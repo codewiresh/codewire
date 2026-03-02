@@ -403,12 +403,13 @@ jobs:
           printf 'Host aur.archlinux.org\n  IdentityFile /root/.ssh/aur\n' > /root/.ssh/config
 
           git clone ssh://aur@aur.archlinux.org/codewire-bin.git aur-repo
-          cp PKGBUILD .SRCINFO aur-repo/
           cd aur-repo
-          git checkout -B master origin/master || git checkout -b master
+          git checkout master 2>/dev/null || git checkout -b master origin/master
+          cp ../PKGBUILD ../.SRCINFO .
           git config user.name "Codewire Bot"
           git config user.email "hello@codewire.sh"
           git add PKGBUILD .SRCINFO
           git diff --cached --quiet && { echo "No changes to commit"; exit 0; }
           git commit -m "Update to ${GITHUB_REF_NAME#v}"
+          git pull --rebase origin master
           git push origin master
