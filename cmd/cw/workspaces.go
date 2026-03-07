@@ -212,6 +212,17 @@ func launchCmd() *cobra.Command {
 				params = append(params, platform.RichParameterValue{Name: "memory", Value: memory})
 			}
 
+			// Pass Claude OAuth token (preferred) or API key for workspace auth.
+			// Priority: CLAUDE_CODE_OAUTH_TOKEN env > ~/.claude/.credentials.json > CLAUDE_API_KEY > ANTHROPIC_API_KEY
+			if token := resolveClaudeOAuthToken(); token != "" {
+				params = append(params, platform.RichParameterValue{Name: "claude_code_oauth_token", Value: token})
+			}
+			if key := os.Getenv("CLAUDE_API_KEY"); key != "" {
+				params = append(params, platform.RichParameterValue{Name: "claude_api_key", Value: key})
+			} else if key := os.Getenv("ANTHROPIC_API_KEY"); key != "" {
+				params = append(params, platform.RichParameterValue{Name: "claude_api_key", Value: key})
+			}
+
 			fmt.Printf("Creating workspace %q...\n", wsName)
 			ws, err := client.CreateWorkspace(resID, &platform.CreateWorkspaceRequest{
 				Name:         wsName,
@@ -525,6 +536,31 @@ func detectLocalRepo(dir string) (string, string, error) {
 	}
 
 	return repoURL, branch, nil
+}
+
+// resolveClaudeOAuthToken returns the Claude Code OAuth token from env or credentials file.
+func resolveClaudeOAuthToken() string {
+	if token := os.Getenv("CLAUDE_CODE_OAUTH_TOKEN"); token != "" {
+		return token
+	}
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	data, err := os.ReadFile(path.Join(home, ".claude", ".credentials.json"))
+	if err != nil {
+		return ""
+	}
+	var creds struct {
+		ClaudeAiOauth struct {
+			AccessToken string `json:"accessToken"`
+		} `json:"claudeAiOauth"`
+	}
+	if err := json.Unmarshal(data, &creds); err != nil {
+		return ""
+	}
+	return creds.ClaudeAiOauth.AccessToken
 }
 
 // normalizeGitURL converts SSH git URLs to HTTPS.
