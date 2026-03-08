@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"strings"
 	"text/tabwriter"
 	"time"
 
@@ -70,14 +71,34 @@ func envCreateCmd() *cobra.Command {
 		cpu        int
 		memory     int
 		disk       int
+		repoURL    string
+		branch     string
+		image      string
+		install    string
+		startup    string
+		agent      string
+		envVars    []string
 	)
 
 	cmd := &cobra.Command{
-		Use:   "create",
+		Use:   "create [repo-url]",
 		Short: "Create a new environment",
+		Long: `Create a new environment. Smart create detects configuration from a repo URL.
+
+Examples:
+  cw env create https://github.com/foo/bar
+  cw env create --image python:3.12
+  cw env create --image node:20 --repo https://github.com/foo/bar
+  cw env create --template <id>`,
+		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if templateID == "" {
-				return fmt.Errorf("--template is required")
+			// Positional arg is repo URL.
+			if len(args) == 1 {
+				repoURL = args[0]
+			}
+
+			if templateID == "" && image == "" && repoURL == "" {
+				return fmt.Errorf("provide a repo URL, --image, or --template")
 			}
 
 			orgID, client, err := getDefaultOrg()
@@ -85,9 +106,28 @@ func envCreateCmd() *cobra.Command {
 				return err
 			}
 
+			// Parse env vars from KEY=val format.
+			parsedEnvVars := make(map[string]string)
+			for _, ev := range envVars {
+				parts := strings.SplitN(ev, "=", 2)
+				if len(parts) != 2 {
+					return fmt.Errorf("invalid --env format %q, expected KEY=val", ev)
+				}
+				parsedEnvVars[parts[0]] = parts[1]
+			}
+
 			req := &platform.CreateEnvironmentRequest{
 				TemplateID: templateID,
 				Name:       name,
+				RepoURL:    repoURL,
+				Branch:     branch,
+				Image:      image,
+				InstallCommand: install,
+				StartupScript:  startup,
+				Agent:      agent,
+			}
+			if len(parsedEnvVars) > 0 {
+				req.EnvVars = parsedEnvVars
 			}
 			if cpu > 0 {
 				req.CPUMillicores = &cpu
@@ -105,6 +145,16 @@ func envCreateCmd() *cobra.Command {
 				}
 				secs := int(d.Seconds())
 				req.TTLSeconds = &secs
+			}
+
+			// Resolve Claude OAuth token if agent is claude-code.
+			if agent == "claude-code" {
+				token := resolveClaudeOAuthToken()
+				if token != "" {
+					req.AgentEnv = map[string]string{
+						"CLAUDE_CODE_OAUTH_TOKEN": token,
+					}
+				}
 			}
 
 			env, err := client.CreateEnvironment(orgID, req)
@@ -127,12 +177,19 @@ func envCreateCmd() *cobra.Command {
 		},
 	}
 
-	cmd.Flags().StringVar(&templateID, "template", "", "Template ID (required)")
+	cmd.Flags().StringVar(&templateID, "template", "", "Template ID")
 	cmd.Flags().StringVar(&name, "name", "", "Environment name")
 	cmd.Flags().StringVar(&ttl, "ttl", "", "Time to live (e.g. 1h, 30m)")
 	cmd.Flags().IntVar(&cpu, "cpu", 0, "CPU in millicores")
 	cmd.Flags().IntVar(&memory, "memory", 0, "Memory in MB")
 	cmd.Flags().IntVar(&disk, "disk", 0, "Disk in GB")
+	cmd.Flags().StringVar(&repoURL, "repo", "", "Git repo URL")
+	cmd.Flags().StringVar(&branch, "branch", "", "Branch to checkout")
+	cmd.Flags().StringVar(&image, "image", "", "Container image")
+	cmd.Flags().StringVar(&install, "install", "", "Install command")
+	cmd.Flags().StringVar(&startup, "startup", "", "Startup script")
+	cmd.Flags().StringVar(&agent, "agent", "", "AI agent (claude-code)")
+	cmd.Flags().StringSliceVar(&envVars, "env", nil, "Env vars (KEY=val)")
 	return cmd
 }
 

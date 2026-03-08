@@ -291,12 +291,20 @@ type EnvironmentTemplate struct {
 }
 
 type CreateEnvironmentRequest struct {
-	TemplateID    string `json:"template_id"`
-	Name          string `json:"name,omitempty"`
-	CPUMillicores *int   `json:"cpu_millicores,omitempty"`
-	MemoryMB      *int   `json:"memory_mb,omitempty"`
-	DiskGB        *int   `json:"disk_gb,omitempty"`
-	TTLSeconds    *int   `json:"ttl_seconds,omitempty"`
+	TemplateID     string            `json:"template_id,omitempty"`
+	Name           string            `json:"name,omitempty"`
+	CPUMillicores  *int              `json:"cpu_millicores,omitempty"`
+	MemoryMB       *int              `json:"memory_mb,omitempty"`
+	DiskGB         *int              `json:"disk_gb,omitempty"`
+	TTLSeconds     *int              `json:"ttl_seconds,omitempty"`
+	RepoURL        string            `json:"repo_url,omitempty"`
+	Branch         string            `json:"branch,omitempty"`
+	Image          string            `json:"image,omitempty"`
+	InstallCommand string            `json:"install_command,omitempty"`
+	StartupScript  string            `json:"startup_script,omitempty"`
+	EnvVars        map[string]string `json:"env_vars,omitempty"`
+	Agent          string            `json:"agent,omitempty"`
+	AgentEnv       map[string]string `json:"agent_env,omitempty"`
 }
 
 type CreateTemplateRequest struct {
@@ -307,6 +315,7 @@ type CreateTemplateRequest struct {
 	DefaultMemoryMB      *int   `json:"default_memory_mb,omitempty"`
 	DefaultDiskGB        *int   `json:"default_disk_gb,omitempty"`
 	DefaultTTLSeconds    *int   `json:"default_ttl_seconds,omitempty"`
+	Image                string `json:"image,omitempty"`
 }
 
 type StatusResponse struct {

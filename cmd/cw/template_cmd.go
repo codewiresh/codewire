@@ -70,6 +70,7 @@ func templateCreateCmd() *cobra.Command {
 		memory      int
 		disk        int
 		ttl         string
+		image       string
 	)
 
 	cmd := &cobra.Command{
@@ -92,6 +93,7 @@ func templateCreateCmd() *cobra.Command {
 				Type:        tmplType,
 				Name:        name,
 				Description: description,
+				Image:       image,
 			}
 			if cpu > 0 {
 				req.DefaultCPUMillicores = &cpu
@@ -131,6 +133,7 @@ func templateCreateCmd() *cobra.Command {
 	cmd.Flags().IntVar(&memory, "memory", 0, "Default memory in MB")
 	cmd.Flags().IntVar(&disk, "disk", 0, "Default disk in GB")
 	cmd.Flags().StringVar(&ttl, "ttl", "", "Default TTL (e.g. 1h, 30m)")
+	cmd.Flags().StringVar(&image, "image", "", "Container image for sandbox template")
 	return cmd
 }
 
