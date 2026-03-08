@@ -29,15 +29,21 @@ func launchCmd() *cobra.Command {
 		image          string
 		installCommand string
 		startupScript  string
+		secretProject  string
 	)
 
 	cmd := &cobra.Command{
 		Use:   "launch <repo-url|directory>",
 		Short: "Create a workspace from a repo URL or local directory",
-		Long:  "Create a new workspace on the default Coder resource, cloning the given repository.\nUses AI to detect the project type and configure the workspace automatically.\n\nPass '.' or a local directory to detect the git remote and use that.",
+		Long:  "Create a new workspace on the default Coder resource, cloning the given repository.\nUses AI to detect the project type and configure the workspace automatically.\n\nPass '.' or a local directory to detect the git remote and use that.\nUse --type sandbox to create a sandbox environment instead of a Coder workspace.",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			repoURL := args[0]
+
+			// If --type sandbox, delegate to the sandbox environment path.
+			if launchType, _ := cmd.Flags().GetString("type"); launchType == "sandbox" {
+				return launchSandboxEnv(cmd, repoURL, branch, image, installCommand, startupScript, cpu, memory, secretProject)
+			}
 
 			// Detect local directory → resolve git remote
 			if isLocalPath(repoURL) {
@@ -92,6 +98,9 @@ func launchCmd() *cobra.Command {
 				fmt.Printf("\nDetected: %s", detection.Language)
 				if detection.Framework != "" {
 					fmt.Printf(" (%s)", detection.Framework)
+				}
+				if detection.ProjectType != "" {
+					fmt.Printf(" [%s]", detection.ProjectType)
 				}
 				fmt.Println()
 				if detection.TemplateImage != "" {
@@ -272,7 +281,84 @@ func launchCmd() *cobra.Command {
 	cmd.Flags().StringVar(&image, "image", "", "Template image (default: from detection)")
 	cmd.Flags().StringVar(&installCommand, "install-command", "", "Install command (default: from detection)")
 	cmd.Flags().StringVar(&startupScript, "startup-script", "", "Startup script (default: from detection)")
+	cmd.Flags().StringVar(&secretProject, "secrets", "", "Secret project to bind to environment")
+	cmd.Flags().String("type", "", "Environment type: sandbox (default: coder workspace)")
 	return cmd
+}
+
+// launchSandboxEnv creates a sandbox environment via the env create API.
+func launchSandboxEnv(cmd *cobra.Command, repoURL, branch, image, installCommand, startupScript, cpu, memory, secretProject string) error {
+	// Resolve local directory to git remote.
+	if isLocalPath(repoURL) {
+		detected, detectedBranch, err := detectLocalRepo(repoURL)
+		if err != nil {
+			return fmt.Errorf("detect local repo: %w", err)
+		}
+		repoURL = detected
+		if branch == "" && detectedBranch != "" {
+			branch = detectedBranch
+		}
+		fmt.Printf("Detected remote: %s", repoURL)
+		if branch != "" {
+			fmt.Printf(" (branch: %s)", branch)
+		}
+		fmt.Println()
+	}
+
+	orgID, client, err := getDefaultOrg()
+	if err != nil {
+		return err
+	}
+
+	req := &platform.CreateEnvironmentRequest{
+		RepoURL:        repoURL,
+		Branch:         branch,
+		Image:          image,
+		InstallCommand: installCommand,
+		StartupScript:  startupScript,
+		SecretProject:  secretProject,
+	}
+
+	// Parse CPU/memory from string to int if provided.
+	if cpu != "" {
+		var cpuVal int
+		if _, err := fmt.Sscanf(cpu, "%d", &cpuVal); err == nil {
+			millis := cpuVal * 1000
+			req.CPUMillicores = &millis
+		}
+	}
+	if memory != "" {
+		var memVal int
+		if _, err := fmt.Sscanf(memory, "%d", &memVal); err == nil {
+			mb := memVal * 1024
+			req.MemoryMB = &mb
+		}
+	}
+
+	// Auto-detect agent token.
+	token := resolveClaudeOAuthToken()
+	if token != "" {
+		req.Agent = "claude-code"
+		req.AgentEnv = map[string]string{
+			"CLAUDE_CODE_OAUTH_TOKEN": token,
+		}
+	}
+
+	fmt.Printf("Creating sandbox environment from %s...\n", repoURL)
+	env, err := client.CreateEnvironment(orgID, req)
+	if err != nil {
+		return fmt.Errorf("create environment: %w", err)
+	}
+
+	envName := env.ID
+	if env.Name != nil {
+		envName = *env.Name
+	}
+	fmt.Printf("Environment created: %s\n", envName)
+	fmt.Printf("  ID:    %s\n", env.ID)
+	fmt.Printf("  State: %s\n", env.State)
+	fmt.Printf("  Type:  %s\n", env.Type)
+	return nil
 }
 
 func openCmd() *cobra.Command {

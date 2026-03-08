@@ -14,33 +14,94 @@ import (
 func secretsCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "secrets",
-		Short: "Manage organization secrets",
+		Short: "Manage secrets and secret projects",
 	}
-	cmd.AddCommand(secretsListCmd(), secretsSetCmd(), secretsDeleteCmd())
+	cmd.AddCommand(
+		secretsCreateCmd(),
+		secretsListCmd(),
+		secretsSetCmd(),
+		secretsDeleteCmd(),
+		secretsRmCmd(),
+	)
 	return cmd
 }
 
+// ── cw secrets create <name> ─────────────────────────────────────────
+
+func secretsCreateCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "create <name>",
+		Short: "Create a secret project",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			orgID, client, err := getDefaultOrg()
+			if err != nil {
+				return err
+			}
+
+			project, err := client.CreateSecretProject(orgID, args[0])
+			if err != nil {
+				return fmt.Errorf("create secret project: %w", err)
+			}
+
+			fmt.Printf("Secret project %q created. (id: %s)\n", project.Name, project.ID)
+			return nil
+		},
+	}
+	return cmd
+}
+
+// ── cw secrets list [name] ──────────────────────────────────────────
+
 func secretsListCmd() *cobra.Command {
 	var jsonOutput bool
-	var orgID string
 
 	cmd := &cobra.Command{
-		Use:   "list",
-		Short: "List secret keys (names only)",
+		Use:   "list [project-name]",
+		Short: "List secret projects, or secrets in a project",
+		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			client, err := platform.NewClient()
+			oid, client, err := getDefaultOrg()
 			if err != nil {
 				return err
 			}
 
-			oid, err := resolveOrgID(client, orgID)
+			if len(args) == 0 {
+				// List all secret projects.
+				projects, err := client.ListSecretProjects(oid)
+				if err != nil {
+					return fmt.Errorf("list secret projects: %w", err)
+				}
+
+				if jsonOutput {
+					enc := json.NewEncoder(os.Stdout)
+					enc.SetIndent("", "  ")
+					return enc.Encode(projects)
+				}
+
+				if len(projects) == 0 {
+					fmt.Println("No secret projects found.")
+					return nil
+				}
+
+				w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+				fmt.Fprintln(w, "NAME\tSECRETS\tCREATED")
+				for _, p := range projects {
+					fmt.Fprintf(w, "%s\t%d\t%s\n", p.Name, p.SecretCount, p.CreatedAt)
+				}
+				return w.Flush()
+			}
+
+			// List secrets in a specific project.
+			projectName := args[0]
+			project, err := findProjectByName(client, oid, projectName)
 			if err != nil {
 				return err
 			}
 
-			secrets, err := client.ListSecrets(oid)
+			secrets, err := client.ListProjectSecrets(oid, project.ID)
 			if err != nil {
-				return fmt.Errorf("list secrets: %w", err)
+				return fmt.Errorf("list project secrets: %w", err)
 			}
 
 			if jsonOutput {
@@ -50,7 +111,7 @@ func secretsListCmd() *cobra.Command {
 			}
 
 			if len(secrets) == 0 {
-				fmt.Println("No secrets found.")
+				fmt.Printf("No secrets in project %q.\n", projectName)
 				return nil
 			}
 
@@ -64,29 +125,30 @@ func secretsListCmd() *cobra.Command {
 	}
 
 	cmd.Flags().BoolVarP(&jsonOutput, "json", "j", false, "Output as JSON")
-	cmd.Flags().StringVar(&orgID, "org", "", "Organization ID (defaults to configured org)")
 	return cmd
 }
 
+// ── cw secrets set <project> <key> ──────────────────────────────────
+
 func secretsSetCmd() *cobra.Command {
-	var orgID string
-
 	cmd := &cobra.Command{
-		Use:   "set <KEY>",
-		Short: "Set a secret (prompts for value)",
-		Args:  cobra.ExactArgs(1),
+		Use:   "set <project> <KEY>",
+		Short: "Set a secret in a project (prompts for value)",
+		Args:  cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			client, err := platform.NewClient()
+			oid, client, err := getDefaultOrg()
 			if err != nil {
 				return err
 			}
 
-			oid, err := resolveOrgID(client, orgID)
+			projectName := args[0]
+			key := args[1]
+
+			project, err := findProjectByName(client, oid, projectName)
 			if err != nil {
 				return err
 			}
 
-			key := args[0]
 			value, err := promptPassword("Value: ")
 			if err != nil {
 				return err
@@ -95,48 +157,92 @@ func secretsSetCmd() *cobra.Command {
 				return fmt.Errorf("value cannot be empty")
 			}
 
-			if err := client.SetSecret(oid, key, value); err != nil {
+			if err := client.SetProjectSecret(oid, project.ID, key, value); err != nil {
 				return fmt.Errorf("set secret: %w", err)
 			}
 
-			fmt.Printf("Secret %s set.\n", key)
+			fmt.Printf("Secret %s set in project %q.\n", key, projectName)
 			return nil
 		},
 	}
-
-	cmd.Flags().StringVar(&orgID, "org", "", "Organization ID (defaults to configured org)")
 	return cmd
 }
+
+// ── cw secrets delete / rm <project> [key] ──────────────────────────
 
 func secretsDeleteCmd() *cobra.Command {
-	var orgID string
-
 	cmd := &cobra.Command{
-		Use:   "delete <KEY>",
-		Short: "Delete a secret",
-		Args:  cobra.ExactArgs(1),
+		Use:     "delete <project> [key]",
+		Aliases: []string{"rm"},
+		Short:   "Delete a secret or an entire project",
+		Long:    "With key: deletes a single secret. Without key: deletes the entire project (prompts for confirmation).",
+		Args:    cobra.RangeArgs(1, 2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			client, err := platform.NewClient()
+			oid, client, err := getDefaultOrg()
 			if err != nil {
 				return err
 			}
 
-			oid, err := resolveOrgID(client, orgID)
+			projectName := args[0]
+
+			if len(args) == 2 {
+				// Delete a specific secret.
+				key := args[1]
+				project, err := findProjectByName(client, oid, projectName)
+				if err != nil {
+					return err
+				}
+				if err := client.DeleteProjectSecret(oid, project.ID, key); err != nil {
+					return fmt.Errorf("delete secret: %w", err)
+				}
+				fmt.Printf("Secret %s deleted from project %q.\n", key, projectName)
+				return nil
+			}
+
+			// Delete entire project — confirm first.
+			project, err := findProjectByName(client, oid, projectName)
 			if err != nil {
 				return err
 			}
 
-			key := args[0]
-			if err := client.DeleteSecret(oid, key); err != nil {
-				return fmt.Errorf("delete secret: %w", err)
+			ok, err := promptConfirm(fmt.Sprintf("Delete secret project %q and all its secrets? [Y/n]", projectName))
+			if err != nil {
+				return err
+			}
+			if !ok {
+				fmt.Println("Canceled.")
+				return nil
 			}
 
-			fmt.Printf("Secret %s deleted.\n", key)
+			if err := client.DeleteSecretProject(oid, project.ID); err != nil {
+				return fmt.Errorf("delete secret project: %w", err)
+			}
+			fmt.Printf("Secret project %q deleted.\n", projectName)
 			return nil
 		},
 	}
-
-	cmd.Flags().StringVar(&orgID, "org", "", "Organization ID (defaults to configured org)")
 	return cmd
 }
 
+// secretsRmCmd is an alias for delete at the top level.
+func secretsRmCmd() *cobra.Command {
+	cmd := secretsDeleteCmd()
+	cmd.Use = "rm <project> [key]"
+	cmd.Aliases = nil
+	return cmd
+}
+
+// ── Helpers ─────────────────────────────────────────────────────────
+
+func findProjectByName(client *platform.Client, orgID, name string) (*platform.SecretProject, error) {
+	projects, err := client.ListSecretProjects(orgID)
+	if err != nil {
+		return nil, fmt.Errorf("list secret projects: %w", err)
+	}
+	for _, p := range projects {
+		if p.Name == name {
+			return &p, nil
+		}
+	}
+	return nil, fmt.Errorf("secret project %q not found", name)
+}

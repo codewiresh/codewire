@@ -213,6 +213,7 @@ type ProvisionEvent struct {
 // Detection types
 
 type DetectionResult struct {
+	ProjectType    string              `json:"project_type"`
 	TemplateImage  string              `json:"template_image"`
 	InstallCommand string              `json:"install_command"`
 	StartupScript  string              `json:"startup_script"`
@@ -305,6 +306,16 @@ type CreateEnvironmentRequest struct {
 	EnvVars        map[string]string `json:"env_vars,omitempty"`
 	Agent          string            `json:"agent,omitempty"`
 	AgentEnv       map[string]string `json:"agent_env,omitempty"`
+	SecretProject  string            `json:"secret_project,omitempty"`
+}
+
+// SecretProject represents a named collection of secrets.
+type SecretProject struct {
+	ID          string `json:"id"`
+	OrgID       string `json:"org_id"`
+	Name        string `json:"name"`
+	SecretCount int    `json:"secret_count,omitempty"`
+	CreatedAt   string `json:"created_at"`
 }
 
 type CreateTemplateRequest struct {
