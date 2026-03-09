@@ -12,6 +12,9 @@ import (
 	"time"
 )
 
+// ErrUnauthorized is returned when the server responds with HTTP 401.
+var ErrUnauthorized = fmt.Errorf("session expired or invalid")
+
 // Client is an HTTP client for the Codewire platform API.
 type Client struct {
 	ServerURL    string
@@ -164,6 +167,10 @@ func (c *Client) do(method, path string, body any, result any) error {
 	if debugEnabled() {
 		fmt.Fprintf(os.Stderr, "DEBUG %s %s → %d (%d bytes)\n", method, path, resp.StatusCode, len(respBody))
 		fmt.Fprintf(os.Stderr, "DEBUG body: %s\n", string(respBody))
+	}
+
+	if resp.StatusCode == http.StatusUnauthorized {
+		return ErrUnauthorized
 	}
 
 	if resp.StatusCode >= 400 {

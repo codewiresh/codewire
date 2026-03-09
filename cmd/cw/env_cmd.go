@@ -231,7 +231,12 @@ Examples:
 				}
 			}
 
-			env, err := client.CreateEnvironment(orgID, req)
+			var env *platform.Environment
+			err = withReauth(client, func() error {
+				var createErr error
+				env, createErr = client.CreateEnvironment(orgID, req)
+				return createErr
+			})
 			if err != nil {
 				return fmt.Errorf("create environment: %w", err)
 			}

@@ -1,12 +1,42 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
 
 	"github.com/codewiresh/codewire/internal/platform"
 )
+
+// withReauth runs fn. If it returns ErrUnauthorized, prompts the user
+// to re-authenticate via device login, updates the client token, and retries.
+func withReauth(client *platform.Client, fn func() error) error {
+	err := fn()
+	if err == nil || !errors.Is(err, platform.ErrUnauthorized) {
+		return err
+	}
+
+	fmt.Println("Session expired. Re-authenticating...")
+
+	name, loginErr := loginWithDevice(client)
+	if loginErr != nil {
+		return fmt.Errorf("re-authentication failed: %w", loginErr)
+	}
+
+	// Save the new token
+	cfg, cfgErr := platform.LoadConfig()
+	if cfgErr != nil {
+		cfg = &platform.PlatformConfig{ServerURL: client.ServerURL}
+	}
+	cfg.SessionToken = client.SessionToken
+	if saveErr := platform.SaveConfig(cfg); saveErr != nil {
+		return fmt.Errorf("save config after re-auth: %w", saveErr)
+	}
+
+	fmt.Printf("Re-authenticated as %s\n", name)
+	return fn()
+}
 
 var nonAlnum = regexp.MustCompile(`[^a-z0-9]+`)
 
