@@ -29,13 +29,6 @@ func updateCmd() *cobra.Command {
 			}
 
 			fmt.Printf("New version available: %s → %s\n", version, latest)
-
-			method := update.DetectInstallMethod()
-			if method != update.DirectBinary {
-				fmt.Printf("Installed via %s. Run:\n  %s\n", method, update.UpgradeCommand(method))
-				return nil
-			}
-
 			fmt.Printf("Downloading %s...\n", latest)
 			if err := update.SelfUpdate(version, latest); err != nil {
 				return err

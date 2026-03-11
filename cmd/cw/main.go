@@ -130,10 +130,25 @@ func main() {
 
 	printUpdateNotice := update.BackgroundCheck(version)
 	err := rootCmd.Execute()
-	printUpdateNotice()
+	if !isUpdateCommand() {
+		printUpdateNotice()
+	}
 	if err != nil {
 		os.Exit(1)
 	}
+}
+
+// isUpdateCommand returns true when the user invoked "cw update".
+func isUpdateCommand() bool {
+	for _, arg := range os.Args[1:] {
+		if arg == "update" {
+			return true
+		}
+		if !strings.HasPrefix(arg, "-") {
+			return false
+		}
+	}
+	return false
 }
 
 // isKnownCommand checks if name matches any registered cobra command or alias.
