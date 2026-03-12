@@ -187,10 +187,12 @@ jobs:
     name: Update Homebrew Formula
     needs: release
     runs-on: ubuntu-latest
+    environment: build
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: main
+          repository: codewiresh/homebrew-codewire
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
 
       - name: Download SHA256SUMS from release
         env:
@@ -269,14 +271,7 @@ jobs:
           git add Formula/codewire.rb
           git diff --cached --quiet && { echo "No changes to commit"; exit 0; }
           git commit -m "brew: update codewire to ${{ github.ref_name }}"
-          # Retry loop to handle concurrent pushes to main
-          for i in 1 2 3; do
-            git pull --rebase origin main && git push origin main && exit 0
-            echo "Push attempt $i failed, retrying..."
-            sleep 5
-          done
-          echo "Failed to push after 3 attempts"
-          exit 1
+          git push origin main
 
   deb-packages:
     name: Build .deb Packages
