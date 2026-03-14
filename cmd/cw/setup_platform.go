@@ -121,8 +121,9 @@ func platformSetupCmd() *cobra.Command {
 			fmt.Println("[6/6] SSH Setup")
 			if writeErr := writeSSHConfig(); writeErr != nil {
 				fmt.Printf("      Warning: SSH config update failed: %v\n", writeErr)
+				fmt.Println("      You can retry later with: cw config-ssh")
 			} else {
-				fmt.Println("      Updated ~/.ssh/config (WireGuard auth — no keys needed)")
+				fmt.Println("      Updated ~/.ssh/config via cw config-ssh")
 			}
 			fmt.Println()
 

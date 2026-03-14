@@ -82,6 +82,7 @@ func main() {
 		grouped(billingCmd(), "platform"),
 		grouped(githubCmd(), "platform"),
 		grouped(platformSetupCmd(), "platform"),
+		grouped(configSSHCmd(), "platform"),
 		// Network & Relay
 		grouped(nodeCmd(), "network"),
 		grouped(relayCmd(), "network"),

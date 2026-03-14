@@ -22,8 +22,8 @@ import (
 	"tailscale.com/tailcfg"
 
 	"github.com/codewiresh/codewire/internal/platform"
-	"github.com/codewiresh/tailnet"
 	"github.com/codewiresh/codewire/internal/terminal"
+	"github.com/codewiresh/tailnet"
 )
 
 func sshCmd() *cobra.Command {
@@ -179,7 +179,7 @@ func sshInteractive(client *platform.Client, orgID, envID string) error {
 
 // coordinateMsg is the JSON message sent to the coordinate WebSocket.
 type coordinateMsg struct {
-	Type string       `json:"type"`
+	Type string        `json:"type"`
 	Node *tailnet.Node `json:"node,omitempty"`
 }
 
@@ -332,9 +332,12 @@ func sshOverWireGuard(client *platform.Client, orgID, envID string) error {
 	defer wgConn.Close()
 
 	sshConfig := &ssh.ClientConfig{
-		User:            "codewire",
-		Auth:            []ssh.AuthMethod{ssh.Password("")},
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		User: "codewire",
+		Auth: []ssh.AuthMethod{ssh.Password("")},
+	}
+	sshConfig.HostKeyCallback, err = codewireHostKeyCallback()
+	if err != nil {
+		return fmt.Errorf("known_hosts callback: %w", err)
 	}
 
 	sshConn, chans, reqs, err := ssh.NewClientConn(tcpConn, "cw-"+envID, sshConfig)
@@ -423,9 +426,12 @@ func sshOverWebSocket(client *platform.Client, orgID, envID string) error {
 	wsConn := &wsNetConn{conn: conn, ctx: ctx}
 
 	sshConfig := &ssh.ClientConfig{
-		User:            "codewire",
-		Auth:            []ssh.AuthMethod{ssh.Password("")},
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		User: "codewire",
+		Auth: []ssh.AuthMethod{ssh.Password("")},
+	}
+	sshConfig.HostKeyCallback, err = codewireHostKeyCallback()
+	if err != nil {
+		return fmt.Errorf("known_hosts callback: %w", err)
 	}
 
 	sshConn, chans, reqs, err := ssh.NewClientConn(wsConn, "cw-"+envID, sshConfig)
@@ -690,8 +696,8 @@ func (w *wsNetConn) LocalAddr() net.Addr  { return wsAddr{} }
 func (w *wsNetConn) RemoteAddr() net.Addr { return wsAddr{} }
 
 func (w *wsNetConn) SetDeadline(t time.Time) error      { return nil }
-func (w *wsNetConn) SetReadDeadline(t time.Time) error   { return nil }
-func (w *wsNetConn) SetWriteDeadline(t time.Time) error  { return nil }
+func (w *wsNetConn) SetReadDeadline(t time.Time) error  { return nil }
+func (w *wsNetConn) SetWriteDeadline(t time.Time) error { return nil }
 
 type wsAddr struct{}
 
