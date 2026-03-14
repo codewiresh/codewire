@@ -9,3 +9,4 @@ operator/bin/
 .terraform/
 .terraform.lock.hcl
 .worktrees/
+.tmp/
