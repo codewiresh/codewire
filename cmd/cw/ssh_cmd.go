@@ -26,6 +26,13 @@ import (
 	"github.com/codewiresh/tailnet"
 )
 
+func tailnetDebugf(format string, args ...any) {
+	if os.Getenv("CW_DEBUG_TAILNET") == "" {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "cw tailnet: "+format+"\n", args...)
+}
+
 func sshCmd() *cobra.Command {
 	var stdio bool
 
@@ -231,6 +238,7 @@ func connectWireGuard(ctx context.Context, client *platform.Client, orgID, envID
 			},
 		},
 	}
+	tailnetDebugf("initial derp target host=%s port=%d insecure=%t", serverHost, derpPort, insecure)
 
 	conn, err := tailnet.NewConn(&tailnet.Options{
 		ID:        clientID,
@@ -279,13 +287,35 @@ func connectWireGuard(ctx context.Context, client *platform.Client, orgID, envID
 		for {
 			_, data, err := wsConn.Read(ctx)
 			if err != nil {
+				tailnetDebugf("coordinator read failed: %v", err)
 				return
 			}
 			var resp coordinateResp
 			if json.Unmarshal(data, &resp) != nil {
 				continue
 			}
+			if resp.DERPMap != nil {
+				node := ""
+				port := 0
+				insecure := false
+				if region, ok := resp.DERPMap.Regions[1]; ok && len(region.Nodes) > 0 {
+					node = region.Nodes[0].HostName
+					port = region.Nodes[0].DERPPort
+					insecure = region.Nodes[0].InsecureForTests
+				}
+				tailnetDebugf("received derp map host=%s port=%d insecure=%t", node, port, insecure)
+				conn.SetDERPMap(resp.DERPMap)
+			}
 			if resp.Type == "peer_update" && len(resp.Nodes) > 0 {
+				for _, node := range resp.Nodes {
+					tailnetDebugf(
+						"peer update id=%s derp=%d endpoints=%v addresses=%v",
+						node.ID,
+						node.PreferredDERP,
+						node.Endpoints,
+						node.Addresses,
+					)
+				}
 				if err := conn.UpdatePeers(resp.Nodes); err == nil {
 					select {
 					case peerReady <- struct{}{}:
@@ -293,15 +323,13 @@ func connectWireGuard(ctx context.Context, client *platform.Client, orgID, envID
 					}
 				}
 			}
-			if resp.DERPMap != nil {
-				conn.SetDERPMap(resp.DERPMap)
-			}
 		}
 	}()
 
 	// Wait for peer info (with timeout).
 	select {
 	case <-peerReady:
+		tailnetDebugf("peer exchange complete for env=%s", envID)
 	case <-time.After(10 * time.Second):
 		conn.Close()
 		return nil, nil, fmt.Errorf("timeout waiting for agent peer info")
@@ -312,6 +340,7 @@ func connectWireGuard(ctx context.Context, client *platform.Client, orgID, envID
 
 	// Dial agent's SSH port over the WireGuard tunnel.
 	agentIP := agentAddr.Addr()
+	tailnetDebugf("dialing agent ssh at %s:22", agentIP)
 	tcpConn, err := conn.DialContextTCP(ctx, netip.AddrPortFrom(agentIP, 22))
 	if err != nil {
 		conn.Close()
