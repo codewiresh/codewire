@@ -172,13 +172,31 @@ func sshInteractive(client *platform.Client, orgID, envID string) error {
 	if err == nil {
 		return nil
 	}
-	fmt.Fprintf(os.Stderr, "wireguard unavailable (%v) — trying websocket proxy\n", err)
+
+	// Classify the WireGuard failure for diagnostics.
+	errMsg := err.Error()
+	switch {
+	case strings.Contains(errMsg, "timeout waiting for agent peer info"):
+		fmt.Fprintf(os.Stderr, "wireguard: no peer info from sidecar (coordinator exchange timed out)\n")
+		fmt.Fprintf(os.Stderr, "  hint: sidecar may be on a different server replica, or DERP relay unreachable\n")
+		fmt.Fprintf(os.Stderr, "  debug: CW_DEBUG_TAILNET=1 cw ssh %s\n", envID)
+	case strings.Contains(errMsg, "coordinator connect"):
+		fmt.Fprintf(os.Stderr, "wireguard: coordinator WebSocket failed (%v)\n", err)
+	case strings.Contains(errMsg, "dial agent ssh"):
+		fmt.Fprintf(os.Stderr, "wireguard: peer found but SSH dial failed (%v)\n", err)
+		fmt.Fprintf(os.Stderr, "  hint: DERP relay may be unreachable from sidecar, or sidecar SSH not listening\n")
+	case strings.Contains(errMsg, "ssh handshake"):
+		fmt.Fprintf(os.Stderr, "wireguard: tunnel OK but SSH handshake failed (%v)\n", err)
+	default:
+		fmt.Fprintf(os.Stderr, "wireguard unavailable (%v)\n", err)
+	}
+	fmt.Fprintln(os.Stderr, "trying websocket proxy...")
 
 	// Check if SSH proxy is available
 	available, _ := client.CheckSSHProxy(orgID, envID)
 	if !available {
-		fmt.Fprintln(os.Stderr, "sshd not available — using terminal fallback")
-		fmt.Fprintln(os.Stderr, "SSH proxy could not reach sidecar (check server logs for port-forward errors)")
+		fmt.Fprintln(os.Stderr, "websocket proxy: sshd not reachable via port-forward")
+		fmt.Fprintln(os.Stderr, "  hint: sidecar may not be running, or exec-check endpoint failing")
 		return terminalFallback(client, orgID, envID)
 	}
 
@@ -327,10 +345,13 @@ func connectWireGuard(ctx context.Context, client *platform.Client, orgID, envID
 	}()
 
 	// Wait for peer info (with timeout).
+	tailnetDebugf("waiting for peer info (10s timeout)...")
 	select {
 	case <-peerReady:
 		tailnetDebugf("peer exchange complete for env=%s", envID)
 	case <-time.After(10 * time.Second):
+		tailnetDebugf("TIMEOUT: no peer_update received in 10s for env=%s", envID)
+		tailnetDebugf("  check: server logs for 'local_sidecar_node_delivered' and 'KV hit/miss'")
 		conn.Close()
 		return nil, nil, fmt.Errorf("timeout waiting for agent peer info")
 	case <-ctx.Done():
