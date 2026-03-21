@@ -26,11 +26,28 @@ import (
 	"github.com/codewiresh/tailnet"
 )
 
+const (
+	defaultTailnetPeerTimeout = 10 * time.Second
+	defaultTailnetDialTimeout = 20 * time.Second
+)
+
 func tailnetDebugf(format string, args ...any) {
 	if os.Getenv("CW_DEBUG_TAILNET") == "" {
 		return
 	}
 	fmt.Fprintf(os.Stderr, "cw tailnet: "+format+"\n", args...)
+}
+
+func tailnetTimeoutEnv(name string, fallback time.Duration) time.Duration {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return fallback
+	}
+	d, err := time.ParseDuration(value)
+	if err != nil || d <= 0 {
+		return fallback
+	}
+	return d
 }
 
 func sshCmd() *cobra.Command {
@@ -224,6 +241,8 @@ func connectWireGuard(ctx context.Context, client *platform.Client, orgID, envID
 		return nil, nil, fmt.Errorf("invalid env ID %q: %w", envID, err)
 	}
 	clientID := uuid.New()
+	peerTimeout := tailnetTimeoutEnv("CW_TAILNET_PEER_TIMEOUT", defaultTailnetPeerTimeout)
+	dialTimeout := tailnetTimeoutEnv("CW_TAILNET_DIAL_TIMEOUT", defaultTailnetDialTimeout)
 
 	// Derive our tailnet address and the agent's.
 	clientAddr := tailnet.CWServicePrefix.PrefixFromUUID(clientID)
@@ -345,15 +364,21 @@ func connectWireGuard(ctx context.Context, client *platform.Client, orgID, envID
 	}()
 
 	// Wait for peer info (with timeout).
-	tailnetDebugf("waiting for peer info (10s timeout)...")
+	peerWaitStarted := time.Now()
+	tailnetDebugf("waiting for peer info (timeout=%s)...", peerTimeout)
 	select {
 	case <-peerReady:
-		tailnetDebugf("peer exchange complete for env=%s", envID)
-	case <-time.After(10 * time.Second):
-		tailnetDebugf("TIMEOUT: no peer_update received in 10s for env=%s", envID)
+		tailnetDebugf("peer exchange complete for env=%s after=%s", envID, time.Since(peerWaitStarted).Round(time.Millisecond))
+	case <-time.After(peerTimeout):
+		tailnetDebugf("TIMEOUT: no peer_update received in %s for env=%s", peerTimeout, envID)
 		tailnetDebugf("  check: server logs for 'local_sidecar_node_delivered' and 'KV hit/miss'")
 		conn.Close()
-		return nil, nil, fmt.Errorf("timeout waiting for agent peer info")
+		return nil, nil, fmt.Errorf(
+			"timeout waiting for agent peer info after %s (env=%s, peer_timeout=%s)",
+			time.Since(peerWaitStarted).Round(time.Millisecond),
+			envID,
+			peerTimeout,
+		)
 	case <-ctx.Done():
 		conn.Close()
 		return nil, nil, ctx.Err()
@@ -361,11 +386,20 @@ func connectWireGuard(ctx context.Context, client *platform.Client, orgID, envID
 
 	// Dial agent's SSH port over the WireGuard tunnel.
 	agentIP := agentAddr.Addr()
-	tailnetDebugf("dialing agent ssh at %s:22", agentIP)
-	tcpConn, err := conn.DialContextTCP(ctx, netip.AddrPortFrom(agentIP, 22))
+	dialCtx, cancelDial := context.WithTimeout(ctx, dialTimeout)
+	defer cancelDial()
+	dialStarted := time.Now()
+	tailnetDebugf("dialing agent ssh at %s:22 with timeout=%s", agentIP, dialTimeout)
+	tcpConn, err := conn.DialContextTCP(dialCtx, netip.AddrPortFrom(agentIP, 22))
 	if err != nil {
 		conn.Close()
-		return nil, nil, fmt.Errorf("dial agent ssh: %w", err)
+		return nil, nil, fmt.Errorf(
+			"tailnet TCP dial to agent ssh timed out/failed after %s (agent=%s:22, dial_timeout=%s): %w",
+			time.Since(dialStarted).Round(time.Millisecond),
+			agentIP,
+			dialTimeout,
+			err,
+		)
 	}
 
 	return tcpConn, conn, nil
