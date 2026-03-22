@@ -150,6 +150,51 @@ func envConnectHint(env platform.Environment) string {
 	return "cw ssh " + ref
 }
 
+func environmentDisplayName(env platform.Environment) string {
+	if env.Name != nil && strings.TrimSpace(*env.Name) != "" {
+		return *env.Name
+	}
+	return env.ID
+}
+
+func currentEnvironmentTargetRef() string {
+	if cfg, err := loadCLIConfigForTarget(); err == nil {
+		if target := currentTargetConfig(cfg); target.Kind == "env" {
+			return target.Ref
+		}
+	}
+	return ""
+}
+
+func environmentCardLines(env platform.Environment, currentRef string) []string {
+	marker := ""
+	if currentRef != "" && env.ID == currentRef {
+		marker = " " + green("(current)")
+	}
+
+	lines := []string{
+		fmt.Sprintf("%s [%s]  %s  %s%s",
+			bold(environmentDisplayName(env)),
+			dim(shortEnvID(env.ID)),
+			stateColor(env.State),
+			timeAgo(env.CreatedAt),
+			marker,
+		),
+		fmt.Sprintf("  %s  %dm/%dMB  ttl %s",
+			env.Type,
+			env.CPUMillicores,
+			env.MemoryMB,
+			envTTLString(env),
+		),
+	}
+	if hint := envConnectHint(env); hint != "--" {
+		lines = append(lines, fmt.Sprintf("  connect: %s", hint))
+	} else {
+		lines = append(lines, "  connect: --")
+	}
+	return lines
+}
+
 func envTTLString(env platform.Environment) string {
 	if env.ShutdownAt == nil {
 		return "--"
@@ -166,41 +211,11 @@ func envTTLString(env platform.Environment) string {
 }
 
 func printEnvListEntries(envs []platform.Environment) {
-	currentRef := ""
-	if cfg, err := loadCLIConfigForTarget(); err == nil {
-		if target := currentTargetConfig(cfg); target.Kind == "env" {
-			currentRef = target.Ref
-		}
-	}
+	currentRef := currentEnvironmentTargetRef()
 
 	for i, e := range envs {
-		envName := e.ID
-		if e.Name != nil && strings.TrimSpace(*e.Name) != "" {
-			envName = *e.Name
-		}
-
-		marker := ""
-		if currentRef != "" && e.ID == currentRef {
-			marker = " " + green("(current)")
-		}
-
-		fmt.Printf("%s [%s]  %s  %s%s\n",
-			bold(envName),
-			dim(shortEnvID(e.ID)),
-			stateColor(e.State),
-			timeAgo(e.CreatedAt),
-			marker,
-		)
-		fmt.Printf("  %s  %dm/%dMB  ttl %s\n",
-			e.Type,
-			e.CPUMillicores,
-			e.MemoryMB,
-			envTTLString(e),
-		)
-		if hint := envConnectHint(e); hint != "--" {
-			fmt.Printf("  connect: %s\n", hint)
-		} else {
-			fmt.Printf("  connect: --\n")
+		for _, line := range environmentCardLines(e, currentRef) {
+			fmt.Println(line)
 		}
 		if i < len(envs)-1 {
 			fmt.Println()

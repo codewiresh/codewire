@@ -174,11 +174,12 @@ func summarizeExecError(result *platform.ExecResult) string {
 }
 
 func printPlatformEntries(entries []platformListEntry) error {
+	currentRef := currentEnvironmentTargetRef()
+
 	for _, entry := range entries {
 		env := entry.Environment
-		envName := env.ID
-		if env.Name != nil && strings.TrimSpace(*env.Name) != "" {
-			envName = *env.Name
+		for _, line := range environmentCardLines(env, currentRef) {
+			fmt.Println(line)
 		}
 
 		runSummary := "n/a"
@@ -191,21 +192,11 @@ func printPlatformEntries(entries []platformListEntry) error {
 			runSummary = "--"
 		}
 
-		fmt.Printf("%s (%s)\n", bold(envName), dim(env.ID))
-		fmt.Printf("  state: %s  type: %s  size: %dm/%dMB", stateColor(env.State), env.Type, env.CPUMillicores, env.MemoryMB)
-		if entry.SessionLookup != "" {
-			fmt.Printf("  runs: %s", runSummary)
-		}
-		fmt.Printf("  created: %s\n", timeAgo(env.CreatedAt))
-
-		if entry.SessionLookup == "unavailable" && entry.SessionError != "" {
-			fmt.Printf("  runs: unavailable (%s)\n", entry.SessionError)
-		}
-
 		if entry.SessionLookup == "available" {
 			if len(entry.Sessions) == 0 {
 				fmt.Println("  runs: none")
 			} else {
+				fmt.Printf("  runs: %s\n", runSummary)
 				w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 				tableHeader(w, "  ID", "NAME", "STATUS", "AGE", "COMMAND")
 				for _, session := range entry.Sessions {
@@ -225,6 +216,8 @@ func printPlatformEntries(entries []platformListEntry) error {
 					return err
 				}
 			}
+		} else if entry.SessionLookup == "unavailable" && entry.SessionError != "" {
+			fmt.Printf("  runs: unavailable (%s)\n", entry.SessionError)
 		}
 
 		fmt.Println()
