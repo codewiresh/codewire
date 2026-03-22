@@ -66,6 +66,29 @@ func currentTargetConfig(cfg *cwconfig.Config) *cwconfig.CurrentTargetConfig {
 	return cfg.CurrentTarget
 }
 
+func selectedExecutionTarget(ref string) (*cwconfig.CurrentTargetConfig, error) {
+	if strings.TrimSpace(ref) != "" {
+		return resolveNamedExecutionTarget(ref)
+	}
+
+	cfg, err := loadCLIConfigForTarget()
+	if err != nil {
+		cfg = &cwconfig.Config{}
+	}
+	return currentTargetConfig(cfg), nil
+}
+
+func requireEnvironmentTarget(ref string) (*cwconfig.CurrentTargetConfig, error) {
+	target, err := selectedExecutionTarget(ref)
+	if err != nil {
+		return nil, err
+	}
+	if target.Kind != "env" {
+		return nil, fmt.Errorf("current target is %q; select an environment with 'cw use <env>' or pass one explicitly", target.Kind)
+	}
+	return target, nil
+}
+
 func targetCompletionFunc(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
 	completions := []string{"local"}
 	if strings.TrimSpace(toComplete) != "" && !strings.HasPrefix("local", strings.ToLower(strings.TrimSpace(toComplete))) {

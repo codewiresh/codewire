@@ -54,7 +54,7 @@ func sshCmd() *cobra.Command {
 	var stdio bool
 
 	cmd := &cobra.Command{
-		Use:   "ssh <env-id-or-name>",
+		Use:   "ssh [env-id-or-name]",
 		Short: "SSH into a running environment",
 		Long: `Connect to a running sandbox environment via SSH.
 
@@ -66,25 +66,27 @@ Stdio mode (--stdio):
   Used by: ssh cw-<envid> (via ~/.ssh/config ProxyCommand)
 
 For VS Code Remote-SSH, run 'cw config-ssh' to configure ~/.ssh/config.`,
-		Args:              cobra.ExactArgs(1),
+		Args:              cobra.MaximumNArgs(1),
 		ValidArgsFunction: envCompletionFunc,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ref := args[0]
-
-			// Strip "cw-" prefix for ProxyCommand use (Host cw-*)
-			if strings.HasPrefix(ref, "cw-") {
-				ref = ref[3:]
+			ref := ""
+			if len(args) > 0 {
+				ref = args[0]
+				// Strip "cw-" prefix for ProxyCommand use (Host cw-*)
+				if strings.HasPrefix(ref, "cw-") {
+					ref = ref[3:]
+				}
 			}
 
+			target, err := requireEnvironmentTarget(ref)
+			if err != nil {
+				return err
+			}
 			orgID, client, err := getOrgContext(cmd)
 			if err != nil {
 				return err
 			}
-
-			envID, err := resolveEnvID(client, orgID, ref)
-			if err != nil {
-				return err
-			}
+			envID := target.Ref
 
 			if stdio {
 				return sshStdio(client, orgID, envID)
