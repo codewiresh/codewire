@@ -261,12 +261,16 @@ func resolveEnvID(client *platform.Client, orgID, ref string) (string, error) {
 	return resolveEnvIDFromList(envs, ref)
 }
 
-func envCompletionFunc(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+var listEnvironmentsForCompletion = func(cmd *cobra.Command) ([]platform.Environment, error) {
 	orgID, client, err := getOrgContext(cmd)
 	if err != nil {
-		return nil, cobra.ShellCompDirectiveNoFileComp
+		return nil, err
 	}
-	envs, err := client.ListEnvironments(orgID, "", "", false)
+	return client.ListEnvironments(orgID, "", "", false)
+}
+
+func envCompletionFunc(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+	envs, err := listEnvironmentsForCompletion(cmd)
 	if err != nil {
 		return nil, cobra.ShellCompDirectiveNoFileComp
 	}

@@ -6,6 +6,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/spf13/cobra"
+
 	"github.com/codewiresh/codewire/internal/platform"
 )
 
@@ -109,6 +111,33 @@ func TestEnvCreateDefaultsToWaiting(t *testing.T) {
 	}
 	if noWaitFlag.DefValue != "false" {
 		t.Fatalf("expected --no-wait default false, got %q", noWaitFlag.DefValue)
+	}
+}
+
+func TestSSHCmdCompletionUsesEnvironmentRefs(t *testing.T) {
+	alpha := "alpha"
+	orig := listEnvironmentsForCompletion
+	listEnvironmentsForCompletion = func(cmd *cobra.Command) ([]platform.Environment, error) {
+		return []platform.Environment{
+			{ID: "f062947a-60e2-405c-b89d-5f48b493d8fb", Name: &alpha},
+			{ID: "f8396bb0-18b4-42a0-8151-2dd2b41cd41f"},
+		}, nil
+	}
+	defer func() { listEnvironmentsForCompletion = orig }()
+
+	cmd := sshCmd()
+	got, directive := cmd.ValidArgsFunction(cmd, nil, "f")
+	want := []string{
+		"f062947a",
+		"f062947a-60e2-405c-b89d-5f48b493d8fb",
+		"f8396bb0",
+		"f8396bb0-18b4-42a0-8151-2dd2b41cd41f",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("unexpected ssh completions:\nwant %#v\ngot  %#v", want, got)
+	}
+	if directive != cobra.ShellCompDirectiveNoFileComp {
+		t.Fatalf("expected no-file completion directive, got %v", directive)
 	}
 }
 
