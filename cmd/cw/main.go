@@ -216,6 +216,7 @@ func runCmd() *cobra.Command {
 		envVars     []string
 		autoApprove bool
 		promptFile  string
+		on          string
 	)
 
 	cmd := &cobra.Command{
@@ -223,17 +224,6 @@ func runCmd() *cobra.Command {
 		Aliases: []string{},
 		Short:   "Launch a new session",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			target, err := resolveTarget()
-			if err != nil {
-				return err
-			}
-
-			if target.IsLocal() {
-				if err := ensureNode(); err != nil {
-					return err
-				}
-			}
-
 			dash := cmd.ArgsLenAtDash()
 			if dash == -1 {
 				if len(args) > 0 {
@@ -272,11 +262,6 @@ func runCmd() *cobra.Command {
 				command = append([]string{command[0], "--dangerously-skip-permissions"}, command[1:]...)
 			}
 
-			// Default to current working directory if --dir not specified.
-			if workDir == "" {
-				workDir, _ = os.Getwd()
-			}
-
 			var stdinData []byte
 			if promptFile != "" {
 				var readErr error
@@ -286,7 +271,57 @@ func runCmd() *cobra.Command {
 				}
 			}
 
-			return client.Run(target, command, workDir, name, envVars, stdinData, tags...)
+			if serverFlag != "" {
+				if strings.TrimSpace(on) != "" {
+					return fmt.Errorf("--on cannot be used with --server")
+				}
+				target, err := resolveTarget()
+				if err != nil {
+					return err
+				}
+				if target.IsLocal() {
+					if err := ensureNode(); err != nil {
+						return err
+					}
+				}
+				if workDir == "" {
+					workDir, _ = os.Getwd()
+				}
+				return client.Run(target, command, workDir, name, envVars, stdinData, tags...)
+			}
+
+			execTarget, err := selectedExecutionTarget(on)
+			if err != nil {
+				return err
+			}
+			switch execTarget.Kind {
+			case "local":
+				target, err := resolveTarget()
+				if err != nil {
+					return err
+				}
+				if err := ensureNode(); err != nil {
+					return err
+				}
+				if workDir == "" {
+					workDir, _ = os.Getwd()
+				}
+				return client.Run(target, command, workDir, name, envVars, stdinData, tags...)
+			case "env":
+				if len(stdinData) > 0 {
+					return fmt.Errorf("--prompt-file is not supported for environment targets yet")
+				}
+				if workDir == "" {
+					workDir = "/workspace"
+				}
+				result, err := runInEnvironmentTarget(execTarget.Ref, workDir, name, envVars, tags, command)
+				if err != nil {
+					return fmt.Errorf("run: %w", err)
+				}
+				return printEnvironmentRunResult(result)
+			default:
+				return fmt.Errorf("unsupported target kind %q", execTarget.Kind)
+			}
 		},
 	}
 
@@ -294,9 +329,11 @@ func runCmd() *cobra.Command {
 	cmd.Flags().StringSliceVarP(&tags, "tag", "t", nil, "Tags for the session (can be repeated)")
 	cmd.Flags().StringVar(&name, "name", "", "Unique name for the session (alphanumeric + hyphens, 1-32 chars)")
 	cmd.Flags().StringArrayVarP(&envVars, "env", "e", nil, "Environment variable overrides (KEY=VALUE, can be repeated)")
+	cmd.Flags().StringVar(&on, "on", "", "Override the current target for this command")
 	cmd.Flags().BoolVar(&autoApprove, "auto-approve", false, "Inject --dangerously-skip-permissions after the command binary")
 	cmd.Flags().StringVar(&promptFile, "prompt-file", "", "File whose contents are injected as stdin after launch")
 	_ = cmd.RegisterFlagCompletionFunc("tag", tagCompletionFunc)
+	_ = cmd.RegisterFlagCompletionFunc("on", targetCompletionFunc)
 
 	return cmd
 }
