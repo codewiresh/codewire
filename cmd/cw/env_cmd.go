@@ -96,7 +96,105 @@ func getDefaultOrg() (string, *platform.Client, error) {
 	return getOrgContext(nil)
 }
 
+func normalizeEnvRef(ref string) string {
+	return strings.TrimSpace(ref)
+}
+
+func shortEnvID(id string) string {
+	if idx := strings.Index(id, "-"); idx > 0 {
+		return id[:idx]
+	}
+	if len(id) > 8 {
+		return id[:8]
+	}
+	return id
+}
+
+func envDisplayRefs(env platform.Environment) []string {
+	var refs []string
+	if env.Name != nil && *env.Name != "" {
+		refs = append(refs, *env.Name)
+	}
+	if env.ID != "" {
+		refs = append(refs, shortEnvID(env.ID), env.ID)
+	}
+	return refs
+}
+
+func filterEnvCompletions(envs []platform.Environment, toComplete string) []string {
+	needle := strings.ToLower(normalizeEnvRef(toComplete))
+	seen := make(map[string]bool)
+	var completions []string
+
+	for _, env := range envs {
+		for _, ref := range envDisplayRefs(env) {
+			if seen[ref] {
+				continue
+			}
+			if needle != "" && !strings.HasPrefix(strings.ToLower(ref), needle) {
+				continue
+			}
+			seen[ref] = true
+			completions = append(completions, ref)
+		}
+	}
+
+	return completions
+}
+
+func resolveEnvIDFromList(envs []platform.Environment, ref string) (string, error) {
+	ref = normalizeEnvRef(ref)
+	if ref == "" {
+		return "", fmt.Errorf("environment reference cannot be empty")
+	}
+
+	var exactNameMatches []platform.Environment
+	var prefixMatches []platform.Environment
+	for _, e := range envs {
+		if e.ID == ref {
+			return e.ID, nil
+		}
+		if e.Name != nil && *e.Name == ref {
+			exactNameMatches = append(exactNameMatches, e)
+		}
+		if strings.HasPrefix(e.ID, ref) {
+			prefixMatches = append(prefixMatches, e)
+		}
+	}
+
+	switch len(exactNameMatches) {
+	case 1:
+		return exactNameMatches[0].ID, nil
+	case 0:
+		// Fall through to unique UUID prefix lookup below.
+	default:
+		ids := make([]string, len(exactNameMatches))
+		for i, m := range exactNameMatches {
+			ids[i] = m.ID
+		}
+		return "", fmt.Errorf("multiple environments named %q, use ID: %s", ref, strings.Join(ids, ", "))
+	}
+
+	switch len(prefixMatches) {
+	case 1:
+		return prefixMatches[0].ID, nil
+	case 0:
+		return "", fmt.Errorf("environment %q not found", ref)
+	default:
+		ids := make([]string, len(prefixMatches))
+		for i, m := range prefixMatches {
+			ids[i] = m.ID
+		}
+		return "", fmt.Errorf("environment %q matched multiple IDs, use a longer prefix or full ID: %s", ref, strings.Join(ids, ", "))
+	}
+}
+
 func resolveEnvID(client *platform.Client, orgID, ref string) (string, error) {
+	ref = normalizeEnvRef(ref)
+	if ref == "" {
+		return "", fmt.Errorf("environment reference cannot be empty")
+	}
+
 	// Fast path: if it looks like a UUID, try direct lookup.
 	if len(ref) >= 36 && strings.Contains(ref, "-") {
 		if _, err := client.GetEnvironment(orgID, ref); err == nil {
@@ -110,25 +208,7 @@ func resolveEnvID(client *platform.Client, orgID, ref string) (string, error) {
 		return "", fmt.Errorf("list environments: %w", err)
 	}
 
-	var matches []platform.Environment
-	for _, e := range envs {
-		if e.Name != nil && *e.Name == ref {
-			matches = append(matches, e)
-		}
-	}
-
-	switch len(matches) {
-	case 1:
-		return matches[0].ID, nil
-	case 0:
-		return "", fmt.Errorf("environment %q not found", ref)
-	default:
-		ids := make([]string, len(matches))
-		for i, m := range matches {
-			ids[i] = m.ID
-		}
-		return "", fmt.Errorf("multiple environments named %q, use ID: %s", ref, strings.Join(ids, ", "))
-	}
+	return resolveEnvIDFromList(envs, ref)
 }
 
 func envCompletionFunc(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
@@ -140,19 +220,8 @@ func envCompletionFunc(cmd *cobra.Command, args []string, toComplete string) ([]
 	if err != nil {
 		return nil, cobra.ShellCompDirectiveNoFileComp
 	}
-	seen := make(map[string]bool)
-	var completions []string
-	// Names first (preferred), then IDs.
-	for _, e := range envs {
-		if e.Name != nil && *e.Name != "" && !seen[*e.Name] {
-			seen[*e.Name] = true
-			completions = append(completions, *e.Name)
-		}
-	}
-	for _, e := range envs {
-		completions = append(completions, e.ID)
-	}
-	return completions, cobra.ShellCompDirectiveNoFileComp
+
+	return filterEnvCompletions(envs, toComplete), cobra.ShellCompDirectiveNoFileComp
 }
 
 func timeAgo(s string) string {
@@ -305,6 +374,7 @@ func envCreateCmd() *cobra.Command {
 		noOrgSecrets  bool
 		noUserSecrets bool
 		follow        bool
+		noWait        bool
 		yes           bool
 		network       string
 		noNetwork     bool
@@ -635,7 +705,7 @@ Examples:
 			fmt.Fprintf(os.Stderr, "  Mem:   %dMB\n", env.MemoryMB)
 			fmt.Fprintf(os.Stderr, "  Disk:  %dGB\n", env.DiskGB)
 
-			if follow {
+			if !noWait && follow {
 				fmt.Println()
 				if err := followEnvironmentLogs(client, orgID, env.ID); err != nil {
 					fmt.Fprintf(os.Stderr, "Warning: could not follow logs: %v\n", err)
@@ -664,7 +734,8 @@ Examples:
 	cmd.Flags().BoolVar(&noUserSecrets, "no-user-secrets", false, "Don't inject user-level secrets")
 	cmd.Flags().StringVar(&network, "network", "", "Join a specific relay network on boot (requires relay auth in local config)")
 	cmd.Flags().BoolVar(&noNetwork, "no-network", false, "Don't join the default private relay network")
-	cmd.Flags().BoolVarP(&follow, "follow", "f", false, "Follow startup logs after creation")
+	cmd.Flags().BoolVarP(&follow, "follow", "f", true, "Watch startup progress and wait for readiness (default: true)")
+	cmd.Flags().BoolVar(&noWait, "no-wait", false, "Return immediately after creation instead of waiting for startup")
 	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "Skip confirmation prompts")
 	return cmd
 }
