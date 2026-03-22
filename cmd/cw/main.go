@@ -1622,24 +1622,7 @@ func completionInstall(rootCmd *cobra.Command) error {
 // completionInstallZsh writes _cw to the first auto-loaded zsh completion dir
 // it can find: homebrew's site-functions, oh-my-zsh, or ~/.zfunc (with a hint).
 func completionInstallZsh(rootCmd *cobra.Command) error {
-	candidates := []struct {
-		dir      string
-		autoload bool // true = no shell config change needed
-		hint     string
-	}{
-		// Homebrew's zsh site-functions are already in $fpath for all brew users.
-		{dir: brewPrefix() + "/share/zsh/site-functions", autoload: true},
-		// Oh My Zsh custom completions are auto-loaded.
-		{dir: os.Getenv("HOME") + "/.oh-my-zsh/completions", autoload: true},
-		// ~/.zfunc needs one fpath entry in .zshrc.
-		{
-			dir:      os.Getenv("HOME") + "/.zfunc",
-			autoload: false,
-			hint: "Add these lines to ~/.zshrc (before compinit):\n" +
-				"  fpath=(~/.zfunc $fpath)\n" +
-				"  autoload -Uz compinit && compinit",
-		},
-	}
+	candidates := zshCompletionInstallCandidates()
 
 	for _, c := range candidates {
 		if c.dir == "" || c.dir == "/share/zsh/site-functions" {
@@ -1673,6 +1656,43 @@ func completionInstallZsh(rootCmd *cobra.Command) error {
 	fmt.Fprintln(os.Stderr, "Could not find a writable zsh completion directory.")
 	fmt.Fprintln(os.Stderr, "Add this to ~/.zshrc:\n  source <(cw completion zsh)")
 	return nil
+}
+
+type zshCompletionCandidate struct {
+	dir      string
+	autoload bool
+	hint     string
+}
+
+func zshCompletionInstallCandidates() []zshCompletionCandidate {
+	var candidates []zshCompletionCandidate
+	seen := make(map[string]bool)
+	add := func(dir string, autoload bool, hint string) {
+		if dir == "" || seen[dir] {
+			return
+		}
+		seen[dir] = true
+		candidates = append(candidates, zshCompletionCandidate{dir: dir, autoload: autoload, hint: hint})
+	}
+
+	// Prefer zsh site-functions paths that are commonly already in $fpath.
+	if prefix := brewPrefix(); prefix != "" {
+		add(filepath.Join(prefix, "share/zsh/site-functions"), true, "")
+	}
+	add("/usr/local/share/zsh/site-functions", true, "")
+	add("/usr/share/zsh/site-functions", true, "")
+
+	// Only use Oh My Zsh's completions directory when OMZ is actually configured.
+	if zshDir := os.Getenv("ZSH"); zshDir != "" {
+		add(filepath.Join(zshDir, "completions"), true, "")
+	}
+
+	// ~/.zfunc needs one fpath entry in .zshrc.
+	add(os.Getenv("HOME")+"/.zfunc", false, "Add these lines to ~/.zshrc (before compinit):\n"+
+		"  fpath=(~/.zfunc $fpath)\n"+
+		"  autoload -Uz compinit && compinit")
+
+	return candidates
 }
 
 // completionInstallBash writes a bash completion script to the first available
