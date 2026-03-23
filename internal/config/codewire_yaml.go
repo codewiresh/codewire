@@ -3,24 +3,26 @@ package config
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"gopkg.in/yaml.v3"
 )
 
 // CodewireConfig represents the codewire.yaml schema.
 type CodewireConfig struct {
-	Template string            `yaml:"template"`
-	Install  string            `yaml:"install"`
-	Startup  string            `yaml:"startup"`
-	Secrets  string            `yaml:"secrets"`
-	Env      map[string]string `yaml:"env"`
-	Ports    []PortConfig      `yaml:"ports"`
-	CPU      int               `yaml:"cpu"`
-	Memory   int               `yaml:"memory"`
-	Disk               int               `yaml:"disk"`
-	Agent              string            `yaml:"agent"`
-	IncludeOrgSecrets  *bool             `yaml:"include_org_secrets"`
-	IncludeUserSecrets *bool             `yaml:"include_user_secrets"`
+	Preset             string            `yaml:"preset,omitempty"`
+	Image              string            `yaml:"image,omitempty"`
+	Install            string            `yaml:"install,omitempty"`
+	Startup            string            `yaml:"startup,omitempty"`
+	Secrets            string            `yaml:"secrets,omitempty"`
+	Env                map[string]string `yaml:"env,omitempty"`
+	Ports              []PortConfig      `yaml:"ports,omitempty"`
+	CPU                int               `yaml:"cpu,omitempty"`
+	Memory             int               `yaml:"memory,omitempty"`
+	Disk               int               `yaml:"disk,omitempty"`
+	Agent              string            `yaml:"agent,omitempty"`
+	IncludeOrgSecrets  *bool             `yaml:"include_org_secrets,omitempty"`
+	IncludeUserSecrets *bool             `yaml:"include_user_secrets,omitempty"`
 }
 
 // PortConfig represents a port in codewire.yaml.
@@ -42,4 +44,24 @@ func LoadCodewireConfig(path string) (*CodewireConfig, error) {
 	}
 
 	return &cfg, nil
+}
+
+// WriteCodewireConfig writes a codewire.yaml file.
+func WriteCodewireConfig(path string, cfg *CodewireConfig) error {
+	data, err := yaml.Marshal(cfg)
+	if err != nil {
+		return fmt.Errorf("marshal %s: %w", path, err)
+	}
+
+	dir := filepath.Dir(path)
+	if dir != "." && dir != "" {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return fmt.Errorf("create %s: %w", dir, err)
+		}
+	}
+
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		return fmt.Errorf("write %s: %w", path, err)
+	}
+	return nil
 }

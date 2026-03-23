@@ -50,13 +50,13 @@ func environmentTools() []tool {
 		},
 		{
 			Name:        "codewire_create_environment",
-			Description: "Create a new environment from a template. Returns the created environment details.",
+			Description: "Create a new environment from a preset. Returns the created environment details.",
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
-					"template_id": map[string]interface{}{
+					"preset_id": map[string]interface{}{
 						"type":        "string",
-						"description": "Template ID to create the environment from (required)",
+						"description": "Preset ID to create the environment from (required)",
 					},
 					"name": map[string]interface{}{
 						"type":        "string",
@@ -79,7 +79,7 @@ func environmentTools() []tool {
 						"description": "Disk in GB",
 					},
 				},
-				"required": []string{"template_id"},
+				"required": []string{"preset_id"},
 			},
 		},
 		{
@@ -139,17 +139,11 @@ func environmentTools() []tool {
 			},
 		},
 		{
-			Name:        "codewire_list_templates",
-			Description: "List available environment templates. Templates define the base configuration for creating environments.",
+			Name:        "codewire_list_presets",
+			Description: "List available environment presets. Presets define the base configuration for creating environments.",
 			InputSchema: map[string]interface{}{
-				"type": "object",
-				"properties": map[string]interface{}{
-					"type": map[string]interface{}{
-						"type":        "string",
-						"description": "Filter by template type: 'coder' or 'sandbox'",
-						"enum":        []string{"coder", "sandbox"},
-					},
-				},
+				"type":       "object",
+				"properties": map[string]interface{}{},
 			},
 		},
 		{
@@ -232,13 +226,13 @@ func toolCreateEnvironment(args map[string]interface{}) (string, error) {
 		return "", err
 	}
 
-	templateID, _ := args["template_id"].(string)
-	if templateID == "" {
-		return "", fmt.Errorf("template_id is required")
+	presetID, _ := args["preset_id"].(string)
+	if presetID == "" {
+		return "", fmt.Errorf("preset_id is required")
 	}
 
 	req := &platform.CreateEnvironmentRequest{
-		TemplateID: templateID,
+		PresetID: presetID,
 	}
 	if name, ok := args["name"].(string); ok && name != "" {
 		req.Name = name
@@ -429,24 +423,22 @@ func toolListFiles(args map[string]interface{}) (string, error) {
 	return string(out), nil
 }
 
-func toolListTemplates(args map[string]interface{}) (string, error) {
+func toolListPresets(args map[string]interface{}) (string, error) {
 	client, orgID, err := getPlatformClient()
 	if err != nil {
 		return "", err
 	}
 
-	envType, _ := args["type"].(string)
-
-	templates, err := client.ListEnvTemplates(orgID, envType)
+	presets, err := client.ListPresets(orgID)
 	if err != nil {
-		return "", fmt.Errorf("list templates: %w", err)
+		return "", fmt.Errorf("list presets: %w", err)
 	}
 
-	if len(templates) == 0 {
-		return "No templates found.", nil
+	if len(presets) == 0 {
+		return "No presets found.", nil
 	}
 
-	out, err := json.MarshalIndent(templates, "", "  ")
+	out, err := json.MarshalIndent(presets, "", "  ")
 	if err != nil {
 		return "", err
 	}

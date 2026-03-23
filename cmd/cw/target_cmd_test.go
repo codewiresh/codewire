@@ -59,6 +59,30 @@ func TestUseCmdSavesResolvedTarget(t *testing.T) {
 	}
 }
 
+func TestResolveNamedExecutionTargetFindsLocalInstance(t *testing.T) {
+	origLoadLocal := loadLocalInstancesForCLI
+	defer func() { loadLocalInstancesForCLI = origLoadLocal }()
+
+	loadLocalInstancesForCLI = func() (*cwconfig.LocalInstancesConfig, error) {
+		return &cwconfig.LocalInstancesConfig{
+			Instances: map[string]cwconfig.LocalInstance{
+				"repo": {
+					Name:    "repo",
+					Backend: "docker",
+				},
+			},
+		}, nil
+	}
+
+	target, err := resolveNamedExecutionTarget("repo")
+	if err != nil {
+		t.Fatalf("resolveNamedExecutionTarget() error = %v", err)
+	}
+	if target.Kind != "local" || target.Ref != "repo" || target.Name != "repo" {
+		t.Fatalf("unexpected target %#v", target)
+	}
+}
+
 func TestCurrentCmdPrintsLocalTarget(t *testing.T) {
 	origLoad := loadCLIConfigForTarget
 	defer func() { loadCLIConfigForTarget = origLoad }()
@@ -127,11 +151,24 @@ func TestCurrentCmdVerbosePrintsFullDetails(t *testing.T) {
 func TestTargetCompletionIncludesLocalAndEnvironments(t *testing.T) {
 	alpha := "alpha"
 	orig := listEnvironmentsForCompletion
-	defer func() { listEnvironmentsForCompletion = orig }()
+	origLoadLocal := loadLocalInstancesForCLI
+	defer func() {
+		listEnvironmentsForCompletion = orig
+		loadLocalInstancesForCLI = origLoadLocal
+	}()
 
 	listEnvironmentsForCompletion = func(cmd *cobra.Command) ([]platform.Environment, error) {
 		return []platform.Environment{
 			{ID: "f062947a-60e2-405c-b89d-5f48b493d8fb", Name: &alpha},
+		}, nil
+	}
+	loadLocalInstancesForCLI = func() (*cwconfig.LocalInstancesConfig, error) {
+		return &cwconfig.LocalInstancesConfig{
+			Instances: map[string]cwconfig.LocalInstance{
+				"repo": {
+					Name: "repo",
+				},
+			},
 		}, nil
 	}
 
@@ -141,5 +178,57 @@ func TestTargetCompletionIncludesLocalAndEnvironments(t *testing.T) {
 	}
 	if len(got) == 0 || got[0] != "local" {
 		t.Fatalf("expected local completion first, got %#v", got)
+	}
+}
+
+func TestCurrentCmdPrintsLocalInstanceTarget(t *testing.T) {
+	origLoad := loadCLIConfigForTarget
+	origLoadLocal := loadLocalInstancesForCLI
+	defer func() {
+		loadCLIConfigForTarget = origLoad
+		loadLocalInstancesForCLI = origLoadLocal
+	}()
+
+	loadCLIConfigForTarget = func() (*cwconfig.Config, error) {
+		return &cwconfig.Config{
+			CurrentTarget: &cwconfig.CurrentTargetConfig{
+				Kind: "local",
+				Ref:  "repo",
+				Name: "repo",
+			},
+		}, nil
+	}
+	loadLocalInstancesForCLI = func() (*cwconfig.LocalInstancesConfig, error) {
+		return &cwconfig.LocalInstancesConfig{
+			Instances: map[string]cwconfig.LocalInstance{
+				"repo": {
+					Name:    "repo",
+					Backend: "docker",
+				},
+			},
+		}, nil
+	}
+
+	oldStdout := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	os.Stdout = w
+	defer func() { os.Stdout = oldStdout }()
+
+	cmd := currentCmd()
+	if err := cmd.RunE(cmd, nil); err != nil {
+		t.Fatalf("current command failed: %v", err)
+	}
+
+	_ = w.Close()
+	output, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("read output: %v", err)
+	}
+	got := strings.TrimSpace(string(output))
+	if got != "repo [docker]" {
+		t.Fatalf("unexpected output %q", got)
 	}
 }

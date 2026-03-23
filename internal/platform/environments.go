@@ -63,28 +63,25 @@ func (c *Client) StartEnvironment(orgID, envID string) (*StatusResponse, error) 
 	return &resp, nil
 }
 
-func (c *Client) ListEnvTemplates(orgID string, envType string) ([]EnvironmentTemplate, error) {
-	path := fmt.Sprintf("/api/v1/organizations/%s/templates", orgID)
-	if envType != "" {
-		path += "?type=" + envType
-	}
-	var templates []EnvironmentTemplate
-	if err := c.do("GET", path, nil, &templates); err != nil {
+func (c *Client) ListPresets(orgID string) ([]Preset, error) {
+	path := fmt.Sprintf("/api/v1/organizations/%s/presets", orgID)
+	var presets []Preset
+	if err := c.do("GET", path, nil, &presets); err != nil {
 		return nil, err
 	}
-	return templates, nil
+	return presets, nil
 }
 
-func (c *Client) CreateEnvTemplate(orgID string, req *CreateTemplateRequest) (*EnvironmentTemplate, error) {
-	var tmpl EnvironmentTemplate
-	if err := c.do("POST", fmt.Sprintf("/api/v1/organizations/%s/templates", orgID), req, &tmpl); err != nil {
+func (c *Client) CreatePreset(orgID string, req *CreatePresetRequest) (*Preset, error) {
+	var preset Preset
+	if err := c.do("POST", fmt.Sprintf("/api/v1/organizations/%s/presets", orgID), req, &preset); err != nil {
 		return nil, err
 	}
-	return &tmpl, nil
+	return &preset, nil
 }
 
-func (c *Client) DeleteEnvTemplate(orgID, templateID string) error {
-	return c.do("DELETE", fmt.Sprintf("/api/v1/organizations/%s/templates/%s", orgID, templateID), nil, nil)
+func (c *Client) DeletePreset(orgID, presetID string) error {
+	return c.do("DELETE", fmt.Sprintf("/api/v1/organizations/%s/presets/%s", orgID, presetID), nil, nil)
 }
 
 func (c *Client) ExecInEnvironment(orgID, envID string, req *ExecRequest) (*ExecResult, error) {
@@ -138,10 +135,10 @@ func (c *Client) LookupRepoConfig(orgID, repoURL string) (*RepoConfig, error) {
 	return &rc, nil
 }
 
-func (c *Client) SaveRepoConfig(orgID string, repoURL, templateID string, setupConfig map[string]any) error {
+func (c *Client) SaveRepoConfig(orgID string, repoURL, presetID string, setupConfig map[string]any) error {
 	body := map[string]any{
 		"repo_url":     repoURL,
-		"template_id":  templateID,
+		"preset_id":    presetID,
 		"setup_config": setupConfig,
 	}
 	return c.do("PUT", fmt.Sprintf("/api/v1/organizations/%s/repo-configs", orgID), body, nil)

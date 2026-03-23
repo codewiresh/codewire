@@ -117,6 +117,13 @@ func TestEnvCreateDefaultsToWaiting(t *testing.T) {
 	if noWaitFlag.DefValue != "false" {
 		t.Fatalf("expected --no-wait default false, got %q", noWaitFlag.DefValue)
 	}
+
+	if flag := cmd.Flags().Lookup("write-preset"); flag == nil {
+		t.Fatal("expected create command to expose --write-preset")
+	}
+	if flag := cmd.Flags().Lookup("save-preset"); flag == nil {
+		t.Fatal("expected create command to expose --save-preset")
+	}
 }
 
 func TestSSHCmdCompletionUsesEnvironmentRefs(t *testing.T) {

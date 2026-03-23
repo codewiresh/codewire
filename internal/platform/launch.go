@@ -3,14 +3,14 @@ package platform
 import "fmt"
 
 type LaunchOptions struct {
-	GitHubStatus   GitHubStatus          `json:"github_status"`
-	Templates      []EnvironmentTemplate `json:"templates"`
-	SecretProjects []SecretProject       `json:"secret_projects"`
+	GitHubStatus   GitHubStatus    `json:"github_status"`
+	Presets        []Preset        `json:"presets"`
+	SecretProjects []SecretProject `json:"secret_projects"`
 }
 
 type PrepareLaunchRequest struct {
-	TemplateID         *string           `json:"template_id,omitempty"`
-	TemplateSlug       string            `json:"template_slug,omitempty"`
+	PresetID           *string           `json:"preset_id,omitempty"`
+	PresetSlug         string            `json:"preset_slug,omitempty"`
 	Name               *string           `json:"name,omitempty"`
 	CPUMillicores      *int              `json:"cpu_millicores,omitempty"`
 	MemoryMB           *int              `json:"memory_mb,omitempty"`
@@ -33,10 +33,10 @@ type PrepareLaunchRequest struct {
 }
 
 type PrepareLaunchResponse struct {
-	Draft            CreateEnvironmentRequest `json:"draft"`
-	Detection        *DetectionResult         `json:"detection,omitempty"`
-	ResolvedTemplate *EnvironmentTemplate     `json:"resolved_template,omitempty"`
-	RepoConfig       *RepoConfig              `json:"repo_config,omitempty"`
+	Draft          CreateEnvironmentRequest `json:"draft"`
+	Detection      *DetectionResult         `json:"detection,omitempty"`
+	ResolvedPreset *Preset                  `json:"resolved_preset,omitempty"`
+	RepoConfig     *RepoConfig              `json:"repo_config,omitempty"`
 }
 
 func (c *Client) GetLaunchOptions(orgID string) (*LaunchOptions, error) {

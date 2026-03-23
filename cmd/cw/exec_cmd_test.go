@@ -119,6 +119,63 @@ func TestExecCmdUsesCurrentLocalTarget(t *testing.T) {
 	}
 }
 
+func TestExecCmdUsesCurrentLocalInstanceTarget(t *testing.T) {
+	origLoad := loadCLIConfigForTarget
+	origLoadLocal := loadLocalInstancesForCLI
+	origExecLocalRuntime := execInLocalRuntimeTarget
+	defer func() {
+		loadCLIConfigForTarget = origLoad
+		loadLocalInstancesForCLI = origLoadLocal
+		execInLocalRuntimeTarget = origExecLocalRuntime
+	}()
+
+	loadCLIConfigForTarget = func() (*cwconfig.Config, error) {
+		return &cwconfig.Config{
+			CurrentTarget: &cwconfig.CurrentTargetConfig{
+				Kind: "local",
+				Ref:  "repo",
+				Name: "repo",
+			},
+		}, nil
+	}
+	loadLocalInstancesForCLI = func() (*cwconfig.LocalInstancesConfig, error) {
+		return &cwconfig.LocalInstancesConfig{
+			Instances: map[string]cwconfig.LocalInstance{
+				"repo": {
+					Name:        "repo",
+					Backend:     "docker",
+					RuntimeName: "cw-repo",
+				},
+			},
+		}, nil
+	}
+
+	var gotInstance *cwconfig.LocalInstance
+	var gotWorkDir string
+	var gotCommand []string
+	execInLocalRuntimeTarget = func(instance *cwconfig.LocalInstance, workDir string, command []string) error {
+		gotInstance = instance
+		gotWorkDir = workDir
+		gotCommand = append([]string(nil), command...)
+		return nil
+	}
+
+	cmd := execCmd()
+	cmd.SetArgs([]string{"--", "pwd"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("exec command failed: %v", err)
+	}
+	if gotInstance == nil || gotInstance.Name != "repo" {
+		t.Fatalf("instance = %#v", gotInstance)
+	}
+	if gotWorkDir != "/workspace" {
+		t.Fatalf("workdir = %q, want /workspace", gotWorkDir)
+	}
+	if len(gotCommand) != 1 || gotCommand[0] != "pwd" {
+		t.Fatalf("command = %#v", gotCommand)
+	}
+}
+
 func TestSSHCmdAllowsCurrentTargetWhenNoArg(t *testing.T) {
 	cmd := sshCmd()
 	if err := cmd.Args(cmd, nil); err != nil {

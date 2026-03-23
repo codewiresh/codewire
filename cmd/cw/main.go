@@ -58,7 +58,8 @@ func main() {
 	rootCmd.AddCommand(
 		// Environments
 		grouped(envParentCmd(), "environment"),
-		grouped(tmplParentCmd(), "environment"),
+		grouped(localParentCmd(), "environment"),
+		grouped(presetParentCmd(), "environment"),
 		grouped(useCmd(), "environment"),
 		grouped(currentCmd(), "environment"),
 		grouped(execCmd(), "environment"),

@@ -70,7 +70,62 @@ cw attach 1
 cw logs 1
 ```
 
+## Presets, Cloud Environments, And Local Runtimes
+
+`codewire.yaml` is the shared preset file for both managed environments and local
+containers.
+
+```bash
+# Write a preset for this repo
+cw preset init --image full --install "pnpm install" --startup "pnpm dev"
+
+# Launch a cloud environment from the preset
+cw env create --file codewire.yaml
+
+# Or create a local container from the same preset
+cw local create --backend docker
+```
+
+Local runtimes become normal `cw` targets:
+
+```bash
+cw local info my-app
+cw exec --on my-app -- pwd
+cw use my-app
+cw exec -- pwd
+cw use local
+```
+
+Notes:
+- `cw exec` works across the current target, including remote envs and local Docker/Incus runtimes.
+- `cw ssh` remains for remote environments; local runtimes use backend-native exec.
+- Incus with OCI registry images like `docker.io/...` and `ghcr.io/...` requires `skopeo` on the host.
+
 ## Commands
+
+### Workspace Lifecycle
+
+```bash
+cw preset init                              # Write codewire.yaml
+cw preset list                              # List reusable server presets
+cw preset create <slug> --image full ...    # Save a reusable server preset
+
+cw env create --file codewire.yaml          # Create a cloud environment from a preset
+cw env create --preset full                 # Create from a saved server preset
+
+cw local create --backend docker            # Create a local Docker runtime
+cw local create --backend incus             # Create a local Incus runtime
+cw local list                               # List local runtimes
+cw local info <name>                        # Show local runtime details
+cw local start <name>                       # Start a stopped local runtime
+cw local stop <name>                        # Stop a running local runtime
+cw local rm <name>                          # Delete a local runtime
+
+cw use <target>                             # Set current target
+cw current -v                               # Show current target details
+cw exec -- <command>                        # Run on the current target
+cw exec --on <target> -- <command>          # Run on a specific target
+```
 
 ### `cw launch [name] [--dir <dir>] [--tag <tag>...] -- <command> [args...]`
 

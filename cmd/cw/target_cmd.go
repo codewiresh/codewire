@@ -29,6 +29,15 @@ var (
 				Name: "local",
 			}, nil
 		}
+		if state, err := loadLocalInstancesForCLI(); err == nil && state != nil {
+			if key, instance, localErr := resolveLocalInstance(state, ref); localErr == nil && instance != nil {
+				return &cwconfig.CurrentTargetConfig{
+					Kind: "local",
+					Ref:  key,
+					Name: instance.Name,
+				}, nil
+			}
+		}
 
 		orgID, client, err := getDefaultOrg()
 		if err != nil {
@@ -56,8 +65,26 @@ var (
 )
 
 func targetSummaryLine(target *cwconfig.CurrentTargetConfig, env *platform.Environment) string {
-	if target == nil || target.Kind == "local" {
+	if target == nil || target.Kind == "local" && target.Ref == "local" {
 		return "local"
+	}
+	if target.Kind == "local" {
+		instance := lookupLocalInstanceForTarget(target)
+		name := target.Name
+		if instance != nil && strings.TrimSpace(instance.Name) != "" {
+			name = instance.Name
+		}
+		if strings.TrimSpace(name) == "" {
+			name = target.Ref
+		}
+		summary := name
+		if instance != nil && strings.TrimSpace(instance.Backend) != "" {
+			summary += " [" + instance.Backend + "]"
+			if status, err := localRuntimeStatus(instance); err == nil && strings.TrimSpace(status) != "" {
+				summary += " " + status
+			}
+		}
+		return summary
 	}
 
 	name := target.Name
@@ -92,6 +119,21 @@ func lookupEnvironmentForTarget(target *cwconfig.CurrentTargetConfig) *platform.
 		return nil
 	}
 	return env
+}
+
+func lookupLocalInstanceForTarget(target *cwconfig.CurrentTargetConfig) *cwconfig.LocalInstance {
+	if target == nil || target.Kind != "local" || strings.TrimSpace(target.Ref) == "" || target.Ref == "local" {
+		return nil
+	}
+	state, err := loadLocalInstancesForCLI()
+	if err != nil || state == nil {
+		return nil
+	}
+	instance, ok := state.Instances[target.Ref]
+	if !ok {
+		return nil
+	}
+	return &instance
 }
 
 func currentTargetConfig(cfg *cwconfig.Config) *cwconfig.CurrentTargetConfig {
@@ -133,6 +175,13 @@ func targetCompletionFunc(cmd *cobra.Command, args []string, toComplete string) 
 	if strings.TrimSpace(toComplete) != "" && !strings.HasPrefix("local", strings.ToLower(strings.TrimSpace(toComplete))) {
 		completions = nil
 	}
+	if state, err := loadLocalInstancesForCLI(); err == nil && state != nil {
+		for _, name := range sortedLocalInstanceNames(state) {
+			if strings.TrimSpace(toComplete) == "" || strings.HasPrefix(strings.ToLower(name), strings.ToLower(strings.TrimSpace(toComplete))) {
+				completions = append(completions, name)
+			}
+		}
+	}
 	envCompletions, directive := envCompletionFunc(cmd, args, toComplete)
 	completions = append(completions, envCompletions...)
 	return completions, directive
@@ -159,8 +208,12 @@ func useCmd() *cobra.Command {
 				return fmt.Errorf("save current target: %w", err)
 			}
 
-			if target.Kind == "local" {
+			if target.Kind == "local" && target.Ref == "local" {
 				successMsg("Current target set to local.")
+				return nil
+			}
+			if target.Kind == "local" {
+				successMsg("Current target set to %s.", target.Name)
 				return nil
 			}
 			successMsg("Current target set to %s (%s).", target.Name, shortEnvID(target.Ref))
@@ -189,8 +242,19 @@ func currentCmd() *cobra.Command {
 			}
 
 			fmt.Printf("%-10s %s\n", bold("Kind:"), target.Kind)
-			if target.Kind == "local" {
+			if target.Kind == "local" && target.Ref == "local" {
 				fmt.Printf("%-10s %s\n", bold("Target:"), "local")
+				return nil
+			}
+			if target.Kind == "local" {
+				fmt.Printf("%-10s %s\n", bold("Target:"), target.Name)
+				if instance := lookupLocalInstanceForTarget(target); instance != nil {
+					fmt.Printf("%-10s %s\n", bold("Backend:"), instance.Backend)
+					fmt.Printf("%-10s %s\n", bold("Runtime:"), instance.RuntimeName)
+					if status, err := localRuntimeStatus(instance); err == nil {
+						fmt.Printf("%-10s %s\n", bold("State:"), stateColor(status))
+					}
+				}
 				return nil
 			}
 

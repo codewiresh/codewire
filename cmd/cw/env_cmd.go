@@ -366,8 +366,8 @@ func printDetectionSummary(detection *platform.DetectionResult) {
 		fmt.Fprintf(os.Stderr, " [%s]", detection.ProjectType)
 	}
 	fmt.Fprintln(os.Stderr)
-	if detection.TemplateImage != "" {
-		fmt.Fprintf(os.Stderr, "  Image:    %s\n", detection.TemplateImage)
+	if detection.PresetImage != "" {
+		fmt.Fprintf(os.Stderr, "  Image:    %s\n", detection.PresetImage)
 	}
 	if detection.InstallCommand != "" {
 		fmt.Fprintf(os.Stderr, "  Install:  %s\n", detection.InstallCommand)
@@ -469,8 +469,8 @@ func resolveEnvRelayEnrollment(dir string, assumeYes bool, requestedNetwork stri
 
 func envCreateCmd() *cobra.Command {
 	var (
-		templateSlug  string
-		templateID    string
+		presetSlug    string
+		presetID      string
 		name          string
 		ttl           string
 		cpu           int
@@ -491,6 +491,8 @@ func envCreateCmd() *cobra.Command {
 		yes           bool
 		network       string
 		noNetwork     bool
+		writePreset   bool
+		savePreset    string
 	)
 
 	cmd := &cobra.Command{
@@ -505,240 +507,42 @@ Examples:
   cw env create https://github.com/foo/bar
   cw env create https://github.com/foo/frontend https://github.com/foo/api
   cw env create --repo github.com/foo/frontend@main --repo git.noel.sh/foo/backend
-  cw env create --template go --name my-env
+  cw env create --preset go --name my-env
   cw env create --image go --name my-env
   cw env create --secrets my-project https://github.com/foo/bar
   cw env create --network project-alpha https://github.com/foo/bar`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			// Collect repos from positional args + --repo flags.
-			var repoURL string
-			var repos []platform.RepoEntry
-
-			allRepoSpecs := append(args, repoFlags...)
-			for _, spec := range allRepoSpecs {
-				u, b := parseRepoSpec(spec)
-				repos = append(repos, platform.RepoEntry{URL: u, Branch: b})
-			}
-
-			// Single repo: also set repoURL for backward compat.
-			if len(repos) == 1 {
-				repoURL = repos[0].URL
-				if repos[0].Branch != "" && branch == "" {
-					branch = repos[0].Branch
-				}
-			} else if len(repos) > 1 {
-				repoURL = repos[0].URL
-			}
-
-			// 0-arg support: look for ./codewire.yaml
-			if templateSlug == "" && templateID == "" && image == "" && repoURL == "" {
-				cfg, err := loadCodewireYAML("codewire.yaml")
-				if err == nil {
-					fmt.Println("Using ./codewire.yaml")
-					if cfg.Template != "" && templateSlug == "" {
-						templateSlug = cfg.Template
-					}
-					if cfg.Install != "" && install == "" {
-						install = cfg.Install
-					}
-					if cfg.Startup != "" && startup == "" {
-						startup = cfg.Startup
-					}
-					if cfg.Secrets != "" && secretProject == "" {
-						secretProject = cfg.Secrets
-					}
-					if cfg.Agent != "" && agent == "" {
-						agent = cfg.Agent
-					}
-					if cfg.CPU > 0 && cpu == 0 {
-						cpu = cfg.CPU
-					}
-					if cfg.Memory > 0 && memory == 0 {
-						memory = cfg.Memory
-					}
-					if cfg.Disk > 0 && disk == 0 {
-						disk = cfg.Disk
-					}
-					if cfg.IncludeOrgSecrets != nil && !*cfg.IncludeOrgSecrets {
-						noOrgSecrets = true
-					}
-					if cfg.IncludeUserSecrets != nil && !*cfg.IncludeUserSecrets {
-						noUserSecrets = true
-					}
-					for k, v := range cfg.Env {
-						envVars = append(envVars, k+"="+v)
-					}
-				} else {
-					// No codewire.yaml — try to infer repo URL from git remote.
-					if url, b, err := detectLocalRepo("."); err == nil && url != "" {
-						repoURL = url
-						if branch == "" {
-							branch = b
-						}
-						fmt.Printf("Using repo: %s\n", repoURL)
-					} else {
-						return fmt.Errorf("provide a repo URL, --image, or --template")
-					}
-				}
-			}
-
-			orgID, client, err := getOrgContext(cmd)
+			orgID, client, resolved, err := resolvePresetAuthoring(cmd, &presetAuthoringOptions{
+				Args:              args,
+				RepoFlags:         repoFlags,
+				PresetSlug:        presetSlug,
+				PresetID:          presetID,
+				Name:              name,
+				TTL:               ttl,
+				CPU:               cpu,
+				Memory:            memory,
+				Disk:              disk,
+				Branch:            branch,
+				Image:             image,
+				Install:           install,
+				Startup:           startup,
+				Agent:             agent,
+				EnvVars:           envVars,
+				SecretProject:     secretProject,
+				NoOrgSecrets:      noOrgSecrets,
+				NoUserSecrets:     noUserSecrets,
+				Yes:               yes,
+				AllowCodewireYAML: true,
+				PromptOnAnalyze:   true,
+				PromptOnDetection: true,
+				ShowDetection:     true,
+			})
 			if err != nil {
 				return err
 			}
 
-			var (
-				detection        *platform.DetectionResult
-				preparedAppPorts []platform.AppPort
-			)
-			if repoURL != "" || templateSlug != "" || templateID != "" || image != "" {
-				var analyze *bool
-				if repoURL != "" && templateSlug == "" && templateID == "" && image == "" && !yes {
-					idx, promptErr := promptSelect("Do you want to auto analyze for setup suggestions?", []string{"Yes", "No"})
-					if promptErr != nil {
-						return promptErr
-					}
-					v := idx == 0
-					analyze = &v
-				}
-
-				prepared, prepErr := client.PrepareLaunch(orgID, &platform.PrepareLaunchRequest{
-					TemplateID:         strPtrOrNil(templateID),
-					TemplateSlug:       templateSlug,
-					Name:               strPtrOrNil(name),
-					CPUMillicores:      intPtrOrNil(cpu),
-					MemoryMB:           intPtrOrNil(memory),
-					DiskGB:             intPtrOrNil(disk),
-					TTLSeconds:         durationSecondsPtr(ttl),
-					RepoURL:            repoURL,
-					Branch:             branch,
-					Repos:              repos,
-					Image:              image,
-					InstallCommand:     install,
-					StartupScript:      startup,
-					Agent:              agent,
-					SecretProject:      secretProject,
-					IncludeOrgSecrets:  boolPtrOrNil(!noOrgSecrets, noOrgSecrets),
-					IncludeUserSecrets: boolPtrOrNil(!noUserSecrets, noUserSecrets),
-					Analyze:            analyze,
-				})
-				if prepErr != nil {
-					return fmt.Errorf("prepare launch: %w", prepErr)
-				}
-
-				if prepared.Draft.TemplateID != "" {
-					templateID = prepared.Draft.TemplateID
-				}
-				if templateSlug == "" {
-					templateSlug = prepared.Draft.TemplateSlug
-				}
-				if name == "" {
-					name = prepared.Draft.Name
-				}
-				if repoURL == "" {
-					repoURL = prepared.Draft.RepoURL
-				}
-				if branch == "" {
-					branch = prepared.Draft.Branch
-				}
-				if len(repos) == 0 && len(prepared.Draft.Repos) > 0 {
-					repos = prepared.Draft.Repos
-				}
-				if image == "" {
-					image = prepared.Draft.Image
-				}
-				if install == "" {
-					install = prepared.Draft.InstallCommand
-				}
-				if startup == "" {
-					startup = prepared.Draft.StartupScript
-				}
-				if secretProject == "" {
-					secretProject = prepared.Draft.SecretProject
-				}
-				if agent == "" {
-					agent = prepared.Draft.Agent
-				}
-				if cpu == 0 && prepared.Draft.CPUMillicores != nil {
-					cpu = *prepared.Draft.CPUMillicores
-				}
-				if memory == 0 && prepared.Draft.MemoryMB != nil {
-					memory = *prepared.Draft.MemoryMB
-				}
-				if disk == 0 && prepared.Draft.DiskGB != nil {
-					disk = *prepared.Draft.DiskGB
-				}
-				if ttl == "" && prepared.Draft.TTLSeconds != nil {
-					ttl = fmt.Sprintf("%ds", *prepared.Draft.TTLSeconds)
-				}
-				preparedAppPorts = prepared.Draft.AppPorts
-				detection = prepared.Detection
-				printDetectionSummary(detection)
-
-				if detection != nil && !yes {
-					idx, promptErr := promptSelect("Create environment?", []string{"Yes", "Edit options", "Cancel"})
-					if promptErr != nil {
-						return promptErr
-					}
-					switch idx {
-					case 2:
-						return fmt.Errorf("canceled")
-					case 1:
-						if v, err := promptDefault("Image", image); err == nil {
-							image = v
-						}
-						if v, err := promptDefault("Install command", install); err == nil {
-							install = v
-						}
-						if v, err := promptDefault("Startup script", startup); err == nil {
-							startup = v
-						}
-						if v, err := promptDefault("Environment name", name); err == nil {
-							name = v
-						}
-					}
-				}
-			}
-
-			// Parse env vars from KEY=val format.
-			parsedEnvVars := make(map[string]string)
-			for _, ev := range envVars {
-				parts := strings.SplitN(ev, "=", 2)
-				if len(parts) != 2 {
-					return fmt.Errorf("invalid --env format %q, expected KEY=val", ev)
-				}
-				parsedEnvVars[parts[0]] = parts[1]
-			}
-
-			// Image expansion with Docker-like semantics.
-			if image != "" {
-				image = expandImageRef(image)
-			}
-
-			req := &platform.CreateEnvironmentRequest{
-				TemplateID:     templateID,
-				TemplateSlug:   templateSlug,
-				Name:           name,
-				RepoURL:        repoURL,
-				Branch:         branch,
-				Image:          image,
-				InstallCommand: install,
-				StartupScript:  startup,
-				Agent:          agent,
-				SecretProject:  secretProject,
-			}
-			if len(repos) > 0 {
-				req.Repos = repos
-			}
-			if len(preparedAppPorts) > 0 {
-				req.AppPorts = preparedAppPorts
-			} else if detection != nil && len(detection.AppPorts) > 0 && len(req.AppPorts) == 0 {
-				req.AppPorts = detection.AppPorts
-			}
-			if len(parsedEnvVars) > 0 {
-				req.EnvVars = parsedEnvVars
-			}
+			req := resolved.Request
 
 			enrollment, err := resolveEnvRelayEnrollment(dataDir(), yes, network, noNetwork)
 			if err != nil {
@@ -806,6 +610,24 @@ Examples:
 				return fmt.Errorf("create environment: %w", err)
 			}
 
+			if writePreset {
+				if err := writeResolvedCodewireYAML("codewire.yaml", req); err != nil {
+					return fmt.Errorf("write codewire.yaml: %w", err)
+				}
+				successMsg("Preset written: codewire.yaml")
+			}
+			if strings.TrimSpace(savePreset) != "" {
+				presetReq, err := createPresetRequestFromEnvironment(savePreset, req)
+				if err != nil {
+					return err
+				}
+				preset, err := client.CreatePreset(orgID, presetReq)
+				if err != nil {
+					return fmt.Errorf("save preset: %w", err)
+				}
+				successMsg("Preset saved: %s (%s).", preset.Name, preset.ID)
+			}
+
 			envName := env.ID
 			if env.Name != nil {
 				envName = *env.Name
@@ -828,8 +650,8 @@ Examples:
 		},
 	}
 
-	cmd.Flags().StringVar(&templateSlug, "template", "", "Template slug (e.g. go, node, python)")
-	cmd.Flags().StringVar(&templateID, "template-id", "", "Template ID (exact)")
+	cmd.Flags().StringVar(&presetSlug, "preset", "", "Preset slug (e.g. go, node, python)")
+	cmd.Flags().StringVar(&presetID, "preset-id", "", "Preset ID (exact)")
 	cmd.Flags().StringVar(&name, "name", "", "Environment name")
 	cmd.Flags().StringVar(&ttl, "ttl", "", "Time to live (e.g. 1h, 30m)")
 	cmd.Flags().IntVar(&cpu, "cpu", 0, "CPU in millicores")
@@ -850,6 +672,8 @@ Examples:
 	cmd.Flags().BoolVarP(&follow, "follow", "f", true, "Watch startup progress and wait for readiness (default: true)")
 	cmd.Flags().BoolVar(&noWait, "no-wait", false, "Return immediately after creation instead of waiting for startup")
 	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "Skip confirmation prompts")
+	cmd.Flags().BoolVar(&writePreset, "write-preset", false, "Write the resolved preset to ./codewire.yaml after creation")
+	cmd.Flags().StringVar(&savePreset, "save-preset", "", "Save the resolved preset to the server after creation")
 	return cmd
 }
 
@@ -923,7 +747,7 @@ func envInfoCmd() *cobra.Command {
 			fmt.Printf("%-14s %s\n", bold("Type:"), env.Type)
 			fmt.Printf("%-14s %s\n", bold("State:"), stateColor(env.State))
 			fmt.Printf("%-14s %s\n", bold("DesiredState:"), stateColor(env.DesiredState))
-			fmt.Printf("%-14s %s\n", bold("TemplateID:"), dim(env.TemplateID))
+			fmt.Printf("%-14s %s\n", bold("PresetID:"), dim(env.PresetID))
 			fmt.Printf("CPU:           %dm\n", env.CPUMillicores)
 			fmt.Printf("Memory:        %dMB\n", env.MemoryMB)
 			fmt.Printf("Disk:          %dGB\n", env.DiskGB)

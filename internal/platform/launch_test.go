@@ -27,7 +27,7 @@ func TestGetLaunchOptions(t *testing.T) {
 				gotPath = r.URL.Path
 				body, _ := json.Marshal(LaunchOptions{
 					GitHubStatus:   GitHubStatus{Connected: true, Username: "noel"},
-					Templates:      []EnvironmentTemplate{{ID: "tmpl_1", Name: "Go"}},
+					Presets:        []Preset{{ID: "preset_1", Name: "Go"}},
 					SecretProjects: []SecretProject{{ID: "sp_1", Name: "default"}},
 				})
 				return &http.Response{
@@ -50,8 +50,8 @@ func TestGetLaunchOptions(t *testing.T) {
 	if !out.GitHubStatus.Connected || out.GitHubStatus.Username != "noel" {
 		t.Fatalf("unexpected github status: %+v", out.GitHubStatus)
 	}
-	if len(out.Templates) != 1 || out.Templates[0].Name != "Go" {
-		t.Fatalf("unexpected templates: %+v", out.Templates)
+	if len(out.Presets) != 1 || out.Presets[0].Name != "Go" {
+		t.Fatalf("unexpected presets: %+v", out.Presets)
 	}
 	if len(out.SecretProjects) != 1 || out.SecretProjects[0].Name != "default" {
 		t.Fatalf("unexpected secret projects: %+v", out.SecretProjects)

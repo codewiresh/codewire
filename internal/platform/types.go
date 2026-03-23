@@ -64,11 +64,11 @@ type Organization struct {
 
 type OrgWithRole struct {
 	Organization
-	Role          string             `json:"role"`
-	BillingPlan   string             `json:"billingPlan,omitempty"`
-	BillingStatus string             `json:"billingStatus,omitempty"`
-	TrialEndsAt   *string            `json:"trialEndsAt,omitempty"`
-	Resources     []ResourceSummary  `json:"resources,omitempty"`
+	Role          string            `json:"role"`
+	BillingPlan   string            `json:"billingPlan,omitempty"`
+	BillingStatus string            `json:"billingStatus,omitempty"`
+	TrialEndsAt   *string           `json:"trialEndsAt,omitempty"`
+	Resources     []ResourceSummary `json:"resources,omitempty"`
 }
 
 type CreateOrgRequest struct {
@@ -101,22 +101,22 @@ type ResourceSummary struct {
 // Resource types
 
 type PlatformResource struct {
-	ID                string          `json:"id"`
-	OrgID             string          `json:"org_id"`
-	Type              string          `json:"type"`
-	Name              string          `json:"name"`
-	Slug              string          `json:"slug"`
-	Status            string          `json:"status"`
-	Config            *map[string]any `json:"config,omitempty"`
-	Metadata          *map[string]any `json:"metadata,omitempty"`
-	ProvisionPhase    string          `json:"provision_phase,omitempty"`
-	ProvisionError    string          `json:"provision_error,omitempty"`
-	HealthStatus      string          `json:"health_status"`
-	HealthCheckedAt   *time.Time      `json:"health_checked_at,omitempty"`
-	BillingPlan       string          `json:"billing_plan"`
-	BillingStatus     string          `json:"billing_status"`
-	CreatedAt         string          `json:"created_at"`
-	UpdatedAt         string          `json:"updated_at"`
+	ID              string          `json:"id"`
+	OrgID           string          `json:"org_id"`
+	Type            string          `json:"type"`
+	Name            string          `json:"name"`
+	Slug            string          `json:"slug"`
+	Status          string          `json:"status"`
+	Config          *map[string]any `json:"config,omitempty"`
+	Metadata        *map[string]any `json:"metadata,omitempty"`
+	ProvisionPhase  string          `json:"provision_phase,omitempty"`
+	ProvisionError  string          `json:"provision_error,omitempty"`
+	HealthStatus    string          `json:"health_status"`
+	HealthCheckedAt *time.Time      `json:"health_checked_at,omitempty"`
+	BillingPlan     string          `json:"billing_plan"`
+	BillingStatus   string          `json:"billing_status"`
+	CreatedAt       string          `json:"created_at"`
+	UpdatedAt       string          `json:"updated_at"`
 }
 
 // Resource CRUD types
@@ -206,8 +206,8 @@ type EnvironmentLog struct {
 
 type DetectionResult struct {
 	ProjectType    string    `json:"project_type"`
-	TemplateSlug   string    `json:"template_slug"`
-	TemplateImage  string    `json:"template_image"`
+	PresetSlug     string    `json:"preset_slug"`
+	PresetImage    string    `json:"preset_image"`
 	InstallCommand string    `json:"install_command"`
 	StartupScript  string    `json:"startup_script"`
 	Language       string    `json:"language"`
@@ -229,10 +229,10 @@ type AppPort struct {
 // API error
 
 type APIError struct {
-	Status  int      `json:"status"`
-	Title   string   `json:"title"`
-	Detail  string   `json:"detail,omitempty"`
-	Errors  []string `json:"errors,omitempty"`
+	Status int      `json:"status"`
+	Title  string   `json:"title"`
+	Detail string   `json:"detail,omitempty"`
+	Errors []string `json:"errors,omitempty"`
 }
 
 func (e *APIError) Error() string {
@@ -248,7 +248,7 @@ type Environment struct {
 	ID                  string  `json:"id"`
 	OrgID               string  `json:"org_id"`
 	CreatedBy           string  `json:"created_by"`
-	TemplateID          string  `json:"template_id"`
+	PresetID            string  `json:"preset_id"`
 	Type                string  `json:"type"`
 	Name                *string `json:"name,omitempty"`
 	State               string  `json:"state"`
@@ -269,22 +269,23 @@ type Environment struct {
 	DestroyedAt         *string `json:"destroyed_at,omitempty"`
 }
 
-type EnvironmentTemplate struct {
-	ID                   string  `json:"id"`
-	OrgID                string  `json:"org_id"`
-	Type                 string  `json:"type"`
-	Name                 string  `json:"name"`
-	Slug                 *string `json:"slug,omitempty"`
-	Language             *string `json:"language,omitempty"`
-	Official             bool    `json:"official"`
-	Description          *string `json:"description,omitempty"`
-	BuildStatus          string  `json:"build_status"`
-	BuildError           *string `json:"build_error,omitempty"`
-	DefaultCPUMillicores int     `json:"default_cpu_millicores"`
-	DefaultMemoryMB      int     `json:"default_memory_mb"`
-	DefaultDiskGB        int     `json:"default_disk_gb"`
-	DefaultTTLSeconds    *int    `json:"default_ttl_seconds,omitempty"`
-	CreatedAt            string  `json:"created_at"`
+type Preset struct {
+	ID                   string       `json:"id"`
+	OrgID                string       `json:"org_id"`
+	Name                 string       `json:"name"`
+	Slug                 *string      `json:"slug,omitempty"`
+	Language             *string      `json:"language,omitempty"`
+	Official             bool         `json:"official"`
+	Description          *string      `json:"description,omitempty"`
+	BuildStatus          string       `json:"build_status"`
+	BuildError           *string      `json:"build_error,omitempty"`
+	DefaultCPUMillicores int          `json:"default_cpu_millicores"`
+	DefaultMemoryMB      int          `json:"default_memory_mb"`
+	DefaultDiskGB        int          `json:"default_disk_gb"`
+	DefaultTTLSeconds    *int         `json:"default_ttl_seconds,omitempty"`
+	Image                *string      `json:"image,omitempty"`
+	DefaultSetupConfig   *SetupConfig `json:"default_setup_config,omitempty"`
+	CreatedAt            string       `json:"created_at"`
 }
 
 // RepoEntry describes a single repository to clone into an environment.
@@ -294,20 +295,20 @@ type RepoEntry struct {
 }
 
 type CreateEnvironmentRequest struct {
-	TemplateID     string            `json:"template_id,omitempty"`
-	TemplateSlug   string            `json:"template_slug,omitempty"`
-	Name           string            `json:"name,omitempty"`
-	CPUMillicores  *int              `json:"cpu_millicores,omitempty"`
-	MemoryMB       *int              `json:"memory_mb,omitempty"`
-	DiskGB         *int              `json:"disk_gb,omitempty"`
-	TTLSeconds     *int              `json:"ttl_seconds,omitempty"`
-	RepoURL        string            `json:"repo_url,omitempty"`
-	Branch         string            `json:"branch,omitempty"`
-	Repos          []RepoEntry       `json:"repos,omitempty"`
-	Image          string            `json:"image,omitempty"`
-	InstallCommand string            `json:"install_command,omitempty"`
-	StartupScript  string            `json:"startup_script,omitempty"`
-	EnvVars        map[string]string `json:"env_vars,omitempty"`
+	PresetID           string            `json:"preset_id,omitempty"`
+	PresetSlug         string            `json:"preset_slug,omitempty"`
+	Name               string            `json:"name,omitempty"`
+	CPUMillicores      *int              `json:"cpu_millicores,omitempty"`
+	MemoryMB           *int              `json:"memory_mb,omitempty"`
+	DiskGB             *int              `json:"disk_gb,omitempty"`
+	TTLSeconds         *int              `json:"ttl_seconds,omitempty"`
+	RepoURL            string            `json:"repo_url,omitempty"`
+	Branch             string            `json:"branch,omitempty"`
+	Repos              []RepoEntry       `json:"repos,omitempty"`
+	Image              string            `json:"image,omitempty"`
+	InstallCommand     string            `json:"install_command,omitempty"`
+	StartupScript      string            `json:"startup_script,omitempty"`
+	EnvVars            map[string]string `json:"env_vars,omitempty"`
 	Agent              string            `json:"agent,omitempty"`
 	AgentEnv           map[string]string `json:"agent_env,omitempty"`
 	SecretProject      string            `json:"secret_project,omitempty"`
@@ -325,19 +326,38 @@ type SecretProject struct {
 	CreatedAt   string `json:"created_at"`
 }
 
-type CreateTemplateRequest struct {
-	Type                 string `json:"type"`
-	Name                 string `json:"name"`
-	Slug                 string `json:"slug,omitempty"`
-	Description          string `json:"description,omitempty"`
-	DefaultCPUMillicores *int   `json:"default_cpu_millicores,omitempty"`
-	DefaultMemoryMB      *int   `json:"default_memory_mb,omitempty"`
-	DefaultDiskGB        *int   `json:"default_disk_gb,omitempty"`
-	DefaultTTLSeconds    *int   `json:"default_ttl_seconds,omitempty"`
-	Image                string `json:"image,omitempty"`
-	InstallCommand       string `json:"install_command,omitempty"`
-	StartupScript        string `json:"startup_script,omitempty"`
-	SecretProject        string `json:"secret_project,omitempty"`
+type CreatePresetRequest struct {
+	Name                 string            `json:"name"`
+	Slug                 string            `json:"slug,omitempty"`
+	Description          string            `json:"description,omitempty"`
+	DefaultCPUMillicores *int              `json:"default_cpu_millicores,omitempty"`
+	DefaultMemoryMB      *int              `json:"default_memory_mb,omitempty"`
+	DefaultDiskGB        *int              `json:"default_disk_gb,omitempty"`
+	DefaultTTLSeconds    *int              `json:"default_ttl_seconds,omitempty"`
+	Image                string            `json:"image,omitempty"`
+	InstallCommand       string            `json:"install_command,omitempty"`
+	StartupScript        string            `json:"startup_script,omitempty"`
+	EnvVars              map[string]string `json:"env_vars,omitempty"`
+	Agent                string            `json:"agent,omitempty"`
+	AgentEnv             map[string]string `json:"agent_env,omitempty"`
+	AppPorts             []AppPort         `json:"app_ports,omitempty"`
+	IncludeOrgSecrets    *bool             `json:"include_org_secrets,omitempty"`
+	IncludeUserSecrets   *bool             `json:"include_user_secrets,omitempty"`
+	SecretProject        string            `json:"secret_project,omitempty"`
+}
+
+type SetupConfig struct {
+	RepoURL            string            `json:"repo_url,omitempty"`
+	Branch             string            `json:"branch,omitempty"`
+	Repos              []RepoEntry       `json:"repos,omitempty"`
+	InstallCommand     string            `json:"install_command,omitempty"`
+	StartupScript      string            `json:"startup_script,omitempty"`
+	EnvVars            map[string]string `json:"env_vars,omitempty"`
+	Agent              string            `json:"agent,omitempty"`
+	AgentEnv           map[string]string `json:"agent_env,omitempty"`
+	AppPorts           []AppPort         `json:"app_ports,omitempty"`
+	IncludeOrgSecrets  *bool             `json:"include_org_secrets,omitempty"`
+	IncludeUserSecrets *bool             `json:"include_user_secrets,omitempty"`
 }
 
 // RepoConfig represents a saved detection result for a repo URL.
@@ -345,7 +365,7 @@ type RepoConfig struct {
 	ID          string          `json:"id"`
 	OrgID       string          `json:"org_id"`
 	RepoURL     string          `json:"repo_url"`
-	TemplateID  *string         `json:"template_id,omitempty"`
+	PresetID    *string         `json:"preset_id,omitempty"`
 	SetupConfig json.RawMessage `json:"setup_config"`
 	CreatedBy   string          `json:"created_by"`
 	UpdatedAt   string          `json:"updated_at"`

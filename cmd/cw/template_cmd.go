@@ -11,25 +11,23 @@ import (
 	"github.com/codewiresh/codewire/internal/platform"
 )
 
-func tmplParentCmd() *cobra.Command {
+func presetParentCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:     "template",
-		Short:   "Manage environment templates",
-		Aliases: []string{"tmpl"},
+		Use:   "preset",
+		Short: "Manage environment presets",
 	}
-	cmd.AddCommand(templateListCmd())
-	cmd.AddCommand(templateCreateCmd())
-	cmd.AddCommand(templateInfoCmd())
-	cmd.AddCommand(templateRmCmd())
+	cmd.AddCommand(presetInitCmd())
+	cmd.AddCommand(presetListCmd())
+	cmd.AddCommand(presetCreateCmd())
+	cmd.AddCommand(presetInfoCmd())
+	cmd.AddCommand(presetRmCmd())
 	return cmd
 }
 
-func templateListCmd() *cobra.Command {
-	var envType string
-
+func presetListCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "list",
-		Short:   "List environment templates",
+		Short:   "List environment presets",
 		Aliases: []string{"ls"},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			orgID, client, err := getDefaultOrg()
@@ -37,19 +35,19 @@ func templateListCmd() *cobra.Command {
 				return err
 			}
 
-			templates, err := client.ListEnvTemplates(orgID, envType)
+			presets, err := client.ListPresets(orgID)
 			if err != nil {
-				return fmt.Errorf("list templates: %w", err)
+				return fmt.Errorf("list presets: %w", err)
 			}
 
-			if len(templates) == 0 {
-				fmt.Println("No templates found.")
+			if len(presets) == 0 {
+				fmt.Println("No presets found.")
 				return nil
 			}
 
 			w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 			tableHeader(w, "NAME", "LANGUAGE", "IMAGE", "OFFICIAL", "CPU/MEM/DISK")
-			for _, t := range templates {
+			for _, t := range presets {
 				slug := "--"
 				if t.Slug != nil {
 					slug = *t.Slug
@@ -62,19 +60,22 @@ func templateListCmd() *cobra.Command {
 				if t.Official {
 					official = "yes"
 				}
+				image := "--"
+				if t.Image != nil && *t.Image != "" {
+					image = *t.Image
+				}
 				resources := fmt.Sprintf("%dm/%dMB/%dGB", t.DefaultCPUMillicores, t.DefaultMemoryMB, t.DefaultDiskGB)
 				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n",
-					slug, lang, t.Name, official, resources)
+					slug, lang, image, official, resources)
 			}
 			return w.Flush()
 		},
 	}
 
-	cmd.Flags().StringVar(&envType, "type", "", "Filter by type (coder, sandbox)")
 	return cmd
 }
 
-func templateCreateCmd() *cobra.Command {
+func presetCreateCmd() *cobra.Command {
 	var (
 		name          string
 		image         string
@@ -90,12 +91,12 @@ func templateCreateCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "create <slug>",
-		Short: "Create an environment template",
-		Long: `Create a template with a short name (slug) for reuse.
+		Short: "Create an environment preset",
+		Long: `Create a preset with a short name (slug) for reuse.
 
 Examples:
-  cw template create my-app --image go --install "go mod download"
-  cw template create my-app --image go --secrets my-project`,
+  cw preset create my-app --image go --install "go mod download"
+  cw preset create my-app --image go --secrets my-project`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			slug := args[0]
@@ -114,15 +115,14 @@ Examples:
 				return err
 			}
 
-			req := &platform.CreateTemplateRequest{
-				Type:          "sandbox",
-				Name:          slug,
-				Slug:          slug,
-				Description:   description,
-				Image:         image,
+			req := &platform.CreatePresetRequest{
+				Name:           slug,
+				Slug:           slug,
+				Description:    description,
+				Image:          image,
 				InstallCommand: install,
-				StartupScript: startup,
-				SecretProject: secretProject,
+				StartupScript:  startup,
+				SecretProject:  secretProject,
 			}
 			if cpu > 0 {
 				req.DefaultCPUMillicores = &cpu
@@ -146,14 +146,13 @@ Examples:
 				req.Name = name
 			}
 
-			tmpl, err := client.CreateEnvTemplate(orgID, req)
+			preset, err := client.CreatePreset(orgID, req)
 			if err != nil {
-				return fmt.Errorf("create template: %w", err)
+				return fmt.Errorf("create preset: %w", err)
 			}
 
-			successMsg("Template created: %s.", tmpl.Name)
-			fmt.Printf("  ID:    %s\n", tmpl.ID)
-			fmt.Printf("  Type:  %s\n", tmpl.Type)
+			successMsg("Preset created: %s.", preset.Name)
+			fmt.Printf("  ID:    %s\n", preset.ID)
 			return nil
 		},
 	}
@@ -166,15 +165,15 @@ Examples:
 	cmd.Flags().IntVar(&memory, "memory", 0, "Default memory in MB")
 	cmd.Flags().IntVar(&disk, "disk", 0, "Default disk in GB")
 	cmd.Flags().StringVar(&ttl, "ttl", "", "Default TTL (e.g. 1h, 30m)")
-	cmd.Flags().StringVar(&description, "description", "", "Template description")
+	cmd.Flags().StringVar(&description, "description", "", "Preset description")
 	cmd.Flags().StringVar(&secretProject, "secrets", "", "Default secret project to bind")
 	return cmd
 }
 
-func templateInfoCmd() *cobra.Command {
+func presetInfoCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "info <slug-or-id>",
-		Short: "Show template details",
+		Short: "Show preset details",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			orgID, client, err := getDefaultOrg()
@@ -182,51 +181,53 @@ func templateInfoCmd() *cobra.Command {
 				return err
 			}
 
-			// Try to find by slug first by listing all templates.
-			templates, err := client.ListEnvTemplates(orgID, "")
+			// Try to find by slug first by listing all presets.
+			presets, err := client.ListPresets(orgID)
 			if err != nil {
-				return fmt.Errorf("list templates: %w", err)
+				return fmt.Errorf("list presets: %w", err)
 			}
 
-			var tmpl *platform.EnvironmentTemplate
-			for i, t := range templates {
+			var preset *platform.Preset
+			for i, t := range presets {
 				if t.ID == args[0] || (t.Slug != nil && *t.Slug == args[0]) {
-					tmpl = &templates[i]
+					preset = &presets[i]
 					break
 				}
 			}
-			if tmpl == nil {
-				return fmt.Errorf("template not found: %s", args[0])
+			if preset == nil {
+				return fmt.Errorf("preset not found: %s", args[0])
 			}
 
 			slug := "--"
-			if tmpl.Slug != nil {
-				slug = *tmpl.Slug
+			if preset.Slug != nil {
+				slug = *preset.Slug
 			}
 			lang := "--"
-			if tmpl.Language != nil && *tmpl.Language != "" {
-				lang = *tmpl.Language
+			if preset.Language != nil && *preset.Language != "" {
+				lang = *preset.Language
 			}
 
-			fmt.Printf("%-10s %s\n", bold("ID:"), dim(tmpl.ID))
-			fmt.Printf("%-10s %s\n", bold("Name:"), tmpl.Name)
+			fmt.Printf("%-10s %s\n", bold("ID:"), dim(preset.ID))
+			fmt.Printf("%-10s %s\n", bold("Name:"), preset.Name)
 			fmt.Printf("%-10s %s\n", bold("Slug:"), slug)
-			fmt.Printf("%-10s %s\n", bold("Type:"), tmpl.Type)
 			fmt.Printf("%-10s %s\n", bold("Language:"), lang)
-			fmt.Printf("%-10s %v\n", bold("Official:"), tmpl.Official)
-			fmt.Printf("%-10s %s\n", bold("Build:"), tmpl.BuildStatus)
-			fmt.Printf("CPU:      %dm\n", tmpl.DefaultCPUMillicores)
-			fmt.Printf("Memory:   %dMB\n", tmpl.DefaultMemoryMB)
-			fmt.Printf("Disk:     %dGB\n", tmpl.DefaultDiskGB)
+			if preset.Image != nil && *preset.Image != "" {
+				fmt.Printf("%-10s %s\n", bold("Image:"), *preset.Image)
+			}
+			fmt.Printf("%-10s %v\n", bold("Official:"), preset.Official)
+			fmt.Printf("%-10s %s\n", bold("Build:"), preset.BuildStatus)
+			fmt.Printf("CPU:      %dm\n", preset.DefaultCPUMillicores)
+			fmt.Printf("Memory:   %dMB\n", preset.DefaultMemoryMB)
+			fmt.Printf("Disk:     %dGB\n", preset.DefaultDiskGB)
 			return nil
 		},
 	}
 }
 
-func templateRmCmd() *cobra.Command {
+func presetRmCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:     "rm <id>",
-		Short:   "Delete an environment template",
+		Short:   "Delete an environment preset",
 		Aliases: []string{"delete"},
 		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -235,10 +236,10 @@ func templateRmCmd() *cobra.Command {
 				return err
 			}
 
-			if err := client.DeleteEnvTemplate(orgID, args[0]); err != nil {
-				return fmt.Errorf("delete template: %w", err)
+			if err := client.DeletePreset(orgID, args[0]); err != nil {
+				return fmt.Errorf("delete preset: %w", err)
 			}
-			successMsg("Template %s deleted.", args[0])
+			successMsg("Preset %s deleted.", args[0])
 			return nil
 		},
 	}

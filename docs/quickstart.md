@@ -34,6 +34,61 @@ cw logs 1
 
 ---
 
+## Presets And Workspaces
+
+Use `codewire.yaml` as the canonical preset file for both cloud environments and local
+containers.
+
+```bash
+# Write a preset file in the current repo
+cw preset init --image full --install "pnpm install" --startup "pnpm dev"
+
+# Launch a cloud environment from the preset
+cw env create --file codewire.yaml
+
+# Or create a local runtime from the same preset
+cw local create --backend docker
+cw local create --backend incus
+```
+
+You can also generate and save a reusable server preset:
+
+```bash
+cw preset init --image go --save-preset go-dev
+cw env create --preset go-dev
+```
+
+---
+
+## Local Containers
+
+Local runtimes are first-class `cw` targets. Create them once from `codewire.yaml`, then
+start, stop, inspect, and exec into them by name.
+
+```bash
+# Create from the repo preset
+cw local create --backend docker --name my-app
+
+# Inspect and manage lifecycle
+cw local info my-app
+cw local stop my-app
+cw local start my-app
+cw local rm my-app
+
+# Run commands inside the container
+cw exec --on my-app -- pwd
+cw use my-app
+cw exec -- pwd
+cw current -v
+```
+
+Notes:
+- Docker works out of the box when the Docker daemon is available.
+- Incus with OCI images like `docker.io/...` or `ghcr.io/...` requires `skopeo` on the host.
+- `cw ssh` is for remote environments; for local runtimes, use `cw exec`.
+
+---
+
 ## Core Commands
 
 ```bash
@@ -55,6 +110,25 @@ cw kill --tag worker            # Kill all sessions with tag
 
 cw attach <id>                  # Attach interactive TTY (use Ctrl+B d to detach)
 cw send <id> 'input text'       # Send input without attaching
+
+cw preset init                  # Write codewire.yaml in the current repo
+cw preset list                  # List reusable server presets
+cw preset create <slug> ...     # Save a reusable server preset
+
+cw env create --file codewire.yaml  # Create a cloud environment from a preset
+
+cw local create --backend docker    # Create a local Docker runtime
+cw local create --backend incus     # Create a local Incus runtime
+cw local list                       # List local runtimes
+cw local info <name>                # Show local runtime details
+cw local start <name>               # Start a stopped local runtime
+cw local stop <name>                # Stop a running local runtime
+cw local rm <name>                  # Delete a local runtime
+
+cw use <target>                  # Set current target (env, local runtime, or host local)
+cw current -v                    # Show the current target
+cw exec -- <command>             # Exec on the current target
+cw exec --on <target> -- <cmd>   # Exec on a specific target
 ```
 
 ---

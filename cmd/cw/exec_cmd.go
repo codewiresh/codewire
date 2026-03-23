@@ -4,9 +4,11 @@ import (
 	"fmt"
 	"os"
 	osExec "os/exec"
+	"strings"
 
 	"github.com/spf13/cobra"
 
+	cwconfig "github.com/codewiresh/codewire/internal/config"
 	"github.com/codewiresh/codewire/internal/platform"
 )
 
@@ -28,6 +30,48 @@ var execLocally = func(workDir string, command []string) error {
 	}
 	cmd := osExec.Command(command[0], command[1:]...)
 	cmd.Dir = workDir
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		if exitErr, ok := err.(*osExec.ExitError); ok {
+			os.Exit(exitErr.ExitCode())
+		}
+		return err
+	}
+	return nil
+}
+
+var execInLocalRuntimeTarget = func(instance *cwconfig.LocalInstance, workDir string, command []string) error {
+	if instance == nil {
+		return fmt.Errorf("local instance is required")
+	}
+	if len(command) == 0 {
+		return fmt.Errorf("no command specified")
+	}
+
+	var cmd *osExec.Cmd
+	switch instance.Backend {
+	case "docker":
+		args := []string{"exec", "-i"}
+		if strings.TrimSpace(workDir) != "" {
+			args = append(args, "-w", workDir)
+		}
+		args = append(args, instance.RuntimeName)
+		args = append(args, command...)
+		cmd = osExec.Command("docker", args...)
+	case "incus":
+		args := []string{"exec"}
+		if strings.TrimSpace(workDir) != "" {
+			args = append(args, "--cwd", workDir)
+		}
+		args = append(args, instance.RuntimeName, "--")
+		args = append(args, command...)
+		cmd = osExec.Command("incus", args...)
+	default:
+		return fmt.Errorf("unsupported local backend %q", instance.Backend)
+	}
+
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -68,6 +112,16 @@ func execCmd() *cobra.Command {
 
 			switch target.Kind {
 			case "local":
+				if target.Ref != "" && target.Ref != "local" {
+					instance := lookupLocalInstanceForTarget(target)
+					if instance == nil {
+						return fmt.Errorf("local instance not found: %s", target.Ref)
+					}
+					if workDir == "" {
+						workDir = localWorkspacePath
+					}
+					return execInLocalRuntimeTarget(instance, workDir, cmdArgs)
+				}
 				if workDir == "" {
 					workDir, _ = os.Getwd()
 				}

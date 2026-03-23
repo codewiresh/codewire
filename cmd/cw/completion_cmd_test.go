@@ -16,8 +16,12 @@ func TestZshCompletionInstallCandidatesPreferSiteFunctionsWithoutOhMyZsh(t *test
 		t.Fatalf("expected several zsh completion candidates, got %#v", candidates)
 	}
 
-	if candidates[0].dir != "/usr/local/share/zsh/site-functions" {
-		t.Fatalf("expected /usr/local/share/zsh/site-functions first, got %q", candidates[0].dir)
+	wantFirst := "/usr/local/share/zsh/site-functions"
+	if prefix := brewPrefix(); prefix != "" {
+		wantFirst = filepath.Join(prefix, "share/zsh/site-functions")
+	}
+	if candidates[0].dir != wantFirst {
+		t.Fatalf("expected %s first, got %q", wantFirst, candidates[0].dir)
 	}
 
 	last := candidates[len(candidates)-1]
