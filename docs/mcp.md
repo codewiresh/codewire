@@ -14,14 +14,16 @@ That's it. Claude Code will now have access to all Codewire tools.
 
 ## Prerequisites
 
-A Codewire node must be running before the MCP server can connect:
+**Session tools** require a running Codewire node:
 
 ```bash
 cw node          # foreground
 cw node -d       # background (daemonize)
 ```
 
-The node auto-starts on most `cw` commands, but the MCP server itself does not auto-start a node — it connects to the existing Unix socket at `~/.codewire/codewire.sock`.
+The node auto-starts on most `cw` commands, but the MCP server itself does not auto-start a node -- it connects to the existing Unix socket at `~/.codewire/codewire.sock`.
+
+**Environment tools** only require `cw login` (they use the Codewire platform API directly, no local node needed).
 
 ## Tool Reference
 
@@ -327,6 +329,33 @@ List available environment presets.
 No parameters.
 
 ## Common Workflows
+
+### Create and use a sandbox
+
+Create an environment, run commands, upload files, and clean up:
+
+```
+1. codewire_create_environment
+     image: "python:3.12"
+     name: "sandbox"
+     ttl: "30m"
+
+2. codewire_exec_in_environment
+     environment_id: "<id from step 1>"
+     command: ["python3", "--version"]
+
+3. codewire_upload_file
+     environment_id: "<id>"
+     path: "/workspace/script.py"
+     content: "print('hello')"
+
+4. codewire_exec_in_environment
+     environment_id: "<id>"
+     command: ["python3", "/workspace/script.py"]
+
+5. codewire_delete_environment
+     environment_id: "<id>"
+```
 
 ### Launch, watch, and read output
 

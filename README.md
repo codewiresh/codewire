@@ -127,6 +127,27 @@ cw exec -- <command>                        # Run on the current target
 cw exec --on <target> -- <command>          # Run on a specific target
 ```
 
+### Environment Management
+
+```bash
+cw env create --preset python                  # From a preset
+cw env create --image openclaw --ttl 1h        # From a custom image
+cw env create --preset node https://github.com/org/repo  # Clone a repo
+
+cw env list                                    # List environments
+cw env info <name-or-id>                       # Show details
+cw env logs <name-or-id>                       # Startup/provisioning logs
+
+cw env exec <name-or-id> -- npm test           # Run a command
+cw env cp local.txt <id>:/workspace/local.txt  # Upload a file
+cw env cp <id>:/workspace/out.txt ./out.txt    # Download a file
+
+cw env stop <name-or-id>                       # Stop
+cw env start <name-or-id>                      # Restart
+cw env rm <name-or-id>                         # Delete
+cw env prune                                   # Clean up stale envs
+```
+
 ### `cw launch [name] [--dir <dir>] [--tag <tag>...] -- <command> [args...]`
 
 Start a new session running the given command in a persistent PTY. Everything after `--` is the command and its arguments. An optional positional name before `--` gives the session a stable identifier for messaging. Tags enable filtering and coordination.
@@ -748,7 +769,9 @@ claude mcp add --scope user codewire -- cw mcp-server
 claude mcp add codewire -- cw mcp-server
 ```
 
-This exposes 18 tools:
+This exposes 26 tools across sessions, environments, messaging, and shared state:
+
+**Sessions**
 
 | Tool | Description |
 |------|-------------|
@@ -761,10 +784,37 @@ This exposes 18 tools:
 | `codewire_kill_session` | Terminate session (by ID or tags) |
 | `codewire_subscribe` | Subscribe to session events |
 | `codewire_wait_for` | Block until sessions complete |
+
+**Messaging**
+
+| Tool | Description |
+|------|-------------|
 | `codewire_msg` | Send a direct message to a session |
 | `codewire_read_messages` | Read messages from a session's inbox |
 | `codewire_request` | Send a request and block for reply |
 | `codewire_reply` | Reply to a pending request |
+
+**Environments** (requires `cw login`)
+
+| Tool | Description |
+|------|-------------|
+| `codewire_create_environment` | Create environment from preset or image |
+| `codewire_list_environments` | List environments with filters |
+| `codewire_get_environment` | Get environment details |
+| `codewire_start_environment` | Start a stopped environment |
+| `codewire_stop_environment` | Stop a running environment |
+| `codewire_delete_environment` | Delete an environment |
+| `codewire_exec_in_environment` | Execute command in sandbox |
+| `codewire_list_files` | List files in sandbox |
+| `codewire_upload_file` | Upload file to sandbox |
+| `codewire_download_file` | Download file from sandbox |
+| `codewire_get_environment_logs` | Get startup/provisioning logs |
+| `codewire_list_presets` | List available presets |
+
+**Network**
+
+| Tool | Description |
+|------|-------------|
 | `codewire_list_nodes` | List nodes from relay |
 | `codewire_kv_set` | Set key-value (shared KV store) |
 | `codewire_kv_get` | Get value by key |
@@ -815,4 +865,4 @@ sha256sum --check --ignore-missing SHA256SUMS
 MIT
 
 ---
-Latest release: v0.2.26 — 2026-02-21
+Latest release: v0.2.82 — 2026-03-26
