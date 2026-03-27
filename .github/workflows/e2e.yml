@@ -1,0 +1,45 @@
+name: E2E
+
+on:
+  workflow_dispatch:
+
+jobs:
+  integration-tests:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Run integration test package
+        run: go test ./tests/... -timeout 120s -count=1
+
+  relay-network-kind-e2e:
+    name: Relay Network Kind E2E
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+
+      - name: Set up kind
+        uses: helm/kind-action@v1.12.0
+        with:
+          cluster_name: codewire-relay-e2e
+
+      - name: Run relay/network kind E2E
+        env:
+          CLUSTER_NAME: codewire-relay-e2e
+        run: ./scripts/run-relay-kind-e2e.sh
