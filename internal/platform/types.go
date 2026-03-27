@@ -205,25 +205,34 @@ type EnvironmentLog struct {
 // Detection types
 
 type DetectionResult struct {
-	ProjectType    string    `json:"project_type"`
-	PresetSlug     string    `json:"preset_slug"`
-	PresetImage    string    `json:"preset_image"`
-	InstallCommand string    `json:"install_command"`
-	StartupScript  string    `json:"startup_script"`
-	Language       string    `json:"language"`
-	Framework      string    `json:"framework"`
-	SuggestedName  string    `json:"suggested_name"`
-	NeedsDocker    bool      `json:"needs_docker"`
-	HasCompose     bool      `json:"has_compose"`
-	AppPorts       []AppPort `json:"app_ports"`
-	CPU            string    `json:"cpu"`
-	Memory         string    `json:"memory"`
-	SetupNotes     string    `json:"setup_notes"`
+	ProjectType        string       `json:"project_type"`
+	PresetSlug         string       `json:"preset_slug"`
+	PresetImage        string       `json:"preset_image"`
+	InstallCommand     string       `json:"install_command"`
+	StartupScript      string       `json:"startup_script"`
+	Language           string       `json:"language"`
+	Framework          string       `json:"framework"`
+	SuggestedName      string       `json:"suggested_name"`
+	NeedsDocker        bool         `json:"needs_docker"`
+	HasCompose         bool         `json:"has_compose"`
+	AppPorts           []AppPort    `json:"app_ports"`
+	Agents             []SetupAgent `json:"agents,omitempty"`
+	InstallAgents      *bool        `json:"install_agents,omitempty"`
+	SecretProject      string       `json:"secret_project,omitempty"`
+	IncludeOrgSecrets  *bool        `json:"include_org_secrets,omitempty"`
+	IncludeUserSecrets *bool        `json:"include_user_secrets,omitempty"`
+	CPU                string       `json:"cpu"`
+	Memory             string       `json:"memory"`
+	SetupNotes         string       `json:"setup_notes"`
 }
 
 type AppPort struct {
 	Port  int    `json:"port"`
 	Label string `json:"label"`
+}
+
+type SetupAgent struct {
+	Type string `json:"type"`
 }
 
 // API error
@@ -310,6 +319,8 @@ type CreateEnvironmentRequest struct {
 	InstallCommand     string            `json:"install_command,omitempty"`
 	StartupScript      string            `json:"startup_script,omitempty"`
 	EnvVars            map[string]string `json:"env_vars,omitempty"`
+	Agents             []SetupAgent      `json:"agents,omitempty"`
+	InstallAgents      *bool             `json:"install_agents,omitempty"`
 	Agent              string            `json:"agent,omitempty"`
 	AgentEnv           map[string]string `json:"agent_env,omitempty"`
 	SecretProject      string            `json:"secret_project,omitempty"`
@@ -339,6 +350,8 @@ type CreatePresetRequest struct {
 	InstallCommand       string            `json:"install_command,omitempty"`
 	StartupScript        string            `json:"startup_script,omitempty"`
 	EnvVars              map[string]string `json:"env_vars,omitempty"`
+	Agents               []SetupAgent      `json:"agents,omitempty"`
+	InstallAgents        *bool             `json:"install_agents,omitempty"`
 	Agent                string            `json:"agent,omitempty"`
 	AgentEnv             map[string]string `json:"agent_env,omitempty"`
 	AppPorts             []AppPort         `json:"app_ports,omitempty"`
@@ -354,6 +367,8 @@ type SetupConfig struct {
 	InstallCommand     string            `json:"install_command,omitempty"`
 	StartupScript      string            `json:"startup_script,omitempty"`
 	EnvVars            map[string]string `json:"env_vars,omitempty"`
+	Agents             []SetupAgent      `json:"agents,omitempty"`
+	InstallAgents      *bool             `json:"install_agents,omitempty"`
 	Agent              string            `json:"agent,omitempty"`
 	AgentEnv           map[string]string `json:"agent_env,omitempty"`
 	AppPorts           []AppPort         `json:"app_ports,omitempty"`

@@ -28,7 +28,8 @@ func TestCodewireConfigFromRequest(t *testing.T) {
 		EnvVars: map[string]string{
 			"NODE_ENV": "development",
 		},
-		Agent:             "codex",
+		Agents:            []platform.SetupAgent{{Type: "codex"}},
+		InstallAgents:     boolPtr(true),
 		SecretProject:     "my-project",
 		AppPorts:          []platform.AppPort{{Port: 3000, Label: "web"}},
 		CPUMillicores:     intPtr(2000),
@@ -47,8 +48,8 @@ func TestCodewireConfigFromRequest(t *testing.T) {
 	if cfg.Startup != req.StartupScript {
 		t.Fatalf("cfg.Startup = %q, want %q", cfg.Startup, req.StartupScript)
 	}
-	if cfg.Secrets != req.SecretProject {
-		t.Fatalf("cfg.Secrets = %q, want %q", cfg.Secrets, req.SecretProject)
+	if cfg.Secrets == nil || cfg.Secrets.Project != req.SecretProject {
+		t.Fatalf("cfg.Secrets = %#v, want project %q", cfg.Secrets, req.SecretProject)
 	}
 	if !reflect.DeepEqual(cfg.Env, req.EnvVars) {
 		t.Fatalf("cfg.Env = %#v, want %#v", cfg.Env, req.EnvVars)
@@ -59,8 +60,17 @@ func TestCodewireConfigFromRequest(t *testing.T) {
 	if cfg.CPU != 2000 || cfg.Memory != 4096 || cfg.Disk != 20 {
 		t.Fatalf("unexpected resources: cpu=%d mem=%d disk=%d", cfg.CPU, cfg.Memory, cfg.Disk)
 	}
-	if cfg.IncludeOrgSecrets == nil || *cfg.IncludeOrgSecrets {
-		t.Fatalf("expected include_org_secrets to be false, got %#v", cfg.IncludeOrgSecrets)
+	if cfg.Agents == nil || !reflect.DeepEqual(cfg.Agents.Tools, []string{"codex"}) {
+		t.Fatalf("cfg.Agents = %#v, want [codex]", cfg.Agents)
+	}
+	if cfg.Agents.Install == nil || !*cfg.Agents.Install {
+		t.Fatalf("expected agents.install to be true, got %#v", cfg.Agents)
+	}
+	if cfg.Secrets.Org == nil || *cfg.Secrets.Org {
+		t.Fatalf("expected secrets.org to be false, got %#v", cfg.Secrets)
+	}
+	if cfg.Secrets.User == nil || !*cfg.Secrets.User {
+		t.Fatalf("expected secrets.user to default true, got %#v", cfg.Secrets)
 	}
 }
 
@@ -71,7 +81,8 @@ func TestCreatePresetRequestFromEnvironment(t *testing.T) {
 		InstallCommand:     "pnpm install",
 		StartupScript:      "pnpm dev",
 		EnvVars:            map[string]string{"NODE_ENV": "development"},
-		Agent:              "codex",
+		Agents:             []platform.SetupAgent{{Type: "codex"}},
+		InstallAgents:      boolPtr(true),
 		AppPorts:           []platform.AppPort{{Port: 3000, Label: "web"}},
 		IncludeUserSecrets: &f,
 	}
@@ -94,6 +105,12 @@ func TestCreatePresetRequestFromEnvironment(t *testing.T) {
 	}
 	if !reflect.DeepEqual(presetReq.AppPorts, req.AppPorts) {
 		t.Fatalf("presetReq.AppPorts = %#v, want %#v", presetReq.AppPorts, req.AppPorts)
+	}
+	if !reflect.DeepEqual(presetReq.Agents, req.Agents) {
+		t.Fatalf("presetReq.Agents = %#v, want %#v", presetReq.Agents, req.Agents)
+	}
+	if presetReq.InstallAgents == nil || !*presetReq.InstallAgents {
+		t.Fatalf("expected install_agents to be true, got %#v", presetReq.InstallAgents)
 	}
 	if presetReq.IncludeUserSecrets == nil || *presetReq.IncludeUserSecrets {
 		t.Fatalf("expected include_user_secrets to be false, got %#v", presetReq.IncludeUserSecrets)
@@ -121,6 +138,9 @@ func TestWriteResolvedCodewireYAMLRoundTrip(t *testing.T) {
 	}
 	if cfg.Install != req.InstallCommand || cfg.Startup != req.StartupScript {
 		t.Fatalf("unexpected install/startup round-trip: %#v", cfg)
+	}
+	if cfg.Secrets == nil || cfg.Secrets.Org == nil || !*cfg.Secrets.Org || cfg.Secrets.User == nil || !*cfg.Secrets.User {
+		t.Fatalf("expected default secrets sources to round-trip as true, got %#v", cfg.Secrets)
 	}
 }
 

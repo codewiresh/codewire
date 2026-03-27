@@ -24,6 +24,8 @@ type presetAuthoringOptions struct {
 	Image             string
 	Install           string
 	Startup           string
+	Agents            []platform.SetupAgent
+	InstallAgents     *bool
 	Agent             string
 	EnvVars           []string
 	SecretProject     string
@@ -105,11 +107,35 @@ func applyCodewireYAMLDefaults(opts *presetAuthoringOptions) bool {
 	if cfg.Startup != "" && opts.Startup == "" {
 		opts.Startup = cfg.Startup
 	}
-	if cfg.Secrets != "" && opts.SecretProject == "" {
-		opts.SecretProject = cfg.Secrets
+	if cfg.Secrets != nil {
+		if strings.TrimSpace(cfg.Secrets.Project) != "" && opts.SecretProject == "" {
+			opts.SecretProject = strings.TrimSpace(cfg.Secrets.Project)
+		}
+		if cfg.Secrets.Org != nil && !*cfg.Secrets.Org {
+			opts.NoOrgSecrets = true
+		}
+		if cfg.Secrets.User != nil && !*cfg.Secrets.User {
+			opts.NoUserSecrets = true
+		}
 	}
-	if cfg.Agent != "" && opts.Agent == "" {
-		opts.Agent = cfg.Agent
+	if cfg.Agents != nil && len(cfg.Agents.Tools) > 0 && len(opts.Agents) == 0 && opts.Agent == "" {
+		opts.Agents = make([]platform.SetupAgent, 0, len(cfg.Agents.Tools))
+		for _, tool := range cfg.Agents.Tools {
+			agentType := cwconfig.CanonicalAgentID(tool)
+			if agentType == "" {
+				continue
+			}
+			opts.Agents = append(opts.Agents, platform.SetupAgent{Type: agentType})
+		}
+		if opts.InstallAgents == nil {
+			opts.InstallAgents = cfg.Agents.Install
+		}
+	}
+	if cfg.Agent != "" && opts.Agent == "" && len(opts.Agents) == 0 {
+		opts.Agent = cwconfig.CanonicalAgentID(cfg.Agent)
+	}
+	if cfg.InstallAgents != nil && opts.InstallAgents == nil {
+		opts.InstallAgents = cfg.InstallAgents
 	}
 	if cfg.CPU > 0 && opts.CPU == 0 {
 		opts.CPU = cfg.CPU
@@ -193,6 +219,8 @@ func resolvePresetAuthoring(cmd *cobra.Command, opts *presetAuthoringOptions) (s
 			InstallCommand:     opts.Install,
 			StartupScript:      opts.Startup,
 			EnvVars:            parsedEnvVars,
+			Agents:             selectedAgentsFromOptions(opts),
+			InstallAgents:      opts.InstallAgents,
 			Agent:              opts.Agent,
 			SecretProject:      opts.SecretProject,
 			IncludeOrgSecrets:  boolPtrOrNil(!opts.NoOrgSecrets, opts.NoOrgSecrets),
@@ -233,7 +261,13 @@ func resolvePresetAuthoring(cmd *cobra.Command, opts *presetAuthoringOptions) (s
 		if opts.SecretProject == "" {
 			opts.SecretProject = prepared.Draft.SecretProject
 		}
-		if opts.Agent == "" {
+		if len(opts.Agents) == 0 && len(prepared.Draft.Agents) > 0 {
+			opts.Agents = prepared.Draft.Agents
+		}
+		if opts.InstallAgents == nil {
+			opts.InstallAgents = prepared.Draft.InstallAgents
+		}
+		if opts.Agent == "" && len(opts.Agents) == 0 {
 			opts.Agent = prepared.Draft.Agent
 		}
 		if opts.CPU == 0 && prepared.Draft.CPUMillicores != nil {
@@ -293,8 +327,12 @@ func resolvePresetAuthoring(cmd *cobra.Command, opts *presetAuthoringOptions) (s
 		Image:          opts.Image,
 		InstallCommand: opts.Install,
 		StartupScript:  opts.Startup,
-		Agent:          opts.Agent,
+		Agents:         selectedAgentsFromOptions(opts),
+		InstallAgents:  opts.InstallAgents,
 		SecretProject:  opts.SecretProject,
+	}
+	if len(req.Agents) == 0 && opts.Agent != "" {
+		req.Agent = cwconfig.CanonicalAgentID(opts.Agent)
 	}
 	if len(repos) > 0 {
 		req.Repos = repos
@@ -338,19 +376,27 @@ func resolvePresetAuthoring(cmd *cobra.Command, opts *presetAuthoringOptions) (s
 	}, nil
 }
 
+func selectedAgentsFromOptions(opts *presetAuthoringOptions) []platform.SetupAgent {
+	if len(opts.Agents) > 0 {
+		return opts.Agents
+	}
+	if strings.TrimSpace(opts.Agent) == "" {
+		return nil
+	}
+	return []platform.SetupAgent{{Type: cwconfig.CanonicalAgentID(opts.Agent)}}
+}
+
 func codewireConfigFromRequest(req *platform.CreateEnvironmentRequest) *cwconfig.CodewireConfig {
 	cfg := &cwconfig.CodewireConfig{
-		Image:              req.Image,
-		Install:            req.InstallCommand,
-		Startup:            req.StartupScript,
-		Secrets:            req.SecretProject,
-		Env:                req.EnvVars,
-		CPU:                valueOrZero(req.CPUMillicores),
-		Memory:             valueOrZero(req.MemoryMB),
-		Disk:               valueOrZero(req.DiskGB),
-		Agent:              req.Agent,
-		IncludeOrgSecrets:  req.IncludeOrgSecrets,
-		IncludeUserSecrets: req.IncludeUserSecrets,
+		Image:   req.Image,
+		Install: req.InstallCommand,
+		Startup: req.StartupScript,
+		Env:     req.EnvVars,
+		CPU:     valueOrZero(req.CPUMillicores),
+		Memory:  valueOrZero(req.MemoryMB),
+		Disk:    valueOrZero(req.DiskGB),
+		Agents:  yamlAgentsFromRequest(req),
+		Secrets: yamlSecretsFromRequest(req),
 	}
 	if len(req.AppPorts) > 0 {
 		cfg.Ports = make([]cwconfig.PortConfig, 0, len(req.AppPorts))
@@ -371,8 +417,47 @@ func valueOrZero(v *int) int {
 	return *v
 }
 
+func boolPtr(v bool) *bool {
+	return &v
+}
+
 func writeResolvedCodewireYAML(path string, req *platform.CreateEnvironmentRequest) error {
 	return cwconfig.WriteCodewireConfig(path, codewireConfigFromRequest(req))
+}
+
+func yamlAgentsFromRequest(req *platform.CreateEnvironmentRequest) *cwconfig.CodewireAgentsConfig {
+	tools := make([]string, 0, len(req.Agents))
+	for _, agent := range req.Agents {
+		if id := cwconfig.DisplayAgentID(agent.Type); id != "" {
+			tools = append(tools, id)
+		}
+	}
+	if len(tools) == 0 && strings.TrimSpace(req.Agent) != "" {
+		tools = append(tools, cwconfig.DisplayAgentID(req.Agent))
+	}
+	if len(tools) == 0 && req.InstallAgents == nil {
+		return nil
+	}
+	return &cwconfig.CodewireAgentsConfig{
+		Install: req.InstallAgents,
+		Tools:   tools,
+	}
+}
+
+func yamlSecretsFromRequest(req *platform.CreateEnvironmentRequest) *cwconfig.CodewireSecretsConfig {
+	org := req.IncludeOrgSecrets
+	if org == nil {
+		org = boolPtr(true)
+	}
+	user := req.IncludeUserSecrets
+	if user == nil {
+		user = boolPtr(true)
+	}
+	return &cwconfig.CodewireSecretsConfig{
+		Org:     org,
+		User:    user,
+		Project: req.SecretProject,
+	}
 }
 
 func slugifyPresetName(name string) string {
@@ -415,6 +500,8 @@ func createPresetRequestFromEnvironment(name string, req *platform.CreateEnviron
 		InstallCommand:       req.InstallCommand,
 		StartupScript:        req.StartupScript,
 		EnvVars:              req.EnvVars,
+		Agents:               req.Agents,
+		InstallAgents:        req.InstallAgents,
 		Agent:                req.Agent,
 		AgentEnv:             req.AgentEnv,
 		AppPorts:             req.AppPorts,

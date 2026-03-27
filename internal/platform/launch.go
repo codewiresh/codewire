@@ -23,6 +23,8 @@ type PrepareLaunchRequest struct {
 	InstallCommand     string            `json:"install_command,omitempty"`
 	StartupScript      string            `json:"startup_script,omitempty"`
 	EnvVars            map[string]string `json:"env_vars,omitempty"`
+	Agents             []SetupAgent      `json:"agents,omitempty"`
+	InstallAgents      *bool             `json:"install_agents,omitempty"`
 	Agent              string            `json:"agent,omitempty"`
 	AgentEnv           map[string]string `json:"agent_env,omitempty"`
 	SecretProject      string            `json:"secret_project,omitempty"`

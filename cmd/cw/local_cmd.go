@@ -320,10 +320,17 @@ func prepareLocalInstance(opts localCreateOptions) (cwconfig.LocalInstance, erro
 		cfg.Startup = opts.Startup
 	}
 	if opts.Agent != "" {
-		cfg.Agent = opts.Agent
+		cfg.Agents = &cwconfig.CodewireAgentsConfig{
+			Install: cfg.InstallAgents,
+			Tools:   []string{cwconfig.DisplayAgentID(opts.Agent)},
+		}
+		cfg.Agent = ""
 	}
 	if opts.Secrets != "" {
-		cfg.Secrets = opts.Secrets
+		if cfg.Secrets == nil {
+			cfg.Secrets = &cwconfig.CodewireSecretsConfig{}
+		}
+		cfg.Secrets.Project = opts.Secrets
 	}
 	if opts.CPU > 0 {
 		cfg.CPU = opts.CPU
@@ -336,11 +343,17 @@ func prepareLocalInstance(opts localCreateOptions) (cwconfig.LocalInstance, erro
 	}
 	if opts.NoOrgSecrets {
 		f := false
-		cfg.IncludeOrgSecrets = &f
+		if cfg.Secrets == nil {
+			cfg.Secrets = &cwconfig.CodewireSecretsConfig{}
+		}
+		cfg.Secrets.Org = &f
 	}
 	if opts.NoUserSecrets {
 		f := false
-		cfg.IncludeUserSecrets = &f
+		if cfg.Secrets == nil {
+			cfg.Secrets = &cwconfig.CodewireSecretsConfig{}
+		}
+		cfg.Secrets.User = &f
 	}
 	if cfg.Image == "" && cfg.Preset != "" {
 		cfg.Image = expandImageRef(cfg.Preset)
@@ -367,19 +380,56 @@ func prepareLocalInstance(opts localCreateOptions) (cwconfig.LocalInstance, erro
 		Image:              expandImageRef(cfg.Image),
 		Install:            cfg.Install,
 		Startup:            cfg.Startup,
-		Secrets:            cfg.Secrets,
+		Secrets:            localSecretProject(cfg),
 		Env:                cfg.Env,
 		Ports:              cfg.Ports,
 		CPU:                cfg.CPU,
 		Memory:             cfg.Memory,
 		Disk:               cfg.Disk,
-		Agent:              cfg.Agent,
-		IncludeOrgSecrets:  cfg.IncludeOrgSecrets,
-		IncludeUserSecrets: cfg.IncludeUserSecrets,
+		Agent:              localPrimaryAgent(cfg),
+		IncludeOrgSecrets:  localIncludeOrgSecrets(cfg),
+		IncludeUserSecrets: localIncludeUserSecrets(cfg),
 		CreatedAt:          localNow().Format(time.RFC3339),
 		LastUsedAt:         localNow().Format(time.RFC3339),
 	}
 	return instance, nil
+}
+
+func localPrimaryAgent(cfg *cwconfig.CodewireConfig) string {
+	if cfg == nil {
+		return ""
+	}
+	if cfg.Agents != nil && len(cfg.Agents.Tools) > 0 {
+		return cwconfig.CanonicalAgentID(cfg.Agents.Tools[0])
+	}
+	return cwconfig.CanonicalAgentID(cfg.Agent)
+}
+
+func localSecretProject(cfg *cwconfig.CodewireConfig) string {
+	if cfg == nil || cfg.Secrets == nil {
+		return ""
+	}
+	return strings.TrimSpace(cfg.Secrets.Project)
+}
+
+func localIncludeOrgSecrets(cfg *cwconfig.CodewireConfig) *bool {
+	if cfg == nil {
+		return nil
+	}
+	if cfg.Secrets != nil && cfg.Secrets.Org != nil {
+		return cfg.Secrets.Org
+	}
+	return cfg.IncludeOrgSecrets
+}
+
+func localIncludeUserSecrets(cfg *cwconfig.CodewireConfig) *bool {
+	if cfg == nil {
+		return nil
+	}
+	if cfg.Secrets != nil && cfg.Secrets.User != nil {
+		return cfg.Secrets.User
+	}
+	return cfg.IncludeUserSecrets
 }
 
 func loadLocalCodewireConfig(projectDir, filePath string) (*cwconfig.CodewireConfig, error) {
