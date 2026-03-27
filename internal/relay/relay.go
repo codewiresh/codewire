@@ -52,8 +52,6 @@ type RelayConfig struct {
 	OIDCAllowedGroups []string
 }
 
-const defaultNetworkID = "default"
-
 // RunRelay starts the relay server. It blocks until ctx is cancelled.
 func RunRelay(ctx context.Context, cfg RelayConfig) error {
 	if cfg.ListenAddr == "" {
@@ -207,12 +205,15 @@ func buildMux(hub *NodeHub, sessions *PendingSessions, st store.Store, cfg Relay
 	mux.Handle("DELETE /api/v1/nodes/{name}", authMiddleware(http.HandlerFunc(nodeRevokeHandler(st))))
 	mux.Handle("GET /api/v1/nodes", authMiddleware(http.HandlerFunc(nodesListHandler(st))))
 
-	// Invite management (admin-only).
+	// Invite management (owner-only).
 	mux.Handle("POST /api/v1/invites", authMiddleware(http.HandlerFunc(inviteCreateHandler(st))))
 	mux.Handle("GET /api/v1/invites", authMiddleware(http.HandlerFunc(inviteListHandler(st))))
 	mux.Handle("DELETE /api/v1/invites/{token}", authMiddleware(http.HandlerFunc(inviteDeleteHandler(st))))
 
-	// Invite redemption (public, rate-limited).
+	// Authenticated membership join.
+	mux.Handle("POST /api/v1/networks/join", authMiddleware(http.HandlerFunc(networkJoinHandler(st))))
+
+	// Invite redemption for node bootstrap (public, rate-limited).
 	mux.HandleFunc("POST /api/v1/join", rateLimitMiddleware(joinRL, joinHandler(st)))
 	mux.HandleFunc("GET /join", joinPageHandler(cfg.BaseURL))
 
@@ -231,11 +232,15 @@ func buildMux(hub *NodeHub, sessions *PendingSessions, st store.Store, cfg Relay
 }
 
 func resolveNetworkID(raw string) string {
-	networkID := strings.TrimSpace(raw)
+	return strings.TrimSpace(raw)
+}
+
+func requiredNetworkID(raw string) (string, error) {
+	networkID := resolveNetworkID(raw)
 	if networkID == "" {
-		return defaultNetworkID
+		return "", fmt.Errorf("network_id required")
 	}
-	return networkID
+	return networkID, nil
 }
 
 func validateNetworkID(raw string) error {
@@ -272,7 +277,21 @@ type networkResponse struct {
 
 func networkListHandler(st store.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		networks, err := st.NetworkList(r.Context())
+		auth := oauth.GetAuth(r.Context())
+		var (
+			networks []store.Network
+			err      error
+		)
+		if auth != nil && auth.IsAdmin {
+			networks, err = st.NetworkList(r.Context())
+		} else {
+			subject, subjectErr := membershipSubject(auth)
+			if subjectErr != nil {
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+			networks, err = st.NetworkListByMember(r.Context(), subject)
+		}
 		if err != nil {
 			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
@@ -304,15 +323,63 @@ func networkCreateHandler(st store.Store) http.HandlerFunc {
 		}
 
 		networkID := strings.TrimSpace(req.NetworkID)
-		networkID = resolveNetworkID(networkID)
 		if err := validateNetworkID(networkID); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 
+		auth := oauth.GetAuth(r.Context())
+		if auth == nil {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		if auth.IsAdmin {
+			if err := st.NetworkEnsure(r.Context(), networkID); err != nil {
+				http.Error(w, "internal error", http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]string{
+				"status":     "created",
+				"network_id": networkID,
+			})
+			return
+		}
+
+		subject, err := membershipSubject(auth)
+		if err != nil {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
 		if err := st.NetworkEnsure(r.Context(), networkID); err != nil {
 			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
+		}
+		count, err := st.NetworkMemberCount(r.Context(), networkID)
+		if err != nil {
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		member, err := st.NetworkMemberGet(r.Context(), networkID, subject)
+		if err != nil {
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		if count > 0 && member == nil {
+			http.Error(w, "network already claimed", http.StatusConflict)
+			return
+		}
+		if member == nil {
+			if err := st.NetworkMemberUpsert(r.Context(), store.NetworkMember{
+				NetworkID: networkID,
+				Subject:   subject,
+				Role:      store.NetworkRoleOwner,
+				CreatedAt: time.Now().UTC(),
+				CreatedBy: subject,
+			}); err != nil {
+				http.Error(w, "internal error", http.StatusInternalServerError)
+				return
+			}
 		}
 
 		w.Header().Set("Content-Type", "application/json")
@@ -336,11 +403,22 @@ func nodeRegisterHandler(st store.Store) http.HandlerFunc {
 			http.Error(w, "node_name required", http.StatusBadRequest)
 			return
 		}
-		networkID := resolveNetworkID(req.NetworkID)
+		networkID, err := requiredNetworkID(req.NetworkID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		auth := oauth.GetAuth(r.Context())
+		if _, ok, err := requireMembership(r.Context(), st, networkID, auth); err != nil {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		} else if !ok {
+			writeMembershipRequired(w)
+			return
+		}
 
 		token := generateToken()
 
-		auth := oauth.GetAuth(r.Context())
 		var githubID *int64
 		if auth != nil && auth.UserID != 0 {
 			githubID = &auth.UserID
@@ -375,7 +453,20 @@ func nodeRegisterHandler(st store.Store) http.HandlerFunc {
 func nodeRevokeHandler(st store.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		name := r.PathValue("name")
-		networkID := resolveNetworkID(r.URL.Query().Get("network_id"))
+		networkID, err := requiredNetworkID(r.URL.Query().Get("network_id"))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		owner, err := requireOwner(r.Context(), st, networkID, oauth.GetAuth(r.Context()))
+		if err != nil {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		if !owner {
+			writeOwnerRequired(w)
+			return
+		}
 
 		node, err := st.NodeGet(r.Context(), networkID, name)
 		if err != nil || node == nil {
@@ -408,16 +499,47 @@ type nodeResponse struct {
 func nodesListHandler(st store.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		all := strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("all")), "true")
+		auth := oauth.GetAuth(r.Context())
 
 		var (
 			networkID string
 			nodes     []store.NodeRecord
 			err       error
 		)
-		if all {
+		if auth != nil && auth.IsAdmin && all {
 			nodes, err = st.NodeListAll(r.Context())
+		} else if all {
+			subject, subjectErr := membershipSubject(auth)
+			if subjectErr != nil {
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+			networks, listErr := st.NetworkListByMember(r.Context(), subject)
+			if listErr != nil {
+				http.Error(w, "internal error", http.StatusInternalServerError)
+				return
+			}
+			for _, network := range networks {
+				networkNodes, listNodesErr := st.NodeList(r.Context(), network.ID)
+				if listNodesErr != nil {
+					http.Error(w, "internal error", http.StatusInternalServerError)
+					return
+				}
+				nodes = append(nodes, networkNodes...)
+			}
 		} else {
-			networkID = resolveNetworkID(r.URL.Query().Get("network_id"))
+			networkID, err = requiredNetworkID(r.URL.Query().Get("network_id"))
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			if _, ok, memberErr := requireMembership(r.Context(), st, networkID, auth); memberErr != nil {
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			} else if !ok {
+				writeMembershipRequired(w)
+				return
+			}
 			nodes, err = st.NodeList(r.Context(), networkID)
 		}
 		if err != nil {
@@ -457,12 +579,25 @@ func inviteCreateHandler(st store.Store) http.HandlerFunc {
 		if req.Uses <= 0 {
 			req.Uses = 1
 		}
-		networkID := resolveNetworkID(req.NetworkID)
+		networkID, err := requiredNetworkID(req.NetworkID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		owner, err := requireOwner(r.Context(), st, networkID, oauth.GetAuth(r.Context()))
+		if err != nil {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		if !owner {
+			writeOwnerRequired(w)
+			return
+		}
 
 		ttl := time.Hour
 		if req.TTL != "" {
-			parsed, err := time.ParseDuration(req.TTL)
-			if err != nil {
+			parsed, parseErr := time.ParseDuration(req.TTL)
+			if parseErr != nil {
 				http.Error(w, "invalid ttl", http.StatusBadRequest)
 				return
 			}
@@ -497,7 +632,18 @@ func inviteCreateHandler(st store.Store) http.HandlerFunc {
 
 func inviteListHandler(st store.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		networkID := resolveNetworkID(r.URL.Query().Get("network_id"))
+		networkID, err := requiredNetworkID(r.URL.Query().Get("network_id"))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if owner, err := requireOwner(r.Context(), st, networkID, oauth.GetAuth(r.Context())); err != nil {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		} else if !owner {
+			writeOwnerRequired(w)
+			return
+		}
 		invites, err := st.InviteList(r.Context(), networkID)
 		if err != nil {
 			http.Error(w, "internal error", http.StatusInternalServerError)
@@ -511,7 +657,18 @@ func inviteListHandler(st store.Store) http.HandlerFunc {
 func inviteDeleteHandler(st store.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		token := r.PathValue("token")
-		networkID := resolveNetworkID(r.URL.Query().Get("network_id"))
+		networkID, err := requiredNetworkID(r.URL.Query().Get("network_id"))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if owner, err := requireOwner(r.Context(), st, networkID, oauth.GetAuth(r.Context())); err != nil {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		} else if !owner {
+			writeOwnerRequired(w)
+			return
+		}
 		if err := st.InviteDelete(r.Context(), networkID, token); err != nil {
 			http.Error(w, "invite not found", http.StatusNotFound)
 			return
@@ -525,6 +682,62 @@ func inviteDeleteHandler(st store.Store) http.HandlerFunc {
 type joinRequest struct {
 	NodeName    string `json:"node_name"`
 	InviteToken string `json:"invite_token"`
+}
+
+func networkJoinHandler(st store.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			InviteToken string `json:"invite_token"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		if strings.TrimSpace(req.InviteToken) == "" {
+			http.Error(w, "invite_token required", http.StatusBadRequest)
+			return
+		}
+
+		invite, _ := st.InviteGet(r.Context(), req.InviteToken)
+		if invite == nil {
+			http.Error(w, "invalid or expired invite", http.StatusForbidden)
+			return
+		}
+		if err := st.InviteConsume(r.Context(), req.InviteToken); err != nil {
+			http.Error(w, "invalid or expired invite", http.StatusForbidden)
+			return
+		}
+
+		subject, err := membershipSubject(oauth.GetAuth(r.Context()))
+		if err != nil {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		now := time.Now().UTC()
+		role := store.NetworkRoleMember
+		if existing, err := st.NetworkMemberGet(r.Context(), invite.NetworkID, subject); err == nil && existing != nil {
+			role = existing.Role
+		} else if err != nil {
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		if err := st.NetworkMemberUpsert(r.Context(), store.NetworkMember{
+			NetworkID: invite.NetworkID,
+			Subject:   subject,
+			Role:      role,
+			CreatedAt: now,
+			CreatedBy: invite.Token,
+		}); err != nil {
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{
+			"status":     "joined",
+			"network_id": invite.NetworkID,
+		})
+	}
 }
 
 func joinHandler(st store.Store) http.HandlerFunc {
@@ -549,13 +762,15 @@ func joinHandler(st store.Store) http.HandlerFunc {
 			return
 		}
 
-		var githubID *int64
-		networkID := defaultNetworkID
-		if invite != nil && invite.CreatedBy != nil {
-			githubID = invite.CreatedBy
+		if invite == nil || strings.TrimSpace(invite.NetworkID) == "" {
+			http.Error(w, "invalid or expired invite", http.StatusForbidden)
+			return
 		}
-		if invite != nil && invite.NetworkID != "" {
-			networkID = invite.NetworkID
+
+		var githubID *int64
+		networkID := invite.NetworkID
+		if invite.CreatedBy != nil {
+			githubID = invite.CreatedBy
 		}
 
 		token := generateToken()
@@ -595,10 +810,10 @@ h2{font-weight:600}
 p{color:#525252;line-height:1.6}
 </style></head><body>
 <h2>Join CodeWire Relay</h2>
-<p>Use this invite code to register your device:</p>
+<p>Use this invite code to join the network:</p>
 <div class="code">%s</div>
 <p>Run on your device:</p>
-<div class="code">cw network join --relay-url %s %s</div>
+<div class="code">cw login && cw network join --relay-url %s %s</div>
 </body></html>`, invite, baseURL, invite)
 	}
 }
@@ -609,7 +824,11 @@ func kvSetHandler(st store.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ns := r.PathValue("namespace")
 		key := r.PathValue("key")
-		networkID := resolveNetworkID(r.URL.Query().Get("network_id"))
+		networkID, err := requiredNetworkID(r.URL.Query().Get("network_id"))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 
 		body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
 		if err != nil {
@@ -639,7 +858,11 @@ func kvGetHandler(st store.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ns := r.PathValue("namespace")
 		key := r.PathValue("key")
-		networkID := resolveNetworkID(r.URL.Query().Get("network_id"))
+		networkID, err := requiredNetworkID(r.URL.Query().Get("network_id"))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 
 		val, err := st.KVGet(r.Context(), networkID, ns, key)
 		if err != nil {
@@ -659,7 +882,11 @@ func kvDeleteHandler(st store.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ns := r.PathValue("namespace")
 		key := r.PathValue("key")
-		networkID := resolveNetworkID(r.URL.Query().Get("network_id"))
+		networkID, err := requiredNetworkID(r.URL.Query().Get("network_id"))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 
 		if err := st.KVDelete(r.Context(), networkID, ns, key); err != nil {
 			http.Error(w, "internal error", http.StatusInternalServerError)
@@ -673,7 +900,11 @@ func kvListHandler(st store.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ns := r.PathValue("namespace")
 		prefix := r.URL.Query().Get("prefix")
-		networkID := resolveNetworkID(r.URL.Query().Get("network_id"))
+		networkID, err := requiredNetworkID(r.URL.Query().Get("network_id"))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 
 		entries, err := st.KVList(r.Context(), networkID, ns, prefix)
 		if err != nil {

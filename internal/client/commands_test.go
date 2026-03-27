@@ -201,6 +201,12 @@ func TestCreateNetworkCreatesAndSelectsNetwork(t *testing.T) {
 
 func TestJoinNetworkPersistsEnrollment(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
+	if err := platform.SaveConfig(&platform.PlatformConfig{
+		ServerURL:    "https://codewire.sh",
+		SessionToken: "platform-token",
+	}); err != nil {
+		t.Fatalf("SaveConfig(platform): %v", err)
+	}
 
 	dir := t.TempDir()
 	if err := JoinNetwork(dir, "https://relay.example.com", "CW-INV-TEST"); err == nil {
@@ -208,9 +214,12 @@ func TestJoinNetworkPersistsEnrollment(t *testing.T) {
 	}
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost || r.URL.Path != "/api/v1/join" {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/v1/networks/join" {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer platform-token" {
+			t.Fatalf("Authorization = %q", got)
 		}
 		var body map[string]string
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -221,8 +230,6 @@ func TestJoinNetworkPersistsEnrollment(t *testing.T) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]string{
-			"node_token": "node-token",
-			"node_name":  "codewire",
 			"network_id": "project-alpha",
 		})
 	}))
@@ -242,7 +249,7 @@ func TestJoinNetworkPersistsEnrollment(t *testing.T) {
 	if cfg.RelayNetwork == nil || *cfg.RelayNetwork != "project-alpha" {
 		t.Fatalf("RelayNetwork = %#v", cfg.RelayNetwork)
 	}
-	if cfg.RelayToken == nil || *cfg.RelayToken != "node-token" {
-		t.Fatalf("RelayToken = %#v", cfg.RelayToken)
+	if cfg.RelayToken != nil {
+		t.Fatalf("RelayToken = %#v, want nil", cfg.RelayToken)
 	}
 }

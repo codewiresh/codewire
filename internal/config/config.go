@@ -19,7 +19,7 @@ type Config struct {
 	RelayNetwork         *string              `toml:"relay_network,omitempty"`
 	RelayToken           *string              `toml:"relay_token,omitempty"`             // node auth token for relay agent
 	RelayInviteToken     *string              `toml:"relay_invite_token,omitempty"`      // one-time invite token for bootstrap
-	RelayAutoJoinPrivate *bool                `toml:"relay_auto_join_private,omitempty"` // consent for default private-network join
+	RelayAutoJoinPrivate *bool                `toml:"relay_auto_join_private,omitempty"` // consent for auto-joining the selected private network
 	CurrentTarget        *CurrentTargetConfig `toml:"current_target,omitempty"`
 }
 

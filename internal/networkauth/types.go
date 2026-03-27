@@ -3,7 +3,6 @@ package networkauth
 import "time"
 
 const (
-	DefaultNetworkID      = "default"
 	RuntimeTokenPrefix    = "cwrt1"
 	SenderTokenPrefix     = "cwsd1"
 	AlgorithmEd25519      = "Ed25519"

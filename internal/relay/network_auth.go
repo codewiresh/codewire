@@ -18,7 +18,11 @@ const networkAuthIssuerKey = "issuer.current"
 
 func verifierBundleHandler(st store.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		networkID := resolveNetworkID(r.URL.Query().Get("network_id"))
+		networkID, err := requiredNetworkID(r.URL.Query().Get("network_id"))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 		state, err := loadOrCreateIssuerState(r.Context(), st, networkID)
 		if err != nil {
 			http.Error(w, "internal error", http.StatusInternalServerError)
@@ -36,7 +40,27 @@ func clientRuntimeCredentialHandler(st store.Store) http.HandlerFunc {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
-		networkID := resolveNetworkID(r.URL.Query().Get("network_id"))
+		networkID, err := requiredNetworkID(r.URL.Query().Get("network_id"))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if !identity.IsAdmin {
+			subject, err := membershipSubject(identity)
+			if err != nil {
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+			member, err := st.NetworkMemberGet(r.Context(), networkID, subject)
+			if err != nil {
+				http.Error(w, "internal error", http.StatusInternalServerError)
+				return
+			}
+			if member == nil {
+				writeMembershipRequired(w)
+				return
+			}
+		}
 		state, err := loadOrCreateIssuerState(r.Context(), st, networkID)
 		if err != nil {
 			http.Error(w, "internal error", http.StatusInternalServerError)
@@ -69,7 +93,7 @@ func nodeRuntimeCredentialHandler(st store.Store) http.HandlerFunc {
 			return
 		}
 
-		state, err := loadOrCreateIssuerState(r.Context(), st, resolveNetworkID(node.NetworkID))
+		state, err := loadOrCreateIssuerState(r.Context(), st, node.NetworkID)
 		if err != nil {
 			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
@@ -118,7 +142,7 @@ func nodeSenderDelegationHandler(st store.Store) http.HandlerFunc {
 			return
 		}
 
-		state, err := loadOrCreateIssuerState(r.Context(), st, resolveNetworkID(node.NetworkID))
+		state, err := loadOrCreateIssuerState(r.Context(), st, node.NetworkID)
 		if err != nil {
 			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
@@ -154,6 +178,9 @@ func nodeSenderDelegationHandler(st store.Store) http.HandlerFunc {
 
 func loadOrCreateIssuerState(ctx context.Context, st store.Store, networkID string) (*networkauth.IssuerState, error) {
 	networkID = resolveNetworkID(networkID)
+	if networkID == "" {
+		return nil, fmt.Errorf("network_id required")
+	}
 	raw, err := st.KVGet(ctx, networkID, networkAuthNamespace, networkAuthIssuerKey)
 	if err != nil {
 		return nil, fmt.Errorf("loading issuer state: %w", err)

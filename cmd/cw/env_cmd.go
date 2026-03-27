@@ -673,7 +673,7 @@ Examples:
 	cmd.Flags().BoolVar(&noOrgSecrets, "no-org-secrets", false, "Don't inject org-level secrets")
 	cmd.Flags().BoolVar(&noUserSecrets, "no-user-secrets", false, "Don't inject user-level secrets")
 	cmd.Flags().StringVar(&network, "network", "", "Join a specific relay network on boot (requires relay auth in local config)")
-	cmd.Flags().BoolVar(&noNetwork, "no-network", false, "Don't join the default private relay network")
+	cmd.Flags().BoolVar(&noNetwork, "no-network", false, "Don't join the selected private relay network")
 	cmd.Flags().BoolVarP(&follow, "follow", "f", true, "Watch startup progress and wait for readiness (default: true)")
 	cmd.Flags().BoolVar(&noWait, "no-wait", false, "Return immediately after creation instead of waiting for startup")
 	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "Skip confirmation prompts")

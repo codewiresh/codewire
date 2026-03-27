@@ -12,13 +12,9 @@ import (
 
 const maxClockSkew = 30 * time.Second
 
-// ResolveNetworkID normalizes an empty network ID to the default network.
+// ResolveNetworkID normalizes whitespace in a network ID.
 func ResolveNetworkID(raw string) string {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return DefaultNetworkID
-	}
-	return raw
+	return strings.TrimSpace(raw)
 }
 
 // NewIssuerState generates a new Ed25519 issuer state for one network.

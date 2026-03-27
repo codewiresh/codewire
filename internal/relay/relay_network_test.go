@@ -15,12 +15,46 @@ import (
 	"nhooyr.io/websocket"
 )
 
-func TestNodesListRequiresAuthAndScopesByNetwork(t *testing.T) {
+func createGitHubSession(t *testing.T, st store.Store, githubID int64, username string) string {
+	t.Helper()
+	now := time.Now().UTC()
+	if err := st.UserUpsert(context.Background(), store.User{
+		GitHubID:    githubID,
+		Username:    username,
+		CreatedAt:   now,
+		LastLoginAt: now,
+	}); err != nil {
+		t.Fatalf("UserUpsert: %v", err)
+	}
+	token := "sess_" + username
+	if err := st.SessionCreate(context.Background(), store.Session{
+		Token:     token,
+		GitHubID:  githubID,
+		CreatedAt: now,
+		ExpiresAt: now.Add(time.Hour),
+	}); err != nil {
+		t.Fatalf("SessionCreate: %v", err)
+	}
+	return token
+}
+
+func TestNodesListRequiresMembershipAndScopesByNetwork(t *testing.T) {
 	st, err := store.NewSQLiteStore(t.TempDir())
 	if err != nil {
 		t.Fatalf("NewSQLiteStore: %v", err)
 	}
 	t.Cleanup(func() { st.Close() })
+	memberToken := createGitHubSession(t, st, 101, "member")
+	outsiderToken := createGitHubSession(t, st, 202, "outsider")
+	now := time.Now().UTC()
+	if err := st.NetworkMemberUpsert(context.Background(), store.NetworkMember{
+		NetworkID: "network-a",
+		Subject:   "github:101",
+		Role:      store.NetworkRoleOwner,
+		CreatedAt: now,
+	}); err != nil {
+		t.Fatalf("NetworkMemberUpsert: %v", err)
+	}
 
 	hub := NewNodeHub()
 	sessions := NewPendingSessions()
@@ -65,14 +99,25 @@ func TestNodesListRequiresAuthAndScopesByNetwork(t *testing.T) {
 	}
 
 	req, _ = http.NewRequest(http.MethodGet, srv.URL+"/api/v1/nodes?network_id=network-a", nil)
-	req.Header.Set("Authorization", "Bearer admin-token")
+	req.Header.Set("Authorization", "Bearer "+outsiderToken)
 	resp, err = client.Do(req)
 	if err != nil {
-		t.Fatalf("authenticated list nodes: %v", err)
+		t.Fatalf("outsider list nodes: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("outsider status = %d, want 403", resp.StatusCode)
+	}
+
+	req, _ = http.NewRequest(http.MethodGet, srv.URL+"/api/v1/nodes?network_id=network-a", nil)
+	req.Header.Set("Authorization", "Bearer "+memberToken)
+	resp, err = client.Do(req)
+	if err != nil {
+		t.Fatalf("member list nodes: %v", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("authenticated status = %d", resp.StatusCode)
+		t.Fatalf("member status = %d", resp.StatusCode)
 	}
 
 	var nodes []nodeResponse
@@ -84,29 +129,22 @@ func TestNodesListRequiresAuthAndScopesByNetwork(t *testing.T) {
 	}
 
 	req, _ = http.NewRequest(http.MethodGet, srv.URL+"/api/v1/nodes?all=true", nil)
-	req.Header.Set("Authorization", "Bearer admin-token")
+	req.Header.Set("Authorization", "Bearer "+memberToken)
 	resp, err = client.Do(req)
 	if err != nil {
-		t.Fatalf("authenticated list all nodes: %v", err)
+		t.Fatalf("member list all nodes: %v", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("authenticated all status = %d", resp.StatusCode)
+		t.Fatalf("member all status = %d", resp.StatusCode)
 	}
 
 	nodes = nil
 	if err := json.NewDecoder(resp.Body).Decode(&nodes); err != nil {
 		t.Fatalf("decode all nodes: %v", err)
 	}
-	if len(nodes) != 2 {
-		t.Fatalf("all nodes len = %d, want 2", len(nodes))
-	}
-	foundNetworks := map[string]bool{}
-	for _, node := range nodes {
-		foundNetworks[node.NetworkID] = true
-	}
-	if !foundNetworks["network-a"] || !foundNetworks["network-b"] {
-		t.Fatalf("all nodes networks = %#v, want network-a and network-b", foundNetworks)
+	if len(nodes) != 1 || nodes[0].NetworkID != "network-a" {
+		t.Fatalf("all nodes = %#v, want only network-a membership scope", nodes)
 	}
 }
 
@@ -172,8 +210,8 @@ func TestOIDCAuthAcceptsPlatformSessionBearer(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&networks); err != nil {
 		t.Fatalf("decode networks: %v", err)
 	}
-	if len(networks) != 1 || networks[0].ID != "default" {
-		t.Fatalf("networks = %#v, want default network", networks)
+	if len(networks) != 0 {
+		t.Fatalf("networks = %#v, want no memberships by default", networks)
 	}
 }
 
@@ -250,12 +288,13 @@ func TestKVIsNetworkScopedAndRequiresAuth(t *testing.T) {
 	}
 }
 
-func TestJoinRegistersNodeIntoInviteNetwork(t *testing.T) {
+func TestAuthenticatedNetworkJoinAddsMembership(t *testing.T) {
 	st, err := store.NewSQLiteStore(t.TempDir())
 	if err != nil {
 		t.Fatalf("NewSQLiteStore: %v", err)
 	}
 	t.Cleanup(func() { st.Close() })
+	memberToken := createGitHubSession(t, st, 101, "member")
 
 	now := time.Now().UTC()
 	if err := st.InviteCreate(context.Background(), store.Invite{
@@ -269,17 +308,18 @@ func TestJoinRegistersNodeIntoInviteNetwork(t *testing.T) {
 	}
 
 	srv := httptest.NewServer(buildMux(NewNodeHub(), NewPendingSessions(), st, RelayConfig{
-		BaseURL:  "http://relay.test",
-		AuthMode: "none",
+		BaseURL:   "http://relay.test",
+		AuthMode:  "token",
+		AuthToken: "admin-token",
 	}, nil, networkauth.NewReplayCache(), nil))
 	defer srv.Close()
 	client := srv.Client()
 
-	body, _ := json.Marshal(map[string]string{
-		"node_name":    "joined-node",
-		"invite_token": "CW-INV-TEST",
-	})
-	resp, err := client.Post(srv.URL+"/api/v1/join", "application/json", bytes.NewReader(body))
+	body, _ := json.Marshal(map[string]string{"invite_token": "CW-INV-TEST"})
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/api/v1/networks/join", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+memberToken)
+	resp, err := client.Do(req)
 	if err != nil {
 		t.Fatalf("join: %v", err)
 	}
@@ -288,21 +328,23 @@ func TestJoinRegistersNodeIntoInviteNetwork(t *testing.T) {
 		t.Fatalf("join status = %d", resp.StatusCode)
 	}
 
-	node, err := st.NodeGet(context.Background(), "network-invite", "joined-node")
+	member, err := st.NetworkMemberGet(context.Background(), "network-invite", "github:101")
 	if err != nil {
-		t.Fatalf("NodeGet: %v", err)
+		t.Fatalf("NetworkMemberGet: %v", err)
 	}
-	if node == nil {
-		t.Fatal("expected joined node")
+	if member == nil || member.Role != store.NetworkRoleMember {
+		t.Fatalf("member = %#v, want joined member", member)
 	}
 }
 
-func TestNetworksCanBeCreatedAndListed(t *testing.T) {
+func TestNetworksCanBeCreatedAndListedForOwner(t *testing.T) {
 	st, err := store.NewSQLiteStore(t.TempDir())
 	if err != nil {
 		t.Fatalf("NewSQLiteStore: %v", err)
 	}
 	t.Cleanup(func() { st.Close() })
+	memberToken := createGitHubSession(t, st, 101, "member")
+	otherToken := createGitHubSession(t, st, 202, "other")
 
 	srv := httptest.NewServer(buildMux(NewNodeHub(), NewPendingSessions(), st, RelayConfig{
 		BaseURL:   "http://relay.test",
@@ -314,7 +356,7 @@ func TestNetworksCanBeCreatedAndListed(t *testing.T) {
 
 	createBody, _ := json.Marshal(map[string]string{"network_id": "project-alpha"})
 	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/api/v1/networks", bytes.NewReader(createBody))
-	req.Header.Set("Authorization", "Bearer admin-token")
+	req.Header.Set("Authorization", "Bearer "+memberToken)
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := client.Do(req)
 	if err != nil {
@@ -326,7 +368,7 @@ func TestNetworksCanBeCreatedAndListed(t *testing.T) {
 	}
 
 	req, _ = http.NewRequest(http.MethodGet, srv.URL+"/api/v1/networks", nil)
-	req.Header.Set("Authorization", "Bearer admin-token")
+	req.Header.Set("Authorization", "Bearer "+memberToken)
 	resp, err = client.Do(req)
 	if err != nil {
 		t.Fatalf("list networks: %v", err)
@@ -345,11 +387,75 @@ func TestNetworksCanBeCreatedAndListed(t *testing.T) {
 	for _, network := range networks {
 		found[network.ID] = network
 	}
-	if _, ok := found["default"]; !ok {
-		t.Fatal("expected default network")
-	}
 	if _, ok := found["project-alpha"]; !ok {
 		t.Fatal("expected project-alpha network")
+	}
+
+	req, _ = http.NewRequest(http.MethodGet, srv.URL+"/api/v1/networks", nil)
+	req.Header.Set("Authorization", "Bearer "+otherToken)
+	resp, err = client.Do(req)
+	if err != nil {
+		t.Fatalf("list outsider networks: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("outsider list status = %d", resp.StatusCode)
+	}
+	networks = nil
+	if err := json.NewDecoder(resp.Body).Decode(&networks); err != nil {
+		t.Fatalf("decode outsider networks: %v", err)
+	}
+	if len(networks) != 0 {
+		t.Fatalf("outsider networks = %#v, want none", networks)
+	}
+}
+
+func TestClientRuntimeCredentialRequiresMembership(t *testing.T) {
+	st, err := store.NewSQLiteStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewSQLiteStore: %v", err)
+	}
+	t.Cleanup(func() { st.Close() })
+	memberToken := createGitHubSession(t, st, 101, "member")
+	outsiderToken := createGitHubSession(t, st, 202, "outsider")
+	now := time.Now().UTC()
+	if err := st.NetworkMemberUpsert(context.Background(), store.NetworkMember{
+		NetworkID: "network-a",
+		Subject:   "github:101",
+		Role:      store.NetworkRoleOwner,
+		CreatedAt: now,
+	}); err != nil {
+		t.Fatalf("NetworkMemberUpsert: %v", err)
+	}
+
+	srv := httptest.NewServer(buildMux(NewNodeHub(), NewPendingSessions(), st, RelayConfig{
+		BaseURL:   "http://relay.test",
+		AuthMode:  "token",
+		AuthToken: "admin-token",
+	}, nil, networkauth.NewReplayCache(), nil))
+	defer srv.Close()
+	client := srv.Client()
+
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/api/v1/network-auth/runtime/client?network_id=network-a", nil)
+	req.Header.Set("Authorization", "Bearer "+outsiderToken)
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("outsider runtime credential: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("outsider runtime status = %d, want 403", resp.StatusCode)
+	}
+
+	req, _ = http.NewRequest(http.MethodPost, srv.URL+"/api/v1/network-auth/runtime/client?network_id=network-a", nil)
+	req.Header.Set("Authorization", "Bearer "+memberToken)
+	resp, err = client.Do(req)
+	if err != nil {
+		t.Fatalf("member runtime credential: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("member runtime status = %d", resp.StatusCode)
 	}
 }
 

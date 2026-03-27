@@ -327,7 +327,7 @@ func (n *Node) validateRuntimeCredential(ctx context.Context, token string) bool
 
 func (n *Node) relayNetworkID() string {
 	if n == nil || n.config == nil || n.config.RelayNetwork == nil {
-		return networkauth.DefaultNetworkID
+		return ""
 	}
 	return networkauth.ResolveNetworkID(*n.config.RelayNetwork)
 }

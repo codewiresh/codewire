@@ -154,7 +154,7 @@ func startRuntimeTailnetRelayNode(t *testing.T, relayNetwork, relaySession, node
 		}
 		if relayNetwork != "" {
 			got := r.URL.Query().Get("network_id")
-			if got != relayNetwork && !(relayNetwork == networkauth.DefaultNetworkID && got == "") {
+			if got != relayNetwork {
 				t.Fatalf("network_id = %q", got)
 			}
 		}

@@ -37,7 +37,11 @@ func deviceAuthorizeHandler(st store.Store, p *oauth.OIDCProvider) http.HandlerF
 			http.Error(w, "node_name required", http.StatusBadRequest)
 			return
 		}
-		networkID := resolveNetworkID(req.NetworkID)
+		networkID, err := requiredNetworkID(req.NetworkID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 
 		// Ask the OIDC provider to start the device authorization flow.
 		data := url.Values{

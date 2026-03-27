@@ -23,6 +23,20 @@ type Network struct {
 	InviteCount int       `json:"invite_count"`
 }
 
+const (
+	NetworkRoleOwner  = "owner"
+	NetworkRoleMember = "member"
+)
+
+// NetworkMember records which authenticated principals belong to a network.
+type NetworkMember struct {
+	NetworkID string    `json:"network_id"`
+	Subject   string    `json:"subject"`
+	Role      string    `json:"role"`
+	CreatedAt time.Time `json:"created_at"`
+	CreatedBy string    `json:"created_by,omitempty"`
+}
+
 // NodeRecord is a registered relay node.
 type NodeRecord struct {
 	NetworkID    string    `json:"network_id"`
@@ -136,6 +150,10 @@ type Store interface {
 	// Node registry — internal to relay.
 	NetworkEnsure(ctx context.Context, networkID string) error
 	NetworkList(ctx context.Context) ([]Network, error)
+	NetworkListByMember(ctx context.Context, subject string) ([]Network, error)
+	NetworkMemberGet(ctx context.Context, networkID, subject string) (*NetworkMember, error)
+	NetworkMemberUpsert(ctx context.Context, member NetworkMember) error
+	NetworkMemberCount(ctx context.Context, networkID string) (int, error)
 	NodeRegister(ctx context.Context, node NodeRecord) error
 	NodeList(ctx context.Context, networkID string) ([]NodeRecord, error)
 	NodeListAll(ctx context.Context) ([]NodeRecord, error)

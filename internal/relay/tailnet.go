@@ -34,6 +34,30 @@ func tailnetCoordinateHandler(cfg RelayConfig, st store.Store, coord *tailnetlib
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
+		switch claims.SubjectKind {
+		case networkauth.SubjectKindClient:
+			if claims.SubjectID != "admin" {
+				member, memberErr := st.NetworkMemberGet(r.Context(), claims.NetworkID, claims.SubjectID)
+				if memberErr != nil {
+					http.Error(w, "internal error", http.StatusInternalServerError)
+					return
+				}
+				if member == nil {
+					http.Error(w, "unauthorized", http.StatusUnauthorized)
+					return
+				}
+			}
+		case networkauth.SubjectKindNode:
+			node, nodeErr := st.NodeGet(r.Context(), claims.NetworkID, claims.SubjectID)
+			if nodeErr != nil {
+				http.Error(w, "internal error", http.StatusInternalServerError)
+				return
+			}
+			if node == nil {
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+		}
 
 		derpMap, err := peer.NewDERPMapFromRelayURL(cfg.BaseURL)
 		if err != nil {

@@ -72,7 +72,10 @@ func TestDeviceAuthorizeHandler(t *testing.T) {
 	client := srv.Client()
 
 	// POST /api/v1/device/authorize with node_name.
-	body, _ := json.Marshal(map[string]string{"node_name": "my-node"})
+	body, _ := json.Marshal(map[string]string{
+		"node_name":  "my-node",
+		"network_id": "project-alpha",
+	})
 	resp, err := client.Post(srv.URL+"/api/v1/device/authorize", "application/json", bytes.NewReader(body))
 	if err != nil {
 		t.Fatalf("POST /api/v1/device/authorize: %v", err)
@@ -142,7 +145,10 @@ func TestDevicePollHandler_Pending(t *testing.T) {
 	client := srv.Client()
 
 	// First: authorize to get a poll_token.
-	authBody, _ := json.Marshal(map[string]string{"node_name": "pending-node"})
+	authBody, _ := json.Marshal(map[string]string{
+		"node_name":  "pending-node",
+		"network_id": "project-alpha",
+	})
 	authResp, err := client.Post(srv.URL+"/api/v1/device/authorize", "application/json", bytes.NewReader(authBody))
 	if err != nil {
 		t.Fatalf("authorize: %v", err)
@@ -228,7 +234,10 @@ func TestDevicePollHandler_Authorized(t *testing.T) {
 	client := srv.Client()
 
 	// Step 1: authorize.
-	authBody, _ := json.Marshal(map[string]string{"node_name": "auth-node"})
+	authBody, _ := json.Marshal(map[string]string{
+		"node_name":  "auth-node",
+		"network_id": "project-alpha",
+	})
 	authResp, err := client.Post(srv.URL+"/api/v1/device/authorize", "application/json", bytes.NewReader(authBody))
 	if err != nil {
 		t.Fatalf("authorize: %v", err)

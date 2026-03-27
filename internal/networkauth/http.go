@@ -15,7 +15,11 @@ func FetchVerifierBundle(ctx context.Context, client *http.Client, relayURL, net
 	if client == nil {
 		client = http.DefaultClient
 	}
-	requestURL := strings.TrimRight(strings.TrimSpace(relayURL), "/") + "/api/v1/network-auth/bundle?network_id=" + url.QueryEscape(ResolveNetworkID(networkID))
+	networkID = ResolveNetworkID(networkID)
+	if networkID == "" {
+		return nil, fmt.Errorf("network_id required")
+	}
+	requestURL := strings.TrimRight(strings.TrimSpace(relayURL), "/") + "/api/v1/network-auth/bundle?network_id=" + url.QueryEscape(networkID)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("building verifier bundle request: %w", err)
@@ -37,7 +41,11 @@ func FetchVerifierBundle(ctx context.Context, client *http.Client, relayURL, net
 
 // IssueClientRuntimeCredential asks the relay for a client runtime credential.
 func IssueClientRuntimeCredential(ctx context.Context, client *http.Client, relayURL, authToken, networkID string) (*RuntimeCredentialResponse, error) {
-	return issueRuntimeCredential(ctx, client, strings.TrimRight(strings.TrimSpace(relayURL), "/")+"/api/v1/network-auth/runtime/client?network_id="+url.QueryEscape(ResolveNetworkID(networkID)), authToken)
+	networkID = ResolveNetworkID(networkID)
+	if networkID == "" {
+		return nil, fmt.Errorf("network_id required")
+	}
+	return issueRuntimeCredential(ctx, client, strings.TrimRight(strings.TrimSpace(relayURL), "/")+"/api/v1/network-auth/runtime/client?network_id="+url.QueryEscape(networkID), authToken)
 }
 
 // IssueNodeRuntimeCredential asks the relay for a node runtime credential.

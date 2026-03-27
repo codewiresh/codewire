@@ -54,8 +54,17 @@ func (s *SQLiteStore) migrate() error {
 			network_id TEXT PRIMARY KEY,
 			created_at DATETIME NOT NULL
 		)`,
+		`CREATE TABLE IF NOT EXISTS network_members (
+			network_id TEXT NOT NULL,
+			subject TEXT NOT NULL,
+			role TEXT NOT NULL,
+			created_at DATETIME NOT NULL,
+			created_by TEXT NOT NULL DEFAULT '',
+			PRIMARY KEY (network_id, subject)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_network_members_subject ON network_members(subject)`,
 		`CREATE TABLE IF NOT EXISTS nodes (
-			network_id TEXT NOT NULL DEFAULT 'default',
+			network_id TEXT NOT NULL,
 			name TEXT NOT NULL,
 			token TEXT NOT NULL UNIQUE,
 			authorized_at DATETIME NOT NULL,
@@ -63,7 +72,7 @@ func (s *SQLiteStore) migrate() error {
 			PRIMARY KEY (network_id, name)
 		)`,
 		`CREATE TABLE IF NOT EXISTS kv (
-			network_id TEXT NOT NULL DEFAULT 'default',
+			network_id TEXT NOT NULL,
 			namespace TEXT NOT NULL,
 			key TEXT NOT NULL,
 			value BLOB NOT NULL,
@@ -108,7 +117,7 @@ func (s *SQLiteStore) migrate() error {
 			expires_at DATETIME NOT NULL
 		)`,
 		`CREATE TABLE IF NOT EXISTS invites (
-			network_id TEXT NOT NULL DEFAULT 'default',
+			network_id TEXT NOT NULL,
 			token TEXT PRIMARY KEY,
 			created_by INTEGER REFERENCES users(github_id),
 			uses_remaining INTEGER NOT NULL DEFAULT 1,
@@ -136,7 +145,7 @@ func (s *SQLiteStore) migrate() error {
 		`CREATE TABLE IF NOT EXISTS oidc_device_flows (
 			poll_token  TEXT PRIMARY KEY,
 			device_code TEXT NOT NULL UNIQUE,
-			network_id  TEXT NOT NULL DEFAULT 'default',
+			network_id  TEXT NOT NULL,
 			node_name   TEXT NOT NULL DEFAULT '',
 			node_token  TEXT NOT NULL DEFAULT '',
 			expires_at  DATETIME NOT NULL
@@ -151,8 +160,8 @@ func (s *SQLiteStore) migrate() error {
 
 	// Add columns that may not exist in older databases.
 	s.addColumnIfNotExists("nodes", "github_id", "INTEGER REFERENCES users(github_id)")
-	s.addColumnIfNotExists("invites", "network_id", "TEXT NOT NULL DEFAULT 'default'")
-	s.addColumnIfNotExists("oidc_device_flows", "network_id", "TEXT NOT NULL DEFAULT 'default'")
+	s.addColumnIfNotExists("invites", "network_id", "TEXT NOT NULL DEFAULT ''")
+	s.addColumnIfNotExists("oidc_device_flows", "network_id", "TEXT NOT NULL DEFAULT ''")
 	// token column replaces public_key/tunnel_url in the new relay architecture.
 	s.addColumnIfNotExists("nodes", "token", "TEXT NOT NULL DEFAULT ''")
 	s.addColumnIfNotExists("nodes", "peer_url", "TEXT NOT NULL DEFAULT ''")
@@ -162,8 +171,6 @@ func (s *SQLiteStore) migrate() error {
 
 	// Ensure unique index on token for NodeGetByToken.
 	s.db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_nodes_token ON nodes(token) WHERE token != ''`)
-	s.db.Exec(`INSERT OR IGNORE INTO networks (network_id, created_at) VALUES ('default', CURRENT_TIMESTAMP)`)
-
 	return nil
 }
 
@@ -184,7 +191,7 @@ func (s *SQLiteStore) migrateLegacyNodesTable() error {
 
 	if _, err := tx.Exec(`
 		CREATE TABLE nodes_new (
-			network_id TEXT NOT NULL DEFAULT 'default',
+			network_id TEXT NOT NULL,
 			name TEXT NOT NULL,
 			token TEXT NOT NULL UNIQUE,
 			authorized_at DATETIME NOT NULL,
@@ -198,7 +205,7 @@ func (s *SQLiteStore) migrateLegacyNodesTable() error {
 
 	if _, err := tx.Exec(`
 		INSERT INTO nodes_new (network_id, name, token, authorized_at, last_seen_at, github_id, peer_url)
-		SELECT 'default', name, token, authorized_at, last_seen_at, github_id, peer_url
+		SELECT '', name, token, authorized_at, last_seen_at, github_id, peer_url
 		FROM nodes
 	`); err != nil {
 		return fmt.Errorf("copy nodes to nodes_new: %w", err)
@@ -396,6 +403,101 @@ func (s *SQLiteStore) NetworkList(_ context.Context) ([]Network, error) {
 		networks = append(networks, network)
 	}
 	return networks, rows.Err()
+}
+
+func (s *SQLiteStore) NetworkListByMember(_ context.Context, subject string) ([]Network, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	rows, err := s.db.Query(`
+		SELECT
+			n.network_id,
+			n.created_at,
+			COALESCE(node_counts.count, 0),
+			COALESCE(invite_counts.count, 0)
+		FROM networks n
+		INNER JOIN network_members nm ON nm.network_id = n.network_id
+		LEFT JOIN (
+			SELECT network_id, COUNT(*) AS count
+			FROM nodes
+			GROUP BY network_id
+		) node_counts ON node_counts.network_id = n.network_id
+		LEFT JOIN (
+			SELECT network_id, COUNT(*) AS count
+			FROM invites
+			WHERE expires_at > ?
+			GROUP BY network_id
+		) invite_counts ON invite_counts.network_id = n.network_id
+		WHERE nm.subject = ?
+		ORDER BY n.network_id
+	`, time.Now().UTC(), subject)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var networks []Network
+	for rows.Next() {
+		var network Network
+		if err := rows.Scan(&network.ID, &network.CreatedAt, &network.NodeCount, &network.InviteCount); err != nil {
+			return nil, err
+		}
+		networks = append(networks, network)
+	}
+	return networks, rows.Err()
+}
+
+func (s *SQLiteStore) NetworkMemberGet(_ context.Context, networkID, subject string) (*NetworkMember, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var member NetworkMember
+	err := s.db.QueryRow(
+		`SELECT network_id, subject, role, created_at, created_by
+		 FROM network_members
+		 WHERE network_id = ? AND subject = ?`,
+		networkID, subject,
+	).Scan(&member.NetworkID, &member.Subject, &member.Role, &member.CreatedAt, &member.CreatedBy)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &member, nil
+}
+
+func (s *SQLiteStore) NetworkMemberUpsert(_ context.Context, member NetworkMember) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if _, err := s.db.Exec(
+		`INSERT OR IGNORE INTO networks (network_id, created_at) VALUES (?, ?)`,
+		member.NetworkID, time.Now().UTC(),
+	); err != nil {
+		return err
+	}
+
+	_, err := s.db.Exec(
+		`INSERT INTO network_members (network_id, subject, role, created_at, created_by)
+		 VALUES (?, ?, ?, ?, ?)
+		 ON CONFLICT (network_id, subject) DO UPDATE SET
+		   role = excluded.role`,
+		member.NetworkID, member.Subject, member.Role, member.CreatedAt, member.CreatedBy,
+	)
+	return err
+}
+
+func (s *SQLiteStore) NetworkMemberCount(_ context.Context, networkID string) (int, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var count int
+	err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM network_members WHERE network_id = ?`,
+		networkID,
+	).Scan(&count)
+	return count, err
 }
 
 func (s *SQLiteStore) NodeRegister(_ context.Context, node NodeRecord) error {

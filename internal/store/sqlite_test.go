@@ -196,10 +196,6 @@ func TestNetworkListIncludesExplicitAndImplicitNetworks(t *testing.T) {
 	for _, network := range networks {
 		found[network.ID] = network
 	}
-
-	if _, ok := found["default"]; !ok {
-		t.Fatal("expected default network")
-	}
 	if _, ok := found["project-alpha"]; !ok {
 		t.Fatal("expected project-alpha network")
 	}
@@ -209,6 +205,61 @@ func TestNetworkListIncludesExplicitAndImplicitNetworks(t *testing.T) {
 	}
 	if beta.NodeCount != 1 {
 		t.Fatalf("project-beta NodeCount = %d, want 1", beta.NodeCount)
+	}
+}
+
+func TestNetworkMembershipScopesListAndLookup(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	now := time.Now().UTC()
+	if err := s.NetworkMemberUpsert(ctx, NetworkMember{
+		NetworkID: "project-alpha",
+		Subject:   "oidc:user-1",
+		Role:      NetworkRoleOwner,
+		CreatedAt: now,
+	}); err != nil {
+		t.Fatalf("NetworkMemberUpsert alpha: %v", err)
+	}
+	if err := s.NetworkMemberUpsert(ctx, NetworkMember{
+		NetworkID: "project-beta",
+		Subject:   "oidc:user-1",
+		Role:      NetworkRoleMember,
+		CreatedAt: now,
+	}); err != nil {
+		t.Fatalf("NetworkMemberUpsert beta user-1: %v", err)
+	}
+	if err := s.NetworkMemberUpsert(ctx, NetworkMember{
+		NetworkID: "project-beta",
+		Subject:   "oidc:user-2",
+		Role:      NetworkRoleOwner,
+		CreatedAt: now,
+	}); err != nil {
+		t.Fatalf("NetworkMemberUpsert beta user-2: %v", err)
+	}
+
+	networks, err := s.NetworkListByMember(ctx, "oidc:user-1")
+	if err != nil {
+		t.Fatalf("NetworkListByMember: %v", err)
+	}
+	if len(networks) != 2 {
+		t.Fatalf("NetworkListByMember len = %d, want 2", len(networks))
+	}
+
+	member, err := s.NetworkMemberGet(ctx, "project-alpha", "oidc:user-1")
+	if err != nil {
+		t.Fatalf("NetworkMemberGet: %v", err)
+	}
+	if member == nil || member.Role != NetworkRoleOwner {
+		t.Fatalf("member = %#v, want owner", member)
+	}
+
+	count, err := s.NetworkMemberCount(ctx, "project-beta")
+	if err != nil {
+		t.Fatalf("NetworkMemberCount: %v", err)
+	}
+	if count != 2 {
+		t.Fatalf("NetworkMemberCount = %d, want 2", count)
 	}
 }
 
@@ -257,30 +308,25 @@ func TestMigrateLegacyNodesTableAddsNetworkID(t *testing.T) {
 	defer s.Close()
 
 	ctx := context.Background()
-	nodes, err := s.NodeList(ctx, "default")
+	nodes, err := s.NodeList(ctx, "")
 	if err != nil {
 		t.Fatalf("NodeList: %v", err)
 	}
 	if len(nodes) != 1 {
 		t.Fatalf("NodeList len = %d, want 1", len(nodes))
 	}
-	if nodes[0].NetworkID != "default" {
-		t.Fatalf("NetworkID = %q, want default", nodes[0].NetworkID)
+	if nodes[0].NetworkID != "" {
+		t.Fatalf("NetworkID = %q, want empty legacy network", nodes[0].NetworkID)
 	}
 
 	networks, err := s.NetworkList(ctx)
 	if err != nil {
 		t.Fatalf("NetworkList: %v", err)
 	}
-	foundDefault := false
 	for _, n := range networks {
-		if n.ID == "default" {
-			foundDefault = true
-			break
+		if n.ID == "" {
+			t.Fatalf("unexpected empty network listed: %#v", networks)
 		}
-	}
-	if !foundDefault {
-		t.Fatal("expected default network after legacy nodes migration")
 	}
 }
 

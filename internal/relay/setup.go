@@ -40,18 +40,16 @@ func RegisterWithAuthToken(ctx context.Context, relayURL, networkID, nodeName, a
 }
 
 type JoinResult struct {
-	NodeToken string `json:"node_token"`
-	NodeName  string `json:"node_name"`
 	NetworkID string `json:"network_id"`
 }
 
-func JoinWithInvite(ctx context.Context, relayURL, nodeName, inviteToken string) (*JoinResult, error) {
+func JoinNetworkWithInvite(ctx context.Context, relayURL, authToken, inviteToken string) (*JoinResult, error) {
 	body, _ := json.Marshal(map[string]string{
-		"node_name":    nodeName,
 		"invite_token": inviteToken,
 	})
-	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, relayURL+"/api/v1/join", bytes.NewReader(body))
+	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, relayURL+"/api/v1/networks/join", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+authToken)
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -73,9 +71,29 @@ func JoinWithInvite(ctx context.Context, relayURL, nodeName, inviteToken string)
 
 // RegisterWithInvite exchanges an invite token for a node token.
 func RegisterWithInvite(ctx context.Context, relayURL, nodeName, inviteToken string) (string, error) {
-	result, err := JoinWithInvite(ctx, relayURL, nodeName, inviteToken)
+	body, _ := json.Marshal(map[string]string{
+		"node_name":    nodeName,
+		"invite_token": inviteToken,
+	})
+	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, relayURL+"/api/v1/join", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("contacting relay: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		return "", fmt.Errorf("invite rejected (%d): %s", resp.StatusCode, b)
+	}
+
+	var result struct {
+		NodeToken string `json:"node_token"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", fmt.Errorf("parsing join response: %w", err)
 	}
 	return result.NodeToken, nil
 }

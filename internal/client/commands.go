@@ -1806,20 +1806,25 @@ func JoinNetwork(dataDir, relayURL, inviteToken string) error {
 		return fmt.Errorf("loading config: %w", err)
 	}
 
-	result, err := relay.JoinWithInvite(context.Background(), relayURL, cfg.Node.Name, inviteToken)
+	_, authToken, _, err := loadRelayAuth(dataDir, RelayAuthOptions{RelayURL: relayURL})
+	if err != nil {
+		return err
+	}
+
+	result, err := relay.JoinNetworkWithInvite(context.Background(), relayURL, authToken, inviteToken)
 	if err != nil {
 		return err
 	}
 
 	cfg.RelayURL = &relayURL
 	cfg.RelayNetwork = &result.NetworkID
-	cfg.RelayToken = &result.NodeToken
+	cfg.RelayToken = nil
 	cfg.RelayInviteToken = nil
 	if err := config.SaveConfig(dataDir, cfg); err != nil {
 		return fmt.Errorf("saving config: %w", err)
 	}
 
-	fmt.Fprintf(os.Stderr, "Joined network %q as node %q\n", result.NetworkID, cfg.Node.Name)
+	fmt.Fprintf(os.Stderr, "Joined network %q\n", result.NetworkID)
 	fmt.Fprintf(os.Stderr, "Start node agent: cw node\n")
 	return nil
 }
