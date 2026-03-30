@@ -8,7 +8,18 @@ import (
 	"github.com/spf13/cobra"
 )
 
+func initCmd() *cobra.Command {
+	return newProjectInitCmd("init [repo-url ...]", false)
+}
+
 func presetInitCmd() *cobra.Command {
+	cmd := newProjectInitCmd("init [repo-url ...]", true)
+	cmd.Hidden = true
+	cmd.Deprecated = "use 'cw init'"
+	return cmd
+}
+
+func newProjectInitCmd(use string, legacyPresetAlias bool) *cobra.Command {
 	var (
 		presetSlug    string
 		presetID      string
@@ -33,16 +44,25 @@ func presetInitCmd() *cobra.Command {
 		yes           bool
 	)
 
-	cmd := &cobra.Command{
-		Use:   "init [repo-url ...]",
-		Short: "Write a codewire.yaml preset",
-		Long: `Initialize a codewire.yaml preset from direct flags, a repo URL, or server-side preset resolution.
+	short := "Write a codewire.yaml project file"
+	long := `Initialize codewire.yaml from direct flags, a repo URL, or server-side preset resolution.
 
 Examples:
-  cw preset init
-  cw preset init --image full --install "pnpm install" --startup "pnpm dev"
-  cw preset init --preset go --save-preset fullstack-dev`,
-		Args: cobra.ArbitraryArgs,
+  cw init
+  cw init --image full --install "pnpm install" --startup "pnpm dev"
+  cw init --preset go --save-preset fullstack-dev`
+	if legacyPresetAlias {
+		short = "Write a codewire.yaml project file (deprecated: use 'cw init')"
+		long = `Deprecated alias for 'cw init'.
+
+Initialize codewire.yaml from direct flags, a repo URL, or server-side preset resolution.`
+	}
+
+	cmd := &cobra.Command{
+		Use:   use,
+		Short: short,
+		Long:  long,
+		Args:  cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if !force {
 				if _, err := os.Stat(filePath); err == nil {
@@ -80,9 +100,9 @@ Examples:
 			}
 
 			if err := writeResolvedCodewireYAML(filePath, resolved.Request); err != nil {
-				return fmt.Errorf("write preset: %w", err)
+				return fmt.Errorf("write codewire.yaml: %w", err)
 			}
-			successMsg("Preset written: %s", filePath)
+			successMsg("codewire.yaml written: %s", filePath)
 
 			if strings.TrimSpace(savePreset) != "" {
 				presetReq, err := createPresetRequestFromEnvironment(savePreset, resolved.Request)
@@ -94,6 +114,12 @@ Examples:
 					return fmt.Errorf("save preset: %w", err)
 				}
 				successMsg("Preset saved: %s (%s).", preset.Name, preset.ID)
+			}
+
+			if !legacyPresetAlias {
+				fmt.Fprintln(os.Stderr, "Next:")
+				fmt.Fprintln(os.Stderr, "  cw env create")
+				fmt.Fprintln(os.Stderr, "  cw local create")
 			}
 			return nil
 		},

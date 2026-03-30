@@ -10,13 +10,23 @@ import (
 	"github.com/codewiresh/codewire/internal/platform"
 )
 
-func TestPresetInitCmdExposesWriteAndSaveFlags(t *testing.T) {
-	cmd := presetInitCmd()
+func TestInitCmdExposesWriteAndSaveFlags(t *testing.T) {
+	cmd := initCmd()
 	if cmd.Flags().Lookup("file") == nil {
-		t.Fatal("expected preset init to expose --file")
+		t.Fatal("expected init to expose --file")
 	}
 	if cmd.Flags().Lookup("save-preset") == nil {
-		t.Fatal("expected preset init to expose --save-preset")
+		t.Fatal("expected init to expose --save-preset")
+	}
+}
+
+func TestPresetInitCmdIsHiddenDeprecatedAlias(t *testing.T) {
+	cmd := presetInitCmd()
+	if !cmd.Hidden {
+		t.Fatal("expected preset init alias to be hidden")
+	}
+	if cmd.Deprecated == "" {
+		t.Fatal("expected preset init alias to be deprecated")
 	}
 }
 

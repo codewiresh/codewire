@@ -93,6 +93,7 @@ func main() {
 		// Environments
 		grouped(envParentCmd(), "environment"),
 		grouped(localParentCmd(), "environment"),
+		grouped(initCmd(), "environment"),
 		grouped(presetParentCmd(), "environment"),
 		grouped(useCmd(), "environment"),
 		grouped(currentCmd(), "environment"),
