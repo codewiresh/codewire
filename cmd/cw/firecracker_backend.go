@@ -14,7 +14,7 @@ import (
 )
 
 const (
-	fcDefaultBootArgs = "console=ttyS0 reboot=k panic=1 pci=off"
+	fcDefaultBootArgs = "console=ttyS0 reboot=k panic=1 pci=off init=/usr/local/bin/cw-init"
 	fcDefaultVCPUs    = 2
 	fcDefaultMemMB    = 512
 )
@@ -143,12 +143,18 @@ func createLocalFirecrackerInstance(instance *cwconfig.LocalInstance) error {
 		return fmt.Errorf("kernel: %w", err)
 	}
 
+	// Build guest agent for injection into rootfs
+	agentPath, err := buildGuestAgent(dd)
+	if err != nil {
+		return fmt.Errorf("guest agent: %w", err)
+	}
+
 	// Build rootfs from OCI image
 	diskGB := instance.Disk
 	if diskGB <= 0 {
 		diskGB = 4
 	}
-	rootfsPath, err := buildFirecrackerRootfs(instance.Image, instance.Name, dd, diskGB)
+	rootfsPath, err := buildFirecrackerRootfs(instance.Image, instance.Name, dd, diskGB, agentPath)
 	if err != nil {
 		return fmt.Errorf("rootfs: %w", err)
 	}
@@ -165,6 +171,24 @@ func createLocalFirecrackerInstance(instance *cwconfig.LocalInstance) error {
 	}
 
 	return nil
+}
+
+// buildGuestAgent cross-compiles the guest agent binary for injection into rootfs.
+func buildGuestAgent(dataDir string) (string, error) {
+	agentPath := filepath.Join(dataDir, "firecracker", "cw-guest-agent")
+	// Use cached binary if it exists
+	if _, err := os.Stat(agentPath); err == nil {
+		return agentPath, nil
+	}
+
+	fmt.Fprintf(os.Stderr, "  Building guest agent...\n")
+	os.MkdirAll(filepath.Dir(agentPath), 0o755)
+	out, err := localRunCommand("go", "build", "-ldflags=-s -w",
+		"-o", agentPath, "./cmd/cw-guest-agent")
+	if err != nil {
+		return "", fmt.Errorf("build guest agent: %v\n%s", err, strings.TrimSpace(string(out)))
+	}
+	return agentPath, nil
 }
 
 // startFirecrackerProcess launches the firecracker binary and configures it via API.
