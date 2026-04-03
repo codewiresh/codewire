@@ -10,6 +10,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/codewiresh/codewire/internal/platform"
+	"github.com/codewiresh/codewire/internal/tui"
 )
 
 func loginCmd() *cobra.Command {
@@ -125,7 +126,6 @@ func loginWithDevice(client *platform.Client) (string, error) {
 
 	_ = openBrowser(dauth.VerificationURI)
 
-	// Poll for approval
 	interval := time.Duration(dauth.Interval) * time.Second
 	if interval < 5*time.Second {
 		interval = 5 * time.Second
@@ -136,32 +136,33 @@ func loginWithDevice(client *platform.Client) (string, error) {
 	}
 	deadline := time.Now().Add(time.Duration(expiresIn) * time.Second)
 
-	for time.Now().Before(deadline) {
-		time.Sleep(interval)
+	var resultName string
+
+	res, err := tui.RunSpinner("Waiting for authorization...", interval, func() (bool, string, error) {
+		if time.Now().After(deadline) {
+			return false, "", fmt.Errorf("timed out waiting for authorization")
+		}
 
 		resp, statusCode, err := client.DeviceToken(dauth.DeviceCode)
 		if err != nil {
 			if statusCode == 410 {
-				return "", fmt.Errorf("device code expired")
+				return false, "", fmt.Errorf("device code expired")
 			}
 			if statusCode == 403 {
-				return "", fmt.Errorf("authorization denied")
+				return false, "", fmt.Errorf("authorization denied")
 			}
-			// Network error or other transient failure, retry
-			continue
+			return false, "", nil // transient error, retry
 		}
 
 		if statusCode == 202 {
-			// Still pending
 			if resp.Status == "slow_down" {
 				interval *= 2
 			}
-			continue
+			return false, "", nil
 		}
 
-		// Success — verify token was actually set
 		if client.SessionToken == "" {
-			return "", fmt.Errorf("device auth approved but no session token received (status %d, session_token=%q)", statusCode, resp.SessionToken)
+			return false, "", fmt.Errorf("device auth approved but no session token received (status %d, session_token=%q)", statusCode, resp.SessionToken)
 		}
 
 		if resp.User != nil {
@@ -169,12 +170,20 @@ func loginWithDevice(client *platform.Client) (string, error) {
 			if name == "" {
 				name = resp.User.Email
 			}
-			return name, nil
+			resultName = name
+			return true, name, nil
 		}
-		return "(unknown)", nil
+		resultName = "(unknown)"
+		return true, "(unknown)", nil
+	})
+	if err != nil {
+		return "", err
+	}
+	if res.Err != nil {
+		return "", res.Err
 	}
 
-	return "", fmt.Errorf("timed out waiting for authorization")
+	return resultName, nil
 }
 
 func logoutCmd() *cobra.Command {

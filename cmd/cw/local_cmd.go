@@ -63,6 +63,7 @@ func localParentCmd() *cobra.Command {
 	cmd.AddCommand(localRmCmd())
 	cmd.AddCommand(localListCmd())
 	cmd.AddCommand(localInfoCmd())
+	cmd.AddCommand(localPortsCmd())
 	return cmd
 }
 
@@ -109,7 +110,7 @@ func localCreateCmd() *cobra.Command {
 		},
 	}
 
-	cmd.Flags().StringVar(&opts.Backend, "backend", "", "Local runtime backend (incus or docker)")
+	cmd.Flags().StringVar(&opts.Backend, "backend", "", "Local runtime backend (docker, incus, or firecracker)")
 	cmd.Flags().StringVar(&opts.Name, "name", "", "Instance name (defaults to the repo directory name)")
 	cmd.Flags().StringVar(&opts.Path, "path", ".", "Project directory to associate with the local instance")
 	cmd.Flags().StringVar(&opts.File, "file", "codewire.yaml", "Preset file path, relative to --path when not absolute")
@@ -269,6 +270,55 @@ func localInfoCmd() *cobra.Command {
 			return nil
 		},
 	}
+}
+
+func localPortsCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "ports [name] --publish <host>:<guest>",
+		Short: "Forward ports from host to a local Firecracker instance",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			instance, err := resolveLocalInstanceArg(optionalArg(args))
+			if err != nil {
+				return err
+			}
+			if instance.Backend != "firecracker" {
+				return fmt.Errorf("port forwarding only supported for firecracker backend (use docker -p for docker)")
+			}
+
+			publish, _ := cmd.Flags().GetStringSlice("publish")
+			if len(publish) == 0 {
+				if len(instance.Ports) == 0 {
+					fmt.Println("No ports configured.")
+					return nil
+				}
+				for _, p := range instance.Ports {
+					fmt.Printf("  %d (%s)\n", p.Port, p.Label)
+				}
+				return nil
+			}
+
+			vsockPath := instance.FirecrackerSocket + ".vsock"
+			for _, spec := range publish {
+				var hostPort, guestPort int
+				if _, err := fmt.Sscanf(spec, "%d:%d", &hostPort, &guestPort); err != nil {
+					return fmt.Errorf("invalid port spec %q (use host:guest format, e.g. 8080:3000)", spec)
+				}
+				ln, err := forwardPort(hostPort, guestPort, vsockPath)
+				if err != nil {
+					return err
+				}
+				defer ln.Close()
+				fmt.Fprintf(os.Stderr, "  Forwarding localhost:%d -> guest:%d\n", hostPort, guestPort)
+			}
+
+			fmt.Fprintf(os.Stderr, "\n  Press Ctrl+C to stop forwarding.\n")
+			// Block until interrupted
+			select {}
+		},
+	}
+	cmd.Flags().StringSliceP("publish", "p", nil, "Port mapping host:guest (e.g. 8080:3000)")
+	return cmd
 }
 
 func optionalArg(args []string) string {
@@ -456,12 +506,24 @@ func loadLocalCodewireConfig(projectDir, filePath string) (*cwconfig.CodewireCon
 	return loaded, nil
 }
 
+// saveLocalInstanceState persists an in-memory instance change back to TOML.
+func saveLocalInstanceState(instance *cwconfig.LocalInstance) error {
+	state, err := loadLocalInstancesForCLI()
+	if err != nil {
+		return err
+	}
+	state.Instances[instance.Name] = *instance
+	return saveLocalInstancesForCLI(state)
+}
+
 func createLocalRuntime(instance *cwconfig.LocalInstance) error {
 	switch instance.Backend {
 	case "incus":
 		return createLocalIncusInstance(instance)
 	case "docker":
 		return createLocalDockerInstance(instance)
+	case "firecracker":
+		return createLocalFirecrackerInstance(instance)
 	default:
 		return fmt.Errorf("unsupported local backend %q", instance.Backend)
 	}
@@ -473,6 +535,11 @@ func startLocalRuntime(instance *cwconfig.LocalInstance) error {
 		return runIncus("start", instance.RuntimeName)
 	case "docker":
 		return runDocker("start", instance.RuntimeName)
+	case "firecracker":
+		if err := startLocalFirecrackerInstance(instance); err != nil {
+			return err
+		}
+		return saveLocalInstanceState(instance)
 	default:
 		return fmt.Errorf("unsupported local backend %q", instance.Backend)
 	}
@@ -484,6 +551,11 @@ func stopLocalRuntime(instance *cwconfig.LocalInstance) error {
 		return runIncus("stop", instance.RuntimeName, "--force")
 	case "docker":
 		return runDocker("stop", "-t", "0", instance.RuntimeName)
+	case "firecracker":
+		if err := stopLocalFirecrackerInstance(instance); err != nil {
+			return err
+		}
+		return saveLocalInstanceState(instance)
 	default:
 		return fmt.Errorf("unsupported local backend %q", instance.Backend)
 	}
@@ -511,6 +583,8 @@ func deleteLocalRuntime(instance *cwconfig.LocalInstance) error {
 			return fmt.Errorf("docker rm %s: %v\n%s", instance.RuntimeName, err, strings.TrimSpace(string(out)))
 		}
 		return nil
+	case "firecracker":
+		return deleteLocalFirecrackerInstance(instance)
 	default:
 		return fmt.Errorf("unsupported local backend %q", instance.Backend)
 	}
@@ -522,6 +596,8 @@ func localRuntimeStatus(instance *cwconfig.LocalInstance) (string, error) {
 		return incusInstanceStatus(instance.RuntimeName)
 	case "docker":
 		return dockerContainerStatus(instance.RuntimeName)
+	case "firecracker":
+		return firecrackerInstanceStatus(instance)
 	default:
 		return "unknown", fmt.Errorf("unsupported local backend %q", instance.Backend)
 	}

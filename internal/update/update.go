@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mattn/go-isatty"
+	"github.com/charmbracelet/lipgloss"
 )
 
 const (
@@ -136,9 +136,8 @@ func BackgroundCheck(currentVersion string) func() {
 		case r := <-ch:
 			if r.newer {
 				msg := fmt.Sprintf("A new version of cw is available: %s → %s", currentVersion, r.latest)
-				if os.Getenv("NO_COLOR") == "" && (isatty.IsTerminal(os.Stderr.Fd()) || isatty.IsCygwinTerminal(os.Stderr.Fd())) {
-					msg = "\033[33m" + msg + "\033[0m"
-				}
+				style := lipgloss.NewRenderer(os.Stderr).NewStyle().Foreground(lipgloss.Color("3"))
+				msg = style.Render(msg)
 				fmt.Fprintf(os.Stderr, "\n%s\nRun `cw update` to upgrade.\n", msg)
 			}
 		default:

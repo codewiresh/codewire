@@ -5,82 +5,33 @@ import (
 	"os"
 	"text/tabwriter"
 
-	"github.com/mattn/go-isatty"
+	"github.com/charmbracelet/lipgloss"
 )
 
 var (
-	stderrColor bool
-	stdoutColor bool
+	stdoutRenderer = lipgloss.NewRenderer(os.Stdout)
+	stderrRenderer = lipgloss.NewRenderer(os.Stderr)
+
+	boldStyle   = stdoutRenderer.NewStyle().Bold(true)
+	dimStyle    = stdoutRenderer.NewStyle().Faint(true)
+	greenStyle  = stdoutRenderer.NewStyle().Foreground(lipgloss.Color("2"))
+	redStyle    = stdoutRenderer.NewStyle().Foreground(lipgloss.Color("1"))
+	yellowStyle = stdoutRenderer.NewStyle().Foreground(lipgloss.Color("3"))
+
+	greenErrStyle  = stderrRenderer.NewStyle().Foreground(lipgloss.Color("2"))
+	redErrStyle    = stderrRenderer.NewStyle().Foreground(lipgloss.Color("1"))
+	yellowErrStyle = stderrRenderer.NewStyle().Foreground(lipgloss.Color("3"))
 )
 
-func init() {
-	stderrColor = isatty.IsTerminal(os.Stderr.Fd()) || isatty.IsCygwinTerminal(os.Stderr.Fd())
-	stdoutColor = isatty.IsTerminal(os.Stdout.Fd()) || isatty.IsCygwinTerminal(os.Stdout.Fd())
-	if os.Getenv("NO_COLOR") != "" {
-		stderrColor = false
-		stdoutColor = false
-	}
-}
+func bold(s string) string   { return boldStyle.Render(s) }
+func dim(s string) string    { return dimStyle.Render(s) }
+func green(s string) string  { return greenStyle.Render(s) }
+func red(s string) string    { return redStyle.Render(s) }
+func yellow(s string) string { return yellowStyle.Render(s) }
 
-// ANSI helpers — all check stdoutColor before emitting codes.
-
-func bold(s string) string {
-	if !stdoutColor {
-		return s
-	}
-	return "\033[1m" + s + "\033[0m"
-}
-
-func dim(s string) string {
-	if !stdoutColor {
-		return s
-	}
-	return "\033[2m" + s + "\033[0m"
-}
-
-func green(s string) string {
-	if !stdoutColor {
-		return s
-	}
-	return "\033[32m" + s + "\033[0m"
-}
-
-func red(s string) string {
-	if !stdoutColor {
-		return s
-	}
-	return "\033[31m" + s + "\033[0m"
-}
-
-func yellow(s string) string {
-	if !stdoutColor {
-		return s
-	}
-	return "\033[33m" + s + "\033[0m"
-}
-
-// Stderr-targeted color helpers.
-
-func greenErr(s string) string {
-	if !stderrColor {
-		return s
-	}
-	return "\033[32m" + s + "\033[0m"
-}
-
-func redErr(s string) string {
-	if !stderrColor {
-		return s
-	}
-	return "\033[31m" + s + "\033[0m"
-}
-
-func yellowErr(s string) string {
-	if !stderrColor {
-		return s
-	}
-	return "\033[33m" + s + "\033[0m"
-}
+func greenErr(s string) string  { return greenErrStyle.Render(s) }
+func redErr(s string) string    { return redErrStyle.Render(s) }
+func yellowErr(s string) string { return yellowErrStyle.Render(s) }
 
 // stateColor applies color to a state label for stdout.
 func stateColor(state string) string {

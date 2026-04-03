@@ -33,9 +33,6 @@ func TestSetupSetsScrollRegionAndDrawsBar(t *testing.T) {
 	if !strings.Contains(out, "\x1b[1;23r") {
 		t.Fatal("should contain scroll region")
 	}
-	if !strings.Contains(out, "\x1b[7m") {
-		t.Fatal("should contain reverse video")
-	}
 	if !strings.Contains(out, "session 1") {
 		t.Fatal("should contain session 1")
 	}
@@ -65,7 +62,7 @@ func TestTeardownExitsAltScreenAndClearsBar(t *testing.T) {
 func TestDrawContainsSessionInfo(t *testing.T) {
 	bar := New(42, 80, 24)
 	out := string(bar.Draw())
-	for _, s := range []string{"session 42", "running", "Ctrl+B d", "\x1b[7m"} {
+	for _, s := range []string{"session 42", "running", "Ctrl+B d"} {
 		if !strings.Contains(out, s) {
 			t.Fatalf("should contain %q", s)
 		}

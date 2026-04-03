@@ -52,18 +52,12 @@ func resourceStatusCmd() *cobra.Command {
 
 			// If following and resource is transitioning, use SSE
 			if follow && (resource.Status == "provisioning" || resource.Status == "pending") {
-				timeline := newProvisionTimeline()
 				events := make(chan platform.ProvisionEvent, 64)
 				if err := client.StreamProvisionEvents(resource.ID, events); err != nil {
 					return fmt.Errorf("stream events: %w", err)
 				}
-				for ev := range events {
-					timeline.handleEvent(ev)
-					if ev.Phase == "complete" || (ev.Phase == "error" && ev.Status == "failed") {
-						break
-					}
-				}
-				return nil
+				_, err := runProvisionTimeline(events)
+				return err
 			}
 
 			// Static display: fetch and render events

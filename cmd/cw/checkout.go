@@ -2,10 +2,10 @@ package main
 
 import (
 	"fmt"
-	"os"
 	"time"
 
 	"github.com/codewiresh/codewire/internal/platform"
+	"github.com/codewiresh/codewire/internal/tui"
 )
 
 // handleCheckoutAndWait opens a browser for Stripe checkout, polls for payment
@@ -18,70 +18,87 @@ func handleCheckoutAndWait(client *platform.Client, result *platform.CreateResou
 		fmt.Printf("  URL: %s\n", result.CheckoutURL)
 		_ = openBrowser(result.CheckoutURL)
 
-		fmt.Print("  Waiting for checkout...")
-		resource, err := client.WaitForCheckout(result.ID, 2*time.Second, 5*time.Minute)
-		if err != nil {
-			fmt.Println()
-			return fmt.Errorf("checkout not completed: %w\n  Run `cw setup` to try again", err)
+		type checkoutResult struct {
+			resource *platform.PlatformResource
+			err      error
 		}
+		ch := make(chan checkoutResult, 1)
+		go func() {
+			r, err := client.WaitForCheckout(result.ID, 2*time.Second, 5*time.Minute)
+			ch <- checkoutResult{r, err}
+		}()
 
-		if resource.BillingStatus == "active" || resource.BillingStatus == "trialing" {
-			fmt.Println(" done")
-		} else {
-			fmt.Printf(" %s\n", resource.BillingStatus)
+		var resource *platform.PlatformResource
+		spinRes, spinErr := tui.RunSpinner("Waiting for checkout...", time.Second, func() (bool, string, error) {
+			select {
+			case r := <-ch:
+				if r.err != nil {
+					return false, "", r.err
+				}
+				resource = r.resource
+				return true, r.resource.BillingStatus, nil
+			default:
+				return false, "", nil
+			}
+		})
+		if spinErr != nil {
+			return fmt.Errorf("checkout not completed: %w\n  Run `cw setup` to try again", spinErr)
 		}
+		if spinRes.Err != nil {
+			return fmt.Errorf("checkout not completed: %w\n  Run `cw setup` to try again", spinRes.Err)
+		}
+		_ = resource
 	}
 
 	fmt.Printf("  Provisioning %q (%s)\n\n", result.Name, result.Type)
-
-	timeline := newProvisionTimeline()
 
 	// Try SSE first, fall back to polling
 	events := make(chan platform.ProvisionEvent, 64)
 	sseErr := client.StreamProvisionEvents(result.ID, events)
 
 	if sseErr != nil {
-		// Fallback: poll with phase display
-		fmt.Print("  Waiting for provisioning...")
-		resource, err := client.WaitForResource(result.ID, "running", 5*time.Second, 10*time.Minute)
-		if err != nil {
-			fmt.Println()
-			return fmt.Errorf("provisioning failed: %w\n  Check status with: cw resources get %s", err, result.ID)
+		// Fallback: poll with spinner
+		type waitResult struct {
+			err error
 		}
-		_ = resource
-		fmt.Printf(" ready (%s)\n", timeline.total())
+		wch := make(chan waitResult, 1)
+		go func() {
+			_, err := client.WaitForResource(result.ID, "running", 5*time.Second, 10*time.Minute)
+			wch <- waitResult{err}
+		}()
+
+		spinRes, spinErr := tui.RunSpinner("Waiting for provisioning...", time.Second, func() (bool, string, error) {
+			select {
+			case r := <-wch:
+				if r.err != nil {
+					return false, "", r.err
+				}
+				return true, "ready", nil
+			default:
+				return false, "", nil
+			}
+		})
+		if spinErr != nil {
+			return fmt.Errorf("provisioning failed: %w\n  Check status with: cw resources get %s", spinErr, result.ID)
+		}
+		if spinRes.Err != nil {
+			return fmt.Errorf("provisioning failed: %w\n  Check status with: cw resources get %s", spinRes.Err, result.ID)
+		}
 		return nil
 	}
 
 	// SSE path: render live timeline
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		for ev := range events {
-			timeline.handleEvent(ev)
-			if ev.Phase == "complete" && ev.Status == "completed" {
-				return
-			}
-			if ev.Phase == "error" && ev.Status == "failed" {
-				return
-			}
-		}
-	}()
-
-	// Wait for either SSE completion or timeout
-	select {
-	case <-done:
-	case <-time.After(10 * time.Minute):
-		fmt.Fprintf(os.Stderr, "\n  Timed out after 10 minutes.\n")
-		return fmt.Errorf("provisioning timed out\n  Check status with: cw resources get %s", result.ID)
+	res, err := runProvisionTimeline(events)
+	if err != nil {
+		return fmt.Errorf("timeline error: %w", err)
 	}
 
 	fmt.Println()
-	if timeline.failed() {
-		return fmt.Errorf("provisioning failed (%s)\n  Run `cw resources retry %s` to retry", timeline.total(), result.Slug)
+	if res.Failed {
+		return fmt.Errorf("provisioning failed (%s)\n  Run `cw resources retry %s` to retry", res.Total, result.Slug)
 	}
 
-	fmt.Printf("  Ready! (%s)\n", timeline.total())
+	fmt.Printf("  Ready! (%s)\n", res.Total)
 	return nil
 }
 

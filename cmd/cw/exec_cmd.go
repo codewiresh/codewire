@@ -9,6 +9,7 @@ import (
 	"github.com/spf13/cobra"
 
 	cwconfig "github.com/codewiresh/codewire/internal/config"
+	"github.com/codewiresh/codewire/internal/guestagent"
 	"github.com/codewiresh/codewire/internal/platform"
 )
 
@@ -68,6 +69,23 @@ var execInLocalRuntimeTarget = func(instance *cwconfig.LocalInstance, workDir st
 		args = append(args, instance.RuntimeName, "--")
 		args = append(args, command...)
 		cmd = osExec.Command("incus", args...)
+	case "firecracker":
+		vsockPath := instance.FirecrackerSocket + ".vsock"
+		agent, err := guestagent.DialVsockUDS(vsockPath)
+		if err != nil {
+			return fmt.Errorf("connect to guest agent: %w\n  Is the VM running? Check: cw local list", err)
+		}
+		defer agent.Close()
+		wd := workDir
+		if wd == "" {
+			wd = instance.Workdir
+		}
+		exitCode, execErr := agent.Exec(command, wd)
+		if execErr != nil {
+			return execErr
+		}
+		os.Exit(exitCode)
+		return nil
 	default:
 		return fmt.Errorf("unsupported local backend %q", instance.Backend)
 	}
