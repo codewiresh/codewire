@@ -49,7 +49,7 @@ require (
 	filippo.io/edwards25519 v1.2.0 // indirect
 	github.com/akutz/memconn v0.1.0 // indirect
 	github.com/coder/websocket v1.8.14 // indirect
-	github.com/codewiresh/tailnet v0.0.16
+	github.com/codewiresh/tailnet v0.0.17
 	github.com/creachadair/msync v0.7.1 // indirect
 	github.com/dblohm7/wingoes v0.0.0-20240119213807-a09d6be7affa // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
