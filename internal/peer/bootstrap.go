@@ -61,7 +61,25 @@ func DialEnvironmentPeerTCP(ctx context.Context, client *platform.Client, orgID,
 			fmt.Sscanf(p, "%d", &derpPort)
 		}
 	}
-	derpMap := tailnetlib.NewDERPMap(serverHost, derpPort, insecure)
+	// Build a minimal relay-only DERPMap for bootstrap. The server's
+	// coordinator will send the full DERPMap (with STUN regions and the
+	// correct DERP hostname) once the WebSocket connects.
+	derpMap := &tailcfg.DERPMap{
+		Regions: map[int]*tailcfg.DERPRegion{
+			1: {
+				RegionID:   1,
+				RegionCode: "cw",
+				RegionName: "Codewire",
+				Nodes: []*tailcfg.DERPNode{{
+					Name:             "1a",
+					RegionID:         1,
+					HostName:         serverHost,
+					DERPPort:         derpPort,
+					InsecureForTests: insecure,
+				}},
+			},
+		},
+	}
 	debugf("initial derp target host=%s port=%d insecure=%t", serverHost, derpPort, insecure)
 
 	conn, err := tailnetlib.NewConn(&tailnetlib.Options{
