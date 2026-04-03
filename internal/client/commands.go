@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/BurntSushi/toml"
+	"github.com/charmbracelet/lipgloss"
 	qrcode "github.com/skip2/go-qrcode"
 
 	"github.com/codewiresh/codewire/internal/config"
@@ -752,12 +753,17 @@ type watchLine struct {
 	err   error
 }
 
-var watchColors = []string{
-	"\x1b[32m", "\x1b[33m", "\x1b[34m",
-	"\x1b[35m", "\x1b[36m", "\x1b[31m",
-}
+var watchColorFuncs []func(string) string
 
-const colorReset = "\x1b[0m"
+func init() {
+	r := lipgloss.NewRenderer(os.Stdout)
+	for _, c := range []lipgloss.Color{"2", "3", "4", "5", "6", "1"} {
+		s := r.NewStyle().Foreground(c)
+		watchColorFuncs = append(watchColorFuncs, func(text string) string {
+			return s.Render(text)
+		})
+	}
+}
 
 // WatchMultiByTag watches all sessions matching a tag, merging their output
 // with colored prefixes. It writes to w (os.Stdout for CLI, or a buffer for
@@ -799,12 +805,13 @@ func WatchMultiByTag(target *Target, tag string, w io.Writer, timeout *uint64) e
 		if label == "" {
 			label = fmt.Sprintf("%d", s.ID)
 		}
-		color := watchColors[idx%len(watchColors)]
+		colorFn := watchColorFuncs[idx%len(watchColorFuncs)]
+		prefix := colorFn(fmt.Sprintf("[%s]", label))
 		sessionID := s.ID
 
 		go func() {
 			defer wg.Done()
-			watchSingleToChannel(target, sessionID, label, color, merged)
+			watchSingleToChannel(target, sessionID, prefix, merged)
 		}()
 	}
 
@@ -832,11 +839,11 @@ func WatchMultiByTag(target *Target, tag string, w io.Writer, timeout *uint64) e
 				return nil // all watchers done
 			}
 			if line.err != nil {
-				fmt.Fprintf(w, "%s[%s]%s error: %v\n", line.label, line.label, colorReset, line.err)
+				fmt.Fprintf(w, "%s error: %v\n", line.label, line.err)
 				continue
 			}
 			if line.data != "" {
-				fmt.Fprintf(w, "%s[%s]%s %s", line.label, line.label, colorReset, line.data)
+				fmt.Fprintf(w, "%s %s", line.label, line.data)
 			}
 		case <-timer.C:
 			fmt.Fprintf(os.Stderr, "\n[cw] watch timeout reached\n")
@@ -847,10 +854,10 @@ func WatchMultiByTag(target *Target, tag string, w io.Writer, timeout *uint64) e
 
 // watchSingleToChannel connects to a single session's WatchSession stream
 // and sends output lines to the merged channel.
-func watchSingleToChannel(target *Target, sessionID uint32, label, color string, merged chan<- watchLine) {
+func watchSingleToChannel(target *Target, sessionID uint32, prefix string, merged chan<- watchLine) {
 	reader, writer, err := target.Connect()
 	if err != nil {
-		merged <- watchLine{label: color, err: err}
+		merged <- watchLine{label: prefix, err: err}
 		return
 	}
 	defer reader.Close()
@@ -863,7 +870,7 @@ func watchSingleToChannel(target *Target, sessionID uint32, label, color string,
 		IncludeHistory: &includeHistory,
 	}
 	if err := writer.SendRequest(req); err != nil {
-		merged <- watchLine{label: color, err: err}
+		merged <- watchLine{label: prefix, err: err}
 		return
 	}
 
@@ -886,14 +893,14 @@ func watchSingleToChannel(target *Target, sessionID uint32, label, color string,
 		}
 		if resp.Type == "WatchUpdate" {
 			if resp.Output != nil && *resp.Output != "" {
-				merged <- watchLine{label: color, data: *resp.Output}
+				merged <- watchLine{label: prefix, data: *resp.Output}
 			}
 			if resp.Done != nil && *resp.Done {
 				return
 			}
 		}
 		if resp.Type == "Error" {
-			merged <- watchLine{label: color, err: fmt.Errorf("%s", resp.Message)}
+			merged <- watchLine{label: prefix, err: fmt.Errorf("%s", resp.Message)}
 			return
 		}
 	}

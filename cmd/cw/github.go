@@ -7,6 +7,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/codewiresh/codewire/internal/platform"
+	"github.com/codewiresh/codewire/internal/tui"
 )
 
 func githubCmd() *cobra.Command {
@@ -108,15 +109,36 @@ func setupGitHub(client *platform.Client) error {
 	// Try to open browser
 	_ = openBrowser(deviceCode.VerificationURI)
 
-	fmt.Print("  Waiting for authorization...")
-
-	// Poll for token
-	tokenResp, err := platform.PollForToken(ghCfg.ClientID, deviceCode.DeviceCode, deviceCode.Interval)
-	if err != nil {
-		fmt.Println(" failed")
-		return err
+	// Poll for token with spinner
+	type tokenResult struct {
+		resp *platform.GitHubTokenResponse
+		err  error
 	}
-	fmt.Println(" done")
+	ch := make(chan tokenResult, 1)
+	go func() {
+		resp, err := platform.PollForToken(ghCfg.ClientID, deviceCode.DeviceCode, deviceCode.Interval)
+		ch <- tokenResult{resp, err}
+	}()
+
+	var tokenResp *platform.GitHubTokenResponse
+	res, spinErr := tui.RunSpinner("Waiting for authorization...", time.Second, func() (bool, string, error) {
+		select {
+		case r := <-ch:
+			if r.err != nil {
+				return false, "", r.err
+			}
+			tokenResp = r.resp
+			return true, "done", nil
+		default:
+			return false, "", nil
+		}
+	})
+	if spinErr != nil {
+		return spinErr
+	}
+	if res.Err != nil {
+		return res.Err
+	}
 
 	// Fetch username
 	username, err := platform.FetchGitHubUsername(tokenResp.AccessToken)

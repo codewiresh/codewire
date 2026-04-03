@@ -2,8 +2,13 @@ package statusbar
 
 import (
 	"fmt"
+	"os"
 	"time"
+
+	"github.com/charmbracelet/lipgloss"
 )
+
+var barStyle = lipgloss.NewRenderer(os.Stdout).NewStyle().Reverse(true)
 
 type StatusBar struct {
 	SessionID uint32
@@ -105,8 +110,8 @@ func (s *StatusBar) Draw() []byte {
 	out = append(out, "\x1b7"...)
 	// Move to status bar row (last row)
 	out = append(out, fmt.Sprintf("\x1b[%d;1H", s.Rows)...)
-	// Reverse video + content + reset
-	out = append(out, fmt.Sprintf("\x1b[7m%s\x1b[0m", padded)...)
+	// Reverse video + content
+	out = append(out, barStyle.Render(padded)...)
 	// Restore cursor
 	out = append(out, "\x1b8"...)
 	return out
