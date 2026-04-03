@@ -33,6 +33,12 @@ type LocalInstance struct {
 	Agent              string            `toml:"agent,omitempty"`
 	IncludeOrgSecrets  *bool             `toml:"include_org_secrets,omitempty"`
 	IncludeUserSecrets *bool             `toml:"include_user_secrets,omitempty"`
+
+	// Firecracker-specific fields (only populated when Backend == "firecracker")
+	FirecrackerPID    int    `toml:"firecracker_pid,omitempty"`
+	FirecrackerSocket string `toml:"firecracker_socket,omitempty"`
+	KernelPath        string `toml:"kernel_path,omitempty"`
+	RootfsPath        string `toml:"rootfs_path,omitempty"`
 	CreatedAt          string            `toml:"created_at"`
 	LastUsedAt         string            `toml:"last_used_at,omitempty"`
 }

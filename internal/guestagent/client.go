@@ -1,11 +1,12 @@
 package guestagent
 
 import (
+	"bufio"
 	"fmt"
 	"io"
+	"net"
 	"os"
-
-	"github.com/mdlayher/vsock"
+	"strings"
 )
 
 const (
@@ -13,18 +14,56 @@ const (
 	DefaultCID uint32 = 3
 )
 
-// Client connects to the guest agent over vsock.
+// Client connects to the guest agent over Firecracker's vsock UDS.
 type Client struct {
-	conn *vsock.Conn
+	conn net.Conn
 }
 
-// Dial connects to the guest agent at the given CID.
-func Dial(cid uint32) (*Client, error) {
-	conn, err := vsock.Dial(cid, AgentPort, nil)
+// DialVsockUDS connects to the guest agent via Firecracker's vsock Unix socket.
+// Firecracker exposes guest vsock ports through a UDS with a CONNECT handshake:
+// 1. Connect to the Unix socket at udsPath
+// 2. Send "CONNECT <port>\n"
+// 3. Receive "OK <port>\n"
+func DialVsockUDS(udsPath string) (*Client, error) {
+	conn, err := net.Dial("unix", udsPath)
 	if err != nil {
-		return nil, fmt.Errorf("vsock dial cid=%d port=%d: %w", cid, AgentPort, err)
+		return nil, fmt.Errorf("connect to vsock UDS %s: %w", udsPath, err)
 	}
-	return &Client{conn: conn}, nil
+
+	// Firecracker vsock handshake
+	connectMsg := fmt.Sprintf("CONNECT %d\n", AgentPort)
+	if _, err := conn.Write([]byte(connectMsg)); err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("vsock CONNECT: %w", err)
+	}
+
+	reader := bufio.NewReader(conn)
+	response, err := reader.ReadString('\n')
+	if err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("vsock CONNECT response: %w", err)
+	}
+
+	response = strings.TrimSpace(response)
+	if !strings.HasPrefix(response, "OK") {
+		conn.Close()
+		return nil, fmt.Errorf("vsock CONNECT failed: %q", response)
+	}
+
+	// The connection is now a transparent pipe to the guest's vsock port.
+	// Wrap with the buffered reader since we already consumed from it.
+	return &Client{conn: &bufferedConn{Conn: conn, reader: reader}}, nil
+}
+
+// bufferedConn wraps a net.Conn with a bufio.Reader for reads
+// (since we already consumed the handshake response from the reader).
+type bufferedConn struct {
+	net.Conn
+	reader *bufio.Reader
+}
+
+func (c *bufferedConn) Read(p []byte) (int, error) {
+	return c.reader.Read(p)
 }
 
 // Close closes the connection.

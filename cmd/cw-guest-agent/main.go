@@ -70,7 +70,18 @@ func handleExec(conn io.Writer, req *guestagent.Request) {
 	if req.Workdir != "" {
 		cmd.Dir = req.Workdir
 	}
-	cmd.Env = os.Environ()
+	env := os.Environ()
+	hasPath := false
+	for _, e := range env {
+		if len(e) > 5 && e[:5] == "PATH=" {
+			hasPath = true
+			break
+		}
+	}
+	if !hasPath {
+		env = append(env, "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
+	}
+	cmd.Env = env
 
 	stdout, _ := cmd.StdoutPipe()
 	stderr, _ := cmd.StderrPipe()

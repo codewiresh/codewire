@@ -73,7 +73,8 @@ func buildFirecrackerRootfs(image, instanceName, dataDir string, diskGB int, age
 			"tar xf /rootfs.tar -C /mnt/rootfs 2>/dev/null; "+
 			"cp /cw-guest-agent /mnt/rootfs/usr/local/bin/cw-guest-agent && "+
 			"chmod 755 /mnt/rootfs/usr/local/bin/cw-guest-agent && "+
-			"printf '#!/bin/sh\\nmount -t proc proc /proc 2>/dev/null\\nmount -t sysfs sys /sys 2>/dev/null\\nmount -t devtmpfs devtmpfs /dev 2>/dev/null\\n/usr/local/bin/cw-guest-agent &\\nexec /bin/sh\\n' > /mnt/rootfs/usr/local/bin/cw-init && "+
+			"mkdir -p /mnt/rootfs/workspace && "+
+			"printf '#!/bin/sh\\nmount -t proc proc /proc 2>/dev/null\\nmount -t sysfs sys /sys 2>/dev/null\\nmount -t devtmpfs devtmpfs /dev 2>/dev/null\\nexport PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\\n/usr/local/bin/cw-guest-agent &\\nexec /bin/sh\\n' > /mnt/rootfs/usr/local/bin/cw-init && "+
 			"chmod 755 /mnt/rootfs/usr/local/bin/cw-init && "+
 			"sync && umount /mnt/rootfs && losetup -d $LOOP",
 	)

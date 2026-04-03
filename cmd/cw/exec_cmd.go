@@ -70,7 +70,8 @@ var execInLocalRuntimeTarget = func(instance *cwconfig.LocalInstance, workDir st
 		args = append(args, command...)
 		cmd = osExec.Command("incus", args...)
 	case "firecracker":
-		agent, err := guestagent.Dial(guestagent.DefaultCID)
+		vsockPath := instance.FirecrackerSocket + ".vsock"
+		agent, err := guestagent.DialVsockUDS(vsockPath)
 		if err != nil {
 			return fmt.Errorf("connect to guest agent: %w\n  Is the VM running? Check: cw local list", err)
 		}

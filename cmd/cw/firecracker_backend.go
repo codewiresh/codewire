@@ -183,8 +183,9 @@ func buildGuestAgent(dataDir string) (string, error) {
 
 	fmt.Fprintf(os.Stderr, "  Building guest agent...\n")
 	os.MkdirAll(filepath.Dir(agentPath), 0o755)
-	out, err := localRunCommand("go", "build", "-ldflags=-s -w",
-		"-o", agentPath, "./cmd/cw-guest-agent")
+	// Must be static (CGO_ENABLED=0) to run in Alpine/musl-based images
+	out, err := localRunCommand("sh", "-c",
+		fmt.Sprintf("CGO_ENABLED=0 GOOS=linux go build -ldflags='-s -w' -o %s ./cmd/cw-guest-agent", agentPath))
 	if err != nil {
 		return "", fmt.Errorf("build guest agent: %v\n%s", err, strings.TrimSpace(string(out)))
 	}

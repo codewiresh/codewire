@@ -14,7 +14,6 @@ import (
 	"github.com/spf13/cobra"
 
 	cwconfig "github.com/codewiresh/codewire/internal/config"
-	"github.com/codewiresh/codewire/internal/guestagent"
 )
 
 const localWorkspacePath = "/workspace"
@@ -299,12 +298,13 @@ func localPortsCmd() *cobra.Command {
 				return nil
 			}
 
+			vsockPath := instance.FirecrackerSocket + ".vsock"
 			for _, spec := range publish {
 				var hostPort, guestPort int
 				if _, err := fmt.Sscanf(spec, "%d:%d", &hostPort, &guestPort); err != nil {
 					return fmt.Errorf("invalid port spec %q (use host:guest format, e.g. 8080:3000)", spec)
 				}
-				ln, err := forwardPort(hostPort, guestPort, guestagent.DefaultCID)
+				ln, err := forwardPort(hostPort, guestPort, vsockPath)
 				if err != nil {
 					return err
 				}
