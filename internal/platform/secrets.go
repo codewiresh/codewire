@@ -19,6 +19,19 @@ type setSecretRequest struct {
 	Value string `json:"value"`
 }
 
+type renameSecretRequest struct {
+	OrgID  string `json:"org_id"`
+	NewKey string `json:"new_key"`
+}
+
+type renameProjectSecretRequest struct {
+	NewKey string `json:"new_key"`
+}
+
+type renameUserSecretRequest struct {
+	NewKey string `json:"new_key"`
+}
+
 // ListSecrets returns secret metadata (names only, no values) for an org.
 func (c *Client) ListSecrets(orgID string) ([]SecretMetadata, error) {
 	var resp listSecretsResponse
@@ -40,6 +53,14 @@ func (c *Client) SetSecret(orgID, key, value string) error {
 // DeleteSecret removes a secret from an org.
 func (c *Client) DeleteSecret(orgID, key string) error {
 	return c.do("DELETE", fmt.Sprintf("/api/v1/secrets/%s?org_id=%s", key, orgID), nil, nil)
+}
+
+// RenameSecret renames a secret key for an org.
+func (c *Client) RenameSecret(orgID, oldKey, newKey string) error {
+	return c.do("POST", fmt.Sprintf("/api/v1/secrets/%s/rename", oldKey), &renameSecretRequest{
+		OrgID:  orgID,
+		NewKey: newKey,
+	}, nil)
 }
 
 // ── Secret Project methods ───────────────────────────────────────────
@@ -97,6 +118,12 @@ func (c *Client) DeleteProjectSecret(orgID, projectID, key string) error {
 	return c.do("DELETE", fmt.Sprintf("/api/v1/organizations/%s/secret-projects/%s/secrets/%s", orgID, projectID, key), nil, nil)
 }
 
+// RenameProjectSecret renames a secret key in a project.
+func (c *Client) RenameProjectSecret(orgID, projectID, oldKey, newKey string) error {
+	return c.do("POST", fmt.Sprintf("/api/v1/organizations/%s/secret-projects/%s/secrets/%s/rename", orgID, projectID, oldKey),
+		&renameProjectSecretRequest{NewKey: newKey}, nil)
+}
+
 // ── User Secret methods ─────────────────────────────────────────────
 
 type setUserSecretRequest struct {
@@ -123,4 +150,10 @@ func (c *Client) SetUserSecret(key, value string) error {
 // DeleteUserSecret removes a user secret.
 func (c *Client) DeleteUserSecret(key string) error {
 	return c.do("DELETE", fmt.Sprintf("/api/v1/user/secrets/%s", key), nil, nil)
+}
+
+// RenameUserSecret renames a user secret key.
+func (c *Client) RenameUserSecret(oldKey, newKey string) error {
+	return c.do("POST", fmt.Sprintf("/api/v1/user/secrets/%s/rename", oldKey),
+		&renameUserSecretRequest{NewKey: newKey}, nil)
 }

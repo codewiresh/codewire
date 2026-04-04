@@ -22,6 +22,7 @@ func secretsCmd() *cobra.Command {
 		secretsSetCmd(),
 		secretsDeleteCmd(),
 		secretsRmCmd(),
+		secretsRenameCmd(),
 		secretsUserCmd(),
 		secretsOrgCmd(),
 	)
@@ -234,6 +235,39 @@ func secretsRmCmd() *cobra.Command {
 	return cmd
 }
 
+// ── cw secrets rename <project> <old-key> <new-key> ────────────────
+
+func secretsRenameCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "rename <project> <old-key> <new-key>",
+		Short: "Rename a secret key in a project",
+		Args:  cobra.ExactArgs(3),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			oid, client, err := getDefaultOrg()
+			if err != nil {
+				return err
+			}
+
+			projectName := args[0]
+			oldKey := args[1]
+			newKey := args[2]
+
+			project, err := findProjectByName(client, oid, projectName)
+			if err != nil {
+				return err
+			}
+
+			if err := client.RenameProjectSecret(oid, project.ID, oldKey, newKey); err != nil {
+				return fmt.Errorf("rename secret: %w", err)
+			}
+
+			successMsg("Secret %s renamed to %s in project %q.", oldKey, newKey, projectName)
+			return nil
+		},
+	}
+	return cmd
+}
+
 // ── cw secrets user ──────────────────────────────────────────────────
 
 func secretsUserCmd() *cobra.Command {
@@ -245,6 +279,7 @@ func secretsUserCmd() *cobra.Command {
 		secretsUserListCmd(),
 		secretsUserSetCmd(),
 		secretsUserDeleteCmd(),
+		secretsUserRenameCmd(),
 	)
 	return cmd
 }
@@ -323,6 +358,28 @@ func secretsUserSetCmd() *cobra.Command {
 	return cmd
 }
 
+func secretsUserRenameCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "rename <old-key> <new-key>",
+		Short: "Rename a user secret key",
+		Args:  cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client, err := platform.NewClient()
+			if err != nil {
+				return err
+			}
+
+			if err := client.RenameUserSecret(args[0], args[1]); err != nil {
+				return fmt.Errorf("rename user secret: %w", err)
+			}
+
+			successMsg("Secret %s renamed to %s.", args[0], args[1])
+			return nil
+		},
+	}
+	return cmd
+}
+
 func secretsUserDeleteCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "delete <KEY>",
@@ -359,6 +416,7 @@ func secretsOrgCmd() *cobra.Command {
 		secretsOrgListCmd(),
 		secretsOrgSetCmd(),
 		secretsOrgDeleteCmd(),
+		secretsOrgRenameCmd(),
 	)
 	return cmd
 }
@@ -431,6 +489,28 @@ func secretsOrgSetCmd() *cobra.Command {
 			}
 
 			successMsg("Secret %s set.", key)
+			return nil
+		},
+	}
+	return cmd
+}
+
+func secretsOrgRenameCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "rename <old-key> <new-key>",
+		Short: "Rename an organization secret key",
+		Args:  cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			orgID, client, err := getDefaultOrg()
+			if err != nil {
+				return err
+			}
+
+			if err := client.RenameSecret(orgID, args[0], args[1]); err != nil {
+				return fmt.Errorf("rename org secret: %w", err)
+			}
+
+			successMsg("Secret %s renamed to %s.", args[0], args[1])
 			return nil
 		},
 	}
