@@ -38,6 +38,11 @@ func envParentCmd() *cobra.Command {
 	cmd.AddCommand(envNukeCmd())
 	cmd.AddCommand(envLogsCmd())
 	cmd.AddCommand(portParentCmd())
+	cmd.AddCommand(envProtectCmd())
+	cmd.AddCommand(envUnprotectCmd())
+	cmd.AddCommand(envCancelDeleteCmd())
+	cmd.AddCommand(envExtendCmd())
+	cmd.AddCommand(envAccessCmd())
 	return cmd
 }
 
@@ -182,13 +187,22 @@ func environmentCardLines(env platform.Environment, currentRef string) []string 
 		marker = " " + green("(current)")
 	}
 
+	protectTag := ""
+	if env.Protected {
+		protectTag = " [protected]"
+	}
+	if env.DeletionGraceUntil != nil {
+		protectTag = " [deleting]"
+	}
+
 	lines := []string{
-		fmt.Sprintf("%s [%s]  %s  %s%s",
+		fmt.Sprintf("%s [%s]  %s  %s%s%s",
 			bold(environmentDisplayName(env)),
 			dim(shortEnvID(env.ID)),
 			stateColor(env.State),
 			timeAgo(env.CreatedAt),
 			marker,
+			protectTag,
 		),
 		fmt.Sprintf("  %s  %dm/%dMB  ttl %s",
 			env.Type,
@@ -788,6 +802,12 @@ func envInfoCmd() *cobra.Command {
 			}
 			fmt.Printf("Recoverable:   %v\n", env.Recoverable)
 			fmt.Printf("TotalRunning:  %ds\n", env.TotalRunningSeconds)
+			if env.Protected {
+				fmt.Printf("%-14s %s\n", bold("Protected:"), "yes")
+			}
+			if env.DeletionGraceUntil != nil {
+				fmt.Printf("%-14s %s\n", bold("DeletingAt:"), *env.DeletionGraceUntil)
+			}
 			return nil
 		},
 	}
@@ -866,6 +886,17 @@ func envRmCmd() *cobra.Command {
 			}
 
 			if err := client.DeleteEnvironment(orgID, envID); err != nil {
+				errStr := err.Error()
+				if strings.Contains(errStr, "deletion_pending") || strings.Contains(errStr, "202") {
+					fmt.Fprintf(os.Stderr, "  Environment %s scheduled for deletion (grace period).\n  Use 'cw env cancel-delete %s' to cancel.\n", args[0], args[0])
+					return nil
+				}
+				if strings.Contains(errStr, "environment_protected") {
+					return fmt.Errorf("environment is protected. Run 'cw env unprotect %s' first", args[0])
+				}
+				if strings.Contains(errStr, "access_denied") {
+					return fmt.Errorf("access denied: only the environment owner can delete it")
+				}
 				return fmt.Errorf("delete environment: %w", err)
 			}
 			successMsg("Environment %s deleted.", args[0])
@@ -905,10 +936,19 @@ func envPruneCmd() *cobra.Command {
 			}
 
 			var targets []platform.Environment
+			var skippedProtected int
 			for _, e := range envs {
 				if pruneStates[e.State] {
+					if e.Protected {
+						skippedProtected++
+						continue
+					}
 					targets = append(targets, e)
 				}
+			}
+
+			if skippedProtected > 0 {
+				fmt.Fprintf(os.Stderr, "  Skipped %d protected environment(s).\n", skippedProtected)
 			}
 
 			if len(targets) == 0 {
@@ -987,10 +1027,26 @@ func envNukeCmd() *cobra.Command {
 				return fmt.Errorf("list environments: %w", err)
 			}
 
-			if len(envs) == 0 {
+			// Filter out protected environments.
+			var targets []platform.Environment
+			var skippedProtected int
+			for _, e := range envs {
+				if e.Protected {
+					skippedProtected++
+					continue
+				}
+				targets = append(targets, e)
+			}
+
+			if skippedProtected > 0 {
+				fmt.Fprintf(os.Stderr, "  Skipped %d protected environment(s).\n", skippedProtected)
+			}
+
+			if len(targets) == 0 {
 				fmt.Println("No environments to nuke.")
 				return nil
 			}
+			envs = targets
 
 			cfg, _ := platform.LoadConfig()
 			orgLabel := orgID
@@ -1167,4 +1223,229 @@ func expandImageRef(image string) string {
 		return ref + ":" + tag
 	}
 	return ref + ":latest"
+}
+
+// ── Protection commands ───────────────────────────────────────────────
+
+func envProtectCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:               "protect <id-or-name>",
+		Short:             "Protect an environment from deletion",
+		Args:              cobra.ExactArgs(1),
+		ValidArgsFunction: envCompletionFunc,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			orgID, client, err := getOrgContext(cmd)
+			if err != nil {
+				return err
+			}
+			envID, err := resolveEnvID(client, orgID, args[0])
+			if err != nil {
+				return err
+			}
+			resp, err := client.ProtectEnvironment(orgID, envID)
+			if err != nil {
+				return fmt.Errorf("protect environment: %w", err)
+			}
+			successMsg("Environment %s: %s.", args[0], resp.Status)
+			return nil
+		},
+	}
+}
+
+func envUnprotectCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:               "unprotect <id-or-name>",
+		Short:             "Remove deletion protection from an environment",
+		Args:              cobra.ExactArgs(1),
+		ValidArgsFunction: envCompletionFunc,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			orgID, client, err := getOrgContext(cmd)
+			if err != nil {
+				return err
+			}
+			envID, err := resolveEnvID(client, orgID, args[0])
+			if err != nil {
+				return err
+			}
+			resp, err := client.UnprotectEnvironment(orgID, envID)
+			if err != nil {
+				return fmt.Errorf("unprotect environment: %w", err)
+			}
+			successMsg("Environment %s: %s.", args[0], resp.Status)
+			return nil
+		},
+	}
+}
+
+func envCancelDeleteCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:               "cancel-delete <id-or-name>",
+		Short:             "Cancel a pending environment deletion",
+		Args:              cobra.ExactArgs(1),
+		ValidArgsFunction: envCompletionFunc,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			orgID, client, err := getOrgContext(cmd)
+			if err != nil {
+				return err
+			}
+			envID, err := resolveEnvID(client, orgID, args[0])
+			if err != nil {
+				return err
+			}
+			resp, err := client.CancelDeletion(orgID, envID)
+			if err != nil {
+				return fmt.Errorf("cancel deletion: %w", err)
+			}
+			successMsg("Environment %s: %s.", args[0], resp.Status)
+			return nil
+		},
+	}
+}
+
+func envExtendCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:               "extend <id-or-name>",
+		Short:             "Extend the TTL of an environment",
+		Args:              cobra.ExactArgs(1),
+		ValidArgsFunction: envCompletionFunc,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			orgID, client, err := getOrgContext(cmd)
+			if err != nil {
+				return err
+			}
+			envID, err := resolveEnvID(client, orgID, args[0])
+			if err != nil {
+				return err
+			}
+			hours, _ := cmd.Flags().GetInt("hours")
+			if hours <= 0 {
+				hours = 1
+			}
+			resp, err := client.ExtendTTL(orgID, envID, hours*3600)
+			if err != nil {
+				return fmt.Errorf("extend TTL: %w", err)
+			}
+			successMsg("Environment %s: %s (%d hours added).", args[0], resp.Status, hours)
+			return nil
+		},
+	}
+	cmd.Flags().Int("hours", 1, "Hours to extend TTL by")
+	return cmd
+}
+
+// ── Access management ─────────────────────────────────────────────────
+
+func envAccessCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "access",
+		Short: "Manage environment access",
+	}
+	cmd.AddCommand(envAccessListCmd())
+	cmd.AddCommand(envAccessGrantCmd())
+	cmd.AddCommand(envAccessRevokeCmd())
+	return cmd
+}
+
+func envAccessListCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:               "list <id-or-name>",
+		Short:             "List access grants for an environment",
+		Args:              cobra.ExactArgs(1),
+		ValidArgsFunction: envCompletionFunc,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			orgID, client, err := getOrgContext(cmd)
+			if err != nil {
+				return err
+			}
+			envID, err := resolveEnvID(client, orgID, args[0])
+			if err != nil {
+				return err
+			}
+			grants, err := client.ListAccess(orgID, envID)
+			if err != nil {
+				return fmt.Errorf("list access: %w", err)
+			}
+			if len(grants) == 0 {
+				fmt.Println("No explicit access grants (creator has implicit owner access).")
+				return nil
+			}
+			tw := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+			fmt.Fprintln(tw, "USER ID\tPERMISSION\tGRANTED BY\tCREATED AT")
+			for _, g := range grants {
+				fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", g.UserID, g.Permission, g.GrantedBy, g.CreatedAt)
+			}
+			tw.Flush()
+			return nil
+		},
+	}
+}
+
+func envAccessGrantCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "grant <id-or-name>",
+		Short: "Grant a user access to an environment",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			orgID, client, err := getOrgContext(cmd)
+			if err != nil {
+				return err
+			}
+			envID, err := resolveEnvID(client, orgID, args[0])
+			if err != nil {
+				return err
+			}
+			userID, _ := cmd.Flags().GetString("user")
+			permission, _ := cmd.Flags().GetString("permission")
+			if userID == "" {
+				return fmt.Errorf("--user is required")
+			}
+			if permission == "" {
+				permission = "viewer"
+			}
+			err = client.GrantAccess(orgID, envID, &platform.GrantAccessRequest{
+				UserID:     userID,
+				Permission: permission,
+			})
+			if err != nil {
+				return fmt.Errorf("grant access: %w", err)
+			}
+			successMsg("Granted %s access to %s for user %s.", permission, args[0], userID)
+			return nil
+		},
+	}
+	cmd.Flags().String("user", "", "User ID to grant access to")
+	cmd.Flags().String("permission", "viewer", "Permission level: owner, operator, or viewer")
+	_ = cmd.MarkFlagRequired("user")
+	return cmd
+}
+
+func envAccessRevokeCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "revoke <id-or-name>",
+		Short: "Revoke a user's access to an environment",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			orgID, client, err := getOrgContext(cmd)
+			if err != nil {
+				return err
+			}
+			envID, err := resolveEnvID(client, orgID, args[0])
+			if err != nil {
+				return err
+			}
+			userID, _ := cmd.Flags().GetString("user")
+			if userID == "" {
+				return fmt.Errorf("--user is required")
+			}
+			err = client.RevokeAccess(orgID, envID, userID)
+			if err != nil {
+				return fmt.Errorf("revoke access: %w", err)
+			}
+			successMsg("Revoked access for user %s on %s.", userID, args[0])
+			return nil
+		},
+	}
+	cmd.Flags().String("user", "", "User ID to revoke access from")
+	_ = cmd.MarkFlagRequired("user")
+	return cmd
 }

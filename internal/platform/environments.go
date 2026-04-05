@@ -193,6 +193,55 @@ func (c *Client) SaveRepoConfig(orgID string, repoURL, presetID string, setupCon
 	return c.do("PUT", fmt.Sprintf("/api/v1/organizations/%s/repo-configs", orgID), body, nil)
 }
 
+func (c *Client) ProtectEnvironment(orgID, envID string) (*StatusResponse, error) {
+	var resp StatusResponse
+	if err := c.do("POST", fmt.Sprintf("/api/v1/organizations/%s/environments/%s/protect", orgID, envID), nil, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+func (c *Client) UnprotectEnvironment(orgID, envID string) (*StatusResponse, error) {
+	var resp StatusResponse
+	if err := c.do("POST", fmt.Sprintf("/api/v1/organizations/%s/environments/%s/unprotect", orgID, envID), nil, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+func (c *Client) CancelDeletion(orgID, envID string) (*StatusResponse, error) {
+	var resp StatusResponse
+	if err := c.do("POST", fmt.Sprintf("/api/v1/organizations/%s/environments/%s/cancel-deletion", orgID, envID), nil, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+func (c *Client) ExtendTTL(orgID, envID string, additionalSeconds int) (*StatusResponse, error) {
+	var resp StatusResponse
+	req := &ExtendTTLRequest{AdditionalSeconds: additionalSeconds}
+	if err := c.do("POST", fmt.Sprintf("/api/v1/organizations/%s/environments/%s/extend-ttl", orgID, envID), req, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+func (c *Client) ListAccess(orgID, envID string) ([]AccessGrant, error) {
+	var grants []AccessGrant
+	if err := c.do("GET", fmt.Sprintf("/api/v1/organizations/%s/environments/%s/access", orgID, envID), nil, &grants); err != nil {
+		return nil, err
+	}
+	return grants, nil
+}
+
+func (c *Client) GrantAccess(orgID, envID string, req *GrantAccessRequest) error {
+	return c.do("POST", fmt.Sprintf("/api/v1/organizations/%s/environments/%s/access", orgID, envID), req, nil)
+}
+
+func (c *Client) RevokeAccess(orgID, envID, userID string) error {
+	return c.do("DELETE", fmt.Sprintf("/api/v1/organizations/%s/environments/%s/access/%s", orgID, envID, userID), nil, nil)
+}
+
 func (c *Client) DownloadFile(orgID, envID, path string) (io.ReadCloser, error) {
 	url := fmt.Sprintf("%s/api/v1/organizations/%s/environments/%s/files/download?path=%s",
 		c.ServerURL, orgID, envID, path)

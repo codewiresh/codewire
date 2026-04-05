@@ -276,7 +276,28 @@ type Environment struct {
 	StartedAt           *string `json:"started_at,omitempty"`
 	StoppedAt           *string `json:"stopped_at,omitempty"`
 	DestroyedAt         *string `json:"destroyed_at,omitempty"`
+	Protected           bool    `json:"protected"`
+	DeletionRequestedAt *string `json:"deletion_requested_at,omitempty"`
+	DeletionGraceUntil  *string `json:"deletion_grace_until,omitempty"`
 	Network             *string `json:"network,omitempty"`
+}
+
+type AccessGrant struct {
+	ID            string `json:"id"`
+	EnvironmentID string `json:"environment_id"`
+	UserID        string `json:"user_id"`
+	Permission    string `json:"permission"`
+	GrantedBy     string `json:"granted_by"`
+	CreatedAt     string `json:"created_at"`
+}
+
+type GrantAccessRequest struct {
+	UserID     string `json:"user_id"`
+	Permission string `json:"permission"`
+}
+
+type ExtendTTLRequest struct {
+	AdditionalSeconds int `json:"additional_seconds"`
 }
 
 type Preset struct {
