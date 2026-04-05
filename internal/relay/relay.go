@@ -127,6 +127,7 @@ func BuildRelayMux(hub *NodeHub, sessions *PendingSessions, st store.Store) http
 	return mux
 }
 
+
 func buildMux(hub *NodeHub, sessions *PendingSessions, st store.Store, cfg RelayConfig, tailnetCoord *tailnetlib.Coordinator, runtimeReplay *networkauth.ReplayCache, derpHandler http.Handler) *http.ServeMux {
 	var fallbackAuth oauth.ExternalTokenValidator
 	if cfg.AuthMode == "oidc" {

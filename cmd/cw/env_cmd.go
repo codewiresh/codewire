@@ -569,7 +569,7 @@ Examples:
 				}
 				for key, value := range map[string]string{
 					"CODEWIRE_RELAY_URL":          enrollment.RelayURL,
-					"CODEWIRE_NETWORK_ID":      enrollment.NetworkID,
+					"CODEWIRE_RELAY_NETWORK":      enrollment.NetworkID,
 					"CODEWIRE_RELAY_INVITE_TOKEN": enrollment.InviteToken,
 				} {
 					if _, exists := req.EnvVars[key]; exists {

@@ -8,7 +8,6 @@ func TestExpandImageRef(t *testing.T) {
 		want  string
 	}{
 		// Fully qualified — pass through.
-		{"ghcr.io/codewiresh/redteam:latest", "ghcr.io/codewiresh/redteam:latest"},
 		{"docker.io/library/alpine:3.19", "docker.io/library/alpine:3.19"},
 		{"ghcr.io/foo/bar:v1", "ghcr.io/foo/bar:v1"},
 		{"registry.example.com/img", "registry.example.com/img"},

@@ -2042,7 +2042,7 @@ func loadConfigFromDir(dataDir string) (*relayAuthConfig, error) {
 	if relayURL := os.Getenv("CODEWIRE_RELAY_URL"); relayURL != "" {
 		result.relayURL = relayURL
 	}
-	if relayNetwork := os.Getenv("CODEWIRE_NETWORK_ID"); relayNetwork != "" {
+	if relayNetwork := os.Getenv("CODEWIRE_RELAY_NETWORK"); relayNetwork != "" {
 		result.relayNetwork = relayNetwork
 	}
 	if authToken := os.Getenv("CODEWIRE_API_KEY"); authToken != "" {
