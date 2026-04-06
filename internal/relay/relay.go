@@ -218,7 +218,28 @@ func buildMux(hub *NodeHub, sessions *PendingSessions, st store.Store, cfg Relay
 	mux.HandleFunc("POST /api/v1/node-enrollments/redeem", nodeEnrollmentRedeemHandler(st))
 	mux.Handle("POST /api/v1/nodes", authMiddleware(http.HandlerFunc(nodeRegisterDeprecatedHandler())))
 	mux.Handle("DELETE /api/v1/nodes/{name}", authMiddleware(http.HandlerFunc(nodeRevokeHandler(st))))
-	mux.Handle("GET /api/v1/nodes", groupMemberAuth(nodesListHandler(st)))
+	// Nodes endpoint accepts both node tokens and user session tokens.
+	// Node-authed requests bypass membership checks (nodes are in a network by definition).
+	mux.Handle("GET /api/v1/nodes", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if node, err := nodeAuthFromRequest(r, st); err == nil && node != nil {
+			// Node is authenticated -- serve directly, scoped to their network.
+			networkID := node.NetworkID
+			nodes, err := st.NodeList(r.Context(), networkID)
+			if err != nil {
+				http.Error(w, "internal error", http.StatusInternalServerError)
+				return
+			}
+			resp := make([]nodeResponse, 0, len(nodes))
+			for _, n := range nodes {
+				resp = append(resp, nodeResponse{Name: n.Name, PeerURL: n.PeerURL})
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(resp)
+			return
+		}
+		// Fall back to user auth.
+		authMiddleware(http.HandlerFunc(nodesListHandler(st))).ServeHTTP(w, r)
+	}))
 
 	// Invite management (owner-only).
 	mux.Handle("POST /api/v1/invites", authMiddleware(http.HandlerFunc(inviteCreateHandler(st))))

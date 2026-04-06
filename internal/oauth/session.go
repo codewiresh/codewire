@@ -42,6 +42,11 @@ func GetAuth(ctx context.Context) *AuthIdentity {
 	return id
 }
 
+// WithAuth returns a context with the given AuthIdentity set.
+func WithAuth(ctx context.Context, identity *AuthIdentity) context.Context {
+	return context.WithValue(ctx, contextKey{}, identity)
+}
+
 // GenerateSessionToken returns a session token with the format sess_ + 32 random
 // alphanumeric characters (~190 bits of entropy).
 func GenerateSessionToken() string {
