@@ -386,7 +386,15 @@ Examples:
 				if err != nil {
 					return fmt.Errorf("run: %w", err)
 				}
-				return printEnvironmentRunResult(result)
+				if err := printEnvironmentRunResult(result); err != nil {
+					return err
+				}
+				sessionRef := name
+				if sessionRef == "" {
+					sessionRef = "1"
+				}
+				fmt.Fprintf(os.Stderr, "  follow: cw exec %s -- cw logs %s --follow\n", shortEnvID(execTarget.Ref), sessionRef)
+				return nil
 			default:
 				return fmt.Errorf("unsupported target kind %q", execTarget.Kind)
 			}
