@@ -309,20 +309,29 @@ func (n *Node) runWSServer(ctx context.Context, addr string, peerServer *peer.Se
 
 func (n *Node) runTailnetPeerServer(ctx context.Context, peerServer *peer.Server) {
 	if n == nil || n.config == nil || n.config.RelayURL == nil || n.config.RelayToken == nil {
+		slog.Warn("tailnet peer server skipped: missing config",
+			"nil_node", n == nil,
+			"nil_config", n != nil && n.config == nil,
+			"nil_relay_url", n != nil && n.config != nil && n.config.RelayURL == nil,
+			"nil_relay_token", n != nil && n.config != nil && n.config.RelayToken == nil)
 		return
 	}
+
+	slog.Info("tailnet peer server starting", "relay", *n.config.RelayURL)
 
 	issued, err := networkauth.IssueNodeRuntimeCredential(ctx, http.DefaultClient, *n.config.RelayURL, *n.config.RelayToken)
 	if err != nil {
 		slog.Error("tailnet runtime credential failed", "err", err)
 		return
 	}
+	slog.Info("tailnet runtime credential issued")
 
 	conn, err := peer.StartNodeTailnetListener(ctx, *n.config.RelayURL, issued.Credential, peerServer)
 	if err != nil {
 		slog.Error("tailnet peer listener failed", "err", err)
 		return
 	}
+	slog.Info("tailnet peer listener started")
 	defer conn.Close()
 
 	<-ctx.Done()
