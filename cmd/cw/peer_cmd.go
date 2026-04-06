@@ -119,9 +119,15 @@ func issueRuntimeCredentialForPeer(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	// Try client credential (session token / API key) first.
 	issued, err := networkauth.IssueClientRuntimeCredential(ctx, http.DefaultClient, relayURL, authToken, networkID)
+	if err == nil {
+		return issued.Credential, nil
+	}
+	// Fall back to node credential (relay_token from config.toml).
+	issued, err = networkauth.IssueNodeRuntimeCredential(ctx, http.DefaultClient, relayURL, authToken)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("runtime credential: client and node auth both failed: %w", err)
 	}
 	return issued.Credential, nil
 }
