@@ -129,13 +129,6 @@ func tailnetCoordinateHandler(cfg RelayConfig, st store.Store, coord *tailnetlib
 				}
 				coord.UpdateNode(peerID, req.Node)
 			case "subscribe":
-				if claims.SubjectKind != networkauth.SubjectKindClient {
-					_ = writeTailnetResponse(ctx, wsConn, peer.TailnetCoordinateResponse{
-						Type:  "error",
-						Error: "only client peers may subscribe",
-					})
-					continue
-				}
 				target := strings.TrimSpace(req.TargetNode)
 				if target == "" {
 					_ = writeTailnetResponse(ctx, wsConn, peer.TailnetCoordinateResponse{
