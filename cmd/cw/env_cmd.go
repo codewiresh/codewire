@@ -582,7 +582,8 @@ Examples:
 
 			enrollment, err := resolveEnvRelayEnrollment(dataDir(), yes, network, noNetwork)
 			if err != nil {
-				return err
+				fmt.Fprintf(os.Stderr, "Warning: relay enrollment failed (%v), continuing without network\n", err)
+				enrollment = nil
 			}
 			if enrollment != nil {
 				if req.EnvVars == nil {

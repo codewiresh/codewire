@@ -52,6 +52,9 @@ type RelayConfig struct {
 	// OIDCAllowedGroups restricts access to members of these groups.
 	// Empty means any authenticated user is allowed.
 	OIDCAllowedGroups []string
+	// DatabaseURL is a PostgreSQL connection string. If set, uses Postgres
+	// instead of SQLite. Empty means use SQLite in DataDir.
+	DatabaseURL string
 }
 
 // RunRelay starts the relay server. It blocks until ctx is cancelled.
@@ -63,11 +66,23 @@ func RunRelay(ctx context.Context, cfg RelayConfig) error {
 		cfg.SSHListenAddr = ":2222"
 	}
 
-	st, err := store.NewSQLiteStore(cfg.DataDir)
-	if err != nil {
-		return fmt.Errorf("opening store: %w", err)
+	var st store.Store
+	if cfg.DatabaseURL != "" {
+		pgStore, err := store.NewPostgresStore(ctx, cfg.DatabaseURL)
+		if err != nil {
+			return fmt.Errorf("opening postgres store: %w", err)
+		}
+		defer pgStore.Close()
+		st = pgStore
+		fmt.Fprintln(os.Stderr, "[relay] using PostgreSQL store")
+	} else {
+		sqliteStore, err := store.NewSQLiteStore(cfg.DataDir)
+		if err != nil {
+			return fmt.Errorf("opening sqlite store: %w", err)
+		}
+		defer sqliteStore.Close()
+		st = sqliteStore
 	}
-	defer st.Close()
 
 	hub := NewNodeHub()
 	sessions := NewPendingSessions()

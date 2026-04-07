@@ -16,6 +16,11 @@ oidc:
   # Groups required for access. Empty = any authenticated user.
   allowedGroups: []
 
+database:
+  enabled: false
+  secretName: "codewire-relay-db-app"
+  uriKey: "uri"
+
 image:
   repository: ghcr.io/codewiresh/codewire
   tag: ""  # Defaults to appVersion

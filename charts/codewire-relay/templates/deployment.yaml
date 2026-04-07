@@ -42,7 +42,9 @@ spec:
                 --ssh-listen={{ .Values.relay.sshListen | quote }} \
                 --data-dir=/data \
                 --auth-mode={{ .Values.relay.authMode | quote }} \
-                --auth-token="$CW_AUTH_TOKEN"
+                --auth-token="$CW_AUTH_TOKEN"{{- if .Values.database.enabled }} \
+                --database-url="$DATABASE_URL"
+                {{- end }}
           {{- else if eq .Values.relay.authMode "oidc" }}
           command: ["sh", "-c"]
           args:
@@ -55,21 +57,34 @@ spec:
                 --auth-mode=oidc \
                 --oidc-issuer={{ .Values.oidc.issuer | quote }} \
                 --oidc-client-id={{ .Values.oidc.clientID | quote }} \
-                --oidc-client-secret="$OIDC_CLIENT_SECRET"{{- if .Values.oidc.allowedGroups }} \
+                --oidc-client-secret="$OIDC_CLIENT_SECRET"{{- if .Values.relay.authToken }} \
+                --auth-token="$CW_AUTH_TOKEN"
+                {{- end }}{{- if .Values.oidc.allowedGroups }} \
                 --oidc-allowed-groups={{ join "," .Values.oidc.allowedGroups | quote }}
-                {{- else }}
+                {{- end }}{{- if .Values.database.enabled }} \
+                --database-url="$DATABASE_URL"
                 {{- end }}
           {{- else }}
+          command: ["sh", "-c"]
           args:
-            - relay
-            - serve
-            - --base-url={{ .Values.relay.baseURL }}
-            - --listen={{ .Values.relay.listenAddr }}
-            - --ssh-listen={{ .Values.relay.sshListen }}
-            - --data-dir=/data
-            - --auth-mode={{ .Values.relay.authMode }}
+            - |
+              exec cw relay serve \
+                --base-url={{ .Values.relay.baseURL | quote }} \
+                --listen={{ .Values.relay.listenAddr | quote }} \
+                --ssh-listen={{ .Values.relay.sshListen | quote }} \
+                --data-dir=/data \
+                --auth-mode={{ .Values.relay.authMode | quote }}{{- if .Values.database.enabled }} \
+                --database-url="$DATABASE_URL"
+                {{- end }}
           {{- end }}
           env:
+            {{- if .Values.database.enabled }}
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.database.secretName }}
+                  key: {{ .Values.database.uriKey }}
+            {{- end }}
             {{- if eq .Values.relay.authMode "token" }}
             - name: CW_AUTH_TOKEN
               valueFrom:
@@ -83,6 +98,13 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.oidc.clientSecretRef.name | default (include "codewire-relay.fullname" .) }}
                   key: {{ .Values.oidc.clientSecretRef.key }}
+            {{- end }}
+            {{- if .Values.relay.authToken }}
+            - name: CW_AUTH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "codewire-relay.fullname" . }}
+                  key: auth-token
             {{- end }}
           ports:
             - name: http

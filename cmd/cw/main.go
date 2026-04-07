@@ -1230,6 +1230,7 @@ func relayServeCmd() *cobra.Command {
 		oidcClientID       string
 		oidcClientSecret   string
 		oidcAllowedGroups  []string
+		databaseURL        string
 	)
 
 	cmd := &cobra.Command{
@@ -1273,6 +1274,7 @@ func relayServeCmd() *cobra.Command {
 				OIDCClientID:       oidcClientID,
 				OIDCClientSecret:   oidcClientSecret,
 				OIDCAllowedGroups:  oidcAllowedGroups,
+				DatabaseURL:        databaseURL,
 			})
 		},
 	}
@@ -1292,6 +1294,7 @@ func relayServeCmd() *cobra.Command {
 	cmd.Flags().StringVar(&oidcIssuer, "oidc-issuer", "", "OIDC provider issuer URL (for --auth-mode=oidc)")
 	cmd.Flags().StringVar(&oidcClientID, "oidc-client-id", "", "OIDC client ID")
 	cmd.Flags().StringVar(&oidcClientSecret, "oidc-client-secret", "", "OIDC client secret")
+	cmd.Flags().StringVar(&databaseURL, "database-url", os.Getenv("DATABASE_URL"), "PostgreSQL connection URL (uses SQLite if empty)")
 	cmd.Flags().StringSliceVar(&oidcAllowedGroups, "oidc-allowed-groups", nil, "OIDC groups required for access (empty = any authenticated user)")
 
 	return cmd
