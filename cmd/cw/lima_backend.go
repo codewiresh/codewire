@@ -159,14 +159,24 @@ func limaCreateCommandArgs(instance *cwconfig.LocalInstance) []string {
 		mountType = defaultLimaMountType(vmType)
 	}
 
-	homeDir, _ := os.UserHomeDir()
+	homeDir, _ := localUserHomeDir()
 	ghConfigDir := filepath.Join(homeDir, ".config", "gh")
 
-	mountSet := fmt.Sprintf(
-		`.mounts=[{"location":%s,"mountPoint":"/workspace","writable":true},{"location":%s,"mountPoint":"/home/{{.User}}.guest/.config/gh","writable":false}]`,
+	mounts := fmt.Sprintf(
+		`{"location":%s,"mountPoint":"/workspace","writable":true},{"location":%s,"mountPoint":"/home/{{.User}}.guest/.config/gh","writable":false}`,
 		strconv.Quote(instance.RepoPath),
 		strconv.Quote(ghConfigDir),
 	)
+
+	claudeDir := filepath.Join(homeDir, ".claude")
+	if _, err := localOsStat(claudeDir); err == nil {
+		mounts += fmt.Sprintf(
+			`,{"location":%s,"mountPoint":"/home/{{.User}}.guest/.claude","writable":true}`,
+			strconv.Quote(claudeDir),
+		)
+	}
+
+	mountSet := ".mounts=[" + mounts + "]"
 
 	args := []string{
 		"start",
@@ -256,14 +266,25 @@ func createLocalLimaInstance(instance *cwconfig.LocalInstance) error {
 
 	// Run the container with the workspace mounted
 	fmt.Fprintf(os.Stderr, "  Starting workspace container...\n")
-	if err := localRunCommandStream("limactl", "shell", "--workdir", "/", name,
+	dockerArgs := []string{
 		"docker", "run", "-d",
 		"--name", limaContainerName,
 		"-v", "/workspace:/workspace",
+	}
+	vmUser := os.Getenv("USER")
+	claudeDir := filepath.Join("/home", vmUser+".guest", ".claude")
+	if homeDir, err := localUserHomeDir(); err == nil {
+		hostClaude := filepath.Join(homeDir, ".claude")
+		if _, statErr := localOsStat(hostClaude); statErr == nil {
+			dockerArgs = append(dockerArgs, "-v", claudeDir+":/home/codewire/.claude")
+		}
+	}
+	dockerArgs = append(dockerArgs,
 		"--workdir", "/workspace",
 		image,
 		"sleep", "infinity",
-	); err != nil {
+	)
+	if err := localRunCommandStream("limactl", append([]string{"shell", "--workdir", "/", name}, dockerArgs...)...); err != nil {
 		return fmt.Errorf("docker run: %v", err)
 	}
 

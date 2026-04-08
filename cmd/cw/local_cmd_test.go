@@ -2,9 +2,7 @@ package main
 
 import (
 	"errors"
-	"fmt"
 	"io"
-	"strconv"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -440,8 +438,16 @@ func TestCreateLocalDockerInstanceCleansUpOnFailure(t *testing.T) {
 
 func TestLimaCreateCommandArgs(t *testing.T) {
 	origGOOS := localGOOS
-	t.Cleanup(func() { localGOOS = origGOOS })
+	origUserHomeDir := localUserHomeDir
+	origOsStat := localOsStat
+	t.Cleanup(func() {
+		localGOOS = origGOOS
+		localUserHomeDir = origUserHomeDir
+		localOsStat = origOsStat
+	})
 	localGOOS = "linux"
+	localUserHomeDir = func() (string, error) { return "/home/testuser", nil }
+	localOsStat = func(name string) (os.FileInfo, error) { return nil, nil }
 
 	instance := &cwconfig.LocalInstance{
 		Name:        "repo",
@@ -458,13 +464,7 @@ func TestLimaCreateCommandArgs(t *testing.T) {
 
 	got := limaCreateCommandArgs(instance)
 
-	// The gh config mount uses the real home dir, so match dynamically
-	homeDir, _ := os.UserHomeDir()
-	ghConfigDir := filepath.Join(homeDir, ".config", "gh")
-	wantMountSet := fmt.Sprintf(
-		`.mounts=[{"location":"/tmp/repo","mountPoint":"/workspace","writable":true},{"location":%s,"mountPoint":"/home/{{.User}}.guest/.config/gh","writable":false}]`,
-		strconv.Quote(ghConfigDir),
-	)
+	wantMountSet := `.mounts=[{"location":"/tmp/repo","mountPoint":"/workspace","writable":true},{"location":"/home/testuser/.config/gh","mountPoint":"/home/{{.User}}.guest/.config/gh","writable":false},{"location":"/home/testuser/.claude","mountPoint":"/home/{{.User}}.guest/.claude","writable":true}]`
 
 	want := []string{
 		"start",
@@ -491,14 +491,20 @@ func TestCreateLocalLimaInstanceInvokesExpectedCommands(t *testing.T) {
 	origRunStream := localRunCommandStream
 	origRunCommand := localRunCommand
 	origGOOS := localGOOS
+	origUserHomeDir := localUserHomeDir
+	origOsStat := localOsStat
 	t.Cleanup(func() {
 		localLookPath = origLookPath
 		localRunCommandStream = origRunStream
 		localRunCommand = origRunCommand
 		localGOOS = origGOOS
+		localUserHomeDir = origUserHomeDir
+		localOsStat = origOsStat
 	})
 
 	localGOOS = "linux"
+	localUserHomeDir = func() (string, error) { return "/home/testuser", nil }
+	localOsStat = func(name string) (os.FileInfo, error) { return nil, nil }
 	localLookPath = func(file string) (string, error) {
 		if file == "limactl" {
 			return "/usr/bin/limactl", nil
@@ -522,6 +528,7 @@ func TestCreateLocalLimaInstanceInvokesExpectedCommands(t *testing.T) {
 		return nil, nil
 	}
 
+	vmUser := os.Getenv("USER")
 	instance := &cwconfig.LocalInstance{
 		Name:        "repo",
 		Backend:     "lima",
@@ -550,6 +557,7 @@ func TestCreateLocalLimaInstanceInvokesExpectedCommands(t *testing.T) {
 		{"limactl", "shell", "--workdir", "/", "cw-repo", "docker", "run", "-d",
 			"--name", "cw-workspace",
 			"-v", "/workspace:/workspace",
+			"-v", "/home/" + vmUser + ".guest/.claude:/home/codewire/.claude",
 			"--workdir", "/workspace",
 			"ghcr.io/codewiresh/full:latest",
 			"sleep", "infinity"},
