@@ -714,6 +714,15 @@ func createLocalIncusInstance(instance *cwconfig.LocalInstance) error {
 	if err := runIncus("config", "device", "add", instance.RuntimeName, "workspace", "disk", "source="+instance.RepoPath, "path="+localWorkspacePath); err != nil {
 		return err
 	}
+	if homeDir, err := localUserHomeDir(); err == nil {
+		claudeDir := filepath.Join(homeDir, ".claude")
+		if _, statErr := localOsStat(claudeDir); statErr == nil {
+			if err := runIncus("config", "device", "add", instance.RuntimeName, "claude-config", "disk",
+				"source="+claudeDir, "path=/home/codewire/.claude"); err != nil {
+				return err
+			}
+		}
+	}
 	if err := runIncus("start", instance.RuntimeName); err != nil {
 		return err
 	}

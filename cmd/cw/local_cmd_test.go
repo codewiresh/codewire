@@ -101,10 +101,17 @@ func TestPrepareLocalInstanceUsesCodewireYAMLAndOverrides(t *testing.T) {
 func TestCreateLocalIncusInstanceInvokesExpectedCommands(t *testing.T) {
 	origLookPath := localLookPath
 	origRunCommand := localRunCommand
+	origUserHomeDir := localUserHomeDir
+	origOsStat := localOsStat
 	t.Cleanup(func() {
 		localLookPath = origLookPath
 		localRunCommand = origRunCommand
+		localUserHomeDir = origUserHomeDir
+		localOsStat = origOsStat
 	})
+
+	localUserHomeDir = func() (string, error) { return "/home/testuser", nil }
+	localOsStat = func(name string) (os.FileInfo, error) { return nil, nil }
 
 	localLookPath = func(file string) (string, error) {
 		if file != "incus" && file != "skopeo" {
@@ -141,6 +148,7 @@ func TestCreateLocalIncusInstanceInvokesExpectedCommands(t *testing.T) {
 		{"incus", "config", "set", "cw-repo", "limits.memory", "4096MiB"},
 		{"incus", "config", "device", "set", "cw-repo", "root", "size", "20GiB"},
 		{"incus", "config", "device", "add", "cw-repo", "workspace", "disk", "source=/tmp/repo", "path=/workspace"},
+		{"incus", "config", "device", "add", "cw-repo", "claude-config", "disk", "source=/home/testuser/.claude", "path=/home/codewire/.claude"},
 		{"incus", "start", "cw-repo"},
 	}
 	if !reflect.DeepEqual(calls, want) {
@@ -151,10 +159,17 @@ func TestCreateLocalIncusInstanceInvokesExpectedCommands(t *testing.T) {
 func TestCreateLocalIncusInstanceCleansUpOnFailure(t *testing.T) {
 	origLookPath := localLookPath
 	origRunCommand := localRunCommand
+	origUserHomeDir := localUserHomeDir
+	origOsStat := localOsStat
 	t.Cleanup(func() {
 		localLookPath = origLookPath
 		localRunCommand = origRunCommand
+		localUserHomeDir = origUserHomeDir
+		localOsStat = origOsStat
 	})
+
+	localUserHomeDir = func() (string, error) { return "/home/testuser", nil }
+	localOsStat = func(name string) (os.FileInfo, error) { return nil, os.ErrNotExist }
 
 	localLookPath = func(file string) (string, error) {
 		if file != "incus" && file != "skopeo" {
