@@ -39,6 +39,8 @@ var (
 	localPromptConfirm = promptConfirm
 	localNow           = func() time.Time { return time.Now().UTC() }
 	localGetwd         = os.Getwd
+	localUserHomeDir   = os.UserHomeDir
+	localOsStat        = os.Stat
 )
 
 type localCreateOptions struct {
@@ -730,6 +732,12 @@ func createLocalDockerInstance(instance *cwconfig.LocalInstance) error {
 		"--hostname", instance.RuntimeName,
 		"--workdir", localWorkspacePath,
 		"--volume", instance.RepoPath + ":" + localWorkspacePath,
+	}
+	if homeDir, err := localUserHomeDir(); err == nil {
+		claudeDir := filepath.Join(homeDir, ".claude")
+		if _, err := localOsStat(claudeDir); err == nil {
+			args = append(args, "--volume", claudeDir+":/home/codewire/.claude")
+		}
 	}
 	if instance.CPU > 0 {
 		args = append(args, "--cpus", formatDockerCPUs(instance.CPU))

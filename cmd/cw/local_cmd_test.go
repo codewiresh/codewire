@@ -288,9 +288,13 @@ func TestFormatDockerCPUs(t *testing.T) {
 func TestCreateLocalDockerInstanceInvokesExpectedCommands(t *testing.T) {
 	origLookPath := localLookPath
 	origRunCommand := localRunCommand
+	origUserHomeDir := localUserHomeDir
+	origOsStat := localOsStat
 	t.Cleanup(func() {
 		localLookPath = origLookPath
 		localRunCommand = origRunCommand
+		localUserHomeDir = origUserHomeDir
+		localOsStat = origOsStat
 	})
 
 	localLookPath = func(file string) (string, error) {
@@ -299,6 +303,10 @@ func TestCreateLocalDockerInstanceInvokesExpectedCommands(t *testing.T) {
 		}
 		return "/usr/bin/docker", nil
 	}
+
+	// ~/.claude exists
+	localUserHomeDir = func() (string, error) { return "/home/testuser", nil }
+	localOsStat = func(name string) (os.FileInfo, error) { return nil, nil }
 
 	var calls [][]string
 	localRunCommand = func(name string, args ...string) ([]byte, error) {
@@ -325,7 +333,7 @@ func TestCreateLocalDockerInstanceInvokesExpectedCommands(t *testing.T) {
 	}
 
 	want := [][]string{
-		{"docker", "create", "--name", "cw-repo", "--hostname", "cw-repo", "--workdir", "/workspace", "--volume", "/tmp/repo:/workspace", "--cpus", "1.500", "--memory", "4096m", "--env", "A=1", "--env", "B=2", "ghcr.io/codewiresh/full:latest", "/bin/sh", "-lc", "trap 'exit 0' TERM INT; while true; do sleep 3600; done"},
+		{"docker", "create", "--name", "cw-repo", "--hostname", "cw-repo", "--workdir", "/workspace", "--volume", "/tmp/repo:/workspace", "--volume", "/home/testuser/.claude:/home/codewire/.claude", "--cpus", "1.500", "--memory", "4096m", "--env", "A=1", "--env", "B=2", "ghcr.io/codewiresh/full:latest", "/bin/sh", "-lc", "trap 'exit 0' TERM INT; while true; do sleep 3600; done"},
 		{"docker", "start", "cw-repo"},
 	}
 	if !reflect.DeepEqual(calls, want) {
@@ -333,17 +341,73 @@ func TestCreateLocalDockerInstanceInvokesExpectedCommands(t *testing.T) {
 	}
 }
 
-func TestCreateLocalDockerInstanceCleansUpOnFailure(t *testing.T) {
+func TestCreateLocalDockerInstanceSkipsClaudeMountWhenMissing(t *testing.T) {
 	origLookPath := localLookPath
 	origRunCommand := localRunCommand
+	origUserHomeDir := localUserHomeDir
+	origOsStat := localOsStat
 	t.Cleanup(func() {
 		localLookPath = origLookPath
 		localRunCommand = origRunCommand
+		localUserHomeDir = origUserHomeDir
+		localOsStat = origOsStat
 	})
 
 	localLookPath = func(file string) (string, error) {
 		return "/usr/bin/docker", nil
 	}
+
+	// ~/.claude does not exist
+	localUserHomeDir = func() (string, error) { return "/home/testuser", nil }
+	localOsStat = func(name string) (os.FileInfo, error) {
+		return nil, os.ErrNotExist
+	}
+
+	var calls [][]string
+	localRunCommand = func(name string, args ...string) ([]byte, error) {
+		call := append([]string{name}, args...)
+		calls = append(calls, call)
+		return nil, nil
+	}
+
+	instance := &cwconfig.LocalInstance{
+		Name:        "repo",
+		Backend:     "docker",
+		RuntimeName: "cw-repo",
+		RepoPath:    "/tmp/repo",
+		Image:       "ghcr.io/codewiresh/full:latest",
+	}
+	if err := createLocalDockerInstance(instance); err != nil {
+		t.Fatalf("createLocalDockerInstance() error = %v", err)
+	}
+
+	createArgs := calls[0]
+	for i, arg := range createArgs {
+		if arg == "--volume" && i+1 < len(createArgs) && strings.Contains(createArgs[i+1], ".claude") {
+			t.Fatalf("unexpected .claude volume mount when ~/.claude does not exist: %v", createArgs)
+		}
+	}
+}
+
+func TestCreateLocalDockerInstanceCleansUpOnFailure(t *testing.T) {
+	origLookPath := localLookPath
+	origRunCommand := localRunCommand
+	origUserHomeDir := localUserHomeDir
+	origOsStat := localOsStat
+	t.Cleanup(func() {
+		localLookPath = origLookPath
+		localRunCommand = origRunCommand
+		localUserHomeDir = origUserHomeDir
+		localOsStat = origOsStat
+	})
+
+	localLookPath = func(file string) (string, error) {
+		return "/usr/bin/docker", nil
+	}
+
+	// No ~/.claude for this test
+	localUserHomeDir = func() (string, error) { return "/home/testuser", nil }
+	localOsStat = func(name string) (os.FileInfo, error) { return nil, os.ErrNotExist }
 
 	var calls [][]string
 	localRunCommand = func(name string, args ...string) ([]byte, error) {
