@@ -722,6 +722,13 @@ func createLocalIncusInstance(instance *cwconfig.LocalInstance) error {
 				return err
 			}
 		}
+		claudeJSON := filepath.Join(homeDir, ".claude.json")
+		if _, statErr := localOsStat(claudeJSON); statErr == nil {
+			if err := runIncus("config", "device", "add", instance.RuntimeName, "claude-json", "disk",
+				"source="+claudeJSON, "path=/home/codewire/.claude.json"); err != nil {
+				return err
+			}
+		}
 		ghConfigDir := filepath.Join(homeDir, ".config", "gh")
 		if _, statErr := localOsStat(ghConfigDir); statErr == nil {
 			if err := runIncus("config", "device", "add", instance.RuntimeName, "gh-config", "disk",
@@ -760,6 +767,10 @@ func createLocalDockerInstance(instance *cwconfig.LocalInstance) error {
 		claudeDir := filepath.Join(homeDir, ".claude")
 		if _, err := localOsStat(claudeDir); err == nil {
 			args = append(args, "--volume", claudeDir+":/home/codewire/.claude")
+		}
+		claudeJSON := filepath.Join(homeDir, ".claude.json")
+		if _, err := localOsStat(claudeJSON); err == nil {
+			args = append(args, "--volume", claudeJSON+":/home/codewire/.claude.json")
 		}
 		ghConfigDir := filepath.Join(homeDir, ".config", "gh")
 		if _, err := localOsStat(ghConfigDir); err == nil {

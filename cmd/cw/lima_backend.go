@@ -177,6 +177,13 @@ func limaCreateCommandArgs(instance *cwconfig.LocalInstance) []string {
 			strconv.Quote(claudeDir),
 		)
 	}
+	claudeJSON := filepath.Join(homeDir, ".claude.json")
+	if _, err := localOsStat(claudeJSON); err == nil {
+		mounts += fmt.Sprintf(
+			`,{"location":%s,"mountPoint":"/home/{{.User}}.guest/.claude.json","writable":true}`,
+			strconv.Quote(claudeJSON),
+		)
+	}
 
 	mountSet := ".mounts=[" + mounts + "]"
 
@@ -289,6 +296,10 @@ func createLocalLimaInstance(instance *cwconfig.LocalInstance) error {
 		hostClaude := filepath.Join(homeDir, ".claude")
 		if _, statErr := localOsStat(hostClaude); statErr == nil {
 			dockerArgs = append(dockerArgs, "-v", claudeDir+":/home/codewire/.claude")
+		}
+		hostClaudeJSON := filepath.Join(homeDir, ".claude.json")
+		if _, statErr := localOsStat(hostClaudeJSON); statErr == nil {
+			dockerArgs = append(dockerArgs, "-v", filepath.Join(vmHome, ".claude.json")+":/home/codewire/.claude.json")
 		}
 	}
 	dockerArgs = append(dockerArgs,
