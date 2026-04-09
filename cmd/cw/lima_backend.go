@@ -177,6 +177,13 @@ func limaCreateCommandArgs(instance *cwconfig.LocalInstance) []string {
 			strconv.Quote(claudeDir),
 		)
 	}
+	codexDir := filepath.Join(homeDir, ".codex")
+	if _, err := localOsStat(codexDir); err == nil {
+		mounts += fmt.Sprintf(
+			`,{"location":%s,"mountPoint":"/home/{{.User}}.guest/.codex","writable":true}`,
+			strconv.Quote(codexDir),
+		)
+	}
 
 	mountSet := ".mounts=[" + mounts + "]"
 
@@ -294,6 +301,7 @@ func createLocalLimaInstance(instance *cwconfig.LocalInstance) error {
 	dockerArgs = append(dockerArgs,
 		"-v", filepath.Join(vmHome, ".config", "gh")+":/home/codewire/.config/gh:ro",
 		"-v", "/mnt/host-ssh:/home/codewire/.ssh:ro",
+		"-v", filepath.Join(vmHome, ".codex")+":/home/codewire/.codex",
 	)
 	dockerArgs = append(dockerArgs,
 		"--workdir", "/workspace",

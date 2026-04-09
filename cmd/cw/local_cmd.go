@@ -743,6 +743,13 @@ func createLocalIncusInstance(instance *cwconfig.LocalInstance) error {
 				return err
 			}
 		}
+		codexDir := filepath.Join(homeDir, ".codex")
+		if _, statErr := localOsStat(codexDir); statErr == nil {
+			if err := runIncus("config", "device", "add", instance.RuntimeName, "codex-config", "disk",
+				"source="+codexDir, "path=/home/codewire/.codex"); err != nil {
+				return err
+			}
+		}
 	}
 	if err := runIncus("start", instance.RuntimeName); err != nil {
 		return err
@@ -779,6 +786,10 @@ func createLocalDockerInstance(instance *cwconfig.LocalInstance) error {
 		sshDir := filepath.Join(homeDir, ".ssh")
 		if _, err := localOsStat(sshDir); err == nil {
 			args = append(args, "--volume", sshDir+":/home/codewire/.ssh:ro")
+		}
+		codexDir := filepath.Join(homeDir, ".codex")
+		if _, err := localOsStat(codexDir); err == nil {
+			args = append(args, "--volume", codexDir+":/home/codewire/.codex")
 		}
 	}
 	if instance.CPU > 0 {
