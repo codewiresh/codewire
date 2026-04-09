@@ -255,9 +255,15 @@ func createLocalLimaInstance(instance *cwconfig.LocalInstance) error {
 		}
 	}()
 
+	// Switch to rootful Docker so bind-mounted files preserve host UIDs.
+	// The Lima template installs both rootful and rootless; rootless remaps
+	// UIDs which makes 600-permission credential files unreadable.
+	_, _ = localRunCommand("limactl", "shell", "--workdir", "/", name,
+		"sudo", "systemctl", "start", "docker")
+
 	// Wait for Docker readiness inside the VM
 	fmt.Fprintf(os.Stderr, "  Waiting for Docker inside VM...\n")
-	if err := localRunCommandStream("limactl", "shell", "--workdir", "/", name, "docker", "info"); err != nil {
+	if err := localRunCommandStream("limactl", "shell", "--workdir", "/", name, "sudo", "docker", "info"); err != nil {
 		return fmt.Errorf("docker not ready inside Lima VM: %v", err)
 	}
 
@@ -267,7 +273,7 @@ func createLocalLimaInstance(instance *cwconfig.LocalInstance) error {
 			tok := strings.TrimSpace(string(token))
 			if tok != "" {
 				_, _ = localRunCommand("limactl", "shell", "--workdir", "/", name, "sh", "-c",
-					"docker login ghcr.io -u oauth2 --password-stdin <<< "+strconv.Quote(tok))
+					"sudo docker login ghcr.io -u oauth2 --password-stdin <<< "+strconv.Quote(tok))
 			}
 		}
 	}
@@ -278,16 +284,15 @@ func createLocalLimaInstance(instance *cwconfig.LocalInstance) error {
 		image = "ubuntu:latest"
 	}
 	fmt.Fprintf(os.Stderr, "  Pulling %s...\n", image)
-	if err := localRunCommandStream("limactl", "shell", "--workdir", "/", name, "docker", "pull", image); err != nil {
+	if err := localRunCommandStream("limactl", "shell", "--workdir", "/", name, "sudo", "docker", "pull", image); err != nil {
 		return fmt.Errorf("docker pull %s: %v", image, err)
 	}
 
 	// Run the container with the workspace mounted
 	fmt.Fprintf(os.Stderr, "  Starting workspace container...\n")
 	dockerArgs := []string{
-		"docker", "run", "-d",
+		"sudo", "docker", "run", "-d",
 		"--name", limaContainerName,
-		"--userns=host",
 		"-v", "/workspace:/workspace",
 	}
 	vmUser := os.Getenv("USER")
@@ -320,7 +325,7 @@ func createLocalLimaInstance(instance *cwconfig.LocalInstance) error {
 			vmTmp := "/tmp/claude.json"
 			if _, cpErr := localRunCommand("limactl", "copy", claudeJSON, name+":"+vmTmp); cpErr == nil {
 				_, _ = localRunCommand("limactl", "shell", "--workdir", "/", name,
-					"docker", "cp", vmTmp, limaContainerName+":/home/codewire/.claude.json")
+					"sudo", "docker", "cp", vmTmp, limaContainerName+":/home/codewire/.claude.json")
 				_, _ = localRunCommand("limactl", "shell", "--workdir", "/", name, "rm", "-f", vmTmp)
 			}
 		}
@@ -341,9 +346,10 @@ func startLocalLimaInstance(instance *cwconfig.LocalInstance) error {
 	if err := localRunCommandStream("limactl", "start", "--tty=false", name); err != nil {
 		return fmt.Errorf("limactl start %s: %v", name, err)
 	}
-	// Start the workspace container
+	// Start rootful Docker and the workspace container
+	_, _ = localRunCommand("limactl", "shell", "--workdir", "/", name, "sudo", "systemctl", "start", "docker")
 	fmt.Fprintf(os.Stderr, "  Starting workspace container...\n")
-	out, err := localRunCommand("limactl", "shell", "--workdir", "/", name, "docker", "start", limaContainerName)
+	out, err := localRunCommand("limactl", "shell", "--workdir", "/", name, "sudo", "docker", "start", limaContainerName)
 	if err != nil {
 		return fmt.Errorf("docker start %s: %v\n%s", limaContainerName, err, strings.TrimSpace(string(out)))
 	}
@@ -358,7 +364,7 @@ func stopLocalLimaInstance(instance *cwconfig.LocalInstance) error {
 	}
 	name := limaInstanceName(instance)
 	// Stop the workspace container first
-	_, _ = localRunCommand("limactl", "shell", "--workdir", "/", name, "docker", "stop", limaContainerName)
+	_, _ = localRunCommand("limactl", "shell", "--workdir", "/", name, "sudo", "docker", "stop", limaContainerName)
 	// Stop the VM
 	out, err := localRunCommand("limactl", "stop", name)
 	if err != nil {

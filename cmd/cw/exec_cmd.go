@@ -79,7 +79,7 @@ var execInLocalRuntimeTarget = func(instance *cwconfig.LocalInstance, workDir st
 
 		// Verify the command exists inside the container, not the VM.
 		checkOut, checkErr := localRunCommand("limactl", "shell", "--workdir", "/", name,
-			"docker", "exec", limaContainerName, "which", command[0])
+			"sudo", "docker", "exec", limaContainerName, "which", command[0])
 		if checkErr != nil {
 			return fmt.Errorf("%q not found inside Lima instance %q\n%s", command[0], name, strings.TrimSpace(string(checkOut)))
 		}
@@ -89,8 +89,8 @@ var execInLocalRuntimeTarget = func(instance *cwconfig.LocalInstance, workDir st
 			wd = instance.Workdir
 		}
 
-		// limactl shell <vm> docker exec -i [-t] -w <wd> cw-workspace <command...>
-		dockerArgs := []string{"docker", "exec", "-i"}
+		// limactl shell <vm> sudo docker exec -i [-t] -w <wd> cw-workspace <command...>
+		dockerArgs := []string{"sudo", "docker", "exec", "-i"}
 		if wantTTY {
 			dockerArgs = append(dockerArgs, "-t")
 		}
