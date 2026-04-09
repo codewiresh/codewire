@@ -164,7 +164,7 @@ func limaCreateCommandArgs(instance *cwconfig.LocalInstance) []string {
 	sshDir := filepath.Join(homeDir, ".ssh")
 
 	mounts := fmt.Sprintf(
-		`{"location":%s,"mountPoint":"/workspace","writable":true},{"location":%s,"mountPoint":"/home/{{.User}}.guest/.config/gh","writable":false},{"location":%s,"mountPoint":"/home/{{.User}}.guest/.ssh","writable":false}`,
+		`{"location":%s,"mountPoint":"/workspace","writable":true},{"location":%s,"mountPoint":"/home/{{.User}}.guest/.config/gh","writable":false},{"location":%s,"mountPoint":"/mnt/host-ssh","writable":false}`,
 		strconv.Quote(instance.RepoPath),
 		strconv.Quote(ghConfigDir),
 		strconv.Quote(sshDir),
@@ -284,7 +284,7 @@ func createLocalLimaInstance(instance *cwconfig.LocalInstance) error {
 	}
 	dockerArgs = append(dockerArgs,
 		"-v", filepath.Join(vmHome, ".config", "gh")+":/home/codewire/.config/gh:ro",
-		"-v", filepath.Join(vmHome, ".ssh")+":/home/codewire/.ssh:ro",
+		"-v", "/mnt/host-ssh:/home/codewire/.ssh:ro",
 	)
 	dockerArgs = append(dockerArgs,
 		"--workdir", "/workspace",
