@@ -287,6 +287,7 @@ func createLocalLimaInstance(instance *cwconfig.LocalInstance) error {
 	dockerArgs := []string{
 		"docker", "run", "-d",
 		"--name", limaContainerName,
+		"--userns=host",
 		"-v", "/workspace:/workspace",
 	}
 	vmUser := os.Getenv("USER")
