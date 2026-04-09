@@ -722,6 +722,20 @@ func createLocalIncusInstance(instance *cwconfig.LocalInstance) error {
 				return err
 			}
 		}
+		ghConfigDir := filepath.Join(homeDir, ".config", "gh")
+		if _, statErr := localOsStat(ghConfigDir); statErr == nil {
+			if err := runIncus("config", "device", "add", instance.RuntimeName, "gh-config", "disk",
+				"source="+ghConfigDir, "path=/home/codewire/.config/gh", "readonly=true"); err != nil {
+				return err
+			}
+		}
+		sshDir := filepath.Join(homeDir, ".ssh")
+		if _, statErr := localOsStat(sshDir); statErr == nil {
+			if err := runIncus("config", "device", "add", instance.RuntimeName, "ssh-config", "disk",
+				"source="+sshDir, "path=/home/codewire/.ssh", "readonly=true"); err != nil {
+				return err
+			}
+		}
 	}
 	if err := runIncus("start", instance.RuntimeName); err != nil {
 		return err
@@ -746,6 +760,14 @@ func createLocalDockerInstance(instance *cwconfig.LocalInstance) error {
 		claudeDir := filepath.Join(homeDir, ".claude")
 		if _, err := localOsStat(claudeDir); err == nil {
 			args = append(args, "--volume", claudeDir+":/home/codewire/.claude")
+		}
+		ghConfigDir := filepath.Join(homeDir, ".config", "gh")
+		if _, err := localOsStat(ghConfigDir); err == nil {
+			args = append(args, "--volume", ghConfigDir+":/home/codewire/.config/gh:ro")
+		}
+		sshDir := filepath.Join(homeDir, ".ssh")
+		if _, err := localOsStat(sshDir); err == nil {
+			args = append(args, "--volume", sshDir+":/home/codewire/.ssh:ro")
 		}
 	}
 	if instance.CPU > 0 {

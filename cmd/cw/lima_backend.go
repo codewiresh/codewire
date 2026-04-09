@@ -161,11 +161,13 @@ func limaCreateCommandArgs(instance *cwconfig.LocalInstance) []string {
 
 	homeDir, _ := localUserHomeDir()
 	ghConfigDir := filepath.Join(homeDir, ".config", "gh")
+	sshDir := filepath.Join(homeDir, ".ssh")
 
 	mounts := fmt.Sprintf(
-		`{"location":%s,"mountPoint":"/workspace","writable":true},{"location":%s,"mountPoint":"/home/{{.User}}.guest/.config/gh","writable":false}`,
+		`{"location":%s,"mountPoint":"/workspace","writable":true},{"location":%s,"mountPoint":"/home/{{.User}}.guest/.config/gh","writable":false},{"location":%s,"mountPoint":"/home/{{.User}}.guest/.ssh","writable":false}`,
 		strconv.Quote(instance.RepoPath),
 		strconv.Quote(ghConfigDir),
+		strconv.Quote(sshDir),
 	)
 
 	claudeDir := filepath.Join(homeDir, ".claude")
@@ -272,13 +274,18 @@ func createLocalLimaInstance(instance *cwconfig.LocalInstance) error {
 		"-v", "/workspace:/workspace",
 	}
 	vmUser := os.Getenv("USER")
-	claudeDir := filepath.Join("/home", vmUser+".guest", ".claude")
+	vmHome := filepath.Join("/home", vmUser+".guest")
+	claudeDir := filepath.Join(vmHome, ".claude")
 	if homeDir, err := localUserHomeDir(); err == nil {
 		hostClaude := filepath.Join(homeDir, ".claude")
 		if _, statErr := localOsStat(hostClaude); statErr == nil {
 			dockerArgs = append(dockerArgs, "-v", claudeDir+":/home/codewire/.claude")
 		}
 	}
+	dockerArgs = append(dockerArgs,
+		"-v", filepath.Join(vmHome, ".config", "gh")+":/home/codewire/.config/gh:ro",
+		"-v", filepath.Join(vmHome, ".ssh")+":/home/codewire/.ssh:ro",
+	)
 	dockerArgs = append(dockerArgs,
 		"--workdir", "/workspace",
 		image,
