@@ -234,10 +234,19 @@ func createLocalLimaInstance(instance *cwconfig.LocalInstance) error {
 	args := limaCreateCommandArgs(instance)
 	fmt.Fprintf(os.Stderr, "  Creating Lima VM %q (this may download a VM image on first run)...\n", limaInstanceName(instance))
 	if err := localRunCommandStream("limactl", args...); err != nil {
+		// Clean up zombie VM on boot failure
+		_, _ = localRunCommand("limactl", "delete", "--force", limaInstanceName(instance))
 		return fmt.Errorf("limactl %s: %v", strings.Join(args, " "), err)
 	}
 
 	name := limaInstanceName(instance)
+
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_, _ = localRunCommand("limactl", "delete", "--force", name)
+		}
+	}()
 
 	// Wait for Docker readiness inside the VM
 	fmt.Fprintf(os.Stderr, "  Waiting for Docker inside VM...\n")
@@ -295,6 +304,7 @@ func createLocalLimaInstance(instance *cwconfig.LocalInstance) error {
 		return fmt.Errorf("docker run: %v", err)
 	}
 
+	cleanup = false
 	return nil
 }
 
