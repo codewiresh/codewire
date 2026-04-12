@@ -18,6 +18,15 @@ func TestSanitizeLocalName(t *testing.T) {
 	}
 }
 
+func stubLocalCLIDataDir(t *testing.T) string {
+	t.Helper()
+	orig := localCLIDataDir
+	dir := t.TempDir()
+	localCLIDataDir = func() string { return dir }
+	t.Cleanup(func() { localCLIDataDir = orig })
+	return dir
+}
+
 func TestIncusOCIImageRef(t *testing.T) {
 	remoteName, remoteURL, remoteImage, err := incusOCIImageRef("ghcr.io/codewiresh/full:latest")
 	if err != nil {
@@ -95,6 +104,22 @@ func TestPrepareLocalInstanceUsesCodewireYAMLAndOverrides(t *testing.T) {
 	}
 	if instance.Memory != 4096 {
 		t.Fatalf("instance.Memory = %d, want 4096", instance.Memory)
+	}
+}
+
+func TestPrepareLocalInstanceUsesRepoPathWorkdirForLima(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfgPath := filepath.Join(tmpDir, "codewire.yaml")
+	if err := cwconfig.WriteCodewireConfig(cfgPath, &cwconfig.CodewireConfig{Image: "ghcr.io/codewiresh/full:latest"}); err != nil {
+		t.Fatalf("WriteCodewireConfig() error = %v", err)
+	}
+
+	instance, err := prepareLocalInstance(localCreateOptions{Backend: "lima", Path: tmpDir, File: "codewire.yaml"})
+	if err != nil {
+		t.Fatalf("prepareLocalInstance() error = %v", err)
+	}
+	if instance.Workdir != tmpDir {
+		t.Fatalf("instance.Workdir = %q, want %q", instance.Workdir, tmpDir)
 	}
 }
 
@@ -459,6 +484,7 @@ func TestLimaCreateCommandArgs(t *testing.T) {
 	origGOOS := localGOOS
 	origUserHomeDir := localUserHomeDir
 	origOsStat := localOsStat
+	dataDir := stubLocalCLIDataDir(t)
 	t.Cleanup(func() {
 		localGOOS = origGOOS
 		localUserHomeDir = origUserHomeDir
@@ -485,8 +511,8 @@ func TestLimaCreateCommandArgs(t *testing.T) {
 	}
 
 	got := limaCreateCommandArgs(instance)
-
-	wantMountSet := `.mounts=[{"location":"/tmp/repo","mountPoint":"/workspace","writable":true},{"location":"/home/testuser/.config/gh","mountPoint":"/home/{{.User}}.guest/.config/gh","writable":false},{"location":"/home/testuser/.ssh","mountPoint":"/mnt/host-ssh","writable":false},{"location":"/home/testuser/.claude","mountPoint":"/home/{{.User}}.guest/.claude","writable":true},{"location":"/home/testuser/.codex","mountPoint":"/home/{{.User}}.guest/.codex","writable":true},{"location":"/tmp/shared","mountPoint":"/mnt/shared","writable":false}]`
+	wantClaudeDir := filepath.Join(dataDir, "lima", "cw-repo", "claude")
+	wantMountSet := `.mounts=[{"location":"/tmp/repo","mountPoint":"/tmp/repo","writable":true},{"location":"` + wantClaudeDir + `","mountPoint":"/home/{{.User}}.guest/.claude","writable":true},{"location":"/home/testuser/.config/gh","mountPoint":"/home/{{.User}}.guest/.config/gh","writable":false},{"location":"/home/testuser/.ssh","mountPoint":"/mnt/host-ssh","writable":false},{"location":"/home/testuser/.codex","mountPoint":"/home/{{.User}}.guest/.codex","writable":true},{"location":"/tmp/shared","mountPoint":"/mnt/shared","writable":false}]`
 
 	want := []string{
 		"start",
@@ -515,6 +541,7 @@ func TestCreateLocalLimaInstanceInvokesExpectedCommands(t *testing.T) {
 	origGOOS := localGOOS
 	origUserHomeDir := localUserHomeDir
 	origOsStat := localOsStat
+	stubLocalCLIDataDir(t)
 	t.Cleanup(func() {
 		localLookPath = origLookPath
 		localRunCommandStream = origRunStream
@@ -543,7 +570,6 @@ func TestCreateLocalLimaInstanceInvokesExpectedCommands(t *testing.T) {
 		return nil
 	}
 	localRunCommand = func(name string, args ...string) ([]byte, error) {
-		// gh auth token -> return fake token; docker login -> succeed
 		if name == "/usr/bin/gh" {
 			return []byte("fake-token\n"), nil
 		}
@@ -566,38 +592,30 @@ func TestCreateLocalLimaInstanceInvokesExpectedCommands(t *testing.T) {
 		CPU:         1500,
 		Memory:      4096,
 		Disk:        20,
-		Ports: []cwconfig.PortConfig{
-			{Port: 3000, Label: "web"},
-		},
-		Mounts: []cwconfig.MountConfig{
-			{Source: "/tmp/shared", Target: "/mnt/shared", Readonly: boolPtr(true)},
-		},
+		Ports:       []cwconfig.PortConfig{{Port: 3000, Label: "web"}},
+		Mounts:      []cwconfig.MountConfig{{Source: "/tmp/shared", Target: "/mnt/shared", Readonly: boolPtr(true)}},
 	}
 	if err := createLocalLimaInstance(instance); err != nil {
 		t.Fatalf("createLocalLimaInstance() error = %v", err)
 	}
 
 	want := [][]string{
-		// 1. Boot VM
 		append([]string{"limactl"}, limaCreateCommandArgs(instance)...),
-		// 2. Wait for Docker
 		{"limactl", "shell", "--workdir", "/", "cw-repo", "sudo", "docker", "info"},
-		// 3. Pull image
 		{"limactl", "shell", "--workdir", "/", "cw-repo", "sudo", "docker", "pull", "ghcr.io/codewiresh/full:latest"},
-		// 4. Run container
 		{"limactl", "shell", "--workdir", "/", "cw-repo", "sudo", "docker", "run", "-d",
 			"--name", "cw-workspace",
 			"--network", "host",
 			"--group-add", "988",
 			"-e", "DOCKER_HOST=" + limaDockerHostValue,
 			"-v", limaDockerSockPath + ":" + limaDockerSockPath,
-			"-v", "/workspace:/workspace",
+			"-v", "/tmp/repo:/tmp/repo",
 			"-v", "/home/" + vmUser + ".guest/.claude:/home/codewire/.claude",
 			"-v", "/home/" + vmUser + ".guest/.config/gh:/home/codewire/.config/gh:ro",
 			"-v", "/mnt/host-ssh:/home/codewire/.ssh:ro",
 			"-v", "/home/" + vmUser + ".guest/.codex:/home/codewire/.codex",
 			"-v", "/tmp/shared:/mnt/shared:ro",
-			"--workdir", "/workspace",
+			"--workdir", "/tmp/repo",
 			"ghcr.io/codewiresh/full:latest",
 			"sleep", "infinity"},
 	}
@@ -642,19 +660,19 @@ func TestResolveLocalMountsNormalizesSourceAndTarget(t *testing.T) {
 	}
 }
 
-func TestLimaAdditionalMountsFollowsExternalClaudeSymlinkTargets(t *testing.T) {
+func TestEnsureLimaClaudeStateSeedsPortableEntries(t *testing.T) {
 	origUserHomeDir := localUserHomeDir
-	origOsStat := localOsStat
-	t.Cleanup(func() {
-		localUserHomeDir = origUserHomeDir
-		localOsStat = origOsStat
-	})
+	stubDir := stubLocalCLIDataDir(t)
+	t.Cleanup(func() { localUserHomeDir = origUserHomeDir })
 
 	root := t.TempDir()
 	homeDir := filepath.Join(root, "home")
 	agenticDir := filepath.Join(root, "agentic")
-	if err := os.MkdirAll(filepath.Join(homeDir, ".claude"), 0o755); err != nil {
-		t.Fatalf("MkdirAll(home .claude): %v", err)
+	if err := os.MkdirAll(filepath.Join(homeDir, ".claude", "commands"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(home .claude commands): %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(homeDir, ".claude", "skills", "tasks"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(home .claude skills): %v", err)
 	}
 	if err := os.MkdirAll(filepath.Join(agenticDir, ".claude"), 0o755); err != nil {
 		t.Fatalf("MkdirAll(agentic .claude): %v", err)
@@ -662,8 +680,17 @@ func TestLimaAdditionalMountsFollowsExternalClaudeSymlinkTargets(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(agenticDir, "MEMORY.md"), []byte("memory"), 0o644); err != nil {
 		t.Fatalf("WriteFile(MEMORY.md): %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(agenticDir, ".claude", "settings.json"), []byte("{}"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(agenticDir, ".claude", "settings.json"), []byte("{\"permissions\":{}}"), 0o644); err != nil {
 		t.Fatalf("WriteFile(settings.json): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(homeDir, ".claude", "settings.local.json"), []byte("{}"), 0o644); err != nil {
+		t.Fatalf("WriteFile(settings.local.json): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(homeDir, ".claude", "commands", "test.md"), []byte("command"), 0o644); err != nil {
+		t.Fatalf("WriteFile(command): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(homeDir, ".claude", "skills", "tasks", "SKILL.md"), []byte("skill"), 0o644); err != nil {
+		t.Fatalf("WriteFile(skill): %v", err)
 	}
 	if err := os.Symlink(filepath.Join(agenticDir, "MEMORY.md"), filepath.Join(homeDir, ".claude", "CLAUDE.md")); err != nil {
 		t.Fatalf("Symlink(CLAUDE.md): %v", err)
@@ -673,10 +700,64 @@ func TestLimaAdditionalMountsFollowsExternalClaudeSymlinkTargets(t *testing.T) {
 	}
 
 	localUserHomeDir = func() (string, error) { return homeDir, nil }
+	instance := &cwconfig.LocalInstance{Name: "repo", RuntimeName: "cw-repo"}
+	if err := ensureLimaClaudeState(instance); err != nil {
+		t.Fatalf("ensureLimaClaudeState() error = %v", err)
+	}
+
+	targetDir := filepath.Join(stubDir, "lima", "cw-repo", "claude")
+	checks := map[string]string{
+		"CLAUDE.md":                                  "memory",
+		"settings.json":                              "{\"permissions\":{}}",
+		"settings.local.json":                        "{}",
+		filepath.Join("commands", "test.md"):         "command",
+		filepath.Join("skills", "tasks", "SKILL.md"): "skill",
+	}
+	for rel, want := range checks {
+		data, err := os.ReadFile(filepath.Join(targetDir, rel))
+		if err != nil {
+			t.Fatalf("ReadFile(%s): %v", rel, err)
+		}
+		if string(data) != want {
+			t.Fatalf("%s = %q, want %q", rel, string(data), want)
+		}
+	}
+	if info, err := os.Lstat(filepath.Join(targetDir, "settings.json")); err != nil {
+		t.Fatalf("Lstat(settings.json): %v", err)
+	} else if info.Mode()&os.ModeSymlink != 0 {
+		t.Fatal("expected settings.json to be copied, not symlinked")
+	}
+}
+
+func TestLimaAdditionalMountsFollowsExternalCodexSymlinkTargets(t *testing.T) {
+	origUserHomeDir := localUserHomeDir
+	origOsStat := localOsStat
+	t.Cleanup(func() {
+		localUserHomeDir = origUserHomeDir
+		localOsStat = origOsStat
+	})
+
+	root := t.TempDir()
+	homeDir := filepath.Join(root, "home")
+	externalDir := filepath.Join(root, "external")
+	if err := os.MkdirAll(filepath.Join(homeDir, ".codex"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(home .codex): %v", err)
+	}
+	if err := os.MkdirAll(externalDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(external): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(externalDir, "config.toml"), []byte("model = \"gpt-5\""), 0o644); err != nil {
+		t.Fatalf("WriteFile(config.toml): %v", err)
+	}
+	if err := os.Symlink(filepath.Join(externalDir, "config.toml"), filepath.Join(homeDir, ".codex", "config.toml")); err != nil {
+		t.Fatalf("Symlink(config.toml): %v", err)
+	}
+
+	localUserHomeDir = func() (string, error) { return homeDir, nil }
 	localOsStat = os.Stat
 
 	got := limaAdditionalMounts(&cwconfig.LocalInstance{})
-	want := []cwconfig.MountConfig{{Source: agenticDir, Target: agenticDir, Readonly: boolPtr(false)}}
+	want := []cwconfig.MountConfig{{Source: externalDir, Target: externalDir, Readonly: boolPtr(false)}}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("limaAdditionalMounts() = %#v, want %#v", got, want)
 	}
@@ -689,6 +770,7 @@ func TestCreateLocalLimaInstanceReusesExistingVMAndContainer(t *testing.T) {
 	origGOOS := localGOOS
 	origUserHomeDir := localUserHomeDir
 	origOsStat := localOsStat
+	stubLocalCLIDataDir(t)
 	t.Cleanup(func() {
 		localLookPath = origLookPath
 		localRunCommandStream = origRunStream
@@ -756,12 +838,17 @@ func TestLimaLifecycleCommands(t *testing.T) {
 	origLookPath := localLookPath
 	origRunCommand := localRunCommand
 	origRunStream := localRunCommandStream
+	origUserHomeDir := localUserHomeDir
+	dataDir := stubLocalCLIDataDir(t)
+	homeDir := filepath.Join(t.TempDir(), "home")
 	t.Cleanup(func() {
 		localLookPath = origLookPath
 		localRunCommand = origRunCommand
 		localRunCommandStream = origRunStream
+		localUserHomeDir = origUserHomeDir
 	})
 
+	localUserHomeDir = func() (string, error) { return homeDir, nil }
 	localLookPath = func(file string) (string, error) {
 		if file != "limactl" {
 			t.Fatalf("LookPath(%q) unexpected", file)
@@ -779,11 +866,12 @@ func TestLimaLifecycleCommands(t *testing.T) {
 		return nil
 	}
 
-	instance := &cwconfig.LocalInstance{
-		Name:             "repo",
-		Backend:          "lima",
-		LimaInstanceName: "cw-repo",
+	stateDir := filepath.Join(dataDir, "lima", "cw-repo", "claude")
+	if err := os.MkdirAll(stateDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(stateDir): %v", err)
 	}
+
+	instance := &cwconfig.LocalInstance{Name: "repo", Backend: "lima", LimaInstanceName: "cw-repo"}
 	if err := startLocalLimaInstance(instance); err != nil {
 		t.Fatalf("startLocalLimaInstance() error = %v", err)
 	}
@@ -795,18 +883,18 @@ func TestLimaLifecycleCommands(t *testing.T) {
 	}
 
 	want := [][]string{
-		// start: boot VM then start container
 		{"limactl", "start", "--tty=false", "cw-repo"},
 		{"limactl", "shell", "--workdir", "/", "cw-repo", "sudo", "systemctl", "start", "docker"},
 		{"limactl", "shell", "--workdir", "/", "cw-repo", "sudo", "docker", "start", "cw-workspace"},
-		// stop: stop container then stop VM
 		{"limactl", "shell", "--workdir", "/", "cw-repo", "sudo", "docker", "stop", "cw-workspace"},
 		{"limactl", "stop", "cw-repo"},
-		// delete: just delete the VM (container goes with it)
 		{"limactl", "delete", "--force", "cw-repo"},
 	}
 	if !reflect.DeepEqual(calls, want) {
 		t.Fatalf("lima calls:\n  got:  %#v\n  want: %#v", calls, want)
+	}
+	if _, err := os.Stat(filepath.Join(dataDir, "lima", "cw-repo")); !os.IsNotExist(err) {
+		t.Fatalf("expected Lima state dir to be removed, got err=%v", err)
 	}
 }
 
@@ -1307,13 +1395,18 @@ func TestLimaCreateFailureReturnsError(t *testing.T) {
 	origLookPath := localLookPath
 	origRunStream := localRunCommandStream
 	origGOOS := localGOOS
+	origUserHomeDir := localUserHomeDir
+	stubLocalCLIDataDir(t)
+	homeDir := filepath.Join(t.TempDir(), "home")
 	t.Cleanup(func() {
 		localLookPath = origLookPath
 		localRunCommandStream = origRunStream
 		localGOOS = origGOOS
+		localUserHomeDir = origUserHomeDir
 	})
 
 	localGOOS = "linux"
+	localUserHomeDir = func() (string, error) { return homeDir, nil }
 	localLookPath = func(file string) (string, error) {
 		return "/usr/bin/" + file, nil
 	}
@@ -1321,9 +1414,7 @@ func TestLimaCreateFailureReturnsError(t *testing.T) {
 		return errors.New("exit status 1")
 	}
 
-	instance := &cwconfig.LocalInstance{
-		Name: "repo", Backend: "lima", RuntimeName: "cw-repo", RepoPath: "/tmp/repo",
-	}
+	instance := &cwconfig.LocalInstance{Name: "repo", Backend: "lima", RuntimeName: "cw-repo", RepoPath: "/tmp/repo"}
 	err := createLocalLimaInstance(instance)
 	if err == nil {
 		t.Fatal("expected error when limactl start fails")
@@ -1336,11 +1427,16 @@ func TestLimaCreateFailureReturnsError(t *testing.T) {
 func TestLimaStartFailureReturnsError(t *testing.T) {
 	origLookPath := localLookPath
 	origRunStream := localRunCommandStream
+	origUserHomeDir := localUserHomeDir
+	stubLocalCLIDataDir(t)
+	homeDir := filepath.Join(t.TempDir(), "home")
 	t.Cleanup(func() {
 		localLookPath = origLookPath
 		localRunCommandStream = origRunStream
+		localUserHomeDir = origUserHomeDir
 	})
 
+	localUserHomeDir = func() (string, error) { return homeDir, nil }
 	localLookPath = func(file string) (string, error) {
 		return "/usr/bin/" + file, nil
 	}
@@ -1386,6 +1482,7 @@ func TestLimaStopFailureReturnsError(t *testing.T) {
 func TestLimaDeleteNotFoundReturnsNil(t *testing.T) {
 	origLookPath := localLookPath
 	origRunCommand := localRunCommand
+	dataDir := stubLocalCLIDataDir(t)
 	t.Cleanup(func() {
 		localLookPath = origLookPath
 		localRunCommand = origRunCommand
@@ -1399,15 +1496,22 @@ func TestLimaDeleteNotFoundReturnsNil(t *testing.T) {
 	}
 
 	instance := &cwconfig.LocalInstance{LimaInstanceName: "cw-repo"}
+	if err := os.MkdirAll(filepath.Join(dataDir, "lima", "cw-repo", "claude"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(stateDir): %v", err)
+	}
 	err := deleteLocalLimaInstance(instance)
 	if err != nil {
 		t.Fatalf("expected nil error for not-found delete, got: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dataDir, "lima", "cw-repo")); !os.IsNotExist(err) {
+		t.Fatalf("expected Lima state dir to be removed, got err=%v", err)
 	}
 }
 
 func TestLimaDeleteFailureReturnsError(t *testing.T) {
 	origLookPath := localLookPath
 	origRunCommand := localRunCommand
+	stubLocalCLIDataDir(t)
 	t.Cleanup(func() {
 		localLookPath = origLookPath
 		localRunCommand = origRunCommand

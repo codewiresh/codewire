@@ -172,7 +172,10 @@ func execCmd() *cobra.Command {
 						return fmt.Errorf("local instance not found: %s", target.Ref)
 					}
 					if workDir == "" {
-						workDir = localWorkspacePath
+						workDir = instance.Workdir
+						if workDir == "" {
+							workDir = localWorkspacePath
+						}
 					}
 					return execInLocalRuntimeTarget(instance, workDir, cmdArgs, interactive && tty)
 				}

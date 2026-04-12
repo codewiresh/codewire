@@ -20,10 +20,10 @@ const localWorkspacePath = "/workspace"
 
 var (
 	loadLocalInstancesForCLI = func() (*cwconfig.LocalInstancesConfig, error) {
-		return cwconfig.LoadLocalInstancesConfig(dataDir())
+		return cwconfig.LoadLocalInstancesConfig(localCLIDataDir())
 	}
 	saveLocalInstancesForCLI = func(cfg *cwconfig.LocalInstancesConfig) error {
-		return cwconfig.SaveLocalInstancesConfig(dataDir(), cfg)
+		return cwconfig.SaveLocalInstancesConfig(localCLIDataDir(), cfg)
 	}
 	localRunCommand = func(name string, args ...string) ([]byte, error) {
 		return exec.Command(name, args...).CombinedOutput()
@@ -41,6 +41,7 @@ var (
 	localGetwd         = os.Getwd
 	localUserHomeDir   = os.UserHomeDir
 	localOsStat        = os.Stat
+	localCLIDataDir    = dataDir
 )
 
 type localCreateOptions struct {
@@ -115,7 +116,7 @@ func localCreateCmd() *cobra.Command {
 			fmt.Printf("%-10s %s\n", bold("Runtime:"), instance.RuntimeName)
 			fmt.Printf("%-10s %s\n", bold("Image:"), instance.Image)
 			fmt.Printf("%-10s %s\n", bold("Repo:"), instance.RepoPath)
-			fmt.Printf("%-10s %s\n", bold("Mount:"), localWorkspacePath)
+			fmt.Printf("%-10s %s\n", bold("Mount:"), instance.Workdir)
 			return nil
 		},
 	}
@@ -650,12 +651,17 @@ func prepareLocalInstance(opts localCreateOptions) (cwconfig.LocalInstance, erro
 		return cwconfig.LocalInstance{}, fmt.Errorf("could not derive a valid local instance name")
 	}
 
+	workdir := localWorkspacePath
+	if strings.TrimSpace(opts.Backend) == "lima" {
+		workdir = projectDir
+	}
+
 	instance := cwconfig.LocalInstance{
 		Name:               name,
 		Backend:            strings.TrimSpace(opts.Backend),
 		RuntimeName:        "cw-" + name,
 		RepoPath:           projectDir,
-		Workdir:            localWorkspacePath,
+		Workdir:            workdir,
 		Preset:             cfg.Preset,
 		Image:              expandImageRef(cfg.Image),
 		Install:            cfg.Install,

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -265,10 +266,133 @@ func discoverExternalSymlinkMounts(root string, readOnly bool) []cwconfig.MountC
 	return mounts
 }
 
+var limaClaudePortableEntries = []string{
+	"settings.json",
+	"settings.local.json",
+	"CLAUDE.md",
+	"commands",
+	"skills",
+}
+
+func limaRepoMountPath(instance *cwconfig.LocalInstance) string {
+	if instance == nil {
+		return localWorkspacePath
+	}
+	if workdir := strings.TrimSpace(instance.Workdir); workdir != "" {
+		return filepath.Clean(workdir)
+	}
+	if repoPath := strings.TrimSpace(instance.RepoPath); repoPath != "" {
+		return filepath.Clean(repoPath)
+	}
+	return localWorkspacePath
+}
+
+func limaStateDir(instance *cwconfig.LocalInstance) string {
+	return filepath.Join(localCLIDataDir(), "lima", limaInstanceName(instance))
+}
+
+func limaClaudeStateHostDir(instance *cwconfig.LocalInstance) string {
+	return filepath.Join(limaStateDir(instance), "claude")
+}
+
+func ensureLimaClaudeState(instance *cwconfig.LocalInstance) error {
+	targetDir := limaClaudeStateHostDir(instance)
+	if err := os.MkdirAll(targetDir, 0o755); err != nil {
+		return fmt.Errorf("create Lima Claude state dir: %w", err)
+	}
+
+	homeDir, err := localUserHomeDir()
+	if err != nil {
+		return nil
+	}
+	hostClaudeDir := filepath.Join(homeDir, ".claude")
+	if _, err := os.Stat(hostClaudeDir); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("read host Claude dir: %w", err)
+	}
+
+	for _, entry := range limaClaudePortableEntries {
+		if err := copyPathIfMissing(filepath.Join(hostClaudeDir, entry), filepath.Join(targetDir, entry)); err != nil {
+			return fmt.Errorf("seed Lima Claude state %s: %w", entry, err)
+		}
+	}
+	return nil
+}
+
+func copyPathIfMissing(source, target string) error {
+	info, err := os.Lstat(source)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+
+	if info.Mode()&os.ModeSymlink != 0 {
+		resolved, err := filepath.EvalSymlinks(source)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return nil
+			}
+			return err
+		}
+		return copyPathIfMissing(resolved, target)
+	}
+
+	if info.IsDir() {
+		if err := os.MkdirAll(target, info.Mode().Perm()); err != nil {
+			return err
+		}
+		entries, err := os.ReadDir(source)
+		if err != nil {
+			return err
+		}
+		for _, entry := range entries {
+			if err := copyPathIfMissing(filepath.Join(source, entry.Name()), filepath.Join(target, entry.Name())); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	if !info.Mode().IsRegular() {
+		return nil
+	}
+	if _, err := os.Lstat(target); err == nil {
+		return nil
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		return err
+	}
+	return copyRegularFile(source, target, info.Mode().Perm())
+}
+
+func copyRegularFile(source, target string, mode os.FileMode) error {
+	in, err := os.Open(source)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+
+	out, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = out.Close() }()
+
+	if _, err := io.Copy(out, in); err != nil {
+		return err
+	}
+	return out.Close()
+}
+
 func limaAdditionalMounts(instance *cwconfig.LocalInstance) []cwconfig.MountConfig {
 	mounts := make([]cwconfig.MountConfig, 0)
 	if homeDir, err := localUserHomeDir(); err == nil {
-		mounts = append(mounts, discoverExternalSymlinkMounts(filepath.Join(homeDir, ".claude"), false)...)
 		mounts = append(mounts, discoverExternalSymlinkMounts(filepath.Join(homeDir, ".codex"), false)...)
 		mounts = append(mounts, discoverExternalSymlinkMounts(filepath.Join(homeDir, ".config", "gh"), true)...)
 		mounts = append(mounts, discoverExternalSymlinkMounts(filepath.Join(homeDir, ".ssh"), true)...)
@@ -312,15 +436,12 @@ func limaVMMounts(instance *cwconfig.LocalInstance) []limaVMMount {
 	ghConfigDir := filepath.Join(homeDir, ".config", "gh")
 	sshDir := filepath.Join(homeDir, ".ssh")
 	mounts := []limaVMMount{
-		{Location: instance.RepoPath, MountPoint: "/workspace", Writable: true},
+		{Location: limaRepoMountPath(instance), MountPoint: limaRepoMountPath(instance), Writable: true},
+		{Location: limaClaudeStateHostDir(instance), MountPoint: "/home/{{.User}}.guest/.claude", Writable: true},
 		{Location: ghConfigDir, MountPoint: "/home/{{.User}}.guest/.config/gh", Writable: false},
 		{Location: sshDir, MountPoint: "/mnt/host-ssh", Writable: false},
 	}
 
-	claudeDir := filepath.Join(homeDir, ".claude")
-	if _, err := localOsStat(claudeDir); err == nil {
-		mounts = append(mounts, limaVMMount{Location: claudeDir, MountPoint: "/home/{{.User}}.guest/.claude", Writable: true})
-	}
 	codexDir := filepath.Join(homeDir, ".codex")
 	if _, err := localOsStat(codexDir); err == nil {
 		mounts = append(mounts, limaVMMount{Location: codexDir, MountPoint: "/home/{{.User}}.guest/.codex", Writable: true})
@@ -339,15 +460,10 @@ func limaContainerMounts(instance *cwconfig.LocalInstance) []limaContainerMount 
 	vmUser := os.Getenv("USER")
 	vmHome := filepath.Join("/home", vmUser+".guest")
 	mounts := []limaContainerMount{
+		{Source: filepath.Join(vmHome, ".claude"), Target: "/home/codewire/.claude", ReadOnly: false},
 		{Source: filepath.Join(vmHome, ".config", "gh"), Target: "/home/codewire/.config/gh", ReadOnly: true},
 		{Source: "/mnt/host-ssh", Target: "/home/codewire/.ssh", ReadOnly: true},
 		{Source: filepath.Join(vmHome, ".codex"), Target: "/home/codewire/.codex", ReadOnly: false},
-	}
-	if homeDir, err := localUserHomeDir(); err == nil {
-		hostClaude := filepath.Join(homeDir, ".claude")
-		if _, statErr := localOsStat(hostClaude); statErr == nil {
-			mounts = append([]limaContainerMount{{Source: filepath.Join(vmHome, ".claude"), Target: "/home/codewire/.claude", ReadOnly: false}}, mounts...)
-		}
 	}
 	for _, mount := range limaAdditionalMounts(instance) {
 		mounts = append(mounts, limaContainerMount{
@@ -442,6 +558,9 @@ func createLocalLimaInstance(instance *cwconfig.LocalInstance) error {
 	instance.LimaMountType = defaultLimaMountType(instance.LimaVMType)
 
 	name := limaInstanceName(instance)
+	if err := ensureLimaClaudeState(instance); err != nil {
+		return err
+	}
 	cleanup, err := ensureLimaVMForCreate(instance)
 	if err != nil {
 		return err
@@ -496,6 +615,7 @@ func createLocalLimaInstance(instance *cwconfig.LocalInstance) error {
 	fmt.Fprintf(os.Stderr, "  Starting workspace container...\n")
 	switch status {
 	case "missing":
+		repoMountPath := limaRepoMountPath(instance)
 		dockerArgs := []string{
 			"sudo", "docker", "run", "-d",
 			"--name", limaContainerName,
@@ -503,11 +623,11 @@ func createLocalLimaInstance(instance *cwconfig.LocalInstance) error {
 			"--group-add", dockerSockGID,
 			"-e", "DOCKER_HOST=" + limaDockerHostValue,
 			"-v", limaDockerSockPath + ":" + limaDockerSockPath,
-			"-v", "/workspace:/workspace",
+			"-v", repoMountPath + ":" + repoMountPath,
 		}
 		dockerArgs = append(dockerArgs, limaContainerMountArgs(instance)...)
 		dockerArgs = append(dockerArgs,
-			"--workdir", "/workspace",
+			"--workdir", repoMountPath,
 			image,
 			"sleep", "infinity",
 		)
@@ -520,19 +640,6 @@ func createLocalLimaInstance(instance *cwconfig.LocalInstance) error {
 		out, err := localRunCommand("limactl", "shell", "--workdir", "/", name, "sudo", "docker", "start", limaContainerName)
 		if err != nil {
 			return fmt.Errorf("docker start %s: %v\n%s", limaContainerName, err, strings.TrimSpace(string(out)))
-		}
-	}
-
-	// Copy ~/.claude.json into the container (Lima mounts only support directories).
-	if homeDir, err := localUserHomeDir(); err == nil {
-		claudeJSON := filepath.Join(homeDir, ".claude.json")
-		if _, statErr := localOsStat(claudeJSON); statErr == nil {
-			vmTmp := "/tmp/claude.json"
-			if _, cpErr := localRunCommand("limactl", "copy", claudeJSON, name+":"+vmTmp); cpErr == nil {
-				_, _ = localRunCommand("limactl", "shell", "--workdir", "/", name,
-					"sudo", "docker", "cp", vmTmp, limaContainerName+":/home/codewire/.claude.json")
-				_, _ = localRunCommand("limactl", "shell", "--workdir", "/", name, "rm", "-f", vmTmp)
-			}
 		}
 	}
 
@@ -605,6 +712,9 @@ func startLocalLimaInstance(instance *cwconfig.LocalInstance) error {
 		}
 	}
 	name := limaInstanceName(instance)
+	if err := ensureLimaClaudeState(instance); err != nil {
+		return err
+	}
 	fmt.Fprintf(os.Stderr, "  Starting Lima VM %q...\n", name)
 	if err := localRunCommandStream("limactl", "start", "--tty=false", name); err != nil {
 		return fmt.Errorf("limactl start %s: %v", name, err)
@@ -647,9 +757,13 @@ func deleteLocalLimaInstance(instance *cwconfig.LocalInstance) error {
 	if err != nil {
 		lower := strings.ToLower(string(out))
 		if strings.Contains(lower, "not found") || strings.Contains(lower, "no such") {
+			_ = os.RemoveAll(limaStateDir(instance))
 			return nil
 		}
 		return fmt.Errorf("limactl delete --force %s: %v\n%s", name, err, strings.TrimSpace(string(out)))
+	}
+	if err := os.RemoveAll(limaStateDir(instance)); err != nil {
+		return fmt.Errorf("remove Lima state dir: %w", err)
 	}
 	return nil
 }
