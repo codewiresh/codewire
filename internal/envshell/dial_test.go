@@ -134,3 +134,38 @@ func TestDial_PreferWS_SkipsWG(t *testing.T) {
 		t.Errorf("WG should not have been called, got %d", fd.wgCalls)
 	}
 }
+
+func TestShell_Close_Idempotent(t *testing.T) {
+	s := &fakeShell{}
+	if err := s.Close(); err != nil {
+		t.Fatalf("first Close should not error: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Errorf("second Close should not error: %v", err)
+	}
+	if s.closeCalls != 2 {
+		t.Errorf("expected 2 close calls, got %d", s.closeCalls)
+	}
+}
+
+func TestDial_WireGuardCoordinatorFails_FallsBackToWS(t *testing.T) {
+	wsShell := &fakeShell{}
+	fd := &fakeDialer{
+		wgErr:    errors.New("coordinator connect: connection refused"),
+		wsResult: wsShell,
+	}
+
+	got, err := dialWith(context.Background(), fd, DialOptions{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != wsShell {
+		t.Error("expected WS shell after coordinator failure")
+	}
+	if fd.wgCalls != 1 {
+		t.Errorf("WG should be called once, got %d", fd.wgCalls)
+	}
+	if fd.wsCalls != 1 {
+		t.Errorf("WS should be called once, got %d", fd.wsCalls)
+	}
+}
