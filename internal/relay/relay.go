@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"html"
 	"io"
 	"log/slog"
 	"net"
@@ -950,9 +951,12 @@ func joinHandler(st store.Store) http.HandlerFunc {
 }
 
 func joinPageHandler(baseURL string) http.HandlerFunc {
+	// baseURL is server-config; escape defensively anyway.
+	safeBaseURL := html.EscapeString(baseURL)
 	return func(w http.ResponseWriter, r *http.Request) {
-		invite := r.URL.Query().Get("invite")
-		w.Header().Set("Content-Type", "text/html")
+		// Escape user-provided invite to prevent reflected XSS.
+		safeInvite := html.EscapeString(r.URL.Query().Get("invite"))
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		fmt.Fprintf(w, `<!DOCTYPE html>
 <html><head><title>Join CodeWire Relay</title>
 <style>body{font-family:system-ui;max-width:480px;margin:80px auto;text-align:center;color:#1a1a1a}
@@ -965,7 +969,7 @@ p{color:#525252;line-height:1.6}
 <div class="code">%s</div>
 <p>Run on your device:</p>
 <div class="code">cw login && cw network join --relay-url %s %s</div>
-</body></html>`, invite, baseURL, invite)
+</body></html>`, safeInvite, safeBaseURL, safeInvite)
 	}
 }
 
