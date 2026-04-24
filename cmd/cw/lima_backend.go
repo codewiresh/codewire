@@ -683,6 +683,10 @@ func createLocalLimaInstance(instance *cwconfig.LocalInstance) error {
 			"--name", limaContainerName,
 			"--network", "host",
 			"--group-add", dockerSockGID,
+			// Override the image's ENTRYPOINT so the sleep CMD runs directly.
+			// Matches the docker backend: dev images often have an entrypoint
+			// that writes SSH host keys into ~/.ssh (which we mount read-only).
+			"--entrypoint", "/bin/sh",
 			"-e", "DOCKER_HOST=" + limaDockerHostValue,
 			"-v", limaDockerSockPath + ":" + limaDockerSockPath,
 			"-v", repoMountPath + ":" + repoMountPath,
@@ -697,7 +701,9 @@ func createLocalLimaInstance(instance *cwconfig.LocalInstance) error {
 		dockerArgs = append(dockerArgs,
 			"--workdir", repoMountPath,
 			image,
-			"sleep", "infinity",
+			// Entrypoint was overridden to /bin/sh above, so "sleep infinity"
+			// must be wrapped in `-c` for the shell to exec it.
+			"-c", "sleep infinity",
 		)
 		if err := localRunCommandStream("limactl", append([]string{"shell", "--workdir", "/", name}, dockerArgs...)...); err != nil {
 			return fmt.Errorf("docker run: %v", err)

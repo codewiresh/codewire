@@ -1268,10 +1268,11 @@ func createLocalIncusInstance(instance *cwconfig.LocalInstance) error {
 			}
 		}
 		if token := strings.TrimSpace(localClaudeOAuthToken()); token != "" {
+			// Only CLAUDE_CODE_OAUTH_TOKEN — ANTHROPIC_AUTH_TOKEN expects a
+			// regular API key ("sk-ant-api…"), not an OAuth token
+			// ("sk-ant-oat…"), and setting it here causes claude-code to
+			// preferentially use the wrong token and fail with 401.
 			if err := runIncus("config", "set", instance.RuntimeName, "environment.CLAUDE_CODE_OAUTH_TOKEN", token); err != nil {
-				return err
-			}
-			if err := runIncus("config", "set", instance.RuntimeName, "environment.ANTHROPIC_AUTH_TOKEN", token); err != nil {
 				return err
 			}
 		}
@@ -1312,6 +1313,11 @@ func createLocalDockerInstance(instance *cwconfig.LocalInstance) error {
 		"create",
 		"--name", instance.RuntimeName,
 		"--hostname", instance.RuntimeName,
+		// Override the image's ENTRYPOINT so the long-running sleep script is
+		// what actually runs. Many dev images ship an entrypoint that writes
+		// SSH host keys into ~/.ssh at startup — which fails here because we
+		// mount ~/.ssh read-only from the host.
+		"--entrypoint", "/bin/sh",
 		"--workdir", localWorkspacePath,
 		"--volume", instance.RepoPath + ":" + localWorkspacePath,
 	}
@@ -1356,8 +1362,11 @@ func createLocalDockerInstance(instance *cwconfig.LocalInstance) error {
 		args = append(args, "--env", "SSH_AUTH_SOCK="+localSSHAuthSockPath)
 	}
 	if token := strings.TrimSpace(localClaudeOAuthToken()); token != "" {
+		// Only CLAUDE_CODE_OAUTH_TOKEN — ANTHROPIC_AUTH_TOKEN expects a
+		// regular API key ("sk-ant-api…"), not an OAuth token
+		// ("sk-ant-oat…"), and setting it here causes claude-code to
+		// preferentially use the wrong token and fail with 401.
 		args = append(args, "--env", "CLAUDE_CODE_OAUTH_TOKEN="+token)
-		args = append(args, "--env", "ANTHROPIC_AUTH_TOKEN="+token)
 	}
 	if len(instance.Env) > 0 {
 		keys := make([]string, 0, len(instance.Env))
@@ -1371,7 +1380,8 @@ func createLocalDockerInstance(instance *cwconfig.LocalInstance) error {
 	}
 	args = append(args,
 		instance.Image,
-		"/bin/sh",
+		// Entrypoint was overridden to /bin/sh above, so the CMD is the shell's
+		// arguments. The `trap` keeps the container responsive to stop signals.
 		"-lc",
 		"trap 'exit 0' TERM INT; while true; do sleep 3600; done",
 	)

@@ -257,21 +257,19 @@ func TestCreateLocalIncusInstanceSetsClaudeOAuthEnv(t *testing.T) {
 	}
 
 	wantOAuth := []string{"incus", "config", "set", "cw-repo", "environment.CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat01-test"}
-	wantAnthropic := []string{"incus", "config", "set", "cw-repo", "environment.ANTHROPIC_AUTH_TOKEN", "sk-ant-oat01-test"}
-	var sawOAuth, sawAnthropic bool
+	var sawOAuth bool
 	for _, call := range calls {
 		if reflect.DeepEqual(call, wantOAuth) {
 			sawOAuth = true
 		}
-		if reflect.DeepEqual(call, wantAnthropic) {
-			sawAnthropic = true
+		// ANTHROPIC_AUTH_TOKEN must NOT be set to an OAuth token value —
+		// that env var expects a regular API key. Regression guard.
+		if len(call) >= 5 && call[4] == "environment.ANTHROPIC_AUTH_TOKEN" {
+			t.Fatalf("ANTHROPIC_AUTH_TOKEN must not be set to the OAuth token; got call %v", call)
 		}
 	}
 	if !sawOAuth {
 		t.Fatalf("expected %v in calls; got %#v", wantOAuth, calls)
-	}
-	if !sawAnthropic {
-		t.Fatalf("expected %v in calls; got %#v", wantAnthropic, calls)
 	}
 }
 
@@ -473,7 +471,7 @@ func TestCreateLocalDockerInstanceInvokesExpectedCommands(t *testing.T) {
 	}
 
 	want := [][]string{
-		{"docker", "create", "--name", "cw-repo", "--hostname", "cw-repo", "--workdir", "/workspace", "--volume", "/tmp/repo:/workspace", "--volume", "/home/testuser/.claude:/home/codewire/.claude", "--volume", "/home/testuser/.claude.json:/home/codewire/.claude.json", "--volume", "/home/testuser/.config/gh:/home/codewire/.config/gh", "--volume", "/home/testuser/.gitconfig:/home/codewire/.gitconfig:ro", "--volume", "/home/testuser/.1password/agent.sock:/tmp/codewire-ssh-agent.sock", "--volume", "/home/testuser/.ssh:/home/codewire/.ssh:ro", "--volume", "/home/testuser/.codex:/home/codewire/.codex", "--cpus", "1.500", "--memory", "4096m", "--env", "GH_TOKEN=gho_test", "--env", "SSH_AUTH_SOCK=/tmp/codewire-ssh-agent.sock", "--env", "A=1", "--env", "B=2", "ghcr.io/codewiresh/full:latest", "/bin/sh", "-lc", "trap 'exit 0' TERM INT; while true; do sleep 3600; done"},
+		{"docker", "create", "--name", "cw-repo", "--hostname", "cw-repo", "--entrypoint", "/bin/sh", "--workdir", "/workspace", "--volume", "/tmp/repo:/workspace", "--volume", "/home/testuser/.claude:/home/codewire/.claude", "--volume", "/home/testuser/.claude.json:/home/codewire/.claude.json", "--volume", "/home/testuser/.config/gh:/home/codewire/.config/gh", "--volume", "/home/testuser/.gitconfig:/home/codewire/.gitconfig:ro", "--volume", "/home/testuser/.1password/agent.sock:/tmp/codewire-ssh-agent.sock", "--volume", "/home/testuser/.ssh:/home/codewire/.ssh:ro", "--volume", "/home/testuser/.codex:/home/codewire/.codex", "--cpus", "1.500", "--memory", "4096m", "--env", "GH_TOKEN=gho_test", "--env", "SSH_AUTH_SOCK=/tmp/codewire-ssh-agent.sock", "--env", "A=1", "--env", "B=2", "ghcr.io/codewiresh/full:latest", "-lc", "trap 'exit 0' TERM INT; while true; do sleep 3600; done"},
 		{"docker", "start", "cw-repo"},
 	}
 	if !reflect.DeepEqual(calls, want) {
@@ -522,22 +520,21 @@ func TestCreateLocalDockerInstanceSetsClaudeOAuthEnv(t *testing.T) {
 		t.Fatal("no docker calls recorded")
 	}
 	createArgs := calls[0]
-	var sawOAuth, sawAnthropic bool
+	var sawOAuth bool
 	for i := 0; i+1 < len(createArgs); i++ {
 		if createArgs[i] == "--env" {
-			switch createArgs[i+1] {
-			case "CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-test":
+			switch {
+			case createArgs[i+1] == "CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-test":
 				sawOAuth = true
-			case "ANTHROPIC_AUTH_TOKEN=sk-ant-oat01-test":
-				sawAnthropic = true
+			case strings.HasPrefix(createArgs[i+1], "ANTHROPIC_AUTH_TOKEN="):
+				// ANTHROPIC_AUTH_TOKEN expects a regular API key, not an OAuth
+				// token. Setting it here previously caused claude-code to 401.
+				t.Fatalf("ANTHROPIC_AUTH_TOKEN must not be forwarded as the OAuth token: %q", createArgs[i+1])
 			}
 		}
 	}
 	if !sawOAuth {
 		t.Fatalf("expected --env CLAUDE_CODE_OAUTH_TOKEN=... in docker create args: %v", createArgs)
-	}
-	if !sawAnthropic {
-		t.Fatalf("expected --env ANTHROPIC_AUTH_TOKEN=... in docker create args: %v", createArgs)
 	}
 }
 
@@ -790,6 +787,7 @@ func TestCreateLocalLimaInstanceInvokesExpectedCommands(t *testing.T) {
 			"--name", "cw-workspace",
 			"--network", "host",
 			"--group-add", "988",
+			"--entrypoint", "/bin/sh",
 			"-e", "DOCKER_HOST=" + limaDockerHostValue,
 			"-v", limaDockerSockPath + ":" + limaDockerSockPath,
 			"-v", "/tmp/repo:/tmp/repo",
@@ -804,7 +802,7 @@ func TestCreateLocalLimaInstanceInvokesExpectedCommands(t *testing.T) {
 			"-v", "/tmp/shared:/mnt/shared:ro",
 			"--workdir", "/tmp/repo",
 			"ghcr.io/codewiresh/full:latest",
-			"sleep", "infinity"},
+			"-c", "sleep infinity"},
 	}
 	if !reflect.DeepEqual(streamCalls, want) {
 		t.Fatalf("lima stream calls:\n  got:  %#v\n  want: %#v", streamCalls, want)
