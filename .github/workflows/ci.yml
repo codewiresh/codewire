@@ -62,6 +62,26 @@ jobs:
       - name: Verify binary exists
         run: test -f cw
 
+  docker-integration:
+    name: Docker Integration
+    runs-on: ubuntu-latest
+    # Catches regressions in `cw local create --backend docker` against real
+    # docker (entrypoint override, mount semantics, container lifecycle). The
+    # underlying tests are gated by CODEWIRE_TEST_DOCKER=1 so they're a no-op
+    # locally unless explicitly opted in.
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
+        with:
+          go-version-file: go.mod
+
+      - name: Run docker-backed local integration tests
+        env:
+          CODEWIRE_TEST_DOCKER: "1"
+        run: go test ./cmd/cw -run TestLocalDockerLifecycleIntegration -timeout 5m -count=1 -v
+
   helm-lint:
     name: Helm Chart Lint
     runs-on: ubuntu-latest
