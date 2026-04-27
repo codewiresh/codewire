@@ -662,6 +662,7 @@ func sendCmd() *cobra.Command {
 		useStdin  bool
 		file      string
 		noNewline bool
+		paste     bool
 	)
 
 	cmd := &cobra.Command{
@@ -696,13 +697,14 @@ func sendCmd() *cobra.Command {
 				filePtr = &file
 			}
 
-			return client.SendInput(target, resolved, input, useStdin, filePtr, noNewline)
+			return client.SendInput(target, resolved, input, useStdin, filePtr, noNewline, paste)
 		},
 	}
 
 	cmd.Flags().BoolVar(&useStdin, "stdin", false, "Read input from stdin")
 	cmd.Flags().StringVarP(&file, "file", "f", "", "Read input from file")
 	cmd.Flags().BoolVarP(&noNewline, "no-newline", "n", false, "Do not append newline")
+	cmd.Flags().BoolVar(&paste, "paste", false, "Wrap input in bracketed paste markers + carriage return (use for TUIs like codex-cli that mis-parse raw typed input). Implies no automatic trailing newline.")
 
 	return cmd
 }

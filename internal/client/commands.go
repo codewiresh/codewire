@@ -718,7 +718,7 @@ func Logs(target *Target, id uint32, follow bool, tail *int, raw bool) error {
 // SendInput sends input to a session without attaching. The input can come
 // from a direct argument, stdin, or a file. Unless noNewline is set, a
 // trailing newline is appended.
-func SendInput(target *Target, id uint32, input *string, useStdin bool, file *string, noNewline bool) error {
+func SendInput(target *Target, id uint32, input *string, useStdin bool, file *string, noNewline bool, paste bool) error {
 	var data []byte
 
 	switch {
@@ -740,7 +740,21 @@ func SendInput(target *Target, id uint32, input *string, useStdin bool, file *st
 		return fmt.Errorf("no input source specified")
 	}
 
-	if !noNewline {
+	if paste {
+		// Wrap in bracketed paste markers + carriage return.
+		// Required for TUIs (e.g. codex-cli) that have a wrapping bug
+		// when input arrives as raw typed bytes — the BPM markers
+		// signal "this is a paste" so the TUI reads it as a single
+		// chunk. Trailing \r is the Enter key, sent OUTSIDE the
+		// brackets so the TUI submits the input rather than literally
+		// embed a newline. Implies --no-newline behavior for the
+		// trailing \n that would otherwise be appended.
+		out := make([]byte, 0, len(data)+8)
+		out = append(out, 0x1b, '[', '2', '0', '0', '~')
+		out = append(out, data...)
+		out = append(out, 0x1b, '[', '2', '0', '1', '~', '\r')
+		data = out
+	} else if !noNewline {
 		data = append(data, '\n')
 	}
 
