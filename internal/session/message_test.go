@@ -530,11 +530,16 @@ func TestDeliverDirectMessagePrompt(t *testing.T) {
 	}
 
 	log := string(content)
-	if !containsSubstring(log, "Codewire message from planner") {
-		t.Fatalf("PTY log should contain prompt header, got: %q", log)
-	}
+	// The new PTY delivery format wraps the body in bracketed-paste markers
+	// (\x1b[200~ ... \x1b[201~) followed by CR. The body itself must appear
+	// verbatim; the header text is intentionally NOT prepended to the PTY
+	// stream because some TUIs (codex) panic on bracket-prefixed multi-line
+	// content. Sender identity is preserved through inbox + log layers.
 	if !containsSubstring(log, "start with auth module") {
 		t.Fatalf("PTY log should contain message body, got: %q", log)
+	}
+	if !containsSubstring(log, "\x1b[200~") || !containsSubstring(log, "\x1b[201~") {
+		t.Fatalf("PTY log should contain bracketed-paste markers, got: %q", log)
 	}
 }
 
@@ -564,13 +569,17 @@ func TestDeliverRequestPrompt(t *testing.T) {
 	}
 
 	log := string(content)
-	if !containsSubstring(log, "Codewire request req_123 from planner") {
-		t.Fatalf("PTY log should contain request header, got: %q", log)
-	}
+	// Same change as TestDeliverDirectMessagePrompt: PTY delivery is
+	// body + reply-hint wrapped in bracketed-paste, no bracket-prefixed
+	// header (which would crash codex's TUI). Request ID is still present
+	// in the reply-hint footer.
 	if !containsSubstring(log, "ready for review?") {
 		t.Fatalf("PTY log should contain request body, got: %q", log)
 	}
 	if !containsSubstring(log, "cw reply req_123") {
-		t.Fatalf("PTY log should contain reply hint, got: %q", log)
+		t.Fatalf("PTY log should contain reply hint with request id, got: %q", log)
+	}
+	if !containsSubstring(log, "\x1b[200~") || !containsSubstring(log, "\x1b[201~") {
+		t.Fatalf("PTY log should contain bracketed-paste markers, got: %q", log)
 	}
 }
