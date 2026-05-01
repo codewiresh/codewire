@@ -879,6 +879,7 @@ func TestCreateLocalLimaInstanceInvokesExpectedCommands(t *testing.T) {
 	origUserHomeDir := localUserHomeDir
 	origOsStat := localOsStat
 	origAnthropicAPIKey := localAnthropicAPIKey
+	origClaudeOAuthToken := localClaudeOAuthToken
 	stubLocalCLIDataDir(t)
 	t.Cleanup(func() {
 		localLookPath = origLookPath
@@ -888,9 +889,12 @@ func TestCreateLocalLimaInstanceInvokesExpectedCommands(t *testing.T) {
 		localUserHomeDir = origUserHomeDir
 		localOsStat = origOsStat
 		localAnthropicAPIKey = origAnthropicAPIKey
+		localClaudeOAuthToken = origClaudeOAuthToken
 	})
-	// Isolate from a host that happens to have ANTHROPIC_API_KEY set.
+	// Isolate from a host that happens to have ANTHROPIC_API_KEY or
+	// CLAUDE_CODE_OAUTH_TOKEN set.
 	localAnthropicAPIKey = func() string { return "" }
+	localClaudeOAuthToken = func() string { return "" }
 
 	localGOOS = "linux"
 	localUserHomeDir = func() (string, error) { return "/home/testuser", nil }

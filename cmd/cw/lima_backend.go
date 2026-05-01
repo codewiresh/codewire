@@ -699,9 +699,15 @@ func createLocalLimaInstance(instance *cwconfig.LocalInstance) error {
 		}
 		if apiKey := localAnthropicAPIKey(); apiKey != "" {
 			// Forward ANTHROPIC_API_KEY (sk-ant-api…) for SDK / claude-code
-			// direct-API use. Distinct from CLAUDE_CODE_OAUTH_TOKEN, which is
-			// forwarded separately via the codewire.yaml token plumbing.
+			// direct-API use.
 			dockerArgs = append(dockerArgs, "-e", "ANTHROPIC_API_KEY="+apiKey)
+		}
+		if token := strings.TrimSpace(localClaudeOAuthToken()); token != "" {
+			// Forward host's claude OAuth token (sk-ant-oat…) so claude-code
+			// inside the VM authenticates against the user's Claude
+			// subscription without re-running the browser flow. Matches the
+			// docker + incus backends.
+			dockerArgs = append(dockerArgs, "-e", "CLAUDE_CODE_OAUTH_TOKEN="+token)
 		}
 		dockerArgs = append(dockerArgs, limaContainerMountArgs(instance)...)
 		dockerArgs = append(dockerArgs,
