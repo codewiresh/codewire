@@ -715,10 +715,21 @@ func Logs(target *Target, id uint32, follow bool, tail *int, raw bool) error {
 // SendInput
 // ---------------------------------------------------------------------------
 
+// typeKeystrokeDelay is the per-byte delay used by --type. Long enough that
+// the receiving TUI processes each byte through its live-keystroke path
+// (autocomplete narrowing, slash-command detection) instead of seeing the
+// input as a burst that bypasses those handlers, but short enough that
+// short strings ("/rc", "/help") complete in a fraction of a second.
+const typeKeystrokeDelay = 15 * time.Millisecond
+
 // SendInput sends input to a session without attaching. The input can come
 // from a direct argument, stdin, or a file. Unless noNewline is set, a
 // trailing newline is appended.
-func SendInput(target *Target, id uint32, input *string, useStdin bool, file *string, noNewline bool, paste bool) error {
+func SendInput(target *Target, id uint32, input *string, useStdin bool, file *string, noNewline bool, paste bool, typed bool) error {
+	if paste && typed {
+		return fmt.Errorf("--paste and --type are mutually exclusive")
+	}
+
 	var data []byte
 
 	switch {
@@ -738,6 +749,18 @@ func SendInput(target *Target, id uint32, input *string, useStdin bool, file *st
 		}
 	default:
 		return fmt.Errorf("no input source specified")
+	}
+
+	if typed {
+		// Send each byte as its own SendInput with a short delay
+		// between bytes, simulating live typing. Slash-command
+		// handlers in TUIs like Claude Code only fire when bytes
+		// arrive as live keystrokes (one at a time, through the
+		// terminal driver) — sending the whole string at once
+		// routes through the "submit message" path instead. The
+		// trailing newline (or \r when followed by --no-newline=false)
+		// becomes the Enter that submits the slash command.
+		return sendTyped(target, id, data, noNewline)
 	}
 
 	if paste {
@@ -775,6 +798,47 @@ func SendInput(target *Target, id uint32, input *string, useStdin bool, file *st
 		bytes = *resp.Bytes
 	}
 	fmt.Fprintf(os.Stderr, "Sent %d bytes to session %d\n", bytes, id)
+	return nil
+}
+
+func sendTyped(target *Target, id uint32, data []byte, noNewline bool) error {
+	total := uint(0)
+	send := func(b []byte) error {
+		resp, err := requestResponse(target, &protocol.Request{
+			Type: "SendInput",
+			ID:   &id,
+			Data: b,
+		})
+		if err != nil {
+			return err
+		}
+		if resp.Type == "Error" {
+			return fmt.Errorf("%s", formatError(resp.Message))
+		}
+		if resp.Bytes != nil {
+			total += *resp.Bytes
+		}
+		return nil
+	}
+	for i, b := range data {
+		if i > 0 {
+			time.Sleep(typeKeystrokeDelay)
+		}
+		if err := send([]byte{b}); err != nil {
+			return err
+		}
+	}
+	if !noNewline {
+		// Submit with \r so the TUI sees the Enter keystroke that
+		// completes a slash command's autocomplete or commits a typed
+		// message. \n is treated as "newline within input" by some
+		// TUIs and would not submit.
+		time.Sleep(typeKeystrokeDelay)
+		if err := send([]byte{'\r'}); err != nil {
+			return err
+		}
+	}
+	fmt.Fprintf(os.Stderr, "Sent %d bytes to session %d\n", total, id)
 	return nil
 }
 
