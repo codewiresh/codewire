@@ -237,7 +237,15 @@ var execInLocalRuntimeTarget = func(instance *cwconfig.LocalInstance, workDir st
 			wd = instance.Workdir
 		}
 
-		// limactl shell <vm> sudo docker exec -i [-t] -w <wd> cw-workspace <command...>
+		// limactl shell <vm> sudo docker exec -i [-t] -w <wd> cw-workspace bash -lc 'exec "$@"' bash <command...>
+		// The `bash -lc 'exec "$@"' bash <args>` wrapper makes the docker exec
+		// run through a login shell, so /etc/profile.d/* gets sourced. That's
+		// how cw-claude-token-shadow.sh (PR #8) actually fires for direct
+		// `cw exec -- claude` invocations — without this, profile.d only
+		// sources for shells started by the user, not for binaries we exec
+		// directly. The `exec "$@"` form passes args verbatim so quoting is
+		// correct even with embedded spaces; the dummy `bash` after the script
+		// is $0 so $1..$N stay in order.
 		dockerArgs := []string{"sudo", "docker", "exec", "-i"}
 		if wantTTY {
 			dockerArgs = append(dockerArgs, "-t")
@@ -246,7 +254,7 @@ var execInLocalRuntimeTarget = func(instance *cwconfig.LocalInstance, workDir st
 			dockerArgs = append(dockerArgs, "-w", wd)
 		}
 		dockerArgs = appendLocalRuntimeEnvArgs(dockerArgs, "-e")
-		dockerArgs = append(dockerArgs, limaContainerName)
+		dockerArgs = append(dockerArgs, limaContainerName, "bash", "-lc", `exec "$@"`, "bash")
 		dockerArgs = append(dockerArgs, command...)
 
 		args := []string{"shell", "--workdir", "/", name}
