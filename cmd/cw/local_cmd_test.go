@@ -1238,6 +1238,11 @@ cat > /home/codewire/.claude.json <<CWEOF
 CWEOF
 chown codewire:codewire /home/codewire/.claude.json
 chmod 600 /home/codewire/.claude.json
+mkdir -p /etc/profile.d
+cat > /etc/profile.d/cw-claude-token-shadow.sh <<'CWEOF2'
+` + claudeTokenShadowScript() + `
+CWEOF2
+chmod 644 /etc/profile.d/cw-claude-token-shadow.sh
 `
 	want := [][]string{
 		{"limactl", "start", "--tty=false", "cw-repo"},
