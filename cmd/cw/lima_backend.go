@@ -148,6 +148,13 @@ func defaultLimaMountType(vmType string) string {
 	if vmType == "vz" {
 		return "virtiofs"
 	}
+	// qemu vmtype (Linux): prefer virtiofs when virtiofsd is in $PATH because
+	// 9p cannot mount single files (e.g. ~/.claude.json) and has slower
+	// metadata semantics. Fall back to 9p if virtiofsd isn't available so
+	// Lima still works on hosts that haven't set up the daemon.
+	if _, err := localLookPath("virtiofsd"); err == nil {
+		return "virtiofs"
+	}
 	return "9p"
 }
 
@@ -266,17 +273,6 @@ func discoverExternalSymlinkMounts(root string, readOnly bool) []cwconfig.MountC
 	return mounts
 }
 
-// Keep per-instance Claude runtime state isolated. In particular, do not seed
-// plugins or marketplaces from host ~/.claude because those registries store
-// absolute install and project paths that break across host/Lima boundaries.
-var limaClaudePortableEntries = []string{
-	"settings.json",
-	"settings.local.json",
-	"CLAUDE.md",
-	"commands",
-	"skills",
-}
-
 func limaRepoMountPath(instance *cwconfig.LocalInstance) string {
 	if instance == nil {
 		return localWorkspacePath
@@ -294,8 +290,51 @@ func limaStateDir(instance *cwconfig.LocalInstance) string {
 	return filepath.Join(localCLIDataDir(), "lima", limaInstanceName(instance))
 }
 
-func limaClaudeStateHostDir(instance *cwconfig.LocalInstance) string {
-	return filepath.Join(limaStateDir(instance), "claude")
+// bootstrapClaudeJSON writes a minimal ~/.claude.json into the workspace
+// container so claude-code skips its first-run UX (theme picker, login
+// screen, workspace trust dialog). Auth still flows through the
+// CLAUDE_CODE_OAUTH_TOKEN env var; this only handles the UX gates that
+// require local state.
+//
+// Mirrors the hosted Codewire path (platform's buildClaudeBootstrapScript at
+// platform/go-server/internal/worker/environment_setup_helpers.go:287-329).
+// We do NOT copy host's ~/.claude.json: that file contains host-absolute
+// paths (recent projects, plugin install dirs, marketplace entries) and
+// auth bookkeeping that doesn't translate cleanly into the VM. Instead we
+// write a fresh minimal config.
+func bootstrapClaudeJSON(instance *cwconfig.LocalInstance) error {
+	name := limaInstanceName(instance)
+	workdir := strings.TrimSpace(instance.Workdir)
+	if workdir == "" {
+		workdir = limaRepoMountPath(instance)
+	}
+	// codewire is the in-container user.
+	const containerHome = "/home/codewire"
+	script := fmt.Sprintf(`set -eu
+trust='{"hasCompletedProjectOnboarding":true,"hasTrustDialogAccepted":true}'
+mkdir -p %[2]s/.claude
+cat > %[2]s/.claude.json <<CWEOF
+{
+  "autoUpdaterStatus": "disabled",
+  "bypassPermissionsModeAccepted": true,
+  "hasAcknowledgedCostThreshold": true,
+  "hasCompletedOnboarding": true,
+  "projects": {
+    "%[1]s":  $trust,
+    "%[2]s":  $trust,
+    "/workspace": $trust
+  }
+}
+CWEOF
+chown codewire:codewire %[2]s/.claude.json
+chmod 600 %[2]s/.claude.json
+`, workdir, containerHome)
+	_, err := localRunCommand("limactl", "shell", "--workdir", "/", name,
+		"sudo", "docker", "exec", limaContainerName, "bash", "-c", script)
+	if err != nil {
+		return fmt.Errorf("bootstrap claude.json: %w", err)
+	}
+	return nil
 }
 
 func limaGitStateHostDir(instance *cwconfig.LocalInstance) string {
@@ -341,32 +380,6 @@ func ensureLimaSSHAgentForward(instance *cwconfig.LocalInstance) error {
 			return fmt.Errorf("limactl edit %s: %v\n%s", limaInstanceName(instance), err, trimmed)
 		}
 		return fmt.Errorf("limactl edit %s: %w", limaInstanceName(instance), err)
-	}
-	return nil
-}
-
-func ensureLimaClaudeState(instance *cwconfig.LocalInstance) error {
-	targetDir := limaClaudeStateHostDir(instance)
-	if err := os.MkdirAll(targetDir, 0o755); err != nil {
-		return fmt.Errorf("create Lima Claude state dir: %w", err)
-	}
-
-	homeDir, err := localUserHomeDir()
-	if err != nil {
-		return nil
-	}
-	hostClaudeDir := filepath.Join(homeDir, ".claude")
-	if _, err := os.Stat(hostClaudeDir); err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return fmt.Errorf("read host Claude dir: %w", err)
-	}
-
-	for _, entry := range limaClaudePortableEntries {
-		if err := copyPathIfMissing(filepath.Join(hostClaudeDir, entry), filepath.Join(targetDir, entry)); err != nil {
-			return fmt.Errorf("seed Lima Claude state %s: %w", entry, err)
-		}
 	}
 	return nil
 }
@@ -485,15 +498,9 @@ func limaVMMounts(instance *cwconfig.LocalInstance) []limaVMMount {
 	homeDir, _ := localUserHomeDir()
 	ghConfigDir := filepath.Join(homeDir, ".config", "gh")
 	sshDir := filepath.Join(homeDir, ".ssh")
-	hostClaudeDir := filepath.Join(homeDir, ".claude")
-	hostClaudeJSON := filepath.Join(homeDir, ".claude.json")
 	mounts := []limaVMMount{
 		{Location: limaRepoMountPath(instance), MountPoint: limaRepoMountPath(instance), Writable: true},
-		{Location: hostClaudeDir, MountPoint: "/home/{{.User}}.guest/.claude", Writable: true},
 		{Location: ghConfigDir, MountPoint: "/home/{{.User}}.guest/.config/gh", Writable: true},
-	}
-	if _, err := localOsStat(hostClaudeJSON); err == nil {
-		mounts = append(mounts, limaVMMount{Location: hostClaudeJSON, MountPoint: "/home/{{.User}}.guest/.claude.json", Writable: true})
 	}
 	if _, err := os.Stat(filepath.Join(limaGitStateHostDir(instance), ".gitconfig")); err == nil {
 		mounts = append(mounts, limaVMMount{Location: limaGitStateHostDir(instance), MountPoint: "/home/{{.User}}.guest/.codewire-git", Writable: false})
@@ -517,16 +524,10 @@ func limaVMMounts(instance *cwconfig.LocalInstance) []limaVMMount {
 func limaContainerMounts(instance *cwconfig.LocalInstance) []limaContainerMount {
 	vmUser := os.Getenv("USER")
 	vmHome := filepath.Join("/home", vmUser+".guest")
-	homeDir, _ := localUserHomeDir()
-	hostClaudeJSON := filepath.Join(homeDir, ".claude.json")
 	mounts := []limaContainerMount{
-		{Source: filepath.Join(vmHome, ".claude"), Target: "/home/codewire/.claude", ReadOnly: false},
 		{Source: filepath.Join(vmHome, ".config", "gh"), Target: "/home/codewire/.config/gh", ReadOnly: false},
 		{Source: "/mnt/host-ssh", Target: "/home/codewire/.ssh", ReadOnly: true},
 		{Source: filepath.Join(vmHome, ".codex"), Target: "/home/codewire/.codex", ReadOnly: false},
-	}
-	if _, err := localOsStat(hostClaudeJSON); err == nil {
-		mounts = append(mounts, limaContainerMount{Source: filepath.Join(vmHome, ".claude.json"), Target: "/home/codewire/.claude.json", ReadOnly: false})
 	}
 	if sshAuthSock := strings.TrimSpace(localSSHAuthSock()); sshAuthSock != "" {
 		mounts = append([]limaContainerMount{{Source: localSSHAuthSockPath, Target: localSSHAuthSockPath, ReadOnly: false}}, mounts...)
@@ -632,9 +633,6 @@ func createLocalLimaInstance(instance *cwconfig.LocalInstance) error {
 	instance.LimaMountType = defaultLimaMountType(instance.LimaVMType)
 
 	name := limaInstanceName(instance)
-	if err := ensureLimaClaudeState(instance); err != nil {
-		return err
-	}
 	if err := ensureLimaGitConfig(instance); err != nil {
 		return err
 	}
@@ -742,6 +740,10 @@ func createLocalLimaInstance(instance *cwconfig.LocalInstance) error {
 		return err
 	}
 
+	if err := bootstrapClaudeJSON(instance); err != nil {
+		return err
+	}
+
 	cleanup = false
 	return nil
 }
@@ -833,9 +835,6 @@ func startLocalLimaInstance(instance *cwconfig.LocalInstance) error {
 		}
 	}
 	name := limaInstanceName(instance)
-	if err := ensureLimaClaudeState(instance); err != nil {
-		return err
-	}
 	if err := ensureLimaGitConfig(instance); err != nil {
 		return err
 	}
@@ -858,6 +857,9 @@ func startLocalLimaInstance(instance *cwconfig.LocalInstance) error {
 		return err
 	}
 	if err := ensureLimaDockerSocketGroup(instance, dockerSockGID); err != nil {
+		return err
+	}
+	if err := bootstrapClaudeJSON(instance); err != nil {
 		return err
 	}
 	return nil

@@ -811,15 +811,20 @@ func TestLimaCreateCommandArgs(t *testing.T) {
 	origGOOS := localGOOS
 	origUserHomeDir := localUserHomeDir
 	origOsStat := localOsStat
+	origLookPath := localLookPath
 	dataDir := stubLocalCLIDataDir(t)
 	t.Cleanup(func() {
 		localGOOS = origGOOS
 		localUserHomeDir = origUserHomeDir
 		localOsStat = origOsStat
+		localLookPath = origLookPath
 	})
 	localGOOS = "linux"
 	localUserHomeDir = func() (string, error) { return "/home/testuser", nil }
 	localOsStat = func(name string) (os.FileInfo, error) { return nil, nil }
+	// Force qemu+9p path so the fixture (no .claude.json file mount) applies.
+	// The virtiofs+file-mount path is exercised in TestDefaultLimaVMAndMountType.
+	localLookPath = func(file string) (string, error) { return "", errors.New("not found") }
 	stubLocalSSHAuthSock(t, "/home/testuser/.1password/agent.sock")
 	gitStateDir := filepath.Join(dataDir, "lima", "cw-repo", "git")
 	if err := os.MkdirAll(gitStateDir, 0o755); err != nil {
@@ -846,9 +851,8 @@ func TestLimaCreateCommandArgs(t *testing.T) {
 	}
 
 	got := limaCreateCommandArgs(instance)
-	_ = filepath.Join(dataDir, "lima", "cw-repo", "claude")
 	wantGitDir := filepath.Join(dataDir, "lima", "cw-repo", "git")
-	wantMountSet := `.mounts=[{"location":"/tmp/repo","mountPoint":"/tmp/repo","writable":true},{"location":"/home/testuser/.claude","mountPoint":"/home/{{.User}}.guest/.claude","writable":true},{"location":"/home/testuser/.config/gh","mountPoint":"/home/{{.User}}.guest/.config/gh","writable":true},{"location":"/home/testuser/.claude.json","mountPoint":"/home/{{.User}}.guest/.claude.json","writable":true},{"location":"` + wantGitDir + `","mountPoint":"/home/{{.User}}.guest/.codewire-git","writable":false},{"location":"/home/testuser/.ssh","mountPoint":"/mnt/host-ssh","writable":false},{"location":"/home/testuser/.codex","mountPoint":"/home/{{.User}}.guest/.codex","writable":true},{"location":"/tmp/shared","mountPoint":"/mnt/shared","writable":false}]`
+	wantMountSet := `.mounts=[{"location":"/tmp/repo","mountPoint":"/tmp/repo","writable":true},{"location":"/home/testuser/.config/gh","mountPoint":"/home/{{.User}}.guest/.config/gh","writable":true},{"location":"` + wantGitDir + `","mountPoint":"/home/{{.User}}.guest/.codewire-git","writable":false},{"location":"/home/testuser/.ssh","mountPoint":"/mnt/host-ssh","writable":false},{"location":"/home/testuser/.codex","mountPoint":"/home/{{.User}}.guest/.codex","writable":true},{"location":"/tmp/shared","mountPoint":"/mnt/shared","writable":false}]`
 
 	want := []string{
 		"start",
@@ -967,11 +971,9 @@ func TestCreateLocalLimaInstanceInvokesExpectedCommands(t *testing.T) {
 			"-e", "SSH_AUTH_SOCK=/tmp/codewire-ssh-agent.sock",
 			"-v", "/home/" + vmUser + ".guest/.codewire-git/.gitconfig:/home/codewire/.gitconfig:ro",
 			"-v", "/tmp/codewire-ssh-agent.sock:/tmp/codewire-ssh-agent.sock",
-			"-v", "/home/" + vmUser + ".guest/.claude:/home/codewire/.claude",
 			"-v", "/home/" + vmUser + ".guest/.config/gh:/home/codewire/.config/gh",
 			"-v", "/mnt/host-ssh:/home/codewire/.ssh:ro",
 			"-v", "/home/" + vmUser + ".guest/.codex:/home/codewire/.codex",
-			"-v", "/home/" + vmUser + ".guest/.claude.json:/home/codewire/.claude.json",
 			"-v", "/tmp/shared:/mnt/shared:ro",
 			"--workdir", "/tmp/repo",
 			"ghcr.io/codewiresh/full:latest",
@@ -1055,84 +1057,6 @@ func TestResolveLocalMountsNormalizesSourceAndTarget(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("resolveLocalMounts() = %#v, want %#v", got, want)
-	}
-}
-
-func TestEnsureLimaClaudeStateSeedsPortableEntries(t *testing.T) {
-	origUserHomeDir := localUserHomeDir
-	stubDir := stubLocalCLIDataDir(t)
-	t.Cleanup(func() { localUserHomeDir = origUserHomeDir })
-
-	root := t.TempDir()
-	homeDir := filepath.Join(root, "home")
-	agenticDir := filepath.Join(root, "agentic")
-	if err := os.MkdirAll(filepath.Join(homeDir, ".claude", "commands"), 0o755); err != nil {
-		t.Fatalf("MkdirAll(home .claude commands): %v", err)
-	}
-	if err := os.MkdirAll(filepath.Join(homeDir, ".claude", "skills", "tasks"), 0o755); err != nil {
-		t.Fatalf("MkdirAll(home .claude skills): %v", err)
-	}
-	if err := os.MkdirAll(filepath.Join(homeDir, ".claude", "plugins", "marketplaces", "official"), 0o755); err != nil {
-		t.Fatalf("MkdirAll(home .claude plugins): %v", err)
-	}
-	if err := os.MkdirAll(filepath.Join(agenticDir, ".claude"), 0o755); err != nil {
-		t.Fatalf("MkdirAll(agentic .claude): %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(agenticDir, "MEMORY.md"), []byte("memory"), 0o644); err != nil {
-		t.Fatalf("WriteFile(MEMORY.md): %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(agenticDir, ".claude", "settings.json"), []byte("{\"permissions\":{}}"), 0o644); err != nil {
-		t.Fatalf("WriteFile(settings.json): %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(homeDir, ".claude", "settings.local.json"), []byte("{}"), 0o644); err != nil {
-		t.Fatalf("WriteFile(settings.local.json): %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(homeDir, ".claude", "commands", "test.md"), []byte("command"), 0o644); err != nil {
-		t.Fatalf("WriteFile(command): %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(homeDir, ".claude", "skills", "tasks", "SKILL.md"), []byte("skill"), 0o644); err != nil {
-		t.Fatalf("WriteFile(skill): %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(homeDir, ".claude", "plugins", "marketplaces", "official", "marketplace.json"), []byte("marketplace"), 0o644); err != nil {
-		t.Fatalf("WriteFile(marketplace): %v", err)
-	}
-	if err := os.Symlink(filepath.Join(agenticDir, "MEMORY.md"), filepath.Join(homeDir, ".claude", "CLAUDE.md")); err != nil {
-		t.Fatalf("Symlink(CLAUDE.md): %v", err)
-	}
-	if err := os.Symlink(filepath.Join(agenticDir, ".claude", "settings.json"), filepath.Join(homeDir, ".claude", "settings.json")); err != nil {
-		t.Fatalf("Symlink(settings.json): %v", err)
-	}
-
-	localUserHomeDir = func() (string, error) { return homeDir, nil }
-	instance := &cwconfig.LocalInstance{Name: "repo", RuntimeName: "cw-repo"}
-	if err := ensureLimaClaudeState(instance); err != nil {
-		t.Fatalf("ensureLimaClaudeState() error = %v", err)
-	}
-
-	targetDir := filepath.Join(stubDir, "lima", "cw-repo", "claude")
-	checks := map[string]string{
-		"CLAUDE.md":                                  "memory",
-		"settings.json":                              "{\"permissions\":{}}",
-		"settings.local.json":                        "{}",
-		filepath.Join("commands", "test.md"):         "command",
-		filepath.Join("skills", "tasks", "SKILL.md"): "skill",
-	}
-	for rel, want := range checks {
-		data, err := os.ReadFile(filepath.Join(targetDir, rel))
-		if err != nil {
-			t.Fatalf("ReadFile(%s): %v", rel, err)
-		}
-		if string(data) != want {
-			t.Fatalf("%s = %q, want %q", rel, string(data), want)
-		}
-	}
-	if info, err := os.Lstat(filepath.Join(targetDir, "settings.json")); err != nil {
-		t.Fatalf("Lstat(settings.json): %v", err)
-	} else if info.Mode()&os.ModeSymlink != 0 {
-		t.Fatal("expected settings.json to be copied, not symlinked")
-	}
-	if _, err := os.Stat(filepath.Join(targetDir, "plugins")); !os.IsNotExist(err) {
-		t.Fatalf("expected plugins to remain unseeded, got err=%v", err)
 	}
 }
 
@@ -1296,12 +1220,32 @@ func TestLimaLifecycleCommands(t *testing.T) {
 		t.Fatalf("deleteLocalLimaInstance() error = %v", err)
 	}
 
+	wantBootstrapScript := `set -eu
+trust='{"hasCompletedProjectOnboarding":true,"hasTrustDialogAccepted":true}'
+mkdir -p /home/codewire/.claude
+cat > /home/codewire/.claude.json <<CWEOF
+{
+  "autoUpdaterStatus": "disabled",
+  "bypassPermissionsModeAccepted": true,
+  "hasAcknowledgedCostThreshold": true,
+  "hasCompletedOnboarding": true,
+  "projects": {
+    "/workspace":  $trust,
+    "/home/codewire":  $trust,
+    "/workspace": $trust
+  }
+}
+CWEOF
+chown codewire:codewire /home/codewire/.claude.json
+chmod 600 /home/codewire/.claude.json
+`
 	want := [][]string{
 		{"limactl", "start", "--tty=false", "cw-repo"},
 		{"limactl", "shell", "--workdir", "/", "cw-repo", "sudo", "systemctl", "start", "docker"},
 		{"limactl", "shell", "--workdir", "/", "cw-repo", "sudo", "docker", "start", "cw-workspace"},
 		{"limactl", "shell", "--workdir", "/", "cw-repo", "sudo", "stat", "-c", "%g", limaDockerSockPath},
 		{"limactl", "shell", "--workdir", "/", "cw-repo", "sudo", "docker", "exec", "-u", "0", "cw-workspace", "sh", "-lc", `gid="988"; if getent group "$gid" >/dev/null 2>&1; then exit 0; fi; groupadd -g "$gid" codewire-docker >/dev/null 2>&1 || groupadd -g "$gid" docker >/dev/null 2>&1 || true`},
+		{"limactl", "shell", "--workdir", "/", "cw-repo", "sudo", "docker", "exec", "cw-workspace", "bash", "-c", wantBootstrapScript},
 		{"limactl", "shell", "--workdir", "/", "cw-repo", "sudo", "docker", "stop", "cw-workspace"},
 		{"limactl", "stop", "cw-repo"},
 		{"limactl", "delete", "--force", "cw-repo"},
@@ -2240,7 +2184,11 @@ func TestLimaInstanceNamePriority(t *testing.T) {
 
 func TestDefaultLimaVMAndMountType(t *testing.T) {
 	origGOOS := localGOOS
-	t.Cleanup(func() { localGOOS = origGOOS })
+	origLookPath := localLookPath
+	t.Cleanup(func() {
+		localGOOS = origGOOS
+		localLookPath = origLookPath
+	})
 
 	localGOOS = "darwin"
 	if got := defaultLimaVMType(); got != "vz" {
@@ -2254,8 +2202,19 @@ func TestDefaultLimaVMAndMountType(t *testing.T) {
 	if got := defaultLimaVMType(); got != "qemu" {
 		t.Fatalf("linux VM type = %q, want qemu", got)
 	}
+	// qemu prefers virtiofs when virtiofsd is in PATH, else falls back to 9p.
+	localLookPath = func(file string) (string, error) {
+		if file == "virtiofsd" {
+			return "/usr/local/bin/virtiofsd", nil
+		}
+		return "", errors.New("not found")
+	}
+	if got := defaultLimaMountType("qemu"); got != "virtiofs" {
+		t.Fatalf("qemu mount type with virtiofsd present = %q, want virtiofs", got)
+	}
+	localLookPath = func(file string) (string, error) { return "", errors.New("not found") }
 	if got := defaultLimaMountType("qemu"); got != "9p" {
-		t.Fatalf("qemu mount type = %q, want 9p", got)
+		t.Fatalf("qemu mount type without virtiofsd = %q, want 9p (fallback)", got)
 	}
 }
 
