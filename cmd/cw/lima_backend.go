@@ -485,10 +485,15 @@ func limaVMMounts(instance *cwconfig.LocalInstance) []limaVMMount {
 	homeDir, _ := localUserHomeDir()
 	ghConfigDir := filepath.Join(homeDir, ".config", "gh")
 	sshDir := filepath.Join(homeDir, ".ssh")
+	hostClaudeDir := filepath.Join(homeDir, ".claude")
+	hostClaudeJSON := filepath.Join(homeDir, ".claude.json")
 	mounts := []limaVMMount{
 		{Location: limaRepoMountPath(instance), MountPoint: limaRepoMountPath(instance), Writable: true},
-		{Location: limaClaudeStateHostDir(instance), MountPoint: "/home/{{.User}}.guest/.claude", Writable: true},
+		{Location: hostClaudeDir, MountPoint: "/home/{{.User}}.guest/.claude", Writable: true},
 		{Location: ghConfigDir, MountPoint: "/home/{{.User}}.guest/.config/gh", Writable: true},
+	}
+	if _, err := localOsStat(hostClaudeJSON); err == nil {
+		mounts = append(mounts, limaVMMount{Location: hostClaudeJSON, MountPoint: "/home/{{.User}}.guest/.claude.json", Writable: true})
 	}
 	if _, err := os.Stat(filepath.Join(limaGitStateHostDir(instance), ".gitconfig")); err == nil {
 		mounts = append(mounts, limaVMMount{Location: limaGitStateHostDir(instance), MountPoint: "/home/{{.User}}.guest/.codewire-git", Writable: false})
@@ -512,11 +517,16 @@ func limaVMMounts(instance *cwconfig.LocalInstance) []limaVMMount {
 func limaContainerMounts(instance *cwconfig.LocalInstance) []limaContainerMount {
 	vmUser := os.Getenv("USER")
 	vmHome := filepath.Join("/home", vmUser+".guest")
+	homeDir, _ := localUserHomeDir()
+	hostClaudeJSON := filepath.Join(homeDir, ".claude.json")
 	mounts := []limaContainerMount{
 		{Source: filepath.Join(vmHome, ".claude"), Target: "/home/codewire/.claude", ReadOnly: false},
 		{Source: filepath.Join(vmHome, ".config", "gh"), Target: "/home/codewire/.config/gh", ReadOnly: false},
 		{Source: "/mnt/host-ssh", Target: "/home/codewire/.ssh", ReadOnly: true},
 		{Source: filepath.Join(vmHome, ".codex"), Target: "/home/codewire/.codex", ReadOnly: false},
+	}
+	if _, err := localOsStat(hostClaudeJSON); err == nil {
+		mounts = append(mounts, limaContainerMount{Source: filepath.Join(vmHome, ".claude.json"), Target: "/home/codewire/.claude.json", ReadOnly: false})
 	}
 	if sshAuthSock := strings.TrimSpace(localSSHAuthSock()); sshAuthSock != "" {
 		mounts = append([]limaContainerMount{{Source: localSSHAuthSockPath, Target: localSSHAuthSockPath, ReadOnly: false}}, mounts...)
@@ -699,9 +709,15 @@ func createLocalLimaInstance(instance *cwconfig.LocalInstance) error {
 		}
 		if apiKey := localAnthropicAPIKey(); apiKey != "" {
 			// Forward ANTHROPIC_API_KEY (sk-ant-api…) for SDK / claude-code
-			// direct-API use. Distinct from CLAUDE_CODE_OAUTH_TOKEN, which is
-			// forwarded separately via the codewire.yaml token plumbing.
+			// direct-API use.
 			dockerArgs = append(dockerArgs, "-e", "ANTHROPIC_API_KEY="+apiKey)
+		}
+		if token := strings.TrimSpace(localClaudeOAuthToken()); token != "" {
+			// Forward host's claude OAuth token (sk-ant-oat…) so claude-code
+			// inside the VM authenticates against the user's Claude
+			// subscription without re-running the browser flow. Matches the
+			// docker + incus backends.
+			dockerArgs = append(dockerArgs, "-e", "CLAUDE_CODE_OAUTH_TOKEN="+token)
 		}
 		dockerArgs = append(dockerArgs, limaContainerMountArgs(instance)...)
 		dockerArgs = append(dockerArgs,
