@@ -21,7 +21,7 @@ var taskCmdStderr io.Writer = os.Stderr
 
 func tasksCmd() *cobra.Command {
 	var (
-		jsonOutput bool
+		output     string
 		speak      bool
 		watch      bool
 		networkID  string
@@ -52,6 +52,10 @@ func tasksCmd() *cobra.Command {
 				AuthToken: authToken,
 				NetworkID: networkID,
 			}
+			jsonOutput, err := wantsJSON(output)
+			if err != nil {
+				return err
+			}
 
 			if watch {
 				return runTasksWatch(auth, opts, jsonOutput, speak, voice)
@@ -75,7 +79,7 @@ func tasksCmd() *cobra.Command {
 
 	cmd.Flags().BoolVar(&watch, "watch", false, "Watch task events as they arrive")
 	cmd.Flags().BoolVar(&speak, "speak", false, "Speak task summaries while watching")
-	cmd.Flags().BoolVarP(&jsonOutput, "json", "j", false, "Output as JSON")
+	addOutputFlag(cmd, &output, "Output format (text|json)")
 	cmd.Flags().StringVar(&networkID, "network", "", "Network override")
 	cmd.Flags().StringVar(&nodeName, "node", "", "Filter by node name")
 	cmd.Flags().StringVar(&sessionArg, "session", "", "Filter by numeric session ID")

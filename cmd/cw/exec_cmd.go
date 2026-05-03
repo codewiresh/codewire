@@ -14,7 +14,7 @@ import (
 	"github.com/codewiresh/codewire/internal/platform"
 )
 
-// execBufferedResult is the JSON shape produced by `cw exec --json`. SDK
+// execBufferedResult is the JSON shape produced by `cw exec --output json`. SDK
 // consumers decode this directly.
 type execBufferedResult struct {
 	ExitCode int    `json:"exit_code"`
@@ -68,7 +68,7 @@ func execInLocalRuntimeBuffered(instance *cwconfig.LocalInstance, workDir string
 		args = append(args, dockerArgs...)
 		cmd = osExec.Command("limactl", args...)
 	case "firecracker":
-		return nil, fmt.Errorf("cw exec --json is not yet supported for the firecracker backend")
+		return nil, fmt.Errorf("cw exec --output json is not yet supported for the firecracker backend")
 	default:
 		return nil, fmt.Errorf("unsupported local backend %q", instance.Backend)
 	}
@@ -300,7 +300,7 @@ func execCmd() *cobra.Command {
 		on          string
 		interactive bool
 		tty         bool
-		jsonOutput  bool
+		output      string
 	)
 
 	cmd := &cobra.Command{
@@ -315,6 +315,10 @@ func execCmd() *cobra.Command {
 			}
 			if len(cmdArgs) == 0 {
 				return fmt.Errorf("no command specified. Usage: cw exec -- <command>")
+			}
+			jsonOutput, err := wantsJSON(output)
+			if err != nil {
+				return err
 			}
 
 			target, err := selectedExecutionTarget(on)
@@ -391,12 +395,12 @@ func execCmd() *cobra.Command {
 	cmd.Flags().IntVar(&timeout, "timeout", 30, "Timeout in seconds for environment exec")
 	cmd.Flags().BoolVarP(&interactive, "interactive", "i", false, "Keep stdin open")
 	cmd.Flags().BoolVarP(&tty, "tty", "t", false, "Allocate a pseudo-TTY")
-	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Capture stdout/stderr and emit {exit_code,stdout,stderr} JSON on completion")
+	addOutputFlag(cmd, &output, "Output format (text|json)")
 	return cmd
 }
 
 // execLocallyBuffered runs command in workDir on the host and captures stdout
-// and stderr instead of streaming them. Used by `cw exec --json` when the
+// and stderr instead of streaming them. Used by `cw exec --output json` when the
 // target is the host itself (local, no VM).
 func execLocallyBuffered(workDir string, command []string) (*execBufferedResult, error) {
 	if len(command) == 0 {
@@ -423,4 +427,3 @@ func execLocallyBuffered(workDir string, command []string) (*execBufferedResult,
 		Stderr:   stderrBuf.String(),
 	}, nil
 }
-

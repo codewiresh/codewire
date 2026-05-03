@@ -1,26 +1,27 @@
 # `cw local` JSON output schema
 
-The `cw local` subcommands emit machine-readable JSON when `--json` is passed.
+The `cw local` subcommands emit machine-readable JSON when `--output json` is passed.
 The SDKs (Go, Python, TypeScript) consume this output directly, so the schema
 below is a public contract — **any breaking change here is also a breaking
 change to the SDK**.
 
 ## Global flag
 
-`--json` is a persistent flag on `cw local`; it applies to every subcommand:
+`-o, --output` is a persistent flag on `cw local`; use `--output json` for
+machine-readable output:
 
 ```bash
-cw local list --json
-cw local info <name> --json
-cw local create --backend docker --spec - --json
-cw local start <name> --json
-cw local stop <name> --json
-cw local rm <name> --json
-cw local ports <name> --json
-cw local files list --json <name> [remote-path]
+cw local list --output json
+cw local info <name> --output json
+cw local create --backend docker --spec - --output json
+cw local start <name> --output json
+cw local stop <name> --output json
+cw local rm --output json
+cw local ports --output json <name>
+cw local files list --output json <name> [remote-path]
 ```
 
-`cw exec` accepts its own `--json` flag that captures stdout/stderr into a
+`cw exec` accepts `--output json`, which captures stdout/stderr into a
 buffered result (see below).
 
 ---
@@ -104,7 +105,7 @@ read JSON from stdin (this is what the SDK shell-out uses).
 
 ---
 
-## `cw local files list --json`
+## `cw local files list --output json`
 
 Returns an array of file entries at the given path:
 
@@ -126,7 +127,7 @@ error.
 
 ---
 
-## `cw local rm --json`
+## `cw local rm --output json`
 
 ```jsonc
 { "name": "my-repo", "removed": true }
@@ -134,7 +135,7 @@ error.
 
 ---
 
-## `cw local ports --json`
+## `cw local ports --output json`
 
 - With no `--publish`: emits the instance's configured ports array (the
   `ports` field of `LocalInstance`).
@@ -143,7 +144,7 @@ error.
 
 ---
 
-## `cw exec --json`
+## `cw exec --output json`
 
 Buffers stdout/stderr and emits:
 
@@ -156,10 +157,10 @@ result — the caller inspects `exit_code` to see whether the remote command
 succeeded. Non-zero CLI exit indicates a CLI-level failure (instance not
 found, backend unreachable, etc.).
 
-`cw exec --target <ref> --json --workdir <dir> -- <cmd>` is the shape the
+`cw exec --target <ref> --output json --workdir <dir> -- <cmd>` is the shape the
 SDKs use. `<ref>` may be a local instance name or an environment id.
 
-Supported backends for local exec + `--json`: docker, lima, incus. Firecracker
+Supported backends for local exec + `--output json`: docker, lima, incus. Firecracker
 is not yet wired for buffered JSON output.
 
 ---

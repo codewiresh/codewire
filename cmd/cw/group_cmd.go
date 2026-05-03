@@ -33,10 +33,10 @@ func groupCmd() *cobra.Command {
 
 func groupCreateCmd() *cobra.Command {
 	var (
-		jsonOutput bool
-		networkID  string
-		relayURL   string
-		authToken  string
+		output    string
+		networkID string
+		relayURL  string
+		authToken string
 	)
 
 	cmd := &cobra.Command{
@@ -44,6 +44,10 @@ func groupCreateCmd() *cobra.Command {
 		Short: "Create a new group in the current network",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			jsonOutput, err := wantsJSON(output)
+			if err != nil {
+				return err
+			}
 			group, err := client.CreateGroup(dataDir(), args[0], client.RelayAuthOptions{
 				RelayURL:  relayURL,
 				AuthToken: authToken,
@@ -66,7 +70,7 @@ func groupCreateCmd() *cobra.Command {
 		},
 	}
 
-	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Print the raw JSON response")
+	addOutputFlag(cmd, &output, "Output format (text|json)")
 	cmd.Flags().StringVar(&networkID, "network", "", "Network to create within (default: configured network)")
 	cmd.Flags().StringVar(&relayURL, "relay-url", "", "Relay base URL override")
 	cmd.Flags().StringVar(&authToken, "token", "", "Relay auth token override (session token or token-mode admin token)")
@@ -105,16 +109,20 @@ func groupDeleteCmd() *cobra.Command {
 
 func groupListCmd() *cobra.Command {
 	var (
-		jsonOutput bool
-		networkID  string
-		relayURL   string
-		authToken  string
+		output    string
+		networkID string
+		relayURL  string
+		authToken string
 	)
 
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List groups in the current network",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			jsonOutput, err := wantsJSON(output)
+			if err != nil {
+				return err
+			}
 			groups, err := client.ListGroups(dataDir(), client.RelayAuthOptions{
 				RelayURL:  relayURL,
 				AuthToken: authToken,
@@ -147,7 +155,7 @@ func groupListCmd() *cobra.Command {
 		},
 	}
 
-	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Print the raw JSON response")
+	addOutputFlag(cmd, &output, "Output format (text|json)")
 	cmd.Flags().StringVar(&networkID, "network", "", "Network to list within (default: configured network)")
 	cmd.Flags().StringVar(&relayURL, "relay-url", "", "Relay base URL override")
 	cmd.Flags().StringVar(&authToken, "token", "", "Relay auth token override (session token or token-mode admin token)")
@@ -156,10 +164,10 @@ func groupListCmd() *cobra.Command {
 
 func groupMembersCmd() *cobra.Command {
 	var (
-		jsonOutput bool
-		networkID  string
-		relayURL   string
-		authToken  string
+		output    string
+		networkID string
+		relayURL  string
+		authToken string
 	)
 
 	cmd := &cobra.Command{
@@ -167,6 +175,10 @@ func groupMembersCmd() *cobra.Command {
 		Short: "Show members of one group",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			jsonOutput, err := wantsJSON(output)
+			if err != nil {
+				return err
+			}
 			group, err := client.GetGroup(dataDir(), args[0], client.RelayAuthOptions{
 				RelayURL:  relayURL,
 				AuthToken: authToken,
@@ -198,7 +210,7 @@ func groupMembersCmd() *cobra.Command {
 		},
 	}
 
-	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Print the raw JSON response")
+	addOutputFlag(cmd, &output, "Output format (text|json)")
 	cmd.Flags().StringVar(&networkID, "network", "", "Network containing the group (default: configured network)")
 	cmd.Flags().StringVar(&relayURL, "relay-url", "", "Relay base URL override")
 	cmd.Flags().StringVar(&authToken, "token", "", "Relay auth token override (session token or token-mode admin token)")
@@ -286,7 +298,7 @@ func groupPolicyCmd() *cobra.Command {
 	var (
 		messagesPolicy string
 		debugPolicy    string
-		jsonOutput     bool
+		output         string
 		networkID      string
 		relayURL       string
 		authToken      string
@@ -297,6 +309,10 @@ func groupPolicyCmd() *cobra.Command {
 		Short: "Show or update policy for one group",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			jsonOutput, err := wantsJSON(output)
+			if err != nil {
+				return err
+			}
 			auth := client.RelayAuthOptions{
 				RelayURL:  relayURL,
 				AuthToken: authToken,
@@ -348,7 +364,7 @@ func groupPolicyCmd() *cobra.Command {
 
 	cmd.Flags().StringVar(&messagesPolicy, "messages", "", "Message policy (internal-only|open)")
 	cmd.Flags().StringVar(&debugPolicy, "debug", "", "Debug policy (none|observe-only|full)")
-	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Print the raw JSON response")
+	addOutputFlag(cmd, &output, "Output format (text|json)")
 	cmd.Flags().StringVar(&networkID, "network", "", "Network containing the group (default: configured network)")
 	cmd.Flags().StringVar(&relayURL, "relay-url", "", "Relay base URL override")
 	cmd.Flags().StringVar(&authToken, "token", "", "Relay auth token override (session token or token-mode admin token)")

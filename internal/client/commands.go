@@ -1101,10 +1101,11 @@ func watchSingleToChannel(target *Target, sessionID uint32, prefix string, merge
 // ---------------------------------------------------------------------------
 
 // GetStatus retrieves detailed status information for a single session.
-func GetStatus(target *Target, id uint32, jsonOutput bool) error {
+func GetStatus(target *Target, id uint32, jsonOutput bool, full bool) error {
 	resp, err := requestResponse(target, &protocol.Request{
 		Type: "GetStatus",
 		ID:   &id,
+		Full: &full,
 	})
 	if err != nil {
 		return err
@@ -1119,7 +1120,7 @@ func GetStatus(target *Target, id uint32, jsonOutput bool) error {
 	info := resp.Info
 
 	if jsonOutput {
-		data, err := json.MarshalIndent(info, "", "  ")
+		data, err := json.MarshalIndent(statusJSONPayload(info), "", "  ")
 		if err != nil {
 			return err
 		}
@@ -1134,6 +1135,12 @@ func GetStatus(target *Target, id uint32, jsonOutput bool) error {
 	fmt.Printf("  Status:      %s\n", info.Status)
 	fmt.Printf("  Created:     %s\n", info.CreatedAt)
 	fmt.Printf("  Attached:    %v\n", info.Attached)
+	if info.LastEventAt != nil {
+		fmt.Printf("  Last Event At: %s\n", *info.LastEventAt)
+	}
+	if info.IdleSeconds != nil {
+		fmt.Printf("  Idle:          %ds\n", *info.IdleSeconds)
+	}
 	if info.PID != nil {
 		fmt.Printf("  PID:         %d\n", *info.PID)
 	}
@@ -1143,10 +1150,26 @@ func GetStatus(target *Target, id uint32, jsonOutput bool) error {
 	if resp.OutputSize != nil {
 		fmt.Printf("  Log Size:    %d bytes\n", *resp.OutputSize)
 	}
-	if info.LastOutputSnippet != nil {
-		fmt.Printf("  Last Output:\n%s\n", *info.LastOutputSnippet)
+	if full && info.LastEvent != nil {
+		fmt.Printf("  Last Event:\n%s\n", *info.LastEvent)
+	} else if info.LastEventPreview != nil {
+		fmt.Printf("  Last Event:    %s\n", *info.LastEventPreview)
 	}
 	return nil
+}
+
+func statusJSONPayload(info *protocol.SessionInfo) map[string]any {
+	data, err := json.Marshal(info)
+	if err != nil {
+		return map[string]any{}
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return map[string]any{}
+	}
+	delete(payload, "last_output_at")
+	delete(payload, "last_output_snippet")
+	return payload
 }
 
 // ---------------------------------------------------------------------------

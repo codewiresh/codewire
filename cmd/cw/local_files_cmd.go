@@ -31,6 +31,10 @@ func localFilesUploadCmd() *cobra.Command {
 		Short: "Upload bytes from stdin to a path inside a local runtime instance",
 		Args:  cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			jsonOutput, err := localOutputJSON(cmd)
+			if err != nil {
+				return err
+			}
 			instance, err := resolveLocalInstanceArg(args[0])
 			if err != nil {
 				return err
@@ -39,7 +43,7 @@ func localFilesUploadCmd() *cobra.Command {
 			if err := localFilesUpload(instance, remotePath, os.Stdin); err != nil {
 				return err
 			}
-			if jsonOut(cmd) {
+			if jsonOutput {
 				return emitJSON(map[string]any{
 					"name":        instance.Name,
 					"remote_path": remotePath,
@@ -72,6 +76,10 @@ func localFilesListCmd() *cobra.Command {
 		Short: "List directory entries at a path inside a local runtime instance",
 		Args:  cobra.RangeArgs(1, 2),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			jsonOutput, err := localOutputJSON(cmd)
+			if err != nil {
+				return err
+			}
 			instance, err := resolveLocalInstanceArg(args[0])
 			if err != nil {
 				return err
@@ -84,7 +92,7 @@ func localFilesListCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if jsonOut(cmd) {
+			if jsonOutput {
 				return emitJSON(entries)
 			}
 			for _, e := range entries {
@@ -284,7 +292,7 @@ func parentDir(remotePath string) string {
 }
 
 // shellQuote wraps s in single quotes for POSIX sh. Embedded single quotes are
-// escaped using the standard '\'' pattern.
+// escaped using the standard '\” pattern.
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }

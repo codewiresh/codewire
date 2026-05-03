@@ -18,12 +18,15 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/creack/pty"
 
 	"github.com/codewiresh/codewire/internal/protocol"
 	termutil "github.com/codewiresh/codewire/internal/terminal"
 )
+
+const statusPreviewLimit = 200
 
 // namePattern validates session names: alphanumeric + hyphens, 1-32 chars.
 var namePattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9-]{0,31}$`)
@@ -1218,8 +1221,8 @@ func (m *SessionManager) SendInput(id uint32, data []byte) (int, error) {
 }
 
 // GetStatus returns detailed status information for a session, including log
-// file size and the last few lines of output.
-func (m *SessionManager) GetStatus(id uint32) (protocol.SessionInfo, uint64, error) {
+// file size and the last event preview or full tail blob when requested.
+func (m *SessionManager) GetStatus(id uint32, full bool) (protocol.SessionInfo, uint64, error) {
 	m.mu.RLock()
 	sess, ok := m.sessions[id]
 	m.mu.RUnlock()
@@ -1229,20 +1232,16 @@ func (m *SessionManager) GetStatus(id uint32) (protocol.SessionInfo, uint64, err
 
 	info := m.buildSessionInfo(sess)
 
-	// Add snippet for GetStatus specifically.
-	if content, err := os.ReadFile(sess.logPath); err == nil {
-		lines := strings.Split(string(content), "\n")
-		start := len(lines) - 5
-		if start < 0 {
-			start = 0
+	lastEvent, err := statusLastEventBlob(sess)
+	if err == nil {
+		if preview := statusPreview(lastEvent); preview != "" {
+			info.LastEventPreview = &preview
 		}
-		tail := lines[start:]
-		joined := termutil.StripANSI(strings.Join(tail, "\n"))
-		if joined != "" {
-			info.LastOutputSnippet = &joined
+		if full && lastEvent != "" {
+			info.LastEvent = &lastEvent
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
-		slog.Warn("failed to read log file for snippet", "id", id, "err", err)
+		slog.Warn("failed to read log file for status preview", "id", id, "err", err)
 	}
 
 	var outputSize uint64
@@ -1382,12 +1381,66 @@ func (m *SessionManager) buildSessionInfo(s *Session) protocol.SessionInfo {
 	s.mu.Unlock()
 
 	// Last output timestamp.
-	if lastNano := s.lastOutputAt.Load(); lastNano > 0 {
+	lastNano := s.lastOutputAt.Load()
+	if lastNano > 0 {
 		lastStr := time.Unix(0, lastNano).UTC().Format(time.RFC3339)
 		info.LastOutputAt = &lastStr
 	}
+	lastEventTime := sessionLastEventTime(s, lastNano)
+	lastEventStr := lastEventTime.UTC().Format(time.RFC3339)
+	info.LastEventAt = &lastEventStr
+	idleSeconds := int64(time.Since(lastEventTime).Seconds())
+	if idleSeconds < 0 {
+		idleSeconds = 0
+	}
+	info.IdleSeconds = &idleSeconds
 
 	return info
+}
+
+func sessionLastEventTime(s *Session, lastOutputNano int64) time.Time {
+	if lastOutputNano > 0 {
+		return time.Unix(0, lastOutputNano).UTC()
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.Meta.CompletedAt != nil {
+		return s.Meta.CompletedAt.UTC()
+	}
+	return s.Meta.CreatedAt.UTC()
+}
+
+func statusLastEventBlob(s *Session) (string, error) {
+	s.mu.Lock()
+	result := s.Meta.Result
+	s.mu.Unlock()
+	if result != nil && strings.TrimSpace(*result) != "" {
+		return termutil.StripANSI(*result), nil
+	}
+
+	content, err := os.ReadFile(s.logPath)
+	if err != nil {
+		return "", err
+	}
+	lines := strings.Split(string(content), "\n")
+	start := len(lines) - 5
+	if start < 0 {
+		start = 0
+	}
+	return termutil.StripANSI(strings.Join(lines[start:], "\n")), nil
+}
+
+func statusPreview(blob string) string {
+	normalized := strings.Join(strings.Fields(strings.TrimSpace(blob)), " ")
+	if normalized == "" {
+		return ""
+	}
+	if utf8.RuneCountInString(normalized) <= statusPreviewLimit {
+		return normalized
+	}
+	runes := []rune(normalized)
+	return string(runes[:statusPreviewLimit]) + "..."
 }
 
 // GetSessionTags returns the tags for a session (used by handler for event filtering).

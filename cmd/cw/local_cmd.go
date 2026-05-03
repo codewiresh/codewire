@@ -173,7 +173,10 @@ func localParentCmd() *cobra.Command {
 		Use:   "local",
 		Short: "Manage local runtime instances",
 	}
-	cmd.PersistentFlags().Bool("json", false, "Emit machine-readable JSON output (stable schema for SDK consumers)")
+	cmd.PersistentFlags().StringP("output", "o", outputFormatText, "Output format (text|json)")
+	_ = cmd.RegisterFlagCompletionFunc("output", func(_ *cobra.Command, _ []string, _ string) ([]string, cobra.ShellCompDirective) {
+		return []string{outputFormatText, outputFormatJSON}, cobra.ShellCompDirectiveNoFileComp
+	})
 	cmd.AddCommand(localCreateCmd())
 	cmd.AddCommand(localStartCmd())
 	cmd.AddCommand(localStopCmd())
@@ -185,11 +188,17 @@ func localParentCmd() *cobra.Command {
 	return cmd
 }
 
-// jsonOut returns true when the --json persistent flag has been set on
-// `cw local ...`. Used by every local subcommand to branch output.
-func jsonOut(cmd *cobra.Command) bool {
-	v, _ := cmd.Flags().GetBool("json")
-	return v
+// localOutputJSON returns true when the inherited output format for
+// `cw local ...` is json. Used by every local subcommand to branch output.
+func localOutputJSON(cmd *cobra.Command) (bool, error) {
+	flag := cmd.Flags().Lookup("output")
+	if flag == nil {
+		flag = cmd.InheritedFlags().Lookup("output")
+	}
+	if flag == nil {
+		return false, nil
+	}
+	return wantsJSON(flag.Value.String())
 }
 
 func localCreateCmd() *cobra.Command {
@@ -199,6 +208,10 @@ func localCreateCmd() *cobra.Command {
 		Use:   "create",
 		Short: "Create a local runtime instance from codewire.yaml",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			jsonOutput, err := localOutputJSON(cmd)
+			if err != nil {
+				return err
+			}
 			if strings.TrimSpace(opts.Backend) == "" {
 				return fmt.Errorf("--backend is required")
 			}
@@ -251,7 +264,7 @@ func localCreateCmd() *cobra.Command {
 				}
 			}
 
-			if jsonOut(cmd) {
+			if jsonOutput {
 				status, statusErr := localRuntimeStatus(&instance)
 				if statusErr != nil {
 					status = "unknown"
@@ -301,6 +314,10 @@ func localStartCmd() *cobra.Command {
 		Short: "Start an existing local runtime instance",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			jsonOutput, err := localOutputJSON(cmd)
+			if err != nil {
+				return err
+			}
 			state, err := loadLocalInstancesForCLI()
 			if err != nil {
 				return err
@@ -322,7 +339,7 @@ func localStartCmd() *cobra.Command {
 			if err := startLocalRuntime(instance); err != nil {
 				return err
 			}
-			if jsonOut(cmd) {
+			if jsonOutput {
 				status, statusErr := localRuntimeStatus(instance)
 				if statusErr != nil {
 					status = "unknown"
@@ -341,6 +358,10 @@ func localStopCmd() *cobra.Command {
 		Short: "Stop an existing local runtime instance",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			jsonOutput, err := localOutputJSON(cmd)
+			if err != nil {
+				return err
+			}
 			instance, err := resolveLocalInstanceArg(optionalArg(args))
 			if err != nil {
 				return err
@@ -348,7 +369,7 @@ func localStopCmd() *cobra.Command {
 			if err := stopLocalRuntime(instance); err != nil {
 				return err
 			}
-			if jsonOut(cmd) {
+			if jsonOutput {
 				status, statusErr := localRuntimeStatus(instance)
 				if statusErr != nil {
 					status = "unknown"
@@ -368,6 +389,10 @@ func localRmCmd() *cobra.Command {
 		Short:   "Delete an existing local runtime instance",
 		Args:    cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			jsonOutput, err := localOutputJSON(cmd)
+			if err != nil {
+				return err
+			}
 			state, err := loadLocalInstancesForCLI()
 			if err != nil {
 				return err
@@ -384,7 +409,7 @@ func localRmCmd() *cobra.Command {
 			if err := saveLocalInstancesForCLI(state); err != nil {
 				return fmt.Errorf("save local instance state: %w", err)
 			}
-			if jsonOut(cmd) {
+			if jsonOutput {
 				return emitJSON(map[string]any{
 					"name":    instance.Name,
 					"removed": true,
@@ -402,13 +427,17 @@ func localListCmd() *cobra.Command {
 		Aliases: []string{"ls"},
 		Short:   "List local runtime instances",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			jsonOutput, err := localOutputJSON(cmd)
+			if err != nil {
+				return err
+			}
 			state, err := loadLocalInstancesForCLI()
 			if err != nil {
 				return err
 			}
 			names := sortedLocalInstanceNames(state)
 
-			if jsonOut(cmd) {
+			if jsonOutput {
 				out := make([]localInstanceJSON, 0, len(names))
 				for _, name := range names {
 					instance := state.Instances[name]
@@ -454,6 +483,10 @@ func localInfoCmd() *cobra.Command {
 		Short: "Show local runtime instance details",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			jsonOutput, err := localOutputJSON(cmd)
+			if err != nil {
+				return err
+			}
 			instance, err := resolveLocalInstanceArg(optionalArg(args))
 			if err != nil {
 				return err
@@ -463,7 +496,7 @@ func localInfoCmd() *cobra.Command {
 				status = "unknown"
 			}
 
-			if jsonOut(cmd) {
+			if jsonOutput {
 				return emitJSON(localInstanceToJSON(instance, status))
 			}
 
@@ -508,6 +541,10 @@ func localPortsCmd() *cobra.Command {
 		Short: "Forward ports from host to a local runtime when the backend supports it",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			jsonOutput, err := localOutputJSON(cmd)
+			if err != nil {
+				return err
+			}
 			state, err := loadLocalInstancesForCLI()
 			if err != nil {
 				return err
@@ -519,7 +556,7 @@ func localPortsCmd() *cobra.Command {
 
 			publish, _ := cmd.Flags().GetStringSlice("publish")
 			if len(publish) == 0 {
-				if jsonOut(cmd) {
+				if jsonOutput {
 					status, statusErr := localRuntimeStatus(instance)
 					if statusErr != nil {
 						status = "unknown"
@@ -541,7 +578,7 @@ func localPortsCmd() *cobra.Command {
 				if err := saveLocalInstancesForCLI(state); err != nil {
 					return fmt.Errorf("save local instance state: %w", err)
 				}
-				if jsonOut(cmd) {
+				if jsonOutput {
 					status, statusErr := localRuntimeStatus(instance)
 					if statusErr != nil {
 						status = "unknown"

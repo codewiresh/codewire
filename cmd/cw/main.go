@@ -776,7 +776,8 @@ func watchCmd() *cobra.Command {
 // ---------------------------------------------------------------------------
 
 func statusCmd() *cobra.Command {
-	var jsonOutput bool
+	var output string
+	var full bool
 
 	cmd := &cobra.Command{
 		Use:               "status <session>",
@@ -800,11 +801,16 @@ func statusCmd() *cobra.Command {
 				return err
 			}
 
-			return client.GetStatus(target, resolved, jsonOutput)
+			jsonOutput, err := wantsJSON(output)
+			if err != nil {
+				return err
+			}
+			return client.GetStatus(target, resolved, jsonOutput, full)
 		},
 	}
 
-	cmd.Flags().BoolVarP(&jsonOutput, "json", "j", false, "Output as JSON")
+	addOutputFlag(cmd, &output, "Output format (text|json)")
+	cmd.Flags().BoolVar(&full, "full", false, "Include the unbounded last event blob in status output")
 
 	return cmd
 }

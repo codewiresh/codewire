@@ -217,7 +217,8 @@ func handleClient(reader connection.FrameReader, writer connection.FrameWriter, 
 			})
 			return
 		}
-		info, outputSize, statusErr := manager.GetStatus(*req.ID)
+		full := req.Full != nil && *req.Full
+		info, outputSize, statusErr := manager.GetStatus(*req.ID, full)
 		if statusErr != nil {
 			_ = writer.SendResponse(&protocol.Response{
 				Type:    "Error",
@@ -658,7 +659,7 @@ func handleWait(
 
 	// Check if already completed.
 	if req.ID != nil {
-		info, _, err := manager.GetStatus(*req.ID)
+		info, _, err := manager.GetStatus(*req.ID, false)
 		if err == nil && (strings.Contains(info.Status, "completed") || strings.Contains(info.Status, "killed")) {
 			sessions := []protocol.SessionInfo{info}
 			_ = writer.SendResponse(&protocol.Response{
@@ -699,7 +700,7 @@ func handleWait(
 
 			// Re-check condition.
 			if req.ID != nil {
-				info, _, err := manager.GetStatus(*req.ID)
+				info, _, err := manager.GetStatus(*req.ID, false)
 				if err == nil && (strings.Contains(info.Status, "completed") || strings.Contains(info.Status, "killed")) {
 					sessions := []protocol.SessionInfo{info}
 					_ = writer.SendResponse(&protocol.Response{
