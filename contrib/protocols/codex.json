@@ -1,0 +1,36 @@
+{
+  "name": "codex",
+  "version": 1,
+  "match": {
+    "jsonrpc": "2.0"
+  },
+  "turn_stream": {
+    "method_field": "method",
+    "turn_id_field": "params.turnId",
+    "thread_id_field": "params.threadId",
+    "events": [
+      {
+        "method": "turn/started",
+        "state": "started"
+      },
+      {
+        "method": "turn/completed",
+        "state": "completed"
+      },
+      {
+        "method": "turn/failed",
+        "state": "failed"
+      },
+      {
+        "method": "turn/interrupted",
+        "state": "interrupted"
+      },
+      {
+        "method": "tokenUsage/updated",
+        "state": "running",
+        "kind": "progress",
+        "token_usage_field": "params"
+      }
+    ]
+  }
+}
