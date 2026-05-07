@@ -52,11 +52,11 @@ func main() {
       |
       +-- Environment
             |
-            +-- Shell (` + "`cw ssh`" + `)
+            +-- Shell (` + "`cw shell`" + `)
             |
             +-- Codewire runtime
                   |
-                  +-- Run / session (` + "`cw run`" + `)
+                  +-- Run / session (` + "`cw exec --name`" + `)
                         |
                         +-- Terminal (` + "`cw attach`" + `)
                         +-- Output (` + "`cw logs`" + `, ` + "`cw watch`" + `)
@@ -65,12 +65,12 @@ func main() {
   Example:
     cw env create --image full
     cw use my-env
-    cw ssh
-    cw run --name claude -- claude
+    cw shell
+    cw exec --name claude -- claude
     cw attach claude
 
   Or run directly in the selected environment:
-    cw run --on my-env --name claude -- claude`,
+    cw exec my-env -- claude`,
 		Version:      version,
 		SilenceUsage: true,
 	}
@@ -104,11 +104,10 @@ func main() {
 		grouped(useCmd(), "environment"),
 		grouped(currentCmd(), "environment"),
 		grouped(execCmd(), "environment"),
-		grouped(sshCmd(), "environment"),
+		grouped(shellCmd(), "environment"),
 		grouped(vscodeCmd(), "environment"),
 		grouped(platformListCmd(), "environment"),
 		// Sessions
-		grouped(runCmd(), "session"),
 		grouped(attachCmd(), "session"),
 		grouped(killCmd(), "session"),
 		grouped(logsCmd(), "session"),
@@ -178,7 +177,7 @@ func wrapLocalRuntimeRunCommand(instance *config.LocalInstance, workDir string, 
 		hostWorkDir = "."
 	}
 
-	args := []string{exe, "exec", "-it", "--on", instance.Name, "--workdir", guestWorkDir, "--"}
+	args := []string{exe, "exec", "-it", "--workdir", guestWorkDir, instance.Name, "--"}
 	args = append(args, command...)
 	return args, hostWorkDir, nil
 }
@@ -272,194 +271,6 @@ func nodeStopCmd() *cobra.Command {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// runCmd (alias: launch)
-// ---------------------------------------------------------------------------
-
-func runCmd() *cobra.Command {
-	var (
-		workDir     string
-		tags        []string
-		name        string
-		group       string
-		envVars     []string
-		autoApprove bool
-		promptFile  string
-		on          string
-	)
-
-	cmd := &cobra.Command{
-		Use:     "run [name] [tag] -- command...",
-		Aliases: []string{},
-		Short:   "Start a run on the current target",
-		Long: `Start a Codewire run on the current target.
-
-Local target:
-  starts a run on your local Codewire node
-
-Environment target:
-  execs into the selected environment and starts a run there
-  requires the image to include the Codewire CLI
-
-Examples:
-  cw run -- claude
-  cw run --on env-1234 -- codex
-  cw use my-env && cw run -- pytest -q`,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			dash := cmd.ArgsLenAtDash()
-			if dash == -1 {
-				if len(args) > 0 {
-					return fmt.Errorf("missing '--' before command\n\nDid you mean: cw run -- %s\n\nUsage: cw run [name] [tag] -- <command> [args...]", strings.Join(args, " "))
-				}
-				return fmt.Errorf("command required\n\nUsage: cw run [name] [tag] -- <command> [args...]")
-			}
-
-			var command []string
-			if dash == 2 {
-				// cw run planner my-cohort -- claude -p "..."
-				if name == "" {
-					name = args[0]
-				}
-				tags = append(tags, args[1])
-				command = args[2:]
-			} else if dash == 1 {
-				// cw launch planner -- claude -p "..."
-				if name == "" {
-					name = args[0]
-				}
-				command = args[1:]
-			} else if dash == 0 {
-				// cw launch -- claude -p "..."
-				command = args
-			} else {
-				return fmt.Errorf("expected at most two positional args (name, tag) before --")
-			}
-
-			if len(command) == 0 {
-				return fmt.Errorf("command required after --")
-			}
-			group = strings.TrimSpace(group)
-			if group != "" {
-				if strings.TrimSpace(name) == "" {
-					return fmt.Errorf("--group requires --name")
-				}
-				if serverFlag != "" {
-					return fmt.Errorf("--group cannot be used with --server")
-				}
-				tags = appendGroupTag(tags, group)
-			}
-
-			// If --auto-approve, inject --dangerously-skip-permissions after the binary.
-			if autoApprove && len(command) > 0 {
-				command = append([]string{command[0], "--dangerously-skip-permissions"}, command[1:]...)
-			}
-
-			var stdinData []byte
-			if promptFile != "" {
-				var readErr error
-				stdinData, readErr = os.ReadFile(promptFile)
-				if readErr != nil {
-					return fmt.Errorf("reading prompt file: %w", readErr)
-				}
-			}
-
-			if serverFlag != "" {
-				if strings.TrimSpace(on) != "" {
-					return fmt.Errorf("--on cannot be used with --server")
-				}
-				target, err := resolveTarget()
-				if err != nil {
-					return err
-				}
-				if target.IsLocal() {
-					if err := ensureNode(); err != nil {
-						return err
-					}
-				}
-				if workDir == "" {
-					workDir, _ = os.Getwd()
-				}
-				return client.Run(target, command, workDir, name, envVars, stdinData, tags...)
-			}
-
-			execTarget, err := selectedExecutionTarget(on)
-			if err != nil {
-				return err
-			}
-			switch execTarget.Kind {
-			case "local":
-				target, err := resolveTargetForRun()
-				if err != nil {
-					return err
-				}
-				if err := ensureNodeForRun(); err != nil {
-					return err
-				}
-				runCommand := command
-				runWorkDir := workDir
-				if execTarget.Ref != "" && execTarget.Ref != "local" {
-					instance := lookupLocalInstanceForTarget(execTarget)
-					if instance == nil {
-						return fmt.Errorf("local instance not found: %s", execTarget.Ref)
-					}
-					runCommand, runWorkDir, err = wrapLocalRuntimeRunCommand(instance, workDir, command)
-					if err != nil {
-						return err
-					}
-				}
-				if group != "" {
-					if err := validateLocalGroupedRun(group); err != nil {
-						return err
-					}
-				}
-				if strings.TrimSpace(runWorkDir) == "" {
-					runWorkDir, _ = os.Getwd()
-				}
-				if err := runOnTarget(target, runCommand, runWorkDir, name, envVars, stdinData, tags...); err != nil {
-					return err
-				}
-				return nil
-			case "env":
-				if len(stdinData) > 0 {
-					return fmt.Errorf("--prompt-file is not supported for environment targets yet")
-				}
-				if workDir == "" {
-					workDir = "/workspace"
-				}
-				printEnvironmentRunPreamble(execTarget)
-				result, err := runInEnvironmentTarget(execTarget.Ref, workDir, name, group, envVars, tags, command)
-				if err != nil {
-					return fmt.Errorf("run: %w", err)
-				}
-				if err := printEnvironmentRunResult(result); err != nil {
-					return err
-				}
-				sessionRef := name
-				if sessionRef == "" {
-					sessionRef = "1"
-				}
-				fmt.Fprintf(os.Stderr, "  follow: cw exec %s -- cw logs %s --follow\n", shortEnvID(execTarget.Ref), sessionRef)
-				return nil
-			default:
-				return fmt.Errorf("unsupported target kind %q", execTarget.Kind)
-			}
-		},
-	}
-
-	cmd.Flags().StringVarP(&workDir, "dir", "d", "", "Working directory for the session")
-	cmd.Flags().StringSliceVarP(&tags, "tag", "t", nil, "Tags for the session (can be repeated)")
-	cmd.Flags().StringVar(&name, "name", "", "Unique name for the session (alphanumeric + hyphens, 1-32 chars)")
-	cmd.Flags().StringVar(&group, "group", "", "Attach the named session to a relay group")
-	cmd.Flags().StringArrayVarP(&envVars, "env", "e", nil, "Environment variable overrides (KEY=VALUE, can be repeated)")
-	cmd.Flags().StringVar(&on, "on", "", "Override the current target for this command")
-	cmd.Flags().BoolVar(&autoApprove, "auto-approve", false, "Inject --dangerously-skip-permissions after the command binary")
-	cmd.Flags().StringVar(&promptFile, "prompt-file", "", "File whose contents are injected as stdin after launch")
-	_ = cmd.RegisterFlagCompletionFunc("tag", tagCompletionFunc)
-	_ = cmd.RegisterFlagCompletionFunc("on", targetCompletionFunc)
-
-	return cmd
-}
-
 func appendGroupTag(tags []string, group string) []string {
 	group = strings.TrimSpace(group)
 	if group == "" {
@@ -501,7 +312,7 @@ func attachCmd() *cobra.Command {
 		Long: `Attach to a running session's PTY for interactive use.
 
 Use this for a specific Codewire run.
-Use 'cw ssh' for a shell in the environment itself.
+Use 'cw shell' for a shell in the environment itself.
 
 Detach without killing: press Ctrl+B d
 The session continues running after you detach.

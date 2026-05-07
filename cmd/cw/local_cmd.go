@@ -1058,7 +1058,7 @@ func relayEnrollmentRedeemCommand(instance *cwconfig.LocalInstance, enrollment *
 // redeemRelayEnrollmentInLocalRuntime redeems a relay node enrollment from
 // inside a freshly-created local runtime. The runtime registers itself as
 // a relay node under the instance name, becoming addressable via
-// `cw run --on <name>` and the rest of the relay-routed CLI surface.
+// `cw exec --name` on a named local target and the rest of the relay-routed CLI surface.
 //
 // Local runtimes have no platform-side worker setup phase, so the host
 // creates and redeems a node enrollment synchronously after the runtime is up.

@@ -19,24 +19,24 @@ import (
 	"github.com/codewiresh/codewire/internal/terminal"
 )
 
-func sshCmd() *cobra.Command {
+func shellCmd() *cobra.Command {
 	var stdio bool
 
 	cmd := &cobra.Command{
-		Use:   "ssh [env-id-or-name]",
+		Use:   "shell [target]",
 		Short: "Open a shell in a running environment",
-		Long: `Connect to a running sandbox environment via SSH.
+		Long: `Connect to a running sandbox environment shell.
 
-Use this for an environment shell.
+Use this for an interactive target shell.
 Use 'cw attach' to re-open the terminal of a specific Codewire run.
-Use 'cw run' to start a run inside the selected environment.
+Use 'cw exec' to run one command on a target.
 
 Interactive mode (default):
-  Connects via SSH with PTY, resize support, and Ctrl+B d to detach.
+  Connects with PTY, resize support, and Ctrl+B d to detach.
 
 Stdio mode (--stdio):
   For use as SSH ProxyCommand. Pipes stdin/stdout directly to the SSH proxy.
-  Used by: ssh cw-<envid> (via ~/.ssh/config ProxyCommand)
+  Used by: ssh cw-<envid> via the managed SSH ProxyCommand
 
 For VS Code Remote-SSH, run 'cw config-ssh' to configure ~/.ssh/config.`,
 		Args:              cobra.MaximumNArgs(1),
@@ -68,7 +68,7 @@ For VS Code Remote-SSH, run 'cw config-ssh' to configure ~/.ssh/config.`,
 		},
 	}
 
-	cmd.Flags().BoolVar(&stdio, "stdio", false, "Stdio mode for ProxyCommand (pipe stdin/stdout to SSH proxy)")
+	cmd.Flags().BoolVar(&stdio, "stdio", false, "Stdio mode for ProxyCommand (pipe stdin/stdout to shell proxy)")
 	cmd.Flags().String("org", "", "Organization ID or slug (default: current org)")
 	return cmd
 }
@@ -179,7 +179,7 @@ func sshInteractive(client *platform.Client, orgID, envID string) error {
 		KnownHostsPath: defaultKnownHostsPath(),
 	})
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "ssh dial failed: %v\n", err)
+		fmt.Fprintf(os.Stderr, "shell dial failed: %v\n", err)
 		available, _ := client.CheckSSHProxy(orgID, envID)
 		if !available {
 			return terminalFallback(client, orgID, envID)
@@ -278,7 +278,7 @@ func runInteractiveShell(shell envshell.Shell) error {
 
 	// shell.Read -> stdout
 	go func() {
-		buf := make([]byte, 32 * 1024)
+		buf := make([]byte, 32*1024)
 		for {
 			n, err := shell.Read(buf)
 			if n > 0 {

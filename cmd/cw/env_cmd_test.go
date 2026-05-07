@@ -126,7 +126,7 @@ func TestEnvCreateDefaultsToWaiting(t *testing.T) {
 	}
 }
 
-func TestSSHCmdCompletionUsesEnvironmentRefs(t *testing.T) {
+func TestShellCmdCompletionUsesEnvironmentRefs(t *testing.T) {
 	alpha := "alpha"
 	created1 := time.Now().UTC().Add(-2 * time.Hour).Format(time.RFC3339)
 	created2 := time.Now().UTC().Add(-3 * time.Hour).Format(time.RFC3339)
@@ -139,7 +139,7 @@ func TestSSHCmdCompletionUsesEnvironmentRefs(t *testing.T) {
 	}
 	defer func() { listEnvironmentsForCompletion = orig }()
 
-	cmd := sshCmd()
+	cmd := shellCmd()
 	got, directive := cmd.ValidArgsFunction(cmd, nil, "f")
 	want := []string{
 		"f062947a\tf062947a-60e2-405c-b89d-5f48b493d8fb alpha " + timeAgo(created1),
@@ -197,7 +197,7 @@ func TestPrintEnvListEntriesUsesUnifiedBlockLayout(t *testing.T) {
 	if !strings.Contains(got, "network: project-alpha") {
 		t.Fatalf("expected network line, got %q", got)
 	}
-	if !strings.Contains(got, "connect: cw ssh 12345678") {
+	if !strings.Contains(got, "connect: cw shell 12345678") {
 		t.Fatalf("expected connect hint, got %q", got)
 	}
 }

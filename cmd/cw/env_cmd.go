@@ -32,7 +32,6 @@ func envParentCmd() *cobra.Command {
 	cmd.AddCommand(envStopCmd())
 	cmd.AddCommand(envStartCmd())
 	cmd.AddCommand(envRmCmd())
-	cmd.AddCommand(envExecCmd())
 	cmd.AddCommand(envCpCmd())
 	cmd.AddCommand(envPruneCmd())
 	cmd.AddCommand(envNukeCmd())
@@ -162,7 +161,7 @@ func envConnectHint(env platform.Environment) string {
 	if ref == "--" {
 		return "--"
 	}
-	return "cw ssh " + ref
+	return "cw shell " + ref
 }
 
 func environmentStateLabel(env platform.Environment) string {

@@ -30,7 +30,7 @@ func configSSHCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "config-ssh",
 		Short: "Write OpenSSH config for Codewire environments",
-		Long:  "Adds or updates the managed Codewire section in your SSH config so OpenSSH, scp, sftp, rsync, and Remote-SSH can use `cw ssh --stdio` as ProxyCommand.",
+		Long:  "Adds or updates the managed Codewire section in your SSH config so OpenSSH, scp, sftp, rsync, and Remote-SSH can use `cw shell --stdio` as ProxyCommand.",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if strings.HasPrefix(configPath, "~/") {
 				home, err := os.UserHomeDir()
@@ -114,7 +114,7 @@ func sshConfigBlock(opts sshConfigOptions) string {
 	buf.WriteString("\n")
 	buf.WriteString("# This section is managed by Codewire. Re-run `cw config-ssh` to update it.\n")
 	buf.WriteString("Host cw-*\n")
-	buf.WriteString("    ProxyCommand cw ssh --stdio %n\n")
+	buf.WriteString("    ProxyCommand cw shell --stdio %n\n")
 	buf.WriteString("    StrictHostKeyChecking accept-new\n")
 	buf.WriteString("    UserKnownHostsFile " + defaultKnownHostsPath() + "\n")
 	buf.WriteString("    User codewire\n")

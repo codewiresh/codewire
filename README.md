@@ -49,14 +49,14 @@ make install
 
 ```bash
 # Launch a session (node auto-starts)
-cw launch -- claude -p "fix the auth bug in login.ts"
+cw exec --name claude -- claude -p "fix the auth bug in login.ts"
 
 # Use a different AI agent
-cw launch -- aider --message "fix the auth bug"
-cw launch -- goose run
+cw exec --name aider -- aider --message "fix the auth bug"
+cw exec --name goose -- goose run
 
 # Specify a working directory
-cw launch --dir /home/coder/project -- claude -p "add tests"
+cw exec --name project --dir /home/coder/project -- claude -p "add tests"
 
 # List running sessions
 cw list
@@ -91,7 +91,7 @@ Local runtimes become normal `cw` targets:
 
 ```bash
 cw local info my-app
-cw exec --on my-app -- pwd
+cw exec my-app -- pwd
 cw use my-app
 cw exec -- pwd
 cw use local
@@ -99,11 +99,10 @@ cw use local
 
 Notes:
 - `cw exec` works across the current target, including remote envs and local Docker/Incus/Lima runtimes.
-- `cw ssh` remains for remote environments; local runtimes use backend-native exec.
+- `cw shell` opens interactive shells in remote environments; local runtimes use backend-native exec.
 - Lima is the preferred VM-style local backend for Linux and macOS because it provides real VM isolation with repo mounts.
 - For Lima, ports declared in `codewire.yaml` are forwarded automatically using the same host and guest port.
-- Firecracker remains experimental and is not recommended as the default local VM backend.
-- `cw run --on <named-local-runtime>` launches a host-managed session that executes inside the selected runtime through `cw exec`.
+- `cw exec --name` against a named local runtime launches a host-managed session that executes inside the selected runtime through `cw exec`.
 - Incus with OCI registry images like `docker.io/...` and `ghcr.io/...` requires `skopeo` on the host.
 
 ## Commands
@@ -130,7 +129,7 @@ cw local rm <name>                          # Delete a local runtime
 cw use <target>                             # Set current target
 cw current -v                               # Show current target details
 cw exec -- <command>                        # Run on the current target
-cw exec --on <target> -- <command>          # Run on a specific target
+cw exec <target> -- <command>               # Run on a specific target
 ```
 
 ### Environment Management
@@ -144,7 +143,7 @@ cw env list                                    # List environments
 cw env info <name-or-id>                       # Show details
 cw env logs <name-or-id>                       # Startup/provisioning logs
 
-cw env exec <name-or-id> -- npm test           # Run a command
+cw exec <name-or-id> -- npm test               # Run a command
 cw env cp local.txt <id>:/workspace/local.txt  # Upload a file
 cw env cp <id>:/workspace/out.txt ./out.txt    # Download a file
 
@@ -154,23 +153,22 @@ cw env rm <name-or-id>                         # Delete
 cw env prune                                   # Clean up stale envs
 ```
 
-### `cw launch [name] [--dir <dir>] [--tag <tag>...] -- <command> [args...]`
+### `cw exec --name <name> [--dir <dir>] [--tag <tag>...] -- <command> [args...]`
 
-Start a new session running the given command in a persistent PTY. Everything after `--` is the command and its arguments. An optional positional name before `--` gives the session a stable identifier for messaging. Tags enable filtering and coordination.
+Start a new session running the given command in a persistent PTY. Everything after `--` is the command and its arguments. Tags enable filtering and coordination.
 
 ```bash
-cw launch -- claude -p "refactor the database layer"
-cw launch planner -- claude -p "plan the refactor"
-cw launch --dir /home/coder/project -- claude -p "add unit tests for auth"
-cw launch --tag worker --tag build -- claude -p "fix tests"
-cw launch -- bash -c "npm test && npm run lint"
+cw exec --name claude -- claude -p "refactor the database layer"
+cw exec --name planner -- claude -p "plan the refactor"
+cw exec --name project --dir /home/coder/project -- claude -p "add unit tests for auth"
+cw exec --tag worker --tag build -- claude -p "fix tests"
+cw exec --name test -- bash -c "npm test && npm run lint"
 ```
 
 Options:
-- Positional name (before `--`) — Unique name for the session (alphanumeric + hyphens, 1-32 chars). Used for addressing in messaging. Equivalent to `--name`.
-- `--name` — Alternative to positional name (useful for programmatic/MCP use)
+- `--name` — Unique name for the session (alphanumeric + hyphens, 1-32 chars)
 - `--dir`, `-d` — Working directory (defaults to current dir)
-- `--tag`, `-t` — Tag the session (repeatable)
+- `--tag` — Tag the session (repeatable)
 
 ### `cw list`
 
@@ -460,7 +458,7 @@ Codewire is a single Go binary (`cw`) that acts as both node and CLI client.
 
 **Node** (`cw node`): Listens on a Unix socket at `~/.codewire/codewire.sock`. Manages PTY sessions — each AI agent runs in its own pseudoterminal. The node owns the master side of each PTY and keeps processes alive regardless of client connections.
 
-**Client** (`cw launch`, `attach`, etc.): Connects to the node's Unix socket. When you attach, the client puts your terminal in raw mode and bridges your stdin/stdout directly to the PTY. Your terminal emulator handles all rendering — that's why scrolling and copy/paste work natively.
+**Client** (`cw exec --name`, `attach`, etc.): Connects to the node's Unix socket. When you attach, the client puts your terminal in raw mode and bridges your stdin/stdout directly to the PTY. Your terminal emulator handles all rendering — that's why scrolling and copy/paste work natively.
 
 **Logs**: All PTY output is teed to `~/.codewire/sessions/<id>/output.log` so you can review what happened while disconnected.
 
@@ -469,10 +467,10 @@ Codewire is a single Go binary (`cw`) that acts as both node and CLI client.
 Pass the exact command you want to run after `--`. No magic — what you type is what runs:
 
 ```bash
-cw launch -- claude -p "fix the bug"              # Claude Code
-cw launch -- aider --message "fix the bug"         # Aider
-cw launch -- goose run                             # Goose
-cw launch -- codex "refactor auth"                 # Codex
+cw exec --name claude -- claude -p "fix the bug"              # Claude Code
+cw exec --name aider -- aider --message "fix the bug"         # Aider
+cw exec --name goose -- goose run                             # Goose
+cw exec --name codex -- codex "refactor auth"                 # Codex
 ```
 
 ### Wire Protocol
@@ -581,9 +579,9 @@ cw network create private-agents --use
 cw group create mesh
 
 # Launch named sessions directly into that group
-cw run --name agent-1 --group mesh -- claude
-cw run --name agent-2 --group mesh -- claude
-cw run --name agent-3 --group mesh -- claude
+cw exec --name agent-1 --group mesh -- claude
+cw exec --name agent-2 --group mesh -- claude
+cw exec --name agent-3 --group mesh -- claude
 
 # Inspect and manage membership
 cw group members mesh
@@ -651,7 +649,7 @@ cw attach 3                                # Attach to a local/current-target se
 # Remote (node prefix)
 cw list dev-1                              # Sessions on dev-1
 cw attach dev-1:3                          # Session 3 on dev-1
-cw launch dev-1 -- claude -p "fix bug"     # Launch on dev-1
+cw --server dev-1 exec --name remote -- claude -p "fix bug"     # Launch on dev-1
 cw kill dev-1:3                            # Kill on dev-1
 ```
 
@@ -776,8 +774,8 @@ CodeWire is designed for LLM-driven multi-agent workflows. Tags, subscriptions, 
 Label sessions at launch for filtering and coordination:
 
 ```bash
-cw launch --tag worker --tag build -- claude -p "fix tests"
-cw launch --tag worker --tag lint -- claude -p "fix lint issues"
+cw exec --tag worker --tag build -- claude -p "fix tests"
+cw exec --tag worker --tag lint -- claude -p "fix lint issues"
 
 # List sessions by tag (via MCP or API)
 # Kill all workers
@@ -819,8 +817,8 @@ cw wait --tag worker --condition any --timeout 60
 
 ```bash
 # Launch tagged workers
-cw launch --tag worker -- claude -p "implement feature X"
-cw launch --tag worker -- claude -p "write tests for X"
+cw exec --tag worker -- claude -p "implement feature X"
+cw exec --tag worker -- claude -p "write tests for X"
 
 # Wait for all workers to finish
 cw wait --tag worker --condition all --timeout 300
@@ -833,8 +831,8 @@ cw list
 
 ```bash
 # Launch named agents
-cw launch planner -- claude -p "plan the refactor"
-cw launch coder -- claude -p "implement changes"
+cw exec --name planner -- claude -p "plan the refactor"
+cw exec --name coder -- claude -p "implement changes"
 
 # Send a direct message
 cw msg -f planner coder "start with the auth module"
@@ -850,8 +848,8 @@ cw listen
 **Agent swarms** — parallel agents with cross-session communication:
 
 ```bash
-cw launch --tag backend -- claude -p "optimize queries"
-cw launch --tag frontend -- claude -p "optimize bundle"
+cw exec --tag backend -- claude -p "optimize queries"
+cw exec --tag frontend -- claude -p "optimize bundle"
 
 # Send coordination message
 cw send 1 "Backend ready for integration"

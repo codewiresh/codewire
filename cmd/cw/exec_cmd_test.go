@@ -79,8 +79,8 @@ func TestExecCmdUsesCurrentEnvironmentTarget(t *testing.T) {
 	if gotWorkDir != "/workspace" {
 		t.Fatalf("workdir = %q, want /workspace", gotWorkDir)
 	}
-	if gotTimeout != 30 {
-		t.Fatalf("timeout = %d, want 30", gotTimeout)
+	if gotTimeout != 0 {
+		t.Fatalf("timeout = %d, want 0 (server default)", gotTimeout)
 	}
 	if len(gotCommand) != 1 || gotCommand[0] != "pwd" {
 		t.Fatalf("command = %#v", gotCommand)
@@ -205,16 +205,16 @@ func TestLocalRuntimeTerminalEnvFallsBackToSafeDefaults(t *testing.T) {
 	}
 }
 
-func TestSSHCmdAllowsCurrentTargetWhenNoArg(t *testing.T) {
-	cmd := sshCmd()
+func TestShellCmdAllowsCurrentTargetWhenNoArg(t *testing.T) {
+	cmd := shellCmd()
 	if err := cmd.Args(cmd, nil); err != nil {
 		t.Fatalf("ssh args rejected zero args: %v", err)
 	}
 }
 
-func TestExecCmdExposesOnFlag(t *testing.T) {
+func TestExecCmdDoesNotExposeOnFlag(t *testing.T) {
 	cmd := execCmd()
-	if cmd.Flags().Lookup("on") == nil {
-		t.Fatal("expected exec command to expose --on")
+	if cmd.Flags().Lookup("on") != nil {
+		t.Fatal("expected exec command not to expose legacy target override flag")
 	}
 }

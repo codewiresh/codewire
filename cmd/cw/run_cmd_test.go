@@ -21,7 +21,7 @@ func TestBuildEnvironmentRunCommandIncludesFlags(t *testing.T) {
 	)
 
 	want := []string{
-		"cw", "run",
+		"cw", "exec",
 		"--dir", "/workspace/app",
 		"--name", "planner",
 		"--group", "mesh",
@@ -72,7 +72,7 @@ func TestRunCmdUsesCurrentEnvironmentTarget(t *testing.T) {
 		return &platform.ExecResult{}, nil
 	}
 
-	cmd := runCmd()
+	cmd := execCmd()
 	cmd.SetArgs([]string{"--name", "planner", "--group", "mesh", "--tag", "alpha", "--env", "FOO=bar", "--", "claude", "--version"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("run command failed: %v", err)
@@ -102,7 +102,7 @@ func TestRunCmdUsesCurrentEnvironmentTarget(t *testing.T) {
 }
 
 func TestRunCmdRequiresNameForGroup(t *testing.T) {
-	cmd := runCmd()
+	cmd := execCmd()
 	cmd.SetArgs([]string{"--group", "mesh", "--", "claude"})
 	err := cmd.Execute()
 	if err == nil {
@@ -144,7 +144,7 @@ func TestRunCmdRejectsPromptFileForEnvironmentTarget(t *testing.T) {
 		t.Fatalf("write prompt file: %v", err)
 	}
 
-	cmd := runCmd()
+	cmd := execCmd()
 	cmd.SetArgs([]string{"--prompt-file", promptFile, "--", "claude", "--version"})
 	err := cmd.Execute()
 	if err == nil {
@@ -174,7 +174,7 @@ func TestWrapLocalRuntimeRunCommand(t *testing.T) {
 	if hostWorkDir != "/tmp/repo" {
 		t.Fatalf("hostWorkDir = %q, want /tmp/repo", hostWorkDir)
 	}
-	want := []string{"/usr/local/bin/cw", "exec", "-it", "--on", "repo", "--workdir", "/workspace", "--", "claude", "--version"}
+	want := []string{"/usr/local/bin/cw", "exec", "-it", "--workdir", "/workspace", "repo", "--", "claude", "--version"}
 	if strings.Join(command, "\x00") != strings.Join(want, "\x00") {
 		t.Fatalf("command = %#v, want %#v", command, want)
 	}
@@ -240,15 +240,15 @@ func TestRunCmdUsesNamedLocalRuntimeTarget(t *testing.T) {
 		}, nil
 	}
 
-	cmd := runCmd()
-	cmd.SetArgs([]string{"--", "claude"})
+	cmd := execCmd()
+	cmd.SetArgs([]string{"--name", "planner", "--", "claude"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("run command failed: %v", err)
 	}
 	if gotTarget == nil || gotTarget.Local != "/tmp/data" {
 		t.Fatalf("target = %#v", gotTarget)
 	}
-	wantCommand := []string{"/usr/local/bin/cw", "exec", "-it", "--on", "repo", "--workdir", "/workspace", "--", "claude"}
+	wantCommand := []string{"/usr/local/bin/cw", "exec", "-it", "--workdir", "/workspace", "repo", "--", "claude"}
 	if strings.Join(gotCommand, "\x00") != strings.Join(wantCommand, "\x00") {
 		t.Fatalf("command = %#v, want %#v", gotCommand, wantCommand)
 	}
@@ -265,7 +265,7 @@ func TestPrintEnvironmentRunResultExplainsMissingCodewireCLI(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected missing cw error")
 	}
-	if !strings.Contains(err.Error(), "environment image does not include the codewire CLI") {
+	if !strings.Contains(err.Error(), "environment image does not include the codewire CLI") || !strings.Contains(err.Error(), "session support") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }

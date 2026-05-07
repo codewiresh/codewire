@@ -12,7 +12,7 @@ func TestReplaceManagedSSHSectionAppend(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(got, "ProxyCommand cw ssh --stdio %n") {
+	if !strings.Contains(got, "ProxyCommand cw shell --stdio %n") {
 		t.Fatalf("expected ProxyCommand in config, got %q", got)
 	}
 	if !strings.Contains(got, "StrictHostKeyChecking accept-new") {

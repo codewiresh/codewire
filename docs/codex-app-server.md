@@ -1,6 +1,6 @@
 # Driving codex via cw + JSON-RPC
 
-How to run an autonomous Codex session under `cw run` and send it
+How to run an autonomous Codex session under `cw exec --name` and send it
 mid-flight redirects, using `cw msg` / `cw send` and codex's
 `app-server` JSON-RPC protocol.
 
@@ -10,7 +10,7 @@ mid-flight redirects, using `cw msg` / `cw send` and codex's
 
 ```bash
 # Start codex as a JSON-RPC server, named so it's addressable.
-cw run --name codex-256 -- codex app-server
+cw exec --name codex-256 -- codex app-server
 
 # Initialize + start a thread + start a turn.
 echo '{"jsonrpc":"2.0","id":1,"method":"initialize",
@@ -130,7 +130,7 @@ clobbering a new turn.
 
 ## TUI capability shim
 
-`cw run` allocates a bare PTY without a terminal emulator behind
+`cw exec --name` allocates a bare PTY without a terminal emulator behind
 it. TUIs (codex's TUI mode, claude code) emit terminal-capability
 queries (`\x1b[6n` cursor-position, `\x1b[c` device-attributes,
 OSC 10/11/12 color queries) at startup and block waiting for
