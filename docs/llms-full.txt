@@ -58,14 +58,14 @@ your sessions. The node itself must be explicitly stopped.
 
 ## 3. CLI Commands
 
-### cw run
+### cw exec
 
 Start a new session. The `--` separator is **required** before the command.
 
 ```bash
-cw run -- <command> [args...]
-cw run --name <name> -- <command>
-cw run --name <name> --tag <tag> -- <command>
+cw exec --name <name> -- <command> [args...]
+cw exec --name <name> -- <command>
+cw exec --name <name> --tag <tag> -- <command>
 ```
 
 Flags:
@@ -77,10 +77,10 @@ Flags:
 
 Examples:
 ```bash
-cw run -- sleep 60
-cw run --name build -- make test
-cw run --name worker-1 --tag batch-42 -- ./worker.sh shard-1
-cw run --name worker-2 --tag batch-42 -- ./worker.sh shard-2
+cw exec --name sleeper -- sleep 60
+cw exec --name build -- make test
+cw exec --name worker-1 --tag batch-42 -- ./worker.sh shard-1
+cw exec --name worker-2 --tag batch-42 -- ./worker.sh shard-2
 ```
 
 **Note:** Omitting `--` causes flags in your command to be parsed by `cw`. If your
@@ -522,7 +522,7 @@ The basic loop. Launch a process, wait for it, read the output.
 
 ```
 CLI:
-  cw run --name build -- make test
+  cw exec --name build -- make test
   cw wait build
   cw logs build
 
@@ -542,9 +542,9 @@ Launch N parallel workers, wait for all, then cleanup.
 
 ```
 CLI:
-  cw run --tag batch-42 -- ./worker.sh shard-1
-  cw run --tag batch-42 -- ./worker.sh shard-2
-  cw run --tag batch-42 -- ./worker.sh shard-3
+  cw exec --tag batch-42 -- ./worker.sh shard-1
+  cw exec --tag batch-42 -- ./worker.sh shard-2
+  cw exec --tag batch-42 -- ./worker.sh shard-3
   cw wait --tag batch-42
   cw kill --tag batch-42     # cleanup stragglers
 
@@ -776,7 +776,7 @@ agent:
 
 Claude Code will:
 1. Derive a short session name from the task
-2. Run `cw run --name <slug> -- claude --dangerously-skip-permissions --print "<task>"`
+2. Run `cw exec --name <slug> -- claude --dangerously-skip-permissions --print "<task>"`
 3. Show you the session name so you can track it with `cw watch`, `cw logs`, or `cw wait`
 
 This is the fastest way to fan out work: keep your main Claude session focused on one
@@ -787,7 +787,7 @@ thing while background agents handle parallel tasks.
 Chain `/cw` calls to build a simple supervisor:
 
 ```
-/cw run the full test suite and fix any failures
+/cw execute the full test suite and fix any failures
 /cw update the changelog for v0.3.0
 /cw review docs/llms-full.txt for accuracy against the current codebase
 ```
@@ -860,8 +860,8 @@ reused between node restarts.
 You forgot the `--` separator before your command:
 ```bash
 # Wrong:
-cw run -- bash -c 'echo hi'   # correct
-cw run bash -c 'echo hi'      # wrong — -c parsed as cw flag
+cw exec --name shell -- bash -c 'echo hi'   # correct
+cw exec bash -c 'echo hi'      # wrong — -c parsed as cw flag
 ```
 
 ### "name already in use"
@@ -870,7 +870,7 @@ Session names must be unique within a running node. Kill the old session or use 
 different name:
 ```bash
 cw kill myapp
-cw run --name myapp -- ./app
+cw exec --name myapp -- ./app
 ```
 
 ### Session shows "completed (-1)"

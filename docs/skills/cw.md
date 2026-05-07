@@ -8,14 +8,14 @@ Task: $ARGUMENTS
 
 2. If launching multiple related sessions (cohort), pick a shared tag:
    ```bash
-   cw run --name researcher-1 research-batch -- claude --dangerously-skip-permissions --print "<task1>"
-   cw run --name researcher-2 research-batch -- claude --dangerously-skip-permissions --print "<task2>"
+   cw exec --name researcher-1 research-batch -- claude --dangerously-skip-permissions --print "<task1>"
+   cw exec --name researcher-2 research-batch -- claude --dangerously-skip-permissions --print "<task2>"
    ```
-   Or use the positional tag syntax: `cw run <name> <tag> -- <command>`
+   Use --name and repeat --tag for session identity and cohorts.
 
 3. For a single session:
    ```bash
-   cw run --name <slug> -- claude --dangerously-skip-permissions --print "<task>"
+   cw exec --name <slug> -- claude --dangerously-skip-permissions --print "<task>"
    ```
 
 4. Confirm launch -- show the exact command used and the session name.
@@ -33,8 +33,8 @@ For fan-out/fan-in work (multiple researchers, parallel tasks):
 
 ```bash
 # Launch cohort
-cw run researcher-1 my-cohort -- claude --dangerously-skip-permissions --print "Research topic A"
-cw run researcher-2 my-cohort -- claude --dangerously-skip-permissions --print "Research topic B"
+cw exec --name researcher-1 --tag my-cohort -- claude --dangerously-skip-permissions --print "Research topic A"
+cw exec --name researcher-2 --tag my-cohort -- claude --dangerously-skip-permissions --print "Research topic B"
 
 # Wait for all results (auto-captured output is printed)
 cw wait --tag my-cohort

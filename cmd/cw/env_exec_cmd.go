@@ -6,73 +6,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
-
-	"github.com/codewiresh/codewire/internal/platform"
 )
-
-func envExecCmd() *cobra.Command {
-	var (
-		workDir string
-		timeout int
-	)
-
-	cmd := &cobra.Command{
-		Use:   "exec <id-or-name> -- <command> [args...]",
-		Short: "Execute a command in a running environment",
-		Long: `Run a one-shot command directly in a sandbox environment.
-
-Use this when you want one command and its output.
-Use 'cw ssh' for an interactive shell.
-Use 'cw run' if you want a named/background Codewire run you can later attach to.`,
-		Args:              cobra.MinimumNArgs(1),
-		ValidArgsFunction: envCompletionFunc,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			// Find the -- separator to split env ID from command
-			cmdArgs := args[1:]
-			if cmd.ArgsLenAtDash() > 0 {
-				cmdArgs = args[cmd.ArgsLenAtDash():]
-			}
-			if len(cmdArgs) == 0 {
-				return fmt.Errorf("no command specified. Usage: cw env exec <id-or-name> -- <command>")
-			}
-
-			orgID, client, err := getOrgContext(cmd)
-			if err != nil {
-				return err
-			}
-
-			envID, err := resolveEnvID(client, orgID, args[0])
-			if err != nil {
-				return err
-			}
-
-			result, err := client.ExecInEnvironment(orgID, envID, &platform.ExecRequest{
-				Command:    cmdArgs,
-				WorkingDir: workDir,
-				Timeout:    timeout,
-			})
-			if err != nil {
-				return fmt.Errorf("exec: %w", err)
-			}
-
-			if result.Stdout != "" {
-				fmt.Print(result.Stdout)
-			}
-			if result.Stderr != "" {
-				fmt.Fprint(os.Stderr, result.Stderr)
-			}
-
-			if result.ExitCode != 0 {
-				os.Exit(result.ExitCode)
-			}
-			return nil
-		},
-	}
-
-	cmd.Flags().StringVarP(&workDir, "workdir", "w", "/workspace", "Working directory")
-	cmd.Flags().IntVar(&timeout, "timeout", 30, "Timeout in seconds")
-	return cmd
-}
 
 func envCpCmd() *cobra.Command {
 	return &cobra.Command{

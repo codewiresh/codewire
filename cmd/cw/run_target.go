@@ -9,7 +9,10 @@ import (
 	"github.com/codewiresh/codewire/internal/platform"
 )
 
-const environmentRunExecTimeoutSeconds = 30
+// 0 = server-side default (currently 10 minutes). The server already clamps
+// non-positive values; sending 0 lets the platform pick the timeout instead
+// of the CLI capping it at a fast-path-only number.
+const environmentRunExecTimeoutSeconds = 0
 
 var runInEnvironmentTarget = func(envID, workDir, name, group string, envVars []string, tags []string, command []string) (*platform.ExecResult, error) {
 	orgID, client, err := getDefaultOrg()
@@ -24,7 +27,7 @@ var runInEnvironmentTarget = func(envID, workDir, name, group string, envVars []
 }
 
 func buildEnvironmentRunCommand(workDir, name, group string, envVars []string, tags []string, command []string) []string {
-	runCommand := []string{"cw", "run"}
+	runCommand := []string{"cw", "exec"}
 	if workDir != "" {
 		runCommand = append(runCommand, "--dir", workDir)
 	}
@@ -61,7 +64,7 @@ func printEnvironmentRunResult(result *platform.ExecResult) error {
 
 	combined := strings.ToLower(result.Stdout + "\n" + result.Stderr)
 	if strings.Contains(combined, "cw: not found") || strings.Contains(combined, "exec: cw: not found") {
-		return fmt.Errorf("environment image does not include the codewire CLI; use a Codewire base image for 'cw run' support or fall back to 'cw exec'")
+		return fmt.Errorf("environment image does not include the codewire CLI; use a Codewire base image for session support or run a direct 'cw exec'")
 	}
 	return fmt.Errorf("environment run exited with code %d", result.ExitCode)
 }

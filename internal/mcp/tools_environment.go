@@ -221,7 +221,7 @@ func environmentTools() []tool {
 					},
 					"timeout": map[string]interface{}{
 						"type":        "integer",
-						"description": "Timeout in seconds (default: 30)",
+						"description": "Timeout in seconds (default: server-side, currently 600)",
 					},
 				},
 				"required": []string{"environment_id", "command"},

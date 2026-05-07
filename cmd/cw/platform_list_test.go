@@ -252,7 +252,7 @@ func TestPrintPlatformEntriesUsesSameEnvironmentCardLayout(t *testing.T) {
 	if !strings.Contains(got, "alpha [12345678]  running") {
 		t.Fatalf("expected shared card header, got %q", got)
 	}
-	if !strings.Contains(got, "connect: cw ssh 12345678") {
+	if !strings.Contains(got, "connect: cw shell 12345678") {
 		t.Fatalf("expected shared connect hint, got %q", got)
 	}
 }

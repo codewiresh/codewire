@@ -21,7 +21,7 @@ The node auto-starts on first use. No daemon to configure.
 
 ```bash
 # Launch a session (-- is required before the command)
-cw run -- bash -c 'echo hello; sleep 2; echo done'
+cw exec --name hello -- bash -c 'echo hello; sleep 2; echo done'
 
 # Output: Session 1 launched: bash -c echo hello; ...
 
@@ -78,7 +78,7 @@ cw local start my-app
 cw local rm my-app
 
 # Run commands inside the container
-cw exec --on my-app -- pwd
+cw exec my-app -- pwd
 cw use my-app
 cw exec -- pwd
 cw current -v
@@ -89,18 +89,17 @@ Notes:
 - Incus with OCI images like `docker.io/...` or `ghcr.io/...` requires `skopeo` on the host.
 - Lima is the recommended VM-style backend for Linux and macOS.
 - For Lima, ports declared in `codewire.yaml` are forwarded automatically on the same host port.
-- Firecracker remains experimental and should not be the default choice for local VM workflows.
-- `cw ssh` is for remote environments; for local runtimes, use `cw exec`.
-- `cw run --on <named-local-runtime>` creates a normal host-managed session whose command executes inside the selected runtime.
+- `cw shell` is for remote environment shells; for local runtimes, use `cw exec`.
+- `cw exec --name` against a named local runtime creates a normal host-managed session whose command executes inside the selected runtime.
 
 ---
 
 ## Core Commands
 
 ```bash
-cw run -- <command>          # Start a session
-cw run --name myapp -- cmd   # Start with a name (reference by name later)
-cw run --tag worker -- cmd   # Tag for group operations
+cw exec --name <name> -- <command>          # Start a session
+cw exec --name myapp -- cmd   # Start with a name (reference by name later)
+cw exec --tag worker -- cmd   # Tag for group operations
 
 cw list                         # Show all sessions
 cw status <id>                  # Detailed status for one session
@@ -135,7 +134,7 @@ cw local rm <name>                  # Delete a local runtime
 cw use <target>                  # Set current target (env, local runtime, or host local)
 cw current -v                    # Show the current target
 cw exec -- <command>             # Exec on the current target
-cw exec --on <target> -- <cmd>   # Exec on a specific target
+cw exec <target> -- <cmd>        # Exec on a specific target
 ```
 
 ---
@@ -156,9 +155,9 @@ cw network create private-agents --use
 cw node
 
 cw group create mesh
-cw run --name agent-1 --group mesh -- claude
-cw run --name agent-2 --group mesh -- claude
-cw run --name agent-3 --group mesh -- claude
+cw exec --name agent-1 --group mesh -- claude
+cw exec --name agent-2 --group mesh -- claude
+cw exec --name agent-3 --group mesh -- claude
 
 cw group members mesh
 cw group policy mesh
@@ -275,9 +274,9 @@ cw logs myapp
 cw kill myapp
 
 # Tags enable group operations
-cw run --tag batch-1 -- ./worker.sh shard-a
-cw run --tag batch-1 -- ./worker.sh shard-b
-cw run --tag batch-1 -- ./worker.sh shard-c
+cw exec --tag batch-1 -- ./worker.sh shard-a
+cw exec --tag batch-1 -- ./worker.sh shard-b
+cw exec --tag batch-1 -- ./worker.sh shard-c
 cw wait --tag batch-1            # blocks until all three finish
 cw kill --tag batch-1            # cleanup
 ```
@@ -327,14 +326,14 @@ full reference.
 
 **Wait for completion, then read output:**
 ```bash
-cw run --name build -- make test
+cw exec --name build -- make test
 cw wait build
 cw logs build
 ```
 
 **Launch and check later (non-blocking):**
 ```bash
-cw run --name deploy -- ./deploy.sh
+cw exec --name deploy -- ./deploy.sh
 # ... do other things ...
 cw status deploy
 cw logs deploy --tail 20
@@ -343,7 +342,7 @@ cw logs deploy --tail 20
 **Fan-out with tags:**
 ```bash
 for shard in a b c; do
-  cw run --tag run-42 -- ./process.sh $shard
+  cw exec --tag run-42 -- ./process.sh $shard
 done
 cw wait --tag run-42
 cw logs --tag run-42    # (use cw list + per-ID logs)

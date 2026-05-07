@@ -16,8 +16,8 @@ func TestEnvParentCmdHasOrgFlag(t *testing.T) {
 	}
 }
 
-func TestSSHCmdReferencesConfigSSH(t *testing.T) {
-	cmd := sshCmd()
+func TestShellCmdReferencesConfigSSH(t *testing.T) {
+	cmd := shellCmd()
 	if !strings.Contains(cmd.Long, "cw config-ssh") {
 		t.Fatalf("expected ssh help to reference cw config-ssh, got %q", cmd.Long)
 	}
