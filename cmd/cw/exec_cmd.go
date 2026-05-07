@@ -270,7 +270,7 @@ func execCmd() *cobra.Command {
 		timeout     int
 		interactive bool
 		tty         bool
-		jsonOutput  bool
+		output      string
 		sessionDir  string
 		tags        []string
 		name        string
@@ -305,6 +305,11 @@ func execCmd() *cobra.Command {
 					return fmt.Errorf("use either --dir or --workdir, not both")
 				}
 				workDir = sessionDir
+			}
+
+			jsonOutput, err := wantsJSON(output)
+			if err != nil {
+				return err
 			}
 
 			sessionMode := name != "" || group != "" || len(tags) > 0 || len(envVars) > 0 || autoApprove || promptFile != "" || cmd.Flags().Changed("dir")
@@ -400,7 +405,7 @@ func execCmd() *cobra.Command {
 	cmd.Flags().IntVar(&timeout, "timeout", 0, "Timeout in seconds for environment exec (0 = server default, currently 10m)")
 	cmd.Flags().BoolVarP(&interactive, "interactive", "i", false, "Keep stdin open")
 	cmd.Flags().BoolVarP(&tty, "tty", "t", false, "Allocate a pseudo-TTY")
-	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Capture stdout/stderr and emit {exit_code,stdout,stderr} JSON on completion")
+	addOutputFlag(cmd, &output, "Output format (text|json)")
 	cmd.Flags().StringVarP(&sessionDir, "dir", "d", "", "Working directory for the session")
 	cmd.Flags().StringSliceVar(&tags, "tag", nil, "Tags for the session (can be repeated)")
 	cmd.Flags().StringVar(&name, "name", "", "Unique name for the session (alphanumeric + hyphens, 1-32 chars)")

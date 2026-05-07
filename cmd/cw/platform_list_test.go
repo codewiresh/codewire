@@ -81,11 +81,11 @@ func TestListEnvironmentRunsUsesLocalSessionListing(t *testing.T) {
 	if gotPath != "/api/v1/organizations/org_123/environments/env_123/exec" {
 		t.Fatalf("path = %q", gotPath)
 	}
-	if len(gotBody.Command) != 4 {
-		t.Fatalf("command = %#v, want cw list --local --json", gotBody.Command)
+	if len(gotBody.Command) != 5 {
+		t.Fatalf("command = %#v, want cw list --local --output json", gotBody.Command)
 	}
-	if gotBody.Command[0] != "cw" || gotBody.Command[1] != "list" || gotBody.Command[2] != "--local" || gotBody.Command[3] != "--json" {
-		t.Fatalf("command = %#v, want cw list --local --json", gotBody.Command)
+	if gotBody.Command[0] != "cw" || gotBody.Command[1] != "list" || gotBody.Command[2] != "--local" || gotBody.Command[3] != "--output" || gotBody.Command[4] != "json" {
+		t.Fatalf("command = %#v, want cw list --local --output json", gotBody.Command)
 	}
 }
 

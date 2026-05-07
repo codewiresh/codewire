@@ -16,6 +16,10 @@
   all CLI commands with flags and examples, all 18 MCP tools, multi-agent patterns
   (supervisor, fan-out, request/reply), relay mode (SSH gateway, no WireGuard), common errors.
 
+- [Agent-to-agent patterns](https://codewire.sh/agent-to-agent.md): Dispatcher one-shots with
+  `cw exec --output json`, persistent worker sessions with `cw exec --name`, and `cw send` / `cw msg`
+  coordination patterns.
+
 - [MCP tool reference](https://codewire.sh/mcp.md): All 18 MCP tools with parameters,
   types, defaults, and workflow examples.
 

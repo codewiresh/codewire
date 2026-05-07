@@ -487,6 +487,10 @@ func TestSessionInfoJSON_WithOptionalFields(t *testing.T) {
 	pid := uint32(12345)
 	size := uint64(4096)
 	snippet := "$ ls\n"
+	lastEventAt := "2026-05-03T15:24:11Z"
+	idleSeconds := int64(47)
+	lastEventPreview := "turn/completed"
+	lastEvent := "{\"jsonrpc\":\"2.0\"}"
 	info := SessionInfo{
 		ID:                1,
 		Prompt:            "$ ",
@@ -497,6 +501,10 @@ func TestSessionInfoJSON_WithOptionalFields(t *testing.T) {
 		PID:               &pid,
 		OutputSizeBytes:   &size,
 		LastOutputSnippet: &snippet,
+		LastEventAt:       &lastEventAt,
+		IdleSeconds:       &idleSeconds,
+		LastEventPreview:  &lastEventPreview,
+		LastEvent:         &lastEvent,
 	}
 	b, err := json.Marshal(info)
 	if err != nil {
@@ -513,6 +521,18 @@ func TestSessionInfoJSON_WithOptionalFields(t *testing.T) {
 	}
 	if m["last_output_snippet"] != "$ ls\n" {
 		t.Errorf("last_output_snippet = %v, want '$ ls\\n'", m["last_output_snippet"])
+	}
+	if m["last_event_at"] != "2026-05-03T15:24:11Z" {
+		t.Errorf("last_event_at = %v, want 2026-05-03T15:24:11Z", m["last_event_at"])
+	}
+	if m["idle_seconds"].(float64) != 47 {
+		t.Errorf("idle_seconds = %v, want 47", m["idle_seconds"])
+	}
+	if m["last_event_preview"] != "turn/completed" {
+		t.Errorf("last_event_preview = %v, want turn/completed", m["last_event_preview"])
+	}
+	if m["last_event"] != "{\"jsonrpc\":\"2.0\"}" {
+		t.Errorf("last_event = %v, want JSON blob", m["last_event"])
 	}
 }
 
@@ -541,6 +561,18 @@ func TestSessionInfoJSON_WithoutOptionalFields(t *testing.T) {
 	}
 	if _, ok := m["last_output_snippet"]; ok {
 		t.Error("last_output_snippet should be omitted when nil")
+	}
+	if _, ok := m["last_event_at"]; ok {
+		t.Error("last_event_at should be omitted when nil")
+	}
+	if _, ok := m["idle_seconds"]; ok {
+		t.Error("idle_seconds should be omitted when nil")
+	}
+	if _, ok := m["last_event_preview"]; ok {
+		t.Error("last_event_preview should be omitted when nil")
+	}
+	if _, ok := m["last_event"]; ok {
+		t.Error("last_event should be omitted when nil")
 	}
 }
 

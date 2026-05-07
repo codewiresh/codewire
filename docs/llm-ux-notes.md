@@ -7,6 +7,18 @@ Written to inform what docs need to exist and what traps to call out.
 
 ## What Was Smooth
 
+**Dispatcher one-shots should use `cw exec --output json`.** This is the clean
+non-interactive pattern for "run a command and give me structured stdout/stderr
+back". It avoids allocating a session just to ask one question.
+
+```bash
+cw exec --on codewire --output json -- bash -lc 'echo hi'
+```
+
+This should be the documented default for dispatcher probes and setup work.
+`cw run` is the right tool only when the dispatcher intends to keep a worker
+alive and steer it over time.
+
 **Core loop is frictionless.** `cw launch -- <command>` → `cw wait <id>` → `cw logs <id>` works
 exactly as you'd expect. The session ID is the stable handle — every command takes it.
 
@@ -20,7 +32,8 @@ is genuinely elegant. Once you know about tags, the multi-agent pattern is one c
 without attaching, read the output with `cw logs`. No TTY weirdness, no pipes needed.
 
 **`cw status` output is informative.** Shows working dir, PID, exit code, output size — all the
-things you'd reach for when debugging why a session behaved unexpectedly.
+things you'd reach for when debugging why a session behaved unexpectedly. For dispatcher loops,
+`cw status --output json` is the cheap structured check to prefer over scraping large log blobs.
 
 ---
 
@@ -86,6 +99,19 @@ or `cw status`. The actual command is `cw list` (all sessions) or `cw status <id
 session). `cw list` with 20 old sessions is noisy. A quick `cw list --status running` would
 be a quality-of-life improvement.
 
+### 9. Dispatcher docs should separate one-shot vs persistent patterns
+
+There are two distinct workflows:
+
+- `cw exec --output json` for one-shot commands where the dispatcher needs a
+  structured result immediately
+- `cw run` + `cw status` + `cw send` + `cw logs` / `cw watch` for persistent
+  worker sessions
+
+Mixing them together makes `cw run` look like the answer to every problem,
+which is wrong. The docs should present `exec --output json` as the default
+dispatcher tool and `run` as the long-lived worker primitive.
+
 ---
 
 ## LLM Instinct vs Codewire Idiom
@@ -121,8 +147,9 @@ be a quality-of-life improvement.
 
 ## Summary
 
-Codewire's core primitives are well-designed and mostly intuitive. The main friction points are:
-(1) the `--` separator that's easy to forget, (2) the `run`/`launch` naming inconsistency,
-(3) the MCP node-not-auto-started footgun, and (4) the `watch` vs `logs` distinction. All of
-these should be addressed in LLM-facing docs — not by changing the tool, but by being explicit
-about them upfront.
+Codewire's core primitives are well-designed and mostly intuitive. The dispatcher-facing docs
+should now lead with `cw exec --output json` for one-shots and treat `cw run` as the persistent
+worker path. The remaining friction points are: (1) the `--` separator that's easy to forget,
+(2) the `run`/`launch` naming inconsistency, (3) the MCP node-not-auto-started footgun, and
+(4) the `watch` vs `logs` distinction. These should be addressed in LLM-facing docs by being
+explicit about them upfront.

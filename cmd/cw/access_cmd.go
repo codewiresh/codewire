@@ -61,7 +61,7 @@ func accessGrantCmd() *cobra.Command {
 		ttl         string
 		allowRead   bool
 		allowListen bool
-		jsonOutput  bool
+		output      string
 		networkID   string
 		relayURL    string
 		authToken   string
@@ -72,6 +72,10 @@ func accessGrantCmd() *cobra.Command {
 		Short: "Grant remote read/listen access to one session",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			jsonOutput, err := wantsJSON(output)
+			if err != nil {
+				return err
+			}
 			loc, err := parseSessionLocator(args[0])
 			if err != nil {
 				return err
@@ -131,7 +135,7 @@ func accessGrantCmd() *cobra.Command {
 	cmd.Flags().StringVar(&ttl, "for", "", "Grant time-to-live (default: 10m)")
 	cmd.Flags().BoolVar(&allowRead, "read", false, "Allow inbox reads")
 	cmd.Flags().BoolVar(&allowListen, "listen", false, "Allow live listen")
-	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Print the raw JSON response")
+	addOutputFlag(cmd, &output, "Output format (text|json)")
 	cmd.Flags().StringVar(&networkID, "network", "", "Network to grant within (default: configured network)")
 	cmd.Flags().StringVar(&relayURL, "relay-url", "", "Relay base URL override")
 	cmd.Flags().StringVar(&authToken, "token", "", "Relay auth token override (session token or token-mode admin token)")
@@ -156,10 +160,10 @@ func accessDropCmd() *cobra.Command {
 
 func accessInspectCmd() *cobra.Command {
 	var (
-		jsonOutput bool
-		networkID  string
-		relayURL   string
-		authToken  string
+		output    string
+		networkID string
+		relayURL  string
+		authToken string
 	)
 
 	cmd := &cobra.Command{
@@ -167,6 +171,10 @@ func accessInspectCmd() *cobra.Command {
 		Short: "Inspect one accepted access grant from the local cache",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			jsonOutput, err := wantsJSON(output)
+			if err != nil {
+				return err
+			}
 			_, _ = client.PruneAcceptedAccessGrants(dataDir(), client.RelayAuthOptions{
 				RelayURL:  relayURL,
 				AuthToken: authToken,
@@ -192,7 +200,7 @@ func accessInspectCmd() *cobra.Command {
 		},
 	}
 
-	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Print the raw JSON response")
+	addOutputFlag(cmd, &output, "Output format (text|json)")
 	cmd.Flags().StringVar(&networkID, "network", "", "Network to validate against before inspecting (default: configured network)")
 	cmd.Flags().StringVar(&relayURL, "relay-url", "", "Relay base URL override")
 	cmd.Flags().StringVar(&authToken, "token", "", "Relay auth token override (session token or token-mode admin token)")
@@ -208,7 +216,7 @@ func accessListCmd() *cobra.Command {
 		activeOnly bool
 		mine       bool
 		accepted   bool
-		jsonOutput bool
+		output     string
 		networkID  string
 		relayURL   string
 		authToken  string
@@ -218,6 +226,10 @@ func accessListCmd() *cobra.Command {
 		Use:   "list",
 		Short: "List issued remote access grants",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			jsonOutput, err := wantsJSON(output)
+			if err != nil {
+				return err
+			}
 			if accepted {
 				if mine || strings.TrimSpace(audience) != "" || activeOnly {
 					return fmt.Errorf("--accepted cannot be combined with remote grant filters")
@@ -309,7 +321,7 @@ func accessListCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&activeOnly, "active", false, "Only show active, non-revoked grants")
 	cmd.Flags().BoolVar(&mine, "mine", false, "List grants issued to the authenticated principal")
 	cmd.Flags().BoolVar(&accepted, "accepted", false, "List locally accepted access grants")
-	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Print the raw JSON response")
+	addOutputFlag(cmd, &output, "Output format (text|json)")
 	cmd.Flags().StringVar(&networkID, "network", "", "Network to list within (default: configured network)")
 	cmd.Flags().StringVar(&relayURL, "relay-url", "", "Relay base URL override")
 	cmd.Flags().StringVar(&authToken, "token", "", "Relay auth token override (session token or token-mode admin token)")
@@ -318,16 +330,20 @@ func accessListCmd() *cobra.Command {
 
 func accessPruneCmd() *cobra.Command {
 	var (
-		jsonOutput bool
-		networkID  string
-		relayURL   string
-		authToken  string
+		output    string
+		networkID string
+		relayURL  string
+		authToken string
 	)
 
 	cmd := &cobra.Command{
 		Use:   "prune",
 		Short: "Prune expired or revoked accepted access grants",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			jsonOutput, err := wantsJSON(output)
+			if err != nil {
+				return err
+			}
 			result, err := client.PruneAcceptedAccessGrants(dataDir(), client.RelayAuthOptions{
 				RelayURL:  relayURL,
 				AuthToken: authToken,
@@ -351,7 +367,7 @@ func accessPruneCmd() *cobra.Command {
 		},
 	}
 
-	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Print the raw JSON response")
+	addOutputFlag(cmd, &output, "Output format (text|json)")
 	cmd.Flags().StringVar(&networkID, "network", "", "Network to validate against (default: configured network)")
 	cmd.Flags().StringVar(&relayURL, "relay-url", "", "Relay base URL override")
 	cmd.Flags().StringVar(&authToken, "token", "", "Relay auth token override (session token or token-mode admin token)")

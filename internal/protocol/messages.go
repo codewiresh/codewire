@@ -16,14 +16,18 @@ type SessionInfo struct {
 	LastOutputSnippet *string `json:"last_output_snippet,omitempty"`
 
 	// Enriched fields (new — backward compatible via omitempty).
-	Tags          []string `json:"tags,omitempty"`
-	ExitCode      *int     `json:"exit_code,omitempty"`
-	CompletedAt   *string  `json:"completed_at,omitempty"`
-	DurationMs    *int64   `json:"duration_ms,omitempty"`
-	OutputLines   *uint64  `json:"output_lines,omitempty"`
-	OutputBytes   *uint64  `json:"output_bytes,omitempty"`
-	LastOutputAt  *string  `json:"last_output_at,omitempty"`
-	AttachedCount int32    `json:"attached_count"`
+	Tags             []string `json:"tags,omitempty"`
+	ExitCode         *int     `json:"exit_code,omitempty"`
+	CompletedAt      *string  `json:"completed_at,omitempty"`
+	DurationMs       *int64   `json:"duration_ms,omitempty"`
+	OutputLines      *uint64  `json:"output_lines,omitempty"`
+	OutputBytes      *uint64  `json:"output_bytes,omitempty"`
+	LastOutputAt     *string  `json:"last_output_at,omitempty"`
+	LastEventAt      *string  `json:"last_event_at,omitempty"`
+	IdleSeconds      *int64   `json:"idle_seconds,omitempty"`
+	LastEventPreview *string  `json:"last_event_preview,omitempty"`
+	LastEvent        *string  `json:"last_event,omitempty"`
+	AttachedCount    int32    `json:"attached_count"`
 }
 
 // Request is the union of all client-to-server control messages.
@@ -60,6 +64,7 @@ type Request struct {
 	SubscriptionID *uint64  `json:"subscription_id,omitempty"`
 	Condition      string   `json:"condition,omitempty"` // "any", "all"
 	TimeoutSeconds *uint64  `json:"timeout_seconds,omitempty"`
+	Full           *bool    `json:"full,omitempty"`
 
 	// KV fields.
 	Namespace string `json:"namespace,omitempty"`

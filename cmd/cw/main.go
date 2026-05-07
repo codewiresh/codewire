@@ -531,6 +531,8 @@ func watchCmd() *cobra.Command {
 		tail      int
 		noHistory bool
 		timeout   uint64
+		output    string
+		filter    string
 	)
 
 	cmd := &cobra.Command{
@@ -539,6 +541,13 @@ func watchCmd() *cobra.Command {
 		Args:              cobra.ExactArgs(1),
 		ValidArgsFunction: sessionCompletionFunc,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			jsonOutput, err := wantsJSON(output)
+			if err != nil {
+				return err
+			}
+			if strings.TrimSpace(filter) != "" && !jsonOutput {
+				return fmt.Errorf("--filter requires --output json")
+			}
 			target, err := resolveTarget()
 			if err != nil {
 				return err
@@ -556,6 +565,9 @@ func watchCmd() *cobra.Command {
 			}
 
 			if len(tagList) > 0 {
+				if jsonOutput {
+					return fmt.Errorf("--output json is only supported when watching a single session")
+				}
 				var timeoutPtr *uint64
 				if cmd.Flags().Changed("timeout") {
 					timeoutPtr = &timeout
@@ -571,13 +583,15 @@ func watchCmd() *cobra.Command {
 			if cmd.Flags().Changed("timeout") {
 				timeoutPtr = &timeout
 			}
-			return client.WatchSession(target, *id, tailPtr, noHistory, timeoutPtr)
+			return client.WatchSession(target, *id, tailPtr, noHistory, timeoutPtr, jsonOutput, filter, os.Stdout)
 		},
 	}
 
 	cmd.Flags().IntVarP(&tail, "tail", "t", 0, "Number of lines to show from end")
 	cmd.Flags().BoolVar(&noHistory, "no-history", false, "Do not replay session history")
 	cmd.Flags().Uint64Var(&timeout, "timeout", 0, "Timeout in seconds")
+	addOutputFlag(cmd, &output, "Output format (text|json)")
+	cmd.Flags().StringVar(&filter, "filter", "", "Projection path to apply when using --output json (for example: .method)")
 
 	return cmd
 }
@@ -587,7 +601,8 @@ func watchCmd() *cobra.Command {
 // ---------------------------------------------------------------------------
 
 func statusCmd() *cobra.Command {
-	var jsonOutput bool
+	var output string
+	var full bool
 
 	cmd := &cobra.Command{
 		Use:               "status <session>",
@@ -611,11 +626,16 @@ func statusCmd() *cobra.Command {
 				return err
 			}
 
-			return client.GetStatus(target, resolved, jsonOutput)
+			jsonOutput, err := wantsJSON(output)
+			if err != nil {
+				return err
+			}
+			return client.GetStatus(target, resolved, jsonOutput, full)
 		},
 	}
 
-	cmd.Flags().BoolVarP(&jsonOutput, "json", "j", false, "Output as JSON")
+	addOutputFlag(cmd, &output, "Output format (text|json)")
+	cmd.Flags().BoolVar(&full, "full", false, "Include the unbounded last event blob in status output")
 
 	return cmd
 }

@@ -57,13 +57,17 @@ func secretsCreateCmd() *cobra.Command {
 // ── cw secrets list [name] ──────────────────────────────────────────
 
 func secretsListCmd() *cobra.Command {
-	var jsonOutput bool
+	var output string
 
 	cmd := &cobra.Command{
 		Use:   "list [project-name]",
 		Short: "List secret projects, or secrets in a project",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			jsonOutput, err := wantsJSON(output)
+			if err != nil {
+				return err
+			}
 			oid, client, err := getDefaultOrg()
 			if err != nil {
 				return err
@@ -127,7 +131,7 @@ func secretsListCmd() *cobra.Command {
 		},
 	}
 
-	cmd.Flags().BoolVarP(&jsonOutput, "json", "j", false, "Output as JSON")
+	addOutputFlag(cmd, &output, "Output format (text|json)")
 	return cmd
 }
 
@@ -285,13 +289,17 @@ func secretsUserCmd() *cobra.Command {
 }
 
 func secretsUserListCmd() *cobra.Command {
-	var jsonOutput bool
+	var output string
 
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List your user secrets",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			jsonOutput, err := wantsJSON(output)
+			if err != nil {
+				return err
+			}
 			client, err := platform.NewClient()
 			if err != nil {
 				return err
@@ -322,7 +330,7 @@ func secretsUserListCmd() *cobra.Command {
 		},
 	}
 
-	cmd.Flags().BoolVarP(&jsonOutput, "json", "j", false, "Output as JSON")
+	addOutputFlag(cmd, &output, "Output format (text|json)")
 	return cmd
 }
 
@@ -422,13 +430,17 @@ func secretsOrgCmd() *cobra.Command {
 }
 
 func secretsOrgListCmd() *cobra.Command {
-	var jsonOutput bool
+	var output string
 
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List organization secrets",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			jsonOutput, err := wantsJSON(output)
+			if err != nil {
+				return err
+			}
 			orgID, client, err := getDefaultOrg()
 			if err != nil {
 				return err
@@ -459,7 +471,7 @@ func secretsOrgListCmd() *cobra.Command {
 		},
 	}
 
-	cmd.Flags().BoolVarP(&jsonOutput, "json", "j", false, "Output as JSON")
+	addOutputFlag(cmd, &output, "Output format (text|json)")
 	return cmd
 }
 

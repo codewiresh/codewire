@@ -113,11 +113,11 @@ Get detailed status for a single session.
 
 ```bash
 cw status <id-or-name>
-cw status <id-or-name> --json
+cw status <id-or-name> --output json
 ```
 
 Output includes: command, working dir, status, created time, attached flag, PID,
-output size, last few lines of output.
+output size, last event time, idle seconds, and a bounded last event preview.
 
 ---
 

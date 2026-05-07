@@ -121,7 +121,7 @@ func localInstanceToJSON(instance *cwconfig.LocalInstance, status string) localI
 }
 
 // emitJSON writes a JSON value to stdout with pretty indentation. Shared
-// between `cw local` subcommands, `cw exec --json`, and any other command
+// between `cw local` subcommands, `cw exec --output json`, and any other command
 // that emits machine-readable output for SDK consumers.
 func emitJSON(v any) error {
 	enc := json.NewEncoder(os.Stdout)

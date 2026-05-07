@@ -13,8 +13,8 @@ import (
 
 func costCmd() *cobra.Command {
 	var (
-		jsonOutput bool
-		orgFilter  string
+		output    string
+		orgFilter string
 	)
 
 	cmd := &cobra.Command{
@@ -22,6 +22,10 @@ func costCmd() *cobra.Command {
 		Short: "Show usage and billing overview",
 		Long:  "Display resource usage and billing information across organizations.",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			jsonOutput, err := wantsJSON(output)
+			if err != nil {
+				return err
+			}
 			if !platform.HasConfig() {
 				return fmt.Errorf("not in platform mode (run 'cw setup')")
 			}
@@ -132,14 +136,14 @@ func costCmd() *cobra.Command {
 		},
 	}
 
-	cmd.Flags().BoolVarP(&jsonOutput, "json", "j", false, "Output as JSON")
+	addOutputFlag(cmd, &output, "Output format (text|json)")
 	cmd.Flags().StringVar(&orgFilter, "org", "", "Filter to a specific organization (slug or ID)")
 	return cmd
 }
 
 func costJSON(pc *platform.Client, orgs []platform.OrgWithRole, orgFilter string) error {
 	type orgCost struct {
-		Org     platform.OrgWithRole              `json:"org"`
+		Org     platform.OrgWithRole               `json:"org"`
 		Billing *platform.BillingOverview          `json:"billing,omitempty"`
 		Usage   map[string]*platform.ResourceUsage `json:"usage,omitempty"`
 	}

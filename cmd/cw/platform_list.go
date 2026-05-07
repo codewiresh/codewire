@@ -25,7 +25,7 @@ type platformListEntry struct {
 }
 
 func platformListCmd() *cobra.Command {
-	var jsonOutput bool
+	var output string
 	var statusFilter string
 	var localOnly bool
 	var includeRuns bool
@@ -40,6 +40,10 @@ Add --runs to also inspect Codewire runs inside running sandbox environments.
 
 In standalone mode, this falls back to listing local runs.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			jsonOutput, err := wantsJSON(output)
+			if err != nil {
+				return err
+			}
 			if localOnly || !platform.HasConfig() {
 				target, err := resolveTarget()
 				if err != nil {
@@ -96,7 +100,7 @@ In standalone mode, this falls back to listing local runs.`,
 		},
 	}
 
-	cmd.Flags().BoolVarP(&jsonOutput, "json", "j", false, "Output as JSON")
+	addOutputFlag(cmd, &output, "Output format (text|json)")
 	cmd.Flags().BoolVar(&localOnly, "local", false, "Force local session listing even when platform config exists")
 	cmd.Flags().BoolVar(&includeRuns, "runs", false, "Include Codewire runs from inside running sandbox environments")
 	cmd.Flags().StringVar(&networkFilter, "network", "", "Only show environments in the specified network")
@@ -259,7 +263,7 @@ func listEnvironmentRuns(pc *platform.Client, orgID string, env platform.Environ
 	}
 
 	result, err := pc.ExecInEnvironment(orgID, env.ID, &platform.ExecRequest{
-		Command:    []string{"cw", "list", "--local", "--json"},
+		Command:    []string{"cw", "list", "--local", "--output", "json"},
 		WorkingDir: "/workspace",
 		Timeout:    10,
 	})

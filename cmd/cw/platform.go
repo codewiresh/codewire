@@ -207,12 +207,16 @@ func logoutCmd() *cobra.Command {
 }
 
 func whoamiCmd() *cobra.Command {
-	var jsonOutput bool
+	var output string
 
 	cmd := &cobra.Command{
 		Use:   "whoami",
 		Short: "Show current user and server",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			jsonOutput, err := wantsJSON(output)
+			if err != nil {
+				return err
+			}
 			client, err := platform.NewClient()
 			if err != nil {
 				return err
@@ -242,7 +246,7 @@ func whoamiCmd() *cobra.Command {
 		},
 	}
 
-	cmd.Flags().BoolVarP(&jsonOutput, "json", "j", false, "Output as JSON")
+	addOutputFlag(cmd, &output, "Output format (text|json)")
 	return cmd
 }
 
@@ -261,12 +265,16 @@ func orgsCmd() *cobra.Command {
 }
 
 func orgsListCmd() *cobra.Command {
-	var jsonOutput bool
+	var output string
 
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List organizations",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			jsonOutput, err := wantsJSON(output)
+			if err != nil {
+				return err
+			}
 			client, err := platform.NewClient()
 			if err != nil {
 				return err
@@ -302,7 +310,7 @@ func orgsListCmd() *cobra.Command {
 		},
 	}
 
-	cmd.Flags().BoolVarP(&jsonOutput, "json", "j", false, "Output as JSON")
+	addOutputFlag(cmd, &output, "Output format (text|json)")
 	return cmd
 }
 
@@ -431,13 +439,17 @@ func resourcesCmd() *cobra.Command {
 }
 
 func resourcesListCmd() *cobra.Command {
-	var jsonOutput bool
+	var output string
 	var orgFlag string
 
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List resources",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			jsonOutput, err := wantsJSON(output)
+			if err != nil {
+				return err
+			}
 			client, err := platform.NewClient()
 			if err != nil {
 				return err
@@ -497,19 +509,23 @@ func resourcesListCmd() *cobra.Command {
 		},
 	}
 
-	cmd.Flags().BoolVarP(&jsonOutput, "json", "j", false, "Output as JSON")
+	addOutputFlag(cmd, &output, "Output format (text|json)")
 	cmd.Flags().StringVar(&orgFlag, "org", "", "Organization ID or slug")
 	return cmd
 }
 
 func resourcesGetCmd() *cobra.Command {
-	var jsonOutput bool
+	var output string
 
 	cmd := &cobra.Command{
 		Use:   "get <id-or-slug>",
 		Short: "Get resource details",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			jsonOutput, err := wantsJSON(output)
+			if err != nil {
+				return err
+			}
 			client, err := platform.NewClient()
 			if err != nil {
 				return err
@@ -537,6 +553,6 @@ func resourcesGetCmd() *cobra.Command {
 		},
 	}
 
-	cmd.Flags().BoolVarP(&jsonOutput, "json", "j", false, "Output as JSON")
+	addOutputFlag(cmd, &output, "Output format (text|json)")
 	return cmd
 }

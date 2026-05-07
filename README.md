@@ -180,7 +180,7 @@ cw list
 # 1    planner        claude -p "plan the refactor"    running    2m ago
 # 2    coder          claude -p "implement changes"    running    45s ago
 
-cw list --json   # machine-readable output
+cw list --output json   # machine-readable output
 ```
 
 ### `cw attach <id>`
@@ -304,7 +304,7 @@ Get detailed session status including PID, output size, and recent output.
 
 ```bash
 cw status 1                     # Human-readable format
-cw status 1 --json              # JSON output
+cw status 1 --output json       # JSON output
 ```
 
 ### `cw subscribe [node] [--tag <tag>] [--event <type>]`

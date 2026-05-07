@@ -156,6 +156,43 @@ func TestCaptureResultStripsOSCQueries(t *testing.T) {
 	}
 }
 
+func TestStatusPreviewCollapsesWhitespaceAndTruncates(t *testing.T) {
+	raw := " first line \n\n second\tline " + strings.Repeat("x", statusPreviewLimit)
+
+	got := statusPreview(raw)
+	if !strings.HasPrefix(got, "first line second line ") {
+		t.Fatalf("statusPreview prefix = %q", got)
+	}
+	if !strings.HasSuffix(got, "...") {
+		t.Fatalf("statusPreview should truncate with ellipsis, got %q", got)
+	}
+	if len([]rune(got)) != statusPreviewLimit+3 {
+		t.Fatalf("statusPreview length = %d, want %d", len([]rune(got)), statusPreviewLimit+3)
+	}
+}
+
+func TestStatusLastEventBlobPrefersCapturedResult(t *testing.T) {
+	tempDir := t.TempDir()
+	logPath := filepath.Join(tempDir, "output.log")
+	if err := os.WriteFile(logPath, []byte("log file content\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	result := "\x1b[31mhello\x1b[0m\nworld"
+
+	session := &Session{
+		Meta:    SessionMeta{Result: &result},
+		logPath: logPath,
+	}
+
+	got, err := statusLastEventBlob(session)
+	if err != nil {
+		t.Fatalf("statusLastEventBlob: %v", err)
+	}
+	if got != "hello\nworld" {
+		t.Fatalf("statusLastEventBlob = %q, want %q", got, "hello\nworld")
+	}
+}
+
 func TestSessionManagerReportTaskRecordsAndPublishes(t *testing.T) {
 	dir := t.TempDir()
 	sm, err := NewSessionManager(dir)

@@ -12,7 +12,7 @@ import (
 )
 
 func resourceStatusCmd() *cobra.Command {
-	var jsonOutput bool
+	var output string
 	var follow bool
 
 	cmd := &cobra.Command{
@@ -20,6 +20,10 @@ func resourceStatusCmd() *cobra.Command {
 		Short: "Show provisioning status and events for a resource",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			jsonOutput, err := wantsJSON(output)
+			if err != nil {
+				return err
+			}
 			client, err := platform.NewClient()
 			if err != nil {
 				return err
@@ -85,7 +89,7 @@ func resourceStatusCmd() *cobra.Command {
 		},
 	}
 
-	cmd.Flags().BoolVarP(&jsonOutput, "json", "j", false, "Output as JSON")
+	addOutputFlag(cmd, &output, "Output format (text|json)")
 	cmd.Flags().BoolVarP(&follow, "follow", "f", false, "Follow live provisioning events")
 	return cmd
 }
