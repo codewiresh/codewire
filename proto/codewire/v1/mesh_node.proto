@@ -1,0 +1,91 @@
+syntax = "proto3";
+
+package codewire.v1;
+
+import "google/protobuf/duration.proto";
+import "google/protobuf/timestamp.proto";
+
+// MeshNodeService manages nodes and one-use node enrollment capabilities.
+service MeshNodeService {
+  rpc ListMeshNodes(ListMeshNodesRequest) returns (ListMeshNodesResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+
+  rpc RevokeMeshNode(RevokeMeshNodeRequest) returns (RevokeMeshNodeResponse);
+
+  rpc CreateMeshNodeEnrollment(CreateMeshNodeEnrollmentRequest) returns (CreateMeshNodeEnrollmentResponse);
+
+  // RedeemMeshNodeEnrollment consumes a one-use capability. It registers the
+  // node and returns metadata only; it never returns a node bearer.
+  rpc RedeemMeshNodeEnrollment(RedeemMeshNodeEnrollmentRequest) returns (RedeemMeshNodeEnrollmentResponse);
+}
+
+// MeshNode is one node registered in an organization-owned Mesh network.
+message MeshNode {
+  string org_id = 1;
+  string network_id = 2;
+  string name = 3;
+  string peer_url = 4;
+  bool connected = 5;
+}
+
+// MeshNodeEnrollment is a bounded capability record for registering one named
+// node. The capability value itself appears only in create/redeem messages.
+message MeshNodeEnrollment {
+  string id = 1;
+  string org_id = 2;
+  string network_id = 3;
+  string node_name = 4;
+  string owner_user_id = 5;
+  string issued_by_user_id = 6;
+  google.protobuf.Timestamp expires_at = 7;
+  google.protobuf.Timestamp created_at = 8;
+  google.protobuf.Timestamp redeemed_at = 9;
+}
+
+message ListMeshNodesRequest {
+  string org_id = 1;
+  string network_id = 2;
+  int32 page_size = 3;
+  string page_token = 4;
+}
+
+message ListMeshNodesResponse {
+  repeated MeshNode nodes = 1;
+  string next_page_token = 2;
+}
+
+message RevokeMeshNodeRequest {
+  string org_id = 1;
+  string network_id = 2;
+  string node_name = 3;
+}
+
+message RevokeMeshNodeResponse {}
+
+message CreateMeshNodeEnrollmentRequest {
+  string org_id = 1;
+  string network_id = 2;
+  // Empty lets the first redeemer select the node name.
+  string node_name = 3;
+  // Unset selects the server default.
+  google.protobuf.Duration ttl = 4;
+}
+
+message CreateMeshNodeEnrollmentResponse {
+  MeshNodeEnrollment enrollment = 1;
+  // Secret one-use capability returned exactly once. Clients must not log it.
+  string enrollment_code = 2;
+}
+
+message RedeemMeshNodeEnrollmentRequest {
+  string enrollment_code = 1;
+  // Required only when the enrollment did not reserve a node name.
+  string node_name = 2;
+  string peer_url = 3;
+}
+
+message RedeemMeshNodeEnrollmentResponse {
+  MeshNode node = 1;
+  MeshNodeEnrollment enrollment = 2;
+}

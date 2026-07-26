@@ -1,0 +1,77 @@
+syntax = "proto3";
+
+package codewire.v1;
+
+import "google/protobuf/duration.proto";
+import "google/protobuf/timestamp.proto";
+
+// MeshKeyValueService manages namespaced values in one Mesh network.
+service MeshKeyValueService {
+  rpc ListMeshKeyValues(ListMeshKeyValuesRequest) returns (ListMeshKeyValuesResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+
+  rpc GetMeshKeyValue(GetMeshKeyValueRequest) returns (GetMeshKeyValueResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+
+  rpc SetMeshKeyValue(SetMeshKeyValueRequest) returns (SetMeshKeyValueResponse);
+
+  rpc DeleteMeshKeyValue(DeleteMeshKeyValueRequest) returns (DeleteMeshKeyValueResponse);
+}
+
+message MeshKeyValue {
+  string org_id = 1;
+  string network_id = 2;
+  string namespace = 3;
+  string key = 4;
+  bytes value = 5;
+  google.protobuf.Timestamp expires_at = 6;
+}
+
+message ListMeshKeyValuesRequest {
+  string org_id = 1;
+  string network_id = 2;
+  string namespace = 3;
+  string prefix = 4;
+  int32 page_size = 5;
+  string page_token = 6;
+}
+
+message ListMeshKeyValuesResponse {
+  repeated MeshKeyValue entries = 1;
+  string next_page_token = 2;
+}
+
+message GetMeshKeyValueRequest {
+  string org_id = 1;
+  string network_id = 2;
+  string namespace = 3;
+  string key = 4;
+}
+
+message GetMeshKeyValueResponse {
+  MeshKeyValue entry = 1;
+}
+
+message SetMeshKeyValueRequest {
+  string org_id = 1;
+  string network_id = 2;
+  string namespace = 3;
+  string key = 4;
+  bytes value = 5;
+  google.protobuf.Duration ttl = 6;
+}
+
+message SetMeshKeyValueResponse {
+  MeshKeyValue entry = 1;
+}
+
+message DeleteMeshKeyValueRequest {
+  string org_id = 1;
+  string network_id = 2;
+  string namespace = 3;
+  string key = 4;
+}
+
+message DeleteMeshKeyValueResponse {}

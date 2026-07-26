@@ -1,4 +1,4 @@
-//! Generated Connect-RPC contract types for the client-facing Codewire
+//! Generated Connect-RPC contract types for the audience-packaged Codewire
 //! control-plane API.
 //!
 //! Message types (buffa), Connect service traits, and — behind the default
@@ -6,7 +6,8 @@
 //! `connectrpc-build` from the schema-of-record protos. Packages map to modules:
 //! `codewire.v1` is [`codewire::v1`]; `codewire.console.v1` is
 //! [`codewire::console::v1`]; `codewire.admin.v1` is
-//! [`codewire::admin::v1`]; `codewire.testing.v1` (the
+//! [`codewire::admin::v1`]; `codewire.internal.v1` is
+//! [`codewire::internal::v1`]; `codewire.testing.v1` (the
 //! never-routed Connect-infrastructure probe, doc 03 D8) is
 //! [`codewire::testing::v1`]; `coordinator.v1` is [`coordinator::v1`].
 //! The vendored `google.rpc` error-detail types
@@ -33,15 +34,207 @@ mod tests {
         GitHubConnection, ListGitHubReposResponse, ResourcePlan, SaveGitHubTokenRequest, SshKey,
         UpdateGitIdentityRequest,
     };
+    use super::codewire::internal::v1::{
+        COORDINATOR_SERVICE_SERVICE_NAME, CoordinateNode, MESH_AUTHORIZATION_SERVICE_SERVICE_NAME,
+        MESH_COORDINATOR_SERVICE_SERVICE_NAME, MeshAuthorizationContext,
+        MeshAuthorizationCredentialKind, MeshAuthorizationPrincipalKind, MeshCoordinateHello,
+        MeshCoordinateRole, MeshCoordinatorServiceCoordinateRequest,
+        ResolveMeshAuthorizationResponse,
+    };
     use super::codewire::v1::{
         AgentEnvMap, AgentList, ApiKey, AppPort, AppPortList, CreateApiKeyResponse,
-        CreatePortRequest, EnvVarMap, GetOrganizationResponse, InvitationStatus,
-        ListSecretProjectsResponse, ListSecretsResponse, ORGANIZATION_SERVICE_SERVICE_NAME,
-        OrgMember, OrgRole, Organization, OrganizationDeletionState, PORT_SERVICE_SERVICE_NAME,
-        PRESET_SERVICE_SERVICE_NAME, Port, PortAccess, Preset, RepoEntry,
+        CreateMeshInviteResponse, CreateMeshNodeEnrollmentResponse, CreatePortRequest, EnvVarMap,
+        GetOrganizationResponse, InvitationStatus, ListSecretProjectsResponse, ListSecretsResponse,
+        MESH_GROUP_SERVICE_SERVICE_NAME, MESH_INVITE_SERVICE_SERVICE_NAME,
+        MESH_KEY_VALUE_SERVICE_SERVICE_NAME, MESH_NETWORK_SERVICE_SERVICE_NAME,
+        MESH_NODE_SERVICE_SERVICE_NAME, MeshInvite, MeshNetwork, MeshNode, MeshNodeEnrollment,
+        ORGANIZATION_SERVICE_SERVICE_NAME, OrgMember, OrgRole, Organization,
+        OrganizationDeletionState, PORT_SERVICE_SERVICE_NAME, PRESET_SERVICE_SERVICE_NAME, Port,
+        PortAccess, Preset, RedeemMeshNodeEnrollmentResponse, RepoEntry,
         SECRET_SERVICE_SERVICE_NAME, SecretMetadata, SetProjectSecretRequest, SetSecretRequest,
         SetUserSecretRequest, SetupAgent, SetupConfig, UpdatePresetRequest,
     };
+
+    #[test]
+    fn mesh_contracts_are_owned_by_the_audience_packages() {
+        for (actual, expected) in [
+            (
+                MESH_NETWORK_SERVICE_SERVICE_NAME,
+                "codewire.v1.MeshNetworkService",
+            ),
+            (
+                MESH_NODE_SERVICE_SERVICE_NAME,
+                "codewire.v1.MeshNodeService",
+            ),
+            (
+                MESH_INVITE_SERVICE_SERVICE_NAME,
+                "codewire.v1.MeshInviteService",
+            ),
+            (
+                MESH_GROUP_SERVICE_SERVICE_NAME,
+                "codewire.v1.MeshGroupService",
+            ),
+            (
+                MESH_KEY_VALUE_SERVICE_SERVICE_NAME,
+                "codewire.v1.MeshKeyValueService",
+            ),
+            (
+                MESH_AUTHORIZATION_SERVICE_SERVICE_NAME,
+                "codewire.internal.v1.MeshAuthorizationService",
+            ),
+            (
+                COORDINATOR_SERVICE_SERVICE_NAME,
+                "codewire.internal.v1.CoordinatorService",
+            ),
+            (
+                MESH_COORDINATOR_SERVICE_SERVICE_NAME,
+                "codewire.internal.v1.MeshCoordinatorService",
+            ),
+        ] {
+            assert_eq!(actual, expected);
+        }
+    }
+
+    #[test]
+    fn mesh_product_json_pins_org_ownership_and_secret_free_redemption() {
+        let network = MeshNetwork {
+            id: "network-alpha".into(),
+            org_id: "org-alpha".into(),
+            node_count: 2,
+            invite_count: 1,
+            ..Default::default()
+        };
+        let json = serde_json::to_value(network).expect("Mesh network proto3 JSON");
+        assert_eq!(json["id"], "network-alpha");
+        assert_eq!(json["orgId"], "org-alpha");
+        assert_eq!(json["nodeCount"], "2");
+        assert_eq!(json["inviteCount"], "1");
+        assert!(json.get("org_id").is_none(), "unexpected JSON: {json}");
+
+        let enrollment = MeshNodeEnrollment {
+            id: "enrollment-alpha".into(),
+            org_id: "org-alpha".into(),
+            network_id: "network-alpha".into(),
+            node_name: "node-alpha".into(),
+            ..Default::default()
+        };
+        let created = CreateMeshNodeEnrollmentResponse {
+            enrollment: Some(enrollment.clone()).into(),
+            enrollment_code: "cw_enr_example".into(),
+            ..Default::default()
+        };
+        let created_json =
+            serde_json::to_value(created).expect("Mesh enrollment create proto3 JSON");
+        assert_eq!(created_json["enrollmentCode"], "cw_enr_example");
+        assert!(created_json.get("enrollment_token").is_none());
+
+        let invite = CreateMeshInviteResponse {
+            invite: Some(MeshInvite {
+                id: "invite-alpha".into(),
+                org_id: "org-alpha".into(),
+                network_id: "network-alpha".into(),
+                ..Default::default()
+            })
+            .into(),
+            invite_code: "cw_inv_example".into(),
+            ..Default::default()
+        };
+        let invite_json = serde_json::to_value(invite).expect("Mesh invite create proto3 JSON");
+        assert_eq!(invite_json["invite"]["id"], "invite-alpha");
+        assert_eq!(invite_json["inviteCode"], "cw_inv_example");
+        assert!(invite_json["invite"].get("inviteCode").is_none());
+        assert!(invite_json["invite"].get("usesRemaining").is_none());
+
+        let redeemed = RedeemMeshNodeEnrollmentResponse {
+            node: Some(MeshNode {
+                org_id: "org-alpha".into(),
+                network_id: "network-alpha".into(),
+                name: "node-alpha".into(),
+                ..Default::default()
+            })
+            .into(),
+            enrollment: Some(enrollment).into(),
+            ..Default::default()
+        };
+        let redeemed_json =
+            serde_json::to_value(redeemed).expect("Mesh enrollment redeem proto3 JSON");
+        assert_eq!(redeemed_json["node"]["orgId"], "org-alpha");
+        assert_eq!(redeemed_json["enrollment"]["id"], "enrollment-alpha");
+        for forbidden in [
+            "credential",
+            "enrollmentCode",
+            "nodeToken",
+            "runtimeCredential",
+        ] {
+            assert!(
+                redeemed_json.get(forbidden).is_none(),
+                "unexpected {forbidden}: {redeemed_json}"
+            );
+        }
+    }
+
+    #[test]
+    fn mesh_internal_json_is_typed_without_raw_authorization_material() {
+        let resolved = ResolveMeshAuthorizationResponse {
+            context: Some(MeshAuthorizationContext {
+                principal_id: "user-alpha".into(),
+                principal_kind: MeshAuthorizationPrincipalKind::User.into(),
+                org_id: "org-alpha".into(),
+                role: OrgRole::Admin.into(),
+                credential_kind: MeshAuthorizationCredentialKind::ApiKey.into(),
+                ..Default::default()
+            })
+            .into(),
+            ..Default::default()
+        };
+        let json = serde_json::to_value(resolved).expect("Mesh authorization context proto3 JSON");
+        assert_eq!(json["context"]["principalId"], "user-alpha");
+        assert_eq!(
+            json["context"]["principalKind"],
+            "MESH_AUTHORIZATION_PRINCIPAL_KIND_USER"
+        );
+        assert_eq!(json["context"]["role"], "ORG_ROLE_ADMIN");
+        assert_eq!(
+            json["context"]["credentialKind"],
+            "MESH_AUTHORIZATION_CREDENTIAL_KIND_API_KEY"
+        );
+        for forbidden in ["authorized", "credential", "scope", "token"] {
+            assert!(
+                json["context"].get(forbidden).is_none(),
+                "unexpected {forbidden}: {json}"
+            );
+        }
+
+        let hello = MeshCoordinatorServiceCoordinateRequest {
+            msg: Some(
+                MeshCoordinateHello {
+                    org_id: "org-alpha".into(),
+                    network_id: "network-alpha".into(),
+                    role: MeshCoordinateRole::Dial.into(),
+                    ..Default::default()
+                }
+                .into(),
+            ),
+            ..Default::default()
+        };
+        let hello_json = serde_json::to_value(hello).expect("Mesh coordinate proto3 JSON");
+        assert_eq!(hello_json["hello"]["orgId"], "org-alpha");
+        assert_eq!(hello_json["hello"]["networkId"], "network-alpha");
+        assert_eq!(hello_json["hello"]["role"], "MESH_COORDINATE_ROLE_DIAL");
+
+        let node = CoordinateNode {
+            id: "peer-alpha".into(),
+            disco_key: "discokey:test".into(),
+            ..Default::default()
+        };
+        let node_json = serde_json::to_value(node).expect("coordinate node proto3 JSON");
+        assert_eq!(node_json["id"], "peer-alpha");
+        assert_eq!(node_json["discoKey"], "discokey:test");
+        assert!(
+            node_json.get("disco_key").is_none(),
+            "unexpected JSON: {node_json}"
+        );
+    }
 
     #[test]
     fn admin_proto_json_surface_and_typed_window_are_pinned() {

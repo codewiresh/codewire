@@ -81,6 +81,7 @@ export TEST_USER_NAME ?= Test User
 REGISTRY ?= git.example.com
 INFISICAL_HOST ?= infisical.example.com
 BUF ?= $(shell command -v buf 2>/dev/null || echo "$(HOME)/go/bin/buf")
+GO_BIN ?= $(shell go env GOPATH)/bin
 # protoc is pinned because buf.gen.codewire.yaml uses protoc's built-in
 # python/pyi generators, whose output is protoc-version-dependent and
 # checked in (libs/gen-python). Keep version + checksum in lockstep with
@@ -157,6 +158,7 @@ seed-e2e-users:
 # protobuf-compiler (protoc) on PATH; protoc-gen-connectrpc and its runtime
 # compatibility protobuf are pinned into the repo-root .venv-proto venv.
 proto-tools:
+	go install github.com/bufbuild/buf/cmd/buf@v1.50.0
 	go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.5
 	go install connectrpc.com/connect/cmd/protoc-gen-connect-go@v1.18.1
 	python3 -m venv .venv-proto
@@ -181,11 +183,15 @@ proto-lint:
 	cd proto && $(BUF) lint
 
 proto-generate:
-	rm -rf libs/gen-go/coordinator
-	cd proto && $(BUF) generate
-	cd proto && PATH="$(abspath $(PROTOC_DIR))/bin:$$PATH" $(BUF) generate --template buf.gen.codewire.yaml
+	rm -rf \
+		libs/gen-go/codewire \
+		libs/gen-go/coordinator \
+		libs/gen-python/codewire \
+		packages/codewire-proto-ts/src/gen/codewire
+	cd proto && PATH="$(GO_BIN):$$PATH" $(BUF) generate
+	cd proto && PATH="$(abspath $(PROTOC_DIR))/bin:$(GO_BIN):$$PATH" $(BUF) generate --template buf.gen.codewire.yaml
 	cd proto && $(BUF) generate --template buf.gen.google-rpc-ts.yaml
-	cd proto && PATH="$(abspath $(PROTOC_DIR))/bin:$$PATH" $(BUF) generate --template buf.gen.google-rpc-python.yaml
+	cd proto && PATH="$(abspath $(PROTOC_DIR))/bin:$(GO_BIN):$$PATH" $(BUF) generate --template buf.gen.google-rpc-python.yaml
 	cd proto && $(BUF) build --as-file-descriptor-set -o ../crates/codewire-proto/codewire_descriptor.bin
 
 # Fails if generated code is out of sync with proto/ definitions.

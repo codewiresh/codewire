@@ -2,11 +2,15 @@
   "name": "@codewire/proto-ts",
   "version": "0.1.0",
   "license": "MIT",
+  "private": true,
   "type": "module",
   "description": "TypeScript schemas for client-facing codewire contracts and vendored google.rpc error details, generated locally with protoc-gen-es",
   "exports": {
     ".": "./src/index.ts",
-    "./gen/*": "./src/gen/*.ts"
+    "./gen/codewire/v1/*": "./src/gen/codewire/v1/*.ts",
+    "./gen/codewire/console/v1/*": "./src/gen/codewire/console/v1/*.ts",
+    "./gen/codewire/admin/v1/*": "./src/gen/codewire/admin/v1/*.ts",
+    "./gen/google/rpc/*": "./src/gen/google/rpc/*.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit"

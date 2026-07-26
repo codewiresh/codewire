@@ -616,6 +616,12 @@ grep -qF 'git ls-files --others --exclude-standard' "$contracts_proto_runner"
 grep -qF 'PYTHONPATH=libs/gen-python' "$contracts_proto_runner"
 grep -qF 'py_compile.compile' "$contracts_proto_runner"
 grep -qF '@codewire/proto-ts typecheck' "$contracts_proto_runner"
+grep -qF '../libs/gen-go/codewire' "$contracts_proto_runner"
+grep -qF '../libs/gen-python/codewire' "$contracts_proto_runner"
+grep -qF '../packages/codewire-proto-ts/src/gen/codewire' "$contracts_proto_runner"
+grep -qF 'proto-package-boundaries --self-test' "$contracts_proto_runner"
+grep -qF 'cargo test --locked -p codewire-proto' "$contracts_proto_runner"
+grep -qF 'github.com/bufbuild/buf/cmd/buf@v1.50.0' "$ROOT/Makefile"
 if rg -n 'tests/contract' "$contracts_proto_runner"; then
   echo 'Proto regeneration runs a general Go service-driver suite' >&2
   exit 1
@@ -1174,6 +1180,8 @@ grep -qF "find scripts/runtime -type f -name '*.sh' -print0" \
 grep -qF "find scripts/runtime -type f -name '*.sh' -print0" \
   "$ROOT/scripts/ci/verify/run-product-verification.sh"
 grep -qF 'scripts/runtime/tests/test-run-sdk-python-e2e.sh' \
+  "$ROOT/scripts/ci/verify/run-product-verification.sh"
+grep -qF 'Python SDK wheel leaked generated codewire/$forbidden_package' \
   "$ROOT/scripts/ci/verify/run-product-verification.sh"
 grep -qF 'scripts/runtime/tests/test-run-sdk-ts-e2e.sh' \
   "$ROOT/scripts/ci/verify/run-product-verification.sh"

@@ -137,7 +137,11 @@ run_contracts_proto() {
   )
   (
     cd proto
-    rm -rf ../libs/gen-go/coordinator
+    rm -rf \
+      ../libs/gen-go/codewire \
+      ../libs/gen-go/coordinator \
+      ../libs/gen-python/codewire \
+      ../packages/codewire-proto-ts/src/gen/codewire
     buf generate
     buf generate --template buf.gen.codewire.yaml
     buf generate --template buf.gen.google-rpc-ts.yaml
@@ -160,6 +164,8 @@ run_contracts_proto() {
 
   (cd libs/gen-go && GOWORK=off go build ./... && GOWORK=off go vet ./...)
   bun --filter @codewire/proto-ts typecheck
+  python3 scripts/checks/repo_checks.py proto-package-boundaries --self-test
+  cargo test --locked -p codewire-proto
 
   PYTHONPATH=libs/gen-python .venv-proto/bin/python - <<'PY'
 import py_compile
@@ -245,6 +251,19 @@ run_sdk_python() {
   .venv-sdk/bin/python -m pip install --require-hashes \
     -r libs/sdk-python/requirements.lock
   .venv-sdk/bin/python -m pip install --no-deps libs/sdk-python
+  local sdk_site_packages forbidden_package
+  sdk_site_packages="$(
+    .venv-sdk/bin/python -c \
+      'import sysconfig; print(sysconfig.get_paths()["purelib"])'
+  )"
+  [ -d "$sdk_site_packages/codewire/v1" ]
+  [ -d "$sdk_site_packages/google/rpc" ]
+  for forbidden_package in admin console internal testing; do
+    if [ -e "$sdk_site_packages/codewire/$forbidden_package" ]; then
+      echo "::error::Python SDK wheel leaked generated codewire/$forbidden_package" >&2
+      return 1
+    fi
+  done
   (cd libs/sdk-python && PYTHONPATH="$repository_root/libs/gen-python${PYTHONPATH:+:$PYTHONPATH}" \
     "$repository_root/.venv-sdk/bin/python" -m unittest test_sdk test_transport -v)
   (cd /tmp && "$repository_root/.venv-sdk/bin/python" -c \

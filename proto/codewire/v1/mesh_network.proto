@@ -1,0 +1,57 @@
+syntax = "proto3";
+
+package codewire.v1;
+
+import "google/protobuf/timestamp.proto";
+
+// MeshNetworkService manages organization-owned Mesh networks.
+service MeshNetworkService {
+  rpc ListMeshNetworks(ListMeshNetworksRequest) returns (ListMeshNetworksResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+
+  rpc CreateMeshNetwork(CreateMeshNetworkRequest) returns (CreateMeshNetworkResponse);
+
+  // JoinMeshNetwork consumes a one-use invitation capability and adds the
+  // authenticated caller to its organization-owned network.
+  rpc JoinMeshNetwork(JoinMeshNetworkRequest) returns (JoinMeshNetworkResponse);
+}
+
+// MeshNetwork is one private network owned by exactly one organization.
+message MeshNetwork {
+  string id = 1;
+  string org_id = 2;
+  google.protobuf.Timestamp created_at = 3;
+  int64 node_count = 4;
+  int64 invite_count = 5;
+}
+
+message ListMeshNetworksRequest {
+  string org_id = 1;
+  int32 page_size = 2;
+  string page_token = 3;
+}
+
+message ListMeshNetworksResponse {
+  repeated MeshNetwork networks = 1;
+  string next_page_token = 2;
+}
+
+message CreateMeshNetworkRequest {
+  string org_id = 1;
+  string network_id = 2;
+}
+
+message CreateMeshNetworkResponse {
+  MeshNetwork network = 1;
+}
+
+message JoinMeshNetworkRequest {
+  // One-use capability returned by CreateMeshInvite. It selects the
+  // organization and network; it is not a steady-state credential.
+  string invite_code = 1;
+}
+
+message JoinMeshNetworkResponse {
+  MeshNetwork network = 1;
+}

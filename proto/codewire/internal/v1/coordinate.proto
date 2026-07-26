@@ -1,0 +1,106 @@
+syntax = "proto3";
+
+package codewire.internal.v1;
+
+import "google/protobuf/timestamp.proto";
+
+// CoordinatorService is the primary control-plane tailnet coordinate service.
+service CoordinatorService {
+  rpc Coordinate(stream CoordinateRequest) returns (stream CoordinateResponse);
+}
+
+// MeshCoordinatorService is the Mesh coordinate dialect. It shares the node,
+// DERP, peer-update, peer-remove, and ping vocabulary with the primary
+// coordinator while adding typed Mesh hello and subscription inputs.
+service MeshCoordinatorService {
+  rpc Coordinate(stream MeshCoordinatorServiceCoordinateRequest) returns (stream MeshCoordinatorServiceCoordinateResponse);
+}
+
+// CoordinateNode carries WireGuard connectivity for one peer.
+message CoordinateNode {
+  string id = 1;
+  google.protobuf.Timestamp as_of = 2;
+  string key = 3;
+  string disco_key = 4;
+  int32 preferred_derp = 5;
+  map<string, double> derp_latency = 6;
+  repeated string endpoints = 7;
+  repeated string addresses = 8;
+}
+
+// CoordinateRequest is a message from a primary coordinator peer.
+message CoordinateRequest {
+  oneof msg {
+    CoordinateNode node = 1;
+    CoordinateHello hello = 2;
+    CoordinatePing ping = 3;
+  }
+}
+
+message CoordinateHello {
+  string org_id = 1;
+  string environment_id = 2;
+}
+
+// MeshCoordinatorServiceCoordinateRequest is a message from a Mesh
+// coordinator peer.
+message MeshCoordinatorServiceCoordinateRequest {
+  oneof msg {
+    CoordinateNode node = 1;
+    MeshCoordinateHello hello = 2;
+    CoordinatePing ping = 3;
+    MeshCoordinateSubscribe subscribe = 4;
+  }
+}
+
+enum MeshCoordinateRole {
+  MESH_COORDINATE_ROLE_UNSPECIFIED = 0;
+  MESH_COORDINATE_ROLE_PEER = 1;
+  MESH_COORDINATE_ROLE_DIAL = 2;
+}
+
+message MeshCoordinateHello {
+  string org_id = 1;
+  string network_id = 2;
+  MeshCoordinateRole role = 3;
+}
+
+message MeshCoordinateSubscribe {
+  string target_node = 1;
+}
+
+// CoordinateResponse is the primary service's response envelope.
+message CoordinateResponse {
+  oneof msg {
+    CoordinatePeerUpdate peer_update = 1;
+    CoordinatePeerRemove peer_remove = 2;
+    CoordinateDerpMap derp_map = 3;
+    CoordinatePing ping = 4;
+  }
+}
+
+// MeshCoordinatorServiceCoordinateResponse uses the shared coordinate response
+// messages while retaining one request/response envelope per RPC.
+message MeshCoordinatorServiceCoordinateResponse {
+  oneof msg {
+    CoordinatePeerUpdate peer_update = 1;
+    CoordinatePeerRemove peer_remove = 2;
+    CoordinateDerpMap derp_map = 3;
+    CoordinatePing ping = 4;
+  }
+}
+
+message CoordinatePing {}
+
+message CoordinatePeerUpdate {
+  repeated CoordinateNode nodes = 1;
+}
+
+message CoordinatePeerRemove {
+  string peer_id = 1;
+}
+
+// CoordinateDerpMap wraps the tailscale tailcfg.DERPMap JSON document.
+message CoordinateDerpMap {
+  bytes derp_map_json = 1;
+}

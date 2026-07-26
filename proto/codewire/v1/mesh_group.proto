@@ -1,0 +1,145 @@
+syntax = "proto3";
+
+package codewire.v1;
+
+import "google/protobuf/timestamp.proto";
+
+// MeshGroupService manages named communication boundaries in one Mesh network.
+service MeshGroupService {
+  rpc ListMeshGroups(ListMeshGroupsRequest) returns (ListMeshGroupsResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+
+  rpc CreateMeshGroup(CreateMeshGroupRequest) returns (CreateMeshGroupResponse);
+
+  rpc GetMeshGroup(GetMeshGroupRequest) returns (GetMeshGroupResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+
+  rpc DeleteMeshGroup(DeleteMeshGroupRequest) returns (DeleteMeshGroupResponse);
+
+  rpc SetMeshGroupPolicy(SetMeshGroupPolicyRequest) returns (SetMeshGroupPolicyResponse);
+
+  rpc AddMeshGroupMember(AddMeshGroupMemberRequest) returns (AddMeshGroupMemberResponse);
+
+  rpc RemoveMeshGroupMember(RemoveMeshGroupMemberRequest) returns (RemoveMeshGroupMemberResponse);
+}
+
+enum MeshGroupMessagesPolicy {
+  MESH_GROUP_MESSAGES_POLICY_UNSPECIFIED = 0;
+  MESH_GROUP_MESSAGES_POLICY_INTERNAL_ONLY = 1;
+  MESH_GROUP_MESSAGES_POLICY_OPEN = 2;
+}
+
+enum MeshGroupDebugPolicy {
+  MESH_GROUP_DEBUG_POLICY_UNSPECIFIED = 0;
+  MESH_GROUP_DEBUG_POLICY_NONE = 1;
+  MESH_GROUP_DEBUG_POLICY_OBSERVE_ONLY = 2;
+  MESH_GROUP_DEBUG_POLICY_FULL = 3;
+}
+
+message MeshGroup {
+  string org_id = 1;
+  string network_id = 2;
+  string name = 3;
+  google.protobuf.Timestamp created_at = 4;
+  string created_by_user_id = 5;
+  repeated MeshGroupMember members = 6;
+  MeshGroupPolicy policy = 7;
+}
+
+message MeshGroupMember {
+  string org_id = 1;
+  string network_id = 2;
+  string group_name = 3;
+  string node_name = 4;
+  // Application session label within the node, not a Tailnet connection or
+  // coordinator peer lifecycle.
+  string session_name = 5;
+  google.protobuf.Timestamp created_at = 6;
+}
+
+message MeshGroupPolicy {
+  string org_id = 1;
+  string network_id = 2;
+  string group_name = 3;
+  MeshGroupMessagesPolicy messages_policy = 4;
+  MeshGroupDebugPolicy debug_policy = 5;
+  google.protobuf.Timestamp updated_at = 6;
+}
+
+message ListMeshGroupsRequest {
+  string org_id = 1;
+  string network_id = 2;
+  int32 page_size = 3;
+  string page_token = 4;
+}
+
+message ListMeshGroupsResponse {
+  repeated MeshGroup groups = 1;
+  string next_page_token = 2;
+}
+
+message CreateMeshGroupRequest {
+  string org_id = 1;
+  string network_id = 2;
+  string name = 3;
+}
+
+message CreateMeshGroupResponse {
+  MeshGroup group = 1;
+}
+
+message GetMeshGroupRequest {
+  string org_id = 1;
+  string network_id = 2;
+  string group_name = 3;
+}
+
+message GetMeshGroupResponse {
+  MeshGroup group = 1;
+}
+
+message DeleteMeshGroupRequest {
+  string org_id = 1;
+  string network_id = 2;
+  string group_name = 3;
+}
+
+message DeleteMeshGroupResponse {}
+
+message SetMeshGroupPolicyRequest {
+  string org_id = 1;
+  string network_id = 2;
+  string group_name = 3;
+  // Unspecified preserves the current internal-only default.
+  MeshGroupMessagesPolicy messages_policy = 4;
+  // Unspecified preserves the current observe-only default.
+  MeshGroupDebugPolicy debug_policy = 5;
+}
+
+message SetMeshGroupPolicyResponse {
+  MeshGroupPolicy policy = 1;
+}
+
+message AddMeshGroupMemberRequest {
+  string org_id = 1;
+  string network_id = 2;
+  string group_name = 3;
+  string node_name = 4;
+  string session_name = 5;
+}
+
+message AddMeshGroupMemberResponse {
+  MeshGroupMember member = 1;
+}
+
+message RemoveMeshGroupMemberRequest {
+  string org_id = 1;
+  string network_id = 2;
+  string group_name = 3;
+  string node_name = 4;
+  string session_name = 5;
+}
+
+message RemoveMeshGroupMemberResponse {}

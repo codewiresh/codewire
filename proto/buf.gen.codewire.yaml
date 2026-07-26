@@ -22,7 +22,8 @@ version: v2
 # at build time via connectrpc-build (no checked-in Rust codegen).
 #
 # No `clean: true` here: libs/gen-go must keep its hand-written go.mod/go.sum
-# beside the generated tree.
+# beside the generated tree. The generation entrypoints delete only their
+# owned `codewire` output subtrees first, preserving module and license roots.
 
 # Managed mode supplies go_package for the codewire packages so the
 # contract files stay language-neutral (adding go_package to a published

@@ -26,5 +26,5 @@ Repository = "https://github.com/codewiresh/codewire"
 packages = ["codewire"]
 
 [tool.hatch.build.targets.wheel.force-include]
-"../gen-python/codewire" = "codewire"
+"../gen-python/codewire/v1" = "codewire/v1"
 "../gen-python/google" = "google"

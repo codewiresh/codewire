@@ -1,0 +1,59 @@
+syntax = "proto3";
+
+package codewire.v1;
+
+import "google/protobuf/duration.proto";
+import "google/protobuf/timestamp.proto";
+
+// MeshInviteService manages capabilities for joining one Mesh network.
+service MeshInviteService {
+  rpc ListMeshInvites(ListMeshInvitesRequest) returns (ListMeshInvitesResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+
+  rpc CreateMeshInvite(CreateMeshInviteRequest) returns (CreateMeshInviteResponse);
+
+  rpc DeleteMeshInvite(DeleteMeshInviteRequest) returns (DeleteMeshInviteResponse);
+}
+
+message MeshInvite {
+  string id = 1;
+  string org_id = 2;
+  string network_id = 3;
+  string created_by_user_id = 4;
+  google.protobuf.Timestamp expires_at = 5;
+  google.protobuf.Timestamp created_at = 6;
+}
+
+message ListMeshInvitesRequest {
+  string org_id = 1;
+  string network_id = 2;
+  int32 page_size = 3;
+  string page_token = 4;
+}
+
+message ListMeshInvitesResponse {
+  repeated MeshInvite invites = 1;
+  string next_page_token = 2;
+}
+
+message CreateMeshInviteRequest {
+  string org_id = 1;
+  string network_id = 2;
+  // Unset selects the server default.
+  google.protobuf.Duration ttl = 3;
+}
+
+message CreateMeshInviteResponse {
+  MeshInvite invite = 1;
+  // Secret one-use capability returned exactly once. Clients must not log it.
+  string invite_code = 2;
+}
+
+message DeleteMeshInviteRequest {
+  string org_id = 1;
+  string network_id = 2;
+  string invite_id = 3;
+}
+
+message DeleteMeshInviteResponse {}

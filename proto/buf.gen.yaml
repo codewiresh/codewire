@@ -10,8 +10,8 @@ version: v2
 # Generated Go packages share the standalone libs/gen-go module with the
 # client-facing codewire packages. Do not use `clean: true`: that would delete
 # the module's hand-written go.mod/go.sum. The generation entrypoints remove
-# the owned coordinator subtree before invoking buf so stale files cannot
-# survive.
+# the owned generated Codewire/coordinator subtrees before invoking buf so
+# stale files cannot survive.
 
 # Generation relocates the historical coordinator Go package into the one
 # canonical standalone generated-client module. This affects generated import
