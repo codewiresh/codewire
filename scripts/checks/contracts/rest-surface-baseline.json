@@ -252,13 +252,24 @@
       "caller_operation_references": {
         "browser": 5,
         "ci-smoke": 0,
-        "go-sdk": 21,
+        "go-sdk": 17,
         "node-runtime": 0,
-        "python-sdk": 21,
+        "python-sdk": 17,
         "rust-cli": 9,
         "rust-client": 0,
         "rust-tailnet": 0,
-        "typescript-sdk": 21
+        "typescript-sdk": 17
+      },
+      "wrapper_declaration_references": {
+        "browser": 0,
+        "ci-smoke": 0,
+        "go-sdk": 4,
+        "node-runtime": 0,
+        "python-sdk": 4,
+        "rust-cli": 0,
+        "rust-client": 0,
+        "rust-tailnet": 0,
+        "typescript-sdk": 4
       },
       "credential_operations": {
         "enrollment-code": 1,
@@ -274,15 +285,16 @@
         "runtime-credential": 1
       },
       "disposition_operations": {
-        "connect": 26,
-        "delete": 5
+        "connect": 22,
+        "delete": 9
       },
       "package_operations": {
-        "codewire.internal.v1": 6,
-        "codewire.v1": 20,
-        "none": 5
+        "codewire.internal.v1": 1,
+        "codewire.v1": 21,
+        "none": 9
       },
-      "operations_without_callers": 3,
+      "operations_without_callers": 7,
+      "wrapper_declaration_records": 12,
       "client_url_template_records": 58,
       "client_url_template_occurrences": 74
     },
@@ -329,7 +341,7 @@
         "scope": "public",
         "path": "/api/v1/node-enrollments/redeem",
         "operations": [
-          {"method": "post", "handler": "node_enrollment_redeem", "credential": "enrollment-code", "callers": ["rust-cli", "go-sdk", "typescript-sdk", "python-sdk"], "disposition": "connect", "package": "codewire.internal.v1"}
+          {"method": "post", "handler": "node_enrollment_redeem", "credential": "enrollment-code", "callers": ["rust-cli", "go-sdk", "typescript-sdk", "python-sdk"], "disposition": "connect", "package": "codewire.v1"}
         ]
       },
       {
@@ -343,21 +355,21 @@
         "scope": "public",
         "path": "/api/v1/network-auth/bundle",
         "operations": [
-          {"method": "get", "handler": "verifier_bundle", "credential": "node-or-mesh-identity", "callers": ["go-sdk", "typescript-sdk", "python-sdk"], "disposition": "connect", "package": "codewire.internal.v1"}
+          {"method": "get", "handler": "verifier_bundle", "credential": "node-or-mesh-identity", "callers": [], "disposition": "delete", "package": null}
         ]
       },
       {
         "scope": "public",
         "path": "/api/v1/network-auth/runtime/node",
         "operations": [
-          {"method": "post", "handler": "node_runtime_credential", "credential": "node-bearer", "callers": ["go-sdk", "typescript-sdk", "python-sdk"], "disposition": "connect", "package": "codewire.internal.v1"}
+          {"method": "post", "handler": "node_runtime_credential", "credential": "node-bearer", "callers": [], "disposition": "delete", "package": null}
         ]
       },
       {
         "scope": "public",
         "path": "/api/v1/network-auth/delegation/node",
         "operations": [
-          {"method": "post", "handler": "node_sender_delegation", "credential": "node-or-mesh-identity", "callers": ["go-sdk", "typescript-sdk", "python-sdk"], "disposition": "connect", "package": "codewire.internal.v1"}
+          {"method": "post", "handler": "node_sender_delegation", "credential": "node-or-mesh-identity", "callers": [], "disposition": "delete", "package": null}
         ]
       },
       {
@@ -483,9 +495,23 @@
         "scope": "protected",
         "path": "/api/v1/network-auth/runtime/client",
         "operations": [
-          {"method": "post", "handler": "client_runtime_credential", "credential": "mesh-identity", "callers": ["go-sdk", "typescript-sdk", "python-sdk"], "disposition": "connect", "package": "codewire.internal.v1"}
+          {"method": "post", "handler": "client_runtime_credential", "credential": "mesh-identity", "callers": [], "disposition": "delete", "package": null}
         ]
       }
+    ],
+    "wrapper_declarations": [
+      {"method": "get", "path": "/api/v1/network-auth/bundle", "caller": "go-sdk", "source": "libs/sdk-go/mesh_credentials.go", "symbol": "FetchVerifierBundle"},
+      {"method": "get", "path": "/api/v1/network-auth/bundle", "caller": "typescript-sdk", "source": "libs/sdk-ts/src/mesh.ts", "symbol": "fetchVerifierBundle"},
+      {"method": "get", "path": "/api/v1/network-auth/bundle", "caller": "python-sdk", "source": "libs/sdk-python/codewire/mesh.py", "symbol": "fetch_verifier_bundle"},
+      {"method": "post", "path": "/api/v1/network-auth/runtime/node", "caller": "go-sdk", "source": "libs/sdk-go/mesh_credentials.go", "symbol": "IssueNodeRuntimeCredential"},
+      {"method": "post", "path": "/api/v1/network-auth/runtime/node", "caller": "typescript-sdk", "source": "libs/sdk-ts/src/mesh.ts", "symbol": "issueNodeRuntimeCredential"},
+      {"method": "post", "path": "/api/v1/network-auth/runtime/node", "caller": "python-sdk", "source": "libs/sdk-python/codewire/mesh.py", "symbol": "issue_node_runtime_credential"},
+      {"method": "post", "path": "/api/v1/network-auth/delegation/node", "caller": "go-sdk", "source": "libs/sdk-go/mesh_credentials.go", "symbol": "IssueSenderDelegation"},
+      {"method": "post", "path": "/api/v1/network-auth/delegation/node", "caller": "typescript-sdk", "source": "libs/sdk-ts/src/mesh.ts", "symbol": "issueSenderDelegation"},
+      {"method": "post", "path": "/api/v1/network-auth/delegation/node", "caller": "python-sdk", "source": "libs/sdk-python/codewire/mesh.py", "symbol": "issue_sender_delegation"},
+      {"method": "post", "path": "/api/v1/network-auth/runtime/client", "caller": "go-sdk", "source": "libs/sdk-go/mesh_credentials.go", "symbol": "IssueRuntimeCredential"},
+      {"method": "post", "path": "/api/v1/network-auth/runtime/client", "caller": "typescript-sdk", "source": "libs/sdk-ts/src/mesh.ts", "symbol": "issueRuntimeCredential"},
+      {"method": "post", "path": "/api/v1/network-auth/runtime/client", "caller": "python-sdk", "source": "libs/sdk-python/codewire/mesh.py", "symbol": "issue_runtime_credential"}
     ],
     "implicit_raw_routes": [
       {"method": "GET", "path": "/healthz", "disposition": "permanent-raw"},

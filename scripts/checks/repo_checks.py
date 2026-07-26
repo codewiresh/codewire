@@ -903,6 +903,9 @@ MESH_EXPECTED_OPERATIONS = 31
 MESH_EXPECTED_ROUTER_SHA256 = (
     "604338c2d59548a3e4077a90ff99da428be93512d56e50e607f4d3691bb9256b"
 )
+MESH_EXPECTED_SEMANTICS_SHA256 = (
+    "c75aef4caaa689eb3daec18a1cd1f63395493b9443089ff093051d9624ced37e"
+)
 MESH_EXPECTED_COUNTS = {
     "route_registrations": 24,
     "method_path_operations": 31,
@@ -912,13 +915,24 @@ MESH_EXPECTED_COUNTS = {
     "caller_operation_references": {
         "browser": 5,
         "ci-smoke": 0,
-        "go-sdk": 21,
+        "go-sdk": 17,
         "node-runtime": 0,
-        "python-sdk": 21,
+        "python-sdk": 17,
         "rust-cli": 9,
         "rust-client": 0,
         "rust-tailnet": 0,
-        "typescript-sdk": 21,
+        "typescript-sdk": 17,
+    },
+    "wrapper_declaration_references": {
+        "browser": 0,
+        "ci-smoke": 0,
+        "go-sdk": 4,
+        "node-runtime": 0,
+        "python-sdk": 4,
+        "rust-cli": 0,
+        "rust-client": 0,
+        "rust-tailnet": 0,
+        "typescript-sdk": 4,
     },
     "credential_operations": {
         "enrollment-code": 1,
@@ -933,15 +947,22 @@ MESH_EXPECTED_COUNTS = {
         "oidc-state-and-code": 1,
         "runtime-credential": 1,
     },
-    "disposition_operations": {"connect": 26, "delete": 5},
+    "disposition_operations": {"connect": 22, "delete": 9},
     "package_operations": {
-        "codewire.internal.v1": 6,
-        "codewire.v1": 20,
-        "none": 5,
+        "codewire.internal.v1": 1,
+        "codewire.v1": 21,
+        "none": 9,
     },
-    "operations_without_callers": 3,
+    "operations_without_callers": 7,
+    "wrapper_declaration_records": 12,
     "client_url_template_records": 58,
     "client_url_template_occurrences": 74,
+}
+MESH_DECLARATION_ONLY_OPERATIONS = {
+    ("get", "/api/v1/network-auth/bundle"),
+    ("post", "/api/v1/network-auth/delegation/node"),
+    ("post", "/api/v1/network-auth/runtime/client"),
+    ("post", "/api/v1/network-auth/runtime/node"),
 }
 MESH_HTTP_METHODS = {"delete", "get", "head", "options", "patch", "post", "put"}
 MESH_CALLER_CLASSES = {
@@ -1104,6 +1125,7 @@ def mesh_surface_failures(
         inventory_routes = []
 
     inventory_core: list[dict[str, Any]] = []
+    inventory_operation_details: dict[tuple[str, str], dict[str, Any]] = {}
     inventoried_operation_count = 0
     caller_operation_references: Counter[str] = Counter(
         {caller: 0 for caller in MESH_CALLER_CLASSES}
@@ -1187,6 +1209,9 @@ def mesh_surface_failures(
                 core_operations.append(
                     {"method": method.lower(), "handler": handler}
                 )
+                path = route.get("path")
+                if isinstance(path, str):
+                    inventory_operation_details[(method.lower(), path)] = operation
         inventory_core.append(
             {
                 "scope": route.get("scope"),
@@ -1211,7 +1236,33 @@ def mesh_surface_failures(
             f"does not match {MESH_SURFACE_REL} mesh_surface.routes"
         )
 
-    actual_templates = mesh_client_url_templates(client_sources)
+    wrapper_declarations = inventory.get("wrapper_declarations")
+    if not isinstance(wrapper_declarations, list):
+        failures.append("wrapper_declarations must be a list")
+        wrapper_declarations = []
+    semantic_fingerprint = hashlib.sha256(
+        stable_json(
+            {
+                "routes": inventory_routes,
+                "wrapper_declarations": wrapper_declarations,
+            }
+        ).encode("utf-8")
+    ).hexdigest()
+    if semantic_fingerprint != MESH_EXPECTED_SEMANTICS_SHA256:
+        failures.append(
+            "Mesh per-operation semantic fingerprint drift: "
+            f"found {semantic_fingerprint}"
+        )
+    wrapper_symbols = {
+        declaration.get("symbol")
+        for declaration in wrapper_declarations
+        if isinstance(declaration, dict)
+        and isinstance(declaration.get("symbol"), str)
+    }
+    actual_templates, wrapper_symbol_occurrences = mesh_client_facts(
+        client_sources,
+        wrapper_symbols,
+    )
     expected_templates = inventory.get("client_url_templates")
     if not isinstance(expected_templates, list):
         failures.append("client_url_templates must be a list")
@@ -1242,12 +1293,112 @@ def mesh_surface_failures(
                     f"{item.get('count')} × {item.get('template')!r}"
                 )
 
+    wrapper_declaration_references: Counter[str] = Counter(
+        {caller: 0 for caller in MESH_CALLER_CLASSES}
+    )
+    wrapper_callers_by_operation: dict[tuple[str, str], set[str]] = {}
+    for index, declaration in enumerate(wrapper_declarations):
+        label = f"wrapper_declarations[{index}]"
+        if not isinstance(declaration, dict):
+            failures.append(f"{label} must be an object")
+            continue
+        method = declaration.get("method")
+        path = declaration.get("path")
+        caller = declaration.get("caller")
+        source = declaration.get("source")
+        symbol = declaration.get("symbol")
+        if set(declaration) != {"method", "path", "caller", "source", "symbol"}:
+            failures.append(
+                f"{label} must contain only method/path/caller/source/symbol"
+            )
+        if caller not in caller_classes:
+            failures.append(f"{label} has unclassified caller {caller!r}")
+        elif isinstance(caller, str):
+            wrapper_declaration_references[caller] += 1
+        if not all(
+            isinstance(value, str) and value
+            for value in (method, path, source, symbol)
+        ):
+            failures.append(f"{label} has an invalid method/path/source/symbol")
+            continue
+
+        operation = inventory_operation_details.get((method.lower(), path))
+        operation_key = (method.lower(), path)
+        if isinstance(caller, str):
+            wrapper_callers_by_operation.setdefault(operation_key, set()).add(caller)
+        if operation is None:
+            failures.append(
+                f"{label} does not identify an inventoried Mesh operation"
+            )
+        else:
+            if operation.get("callers"):
+                failures.append(
+                    f"{label} declaration-only operation must have no shipped callers"
+                )
+            if (
+                operation.get("disposition") != "delete"
+                or operation.get("package") is not None
+            ):
+                failures.append(
+                    f"{label} declaration-only operation must be a delete with null package"
+                )
+
+        source_entry = client_sources.get(source)
+        if source_entry is None:
+            failures.append(
+                f"{label} source {source!r} is not a production client source"
+            )
+        elif source_entry[0] != caller:
+            failures.append(
+                f"{label} source {source!r} is classified as {source_entry[0]!r}, "
+                f"not {caller!r}"
+            )
+
+        occurrences = wrapper_symbol_occurrences.get(symbol, {})
+        if occurrences != {source: 1}:
+            failures.append(
+                f"{label} declaration-only symbol {symbol!r} must occur exactly "
+                f"once in {source!r}; found {stable_json(occurrences)}"
+            )
+
+        matching_templates = [
+            item
+            for item in actual_templates
+            if item.get("caller") == caller
+            and item.get("source") == source
+            and item.get("count") == 1
+            and isinstance(item.get("template"), str)
+            and item["template"].split("?", 1)[0] == path
+        ]
+        if len(matching_templates) != 1:
+            failures.append(
+                f"{label} must bind exactly one declaration-owned URL template"
+            )
+
+    if set(wrapper_callers_by_operation) != MESH_DECLARATION_ONLY_OPERATIONS:
+        failures.append(
+            "wrapper_declarations must cover exactly the four declaration-only "
+            "credential operations"
+        )
+    expected_wrapper_callers = {"go-sdk", "python-sdk", "typescript-sdk"}
+    for operation_key, callers in wrapper_callers_by_operation.items():
+        if callers != expected_wrapper_callers:
+            failures.append(
+                "wrapper_declarations for "
+                f"{operation_key[0].upper()} {operation_key[1]} must cover exactly "
+                "the Go, Python, and TypeScript SDK wrappers"
+            )
+
     actual_semantic_counts = {
         "caller_operation_references": dict(sorted(caller_operation_references.items())),
+        "wrapper_declaration_references": dict(
+            sorted(wrapper_declaration_references.items())
+        ),
         "credential_operations": dict(sorted(credential_operations.items())),
         "disposition_operations": dict(sorted(disposition_operations.items())),
         "package_operations": dict(sorted(package_operations.items())),
         "operations_without_callers": operations_without_callers,
+        "wrapper_declaration_records": len(wrapper_declarations),
         "client_url_template_records": len(expected_templates),
         "client_url_template_occurrences": sum(
             item.get("count", 0)
@@ -1520,10 +1671,29 @@ def mesh_caller_for_source(rel: str) -> str:
     return "unclassified"
 
 
-def mesh_client_url_templates(
+def mesh_client_facts(
     sources: dict[str, tuple[str, str]],
-) -> list[dict[str, Any]]:
+    wrapper_symbols: set[str],
+) -> tuple[list[dict[str, Any]], dict[str, dict[str, int]]]:
     counts: Counter[tuple[str, str, str]] = Counter()
+    symbol_counts: dict[str, Counter[str]] = {
+        symbol: Counter() for symbol in wrapper_symbols
+    }
+    symbol_pattern = (
+        re.compile(
+            r"(?<![A-Za-z0-9_])("
+            + "|".join(
+                re.escape(symbol)
+                for symbol in sorted(
+                    wrapper_symbols,
+                    key=lambda value: (-len(value), value),
+                )
+            )
+            + r")(?![A-Za-z0-9_])"
+        )
+        if wrapper_symbols
+        else None
+    )
     for source, (caller, raw_text) in sources.items():
         if source.endswith(".rs"):
             text = sanitize_rust_source(raw_text)
@@ -1537,11 +1707,14 @@ def mesh_client_url_templates(
         else:
             text = raw_text
             string_literals = source_string_literals(text)
+        if symbol_pattern is not None:
+            for match in symbol_pattern.finditer(text):
+                symbol_counts[match.group(1)][source] += 1
         for template in string_literals:
             if not is_mesh_client_template(template):
                 continue
             counts[(source, caller, template)] += 1
-    return [
+    templates = [
         {
             "source": source,
             "caller": caller,
@@ -1550,6 +1723,18 @@ def mesh_client_url_templates(
         }
         for (source, caller, template), count in sorted(counts.items())
     ]
+    occurrences = {
+        symbol: dict(sorted(by_source.items()))
+        for symbol, by_source in sorted(symbol_counts.items())
+    }
+    return templates, occurrences
+
+
+def mesh_client_url_templates(
+    sources: dict[str, tuple[str, str]],
+) -> list[dict[str, Any]]:
+    templates, _ = mesh_client_facts(sources, set())
+    return templates
 
 
 def is_mesh_client_template(template: str) -> bool:
@@ -1687,6 +1872,19 @@ def mesh_surface_self_test(
     inventory: dict[str, Any],
 ) -> None:
     server_source = mesh_sources[MESH_SERVER_REL]
+
+    def operation(
+        subject: dict[str, Any],
+        method: str,
+        path: str,
+    ) -> dict[str, Any]:
+        return next(
+            candidate
+            for route in subject["routes"]
+            if route["path"] == path
+            for candidate in route["operations"]
+            if candidate["method"] == method
+        )
 
     helper_route_sources = copy.deepcopy(mesh_sources)
     helper_route_sources[MESH_SERVER_REL] = server_source.replace(
@@ -1860,6 +2058,139 @@ def mesh_surface_self_test(
         "semantic count drift" in failure for failure in reclassified_failures
     ):
         raise RuntimeError("self-test accepted Mesh credential/caller reclassification")
+
+    swapped_packages = copy.deepcopy(inventory)
+    enrollment_operation = operation(
+        swapped_packages,
+        "post",
+        "/api/v1/node-enrollments/redeem",
+    )
+    coordinate_operation = operation(
+        swapped_packages,
+        "get",
+        "/api/v1/tailnet/coordinate",
+    )
+    enrollment_operation["package"], coordinate_operation["package"] = (
+        coordinate_operation["package"],
+        enrollment_operation["package"],
+    )
+    swapped_package_failures = mesh_surface_failures(
+        mesh_sources,
+        client_sources,
+        swapped_packages,
+    )
+    if not any(
+        "per-operation semantic fingerprint drift" in failure
+        for failure in swapped_package_failures
+    ):
+        raise RuntimeError("self-test accepted a balanced audience-package swap")
+
+    swapped_dispositions = copy.deepcopy(inventory)
+    join_page_operation = operation(swapped_dispositions, "get", "/join")
+    network_join_operation = operation(
+        swapped_dispositions,
+        "post",
+        "/api/v1/networks/join",
+    )
+    for field in ("disposition", "package"):
+        join_page_operation[field], network_join_operation[field] = (
+            network_join_operation[field],
+            join_page_operation[field],
+        )
+    swapped_disposition_failures = mesh_surface_failures(
+        mesh_sources,
+        client_sources,
+        swapped_dispositions,
+    )
+    if not any(
+        "per-operation semantic fingerprint drift" in failure
+        for failure in swapped_disposition_failures
+    ):
+        raise RuntimeError("self-test accepted a balanced disposition swap")
+
+    swapped_callers = copy.deepcopy(inventory)
+    join_page_operation = operation(swapped_callers, "get", "/join")
+    network_join_operation = operation(
+        swapped_callers,
+        "post",
+        "/api/v1/networks/join",
+    )
+    join_page_operation["callers"], network_join_operation["callers"] = (
+        network_join_operation["callers"],
+        join_page_operation["callers"],
+    )
+    swapped_caller_failures = mesh_surface_failures(
+        mesh_sources,
+        client_sources,
+        swapped_callers,
+    )
+    if not any(
+        "per-operation semantic fingerprint drift" in failure
+        for failure in swapped_caller_failures
+    ):
+        raise RuntimeError("self-test accepted a balanced caller swap")
+
+    declaration_as_caller = copy.deepcopy(inventory)
+    bundle_operation = operation(
+        declaration_as_caller,
+        "get",
+        "/api/v1/network-auth/bundle",
+    )
+    bundle_operation["callers"] = ["go-sdk"]
+    declaration_as_caller_failures = mesh_surface_failures(
+        mesh_sources,
+        client_sources,
+        declaration_as_caller,
+    )
+    if not any(
+        "declaration-only operation must have no shipped callers" in failure
+        for failure in declaration_as_caller_failures
+    ):
+        raise RuntimeError(
+            "self-test accepted a wrapper declaration as a shipped caller"
+        )
+
+    reverted_disposition = copy.deepcopy(inventory)
+    bundle_operation = operation(
+        reverted_disposition,
+        "get",
+        "/api/v1/network-auth/bundle",
+    )
+    bundle_operation["disposition"] = "connect"
+    bundle_operation["package"] = "codewire.internal.v1"
+    reverted_disposition_failures = mesh_surface_failures(
+        mesh_sources,
+        client_sources,
+        reverted_disposition,
+    )
+    if not any(
+        "declaration-only operation must be a delete with null package" in failure
+        for failure in reverted_disposition_failures
+    ):
+        raise RuntimeError(
+            "self-test accepted a reverted credential-route disposition"
+        )
+
+    consumer_sources = copy.deepcopy(client_sources)
+    consumer_sources["libs/sdk-go/declaration_consumer.go"] = (
+        "go-sdk",
+        "package codewire\n"
+        "func consume(service *MeshCredentialService) {\n"
+        "    fetch := service.FetchVerifierBundle\n"
+        '    fetch(nil, "network")\n'
+        "}\n",
+    )
+    consumer_failures = mesh_surface_failures(
+        mesh_sources,
+        consumer_sources,
+        copy.deepcopy(inventory),
+    )
+    if not any(
+        "declaration-only symbol 'FetchVerifierBundle' must occur exactly once"
+        in failure
+        for failure in consumer_failures
+    ):
+        raise RuntimeError("self-test accepted a non-wrapper production consumer")
 
 
 # ---------------------------------------------------------------------------
