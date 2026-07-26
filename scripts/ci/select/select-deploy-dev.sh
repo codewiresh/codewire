@@ -103,6 +103,8 @@ else
       libs/sdk-scripts/*|\
       libs/sdk-ts/*|\
       libs/sdk-examples/*|\
+      crates/codewire-cli/*|\
+      crates/codewire-cli-bin/*|\
       scripts/runtime/dev/run-sdk-python-e2e.sh|\
       scripts/runtime/tests/test-run-sdk-python-e2e.sh|\
       crates/codewire-server-core/tests/org_deletion_lifecycle.rs|\

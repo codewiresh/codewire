@@ -72,6 +72,15 @@ assert_selection sdk_tooling_wi12_paths false push "$ROOT" \
   docs/plans/connect-rpc/13-rest-sunset-and-openapi-removal.md \
   libs/sdk-examples/run-claude/typescript/package-lock.json \
   libs/sdk-ts/src/types.ts
+assert_selection cli_source false push "$ROOT" \
+  crates/codewire-cli/src/lib.rs
+assert_selection cli_bin_source false push "$ROOT" \
+  crates/codewire-cli-bin/src/main.rs
+assert_selection combined_cli_sources false push "$ROOT" \
+  crates/codewire-cli/src/lib.rs \
+  crates/codewire-cli-bin/src/main.rs
+assert_selection mixed_cli_and_runtime true push "$ROOT" \
+  crates/codewire-cli/src/lib.rs crates/codewire-mesh/src/server.rs
 assert_selection sdk_python_runner false push "$ROOT" \
   scripts/runtime/dev/run-sdk-python-e2e.sh \
   scripts/runtime/tests/test-run-sdk-python-e2e.sh
