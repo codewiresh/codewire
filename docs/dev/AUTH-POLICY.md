@@ -36,11 +36,26 @@ platform-internal.
 - Environment and HMAC sidecar tokens stay inside their platform trust
   domains. They are not fallbacks for session, OAuth, or API-key
   authentication.
+- Invitation and enrollment codes are one-use capabilities, not
+  authentication flavors. Redeeming one may create or bind a resource, but it
+  must not mint a new steady-state bearer. In particular, Mesh enrollment
+  returns non-secret node/enrollment metadata; persistent node bearers,
+  `cwrt1` runtime credentials, verifier bundles, and sender-delegation
+  credentials are not approved flavors.
+- A trusted service hop may transport the caller's existing credential for a
+  canonical authorization decision without creating a new flavor. The WS18
+  Mesh boundary authenticates the hop with flavor 5, carries exactly one
+  flavor-1/2/3/4 credential in reserved sensitive binary Connect metadata,
+  removes it before handler dispatch, and exposes only a typed authorization
+  context. Credential values never belong in protobuf fields, logs, traces,
+  metrics, errors, retries, persistence, or response metadata.
 
 ## Client use
 
 - The dashboard uses connect-es/connect-query with the same-origin session
-  cookie. Browser JavaScript does not store a user bearer token.
+  cookie. Generated Mesh product service paths are routed from that same
+  product origin to Mesh; browser JavaScript does not store a user bearer token
+  and Mesh does not own another login/session cookie.
 - The CLI and rewritten native apps use the shared Rust
   `codewire-client` OAuth implementation and `TokenProvider`. The CLI uses the
   OAuth device grant; clients with a system browser use PKCE.

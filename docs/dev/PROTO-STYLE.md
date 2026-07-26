@@ -117,8 +117,21 @@ services use only their declared environment or HMAC sidecar boundary.
 Missing or invalid credentials map to `unauthenticated`. A valid credential
 without the required scope, role, organization binding, or method authority
 maps to `permission_denied`. Never encode credentials, scopes, or authorization
-decisions into request messages merely to bypass the shared authentication
-layer.
+booleans into request or response messages merely to bypass the shared
+authentication layer.
+
+When an internal service must ask the canonical identity boundary to authorize
+an already-authenticated caller, the caller credential stays outside protobuf.
+WS18's Mesh authorization hop is the binding pattern: ordinary
+`Authorization` authenticates the scoped HMAC service hop; exactly one
+reserved sensitive binary metadata entry carries the existing session,
+OAuth/API-key, or environment credential; outer middleware removes it before
+Connect dispatch and inserts only a typed principal/organization/role/
+credential-kind context into request extensions. The raw value is redacting in
+memory and may not enter logs, traces, metrics, errors, retries, persistence,
+or response metadata. A typed authorization RPC returns the authorized
+principal context or a canonical error, never a boolean decision or a new
+credential.
 
 ## Error model
 
