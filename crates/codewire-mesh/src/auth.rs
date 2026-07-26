@@ -119,8 +119,6 @@ mod tests {
     fn config(auth_token: Option<&str>) -> Config {
         Config {
             bind_addr: "127.0.0.1:0".parse().unwrap(),
-            ssh_bind_addr: "127.0.0.1:0".parse().unwrap(),
-            ssh_host_key_path: String::new(),
             base_url: "https://mesh.codewire.sh".to_string(),
             auth_mode: AuthMode::Token,
             auth_token: auth_token.map(str::to_string),

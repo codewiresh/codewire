@@ -39,8 +39,6 @@ spec:
               exec codewire-mesh \
                 --base-url={{ .Values.mesh.baseURL | quote }} \
                 --listen={{ .Values.mesh.listenAddr | quote }} \
-                --ssh-listen={{ .Values.mesh.sshListen | quote }} \
-                --ssh-host-key-path=/data/ssh_host_ed25519 \
                 --auth-mode={{ .Values.mesh.authMode | quote }} \
                 --auth-token="$CW_AUTH_TOKEN"{{- if .Values.database.enabled }} \
                 --database-url="$DATABASE_URL"
@@ -52,8 +50,6 @@ spec:
               exec codewire-mesh \
                 --base-url={{ .Values.mesh.baseURL | quote }} \
                 --listen={{ .Values.mesh.listenAddr | quote }} \
-                --ssh-listen={{ .Values.mesh.sshListen | quote }} \
-                --ssh-host-key-path=/data/ssh_host_ed25519 \
                 --auth-mode=oidc \
                 --oidc-issuer={{ .Values.oidc.issuer | quote }} \
                 --oidc-client-id={{ .Values.oidc.clientID | quote }} \
@@ -71,8 +67,6 @@ spec:
               exec codewire-mesh \
                 --base-url={{ .Values.mesh.baseURL | quote }} \
                 --listen={{ .Values.mesh.listenAddr | quote }} \
-                --ssh-listen={{ .Values.mesh.sshListen | quote }} \
-                --ssh-host-key-path=/data/ssh_host_ed25519 \
                 --auth-mode={{ .Values.mesh.authMode | quote }}{{- if .Values.database.enabled }} \
                 --database-url="$DATABASE_URL"
                 {{- end }}
@@ -110,9 +104,6 @@ spec:
           ports:
             - name: http
               containerPort: 8080
-              protocol: TCP
-            - name: ssh
-              containerPort: 2222
               protocol: TCP
           livenessProbe:
             httpGet:

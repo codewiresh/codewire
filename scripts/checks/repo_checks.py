@@ -897,20 +897,20 @@ def is_raw_string_start(text: str, index: int) -> bool:
 
 MESH_SURFACE_REL = "scripts/checks/contracts/rest-surface-baseline.json"
 MESH_SERVER_REL = "crates/codewire-mesh/src/server.rs"
-MESH_EXPECTED_REGISTRATIONS = 36
-MESH_EXPECTED_OPERATIONS = 45
+MESH_EXPECTED_REGISTRATIONS = 24
+MESH_EXPECTED_OPERATIONS = 31
 MESH_EXPECTED_ROUTER_SHA256 = (
-    "ecc82588f3df931107d93472ddfa30cba7d03bb03151e90c1355a8ad9ac92723"
+    "604338c2d59548a3e4077a90ff99da428be93512d56e50e607f4d3691bb9256b"
 )
 MESH_EXPECTED_COUNTS = {
-    "route_registrations": 36,
-    "method_path_operations": 45,
+    "route_registrations": 24,
+    "method_path_operations": 31,
     "router_new_expressions": 2,
     "router_merges": 1,
     "app_builder_route_mounts": 1,
     "caller_operation_references": {
         "browser": 5,
-        "ci-smoke": 1,
+        "ci-smoke": 0,
         "go-sdk": 21,
         "node-runtime": 0,
         "python-sdk": 21,
@@ -921,26 +921,26 @@ MESH_EXPECTED_COUNTS = {
     },
     "credential_operations": {
         "enrollment-code": 1,
-        "invite-code": 2,
-        "mesh-identity": 24,
+        "invite-code": 1,
+        "mesh-identity": 17,
         "mesh-identity-plus-invite-code": 1,
         "mesh-session-bearer-or-cookie": 1,
-        "node-bearer": 3,
-        "node-or-mesh-identity": 6,
-        "none": 4,
-        "oidc-device-code": 1,
+        "node-bearer": 1,
+        "node-or-mesh-identity": 5,
+        "none": 2,
+        "oidc-device-code": 0,
         "oidc-state-and-code": 1,
         "runtime-credential": 1,
     },
-    "disposition_operations": {"connect": 26, "delete": 19},
+    "disposition_operations": {"connect": 26, "delete": 5},
     "package_operations": {
         "codewire.internal.v1": 6,
         "codewire.v1": 20,
-        "none": 19,
+        "none": 5,
     },
-    "operations_without_callers": 16,
-    "client_url_template_records": 59,
-    "client_url_template_occurrences": 75,
+    "operations_without_callers": 3,
+    "client_url_template_records": 58,
+    "client_url_template_occurrences": 74,
 }
 MESH_HTTP_METHODS = {"delete", "get", "head", "options", "patch", "post", "put"}
 MESH_CALLER_CLASSES = {
@@ -1714,11 +1714,11 @@ def mesh_surface_self_test(
 
     alternate_router_sources = copy.deepcopy(mesh_sources)
     alternate_router_source = server_source.replace(
-        '.route("/api/v1/auth/config", get(auth_config))',
+        '.route("/api/v1/tailnet/coordinate", get(tailnet_coordinate))',
         '.route_service("/api/v1/new-service", get(new_mesh_service))\n'
         "        .route(\n"
-        '            "/api/v1/auth/config",\n'
-        "            get(auth_config)\n"
+        '            "/api/v1/tailnet/coordinate",\n'
+        "            get(tailnet_coordinate)\n"
         "                .on(MethodFilter::POST, new_handler)\n"
         "                .post_service(new_service),\n"
         "        )",

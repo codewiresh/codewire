@@ -2,7 +2,6 @@ mesh:
   baseURL: ""  # Required: e.g. https://mesh.example.com
   authMode: "token"
   authToken: ""  # Auto-generated if empty
-  sshListen: ":2222"
   listenAddr: "0.0.0.0:8080"
 
 oidc:
@@ -49,12 +48,6 @@ ingress:
         - path: /
           pathType: Prefix
   tls: []
-
-ssh:
-  service:
-    type: LoadBalancer
-    annotations: {}
-    loadBalancerIP: ""
 
 resources:
   requests:

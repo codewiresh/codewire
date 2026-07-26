@@ -16,7 +16,6 @@ mesh:
   baseURL: https://mesh.codewire.sh
   authMode: oidc
   authToken: ""
-  sshListen: ":2222"
   listenAddr: "0.0.0.0:8080"
 
 oidc:
@@ -43,11 +42,6 @@ ingress:
     - hosts:
         - mesh.codewire.sh
       secretName: mesh-codewire-tls
-
-ssh:
-  service:
-    type: LoadBalancer
-    annotations: {}
 
 persistence:
   enabled: true

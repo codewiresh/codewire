@@ -177,7 +177,6 @@ pub(crate) struct LocalMeshStatus {
     pub(crate) pid: Option<u32>,
     pub(crate) base_url: Option<String>,
     pub(crate) listen_addr: Option<String>,
-    pub(crate) ssh_listen_addr: Option<String>,
     pub(crate) binary: Option<String>,
     pub(crate) log_path: Option<String>,
     pub(crate) derp: Option<LocalDerpStatus>,
@@ -198,7 +197,6 @@ pub(crate) struct LocalMeshRuntime {
     pub(crate) pid: u32,
     pub(crate) base_url: String,
     pub(crate) listen_addr: String,
-    pub(crate) ssh_listen_addr: String,
     pub(crate) binary: String,
     pub(crate) log_path: String,
     pub(crate) started_at: String,
@@ -220,8 +218,6 @@ pub(crate) struct LocalMeshStartSpec {
     pub(crate) binary: PathBuf,
     pub(crate) base_url: String,
     pub(crate) listen_addr: String,
-    pub(crate) ssh_listen_addr: String,
-    pub(crate) ssh_host_key_path: PathBuf,
     pub(crate) auth_token: String,
     pub(crate) log_path: PathBuf,
     pub(crate) derp: Option<LocalDerpStartSpec>,
@@ -241,7 +237,6 @@ pub(crate) struct MeshUpReport {
     pub(crate) pid: u32,
     pub(crate) base_url: String,
     pub(crate) listen_addr: String,
-    pub(crate) ssh_listen_addr: String,
     pub(crate) binary: String,
     pub(crate) log_path: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -352,9 +347,6 @@ pub(crate) fn format_mesh_status_report(report: &MeshStatusReport) -> String {
     if let Some(listen_addr) = report.local.listen_addr.as_deref() {
         out.push_str(&format!("Listen:      {listen_addr}\n"));
     }
-    if let Some(ssh_listen_addr) = report.local.ssh_listen_addr.as_deref() {
-        out.push_str(&format!("SSH listen:  {ssh_listen_addr}\n"));
-    }
     if let Some(log_path) = report.local.log_path.as_deref() {
         out.push_str(&format!("Log:         {log_path}\n"));
     }
@@ -430,7 +422,6 @@ pub(crate) fn handle_mesh_up(
         pid,
         base_url: spec.base_url,
         listen_addr: spec.listen_addr,
-        ssh_listen_addr: spec.ssh_listen_addr,
         binary: spec.binary.display().to_string(),
         log_path: spec.log_path.display().to_string(),
         started_at: Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
@@ -446,7 +437,6 @@ pub(crate) fn local_mesh_runtime_matches_args(
 ) -> bool {
     runtime.base_url == args.base_url
         && runtime.listen_addr == args.listen
-        && runtime.ssh_listen_addr == args.ssh_listen
         && match (runtime.derp.as_ref(), args.no_derp) {
             (None, true) => true,
             (Some(derp), false) => {
@@ -474,7 +464,6 @@ pub(crate) fn print_mesh_up_report(
                 report.pid
             );
             println!("HTTP listen: {}", report.listen_addr);
-            println!("SSH listen:  {}", report.ssh_listen_addr);
             if let Some(derp) = report.derp.as_ref() {
                 println!("DERP:        {} (pid {})", derp.url, derp.pid);
                 println!("DERP listen: {}", derp.listen_addr);
@@ -543,7 +532,6 @@ pub(crate) fn local_mesh_start_spec(
 ) -> anyhow::Result<LocalMeshStartSpec> {
     let base_url = trimmed_required(&args.base_url, "base URL")?.to_string();
     let listen_addr = trimmed_required(&args.listen, "listen address")?.to_string();
-    let ssh_listen_addr = trimmed_required(&args.ssh_listen, "SSH listen address")?.to_string();
     let binary = locate_codewire_mesh_binary(args.binary.as_ref());
     let derp = if args.no_derp {
         None
@@ -559,8 +547,6 @@ pub(crate) fn local_mesh_start_spec(
         binary,
         base_url,
         listen_addr,
-        ssh_listen_addr,
-        ssh_host_key_path: paths.mesh_data_dir.join(LOCAL_MESH_HOST_KEY_FILE),
         auth_token,
         log_path: paths.mesh_data_dir.join(LOCAL_MESH_LOG_FILE),
         derp,
@@ -615,10 +601,6 @@ pub(crate) fn start_local_mesh_process(spec: &LocalMeshStartSpec) -> anyhow::Res
         .arg(&spec.base_url)
         .arg("--listen")
         .arg(&spec.listen_addr)
-        .arg("--ssh-listen")
-        .arg(&spec.ssh_listen_addr)
-        .arg("--ssh-host-key-path")
-        .arg(&spec.ssh_host_key_path)
         .arg("--auth-mode")
         .arg("token")
         .arg("--auth-token")
@@ -734,7 +716,6 @@ pub(crate) fn local_mesh_status(data_dir: &Path) -> LocalMeshStatus {
             pid: None,
             base_url: None,
             listen_addr: None,
-            ssh_listen_addr: None,
             binary: None,
             log_path: None,
             derp: None,
@@ -758,7 +739,6 @@ pub(crate) fn local_mesh_status(data_dir: &Path) -> LocalMeshStatus {
         pid: Some(runtime.pid),
         base_url: Some(runtime.base_url),
         listen_addr: Some(runtime.listen_addr),
-        ssh_listen_addr: Some(runtime.ssh_listen_addr),
         binary: Some(runtime.binary),
         log_path: Some(runtime.log_path),
         derp,
@@ -806,7 +786,6 @@ pub(crate) fn mesh_up_report(started: bool, runtime: &LocalMeshRuntime) -> MeshU
         pid: runtime.pid,
         base_url: runtime.base_url.clone(),
         listen_addr: runtime.listen_addr.clone(),
-        ssh_listen_addr: runtime.ssh_listen_addr.clone(),
         binary: runtime.binary.clone(),
         log_path: runtime.log_path.clone(),
         derp: runtime.derp.clone(),

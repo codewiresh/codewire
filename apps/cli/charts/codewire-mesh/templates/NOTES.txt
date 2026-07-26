@@ -8,28 +8,15 @@ Codewire Mesh has been deployed!
   Mesh URL: http://localhost:8080
 {{- end }}
 
-2. Get the SSH endpoint:
-{{- if eq .Values.ssh.service.type "LoadBalancer" }}
-  export SSH_IP=$(kubectl get svc {{ include "codewire-mesh.fullname" . }}-ssh -n {{ .Release.Namespace }} -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
-  echo "SSH endpoint: ${SSH_IP}:2222"
-  NOTE: It may take a few minutes for the LoadBalancer IP to be assigned.
-{{- else }}
-  SSH service type: {{ .Values.ssh.service.type }}
-  kubectl get svc {{ include "codewire-mesh.fullname" . }}-ssh -n {{ .Release.Namespace }}
-{{- end }}
-
-3. Get the auth token:
+2. Get the auth token:
 {{- if eq .Values.mesh.authMode "token" }}
   kubectl get secret {{ include "codewire-mesh.fullname" . }} -n {{ .Release.Namespace }} -o jsonpath='{.data.auth-token}' | base64 -d
 {{- else }}
   Auth mode is "{{ .Values.mesh.authMode }}" — no token required.
 {{- end }}
 
-4. Create or select a network:
+3. Create or select a network:
   cw network create project-alpha --mesh-url {{ .Values.mesh.baseURL }} --token <auth-token>
 
-5. Inspect environment-owned nodes in that network:
+4. Inspect environment-owned nodes in that network:
   cw network nodes --network project-alpha --mesh-url {{ .Values.mesh.baseURL }} --token <auth-token>
-
-6. SSH into a connected node:
-  ssh <node-name>@<SSH_IP> -p 2222

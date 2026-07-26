@@ -1,6 +1,6 @@
 apiVersion: v2
 name: codewire-mesh
-description: A Helm chart for deploying Codewire Mesh with SSH gateway, device auth, node discovery, and shared KV storage
+description: A Helm chart for deploying Codewire Mesh networking, node enrollment, coordination, and shared KV storage
 type: application
 version: 0.1.0
 appVersion: "0.1.0"

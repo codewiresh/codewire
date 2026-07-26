@@ -26,8 +26,6 @@
             "http://127.0.0.1:19090",
             "--listen",
             "127.0.0.1:19090",
-            "--ssh-listen",
-            "127.0.0.1:12223",
             "--derp-url",
             "http://127.0.0.1:19091",
             "--derp-listen",
@@ -55,7 +53,6 @@
         );
         assert_eq!(args.base_url, "http://127.0.0.1:19090");
         assert_eq!(args.listen, "127.0.0.1:19090");
-        assert_eq!(args.ssh_listen, "127.0.0.1:12223");
         assert_eq!(args.derp_url, "http://127.0.0.1:19091");
         assert_eq!(args.derp_listen, "127.0.0.1:19091");
         assert!(!args.no_derp);
@@ -86,7 +83,6 @@
             derp_binary: Some(PathBuf::from("/opt/codewire/bin/codewire-derp")),
             base_url: DEFAULT_LOCAL_MESH_URL.to_string(),
             listen: DEFAULT_LOCAL_MESH_LISTEN_ADDR.to_string(),
-            ssh_listen: DEFAULT_LOCAL_MESH_SSH_LISTEN_ADDR.to_string(),
             derp_url: DEFAULT_LOCAL_DERP_URL.to_string(),
             derp_listen: DEFAULT_LOCAL_DERP_LISTEN_ADDR.to_string(),
             no_derp: false,
@@ -102,11 +98,6 @@
         );
         assert_eq!(spec.base_url, "http://127.0.0.1:18090");
         assert_eq!(spec.listen_addr, "127.0.0.1:18090");
-        assert_eq!(spec.ssh_listen_addr, "127.0.0.1:12222");
-        assert_eq!(
-            spec.ssh_host_key_path,
-            paths.mesh_data_dir.join(LOCAL_MESH_HOST_KEY_FILE)
-        );
         assert_eq!(spec.auth_token, "mesh-token");
         assert_eq!(spec.log_path, paths.mesh_data_dir.join(LOCAL_MESH_LOG_FILE));
         let derp = spec.derp.expect("default managed DERP");
@@ -133,7 +124,6 @@
             pid: 42,
             base_url: args.base_url.clone(),
             listen_addr: args.listen.clone(),
-            ssh_listen_addr: args.ssh_listen.clone(),
             binary: "codewire-mesh".to_string(),
             log_path: "codewire-mesh.log".to_string(),
             started_at: "2026-07-09T00:00:00Z".to_string(),
@@ -230,7 +220,6 @@
             pid: stale_mesh_pid,
             base_url: "http://127.0.0.1:18090".to_string(),
             listen_addr: "127.0.0.1:18090".to_string(),
-            ssh_listen_addr: "127.0.0.1:12222".to_string(),
             binary: "codewire-mesh".to_string(),
             log_path: dir.path().join(LOCAL_MESH_LOG_FILE).display().to_string(),
             started_at: "2026-07-05T12:00:00Z".to_string(),

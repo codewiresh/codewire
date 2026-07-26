@@ -2,12 +2,8 @@ use std::net::SocketAddr;
 use std::str::FromStr;
 
 pub const DEFAULT_LISTEN_ADDR: &str = "0.0.0.0:8080";
-pub const DEFAULT_SSH_LISTEN_ADDR: &str = "0.0.0.0:2222";
-pub const DEFAULT_SSH_HOST_KEY_PATH: &str = "/var/lib/codewire-mesh/ssh_host_ed25519";
 pub const MESH_URL_ENV: &str = "CODEWIRE_MESH_URL";
 pub const LISTEN_ADDR_ENV: &str = "CODEWIRE_MESH_LISTEN_ADDR";
-pub const SSH_LISTEN_ADDR_ENV: &str = "CODEWIRE_MESH_SSH_LISTEN_ADDR";
-pub const SSH_HOST_KEY_PATH_ENV: &str = "CODEWIRE_MESH_SSH_HOST_KEY_PATH";
 pub const AUTH_MODE_ENV: &str = "CODEWIRE_MESH_AUTH_MODE";
 pub const AUTH_TOKEN_ENV: &str = "CODEWIRE_MESH_AUTH_TOKEN";
 pub const DERP_URL_ENV: &str = "CODEWIRE_MESH_DERP_URL";
@@ -50,8 +46,6 @@ impl FromStr for AuthMode {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Config {
     pub bind_addr: SocketAddr,
-    pub ssh_bind_addr: SocketAddr,
-    pub ssh_host_key_path: String,
     pub base_url: String,
     pub auth_mode: AuthMode,
     pub auth_token: Option<String>,
@@ -87,11 +81,6 @@ impl Config {
             },
         };
 
-        let ssh_bind_addr = match first_non_empty([args.ssh_listen, getenv(SSH_LISTEN_ADDR_ENV)]) {
-            Some(raw) => parse_listen_addr("ssh-listen", &raw)?,
-            None => parse_listen_addr("ssh-listen", DEFAULT_SSH_LISTEN_ADDR)?,
-        };
-
         let auth_mode = first_non_empty([args.auth_mode, getenv(AUTH_MODE_ENV)])
             .as_deref()
             .map(AuthMode::from_str)
@@ -108,12 +97,6 @@ impl Config {
 
         Ok(Self {
             bind_addr,
-            ssh_bind_addr,
-            ssh_host_key_path: first_non_empty([
-                args.ssh_host_key_path,
-                getenv(SSH_HOST_KEY_PATH_ENV),
-            ])
-            .unwrap_or_else(|| DEFAULT_SSH_HOST_KEY_PATH.to_string()),
             base_url,
             auth_mode,
             auth_token: first_non_empty([args.auth_token, getenv(AUTH_TOKEN_ENV)]),
@@ -152,8 +135,6 @@ pub enum ConfigError {
 struct Args {
     base_url: Option<String>,
     listen: Option<String>,
-    ssh_listen: Option<String>,
-    ssh_host_key_path: Option<String>,
     auth_mode: Option<String>,
     auth_token: Option<String>,
     derp_url: Option<String>,
@@ -183,20 +164,6 @@ impl Args {
             match flag_value(&arg, "--listen", &mut iter)? {
                 FlagValue::Matched(value) => {
                     parsed.listen = Some(value);
-                    continue;
-                }
-                FlagValue::NotMatched => {}
-            }
-            match flag_value(&arg, "--ssh-listen", &mut iter)? {
-                FlagValue::Matched(value) => {
-                    parsed.ssh_listen = Some(value);
-                    continue;
-                }
-                FlagValue::NotMatched => {}
-            }
-            match flag_value(&arg, "--ssh-host-key-path", &mut iter)? {
-                FlagValue::Matched(value) => {
-                    parsed.ssh_host_key_path = Some(value);
                     continue;
                 }
                 FlagValue::NotMatched => {}
@@ -365,10 +332,6 @@ mod tests {
                 "--base-url=https://flag.example",
                 "--listen",
                 ":18080",
-                "--ssh-listen",
-                ":12222",
-                "--ssh-host-key-path",
-                "/tmp/flag-key",
                 "--auth-mode",
                 "oidc",
                 "--auth-token",
@@ -389,8 +352,6 @@ mod tests {
             env(&[
                 (MESH_URL_ENV, "https://mesh.codewire.sh"),
                 (LISTEN_ADDR_ENV, "127.0.0.1:1"),
-                (SSH_LISTEN_ADDR_ENV, "127.0.0.1:2"),
-                (SSH_HOST_KEY_PATH_ENV, "/tmp/env-key"),
                 (AUTH_MODE_ENV, "token"),
                 (AUTH_TOKEN_ENV, "env-token"),
                 (DERP_URL_ENV, "https://derp.env"),
@@ -405,8 +366,6 @@ mod tests {
 
         assert_eq!(cfg.base_url, "https://flag.example");
         assert_eq!(cfg.bind_addr, "0.0.0.0:18080".parse().unwrap());
-        assert_eq!(cfg.ssh_bind_addr, "0.0.0.0:12222".parse().unwrap());
-        assert_eq!(cfg.ssh_host_key_path, "/tmp/flag-key");
         assert_eq!(cfg.auth_mode, AuthMode::Oidc);
         assert_eq!(cfg.auth_token.as_deref(), Some("flag-token"));
         assert_eq!(cfg.derp_url.as_deref(), Some("https://derp.flag"));

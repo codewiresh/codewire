@@ -56,7 +56,6 @@ const LIMA_DOCKER_SOCK_PATH: &str = "/var/run/docker.sock";
 const LIMA_DOCKER_HOST_VALUE: &str = "unix:///var/run/docker.sock";
 const DEFAULT_LOCAL_MESH_URL: &str = "http://127.0.0.1:18090";
 const DEFAULT_LOCAL_MESH_LISTEN_ADDR: &str = "127.0.0.1:18090";
-const DEFAULT_LOCAL_MESH_SSH_LISTEN_ADDR: &str = "127.0.0.1:12222";
 const DEFAULT_LOCAL_DERP_URL: &str = "http://127.0.0.1:18091";
 const DEFAULT_LOCAL_DERP_LISTEN_ADDR: &str = "127.0.0.1:18091";
 const LOCAL_RUNTIME_CLI_PATH: &str = "/usr/local/bin/cw";
@@ -66,7 +65,6 @@ const LIMA_RUNTIME_CLI_STAGE_PATH: &str = "/var/lib/codewire/cw";
 const LOCAL_MESH_RUNTIME_FILE: &str = "mesh_runtime.json";
 const LOCAL_MESH_LOG_FILE: &str = "codewire-mesh.log";
 const LOCAL_DERP_LOG_FILE: &str = "codewire-derp.log";
-const LOCAL_MESH_HOST_KEY_FILE: &str = "codewire-mesh-ssh-host-ed25519";
 
 #[derive(Debug, Parser)]
 #[command(name = "cw", version = CLI_VERSION, about = "Codewire CLI")]

@@ -6,15 +6,15 @@ deployment at `mesh.codewire-dev.sh`.
 The Mesh control service is separate from DERP:
 
 - `mesh.codewire-dev.sh` serves the Codewire Mesh API, network membership,
-  invite creation, node enrollment, and node-agent WebSocket endpoints. The
-  hostname is the dev Mesh endpoint.
+  invite creation, node enrollment, runtime network authorization, and tailnet
+  coordination. The hostname is the dev Mesh endpoint.
 - `derp.codewire-dev.sh` serves the DERP packet relay used by the tailnet data
   path.
 
 Dev uses `authMode=oidc` with issuer `https://codewire-dev.sh`. Platform bearer
 tokens are accepted through the Mesh platform-session fallback, so the OIDC
 client secret is optional for the current dev validation lane. A dedicated dev
-Mesh OIDC client secret can be added later for browser/device login parity.
+Mesh OIDC client secret can be added later for browser login parity.
 
 ## Deployment ownership
 

@@ -285,10 +285,9 @@
 
 
     #[test]
-    fn node_qr_renderer_outputs_terminal_blocks() {
+    fn invite_qr_renderer_outputs_terminal_blocks() {
         let rendered =
-            render_qr_terminal("ssh://network-alpha/builder:node-token@mesh.example.com:2222")
-                .unwrap();
+            render_qr_terminal("https://mesh.example.com/join?invite=CW-INV-TEST").unwrap();
 
         assert!(rendered.lines().count() > 8);
         assert!(

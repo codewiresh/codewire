@@ -7,7 +7,6 @@ KUBE_CONTEXT="${KUBE_CONTEXT:-csrke2}"
 PROD_NAMESPACE="${PROD_NAMESPACE:-prod}"
 CODEWIRE_SERVER_URL="${CODEWIRE_SERVER_URL:-https://codewire.sh}"
 CODEWIRE_IDP_URL="${CODEWIRE_IDP_URL:-$CODEWIRE_SERVER_URL}"
-CODEWIRE_MESH_URL="${CODEWIRE_MESH_URL:-https://mesh.codewire.sh}"
 CODEWIRE_DERP_URL="${CODEWIRE_DERP_URL:-https://derp.codewire.sh}"
 CW_BIN="${CW_BIN:-cw}"
 SMOKE_NAME="${SMOKE_NAME:-prod-rc-$(date -u +%Y%m%d%H%M%S)}"
@@ -48,7 +47,6 @@ Options:
   --skip-public            Skip public HTTP endpoint checks.
   --server URL             Codewire platform URL (default: https://codewire.sh).
   --idp-url URL            IdP URL (default: same as --server).
-  --mesh-url URL           Mesh URL (default: https://mesh.codewire.sh).
   --derp-url URL           DERP URL (default: https://derp.codewire.sh).
   --cw-bin PATH            cw binary to use (default: cw on PATH).
   -h, --help               Show this help.
@@ -154,11 +152,6 @@ while [[ "$#" -gt 0 ]]; do
       CODEWIRE_IDP_URL="$2"
       shift 2
       ;;
-    --mesh-url)
-      [[ "$#" -ge 2 ]] || die "--mesh-url requires a value"
-      CODEWIRE_MESH_URL="$2"
-      shift 2
-      ;;
     --derp-url)
       [[ "$#" -ge 2 ]] || die "--derp-url requires a value"
       CODEWIRE_DERP_URL="$2"
@@ -245,7 +238,6 @@ run_public_checks() {
   printf '%-28s %s %s\n' "idp discovery" "ok" "$CODEWIRE_IDP_URL/.well-known/openid-configuration"
 
   assert_http_status "billing session route" "$CODEWIRE_SERVER_URL/api/v1/billing/session" 200 401 403 405
-  assert_http_status "mesh auth config" "$CODEWIRE_MESH_URL/api/v1/auth/config" 200
   assert_http_status "derp latency" "$CODEWIRE_DERP_URL/derp/latency-check" 200
 }
 

@@ -1181,12 +1181,6 @@ pub(crate) struct MeshUpArgs {
     )]
     listen: String,
     #[arg(
-        long = "ssh-listen",
-        default_value = DEFAULT_LOCAL_MESH_SSH_LISTEN_ADDR,
-        help = "SSH listen address for the local Mesh process"
-    )]
-    ssh_listen: String,
-    #[arg(
         long = "derp-url",
         default_value = DEFAULT_LOCAL_DERP_URL,
         help = "Public DERP URL advertised by the local Mesh process"
