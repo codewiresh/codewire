@@ -1,6 +1,7 @@
 {
   "name": "@codewire/proto-ts",
   "version": "0.1.0",
+  "license": "MIT",
   "type": "module",
   "description": "TypeScript schemas for client-facing codewire contracts and vendored google.rpc error details, generated locally with protoc-gen-es",
   "exports": {

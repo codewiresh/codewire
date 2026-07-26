@@ -6,7 +6,7 @@ edition.workspace = true
 # *mechanics* live in the dual-licensed codewire-oidc library; this service
 # is the Codewire-specific glue (Postgres stores, the session/org-gating
 # bridge, client provisioning) and stays AGPL.
-license = "AGPL-3.0"
+license = "AGPL-3.0-only"
 description = "Codewire OIDC provider service — wires the codewire-oidc library to Postgres and the Codewire session/org model."
 
 [dependencies]

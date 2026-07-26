@@ -3,7 +3,7 @@ name = "codewire-mesh"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
-license = "AGPL-3.0"
+license = "AGPL-3.0-only"
 description = "Rust Codewire Mesh service."
 
 [[bin]]

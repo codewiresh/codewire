@@ -2,6 +2,7 @@
   "name": "@codewire/api-client",
   "version": "0.1.0",
   "description": "Generated TypeScript client for the Codewire API (openapi.json is the source of truth)",
+  "license": "MIT",
   "type": "module",
   "main": "src/index.ts",
   "types": "src/index.ts",

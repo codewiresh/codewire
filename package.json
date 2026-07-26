@@ -2,6 +2,7 @@
   "name": "codewire",
   "private": true,
   "version": "0.1.0",
+  "license": "AGPL-3.0-only",
   "description": "Environment-first control plane for agent-oriented development",
   "workspaces": ["packages/*", "apps/*"],
   "scripts": {

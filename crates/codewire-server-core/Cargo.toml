@@ -4,9 +4,9 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 description = "Shared platform for Codewire backend services: HTTP scaffold, auth, error envelope, tracing, DB and NATS helpers"
-# Server crates are AGPL-3.0 (matches the main repo); existing UI/desktop
-# crates intentionally keep the workspace-default MIT.
-license = "AGPL-3.0"
+# Server crates are AGPL-3.0-only (matching the repository); intentional
+# permissive client/UI packages override the AGPL workspace default.
+license = "AGPL-3.0-only"
 
 [lib]
 name = "codewire_server_core"

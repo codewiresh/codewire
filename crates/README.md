@@ -13,33 +13,34 @@ A `(bin)` marker means the crate produces a service/app binary.
 
 | Crate                   | Role                                                                              | License  |
 | ----------------------- | -------------------------------------------------------------------------------- | -------- |
-| `codewire-server-core`  | Shared backend chassis: HTTP scaffold, auth, error envelope, tracing, DB/NATS helpers. | AGPL-3.0 |
-| `codewire-idp`          | OIDC provider service (bin) — wires `codewire-oidc` to Postgres and the session/org model. | AGPL-3.0 |
-| `codewire-orchestration`| Environment lifecycle: reconciliation, sandbox client, Temporal worker (bin).    | AGPL-3.0 |
-| `codewire-billing`      | Billing service (bin): catalog, plans, Stripe webhooks.                          | AGPL-3.0 |
-| `codewire-coordinator`  | Coordinate service (bin): peer/session fan-out over WebSocket + Connect.          | AGPL-3.0 |
-| `codewire-mesh`         | Hosted Codewire Mesh node/network control plane (bin).                            | AGPL-3.0 |
+| `codewire-server-core`  | Shared backend chassis: HTTP scaffold, auth, error envelope, tracing, DB/NATS helpers. | AGPL-3.0-only |
+| `codewire-idp`          | OIDC provider service (bin) — wires `codewire-oidc` to Postgres and the session/org model. | AGPL-3.0-only |
+| `codewire-orchestration`| Environment lifecycle: reconciliation, sandbox client, Temporal worker (bin).    | AGPL-3.0-only |
+| `codewire-billing`      | Billing service (bin): catalog, plans, Stripe webhooks.                          | AGPL-3.0-only |
+| `codewire-coordinator`  | Coordinate service (bin): peer/session fan-out over WebSocket + Connect.          | AGPL-3.0-only |
+| `codewire-mesh`         | Hosted Codewire Mesh node/network control plane (bin).                            | AGPL-3.0-only |
 
 ### Networking & tunnel
 
 | Crate                  | Role                                                                               | License      |
 | ---------------------- | ---------------------------------------------------------------------------------- | ------------ |
-| `codewire-gateway`     | Sandbox gateway (bin): SSH/tailnet adapter, Connect-RPC to the daemon.             | AGPL-3.0     |
-| `codewire-daemon`      | Workspace daemon (bin): exec, PTY, and file RPCs inside the sandbox.               | AGPL-3.0     |
-| `codewire-derp`        | DERP relay core (bin).                                                             | MIT¹         |
-| `codewire-udp-relay`   | UDP peer-relay allocation and forwarding (bin).                                    | AGPL-3.0     |
+| `codewire-gateway`     | Sandbox gateway (bin): SSH/tailnet adapter, Connect-RPC to the daemon.             | AGPL-3.0-only |
+| `codewire-daemon`      | Workspace daemon (bin): exec, PTY, and file RPCs inside the sandbox.               | AGPL-3.0-only |
+| `codewire-derp`        | DERP relay core (bin).                                                             | BSD-3-Clause  |
+| `codewire-udp-relay`   | UDP peer-relay allocation and forwarding (bin).                                    | AGPL-3.0-only |
 | `codewire-tailnet`     | Tailscale-style tailnet client: WireGuard (boringtun) + DERP + coordinator client. | BSD-3-Clause |
-| `codewire-network-auth`| Mesh runtime credential and delegation tokens.                                    | MIT¹         |
+| `codewire-network-auth`| Mesh runtime credential and delegation tokens.                                    | AGPL-3.0-only |
 
 ### Contract & shared types
 
 | Crate                   | Role                                                            | License  |
 | ----------------------- | -------------------------------------------------------------- | -------- |
-| `codewire-types`        | Pure shared types and functions (no tokio, WASM-safe).         | MIT¹     |
-| `codewire-api-types`    | Generated Rust models for the OpenAPI surface.                 | MIT¹     |
-| `codewire-api-contract` | Rust-owned OpenAPI contract assembly helpers.                  | AGPL-3.0 |
-| `codewire-proto`        | Generated Connect-RPC contract types for the control-plane API. | AGPL-3.0 |
-| `codewire-gateway-proto`| Generated protobuf types for the gateway/daemon boundary.      | AGPL-3.0 |
+| `codewire-types`        | Pure shared types and functions (no tokio, WASM-safe).         | MIT             |
+| `codewire-api-types`    | Generated Rust models for the OpenAPI surface.                 | MIT             |
+| `codewire-api-contract` | Rust-owned OpenAPI contract assembly helpers.                  | AGPL-3.0-only   |
+| `codewire-client`       | Shared ergonomic Rust client over generated Connect-RPC stubs. | AGPL-3.0-only   |
+| `codewire-proto`        | Generated Connect-RPC contract types for the control-plane API. | AGPL-3.0-only   |
+| `codewire-gateway-proto`| Generated protobuf types for the gateway/daemon boundary.      | AGPL-3.0-only   |
 
 ### Auth library
 
@@ -51,23 +52,28 @@ A `(bin)` marker means the crate produces a service/app binary.
 
 | Crate              | Role                          | License |
 | ------------------ | ----------------------------- | ------- |
-| `codewire-cli`     | `cw` CLI implementation.       | MIT¹    |
-| `codewire-cli-bin` | `cw` CLI binary wrapper (bin). | MIT¹    |
+| `codewire-cli`     | `cw` CLI implementation.       | AGPL-3.0-only |
+| `codewire-cli-bin` | `cw` CLI binary wrapper (bin). | AGPL-3.0-only |
 
 ### Desktop app (excluded from the root workspace)
 
 | Crate                      | Role                                                       | License |
 | -------------------------- | ---------------------------------------------------------- | ------- |
-| `codewire-core`            | Platform-agnostic app business logic.                      | MIT¹    |
+| `codewire-core`            | Platform-agnostic app business logic.                      | MIT     |
 | `codewire-ui`              | Reusable GPUI components.                                  | MIT     |
 | `codewire-platform-native` | Native platform impls (reqwest, russh, keyring).          | MIT     |
 | `codewire-desktop`         | GPUI desktop app entrypoint (bin).                        | MIT     |
 
-Licenses are set per crate. The workspace default is **MIT** (`[workspace.package]
-license` in the root `Cargo.toml`); backend service crates set **AGPL-3.0** explicitly.
-Crates marked **¹** omit an explicit license and inherit the MIT default via
-`license.workspace = true` — including `codewire-derp`, a server-side relay, which is
-worth reconciling with its AGPL-3.0 siblings.
+The root workspace default is **AGPL-3.0-only**. `codewire-cli`,
+`codewire-cli-bin`, and `codewire-network-auth` intentionally inherit that
+default. Every permissive crate declares an explicit override, and every crate
+directory carries the applicable license text.
+
+`codewire-tailnet` and `codewire-derp` remain BSD-3-Clause as standalone
+crates. Their current dependency graph includes the AGPL-3.0-only
+`codewire-proto`; a combined distribution must therefore satisfy the
+AGPL-3.0-only obligations for the combined work. A package's permissive
+metadata does not relicense its dependencies.
 
 ## Adding a server crate
 
@@ -83,7 +89,7 @@ name = "codewire-billing"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
-license = "AGPL-3.0"
+license = "AGPL-3.0-only"
 description = "Billing service: Stripe webhooks, plans, usage."
 
 [dependencies]

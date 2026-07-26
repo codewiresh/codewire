@@ -2,7 +2,7 @@
 name = "codewire-api-contract"
 version.workspace = true
 edition.workspace = true
-license = "AGPL-3.0"
+license = "AGPL-3.0-only"
 authors.workspace = true
 description = "Rust-owned OpenAPI contract assembly helpers"
 

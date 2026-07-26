@@ -5,7 +5,7 @@ version: "${VERSION}"
 maintainer: "Codewire <hello@codewire.sh>"
 description: "Persistent process server for AI coding agents"
 homepage: "https://codewire.sh"
-license: MIT
+license: AGPL-3.0-only
 contents:
   - src: ./cw
     dst: /usr/local/bin/cw

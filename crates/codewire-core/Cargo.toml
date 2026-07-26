@@ -2,7 +2,7 @@
 name = "codewire-core"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license = "MIT"
 authors.workspace = true
 description = "Shared business logic for Codewire app — platform-agnostic"
 

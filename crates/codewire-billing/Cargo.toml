@@ -3,7 +3,7 @@ name = "codewire-billing"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
-license = "AGPL-3.0"
+license = "AGPL-3.0-only"
 description = "Codewire billing service: catalog reads, plan management, Stripe webhook handling"
 
 [[bin]]

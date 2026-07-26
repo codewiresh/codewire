@@ -299,6 +299,16 @@ elif [ "$event_selected" = false ]; then
         ;;
     esac
 
+    # License texts are validated as package payloads by the exact license-map
+    # policy check. Their contents do not alter product compilation or runtime
+    # behavior, even when they live below a product-owned directory.
+    case "$path" in
+      LICENSE|LICENSE-*|*/LICENSE|*/LICENSE-*)
+        select_token policy
+        continue
+        ;;
+    esac
+
     if [[ "$path" != */* && "$path" == *.md ]]; then
       recognized=true
     fi

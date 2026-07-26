@@ -96,6 +96,7 @@ run_policy() {
   scripts/ci/tests/test-resolve-cargo-target-dir.sh
   scripts/ci/tests/test-sdk-local-cli-contract.sh
   scripts/ci/tests/test-integration-postgres.sh
+  python3 scripts/checks/repo_checks.py license-map
   python3 scripts/checks/repo_checks.py rest-surface-freeze
   python3 scripts/checks/repo_checks.py rust-validation-source
   python3 scripts/checks/repo_checks.py retired-reference-source

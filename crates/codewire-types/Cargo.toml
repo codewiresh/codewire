@@ -2,7 +2,7 @@
 name = "codewire-types"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license = "MIT"
 authors.workspace = true
 description = "Shared types and pure functions for Codewire — zero tokio, WASM-safe"
 

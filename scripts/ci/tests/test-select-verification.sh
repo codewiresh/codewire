@@ -60,6 +60,10 @@ run_paths_case repository_ignores pull_request refs/pull/10/head false "$policy"
   .gitignore .dockerignore
 run_paths_case repository_attributes pull_request refs/pull/1010/head false "$policy" \
   .gitattributes
+run_paths_case license_texts pull_request refs/pull/1011/head false "$policy" \
+  LICENSE LICENSE-MIT LICENSE-APACHE LICENSE-BSD-3-CLAUSE \
+  crates/codewire-cli/LICENSE packages/codewire-proto-ts/LICENSE-APACHE \
+  proto/LICENSE-APACHE tests/contract/LICENSE
 run_paths_case local_compose pull_request refs/pull/11/head false \
   'database policy' docker-compose.yml
 run_paths_case ci_self pull_request refs/pull/2/head false \

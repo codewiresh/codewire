@@ -146,6 +146,7 @@ run_policy_local() {
   if [ "${#syntax_files[@]}" -gt 0 ]; then
     run_step "verification shell syntax" bash -n "${syntax_files[@]}"
   fi
+  run_step "package license map" python3 scripts/checks/repo_checks.py license-map
   run_step "REST surface freeze ratchet" python3 scripts/checks/repo_checks.py rest-surface-freeze
   run_step "Rust validation source guard" python3 scripts/checks/repo_checks.py rust-validation-source
   run_step "retired reference guard" python3 scripts/checks/repo_checks.py retired-reference-source

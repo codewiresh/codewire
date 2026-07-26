@@ -7,6 +7,7 @@ name = "codewire"
 version = "0.1.0"
 description = "Codewire SDK — environment-first cloud development"
 license = "MIT"
+license-files = ["LICENSE", "LICENSE-APACHE"]
 requires-python = ">=3.10"
 dependencies = [
     "connectrpc==0.11.1",

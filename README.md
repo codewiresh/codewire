@@ -1,6 +1,6 @@
 # Codewire
 
-Agent-ready sandbox environments. Open source under AGPL-3.0.
+Agent-ready sandbox environments. Open source under AGPL-3.0-only.
 
 ## What it is
 
@@ -101,7 +101,7 @@ See [SECURITY.md](SECURITY.md) for the vulnerability disclosure policy.
 
 ## License
 
-Codewire is licensed under AGPL-3.0. See [LICENSE](LICENSE).
+Codewire is licensed under AGPL-3.0-only. See [LICENSE](LICENSE).
 
 ## Contributing
 
