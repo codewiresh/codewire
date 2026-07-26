@@ -61,6 +61,7 @@ At the start of every turn or wakeup:
    - `git status --short --branch`
    - relevant Gitea issue/PR state with command-scoped `tea` flags
    - CI runs and failing logs when a PR or merge run exists
+   - active program-coordinate claims in issues, branches, worktrees, and PRs
 4. Continue the smallest unblocked step through implementation, validation,
    PR, CI, merge, and issue closure.
 5. Give brief progress updates during long work.
@@ -77,6 +78,35 @@ the normal verification ladder.
 Do not ask "should I continue?" while the goal is actionable. Ask only for a
 decision that materially changes scope, risk, credentials, production impact,
 or an unresolved ambiguity that cannot be discovered locally.
+
+## Coordinate Parallel Work
+
+When a live `ACTIVE` ProgramControl opts into the repository's bounded-parallel
+admission envelope:
+
+1. Use the direct owner decision and canonical Gitea issue/comment receipt as
+   the admission record. Confirm that it names the coordinate, claimant
+   branch/worktree/PR, prerequisites, exclusive paths, shared surfaces, gates,
+   forbidden work, and merge order.
+2. Check open issues, branches, worktrees, and PRs before editing. One session
+   claims one coordinate and one PR. Never open a competing PR for a coordinate
+   that another session already owns.
+3. Let disjoint admitted WIs edit, commit, push, review, and run CI
+   concurrently. Do not tell an entire session to stop merely because another
+   coordinate is active; redirect it only when it collides with an existing
+   claim or lacks admission.
+4. Serialize main merges and shared/external mutations. Immediately before
+   each push or merge, reconcile all active claims, the exact current main
+   revision, and the declared merge order. Rebase or otherwise reconcile the
+   next PR and rerun its exact-head gates after an earlier merge.
+5. If new evidence affects only one WI, mark that WI or its overlapping
+   coordinates `UNSATISFIED` and keep independent admitted WIs moving. Use a
+   program-wide `STOPPED_FOR_REPLAN` only when a program-level field named by
+   `AGENTS.md` is materially invalidated.
+
+The envelope does not make workflows, lockfiles, generated output, schemas,
+deployments, publications, releases, credentials, or live state implicitly
+independent and does not grant authority for those actions.
 
 ## Codewire Defaults
 

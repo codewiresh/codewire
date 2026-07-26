@@ -50,10 +50,33 @@ Method context can add procedure but cannot widen repository authority.
   no source edit or PR, and gives exact authority and acceptance evidence. The
   program master must contain a
   binding execution-control block that names the current coordinate, the
-  explicitly authorized queue, all hard gates, and all forbidden work.
+  explicitly authorized queue, all hard gates, and all forbidden work. A live
+  control may opt into the bounded-parallel admission envelope below instead
+  of requiring another master-plan PR for every independent preparable WI.
 - Program state is exactly `ACTIVE`, `STOPPED_FOR_REPLAN`, or `COMPLETE`.
   Gate state is exactly `SATISFIED` or `UNSATISFIED`; terms such as "closed",
   "almost green", or "expected to pass" do not authorize later work.
+- An `ACTIVE` program whose live control opts into bounded-parallel admission
+  may admit an independent WI through a direct owner decision plus a canonical
+  Gitea issue or comment receipt. The receipt must name the exact coordinate,
+  issue, claimant branch/worktree/PR, prerequisites, exclusive path ownership,
+  shared surfaces, verification gates, forbidden work, and merge order.
+  Admission does not require a docs/control PR when it stays inside the
+  already accepted goal, wave/frontier, dependencies, contracts, program
+  gates, repositories, external controls, and acceptance criteria.
+- Independently admitted WIs may be inspected, edited, committed, pushed,
+  reviewed, and tested concurrently. One WI remains one PR. Main merges and
+  shared or external mutations remain serialized unless the live control and
+  applicable authority explicitly prove a narrower safe boundary. Before each
+  push or merge, reconcile all active claims and stop only a duplicate claim
+  on the same coordinate; redirect that session to another admitted WI rather
+  than stopping independent work.
+- Workflows, dependencies and lockfiles, generated trees, schemas and
+  migrations, shared contracts, deployment/image inputs, publication and
+  release paths, credentials, and live state are not presumed independent.
+  Their admission receipt must prove non-overlap and ownership, and it never
+  supplies missing release, deployment, credential, production, or live-state
+  authority.
 - Before dispatching, pushing, or merging a program PR, reconcile the master,
   workstream status, canonical Gitea issue/PR state, current `gitea/main`, and
   required evidence. A healthy branch or CI run is not authorization, and CI
@@ -69,9 +92,12 @@ Method context can add procedure but cannot widen repository authority.
   the concrete artifact, runtime state, or failure class the next coordinate
   consumes. Docs-only CI is not a downstream-start gate by default.
 - When a hard gate is `UNSATISFIED`, do not implement later-wave or unrelated
-  work. Same-wave preparation is allowed only when the master explicitly
-  names the coordinate and its prerequisites. Merge shared or production
-  mutations serially even when independent local preparation is authorized.
+  dependent work. Same-wave preparation is allowed when the master explicitly
+  names the coordinate and prerequisites or when it is admitted through the
+  live bounded-parallel envelope. An `UNSATISFIED` gate on one WI does not
+  freeze another admitted WI whose independence receipt remains true. Merge
+  shared or production mutations serially even when independent preparation
+  is concurrent.
 - A new finding may be filed with read-only evidence. If reality changes the
   program's scope, dependencies, gates, repositories, contracts, production
   controls, or acceptance criteria, stop all mutations, set the program to
@@ -79,9 +105,17 @@ Method context can add procedure but cannot widen repository authority.
   decision, and only then continue. While stopped, only read-only diagnosis,
   issue filing, and the replan docs PR are allowed; there is no "productive
   side work" exception.
+- If a finding is bounded to one WI's implementation, path ownership, or local
+  acceptance evidence and does not invalidate the program-level fields above,
+  mark that WI's gate `UNSATISFIED` and freeze only the affected or overlapping
+  coordinates. The program remains `ACTIVE` for other admitted WIs whose
+  receipts still prove independence. A local collision is not by itself a
+  program-wide replan.
 - Work discovered in one lane may not be pulled into another lane merely
   because it is useful. It executes only at the dependency and coordinate
-  recorded by the master. If the plan has no such coordinate, stop and replan.
+  recorded by the master or admitted through its bounded-parallel envelope.
+  If neither path covers the work, stop the affected lane and replan; do not
+  freeze unrelated admitted work unless a program-level invariant changed.
 - Examples: `Connect-RPC / Wave 2 / WS04 / WI-8A` is a valid coordinate;
   `Connect cleanup`, `WI-8`, and `work while CI runs` are not sufficient
   execution authorization.
