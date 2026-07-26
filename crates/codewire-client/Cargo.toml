@@ -1,0 +1,29 @@
+[package]
+name = "codewire-client"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license = "AGPL-3.0"
+description = "Shared ergonomic Rust client over Codewire's generated Connect-RPC stubs."
+
+[dependencies]
+async-trait = { workspace = true }
+base64 = { workspace = true }
+buffa = { workspace = true }
+buffa-types = { workspace = true }
+codewire-proto = { workspace = true, features = ["client"] }
+connectrpc = { workspace = true, features = ["client"] }
+http = { workspace = true }
+http-body-util = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+url = { workspace = true }
+
+tokio = { workspace = true }
+wiremock = { workspace = true }
+
+[dev-dependencies]
+anyhow = { workspace = true }
+tempfile = { workspace = true }

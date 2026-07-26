@@ -1,0 +1,24 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: codewire-demo-site
+  annotations:
+    cert-manager.io/cluster-issuer: "letsencrypt-codewire"
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - demo.codewire.sh
+      secretName: codewire-demo-site-tls
+  rules:
+    - host: demo.codewire.sh
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: codewire-demo-site
+                port:
+                  name: http

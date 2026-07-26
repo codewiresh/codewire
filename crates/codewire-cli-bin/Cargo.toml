@@ -1,0 +1,15 @@
+[package]
+name = "codewire-cli-bin"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Codewire cw CLI binary wrapper."
+
+[[bin]]
+name = "cw"
+path = "src/main.rs"
+
+[dependencies]
+codewire-cli = { path = "../codewire-cli" }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

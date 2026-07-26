@@ -1,0 +1,5 @@
+[
+  "sh",
+  "-lc",
+  "if [ -f \"$HOME/.codewire/environment.sh\" ]; then . \"$HOME/.codewire/environment.sh\"; fi \u0026\u0026 cd '/workspace/my repo' \u0026\u0026 export A_FIRST='plain' \u0026\u0026 export B_META='$HOME `cmd` \"dq\"' \u0026\u0026 export Z_LAST='with '\\''single'\\'' quotes' \u0026\u0026 exec 'sh' '-c' 'npm install \u0026\u0026 echo '\\''done'\\'''"
+]

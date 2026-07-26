@@ -1,0 +1,67 @@
+.PHONY: build test test-cli test-all smoke test-manual lint clean install \
+       install-user install-system
+
+REPO_ROOT := $(abspath ../..)
+BINARY := cw
+REQUESTED_CARGO_TARGET_DIR := $(CARGO_TARGET_DIR)
+RESOLVED_CARGO_TARGET_DIR := $(shell cd "$(REPO_ROOT)" && CARGO_TARGET_DIR="$(REQUESTED_CARGO_TARGET_DIR)" scripts/ci/verify/resolve-cargo-target-dir.sh .)
+RELEASE_BINARY := $(RESOLVED_CARGO_TARGET_DIR)/release/$(BINARY)
+USER_BIN_DIR ?= $(if $(strip $(XDG_BIN_HOME)),$(XDG_BIN_HOME),$(HOME)/.local/bin)
+SYSTEM_BIN_DIR ?= /usr/local/bin
+build:
+	cd "$(REPO_ROOT)" && CARGO_TARGET_DIR="$(RESOLVED_CARGO_TARGET_DIR)" cargo build --locked --release -p codewire-cli-bin --bin cw
+	cp "$(RELEASE_BINARY)" "$(BINARY)"
+
+test:
+	cd $(REPO_ROOT) && cargo test -p codewire-cli
+
+test-cli: test
+
+test-all: test smoke
+
+smoke: build
+	./$(BINARY) --help >/dev/null
+	./$(BINARY) env --help >/dev/null
+	./$(BINARY) run --help >/dev/null
+	./$(BINARY) list --help >/dev/null
+	./$(BINARY) mesh --help >/dev/null
+	./$(BINARY) network --help >/dev/null
+
+test-manual: smoke
+
+lint:
+	cd $(REPO_ROOT) && cargo clippy -p codewire-cli --all-targets -- -D warnings
+
+install: install-user
+
+install-user: smoke
+	@test -n "$(USER_BIN_DIR)" || { echo "USER_BIN_DIR is empty; set HOME, XDG_BIN_HOME, or USER_BIN_DIR" >&2; exit 1; }
+	install -d "$(USER_BIN_DIR)"
+	install -m 0755 "$(BINARY)" "$(USER_BIN_DIR)/$(BINARY)"
+	@echo "Installed $(BINARY) to $(USER_BIN_DIR)/$(BINARY)"
+	@path_found=false; old_ifs=$$IFS; IFS=:; \
+	for dir in $${PATH:-}; do \
+		if [ "$$dir" = "$(USER_BIN_DIR)" ]; then path_found=true; break; fi; \
+	done; \
+	IFS=$$old_ifs; \
+	if [ "$$path_found" != true ]; then \
+		echo "Note: add $(USER_BIN_DIR) to PATH to run $(BINARY) by name."; \
+	fi
+
+install-system: smoke
+	@if { [ -d "$(SYSTEM_BIN_DIR)" ] && [ -w "$(SYSTEM_BIN_DIR)" ]; } || \
+	    { [ ! -e "$(SYSTEM_BIN_DIR)" ] && [ -w "$$(dirname "$(SYSTEM_BIN_DIR)")" ]; }; then \
+		install -d "$(SYSTEM_BIN_DIR)"; \
+		install -m 0755 "$(BINARY)" "$(SYSTEM_BIN_DIR)/$(BINARY)"; \
+	elif command -v sudo >/dev/null 2>&1; then \
+		sudo install -d "$(SYSTEM_BIN_DIR)"; \
+		sudo install -m 0755 "$(BINARY)" "$(SYSTEM_BIN_DIR)/$(BINARY)"; \
+	else \
+		echo "Cannot write $(SYSTEM_BIN_DIR) and sudo is unavailable." >&2; \
+		echo "Install manually, or run 'make cli-install-user' from the repository root." >&2; \
+		exit 1; \
+	fi
+	@echo "Installed $(BINARY) to $(SYSTEM_BIN_DIR)/$(BINARY)"
+
+clean:
+	rm -f $(BINARY)

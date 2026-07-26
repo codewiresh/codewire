@@ -1,0 +1,52 @@
+# Maintainer: Codewire <hello@codewire.sh>
+#
+# DISABLED: source URL points at codewiresh/homebrew-tap, which does not
+# exist on GitHub. Desktop package publication is not part of the active Gitea
+# release path. Re-enable both together once the tap repo exists.
+#
+pkgname=codewire-desktop-bin
+pkgver=VERSION
+pkgrel=1
+pkgdesc="Desktop app for managing Codewire development environments"
+arch=('x86_64')
+url="https://codewire.sh"
+license=('MIT')
+depends=('vulkan-driver' 'wayland' 'libxkbcommon' 'libxcb' 'gtk3')
+provides=('codewire-desktop')
+conflicts=('codewire-desktop')
+source=("https://github.com/codewiresh/homebrew-tap/releases/download/v${pkgver}/Codewire-v${pkgver}-x86_64-unknown-linux-gnu.AppImage")
+sha256sums=('SHA256_AMD64')
+options=('!strip')
+
+package() {
+  install -Dm755 "Codewire-v${pkgver}-x86_64-unknown-linux-gnu.AppImage" "${pkgdir}/opt/codewire/codewire.AppImage"
+  install -Dm644 /dev/null "${pkgdir}/usr/share/applications/codewire.desktop"
+  install -Dm644 /dev/null "${pkgdir}/usr/share/icons/hicolor/256x256/apps/codewire.png"
+
+  # Extract icon and desktop file from AppImage
+  cd "${srcdir}"
+  chmod +x "Codewire-v${pkgver}-x86_64-unknown-linux-gnu.AppImage"
+  ./"Codewire-v${pkgver}-x86_64-unknown-linux-gnu.AppImage" --appimage-extract codewire.png 2>/dev/null || true
+  ./"Codewire-v${pkgver}-x86_64-unknown-linux-gnu.AppImage" --appimage-extract codewire.desktop 2>/dev/null || true
+
+  if [ -f squashfs-root/codewire.png ]; then
+    install -Dm644 squashfs-root/codewire.png "${pkgdir}/usr/share/icons/hicolor/256x256/apps/codewire.png"
+  fi
+
+  # Write desktop entry pointing to installed AppImage
+  cat > "${pkgdir}/usr/share/applications/codewire.desktop" << 'EOF'
+[Desktop Entry]
+Name=Codewire
+Comment=Desktop app for managing Codewire development environments
+Exec=/opt/codewire/codewire.AppImage
+Icon=codewire
+Type=Application
+Categories=Development;IDE;
+Terminal=false
+StartupWMClass=codewire
+EOF
+
+  # Symlink to PATH
+  install -dm755 "${pkgdir}/usr/bin"
+  ln -s /opt/codewire/codewire.AppImage "${pkgdir}/usr/bin/codewire"
+}

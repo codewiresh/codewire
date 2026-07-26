@@ -1,0 +1,71 @@
+# Authentication policy
+
+This is Codewire's canonical authentication policy. The architectural decision
+and migration evidence live in
+`docs/plans/connect-rpc/15-auth-policy.md`; product and client code should link
+here instead of restating or extending the credential model.
+
+Codewire has exactly five credential flavors: three user-facing and two
+platform-internal.
+
+| # | Flavor | Presenter | Acquisition and boundary |
+|---|---|---|---|
+| 1 | Session cookie | Browsers | The IDP login page issues the HttpOnly, SameSite session cookie. Browsers use it for same-origin product calls and identity pages. |
+| 2 | OAuth user bearer | Native apps | PKCE authorization code where a system browser exists; OAuth device grant where none does. Both yield the same opaque access/refresh token species and use one `TokenProvider`. Product access requires exact `codewire.api`. |
+| 3 | `cw_` API key | Machines, SDKs, CI, and agents | `ApiKeyService` creates a revocable key bound to exactly one organization. It is not a user token or an OAuth client-credentials grant. |
+| 4 | Environment token | Environment sidecars | Provisioning injects an environment identity for `codewire.internal.v1`. It never authenticates a user-facing product request. |
+| 5 | HMAC sidecar token | Gateway/coordinator service hops | The control plane mints a short-lived service credential for the internal hot path. It never becomes a user credential. |
+
+## Credential rules
+
+- Passwords, 2FA, and passkeys belong only to the browser-owned IDP login
+  page. Native apps and the CLI never accept or store a Codewire password.
+- Session cookies are browser credentials. A session token in
+  `Authorization: Bearer` is invalid and must not be reinterpreted as another
+  flavor.
+- Native OAuth credentials are opaque and authoritative in the IDP token
+  store. `TokenProvider` supplies the current access token; a
+  `CredentialStore` persists the access/refresh pair atomically and saves a
+  refreshed pair as one unit.
+- An OAuth credential without exact `codewire.api` may use the identity
+  endpoints its scopes permit, but product calls fail with REST `403` /
+  Connect `permission_denied`.
+- A `cw_` API key is authorized only inside its one bound organization. It
+  cannot inherit its owner's global-admin authority or perform account-global
+  operations.
+- Environment and HMAC sidecar tokens stay inside their platform trust
+  domains. They are not fallbacks for session, OAuth, or API-key
+  authentication.
+
+## Client use
+
+- The dashboard uses connect-es/connect-query with the same-origin session
+  cookie. Browser JavaScript does not store a user bearer token.
+- The CLI and rewritten native apps use the shared Rust
+  `codewire-client` OAuth implementation and `TokenProvider`. The CLI uses the
+  OAuth device grant; clients with a system browser use PKCE.
+- Public SDKs and non-interactive agents use an organization-scoped `cw_` API
+  key through their generated Connect client wrapper.
+- Platform sidecars use only the internal credential flavor assigned to their
+  service boundary.
+
+## Protocol and error boundaries
+
+OAuth/OIDC endpoints and the browser login/consent pages are permanent raw IDP
+protocol. `POST /api/oauth/device_verification` is the session-cookie-only
+browser approval bridge for the standard device grant; it is not a product
+REST API. Product capability is proto-first and served through the shared
+Connect authentication layer.
+
+Terminal tickets are short-lived derivatives of an already authenticated user
+credential for a WebSocket handshake. Stripe webhook signatures and GitHub
+OAuth delegation are third-party protocol mechanisms. None is an additional
+Codewire credential flavor.
+
+Missing or invalid credentials map to REST `401` / Connect
+`unauthenticated`. An authenticated principal without required scope, role,
+organization authority, or method authority maps to REST `403` / Connect
+`permission_denied`. Handlers return the shared server error and its canonical
+`google.rpc` details; they do not construct auth-specific wire errors or log
+credential values. See
+`docs/dev/PROTO-STYLE.md#error-model` for the complete error contract.

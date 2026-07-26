@@ -1,0 +1,4 @@
+interface:
+  display_name: "Codewire Loop"
+  short_description: "Persistent Codewire goal loop"
+  default_prompt: "Use $codewire-loop to keep this Codewire task moving until it is complete or genuinely blocked."

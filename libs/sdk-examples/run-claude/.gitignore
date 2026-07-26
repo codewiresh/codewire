@@ -1,0 +1,4 @@
+# Compiled Go binary from `go run` / `go build` in ./go
+go/run-claude
+# Node install output; package-lock.json is tracked for reproducibility.
+typescript/node_modules/

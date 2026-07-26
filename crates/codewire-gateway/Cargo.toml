@@ -1,0 +1,48 @@
+[package]
+name = "codewire-gateway"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license = "AGPL-3.0"
+description = "Rust landing zone for the Codewire sandbox gateway."
+
+[features]
+kind-e2e = []
+
+[[bin]]
+name = "coordinator-selector-smoke"
+path = "src/bin/coordinator-selector-smoke.rs"
+required-features = ["kind-e2e"]
+
+[dependencies]
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+axum = { workspace = true }
+codewire-gateway-proto = { workspace = true }
+codewire-proto = { workspace = true, features = ["client"] }
+codewire-tailnet = { workspace = true }
+connectrpc = { workspace = true, features = ["axum", "client"] }
+ed25519-dalek = { workspace = true, features = ["pem", "rand_core"] }
+http = { workspace = true }
+prost-types = { workspace = true }
+rand = { workspace = true }
+reqwest = { workspace = true }
+russh = { workspace = true }
+russh-sftp = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+shell-words = { workspace = true }
+ssh-key = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+tonic = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+url = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+boringtun = "0.7"
+chrono = { workspace = true }
+tower = { workspace = true }

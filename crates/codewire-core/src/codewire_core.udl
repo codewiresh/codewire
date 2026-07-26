@@ -1,0 +1,128 @@
+// UniFFI Interface Definition for codewire-core
+// This file defines the FFI boundary for Swift/Kotlin bindings
+
+namespace codewire_core {
+    // No standalone functions yet - all functionality is in objects
+};
+
+// Error type
+[Error]
+enum CoreError {
+    "Network",
+    "Api",
+    "Io",
+    "Serialization",
+    "WorkspaceNotFound",
+    "InvalidConfig",
+    "StreamCancelled",
+};
+
+// Enums
+enum RuntimeType {
+    "Local",
+    "Worktree",
+    "Ssh",
+    "Docker",
+};
+
+enum WorkspaceStatus {
+    "Ready",
+    "Connecting",
+    "Error",
+};
+
+enum MessageRole {
+    "User",
+    "Assistant",
+    "System",
+};
+
+enum AiProvider {
+    "Anthropic",
+    "OpenAi",
+    "OpenRouter",
+};
+
+enum StreamEvent {
+    "Token",
+    "ToolCallStart",
+    "ToolCallEnd",
+    "Reasoning",
+    "Done",
+    "Error",
+};
+
+// Records (structs)
+dictionary Workspace {
+    string id;
+    string name;
+    string project_path;
+    RuntimeType runtime_type;
+    WorkspaceStatus status;
+};
+
+dictionary ChatMessage {
+    string id;
+    MessageRole role;
+    string content;
+    u64 timestamp;
+};
+
+dictionary AiConfig {
+    AiProvider provider;
+    string api_key;
+    string model;
+    string? base_url;
+};
+
+// Callback interface for streaming
+callback interface StreamCallback {
+    void on_event(StreamEvent event);
+};
+
+// Objects
+interface WorkspaceManager {
+    constructor();
+
+    [Async]
+    sequence<Workspace> list_workspaces();
+
+    [Async, Throws=CoreError]
+    Workspace get_workspace(string id);
+
+    [Async, Throws=CoreError]
+    Workspace create_local_workspace(string name, string project_path);
+
+    [Async, Throws=CoreError]
+    Workspace create_ssh_workspace(string name, string host, string user, string project_path);
+
+    [Async, Throws=CoreError]
+    void update_status(string id, WorkspaceStatus status);
+
+    [Async, Throws=CoreError]
+    void remove_workspace(string id);
+};
+
+interface AiClient {
+    constructor(AiConfig config);
+
+    [Async, Throws=CoreError]
+    void stream_message(sequence<ChatMessage> messages, StreamCallback callback);
+
+    AiConfig get_config();
+};
+
+interface ChatHistory {
+    constructor(string workspace_id, string base_path);
+
+    [Async, Throws=CoreError]
+    sequence<ChatMessage> load_messages();
+
+    [Async, Throws=CoreError]
+    void append_message(ChatMessage message);
+
+    [Async, Throws=CoreError]
+    void clear();
+
+    string workspace_id();
+};

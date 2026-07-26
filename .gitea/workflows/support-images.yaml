@@ -1,0 +1,87 @@
+name: Build support images
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'crates/codewire-cli/**'
+      - 'crates/codewire-cli-bin/**'
+      - 'crates/codewire-daemon/**'
+      - 'crates/codewire-gateway-proto/**'
+      - 'crates/codewire-network-auth/**'
+      - 'crates/codewire-proto/**'
+      - 'crates/codewire-tailnet/**'
+      - 'images/base/**'
+      - 'images/workspace/**'
+      - 'libs/gateway-proto/**'
+      - 'proto/**'
+      - 'scripts/ci/images/build-push-image.sh'
+      - 'scripts/ci/images/compute-image-tags.sh'
+      - 'scripts/ci/images/copy-image-to-ghcr.sh'
+      - 'scripts/ci/setup/fetch-infisical-ci-secret.sh'
+      - 'scripts/ci/images/image-bundle.py'
+      - 'scripts/ci/images/publish-image-to-ghcr.sh'
+      - 'scripts/ci/images/run-skopeo-container.sh'
+      - '.gitea/workflows/support-images.yaml'
+permissions:
+  contents: read
+
+env:
+  REGISTRY_HOST: ${{ vars.REGISTRY_HOST }}
+
+jobs:
+  build-base-image:
+    name: Build Base Image
+    runs-on: ubuntu-latest
+    outputs:
+      source_sha: ${{ steps.build.outputs.source_sha }}
+      candidate_ref: ${{ steps.build.outputs.candidate_ref }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+
+      - name: Build canonical base image
+        id: build
+        run: scripts/ci/images/build-push-image.sh base images/base/Dockerfile images/base
+
+  build-workspace-image:
+    name: Build Workspace Image
+    runs-on: ubuntu-latest
+    needs: [build-base-image]
+    outputs:
+      source_sha: ${{ steps.build.outputs.source_sha }}
+      candidate_ref: ${{ steps.build.outputs.candidate_ref }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+
+      - name: Build workspace from exact canonical base
+        id: build
+        env:
+          CODEWIRE_BASE_IMAGE_REF: ${{ needs.build-base-image.outputs.candidate_ref }}
+        run: scripts/ci/images/build-push-image.sh workspace images/workspace/Dockerfile .
+
+  publish-support-images:
+    name: Publish exact support manifests to GHCR
+    runs-on: ubuntu-latest
+    needs: [build-base-image, build-workspace-image]
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+
+      - name: Copy both support images without rebuilding
+        env:
+          GHCR_PUBLISH_USERNAME: ${{ vars.GHCR_PUBLISH_USERNAME }}
+        run: |
+          set -euo pipefail
+          [[ "${{ needs.build-base-image.outputs.source_sha }}" == "$GITHUB_SHA" ]]
+          [[ "${{ needs.build-workspace-image.outputs.source_sha }}" == "$GITHUB_SHA" ]]
+          scripts/ci/images/publish-image-to-ghcr.sh \
+            "${{ needs.build-base-image.outputs.candidate_ref }}" \
+            ghcr.io/codewiresh/base \
+            "${{ needs.build-base-image.outputs.source_sha }}" \
+            latest
+          scripts/ci/images/publish-image-to-ghcr.sh \
+            "${{ needs.build-workspace-image.outputs.candidate_ref }}" \
+            ghcr.io/codewiresh/workspace \
+            "${{ needs.build-workspace-image.outputs.source_sha }}" \
+            latest

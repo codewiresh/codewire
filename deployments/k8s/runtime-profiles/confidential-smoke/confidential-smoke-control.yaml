@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: codewire-confidential-snp-smoke-control
+  namespace: codewire-runtime-probes
+  labels:
+    app.kubernetes.io/name: codewire-confidential-snp-smoke-control
+    app.kubernetes.io/part-of: codewire
+data:
+  phase: inactive

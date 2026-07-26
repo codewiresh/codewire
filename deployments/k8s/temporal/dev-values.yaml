@@ -1,0 +1,49 @@
+server:
+  replicaCount: 1
+  config:
+    logLevel: "info"
+    namespaces:
+      create: true
+      namespace:
+        - name: default
+          retention: 72h
+    persistence:
+      defaultStore: default
+      visibilityStore: visibility
+      numHistoryShards: 512
+      datastores:
+        default:
+          sql:
+            createDatabase: false
+            manageSchema: true
+            pluginName: postgres12
+            databaseName: temporal
+            connectAddr: "temporal-postgres-rw.temporal-system.svc.cluster.local:5432"
+            connectProtocol: "tcp"
+            user: temporal
+            existingSecret: temporal-postgres-app
+            secretKey: password
+            maxConns: 20
+            maxIdleConns: 20
+            maxConnLifetime: "1h"
+        visibility:
+          sql:
+            createDatabase: false
+            manageSchema: true
+            pluginName: postgres12
+            databaseName: temporal_visibility
+            connectAddr: "temporal-postgres-rw.temporal-system.svc.cluster.local:5432"
+            connectProtocol: "tcp"
+            user: temporal
+            existingSecret: temporal-postgres-app
+            secretKey: password
+            maxConns: 20
+            maxIdleConns: 20
+            maxConnLifetime: "1h"
+
+web:
+  enabled: true
+  replicaCount: 1
+
+admintools:
+  enabled: true

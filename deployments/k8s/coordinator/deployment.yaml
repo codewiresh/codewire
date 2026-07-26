@@ -1,0 +1,84 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: codewire-coordinator
+  namespace: prod
+  labels:
+    app.kubernetes.io/name: codewire
+    app.kubernetes.io/component: coordinator
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: codewire
+      app.kubernetes.io/component: coordinator
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: codewire
+        app.kubernetes.io/component: coordinator
+    spec:
+      imagePullSecrets:
+        - name: gitea-registry
+      # Coordinate WebSockets are long-lived; give clients time to reconnect
+      # elsewhere before the pod goes away.
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: coordinator
+          # Runs from the shared Rust services image; command selects the
+          # coordinator binary.
+          image: git.example.com/codewire/services:latest
+          command: ["/codewire-coordinator"]
+          ports:
+            - containerPort: 8090
+              name: http
+          envFrom:
+            - configMapRef:
+                name: codewire-config
+            - secretRef:
+                name: codewire-secrets
+          env:
+            - name: COORDINATOR_PORT
+              value: "8090"
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: codewire-db-app
+                  key: password
+            - name: NATS_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: nats-auth-token
+                  key: token
+            - name: MY_POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5

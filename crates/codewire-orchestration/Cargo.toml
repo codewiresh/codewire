@@ -1,0 +1,105 @@
+[package]
+name = "codewire-orchestration"
+version.workspace = true
+edition.workspace = true
+# Server-side crate: AGPL like the other Phase 2+ services.
+license = "AGPL-3.0"
+
+[features]
+# Host-only evidence hooks used by the local Kind fencing smoke. Production
+# service images never enable this feature.
+kind-e2e = [
+  "codewire-proto/client",
+  "connectrpc/client",
+  "dep:tokio-tungstenite",
+]
+
+[[bin]]
+name = "environment-setup-smoke"
+path = "src/bin/environment-setup-smoke.rs"
+required-features = ["kind-e2e"]
+
+[[bin]]
+name = "exec-stream-smoke"
+path = "src/bin/exec-stream-smoke.rs"
+required-features = ["kind-e2e"]
+
+[[bin]]
+name = "prepare-stream-smoke"
+path = "src/bin/prepare-stream-smoke.rs"
+required-features = ["kind-e2e"]
+
+[[bin]]
+name = "log-stream-smoke"
+path = "src/bin/log-stream-smoke.rs"
+required-features = ["kind-e2e"]
+
+[[bin]]
+name = "file-service-smoke"
+path = "src/bin/file-service-smoke.rs"
+required-features = ["kind-e2e"]
+
+[[bin]]
+name = "reconciler-ttl-smoke"
+path = "src/bin/reconciler-ttl-smoke.rs"
+required-features = ["kind-e2e"]
+
+[[bin]]
+name = "deploy-shape-smoke"
+path = "src/bin/deploy-shape-smoke.rs"
+required-features = ["kind-e2e"]
+
+[dependencies]
+codewire-api-contract = { workspace = true }
+codewire-gateway-proto = { workspace = true }
+codewire-proto = { workspace = true }
+codewire-server-core = { workspace = true }
+anyhow = { workspace = true }
+axum = { workspace = true, features = ["ws"] }
+schemars = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+kube = { workspace = true }
+futures = { workspace = true }
+reqwest = { workspace = true }
+k8s-openapi = { workspace = true }
+sqlx = { workspace = true }
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+tonic = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+# Sidecar readiness probes speak SSH/SFTP over a pod port-forward, the
+# same path the Go worker's CheckSidecarReady takes.
+russh = { workspace = true }
+russh-sftp = { workspace = true }
+uuid = { workspace = true }
+# Temporal worker (#36 Stage D1): EnvironmentWorkflow + activities.
+temporalio-sdk = { workspace = true }
+temporalio-client = { workspace = true }
+temporalio-macros = { workspace = true }
+temporalio-sdk-core = { workspace = true }
+temporalio-common = { workspace = true }
+url = { workspace = true }
+futures-util = "0.3"
+chrono = { workspace = true }
+connectrpc = { workspace = true }
+buffa = { workspace = true }
+buffa-types = { workspace = true }
+# Gateway sidecar token issuance.
+sha2 = { workspace = true }
+hmac = { workspace = true }
+base64 = { workspace = true }
+crc32fast = { workspace = true }
+# OS entropy for SSH keypair generation (ssh_keys.rs); version-pinned to the
+# ssh-key/rand_core 0.10 tree already in the lock.
+getrandom = "0.3"
+tokio-tungstenite = { version = "=0.28.0", default-features = false, features = ["connect", "handshake"], optional = true }
+
+[dev-dependencies]
+codewire-daemon = { workspace = true }
+codewire-proto = { workspace = true, features = ["client"] }
+connectrpc = { workspace = true, features = ["client"] }
+flate2 = { workspace = true }
+tempfile = { workspace = true }

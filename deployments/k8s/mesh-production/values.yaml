@@ -1,0 +1,62 @@
+fullnameOverride: codewire-mesh
+
+image:
+  repository: ghcr.io/codewiresh/codewire
+  # Keep this empty when pinning by digest.
+  tag: ""
+  # Set this to the exact released Mesh image digest for production rollouts.
+  digest: ""
+
+database:
+  enabled: true
+  secretName: "codewire-mesh-db-app"
+  uriKey: "uri"
+
+mesh:
+  baseURL: https://mesh.codewire.sh
+  authMode: oidc
+  authToken: ""
+  sshListen: ":2222"
+  listenAddr: "0.0.0.0:8080"
+
+oidc:
+  issuer: https://codewire.sh
+  clientID: codewire-mesh
+  clientSecretRef:
+    name: codewire-mesh-oidc
+    key: MESH_OIDC_CLIENT_SECRET
+
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+  hosts:
+    - host: mesh.codewire.sh
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    - hosts:
+        - mesh.codewire.sh
+      secretName: mesh-codewire-tls
+
+ssh:
+  service:
+    type: LoadBalancer
+    annotations: {}
+
+persistence:
+  enabled: true
+  size: 10Gi
+
+resources:
+  requests:
+    cpu: 250m
+    memory: 256Mi
+  limits:
+    cpu: "1"
+    memory: 1Gi

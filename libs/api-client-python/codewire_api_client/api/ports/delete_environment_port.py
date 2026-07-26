@@ -1,0 +1,176 @@
+from http import HTTPStatus
+from typing import Any, cast
+from urllib.parse import quote
+
+import httpx
+
+from ...client import AuthenticatedClient, Client
+from ...models.error_model import ErrorModel
+from ...types import Response
+
+
+def _get_kwargs(
+    org_id: str,
+    env_id: str,
+    port_id: str,
+) -> dict[str, Any]:
+
+    _kwargs: dict[str, Any] = {
+        "method": "delete",
+        "url": "/api/v1/organizations/{org_id}/environments/{env_id}/ports/{port_id}".format(
+            org_id=quote(str(org_id), safe=""),
+            env_id=quote(str(env_id), safe=""),
+            port_id=quote(str(port_id), safe=""),
+        ),
+    }
+
+    return _kwargs
+
+
+def _parse_response(*, client: AuthenticatedClient | Client, response: httpx.Response) -> Any | ErrorModel:
+    if response.status_code == 204:
+        response_204 = cast(Any, None)
+        return response_204
+
+    response_default = ErrorModel.from_dict(response.json())
+
+    return response_default
+
+
+def _build_response(*, client: AuthenticatedClient | Client, response: httpx.Response) -> Response[Any | ErrorModel]:
+    return Response(
+        status_code=HTTPStatus(response.status_code),
+        content=response.content,
+        headers=response.headers,
+        parsed=_parse_response(client=client, response=response),
+    )
+
+
+def sync_detailed(
+    org_id: str,
+    env_id: str,
+    port_id: str,
+    *,
+    client: AuthenticatedClient,
+) -> Response[Any | ErrorModel]:
+    """Remove a port registration
+
+    Args:
+        org_id (str): Organization ID
+        env_id (str): Environment ID
+        port_id (str): Port ID
+
+    Raises:
+        errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
+        httpx.TimeoutException: If the request takes longer than Client.timeout.
+
+    Returns:
+        Response[Any | ErrorModel]
+    """
+
+    kwargs = _get_kwargs(
+        org_id=org_id,
+        env_id=env_id,
+        port_id=port_id,
+    )
+
+    response = client.get_httpx_client().request(
+        **kwargs,
+    )
+
+    return _build_response(client=client, response=response)
+
+
+def sync(
+    org_id: str,
+    env_id: str,
+    port_id: str,
+    *,
+    client: AuthenticatedClient,
+) -> Any | ErrorModel | None:
+    """Remove a port registration
+
+    Args:
+        org_id (str): Organization ID
+        env_id (str): Environment ID
+        port_id (str): Port ID
+
+    Raises:
+        errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
+        httpx.TimeoutException: If the request takes longer than Client.timeout.
+
+    Returns:
+        Any | ErrorModel
+    """
+
+    return sync_detailed(
+        org_id=org_id,
+        env_id=env_id,
+        port_id=port_id,
+        client=client,
+    ).parsed
+
+
+async def asyncio_detailed(
+    org_id: str,
+    env_id: str,
+    port_id: str,
+    *,
+    client: AuthenticatedClient,
+) -> Response[Any | ErrorModel]:
+    """Remove a port registration
+
+    Args:
+        org_id (str): Organization ID
+        env_id (str): Environment ID
+        port_id (str): Port ID
+
+    Raises:
+        errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
+        httpx.TimeoutException: If the request takes longer than Client.timeout.
+
+    Returns:
+        Response[Any | ErrorModel]
+    """
+
+    kwargs = _get_kwargs(
+        org_id=org_id,
+        env_id=env_id,
+        port_id=port_id,
+    )
+
+    response = await client.get_async_httpx_client().request(**kwargs)
+
+    return _build_response(client=client, response=response)
+
+
+async def asyncio(
+    org_id: str,
+    env_id: str,
+    port_id: str,
+    *,
+    client: AuthenticatedClient,
+) -> Any | ErrorModel | None:
+    """Remove a port registration
+
+    Args:
+        org_id (str): Organization ID
+        env_id (str): Environment ID
+        port_id (str): Port ID
+
+    Raises:
+        errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
+        httpx.TimeoutException: If the request takes longer than Client.timeout.
+
+    Returns:
+        Any | ErrorModel
+    """
+
+    return (
+        await asyncio_detailed(
+            org_id=org_id,
+            env_id=env_id,
+            port_id=port_id,
+            client=client,
+        )
+    ).parsed

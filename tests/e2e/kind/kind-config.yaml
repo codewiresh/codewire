@@ -1,0 +1,55 @@
+# kind cluster for the billing e2e job (build-test.yml kind-e2e).
+#
+# One node, labeled ingress-ready so the vendored ingress-nginx kind
+# deploy schedules its controller here. The controller's node hostPorts 80
+# and 443 are mapped to host ports 8090 and 10443. Existing contract probes
+# use plain HTTP via 127.0.0.1 (the hostless ingress); the coordinator bidi
+# smoke uses localhost SNI plus TLS+ALPN h2 through 10443.
+# Both paths cross nginx ingress instead of talking directly to a service.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+  - role: control-plane
+    kubeadmConfigPatches:
+      - |
+        kind: InitConfiguration
+        nodeRegistration:
+          kubeletExtraArgs:
+            # ingress-ready: schedules the vendored ingress-nginx controller.
+            # node-pool=sandbox + isol8.../enabled: workspace pods carry these
+            # as nodeSelectors (prod's sandbox node-pool); without them the pod
+            # is unschedulable and the env never leaves `creating`. These are
+            # non-kubernetes.io labels, so NodeRestriction permits the kubelet
+            # to self-apply them.
+            node-labels: "ingress-ready=true,codewire.sh/node-pool=sandbox,isol8.codewire.sh/enabled=true"
+    extraPortMappings:
+      - containerPort: 80
+        hostPort: 8090
+        protocol: TCP
+      - containerPort: 443
+        hostPort: 10443
+        protocol: TCP
+      # Temporal frontend (NodePort 30733 on the temporal Service) —
+      # exposed directly instead of kubectl port-forward, which exits
+      # on the first connection error and made the smoke flaky.
+      - containerPort: 30733
+        hostPort: 7233
+        protocol: TCP
+      # codewire-orchestration HTTP (NodePort 30084) — lets the env-API
+      # e2e drive POST /environments through the real Rust service from
+      # the runner at http://localhost:8084.
+      - containerPort: 30084
+        hostPort: 8084
+        protocol: TCP
+      # Coordinator direct Service leg for the gateway transport-selector
+      # proof. The sidecar uses this in-cluster shape rather than another
+      # generated-client ingress smoke.
+      - containerPort: 30090
+        hostPort: 18092
+        protocol: TCP
+      # Postgres (NodePort 30432) — lets the host-side Go e2e suite seed
+      # an API key and assert lifecycle journal rows against the in-cluster DB
+      # without relying on kubectl port-forward.
+      - containerPort: 30432
+        hostPort: 25432
+        protocol: TCP

@@ -1,0 +1,43 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: codewire-confidential-runtime-smoke
+  namespace: codewire-runtime-probes
+  labels:
+    app.kubernetes.io/name: codewire-confidential-runtime-smoke
+    app.kubernetes.io/part-of: codewire
+    codewire.sh/runtime-tier: confidential
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: codewire-confidential-runtime-smoke
+        app.kubernetes.io/part-of: codewire
+        codewire.sh/runtime-tier: confidential
+    spec:
+      automountServiceAccountToken: false
+      runtimeClassName: confidential
+      nodeSelector:
+        node.codewire.sh/confidential-snp: "true"
+      restartPolicy: Never
+      containers:
+        - name: smoke
+          image: registry.k8s.io/e2e-test-images/busybox@sha256:caec39cad3b12c26600baf6e67ba811ac15d28a9288d0ccdfffb4b318992c3bb
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            capabilities:
+              drop:
+                - ALL
+          command:
+            - sh
+            - -lc
+            - |
+              echo "runtimeClass=confidential"
+              uname -a
+              test -r /proc/cpuinfo

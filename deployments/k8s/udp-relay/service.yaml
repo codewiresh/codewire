@@ -1,0 +1,21 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: codewire-udp-relay
+  namespace: prod
+  labels:
+    app.kubernetes.io/name: codewire
+    app.kubernetes.io/component: udp-relay
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: codewire
+    app.kubernetes.io/component: udp-relay
+  ports:
+    - port: 41641
+      targetPort: 41641
+      protocol: UDP
+      name: udp
+    - port: 8095
+      targetPort: 8095
+      name: http

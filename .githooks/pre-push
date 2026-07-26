@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+# Pre-push gate: refuse to push if the same checks CI runs would fail locally.
+# Install via `bun run hooks:install` (sets a shared absolute hooksPath).
+# Bypass for a one-off (NOT recommended): `git push --no-verify`.
+
+set -euo pipefail
+
+if ! INVOKING_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" ||
+  [ -z "$INVOKING_ROOT" ]; then
+  echo "pre-push: could not resolve the invoking worktree root" >&2
+  exit 1
+fi
+
+PREFLIGHT="$INVOKING_ROOT/scripts/dev/preflight.sh"
+if [ ! -x "$PREFLIGHT" ]; then
+  echo "pre-push: invoking worktree has no executable scripts/dev/preflight.sh" >&2
+  exit 1
+fi
+
+push_count=0
+head_sha=""
+base_sha=""
+remote_ref=""
+if [ ! -t 0 ]; then
+  while read -r _local_ref candidate_head candidate_remote_ref candidate_base; do
+    [ -n "${candidate_head:-}" ] || continue
+    if [[ "$candidate_head" =~ ^0+$ ]]; then
+      continue
+    fi
+    push_count=$((push_count + 1))
+    head_sha="$candidate_head"
+    base_sha="$candidate_base"
+    remote_ref="$candidate_remote_ref"
+  done
+fi
+
+if [ "$push_count" -gt 1 ]; then
+  export PREFLIGHT_FORCE_UNKNOWN=true
+elif [ "$push_count" -eq 1 ]; then
+  export PREFLIGHT_HEAD_SHA="$head_sha"
+  # Feature branches are always compared with canonical main so the local
+  # selection matches pull-request CI. A direct main push compares the exact
+  # remote before/after range supplied by Git.
+  if [ "$remote_ref" = refs/heads/main ] && [[ ! "$base_sha" =~ ^0+$ ]]; then
+    export PREFLIGHT_BASE_SHA="$base_sha"
+  fi
+fi
+
+exec "$PREFLIGHT"

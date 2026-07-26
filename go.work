@@ -1,0 +1,10 @@
+go 1.26.5
+
+use (
+	./libs/api-client-go
+	./libs/gen-go
+	./libs/sdk-examples/run-claude/go
+	./libs/sdk-go
+	./libs/tailnet
+	./tests/contract
+)

@@ -1,0 +1,170 @@
+syntax = "proto3";
+
+package codewire.admin.v1;
+
+import "google/protobuf/duration.proto";
+import "google/protobuf/struct.proto";
+import "google/protobuf/timestamp.proto";
+
+// AdminService exposes global operator reads. Every method requires a browser
+// session or OAuth-issued user bearer belonging to a global administrator;
+// organization-scoped API keys cannot call this service.
+service AdminService {
+  // GetStats returns global environment counts and current-month usage totals.
+  rpc GetStats(GetStatsRequest) returns (GetStatsResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+
+  // ListOrganizations returns every organization ordered by name.
+  rpc ListOrganizations(ListOrganizationsRequest) returns (ListOrganizationsResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+
+  // ListAuditLogs returns newest-first global audit entries.
+  rpc ListAuditLogs(ListAuditLogsRequest) returns (ListAuditLogsResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+
+  // ListEnvironmentLifecycleJournal returns newest-first lifecycle entries for
+  // one environment.
+  rpc ListEnvironmentLifecycleJournal(ListEnvironmentLifecycleJournalRequest)
+      returns (ListEnvironmentLifecycleJournalResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+
+  // GetEnvironmentStartupSummary returns global startup backlog counts and
+  // phase-duration percentiles within the requested window.
+  rpc GetEnvironmentStartupSummary(GetEnvironmentStartupSummaryRequest)
+      returns (GetEnvironmentStartupSummaryResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+
+  // GetEnvironmentStartupTimings returns the latest startup timing for every
+  // known phase of one environment.
+  rpc GetEnvironmentStartupTimings(GetEnvironmentStartupTimingsRequest)
+      returns (GetEnvironmentStartupTimingsResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+}
+
+message GetStatsRequest {}
+
+message GetStatsResponse {
+  int64 total_environments = 1;
+  int64 active_environments = 2;
+  double monthly_cpu_hours = 3;
+  double monthly_memory_gb_hours = 4;
+  int64 monthly_cost_cents = 5;
+}
+
+message Organization {
+  string id = 1;
+  string name = 2;
+  string slug = 3;
+  google.protobuf.Timestamp created_at = 4;
+}
+
+message ListOrganizationsRequest {}
+
+message ListOrganizationsResponse {
+  repeated Organization organizations = 1;
+}
+
+message ListAuditLogsRequest {
+  // Zero selects the server default of 50; the maximum is 200.
+  int32 limit = 1;
+  int32 offset = 2;
+  // Empty means no action filter.
+  string action = 3;
+  // Empty means no severity filter.
+  string severity = 4;
+}
+
+message AuditLogEntry {
+  string id = 1;
+  google.protobuf.Timestamp timestamp = 2;
+  string action = 3;
+  optional string user_id = 4;
+  optional string user_email = 5;
+  optional string ip_address = 6;
+  optional string user_agent = 7;
+  // Unset when the stored metadata is NULL.
+  google.protobuf.Struct metadata = 8;
+  string severity = 9;
+}
+
+message ListAuditLogsResponse {
+  repeated AuditLogEntry audit_logs = 1;
+}
+
+message ListEnvironmentLifecycleJournalRequest {
+  string environment_id = 1;
+  // Zero selects the server default of 100; the maximum is 500.
+  int32 limit = 2;
+}
+
+message EnvironmentLifecycleJournalEntry {
+  string id = 1;
+  string environment_id = 2;
+  string kind = 3;
+  string actor = 4;
+  string phase = 5;
+  string status = 6;
+  string from_state = 7;
+  string to_state = 8;
+  string checkpoint = 9;
+  string reason = 10;
+  // Always present; a stored SQL NULL is represented as protobuf null.
+  google.protobuf.Value metadata = 11;
+  google.protobuf.Timestamp created_at = 12;
+}
+
+message ListEnvironmentLifecycleJournalResponse {
+  repeated EnvironmentLifecycleJournalEntry entries = 1;
+}
+
+message GetEnvironmentStartupSummaryRequest {
+  // Unset selects the server default of 240 minutes. Present values must be a
+  // whole number of minutes because the existing shared query is minute-based.
+  google.protobuf.Duration window = 1;
+}
+
+message StartupPhaseSummary {
+  string phase = 1;
+  int32 sample_count = 2;
+  // Unset when the phase has no samples.
+  google.protobuf.Duration p50 = 3;
+  // Unset when the phase has no samples.
+  google.protobuf.Duration p95 = 4;
+}
+
+message GetEnvironmentStartupSummaryResponse {
+  google.protobuf.Timestamp generated_at = 1;
+  google.protobuf.Duration window = 2;
+  int32 starting_backlog_count = 3;
+  int32 starting_backlog_over_5m_count = 4;
+  int32 starting_backlog_over_10m_count = 5;
+  int32 running_without_gateway_ready_count = 6;
+  repeated StartupPhaseSummary phase_durations = 7;
+}
+
+message GetEnvironmentStartupTimingsRequest {
+  string environment_id = 1;
+}
+
+message EnvironmentStartupTiming {
+  string phase = 1;
+  string status = 2;
+  string message = 3;
+  // Unset when the log entry has no numeric duration.
+  google.protobuf.Duration duration = 4;
+  // Always present; a stored SQL NULL is represented as protobuf null.
+  google.protobuf.Value metadata = 5;
+  google.protobuf.Timestamp created_at = 6;
+}
+
+message GetEnvironmentStartupTimingsResponse {
+  string environment_id = 1;
+  google.protobuf.Timestamp created_at = 2;
+  repeated EnvironmentStartupTiming timings = 3;
+}

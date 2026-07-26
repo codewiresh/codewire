@@ -1,0 +1,37 @@
+[package]
+name = "codewire-daemon"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license = "AGPL-3.0"
+description = "Rust workspace daemon for Codewire sandbox exec, PTY, and file RPCs."
+
+[[bin]]
+name = "codewire-daemon"
+path = "src/main.rs"
+
+[lib]
+name = "codewire_daemon"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+axum = { workspace = true }
+codewire-gateway-proto = { workspace = true }
+filetime = { workspace = true }
+portable-pty = { workspace = true }
+prost-types = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+subtle = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+tonic = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+reqwest = { workspace = true }
+tempfile = { workspace = true }

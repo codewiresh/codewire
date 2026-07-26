@@ -1,0 +1,94 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
+mkdir -p "$ROOT/.tmp"
+TMP="$(mktemp -d "$ROOT/.tmp/integration-postgres-test.XXXXXX")"
+trap 'rm -rf "$TMP"' EXIT
+
+cat > "$TMP/docker" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >> "$FAKE_DOCKER_LOG"
+case "$1" in
+  run) printf '%s\n' fake-container-id ;;
+  port) printf '%s\n' 127.0.0.1:45678 ;;
+  exec|rm) ;;
+  *) printf 'unexpected fake docker command: %s\n' "$1" >&2; exit 1 ;;
+esac
+EOF
+chmod +x "$TMP/docker"
+cat > "$TMP/psql" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >> "$FAKE_PSQL_LOG"
+printf '%s\n' 1
+EOF
+chmod +x "$TMP/psql"
+export PATH="$TMP:$PATH"
+hash -r
+
+# shellcheck source=scripts/ci/verify/integration-postgres.sh
+source "$ROOT/scripts/ci/verify/integration-postgres.sh"
+
+reset_case() {
+  DATABASE_URL=""
+  DATABASE_URL_RUST=""
+  DATABASE_URL_EXPLICIT=false
+  DATABASE_URL_RUST_EXPLICIT=false
+  GITHUB_ACTIONS=false
+  GITHUB_RUN_ID="fixture-$$"
+  FAKE_DOCKER_LOG="$TMP/docker.log"
+  FAKE_PSQL_LOG="$TMP/psql.log"
+  export FAKE_DOCKER_LOG FAKE_PSQL_LOG
+  : > "$FAKE_DOCKER_LOG"
+  : > "$FAKE_PSQL_LOG"
+  integration_postgres_init
+}
+
+reset_case
+integration_postgres_configure
+[ "$INTEGRATION_POSTGRES_SOURCE" = managed ]
+[ "$DATABASE_URL" = "postgres://codewire:codewire@127.0.0.1:45678/codewire?sslmode=disable" ]
+[ "$DATABASE_URL_RUST" = "postgres://codewire:codewire@127.0.0.1:45678/codewire" ]
+grep -q '^run .*127.0.0.1::5432 postgres:17-alpine$' "$FAKE_DOCKER_LOG"
+grep -q '127.0.0.1:45678/codewire?sslmode=disable.*SELECT 1' "$FAKE_PSQL_LOG"
+integration_postgres_cleanup
+grep -q "^rm -f $INTEGRATION_POSTGRES_CONTAINER$" "$FAKE_DOCKER_LOG"
+[ "$INTEGRATION_POSTGRES_MANAGED" = false ]
+
+reset_case
+GITHUB_ACTIONS=true
+integration_postgres_configure
+[ "$INTEGRATION_POSTGRES_SOURCE" = ci ]
+[ "$DATABASE_URL" = "postgres://codewire:codewire@127.0.0.1:5432/codewire?sslmode=disable" ]
+[ "$DATABASE_URL_RUST" = "postgres://codewire:codewire@127.0.0.1:5432/codewire" ]
+[ ! -s "$FAKE_DOCKER_LOG" ]
+
+reset_case
+DATABASE_URL_EXPLICIT=true
+DATABASE_URL="postgres://synthetic:synthetic@127.0.0.1:60001/synthetic"
+DATABASE_URL_RUST_EXPLICIT=true
+DATABASE_URL_RUST="postgres://synthetic:synthetic@127.0.0.1:60002/synthetic"
+integration_postgres_configure
+[ "$INTEGRATION_POSTGRES_SOURCE" = explicit ]
+[ "$DATABASE_URL" = "postgres://synthetic:synthetic@127.0.0.1:60001/synthetic" ]
+[ "$DATABASE_URL_RUST" = "postgres://synthetic:synthetic@127.0.0.1:60002/synthetic" ]
+[ ! -s "$FAKE_DOCKER_LOG" ]
+
+reset_case
+DATABASE_URL_EXPLICIT=true
+DATABASE_URL="postgres://synthetic:synthetic@127.0.0.1:60003/synthetic"
+integration_postgres_configure
+[ "$DATABASE_URL_RUST" = "$DATABASE_URL" ]
+[ ! -s "$FAKE_DOCKER_LOG" ]
+
+reset_case
+DATABASE_URL_EXPLICIT=true
+if integration_postgres_configure >/dev/null 2>&1; then
+  echo "explicit empty DATABASE_URL was accepted" >&2
+  exit 1
+fi
+[ ! -s "$FAKE_DOCKER_LOG" ]
+
+printf '[test-integration-postgres] hermetic selection and cleanup cases passed\n'

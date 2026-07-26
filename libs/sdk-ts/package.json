@@ -1,0 +1,49 @@
+{
+  "name": "@codewire/sdk",
+  "version": "0.1.0",
+  "description": "Codewire SDK — environment-first cloud development",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx src/test.ts"
+  },
+  "keywords": [
+    "codewire",
+    "sandbox",
+    "environment",
+    "sdk"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/codewiresh/sdk.git",
+    "directory": "typescript"
+  },
+  "dependencies": {
+    "@bufbuild/protobuf": "2.12.1",
+    "@codewire/proto-ts": "file:../../packages/codewire-proto-ts",
+    "@connectrpc/connect": "2.1.2",
+    "@connectrpc/connect-node": "2.1.2",
+    "@connectrpc/connect-web": "2.1.2"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "tsx": "4.21.0",
+    "@types/node": "25.3.5",
+    "typescript": "5.9.3"
+  }
+}

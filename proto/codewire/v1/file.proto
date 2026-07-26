@@ -1,0 +1,68 @@
+syntax = "proto3";
+
+package codewire.v1;
+
+import "google/protobuf/timestamp.proto";
+
+// FileService lists and transfers files in a running sandbox environment.
+service FileService {
+  rpc ListFiles(ListFilesRequest) returns (ListFilesResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+  rpc DownloadFile(DownloadFileRequest) returns (stream DownloadFileResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+  rpc UploadFile(stream UploadFileRequest) returns (UploadFileResponse);
+}
+
+message ListFilesRequest {
+  string org_id = 1;
+  string environment_id = 2;
+  string path = 3;
+  int32 page_size = 4;
+  string page_token = 5;
+}
+
+message ListFilesResponse {
+  repeated FileEntry entries = 1;
+  string next_page_token = 2;
+}
+
+message FileEntry {
+  string name = 1;
+  int64 size = 2;
+  bool is_dir = 3;
+  uint32 mode = 4;
+  google.protobuf.Timestamp mod_time = 5;
+}
+
+message DownloadFileRequest {
+  string org_id = 1;
+  string environment_id = 2;
+  string path = 3;
+}
+
+message DownloadFileResponse {
+  oneof payload {
+    FileEntry info = 1;
+    bytes chunk = 2;
+  }
+}
+
+message UploadFileRequest {
+  oneof payload {
+    UploadFileHeader header = 1;
+    bytes chunk = 2;
+  }
+}
+
+message UploadFileHeader {
+  string org_id = 1;
+  string environment_id = 2;
+  string path = 3;
+}
+
+message UploadFileResponse {
+  string path = 1;
+  int64 size = 2;
+}

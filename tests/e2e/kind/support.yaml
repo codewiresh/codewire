@@ -1,0 +1,140 @@
+# Config/secret objects the real billing Deployment (envFrom/secretKeyRef
+# in deployments/k8s/billing/deployment.yaml) expects to exist. Supplying
+# them — instead of patching the references away — keeps the e2e
+# deployment as close to the shipped manifest as possible.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: codewire-config
+data:
+  DATABASE_URL: postgres://codewire:codewire@postgres:5432/codewire?sslmode=disable
+  FRONTEND_URL: http://127.0.0.1:8080
+  PREVIEW_BASE_DOMAIN: codewire-dev.local
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: codewire-secrets
+stringData:
+  SESSION_SECRET: kind-e2e-not-a-real-secret
+  STRIPE_SECRET_KEY: sk_test_buildtest_dummy
+  STRIPE_WEBHOOK_SECRET: whsec_test_secret
+---
+# Referenced by the deployment's DB_PASSWORD secretKeyRef.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: codewire-db-app
+stringData:
+  password: codewire
+---
+# Referenced unconditionally by the real coordinator Deployment. NATS_URL is
+# deliberately unset in this single-replica edge proof, so the value is never
+# used to establish a connection.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: nats-auth-token
+stringData:
+  token: kind-e2e-unused-nats-token
+---
+# Deterministic disposable-cluster CA for the HTTPS ingress proof. The
+# feature-gated test client trusts this CA explicitly; production client trust
+# remains the WebPKI root set.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: codewire-kind-ingress-ca
+stringData:
+  ca.crt: |-
+    -----BEGIN CERTIFICATE-----
+    MIIBqTCCAVCgAwIBAgIUHxZNS1sNac7rGwEvLVRkeeuofWswCgYIKoZIzj0EAwIw
+    IDEeMBwGA1UEAwwVQ29kZXdpcmUgS0lORCBUZXN0IENBMCAXDTI2MDcxMjAyMTAw
+    MloYDzIxMjYwNjE4MDIxMDAyWjAgMR4wHAYDVQQDDBVDb2Rld2lyZSBLSU5EIFRl
+    c3QgQ0EwWTATBgcqhkjOPQIBBggqhkjOPQMBBwNCAARTLmRvhaOxQ3+wHRfF/8G2
+    tIYej1VTJwAFwp7GguxZiGkk7aAMIITz7KTMDeLMfFCSnx0kGJfu36ObLWHyKLJk
+    o2YwZDAdBgNVHQ4EFgQUge6RsgPnkRalZ2HkZwC3SWxylKIwHwYDVR0jBBgwFoAU
+    ge6RsgPnkRalZ2HkZwC3SWxylKIwEgYDVR0TAQH/BAgwBgEB/wIBADAOBgNVHQ8B
+    Af8EBAMCAQYwCgYIKoZIzj0EAwIDRwAwRAIgJshE0bu4fdPm6wtAYkrAw0kFR2Se
+    v4HzzER4ZYhg78wCIB7jFpr7jjplRmKoeykfJrnlhmbIT3zGJ21cmP2wpfI+
+    -----END CERTIFICATE-----
+---
+# CA-signed localhost leaf and its test-only private key for ingress-nginx.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: codewire-kind-ingress-tls
+type: kubernetes.io/tls
+stringData:
+  tls.crt: |-
+    -----BEGIN CERTIFICATE-----
+    MIIByjCCAXGgAwIBAgIUQKPLBmB+H5NYNtUcnroIoVtRQ9owCgYIKoZIzj0EAwIw
+    IDEeMBwGA1UEAwwVQ29kZXdpcmUgS0lORCBUZXN0IENBMCAXDTI2MDcxMjAyMTAw
+    MloYDzIxMjYwNjE4MDIxMDAyWjAUMRIwEAYDVQQDDAlsb2NhbGhvc3QwWTATBgcq
+    hkjOPQIBBggqhkjOPQMBBwNCAATUXSKAUEpZMPdJfzh8cyu18HbD/fElfRzVFHvG
+    DaBCovzADcuUH/z5FNwDKAXDcERERVoGYWTZ4SUplPA8LAjso4GSMIGPMBoGA1Ud
+    EQQTMBGCCWxvY2FsaG9zdIcEfwAAATAMBgNVHRMBAf8EAjAAMA4GA1UdDwEB/wQE
+    AwIHgDATBgNVHSUEDDAKBggrBgEFBQcDATAdBgNVHQ4EFgQU0MKC6kp7Csx6J5Mc
+    4TCPK60ImgUwHwYDVR0jBBgwFoAUge6RsgPnkRalZ2HkZwC3SWxylKIwCgYIKoZI
+    zj0EAwIDRwAwRAIgJZkg99OHOYGsNXq/ySjRte0kGw6zNUZLDsk/1sWAml4CIA+9
+    jBDBJpoEyCcCkj9ezV6Z4IglRCxN+DCEWdmw0c05
+    -----END CERTIFICATE-----
+  tls.key: |-
+    -----BEGIN EC PRIVATE KEY-----
+    MHcCAQEEIOhCDKEGmBaSH/HVLowPE1TTogv2bPxlOGZ555m4xOOuoAoGCCqGSM49
+    AwEHoUQDQgAE1F0igFBKWTD3SX84fHMrtfB2w/3xJX0c1RR7xg2gQqL8wA3LlB/8
+    +RTcAygFw3BEREVaBmFk2eElKZTwPCwI7A==
+    -----END EC PRIVATE KEY-----
+---
+# Referenced by imagePullSecrets; never consulted because the image is
+# side-loaded into kind with imagePullPolicy: Never.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: gitea-registry
+type: kubernetes.io/dockerconfigjson
+stringData:
+  .dockerconfigjson: '{"auths":{}}'
+---
+# The agent-sandbox controller renders every workspace pod with
+# serviceAccountName=codewire-sandbox (orchestration's SANDBOX_SERVICE_ACCOUNT,
+# crates/codewire-orchestration/src/sandbox/template.rs). In prod/dev that SA
+# is provisioned per sandbox namespace; kind never created it, so pod creation
+# was rejected ("serviceaccount codewire-sandbox not found") and the env hung
+# in `creating`. A bare SA is sufficient — the workspace + side-loaded gateway
+# images are public, so no imagePullSecrets are needed here.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: codewire-sandbox
+---
+# kind e2e exercises environment lifecycle, not the real sandbox isolation
+# runtime. Product configs can render explicit RuntimeClasses even when the
+# handler is kind's default runc, so provide the aliases that local tests need.
+# Cluster-scoped — kustomize's namespace transformer leaves these alone.
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: runc
+handler: runc
+---
+# Legacy compatibility for older isol8-rendering paths in kind.
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: isol8
+handler: runc
+---
+# The workspace pod's PVC requests storageClassName=example-volumes (Hetzner
+# Cloud block storage in prod). kind has no such StorageClass, so the PVC
+# stayed unbound and the pod hung in Pending (unschedulable) — the env never
+# left `creating`. Alias example-volumes to kind's built-in local-path
+# provisioner; WaitForFirstConsumer lets the pod schedule, then the volume
+# binds on that node. Cluster-scoped — kustomize won't namespace it.
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: example-volumes
+provisioner: rancher.io/local-path
+volumeBindingMode: WaitForFirstConsumer
+reclaimPolicy: Delete

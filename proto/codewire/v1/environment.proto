@@ -1,0 +1,525 @@
+syntax = "proto3";
+
+package codewire.v1;
+
+import "codewire/v1/common.proto";
+import "codewire/v1/port.proto";
+import "codewire/v1/preset.proto";
+import "google/protobuf/duration.proto";
+import "google/protobuf/struct.proto";
+import "google/protobuf/timestamp.proto";
+
+// EnvironmentService manages environment resources, lifecycle intent, trust
+// reports, and explicit environment access grants.
+service EnvironmentService {
+  rpc ListEnvironments(ListEnvironmentsRequest) returns (ListEnvironmentsResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+  rpc CreateEnvironment(CreateEnvironmentRequest) returns (CreateEnvironmentResponse);
+  rpc GetEnvironment(GetEnvironmentRequest) returns (GetEnvironmentResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+  rpc DeleteEnvironment(DeleteEnvironmentRequest) returns (DeleteEnvironmentResponse);
+  rpc StopEnvironment(StopEnvironmentRequest) returns (StopEnvironmentResponse);
+  rpc StartEnvironment(StartEnvironmentRequest) returns (StartEnvironmentResponse);
+  rpc ProtectEnvironment(ProtectEnvironmentRequest) returns (ProtectEnvironmentResponse);
+  rpc UnprotectEnvironment(UnprotectEnvironmentRequest) returns (UnprotectEnvironmentResponse);
+  rpc CancelEnvironmentDeletion(CancelEnvironmentDeletionRequest) returns (CancelEnvironmentDeletionResponse);
+  rpc ExtendEnvironmentTtl(ExtendEnvironmentTtlRequest) returns (ExtendEnvironmentTtlResponse);
+  rpc GetEnvironmentTrustReport(GetEnvironmentTrustReportRequest) returns (GetEnvironmentTrustReportResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+  rpc GetEnvironmentDaemonStatus(GetEnvironmentDaemonStatusRequest) returns (GetEnvironmentDaemonStatusResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+  rpc StreamEnvironmentDaemonLogs(StreamEnvironmentDaemonLogsRequest) returns (stream StreamEnvironmentDaemonLogsResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+  rpc RepairEnvironmentDaemon(RepairEnvironmentDaemonRequest) returns (RepairEnvironmentDaemonResponse);
+  rpc ListEnvironmentAccess(ListEnvironmentAccessRequest) returns (ListEnvironmentAccessResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+  rpc GrantEnvironmentAccess(GrantEnvironmentAccessRequest) returns (GrantEnvironmentAccessResponse);
+  rpc RevokeEnvironmentAccess(RevokeEnvironmentAccessRequest) returns (RevokeEnvironmentAccessResponse);
+  rpc WatchEnvironmentCreate(WatchEnvironmentCreateRequest) returns (stream WatchEnvironmentCreateResponse);
+  rpc StreamLogs(StreamLogsRequest) returns (stream StreamLogsResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+}
+
+// EnvironmentState mirrors environments_state_check exactly. The real stored
+// UNKNOWN value is distinct from the proto zero value UNSPECIFIED.
+enum EnvironmentState {
+  ENVIRONMENT_STATE_UNSPECIFIED = 0;
+  ENVIRONMENT_STATE_PENDING = 1;
+  ENVIRONMENT_STATE_PENDING_BUILD = 2;
+  ENVIRONMENT_STATE_BUILDING = 3;
+  ENVIRONMENT_STATE_BUILD_FAILED = 4;
+  ENVIRONMENT_STATE_PULLING_SNAPSHOT = 5;
+  ENVIRONMENT_STATE_CREATING = 6;
+  ENVIRONMENT_STATE_STARTING = 7;
+  ENVIRONMENT_STATE_RUNNING = 8;
+  ENVIRONMENT_STATE_STOPPING = 9;
+  ENVIRONMENT_STATE_STOPPED = 10;
+  ENVIRONMENT_STATE_ARCHIVING = 11;
+  ENVIRONMENT_STATE_ARCHIVED = 12;
+  ENVIRONMENT_STATE_RESTORING = 13;
+  ENVIRONMENT_STATE_RESIZING = 14;
+  ENVIRONMENT_STATE_DESTROYING = 15;
+  ENVIRONMENT_STATE_DESTROYED = 16;
+  ENVIRONMENT_STATE_ERROR = 17;
+  ENVIRONMENT_STATE_UNKNOWN = 18;
+}
+
+// DesiredState mirrors environments_desired_state_check exactly.
+enum DesiredState {
+  DESIRED_STATE_UNSPECIFIED = 0;
+  DESIRED_STATE_STARTED = 1;
+  DESIRED_STATE_STOPPED = 2;
+  DESIRED_STATE_DESTROYED = 3;
+  DESIRED_STATE_ARCHIVED = 4;
+  DESIRED_STATE_RESIZED = 5;
+}
+
+message Environment {
+  string id = 1;
+  string org_id = 2;
+  string created_by = 3;
+  string preset_id = 4;
+  string type = 5;
+  string name = 6;
+  EnvironmentState state = 7;
+  DesiredState desired_state = 8;
+  string error_reason = 9;
+  bool recoverable = 10;
+  google.protobuf.Timestamp state_changed_at = 11;
+  int32 retry_count = 12;
+  int32 setup_phase = 13;
+  bool setup_complete = 14;
+  string setup_error = 15;
+  optional int32 ttl_seconds = 16;
+  google.protobuf.Timestamp shutdown_at = 17;
+  int32 cpu_millicores = 18;
+  int32 memory_mb = 19;
+  int32 disk_gb = 20;
+  int32 total_running_seconds = 21;
+  google.protobuf.Timestamp created_at = 22;
+  google.protobuf.Timestamp started_at = 23;
+  google.protobuf.Timestamp stopped_at = 24;
+  google.protobuf.Timestamp destroyed_at = 25;
+  bool protected = 26;
+  google.protobuf.Timestamp deletion_requested_at = 27;
+  google.protobuf.Timestamp deletion_grace_until = 28;
+  string preset_name = 29;
+  string network = 30;
+  repeated Port ports = 31;
+}
+
+message ListEnvironmentsRequest {
+  string org_id = 1;
+  string type = 2;
+  EnvironmentState state = 3;
+  bool include_destroyed = 4;
+  int32 page_size = 5;
+  string page_token = 6;
+}
+
+message ListEnvironmentsResponse {
+  repeated Environment environments = 1;
+  string next_page_token = 2;
+  google.protobuf.Duration poll_interval = 3;
+}
+
+message CreateEnvironmentRequest {
+  string org_id = 1;
+  optional string preset_id = 2;
+  optional string name = 3;
+  optional int32 cpu_millicores = 4;
+  optional int32 memory_mb = 5;
+  optional int32 disk_gb = 6;
+  optional int32 ttl_seconds = 7;
+  string preset_slug = 8;
+  string repo_url = 9;
+  string branch = 10;
+  repeated RepoEntry repos = 11;
+  string image = 12;
+  string install_command = 13;
+  string startup_script = 14;
+  map<string, string> env_vars = 15;
+  repeated SetupAgent agents = 16;
+  optional bool install_agents = 17;
+  string agent = 18;
+  map<string, string> agent_env = 19;
+  string secret_project = 20;
+  repeated AppPort app_ports = 21;
+  optional bool include_org_secrets = 22;
+  optional bool include_user_secrets = 23;
+}
+
+message CreateEnvironmentResponse {
+  Environment environment = 1;
+}
+
+message GetEnvironmentRequest {
+  string org_id = 1;
+  string environment_id = 2;
+}
+
+message GetEnvironmentResponse {
+  Environment environment = 1;
+  google.protobuf.Duration poll_interval = 2;
+}
+
+message DeleteEnvironmentRequest {
+  string org_id = 1;
+  string environment_id = 2;
+}
+
+message DeleteEnvironmentResponse {}
+
+message StopEnvironmentRequest {
+  string org_id = 1;
+  string environment_id = 2;
+}
+
+message StopEnvironmentResponse {
+  string status = 1;
+}
+
+enum StartOutcome {
+  START_OUTCOME_UNSPECIFIED = 0;
+  START_OUTCOME_STARTED = 1;
+  START_OUTCOME_RETRIED = 2;
+}
+
+message StartEnvironmentRequest {
+  string org_id = 1;
+  string environment_id = 2;
+}
+
+message StartEnvironmentResponse {
+  string status = 1;
+  StartOutcome outcome = 2;
+}
+
+message ProtectEnvironmentRequest {
+  string org_id = 1;
+  string environment_id = 2;
+}
+
+message ProtectEnvironmentResponse {
+  string status = 1;
+}
+
+message UnprotectEnvironmentRequest {
+  string org_id = 1;
+  string environment_id = 2;
+}
+
+message UnprotectEnvironmentResponse {
+  string status = 1;
+}
+
+message CancelEnvironmentDeletionRequest {
+  string org_id = 1;
+  string environment_id = 2;
+}
+
+message CancelEnvironmentDeletionResponse {
+  string status = 1;
+}
+
+message ExtendEnvironmentTtlRequest {
+  string org_id = 1;
+  string environment_id = 2;
+  int32 additional_seconds = 3;
+}
+
+message ExtendEnvironmentTtlResponse {
+  string status = 1;
+}
+
+enum AccessPermission {
+  ACCESS_PERMISSION_UNSPECIFIED = 0;
+  ACCESS_PERMISSION_VIEWER = 1;
+  ACCESS_PERMISSION_OPERATOR = 2;
+  ACCESS_PERMISSION_OWNER = 3;
+}
+
+message AccessGrant {
+  string id = 1;
+  string environment_id = 2;
+  string user_id = 3;
+  AccessPermission permission = 4;
+  string granted_by = 5;
+  google.protobuf.Timestamp created_at = 6;
+}
+
+message ListEnvironmentAccessRequest {
+  string org_id = 1;
+  string environment_id = 2;
+  int32 page_size = 3;
+  string page_token = 4;
+}
+
+message ListEnvironmentAccessResponse {
+  repeated AccessGrant access_grants = 1;
+  string next_page_token = 2;
+}
+
+message GrantEnvironmentAccessRequest {
+  string org_id = 1;
+  string environment_id = 2;
+  string user_id = 3;
+  AccessPermission permission = 4;
+}
+
+message GrantEnvironmentAccessResponse {
+  AccessGrant access_grant = 1;
+}
+
+message RevokeEnvironmentAccessRequest {
+  string org_id = 1;
+  string environment_id = 2;
+  string user_id = 3;
+}
+
+message RevokeEnvironmentAccessResponse {}
+
+message GetEnvironmentTrustReportRequest {
+  string org_id = 1;
+  string environment_id = 2;
+}
+
+message GetEnvironmentTrustReportResponse {
+  EnvironmentTrustReport trust_report = 1;
+}
+
+message EnvironmentTrustReport {
+  TrustReportEnvironment environment = 1;
+  TrustReportRuntime runtime = 2;
+  TrustReportPlacement placement = 3;
+  TrustReportImages images = 4;
+  TrustReportProvenance provenance = 5;
+  TrustReportAttestation attestation = 6;
+  TrustReportTrustee trustee = 7;
+  TrustReportSummary summary = 8;
+}
+
+message TrustReportEnvironment {
+  string id = 1;
+  string org_id = 2;
+  string type = 3;
+  string state = 4;
+}
+
+message TrustReportRuntime {
+  string profile = 1;
+  string runtime_class = 2;
+  string handler = 3;
+  bool confidential = 4;
+}
+
+message TrustReportPlacement {
+  string namespace = 1;
+  string workspace_pod = 2;
+  string pod_ip = 3;
+  string node = 4;
+  string zone = 5;
+  string region = 6;
+}
+
+message TrustReportImages {
+  string workspace_image = 1;
+  string workspace_image_id = 2;
+  string gateway_image = 3;
+  string gateway_image_id = 4;
+  string dind_image = 5;
+  string dind_image_id = 6;
+  string daemon_init_image = 7;
+  string daemon_init_image_id = 8;
+}
+
+message TrustReportProvenance {
+  string status = 1;
+  string guest_kernel = 2;
+  string guest_initrd = 3;
+  string guest_image = 4;
+  string firmware = 5;
+  string source = 6;
+  repeated string notes = 7;
+}
+
+message TrustReportAttestation {
+  string status = 1;
+  string tee = 2;
+  bool report_available = 3;
+  string report_source = 4;
+  map<string, string> metadata = 5;
+}
+
+message TrustReportTrustee {
+  string status = 1;
+  string resource_uri = 2;
+  string reference_values = 3;
+  string policy = 4;
+  repeated string evidence_issues = 5;
+}
+
+message TrustReportSummary {
+  string trust_level = 1;
+  bool production_verified = 2;
+  repeated string warnings = 3;
+}
+
+// WatchEnvironmentCreate replaces both the environment-create prepare SSE and
+// its synchronous JSON mode. Callers read through the terminal complete frame.
+message WatchEnvironmentCreateRequest {
+  string org_id = 1;
+  CreateEnvironmentRequest draft = 2;
+  optional bool analyze = 3;
+}
+
+message WatchEnvironmentCreateResponse {
+  oneof event {
+    PrepareProgress progress = 1;
+    RepoFetched repo_fetched = 2;
+    PrepareComplete complete = 3;
+  }
+}
+
+message PrepareProgress {
+  string phase = 1;
+  string message = 2;
+  int32 total = 3;
+  string repo = 4;
+}
+
+message RepoFetched {
+  int32 index = 1;
+  string repo = 2;
+  bool ok = 3;
+}
+
+message PrepareComplete {
+  CreateEnvironmentRequest draft = 1;
+  DetectionResult detection = 2;
+  Preset resolved_preset = 3;
+  RepoConfig repo_config = 4;
+}
+
+message DetectionResult {
+  string project_type = 1;
+  string preset_slug = 2;
+  string preset_image = 3;
+  string install_command = 4;
+  string startup_script = 5;
+  string language = 6;
+  string framework = 7;
+  string suggested_name = 8;
+  bool needs_docker = 9;
+  bool has_compose = 10;
+  repeated AppPort app_ports = 11;
+  repeated SetupAgent agents = 12;
+  optional bool install_agents = 13;
+  string secret_project = 14;
+  optional bool include_org_secrets = 15;
+  optional bool include_user_secrets = 16;
+  string cpu = 17;
+  string memory = 18;
+  string setup_notes = 19;
+}
+
+message RepoConfig {
+  string id = 1;
+  string org_id = 2;
+  string repo_url = 3;
+  optional string preset_id = 4;
+  google.protobuf.Struct setup_config = 5;
+  string created_by = 6;
+  string updated_at = 7;
+}
+
+// StreamLogs replaces both the bounded environment-log JSON list and the SSE
+// follower. The composite cursor keeps rows with identical timestamps visible.
+message StreamLogsRequest {
+  string org_id = 1;
+  string environment_id = 2;
+  bool follow = 3;
+  string after_log_id = 4;
+}
+
+message StreamLogsResponse {
+  oneof event {
+    EnvironmentLog log = 1;
+    StreamHeartbeat heartbeat = 2;
+  }
+}
+
+message StreamHeartbeat {
+  google.protobuf.Timestamp sent_at = 1;
+}
+
+message EnvironmentLog {
+  string id = 1;
+  string environment_id = 2;
+  string phase = 3;
+  string status = 4;
+  string message = 5;
+  google.protobuf.Struct metadata = 6;
+  google.protobuf.Timestamp created_at = 7;
+}
+
+enum EnvironmentDaemonState {
+  ENVIRONMENT_DAEMON_STATE_UNSPECIFIED = 0;
+  ENVIRONMENT_DAEMON_STATE_UNSUPPORTED = 1;
+  ENVIRONMENT_DAEMON_STATE_STARTING = 2;
+  ENVIRONMENT_DAEMON_STATE_READY = 3;
+  ENVIRONMENT_DAEMON_STATE_UNHEALTHY = 4;
+  ENVIRONMENT_DAEMON_STATE_UPGRADE_REQUIRED = 5;
+}
+
+message EnvironmentDaemonDiagnostic {
+  string name = 1;
+  bool healthy = 2;
+  string message = 3;
+}
+
+message EnvironmentDaemonStatus {
+  EnvironmentDaemonState state = 1;
+  uint32 protocol_version = 2;
+  uint32 minimum_protocol_version = 3;
+  string daemon_version = 4;
+  repeated string capabilities = 5;
+  string message = 6;
+  repeated EnvironmentDaemonDiagnostic diagnostics = 7;
+  string pod_name = 8;
+}
+
+message GetEnvironmentDaemonStatusRequest {
+  string org_id = 1;
+  string environment_id = 2;
+}
+
+message GetEnvironmentDaemonStatusResponse {
+  EnvironmentDaemonStatus status = 1;
+}
+
+message StreamEnvironmentDaemonLogsRequest {
+  string org_id = 1;
+  string environment_id = 2;
+}
+
+message StreamEnvironmentDaemonLogsResponse {
+  bytes data = 1;
+}
+
+message RepairEnvironmentDaemonRequest {
+  string org_id = 1;
+  string environment_id = 2;
+}
+
+message RepairEnvironmentDaemonResponse {
+  EnvironmentDaemonStatus status = 1;
+  string replaced_pod_name = 2;
+}

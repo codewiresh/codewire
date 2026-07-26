@@ -1,0 +1,56 @@
+syntax = "proto3";
+
+package codewire.internal.v1;
+
+// GatewayBindingService is intentionally anonymous. The handler resolves the
+// requesting pod and namespace against the cluster/DB, then issues a fresh
+// coordinate-scoped sidecar token for the bound environment.
+service GatewayBindingService {
+  // IssueGatewayBinding resolves a pod binding and issues a fresh sidecar
+  // token. A not-yet-bound pod receives not_found so the gateway can retry.
+  rpc IssueGatewayBinding(IssueGatewayBindingRequest) returns (IssueGatewayBindingResponse);
+}
+
+message IssueGatewayBindingRequest {
+  string pod = 1;
+  string namespace = 2;
+}
+
+message IssueGatewayBindingResponse {
+  string environment_id = 1;
+  string sidecar_token = 2;
+  // Empty when the workspace pod IP is not known yet.
+  string workspace_pod_ip = 3;
+  repeated int32 app_ports = 4;
+  // Unset when no enabled transport zone is resolved for the runtime node.
+  RuntimeTransport runtime_transport = 5;
+}
+
+// RuntimeTransport is the complete current gateway binding surface. Presence
+// of each nested value is significant and is preserved by the generated
+// client conversion in WS09 WI-5.
+message RuntimeTransport {
+  string runtime_region = 1;
+  string transport_zone = 2;
+  PeerRelayTransport peer_relay = 3;
+  DirectUdpTransport direct_udp = 4;
+  EndpointList stun = 5;
+  EndpointList derp = 6;
+}
+
+message PeerRelayTransport {
+  repeated string public_endpoints = 1;
+  optional string dns = 2;
+  string allocator_url = 3;
+  repeated string bind_addrs = 4;
+}
+
+message DirectUdpTransport {
+  optional string vip = 1;
+  optional int32 port_start = 2;
+  optional int32 port_end = 3;
+}
+
+message EndpointList {
+  repeated string endpoints = 1;
+}

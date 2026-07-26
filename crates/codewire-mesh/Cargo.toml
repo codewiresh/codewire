@@ -1,0 +1,46 @@
+[package]
+name = "codewire-mesh"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license = "AGPL-3.0"
+description = "Rust Codewire Mesh service."
+
+[[bin]]
+name = "codewire-mesh"
+path = "src/main.rs"
+
+[lib]
+name = "codewire_mesh"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+axum = { workspace = true, features = ["ws"] }
+base64 = { workspace = true }
+bytes = { workspace = true }
+chrono = { workspace = true }
+codewire-network-auth = { workspace = true }
+codewire-tailnet = { workspace = true }
+codewire-server-core = { workspace = true }
+ed25519-dalek = { workspace = true, features = ["pem"] }
+rand = { workspace = true }
+russh = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+sqlx = { workspace = true }
+subtle = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+url = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+futures-util = "0.3"
+tokio-tungstenite = { version = "0.28", default-features = false, features = ["connect", "handshake", "rustls-tls-webpki-roots"] }
+tower = { workspace = true }

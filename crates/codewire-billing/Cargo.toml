@@ -1,0 +1,70 @@
+[package]
+name = "codewire-billing"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license = "AGPL-3.0"
+description = "Codewire billing service: catalog reads, plan management, Stripe webhook handling"
+
+[[bin]]
+name = "codewire-billing"
+path = "src/main.rs"
+
+[[bin]]
+name = "billing-openapi-preview"
+path = "src/bin/openapi-preview.rs"
+
+[[bin]]
+name = "billing-runtime-smoke"
+path = "src/bin/runtime-smoke.rs"
+
+[lib]
+name = "codewire_billing"
+path = "src/lib.rs"
+
+[dependencies]
+codewire-api-contract = { workspace = true }
+codewire-proto = { workspace = true }
+codewire-server-core = { workspace = true }
+
+axum = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+schemars = { workspace = true }
+sqlx = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }
+chrono = { workspace = true }
+connectrpc = { workspace = true }
+buffa-types = { workspace = true }
+sha2 = { workspace = true }
+hmac = { workspace = true }
+reqwest = { workspace = true }
+uuid = { workspace = true }
+async-stripe = { workspace = true }
+async-stripe-core = { workspace = true }
+async-stripe-checkout = { workspace = true }
+async-stripe-billing = { workspace = true }
+async-stripe-shared = { workspace = true }
+async-stripe-webhook = { workspace = true }
+async-stripe-types = { workspace = true }
+
+# Temporal worker (#38): OrgTeardownWorkflow + the subscription-cancel
+# activity, on the codewire-billing task queue. Same pinned SDK the
+# orchestration worker uses.
+temporalio-sdk = { workspace = true }
+temporalio-client = { workspace = true }
+temporalio-macros = { workspace = true }
+temporalio-sdk-core = { workspace = true }
+temporalio-common = { workspace = true }
+url = { workspace = true }
+# Required in scope by the temporalio workflow/activity attribute macros.
+futures = { workspace = true }
+futures-util = "0.3"
+
+[dev-dependencies]
+# The wire contract drives generated BillingCatalogService clients over both
+# Connect codecs; production billing stays server-only.
+codewire-proto = { workspace = true, features = ["client"] }
+connectrpc = { workspace = true, features = ["client"] }

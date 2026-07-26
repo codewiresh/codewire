@@ -1,0 +1,32 @@
+---
+// Custom SiteTitle override — uses inline SVG so the logo works behind the
+// Vite dev proxy (Astro's image pipeline generates /@fs/ URLs that don't
+// resolve through the web app's Vite server).
+interface Props {
+  locale: string | undefined;
+}
+---
+
+<a href="/docs" class="site-title sl-flex">
+  <svg width="24" height="24" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+    <rect width="32" height="32" rx="8" fill="#0EA5E9" />
+    <path d="M8 10l6 6-6 6" stroke="white" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" />
+    <line x1="17" y1="22" x2="24" y2="22" stroke="white" stroke-width="2.5" stroke-linecap="round" />
+  </svg>
+  <span class="site-title-text">Codewire</span>
+</a>
+
+<style>
+  .site-title {
+    align-items: center;
+    gap: 0.5rem;
+    font-weight: 600;
+    color: var(--sl-color-white);
+    text-decoration: none;
+    white-space: nowrap;
+  }
+  svg {
+    width: 1.5rem;
+    height: 1.5rem;
+  }
+</style>

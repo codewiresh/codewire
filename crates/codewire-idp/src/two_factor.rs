@@ -1,0 +1,574 @@
+//! TOTP two-factor auth handlers.
+//!
+//! Owns `/api/auth/two-factor/{enable,verify,disable,validate}`. The encrypted
+//! DB columns use the stable AES-256-GCM layout:
+//! `base64(nonce(12B) || ciphertext || tag)`, key = sha256(session secret).
+
+use aes_gcm::aead::{Aead, KeyInit, OsRng, rand_core::RngCore};
+use aes_gcm::{Aes256Gcm, Nonce};
+use axum::extract::State;
+use axum::http::{HeaderMap, StatusCode, header};
+use axum::middleware;
+use axum::response::{IntoResponse, Response};
+use axum::routing::post;
+use axum::{Json, Router};
+use base64::Engine;
+use chrono::{NaiveDateTime, Utc};
+use codewire_server_core::auth::{AuthState, AuthUser, require_session_auth};
+use codewire_server_core::{AppError, ValidatedJson};
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+use serde_json::json;
+use sha2::{Digest, Sha256};
+use sqlx::{PgPool, Postgres, Transaction};
+use totp_rs::{Algorithm, Secret, TOTP};
+
+use crate::auth_session::{
+    AuthResponse, LOCKOUT_DURATION_SECS, MAX_FAILED_ATTEMPTS, UserAuthRow, create_session, hex_id,
+    request_info, session_cookie_string, too_many_requests, user_response,
+};
+
+#[derive(Clone)]
+pub struct TwoFactorState {
+    pool: PgPool,
+    session_secret: String,
+    secure: bool,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub(crate) struct CodeRequest {
+    code: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub(crate) struct ValidateRequest {
+    code: String,
+    token: String,
+}
+
+#[derive(Serialize, JsonSchema)]
+pub(crate) struct EnableResponse {
+    #[serde(rename = "totpUri")]
+    totp_uri: String,
+    secret: String,
+    #[serde(rename = "backupCodes")]
+    backup_codes: Vec<String>,
+}
+
+#[derive(Serialize, JsonSchema)]
+pub(crate) struct VerifyResponse {
+    enabled: bool,
+}
+
+#[derive(Serialize, JsonSchema)]
+pub(crate) struct DisableResponse {
+    disabled: bool,
+}
+
+#[derive(sqlx::FromRow)]
+struct TwoFactorUser {
+    id: String,
+    email: String,
+    two_factor_enabled: Option<bool>,
+}
+
+fn bare_unauthorized(detail: &'static str) -> AppError {
+    AppError::Coded {
+        status: StatusCode::UNAUTHORIZED,
+        code: "",
+        detail: detail.into(),
+    }
+}
+
+fn derive_key(secret: &str) -> [u8; 32] {
+    Sha256::digest(secret.as_bytes()).into()
+}
+
+fn encrypt(plaintext: &str, secret: &str) -> Result<String, AppError> {
+    let key = derive_key(secret);
+    let cipher = Aes256Gcm::new_from_slice(&key).map_err(|e| {
+        tracing::error!(error = %e, "failed to create 2FA cipher");
+        AppError::InternalMsg("Failed to encrypt 2FA data".into())
+    })?;
+    let mut nonce = [0u8; 12];
+    OsRng.fill_bytes(&mut nonce);
+    let mut out = nonce.to_vec();
+    let ciphertext = cipher
+        .encrypt(Nonce::from_slice(&nonce), plaintext.as_bytes())
+        .map_err(|e| {
+            tracing::error!(error = ?e, "failed to encrypt 2FA data");
+            AppError::InternalMsg("Failed to encrypt 2FA data".into())
+        })?;
+    out.extend_from_slice(&ciphertext);
+    Ok(base64::engine::general_purpose::STANDARD.encode(out))
+}
+
+fn decrypt(encrypted: &str, secret: &str) -> Result<String, AppError> {
+    let data = base64::engine::general_purpose::STANDARD
+        .decode(encrypted)
+        .map_err(|e| {
+            tracing::error!(error = %e, "failed to decode 2FA ciphertext");
+            AppError::InternalMsg("Failed to decrypt 2FA data".into())
+        })?;
+    if data.len() < 12 {
+        return Err(AppError::InternalMsg("Failed to decrypt 2FA data".into()));
+    }
+    let (nonce, ciphertext) = data.split_at(12);
+    let key = derive_key(secret);
+    let cipher = Aes256Gcm::new_from_slice(&key).map_err(|e| {
+        tracing::error!(error = %e, "failed to create 2FA cipher");
+        AppError::InternalMsg("Failed to decrypt 2FA data".into())
+    })?;
+    let plaintext = cipher
+        .decrypt(Nonce::from_slice(nonce), ciphertext)
+        .map_err(|e| {
+            tracing::error!(error = ?e, "failed to decrypt 2FA data");
+            AppError::InternalMsg("Failed to decrypt 2FA data".into())
+        })?;
+    String::from_utf8(plaintext).map_err(|e| {
+        tracing::error!(error = %e, "decrypted 2FA data was not UTF-8");
+        AppError::InternalMsg("Failed to decrypt 2FA data".into())
+    })
+}
+
+fn generate_backup_codes(count: usize, length: usize) -> Vec<String> {
+    (0..count)
+        .map(|_| {
+            let mut bytes = vec![0u8; (length / 2) + 1];
+            rand::rngs::OsRng.fill_bytes(&mut bytes);
+            let hex = crate::auth_session::hex_lower(&bytes);
+            hex[..length].to_string()
+        })
+        .collect()
+}
+
+fn pquerna_totp_uri(secret: &str, email: &str) -> String {
+    let issuer = "Codewire";
+    let label = format!(
+        "{}:{}",
+        urlencoding::encode(issuer),
+        urlencoding::encode(email)
+    );
+    format!(
+        "otpauth://totp/{label}?algorithm=SHA1&digits=6&issuer={}&period=30&secret={}",
+        urlencoding::encode(issuer),
+        urlencoding::encode(secret)
+    )
+}
+
+fn totp_from_secret(secret: &str, account_name: &str) -> Option<TOTP> {
+    let bytes = Secret::Encoded(secret.to_string()).to_bytes().ok()?;
+    TOTP::new(
+        Algorithm::SHA1,
+        6,
+        1,
+        30,
+        bytes,
+        Some("Codewire".to_string()),
+        account_name.to_string(),
+    )
+    .ok()
+}
+
+fn validate_totp(code: &str, secret: &str, account_name: &str) -> bool {
+    totp_from_secret(secret, account_name)
+        .and_then(|totp| totp.check_current(code).ok())
+        .unwrap_or(false)
+}
+
+async fn load_two_factor_user(pool: &PgPool, user_id: &str) -> Result<TwoFactorUser, AppError> {
+    sqlx::query_as(
+        r#"
+        SELECT id, email, two_factor_enabled
+        FROM users WHERE id = $1
+        "#,
+    )
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await?
+    .ok_or(AppError::Unauthorized)
+}
+
+async fn enable(
+    State(state): State<TwoFactorState>,
+    auth: AuthUser,
+) -> Result<Json<EnableResponse>, AppError> {
+    let user = load_two_factor_user(&state.pool, &auth.user_id).await?;
+    if user.two_factor_enabled.unwrap_or(false) {
+        return Err(AppError::BadRequest("2FA is already enabled".into()));
+    }
+
+    let raw_secret = Secret::generate_secret();
+    let secret = raw_secret.to_encoded().to_string();
+    let totp_uri = pquerna_totp_uri(&secret, &user.email);
+    let backup_codes = generate_backup_codes(10, 10);
+
+    let enc_secret = encrypt(&secret, &state.session_secret)
+        .map_err(|_| AppError::InternalMsg("Failed to encrypt 2FA secret".into()))?;
+    let backup_json = serde_json::to_string(&backup_codes)
+        .map_err(|_| AppError::InternalMsg("Failed to encrypt backup codes".into()))?;
+    let enc_backup = encrypt(&backup_json, &state.session_secret)
+        .map_err(|_| AppError::InternalMsg("Failed to encrypt backup codes".into()))?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO two_factor (id, user_id, secret, backup_codes)
+        VALUES ($1, $2, $3, $4)
+        ON CONFLICT (user_id) DO UPDATE SET secret = $3, backup_codes = $4
+        "#,
+    )
+    .bind(hex_id())
+    .bind(&user.id)
+    .bind(&enc_secret)
+    .bind(&enc_backup)
+    .execute(&state.pool)
+    .await
+    .map_err(|e| {
+        tracing::error!(error = %e, "failed to store 2FA data");
+        AppError::InternalMsg("Failed to store 2FA data".into())
+    })?;
+
+    Ok(Json(EnableResponse {
+        totp_uri,
+        secret,
+        backup_codes,
+    }))
+}
+
+async fn verify(
+    State(state): State<TwoFactorState>,
+    auth: AuthUser,
+    headers: HeaderMap,
+    ValidatedJson(req): ValidatedJson<CodeRequest>,
+) -> Result<Json<VerifyResponse>, AppError> {
+    if req.code.is_empty() {
+        return Err(AppError::BadRequest("Code is required".into()));
+    }
+    let user = load_two_factor_user(&state.pool, &auth.user_id).await?;
+    let enc_secret: String = sqlx::query_scalar("SELECT secret FROM two_factor WHERE user_id = $1")
+        .bind(&user.id)
+        .fetch_optional(&state.pool)
+        .await?
+        .ok_or_else(|| AppError::BadRequest("2FA not set up. Call enable first.".into()))?;
+    let secret = decrypt(&enc_secret, &state.session_secret)
+        .map_err(|_| AppError::InternalMsg("Failed to decrypt 2FA secret".into()))?;
+    if !validate_totp(&req.code, &secret, &user.email) {
+        return Err(AppError::BadRequest("Invalid 2FA code".into()));
+    }
+
+    sqlx::query("UPDATE users SET two_factor_enabled = true, updated_at = NOW() WHERE id = $1")
+        .bind(&user.id)
+        .execute(&state.pool)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "failed to enable 2FA");
+            AppError::InternalMsg("Failed to enable 2FA".into())
+        })?;
+
+    let (ip, ua) = request_info(&headers);
+    crate::auth_session::log_audit(
+        &state.pool,
+        "user.2fa.enabled",
+        &user.id,
+        &ip,
+        &ua,
+        json!(null),
+        "info",
+    )
+    .await;
+
+    Ok(Json(VerifyResponse { enabled: true }))
+}
+
+async fn disable(
+    State(state): State<TwoFactorState>,
+    auth: AuthUser,
+    headers: HeaderMap,
+) -> Result<Json<DisableResponse>, AppError> {
+    let user = load_two_factor_user(&state.pool, &auth.user_id).await?;
+    sqlx::query("DELETE FROM two_factor WHERE user_id = $1")
+        .bind(&user.id)
+        .execute(&state.pool)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "failed to disable 2FA");
+            AppError::InternalMsg("Failed to disable 2FA".into())
+        })?;
+    sqlx::query("UPDATE users SET two_factor_enabled = false, updated_at = NOW() WHERE id = $1")
+        .bind(&user.id)
+        .execute(&state.pool)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "failed to update 2FA user");
+            AppError::InternalMsg("Failed to update user".into())
+        })?;
+
+    let (ip, ua) = request_info(&headers);
+    crate::auth_session::log_audit(
+        &state.pool,
+        "user.2fa.disabled",
+        &user.id,
+        &ip,
+        &ua,
+        json!(null),
+        "warn",
+    )
+    .await;
+
+    Ok(Json(DisableResponse { disabled: true }))
+}
+
+async fn complete_login(
+    state: &TwoFactorState,
+    headers: &HeaderMap,
+    user_id: &str,
+) -> Result<Response, AppError> {
+    let (ip, ua) = request_info(headers);
+    let session = create_session(&state.pool, user_id, &ip, &ua).await?;
+    let user: UserAuthRow = sqlx::query_as(
+        r#"
+        SELECT id, email, email_verified, name, image, is_admin,
+               two_factor_enabled, failed_login_attempts, locked_until, created_at
+        FROM users WHERE id = $1
+        "#,
+    )
+    .bind(user_id)
+    .fetch_optional(&state.pool)
+    .await?
+    .ok_or_else(|| AppError::InternalMsg("Failed to get user".into()))?;
+
+    let body = AuthResponse {
+        user: user_response(user),
+        session,
+        skip_2fa_setup: false,
+    };
+    let cookie = session_cookie_string(&body.session.token, state.secure);
+    let mut resp = Json(body).into_response();
+    if let Ok(v) = header::HeaderValue::from_str(&cookie) {
+        resp.headers_mut().insert(header::SET_COOKIE, v);
+    }
+    Ok(resp)
+}
+
+async fn claim_token(
+    tx: &mut Transaction<'_, Postgres>,
+    token: &str,
+) -> Result<Option<String>, AppError> {
+    let user_id = sqlx::query_scalar(
+        r#"
+        DELETE FROM two_factor_tokens
+        WHERE token = $1 AND expires_at > NOW()
+        RETURNING user_id
+        "#,
+    )
+    .bind(token)
+    .fetch_optional(&mut **tx)
+    .await?;
+
+    sqlx::query("DELETE FROM two_factor_tokens WHERE expires_at <= NOW()")
+        .execute(&mut **tx)
+        .await?;
+    Ok(user_id)
+}
+
+async fn record_failed_attempt(
+    tx: &mut Transaction<'_, Postgres>,
+    user_id: &str,
+) -> Result<bool, AppError> {
+    let attempts: i32 = sqlx::query_scalar(
+        r#"
+        UPDATE users
+           SET failed_login_attempts = COALESCE(failed_login_attempts, 0) + 1,
+               locked_until = CASE
+                   WHEN COALESCE(failed_login_attempts, 0) + 1 >= $2
+                   THEN NOW() + ($3::bigint * interval '1 second')
+                   ELSE locked_until
+               END,
+               updated_at = NOW()
+         WHERE id = $1
+         RETURNING failed_login_attempts
+        "#,
+    )
+    .bind(user_id)
+    .bind(MAX_FAILED_ATTEMPTS)
+    .bind(LOCKOUT_DURATION_SECS)
+    .fetch_optional(&mut **tx)
+    .await?
+    .ok_or_else(|| AppError::InternalMsg("Failed to record 2FA attempt".into()))?;
+    Ok(attempts >= MAX_FAILED_ATTEMPTS)
+}
+
+async fn reset_failed_attempts(
+    tx: &mut Transaction<'_, Postgres>,
+    user_id: &str,
+) -> Result<(), AppError> {
+    let result = sqlx::query(
+        "UPDATE users SET failed_login_attempts = 0, locked_until = NULL, updated_at = NOW() WHERE id = $1",
+    )
+    .bind(user_id)
+    .execute(&mut **tx)
+    .await?;
+    if result.rows_affected() != 1 {
+        return Err(AppError::InternalMsg("Failed to complete login".into()));
+    }
+    Ok(())
+}
+
+async fn validate(
+    State(state): State<TwoFactorState>,
+    headers: HeaderMap,
+    ValidatedJson(req): ValidatedJson<ValidateRequest>,
+) -> Result<Response, AppError> {
+    if req.token.is_empty() {
+        return Err(AppError::BadRequest("Code and token are required".into()));
+    }
+
+    let mut tx = state.pool.begin().await?;
+    let user_id = claim_token(&mut tx, &req.token).await?;
+    if req.code.is_empty() {
+        tx.commit().await?;
+        return Err(AppError::BadRequest("Code and token are required".into()));
+    }
+    let Some(user_id) = user_id else {
+        tx.commit().await?;
+        return Err(bare_unauthorized("Invalid or expired 2FA token"));
+    };
+
+    let tf: Option<(String, Option<String>, String, Option<NaiveDateTime>)> = sqlx::query_as(
+        r#"
+        SELECT tf.secret, tf.backup_codes, u.email, u.locked_until
+        FROM two_factor tf
+        JOIN users u ON u.id = tf.user_id
+        WHERE tf.user_id = $1
+        FOR UPDATE OF tf, u
+        "#,
+    )
+    .bind(&user_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some((enc_secret, enc_backup, email, locked_until)) = tf else {
+        tx.commit().await?;
+        return Err(AppError::BadRequest("2FA not enabled".into()));
+    };
+    if locked_until.is_some_and(|locked| locked > Utc::now().naive_utc()) {
+        tx.commit().await?;
+        return Err(too_many_requests(
+            "Account is temporarily locked. Please try again later.",
+        ));
+    }
+
+    let secret = decrypt(&enc_secret, &state.session_secret).ok();
+    if let Some(secret) = secret
+        && validate_totp(&req.code, &secret, &email)
+    {
+        reset_failed_attempts(&mut tx, &user_id).await?;
+        tx.commit().await?;
+        return complete_login(&state, &headers, &user_id).await;
+    }
+
+    if let Some(enc_backup) = enc_backup
+        && let Ok(backup_str) = decrypt(&enc_backup, &state.session_secret)
+        && let Ok(mut codes) = serde_json::from_str::<Vec<String>>(&backup_str)
+        && let Some(pos) = codes.iter().position(|code| code == &req.code)
+    {
+        codes.remove(pos);
+        let new_backup_json = serde_json::to_string(&codes)
+            .map_err(|_| AppError::InternalMsg("Failed to update backup codes".into()))?;
+        let new_enc_backup = encrypt(&new_backup_json, &state.session_secret)
+            .map_err(|_| AppError::InternalMsg("Failed to update backup codes".into()))?;
+        sqlx::query("UPDATE two_factor SET backup_codes = $1 WHERE user_id = $2")
+            .bind(new_enc_backup)
+            .bind(&user_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| {
+                tracing::error!(error = %e, "failed to consume backup code");
+                AppError::InternalMsg("Failed to update backup codes".into())
+            })?;
+        reset_failed_attempts(&mut tx, &user_id).await?;
+        tx.commit().await?;
+        return complete_login(&state, &headers, &user_id).await;
+    }
+
+    let locked = record_failed_attempt(&mut tx, &user_id).await?;
+    tx.commit().await?;
+    if locked {
+        return Err(too_many_requests(
+            "Account is temporarily locked. Please try again later.",
+        ));
+    }
+    Err(bare_unauthorized("Invalid 2FA code or backup code"))
+}
+
+pub fn router(pool: PgPool, session_secret: String, secure: bool, auth: AuthState) -> Router {
+    let state = TwoFactorState {
+        pool,
+        session_secret,
+        secure,
+    };
+
+    let required = Router::new()
+        .route("/api/auth/two-factor/enable", post(enable))
+        .route("/api/auth/two-factor/verify", post(verify))
+        .route("/api/auth/two-factor/disable", post(disable))
+        .route_layer(middleware::from_fn_with_state(auth, require_session_auth));
+
+    Router::new()
+        .route("/api/auth/two-factor/validate", post(validate))
+        .merge(required)
+        .with_state(state)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn aes_gcm_roundtrips_and_rejects_wrong_secret() {
+        let encrypted = encrypt(r#"["abc123def0"]"#, "session-secret").unwrap();
+        assert_ne!(encrypted, r#"["abc123def0"]"#);
+        assert_eq!(
+            decrypt(&encrypted, "session-secret").unwrap(),
+            r#"["abc123def0"]"#
+        );
+        assert!(decrypt(&encrypted, "wrong").is_err());
+    }
+
+    #[test]
+    fn decrypts_accepted_aes_gcm_fixture() {
+        let encrypted = "AAECAwQFBgcICQoLLYY3dbWpcbc6RZ8ALjZtMW+NPilraGP3sMCB8lK85So=";
+        assert_eq!(
+            decrypt(encrypted, "go-session-secret").unwrap(),
+            "JBSWY3DPEHPK3PXP"
+        );
+    }
+
+    #[test]
+    fn backup_codes_match_go_shape() {
+        let codes = generate_backup_codes(10, 10);
+        assert_eq!(codes.len(), 10);
+        assert!(codes.iter().all(|c| c.len() == 10));
+        assert!(
+            codes
+                .iter()
+                .all(|c| c.chars().all(|ch| matches!(ch, '0'..='9' | 'a'..='f')))
+        );
+    }
+
+    #[test]
+    fn totp_uri_matches_pquerna_shape() {
+        assert_eq!(
+            pquerna_totp_uri("JBSWY3DPEHPK3PXP", "a+b@example.com"),
+            "otpauth://totp/Codewire:a%2Bb%40example.com?algorithm=SHA1&digits=6&issuer=Codewire&period=30&secret=JBSWY3DPEHPK3PXP"
+        );
+    }
+
+    #[test]
+    fn totp_secret_validates_current_token() {
+        let secret = Secret::generate_secret().to_encoded().to_string();
+        let totp = totp_from_secret(&secret, "user@example.com").unwrap();
+        let code = totp.generate_current().unwrap();
+        assert!(validate_totp(&code, &secret, "user@example.com"));
+        assert!(!validate_totp("000000", &secret, "user@example.com"));
+    }
+}

@@ -1,0 +1,19 @@
+version: v2
+
+modules:
+  - path: .
+
+lint:
+  use:
+    - STANDARD
+  ignore:
+    # Vendored upstream googleapis files (see google/rpc/*.proto provenance
+    # comments); they predate buf's STANDARD rules (no package version
+    # suffix, unprefixed enum values) and are kept byte-identical to
+    # upstream, so they are exempt from lint. `buf breaking` still covers
+    # them (FILE rules apply to every file in the module).
+    - google/rpc
+
+breaking:
+  use:
+    - FILE

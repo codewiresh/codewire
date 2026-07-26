@@ -1,0 +1,3 @@
+set -eu
+mkdir -p "$HOME/.codex"
+echo 'sk-golden-key' | codex login --with-api-key

@@ -1,0 +1,374 @@
+//! CLI-owned presentation shapes retained across Connect client flips.
+
+use std::collections::BTreeMap;
+
+use serde::{Deserialize, Serialize};
+
+use crate::organization_client::Preset;
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct Environment {
+    pub id: String,
+    pub org_id: String,
+    pub created_by: String,
+    pub preset_id: String,
+    #[serde(rename = "type")]
+    pub environment_type: String,
+    pub name: Option<String>,
+    pub state: String,
+    pub desired_state: String,
+    pub error_reason: Option<String>,
+    pub recoverable: bool,
+    pub state_changed_at: String,
+    pub retry_count: i32,
+    pub ttl_seconds: Option<i32>,
+    pub shutdown_at: Option<String>,
+    pub cpu_millicores: i32,
+    pub memory_mb: i32,
+    pub disk_gb: i32,
+    pub total_running_seconds: i32,
+    pub created_at: String,
+    pub started_at: Option<String>,
+    pub stopped_at: Option<String>,
+    pub destroyed_at: Option<String>,
+    pub protected: bool,
+    pub deletion_requested_at: Option<String>,
+    pub deletion_grace_until: Option<String>,
+    pub network: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct EnvironmentDaemonDiagnostic {
+    pub name: String,
+    pub healthy: bool,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct EnvironmentDaemonStatus {
+    pub state: String,
+    pub protocol_version: u32,
+    pub minimum_protocol_version: u32,
+    pub daemon_version: String,
+    pub capabilities: Vec<String>,
+    pub message: String,
+    pub diagnostics: Vec<EnvironmentDaemonDiagnostic>,
+    pub pod_name: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct EnvironmentDaemonRepair {
+    pub status: EnvironmentDaemonStatus,
+    pub replaced_pod_name: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct EnvironmentTrustReport {
+    pub environment: TrustReportEnvironment,
+    pub runtime: TrustReportRuntime,
+    pub placement: TrustReportPlacement,
+    pub images: TrustReportImages,
+    pub provenance: TrustReportProvenance,
+    pub attestation: TrustReportAttestation,
+    pub trustee: TrustReportTrustee,
+    pub summary: TrustReportSummary,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct TrustReportEnvironment {
+    pub id: String,
+    pub org_id: String,
+    #[serde(rename = "type")]
+    pub environment_type: String,
+    pub state: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct TrustReportRuntime {
+    pub profile: String,
+    pub runtime_class: String,
+    pub handler: String,
+    pub confidential: bool,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct TrustReportPlacement {
+    pub namespace: Option<String>,
+    pub workspace_pod: Option<String>,
+    pub pod_ip: Option<String>,
+    pub node: Option<String>,
+    pub zone: Option<String>,
+    pub region: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct TrustReportImages {
+    pub workspace_image: Option<String>,
+    pub workspace_image_id: Option<String>,
+    pub gateway_image: Option<String>,
+    pub gateway_image_id: Option<String>,
+    pub dind_image: Option<String>,
+    pub dind_image_id: Option<String>,
+    pub daemon_init_image: Option<String>,
+    pub daemon_init_image_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct TrustReportProvenance {
+    pub status: String,
+    pub guest_kernel: Option<String>,
+    pub guest_initrd: Option<String>,
+    pub guest_image: Option<String>,
+    pub firmware: Option<String>,
+    pub source: Option<String>,
+    pub notes: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct TrustReportAttestation {
+    pub status: String,
+    pub tee: String,
+    pub report_available: bool,
+    pub report_source: Option<String>,
+    pub metadata: BTreeMap<String, String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct TrustReportTrustee {
+    pub status: String,
+    pub resource_uri: Option<String>,
+    pub reference_values: Option<String>,
+    pub policy: Option<String>,
+    pub evidence_issues: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct TrustReportSummary {
+    pub trust_level: String,
+    pub production_verified: bool,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct CreateEnvironmentRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preset_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cpu_millicores: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory_mb: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disk_gb: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ttl_seconds: Option<i32>,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub preset_slug: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub repo_url: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub branch: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub repos: Vec<RepoEntry>,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub image: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub install_command: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub startup_script: String,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub env_vars: BTreeMap<String, String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub agents: Vec<SetupAgent>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub install_agents: Option<bool>,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub agent: String,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub agent_env: BTreeMap<String, String>,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub secret_project: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub app_ports: Vec<AppPort>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub include_org_secrets: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub include_user_secrets: Option<bool>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct RepoEntry {
+    pub url: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub branch: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct SetupAgent {
+    #[serde(rename = "type")]
+    pub agent_type: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct AppPort {
+    pub port: i32,
+    pub label: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub access: String,
+}
+
+#[derive(Clone, Debug, Default, Serialize, PartialEq, Eq)]
+pub struct PrepareEnvironmentRequest {
+    #[serde(flatten)]
+    pub draft: CreateEnvironmentRequest,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub analyze: Option<bool>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+#[serde(default)]
+pub struct PrepareEnvironmentResponse {
+    pub draft: CreateEnvironmentRequest,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detection: Option<DetectionResult>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolved_preset: Option<Preset>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repo_config: Option<RepoConfig>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+#[serde(default)]
+pub struct DetectionResult {
+    pub project_type: String,
+    pub preset_slug: String,
+    pub preset_image: String,
+    pub install_command: String,
+    pub startup_script: String,
+    pub language: String,
+    pub framework: String,
+    pub suggested_name: String,
+    pub needs_docker: bool,
+    pub has_compose: bool,
+    pub app_ports: Vec<AppPort>,
+    pub agents: Vec<SetupAgent>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub install_agents: Option<bool>,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub secret_project: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub include_org_secrets: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub include_user_secrets: Option<bool>,
+    pub cpu: String,
+    pub memory: String,
+    pub setup_notes: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+#[serde(default)]
+pub struct RepoConfig {
+    pub id: String,
+    pub org_id: String,
+    pub repo_url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preset_id: Option<String>,
+    pub setup_config: serde_json::Value,
+    pub created_by: String,
+    pub updated_at: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct StatusResponse {
+    pub status: String,
+}
+
+#[derive(Clone, Debug, Default, Serialize, PartialEq, Eq)]
+pub struct ExtendTtlRequest {
+    pub additional_seconds: i32,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct EnvironmentAccessGrant {
+    pub id: String,
+    pub environment_id: String,
+    pub user_id: String,
+    pub permission: String,
+    pub granted_by: String,
+    pub created_at: String,
+}
+
+#[derive(Clone, Debug, Default, Serialize, PartialEq, Eq)]
+pub struct GrantEnvironmentAccessRequest {
+    pub user_id: String,
+    pub permission: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+#[serde(default)]
+pub struct EnvironmentLog {
+    pub id: String,
+    pub environment_id: String,
+    pub phase: String,
+    pub status: String,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<serde_json::Value>,
+    pub created_at: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn environment_request_presentation_keeps_the_cli_json_shape() {
+        let request = CreateEnvironmentRequest {
+            preset_id: Some("preset_123".to_string()),
+            name: Some("builder".to_string()),
+            cpu_millicores: Some(2000),
+            memory_mb: Some(4096),
+            disk_gb: Some(40),
+            ttl_seconds: Some(3600),
+            preset_slug: "go".to_string(),
+            repo_url: "https://github.com/codewiresh/codewire".to_string(),
+            branch: "main".to_string(),
+            repos: vec![RepoEntry {
+                url: "https://github.com/codewiresh/codewire".to_string(),
+                branch: "main".to_string(),
+            }],
+            env_vars: BTreeMap::from([("FOO".to_string(), "bar".to_string())]),
+            agents: vec![SetupAgent {
+                agent_type: "codex".to_string(),
+            }],
+            ..Default::default()
+        };
+
+        let value = serde_json::to_value(request).expect("serialize request");
+        assert_eq!(value["preset_id"], "preset_123");
+        assert_eq!(value["name"], "builder");
+        assert_eq!(value["cpu_millicores"], 2000);
+        assert_eq!(value["repos"][0]["branch"], "main");
+        assert_eq!(value["env_vars"]["FOO"], "bar");
+        assert_eq!(value["agents"][0]["type"], "codex");
+    }
+}

@@ -1,0 +1,507 @@
+{
+  "apiVersion": "extensions.agents.x-k8s.io/v1beta1",
+  "kind": "SandboxTemplate",
+  "metadata": {
+    "name": "tmpl-golden-commodity",
+    "namespace": "codewire-runtime"
+  },
+  "spec": {
+    "networkPolicy": {
+      "egress": [
+        {
+          "to": [
+            {
+              "ipBlock": {
+                "cidr": "0.0.0.0/0",
+                "except": [
+                  "10.0.0.0/8",
+                  "172.16.0.0/12",
+                  "192.168.0.0/16",
+                  "169.254.0.0/16"
+                ]
+              }
+            },
+            {
+              "ipBlock": {
+                "cidr": "::/0",
+                "except": [
+                  "fc00::/7"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "ports": [
+            {
+              "port": 53,
+              "protocol": "UDP"
+            },
+            {
+              "port": 53,
+              "protocol": "TCP"
+            }
+          ],
+          "to": [
+            {
+              "namespaceSelector": {
+                "matchLabels": {
+                  "kubernetes.io/metadata.name": "kube-system"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "ports": [
+            {
+              "port": 443,
+              "protocol": "TCP"
+            },
+            {
+              "port": 80,
+              "protocol": "TCP"
+            }
+          ],
+          "to": [
+            {
+              "namespaceSelector": {
+                "matchLabels": {
+                  "kubernetes.io/metadata.name": "kube-system"
+                }
+              },
+              "podSelector": {
+                "matchLabels": {
+                  "app.kubernetes.io/name": "rke2-ingress-nginx"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "ports": [
+            {
+              "port": 8084,
+              "protocol": "TCP"
+            },
+            {
+              "port": 8085,
+              "protocol": "TCP"
+            }
+          ],
+          "to": [
+            {
+              "namespaceSelector": {
+                "matchLabels": {
+                  "kubernetes.io/metadata.name": "dev"
+                }
+              },
+              "podSelector": {
+                "matchLabels": {
+                  "app.kubernetes.io/component": "orchestration"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "ports": [
+            {
+              "port": 8090,
+              "protocol": "TCP"
+            }
+          ],
+          "to": [
+            {
+              "namespaceSelector": {
+                "matchLabels": {
+                  "kubernetes.io/metadata.name": "dev"
+                }
+              },
+              "podSelector": {
+                "matchLabels": {
+                  "app.kubernetes.io/component": "coordinator"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "ports": [
+            {
+              "port": 8443,
+              "protocol": "TCP"
+            },
+            {
+              "port": 3478,
+              "protocol": "UDP"
+            }
+          ],
+          "to": [
+            {
+              "namespaceSelector": {
+                "matchLabels": {
+                  "kubernetes.io/metadata.name": "dev"
+                }
+              },
+              "podSelector": {
+                "matchLabels": {
+                  "app.kubernetes.io/component": "derp"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "ports": [
+            {
+              "port": 8080,
+              "protocol": "TCP"
+            }
+          ],
+          "to": [
+            {
+              "namespaceSelector": {
+                "matchLabels": {
+                  "kubernetes.io/metadata.name": "dev"
+                }
+              },
+              "podSelector": {
+                "matchLabels": {
+                  "app.kubernetes.io/name": "codewire-mesh"
+                }
+              }
+            }
+          ]
+        }
+      ],
+      "ingress": [
+        {
+          "ports": [
+            {
+              "port": 2223,
+              "protocol": "TCP"
+            }
+          ]
+        },
+        {
+          "from": [
+            {
+              "namespaceSelector": {
+                "matchLabels": {
+                  "kubernetes.io/metadata.name": "dev"
+                }
+              },
+              "podSelector": {
+                "matchLabels": {
+                  "app.kubernetes.io/component": "orchestration"
+                }
+              }
+            }
+          ],
+          "ports": [
+            {
+              "port": 2222,
+              "protocol": "TCP"
+            }
+          ]
+        },
+        {
+          "ports": [
+            {
+              "port": 31000,
+              "protocol": "UDP"
+            }
+          ]
+        }
+      ]
+    },
+    "podTemplate": {
+      "metadata": {
+        "annotations": {
+          "codewire.sh/disk-gib": "40",
+          "codewire.sh/workspace": "true"
+        }
+      },
+      "spec": {
+        "containers": [
+          {
+            "command": [
+              "sh",
+              "-c",
+              "user_shell=/bin/bash; [ -x /bin/bash ] || user_shell=/bin/sh; grep -q '^[^:]*:[^:]*:1000:' /etc/passwd || echo \"codewire:x:1000:1000:codewire:/home/codewire:${user_shell}\" \u003e\u003e /etc/passwd; grep -q '^[^:]*:[^:]*:1000:' /etc/group || echo 'codewire:x:1000:' \u003e\u003e /etc/group; while [ ! -f /codewire/bin/daemon ]; do sleep 0.1; done; exec /codewire/bin/daemon"
+            ],
+            "env": [
+              {
+                "name": "CODEWIRE_WORKSPACE_SHIM_ADDR",
+                "value": "127.0.0.1:7777"
+              },
+              {
+                "name": "HOME",
+                "value": "/home/codewire"
+              },
+              {
+                "name": "USER",
+                "value": "codewire"
+              },
+              {
+                "name": "DOCKER_HOST",
+                "value": "unix:///codewire/run/docker.sock"
+              }
+            ],
+            "image": "ghcr.io/codewiresh/workspace:golden",
+            "name": "workspace",
+            "resources": {
+              "limits": {
+                "cpu": "2000m",
+                "ephemeral-storage": "8Gi",
+                "memory": "4096Mi"
+              },
+              "requests": {
+                "cpu": "2000m",
+                "ephemeral-storage": "8Gi",
+                "memory": "4096Mi"
+              }
+            },
+            "volumeMounts": [
+              {
+                "mountPath": "/home/codewire",
+                "name": "workspace"
+              },
+              {
+                "mountPath": "/workspace",
+                "name": "workspace"
+              },
+              {
+                "mountPath": "/codewire/bin",
+                "name": "codewire-bin"
+              },
+              {
+                "mountPath": "/codewire/run",
+                "name": "codewire-run"
+              }
+            ]
+          },
+          {
+            "command": [
+              "sh",
+              "-c",
+              "cp /usr/local/bin/daemon /codewire/bin/.daemon.tmp \u0026\u0026 mv /codewire/bin/.daemon.tmp /codewire/bin/daemon \u0026\u0026 exec /usr/local/bin/codewire-gateway"
+            ],
+            "env": [
+              {
+                "name": "CODEWIRE_WORKSPACE_SHIM_ADDR",
+                "value": "127.0.0.1:7777"
+              },
+              {
+                "name": "CODEWIRE_ENVIRONMENT_ID",
+                "value": "env-golden-commodity"
+              },
+              {
+                "name": "CODEWIRE_GATEWAY_TOKEN",
+                "value": "gw-token-golden-commodity"
+              },
+              {
+                "name": "CODEWIRE_API_URL",
+                "value": "https://codewire-dev.sh"
+              },
+              {
+                "name": "CODEWIRE_BINDING_URL",
+                "value": "http://codewire-orchestration.dev.svc.cluster.local:8085"
+              },
+              {
+                "name": "CODEWIRE_COORDINATOR_URL",
+                "value": "https://codewire-dev.sh/api/v1/internal/gateway/coordinate"
+              },
+              {
+                "name": "CODEWIRE_SERVER_NAMESPACE",
+                "value": "dev"
+              },
+              {
+                "name": "CODEWIRE_DERP_URL",
+                "value": "https://codewire-derp.dev.svc.cluster.local:8443"
+              },
+              {
+                "name": "CODEWIRE_STUN_HOST",
+                "value": "stun.codewire-dev.sh"
+              },
+              {
+                "name": "CODEWIRE_STUN_PORT",
+                "value": "3478"
+              },
+              {
+                "name": "CODEWIRE_TAILNET_UDP_LISTEN_ADDR",
+                "value": "0.0.0.0:31000"
+              },
+              {
+                "name": "CODEWIRE_DOCKER_PROXY_SOCK",
+                "value": "/codewire/run/docker.sock"
+              },
+              {
+                "name": "CODEWIRE_DOCKER_UPSTREAM_SOCK",
+                "value": "/var/run/docker/docker.sock"
+              },
+              {
+                "name": "CODEWIRE_SSH_HOST_KEY_PATH",
+                "value": "/codewire/workspace/.codewire/ssh/sidecar_host_ed25519"
+              },
+              {
+                "name": "POD_NAMESPACE",
+                "valueFrom": {
+                  "fieldRef": {
+                    "fieldPath": "metadata.namespace"
+                  }
+                }
+              }
+            ],
+            "image": "git.example.invalid/codewire/gateway:golden",
+            "name": "codewire-gateway",
+            "readinessProbe": {
+              "failureThreshold": 3,
+              "httpGet": {
+                "path": "/readyz",
+                "port": 2223
+              },
+              "periodSeconds": 2,
+              "timeoutSeconds": 2
+            },
+            "resources": {
+              "limits": {
+                "cpu": "500m",
+                "memory": "256Mi"
+              },
+              "requests": {
+                "cpu": "100m",
+                "memory": "128Mi"
+              }
+            },
+            "startupProbe": {
+              "failureThreshold": 45,
+              "httpGet": {
+                "path": "/readyz",
+                "port": 2223
+              },
+              "periodSeconds": 2,
+              "timeoutSeconds": 2
+            },
+            "volumeMounts": [
+              {
+                "mountPath": "/codewire/run",
+                "name": "codewire-run"
+              },
+              {
+                "mountPath": "/codewire/workspace",
+                "name": "workspace"
+              },
+              {
+                "mountPath": "/codewire/bin",
+                "name": "codewire-bin"
+              },
+              {
+                "mountPath": "/var/run/docker",
+                "name": "docker-sock"
+              }
+            ]
+          },
+          {
+            "command": [
+              "sh",
+              "-ec",
+              "data_image=\"${CODEWIRE_DOCKER_DATA_IMAGE:-/workspace/.codewire/docker-data.ext4}\"\ndata_root=\"${CODEWIRE_DOCKER_DATA_ROOT:-/var/lib/docker}\"\ndata_size=\"${CODEWIRE_DOCKER_DATA_SIZE:-8G}\"\nmount_mode=\"${CODEWIRE_DOCKER_MOUNT_MODE:-loop}\"\ncodewire_dir=\"$(dirname \"$data_image\")\"\nmkdir -p \"$codewire_dir\" \"$data_root\"\nchown 1000:1000 \"$codewire_dir\"\nchmod 0775 \"$codewire_dir\"\nif [ \"$mount_mode\" = \"loop\" ]; then\n  if [ ! -s \"$data_image\" ]; then\n    truncate -s \"$data_size\" \"$data_image\"\n    mkfs.ext4 -q -F \"$data_image\"\n  fi\n  if ! awk -v target=\"$data_root\" '$2 == target \u0026\u0026 $3 == \"ext4\" { found = 1 } END { exit found ? 0 : 1 }' /proc/mounts; then\n    mount -o loop \"$data_image\" \"$data_root\"\n  fi\nelif [ \"$mount_mode\" != \"none\" ]; then\n  echo \"unsupported CODEWIRE_DOCKER_MOUNT_MODE=$mount_mode\" \u003e\u00262\n  exit 1\nfi\nexec dockerd --host \"unix:///var/run/docker/docker.sock\" --group 1000 --data-root \"$data_root\" --storage-driver vfs"
+            ],
+            "env": [
+              {
+                "name": "DOCKER_TLS_CERTDIR",
+                "value": ""
+              },
+              {
+                "name": "CODEWIRE_DOCKER_DATA_IMAGE",
+                "value": "/workspace/.codewire/docker-data.ext4"
+              },
+              {
+                "name": "CODEWIRE_DOCKER_DATA_ROOT",
+                "value": "/var/lib/docker"
+              },
+              {
+                "name": "CODEWIRE_DOCKER_DATA_SIZE",
+                "value": "38G"
+              },
+              {
+                "name": "CODEWIRE_DOCKER_MOUNT_MODE",
+                "value": "loop"
+              }
+            ],
+            "image": "docker:dind",
+            "name": "dind",
+            "resources": {
+              "limits": {
+                "cpu": "2",
+                "memory": "2Gi"
+              },
+              "requests": {
+                "cpu": "500m",
+                "memory": "1Gi"
+              }
+            },
+            "securityContext": {
+              "privileged": true,
+              "runAsGroup": 0,
+              "runAsUser": 0
+            },
+            "volumeMounts": [
+              {
+                "mountPath": "/var/run/docker",
+                "name": "docker-sock"
+              },
+              {
+                "mountPath": "/workspace",
+                "name": "workspace"
+              }
+            ]
+          }
+        ],
+        "dnsPolicy": "ClusterFirst",
+        "restartPolicy": "Never",
+        "runtimeClassName": "commodity",
+        "securityContext": {
+          "fsGroup": 1000,
+          "runAsGroup": 1000,
+          "runAsUser": 1000
+        },
+        "serviceAccountName": "codewire-sandbox",
+        "volumes": [
+          {
+            "emptyDir": {},
+            "name": "codewire-bin"
+          },
+          {
+            "emptyDir": {},
+            "name": "codewire-run"
+          },
+          {
+            "emptyDir": {},
+            "name": "docker-sock"
+          }
+        ]
+      }
+    },
+    "volumeClaimTemplates": [
+      {
+        "metadata": {
+          "name": "workspace"
+        },
+        "spec": {
+          "accessModes": [
+            "ReadWriteOnce"
+          ],
+          "resources": {
+            "requests": {
+              "storage": "40Gi"
+            }
+          },
+          "storageClassName": "local-path"
+        }
+      }
+    ]
+  }
+}

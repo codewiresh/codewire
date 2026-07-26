@@ -1,0 +1,70 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: codewire-udp-relay
+  namespace: prod
+  labels:
+    app.kubernetes.io/name: codewire
+    app.kubernetes.io/component: udp-relay
+spec:
+  # Relay allocations and VNI bindings are in-memory. Keep one replica until
+  # relay sharding or shared state is implemented.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: codewire
+      app.kubernetes.io/component: udp-relay
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: codewire
+        app.kubernetes.io/component: udp-relay
+    spec:
+      imagePullSecrets:
+        - name: gitea-registry
+      terminationGracePeriodSeconds: 15
+      containers:
+        - name: udp-relay
+          image: git.example.com/codewire/services:latest
+          command: ["/codewire-udp-relay"]
+          ports:
+            - containerPort: 41641
+              protocol: UDP
+              name: udp
+            - containerPort: 8095
+              name: http
+          envFrom:
+            - configMapRef:
+                name: codewire-config
+            - secretRef:
+                name: codewire-secrets
+          resources:
+            requests:
+              cpu: 25m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            runAsUser: 65532
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 5

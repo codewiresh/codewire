@@ -1,0 +1,84 @@
+syntax = "proto3";
+
+package codewire.v1;
+
+import "google/protobuf/duration.proto";
+import "google/protobuf/empty.proto";
+
+// ExecService runs non-interactive commands in a running sandbox
+// environment. Output is bytes on the contract; REST's UTF-8 conversion is a
+// renderer concern.
+service ExecService {
+  rpc Exec(ExecRequest) returns (ExecResponse);
+  rpc StreamExec(StreamExecRequest) returns (stream StreamExecResponse);
+  rpc Run(stream RunRequest) returns (stream RunResponse);
+}
+
+message ExecRequest {
+  string org_id = 1;
+  string environment_id = 2;
+  repeated string command = 3;
+  string working_dir = 4;
+  map<string, string> env = 5;
+  google.protobuf.Duration timeout = 6;
+}
+
+message ExecResponse {
+  int32 exit_code = 1;
+  bytes stdout = 2;
+  bytes stderr = 3;
+}
+
+message StreamExecRequest {
+  string org_id = 1;
+  string environment_id = 2;
+  repeated string command = 3;
+  string working_dir = 4;
+  map<string, string> env = 5;
+}
+
+message StreamExecResponse {
+  oneof event {
+    bytes stdout = 1;
+    bytes stderr = 2;
+    int32 exit_code = 3;
+  }
+}
+
+// RunStart is the first message in a Run stream. It selects either a
+// byte-preserving exec session or a PTY without exposing the environment
+// daemon's private credential.
+message RunStart {
+  string org_id = 1;
+  string environment_id = 2;
+  repeated string command = 3;
+  string working_dir = 4;
+  map<string, string> env = 5;
+  google.protobuf.Duration timeout = 6;
+  bool allocate_tty = 7;
+  string term = 8;
+  uint32 columns = 9;
+  uint32 rows = 10;
+}
+
+message RunResize {
+  uint32 columns = 1;
+  uint32 rows = 2;
+}
+
+message RunRequest {
+  oneof input {
+    RunStart start = 1;
+    bytes stdin = 2;
+    RunResize resize = 3;
+    google.protobuf.Empty close_stdin = 4;
+  }
+}
+
+message RunResponse {
+  oneof event {
+    bytes stdout = 1;
+    bytes stderr = 2;
+    int32 exit_code = 3;
+  }
+}

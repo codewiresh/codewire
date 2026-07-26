@@ -1,0 +1,17 @@
+# Host-reachable coordinator service for the gateway selector smoke. This
+# bypasses ingress intentionally: the proof exercises the sidecar's in-cluster
+# h2c/WS origin and the real coordinator kill switch.
+apiVersion: v1
+kind: Service
+metadata:
+  name: codewire-coordinator-nodeport
+spec:
+  type: NodePort
+  selector:
+    app.kubernetes.io/name: codewire
+    app.kubernetes.io/component: coordinator
+  ports:
+    - port: 8090
+      targetPort: 8090
+      nodePort: 30090
+      name: http

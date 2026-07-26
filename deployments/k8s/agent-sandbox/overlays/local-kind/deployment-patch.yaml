@@ -1,0 +1,11 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agent-sandbox-controller
+  namespace: agent-sandbox-system
+spec:
+  template:
+    spec:
+      containers:
+        - name: agent-sandbox-controller
+          image: agent-sandbox-controller:local

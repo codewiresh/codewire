@@ -1,0 +1,43 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: codewire-orchestration
+  namespace: prod
+  labels:
+    app.kubernetes.io/name: codewire
+    app.kubernetes.io/component: orchestration
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: codewire
+    app.kubernetes.io/component: orchestration
+  ports:
+    - port: 8084
+      targetPort: 8084
+      name: http
+    - port: 8085
+      targetPort: internal-api
+      name: internal-api
+---
+# The native-gRPC Ingress uses service-upstream so this Service's distinct
+# ClusterIP, rather than the shared orchestration pod endpoints, keys its
+# ingress-nginx upstream pool. A cached HTTP/1 connection from the ordinary
+# HTTP/Connect Service therefore cannot enter grpc_pass. Both Services still
+# select the same pods, so auth, handlers, and state stay shared.
+apiVersion: v1
+kind: Service
+metadata:
+  name: codewire-orchestration-grpc
+  namespace: prod
+  labels:
+    app.kubernetes.io/name: codewire
+    app.kubernetes.io/component: orchestration
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: codewire
+    app.kubernetes.io/component: orchestration
+  ports:
+    - port: 8084
+      targetPort: http
+      name: grpc

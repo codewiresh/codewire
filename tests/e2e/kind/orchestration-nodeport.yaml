@@ -1,0 +1,21 @@
+# Host-reachable NodePort for the in-cluster codewire-orchestration
+# Service, so the env-API e2e step can drive POST /environments through
+# the REAL Rust HTTP surface (and its session auth) from the runner —
+# the same pattern as the temporal NodePort. The prod ClusterIP Service
+# (deployments/k8s/orchestration/service.yaml) is untouched; this is an
+# additive e2e-only Service mapped to host 8084 via the kind
+# extraPortMapping.
+apiVersion: v1
+kind: Service
+metadata:
+  name: codewire-orchestration-nodeport
+spec:
+  type: NodePort
+  selector:
+    app.kubernetes.io/name: codewire
+    app.kubernetes.io/component: orchestration
+  ports:
+    - port: 8084
+      targetPort: 8084
+      nodePort: 30084
+      name: http

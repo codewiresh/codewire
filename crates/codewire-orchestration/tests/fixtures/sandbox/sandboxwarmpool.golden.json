@@ -1,0 +1,14 @@
+{
+  "apiVersion": "extensions.agents.x-k8s.io/v1beta1",
+  "kind": "SandboxWarmPool",
+  "metadata": {
+    "name": "warm-golden",
+    "namespace": "codewire-runtime"
+  },
+  "spec": {
+    "replicas": 3,
+    "sandboxTemplateRef": {
+      "name": "tmpl-golden-isol8"
+    }
+  }
+}

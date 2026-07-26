@@ -1,0 +1,245 @@
+syntax = "proto3";
+
+package codewire.console.v1;
+
+import "google/protobuf/struct.proto";
+import "google/protobuf/timestamp.proto";
+
+// BillingService exposes first-party billing catalog, organization billing,
+// usage, and Stripe session operations. It is served by codewire-billing.
+service BillingService {
+  // ListOrgPlans returns the active organization plans keyed by plan key.
+  rpc ListOrgPlans(ListOrgPlansRequest) returns (ListOrgPlansResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+
+  // ListResourcePlans returns active plans for one resource type. Admin-only
+  // plans are visible only to platform administrators.
+  rpc ListResourcePlans(ListResourcePlansRequest) returns (ListResourcePlansResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+
+  // GetBillingOverview returns the caller's organization billing summary.
+  rpc GetBillingOverview(GetBillingOverviewRequest) returns (GetBillingOverviewResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+
+  // ListInvoices returns the most recent organization invoices.
+  rpc ListInvoices(ListInvoicesRequest) returns (ListInvoicesResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+
+  // ListBillingEvents returns the most recent organization billing events.
+  rpc ListBillingEvents(ListBillingEventsRequest) returns (ListBillingEventsResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+
+  // GetEnvironmentUsage returns the current billing-period environment usage.
+  rpc GetEnvironmentUsage(GetEnvironmentUsageRequest) returns (GetEnvironmentUsageResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+
+  // CreateCheckoutSession creates a Stripe subscription checkout session.
+  rpc CreateCheckoutSession(CreateCheckoutSessionRequest) returns (CreateCheckoutSessionResponse);
+
+  // CreatePortalSession creates a Stripe billing portal session.
+  rpc CreatePortalSession(CreatePortalSessionRequest) returns (CreatePortalSessionResponse);
+
+  // CreateSetupSession creates a Stripe payment-method setup session.
+  rpc CreateSetupSession(CreateSetupSessionRequest) returns (CreateSetupSessionResponse);
+}
+
+message ListOrgPlansRequest {}
+
+message ListOrgPlansResponse {
+  map<string, OrgPlan> plans = 1;
+}
+
+// OrgPlan is one organization subscription plan.
+message OrgPlan {
+  string display_name = 1;
+  int32 price_cents = 2;
+  int32 included_devs = 3;
+  int32 max_concurrent_ws = 4;
+  int32 max_team_members = 5;
+  int32 storage_gb = 6;
+  bool is_contact_us = 7;
+  reserved 8;
+  bool archived = 9;
+}
+
+message ListResourcePlansRequest {
+  // Existing catalog resource type, for example "sandbox".
+  string resource_type = 1;
+}
+
+message ListResourcePlansResponse {
+  map<string, ResourcePlan> plans = 1;
+}
+
+// ResourcePlan is one compute-resource subscription plan. Fractional-cent
+// overage rates use integer thousandths of a cent.
+message ResourcePlan {
+  string display_name = 1;
+  int32 price_cents = 2;
+  int32 included_devs = 3;
+  int32 max_concurrent_ws = 4;
+  int32 max_team_members = 5;
+  int32 storage_gb = 6;
+  bool is_contact_us = 7;
+  bool is_admin_only = 8;
+  bool archived = 9;
+  int32 included_cpu_hours = 10;
+  int32 included_mem_gb_hours = 11;
+  int32 included_disk_gb_hours = 12;
+  int64 cpu_overage_millicents = 13;
+  int64 mem_overage_millicents = 14;
+  int64 disk_overage_millicents = 15;
+}
+
+message GetBillingOverviewRequest {
+  string org_id = 1;
+}
+
+message GetBillingOverviewResponse {
+  bool billing_enabled = 1;
+  bool has_payment_method = 2;
+  string plan = 3;
+  string plan_display_name = 4;
+  string status = 5;
+  optional google.protobuf.Timestamp trial_end = 6;
+  int32 trial_days = 7;
+  int32 seat_count = 8;
+  int32 included_devs = 9;
+  int32 extra_seat_price_cents = 10;
+  BillingLimits limits = 11;
+  optional google.protobuf.Timestamp current_period_end = 12;
+  int32 active_subscriptions = 13;
+  int32 total_monthly_cost_cents = 14;
+  UsageSummary current_month_usage = 15;
+}
+
+message BillingLimitUsage {
+  int32 used = 1;
+  int32 max = 2;
+}
+
+message BillingLimits {
+  BillingLimitUsage team_members = 1;
+  int32 concurrent_workspaces = 2;
+  int32 storage_gb = 3;
+}
+
+message UsageSummary {
+  double cpu_hours = 1;
+  double memory_gb_hours = 2;
+  double storage_gb_hours = 3;
+}
+
+message ListInvoicesRequest {
+  string org_id = 1;
+}
+
+message ListInvoicesResponse {
+  repeated Invoice invoices = 1;
+}
+
+message Invoice {
+  string id = 1;
+  string stripe_invoice_id = 2;
+  string status = 3;
+  int32 amount_due = 4;
+  int32 amount_paid = 5;
+  string currency = 6;
+  optional string hosted_invoice_url = 7;
+  optional string invoice_pdf = 8;
+  optional google.protobuf.Timestamp period_start = 9;
+  optional google.protobuf.Timestamp period_end = 10;
+  google.protobuf.Timestamp created_at = 11;
+}
+
+message ListBillingEventsRequest {
+  string org_id = 1;
+}
+
+message ListBillingEventsResponse {
+  repeated BillingEvent events = 1;
+}
+
+message BillingEvent {
+  int64 id = 1;
+  string event_type = 2;
+  optional string org_id = 3;
+  optional int32 amount_cents = 4;
+  string currency = 5;
+  optional string stripe_item_id = 6;
+  google.protobuf.Struct metadata = 7;
+  google.protobuf.Timestamp created_at = 8;
+}
+
+message GetEnvironmentUsageRequest {
+  string org_id = 1;
+}
+
+message GetEnvironmentUsageResponse {
+  EnvironmentUsageMonth current_month = 1;
+  repeated EnvironmentUsageHour hourly_breakdown = 2;
+  repeated EnvironmentUsageEntry per_environment = 3;
+}
+
+message EnvironmentUsageMonth {
+  double cpu_hours = 1;
+  double mem_gb_hours = 2;
+  double disk_gb_hours = 3;
+  int32 cost_cents = 4;
+  int32 included_cpu_hours = 5;
+  int32 included_mem_gb_hours = 6;
+}
+
+message EnvironmentUsageHour {
+  google.protobuf.Timestamp hour = 1;
+  double cpu_hours = 2;
+  double mem_gb_hours = 3;
+  int32 cost_cents = 4;
+}
+
+message EnvironmentUsageEntry {
+  string id = 1;
+  string name = 2;
+  int32 running_seconds = 3;
+  int32 cost_cents = 4;
+  int32 cpu_millicores = 5;
+  int32 memory_mb = 6;
+  int32 hourly_cents = 7;
+}
+
+message CreateCheckoutSessionRequest {
+  string org_id = 1;
+  string plan = 2;
+  string success_url = 3;
+  string cancel_url = 4;
+}
+
+message CreateCheckoutSessionResponse {
+  string checkout_url = 1;
+}
+
+message CreatePortalSessionRequest {
+  string org_id = 1;
+  string return_url = 2;
+}
+
+message CreatePortalSessionResponse {
+  string portal_url = 1;
+}
+
+message CreateSetupSessionRequest {
+  string org_id = 1;
+  string success_url = 2;
+  string cancel_url = 3;
+}
+
+message CreateSetupSessionResponse {
+  // Stripe exposes setup-mode sessions through its Checkout API.
+  string checkout_url = 1;
+}

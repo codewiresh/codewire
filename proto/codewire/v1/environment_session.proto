@@ -1,0 +1,173 @@
+syntax = "proto3";
+
+package codewire.v1;
+
+import "google/protobuf/empty.proto";
+import "google/protobuf/timestamp.proto";
+
+// EnvironmentSessionService owns durable command and PTY sessions within a
+// running environment. It is intentionally separate from ExecService: Exec
+// and Run are one-shot operations, while these RPCs expose stable opaque
+// session identity, lifecycle, retained output, and reconnectable attachment.
+service EnvironmentSessionService {
+  rpc LaunchSession(LaunchSessionRequest) returns (LaunchSessionResponse);
+  rpc ListSessions(ListSessionsRequest) returns (ListSessionsResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+  rpc GetSession(GetSessionRequest) returns (GetSessionResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+  rpc StopSession(StopSessionRequest) returns (StopSessionResponse);
+  rpc RestartSession(RestartSessionRequest) returns (RestartSessionResponse);
+  rpc ReadSessionOutput(ReadSessionOutputRequest)
+      returns (ReadSessionOutputResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+  rpc AttachSession(stream AttachSessionRequest)
+      returns (stream AttachSessionResponse);
+}
+
+enum EnvironmentSessionState {
+  ENVIRONMENT_SESSION_STATE_UNSPECIFIED = 0;
+  ENVIRONMENT_SESSION_STATE_STARTING = 1;
+  ENVIRONMENT_SESSION_STATE_RUNNING = 2;
+  ENVIRONMENT_SESSION_STATE_STOPPING = 3;
+  ENVIRONMENT_SESSION_STATE_STOPPED = 4;
+  ENVIRONMENT_SESSION_STATE_EXITED = 5;
+  ENVIRONMENT_SESSION_STATE_FAILED = 6;
+  ENVIRONMENT_SESSION_STATE_INTERRUPTED = 7;
+}
+
+enum EnvironmentSessionOutputStream {
+  ENVIRONMENT_SESSION_OUTPUT_STREAM_UNSPECIFIED = 0;
+  ENVIRONMENT_SESSION_OUTPUT_STREAM_STDOUT = 1;
+  ENVIRONMENT_SESSION_OUTPUT_STREAM_STDERR = 2;
+  ENVIRONMENT_SESSION_OUTPUT_STREAM_PTY = 3;
+}
+
+// EnvironmentSession is the published durable-session record. session_id is
+// a stable opaque identifier assigned by the environment daemon at launch.
+message EnvironmentSession {
+  string session_id = 1;
+  EnvironmentSessionState state = 2;
+  repeated string command = 3;
+  string working_dir = 4;
+  bool pty = 5;
+  google.protobuf.Timestamp created_at = 6;
+  google.protobuf.Timestamp started_at = 7;
+  google.protobuf.Timestamp finished_at = 8;
+  optional int32 exit_code = 9;
+  uint64 output_end_offset = 10;
+  string status_message = 11;
+}
+
+// Output offsets are byte positions over the ordered retained output sequence.
+message EnvironmentSessionOutputChunk {
+  uint64 offset = 1;
+  uint64 next_offset = 2;
+  EnvironmentSessionOutputStream stream = 3;
+  bytes data = 4;
+}
+
+message LaunchSessionRequest {
+  string org_id = 1;
+  string environment_id = 2;
+  repeated string command = 3;
+  string working_dir = 4;
+  map<string, string> env = 5;
+  bool pty = 6;
+  string term = 7;
+  uint32 columns = 8;
+  uint32 rows = 9;
+}
+
+message LaunchSessionResponse {
+  EnvironmentSession session = 1;
+}
+
+message ListSessionsRequest {
+  string org_id = 1;
+  string environment_id = 2;
+}
+
+message ListSessionsResponse {
+  repeated EnvironmentSession sessions = 1;
+}
+
+message GetSessionRequest {
+  string org_id = 1;
+  string environment_id = 2;
+  string session_id = 3;
+}
+
+message GetSessionResponse {
+  EnvironmentSession session = 1;
+}
+
+message StopSessionRequest {
+  string org_id = 1;
+  string environment_id = 2;
+  string session_id = 3;
+}
+
+message StopSessionResponse {
+  EnvironmentSession session = 1;
+}
+
+message RestartSessionRequest {
+  string org_id = 1;
+  string environment_id = 2;
+  string session_id = 3;
+}
+
+message RestartSessionResponse {
+  EnvironmentSession session = 1;
+}
+
+message ReadSessionOutputRequest {
+  string org_id = 1;
+  string environment_id = 2;
+  string session_id = 3;
+  uint64 offset = 4;
+  uint64 limit = 5;
+}
+
+message ReadSessionOutputResponse {
+  repeated EnvironmentSessionOutputChunk chunks = 1;
+  uint64 next_offset = 2;
+  bool eof = 3;
+}
+
+// AttachSessionOpen must be the first frame in an attach stream.
+// output_offset resumes from a caller-selected retained-output byte cursor.
+message AttachSessionOpen {
+  string org_id = 1;
+  string environment_id = 2;
+  string session_id = 3;
+  uint64 output_offset = 4;
+}
+
+message AttachSessionResize {
+  uint32 columns = 1;
+  uint32 rows = 2;
+}
+
+message AttachSessionRequest {
+  oneof input {
+    AttachSessionOpen open = 1;
+    bytes stdin = 2;
+    AttachSessionResize resize = 3;
+    google.protobuf.Empty detach = 4;
+  }
+}
+
+message AttachSessionStatus {
+  EnvironmentSession session = 1;
+}
+
+message AttachSessionResponse {
+  oneof event {
+    EnvironmentSessionOutputChunk output = 1;
+    AttachSessionStatus status = 2;
+  }
+}

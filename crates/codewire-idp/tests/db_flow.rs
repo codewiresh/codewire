@@ -1,0 +1,2865 @@
+//! DB-backed end-to-end gate for the idp.
+//!
+//! Drives the assembled provider against a real Postgres, exercising every
+//! store's SQL: the desktop public client's `authorize -> token -> userinfo`,
+//! id_token signature verification against the published JWKS, and
+//! revocation/introspection.
+//!
+//! Skipped unless `DATABASE_URL` is set (so a plain `cargo test` with no
+//! database is a no-op); CI's integration job runs it against a Postgres
+//! initialized through the standard SQLx migration entrypoint.
+
+use base64::Engine;
+use codewire_idp::{IdpConfig, SigningKekKeyring, build_provider};
+use codewire_oidc::{AuthorizeOutcome, ErrorCode, KeyStore, RawAuthorizeParams, RequestContext};
+use codewire_server_core::auth::{
+    AuthState, AuthUser, CredentialContext, api_key_prefix, generate_api_key, hash_api_key,
+    hash_oauth_token, hash_session_token, require_auth,
+};
+use sqlx::PgPool;
+use totp_rs::{Algorithm, Secret, TOTP};
+
+// PKCE pair from RFC 7636 Appendix B.
+const VERIFIER: &str = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+const CHALLENGE: &str = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM";
+
+const USER: &str = "u_idp_e2e";
+const CLIENT: &str = "codewire-desktop";
+const REDIRECT: &str = "http://localhost:9876/callback";
+type PersistedNewKeyRow = (String, String, Vec<u8>, Vec<u8>, String, i16);
+type PersistedEnvelopeFields = (
+    Option<Vec<u8>>,
+    Option<Vec<u8>>,
+    Option<String>,
+    Option<i16>,
+);
+
+fn test_signing_keyring() -> SigningKekKeyring {
+    use std::sync::OnceLock;
+
+    static KEYRING: OnceLock<SigningKekKeyring> = OnceLock::new();
+    KEYRING
+        .get_or_init(|| {
+            let dir = std::env::temp_dir()
+                .join(format!("codewire-idp-db-flow-kek-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).expect("create test keyring");
+            std::fs::write(
+                dir.join("v1"),
+                "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+            )
+            .expect("write synthetic test KEK");
+            SigningKekKeyring::load(&dir, "v1").expect("load synthetic test keyring")
+        })
+        .clone()
+}
+
+fn rotation_test_keyrings(label: &str) -> (SigningKekKeyring, SigningKekKeyring) {
+    let dir = std::env::temp_dir().join(format!(
+        "codewire-idp-db-flow-rotation-{}-{label}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).expect("create rotation test keyring");
+    std::fs::write(
+        dir.join("v1"),
+        "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+    )
+    .expect("write synthetic v1 KEK");
+    std::fs::write(
+        dir.join("v2"),
+        "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+    )
+    .expect("write synthetic v2 KEK");
+    (
+        SigningKekKeyring::load(&dir, "v1").expect("load v1 rotation keyring"),
+        SigningKekKeyring::load(&dir, "v2").expect("load v2 rotation keyring"),
+    )
+}
+
+async fn seed(pool: &PgPool) {
+    sqlx::query("INSERT INTO users (id, email, name, email_verified, is_admin) VALUES ($1,$2,$3,true,false) ON CONFLICT (id) DO NOTHING")
+        .bind(USER).bind("e2e@example.com").bind("E2E User").execute(pool).await.unwrap();
+    sqlx::query(
+        r#"INSERT INTO oidc_clients
+            (id, name, application_type, auth_method, redirect_uris,
+             grant_types, response_types, scopes, skip_consent,
+             access_token_lifetime, refresh_token_lifetime, id_token_lifetime)
+           VALUES ($1,'Codewire Desktop','native','none',ARRAY[$2],
+             ARRAY['authorization_code','refresh_token'],ARRAY['code'],
+             ARRAY['openid','profile','email','offline_access'],true,
+             interval '1 hour', interval '720 hours', interval '1 hour')
+           ON CONFLICT (id) DO UPDATE SET
+             name = EXCLUDED.name,
+             application_type = EXCLUDED.application_type,
+             auth_method = EXCLUDED.auth_method,
+             redirect_uris = EXCLUDED.redirect_uris,
+             grant_types = EXCLUDED.grant_types,
+             response_types = EXCLUDED.response_types,
+             scopes = EXCLUDED.scopes,
+             skip_consent = EXCLUDED.skip_consent,
+             access_token_lifetime = EXCLUDED.access_token_lifetime,
+             refresh_token_lifetime = EXCLUDED.refresh_token_lifetime,
+             id_token_lifetime = EXCLUDED.id_token_lifetime,
+             disabled = false,
+             updated_at = NOW()"#,
+    )
+    .bind(CLIENT)
+    .bind(REDIRECT)
+    .execute(pool)
+    .await
+    .unwrap();
+    // A live session for the user (the authorize bridge reads the cookie).
+    sqlx::query("INSERT INTO sessions (id, user_id, token_hash, expires_at) VALUES ($1,$2,$3, NOW() + interval '1 hour') ON CONFLICT (id) DO NOTHING")
+        .bind("s_idp_e2e").bind(USER).bind(hash_session_token("sess_tok_e2e")).execute(pool).await.unwrap();
+}
+
+fn id_token_body(jwt: &str) -> serde_json::Value {
+    let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    serde_json::from_slice(&b64.decode(jwt.split('.').nth(1).unwrap()).unwrap()).unwrap()
+}
+
+/// Verify an EdDSA JWT against the provider's published JWKS (key by `kid`).
+fn verify_against_jwks(jwt: &str, jwks: &codewire_oidc::Jwks) -> bool {
+    use ed25519_dalek::{Verifier, VerifyingKey};
+    let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    let parts: Vec<&str> = jwt.split('.').collect();
+    let header: serde_json::Value = serde_json::from_slice(&b64.decode(parts[0]).unwrap()).unwrap();
+    let kid = header["kid"].as_str().unwrap();
+    let jwk = jwks.keys.iter().find(|k| k.kid == kid).unwrap();
+    let pk: [u8; 32] = b64.decode(&jwk.x).unwrap().try_into().unwrap();
+    let vk = VerifyingKey::from_bytes(&pk).unwrap();
+    let sig: [u8; 64] = b64.decode(parts[2]).unwrap().try_into().unwrap();
+    vk.verify(
+        format!("{}.{}", parts[0], parts[1]).as_bytes(),
+        &ed25519_dalek::Signature::from_bytes(&sig),
+    )
+    .is_ok()
+}
+
+#[tokio::test]
+async fn desktop_client_full_flow_against_postgres() {
+    let Ok(url) = std::env::var("DATABASE_URL") else {
+        eprintln!("DATABASE_URL unset — skipping idp DB e2e");
+        return;
+    };
+    let pool = PgPool::connect(&url).await.expect("connect");
+    seed(&pool).await;
+
+    let cfg = IdpConfig {
+        issuer: "https://idp.codewire.test".into(),
+        frontend_url: "https://app.codewire.test".into(),
+        resend_api_key: String::new(),
+        scopes_supported: vec![
+            "openid".into(),
+            "profile".into(),
+            "email".into(),
+            "offline_access".into(),
+        ],
+    };
+    let p = build_provider(pool.clone(), &cfg, test_signing_keyring())
+        .await
+        .unwrap();
+    let published_jwks = p.jwks().await.unwrap();
+    assert!(
+        !published_jwks.keys.is_empty(),
+        "provider startup must publish a signing key before token issuance"
+    );
+
+    // 1. authorize with a live session cookie → redirect carrying the code.
+    let ctx = RequestContext {
+        cookie: Some("codewire.session_token=sess_tok_e2e".into()),
+    };
+    let params = RawAuthorizeParams {
+        client_id: Some(CLIENT.into()),
+        redirect_uri: Some(REDIRECT.into()),
+        response_type: Some("code".into()),
+        scope: Some("openid profile email offline_access".into()),
+        state: Some("st".into()),
+        nonce: Some("no".into()),
+        code_challenge: Some(CHALLENGE.into()),
+        code_challenge_method: Some("S256".into()),
+        ..Default::default()
+    };
+    let url = match p.authorize(&ctx, params).await.unwrap() {
+        AuthorizeOutcome::Redirect(u) => u,
+        other => panic!("expected redirect, got {other:?}"),
+    };
+    assert!(url.starts_with(REDIRECT), "got {url}");
+    let code = url
+        .split("code=")
+        .nth(1)
+        .unwrap()
+        .split('&')
+        .next()
+        .unwrap()
+        .to_string();
+
+    // 2. exchange the code (public client + PKCE) -> tokens.
+    let tokens = p
+        .exchange_authorization_code(CLIENT, None, &code, REDIRECT, Some(VERIFIER))
+        .await
+        .unwrap();
+    assert_eq!(tokens.token_type, "Bearer");
+    assert!(
+        tokens.refresh_token.is_some(),
+        "offline_access → refresh token"
+    );
+    let id_token = tokens.id_token.clone().unwrap();
+
+    // 3. id_token: correct claims + verifiable signature against the JWKS.
+    let body = id_token_body(&id_token);
+    assert_eq!(body["iss"], "https://idp.codewire.test");
+    assert_eq!(body["sub"], USER);
+    assert_eq!(body["aud"], serde_json::json!([CLIENT]));
+    assert!(body.get("org_id").is_none());
+    assert!(body.get("org_role").is_none());
+    assert!(body.get("org_slug").is_none());
+    assert!(verify_against_jwks(&id_token, &published_jwks));
+
+    // 4. userinfo via the access token -> profile/email claims present.
+    let claims = serde_json::to_value(p.userinfo(&tokens.access_token).await.unwrap()).unwrap();
+    assert_eq!(claims["sub"], USER);
+    assert_eq!(claims["email"], "e2e@example.com");
+    assert!(claims.get("org_id").is_none());
+
+    // 5. introspection active -> revoke -> inactive.
+    assert!(
+        p.introspect(CLIENT, None, &tokens.access_token, None)
+            .await
+            .unwrap()
+            .active
+    );
+    p.revoke(CLIENT, None, &tokens.access_token, None)
+        .await
+        .unwrap();
+    assert!(
+        !p.introspect(CLIENT, None, &tokens.access_token, None)
+            .await
+            .unwrap()
+            .active
+    );
+    // The revoked access token also fails userinfo.
+    assert_eq!(
+        p.userinfo(&tokens.access_token).await.unwrap_err().code,
+        codewire_oidc::ErrorCode::InvalidToken
+    );
+
+    // 6. refresh rotation works against the DB.
+    let rt = tokens.refresh_token.unwrap();
+    let refreshed = p
+        .exchange_refresh_token(CLIENT, None, &rt, None)
+        .await
+        .unwrap();
+    assert!(refreshed.id_token.is_some());
+    assert!(
+        p.exchange_refresh_token(CLIENT, None, &rt, None)
+            .await
+            .is_err(),
+        "old RT dead"
+    );
+
+    // Best-effort cleanup (CI's DB is ephemeral, but keep reruns clean).
+    for sql in [
+        "DELETE FROM oidc_access_tokens WHERE user_id = $1",
+        "DELETE FROM oidc_refresh_tokens WHERE user_id = $1",
+        "DELETE FROM oidc_auth_requests WHERE user_id = $1",
+        "DELETE FROM sessions WHERE user_id = $1",
+    ] {
+        let _ = sqlx::query(sql).bind(USER).execute(&pool).await;
+    }
+    let _ = sqlx::query("DELETE FROM oidc_clients WHERE id = $1")
+        .bind(CLIENT)
+        .execute(&pool)
+        .await;
+    let _ = sqlx::query("DELETE FROM users WHERE id = $1")
+        .bind(USER)
+        .execute(&pool)
+        .await;
+}
+
+/// WI-1/WI-1a contract gate (docs/plans/connect-rpc/15-auth-policy.md):
+/// flavor-2 user bearers are opaque OIDC access tokens validated by direct
+/// lookup against `oidc_access_tokens` (joined to `users` and
+/// `oidc_clients`). A product-scoped token authenticates while a valid
+/// identity-only token remains UserInfo-capable but receives `403` from REST
+/// and Connect, including for an admin subject. Expired / revoked /
+/// disabled-client tokens receive `401`. Tokens are hashed at rest, and
+/// presenting the bearer never creates or slides a `sessions` row (fixed idp
+/// expiry, no session mirroring). Browser session tokens remain cookie-only:
+/// presenting one as an Authorization bearer must never be reinterpreted as a
+/// product credential.
+#[tokio::test]
+async fn oidc_access_token_authenticates_product_api_against_postgres() {
+    let Ok(url) = std::env::var("DATABASE_URL") else {
+        eprintln!("DATABASE_URL unset — skipping idp bearer-auth e2e");
+        return;
+    };
+    let pool = PgPool::connect(&url).await.expect("connect");
+
+    let user = "u_bearer_wi1";
+    let client = "codewire-bearer-wi1";
+    let redirect = "http://localhost:9877/callback";
+    let session_id = "s_bearer_wi1";
+    let session_token = "sess_tok_bearer_wi1";
+
+    let cleanup = |p: PgPool| async move {
+        for sql in [
+            "DELETE FROM oidc_access_tokens WHERE user_id = $1",
+            "DELETE FROM oidc_refresh_tokens WHERE user_id = $1",
+            "DELETE FROM oidc_auth_requests WHERE user_id = $1",
+            "DELETE FROM sessions WHERE user_id = $1",
+        ] {
+            let _ = sqlx::query(sql).bind(user).execute(&p).await;
+        }
+        let _ = sqlx::query("DELETE FROM oidc_clients WHERE id = $1")
+            .bind(client)
+            .execute(&p)
+            .await;
+        let _ = sqlx::query("DELETE FROM users WHERE id = $1")
+            .bind(user)
+            .execute(&p)
+            .await;
+    };
+    cleanup(pool.clone()).await;
+
+    sqlx::query("INSERT INTO users (id, email, name, email_verified, is_admin) VALUES ($1,$2,$3,true,false)")
+        .bind(user).bind("bearer-wi1@example.com").bind("Bearer WI1").execute(&pool).await.unwrap();
+    sqlx::query(
+        r#"INSERT INTO oidc_clients
+            (id, name, application_type, auth_method, redirect_uris,
+             grant_types, response_types, scopes, skip_consent,
+             access_token_lifetime, refresh_token_lifetime, id_token_lifetime)
+           VALUES ($1,'Bearer WI1','native','none',ARRAY[$2],
+             ARRAY['authorization_code','refresh_token'],ARRAY['code'],
+             ARRAY['openid','profile','email','offline_access','codewire.api'],true,
+             interval '1 hour', interval '720 hours', interval '1 hour')"#,
+    )
+    .bind(client)
+    .bind(redirect)
+    .execute(&pool)
+    .await
+    .unwrap();
+    // A live web session for the authorize bridge (flavor 1 stays intact
+    // throughout — the bearer path below must never touch it).
+    sqlx::query("INSERT INTO sessions (id, user_id, token_hash, expires_at) VALUES ($1,$2,$3, NOW() + interval '1 hour')")
+        .bind(session_id).bind(user).bind(hash_session_token(session_token)).execute(&pool).await.unwrap();
+
+    // 1. PKCE authorization-code flow mints an opaque access token.
+    let cfg = IdpConfig {
+        issuer: "https://idp.codewire.test".into(),
+        frontend_url: "https://app.codewire.test".into(),
+        resend_api_key: String::new(),
+        scopes_supported: vec![
+            "openid".into(),
+            "profile".into(),
+            "email".into(),
+            "offline_access".into(),
+            "codewire.api".into(),
+        ],
+    };
+    let p = build_provider(pool.clone(), &cfg, test_signing_keyring())
+        .await
+        .unwrap();
+    let ctx = RequestContext {
+        cookie: Some(format!("codewire.session_token={session_token}")),
+    };
+    let params = RawAuthorizeParams {
+        client_id: Some(client.into()),
+        redirect_uri: Some(redirect.into()),
+        response_type: Some("code".into()),
+        scope: Some("openid profile email offline_access codewire.api".into()),
+        state: Some("st".into()),
+        code_challenge: Some(CHALLENGE.into()),
+        code_challenge_method: Some("S256".into()),
+        ..Default::default()
+    };
+    let redirect_url = match p.authorize(&ctx, params).await.unwrap() {
+        AuthorizeOutcome::Redirect(u) => u,
+        other => panic!("expected redirect, got {other:?}"),
+    };
+    let code = redirect_url
+        .split("code=")
+        .nth(1)
+        .unwrap()
+        .split('&')
+        .next()
+        .unwrap()
+        .to_string();
+    let tokens = p
+        .exchange_authorization_code(client, None, &code, redirect, Some(VERIFIER))
+        .await
+        .unwrap();
+    let access = tokens.access_token.clone();
+    let refresh = tokens.refresh_token.clone().expect("offline_access → RT");
+
+    // Mint a separate identity-only token for the same subject/client. It
+    // remains valid for OIDC UserInfo but must never inherit product or admin
+    // authority from the subject.
+    let identity_params = RawAuthorizeParams {
+        client_id: Some(client.into()),
+        redirect_uri: Some(redirect.into()),
+        response_type: Some("code".into()),
+        scope: Some("openid profile email".into()),
+        state: Some("identity-st".into()),
+        code_challenge: Some(CHALLENGE.into()),
+        code_challenge_method: Some("S256".into()),
+        ..Default::default()
+    };
+    let identity_redirect = match p.authorize(&ctx, identity_params).await.unwrap() {
+        AuthorizeOutcome::Redirect(u) => u,
+        other => panic!("expected identity redirect, got {other:?}"),
+    };
+    let identity_code = identity_redirect
+        .split("code=")
+        .nth(1)
+        .unwrap()
+        .split('&')
+        .next()
+        .unwrap();
+    let identity_tokens = p
+        .exchange_authorization_code(client, None, identity_code, redirect, Some(VERIFIER))
+        .await
+        .unwrap();
+    let identity_access = identity_tokens.access_token;
+    let identity_claims = p.userinfo(&identity_access).await.unwrap();
+    assert_eq!(identity_claims.sub, user);
+
+    // 2. Hashed at rest: durable rows carry the SHA-256 digest, never the
+    // raw opaque token.
+    let by_digest: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM oidc_access_tokens WHERE token_hash = $1")
+            .bind(hash_oauth_token(&access))
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(by_digest, 1, "access token stored by digest");
+    let by_plaintext: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM oidc_access_tokens WHERE token_hash = $1")
+            .bind(&access)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(by_plaintext, 0, "raw access token must not persist");
+    let refresh_by_digest: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM oidc_refresh_tokens WHERE token_hash = $1")
+            .bind(hash_oauth_token(&refresh))
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(refresh_by_digest, 1, "refresh token stored by digest");
+
+    // 3. No session mirroring: minting created no sessions row for the
+    // access token.
+    let mirrored: i64 = sqlx::query_scalar("SELECT count(*) FROM sessions WHERE token_hash = $1")
+        .bind(hash_session_token(&access))
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        mirrored, 0,
+        "access tokens must not be mirrored into sessions"
+    );
+
+    // 4. A product-API router behind require_auth accepts the bearer.
+    let app = axum::Router::new()
+        .route(
+            "/whoami",
+            axum::routing::get(|user: AuthUser, credential: CredentialContext| async move {
+                let (client_id, scopes) = match credential {
+                    CredentialContext::OidcAccessToken { client_id, scopes } => {
+                        (Some(client_id), scopes)
+                    }
+                    _ => (None, Vec::new()),
+                };
+                axum::Json(serde_json::json!({
+                    "user_id": user.user_id,
+                    "via_api_key": user.via_api_key,
+                    "is_admin": user.is_admin,
+                    "oidc_client_id": client_id,
+                    "oidc_scopes": scopes,
+                }))
+            }),
+        )
+        .layer(axum::middleware::from_fn_with_state(
+            AuthState { pool: pool.clone() },
+            require_auth,
+        ));
+
+    let (st, body, _) = sess_req_bearer(&app, "GET", "/whoami", &access, "").await;
+    assert_eq!(st, 200, "PKCE-issued access token authenticates: {body}");
+    assert_eq!(body["user_id"], user);
+    assert_eq!(body["via_api_key"], false);
+    assert_eq!(body["is_admin"], false);
+    assert_eq!(body["oidc_client_id"], client);
+    assert_eq!(
+        body["oidc_scopes"],
+        serde_json::json!([
+            "openid",
+            "profile",
+            "email",
+            "offline_access",
+            "codewire.api"
+        ])
+    );
+
+    let (st, body, _) = sess_req_bearer(&app, "GET", "/whoami", &identity_access, "").await;
+    assert_eq!(
+        st, 403,
+        "identity-only access token must not authorize a product route"
+    );
+    assert_eq!(body["code"], "insufficient_scope");
+    assert_eq!(
+        body["hint"],
+        "Request the codewire.api scope and re-authorize"
+    );
+    sqlx::query("UPDATE users SET is_admin = true WHERE id = $1")
+        .bind(user)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (st, _body, _) = sess_req_bearer(&app, "GET", "/whoami", &identity_access, "").await;
+    assert_eq!(
+        st, 403,
+        "admin subject must not turn identity scope into product authority"
+    );
+    sqlx::query("UPDATE users SET is_admin = false WHERE id = $1")
+        .bind(user)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // 5. Fixed expiry, no sliding window: presenting the bearer leaves
+    // `sessions` untouched (same row count, same expiry, same updated_at).
+    let before: (chrono::NaiveDateTime, Option<chrono::NaiveDateTime>) =
+        sqlx::query_as("SELECT expires_at, updated_at FROM sessions WHERE id = $1")
+            .bind(session_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let (st, _b, _) = sess_req_bearer(&app, "GET", "/whoami", &access, "").await;
+    assert_eq!(st, 200);
+    let after: (chrono::NaiveDateTime, Option<chrono::NaiveDateTime>) =
+        sqlx::query_as("SELECT expires_at, updated_at FROM sessions WHERE id = $1")
+            .bind(session_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        before, after,
+        "access-token auth must not slide session expiry"
+    );
+    let session_rows: i64 = sqlx::query_scalar("SELECT count(*) FROM sessions WHERE user_id = $1")
+        .bind(user)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(session_rows, 1, "bearer auth must not mint session rows");
+
+    // 6. Expired token → 401.
+    sqlx::query(
+        "UPDATE oidc_access_tokens SET expires_at = NOW() - interval '1 minute' WHERE token_hash = $1",
+    )
+    .bind(hash_oauth_token(&access))
+    .execute(&pool)
+    .await
+    .unwrap();
+    let (st, _b, _) = sess_req_bearer(&app, "GET", "/whoami", &access, "").await;
+    assert_eq!(st, 401, "expired access token must fail");
+    sqlx::query(
+        "UPDATE oidc_access_tokens SET expires_at = NOW() + interval '1 hour' WHERE token_hash = $1",
+    )
+    .bind(hash_oauth_token(&access))
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // 7. Disabled client → 401; re-enabled → authenticates again.
+    sqlx::query("UPDATE oidc_clients SET disabled = true WHERE id = $1")
+        .bind(client)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (st, _b, _) = sess_req_bearer(&app, "GET", "/whoami", &access, "").await;
+    assert_eq!(st, 401, "disabled client's token must fail");
+    sqlx::query("UPDATE oidc_clients SET disabled = false WHERE id = $1")
+        .bind(client)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (st, _b, _) = sess_req_bearer(&app, "GET", "/whoami", &access, "").await;
+    assert_eq!(st, 200);
+
+    // 7b. The Connect auth layer (doc 03 WI-2) accepts the same
+    // provider-minted access token: `ConnectAuthLayer` wraps the identical
+    // `authenticate()` stack, so a flavor-2 bearer authenticates Connect
+    // mounts too and the handler sees the same AuthUser extension.
+    let connect_app = codewire_server_core::connect::ConnectAuthLayer::authenticated(AuthState {
+        pool: pool.clone(),
+    })
+    .apply(axum::Router::new().route(
+        "/codewire.testing.v1.PingService/Ping",
+        axum::routing::post(|user: codewire_server_core::auth::AuthUser| async move {
+            axum::Json(user)
+        }),
+    ));
+    let (st, body, _) = sess_req_bearer(
+        &connect_app,
+        "POST",
+        "/codewire.testing.v1.PingService/Ping",
+        &access,
+        "{}",
+    )
+    .await;
+    assert_eq!(st, 200, "Connect auth layer accepts minted bearer: {body}");
+    assert_eq!(body["user_id"], user);
+    let (st, body, _) = sess_req_bearer(
+        &connect_app,
+        "POST",
+        "/codewire.testing.v1.PingService/Ping",
+        &identity_access,
+        "{}",
+    )
+    .await;
+    assert_eq!(st, 403, "Connect rejects identity-only bearer");
+    assert_eq!(body["code"], "permission_denied");
+    let (st, body, _) = sess_req_bearer(
+        &connect_app,
+        "POST",
+        "/codewire.testing.v1.PingService/Ping",
+        "not-a-real-token",
+        "{}",
+    )
+    .await;
+    assert_eq!(st, 401, "Connect auth layer rejects a bogus bearer");
+    assert_eq!(body["code"], "unauthenticated", "Connect-shaped rejection");
+
+    // 8. Revoked (row deleted) → 401.
+    p.revoke(client, None, &access, None).await.unwrap();
+    let (st, _b, _) = sess_req_bearer(&app, "GET", "/whoami", &access, "").await;
+    assert_eq!(st, 401, "revoked access token must fail");
+
+    // 9. A browser session token is not a product bearer. It must reject here
+    // without being reinterpreted as the live session created above.
+    let (st, body, _) = sess_req_bearer(&app, "GET", "/whoami", session_token, "").await;
+    assert_eq!(st, 401, "raw session-token bearer must reject: {body}");
+    assert_ne!(body["user_id"], user);
+
+    cleanup(pool.clone()).await;
+}
+
+/// A clean provider must publish a usable signing key before it has issued a
+/// token. This uses the real, freshly migrated application schema rather than
+/// relying on a prior token-flow test to populate `jwks`.
+#[tokio::test]
+async fn provider_startup_publishes_jwks_before_token_issuance() {
+    let Ok(url) = std::env::var("DATABASE_URL") else {
+        eprintln!("DATABASE_URL unset — skipping initial JWKS readiness test");
+        return;
+    };
+    let admin = PgPool::connect(&url).await.expect("connect admin");
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let db_name = format!("cw_idp_jwks_ready_{}_{nanos}", std::process::id());
+    sqlx::query(&format!(r#"CREATE DATABASE "{db_name}""#))
+        .execute(&admin)
+        .await
+        .expect("create JWKS readiness database");
+
+    let mut test_url = url::Url::parse(&url).expect("parse DATABASE_URL");
+    test_url.set_path(&db_name);
+    let result = async {
+        codewire_server_core::migrate::ensure_schema(test_url.as_str()).await?;
+        let pool = PgPool::connect(test_url.as_str()).await?;
+        let cfg = IdpConfig {
+            issuer: "https://idp.codewire.test".into(),
+            frontend_url: "https://app.codewire.test".into(),
+            resend_api_key: String::new(),
+            scopes_supported: vec!["openid".into()],
+        };
+
+        let provider = build_provider(pool.clone(), &cfg, test_signing_keyring()).await?;
+        let jwks = provider.jwks().await?;
+        anyhow::ensure!(jwks.keys.len() == 1, "expected one initial public key");
+        let key = &jwks.keys[0];
+        anyhow::ensure!(key.kty == "OKP");
+        anyhow::ensure!(key.crv == "Ed25519");
+        anyhow::ensure!(key.alg == "EdDSA");
+        anyhow::ensure!(key.use_ == "sig");
+        anyhow::ensure!(!key.kid.is_empty() && !key.x.is_empty());
+
+        let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM jwks")
+            .fetch_one(&pool)
+            .await?;
+        anyhow::ensure!(rows == 1, "provider startup did not persist one signer");
+        pool.close().await;
+        anyhow::Ok(())
+    }
+    .await;
+
+    let _ = sqlx::query(&format!(
+        r#"DROP DATABASE IF EXISTS "{db_name}" WITH (FORCE)"#
+    ))
+    .execute(&admin)
+    .await;
+    result.expect("initial JWKS readiness");
+}
+
+/// Regression: concurrent providers starting against an empty registry must
+/// create exactly one encrypted signer and every replica must adopt it. The
+/// active-signer transaction lock, not a timestamp-shaped `kid`, supplies the
+/// single-winner guarantee. This runs in its own throwaway database (only the
+/// `jwks` table is needed) so it cannot disturb sibling tests.
+#[tokio::test]
+async fn first_signing_key_creation_survives_concurrent_providers() {
+    let Ok(url) = std::env::var("DATABASE_URL") else {
+        eprintln!("DATABASE_URL unset — skipping jwks first-key race test");
+        return;
+    };
+    let admin = PgPool::connect(&url).await.expect("connect admin");
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    // pid keeps concurrent test processes from colliding on the same
+    // clock tick (same class as the migrate TestDatabase name race).
+    let db_name = format!("cw_idp_jwks_race_{}_{nanos}", std::process::id());
+    sqlx::query(&format!(r#"CREATE DATABASE "{db_name}""#))
+        .execute(&admin)
+        .await
+        .expect("create race db");
+
+    let mut race_url = url::Url::parse(&url).expect("parse DATABASE_URL");
+    race_url.set_path(&db_name);
+    let result = async {
+        let pool = PgPool::connect(race_url.as_str()).await?;
+        sqlx::query(
+            "CREATE TABLE jwks (
+                id text PRIMARY KEY,
+                public_key text NOT NULL,
+                private_key_ciphertext bytea,
+                private_key_nonce bytea,
+                private_key_kek_id text,
+                private_key_format smallint,
+                created_at timestamp without time zone NOT NULL,
+                expires_at timestamp without time zone,
+                CONSTRAINT jwks_private_key_envelope_shape_check CHECK (
+                    num_nonnulls(private_key_ciphertext, private_key_nonce,
+                        private_key_kek_id, private_key_format) = ANY (ARRAY[0, 4])
+                )
+            )",
+        )
+        .execute(&pool)
+        .await?;
+
+        let mut tasks = tokio::task::JoinSet::new();
+        for _ in 0..8 {
+            let store = codewire_idp::keys::PgKeyStore::new(pool.clone(), test_signing_keyring());
+            tasks.spawn(async move { store.active_signer().await });
+        }
+        let mut signers = Vec::new();
+        while let Some(joined) = tasks.join_next().await {
+            let signer = joined
+                .expect("signer task panicked")
+                .map_err(|e| anyhow::anyhow!("active_signer failed under race: {}", e.0))?;
+            signers.push(signer);
+        }
+        anyhow::ensure!(signers.len() == 8);
+
+        // Every replica must adopt the exact persisted winner and be able to
+        // decrypt/use it. The prior test's 1-2-row allowance was weaker than
+        // the rolling-replica contract.
+        let rows: Vec<PersistedNewKeyRow> = sqlx::query_as(
+            "SELECT id, public_key, private_key_ciphertext, \
+                        private_key_nonce, private_key_kek_id, private_key_format FROM jwks",
+        )
+        .fetch_all(&pool)
+        .await?;
+        anyhow::ensure!(
+            rows.len() == 1,
+            "expected one persisted winner, got {}",
+            rows.len()
+        );
+        anyhow::ensure!(rows[0].2.len() == 48);
+        anyhow::ensure!(rows[0].3.len() == 12);
+        anyhow::ensure!(rows[0].4 == "v1");
+        anyhow::ensure!(rows[0].5 == 1);
+        let winner = &signers[0];
+        for signer in &signers {
+            anyhow::ensure!(signer.kid == winner.kid);
+            anyhow::ensure!(signer.public_key == winner.public_key);
+            anyhow::ensure!(signer.secret_key == winner.secret_key);
+        }
+
+        use ed25519_dalek::{Signer, Verifier};
+        let secret: [u8; 32] = winner.secret_key.as_slice().try_into()?;
+        let signing = ed25519_dalek::SigningKey::from_bytes(&secret);
+        let signature = signing.sign(b"first-key envelope winner");
+        signing
+            .verifying_key()
+            .verify(b"first-key envelope winner", &signature)?;
+
+        let reread = codewire_idp::keys::PgKeyStore::new(pool.clone(), test_signing_keyring())
+            .active_signer()
+            .await
+            .map_err(|error| anyhow::anyhow!(error.0))?;
+        anyhow::ensure!(reread.kid == winner.kid);
+        anyhow::ensure!(reread.public_key == winner.public_key);
+        anyhow::ensure!(reread.secret_key == winner.secret_key);
+        pool.close().await;
+        anyhow::Ok(())
+    }
+    .await;
+
+    let _ = sqlx::query(&format!(
+        r#"DROP DATABASE IF EXISTS "{db_name}" WITH (FORCE)"#
+    ))
+    .execute(&admin)
+    .await;
+    result.expect("jwks first-key race");
+}
+
+/// The operator rewrap is an all-or-nothing, value-blind transform over the
+/// accepted final schema. It preserves the Ed25519 identity, leaves public
+/// history alone, is idempotent, rejects an invalid ledger/catalog, rolls back
+/// on every invalid envelope shape, and excludes concurrent JWK writers.
+#[tokio::test]
+async fn signing_kek_rewrap_is_atomic_idempotent_and_writer_exclusive() {
+    let Ok(url) = std::env::var("DATABASE_URL") else {
+        eprintln!("DATABASE_URL unset — skipping signing KEK rewrap DB test");
+        return;
+    };
+    let admin = PgPool::connect(&url).await.expect("connect admin");
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let db_name = format!("cw_idp_kek_rewrap_{}_{nanos}", std::process::id());
+    sqlx::query(&format!(r#"CREATE DATABASE "{db_name}""#))
+        .execute(&admin)
+        .await
+        .expect("create rewrap db");
+
+    let mut test_url = url::Url::parse(&url).expect("parse DATABASE_URL");
+    test_url.set_path(&db_name);
+    let result = async {
+        codewire_server_core::migrate::ensure_schema(test_url.as_str()).await?;
+        let pool = PgPool::connect(test_url.as_str()).await?;
+        let (v1_keyring, v2_keyring) = rotation_test_keyrings("transactional");
+
+        let v1_seed = [31u8; 32];
+        let v1_signing = ed25519_dalek::SigningKey::from_bytes(&v1_seed);
+        let v1_public = v1_signing.verifying_key().to_bytes();
+        let v1_public_json =
+            codewire_idp::jwk::encode_public_key("codewire-rewrap-v1", &v1_public)?;
+        let v1_envelope = v1_keyring.encrypt("codewire-rewrap-v1", &v1_public, &v1_seed)?;
+
+        let v2_seed = [32u8; 32];
+        let v2_signing = ed25519_dalek::SigningKey::from_bytes(&v2_seed);
+        let v2_public = v2_signing.verifying_key().to_bytes();
+        let v2_public_json =
+            codewire_idp::jwk::encode_public_key("codewire-rewrap-v2", &v2_public)?;
+        let v2_envelope = v2_keyring.encrypt("codewire-rewrap-v2", &v2_public, &v2_seed)?;
+
+        let public_seed = [33u8; 32];
+        let public_signing = ed25519_dalek::SigningKey::from_bytes(&public_seed);
+        let public_json = codewire_idp::jwk::encode_public_key(
+            "codewire-rewrap-public",
+            &public_signing.verifying_key().to_bytes(),
+        )?;
+
+        sqlx::query(
+            "INSERT INTO jwks \
+                (id, public_key, private_key_ciphertext, private_key_nonce, \
+                 private_key_kek_id, private_key_format, created_at) \
+             VALUES \
+                ('codewire-rewrap-v1', $1, $2, $3, $4, $5, \
+                 NOW() - interval '3 seconds'), \
+                ('codewire-rewrap-v2', $6, $7, $8, $9, $10, \
+                 NOW() - interval '2 seconds'), \
+                ('codewire-rewrap-public', $11, NULL, NULL, NULL, NULL, \
+                 NOW() - interval '1 second')",
+        )
+        .bind(&v1_public_json)
+        .bind(&v1_envelope.ciphertext)
+        .bind(&v1_envelope.nonce)
+        .bind(&v1_envelope.kek_id)
+        .bind(v1_envelope.format)
+        .bind(&v2_public_json)
+        .bind(&v2_envelope.ciphertext)
+        .bind(&v2_envelope.nonce)
+        .bind(&v2_envelope.kek_id)
+        .bind(v2_envelope.format)
+        .bind(&public_json)
+        .execute(&pool)
+        .await?;
+
+        use ed25519_dalek::{Signer, Verifier};
+        let message = b"stable signing identity across KEK rewrap";
+        let signature_before = v1_signing.sign(message);
+
+        let store = codewire_idp::PgKeyStore::new(pool.clone(), v2_keyring.clone());
+        let first = store
+            .rewrap_signing_envelopes()
+            .await
+            .map_err(|error| anyhow::anyhow!(error.0))?;
+        anyhow::ensure!(
+            first
+                == codewire_idp::SigningKekRewrapReport {
+                    active_kek_id: "v2".into(),
+                    total: 3,
+                    signing: 2,
+                    rewrapped: 1,
+                    already_active: 1,
+                    public_only: 1,
+                }
+        );
+
+        let after_first: (String, Vec<u8>, Vec<u8>, String, i16) = sqlx::query_as(
+            "SELECT public_key, private_key_ciphertext, private_key_nonce, \
+                    private_key_kek_id, private_key_format \
+             FROM jwks WHERE id = 'codewire-rewrap-v1'",
+        )
+        .fetch_one(&pool)
+        .await?;
+        anyhow::ensure!(after_first.0 == v1_public_json);
+        anyhow::ensure!(after_first.1 != v1_envelope.ciphertext);
+        anyhow::ensure!(after_first.2 != v1_envelope.nonce);
+        anyhow::ensure!(after_first.3 == "v2" && after_first.4 == 1);
+        let rewritten = codewire_idp::jwk_envelope::JwkEnvelope {
+            ciphertext: after_first.1.clone(),
+            nonce: after_first.2.clone(),
+            kek_id: after_first.3.clone(),
+            format: after_first.4,
+        };
+        let recovered = v2_keyring.decrypt("codewire-rewrap-v1", &v1_public, &rewritten)?;
+        anyhow::ensure!(recovered == v1_seed);
+        let recovered_signing = ed25519_dalek::SigningKey::from_bytes(&recovered);
+        let signature_after = recovered_signing.sign(message);
+        anyhow::ensure!(signature_after == signature_before);
+        recovered_signing
+            .verifying_key()
+            .verify(message, &signature_before)?;
+
+        let public_only: PersistedEnvelopeFields = sqlx::query_as(
+            "SELECT private_key_ciphertext, private_key_nonce, \
+                    private_key_kek_id, private_key_format \
+             FROM jwks WHERE id = 'codewire-rewrap-public'",
+        )
+        .fetch_one(&pool)
+        .await?;
+        anyhow::ensure!(public_only == (None, None, None, None));
+
+        let second = store
+            .rewrap_signing_envelopes()
+            .await
+            .map_err(|error| anyhow::anyhow!(error.0))?;
+        anyhow::ensure!(second.rewrapped == 0 && second.already_active == 2);
+        let after_second: (Vec<u8>, Vec<u8>, String, i16) = sqlx::query_as(
+            "SELECT private_key_ciphertext, private_key_nonce, \
+                    private_key_kek_id, private_key_format \
+             FROM jwks WHERE id = 'codewire-rewrap-v1'",
+        )
+        .fetch_one(&pool)
+        .await?;
+        anyhow::ensure!(
+            after_second == (after_first.1.clone(), after_first.2.clone(), "v2".into(), 1,)
+        );
+
+        // Operator mode never repairs or applies missing history. Keep a local
+        // copy of the value-blind ledger only for this throwaway database.
+        sqlx::query("CREATE TABLE wi9a_migration_backup AS SELECT * FROM _sqlx_migrations")
+            .execute(&pool)
+            .await?;
+        sqlx::query("DELETE FROM _sqlx_migrations")
+            .execute(&pool)
+            .await?;
+        let error = store
+            .rewrap_signing_envelopes()
+            .await
+            .expect_err("missing migration history must fail closed");
+        anyhow::ensure!(error.0.contains("failure_class=migration-ledger-invalid"));
+        sqlx::query("INSERT INTO _sqlx_migrations SELECT * FROM wi9a_migration_backup")
+            .execute(&pool)
+            .await?;
+        sqlx::query("DROP TABLE wi9a_migration_backup")
+            .execute(&pool)
+            .await?;
+
+        // Reset one row to v1 so each later failure has an update to roll
+        // back before it reaches the intentionally invalid final row.
+        sqlx::query(
+            "UPDATE jwks SET private_key_ciphertext = $1, private_key_nonce = $2, \
+                    private_key_kek_id = $3, private_key_format = $4 \
+             WHERE id = 'codewire-rewrap-v1'",
+        )
+        .bind(&v1_envelope.ciphertext)
+        .bind(&v1_envelope.nonce)
+        .bind(&v1_envelope.kek_id)
+        .bind(v1_envelope.format)
+        .execute(&pool)
+        .await?;
+
+        let invalid_public =
+            codewire_idp::jwk::encode_public_key("codewire-rewrap-invalid", &v1_public)?;
+        let invalid_envelope =
+            v1_keyring.encrypt("codewire-rewrap-invalid", &v1_public, &v1_seed)?;
+        sqlx::query(
+            "INSERT INTO jwks \
+                (id, public_key, private_key_ciphertext, private_key_nonce, \
+                 private_key_kek_id, private_key_format, created_at) \
+             VALUES ('codewire-rewrap-invalid', $1, $2, $3, 'v1', 1, NOW())",
+        )
+        .bind(&invalid_public)
+        .bind(&invalid_envelope.ciphertext)
+        .bind(vec![0u8; 11])
+        .execute(&pool)
+        .await?;
+        let error = store
+            .rewrap_signing_envelopes()
+            .await
+            .expect_err("corrupt envelope must roll back the transaction");
+        anyhow::ensure!(error.0.contains("failure_class=envelope-invalid"));
+        let rolled_back: (Vec<u8>, Vec<u8>, String, i16) = sqlx::query_as(
+            "SELECT private_key_ciphertext, private_key_nonce, \
+                    private_key_kek_id, private_key_format \
+             FROM jwks WHERE id = 'codewire-rewrap-v1'",
+        )
+        .fetch_one(&pool)
+        .await?;
+        anyhow::ensure!(
+            rolled_back
+                == (
+                    v1_envelope.ciphertext.clone(),
+                    v1_envelope.nonce.clone(),
+                    "v1".into(),
+                    1,
+                )
+        );
+        sqlx::query("DELETE FROM jwks WHERE id = 'codewire-rewrap-invalid'")
+            .execute(&pool)
+            .await?;
+
+        let unknown_public =
+            codewire_idp::jwk::encode_public_key("codewire-rewrap-unknown", &v1_public)?;
+        let unknown_envelope =
+            v1_keyring.encrypt("codewire-rewrap-unknown", &v1_public, &v1_seed)?;
+        sqlx::query(
+            "INSERT INTO jwks \
+                (id, public_key, private_key_ciphertext, private_key_nonce, \
+                 private_key_kek_id, private_key_format, created_at) \
+             VALUES ('codewire-rewrap-unknown', $1, $2, $3, 'v3', 1, NOW())",
+        )
+        .bind(&unknown_public)
+        .bind(&unknown_envelope.ciphertext)
+        .bind(&unknown_envelope.nonce)
+        .execute(&pool)
+        .await?;
+        let error = store
+            .rewrap_signing_envelopes()
+            .await
+            .expect_err("unknown KEK must roll back the transaction");
+        anyhow::ensure!(error.0.contains("failure_class=envelope-invalid"));
+        let still_v1: String = sqlx::query_scalar(
+            "SELECT private_key_kek_id FROM jwks WHERE id = 'codewire-rewrap-v1'",
+        )
+        .fetch_one(&pool)
+        .await?;
+        anyhow::ensure!(still_v1 == "v1");
+        sqlx::query("DELETE FROM jwks WHERE id = 'codewire-rewrap-unknown'")
+            .execute(&pool)
+            .await?;
+
+        sqlx::query("ALTER TABLE jwks DROP CONSTRAINT jwks_private_key_envelope_shape_check")
+            .execute(&pool)
+            .await?;
+        sqlx::query(
+            "INSERT INTO jwks \
+                (id, public_key, private_key_ciphertext, created_at) \
+             VALUES ('codewire-rewrap-partial', $1, $2, NOW())",
+        )
+        .bind(&invalid_public)
+        .bind(&invalid_envelope.ciphertext)
+        .execute(&pool)
+        .await?;
+        let error = store
+            .rewrap_signing_envelopes()
+            .await
+            .expect_err("partial envelope catalog must fail closed");
+        anyhow::ensure!(error.0.contains("failure_class=final-jwk-schema-required"));
+        let still_v1: String = sqlx::query_scalar(
+            "SELECT private_key_kek_id FROM jwks WHERE id = 'codewire-rewrap-v1'",
+        )
+        .fetch_one(&pool)
+        .await?;
+        anyhow::ensure!(still_v1 == "v1");
+        sqlx::query("DELETE FROM jwks WHERE id = 'codewire-rewrap-partial'")
+            .execute(&pool)
+            .await?;
+        sqlx::query(
+            "ALTER TABLE jwks ADD CONSTRAINT jwks_private_key_envelope_shape_check \
+             CHECK (num_nonnulls(private_key_ciphertext, private_key_nonce, \
+                    private_key_kek_id, private_key_format) = ANY (ARRAY[0, 4]))",
+        )
+        .execute(&pool)
+        .await?;
+
+        // Hold the operator inside its update after the table lock is granted,
+        // then prove a second session cannot insert until that transaction
+        // completes.
+        sqlx::query(
+            "CREATE FUNCTION wi9a_pause_rewrap() RETURNS trigger \
+             LANGUAGE plpgsql AS $$ \
+             BEGIN PERFORM pg_sleep(1); RETURN NEW; END $$",
+        )
+        .execute(&pool)
+        .await?;
+        sqlx::query(
+            "CREATE TRIGGER wi9a_pause_rewrap_trigger BEFORE UPDATE ON jwks \
+             FOR EACH ROW WHEN (OLD.id = 'codewire-rewrap-v1') \
+             EXECUTE FUNCTION wi9a_pause_rewrap()",
+        )
+        .execute(&pool)
+        .await?;
+        let concurrent_store = store.clone();
+        let rewrap = tokio::spawn(async move { concurrent_store.rewrap_signing_envelopes().await });
+
+        let mut lock_seen = false;
+        for _ in 0..200 {
+            lock_seen = sqlx::query_scalar(
+                "SELECT EXISTS ( \
+                    SELECT 1 FROM pg_locks AS lock_row \
+                    JOIN pg_class AS table_row ON table_row.oid = lock_row.relation \
+                    WHERE table_row.relname = 'jwks' \
+                      AND lock_row.mode = 'ShareRowExclusiveLock' \
+                      AND lock_row.granted \
+                )",
+            )
+            .fetch_one(&pool)
+            .await?;
+            if lock_seen {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        anyhow::ensure!(lock_seen, "rewrap transaction lock was not observed");
+
+        let mut concurrent = pool.begin().await?;
+        sqlx::query("SET LOCAL statement_timeout = '100ms'")
+            .execute(&mut *concurrent)
+            .await?;
+        let blocked = sqlx::query(
+            "INSERT INTO jwks (id, public_key, created_at) \
+             VALUES ('codewire-rewrap-concurrent', $1, NOW())",
+        )
+        .bind(&public_json)
+        .execute(&mut *concurrent)
+        .await
+        .expect_err("concurrent JWK writer must block behind rewrap");
+        let code = blocked
+            .as_database_error()
+            .and_then(|error| error.code())
+            .map(|code| code.into_owned());
+        anyhow::ensure!(code.as_deref() == Some("57014"));
+        concurrent.rollback().await?;
+
+        let concurrent_report = rewrap.await?.map_err(|error| anyhow::anyhow!(error.0))?;
+        anyhow::ensure!(concurrent_report.rewrapped == 1);
+        let concurrent_rows: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM jwks WHERE id = 'codewire-rewrap-concurrent'")
+                .fetch_one(&pool)
+                .await?;
+        anyhow::ensure!(concurrent_rows == 0);
+        sqlx::query("DROP TRIGGER wi9a_pause_rewrap_trigger ON jwks")
+            .execute(&pool)
+            .await?;
+        sqlx::query("DROP FUNCTION wi9a_pause_rewrap()")
+            .execute(&pool)
+            .await?;
+
+        pool.close().await;
+        anyhow::Ok(())
+    }
+    .await;
+
+    let _ = sqlx::query(&format!(
+        r#"DROP DATABASE IF EXISTS "{db_name}" WITH (FORCE)"#
+    ))
+    .execute(&admin)
+    .await;
+    result.expect("transactional signing KEK rewrap");
+}
+
+/// The clean baseline contains only authenticated signing envelopes and
+/// public-only history. Partial rows are rejected by the catalog and corrupt
+/// envelopes fail closed without being rewritten or replaced.
+#[tokio::test]
+async fn jwk_final_schema_uses_only_envelopes_and_fails_closed() {
+    let Ok(url) = std::env::var("DATABASE_URL") else {
+        eprintln!("DATABASE_URL unset — skipping JWK final-schema DB test");
+        return;
+    };
+    let admin = PgPool::connect(&url).await.expect("connect admin");
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let db_name = format!("cw_idp_jwk_final_{}_{nanos}", std::process::id());
+    sqlx::query(&format!(r#"CREATE DATABASE "{db_name}""#))
+        .execute(&admin)
+        .await
+        .expect("create final-schema database");
+
+    let mut test_url = url::Url::parse(&url).expect("parse DATABASE_URL");
+    test_url.set_path(&db_name);
+    let result = async {
+        codewire_server_core::migrate::ensure_schema(test_url.as_str()).await?;
+        let pool = PgPool::connect(test_url.as_str()).await?;
+
+        let raw_columns: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM information_schema.columns \
+             WHERE table_schema = 'public' AND table_name = 'jwks' \
+               AND column_name = 'private_key'",
+        )
+        .fetch_one(&pool)
+        .await?;
+        anyhow::ensure!(raw_columns == 0);
+
+        let seed = [12u8; 32];
+        let signing = ed25519_dalek::SigningKey::from_bytes(&seed);
+        let public_key = signing.verifying_key().to_bytes();
+        let public_json = codewire_idp::jwk::encode_public_key("codewire-final", &public_key)?;
+        let keyring = test_signing_keyring();
+        let envelope = keyring.encrypt("codewire-final", &public_key, &seed)?;
+        sqlx::query(
+            "INSERT INTO jwks \
+                (id, public_key, private_key_ciphertext, private_key_nonce, \
+                 private_key_kek_id, private_key_format, created_at) \
+             VALUES ('codewire-final', $1, $2, $3, $4, $5, NOW())",
+        )
+        .bind(&public_json)
+        .bind(&envelope.ciphertext)
+        .bind(&envelope.nonce)
+        .bind(&envelope.kek_id)
+        .bind(envelope.format)
+        .execute(&pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO jwks (id, public_key, created_at) \
+             VALUES ('codewire-retired', $1, NOW() - interval '1 second')",
+        )
+        .bind(&public_json)
+        .execute(&pool)
+        .await?;
+
+        let store = codewire_idp::keys::PgKeyStore::new(pool.clone(), keyring);
+        anyhow::ensure!(
+            store
+                .validate_envelopes()
+                .await
+                .map_err(|error| anyhow::anyhow!(error.0))?
+                == 1
+        );
+        let active = store
+            .active_signer()
+            .await
+            .map_err(|error| anyhow::anyhow!(error.0))?;
+        anyhow::ensure!(active.kid == "codewire-final");
+        anyhow::ensure!(active.public_key == public_key && active.secret_key == seed);
+        let public = store
+            .public_jwks()
+            .await
+            .map_err(|error| anyhow::anyhow!(error.0))?;
+        anyhow::ensure!(public.iter().any(|key| key.kid == "codewire-retired"));
+
+        sqlx::query("DELETE FROM jwks WHERE id = 'codewire-final'")
+            .execute(&pool)
+            .await?;
+        let cfg = IdpConfig {
+            issuer: "https://idp.codewire.test".into(),
+            frontend_url: "https://app.codewire.test".into(),
+            resend_api_key: String::new(),
+            scopes_supported: vec!["openid".into()],
+        };
+        let error = build_provider(pool.clone(), &cfg, test_signing_keyring())
+            .await
+            .expect_err("public-only registry must stop provider startup");
+        anyhow::ensure!(
+            error
+                .to_string()
+                .contains("failure_class=no-signing-capable-row")
+        );
+
+        let partial = sqlx::query(
+            "INSERT INTO jwks (id, public_key, private_key_ciphertext, created_at) \
+             VALUES ('codewire-partial', $1, $2, NOW())",
+        )
+        .bind(&public_json)
+        .bind(&envelope.ciphertext)
+        .execute(&pool)
+        .await;
+        anyhow::ensure!(partial.is_err());
+
+        sqlx::query(
+            "INSERT INTO jwks \
+                (id, public_key, private_key_ciphertext, private_key_nonce, \
+                 private_key_kek_id, private_key_format, created_at) \
+             VALUES ('codewire-corrupt', $1, $2, $3, 'v1', 1, NOW() + interval '1 second')",
+        )
+        .bind(&public_json)
+        .bind(&envelope.ciphertext)
+        .bind(vec![0u8; 11])
+        .execute(&pool)
+        .await?;
+        let error = store
+            .active_signer()
+            .await
+            .expect_err("corrupt envelope must fail closed");
+        anyhow::ensure!(error.0.contains("failure_class=invalid-nonce-length"));
+        let error = build_provider(pool.clone(), &cfg, test_signing_keyring())
+            .await
+            .expect_err("unreadable registry must stop provider startup");
+        anyhow::ensure!(
+            error
+                .to_string()
+                .contains("failure_class=invalid-nonce-length")
+        );
+        let unchanged: PersistedEnvelopeFields = sqlx::query_as(
+            "SELECT private_key_ciphertext, private_key_nonce, \
+                    private_key_kek_id, private_key_format \
+             FROM jwks WHERE id = 'codewire-corrupt'",
+        )
+        .fetch_one(&pool)
+        .await?;
+        anyhow::ensure!(unchanged.0.as_deref() == Some(envelope.ciphertext.as_slice()));
+        anyhow::ensure!(unchanged.1.as_deref() == Some([0u8; 11].as_slice()));
+        anyhow::ensure!(unchanged.2.as_deref() == Some("v1") && unchanged.3 == Some(1));
+
+        pool.close().await;
+        anyhow::Ok(())
+    }
+    .await;
+
+    let _ = sqlx::query(&format!(
+        r#"DROP DATABASE IF EXISTS "{db_name}" WITH (FORCE)"#
+    ))
+    .execute(&admin)
+    .await;
+    result.expect("JWK final-schema DB contract");
+}
+
+/// The public `codewire-cli` registration converges stale state, the
+/// session-only browser verification route approves the standard RFC 8628
+/// store, and the result is a flavor-2 token pair. The retired bespoke route
+/// family remains absent throughout.
+#[tokio::test]
+async fn standard_cli_device_grant_uses_browser_approval_against_postgres() {
+    let Ok(url) = std::env::var("DATABASE_URL") else {
+        eprintln!("DATABASE_URL unset — skipping standard CLI device-flow e2e");
+        return;
+    };
+    let pool = PgPool::connect(&url).await.expect("connect");
+    let user = format!("u_cli_device_{}", std::process::id());
+    let session = format!("sess_cli_device_{}", std::process::id());
+    let session_id = format!("s_cli_device_{}", std::process::id());
+
+    for sql in [
+        "DELETE FROM oidc_access_tokens WHERE user_id = $1",
+        "DELETE FROM oidc_refresh_tokens WHERE user_id = $1",
+        "DELETE FROM oidc_device_authorizations WHERE user_id = $1",
+        "DELETE FROM sessions WHERE user_id = $1",
+    ] {
+        let _ = sqlx::query(sql).bind(&user).execute(&pool).await;
+    }
+    let _ = sqlx::query("DELETE FROM users WHERE id = $1")
+        .bind(&user)
+        .execute(&pool)
+        .await;
+
+    sqlx::query(
+        "INSERT INTO users (id, email, name, email_verified, is_admin) \
+         VALUES ($1, $2, $3, true, false)",
+    )
+    .bind(&user)
+    .bind(format!("{user}@example.com"))
+    .bind("CLI Device")
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO sessions (id, user_id, token_hash, expires_at) \
+         VALUES ($1, $2, $3, NOW() + interval '1 hour')",
+    )
+    .bind(&session_id)
+    .bind(&user)
+    .bind(hash_session_token(&session))
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // Start from deliberately wrong built-in client state. Provisioning must
+    // converge it instead of relying on a one-time bootstrap side effect.
+    sqlx::query(
+        r#"
+        INSERT INTO oidc_clients
+            (id, name, application_type, auth_method, redirect_uris,
+             grant_types, response_types, scopes, skip_consent,
+             access_token_lifetime, refresh_token_lifetime, id_token_lifetime)
+        VALUES (
+            'codewire-cli', 'stale CLI', 'web', 'client_secret_basic',
+            ARRAY['https://stale.invalid/callback'], ARRAY['authorization_code'],
+            ARRAY['code'], ARRAY['openid'], false,
+            interval '1 minute', interval '1 minute', interval '1 minute'
+        )
+        ON CONFLICT (id) DO UPDATE SET
+            name = EXCLUDED.name,
+            application_type = EXCLUDED.application_type,
+            auth_method = EXCLUDED.auth_method,
+            redirect_uris = EXCLUDED.redirect_uris,
+            grant_types = EXCLUDED.grant_types,
+            response_types = EXCLUDED.response_types,
+            scopes = EXCLUDED.scopes,
+            skip_consent = EXCLUDED.skip_consent
+        "#,
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    codewire_idp::provisioning::ensure_cli_client(&pool)
+        .await
+        .expect("provision CLI client");
+    let client_row: (String, String, Vec<String>, Vec<String>, bool) = sqlx::query_as(
+        "SELECT application_type, auth_method, grant_types, scopes, skip_consent \
+         FROM oidc_clients WHERE id = 'codewire-cli'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(client_row.0, "native");
+    assert_eq!(client_row.1, "none");
+    assert_eq!(
+        client_row.2,
+        vec![
+            "urn:ietf:params:oauth:grant-type:device_code".to_string(),
+            "refresh_token".to_string(),
+        ]
+    );
+    assert_eq!(
+        client_row.3,
+        vec![
+            "openid",
+            "profile",
+            "email",
+            "offline_access",
+            "codewire.api"
+        ]
+    );
+    assert!(client_row.4);
+
+    let cfg = IdpConfig {
+        issuer: "https://idp.codewire.test".into(),
+        frontend_url: "https://app.codewire.test".into(),
+        resend_api_key: String::new(),
+        scopes_supported: vec![
+            "openid".into(),
+            "profile".into(),
+            "email".into(),
+            "offline_access".into(),
+            "codewire.api".into(),
+        ],
+    };
+    let provider = build_provider(pool.clone(), &cfg, test_signing_keyring())
+        .await
+        .expect("build provider");
+    assert_eq!(
+        provider
+            .discovery()
+            .device_authorization_endpoint
+            .as_deref(),
+        Some("https://idp.codewire.test/api/oauth/device_authorization")
+    );
+    let device = provider
+        .authorize_device(
+            "codewire-cli",
+            None,
+            Some("openid profile email offline_access codewire.api"),
+        )
+        .await
+        .expect("authorize device");
+    assert_eq!(device.verification_uri, "https://app.codewire.test/device");
+    assert!(
+        provider
+            .lookup_user_code(&device.user_code)
+            .await
+            .expect("lookup device")
+            .is_some()
+    );
+
+    let app = codewire_idp::device_verification::router(
+        provider.clone(),
+        AuthState { pool: pool.clone() },
+    );
+    let approve_body = format!(r#"{{"user_code":"{}"}}"#, device.user_code);
+
+    let (status, _) =
+        device_post(&app, "/api/oauth/device_verification", None, &approve_body).await;
+    assert_eq!(status, 401, "browser approval requires a session cookie");
+
+    let (status, _) = device_post(
+        &app,
+        "/api/oauth/device_verification",
+        Some(&session),
+        r#"{"user_code":"NOPE-0000"}"#,
+    )
+    .await;
+    assert_eq!(status, 404, "unknown user code must fail closed");
+
+    let (status, body) = device_post(
+        &app,
+        "/api/oauth/device_verification",
+        Some(&session),
+        &approve_body,
+    )
+    .await;
+    assert_eq!(status, 200, "standard approval: {body}");
+    assert_eq!(body["approved"], true);
+    let (status, _) = device_post(
+        &app,
+        "/api/oauth/device_verification",
+        Some(&session),
+        &approve_body,
+    )
+    .await;
+    assert_eq!(status, 400, "resolved user code must remain single-use");
+    for path in [
+        "/api/auth/device/authorize",
+        "/api/auth/device/token",
+        "/api/auth/device/approve",
+    ] {
+        let (status, _) = device_post(&app, path, None, "{}").await;
+        assert_eq!(status, 404, "retired route remains mounted: {path}");
+    }
+
+    let (first_exchange, second_exchange) = tokio::join!(
+        provider.exchange_device_code("codewire-cli", None, &device.device_code),
+        provider.exchange_device_code("codewire-cli", None, &device.device_code),
+    );
+    assert_eq!(
+        usize::from(first_exchange.is_ok()) + usize::from(second_exchange.is_ok()),
+        1,
+        "one concurrent device redemption succeeds"
+    );
+    let replay = first_exchange
+        .as_ref()
+        .err()
+        .or_else(|| second_exchange.as_ref().err())
+        .expect("one concurrent device redemption is rejected");
+    assert_eq!(replay.code, ErrorCode::ExpiredToken);
+    let tokens = first_exchange
+        .ok()
+        .or_else(|| second_exchange.ok())
+        .expect("exchange device code");
+    assert_eq!(tokens.token_type, "Bearer");
+    assert!(
+        tokens.refresh_token.is_some(),
+        "offline_access grants refresh"
+    );
+    assert_eq!(
+        tokens.scope,
+        "openid profile email offline_access codewire.api"
+    );
+    assert_eq!(
+        provider
+            .userinfo(&tokens.access_token)
+            .await
+            .expect("userinfo")
+            .sub,
+        user
+    );
+    let pending_rows: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM oidc_device_authorizations WHERE device_code = $1",
+    )
+    .bind(&device.device_code)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(pending_rows, 0, "device code is single-use");
+
+    for sql in [
+        "DELETE FROM oidc_access_tokens WHERE user_id = $1",
+        "DELETE FROM oidc_refresh_tokens WHERE user_id = $1",
+        "DELETE FROM oidc_device_authorizations WHERE user_id = $1",
+        "DELETE FROM sessions WHERE user_id = $1",
+    ] {
+        let _ = sqlx::query(sql).bind(&user).execute(&pool).await;
+    }
+    let _ = sqlx::query("DELETE FROM users WHERE id = $1")
+        .bind(&user)
+        .execute(&pool)
+        .await;
+}
+
+async fn device_post(
+    app: &axum::Router,
+    path: &str,
+    cookie: Option<&str>,
+    body: &str,
+) -> (u16, serde_json::Value) {
+    use tower::ServiceExt;
+    let mut builder = axum::http::Request::builder()
+        .method("POST")
+        .uri(path)
+        .header("content-type", "application/json");
+    if let Some(c) = cookie {
+        builder = builder.header("cookie", format!("codewire.session_token={c}"));
+    }
+    let req = builder
+        .body(axum::body::Body::from(body.to_string()))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    let status = resp.status().as_u16();
+    let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
+        .await
+        .unwrap();
+    let json = if bytes.is_empty() {
+        serde_json::Value::Null
+    } else {
+        serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null)
+    };
+    (status, json)
+}
+
+/// End-to-end session-core credential flow against Postgres: sign-up →
+/// get-session(cookie) → conflict → sign-in → bad-password(401) → lockout
+/// after 5 fails(429) → sign-out → get-session(null). Mirrors
+/// `auth_routes.go`'s signUp/signIn/signOut/getSession contract, including
+/// the Argon2id round-trip and the failed-attempt lockout.
+#[tokio::test]
+async fn session_auth_flow_against_postgres() {
+    let Ok(url) = std::env::var("DATABASE_URL") else {
+        eprintln!("DATABASE_URL unset — skipping idp session-auth e2e");
+        return;
+    };
+    let pool = PgPool::connect(&url).await.expect("connect");
+
+    let email = "sess-flow@example.com";
+    let pw = "Sup3rStrong!Pass";
+    let cleanup = |p: PgPool| async move {
+        sqlx::query("DELETE FROM sessions WHERE user_id IN (SELECT id FROM users WHERE email=$1)")
+            .bind(email)
+            .execute(&p)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM accounts WHERE account_id=$1")
+            .bind(email)
+            .execute(&p)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM users WHERE email=$1")
+            .bind(email)
+            .execute(&p)
+            .await
+            .ok();
+    };
+    cleanup(pool.clone()).await;
+
+    let app = codewire_idp::auth_session::router(pool.clone(), false);
+
+    // 1. sign-up → 200 + Set-Cookie + AuthResponse.
+    let (st, body, cookie) = sess_req(
+        &app,
+        "POST",
+        "/api/auth/sign-up",
+        None,
+        &format!(r#"{{"email":"{email}","password":"{pw}","name":"Sess Flow"}}"#),
+    )
+    .await;
+    assert_eq!(st, 200, "signup: {body}");
+    assert_eq!(body["user"]["email"], email);
+    assert!(
+        cookie
+            .as_deref()
+            .unwrap()
+            .starts_with("codewire.session_token=")
+    );
+    let token = body["session"]["token"].as_str().unwrap().to_string();
+    let created: String =
+        sqlx::query_scalar("SELECT token_hash FROM sessions WHERE token_hash = $1")
+            .bind(hash_session_token(&token))
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(created, hash_session_token(&token));
+
+    // 2. get-session with the cookie → AuthResponse.
+    let (st, body, _) = sess_req(&app, "GET", "/api/auth/get-session", Some(&token), "").await;
+    assert_eq!(st, 200);
+    assert_eq!(body["user"]["email"], email);
+
+    // 3. duplicate sign-up → 409.
+    let (st, _b, _) = sess_req(
+        &app,
+        "POST",
+        "/api/auth/sign-up",
+        None,
+        &format!(r#"{{"email":"{email}","password":"{pw}","name":"x"}}"#),
+    )
+    .await;
+    assert_eq!(st, 409);
+
+    // 4. sign-in (correct) → 200 + cookie. (Proves Argon2id verify of the
+    //    stored hash.)
+    let (st, body, cookie) = sess_req(
+        &app,
+        "POST",
+        "/api/auth/sign-in",
+        None,
+        &format!(r#"{{"email":"{email}","password":"{pw}"}}"#),
+    )
+    .await;
+    assert_eq!(st, 200, "signin: {body}");
+    assert!(cookie.is_some());
+    assert_eq!(body["user"]["email"], email);
+
+    // 5. sign-in (wrong) → 401, then four more wrong → lockout (429).
+    let bad = format!(r#"{{"email":"{email}","password":"nope"}}"#);
+    let (st, _b, _) = sess_req(&app, "POST", "/api/auth/sign-in", None, &bad).await;
+    assert_eq!(st, 401);
+    for _ in 0..4 {
+        sess_req(&app, "POST", "/api/auth/sign-in", None, &bad).await;
+    }
+    let (st, _b, _) = sess_req(
+        &app,
+        "POST",
+        "/api/auth/sign-in",
+        None,
+        &format!(r#"{{"email":"{email}","password":"{pw}"}}"#),
+    )
+    .await;
+    assert_eq!(st, 429, "should be locked after 5 failures");
+
+    // unlock so the sign-out path is reachable.
+    sqlx::query("UPDATE users SET failed_login_attempts=0, locked_until=NULL WHERE email=$1")
+        .bind(email)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // 6. sign-out → {success:true} + clear-cookie (Max-Age=0).
+    let (st, body, clear) = sess_req(&app, "POST", "/api/auth/sign-out", Some(&token), "").await;
+    assert_eq!(st, 200);
+    assert_eq!(body["success"], true);
+    assert!(clear.unwrap().contains("Max-Age=0"));
+
+    // 7. get-session after sign-out → null (session deleted).
+    let (st, body, _) = sess_req(&app, "GET", "/api/auth/get-session", Some(&token), "").await;
+    assert_eq!(st, 200);
+    assert!(body.is_null());
+
+    cleanup(pool.clone()).await;
+}
+
+#[tokio::test]
+async fn get_session_accepts_codewire_api_key_against_postgres() {
+    let Ok(url) = std::env::var("DATABASE_URL") else {
+        eprintln!("DATABASE_URL unset — skipping idp api-key get-session e2e");
+        return;
+    };
+    let pool = PgPool::connect(&url).await.expect("connect");
+
+    let user_id = "u_idp_api_key_session";
+    let org_id = "org_idp_api_key_session";
+    let member_id = "m_idp_api_key_session";
+    let key_id = "ak_idp_api_key_session";
+    let email = "api-key-session@example.com";
+    let raw_key = generate_api_key();
+
+    let cleanup = |p: PgPool| async move {
+        sqlx::query("DELETE FROM api_keys WHERE id=$1 OR user_id=$2")
+            .bind(key_id)
+            .bind(user_id)
+            .execute(&p)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM org_members WHERE id=$1 OR user_id=$2 OR org_id=$3")
+            .bind(member_id)
+            .bind(user_id)
+            .bind(org_id)
+            .execute(&p)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM organizations WHERE id=$1")
+            .bind(org_id)
+            .execute(&p)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM users WHERE id=$1 OR email=$2")
+            .bind(user_id)
+            .bind(email)
+            .execute(&p)
+            .await
+            .ok();
+    };
+    cleanup(pool.clone()).await;
+
+    sqlx::query("INSERT INTO users (id, email, name, email_verified, is_admin) VALUES ($1,$2,$3,true,false)")
+        .bind(user_id)
+        .bind(email)
+        .bind("API Key Session")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO organizations (id, name, slug, created_by) VALUES ($1,$2,$3,$4)")
+        .bind(org_id)
+        .bind("API Key Session Org")
+        .bind("api-key-session-org")
+        .bind(user_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO org_members (id, org_id, user_id, role) VALUES ($1,$2,$3,'owner')")
+        .bind(member_id)
+        .bind(org_id)
+        .bind(user_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO api_keys (id, user_id, org_id, name, key_hash, key_prefix, scopes) VALUES ($1,$2,$3,$4,$5,$6,ARRAY[]::text[])")
+        .bind(key_id)
+        .bind(user_id)
+        .bind(org_id)
+        .bind("db-flow")
+        .bind(hash_api_key(&raw_key))
+        .bind(api_key_prefix(&raw_key))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let app = codewire_idp::auth_session::router(pool.clone(), false);
+    let (st, body, _) = sess_req_bearer(&app, "GET", "/api/auth/get-session", &raw_key, "").await;
+    assert_eq!(st, 200, "api-key get-session: {body}");
+    assert_eq!(body["user"]["email"], email);
+    assert_eq!(body["session"]["id"], "");
+    assert_eq!(body["session"]["token"], "");
+
+    let last_used: Option<chrono::NaiveDateTime> =
+        sqlx::query_scalar("SELECT last_used_at FROM api_keys WHERE id=$1")
+            .bind(key_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(
+        last_used.is_some(),
+        "api-key get-session should bump last_used_at"
+    );
+
+    cleanup(pool).await;
+}
+
+/// End-to-end email verification and password-reset flow against Postgres:
+/// send-verification-email → verify-email → already-verified no-op →
+/// forget-password non-enumerating response → reset invalid/expired/weak
+/// branches → reset success, with the replacement hash proven by sign-in.
+#[tokio::test]
+async fn email_password_flow_against_postgres() {
+    let Ok(url) = std::env::var("DATABASE_URL") else {
+        eprintln!("DATABASE_URL unset — skipping idp email/password e2e");
+        return;
+    };
+    let pool = PgPool::connect(&url).await.expect("connect");
+
+    let user = "u_email_password_e2e";
+    let email = "email-password-e2e@example.com";
+    let session = "sess_email_password_e2e_token";
+    let new_pw = "N3wStrong!Password";
+
+    let cleanup = |p: PgPool| async move {
+        sqlx::query("DELETE FROM verifications WHERE identifier IN ($1, $2)")
+            .bind(email)
+            .bind("missing-email-password-e2e@example.com")
+            .execute(&p)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM sessions WHERE user_id=$1")
+            .bind(user)
+            .execute(&p)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM accounts WHERE user_id=$1")
+            .bind(user)
+            .execute(&p)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM users WHERE id=$1")
+            .bind(user)
+            .execute(&p)
+            .await
+            .ok();
+    };
+    cleanup(pool.clone()).await;
+
+    sqlx::query("INSERT INTO users (id, email, name, email_verified, is_admin, two_factor_enabled) VALUES ($1,$2,$3,false,false,false)")
+        .bind(user)
+        .bind(email)
+        .bind("Email Password E2E")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO accounts (id, user_id, provider_id, account_id, password) VALUES ($1,$2,'credential',$3,$4)")
+        .bind("acct_email_password_e2e")
+        .bind(user)
+        .bind(email)
+        .bind("not-a-valid-phc")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO sessions (id, user_id, token_hash, expires_at) VALUES ($1,$2,$3,NOW() + interval '1 hour')")
+        .bind("s_email_password_e2e")
+        .bind(user)
+        .bind(hash_session_token(session))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let app = codewire_idp::email_password::router(
+        pool.clone(),
+        "https://app.codewire.test".to_string(),
+        String::new(),
+        AuthState { pool: pool.clone() },
+    );
+
+    // 1. Authenticated send-verification-email creates a 24h token but
+    // succeeds without RESEND_API_KEY.
+    let (st, body, _) = sess_req(
+        &app,
+        "POST",
+        "/api/auth/send-verification-email",
+        Some(session),
+        "",
+    )
+    .await;
+    assert_eq!(st, 200, "send verification: {body}");
+    assert_eq!(body["sent"], true);
+    let verify_token: String = sqlx::query_scalar(
+        "SELECT value FROM verifications WHERE identifier=$1 ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(email)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    // 2. verify-email flips users.email_verified and consumes the token.
+    let (st, body, _) = sess_req(
+        &app,
+        "GET",
+        &format!("/api/auth/verify-email?token={verify_token}"),
+        None,
+        "",
+    )
+    .await;
+    assert_eq!(st, 200, "verify email: {body}");
+    assert_eq!(body["verified"], true);
+    let verified: bool = sqlx::query_scalar("SELECT email_verified FROM users WHERE id=$1")
+        .bind(user)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(verified);
+    let remaining: i64 = sqlx::query_scalar("SELECT count(*) FROM verifications WHERE value=$1")
+        .bind(&verify_token)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(remaining, 0);
+
+    // 3. Already verified users get the Go omitempty shape:
+    // {"already_verified":true}, no new token.
+    let before: i64 = sqlx::query_scalar("SELECT count(*) FROM verifications WHERE identifier=$1")
+        .bind(email)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let (st, body, _) = sess_req(
+        &app,
+        "POST",
+        "/api/auth/send-verification-email",
+        Some(session),
+        "",
+    )
+    .await;
+    assert_eq!(st, 200, "send already verified: {body}");
+    assert_eq!(body["already_verified"], true);
+    assert!(body.get("sent").is_none());
+    let after: i64 = sqlx::query_scalar("SELECT count(*) FROM verifications WHERE identifier=$1")
+        .bind(email)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(after, before);
+
+    // 4. forget-password never leaks existence. Missing email returns
+    // success without inserting a verification row.
+    let (st, body, _) = sess_req(
+        &app,
+        "POST",
+        "/api/auth/forget-password",
+        None,
+        r#"{"email":"missing-email-password-e2e@example.com"}"#,
+    )
+    .await;
+    assert_eq!(st, 200, "forget missing: {body}");
+    assert_eq!(body["sent"], true);
+    let missing_rows: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM verifications WHERE identifier=$1")
+            .bind("missing-email-password-e2e@example.com")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(missing_rows, 0);
+
+    // 5. Existing email creates a 1h reset token and still returns
+    // {sent:true} without RESEND_API_KEY.
+    let (st, body, _) = sess_req(
+        &app,
+        "POST",
+        "/api/auth/forget-password",
+        None,
+        &format!(r#"{{"email":"{email}"}}"#),
+    )
+    .await;
+    assert_eq!(st, 200, "forget existing: {body}");
+    assert_eq!(body["sent"], true);
+    let reset_token: String = sqlx::query_scalar(
+        "SELECT value FROM verifications WHERE identifier=$1 ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(email)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    // 6. Password validation happens before token consumption.
+    let (st, _body, _) = sess_req(
+        &app,
+        "POST",
+        "/api/auth/reset-password",
+        None,
+        &format!(r#"{{"token":"{reset_token}","newPassword":"weak"}}"#),
+    )
+    .await;
+    assert_eq!(st, 400);
+    let still_there: i64 = sqlx::query_scalar("SELECT count(*) FROM verifications WHERE value=$1")
+        .bind(&reset_token)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(still_there, 1);
+
+    // 7. Invalid and expired reset tokens return 400; expired tokens are
+    // consumed.
+    let (st, _body, _) = sess_req(
+        &app,
+        "POST",
+        "/api/auth/reset-password",
+        None,
+        &format!(r#"{{"token":"missing-reset-token","newPassword":"{new_pw}"}}"#),
+    )
+    .await;
+    assert_eq!(st, 400);
+
+    sqlx::query("INSERT INTO verifications (id, identifier, value, expires_at) VALUES ($1,$2,$3,NOW() - interval '1 minute')")
+        .bind("ver_email_password_expired")
+        .bind(email)
+        .bind("expired-reset-token")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (st, _body, _) = sess_req(
+        &app,
+        "POST",
+        "/api/auth/reset-password",
+        None,
+        &format!(r#"{{"token":"expired-reset-token","newPassword":"{new_pw}"}}"#),
+    )
+    .await;
+    assert_eq!(st, 400);
+    let expired_remaining: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM verifications WHERE value='expired-reset-token'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(expired_remaining, 0);
+
+    // 8. Successful reset consumes the token and writes a credential hash
+    // that Rust sign-in can verify.
+    let (st, body, _) = sess_req(
+        &app,
+        "POST",
+        "/api/auth/reset-password",
+        None,
+        &format!(r#"{{"token":"{reset_token}","newPassword":"{new_pw}"}}"#),
+    )
+    .await;
+    assert_eq!(st, 200, "reset success: {body}");
+    assert_eq!(body["reset"], true);
+    let reset_remaining: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM verifications WHERE value=$1")
+            .bind(&reset_token)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(reset_remaining, 0);
+
+    let session_app = codewire_idp::auth_session::router(pool.clone(), false);
+    let (st, body, cookie) = sess_req(
+        &session_app,
+        "POST",
+        "/api/auth/sign-in",
+        None,
+        &format!(r#"{{"email":"{email}","password":"{new_pw}"}}"#),
+    )
+    .await;
+    assert_eq!(st, 200, "signin after reset: {body}");
+    assert_eq!(body["user"]["email"], email);
+    assert!(cookie.is_some());
+
+    cleanup(pool.clone()).await;
+}
+
+/// End-to-end TOTP two-factor auth flow against Postgres: enable →
+/// verify → sign-in challenge validation with a TOTP → challenge
+/// validation with a backup code → backup code is single-use → disable.
+/// This locks in the Go-compatible `two_factor` / `two_factor_tokens`
+/// schema and AES-GCM encrypted secret/backup-code storage.
+#[tokio::test]
+async fn two_factor_flow_against_postgres() {
+    let Ok(url) = std::env::var("DATABASE_URL") else {
+        eprintln!("DATABASE_URL unset — skipping idp 2FA e2e");
+        return;
+    };
+    let pool = PgPool::connect(&url).await.expect("connect");
+
+    let user = "u_2fa_e2e";
+    let email = "twofactor-e2e@example.com";
+    let session = "sess_2fa_e2e_token";
+    let session_secret = "two-factor-e2e-session-secret";
+
+    let cleanup = |p: PgPool| async move {
+        sqlx::query("DELETE FROM two_factor_tokens WHERE user_id=$1")
+            .bind(user)
+            .execute(&p)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM two_factor WHERE user_id=$1")
+            .bind(user)
+            .execute(&p)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM sessions WHERE user_id=$1")
+            .bind(user)
+            .execute(&p)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM users WHERE id=$1")
+            .bind(user)
+            .execute(&p)
+            .await
+            .ok();
+    };
+    cleanup(pool.clone()).await;
+
+    sqlx::query("INSERT INTO users (id, email, name, email_verified, is_admin, two_factor_enabled) VALUES ($1,$2,$3,true,false,false)")
+        .bind(user)
+        .bind(email)
+        .bind("2FA E2E")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO sessions (id, user_id, token_hash, expires_at) VALUES ($1,$2,$3,NOW() + interval '1 hour')")
+        .bind("s_2fa_e2e")
+        .bind(user)
+        .bind(hash_session_token(session))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let app = codewire_idp::two_factor::router(
+        pool.clone(),
+        session_secret.to_string(),
+        false,
+        AuthState { pool: pool.clone() },
+    );
+
+    // 1. enable → stores encrypted secret/backup codes but does not
+    // flip users.two_factor_enabled until verify.
+    let (st, body, _) = sess_req(
+        &app,
+        "POST",
+        "/api/auth/two-factor/enable",
+        Some(session),
+        "",
+    )
+    .await;
+    assert_eq!(st, 200, "enable: {body}");
+    let secret = body["secret"].as_str().unwrap().to_string();
+    assert_eq!(secret.len(), 32);
+    assert_eq!(body["backupCodes"].as_array().unwrap().len(), 10);
+    assert!(
+        body["totpUri"]
+            .as_str()
+            .unwrap()
+            .starts_with("otpauth://totp/Codewire:twofactor-e2e%40example.com?")
+    );
+    let backup_code = body["backupCodes"][0].as_str().unwrap().to_string();
+
+    let enabled: bool = sqlx::query_scalar("SELECT two_factor_enabled FROM users WHERE id=$1")
+        .bind(user)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(!enabled);
+
+    // 2. verify with a current TOTP → user is 2FA-enabled.
+    let code = current_totp_code(&secret, email);
+    let (st, body, _) = sess_req(
+        &app,
+        "POST",
+        "/api/auth/two-factor/verify",
+        Some(session),
+        &format!(r#"{{"code":"{code}"}}"#),
+    )
+    .await;
+    assert_eq!(st, 200, "verify: {body}");
+    assert_eq!(body["enabled"], true);
+
+    let enabled: bool = sqlx::query_scalar("SELECT two_factor_enabled FROM users WHERE id=$1")
+        .bind(user)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(enabled);
+
+    // 3. validate a sign-in challenge token with TOTP → session cookie +
+    // AuthResponse, token consumed.
+    insert_two_factor_token(&pool, "tf_2fa_e2e_1", user, "tf-token-e2e-1").await;
+    let code = current_totp_code(&secret, email);
+    let (st, body, cookie) = sess_req(
+        &app,
+        "POST",
+        "/api/auth/two-factor/validate",
+        None,
+        &format!(r#"{{"code":"{code}","token":"tf-token-e2e-1"}}"#),
+    )
+    .await;
+    assert_eq!(st, 200, "validate totp: {body}");
+    assert_eq!(body["user"]["email"], email);
+    assert_eq!(body["user"]["two_factor_enabled"], true);
+    assert!(cookie.unwrap().starts_with("codewire.session_token="));
+    let remaining: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM two_factor_tokens WHERE id='tf_2fa_e2e_1'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(remaining, 0);
+
+    // 4. validate with a backup code → session minted and backup code is
+    // consumed, so the same code cannot be used with a fresh challenge.
+    insert_two_factor_token(&pool, "tf_2fa_e2e_2", user, "tf-token-e2e-2").await;
+    let (st, body, cookie) = sess_req(
+        &app,
+        "POST",
+        "/api/auth/two-factor/validate",
+        None,
+        &format!(r#"{{"code":"{backup_code}","token":"tf-token-e2e-2"}}"#),
+    )
+    .await;
+    assert_eq!(st, 200, "validate backup: {body}");
+    assert_eq!(body["user"]["email"], email);
+    assert!(cookie.is_some());
+    let (session_count, digest_count): (i64, i64) = sqlx::query_as(
+        "SELECT count(*), \
+                count(*) FILTER (WHERE token_hash ~ '^[0-9a-f]{64}$') \
+           FROM sessions WHERE user_id = $1",
+    )
+    .bind(user)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(session_count > 0, "2FA completion must mint a session");
+    assert_eq!(
+        session_count, digest_count,
+        "every 2FA session must persist only a valid digest"
+    );
+
+    insert_two_factor_token(&pool, "tf_2fa_e2e_3", user, "tf-token-e2e-3").await;
+    let (st, _body, _cookie) = sess_req(
+        &app,
+        "POST",
+        "/api/auth/two-factor/validate",
+        None,
+        &format!(r#"{{"code":"{backup_code}","token":"tf-token-e2e-3"}}"#),
+    )
+    .await;
+    assert_eq!(st, 401);
+    let remaining: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM two_factor_tokens WHERE id='tf_2fa_e2e_3'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        remaining, 0,
+        "failed backup-code attempt consumes challenge"
+    );
+
+    // 5. disable → row removed and users.two_factor_enabled false.
+    let (st, body, _) = sess_req(
+        &app,
+        "POST",
+        "/api/auth/two-factor/disable",
+        Some(session),
+        "",
+    )
+    .await;
+    assert_eq!(st, 200, "disable: {body}");
+    assert_eq!(body["disabled"], true);
+    let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM two_factor WHERE user_id=$1")
+        .bind(user)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(rows, 0);
+    let enabled: bool = sqlx::query_scalar("SELECT two_factor_enabled FROM users WHERE id=$1")
+        .bind(user)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(!enabled);
+
+    cleanup(pool.clone()).await;
+}
+
+/// Regression for account-level 2FA lockout and atomic challenge claims.
+/// Correct passwords may mint fresh challenges, but cannot reset failures;
+/// each challenge is single-use even under concurrent validation, and a full
+/// password+TOTP success is the only point that resets the account counter.
+#[tokio::test]
+async fn two_factor_attempts_lock_account_against_postgres() {
+    let Ok(url) = std::env::var("DATABASE_URL") else {
+        eprintln!("DATABASE_URL unset — skipping idp 2FA lockout e2e");
+        return;
+    };
+    let pool = PgPool::connect(&url).await.expect("connect");
+
+    let email = "twofactor-lockout-e2e@example.com";
+    let password = "Sup3rStrong!Pass";
+    let session_secret = "two-factor-lockout-e2e-session-secret";
+
+    let cleanup = |p: PgPool| async move {
+        sqlx::query(
+            "DELETE FROM two_factor_tokens WHERE user_id IN (SELECT id FROM users WHERE email=$1)",
+        )
+        .bind(email)
+        .execute(&p)
+        .await
+        .ok();
+        sqlx::query(
+            "DELETE FROM two_factor WHERE user_id IN (SELECT id FROM users WHERE email=$1)",
+        )
+        .bind(email)
+        .execute(&p)
+        .await
+        .ok();
+        sqlx::query("DELETE FROM sessions WHERE user_id IN (SELECT id FROM users WHERE email=$1)")
+            .bind(email)
+            .execute(&p)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM accounts WHERE account_id=$1")
+            .bind(email)
+            .execute(&p)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM users WHERE email=$1")
+            .bind(email)
+            .execute(&p)
+            .await
+            .ok();
+    };
+    cleanup(pool.clone()).await;
+
+    let app = codewire_idp::auth_session::router(pool.clone(), false).merge(
+        codewire_idp::two_factor::router(
+            pool.clone(),
+            session_secret.to_string(),
+            false,
+            AuthState { pool: pool.clone() },
+        ),
+    );
+
+    // Create a real credential account, then enable and verify 2FA through
+    // the same HTTP handlers used by the login page.
+    let (st, body, _) = sess_req(
+        &app,
+        "POST",
+        "/api/auth/sign-up",
+        None,
+        &format!(r#"{{"email":"{email}","password":"{password}","name":"2FA Lockout"}}"#),
+    )
+    .await;
+    assert_eq!(st, 200, "sign up: {body}");
+    let session = body["session"]["token"].as_str().unwrap().to_string();
+    let user: String = sqlx::query_scalar("SELECT id FROM users WHERE email=$1")
+        .bind(email)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+    let (st, body, _) = sess_req(
+        &app,
+        "POST",
+        "/api/auth/two-factor/enable",
+        Some(&session),
+        "",
+    )
+    .await;
+    assert_eq!(st, 200, "enable: {body}");
+    let secret = body["secret"].as_str().unwrap().to_string();
+    let backup_code = body["backupCodes"][0].as_str().unwrap().to_string();
+    let code = current_totp_code(&secret, email);
+    let (st, body, _) = sess_req(
+        &app,
+        "POST",
+        "/api/auth/two-factor/verify",
+        Some(&session),
+        &format!(r#"{{"code":"{code}"}}"#),
+    )
+    .await;
+    assert_eq!(st, 200, "verify: {body}");
+
+    let sign_in_body = format!(r#"{{"email":"{email}","password":"{password}"}}"#);
+    let sign_in = || sess_req(&app, "POST", "/api/auth/sign-in", None, &sign_in_body);
+
+    // Two concurrent validations of one challenge permit exactly one
+    // claimant. The loser sees the existing invalid/expired-token 401.
+    let (st, body, _) = sign_in().await;
+    assert_eq!(st, 200, "sign in for concurrent claim: {body}");
+    let token = body["twoFactorToken"].as_str().unwrap().to_string();
+    let code = current_totp_code(&secret, email);
+    let validate_body = format!(r#"{{"code":"{code}","token":"{token}"}}"#);
+    let (first, second) = tokio::join!(
+        sess_req(
+            &app,
+            "POST",
+            "/api/auth/two-factor/validate",
+            None,
+            &validate_body,
+        ),
+        sess_req(
+            &app,
+            "POST",
+            "/api/auth/two-factor/validate",
+            None,
+            &validate_body,
+        ),
+    );
+    let mut statuses = [first.0, second.0];
+    statuses.sort_unstable();
+    assert_eq!(
+        statuses,
+        [200, 401],
+        "one concurrent claimant: {first:?} {second:?}"
+    );
+    let remaining: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM two_factor_tokens WHERE token=$1")
+            .bind(&token)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(remaining, 0);
+
+    let (st, body, _) = sign_in().await;
+    assert_eq!(st, 200, "sign in for empty-code claim: {body}");
+    let token = body["twoFactorToken"].as_str().unwrap().to_string();
+    let (st, body, _) = sess_req(
+        &app,
+        "POST",
+        "/api/auth/two-factor/validate",
+        None,
+        &format!(r#"{{"code":"","token":"{token}"}}"#),
+    )
+    .await;
+    assert_eq!(
+        st, 400,
+        "empty code keeps the required-fields response: {body}"
+    );
+    let remaining: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM two_factor_tokens WHERE token=$1")
+            .bind(&token)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(remaining, 0, "empty-code attempt consumes challenge");
+
+    // Two distinct challenges using the same backup code serialize on the
+    // user + two_factor rows. Exactly one consumes the backup code; the other
+    // is a failed second-factor attempt, and both challenges stay consumed.
+    insert_two_factor_token(
+        &pool,
+        "tf_2fa_lockout_backup_a",
+        &user,
+        "tf-token-2fa-lockout-backup-a",
+    )
+    .await;
+    insert_two_factor_token(
+        &pool,
+        "tf_2fa_lockout_backup_b",
+        &user,
+        "tf-token-2fa-lockout-backup-b",
+    )
+    .await;
+    let first_body =
+        format!(r#"{{"code":"{backup_code}","token":"tf-token-2fa-lockout-backup-a"}}"#);
+    let second_body =
+        format!(r#"{{"code":"{backup_code}","token":"tf-token-2fa-lockout-backup-b"}}"#);
+    let (first, second) = tokio::join!(
+        sess_req(
+            &app,
+            "POST",
+            "/api/auth/two-factor/validate",
+            None,
+            &first_body,
+        ),
+        sess_req(
+            &app,
+            "POST",
+            "/api/auth/two-factor/validate",
+            None,
+            &second_body,
+        ),
+    );
+    let mut statuses = [first.0, second.0];
+    statuses.sort_unstable();
+    assert_eq!(
+        statuses,
+        [200, 401],
+        "backup code has one concurrent winner: {first:?} {second:?}"
+    );
+    let remaining: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM two_factor_tokens WHERE token IN ($1, $2)")
+            .bind("tf-token-2fa-lockout-backup-a")
+            .bind("tf-token-2fa-lockout-backup-b")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(remaining, 0, "both backup-code challenges are consumed");
+    let failed: i32 = sqlx::query_scalar("SELECT failed_login_attempts FROM users WHERE id=$1")
+        .bind(&user)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(failed, 1, "the losing backup-code validation is counted");
+
+    insert_two_factor_token(
+        &pool,
+        "tf_2fa_lockout_reset",
+        &user,
+        "tf-token-2fa-lockout-reset",
+    )
+    .await;
+    let code = current_totp_code(&secret, email);
+    let (st, body, _) = sess_req(
+        &app,
+        "POST",
+        "/api/auth/two-factor/validate",
+        None,
+        &format!(r#"{{"code":"{code}","token":"tf-token-2fa-lockout-reset"}}"#),
+    )
+    .await;
+    assert_eq!(st, 200, "TOTP success resets backup-race failure: {body}");
+    let failed: i32 = sqlx::query_scalar("SELECT failed_login_attempts FROM users WHERE id=$1")
+        .bind(&user)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(failed, 0);
+
+    // A password failure and a second-factor failure can arrive together.
+    // Both paths must atomically contribute to the shared account counter;
+    // the password verifier is deliberately slower, which regresses the old
+    // stale-read absolute write that could overwrite the 2FA increment.
+    insert_two_factor_token(
+        &pool,
+        "tf_2fa_lockout_mixed",
+        &user,
+        "tf-token-2fa-lockout-mixed",
+    )
+    .await;
+    let mixed_2fa_body = r#"{"code":"wrong-code","token":"tf-token-2fa-lockout-mixed"}"#;
+    let wrong_password_body =
+        format!(r#"{{"email":"{email}","password":"definitely-wrong-password"}}"#);
+    let (two_factor_failure, password_failure) = tokio::join!(
+        sess_req(
+            &app,
+            "POST",
+            "/api/auth/two-factor/validate",
+            None,
+            mixed_2fa_body,
+        ),
+        sess_req(
+            &app,
+            "POST",
+            "/api/auth/sign-in",
+            None,
+            &wrong_password_body,
+        ),
+    );
+    assert_eq!(
+        two_factor_failure.0, 401,
+        "mixed 2FA failure: {two_factor_failure:?}"
+    );
+    assert_eq!(
+        password_failure.0, 401,
+        "mixed password failure: {password_failure:?}"
+    );
+    let failed: i32 = sqlx::query_scalar("SELECT failed_login_attempts FROM users WHERE id=$1")
+        .bind(&user)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(failed, 2, "mixed concurrent failures must not be lost");
+
+    let (st, body, _) = sign_in().await;
+    assert_eq!(st, 200, "sign in after mixed failures: {body}");
+    let token = body["twoFactorToken"].as_str().unwrap().to_string();
+    let code = current_totp_code(&secret, email);
+    let (st, body, _) = sess_req(
+        &app,
+        "POST",
+        "/api/auth/two-factor/validate",
+        None,
+        &format!(r#"{{"code":"{code}","token":"{token}"}}"#),
+    )
+    .await;
+    assert_eq!(st, 200, "TOTP success resets mixed failures: {body}");
+    let failed: i32 = sqlx::query_scalar("SELECT failed_login_attempts FROM users WHERE id=$1")
+        .bind(&user)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(failed, 0);
+
+    let mut locked_probe_token = None;
+    for attempt in 1..=5 {
+        let (st, body, _) = sign_in().await;
+        assert_eq!(st, 200, "correct password attempt {attempt}: {body}");
+        let token = body["twoFactorToken"].as_str().unwrap().to_string();
+
+        let attempts_before: i32 =
+            sqlx::query_scalar("SELECT failed_login_attempts FROM users WHERE id=$1")
+                .bind(&user)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            attempts_before,
+            attempt - 1,
+            "correct password must not reset prior 2FA failures"
+        );
+
+        // Keep a second valid challenge from the pre-lock state. Once the
+        // fifth failure locks the account, validation must consume and reject
+        // this challenge even when its TOTP is correct.
+        if attempt == 5 {
+            let (st, body, _) = sign_in().await;
+            assert_eq!(st, 200, "mint active-lock probe: {body}");
+            locked_probe_token = Some(body["twoFactorToken"].as_str().unwrap().to_string());
+        }
+
+        let (st, body, _) = sess_req(
+            &app,
+            "POST",
+            "/api/auth/two-factor/validate",
+            None,
+            &format!(r#"{{"code":"wrong-code","token":"{token}"}}"#),
+        )
+        .await;
+        let expected = if attempt < 5 { 401 } else { 429 };
+        assert_eq!(st, expected, "failed 2FA attempt {attempt}: {body}");
+
+        let remaining: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM two_factor_tokens WHERE token=$1")
+                .bind(&token)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(remaining, 0, "failed attempt consumes challenge");
+        let (failed, locked): (i32, Option<chrono::NaiveDateTime>) =
+            sqlx::query_as("SELECT failed_login_attempts, locked_until FROM users WHERE id=$1")
+                .bind(&user)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(failed, attempt);
+        assert_eq!(locked.is_some(), attempt == 5);
+    }
+
+    let probe = locked_probe_token.unwrap();
+    let code = current_totp_code(&secret, email);
+    let (st, body, _) = sess_req(
+        &app,
+        "POST",
+        "/api/auth/two-factor/validate",
+        None,
+        &format!(r#"{{"code":"{code}","token":"{probe}"}}"#),
+    )
+    .await;
+    assert_eq!(st, 429, "active lock rejects valid TOTP: {body}");
+    let remaining: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM two_factor_tokens WHERE token=$1")
+            .bind(&probe)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(remaining, 0, "active-lock validation consumes challenge");
+
+    let (st, body, _) = sign_in().await;
+    assert_eq!(st, 429, "active lock rejects correct password: {body}");
+
+    // Expire the lock without touching the counter. Correct password still
+    // leaves five failures in place; the successful second factor resets it.
+    sqlx::query("UPDATE users SET locked_until=NOW() - interval '1 second' WHERE id=$1")
+        .bind(&user)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (st, body, _) = sign_in().await;
+    assert_eq!(st, 200, "sign in after lock expiry: {body}");
+    let token = body["twoFactorToken"].as_str().unwrap().to_string();
+    let failed: i32 = sqlx::query_scalar("SELECT failed_login_attempts FROM users WHERE id=$1")
+        .bind(&user)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        failed, 5,
+        "password success still must not reset 2FA failures"
+    );
+
+    let code = current_totp_code(&secret, email);
+    let (st, body, cookie) = sess_req(
+        &app,
+        "POST",
+        "/api/auth/two-factor/validate",
+        None,
+        &format!(r#"{{"code":"{code}","token":"{token}"}}"#),
+    )
+    .await;
+    assert_eq!(st, 200, "full 2FA success: {body}");
+    assert!(cookie.is_some());
+    let (failed, locked): (i32, Option<chrono::NaiveDateTime>) =
+        sqlx::query_as("SELECT failed_login_attempts, locked_until FROM users WHERE id=$1")
+            .bind(&user)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(failed, 0);
+    assert!(locked.is_none());
+
+    cleanup(pool).await;
+}
+
+async fn insert_two_factor_token(pool: &PgPool, id: &str, user: &str, token: &str) {
+    sqlx::query(
+        "INSERT INTO two_factor_tokens (id, user_id, token, expires_at) VALUES ($1,$2,$3,NOW() + interval '10 minutes')",
+    )
+    .bind(id)
+    .bind(user)
+    .bind(token)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+fn current_totp_code(secret: &str, account_name: &str) -> String {
+    let bytes = Secret::Encoded(secret.to_string()).to_bytes().unwrap();
+    TOTP::new(
+        Algorithm::SHA1,
+        6,
+        1,
+        30,
+        bytes,
+        Some("Codewire".to_string()),
+        account_name.to_string(),
+    )
+    .unwrap()
+    .generate_current()
+    .unwrap()
+}
+
+async fn sess_req(
+    app: &axum::Router,
+    method: &str,
+    path: &str,
+    cookie: Option<&str>,
+    body: &str,
+) -> (u16, serde_json::Value, Option<String>) {
+    use tower::ServiceExt;
+    let mut builder = axum::http::Request::builder()
+        .method(method)
+        .uri(path)
+        .header("content-type", "application/json");
+    if let Some(c) = cookie {
+        builder = builder.header("cookie", format!("codewire.session_token={c}"));
+    }
+    let req = builder
+        .body(axum::body::Body::from(body.to_string()))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    let status = resp.status().as_u16();
+    let set_cookie = resp
+        .headers()
+        .get(axum::http::header::SET_COOKIE)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+    let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
+        .await
+        .unwrap();
+    let json = if bytes.is_empty() {
+        serde_json::Value::Null
+    } else {
+        serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null)
+    };
+    (status, json, set_cookie)
+}
+
+async fn sess_req_bearer(
+    app: &axum::Router,
+    method: &str,
+    path: &str,
+    bearer: &str,
+    body: &str,
+) -> (u16, serde_json::Value, Option<String>) {
+    use tower::ServiceExt;
+    let req = axum::http::Request::builder()
+        .method(method)
+        .uri(path)
+        .header("content-type", "application/json")
+        .header("authorization", format!("Bearer {bearer}"))
+        .body(axum::body::Body::from(body.to_string()))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    let status = resp.status().as_u16();
+    let set_cookie = resp
+        .headers()
+        .get(axum::http::header::SET_COOKIE)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+    let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
+        .await
+        .unwrap();
+    let json = if bytes.is_empty() {
+        serde_json::Value::Null
+    } else {
+        serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null)
+    };
+    (status, json, set_cookie)
+}

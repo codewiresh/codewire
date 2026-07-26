@@ -1,0 +1,245 @@
+syntax = "proto3";
+
+package codewire.v1;
+
+import "google/protobuf/timestamp.proto";
+
+// OrganizationService manages organizations, membership, assignments, and
+// invitations. GetInvitationByToken is the sole unauthenticated codewire.v1
+// RPC; every other method requires an authenticated product credential.
+service OrganizationService {
+  rpc ListOrganizations(ListOrganizationsRequest) returns (ListOrganizationsResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+  rpc CreateOrganization(CreateOrganizationRequest) returns (CreateOrganizationResponse);
+  rpc GetOrganization(GetOrganizationRequest) returns (GetOrganizationResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+  rpc DeleteOrganization(DeleteOrganizationRequest) returns (DeleteOrganizationResponse);
+
+  rpc ListMembers(ListMembersRequest) returns (ListMembersResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+  rpc UpdateMemberRole(UpdateMemberRoleRequest) returns (UpdateMemberRoleResponse);
+  rpc RemoveMember(RemoveMemberRequest) returns (RemoveMemberResponse);
+  rpc GetMemberAssignments(GetMemberAssignmentsRequest) returns (GetMemberAssignmentsResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+  rpc UpdateMemberAssignments(UpdateMemberAssignmentsRequest) returns (UpdateMemberAssignmentsResponse);
+
+  rpc ListInvitations(ListInvitationsRequest) returns (ListInvitationsResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+  rpc CreateInvitation(CreateInvitationRequest) returns (CreateInvitationResponse);
+  rpc RevokeInvitation(RevokeInvitationRequest) returns (RevokeInvitationResponse);
+  rpc AcceptInvitation(AcceptInvitationRequest) returns (AcceptInvitationResponse);
+  // GetInvitationByToken resolves an opaque invitation token without a
+  // credential. Unknown and incorrect tokens both return not_found.
+  rpc GetInvitationByToken(GetInvitationByTokenRequest) returns (GetInvitationByTokenResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+}
+
+enum OrgRole {
+  ORG_ROLE_UNSPECIFIED = 0;
+  ORG_ROLE_OWNER = 1;
+  ORG_ROLE_ADMIN = 2;
+  ORG_ROLE_MEMBER = 3;
+}
+
+enum InvitationStatus {
+  INVITATION_STATUS_UNSPECIFIED = 0;
+  INVITATION_STATUS_PENDING = 1;
+  INVITATION_STATUS_ACCEPTED = 2;
+  INVITATION_STATUS_REVOKED = 3;
+  INVITATION_STATUS_EXPIRED = 4;
+}
+
+// OrganizationDeletionState describes the retained organization row while a
+// durable deletion operation is running or awaiting an owner retry. Successful
+// deletion is represented by the organization becoming not_found.
+enum OrganizationDeletionState {
+  ORGANIZATION_DELETION_STATE_UNSPECIFIED = 0;
+  ORGANIZATION_DELETION_STATE_ACTIVE = 1;
+  ORGANIZATION_DELETION_STATE_DELETING = 2;
+  ORGANIZATION_DELETION_STATE_DELETE_FAILED = 3;
+}
+
+message Organization {
+  string id = 1;
+  string name = 2;
+  string slug = 3;
+  string created_by = 4;
+  google.protobuf.Timestamp created_at = 5;
+  google.protobuf.Timestamp updated_at = 6;
+  // Present on GetOrganization while the retained row exists. List and create
+  // responses may omit lifecycle fields that are not part of their query.
+  optional OrganizationDeletionState deletion_state = 7;
+  optional string deletion_operation_id = 8;
+  optional string deletion_failure_code = 9;
+}
+
+message OrganizationMembership {
+  Organization organization = 1;
+  OrgRole role = 2;
+  // Assignment names are intentionally extensible strings.
+  repeated string assignments = 3;
+  string billing_plan = 4;
+  string billing_status = 5;
+  optional google.protobuf.Timestamp trial_ends_at = 6;
+}
+
+message OrgMember {
+  string id = 1;
+  string org_id = 2;
+  string user_id = 3;
+  OrgRole role = 4;
+  string email = 5;
+  optional string name = 6;
+  optional string image = 7;
+  repeated string assignments = 8;
+  google.protobuf.Timestamp created_at = 9;
+}
+
+message OrgInvitation {
+  string id = 1;
+  string org_id = 2;
+  string org_name = 3;
+  string email = 4;
+  OrgRole role = 5;
+  string invited_by = 6;
+  optional string inviter_name = 7;
+  string token = 8;
+  InvitationStatus status = 9;
+  google.protobuf.Timestamp expires_at = 10;
+  google.protobuf.Timestamp created_at = 11;
+  optional google.protobuf.Timestamp accepted_at = 12;
+}
+
+message ListOrganizationsRequest {
+  int32 page_size = 1;
+  string page_token = 2;
+}
+
+message ListOrganizationsResponse {
+  repeated OrganizationMembership organizations = 1;
+  string next_page_token = 2;
+}
+
+message CreateOrganizationRequest {
+  string name = 1;
+  string slug = 2;
+}
+
+message CreateOrganizationResponse {
+  Organization organization = 1;
+}
+
+message GetOrganizationRequest {
+  string org_id = 1;
+}
+
+message GetOrganizationResponse {
+  Organization organization = 1;
+  repeated OrgMember members = 2;
+}
+
+message DeleteOrganizationRequest {
+  string org_id = 1;
+}
+
+message DeleteOrganizationResponse {
+  string operation_id = 1;
+  OrganizationDeletionState state = 2;
+}
+
+message ListMembersRequest {
+  string org_id = 1;
+  int32 page_size = 2;
+  string page_token = 3;
+}
+
+message ListMembersResponse {
+  repeated OrgMember members = 1;
+  string next_page_token = 2;
+}
+
+message UpdateMemberRoleRequest {
+  string org_id = 1;
+  string user_id = 2;
+  OrgRole role = 3;
+}
+
+message UpdateMemberRoleResponse {}
+
+message RemoveMemberRequest {
+  string org_id = 1;
+  string user_id = 2;
+}
+
+message RemoveMemberResponse {}
+
+message GetMemberAssignmentsRequest {
+  string org_id = 1;
+  string member_id = 2;
+}
+
+message GetMemberAssignmentsResponse {
+  repeated string assignments = 1;
+}
+
+message UpdateMemberAssignmentsRequest {
+  string org_id = 1;
+  string member_id = 2;
+  repeated string assignments = 3;
+}
+
+message UpdateMemberAssignmentsResponse {
+  repeated string assignments = 1;
+}
+
+message ListInvitationsRequest {
+  string org_id = 1;
+  int32 page_size = 2;
+  string page_token = 3;
+}
+
+message ListInvitationsResponse {
+  repeated OrgInvitation invitations = 1;
+  string next_page_token = 2;
+}
+
+message CreateInvitationRequest {
+  string org_id = 1;
+  string email = 2;
+  // UNSPECIFIED defaults to MEMBER.
+  OrgRole role = 3;
+  repeated string assignments = 4;
+}
+
+message CreateInvitationResponse {
+  OrgInvitation invitation = 1;
+}
+
+message RevokeInvitationRequest {
+  string org_id = 1;
+  string invitation_id = 2;
+}
+
+message RevokeInvitationResponse {}
+
+message AcceptInvitationRequest {
+  string token = 1;
+}
+
+message AcceptInvitationResponse {
+  string org_id = 1;
+}
+
+message GetInvitationByTokenRequest {
+  string token = 1;
+}
+
+message GetInvitationByTokenResponse {
+  OrgInvitation invitation = 1;
+}

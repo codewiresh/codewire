@@ -1,0 +1,6 @@
+set -eu
+mkdir -p "$HOME/.codex"
+cat > "$HOME/.codex/auth.json" <<'CWEOF'
+{"tokens":{"access_token":"golden"}}
+CWEOF
+chmod 600 "$HOME/.codex/auth.json"

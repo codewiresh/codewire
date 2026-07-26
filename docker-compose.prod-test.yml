@@ -1,0 +1,18 @@
+services:
+  web:
+    build:
+      context: .
+      dockerfile: apps/dashboard/Dockerfile
+    container_name: codewire-web-prod
+    ports:
+      - "3000:3000"
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgres://codewire:codewire@postgres:5432/codewire?sslmode=disable
+      FRONTEND_URL: http://localhost:3000
+      NODE_ENV: production
+      PORT: "3000"
+    depends_on:
+      postgres:
+        condition: service_healthy

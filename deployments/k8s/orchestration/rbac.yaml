@@ -1,0 +1,95 @@
+# RBAC for the codewire-orchestration ServiceAccount.
+#
+# The Rust orchestration service took over environment lifecycle work
+# (SandboxClaim/SandboxTemplate creation, pod exec, sandbox probing)
+# that the Go monolith performed under the codewire-server SA. That SA's
+# ClusterRole grants these verbs, but its ClusterRoleBinding only lists
+# codewire-server as a subject — so the new orchestration SA had no
+# claim/exec permission. With the Temporal worker running primary, the
+# create activity (and the exec/file proxy routes) call the kube API as
+# this SA, so it needs its own grant.
+#
+# Least-privilege: only the resources orchestration's create/exec/probe
+# paths touch. It owns Sandbox CRDs plus the per-environment gateway companion
+# Deployment, ClusterIP Services, and NetworkPolicies. Gateway host-key Secret
+# creation/deletion is granted separately in the shared sandbox namespace and
+# constrained by admission. It still does NOT get the full codewire-server
+# surface such as ingresses, secret reads/writes, or RBAC authoring.
+#
+# The ClusterRoleBinding's subject namespace is rewritten per overlay by
+# kustomize's namespace transformer (prod here, codewire-e2e in the kind
+# e2e overlay), so one definition serves every environment.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: codewire-orchestration
+  labels:
+    app.kubernetes.io/name: codewire
+    app.kubernetes.io/component: orchestration
+rules:
+  # Infisical Kubernetes Auth validates the presented workload JWT through the
+  # cluster TokenReview API as this ServiceAccount. It needs only TokenReview
+  # creation; SubjectAccessReview and broader auth-delegator access are not
+  # required.
+  - apiGroups: ["authentication.k8s.io"]
+    resources: ["tokenreviews"]
+    verbs: ["create"]
+  # Sandbox namespaces must exist before a claim lands in them.
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  # Pod exec/probe/file-cat/port-forward for the environment proxy routes,
+  # plus the lifecycle probe that resolves pod IP/name and readiness.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get", "list", "watch"]
+  # Environment deletion independently proves and removes retained workspace
+  # storage after the Sandbox/SandboxClaim controllers have quiesced.
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get", "list", "watch", "delete"]
+  # Gateway binding selects transport-zone capabilities from the scheduled
+  # runtime node labels.
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["pods/exec", "pods/portforward"]
+    verbs: ["create", "get"]
+  # Agent Sandbox CRDs — the create/start/stop/delete lifecycle.
+  - apiGroups: ["agents.x-k8s.io"]
+    resources: ["sandboxes"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["extensions.agents.x-k8s.io"]
+    resources: ["sandboxclaims", "sandboxtemplates", "sandboxwarmpools"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Split gateway/workspace runtime companions. Orchestration creates these
+  # alongside the SandboxClaim and removes them on stop/destroy.
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: codewire-orchestration
+  labels:
+    app.kubernetes.io/name: codewire
+    app.kubernetes.io/component: orchestration
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: codewire-orchestration
+subjects:
+  - kind: ServiceAccount
+    name: codewire-orchestration
+    namespace: prod

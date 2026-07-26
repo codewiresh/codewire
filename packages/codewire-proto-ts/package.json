@@ -1,0 +1,19 @@
+{
+  "name": "@codewire/proto-ts",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "TypeScript schemas for client-facing codewire contracts and vendored google.rpc error details, generated locally with protoc-gen-es",
+  "exports": {
+    ".": "./src/index.ts",
+    "./gen/*": "./src/gen/*.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@bufbuild/protobuf": "2.12.1"
+  },
+  "devDependencies": {
+    "typescript": "5.9.3"
+  }
+}

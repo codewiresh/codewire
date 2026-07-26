@@ -1,0 +1,6 @@
+# Copy this file over kustomization.yaml in a reviewed source PR to restore
+# the inactive control marker and let Flux prune the completed smoke Jobs.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - confidential-smoke-control.yaml

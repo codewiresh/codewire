@@ -1,0 +1,29 @@
+---
+title: Create your first environment
+description: Launch your first Codewire sandbox
+---
+
+import { CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+After you create an organization, create an environment from a repository.
+
+## Steps
+
+1. Open your organization in the dashboard.
+2. Choose **New Environment**.
+3. Enter a repository URL.
+4. Review the detected preset, commands, ports, and variables.
+5. Create the environment and wait for it to reach **Running**.
+
+For CLI usage:
+
+```bash
+cw env create github.com/your-org/your-repo
+```
+
+## Next steps
+
+<CardGrid>
+  <LinkCard title="Connect to an environment" href="/docs/environments/connect" description="Use terminal, SSH, previews, files, and sessions." />
+  <LinkCard title="Manage environments" href="/docs/environments/manage-environments" description="Start, stop, inspect, and delete environments." />
+</CardGrid>

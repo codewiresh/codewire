@@ -1,0 +1,155 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "codewire-mesh.fullname" . }}
+  labels:
+    {{- include "codewire-mesh.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "codewire-mesh.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      labels:
+        {{- include "codewire-mesh.labels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "codewire-mesh.serviceAccountName" . }}
+      containers:
+        - name: mesh
+          image: "{{ include "codewire-mesh.imageRef" . }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- if eq .Values.mesh.authMode "token" }}
+          command: ["sh", "-c"]
+          args:
+            - |
+              exec codewire-mesh \
+                --base-url={{ .Values.mesh.baseURL | quote }} \
+                --listen={{ .Values.mesh.listenAddr | quote }} \
+                --ssh-listen={{ .Values.mesh.sshListen | quote }} \
+                --ssh-host-key-path=/data/ssh_host_ed25519 \
+                --auth-mode={{ .Values.mesh.authMode | quote }} \
+                --auth-token="$CW_AUTH_TOKEN"{{- if .Values.database.enabled }} \
+                --database-url="$DATABASE_URL"
+                {{- end }}
+          {{- else if eq .Values.mesh.authMode "oidc" }}
+          command: ["sh", "-c"]
+          args:
+            - |
+              exec codewire-mesh \
+                --base-url={{ .Values.mesh.baseURL | quote }} \
+                --listen={{ .Values.mesh.listenAddr | quote }} \
+                --ssh-listen={{ .Values.mesh.sshListen | quote }} \
+                --ssh-host-key-path=/data/ssh_host_ed25519 \
+                --auth-mode=oidc \
+                --oidc-issuer={{ .Values.oidc.issuer | quote }} \
+                --oidc-client-id={{ .Values.oidc.clientID | quote }} \
+                --oidc-client-secret="$OIDC_CLIENT_SECRET"{{- if .Values.mesh.authToken }} \
+                --auth-token="$CW_AUTH_TOKEN"
+                {{- end }}{{- if .Values.oidc.allowedGroups }} \
+                --oidc-allowed-groups={{ join "," .Values.oidc.allowedGroups | quote }}
+                {{- end }}{{- if .Values.database.enabled }} \
+                --database-url="$DATABASE_URL"
+                {{- end }}
+          {{- else }}
+          command: ["sh", "-c"]
+          args:
+            - |
+              exec codewire-mesh \
+                --base-url={{ .Values.mesh.baseURL | quote }} \
+                --listen={{ .Values.mesh.listenAddr | quote }} \
+                --ssh-listen={{ .Values.mesh.sshListen | quote }} \
+                --ssh-host-key-path=/data/ssh_host_ed25519 \
+                --auth-mode={{ .Values.mesh.authMode | quote }}{{- if .Values.database.enabled }} \
+                --database-url="$DATABASE_URL"
+                {{- end }}
+          {{- end }}
+          env:
+            {{- if .Values.database.enabled }}
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.database.secretName }}
+                  key: {{ .Values.database.uriKey }}
+            {{- end }}
+            {{- if eq .Values.mesh.authMode "token" }}
+            - name: CW_AUTH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "codewire-mesh.fullname" . }}
+                  key: auth-token
+            {{- end }}
+            {{- if eq .Values.mesh.authMode "oidc" }}
+            - name: OIDC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.oidc.clientSecretRef.name | default (include "codewire-mesh.fullname" .) }}
+                  key: {{ .Values.oidc.clientSecretRef.key }}
+                  optional: {{ .Values.oidc.clientSecretRef.optional | default false }}
+            {{- end }}
+            {{- if and .Values.mesh.authToken (ne .Values.mesh.authMode "token") }}
+            - name: CW_AUTH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "codewire-mesh.fullname" . }}
+                  key: auth-token
+            {{- end }}
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+            - name: ssh
+              containerPort: 2222
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          {{- if .Values.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "codewire-mesh.fullname" . }}-data
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

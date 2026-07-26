@@ -1,0 +1,15 @@
+version: v2
+
+# Python generation for the vendored google.rpc detail messages. The Python
+# SDK uses these standard types to decode Connect validation and request-ID
+# errors without adding a second runtime dependency.
+inputs:
+  - directory: .
+    paths:
+      - google/rpc
+
+plugins:
+  - protoc_builtin: python
+    out: ../libs/gen-python
+  - protoc_builtin: pyi
+    out: ../libs/gen-python

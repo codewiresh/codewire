@@ -1,0 +1,212 @@
+//! Connect-RPC adapters for the cluster-local `codewire.internal.v1` surface.
+//!
+//! The raw REST handlers remain during dual serve, but both wires delegate to
+//! the shared functions in [`crate::api::internal`]. The binding service is
+//! deliberately anonymous and validates its pod identity in the handler;
+//! credentials use the environment-token Connect layer.
+
+use std::sync::Arc;
+
+use codewire_proto::codewire::internal::v1::{
+    DirectUdpTransport as ProtoDirectUdpTransport, EndpointList as ProtoEndpointList,
+    EnvironmentCredentialService, GatewayBindingService, IssueGatewayBindingRequest,
+    IssueGatewayBindingResponse, IssueGitCredentialsRequest, IssueGitCredentialsResponse,
+    IssueGitHubCredentialsRequest, IssueGitHubCredentialsResponse,
+    PeerRelayTransport as ProtoPeerRelayTransport, RuntimeTransport as ProtoRuntimeTransport,
+};
+use codewire_server_core::connect::{environment_identity, rpc_app_error};
+use connectrpc::{RequestContext, ServiceRequest, ServiceResult};
+
+use crate::api::ApiState;
+use crate::api::internal::{
+    GatewayBinding, issue_gateway_binding_core, issue_git_credentials_core,
+    issue_github_credentials_core,
+};
+use crate::runtime_transport::{
+    DirectUdpTransport, EndpointList, PeerRelayTransport, RuntimeTransportBinding,
+};
+
+/// Registers the anonymous pod-keyed binding command. The handler itself
+/// resolves `(pod, namespace)` exactly as the temporary REST handler does.
+pub fn gateway_binding_router(state: ApiState) -> connectrpc::Router {
+    connectrpc::Router::new().add_service(Arc::new(GatewayBindingConnectService { state }))
+}
+
+/// Registers the environment-Bearer credential commands. The caller must
+/// mount this router behind `ConnectAuthLayer::environment_token`.
+pub fn environment_credentials_router(state: ApiState) -> connectrpc::Router {
+    connectrpc::Router::new().add_service(Arc::new(EnvironmentCredentialConnectService { state }))
+}
+
+struct GatewayBindingConnectService {
+    state: ApiState,
+}
+
+#[allow(refining_impl_trait)]
+impl GatewayBindingService for GatewayBindingConnectService {
+    async fn issue_gateway_binding(
+        &self,
+        ctx: RequestContext,
+        request: ServiceRequest<'_, IssueGatewayBindingRequest>,
+    ) -> ServiceResult<IssueGatewayBindingResponse> {
+        let request = request.view();
+        let binding = issue_gateway_binding_core(&self.state, request.pod, request.namespace)
+            .await
+            .map_err(|error| rpc_app_error(&error, &ctx))?;
+        connectrpc::Response::ok(proto_gateway_binding(binding))
+    }
+}
+
+struct EnvironmentCredentialConnectService {
+    state: ApiState,
+}
+
+#[allow(refining_impl_trait)]
+impl EnvironmentCredentialService for EnvironmentCredentialConnectService {
+    async fn issue_git_hub_credentials(
+        &self,
+        ctx: RequestContext,
+        _request: ServiceRequest<'_, IssueGitHubCredentialsRequest>,
+    ) -> ServiceResult<IssueGitHubCredentialsResponse> {
+        let user_id = environment_identity(&ctx)?.user_id.clone();
+        let credentials = issue_github_credentials_core(&self.state, &user_id)
+            .await
+            .map_err(|error| rpc_app_error(&error, &ctx))?;
+        connectrpc::Response::ok(IssueGitHubCredentialsResponse {
+            token: credentials.token,
+            username: credentials.username,
+            host: credentials.host,
+            ..Default::default()
+        })
+    }
+
+    async fn issue_git_credentials(
+        &self,
+        ctx: RequestContext,
+        request: ServiceRequest<'_, IssueGitCredentialsRequest>,
+    ) -> ServiceResult<IssueGitCredentialsResponse> {
+        let user_id = environment_identity(&ctx)?.user_id.clone();
+        let host = request.view().host.to_string();
+        let credentials = issue_git_credentials_core(&self.state, &user_id, &host)
+            .await
+            .map_err(|error| rpc_app_error(&error, &ctx))?;
+        connectrpc::Response::ok(IssueGitCredentialsResponse {
+            token: credentials.token,
+            username: credentials.username,
+            host: credentials.host,
+            ..Default::default()
+        })
+    }
+}
+
+fn proto_gateway_binding(binding: GatewayBinding) -> IssueGatewayBindingResponse {
+    IssueGatewayBindingResponse {
+        environment_id: binding.environment_id,
+        sidecar_token: binding.sidecar_token,
+        workspace_pod_ip: binding.workspace_pod_ip.unwrap_or_default(),
+        app_ports: binding.app_ports,
+        runtime_transport: binding
+            .runtime_transport
+            .map(proto_runtime_transport)
+            .into(),
+        ..Default::default()
+    }
+}
+
+fn proto_runtime_transport(value: RuntimeTransportBinding) -> ProtoRuntimeTransport {
+    ProtoRuntimeTransport {
+        runtime_region: value.runtime_region,
+        transport_zone: value.transport_zone,
+        peer_relay: value.peer_relay.map(proto_peer_relay).into(),
+        direct_udp: value.direct_udp.map(proto_direct_udp).into(),
+        stun: value.stun.map(proto_endpoint_list).into(),
+        derp: value.derp.map(proto_endpoint_list).into(),
+        ..Default::default()
+    }
+}
+
+fn proto_peer_relay(value: PeerRelayTransport) -> ProtoPeerRelayTransport {
+    ProtoPeerRelayTransport {
+        public_endpoints: value.public_endpoints,
+        dns: value.dns,
+        allocator_url: value.allocator_url,
+        bind_addrs: value.bind_addrs,
+        ..Default::default()
+    }
+}
+
+fn proto_direct_udp(value: DirectUdpTransport) -> ProtoDirectUdpTransport {
+    ProtoDirectUdpTransport {
+        vip: value.vip,
+        port_start: value.port_start,
+        port_end: value.port_end,
+        ..Default::default()
+    }
+}
+
+fn proto_endpoint_list(value: EndpointList) -> ProtoEndpointList {
+    ProtoEndpointList {
+        endpoints: value.endpoints,
+        ..Default::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn runtime_transport_conversion_preserves_every_optional_surface() {
+        let binding = GatewayBinding {
+            environment_id: "env-1".to_string(),
+            sidecar_token: "sidecar-token".to_string(),
+            workspace_pod_ip: Some("10.0.0.3".to_string()),
+            app_ports: vec![3000],
+            runtime_transport: Some(RuntimeTransportBinding {
+                runtime_region: "ams".to_string(),
+                transport_zone: "prod-node-1".to_string(),
+                peer_relay: Some(PeerRelayTransport {
+                    public_endpoints: vec!["203.0.113.10:3478".to_string()],
+                    dns: Some("relay.example.test".to_string()),
+                    allocator_url: "https://allocator.example.test".to_string(),
+                    bind_addrs: vec!["0.0.0.0:3478".to_string()],
+                }),
+                direct_udp: Some(DirectUdpTransport {
+                    vip: Some("198.51.100.2".to_string()),
+                    port_start: Some(40000),
+                    port_end: Some(40100),
+                }),
+                stun: Some(EndpointList {
+                    endpoints: vec!["stun.example.test:3478".to_string()],
+                }),
+                derp: Some(EndpointList {
+                    endpoints: vec!["https://derp.example.test".to_string()],
+                }),
+            }),
+        };
+
+        let proto = proto_gateway_binding(binding);
+        let transport = proto
+            .runtime_transport
+            .as_option()
+            .expect("transport is present");
+        assert_eq!(transport.runtime_region, "ams");
+        assert_eq!(transport.transport_zone, "prod-node-1");
+        assert_eq!(
+            transport.peer_relay.as_option().unwrap().dns,
+            Some("relay.example.test".to_string())
+        );
+        assert_eq!(
+            transport.direct_udp.as_option().unwrap().port_end,
+            Some(40100)
+        );
+        assert_eq!(
+            transport.stun.as_option().unwrap().endpoints,
+            ["stun.example.test:3478"]
+        );
+        assert_eq!(
+            transport.derp.as_option().unwrap().endpoints,
+            ["https://derp.example.test"]
+        );
+    }
+}

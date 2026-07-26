@@ -1,0 +1,13 @@
+{
+  "attribution": {
+    "commit": "",
+    "pr": ""
+  },
+  "includeCoAuthoredBy": false,
+  "env": {
+    "GIT_AUTHOR_NAME": "Noel Jackson",
+    "GIT_AUTHOR_EMAIL": "n@noeljackson.com",
+    "GIT_COMMITTER_NAME": "Noel Jackson",
+    "GIT_COMMITTER_EMAIL": "n@noeljackson.com"
+  }
+}

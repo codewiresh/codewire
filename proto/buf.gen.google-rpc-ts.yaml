@@ -1,0 +1,22 @@
+version: v2
+
+# TypeScript-only codegen for the vendored google.rpc error-detail schemas.
+# Browser clients decode ConnectError details with these exact protoc-gen-es
+# schemas. Go and Python use their canonical ecosystem representations and
+# remain intentionally excluded. Run with
+#   cd proto && buf generate --template buf.gen.google-rpc-ts.yaml
+# (or `make proto-generate`, which runs every checked-in template).
+#
+# The plugin is local and pinned in the root package.json so generation stays
+# offline and reproducible in restricted-network CI.
+
+inputs:
+  - directory: .
+    paths:
+      - google/rpc
+
+plugins:
+  - local: ../node_modules/.bin/protoc-gen-es
+    out: ../packages/codewire-proto-ts/src/gen
+    opt:
+      - target=ts

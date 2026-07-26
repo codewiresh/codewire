@@ -1,0 +1,354 @@
+name: Publish Production Images
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing canonical vMAJOR.MINOR.PATCH tag to recover
+        required: true
+        type: string
+
+concurrency:
+  group: deploy-prod-release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  REGISTRY_HOST: ${{ vars.REGISTRY_HOST }}
+
+jobs:
+  release-selection:
+    name: Verify canonical release tag
+    runs-on: ubuntu-latest
+    outputs:
+      release_tag: ${{ steps.select.outputs.release_tag }}
+      source_sha: ${{ steps.select.outputs.source_sha }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          fetch-depth: 0
+
+      - name: Refuse recovery control outside protected main
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          RECOVERY_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          [ "$GITHUB_REF" = 'refs/heads/main' ]
+          [ "$GITHUB_REF_NAME" = 'main' ]
+          [[ "$RECOVERY_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+
+      # Recovery control stays on protected main. Release source is checked
+      # out separately from the exact tag and is the only source built below.
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        if: github.event_name == 'workflow_dispatch'
+        with:
+          ref: refs/tags/${{ inputs.release_tag }}
+          path: .release-source
+          fetch-depth: 0
+
+      - name: Select exact canonical release source
+        id: select
+        env:
+          RECOVERY_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          selected_tag="$GITHUB_REF_NAME"
+          source_dir='.'
+          if [ "$GITHUB_EVENT_NAME" = 'workflow_dispatch' ]; then
+            selected_tag="$RECOVERY_TAG"
+            source_dir='.release-source'
+          fi
+          remote_refs="$(git ls-remote --tags origin \
+            "refs/tags/${selected_tag}" \
+            "refs/tags/${selected_tag}^{}")"
+          remote_object_sha="$(printf '%s\n' "$remote_refs" | awk -v ref="refs/tags/${selected_tag}" '$2 == ref { print $1 }')"
+          remote_peeled_sha="$(printf '%s\n' "$remote_refs" | awk -v ref="refs/tags/${selected_tag}^{}" '$2 == ref { print $1 }')"
+          canonical_main_sha="$(git ls-remote origin refs/heads/main | awk '$2 == "refs/heads/main" { print $1 }')"
+          source_sha="$(git -C "$source_dir" rev-parse HEAD)"
+          git fetch --no-tags origin \
+            "+refs/heads/main:refs/remotes/origin/main" \
+            "+refs/tags/${selected_tag}:refs/tags/${selected_tag}"
+          scripts/ci/release/verify-release-tag-ref.sh \
+            "$GITHUB_EVENT_NAME" \
+            "$GITHUB_REF" \
+            "$GITHUB_REF_NAME" \
+            "$RECOVERY_TAG" \
+            "$GITHUB_SERVER_URL" \
+            "$GITHUB_REPOSITORY" \
+            "$source_sha" \
+            "$remote_object_sha" \
+            "$remote_peeled_sha" \
+            "$canonical_main_sha"
+          printf 'release_tag=%s\n' "$selected_tag" >> "$GITHUB_OUTPUT"
+          printf 'source_sha=%s\n' "$source_sha" >> "$GITHUB_OUTPUT"
+
+  build-gateway-image:
+    name: Alias Existing Gateway Image
+    runs-on: ubuntu-latest
+    needs: [release-selection]
+    outputs:
+      source_sha: ${{ steps.build.outputs.source_sha }}
+      candidate_ref: ${{ steps.build.outputs.candidate_ref }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: refs/tags/${{ needs.release-selection.outputs.release_tag }}
+          path: .release-source
+
+      - name: Reuse and alias gateway image
+        id: build
+        env:
+          CODEWIRE_RELEASE_TAG: ${{ needs.release-selection.outputs.release_tag }}
+          CODEWIRE_SOURCE_SHA: ${{ needs.release-selection.outputs.source_sha }}
+          CODEWIRE_SOURCE_DIR: .release-source
+          REQUIRE_EXISTING_SOURCE_IMAGE: '1'
+        run: scripts/ci/images/build-push-image.sh gateway .release-source/deployments/docker/gateway.Dockerfile .release-source
+
+  build-derp:
+    name: Alias Existing DERP Relay Image
+    runs-on: ubuntu-latest
+    needs: [release-selection]
+    outputs:
+      source_sha: ${{ steps.build.outputs.source_sha }}
+      candidate_ref: ${{ steps.build.outputs.candidate_ref }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: refs/tags/${{ needs.release-selection.outputs.release_tag }}
+          path: .release-source
+
+      - name: Reuse and alias DERP image
+        id: build
+        env:
+          CODEWIRE_RELEASE_TAG: ${{ needs.release-selection.outputs.release_tag }}
+          CODEWIRE_SOURCE_SHA: ${{ needs.release-selection.outputs.source_sha }}
+          CODEWIRE_SOURCE_DIR: .release-source
+          REQUIRE_EXISTING_SOURCE_IMAGE: '1'
+        run: scripts/ci/images/build-push-image.sh derp .release-source/deployments/docker/derp.Dockerfile .release-source
+
+  build-services-image:
+    name: Alias Existing Rust Services Image
+    runs-on: ubuntu-latest
+    needs: [release-selection]
+    outputs:
+      source_sha: ${{ steps.build.outputs.source_sha }}
+      candidate_ref: ${{ steps.build.outputs.candidate_ref }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: refs/tags/${{ needs.release-selection.outputs.release_tag }}
+          path: .release-source
+
+      - name: Reuse and alias services image
+        id: build
+        env:
+          CODEWIRE_RELEASE_TAG: ${{ needs.release-selection.outputs.release_tag }}
+          CODEWIRE_SOURCE_SHA: ${{ needs.release-selection.outputs.source_sha }}
+          CODEWIRE_SOURCE_DIR: .release-source
+          REQUIRE_EXISTING_SOURCE_IMAGE: '1'
+        run: scripts/ci/images/build-push-image.sh services .release-source/deployments/docker/services.Dockerfile .release-source
+
+  build-mesh-image:
+    name: Alias Existing Hosted Mesh Image
+    runs-on: ubuntu-latest
+    needs: [release-selection]
+    outputs:
+      source_sha: ${{ steps.build.outputs.source_sha }}
+      candidate_ref: ${{ steps.build.outputs.candidate_ref }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: refs/tags/${{ needs.release-selection.outputs.release_tag }}
+          path: .release-source
+
+      - name: Reuse and alias hosted Mesh image
+        id: build
+        env:
+          CODEWIRE_RELEASE_TAG: ${{ needs.release-selection.outputs.release_tag }}
+          CODEWIRE_SOURCE_SHA: ${{ needs.release-selection.outputs.source_sha }}
+          CODEWIRE_SOURCE_DIR: .release-source
+          REQUIRE_EXISTING_SOURCE_IMAGE: '1'
+        run: scripts/ci/images/build-push-image.sh mesh .release-source/deployments/docker/mesh.Dockerfile .release-source
+
+  build-dashboard-image:
+    name: Alias Existing Dashboard Image
+    runs-on: ubuntu-latest
+    needs: [release-selection]
+    outputs:
+      source_sha: ${{ steps.build.outputs.source_sha }}
+      candidate_ref: ${{ steps.build.outputs.candidate_ref }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: refs/tags/${{ needs.release-selection.outputs.release_tag }}
+          path: .release-source
+
+      - name: Reuse and alias dashboard image
+        id: build
+        env:
+          CODEWIRE_RELEASE_TAG: ${{ needs.release-selection.outputs.release_tag }}
+          CODEWIRE_SOURCE_SHA: ${{ needs.release-selection.outputs.source_sha }}
+          CODEWIRE_SOURCE_DIR: .release-source
+          REQUIRE_EXISTING_SOURCE_IMAGE: '1'
+        run: scripts/ci/images/build-push-image.sh dashboard .release-source/apps/dashboard/Dockerfile .release-source
+
+  build-base-support-image:
+    name: Publish Base Release Image
+    runs-on: ubuntu-latest
+    needs: [release-selection]
+    outputs:
+      candidate_ref: ${{ steps.build.outputs.candidate_ref }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: refs/tags/${{ needs.release-selection.outputs.release_tag }}
+          path: .release-source
+
+      - name: Reuse or build and alias base image
+        id: build
+        env:
+          CODEWIRE_RELEASE_TAG: ${{ needs.release-selection.outputs.release_tag }}
+          CODEWIRE_SOURCE_SHA: ${{ needs.release-selection.outputs.source_sha }}
+          CODEWIRE_SOURCE_DIR: .release-source
+        run: scripts/ci/images/build-push-image.sh base .release-source/images/base/Dockerfile .release-source/images/base
+
+  build-workspace-support-image:
+    name: Publish Workspace Release Image
+    runs-on: ubuntu-latest
+    needs: [release-selection, build-base-support-image]
+    outputs:
+      candidate_ref: ${{ steps.build.outputs.candidate_ref }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: refs/tags/${{ needs.release-selection.outputs.release_tag }}
+          path: .release-source
+
+      - name: Reuse or build workspace from the exact release base
+        id: build
+        env:
+          CODEWIRE_BASE_IMAGE_REF: ${{ needs.build-base-support-image.outputs.candidate_ref }}
+          CODEWIRE_RELEASE_TAG: ${{ needs.release-selection.outputs.release_tag }}
+          CODEWIRE_SOURCE_SHA: ${{ needs.release-selection.outputs.source_sha }}
+          CODEWIRE_SOURCE_DIR: .release-source
+        run: scripts/ci/images/build-push-image.sh workspace .release-source/images/workspace/Dockerfile .release-source
+
+  publish-runtime-images:
+    name: Validate and Publish Exact Runtime Bundle
+    runs-on: ubuntu-latest
+    needs:
+      - release-selection
+      - build-gateway-image
+      - build-derp
+      - build-services-image
+      - build-mesh-image
+      - build-dashboard-image
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          fetch-depth: 0
+
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: refs/tags/${{ needs.release-selection.outputs.release_tag }}
+          path: .release-source
+          fetch-depth: 0
+
+      - name: Validate complete production candidate bundle
+        env:
+          RELEASE_TAG: ${{ needs.release-selection.outputs.release_tag }}
+          SOURCE_SHA: ${{ needs.release-selection.outputs.source_sha }}
+          GHCR_PUBLISH_USERNAME: ${{ vars.GHCR_PUBLISH_USERNAME }}
+        run: |
+          set -euo pipefail
+          bundle="${RUNNER_TEMP:?}/codewire-prod-image-bundle.json"
+          scripts/ci/images/image-bundle.py create \
+            --environment prod \
+            --source-sha "$SOURCE_SHA" \
+            --output "$bundle" \
+            --candidate dashboard "${{ needs.build-dashboard-image.outputs.source_sha }}" "${{ needs.build-dashboard-image.outputs.candidate_ref }}" \
+            --candidate derp "${{ needs.build-derp.outputs.source_sha }}" "${{ needs.build-derp.outputs.candidate_ref }}" \
+            --candidate gateway "${{ needs.build-gateway-image.outputs.source_sha }}" "${{ needs.build-gateway-image.outputs.candidate_ref }}" \
+            --candidate services "${{ needs.build-services-image.outputs.source_sha }}" "${{ needs.build-services-image.outputs.candidate_ref }}" \
+            --candidate mesh "${{ needs.build-mesh-image.outputs.source_sha }}" "${{ needs.build-mesh-image.outputs.candidate_ref }}"
+          scripts/ci/images/publish-image-to-ghcr.sh \
+            "${{ needs.build-dashboard-image.outputs.candidate_ref }}" \
+            ghcr.io/codewiresh/dashboard \
+            "$SOURCE_SHA" "$RELEASE_TAG"
+          scripts/ci/images/publish-image-to-ghcr.sh \
+            "${{ needs.build-derp.outputs.candidate_ref }}" \
+            ghcr.io/codewiresh/derp \
+            "$SOURCE_SHA" "$RELEASE_TAG"
+          scripts/ci/images/publish-image-to-ghcr.sh \
+            "${{ needs.build-gateway-image.outputs.candidate_ref }}" \
+            ghcr.io/codewiresh/gateway \
+            "$SOURCE_SHA" "$RELEASE_TAG"
+          scripts/ci/images/publish-image-to-ghcr.sh \
+            "${{ needs.build-services-image.outputs.candidate_ref }}" \
+            ghcr.io/codewiresh/services \
+            "$SOURCE_SHA" "$RELEASE_TAG"
+          scripts/ci/images/publish-image-to-ghcr.sh \
+            "${{ needs.build-mesh-image.outputs.candidate_ref }}" \
+            ghcr.io/codewiresh/mesh \
+            "$SOURCE_SHA" "$RELEASE_TAG"
+
+  publish-support-release-images:
+    name: Publish Exact Support Release Images
+    runs-on: ubuntu-latest
+    needs:
+      - release-selection
+      - build-base-support-image
+      - build-workspace-support-image
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+
+      - name: Copy both support release manifests without rebuilding
+        env:
+          RELEASE_TAG: ${{ needs.release-selection.outputs.release_tag }}
+          SOURCE_SHA: ${{ needs.release-selection.outputs.source_sha }}
+          GHCR_PUBLISH_USERNAME: ${{ vars.GHCR_PUBLISH_USERNAME }}
+        run: |
+          set -euo pipefail
+          scripts/ci/images/publish-image-to-ghcr.sh \
+            "${{ needs.build-base-support-image.outputs.candidate_ref }}" \
+            ghcr.io/codewiresh/base \
+            "$SOURCE_SHA" "$RELEASE_TAG"
+          scripts/ci/images/publish-image-to-ghcr.sh \
+            "${{ needs.build-workspace-support-image.outputs.candidate_ref }}" \
+            ghcr.io/codewiresh/workspace \
+            "$SOURCE_SHA" "$RELEASE_TAG"
+
+  dispatch-deploy-prod:
+    name: Dispatch Signed Tag to Deploy
+    runs-on: ubuntu-latest
+    needs:
+      - release-selection
+      - publish-runtime-images
+      - publish-support-release-images
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+
+      - name: Dispatch only the canonical signed release tag
+        env:
+          RELEASE_TAG: ${{ needs.release-selection.outputs.release_tag }}
+          CODEWIRE_DEPLOY_PROMOTION_TOKEN: ${{ secrets.CODEWIRE_DEPLOY_PROMOTION_TOKEN }}
+        run: scripts/ci/deploy/dispatch-deploy-prod.sh "$RELEASE_TAG"

@@ -1,0 +1,80 @@
+mesh:
+  baseURL: ""  # Required: e.g. https://mesh.example.com
+  authMode: "token"
+  authToken: ""  # Auto-generated if empty
+  sshListen: ":2222"
+  listenAddr: "0.0.0.0:8080"
+
+oidc:
+  # Set issuer to enable OIDC auth mode (e.g. https://auth.codewire.sh)
+  issuer: ""
+  clientID: ""
+  # Reference to a dedicated Mesh OIDC client secret.
+  clientSecretRef:
+    name: ""
+    key: "oidc-client-secret"
+    optional: false
+  # Groups required for access. Empty = any authenticated user.
+  allowedGroups: []
+
+database:
+  enabled: false
+  secretName: "codewire-mesh-db-app"
+  uriKey: "uri"
+
+image:
+  repository: ghcr.io/codewiresh/codewire
+  tag: ""  # Defaults to appVersion
+  digest: ""  # If set, renders repository@digest and takes precedence over tag
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+replicaCount: 1
+
+persistence:
+  enabled: true
+  size: 1Gi
+  storageClass: ""
+  accessModes:
+    - ReadWriteOnce
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: mesh.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+ssh:
+  service:
+    type: LoadBalancer
+    annotations: {}
+    loadBalancerIP: ""
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+podAnnotations: {}
+podLabels: {}
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+monitoring:
+  enabled: false

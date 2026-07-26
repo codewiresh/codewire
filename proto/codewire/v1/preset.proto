@@ -1,0 +1,160 @@
+syntax = "proto3";
+
+package codewire.v1;
+
+import "codewire/v1/common.proto";
+import "google/protobuf/timestamp.proto";
+
+// PresetService manages organization and official environment presets.
+// Official presets are readable across organizations but cannot be mutated
+// through this organization-scoped service.
+service PresetService {
+  rpc ListPresets(ListPresetsRequest) returns (ListPresetsResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+
+  rpc CreatePreset(CreatePresetRequest) returns (CreatePresetResponse);
+
+  rpc GetPreset(GetPresetRequest) returns (GetPresetResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+
+  rpc UpdatePreset(UpdatePresetRequest) returns (UpdatePresetResponse);
+
+  rpc DeletePreset(DeletePresetRequest) returns (DeletePresetResponse);
+}
+
+// Preset is a reusable environment configuration. Organization-less presets
+// are official global presets; organization presets carry org_id.
+message Preset {
+  string id = 1;
+  optional string org_id = 2;
+  string name = 3;
+  optional string slug = 4;
+  optional string language = 5;
+  bool official = 6;
+  optional string description = 7;
+  // Extensible backend build state. The 2026-07-17 repository writer sweep
+  // found that every writer leaves the unconstrained database default
+  // "ready"; clients must tolerate future values rather than exhaustively
+  // matching the current value.
+  string build_status = 8;
+  optional string build_error = 9;
+  int32 default_cpu_millicores = 10;
+  int32 default_memory_mb = 11;
+  int32 default_disk_gb = 12;
+  optional int32 default_ttl_seconds = 13;
+  optional string image = 14;
+  optional SetupConfig default_setup_config = 15;
+  optional string secret_project_id = 16;
+  google.protobuf.Timestamp created_at = 17;
+}
+
+message ListPresetsRequest {
+  string org_id = 1;
+  // Optional. Zero lets the server choose; the current implementation returns
+  // all matching presets in one page.
+  int32 page_size = 2;
+  // Optional. Empty selects the first page. Non-empty tokens are rejected
+  // until pagination is introduced.
+  string page_token = 3;
+}
+
+message ListPresetsResponse {
+  repeated Preset presets = 1;
+  string next_page_token = 2;
+}
+
+message CreatePresetRequest {
+  string org_id = 1;
+  string name = 2;
+  string slug = 3;
+  optional string description = 4;
+  optional int32 default_cpu_millicores = 5;
+  optional int32 default_memory_mb = 6;
+  optional int32 default_disk_gb = 7;
+  optional int32 default_ttl_seconds = 8;
+  string image = 9;
+  string install_command = 10;
+  string startup_script = 11;
+  map<string, string> env_vars = 12;
+  repeated SetupAgent agents = 13;
+  optional bool install_agents = 14;
+  string agent = 15;
+  map<string, string> agent_env = 16;
+  repeated AppPort app_ports = 17;
+  optional bool include_org_secrets = 18;
+  optional bool include_user_secrets = 19;
+  // Organization-scoped secret project ID. Ergonomic clients may resolve a
+  // display name before issuing this request.
+  optional string secret_project_id = 20;
+}
+
+message CreatePresetResponse {
+  Preset preset = 1;
+}
+
+message GetPresetRequest {
+  string org_id = 1;
+  string preset_id = 2;
+}
+
+message GetPresetResponse {
+  Preset preset = 1;
+}
+
+// Presence-bearing collection wrappers preserve REST PATCH semantics: an
+// absent wrapper leaves the field unchanged, while a present empty wrapper
+// replaces the field with an empty collection.
+message EnvVarMap {
+  map<string, string> values = 1;
+}
+
+message AgentList {
+  repeated SetupAgent values = 1;
+}
+
+message AgentEnvMap {
+  map<string, string> values = 1;
+}
+
+message AppPortList {
+  repeated AppPort values = 1;
+}
+
+message UpdatePresetRequest {
+  string org_id = 1;
+  string preset_id = 2;
+  optional string name = 3;
+  optional string description = 4;
+  optional string slug = 5;
+  optional int32 default_cpu_millicores = 6;
+  optional int32 default_memory_mb = 7;
+  optional int32 default_disk_gb = 8;
+  optional int32 default_ttl_seconds = 9;
+  optional string image = 10;
+  optional string install_command = 11;
+  optional string startup_script = 12;
+  optional EnvVarMap env_vars = 13;
+  optional AgentList agents = 14;
+  optional bool install_agents = 15;
+  optional string agent = 16;
+  optional AgentEnvMap agent_env = 17;
+  optional AppPortList app_ports = 18;
+  optional bool include_org_secrets = 19;
+  optional bool include_user_secrets = 20;
+  // Present-empty clears the binding; present-non-empty selects an
+  // organization-owned secret project by ID.
+  optional string secret_project_id = 21;
+}
+
+message UpdatePresetResponse {
+  Preset preset = 1;
+}
+
+message DeletePresetRequest {
+  string org_id = 1;
+  string preset_id = 2;
+}
+
+message DeletePresetResponse {}

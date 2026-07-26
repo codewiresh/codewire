@@ -1,0 +1,99 @@
+# Docker Caddyfile for local HTTPS development
+# Using host network mode to access localhost services
+#
+# Access the app at: https://codewire.localhost
+#
+# Caddy automatically generates and trusts local certificates for .localhost domains
+
+*.codewire.localhost {
+	reverse_proxy 127.0.0.1:8084
+}
+
+codewire.localhost {
+	# Docs (Starlight dev server)
+	handle /docs/* {
+		reverse_proxy 127.0.0.1:4322
+	}
+	handle /docs {
+		reverse_proxy 127.0.0.1:4322
+	}
+
+	# Tailnet coordinate WebSockets (Rust codewire-coordinator)
+	@coordinate path /api/v1/organizations/*/environments/*/coordinate /api/v1/internal/gateway/coordinate
+	handle @coordinate {
+		reverse_proxy 127.0.0.1:8090
+	}
+
+	# OIDC provider (codewire-idp binary)
+	@idp path /.well-known/openid-configuration /.well-known/oauth-authorization-server /.well-known/jwks.json /api/oauth/* /api/oidc/* /api/auth/two-factor/* /api/auth/verify-email /api/auth/forget-password /api/auth/reset-password /api/auth/send-verification-email /api/auth/sign-up /api/auth/sign-in /api/auth/sign-out /api/auth/get-session
+	handle @idp {
+		reverse_proxy 127.0.0.1:8091
+	}
+
+	# Billing service (codewire-billing binary). Transitional REST routes and
+	# the permanent Stripe webhook are matched before the broad /api fallback.
+	@billing path_regexp ^(/api/webhooks/stripe|/api/v1/admin/billing(/.*)?|/api/v1/billing/plans(/.*)?|/api/v1/organizations/[^/]+/billing(/.*)?|/api/v1/organizations/[^/]+/environments/usage)$
+	handle @billing {
+		reverse_proxy 127.0.0.1:8081
+	}
+
+	# Connect-RPC routes: /{package}.{Service}/{Method}
+	# (docs/plans/connect-rpc/03, D5). Routing is per-Service because
+	# packages span binaries. Billing-owned Services are matched before the
+	# orchestration fallback.
+	@connect_admin path /codewire.admin.v1.AdminService/*
+	handle @connect_admin {
+		reverse_proxy 127.0.0.1:8084
+	}
+	@connect_billing_catalog path /codewire.admin.v1.BillingCatalogService/*
+	handle @connect_billing_catalog {
+		reverse_proxy 127.0.0.1:8081
+	}
+	@connect_billing path /codewire.console.v1.BillingService/*
+	handle @connect_billing {
+		reverse_proxy 127.0.0.1:8081
+	}
+	# The coordinator's native bidi stream needs HTTP/2 on the backend leg.
+	# Keep it separate from the HTTP/1.1 WebSocket matcher above.
+	handle /coordinator.v1.CoordinatorService/* {
+		reverse_proxy 127.0.0.1:8090 {
+			transport http {
+				versions h2c 2
+			}
+		}
+	}
+	# Environment sessions are the second first-party bidi service whose
+	# secure client leg uses native gRPC. Preserve h2c to orchestration.
+	handle /codewire.v1.EnvironmentSessionService/* {
+		reverse_proxy 127.0.0.1:8084 {
+			transport http {
+				versions h2c 2
+			}
+		}
+	}
+
+	# Everything else lands on orchestration (the Connect twin of the
+	# /api/* fallback below), so an unmatched RPC path
+	# gets a Connect-shaped answer from a service, never dashboard HTML.
+	# These matchers are drift-checked against proto/ by
+	# scripts/checks/repo_checks.py connect-edge-routing.
+	handle /codewire.* {
+		reverse_proxy 127.0.0.1:8084
+	}
+
+	# All remaining API traffic is Rust orchestration. IdP, coordinator, and
+	# billing have narrower matchers above.
+	handle /api/* {
+		reverse_proxy 127.0.0.1:8084
+	}
+
+	# Handle WebSocket connections for Vite HMR
+	@websockets {
+		header Connection *Upgrade*
+		header Upgrade websocket
+	}
+	reverse_proxy @websockets 127.0.0.1:5173
+
+	# Default: web app
+	reverse_proxy 127.0.0.1:5173
+}

@@ -1,0 +1,9 @@
+# BuildKit per-Dockerfile ignore for the hosted Codewire Mesh image.
+*
+!Cargo.toml
+!Cargo.lock
+!crates
+!crates/**
+!proto
+!proto/**
+crates/**/target

@@ -1,0 +1,34 @@
+---
+title: Environments overview
+description: Understanding sandbox environments in Codewire
+---
+
+import { CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+Environments are isolated cloud development machines for agents and developers. Each environment belongs to one organization, runs from a repo-aware preset, and exposes terminal, SSH, file, preview, and session access through Codewire.
+
+## What an environment includes
+
+- A sandbox runtime with dedicated CPU, memory, and persistent storage
+- Repo configuration, presets, ports, logs, files, exec, SSH, and preview access
+- Organization membership and access controls
+- Usage metering and billing at the organization level
+
+## Lifecycle
+
+Environments move through a small set of states:
+
+1. **Creating** - Codewire analyzes the repo, prepares the sandbox, and applies the selected preset.
+2. **Running** - terminal, SSH, file, preview, and agent sessions are available.
+3. **Stopped** - compute is released while persistent data is retained.
+4. **Deleting** - Codewire tears down runtime state and related access records.
+
+See [Environment statuses](/docs/reference/environment-statuses) for the full status reference.
+
+## Common tasks
+
+<CardGrid>
+  <LinkCard title="Create an environment" href="/docs/environments/create-environment" description="Launch from a repository with AI-assisted setup." />
+  <LinkCard title="Manage environments" href="/docs/environments/manage-environments" description="Start, stop, delete, and inspect environments." />
+  <LinkCard title="Connect to an environment" href="/docs/environments/connect" description="Use terminal, SSH, files, previews, and agent sessions." />
+</CardGrid>

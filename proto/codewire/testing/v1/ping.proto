@@ -1,0 +1,81 @@
+syntax = "proto3";
+
+// Never-routed conformance fixture for the Connect serving infrastructure
+// (docs/plans/connect-rpc/03-connect-server-infrastructure.md, D8).
+//
+// PingService exists to prove mount + auth + error wire-shape + edge routing
+// before any product surface does. It is mounted only when
+// CONNECT_TESTING_SURFACE=1 (dev-stack, the migration-integration gate, and
+// kind/local-kind test manifests — never base or production deploys), carries
+// NO stability posture, and is deliberately absent from the production edge
+// rules. It is not part of any SDK's public surface.
+package codewire.testing.v1;
+
+// Probe service exercising the three auth mount modes (03 D3):
+//   PublicPing — allowlisted (no credential required)
+//   Ping       — authenticated mount
+//   AdminPing  — admin mount
+// plus the serving infrastructure's streaming fixture:
+//   StreamPing — allowlisted server-streaming probe (03 D5's edge
+//                buffering proof; 03 WI-4)
+service PingService {
+  // Unauthenticated probe; the D3 allowlist bypass fixture.
+  rpc PublicPing(PublicPingRequest) returns (PublicPingResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+
+  // Authenticated echo. Rejects an empty `message` with `invalid_argument`
+  // plus a `google.rpc.BadRequest` detail to exercise the 01 error renderer
+  // end to end. Genuinely read-only (echo), hence NO_SIDE_EFFECTS — this is
+  // also the fixture for credentialed Connect GET (03 D6b cache posture,
+  // WI-5's GET coverage).
+  rpc Ping(PingRequest) returns (PingResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+
+  // Admin-mount probe; rejects non-admin users with `permission_denied`.
+  rpc AdminPing(AdminPingRequest) returns (AdminPingResponse);
+
+  // Server-streaming probe: emits a fixed, server-paced sequence of
+  // messages so edge tests can prove streamed responses cross the ingress
+  // incrementally (03 D5 — response buffering is verified in kind before
+  // the coordinator pilot relies on it). Allowlisted like PublicPing
+  // (fixed public data, no caller identity) so edge probes need no
+  // credential.
+  rpc StreamPing(StreamPingRequest) returns (stream StreamPingResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+}
+
+message PublicPingRequest {}
+
+message PublicPingResponse {
+  // Fixed server greeting proving the response path.
+  string message = 1;
+}
+
+message PingRequest {
+  // Echoed back verbatim; empty is rejected with `invalid_argument`.
+  string message = 1;
+}
+
+message PingResponse {
+  // The request's `message`, echoed.
+  string message = 1;
+}
+
+message AdminPingRequest {}
+
+message AdminPingResponse {
+  // Fixed server greeting proving the admin path.
+  string message = 1;
+}
+
+message StreamPingRequest {}
+
+message StreamPingResponse {
+  // 0-based position of this message in the fixed sequence.
+  uint32 sequence = 1;
+  // Total number of messages the server will send.
+  uint32 total = 2;
+}

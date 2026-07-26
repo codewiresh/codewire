@@ -1,0 +1,126 @@
+{
+  "version": 3,
+  "generated_by": "libs/tailnet/parity_fixture_test.go",
+  "oracle": {
+    "modules": [
+      {
+        "path": "tailscale.com",
+        "version": "v1.96.1",
+        "sum": "h1:9+0JuyK9SSnbKSumGRQhrOdNtgZ5SgJINXgJoVpyf0Y="
+      }
+    ],
+    "source_files": [
+      {
+        "path": "libs/tailnet/conn.go",
+        "sha256": "93dc8a41a4aa509303b2e9538f331b5984bd1271a3daa25186a0bc3ada069084"
+      },
+      {
+        "path": "libs/tailnet/coordinator.go",
+        "sha256": "74e6d636a58d7770e8cb052f8a41d4fcb8a9d64e2619deb69cbc1e1f7a935429"
+      },
+      {
+        "path": "libs/tailnet/derp.go",
+        "sha256": "d595152d1e441bc721dad85d823d067078429931d089680b9ca05262fee3ca2c"
+      },
+      {
+        "path": "libs/tailnet/node.go",
+        "sha256": "f0766174019d46b2fe398a597bf644c58e437c29b6d64ff1c71d21fa2f9a6858"
+      },
+      {
+        "path": "libs/tailnet/path.go",
+        "sha256": "b022355c85297599bd5949c2d631afbc4f487b38714932e1841e617800f50298"
+      }
+    ]
+  },
+  "path_cases": [
+    {
+      "name": "direct udp endpoint",
+      "ping": {
+        "endpoint": "203.0.113.10:41641"
+      },
+      "expected": {
+        "transport": "direct_udp",
+        "endpoint": "203.0.113.10:41641"
+      }
+    },
+    {
+      "name": "peer relay",
+      "ping": {
+        "peer_relay": "203.0.113.10:41641:vni:7"
+      },
+      "expected": {
+        "transport": "peer_relay",
+        "peer_relay": "203.0.113.10:41641:vni:7"
+      }
+    },
+    {
+      "name": "derp relay",
+      "ping": {
+        "derp_region_id": 1,
+        "derp_region_code": "cw",
+        "latency_seconds": 0.004
+      },
+      "expected": {
+        "transport": "derp_relay",
+        "derp_region_id": 1,
+        "derp_region_code": "cw",
+        "latency_seconds": 0.004
+      }
+    },
+    {
+      "name": "unknown",
+      "ping": {},
+      "expected": {
+        "transport": "unknown"
+      }
+    },
+    {
+      "name": "endpoint wins over derp",
+      "ping": {
+        "endpoint": "203.0.113.20:41641",
+        "derp_region_id": 3,
+        "derp_region_code": "cw"
+      },
+      "expected": {
+        "transport": "direct_udp",
+        "endpoint": "203.0.113.20:41641",
+        "derp_region_id": 3,
+        "derp_region_code": "cw"
+      },
+      "note": "Go magicsock reports a direct endpoint as the preferred transport even when DERP fields are populated."
+    },
+    {
+      "name": "peer relay wins over derp",
+      "ping": {
+        "peer_relay": "203.0.113.30:41641:vni:9",
+        "derp_region_id": 4,
+        "derp_region_code": "cw"
+      },
+      "expected": {
+        "transport": "peer_relay",
+        "peer_relay": "203.0.113.30:41641:vni:9",
+        "derp_region_id": 4,
+        "derp_region_code": "cw"
+      },
+      "note": "DERP is still the control/fallback channel; a populated PeerRelay means the selected path is peer_relay."
+    }
+  ],
+  "derp_magic_cases": [
+    {
+      "region_id": 1,
+      "addr_port": "127.3.3.40:1",
+      "note": "Tailscale magicsock represents DERP receive paths as 127.3.3.40:\u003cregion\u003e; DERP disco Pong.Src echoes this tuple."
+    }
+  ],
+  "prefix_cases": [
+    {
+      "uuid": "12345678-1234-5678-1234-567812345678",
+      "prefix": "fd7a:115c:a1e0:1234:5678:1234:5678:1234/128"
+    },
+    {
+      "uuid": "00112233-4455-6677-8899-aabbccddeeff",
+      "prefix": "fd7a:115c:a1e0:11:2233:4455:6677:8899/128"
+    }
+  ],
+  "node_json": "{\"id\":\"12345678-1234-5678-1234-567812345678\",\"as_of\":\"2026-06-19T12:00:00Z\",\"key\":\"nodekey:0000000000000000000000000000000000000000000000000000000000000001\",\"disco_key\":\"discokey:0000000000000000000000000000000000000000000000000000000000000002\",\"preferred_derp\":3,\"derp_latency\":{\"1\":0.05},\"endpoints\":[\"1.2.3.4:41641\",\"[2001:db8::1]:41641\"],\"addresses\":[\"fd7a:115c:a1e0:1234:5678:1234:5678:1234/128\"]}"
+}

@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=Codewire
+Comment=Desktop app for managing Codewire development environments
+Exec=codewire
+Icon=codewire
+Type=Application
+Categories=Development;IDE;
+Terminal=false
+StartupWMClass=codewire

@@ -1,0 +1,16 @@
+# BuildKit per-Dockerfile ignore for the DERP/STUN relay image.
+*
+!deployments
+!deployments/docker
+!deployments/docker/derp.Cargo.toml
+!deployments/docker/derp.Cargo.lock
+!crates
+!crates/codewire-derp
+!crates/codewire-derp/**
+!crates/codewire-proto
+!crates/codewire-proto/**
+!crates/codewire-tailnet
+!crates/codewire-tailnet/**
+!proto
+!proto/**
+crates/**/target

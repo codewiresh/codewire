@@ -1,0 +1,20 @@
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: confidential
+  labels:
+    app.kubernetes.io/name: codewire-runtime-profile
+    app.kubernetes.io/part-of: codewire
+    codewire.sh/runtime-tier: confidential
+    codewire.sh/runtime-handler: kata-qemu-snp
+handler: kata-qemu-snp
+scheduling:
+  nodeSelector:
+    katacontainers.io/kata-runtime: "true"
+    node.codewire.sh/runtime-candidate: "true"
+    node.codewire.sh/confidential-snp: "true"
+  tolerations:
+    - key: node.codewire.sh/runtime-candidate
+      operator: Equal
+      value: "true"
+      effect: NoSchedule

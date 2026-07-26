@@ -1,0 +1,32 @@
+[package]
+name = "codewire-types"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Shared types and pure functions for Codewire — zero tokio, WASM-safe"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+# UniFFI (optional — only for mobile bindings)
+uniffi = { workspace = true, optional = true }
+
+# WASM (optional — Tsify derives for TypeScript type generation)
+tsify-next = { version = "0.5", features = ["js"], optional = true }
+wasm-bindgen = { version = "0.2", optional = true }
+
+# Rust-owned API schema generation. This feeds the same JsonSchema
+# representation that codewire-server-core::ValidatedJson enforces.
+schemars = { workspace = true, optional = true }
+
+[build-dependencies]
+uniffi = { workspace = true, features = ["build"], optional = true }
+
+[features]
+default = []
+uniffi = ["dep:uniffi"]
+wasm = ["dep:tsify-next", "dep:wasm-bindgen"]
+openapi = ["dep:schemars"]

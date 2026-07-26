@@ -1,0 +1,22 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: codewire-derp
+spec:
+  replicas: 1
+  template:
+    spec:
+      imagePullSecrets: []
+      containers:
+        - name: derp
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8443
+              name: https
+          env:
+            - name: DERP_MESH_HOSTNAME
+              value: codewire-derp-mesh.default.svc.cluster.local
+            - name: TLS_PORT
+              value: "8443"
+            - name: TLS_HOSTS
+              value: "127.0.0.1,localhost"

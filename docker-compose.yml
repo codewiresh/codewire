@@ -1,0 +1,51 @@
+services:
+  # PostgreSQL database
+  postgres:
+    image: postgres:17-alpine
+    container_name: codewire-postgres
+    environment:
+      POSTGRES_USER: codewire
+      POSTGRES_PASSWORD: codewire
+      POSTGRES_DB: codewire
+    ports:
+      - "54320:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U codewire -d codewire"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # Web frontend (Vite SPA).
+  web:
+    build:
+      context: .
+      dockerfile: apps/dashboard/Dockerfile.dev
+    container_name: codewire-web
+    ports:
+      - "5173:5173"
+    environment:
+      DASHBOARD_API_PROXY_TARGET: ${DASHBOARD_API_PROXY_TARGET:-http://host.docker.internal:8080}
+      VITE_RESOURCE_BASE_DOMAIN: codewire-dev.sh
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./apps/dashboard:/app/apps/dashboard
+      - /app/apps/dashboard/node_modules
+      - ./packages/codewire-types:/app/packages/codewire-types
+
+  # Docs (Astro Starlight — served at /docs)
+  docs:
+    build:
+      context: .
+      dockerfile: apps/docs/Dockerfile.dev
+    container_name: codewire-docs
+    ports:
+      - "4322:4321"
+    volumes:
+      - ./apps/docs:/app/apps/docs
+      - /app/apps/docs/node_modules
+
+volumes:
+  postgres_data:

@@ -1,0 +1,66 @@
+# Single-node Temporal for the kind e2e cluster, schema'd into the
+# throwaway postgres by the auto-setup entrypoint. Production runs the
+# Helm chart against CNPG (deployments/k8s/temporal/); this deployment
+# exists so the kind job exercises the REAL in-cluster topology:
+# orchestration's Temporal worker → temporal-frontend → activities
+# against the cluster database.
+#
+# Tag-pinned like the other kind support images (postgres:17-alpine);
+# 1.29.0 matches the server bundled with the CLI v1.5.0 used in the
+# integration job.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: temporal
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: temporal
+  template:
+    metadata:
+      labels:
+        app: temporal
+    spec:
+      containers:
+        - name: temporal
+          image: temporalio/auto-setup:1.29.0
+          env:
+            - name: DB
+              value: postgres12
+            - name: DB_PORT
+              value: "5432"
+            - name: POSTGRES_SEEDS
+              value: postgres
+            - name: POSTGRES_USER
+              value: codewire
+            - name: POSTGRES_PWD
+              value: codewire
+            - name: DBNAME
+              value: temporal
+            - name: VISIBILITY_DBNAME
+              value: temporal_visibility
+          ports:
+            - containerPort: 7233
+              name: frontend
+          readinessProbe:
+            tcpSocket:
+              port: 7233
+            initialDelaySeconds: 10
+            periodSeconds: 5
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: temporal
+spec:
+  # NodePort matched by the kind extraPortMapping (host 7233) so the
+  # smoke reaches the frontend without a kubectl port-forward tunnel.
+  type: NodePort
+  selector:
+    app: temporal
+  ports:
+    - port: 7233
+      targetPort: 7233
+      nodePort: 30733
+      name: frontend

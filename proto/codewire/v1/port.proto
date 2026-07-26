@@ -1,0 +1,72 @@
+syntax = "proto3";
+
+package codewire.v1;
+
+import "google/protobuf/timestamp.proto";
+
+// PortService manages the network ports exposed by one environment.
+service PortService {
+  rpc ListPorts(ListPortsRequest) returns (ListPortsResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+
+  rpc CreatePort(CreatePortRequest) returns (CreatePortResponse);
+
+  rpc DeletePort(DeletePortRequest) returns (DeletePortResponse);
+}
+
+// PortAccess controls who can reach an environment port.
+enum PortAccess {
+  PORT_ACCESS_UNSPECIFIED = 0;
+  PORT_ACCESS_PUBLIC = 1;
+  PORT_ACCESS_ORG_MEMBERS = 2;
+  PORT_ACCESS_CREATOR = 3;
+}
+
+// Port is one registered environment port.
+message Port {
+  string id = 1;
+  string environment_id = 2;
+  int32 port = 3;
+  string label = 4;
+  PortAccess access = 5;
+  optional string preview_url = 6;
+  google.protobuf.Timestamp created_at = 7;
+}
+
+message ListPortsRequest {
+  string org_id = 1;
+  string environment_id = 2;
+  // Optional. Zero lets the server choose; the current implementation returns
+  // every matching port in one page.
+  int32 page_size = 3;
+  // Optional. Empty selects the first page. Non-empty tokens are rejected
+  // until pagination is introduced.
+  string page_token = 4;
+}
+
+message ListPortsResponse {
+  repeated Port ports = 1;
+  string next_page_token = 2;
+}
+
+message CreatePortRequest {
+  string org_id = 1;
+  string environment_id = 2;
+  int32 port = 3;
+  string label = 4;
+  // Unspecified preserves the existing creator-only default.
+  PortAccess access = 5;
+}
+
+message CreatePortResponse {
+  Port port = 1;
+}
+
+message DeletePortRequest {
+  string org_id = 1;
+  string environment_id = 2;
+  string port_id = 3;
+}
+
+message DeletePortResponse {}

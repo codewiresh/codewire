@@ -1,0 +1,12 @@
+# BuildKit per-Dockerfile ignore: only the Rust workspace goes into the
+# build context for services.Dockerfile.
+*
+!Cargo.toml
+!Cargo.lock
+!crates
+!proto
+!proto/**
+!libs
+!libs/gateway-proto
+!libs/gateway-proto/**
+crates/**/target

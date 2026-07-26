@@ -1,0 +1,234 @@
+@import "tailwindcss";
+
+/* ── Design System: Kernel Dark Theme ─────────────────────────────── */
+
+:root {
+  /* Core palette */
+  --bg-primary: #08090a;
+  --bg-secondary: #0f1011;
+  --bg-base: #08090a;
+  --bg-surface: #0f1011;
+  --bg-surface-hover: #161719;
+
+  --fg-primary: #f7f8f8;
+  --fg-secondary: #8a8f98;
+  --fg-tertiary: #565b63;
+
+  --border: rgba(255,255,255,0.08);
+  --border-hover: rgba(255,255,255,0.15);
+  --border-subtle: rgba(255,255,255,0.04);
+
+  --accent: #0EA5E9;
+  --accent-hover: #0284C7;
+  --accent-muted: rgba(14,165,233,0.12);
+
+  --success: #22C55E;
+  --warning: #EAB308;
+  --info: #3B82F6;
+  --destructive: #EF4444;
+
+  --font-mono: 'JetBrains Mono', monospace;
+  --font-sans: 'Inter Variable', 'Inter', system-ui, sans-serif;
+
+  /* ── shadcn/ui CSS variables (resolved to kernel values) ── */
+  --color-background: #08090a;
+  --color-foreground: #f7f8f8;
+  --color-card: #0f1011;
+  --color-card-foreground: #f7f8f8;
+  --color-popover: #0f1011;
+  --color-popover-foreground: #f7f8f8;
+  --color-primary: #0EA5E9;
+  --color-primary-foreground: #000000;
+  --color-secondary: rgba(255,255,255,0.08);
+  --color-secondary-foreground: #f7f8f8;
+  --color-muted: rgba(255,255,255,0.08);
+  --color-muted-foreground: #8a8f98;
+  --color-accent: rgba(255,255,255,0.08);
+  --color-accent-foreground: #f7f8f8;
+  --color-destructive: #EF4444;
+  --color-destructive-foreground: #f7f8f8;
+  --color-border: rgba(255,255,255,0.08);
+  --color-input: rgba(255,255,255,0.08);
+  --color-ring: #0EA5E9;
+}
+
+@theme {
+  --color-accent-brand: #0EA5E9;
+  --color-accent-brand-hover: #0284C7;
+  --color-success: #22C55E;
+  --color-warning: #EAB308;
+  --color-info: #3B82F6;
+  --color-surface: #0f1011;
+  --color-surface-hover: #161719;
+  --color-sidebar: #08090a;
+  --color-bg-base: #08090a;
+  --color-orange: #0EA5E9;
+  --color-red: #EF4444;
+  --color-blue: #3B82F6;
+  --color-purple: #8B5CF6;
+  --color-yellow: #EAB308;
+}
+
+@layer base {
+  * {
+    border-color: var(--color-border);
+  }
+  body {
+    background-color: var(--color-background);
+    color: var(--color-foreground);
+    font-family: 'Inter Variable', 'Inter', system-ui, sans-serif;
+    font-feature-settings: "rlig" 1, "calt" 1;
+    font-size: 15px;
+    font-weight: 450;
+    line-height: 1.6;
+  }
+  /* Component default colors — overridden by @layer utilities */
+  [data-slot="card"] { color: var(--fg-primary); }
+  [data-slot="card-title"] { color: var(--fg-primary); font-weight: 510; }
+  [data-slot="card-description"] { color: var(--fg-secondary); }
+  [data-slot="dialog-title"] { color: var(--fg-primary); font-weight: 510; }
+  [data-slot="dialog-description"] { color: var(--fg-secondary); }
+}
+
+/* Custom font weights for Inter Variable */
+.font-body { font-weight: 450; }
+.font-heading { font-weight: 510; }
+
+.font-serif {
+  font-family: 'Instrument Serif', Georgia, serif;
+}
+
+/* Mono heading style (terminal/code labels) */
+.font-mono-heading {
+  font-family: var(--font-mono);
+}
+
+.section-label {
+  font-size: 0.8125rem;
+  font-weight: 510;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--fg-tertiary);
+}
+
+.dot-bg {
+  background-image: radial-gradient(circle, rgba(14,165,233,0.08) 1px, transparent 1px);
+  background-size: 24px 24px;
+}
+
+.dot-bg-subtle {
+  background-image: radial-gradient(circle, rgba(255,255,255,0.03) 1px, transparent 1px);
+  background-size: 20px 20px;
+}
+
+/* Terminal mockup */
+.terminal-line .prompt { color: var(--accent); }
+.terminal-line .cmd { color: var(--fg-primary); }
+.terminal-line .output { color: var(--fg-tertiary); }
+.terminal-line .success { color: var(--success); }
+
+/* ── View Transitions ────────────────────────────────────────────── */
+
+::view-transition-old(root) {
+  animation-duration: 100ms;
+}
+::view-transition-new(root) {
+  animation-duration: 100ms;
+}
+
+/* ── Animations ──────────────────────────────────────────────────── */
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes fadeOut {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+
+@keyframes zoomIn {
+  from { transform: scale(0.95); }
+  to { transform: scale(1); }
+}
+
+@keyframes zoomOut {
+  from { transform: scale(1); }
+  to { transform: scale(0.95); }
+}
+
+@keyframes slideInFromTop {
+  from { transform: translateY(-2px); }
+  to { transform: translateY(0); }
+}
+
+@keyframes fadeInUp {
+  from { opacity: 0; transform: translateY(20px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes pulse-glow {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.4); }
+  50% { box-shadow: 0 0 0 8px rgba(239, 68, 68, 0); }
+}
+
+@keyframes fill-progress {
+  0% { width: 0%; }
+  85% { width: 100%; }
+  100% { width: 0%; }
+}
+
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+@keyframes page-enter {
+  from { transform: translateY(4px); }
+  to { transform: translateY(0); }
+}
+
+.animate-in {
+  animation: fadeIn 150ms ease-out, zoomIn 150ms ease-out;
+}
+
+.animate-out {
+  animation: fadeOut 150ms ease-in, zoomOut 150ms ease-in;
+}
+
+[data-side="bottom"] {
+  animation: slideInFromTop 150ms ease-out;
+}
+
+.animate-pulse-glow {
+  animation: pulse-glow 2s infinite;
+}
+
+.animate-blink {
+  animation: blink 1.5s infinite;
+}
+
+.animate-fade-in-up {
+  animation: fadeInUp 0.6s ease forwards;
+}
+
+.animate-pulse-dot {
+  animation: pulse-dot 2s ease-in-out infinite;
+}
+
+.animate-page-enter {
+  animation: page-enter 200ms ease-out;
+}
+
+/* Progress bar animations with different delays */
+.ws-progress-fill-1 { animation: fill-progress 2.5s infinite; }
+.ws-progress-fill-2 { animation: fill-progress 3s infinite 0.3s; }
+.ws-progress-fill-3 { animation: fill-progress 2.2s infinite 0.1s; }
+.ws-progress-fill-4 { animation: fill-progress 2.8s infinite 0.5s; }
+.ws-progress-fill-5 { animation: fill-progress 2.4s infinite 0.2s; }

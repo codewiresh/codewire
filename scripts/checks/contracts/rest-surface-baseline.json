@@ -1,0 +1,642 @@
+{
+  "comment": "REST surface freeze (gate G3). Additions fail CI; the baseline only shrinks (bun run rest:freeze:update). docs/plans/connect-rpc/13-rest-sunset-and-openapi-removal.md",
+  "operations": [
+    "DELETE /api/v1/git-credentials/{credentialId}",
+    "DELETE /api/v1/github/token",
+    "DELETE /api/v1/organizations/{orgId}",
+    "DELETE /api/v1/organizations/{orgId}/api-keys/{keyId}",
+    "DELETE /api/v1/organizations/{orgId}/environments/{envId}",
+    "DELETE /api/v1/organizations/{orgId}/environments/{envId}/ports/{portId}",
+    "DELETE /api/v1/organizations/{orgId}/invitations/{invitationId}",
+    "DELETE /api/v1/organizations/{orgId}/members/{userId}",
+    "DELETE /api/v1/organizations/{orgId}/presets/{presetId}",
+    "DELETE /api/v1/organizations/{orgId}/secret-projects/{projectId}",
+    "DELETE /api/v1/organizations/{orgId}/secret-projects/{projectId}/secrets/{key}",
+    "DELETE /api/v1/secrets/{key}",
+    "DELETE /api/v1/user/login-keys/{id}",
+    "DELETE /api/v1/user/secrets/{key}",
+    "GET /api/auth/get-session",
+    "GET /api/auth/verify-email",
+    "GET /api/v1/admin/audit-logs",
+    "GET /api/v1/admin/billing/catalog",
+    "GET /api/v1/admin/billing/catalog/subscription-migrations",
+    "GET /api/v1/admin/environments/startup-summary",
+    "GET /api/v1/admin/environments/{environmentId}/lifecycle-journal",
+    "GET /api/v1/admin/environments/{environmentId}/startup-timings",
+    "GET /api/v1/admin/organizations",
+    "GET /api/v1/admin/stats",
+    "GET /api/v1/billing/plans/{resourceType}",
+    "GET /api/v1/git-credentials",
+    "GET /api/v1/github/config",
+    "GET /api/v1/github/repos",
+    "GET /api/v1/github/status",
+    "GET /api/v1/invitations/{token}",
+    "GET /api/v1/organizations",
+    "GET /api/v1/organizations/{orgId}",
+    "GET /api/v1/organizations/{orgId}/api-keys",
+    "GET /api/v1/organizations/{orgId}/billing",
+    "GET /api/v1/organizations/{orgId}/billing/events",
+    "GET /api/v1/organizations/{orgId}/billing/invoices",
+    "GET /api/v1/organizations/{orgId}/environment-create/options",
+    "GET /api/v1/organizations/{orgId}/environments",
+    "GET /api/v1/organizations/{orgId}/environments/usage",
+    "GET /api/v1/organizations/{orgId}/environments/{envId}",
+    "GET /api/v1/organizations/{orgId}/environments/{envId}/files",
+    "GET /api/v1/organizations/{orgId}/environments/{envId}/ports",
+    "GET /api/v1/organizations/{orgId}/environments/{envId}/trust-report",
+    "GET /api/v1/organizations/{orgId}/invitations",
+    "GET /api/v1/organizations/{orgId}/members",
+    "GET /api/v1/organizations/{orgId}/members/{memberId}/assignments",
+    "GET /api/v1/organizations/{orgId}/presets",
+    "GET /api/v1/organizations/{orgId}/presets/{presetId}",
+    "GET /api/v1/organizations/{orgId}/secret-projects",
+    "GET /api/v1/organizations/{orgId}/secret-projects/{projectId}/secrets",
+    "GET /api/v1/secrets",
+    "GET /api/v1/user/git-identity",
+    "GET /api/v1/user/login-keys",
+    "GET /api/v1/user/secrets",
+    "GET /api/v1/user/ssh-key",
+    "GET /healthz",
+    "GET /readyz",
+    "PATCH /api/v1/organizations/{orgId}/api-keys/{keyId}",
+    "PATCH /api/v1/organizations/{orgId}/presets/{presetId}",
+    "POST /api/auth/forget-password",
+    "POST /api/auth/reset-password",
+    "POST /api/auth/send-verification-email",
+    "POST /api/auth/sign-in",
+    "POST /api/auth/sign-out",
+    "POST /api/auth/sign-up",
+    "POST /api/auth/two-factor/disable",
+    "POST /api/auth/two-factor/enable",
+    "POST /api/auth/two-factor/validate",
+    "POST /api/auth/two-factor/verify",
+    "POST /api/v1/admin/billing/catalog/plans",
+    "POST /api/v1/admin/billing/catalog/prices",
+    "POST /api/v1/admin/billing/catalog/subscription-migrations",
+    "POST /api/v1/admin/billing/catalog/subscription-migrations/preview",
+    "POST /api/v1/environment-create/detect",
+    "POST /api/v1/git-credentials",
+    "POST /api/v1/github/token",
+    "POST /api/v1/invitations/{token}/accept",
+    "POST /api/v1/organizations",
+    "POST /api/v1/organizations/{orgId}/api-keys",
+    "POST /api/v1/organizations/{orgId}/billing/checkout",
+    "POST /api/v1/organizations/{orgId}/billing/portal",
+    "POST /api/v1/organizations/{orgId}/billing/setup",
+    "POST /api/v1/organizations/{orgId}/environments",
+    "POST /api/v1/organizations/{orgId}/environments/{envId}/cancel-deletion",
+    "POST /api/v1/organizations/{orgId}/environments/{envId}/exec",
+    "POST /api/v1/organizations/{orgId}/environments/{envId}/extend-ttl",
+    "POST /api/v1/organizations/{orgId}/environments/{envId}/ports",
+    "POST /api/v1/organizations/{orgId}/environments/{envId}/protect",
+    "POST /api/v1/organizations/{orgId}/environments/{envId}/start",
+    "POST /api/v1/organizations/{orgId}/environments/{envId}/stop",
+    "POST /api/v1/organizations/{orgId}/environments/{envId}/unprotect",
+    "POST /api/v1/organizations/{orgId}/invitations",
+    "POST /api/v1/organizations/{orgId}/presets",
+    "POST /api/v1/organizations/{orgId}/secret-projects",
+    "POST /api/v1/organizations/{orgId}/secret-projects/{projectId}/secrets/{key}/rename",
+    "POST /api/v1/secrets/{key}/rename",
+    "POST /api/v1/user/login-keys",
+    "POST /api/v1/user/secrets/{key}/rename",
+    "POST /api/v1/user/ssh-key/regenerate",
+    "PUT /api/v1/admin/billing/catalog/plans/{resourceType}/{planKey}",
+    "PUT /api/v1/admin/billing/catalog/plans/{resourceType}/{planKey}/archive",
+    "PUT /api/v1/admin/billing/catalog/prices/{resourceType}/{planKey}/{stripeMode}/{priceKind}",
+    "PUT /api/v1/admin/billing/catalog/prices/{resourceType}/{planKey}/{stripeMode}/{priceKind}/archive",
+    "PUT /api/v1/admin/billing/catalog/settings/{settingKey}",
+    "PUT /api/v1/git-credentials/{credentialId}",
+    "PUT /api/v1/organizations/{orgId}/members/{memberId}/assignments",
+    "PUT /api/v1/organizations/{orgId}/members/{userId}",
+    "PUT /api/v1/organizations/{orgId}/secret-projects/{projectId}/secrets",
+    "PUT /api/v1/secrets",
+    "PUT /api/v1/user/git-identity",
+    "PUT /api/v1/user/secrets"
+  ],
+  "raw_routes": [
+    "/.well-known/jwks.json",
+    "/api/auth/forget-password",
+    "/api/auth/get-session",
+    "/api/auth/reset-password",
+    "/api/auth/send-verification-email",
+    "/api/auth/sign-in",
+    "/api/auth/sign-out",
+    "/api/auth/sign-up",
+    "/api/auth/two-factor/disable",
+    "/api/auth/two-factor/enable",
+    "/api/auth/two-factor/validate",
+    "/api/auth/two-factor/verify",
+    "/api/auth/verify-email",
+    "/api/oauth/authorize",
+    "/api/oauth/device_authorization",
+    "/api/oauth/end_session",
+    "/api/oauth/introspect",
+    "/api/oauth/revoke",
+    "/api/oauth/token",
+    "/api/oauth/userinfo",
+    "/api/oidc/callback",
+    "/api/v1/admin/audit-logs",
+    "/api/v1/admin/billing/catalog",
+    "/api/v1/admin/billing/catalog/plans",
+    "/api/v1/admin/billing/catalog/plans/{resource_type}/{plan_key}",
+    "/api/v1/admin/billing/catalog/plans/{resource_type}/{plan_key}/archive",
+    "/api/v1/admin/billing/catalog/prices",
+    "/api/v1/admin/billing/catalog/prices/{resource_type}/{plan_key}/{stripe_mode}/{price_kind}",
+    "/api/v1/admin/billing/catalog/prices/{resource_type}/{plan_key}/{stripe_mode}/{price_kind}/archive",
+    "/api/v1/admin/billing/catalog/settings/{setting_key}",
+    "/api/v1/admin/billing/catalog/subscription-migrations",
+    "/api/v1/admin/billing/catalog/subscription-migrations/preview",
+    "/api/v1/admin/environments/startup-summary",
+    "/api/v1/admin/environments/{environment_id}/lifecycle-journal",
+    "/api/v1/admin/environments/{environment_id}/startup-timings",
+    "/api/v1/admin/organizations",
+    "/api/v1/admin/stats",
+    "/api/v1/billing/plans/{resource_type}",
+    "/api/v1/environment-create/detect",
+    "/api/v1/git-credentials",
+    "/api/v1/git-credentials/{credential_id}",
+    "/api/v1/github/config",
+    "/api/v1/github/oauth/authorize",
+    "/api/v1/github/oauth/callback",
+    "/api/v1/github/repos",
+    "/api/v1/github/status",
+    "/api/v1/github/token",
+    "/api/v1/internal/credentials/git",
+    "/api/v1/internal/credentials/github",
+    "/api/v1/internal/gateway/binding",
+    "/api/v1/internal/gateway/coordinate",
+    "/api/v1/invitations/{token}",
+    "/api/v1/invitations/{token}/accept",
+    "/api/v1/organizations",
+    "/api/v1/organizations/{org_id}",
+    "/api/v1/organizations/{org_id}/api-keys",
+    "/api/v1/organizations/{org_id}/api-keys/{key_id}",
+    "/api/v1/organizations/{org_id}/billing",
+    "/api/v1/organizations/{org_id}/billing/checkout",
+    "/api/v1/organizations/{org_id}/billing/events",
+    "/api/v1/organizations/{org_id}/billing/invoices",
+    "/api/v1/organizations/{org_id}/billing/portal",
+    "/api/v1/organizations/{org_id}/billing/setup",
+    "/api/v1/organizations/{org_id}/environment-create/options",
+    "/api/v1/organizations/{org_id}/environment-create/prepare",
+    "/api/v1/organizations/{org_id}/environments",
+    "/api/v1/organizations/{org_id}/environments/usage",
+    "/api/v1/organizations/{org_id}/environments/{env_id}",
+    "/api/v1/organizations/{org_id}/environments/{env_id}/access",
+    "/api/v1/organizations/{org_id}/environments/{env_id}/access/{user_id}",
+    "/api/v1/organizations/{org_id}/environments/{env_id}/cancel-deletion",
+    "/api/v1/organizations/{org_id}/environments/{env_id}/coordinate",
+    "/api/v1/organizations/{org_id}/environments/{env_id}/exec",
+    "/api/v1/organizations/{org_id}/environments/{env_id}/exec/stream",
+    "/api/v1/organizations/{org_id}/environments/{env_id}/extend-ttl",
+    "/api/v1/organizations/{org_id}/environments/{env_id}/files",
+    "/api/v1/organizations/{org_id}/environments/{env_id}/files/cat",
+    "/api/v1/organizations/{org_id}/environments/{env_id}/files/download",
+    "/api/v1/organizations/{org_id}/environments/{env_id}/files/upload",
+    "/api/v1/organizations/{org_id}/environments/{env_id}/logs",
+    "/api/v1/organizations/{org_id}/environments/{env_id}/ports",
+    "/api/v1/organizations/{org_id}/environments/{env_id}/ports/{port_id}",
+    "/api/v1/organizations/{org_id}/environments/{env_id}/protect",
+    "/api/v1/organizations/{org_id}/environments/{env_id}/ssh-proxy",
+    "/api/v1/organizations/{org_id}/environments/{env_id}/ssh-proxy/check",
+    "/api/v1/organizations/{org_id}/environments/{env_id}/start",
+    "/api/v1/organizations/{org_id}/environments/{env_id}/stop",
+    "/api/v1/organizations/{org_id}/environments/{env_id}/terminal",
+    "/api/v1/organizations/{org_id}/environments/{env_id}/trust-report",
+    "/api/v1/organizations/{org_id}/environments/{env_id}/unprotect",
+    "/api/v1/organizations/{org_id}/invitations",
+    "/api/v1/organizations/{org_id}/invitations/{invitation_id}",
+    "/api/v1/organizations/{org_id}/members",
+    "/api/v1/organizations/{org_id}/members/{member_id}",
+    "/api/v1/organizations/{org_id}/members/{member_id}/assignments",
+    "/api/v1/organizations/{org_id}/presets",
+    "/api/v1/organizations/{org_id}/presets/{preset_id}",
+    "/api/v1/organizations/{org_id}/repo-configs",
+    "/api/v1/organizations/{org_id}/repo-configs/lookup",
+    "/api/v1/organizations/{org_id}/repo-configs/{config_id}",
+    "/api/v1/organizations/{org_id}/secret-projects",
+    "/api/v1/organizations/{org_id}/secret-projects/{project_id}",
+    "/api/v1/organizations/{org_id}/secret-projects/{project_id}/secrets",
+    "/api/v1/organizations/{org_id}/secret-projects/{project_id}/secrets/{key}",
+    "/api/v1/organizations/{org_id}/secret-projects/{project_id}/secrets/{key}/rename",
+    "/api/v1/secrets",
+    "/api/v1/secrets/{key}",
+    "/api/v1/secrets/{key}/rename",
+    "/api/v1/terminal/ticket",
+    "/api/v1/user/git-identity",
+    "/api/v1/user/login-keys",
+    "/api/v1/user/login-keys/{id}",
+    "/api/v1/user/secrets",
+    "/api/v1/user/secrets/{key}",
+    "/api/v1/user/secrets/{key}/rename",
+    "/api/v1/user/ssh-key",
+    "/api/v1/user/ssh-key/regenerate",
+    "/api/webhooks/stripe"
+  ],
+  "allowlist": [
+    {
+      "issue": "#727",
+      "justification": "Permanent session-cookie-only browser approval route for the standard OAuth device authorization grant.",
+      "raw_route": "/api/oauth/device_verification"
+    }
+  ],
+  "mesh_surface": {
+    "$comment": "Temporary WS18 WI-1 hosted Mesh route/caller/auth/disposition inventory. The source guard freezes 36 production registrations and 45 method/path operations until WS18 WI-11 replaces it with the final raw-route guard.",
+    "router_from_state_sha256": "ecc82588f3df931107d93472ddfa30cba7d03bb03151e90c1355a8ad9ac92723",
+    "expected_counts": {
+      "route_registrations": 36,
+      "method_path_operations": 45,
+      "router_new_expressions": 2,
+      "router_merges": 1,
+      "app_builder_route_mounts": 1,
+      "caller_operation_references": {
+        "browser": 5,
+        "ci-smoke": 1,
+        "go-sdk": 21,
+        "node-runtime": 0,
+        "python-sdk": 21,
+        "rust-cli": 9,
+        "rust-client": 0,
+        "rust-tailnet": 0,
+        "typescript-sdk": 21
+      },
+      "credential_operations": {
+        "enrollment-code": 1,
+        "invite-code": 2,
+        "mesh-identity": 24,
+        "mesh-identity-plus-invite-code": 1,
+        "mesh-session-bearer-or-cookie": 1,
+        "node-bearer": 3,
+        "node-or-mesh-identity": 6,
+        "none": 4,
+        "oidc-device-code": 1,
+        "oidc-state-and-code": 1,
+        "runtime-credential": 1
+      },
+      "disposition_operations": {
+        "connect": 26,
+        "delete": 19
+      },
+      "package_operations": {
+        "codewire.internal.v1": 6,
+        "codewire.v1": 20,
+        "none": 19
+      },
+      "operations_without_callers": 16,
+      "client_url_template_records": 59,
+      "client_url_template_occurrences": 75
+    },
+    "caller_classes": {
+      "browser": "Browser presentation or redirect flow generated by the Mesh server.",
+      "ci-smoke": "Production smoke observation; not a product client.",
+      "go-sdk": "Hand-written public Go Mesh SDK wrapper.",
+      "node-runtime": "No shipped direct URL caller; runtime-facing capabilities are currently exposed through SDK wrappers.",
+      "python-sdk": "Hand-written public Python Mesh SDK wrapper.",
+      "rust-cli": "Hand-written Rust CLI Mesh wrapper.",
+      "rust-client": "Shared Rust Connect client façade; no hosted Mesh REST URL is currently present.",
+      "rust-tailnet": "Generic Rust Tailnet WebSocket client exists, but no production Mesh URL wiring is present.",
+      "typescript-sdk": "Hand-written public TypeScript Mesh SDK wrapper."
+    },
+    "credential_classes": {
+      "enrollment-code": "One-use node enrollment capability in the request body.",
+      "invite-code": "One-use network invitation capability in the request body or query.",
+      "mesh-identity": "Current sess_ bearer/session cookie or static hosted admin bearer.",
+      "mesh-identity-plus-invite-code": "Current Mesh identity plus a one-use network invitation capability.",
+      "mesh-session-bearer-or-cookie": "Current Mesh-owned sess_ bearer token or browser cookie.",
+      "node-bearer": "Current store-backed node bearer.",
+      "node-or-mesh-identity": "Current node bearer or sess_/static-admin Mesh identity.",
+      "none": "No request credential.",
+      "oidc-device-code": "Current Mesh-owned OIDC device code.",
+      "oidc-state-and-code": "Current Mesh-owned OIDC authorization state and code.",
+      "runtime-credential": "Current Mesh-signed runtime credential."
+    },
+    "routes": [
+      {
+        "scope": "public",
+        "path": "/api/v1/auth/config",
+        "operations": [
+          {"method": "get", "handler": "auth_config", "credential": "none", "callers": ["ci-smoke"], "disposition": "delete", "package": null}
+        ]
+      },
+      {
+        "scope": "public",
+        "path": "/node/connect",
+        "operations": [
+          {"method": "get", "handler": "node_connect", "credential": "node-bearer", "callers": [], "disposition": "delete", "package": null}
+        ]
+      },
+      {
+        "scope": "public",
+        "path": "/node/back/{session_id}",
+        "operations": [
+          {"method": "get", "handler": "node_back", "credential": "node-bearer", "callers": [], "disposition": "delete", "package": null}
+        ]
+      },
+      {
+        "scope": "public",
+        "path": "/api/v1/tailnet/coordinate",
+        "operations": [
+          {"method": "get", "handler": "tailnet_coordinate", "credential": "runtime-credential", "callers": [], "disposition": "connect", "package": "codewire.internal.v1"}
+        ]
+      },
+      {
+        "scope": "public",
+        "path": "/api/v1/nodes",
+        "operations": [
+          {"method": "get", "handler": "node_list", "credential": "node-or-mesh-identity", "callers": ["rust-cli", "go-sdk", "typescript-sdk", "python-sdk"], "disposition": "connect", "package": "codewire.v1"}
+        ]
+      },
+      {
+        "scope": "public",
+        "path": "/api/v1/node-enrollments/redeem",
+        "operations": [
+          {"method": "post", "handler": "node_enrollment_redeem", "credential": "enrollment-code", "callers": ["rust-cli", "go-sdk", "typescript-sdk", "python-sdk"], "disposition": "connect", "package": "codewire.internal.v1"}
+        ]
+      },
+      {
+        "scope": "public",
+        "path": "/api/v1/join",
+        "operations": [
+          {"method": "post", "handler": "join_bootstrap", "credential": "invite-code", "callers": [], "disposition": "delete", "package": null}
+        ]
+      },
+      {
+        "scope": "public",
+        "path": "/join",
+        "operations": [
+          {"method": "get", "handler": "join_page", "credential": "invite-code", "callers": ["rust-cli", "browser"], "disposition": "delete", "package": null}
+        ]
+      },
+      {
+        "scope": "public",
+        "path": "/api/v1/groups/bindings",
+        "operations": [
+          {"method": "get", "handler": "group_bindings", "credential": "node-or-mesh-identity", "callers": [], "disposition": "delete", "package": null}
+        ]
+      },
+      {
+        "scope": "public",
+        "path": "/api/v1/network-auth/bundle",
+        "operations": [
+          {"method": "get", "handler": "verifier_bundle", "credential": "node-or-mesh-identity", "callers": ["go-sdk", "typescript-sdk", "python-sdk"], "disposition": "connect", "package": "codewire.internal.v1"}
+        ]
+      },
+      {
+        "scope": "public",
+        "path": "/api/v1/network-auth/runtime/node",
+        "operations": [
+          {"method": "post", "handler": "node_runtime_credential", "credential": "node-bearer", "callers": ["go-sdk", "typescript-sdk", "python-sdk"], "disposition": "connect", "package": "codewire.internal.v1"}
+        ]
+      },
+      {
+        "scope": "public",
+        "path": "/api/v1/network-auth/delegation/node",
+        "operations": [
+          {"method": "post", "handler": "node_sender_delegation", "credential": "node-or-mesh-identity", "callers": ["go-sdk", "typescript-sdk", "python-sdk"], "disposition": "connect", "package": "codewire.internal.v1"}
+        ]
+      },
+      {
+        "scope": "public",
+        "path": "/api/v1/groups/{name}/members",
+        "operations": [
+          {"method": "post", "handler": "group_member_add", "credential": "node-or-mesh-identity", "callers": ["go-sdk", "typescript-sdk", "python-sdk"], "disposition": "connect", "package": "codewire.v1"},
+          {"method": "delete", "handler": "group_member_remove", "credential": "node-or-mesh-identity", "callers": ["go-sdk", "typescript-sdk", "python-sdk"], "disposition": "connect", "package": "codewire.v1"}
+        ]
+      },
+      {
+        "scope": "oidc",
+        "path": "/",
+        "operations": [
+          {"method": "get", "handler": "oidc_index", "credential": "none", "callers": ["browser"], "disposition": "delete", "package": null}
+        ]
+      },
+      {
+        "scope": "oidc",
+        "path": "/auth/oidc",
+        "operations": [
+          {"method": "get", "handler": "oidc_login", "credential": "none", "callers": ["browser"], "disposition": "delete", "package": null}
+        ]
+      },
+      {
+        "scope": "oidc",
+        "path": "/auth/oidc/callback",
+        "operations": [
+          {"method": "get", "handler": "oidc_callback", "credential": "oidc-state-and-code", "callers": ["browser"], "disposition": "delete", "package": null}
+        ]
+      },
+      {
+        "scope": "oidc",
+        "path": "/auth/session",
+        "operations": [
+          {"method": "get", "handler": "oidc_session_info", "credential": "mesh-session-bearer-or-cookie", "callers": ["browser"], "disposition": "delete", "package": null}
+        ]
+      },
+      {
+        "scope": "oidc",
+        "path": "/api/v1/device/authorize",
+        "operations": [
+          {"method": "post", "handler": "oidc_device_authorize", "credential": "none", "callers": [], "disposition": "delete", "package": null}
+        ]
+      },
+      {
+        "scope": "oidc",
+        "path": "/api/v1/device/poll",
+        "operations": [
+          {"method": "post", "handler": "oidc_device_poll", "credential": "oidc-device-code", "callers": [], "disposition": "delete", "package": null}
+        ]
+      },
+      {
+        "scope": "protected",
+        "path": "/api/v1/auth/validate",
+        "operations": [
+          {"method": "get", "handler": "auth_validate", "credential": "mesh-identity", "callers": [], "disposition": "delete", "package": null}
+        ]
+      },
+      {
+        "scope": "protected",
+        "path": "/api/v1/groups",
+        "operations": [
+          {"method": "get", "handler": "group_list", "credential": "mesh-identity", "callers": ["go-sdk", "typescript-sdk", "python-sdk"], "disposition": "connect", "package": "codewire.v1"},
+          {"method": "post", "handler": "group_create", "credential": "mesh-identity", "callers": ["go-sdk", "typescript-sdk", "python-sdk"], "disposition": "connect", "package": "codewire.v1"}
+        ]
+      },
+      {
+        "scope": "protected",
+        "path": "/api/v1/groups/{name}",
+        "operations": [
+          {"method": "get", "handler": "group_get", "credential": "mesh-identity", "callers": ["go-sdk", "typescript-sdk", "python-sdk"], "disposition": "connect", "package": "codewire.v1"},
+          {"method": "delete", "handler": "group_delete", "credential": "mesh-identity", "callers": ["go-sdk", "typescript-sdk", "python-sdk"], "disposition": "connect", "package": "codewire.v1"}
+        ]
+      },
+      {
+        "scope": "protected",
+        "path": "/api/v1/groups/{name}/policy",
+        "operations": [
+          {"method": "put", "handler": "group_policy_set", "credential": "mesh-identity", "callers": ["go-sdk", "typescript-sdk", "python-sdk"], "disposition": "connect", "package": "codewire.v1"}
+        ]
+      },
+      {
+        "scope": "protected",
+        "path": "/api/v1/invites",
+        "operations": [
+          {"method": "get", "handler": "invite_list", "credential": "mesh-identity", "callers": [], "disposition": "connect", "package": "codewire.v1"},
+          {"method": "post", "handler": "invite_create", "credential": "mesh-identity", "callers": ["rust-cli"], "disposition": "connect", "package": "codewire.v1"}
+        ]
+      },
+      {
+        "scope": "protected",
+        "path": "/api/v1/invites/{token}",
+        "operations": [
+          {"method": "delete", "handler": "invite_delete", "credential": "mesh-identity", "callers": [], "disposition": "connect", "package": "codewire.v1"}
+        ]
+      },
+      {
+        "scope": "protected",
+        "path": "/api/v1/kv/{namespace}",
+        "operations": [
+          {"method": "get", "handler": "kv_list", "credential": "mesh-identity", "callers": ["go-sdk", "typescript-sdk", "python-sdk"], "disposition": "connect", "package": "codewire.v1"}
+        ]
+      },
+      {
+        "scope": "protected",
+        "path": "/api/v1/kv/{namespace}/{key}",
+        "operations": [
+          {"method": "get", "handler": "kv_get", "credential": "mesh-identity", "callers": ["go-sdk", "typescript-sdk", "python-sdk"], "disposition": "connect", "package": "codewire.v1"},
+          {"method": "put", "handler": "kv_set", "credential": "mesh-identity", "callers": ["go-sdk", "typescript-sdk", "python-sdk"], "disposition": "connect", "package": "codewire.v1"},
+          {"method": "delete", "handler": "kv_delete", "credential": "mesh-identity", "callers": ["go-sdk", "typescript-sdk", "python-sdk"], "disposition": "connect", "package": "codewire.v1"}
+        ]
+      },
+      {
+        "scope": "protected",
+        "path": "/api/v1/node-enrollments",
+        "operations": [
+          {"method": "post", "handler": "node_enrollment_create", "credential": "mesh-identity", "callers": ["rust-cli", "go-sdk", "typescript-sdk", "python-sdk"], "disposition": "connect", "package": "codewire.v1"}
+        ]
+      },
+      {
+        "scope": "protected",
+        "path": "/api/v1/nodes",
+        "operations": [
+          {"method": "post", "handler": "node_register_deprecated", "credential": "mesh-identity", "callers": [], "disposition": "delete", "package": null}
+        ]
+      },
+      {
+        "scope": "protected",
+        "path": "/api/v1/nodes/{name}",
+        "operations": [
+          {"method": "delete", "handler": "node_revoke", "credential": "mesh-identity", "callers": ["rust-cli", "go-sdk", "typescript-sdk", "python-sdk"], "disposition": "connect", "package": "codewire.v1"}
+        ]
+      },
+      {
+        "scope": "protected",
+        "path": "/api/v1/networks",
+        "operations": [
+          {"method": "get", "handler": "network_list", "credential": "mesh-identity", "callers": ["rust-cli", "go-sdk", "typescript-sdk", "python-sdk"], "disposition": "connect", "package": "codewire.v1"},
+          {"method": "post", "handler": "network_create", "credential": "mesh-identity", "callers": ["rust-cli", "go-sdk", "typescript-sdk", "python-sdk"], "disposition": "connect", "package": "codewire.v1"}
+        ]
+      },
+      {
+        "scope": "protected",
+        "path": "/api/v1/networks/join",
+        "operations": [
+          {"method": "post", "handler": "network_join", "credential": "mesh-identity-plus-invite-code", "callers": ["rust-cli"], "disposition": "connect", "package": "codewire.v1"}
+        ]
+      },
+      {
+        "scope": "protected",
+        "path": "/api/v1/access-grants",
+        "operations": [
+          {"method": "get", "handler": "access_grant_list", "credential": "mesh-identity", "callers": [], "disposition": "delete", "package": null},
+          {"method": "post", "handler": "access_grant_create", "credential": "mesh-identity", "callers": [], "disposition": "delete", "package": null}
+        ]
+      },
+      {
+        "scope": "protected",
+        "path": "/api/v1/access-grants/{id}",
+        "operations": [
+          {"method": "get", "handler": "access_grant_get", "credential": "mesh-identity", "callers": [], "disposition": "delete", "package": null},
+          {"method": "delete", "handler": "access_grant_revoke", "credential": "mesh-identity", "callers": [], "disposition": "delete", "package": null}
+        ]
+      },
+      {
+        "scope": "protected",
+        "path": "/api/v1/tasks",
+        "operations": [
+          {"method": "get", "handler": "task_list", "credential": "mesh-identity", "callers": [], "disposition": "delete", "package": null}
+        ]
+      },
+      {
+        "scope": "protected",
+        "path": "/api/v1/network-auth/runtime/client",
+        "operations": [
+          {"method": "post", "handler": "client_runtime_credential", "credential": "mesh-identity", "callers": ["go-sdk", "typescript-sdk", "python-sdk"], "disposition": "connect", "package": "codewire.internal.v1"}
+        ]
+      }
+    ],
+    "implicit_raw_routes": [
+      {"method": "GET", "path": "/healthz", "disposition": "permanent-raw"},
+      {"method": "GET", "path": "/readyz", "disposition": "permanent-raw"}
+    ],
+    "client_url_templates": [
+      {"source": "crates/codewire-cli/src/commands/collaboration.rs", "caller": "rust-cli", "template": "{}/join?invite={}", "count": 1},
+      {"source": "crates/codewire-cli/src/mesh.rs", "caller": "rust-cli", "template": "api/v1/invites", "count": 1},
+      {"source": "crates/codewire-cli/src/mesh.rs", "caller": "rust-cli", "template": "api/v1/networks", "count": 2},
+      {"source": "crates/codewire-cli/src/mesh.rs", "caller": "rust-cli", "template": "api/v1/networks/join", "count": 1},
+      {"source": "crates/codewire-cli/src/mesh.rs", "caller": "rust-cli", "template": "api/v1/node-enrollments", "count": 1},
+      {"source": "crates/codewire-cli/src/mesh.rs", "caller": "rust-cli", "template": "api/v1/node-enrollments/redeem", "count": 1},
+      {"source": "crates/codewire-cli/src/mesh.rs", "caller": "rust-cli", "template": "api/v1/nodes", "count": 1},
+      {"source": "crates/codewire-cli/src/mesh.rs", "caller": "rust-cli", "template": "api/v1/nodes/{node_name}", "count": 1},
+      {"source": "libs/sdk-go/codewire.go", "caller": "go-sdk", "template": "/api/v1", "count": 2},
+      {"source": "libs/sdk-go/mesh_credentials.go", "caller": "go-sdk", "template": "/api/v1/network-auth/bundle?network_id=%s", "count": 1},
+      {"source": "libs/sdk-go/mesh_credentials.go", "caller": "go-sdk", "template": "/api/v1/network-auth/delegation/node", "count": 1},
+      {"source": "libs/sdk-go/mesh_credentials.go", "caller": "go-sdk", "template": "/api/v1/network-auth/runtime/client?network_id=%s", "count": 1},
+      {"source": "libs/sdk-go/mesh_credentials.go", "caller": "go-sdk", "template": "/api/v1/network-auth/runtime/node", "count": 1},
+      {"source": "libs/sdk-go/mesh_groups.go", "caller": "go-sdk", "template": "/api/v1/groups", "count": 1},
+      {"source": "libs/sdk-go/mesh_groups.go", "caller": "go-sdk", "template": "/api/v1/groups/%s/members", "count": 1},
+      {"source": "libs/sdk-go/mesh_groups.go", "caller": "go-sdk", "template": "/api/v1/groups/%s/members?network_id=%s&node_name=%s&session_name=%s", "count": 1},
+      {"source": "libs/sdk-go/mesh_groups.go", "caller": "go-sdk", "template": "/api/v1/groups/%s/policy", "count": 1},
+      {"source": "libs/sdk-go/mesh_groups.go", "caller": "go-sdk", "template": "/api/v1/groups/%s?network_id=%s", "count": 2},
+      {"source": "libs/sdk-go/mesh_groups.go", "caller": "go-sdk", "template": "/api/v1/groups?network_id=%s", "count": 1},
+      {"source": "libs/sdk-go/mesh_kv.go", "caller": "go-sdk", "template": "/api/v1/kv/%s/%s?network_id=%s", "count": 3},
+      {"source": "libs/sdk-go/mesh_kv.go", "caller": "go-sdk", "template": "/api/v1/kv/%s?prefix=%s&network_id=%s", "count": 1},
+      {"source": "libs/sdk-go/mesh_networks.go", "caller": "go-sdk", "template": "/api/v1/networks", "count": 2},
+      {"source": "libs/sdk-go/mesh_nodes.go", "caller": "go-sdk", "template": "/api/v1/node-enrollments", "count": 1},
+      {"source": "libs/sdk-go/mesh_nodes.go", "caller": "go-sdk", "template": "/api/v1/node-enrollments/redeem", "count": 1},
+      {"source": "libs/sdk-go/mesh_nodes.go", "caller": "go-sdk", "template": "/api/v1/nodes/%s?network_id=%s", "count": 1},
+      {"source": "libs/sdk-go/mesh_nodes.go", "caller": "go-sdk", "template": "/api/v1/nodes?network_id=%s", "count": 1},
+      {"source": "libs/sdk-python/codewire/mesh.py", "caller": "python-sdk", "template": "/api/v1/groups", "count": 1},
+      {"source": "libs/sdk-python/codewire/mesh.py", "caller": "python-sdk", "template": "/api/v1/groups/{quote(group_name, safe='')}/members", "count": 2},
+      {"source": "libs/sdk-python/codewire/mesh.py", "caller": "python-sdk", "template": "/api/v1/groups/{quote(group_name, safe='')}/policy", "count": 1},
+      {"source": "libs/sdk-python/codewire/mesh.py", "caller": "python-sdk", "template": "/api/v1/groups/{quote(name, safe='')}?network_id={quote(network_id, safe='')}", "count": 2},
+      {"source": "libs/sdk-python/codewire/mesh.py", "caller": "python-sdk", "template": "/api/v1/groups?network_id={quote(network_id, safe='')}", "count": 1},
+      {"source": "libs/sdk-python/codewire/mesh.py", "caller": "python-sdk", "template": "/api/v1/kv/{quote(namespace, safe='')}", "count": 1},
+      {"source": "libs/sdk-python/codewire/mesh.py", "caller": "python-sdk", "template": "/api/v1/kv/{quote(namespace, safe='')}/{quote(key, safe='')}", "count": 3},
+      {"source": "libs/sdk-python/codewire/mesh.py", "caller": "python-sdk", "template": "/api/v1/network-auth/bundle?network_id={quote(network_id, safe='')}", "count": 1},
+      {"source": "libs/sdk-python/codewire/mesh.py", "caller": "python-sdk", "template": "/api/v1/network-auth/delegation/node", "count": 1},
+      {"source": "libs/sdk-python/codewire/mesh.py", "caller": "python-sdk", "template": "/api/v1/network-auth/runtime/client?network_id={quote(network_id, safe='')}", "count": 1},
+      {"source": "libs/sdk-python/codewire/mesh.py", "caller": "python-sdk", "template": "/api/v1/network-auth/runtime/node", "count": 1},
+      {"source": "libs/sdk-python/codewire/mesh.py", "caller": "python-sdk", "template": "/api/v1/networks", "count": 2},
+      {"source": "libs/sdk-python/codewire/mesh.py", "caller": "python-sdk", "template": "/api/v1/node-enrollments", "count": 1},
+      {"source": "libs/sdk-python/codewire/mesh.py", "caller": "python-sdk", "template": "/api/v1/node-enrollments/redeem", "count": 1},
+      {"source": "libs/sdk-python/codewire/mesh.py", "caller": "python-sdk", "template": "/api/v1/nodes/{quote(node_name, safe='')}?network_id={quote(network_id, safe='')}", "count": 1},
+      {"source": "libs/sdk-python/codewire/mesh.py", "caller": "python-sdk", "template": "/api/v1/nodes?network_id={quote(network_id, safe='')}", "count": 1},
+      {"source": "libs/sdk-ts/src/mesh.ts", "caller": "typescript-sdk", "template": "/api/v1/groups", "count": 1},
+      {"source": "libs/sdk-ts/src/mesh.ts", "caller": "typescript-sdk", "template": "/api/v1/groups/${q(groupName)}/members", "count": 2},
+      {"source": "libs/sdk-ts/src/mesh.ts", "caller": "typescript-sdk", "template": "/api/v1/groups/${q(groupName)}/policy", "count": 1},
+      {"source": "libs/sdk-ts/src/mesh.ts", "caller": "typescript-sdk", "template": "/api/v1/groups/${q(name)}?network_id=${q(networkId)}", "count": 2},
+      {"source": "libs/sdk-ts/src/mesh.ts", "caller": "typescript-sdk", "template": "/api/v1/groups?network_id=${q(networkId)}", "count": 1},
+      {"source": "libs/sdk-ts/src/mesh.ts", "caller": "typescript-sdk", "template": "/api/v1/kv/${q(namespace)}", "count": 1},
+      {"source": "libs/sdk-ts/src/mesh.ts", "caller": "typescript-sdk", "template": "/api/v1/kv/${q(namespace)}/${q(key)}?network_id=${q(networkId)}", "count": 3},
+      {"source": "libs/sdk-ts/src/mesh.ts", "caller": "typescript-sdk", "template": "/api/v1/network-auth/bundle?network_id=${q(networkId)}", "count": 1},
+      {"source": "libs/sdk-ts/src/mesh.ts", "caller": "typescript-sdk", "template": "/api/v1/network-auth/delegation/node", "count": 1},
+      {"source": "libs/sdk-ts/src/mesh.ts", "caller": "typescript-sdk", "template": "/api/v1/network-auth/runtime/client?network_id=${q(networkId)}", "count": 1},
+      {"source": "libs/sdk-ts/src/mesh.ts", "caller": "typescript-sdk", "template": "/api/v1/network-auth/runtime/node", "count": 1},
+      {"source": "libs/sdk-ts/src/mesh.ts", "caller": "typescript-sdk", "template": "/api/v1/networks", "count": 2},
+      {"source": "libs/sdk-ts/src/mesh.ts", "caller": "typescript-sdk", "template": "/api/v1/node-enrollments", "count": 1},
+      {"source": "libs/sdk-ts/src/mesh.ts", "caller": "typescript-sdk", "template": "/api/v1/node-enrollments/redeem", "count": 1},
+      {"source": "libs/sdk-ts/src/mesh.ts", "caller": "typescript-sdk", "template": "/api/v1/nodes/${q(nodeName)}?network_id=${q(networkId)}", "count": 1},
+      {"source": "libs/sdk-ts/src/mesh.ts", "caller": "typescript-sdk", "template": "/api/v1/nodes?network_id=${q(networkId)}", "count": 1},
+      {"source": "scripts/ci/verify/smoke-prod.sh", "caller": "ci-smoke", "template": "$CODEWIRE_MESH_URL/api/v1/auth/config", "count": 1}
+    ]
+  }
+}

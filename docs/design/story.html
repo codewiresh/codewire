@@ -1,0 +1,963 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Codewire — The Story</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&display=swap" rel="stylesheet">
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+::selection { background: #EAB308; color: #000; }
+
+:root {
+  --bg: #08090a;
+  --fg: #e8e8e8;
+  --fg-dim: #6b7280;
+  --fg-muted: #3f4451;
+  --teal: #0EA5E9;
+  --yellow: #EAB308;
+  --green: #22C55E;
+  --red: #EF4444;
+  --border: rgba(255,255,255,0.08);
+  --font: 'JetBrains Mono', monospace;
+}
+
+html { scroll-behavior: smooth; }
+body {
+  font-family: var(--font);
+  background: var(--bg);
+  color: var(--fg);
+  font-size: 0.8125rem;
+  line-height: 1.7;
+  -webkit-font-smoothing: antialiased;
+  background-image: radial-gradient(circle, rgba(14,165,233,0.04) 1px, transparent 1px);
+  background-size: 24px 24px;
+}
+a { color: var(--teal); text-decoration: none; }
+a:hover { color: var(--fg); }
+
+/* ── Nav ── */
+.nav {
+  position: sticky; top: 0; z-index: 100;
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 0 24px; height: 48px;
+  font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.06em;
+}
+.nav-left { display: flex; align-items: center; gap: 16px; }
+.nav-left a { color: var(--fg); text-decoration: none; font-weight: 700; }
+.nav-left .wire { color: var(--teal); }
+.nav-left .year { color: var(--fg-muted); font-weight: 400; }
+.nav-links { display: flex; align-items: center; gap: 4px; color: var(--fg-muted); }
+.nav-links a { color: var(--fg-dim); text-decoration: none; }
+.nav-links a:hover { color: var(--fg); }
+.nav-login {
+  border: 1px solid var(--teal); color: var(--teal);
+  padding: 5px 14px; font-family: var(--font); font-size: 0.6875rem;
+  font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em;
+  text-decoration: none; transition: background 0.15s, color 0.15s; margin-left: 8px;
+}
+.nav-login:hover { background: var(--teal); color: var(--bg); }
+.nav-hamburger {
+  display: none; background: none; border: none; cursor: pointer;
+  width: 24px; height: 20px; position: relative; padding: 0;
+}
+.nav-hamburger span {
+  display: block; width: 100%; height: 2px; background: var(--fg-dim);
+  position: absolute; left: 0; transition: transform 0.3s, opacity 0.3s;
+}
+.nav-hamburger span:nth-child(1) { top: 0; }
+.nav-hamburger span:nth-child(2) { top: 9px; }
+.nav-hamburger span:nth-child(3) { top: 18px; }
+.nav-hamburger.open span:nth-child(1) { top: 9px; transform: rotate(45deg); }
+.nav-hamburger.open span:nth-child(2) { opacity: 0; }
+.nav-hamburger.open span:nth-child(3) { top: 9px; transform: rotate(-45deg); }
+.nav-mobile {
+  display: none; position: fixed; top: 48px; left: 0; right: 0; bottom: 0;
+  background: var(--bg); padding: 24px; z-index: 99;
+  flex-direction: column; font-size: 0.8125rem; text-transform: uppercase; letter-spacing: 0.06em;
+}
+.nav-mobile.open { display: flex; }
+.nav-mobile a { color: var(--fg-dim); text-decoration: none; padding: 12px 0; border-bottom: 1px solid var(--border); }
+.nav-mobile a:hover { color: var(--fg); }
+.nav-mobile .nav-login-mobile {
+  display: inline-block; border: 1px solid var(--teal); color: var(--teal);
+  padding: 10px 24px; margin-top: 16px; text-align: center; font-weight: 600; border-bottom: none;
+}
+.nav-mobile .nav-login-mobile:hover { background: var(--teal); color: var(--bg); }
+@media (max-width: 640px) {
+  .nav-links { display: none; }
+  .nav-login { display: none; }
+  .nav-hamburger { display: block; }
+}
+
+/* ── Scrollytelling layout ── */
+.scroll-container {
+  position: relative;
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 0 24px;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0 48px;
+}
+.scroll-text { padding: 0 0 20vh; }
+.scroll-step:first-child { padding-top: 20vh; }
+.scroll-step {
+  min-height: 80vh;
+  display: flex; flex-direction: column; justify-content: center;
+  padding: 40px 0;
+  opacity: 0.15;
+  transition: opacity 0.6s ease;
+}
+.scroll-step.active { opacity: 1; }
+.scroll-step h2 {
+  font-size: 1.5rem; font-weight: 700; line-height: 1.3; margin-bottom: 1rem;
+}
+.scroll-step p { color: var(--fg-dim); margin-bottom: 1rem; }
+.scroll-step p:last-child { margin-bottom: 0; }
+
+.scroll-viz-col { position: relative; }
+.scroll-viz {
+  position: sticky;
+  top: 48px;
+  height: calc(100vh - 48px);
+  display: flex; align-items: center; justify-content: center;
+}
+
+/* ── Stage ── */
+.stage {
+  position: relative;
+  width: 460px;
+  height: 380px;
+  margin: 0 auto;
+}
+
+/* All positioned elements sit at center by default */
+.agent-box, .you-box {
+  position: absolute;
+  left: 50%; top: 50%;
+  transform: translate(-50%, -50%);
+  transition: transform 0.6s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.6s ease, left 0.4s ease, top 0.4s ease;
+}
+
+/* ── Agent box ── */
+.agent-box {
+  width: 150px;
+  border: 1px solid var(--border);
+  padding: 8px 10px;
+  font-size: 0.625rem;
+  line-height: 1.5;
+  overflow: hidden;
+  opacity: 0;
+}
+.agent-box.visible { opacity: 1; }
+.agent-box.dimmed { opacity: 0.2; }
+
+.agent-branch { color: var(--teal); font-weight: 600; margin-bottom: 2px; }
+.agent-conv { height: 2.8em; overflow: hidden; position: relative; }
+.agent-conv-inner { transition: transform 0.4s ease; }
+.agent-msg { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.agent-msg.you { color: var(--fg); }
+.agent-msg.reply { color: var(--fg-muted); }
+.agent-status { color: var(--fg-muted); display: flex; align-items: center; gap: 4px; margin-top: 2px; }
+.pip { display: inline-block; width: 6px; height: 6px; background: var(--green); animation: pip-pulse 2s ease-in-out infinite; }
+@keyframes pip-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.2; } }
+
+/* ── YOU box ── */
+.you-box {
+  border: 1px solid var(--teal);
+  color: var(--teal);
+  font-weight: 700;
+  font-size: 0.6875rem;
+  padding: 8px 16px;
+  white-space: nowrap;
+  opacity: 0;
+  z-index: 2;
+}
+.you-box.visible { opacity: 1; }
+
+/* ── State: queue — YOU positioned by JS ── */
+.state-queue #ab0   { transform: translate(20%, -230%); }
+.state-queue #ab1   { transform: translate(20%, -110%); }
+.state-queue #ab2   { transform: translate(20%, 10%); }
+.state-queue #ab3   { transform: translate(20%, 130%); }
+
+/* ── State: parallel — same layout, all active ── */
+.state-parallel .you-box { transform: translate(-250%, -50%); }
+.state-parallel #ab0   { transform: translate(20%, -230%); }
+.state-parallel #ab1   { transform: translate(20%, -110%); }
+.state-parallel #ab2   { transform: translate(20%, 10%); }
+.state-parallel #ab3   { transform: translate(20%, 130%); }
+
+/* ── State: grid — YOU center, 3 left, 3 right ── */
+.state-grid .you-box { transform: translate(-50%, -50%); }
+.state-grid #ab0   { transform: translate(-170%, -210%); }
+.state-grid #ab1   { transform: translate(-170%, -50%); }
+.state-grid #ab2   { transform: translate(-170%, 110%); }
+.state-grid #ab3   { transform: translate(70%, -210%); }
+.state-grid #ab4   { transform: translate(70%, -50%); }
+.state-grid #ab5   { transform: translate(70%, 110%); }
+
+/* ── Connection lines ── */
+.conn-svg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  z-index: 0;
+  overflow: visible;
+}
+.conn-svg line {
+  stroke: var(--fg-muted);
+  stroke-width: 1;
+  stroke-dasharray: 4 4;
+  transition: opacity 0.15s ease;
+  opacity: 0;
+}
+.conn-svg line.visible { opacity: 1; animation: dash-flow 0.8s linear infinite; }
+@keyframes dash-flow { to { stroke-dashoffset: -8; } }
+.conn-svg circle.flow-dot { fill: var(--green); r: 3; opacity: 0; }
+.conn-svg circle.flow-dot.visible { opacity: 1; }
+
+/* ── Story terminal ── */
+.story-terminal {
+  border: 1px solid var(--border);
+  padding: 12px 16px;
+  font-size: 0.75rem;
+  line-height: 1.85;
+  color: var(--fg-dim);
+  overflow-y: auto;
+  height: 100%;
+  transition: opacity 0.6s ease;
+  text-align: left;
+  opacity: 1;
+}
+.stage:not(.state-terminal) .story-terminal { opacity: 0; pointer-events: none; position: absolute; height: 0; }
+.story-terminal .prompt { color: var(--teal); }
+.story-terminal .cmd { color: var(--fg); }
+.story-terminal .output { color: var(--fg-muted); }
+.story-terminal .cursor { color: var(--yellow); }
+
+/* ── CTA ── */
+.cta-section {
+  max-width: 1100px; margin: 0 auto;
+  padding: 80px 24px; text-align: center;
+}
+.cta-section h2 { font-size: 1.5rem; font-weight: 700; margin-bottom: 1rem; }
+.cta-section p { color: var(--fg-dim); margin-bottom: 1.5rem; }
+.cta-form { display: flex; gap: 12px; max-width: 480px; margin: 0 auto; }
+.cta-form input[type="email"] {
+  flex: 1; font-family: var(--font); font-size: 0.75rem;
+  padding: 12px 16px; background: transparent;
+  border: 1px solid var(--border); color: var(--fg); outline: none;
+}
+.cta-form input[type="email"]:focus { border-color: var(--teal); }
+.cta-form input[type="email"]::placeholder { color: var(--fg-muted); }
+.btn {
+  font-family: var(--font); font-size: 0.75rem; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.06em;
+  padding: 12px 28px; border: 1px solid var(--teal);
+  color: var(--teal); background: transparent; cursor: pointer;
+}
+.btn:hover { background: var(--teal); color: var(--bg); }
+
+.footer {
+  text-align: center; padding: 40px 24px;
+  font-size: 0.6875rem; color: var(--fg-muted);
+}
+.footer a { color: var(--fg-dim); }
+
+/* ── Mobile: hidden on desktop ── */
+.mobile-text-panel { display: none; }
+
+@media (max-width: 768px) {
+  body.mobile-story { overflow: hidden; height: 100vh; }
+
+  .scroll-container {
+    display: flex;
+    flex-direction: column;
+    height: calc(100dvh - 48px);
+    max-width: none;
+    padding: 0;
+    overflow: hidden;
+  }
+  .scroll-text { display: none; }
+
+  .scroll-viz-col {
+    display: flex;
+    flex: 0 0 50%;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+    padding: 8px;
+  }
+  .scroll-viz {
+    position: relative;
+    top: auto;
+    width: 100%;
+    height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .stage { width: 340px; height: 280px; }
+  .agent-box { width: 110px; font-size: 0.5625rem; padding: 6px 8px; }
+  .agent-conv { height: 2.4em; }
+  .you-box { font-size: 0.5625rem; padding: 6px 12px; }
+
+  .mobile-text-panel {
+    display: block;
+    flex: 0 0 50%;
+    overflow: hidden;
+    position: relative;
+    border-top: 1px solid rgba(255,255,255,0.15);
+  }
+  .mobile-text-track {
+    display: flex;
+    height: 100%;
+    transition: transform 0.4s ease;
+  }
+  .mobile-text-slide {
+    flex: 0 0 100%;
+    padding: 20px 24px;
+    overflow-y: auto;
+    font-size: 0.8125rem;
+    line-height: 1.7;
+  }
+  .mobile-text-slide h2 {
+    font-size: 1.125rem;
+    font-weight: 700;
+    line-height: 1.3;
+    margin-bottom: 0.75rem;
+  }
+  .mobile-text-slide p {
+    color: var(--fg-dim);
+    margin-bottom: 0.75rem;
+  }
+  .mobile-dots {
+    position: absolute;
+    bottom: 8px;
+    left: 50%;
+    transform: translateX(-50%);
+    display: flex;
+    gap: 8px;
+    z-index: 10;
+  }
+  .mobile-dot {
+    width: 6px; height: 6px;
+    background: var(--fg-muted);
+    transition: background 0.3s;
+  }
+  .mobile-dot.active { background: var(--teal); }
+
+  .cta-section, .footer { display: none; }
+}
+</style>
+</head>
+<body>
+
+<nav class="nav">
+  <div class="nav-left">
+    <a href="index.html">CODE<span class="wire">WIRE</span></a>
+    <span class="nav-cursor" data-spinner></span>
+    <span class="year">2026</span>
+  </div>
+  <div class="nav-links">
+    [<a href="index.html">HOME</a>]
+    [<a href="pricing.html">PRICING</a>]
+    [<a href="https://docs.codewire.sh">DOCS</a>]
+  </div>
+  <a href="/login" class="nav-login">LOG IN</a>
+  <button class="nav-hamburger" onclick="this.classList.toggle('open');document.querySelector('.nav-mobile').classList.toggle('open')">
+    <span></span><span></span><span></span>
+  </button>
+</nav>
+<div class="nav-mobile">
+  <a href="index.html">HOME</a>
+  <a href="pricing.html">PRICING</a>
+  <a href="https://docs.codewire.sh">DOCS</a>
+  <a href="/login" class="nav-login-mobile">LOG IN</a>
+</div>
+
+<div class="scroll-container">
+
+  <div class="scroll-text">
+
+    <div class="scroll-step active" data-step="0">
+      <h2>Your job has <span style="color:var(--teal)">changed.</span></h2>
+      <p>The best engineers don't write code anymore. They describe what needs to happen, and Claude, Cursor, Codex — they build it.</p>
+      <p>Your job isn't implementation. It's <strong>direction.</strong></p>
+    </div>
+
+    <div class="scroll-step" data-step="1">
+      <h2>But your machine <span style="color:var(--red)">didn't get the memo.</span></h2>
+      <p>Monday morning. 4 tasks on your plate. You fire up an agent. It takes over your terminal. CPU spikes. Fans scream.</p>
+      <p>Agent 1 is running. Agent 2 is waiting. Agent 3 and 4? Maybe tomorrow.</p>
+      <p>You became the manager, but your laptop is still a <span style="color:var(--red)">single-threaded worker.</span></p>
+      <p>Git worktrees give you five copies of the code. They don't give you five copies of the machine. You only have so much RAM.</p>
+    </div>
+
+    <div class="scroll-step" data-step="2">
+      <h2>What if each agent got <span style="color:var(--teal)">its own machine?</span></h2>
+      <p>4 tasks. 4 cloud machines. All running at the same time. No queuing. No waiting. No fan noise.</p>
+      <p>You kick them off at 9am. You check in at lunch. <strong>They're all done.</strong></p>
+    </div>
+
+    <div class="scroll-step" data-step="3">
+      <h2>Not just parallel. <span style="color:var(--teal)">A fabric.</span></h2>
+      <p>Agents don't just run side by side. They coordinate across a distributed fabric — one agent's output feeds another's input. Events, MCP, shared state flowing between isolated VMs.</p>
+      <p>You're in the center. Add agents, add machines. The fabric grows with you.</p>
+    </div>
+
+    <div class="scroll-step" data-step="4">
+      <h2>You didn't write a line of code. You shipped <span style="color:var(--teal)">6 features.</span></h2>
+      <p>Before: <span style="color:var(--red)">6 days.</span> With Codewire: <span style="color:var(--teal)">1 day.</span></p>
+      <p>Each agent on its own isolated Xen VM. Dedicated kernel. Persistent sessions. SSH from anywhere. 3 commands to get started.</p>
+      <p><a href="#cta">[GET EARLY ACCESS →]</a></p>
+    </div>
+
+  </div>
+
+  <div class="scroll-viz-col">
+    <div class="scroll-viz">
+      <div class="stage state-terminal" id="stage">
+        <svg class="conn-svg" id="conn-svg">
+          <line id="ln-q"/><line id="ln-g0"/><line id="ln-g1"/><line id="ln-g2"/>
+          <line id="ln-g3"/><line id="ln-g4"/><line id="ln-g5"/>
+          <line id="ln-c0"/><line id="ln-c1"/><line id="ln-c2"/>
+          <circle class="flow-dot" id="fd-q"/><circle class="flow-dot" id="fd-g0"/>
+          <circle class="flow-dot" id="fd-g1"/><circle class="flow-dot" id="fd-g2"/>
+          <circle class="flow-dot" id="fd-g3"/><circle class="flow-dot" id="fd-g4"/>
+          <circle class="flow-dot" id="fd-g5"/><circle class="flow-dot" id="fd-c0"/>
+          <circle class="flow-dot" id="fd-c1"/><circle class="flow-dot" id="fd-c2"/>
+        </svg>
+
+        <div class="story-terminal" id="story-term"></div>
+
+        <div class="you-box" id="you-box">YOU</div>
+
+        <div class="agent-box" id="ab0" data-conv='["> fix the login session bug","  found it — token refresh skips expiry check","  patched + added test for edge case","  PR #241 — all checks green"]'>
+          <div class="agent-branch">feat/auth</div>
+          <div class="agent-conv"><div class="agent-conv-inner"></div></div>
+          <div class="agent-status"><span class="pip"></span> <span class="status-text">working...</span></div>
+        </div>
+        <div class="agent-box" id="ab1" data-conv='["> add cursor pagination to /api/users","  refactored to keyset pagination","  updated OpenAPI spec, regenerated types","  PR #242 — 3x faster on large sets"]'>
+          <div class="agent-branch">fix/pagination</div>
+          <div class="agent-conv"><div class="agent-conv-inner"></div></div>
+          <div class="agent-status"><span class="pip"></span> <span class="status-text">working...</span></div>
+        </div>
+        <div class="agent-box" id="ab2" data-conv='["> migrate v1 endpoints to v2 schema","  moved 12 handlers, updated routes","  added 301 redirects for old paths","  PR #243 — zero breaking changes"]'>
+          <div class="agent-branch">feat/api-v2</div>
+          <div class="agent-conv"><div class="agent-conv-inner"></div></div>
+          <div class="agent-status"><span class="pip"></span> <span class="status-text">working...</span></div>
+        </div>
+        <div class="agent-box" id="ab3" data-conv='["> integration tests for billing pipeline","  set up fixtures with stripe-mock","  wrote 14 tests for upgrades + overages","  PR #244 — coverage 23% → 91%"]'>
+          <div class="agent-branch">chore/tests</div>
+          <div class="agent-conv"><div class="agent-conv-inner"></div></div>
+          <div class="agent-status"><span class="pip"></span> <span class="status-text">working...</span></div>
+        </div>
+        <div class="agent-box" id="ab4" data-conv='["> add rate limiting to public endpoints","  implemented token bucket per API key","  added 429 responses + retry-after header","  PR #245 — tested at 10k req/s"]'>
+          <div class="agent-branch">feat/rate-limit</div>
+          <div class="agent-conv"><div class="agent-conv-inner"></div></div>
+          <div class="agent-status"><span class="pip"></span> <span class="status-text">working...</span></div>
+        </div>
+        <div class="agent-box" id="ab5" data-conv='["> refactor webhook delivery to async","  moved to NATS JetStream consumer","  added dead letter queue + retries","  PR #246 — p99 latency down 80%"]'>
+          <div class="agent-branch">refactor/webhooks</div>
+          <div class="agent-conv"><div class="agent-conv-inner"></div></div>
+          <div class="agent-status"><span class="pip"></span> <span class="status-text">working...</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Mobile text panel (hidden on desktop) ── -->
+  <div class="mobile-text-panel">
+  <div class="mobile-text-track" id="mobile-track">
+    <div class="mobile-text-slide">
+      <h2>Your job has <span style="color:var(--teal)">changed.</span></h2>
+      <p>The best engineers don't write code anymore. They describe what needs to happen, and Claude, Cursor, Codex — they build it.</p>
+      <p>Your job isn't implementation. It's <strong>direction.</strong></p>
+    </div>
+    <div class="mobile-text-slide">
+      <h2>But your machine <span style="color:var(--red)">didn't get the memo.</span></h2>
+      <p>Monday morning. 4 tasks. You fire up an agent. CPU spikes. Fans scream.</p>
+      <p>Agent 1 is running. 2, 3, 4? Waiting.</p>
+      <p>Git worktrees give you five copies of the code. They don't give you five copies of the machine.</p>
+    </div>
+    <div class="mobile-text-slide">
+      <h2>What if each agent got <span style="color:var(--teal)">its own machine?</span></h2>
+      <p>4 tasks. 4 cloud machines. All running at the same time.</p>
+      <p>Kick them off at 9am. Check in at lunch. <strong>They're all done.</strong></p>
+    </div>
+    <div class="mobile-text-slide">
+      <h2>Not just parallel. <span style="color:var(--teal)">A fabric.</span></h2>
+      <p>Agents coordinate across a distributed fabric — events, MCP, shared state flowing between isolated VMs.</p>
+      <p>You're in the center. The fabric grows with you.</p>
+    </div>
+    <div class="mobile-text-slide">
+      <h2>Shipped <span style="color:var(--teal)">6 features.</span> Wrote zero code.</h2>
+      <p>Before: <span style="color:var(--red)">6 days.</span> With Codewire: <span style="color:var(--teal)">1 day.</span></p>
+      <p>Isolated Xen VMs. Per-second billing. Persistent sessions.</p>
+      <div id="mobile-cta-container" style="margin-top:1rem">
+        <form class="cta-form" id="mobile-waitlist-form">
+          <input type="email" placeholder="you@company.com" required id="mobile-cta-email">
+          <button type="submit" class="btn">Join Waitlist →</button>
+        </form>
+      </div>
+    </div>
+  </div>
+  <div class="mobile-dots">
+    <div class="mobile-dot active"></div>
+    <div class="mobile-dot"></div>
+    <div class="mobile-dot"></div>
+    <div class="mobile-dot"></div>
+    <div class="mobile-dot"></div>
+  </div>
+  </div>
+
+</div>
+
+<div class="cta-section" id="cta">
+  <h2>Stop queuing. <span style="color:var(--teal)">Start orchestrating.</span></h2>
+  <p>We're onboarding teams one at a time during the private beta.</p>
+  <div id="cta-container">
+    <form class="cta-form" id="waitlist-form">
+      <input type="email" placeholder="you@company.com" required id="cta-email">
+      <button type="submit" class="btn">Join Waitlist →</button>
+    </form>
+  </div>
+</div>
+
+<footer class="footer">
+  <a href="index.html">Home</a> |
+  <a href="pricing.html">Pricing</a> |
+  <a href="https://docs.codewire.sh">Docs</a> |
+  <a href="mailto:hello@codewire.sh">hello@codewire.sh</a>
+  <br>© 2026 Codewire
+</footer>
+
+<script>
+/* ── Spinners ── */
+(function() {
+  var f = ['\u2847','\u2807','\u280F','\u2819','\u2839','\u2838','\u283C','\u2834','\u2826','\u2846'];
+  var els = document.querySelectorAll('[data-spinner]');
+  var i = 0, last = 0;
+  function tick(now) {
+    if (now - last >= 80) { i = (i+1)%f.length; els.forEach(function(e){e.textContent=f[i]}); last = now; }
+    requestAnimationFrame(tick);
+  }
+  requestAnimationFrame(tick);
+})();
+
+/* ── Story terminal typing ── */
+(function() {
+  var el = document.getElementById('story-term');
+  if (!el) return;
+  var lines = [
+    { t:'cmd', s:'$ cw env create github.com/acme/api' },
+    { t:'out', s:'Workspace "api" running (4 vCPU, 16GB)', d:400 },
+    { t:'gap' },
+    { t:'cmd', s:'$ cw run -- claude "fix the auth bug"' },
+    { t:'out', s:'Session 1 started', d:300 },
+    { t:'gap' },
+    { t:'cmd', s:'$ cw run -- claude "add pagination"' },
+    { t:'out', s:'Session 2 started', d:300 },
+    { t:'gap' },
+    { t:'cmd', s:'$ cw status' },
+    { t:'out', s:'WORKSPACE  SESSIONS  STATUS', d:200 },
+    { t:'out', s:'api        2 active  <span style="color:var(--green)">running</span>', d:100 },
+  ];
+  var cf = ['|','/','-','\\'], ci = 0;
+  function run() {
+    el.innerHTML = '';
+    var li = 0;
+    function next() {
+      if (li >= lines.length) { setTimeout(run, 5000); return; }
+      var line = lines[li++];
+      if (line.t === 'gap') { el.innerHTML += '<br>'; el.scrollTop = el.scrollHeight; setTimeout(next, 400); return; }
+      if (line.t === 'out') {
+        setTimeout(function() {
+          var d = document.createElement('div');
+          d.className = 'output';
+          d.innerHTML = line.s;
+          el.appendChild(d);
+          el.scrollTop = el.scrollHeight;
+          next();
+        }, line.d || 200);
+        return;
+      }
+      var text = line.s, chi = 0;
+      var div = document.createElement('div');
+      var cursor = document.createElement('span');
+      cursor.className = 'cursor';
+      el.appendChild(div);
+      el.appendChild(cursor);
+      var cint = setInterval(function() { ci = (ci+1)%4; cursor.textContent = cf[ci]; }, 100);
+      function tc() {
+        if (chi >= text.length) { clearInterval(cint); el.removeChild(cursor); setTimeout(next, 200); return; }
+        var c = text[chi];
+        if (chi === 0 && c === '$') { div.innerHTML += '<span class="prompt">$</span>'; chi++; setTimeout(tc, 30); return; }
+        if (chi === 1 && c === ' ') { div.innerHTML += ' <span class="cmd">'; chi++; setTimeout(tc, 30); return; }
+        var span = div.querySelector('.cmd');
+        if (span) span.textContent += c; else div.innerHTML += c;
+        el.scrollTop = el.scrollHeight;
+        chi++;
+        setTimeout(tc, 30 + Math.random() * 25);
+      }
+      tc();
+    }
+    next();
+  }
+  run();
+})();
+
+/* ── Conversation scrolling for all agent boxes ── */
+(function() {
+  document.querySelectorAll('.agent-box').forEach(function(box, bi) {
+    var msgs = JSON.parse(box.getAttribute('data-conv'));
+    var inner = box.querySelector('.agent-conv-inner');
+    var stxt = box.querySelector('.status-text');
+    var pip = box.querySelector('.pip');
+
+    msgs.forEach(function(m, i) {
+      var d = document.createElement('div');
+      d.className = 'agent-msg ' + (i === 0 ? 'you' : 'reply');
+      d.textContent = m;
+      inner.appendChild(d);
+    });
+
+    var lineH = inner.children[0] ? inner.children[0].offsetHeight || 14 : 14;
+    var off = 0;
+
+    function scroll() {
+      if (off >= msgs.length - 2) {
+        stxt.textContent = 'PR opened';
+        pip.style.background = 'var(--teal)';
+        pip.style.animation = 'none';
+        setTimeout(function() {
+          off = 0;
+          inner.style.transition = 'none';
+          inner.style.transform = 'translateY(0)';
+          stxt.textContent = 'working...';
+          pip.style.background = ''; pip.style.animation = '';
+          setTimeout(function() {
+            inner.style.transition = 'transform 0.4s ease';
+            setTimeout(scroll, 2000 + bi * 300);
+          }, 50);
+        }, 4000);
+        return;
+      }
+      off++;
+      inner.style.transform = 'translateY(-' + (off * lineH) + 'px)';
+      setTimeout(scroll, 2200 + bi * 250);
+    }
+    setTimeout(scroll, 2000 + bi * 600);
+  });
+})();
+
+/* ── Layout states ── */
+var stage = document.getElementById('stage');
+var connSvg = document.getElementById('conn-svg');
+var boxes = [0,1,2,3,4,5].map(function(i) { return document.getElementById('ab'+i); });
+var youBox = document.getElementById('you-box');
+var qLine = document.getElementById('ln-q');
+var gLines = [0,1,2,3,4,5].map(function(i) { return document.getElementById('ln-g'+i); });
+var cLines = [0,1,2].map(function(i) { return document.getElementById('ln-c'+i); });
+var allLines = [qLine].concat(gLines).concat(cLines);
+
+function hideAllLines() { allLines.forEach(function(l) { l.classList.remove('visible'); }); }
+function setLine(ln, x1, y1, x2, y2) {
+  ln.setAttribute('x1',x1); ln.setAttribute('y1',y1); ln.setAttribute('x2',x2); ln.setAttribute('y2',y2);
+}
+function pos(el) {
+  var sr = connSvg.getBoundingClientRect(), r = el.getBoundingClientRect();
+  return { cx:r.left+r.width/2-sr.left, cy:r.top+r.height/2-sr.top, l:r.left-sr.left, r:r.right-sr.left, t:r.top-sr.top, b:r.bottom-sr.top };
+}
+
+function updateLinePositions() {
+  if (currentState === 'terminal' || currentState === 'queue') return;
+  var you = pos(youBox);
+  if (currentState === 'parallel') {
+    [0,1,2,3].forEach(function(i) { var b = pos(boxes[i]); setLine(gLines[i], you.r, you.cy, b.l, b.cy); });
+  }
+  if (currentState === 'grid') {
+    var vis = boxes.filter(function(b) { return b.classList.contains('visible'); });
+    vis.forEach(function(box, i) {
+      var b = pos(box), isLeft = b.cx < you.cx;
+      setLine(gLines[i], isLeft ? you.l : you.r, you.cy, isLeft ? b.r : b.l, b.cy);
+    });
+    if (vis.length >= 4) { var p0=pos(vis[0]),p3=pos(vis[3]); setLine(cLines[0],p0.r,p0.cy,p3.l,p3.cy); }
+    if (vis.length >= 6) { var p2=pos(vis[2]),p5=pos(vis[5]); setLine(cLines[1],p2.r,p2.cy,p5.l,p5.cy); }
+    if (vis.length >= 2) { var pA=pos(vis[0]),pB=pos(vis[1]); setLine(cLines[2],pA.cx,pA.b,pB.cx,pB.t); }
+  }
+}
+
+function drawLines() {
+  hideAllLines();
+  if (currentState === 'terminal') return;
+
+  if (currentState === 'queue') {
+    // Don't draw static lines — use CSS transition on the SVG line instead
+    // Line position is updated continuously by the queue animation loop
+    return;
+  }
+
+  var you = pos(youBox);
+  if (currentState === 'parallel') {
+    [0,1,2,3].forEach(function(i) { var b = pos(boxes[i]); setLine(gLines[i], you.r, you.cy, b.l, b.cy); gLines[i].classList.add('visible'); });
+  }
+  if (currentState === 'grid') {
+    var vis = boxes.filter(function(b) { return b.classList.contains('visible'); });
+    vis.forEach(function(box, i) {
+      var b = pos(box), isLeft = b.cx < you.cx;
+      setLine(gLines[i], isLeft ? you.l : you.r, you.cy, isLeft ? b.r : b.l, b.cy);
+      gLines[i].classList.add('visible');
+    });
+    if (vis.length >= 4) { var p0=pos(vis[0]),p3=pos(vis[3]); setLine(cLines[0],p0.r,p0.cy,p3.l,p3.cy); cLines[0].classList.add('visible'); }
+    if (vis.length >= 6) { var p2=pos(vis[2]),p5=pos(vis[5]); setLine(cLines[1],p2.r,p2.cy,p5.l,p5.cy); cLines[1].classList.add('visible'); }
+    if (vis.length >= 2) { var pA=pos(vis[0]),pB=pos(vis[1]); setLine(cLines[2],pA.cx,pA.b,pB.cx,pB.t); cLines[2].classList.add('visible'); }
+  }
+}
+
+var _queueInterval = null;
+var _stateGen = 0; // generation counter — increments on every state change
+function stopQueue() {
+  if (_queueInterval) { clearInterval(_queueInterval); _queueInterval = null; }
+}
+
+var stateMap = ['terminal', 'queue', 'parallel', 'grid', 'grid'];
+var currentState = '';
+
+function applyState(name) {
+  _stateGen++;
+  var gen = _stateGen;
+  stopQueue();
+  hideAllLines();
+  currentState = name;
+  youBox.style.transform = '';
+  youBox.style.left = '';
+  youBox.style.top = '';
+
+  // Clear old state class, apply new
+  stage.className = 'stage state-' + name;
+
+  // Visibility
+  youBox.classList.toggle('visible', name !== 'terminal');
+  [0,1,2,3].forEach(function(i) { boxes[i].classList.toggle('visible', name !== 'terminal'); });
+  [4,5].forEach(function(i) { boxes[i].classList.toggle('visible', name === 'grid'); });
+  boxes.forEach(function(b) { b.classList.remove('dimmed'); });
+
+  if (name === 'queue') {
+    var qIdx = 0;
+
+    function positionYouAtBox(idx) {
+      var stageRect = stage.getBoundingClientRect();
+      var boxRect = boxes[idx].getBoundingClientRect();
+      var youH = youBox.offsetHeight;
+      youBox.style.left = '40px';
+      youBox.style.top = ((boxRect.top + boxRect.height/2) - stageRect.top - youH/2) + 'px';
+      youBox.style.transform = 'none';
+    }
+
+    // Hide YOU until boxes settle
+    youBox.classList.remove('visible');
+    [0,1,2,3].forEach(function(i) { boxes[i].classList.toggle('dimmed', i !== 0); });
+    qIdx = 1;
+
+    // Continuously update line to track YOU
+    function trackLine() {
+      if (gen !== _stateGen) return;
+      var you = pos(youBox);
+      var active = boxes.find(function(b) { return b.classList.contains('visible') && !b.classList.contains('dimmed'); });
+      if (active) {
+        var b = pos(active);
+        setLine(qLine, you.r, you.cy, b.l, you.cy);
+        qLine.classList.add('visible');
+      }
+      requestAnimationFrame(trackLine);
+    }
+
+    // Wait for box transforms to finish, then snap YOU to first box
+    setTimeout(function() {
+      if (gen !== _stateGen) return;
+      youBox.style.transition = 'none';
+      positionYouAtBox(0);
+      void youBox.offsetHeight;
+      youBox.classList.add('visible');
+      youBox.style.transition = '';
+      trackLine();
+
+      _queueInterval = setInterval(function() {
+        if (gen !== _stateGen) { stopQueue(); return; }
+        [0,1,2,3].forEach(function(i) { boxes[i].classList.toggle('dimmed', i !== qIdx); });
+        positionYouAtBox(qIdx);
+        qIdx = (qIdx + 1) % 4;
+      }, 1200);
+    }, 650);
+  }
+
+  // Continuously redraw lines during transform animation
+  if (name !== 'terminal' && name !== 'queue') {
+    var _lineStart = performance.now();
+    var _lineDrawn = false;
+    function _trackLines(now) {
+      if (gen !== _stateGen) return;
+      if (!_lineDrawn) { drawLines(); _lineDrawn = true; }
+      else { updateLinePositions(); }
+      if (now - _lineStart < 650) requestAnimationFrame(_trackLines);
+    }
+    requestAnimationFrame(_trackLines);
+  }
+}
+
+applyState('terminal');
+window.addEventListener('resize', function() { if (currentState !== 'terminal') setTimeout(drawLines, 100); });
+
+/* ── Desktop: Scroll observer ── */
+function isMobile() { return window.innerWidth <= 768; }
+
+(function() {
+  if (isMobile()) return;
+  var steps = document.querySelectorAll('.scroll-step');
+  var observer = new IntersectionObserver(function(entries) {
+    entries.forEach(function(entry) {
+      if (entry.isIntersecting) {
+        var idx = parseInt(entry.target.getAttribute('data-step'));
+        steps.forEach(function(s, i) { s.classList.toggle('active', i === idx); });
+        applyState(stateMap[idx]);
+      }
+    });
+  }, { rootMargin: '-30% 0px -30% 0px', threshold: 0 });
+  steps.forEach(function(s) { observer.observe(s); });
+})();
+
+/* ── Mobile: scroll-jacking carousel ── */
+(function() {
+  if (!isMobile()) return;
+  document.body.classList.add('mobile-story');
+
+  var track = document.getElementById('mobile-track');
+  var dots = document.querySelectorAll('.mobile-dot');
+  var totalSteps = 5;
+  var mobileStep = 0;
+
+  function goTo(idx) {
+    idx = Math.max(0, Math.min(idx, totalSteps - 1));
+    if (idx === mobileStep) return;
+    mobileStep = idx;
+    track.style.transform = 'translateX(-' + (idx * 100) + '%)';
+    applyState(stateMap[idx]);
+    dots.forEach(function(d, i) { d.classList.toggle('active', i === idx); });
+  }
+
+  // Scroll (vertical + horizontal) → step
+  var accum = 0;
+  document.addEventListener('wheel', function(e) {
+    e.preventDefault();
+    var delta = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
+    accum += delta;
+    if (accum > 80) { goTo(mobileStep + 1); accum = 0; }
+    else if (accum < -80) { goTo(mobileStep - 1); accum = 0; }
+  }, { passive: false });
+
+  // Touch swipe (vertical + horizontal)
+  var touchX = 0, touchY = 0;
+  document.addEventListener('touchstart', function(e) {
+    touchX = e.touches[0].clientX;
+    touchY = e.touches[0].clientY;
+  });
+  document.addEventListener('touchend', function(e) {
+    var dx = touchX - e.changedTouches[0].clientX;
+    var dy = touchY - e.changedTouches[0].clientY;
+    // Use whichever axis had more movement
+    var d = Math.abs(dx) > Math.abs(dy) ? dx : dy;
+    if (d > 50) goTo(mobileStep + 1);
+    else if (d < -50) goTo(mobileStep - 1);
+  });
+
+  // Mobile waitlist form
+  var mf = document.getElementById('mobile-waitlist-form');
+  if (mf) {
+    mf.addEventListener('submit', function(e) {
+      e.preventDefault();
+      var email = document.getElementById('mobile-cta-email').value;
+      if (!email) return;
+      var btn = mf.querySelector('button');
+      btn.textContent = 'Joining...'; btn.disabled = true;
+      fetch('/api/v1/waitlist', {
+        method: 'POST',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({email:email})
+      }).then(function(r) {
+        if (r.ok) {
+          document.getElementById('mobile-cta-container').innerHTML =
+            '<p style="color:var(--teal);font-weight:600">You\'re on the list!</p>';
+        } else { btn.textContent='Join Waitlist \u2192'; btn.disabled=false; }
+      }).catch(function() { btn.textContent='Join Waitlist \u2192'; btn.disabled=false; });
+    });
+  }
+})();
+
+/* ── Animate flow dots along lines ── */
+(function() {
+  var pairs = [
+    ['ln-q','fd-q'],
+    ['ln-g0','fd-g0'],['ln-g1','fd-g1'],['ln-g2','fd-g2'],
+    ['ln-g3','fd-g3'],['ln-g4','fd-g4'],['ln-g5','fd-g5'],
+    ['ln-c0','fd-c0'],['ln-c1','fd-c1'],['ln-c2','fd-c2']
+  ];
+  var els = pairs.map(function(p) {
+    return { line: document.getElementById(p[0]), dot: document.getElementById(p[1]) };
+  });
+
+  var t = 0;
+  function tick() {
+    t = (t + 0.008) % 1;
+    els.forEach(function(e, i) {
+      var vis = e.line.classList.contains('visible');
+      e.dot.classList.toggle('visible', vis);
+      if (!vis) return;
+      // stagger each dot
+      var progress = (t + i * 0.12) % 1;
+      var x1 = parseFloat(e.line.getAttribute('x1'));
+      var y1 = parseFloat(e.line.getAttribute('y1'));
+      var x2 = parseFloat(e.line.getAttribute('x2'));
+      var y2 = parseFloat(e.line.getAttribute('y2'));
+      e.dot.setAttribute('cx', x1 + (x2 - x1) * progress);
+      e.dot.setAttribute('cy', y1 + (y2 - y1) * progress);
+    });
+    requestAnimationFrame(tick);
+  }
+  requestAnimationFrame(tick);
+})();
+
+/* ── Waitlist ── */
+(function() {
+  var f = document.getElementById('waitlist-form');
+  if (!f) return;
+  f.addEventListener('submit', function(e) {
+    e.preventDefault();
+    var email = document.getElementById('cta-email').value;
+    if (!email) return;
+    var btn = f.querySelector('button');
+    btn.textContent = 'Joining...'; btn.disabled = true;
+    fetch('/api/v1/waitlist', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({email:email})
+    }).then(function(r) {
+      if (r.ok) {
+        document.getElementById('cta-container').innerHTML =
+          '<p style="color:var(--teal);font-weight:600">You\'re on the list!</p>';
+      } else { btn.textContent='Join Waitlist \u2192'; btn.disabled=false; }
+    }).catch(function() { btn.textContent='Join Waitlist \u2192'; btn.disabled=false; });
+  });
+})();
+</script>
+</body>
+</html>

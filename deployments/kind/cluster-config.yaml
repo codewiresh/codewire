@@ -1,0 +1,46 @@
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+networking:
+  apiServerAddress: "0.0.0.0"
+  apiServerPort: 16443
+nodes:
+  - role: control-plane
+    kubeadmConfigPatches:
+      - |
+        kind: InitConfiguration
+        nodeRegistration:
+          kubeletExtraArgs:
+            node-labels: "ingress-ready=true"
+    extraPortMappings:
+      # ingress-nginx HTTP (canonical local entrypoint)
+      - containerPort: 80
+        hostPort: 8080
+        protocol: TCP
+      # codewire-derp HTTPS (NodePort 30443 → host 8443)
+      - containerPort: 30443
+        hostPort: 8443
+        protocol: TCP
+      # STUN edge (host-network 3478 → host 3478)
+      - containerPort: 3478
+        hostPort: 3478
+        protocol: UDP
+      # docs (NodePort 30321 → host 4321)
+      - containerPort: 30321
+        hostPort: 4321
+        protocol: TCP
+    extraMounts:
+      # CodeWire repo root for workspace-aware Air hot reload
+      - hostPath: .
+        containerPath: /src/codewire
+      # Sibling workspace repo required by codewire/go.work
+      - hostPath: ../agent-sandbox
+        containerPath: /src/agent-sandbox
+      # Web frontend source for Vite HMR
+      - hostPath: ./apps/dashboard
+        containerPath: /src/dashboard
+      # Shared types package
+      - hostPath: ./packages/codewire-types
+        containerPath: /src/codewire-types
+      # Docs source
+      - hostPath: ./apps/docs
+        containerPath: /src/docs

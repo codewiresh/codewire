@@ -1,0 +1,79 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: codewire-derp
+  namespace: prod
+  labels:
+    app.kubernetes.io/name: codewire
+    app.kubernetes.io/component: derp
+spec:
+  replicas: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: codewire
+      app.kubernetes.io/component: derp
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: codewire
+        app.kubernetes.io/component: derp
+    spec:
+      imagePullSecrets:
+        - name: gitea-registry
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: derp
+          image: git.example.com/codewire/derp:latest
+          ports:
+            - containerPort: 8080
+              name: http
+            - containerPort: 8443
+              name: https
+            - containerPort: 3478
+              protocol: UDP
+              name: stun
+          env:
+            - name: MY_POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: DERP_MESH_HOSTNAME
+              value: codewire-derp-mesh.prod.svc.cluster.local
+            - name: TLS_PORT
+              value: "8443"
+            - name: TLS_HOSTS
+              value: codewire-derp.prod.svc.cluster.local,codewire-derp.dev.svc.cluster.local,codewire-derp.default.svc.cluster.local,127.0.0.1,localhost
+            - name: DERP_MESH_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: codewire-secrets
+                  key: DERP_MESH_KEY
+                  optional: true
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /derp/latency-check
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sleep", "15"]

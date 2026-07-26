@@ -1,0 +1,319 @@
+# E2E ingress mirrors the shipped routing shape: preview hosts and the broad
+# /api fallback go to codewire-orchestration, while the billing ingress below
+# carries the permanent codewire-billing override paths.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: codewire-preview-e2e
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: "*.codewire-dev.local"
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: codewire-orchestration
+                port:
+                  name: http
+    - http:
+        paths:
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: codewire-orchestration
+                port:
+                  name: http
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: codewire-billing-e2e
+  annotations:
+    nginx.ingress.kubernetes.io/use-regex: "true"
+spec:
+  ingressClassName: nginx
+  rules:
+    - http:
+        paths:
+          - path: /api/v1/admin/billing/catalog$
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: codewire-billing
+                port:
+                  name: http
+          # Catalog plan/price/settings write CRUD + subscription-
+          # migrations (#168, #38). Scoped to the write subpaths so the
+          # bare /catalog read above keeps its own rule.
+          - path: /api/v1/admin/billing/catalog/(plans|prices|settings|subscription-migrations)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: codewire-billing
+                port:
+                  name: http
+          - path: /api/v1/billing/plans
+            pathType: Prefix
+            backend:
+              service:
+                name: codewire-billing
+                port:
+                  name: http
+          - path: /api/v1/organizations/[^/]+/billing/invoices
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: codewire-billing
+                port:
+                  name: http
+          - path: /api/v1/organizations/[^/]+/billing/events
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: codewire-billing
+                port:
+                  name: http
+          - path: /api/v1/organizations/[^/]+/billing$
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: codewire-billing
+                port:
+                  name: http
+          - path: /api/v1/organizations/[^/]+/billing/(checkout|portal|setup)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: codewire-billing
+                port:
+                  name: http
+          - path: /api/v1/organizations/[^/]+/environments/usage
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: codewire-billing
+                port:
+                  name: http
+          - path: /codewire\.console\.v1\.BillingService/
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: codewire-billing
+                port:
+                  name: http
+          - path: /api/webhooks/stripe
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: codewire-billing
+                port:
+                  name: http
+          # D8 probe routing proof (docs/plans/connect-rpc/03 WI-4): both
+          # binaries mount codewire.testing.v1.PingService; routing
+          # PublicPing to billing proves a billing-owned Connect regex
+          # beats the /codewire\. orchestration fallback (D5 ordering).
+          - path: /codewire\.testing\.v1\.PingService/PublicPing$
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: codewire-billing
+                port:
+                  name: http
+
+---
+# Real coordinator WebSocket routes. This object deliberately remains
+# HTTP/1.1 and separate from the GRPC-backed Connect object below.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: codewire-coordinator-e2e
+  annotations:
+    nginx.ingress.kubernetes.io/use-regex: "true"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - localhost
+      secretName: codewire-kind-ingress-tls
+  rules:
+    - host: localhost
+      http:
+        paths:
+          - path: /api/v1/organizations/[^/]+/environments/[^/]+/coordinate
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: codewire-coordinator
+                port:
+                  name: http
+          - path: /api/v1/internal/gateway/coordinate
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: codewire-coordinator
+                port:
+                  name: http
+---
+# Native coordinator Connect bidi stream. TLS+ALPN proves HTTP/2 on the
+# client leg; GRPC retains HTTP/2 from ingress-nginx to the coordinator.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: codewire-coordinator-connect-e2e
+  annotations:
+    nginx.ingress.kubernetes.io/use-regex: "true"
+    nginx.ingress.kubernetes.io/backend-protocol: "GRPC"
+    nginx.ingress.kubernetes.io/proxy-request-buffering: "off"
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - localhost
+      secretName: codewire-kind-ingress-tls
+  rules:
+    - host: localhost
+      http:
+        paths:
+          - path: /coordinator\.v1\.CoordinatorService/
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: codewire-coordinator
+                port:
+                  name: http
+---
+# Native environment-session bidi stream. TLS+ALPN proves HTTP/2 on the
+# client leg; GRPC retains HTTP/2 from ingress-nginx to orchestration.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: codewire-environment-session-grpc-e2e
+  annotations:
+    nginx.ingress.kubernetes.io/use-regex: "true"
+    nginx.ingress.kubernetes.io/backend-protocol: "GRPC"
+    nginx.ingress.kubernetes.io/service-upstream: "true"
+    nginx.ingress.kubernetes.io/proxy-request-buffering: "off"
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - localhost
+      secretName: codewire-kind-ingress-tls
+  rules:
+    - host: localhost
+      http:
+        paths:
+          - path: /codewire\.v1\.EnvironmentSessionService/
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: codewire-orchestration-grpc
+                port:
+                  name: grpc
+---
+# Connect-RPC path routing (docs/plans/connect-rpc/03, D5) — the e2e twin
+# of base's codewire-connect Ingress. The D8 probe's billing routing proof
+# lives in codewire-billing-e2e above (production topology: billing-owned
+# Connect rules ride the billing regex Ingress); every other Connect path
+# reaches orchestration here. Request and response buffering are off and the
+# ingress body-size limit is disabled for typed streaming RPCs —
+# scripts/ci/verify/kind-e2e.sh's stream probes assert the live behavior.
+# Drift-checked by scripts/checks/repo_checks.py connect-edge-routing.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: codewire-connect-e2e
+  annotations:
+    nginx.ingress.kubernetes.io/use-regex: "true"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-request-buffering: "off"
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+    nginx.ingress.kubernetes.io/proxy-body-size: "0"
+spec:
+  ingressClassName: nginx
+  rules:
+    - http:
+        paths:
+          - path: /codewire\.admin\.v1\.AdminService/
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: codewire-orchestration
+                port:
+                  name: http
+          - path: /codewire\.admin\.v1\.BillingCatalogService/
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: codewire-billing
+                port:
+                  name: http
+          - path: /codewire\.
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: codewire-orchestration
+                port:
+                  name: http
+---
+# The hostless ingress above keeps the existing direct HTTP probes. This
+# localhost TLS twin exercises the public HTTP/2 edge used by the interactive
+# platform Run client without changing that product route's ownership.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: codewire-connect-tls-e2e
+  annotations:
+    nginx.ingress.kubernetes.io/use-regex: "true"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-request-buffering: "off"
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+    nginx.ingress.kubernetes.io/proxy-body-size: "0"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - localhost
+      secretName: codewire-kind-ingress-tls
+  rules:
+    - host: localhost
+      http:
+        paths:
+          - path: /codewire\.admin\.v1\.AdminService/
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: codewire-orchestration
+                port:
+                  name: http
+          - path: /codewire\.admin\.v1\.BillingCatalogService/
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: codewire-billing
+                port:
+                  name: http
+          - path: /codewire\.
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: codewire-orchestration
+                port:
+                  name: http

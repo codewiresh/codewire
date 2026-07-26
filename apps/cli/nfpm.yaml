@@ -1,0 +1,11 @@
+name: codewire
+arch: "${ARCH}"
+platform: linux
+version: "${VERSION}"
+maintainer: "Codewire <hello@codewire.sh>"
+description: "Persistent process server for AI coding agents"
+homepage: "https://codewire.sh"
+license: MIT
+contents:
+  - src: ./cw
+    dst: /usr/local/bin/cw

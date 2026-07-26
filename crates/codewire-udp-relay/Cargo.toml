@@ -1,0 +1,30 @@
+[package]
+name = "codewire-udp-relay"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license = "AGPL-3.0"
+description = "Codewire UDP peer relay service for shared tailnet peer-relay allocation and forwarding."
+
+[[bin]]
+name = "codewire-udp-relay"
+path = "src/main.rs"
+
+[lib]
+name = "codewire_udp_relay"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+axum = { workspace = true }
+codewire-tailnet = { workspace = true }
+rand = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+tower = { workspace = true }

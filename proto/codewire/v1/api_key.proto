@@ -1,0 +1,112 @@
+syntax = "proto3";
+
+package codewire.v1;
+
+import "google/protobuf/timestamp.proto";
+
+// ApiKeyService manages organization-scoped API keys.
+//
+// API keys are also a credential: a `cw_`-prefixed key authenticates
+// requests to every codewire.v1 service (Authorization: Bearer). The
+// first key in an organization must therefore be created with a
+// session credential (dashboard or CLI login); after that, keys can
+// mint further keys within that organization. Only the SHA-256 hash
+// of a key is stored —
+// CreateApiKeyResponse.key is the one and only time the secret is
+// returned.
+service ApiKeyService {
+  // ListApiKeys returns the organization's API keys, newest first.
+  // The caller must be a member of the organization.
+  rpc ListApiKeys(ListApiKeysRequest) returns (ListApiKeysResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+
+  // CreateApiKey mints a new key acting as the calling user. The raw
+  // secret is returned exactly once in CreateApiKeyResponse.key.
+  rpc CreateApiKey(CreateApiKeyRequest) returns (CreateApiKeyResponse);
+
+  // UpdateApiKey disables or re-enables a key. A disabled key stops
+  // authenticating immediately but keeps its history.
+  rpc UpdateApiKey(UpdateApiKeyRequest) returns (UpdateApiKeyResponse);
+
+  // DeleteApiKey permanently revokes a key. Requires the org owner or
+  // admin role (or a super_admin assignment).
+  rpc DeleteApiKey(DeleteApiKeyRequest) returns (DeleteApiKeyResponse);
+}
+
+// ApiKey is an organization-scoped API key. The secret material is
+// never part of this message; key_prefix is a display/lookup handle
+// (the 8 hex chars after the `cw_` prefix), not a secret.
+message ApiKey {
+  string id = 1;
+  // User the key acts as. Requests authenticated with this key carry
+  // this user's identity and permissions.
+  string user_id = 2;
+  string org_id = 3;
+  string name = 4;
+  // First 8 hex characters after the `cw_` prefix.
+  string key_prefix = 5;
+  // Stored labels; not enforced by the auth layer today.
+  repeated string scopes = 6;
+  // Unset when the key has never been used.
+  google.protobuf.Timestamp last_used_at = 7;
+  // Unset when the key never expires.
+  google.protobuf.Timestamp expires_at = 8;
+  // Set while the key is disabled; unset when active.
+  google.protobuf.Timestamp disabled_at = 9;
+  google.protobuf.Timestamp created_at = 10;
+  // Display name/email of the creating user. Empty when unknown.
+  string created_by_name = 11;
+  string created_by_email = 12;
+}
+
+message ListApiKeysRequest {
+  string org_id = 1;
+  // Optional. The server may return fewer keys than requested; 0 lets
+  // the server choose (currently: all keys in one page).
+  int32 page_size = 2;
+  // Optional. Empty for the first page.
+  string page_token = 3;
+}
+
+message ListApiKeysResponse {
+  repeated ApiKey api_keys = 1;
+  // Empty when there are no further pages.
+  string next_page_token = 2;
+}
+
+message CreateApiKeyRequest {
+  string org_id = 1;
+  // Required, non-blank after trimming.
+  string name = 2;
+  repeated string scopes = 3;
+  // 1..=3650. Unset means the key never expires.
+  optional int32 expires_in_days = 4;
+}
+
+message CreateApiKeyResponse {
+  ApiKey api_key = 1;
+  // The raw `cw_`-prefixed secret. Returned exactly once, here; only
+  // its SHA-256 hash is stored. Clients must not log or persist it
+  // beyond handing it to the user.
+  string key = 2;
+}
+
+message UpdateApiKeyRequest {
+  string org_id = 1;
+  string key_id = 2;
+  // Required (presence-checked): true disables the key, false
+  // re-enables it.
+  optional bool disabled = 3;
+}
+
+message UpdateApiKeyResponse {
+  ApiKey api_key = 1;
+}
+
+message DeleteApiKeyRequest {
+  string org_id = 1;
+  string key_id = 2;
+}
+
+message DeleteApiKeyResponse {}

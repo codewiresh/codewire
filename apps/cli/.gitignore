@@ -1,0 +1,11 @@
+/target
+/cw
+/cw-static
+.env
+operator/bin/
+.DS_Store
+.terraform/
+.terraform.lock.hcl
+.worktrees/
+.tmp/
+.gocache/

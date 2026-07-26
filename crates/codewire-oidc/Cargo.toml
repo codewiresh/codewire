@@ -1,0 +1,45 @@
+[package]
+name = "codewire-oidc"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "A standalone OpenID Connect / OAuth 2.0 provider (OP) library — protocol mechanics behind storage traits, transport-agnostic with an optional axum integration."
+# Dual-licensed so a public extraction stays cheap (the same posture as
+# codewire-tailnet; see the root Cargo.toml note + issue #62). The IdP
+# *service* that consumes this crate stays AGPL like the other server
+# crates — this is the library only.
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/codewiresh/codewire"
+keywords = ["oidc", "openid-connect", "oauth2", "provider", "idp"]
+categories = ["authentication", "web-programming"]
+
+[lib]
+name = "codewire_oidc"
+
+[features]
+default = []
+# Opt-in axum router so non-axum hosts aren't forced into the dependency.
+axum = ["dep:axum"]
+
+[dependencies]
+# Zero Codewire-internal dependencies — this crate must build in isolation
+# (`cargo check -p codewire-oidc --no-default-features`), the extraction
+# guard the design doc mandates.
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+base64 = { workspace = true }
+url = { workspace = true }
+chrono = { workspace = true }
+sha2 = { workspace = true }
+ed25519-dalek = { workspace = true }
+rand = { workspace = true }
+axum = { workspace = true, optional = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+# For exercising the optional axum transport with `oneshot` in tests.
+tower = { workspace = true }
+http-body-util = "0.1"

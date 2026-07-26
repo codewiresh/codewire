@@ -1,0 +1,41 @@
+set -eu
+mkdir -p "$HOME/.claude"
+cfg="$HOME/.claude.json"
+_cw_workdir='/workspace/my-repo'
+_cw_home="$HOME"
+_cw_trust='{"hasCompletedProjectOnboarding":true,"hasTrustDialogAccepted":true}'
+if command -v jq >/dev/null 2>&1 && [ -f "$cfg" ]; then
+  jq --arg workdir "$_cw_workdir" --arg home "$_cw_home" --argjson trust "$_cw_trust" \
+    '.autoUpdaterStatus = "disabled" |
+     .bypassPermissionsModeAccepted = true |
+     .hasAcknowledgedCostThreshold = true |
+     .hasCompletedOnboarding = true |
+     .projects[$workdir] = $trust |
+     .projects[$home] = $trust |
+     .projects["/workspace"] = $trust' \
+    "$cfg" > "${cfg}.tmp" && mv "${cfg}.tmp" "$cfg"
+else
+  cat > "$cfg" <<CWEOF
+{
+  "autoUpdaterStatus": "disabled",
+  "bypassPermissionsModeAccepted": true,
+  "hasAcknowledgedCostThreshold": true,
+  "hasCompletedOnboarding": true,
+  "projects": {
+    "$_cw_workdir": {
+      "hasCompletedProjectOnboarding": true,
+      "hasTrustDialogAccepted": true
+    },
+    "$_cw_home": {
+      "hasCompletedProjectOnboarding": true,
+      "hasTrustDialogAccepted": true
+    },
+    "/workspace": {
+      "hasCompletedProjectOnboarding": true,
+      "hasTrustDialogAccepted": true
+    }
+  }
+}
+CWEOF
+  chmod 600 "$cfg"
+fi

@@ -1,0 +1,161 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: default
+
+resources:
+  - ../../base
+  - ../../derp
+  - ../../coordinator
+  - ../../idp
+  - ../../billing
+  - ../../orchestration
+  - ingress.yaml
+  - local-secret.yaml
+  - idp-signing-keks.yaml
+  - postgres.yaml
+  - dashboard.yaml
+  - docs.yaml
+  - storage-class.yaml
+
+images:
+  - name: git.example.com/codewire/derp
+    newName: codewire-derp
+    newTag: local
+  - name: git.example.com/codewire/services
+    newName: codewire-services
+    newTag: local
+
+patches:
+  # ConfigMap: local values
+  - path: configmap-patch.yaml
+    target:
+      kind: ConfigMap
+      name: codewire-config
+  - path: derp-deployment-patch.yaml
+    target:
+      kind: Deployment
+      name: codewire-derp
+  - path: derp-service-patch.yaml
+    target:
+      kind: Service
+      name: codewire-derp
+  - path: coordinator-deployment-patch.yaml
+    target:
+      kind: Deployment
+      name: codewire-coordinator
+  - path: idp-deployment-patch.yaml
+    target:
+      kind: Deployment
+      name: codewire-idp
+  - path: billing-deployment-patch.yaml
+    target:
+      kind: Deployment
+      name: codewire-billing
+  - path: orchestration-deployment-patch.yaml
+    target:
+      kind: Deployment
+      name: codewire-orchestration
+  # Remove Infisical-secret resources from the local overlay so kind can run
+  # without external Infisical auth/bootstrap.
+  - patch: |-
+      $patch: delete
+      apiVersion: secrets.infisical.com/v1alpha1
+      kind: InfisicalSecret
+      metadata:
+        name: unused
+    target:
+      group: secrets.infisical.com
+      version: v1alpha1
+      kind: InfisicalSecret
+  # Remove base ingress resources; local kind uses a hostless ingress shape
+  # that matches current 127.0.0.1:8080 / 127.0.0.1:8443 workflows.
+  - patch: |-
+      $patch: delete
+      apiVersion: networking.k8s.io/v1
+      kind: Ingress
+      metadata:
+        name: unused
+    target:
+      kind: Ingress
+      name: codewire-dashboard
+  - patch: |-
+      $patch: delete
+      apiVersion: networking.k8s.io/v1
+      kind: Ingress
+      metadata:
+        name: unused
+    target:
+      kind: Ingress
+      name: codewire-derp
+  # Prod coordinator ingress replaced by coordinate paths in local ingress.yaml.
+  - patch: |-
+      $patch: delete
+      apiVersion: networking.k8s.io/v1
+      kind: Ingress
+      metadata:
+        name: unused
+    target:
+      kind: Ingress
+      name: codewire-coordinator
+  - patch: |-
+      $patch: delete
+      apiVersion: networking.k8s.io/v1
+      kind: Ingress
+      metadata:
+        name: unused
+    target:
+      kind: Ingress
+      name: codewire-idp
+  - patch: |-
+      $patch: delete
+      apiVersion: networking.k8s.io/v1
+      kind: Ingress
+      metadata:
+        name: unused
+    target:
+      kind: Ingress
+      name: codewire-billing
+
+transformers:
+  - |-
+    apiVersion: builtin
+    kind: PatchTransformer
+    metadata:
+      name: codewire-orchestration-gateway-host-key-dev-sandboxes
+    patch: |-
+      - op: replace
+        path: /metadata/namespace
+        value: dev-sandboxes
+    target:
+      group: rbac.authorization.k8s.io
+      version: v1
+      kind: Role|RoleBinding
+      name: codewire-orchestration-gateway-host-key
+  - |-
+    apiVersion: builtin
+    kind: PatchTransformer
+    metadata:
+      name: codewire-orchestration-gateway-host-key-default-subject
+    patch: |-
+      - op: replace
+        path: /subjects/0/namespace
+        value: default
+    target:
+      group: rbac.authorization.k8s.io
+      version: v1
+      kind: RoleBinding
+      name: codewire-orchestration-gateway-host-key
+  - |-
+    apiVersion: builtin
+    kind: PatchTransformer
+    metadata:
+      name: codewire-orchestration-gateway-host-key-admission-cluster-scope
+    patch: |-
+      - op: remove
+        path: /metadata/namespace
+    target:
+      group: admissionregistration.k8s.io
+      version: v1
+      kind: ValidatingAdmissionPolicy|ValidatingAdmissionPolicyBinding
+      name: codewire-orchestration-gateway-host-key

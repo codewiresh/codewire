@@ -1,0 +1,105 @@
+name: Manual diagnostics
+
+on:
+  workflow_dispatch:
+    inputs:
+      diagnostic:
+        description: rust-stack or go-tailnet
+        required: true
+
+concurrency:
+  group: manual-diagnostics-${{ github.ref }}-${{ github.event.inputs.diagnostic }}
+  cancel-in-progress: false
+
+env:
+  CARGO_INCREMENTAL: '0'
+
+jobs:
+  diagnostics:
+    name: Manual diagnostics
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          fetch-depth: 0
+
+      - name: Select manual diagnostic
+        id: select
+        env:
+          GITHUB_EVENT_NAME: workflow_dispatch
+          VERIFICATION_REQUEST: ${{ github.event.inputs.diagnostic }}
+        run: scripts/ci/select/select-verification.sh
+
+      - name: Require explicit diagnostic request
+        env:
+          SELECTION: ${{ steps.select.outputs.selection }}
+        run: |
+          set -euo pipefail
+          case "$SELECTION" in
+            *'|diagnostic_rust_stack|'*|*'|diagnostic_go_tailnet|'*)
+              ;;
+            *)
+              echo "::error::manual diagnostics require diagnostic=rust-stack or go-tailnet"
+              exit 1
+              ;;
+          esac
+
+      - name: Set up Go 1.26.5
+        run: scripts/ci/setup/setup-go.sh 1.26.5
+
+      - uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b
+        if: ${{ contains(steps.select.outputs.selection, '|diagnostic_rust_stack|') || contains(steps.select.outputs.selection, '|diagnostic_go_tailnet|') }}
+        with:
+          toolchain: stable
+
+      - name: Install Rust stack diagnostic tools
+        if: ${{ contains(steps.select.outputs.selection, '|diagnostic_rust_stack|') }}
+        run: |
+          set -euo pipefail
+          if command -v sudo >/dev/null 2>&1; then APT='sudo apt-get'; else APT=apt-get; fi
+          $APT update -qq || true
+          $APT install -y -qq ca-certificates curl jq postgresql-client protobuf-compiler
+
+      - name: Start Rust stack diagnostic Postgres
+        if: ${{ contains(steps.select.outputs.selection, '|diagnostic_rust_stack|') }}
+        run: |
+          set -euo pipefail
+          container="codewire-rust-stack-${GITHUB_RUN_ID:?}"
+          echo "POSTGRES_CONTAINER=$container" >> "$GITHUB_ENV"
+          docker rm -f "$container" >/dev/null 2>&1 || true
+          docker run -d --name "$container" --pids-limit 2048 \
+            -e POSTGRES_USER=codewire -e POSTGRES_PASSWORD=codewire \
+            -e POSTGRES_DB=codewire -p 127.0.0.1::5432 postgres:17-alpine
+          mapping="$(docker port "$container" 5432/tcp | head -n1)"
+          echo "POSTGRES_PORT=${mapping##*:}" >> "$GITHUB_ENV"
+
+      - name: Wait for Rust stack diagnostic Postgres
+        if: ${{ contains(steps.select.outputs.selection, '|diagnostic_rust_stack|') }}
+        env:
+          PGPASSWORD: codewire
+        run: |
+          set -euo pipefail
+          for _ in $(seq 1 60); do
+            if psql -h 127.0.0.1 -p "$POSTGRES_PORT" -U codewire -d codewire -c 'select 1' >/dev/null 2>&1; then
+              echo "DATABASE_URL=postgres://codewire:codewire@127.0.0.1:${POSTGRES_PORT}/codewire?sslmode=disable" >> "$GITHUB_ENV"
+              echo "DATABASE_URL_RUST=postgres://codewire:codewire@127.0.0.1:${POSTGRES_PORT}/codewire" >> "$GITHUB_ENV"
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs "$POSTGRES_CONTAINER" || true
+          exit 1
+
+      - name: Run Go Tailnet diagnostic
+        if: ${{ contains(steps.select.outputs.selection, '|diagnostic_go_tailnet|') }}
+        run: scripts/ci/verify/tailnet-parity.sh
+
+      - name: Run Rust stack diagnostic
+        if: ${{ contains(steps.select.outputs.selection, '|diagnostic_rust_stack|') }}
+        env:
+          GOWORK: 'off'
+        run: scripts/ci/verify/rust-stack-rehearsal.sh
+
+      - name: Stop Rust stack diagnostic Postgres
+        if: ${{ always() && contains(steps.select.outputs.selection, '|diagnostic_rust_stack|') }}
+        run: docker rm -f "${POSTGRES_CONTAINER:-missing}" >/dev/null 2>&1 || true

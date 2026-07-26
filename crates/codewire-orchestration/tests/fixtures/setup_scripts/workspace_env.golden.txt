@@ -1,0 +1,22 @@
+set -eu
+mkdir -p "$HOME/.codewire"
+cat > "$HOME/.codewire/environment.sh" <<'CWEOF'
+export ALPHA_KEY='plain-value'
+export CONNECT_URL='postgres://u:p@h:5432/db?sslmode=disable'
+export ZETA_TOKEN='it'\''s quoted'
+CWEOF
+cat > "$HOME/.codewire/environment.json" <<'CWJSON'
+{
+  "ALPHA_KEY": "plain-value",
+  "CONNECT_URL": "postgres://u:p@h:5432/db?sslmode=disable",
+  "ZETA_TOKEN": "it's quoted"
+}
+CWJSON
+chmod 600 "$HOME/.codewire/environment.sh" "$HOME/.codewire/environment.json"
+for rc in "$HOME/.profile" "$HOME/.bash_profile" "$HOME/.bashrc" "$HOME/.zshrc"; do
+  touch "$rc"
+  line='[ -f "$HOME/.codewire/environment.sh" ] && . "$HOME/.codewire/environment.sh"'
+  if ! grep -Fqx "$line" "$rc"; then
+    printf '\n%s\n' "$line" >> "$rc"
+  fi
+done

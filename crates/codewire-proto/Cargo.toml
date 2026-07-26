@@ -1,0 +1,31 @@
+[package]
+name = "codewire-proto"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license = "AGPL-3.0"
+description = "Generated Connect-RPC contract types for the client-facing Codewire control-plane API."
+
+[lib]
+# The crate is 100% generated code whose doc examples are all `rust,ignore`
+# snippets from connectrpc-codegen; there is nothing to doctest. (Also works
+# around a rustdoc 1.96 merged-doctest bug where an ignore-only doctest set
+# exits non-zero without diagnostics.)
+doctest = false
+
+[features]
+default = ["client"]
+# Generated `*Client` stubs are cfg-gated on this feature
+# (connectrpc_build::Config::gate_client_feature); server-only consumers can
+# disable it to drop the connectrpc HTTP client transport stack.
+client = ["connectrpc/client"]
+
+[dependencies]
+connectrpc = { workspace = true }
+buffa = { workspace = true }
+buffa-types = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[build-dependencies]
+connectrpc-build = { workspace = true }

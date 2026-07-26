@@ -1,0 +1,9 @@
+{
+  "name": "@codewire/types",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "TypeScript types generated from openapi.json via openapi-typescript",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "files": ["index.d.ts", "index.js", "generated"]
+}

@@ -1,0 +1,377 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      verification:
+        description: Product family
+        required: false
+        default: policy
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  REGISTRY_HOST: ${{ vars.REGISTRY_HOST }}
+  KUSTOMIZE_VERSION: v5.4.3
+  HELM_VERSION: v3.16.4
+  CADDY_VERSION: 2.10.2
+  KIND_VERSION: v0.30.0
+  KUBECTL_VERSION: v1.34.0
+  CARGO_INCREMENTAL: '0'
+  AGENT_SANDBOX_SHA: 85e19118bfa3157bd59360a15a26d7bdd2a7524a
+
+# Gitea assigns static jobs to runners before evaluating job-level conditions.
+# Keep the selector's family precision, but execute it through four fixed
+# capability groups instead of creating one runner task per family. The groups
+# preserve parallelism between standard, Rust transport, integration, and Kind
+# verification while step conditions keep unselected commands dormant.
+# A canonical squash whose tree exactly matches a fully green PR head runs only
+# each group's receipt sentinel. Receipt-control changes always take the full
+# path, and every rejected receipt falls back to the ordinary selected suite.
+jobs:
+  verification-selection:
+    name: Verification selection
+    runs-on: ubuntu-latest
+    outputs:
+      selection: ${{ steps.select.outputs.selection }}
+      tested_tree_receipt: ${{ steps.receipt.outputs.tested_tree_receipt }}
+      tested_tree_reason: ${{ steps.receipt.outputs.tested_tree_reason }}
+      tested_tree_pr: ${{ steps.receipt.outputs.tested_tree_pr }}
+      tested_tree_head: ${{ steps.receipt.outputs.tested_tree_head }}
+      tested_tree_run: ${{ steps.receipt.outputs.tested_tree_run }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          fetch-depth: 0
+
+      - name: Select verification
+        id: select
+        env:
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+          PUSH_AFTER_SHA: ${{ github.sha }}
+          VERIFICATION_REQUEST: ${{ github.event.inputs.verification }}
+        run: |
+          case "${VERIFICATION_REQUEST:-}" in
+            rust-stack|go-tailnet)
+              echo "::error::manual diagnostics moved to the Manual diagnostics workflow"
+              exit 1
+              ;;
+          esac
+          scripts/ci/select/select-verification.sh
+
+      - name: Verify exact tested-tree receipt
+        id: receipt
+        env:
+          GITEA_TOKEN: ${{ github.token }}
+        run: scripts/ci/select/verify-tested-tree-receipt.sh
+
+  standard:
+    name: Standard verification
+    runs-on: ubuntu-latest
+    needs: [verification-selection]
+    steps:
+      - name: Reuse exact PR-head content verification
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt == 'accepted' }}
+        run: echo 'standard content verification inherited from the exact tested PR-head tree'
+
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go 1.26.5
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|contracts|') || contains(needs.verification-selection.outputs.selection, '|go_support|') || contains(needs.verification-selection.outputs.selection, '|sdk_go|') || contains(needs.verification-selection.outputs.selection, '|security_go|')) }}
+        run: scripts/ci/setup/setup-go.sh 1.26.5
+
+      - uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|contracts_rest|') || contains(needs.verification-selection.outputs.selection, '|go_tailnet|') || contains(needs.verification-selection.outputs.selection, '|go_consumer_interop|')) }}
+        with:
+          toolchain: stable
+
+      - name: Install pinned protoc for Rust-backed standard checks
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|contracts_rest|') || contains(needs.verification-selection.outputs.selection, '|go_tailnet|') || contains(needs.verification-selection.outputs.selection, '|go_consumer_interop|')) }}
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /tmp/protoc.zip \
+            https://github.com/protocolbuffers/protobuf/releases/download/v35.1/protoc-35.1-linux-x86_64.zip
+          echo '6930ebf62bd4ea607b98fff052596c6ee564b9835b4ce172c75a3f53ae9d91b7  /tmp/protoc.zip' \
+            | sha256sum -c -
+          rm -rf "$HOME/.proto-tools/protoc"
+          mkdir -p "$HOME/.proto-tools/protoc"
+          unzip -o -q /tmp/protoc.zip -d "$HOME/.proto-tools/protoc"
+          echo "$HOME/.proto-tools/protoc/bin" >> "$GITHUB_PATH"
+          "$HOME/.proto-tools/protoc/bin/protoc" --version
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|contracts|') || contains(needs.verification-selection.outputs.selection, '|web|')) }}
+        with:
+          bun-version: '1.3.9'
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|sdk_ts|') }}
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: libs/sdk-ts/package-lock.json
+
+      - name: Run Policy
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|policy|') }}
+        env:
+          VERIFICATION_SELECTION: ${{ needs.verification-selection.outputs.selection }}
+        run: scripts/ci/verify/run-product-verification.sh policy
+
+      - name: Run Contracts
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|contracts|') }}
+        env:
+          VERIFICATION_SELECTION: ${{ needs.verification-selection.outputs.selection }}
+          VERIFICATION_PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          VERIFICATION_PUSH_BEFORE_SHA: ${{ github.event.before }}
+        run: scripts/ci/verify/run-product-verification.sh contracts
+
+      - name: Run Go support
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|go_support|') }}
+        env:
+          VERIFICATION_SELECTION: ${{ needs.verification-selection.outputs.selection }}
+        run: scripts/ci/verify/run-product-verification.sh go-support
+
+      - name: Run Web
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|web|') }}
+        run: scripts/ci/verify/run-product-verification.sh web
+
+      - name: Run SDK Go
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|sdk_go|') }}
+        run: scripts/ci/verify/run-product-verification.sh sdk-go
+
+      - name: Run SDK TypeScript typecheck and unit suite
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|sdk_ts|') }}
+        run: scripts/ci/verify/run-product-verification.sh sdk-ts
+
+      - name: Run SDK Python
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|sdk_python|') }}
+        run: scripts/ci/verify/run-product-verification.sh sdk-python
+
+      - name: Run API key smoke tooling
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|service_apikey_smoke|') }}
+        run: scripts/ci/verify/run-product-verification.sh service-apikey-smoke
+
+      - name: Run Confidential runtime tooling
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|runtime_confidential|') }}
+        run: scripts/ci/verify/run-product-verification.sh runtime-confidential
+
+      - name: Run Release provenance
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|release|') }}
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: scripts/ci/verify/run-product-verification.sh release
+
+      - name: Run Deploy
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|deploy|') }}
+        run: scripts/ci/verify/run-product-verification.sh deploy
+
+      - name: Run Security
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|security|') }}
+        env:
+          VERIFICATION_SELECTION: ${{ needs.verification-selection.outputs.selection }}
+        run: scripts/ci/verify/run-product-verification.sh security
+
+  rust-transport:
+    name: Rust / transport verification
+    runs-on: ubuntu-latest
+    needs: [verification-selection]
+    steps:
+      - name: Reuse exact PR-head content verification
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt == 'accepted' }}
+        run: echo 'Rust and transport content verification inherited from the exact tested PR-head tree'
+
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+
+      - uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|rust|') || contains(needs.verification-selection.outputs.selection, '|rust_curated_locks|') || contains(needs.verification-selection.outputs.selection, '|transport|')) }}
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+
+      - name: Install Rust protobuf compiler
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|rust|') || contains(needs.verification-selection.outputs.selection, '|transport|')) }}
+        run: |
+          set -euo pipefail
+          if command -v protoc >/dev/null 2>&1; then protoc --version; exit 0; fi
+          if command -v sudo >/dev/null 2>&1; then APT='sudo apt-get'; else APT=apt-get; fi
+          $APT update -qq || true
+          $APT install -y -qq protobuf-compiler
+          protoc --version
+
+      - name: Verify curated Rust image workspace locks
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|rust_curated_locks|') }}
+        env:
+          VERIFICATION_SELECTION: ${{ needs.verification-selection.outputs.selection }}
+        run: scripts/ci/verify/run-product-verification.sh rust-curated-locks
+
+      - name: Set up Go 1.26.5 for DERP interop
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|transport_derp_contract|') }}
+        run: scripts/ci/setup/setup-go.sh 1.26.5
+
+      - name: Run Rust
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|rust|') }}
+        env:
+          VERIFICATION_SELECTION: ${{ needs.verification-selection.outputs.selection }}
+        run: scripts/ci/verify/run-product-verification.sh rust
+
+      - name: Run Rust transport
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|transport|') }}
+        env:
+          VERIFICATION_SELECTION: ${{ needs.verification-selection.outputs.selection }}
+        run: scripts/ci/verify/run-product-verification.sh transport
+
+  database-services:
+    name: Database / service verification
+    runs-on: ubuntu-latest
+    needs: [verification-selection]
+    steps:
+      - name: Reuse exact PR-head content verification
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt == 'accepted' }}
+        run: echo 'database and service content verification inherited from the exact tested PR-head tree'
+
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+
+      - uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|database|') || contains(needs.verification-selection.outputs.selection, '|service_integration|')) }}
+        with:
+          toolchain: stable
+
+      - name: Install integration tools
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|database|') || contains(needs.verification-selection.outputs.selection, '|service_integration|')) }}
+        run: |
+          set -euo pipefail
+          if command -v sudo >/dev/null 2>&1; then APT='sudo apt-get'; else APT=apt-get; fi
+          $APT update -qq || true
+          $APT install -y -qq ca-certificates curl jq postgresql-client protobuf-compiler
+
+      - name: Start integration Postgres
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|database|') || contains(needs.verification-selection.outputs.selection, '|service_integration|')) }}
+        run: |
+          set -euo pipefail
+          container="codewire-integration-${GITHUB_RUN_ID:?}"
+          echo "POSTGRES_CONTAINER=$container" >> "$GITHUB_ENV"
+          docker rm -f "$container" >/dev/null 2>&1 || true
+          docker run -d --name "$container" --pids-limit 2048 \
+            -e POSTGRES_USER=codewire -e POSTGRES_PASSWORD=codewire \
+            -e POSTGRES_DB=codewire -p 127.0.0.1::5432 postgres:17-alpine
+          mapping="$(docker port "$container" 5432/tcp | head -n1)"
+          echo "POSTGRES_PORT=${mapping##*:}" >> "$GITHUB_ENV"
+
+      - name: Wait for integration Postgres
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|database|') || contains(needs.verification-selection.outputs.selection, '|service_integration|')) }}
+        env:
+          PGPASSWORD: codewire
+        run: |
+          set -euo pipefail
+          for _ in $(seq 1 60); do
+            if psql -h 127.0.0.1 -p "$POSTGRES_PORT" -U codewire -d codewire -c 'select 1' >/dev/null 2>&1; then
+              echo "DATABASE_URL=postgres://codewire:codewire@127.0.0.1:${POSTGRES_PORT}/codewire?sslmode=disable" >> "$GITHUB_ENV"
+              echo "DATABASE_URL_RUST=postgres://codewire:codewire@127.0.0.1:${POSTGRES_PORT}/codewire" >> "$GITHUB_ENV"
+              base=$((62000 + ((${GITHUB_RUN_ID:-0} % 100) * 10)))
+              echo "VERIFICATION_PORT_BASE=$base" >> "$GITHUB_ENV"
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs "$POSTGRES_CONTAINER" || true
+          exit 1
+
+      - name: Run Database
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|database|') }}
+        run: scripts/ci/verify/run-integration-verification.sh database
+
+      - name: Run Service integration
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|service_integration|') }}
+        env:
+          VERIFICATION_SELECTION: ${{ needs.verification-selection.outputs.selection }}
+        run: scripts/ci/verify/run-integration-verification.sh services
+
+      - name: Stop integration Postgres
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && always() && (contains(needs.verification-selection.outputs.selection, '|database|') || contains(needs.verification-selection.outputs.selection, '|service_integration|')) }}
+        run: docker rm -f "${POSTGRES_CONTAINER:-missing}" >/dev/null 2>&1 || true
+
+  edge-kind:
+    name: Edge / Kind verification
+    runs-on: kind-e2e
+    needs: [verification-selection]
+    env:
+      KIND_CLUSTER_NAME: codewire-e2e-ci-${{ github.run_id }}
+    steps:
+      - name: Reuse exact PR-head content verification
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt == 'accepted' }}
+        run: echo 'edge and Kind content verification inherited from the exact tested PR-head tree'
+
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+
+      - name: Run Edge static verification
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|edge_kind|') }}
+        run: scripts/ci/verify/run-product-verification.sh edge
+
+      - uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|kind|') }}
+        with:
+          toolchain: stable
+
+      - name: Install Kind tools
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|kind|') }}
+        run: |
+          set -euo pipefail
+          if command -v sudo >/dev/null 2>&1; then APT='sudo apt-get'; else APT=apt-get; fi
+          $APT update -qq || true
+          $APT install -y -qq ca-certificates curl jq postgresql-client protobuf-compiler
+          mkdir -p "$HOME/.local/bin"
+          cd /tmp
+          curl -fsSLO "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl"
+          curl -fsSLO "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl.sha256"
+          echo "$(cat kubectl.sha256)  kubectl" | sha256sum -c -
+          install kubectl "$HOME/.local/bin/kubectl"
+          curl -fsSLO "https://github.com/kubernetes-sigs/kind/releases/download/${KIND_VERSION}/kind-linux-amd64"
+          curl -fsSLO "https://github.com/kubernetes-sigs/kind/releases/download/${KIND_VERSION}/kind-linux-amd64.sha256sum"
+          sha256sum -c kind-linux-amd64.sha256sum
+          install kind-linux-amd64 "$HOME/.local/bin/kind"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Run Kind
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|kind|') }}
+        run: scripts/ci/verify/kind-e2e.sh
+
+  required-verification:
+    name: Required verification
+    runs-on: ubuntu-latest
+    if: ${{ always() }}
+    needs:
+      - verification-selection
+      - standard
+      - rust-transport
+      - database-services
+      - edge-kind
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+
+      - name: Require capability groups
+        env:
+          VERIFICATION_SELECTION: ${{ needs.verification-selection.outputs.selection }}
+          VERIFICATION_SELECTION_RESULT: ${{ needs.verification-selection.result }}
+          VERIFICATION_TESTED_TREE_RECEIPT: ${{ needs.verification-selection.outputs.tested_tree_receipt }}
+          VERIFICATION_TESTED_TREE_REASON: ${{ needs.verification-selection.outputs.tested_tree_reason }}
+          VERIFICATION_TESTED_TREE_PR: ${{ needs.verification-selection.outputs.tested_tree_pr }}
+          VERIFICATION_TESTED_TREE_HEAD: ${{ needs.verification-selection.outputs.tested_tree_head }}
+          VERIFICATION_TESTED_TREE_RUN: ${{ needs.verification-selection.outputs.tested_tree_run }}
+          VERIFICATION_STANDARD_RESULT: ${{ needs.standard.result }}
+          VERIFICATION_RUST_TRANSPORT_RESULT: ${{ needs.rust-transport.result }}
+          VERIFICATION_DATABASE_SERVICES_RESULT: ${{ needs.database-services.result }}
+          VERIFICATION_EDGE_KIND_RESULT: ${{ needs.edge-kind.result }}
+        run: scripts/ci/select/require-verification-results.sh

@@ -1,0 +1,50 @@
+[package]
+name = "codewire-idp"
+version.workspace = true
+edition.workspace = true
+# Server-side crate: AGPL like the other Phase 2+ services. The OIDC
+# *mechanics* live in the dual-licensed codewire-oidc library; this service
+# is the Codewire-specific glue (Postgres stores, the session/org-gating
+# bridge, client provisioning) and stays AGPL.
+license = "AGPL-3.0"
+description = "Codewire OIDC provider service — wires the codewire-oidc library to Postgres and the Codewire session/org model."
+
+[dependencies]
+codewire-api-contract = { workspace = true }
+codewire-server-core = { workspace = true }
+codewire-oidc = { workspace = true, features = ["axum"] }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+axum = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+schemars = { workspace = true }
+sqlx = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+chrono = { workspace = true }
+base64 = { workspace = true }
+ed25519-dalek = { workspace = true }
+rand = { workspace = true }
+sha2 = { workspace = true }
+reqwest = { workspace = true }
+# bcrypt verification of confidential-client secrets, matching the Go
+# provider's bcrypt.CompareHashAndPassword (cost 10 / DefaultCost).
+bcrypt = "0.15"
+# Argon2id password hashing for credential accounts, matching the Go
+# auth.HashPassword/VerifyPassword (golang.org/x/crypto/argon2.IDKey,
+# m=65536,t=3,p=2, PHC `$argon2id$v=19$…` strings, RawStd base64). The
+# crate is wire-compatible with the Go output (verified by round-trip).
+argon2 = "0.5"
+aes-gcm = "0.10.3"
+totp-rs = { version = "5.7.2", features = ["gen_secret", "otpauth"] }
+urlencoding = "2.1.3"
+
+[dev-dependencies]
+serde_json = { workspace = true }
+# jwks first-key race regression test (db_flow) builds its throwaway
+# database URL from DATABASE_URL.
+url = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tower = { workspace = true }

@@ -1,0 +1,65 @@
+fullnameOverride: codewire-mesh
+
+image:
+  repository: git.example.invalid/codewire/mesh
+  tag: latest
+  digest: ""
+
+imagePullSecrets:
+  - name: gitea-registry
+
+# Infra owns Cluster/dev/codewire-mesh-db and CNPG generates this Secret.
+# Keep it separate from codewire-db because Mesh owns its SQLx history.
+database:
+  enabled: true
+  secretName: "codewire-mesh-db-app"
+  uriKey: "uri"
+
+mesh:
+  baseURL: https://mesh.codewire-dev.sh
+  authMode: oidc
+  authToken: ""
+  sshListen: ":2222"
+  listenAddr: "0.0.0.0:8080"
+
+oidc:
+  issuer: https://codewire-dev.sh
+  clientID: codewire-mesh-dev
+  clientSecretRef:
+    name: codewire-mesh-oidc
+    key: MESH_OIDC_CLIENT_SECRET
+    optional: true
+
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-codewire
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+  hosts:
+    - host: mesh.codewire-dev.sh
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    - hosts:
+        - mesh.codewire-dev.sh
+      secretName: mesh-codewire-dev-tls
+
+ssh:
+  service:
+    type: ClusterIP
+
+persistence:
+  enabled: true
+  size: 2Gi
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi

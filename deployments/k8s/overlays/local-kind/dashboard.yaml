@@ -1,0 +1,50 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: codewire-dashboard
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: codewire-dashboard
+  template:
+    metadata:
+      labels:
+        app: codewire-dashboard
+    spec:
+      containers:
+        - name: dashboard
+          image: codewire-dashboard:local
+          command: ["sh", "-c", "cd /app && bun run --cwd apps/dashboard dev -- --host"]
+          env:
+            - name: DASHBOARD_API_PROXY_TARGET
+              value: "http://ingress-nginx-controller.ingress-nginx.svc.cluster.local"
+            - name: VITE_RESOURCE_BASE_DOMAIN
+              value: "codewire-dev.sh"
+          ports:
+            - containerPort: 5173
+          volumeMounts:
+            - name: dashboard-source
+              mountPath: /app/apps/dashboard
+            - name: types-source
+              mountPath: /app/packages/codewire-types
+      volumes:
+        - name: dashboard-source
+          hostPath:
+            path: /src/codewire/apps/dashboard
+            type: Directory
+        - name: types-source
+          hostPath:
+            path: /src/codewire/packages/codewire-types
+            type: Directory
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dashboard
+spec:
+  selector:
+    app: codewire-dashboard
+  ports:
+    - port: 5173
+      targetPort: 5173

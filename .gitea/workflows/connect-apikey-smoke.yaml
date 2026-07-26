@@ -1,0 +1,186 @@
+name: Connect ApiKey Lifecycle Smoke
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Fixed Codewire target
+        required: true
+        type: choice
+        options:
+          - dev
+          - prod
+          - prod-evidence
+      production_confirmation:
+        description: For prod enter RUN APIKEY PROD SMOKE; for evidence enter RUN APIKEY PROD EVIDENCE
+        required: false
+        type: string
+      release_tag:
+        description: Exact signed vX.Y.Z CLI release; required only for prod-evidence
+        required: false
+        type: string
+
+concurrency:
+  group: connect-apikey-production-fixtures
+  cancel-in-progress: false
+
+jobs:
+  smoke:
+    name: Connect ApiKey lifecycle (${{ inputs.target }})
+    runs-on: ubuntu-latest
+    env:
+      SMOKE_TARGET: ${{ inputs.target }}
+      PRODUCTION_CONFIRMATION: ${{ inputs.production_confirmation }}
+      RELEASE_TAG: ${{ inputs.release_tag }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          fetch-depth: 0
+
+      - name: Validate fixed target and production opt-in
+        run: |
+          set -euo pipefail
+          case "$SMOKE_TARGET" in
+            dev)
+              test -z "$RELEASE_TAG"
+              ;;
+            prod)
+              test "$PRODUCTION_CONFIRMATION" = 'RUN APIKEY PROD SMOKE'
+              test -z "$RELEASE_TAG"
+              ;;
+            prod-evidence)
+              test "$PRODUCTION_CONFIRMATION" = 'RUN APIKEY PROD EVIDENCE'
+              [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+              ;;
+            *)
+              echo "target must be dev, prod, or prod-evidence" >&2
+              exit 1
+              ;;
+          esac
+          if [ "$SMOKE_TARGET" != dev ]; then
+              test "$GITHUB_REF" = 'refs/heads/main'
+              origin_url="$(git remote get-url origin)"
+              case "$origin_url" in
+                https://git.example.invalid/codewire/codewire|https://git.example.invalid/codewire/codewire.git|ssh://git@git.example.invalid/codewire/codewire.git|git@git.example.invalid:codewire/codewire.git) ;;
+                *) echo "origin is not canonical Gitea" >&2; exit 1 ;;
+              esac
+              git fetch --no-tags origin main
+              test "$(git rev-parse HEAD)" = "$(git rev-parse refs/remotes/origin/main)"
+          fi
+
+      - uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b
+        if: ${{ inputs.target != 'prod-evidence' }}
+        with:
+          toolchain: stable
+
+      - name: Install protoc (pinned)
+        if: ${{ inputs.target != 'prod-evidence' }}
+        run: |
+          set -euo pipefail
+          # Keep version + checksum in lockstep with Makefile's
+          # PROTOC_VERSION / PROTOC_SHA256_LINUX_X86_64, CI, and cli-release.
+          curl -fsSL -o /tmp/protoc.zip "https://github.com/protocolbuffers/protobuf/releases/download/v35.1/protoc-35.1-linux-x86_64.zip"
+          echo "6930ebf62bd4ea607b98fff052596c6ee564b9835b4ce172c75a3f53ae9d91b7  /tmp/protoc.zip" | sha256sum -c -
+          mkdir -p "$HOME/.proto-tools/protoc"
+          unzip -o -q /tmp/protoc.zip -d "$HOME/.proto-tools/protoc"
+          echo "$HOME/.proto-tools/protoc/bin" >> "$GITHUB_PATH"
+          "$HOME/.proto-tools/protoc/bin/protoc" --version
+
+      - name: Build locked current cw
+        if: ${{ inputs.target != 'prod-evidence' }}
+        run: |
+          set -euo pipefail
+          command -v curl >/dev/null
+          command -v jq >/dev/null
+          mkdir -p "$GITHUB_WORKSPACE/.tmp"
+          cargo build --locked --profile ci -p codewire-cli-bin --bin cw
+          install -m 0755 target/ci/cw "$GITHUB_WORKSPACE/.tmp/cw-apikey-smoke"
+          "$GITHUB_WORKSPACE/.tmp/cw-apikey-smoke" --version
+
+      - name: Download and verify exact signed release CLI
+        if: ${{ inputs.target == 'prod-evidence' }}
+        id: release
+        env:
+          GITEA_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test -n "$GITEA_TOKEN"
+          for command in curl gpg jq sha256sum; do
+            command -v "$command" >/dev/null
+          done
+          work="$(mktemp -d)"
+          trap 'rm -rf "$work"' EXIT
+          chmod 0700 "$work"
+
+          remote_refs="$(git ls-remote --tags origin \
+            "refs/tags/${RELEASE_TAG}" "refs/tags/${RELEASE_TAG}^{}")"
+          remote_object_sha="$(printf '%s\n' "$remote_refs" | awk -v ref="refs/tags/${RELEASE_TAG}" '$2 == ref { print $1 }')"
+          remote_peeled_sha="$(printf '%s\n' "$remote_refs" | awk -v ref="refs/tags/${RELEASE_TAG}^{}" '$2 == ref { print $1 }')"
+          git fetch --no-tags origin \
+            "+refs/heads/main:refs/remotes/origin/main" \
+            "+refs/tags/${RELEASE_TAG}:refs/tags/${RELEASE_TAG}"
+          canonical_main_sha="$(git rev-parse refs/remotes/origin/main)"
+          test "$(git rev-parse HEAD)" = "$canonical_main_sha"
+          scripts/ci/release/verify-release-tag-ref.sh \
+            workflow_dispatch "$GITHUB_REF" "$GITHUB_REF_NAME" "$RELEASE_TAG" \
+            "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$remote_peeled_sha" \
+            "$remote_object_sha" "$remote_peeled_sha" "$canonical_main_sha"
+
+          auth_config="$work/gitea.curl"
+          token="$GITEA_TOKEN"
+          unset GITEA_TOKEN
+          umask 077
+          printf 'header = "Authorization: token %s"\n' "$token" >"$auth_config"
+          token=""
+          unset token
+
+          release_json="$work/release.json"
+          release_api="${GITHUB_SERVER_URL%/}/api/v1/repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}"
+          curl --config "$auth_config" --fail --location --silent --show-error \
+            --url "$release_api" --output "$release_json"
+          test "$(jq -er '.tag_name' "$release_json")" = "$RELEASE_TAG"
+          test "$(jq -er '.target_commitish' "$release_json")" = "$remote_peeled_sha"
+
+          binary="cw-${RELEASE_TAG}-x86_64-unknown-linux-musl"
+          for asset in SHA256SUMS SHA256SUMS.asc "$binary"; do
+            asset_url="$(jq -er --arg name "$asset" \
+              '[.assets[] | select(.name == $name)] | if length == 1 then .[0].browser_download_url else error("asset cardinality") end' \
+              "$release_json")"
+            case "$asset_url" in
+              "${GITHUB_SERVER_URL%/}/${GITHUB_REPOSITORY}/releases/download/${RELEASE_TAG}/"*) ;;
+              *) echo "release asset URL escaped canonical Gitea" >&2; exit 1 ;;
+            esac
+            curl --config "$auth_config" --fail --location --silent --show-error \
+              --url "$asset_url" --output "$work/$asset"
+          done
+
+          export GNUPGHOME="$work/gnupg"
+          mkdir -m 0700 "$GNUPGHOME"
+          gpg --batch --quiet --import apps/cli/GPG_PUBLIC_KEY.asc
+          gpg --batch --verify "$work/SHA256SUMS.asc" "$work/SHA256SUMS"
+          grep -E "^[0-9a-f]{64}  ${binary}$" "$work/SHA256SUMS" >"$work/expected"
+          test "$(wc -l < "$work/expected")" -eq 1
+          (cd "$work" && sha256sum --check expected)
+
+          mkdir -p "$GITHUB_WORKSPACE/.tmp"
+          install -m 0755 "$work/$binary" "$GITHUB_WORKSPACE/.tmp/cw-apikey-evidence"
+          test "$("$GITHUB_WORKSPACE/.tmp/cw-apikey-evidence" --version)" = "cw $RELEASE_TAG"
+          printf 'source_sha=%s\n' "$remote_peeled_sha" >> "$GITHUB_OUTPUT"
+
+      - name: Run target-scoped lifecycle with short-lived secret
+        if: ${{ inputs.target != 'prod-evidence' }}
+        run: |
+          set -euo pipefail
+          CW_BIN="$GITHUB_WORKSPACE/.tmp/cw-apikey-smoke" \
+            scripts/runtime/apikey/with-apikey-smoke-auth.sh \
+              --target "$SMOKE_TARGET" -- \
+              scripts/runtime/apikey/smoke-apikey-lifecycle.sh --target "$SMOKE_TARGET"
+
+      - name: Run fixed two-principal G4 evidence sequence
+        if: ${{ inputs.target == 'prod-evidence' }}
+        run: |
+          set -euo pipefail
+          CW_BIN="$GITHUB_WORKSPACE/.tmp/cw-apikey-evidence" \
+            scripts/runtime/apikey/run-apikey-g4-evidence.sh \
+              --release-tag "$RELEASE_TAG" \
+              --confirm 'RUN APIKEY PROD EVIDENCE'

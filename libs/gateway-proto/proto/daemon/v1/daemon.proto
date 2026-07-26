@@ -1,0 +1,344 @@
+syntax = "proto3";
+
+package daemon.v1;
+
+import "google/protobuf/empty.proto";
+import "google/protobuf/timestamp.proto";
+
+service DaemonService {
+  rpc GetCapabilities(GetCapabilitiesRequest) returns (GetCapabilitiesResponse);
+  rpc GetHealth(GetHealthRequest) returns (GetHealthResponse);
+
+  rpc LaunchSession(LaunchSessionRequest) returns (LaunchSessionResponse);
+  rpc ListSessions(ListSessionsRequest) returns (ListSessionsResponse);
+  rpc GetSession(GetSessionRequest) returns (GetSessionResponse);
+  rpc StopSession(StopSessionRequest) returns (StopSessionResponse);
+  rpc RestartSession(RestartSessionRequest) returns (RestartSessionResponse);
+  rpc ReadSessionOutput(ReadSessionOutputRequest) returns (ReadSessionOutputResponse);
+  rpc AttachSession(stream SessionAttachMessage) returns (stream SessionAttachMessage);
+
+  rpc ExecSession(stream ExecMessage) returns (stream ExecMessage);
+  rpc PtySession(stream PtyMessage) returns (stream PtyMessage);
+
+  rpc List(ListRequest) returns (ListResponse);
+  rpc Stat(StatRequest) returns (StatResponse);
+  rpc OpenFile(OpenFileRequest) returns (OperationStatus);
+  rpc Read(ReadRequest) returns (ReadResponse);
+  rpc Write(WriteRequest) returns (WriteResponse);
+  rpc Mkdir(MkdirRequest) returns (OperationStatus);
+  rpc Remove(RemoveRequest) returns (OperationStatus);
+  rpc Rename(RenameRequest) returns (OperationStatus);
+  rpc SetStat(SetStatRequest) returns (OperationStatus);
+  rpc Readlink(ReadlinkRequest) returns (ReadlinkResponse);
+}
+
+enum DaemonState {
+  DAEMON_STATE_UNSPECIFIED = 0;
+  DAEMON_STATE_UNSUPPORTED = 1;
+  DAEMON_STATE_STARTING = 2;
+  DAEMON_STATE_READY = 3;
+  DAEMON_STATE_UNHEALTHY = 4;
+  DAEMON_STATE_UPGRADE_REQUIRED = 5;
+}
+
+enum SessionLifecycleState {
+  SESSION_LIFECYCLE_STATE_UNSPECIFIED = 0;
+  SESSION_LIFECYCLE_STATE_STARTING = 1;
+  SESSION_LIFECYCLE_STATE_RUNNING = 2;
+  SESSION_LIFECYCLE_STATE_STOPPING = 3;
+  SESSION_LIFECYCLE_STATE_STOPPED = 4;
+  SESSION_LIFECYCLE_STATE_EXITED = 5;
+  SESSION_LIFECYCLE_STATE_FAILED = 6;
+  SESSION_LIFECYCLE_STATE_INTERRUPTED = 7;
+}
+
+enum SessionOutputStream {
+  SESSION_OUTPUT_STREAM_UNSPECIFIED = 0;
+  SESSION_OUTPUT_STREAM_STDOUT = 1;
+  SESSION_OUTPUT_STREAM_STDERR = 2;
+  SESSION_OUTPUT_STREAM_PTY = 3;
+}
+
+message GetCapabilitiesRequest {
+  // Zero performs discovery without requiring a particular protocol version.
+  uint32 protocol_version = 1;
+  repeated string required_capabilities = 2;
+}
+
+message GetCapabilitiesResponse {
+  uint32 protocol_version = 1;
+  uint32 minimum_protocol_version = 2;
+  string daemon_version = 3;
+  repeated string capabilities = 4;
+  DaemonState state = 5;
+  string message = 6;
+}
+
+message GetHealthRequest {}
+
+message HealthDiagnostic {
+  string name = 1;
+  bool healthy = 2;
+  string message = 3;
+}
+
+message GetHealthResponse {
+  DaemonState state = 1;
+  string message = 2;
+  repeated HealthDiagnostic diagnostics = 3;
+}
+
+message SessionRecord {
+  // Stable opaque identity assigned once at launch.
+  string session_id = 1;
+  SessionLifecycleState state = 2;
+  repeated string command = 3;
+  string working_dir = 4;
+  bool pty = 5;
+  google.protobuf.Timestamp created_at = 6;
+  google.protobuf.Timestamp started_at = 7;
+  google.protobuf.Timestamp finished_at = 8;
+  optional int32 exit_code = 9;
+  uint64 output_end_offset = 10;
+  string status_message = 11;
+}
+
+message LaunchSessionRequest {
+  repeated string command = 1;
+  string working_dir = 2;
+  repeated string env = 3;
+  bool pty = 4;
+  string term = 5;
+  int32 width = 6;
+  int32 height = 7;
+}
+
+message LaunchSessionResponse {
+  SessionRecord session = 1;
+}
+
+message ListSessionsRequest {}
+
+message ListSessionsResponse {
+  repeated SessionRecord sessions = 1;
+}
+
+message GetSessionRequest {
+  string session_id = 1;
+}
+
+message GetSessionResponse {
+  SessionRecord session = 1;
+}
+
+message StopSessionRequest {
+  string session_id = 1;
+}
+
+message StopSessionResponse {
+  SessionRecord session = 1;
+}
+
+message RestartSessionRequest {
+  string session_id = 1;
+}
+
+message RestartSessionResponse {
+  SessionRecord session = 1;
+}
+
+message ReadSessionOutputRequest {
+  string session_id = 1;
+  uint64 offset = 2;
+  uint64 limit = 3;
+}
+
+message SessionOutputChunk {
+  uint64 offset = 1;
+  uint64 next_offset = 2;
+  SessionOutputStream stream = 3;
+  bytes data = 4;
+}
+
+message ReadSessionOutputResponse {
+  repeated SessionOutputChunk chunks = 1;
+  uint64 next_offset = 2;
+  bool eof = 3;
+}
+
+message AttachSessionRequest {
+  string session_id = 1;
+  uint64 output_offset = 2;
+}
+
+message DetachSessionRequest {
+  string session_id = 1;
+}
+
+message SessionInput {
+  bytes data = 1;
+}
+
+message SessionStatus {
+  string session_id = 1;
+  SessionLifecycleState state = 2;
+  optional int32 exit_code = 3;
+  uint64 output_end_offset = 4;
+  string message = 5;
+}
+
+message SessionAttachMessage {
+  oneof payload {
+    AttachSessionRequest attach = 1;
+    SessionInput input = 2;
+    ResizeRequest resize = 3;
+    DetachSessionRequest detach = 4;
+    SessionOutputChunk output = 5;
+    SessionStatus status = 6;
+  }
+}
+
+message ExecStartRequest {
+  repeated string command = 1;
+  string working_dir = 2;
+  repeated string env = 3;
+}
+
+message PtyStartRequest {
+  repeated string command = 1;
+  string working_dir = 2;
+  repeated string env = 3;
+  string term = 4;
+  int32 width = 5;
+  int32 height = 6;
+}
+
+message ResizeRequest {
+  int32 width = 1;
+  int32 height = 2;
+}
+
+message ExitStatus {
+  int32 code = 1;
+}
+
+message ExecMessage {
+  oneof payload {
+    ExecStartRequest start = 1;
+    bytes stdin = 2;
+    bytes stdout = 3;
+    bytes stderr = 4;
+    ExitStatus exit = 5;
+    google.protobuf.Empty close_stdin = 6;
+    string error = 7;
+  }
+}
+
+message PtyMessage {
+  oneof payload {
+    PtyStartRequest start = 1;
+    bytes stdin = 2;
+    bytes stdout = 3;
+    bytes stderr = 4;
+    ResizeRequest resize = 5;
+    ExitStatus exit = 6;
+    google.protobuf.Empty close_stdin = 7;
+    string error = 8;
+  }
+}
+
+message FileOpenOptions {
+  bool read = 1;
+  bool write = 2;
+  bool append = 3;
+  bool create = 4;
+  bool truncate = 5;
+  bool exclusive = 6;
+}
+
+message FileMetadata {
+  string name = 1;
+  string path = 2;
+  int64 size = 3;
+  uint32 mode = 4;
+  google.protobuf.Timestamp mod_time = 5;
+  string link_target = 6;
+}
+
+message OperationStatus {
+  string status = 1;
+}
+
+message ListRequest {
+  string path = 1;
+}
+
+message ListResponse {
+  repeated FileMetadata entries = 1;
+}
+
+message StatRequest {
+  string path = 1;
+  bool follow = 2;
+}
+
+message StatResponse {
+  FileMetadata entry = 1;
+}
+
+message OpenFileRequest {
+  string path = 1;
+  FileOpenOptions options = 2;
+  uint32 perm = 3;
+}
+
+message ReadRequest {
+  string path = 1;
+  int64 offset = 2;
+  int64 length = 3;
+}
+
+message ReadResponse {
+  bytes data = 1;
+}
+
+message WriteRequest {
+  string path = 1;
+  int64 offset = 2;
+  bytes data = 3;
+}
+
+message WriteResponse {
+  int64 bytes_written = 1;
+}
+
+message MkdirRequest {
+  string path = 1;
+  uint32 perm = 2;
+}
+
+message RemoveRequest {
+  string path = 1;
+  bool dir = 2;
+}
+
+message RenameRequest {
+  string old_path = 1;
+  string new_path = 2;
+}
+
+message SetStatRequest {
+  string path = 1;
+  optional int64 size = 2;
+  optional uint32 mode = 3;
+  google.protobuf.Timestamp access_time = 4;
+  google.protobuf.Timestamp mod_time = 5;
+}
+
+message ReadlinkRequest {
+  string path = 1;
+}
+
+message ReadlinkResponse {
+  string target = 1;
+}

@@ -1,0 +1,88 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: codewire-idp
+  namespace: prod
+  labels:
+    app.kubernetes.io/name: codewire
+    app.kubernetes.io/component: idp
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: codewire
+      app.kubernetes.io/component: idp
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: codewire
+        app.kubernetes.io/component: idp
+    spec:
+      imagePullSecrets:
+        - name: gitea-registry
+      containers:
+        - name: idp
+          # The Rust OIDC provider. Runs from the shared codewire/services
+          # image (one image, many entrypoints) — the codewire-idp binary is
+          # selected by `command`. Shares the jwks / sessions /
+          # oidc_refresh_tokens / oidc_clients tables with the retired Go
+          # provider, so the cutover preserves keys/sessions/tokens and
+          # rollback is a one-line image revert.
+          image: git.example.com/codewire/services:latest
+          command: ["/codewire-idp"]
+          ports:
+            - containerPort: 8091
+              name: http
+          envFrom:
+            - configMapRef:
+                name: codewire-config
+            - secretRef:
+                name: codewire-secrets
+          env:
+            - name: IDP_PORT
+              value: "8091"
+            - name: IDP_SIGNING_KEK_DIR
+              value: /var/run/secrets/codewire/idp-signing-keks
+            - name: IDP_SIGNING_ACTIVE_KEK_ID
+              value: v1
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: codewire-db-app
+                  key: password
+          volumeMounts:
+            - name: idp-signing-keks
+              mountPath: /var/run/secrets/codewire/idp-signing-keks
+              readOnly: true
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+      volumes:
+        - name: idp-signing-keks
+          secret:
+            secretName: codewire-idp-signing-keks

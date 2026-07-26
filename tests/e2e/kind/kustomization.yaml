@@ -1,0 +1,203 @@
+# kind e2e overlay: deploys the REAL billing, orchestration, and coordinator
+# manifests into the codewire-e2e namespace with only the minimum patched —
+# side-loaded image, replica count, and disposable-cluster service wiring.
+# The config/secret objects the deployments reference are provided by
+# support.yaml rather than patched out, so what runs here is what ships.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: codewire-e2e
+
+resources:
+  - namespace.yaml
+  - ../../../deployments/k8s/billing
+  - ../../../deployments/k8s/orchestration
+  - ../../../deployments/k8s/coordinator
+  - postgres.yaml
+  - db-migrate-job.yaml
+  - temporal.yaml
+  - support.yaml
+  - ingress.yaml
+  - orchestration-nodeport.yaml
+  - coordinator-nodeport.yaml
+
+patches:
+  - target:
+      kind: Deployment
+      name: codewire-orchestration
+    # Strategic-merge (keyed by container/env name) so it's robust to env
+    # ordering — the prior JSON6902 index patches broke when the NATS env
+    # vars were removed (D3, #150). NATS is gone; the only overrides the e2e
+    # needs are the in-cluster temporal host and the sandbox wiring.
+    patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: codewire-orchestration
+      spec:
+        template:
+          spec:
+            containers:
+              - name: orchestration
+                image: codewire-services:e2e
+                imagePullPolicy: Never
+                env:
+                  # Override the base temporal-system host with the in-cluster
+                  # e2e temporal service (temporal.yaml).
+                  - name: TEMPORAL_HOST_PORT
+                    value: "temporal:7233"
+                  # Enables the HTTP create/stop/start triggers (SignalWithStart);
+                  # the e2e's codewire-config doesn't carry it.
+                  - name: ENVIRONMENT_ORCHESTRATOR
+                    value: temporal-primary
+                  # Points the create activity's claims at codewire-e2e, where the
+                  # agent-sandbox controller reconciles.
+                  - name: SANDBOX_NAMESPACE
+                    value: dev-sandboxes
+                  # kind e2e validates orchestration/reconciler behavior on a
+                  # single local cluster; it does not prove sandbox isolation.
+                  # Keep the runtime path explicitly diagnostic so production
+                  # manifests can reject managed runc by default.
+                  - name: SANDBOX_RUNTIME_PROFILE
+                    value: runc
+                  - name: SANDBOX_RUNTIME_CLASS
+                    value: runc
+                  - name: SANDBOX_ALLOW_DIAGNOSTIC_RUNTIME
+                    value: "true"
+                  # Workspace pod's gateway container = the kind-loaded Rust image (the
+                  # default git.example.com/codewire/gateway:latest is unpullable
+                  # in kind → ImagePullBackOff → env never reaches running).
+                  - name: SANDBOX_GATEWAY_IMAGE
+                    value: codewire-gateway:e2e
+                  # Warm-pool reconciler config (#137). A SINGLE small profile so
+                  # exactly one pre-warmed pod is provisioned and it fits the one
+                  # 2-vCPU runner node alongside postgres/temporal/billing/
+                  # orchestration/ingress (the default profiles —
+                  # 1000m/2048Mi×2 + 2000m/4096Mi×2 — can't schedule here). The
+                  # format is cpuMillicores:memoryMiB:diskGiB:replicas
+                  # (worker/create.rs parse_canonical_full_warm_pool_profiles).
+                  # 500:1024:5:1 yields the non-default-SKU warm template name
+                  # `workspace-500m-1024mib-5gib`
+                  # (canonical_full_warm_pool_template_name); the warm-pool claim
+                  # e2e creates an env at this EXACT SKU so environment_claim_opts
+                  # (worker/create.rs) matches the profile and points the claim
+                  # at that shared warm template — the WARM path, as opposed to
+                  # the digest-image COLD path the env-lifecycle e2e uses.
+                  - name: SANDBOX_FULL_WARM_PROFILES
+                    value: "500:1024:5:1"
+                  # Mount the Connect conformance probe (docs/plans/
+                  # connect-rpc/03 D8) — kind/e2e manifests only, never
+                  # base or production.
+                  - name: CONNECT_TESTING_SURFACE
+                    value: "1"
+
+  - target:
+      kind: Deployment
+      name: codewire-billing
+    patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 1
+      - op: replace
+        path: /spec/template/spec/containers/0/image
+        value: codewire-services:e2e
+      - op: add
+        path: /spec/template/spec/containers/0/imagePullPolicy
+        value: Never
+  - target:
+      kind: Deployment
+      name: codewire-billing
+    # Override the base temporal-system host (codewire-config) with the
+    # in-cluster e2e temporal service so the #38 org-teardown worker
+    # connects here, same as the orchestration patch above. Strategic-merge
+    # (keyed by container/env name) so it's robust to env ordering.
+    patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: codewire-billing
+      spec:
+        template:
+          spec:
+            containers:
+              - name: billing
+                env:
+                  - name: TEMPORAL_HOST_PORT
+                    value: "temporal:7233"
+                  # Mount the Connect conformance probe (docs/plans/
+                  # connect-rpc/03 D8) — kind/e2e manifests only, never
+                  # base or production.
+                  - name: CONNECT_TESTING_SURFACE
+                    value: "1"
+  - target:
+      kind: Deployment
+      name: codewire-coordinator
+    patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: codewire-coordinator
+      spec:
+        replicas: 1
+        template:
+          spec:
+            containers:
+              - name: coordinator
+                image: codewire-services:e2e
+                imagePullPolicy: Never
+
+transformers:
+  - |-
+    apiVersion: builtin
+    kind: PatchTransformer
+    metadata:
+      name: codewire-sandbox-dev-sandboxes
+    patch: |-
+      - op: replace
+        path: /metadata/namespace
+        value: dev-sandboxes
+    target:
+      version: v1
+      kind: ServiceAccount
+      name: codewire-sandbox
+  - |-
+    apiVersion: builtin
+    kind: PatchTransformer
+    metadata:
+      name: codewire-orchestration-gateway-host-key-dev-sandboxes
+    patch: |-
+      - op: replace
+        path: /metadata/namespace
+        value: dev-sandboxes
+    target:
+      group: rbac.authorization.k8s.io
+      version: v1
+      kind: Role|RoleBinding
+      name: codewire-orchestration-gateway-host-key
+  - |-
+    apiVersion: builtin
+    kind: PatchTransformer
+    metadata:
+      name: codewire-orchestration-gateway-host-key-codewire-e2e-subject
+    patch: |-
+      - op: replace
+        path: /subjects/0/namespace
+        value: codewire-e2e
+    target:
+      group: rbac.authorization.k8s.io
+      version: v1
+      kind: RoleBinding
+      name: codewire-orchestration-gateway-host-key
+  - |-
+    apiVersion: builtin
+    kind: PatchTransformer
+    metadata:
+      name: codewire-orchestration-gateway-host-key-admission-cluster-scope
+    patch: |-
+      - op: remove
+        path: /metadata/namespace
+    target:
+      group: admissionregistration.k8s.io
+      version: v1
+      kind: ValidatingAdmissionPolicy|ValidatingAdmissionPolicyBinding
+      name: codewire-orchestration-gateway-host-key

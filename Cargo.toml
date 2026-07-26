@@ -1,0 +1,222 @@
+[workspace]
+resolver = "2"
+# The root workspace is for server/runtime/shared crates. Desktop app crates
+# are excluded so non-desktop Cargo commands never resolve GPUI/font-kit.
+members = [
+    "crates/codewire-api-contract",
+    "crates/codewire-api-types",
+    "crates/codewire-billing",
+    "crates/codewire-client",
+    "crates/codewire-coordinator",
+    "crates/codewire-core",
+    "crates/codewire-daemon",
+    "crates/codewire-derp",
+    "crates/codewire-gateway",
+    "crates/codewire-gateway-proto",
+    "crates/codewire-idp",
+    "crates/codewire-cli",
+    "crates/codewire-cli-bin",
+    "crates/codewire-mesh",
+    "crates/codewire-network-auth",
+    "crates/codewire-oidc",
+    "crates/codewire-orchestration",
+    "crates/codewire-proto",
+    "crates/codewire-server-core",
+    "crates/codewire-tailnet",
+    "crates/codewire-types",
+    "crates/codewire-udp-relay",
+]
+exclude = [
+    "crates/codewire-desktop",
+    "crates/codewire-platform-native",
+    "crates/codewire-ui",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+authors = ["Sonica"]
+
+[workspace.dependencies]
+# Internal crates
+codewire-api-types = { path = "crates/codewire-api-types" }
+codewire-api-contract = { path = "crates/codewire-api-contract" }
+codewire-client = { path = "crates/codewire-client" }
+codewire-types = { path = "crates/codewire-types" }
+codewire-core = { path = "crates/codewire-core" }
+codewire-server-core = { path = "crates/codewire-server-core" }
+codewire-oidc = { path = "crates/codewire-oidc" }
+codewire-gateway-proto = { path = "crates/codewire-gateway-proto" }
+# default-features = false so server crates can consume the generated
+# message/service types without the Connect HTTP client stack; test/client
+# consumers opt back in with `features = ["client"]`.
+codewire-proto = { path = "crates/codewire-proto", default-features = false }
+codewire-daemon = { path = "crates/codewire-daemon" }
+codewire-derp = { path = "crates/codewire-derp" }
+codewire-tailnet = { path = "crates/codewire-tailnet" }
+codewire-network-auth = { path = "crates/codewire-network-auth" }
+codewire-udp-relay = { path = "crates/codewire-udp-relay" }
+
+# FFI
+uniffi = "0.31"
+
+# AI/HTTP
+reqwest = { version = "0.12", default-features = false, features = ["http2", "json", "stream", "rustls-tls"] }
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+futures = "0.3"
+
+# SSH
+russh = "0.61"
+russh-sftp = "2"
+
+# Terminal emulation
+alacritty_terminal = "0.25"
+portable-pty = "0.9"
+
+# Async utilities
+async-trait = "0.1"
+thiserror = "2"
+anyhow = "1"
+clap = { version = "4", default-features = false, features = ["derive", "error-context", "help", "std", "usage"] }
+clap_complete = "4"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Time
+chrono = { version = "0.4", default-features = false, features = ["now", "serde", "std"] }
+
+# UUID
+uuid = { version = "1", features = ["v4", "serde"] }
+
+# Filesystem
+dirs = "5"
+filetime = "0.2"
+
+# OAuth & Keychain
+keyring = "3"
+tiny_http = "0.12"
+open = "5"
+
+# Crypto
+sha2 = "0.10"
+hmac = "0.12"
+subtle = "=2.6.1"
+base64 = "0.22"
+flate2 = "1"
+crc32fast = "1"
+shell-words = "1"
+ed25519-dalek = "2"
+rand = "0.8"
+ssh-key = { version = "0.7.0-rc.10", features = ["ed25519"] }
+
+# Bytes for streaming
+bytes = "1"
+prost = "0.14"
+prost-types = "0.14"
+prost-build = "0.14"
+tonic = "0.14"
+tonic-prost = "0.14"
+tonic-prost-build = "0.14"
+tokio-stream = { version = "0.1", features = ["net"] }
+
+# Connect-RPC (client-facing contract; docs/plans/connect-rpc/). Pre-1.0 —
+# pinned exact on purpose; bump deliberately, never via `cargo update`.
+connectrpc = { git = "https://github.com/connectrpc/connect-rust.git", rev = "4da239d7a18b7dfeb40002b00f1f37e93891db17" }
+connectrpc-build = "=0.8.0"
+buffa = { version = "=0.8.1", features = ["json"] }
+buffa-types = { version = "=0.8.1", features = ["json"] }
+
+# ---------------------------------------------------------------------------
+# Server-side stack (used by codewire-server-core and the Phase 2+ services)
+# ---------------------------------------------------------------------------
+# HTTP framework. axum is the same Tokio/hyper-based framework the
+# Phase 0 design discussion identified as the canonical Rust analog of
+# huma+chi.
+# http2 is deliberate: Connect/gRPC h2c prior-knowledge on the service
+# listeners (docs/plans/connect-rpc/03-connect-server-infrastructure.md D2).
+axum = { version = "0.8", features = ["macros", "json", "http2"] }
+tower = { version = "0.5", features = ["util"] }
+tower-http = { version = "0.6", features = ["trace", "request-id", "cors", "catch-panic"] }
+hyper = "1"
+hyper-util = { version = "=0.1.20", features = ["server-auto", "server-graceful", "tokio"] }
+http = "1"
+http-body-util = "=0.1.3"
+
+# Database. sqlx-postgres + tokio runtime mirrors what pgx/pgxpool gives
+# Go services. macros + json so we can use query!/query_as! at compile time.
+sqlx = { version = "0.8", default-features = false, features = ["postgres", "runtime-tokio-rustls", "macros", "migrate", "json", "uuid", "chrono"] }
+
+# NATS (replaces nats-io/nats.go).
+async-nats = "0.39"
+
+# Stripe (replaces stripe/stripe-go). The 1.0 rework of async-stripe —
+# NOT the unmaintained 0.x line — split into a client crate plus
+# per-API resource crates; core carries the Customer endpoints the
+# billing overview needs. rustls to match the rest of the stack.
+async-stripe = { version = "1.0.0-rc.6", default-features = false, features = ["rustls-ring", "rustls-tls-webpki-roots"] }
+async-stripe-core = { version = "1.0.0-rc.6", features = ["customer", "setup_intent"] }
+async-stripe-checkout = { version = "1.0.0-rc.6", features = ["checkout_session"] }
+async-stripe-billing = { version = "1.0.0-rc.6", features = ["billing_portal_session", "subscription", "subscription_item", "invoice_item", "invoice"] }
+async-stripe-shared = "1.0.0-rc.6"
+async-stripe-webhook = "1.0.0-rc.6"
+async-stripe-types = "1.0.0-rc.6"
+
+# Temporal (replaces go.temporal.io/sdk for the environment workflow,
+# #36 Stage D). Prerelease SDK; pinned exactly.
+temporalio-sdk = "=0.4.0"
+temporalio-client = "=0.4.0"
+temporalio-macros = "=0.4.0"
+temporalio-sdk-core = "=0.4.0"
+temporalio-common = "=0.4.0"
+url = "2"
+
+# Kubernetes (replaces client-go in internal/sandbox). rustls to match
+# the stack; latest-supported k8s version feature. "ws" is required for
+# the pod exec/port-forward subresources the worker uses during
+# environment setup.
+kube = { version = "3", default-features = false, features = ["client", "rustls-tls", "ws"] }
+k8s-openapi = { version = "0.27", features = ["latest"] }
+
+# Rust-owned request schemas and boundary validation.
+schemars = { version = "1", features = ["derive"] }
+jsonschema = { version = "0.46.6", default-features = false }
+
+# OpenTelemetry — server-core wires this up so every Rust service has
+# distributed tracing out of the box (a capability the Go services
+# currently lack).
+opentelemetry = "0.27"
+opentelemetry_sdk = { version = "0.27", features = ["rt-tokio"] }
+opentelemetry-otlp = { version = "0.27", features = ["grpc-tonic", "trace"] }
+tracing-opentelemetry = "0.28"
+
+# Auth — JWT signing and ID-token verification. Used by codewire-server-core
+# for the bearer-token validator and by the eventual Rust IdP (Phase 3).
+jsonwebtoken = "9"
+
+# Config & misc
+serde_yaml = "0.9"
+toml = "1"
+
+# Testing
+tempfile = "3"
+wiremock = "=0.6.5"
+
+# Embedded web browser
+wry = "0.54"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+
+# CI/dev-drill profile: release semantics without LTO or single-unit
+# codegen — host-built test binaries in CI use this (shipped images
+# still build the real release profile via the Dockerfiles).
+[profile.ci]
+inherits = "release"
+lto = false
+codegen-units = 16
+strip = false

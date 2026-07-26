@@ -1,0 +1,250 @@
+name: Release cw CLI
+
+on:
+  push:
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+    paths:
+      - '.gitea/workflows/cli-release.yaml'
+      - 'scripts/ci/release/verify-release-tag-ref.sh'
+      - 'scripts/ci/tests/test-verify-release-tag-ref.sh'
+      - 'scripts/ci/tests/test-cw-install-signature.sh'
+      - 'scripts/ci/tests/test-publish-cw-release.sh'
+      - 'scripts/ci/release/check-cw-darwin-sdkless.sh'
+      - 'scripts/ci/release/package-cw-release.sh'
+      - 'scripts/ci/release/publish-cw-release.sh'
+      - 'scripts/ci/release/verify-cw-release-signing-key.sh'
+      - 'scripts/ci/tests/test-verify-cw-release-signing-key.sh'
+      - 'apps/cli/GPG_PUBLIC_KEY.asc'
+      - 'keys/production-release.asc'
+      - 'apps/cli/install.sh'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'crates/codewire-cli/**'
+      - 'crates/codewire-cli-bin/**'
+      - 'crates/codewire-daemon/**'
+      - 'crates/codewire-gateway-proto/**'
+      - 'libs/gateway-proto/**'
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing canonical vMAJOR.MINOR.PATCH tag to recover
+        required: true
+        type: string
+
+env:
+  ZIG_VERSION: 0.15.2
+  ZIG_X86_64_LINUX_SHA256: 02aa270f183da276e5b5920b1dac44a63f1a49e55050ebde3aecc9eb82f93239
+  CARGO_ZIGBUILD_VERSION: 0.23.0
+
+jobs:
+  release-selection:
+    name: Verify canonical CLI release tag
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    outputs:
+      release_tag: ${{ steps.select.outputs.release_tag }}
+      source_sha: ${{ steps.select.outputs.source_sha }}
+      tag_object_sha: ${{ steps.select.outputs.tag_object_sha }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          fetch-depth: 0
+
+      - name: Refuse recovery control outside protected main
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          RECOVERY_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          [ "$GITHUB_REF" = 'refs/heads/main' ]
+          [ "$GITHUB_REF_NAME" = 'main' ]
+          [[ "$RECOVERY_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        if: github.event_name == 'workflow_dispatch'
+        with:
+          ref: refs/tags/${{ inputs.release_tag }}
+          path: .release-source
+          fetch-depth: 0
+
+      - name: Select exact canonical release source
+        id: select
+        env:
+          RECOVERY_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          selected_tag="$GITHUB_REF_NAME"
+          source_dir='.'
+          if [ "$GITHUB_EVENT_NAME" = 'workflow_dispatch' ]; then
+            selected_tag="$RECOVERY_TAG"
+            source_dir='.release-source'
+          fi
+          remote_refs="$(git ls-remote --tags origin \
+            "refs/tags/${selected_tag}" \
+            "refs/tags/${selected_tag}^{}")"
+          remote_object_sha="$(printf '%s\n' "$remote_refs" | awk -v ref="refs/tags/${selected_tag}" '$2 == ref { print $1 }')"
+          remote_peeled_sha="$(printf '%s\n' "$remote_refs" | awk -v ref="refs/tags/${selected_tag}^{}" '$2 == ref { print $1 }')"
+          canonical_main_sha="$(git ls-remote origin refs/heads/main | awk '$2 == "refs/heads/main" { print $1 }')"
+          source_sha="$(git -C "$source_dir" rev-parse HEAD)"
+          git fetch --no-tags origin \
+            "+refs/heads/main:refs/remotes/origin/main" \
+            "+refs/tags/${selected_tag}:refs/tags/${selected_tag}"
+          scripts/ci/release/verify-release-tag-ref.sh \
+            "$GITHUB_EVENT_NAME" \
+            "$GITHUB_REF" \
+            "$GITHUB_REF_NAME" \
+            "$RECOVERY_TAG" \
+            "$GITHUB_SERVER_URL" \
+            "$GITHUB_REPOSITORY" \
+            "$source_sha" \
+            "$remote_object_sha" \
+            "$remote_peeled_sha" \
+            "$canonical_main_sha"
+          printf 'release_tag=%s\n' "$selected_tag" >> "$GITHUB_OUTPUT"
+          printf 'source_sha=%s\n' "$source_sha" >> "$GITHUB_OUTPUT"
+          printf 'tag_object_sha=%s\n' "$remote_object_sha" >> "$GITHUB_OUTPUT"
+
+  package-dry-run:
+    name: Package Rust cw release assets
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+
+      - uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b
+        with:
+          toolchain: stable
+          targets: x86_64-unknown-linux-musl,aarch64-unknown-linux-gnu,x86_64-apple-darwin,aarch64-apple-darwin
+
+      - name: Install protoc (pinned)
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /tmp/protoc.zip "https://github.com/protocolbuffers/protobuf/releases/download/v35.1/protoc-35.1-linux-x86_64.zip"
+          echo "6930ebf62bd4ea607b98fff052596c6ee564b9835b4ce172c75a3f53ae9d91b7  /tmp/protoc.zip" | sha256sum -c -
+          mkdir -p "$HOME/.proto-tools/protoc"
+          unzip -o -q /tmp/protoc.zip -d "$HOME/.proto-tools/protoc"
+          echo "$HOME/.proto-tools/protoc/bin" >> "$GITHUB_PATH"
+          "$HOME/.proto-tools/protoc/bin/protoc" --version
+
+      - name: Install cross-build tools
+        run: |
+          set -euo pipefail
+          if command -v sudo >/dev/null 2>&1; then
+            APT="sudo apt-get"
+          else
+            APT="apt-get"
+          fi
+          $APT update -qq || true
+          $APT install -y -qq ca-certificates curl xz-utils
+
+          zig_url="https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${ZIG_VERSION}.tar.xz"
+          curl -fsSLo zig.tar.xz "$zig_url"
+          echo "${ZIG_X86_64_LINUX_SHA256}  zig.tar.xz" | sha256sum -c -
+          tar -xf zig.tar.xz
+          echo "$PWD/zig-x86_64-linux-${ZIG_VERSION}" >> "$GITHUB_PATH"
+
+          cargo install --locked cargo-zigbuild --version "$CARGO_ZIGBUILD_VERSION"
+
+      - name: Reject Darwin SDK framework dependencies
+        run: scripts/ci/release/check-cw-darwin-sdkless.sh
+
+      - name: Package four-target dry-run assets
+        run: |
+          set -euo pipefail
+          CW_RELEASE_PROFILE=ci \
+            CW_RELEASE_BUILD_CMD='cargo zigbuild' \
+            CW_RELEASE_REQUIRE_SIGNATURE=0 \
+            CW_RELEASE_TARGETS='x86_64-unknown-linux-musl aarch64-unknown-linux-gnu x86_64-apple-darwin aarch64-apple-darwin' \
+            scripts/ci/release/package-cw-release.sh v0.0.0-ci
+          "dist/cw-release/cw-v0.0.0-ci-x86_64-unknown-linux-musl" --version | grep -F 'v0.0.0-ci'
+          [ "$(wc -l < dist/cw-release/SHA256SUMS)" -eq 4 ]
+          (cd dist/cw-release && sha256sum --check --ignore-missing SHA256SUMS)
+
+  package-release:
+    name: Package and publish signed Rust cw release
+    needs: [release-selection]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: refs/tags/${{ needs.release-selection.outputs.release_tag }}
+          path: .release-source
+
+      - name: Confirm selected release checkout
+        env:
+          SOURCE_SHA: ${{ needs.release-selection.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          [ "$(git -C .release-source rev-parse HEAD)" = "$SOURCE_SHA" ]
+
+      - name: Verify release signing key
+        working-directory: .release-source
+        env:
+          CW_RELEASE_GPG_PRIVATE_KEY: ${{ secrets.CW_RELEASE_GPG_PRIVATE_KEY }}
+          CW_RELEASE_GPG_PASSPHRASE: ${{ secrets.CW_RELEASE_GPG_PASSPHRASE }}
+          CW_RELEASE_GPG_KEY_ID: ${{ secrets.CW_RELEASE_GPG_KEY_ID }}
+        run: ../scripts/ci/release/verify-cw-release-signing-key.sh apps/cli/GPG_PUBLIC_KEY.asc
+
+      - uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b
+        with:
+          toolchain: stable
+          targets: x86_64-unknown-linux-musl,aarch64-unknown-linux-gnu,x86_64-apple-darwin,aarch64-apple-darwin
+
+      - name: Install protoc (pinned)
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /tmp/protoc.zip "https://github.com/protocolbuffers/protobuf/releases/download/v35.1/protoc-35.1-linux-x86_64.zip"
+          echo "6930ebf62bd4ea607b98fff052596c6ee564b9835b4ce172c75a3f53ae9d91b7  /tmp/protoc.zip" | sha256sum -c -
+          mkdir -p "$HOME/.proto-tools/protoc"
+          unzip -o -q /tmp/protoc.zip -d "$HOME/.proto-tools/protoc"
+          echo "$HOME/.proto-tools/protoc/bin" >> "$GITHUB_PATH"
+          "$HOME/.proto-tools/protoc/bin/protoc" --version
+
+      - name: Install cross-build tools
+        run: |
+          set -euo pipefail
+          if command -v sudo >/dev/null 2>&1; then
+            APT="sudo apt-get"
+          else
+            APT="apt-get"
+          fi
+          $APT update -qq || true
+          $APT install -y -qq ca-certificates curl xz-utils
+
+          zig_url="https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${ZIG_VERSION}.tar.xz"
+          curl -fsSLo zig.tar.xz "$zig_url"
+          echo "${ZIG_X86_64_LINUX_SHA256}  zig.tar.xz" | sha256sum -c -
+          tar -xf zig.tar.xz
+          echo "$PWD/zig-x86_64-linux-${ZIG_VERSION}" >> "$GITHUB_PATH"
+
+          cargo install --locked cargo-zigbuild --version "$CARGO_ZIGBUILD_VERSION"
+
+      - name: Package signed release assets
+        working-directory: .release-source
+        env:
+          CW_RELEASE_GPG_PRIVATE_KEY: ${{ secrets.CW_RELEASE_GPG_PRIVATE_KEY }}
+          CW_RELEASE_GPG_PASSPHRASE: ${{ secrets.CW_RELEASE_GPG_PASSPHRASE }}
+          CW_RELEASE_GPG_KEY_ID: ${{ secrets.CW_RELEASE_GPG_KEY_ID }}
+          GITEA_TOKEN: ${{ github.token }}
+          MIRROR_GITHUB_APP_ID: ${{ secrets.MIRROR_GITHUB_APP_ID }}
+          MIRROR_GITHUB_INSTALLATION_ID: ${{ secrets.MIRROR_GITHUB_INSTALLATION_ID }}
+          MIRROR_GITHUB_PRIVATE_KEY: ${{ secrets.MIRROR_GITHUB_PRIVATE_KEY }}
+          CW_REQUIRE_GITHUB_MIRROR: '1'
+          RELEASE_TAG: ${{ needs.release-selection.outputs.release_tag }}
+          CW_RELEASE_SOURCE_SHA: ${{ needs.release-selection.outputs.source_sha }}
+          CW_RELEASE_TAG_OBJECT_SHA: ${{ needs.release-selection.outputs.tag_object_sha }}
+        run: |
+          set -euo pipefail
+          ../scripts/ci/release/check-cw-darwin-sdkless.sh
+          CW_RELEASE_BUILD_CMD='cargo zigbuild' \
+            CW_RELEASE_TARGETS='x86_64-unknown-linux-musl aarch64-unknown-linux-gnu x86_64-apple-darwin aarch64-apple-darwin' \
+            ../scripts/ci/release/package-cw-release.sh "$RELEASE_TAG"
+          gpg --import apps/cli/GPG_PUBLIC_KEY.asc
+          gpg --verify dist/cw-release/SHA256SUMS.asc dist/cw-release/SHA256SUMS
+          (cd dist/cw-release && sha256sum --check --ignore-missing SHA256SUMS)
+
+          ../scripts/ci/release/publish-cw-release.sh "$RELEASE_TAG" dist/cw-release

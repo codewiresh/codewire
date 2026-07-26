@@ -1,0 +1,23 @@
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: isol8-webhook-selfsigned
+  namespace: isol8-system
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: isol8-webhook-tls
+  namespace: isol8-system
+spec:
+  secretName: isol8-webhook-tls
+  dnsNames:
+    - isol8-webhook.isol8-system.svc
+    - isol8-webhook.isol8-system.svc.cluster.local
+  ipAddresses:
+    - 127.0.0.1
+  issuerRef:
+    name: isol8-webhook-selfsigned
+    kind: Issuer

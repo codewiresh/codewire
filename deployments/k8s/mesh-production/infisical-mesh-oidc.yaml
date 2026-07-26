@@ -1,0 +1,22 @@
+apiVersion: secrets.infisical.com/v1alpha1
+kind: InfisicalSecret
+metadata:
+  name: codewire-mesh-oidc-sync
+  namespace: prod
+spec:
+  hostAPI: https://infisical.example.com/api
+  resyncInterval: 60
+  authentication:
+    universalAuth:
+      secretsScope:
+        projectSlug: codewire
+        envSlug: prod
+        secretsPath: /mesh
+      credentialsRef:
+        secretName: infisical-universal-auth
+        secretNamespace: prod
+  managedKubeSecretReferences:
+    - secretName: codewire-mesh-oidc
+      secretNamespace: prod
+      creationPolicy: Owner
+      secretType: Opaque

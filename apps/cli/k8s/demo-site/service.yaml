@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: codewire-demo-site
+  labels:
+    app: codewire-demo-site
+spec:
+  type: ClusterIP
+  ports:
+    - port: 80
+      targetPort: http
+      protocol: TCP
+      name: http
+  selector:
+    app: codewire-demo-site

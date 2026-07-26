@@ -1,0 +1,81 @@
+# Dependencies
+node_modules/
+
+# Build outputs
+dist/
+.next/
+.turbo/
+.tanstack/
+.output/
+apps/docs/.astro/
+
+# Claude Code (settings.json is checked in: it disables commit/PR
+# attribution for every session; local overrides stay ignored)
+.claude/*
+!.claude/settings.json
+
+# Git worktrees
+.worktrees/
+
+# Rust
+target/
+
+# Environment
+.env
+.env.local
+.env.*.local
+.infisical.json
+infisical.json
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Testing
+coverage/
+playwright-report/
+test-results/
+apps/dashboard/playwright/.auth/
+
+# Go
+apps/worker/worker
+apps/worker/tmp/
+.tmp/
+
+# CLI build artifacts (from D.4 merge)
+apps/cli/cwshell/build/
+apps/cli/bin/
+apps/cli/cw
+apps/cli/cw-guest-agent
+
+# Terraform
+*.tfstate
+*.tfstate.*
+.terraform/
+.terraform.lock.hcl
+*.tfvars
+!*.tfvars.example
+terraform/tenant/workspaces/
+.nitro
+*.key
+*.crt
+*.pem
+*.cer
+*.p12
+*.csr
+apps/ios/CwShellEngine.xcframework/
+apps/ios/.build/
+apps/ios/xtool/
+.dev-stack/
+.venv-proto/
+__pycache__/
+.proto-tools/

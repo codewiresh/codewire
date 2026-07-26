@@ -1,0 +1,82 @@
+[package]
+name = "codewire-server-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "Shared platform for Codewire backend services: HTTP scaffold, auth, error envelope, tracing, DB and NATS helpers"
+# Server crates are AGPL-3.0 (matches the main repo); existing UI/desktop
+# crates intentionally keep the workspace-default MIT.
+license = "AGPL-3.0"
+
+[lib]
+name = "codewire_server_core"
+path = "src/lib.rs"
+
+[features]
+default = []
+# Opt-in OpenTelemetry OTLP exporter. The OTel deps drag in a hefty
+# transitive tree; services that don't ship traces upstream skip the
+# feature and tracing-subscriber alone handles structured logs.
+otel = ["dep:opentelemetry", "dep:opentelemetry-otlp", "dep:opentelemetry_sdk", "dep:tracing-opentelemetry"]
+
+[dependencies]
+axum = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+hyper = { workspace = true }
+hyper-util = { workspace = true }
+http = { workspace = true }
+tokio = { workspace = true }
+
+# Connect-RPC serving (docs/plans/connect-rpc/03-connect-server-infrastructure.md
+# WI-1). The `axum` feature provides the tower-service mount used by
+# `connect::connect_router`; message/client codegen lives in codewire-proto.
+connectrpc = { workspace = true, features = ["axum"] }
+# Connect error details (doc 03 WI-2 / doc 01 D1): the auth layer and the
+# wire renderer protobuf-encode the vendored google.rpc detail types
+# (ErrorInfo, BadRequest, RetryInfo) generated in codewire-proto. Client
+# stubs are not needed server-side, hence default-features = false.
+codewire-proto = { workspace = true }
+buffa = { workspace = true }
+buffa-types = { workspace = true }
+# Server-paced probe stream (connect_testing::StreamPing, doc 03 WI-4).
+futures = { workspace = true }
+
+# JSON + error
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+schemars = { workspace = true }
+jsonschema = { workspace = true }
+
+# Time / IDs
+chrono = { workspace = true }
+uuid = { workspace = true }
+
+# Crypto (SHA-256 digests for api_keys.key_hash and the OIDC token_hash columns)
+sha2 = { workspace = true }
+base64 = { workspace = true }
+
+# DB / NATS
+sqlx = { workspace = true }
+async-nats = { workspace = true }
+url = { workspace = true }
+
+# Tracing
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# Optional OpenTelemetry
+opentelemetry = { workspace = true, optional = true }
+opentelemetry_sdk = { workspace = true, optional = true }
+opentelemetry-otlp = { workspace = true, optional = true }
+tracing-opentelemetry = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+reqwest = { workspace = true }
+# Connect mount integration tests: the generated probe-service trait/client
+# (codewire.testing.v1.PingService) and the h2c prior-knowledge client.
+codewire-proto = { workspace = true, features = ["client"] }
+connectrpc = { workspace = true, features = ["axum", "client"] }

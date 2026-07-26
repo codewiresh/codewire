@@ -1,0 +1,5 @@
+<svg width="120" height="24" viewBox="0 0 120 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <path d="M4 7l4 5-4 5" stroke="#FB923C" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+  <line x1="12" y1="17" x2="20" y2="17" stroke="#FB923C" stroke-width="2.5" stroke-linecap="round"/>
+  <text x="26" y="17" font-family="system-ui, -apple-system, sans-serif" font-size="14" font-weight="600" fill="#fafaf9">codewire</text>
+</svg>

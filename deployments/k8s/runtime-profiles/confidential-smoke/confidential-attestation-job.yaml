@@ -1,0 +1,67 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: codewire-confidential-snp-attestation
+  namespace: codewire-runtime-probes
+  labels:
+    app.kubernetes.io/name: codewire-confidential-snp-attestation
+    app.kubernetes.io/part-of: codewire
+    codewire.sh/runtime-tier: confidential
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: codewire-confidential-snp-attestation
+        app.kubernetes.io/part-of: codewire
+        codewire.sh/runtime-tier: confidential
+    spec:
+      automountServiceAccountToken: false
+      runtimeClassName: confidential
+      nodeSelector:
+        node.codewire.sh/confidential-snp: "true"
+      restartPolicy: Never
+      containers:
+        - name: attest
+          image: docker.io/curlimages/curl@sha256:5a91ea0c9c3ee27b4abe657b68cf6bf0676afa13b236b3bda34283cb3924d4f6
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            privileged: true
+            runAsUser: 0
+            runAsGroup: 0
+          env:
+            - name: SNP_GUEST_TOOL_URL
+              value: https://github.com/virtee/snpguest/releases/download/v0.10.0/snpguest
+            - name: SNP_GUEST_TOOL_SHA256
+              value: 70e700465e3523e67dd5104583dc36cd11eef630c6f04c5b9ccafd6ba2e76ca0
+          command:
+            - sh
+            - -lc
+            - |
+              set -eu
+              echo "runtimeClass=confidential"
+              uname -a
+              if [ ! -e /dev/sev-guest ]; then
+                sev_guest_minor="$(awk '$2 == "sev-guest" { print $1 }' /proc/misc)"
+                test -n "$sev_guest_minor"
+                mknod /dev/sev-guest c 10 "$sev_guest_minor"
+                chmod 0600 /dev/sev-guest
+              fi
+              test -e /dev/sev-guest
+              ls -l /dev/sev-guest
+              curl -fsSL "$SNP_GUEST_TOOL_URL" -o /tmp/snpguest
+              printf '%s  /tmp/snpguest\n' "$SNP_GUEST_TOOL_SHA256" | sha256sum -c -
+              chmod 0755 /tmp/snpguest
+              /tmp/snpguest report /tmp/attestation-report.bin /tmp/report-data.bin --random
+              test -s /tmp/attestation-report.bin
+              test -s /tmp/report-data.bin
+              wc -c /tmp/attestation-report.bin /tmp/report-data.bin
+              sha256sum /tmp/attestation-report.bin /tmp/report-data.bin
+              /tmp/snpguest display report /tmp/attestation-report.bin
+              printf 'attestation_report_base64_begin\n'
+              base64 /tmp/attestation-report.bin
+              printf '\nattestation_report_base64_end\n'
+              printf 'report_data_base64_begin\n'
+              base64 /tmp/report-data.bin
+              printf '\nreport_data_base64_end\n'
+              echo "snp-attestation-report-ok"

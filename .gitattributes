@@ -1,0 +1,4 @@
+packages/codewire-types/generated/** linguist-generated=true
+packages/codewire-proto-ts/src/gen/** linguist-generated=true whitespace=-blank-at-eof
+libs/api-client-go/client_gen.go linguist-generated=true
+libs/gen-python/**/*_connect.py linguist-generated=true whitespace=-trailing-space

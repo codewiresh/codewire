@@ -1,0 +1,70 @@
+version: v2
+
+# Codegen template for the client-facing codewire/** contract packages
+# (docs/plans/connect-rpc/02-proto-authoring-guide.md WI-2). Separate from
+# buf.gen.yaml because the client-facing packages additionally generate
+# TypeScript and Python consumers. Run with
+#   cd proto && buf generate --template buf.gen.codewire.yaml
+# (or `make proto-generate`, which runs every checked-in template).
+#
+# All plugins are local + pinned — remote buf plugins are intentionally not
+# used so generation works in restricted-network CI:
+#   protoc-gen-go / protoc-gen-connect-go   `make proto-tools` (pinned go install)
+#   protoc-gen-es                           bun install (pinned in the root
+#                                           package.json devDependencies)
+#   protoc-gen-connectrpc                   `make proto-tools` (pinned pip
+#                                           install into repo-root .venv-proto)
+#   python / pyi                            protoc built-ins (pinned protoc via
+#                                           `make proto-tools`; output is
+#                                           protoc-version-dependent)
+#
+# Rust is intentionally absent: crates/codewire-proto compiles these protos
+# at build time via connectrpc-build (no checked-in Rust codegen).
+#
+# No `clean: true` here: libs/gen-go must keep its hand-written go.mod/go.sum
+# beside the generated tree.
+
+# Managed mode supplies go_package for the codewire packages so the
+# contract files stay language-neutral (adding go_package to a published
+# file is itself a buf-breaking FILE change).
+managed:
+  enabled: true
+  override:
+    - file_option: go_package_prefix
+      value: github.com/codewiresh/codewire/libs/gen-go
+
+inputs:
+  - directory: .
+    paths:
+      - codewire
+
+plugins:
+  # Go — messages + Connect services in the one canonical generated-client
+  # module (libs/gen-go/go.mod).
+  - local: protoc-gen-go
+    out: ../libs/gen-go
+    opt:
+      - paths=source_relative
+  - local: protoc-gen-connect-go
+    out: ../libs/gen-go
+    opt:
+      - paths=source_relative
+  # TypeScript — protoc-gen-es v2 only: connect-es v2 consumes protoc-gen-es
+  # schemas directly (createClient(Service, transport)); the separate
+  # protoc-gen-connect-es plugin was retired with connect-es v1.
+  - local: ../node_modules/.bin/protoc-gen-es
+    out: ../packages/codewire-proto-ts/src/gen
+    opt:
+      - target=ts
+  # Python — messages/stubs via protoc's built-in generators, Connect
+  # clients/handlers via the official protoc-gen-connectrpc. Google protobuf
+  # compatibility keeps the generated tree on the repository's one protobuf
+  # implementation while the SDK owns the runtime wrapper.
+  - protoc_builtin: python
+    out: ../libs/gen-python
+  - protoc_builtin: pyi
+    out: ../libs/gen-python
+  - local: ../.venv-proto/bin/protoc-gen-connectrpc
+    out: ../libs/gen-python
+    opt:
+      - protobuf=google

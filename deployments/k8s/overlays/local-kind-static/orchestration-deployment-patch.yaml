@@ -1,0 +1,49 @@
+- op: replace
+  path: /spec/replicas
+  value: 1
+- op: replace
+  path: /spec/strategy
+  value:
+    type: Recreate
+- op: replace
+  path: /spec/template/spec/imagePullSecrets
+  value: []
+- op: add
+  path: /spec/template/spec/containers/0/imagePullPolicy
+  value: IfNotPresent
+- op: replace
+  path: /spec/template/spec/containers/0/env
+  value:
+    - name: ORCHESTRATION_PORT
+      value: "8084"
+    - name: POD_NAMESPACE
+      valueFrom:
+        fieldRef:
+          fieldPath: metadata.namespace
+    - name: TEMPORAL_HOST_PORT
+      value: temporal-frontend.temporal-system.svc.cluster.local:7233
+    - name: OTEL_EXPORTER_OTLP_ENDPOINT
+      value: ""
+    # Mount the Connect conformance probe (docs/plans/connect-rpc/03 D8)
+    # — local-kind/e2e manifests only, never base or production.
+    - name: CONNECT_TESTING_SURFACE
+      value: "1"
+- op: replace
+  path: /spec/template/spec/containers/0/envFrom
+  value:
+    - configMapRef:
+        name: codewire-config
+    - secretRef:
+        name: codewire-local-secrets
+- op: add
+  path: /spec/template/spec/initContainers
+  value:
+    - name: wait-for-postgres
+      image: postgres:17-alpine
+      command:
+        - sh
+        - -c
+        - until pg_isready -h postgres -p 5432 -U codewire -d codewire; do sleep 1; done
+      env:
+        - name: PGPASSWORD
+          value: codewire

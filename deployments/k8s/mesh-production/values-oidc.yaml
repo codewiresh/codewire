@@ -1,0 +1,11 @@
+mesh:
+  authMode: oidc
+  authToken: ""
+
+oidc:
+  issuer: https://codewire.sh
+  clientID: codewire-mesh
+  clientSecretRef:
+    name: codewire-mesh-oidc
+    key: MESH_OIDC_CLIENT_SECRET
+  allowedGroups: []

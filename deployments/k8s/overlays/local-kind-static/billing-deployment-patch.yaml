@@ -1,0 +1,39 @@
+- op: replace
+  path: /spec/replicas
+  value: 1
+- op: replace
+  path: /spec/strategy
+  value:
+    type: Recreate
+- op: replace
+  path: /spec/template/spec/imagePullSecrets
+  value: []
+- op: add
+  path: /spec/template/spec/containers/0/imagePullPolicy
+  value: IfNotPresent
+- op: replace
+  path: /spec/template/spec/containers/0/env
+  value:
+    - name: BILLING_PORT
+      value: "8081"
+    - name: STRIPE_SECRET_KEY
+      value: sk_test_buildtest_dummy
+    - name: STRIPE_WEBHOOK_SECRET
+      value: whsec_test_secret
+    - name: POD_NAMESPACE
+      valueFrom:
+        fieldRef:
+          fieldPath: metadata.namespace
+    - name: OTEL_EXPORTER_OTLP_ENDPOINT
+      value: ""
+    # Mount the Connect conformance probe (docs/plans/connect-rpc/03 D8)
+    # — local-kind/e2e manifests only, never base or production.
+    - name: CONNECT_TESTING_SURFACE
+      value: "1"
+- op: replace
+  path: /spec/template/spec/containers/0/envFrom
+  value:
+    - configMapRef:
+        name: codewire-config
+    - secretRef:
+        name: codewire-local-secrets
