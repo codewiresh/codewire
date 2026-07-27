@@ -30,6 +30,12 @@ codewire.localhost {
 		reverse_proxy 127.0.0.1:8091
 	}
 
+	# Exact primary-origin owner for the temporary Mesh network REST bridge.
+	@mesh_networks path /api/v1/networks
+	handle @mesh_networks {
+		reverse_proxy 127.0.0.1:18090
+	}
+
 	# Billing service (codewire-billing binary). Transitional REST routes and
 	# the permanent Stripe webhook are matched before the broad /api fallback.
 	@billing path_regexp ^(/api/webhooks/stripe|/api/v1/admin/billing(/.*)?|/api/v1/billing/plans(/.*)?|/api/v1/organizations/[^/]+/billing(/.*)?|/api/v1/organizations/[^/]+/environments/usage)$

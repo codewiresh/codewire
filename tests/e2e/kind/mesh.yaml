@@ -1,0 +1,81 @@
+# Disposable hosted-Mesh deployment for the WS18 ownership bridge proof. It
+# uses a separate database in the same throwaway PostgreSQL instance so the
+# test preserves Mesh's independent schema ledger while exercising the real
+# in-cluster primary authorization receiver.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: codewire-mesh
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: codewire-mesh
+  template:
+    metadata:
+      labels:
+        app: codewire-mesh
+    spec:
+      initContainers:
+        - name: create-mesh-database
+          image: postgres:17-alpine
+          env:
+            - name: PGPASSWORD
+              value: codewire
+          command:
+            - sh
+            - -ceu
+            - |
+              until pg_isready -h postgres -U codewire -d codewire; do sleep 1; done
+              if [ "$(psql -h postgres -U codewire -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname = 'codewire_mesh'")" != "1" ]; then
+                psql -h postgres -U codewire -d postgres -v ON_ERROR_STOP=1 -c 'CREATE DATABASE codewire_mesh'
+              fi
+      containers:
+        - name: mesh
+          image: codewire-mesh:e2e
+          imagePullPolicy: Never
+          command: ["sh", "-ceu"]
+          args:
+            - |
+              exec codewire-mesh \
+                --base-url=http://codewire-mesh:8080 \
+                --listen=0.0.0.0:8080 \
+                --auth-mode=none \
+                --database-url="$DATABASE_URL"
+          env:
+            - name: DATABASE_URL
+              value: postgres://codewire:codewire@postgres:5432/codewire_mesh?sslmode=disable
+            - name: CODEWIRE_MESH_AUTHORIZATION_URL
+              value: http://codewire-orchestration:8085
+            - name: CODEWIRE_MESH_AUTHORIZATION_HMAC_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: codewire-secrets
+                  key: SESSION_SECRET
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 2
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: codewire-mesh
+spec:
+  selector:
+    app: codewire-mesh
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http

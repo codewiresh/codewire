@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod config;
+pub mod mesh_authorization;
 pub mod server;
 pub mod store;
 
@@ -7,8 +8,11 @@ pub use auth::{AuthIdentity, SESSION_COOKIE_NAME, SESSION_TOKEN_PREFIX, authenti
 pub use codewire_network_auth as network_auth;
 pub use config::{
     AUTH_MODE_ENV, AUTH_TOKEN_ENV, AuthMode, Config, ConfigError, DATABASE_URL_ENV,
-    DEFAULT_LISTEN_ADDR, LISTEN_ADDR_ENV, MESH_URL_ENV, OIDC_ALLOWED_GROUPS_ENV,
-    OIDC_CLIENT_ID_ENV, OIDC_CLIENT_SECRET_ENV, OIDC_ISSUER_ENV,
+    DEFAULT_LISTEN_ADDR, LISTEN_ADDR_ENV, LOCAL_API_KEY_HASH_ENV, LOCAL_ENVIRONMENT_ID_ENV,
+    LOCAL_ENVIRONMENT_TOKEN_HASH_ENV, LOCAL_ORGANIZATION_ID_ENV, LocalMeshAuthorizationConfig,
+    MESH_AUTHORIZATION_HMAC_SECRET_ENV, MESH_AUTHORIZATION_URL_ENV, MESH_URL_ENV,
+    MeshAuthorizationConfig, OIDC_ALLOWED_GROUPS_ENV, OIDC_CLIENT_ID_ENV, OIDC_CLIENT_SECRET_ENV,
+    OIDC_ISSUER_ENV,
 };
 pub use server::{router, router_with_store, serve};
 pub use store::{

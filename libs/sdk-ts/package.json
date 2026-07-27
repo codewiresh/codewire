@@ -17,7 +17,7 @@
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit",
-    "test": "tsx src/test.ts"
+    "test": "tsx src/test.ts && tsx src/mesh.test.ts"
   },
   "keywords": [
     "codewire",

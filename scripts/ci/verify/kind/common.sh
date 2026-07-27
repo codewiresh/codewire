@@ -415,6 +415,10 @@ build_images_and_smokes() {
   docker buildx build --load -f "$ROOT/deployments/docker/services.Dockerfile" -t codewire-services:e2e "$ROOT"
   docker image inspect codewire-services:e2e >/dev/null
 
+  log "building Rust Mesh image"
+  docker buildx build --load -f "$ROOT/deployments/docker/mesh.Dockerfile" -t codewire-mesh:e2e "$ROOT"
+  docker image inspect codewire-mesh:e2e >/dev/null
+
   log "building Rust gateway image"
   docker buildx build --load -f "$ROOT/deployments/docker/gateway.Dockerfile" -t codewire-gateway:e2e "$ROOT"
   docker image inspect codewire-gateway:e2e >/dev/null
@@ -449,6 +453,7 @@ create_cluster() {
 load_images_into_kind() {
   log "loading images into kind"
   kind load docker-image --name "$KIND_CLUSTER_NAME" codewire-services:e2e
+  kind load docker-image --name "$KIND_CLUSTER_NAME" codewire-mesh:e2e
   kind load docker-image --name "$KIND_CLUSTER_NAME" codewire-gateway:e2e
 }
 
@@ -495,6 +500,7 @@ deploy_overlay() {
   # pulls of the side-loaded tags).
   kubectl -n "$NS" scale \
     deploy/codewire-billing \
+    deploy/codewire-mesh \
     deploy/codewire-orchestration \
     deploy/codewire-coordinator \
     --replicas=0
@@ -527,15 +533,102 @@ deploy_overlay() {
   kubectl -n "$NS" exec -i deploy/postgres -- \
     psql -U codewire -d codewire -v ON_ERROR_STOP=1 < "$ROOT/tests/e2e/kind/coordinator-seed.sql"
 
-  log "starting billing, orchestration, and coordinator (dependencies ready)"
+  log "starting billing, primary authorization, Mesh, and coordinator (dependencies ready)"
   kubectl -n "$NS" scale \
     deploy/codewire-billing \
+    deploy/codewire-mesh \
     deploy/codewire-orchestration \
     deploy/codewire-coordinator \
     --replicas=1
   kubectl -n "$NS" rollout status deploy/codewire-billing --timeout=300s
   kubectl -n "$NS" rollout status deploy/codewire-orchestration --timeout=300s
+  kubectl -n "$NS" rollout status deploy/codewire-mesh --timeout=300s
   kubectl -n "$NS" rollout status deploy/codewire-coordinator --timeout=300s
+}
+
+mesh_network_ownership_bridge_smoke() {
+  log "proving Mesh primary-origin network bridge and private HMAC authorization"
+  local api_key='cw_c0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0de'
+  local network_id='mesh-kind-owned'
+  local session_network_id='mesh-kind-session'
+
+  wait_edge_upstream mesh-networks "/api/v1/networks?org_id=org_contract_1" 401
+
+  curl_settled -X POST \
+    -H "authorization: Bearer ${api_key}" \
+    -H 'content-type: application/json' \
+    -d "{\"org_id\":\"org_contract_1\",\"network_id\":\"${network_id}\"}" \
+    "${KIND_INGRESS_URL}/api/v1/networks"
+  if [ "$PROBE_CODE" != "200" ] || [ "$PROBE_BODY" != "{\"status\":\"created\",\"network_id\":\"${network_id}\"}" ]; then
+    echo "::error::Mesh primary-origin create through the HMAC receiver failed: code=$PROBE_CODE body=$PROBE_BODY"
+    exit 1
+  fi
+  if ! grep -qi '^x-codewire-service: mesh' "$PROBE_HEADERS"; then
+    echo "::error::Mesh network create did not reach the Mesh workload"
+    cat "$PROBE_HEADERS"
+    exit 1
+  fi
+
+  # A browser cookie is forwarded only under its canonical primary name. This
+  # crosses the same private HMAC receiver as the machine key above; it never
+  # falls back to Mesh's retired session middleware.
+  curl_settled -X POST \
+    -H 'cookie: codewire.session_token=contract-user-session-token' \
+    -H 'content-type: application/json' \
+    -d "{\"org_id\":\"org_contract_1\",\"network_id\":\"${session_network_id}\"}" \
+    "${KIND_INGRESS_URL}/api/v1/networks"
+  if [ "$PROBE_CODE" != "200" ] || [ "$PROBE_BODY" != "{\"status\":\"created\",\"network_id\":\"${session_network_id}\"}" ]; then
+    echo "::error::Mesh canonical-session bridge through the HMAC receiver failed: code=$PROBE_CODE body=$PROBE_BODY"
+    exit 1
+  fi
+
+  curl_settled -H "authorization: Bearer ${api_key}" \
+    "${KIND_INGRESS_URL}/api/v1/networks?org_id=org_contract_1"
+  if [ "$PROBE_CODE" != "200" ] || ! jq -e --arg network_id "$network_id" \
+      'any(.[]; .id == $network_id and .org_id == "org_contract_1" and .node_count == 0 and .invite_count == 0)' \
+      <<<"$PROBE_BODY" >/dev/null; then
+    echo "::error::Mesh primary-origin list did not return the exact owned network: code=$PROBE_CODE body=$PROBE_BODY"
+    exit 1
+  fi
+
+  curl_settled -H "authorization: Bearer ${api_key}" \
+    "${KIND_INGRESS_URL}/api/v1/networks?org_id=org_contract_2"
+  if [ "$PROBE_CODE" != "403" ] || ! grep -qx 'forbidden' <<<"$PROBE_BODY"; then
+    echo "::error::exact-organization API key crossed the Mesh ownership boundary: code=$PROBE_CODE body=$PROBE_BODY"
+    exit 1
+  fi
+
+  # The OAuth bearer belongs to the same ordinary product user and sees the
+  # same organization-owned state through the identical receiver/domain path.
+  curl_settled -H 'authorization: Bearer at_kind_connect_oidc_codewire_api' \
+    "${KIND_INGRESS_URL}/api/v1/networks?org_id=org_contract_1"
+  if [ "$PROBE_CODE" != "200" ] || ! jq -e \
+      --arg api_key_network "$network_id" \
+      --arg session_network "$session_network_id" \
+      'length == 2 and any(.[]; .id == $api_key_network and .org_id == "org_contract_1") and any(.[]; .id == $session_network and .org_id == "org_contract_1")' \
+      <<<"$PROBE_BODY" >/dev/null; then
+    echo "::error::Mesh OAuth bridge did not return the exact organization-owned networks: code=$PROBE_CODE body=$PROBE_BODY"
+    exit 1
+  fi
+
+  local rejected_credential='Bearer rejected-bridge-credential'
+  curl_settled -H "authorization: ${rejected_credential}" \
+    "${KIND_INGRESS_URL}/api/v1/networks?org_id=org_contract_1"
+  if [ "$PROBE_CODE" != "401" ] || ! grep -qx 'unauthorized' <<<"$PROBE_BODY" \
+    || [[ "$PROBE_BODY" == *"${rejected_credential}"* ]]; then
+    echo "::error::Mesh bridge leaked or accepted a rejected primary credential: code=$PROBE_CODE body=$PROBE_BODY"
+    exit 1
+  fi
+
+  local stored_owner
+  stored_owner="$(kubectl -n "$NS" exec deploy/postgres -- \
+    psql -U codewire -d codewire_mesh -tAc \
+      "SELECT organization_id FROM networks WHERE network_id = '${network_id}'")"
+  if [ "$stored_owner" != "org_contract_1" ]; then
+    echo "::error::Mesh network owner was not written atomically: got ${stored_owner:-empty}"
+    exit 1
+  fi
+  log "Mesh network bridge primary-origin/HMAC/exact-org proof OK"
 }
 
 # Polls a path through the ingress until the expected status arrives —

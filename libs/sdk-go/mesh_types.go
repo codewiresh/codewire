@@ -5,6 +5,7 @@ import "time"
 // MeshNetwork is a network managed by the mesh.
 type MeshNetwork struct {
 	ID          string    `json:"id"`
+	OrgID       string    `json:"org_id"`
 	CreatedAt   time.Time `json:"created_at"`
 	NodeCount   int       `json:"node_count"`
 	InviteCount int       `json:"invite_count"`

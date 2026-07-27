@@ -898,13 +898,16 @@ def is_raw_string_start(text: str, index: int) -> bool:
 
 MESH_SURFACE_REL = "scripts/checks/contracts/rest-surface-baseline.json"
 MESH_SERVER_REL = "crates/codewire-mesh/src/server.rs"
+MESH_PRIMARY_ORIGIN_REST_EDGE_REL = (
+    "scripts/checks/contracts/mesh-primary-origin-rest-edge.json"
+)
 MESH_EXPECTED_REGISTRATIONS = 24
 MESH_EXPECTED_OPERATIONS = 31
 MESH_EXPECTED_ROUTER_SHA256 = (
-    "604338c2d59548a3e4077a90ff99da428be93512d56e50e607f4d3691bb9256b"
+    "9843c61fa097d3b04636391a4d7e6664d391deccc64d371dac7f13dca98a418c"
 )
 MESH_EXPECTED_SEMANTICS_SHA256 = (
-    "c75aef4caaa689eb3daec18a1cd1f63395493b9443089ff093051d9624ced37e"
+    "6f194abc4b31450c6caf0f32f487abb9591b559305fc0e7e0e6ab7b9b6b043c1"
 )
 MESH_EXPECTED_COUNTS = {
     "route_registrations": 24,
@@ -937,7 +940,7 @@ MESH_EXPECTED_COUNTS = {
     "credential_operations": {
         "enrollment-code": 1,
         "invite-code": 1,
-        "mesh-identity": 17,
+        "mesh-identity": 15,
         "mesh-identity-plus-invite-code": 1,
         "mesh-session-bearer-or-cookie": 1,
         "node-bearer": 1,
@@ -945,6 +948,7 @@ MESH_EXPECTED_COUNTS = {
         "none": 2,
         "oidc-device-code": 0,
         "oidc-state-and-code": 1,
+        "primary-product-identity": 2,
         "runtime-credential": 1,
     },
     "disposition_operations": {"connect": 22, "delete": 9},
@@ -955,8 +959,8 @@ MESH_EXPECTED_COUNTS = {
     },
     "operations_without_callers": 7,
     "wrapper_declaration_records": 12,
-    "client_url_template_records": 58,
-    "client_url_template_occurrences": 74,
+    "client_url_template_records": 65,
+    "client_url_template_occurrences": 81,
 }
 MESH_DECLARATION_ONLY_OPERATIONS = {
     ("get", "/api/v1/network-auth/bundle"),
@@ -1434,7 +1438,103 @@ def mesh_surface_failures(
             f"{MESH_SERVER_REL} router_from_state must mount exactly the frozen "
             "public and protected route trees"
         )
+    mesh_network_ownership_failures(
+        failures,
+        mesh_sources,
+        server_source,
+        client_sources,
+        inventory,
+        inventory_operation_details,
+    )
     return failures
+
+
+def mesh_network_ownership_failures(
+    failures: list[str],
+    mesh_sources: dict[str, str],
+    server_source: str,
+    client_sources: dict[str, tuple[str, str]],
+    inventory: dict[str, Any],
+    operation_details: dict[tuple[str, str], dict[str, Any]],
+) -> None:
+    """Keep the WI-4B bridge explicit until its scheduled Connect cutover."""
+    expected_callers = ["rust-cli", "go-sdk", "typescript-sdk", "python-sdk"]
+    for method in ("get", "post"):
+        operation = operation_details.get((method, "/api/v1/networks"))
+        if operation is None:
+            failures.append(
+                f"Mesh network ownership bridge is missing {method.upper()} /api/v1/networks"
+            )
+            continue
+        if operation.get("credential") != "primary-product-identity":
+            failures.append(
+                f"Mesh network {method.upper()} must use primary-product-identity"
+            )
+        if operation.get("callers") != expected_callers:
+            failures.append(
+                f"Mesh network {method.upper()} callers must name only the four direct first-party wrappers"
+            )
+    network_route = next(
+        (route for route in inventory.get("routes", []) if route.get("path") == "/api/v1/networks"),
+        None,
+    )
+    if not isinstance(network_route, dict) or network_route.get("scope") != "public":
+        failures.append(
+            "Mesh network bridge must be public only to primary typed authorization, not Mesh legacy middleware"
+        )
+    required_server_fragments = (
+        "struct NetworkCreateRequest",
+        "org_id: Option<String>",
+        "struct NetworkListQuery",
+        "network_create_owned(&network_id, &org_id)",
+        "network_list_by_organization(&org_id)",
+        "is_network_product_principal(&context)",
+    )
+    for fragment in required_server_fragments:
+        if fragment not in server_source:
+            failures.append(
+                f"Mesh network ownership bridge lost required explicit-org source shape {fragment!r}"
+            )
+    authorization_source = mesh_sources.get(
+        "crates/codewire-mesh/src/mesh_authorization.rs", ""
+    )
+    if "SESSION_COOKIE_NAME" not in authorization_source:
+        failures.append(
+            "Mesh network ownership bridge must forward only the canonical primary session cookie"
+        )
+    if '"cw_session="' in authorization_source:
+        failures.append(
+            "Mesh network ownership bridge must not forward the retired Mesh session cookie"
+        )
+    required_clients = {
+        "crates/codewire-cli/src/mesh.rs": (
+            "list_networks(&self, org_id: &str)",
+            "create_network(&self, org_id: &str, network_id: &str)",
+            '[("org_id", org_id)]',
+        ),
+        "libs/sdk-go/mesh_networks.go": (
+            "Create(ctx context.Context, orgID, networkID string)",
+            "List(ctx context.Context, orgID string)",
+            "org_id=",
+        ),
+        "libs/sdk-ts/src/mesh.ts": (
+            "create(orgId: string, networkId: string)",
+            "list(orgId: string)",
+            "org_id=${q(orgId)}",
+        ),
+        "libs/sdk-python/codewire/mesh.py": (
+            "def create(self, org_id: str, network_id: str)",
+            "def list(self, org_id: str)",
+            "org_id={quote(org_id, safe='')}",
+        ),
+    }
+    for source, fragments in required_clients.items():
+        text = client_sources.get(source, ("", ""))[1]
+        for fragment in fragments:
+            if fragment not in text:
+                failures.append(
+                    f"Mesh network direct caller {source} lost explicit organization input {fragment!r}"
+                )
 
 
 def mesh_production_sources() -> dict[str, str]:
@@ -1804,7 +1904,7 @@ def source_string_literals(text: str) -> list[str]:
     literals: list[str] = []
     index = 0
     while index < len(text):
-        match = re.search(r"(?:[furbFURB]{0,2})([\"'`])", text[index:])
+        match = re.search(r"(?<![A-Za-z0-9_])(?:[furbFURB]{0,2})([\"'`])", text[index:])
         if not match:
             break
         quote = match.group(1)
@@ -2058,6 +2158,41 @@ def mesh_surface_self_test(
         "semantic count drift" in failure for failure in reclassified_failures
     ):
         raise RuntimeError("self-test accepted Mesh credential/caller reclassification")
+
+    defaulted_owner_sources = copy.deepcopy(mesh_sources)
+    defaulted_owner_sources[MESH_SERVER_REL] = server_source.replace(
+        "network_create_owned(&network_id, &org_id)",
+        'network_create_owned(&network_id, "default-org")',
+        1,
+    )
+    defaulted_owner_failures = mesh_surface_failures(
+        defaulted_owner_sources,
+        client_sources,
+        copy.deepcopy(inventory),
+    )
+    if not any(
+        "network_create_owned(&network_id, &org_id)" in failure
+        for failure in defaulted_owner_failures
+    ):
+        raise RuntimeError("self-test accepted a defaulted Mesh network owner")
+
+    legacy_cookie_sources = copy.deepcopy(mesh_sources)
+    authorization_source = legacy_cookie_sources[
+        "crates/codewire-mesh/src/mesh_authorization.rs"
+    ]
+    legacy_cookie_sources["crates/codewire-mesh/src/mesh_authorization.rs"] = (
+        authorization_source.replace("SESSION_COOKIE_NAME", '"cw_session"')
+    )
+    legacy_cookie_failures = mesh_surface_failures(
+        legacy_cookie_sources,
+        client_sources,
+        copy.deepcopy(inventory),
+    )
+    if not any(
+        "canonical primary session cookie" in failure
+        for failure in legacy_cookie_failures
+    ):
+        raise RuntimeError("self-test accepted the retired Mesh session cookie")
 
     swapped_packages = copy.deepcopy(inventory)
     enrollment_operation = operation(
@@ -3245,9 +3380,11 @@ def check_connect_edge_routing(_args: argparse.Namespace) -> int:
                 fail(f"unknown owner kind '{owner}' for {service} in connect-edge-ownership.json")
 
     assert_internal_connect_listener_exemption(unrouted, per_file, fail)
+    assert_mesh_primary_origin_rest_edge(fail)
     if getattr(_args, "self_test", False):
         try:
             internal_connect_listener_self_test()
+            mesh_primary_origin_rest_edge_self_test()
         except RuntimeError as error:
             fail(f"internal-connect listener self-test: {error}")
 
@@ -3277,9 +3414,99 @@ def check_connect_edge_routing(_args: argparse.Namespace) -> int:
 
 
 INTERNAL_CONNECT_SERVICES = {
-    "codewire.internal.v1.GatewayBindingService": "gateway_binding_router",
-    "codewire.internal.v1.EnvironmentCredentialService": "environment_credentials_router",
+    "codewire.internal.v1.GatewayBindingService": (
+        "codewire_orchestration::connect::internal::gateway_binding_router"
+    ),
+    "codewire.internal.v1.EnvironmentCredentialService": (
+        "codewire_orchestration::connect::internal::environment_credentials_router"
+    ),
+    "codewire.internal.v1.MeshAuthorizationService": (
+        "codewire_orchestration::connect::mesh_authorization::router"
+    ),
 }
+
+
+def assert_mesh_primary_origin_rest_edge(
+    fail: Callable[[str], None],
+    reader: Callable[[str], str] = read_text,
+) -> None:
+    """Prove the temporary network REST route has one exact primary owner."""
+    fixture = read_json(MESH_PRIMARY_ORIGIN_REST_EDGE_REL)
+    path = fixture.get("path")
+    if path != "/api/v1/networks":
+        fail("Mesh primary-origin REST fixture must pin /api/v1/networks")
+        return
+    if fixture.get("method_paths") != [
+        "GET /api/v1/networks",
+        "POST /api/v1/networks",
+    ]:
+        fail("Mesh primary-origin REST fixture must pin GET and POST network operations")
+    caddy_backends = fixture.get("caddy_backends")
+    if not isinstance(caddy_backends, dict) or set(caddy_backends) != {
+        "Caddyfile",
+        "Caddyfile.docker",
+    }:
+        fail("Mesh primary-origin REST fixture must name both Caddy edge files")
+        caddy_backends = {}
+    for file, backend in caddy_backends.items():
+        text = reader(file)
+        matcher = "@mesh_networks path /api/v1/networks"
+        if matcher not in text or f"reverse_proxy {backend}" not in text:
+            fail(f"{file}: Mesh network route must be exact and target {backend}")
+
+    kubernetes_backends = fixture.get("kubernetes_backends")
+    expected_kubernetes = {
+        "deployments/k8s/base/ingress.yaml",
+        "deployments/k8s/overlays/local-kind/ingress.yaml",
+        "deployments/k8s/overlays/local-kind-static/ingress.yaml",
+        "tests/e2e/kind/ingress.yaml",
+    }
+    if not isinstance(kubernetes_backends, list) or set(kubernetes_backends) != expected_kubernetes:
+        fail("Mesh primary-origin REST fixture must name every Kubernetes edge copy")
+        kubernetes_backends = []
+    service = fixture.get("service")
+    port_name = fixture.get("port_name")
+    if service != "codewire-mesh" or port_name != "http":
+        fail("Mesh primary-origin REST fixture must target codewire-mesh:http")
+        return
+    for file in kubernetes_backends:
+        text = reader(file)
+        pattern = re.compile(
+            r"-\s+path:\s*/api/v1/networks\s*\n"
+            r"\s*pathType:\s*Exact\s*\n"
+            r"\s*backend:\s*\n\s*service:\s*\n"
+            r"\s*name:\s*codewire-mesh\s*\n\s*port:\s*\n"
+            r"\s*name:\s*http\b"
+        )
+        if not pattern.search(text):
+            fail(f"{file}: Mesh network REST route must be exact and target codewire-mesh:http")
+
+
+def mesh_primary_origin_rest_edge_self_test() -> None:
+    """Ensure the fixture rejects a broad-fallback or wrong-backend edit."""
+    source = {
+        file: read_text(file)
+        for file in [
+            "Caddyfile",
+            "Caddyfile.docker",
+            "deployments/k8s/base/ingress.yaml",
+            "deployments/k8s/overlays/local-kind/ingress.yaml",
+            "deployments/k8s/overlays/local-kind-static/ingress.yaml",
+            "tests/e2e/kind/ingress.yaml",
+        ]
+    }
+    broken = source.copy()
+    file = "tests/e2e/kind/ingress.yaml"
+    before = "name: codewire-mesh"
+    if before not in broken[file]:
+        raise RuntimeError("Mesh primary-origin fixture source is missing expected Mesh backend")
+    broken[file] = broken[file].replace(before, "name: codewire-orchestration", 1)
+    failures: list[str] = []
+    assert_mesh_primary_origin_rest_edge(failures.append, broken.__getitem__)
+    if not any("codewire-mesh:http" in failure for failure in failures):
+        raise RuntimeError(
+            f"Mesh primary-origin fixture accepted a wrong backend: {failures!r}"
+        )
 
 
 def assert_internal_connect_listener_exemption(
@@ -3306,8 +3533,8 @@ def assert_internal_connect_listener_exemption(
                 fail(f"{file}: unrouted {service} has a prohibited public edge matcher")
     if set(unrouted) != set(INTERNAL_CONNECT_SERVICES):
         fail(
-            "unrouted listener map must contain exactly GatewayBindingService and "
-            "EnvironmentCredentialService"
+            "unrouted listener map must contain exactly GatewayBindingService, "
+            "EnvironmentCredentialService, and MeshAuthorizationService"
         )
     assert_internal_connect_listener_boundary(INTERNAL_CONNECT_SERVICES, fail, reader)
 
@@ -3333,9 +3560,9 @@ def assert_internal_connect_listener_boundary(
     internal_section = main[internal_start:public_start]
     public_section = main[public_start:]
     for service, router in services.items():
-        if f"connect::internal::{router}" not in internal_section:
+        if router not in internal_section:
             fail(f"{service} is not mounted on the internal-connect app")
-        if f"connect::internal::{router}" in public_section:
+        if router in public_section:
             fail(f"{service} is prohibited from the public 8084 app")
 
     deployment = reader("deployments/k8s/orchestration/deployment.yaml")

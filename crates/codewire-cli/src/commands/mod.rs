@@ -1194,12 +1194,6 @@ pub(crate) struct MeshUpArgs {
     derp_listen: String,
     #[arg(long = "no-derp", help = "Do not start a managed local DERP process")]
     no_derp: bool,
-    #[arg(
-        long = "auth-token",
-        value_name = "TOKEN",
-        help = "Mesh token to use instead of generating one"
-    )]
-    auth_token: Option<String>,
     #[arg(long, value_enum, default_value_t = OutputFormat::Text, help = "Output format")]
     output: OutputFormat,
 }
@@ -1220,6 +1214,8 @@ pub(crate) struct MeshDownArgs {
 pub(crate) struct NetworkListArgs {
     #[arg(long = "mesh-url", help = "Mesh base URL override")]
     mesh_url: Option<String>,
+    #[arg(long, value_name = "ORG_ID", help = "Exact organization ID to list")]
+    org: String,
     #[arg(long, value_enum, default_value_t = OutputFormat::Text, help = "Output format")]
     output: OutputFormat,
 }
@@ -1230,6 +1226,12 @@ pub(crate) struct NetworkCreateArgs {
     name: String,
     #[arg(long = "mesh-url", help = "Mesh base URL override")]
     mesh_url: Option<String>,
+    #[arg(
+        long,
+        value_name = "ORG_ID",
+        help = "Exact organization ID to own the network"
+    )]
+    org: String,
     #[arg(long, help = "Create without selecting the network locally")]
     no_use: bool,
 }

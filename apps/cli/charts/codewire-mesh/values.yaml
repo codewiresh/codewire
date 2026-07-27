@@ -21,6 +21,16 @@ database:
   secretName: "codewire-mesh-db-app"
   uriKey: "uri"
 
+# Hosted Mesh requires this cluster-local primary-control-plane authorization
+# hop whenever it owns a database. Standalone `cw mesh up` supplies its own
+# explicit local identity and does not use these chart values.
+meshAuthorization:
+  url: ""
+  hmacSecretRef:
+    name: ""
+    key: "SESSION_SECRET"
+    optional: false
+
 image:
   repository: ghcr.io/codewiresh/codewire
   tag: ""  # Defaults to appVersion

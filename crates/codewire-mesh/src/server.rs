@@ -28,6 +28,9 @@ use url::Url;
 use uuid::Uuid;
 
 use crate::auth::{AuthIdentity, authenticate_headers, bearer_token};
+use crate::mesh_authorization::{
+    MeshAuthorizationAdapter, forwarded_mesh_credential, is_network_product_principal,
+};
 use crate::network_auth::{
     DEFAULT_BUNDLE_VALIDITY, DEFAULT_RUNTIME_TTL, DEFAULT_SENDER_TTL, IssuerState,
     NETWORK_AUTH_ISSUER_KEY, NETWORK_AUTH_NAMESPACE, RuntimeClaims, RuntimeCredentialResponse,
@@ -50,6 +53,7 @@ const MAX_KV_VALUE_BYTES: usize = 1 << 20;
 struct AppState {
     config: Config,
     store: SharedStore,
+    mesh_authorization: Option<MeshAuthorizationAdapter>,
     tailnet_coord: TailnetCoordinator,
     runtime_replay: RuntimeCredentialReplay,
     oidc_client: OidcClient,
@@ -185,9 +189,14 @@ pub fn router_with_store(config: Config, store: SharedStore) -> Router {
 
 impl AppState {
     fn new(config: Config, store: SharedStore) -> Self {
+        let mesh_authorization = MeshAuthorizationAdapter::from_config(
+            config.mesh_authorization.as_ref(),
+            config.local_authorization.as_ref(),
+        );
         Self {
             config,
             store,
+            mesh_authorization,
             tailnet_coord: TailnetCoordinator::new(),
             runtime_replay: RuntimeCredentialReplay::new(),
             oidc_client: OidcClient::new(),
@@ -213,6 +222,10 @@ fn router_from_state(state: AppState) -> Router {
             "/api/v1/network-auth/delegation/node",
             post(node_sender_delegation),
         )
+        // The temporary REST spelling is a primary-authenticated ownership
+        // bridge. It must not pass through Mesh's retired cookie/admin
+        // middleware: that would let the two identity systems diverge.
+        .route("/api/v1/networks", get(network_list).post(network_create))
         .route(
             "/api/v1/groups/{name}/members",
             post(group_member_add).delete(group_member_remove),
@@ -241,7 +254,6 @@ fn router_from_state(state: AppState) -> Router {
         )
         .route("/api/v1/node-enrollments", post(node_enrollment_create))
         .route("/api/v1/nodes/{name}", delete(node_revoke))
-        .route("/api/v1/networks", get(network_list).post(network_create))
         .route("/api/v1/networks/join", post(network_join))
         .route(
             "/api/v1/network-auth/runtime/client",
@@ -633,6 +645,7 @@ fn redirect_with_cookie(location: &str, cookie: &str) -> Response {
 #[derive(Serialize)]
 struct NetworkResponse {
     id: String,
+    org_id: String,
     created_at: chrono::DateTime<Utc>,
     node_count: i64,
     invite_count: i64,
@@ -640,17 +653,16 @@ struct NetworkResponse {
 
 async fn network_list(
     State(state): State<AppState>,
-    Extension(identity): Extension<AuthIdentity>,
+    headers: HeaderMap,
+    Query(query): Query<NetworkListQuery>,
 ) -> Response {
-    let networks = if identity.is_admin {
-        state.store.network_list().await
-    } else {
-        let subject = match membership_subject(&identity) {
-            Ok(subject) => subject,
-            Err(_) => return plain_error(StatusCode::UNAUTHORIZED, "unauthorized"),
-        };
-        state.store.network_list_by_member(&subject).await
+    let Some(org_id) = required_org_id(query.org_id) else {
+        return plain_error(StatusCode::BAD_REQUEST, "org_id required");
     };
+    if let Err(response) = authorize_network_request(&state, &headers, &org_id).await {
+        return response;
+    }
+    let networks = state.store.network_list_by_organization(&org_id).await;
 
     match networks {
         Ok(networks) => {
@@ -658,6 +670,7 @@ async fn network_list(
                 .into_iter()
                 .map(|network| NetworkResponse {
                     id: network.id,
+                    org_id: network.organization_id,
                     created_at: network.created_at,
                     node_count: network.node_count,
                     invite_count: network.invite_count,
@@ -671,66 +684,74 @@ async fn network_list(
 
 #[derive(Deserialize)]
 struct NetworkCreateRequest {
+    org_id: Option<String>,
     network_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct NetworkListQuery {
+    org_id: Option<String>,
 }
 
 async fn network_create(
     State(state): State<AppState>,
-    Extension(identity): Extension<AuthIdentity>,
+    headers: HeaderMap,
     body: Bytes,
 ) -> Response {
     let req = match serde_json::from_slice::<NetworkCreateRequest>(&body) {
         Ok(req) => req,
         Err(_) => return plain_error(StatusCode::BAD_REQUEST, "network_id required"),
     };
+    let Some(org_id) = required_org_id(req.org_id) else {
+        return plain_error(StatusCode::BAD_REQUEST, "org_id required");
+    };
     let network_id = req.network_id.unwrap_or_default().trim().to_string();
     if let Err(message) = validate_network_id(&network_id) {
         return plain_error(StatusCode::BAD_REQUEST, message);
     }
 
-    if identity.is_admin {
-        return match state.store.network_ensure(&network_id).await {
-            Ok(()) => Json(NetworkCreateResponse::created(network_id)).into_response(),
-            Err(_) => plain_error(StatusCode::INTERNAL_SERVER_ERROR, "internal error"),
-        };
+    if let Err(response) = authorize_network_request(&state, &headers, &org_id).await {
+        return response;
     }
+    match state.store.network_create_owned(&network_id, &org_id).await {
+        Ok(()) => Json(NetworkCreateResponse::created(network_id)).into_response(),
+        Err(StoreError::AlreadyExists) => {
+            plain_error(StatusCode::CONFLICT, "network already exists")
+        }
+        Err(_) => plain_error(StatusCode::INTERNAL_SERVER_ERROR, "internal error"),
+    }
+}
 
-    let subject = match membership_subject(&identity) {
-        Ok(subject) => subject,
-        Err(_) => return plain_error(StatusCode::UNAUTHORIZED, "unauthorized"),
-    };
+fn required_org_id(org_id: Option<String>) -> Option<String> {
+    org_id
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+}
 
-    if state.store.network_ensure(&network_id).await.is_err() {
-        return plain_error(StatusCode::INTERNAL_SERVER_ERROR, "internal error");
-    }
-    let count = match state.store.network_member_count(&network_id).await {
-        Ok(count) => count,
-        Err(_) => return plain_error(StatusCode::INTERNAL_SERVER_ERROR, "internal error"),
-    };
-    let member = match state.store.network_member_get(&network_id, &subject).await {
-        Ok(member) => member,
-        Err(_) => return plain_error(StatusCode::INTERNAL_SERVER_ERROR, "internal error"),
-    };
-    if count > 0 && member.is_none() {
-        return plain_error(StatusCode::CONFLICT, "network already claimed");
-    }
-    if member.is_none()
-        && state
-            .store
-            .network_member_upsert(NetworkMember {
-                network_id: network_id.clone(),
-                subject: subject.clone(),
-                role: NETWORK_ROLE_OWNER.to_string(),
-                created_at: Utc::now(),
-                created_by: subject,
-            })
+async fn authorize_network_request(
+    state: &AppState,
+    headers: &HeaderMap,
+    org_id: &str,
+) -> Result<(), Response> {
+    let credential = forwarded_mesh_credential(headers)
+        .map_err(|_| plain_error(StatusCode::UNAUTHORIZED, "unauthorized"))?;
+    let adapter = state
+        .mesh_authorization
+        .as_ref()
+        .ok_or_else(|| plain_error(StatusCode::SERVICE_UNAVAILABLE, "authorization unavailable"))?;
+    let context =
+        adapter
+            .resolve(org_id, credential)
             .await
-            .is_err()
-    {
-        return plain_error(StatusCode::INTERNAL_SERVER_ERROR, "internal error");
+            .map_err(|error| match error.status_code() {
+                StatusCode::UNAUTHORIZED => plain_error(StatusCode::UNAUTHORIZED, "unauthorized"),
+                StatusCode::FORBIDDEN => plain_error(StatusCode::FORBIDDEN, "forbidden"),
+                _ => plain_error(StatusCode::BAD_GATEWAY, "authorization unavailable"),
+            })?;
+    if context.org_id != org_id || !is_network_product_principal(&context) {
+        return Err(plain_error(StatusCode::FORBIDDEN, "forbidden"));
     }
-
-    Json(NetworkCreateResponse::created(network_id)).into_response()
+    Ok(())
 }
 
 #[derive(Serialize)]
@@ -3045,13 +3066,28 @@ mod tests {
             oidc_client_secret: None,
             oidc_allowed_groups: Vec::new(),
             database_url: None,
+            mesh_authorization: None,
+            local_authorization: Some(crate::LocalMeshAuthorizationConfig {
+                organization_id: "local-test-org".to_string(),
+                api_key_hash: codewire_server_core::auth::hash_api_key("cw_local-test"),
+                environment_id: "local-test-environment".to_string(),
+                environment_token_hash: crate::mesh_authorization::hash_local_environment_token(
+                    "local-test-environment-token",
+                ),
+            }),
         }
     }
 
     fn test_state(auth_mode: AuthMode, store: MemoryStore) -> AppState {
+        let config = test_config(auth_mode);
+        let mesh_authorization = MeshAuthorizationAdapter::from_config(
+            config.mesh_authorization.as_ref(),
+            config.local_authorization.as_ref(),
+        );
         AppState {
-            config: test_config(auth_mode),
+            config,
             store: std::sync::Arc::new(store),
+            mesh_authorization,
             tailnet_coord: TailnetCoordinator::new(),
             runtime_replay: RuntimeCredentialReplay::new(),
             oidc_client: OidcClient::new(),
@@ -3066,6 +3102,13 @@ mod tests {
         store
     }
 
+    async fn seed_network(store: &MemoryStore, network_id: &str) {
+        store
+            .network_create_owned(network_id, "local-test-org")
+            .await
+            .unwrap();
+    }
+
     async fn seeded_member_store(
         token: &str,
         github_id: i64,
@@ -3074,6 +3117,7 @@ mod tests {
         role: &str,
     ) -> MemoryStore {
         let store = seeded_github_store(token, github_id, username).await;
+        seed_network(&store, network_id).await;
         store
             .network_member_upsert(NetworkMember {
                 network_id: network_id.to_string(),
@@ -3143,6 +3187,7 @@ mod tests {
         peer_url: &str,
         last_seen_at: chrono::DateTime<Utc>,
     ) {
+        seed_network(store, network_id).await;
         store
             .node_register(NodeRecord {
                 network_id: network_id.to_string(),
@@ -3431,9 +3476,11 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/api/v1/networks")
-                    .header(AUTHORIZATION, "Bearer sess_member")
+                    .header(AUTHORIZATION, "Bearer cw_local-test")
                     .header("content-type", "application/json")
-                    .body(Body::from(r#"{"network_id":"project-alpha"}"#))
+                    .body(Body::from(
+                        r#"{"org_id":"local-test-org","network_id":"project-alpha"}"#,
+                    ))
                     .unwrap(),
             )
             .await
@@ -3449,8 +3496,8 @@ mod tests {
         let list = router
             .oneshot(
                 Request::builder()
-                    .uri("/api/v1/networks")
-                    .header(AUTHORIZATION, "Bearer sess_member")
+                    .uri("/api/v1/networks?org_id=local-test-org")
+                    .header(AUTHORIZATION, "Bearer cw_local-test")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -3466,26 +3513,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn network_list_scopes_non_admin_to_memberships() {
+    async fn network_list_requires_explicit_authorized_organization() {
         let store = seeded_github_store("sess_member", 101, "member").await;
-        store.network_ensure("network-a").await.unwrap();
-        store.network_ensure("network-b").await.unwrap();
-        store
-            .network_member_upsert(NetworkMember {
-                network_id: "network-a".to_string(),
-                subject: "github:101".to_string(),
-                role: NETWORK_ROLE_OWNER.to_string(),
-                created_at: Utc::now(),
-                created_by: "github:101".to_string(),
-            })
-            .await
-            .unwrap();
+        seed_network(&store, "network-a").await;
+        seed_network(&store, "network-b").await;
 
         let response = router_with_store(test_config(AuthMode::Token), std::sync::Arc::new(store))
             .oneshot(
                 Request::builder()
-                    .uri("/api/v1/networks")
-                    .header(AUTHORIZATION, "Bearer sess_member")
+                    .uri("/api/v1/networks?org_id=local-test-org")
+                    .header(AUTHORIZATION, "Bearer cw_local-test")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -3495,21 +3532,29 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let got: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(got.as_array().unwrap().len(), 1);
+        assert_eq!(got.as_array().unwrap().len(), 2);
         assert_eq!(got[0]["id"], "network-a");
+        assert_eq!(got[0]["org_id"], "local-test-org");
+
+        let denied = router_with_store(
+            test_config(AuthMode::Token),
+            std::sync::Arc::new(MemoryStore::new()),
+        )
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/networks?org_id=other-org")
+                .header(AUTHORIZATION, "Bearer cw_local-test")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(denied.status(), StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]
-    async fn network_create_rejects_claimed_network_for_outsider() {
-        let store = seeded_github_store("sess_owner", 101, "owner").await;
-        store
-            .upsert_github_session(
-                "sess_outsider",
-                202,
-                "outsider",
-                Utc::now() + Duration::hours(1),
-            )
-            .await;
+    async fn network_create_is_explicitly_owned_and_rejects_cross_organization() {
+        let store = MemoryStore::new();
         let router = router_with_store(test_config(AuthMode::Token), std::sync::Arc::new(store));
 
         let owner = router
@@ -3518,8 +3563,10 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/api/v1/networks")
-                    .header(AUTHORIZATION, "Bearer sess_owner")
-                    .body(Body::from(r#"{"network_id":"project-alpha"}"#))
+                    .header(AUTHORIZATION, "Bearer cw_local-test")
+                    .body(Body::from(
+                        r#"{"org_id":"local-test-org","network_id":"project-alpha"}"#,
+                    ))
                     .unwrap(),
             )
             .await
@@ -3531,15 +3578,38 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/api/v1/networks")
-                    .header(AUTHORIZATION, "Bearer sess_outsider")
-                    .body(Body::from(r#"{"network_id":"project-alpha"}"#))
+                    .header(AUTHORIZATION, "Bearer cw_local-test")
+                    .body(Body::from(
+                        r#"{"org_id":"other-org","network_id":"project-alpha"}"#,
+                    ))
                     .unwrap(),
             )
             .await
             .unwrap();
-        assert_eq!(outsider.status(), StatusCode::CONFLICT);
+        assert_eq!(outsider.status(), StatusCode::FORBIDDEN);
         let body = to_bytes(outsider.into_body(), usize::MAX).await.unwrap();
-        assert_eq!(&body[..], b"network already claimed\n");
+        assert_eq!(&body[..], b"forbidden\n");
+    }
+
+    #[tokio::test]
+    async fn network_management_rejects_the_local_environment_identity() {
+        let router = router_with_store(
+            test_config(AuthMode::Token),
+            std::sync::Arc::new(MemoryStore::new()),
+        );
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/networks?org_id=local-test-org")
+                    .header(AUTHORIZATION, "Bearer local-test-environment-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]
@@ -3707,6 +3777,8 @@ mod tests {
     #[tokio::test]
     async fn kv_routes_are_network_scoped_and_require_membership_like_go_relay() {
         let store = seeded_github_store("sess_member", 101, "member").await;
+        seed_network(&store, "network-a").await;
+        seed_network(&store, "network-b").await;
         store
             .upsert_github_session(
                 "sess_outsider",
@@ -4388,6 +4460,7 @@ mod tests {
 
     async fn seed_invite(store: &MemoryStore, token: &str, network_id: &str, uses: i32) {
         let now = Utc::now();
+        seed_network(store, network_id).await;
         store
             .invite_create(Invite {
                 network_id: network_id.to_string(),
@@ -4486,6 +4559,7 @@ mod tests {
     #[tokio::test]
     async fn network_join_preserves_existing_owner_role() {
         let store = seeded_github_store("sess_owner", 101, "owner").await;
+        seed_network(&store, "network-invite").await;
         store
             .network_member_upsert(NetworkMember {
                 network_id: "network-invite".to_string(),
@@ -4798,6 +4872,8 @@ mod tests {
                 Utc::now() + Duration::hours(1),
             )
             .await;
+        seed_network(&store, "network-a").await;
+        seed_network(&store, "network-b").await;
         store
             .network_member_upsert(NetworkMember {
                 network_id: "network-a".to_string(),
@@ -4966,6 +5042,7 @@ mod tests {
                 Utc::now() + Duration::hours(1),
             )
             .await;
+        seed_network(&store, "network-a").await;
         store
             .network_member_upsert(NetworkMember {
                 network_id: "network-a".to_string(),
@@ -5335,6 +5412,7 @@ mod tests {
                 Utc::now() + Duration::hours(1),
             )
             .await;
+        seed_network(&store, "network-a").await;
         store
             .network_member_upsert(NetworkMember {
                 network_id: "network-a".to_string(),

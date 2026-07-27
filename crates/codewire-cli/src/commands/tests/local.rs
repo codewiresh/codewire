@@ -30,8 +30,6 @@
             "http://127.0.0.1:19091",
             "--derp-listen",
             "127.0.0.1:19091",
-            "--auth-token",
-            "mesh-token",
             "--output",
             "json",
         ])
@@ -56,7 +54,6 @@
         assert_eq!(args.derp_url, "http://127.0.0.1:19091");
         assert_eq!(args.derp_listen, "127.0.0.1:19091");
         assert!(!args.no_derp);
-        assert_eq!(args.auth_token.as_deref(), Some("mesh-token"));
         assert!(matches!(args.output, OutputFormat::Json));
     }
 
@@ -74,7 +71,7 @@
     }
 
     #[test]
-    fn local_mesh_start_spec_defaults_to_loopback_and_token_mode_inputs() {
+    fn local_mesh_start_spec_defaults_to_loopback_and_explicit_local_identity() {
         let home = tempfile::tempdir().unwrap();
         let env = config::MapEnv::default();
         let paths = ResolvePaths::from_home_and_env(home.path().to_path_buf(), &env);
@@ -86,11 +83,11 @@
             derp_url: DEFAULT_LOCAL_DERP_URL.to_string(),
             derp_listen: DEFAULT_LOCAL_DERP_LISTEN_ADDR.to_string(),
             no_derp: false,
-            auth_token: None,
             output: OutputFormat::Text,
         };
 
-        let spec = local_mesh_start_spec(&paths, &args, "mesh-token".to_string()).unwrap();
+        let identity = config::ensure_local_mesh_identity(&paths.mesh_data_dir).unwrap();
+        let spec = local_mesh_start_spec(&paths, &args, identity.clone()).unwrap();
 
         assert_eq!(
             spec.binary,
@@ -98,7 +95,9 @@
         );
         assert_eq!(spec.base_url, "http://127.0.0.1:18090");
         assert_eq!(spec.listen_addr, "127.0.0.1:18090");
-        assert_eq!(spec.auth_token, "mesh-token");
+        assert_eq!(spec.auth_token, identity.api_key);
+        assert_eq!(spec.local_identity.organization_id, identity.organization_id);
+        assert!(spec.auth_token.starts_with("cw_"));
         assert_eq!(spec.log_path, paths.mesh_data_dir.join(LOCAL_MESH_LOG_FILE));
         let derp = spec.derp.expect("default managed DERP");
         assert_eq!(

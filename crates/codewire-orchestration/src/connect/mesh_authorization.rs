@@ -1,9 +1,8 @@
 //! Cluster-local canonical authorization receiver for hosted Mesh.
 //!
-//! WI-4A provides the receiver and its generated-service proof only. It does
-//! not mount this router in a runtime binary, configure a Mesh caller, or
-//! mutate hosted Mesh network ownership. A later authorized serving slice owns
-//! that topology atomically.
+//! WI-4A provided the receiver and its generated-service proof. WI-4B owns
+//! the runtime mount, Mesh caller, and explicit hosted network ownership
+//! bridge that consume this unchanged private service.
 
 use std::sync::Arc;
 

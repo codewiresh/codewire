@@ -476,6 +476,9 @@ run_deploy() {
   grep -Fq -- '--database-url="$DATABASE_URL"' <<<"$dev_mesh_render"
   grep -Fq 'name: DATABASE_URL' <<<"$dev_mesh_render"
   grep -Fq 'name: codewire-mesh-db-app' <<<"$dev_mesh_render"
+  grep -Fq 'name: CODEWIRE_MESH_AUTHORIZATION_URL' <<<"$dev_mesh_render"
+  grep -Fq 'http://codewire-orchestration.dev.svc.cluster.local:8085' <<<"$dev_mesh_render"
+  grep -Fq 'name: CODEWIRE_MESH_AUTHORIZATION_HMAC_SECRET' <<<"$dev_mesh_render"
   python3 scripts/checks/repo_checks.py production-source-ownership --self-test
 }
 

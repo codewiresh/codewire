@@ -23,6 +23,15 @@ spec:
                   name: http
     - http:
         paths:
+          # Exact primary-origin owner for the temporary Mesh network REST
+          # bridge. It must win over the broad /api orchestration fallback.
+          - path: /api/v1/networks
+            pathType: Exact
+            backend:
+              service:
+                name: codewire-mesh
+                port:
+                  name: http
           - path: /api
             pathType: Prefix
             backend:

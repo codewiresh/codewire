@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import json
 import unittest
 from collections.abc import Iterator
 
 import codewire
+import httpx
+from codewire.mesh import MeshClient
 from connectrpc.client import ConnectClientSync
 from connectrpc.code import Code
 from connectrpc.errors import ConnectError, ErrorDetail
@@ -390,3 +393,52 @@ class TransportTestCase(unittest.TestCase):
                     codewire_error_from_connect(ConnectError(code, "failed")).status,
                     status,
                 )
+
+
+class MeshNetworkTransportTestCase(unittest.TestCase):
+    def test_network_calls_transmit_an_exact_explicit_organization(self) -> None:
+        requests: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            if request.method == "POST":
+                return httpx.Response(200, request=request)
+            return httpx.Response(
+                200,
+                request=request,
+                json=[
+                    {
+                        "id": "network-one",
+                        "org_id": "org space/one",
+                        "created_at": "2026-01-01T00:00:00Z",
+                        "node_count": 0,
+                        "invite_count": 0,
+                    }
+                ],
+            )
+
+        http_client = httpx.Client(
+            base_url="https://mesh.example",
+            transport=httpx.MockTransport(handler),
+        )
+        client = MeshClient(
+            "https://mesh.example/", "cw_mesh_test", http_client=http_client
+        )
+        try:
+            client.networks.create("org space/one", "network-one")
+            networks = client.networks.list("org space/one")
+        finally:
+            client.close()
+            http_client.close()
+
+        self.assertEqual(len(requests), 2)
+        self.assertEqual(requests[0].method, "POST")
+        self.assertEqual(requests[0].url.path, "/api/v1/networks")
+        self.assertEqual(requests[0].headers["authorization"], "Bearer cw_mesh_test")
+        self.assertEqual(
+            json.loads(requests[0].content),
+            {"org_id": "org space/one", "network_id": "network-one"},
+        )
+        self.assertEqual(requests[1].method, "GET")
+        self.assertEqual(requests[1].url.params["org_id"], "org space/one")
+        self.assertEqual(networks[0].org_id, "org space/one")

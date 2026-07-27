@@ -13,6 +13,7 @@ resources:
   - ../../../deployments/k8s/billing
   - ../../../deployments/k8s/orchestration
   - ../../../deployments/k8s/coordinator
+  - mesh.yaml
   - postgres.yaml
   - db-migrate-job.yaml
   - temporal.yaml

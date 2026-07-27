@@ -37,6 +37,14 @@ codewire.localhost {
 		reverse_proxy localhost:8091
 	}
 
+	# Transitional Mesh network REST bridge. It is deliberately exact and
+	# precedes the broad /api fallback so the primary origin reaches Mesh while
+	# preserving its explicit organization authorization boundary.
+	@mesh_networks path /api/v1/networks
+	handle @mesh_networks {
+		reverse_proxy localhost:18090
+	}
+
 	# Billing service (codewire-billing binary). Transitional REST routes and
 	# the permanent Stripe webhook are matched before the broad /api fallback.
 	@billing path_regexp ^(/api/webhooks/stripe|/api/v1/admin/billing(/.*)?|/api/v1/billing/plans(/.*)?|/api/v1/organizations/[^/]+/billing(/.*)?|/api/v1/organizations/[^/]+/environments/usage)$

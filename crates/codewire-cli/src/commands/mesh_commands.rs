@@ -9,14 +9,18 @@ pub(crate) async fn handle_network_command(
 
     match command {
         NetworkCommand::List(args) => {
+            let org_id = trimmed_required(&args.org, "organization ID")?;
             let mesh = resolve_mesh(globals, &paths, &env, args.mesh_url, None)?;
-            let networks = MeshClient::new(&mesh)?.list_networks().await?;
+            let networks = MeshClient::new(&mesh)?.list_networks(org_id).await?;
             print_networks(&networks, mesh.selected_network.as_deref(), args.output)?;
         }
         NetworkCommand::Create(args) => {
             let network_id = trimmed_required(&args.name, "network name")?;
+            let org_id = trimmed_required(&args.org, "organization ID")?;
             let mesh = resolve_mesh(globals, &paths, &env, args.mesh_url, None)?;
-            MeshClient::new(&mesh)?.create_network(network_id).await?;
+            MeshClient::new(&mesh)?
+                .create_network(org_id, network_id)
+                .await?;
             if args.no_use {
                 eprintln!("Network {network_id:?} created");
             } else {
@@ -219,6 +223,7 @@ pub(crate) struct LocalMeshStartSpec {
     pub(crate) base_url: String,
     pub(crate) listen_addr: String,
     pub(crate) auth_token: String,
+    pub(crate) local_identity: config::LocalMeshIdentity,
     pub(crate) log_path: PathBuf,
     pub(crate) derp: Option<LocalDerpStartSpec>,
 }
@@ -395,13 +400,9 @@ pub(crate) fn handle_mesh_up(
         remove_local_mesh_runtime(&paths.mesh_data_dir)?;
     }
 
-    let auth_token = args
-        .auth_token
-        .as_deref()
-        .and_then(trimmed_str)
-        .map(str::to_string)
-        .unwrap_or_else(generate_mesh_auth_token);
-    let spec = local_mesh_start_spec(paths, &args, auth_token)?;
+    let local_identity = config::ensure_local_mesh_identity(&paths.mesh_data_dir)
+        .context("initialize standalone Mesh identity")?;
+    let spec = local_mesh_start_spec(paths, &args, local_identity)?;
     let derp = match spec.derp.as_ref() {
         Some(derp_spec) => Some(start_local_derp_process(derp_spec)?),
         None => None,
@@ -528,7 +529,7 @@ pub(crate) fn print_mesh_down_report(
 pub(crate) fn local_mesh_start_spec(
     paths: &ResolvePaths,
     args: &MeshUpArgs,
-    auth_token: String,
+    local_identity: config::LocalMeshIdentity,
 ) -> anyhow::Result<LocalMeshStartSpec> {
     let base_url = trimmed_required(&args.base_url, "base URL")?.to_string();
     let listen_addr = trimmed_required(&args.listen, "listen address")?.to_string();
@@ -547,7 +548,8 @@ pub(crate) fn local_mesh_start_spec(
         binary,
         base_url,
         listen_addr,
-        auth_token,
+        auth_token: local_identity.api_key.clone(),
+        local_identity,
         log_path: paths.mesh_data_dir.join(LOCAL_MESH_LOG_FILE),
         derp,
     })
@@ -601,10 +603,27 @@ pub(crate) fn start_local_mesh_process(spec: &LocalMeshStartSpec) -> anyhow::Res
         .arg(&spec.base_url)
         .arg("--listen")
         .arg(&spec.listen_addr)
-        .arg("--auth-mode")
-        .arg("token")
-        .arg("--auth-token")
-        .arg(&spec.auth_token)
+        // The local API key remains a standard cw_ credential. Keep it out
+        // of argv; only hash-only verification material reaches the Mesh
+        // process besides its normal local environment.
+        .env("CODEWIRE_MESH_AUTH_MODE", "token")
+        .env("CODEWIRE_MESH_AUTH_TOKEN", &spec.auth_token)
+        .env(
+            "CODEWIRE_MESH_LOCAL_ORGANIZATION_ID",
+            &spec.local_identity.organization_id,
+        )
+        .env(
+            "CODEWIRE_MESH_LOCAL_API_KEY_HASH",
+            spec.local_identity.api_key_hash(),
+        )
+        .env(
+            "CODEWIRE_MESH_LOCAL_ENVIRONMENT_ID",
+            &spec.local_identity.environment_id,
+        )
+        .env(
+            "CODEWIRE_MESH_LOCAL_ENVIRONMENT_TOKEN_HASH",
+            spec.local_identity.environment_token_hash(),
+        )
         .stdin(Stdio::null());
     if let Some(derp) = spec.derp.as_ref() {
         command.arg("--derp-url").arg(&derp.url);
@@ -822,10 +841,4 @@ pub(crate) fn local_process_is_running(pid: u32) -> bool {
     {
         false
     }
-}
-
-pub(crate) fn generate_mesh_auth_token() -> String {
-    let mut bytes = [0u8; 32];
-    OsRng.fill_bytes(&mut bytes);
-    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
 }

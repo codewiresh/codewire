@@ -128,6 +128,8 @@ mod tests {
             oidc_client_secret: None,
             oidc_allowed_groups: Vec::new(),
             database_url: None,
+            mesh_authorization: None,
+            local_authorization: None,
         }
     }
 

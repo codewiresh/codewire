@@ -25,7 +25,6 @@
   ],
   "pending": {
     "codewire.internal.v1.CoordinatorService": "TODO(connect-rpc WS18 WI-8C): flip primary coordinator callers and serving to the audience-package contract, then promote this entry to coordinator ownership.",
-    "codewire.internal.v1.MeshAuthorizationService": "TODO(connect-rpc WS18 WI-4): implement the cluster-local canonical authorization boundary, then classify its internal listener ownership.",
     "codewire.internal.v1.MeshCoordinatorService": "TODO(connect-rpc WS18 WI-8B): atomically serve and consume the Mesh coordinate contract, then classify its Mesh edge owner.",
     "codewire.v1.MeshGroupService": "TODO(connect-rpc WS18 WI-5): serve the retained Mesh group contract beside REST, then classify its Mesh edge owner.",
     "codewire.v1.MeshInviteService": "TODO(connect-rpc WS18 WI-5): serve the retained Mesh invite contract beside REST, then classify its Mesh edge owner.",
@@ -40,6 +39,11 @@
       "port": 8085
     },
     "codewire.internal.v1.GatewayBindingService": {
+      "binary": "orchestration",
+      "listener": "internal-connect",
+      "port": 8085
+    },
+    "codewire.internal.v1.MeshAuthorizationService": {
       "binary": "orchestration",
       "listener": "internal-connect",
       "port": 8085

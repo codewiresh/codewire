@@ -18,6 +18,15 @@ spec:
     - host: codewire.sh
       http:
         paths:
+          # Explicit transitional owner while MeshNetworkService is not
+          # mounted publicly yet. Keep this exact route ahead of /api.
+          - path: /api/v1/networks
+            pathType: Exact
+            backend:
+              service:
+                name: codewire-mesh
+                port:
+                  name: http
           - path: /api
             pathType: Prefix
             backend:

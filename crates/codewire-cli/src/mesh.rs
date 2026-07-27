@@ -63,16 +63,17 @@ impl MeshClient {
         })
     }
 
-    pub async fn list_networks(&self) -> anyhow::Result<Vec<Network>> {
-        self.get_json("api/v1/networks", &[], "list networks").await
+    pub async fn list_networks(&self, org_id: &str) -> anyhow::Result<Vec<Network>> {
+        self.get_json("api/v1/networks", &[("org_id", org_id)], "list networks")
+            .await
     }
 
-    pub async fn create_network(&self, network_id: &str) -> anyhow::Result<()> {
+    pub async fn create_network(&self, org_id: &str, network_id: &str) -> anyhow::Result<()> {
         let response = self
             .send_request_bytes(
                 self.http
                     .post(self.endpoint("api/v1/networks", &[])?)
-                    .json(&NetworkCreateRequest { network_id }),
+                    .json(&NetworkCreateRequest { org_id, network_id }),
                 "create network",
             )
             .await?;
@@ -290,6 +291,7 @@ impl MeshClient {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct Network {
     pub id: String,
+    pub org_id: String,
     pub created_at: String,
     pub node_count: i64,
     pub invite_count: i64,
@@ -346,6 +348,7 @@ pub struct RedeemedNodeEnrollment {
 
 #[derive(Serialize)]
 struct NetworkCreateRequest<'a> {
+    org_id: &'a str,
     network_id: &'a str,
 }
 
@@ -403,7 +406,7 @@ mod tests {
         let mut client = MeshClient::with_http(&resolved(&format!("http://{addr}")), http).unwrap();
         client.legacy_json_timeout = Duration::from_millis(50);
 
-        let err = client.list_networks().await.unwrap_err();
+        let err = client.list_networks("org-alpha").await.unwrap_err();
         server.abort();
         let message = format!("{err:#}");
         assert!(
@@ -418,6 +421,7 @@ mod tests {
             serde_json::json!([
                 {
                     "id": "project-alpha",
+                    "org_id": "org-alpha",
                     "created_at": "2026-07-04T04:00:00Z",
                     "node_count": 2,
                     "invite_count": 1
@@ -425,14 +429,14 @@ mod tests {
             ])
             .to_string(),
             |request| {
-                assert!(request.starts_with("GET /api/v1/networks HTTP/1.1"));
+                assert!(request.starts_with("GET /api/v1/networks?org_id=org-alpha HTTP/1.1"));
                 assert!(request.contains("authorization: Bearer mesh-token"));
             },
         )
         .await;
 
         let client = MeshClient::new(&resolved(&server)).unwrap();
-        let networks = client.list_networks().await.unwrap();
+        let networks = client.list_networks("org-alpha").await.unwrap();
 
         assert_eq!(networks.len(), 1);
         assert_eq!(networks[0].id, "project-alpha");
@@ -450,6 +454,7 @@ mod tests {
             |request| {
                 assert!(request.starts_with("POST /api/v1/networks HTTP/1.1"));
                 assert!(request.contains("authorization: Bearer mesh-token"));
+                assert!(request.contains(r#""org_id":"org-alpha""#));
                 assert!(request.contains(r#""network_id":"project-beta""#));
             },
         )
@@ -457,7 +462,10 @@ mod tests {
 
         let client = MeshClient::new(&resolved(&server)).unwrap();
 
-        client.create_network("project-beta").await.unwrap();
+        client
+            .create_network("org-alpha", "project-beta")
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

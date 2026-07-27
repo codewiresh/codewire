@@ -10,6 +10,7 @@ import { CodewireError } from "./types.js";
 
 export interface MeshNetwork {
   id: string;
+  org_id: string;
   created_at: string;
   node_count: number;
   invite_count: number;
@@ -193,17 +194,20 @@ function q(s: string): string {
 export class MeshNetworksService {
   constructor(private readonly http: MeshHttp) {}
 
-  /** Create or claim a network. */
-  async create(networkId: string): Promise<void> {
+  /** Create a network owned by orgId. */
+  async create(orgId: string, networkId: string): Promise<void> {
     await this.http.request("POST", "/api/v1/networks", {
-      body: { network_id: networkId },
+      body: { org_id: orgId, network_id: networkId },
     });
   }
 
-  /** List all networks the authenticated user is a member of. */
-  async list(): Promise<MeshNetwork[]> {
+  /** List networks owned by the exact orgId. */
+  async list(orgId: string): Promise<MeshNetwork[]> {
     return (
-      (await this.http.json<MeshNetwork[]>("GET", "/api/v1/networks")) ?? []
+      (await this.http.json<MeshNetwork[]>(
+        "GET",
+        `/api/v1/networks?org_id=${q(orgId)}`,
+      )) ?? []
     );
   }
 }

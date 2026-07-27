@@ -127,4 +127,20 @@ mesh_values_database="$(sed -n '/^database:$/,/^mesh:$/p' "$DEV_MESH_VALUES")"
 assert_mesh_database_input "dev Mesh HelmRelease" "$mesh_release_database"
 assert_mesh_database_input "dev Mesh values" "$mesh_values_database"
 
+assert_mesh_authorization_input() {
+  local label="$1"
+  local block="$2"
+  grep -Eq '^[[:space:]]+url: "?http://codewire-orchestration\.dev\.svc\.cluster\.local:8085"?$' <<<"$block" ||
+    fail "$label does not target the internal primary authorization listener"
+  grep -Eq '^[[:space:]]+name: "?codewire-secrets"?$' <<<"$block" ||
+    fail "$label does not use the existing HMAC Secret"
+  grep -Eq '^[[:space:]]+key: "?SESSION_SECRET"?$' <<<"$block" ||
+    fail "$label does not select the scoped HMAC key"
+}
+
+mesh_release_authorization="$(sed -n '/^    meshAuthorization:$/,/^    mesh:$/p' "$DEV_MESH_RELEASE")"
+mesh_values_authorization="$(sed -n '/^meshAuthorization:$/,/^mesh:$/p' "$DEV_MESH_VALUES")"
+assert_mesh_authorization_input "dev Mesh HelmRelease" "$mesh_release_authorization"
+assert_mesh_authorization_input "dev Mesh values" "$mesh_values_authorization"
+
 printf '[test-deploy-dev] SHA-only dispatch contract passed\n'

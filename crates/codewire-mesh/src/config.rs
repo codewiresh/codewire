@@ -1,3 +1,4 @@
+use std::fmt;
 use std::net::SocketAddr;
 use std::str::FromStr;
 
@@ -12,6 +13,61 @@ pub const OIDC_CLIENT_ID_ENV: &str = "CODEWIRE_MESH_OIDC_CLIENT_ID";
 pub const OIDC_CLIENT_SECRET_ENV: &str = "CODEWIRE_MESH_OIDC_CLIENT_SECRET";
 pub const OIDC_ALLOWED_GROUPS_ENV: &str = "CODEWIRE_MESH_OIDC_ALLOWED_GROUPS";
 pub const DATABASE_URL_ENV: &str = "DATABASE_URL";
+pub const MESH_AUTHORIZATION_URL_ENV: &str = "CODEWIRE_MESH_AUTHORIZATION_URL";
+pub const MESH_AUTHORIZATION_HMAC_SECRET_ENV: &str = "CODEWIRE_MESH_AUTHORIZATION_HMAC_SECRET";
+pub const LOCAL_ORGANIZATION_ID_ENV: &str = "CODEWIRE_MESH_LOCAL_ORGANIZATION_ID";
+pub const LOCAL_API_KEY_HASH_ENV: &str = "CODEWIRE_MESH_LOCAL_API_KEY_HASH";
+pub const LOCAL_ENVIRONMENT_ID_ENV: &str = "CODEWIRE_MESH_LOCAL_ENVIRONMENT_ID";
+pub const LOCAL_ENVIRONMENT_TOKEN_HASH_ENV: &str = "CODEWIRE_MESH_LOCAL_ENVIRONMENT_TOKEN_HASH";
+
+/// Configuration for the one cluster-local Mesh-to-primary authorization hop.
+///
+/// The HMAC secret is the existing shared service credential. It is never a
+/// product credential and its debug representation is deliberately redacted.
+#[derive(Clone, PartialEq, Eq)]
+pub struct MeshAuthorizationConfig {
+    pub url: String,
+    hmac_secret: String,
+}
+
+impl MeshAuthorizationConfig {
+    pub(crate) fn hmac_secret(&self) -> &str {
+        &self.hmac_secret
+    }
+}
+
+impl fmt::Debug for MeshAuthorizationConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("MeshAuthorizationConfig")
+            .field("url", &self.url)
+            .field("hmac_secret", &"[redacted]")
+            .finish()
+    }
+}
+
+/// Hash-only standalone Mesh authorization record supplied by the local
+/// launcher. The local credential values themselves remain in the hardened
+/// local CLI configuration; the Mesh process receives only verification data.
+#[derive(Clone, PartialEq, Eq)]
+pub struct LocalMeshAuthorizationConfig {
+    pub organization_id: String,
+    pub api_key_hash: String,
+    pub environment_id: String,
+    pub environment_token_hash: String,
+}
+
+impl fmt::Debug for LocalMeshAuthorizationConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("LocalMeshAuthorizationConfig")
+            .field("organization_id", &self.organization_id)
+            .field("api_key_hash", &"[redacted]")
+            .field("environment_id", &self.environment_id)
+            .field("environment_token_hash", &"[redacted]")
+            .finish()
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AuthMode {
@@ -55,6 +111,13 @@ pub struct Config {
     pub oidc_client_secret: Option<String>,
     pub oidc_allowed_groups: Vec<String>,
     pub database_url: Option<String>,
+    /// Present for the hosted deployment. It is mandatory whenever Mesh owns
+    /// a PostgreSQL database, so a hosted request can never fall back to
+    /// legacy Mesh-local credentials.
+    pub mesh_authorization: Option<MeshAuthorizationConfig>,
+    /// Present for the explicit standalone-local identity. Hosted and local
+    /// authorization configurations are mutually exclusive.
+    pub local_authorization: Option<LocalMeshAuthorizationConfig>,
 }
 
 impl Config {
@@ -95,6 +158,24 @@ impl Config {
                 .map(|raw| parse_csv_list(&raw))
                 .unwrap_or_default();
 
+        let database_url = first_non_empty([args.database_url, getenv(DATABASE_URL_ENV), None]);
+        let mesh_authorization = mesh_authorization_config(
+            getenv(MESH_AUTHORIZATION_URL_ENV),
+            getenv(MESH_AUTHORIZATION_HMAC_SECRET_ENV),
+        )?;
+        let local_authorization = local_authorization_config(
+            getenv(LOCAL_ORGANIZATION_ID_ENV),
+            getenv(LOCAL_API_KEY_HASH_ENV),
+            getenv(LOCAL_ENVIRONMENT_ID_ENV),
+            getenv(LOCAL_ENVIRONMENT_TOKEN_HASH_ENV),
+        )?;
+        if database_url.is_some() && mesh_authorization.is_none() {
+            return Err(ConfigError::HostedMeshAuthorizationRequired);
+        }
+        if mesh_authorization.is_some() && local_authorization.is_some() {
+            return Err(ConfigError::AmbiguousMeshAuthorization);
+        }
+
         Ok(Self {
             bind_addr,
             base_url,
@@ -108,7 +189,9 @@ impl Config {
                 getenv(OIDC_CLIENT_SECRET_ENV),
             ]),
             oidc_allowed_groups,
-            database_url: first_non_empty([args.database_url, getenv(DATABASE_URL_ENV), None]),
+            database_url,
+            mesh_authorization,
+            local_authorization,
         })
     }
 }
@@ -129,6 +212,20 @@ pub enum ConfigError {
     InvalidPort { value: String, message: String },
     #[error("invalid auth mode {0:?}; expected none, token, or oidc")]
     InvalidAuthMode(String),
+    #[error(
+        "{MESH_AUTHORIZATION_URL_ENV} and {MESH_AUTHORIZATION_HMAC_SECRET_ENV} must be set together"
+    )]
+    IncompleteMeshAuthorization,
+    #[error(
+        "{LOCAL_ORGANIZATION_ID_ENV}, {LOCAL_API_KEY_HASH_ENV}, {LOCAL_ENVIRONMENT_ID_ENV}, and {LOCAL_ENVIRONMENT_TOKEN_HASH_ENV} must be set together"
+    )]
+    IncompleteLocalMeshAuthorization,
+    #[error(
+        "hosted Mesh requires {MESH_AUTHORIZATION_URL_ENV} and {MESH_AUTHORIZATION_HMAC_SECRET_ENV}"
+    )]
+    HostedMeshAuthorizationRequired,
+    #[error("hosted and standalone Mesh authorization configuration are mutually exclusive")]
+    AmbiguousMeshAuthorization,
 }
 
 #[derive(Default)]
@@ -269,6 +366,48 @@ fn parse_csv_list(raw: &str) -> Vec<String> {
         .collect()
 }
 
+fn mesh_authorization_config(
+    url: Option<String>,
+    hmac_secret: Option<String>,
+) -> Result<Option<MeshAuthorizationConfig>, ConfigError> {
+    match (trim(url), trim(hmac_secret)) {
+        (None, None) => Ok(None),
+        (Some(url), Some(hmac_secret)) => {
+            validate_base_url(&url)?;
+            Ok(Some(MeshAuthorizationConfig { url, hmac_secret }))
+        }
+        _ => Err(ConfigError::IncompleteMeshAuthorization),
+    }
+}
+
+fn local_authorization_config(
+    organization_id: Option<String>,
+    api_key_hash: Option<String>,
+    environment_id: Option<String>,
+    environment_token_hash: Option<String>,
+) -> Result<Option<LocalMeshAuthorizationConfig>, ConfigError> {
+    match (
+        trim(organization_id),
+        trim(api_key_hash),
+        trim(environment_id),
+        trim(environment_token_hash),
+    ) {
+        (None, None, None, None) => Ok(None),
+        (
+            Some(organization_id),
+            Some(api_key_hash),
+            Some(environment_id),
+            Some(environment_token_hash),
+        ) => Ok(Some(LocalMeshAuthorizationConfig {
+            organization_id,
+            api_key_hash,
+            environment_id,
+            environment_token_hash,
+        })),
+        _ => Err(ConfigError::IncompleteLocalMeshAuthorization),
+    }
+}
+
 fn validate_base_url(value: &str) -> Result<(), ConfigError> {
     url::Url::parse(value)
         .map(|_| ())
@@ -360,6 +499,11 @@ mod tests {
                 (OIDC_CLIENT_SECRET_ENV, "secret-env"),
                 (OIDC_ALLOWED_GROUPS_ENV, "envs"),
                 (DATABASE_URL_ENV, "postgres://env/db"),
+                (
+                    MESH_AUTHORIZATION_URL_ENV,
+                    "http://orchestration.internal:8085",
+                ),
+                (MESH_AUTHORIZATION_HMAC_SECRET_ENV, "test-hmac"),
             ]),
         )
         .unwrap();
@@ -374,6 +518,12 @@ mod tests {
         assert_eq!(cfg.oidc_client_secret.as_deref(), Some("secret-flag"));
         assert_eq!(cfg.oidc_allowed_groups, ["devs", "operators"]);
         assert_eq!(cfg.database_url.as_deref(), Some("postgres://flag/db"));
+        assert_eq!(
+            cfg.mesh_authorization
+                .as_ref()
+                .map(|config| config.url.as_str()),
+            Some("http://orchestration.internal:8085")
+        );
     }
 
     #[test]

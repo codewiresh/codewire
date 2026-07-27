@@ -22,6 +22,7 @@ from codewire.errors import CodewireError
 @dataclass
 class MeshNetwork:
     id: str
+    org_id: str
     created_at: str
     node_count: int = 0
     invite_count: int = 0
@@ -213,14 +214,16 @@ class MeshNetworks:
     def __init__(self, http: _MeshHttp):
         self._http = http
 
-    def create(self, network_id: str) -> None:
-        """Create or claim a network."""
+    def create(self, org_id: str, network_id: str) -> None:
+        """Create a network owned by org_id."""
         self._http.json(
-            "POST", "/api/v1/networks", body={"network_id": network_id}
+            "POST", "/api/v1/networks", body={"org_id": org_id, "network_id": network_id}
         )
 
-    def list(self) -> list[MeshNetwork]:
-        rows = self._http.json("GET", "/api/v1/networks") or []
+    def list(self, org_id: str) -> list[MeshNetwork]:
+        rows = self._http.json(
+            "GET", f"/api/v1/networks?org_id={quote(org_id, safe='')}"
+        ) or []
         return [MeshNetwork(**row) for row in rows]
 
 

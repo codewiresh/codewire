@@ -1,0 +1,20 @@
+{
+  "$comment": "WS18 WI-4B exact primary-origin ownership fixture. The temporary REST bridge is deliberately limited to its published proto-shaped network path and must route to Mesh before the broad /api fallback. WI-5 replaces this bridge with generated MeshNetworkService routing.",
+  "path": "/api/v1/networks",
+  "method_paths": [
+    "GET /api/v1/networks",
+    "POST /api/v1/networks"
+  ],
+  "caddy_backends": {
+    "Caddyfile": "localhost:18090",
+    "Caddyfile.docker": "127.0.0.1:18090"
+  },
+  "kubernetes_backends": [
+    "deployments/k8s/base/ingress.yaml",
+    "deployments/k8s/overlays/local-kind/ingress.yaml",
+    "deployments/k8s/overlays/local-kind-static/ingress.yaml",
+    "tests/e2e/kind/ingress.yaml"
+  ],
+  "service": "codewire-mesh",
+  "port_name": "http"
+}

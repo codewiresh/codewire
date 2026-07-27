@@ -12,6 +12,13 @@ database:
   secretName: "codewire-mesh-db-app"
   uriKey: "uri"
 
+meshAuthorization:
+  url: "http://codewire-orchestration.prod.svc.cluster.local:8085"
+  hmacSecretRef:
+    name: "codewire-secrets"
+    key: "SESSION_SECRET"
+    optional: false
+
 mesh:
   baseURL: https://mesh.codewire.sh
   authMode: oidc

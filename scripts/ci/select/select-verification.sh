@@ -463,6 +463,14 @@ elif [ "$event_selected" = false ]; then
         select_token edge_kind
         recognized=true
         ;;
+      scripts/checks/contracts/mesh-primary-origin-rest-edge.json)
+        # This is a checked edge-routing fixture for the explicitly
+        # transitional Mesh REST bridge. It is neither OpenAPI input nor a
+        # generated proto contract; the edge family executes its owning
+        # checker and route assertions.
+        select_token edge_kind
+        recognized=true
+        ;;
       libs/api-client-go/*)
         select_token contracts
         select_token contracts_rest
@@ -825,6 +833,10 @@ elif [ "$event_selected" = false ]; then
         recognized=true
         ;;
       scripts/checks/contracts/connect-edge-ownership.json)
+        select_token edge_kind
+        recognized=true
+        ;;
+      scripts/checks/contracts/mesh-primary-origin-rest-edge.json)
         select_token edge_kind
         recognized=true
         ;;

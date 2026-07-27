@@ -247,6 +247,12 @@ async fn main() -> anyhow::Result<()> {
     let connect_admin = codewire_server_core::connect::ConnectAuthLayer::admin(auth.clone());
     let connect_environment =
         codewire_server_core::connect::ConnectAuthLayer::environment_token(auth.clone());
+    let mesh_authorization = codewire_server_core::connect::MeshAuthorizationLayer::new(
+        auth.clone(),
+        cfg.session_secret.clone(),
+        codewire_orchestration::connect::mesh_authorization::MESH_AUTHORIZATION_CALLER,
+        codewire_orchestration::connect::mesh_authorization::MESH_AUTHORIZATION_METHOD,
+    );
 
     // The internal listener is intentionally a minimal cluster-local surface:
     // no health, REST, public Connect, or edge-routed routes share port 8085.
@@ -259,6 +265,10 @@ async fn main() -> anyhow::Result<()> {
                 api_state.clone(),
             ),
             connect_environment,
+        )
+        .with_unary_connect_routes_mesh_authorization(
+            codewire_orchestration::connect::mesh_authorization::router(pool.clone()),
+            mesh_authorization,
         )
         .into_router();
 

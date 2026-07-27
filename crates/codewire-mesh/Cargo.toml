@@ -21,7 +21,9 @@ axum = { workspace = true, features = ["ws"] }
 base64 = { workspace = true }
 bytes = { workspace = true }
 chrono = { workspace = true }
+connectrpc = { workspace = true, features = ["client"] }
 codewire-network-auth = { workspace = true }
+codewire-proto = { workspace = true, features = ["client"] }
 codewire-tailnet = { workspace = true }
 codewire-server-core = { workspace = true }
 rand = { workspace = true }

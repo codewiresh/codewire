@@ -97,6 +97,7 @@ host_key_authorization_smoke() { record host-key-authz; }
 edge_routing_probes() { record edge; }
 connect_edge_probes() { record connect-edge; }
 internal_connect_listener_probes() { record internal-connect; }
+mesh_network_ownership_bridge_smoke() { record mesh-network-ownership; }
 coordinator_ingress_smoke() { record coordinator; }
 gateway_selector_smoke() { record gateway-selector; }
 billing_contract_through_ingress() { record billing; }
@@ -117,6 +118,7 @@ host-key-authz
 edge
 connect-edge
 internal-connect
+mesh-network-ownership
 coordinator
 gateway-selector
 billing

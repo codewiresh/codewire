@@ -34,6 +34,7 @@ pub struct SessionIdentity {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Network {
     pub id: String,
+    pub organization_id: String,
     pub created_at: DateTime<Utc>,
     pub node_count: i64,
     pub invite_count: i64,
@@ -328,6 +329,23 @@ pub trait MeshStore: Send + Sync + 'static {
     ) -> Result<Option<GroupPolicy>, StoreError>;
     async fn network_list(&self) -> Result<Vec<Network>, StoreError>;
     async fn network_list_by_member(&self, subject: &str) -> Result<Vec<Network>, StoreError>;
+    async fn network_list_by_organization(
+        &self,
+        organization_id: &str,
+    ) -> Result<Vec<Network>, StoreError>;
+    /// Creates a network for one exact organization, or confirms that an
+    /// existing row belongs to that same organization. It never invents an
+    /// owner or converts an existing row to a different organization.
+    async fn network_create_owned(
+        &self,
+        network_id: &str,
+        organization_id: &str,
+    ) -> Result<(), StoreError>;
+    async fn network_organization_id(&self, network_id: &str)
+    -> Result<Option<String>, StoreError>;
+    /// Compatibility name retained only while old non-network handlers remain
+    /// in the binary. It now verifies that an already-owned row exists; it
+    /// never creates a fallback network.
     async fn network_ensure(&self, network_id: &str) -> Result<(), StoreError>;
     async fn network_member_get(
         &self,
@@ -426,7 +444,7 @@ pub struct MemoryStore {
 
 #[derive(Default)]
 struct MemoryState {
-    networks: HashMap<String, DateTime<Utc>>,
+    networks: HashMap<String, MemoryNetwork>,
     kv: HashMap<(String, String, String), KVEntry>,
     groups: HashMap<(String, String), Group>,
     group_members: HashMap<(String, String, String, String), GroupMember>,
@@ -444,6 +462,12 @@ struct MemoryState {
     oidc_users: HashMap<String, MemoryOidcUser>,
     oidc_sessions: HashMap<String, OidcSession>,
     oidc_device_flows: HashMap<String, OidcDeviceFlow>,
+}
+
+#[derive(Clone)]
+struct MemoryNetwork {
+    organization_id: String,
+    created_at: DateTime<Utc>,
 }
 
 struct MemoryGitHubUser {
@@ -641,10 +665,9 @@ impl MeshStore for MemoryStore {
 
     async fn group_create(&self, group: Group) -> Result<(), StoreError> {
         let mut state = self.state.lock().await;
-        state
-            .networks
-            .entry(group.network_id.clone())
-            .or_insert_with(Utc::now);
+        if !state.networks.contains_key(&group.network_id) {
+            return Err(StoreError::NotFound);
+        }
         let key = (group.network_id.clone(), group.name.clone());
         if state.groups.contains_key(&key) {
             return Err(StoreError::AlreadyExists);
@@ -832,13 +855,58 @@ impl MeshStore for MemoryStore {
         Ok(networks_from_state(&state, Some(&allowed)))
     }
 
-    async fn network_ensure(&self, network_id: &str) -> Result<(), StoreError> {
+    async fn network_list_by_organization(
+        &self,
+        organization_id: &str,
+    ) -> Result<Vec<Network>, StoreError> {
+        let state = self.state.lock().await;
+        Ok(networks_from_state(&state, None)
+            .into_iter()
+            .filter(|network| network.organization_id == organization_id)
+            .collect())
+    }
+
+    async fn network_create_owned(
+        &self,
+        network_id: &str,
+        organization_id: &str,
+    ) -> Result<(), StoreError> {
+        let network_id = required_identifier(network_id, "network_id")?;
+        let organization_id = required_identifier(organization_id, "organization_id")?;
         let mut state = self.state.lock().await;
-        state
+        match state.networks.entry(network_id) {
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(MemoryNetwork {
+                    organization_id,
+                    created_at: Utc::now(),
+                });
+                Ok(())
+            }
+            std::collections::hash_map::Entry::Occupied(entry)
+                if entry.get().organization_id == organization_id =>
+            {
+                Ok(())
+            }
+            std::collections::hash_map::Entry::Occupied(_) => Err(StoreError::AlreadyExists),
+        }
+    }
+
+    async fn network_organization_id(
+        &self,
+        network_id: &str,
+    ) -> Result<Option<String>, StoreError> {
+        let state = self.state.lock().await;
+        Ok(state
             .networks
-            .entry(network_id.to_string())
-            .or_insert_with(Utc::now);
-        Ok(())
+            .get(network_id)
+            .map(|network| network.organization_id.clone()))
+    }
+
+    async fn network_ensure(&self, network_id: &str) -> Result<(), StoreError> {
+        self.network_organization_id(network_id)
+            .await?
+            .map(|_| ())
+            .ok_or(StoreError::NotFound)
     }
 
     async fn network_member_get(
@@ -864,10 +932,9 @@ impl MeshStore for MemoryStore {
 
     async fn network_member_upsert(&self, member: NetworkMember) -> Result<(), StoreError> {
         let mut state = self.state.lock().await;
-        state
-            .networks
-            .entry(member.network_id.clone())
-            .or_insert_with(Utc::now);
+        if !state.networks.contains_key(&member.network_id) {
+            return Err(StoreError::NotFound);
+        }
         let key = (member.network_id.clone(), member.subject.clone());
         if let Some(existing) = state.members.get_mut(&key) {
             existing.role = member.role;
@@ -879,10 +946,9 @@ impl MeshStore for MemoryStore {
 
     async fn invite_create(&self, invite: Invite) -> Result<(), StoreError> {
         let mut state = self.state.lock().await;
-        state
-            .networks
-            .entry(invite.network_id.clone())
-            .or_insert_with(Utc::now);
+        if !state.networks.contains_key(&invite.network_id) {
+            return Err(StoreError::NotFound);
+        }
         state.invites.insert(invite.token.clone(), invite);
         Ok(())
     }
@@ -938,10 +1004,9 @@ impl MeshStore for MemoryStore {
 
     async fn node_register(&self, node: NodeRecord) -> Result<(), StoreError> {
         let mut state = self.state.lock().await;
-        state
-            .networks
-            .entry(node.network_id.clone())
-            .or_insert_with(Utc::now);
+        if !state.networks.contains_key(&node.network_id) {
+            return Err(StoreError::NotFound);
+        }
         let key = (node.network_id.clone(), node.name.clone());
         if let Some(existing) = state.nodes.get_mut(&key) {
             existing.token = node.token;
@@ -1011,10 +1076,9 @@ impl MeshStore for MemoryStore {
 
     async fn node_enrollment_create(&self, enrollment: NodeEnrollment) -> Result<(), StoreError> {
         let mut state = self.state.lock().await;
-        state
-            .networks
-            .entry(enrollment.network_id.clone())
-            .or_insert_with(Utc::now);
+        if !state.networks.contains_key(&enrollment.network_id) {
+            return Err(StoreError::NotFound);
+        }
         state
             .node_enrollments
             .insert(enrollment.token_hash.clone(), enrollment);
@@ -1183,11 +1247,8 @@ impl MeshStore for MemoryStore {
     }
 
     async fn access_grant_create(&self, grant: AccessGrant) -> Result<(), StoreError> {
+        self.network_ensure(&grant.network_id).await?;
         let mut state = self.state.lock().await;
-        state
-            .networks
-            .entry(grant.network_id.clone())
-            .or_insert_with(Utc::now);
         state
             .access_grants
             .insert((grant.network_id.clone(), grant.id.clone()), grant);
@@ -1255,11 +1316,8 @@ impl MeshStore for MemoryStore {
     }
 
     async fn task_event_create(&self, event: TaskEvent) -> Result<LatestTaskValue, StoreError> {
+        self.network_ensure(&event.network_id).await?;
         let mut state = self.state.lock().await;
-        state
-            .networks
-            .entry(event.network_id.clone())
-            .or_insert_with(Utc::now);
         state.next_task_seq += 1;
         let seq = state.next_task_seq;
         state.task_events.push(TaskWatchEvent {
@@ -1384,11 +1442,12 @@ fn networks_from_state(state: &MemoryState, allowed: Option<&HashSet<&str>>) -> 
     let mut networks = state
         .networks
         .iter()
-        .filter_map(|(id, created_at)| {
+        .filter_map(|(id, network)| {
             if allowed.is_none_or(|allowed| allowed.contains(id.as_str())) {
                 Some(Network {
                     id: id.clone(),
-                    created_at: *created_at,
+                    organization_id: network.organization_id.clone(),
+                    created_at: network.created_at,
                     node_count: state
                         .nodes
                         .keys()
@@ -1949,19 +2008,59 @@ impl MeshStore for PostgresMeshStore {
         rows_to_networks(rows)
     }
 
-    async fn network_ensure(&self, network_id: &str) -> Result<(), StoreError> {
-        sqlx::query(
+    async fn network_list_by_organization(
+        &self,
+        organization_id: &str,
+    ) -> Result<Vec<Network>, StoreError> {
+        let rows = sqlx::query(network_list_by_organization_sql())
+            .bind(Utc::now())
+            .bind(organization_id)
+            .fetch_all(&self.pool)
+            .await?;
+        rows_to_networks(rows)
+    }
+
+    async fn network_create_owned(
+        &self,
+        network_id: &str,
+        organization_id: &str,
+    ) -> Result<(), StoreError> {
+        let network_id = required_identifier(network_id, "network_id")?;
+        let organization_id = required_identifier(organization_id, "organization_id")?;
+        let matched: Option<String> = sqlx::query_scalar(
             r#"
-            INSERT INTO networks (network_id, created_at)
-            VALUES ($1, $2)
-            ON CONFLICT DO NOTHING
+            INSERT INTO networks (network_id, organization_id, created_at)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (network_id) DO UPDATE
+               SET organization_id = networks.organization_id
+             WHERE networks.organization_id = EXCLUDED.organization_id
+            RETURNING organization_id
             "#,
         )
         .bind(network_id)
+        .bind(organization_id)
         .bind(Utc::now())
-        .execute(&self.pool)
+        .fetch_optional(&self.pool)
         .await?;
-        Ok(())
+        matched.map(|_| ()).ok_or(StoreError::AlreadyExists)
+    }
+
+    async fn network_organization_id(
+        &self,
+        network_id: &str,
+    ) -> Result<Option<String>, StoreError> {
+        sqlx::query_scalar("SELECT organization_id FROM networks WHERE network_id = $1")
+            .bind(network_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(StoreError::from)
+    }
+
+    async fn network_ensure(&self, network_id: &str) -> Result<(), StoreError> {
+        self.network_organization_id(network_id)
+            .await?
+            .map(|_| ())
+            .ok_or(StoreError::NotFound)
     }
 
     async fn network_member_get(
@@ -2731,6 +2830,7 @@ fn network_list_sql(subject: Option<&str>) -> &'static str {
             r#"
             SELECT
                 n.network_id,
+                n.organization_id,
                 n.created_at,
                 COALESCE(node_counts.count, 0) AS node_count,
                 COALESCE(invite_counts.count, 0) AS invite_count
@@ -2753,6 +2853,7 @@ fn network_list_sql(subject: Option<&str>) -> &'static str {
             r#"
             SELECT
                 n.network_id,
+                n.organization_id,
                 n.created_at,
                 COALESCE(node_counts.count, 0) AS node_count,
                 COALESCE(invite_counts.count, 0) AS invite_count
@@ -2776,17 +2877,50 @@ fn network_list_sql(subject: Option<&str>) -> &'static str {
     }
 }
 
+fn network_list_by_organization_sql() -> &'static str {
+    r#"
+    SELECT
+        n.network_id,
+        n.organization_id,
+        n.created_at,
+        COALESCE(node_counts.count, 0) AS node_count,
+        COALESCE(invite_counts.count, 0) AS invite_count
+    FROM networks n
+    LEFT JOIN (
+        SELECT network_id, COUNT(*) AS count
+        FROM nodes
+        GROUP BY network_id
+    ) node_counts ON node_counts.network_id = n.network_id
+    LEFT JOIN (
+        SELECT network_id, COUNT(*) AS count
+        FROM invites
+        WHERE expires_at > $1
+        GROUP BY network_id
+    ) invite_counts ON invite_counts.network_id = n.network_id
+    WHERE n.organization_id = $2
+    ORDER BY n.network_id
+    "#
+}
+
 fn rows_to_networks(rows: Vec<sqlx::postgres::PgRow>) -> Result<Vec<Network>, StoreError> {
     rows.into_iter()
         .map(|row| {
             Ok(Network {
                 id: row.try_get("network_id")?,
+                organization_id: row.try_get("organization_id")?,
                 created_at: row.try_get("created_at")?,
                 node_count: row.try_get("node_count")?,
                 invite_count: row.try_get("invite_count")?,
             })
         })
         .collect()
+}
+
+fn required_identifier(value: &str, field: &str) -> Result<String, StoreError> {
+    let value = value.trim();
+    (!value.is_empty())
+        .then(|| value.to_owned())
+        .ok_or_else(|| StoreError::Invalid(format!("{field} required")))
 }
 
 fn row_to_kv_entry(row: sqlx::postgres::PgRow) -> Result<KVEntry, StoreError> {
@@ -2983,7 +3117,7 @@ mod migration_tests {
 
     use super::*;
 
-    const EXPECTED_MESH_MIGRATION_COUNT: usize = 1;
+    const EXPECTED_MESH_MIGRATION_COUNT: usize = 2;
 
     #[derive(Debug, PartialEq, Eq)]
     struct AppliedMigration {
@@ -3039,10 +3173,21 @@ mod migration_tests {
         sorted_unique.dedup();
         assert_eq!(versions, sorted_unique);
 
-        let initial = migrations[0];
-        assert_eq!(initial.version, 1);
-        assert_eq!(initial.description, "initial schema");
-        assert_eq!(initial.checksum.len(), 48);
+        assert_eq!(
+            migrations
+                .iter()
+                .map(|migration| (migration.version, migration.description.to_string()))
+                .collect::<Vec<_>>(),
+            vec![
+                (1, "initial schema".to_string()),
+                (2, "network organization ownership".to_string()),
+            ]
+        );
+        assert!(
+            migrations
+                .iter()
+                .all(|migration| migration.checksum.len() == 48)
+        );
     }
 
     #[tokio::test]
@@ -3052,16 +3197,20 @@ mod migration_tests {
         let result = async {
             let store = PostgresMeshStore::connect(&test_db.url).await?;
             let applied = applied_migrations(&store.pool).await?;
-            let registered = MESH_MIGRATOR
-                .iter()
-                .next()
-                .context("Mesh migrator must register its initial migration")?;
+            let registered: Vec<_> = MESH_MIGRATOR.iter().collect();
 
             anyhow::ensure!(applied.len() == EXPECTED_MESH_MIGRATION_COUNT);
-            anyhow::ensure!(applied[0].version == registered.version);
-            anyhow::ensure!(applied[0].description == registered.description);
-            anyhow::ensure!(applied[0].success);
-            anyhow::ensure!(applied[0].checksum == registered.checksum.as_ref());
+            anyhow::ensure!(
+                applied
+                    .iter()
+                    .zip(&registered)
+                    .all(|(applied, registered)| {
+                        applied.version == registered.version
+                            && applied.description == registered.description
+                            && applied.success
+                            && applied.checksum == registered.checksum.as_ref()
+                    })
+            );
 
             let schema_exists: bool =
                 sqlx::query_scalar("SELECT to_regclass('public.networks') IS NOT NULL")
@@ -3077,7 +3226,8 @@ mod migration_tests {
 
     #[tokio::test]
     #[ignore = "requires TEST_DATABASE_URL"]
-    async fn preledger_schema_gains_ledger_without_losing_data() -> anyhow::Result<()> {
+    async fn preledger_schema_with_unowned_network_fails_closed_without_backfill()
+    -> anyhow::Result<()> {
         let test_db = TestDatabase::create(&test_database_url()?).await?;
         let result = async {
             let pool = PgPoolOptions::new()
@@ -3091,19 +3241,24 @@ mod migration_tests {
                 .bind("preserved-network")
                 .execute(&pool)
                 .await?;
-            drop(pool);
-
-            let store = PostgresMeshStore::connect(&test_db.url).await?;
+            let startup = PostgresMeshStore::connect(&test_db.url).await;
+            anyhow::ensure!(
+                startup.is_err(),
+                "unowned pre-launch network unexpectedly migrated"
+            );
             let preserved: bool =
                 sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM networks WHERE network_id = $1)")
                     .bind("preserved-network")
-                    .fetch_one(&store.pool)
+                    .fetch_one(&pool)
                     .await?;
-            let applied = applied_migrations(&store.pool).await?;
+            let organization_id_column_exists: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'networks' AND column_name = 'organization_id')",
+            )
+            .fetch_one(&pool)
+            .await?;
 
             anyhow::ensure!(preserved);
-            anyhow::ensure!(applied.len() == EXPECTED_MESH_MIGRATION_COUNT);
-            anyhow::ensure!(applied[0].success);
+            anyhow::ensure!(!organization_id_column_exists);
             anyhow::Ok(())
         }
         .await;

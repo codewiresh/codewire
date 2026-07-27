@@ -8,7 +8,9 @@ use std::sync::Arc;
 use codewire_client::{
     FileCredentialStore, OAuthClient, RefreshingTokenProvider, StaticTokenProvider, TokenProvider,
 };
+use rand::RngCore;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use url::Url;
 
 pub const CW_CONFIG_DIR_ENV: &str = "CW_CONFIG_DIR";
@@ -359,6 +361,52 @@ pub struct MeshConfig {
     pub current_target: Option<CurrentTargetConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub node: Option<MeshNodeConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_identity: Option<LocalMeshIdentity>,
+}
+
+/// Durable standalone-Mesh identity. The file containing this record is
+/// created mode 0600; Debug intentionally never displays the raw credentials.
+#[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct LocalMeshIdentity {
+    pub organization_id: String,
+    pub api_key: String,
+    pub environment_id: String,
+    pub environment_token: String,
+}
+
+impl std::fmt::Debug for LocalMeshIdentity {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("LocalMeshIdentity")
+            .field("organization_id", &self.organization_id)
+            .field("api_key", &"[redacted]")
+            .field("environment_id", &self.environment_id)
+            .field("environment_token", &"[redacted]")
+            .finish()
+    }
+}
+
+impl LocalMeshIdentity {
+    pub fn api_key_hash(&self) -> String {
+        sha256_hex(&self.api_key)
+    }
+
+    pub fn environment_token_hash(&self) -> String {
+        sha256_hex(&self.environment_token)
+    }
+
+    fn is_complete(&self) -> bool {
+        [
+            self.organization_id.as_str(),
+            self.api_key.as_str(),
+            self.environment_id.as_str(),
+            self.environment_token.as_str(),
+        ]
+        .iter()
+        .all(|value| !value.trim().is_empty())
+            && self.api_key.starts_with("cw_")
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -1087,6 +1135,46 @@ pub fn load_mesh_config(data_dir: &Path) -> Result<MeshConfig, ConfigError> {
     value
         .try_into()
         .map_err(|source| ConfigError::ParseMesh { path, source })
+}
+
+/// Creates the one standalone-local organization and its approved machine and
+/// environment credentials once, then persists them in the hardened local
+/// config. It never derives identity from a network name or a hosted default.
+pub fn ensure_local_mesh_identity(data_dir: &Path) -> Result<LocalMeshIdentity, ConfigError> {
+    let mut config = load_mesh_config(data_dir)?;
+    if let Some(identity) = config.local_identity.as_ref()
+        && identity.is_complete()
+    {
+        return Ok(identity.clone());
+    }
+
+    let identity = new_local_mesh_identity();
+    config.local_identity = Some(identity.clone());
+    write_mesh_config(data_dir, &config)?;
+    Ok(identity)
+}
+
+fn new_local_mesh_identity() -> LocalMeshIdentity {
+    let mut api_key_bytes = [0u8; 32];
+    let mut environment_token_bytes = [0u8; 32];
+    rand::rngs::OsRng.fill_bytes(&mut api_key_bytes);
+    rand::rngs::OsRng.fill_bytes(&mut environment_token_bytes);
+    LocalMeshIdentity {
+        organization_id: format!("local-org-{}", uuid::Uuid::new_v4().simple()),
+        api_key: format!("cw_{}", hex_lower(&api_key_bytes)),
+        environment_id: format!("local-env-{}", uuid::Uuid::new_v4().simple()),
+        environment_token: hex_lower(&environment_token_bytes),
+    }
+}
+
+fn sha256_hex(value: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(value.as_bytes());
+    hex_lower(&hasher.finalize())
+}
+
+fn hex_lower(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 pub fn selected_mesh_network(paths: &ResolvePaths, env: &impl Env) -> Option<String> {

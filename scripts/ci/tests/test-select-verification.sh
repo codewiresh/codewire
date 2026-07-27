@@ -302,6 +302,8 @@ run_paths_case google_rpc_python_template pull_request refs/pull/1115/head false
   proto/buf.gen.google-rpc-python.yaml
 run_paths_case edge_ownership pull_request refs/pull/114/head false \
   'contracts contracts_proto edge_kind policy' scripts/checks/contracts/connect-edge-ownership.json
+run_paths_case mesh_primary_origin_rest_edge pull_request refs/pull/1141/head false \
+  'edge_kind policy' scripts/checks/contracts/mesh-primary-origin-rest-edge.json
 run_paths_case generated_connect_go pull_request refs/pull/111/head false \
   'contracts contracts_proto go_consumer_interop go_support policy' libs/gen-go/codewire/v1/api_key.pb.go
 run_paths_case retired_generated_connect_oracle_go pull_request refs/pull/1110/head false \

@@ -3,7 +3,13 @@ kind: Deployment
 metadata:
   name: {{ include "codewire-mesh.fullname" . }}
   labels:
-    {{- include "codewire-mesh.labels" . | nindent 4 }}
+      {{- include "codewire-mesh.labels" . | nindent 4 }}
+{{- if and .Values.database.enabled (not .Values.meshAuthorization.url) }}
+{{- fail "database-enabled Mesh requires meshAuthorization.url" }}
+{{- end }}
+{{- if and .Values.meshAuthorization.url (not .Values.meshAuthorization.hmacSecretRef.name) }}
+{{- fail "meshAuthorization.url requires meshAuthorization.hmacSecretRef.name" }}
+{{- end }}
 spec:
   replicas: {{ .Values.replicaCount }}
   strategy:
@@ -78,6 +84,19 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.database.secretName }}
                   key: {{ .Values.database.uriKey }}
+            {{- end }}
+            {{- if .Values.meshAuthorization.url }}
+            # Hosted Mesh resolves product credentials only through the
+            # cluster-local primary authorization service. This is an HMAC
+            # sidecar credential, never a product bearer.
+            - name: CODEWIRE_MESH_AUTHORIZATION_URL
+              value: {{ .Values.meshAuthorization.url | quote }}
+            - name: CODEWIRE_MESH_AUTHORIZATION_HMAC_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.meshAuthorization.hmacSecretRef.name }}
+                  key: {{ .Values.meshAuthorization.hmacSecretRef.key }}
+                  optional: {{ .Values.meshAuthorization.hmacSecretRef.optional | default false }}
             {{- end }}
             {{- if eq .Values.mesh.authMode "token" }}
             - name: CW_AUTH_TOKEN
