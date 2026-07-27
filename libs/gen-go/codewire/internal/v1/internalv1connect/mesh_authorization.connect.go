@@ -63,6 +63,7 @@ func NewMeshAuthorizationServiceClient(httpClient connect.HTTPClient, baseURL st
 			httpClient,
 			baseURL+MeshAuthorizationServiceResolveMeshAuthorizationProcedure,
 			connect.WithSchema(meshAuthorizationServiceMethods.ByName("ResolveMeshAuthorization")),
+			connect.WithIdempotency(connect.IdempotencyNoSideEffects),
 			connect.WithClientOptions(opts...),
 		),
 	}
@@ -99,6 +100,7 @@ func NewMeshAuthorizationServiceHandler(svc MeshAuthorizationServiceHandler, opt
 		MeshAuthorizationServiceResolveMeshAuthorizationProcedure,
 		svc.ResolveMeshAuthorization,
 		connect.WithSchema(meshAuthorizationServiceMethods.ByName("ResolveMeshAuthorization")),
+		connect.WithIdempotency(connect.IdempotencyNoSideEffects),
 		connect.WithHandlerOptions(opts...),
 	)
 	return "/codewire.internal.v1.MeshAuthorizationService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

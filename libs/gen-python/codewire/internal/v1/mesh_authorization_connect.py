@@ -58,7 +58,7 @@ class MeshAuthorizationServiceASGIApplication(ConnectASGIApplication[MeshAuthori
                         service_name="codewire.internal.v1.MeshAuthorizationService",
                         input=ResolveMeshAuthorizationRequest,
                         output=ResolveMeshAuthorizationResponse,
-                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                        idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
                     ),
                     function=svc.resolve_mesh_authorization,
                 ),
@@ -106,6 +106,7 @@ class MeshAuthorizationServiceClient(ConnectClient):
         *,
         headers: Headers | Mapping[str, str] | None = None, 
         timeout_ms: int | None = None,
+        use_get: bool = False,
     ) -> ResolveMeshAuthorizationResponse:
         return await self.execute_unary(
             request=request,
@@ -114,10 +115,11 @@ class MeshAuthorizationServiceClient(ConnectClient):
                 service_name="codewire.internal.v1.MeshAuthorizationService",
                 input=ResolveMeshAuthorizationRequest,
                 output=ResolveMeshAuthorizationResponse,
-                idempotency_level=IdempotencyLevel.UNKNOWN,
+                idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
             ),
             headers=headers,
             timeout_ms=timeout_ms,
+            use_get=use_get,
         )
 
 class MeshAuthorizationServiceSync(Protocol):
@@ -142,7 +144,7 @@ class MeshAuthorizationServiceWSGIApplication(ConnectWSGIApplication):
                         service_name="codewire.internal.v1.MeshAuthorizationService",
                         input=ResolveMeshAuthorizationRequest,
                         output=ResolveMeshAuthorizationResponse,
-                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                        idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
                     ),
                     function=service.resolve_mesh_authorization,
                 ),
@@ -190,6 +192,7 @@ class MeshAuthorizationServiceClientSync(ConnectClientSync):
         *,
         headers: Headers | Mapping[str, str] | None = None, 
         timeout_ms: int | None = None,
+        use_get: bool = False,
     ) -> ResolveMeshAuthorizationResponse:
         return self.execute_unary(
             request=request,
@@ -198,8 +201,9 @@ class MeshAuthorizationServiceClientSync(ConnectClientSync):
                 service_name="codewire.internal.v1.MeshAuthorizationService",
                 input=ResolveMeshAuthorizationRequest,
                 output=ResolveMeshAuthorizationResponse,
-                idempotency_level=IdempotencyLevel.UNKNOWN,
+                idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
             ),
             headers=headers,
             timeout_ms=timeout_ms,
+            use_get=use_get,
         )

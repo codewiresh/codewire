@@ -2244,14 +2244,51 @@ MESH_INTERNAL_SERVICE_METHODS = {
     "CoordinatorService": {"Coordinate"},
     "MeshCoordinatorService": {"Coordinate"},
 }
-MESH_READ_METHODS = {
-    "ListMeshNetworks",
-    "ListMeshNodes",
-    "ListMeshInvites",
-    "ListMeshGroups",
-    "GetMeshGroup",
-    "ListMeshKeyValues",
-    "GetMeshKeyValue",
+# Every declared Mesh RPC carries an explicit expected idempotency posture.
+# Keeping the internal services here matters as much as the public product
+# surface: a newly authored internal read must not escape the mechanical
+# NO_SIDE_EFFECTS contract merely because it is not exported by an SDK.
+MESH_RPC_IDEMPOTENCY = {
+    "MeshNetworkService": {
+        "ListMeshNetworks": True,
+        "CreateMeshNetwork": False,
+        "JoinMeshNetwork": False,
+    },
+    "MeshNodeService": {
+        "ListMeshNodes": True,
+        "RevokeMeshNode": False,
+        "CreateMeshNodeEnrollment": False,
+        "RedeemMeshNodeEnrollment": False,
+    },
+    "MeshInviteService": {
+        "ListMeshInvites": True,
+        "CreateMeshInvite": False,
+        "DeleteMeshInvite": False,
+    },
+    "MeshGroupService": {
+        "ListMeshGroups": True,
+        "CreateMeshGroup": False,
+        "GetMeshGroup": True,
+        "DeleteMeshGroup": False,
+        "SetMeshGroupPolicy": False,
+        "AddMeshGroupMember": False,
+        "RemoveMeshGroupMember": False,
+    },
+    "MeshKeyValueService": {
+        "ListMeshKeyValues": True,
+        "GetMeshKeyValue": True,
+        "SetMeshKeyValue": False,
+        "DeleteMeshKeyValue": False,
+    },
+    "MeshAuthorizationService": {
+        "ResolveMeshAuthorization": True,
+    },
+    "CoordinatorService": {
+        "Coordinate": False,
+    },
+    "MeshCoordinatorService": {
+        "Coordinate": False,
+    },
 }
 MESH_ORG_OWNED_RESOURCES = {
     "MeshNetwork",
@@ -2397,17 +2434,10 @@ def proto_package_boundary_failures(
     if public_method_count != 21:
         failures.append(f"public Mesh RPC count is {public_method_count}, expected 21")
 
-    annotations = {
-        method: annotated
-        for service, methods in services.items()
-        if service in MESH_PUBLIC_SERVICE_METHODS
-        for method, annotated in methods.items()
-    }
-    annotated_reads = {method for method, annotated in annotations.items() if annotated}
-    if annotated_reads != MESH_READ_METHODS:
+    if services != MESH_RPC_IDEMPOTENCY:
         failures.append(
-            "Mesh NO_SIDE_EFFECTS set differs: "
-            f"actual={sorted(annotated_reads)}, expected={sorted(MESH_READ_METHODS)}"
+            "Mesh RPC idempotency classification differs: "
+            f"actual={services}, expected={MESH_RPC_IDEMPOTENCY}"
         )
 
     for name in sorted(MESH_ORG_OWNED_RESOURCES | MESH_ORG_SCOPED_REQUESTS):
@@ -2551,7 +2581,21 @@ def proto_package_boundary_self_test(
         proto_package_boundary_failures(
             missing_read, ts_manifest, ts_index, python_manifest, sdk_sources
         ),
-        "NO_SIDE_EFFECTS set differs",
+        "idempotency classification differs",
+    )
+
+    missing_internal_read = dict(proto_sources)
+    missing_internal_read["proto/codewire/internal/v1/mesh_authorization.proto"] = (
+        missing_internal_read["proto/codewire/internal/v1/mesh_authorization.proto"].replace(
+            "    option idempotency_level = NO_SIDE_EFFECTS;\n", "", 1
+        )
+    )
+    require_failure(
+        "an internal read RPC without NO_SIDE_EFFECTS",
+        proto_package_boundary_failures(
+            missing_internal_read, ts_manifest, ts_index, python_manifest, sdk_sources
+        ),
+        "idempotency classification differs",
     )
 
     missing_org = dict(proto_sources)

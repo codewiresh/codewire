@@ -17,3 +17,12 @@ lint:
 breaking:
   use:
     - FILE
+  # WI-4A corrects the newly authored internal read's missing declaration.
+  # Buf regards unknown -> NO_SIDE_EFFECTS as a wire break, so keep this
+  # one historical transition out of RPC_SAME_IDEMPOTENCY_LEVEL. The Mesh
+  # source guard owns the stricter permanent rule: every declared public and
+  # internal Mesh RPC has the exact expected idempotency classification, with
+  # demonstrated-red coverage for this method.
+  ignore_only:
+    RPC_SAME_IDEMPOTENCY_LEVEL:
+      - codewire/internal/v1/mesh_authorization.proto

@@ -129,6 +129,24 @@ impl AppBuilder {
         self
     }
 
+    /// Mounts one all-unary, cluster-local generated service behind the
+    /// Mesh authorization HMAC/forwarded-metadata boundary.
+    ///
+    /// The boundary authenticates a scoped service hop and removes the raw
+    /// caller credential before Connect dispatch. This helper is deliberately
+    /// separate from product and environment mounts: it must never be used to
+    /// expose a public route or to give a handler access to raw headers.
+    pub fn with_unary_connect_routes_mesh_authorization(
+        mut self,
+        connect: connectrpc::Router,
+        authorization: crate::connect::MeshAuthorizationLayer,
+    ) -> Self {
+        self.connect_routes.push(
+            crate::connect::connect_unary_router_with_mesh_authorization(connect, authorization),
+        );
+        self
+    }
+
     /// Mounts the never-routed Connect conformance probe
     /// (`codewire.testing.v1.PingService`, doc 03 D8) when
     /// `CONNECT_TESTING_SURFACE=1`; a no-op otherwise, leaving the router

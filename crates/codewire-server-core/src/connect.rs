@@ -55,15 +55,18 @@ use axum::body::Body;
 use axum::extract::{Request, State};
 use axum::middleware::Next;
 use axum::response::Response;
+use base64::Engine as _;
 use http::{HeaderValue, Method, StatusCode, header};
 use sha2::{Digest, Sha256};
 
 use crate::auth::{
     AuthState, AuthUser, CredentialContext, EnvironmentIdentity, authenticate_environment_token,
-    bearer_token, require_product_access, resolve_authentication, session_cookie,
+    authenticate_product_credential, bearer_token, require_product_access, resolve_authentication,
+    session_cookie,
 };
 use crate::connect_error::{ConnectCode, ConnectError, ConnectErrorDetail};
 use crate::error::AppError;
+use crate::internal_hmac::verify_internal_hmac_token;
 
 /// `Accept-Post` value advertised on a 415 rejection: the Connect protocol
 /// content types this mount accepts (D9 — Connect only; gRPC and gRPC-Web
@@ -197,7 +200,7 @@ struct ValidatedRpcProtocol(&'static str);
 /// credential, mirroring `api/internal.rs`). User-facing mounts go through
 /// [`connect_router_with_auth`].
 pub fn connect_router(connect: connectrpc::Router) -> axum::Router {
-    build_connect_router(connect, None, ProtocolPolicy::ConnectOnly, None)
+    build_connect_router(connect, None, None, ProtocolPolicy::ConnectOnly, None)
 }
 
 /// [`connect_router`] with an explicit wire-protocol policy.
@@ -209,7 +212,7 @@ pub fn connect_router_with_protocol_policy(
     connect: connectrpc::Router,
     protocol_policy: ProtocolPolicy,
 ) -> axum::Router {
-    build_connect_router(connect, None, protocol_policy, None)
+    build_connect_router(connect, None, None, protocol_policy, None)
 }
 
 /// [`connect_router`] with a [`ConnectAuthLayer`] in front of the dispatcher
@@ -223,7 +226,7 @@ pub fn connect_router_with_auth(
     connect: connectrpc::Router,
     auth: ConnectAuthLayer,
 ) -> axum::Router {
-    build_connect_router(connect, Some(auth), ProtocolPolicy::ConnectOnly, None)
+    build_connect_router(connect, Some(auth), None, ProtocolPolicy::ConnectOnly, None)
 }
 
 /// [`connect_router_with_auth`] with an explicit wire-protocol policy.
@@ -237,7 +240,7 @@ pub fn connect_router_with_auth_and_protocol_policy(
     auth: ConnectAuthLayer,
     protocol_policy: ProtocolPolicy,
 ) -> axum::Router {
-    build_connect_router(connect, Some(auth), protocol_policy, None)
+    build_connect_router(connect, Some(auth), None, protocol_policy, None)
 }
 
 /// [`connect_router_with_auth`] for an all-unary product service.
@@ -256,6 +259,27 @@ pub fn connect_unary_router_with_auth(
     build_connect_router(
         connect,
         Some(auth),
+        None,
+        ProtocolPolicy::ConnectOnly,
+        Some(deadline_policy),
+    )
+}
+
+/// Builds an all-unary private Connect mount whose outer authentication layer
+/// validates the scoped HMAC service hop and removes forwarded credential
+/// metadata before generated-service dispatch. Handlers can observe only a
+/// typed [`MeshAuthorizationPrincipal`].
+pub fn connect_unary_router_with_mesh_authorization(
+    connect: connectrpc::Router,
+    authorization: MeshAuthorizationLayer,
+) -> axum::Router {
+    let deadline_policy = connectrpc::DeadlinePolicy::new()
+        .with_default_timeout(CONNECT_UNARY_SERVER_TIMEOUT)
+        .with_max(CONNECT_UNARY_SERVER_TIMEOUT);
+    build_connect_router(
+        connect,
+        None,
+        Some(authorization),
         ProtocolPolicy::ConnectOnly,
         Some(deadline_policy),
     )
@@ -264,6 +288,7 @@ pub fn connect_unary_router_with_auth(
 fn build_connect_router(
     connect: connectrpc::Router,
     auth: Option<ConnectAuthLayer>,
+    mesh_authorization: Option<MeshAuthorizationLayer>,
     protocol_policy: ProtocolPolicy,
     deadline_policy: Option<connectrpc::DeadlinePolicy>,
 ) -> axum::Router {
@@ -286,6 +311,9 @@ fn build_connect_router(
 
     if let Some(auth) = auth {
         router = auth.apply(router);
+    }
+    if let Some(authorization) = mesh_authorization {
+        router = authorization.apply(router);
     }
 
     // `.layer` wraps outside-in as written bottom-to-top, so the log event
@@ -487,6 +515,330 @@ impl ConnectAuthLayer {
                 async move { enforce_connect_auth(layer, req, next).await }
             },
         ))
+    }
+}
+
+/// Typed original-caller identity attached by [`MeshAuthorizationLayer`].
+///
+/// It contains no raw credential material. The private Mesh authorization
+/// service consumes this value plus the request's organization ID; it never
+/// reads an HTTP credential header after middleware dispatch.
+#[derive(Clone, Debug)]
+pub enum MeshAuthorizationPrincipal {
+    User {
+        user: AuthUser,
+        credential: CredentialContext,
+    },
+    Environment(EnvironmentIdentity),
+}
+
+/// Extracts the original caller identity established by
+/// [`MeshAuthorizationLayer`].
+pub fn mesh_authorization_principal(
+    ctx: &connectrpc::RequestContext,
+) -> Result<&MeshAuthorizationPrincipal, connectrpc::ConnectError> {
+    ctx.extensions()
+        .get::<MeshAuthorizationPrincipal>()
+        .ok_or_else(|| connectrpc::ConnectError::unauthenticated("request has no Mesh principal"))
+}
+
+/// Reserved binary metadata carrying the canonical browser session token.
+///
+/// Its value is standard base64 without padding. It exists only on the
+/// private Mesh-to-control-plane hop and is removed before Connect dispatch.
+pub const MESH_FORWARDED_SESSION_METADATA: &str = "codewire-forwarded-session-bin";
+
+/// Reserved binary metadata carrying the full canonical Authorization value.
+///
+/// Its value is standard base64 without padding. It is mutually exclusive
+/// with [`MESH_FORWARDED_SESSION_METADATA`] and is removed before dispatch.
+pub const MESH_FORWARDED_AUTHORIZATION_METADATA: &str = "codewire-forwarded-authorization-bin";
+
+/// HMAC-authenticated metadata boundary for the private Mesh authorization
+/// service.
+///
+/// The ordinary `Authorization` header is the short-lived HMAC service
+/// credential. Exactly one original caller credential must arrive in one of
+/// the reserved binary metadata lanes. The middleware validates the exact
+/// service/method scope, removes all raw credentials, resolves the original
+/// credential through canonical stores, and inserts only a typed principal.
+#[derive(Clone)]
+pub struct MeshAuthorizationLayer {
+    state: AuthState,
+    hmac_secret: String,
+    expected_service: String,
+    expected_method: String,
+}
+
+impl std::fmt::Debug for MeshAuthorizationLayer {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("MeshAuthorizationLayer")
+            .field("expected_service", &self.expected_service)
+            .field("expected_method", &self.expected_method)
+            .field("hmac_secret", &"[redacted]")
+            .finish()
+    }
+}
+
+impl MeshAuthorizationLayer {
+    /// Constructs the boundary for one private calling service and one exact
+    /// generated RPC method.
+    pub fn new(
+        state: AuthState,
+        hmac_secret: impl Into<String>,
+        expected_service: impl Into<String>,
+        expected_method: impl Into<String>,
+    ) -> Self {
+        Self {
+            state,
+            hmac_secret: hmac_secret.into(),
+            expected_service: expected_service.into(),
+            expected_method: expected_method.into(),
+        }
+    }
+
+    /// Applies the boundary inside the normal Connect content-type and
+    /// per-RPC observability layers.
+    pub fn apply(self, router: axum::Router) -> axum::Router {
+        let layer = Arc::new(self);
+        router.layer(axum::middleware::from_fn(
+            move |req: Request, next: Next| {
+                let layer = Arc::clone(&layer);
+                async move { enforce_mesh_authorization(layer, req, next).await }
+            },
+        ))
+    }
+}
+
+async fn enforce_mesh_authorization(
+    layer: Arc<MeshAuthorizationLayer>,
+    mut req: Request,
+    next: Next,
+) -> Response {
+    let request_id = req
+        .headers()
+        .get("x-request-id")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    // Never pass a credential-bearing header set to error rendering, tracing,
+    // or the generated dispatcher. This sanitized copy is the only header
+    // view used by a rejection below.
+    let mut safe_headers = req.headers().clone();
+    safe_headers.remove(header::AUTHORIZATION);
+    safe_headers.remove(header::COOKIE);
+    safe_headers.remove(MESH_FORWARDED_SESSION_METADATA);
+    safe_headers.remove(MESH_FORWARDED_AUTHORIZATION_METADATA);
+
+    if req.uri().path() != format!("/{}", layer.expected_method) {
+        return rejection_response(
+            &AppError::Unauthorized,
+            request_id.as_deref(),
+            &safe_headers,
+        );
+    }
+
+    let hmac_bearer = match exactly_one_header(req.headers(), header::AUTHORIZATION.as_str()) {
+        Ok(value) => value,
+        Err(error) => return rejection_response(&error, request_id.as_deref(), &safe_headers),
+    };
+    let hmac_bearer = match hmac_bearer
+        .strip_prefix("Bearer ")
+        .or_else(|| hmac_bearer.strip_prefix("bearer "))
+    {
+        Some(token) if !token.is_empty() => token,
+        None | Some(_) => {
+            return rejection_response(
+                &AppError::Unauthorized,
+                request_id.as_deref(),
+                &safe_headers,
+            );
+        }
+    };
+    if verify_internal_hmac_token(
+        &layer.hmac_secret,
+        hmac_bearer,
+        &layer.expected_service,
+        &layer.expected_method,
+        chrono::Utc::now(),
+    )
+    .is_err()
+    {
+        return rejection_response(
+            &AppError::Unauthorized,
+            request_id.as_deref(),
+            &safe_headers,
+        );
+    }
+
+    // A browser cookie belongs only in the dedicated binary metadata lane.
+    // Rejecting a raw Cookie prevents it surviving beside a typed principal.
+    if req.headers().contains_key(header::COOKIE) {
+        return rejection_response(
+            &AppError::Unauthorized,
+            request_id.as_deref(),
+            &safe_headers,
+        );
+    }
+
+    let forwarded = match forwarded_credential(req.headers()) {
+        Ok(credential) => credential,
+        Err(error) => return rejection_response(&error, request_id.as_deref(), &safe_headers),
+    };
+
+    // Remove both the hop and original credential before the request reaches
+    // Connect dispatch, error serialization, or handler code.
+    req.headers_mut().remove(header::AUTHORIZATION);
+    req.headers_mut().remove(header::COOKIE);
+    req.headers_mut().remove(MESH_FORWARDED_SESSION_METADATA);
+    req.headers_mut()
+        .remove(MESH_FORWARDED_AUTHORIZATION_METADATA);
+
+    let auth_timeout = connect_auth_resolution_timeout(req.headers());
+    let principal = match forwarded {
+        ForwardedCredential::Session(session) => bounded_authentication(
+            authenticate_product_credential(&layer.state, Some(session.as_str()), None),
+            auth_timeout,
+        )
+        .await
+        .map(|authentication| MeshAuthorizationPrincipal::User {
+            user: authentication.user,
+            credential: authentication.credential,
+        }),
+        ForwardedCredential::Authorization(authorization) => {
+            let bearer = match authorization
+                .as_str()
+                .strip_prefix("Bearer ")
+                .or_else(|| authorization.as_str().strip_prefix("bearer "))
+            {
+                Some(token) if !token.is_empty() => token,
+                None | Some(_) => {
+                    return rejection_response(
+                        &AppError::Unauthorized,
+                        request_id.as_deref(),
+                        &safe_headers,
+                    );
+                }
+            };
+            match bounded_authentication(
+                authenticate_product_credential(&layer.state, None, Some(bearer)),
+                auth_timeout,
+            )
+            .await
+            {
+                Ok(authentication) => Ok(MeshAuthorizationPrincipal::User {
+                    user: authentication.user,
+                    credential: authentication.credential,
+                }),
+                // Environment identities are not product credentials. Fall
+                // back only after an otherwise unrecognized bearer, never
+                // after an OAuth scope or API-key authorization denial.
+                Err(AuthResolutionFailure::Authentication(AppError::Unauthorized)) => {
+                    bounded_authentication(
+                        authenticate_environment_token(&layer.state, Some(bearer)),
+                        auth_timeout,
+                    )
+                    .await
+                    .map(MeshAuthorizationPrincipal::Environment)
+                }
+                Err(error) => Err(error),
+            }
+        }
+    };
+    let principal = match principal {
+        Ok(principal) => principal,
+        Err(failure) => {
+            return connect_auth_failure_response(
+                failure,
+                auth_timeout,
+                request_id.as_deref(),
+                &safe_headers,
+            );
+        }
+    };
+
+    let (credential, principal_evidence) = match &principal {
+        MeshAuthorizationPrincipal::User { user, credential } => (
+            RpcCredentialKind(credential.kind().as_str()),
+            RpcPrincipalEvidence::authenticated(&user.user_id, &BTreeSet::new()),
+        ),
+        MeshAuthorizationPrincipal::Environment(identity) => (
+            RpcCredentialKind("environment_token"),
+            RpcPrincipalEvidence::authenticated(&identity.user_id, &BTreeSet::new()),
+        ),
+    };
+    req.extensions_mut().insert(principal);
+    let mut response = next.run(req).await;
+    response.extensions_mut().insert(credential);
+    response.extensions_mut().insert(principal_evidence);
+    response
+}
+
+fn exactly_one_header<'a>(headers: &'a http::HeaderMap, name: &str) -> Result<&'a str, AppError> {
+    let mut values = headers.get_all(name).iter();
+    let value = values.next().ok_or(AppError::Unauthorized)?;
+    if values.next().is_some() {
+        return Err(AppError::Unauthorized);
+    }
+    value.to_str().map_err(|_| AppError::Unauthorized)
+}
+
+fn forwarded_credential(headers: &http::HeaderMap) -> Result<ForwardedCredential, AppError> {
+    let session = binary_metadata(headers, MESH_FORWARDED_SESSION_METADATA)?;
+    let authorization = binary_metadata(headers, MESH_FORWARDED_AUTHORIZATION_METADATA)?;
+    match (session, authorization) {
+        (Some(session), None) => Ok(ForwardedCredential::Session(RedactedCredential(session))),
+        (None, Some(authorization)) => Ok(ForwardedCredential::Authorization(RedactedCredential(
+            authorization,
+        ))),
+        _ => Err(AppError::Unauthorized),
+    }
+}
+
+fn binary_metadata(headers: &http::HeaderMap, name: &str) -> Result<Option<String>, AppError> {
+    let mut values = headers.get_all(name).iter();
+    let Some(value) = values.next() else {
+        return Ok(None);
+    };
+    if values.next().is_some() {
+        return Err(AppError::Unauthorized);
+    }
+    let encoded = value.to_str().map_err(|_| AppError::Unauthorized)?;
+    let decoded = base64::engine::general_purpose::STANDARD_NO_PAD
+        .decode(encoded)
+        .map_err(|_| AppError::Unauthorized)?;
+    String::from_utf8(decoded)
+        .map(Some)
+        .map_err(|_| AppError::Unauthorized)
+}
+
+struct RedactedCredential(String);
+
+impl RedactedCredential {
+    fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for RedactedCredential {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("[redacted]")
+    }
+}
+
+enum ForwardedCredential {
+    Session(RedactedCredential),
+    Authorization(RedactedCredential),
+}
+
+impl std::fmt::Debug for ForwardedCredential {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Session(_) => formatter.write_str("ForwardedCredential::Session([redacted])"),
+            Self::Authorization(_) => {
+                formatter.write_str("ForwardedCredential::Authorization([redacted])")
+            }
+        }
     }
 }
 
@@ -1081,6 +1433,30 @@ fn connect_code_for_http_status(status: StatusCode) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn mesh_authorization_debug_values_redact_hop_and_forwarded_credentials() {
+        let hop_secret = "test-mesh-hop-secret";
+        let forwarded_secret = "test-forwarded-credential";
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://codewire:codewire@localhost/codewire")
+            .expect("lazy PostgreSQL pool");
+        let layer = MeshAuthorizationLayer::new(
+            AuthState { pool },
+            hop_secret,
+            "codewire-mesh",
+            "codewire.internal.v1.MeshAuthorizationService/ResolveMeshAuthorization",
+        );
+        let forwarded =
+            ForwardedCredential::Authorization(RedactedCredential(forwarded_secret.to_owned()));
+
+        let layer_debug = format!("{layer:?}");
+        let forwarded_debug = format!("{forwarded:?}");
+        assert!(!layer_debug.contains(hop_secret));
+        assert!(!forwarded_debug.contains(forwarded_secret));
+        assert!(layer_debug.contains("[redacted]"));
+        assert!(forwarded_debug.contains("[redacted]"));
+    }
 
     #[tokio::test]
     async fn stalled_authentication_is_bounded_and_renders_deadline_exceeded() {

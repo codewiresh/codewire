@@ -1536,6 +1536,7 @@ dependencies = [
  "codewire-proto",
  "connectrpc",
  "futures",
+ "hmac 0.12.1",
  "http",
  "hyper",
  "hyper-util",

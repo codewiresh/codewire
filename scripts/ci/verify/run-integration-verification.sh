@@ -178,6 +178,13 @@ run_database() {
   fi
   assert_passed_count "organization billing teardown matrix" "$logfile" 5
 
+  logfile="$RUN_DIR/mesh-authorization-receiver.log"
+  DATABASE_URL="$DATABASE_URL_RUST" \
+    cargo test --profile ci -p codewire-orchestration --lib \
+      connect::mesh_authorization::tests::generated_mesh_authorization_service_enforces_the_canonical_matrix \
+      -- --ignored --exact --nocapture | tee "$logfile"
+  assert_passed_count "Mesh authorization receiver matrix" "$logfile" 1
+
   logfile="$RUN_DIR/environment-external-cleanup.log"
   DATABASE_URL="$DATABASE_URL_RUST" \
     cargo test -p codewire-orchestration --test environment_external_cleanup \

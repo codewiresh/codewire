@@ -18,6 +18,7 @@ pub mod exec;
 pub mod file;
 pub mod github;
 pub mod internal;
+pub mod mesh_authorization;
 pub mod organizations;
 pub mod ports;
 pub mod presets;
