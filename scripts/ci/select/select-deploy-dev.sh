@@ -99,6 +99,7 @@ else
       .gitea/workflows/observe-*.yaml|\
       .gitea/workflows/support-images.yaml|\
       Makefile|\
+      libs/sdk-go/*|\
       libs/sdk-python/*|\
       libs/sdk-scripts/*|\
       libs/sdk-ts/*|\

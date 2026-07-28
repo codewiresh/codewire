@@ -59,6 +59,8 @@ printf '%s\n' \
 assert_selection deploy_workflow true push "$FIXTURE_REPO" \
   .gitea/workflows/deploy-dev.yaml
 assert_selection product_input true push "$ROOT" Cargo.toml
+assert_selection sdk_go_source false push "$ROOT" \
+  libs/sdk-go/mesh.go
 assert_selection sdk_python_source false push "$ROOT" \
   libs/sdk-python/codewire/client.py
 assert_selection sdk_tooling_source false push "$ROOT" \
@@ -89,10 +91,14 @@ assert_selection server_core_lifecycle_test false push "$ROOT" \
   crates/codewire-server-core/tests/org_deletion_lifecycle.rs
 assert_selection mixed_sdk_and_runtime true push "$ROOT" \
   libs/sdk-python/codewire/client.py crates/codewire-server-core/src/lib.rs
+assert_selection mixed_sdk_go_and_runtime true push "$ROOT" \
+  libs/sdk-go/mesh.go crates/codewire-server-core/src/lib.rs
 assert_selection mixed_sdk_tooling_and_runtime true push "$ROOT" \
   libs/sdk-scripts/filter-openapi.py crates/codewire-server-core/src/lib.rs
 assert_selection mixed_sdk_ts_and_runtime true push "$ROOT" \
   libs/sdk-ts/src/types.ts crates/codewire-server-core/src/lib.rs
+assert_selection unknown_path true push "$ROOT" \
+  unknown/path.txt
 
 # The selector's established manual-dispatch fail-safe remains unchanged.
 assert_selection manual_dispatch true workflow_dispatch "$ROOT" \
