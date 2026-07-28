@@ -18,8 +18,8 @@ spec:
     - host: codewire.sh
       http:
         paths:
-          # Explicit transitional owner while MeshNetworkService is not
-          # mounted publicly yet. Keep this exact route ahead of /api.
+          # Explicit transitional REST owner beside MeshNetworkService.
+          # Keep this exact route ahead of /api until the caller sunset.
           - path: /api/v1/networks
             pathType: Exact
             backend:
@@ -519,6 +519,41 @@ spec:
             backend:
               service:
                 name: codewire-billing
+                port:
+                  name: http
+          - path: /codewire\.v1\.MeshNetworkService/
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: codewire-mesh
+                port:
+                  name: http
+          - path: /codewire\.v1\.MeshNodeService/
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: codewire-mesh
+                port:
+                  name: http
+          - path: /codewire\.v1\.MeshInviteService/
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: codewire-mesh
+                port:
+                  name: http
+          - path: /codewire\.v1\.MeshGroupService/
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: codewire-mesh
+                port:
+                  name: http
+          - path: /codewire\.v1\.MeshKeyValueService/
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: codewire-mesh
                 port:
                   name: http
           - path: /codewire\.

@@ -546,11 +546,12 @@ deploy_overlay() {
   kubectl -n "$NS" rollout status deploy/codewire-coordinator --timeout=300s
 }
 
-mesh_network_ownership_bridge_smoke() {
-  log "proving Mesh primary-origin network bridge and private HMAC authorization"
+mesh_product_connect_ownership_smoke() {
+  log "proving Mesh primary-origin REST/Connect parity and private HMAC authorization"
   local api_key='cw_c0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0de'
   local network_id='mesh-kind-owned'
   local session_network_id='mesh-kind-session'
+  local invite_network_id='mesh-kind-invite'
 
   wait_edge_upstream mesh-networks "/api/v1/networks?org_id=org_contract_1" 401
 
@@ -582,6 +583,19 @@ mesh_network_ownership_bridge_smoke() {
     exit 1
   fi
 
+  # Invitation administration remains owner-only. Create the invitation target
+  # as the organization owner, then redeem its capability as the ordinary
+  # member through the machine credential below.
+  curl_settled -X POST \
+    -H 'cookie: codewire.session_token=contract-admin-session-token' \
+    -H 'content-type: application/json' \
+    -d "{\"org_id\":\"org_contract_1\",\"network_id\":\"${invite_network_id}\"}" \
+    "${KIND_INGRESS_URL}/api/v1/networks"
+  if [ "$PROBE_CODE" != "200" ] || [ "$PROBE_BODY" != "{\"status\":\"created\",\"network_id\":\"${invite_network_id}\"}" ]; then
+    echo "::error::Mesh owner-session invitation target create failed: code=$PROBE_CODE body=$PROBE_BODY"
+    exit 1
+  fi
+
   curl_settled -H "authorization: Bearer ${api_key}" \
     "${KIND_INGRESS_URL}/api/v1/networks?org_id=org_contract_1"
   if [ "$PROBE_CODE" != "200" ] || ! jq -e --arg network_id "$network_id" \
@@ -593,7 +607,9 @@ mesh_network_ownership_bridge_smoke() {
 
   curl_settled -H "authorization: Bearer ${api_key}" \
     "${KIND_INGRESS_URL}/api/v1/networks?org_id=org_contract_2"
-  if [ "$PROBE_CODE" != "403" ] || ! grep -qx 'forbidden' <<<"$PROBE_BODY"; then
+  if [ "$PROBE_CODE" != "403" ] || ! jq -e \
+      '.status == 403 and .code == "forbidden" and .detail == "forbidden"' \
+      <<<"$PROBE_BODY" >/dev/null; then
     echo "::error::exact-organization API key crossed the Mesh ownership boundary: code=$PROBE_CODE body=$PROBE_BODY"
     exit 1
   fi
@@ -605,7 +621,11 @@ mesh_network_ownership_bridge_smoke() {
   if [ "$PROBE_CODE" != "200" ] || ! jq -e \
       --arg api_key_network "$network_id" \
       --arg session_network "$session_network_id" \
-      'length == 2 and any(.[]; .id == $api_key_network and .org_id == "org_contract_1") and any(.[]; .id == $session_network and .org_id == "org_contract_1")' \
+      --arg invite_network "$invite_network_id" \
+      'length == 3 and
+       any(.[]; .id == $api_key_network and .org_id == "org_contract_1") and
+       any(.[]; .id == $session_network and .org_id == "org_contract_1") and
+       any(.[]; .id == $invite_network and .org_id == "org_contract_1")' \
       <<<"$PROBE_BODY" >/dev/null; then
     echo "::error::Mesh OAuth bridge did not return the exact organization-owned networks: code=$PROBE_CODE body=$PROBE_BODY"
     exit 1
@@ -614,7 +634,8 @@ mesh_network_ownership_bridge_smoke() {
   local rejected_credential='Bearer rejected-bridge-credential'
   curl_settled -H "authorization: ${rejected_credential}" \
     "${KIND_INGRESS_URL}/api/v1/networks?org_id=org_contract_1"
-  if [ "$PROBE_CODE" != "401" ] || ! grep -qx 'unauthorized' <<<"$PROBE_BODY" \
+  if [ "$PROBE_CODE" != "401" ] || ! jq -e \
+      '.status == 401 and .detail == "unauthorized"' <<<"$PROBE_BODY" >/dev/null \
     || [[ "$PROBE_BODY" == *"${rejected_credential}"* ]]; then
     echo "::error::Mesh bridge leaked or accepted a rejected primary credential: code=$PROBE_CODE body=$PROBE_BODY"
     exit 1
@@ -628,7 +649,89 @@ mesh_network_ownership_bridge_smoke() {
     echo "::error::Mesh network owner was not written atomically: got ${stored_owner:-empty}"
     exit 1
   fi
-  log "Mesh network bridge primary-origin/HMAC/exact-org proof OK"
+
+  # The generated primary-origin path must reach Mesh, forward the presented
+  # product credential through the same private HMAC receiver, and expose the
+  # one-use capability only in the create response.
+  curl_settled -X POST \
+    -H 'cookie: codewire.session_token=contract-admin-session-token' \
+    -H 'content-type: application/json' \
+    -d "{\"orgId\":\"org_contract_1\",\"networkId\":\"${invite_network_id}\"}" \
+    "${KIND_INGRESS_URL}/codewire.v1.MeshInviteService/CreateMeshInvite"
+  local invite_id invite_code
+  if [ "$PROBE_CODE" != "200" ] || ! jq -e \
+      '(.invite.id | type == "string" and length > 0) and
+       (.inviteCode | type == "string" and startswith("cw_inv_"))' \
+      <<<"$PROBE_BODY" >/dev/null; then
+    echo "::error::Mesh Connect invite create returned no clean one-use capability: code=$PROBE_CODE body=$PROBE_BODY"
+    exit 1
+  fi
+  invite_id="$(jq -er '.invite.id' <<<"$PROBE_BODY")"
+  invite_code="$(jq -er '.inviteCode' <<<"$PROBE_BODY")"
+  if [ "$invite_id" = "$invite_code" ] \
+    || jq -e '.invite | has("inviteCode") or has("inviteToken") or has("codeHash") or has("usesRemaining")' \
+      <<<"$PROBE_BODY" >/dev/null; then
+    echo "::error::Mesh Connect invite create violated the clean contract: code=$PROBE_CODE body=$PROBE_BODY"
+    exit 1
+  fi
+  if ! grep -qi '^x-codewire-service: mesh' "$PROBE_HEADERS"; then
+    echo "::error::MeshInviteService did not reach the Mesh workload"
+    cat "$PROBE_HEADERS"
+    exit 1
+  fi
+
+  curl_settled -X POST \
+    -H 'cookie: codewire.session_token=contract-admin-session-token' \
+    -H 'content-type: application/json' \
+    -d "{\"orgId\":\"org_contract_1\",\"networkId\":\"${invite_network_id}\"}" \
+    "${KIND_INGRESS_URL}/codewire.v1.MeshInviteService/ListMeshInvites"
+  if [ "$PROBE_CODE" != "200" ] || ! jq -e --arg invite_id "$invite_id" \
+      '(.invites | length) == 1 and .invites[0].id == $invite_id and
+       ((.invites[0] | has("inviteCode") or has("inviteToken") or has("codeHash") or has("usesRemaining")) | not)' \
+      <<<"$PROBE_BODY" >/dev/null; then
+    echo "::error::Mesh Connect/REST invitation state diverged: code=$PROBE_CODE body=$PROBE_BODY"
+    exit 1
+  fi
+
+  local persisted_invite forbidden_columns
+  persisted_invite="$(kubectl -n "$NS" exec deploy/postgres -- \
+    psql -U codewire -d codewire_mesh -tA -F '|' -c \
+      "SELECT id, organization_id, created_by_user_id, code_hash FROM invites WHERE id = '${invite_id}'")"
+  forbidden_columns="$(kubectl -n "$NS" exec deploy/postgres -- \
+    psql -U codewire -d codewire_mesh -tAc \
+      "SELECT count(*) FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'invites' AND column_name IN ('token', 'created_by', 'uses_remaining')")"
+  if [[ "$persisted_invite" != "${invite_id}|org_contract_1|usr_contract_admin|"* ]] \
+    || [[ "$persisted_invite" == *"${invite_code}"* ]] \
+    || [ "$forbidden_columns" != "0" ]; then
+    echo "::error::Mesh invitation persistence is not opaque-ID/hash-only: row=${persisted_invite:-missing} forbidden_columns=${forbidden_columns:-missing}"
+    exit 1
+  fi
+
+  curl_settled -X POST \
+    -H "authorization: Bearer ${api_key}" \
+    -H 'content-type: application/json' \
+    -d "{\"inviteCode\":\"${invite_code}\"}" \
+    "${KIND_INGRESS_URL}/codewire.v1.MeshNetworkService/JoinMeshNetwork"
+  if [ "$PROBE_CODE" != "200" ] || ! jq -e --arg network_id "$invite_network_id" \
+      '.network.id == $network_id and .network.orgId == "org_contract_1"' \
+      <<<"$PROBE_BODY" >/dev/null; then
+    echo "::error::Mesh Connect one-use invitation redemption failed: code=$PROBE_CODE body=$PROBE_BODY"
+    exit 1
+  fi
+
+  local invite_rows invite_provenance
+  invite_rows="$(kubectl -n "$NS" exec deploy/postgres -- \
+    psql -U codewire -d codewire_mesh -tAc \
+      "SELECT count(*) FROM invites WHERE id = '${invite_id}'")"
+  invite_provenance="$(kubectl -n "$NS" exec deploy/postgres -- \
+    psql -U codewire -d codewire_mesh -tAc \
+      "SELECT created_by FROM network_members WHERE network_id = '${invite_network_id}' AND subject = 'usr_contract_user'")"
+  if [ "$invite_rows" != "0" ] || [ "$invite_provenance" != "invite:${invite_id}" ] \
+    || [[ "$invite_provenance" == *"${invite_code}"* ]]; then
+    echo "::error::Mesh invitation consumption/provenance is not one-use and non-secret: rows=${invite_rows:-missing} provenance=${invite_provenance:-missing}"
+    exit 1
+  fi
+  log "Mesh primary-origin REST/Connect/HMAC/exact-org/invitation proof OK"
 }
 
 # Polls a path through the ingress until the expected status arrives —

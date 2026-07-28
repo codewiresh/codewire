@@ -172,7 +172,7 @@ run_migration_matrix() {
       | tee "$logfile"
   local passed_count
   passed_count="$(sed -nE 's/.*test result: ok\. ([0-9]+) passed.*/\1/p' "$logfile" | tail -n 1)"
-  if [[ "$passed_count" != "5" ]]; then
+  if [[ "$passed_count" != "7" ]]; then
     echo "::error::server-core migration matrix did not report its 5 passing tests"
     return 1
   fi
@@ -204,7 +204,7 @@ run_mesh_migration_ledger() {
   local passed_count
   passed_count="$(sed -nE 's/.*test result: ok\. ([0-9]+) passed.*/\1/p' "$logfile" | tail -n 1)"
   if [[ "$passed_count" != "5" ]]; then
-    echo "::error::Mesh migration ledger did not execute exactly 5 DB-backed tests"
+    echo "::error::Mesh migration ledger did not execute exactly 7 DB-backed tests"
     return 1
   fi
 }

@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::fmt;
 use std::sync::Arc;
 
 use anyhow::Context;
@@ -92,14 +93,31 @@ pub struct NetworkMember {
     pub created_by: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, PartialEq, Eq, Serialize)]
 pub struct Invite {
+    pub id: String,
     pub network_id: String,
-    pub token: String,
-    pub created_by: Option<i64>,
-    pub uses_remaining: i32,
+    pub organization_id: String,
+    pub created_by_user_id: String,
+    #[serde(skip_serializing)]
+    pub code_hash: String,
     pub expires_at: DateTime<Utc>,
     pub created_at: DateTime<Utc>,
+}
+
+impl fmt::Debug for Invite {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Invite")
+            .field("id", &self.id)
+            .field("network_id", &self.network_id)
+            .field("organization_id", &self.organization_id)
+            .field("created_by_user_id", &self.created_by_user_id)
+            .field("code_hash", &"[redacted]")
+            .field("expires_at", &self.expires_at)
+            .field("created_at", &self.created_at)
+            .finish()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -282,6 +300,12 @@ pub trait MeshStore: Send + Sync + 'static {
         namespace: &str,
         key: &str,
     ) -> Result<Option<Vec<u8>>, StoreError>;
+    async fn kv_get_entry(
+        &self,
+        network_id: &str,
+        namespace: &str,
+        key: &str,
+    ) -> Result<Option<KVEntry>, StoreError>;
     async fn kv_delete(
         &self,
         network_id: &str,
@@ -355,10 +379,23 @@ pub trait MeshStore: Send + Sync + 'static {
     async fn network_member_count(&self, network_id: &str) -> Result<i64, StoreError>;
     async fn network_member_upsert(&self, member: NetworkMember) -> Result<(), StoreError>;
     async fn invite_create(&self, invite: Invite) -> Result<(), StoreError>;
-    async fn invite_get(&self, token: &str) -> Result<Option<Invite>, StoreError>;
-    async fn invite_consume(&self, token: &str) -> Result<(), StoreError>;
+    async fn invite_get_by_id(
+        &self,
+        network_id: &str,
+        invite_id: &str,
+    ) -> Result<Option<Invite>, StoreError>;
+    async fn invite_get_by_code_hash(
+        &self,
+        code_hash: &str,
+        now: DateTime<Utc>,
+    ) -> Result<Option<Invite>, StoreError>;
+    async fn invite_consume(
+        &self,
+        code_hash: &str,
+        now: DateTime<Utc>,
+    ) -> Result<Option<Invite>, StoreError>;
     async fn invite_list(&self, network_id: &str) -> Result<Vec<Invite>, StoreError>;
-    async fn invite_delete(&self, network_id: &str, token: &str) -> Result<(), StoreError>;
+    async fn invite_delete(&self, network_id: &str, invite_id: &str) -> Result<(), StoreError>;
     async fn node_register(&self, node: NodeRecord) -> Result<(), StoreError>;
     async fn node_get(
         &self,
@@ -623,6 +660,25 @@ impl MeshStore for MemoryStore {
             ))
             .filter(|entry| entry.expires_at.is_none_or(|expires_at| expires_at > now))
             .map(|entry| entry.value.clone()))
+    }
+
+    async fn kv_get_entry(
+        &self,
+        network_id: &str,
+        namespace: &str,
+        key: &str,
+    ) -> Result<Option<KVEntry>, StoreError> {
+        let state = self.state.lock().await;
+        let now = Utc::now();
+        Ok(state
+            .kv
+            .get(&(
+                network_id.to_string(),
+                namespace.to_string(),
+                key.to_string(),
+            ))
+            .filter(|entry| entry.expires_at.is_none_or(|expires_at| expires_at > now))
+            .cloned())
     }
 
     async fn kv_delete(
@@ -946,35 +1002,61 @@ impl MeshStore for MemoryStore {
 
     async fn invite_create(&self, invite: Invite) -> Result<(), StoreError> {
         let mut state = self.state.lock().await;
-        if !state.networks.contains_key(&invite.network_id) {
+        let Some(network) = state.networks.get(&invite.network_id) else {
+            return Err(StoreError::NotFound);
+        };
+        if network.organization_id != invite.organization_id {
             return Err(StoreError::NotFound);
         }
-        state.invites.insert(invite.token.clone(), invite);
+        if state.invites.contains_key(&invite.id)
+            || state
+                .invites
+                .values()
+                .any(|existing| existing.code_hash == invite.code_hash)
+        {
+            return Err(StoreError::AlreadyExists);
+        }
+        state.invites.insert(invite.id.clone(), invite);
         Ok(())
     }
 
-    async fn invite_get(&self, token: &str) -> Result<Option<Invite>, StoreError> {
+    async fn invite_get_by_id(
+        &self,
+        network_id: &str,
+        invite_id: &str,
+    ) -> Result<Option<Invite>, StoreError> {
         let state = self.state.lock().await;
         let now = Utc::now();
         Ok(state
             .invites
-            .get(token)
-            .filter(|invite| invite.expires_at > now)
+            .get(invite_id)
+            .filter(|invite| invite.network_id == network_id && invite.expires_at > now)
             .cloned())
     }
 
-    async fn invite_consume(&self, token: &str) -> Result<(), StoreError> {
+    async fn invite_get_by_code_hash(
+        &self,
+        code_hash: &str,
+        now: DateTime<Utc>,
+    ) -> Result<Option<Invite>, StoreError> {
+        let state = self.state.lock().await;
+        Ok(state
+            .invites
+            .values()
+            .find(|invite| invite.code_hash == code_hash && invite.expires_at > now)
+            .cloned())
+    }
+
+    async fn invite_consume(
+        &self,
+        code_hash: &str,
+        now: DateTime<Utc>,
+    ) -> Result<Option<Invite>, StoreError> {
         let mut state = self.state.lock().await;
-        let now = Utc::now();
-        let invite = state.invites.get_mut(token).ok_or(StoreError::NotFound)?;
-        if invite.uses_remaining <= 0 || invite.expires_at <= now {
-            return Err(StoreError::NotFound);
-        }
-        invite.uses_remaining -= 1;
-        if invite.uses_remaining <= 0 {
-            state.invites.remove(token);
-        }
-        Ok(())
+        let invite_id = state.invites.iter().find_map(|(id, invite)| {
+            (invite.code_hash == code_hash && invite.expires_at > now).then(|| id.clone())
+        });
+        Ok(invite_id.and_then(|id| state.invites.remove(&id)))
     }
 
     async fn invite_list(&self, network_id: &str) -> Result<Vec<Invite>, StoreError> {
@@ -990,16 +1072,18 @@ impl MeshStore for MemoryStore {
         Ok(invites)
     }
 
-    async fn invite_delete(&self, network_id: &str, token: &str) -> Result<(), StoreError> {
+    async fn invite_delete(&self, network_id: &str, invite_id: &str) -> Result<(), StoreError> {
         let mut state = self.state.lock().await;
         if state
             .invites
-            .get(token)
+            .get(invite_id)
             .is_some_and(|invite| invite.network_id == network_id)
         {
-            state.invites.remove(token);
+            state.invites.remove(invite_id);
+            Ok(())
+        } else {
+            Err(StoreError::NotFound)
         }
-        Ok(())
     }
 
     async fn node_register(&self, node: NodeRecord) -> Result<(), StoreError> {
@@ -1640,6 +1724,38 @@ impl MeshStore for PostgresMeshStore {
         Ok(value)
     }
 
+    async fn kv_get_entry(
+        &self,
+        network_id: &str,
+        namespace: &str,
+        key: &str,
+    ) -> Result<Option<KVEntry>, StoreError> {
+        let row = sqlx::query(
+            r#"
+            SELECT key, value, expires_at
+            FROM kv
+            WHERE network_id = $1
+                AND namespace = $2
+                AND key = $3
+                AND (expires_at IS NULL OR expires_at > $4)
+            "#,
+        )
+        .bind(network_id)
+        .bind(namespace)
+        .bind(key)
+        .bind(Utc::now())
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(|row| {
+            Ok(KVEntry {
+                key: row.try_get("key")?,
+                value: row.try_get("value")?,
+                expires_at: row.try_get("expires_at")?,
+            })
+        })
+        .transpose()
+    }
+
     async fn kv_delete(
         &self,
         network_id: &str,
@@ -2123,80 +2239,98 @@ impl MeshStore for PostgresMeshStore {
     }
 
     async fn invite_create(&self, invite: Invite) -> Result<(), StoreError> {
-        self.network_ensure(&invite.network_id).await?;
-        sqlx::query(
+        let result = sqlx::query(
             r#"
             INSERT INTO invites
-                (network_id, token, created_by, uses_remaining, expires_at, created_at)
-            VALUES ($1, $2, $3, $4, $5, $6)
+                (id, network_id, organization_id, created_by_user_id,
+                 code_hash, expires_at, created_at)
+            SELECT $1, n.network_id, n.organization_id, $4, $5, $6, $7
+            FROM networks n
+            WHERE n.network_id = $2 AND n.organization_id = $3
             "#,
         )
+        .bind(&invite.id)
         .bind(&invite.network_id)
-        .bind(&invite.token)
-        .bind(invite.created_by)
-        .bind(invite.uses_remaining)
+        .bind(&invite.organization_id)
+        .bind(&invite.created_by_user_id)
+        .bind(&invite.code_hash)
         .bind(invite.expires_at)
         .bind(invite.created_at)
         .execute(&self.pool)
         .await?;
+        if result.rows_affected() == 0 {
+            return Err(StoreError::NotFound);
+        }
         Ok(())
     }
 
-    async fn invite_get(&self, token: &str) -> Result<Option<Invite>, StoreError> {
+    async fn invite_get_by_id(
+        &self,
+        network_id: &str,
+        invite_id: &str,
+    ) -> Result<Option<Invite>, StoreError> {
         let row = sqlx::query(
             r#"
-            SELECT network_id, token, created_by, uses_remaining, expires_at, created_at
+            SELECT id, network_id, organization_id, created_by_user_id,
+                   code_hash, expires_at, created_at
             FROM invites
-            WHERE token = $1 AND expires_at > $2
+            WHERE network_id = $1 AND id = $2 AND expires_at > $3
             "#,
         )
-        .bind(token)
+        .bind(network_id)
+        .bind(invite_id)
         .bind(Utc::now())
         .fetch_optional(&self.pool)
         .await?;
 
-        if let Some(row) = row {
-            Ok(Some(Invite {
-                network_id: row.try_get("network_id")?,
-                token: row.try_get("token")?,
-                created_by: row.try_get("created_by")?,
-                uses_remaining: row.try_get("uses_remaining")?,
-                expires_at: row.try_get("expires_at")?,
-                created_at: row.try_get("created_at")?,
-            }))
-        } else {
-            Ok(None)
-        }
+        row.map(row_to_invite).transpose()
     }
 
-    async fn invite_consume(&self, token: &str) -> Result<(), StoreError> {
-        let result = sqlx::query(
+    async fn invite_get_by_code_hash(
+        &self,
+        code_hash: &str,
+        now: DateTime<Utc>,
+    ) -> Result<Option<Invite>, StoreError> {
+        let row = sqlx::query(
             r#"
-            UPDATE invites
-            SET uses_remaining = uses_remaining - 1
-            WHERE token = $1 AND uses_remaining > 0 AND expires_at > $2
+            SELECT id, network_id, organization_id, created_by_user_id,
+                   code_hash, expires_at, created_at
+            FROM invites
+            WHERE code_hash = $1 AND expires_at > $2
             "#,
         )
-        .bind(token)
-        .bind(Utc::now())
-        .execute(&self.pool)
+        .bind(code_hash)
+        .bind(now)
+        .fetch_optional(&self.pool)
         .await?;
+        row.map(row_to_invite).transpose()
+    }
 
-        if result.rows_affected() == 0 {
-            return Err(StoreError::NotFound);
-        }
-
-        let _ = sqlx::query(r#"DELETE FROM invites WHERE token = $1 AND uses_remaining <= 0"#)
-            .bind(token)
-            .execute(&self.pool)
-            .await;
-        Ok(())
+    async fn invite_consume(
+        &self,
+        code_hash: &str,
+        now: DateTime<Utc>,
+    ) -> Result<Option<Invite>, StoreError> {
+        let row = sqlx::query(
+            r#"
+            DELETE FROM invites
+            WHERE code_hash = $1 AND expires_at > $2
+            RETURNING id, network_id, organization_id, created_by_user_id,
+                      code_hash, expires_at, created_at
+            "#,
+        )
+        .bind(code_hash)
+        .bind(now)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(row_to_invite).transpose()
     }
 
     async fn invite_list(&self, network_id: &str) -> Result<Vec<Invite>, StoreError> {
         let rows = sqlx::query(
             r#"
-            SELECT network_id, token, created_by, uses_remaining, expires_at, created_at
+            SELECT id, network_id, organization_id, created_by_user_id,
+                   code_hash, expires_at, created_at
             FROM invites
             WHERE network_id = $1 AND expires_at > $2
             ORDER BY created_at
@@ -2207,27 +2341,20 @@ impl MeshStore for PostgresMeshStore {
         .fetch_all(&self.pool)
         .await?;
 
-        rows.into_iter()
-            .map(|row| {
-                Ok(Invite {
-                    network_id: row.try_get("network_id")?,
-                    token: row.try_get("token")?,
-                    created_by: row.try_get("created_by")?,
-                    uses_remaining: row.try_get("uses_remaining")?,
-                    expires_at: row.try_get("expires_at")?,
-                    created_at: row.try_get("created_at")?,
-                })
-            })
-            .collect()
+        rows.into_iter().map(row_to_invite).collect()
     }
 
-    async fn invite_delete(&self, network_id: &str, token: &str) -> Result<(), StoreError> {
-        sqlx::query(r#"DELETE FROM invites WHERE network_id = $1 AND token = $2"#)
+    async fn invite_delete(&self, network_id: &str, invite_id: &str) -> Result<(), StoreError> {
+        let result = sqlx::query(r#"DELETE FROM invites WHERE network_id = $1 AND id = $2"#)
             .bind(network_id)
-            .bind(token)
+            .bind(invite_id)
             .execute(&self.pool)
             .await?;
-        Ok(())
+        if result.rows_affected() == 0 {
+            Err(StoreError::NotFound)
+        } else {
+            Ok(())
+        }
     }
 
     async fn node_register(&self, node: NodeRecord) -> Result<(), StoreError> {
@@ -2916,6 +3043,18 @@ fn rows_to_networks(rows: Vec<sqlx::postgres::PgRow>) -> Result<Vec<Network>, St
         .collect()
 }
 
+fn row_to_invite(row: sqlx::postgres::PgRow) -> Result<Invite, StoreError> {
+    Ok(Invite {
+        id: row.try_get("id")?,
+        network_id: row.try_get("network_id")?,
+        organization_id: row.try_get("organization_id")?,
+        created_by_user_id: row.try_get("created_by_user_id")?,
+        code_hash: row.try_get("code_hash")?,
+        expires_at: row.try_get("expires_at")?,
+        created_at: row.try_get("created_at")?,
+    })
+}
+
 fn required_identifier(value: &str, field: &str) -> Result<String, StoreError> {
     let value = value.trim();
     (!value.is_empty())
@@ -3113,11 +3252,14 @@ fn parse_task_timestamp(raw: &str) -> Result<DateTime<Utc>, StoreError> {
 
 #[cfg(test)]
 mod migration_tests {
+    use std::sync::Arc;
+
+    use sha2::{Digest, Sha256};
     use sqlx::postgres::PgPoolOptions;
 
     use super::*;
 
-    const EXPECTED_MESH_MIGRATION_COUNT: usize = 2;
+    const EXPECTED_MESH_MIGRATION_COUNT: usize = 3;
 
     #[derive(Debug, PartialEq, Eq)]
     struct AppliedMigration {
@@ -3181,6 +3323,7 @@ mod migration_tests {
             vec![
                 (1, "initial schema".to_string()),
                 (2, "network organization ownership".to_string()),
+                (3, "contract native invitations".to_string()),
             ]
         );
         assert!(
@@ -3259,6 +3402,194 @@ mod migration_tests {
 
             anyhow::ensure!(preserved);
             anyhow::ensure!(!organization_id_column_exists);
+            anyhow::Ok(())
+        }
+        .await;
+        let cleanup = test_db.drop().await;
+        result.and(cleanup)
+    }
+
+    #[tokio::test]
+    #[ignore = "requires TEST_DATABASE_URL"]
+    async fn contract_native_invitation_migration_rejects_nonempty_legacy_table()
+    -> anyhow::Result<()> {
+        let test_db = TestDatabase::create(&test_database_url()?).await?;
+        let result = async {
+            let pool = PgPoolOptions::new()
+                .max_connections(1)
+                .connect(&test_db.url)
+                .await?;
+            sqlx::raw_sql(include_str!("../migrations/001_initial_schema.sql"))
+                .execute(&pool)
+                .await?;
+            sqlx::query(
+                r#"
+                CREATE TABLE _sqlx_migrations (
+                    version BIGINT PRIMARY KEY,
+                    description TEXT NOT NULL,
+                    installed_on TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    success BOOLEAN NOT NULL,
+                    checksum BYTEA NOT NULL,
+                    execution_time BIGINT NOT NULL
+                )
+                "#,
+            )
+            .execute(&pool)
+            .await?;
+            let initial = MESH_MIGRATOR
+                .iter()
+                .next()
+                .context("initial migration missing")?;
+            sqlx::query(
+                r#"
+                INSERT INTO _sqlx_migrations
+                    (version, description, success, checksum, execution_time)
+                VALUES ($1, $2, true, $3, 0)
+                "#,
+            )
+            .bind(initial.version)
+            .bind(initial.description.as_ref())
+            .bind(initial.checksum.as_ref())
+            .execute(&pool)
+            .await?;
+            sqlx::query(
+                r#"
+                INSERT INTO invites
+                    (network_id, token, uses_remaining, expires_at, created_at)
+                VALUES ('legacy-network', 'legacy-plaintext-capability', 3,
+                        now() + interval '1 hour', now())
+                "#,
+            )
+            .execute(&pool)
+            .await?;
+
+            let startup = PostgresMeshStore::connect(&test_db.url).await;
+            anyhow::ensure!(
+                startup.is_err(),
+                "nonempty legacy invitation table unexpectedly migrated"
+            );
+            let preserved: String =
+                sqlx::query_scalar("SELECT token FROM invites LIMIT 1")
+                    .fetch_one(&pool)
+                    .await?;
+            let contract_id_exists: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'invites' AND column_name = 'id')",
+            )
+            .fetch_one(&pool)
+            .await?;
+            anyhow::ensure!(preserved == "legacy-plaintext-capability");
+            anyhow::ensure!(!contract_id_exists);
+            anyhow::Ok(())
+        }
+        .await;
+        let cleanup = test_db.drop().await;
+        result.and(cleanup)
+    }
+
+    #[tokio::test]
+    #[ignore = "requires TEST_DATABASE_URL"]
+    async fn contract_native_invitations_are_hash_only_owned_and_atomically_one_use()
+    -> anyhow::Result<()> {
+        let test_db = TestDatabase::create(&test_database_url()?).await?;
+        let result = async {
+            let store = Arc::new(PostgresMeshStore::connect(&test_db.url).await?);
+            store
+                .network_create_owned("network-alpha", "org-alpha")
+                .await?;
+            let raw_code = "cw_inv_contract_capability_must_never_persist";
+            let code_hash = format!("{:x}", Sha256::digest(raw_code.as_bytes()));
+            // PostgreSQL stores `timestamptz` at microsecond precision. Match
+            // that precision so the round-trip assertion compares product
+            // fields rather than Chrono's discarded sub-microsecond tail.
+            let now = DateTime::<Utc>::from_timestamp_micros(Utc::now().timestamp_micros())
+                .context("current time was outside Chrono's supported range")?;
+            let invitation = Invite {
+                id: "invite-opaque-alpha".to_string(),
+                network_id: "network-alpha".to_string(),
+                organization_id: "org-alpha".to_string(),
+                created_by_user_id: "user-primary-alpha".to_string(),
+                code_hash: code_hash.clone(),
+                expires_at: now + Duration::hours(1),
+                created_at: now,
+            };
+            store.invite_create(invitation.clone()).await?;
+
+            let stored = store
+                .invite_get_by_id("network-alpha", "invite-opaque-alpha")
+                .await?
+                .context("opaque invitation ID lookup failed")?;
+            anyhow::ensure!(stored == invitation);
+            anyhow::ensure!(
+                store
+                    .invite_get_by_id("network-other", "invite-opaque-alpha")
+                    .await?
+                    .is_none()
+            );
+            let persisted: (String, String, String, String, String) = sqlx::query_as(
+                r#"
+                SELECT id, network_id, organization_id, created_by_user_id, code_hash
+                FROM invites
+                WHERE id = $1
+                "#,
+            )
+            .bind("invite-opaque-alpha")
+            .fetch_one(&store.pool)
+            .await?;
+            anyhow::ensure!(persisted.0 == invitation.id);
+            anyhow::ensure!(persisted.1 == invitation.network_id);
+            anyhow::ensure!(persisted.2 == invitation.organization_id);
+            anyhow::ensure!(persisted.3 == invitation.created_by_user_id);
+            anyhow::ensure!(persisted.4 == code_hash);
+            anyhow::ensure!(
+                ![
+                    persisted.0,
+                    persisted.1,
+                    persisted.2,
+                    persisted.3,
+                    persisted.4
+                ]
+                .iter()
+                .any(|value| value.contains(raw_code))
+            );
+
+            let first_store = store.clone();
+            let first_hash = code_hash.clone();
+            let first =
+                tokio::spawn(async move { first_store.invite_consume(&first_hash, now).await });
+            let second_store = store.clone();
+            let second_hash = code_hash.clone();
+            let second =
+                tokio::spawn(async move { second_store.invite_consume(&second_hash, now).await });
+            let consumed = [first.await??, second.await??];
+            anyhow::ensure!(
+                consumed.iter().filter(|invite| invite.is_some()).count() == 1,
+                "one-use invitation was not consumed exactly once"
+            );
+            anyhow::ensure!(
+                store
+                    .invite_get_by_id("network-alpha", "invite-opaque-alpha")
+                    .await?
+                    .is_none()
+            );
+
+            let expired_code = "cw_inv_expired_capability";
+            let expired_hash = format!("{:x}", Sha256::digest(expired_code.as_bytes()));
+            store
+                .invite_create(Invite {
+                    id: "invite-expired".to_string(),
+                    network_id: "network-alpha".to_string(),
+                    organization_id: "org-alpha".to_string(),
+                    created_by_user_id: "user-primary-alpha".to_string(),
+                    code_hash: expired_hash.clone(),
+                    expires_at: now - Duration::seconds(1),
+                    created_at: now - Duration::hours(1),
+                })
+                .await?;
+            anyhow::ensure!(
+                store.invite_consume(&expired_hash, now).await?.is_none(),
+                "expired invitation was consumed"
+            );
+            anyhow::ensure!(store.invite_list("network-alpha").await?.is_empty());
             anyhow::Ok(())
         }
         .await;

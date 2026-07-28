@@ -396,6 +396,41 @@ spec:
                 name: codewire-billing
                 port:
                   name: http
+          - path: /codewire\.v1\.MeshNetworkService/
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: codewire-mesh
+                port:
+                  name: http
+          - path: /codewire\.v1\.MeshNodeService/
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: codewire-mesh
+                port:
+                  name: http
+          - path: /codewire\.v1\.MeshInviteService/
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: codewire-mesh
+                port:
+                  name: http
+          - path: /codewire\.v1\.MeshGroupService/
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: codewire-mesh
+                port:
+                  name: http
+          - path: /codewire\.v1\.MeshKeyValueService/
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: codewire-mesh
+                port:
+                  name: http
           - path: /codewire\.
             pathType: ImplementationSpecific
             backend:

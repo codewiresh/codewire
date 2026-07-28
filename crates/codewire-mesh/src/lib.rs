@@ -1,6 +1,8 @@
 pub mod auth;
 pub mod config;
+mod connect;
 pub mod mesh_authorization;
+mod product;
 pub mod server;
 pub mod store;
 

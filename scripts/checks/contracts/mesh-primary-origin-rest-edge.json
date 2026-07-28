@@ -1,5 +1,5 @@
 {
-  "$comment": "WS18 WI-4B exact primary-origin ownership fixture. The temporary REST bridge is deliberately limited to its published proto-shaped network path and must route to Mesh before the broad /api fallback. WI-5 replaces this bridge with generated MeshNetworkService routing.",
+  "$comment": "WS18 WI-4B/WI-5 exact primary-origin ownership fixture. The temporary REST bridge remains deliberately limited to its published proto-shaped network path and routes to the same Mesh domain/store as generated MeshNetworkService until the caller flips and REST sunset delete it.",
   "path": "/api/v1/networks",
   "method_paths": [
     "GET /api/v1/networks",

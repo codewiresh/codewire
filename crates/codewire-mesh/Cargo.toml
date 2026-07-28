@@ -19,6 +19,7 @@ anyhow = { workspace = true }
 async-trait = { workspace = true }
 axum = { workspace = true, features = ["ws"] }
 base64 = { workspace = true }
+buffa-types = { workspace = true }
 bytes = { workspace = true }
 chrono = { workspace = true }
 connectrpc = { workspace = true, features = ["client"] }

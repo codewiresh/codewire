@@ -35,7 +35,7 @@ run_integrated_kind_suite() {
   edge_routing_probes
   connect_edge_probes
   internal_connect_listener_probes
-  mesh_network_ownership_bridge_smoke
+  mesh_product_connect_ownership_smoke
   coordinator_ingress_smoke
   gateway_selector_smoke
   billing_contract_through_ingress

@@ -1406,6 +1406,7 @@ dependencies = [
  "async-trait",
  "axum 0.8.9",
  "base64",
+ "buffa-types",
  "bytes",
  "chrono",
  "codewire-network-auth",

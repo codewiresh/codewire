@@ -56,6 +56,10 @@ codewire.localhost {
 	# (docs/plans/connect-rpc/03, D5). Routing is per-Service because
 	# packages span binaries. Billing-owned Services are matched before the
 	# orchestration fallback.
+	@connect_mesh path /codewire.v1.MeshNetworkService/* /codewire.v1.MeshNodeService/* /codewire.v1.MeshInviteService/* /codewire.v1.MeshGroupService/* /codewire.v1.MeshKeyValueService/*
+	handle @connect_mesh {
+		reverse_proxy localhost:18090
+	}
 	@connect_admin path /codewire.admin.v1.AdminService/*
 	handle @connect_admin {
 		reverse_proxy localhost:8084

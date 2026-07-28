@@ -1,5 +1,5 @@
 {
-  "$comment": "Connect service -> binary ownership map (docs/plans/connect-rpc/03, D5). The single checked-in source both the edge rules and scripts/checks/repo_checks.py connect-edge-routing read. Every Connect service declared under proto/codewire/** or proto/coordinator/** must appear in exactly one of 'owners', 'pending', or 'unrouted'. Owner values: 'orchestration' (reached through the /codewire. fallback unless named in 'explicit'; must never appear in a billing-targeted rule), 'billing' (needs an explicit billing-targeted rule in all six edge files; must never appear in an orchestration-targeted rule), 'coordinator' (needs an explicit :8090/codewire-coordinator rule plus h2c/GRPC/3600 shape in all six files), 'testing' (the D8 probe: never routed in Caddyfiles/base, explicit proof rules in the kind/local manifests only). 'explicit' records orchestration-owned services whose per-Service matcher is a workstream requirement. 'pending' lists services whose proto has merged but whose serving/edge wiring has not. 'unrouted' is the closed cluster-local listener exception: its record fixes binary, listener, and Service port and is rejected if it gains a public edge matcher or public-listener mount.",
+  "$comment": "Connect service -> binary ownership map (docs/plans/connect-rpc/03, D5). The single checked-in source both the edge rules and scripts/checks/repo_checks.py connect-edge-routing read. Every Connect service declared under proto/codewire/** or proto/coordinator/** must appear in exactly one of 'owners', 'pending', or 'unrouted'. Owner values: 'orchestration' (reached through the /codewire. fallback unless named in 'explicit'; must never appear in another binary's rule), 'billing' (needs an explicit billing-targeted rule in all six edge files), 'mesh' (needs an explicit :18090/codewire-mesh HTTP Connect rule in all six edge files), 'coordinator' (needs an explicit :8090/codewire-coordinator rule plus h2c/GRPC/3600 shape in all six files), 'testing' (the D8 probe: never routed in Caddyfiles/base, explicit proof rules in the kind/local manifests only). 'explicit' records services whose per-Service matcher is required. 'pending' lists services whose proto has merged but whose serving/edge wiring has not. 'unrouted' is the closed cluster-local listener exception: its record fixes binary, listener, and Service port and is rejected if it gains a public edge matcher or public-listener mount.",
   "owners": {
     "coordinator.v1.CoordinatorService": "coordinator",
     "codewire.admin.v1.AdminService": "orchestration",
@@ -14,6 +14,11 @@
     "codewire.v1.EnvironmentSessionService": "orchestration",
     "codewire.v1.ExecService": "orchestration",
     "codewire.v1.FileService": "orchestration",
+    "codewire.v1.MeshGroupService": "mesh",
+    "codewire.v1.MeshInviteService": "mesh",
+    "codewire.v1.MeshKeyValueService": "mesh",
+    "codewire.v1.MeshNetworkService": "mesh",
+    "codewire.v1.MeshNodeService": "mesh",
     "codewire.v1.OrganizationService": "orchestration",
     "codewire.v1.PortService": "orchestration",
     "codewire.v1.PresetService": "orchestration",
@@ -21,16 +26,16 @@
   },
   "explicit": [
     "codewire.admin.v1.AdminService",
-    "codewire.v1.EnvironmentSessionService"
+    "codewire.v1.EnvironmentSessionService",
+    "codewire.v1.MeshGroupService",
+    "codewire.v1.MeshInviteService",
+    "codewire.v1.MeshKeyValueService",
+    "codewire.v1.MeshNetworkService",
+    "codewire.v1.MeshNodeService"
   ],
   "pending": {
     "codewire.internal.v1.CoordinatorService": "TODO(connect-rpc WS18 WI-8C): flip primary coordinator callers and serving to the audience-package contract, then promote this entry to coordinator ownership.",
-    "codewire.internal.v1.MeshCoordinatorService": "TODO(connect-rpc WS18 WI-8B): atomically serve and consume the Mesh coordinate contract, then classify its Mesh edge owner.",
-    "codewire.v1.MeshGroupService": "TODO(connect-rpc WS18 WI-5): serve the retained Mesh group contract beside REST, then classify its Mesh edge owner.",
-    "codewire.v1.MeshInviteService": "TODO(connect-rpc WS18 WI-5): serve the retained Mesh invite contract beside REST, then classify its Mesh edge owner.",
-    "codewire.v1.MeshKeyValueService": "TODO(connect-rpc WS18 WI-5): serve the retained Mesh key-value contract beside REST, then classify its Mesh edge owner.",
-    "codewire.v1.MeshNetworkService": "TODO(connect-rpc WS18 WI-5): serve the retained Mesh network contract beside REST, then classify its Mesh edge owner.",
-    "codewire.v1.MeshNodeService": "TODO(connect-rpc WS18 WI-5): serve the retained Mesh node contract beside REST, then classify its Mesh edge owner."
+    "codewire.internal.v1.MeshCoordinatorService": "TODO(connect-rpc WS18 WI-8B): atomically serve and consume the Mesh coordinate contract, then classify its Mesh edge owner."
   },
   "unrouted": {
     "codewire.internal.v1.EnvironmentCredentialService": {

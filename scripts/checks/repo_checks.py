@@ -898,21 +898,22 @@ def is_raw_string_start(text: str, index: int) -> bool:
 
 MESH_SURFACE_REL = "scripts/checks/contracts/rest-surface-baseline.json"
 MESH_SERVER_REL = "crates/codewire-mesh/src/server.rs"
+MESH_CONNECT_REL = "crates/codewire-mesh/src/connect.rs"
 MESH_PRIMARY_ORIGIN_REST_EDGE_REL = (
     "scripts/checks/contracts/mesh-primary-origin-rest-edge.json"
 )
 MESH_EXPECTED_REGISTRATIONS = 24
 MESH_EXPECTED_OPERATIONS = 31
 MESH_EXPECTED_ROUTER_SHA256 = (
-    "9843c61fa097d3b04636391a4d7e6664d391deccc64d371dac7f13dca98a418c"
+    "f2f3b3e83dfb54682f64c8f475cba9af79deba2fcb09b5d89c0fba173a106120"
 )
 MESH_EXPECTED_SEMANTICS_SHA256 = (
-    "6f194abc4b31450c6caf0f32f487abb9591b559305fc0e7e0e6ab7b9b6b043c1"
+    "99ddd88fefff027aa6ead683ae9297c5644135c2b3480b85258e033ba65d9245"
 )
 MESH_EXPECTED_COUNTS = {
-    "route_registrations": 24,
+    "route_registrations": 37,
     "method_path_operations": 31,
-    "router_new_expressions": 2,
+    "router_new_expressions": 3,
     "router_merges": 1,
     "app_builder_route_mounts": 1,
     "caller_operation_references": {
@@ -940,15 +941,15 @@ MESH_EXPECTED_COUNTS = {
     "credential_operations": {
         "enrollment-code": 1,
         "invite-code": 1,
-        "mesh-identity": 15,
-        "mesh-identity-plus-invite-code": 1,
+        "mesh-identity": 1,
         "mesh-session-bearer-or-cookie": 1,
         "node-bearer": 1,
-        "node-or-mesh-identity": 5,
+        "node-or-mesh-identity": 2,
         "none": 2,
         "oidc-device-code": 0,
         "oidc-state-and-code": 1,
-        "primary-product-identity": 2,
+        "primary-product-identity": 19,
+        "primary-product-identity-plus-invite-code": 1,
         "runtime-credential": 1,
     },
     "disposition_operations": {"connect": 22, "delete": 9},
@@ -960,7 +961,39 @@ MESH_EXPECTED_COUNTS = {
     "operations_without_callers": 7,
     "wrapper_declaration_records": 12,
     "client_url_template_records": 65,
-    "client_url_template_occurrences": 81,
+    "client_url_template_occurrences": 82,
+}
+MESH_EXPECTED_CONNECT_METHODS = {
+    "MESH_NETWORK_SERVICE_SERVICE_NAME": {
+        "CreateMeshNetwork",
+        "JoinMeshNetwork",
+        "ListMeshNetworks",
+    },
+    "MESH_NODE_SERVICE_SERVICE_NAME": {
+        "CreateMeshNodeEnrollment",
+        "ListMeshNodes",
+        "RevokeMeshNode",
+    },
+    "MESH_INVITE_SERVICE_SERVICE_NAME": {
+        "CreateMeshInvite",
+        "DeleteMeshInvite",
+        "ListMeshInvites",
+    },
+    "MESH_GROUP_SERVICE_SERVICE_NAME": {
+        "AddMeshGroupMember",
+        "CreateMeshGroup",
+        "DeleteMeshGroup",
+        "GetMeshGroup",
+        "ListMeshGroups",
+        "RemoveMeshGroupMember",
+        "SetMeshGroupPolicy",
+    },
+    "MESH_KEY_VALUE_SERVICE_SERVICE_NAME": {
+        "DeleteMeshKeyValue",
+        "GetMeshKeyValue",
+        "ListMeshKeyValues",
+        "SetMeshKeyValue",
+    },
 }
 MESH_DECLARATION_ONLY_OPERATIONS = {
     ("get", "/api/v1/network-auth/bundle"),
@@ -1019,7 +1052,6 @@ MESH_FORBIDDEN_ROUTER_METHODS = (
     "put_service",
     "route_service",
     "trace_service",
-    "with_connect_routes",
     "with_connect_routes_auth",
     "with_connect_routes_auth_and_protocol_policy",
     "with_unary_connect_routes_auth",
@@ -1097,6 +1129,7 @@ def mesh_surface_failures(
         failures.append(
             f"production Mesh router uses unsupported .{method}(...) in {source}"
         )
+    mesh_connect_surface_failures(mesh_sources, server_source, failures)
     if len(registrations) != MESH_EXPECTED_REGISTRATIONS:
         failures.append(
             f"{MESH_SERVER_REL} has {len(registrations)} production route registrations, "
@@ -1433,6 +1466,16 @@ def mesh_surface_failures(
             f"{MESH_SERVER_REL} router_from_state must retain AppBuilder.with_health()"
         )
     compact_router_source = re.sub(r"\s+", "", sanitize_rust_source(router_source))
+    if (
+        compact_router_source.count(
+            ".with_connect_routes(crate::connect::router(state))"
+        )
+        != 1
+    ):
+        failures.append(
+            f"{MESH_SERVER_REL} router_from_state must mount exactly one retained "
+            "Mesh Connect router"
+        )
     if ".with_routes(public_routes.merge(protected_routes))" not in compact_router_source:
         failures.append(
             f"{MESH_SERVER_REL} router_from_state must mount exactly the frozen "
@@ -1449,6 +1492,90 @@ def mesh_surface_failures(
     return failures
 
 
+def mesh_connect_surface_failures(
+    mesh_sources: dict[str, str],
+    server_source: str,
+    failures: list[str],
+) -> None:
+    """Freeze the exact retained generated Mesh Connect registrations."""
+    connect_source = mesh_sources.get(MESH_CONNECT_REL)
+    if connect_source is None:
+        failures.append(
+            f"missing retained Mesh Connect router source {MESH_CONNECT_REL}"
+        )
+        return
+
+    sanitized = sanitize_rust_source(connect_source)
+    registrations = re.findall(
+        r"\.route(?:_idempotent)?\(\s*([A-Z0-9_]+)\s*,\s*\"([^\"]+)\"",
+        sanitized,
+    )
+    actual: dict[str, set[str]] = {}
+    duplicate_registrations: list[tuple[str, str]] = []
+    for service, method in registrations:
+        methods = actual.setdefault(service, set())
+        if method in methods:
+            duplicate_registrations.append((service, method))
+        methods.add(method)
+
+    if actual != MESH_EXPECTED_CONNECT_METHODS or len(registrations) != 20:
+        rendered_actual = {
+            service: sorted(methods) for service, methods in actual.items()
+        }
+        failures.append(
+            "retained Mesh Connect surface drift: "
+            f"found {stable_json(rendered_actual)}"
+        )
+    if duplicate_registrations:
+        failures.append(
+            "retained Mesh Connect surface has duplicate registrations: "
+            f"{stable_json(duplicate_registrations)}"
+        )
+
+    expected_bindings: dict[tuple[str, str], str] = {}
+    for service, methods in MESH_EXPECTED_CONNECT_METHODS.items():
+        for method in methods:
+            method_constant = re.sub(
+                r"(?<=[a-z0-9])(?=[A-Z])", "_", method
+            ).upper()
+            expected_bindings[(service, method)] = (
+                f"{service.removesuffix('_SERVICE_NAME')}_{method_constant}_SPEC"
+            )
+    expected_specs = set(expected_bindings.values())
+    actual_specs = re.findall(r"\.with_spec\(\s*([A-Z0-9_]+)\s*\)", sanitized)
+    if set(actual_specs) != expected_specs or len(actual_specs) != 20:
+        failures.append(
+            "retained Mesh Connect generated spec bindings drift: "
+            f"found {stable_json(sorted(actual_specs))}"
+        )
+    bound_routes = re.findall(
+        r"\.route(?:_idempotent)?\(\s*([A-Z0-9_]+)\s*,\s*\"([^\"]+)\""
+        r".*?\)\s*\.with_spec\(\s*([A-Z0-9_]+)\s*\)",
+        sanitized,
+        re.DOTALL,
+    )
+    actual_bindings = {
+        (service, method): spec for service, method, spec in bound_routes
+    }
+    if actual_bindings != expected_bindings or len(bound_routes) != 20:
+        failures.append(
+            "retained Mesh Connect RPC-to-spec binding drift: "
+            f"found {stable_json(sorted(bound_routes))}"
+        )
+
+    mount_counts = []
+    for source, raw_source in sorted(mesh_sources.items()):
+        code = rust_code_without_literals(sanitize_rust_source(raw_source))
+        count = len(re.findall(r"\.with_connect_routes\s*\(", code))
+        if count:
+            mount_counts.append((source, count))
+    if mount_counts != [(MESH_SERVER_REL, 1)]:
+        failures.append(
+            "retained Mesh Connect mount count drift: "
+            f"found {stable_json(mount_counts)}"
+        )
+
+
 def mesh_network_ownership_failures(
     failures: list[str],
     mesh_sources: dict[str, str],
@@ -1457,7 +1584,7 @@ def mesh_network_ownership_failures(
     inventory: dict[str, Any],
     operation_details: dict[tuple[str, str], dict[str, Any]],
 ) -> None:
-    """Keep the WI-4B bridge explicit until its scheduled Connect cutover."""
+    """Keep the WI-5 shared REST/Connect ownership boundary explicit."""
     expected_callers = ["rust-cli", "go-sdk", "typescript-sdk", "python-sdk"]
     for method in ("get", "post"):
         operation = operation_details.get((method, "/api/v1/networks"))
@@ -1486,14 +1613,25 @@ def mesh_network_ownership_failures(
         "struct NetworkCreateRequest",
         "org_id: Option<String>",
         "struct NetworkListQuery",
-        "network_create_owned(&network_id, &org_id)",
-        "network_list_by_organization(&org_id)",
+        "state.product.list_networks",
+        ".create_network(&org_id, &network_id, credential)",
+        "product_credential(&headers)",
+    )
+    required_product_fragments = (
+        "network_create_owned(&network_id, &context.org_id)",
+        "network_list_by_organization(&context.org_id)",
         "is_network_product_principal(&context)",
     )
     for fragment in required_server_fragments:
         if fragment not in server_source:
             failures.append(
                 f"Mesh network ownership bridge lost required explicit-org source shape {fragment!r}"
+            )
+    product_source = mesh_sources.get("crates/codewire-mesh/src/product.rs", "")
+    for fragment in required_product_fragments:
+        if fragment not in product_source:
+            failures.append(
+                f"Mesh shared product domain lost required ownership shape {fragment!r}"
             )
     authorization_source = mesh_sources.get(
         "crates/codewire-mesh/src/mesh_authorization.rs", ""
@@ -2026,7 +2164,7 @@ def mesh_surface_self_test(
     alternate_router_sources[MESH_SERVER_REL] = alternate_router_source.replace(
         ".with_health()",
         ".with_health()\n"
-        "        .with_connect_routes(mesh_connect_router())",
+        "        .with_connect_routes_auth(mesh_connect_router(), auth)",
         1,
     )
     alternate_router_failures = mesh_surface_failures(
@@ -2034,7 +2172,7 @@ def mesh_surface_self_test(
         client_sources,
         copy.deepcopy(inventory),
     )
-    for method in ("on", "post_service", "route_service", "with_connect_routes"):
+    for method in ("on", "post_service", "route_service", "with_connect_routes_auth"):
         if not any(
             f"unsupported .{method}" in failure
             for failure in alternate_router_failures
@@ -2042,6 +2180,70 @@ def mesh_surface_self_test(
             raise RuntimeError(
                 f"self-test accepted alternate Mesh router method .{method}"
             )
+
+    changed_connect_sources = copy.deepcopy(mesh_sources)
+    changed_connect_sources[MESH_CONNECT_REL] = changed_connect_sources[
+        MESH_CONNECT_REL
+    ].replace('"ListMeshNetworks"', '"ListMeshNetworksTypo"', 1)
+    changed_connect_failures: list[str] = []
+    mesh_connect_surface_failures(
+        changed_connect_sources,
+        changed_connect_sources[MESH_SERVER_REL],
+        changed_connect_failures,
+    )
+    if not any(
+        "retained Mesh Connect surface drift" in failure
+        for failure in changed_connect_failures
+    ):
+        raise RuntimeError("self-test accepted a changed retained Mesh Connect RPC")
+
+    swapped_spec_sources = copy.deepcopy(mesh_sources)
+    swapped_spec_sources[MESH_CONNECT_REL] = (
+        swapped_spec_sources[MESH_CONNECT_REL]
+        .replace(
+            "MESH_NETWORK_SERVICE_LIST_MESH_NETWORKS_SPEC",
+            "MESH_NETWORK_SERVICE_TEMP_SPEC",
+            1,
+        )
+        .replace(
+            "MESH_NETWORK_SERVICE_CREATE_MESH_NETWORK_SPEC",
+            "MESH_NETWORK_SERVICE_LIST_MESH_NETWORKS_SPEC",
+            1,
+        )
+        .replace(
+            "MESH_NETWORK_SERVICE_TEMP_SPEC",
+            "MESH_NETWORK_SERVICE_CREATE_MESH_NETWORK_SPEC",
+            1,
+        )
+    )
+    swapped_spec_failures: list[str] = []
+    mesh_connect_surface_failures(
+        swapped_spec_sources,
+        swapped_spec_sources[MESH_SERVER_REL],
+        swapped_spec_failures,
+    )
+    if not any(
+        "RPC-to-spec binding drift" in failure for failure in swapped_spec_failures
+    ):
+        raise RuntimeError("self-test accepted swapped Mesh Connect spec bindings")
+
+    duplicate_mount_sources = copy.deepcopy(mesh_sources)
+    duplicate_mount_sources[MESH_SERVER_REL] = server_source.replace(
+        ".with_health()",
+        ".with_health()\n        .with_connect_routes(other_mesh_router())",
+        1,
+    )
+    duplicate_mount_failures: list[str] = []
+    mesh_connect_surface_failures(
+        duplicate_mount_sources,
+        duplicate_mount_sources[MESH_SERVER_REL],
+        duplicate_mount_failures,
+    )
+    if not any(
+        "Connect mount count drift" in failure
+        for failure in duplicate_mount_failures
+    ):
+        raise RuntimeError("self-test accepted a duplicate Mesh Connect mount")
 
     new_client_sources = copy.deepcopy(client_sources)
     caller, cli_source = new_client_sources["crates/codewire-cli/src/mesh.rs"]
@@ -2160,10 +2362,12 @@ def mesh_surface_self_test(
         raise RuntimeError("self-test accepted Mesh credential/caller reclassification")
 
     defaulted_owner_sources = copy.deepcopy(mesh_sources)
-    defaulted_owner_sources[MESH_SERVER_REL] = server_source.replace(
-        "network_create_owned(&network_id, &org_id)",
-        'network_create_owned(&network_id, "default-org")',
-        1,
+    defaulted_owner_sources["crates/codewire-mesh/src/product.rs"] = (
+        defaulted_owner_sources["crates/codewire-mesh/src/product.rs"].replace(
+            "network_create_owned(&network_id, &context.org_id)",
+            'network_create_owned(&network_id, "default-org")',
+            1,
+        )
     )
     defaulted_owner_failures = mesh_surface_failures(
         defaulted_owner_sources,
@@ -2171,7 +2375,7 @@ def mesh_surface_self_test(
         copy.deepcopy(inventory),
     )
     if not any(
-        "network_create_owned(&network_id, &org_id)" in failure
+        "network_create_owned(&network_id, &context.org_id)" in failure
         for failure in defaulted_owner_failures
     ):
         raise RuntimeError("self-test accepted a defaulted Mesh network owner")
@@ -3361,6 +3565,11 @@ def check_connect_edge_routing(_args: argparse.Namespace) -> int:
                 for rule in here:
                     if rule["backend"] != "orchestration":
                         fail(f"{file}: orchestration-owned {service} routed to {rule['backend']}")
+            elif owner == "mesh":
+                if not any(rule["backend"] == "mesh" for rule in here):
+                    fail(f"{file}: Mesh-owned {service} has no Mesh-targeted Connect rule")
+                if any(rule["backend"] != "mesh" for rule in here):
+                    fail(f"{file}: Mesh-owned {service} is also routed to another binary")
             elif owner == "coordinator":
                 if not any(rule["backend"] == "coordinator" for rule in here):
                     fail(f"{file}: coordinator-owned {service} has no coordinator-targeted Connect rule")
@@ -3717,6 +3926,8 @@ def connect_rules(rel_path: str, fail: Callable[[str], None]) -> dict[str, Any]:
                 backend = "billing"
             elif target.group(1) == "8090":
                 backend = "coordinator"
+            elif target.group(1) == "18090":
+                backend = "mesh"
             else:
                 backend = target.group(1)
             paths = matcher_paths.get(handle.group(1), []) if handle.group(1).startswith("@") else [handle.group(1)]

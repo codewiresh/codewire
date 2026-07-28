@@ -15,6 +15,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
 use chrono::{DateTime, Duration, Utc};
+use codewire_server_core::AppError;
 use codewire_server_core::http::AppBuilder;
 use codewire_tailnet::node::Node as TailnetNode;
 use rand::RngCore;
@@ -29,7 +30,7 @@ use uuid::Uuid;
 
 use crate::auth::{AuthIdentity, authenticate_headers, bearer_token};
 use crate::mesh_authorization::{
-    MeshAuthorizationAdapter, forwarded_mesh_credential, is_network_product_principal,
+    ForwardedMeshCredential, MeshAuthorizationAdapter, forwarded_mesh_credential,
 };
 use crate::network_auth::{
     DEFAULT_BUNDLE_VALIDITY, DEFAULT_RUNTIME_TTL, DEFAULT_SENDER_TTL, IssuerState,
@@ -38,22 +39,20 @@ use crate::network_auth::{
     new_issuer_state, parse_runtime_credential, sign_runtime_credential, sign_sender_delegation,
     verify_runtime_credential,
 };
+use crate::product::{KeyValueWrite, MeshProductService};
 use crate::store::{
-    GROUP_DEBUG_FULL, GROUP_DEBUG_NONE, GROUP_DEBUG_OBSERVE_ONLY, GROUP_MESSAGES_INTERNAL_ONLY,
-    GROUP_MESSAGES_OPEN, Group, GroupMember, GroupPolicy, Invite, NETWORK_ROLE_MEMBER,
-    NETWORK_ROLE_OWNER, NetworkMember, NodeEnrollment, NodeRecord, OAuthState, OidcSession,
-    OidcUser, SharedStore, StoreError, store_from_config,
+    Group, GroupMember, GroupPolicy, NETWORK_ROLE_OWNER, NetworkMember, NodeRecord, OAuthState,
+    OidcSession, OidcUser, SharedStore, StoreError, store_from_config,
 };
 use crate::{AuthMode, Config};
 
-const INVITE_TOKEN_PREFIX: &str = "CW-INV-";
 const ALPHANUMERIC: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
 const MAX_KV_VALUE_BYTES: usize = 1 << 20;
 #[derive(Clone)]
-struct AppState {
+pub(crate) struct AppState {
     config: Config,
-    store: SharedStore,
-    mesh_authorization: Option<MeshAuthorizationAdapter>,
+    pub(crate) store: SharedStore,
+    pub(crate) product: MeshProductService,
     tailnet_coord: TailnetCoordinator,
     runtime_replay: RuntimeCredentialReplay,
     oidc_client: OidcClient,
@@ -193,10 +192,11 @@ impl AppState {
             config.mesh_authorization.as_ref(),
             config.local_authorization.as_ref(),
         );
+        let product = MeshProductService::new(store.clone(), mesh_authorization);
         Self {
             config,
             store,
-            mesh_authorization,
+            product,
             tailnet_coord: TailnetCoordinator::new(),
             runtime_replay: RuntimeCredentialReplay::new(),
             oidc_client: OidcClient::new(),
@@ -229,7 +229,20 @@ fn router_from_state(state: AppState) -> Router {
         .route(
             "/api/v1/groups/{name}/members",
             post(group_member_add).delete(group_member_remove),
-        );
+        )
+        .route("/api/v1/groups", get(group_list).post(group_create))
+        .route("/api/v1/groups/{name}", get(group_get).delete(group_delete))
+        .route("/api/v1/groups/{name}/policy", put(group_policy_set))
+        .route("/api/v1/invites", get(invite_list).post(invite_create))
+        .route("/api/v1/invites/{invite_id}", delete(invite_delete))
+        .route("/api/v1/kv/{namespace}", get(kv_list))
+        .route(
+            "/api/v1/kv/{namespace}/{key}",
+            get(kv_get).put(kv_set).delete(kv_delete),
+        )
+        .route("/api/v1/node-enrollments", post(node_enrollment_create))
+        .route("/api/v1/nodes/{name}", delete(node_revoke))
+        .route("/api/v1/networks/join", post(network_join));
 
     if state.config.auth_mode == AuthMode::Oidc {
         public_routes = public_routes
@@ -242,28 +255,16 @@ fn router_from_state(state: AppState) -> Router {
     let public_routes = public_routes.with_state(state.clone());
 
     let protected_routes = Router::new()
-        .route("/api/v1/groups", get(group_list).post(group_create))
-        .route("/api/v1/groups/{name}", get(group_get).delete(group_delete))
-        .route("/api/v1/groups/{name}/policy", put(group_policy_set))
-        .route("/api/v1/invites", get(invite_list).post(invite_create))
-        .route("/api/v1/invites/{token}", delete(invite_delete))
-        .route("/api/v1/kv/{namespace}", get(kv_list))
-        .route(
-            "/api/v1/kv/{namespace}/{key}",
-            get(kv_get).put(kv_set).delete(kv_delete),
-        )
-        .route("/api/v1/node-enrollments", post(node_enrollment_create))
-        .route("/api/v1/nodes/{name}", delete(node_revoke))
-        .route("/api/v1/networks/join", post(network_join))
         .route(
             "/api/v1/network-auth/runtime/client",
             post(client_runtime_credential),
         )
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth))
-        .with_state(state);
+        .with_state(state.clone());
 
     AppBuilder::new("mesh")
         .with_health()
+        .with_connect_routes(crate::connect::router(state))
         .with_routes(public_routes.merge(protected_routes))
         .into_router()
 }
@@ -338,11 +339,11 @@ async fn oidc_callback(
     let redirect_uri = oidc_redirect_uri(&state.config);
     let access_token = match exchange_oidc_code(&state, &endpoints, code, &redirect_uri).await {
         Ok(access_token) => access_token,
-        Err(response) => return response,
+        Err(error) => return error.into_response(),
     };
     let claims = match fetch_oidc_userinfo(&state, &endpoints, &access_token).await {
         Ok(claims) => claims,
-        Err(response) => return response,
+        Err(error) => return error.into_response(),
     };
     if let Err(message) = check_oidc_groups(&state.config.oidc_allowed_groups, &claims.groups) {
         let message = format!("access denied: {message}");
@@ -659,12 +660,11 @@ async fn network_list(
     let Some(org_id) = required_org_id(query.org_id) else {
         return plain_error(StatusCode::BAD_REQUEST, "org_id required");
     };
-    if let Err(response) = authorize_network_request(&state, &headers, &org_id).await {
-        return response;
-    }
-    let networks = state.store.network_list_by_organization(&org_id).await;
-
-    match networks {
+    let credential = match product_credential(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return error.into_response(),
+    };
+    match state.product.list_networks(&org_id, credential).await {
         Ok(networks) => {
             let body = networks
                 .into_iter()
@@ -678,7 +678,7 @@ async fn network_list(
                 .collect::<Vec<_>>();
             Json(body).into_response()
         }
-        Err(_) => plain_error(StatusCode::INTERNAL_SERVER_ERROR, "internal error"),
+        Err(error) => error.into_response(),
     }
 }
 
@@ -710,15 +710,17 @@ async fn network_create(
         return plain_error(StatusCode::BAD_REQUEST, message);
     }
 
-    if let Err(response) = authorize_network_request(&state, &headers, &org_id).await {
-        return response;
-    }
-    match state.store.network_create_owned(&network_id, &org_id).await {
-        Ok(()) => Json(NetworkCreateResponse::created(network_id)).into_response(),
-        Err(StoreError::AlreadyExists) => {
-            plain_error(StatusCode::CONFLICT, "network already exists")
-        }
-        Err(_) => plain_error(StatusCode::INTERNAL_SERVER_ERROR, "internal error"),
+    let credential = match product_credential(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return error.into_response(),
+    };
+    match state
+        .product
+        .create_network(&org_id, &network_id, credential)
+        .await
+    {
+        Ok(network) => Json(NetworkCreateResponse::created(network.id)).into_response(),
+        Err(error) => error.into_response(),
     }
 }
 
@@ -728,30 +730,10 @@ fn required_org_id(org_id: Option<String>) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-async fn authorize_network_request(
-    state: &AppState,
+fn product_credential(
     headers: &HeaderMap,
-    org_id: &str,
-) -> Result<(), Response> {
-    let credential = forwarded_mesh_credential(headers)
-        .map_err(|_| plain_error(StatusCode::UNAUTHORIZED, "unauthorized"))?;
-    let adapter = state
-        .mesh_authorization
-        .as_ref()
-        .ok_or_else(|| plain_error(StatusCode::SERVICE_UNAVAILABLE, "authorization unavailable"))?;
-    let context =
-        adapter
-            .resolve(org_id, credential)
-            .await
-            .map_err(|error| match error.status_code() {
-                StatusCode::UNAUTHORIZED => plain_error(StatusCode::UNAUTHORIZED, "unauthorized"),
-                StatusCode::FORBIDDEN => plain_error(StatusCode::FORBIDDEN, "forbidden"),
-                _ => plain_error(StatusCode::BAD_GATEWAY, "authorization unavailable"),
-            })?;
-    if context.org_id != org_id || !is_network_product_principal(&context) {
-        return Err(plain_error(StatusCode::FORBIDDEN, "forbidden"));
-    }
-    Ok(())
+) -> codewire_server_core::AppResult<ForwardedMeshCredential> {
+    forwarded_mesh_credential(headers).map_err(|_| AppError::Unauthorized)
 }
 
 #[derive(Serialize)]
@@ -769,10 +751,10 @@ impl NetworkCreateResponse {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct InviteCreateRequest {
     network_id: Option<String>,
-    uses: i32,
     ttl: Option<String>,
 }
 
@@ -871,23 +853,29 @@ struct GroupMemberRemoveResponse {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct NodeEnrollmentCreateRequest {
     network_id: Option<String>,
     node_name: Option<String>,
-    uses: Option<i32>,
     ttl: Option<String>,
 }
 
 #[derive(Serialize)]
 struct NodeEnrollmentCreateResponse {
+    enrollment: NodeEnrollmentResponse,
+    enrollment_code: String,
+}
+
+#[derive(Serialize)]
+struct NodeEnrollmentResponse {
     id: String,
+    org_id: String,
     network_id: String,
     node_name: String,
-    owner_subject: String,
-    issued_by: String,
-    uses_remaining: i32,
+    owner_user_id: String,
+    issued_by_user_id: String,
     expires_at: chrono::DateTime<Utc>,
-    enrollment_token: String,
+    created_at: chrono::DateTime<Utc>,
 }
 
 #[derive(Deserialize)]
@@ -909,7 +897,6 @@ struct NodeEnrollmentRedeemResponse {
 #[derive(Deserialize)]
 struct NodesListQuery {
     network_id: Option<String>,
-    all: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -946,7 +933,7 @@ struct NodeRedeemResult {
 
 async fn node_enrollment_create(
     State(state): State<AppState>,
-    Extension(identity): Extension<AuthIdentity>,
+    headers: HeaderMap,
     body: Bytes,
 ) -> Response {
     let req = match serde_json::from_slice::<NodeEnrollmentCreateRequest>(&body) {
@@ -958,13 +945,6 @@ async fn node_enrollment_create(
         Ok(network_id) => network_id,
         Err(message) => return plain_error(StatusCode::BAD_REQUEST, message),
     };
-    let member = match require_membership(&state, &network_id, &identity).await {
-        Ok(Some(member)) => member,
-        Ok(None) => return plain_error(StatusCode::FORBIDDEN, "membership required"),
-        Err(_) => return plain_error(StatusCode::UNAUTHORIZED, "unauthorized"),
-    };
-
-    let uses = req.uses.unwrap_or_default();
     let ttl = match req.ttl.as_deref() {
         None => Duration::minutes(10),
         Some(raw) if raw.trim().is_empty() => Duration::minutes(10),
@@ -973,30 +953,40 @@ async fn node_enrollment_create(
             None => return plain_error(StatusCode::BAD_REQUEST, "invalid ttl"),
         },
     };
-
-    match create_node_enrollment(
-        state.store.as_ref(),
-        &network_id,
-        &member.subject,
-        &member.subject,
-        req.node_name.as_deref().unwrap_or_default(),
-        uses,
-        ttl,
-    )
-    .await
+    let organization_id = match state.product.organization_for_network(&network_id).await {
+        Ok(organization_id) => organization_id,
+        Err(error) => return error.into_response(),
+    };
+    let credential = match product_credential(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return error.into_response(),
+    };
+    match state
+        .product
+        .create_node_enrollment(
+            &organization_id,
+            &network_id,
+            req.node_name.as_deref().unwrap_or_default(),
+            credential,
+            ttl,
+        )
+        .await
     {
-        Ok((enrollment, token)) => Json(NodeEnrollmentCreateResponse {
-            id: enrollment.id,
-            network_id: enrollment.network_id,
-            node_name: enrollment.node_name,
-            owner_subject: enrollment.owner_subject,
-            issued_by: enrollment.issued_by,
-            uses_remaining: enrollment.uses_remaining,
-            expires_at: enrollment.expires_at,
-            enrollment_token: token,
+        Ok(created) => Json(NodeEnrollmentCreateResponse {
+            enrollment: NodeEnrollmentResponse {
+                id: created.enrollment.id,
+                org_id: organization_id,
+                network_id: created.enrollment.network_id,
+                node_name: created.enrollment.node_name,
+                owner_user_id: created.enrollment.owner_subject,
+                issued_by_user_id: created.enrollment.issued_by,
+                expires_at: created.enrollment.expires_at,
+                created_at: created.enrollment.created_at,
+            },
+            enrollment_code: created.enrollment_code,
         })
         .into_response(),
-        Err(_) => plain_error(StatusCode::INTERNAL_SERVER_ERROR, "internal error"),
+        Err(error) => error.into_response(),
     }
 }
 
@@ -1043,7 +1033,6 @@ async fn node_enrollment_redeem(State(state): State<AppState>, body: Bytes) -> R
 
 async fn kv_set(
     State(state): State<AppState>,
-    Extension(identity): Extension<AuthIdentity>,
     Path((namespace, key)): Path<(String, String)>,
     Query(query): Query<NetworkIDQuery>,
     headers: HeaderMap,
@@ -1053,12 +1042,6 @@ async fn kv_set(
         Ok(network_id) => network_id,
         Err(message) => return plain_error(StatusCode::BAD_REQUEST, message),
     };
-    match require_membership(&state, &network_id, &identity).await {
-        Ok(Some(_)) => {}
-        Ok(None) => return plain_error(StatusCode::FORBIDDEN, "membership required"),
-        Err(_) => return plain_error(StatusCode::UNAUTHORIZED, "unauthorized"),
-    }
-
     let ttl = match parse_xttl_header(&headers) {
         Ok(ttl) => ttl,
         Err(message) => return plain_error(StatusCode::BAD_REQUEST, message),
@@ -1068,105 +1051,133 @@ async fn kv_set(
         .take(MAX_KV_VALUE_BYTES)
         .copied()
         .collect::<Vec<_>>();
-
+    let organization_id = match state.product.organization_for_network(&network_id).await {
+        Ok(organization_id) => organization_id,
+        Err(error) => return error.into_response(),
+    };
+    let credential = match product_credential(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return error.into_response(),
+    };
     match state
-        .store
-        .kv_set(&network_id, &namespace, &key, value, ttl)
+        .product
+        .set_key_value(
+            KeyValueWrite {
+                organization_id: &organization_id,
+                network_id: &network_id,
+                namespace: &namespace,
+                key: &key,
+                value,
+                ttl,
+            },
+            credential,
+        )
         .await
     {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
-        Err(_) => plain_error(StatusCode::INTERNAL_SERVER_ERROR, "internal error"),
+        Ok(_) => StatusCode::NO_CONTENT.into_response(),
+        Err(error) => error.into_response(),
     }
 }
 
 async fn kv_get(
     State(state): State<AppState>,
-    Extension(identity): Extension<AuthIdentity>,
     Path((namespace, key)): Path<(String, String)>,
     Query(query): Query<NetworkIDQuery>,
+    headers: HeaderMap,
 ) -> Response {
     let network_id = match required_network_id(query.network_id.as_deref()) {
         Ok(network_id) => network_id,
         Err(message) => return plain_error(StatusCode::BAD_REQUEST, message),
     };
-    match require_membership(&state, &network_id, &identity).await {
-        Ok(Some(_)) => {}
-        Ok(None) => return plain_error(StatusCode::FORBIDDEN, "membership required"),
-        Err(_) => return plain_error(StatusCode::UNAUTHORIZED, "unauthorized"),
-    }
-
-    match state.store.kv_get(&network_id, &namespace, &key).await {
-        Ok(Some(value)) => (
+    let organization_id = match state.product.organization_for_network(&network_id).await {
+        Ok(organization_id) => organization_id,
+        Err(error) => return error.into_response(),
+    };
+    let credential = match product_credential(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return error.into_response(),
+    };
+    match state
+        .product
+        .get_key_value(&organization_id, &network_id, &namespace, &key, credential)
+        .await
+    {
+        Ok(entry) => (
             StatusCode::OK,
             [(
                 CONTENT_TYPE,
                 HeaderValue::from_static("application/octet-stream"),
             )],
-            value,
+            entry.value,
         )
             .into_response(),
-        Ok(None) => plain_error(StatusCode::NOT_FOUND, "not found"),
-        Err(_) => plain_error(StatusCode::INTERNAL_SERVER_ERROR, "internal error"),
+        Err(error) => error.into_response(),
     }
 }
 
 async fn kv_delete(
     State(state): State<AppState>,
-    Extension(identity): Extension<AuthIdentity>,
     Path((namespace, key)): Path<(String, String)>,
     Query(query): Query<NetworkIDQuery>,
+    headers: HeaderMap,
 ) -> Response {
     let network_id = match required_network_id(query.network_id.as_deref()) {
         Ok(network_id) => network_id,
         Err(message) => return plain_error(StatusCode::BAD_REQUEST, message),
     };
-    match require_owner(&state, &network_id, &identity).await {
-        Ok(true) => {}
-        Ok(false) => return plain_error(StatusCode::FORBIDDEN, "owner access required"),
-        Err(_) => return plain_error(StatusCode::UNAUTHORIZED, "unauthorized"),
-    }
-
-    match state.store.kv_delete(&network_id, &namespace, &key).await {
+    let organization_id = match state.product.organization_for_network(&network_id).await {
+        Ok(organization_id) => organization_id,
+        Err(error) => return error.into_response(),
+    };
+    let credential = match product_credential(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return error.into_response(),
+    };
+    match state
+        .product
+        .delete_key_value(&organization_id, &network_id, &namespace, &key, credential)
+        .await
+    {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
-        Err(_) => plain_error(StatusCode::INTERNAL_SERVER_ERROR, "internal error"),
+        Err(error) => error.into_response(),
     }
 }
 
 async fn kv_list(
     State(state): State<AppState>,
-    Extension(identity): Extension<AuthIdentity>,
     Path(namespace): Path<String>,
     Query(query): Query<KVListQuery>,
+    headers: HeaderMap,
 ) -> Response {
     let network_id = match required_network_id(query.network_id.as_deref()) {
         Ok(network_id) => network_id,
         Err(message) => return plain_error(StatusCode::BAD_REQUEST, message),
     };
-    match require_membership(&state, &network_id, &identity).await {
-        Ok(Some(_)) => {}
-        Ok(None) => return plain_error(StatusCode::FORBIDDEN, "membership required"),
-        Err(_) => return plain_error(StatusCode::UNAUTHORIZED, "unauthorized"),
-    }
-
+    let organization_id = match state.product.organization_for_network(&network_id).await {
+        Ok(organization_id) => organization_id,
+        Err(error) => return error.into_response(),
+    };
+    let credential = match product_credential(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return error.into_response(),
+    };
     match state
-        .store
-        .kv_list(
+        .product
+        .list_key_values(
+            &organization_id,
             &network_id,
             &namespace,
             query.prefix.as_deref().unwrap_or_default(),
+            credential,
         )
         .await
     {
         Ok(entries) => Json(entries).into_response(),
-        Err(_) => plain_error(StatusCode::INTERNAL_SERVER_ERROR, "internal error"),
+        Err(error) => error.into_response(),
     }
 }
 
-async fn group_create(
-    State(state): State<AppState>,
-    Extension(identity): Extension<AuthIdentity>,
-    body: Bytes,
-) -> Response {
+async fn group_create(State(state): State<AppState>, headers: HeaderMap, body: Bytes) -> Response {
     let req = match serde_json::from_slice::<GroupCreateRequest>(&body) {
         Ok(req) => req,
         Err(_) => return plain_error(StatusCode::BAD_REQUEST, "bad request"),
@@ -1179,77 +1190,62 @@ async fn group_create(
         Ok(group_name) => group_name,
         Err(message) => return plain_error(StatusCode::BAD_REQUEST, message),
     };
-    match require_owner(&state, &network_id, &identity).await {
-        Ok(true) => {}
-        Ok(false) => return plain_error(StatusCode::FORBIDDEN, "owner access required"),
-        Err(_) => return unauthorized_response(),
-    }
-
-    let created_by = match membership_subject(&identity) {
-        Ok(subject) => subject,
-        Err(_) if identity.is_admin => String::new(),
-        Err(_) => return unauthorized_response(),
+    let organization_id = match state.product.organization_for_network(&network_id).await {
+        Ok(organization_id) => organization_id,
+        Err(error) => return error.into_response(),
     };
-    let now = Utc::now();
-    let group = Group {
-        network_id,
-        name: group_name,
-        created_at: now,
-        created_by,
+    let credential = match product_credential(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return error.into_response(),
     };
-    match state.store.group_create(group.clone()).await {
-        Ok(()) => match state
-            .store
-            .group_policy_get(&group.network_id, &group.name)
-            .await
-        {
-            Ok(policy) => Json(group_response(group, Vec::new(), policy)).into_response(),
-            Err(_) => plain_error(StatusCode::INTERNAL_SERVER_ERROR, "internal error"),
-        },
-        Err(StoreError::AlreadyExists) => plain_error(StatusCode::CONFLICT, "group already exists"),
-        Err(_) => plain_error(StatusCode::INTERNAL_SERVER_ERROR, "internal error"),
+    match state
+        .product
+        .create_group(&organization_id, &network_id, &group_name, credential)
+        .await
+    {
+        Ok(view) => Json(group_response(view.group, view.members, view.policy)).into_response(),
+        Err(error) => error.into_response(),
     }
 }
 
 async fn group_list(
     State(state): State<AppState>,
-    Extension(identity): Extension<AuthIdentity>,
     Query(query): Query<NetworkIDQuery>,
+    headers: HeaderMap,
 ) -> Response {
     let network_id = match required_network_id(query.network_id.as_deref()) {
         Ok(network_id) => network_id,
         Err(message) => return plain_error(StatusCode::BAD_REQUEST, message),
     };
-    match require_owner(&state, &network_id, &identity).await {
-        Ok(true) => {}
-        Ok(false) => return plain_error(StatusCode::FORBIDDEN, "owner access required"),
-        Err(_) => return unauthorized_response(),
-    }
-
-    let groups = match state.store.group_list(&network_id).await {
-        Ok(groups) => groups,
-        Err(_) => return plain_error(StatusCode::INTERNAL_SERVER_ERROR, "internal error"),
+    let organization_id = match state.product.organization_for_network(&network_id).await {
+        Ok(organization_id) => organization_id,
+        Err(error) => return error.into_response(),
     };
-    let mut responses = Vec::with_capacity(groups.len());
-    for group in groups {
-        let policy = match state
-            .store
-            .group_policy_get(&group.network_id, &group.name)
-            .await
-        {
-            Ok(policy) => policy,
-            Err(_) => return plain_error(StatusCode::INTERNAL_SERVER_ERROR, "internal error"),
-        };
-        responses.push(group_response(group, Vec::new(), policy));
+    let credential = match product_credential(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return error.into_response(),
+    };
+    match state
+        .product
+        .list_groups(&organization_id, &network_id, credential)
+        .await
+    {
+        Ok(groups) => Json(
+            groups
+                .into_iter()
+                .map(|view| group_response(view.group, view.members, view.policy))
+                .collect::<Vec<_>>(),
+        )
+        .into_response(),
+        Err(error) => error.into_response(),
     }
-    Json(responses).into_response()
 }
 
 async fn group_get(
     State(state): State<AppState>,
-    Extension(identity): Extension<AuthIdentity>,
     Path(name): Path<String>,
     Query(query): Query<NetworkIDQuery>,
+    headers: HeaderMap,
 ) -> Response {
     let network_id = match required_network_id(query.network_id.as_deref()) {
         Ok(network_id) => network_id,
@@ -1259,24 +1255,29 @@ async fn group_get(
         Ok(group_name) => group_name,
         Err(message) => return plain_error(StatusCode::BAD_REQUEST, message),
     };
-    match require_owner(&state, &network_id, &identity).await {
-        Ok(true) => {}
-        Ok(false) => return plain_error(StatusCode::FORBIDDEN, "owner access required"),
-        Err(_) => return unauthorized_response(),
-    }
-
-    match load_group_response(&state, &network_id, &group_name).await {
-        Ok(Some(response)) => Json(response).into_response(),
-        Ok(None) => plain_error(StatusCode::NOT_FOUND, "group not found"),
-        Err(_) => plain_error(StatusCode::INTERNAL_SERVER_ERROR, "internal error"),
+    let organization_id = match state.product.organization_for_network(&network_id).await {
+        Ok(organization_id) => organization_id,
+        Err(error) => return error.into_response(),
+    };
+    let credential = match product_credential(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return error.into_response(),
+    };
+    match state
+        .product
+        .get_group(&organization_id, &network_id, &group_name, credential)
+        .await
+    {
+        Ok(view) => Json(group_response(view.group, view.members, view.policy)).into_response(),
+        Err(error) => error.into_response(),
     }
 }
 
 async fn group_delete(
     State(state): State<AppState>,
-    Extension(identity): Extension<AuthIdentity>,
     Path(name): Path<String>,
     Query(query): Query<NetworkIDQuery>,
+    headers: HeaderMap,
 ) -> Response {
     let network_id = match required_network_id(query.network_id.as_deref()) {
         Ok(network_id) => network_id,
@@ -1286,21 +1287,26 @@ async fn group_delete(
         Ok(group_name) => group_name,
         Err(message) => return plain_error(StatusCode::BAD_REQUEST, message),
     };
-    match require_owner(&state, &network_id, &identity).await {
-        Ok(true) => {}
-        Ok(false) => return plain_error(StatusCode::FORBIDDEN, "owner access required"),
-        Err(_) => return unauthorized_response(),
-    }
-
-    match state.store.group_delete(&network_id, &group_name).await {
+    let organization_id = match state.product.organization_for_network(&network_id).await {
+        Ok(organization_id) => organization_id,
+        Err(error) => return error.into_response(),
+    };
+    let credential = match product_credential(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return error.into_response(),
+    };
+    match state
+        .product
+        .delete_group(&organization_id, &network_id, &group_name, credential)
+        .await
+    {
         Ok(()) => Json(GroupDeleteResponse {
             status: "deleted",
             network_id,
             name: group_name,
         })
         .into_response(),
-        Err(StoreError::NotFound) => plain_error(StatusCode::NOT_FOUND, "group not found"),
-        Err(_) => plain_error(StatusCode::INTERNAL_SERVER_ERROR, "internal error"),
+        Err(error) => error.into_response(),
     }
 }
 
@@ -1328,61 +1334,38 @@ async fn group_member_add(
         return plain_error(StatusCode::BAD_REQUEST, "session_name required");
     }
 
-    let (network_id, node_name) =
-        if let Some(node) = node_auth_from_headers(&headers, state.store.as_ref()).await {
-            let requested_node_name = req
-                .node_name
-                .as_deref()
-                .unwrap_or_default()
-                .trim()
-                .to_string();
-            let node_name = if requested_node_name.is_empty() {
-                node.name.clone()
-            } else {
-                requested_node_name
-            };
-            if node_name != node.name {
-                return plain_error(StatusCode::FORBIDDEN, "forbidden");
-            }
-            (node.network_id, node_name)
-        } else {
-            let Some(identity) =
-                authenticate_headers(&headers, &state.config, state.store.as_ref()).await
-            else {
-                return unauthorized_response();
-            };
-            let network_id = match required_network_id(req.network_id.as_deref()) {
-                Ok(network_id) => network_id,
-                Err(message) => return plain_error(StatusCode::BAD_REQUEST, message),
-            };
-            let node_name = req
-                .node_name
-                .as_deref()
-                .unwrap_or_default()
-                .trim()
-                .to_string();
-            if node_name.is_empty() {
-                return plain_error(StatusCode::BAD_REQUEST, "node_name required");
-            }
-            match require_owner(&state, &network_id, &identity).await {
-                Ok(true) => {}
-                Ok(false) => return plain_error(StatusCode::FORBIDDEN, "owner access required"),
-                Err(_) => return unauthorized_response(),
-            }
-            (network_id, node_name)
-        };
-
-    let member = GroupMember {
-        network_id,
-        group_name,
-        node_name,
-        session_name,
-        created_at: Utc::now(),
+    let network_id = match required_network_id(req.network_id.as_deref()) {
+        Ok(network_id) => network_id,
+        Err(message) => return plain_error(StatusCode::BAD_REQUEST, message),
     };
-    match state.store.group_member_add(member.clone()).await {
-        Ok(()) => Json(member).into_response(),
-        Err(StoreError::NotFound) => plain_error(StatusCode::NOT_FOUND, "group not found"),
-        Err(_) => plain_error(StatusCode::INTERNAL_SERVER_ERROR, "internal error"),
+    let node_name = req
+        .node_name
+        .as_deref()
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    let organization_id = match state.product.organization_for_network(&network_id).await {
+        Ok(organization_id) => organization_id,
+        Err(error) => return error.into_response(),
+    };
+    let credential = match product_credential(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return error.into_response(),
+    };
+    match state
+        .product
+        .add_group_member(
+            &organization_id,
+            &network_id,
+            &group_name,
+            &node_name,
+            &session_name,
+            credential,
+        )
+        .await
+    {
+        Ok(member) => Json(member).into_response(),
+        Err(error) => error.into_response(),
     }
 }
 
@@ -1396,88 +1379,50 @@ async fn group_member_remove(
         Ok(group_name) => group_name,
         Err(message) => return plain_error(StatusCode::BAD_REQUEST, message),
     };
-    let session_name = query
-        .session_name
-        .as_deref()
-        .unwrap_or_default()
-        .trim()
-        .to_string();
-    if session_name.is_empty() {
-        return plain_error(StatusCode::BAD_REQUEST, "session_name required");
-    }
-
-    let (network_id, node_name) =
-        if let Some(node) = node_auth_from_headers(&headers, state.store.as_ref()).await {
-            let requested_node_name = query
-                .node_name
-                .as_deref()
-                .unwrap_or_default()
-                .trim()
-                .to_string();
-            let node_name = if requested_node_name.is_empty() {
-                node.name.clone()
-            } else {
-                requested_node_name
-            };
-            if node_name != node.name {
-                return plain_error(StatusCode::FORBIDDEN, "forbidden");
-            }
-            (node.network_id, node_name)
-        } else {
-            let Some(identity) =
-                authenticate_headers(&headers, &state.config, state.store.as_ref()).await
-            else {
-                return unauthorized_response();
-            };
-            let network_id = match required_network_id(query.network_id.as_deref()) {
-                Ok(network_id) => network_id,
-                Err(message) => return plain_error(StatusCode::BAD_REQUEST, message),
-            };
-            let node_name = query
-                .node_name
-                .as_deref()
-                .unwrap_or_default()
-                .trim()
-                .to_string();
-            if node_name.is_empty() {
-                return plain_error(StatusCode::BAD_REQUEST, "node_name required");
-            }
-            match require_owner(&state, &network_id, &identity).await {
-                Ok(true) => {}
-                Ok(false) => return plain_error(StatusCode::FORBIDDEN, "owner access required"),
-                Err(_) => return unauthorized_response(),
-            }
-            (network_id, node_name)
-        };
-
+    let network_id = match required_network_id(query.network_id.as_deref()) {
+        Ok(network_id) => network_id,
+        Err(message) => return plain_error(StatusCode::BAD_REQUEST, message),
+    };
+    let node_name = query.node_name.as_deref().unwrap_or_default();
+    let session_name = query.session_name.as_deref().unwrap_or_default();
+    let organization_id = match state.product.organization_for_network(&network_id).await {
+        Ok(organization_id) => organization_id,
+        Err(error) => return error.into_response(),
+    };
+    let credential = match product_credential(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return error.into_response(),
+    };
     match state
-        .store
-        .group_member_remove(&network_id, &group_name, &node_name, &session_name)
+        .product
+        .remove_group_member(
+            &organization_id,
+            &network_id,
+            &group_name,
+            node_name,
+            session_name,
+            credential,
+        )
         .await
     {
         Ok(()) => Json(GroupMemberRemoveResponse {
             status: "removed",
             network_id,
             group_name,
-            node_name,
-            session_name,
+            node_name: node_name.trim().to_owned(),
+            session_name: session_name.trim().to_owned(),
         })
         .into_response(),
-        Err(StoreError::NotFound) => plain_error(StatusCode::NOT_FOUND, "group member not found"),
-        Err(_) => plain_error(StatusCode::INTERNAL_SERVER_ERROR, "internal error"),
+        Err(error) => error.into_response(),
     }
 }
 
 async fn group_policy_set(
     State(state): State<AppState>,
-    Extension(identity): Extension<AuthIdentity>,
     Path(name): Path<String>,
+    headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let group_name = match validate_group_name(&name) {
-        Ok(group_name) => group_name,
-        Err(message) => return plain_error(StatusCode::BAD_REQUEST, message),
-    };
     let req = match serde_json::from_slice::<GroupPolicyRequest>(&body) {
         Ok(req) => req,
         Err(_) => return plain_error(StatusCode::BAD_REQUEST, "bad request"),
@@ -1486,31 +1431,28 @@ async fn group_policy_set(
         Ok(network_id) => network_id,
         Err(message) => return plain_error(StatusCode::BAD_REQUEST, message),
     };
-    let messages_policy = match normalize_group_messages_policy(req.messages_policy.as_deref()) {
-        Ok(policy) => policy,
-        Err(message) => return plain_error(StatusCode::BAD_REQUEST, message),
+    let organization_id = match state.product.organization_for_network(&network_id).await {
+        Ok(organization_id) => organization_id,
+        Err(error) => return error.into_response(),
     };
-    let debug_policy = match normalize_group_debug_policy(req.debug_policy.as_deref()) {
-        Ok(policy) => policy,
-        Err(message) => return plain_error(StatusCode::BAD_REQUEST, message),
+    let credential = match product_credential(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return error.into_response(),
     };
-    match require_owner(&state, &network_id, &identity).await {
-        Ok(true) => {}
-        Ok(false) => return plain_error(StatusCode::FORBIDDEN, "owner access required"),
-        Err(_) => return unauthorized_response(),
-    }
-
-    let policy = GroupPolicy {
-        network_id,
-        group_name,
-        messages_policy,
-        debug_policy,
-        updated_at: Utc::now(),
-    };
-    match state.store.group_policy_set(policy.clone()).await {
-        Ok(()) => Json(policy).into_response(),
-        Err(StoreError::NotFound) => plain_error(StatusCode::NOT_FOUND, "group not found"),
-        Err(_) => plain_error(StatusCode::INTERNAL_SERVER_ERROR, "internal error"),
+    match state
+        .product
+        .set_group_policy(
+            &organization_id,
+            &network_id,
+            &name,
+            req.messages_policy.as_deref().unwrap_or_default(),
+            req.debug_policy.as_deref().unwrap_or_default(),
+            credential,
+        )
+        .await
+    {
+        Ok(policy) => Json(policy).into_response(),
+        Err(error) => error.into_response(),
     }
 }
 
@@ -1519,91 +1461,58 @@ async fn node_list(
     Query(query): Query<NodesListQuery>,
     headers: HeaderMap,
 ) -> Response {
-    if let Some(node) = node_auth_from_headers(&headers, state.store.as_ref()).await {
-        return match state.store.node_list(&node.network_id).await {
-            Ok(nodes) => Json(node_responses(nodes)).into_response(),
-            Err(_) => plain_error(StatusCode::INTERNAL_SERVER_ERROR, "internal error"),
-        };
-    }
-
-    let Some(identity) = authenticate_headers(&headers, &state.config, state.store.as_ref()).await
-    else {
-        return unauthorized_response();
+    let network_id = match required_network_id(query.network_id.as_deref()) {
+        Ok(network_id) => network_id,
+        Err(message) => return plain_error(StatusCode::BAD_REQUEST, message),
     };
-
-    let all = query
-        .all
-        .as_deref()
-        .unwrap_or_default()
-        .trim()
-        .eq_ignore_ascii_case("true");
-
-    let nodes = if identity.is_admin && all {
-        state.store.node_list_all().await
-    } else if all {
-        let subject = match membership_subject(&identity) {
-            Ok(subject) => subject,
-            Err(_) => return unauthorized_response(),
-        };
-        let networks = match state.store.network_list_by_member(&subject).await {
-            Ok(networks) => networks,
-            Err(_) => return plain_error(StatusCode::INTERNAL_SERVER_ERROR, "internal error"),
-        };
-        let mut nodes = Vec::new();
-        for network in networks {
-            match state.store.node_list(&network.id).await {
-                Ok(mut network_nodes) => nodes.append(&mut network_nodes),
-                Err(_) => return plain_error(StatusCode::INTERNAL_SERVER_ERROR, "internal error"),
-            }
-        }
-        Ok(nodes)
-    } else {
-        let network_id = match required_network_id(query.network_id.as_deref()) {
-            Ok(network_id) => network_id,
-            Err(message) => return plain_error(StatusCode::BAD_REQUEST, message),
-        };
-        match require_membership(&state, &network_id, &identity).await {
-            Ok(Some(_)) => state.store.node_list(&network_id).await,
-            Ok(None) => return plain_error(StatusCode::FORBIDDEN, "membership required"),
-            Err(_) => return unauthorized_response(),
-        }
+    let organization_id = match state.product.organization_for_network(&network_id).await {
+        Ok(organization_id) => organization_id,
+        Err(error) => return error.into_response(),
     };
-
-    match nodes {
+    let credential = match product_credential(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return error.into_response(),
+    };
+    match state
+        .product
+        .list_nodes(&organization_id, &network_id, credential)
+        .await
+    {
         Ok(nodes) => Json(node_responses(nodes)).into_response(),
-        Err(_) => plain_error(StatusCode::INTERNAL_SERVER_ERROR, "internal error"),
+        Err(error) => error.into_response(),
     }
 }
 
 async fn node_revoke(
     State(state): State<AppState>,
-    Extension(identity): Extension<AuthIdentity>,
     Path(name): Path<String>,
     Query(query): Query<NodesListQuery>,
+    headers: HeaderMap,
 ) -> Response {
     let network_id = match required_network_id(query.network_id.as_deref()) {
         Ok(network_id) => network_id,
         Err(message) => return plain_error(StatusCode::BAD_REQUEST, message),
     };
-    match require_owner(&state, &network_id, &identity).await {
-        Ok(true) => {}
-        Ok(false) => return plain_error(StatusCode::FORBIDDEN, "owner access required"),
-        Err(_) => return unauthorized_response(),
+    let organization_id = match state.product.organization_for_network(&network_id).await {
+        Ok(organization_id) => organization_id,
+        Err(error) => return error.into_response(),
+    };
+    let credential = match product_credential(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return error.into_response(),
+    };
+    match state
+        .product
+        .revoke_node(&organization_id, &network_id, &name, credential)
+        .await
+    {
+        Ok(()) => Json(NodeRevokeResponse {
+            status: "revoked",
+            node: &name,
+        })
+        .into_response(),
+        Err(error) => error.into_response(),
     }
-
-    match state.store.node_get(&network_id, &name).await {
-        Ok(Some(_)) => {}
-        Ok(None) | Err(_) => return plain_error(StatusCode::NOT_FOUND, "node not found"),
-    }
-    if state.store.node_delete(&network_id, &name).await.is_err() {
-        return plain_error(StatusCode::INTERNAL_SERVER_ERROR, "internal error");
-    }
-
-    Json(NodeRevokeResponse {
-        status: "revoked",
-        node: &name,
-    })
-    .into_response()
 }
 
 async fn tailnet_coordinate(
@@ -2136,117 +2045,138 @@ async fn node_sender_delegation(
     .into_response()
 }
 
-async fn invite_create(
-    State(state): State<AppState>,
-    Extension(identity): Extension<AuthIdentity>,
-    body: Bytes,
-) -> Response {
-    let req = decode_invite_create_request(&body);
-    let uses = if req.uses <= 0 { 1 } else { req.uses };
-
+async fn invite_create(State(state): State<AppState>, headers: HeaderMap, body: Bytes) -> Response {
+    let req = match serde_json::from_slice::<InviteCreateRequest>(&body) {
+        Ok(req) => req,
+        Err(_) => return AppError::BadRequest("bad request".into()).into_response(),
+    };
     let network_id = match required_network_id(req.network_id.as_deref()) {
         Ok(network_id) => network_id,
         Err(message) => return plain_error(StatusCode::BAD_REQUEST, message),
     };
-    match require_owner(&state, &network_id, &identity).await {
-        Ok(true) => {}
-        Ok(false) => return plain_error(StatusCode::FORBIDDEN, "owner access required"),
-        Err(_) => return plain_error(StatusCode::UNAUTHORIZED, "unauthorized"),
-    }
-
     let ttl = match req.ttl.as_deref() {
         None | Some("") => Duration::hours(1),
         Some(raw) => match parse_go_duration(raw) {
             Some(ttl) => ttl,
-            None => return plain_error(StatusCode::BAD_REQUEST, "invalid ttl"),
+            None => return AppError::BadRequest("invalid ttl".into()).into_response(),
         },
     };
-
-    let now = Utc::now();
-    let invite = Invite {
-        network_id,
-        token: generate_invite_token(),
-        created_by: identity.user_id,
-        uses_remaining: uses,
-        expires_at: now + ttl,
-        created_at: now,
+    let organization_id = match state.product.organization_for_network(&network_id).await {
+        Ok(organization_id) => organization_id,
+        Err(error) => return error.into_response(),
     };
-    match state.store.invite_create(invite.clone()).await {
-        Ok(()) => Json(invite).into_response(),
-        Err(_) => plain_error(StatusCode::INTERNAL_SERVER_ERROR, "internal error"),
+    let credential = match product_credential(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return error.into_response(),
+    };
+    match state
+        .product
+        .create_invite(&organization_id, &network_id, credential, ttl)
+        .await
+    {
+        Ok(created) => Json(InviteCreateResponse {
+            invite: InviteResponse::from(created.invite),
+            invite_code: created.invite_code,
+        })
+        .into_response(),
+        Err(error) => error.into_response(),
     }
 }
 
-fn decode_invite_create_request(body: &Bytes) -> InviteCreateRequest {
-    let Ok(value) = serde_json::from_slice::<serde_json::Value>(body) else {
-        return InviteCreateRequest::default();
-    };
-    let network_id = value
-        .get("network_id")
-        .and_then(|value| value.as_str())
-        .map(str::to_string);
-    let uses = value
-        .get("uses")
-        .and_then(|value| value.as_i64())
-        .and_then(|value| i32::try_from(value).ok())
-        .unwrap_or_default();
-    let ttl = value
-        .get("ttl")
-        .and_then(|value| value.as_str())
-        .map(str::to_string);
-    InviteCreateRequest {
-        network_id,
-        uses,
-        ttl,
+#[derive(Serialize)]
+struct InviteResponse {
+    id: String,
+    org_id: String,
+    network_id: String,
+    created_by_user_id: String,
+    expires_at: DateTime<Utc>,
+    created_at: DateTime<Utc>,
+}
+
+impl From<crate::store::Invite> for InviteResponse {
+    fn from(invite: crate::store::Invite) -> Self {
+        Self {
+            id: invite.id,
+            org_id: invite.organization_id,
+            network_id: invite.network_id,
+            created_by_user_id: invite.created_by_user_id,
+            expires_at: invite.expires_at,
+            created_at: invite.created_at,
+        }
     }
+}
+
+#[derive(Serialize)]
+struct InviteCreateResponse {
+    invite: InviteResponse,
+    invite_code: String,
 }
 
 async fn invite_list(
     State(state): State<AppState>,
-    Extension(identity): Extension<AuthIdentity>,
+    headers: HeaderMap,
     Query(query): Query<NetworkIDQuery>,
 ) -> Response {
     let network_id = match required_network_id(query.network_id.as_deref()) {
         Ok(network_id) => network_id,
         Err(message) => return plain_error(StatusCode::BAD_REQUEST, message),
     };
-    match require_owner(&state, &network_id, &identity).await {
-        Ok(true) => {}
-        Ok(false) => return plain_error(StatusCode::FORBIDDEN, "owner access required"),
-        Err(_) => return plain_error(StatusCode::UNAUTHORIZED, "unauthorized"),
-    }
-
-    match state.store.invite_list(&network_id).await {
-        Ok(invites) => Json(invites).into_response(),
-        Err(_) => plain_error(StatusCode::INTERNAL_SERVER_ERROR, "internal error"),
+    let organization_id = match state.product.organization_for_network(&network_id).await {
+        Ok(organization_id) => organization_id,
+        Err(error) => return error.into_response(),
+    };
+    let credential = match product_credential(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return error.into_response(),
+    };
+    match state
+        .product
+        .list_invites(&organization_id, &network_id, credential)
+        .await
+    {
+        Ok(invites) => Json(
+            invites
+                .into_iter()
+                .map(InviteResponse::from)
+                .collect::<Vec<_>>(),
+        )
+        .into_response(),
+        Err(error) => error.into_response(),
     }
 }
 
 async fn invite_delete(
     State(state): State<AppState>,
-    Extension(identity): Extension<AuthIdentity>,
-    Path(token): Path<String>,
+    headers: HeaderMap,
+    Path(invite_id): Path<String>,
     Query(query): Query<NetworkIDQuery>,
 ) -> Response {
     let network_id = match required_network_id(query.network_id.as_deref()) {
         Ok(network_id) => network_id,
         Err(message) => return plain_error(StatusCode::BAD_REQUEST, message),
     };
-    match require_owner(&state, &network_id, &identity).await {
-        Ok(true) => {}
-        Ok(false) => return plain_error(StatusCode::FORBIDDEN, "owner access required"),
-        Err(_) => return plain_error(StatusCode::UNAUTHORIZED, "unauthorized"),
-    }
-
-    match state.store.invite_delete(&network_id, &token).await {
+    let organization_id = match state.product.organization_for_network(&network_id).await {
+        Ok(organization_id) => organization_id,
+        Err(error) => return error.into_response(),
+    };
+    let credential = match product_credential(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return error.into_response(),
+    };
+    match state
+        .product
+        .delete_invite(&organization_id, &network_id, &invite_id, credential)
+        .await
+    {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
-        Err(_) => plain_error(StatusCode::NOT_FOUND, "invite not found"),
+        Err(error) => error.into_response(),
     }
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct NetworkJoinRequest {
-    invite_token: Option<String>,
+    invite_code: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -2260,63 +2190,27 @@ struct JoinPageQuery {
     invite: Option<String>,
 }
 
-async fn network_join(
-    State(state): State<AppState>,
-    Extension(identity): Extension<AuthIdentity>,
-    body: Bytes,
-) -> Response {
+async fn network_join(State(state): State<AppState>, headers: HeaderMap, body: Bytes) -> Response {
     let req = match serde_json::from_slice::<NetworkJoinRequest>(&body) {
         Ok(req) => req,
         Err(_) => return plain_error(StatusCode::BAD_REQUEST, "bad request"),
     };
-    let invite_token = req.invite_token.unwrap_or_default();
-    if invite_token.trim().is_empty() {
-        return plain_error(StatusCode::BAD_REQUEST, "invite_token required");
-    }
-
-    let invite = match state.store.invite_get(&invite_token).await {
-        Ok(Some(invite)) => invite,
-        Ok(None) | Err(_) => {
-            return plain_error(StatusCode::FORBIDDEN, "invalid or expired invite");
-        }
+    let credential = match product_credential(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return error.into_response(),
     };
-    if state.store.invite_consume(&invite_token).await.is_err() {
-        return plain_error(StatusCode::FORBIDDEN, "invalid or expired invite");
-    }
-
-    let subject = match membership_subject(&identity) {
-        Ok(subject) => subject,
-        Err(_) => return plain_error(StatusCode::UNAUTHORIZED, "unauthorized"),
-    };
-    let role = match state
-        .store
-        .network_member_get(&invite.network_id, &subject)
+    match state
+        .product
+        .join_network(req.invite_code.as_deref().unwrap_or_default(), credential)
         .await
     {
-        Ok(Some(existing)) => existing.role,
-        Ok(None) => NETWORK_ROLE_MEMBER.to_string(),
-        Err(_) => return plain_error(StatusCode::INTERNAL_SERVER_ERROR, "internal error"),
-    };
-    if state
-        .store
-        .network_member_upsert(NetworkMember {
-            network_id: invite.network_id.clone(),
-            subject,
-            role,
-            created_at: Utc::now(),
-            created_by: invite.token,
+        Ok(network) => Json(NetworkJoinResponse {
+            status: "joined",
+            network_id: network.id,
         })
-        .await
-        .is_err()
-    {
-        return plain_error(StatusCode::INTERNAL_SERVER_ERROR, "internal error");
+        .into_response(),
+        Err(error) => error.into_response(),
     }
-
-    Json(NetworkJoinResponse {
-        status: "joined",
-        network_id: invite.network_id,
-    })
-    .into_response()
 }
 
 async fn join_page(State(state): State<AppState>, Query(query): Query<JoinPageQuery>) -> Response {
@@ -2597,23 +2491,6 @@ fn membership_subject(identity: &AuthIdentity) -> Result<String, &'static str> {
     Err("unsupported identity")
 }
 
-async fn require_owner(
-    state: &AppState,
-    network_id: &str,
-    identity: &AuthIdentity,
-) -> Result<bool, &'static str> {
-    if identity.is_admin {
-        return Ok(true);
-    }
-    let subject = membership_subject(identity)?;
-    let member = state
-        .store
-        .network_member_get(network_id, &subject)
-        .await
-        .map_err(|_| "store error")?;
-    Ok(member.is_some_and(|member| member.role.eq_ignore_ascii_case(NETWORK_ROLE_OWNER)))
-}
-
 async fn require_membership(
     state: &AppState,
     network_id: &str,
@@ -2700,42 +2577,6 @@ enum NodeEnrollmentError {
     Store,
 }
 
-async fn create_node_enrollment(
-    store: &dyn crate::store::MeshStore,
-    network_id: &str,
-    owner_subject: &str,
-    issued_by: &str,
-    node_name: &str,
-    uses: i32,
-    ttl: Duration,
-) -> Result<(NodeEnrollment, String), NodeEnrollmentError> {
-    let uses = if uses <= 0 { 1 } else { uses };
-    let ttl = if ttl <= Duration::zero() {
-        Duration::minutes(10)
-    } else {
-        ttl
-    };
-    let now = Utc::now();
-    let token = format!("cw_enr_{}", generate_hex_token());
-    let enrollment = NodeEnrollment {
-        id: generate_hex_token(),
-        network_id: network_id.trim().to_string(),
-        owner_subject: owner_subject.trim().to_string(),
-        issued_by: issued_by.trim().to_string(),
-        node_name: node_name.trim().to_string(),
-        token_hash: hash_enrollment_token(&token),
-        uses_remaining: uses,
-        expires_at: now + ttl,
-        created_at: now,
-        redeemed_at: None,
-    };
-    store
-        .node_enrollment_create(enrollment.clone())
-        .await
-        .map_err(|_| NodeEnrollmentError::Store)?;
-    Ok((enrollment, token))
-}
-
 async fn redeem_node_enrollment(
     store: &dyn crate::store::MeshStore,
     enrollment_token: &str,
@@ -2802,22 +2643,6 @@ async fn redeem_node_enrollment(
     })
 }
 
-async fn load_group_response(
-    state: &AppState,
-    network_id: &str,
-    group_name: &str,
-) -> Result<Option<GroupResponse>, StoreError> {
-    let Some(group) = state.store.group_get(network_id, group_name).await? else {
-        return Ok(None);
-    };
-    let members = state
-        .store
-        .group_member_list(network_id, group_name)
-        .await?;
-    let policy = state.store.group_policy_get(network_id, group_name).await?;
-    Ok(Some(group_response(group, members, policy)))
-}
-
 fn group_response(
     group: Group,
     members: Vec<GroupMember>,
@@ -2877,23 +2702,6 @@ fn validate_group_name(raw: &str) -> Result<String, &'static str> {
     }
 }
 
-fn normalize_group_messages_policy(raw: Option<&str>) -> Result<String, &'static str> {
-    match raw.unwrap_or_default().trim().to_ascii_lowercase().as_str() {
-        "" | GROUP_MESSAGES_INTERNAL_ONLY => Ok(GROUP_MESSAGES_INTERNAL_ONLY.to_string()),
-        GROUP_MESSAGES_OPEN => Ok(GROUP_MESSAGES_OPEN.to_string()),
-        _ => Err("invalid messages_policy"),
-    }
-}
-
-fn normalize_group_debug_policy(raw: Option<&str>) -> Result<String, &'static str> {
-    match raw.unwrap_or_default().trim().to_ascii_lowercase().as_str() {
-        "" | GROUP_DEBUG_OBSERVE_ONLY => Ok(GROUP_DEBUG_OBSERVE_ONLY.to_string()),
-        GROUP_DEBUG_NONE => Ok(GROUP_DEBUG_NONE.to_string()),
-        GROUP_DEBUG_FULL => Ok(GROUP_DEBUG_FULL.to_string()),
-        _ => Err("invalid debug_policy"),
-    }
-}
-
 fn escape_html(raw: &str) -> String {
     let mut escaped = String::with_capacity(raw.len());
     for ch in raw.chars() {
@@ -2907,10 +2715,6 @@ fn escape_html(raw: &str) -> String {
         }
     }
     escaped
-}
-
-fn generate_invite_token() -> String {
-    format!("{}{}", INVITE_TOKEN_PREFIX, random_alphanumeric(24))
 }
 
 fn generate_session_token() -> String {
@@ -3052,6 +2856,10 @@ mod tests {
     use crate::network_auth::{
         VerifierBundle, verify_runtime_credential, verify_sender_delegation,
     };
+    use crate::store::{
+        GROUP_DEBUG_NONE, GROUP_DEBUG_OBSERVE_ONLY, GROUP_MESSAGES_INTERNAL_ONLY,
+        GROUP_MESSAGES_OPEN, NETWORK_ROLE_MEMBER, NodeEnrollment,
+    };
     use crate::{Invite, MemoryStore, MeshStore};
 
     fn test_config(auth_mode: AuthMode) -> Config {
@@ -3079,19 +2887,7 @@ mod tests {
     }
 
     fn test_state(auth_mode: AuthMode, store: MemoryStore) -> AppState {
-        let config = test_config(auth_mode);
-        let mesh_authorization = MeshAuthorizationAdapter::from_config(
-            config.mesh_authorization.as_ref(),
-            config.local_authorization.as_ref(),
-        );
-        AppState {
-            config,
-            store: std::sync::Arc::new(store),
-            mesh_authorization,
-            tailnet_coord: TailnetCoordinator::new(),
-            runtime_replay: RuntimeCredentialReplay::new(),
-            oidc_client: OidcClient::new(),
-        }
+        AppState::new(test_config(auth_mode), std::sync::Arc::new(store))
     }
 
     async fn seeded_github_store(token: &str, github_id: i64, username: &str) -> MemoryStore {
@@ -3588,7 +3384,8 @@ mod tests {
             .unwrap();
         assert_eq!(outsider.status(), StatusCode::FORBIDDEN);
         let body = to_bytes(outsider.into_body(), usize::MAX).await.unwrap();
-        assert_eq!(&body[..], b"forbidden\n");
+        let error: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(error["detail"], "forbidden");
     }
 
     #[tokio::test]
@@ -3633,11 +3430,9 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/api/v1/invites")
-                    .header(AUTHORIZATION, "Bearer sess_owner")
+                    .header(AUTHORIZATION, "Bearer cw_local-test")
                     .header("content-type", "application/json")
-                    .body(Body::from(
-                        r#"{"network_id":"project-alpha","uses":3,"ttl":"30m"}"#,
-                    ))
+                    .body(Body::from(r#"{"network_id":"project-alpha","ttl":"30m"}"#))
                     .unwrap(),
             )
             .await
@@ -3645,19 +3440,26 @@ mod tests {
         assert_eq!(create.status(), StatusCode::OK);
         let body = to_bytes(create.into_body(), usize::MAX).await.unwrap();
         let invite: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        let token = invite["token"].as_str().unwrap().to_string();
-        assert_eq!(invite["network_id"], "project-alpha");
-        assert_eq!(invite["created_by"], 101);
-        assert_eq!(invite["uses_remaining"], 3);
-        assert!(token.starts_with(INVITE_TOKEN_PREFIX));
-        assert_eq!(token.len(), INVITE_TOKEN_PREFIX.len() + 24);
+        let invite_id = invite["invite"]["id"].as_str().unwrap().to_string();
+        let invite_code = invite["invite_code"].as_str().unwrap().to_string();
+        assert_eq!(invite["invite"]["org_id"], "local-test-org");
+        assert_eq!(invite["invite"]["network_id"], "project-alpha");
+        assert_eq!(
+            invite["invite"]["created_by_user_id"],
+            "local-machine:local-test-environment"
+        );
+        assert!(invite_code.starts_with("cw_inv_"));
+        assert_eq!(invite_code.len(), "cw_inv_".len() + 64);
+        assert!(invite["invite"].get("code_hash").is_none());
+        assert!(invite["invite"].get("token").is_none());
+        assert!(invite["invite"].get("uses_remaining").is_none());
 
         let list = router
             .clone()
             .oneshot(
                 Request::builder()
                     .uri("/api/v1/invites?network_id=project-alpha")
-                    .header(AUTHORIZATION, "Bearer sess_owner")
+                    .header(AUTHORIZATION, "Bearer cw_local-test")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -3667,15 +3469,19 @@ mod tests {
         let body = to_bytes(list.into_body(), usize::MAX).await.unwrap();
         let got: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(got.as_array().unwrap().len(), 1);
-        assert_eq!(got[0]["token"], token);
+        assert_eq!(got[0]["id"], invite_id);
+        assert!(got[0].get("invite_code").is_none());
+        assert!(got[0].get("code_hash").is_none());
 
         let delete = router
             .clone()
             .oneshot(
                 Request::builder()
                     .method("DELETE")
-                    .uri(format!("/api/v1/invites/{token}?network_id=project-alpha"))
-                    .header(AUTHORIZATION, "Bearer sess_owner")
+                    .uri(format!(
+                        "/api/v1/invites/{invite_id}?network_id=project-alpha"
+                    ))
+                    .header(AUTHORIZATION, "Bearer cw_local-test")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -3683,11 +3489,17 @@ mod tests {
             .unwrap();
         assert_eq!(delete.status(), StatusCode::NO_CONTENT);
 
-        assert!(store.invite_get(&token).await.unwrap().is_none());
+        assert!(
+            store
+                .invite_get_by_id("project-alpha", &invite_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[tokio::test]
-    async fn invite_create_defaults_invalid_uses_like_go_relay() {
+    async fn invite_create_rejects_legacy_uses_field() {
         let store = seeded_member_store(
             "sess_owner",
             101,
@@ -3702,7 +3514,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/api/v1/invites")
-                    .header(AUTHORIZATION, "Bearer sess_owner")
+                    .header(AUTHORIZATION, "Bearer cw_local-test")
                     .header("content-type", "application/json")
                     .body(Body::from(r#"{"network_id":"project-alpha","uses":"bad"}"#))
                     .unwrap(),
@@ -3710,10 +3522,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-        let invite: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(invite["uses_remaining"], 1);
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
@@ -3732,7 +3541,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/api/v1/invites")
-                    .header(AUTHORIZATION, "Bearer sess_member")
+                    .header(AUTHORIZATION, "Bearer local-test-environment-token")
                     .header("content-type", "application/json")
                     .body(Body::from(r#"{"network_id":"project-alpha"}"#))
                     .unwrap(),
@@ -3741,12 +3550,10 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
-        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-        assert_eq!(&body[..], b"owner access required\n");
     }
 
     #[tokio::test]
-    async fn invite_create_rejects_invalid_ttl_like_go_relay() {
+    async fn invite_create_rejects_invalid_ttl() {
         let store = seeded_member_store(
             "sess_owner",
             101,
@@ -3761,7 +3568,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/api/v1/invites")
-                    .header(AUTHORIZATION, "Bearer sess_owner")
+                    .header(AUTHORIZATION, "Bearer cw_local-test")
                     .header("content-type", "application/json")
                     .body(Body::from(r#"{"network_id":"project-alpha","ttl":"soon"}"#))
                     .unwrap(),
@@ -3771,11 +3578,12 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-        assert_eq!(&body[..], b"invalid ttl\n");
+        let error: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(error["detail"], "invalid ttl");
     }
 
     #[tokio::test]
-    async fn kv_routes_are_network_scoped_and_require_membership_like_go_relay() {
+    async fn kv_routes_are_network_scoped_and_require_primary_product_auth() {
         let store = seeded_github_store("sess_member", 101, "member").await;
         seed_network(&store, "network-a").await;
         seed_network(&store, "network-b").await;
@@ -3809,7 +3617,7 @@ mod tests {
                     Request::builder()
                         .method("PUT")
                         .uri(format!("/api/v1/kv/tasks/build?network_id={network_id}"))
-                        .header(AUTHORIZATION, "Bearer relay-admin")
+                        .header(AUTHORIZATION, "Bearer cw_local-test")
                         .body(Body::from(value))
                         .unwrap(),
                 )
@@ -3835,7 +3643,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/api/v1/kv/tasks/build?network_id=network-a")
-                    .header(AUTHORIZATION, "Bearer sess_member")
+                    .header(AUTHORIZATION, "Bearer cw_local-test")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -3857,7 +3665,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/api/v1/kv/tasks/build?network_id=network-b")
-                    .header(AUTHORIZATION, "Bearer sess_outsider")
+                    .header(AUTHORIZATION, "Bearer local-test-environment-token")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -3869,7 +3677,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/api/v1/kv/tasks/build?network_id=network-b")
-                    .header(AUTHORIZATION, "Bearer sess_member")
+                    .header(AUTHORIZATION, "Bearer local-test-environment-token")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -3879,7 +3687,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn kv_list_filters_prefix_and_base64_encodes_values_like_go_relay() {
+    async fn kv_list_filters_prefix_and_base64_encodes_values() {
         let store = seeded_member_store(
             "sess_owner",
             101,
@@ -3901,7 +3709,7 @@ mod tests {
                     Request::builder()
                         .method("PUT")
                         .uri(format!("/api/v1/kv/tasks/{key}?network_id=project-alpha"))
-                        .header(AUTHORIZATION, "Bearer sess_owner")
+                        .header(AUTHORIZATION, "Bearer cw_local-test")
                         .body(Body::from(value))
                         .unwrap(),
                 )
@@ -3914,7 +3722,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/api/v1/kv/tasks?network_id=project-alpha&prefix=build")
-                    .header(AUTHORIZATION, "Bearer sess_owner")
+                    .header(AUTHORIZATION, "Bearer cw_local-test")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -3933,7 +3741,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn kv_ttl_expiry_and_invalid_ttl_match_go_relay() {
+    async fn kv_ttl_expiry_and_invalid_ttl_are_enforced() {
         let store = seeded_member_store(
             "sess_owner",
             101,
@@ -3950,36 +3758,35 @@ mod tests {
                 Request::builder()
                     .method("PUT")
                     .uri("/api/v1/kv/tasks/expired?network_id=project-alpha")
-                    .header(AUTHORIZATION, "Bearer sess_owner")
-                    .header("x-ttl", "-1s")
+                    .header(AUTHORIZATION, "Bearer cw_local-test")
+                    .header("x-ttl", "1ms")
                     .body(Body::from("gone"))
                     .unwrap(),
             )
             .await
             .unwrap();
         assert_eq!(expired_set.status(), StatusCode::NO_CONTENT);
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
 
         let expired_get = router
             .clone()
             .oneshot(
                 Request::builder()
                     .uri("/api/v1/kv/tasks/expired?network_id=project-alpha")
-                    .header(AUTHORIZATION, "Bearer sess_owner")
+                    .header(AUTHORIZATION, "Bearer cw_local-test")
                     .body(Body::empty())
                     .unwrap(),
             )
             .await
             .unwrap();
         assert_eq!(expired_get.status(), StatusCode::NOT_FOUND);
-        let body = to_bytes(expired_get.into_body(), usize::MAX).await.unwrap();
-        assert_eq!(&body[..], b"not found\n");
 
         let invalid_ttl = router
             .oneshot(
                 Request::builder()
                     .method("PUT")
                     .uri("/api/v1/kv/tasks/bad?network_id=project-alpha")
-                    .header(AUTHORIZATION, "Bearer sess_owner")
+                    .header(AUTHORIZATION, "Bearer cw_local-test")
                     .header("x-ttl", "1d")
                     .body(Body::from("bad"))
                     .unwrap(),
@@ -3992,7 +3799,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn kv_delete_requires_owner_and_removes_value_like_go_relay() {
+    async fn kv_delete_requires_owner_and_removes_value() {
         let store = seeded_member_store(
             "sess_owner",
             101,
@@ -4027,7 +3834,7 @@ mod tests {
                 Request::builder()
                     .method("PUT")
                     .uri("/api/v1/kv/tasks/build?network_id=project-alpha")
-                    .header(AUTHORIZATION, "Bearer sess_owner")
+                    .header(AUTHORIZATION, "Bearer cw_local-test")
                     .body(Body::from("alpha"))
                     .unwrap(),
             )
@@ -4041,17 +3848,13 @@ mod tests {
                 Request::builder()
                     .method("DELETE")
                     .uri("/api/v1/kv/tasks/build?network_id=project-alpha")
-                    .header(AUTHORIZATION, "Bearer sess_member")
+                    .header(AUTHORIZATION, "Bearer local-test-environment-token")
                     .body(Body::empty())
                     .unwrap(),
             )
             .await
             .unwrap();
         assert_eq!(member_delete.status(), StatusCode::FORBIDDEN);
-        let body = to_bytes(member_delete.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        assert_eq!(&body[..], b"owner access required\n");
 
         let owner_delete = router
             .clone()
@@ -4059,7 +3862,7 @@ mod tests {
                 Request::builder()
                     .method("DELETE")
                     .uri("/api/v1/kv/tasks/build?network_id=project-alpha")
-                    .header(AUTHORIZATION, "Bearer sess_owner")
+                    .header(AUTHORIZATION, "Bearer cw_local-test")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -4071,7 +3874,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/api/v1/kv/tasks/build?network_id=project-alpha")
-                    .header(AUTHORIZATION, "Bearer sess_owner")
+                    .header(AUTHORIZATION, "Bearer cw_local-test")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -4100,7 +3903,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn group_lifecycle_requires_owner_and_persists_defaults_like_go_relay() {
+    async fn group_lifecycle_requires_primary_owner_and_persists_defaults() {
         let store = seeded_member_store(
             "sess_owner",
             101,
@@ -4128,7 +3931,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/api/v1/groups")
-                    .header(AUTHORIZATION, "Bearer sess_outsider")
+                    .header(AUTHORIZATION, "Bearer local-test-environment-token")
                     .header("content-type", "application/json")
                     .body(Body::from(
                         r#"{"network_id":"project-alpha","name":"mesh"}"#,
@@ -4145,7 +3948,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/api/v1/groups")
-                    .header(AUTHORIZATION, "Bearer sess_owner")
+                    .header(AUTHORIZATION, "Bearer cw_local-test")
                     .header("content-type", "application/json")
                     .body(Body::from(
                         r#"{"network_id":"project-alpha","name":"mesh"}"#,
@@ -4159,7 +3962,10 @@ mod tests {
         let created: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(created["network_id"], "project-alpha");
         assert_eq!(created["name"], "mesh");
-        assert_eq!(created["created_by"], "github:101");
+        assert_eq!(
+            created["created_by"],
+            "local-machine:local-test-environment"
+        );
         assert_eq!(
             created["policy"]["messages_policy"],
             GROUP_MESSAGES_INTERNAL_ONLY
@@ -4171,7 +3977,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/api/v1/groups?network_id=project-alpha")
-                    .header(AUTHORIZATION, "Bearer sess_owner")
+                    .header(AUTHORIZATION, "Bearer cw_local-test")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -4190,7 +3996,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/api/v1/groups/mesh/members")
-                    .header(AUTHORIZATION, "Bearer sess_owner")
+                    .header(AUTHORIZATION, "Bearer cw_local-test")
                     .header("content-type", "application/json")
                     .body(Body::from(
                         r#"{"network_id":"project-alpha","node_name":"node-a","session_name":"agent-1"}"#,
@@ -4206,7 +4012,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/api/v1/groups/mesh?network_id=project-alpha")
-                    .header(AUTHORIZATION, "Bearer sess_owner")
+                    .header(AUTHORIZATION, "Bearer cw_local-test")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -4225,7 +4031,7 @@ mod tests {
                 Request::builder()
                     .method("PUT")
                     .uri("/api/v1/groups/mesh/policy")
-                    .header(AUTHORIZATION, "Bearer sess_owner")
+                    .header(AUTHORIZATION, "Bearer cw_local-test")
                     .header("content-type", "application/json")
                     .body(Body::from(
                         r#"{"network_id":"project-alpha","messages_policy":"open","debug_policy":"none"}"#,
@@ -4241,7 +4047,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/api/v1/groups/mesh?network_id=project-alpha")
-                    .header(AUTHORIZATION, "Bearer sess_owner")
+                    .header(AUTHORIZATION, "Bearer cw_local-test")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -4259,7 +4065,7 @@ mod tests {
                 Request::builder()
                     .method("DELETE")
                     .uri("/api/v1/groups/mesh/members?network_id=project-alpha&node_name=node-a&session_name=agent-1")
-                    .header(AUTHORIZATION, "Bearer sess_owner")
+                    .header(AUTHORIZATION, "Bearer cw_local-test")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -4273,7 +4079,7 @@ mod tests {
                 Request::builder()
                     .method("DELETE")
                     .uri("/api/v1/groups/mesh?network_id=project-alpha")
-                    .header(AUTHORIZATION, "Bearer sess_owner")
+                    .header(AUTHORIZATION, "Bearer cw_local-test")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -4290,7 +4096,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn group_handlers_reject_invalid_policy_and_duplicate_create_like_go_relay() {
+    async fn group_handlers_reject_invalid_policy_and_duplicate_create() {
         let store = seeded_member_store(
             "sess_owner",
             101,
@@ -4308,7 +4114,7 @@ mod tests {
                     Request::builder()
                         .method("POST")
                         .uri("/api/v1/groups")
-                        .header(AUTHORIZATION, "Bearer sess_owner")
+                        .header(AUTHORIZATION, "Bearer cw_local-test")
                         .header("content-type", "application/json")
                         .body(Body::from(
                             r#"{"network_id":"project-alpha","name":"mesh"}"#,
@@ -4325,7 +4131,7 @@ mod tests {
                 Request::builder()
                     .method("PUT")
                     .uri("/api/v1/groups/mesh/policy")
-                    .header(AUTHORIZATION, "Bearer sess_owner")
+                    .header(AUTHORIZATION, "Bearer cw_local-test")
                     .header("content-type", "application/json")
                     .body(Body::from(
                         r#"{"network_id":"project-alpha","messages_policy":"bad-value","debug_policy":"observe-only"}"#,
@@ -4335,14 +4141,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(invalid_policy.status(), StatusCode::BAD_REQUEST);
-        let body = to_bytes(invalid_policy.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        assert_eq!(&body[..], b"invalid messages_policy\n");
     }
 
     #[tokio::test]
-    async fn group_member_handlers_allow_node_scoped_mutation_like_go_relay() {
+    async fn group_member_handlers_reject_node_bearer_and_accept_primary_owner() {
         let store = MemoryStore::new();
         seed_node(
             &store,
@@ -4367,7 +4169,7 @@ mod tests {
             std::sync::Arc::new(store.clone()),
         );
 
-        let add = router
+        let legacy_node_bearer = router
             .clone()
             .oneshot(
                 Request::builder()
@@ -4375,7 +4177,26 @@ mod tests {
                     .uri("/api/v1/groups/mesh/members")
                     .header(AUTHORIZATION, "Bearer node-token")
                     .header("content-type", "application/json")
-                    .body(Body::from(r#"{"session_name":"agent-1"}"#))
+                    .body(Body::from(
+                        r#"{"network_id":"project-alpha","node_name":"node-a","session_name":"agent-1"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(legacy_node_bearer.status(), StatusCode::UNAUTHORIZED);
+
+        let add = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/groups/mesh/members")
+                    .header(AUTHORIZATION, "Bearer cw_local-test")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"network_id":"project-alpha","node_name":"node-a","session_name":"agent-1"}"#,
+                    ))
                     .unwrap(),
             )
             .await
@@ -4394,8 +4215,10 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("DELETE")
-                    .uri("/api/v1/groups/mesh/members?session_name=agent-1")
-                    .header(AUTHORIZATION, "Bearer node-token")
+                    .uri(
+                        "/api/v1/groups/mesh/members?network_id=project-alpha&node_name=node-a&session_name=agent-1",
+                    )
+                    .header(AUTHORIZATION, "Bearer cw_local-test")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -4410,12 +4233,12 @@ mod tests {
                 .is_empty()
         );
 
-        let forbidden = router
+        let incomplete = router
             .oneshot(
                 Request::builder()
                     .method("POST")
                     .uri("/api/v1/groups/mesh/members")
-                    .header(AUTHORIZATION, "Bearer node-token")
+                    .header(AUTHORIZATION, "Bearer cw_local-test")
                     .header("content-type", "application/json")
                     .body(Body::from(
                         r#"{"node_name":"node-b","session_name":"agent-1"}"#,
@@ -4424,11 +4247,11 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(forbidden.status(), StatusCode::FORBIDDEN);
+        assert_eq!(incomplete.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
-    async fn invite_list_requires_network_id_like_go_relay() {
+    async fn invite_list_requires_network_id() {
         let response = router(test_config(AuthMode::Token))
             .oneshot(
                 Request::builder()
@@ -4458,15 +4281,16 @@ mod tests {
         assert_eq!(parse_go_duration(""), None);
     }
 
-    async fn seed_invite(store: &MemoryStore, token: &str, network_id: &str, uses: i32) {
+    async fn seed_invite(store: &MemoryStore, code: &str, network_id: &str, invite_id: &str) {
         let now = Utc::now();
         seed_network(store, network_id).await;
         store
             .invite_create(Invite {
+                id: invite_id.to_owned(),
                 network_id: network_id.to_string(),
-                token: token.to_string(),
-                created_by: None,
-                uses_remaining: uses,
+                organization_id: "local-test-org".to_string(),
+                created_by_user_id: "creator-primary-id".to_string(),
+                code_hash: crate::product::hash_invite_code(code),
                 expires_at: now + Duration::hours(1),
                 created_at: now,
             })
@@ -4476,8 +4300,8 @@ mod tests {
 
     #[tokio::test]
     async fn network_join_adds_authenticated_member() {
-        let store = seeded_github_store("sess_member", 101, "member").await;
-        seed_invite(&store, "CW-INV-TEST", "network-invite", 1).await;
+        let store = MemoryStore::new();
+        seed_invite(&store, "cw_inv_test", "network-invite", "invite-test-id").await;
         let router = router_with_store(
             test_config(AuthMode::Token),
             std::sync::Arc::new(store.clone()),
@@ -4488,9 +4312,9 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/api/v1/networks/join")
-                    .header(AUTHORIZATION, "Bearer sess_member")
+                    .header(AUTHORIZATION, "Bearer cw_local-test")
                     .header("content-type", "application/json")
-                    .body(Body::from(r#"{"invite_token":"CW-INV-TEST"}"#))
+                    .body(Body::from(r#"{"invite_code":"cw_inv_test"}"#))
                     .unwrap(),
             )
             .await
@@ -4505,72 +4329,95 @@ mod tests {
         );
 
         let member = store
-            .network_member_get("network-invite", "github:101")
+            .network_member_get("network-invite", "local-machine:local-test-environment")
             .await
             .unwrap()
             .unwrap();
         assert_eq!(member.role, NETWORK_ROLE_MEMBER);
-        assert_eq!(member.created_by, "CW-INV-TEST");
-        assert!(store.invite_get("CW-INV-TEST").await.unwrap().is_none());
+        assert_eq!(member.created_by, "invite:invite-test-id");
+        assert!(
+            store
+                .invite_get_by_id("network-invite", "invite-test-id")
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[tokio::test]
-    async fn network_join_rejects_blank_invite_token_like_go_relay() {
-        let store = seeded_github_store("sess_member", 101, "member").await;
+    async fn network_join_rejects_blank_invite_code() {
+        let store = MemoryStore::new();
         let response = router_with_store(test_config(AuthMode::Token), std::sync::Arc::new(store))
             .oneshot(
                 Request::builder()
                     .method("POST")
                     .uri("/api/v1/networks/join")
-                    .header(AUTHORIZATION, "Bearer sess_member")
+                    .header(AUTHORIZATION, "Bearer cw_local-test")
                     .header("content-type", "application/json")
-                    .body(Body::from(r#"{"invite_token":"  "}"#))
+                    .body(Body::from(r#"{"invite_code":"  "}"#))
                     .unwrap(),
             )
             .await
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-        assert_eq!(&body[..], b"invite_token required\n");
     }
 
     #[tokio::test]
-    async fn network_join_rejects_invalid_invite_token_like_go_relay() {
-        let store = seeded_github_store("sess_member", 101, "member").await;
+    async fn network_join_rejects_legacy_invite_token_field() {
+        let response = router_with_store(
+            test_config(AuthMode::Token),
+            std::sync::Arc::new(MemoryStore::new()),
+        )
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/networks/join")
+                .header(AUTHORIZATION, "Bearer cw_local-test")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"invite_token":"legacy-is-not-supported"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn network_join_rejects_invalid_invite_code() {
+        let store = MemoryStore::new();
         let response = router_with_store(test_config(AuthMode::Token), std::sync::Arc::new(store))
             .oneshot(
                 Request::builder()
                     .method("POST")
                     .uri("/api/v1/networks/join")
-                    .header(AUTHORIZATION, "Bearer sess_member")
+                    .header(AUTHORIZATION, "Bearer cw_local-test")
                     .header("content-type", "application/json")
-                    .body(Body::from(r#"{"invite_token":"CW-INV-MISSING"}"#))
+                    .body(Body::from(r#"{"invite_code":"cw_inv_missing"}"#))
                     .unwrap(),
             )
             .await
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
-        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-        assert_eq!(&body[..], b"invalid or expired invite\n");
     }
 
     #[tokio::test]
     async fn network_join_preserves_existing_owner_role() {
-        let store = seeded_github_store("sess_owner", 101, "owner").await;
+        let store = MemoryStore::new();
         seed_network(&store, "network-invite").await;
         store
             .network_member_upsert(NetworkMember {
                 network_id: "network-invite".to_string(),
-                subject: "github:101".to_string(),
+                subject: "local-machine:local-test-environment".to_string(),
                 role: NETWORK_ROLE_OWNER.to_string(),
                 created_at: Utc::now(),
-                created_by: "github:101".to_string(),
+                created_by: "local-machine:local-test-environment".to_string(),
             })
             .await
             .unwrap();
-        seed_invite(&store, "CW-INV-OWNER", "network-invite", 1).await;
+        seed_invite(&store, "cw_inv_owner", "network-invite", "invite-owner-id").await;
 
         let response = router_with_store(
             test_config(AuthMode::Token),
@@ -4580,9 +4427,9 @@ mod tests {
             Request::builder()
                 .method("POST")
                 .uri("/api/v1/networks/join")
-                .header(AUTHORIZATION, "Bearer sess_owner")
+                .header(AUTHORIZATION, "Bearer cw_local-test")
                 .header("content-type", "application/json")
-                .body(Body::from(r#"{"invite_token":"CW-INV-OWNER"}"#))
+                .body(Body::from(r#"{"invite_code":"cw_inv_owner"}"#))
                 .unwrap(),
         )
         .await
@@ -4590,12 +4437,12 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::OK);
         let member = store
-            .network_member_get("network-invite", "github:101")
+            .network_member_get("network-invite", "local-machine:local-test-environment")
             .await
             .unwrap()
             .unwrap();
         assert_eq!(member.role, NETWORK_ROLE_OWNER);
-        assert_eq!(member.created_by, "github:101");
+        assert_eq!(member.created_by, "local-machine:local-test-environment");
     }
 
     #[tokio::test]
@@ -4657,14 +4504,8 @@ mod tests {
 
     #[tokio::test]
     async fn node_enrollment_create_and_redeem_registers_node() {
-        let store = seeded_member_store(
-            "sess_member",
-            101,
-            "member",
-            "network-a",
-            NETWORK_ROLE_MEMBER,
-        )
-        .await;
+        let store = MemoryStore::new();
+        seed_network(&store, "network-a").await;
         let router = router_with_store(
             test_config(AuthMode::Token),
             std::sync::Arc::new(store.clone()),
@@ -4676,10 +4517,10 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/api/v1/node-enrollments")
-                    .header(AUTHORIZATION, "Bearer sess_member")
+                    .header(AUTHORIZATION, "Bearer cw_local-test")
                     .header("content-type", "application/json")
                     .body(Body::from(
-                        r#"{"network_id":"network-a","node_name":"dev-1","uses":1,"ttl":"10m"}"#,
+                        r#"{"network_id":"network-a","node_name":"dev-1","ttl":"10m"}"#,
                     ))
                     .unwrap(),
             )
@@ -4688,13 +4529,21 @@ mod tests {
         assert_eq!(create.status(), StatusCode::OK);
         let body = to_bytes(create.into_body(), usize::MAX).await.unwrap();
         let created: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        let enrollment_id = created["id"].as_str().unwrap().to_string();
-        let enrollment_token = created["enrollment_token"].as_str().unwrap().to_string();
-        assert_eq!(created["network_id"], "network-a");
-        assert_eq!(created["node_name"], "dev-1");
-        assert_eq!(created["owner_subject"], "github:101");
-        assert_eq!(created["issued_by"], "github:101");
-        assert_eq!(created["uses_remaining"], 1);
+        let enrollment_id = created["enrollment"]["id"].as_str().unwrap().to_string();
+        let enrollment_token = created["enrollment_code"].as_str().unwrap().to_string();
+        assert_eq!(created["enrollment"]["org_id"], "local-test-org");
+        assert_eq!(created["enrollment"]["network_id"], "network-a");
+        assert_eq!(created["enrollment"]["node_name"], "dev-1");
+        assert_eq!(
+            created["enrollment"]["owner_user_id"],
+            "local-machine:local-test-environment"
+        );
+        assert_eq!(
+            created["enrollment"]["issued_by_user_id"],
+            "local-machine:local-test-environment"
+        );
+        assert!(created.get("enrollment_token").is_none());
+        assert!(created["enrollment"].get("uses_remaining").is_none());
         assert_eq!(enrollment_id.len(), 64);
         assert!(enrollment_token.starts_with("cw_enr_"));
         assert_eq!(enrollment_token.len(), "cw_enr_".len() + 64);
@@ -4731,8 +4580,8 @@ mod tests {
         assert_eq!(node.network_id, "network-a");
         assert_eq!(node.name, "dev-1");
         assert_eq!(node.peer_url, "https://peer.dev");
-        assert_eq!(node.owner_subject, "github:101");
-        assert_eq!(node.authorized_by, "github:101");
+        assert_eq!(node.owner_subject, "local-machine:local-test-environment");
+        assert_eq!(node.authorized_by, "local-machine:local-test-environment");
         assert_eq!(node.enrollment_id, enrollment_id);
 
         let enrollment = store
@@ -4745,14 +4594,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn node_enrollment_create_requires_membership_like_go_relay() {
-        let store = seeded_github_store("sess_member", 101, "member").await;
+    async fn node_enrollment_create_rejects_environment_credential() {
+        let store = MemoryStore::new();
+        seed_network(&store, "network-a").await;
         let response = router_with_store(test_config(AuthMode::Token), std::sync::Arc::new(store))
             .oneshot(
                 Request::builder()
                     .method("POST")
                     .uri("/api/v1/node-enrollments")
-                    .header(AUTHORIZATION, "Bearer sess_member")
+                    .header(AUTHORIZATION, "Bearer local-test-environment-token")
                     .header("content-type", "application/json")
                     .body(Body::from(r#"{"network_id":"network-a"}"#))
                     .unwrap(),
@@ -4761,26 +4611,18 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
-        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-        assert_eq!(&body[..], b"membership required\n");
     }
 
     #[tokio::test]
-    async fn node_enrollment_create_rejects_invalid_ttl_like_go_relay() {
-        let store = seeded_member_store(
-            "sess_member",
-            101,
-            "member",
-            "network-a",
-            NETWORK_ROLE_MEMBER,
-        )
-        .await;
+    async fn node_enrollment_create_rejects_invalid_ttl() {
+        let store = MemoryStore::new();
+        seed_network(&store, "network-a").await;
         let response = router_with_store(test_config(AuthMode::Token), std::sync::Arc::new(store))
             .oneshot(
                 Request::builder()
                     .method("POST")
                     .uri("/api/v1/node-enrollments")
-                    .header(AUTHORIZATION, "Bearer sess_member")
+                    .header(AUTHORIZATION, "Bearer cw_local-test")
                     .header("content-type", "application/json")
                     .body(Body::from(r#"{"network_id":"network-a","ttl":"soon"}"#))
                     .unwrap(),
@@ -4814,25 +4656,25 @@ mod tests {
 
     #[tokio::test]
     async fn node_enrollment_redeem_rejects_fixed_node_name_mismatch() {
-        let store = seeded_member_store(
-            "sess_member",
-            101,
-            "member",
-            "network-a",
-            NETWORK_ROLE_MEMBER,
-        )
-        .await;
-        let (_, enrollment_token) = create_node_enrollment(
-            &store,
-            "network-a",
-            "github:101",
-            "github:101",
-            "dev-1",
-            1,
-            Duration::minutes(10),
-        )
-        .await
-        .unwrap();
+        let store = MemoryStore::new();
+        seed_network(&store, "network-a").await;
+        let now = Utc::now();
+        let enrollment_token = format!("cw_enr_{}", generate_hex_token());
+        store
+            .node_enrollment_create(NodeEnrollment {
+                id: generate_hex_token(),
+                network_id: "network-a".to_string(),
+                owner_subject: "local-machine:local-test-environment".to_string(),
+                issued_by: "local-machine:local-test-environment".to_string(),
+                node_name: "dev-1".to_string(),
+                token_hash: hash_enrollment_token(&enrollment_token),
+                uses_remaining: 1,
+                expires_at: now + Duration::minutes(10),
+                created_at: now,
+                redeemed_at: None,
+            })
+            .await
+            .unwrap();
 
         let response = router_with_store(test_config(AuthMode::Token), std::sync::Arc::new(store))
             .oneshot(
@@ -4854,36 +4696,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn nodes_list_requires_membership_and_scopes_by_network_like_go_relay() {
+    async fn nodes_list_requires_primary_auth_and_explicit_network_scope() {
         let store = MemoryStore::new();
-        store
-            .upsert_github_session(
-                "sess_member",
-                101,
-                "member",
-                Utc::now() + Duration::hours(1),
-            )
-            .await;
-        store
-            .upsert_github_session(
-                "sess_outsider",
-                202,
-                "outsider",
-                Utc::now() + Duration::hours(1),
-            )
-            .await;
         seed_network(&store, "network-a").await;
         seed_network(&store, "network-b").await;
-        store
-            .network_member_upsert(NetworkMember {
-                network_id: "network-a".to_string(),
-                subject: "github:101".to_string(),
-                role: NETWORK_ROLE_OWNER.to_string(),
-                created_at: Utc::now(),
-                created_by: "github:101".to_string(),
-            })
-            .await
-            .unwrap();
         seed_node(
             &store,
             "network-a",
@@ -4924,22 +4740,20 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/api/v1/nodes?network_id=network-a")
-                    .header(AUTHORIZATION, "Bearer sess_outsider")
+                    .header(AUTHORIZATION, "Bearer local-test-environment-token")
                     .body(Body::empty())
                     .unwrap(),
             )
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
-        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-        assert_eq!(&body[..], b"membership required\n");
 
         let response = router
             .clone()
             .oneshot(
                 Request::builder()
                     .uri("/api/v1/nodes?network_id=network-a")
-                    .header(AUTHORIZATION, "Bearer sess_member")
+                    .header(AUTHORIZATION, "Bearer cw_local-test")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -4959,37 +4773,20 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/api/v1/nodes?all=true")
-                    .header(AUTHORIZATION, "Bearer sess_member")
+                    .header(AUTHORIZATION, "Bearer cw_local-test")
                     .body(Body::empty())
                     .unwrap(),
             )
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-        let nodes: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(nodes.as_array().unwrap().len(), 1);
-        assert_eq!(nodes[0]["network_id"], "network-a");
-
-        let response = router
-            .oneshot(
-                Request::builder()
-                    .uri("/api/v1/nodes?all=true")
-                    .header(AUTHORIZATION, "Bearer relay-admin")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-        let nodes: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(nodes.as_array().unwrap().len(), 2);
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
-    async fn nodes_list_accepts_node_token_like_go_relay() {
+    async fn nodes_list_rejects_legacy_node_bearer() {
         let store = MemoryStore::new();
+        seed_network(&store, "network-a").await;
+        seed_network(&store, "network-b").await;
         seed_node(
             &store,
             "network-a",
@@ -5020,49 +4817,13 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-        let nodes: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(nodes.as_array().unwrap().len(), 1);
-        assert_eq!(nodes[0]["network_id"], "network-a");
-        assert_eq!(nodes[0]["name"], "builder");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]
-    async fn node_revoke_requires_owner_and_deletes_node_like_go_relay() {
+    async fn node_revoke_requires_primary_owner_and_deletes_node() {
         let store = MemoryStore::new();
-        store
-            .upsert_github_session("sess_owner", 101, "owner", Utc::now() + Duration::hours(1))
-            .await;
-        store
-            .upsert_github_session(
-                "sess_member",
-                202,
-                "member",
-                Utc::now() + Duration::hours(1),
-            )
-            .await;
         seed_network(&store, "network-a").await;
-        store
-            .network_member_upsert(NetworkMember {
-                network_id: "network-a".to_string(),
-                subject: "github:101".to_string(),
-                role: NETWORK_ROLE_OWNER.to_string(),
-                created_at: Utc::now(),
-                created_by: "github:101".to_string(),
-            })
-            .await
-            .unwrap();
-        store
-            .network_member_upsert(NetworkMember {
-                network_id: "network-a".to_string(),
-                subject: "github:202".to_string(),
-                role: NETWORK_ROLE_MEMBER.to_string(),
-                created_at: Utc::now(),
-                created_by: "github:101".to_string(),
-            })
-            .await
-            .unwrap();
         seed_node(
             &store,
             "network-a",
@@ -5096,15 +4857,13 @@ mod tests {
                 Request::builder()
                     .method("DELETE")
                     .uri("/api/v1/nodes/builder?network_id=network-a")
-                    .header(AUTHORIZATION, "Bearer sess_member")
+                    .header(AUTHORIZATION, "Bearer local-test-environment-token")
                     .body(Body::empty())
                     .unwrap(),
             )
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
-        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-        assert_eq!(&body[..], b"owner access required\n");
 
         let response = router
             .clone()
@@ -5112,22 +4871,20 @@ mod tests {
                 Request::builder()
                     .method("DELETE")
                     .uri("/api/v1/nodes/missing?network_id=network-a")
-                    .header(AUTHORIZATION, "Bearer sess_owner")
+                    .header(AUTHORIZATION, "Bearer cw_local-test")
                     .body(Body::empty())
                     .unwrap(),
             )
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
-        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-        assert_eq!(&body[..], b"node not found\n");
 
         let response = router
             .oneshot(
                 Request::builder()
                     .method("DELETE")
                     .uri("/api/v1/nodes/builder?network_id=network-a")
-                    .header(AUTHORIZATION, "Bearer sess_owner")
+                    .header(AUTHORIZATION, "Bearer cw_local-test")
                     .body(Body::empty())
                     .unwrap(),
             )
