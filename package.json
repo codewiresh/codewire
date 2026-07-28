@@ -5,6 +5,10 @@
   "license": "AGPL-3.0-only",
   "description": "Environment-first control plane for agent-oriented development",
   "workspaces": ["packages/*", "apps/*"],
+  "overrides": {
+    "js-yaml": "4.3.0",
+    "sharp": "0.35.0"
+  },
   "scripts": {
     "preflight": "./scripts/dev/preflight.sh",
     "hooks:install": "./scripts/dev/install-hooks.sh",

@@ -33,6 +33,9 @@ on:
         required: true
         type: string
 
+permissions:
+  contents: read
+
 env:
   ZIG_VERSION: 0.15.2
   ZIG_X86_64_LINUX_SHA256: 02aa270f183da276e5b5920b1dac44a63f1a49e55050ebde3aecc9eb82f93239
@@ -166,6 +169,8 @@ jobs:
     name: Package and publish signed Rust cw release
     needs: [release-selection]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
 

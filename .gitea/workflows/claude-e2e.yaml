@@ -7,6 +7,9 @@ on:
     tags:
       - "v*"
 
+permissions:
+  contents: read
+
 jobs:
   claude-parity:
     name: Run claude in all three SDKs

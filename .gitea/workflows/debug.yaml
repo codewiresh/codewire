@@ -3,6 +3,9 @@ name: Debug Infisical Auth
 on:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   debug-auth:
     name: Debug Infisical OIDC

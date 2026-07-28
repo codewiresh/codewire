@@ -3,6 +3,9 @@ name: Prod Read-only Smoke
 on:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   prod-readonly-smoke:
     name: Production Read-only Smoke

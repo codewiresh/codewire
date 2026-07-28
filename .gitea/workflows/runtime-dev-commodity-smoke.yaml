@@ -3,6 +3,9 @@ name: Runtime Dev Commodity Smoke
 on:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 env:
   KUBECTL_VERSION: v1.34.0
   CODEWIRE_SERVER_URL: https://codewire-dev.sh

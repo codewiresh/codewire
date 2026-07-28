@@ -1,0 +1,61 @@
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Codewire Rust lockfiles list the crypto_secretbox dependency next to registry checksums"
+targetRules = ["generic-api-key"]
+condition = "AND"
+paths = [
+  '''(^|/)Cargo\.lock$''',
+  '''(^|/)deployments/docker/(derp|gateway)\.Cargo\.lock$''',
+]
+regexTarget = "match"
+regexes = ['''crypto_secretbox''']
+
+[[allowlists]]
+description = "Codewire terminal rejection tests use fixed 32-byte hex signing fixtures"
+targetRules = ["generic-api-key"]
+condition = "AND"
+paths = ['''(^|/)crates/codewire-orchestration/src/api/terminal\.rs$''']
+regexTarget = "line"
+regexes = ['''let[[:space:]]+secret[[:space:]]*=[[:space:]]*"[[:xdigit:]]{32}";''']
+
+[[allowlists]]
+description = "Codewire proto JSON tests serialize a fixed API-key-shaped fixture"
+targetRules = ["generic-api-key"]
+condition = "AND"
+paths = ['''(^|/)crates/codewire-proto/src/lib\.rs$''']
+regexTarget = "match"
+regexes = ['''key:[[:space:]]*"cw_[0-9a-fA-F]{16}"''']
+
+[[allowlists]]
+description = "Codewire historical plan prose quotes a deploy-key record name"
+targetRules = ["generic-api-key"]
+condition = "AND"
+paths = ['''(^|/)docs/plans/connect-rpc/05-apikey-service-pilot\.md$''']
+regexTarget = "match"
+regexes = ['''key\r?\n>[[:space:]]+`''']
+
+[[allowlists]]
+description = "Codewire Kind coordinator smoke test generates a disposable sidecar token"
+targetRules = ["generic-api-key"]
+condition = "AND"
+paths = ['''(^|/)scripts/ci/verify/kind/common\.sh$''']
+regexTarget = "line"
+regexes = ['''sidecar_token="[[:alnum:]_.-]{100,200}"''']
+
+[[allowlists]]
+description = "Codewire sandbox template tests embed an OpenSSH private-key fixture"
+targetRules = ["private-key"]
+condition = "AND"
+paths = ['''(^|/)crates/codewire-orchestration/src/sandbox/template\.rs$''']
+regexTarget = "match"
+regexes = ['''BEGIN[[:space:]]+OPENSSH[[:space:]]+PRIVATE[[:space:]]+KEY''']
+
+[[allowlists]]
+description = "Codewire Kind support manifest embeds a disposable EC private-key fixture"
+targetRules = ["private-key"]
+condition = "AND"
+paths = ['''(^|/)tests/e2e/kind/support\.yaml$''']
+regexTarget = "match"
+regexes = ['''BEGIN[[:space:]]+EC[[:space:]]+PRIVATE[[:space:]]+KEY''']

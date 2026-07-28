@@ -4,7 +4,10 @@ go 1.26.3
 
 require (
 	connectrpc.com/connect v1.18.1
-	google.golang.org/protobuf v1.36.5
+	google.golang.org/protobuf v1.36.11
 )
 
-require github.com/google/go-cmp v0.7.0 // indirect
+require (
+	golang.org/x/net v0.56.0 // indirect
+	golang.org/x/text v0.39.0 // indirect
+)
