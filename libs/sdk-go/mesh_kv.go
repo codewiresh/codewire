@@ -2,11 +2,11 @@ package codewire
 
 import (
 	"context"
-	"fmt"
-	"io"
-	"net/http"
-	"net/url"
-	"strings"
+	"time"
+
+	"connectrpc.com/connect"
+	codewirev1 "github.com/codewiresh/codewire/libs/gen-go/codewire/v1"
+	"google.golang.org/protobuf/types/known/durationpb"
 )
 
 // MeshKVService handles mesh key-value store operations.
@@ -14,57 +14,69 @@ type MeshKVService struct {
 	client *MeshClient
 }
 
-// Set stores a value in the KV store. Pass empty ttl for no expiry.
-func (s *MeshKVService) Set(ctx context.Context, networkID, namespace, key string, value []byte, ttl string) error {
-	path := fmt.Sprintf("/api/v1/kv/%s/%s?network_id=%s",
-		url.PathEscape(namespace), url.PathEscape(key), url.QueryEscape(networkID))
-
-	req, err := http.NewRequestWithContext(ctx, "PUT", s.client.baseURL+path, strings.NewReader(string(value)))
+// Set stores a value in the KV store. A zero ttl selects no expiry.
+func (s *MeshKVService) Set(ctx context.Context, orgID, networkID, namespace, key string, value []byte, ttl time.Duration) (*MeshKVEntry, error) {
+	request := &codewirev1.SetMeshKeyValueRequest{
+		OrgId: orgID, NetworkId: networkID, Namespace: namespace, Key: key, Value: append([]byte(nil), value...),
+	}
+	if ttl != 0 {
+		request.Ttl = durationpb.New(ttl)
+	}
+	response, err := s.client.kvClient.SetMeshKeyValue(ctx, connect.NewRequest(request))
 	if err != nil {
-		return fmt.Errorf("mesh: create request: %w", err)
+		return nil, connectSDKError(err)
 	}
-	req.Header.Set("Authorization", "Bearer "+s.client.authToken)
-	req.Header.Set("Content-Type", "application/octet-stream")
-	if ttl != "" {
-		req.Header.Set("X-TTL", ttl)
-	}
-
-	resp, err := s.client.httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("mesh: request: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 400 {
-		detail, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		return &Error{StatusCode: resp.StatusCode, Detail: strings.TrimSpace(string(detail))}
-	}
-	return nil
-}
-
-// Get retrieves a value from the KV store.
-func (s *MeshKVService) Get(ctx context.Context, networkID, namespace, key string) ([]byte, error) {
-	path := fmt.Sprintf("/api/v1/kv/%s/%s?network_id=%s",
-		url.PathEscape(namespace), url.PathEscape(key), url.QueryEscape(networkID))
-	resp, err := s.client.doRawBody(ctx, "GET", path, nil, "")
+	entry, err := fromProtoMeshKeyValue(response.Msg.GetEntry())
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
-	return io.ReadAll(resp.Body)
+	return &entry, nil
+}
+
+// Get retrieves a value from the KV store.
+func (s *MeshKVService) Get(ctx context.Context, orgID, networkID, namespace, key string) (*MeshKVEntry, error) {
+	response, err := s.client.kvClient.GetMeshKeyValue(ctx, connect.NewRequest(&codewirev1.GetMeshKeyValueRequest{
+		OrgId: orgID, NetworkId: networkID, Namespace: namespace, Key: key,
+	}))
+	if err != nil {
+		return nil, connectSDKError(err)
+	}
+	entry, err := fromProtoMeshKeyValue(response.Msg.GetEntry())
+	if err != nil {
+		return nil, err
+	}
+	return &entry, nil
 }
 
 // List returns KV entries matching a prefix.
-func (s *MeshKVService) List(ctx context.Context, networkID, namespace, prefix string) ([]MeshKVEntry, error) {
-	path := fmt.Sprintf("/api/v1/kv/%s?prefix=%s&network_id=%s",
-		url.PathEscape(namespace), url.QueryEscape(prefix), url.QueryEscape(networkID))
+func (s *MeshKVService) List(ctx context.Context, orgID, networkID, namespace, prefix string) ([]MeshKVEntry, error) {
 	var entries []MeshKVEntry
-	err := s.client.doAuth(ctx, "GET", path, nil, &entries)
-	return entries, err
+	request := &codewirev1.ListMeshKeyValuesRequest{
+		OrgId: orgID, NetworkId: networkID, Namespace: namespace, Prefix: prefix,
+	}
+	for {
+		response, err := s.client.kvClient.ListMeshKeyValues(ctx, connect.NewRequest(request))
+		if err != nil {
+			return nil, connectSDKError(err)
+		}
+		for _, entry := range response.Msg.GetEntries() {
+			converted, err := fromProtoMeshKeyValue(entry)
+			if err != nil {
+				return nil, err
+			}
+			entries = append(entries, converted)
+		}
+		request.PageToken = response.Msg.GetNextPageToken()
+		if request.PageToken == "" {
+			return entries, nil
+		}
+	}
 }
 
 // Delete removes a key from the KV store (owner required).
-func (s *MeshKVService) Delete(ctx context.Context, networkID, namespace, key string) error {
-	path := fmt.Sprintf("/api/v1/kv/%s/%s?network_id=%s",
-		url.PathEscape(namespace), url.PathEscape(key), url.QueryEscape(networkID))
-	return s.client.doAuth(ctx, "DELETE", path, nil, nil)
+func (s *MeshKVService) Delete(ctx context.Context, orgID, networkID, namespace, key string) error {
+	_, err := s.client.kvClient.DeleteMeshKeyValue(ctx, connect.NewRequest(&codewirev1.DeleteMeshKeyValueRequest{
+		OrgId: orgID, NetworkId: networkID, Namespace: namespace, Key: key,
+	}))
+	return connectSDKError(err)
 }

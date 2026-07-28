@@ -2,8 +2,9 @@ package codewire
 
 import (
 	"context"
-	"fmt"
-	"net/url"
+
+	"connectrpc.com/connect"
+	codewirev1 "github.com/codewiresh/codewire/libs/gen-go/codewire/v1"
 )
 
 // MeshGroupService handles mesh group operations.
@@ -12,12 +13,14 @@ type MeshGroupService struct {
 }
 
 // Create creates a group in a network (owner required).
-func (s *MeshGroupService) Create(ctx context.Context, networkID, name string) (*MeshGroup, error) {
-	var group MeshGroup
-	err := s.client.doAuth(ctx, "POST", "/api/v1/groups", map[string]string{
-		"network_id": networkID,
-		"name":       name,
-	}, &group)
+func (s *MeshGroupService) Create(ctx context.Context, orgID, networkID, name string) (*MeshGroup, error) {
+	response, err := s.client.groupClient.CreateMeshGroup(ctx, connect.NewRequest(&codewirev1.CreateMeshGroupRequest{
+		OrgId: orgID, NetworkId: networkID, Name: name,
+	}))
+	if err != nil {
+		return nil, connectSDKError(err)
+	}
+	group, err := fromProtoMeshGroup(response.Msg.GetGroup())
 	if err != nil {
 		return nil, err
 	}
@@ -25,20 +28,37 @@ func (s *MeshGroupService) Create(ctx context.Context, networkID, name string) (
 }
 
 // List returns all groups in a network (owner required).
-func (s *MeshGroupService) List(ctx context.Context, networkID string) ([]MeshGroup, error) {
+func (s *MeshGroupService) List(ctx context.Context, orgID, networkID string) ([]MeshGroup, error) {
 	var groups []MeshGroup
-	err := s.client.doAuth(ctx, "GET",
-		fmt.Sprintf("/api/v1/groups?network_id=%s", url.QueryEscape(networkID)),
-		nil, &groups)
-	return groups, err
+	request := &codewirev1.ListMeshGroupsRequest{OrgId: orgID, NetworkId: networkID}
+	for {
+		response, err := s.client.groupClient.ListMeshGroups(ctx, connect.NewRequest(request))
+		if err != nil {
+			return nil, connectSDKError(err)
+		}
+		for _, group := range response.Msg.GetGroups() {
+			converted, err := fromProtoMeshGroup(group)
+			if err != nil {
+				return nil, err
+			}
+			groups = append(groups, converted)
+		}
+		request.PageToken = response.Msg.GetNextPageToken()
+		if request.PageToken == "" {
+			return groups, nil
+		}
+	}
 }
 
 // Get returns a group by name (owner required).
-func (s *MeshGroupService) Get(ctx context.Context, networkID, name string) (*MeshGroup, error) {
-	var group MeshGroup
-	err := s.client.doAuth(ctx, "GET",
-		fmt.Sprintf("/api/v1/groups/%s?network_id=%s", url.PathEscape(name), url.QueryEscape(networkID)),
-		nil, &group)
+func (s *MeshGroupService) Get(ctx context.Context, orgID, networkID, name string) (*MeshGroup, error) {
+	response, err := s.client.groupClient.GetMeshGroup(ctx, connect.NewRequest(&codewirev1.GetMeshGroupRequest{
+		OrgId: orgID, NetworkId: networkID, GroupName: name,
+	}))
+	if err != nil {
+		return nil, connectSDKError(err)
+	}
+	group, err := fromProtoMeshGroup(response.Msg.GetGroup())
 	if err != nil {
 		return nil, err
 	}
@@ -46,22 +66,22 @@ func (s *MeshGroupService) Get(ctx context.Context, networkID, name string) (*Me
 }
 
 // Delete removes a group (owner required).
-func (s *MeshGroupService) Delete(ctx context.Context, networkID, name string) error {
-	return s.client.doAuth(ctx, "DELETE",
-		fmt.Sprintf("/api/v1/groups/%s?network_id=%s", url.PathEscape(name), url.QueryEscape(networkID)),
-		nil, nil)
+func (s *MeshGroupService) Delete(ctx context.Context, orgID, networkID, name string) error {
+	_, err := s.client.groupClient.DeleteMeshGroup(ctx, connect.NewRequest(&codewirev1.DeleteMeshGroupRequest{
+		OrgId: orgID, NetworkId: networkID, GroupName: name,
+	}))
+	return connectSDKError(err)
 }
 
 // AddMember adds a session to a group.
-func (s *MeshGroupService) AddMember(ctx context.Context, networkID, groupName, nodeName, sessionName string) (*MeshGroupMember, error) {
-	var member MeshGroupMember
-	err := s.client.doAuth(ctx, "POST",
-		fmt.Sprintf("/api/v1/groups/%s/members", url.PathEscape(groupName)),
-		map[string]string{
-			"network_id":   networkID,
-			"node_name":    nodeName,
-			"session_name": sessionName,
-		}, &member)
+func (s *MeshGroupService) AddMember(ctx context.Context, orgID, networkID, groupName, nodeName, sessionName string) (*MeshGroupMember, error) {
+	response, err := s.client.groupClient.AddMeshGroupMember(ctx, connect.NewRequest(&codewirev1.AddMeshGroupMemberRequest{
+		OrgId: orgID, NetworkId: networkID, GroupName: groupName, NodeName: nodeName, SessionName: sessionName,
+	}))
+	if err != nil {
+		return nil, connectSDKError(err)
+	}
+	member, err := fromProtoMeshGroupMember(response.Msg.GetMember())
 	if err != nil {
 		return nil, err
 	}
@@ -69,24 +89,31 @@ func (s *MeshGroupService) AddMember(ctx context.Context, networkID, groupName, 
 }
 
 // RemoveMember removes a session from a group.
-func (s *MeshGroupService) RemoveMember(ctx context.Context, networkID, groupName, nodeName, sessionName string) error {
-	return s.client.doAuth(ctx, "DELETE",
-		fmt.Sprintf("/api/v1/groups/%s/members?network_id=%s&node_name=%s&session_name=%s",
-			url.PathEscape(groupName), url.QueryEscape(networkID),
-			url.QueryEscape(nodeName), url.QueryEscape(sessionName)),
-		nil, nil)
+func (s *MeshGroupService) RemoveMember(ctx context.Context, orgID, networkID, groupName, nodeName, sessionName string) error {
+	_, err := s.client.groupClient.RemoveMeshGroupMember(ctx, connect.NewRequest(&codewirev1.RemoveMeshGroupMemberRequest{
+		OrgId: orgID, NetworkId: networkID, GroupName: groupName, NodeName: nodeName, SessionName: sessionName,
+	}))
+	return connectSDKError(err)
 }
 
 // SetPolicy updates a group's messaging and debug policies (owner required).
-func (s *MeshGroupService) SetPolicy(ctx context.Context, networkID, groupName, messagesPolicy, debugPolicy string) (*MeshGroupPolicy, error) {
-	var policy MeshGroupPolicy
-	err := s.client.doAuth(ctx, "PUT",
-		fmt.Sprintf("/api/v1/groups/%s/policy", url.PathEscape(groupName)),
-		map[string]string{
-			"network_id":      networkID,
-			"messages_policy": messagesPolicy,
-			"debug_policy":    debugPolicy,
-		}, &policy)
+func (s *MeshGroupService) SetPolicy(ctx context.Context, orgID, networkID, groupName string, messagesPolicy MeshGroupMessagesPolicy, debugPolicy MeshGroupDebugPolicy) (*MeshGroupPolicy, error) {
+	protoMessagesPolicy, err := toProtoMeshGroupMessagesPolicy(messagesPolicy)
+	if err != nil {
+		return nil, err
+	}
+	protoDebugPolicy, err := toProtoMeshGroupDebugPolicy(debugPolicy)
+	if err != nil {
+		return nil, err
+	}
+	response, err := s.client.groupClient.SetMeshGroupPolicy(ctx, connect.NewRequest(&codewirev1.SetMeshGroupPolicyRequest{
+		OrgId: orgID, NetworkId: networkID, GroupName: groupName,
+		MessagesPolicy: protoMessagesPolicy, DebugPolicy: protoDebugPolicy,
+	}))
+	if err != nil {
+		return nil, connectSDKError(err)
+	}
+	policy, err := fromProtoMeshGroupPolicy(response.Msg.GetPolicy())
 	if err != nil {
 		return nil, err
 	}

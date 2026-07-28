@@ -2,7 +2,9 @@ package codewire
 
 import (
 	"context"
-	"net/url"
+
+	"connectrpc.com/connect"
+	codewirev1 "github.com/codewiresh/codewire/libs/gen-go/codewire/v1"
 )
 
 // MeshNetworkService handles mesh network operations.
@@ -11,16 +13,39 @@ type MeshNetworkService struct {
 }
 
 // Create creates a network owned by orgID.
-func (s *MeshNetworkService) Create(ctx context.Context, orgID, networkID string) error {
-	return s.client.doAuth(ctx, "POST", "/api/v1/networks", map[string]string{
-		"org_id":     orgID,
-		"network_id": networkID,
-	}, nil)
+func (s *MeshNetworkService) Create(ctx context.Context, orgID, networkID string) (*MeshNetwork, error) {
+	response, err := s.client.networkClient.CreateMeshNetwork(ctx, connect.NewRequest(&codewirev1.CreateMeshNetworkRequest{
+		OrgId: orgID, NetworkId: networkID,
+	}))
+	if err != nil {
+		return nil, connectSDKError(err)
+	}
+	network, err := fromProtoMeshNetwork(response.Msg.GetNetwork())
+	if err != nil {
+		return nil, err
+	}
+	return &network, nil
 }
 
 // List returns networks owned by the exact orgID.
 func (s *MeshNetworkService) List(ctx context.Context, orgID string) ([]MeshNetwork, error) {
 	var networks []MeshNetwork
-	err := s.client.doAuth(ctx, "GET", "/api/v1/networks?org_id="+url.QueryEscape(orgID), nil, &networks)
-	return networks, err
+	request := &codewirev1.ListMeshNetworksRequest{OrgId: orgID}
+	for {
+		response, err := s.client.networkClient.ListMeshNetworks(ctx, connect.NewRequest(request))
+		if err != nil {
+			return nil, connectSDKError(err)
+		}
+		for _, network := range response.Msg.GetNetworks() {
+			converted, err := fromProtoMeshNetwork(network)
+			if err != nil {
+				return nil, err
+			}
+			networks = append(networks, converted)
+		}
+		request.PageToken = response.Msg.GetNextPageToken()
+		if request.PageToken == "" {
+			return networks, nil
+		}
+	}
 }
