@@ -70,7 +70,7 @@ pub(crate) async fn handle_network_command(
                 )
             };
             let nodes = MeshClient::new(&mesh)?
-                .list_nodes(org_id, network_id, args.all)
+                .list_nodes(org_id, network_id)
                 .await?;
             print_nodes(&nodes, args.all, args.output)?;
         }

@@ -70,21 +70,31 @@ impl MeshClient {
         &self,
         org_id: &str,
         network_id: Option<&str>,
-        all: bool,
     ) -> anyhow::Result<Vec<Node>> {
-        let response = self
-            .inner
-            .list_mesh_nodes(rpc::ListMeshNodesRequest {
-                org_id: org_id.to_string(),
-                network_id: if all {
-                    String::new()
-                } else {
-                    network_id.unwrap_or_default().to_string()
-                },
-                ..Default::default()
-            })
-            .await?;
-        Ok(response.nodes.into_iter().map(node).collect())
+        let mut network_ids = match network_id {
+            Some(network_id) => vec![network_id.to_string()],
+            None => self
+                .list_networks(org_id)
+                .await?
+                .into_iter()
+                .map(|network| network.id)
+                .collect(),
+        };
+        network_ids.sort_unstable();
+
+        let mut nodes = Vec::new();
+        for network_id in network_ids {
+            let response = self
+                .inner
+                .list_mesh_nodes(rpc::ListMeshNodesRequest {
+                    org_id: org_id.to_string(),
+                    network_id,
+                    ..Default::default()
+                })
+                .await?;
+            nodes.extend(response.nodes.into_iter().map(node));
+        }
+        Ok(nodes)
     }
 
     pub async fn create_invite(
@@ -505,7 +515,7 @@ mod tests {
             .expect("join network");
         assert_eq!(joined.network_id, "project-alpha");
         let nodes = client
-            .list_nodes("org-alpha", Some("project-alpha"), false)
+            .list_nodes("org-alpha", Some("project-alpha"))
             .await
             .expect("list nodes");
         assert_eq!(
@@ -530,6 +540,149 @@ mod tests {
         let json = serde_json::to_value(enrollment).expect("enrollment JSON");
         assert!(json.get("enrollment_token").is_none());
         assert!(json.get("uses_remaining").is_none());
+    }
+
+    #[tokio::test]
+    async fn all_network_node_listing_returns_empty_without_a_node_request() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/codewire.v1.MeshNetworkService/ListMeshNetworks"))
+            .and(header("authorization", "Bearer oauth-access"))
+            .respond_with(|request: &wiremock::Request| {
+                let mut body = request.body.as_slice();
+                let request = rpc::ListMeshNetworksRequest::decode(&mut body)
+                    .expect("decode list networks request");
+                assert_eq!(request.org_id, "org-alpha");
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "application/proto")
+                    .set_body_bytes(rpc::ListMeshNetworksResponse::default().encode_to_vec())
+            })
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client =
+            MeshClient::new(&resolved(&server.uri(), "oauth-access")).expect("Mesh client");
+        let nodes = client
+            .list_nodes("org-alpha", None)
+            .await
+            .expect("list all nodes");
+        assert!(nodes.is_empty());
+
+        let requests = server
+            .received_requests()
+            .await
+            .expect("request recording enabled");
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0].url.path(),
+            "/codewire.v1.MeshNetworkService/ListMeshNetworks"
+        );
+    }
+
+    #[tokio::test]
+    async fn all_network_node_listing_uses_sorted_exact_network_requests() {
+        let server = MockServer::start().await;
+        let networks = rpc::ListMeshNetworksResponse {
+            networks: vec![
+                rpc::MeshNetwork {
+                    id: "project-beta".into(),
+                    org_id: "org-alpha".into(),
+                    ..Default::default()
+                },
+                rpc::MeshNetwork {
+                    id: "project-alpha".into(),
+                    org_id: "org-alpha".into(),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        Mock::given(method("POST"))
+            .and(path("/codewire.v1.MeshNetworkService/ListMeshNetworks"))
+            .and(header("authorization", "Bearer cw_exact_org_key"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "application/proto")
+                    .set_body_bytes(networks.encode_to_vec()),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/codewire.v1.MeshNodeService/ListMeshNodes"))
+            .and(header("authorization", "Bearer cw_exact_org_key"))
+            .respond_with(|request: &wiremock::Request| {
+                let mut body = request.body.as_slice();
+                let request = rpc::ListMeshNodesRequest::decode(&mut body)
+                    .expect("decode list nodes request");
+                assert_eq!(request.org_id, "org-alpha");
+                assert!(!request.network_id.is_empty());
+                let response = rpc::ListMeshNodesResponse {
+                    nodes: vec![rpc::MeshNode {
+                        org_id: request.org_id,
+                        network_id: request.network_id.clone(),
+                        name: format!("{}-node", request.network_id),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                };
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "application/proto")
+                    .set_body_bytes(response.encode_to_vec())
+            })
+            .expect(2)
+            .mount(&server)
+            .await;
+
+        let client =
+            MeshClient::new(&resolved(&server.uri(), "cw_exact_org_key")).expect("Mesh client");
+        let nodes = client
+            .list_nodes("org-alpha", None)
+            .await
+            .expect("list all nodes");
+        assert_eq!(
+            nodes
+                .iter()
+                .map(|node| node.network_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["project-alpha", "project-beta"]
+        );
+        assert_eq!(
+            serde_json::to_value(&nodes).expect("node JSON"),
+            serde_json::json!([
+                {
+                    "network_id": "project-alpha",
+                    "name": "project-alpha-node",
+                    "connected": false
+                },
+                {
+                    "network_id": "project-beta",
+                    "name": "project-beta-node",
+                    "connected": false
+                }
+            ])
+        );
+
+        let requests = server
+            .received_requests()
+            .await
+            .expect("request recording enabled");
+        assert_eq!(requests.len(), 3);
+        assert_eq!(
+            requests[0].url.path(),
+            "/codewire.v1.MeshNetworkService/ListMeshNetworks"
+        );
+        let requested_networks = requests[1..]
+            .iter()
+            .map(|request| {
+                let mut body = request.body.as_slice();
+                rpc::ListMeshNodesRequest::decode(&mut body)
+                    .expect("decode recorded list nodes request")
+                    .network_id
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(requested_networks, vec!["project-alpha", "project-beta"]);
     }
 
     #[tokio::test]
