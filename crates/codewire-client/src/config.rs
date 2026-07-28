@@ -16,6 +16,7 @@ pub const DEFAULT_UNARY_TIMEOUT: Duration = Duration::from_secs(30);
 #[derive(Clone, Debug)]
 pub struct ClientConfig {
     server_url: Url,
+    mesh_url: Option<Url>,
     unary_timeout: Duration,
     user_agent: Option<HeaderValue>,
 }
@@ -51,6 +52,7 @@ impl ClientConfig {
 
         Ok(Self {
             server_url: parsed,
+            mesh_url: None,
             unary_timeout: DEFAULT_UNARY_TIMEOUT,
             user_agent: None,
         })
@@ -81,8 +83,19 @@ impl ClientConfig {
         Ok(self)
     }
 
+    /// Configure the separately deployed Mesh origin used by Mesh service
+    /// handles. Other generated services continue to use `server_url`.
+    pub fn with_mesh_url(mut self, mesh_url: impl AsRef<str>) -> Result<Self, ClientError> {
+        self.mesh_url = Some(parse_server_url(mesh_url.as_ref(), "Mesh")?);
+        Ok(self)
+    }
+
     pub fn server_url(&self) -> &Url {
         &self.server_url
+    }
+
+    pub fn mesh_url(&self) -> &Url {
+        self.mesh_url.as_ref().unwrap_or(&self.server_url)
     }
 
     pub fn unary_timeout(&self) -> Duration {
@@ -91,13 +104,23 @@ impl ClientConfig {
 
     pub(crate) fn connect_config(&self) -> Result<connectrpc::client::ClientConfig, ClientError> {
         Ok(self
-            .base_connect_config()?
+            .base_connect_config(self.server_url())?
             .with_default_timeout(self.unary_timeout))
     }
 
-    fn base_connect_config(&self) -> Result<connectrpc::client::ClientConfig, ClientError> {
-        let base_uri = self
-            .server_url
+    pub(crate) fn mesh_connect_config(
+        &self,
+    ) -> Result<connectrpc::client::ClientConfig, ClientError> {
+        Ok(self
+            .base_connect_config(self.mesh_url())?
+            .with_default_timeout(self.unary_timeout))
+    }
+
+    fn base_connect_config(
+        &self,
+        server_url: &Url,
+    ) -> Result<connectrpc::client::ClientConfig, ClientError> {
+        let base_uri = server_url
             .as_str()
             .trim_end_matches('/')
             .parse()
@@ -124,7 +147,7 @@ impl ClientConfig {
         &self,
     ) -> Result<connectrpc::client::ClientConfig, ClientError> {
         Ok(self
-            .base_connect_config()?
+            .base_connect_config(self.server_url())?
             .with_protocol(self.environment_session_protocol()))
     }
 
@@ -148,6 +171,35 @@ impl ClientConfig {
     }
 }
 
+fn parse_server_url(raw: &str, label: &str) -> Result<Url, ClientError> {
+    let raw = raw.trim().trim_end_matches('/');
+    let parsed = Url::parse(raw).map_err(|_| {
+        ClientError::new(ErrorCode::InvalidArgument, format!("invalid {label} URL"))
+    })?;
+    match parsed.scheme() {
+        "http" | "https" => {}
+        _ => {
+            return Err(ClientError::new(
+                ErrorCode::InvalidArgument,
+                format!("{label} URL must use http or https"),
+            ));
+        }
+    }
+    if parsed.cannot_be_a_base() || parsed.host_str().is_none() {
+        return Err(ClientError::new(
+            ErrorCode::InvalidArgument,
+            format!("{label} URL must be an absolute HTTP URL"),
+        ));
+    }
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err(ClientError::new(
+            ErrorCode::InvalidArgument,
+            format!("{label} URL must not contain a query or fragment"),
+        ));
+    }
+    Ok(parsed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -160,6 +212,29 @@ mod tests {
 
         assert!(ClientConfig::new("file:///tmp/codewire").is_err());
         assert!(ClientConfig::new("https://example.test/?token=nope").is_err());
+    }
+
+    #[test]
+    fn mesh_origin_is_independent_and_validated() {
+        let config = ClientConfig::new("https://codewire.test/control")
+            .expect("primary URL")
+            .with_mesh_url(" https://mesh.codewire.test/base/ ")
+            .expect("Mesh URL");
+        assert_eq!(
+            config.server_url().as_str(),
+            "https://codewire.test/control"
+        );
+        assert_eq!(
+            config.mesh_url().as_str(),
+            "https://mesh.codewire.test/base"
+        );
+
+        assert!(config.clone().with_mesh_url("file:///tmp/mesh").is_err());
+        assert!(
+            config
+                .with_mesh_url("https://mesh.codewire.test/?token=nope")
+                .is_err()
+        );
     }
 
     #[test]

@@ -7,6 +7,7 @@
 mod auth;
 mod config;
 mod error;
+mod mesh;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -14,8 +15,9 @@ use std::time::Duration;
 use codewire_proto::codewire::console::v1::{BillingServiceClient, GitHubServiceClient};
 use codewire_proto::codewire::v1::{
     ApiKeyServiceClient, EnvironmentServiceClient, EnvironmentSessionServiceClient,
-    ExecServiceClient, FileServiceClient, OrganizationServiceClient, PortServiceClient,
-    PresetServiceClient, SecretServiceClient,
+    ExecServiceClient, FileServiceClient, MeshInviteServiceClient, MeshNetworkServiceClient,
+    MeshNodeServiceClient, OrganizationServiceClient, PortServiceClient, PresetServiceClient,
+    SecretServiceClient,
 };
 use connectrpc::ConnectError;
 use connectrpc::client::{BoxFuture, CallOptions, ClientBody, ClientTransport};
@@ -78,6 +80,13 @@ pub use codewire_proto::codewire::v1::{
     WatchEnvironmentCreateResponse,
 };
 pub use codewire_proto::codewire::v1::{
+    CreateMeshInviteRequest, CreateMeshInviteResponse, CreateMeshNetworkRequest,
+    CreateMeshNetworkResponse, CreateMeshNodeEnrollmentRequest, CreateMeshNodeEnrollmentResponse,
+    JoinMeshNetworkRequest, JoinMeshNetworkResponse, ListMeshNetworksRequest,
+    ListMeshNetworksResponse, ListMeshNodesRequest, ListMeshNodesResponse, MeshInvite, MeshNetwork,
+    MeshNode, MeshNodeEnrollment, RevokeMeshNodeRequest, RevokeMeshNodeResponse,
+};
+pub use codewire_proto::codewire::v1::{
     CreateSecretProjectRequest, CreateSecretProjectResponse, DeleteProjectSecretRequest,
     DeleteProjectSecretResponse, DeleteSecretProjectRequest, DeleteSecretProjectResponse,
     DeleteSecretRequest, DeleteSecretResponse, DeleteUserSecretRequest, DeleteUserSecretResponse,
@@ -94,6 +103,7 @@ pub use config::{
 };
 pub use connectrpc::ErrorCode;
 pub use error::{ClientError, ErrorInfo, ValidationError};
+pub use mesh::TransitionalMeshNodeEnrollmentRedemption;
 
 /// The one Rust client core consumed by the CLI and future native bindings.
 #[derive(Clone)]
@@ -112,6 +122,9 @@ pub struct CodewireClient {
     secrets: SecretServiceClient<ReqwestConnectTransport>,
     billing: BillingServiceClient<ReqwestConnectTransport>,
     github: GitHubServiceClient<ReqwestConnectTransport>,
+    mesh_networks: MeshNetworkServiceClient<ReqwestConnectTransport>,
+    mesh_nodes: MeshNodeServiceClient<ReqwestConnectTransport>,
+    mesh_invites: MeshInviteServiceClient<ReqwestConnectTransport>,
 }
 
 pub struct RunSession {
@@ -193,6 +206,9 @@ impl CodewireClient {
         let secret_config = config.connect_config()?;
         let billing_config = config.connect_config()?;
         let github_config = config.connect_config()?;
+        let mesh_network_config = config.mesh_connect_config()?;
+        let mesh_node_config = config.mesh_connect_config()?;
+        let mesh_invite_config = config.mesh_connect_config()?;
         Ok(Self {
             config,
             token_provider,
@@ -222,7 +238,19 @@ impl CodewireClient {
                 ReqwestConnectTransport(http.clone()),
                 billing_config,
             ),
-            github: GitHubServiceClient::new(ReqwestConnectTransport(http), github_config),
+            github: GitHubServiceClient::new(ReqwestConnectTransport(http.clone()), github_config),
+            mesh_networks: MeshNetworkServiceClient::new(
+                ReqwestConnectTransport(http.clone()),
+                mesh_network_config,
+            ),
+            mesh_nodes: MeshNodeServiceClient::new(
+                ReqwestConnectTransport(http.clone()),
+                mesh_node_config,
+            ),
+            mesh_invites: MeshInviteServiceClient::new(
+                ReqwestConnectTransport(http),
+                mesh_invite_config,
+            ),
         })
     }
 

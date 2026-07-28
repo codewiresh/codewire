@@ -106,7 +106,11 @@ def git_source_files() -> list[str]:
         ["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z"],
         check=True,
     )
-    return [path for path in result.stdout.split("\0") if path]
+    return [
+        path
+        for path in result.stdout.split("\0")
+        if path and (ROOT / path).is_file()
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -960,8 +964,8 @@ MESH_EXPECTED_COUNTS = {
     },
     "operations_without_callers": 7,
     "wrapper_declaration_records": 12,
-    "client_url_template_records": 65,
-    "client_url_template_occurrences": 82,
+    "client_url_template_records": 59,
+    "client_url_template_occurrences": 75,
 }
 MESH_EXPECTED_CONNECT_METHODS = {
     "MESH_NETWORK_SERVICE_SERVICE_NAME": {
@@ -1599,7 +1603,7 @@ def mesh_network_ownership_failures(
             )
         if operation.get("callers") != expected_callers:
             failures.append(
-                f"Mesh network {method.upper()} callers must name only the four direct first-party wrappers"
+                f"Mesh network {method.upper()} callers must name only the four shipped first-party consumers"
             )
     network_route = next(
         (route for route in inventory.get("routes", []) if route.get("path") == "/api/v1/networks"),
@@ -1645,10 +1649,11 @@ def mesh_network_ownership_failures(
             "Mesh network ownership bridge must not forward the retired Mesh session cookie"
         )
     required_clients = {
-        "crates/codewire-cli/src/mesh.rs": (
-            "list_networks(&self, org_id: &str)",
-            "create_network(&self, org_id: &str, network_id: &str)",
-            '[("org_id", org_id)]',
+        "crates/codewire-client/src/mesh.rs": (
+            "list_mesh_networks(",
+            "create_mesh_network(",
+            "ListMeshNetworksRequest",
+            "CreateMeshNetworkRequest",
         ),
         "libs/sdk-go/mesh_networks.go": (
             "Create(ctx context.Context, orgID, networkID string)",

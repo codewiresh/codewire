@@ -19,7 +19,7 @@ pub const CODEWIRE_API_KEY_ENV: &str = "CODEWIRE_API_KEY";
 pub const CODEWIRE_MESH_URL_ENV: &str = "CODEWIRE_MESH_URL";
 pub const CODEWIRE_MESH_AUTH_TOKEN_ENV: &str = "CODEWIRE_MESH_AUTH_TOKEN";
 pub const CODEWIRE_MESH_NETWORK_ENV: &str = "CODEWIRE_MESH_NETWORK";
-pub const CODEWIRE_MESH_INVITE_TOKEN_ENV: &str = "CODEWIRE_MESH_INVITE_TOKEN";
+pub const CODEWIRE_MESH_INVITE_CODE_ENV: &str = "CODEWIRE_MESH_INVITE_CODE";
 pub const CODEWIRE_NODE_NAME_ENV: &str = "CODEWIRE_NODE_NAME";
 
 pub trait Env {
@@ -983,20 +983,46 @@ pub struct MeshResolveOptions {
     pub platform_server_url: Option<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Serialize)]
 pub struct ResolvedMeshConfig {
     pub mesh_url: String,
-    #[serde(skip_serializing)]
-    pub auth_token: String,
     pub selected_network: Option<String>,
     pub auth_source: MeshAuthSource,
+    #[serde(skip)]
+    token_provider: Arc<dyn TokenProvider>,
 }
 
 impl ResolvedMeshConfig {
     pub fn auth_configured(&self) -> bool {
-        !self.auth_token.trim().is_empty()
+        true
+    }
+
+    pub fn token_provider(&self) -> Arc<dyn TokenProvider> {
+        Arc::clone(&self.token_provider)
     }
 }
+
+impl std::fmt::Debug for ResolvedMeshConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ResolvedMeshConfig")
+            .field("mesh_url", &self.mesh_url)
+            .field("selected_network", &self.selected_network)
+            .field("auth_source", &self.auth_source)
+            .field("token_provider", &"[redacted]")
+            .finish()
+    }
+}
+
+impl PartialEq for ResolvedMeshConfig {
+    fn eq(&self, other: &Self) -> bool {
+        self.mesh_url == other.mesh_url
+            && self.selected_network == other.selected_network
+            && self.auth_source == other.auth_source
+    }
+}
+
+impl Eq for ResolvedMeshConfig {}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -1016,6 +1042,8 @@ enum MeshUrlSource {
     Hosted,
 }
 
+type ResolvedMeshAuth = (Arc<dyn TokenProvider>, MeshAuthSource);
+
 pub fn resolve_mesh(
     opts: MeshResolveOptions,
     paths: &ResolvePaths,
@@ -1024,17 +1052,8 @@ pub fn resolve_mesh(
     let mesh_config = load_mesh_config(&paths.mesh_data_dir)?;
     let (mesh_url, mesh_url_source) =
         resolve_mesh_base_url_with_source(opts.clone(), &mesh_config, paths, env)?;
-
-    let selected_network = trim_opt(opts.network_id)
-        .or_else(|| trim_opt(env.var(CODEWIRE_MESH_NETWORK_ENV)))
-        .or_else(|| {
-            saved_mesh_value_for_selected_url(
-                &mesh_url,
-                mesh_url_source,
-                mesh_config.mesh_url.as_deref(),
-                mesh_config.mesh_selected_network.as_deref(),
-            )
-        });
+    let selected_network =
+        resolve_mesh_network(&mesh_url, mesh_url_source, &opts, &mesh_config, env);
     let config_auth_token = saved_mesh_value_for_selected_url(
         &mesh_url,
         mesh_url_source,
@@ -1042,26 +1061,61 @@ pub fn resolve_mesh(
         mesh_config.mesh_auth_token.as_deref(),
     );
 
-    let (auth_token, auth_source) = resolve_mesh_user_auth_token(
+    let (token_provider, auth_source) = resolve_mesh_user_auth_provider(
         &mesh_url,
         opts.platform_server_url.as_deref().unwrap_or(""),
         trim_opt(opts.auth_token),
         config_auth_token,
         paths,
         env,
-    );
-
-    let auth_token = match auth_token {
-        Some(token) => token,
-        None => return Err(ConfigError::NoMeshAuth),
-    };
+    )?
+    .ok_or(ConfigError::NoMeshAuth)?;
 
     Ok(ResolvedMeshConfig {
         mesh_url,
-        auth_token,
         selected_network,
         auth_source,
+        token_provider,
     })
+}
+
+pub fn resolve_mesh_with_token_provider(
+    opts: MeshResolveOptions,
+    paths: &ResolvePaths,
+    env: &impl Env,
+    token_provider: Arc<dyn TokenProvider>,
+    auth_source: MeshAuthSource,
+) -> Result<ResolvedMeshConfig, ConfigError> {
+    let mesh_config = load_mesh_config(&paths.mesh_data_dir)?;
+    let (mesh_url, mesh_url_source) =
+        resolve_mesh_base_url_with_source(opts.clone(), &mesh_config, paths, env)?;
+    let selected_network =
+        resolve_mesh_network(&mesh_url, mesh_url_source, &opts, &mesh_config, env);
+    Ok(ResolvedMeshConfig {
+        mesh_url,
+        selected_network,
+        auth_source,
+        token_provider,
+    })
+}
+
+fn resolve_mesh_network(
+    mesh_url: &str,
+    mesh_url_source: MeshUrlSource,
+    opts: &MeshResolveOptions,
+    mesh_config: &MeshConfig,
+    env: &impl Env,
+) -> Option<String> {
+    trim_opt(opts.network_id.clone())
+        .or_else(|| trim_opt(env.var(CODEWIRE_MESH_NETWORK_ENV)))
+        .or_else(|| {
+            saved_mesh_value_for_selected_url(
+                mesh_url,
+                mesh_url_source,
+                mesh_config.mesh_url.as_deref(),
+                mesh_config.mesh_selected_network.as_deref(),
+            )
+        })
 }
 
 pub fn resolve_mesh_base_url(
@@ -1438,48 +1492,69 @@ fn harden_file(_path: &Path) -> Result<(), ConfigError> {
     Ok(())
 }
 
-fn resolve_mesh_user_auth_token(
+fn resolve_mesh_user_auth_provider(
     mesh_url: &str,
     platform_server_url: &str,
     explicit_token: Option<String>,
     config_token: Option<String>,
     paths: &ResolvePaths,
     env: &impl Env,
-) -> (Option<String>, MeshAuthSource) {
+) -> Result<Option<ResolvedMeshAuth>, ConfigError> {
     if let Some(token) = explicit_token {
-        return (Some(token), MeshAuthSource::Explicit);
+        return static_mesh_provider(token, MeshAuthSource::Explicit).map(Some);
     }
     if let Some(token) = trim_opt(env.var(CODEWIRE_MESH_AUTH_TOKEN_ENV)) {
-        return (Some(token), MeshAuthSource::MeshEnv);
-    }
-    if let Some(token) = config_token {
-        return (Some(token), MeshAuthSource::MeshConfig);
+        return static_mesh_provider(token, MeshAuthSource::MeshEnv).map(Some);
     }
 
     let hosted_url = derive_hosted_mesh_url(platform_server_url, paths);
     let Some(hosted_url) = hosted_url else {
-        return (None, MeshAuthSource::Explicit);
+        return match config_token {
+            Some(token) => static_mesh_provider(token, MeshAuthSource::MeshConfig).map(Some),
+            None => Ok(None),
+        };
     };
     if !same_mesh_url(mesh_url, &hosted_url) {
-        return (None, MeshAuthSource::Explicit);
+        return match config_token {
+            Some(token) => static_mesh_provider(token, MeshAuthSource::MeshConfig).map(Some),
+            None => Ok(None),
+        };
     }
 
     if let Some(token) = trim_opt(env.var(CODEWIRE_API_KEY_ENV)) {
-        return (Some(token), MeshAuthSource::ApiKeyEnv);
+        return static_mesh_provider(token, MeshAuthSource::ApiKeyEnv).map(Some);
     }
 
     let Ok(config) = load_platform_config(&paths.platform_config_dir) else {
-        return (None, MeshAuthSource::Explicit);
+        return Ok(None);
     };
     if !platform_server_url.trim().is_empty()
         && !same_server_url(&config.server_url, platform_server_url)
     {
-        return (None, MeshAuthSource::Explicit);
+        return Ok(None);
     }
-    (
-        non_empty(config.session_token.trim().to_string()),
+    let credentials_path = oauth_credentials_path(&paths.platform_config_dir);
+    if !credentials_path.is_file() {
+        return Ok(None);
+    }
+    let client = OAuthClient::for_server_url(&config.server_url)
+        .map_err(|error| ConfigError::InvalidMeshAuth(error.to_string()))?;
+    let provider =
+        RefreshingTokenProvider::from_store(client, FileCredentialStore::at(credentials_path))
+            .map_err(|error| ConfigError::InvalidMeshAuth(error.to_string()))?;
+    Ok(Some((
+        Arc::new(provider) as Arc<dyn TokenProvider>,
         MeshAuthSource::PlatformConfig,
-    )
+    )))
+}
+
+fn static_mesh_provider(
+    token: String,
+    source: MeshAuthSource,
+) -> Result<ResolvedMeshAuth, ConfigError> {
+    StaticTokenProvider::new(token)
+        .map(|provider| (Arc::new(provider) as Arc<dyn TokenProvider>, source))
+        .map_err(|error| ConfigError::InvalidMeshAuth(error.to_string()))
 }
 
 pub fn derive_hosted_mesh_url_for_server(raw_server_url: &str) -> Option<String> {
@@ -1691,6 +1766,8 @@ pub enum ConfigError {
         "mesh user authentication not configured (pass --token, set CODEWIRE_MESH_AUTH_TOKEN, or use 'cw login'/CODEWIRE_API_KEY for hosted Codewire)"
     )]
     NoMeshAuth,
+    #[error("invalid Mesh authentication configuration: {0}")]
+    InvalidMeshAuth(String),
     #[error("node enrollment response missing node token")]
     InvalidNodeToken,
 }
@@ -2340,8 +2417,8 @@ readonly = true
         assert!(data.contains("runtime_name = \"cw-repo\""));
     }
 
-    #[test]
-    fn mesh_auth_uses_saved_mesh_config_token() {
+    #[tokio::test]
+    async fn mesh_auth_uses_saved_mesh_config_token() {
         let home = tempfile::tempdir().unwrap();
         let env = MapEnv::default();
         let paths = paths(home.path(), &env);
@@ -2356,12 +2433,20 @@ mesh_auth_token = "mesh-token"
         let resolved = resolve_mesh(MeshResolveOptions::default(), &paths, &env).unwrap();
 
         assert_eq!(resolved.mesh_url, "http://127.0.0.1:18090");
-        assert_eq!(resolved.auth_token, "mesh-token");
+        assert_eq!(
+            resolved
+                .token_provider()
+                .token()
+                .await
+                .unwrap()
+                .expose_secret(),
+            "mesh-token"
+        );
         assert_eq!(resolved.auth_source, MeshAuthSource::MeshConfig);
     }
 
-    #[test]
-    fn mesh_env_url_and_token_override_saved_mesh_config() {
+    #[tokio::test]
+    async fn mesh_env_url_and_token_override_saved_mesh_config() {
         let home = tempfile::tempdir().unwrap();
         let env = MapEnv::new([
             (CODEWIRE_MESH_URL_ENV, "http://127.0.0.1:19090"),
@@ -2381,7 +2466,15 @@ mesh_selected_network = "saved-network"
         let resolved = resolve_mesh(MeshResolveOptions::default(), &paths, &env).unwrap();
 
         assert_eq!(resolved.mesh_url, "http://127.0.0.1:19090");
-        assert_eq!(resolved.auth_token, "env-token");
+        assert_eq!(
+            resolved
+                .token_provider()
+                .token()
+                .await
+                .unwrap()
+                .expose_secret(),
+            "env-token"
+        );
         assert_eq!(resolved.selected_network.as_deref(), Some("env-network"));
         assert_eq!(resolved.auth_source, MeshAuthSource::MeshEnv);
     }
@@ -2417,8 +2510,8 @@ mesh_selected_network = "saved-network"
         assert!(matches!(err, ConfigError::NoMeshAuth));
     }
 
-    #[test]
-    fn mesh_env_url_can_reuse_matching_saved_mesh_token() {
+    #[tokio::test]
+    async fn mesh_env_url_can_reuse_matching_saved_mesh_token() {
         let home = tempfile::tempdir().unwrap();
         let env = MapEnv::new([
             (CODEWIRE_MESH_URL_ENV, "https://mesh.example.com/base/"),
@@ -2437,7 +2530,15 @@ mesh_selected_network = "saved-network"
         let resolved = resolve_mesh(MeshResolveOptions::default(), &paths, &env).unwrap();
 
         assert_eq!(resolved.mesh_url, "https://mesh.example.com/base/");
-        assert_eq!(resolved.auth_token, "saved-token");
+        assert_eq!(
+            resolved
+                .token_provider()
+                .token()
+                .await
+                .unwrap()
+                .expose_secret(),
+            "saved-token"
+        );
         assert_eq!(resolved.selected_network.as_deref(), Some("env-network"));
         assert_eq!(resolved.auth_source, MeshAuthSource::MeshConfig);
     }
@@ -2489,7 +2590,7 @@ mesh_selected_network = "project-alpha"
     }
 
     #[test]
-    fn mesh_auth_falls_back_to_platform_login_for_hosted_mesh() {
+    fn hosted_mesh_rejects_the_old_saved_platform_token_fallback() {
         let home = tempfile::tempdir().unwrap();
         let env = MapEnv::default();
         let paths = paths(home.path(), &env);
@@ -2499,17 +2600,49 @@ mesh_selected_network = "project-alpha"
             "platform-token",
         );
 
-        let resolved = resolve_mesh(MeshResolveOptions::default(), &paths, &env).unwrap();
-
-        assert_eq!(resolved.mesh_url, "https://mesh.codewire.sh");
-        assert_eq!(resolved.auth_token, "platform-token");
-        assert_eq!(resolved.auth_source, MeshAuthSource::PlatformConfig);
+        let error = resolve_mesh(MeshResolveOptions::default(), &paths, &env).unwrap_err();
+        assert!(matches!(error, ConfigError::NoMeshAuth));
     }
 
-    #[test]
-    fn mesh_auth_uses_explicit_platform_server_for_hosted_dev_mesh() {
+    #[tokio::test]
+    async fn hosted_mesh_uses_the_saved_oauth_token_provider() {
         let home = tempfile::tempdir().unwrap();
-        let env = MapEnv::new([(CODEWIRE_API_KEY_ENV, "dev-api-key")]);
+        let env = MapEnv::default();
+        let paths = paths(home.path(), &env);
+        write_platform_config(&paths.platform_config_dir, "https://codewire.sh", "");
+        let credentials = codewire_client::OAuthCredentials::new(
+            "https://codewire.sh",
+            codewire_client::CODEWIRE_CLI_OAUTH_CLIENT_ID,
+            "saved-oauth-access",
+            "saved-oauth-refresh",
+            u64::MAX,
+            codewire_client::CODEWIRE_CLI_OAUTH_SCOPES,
+        )
+        .unwrap();
+        codewire_client::CredentialStore::save(
+            &FileCredentialStore::new(&paths.platform_config_dir),
+            &credentials,
+        )
+        .unwrap();
+
+        let resolved = resolve_mesh(MeshResolveOptions::default(), &paths, &env).unwrap();
+        assert_eq!(resolved.mesh_url, "https://mesh.codewire.sh");
+        assert_eq!(resolved.auth_source, MeshAuthSource::PlatformConfig);
+        assert_eq!(
+            resolved
+                .token_provider()
+                .token()
+                .await
+                .unwrap()
+                .expose_secret(),
+            "saved-oauth-access"
+        );
+    }
+
+    #[tokio::test]
+    async fn mesh_auth_uses_explicit_platform_server_for_hosted_dev_mesh() {
+        let home = tempfile::tempdir().unwrap();
+        let env = MapEnv::new([(CODEWIRE_API_KEY_ENV, "cw_dev_exact_org")]);
         let paths = paths(home.path(), &env);
         write_platform_config(
             &paths.platform_config_dir,
@@ -2529,7 +2662,15 @@ mesh_selected_network = "project-alpha"
         .unwrap();
 
         assert_eq!(resolved.mesh_url, "https://mesh.codewire-dev.sh");
-        assert_eq!(resolved.auth_token, "dev-api-key");
+        assert_eq!(
+            resolved
+                .token_provider()
+                .token()
+                .await
+                .unwrap()
+                .expose_secret(),
+            "cw_dev_exact_org"
+        );
         assert_eq!(resolved.selected_network.as_deref(), Some("default"));
         assert_eq!(resolved.auth_source, MeshAuthSource::ApiKeyEnv);
     }

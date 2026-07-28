@@ -470,6 +470,7 @@ runtime_name = "cw-repo"
             (config::CODEWIRE_MESH_NETWORK_ENV, "ignored-selected"),
         ]);
         let paths = ResolvePaths::from_home_and_env(home.path().to_path_buf(), &env);
+        let identity = config::ensure_local_mesh_identity(&paths.mesh_data_dir).unwrap();
         let globals = Globals {
             server: None,
             token: None,
@@ -487,7 +488,7 @@ runtime_name = "cw-repo"
         .unwrap();
 
         assert_eq!(bootstrap.mesh.mesh_url, "https://mesh.example.com");
-        assert_eq!(bootstrap.mesh.auth_token, "mesh-token");
+        assert_eq!(bootstrap.organization_id, identity.organization_id);
         assert_eq!(bootstrap.network_id, "project-alpha");
         assert_eq!(
             bootstrap.mesh.selected_network.as_deref(),
@@ -504,6 +505,7 @@ runtime_name = "cw-repo"
             (config::CODEWIRE_MESH_NETWORK_ENV, "project-selected"),
         ]);
         let paths = ResolvePaths::from_home_and_env(home.path().to_path_buf(), &env);
+        config::ensure_local_mesh_identity(&paths.mesh_data_dir).unwrap();
         let globals = Globals {
             server: None,
             token: None,
@@ -547,11 +549,15 @@ runtime_name = "cw-repo"
         };
         let enrollment = NodeEnrollment {
             id: "enr_123".to_string(),
+            org_id: "org-alpha".to_string(),
             network_id: "project-alpha".to_string(),
             node_name: "repo".to_string(),
-            enrollment_token: "cw_enr_abc123".to_string(),
-            uses_remaining: 1,
+            owner_user_id: "user-alpha".to_string(),
+            issued_by_user_id: "user-alpha".to_string(),
+            enrollment_code: "cw_enr_abc123".to_string(),
             expires_at: "2026-07-05T00:10:00Z".to_string(),
+            created_at: "2026-07-05T00:00:00Z".to_string(),
+            redeemed_at: String::new(),
         };
 
         assert_eq!(
@@ -578,11 +584,15 @@ runtime_name = "cw-repo"
     fn redeem_mesh_enrollment_runtime_command_matches_docker_and_lima_shapes() {
         let enrollment = NodeEnrollment {
             id: "enr_123".to_string(),
+            org_id: "org-alpha".to_string(),
             network_id: "project-alpha".to_string(),
             node_name: "repo".to_string(),
-            enrollment_token: "cw_enr_abc123".to_string(),
-            uses_remaining: 1,
+            owner_user_id: "user-alpha".to_string(),
+            issued_by_user_id: "user-alpha".to_string(),
+            enrollment_code: "cw_enr_abc123".to_string(),
             expires_at: "2026-07-05T00:10:00Z".to_string(),
+            created_at: "2026-07-05T00:00:00Z".to_string(),
+            redeemed_at: String::new(),
         };
         let command =
             mesh_enrollment_redeem_command(&named_local_instance("docker"), "", &enrollment)

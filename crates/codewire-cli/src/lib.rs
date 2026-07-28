@@ -2,7 +2,6 @@ pub mod config;
 mod console_client;
 mod environment_client;
 mod github_device;
-mod http_policy;
 mod mesh;
 mod organization_client;
 mod presentation;

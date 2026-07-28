@@ -949,7 +949,7 @@
         assert_eq!(
             request
                 .env_vars
-                .get(config::CODEWIRE_MESH_INVITE_TOKEN_ENV)
+                .get(config::CODEWIRE_MESH_INVITE_CODE_ENV)
                 .unwrap(),
             "cw_invite_123"
         );
@@ -1037,11 +1037,6 @@
         let home = tempfile::tempdir().unwrap();
         let env = config::MapEnv::default();
         let paths = ResolvePaths::from_home_and_env(home.path().to_path_buf(), &env);
-        let globals = Globals {
-            server: None,
-            token: Some("platform-token".to_string()),
-        };
-
         for (server_url, expected_mesh_url) in [
             ("https://codewire.sh", "https://mesh.codewire.sh"),
             ("https://codewire-dev.sh", "https://mesh.codewire-dev.sh"),
@@ -1053,10 +1048,10 @@
                 None,
             );
             let bootstrap = resolve_env_create_mesh_bootstrap(
-                &globals,
                 &paths,
                 &env,
                 &platform,
+                "org-alpha",
                 true,
                 Some("local-dev"),
                 false,
@@ -1065,6 +1060,7 @@
             .unwrap();
 
             assert_eq!(bootstrap.mesh.mesh_url, expected_mesh_url);
+            assert_eq!(bootstrap.organization_id, "org-alpha");
             assert_eq!(bootstrap.network_id, "local-dev");
         }
     }
@@ -1081,6 +1077,7 @@
         )
         .unwrap();
         config::save_selected_mesh_network(&paths.mesh_data_dir, "local-dev").unwrap();
+        let identity = config::ensure_local_mesh_identity(&paths.mesh_data_dir).unwrap();
         let globals = Globals {
             server: None,
             token: Some("platform-token".to_string()),
@@ -1094,7 +1091,13 @@
 
         assert!(
             resolve_env_create_mesh_bootstrap(
-                &globals, &paths, &env, &platform, true, None, false,
+                &paths,
+                &env,
+                &platform,
+                "org-alpha",
+                true,
+                None,
+                false,
             )
             .unwrap()
             .is_none(),
@@ -1105,6 +1108,7 @@
             .unwrap()
             .unwrap();
         assert_eq!(local.mesh.mesh_url, "http://127.0.0.1:18090");
+        assert_eq!(local.organization_id, identity.organization_id);
         assert_eq!(local.network_id, "local-dev");
 
         config::save_mesh_connection(
@@ -1114,7 +1118,13 @@
         )
         .unwrap();
         let hosted = resolve_env_create_mesh_bootstrap(
-            &globals, &paths, &env, &platform, true, None, false,
+            &paths,
+            &env,
+            &platform,
+            "org-alpha",
+            true,
+            None,
+            false,
         )
         .unwrap()
         .unwrap();

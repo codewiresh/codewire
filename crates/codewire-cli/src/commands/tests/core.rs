@@ -251,10 +251,10 @@
             "cw",
             "network",
             "invite",
+            "--org",
+            "org-alpha",
             "--network",
             "project-alpha",
-            "--uses",
-            "2",
             "--ttl",
             "2h",
             "--qr",
@@ -268,15 +268,15 @@
         else {
             panic!("expected network invite command");
         };
+        assert_eq!(args.org, "org-alpha");
         assert_eq!(args.network.as_deref(), Some("project-alpha"));
-        assert_eq!(args.uses, 2);
         assert_eq!(args.ttl, "2h");
         assert!(args.qr);
         assert_eq!(args.output, OutputFormat::Json);
     }
 
     #[test]
-    fn invite_join_url_trims_mesh_url_and_token() {
+    fn invite_join_url_trims_mesh_url_and_code() {
         assert_eq!(
             invite_join_url("https://mesh.example.com/", " CW-INV-TEST "),
             "https://mesh.example.com/join?invite=CW-INV-TEST"

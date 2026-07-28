@@ -44,10 +44,10 @@ pub(crate) async fn handle_local_command(globals: &Globals, args: LocalArgs) -> 
                             &bootstrap.mesh.mesh_url,
                             &enrollment,
                         ) {
-                            let token = enrollment.enrollment_token.trim();
+                            let code = enrollment.enrollment_code.trim();
                             eprintln!(
                                 "Warning: mesh enrollment redemption failed ({err}); the runtime is up but not visible on the mesh. Redeem manually with: cw run {} -- cw network enroll redeem {} --node-name {} --mesh-url {}",
-                                instance.name, token, instance.name, bootstrap.mesh.mesh_url
+                                instance.name, code, instance.name, bootstrap.mesh.mesh_url
                             );
                         } else {
                             enrolled_mesh_network = Some(bootstrap.network_id.clone());
@@ -224,14 +224,15 @@ pub(crate) async fn handle_local_command(globals: &Globals, args: LocalArgs) -> 
 #[derive(Clone, Debug)]
 pub(crate) struct LocalMeshBootstrap {
     pub(crate) mesh: config::ResolvedMeshConfig,
+    pub(crate) organization_id: String,
     pub(crate) network_id: String,
 }
 
 pub(crate) fn resolve_env_create_mesh_bootstrap(
-    globals: &Globals,
     paths: &ResolvePaths,
     env: &impl config::Env,
     platform: &config::ResolvedPlatformConfig,
+    organization_id: &str,
     assume_yes: bool,
     requested_network: Option<&str>,
     disable_network: bool,
@@ -252,19 +253,18 @@ pub(crate) fn resolve_env_create_mesh_bootstrap(
         return Ok(None);
     };
 
-    let auth_token = globals
-        .token
-        .clone()
-        .or_else(|| trimmed_str(&platform.session_token).map(str::to_string));
-    let mesh = match config::resolve_mesh(
+    let organization_id = trimmed_required(organization_id, "organization ID")?.to_string();
+    let mesh = match config::resolve_mesh_with_token_provider(
         config::MeshResolveOptions {
             mesh_url: Some(mesh_url),
-            auth_token,
+            auth_token: None,
             network_id: requested_network.map(str::to_string),
             platform_server_url: Some(platform.server_url.clone()),
         },
         paths,
         env,
+        platform.token_provider()?,
+        config::MeshAuthSource::PlatformConfig,
     ) {
         Ok(mesh) => mesh,
         Err(err) if !explicit_network => {
@@ -291,7 +291,11 @@ pub(crate) fn resolve_env_create_mesh_bootstrap(
         }
     }
 
-    Ok(Some(LocalMeshBootstrap { mesh, network_id }))
+    Ok(Some(LocalMeshBootstrap {
+        mesh,
+        organization_id,
+        network_id,
+    }))
 }
 
 pub(crate) fn env_create_mesh_prompt(mesh_url: &str, network_id: &str) -> String {
@@ -353,8 +357,24 @@ pub(crate) fn resolve_mesh_bootstrap_for_network(
         }
     }
 
+    let organization_id = config::load_mesh_config(&paths.mesh_data_dir)?
+        .local_identity
+        .and_then(|identity| trimmed_str(&identity.organization_id).map(str::to_string));
+    let Some(organization_id) = organization_id else {
+        if explicit_network {
+            anyhow::bail!(
+                "local Mesh organization not configured (run 'cw mesh up' before selecting a network)"
+            );
+        }
+        return Ok(None);
+    };
+
     match resolve_mesh(globals, paths, env, None, Some(network_id.clone())) {
-        Ok(mesh) => Ok(Some(LocalMeshBootstrap { mesh, network_id })),
+        Ok(mesh) => Ok(Some(LocalMeshBootstrap {
+            mesh,
+            organization_id,
+            network_id,
+        })),
         Err(err) if !explicit_network => {
             let _ = err;
             Ok(None)
@@ -369,7 +389,12 @@ pub(crate) async fn create_local_mesh_node_enrollment(
 ) -> anyhow::Result<NodeEnrollment> {
     let node_name = trimmed_required(node_name, "node name")?;
     MeshClient::new(&bootstrap.mesh)?
-        .create_node_enrollment(&bootstrap.network_id, node_name, 1, "10m")
+        .create_node_enrollment(
+            &bootstrap.organization_id,
+            &bootstrap.network_id,
+            node_name,
+            "10m",
+        )
         .await
         .context("create mesh node enrollment for local runtime")
 }
@@ -379,14 +404,14 @@ pub(crate) fn mesh_enrollment_redeem_command(
     mesh_url: &str,
     enrollment: &NodeEnrollment,
 ) -> Option<Vec<String>> {
-    let token = trimmed_str(&enrollment.enrollment_token)?;
+    let code = trimmed_str(&enrollment.enrollment_code)?;
     let node_name = trimmed_str(&instance.name)?;
     let mut command = vec![
         "cw".to_string(),
         "network".to_string(),
         "enroll".to_string(),
         "redeem".to_string(),
-        token.to_string(),
+        code.to_string(),
         "--node-name".to_string(),
         node_name.to_string(),
     ];

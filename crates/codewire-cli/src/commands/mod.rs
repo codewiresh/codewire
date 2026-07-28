@@ -1129,7 +1129,7 @@ pub(crate) enum NetworkCommand {
     Nodes(NetworkNodesArgs),
     #[command(about = "Create an invite for the selected Mesh network")]
     Invite(NetworkInviteArgs),
-    #[command(about = "Join a Mesh network from an invite token")]
+    #[command(about = "Join a Mesh network with a one-use invitation code")]
     Join(NetworkJoinArgs),
     #[command(about = "Revoke a node from the selected Mesh network")]
     Revoke(NetworkRevokeArgs),
@@ -1142,9 +1142,9 @@ pub(crate) enum NetworkCommand {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum NetworkEnrollCommand {
-    #[command(about = "Create a short-lived node enrollment token")]
+    #[command(about = "Create a short-lived node enrollment code")]
     Create(NetworkEnrollCreateArgs),
-    #[command(about = "Redeem a node enrollment token and store node credentials")]
+    #[command(about = "Redeem a node enrollment code and store node credentials")]
     Redeem(NetworkEnrollRedeemArgs),
 }
 
@@ -1246,6 +1246,8 @@ pub(crate) struct NetworkUseArgs {
 pub(crate) struct NetworkNodesArgs {
     #[arg(long = "mesh-url", help = "Mesh base URL override")]
     mesh_url: Option<String>,
+    #[arg(long, value_name = "ORG_ID", help = "Exact organization ID to inspect")]
+    org: String,
     #[arg(long, help = "Network to list")]
     network: Option<String>,
     #[arg(long, help = "List nodes across all visible networks")]
@@ -1258,14 +1260,14 @@ pub(crate) struct NetworkNodesArgs {
 pub(crate) struct NetworkInviteArgs {
     #[arg(long = "mesh-url", help = "Mesh base URL override")]
     mesh_url: Option<String>,
-    #[arg(long, help = "Network to create the invite in")]
-    network: Option<String>,
     #[arg(
         long,
-        default_value_t = 1,
-        help = "Number of times the invite can be used"
+        value_name = "ORG_ID",
+        help = "Exact organization ID that owns the network"
     )]
-    uses: i32,
+    org: String,
+    #[arg(long, help = "Network to create the invite in")]
+    network: Option<String>,
     #[arg(long, default_value = "1h", help = "Time-to-live for the invite")]
     ttl: String,
     #[arg(long, help = "Print QR code for the invite URL")]
@@ -1276,8 +1278,8 @@ pub(crate) struct NetworkInviteArgs {
 
 #[derive(Debug, Args)]
 pub(crate) struct NetworkJoinArgs {
-    #[arg(value_name = "INVITE", help = "Invite token to redeem")]
-    invite: String,
+    #[arg(value_name = "INVITE_CODE", help = "One-use invitation code to redeem")]
+    invite_code: String,
     #[arg(long = "mesh-url", help = "Mesh base URL override")]
     mesh_url: Option<String>,
 }
@@ -1288,6 +1290,12 @@ pub(crate) struct NetworkRevokeArgs {
     node_name: String,
     #[arg(long = "mesh-url", help = "Mesh base URL override")]
     mesh_url: Option<String>,
+    #[arg(
+        long,
+        value_name = "ORG_ID",
+        help = "Exact organization ID that owns the network"
+    )]
+    org: String,
     #[arg(long, help = "Network for the target node")]
     network: Option<String>,
 }
@@ -1296,16 +1304,16 @@ pub(crate) struct NetworkRevokeArgs {
 pub(crate) struct NetworkEnrollCreateArgs {
     #[arg(long = "mesh-url", help = "Mesh base URL override")]
     mesh_url: Option<String>,
+    #[arg(
+        long,
+        value_name = "ORG_ID",
+        help = "Exact organization ID that owns the network"
+    )]
+    org: String,
     #[arg(long, help = "Network to create the enrollment in")]
     network: Option<String>,
     #[arg(long, help = "Optional node name to bind the enrollment to")]
     node_name: Option<String>,
-    #[arg(
-        long,
-        default_value_t = 1,
-        help = "Number of times the enrollment can be redeemed"
-    )]
-    uses: i32,
     #[arg(long, default_value = "10m", help = "Time-to-live for the enrollment")]
     ttl: String,
     #[arg(long, value_enum, default_value_t = OutputFormat::Text, help = "Output format")]
@@ -1314,8 +1322,11 @@ pub(crate) struct NetworkEnrollCreateArgs {
 
 #[derive(Debug, Args)]
 pub(crate) struct NetworkEnrollRedeemArgs {
-    #[arg(value_name = "TOKEN", help = "Enrollment token to redeem")]
-    enrollment_token: String,
+    #[arg(
+        value_name = "ENROLLMENT_CODE",
+        help = "One-use enrollment code to redeem"
+    )]
+    enrollment_code: String,
     #[arg(long = "mesh-url", help = "Mesh base URL override")]
     mesh_url: Option<String>,
     #[arg(long, help = "Node name to redeem as")]

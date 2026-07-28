@@ -89,10 +89,10 @@ pub(crate) async fn handle_platform_env_command(
         EnvCommand::Create(args) => {
             let mut request = prepare_platform_env_create_request(&args)?;
             match resolve_env_create_mesh_bootstrap(
-                globals,
                 &paths,
                 &env,
                 &platform,
+                &org_id,
                 args.yes,
                 args.network.as_deref(),
                 args.no_network,
@@ -102,7 +102,7 @@ pub(crate) async fn handle_platform_env_command(
                         &mut request,
                         &bootstrap.mesh.mesh_url,
                         &bootstrap.network_id,
-                        &invite.token,
+                        &invite.invite_code,
                     )?,
                     Err(err) => {
                         eprintln!(
@@ -1285,7 +1285,7 @@ pub(crate) fn validate_env_create_mesh_bootstrap_env(
     for key in [
         config::CODEWIRE_MESH_URL_ENV,
         config::CODEWIRE_MESH_NETWORK_ENV,
-        config::CODEWIRE_MESH_INVITE_TOKEN_ENV,
+        config::CODEWIRE_MESH_INVITE_CODE_ENV,
     ] {
         if request.env_vars.contains_key(key) {
             anyhow::bail!("{key} is reserved for mesh bootstrap");
@@ -1298,13 +1298,13 @@ pub(crate) fn inject_env_create_mesh_bootstrap(
     request: &mut CreateEnvironmentRequest,
     mesh_url: &str,
     network_id: &str,
-    invite_token: &str,
+    invite_code: &str,
 ) -> anyhow::Result<()> {
     validate_env_create_mesh_bootstrap_env(request)?;
     for (key, value) in [
         (config::CODEWIRE_MESH_URL_ENV, mesh_url),
         (config::CODEWIRE_MESH_NETWORK_ENV, network_id),
-        (config::CODEWIRE_MESH_INVITE_TOKEN_ENV, invite_token),
+        (config::CODEWIRE_MESH_INVITE_CODE_ENV, invite_code),
     ] {
         request.env_vars.insert(key.to_string(), value.to_string());
     }
@@ -1315,7 +1315,7 @@ pub(crate) async fn create_env_mesh_invite(
     bootstrap: &LocalMeshBootstrap,
 ) -> anyhow::Result<Invite> {
     MeshClient::new(&bootstrap.mesh)?
-        .create_invite(&bootstrap.network_id, 1, "24h")
+        .create_invite(&bootstrap.organization_id, &bootstrap.network_id, "24h")
         .await
         .context("create mesh invite for environment")
 }

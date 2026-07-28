@@ -45,7 +45,7 @@ grants, and task/reporting coordination.
 
 Rust CLI config and environment inputs are Mesh-only: use
 `CODEWIRE_MESH_URL`, `CODEWIRE_MESH_AUTH_TOKEN`, `CODEWIRE_MESH_NETWORK`,
-`CODEWIRE_MESH_INVITE_TOKEN`, `mesh_url`, `mesh_auth_token`, and
+`CODEWIRE_MESH_INVITE_CODE`, `mesh_url`, `mesh_auth_token`, and
 `mesh_selected_network`.
 
 ## Network

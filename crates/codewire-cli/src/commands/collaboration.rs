@@ -869,24 +869,26 @@ pub(crate) fn print_invite(
     match output {
         OutputFormat::Json => println!("{}", serde_json::to_string_pretty(invite)?),
         OutputFormat::Text => {
-            let join_url = invite_join_url(mesh_url, &invite.token);
+            let join_url = invite_join_url(mesh_url, &invite.invite_code);
             eprintln!("Invite created!\n");
-            eprintln!("  Token:   {}", invite.token);
-            eprintln!("  Uses:    {}", invite.uses_remaining);
+            eprintln!("  Code:    {}", invite.invite_code);
             eprintln!("  Expires: {}", invite.expires_at);
             eprintln!("  URL:     {join_url}\n");
             eprintln!("To join another device:");
-            eprintln!("  cw network join --mesh-url {} {}", mesh_url, invite.token);
+            eprintln!(
+                "  cw network join --mesh-url {} {}",
+                mesh_url, invite.invite_code
+            );
         }
     }
     Ok(())
 }
 
-pub(crate) fn invite_join_url(mesh_url: &str, invite_token: &str) -> String {
+pub(crate) fn invite_join_url(mesh_url: &str, invite_code: &str) -> String {
     format!(
         "{}/join?invite={}",
         mesh_url.trim_end_matches('/'),
-        invite_token.trim()
+        invite_code.trim()
     )
 }
 
@@ -898,12 +900,11 @@ pub(crate) fn print_node_enrollment(
         OutputFormat::Json => println!("{}", serde_json::to_string_pretty(enrollment)?),
         OutputFormat::Text => {
             eprintln!("Enrollment created\n");
-            eprintln!("  Token:   {}", enrollment.enrollment_token);
+            eprintln!("  Code:    {}", enrollment.enrollment_code);
             eprintln!("  Network: {}", enrollment.network_id);
             if !enrollment.node_name.trim().is_empty() {
                 eprintln!("  Node:    {}", enrollment.node_name);
             }
-            eprintln!("  Uses:    {}", enrollment.uses_remaining);
             eprintln!("  Expires: {}", enrollment.expires_at);
         }
     }

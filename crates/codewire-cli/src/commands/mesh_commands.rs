@@ -42,6 +42,7 @@ pub(crate) async fn handle_network_command(
             eprintln!("Cleared selected network");
         }
         NetworkCommand::Nodes(args) => {
+            let org_id = trimmed_required(&args.org, "organization ID")?;
             if args.all
                 && args
                     .network
@@ -69,54 +70,57 @@ pub(crate) async fn handle_network_command(
                 )
             };
             let nodes = MeshClient::new(&mesh)?
-                .list_nodes(network_id, args.all)
+                .list_nodes(org_id, network_id, args.all)
                 .await?;
             print_nodes(&nodes, args.all, args.output)?;
         }
         NetworkCommand::Invite(args) => {
+            let org_id = trimmed_required(&args.org, "organization ID")?;
             let mesh = resolve_mesh(globals, &paths, &env, args.mesh_url, args.network)?;
             let network_id = selected_network_or_error(&mesh)?;
             let ttl = trimmed_required(&args.ttl, "ttl")?;
             let invite = MeshClient::new(&mesh)?
-                .create_invite(network_id, args.uses, ttl)
+                .create_invite(org_id, network_id, ttl)
                 .await?;
             print_invite(&invite, &mesh.mesh_url, args.output)?;
             if args.qr {
-                let join_url = invite_join_url(&mesh.mesh_url, &invite.token);
+                let join_url = invite_join_url(&mesh.mesh_url, &invite.invite_code);
                 let qr = render_qr_terminal(&join_url).context("render invite QR code")?;
                 eprintln!("\n{}", qr.trim_end_matches('\n'));
             }
         }
         NetworkCommand::Join(args) => {
-            let invite_token = trimmed_required(&args.invite, "invite token")?;
+            let invite_code = trimmed_required(&args.invite_code, "invitation code")?;
             let mesh = resolve_mesh(globals, &paths, &env, args.mesh_url, None)?;
-            let joined = MeshClient::new(&mesh)?.join_network(invite_token).await?;
+            let joined = MeshClient::new(&mesh)?.join_network(invite_code).await?;
             config::save_joined_network(&paths.mesh_data_dir, &mesh.mesh_url, &joined.network_id)?;
             eprintln!("Joined network {:?}", joined.network_id);
             eprintln!("Selected network is ready for Mesh commands.");
         }
         NetworkCommand::Revoke(args) => {
             let node_name = trimmed_required(&args.node_name, "node name")?;
+            let org_id = trimmed_required(&args.org, "organization ID")?;
             let mesh = resolve_mesh(globals, &paths, &env, args.mesh_url, args.network)?;
             let network_id = selected_network_or_error(&mesh)?;
             MeshClient::new(&mesh)?
-                .revoke_node(network_id, node_name)
+                .revoke_node(org_id, network_id, node_name)
                 .await?;
             eprintln!("Node {node_name:?} revoked");
         }
         NetworkCommand::Enroll { command } => match command {
             NetworkEnrollCommand::Create(args) => {
+                let org_id = trimmed_required(&args.org, "organization ID")?;
                 let mesh = resolve_mesh(globals, &paths, &env, args.mesh_url, args.network)?;
                 let network_id = selected_network_or_error(&mesh)?;
                 let node_name = args.node_name.as_deref().map(str::trim).unwrap_or("");
                 let ttl = trimmed_required(&args.ttl, "ttl")?;
                 let enrollment = MeshClient::new(&mesh)?
-                    .create_node_enrollment(network_id, node_name, args.uses, ttl)
+                    .create_node_enrollment(org_id, network_id, node_name, ttl)
                     .await?;
                 print_node_enrollment(&enrollment, args.output)?;
             }
             NetworkEnrollCommand::Redeem(args) => {
-                let token = trimmed_required(&args.enrollment_token, "enrollment token")?;
+                let code = trimmed_required(&args.enrollment_code, "enrollment code")?;
                 let node_name = args.node_name.as_deref().map(str::trim).unwrap_or("");
                 let mesh_url = config::resolve_mesh_base_url(
                     config::MeshResolveOptions {
@@ -128,7 +132,7 @@ pub(crate) async fn handle_network_command(
                     &env,
                 )?;
                 let redeemed = MeshClient::unauthenticated(&mesh_url)?
-                    .redeem_node_enrollment(token, node_name)
+                    .redeem_node_enrollment(code, node_name)
                     .await?;
                 save_redeemed_node_enrollment(&paths.mesh_data_dir, &mesh_url, &redeemed)?;
                 eprintln!("Node {:?} enrolled", redeemed.node_name);
