@@ -948,6 +948,20 @@ grep -qF 'name: Verify exact tested-tree receipt' "$selection_block"
 grep -qF 'GITEA_TOKEN: ${{ github.token }}' "$selection_block"
 grep -qF 'run: scripts/ci/select/verify-tested-tree-receipt.sh' "$selection_block"
 
+permissions_block="$(awk '
+  $0 == "permissions:" { capture = 1 }
+  capture && $0 != "permissions:" && $0 ~ /^[^[:space:]]/ { exit }
+  capture { print }
+' "$WORKFLOW")"
+expected_permissions="$(printf '%s\n' \
+  'permissions:' \
+  '  contents: read' \
+  '  actions: read')"
+if [ "$permissions_block" != "$expected_permissions" ]; then
+  echo 'product CI permissions must be exactly contents: read and actions: read' >&2
+  exit 1
+fi
+
 top_level_jobs="$(awk '
   /^jobs:$/ { in_jobs = 1; next }
   in_jobs && /^  [A-Za-z0-9_-]+:$/ { count++ }
