@@ -81,9 +81,34 @@ Method context can add procedure but cannot widen repository authority.
   workstream status, canonical Gitea issue/PR state, current `gitea/main`, and
   required evidence. A healthy branch or CI run is not authorization, and CI
   from an old head is never evidence for a rebased head.
-- One WI is one PR, including evidence or status WIs. If implementation and
-  production evidence have different prerequisites, split them into separate
-  WIs instead of holding a source PR across the boundary.
+- Before a master authorizes a new implementation cluster, complete one
+  bounded read-only readiness audit and record it on the canonical issue. The
+  audit must cover the actual server mounts and shipped callers; ownership,
+  schema, and persistence consequences; auth and sensitive-data flow;
+  deployment, support-image, and verification selectors; CI token permissions
+  and evidence APIs; and the rollback artifact plus local/live smoke shape.
+  Resolve every finding in the cluster definition before source mutation.
+  Do not split predictable audit findings into a sequence of implementation-
+  time replans.
+- One WI is one PR, but a WI is a cohesive deploy/rollback boundary rather
+  than a language, file, guard, evidence, or status micro-step. Generated
+  clients, all affected ergonomic wrappers, guard ratchets, tests, and the
+  workstream status update belong in the same WI when they share
+  prerequisites and rollback. Split implementation from a release,
+  production, or live-evidence operation only when their prerequisites or
+  rollback boundaries genuinely differ. Record routine merge/deploy evidence
+  on the canonical issue; do not create a status-only WI unless repository
+  state must change or the master names a real downstream decision that
+  consumes it.
+- Verification and downstream evidence are impact-proportional. Source-only
+  docs, guard-data, and SDK changes require their focused local gates,
+  exact-head CI, and exact-tree provenance; a no-op deployment selector is a
+  classification result, not a reason to wait before independent downstream
+  work. Runtime/image changes additionally require exact-source deployment
+  evidence. Release, production, credential, and live-state changes require
+  their explicitly named operational evidence. Before authorizing a cluster,
+  audit the selector result for every planned path; repair an over-broad or
+  under-broad selector once, before product implementation.
 - Execution controls must distinguish a **merge gate** from a
   **downstream-start gate**. Exact-head CI may be required before merging a
   PR, but it must not automatically block independently authorized local work
