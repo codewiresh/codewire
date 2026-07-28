@@ -49,7 +49,6 @@ export {
 } from "./local.js";
 export {
   MeshClient,
-  MeshCredentialsService,
   MeshGroupsService,
   MeshKVService,
   MeshNetworksService,
@@ -60,15 +59,14 @@ export type {
   MeshEnrollment,
   MeshGroup,
   MeshGroupMember,
+  MeshGroupDebugPolicy,
+  MeshGroupMessagesPolicy,
   MeshGroupPolicy,
   MeshKVEntry,
   MeshNetwork,
   MeshNode,
   MeshNodeCredentials,
-  MeshRuntimeCredential,
-  MeshSenderDelegation,
-  MeshVerifierBundle,
-  MeshVerifierKey,
+  MeshTTL,
 } from "./mesh.js";
 export type {
   LocalSpec,

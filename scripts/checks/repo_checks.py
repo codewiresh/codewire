@@ -912,7 +912,7 @@ MESH_EXPECTED_ROUTER_SHA256 = (
     "f2f3b3e83dfb54682f64c8f475cba9af79deba2fcb09b5d89c0fba173a106120"
 )
 MESH_EXPECTED_SEMANTICS_SHA256 = (
-    "e73a68315ce6941c3ca0fa9054e4442a3180f42ae6a7ed4d8cc2c7025d278c88"
+    "a7efaa098c45b1819953472db4a718907bac7a2013ea96672fe22a050cdaf9db"
 )
 MESH_EXPECTED_COUNTS = {
     "route_registrations": 37,
@@ -929,7 +929,7 @@ MESH_EXPECTED_COUNTS = {
         "rust-cli": 9,
         "rust-client": 0,
         "rust-tailnet": 0,
-        "typescript-sdk": 17,
+        "typescript-sdk": 1,
     },
     "wrapper_declaration_references": {
         "browser": 0,
@@ -940,7 +940,7 @@ MESH_EXPECTED_COUNTS = {
         "rust-cli": 0,
         "rust-client": 0,
         "rust-tailnet": 0,
-        "typescript-sdk": 4,
+        "typescript-sdk": 0,
     },
     "credential_operations": {
         "enrollment-code": 1,
@@ -963,9 +963,9 @@ MESH_EXPECTED_COUNTS = {
         "none": 9,
     },
     "operations_without_callers": 7,
-    "wrapper_declaration_records": 8,
-    "client_url_template_records": 42,
-    "client_url_template_occurrences": 55,
+    "wrapper_declaration_records": 4,
+    "client_url_template_records": 26,
+    "client_url_template_occurrences": 35,
 }
 MESH_EXPECTED_CONNECT_METHODS = {
     "MESH_NETWORK_SERVICE_SERVICE_NAME": {
@@ -1421,13 +1421,13 @@ def mesh_surface_failures(
             "wrapper_declarations must cover exactly the four declaration-only "
             "credential operations"
         )
-    expected_wrapper_callers = {"python-sdk", "typescript-sdk"}
+    expected_wrapper_callers = {"python-sdk"}
     for operation_key, callers in wrapper_callers_by_operation.items():
         if callers != expected_wrapper_callers:
             failures.append(
                 "wrapper_declarations for "
                 f"{operation_key[0].upper()} {operation_key[1]} must cover exactly "
-                "the remaining Python and TypeScript SDK wrappers"
+                "the remaining Python SDK wrapper"
             )
 
     actual_semantic_counts = {
@@ -1589,7 +1589,7 @@ def mesh_network_ownership_failures(
     operation_details: dict[tuple[str, str], dict[str, Any]],
 ) -> None:
     """Keep the WI-5 shared REST/Connect ownership boundary explicit."""
-    expected_callers = ["rust-cli", "typescript-sdk", "python-sdk"]
+    expected_callers = ["rust-cli", "python-sdk"]
     for method in ("get", "post"):
         operation = operation_details.get((method, "/api/v1/networks"))
         if operation is None:
@@ -1663,9 +1663,10 @@ def mesh_network_ownership_failures(
             "OrgId: orgID",
         ),
         "libs/sdk-ts/src/mesh.ts": (
-            "create(orgId: string, networkId: string)",
-            "list(orgId: string)",
-            "org_id=${q(orgId)}",
+            "create(orgId: string, networkId: string): Promise<MeshNetwork>",
+            "list(orgId: string): Promise<MeshNetwork[]>",
+            "createMeshNetwork({ orgId, networkId })",
+            "listMeshNetworks({ orgId, pageToken })",
         ),
         "libs/sdk-python/codewire/mesh.py": (
             "def create(self, org_id: str, network_id: str)",
