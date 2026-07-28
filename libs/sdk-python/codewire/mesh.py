@@ -1,19 +1,40 @@
-"""Mesh API client for the Codewire Python SDK.
+"""Generated-Connect-backed Mesh API client for the Codewire Python SDK.
 
-Mirrors the Go ``codewire.MeshClient`` surface: Networks, Nodes, Groups,
-Credentials, and KV. The mesh speaks its own HTTP API distinct from the
-platform — construct with :class:`MeshClient` and a mesh URL + auth token.
+The ergonomic wrapper shares the SDK's generated Connect transport and keeps
+only enrollment redemption on its temporary unauthenticated raw route. That
+last raw call is removed when WS18 WI-8A mounts typed redemption.
 """
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Iterable
-from urllib.parse import quote
+from datetime import timezone
+from typing import Any, Literal, TypeVar
 
 import httpx
+from connectrpc.errors import ConnectError
+from google.protobuf.descriptor import Descriptor
+from google.protobuf.duration_pb2 import Duration
+from google.protobuf.timestamp_pb2 import Timestamp
 
-from codewire.errors import CodewireError
+from codewire._transport import ConnectTransport
+from codewire.errors import CodewireError, codewire_error_from_connect
+from codewire.v1 import (
+    mesh_group_pb2,
+    mesh_kv_pb2,
+    mesh_network_pb2,
+    mesh_node_pb2,
+)
+from codewire.v1.mesh_group_connect import MeshGroupServiceClientSync
+from codewire.v1.mesh_kv_connect import MeshKeyValueServiceClientSync
+from codewire.v1.mesh_network_connect import MeshNetworkServiceClientSync
+from codewire.v1.mesh_node_connect import MeshNodeServiceClientSync
+
+
+ResponseT = TypeVar("ResponseT")
+MeshGroupMessagesPolicy = Literal["", "internal-only", "open"]
+MeshGroupDebugPolicy = Literal["", "none", "observe-only", "full"]
 
 
 # -- Types --------------------------------------------------------------------
@@ -24,30 +45,37 @@ class MeshNetwork:
     id: str
     org_id: str
     created_at: str
-    node_count: int = 0
-    invite_count: int = 0
+    node_count: int
+    invite_count: int
 
 
 @dataclass
 class MeshNode:
+    org_id: str
+    network_id: str
     name: str
-    network_id: str = ""
-    peer_url: str = ""
-    connected: bool = False
+    peer_url: str
+    connected: bool
 
 
 @dataclass
 class MeshEnrollment:
     id: str
+    org_id: str
     network_id: str
-    enrollment_token: str
-    uses_remaining: int
+    node_name: str
+    owner_user_id: str
+    issued_by_user_id: str
     expires_at: str
-    node_name: str = ""
+    created_at: str
+    redeemed_at: str | None
+    enrollment_code: str
 
 
 @dataclass
 class MeshNodeCredentials:
+    """Legacy raw response retained only until typed enrollment redemption."""
+
     node_token: str
     node_name: str
     network_id: str
@@ -56,12 +84,17 @@ class MeshNodeCredentials:
 
 @dataclass
 class MeshKVEntry:
+    org_id: str
+    network_id: str
+    namespace: str
     key: str
-    value: str = ""
+    value: bytes
+    expires_at: str | None
 
 
 @dataclass
 class MeshGroupMember:
+    org_id: str
     network_id: str
     group_name: str
     node_name: str
@@ -71,440 +104,692 @@ class MeshGroupMember:
 
 @dataclass
 class MeshGroupPolicy:
+    org_id: str
     network_id: str
     group_name: str
-    messages_policy: str
-    debug_policy: str
+    messages_policy: MeshGroupMessagesPolicy
+    debug_policy: MeshGroupDebugPolicy
+    updated_at: str
 
 
 @dataclass
 class MeshGroup:
+    org_id: str
     network_id: str
     name: str
     created_at: str
-    created_by: str = ""
-    members: list[MeshGroupMember] | None = None
-    policy: MeshGroupPolicy | None = None
+    created_by_user_id: str
+    members: list[MeshGroupMember]
+    policy: MeshGroupPolicy | None
 
 
-@dataclass
-class MeshRuntimeCredential:
-    credential: str
-    network_id: str
-    subject_kind: str
-    subject_id: str
-    expires_at: str
+# -- Conversion ---------------------------------------------------------------
 
 
-@dataclass
-class MeshVerifierKey:
-    key_id: str
-    algorithm: str
-    public_key: str
+def _unary(
+    transport: ConnectTransport,
+    call: Callable[..., ResponseT],
+    request: object,
+) -> ResponseT:
+    try:
+        return transport.unary(call, request)
+    except ConnectError as error:
+        raise codewire_error_from_connect(error) from error
 
 
-@dataclass
-class MeshVerifierBundle:
-    network_id: str
-    issuer: str
-    keys: list[MeshVerifierKey]
-    version: int
-    expires_at: str
+def _message(response: Any, field: str, label: str) -> Any:
+    if not response.HasField(field):
+        raise RuntimeError(f"Mesh {label} response omitted {field}")
+    return getattr(response, field)
 
 
-@dataclass
-class MeshSenderDelegation:
-    delegation: str
-    network_id: str
-    source_node: str
-    expires_at: str
-    from_session_id: int | None = None
-    from_session_name: str = ""
-    audience_node: str = ""
+def _timestamp(value: Timestamp, label: str) -> str:
+    try:
+        converted = value.ToDatetime(tzinfo=timezone.utc)
+    except (OverflowError, ValueError) as error:
+        raise ValueError(f"invalid Mesh {label}: {error}") from error
+    return converted.isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
-# -- HTTP plumbing ------------------------------------------------------------
+def _required_timestamp(message: Any, field: str, label: str) -> str:
+    if not message.HasField(field):
+        raise RuntimeError(f"Mesh {label} is missing")
+    return _timestamp(getattr(message, field), label)
 
 
-class _MeshHttp:
-    """Thin HTTP wrapper that handles auth header selection and error shape.
+def _optional_timestamp(message: Any, field: str, label: str) -> str | None:
+    if not message.HasField(field):
+        return None
+    return _timestamp(getattr(message, field), label)
 
-    The mesh uses two auth modes:
-    - Client auth: Bearer on the client's auth token (most endpoints).
-    - Node auth: Bearer on a node token passed per-call (delegation issuance).
-    - Public: no Authorization header (enrollment redemption).
-    """
 
-    def __init__(
-        self,
-        base_url: str,
-        auth_token: str,
-        *,
-        timeout: float = 30,
-        http_client: httpx.Client | None = None,
-    ):
-        self._base_url = base_url.rstrip("/")
-        self._auth_token = auth_token
-        if http_client is not None:
-            self._client = http_client
-            self._owns_client = False
-        else:
-            self._client = httpx.Client(
-                base_url=self._base_url, timeout=timeout
-            )
-            self._owns_client = True
+def _duration(name: str, seconds: int | None) -> Duration | None:
+    if seconds is None or seconds == 0:
+        return None
+    if isinstance(seconds, bool) or not isinstance(seconds, int) or seconds < 0:
+        raise ValueError(f"Mesh {name} must be a non-negative integer")
+    return Duration(seconds=seconds)
 
-    def close(self) -> None:
-        if self._owns_client:
-            self._client.close()
 
-    def request(
-        self,
-        method: str,
-        path: str,
-        *,
-        body: Any = None,
-        token: str | None = None,
-        raw_body: bytes | None = None,
-        content_type: str | None = None,
-        extra_headers: dict[str, str] | None = None,
-    ) -> httpx.Response:
-        headers: dict[str, str] = {}
-        if extra_headers:
-            headers.update(extra_headers)
-        bearer = self._auth_token if token is None else token
-        if bearer:
-            headers["Authorization"] = f"Bearer {bearer}"
-        if body is not None and raw_body is None:
-            headers.setdefault("Content-Type", "application/json")
-        elif content_type:
-            headers["Content-Type"] = content_type
-        resp = self._client.request(
-            method,
-            path,
-            json=body if raw_body is None else None,
-            content=raw_body,
-            headers=headers,
+def _messages_policy_from_proto(value: int) -> MeshGroupMessagesPolicy:
+    if value == mesh_group_pb2.MESH_GROUP_MESSAGES_POLICY_UNSPECIFIED:
+        return ""
+    if value == mesh_group_pb2.MESH_GROUP_MESSAGES_POLICY_INTERNAL_ONLY:
+        return "internal-only"
+    if value == mesh_group_pb2.MESH_GROUP_MESSAGES_POLICY_OPEN:
+        return "open"
+    raise ValueError(f"unknown Mesh messages policy {value}")
+
+
+def _messages_policy_to_proto(value: MeshGroupMessagesPolicy) -> int:
+    if value == "":
+        return mesh_group_pb2.MESH_GROUP_MESSAGES_POLICY_UNSPECIFIED
+    if value == "internal-only":
+        return mesh_group_pb2.MESH_GROUP_MESSAGES_POLICY_INTERNAL_ONLY
+    if value == "open":
+        return mesh_group_pb2.MESH_GROUP_MESSAGES_POLICY_OPEN
+    raise ValueError(f"unknown Mesh messages policy {value}")
+
+
+def _debug_policy_from_proto(value: int) -> MeshGroupDebugPolicy:
+    if value == mesh_group_pb2.MESH_GROUP_DEBUG_POLICY_UNSPECIFIED:
+        return ""
+    if value == mesh_group_pb2.MESH_GROUP_DEBUG_POLICY_NONE:
+        return "none"
+    if value == mesh_group_pb2.MESH_GROUP_DEBUG_POLICY_OBSERVE_ONLY:
+        return "observe-only"
+    if value == mesh_group_pb2.MESH_GROUP_DEBUG_POLICY_FULL:
+        return "full"
+    raise ValueError(f"unknown Mesh debug policy {value}")
+
+
+def _debug_policy_to_proto(value: MeshGroupDebugPolicy) -> int:
+    if value == "":
+        return mesh_group_pb2.MESH_GROUP_DEBUG_POLICY_UNSPECIFIED
+    if value == "none":
+        return mesh_group_pb2.MESH_GROUP_DEBUG_POLICY_NONE
+    if value == "observe-only":
+        return mesh_group_pb2.MESH_GROUP_DEBUG_POLICY_OBSERVE_ONLY
+    if value == "full":
+        return mesh_group_pb2.MESH_GROUP_DEBUG_POLICY_FULL
+    raise ValueError(f"unknown Mesh debug policy {value}")
+
+
+def _network_from_proto(network: mesh_network_pb2.MeshNetwork) -> MeshNetwork:
+    return MeshNetwork(
+        id=network.id,
+        org_id=network.org_id,
+        created_at=_required_timestamp(
+            network, "created_at", "network created_at"
+        ),
+        node_count=network.node_count,
+        invite_count=network.invite_count,
+    )
+
+
+def _node_from_proto(node: mesh_node_pb2.MeshNode) -> MeshNode:
+    return MeshNode(
+        org_id=node.org_id,
+        network_id=node.network_id,
+        name=node.name,
+        peer_url=node.peer_url,
+        connected=node.connected,
+    )
+
+
+def _enrollment_from_proto(
+    enrollment: mesh_node_pb2.MeshNodeEnrollment,
+    enrollment_code: str,
+) -> MeshEnrollment:
+    return MeshEnrollment(
+        id=enrollment.id,
+        org_id=enrollment.org_id,
+        network_id=enrollment.network_id,
+        node_name=enrollment.node_name,
+        owner_user_id=enrollment.owner_user_id,
+        issued_by_user_id=enrollment.issued_by_user_id,
+        expires_at=_required_timestamp(
+            enrollment, "expires_at", "enrollment expires_at"
+        ),
+        created_at=_required_timestamp(
+            enrollment, "created_at", "enrollment created_at"
+        ),
+        redeemed_at=_optional_timestamp(
+            enrollment, "redeemed_at", "enrollment redeemed_at"
+        ),
+        enrollment_code=enrollment_code,
+    )
+
+
+def _member_from_proto(
+    member: mesh_group_pb2.MeshGroupMember,
+) -> MeshGroupMember:
+    return MeshGroupMember(
+        org_id=member.org_id,
+        network_id=member.network_id,
+        group_name=member.group_name,
+        node_name=member.node_name,
+        session_name=member.session_name,
+        created_at=_required_timestamp(
+            member, "created_at", "group member created_at"
+        ),
+    )
+
+
+def _policy_from_proto(
+    policy: mesh_group_pb2.MeshGroupPolicy,
+) -> MeshGroupPolicy:
+    return MeshGroupPolicy(
+        org_id=policy.org_id,
+        network_id=policy.network_id,
+        group_name=policy.group_name,
+        messages_policy=_messages_policy_from_proto(policy.messages_policy),
+        debug_policy=_debug_policy_from_proto(policy.debug_policy),
+        updated_at=_required_timestamp(
+            policy, "updated_at", "group policy updated_at"
+        ),
+    )
+
+
+def _group_from_proto(group: mesh_group_pb2.MeshGroup) -> MeshGroup:
+    return MeshGroup(
+        org_id=group.org_id,
+        network_id=group.network_id,
+        name=group.name,
+        created_at=_required_timestamp(group, "created_at", "group created_at"),
+        created_by_user_id=group.created_by_user_id,
+        members=[_member_from_proto(member) for member in group.members],
+        policy=(
+            _policy_from_proto(group.policy)
+            if group.HasField("policy")
+            else None
+        ),
+    )
+
+
+def _entry_from_proto(entry: mesh_kv_pb2.MeshKeyValue) -> MeshKVEntry:
+    return MeshKVEntry(
+        org_id=entry.org_id,
+        network_id=entry.network_id,
+        namespace=entry.namespace,
+        key=entry.key,
+        value=bytes(entry.value),
+        expires_at=_optional_timestamp(
+            entry, "expires_at", "key value expires_at"
+        ),
+    )
+
+
+def _assert_fields(
+    descriptor: Descriptor,
+    expected: tuple[str, ...],
+) -> None:
+    actual = tuple(field.name for field in descriptor.fields)
+    if actual != expected:
+        raise RuntimeError(
+            f"Mesh converter field coverage drift for "
+            f"{descriptor.full_name}: {actual!r}"
         )
-        if resp.status_code >= 400:
-            detail = resp.text.strip() or resp.reason_phrase
-            raise CodewireError(resp.status_code, detail, resp.headers.get("x-request-id", ""))
-        return resp
 
-    def json(
-        self,
-        method: str,
-        path: str,
-        *,
-        body: Any = None,
-        token: str | None = None,
-    ) -> Any:
-        resp = self.request(method, path, body=body, token=token)
-        if resp.status_code == 204:
-            return None
-        if not resp.content:
-            return None
-        return resp.json()
+
+def assert_mesh_converter_coverage() -> None:
+    """Fail if a published Mesh message gains an unmapped field."""
+
+    _assert_fields(
+        mesh_network_pb2.MeshNetwork.DESCRIPTOR,
+        ("id", "org_id", "created_at", "node_count", "invite_count"),
+    )
+    _assert_fields(
+        mesh_node_pb2.MeshNode.DESCRIPTOR,
+        ("org_id", "network_id", "name", "peer_url", "connected"),
+    )
+    _assert_fields(
+        mesh_node_pb2.MeshNodeEnrollment.DESCRIPTOR,
+        (
+            "id",
+            "org_id",
+            "network_id",
+            "node_name",
+            "owner_user_id",
+            "issued_by_user_id",
+            "expires_at",
+            "created_at",
+            "redeemed_at",
+        ),
+    )
+    _assert_fields(
+        mesh_group_pb2.MeshGroup.DESCRIPTOR,
+        (
+            "org_id",
+            "network_id",
+            "name",
+            "created_at",
+            "created_by_user_id",
+            "members",
+            "policy",
+        ),
+    )
+    _assert_fields(
+        mesh_group_pb2.MeshGroupMember.DESCRIPTOR,
+        (
+            "org_id",
+            "network_id",
+            "group_name",
+            "node_name",
+            "session_name",
+            "created_at",
+        ),
+    )
+    _assert_fields(
+        mesh_group_pb2.MeshGroupPolicy.DESCRIPTOR,
+        (
+            "org_id",
+            "network_id",
+            "group_name",
+            "messages_policy",
+            "debug_policy",
+            "updated_at",
+        ),
+    )
+    _assert_fields(
+        mesh_kv_pb2.MeshKeyValue.DESCRIPTOR,
+        (
+            "org_id",
+            "network_id",
+            "namespace",
+            "key",
+            "value",
+            "expires_at",
+        ),
+    )
 
 
 # -- Services -----------------------------------------------------------------
 
 
 class MeshNetworks:
-    def __init__(self, http: _MeshHttp):
-        self._http = http
+    def __init__(
+        self,
+        transport: ConnectTransport,
+        client: MeshNetworkServiceClientSync,
+    ) -> None:
+        self._transport = transport
+        self._client = client
 
-    def create(self, org_id: str, network_id: str) -> None:
-        """Create a network owned by org_id."""
-        self._http.json(
-            "POST", "/api/v1/networks", body={"org_id": org_id, "network_id": network_id}
+    def create(self, org_id: str, network_id: str) -> MeshNetwork:
+        response = _unary(
+            self._transport,
+            self._client.create_mesh_network,
+            mesh_network_pb2.CreateMeshNetworkRequest(
+                org_id=org_id, network_id=network_id
+            ),
+        )
+        return _network_from_proto(
+            _message(response, "network", "create network")
         )
 
     def list(self, org_id: str) -> list[MeshNetwork]:
-        rows = self._http.json(
-            "GET", f"/api/v1/networks?org_id={quote(org_id, safe='')}"
-        ) or []
-        return [MeshNetwork(**row) for row in rows]
+        networks: list[MeshNetwork] = []
+        page_token = ""
+        while True:
+            response = _unary(
+                self._transport,
+                self._client.list_mesh_networks,
+                mesh_network_pb2.ListMeshNetworksRequest(
+                    org_id=org_id, page_token=page_token
+                ),
+            )
+            networks.extend(
+                _network_from_proto(network) for network in response.networks
+            )
+            page_token = response.next_page_token
+            if not page_token:
+                return networks
 
 
 class MeshNodes:
-    def __init__(self, http: _MeshHttp):
-        self._http = http
+    def __init__(
+        self,
+        transport: ConnectTransport,
+        client: MeshNodeServiceClientSync,
+        base_url: str,
+        http_client: httpx.Client,
+    ) -> None:
+        self._transport = transport
+        self._client = client
+        self._base_url = base_url
+        self._http_client = http_client
 
-    def list(self, network_id: str) -> list[MeshNode]:
-        rows = self._http.json(
-            "GET", f"/api/v1/nodes?network_id={quote(network_id, safe='')}"
-        ) or []
-        return [MeshNode(**row) for row in rows]
+    def list(self, org_id: str, network_id: str) -> list[MeshNode]:
+        nodes: list[MeshNode] = []
+        page_token = ""
+        while True:
+            response = _unary(
+                self._transport,
+                self._client.list_mesh_nodes,
+                mesh_node_pb2.ListMeshNodesRequest(
+                    org_id=org_id,
+                    network_id=network_id,
+                    page_token=page_token,
+                ),
+            )
+            nodes.extend(_node_from_proto(node) for node in response.nodes)
+            page_token = response.next_page_token
+            if not page_token:
+                return nodes
 
-    def revoke(self, network_id: str, node_name: str) -> None:
-        self._http.json(
-            "DELETE",
-            f"/api/v1/nodes/{quote(node_name, safe='')}?network_id={quote(network_id, safe='')}",
+    def revoke(self, org_id: str, network_id: str, node_name: str) -> None:
+        _unary(
+            self._transport,
+            self._client.revoke_mesh_node,
+            mesh_node_pb2.RevokeMeshNodeRequest(
+                org_id=org_id,
+                network_id=network_id,
+                node_name=node_name,
+            ),
         )
 
     def create_enrollment(
         self,
+        org_id: str,
         network_id: str,
         node_name: str,
         *,
-        uses: int = 1,
-        ttl: str | None = None,
+        ttl_seconds: int | None = None,
     ) -> MeshEnrollment:
-        body: dict[str, Any] = {
-            "network_id": network_id,
-            "node_name": node_name,
-            "uses": uses,
-        }
-        if ttl:
-            body["ttl"] = ttl
-        data = self._http.json("POST", "/api/v1/node-enrollments", body=body)
-        return MeshEnrollment(**data)
+        request = mesh_node_pb2.CreateMeshNodeEnrollmentRequest(
+            org_id=org_id,
+            network_id=network_id,
+            node_name=node_name,
+        )
+        ttl = _duration("enrollment ttl_seconds", ttl_seconds)
+        if ttl is not None:
+            request.ttl.CopyFrom(ttl)
+        response = _unary(
+            self._transport,
+            self._client.create_mesh_node_enrollment,
+            request,
+        )
+        return _enrollment_from_proto(
+            _message(response, "enrollment", "create enrollment"),
+            response.enrollment_code,
+        )
 
     def redeem_enrollment(
-        self, enrollment_token: str, node_name: str
+        self,
+        enrollment_token: str,
+        node_name: str,
     ) -> MeshNodeCredentials:
-        """Redeem an enrollment token to register a node. No auth required."""
-        data = self._http.json(
+        """Redeem through the last temporary raw Mesh client route."""
+
+        request = self._http_client.build_request(
             "POST",
-            "/api/v1/node-enrollments/redeem",
-            body={
+            f"{self._base_url}/api/v1/node-enrollments/redeem",
+            json={
                 "enrollment_token": enrollment_token,
                 "node_name": node_name,
             },
-            token="",
         )
-        return MeshNodeCredentials(**data)
+        request.headers.pop("authorization", None)
+        response = self._http_client.send(request)
+        if response.status_code >= 400:
+            detail = response.text.strip() or response.reason_phrase
+            raise CodewireError(
+                response.status_code,
+                detail,
+                response.headers.get("x-request-id", ""),
+            )
+        return MeshNodeCredentials(**response.json())
 
 
 class MeshGroups:
-    def __init__(self, http: _MeshHttp):
-        self._http = http
+    def __init__(
+        self,
+        transport: ConnectTransport,
+        client: MeshGroupServiceClientSync,
+    ) -> None:
+        self._transport = transport
+        self._client = client
 
-    def create(self, network_id: str, name: str) -> MeshGroup:
-        data = self._http.json(
-            "POST",
-            "/api/v1/groups",
-            body={"network_id": network_id, "name": name},
+    def create(
+        self,
+        org_id: str,
+        network_id: str,
+        name: str,
+    ) -> MeshGroup:
+        response = _unary(
+            self._transport,
+            self._client.create_mesh_group,
+            mesh_group_pb2.CreateMeshGroupRequest(
+                org_id=org_id, network_id=network_id, name=name
+            ),
         )
-        return _group_from_dict(data)
+        return _group_from_proto(_message(response, "group", "create group"))
 
-    def list(self, network_id: str) -> list[MeshGroup]:
-        rows = self._http.json(
-            "GET",
-            f"/api/v1/groups?network_id={quote(network_id, safe='')}",
-        ) or []
-        return [_group_from_dict(row) for row in rows]
+    def list(self, org_id: str, network_id: str) -> list[MeshGroup]:
+        groups: list[MeshGroup] = []
+        page_token = ""
+        while True:
+            response = _unary(
+                self._transport,
+                self._client.list_mesh_groups,
+                mesh_group_pb2.ListMeshGroupsRequest(
+                    org_id=org_id,
+                    network_id=network_id,
+                    page_token=page_token,
+                ),
+            )
+            groups.extend(_group_from_proto(group) for group in response.groups)
+            page_token = response.next_page_token
+            if not page_token:
+                return groups
 
-    def get(self, network_id: str, name: str) -> MeshGroup:
-        data = self._http.json(
-            "GET",
-            f"/api/v1/groups/{quote(name, safe='')}?network_id={quote(network_id, safe='')}",
+    def get(
+        self,
+        org_id: str,
+        network_id: str,
+        name: str,
+    ) -> MeshGroup:
+        response = _unary(
+            self._transport,
+            self._client.get_mesh_group,
+            mesh_group_pb2.GetMeshGroupRequest(
+                org_id=org_id,
+                network_id=network_id,
+                group_name=name,
+            ),
         )
-        return _group_from_dict(data)
+        return _group_from_proto(_message(response, "group", "get group"))
 
-    def delete(self, network_id: str, name: str) -> None:
-        self._http.json(
-            "DELETE",
-            f"/api/v1/groups/{quote(name, safe='')}?network_id={quote(network_id, safe='')}",
+    def delete(self, org_id: str, network_id: str, name: str) -> None:
+        _unary(
+            self._transport,
+            self._client.delete_mesh_group,
+            mesh_group_pb2.DeleteMeshGroupRequest(
+                org_id=org_id,
+                network_id=network_id,
+                group_name=name,
+            ),
         )
 
     def add_member(
         self,
+        org_id: str,
         network_id: str,
         group_name: str,
         node_name: str,
         session_name: str,
     ) -> MeshGroupMember:
-        data = self._http.json(
-            "POST",
-            f"/api/v1/groups/{quote(group_name, safe='')}/members",
-            body={
-                "network_id": network_id,
-                "node_name": node_name,
-                "session_name": session_name,
-            },
+        response = _unary(
+            self._transport,
+            self._client.add_mesh_group_member,
+            mesh_group_pb2.AddMeshGroupMemberRequest(
+                org_id=org_id,
+                network_id=network_id,
+                group_name=group_name,
+                node_name=node_name,
+                session_name=session_name,
+            ),
         )
-        return MeshGroupMember(**data)
+        return _member_from_proto(
+            _message(response, "member", "add group member")
+        )
 
     def remove_member(
         self,
+        org_id: str,
         network_id: str,
         group_name: str,
         node_name: str,
         session_name: str,
     ) -> None:
-        path = (
-            f"/api/v1/groups/{quote(group_name, safe='')}/members"
-            f"?network_id={quote(network_id, safe='')}"
-            f"&node_name={quote(node_name, safe='')}"
-            f"&session_name={quote(session_name, safe='')}"
+        _unary(
+            self._transport,
+            self._client.remove_mesh_group_member,
+            mesh_group_pb2.RemoveMeshGroupMemberRequest(
+                org_id=org_id,
+                network_id=network_id,
+                group_name=group_name,
+                node_name=node_name,
+                session_name=session_name,
+            ),
         )
-        self._http.json("DELETE", path)
 
     def set_policy(
         self,
+        org_id: str,
         network_id: str,
         group_name: str,
-        messages_policy: str,
-        debug_policy: str,
+        messages_policy: MeshGroupMessagesPolicy,
+        debug_policy: MeshGroupDebugPolicy,
     ) -> MeshGroupPolicy:
-        data = self._http.json(
-            "PUT",
-            f"/api/v1/groups/{quote(group_name, safe='')}/policy",
-            body={
-                "network_id": network_id,
-                "messages_policy": messages_policy,
-                "debug_policy": debug_policy,
-            },
+        response = _unary(
+            self._transport,
+            self._client.set_mesh_group_policy,
+            mesh_group_pb2.SetMeshGroupPolicyRequest(
+                org_id=org_id,
+                network_id=network_id,
+                group_name=group_name,
+                messages_policy=_messages_policy_to_proto(messages_policy),
+                debug_policy=_debug_policy_to_proto(debug_policy),
+            ),
         )
-        return MeshGroupPolicy(**data)
-
-
-class MeshCredentials:
-    def __init__(self, http: _MeshHttp):
-        self._http = http
-
-    def issue_runtime_credential(
-        self, network_id: str
-    ) -> MeshRuntimeCredential:
-        data = self._http.json(
-            "POST",
-            f"/api/v1/network-auth/runtime/client?network_id={quote(network_id, safe='')}",
+        return _policy_from_proto(
+            _message(response, "policy", "set group policy")
         )
-        return MeshRuntimeCredential(**data)
-
-    def fetch_verifier_bundle(self, network_id: str) -> MeshVerifierBundle:
-        data = self._http.json(
-            "GET",
-            f"/api/v1/network-auth/bundle?network_id={quote(network_id, safe='')}",
-        )
-        keys = [MeshVerifierKey(**k) for k in data.get("keys", [])]
-        return MeshVerifierBundle(
-            network_id=data["network_id"],
-            issuer=data["issuer"],
-            keys=keys,
-            version=int(data.get("version", 0)),
-            expires_at=data.get("expires_at", ""),
-        )
-
-    def issue_node_runtime_credential(
-        self, node_token: str
-    ) -> MeshRuntimeCredential:
-        """Runtime credential using node auth instead of client auth."""
-        data = self._http.json(
-            "POST", "/api/v1/network-auth/runtime/node", token=node_token
-        )
-        return MeshRuntimeCredential(**data)
-
-    def issue_sender_delegation(
-        self,
-        node_token: str,
-        source_node: str,
-        *,
-        from_session_id: int | None = None,
-        from_session_name: str = "",
-        verbs: Iterable[str] | None = None,
-        audience_node: str = "",
-    ) -> MeshSenderDelegation:
-        body: dict[str, Any] = {
-            "source_node": source_node,
-            "verbs": list(verbs or []),
-        }
-        if from_session_id is not None:
-            body["from_session_id"] = from_session_id
-        if from_session_name:
-            body["from_session_name"] = from_session_name
-        if audience_node:
-            body["audience_node"] = audience_node
-        data = self._http.json(
-            "POST",
-            "/api/v1/network-auth/delegation/node",
-            body=body,
-            token=node_token,
-        )
-        return MeshSenderDelegation(**data)
 
 
 class MeshKV:
-    def __init__(self, http: _MeshHttp):
-        self._http = http
+    def __init__(
+        self,
+        transport: ConnectTransport,
+        client: MeshKeyValueServiceClientSync,
+    ) -> None:
+        self._transport = transport
+        self._client = client
 
     def set(
         self,
+        org_id: str,
         network_id: str,
         namespace: str,
         key: str,
         value: bytes | str,
         *,
-        ttl: str | None = None,
-    ) -> None:
-        path = (
-            f"/api/v1/kv/{quote(namespace, safe='')}/{quote(key, safe='')}"
-            f"?network_id={quote(network_id, safe='')}"
+        ttl_seconds: int | None = None,
+    ) -> MeshKVEntry:
+        request = mesh_kv_pb2.SetMeshKeyValueRequest(
+            org_id=org_id,
+            network_id=network_id,
+            namespace=namespace,
+            key=key,
+            value=value.encode("utf-8") if isinstance(value, str) else value,
         )
-        raw = value.encode("utf-8") if isinstance(value, str) else value
-        headers = {"X-TTL": ttl} if ttl else None
-        self._http.request(
-            "PUT",
-            path,
-            raw_body=raw,
-            content_type="application/octet-stream",
-            extra_headers=headers,
+        ttl = _duration("key value ttl_seconds", ttl_seconds)
+        if ttl is not None:
+            request.ttl.CopyFrom(ttl)
+        response = _unary(
+            self._transport,
+            self._client.set_mesh_key_value,
+            request,
+        )
+        return _entry_from_proto(
+            _message(response, "entry", "set key value")
         )
 
-    def get(self, network_id: str, namespace: str, key: str) -> bytes:
-        path = (
-            f"/api/v1/kv/{quote(namespace, safe='')}/{quote(key, safe='')}"
-            f"?network_id={quote(network_id, safe='')}"
+    def get(
+        self,
+        org_id: str,
+        network_id: str,
+        namespace: str,
+        key: str,
+    ) -> MeshKVEntry:
+        response = _unary(
+            self._transport,
+            self._client.get_mesh_key_value,
+            mesh_kv_pb2.GetMeshKeyValueRequest(
+                org_id=org_id,
+                network_id=network_id,
+                namespace=namespace,
+                key=key,
+            ),
         )
-        resp = self._http.request("GET", path)
-        return resp.content
+        return _entry_from_proto(
+            _message(response, "entry", "get key value")
+        )
 
     def list(
-        self, network_id: str, namespace: str, prefix: str = ""
+        self,
+        org_id: str,
+        network_id: str,
+        namespace: str,
+        prefix: str = "",
     ) -> list[MeshKVEntry]:
-        path = (
-            f"/api/v1/kv/{quote(namespace, safe='')}"
-            f"?prefix={quote(prefix, safe='')}"
-            f"&network_id={quote(network_id, safe='')}"
+        entries: list[MeshKVEntry] = []
+        page_token = ""
+        while True:
+            response = _unary(
+                self._transport,
+                self._client.list_mesh_key_values,
+                mesh_kv_pb2.ListMeshKeyValuesRequest(
+                    org_id=org_id,
+                    network_id=network_id,
+                    namespace=namespace,
+                    prefix=prefix,
+                    page_token=page_token,
+                ),
+            )
+            entries.extend(
+                _entry_from_proto(entry) for entry in response.entries
+            )
+            page_token = response.next_page_token
+            if not page_token:
+                return entries
+
+    def delete(
+        self,
+        org_id: str,
+        network_id: str,
+        namespace: str,
+        key: str,
+    ) -> None:
+        _unary(
+            self._transport,
+            self._client.delete_mesh_key_value,
+            mesh_kv_pb2.DeleteMeshKeyValueRequest(
+                org_id=org_id,
+                network_id=network_id,
+                namespace=namespace,
+                key=key,
+            ),
         )
-        rows = self._http.json("GET", path) or []
-        return [MeshKVEntry(**row) for row in rows]
-
-    def delete(self, network_id: str, namespace: str, key: str) -> None:
-        path = (
-            f"/api/v1/kv/{quote(namespace, safe='')}/{quote(key, safe='')}"
-            f"?network_id={quote(network_id, safe='')}"
-        )
-        self._http.json("DELETE", path)
-
-
-def _group_from_dict(data: dict[str, Any]) -> MeshGroup:
-    members = [
-        MeshGroupMember(**m) for m in (data.get("members") or [])
-    ] or None
-    policy_data = data.get("policy")
-    policy = MeshGroupPolicy(**policy_data) if policy_data else None
-    return MeshGroup(
-        network_id=data["network_id"],
-        name=data["name"],
-        created_at=data.get("created_at", ""),
-        created_by=data.get("created_by", ""),
-        members=members,
-        policy=policy,
-    )
 
 
 # -- Client -------------------------------------------------------------------
 
 
 class MeshClient:
-    """Client for the Codewire mesh API.
-
-    The mesh speaks a separate HTTP API from the platform; construct this with
-    a mesh URL + auth token (not the Codewire API key).
-    """
+    """One ergonomic façade over the generated Mesh Connect clients."""
 
     def __init__(
         self,
@@ -513,23 +798,44 @@ class MeshClient:
         *,
         timeout: float = 30,
         http_client: httpx.Client | None = None,
-    ):
-        self._http = _MeshHttp(
-            mesh_url,
+    ) -> None:
+        self._base_url = mesh_url.rstrip("/")
+        self._owns_http_client = http_client is None
+        self._http_client = http_client or httpx.Client(timeout=timeout)
+        self._transport = ConnectTransport(
+            self._base_url,
             auth_token,
             timeout=timeout,
-            http_client=http_client,
+            http_client=self._http_client,
         )
-        self.networks = MeshNetworks(self._http)
-        self.nodes = MeshNodes(self._http)
-        self.groups = MeshGroups(self._http)
-        self.credentials = MeshCredentials(self._http)
-        self.kv = MeshKV(self._http)
+        self._network_client = self._transport.client(
+            MeshNetworkServiceClientSync
+        )
+        self._node_client = self._transport.client(MeshNodeServiceClientSync)
+        self._group_client = self._transport.client(MeshGroupServiceClientSync)
+        self._kv_client = self._transport.client(
+            MeshKeyValueServiceClientSync
+        )
+        self.networks = MeshNetworks(self._transport, self._network_client)
+        self.nodes = MeshNodes(
+            self._transport,
+            self._node_client,
+            self._base_url,
+            self._http_client,
+        )
+        self.groups = MeshGroups(self._transport, self._group_client)
+        self.kv = MeshKV(self._transport, self._kv_client)
+        assert_mesh_converter_coverage()
 
     def close(self) -> None:
-        self._http.close()
+        self._network_client.close()
+        self._node_client.close()
+        self._group_client.close()
+        self._kv_client.close()
+        if self._owns_http_client:
+            self._http_client.close()
 
-    def __enter__(self) -> "MeshClient":
+    def __enter__(self) -> MeshClient:
         return self
 
     def __exit__(self, *args: object) -> None:

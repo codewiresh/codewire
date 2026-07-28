@@ -912,7 +912,7 @@ MESH_EXPECTED_ROUTER_SHA256 = (
     "f2f3b3e83dfb54682f64c8f475cba9af79deba2fcb09b5d89c0fba173a106120"
 )
 MESH_EXPECTED_SEMANTICS_SHA256 = (
-    "a7efaa098c45b1819953472db4a718907bac7a2013ea96672fe22a050cdaf9db"
+    "bc6655ba2c23cffd36d7b1328023d6db42fe5d72d279ee4eb0f3b2a36437ff6e"
 )
 MESH_EXPECTED_COUNTS = {
     "route_registrations": 37,
@@ -925,7 +925,7 @@ MESH_EXPECTED_COUNTS = {
         "ci-smoke": 0,
         "go-sdk": 1,
         "node-runtime": 0,
-        "python-sdk": 17,
+        "python-sdk": 1,
         "rust-cli": 9,
         "rust-client": 0,
         "rust-tailnet": 0,
@@ -936,7 +936,7 @@ MESH_EXPECTED_COUNTS = {
         "ci-smoke": 0,
         "go-sdk": 0,
         "node-runtime": 0,
-        "python-sdk": 4,
+        "python-sdk": 0,
         "rust-cli": 0,
         "rust-client": 0,
         "rust-tailnet": 0,
@@ -962,10 +962,10 @@ MESH_EXPECTED_COUNTS = {
         "codewire.v1": 21,
         "none": 9,
     },
-    "operations_without_callers": 7,
-    "wrapper_declaration_records": 4,
-    "client_url_template_records": 26,
-    "client_url_template_occurrences": 35,
+    "operations_without_callers": 18,
+    "wrapper_declaration_records": 0,
+    "client_url_template_records": 10,
+    "client_url_template_occurrences": 15,
 }
 MESH_EXPECTED_CONNECT_METHODS = {
     "MESH_NETWORK_SERVICE_SERVICE_NAME": {
@@ -998,12 +998,6 @@ MESH_EXPECTED_CONNECT_METHODS = {
         "ListMeshKeyValues",
         "SetMeshKeyValue",
     },
-}
-MESH_DECLARATION_ONLY_OPERATIONS = {
-    ("get", "/api/v1/network-auth/bundle"),
-    ("post", "/api/v1/network-auth/delegation/node"),
-    ("post", "/api/v1/network-auth/runtime/client"),
-    ("post", "/api/v1/network-auth/runtime/node"),
 }
 MESH_HTTP_METHODS = {"delete", "get", "head", "options", "patch", "post", "put"}
 MESH_CALLER_CLASSES = {
@@ -1416,18 +1410,17 @@ def mesh_surface_failures(
                 f"{label} must bind exactly one declaration-owned URL template"
             )
 
-    if set(wrapper_callers_by_operation) != MESH_DECLARATION_ONLY_OPERATIONS:
+    if wrapper_callers_by_operation:
         failures.append(
-            "wrapper_declarations must cover exactly the four declaration-only "
-            "credential operations"
+            "wrapper_declarations must remain empty after all shipped "
+            "credential-only SDK declarations were deleted"
         )
-    expected_wrapper_callers = {"python-sdk"}
     for operation_key, callers in wrapper_callers_by_operation.items():
-        if callers != expected_wrapper_callers:
+        if callers:
             failures.append(
                 "wrapper_declarations for "
-                f"{operation_key[0].upper()} {operation_key[1]} must cover exactly "
-                "the remaining Python SDK wrapper"
+                f"{operation_key[0].upper()} {operation_key[1]} must have no "
+                "remaining SDK wrapper"
             )
 
     actual_semantic_counts = {
@@ -1589,7 +1582,7 @@ def mesh_network_ownership_failures(
     operation_details: dict[tuple[str, str], dict[str, Any]],
 ) -> None:
     """Keep the WI-5 shared REST/Connect ownership boundary explicit."""
-    expected_callers = ["rust-cli", "python-sdk"]
+    expected_callers = ["rust-cli"]
     for method in ("get", "post"):
         operation = operation_details.get((method, "/api/v1/networks"))
         if operation is None:
@@ -1671,7 +1664,10 @@ def mesh_network_ownership_failures(
         "libs/sdk-python/codewire/mesh.py": (
             "def create(self, org_id: str, network_id: str)",
             "def list(self, org_id: str)",
-            "org_id={quote(org_id, safe='')}",
+            "MeshNetworkServiceClientSync",
+            "mesh_network_pb2.CreateMeshNetworkRequest(",
+            "mesh_network_pb2.ListMeshNetworksRequest(",
+            "org_id=org_id, network_id=network_id",
         ),
     }
     for source, fragments in required_clients.items():
@@ -1681,6 +1677,27 @@ def mesh_network_ownership_failures(
                 failures.append(
                     f"Mesh network direct caller {source} lost explicit organization input {fragment!r}"
                 )
+    python_source = client_sources.get(
+        "libs/sdk-python/codewire/mesh.py", ("", "")
+    )[1]
+    forbidden_python_fragments = (
+        "class _MeshHttp",
+        "class MeshCredentials",
+        "class MeshRuntimeCredential",
+        "class MeshVerifierKey",
+        "class MeshVerifierBundle",
+        "class MeshSenderDelegation",
+        "issue_runtime_credential",
+        "fetch_verifier_bundle",
+        "issue_node_runtime_credential",
+        "issue_sender_delegation",
+    )
+    for fragment in forbidden_python_fragments:
+        if fragment in python_source:
+            failures.append(
+                "Python Mesh generated-client wrapper restored deleted "
+                f"credential or general HTTP shape {fragment!r}"
+            )
 
 
 def mesh_production_sources() -> dict[str, str]:
@@ -2490,11 +2507,11 @@ def mesh_surface_self_test(
         declaration_as_caller,
     )
     if not any(
-        "declaration-only operation must have no shipped callers" in failure
+        "semantic count drift" in failure
         for failure in declaration_as_caller_failures
     ):
         raise RuntimeError(
-            "self-test accepted a wrapper declaration as a shipped caller"
+            "self-test accepted a caller on a declaration-only operation"
         )
 
     reverted_disposition = copy.deepcopy(inventory)
@@ -2511,30 +2528,37 @@ def mesh_surface_self_test(
         reverted_disposition,
     )
     if not any(
-        "declaration-only operation must be a delete with null package" in failure
+        "semantic count drift" in failure
         for failure in reverted_disposition_failures
     ):
         raise RuntimeError(
-            "self-test accepted a reverted credential-route disposition"
+            "self-test accepted a changed credential-route disposition"
         )
 
-    consumer_sources = copy.deepcopy(client_sources)
-    consumer_sources["libs/sdk-python/codewire/declaration_consumer.py"] = (
-        "python-sdk",
-        "from .mesh import MeshCredentials\n"
-        "fetch = MeshCredentials.fetch_verifier_bundle\n",
+    restored_python_wrapper_sources = copy.deepcopy(client_sources)
+    caller, python_source = restored_python_wrapper_sources[
+        "libs/sdk-python/codewire/mesh.py"
+    ]
+    restored_python_wrapper_sources["libs/sdk-python/codewire/mesh.py"] = (
+        caller,
+        python_source
+        + "\nclass MeshCredentials:\n"
+        + "    def fetch_verifier_bundle(self):\n"
+        + "        return None\n",
     )
-    consumer_failures = mesh_surface_failures(
+    restored_python_wrapper_failures = mesh_surface_failures(
         mesh_sources,
-        consumer_sources,
+        restored_python_wrapper_sources,
         copy.deepcopy(inventory),
     )
     if not any(
-        "declaration-only symbol 'fetch_verifier_bundle' must occur exactly once"
+        "Python Mesh generated-client wrapper restored deleted credential"
         in failure
-        for failure in consumer_failures
+        for failure in restored_python_wrapper_failures
     ):
-        raise RuntimeError("self-test accepted a non-wrapper production consumer")
+        raise RuntimeError(
+            "self-test accepted a restored Python credential wrapper"
+        )
 
 
 # ---------------------------------------------------------------------------

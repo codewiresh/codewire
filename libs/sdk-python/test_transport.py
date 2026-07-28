@@ -2,13 +2,23 @@
 
 from __future__ import annotations
 
+import io
 import json
+import sys
+import threading
 import unittest
 from collections.abc import Iterator
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import codewire
-import httpx
-from codewire.mesh import MeshClient
+from codewire.mesh import (
+    MeshClient,
+    _debug_policy_from_proto,
+    _debug_policy_to_proto,
+    _messages_policy_from_proto,
+    _messages_policy_to_proto,
+    assert_mesh_converter_coverage,
+)
 from connectrpc.client import ConnectClientSync
 from connectrpc.code import Code
 from connectrpc.errors import ConnectError, ErrorDetail
@@ -32,6 +42,43 @@ from codewire.v1.environment_pb2 import (
     EnvironmentState,
 )
 from codewire.v1.file_pb2 import FileEntry
+from codewire.v1.mesh_group_connect import MeshGroupServiceWSGIApplication
+from codewire.v1.mesh_group_pb2 import (
+    AddMeshGroupMemberResponse,
+    CreateMeshGroupResponse,
+    DeleteMeshGroupResponse,
+    GetMeshGroupResponse,
+    ListMeshGroupsResponse,
+    MeshGroup,
+    MeshGroupDebugPolicy,
+    MeshGroupMember,
+    MeshGroupMessagesPolicy,
+    MeshGroupPolicy,
+    RemoveMeshGroupMemberResponse,
+    SetMeshGroupPolicyResponse,
+)
+from codewire.v1.mesh_kv_connect import MeshKeyValueServiceWSGIApplication
+from codewire.v1.mesh_kv_pb2 import (
+    DeleteMeshKeyValueResponse,
+    GetMeshKeyValueResponse,
+    ListMeshKeyValuesResponse,
+    MeshKeyValue,
+    SetMeshKeyValueResponse,
+)
+from codewire.v1.mesh_network_connect import MeshNetworkServiceWSGIApplication
+from codewire.v1.mesh_network_pb2 import (
+    CreateMeshNetworkResponse,
+    ListMeshNetworksResponse,
+    MeshNetwork,
+)
+from codewire.v1.mesh_node_connect import MeshNodeServiceWSGIApplication
+from codewire.v1.mesh_node_pb2 import (
+    CreateMeshNodeEnrollmentResponse,
+    ListMeshNodesResponse,
+    MeshNode,
+    MeshNodeEnrollment,
+    RevokeMeshNodeResponse,
+)
 from codewire.v1.port_pb2 import Port, PortAccess
 from codewire.v1.preset_pb2 import Preset
 
@@ -395,50 +442,686 @@ class TransportTestCase(unittest.TestCase):
                 )
 
 
-class MeshNetworkTransportTestCase(unittest.TestCase):
-    def test_network_calls_transmit_an_exact_explicit_organization(self) -> None:
-        requests: list[httpx.Request] = []
+MESH_ORG_ID = "org-exact"
+MESH_NETWORK_ID = "network-exact"
+MESH_CREATED_AT = Timestamp()
+MESH_CREATED_AT.FromJsonString("2026-04-01T00:00:00Z")
+MESH_UPDATED_AT = Timestamp()
+MESH_UPDATED_AT.FromJsonString("2026-04-01T01:00:00Z")
+MESH_EXPIRES_AT = Timestamp()
+MESH_EXPIRES_AT.FromJsonString("2026-04-02T00:00:00Z")
+MESH_REDEEMED_AT = Timestamp()
+MESH_REDEEMED_AT.FromJsonString("2026-04-01T02:00:00Z")
 
-        def handler(request: httpx.Request) -> httpx.Response:
-            requests.append(request)
-            if request.method == "POST":
-                return httpx.Response(200, request=request)
-            return httpx.Response(
-                200,
-                request=request,
-                json=[
-                    {
-                        "id": "network-one",
-                        "org_id": "org space/one",
-                        "created_at": "2026-01-01T00:00:00Z",
-                        "node_count": 0,
-                        "invite_count": 0,
-                    }
+
+class MeshServiceFixture:
+    calls: set[str] = set()
+    raw_authorization: str | None = None
+
+    @classmethod
+    def reset(cls) -> None:
+        cls.calls = set()
+        cls.raw_authorization = None
+
+    @classmethod
+    def _record(
+        cls,
+        operation: str,
+        request: object,
+        ctx: object,
+        *,
+        network: bool = False,
+    ) -> None:
+        cls.calls.add(operation)
+        request_headers = getattr(ctx, "request_headers")
+        if request_headers.get("authorization") != "Bearer cw_mesh_test":
+            raise ConnectError(Code.UNAUTHENTICATED, "unauthorized")
+        if getattr(request, "org_id") != MESH_ORG_ID:
+            raise ConnectError(Code.NOT_FOUND, "organization not found")
+        if network and getattr(request, "network_id") != MESH_NETWORK_ID:
+            raise ConnectError(Code.NOT_FOUND, "network not found")
+
+    @staticmethod
+    def _network(network_id: str = MESH_NETWORK_ID) -> MeshNetwork:
+        return MeshNetwork(
+            id=network_id,
+            org_id=MESH_ORG_ID,
+            created_at=MESH_CREATED_AT,
+            node_count=7,
+            invite_count=3,
+        )
+
+    @staticmethod
+    def _node(name: str) -> MeshNode:
+        return MeshNode(
+            org_id=MESH_ORG_ID,
+            network_id=MESH_NETWORK_ID,
+            name=name,
+            peer_url=f"https://peer.example/{name}",
+            connected=True,
+        )
+
+    @staticmethod
+    def _member() -> MeshGroupMember:
+        return MeshGroupMember(
+            org_id=MESH_ORG_ID,
+            network_id=MESH_NETWORK_ID,
+            group_name="group-one",
+            node_name="node-one",
+            session_name="session-one",
+            created_at=MESH_CREATED_AT,
+        )
+
+    @classmethod
+    def _policy(
+        cls,
+        messages_policy: int,
+        debug_policy: int,
+    ) -> MeshGroupPolicy:
+        return MeshGroupPolicy(
+            org_id=MESH_ORG_ID,
+            network_id=MESH_NETWORK_ID,
+            group_name="group-one",
+            messages_policy=messages_policy,
+            debug_policy=debug_policy,
+            updated_at=MESH_UPDATED_AT,
+        )
+
+    @classmethod
+    def _group(
+        cls,
+        name: str,
+        messages_policy: int = MeshGroupMessagesPolicy.MESH_GROUP_MESSAGES_POLICY_OPEN,
+        debug_policy: int = MeshGroupDebugPolicy.MESH_GROUP_DEBUG_POLICY_FULL,
+    ) -> MeshGroup:
+        return MeshGroup(
+            org_id=MESH_ORG_ID,
+            network_id=MESH_NETWORK_ID,
+            name=name,
+            created_at=MESH_CREATED_AT,
+            created_by_user_id="creator-user",
+            members=[cls._member()],
+            policy=cls._policy(messages_policy, debug_policy),
+        )
+
+    @staticmethod
+    def _entry(key: str) -> MeshKeyValue:
+        return MeshKeyValue(
+            org_id=MESH_ORG_ID,
+            network_id=MESH_NETWORK_ID,
+            namespace="namespace-one",
+            key=key,
+            value=b"\x00\x01\x02\xff",
+            expires_at=MESH_EXPIRES_AT,
+        )
+
+    def list_mesh_networks(self, request, ctx):
+        self._record("ListMeshNetworks", request, ctx)
+        if not request.page_token:
+            return ListMeshNetworksResponse(
+                networks=[self._network("network-one")],
+                next_page_token="network-page-two",
+            )
+        if request.page_token != "network-page-two":
+            raise ConnectError(Code.INVALID_ARGUMENT, "bad network page")
+        return ListMeshNetworksResponse(
+            networks=[self._network("network-two")]
+        )
+
+    def create_mesh_network(self, request, ctx):
+        self._record("CreateMeshNetwork", request, ctx)
+        if request.network_id == "reject-me":
+            raise ConnectError(
+                Code.INVALID_ARGUMENT,
+                "invalid network",
+                [
+                    _connect_detail(
+                        ErrorInfo(metadata={"request_id": "req_mesh"})
+                    )
                 ],
             )
+        if request.network_id != MESH_NETWORK_ID:
+            raise ConnectError(Code.INVALID_ARGUMENT, "wrong network")
+        return CreateMeshNetworkResponse(network=self._network())
 
-        http_client = httpx.Client(
-            base_url="https://mesh.example",
-            transport=httpx.MockTransport(handler),
+    def join_mesh_network(self, request, ctx):
+        raise ConnectError(Code.UNIMPLEMENTED, "not exercised by WI-7C")
+
+    def list_mesh_nodes(self, request, ctx):
+        self._record("ListMeshNodes", request, ctx, network=True)
+        if not request.page_token:
+            return ListMeshNodesResponse(
+                nodes=[self._node("node-one")],
+                next_page_token="node-page-two",
+            )
+        if request.page_token != "node-page-two":
+            raise ConnectError(Code.INVALID_ARGUMENT, "bad node page")
+        return ListMeshNodesResponse(nodes=[self._node("node-two")])
+
+    def revoke_mesh_node(self, request, ctx):
+        self._record("RevokeMeshNode", request, ctx, network=True)
+        if request.node_name != "node-one":
+            raise ConnectError(Code.INVALID_ARGUMENT, "wrong node")
+        return RevokeMeshNodeResponse()
+
+    def create_mesh_node_enrollment(self, request, ctx):
+        self._record(
+            "CreateMeshNodeEnrollment", request, ctx, network=True
         )
-        client = MeshClient(
-            "https://mesh.example/", "cw_mesh_test", http_client=http_client
+        if (
+            request.node_name != "node-one"
+            or not request.HasField("ttl")
+            or request.ttl.seconds != 1_020
+            or request.ttl.nanos != 0
+        ):
+            raise ConnectError(Code.INVALID_ARGUMENT, "wrong enrollment")
+        return CreateMeshNodeEnrollmentResponse(
+            enrollment=MeshNodeEnrollment(
+                id="enrollment-one",
+                org_id=MESH_ORG_ID,
+                network_id=MESH_NETWORK_ID,
+                node_name="node-one",
+                owner_user_id="owner-user",
+                issued_by_user_id="issuer-user",
+                expires_at=MESH_EXPIRES_AT,
+                created_at=MESH_CREATED_AT,
+                redeemed_at=MESH_REDEEMED_AT,
+            ),
+            enrollment_code="secret-one-use-code",
         )
+
+    def redeem_mesh_node_enrollment(self, request, ctx):
+        raise ConnectError(
+            Code.INTERNAL,
+            "redemption must remain on the isolated raw route",
+        )
+
+    def list_mesh_groups(self, request, ctx):
+        self._record("ListMeshGroups", request, ctx, network=True)
+        if not request.page_token:
+            return ListMeshGroupsResponse(
+                groups=[self._group("group-one")],
+                next_page_token="group-page-two",
+            )
+        if request.page_token != "group-page-two":
+            raise ConnectError(Code.INVALID_ARGUMENT, "bad group page")
+        return ListMeshGroupsResponse(
+            groups=[
+                self._group(
+                    "group-two",
+                    MeshGroupMessagesPolicy.MESH_GROUP_MESSAGES_POLICY_INTERNAL_ONLY,
+                    MeshGroupDebugPolicy.MESH_GROUP_DEBUG_POLICY_NONE,
+                ),
+                self._group(
+                    "group-three",
+                    MeshGroupMessagesPolicy.MESH_GROUP_MESSAGES_POLICY_UNSPECIFIED,
+                    MeshGroupDebugPolicy.MESH_GROUP_DEBUG_POLICY_OBSERVE_ONLY,
+                ),
+                self._group(
+                    "group-four",
+                    MeshGroupMessagesPolicy.MESH_GROUP_MESSAGES_POLICY_OPEN,
+                    MeshGroupDebugPolicy.MESH_GROUP_DEBUG_POLICY_UNSPECIFIED,
+                ),
+            ]
+        )
+
+    def create_mesh_group(self, request, ctx):
+        self._record("CreateMeshGroup", request, ctx, network=True)
+        return CreateMeshGroupResponse(group=self._group(request.name))
+
+    def get_mesh_group(self, request, ctx):
+        self._record("GetMeshGroup", request, ctx, network=True)
+        return GetMeshGroupResponse(group=self._group(request.group_name))
+
+    def delete_mesh_group(self, request, ctx):
+        self._record("DeleteMeshGroup", request, ctx, network=True)
+        return DeleteMeshGroupResponse()
+
+    def set_mesh_group_policy(self, request, ctx):
+        self._record("SetMeshGroupPolicy", request, ctx, network=True)
+        return SetMeshGroupPolicyResponse(
+            policy=self._policy(
+                request.messages_policy, request.debug_policy
+            )
+        )
+
+    def add_mesh_group_member(self, request, ctx):
+        self._record("AddMeshGroupMember", request, ctx, network=True)
+        if (
+            request.group_name,
+            request.node_name,
+            request.session_name,
+        ) != ("group-one", "node-one", "session-one"):
+            raise ConnectError(Code.INVALID_ARGUMENT, "wrong member")
+        return AddMeshGroupMemberResponse(member=self._member())
+
+    def remove_mesh_group_member(self, request, ctx):
+        self._record("RemoveMeshGroupMember", request, ctx, network=True)
+        return RemoveMeshGroupMemberResponse()
+
+    def list_mesh_key_values(self, request, ctx):
+        self._record("ListMeshKeyValues", request, ctx, network=True)
+        if (request.namespace, request.prefix) != ("namespace-one", "key"):
+            raise ConnectError(Code.INVALID_ARGUMENT, "wrong key prefix")
+        if not request.page_token:
+            return ListMeshKeyValuesResponse(
+                entries=[self._entry("key-one")],
+                next_page_token="kv-page-two",
+            )
+        if request.page_token != "kv-page-two":
+            raise ConnectError(Code.INVALID_ARGUMENT, "bad key page")
+        return ListMeshKeyValuesResponse(entries=[self._entry("key-two")])
+
+    def get_mesh_key_value(self, request, ctx):
+        self._record("GetMeshKeyValue", request, ctx, network=True)
+        return GetMeshKeyValueResponse(entry=self._entry(request.key))
+
+    def set_mesh_key_value(self, request, ctx):
+        self._record("SetMeshKeyValue", request, ctx, network=True)
+        if (
+            request.namespace != "namespace-one"
+            or request.key != "key-one"
+            or request.value != b"\x00\x01\x02\xff"
+            or not request.HasField("ttl")
+            or request.ttl.seconds != 23
+            or request.ttl.nanos != 0
+        ):
+            raise ConnectError(Code.INVALID_ARGUMENT, "wrong key value")
+        return SetMeshKeyValueResponse(entry=self._entry(request.key))
+
+    def delete_mesh_key_value(self, request, ctx):
+        self._record("DeleteMeshKeyValue", request, ctx, network=True)
+        return DeleteMeshKeyValueResponse()
+
+
+MESH_FIXTURE = MeshServiceFixture()
+MESH_CONNECT_APPS = {
+    "/codewire.v1.MeshNetworkService/": MeshNetworkServiceWSGIApplication(
+        MESH_FIXTURE
+    ),
+    "/codewire.v1.MeshNodeService/": MeshNodeServiceWSGIApplication(
+        MESH_FIXTURE
+    ),
+    "/codewire.v1.MeshGroupService/": MeshGroupServiceWSGIApplication(
+        MESH_FIXTURE
+    ),
+    "/codewire.v1.MeshKeyValueService/": MeshKeyValueServiceWSGIApplication(
+        MESH_FIXTURE
+    ),
+}
+
+
+class MeshHandler(BaseHTTPRequestHandler):
+    def log_message(self, *args):
+        pass
+
+    def _read_body(self) -> bytes:
+        return self.rfile.read(int(self.headers.get("Content-Length", 0)))
+
+    def _serve_connect(self) -> None:
+        path, _, query = self.path.partition("?")
+        app = next(
+            (
+                candidate
+                for prefix, candidate in MESH_CONNECT_APPS.items()
+                if path.startswith(prefix)
+            ),
+            None,
+        )
+        if app is None:
+            self.send_error(404)
+            return
+        body = self._read_body()
+        environ = {
+            "REQUEST_METHOD": self.command,
+            "SCRIPT_NAME": "",
+            "PATH_INFO": path,
+            "QUERY_STRING": query,
+            "SERVER_NAME": self.server.server_address[0],
+            "SERVER_PORT": str(self.server.server_address[1]),
+            "SERVER_PROTOCOL": self.request_version,
+            "wsgi.version": (1, 0),
+            "wsgi.url_scheme": "http",
+            "wsgi.input": io.BytesIO(body),
+            "wsgi.errors": sys.stderr,
+            "wsgi.multithread": False,
+            "wsgi.multiprocess": False,
+            "wsgi.run_once": False,
+        }
+        for name, value in self.headers.items():
+            key = name.upper().replace("-", "_")
+            environ[
+                key
+                if key in {"CONTENT_LENGTH", "CONTENT_TYPE"}
+                else f"HTTP_{key}"
+            ] = value
+        response: dict[str, object] = {}
+
+        def start_response(status, headers, exc_info=None):
+            response["status"] = status
+            response["headers"] = headers
+
+        chunks = app(environ, start_response)
         try:
-            client.networks.create("org space/one", "network-one")
-            networks = client.networks.list("org space/one")
+            response_body = b"".join(chunks)
         finally:
-            client.close()
-            http_client.close()
+            close = getattr(chunks, "close", None)
+            if close is not None:
+                close()
+        self.send_response(int(str(response["status"]).split(" ", 1)[0]))
+        for name, value in response["headers"]:
+            self.send_header(name, value)
+        self.end_headers()
+        self.wfile.write(response_body)
 
-        self.assertEqual(len(requests), 2)
-        self.assertEqual(requests[0].method, "POST")
-        self.assertEqual(requests[0].url.path, "/api/v1/networks")
-        self.assertEqual(requests[0].headers["authorization"], "Bearer cw_mesh_test")
-        self.assertEqual(
-            json.loads(requests[0].content),
-            {"org_id": "org space/one", "network_id": "network-one"},
+    def do_POST(self) -> None:
+        path = self.path.partition("?")[0]
+        if path == "/api/v1/node-enrollments/redeem":
+            MeshServiceFixture.calls.add("RedeemEnrollmentRaw")
+            MeshServiceFixture.raw_authorization = self.headers.get(
+                "Authorization"
+            )
+            body = json.loads(self._read_body())
+            if body != {
+                "enrollment_token": "secret-enrollment",
+                "node_name": "node-one",
+            }:
+                self.send_error(400)
+                return
+            response = json.dumps(
+                {
+                    "node_token": "legacy-node-token",
+                    "node_name": "node-one",
+                    "network_id": MESH_NETWORK_ID,
+                    "enrollment_id": "enrollment-one",
+                }
+            ).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(response)))
+            self.end_headers()
+            self.wfile.write(response)
+            return
+        self._serve_connect()
+
+
+class MeshConnectTransportTestCase(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        MeshServiceFixture.reset()
+        cls.server = HTTPServer(("127.0.0.1", 0), MeshHandler)
+        cls.thread = threading.Thread(target=cls.server.serve_forever)
+        cls.thread.daemon = True
+        cls.thread.start()
+        cls.client = MeshClient(
+            f"http://127.0.0.1:{cls.server.server_address[1]}",
+            "cw_mesh_test",
         )
-        self.assertEqual(requests[1].method, "GET")
-        self.assertEqual(requests[1].url.params["org_id"], "org space/one")
-        self.assertEqual(networks[0].org_id, "org space/one")
+
+    def setUp(self) -> None:
+        MeshServiceFixture.reset()
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.client.close()
+        cls.server.shutdown()
+        cls.server.server_close()
+        cls.thread.join()
+
+    def test_generated_mesh_capabilities_and_golden_conversion(self) -> None:
+        created_network = self.client.networks.create(
+            MESH_ORG_ID, MESH_NETWORK_ID
+        )
+        self.assertEqual(
+            created_network,
+            codewire.MeshNetwork(
+                id=MESH_NETWORK_ID,
+                org_id=MESH_ORG_ID,
+                created_at="2026-04-01T00:00:00Z",
+                node_count=7,
+                invite_count=3,
+            ),
+        )
+        self.assertEqual(
+            [network.id for network in self.client.networks.list(MESH_ORG_ID)],
+            ["network-one", "network-two"],
+        )
+
+        nodes = self.client.nodes.list(MESH_ORG_ID, MESH_NETWORK_ID)
+        self.assertEqual([node.name for node in nodes], ["node-one", "node-two"])
+        self.assertEqual(nodes[0].org_id, MESH_ORG_ID)
+        self.assertEqual(nodes[0].network_id, MESH_NETWORK_ID)
+        self.assertEqual(
+            nodes[0].peer_url, "https://peer.example/node-one"
+        )
+        self.assertTrue(nodes[0].connected)
+        self.client.nodes.revoke(
+            MESH_ORG_ID, MESH_NETWORK_ID, "node-one"
+        )
+        enrollment = self.client.nodes.create_enrollment(
+            MESH_ORG_ID,
+            MESH_NETWORK_ID,
+            "node-one",
+            ttl_seconds=1_020,
+        )
+        self.assertEqual(enrollment.id, "enrollment-one")
+        self.assertEqual(enrollment.org_id, MESH_ORG_ID)
+        self.assertEqual(enrollment.network_id, MESH_NETWORK_ID)
+        self.assertEqual(enrollment.node_name, "node-one")
+        self.assertEqual(enrollment.owner_user_id, "owner-user")
+        self.assertEqual(enrollment.issued_by_user_id, "issuer-user")
+        self.assertEqual(enrollment.expires_at, "2026-04-02T00:00:00Z")
+        self.assertEqual(enrollment.created_at, "2026-04-01T00:00:00Z")
+        self.assertEqual(enrollment.redeemed_at, "2026-04-01T02:00:00Z")
+        self.assertEqual(enrollment.enrollment_code, "secret-one-use-code")
+
+        created_group = self.client.groups.create(
+            MESH_ORG_ID, MESH_NETWORK_ID, "group-one"
+        )
+        self.assertEqual(created_group.org_id, MESH_ORG_ID)
+        self.assertEqual(created_group.network_id, MESH_NETWORK_ID)
+        self.assertEqual(created_group.name, "group-one")
+        self.assertEqual(created_group.created_at, "2026-04-01T00:00:00Z")
+        self.assertEqual(created_group.created_by_user_id, "creator-user")
+        self.assertEqual(len(created_group.members), 1)
+        self.assertEqual(
+            created_group.members[0],
+            codewire.MeshGroupMember(
+                org_id=MESH_ORG_ID,
+                network_id=MESH_NETWORK_ID,
+                group_name="group-one",
+                node_name="node-one",
+                session_name="session-one",
+                created_at="2026-04-01T00:00:00Z",
+            ),
+        )
+        self.assertIsNotNone(created_group.policy)
+        self.assertEqual(created_group.policy.messages_policy, "open")
+        self.assertEqual(created_group.policy.debug_policy, "full")
+        self.assertEqual(
+            created_group.policy.updated_at, "2026-04-01T01:00:00Z"
+        )
+        groups = self.client.groups.list(MESH_ORG_ID, MESH_NETWORK_ID)
+        self.assertEqual(
+            [
+                (group.policy.messages_policy, group.policy.debug_policy)
+                for group in groups
+            ],
+            [
+                ("open", "full"),
+                ("internal-only", "none"),
+                ("", "observe-only"),
+                ("open", ""),
+            ],
+        )
+        self.assertEqual(
+            self.client.groups.get(
+                MESH_ORG_ID, MESH_NETWORK_ID, "group-one"
+            ).name,
+            "group-one",
+        )
+        member = self.client.groups.add_member(
+            MESH_ORG_ID,
+            MESH_NETWORK_ID,
+            "group-one",
+            "node-one",
+            "session-one",
+        )
+        self.assertEqual(member.group_name, "group-one")
+        self.client.groups.remove_member(
+            MESH_ORG_ID,
+            MESH_NETWORK_ID,
+            "group-one",
+            "node-one",
+            "session-one",
+        )
+        policy = self.client.groups.set_policy(
+            MESH_ORG_ID,
+            MESH_NETWORK_ID,
+            "group-one",
+            "internal-only",
+            "observe-only",
+        )
+        self.assertEqual(policy.messages_policy, "internal-only")
+        self.assertEqual(policy.debug_policy, "observe-only")
+        self.client.groups.delete(
+            MESH_ORG_ID, MESH_NETWORK_ID, "group-one"
+        )
+
+        set_entry = self.client.kv.set(
+            MESH_ORG_ID,
+            MESH_NETWORK_ID,
+            "namespace-one",
+            "key-one",
+            b"\x00\x01\x02\xff",
+            ttl_seconds=23,
+        )
+        self.assertEqual(
+            set_entry,
+            codewire.MeshKVEntry(
+                org_id=MESH_ORG_ID,
+                network_id=MESH_NETWORK_ID,
+                namespace="namespace-one",
+                key="key-one",
+                value=b"\x00\x01\x02\xff",
+                expires_at="2026-04-02T00:00:00Z",
+            ),
+        )
+        self.assertEqual(
+            self.client.kv.get(
+                MESH_ORG_ID,
+                MESH_NETWORK_ID,
+                "namespace-one",
+                "key-one",
+            ),
+            set_entry,
+        )
+        self.assertEqual(
+            [
+                entry.key
+                for entry in self.client.kv.list(
+                    MESH_ORG_ID,
+                    MESH_NETWORK_ID,
+                    "namespace-one",
+                    "key",
+                )
+            ],
+            ["key-one", "key-two"],
+        )
+        self.client.kv.delete(
+            MESH_ORG_ID,
+            MESH_NETWORK_ID,
+            "namespace-one",
+            "key-one",
+        )
+
+        credentials = self.client.nodes.redeem_enrollment(
+            "secret-enrollment", "node-one"
+        )
+        self.assertEqual(credentials.node_token, "legacy-node-token")
+        self.assertEqual(credentials.network_id, MESH_NETWORK_ID)
+        self.assertIsNone(MeshServiceFixture.raw_authorization)
+
+        self.assertEqual(
+            MeshServiceFixture.calls,
+            {
+                "CreateMeshNetwork",
+                "ListMeshNetworks",
+                "ListMeshNodes",
+                "RevokeMeshNode",
+                "CreateMeshNodeEnrollment",
+                "CreateMeshGroup",
+                "ListMeshGroups",
+                "GetMeshGroup",
+                "DeleteMeshGroup",
+                "SetMeshGroupPolicy",
+                "AddMeshGroupMember",
+                "RemoveMeshGroupMember",
+                "SetMeshKeyValue",
+                "GetMeshKeyValue",
+                "ListMeshKeyValues",
+                "DeleteMeshKeyValue",
+                "RedeemEnrollmentRaw",
+            },
+        )
+
+    def test_connect_error_uses_the_canonical_sdk_shape(self) -> None:
+        with self.assertRaises(codewire.CodewireError) as raised:
+            self.client.networks.create(MESH_ORG_ID, "reject-me")
+
+        self.assertEqual(raised.exception.status, 400)
+        self.assertEqual(raised.exception.detail, "invalid network")
+        self.assertEqual(raised.exception.request_id, "req_mesh")
+
+    def test_converter_descriptors_and_every_enum_value_are_locked(self) -> None:
+        assert_mesh_converter_coverage()
+        self.assertEqual(
+            [
+                _messages_policy_from_proto(value)
+                for value in (
+                    MeshGroupMessagesPolicy.MESH_GROUP_MESSAGES_POLICY_UNSPECIFIED,
+                    MeshGroupMessagesPolicy.MESH_GROUP_MESSAGES_POLICY_INTERNAL_ONLY,
+                    MeshGroupMessagesPolicy.MESH_GROUP_MESSAGES_POLICY_OPEN,
+                )
+            ],
+            ["", "internal-only", "open"],
+        )
+        self.assertEqual(
+            [
+                _messages_policy_to_proto(value)
+                for value in ("", "internal-only", "open")
+            ],
+            [
+                MeshGroupMessagesPolicy.MESH_GROUP_MESSAGES_POLICY_UNSPECIFIED,
+                MeshGroupMessagesPolicy.MESH_GROUP_MESSAGES_POLICY_INTERNAL_ONLY,
+                MeshGroupMessagesPolicy.MESH_GROUP_MESSAGES_POLICY_OPEN,
+            ],
+        )
+        self.assertEqual(
+            [
+                _debug_policy_from_proto(value)
+                for value in (
+                    MeshGroupDebugPolicy.MESH_GROUP_DEBUG_POLICY_UNSPECIFIED,
+                    MeshGroupDebugPolicy.MESH_GROUP_DEBUG_POLICY_NONE,
+                    MeshGroupDebugPolicy.MESH_GROUP_DEBUG_POLICY_OBSERVE_ONLY,
+                    MeshGroupDebugPolicy.MESH_GROUP_DEBUG_POLICY_FULL,
+                )
+            ],
+            ["", "none", "observe-only", "full"],
+        )
+        self.assertEqual(
+            [
+                _debug_policy_to_proto(value)
+                for value in ("", "none", "observe-only", "full")
+            ],
+            [
+                MeshGroupDebugPolicy.MESH_GROUP_DEBUG_POLICY_UNSPECIFIED,
+                MeshGroupDebugPolicy.MESH_GROUP_DEBUG_POLICY_NONE,
+                MeshGroupDebugPolicy.MESH_GROUP_DEBUG_POLICY_OBSERVE_ONLY,
+                MeshGroupDebugPolicy.MESH_GROUP_DEBUG_POLICY_FULL,
+            ],
+        )
+        with self.assertRaisesRegex(ValueError, "unknown Mesh messages"):
+            _messages_policy_from_proto(99)
+        with self.assertRaisesRegex(ValueError, "unknown Mesh debug"):
+            _debug_policy_from_proto(99)

@@ -21,10 +21,11 @@ from codewire.local import (
 )
 from codewire.mesh import (
     MeshClient,
-    MeshCredentials,
     MeshEnrollment,
     MeshGroup,
+    MeshGroupDebugPolicy,
     MeshGroupMember,
+    MeshGroupMessagesPolicy,
     MeshGroupPolicy,
     MeshGroups,
     MeshKV,
@@ -34,10 +35,6 @@ from codewire.mesh import (
     MeshNode,
     MeshNodeCredentials,
     MeshNodes,
-    MeshRuntimeCredential,
-    MeshSenderDelegation,
-    MeshVerifierBundle,
-    MeshVerifierKey,
 )
 
 __all__ = [
@@ -55,10 +52,11 @@ __all__ = [
     "LocalSpecMount",
     "LocalSpecPort",
     "MeshClient",
-    "MeshCredentials",
     "MeshEnrollment",
     "MeshGroup",
+    "MeshGroupDebugPolicy",
     "MeshGroupMember",
+    "MeshGroupMessagesPolicy",
     "MeshGroupPolicy",
     "MeshGroups",
     "MeshKV",
@@ -68,8 +66,4 @@ __all__ = [
     "MeshNode",
     "MeshNodeCredentials",
     "MeshNodes",
-    "MeshRuntimeCredential",
-    "MeshSenderDelegation",
-    "MeshVerifierBundle",
-    "MeshVerifierKey",
 ]
