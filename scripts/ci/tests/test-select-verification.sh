@@ -339,6 +339,20 @@ run_paths_case mixed_contracts pull_request refs/pull/116/head false \
   proto/codewire/v1/api_key.proto openapi.json
 run_paths_case rest_policy_guard pull_request refs/pull/117/head false \
   'policy' scripts/checks/contracts/rest-surface-baseline.json
+run_paths_case mesh_policy_guard pull_request refs/pull/1171/head false \
+  'policy' scripts/checks/contracts/mesh-surface-policy.json
+run_paths_case mesh_policy_go_sdk pull_request refs/pull/1172/head false \
+  'go_consumer_interop go_support policy sdk_go' \
+  scripts/checks/contracts/mesh-surface-policy.json \
+  libs/sdk-go/mesh_networks.go
+run_paths_case mesh_policy_rust_client pull_request refs/pull/1173/head false \
+  'policy rust rust_pkg_codewire_client' \
+  scripts/checks/contracts/mesh-surface-policy.json \
+  crates/codewire-client/src/mesh.rs
+run_paths_case mesh_policy_runtime pull_request refs/pull/1174/head false \
+  'policy transport transport_pkg_codewire_mesh' \
+  scripts/checks/contracts/mesh-surface-policy.json \
+  crates/codewire-mesh/src/server.rs
 run_paths_case package_contract_tooling pull_request refs/pull/118/head false \
   'contracts contracts_proto contracts_rest policy security security_js web' \
   package.json
@@ -547,6 +561,9 @@ run_paths_case tag push refs/tags/v1.2.3 false \
 
 all_product='contracts contracts_proto contracts_rest database deploy edge_kind go_consumer_interop go_support go_tailnet kind policy release runtime_confidential rust rust_curated_locks rust_workspace sdk_go sdk_python sdk_ts security security_dev_smoke_auth security_go security_idp_kek security_js service_apikey_smoke service_billing service_connectcore service_coordinator service_idp service_integration service_nats service_orchestration service_temporal transport transport_derp_contract transport_pkg_codewire_coordinator transport_pkg_codewire_daemon transport_pkg_codewire_derp transport_pkg_codewire_gateway transport_pkg_codewire_mesh transport_pkg_codewire_tailnet transport_pkg_codewire_udp_relay web'
 run_paths_case unknown pull_request refs/pull/18/head false "$all_product" \
+  unexplained/new-surface.txt
+run_paths_case mesh_policy_unknown pull_request refs/pull/181/head false "$all_product" \
+  scripts/checks/contracts/mesh-surface-policy.json \
   unexplained/new-surface.txt
 run_paths_case empty pull_request refs/pull/19/head false "$all_product" ''
 

@@ -1,0 +1,137 @@
+{
+  "$comment": "Phased hosted-Mesh caller, declaration, source-shape, count, and fingerprint policy. The route inventory, dispositions, credentials, packages, and raw URL records remain in rest-surface-baseline.json; parser and guard semantics remain in repo_checks.py.",
+  "schema_version": 1,
+  "surface": {
+    "route_registrations": 24,
+    "method_path_operations": 31,
+    "router_from_state_sha256": "f2f3b3e83dfb54682f64c8f475cba9af79deba2fcb09b5d89c0fba173a106120",
+    "semantics_sha256": "bc6655ba2c23cffd36d7b1328023d6db42fe5d72d279ee4eb0f3b2a36437ff6e",
+    "expected_counts": {
+      "route_registrations": 37,
+      "method_path_operations": 31,
+      "router_new_expressions": 3,
+      "router_merges": 1,
+      "app_builder_route_mounts": 1,
+      "caller_operation_references": {
+        "browser": 5,
+        "ci-smoke": 0,
+        "go-sdk": 1,
+        "node-runtime": 0,
+        "python-sdk": 1,
+        "rust-cli": 9,
+        "rust-client": 0,
+        "rust-tailnet": 0,
+        "typescript-sdk": 1
+      },
+      "wrapper_declaration_references": {
+        "browser": 0,
+        "ci-smoke": 0,
+        "go-sdk": 0,
+        "node-runtime": 0,
+        "python-sdk": 0,
+        "rust-cli": 0,
+        "rust-client": 0,
+        "rust-tailnet": 0,
+        "typescript-sdk": 0
+      },
+      "credential_operations": {
+        "enrollment-code": 1,
+        "invite-code": 1,
+        "mesh-identity": 1,
+        "mesh-session-bearer-or-cookie": 1,
+        "node-bearer": 1,
+        "node-or-mesh-identity": 2,
+        "none": 2,
+        "oidc-device-code": 0,
+        "oidc-state-and-code": 1,
+        "primary-product-identity": 19,
+        "primary-product-identity-plus-invite-code": 1,
+        "runtime-credential": 1
+      },
+      "disposition_operations": {
+        "connect": 22,
+        "delete": 9
+      },
+      "package_operations": {
+        "codewire.internal.v1": 1,
+        "codewire.v1": 21,
+        "none": 9
+      },
+      "operations_without_callers": 18,
+      "wrapper_declaration_records": 0,
+      "client_url_template_records": 10,
+      "client_url_template_occurrences": 15
+    }
+  },
+  "network_operation_callers": {
+    "get": [
+      "rust-cli"
+    ],
+    "post": [
+      "rust-cli"
+    ]
+  },
+  "wrapper_declaration_callers": {},
+  "required_source_fragments": {
+    "crates/codewire-mesh/src/server.rs": [
+      "struct NetworkCreateRequest",
+      "org_id: Option<String>",
+      "struct NetworkListQuery",
+      "state.product.list_networks",
+      ".create_network(&org_id, &network_id, credential)",
+      "product_credential(&headers)"
+    ],
+    "crates/codewire-mesh/src/product.rs": [
+      "network_create_owned(&network_id, &context.org_id)",
+      "network_list_by_organization(&context.org_id)",
+      "is_network_product_principal(&context)"
+    ],
+    "crates/codewire-mesh/src/mesh_authorization.rs": [
+      "SESSION_COOKIE_NAME"
+    ],
+    "crates/codewire-client/src/mesh.rs": [
+      "list_mesh_networks(",
+      "create_mesh_network(",
+      "ListMeshNetworksRequest",
+      "CreateMeshNetworkRequest"
+    ],
+    "libs/sdk-go/mesh_networks.go": [
+      "Create(ctx context.Context, orgID, networkID string) (*MeshNetwork, error)",
+      "List(ctx context.Context, orgID string)",
+      "CreateMeshNetworkRequest",
+      "ListMeshNetworksRequest",
+      "OrgId: orgID"
+    ],
+    "libs/sdk-ts/src/mesh.ts": [
+      "create(orgId: string, networkId: string): Promise<MeshNetwork>",
+      "list(orgId: string): Promise<MeshNetwork[]>",
+      "createMeshNetwork({ orgId, networkId })",
+      "listMeshNetworks({ orgId, pageToken })"
+    ],
+    "libs/sdk-python/codewire/mesh.py": [
+      "def create(self, org_id: str, network_id: str)",
+      "def list(self, org_id: str)",
+      "MeshNetworkServiceClientSync",
+      "mesh_network_pb2.CreateMeshNetworkRequest(",
+      "mesh_network_pb2.ListMeshNetworksRequest(",
+      "org_id=org_id, network_id=network_id"
+    ]
+  },
+  "forbidden_source_fragments": {
+    "crates/codewire-mesh/src/mesh_authorization.rs": [
+      "\"cw_session=\""
+    ],
+    "libs/sdk-python/codewire/mesh.py": [
+      "class _MeshHttp",
+      "class MeshCredentials",
+      "class MeshRuntimeCredential",
+      "class MeshVerifierKey",
+      "class MeshVerifierBundle",
+      "class MeshSenderDelegation",
+      "issue_runtime_credential",
+      "fetch_verifier_bundle",
+      "issue_node_runtime_credential",
+      "issue_sender_delegation"
+    ]
+  }
+}

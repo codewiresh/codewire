@@ -901,72 +901,12 @@ def is_raw_string_start(text: str, index: int) -> bool:
 
 
 MESH_SURFACE_REL = "scripts/checks/contracts/rest-surface-baseline.json"
+MESH_POLICY_REL = "scripts/checks/contracts/mesh-surface-policy.json"
 MESH_SERVER_REL = "crates/codewire-mesh/src/server.rs"
 MESH_CONNECT_REL = "crates/codewire-mesh/src/connect.rs"
 MESH_PRIMARY_ORIGIN_REST_EDGE_REL = (
     "scripts/checks/contracts/mesh-primary-origin-rest-edge.json"
 )
-MESH_EXPECTED_REGISTRATIONS = 24
-MESH_EXPECTED_OPERATIONS = 31
-MESH_EXPECTED_ROUTER_SHA256 = (
-    "f2f3b3e83dfb54682f64c8f475cba9af79deba2fcb09b5d89c0fba173a106120"
-)
-MESH_EXPECTED_SEMANTICS_SHA256 = (
-    "bc6655ba2c23cffd36d7b1328023d6db42fe5d72d279ee4eb0f3b2a36437ff6e"
-)
-MESH_EXPECTED_COUNTS = {
-    "route_registrations": 37,
-    "method_path_operations": 31,
-    "router_new_expressions": 3,
-    "router_merges": 1,
-    "app_builder_route_mounts": 1,
-    "caller_operation_references": {
-        "browser": 5,
-        "ci-smoke": 0,
-        "go-sdk": 1,
-        "node-runtime": 0,
-        "python-sdk": 1,
-        "rust-cli": 9,
-        "rust-client": 0,
-        "rust-tailnet": 0,
-        "typescript-sdk": 1,
-    },
-    "wrapper_declaration_references": {
-        "browser": 0,
-        "ci-smoke": 0,
-        "go-sdk": 0,
-        "node-runtime": 0,
-        "python-sdk": 0,
-        "rust-cli": 0,
-        "rust-client": 0,
-        "rust-tailnet": 0,
-        "typescript-sdk": 0,
-    },
-    "credential_operations": {
-        "enrollment-code": 1,
-        "invite-code": 1,
-        "mesh-identity": 1,
-        "mesh-session-bearer-or-cookie": 1,
-        "node-bearer": 1,
-        "node-or-mesh-identity": 2,
-        "none": 2,
-        "oidc-device-code": 0,
-        "oidc-state-and-code": 1,
-        "primary-product-identity": 19,
-        "primary-product-identity-plus-invite-code": 1,
-        "runtime-credential": 1,
-    },
-    "disposition_operations": {"connect": 22, "delete": 9},
-    "package_operations": {
-        "codewire.internal.v1": 1,
-        "codewire.v1": 21,
-        "none": 9,
-    },
-    "operations_without_callers": 18,
-    "wrapper_declaration_records": 0,
-    "client_url_template_records": 10,
-    "client_url_template_occurrences": 15,
-}
 MESH_EXPECTED_CONNECT_METHODS = {
     "MESH_NETWORK_SERVICE_SERVICE_NAME": {
         "CreateMeshNetwork",
@@ -1054,17 +994,281 @@ MESH_FORBIDDEN_ROUTER_METHODS = (
     "with_connect_routes_auth_and_protocol_policy",
     "with_unary_connect_routes_auth",
 )
+MESH_POLICY_KEYS = {
+    "$comment",
+    "schema_version",
+    "surface",
+    "network_operation_callers",
+    "wrapper_declaration_callers",
+    "required_source_fragments",
+    "forbidden_source_fragments",
+}
+MESH_POLICY_SURFACE_KEYS = {
+    "route_registrations",
+    "method_path_operations",
+    "router_from_state_sha256",
+    "semantics_sha256",
+    "expected_counts",
+}
+MESH_POLICY_COUNT_KEYS = {
+    "route_registrations",
+    "method_path_operations",
+    "router_new_expressions",
+    "router_merges",
+    "app_builder_route_mounts",
+    "caller_operation_references",
+    "wrapper_declaration_references",
+    "credential_operations",
+    "disposition_operations",
+    "package_operations",
+    "operations_without_callers",
+    "wrapper_declaration_records",
+    "client_url_template_records",
+    "client_url_template_occurrences",
+}
+MESH_POLICY_NESTED_COUNT_KEYS = {
+    "caller_operation_references",
+    "wrapper_declaration_references",
+    "credential_operations",
+    "disposition_operations",
+    "package_operations",
+}
+
+
+def mesh_surface_policy_failures(policy: Any) -> list[str]:
+    failures: list[str] = []
+    if not isinstance(policy, dict):
+        return ["policy root must be an object"]
+    if set(policy) != MESH_POLICY_KEYS:
+        failures.append(
+            "policy root keys must be exactly "
+            f"{stable_json(sorted(MESH_POLICY_KEYS))}"
+        )
+    if not isinstance(policy.get("$comment"), str) or not policy["$comment"].strip():
+        failures.append("$comment must be a non-empty string")
+    if policy.get("schema_version") != 1:
+        failures.append("schema_version must equal 1")
+
+    surface = policy.get("surface")
+    if not isinstance(surface, dict):
+        failures.append("surface must be an object")
+        surface = {}
+    elif set(surface) != MESH_POLICY_SURFACE_KEYS:
+        failures.append(
+            "surface keys must be exactly "
+            f"{stable_json(sorted(MESH_POLICY_SURFACE_KEYS))}"
+        )
+    for key in ("route_registrations", "method_path_operations"):
+        value = surface.get(key)
+        if type(value) is not int or value <= 0:
+            failures.append(f"surface.{key} must be a positive integer")
+    for key in ("router_from_state_sha256", "semantics_sha256"):
+        value = surface.get(key)
+        if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None:
+            failures.append(f"surface.{key} must be a lowercase SHA-256 digest")
+
+    expected_counts = surface.get("expected_counts")
+    if not isinstance(expected_counts, dict):
+        failures.append("surface.expected_counts must be an object")
+        expected_counts = {}
+    elif set(expected_counts) != MESH_POLICY_COUNT_KEYS:
+        failures.append(
+            "surface.expected_counts keys must be exactly "
+            f"{stable_json(sorted(MESH_POLICY_COUNT_KEYS))}"
+        )
+    for key, value in expected_counts.items():
+        if key in MESH_POLICY_NESTED_COUNT_KEYS:
+            if not isinstance(value, dict) or not value:
+                failures.append(
+                    f"surface.expected_counts.{key} must be a non-empty object"
+                )
+                continue
+            for item, count in value.items():
+                if not isinstance(item, str) or not item:
+                    failures.append(
+                        f"surface.expected_counts.{key} keys must be non-empty strings"
+                    )
+                if type(count) is not int or count < 0:
+                    failures.append(
+                        f"surface.expected_counts.{key}.{item} "
+                        "must be a non-negative integer"
+                    )
+        elif type(value) is not int or value < 0:
+            failures.append(
+                f"surface.expected_counts.{key} must be a non-negative integer"
+            )
+    for key in ("caller_operation_references", "wrapper_declaration_references"):
+        value = expected_counts.get(key)
+        if isinstance(value, dict) and set(value) != MESH_CALLER_CLASSES:
+            failures.append(
+                f"surface.expected_counts.{key} must name exactly the known caller classes"
+            )
+    disposition_counts = expected_counts.get("disposition_operations")
+    if isinstance(disposition_counts, dict) and set(disposition_counts) != {
+        "connect",
+        "delete",
+    }:
+        failures.append(
+            "surface.expected_counts.disposition_operations must name connect and delete"
+        )
+    package_counts = expected_counts.get("package_operations")
+    if isinstance(package_counts, dict) and set(package_counts) != {
+        "codewire.internal.v1",
+        "codewire.v1",
+        "none",
+    }:
+        failures.append(
+            "surface.expected_counts.package_operations must name both Connect "
+            "audiences and none"
+        )
+
+    network_callers = policy.get("network_operation_callers")
+    if not isinstance(network_callers, dict):
+        failures.append("network_operation_callers must be an object")
+        network_callers = {}
+    elif set(network_callers) != {"get", "post"}:
+        failures.append("network_operation_callers must contain exactly get and post")
+    for method, callers in network_callers.items():
+        failures.extend(mesh_policy_caller_list_failures(
+            callers,
+            f"network_operation_callers.{method}",
+            allow_empty=False,
+        ))
+
+    wrapper_callers = policy.get("wrapper_declaration_callers")
+    if not isinstance(wrapper_callers, dict):
+        failures.append("wrapper_declaration_callers must be an object")
+        wrapper_callers = {}
+    for operation, callers in wrapper_callers.items():
+        if (
+            not isinstance(operation, str)
+            or re.fullmatch(
+                r"(?:delete|get|head|options|patch|post|put) /[^ ]+",
+                operation,
+            )
+            is None
+        ):
+            failures.append(
+                "wrapper_declaration_callers keys must be normalized "
+                "'method /path' operations"
+            )
+        failures.extend(mesh_policy_caller_list_failures(
+            callers,
+            f"wrapper_declaration_callers.{operation}",
+            allow_empty=False,
+        ))
+
+    required_sources = policy.get("required_source_fragments")
+    forbidden_sources = policy.get("forbidden_source_fragments")
+    failures.extend(mesh_policy_source_fragment_failures(
+        required_sources,
+        "required_source_fragments",
+        allow_empty=False,
+    ))
+    failures.extend(mesh_policy_source_fragment_failures(
+        forbidden_sources,
+        "forbidden_source_fragments",
+        allow_empty=True,
+    ))
+    if isinstance(required_sources, dict) and isinstance(forbidden_sources, dict):
+        for source in set(required_sources) & set(forbidden_sources):
+            required = required_sources.get(source)
+            forbidden = forbidden_sources.get(source)
+            if isinstance(required, list) and isinstance(forbidden, list):
+                overlap = {
+                    fragment
+                    for fragment in required
+                    if isinstance(fragment, str)
+                } & {
+                    fragment
+                    for fragment in forbidden
+                    if isinstance(fragment, str)
+                }
+                if overlap:
+                    failures.append(
+                        f"{source} has fragments that are both required and forbidden: "
+                        f"{stable_json(sorted(overlap))}"
+                    )
+    return failures
+
+
+def mesh_policy_caller_list_failures(
+    callers: Any,
+    label: str,
+    *,
+    allow_empty: bool,
+) -> list[str]:
+    if not isinstance(callers, list):
+        return [f"{label} must be a list"]
+    failures: list[str] = []
+    if not callers and not allow_empty:
+        failures.append(f"{label} must not be empty")
+    if len(callers) != len(set(item for item in callers if isinstance(item, str))):
+        failures.append(f"{label} must not contain duplicates")
+    for caller in callers:
+        if not isinstance(caller, str) or caller not in MESH_CALLER_CLASSES:
+            failures.append(f"{label} contains unknown caller {caller!r}")
+    return failures
+
+
+def mesh_policy_source_fragment_failures(
+    sources: Any,
+    label: str,
+    *,
+    allow_empty: bool,
+) -> list[str]:
+    if not isinstance(sources, dict):
+        return [f"{label} must be an object"]
+    failures: list[str] = []
+    if not sources and not allow_empty:
+        failures.append(f"{label} must not be empty")
+    for source, fragments in sources.items():
+        source_path = Path(source) if isinstance(source, str) else Path()
+        if (
+            not isinstance(source, str)
+            or not source
+            or source_path.is_absolute()
+            or ".." in source_path.parts
+        ):
+            failures.append(f"{label} keys must be repository-relative source paths")
+        if not isinstance(fragments, list) or not fragments:
+            failures.append(f"{label}.{source} must be a non-empty list")
+            continue
+        if len(fragments) != len(
+            set(fragment for fragment in fragments if isinstance(fragment, str))
+        ):
+            failures.append(f"{label}.{source} must not contain duplicates")
+        for fragment in fragments:
+            if not isinstance(fragment, str) or not fragment:
+                failures.append(
+                    f"{label}.{source} fragments must be non-empty strings"
+                )
+    return failures
+
+
+def load_mesh_surface_policy() -> dict[str, Any]:
+    policy = read_json(MESH_POLICY_REL)
+    failures = mesh_surface_policy_failures(policy)
+    if failures:
+        raise RuntimeError("; ".join(failures))
+    return policy
 
 
 def check_mesh_surface_freeze(args: argparse.Namespace) -> int:
     try:
         baseline = read_json(MESH_SURFACE_REL)
         inventory = baseline["mesh_surface"]
+        policy = load_mesh_surface_policy()
         mesh_sources = mesh_production_sources()
         client_sources = mesh_client_sources()
-        failures = mesh_surface_failures(mesh_sources, client_sources, inventory)
+        failures = mesh_surface_failures(
+            mesh_sources,
+            client_sources,
+            inventory,
+            policy,
+        )
         if not failures and args.self_test:
-            mesh_surface_self_test(mesh_sources, client_sources, inventory)
+            mesh_surface_self_test(mesh_sources, client_sources, inventory, policy)
     except Exception as error:  # noqa: BLE001 - this is a repository guard
         failures = [str(error)]
 
@@ -1074,8 +1278,8 @@ def check_mesh_surface_freeze(args: argparse.Namespace) -> int:
         return 1
     print(
         "mesh surface freeze: OK "
-        f"({MESH_EXPECTED_REGISTRATIONS} registrations, "
-        f"{MESH_EXPECTED_OPERATIONS} operations, "
+        f"({policy['surface']['route_registrations']} registrations, "
+        f"{policy['surface']['method_path_operations']} operations, "
         f"{len(inventory['client_url_templates'])} client URL template records)"
     )
     return 0
@@ -1085,8 +1289,17 @@ def mesh_surface_failures(
     mesh_sources: dict[str, str],
     client_sources: dict[str, tuple[str, str]],
     inventory: dict[str, Any],
+    policy: dict[str, Any] | None = None,
 ) -> list[str]:
+    if policy is None:
+        policy = load_mesh_surface_policy()
     failures: list[str] = []
+    surface_policy = policy["surface"]
+    policy_counts = surface_policy["expected_counts"]
+    expected_registrations = surface_policy["route_registrations"]
+    expected_operations = surface_policy["method_path_operations"]
+    expected_router_sha256 = surface_policy["router_from_state_sha256"]
+    expected_semantics_sha256 = surface_policy["semantics_sha256"]
     server_source = mesh_sources.get(MESH_SERVER_REL)
     if server_source is None:
         return [f"missing production Mesh router source {MESH_SERVER_REL}"]
@@ -1095,29 +1308,27 @@ def mesh_surface_failures(
     topology, forbidden_router_uses = mesh_router_topology(mesh_sources)
     router_sha256 = mesh_router_fingerprint(server_source)
 
-    if inventory.get("router_from_state_sha256") != MESH_EXPECTED_ROUTER_SHA256:
+    if inventory.get("router_from_state_sha256") != expected_router_sha256:
         failures.append(
             "router_from_state_sha256 must equal the frozen production router fingerprint"
         )
-    if router_sha256 != MESH_EXPECTED_ROUTER_SHA256:
+    if router_sha256 != expected_router_sha256:
         failures.append(
             f"{MESH_SERVER_REL} router_from_state fingerprint drift: "
             f"found {router_sha256}"
         )
 
     expected_counts = inventory.get("expected_counts")
-    if expected_counts != MESH_EXPECTED_COUNTS:
+    if expected_counts != policy_counts:
         failures.append(
             "expected_counts does not match the exact frozen Mesh topology, "
             "caller, credential, disposition, package, and client URL counts"
         )
     if topology != {
-        "route_registrations": MESH_EXPECTED_COUNTS["route_registrations"],
-        "router_new_expressions": MESH_EXPECTED_COUNTS["router_new_expressions"],
-        "router_merges": MESH_EXPECTED_COUNTS["router_merges"],
-        "app_builder_route_mounts": MESH_EXPECTED_COUNTS[
-            "app_builder_route_mounts"
-        ],
+        "route_registrations": policy_counts["route_registrations"],
+        "router_new_expressions": policy_counts["router_new_expressions"],
+        "router_merges": policy_counts["router_merges"],
+        "app_builder_route_mounts": policy_counts["app_builder_route_mounts"],
     }:
         failures.append(
             "production Mesh router topology drift: "
@@ -1128,15 +1339,15 @@ def mesh_surface_failures(
             f"production Mesh router uses unsupported .{method}(...) in {source}"
         )
     mesh_connect_surface_failures(mesh_sources, server_source, failures)
-    if len(registrations) != MESH_EXPECTED_REGISTRATIONS:
+    if len(registrations) != expected_registrations:
         failures.append(
             f"{MESH_SERVER_REL} has {len(registrations)} production route registrations, "
-            f"expected {MESH_EXPECTED_REGISTRATIONS}"
+            f"expected {expected_registrations}"
         )
-    if operation_count != MESH_EXPECTED_OPERATIONS:
+    if operation_count != expected_operations:
         failures.append(
             f"{MESH_SERVER_REL} has {operation_count} production method/path operations, "
-            f"expected {MESH_EXPECTED_OPERATIONS}"
+            f"expected {expected_operations}"
         )
 
     caller_classes = inventory.get("caller_classes")
@@ -1255,15 +1466,15 @@ def mesh_surface_failures(
             }
         )
 
-    if len(inventory_routes) != MESH_EXPECTED_REGISTRATIONS:
+    if len(inventory_routes) != expected_registrations:
         failures.append(
             f"inventory has {len(inventory_routes)} route registrations, "
-            f"expected {MESH_EXPECTED_REGISTRATIONS}"
+            f"expected {expected_registrations}"
         )
-    if inventoried_operation_count != MESH_EXPECTED_OPERATIONS:
+    if inventoried_operation_count != expected_operations:
         failures.append(
             f"inventory has {inventoried_operation_count} method/path operations, "
-            f"expected {MESH_EXPECTED_OPERATIONS}"
+            f"expected {expected_operations}"
         )
     if inventory_core != registrations:
         failures.append(
@@ -1283,7 +1494,7 @@ def mesh_surface_failures(
             }
         ).encode("utf-8")
     ).hexdigest()
-    if semantic_fingerprint != MESH_EXPECTED_SEMANTICS_SHA256:
+    if semantic_fingerprint != expected_semantics_sha256:
         failures.append(
             "Mesh per-operation semantic fingerprint drift: "
             f"found {semantic_fingerprint}"
@@ -1410,18 +1621,19 @@ def mesh_surface_failures(
                 f"{label} must bind exactly one declaration-owned URL template"
             )
 
-    if wrapper_callers_by_operation:
+    actual_wrapper_callers = {
+        f"{method} {path}": sorted(callers)
+        for (method, path), callers in sorted(wrapper_callers_by_operation.items())
+    }
+    expected_wrapper_callers = {
+        operation: sorted(callers)
+        for operation, callers in policy["wrapper_declaration_callers"].items()
+    }
+    if actual_wrapper_callers != expected_wrapper_callers:
         failures.append(
-            "wrapper_declarations must remain empty after all shipped "
-            "credential-only SDK declarations were deleted"
+            "wrapper_declarations caller policy drift: "
+            f"found {stable_json(actual_wrapper_callers)}"
         )
-    for operation_key, callers in wrapper_callers_by_operation.items():
-        if callers:
-            failures.append(
-                "wrapper_declarations for "
-                f"{operation_key[0].upper()} {operation_key[1]} must have no "
-                "remaining SDK wrapper"
-            )
 
     actual_semantic_counts = {
         "caller_operation_references": dict(sorted(caller_operation_references.items())),
@@ -1441,7 +1653,7 @@ def mesh_surface_failures(
         ),
     }
     expected_semantic_counts = {
-        key: MESH_EXPECTED_COUNTS[key] for key in actual_semantic_counts
+        key: policy_counts[key] for key in actual_semantic_counts
     }
     if actual_semantic_counts != expected_semantic_counts:
         failures.append(
@@ -1481,10 +1693,10 @@ def mesh_surface_failures(
     mesh_network_ownership_failures(
         failures,
         mesh_sources,
-        server_source,
         client_sources,
         inventory,
         inventory_operation_details,
+        policy,
     )
     return failures
 
@@ -1576,13 +1788,12 @@ def mesh_connect_surface_failures(
 def mesh_network_ownership_failures(
     failures: list[str],
     mesh_sources: dict[str, str],
-    server_source: str,
     client_sources: dict[str, tuple[str, str]],
     inventory: dict[str, Any],
     operation_details: dict[tuple[str, str], dict[str, Any]],
+    policy: dict[str, Any],
 ) -> None:
     """Keep the WI-5 shared REST/Connect ownership boundary explicit."""
-    expected_callers = ["rust-cli"]
     for method in ("get", "post"):
         operation = operation_details.get((method, "/api/v1/networks"))
         if operation is None:
@@ -1594,7 +1805,7 @@ def mesh_network_ownership_failures(
             failures.append(
                 f"Mesh network {method.upper()} must use primary-product-identity"
             )
-        if operation.get("callers") != expected_callers:
+        if operation.get("callers") != policy["network_operation_callers"][method]:
             failures.append(
                 f"Mesh network {method.upper()} callers must name only the remaining raw first-party consumers"
             )
@@ -1606,97 +1817,33 @@ def mesh_network_ownership_failures(
         failures.append(
             "Mesh network bridge must be public only to primary typed authorization, not Mesh legacy middleware"
         )
-    required_server_fragments = (
-        "struct NetworkCreateRequest",
-        "org_id: Option<String>",
-        "struct NetworkListQuery",
-        "state.product.list_networks",
-        ".create_network(&org_id, &network_id, credential)",
-        "product_credential(&headers)",
-    )
-    required_product_fragments = (
-        "network_create_owned(&network_id, &context.org_id)",
-        "network_list_by_organization(&context.org_id)",
-        "is_network_product_principal(&context)",
-    )
-    for fragment in required_server_fragments:
-        if fragment not in server_source:
-            failures.append(
-                f"Mesh network ownership bridge lost required explicit-org source shape {fragment!r}"
-            )
-    product_source = mesh_sources.get("crates/codewire-mesh/src/product.rs", "")
-    for fragment in required_product_fragments:
-        if fragment not in product_source:
-            failures.append(
-                f"Mesh shared product domain lost required ownership shape {fragment!r}"
-            )
-    authorization_source = mesh_sources.get(
-        "crates/codewire-mesh/src/mesh_authorization.rs", ""
-    )
-    if "SESSION_COOKIE_NAME" not in authorization_source:
-        failures.append(
-            "Mesh network ownership bridge must forward only the canonical primary session cookie"
-        )
-    if '"cw_session="' in authorization_source:
-        failures.append(
-            "Mesh network ownership bridge must not forward the retired Mesh session cookie"
-        )
-    required_clients = {
-        "crates/codewire-client/src/mesh.rs": (
-            "list_mesh_networks(",
-            "create_mesh_network(",
-            "ListMeshNetworksRequest",
-            "CreateMeshNetworkRequest",
-        ),
-        "libs/sdk-go/mesh_networks.go": (
-            "Create(ctx context.Context, orgID, networkID string) (*MeshNetwork, error)",
-            "List(ctx context.Context, orgID string)",
-            "CreateMeshNetworkRequest",
-            "ListMeshNetworksRequest",
-            "OrgId: orgID",
-        ),
-        "libs/sdk-ts/src/mesh.ts": (
-            "create(orgId: string, networkId: string): Promise<MeshNetwork>",
-            "list(orgId: string): Promise<MeshNetwork[]>",
-            "createMeshNetwork({ orgId, networkId })",
-            "listMeshNetworks({ orgId, pageToken })",
-        ),
-        "libs/sdk-python/codewire/mesh.py": (
-            "def create(self, org_id: str, network_id: str)",
-            "def list(self, org_id: str)",
-            "MeshNetworkServiceClientSync",
-            "mesh_network_pb2.CreateMeshNetworkRequest(",
-            "mesh_network_pb2.ListMeshNetworksRequest(",
-            "org_id=org_id, network_id=network_id",
-        ),
+    all_sources = {
+        **mesh_sources,
+        **{
+            source: text
+            for source, (_caller, text) in client_sources.items()
+        },
     }
-    for source, fragments in required_clients.items():
-        text = client_sources.get(source, ("", ""))[1]
+    for source, fragments in policy["required_source_fragments"].items():
+        text = all_sources.get(source)
+        if text is None:
+            failures.append(f"Mesh policy required source is missing: {source}")
+            continue
         for fragment in fragments:
             if fragment not in text:
                 failures.append(
-                    f"Mesh network direct caller {source} lost explicit organization input {fragment!r}"
+                    f"Mesh source {source} lost required source shape {fragment!r}"
                 )
-    python_source = client_sources.get(
-        "libs/sdk-python/codewire/mesh.py", ("", "")
-    )[1]
-    forbidden_python_fragments = (
-        "class _MeshHttp",
-        "class MeshCredentials",
-        "class MeshRuntimeCredential",
-        "class MeshVerifierKey",
-        "class MeshVerifierBundle",
-        "class MeshSenderDelegation",
-        "issue_runtime_credential",
-        "fetch_verifier_bundle",
-        "issue_node_runtime_credential",
-        "issue_sender_delegation",
-    )
-    for fragment in forbidden_python_fragments:
-        if fragment in python_source:
+    for source, fragments in policy["forbidden_source_fragments"].items():
+        text = all_sources.get(source)
+        if text is None:
+            failures.append(f"Mesh policy forbidden source is missing: {source}")
+            continue
+        for fragment in fragments:
+            if fragment not in text:
+                continue
             failures.append(
-                "Python Mesh generated-client wrapper restored deleted "
-                f"credential or general HTTP shape {fragment!r}"
+                f"Mesh source {source} restored forbidden source shape {fragment!r}"
             )
 
 
@@ -2129,11 +2276,91 @@ def strip_source_comments(text: str, *, c_like: bool) -> str:
     return "".join(chars)
 
 
+def mesh_surface_policy_self_test(
+    mesh_sources: dict[str, str],
+    client_sources: dict[str, tuple[str, str]],
+    inventory: dict[str, Any],
+    policy: dict[str, Any],
+) -> None:
+    def require_schema_failure(
+        label: str,
+        candidate: dict[str, Any],
+        expected: str,
+    ) -> None:
+        failures = mesh_surface_policy_failures(candidate)
+        if not any(expected in failure for failure in failures):
+            raise RuntimeError(
+                f"self-test accepted {label}; failures were {stable_json(failures)}"
+            )
+
+    missing_key = copy.deepcopy(policy)
+    missing_key.pop("schema_version")
+    require_schema_failure(
+        "a Mesh policy with a missing root key",
+        missing_key,
+        "policy root keys",
+    )
+
+    malformed_digest = copy.deepcopy(policy)
+    malformed_digest["surface"]["semantics_sha256"] = "not-a-digest"
+    require_schema_failure(
+        "a Mesh policy with a malformed fingerprint",
+        malformed_digest,
+        "lowercase SHA-256",
+    )
+
+    weakened_shapes = copy.deepcopy(policy)
+    source = next(iter(weakened_shapes["required_source_fragments"]))
+    weakened_shapes["required_source_fragments"][source] = []
+    require_schema_failure(
+        "a Mesh policy with an empty required source shape",
+        weakened_shapes,
+        "must be a non-empty list",
+    )
+
+    unknown_caller = copy.deepcopy(policy)
+    unknown_caller["network_operation_callers"]["get"] = ["unknown-client"]
+    require_schema_failure(
+        "a Mesh policy with an unknown caller",
+        unknown_caller,
+        "contains unknown caller",
+    )
+
+    weakened_counts_policy = copy.deepcopy(policy)
+    weakened_counts_inventory = copy.deepcopy(inventory)
+    weakened_counts_policy["surface"]["expected_counts"][
+        "caller_operation_references"
+    ]["rust-cli"] = 0
+    weakened_counts_inventory["expected_counts"]["caller_operation_references"][
+        "rust-cli"
+    ] = 0
+    weakened_count_failures = mesh_surface_failures(
+        mesh_sources,
+        client_sources,
+        weakened_counts_inventory,
+        weakened_counts_policy,
+    )
+    if not any(
+        "semantic count drift" in failure
+        for failure in weakened_count_failures
+    ):
+        raise RuntimeError(
+            "self-test accepted a coordinated weakened Mesh caller count"
+        )
+
+
 def mesh_surface_self_test(
     mesh_sources: dict[str, str],
     client_sources: dict[str, tuple[str, str]],
     inventory: dict[str, Any],
+    policy: dict[str, Any],
 ) -> None:
+    mesh_surface_policy_self_test(
+        mesh_sources,
+        client_sources,
+        inventory,
+        policy,
+    )
     server_source = mesh_sources[MESH_SERVER_REL]
 
     def operation(
@@ -2418,7 +2645,7 @@ def mesh_surface_self_test(
         copy.deepcopy(inventory),
     )
     if not any(
-        "canonical primary session cookie" in failure
+        "lost required source shape 'SESSION_COOKIE_NAME'" in failure
         for failure in legacy_cookie_failures
     ):
         raise RuntimeError("self-test accepted the retired Mesh session cookie")
@@ -2552,8 +2779,7 @@ def mesh_surface_self_test(
         copy.deepcopy(inventory),
     )
     if not any(
-        "Python Mesh generated-client wrapper restored deleted credential"
-        in failure
+        "restored forbidden source shape" in failure
         for failure in restored_python_wrapper_failures
     ):
         raise RuntimeError(

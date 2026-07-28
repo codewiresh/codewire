@@ -457,6 +457,12 @@ elif [ "$event_selected" = false ]; then
         # These lightweight ratchet/source guards already run once in Policy.
         recognized=true
         ;;
+      scripts/checks/contracts/mesh-surface-policy.json)
+        # Phased Mesh caller/count/source-shape data is consumed by the REST
+        # surface guard in Policy. Product paths in the same change continue
+        # through the independent classifiers below.
+        recognized=true
+        ;;
       scripts/checks/contracts/connect-edge-ownership.json)
         select_token contracts
         select_token contracts_proto
