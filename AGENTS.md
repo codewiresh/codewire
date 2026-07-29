@@ -14,15 +14,15 @@ symlink to `AGENTS.md`; do not put independent instructions in it.
 
 This repository follows this immutable Noel Method runtime pack:
 
-- Release tag: `v0.6.0`
-- Release commit: `165724aad3cd08486cbfd703c1b7a6e1e765aa14`
+- Release tag: `v0.7.0`
+- Release commit: `705a7a3f1aa117cb2ef1358cc75d3bc109cd928f`
 - Pack manifest SHA-256:
-  `ed0361cd3370fb4d823d1c86da2cb2f3206544c62ee807b8387bf6be335d3a22`
+  `44b08fb6aa6f239c878f09bb16fcad246583b3f72f2d3eca627b0d9743dbdcba`
 - Runtime index:
-  `https://raw.githubusercontent.com/noeljackson/method/v0.6.0/dist/pack/INDEX.md`
+  `https://raw.githubusercontent.com/noeljackson/method/v0.7.0/dist/pack/INDEX.md`
 
 Use only that verified published tag and resolve relative links under the same
-`v0.6.0/dist/pack/` path. Codewire uses direct authority mode. Normal repository
+`v0.7.0/dist/pack/` path. Codewire uses direct authority mode. Normal repository
 work—inspect, edit, run focused checks, commit, push a branch, open a pull
 request, and merge—may be authorized directly in conversation. Existing
 Codewire instructions and applicable gates still apply.
