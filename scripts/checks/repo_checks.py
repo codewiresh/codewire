@@ -3844,14 +3844,16 @@ def check_connect_edge_routing(_args: argparse.Namespace) -> int:
             else:
                 fail(f"unknown owner kind '{owner}' for {service} in connect-edge-ownership.json")
 
+    assert_mesh_connect_backend_topology(ownership, owners, per_file, fail)
     assert_internal_connect_listener_exemption(unrouted, per_file, fail)
     assert_mesh_primary_origin_rest_edge(fail)
     if getattr(_args, "self_test", False):
         try:
             internal_connect_listener_self_test()
+            mesh_connect_backend_topology_self_test(ownership, owners, per_file)
             mesh_primary_origin_rest_edge_self_test()
         except RuntimeError as error:
-            fail(f"internal-connect listener self-test: {error}")
+            fail(f"Connect edge self-test: {error}")
 
     for file in all_files:
         assert_coordinator_transport_shape(file, fail)
@@ -3891,6 +3893,89 @@ INTERNAL_CONNECT_SERVICES = {
 }
 
 
+MESH_KUBERNETES_BACKENDS = {
+    "deployments/k8s/base/ingress.yaml": "codewire-mesh-http",
+    "deployments/k8s/overlays/local-kind/ingress.yaml": "codewire-mesh",
+    "deployments/k8s/overlays/local-kind-static/ingress.yaml": "codewire-mesh",
+    "tests/e2e/kind/ingress.yaml": "codewire-mesh",
+}
+
+
+def assert_mesh_connect_backend_topology(
+    ownership: dict[str, Any],
+    owners: dict[str, str],
+    per_file: dict[str, dict[str, Any]],
+    fail: Callable[[str], None],
+) -> None:
+    """Prove every Mesh Connect rule targets its topology's real Service."""
+    expected_backends = ownership.get("mesh_kubernetes_backends")
+    if expected_backends != MESH_KUBERNETES_BACKENDS:
+        fail(
+            "Mesh Connect ownership fixture must pin the hosted "
+            "codewire-mesh-http Service and every Kind codewire-mesh Service"
+        )
+        return
+
+    mesh_services = {service for service, owner in owners.items() if owner == "mesh"}
+    for file, expected_backend in expected_backends.items():
+        rules = per_file.get(file, {}).get("rules", [])
+        for service in sorted(mesh_services):
+            matching = [rule for rule in rules if rule["service"] == service]
+            if not matching or any(
+                rule.get("backend_service") != expected_backend for rule in matching
+            ):
+                fail(
+                    f"{file}: Mesh-owned {service} must target "
+                    f"{expected_backend}:http"
+                )
+
+
+def mesh_connect_backend_topology_self_test(
+    ownership: dict[str, Any],
+    owners: dict[str, str],
+    per_file: dict[str, dict[str, Any]],
+) -> None:
+    """Demonstrate rejection of wrong hosted and Kind Connect backends."""
+
+    def expect_rejection(file: str, wrong_backend: str, expected_backend: str) -> None:
+        broken = copy.deepcopy(per_file)
+        rules = broken[file]["rules"]
+        mesh_rule = next(
+            (
+                rule
+                for rule in rules
+                if owners.get(rule["service"]) == "mesh"
+                and rule.get("backend_service") == expected_backend
+            ),
+            None,
+        )
+        if mesh_rule is None:
+            raise RuntimeError(
+                f"{file}: self-test fixture is missing expected {expected_backend} backend"
+            )
+        mesh_rule["backend_service"] = wrong_backend
+        failures: list[str] = []
+        assert_mesh_connect_backend_topology(ownership, owners, broken, failures.append)
+        if not any(
+            file in failure and f"{expected_backend}:http" in failure
+            for failure in failures
+        ):
+            raise RuntimeError(
+                f"{file}: Mesh Connect topology accepted {wrong_backend}: {failures!r}"
+            )
+
+    expect_rejection(
+        "deployments/k8s/base/ingress.yaml",
+        "codewire-mesh",
+        "codewire-mesh-http",
+    )
+    expect_rejection(
+        "tests/e2e/kind/ingress.yaml",
+        "codewire-mesh-http",
+        "codewire-mesh",
+    )
+
+
 def assert_mesh_primary_origin_rest_edge(
     fail: Callable[[str], None],
     reader: Callable[[str], str] = read_text,
@@ -3926,29 +4011,42 @@ def assert_mesh_primary_origin_rest_edge(
         "deployments/k8s/overlays/local-kind-static/ingress.yaml",
         "tests/e2e/kind/ingress.yaml",
     }
-    if not isinstance(kubernetes_backends, list) or set(kubernetes_backends) != expected_kubernetes:
+    if (
+        not isinstance(kubernetes_backends, dict)
+        or set(kubernetes_backends) != expected_kubernetes
+    ):
         fail("Mesh primary-origin REST fixture must name every Kubernetes edge copy")
-        kubernetes_backends = []
-    service = fixture.get("service")
-    port_name = fixture.get("port_name")
-    if service != "codewire-mesh" or port_name != "http":
-        fail("Mesh primary-origin REST fixture must target codewire-mesh:http")
+        kubernetes_backends = {}
+    expected_backends = {
+        file: {"service": service, "port_name": "http"}
+        for file, service in MESH_KUBERNETES_BACKENDS.items()
+    }
+    if kubernetes_backends != expected_backends:
+        fail(
+            "Mesh primary-origin REST fixture must pin the hosted "
+            "codewire-mesh-http:http backend and every Kind codewire-mesh:http backend"
+        )
         return
-    for file in kubernetes_backends:
+    for file, backend in kubernetes_backends.items():
+        service = backend["service"]
+        port_name = backend["port_name"]
         text = reader(file)
         pattern = re.compile(
             r"-\s+path:\s*/api/v1/networks\s*\n"
             r"\s*pathType:\s*Exact\s*\n"
             r"\s*backend:\s*\n\s*service:\s*\n"
-            r"\s*name:\s*codewire-mesh\s*\n\s*port:\s*\n"
-            r"\s*name:\s*http\b"
+            rf"\s*name:\s*{re.escape(service)}\s*\n\s*port:\s*\n"
+            rf"\s*name:\s*{re.escape(port_name)}\b"
         )
         if not pattern.search(text):
-            fail(f"{file}: Mesh network REST route must be exact and target codewire-mesh:http")
+            fail(
+                f"{file}: Mesh network REST route must be exact and target "
+                f"{service}:{port_name}"
+            )
 
 
 def mesh_primary_origin_rest_edge_self_test() -> None:
-    """Ensure the fixture rejects a broad-fallback or wrong-backend edit."""
+    """Demonstrate rejection of wrong hosted and Kind REST backends."""
     source = {
         file: read_text(file)
         for file in [
@@ -3960,18 +4058,43 @@ def mesh_primary_origin_rest_edge_self_test() -> None:
             "tests/e2e/kind/ingress.yaml",
         ]
     }
-    broken = source.copy()
-    file = "tests/e2e/kind/ingress.yaml"
-    before = "name: codewire-mesh"
-    if before not in broken[file]:
-        raise RuntimeError("Mesh primary-origin fixture source is missing expected Mesh backend")
-    broken[file] = broken[file].replace(before, "name: codewire-orchestration", 1)
-    failures: list[str] = []
-    assert_mesh_primary_origin_rest_edge(failures.append, broken.__getitem__)
-    if not any("codewire-mesh:http" in failure for failure in failures):
-        raise RuntimeError(
-            f"Mesh primary-origin fixture accepted a wrong backend: {failures!r}"
+    def expect_rejection(
+        file: str,
+        expected_backend: str,
+        wrong_backend: str,
+    ) -> None:
+        broken = source.copy()
+        before = f"name: {expected_backend}"
+        if before not in broken[file]:
+            raise RuntimeError(
+                f"{file}: self-test fixture is missing expected {expected_backend} backend"
+            )
+        broken[file] = broken[file].replace(
+            before,
+            f"name: {wrong_backend}",
+            1,
         )
+        failures: list[str] = []
+        assert_mesh_primary_origin_rest_edge(failures.append, broken.__getitem__)
+        if not any(
+            file in failure and f"{expected_backend}:http" in failure
+            for failure in failures
+        ):
+            raise RuntimeError(
+                f"{file}: Mesh primary-origin fixture accepted "
+                f"{wrong_backend}: {failures!r}"
+            )
+
+    expect_rejection(
+        "deployments/k8s/base/ingress.yaml",
+        "codewire-mesh-http",
+        "codewire-mesh",
+    )
+    expect_rejection(
+        "tests/e2e/kind/ingress.yaml",
+        "codewire-mesh",
+        "codewire-mesh-http",
+    )
 
 
 def assert_internal_connect_listener_exemption(
@@ -4207,10 +4330,14 @@ def connect_rules(rel_path: str, fail: Callable[[str], None]) -> dict[str, Any]:
             if not re.match(r"^/(codewire|coordinator)[\\.]", path):
                 continue
             backend = None
+            backend_service = None
             for candidate in lines[index + 1 : min(index + 8, len(lines))]:
-                backend_match = re.match(r"^\s*name:\s+codewire-(\w+)", candidate)
+                backend_match = re.match(
+                    r"^\s*name:\s+(codewire-[a-z0-9-]+)", candidate
+                )
                 if backend_match:
-                    backend = backend_match.group(1)
+                    backend_service = backend_match.group(1)
+                    backend = backend_service.removeprefix("codewire-").split("-", 1)[0]
                     break
             unescaped = path.replace("\\.", ".")
             if unescaped == "/codewire.":
@@ -4221,7 +4348,13 @@ def connect_rules(rel_path: str, fail: Callable[[str], None]) -> dict[str, Any]:
                 continue
             service = re.match(r"^/((?:codewire|coordinator)\.[\w.]+)/", unescaped)
             if service:
-                rules.append({"service": service.group(1), "backend": backend})
+                rules.append(
+                    {
+                        "service": service.group(1),
+                        "backend": backend,
+                        "backend_service": backend_service,
+                    }
+                )
     return {"rules": rules, "fallback": fallback}
 
 

@@ -24,7 +24,7 @@ spec:
             pathType: Exact
             backend:
               service:
-                name: codewire-mesh
+                name: codewire-mesh-http
                 port:
                   name: http
           - path: /api
@@ -525,35 +525,35 @@ spec:
             pathType: ImplementationSpecific
             backend:
               service:
-                name: codewire-mesh
+                name: codewire-mesh-http
                 port:
                   name: http
           - path: /codewire\.v1\.MeshNodeService/
             pathType: ImplementationSpecific
             backend:
               service:
-                name: codewire-mesh
+                name: codewire-mesh-http
                 port:
                   name: http
           - path: /codewire\.v1\.MeshInviteService/
             pathType: ImplementationSpecific
             backend:
               service:
-                name: codewire-mesh
+                name: codewire-mesh-http
                 port:
                   name: http
           - path: /codewire\.v1\.MeshGroupService/
             pathType: ImplementationSpecific
             backend:
               service:
-                name: codewire-mesh
+                name: codewire-mesh-http
                 port:
                   name: http
           - path: /codewire\.v1\.MeshKeyValueService/
             pathType: ImplementationSpecific
             backend:
               service:
-                name: codewire-mesh
+                name: codewire-mesh-http
                 port:
                   name: http
           - path: /codewire\.

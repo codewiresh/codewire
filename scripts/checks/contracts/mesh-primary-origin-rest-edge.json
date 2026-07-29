@@ -9,12 +9,22 @@
     "Caddyfile": "localhost:18090",
     "Caddyfile.docker": "127.0.0.1:18090"
   },
-  "kubernetes_backends": [
-    "deployments/k8s/base/ingress.yaml",
-    "deployments/k8s/overlays/local-kind/ingress.yaml",
-    "deployments/k8s/overlays/local-kind-static/ingress.yaml",
-    "tests/e2e/kind/ingress.yaml"
-  ],
-  "service": "codewire-mesh",
-  "port_name": "http"
+  "kubernetes_backends": {
+    "deployments/k8s/base/ingress.yaml": {
+      "service": "codewire-mesh-http",
+      "port_name": "http"
+    },
+    "deployments/k8s/overlays/local-kind/ingress.yaml": {
+      "service": "codewire-mesh",
+      "port_name": "http"
+    },
+    "deployments/k8s/overlays/local-kind-static/ingress.yaml": {
+      "service": "codewire-mesh",
+      "port_name": "http"
+    },
+    "tests/e2e/kind/ingress.yaml": {
+      "service": "codewire-mesh",
+      "port_name": "http"
+    }
+  }
 }
