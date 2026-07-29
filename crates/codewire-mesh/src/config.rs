@@ -1,17 +1,10 @@
 use std::fmt;
 use std::net::SocketAddr;
-use std::str::FromStr;
 
 pub const DEFAULT_LISTEN_ADDR: &str = "0.0.0.0:8080";
 pub const MESH_URL_ENV: &str = "CODEWIRE_MESH_URL";
 pub const LISTEN_ADDR_ENV: &str = "CODEWIRE_MESH_LISTEN_ADDR";
-pub const AUTH_MODE_ENV: &str = "CODEWIRE_MESH_AUTH_MODE";
-pub const AUTH_TOKEN_ENV: &str = "CODEWIRE_MESH_AUTH_TOKEN";
 pub const DERP_URL_ENV: &str = "CODEWIRE_MESH_DERP_URL";
-pub const OIDC_ISSUER_ENV: &str = "CODEWIRE_MESH_OIDC_ISSUER";
-pub const OIDC_CLIENT_ID_ENV: &str = "CODEWIRE_MESH_OIDC_CLIENT_ID";
-pub const OIDC_CLIENT_SECRET_ENV: &str = "CODEWIRE_MESH_OIDC_CLIENT_SECRET";
-pub const OIDC_ALLOWED_GROUPS_ENV: &str = "CODEWIRE_MESH_OIDC_ALLOWED_GROUPS";
 pub const DATABASE_URL_ENV: &str = "DATABASE_URL";
 pub const MESH_AUTHORIZATION_URL_ENV: &str = "CODEWIRE_MESH_AUTHORIZATION_URL";
 pub const MESH_AUTHORIZATION_HMAC_SECRET_ENV: &str = "CODEWIRE_MESH_AUTHORIZATION_HMAC_SECRET";
@@ -69,47 +62,11 @@ impl fmt::Debug for LocalMeshAuthorizationConfig {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum AuthMode {
-    None,
-    Token,
-    Oidc,
-}
-
-impl AuthMode {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::None => "none",
-            Self::Token => "token",
-            Self::Oidc => "oidc",
-        }
-    }
-}
-
-impl FromStr for AuthMode {
-    type Err = ConfigError;
-
-    fn from_str(raw: &str) -> Result<Self, Self::Err> {
-        match raw.trim().to_ascii_lowercase().as_str() {
-            "none" => Ok(Self::None),
-            "token" => Ok(Self::Token),
-            "oidc" => Ok(Self::Oidc),
-            other => Err(ConfigError::InvalidAuthMode(other.to_string())),
-        }
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Config {
     pub bind_addr: SocketAddr,
     pub base_url: String,
-    pub auth_mode: AuthMode,
-    pub auth_token: Option<String>,
     pub derp_url: Option<String>,
-    pub oidc_issuer: Option<String>,
-    pub oidc_client_id: Option<String>,
-    pub oidc_client_secret: Option<String>,
-    pub oidc_allowed_groups: Vec<String>,
     pub database_url: Option<String>,
     /// Present for the hosted deployment. It is mandatory whenever Mesh owns
     /// a PostgreSQL database, so a hosted request can never fall back to
@@ -144,20 +101,10 @@ impl Config {
             },
         };
 
-        let auth_mode = first_non_empty([args.auth_mode, getenv(AUTH_MODE_ENV)])
-            .as_deref()
-            .map(AuthMode::from_str)
-            .transpose()?
-            .unwrap_or(AuthMode::None);
         let derp_url = first_non_empty([args.derp_url, getenv(DERP_URL_ENV)]);
         if let Some(url) = derp_url.as_deref() {
             validate_base_url(url)?;
         }
-        let oidc_allowed_groups =
-            first_non_empty([args.oidc_allowed_groups, getenv(OIDC_ALLOWED_GROUPS_ENV)])
-                .map(|raw| parse_csv_list(&raw))
-                .unwrap_or_default();
-
         let database_url = first_non_empty([args.database_url, getenv(DATABASE_URL_ENV), None]);
         let mesh_authorization = mesh_authorization_config(
             getenv(MESH_AUTHORIZATION_URL_ENV),
@@ -179,16 +126,7 @@ impl Config {
         Ok(Self {
             bind_addr,
             base_url,
-            auth_mode,
-            auth_token: first_non_empty([args.auth_token, getenv(AUTH_TOKEN_ENV)]),
             derp_url,
-            oidc_issuer: first_non_empty([args.oidc_issuer, getenv(OIDC_ISSUER_ENV)]),
-            oidc_client_id: first_non_empty([args.oidc_client_id, getenv(OIDC_CLIENT_ID_ENV)]),
-            oidc_client_secret: first_non_empty([
-                args.oidc_client_secret,
-                getenv(OIDC_CLIENT_SECRET_ENV),
-            ]),
-            oidc_allowed_groups,
             database_url,
             mesh_authorization,
             local_authorization,
@@ -210,8 +148,6 @@ pub enum ConfigError {
     InvalidListenAddr { value: String, message: String },
     #[error("invalid PORT {value:?}: {message}")]
     InvalidPort { value: String, message: String },
-    #[error("invalid auth mode {0:?}; expected none, token, or oidc")]
-    InvalidAuthMode(String),
     #[error(
         "{MESH_AUTHORIZATION_URL_ENV} and {MESH_AUTHORIZATION_HMAC_SECRET_ENV} must be set together"
     )]
@@ -232,13 +168,7 @@ pub enum ConfigError {
 struct Args {
     base_url: Option<String>,
     listen: Option<String>,
-    auth_mode: Option<String>,
-    auth_token: Option<String>,
     derp_url: Option<String>,
-    oidc_issuer: Option<String>,
-    oidc_client_id: Option<String>,
-    oidc_client_secret: Option<String>,
-    oidc_allowed_groups: Option<String>,
     database_url: Option<String>,
 }
 
@@ -265,51 +195,9 @@ impl Args {
                 }
                 FlagValue::NotMatched => {}
             }
-            match flag_value(&arg, "--auth-mode", &mut iter)? {
-                FlagValue::Matched(value) => {
-                    parsed.auth_mode = Some(value);
-                    continue;
-                }
-                FlagValue::NotMatched => {}
-            }
-            match flag_value(&arg, "--auth-token", &mut iter)? {
-                FlagValue::Matched(value) => {
-                    parsed.auth_token = Some(value);
-                    continue;
-                }
-                FlagValue::NotMatched => {}
-            }
             match flag_value(&arg, "--derp-url", &mut iter)? {
                 FlagValue::Matched(value) => {
                     parsed.derp_url = Some(value);
-                    continue;
-                }
-                FlagValue::NotMatched => {}
-            }
-            match flag_value(&arg, "--oidc-issuer", &mut iter)? {
-                FlagValue::Matched(value) => {
-                    parsed.oidc_issuer = Some(value);
-                    continue;
-                }
-                FlagValue::NotMatched => {}
-            }
-            match flag_value(&arg, "--oidc-client-id", &mut iter)? {
-                FlagValue::Matched(value) => {
-                    parsed.oidc_client_id = Some(value);
-                    continue;
-                }
-                FlagValue::NotMatched => {}
-            }
-            match flag_value(&arg, "--oidc-client-secret", &mut iter)? {
-                FlagValue::Matched(value) => {
-                    parsed.oidc_client_secret = Some(value);
-                    continue;
-                }
-                FlagValue::NotMatched => {}
-            }
-            match flag_value(&arg, "--oidc-allowed-groups", &mut iter)? {
-                FlagValue::Matched(value) => {
-                    parsed.oidc_allowed_groups = Some(value);
                     continue;
                 }
                 FlagValue::NotMatched => {}
@@ -356,14 +244,6 @@ fn trim(value: Option<String>) -> Option<String> {
     value
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
-}
-
-fn parse_csv_list(raw: &str) -> Vec<String> {
-    raw.split(',')
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-        .collect()
 }
 
 fn mesh_authorization_config(
@@ -465,39 +345,21 @@ mod tests {
     }
 
     #[test]
-    fn cli_flags_win_over_mesh_env() {
+    fn retained_cli_flags_win_over_mesh_env() {
         let cfg = Config::from_sources(
             [
                 "--base-url=https://flag.example",
                 "--listen",
                 ":18080",
-                "--auth-mode",
-                "oidc",
-                "--auth-token",
-                "flag-token",
                 "--derp-url",
                 "https://derp.flag",
-                "--oidc-issuer",
-                "https://issuer.flag",
-                "--oidc-client-id",
-                "client-flag",
-                "--oidc-client-secret",
-                "secret-flag",
-                "--oidc-allowed-groups",
-                "devs, operators ",
                 "--database-url",
                 "postgres://flag/db",
             ],
             env(&[
                 (MESH_URL_ENV, "https://mesh.codewire.sh"),
                 (LISTEN_ADDR_ENV, "127.0.0.1:1"),
-                (AUTH_MODE_ENV, "token"),
-                (AUTH_TOKEN_ENV, "env-token"),
                 (DERP_URL_ENV, "https://derp.env"),
-                (OIDC_ISSUER_ENV, "https://issuer.env"),
-                (OIDC_CLIENT_ID_ENV, "client-env"),
-                (OIDC_CLIENT_SECRET_ENV, "secret-env"),
-                (OIDC_ALLOWED_GROUPS_ENV, "envs"),
                 (DATABASE_URL_ENV, "postgres://env/db"),
                 (
                     MESH_AUTHORIZATION_URL_ENV,
@@ -510,13 +372,7 @@ mod tests {
 
         assert_eq!(cfg.base_url, "https://flag.example");
         assert_eq!(cfg.bind_addr, "0.0.0.0:18080".parse().unwrap());
-        assert_eq!(cfg.auth_mode, AuthMode::Oidc);
-        assert_eq!(cfg.auth_token.as_deref(), Some("flag-token"));
         assert_eq!(cfg.derp_url.as_deref(), Some("https://derp.flag"));
-        assert_eq!(cfg.oidc_issuer.as_deref(), Some("https://issuer.flag"));
-        assert_eq!(cfg.oidc_client_id.as_deref(), Some("client-flag"));
-        assert_eq!(cfg.oidc_client_secret.as_deref(), Some("secret-flag"));
-        assert_eq!(cfg.oidc_allowed_groups, ["devs", "operators"]);
         assert_eq!(cfg.database_url.as_deref(), Some("postgres://flag/db"));
         assert_eq!(
             cfg.mesh_authorization
@@ -568,31 +424,5 @@ mod tests {
         )
         .unwrap();
         assert_eq!(cfg.bind_addr, "0.0.0.0:9090".parse().unwrap());
-    }
-
-    #[test]
-    fn rejects_invalid_auth_mode() {
-        let err = Config::from_sources(
-            Vec::<String>::new(),
-            env(&[
-                (MESH_URL_ENV, "https://mesh.codewire.sh"),
-                (AUTH_MODE_ENV, "saml"),
-            ]),
-        )
-        .unwrap_err();
-        assert_eq!(err, ConfigError::InvalidAuthMode("saml".to_string()));
-    }
-
-    #[test]
-    fn rejects_legacy_github_auth_mode() {
-        let err = Config::from_sources(
-            Vec::<String>::new(),
-            env(&[
-                (MESH_URL_ENV, "https://mesh.codewire.sh"),
-                (AUTH_MODE_ENV, "github"),
-            ]),
-        )
-        .unwrap_err();
-        assert_eq!(err, ConfigError::InvalidAuthMode("github".to_string()));
     }
 }

@@ -24,17 +24,7 @@ meshAuthorization:
 
 mesh:
   baseURL: https://mesh.codewire-dev.sh
-  authMode: oidc
-  authToken: ""
   listenAddr: "0.0.0.0:8080"
-
-oidc:
-  issuer: https://codewire-dev.sh
-  clientID: codewire-mesh-dev
-  clientSecretRef:
-    name: codewire-mesh-oidc
-    key: MESH_OIDC_CLIENT_SECRET
-    optional: true
 
 ingress:
   enabled: true

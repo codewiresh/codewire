@@ -28,7 +28,6 @@ codewire-tailnet = { workspace = true }
 codewire-server-core = { workspace = true }
 futures-util = "0.3"
 rand = { workspace = true }
-reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
@@ -42,4 +41,5 @@ url = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
+reqwest = { workspace = true }
 tower = { workspace = true }

@@ -457,23 +457,14 @@ elif [ "$event_selected" = false ]; then
         # These lightweight ratchet/source guards already run once in Policy.
         recognized=true
         ;;
-      scripts/checks/contracts/mesh-surface-policy.json)
-        # Phased Mesh caller/count/source-shape data is consumed by the REST
-        # surface guard in Policy. Product paths in the same change continue
-        # through the independent classifiers below.
+      scripts/checks/contracts/mesh-final-surface-policy.json)
+        # The final Mesh guard is a lightweight policy check. Product paths in
+        # the same change continue through the independent classifiers below.
         recognized=true
         ;;
       scripts/checks/contracts/connect-edge-ownership.json)
         select_token contracts
         select_token contracts_proto
-        select_token edge_kind
-        recognized=true
-        ;;
-      scripts/checks/contracts/mesh-primary-origin-rest-edge.json)
-        # This is a checked edge-routing fixture for the explicitly
-        # transitional Mesh REST bridge. It is neither OpenAPI input nor a
-        # generated proto contract; the edge family executes its owning
-        # checker and route assertions.
         select_token edge_kind
         recognized=true
         ;;
@@ -839,10 +830,6 @@ elif [ "$event_selected" = false ]; then
         recognized=true
         ;;
       scripts/checks/contracts/connect-edge-ownership.json)
-        select_token edge_kind
-        recognized=true
-        ;;
-      scripts/checks/contracts/mesh-primary-origin-rest-edge.json)
         select_token edge_kind
         recognized=true
         ;;

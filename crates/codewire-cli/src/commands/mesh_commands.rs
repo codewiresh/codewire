@@ -599,9 +599,9 @@ pub(crate) fn start_local_mesh_process(spec: &LocalMeshStartSpec) -> anyhow::Res
         .arg(&spec.listen_addr)
         // The local API key remains a standard cw_ credential. Keep it out
         // of argv; only hash-only verification material reaches the Mesh
-        // process besides its normal local environment.
-        .env("CODEWIRE_MESH_AUTH_MODE", "token")
-        .env("CODEWIRE_MESH_AUTH_TOKEN", &spec.auth_token)
+        // process besides its normal local environment. The client retains
+        // the credential; Mesh itself no longer accepts a separate server
+        // auth-token mode.
         .env(
             "CODEWIRE_MESH_LOCAL_ORGANIZATION_ID",
             &spec.local_identity.organization_id,

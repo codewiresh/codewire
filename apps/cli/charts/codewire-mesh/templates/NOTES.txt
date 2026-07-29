@@ -8,15 +8,10 @@ Codewire Mesh has been deployed!
   Mesh URL: http://localhost:8080
 {{- end }}
 
-2. Get the auth token:
-{{- if eq .Values.mesh.authMode "token" }}
-  kubectl get secret {{ include "codewire-mesh.fullname" . }} -n {{ .Release.Namespace }} -o jsonpath='{.data.auth-token}' | base64 -d
-{{- else }}
-  Auth mode is "{{ .Values.mesh.authMode }}" — no token required.
-{{- end }}
+2. Authenticate through the primary Codewire identity plane:
+  cw login
 
 3. Create or select a network:
-  cw network create project-alpha --mesh-url {{ .Values.mesh.baseURL }} --token <auth-token>
+  cw network create project-alpha --mesh-url {{ .Values.mesh.baseURL }}
 
 4. Inspect environment-owned nodes in that network:
-  cw network nodes --network project-alpha --mesh-url {{ .Values.mesh.baseURL }} --token <auth-token>

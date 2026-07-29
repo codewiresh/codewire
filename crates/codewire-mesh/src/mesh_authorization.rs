@@ -1,4 +1,4 @@
-//! Typed authorization boundary for the retained Mesh network REST adapter.
+//! Typed authorization boundary for the generated Mesh Connect services.
 //!
 //! Hosted Mesh forwards exactly one already-presented product credential to
 //! the primary control plane through the private generated service. Standalone

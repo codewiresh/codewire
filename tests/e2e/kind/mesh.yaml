@@ -40,7 +40,6 @@ spec:
               exec codewire-mesh \
                 --base-url=http://codewire-mesh:8080 \
                 --listen=0.0.0.0:8080 \
-                --auth-mode=none \
                 --database-url="$DATABASE_URL"
           env:
             - name: DATABASE_URL

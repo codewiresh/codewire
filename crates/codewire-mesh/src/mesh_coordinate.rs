@@ -524,7 +524,7 @@ mod tests {
     use connectrpc::Protocol;
     use connectrpc::client::{ClientConfig, HttpClient};
 
-    use crate::config::{AuthMode, Config, LocalMeshAuthorizationConfig};
+    use crate::config::{Config, LocalMeshAuthorizationConfig};
     use crate::mesh_authorization::hash_local_environment_token;
     use crate::store::{MemoryStore, MeshStore};
 
@@ -532,13 +532,7 @@ mod tests {
         Config {
             bind_addr: "127.0.0.1:0".parse().unwrap(),
             base_url: "http://mesh.test".to_owned(),
-            auth_mode: AuthMode::None,
-            auth_token: None,
             derp_url: None,
-            oidc_issuer: None,
-            oidc_client_id: None,
-            oidc_client_secret: None,
-            oidc_allowed_groups: Vec::new(),
             database_url: None,
             mesh_authorization: None,
             local_authorization: Some(LocalMeshAuthorizationConfig {

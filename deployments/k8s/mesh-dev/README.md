@@ -11,10 +11,9 @@ The Mesh control service is separate from DERP:
 - `derp.codewire-dev.sh` serves the DERP packet relay used by the tailnet data
   path.
 
-Dev uses `authMode=oidc` with issuer `https://codewire-dev.sh`. Platform bearer
-tokens are accepted through the Mesh platform-session fallback, so the OIDC
-client secret is optional for the current dev validation lane. A dedicated dev
-Mesh OIDC client secret can be added later for browser login parity.
+Hosted Mesh forwards canonical browser, OAuth, and organization-scoped API-key
+credentials to the private Mesh authorization service. It has no independent
+OIDC client, browser-session fallback, or Mesh-owned login flow.
 
 ## Deployment ownership
 

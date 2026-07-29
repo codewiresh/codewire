@@ -455,17 +455,9 @@ run_deploy() {
 
   install_helm
   scripts/ci/tests/test-deploy-prod-render.sh
-  for mode in none token oidc; do
-    args=(--set mesh.baseURL=https://mesh.test --set mesh.authMode="$mode")
-    if [ "$mode" = token ]; then
-      args+=(--set mesh.authToken=test-token)
-    elif [ "$mode" = oidc ]; then
-      args+=(--set oidc.issuer=https://issuer.test --set oidc.clientID=cid \
-        --set oidc.clientSecret=cs)
-    fi
-    helm template test apps/cli/charts/codewire-mesh "${args[@]}" \
-      | grep -q 'exec codewire-mesh'
-  done
+  helm template test apps/cli/charts/codewire-mesh \
+    --set mesh.baseURL=https://mesh.test \
+    | grep -q 'exec codewire-mesh'
   local dev_mesh_render
   dev_mesh_render="$(helm template codewire-mesh-dev apps/cli/charts/codewire-mesh \
     -f deployments/k8s/mesh-dev/values.yaml \

@@ -302,8 +302,6 @@ run_paths_case google_rpc_python_template pull_request refs/pull/1115/head false
   proto/buf.gen.google-rpc-python.yaml
 run_paths_case edge_ownership pull_request refs/pull/114/head false \
   'contracts contracts_proto edge_kind policy' scripts/checks/contracts/connect-edge-ownership.json
-run_paths_case mesh_primary_origin_rest_edge pull_request refs/pull/1141/head false \
-  'edge_kind policy' scripts/checks/contracts/mesh-primary-origin-rest-edge.json
 run_paths_case generated_connect_go pull_request refs/pull/111/head false \
   'contracts contracts_proto go_consumer_interop go_support policy' libs/gen-go/codewire/v1/api_key.pb.go
 run_paths_case retired_generated_connect_oracle_go pull_request refs/pull/1110/head false \
@@ -340,18 +338,18 @@ run_paths_case mixed_contracts pull_request refs/pull/116/head false \
 run_paths_case rest_policy_guard pull_request refs/pull/117/head false \
   'policy' scripts/checks/contracts/rest-surface-baseline.json
 run_paths_case mesh_policy_guard pull_request refs/pull/1171/head false \
-  'policy' scripts/checks/contracts/mesh-surface-policy.json
+  'policy' scripts/checks/contracts/mesh-final-surface-policy.json
 run_paths_case mesh_policy_go_sdk pull_request refs/pull/1172/head false \
   'go_consumer_interop go_support policy sdk_go' \
-  scripts/checks/contracts/mesh-surface-policy.json \
+  scripts/checks/contracts/mesh-final-surface-policy.json \
   libs/sdk-go/mesh_networks.go
 run_paths_case mesh_policy_rust_client pull_request refs/pull/1173/head false \
   'policy rust rust_pkg_codewire_client' \
-  scripts/checks/contracts/mesh-surface-policy.json \
+  scripts/checks/contracts/mesh-final-surface-policy.json \
   crates/codewire-client/src/mesh.rs
 run_paths_case mesh_policy_runtime pull_request refs/pull/1174/head false \
   'policy transport transport_pkg_codewire_mesh' \
-  scripts/checks/contracts/mesh-surface-policy.json \
+  scripts/checks/contracts/mesh-final-surface-policy.json \
   crates/codewire-mesh/src/server.rs
 run_paths_case package_contract_tooling pull_request refs/pull/118/head false \
   'contracts contracts_proto contracts_rest policy security security_js web' \
@@ -563,7 +561,7 @@ all_product='contracts contracts_proto contracts_rest database deploy edge_kind 
 run_paths_case unknown pull_request refs/pull/18/head false "$all_product" \
   unexplained/new-surface.txt
 run_paths_case mesh_policy_unknown pull_request refs/pull/181/head false "$all_product" \
-  scripts/checks/contracts/mesh-surface-policy.json \
+  scripts/checks/contracts/mesh-final-surface-policy.json \
   unexplained/new-surface.txt
 run_paths_case empty pull_request refs/pull/19/head false "$all_product" ''
 

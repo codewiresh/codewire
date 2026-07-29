@@ -38,45 +38,14 @@ spec:
         - name: mesh
           image: "{{ include "codewire-mesh.imageRef" . }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
-          {{- if eq .Values.mesh.authMode "token" }}
           command: ["sh", "-c"]
           args:
             - |
               exec codewire-mesh \
                 --base-url={{ .Values.mesh.baseURL | quote }} \
-                --listen={{ .Values.mesh.listenAddr | quote }} \
-                --auth-mode={{ .Values.mesh.authMode | quote }} \
-                --auth-token="$CW_AUTH_TOKEN"{{- if .Values.database.enabled }} \
+                --listen={{ .Values.mesh.listenAddr | quote }}{{- if .Values.database.enabled }} \
                 --database-url="$DATABASE_URL"
                 {{- end }}
-          {{- else if eq .Values.mesh.authMode "oidc" }}
-          command: ["sh", "-c"]
-          args:
-            - |
-              exec codewire-mesh \
-                --base-url={{ .Values.mesh.baseURL | quote }} \
-                --listen={{ .Values.mesh.listenAddr | quote }} \
-                --auth-mode=oidc \
-                --oidc-issuer={{ .Values.oidc.issuer | quote }} \
-                --oidc-client-id={{ .Values.oidc.clientID | quote }} \
-                --oidc-client-secret="$OIDC_CLIENT_SECRET"{{- if .Values.mesh.authToken }} \
-                --auth-token="$CW_AUTH_TOKEN"
-                {{- end }}{{- if .Values.oidc.allowedGroups }} \
-                --oidc-allowed-groups={{ join "," .Values.oidc.allowedGroups | quote }}
-                {{- end }}{{- if .Values.database.enabled }} \
-                --database-url="$DATABASE_URL"
-                {{- end }}
-          {{- else }}
-          command: ["sh", "-c"]
-          args:
-            - |
-              exec codewire-mesh \
-                --base-url={{ .Values.mesh.baseURL | quote }} \
-                --listen={{ .Values.mesh.listenAddr | quote }} \
-                --auth-mode={{ .Values.mesh.authMode | quote }}{{- if .Values.database.enabled }} \
-                --database-url="$DATABASE_URL"
-                {{- end }}
-          {{- end }}
           env:
             {{- if .Values.database.enabled }}
             - name: DATABASE_URL
@@ -97,28 +66,6 @@ spec:
                   name: {{ .Values.meshAuthorization.hmacSecretRef.name }}
                   key: {{ .Values.meshAuthorization.hmacSecretRef.key }}
                   optional: {{ .Values.meshAuthorization.hmacSecretRef.optional | default false }}
-            {{- end }}
-            {{- if eq .Values.mesh.authMode "token" }}
-            - name: CW_AUTH_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "codewire-mesh.fullname" . }}
-                  key: auth-token
-            {{- end }}
-            {{- if eq .Values.mesh.authMode "oidc" }}
-            - name: OIDC_CLIENT_SECRET
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .Values.oidc.clientSecretRef.name | default (include "codewire-mesh.fullname" .) }}
-                  key: {{ .Values.oidc.clientSecretRef.key }}
-                  optional: {{ .Values.oidc.clientSecretRef.optional | default false }}
-            {{- end }}
-            {{- if and .Values.mesh.authToken (ne .Values.mesh.authMode "token") }}
-            - name: CW_AUTH_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "codewire-mesh.fullname" . }}
-                  key: auth-token
             {{- end }}
           ports:
             - name: http

@@ -25,13 +25,6 @@ pub const GROUP_DEBUG_FULL: &str = "full";
 
 pub type SharedStore = Arc<dyn MeshStore>;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SessionIdentity {
-    pub user_id: Option<i64>,
-    pub sub: Option<String>,
-    pub username: String,
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Network {
     pub id: String,
@@ -158,39 +151,6 @@ pub struct NodeEnrollment {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub struct User {
-    pub github_id: i64,
-    pub username: String,
-    pub avatar_url: String,
-    pub created_at: DateTime<Utc>,
-    pub last_login_at: DateTime<Utc>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub struct OidcUser {
-    pub sub: String,
-    pub username: String,
-    pub avatar_url: String,
-    pub created_at: DateTime<Utc>,
-    pub last_login_at: DateTime<Utc>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct OAuthState {
-    pub state: String,
-    pub created_at: DateTime<Utc>,
-    pub expires_at: DateTime<Utc>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub struct OidcSession {
-    pub token: String,
-    pub sub: String,
-    pub created_at: DateTime<Utc>,
-    pub expires_at: DateTime<Utc>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct AccessGrant {
     pub id: String,
     pub network_id: String,
@@ -274,7 +234,6 @@ pub enum StoreError {
 
 #[async_trait]
 pub trait MeshStore: Send + Sync + 'static {
-    async fn session_identity(&self, token: &str) -> Result<Option<SessionIdentity>, StoreError>;
     async fn kv_set(
         &self,
         network_id: &str,
@@ -404,15 +363,6 @@ pub trait MeshStore: Send + Sync + 'static {
         token_hash: &str,
         redeemed_at: DateTime<Utc>,
     ) -> Result<Option<NodeEnrollment>, StoreError>;
-    async fn user_get_by_username(&self, username: &str) -> Result<Option<User>, StoreError>;
-    async fn oauth_state_create(&self, state: OAuthState) -> Result<(), StoreError>;
-    async fn oauth_state_consume(&self, state: &str) -> Result<(), StoreError>;
-    async fn oidc_user_upsert(&self, user: OidcUser) -> Result<(), StoreError>;
-    async fn oidc_user_get_by_sub(&self, sub: &str) -> Result<Option<OidcUser>, StoreError>;
-    async fn oidc_user_list_by_username(&self, username: &str)
-    -> Result<Vec<OidcUser>, StoreError>;
-    async fn oidc_session_create(&self, session: OidcSession) -> Result<(), StoreError>;
-    async fn oidc_session_get(&self, token: &str) -> Result<Option<OidcSession>, StoreError>;
     async fn access_grant_create(&self, grant: AccessGrant) -> Result<(), StoreError>;
     async fn access_grant_get(
         &self,
@@ -471,11 +421,6 @@ struct MemoryState {
     access_grants: HashMap<(String, String), AccessGrant>,
     task_events: Vec<TaskWatchEvent>,
     next_task_seq: i64,
-    github_users: HashMap<i64, MemoryGitHubUser>,
-    github_sessions: HashMap<String, MemoryGitHubSession>,
-    oauth_states: HashMap<String, OAuthState>,
-    oidc_users: HashMap<String, MemoryOidcUser>,
-    oidc_sessions: HashMap<String, OidcSession>,
 }
 
 #[derive(Clone)]
@@ -484,117 +429,14 @@ struct MemoryNetwork {
     created_at: DateTime<Utc>,
 }
 
-struct MemoryGitHubUser {
-    username: String,
-}
-
-struct MemoryGitHubSession {
-    github_id: i64,
-    expires_at: DateTime<Utc>,
-}
-
-struct MemoryOidcUser {
-    username: String,
-    avatar_url: String,
-    created_at: DateTime<Utc>,
-    last_login_at: DateTime<Utc>,
-}
-
 impl MemoryStore {
     pub fn new() -> Self {
         Self::default()
-    }
-
-    pub async fn upsert_github_session(
-        &self,
-        token: impl Into<String>,
-        github_id: i64,
-        username: impl Into<String>,
-        expires_at: DateTime<Utc>,
-    ) {
-        let mut state = self.state.lock().await;
-        state.github_users.insert(
-            github_id,
-            MemoryGitHubUser {
-                username: username.into(),
-            },
-        );
-        state.github_sessions.insert(
-            token.into(),
-            MemoryGitHubSession {
-                github_id,
-                expires_at,
-            },
-        );
-    }
-
-    pub async fn upsert_oidc_session(
-        &self,
-        token: impl Into<String>,
-        sub: impl Into<String>,
-        username: impl Into<String>,
-        expires_at: DateTime<Utc>,
-    ) {
-        let mut state = self.state.lock().await;
-        let sub = sub.into();
-        let token = token.into();
-        let now = Utc::now();
-        state.oidc_users.insert(
-            sub.clone(),
-            MemoryOidcUser {
-                username: username.into(),
-                avatar_url: String::new(),
-                created_at: now,
-                last_login_at: now,
-            },
-        );
-        state.oidc_sessions.insert(
-            token.clone(),
-            OidcSession {
-                token,
-                sub,
-                created_at: now,
-                expires_at,
-            },
-        );
     }
 }
 
 #[async_trait]
 impl MeshStore for MemoryStore {
-    async fn session_identity(&self, token: &str) -> Result<Option<SessionIdentity>, StoreError> {
-        let state = self.state.lock().await;
-        let now = Utc::now();
-
-        if let Some(session) = state.oidc_sessions.get(token)
-            && session.expires_at > now
-        {
-            let username = state
-                .oidc_users
-                .get(&session.sub)
-                .map(|user| user.username.clone())
-                .unwrap_or_default();
-            return Ok(Some(SessionIdentity {
-                user_id: None,
-                sub: Some(session.sub.clone()),
-                username,
-            }));
-        }
-
-        if let Some(session) = state.github_sessions.get(token)
-            && session.expires_at > now
-            && let Some(user) = state.github_users.get(&session.github_id)
-        {
-            return Ok(Some(SessionIdentity {
-                user_id: Some(session.github_id),
-                sub: None,
-                username: user.username.clone(),
-            }));
-        }
-
-        Ok(None)
-    }
-
     async fn kv_set(
         &self,
         network_id: &str,
@@ -1163,103 +1005,6 @@ impl MeshStore for MemoryStore {
         Ok(Some(enrollment.clone()))
     }
 
-    async fn user_get_by_username(&self, username: &str) -> Result<Option<User>, StoreError> {
-        let state = self.state.lock().await;
-        let now = Utc::now();
-        Ok(state
-            .github_users
-            .iter()
-            .find(|(_, user)| user.username == username)
-            .map(|(github_id, user)| User {
-                github_id: *github_id,
-                username: user.username.clone(),
-                avatar_url: String::new(),
-                created_at: now,
-                last_login_at: now,
-            }))
-    }
-
-    async fn oauth_state_create(&self, state_value: OAuthState) -> Result<(), StoreError> {
-        let mut state = self.state.lock().await;
-        state
-            .oauth_states
-            .insert(state_value.state.clone(), state_value);
-        Ok(())
-    }
-
-    async fn oauth_state_consume(&self, state_value: &str) -> Result<(), StoreError> {
-        let mut state = self.state.lock().await;
-        let Some(stored) = state.oauth_states.remove(state_value) else {
-            return Err(StoreError::NotFound);
-        };
-        if stored.expires_at <= Utc::now() {
-            return Err(StoreError::NotFound);
-        }
-        Ok(())
-    }
-
-    async fn oidc_user_upsert(&self, user: OidcUser) -> Result<(), StoreError> {
-        let mut state = self.state.lock().await;
-        state.oidc_users.insert(
-            user.sub,
-            MemoryOidcUser {
-                username: user.username,
-                avatar_url: user.avatar_url,
-                created_at: user.created_at,
-                last_login_at: user.last_login_at,
-            },
-        );
-        Ok(())
-    }
-
-    async fn oidc_user_get_by_sub(&self, sub: &str) -> Result<Option<OidcUser>, StoreError> {
-        let state = self.state.lock().await;
-        Ok(state.oidc_users.get(sub).map(|user| OidcUser {
-            sub: sub.to_string(),
-            username: user.username.clone(),
-            avatar_url: user.avatar_url.clone(),
-            created_at: user.created_at,
-            last_login_at: user.last_login_at,
-        }))
-    }
-
-    async fn oidc_user_list_by_username(
-        &self,
-        username: &str,
-    ) -> Result<Vec<OidcUser>, StoreError> {
-        let state = self.state.lock().await;
-        let mut users = state
-            .oidc_users
-            .iter()
-            .filter(|(_, user)| user.username == username)
-            .map(|(sub, user)| OidcUser {
-                sub: sub.clone(),
-                username: user.username.clone(),
-                avatar_url: user.avatar_url.clone(),
-                created_at: user.created_at,
-                last_login_at: user.last_login_at,
-            })
-            .collect::<Vec<_>>();
-        users.sort_by(|a, b| a.sub.cmp(&b.sub));
-        Ok(users)
-    }
-
-    async fn oidc_session_create(&self, session: OidcSession) -> Result<(), StoreError> {
-        let mut state = self.state.lock().await;
-        state.oidc_sessions.insert(session.token.clone(), session);
-        Ok(())
-    }
-
-    async fn oidc_session_get(&self, token: &str) -> Result<Option<OidcSession>, StoreError> {
-        let state = self.state.lock().await;
-        let now = Utc::now();
-        Ok(state
-            .oidc_sessions
-            .get(token)
-            .filter(|session| session.expires_at > now)
-            .cloned())
-    }
-
     async fn access_grant_create(&self, grant: AccessGrant) -> Result<(), StoreError> {
         self.network_ensure(&grant.network_id).await?;
         let mut state = self.state.lock().await;
@@ -1554,53 +1299,6 @@ impl PostgresMeshStore {
 
 #[async_trait]
 impl MeshStore for PostgresMeshStore {
-    async fn session_identity(&self, token: &str) -> Result<Option<SessionIdentity>, StoreError> {
-        let now = Utc::now();
-
-        if let Some(row) = sqlx::query(
-            r#"
-            SELECT s.sub, COALESCE(u.username, '') AS username
-            FROM oidc_sessions s
-            LEFT JOIN oidc_users u ON u.sub = s.sub
-            WHERE s.token = $1 AND s.expires_at > $2
-            "#,
-        )
-        .bind(token)
-        .bind(now)
-        .fetch_optional(&self.pool)
-        .await?
-        {
-            return Ok(Some(SessionIdentity {
-                user_id: None,
-                sub: Some(row.try_get("sub")?),
-                username: row.try_get("username")?,
-            }));
-        }
-
-        let row = sqlx::query(
-            r#"
-            SELECT s.github_id, u.username
-            FROM sessions s
-            INNER JOIN users u ON u.github_id = s.github_id
-            WHERE s.token = $1 AND s.expires_at > $2
-            "#,
-        )
-        .bind(token)
-        .bind(now)
-        .fetch_optional(&self.pool)
-        .await?;
-
-        if let Some(row) = row {
-            Ok(Some(SessionIdentity {
-                user_id: Some(row.try_get("github_id")?),
-                sub: None,
-                username: row.try_get("username")?,
-            }))
-        } else {
-            Ok(None)
-        }
-    }
-
     async fn kv_set(
         &self,
         network_id: &str,
@@ -2459,140 +2157,6 @@ impl MeshStore for PostgresMeshStore {
         }
     }
 
-    async fn user_get_by_username(&self, username: &str) -> Result<Option<User>, StoreError> {
-        let row = sqlx::query(
-            r#"
-            SELECT github_id, username, avatar_url, created_at, last_login_at
-            FROM users
-            WHERE username = $1
-            "#,
-        )
-        .bind(username)
-        .fetch_optional(&self.pool)
-        .await?;
-
-        row.map(row_to_user).transpose()
-    }
-
-    async fn oauth_state_create(&self, state: OAuthState) -> Result<(), StoreError> {
-        sqlx::query(
-            r#"
-            INSERT INTO oauth_state (state, created_at, expires_at)
-            VALUES ($1, $2, $3)
-            "#,
-        )
-        .bind(&state.state)
-        .bind(state.created_at)
-        .bind(state.expires_at)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
-    }
-
-    async fn oauth_state_consume(&self, state: &str) -> Result<(), StoreError> {
-        let result = sqlx::query(
-            r#"
-            DELETE FROM oauth_state
-            WHERE state = $1 AND expires_at > $2
-            "#,
-        )
-        .bind(state)
-        .bind(Utc::now())
-        .execute(&self.pool)
-        .await?;
-        if result.rows_affected() == 0 {
-            return Err(StoreError::NotFound);
-        }
-        Ok(())
-    }
-
-    async fn oidc_user_upsert(&self, user: OidcUser) -> Result<(), StoreError> {
-        sqlx::query(
-            r#"
-            INSERT INTO oidc_users (sub, username, avatar_url, created_at, last_login_at)
-            VALUES ($1, $2, $3, $4, $5)
-            ON CONFLICT (sub) DO UPDATE SET
-                username = EXCLUDED.username,
-                avatar_url = EXCLUDED.avatar_url,
-                last_login_at = EXCLUDED.last_login_at
-            "#,
-        )
-        .bind(&user.sub)
-        .bind(&user.username)
-        .bind(&user.avatar_url)
-        .bind(user.created_at)
-        .bind(user.last_login_at)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
-    }
-
-    async fn oidc_user_get_by_sub(&self, sub: &str) -> Result<Option<OidcUser>, StoreError> {
-        let row = sqlx::query(
-            r#"
-            SELECT sub, username, avatar_url, created_at, last_login_at
-            FROM oidc_users
-            WHERE sub = $1
-            "#,
-        )
-        .bind(sub)
-        .fetch_optional(&self.pool)
-        .await?;
-
-        row.map(row_to_oidc_user).transpose()
-    }
-
-    async fn oidc_user_list_by_username(
-        &self,
-        username: &str,
-    ) -> Result<Vec<OidcUser>, StoreError> {
-        let rows = sqlx::query(
-            r#"
-            SELECT sub, username, avatar_url, created_at, last_login_at
-            FROM oidc_users
-            WHERE username = $1
-            ORDER BY sub
-            "#,
-        )
-        .bind(username)
-        .fetch_all(&self.pool)
-        .await?;
-
-        rows.into_iter().map(row_to_oidc_user).collect()
-    }
-
-    async fn oidc_session_create(&self, session: OidcSession) -> Result<(), StoreError> {
-        sqlx::query(
-            r#"
-            INSERT INTO oidc_sessions (token, sub, created_at, expires_at)
-            VALUES ($1, $2, $3, $4)
-            "#,
-        )
-        .bind(&session.token)
-        .bind(&session.sub)
-        .bind(session.created_at)
-        .bind(session.expires_at)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
-    }
-
-    async fn oidc_session_get(&self, token: &str) -> Result<Option<OidcSession>, StoreError> {
-        let row = sqlx::query(
-            r#"
-            SELECT token, sub, created_at, expires_at
-            FROM oidc_sessions
-            WHERE token = $1 AND expires_at > $2
-            "#,
-        )
-        .bind(token)
-        .bind(Utc::now())
-        .fetch_optional(&self.pool)
-        .await?;
-
-        row.map(row_to_oidc_session).transpose()
-    }
-
     async fn access_grant_create(&self, grant: AccessGrant) -> Result<(), StoreError> {
         self.network_ensure(&grant.network_id).await?;
         let verbs = serde_json::to_string(&grant.verbs).map_err(|_| StoreError::NotFound)?;
@@ -2982,35 +2546,6 @@ fn row_to_node_enrollment(row: sqlx::postgres::PgRow) -> Result<NodeEnrollment, 
     })
 }
 
-fn row_to_user(row: sqlx::postgres::PgRow) -> Result<User, StoreError> {
-    Ok(User {
-        github_id: row.try_get("github_id")?,
-        username: row.try_get("username")?,
-        avatar_url: row.try_get("avatar_url")?,
-        created_at: row.try_get("created_at")?,
-        last_login_at: row.try_get("last_login_at")?,
-    })
-}
-
-fn row_to_oidc_user(row: sqlx::postgres::PgRow) -> Result<OidcUser, StoreError> {
-    Ok(OidcUser {
-        sub: row.try_get("sub")?,
-        username: row.try_get("username")?,
-        avatar_url: row.try_get("avatar_url")?,
-        created_at: row.try_get("created_at")?,
-        last_login_at: row.try_get("last_login_at")?,
-    })
-}
-
-fn row_to_oidc_session(row: sqlx::postgres::PgRow) -> Result<OidcSession, StoreError> {
-    Ok(OidcSession {
-        token: row.try_get("token")?,
-        sub: row.try_get("sub")?,
-        created_at: row.try_get("created_at")?,
-        expires_at: row.try_get("expires_at")?,
-    })
-}
-
 fn access_grant_select_sql(where_clause: &str) -> String {
     format!(
         r#"
@@ -3094,7 +2629,7 @@ mod migration_tests {
 
     use super::*;
 
-    const EXPECTED_MESH_MIGRATION_COUNT: usize = 5;
+    const EXPECTED_MESH_MIGRATION_COUNT: usize = 6;
 
     #[derive(Debug, PartialEq, Eq)]
     struct AppliedMigration {
@@ -3161,6 +2696,7 @@ mod migration_tests {
                 (3, "contract native invitations".to_string()),
                 (4, "retire persistent node bearer".to_string()),
                 (5, "retire network auth issuer".to_string()),
+                (6, "retire raw auth session device state".to_string()),
             ]
         );
         assert!(
@@ -3436,8 +2972,7 @@ mod migration_tests {
 
     #[tokio::test]
     #[ignore = "requires TEST_DATABASE_URL"]
-    async fn persistent_node_bearer_migration_scrubs_values_and_retires_index() -> anyhow::Result<()>
-    {
+    async fn raw_auth_retirement_drops_only_empty_legacy_state() -> anyhow::Result<()> {
         let test_db = TestDatabase::create(&test_database_url()?).await?;
         let result = async {
             let pool = PgPoolOptions::new()
@@ -3471,7 +3006,7 @@ mod migration_tests {
             )
             .execute(&pool)
             .await?;
-            for migration in MESH_MIGRATOR.iter().take(3) {
+            for migration in MESH_MIGRATOR.iter().take(5) {
                 sqlx::query(
                     r#"
                     INSERT INTO _sqlx_migrations
@@ -3493,66 +3028,128 @@ mod migration_tests {
             )
             .execute(&pool)
             .await?;
+            drop(pool);
+
+            let store = PostgresMeshStore::connect(&test_db.url).await?;
+            let legacy_relations: i64 = sqlx::query_scalar(
+                r#"
+                SELECT count(*)
+                FROM pg_class
+                WHERE relnamespace = 'public'::regnamespace
+                  AND relname IN (
+                    'users', 'sessions', 'oauth_state', 'oidc_users',
+                    'oidc_sessions', 'oidc_device_flows', 'device_codes',
+                    'github_app'
+                  )
+                "#,
+            )
+            .fetch_one(&store.pool)
+            .await?;
+            let node_token_column_exists: bool = sqlx::query_scalar(
+                r#"
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM information_schema.columns
+                    WHERE table_schema = 'public'
+                      AND table_name = 'nodes'
+                      AND column_name = 'token'
+                )
+                "#,
+            )
+            .fetch_one(&store.pool)
+            .await?;
+            let retained_network: String = sqlx::query_scalar(
+                "SELECT organization_id FROM networks WHERE network_id = 'network-alpha'",
+            )
+            .fetch_one(&store.pool)
+            .await?;
+            let applied = applied_migrations(&store.pool).await?;
+
+            anyhow::ensure!(legacy_relations == 0);
+            anyhow::ensure!(!node_token_column_exists);
+            anyhow::ensure!(retained_network == "org-alpha");
+            anyhow::ensure!(applied.len() == EXPECTED_MESH_MIGRATION_COUNT);
+            anyhow::ensure!(applied.last().map(|migration| migration.version) == Some(6));
+            anyhow::Ok(())
+        }
+        .await;
+        let cleanup = test_db.drop().await;
+        result.and(cleanup)
+    }
+
+    #[tokio::test]
+    #[ignore = "requires TEST_DATABASE_URL"]
+    async fn raw_auth_retirement_refuses_nonempty_legacy_state() -> anyhow::Result<()> {
+        let test_db = TestDatabase::create(&test_database_url()?).await?;
+        let result = async {
+            let pool = PgPoolOptions::new()
+                .max_connections(1)
+                .connect(&test_db.url)
+                .await?;
+            for migration_sql in [
+                include_str!("../migrations/001_initial_schema.sql"),
+                include_str!("../migrations/002_network_organization_ownership.sql"),
+                include_str!("../migrations/003_contract_native_invitations.sql"),
+                include_str!("../migrations/004_retire_persistent_node_bearer.sql"),
+                include_str!("../migrations/005_retire_network_auth_issuer.sql"),
+            ] {
+                sqlx::raw_sql(migration_sql).execute(&pool).await?;
+            }
             sqlx::query(
                 r#"
-                INSERT INTO nodes
-                    (network_id, name, token, authorized_at, last_seen_at)
-                VALUES ('network-alpha', 'node-alpha', 'persistent-node-bearer',
-                        now(), now())
+                CREATE TABLE _sqlx_migrations (
+                    version BIGINT PRIMARY KEY,
+                    description TEXT NOT NULL,
+                    installed_on TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    success BOOLEAN NOT NULL,
+                    checksum BYTEA NOT NULL,
+                    execution_time BIGINT NOT NULL
+                )
                 "#,
             )
             .execute(&pool)
             .await?;
+            for migration in MESH_MIGRATOR.iter().take(5) {
+                sqlx::query(
+                    r#"
+                    INSERT INTO _sqlx_migrations
+                        (version, description, success, checksum, execution_time)
+                    VALUES ($1, $2, true, $3, 0)
+                    "#,
+                )
+                .bind(migration.version)
+                .bind(migration.description.as_ref())
+                .bind(migration.checksum.as_ref())
+                .execute(&pool)
+                .await?;
+            }
             sqlx::query(
                 r#"
-                INSERT INTO oidc_device_flows
-                    (poll_token, device_code, network_id, node_name, node_token,
-                     expires_at)
-                VALUES ('poll-alpha', 'device-alpha', 'network-alpha',
-                        'node-alpha', 'device-flow-node-bearer',
-                        now() + interval '1 hour')
+                INSERT INTO users (github_id, username, created_at, last_login_at)
+                VALUES (1, 'legacy-mesh-user', now(), now())
                 "#,
             )
             .execute(&pool)
             .await?;
             drop(pool);
 
-            let store = PostgresMeshStore::connect(&test_db.url).await?;
-            let node_token: String =
-                sqlx::query_scalar("SELECT token FROM nodes WHERE name = 'node-alpha'")
-                    .fetch_one(&store.pool)
-                    .await?;
-            let device_flow_token: String = sqlx::query_scalar(
-                "SELECT node_token FROM oidc_device_flows WHERE poll_token = 'poll-alpha'",
-            )
-            .fetch_one(&store.pool)
-            .await?;
-            let token_index_exists: bool =
-                sqlx::query_scalar("SELECT to_regclass('public.idx_nodes_token') IS NOT NULL")
-                    .fetch_one(&store.pool)
-                    .await?;
-            let dormant_columns: i64 = sqlx::query_scalar(
-                r#"
-                SELECT count(*)
-                FROM information_schema.columns
-                WHERE table_schema = 'public'
-                  AND (
-                    (table_name = 'nodes' AND column_name = 'token')
-                    OR
-                    (table_name = 'oidc_device_flows' AND column_name = 'node_token')
-                  )
-                "#,
-            )
-            .fetch_one(&store.pool)
-            .await?;
-            let applied = applied_migrations(&store.pool).await?;
+            let startup = PostgresMeshStore::connect(&test_db.url).await;
+            anyhow::ensure!(
+                startup.is_err(),
+                "nonempty legacy auth state unexpectedly retired"
+            );
 
-            anyhow::ensure!(node_token.is_empty());
-            anyhow::ensure!(device_flow_token.is_empty());
-            anyhow::ensure!(!token_index_exists);
-            anyhow::ensure!(dormant_columns == 2);
-            anyhow::ensure!(applied.len() == EXPECTED_MESH_MIGRATION_COUNT);
-            anyhow::ensure!(applied.last().map(|migration| migration.version) == Some(5));
+            let pool = PgPoolOptions::new()
+                .max_connections(1)
+                .connect(&test_db.url)
+                .await?;
+            let retained_user_count: i64 =
+                sqlx::query_scalar("SELECT count(*) FROM users WHERE github_id = 1")
+                    .fetch_one(&pool)
+                    .await?;
+            let applied = applied_migrations(&pool).await?;
+            anyhow::ensure!(retained_user_count == 1);
+            anyhow::ensure!(applied.len() == 5);
             anyhow::Ok(())
         }
         .await;
@@ -3632,7 +3229,7 @@ mod migration_tests {
             anyhow::ensure!(legacy_count == 0);
             anyhow::ensure!(retained_value == vec![0x03, 0x04]);
             anyhow::ensure!(applied.len() == EXPECTED_MESH_MIGRATION_COUNT);
-            anyhow::ensure!(applied.last().map(|migration| migration.version) == Some(5));
+            anyhow::ensure!(applied.last().map(|migration| migration.version) == Some(6));
             anyhow::Ok(())
         }
         .await;

@@ -18,15 +18,6 @@ spec:
     - host: codewire.sh
       http:
         paths:
-          # Explicit transitional REST owner beside MeshNetworkService.
-          # Keep this exact route ahead of /api until the caller sunset.
-          - path: /api/v1/networks
-            pathType: Exact
-            backend:
-              service:
-                name: codewire-mesh-http
-                port:
-                  name: http
           - path: /api
             pathType: Prefix
             backend:

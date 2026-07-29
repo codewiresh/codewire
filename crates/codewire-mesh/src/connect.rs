@@ -1,8 +1,7 @@
 //! Generated Connect adapters for the retained Mesh product surface.
 //!
 //! This module maps protobuf values and canonical errors only. Authorization,
-//! ownership, policy, and persistence live in `product`, which is also used by
-//! every transitional REST adapter.
+//! ownership, policy, and persistence live in `product`.
 
 use buffa_types::google::protobuf::{Duration as ProtoDuration, Timestamp};
 use chrono::{Duration, Utc};
@@ -864,9 +863,9 @@ mod tests {
     use sha2::{Digest, Sha256};
 
     use super::*;
+    use crate::Config;
     use crate::config::LocalMeshAuthorizationConfig;
     use crate::store::{MemoryStore, MeshStore, NodeEnrollment};
-    use crate::{AuthMode, Config};
 
     const ORG: &str = "org-mesh-contract";
     const NETWORK: &str = "network-contract";
@@ -877,13 +876,7 @@ mod tests {
         Config {
             bind_addr: "127.0.0.1:0".parse().unwrap(),
             base_url: "https://mesh.codewire.sh".to_string(),
-            auth_mode: AuthMode::Token,
-            auth_token: None,
             derp_url: None,
-            oidc_issuer: None,
-            oidc_client_id: None,
-            oidc_client_secret: None,
-            oidc_allowed_groups: Vec::new(),
             database_url: None,
             mesh_authorization: None,
             local_authorization: Some(LocalMeshAuthorizationConfig {
@@ -961,92 +954,8 @@ mod tests {
         }
     }
 
-    async fn assert_rest_parity(
-        http: &reqwest::Client,
-        addr: std::net::SocketAddr,
-        invite_id: &str,
-    ) {
-        let authorization = format!("Bearer {API_KEY}");
-        let networks: serde_json::Value = http
-            .get(format!("http://{addr}/api/v1/networks?org_id={ORG}"))
-            .header("authorization", &authorization)
-            .send()
-            .await
-            .unwrap()
-            .error_for_status()
-            .unwrap()
-            .json()
-            .await
-            .unwrap();
-        assert_eq!(networks[0]["id"], NETWORK);
-        assert_eq!(networks[0]["org_id"], ORG);
-
-        let nodes: serde_json::Value = http
-            .get(format!("http://{addr}/api/v1/nodes?network_id={NETWORK}"))
-            .header("authorization", &authorization)
-            .send()
-            .await
-            .unwrap()
-            .error_for_status()
-            .unwrap()
-            .json()
-            .await
-            .unwrap();
-        assert_eq!(nodes[0]["name"], "node-a");
-
-        let invites: serde_json::Value = http
-            .get(format!("http://{addr}/api/v1/invites?network_id={NETWORK}"))
-            .header("authorization", &authorization)
-            .send()
-            .await
-            .unwrap()
-            .error_for_status()
-            .unwrap()
-            .json()
-            .await
-            .unwrap();
-        assert_eq!(invites[0]["id"], invite_id);
-        assert_eq!(invites[0]["org_id"], ORG);
-        assert!(invites[0].get("invite_code").is_none());
-        assert!(invites[0].get("invite_token").is_none());
-        assert!(invites[0].get("code_hash").is_none());
-        assert!(invites[0].get("uses_remaining").is_none());
-
-        let group: serde_json::Value = http
-            .get(format!(
-                "http://{addr}/api/v1/groups/contract?network_id={NETWORK}"
-            ))
-            .header("authorization", &authorization)
-            .send()
-            .await
-            .unwrap()
-            .error_for_status()
-            .unwrap()
-            .json()
-            .await
-            .unwrap();
-        assert_eq!(group["policy"]["messages_policy"], GROUP_MESSAGES_OPEN);
-        assert_eq!(group["policy"]["debug_policy"], GROUP_DEBUG_FULL);
-        assert_eq!(group["members"][0]["node_name"], "node-a");
-
-        let value = http
-            .get(format!(
-                "http://{addr}/api/v1/kv/runtime/key-a?network_id={NETWORK}"
-            ))
-            .header("authorization", authorization)
-            .send()
-            .await
-            .unwrap()
-            .error_for_status()
-            .unwrap()
-            .bytes()
-            .await
-            .unwrap();
-        assert_eq!(value.as_ref(), b"value-a");
-    }
-
     #[tokio::test]
-    async fn all_retained_unary_rpcs_share_the_rest_domain_and_store() {
+    async fn all_retained_unary_rpcs_share_the_connect_domain_and_store() {
         let store = MemoryStore::new();
         let (addr, task) = start(store.clone()).await;
         let config = client_config(addr, Some(API_KEY));
@@ -1232,8 +1141,6 @@ mod tests {
             entry.entry.as_option().unwrap().value.as_slice(),
             b"value-a"
         );
-
-        assert_rest_parity(&reqwest::Client::new(), addr, &invite_id).await;
 
         group_client
             .remove_mesh_group_member(RemoveMeshGroupMemberRequest {
@@ -1602,7 +1509,7 @@ mod tests {
             .send()
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
         task.abort();
     }
 }

@@ -546,68 +546,84 @@ deploy_overlay() {
 }
 
 mesh_product_connect_ownership_smoke() {
-  log "proving Mesh primary-origin REST/Connect parity and private HMAC authorization"
+  log "proving Mesh generated Connect ownership and private HMAC authorization"
   local api_key='cw_c0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0de'
   local network_id='mesh-kind-owned'
   local session_network_id='mesh-kind-session'
   local invite_network_id='mesh-kind-invite'
 
-  wait_edge_upstream mesh-networks "/api/v1/networks?org_id=org_contract_1" 401
+  # The Mesh product surface is Connect-only. A plain HTTP request reaches the
+  # generated service and is rejected by Connect's protocol validation. That
+  # proves ingress selected the generated service before the authenticated
+  # product probes below run.
+  wait_edge_upstream mesh-connect "/codewire.v1.MeshNetworkService/ListMeshNetworks" 400
 
   curl_settled -X POST \
     -H "authorization: Bearer ${api_key}" \
     -H 'content-type: application/json' \
-    -d "{\"org_id\":\"org_contract_1\",\"network_id\":\"${network_id}\"}" \
-    "${KIND_INGRESS_URL}/api/v1/networks"
-  if [ "$PROBE_CODE" != "200" ] || [ "$PROBE_BODY" != "{\"status\":\"created\",\"network_id\":\"${network_id}\"}" ]; then
-    echo "::error::Mesh primary-origin create through the HMAC receiver failed: code=$PROBE_CODE body=$PROBE_BODY"
+    -d "{\"orgId\":\"org_contract_1\",\"networkId\":\"${network_id}\"}" \
+    "${KIND_INGRESS_URL}/codewire.v1.MeshNetworkService/CreateMeshNetwork"
+  if [ "$PROBE_CODE" != "200" ] || ! jq -e --arg network_id "$network_id" \
+      '.network.id == $network_id and .network.orgId == "org_contract_1"' \
+      <<<"$PROBE_BODY" >/dev/null; then
+    echo "::error::Mesh Connect API-key create failed: code=$PROBE_CODE body=$PROBE_BODY"
     exit 1
   fi
   if ! grep -qi '^x-codewire-service: mesh' "$PROBE_HEADERS"; then
-    echo "::error::Mesh network create did not reach the Mesh workload"
+    echo "::error::Mesh Connect network create did not reach the Mesh workload"
     cat "$PROBE_HEADERS"
     exit 1
   fi
 
-  # A browser cookie is forwarded only under its canonical primary name. This
-  # crosses the same private HMAC receiver as the machine key above; it never
-  # falls back to Mesh's retired session middleware.
+  # A browser cookie crosses the private HMAC authorization receiver; Mesh has
+  # no independent cookie/session middleware.
   curl_settled -X POST \
     -H 'cookie: codewire.session_token=contract-user-session-token' \
     -H 'content-type: application/json' \
-    -d "{\"org_id\":\"org_contract_1\",\"network_id\":\"${session_network_id}\"}" \
-    "${KIND_INGRESS_URL}/api/v1/networks"
-  if [ "$PROBE_CODE" != "200" ] || [ "$PROBE_BODY" != "{\"status\":\"created\",\"network_id\":\"${session_network_id}\"}" ]; then
-    echo "::error::Mesh canonical-session bridge through the HMAC receiver failed: code=$PROBE_CODE body=$PROBE_BODY"
+    -d "{\"orgId\":\"org_contract_1\",\"networkId\":\"${session_network_id}\"}" \
+    "${KIND_INGRESS_URL}/codewire.v1.MeshNetworkService/CreateMeshNetwork"
+  if [ "$PROBE_CODE" != "200" ] || ! jq -e --arg network_id "$session_network_id" \
+      '.network.id == $network_id and .network.orgId == "org_contract_1"' \
+      <<<"$PROBE_BODY" >/dev/null; then
+    echo "::error::Mesh Connect session-cookie create failed: code=$PROBE_CODE body=$PROBE_BODY"
     exit 1
   fi
 
-  # Invitation administration remains owner-only. Create the invitation target
-  # as the organization owner, then redeem its capability as the ordinary
-  # member through the machine credential below.
+  # Invitation administration remains owner-only. Create the invitation
+  # target as the organization owner, then redeem its capability as the
+  # ordinary member through the machine credential below.
   curl_settled -X POST \
     -H 'cookie: codewire.session_token=contract-admin-session-token' \
     -H 'content-type: application/json' \
-    -d "{\"org_id\":\"org_contract_1\",\"network_id\":\"${invite_network_id}\"}" \
-    "${KIND_INGRESS_URL}/api/v1/networks"
-  if [ "$PROBE_CODE" != "200" ] || [ "$PROBE_BODY" != "{\"status\":\"created\",\"network_id\":\"${invite_network_id}\"}" ]; then
-    echo "::error::Mesh owner-session invitation target create failed: code=$PROBE_CODE body=$PROBE_BODY"
-    exit 1
-  fi
-
-  curl_settled -H "authorization: Bearer ${api_key}" \
-    "${KIND_INGRESS_URL}/api/v1/networks?org_id=org_contract_1"
-  if [ "$PROBE_CODE" != "200" ] || ! jq -e --arg network_id "$network_id" \
-      'any(.[]; .id == $network_id and .org_id == "org_contract_1" and .node_count == 0 and .invite_count == 0)' \
+    -d "{\"orgId\":\"org_contract_1\",\"networkId\":\"${invite_network_id}\"}" \
+    "${KIND_INGRESS_URL}/codewire.v1.MeshNetworkService/CreateMeshNetwork"
+  if [ "$PROBE_CODE" != "200" ] || ! jq -e --arg network_id "$invite_network_id" \
+      '.network.id == $network_id and .network.orgId == "org_contract_1"' \
       <<<"$PROBE_BODY" >/dev/null; then
-    echo "::error::Mesh primary-origin list did not return the exact owned network: code=$PROBE_CODE body=$PROBE_BODY"
+    echo "::error::Mesh Connect owner-session create failed: code=$PROBE_CODE body=$PROBE_BODY"
     exit 1
   fi
 
-  curl_settled -H "authorization: Bearer ${api_key}" \
-    "${KIND_INGRESS_URL}/api/v1/networks?org_id=org_contract_2"
+  curl_settled -X POST \
+    -H "authorization: Bearer ${api_key}" \
+    -H 'content-type: application/json' \
+    -d '{"orgId":"org_contract_1"}' \
+    "${KIND_INGRESS_URL}/codewire.v1.MeshNetworkService/ListMeshNetworks"
+  if [ "$PROBE_CODE" != "200" ] || ! jq -e --arg network_id "$network_id" \
+      'any(.networks[]; .id == $network_id and .orgId == "org_contract_1" and
+       (.nodeCount // 0) == 0 and (.inviteCount // 0) == 0)' \
+      <<<"$PROBE_BODY" >/dev/null; then
+    echo "::error::Mesh Connect API-key list did not return the exact owned network: code=$PROBE_CODE body=$PROBE_BODY"
+    exit 1
+  fi
+
+  curl_settled -X POST \
+    -H "authorization: Bearer ${api_key}" \
+    -H 'content-type: application/json' \
+    -d '{"orgId":"org_contract_2"}' \
+    "${KIND_INGRESS_URL}/codewire.v1.MeshNetworkService/ListMeshNetworks"
   if [ "$PROBE_CODE" != "403" ] || ! jq -e \
-      '.status == 403 and .code == "forbidden" and .detail == "forbidden"' \
+      '.code == "permission_denied"' \
       <<<"$PROBE_BODY" >/dev/null; then
     echo "::error::exact-organization API key crossed the Mesh ownership boundary: code=$PROBE_CODE body=$PROBE_BODY"
     exit 1
@@ -615,28 +631,33 @@ mesh_product_connect_ownership_smoke() {
 
   # The OAuth bearer belongs to the same ordinary product user and sees the
   # same organization-owned state through the identical receiver/domain path.
-  curl_settled -H 'authorization: Bearer at_kind_connect_oidc_codewire_api' \
-    "${KIND_INGRESS_URL}/api/v1/networks?org_id=org_contract_1"
+  curl_settled -X POST \
+    -H 'authorization: Bearer at_kind_connect_oidc_codewire_api' \
+    -H 'content-type: application/json' \
+    -d '{"orgId":"org_contract_1"}' \
+    "${KIND_INGRESS_URL}/codewire.v1.MeshNetworkService/ListMeshNetworks"
   if [ "$PROBE_CODE" != "200" ] || ! jq -e \
       --arg api_key_network "$network_id" \
       --arg session_network "$session_network_id" \
       --arg invite_network "$invite_network_id" \
-      'length == 3 and
-       any(.[]; .id == $api_key_network and .org_id == "org_contract_1") and
-       any(.[]; .id == $session_network and .org_id == "org_contract_1") and
-       any(.[]; .id == $invite_network and .org_id == "org_contract_1")' \
+      'any(.networks[]; .id == $api_key_network and .orgId == "org_contract_1") and
+       any(.networks[]; .id == $session_network and .orgId == "org_contract_1") and
+       any(.networks[]; .id == $invite_network and .orgId == "org_contract_1")' \
       <<<"$PROBE_BODY" >/dev/null; then
-    echo "::error::Mesh OAuth bridge did not return the exact organization-owned networks: code=$PROBE_CODE body=$PROBE_BODY"
+    echo "::error::Mesh Connect OAuth list did not return the exact organization-owned networks: code=$PROBE_CODE body=$PROBE_BODY"
     exit 1
   fi
 
   local rejected_credential='Bearer rejected-bridge-credential'
-  curl_settled -H "authorization: ${rejected_credential}" \
-    "${KIND_INGRESS_URL}/api/v1/networks?org_id=org_contract_1"
+  curl_settled -X POST \
+    -H "authorization: ${rejected_credential}" \
+    -H 'content-type: application/json' \
+    -d '{"orgId":"org_contract_1"}' \
+    "${KIND_INGRESS_URL}/codewire.v1.MeshNetworkService/ListMeshNetworks"
   if [ "$PROBE_CODE" != "401" ] || ! jq -e \
-      '.status == 401 and .detail == "unauthorized"' <<<"$PROBE_BODY" >/dev/null \
+      '.code == "unauthenticated"' <<<"$PROBE_BODY" >/dev/null \
     || [[ "$PROBE_BODY" == *"${rejected_credential}"* ]]; then
-    echo "::error::Mesh bridge leaked or accepted a rejected primary credential: code=$PROBE_CODE body=$PROBE_BODY"
+    echo "::error::Mesh Connect receiver leaked or accepted a rejected primary credential: code=$PROBE_CODE body=$PROBE_BODY"
     exit 1
   fi
 
@@ -728,6 +749,8 @@ mesh_product_connect_ownership_smoke() {
     fi
   done <<'EOF'
 POST /api/v1/node-enrollments/redeem
+POST /api/v1/networks
+GET /api/v1/networks
 POST /api/v1/network-auth/runtime/node
 GET /api/v1/network-auth/bundle
 POST /api/v1/network-auth/delegation/node
@@ -735,18 +758,15 @@ POST /api/v1/network-auth/runtime/client
 GET /api/v1/tailnet/coordinate
 EOF
 
-  local node_registration token_rows token_index dormant_token_columns migration_004
-  local migration_005 network_auth_rows
+  local node_registration legacy_relations legacy_columns migration_004
+  local migration_005 migration_006 network_auth_rows
   node_registration="$(kubectl -n "$NS" exec deploy/postgres -- \
     psql -U codewire -d codewire_mesh -tA -F '|' -c \
-      "SELECT network_id, name, owner_subject, authorized_by, enrollment_id, peer_url, token FROM nodes WHERE network_id = '${network_id}' AND name = 'mesh-kind-node'")"
-  token_rows="$(kubectl -n "$NS" exec deploy/postgres -- \
-    psql -U codewire -d codewire_mesh -tA -F '|' -c \
-      "SELECT (SELECT count(*) FROM nodes WHERE token <> ''), (SELECT count(*) FROM oidc_device_flows WHERE node_token <> '')")"
-  token_index="$(kubectl -n "$NS" exec deploy/postgres -- \
+      "SELECT network_id, name, owner_subject, authorized_by, enrollment_id, peer_url FROM nodes WHERE network_id = '${network_id}' AND name = 'mesh-kind-node'")"
+  legacy_relations="$(kubectl -n "$NS" exec deploy/postgres -- \
     psql -U codewire -d codewire_mesh -tAc \
-      "SELECT count(*) FROM pg_indexes WHERE schemaname = 'public' AND indexname = 'idx_nodes_token'")"
-  dormant_token_columns="$(kubectl -n "$NS" exec deploy/postgres -- \
+      "SELECT count(*) FROM pg_class WHERE relnamespace = 'public'::regnamespace AND relname IN ('users', 'sessions', 'oauth_state', 'oidc_users', 'oidc_sessions', 'oidc_device_flows', 'device_codes', 'github_app')")"
+  legacy_columns="$(kubectl -n "$NS" exec deploy/postgres -- \
     psql -U codewire -d codewire_mesh -tAc \
       "SELECT count(*) FROM information_schema.columns WHERE table_schema = 'public' AND ((table_name = 'nodes' AND column_name = 'token') OR (table_name = 'oidc_device_flows' AND column_name = 'node_token'))")"
   migration_004="$(kubectl -n "$NS" exec deploy/postgres -- \
@@ -755,17 +775,20 @@ EOF
   migration_005="$(kubectl -n "$NS" exec deploy/postgres -- \
     psql -U codewire -d codewire_mesh -tA -F '|' -c \
       "SELECT description, success FROM _sqlx_migrations WHERE version = 5")"
+  migration_006="$(kubectl -n "$NS" exec deploy/postgres -- \
+    psql -U codewire -d codewire_mesh -tA -F '|' -c \
+      "SELECT description, success FROM _sqlx_migrations WHERE version = 6")"
   network_auth_rows="$(kubectl -n "$NS" exec deploy/postgres -- \
     psql -U codewire -d codewire_mesh -tAc \
       "SELECT count(*) FROM kv WHERE namespace = 'mesh.networkauth'")"
-  if [ "$node_registration" != "${network_id}|mesh-kind-node|usr_contract_admin|usr_contract_admin|${enrollment_id}|https://mesh-kind-node.test/peer|" ] \
-    || [ "$token_rows" != "0|0" ] \
-    || [ "$token_index" != "0" ] \
-    || [ "$dormant_token_columns" != "2" ] \
+  if [ "$node_registration" != "${network_id}|mesh-kind-node|usr_contract_admin|usr_contract_admin|${enrollment_id}|https://mesh-kind-node.test/peer" ] \
+    || [ "$legacy_relations" != "0" ] \
+    || [ "$legacy_columns" != "0" ] \
     || [ "$migration_004" != "retire persistent node bearer|t" ] \
     || [ "$migration_005" != "retire network auth issuer|t" ] \
+    || [ "$migration_006" != "retire raw auth session device state|t" ] \
     || [ "$network_auth_rows" != "0" ]; then
-    echo "::error::Mesh bearer/issuer retirement persistence proof failed: node=${node_registration:-missing} token_rows=${token_rows:-missing} index=${token_index:-missing} columns=${dormant_token_columns:-missing} migration_004=${migration_004:-missing} migration_005=${migration_005:-missing} network_auth_rows=${network_auth_rows:-missing}"
+    echo "::error::Mesh raw-auth retirement persistence proof failed: node=${node_registration:-missing} legacy_relations=${legacy_relations:-missing} legacy_columns=${legacy_columns:-missing} migration_004=${migration_004:-missing} migration_005=${migration_005:-missing} migration_006=${migration_006:-missing} network_auth_rows=${network_auth_rows:-missing}"
     exit 1
   fi
 
@@ -850,7 +873,7 @@ EOF
     echo "::error::Mesh invitation consumption/provenance is not one-use and non-secret: rows=${invite_rows:-missing} provenance=${invite_provenance:-missing}"
     exit 1
   fi
-  log "Mesh primary-origin REST/Connect/HMAC/exact-org/invitation/enrollment proof OK"
+  log "Mesh Connect/HMAC/exact-org/invitation/enrollment proof OK"
 }
 
 # Polls a path through the ingress until the expected status arrives —
