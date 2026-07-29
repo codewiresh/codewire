@@ -1,5 +1,5 @@
 {
-  "$comment": "Phased hosted-Mesh caller, source-shape, count, and fingerprint policy after WI-8B typed coordinate convergence and runtime-credential retirement. The route inventory, dispositions, credentials, packages, and raw URL records remain in rest-surface-baseline.json; parser and guard semantics remain in repo_checks.py.",
+  "$comment": "Phased hosted-Mesh caller, source-shape, count, and fingerprint policy after WI-9A removes obsolete browser invitation presentation. The route inventory, dispositions, credentials, packages, and raw URL records remain in rest-surface-baseline.json; parser and guard semantics remain in repo_checks.py.",
   "schema_version": 1,
   "surface": {
     "route_registrations": 18,
@@ -54,8 +54,8 @@
       },
       "operations_without_callers": 13,
       "wrapper_declaration_records": 0,
-      "client_url_template_records": 6,
-      "client_url_template_occurrences": 11
+      "client_url_template_records": 5,
+      "client_url_template_occurrences": 10
     }
   },
   "network_operation_callers": {

@@ -246,7 +246,7 @@
 
 
     #[test]
-    fn network_invite_parser_accepts_qr_flag() {
+    fn network_invite_parser_rejects_removed_browser_qr_flag() {
         let cli = Cli::try_parse_from([
             "cw",
             "network",
@@ -258,43 +258,10 @@
             "--ttl",
             "2h",
             "--qr",
-            "--output",
-            "json",
         ])
-        .unwrap();
-        let Command::Network {
-            command: NetworkCommand::Invite(args),
-        } = cli.command
-        else {
-            panic!("expected network invite command");
-        };
-        assert_eq!(args.org, "org-alpha");
-        assert_eq!(args.network.as_deref(), Some("project-alpha"));
-        assert_eq!(args.ttl, "2h");
-        assert!(args.qr);
-        assert_eq!(args.output, OutputFormat::Json);
-    }
+        .unwrap_err();
 
-    #[test]
-    fn invite_join_url_trims_mesh_url_and_code() {
-        assert_eq!(
-            invite_join_url("https://mesh.example.com/", " CW-INV-TEST "),
-            "https://mesh.example.com/join?invite=CW-INV-TEST"
-        );
-    }
-
-
-    #[test]
-    fn invite_qr_renderer_outputs_terminal_blocks() {
-        let rendered =
-            render_qr_terminal("https://mesh.example.com/join?invite=CW-INV-TEST").unwrap();
-
-        assert!(rendered.lines().count() > 8);
-        assert!(
-            rendered.contains('\u{2580}')
-                || rendered.contains('\u{2584}')
-                || rendered.contains('\u{2588}')
-        );
+        assert_eq!(cli.kind(), clap::error::ErrorKind::UnknownArgument);
     }
 
 

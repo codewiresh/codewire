@@ -83,11 +83,6 @@ pub(crate) async fn handle_network_command(
                 .create_invite(org_id, network_id, ttl)
                 .await?;
             print_invite(&invite, &mesh.mesh_url, args.output)?;
-            if args.qr {
-                let join_url = invite_join_url(&mesh.mesh_url, &invite.invite_code);
-                let qr = render_qr_terminal(&join_url).context("render invite QR code")?;
-                eprintln!("\n{}", qr.trim_end_matches('\n'));
-            }
         }
         NetworkCommand::Join(args) => {
             let invite_code = trimmed_required(&args.invite_code, "invitation code")?;
@@ -141,11 +136,6 @@ pub(crate) async fn handle_network_command(
     }
 
     Ok(())
-}
-
-pub(crate) fn render_qr_terminal(content: &str) -> anyhow::Result<String> {
-    let code = QrCode::with_error_correction_level(content.as_bytes(), EcLevel::M)?;
-    Ok(code.render::<unicode::Dense1x2>().quiet_zone(false).build())
 }
 
 pub(crate) fn handle_mesh_command(globals: &Globals, command: MeshCommand) -> anyhow::Result<()> {

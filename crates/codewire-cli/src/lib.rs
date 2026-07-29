@@ -41,7 +41,6 @@ use presentation::{
     ExtendTtlRequest, GrantEnvironmentAccessRequest, PrepareEnvironmentRequest, RepoEntry,
     SetupAgent, StatusResponse,
 };
-use qrcode::{EcLevel, QrCode, render::unicode};
 use rand::{RngCore, rngs::OsRng};
 use secret_client::{CreateSecretProjectRequest, SecretClient, SecretMetadata, SecretProject};
 

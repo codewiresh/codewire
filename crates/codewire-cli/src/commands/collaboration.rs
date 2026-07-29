@@ -869,11 +869,10 @@ pub(crate) fn print_invite(
     match output {
         OutputFormat::Json => println!("{}", serde_json::to_string_pretty(invite)?),
         OutputFormat::Text => {
-            let join_url = invite_join_url(mesh_url, &invite.invite_code);
             eprintln!("Invite created!\n");
             eprintln!("  Code:    {}", invite.invite_code);
             eprintln!("  Expires: {}", invite.expires_at);
-            eprintln!("  URL:     {join_url}\n");
+            eprintln!();
             eprintln!("To join another device:");
             eprintln!(
                 "  cw network join --mesh-url {} {}",
@@ -882,14 +881,6 @@ pub(crate) fn print_invite(
         }
     }
     Ok(())
-}
-
-pub(crate) fn invite_join_url(mesh_url: &str, invite_code: &str) -> String {
-    format!(
-        "{}/join?invite={}",
-        mesh_url.trim_end_matches('/'),
-        invite_code.trim()
-    )
 }
 
 pub(crate) fn print_node_enrollment(

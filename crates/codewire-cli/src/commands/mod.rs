@@ -1270,8 +1270,6 @@ pub(crate) struct NetworkInviteArgs {
     network: Option<String>,
     #[arg(long, default_value = "1h", help = "Time-to-live for the invite")]
     ttl: String,
-    #[arg(long, help = "Print QR code for the invite URL")]
-    qr: bool,
     #[arg(long, value_enum, default_value_t = OutputFormat::Text, help = "Output format")]
     output: OutputFormat,
 }
