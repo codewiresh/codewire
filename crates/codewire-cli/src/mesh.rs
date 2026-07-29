@@ -184,14 +184,24 @@ impl MeshClient {
     ) -> anyhow::Result<RedeemedNodeEnrollment> {
         let redeemed = self
             .inner
-            .redeem_transitional_mesh_node_enrollment(enrollment_code, node_name)
+            .redeem_mesh_node_enrollment(rpc::RedeemMeshNodeEnrollmentRequest {
+                enrollment_code: enrollment_code.to_string(),
+                node_name: node_name.to_string(),
+                ..Default::default()
+            })
             .await?;
+        let node = redeemed
+            .node
+            .into_option()
+            .ok_or_else(|| anyhow::anyhow!("RedeemMeshNodeEnrollment returned no node"))?;
+        let enrollment = redeemed
+            .enrollment
+            .into_option()
+            .ok_or_else(|| anyhow::anyhow!("RedeemMeshNodeEnrollment returned no enrollment"))?;
         Ok(RedeemedNodeEnrollment {
-            status: redeemed.status,
-            node_token: redeemed.node_token,
-            node_name: redeemed.node_name,
-            network_id: redeemed.network_id,
-            enrollment_id: redeemed.enrollment_id,
+            node_name: node.name,
+            network_id: node.network_id,
+            enrollment_id: enrollment.id,
         })
     }
 }
@@ -311,8 +321,6 @@ pub struct NodeEnrollment {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RedeemedNodeEnrollment {
-    pub status: String,
-    pub node_token: String,
     pub node_name: String,
     pub network_id: String,
     pub enrollment_id: String,
@@ -725,17 +733,35 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn transitional_redemption_is_facade_owned_and_sends_no_bearer() {
+    async fn generated_redemption_is_facade_owned_and_sends_no_bearer() {
         let server = MockServer::start().await;
+        let response = rpc::RedeemMeshNodeEnrollmentResponse {
+            node: Some(rpc::MeshNode {
+                org_id: "org-alpha".into(),
+                network_id: "project-alpha".into(),
+                name: "builder".into(),
+                ..Default::default()
+            })
+            .into(),
+            enrollment: Some(rpc::MeshNodeEnrollment {
+                id: "enrollment-alpha".into(),
+                org_id: "org-alpha".into(),
+                network_id: "project-alpha".into(),
+                node_name: "builder".into(),
+                ..Default::default()
+            })
+            .into(),
+            ..Default::default()
+        };
         Mock::given(method("POST"))
-            .and(path("/api/v1/node-enrollments/redeem"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "status": "redeemed",
-                "node_token": "node-secret",
-                "node_name": "builder",
-                "network_id": "project-alpha",
-                "enrollment_id": "enrollment-alpha"
-            })))
+            .and(path(
+                "/codewire.v1.MeshNodeService/RedeemMeshNodeEnrollment",
+            ))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "application/proto")
+                    .set_body_bytes(response.encode_to_vec()),
+            )
             .expect(1)
             .mount(&server)
             .await;
@@ -746,6 +772,7 @@ mod tests {
             .await
             .expect("redeem");
         assert_eq!(redeemed.node_name, "builder");
-        assert_eq!(redeemed.node_token, "node-secret");
+        assert_eq!(redeemed.network_id, "project-alpha");
+        assert_eq!(redeemed.enrollment_id, "enrollment-alpha");
     }
 }

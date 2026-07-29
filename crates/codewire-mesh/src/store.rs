@@ -124,7 +124,6 @@ impl fmt::Debug for Invite {
 pub struct NodeRecord {
     pub network_id: String,
     pub name: String,
-    pub token: String,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub peer_url: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -188,16 +187,6 @@ pub struct OidcSession {
     pub token: String,
     pub sub: String,
     pub created_at: DateTime<Utc>,
-    pub expires_at: DateTime<Utc>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct OidcDeviceFlow {
-    pub poll_token: String,
-    pub device_code: String,
-    pub network_id: String,
-    pub node_name: String,
-    pub node_token: String,
     pub expires_at: DateTime<Utc>,
 }
 
@@ -402,7 +391,6 @@ pub trait MeshStore: Send + Sync + 'static {
         network_id: &str,
         name: &str,
     ) -> Result<Option<NodeRecord>, StoreError>;
-    async fn node_get_by_token(&self, token: &str) -> Result<Option<NodeRecord>, StoreError>;
     async fn node_list(&self, network_id: &str) -> Result<Vec<NodeRecord>, StoreError>;
     async fn node_list_all(&self) -> Result<Vec<NodeRecord>, StoreError>;
     async fn node_delete(&self, network_id: &str, name: &str) -> Result<(), StoreError>;
@@ -425,16 +413,6 @@ pub trait MeshStore: Send + Sync + 'static {
     -> Result<Vec<OidcUser>, StoreError>;
     async fn oidc_session_create(&self, session: OidcSession) -> Result<(), StoreError>;
     async fn oidc_session_get(&self, token: &str) -> Result<Option<OidcSession>, StoreError>;
-    async fn oidc_device_flow_create(&self, flow: OidcDeviceFlow) -> Result<(), StoreError>;
-    async fn oidc_device_flow_get(
-        &self,
-        poll_token: &str,
-    ) -> Result<Option<OidcDeviceFlow>, StoreError>;
-    async fn oidc_device_flow_complete(
-        &self,
-        poll_token: &str,
-        node_token: &str,
-    ) -> Result<(), StoreError>;
     async fn access_grant_create(&self, grant: AccessGrant) -> Result<(), StoreError>;
     async fn access_grant_get(
         &self,
@@ -498,7 +476,6 @@ struct MemoryState {
     oauth_states: HashMap<String, OAuthState>,
     oidc_users: HashMap<String, MemoryOidcUser>,
     oidc_sessions: HashMap<String, OidcSession>,
-    oidc_device_flows: HashMap<String, OidcDeviceFlow>,
 }
 
 #[derive(Clone)]
@@ -1093,7 +1070,6 @@ impl MeshStore for MemoryStore {
         }
         let key = (node.network_id.clone(), node.name.clone());
         if let Some(existing) = state.nodes.get_mut(&key) {
-            existing.token = node.token;
             existing.peer_url = node.peer_url;
             existing.github_id = node.github_id;
             existing.owner_subject = node.owner_subject;
@@ -1115,15 +1091,6 @@ impl MeshStore for MemoryStore {
         Ok(state
             .nodes
             .get(&(network_id.to_string(), name.to_string()))
-            .cloned())
-    }
-
-    async fn node_get_by_token(&self, token: &str) -> Result<Option<NodeRecord>, StoreError> {
-        let state = self.state.lock().await;
-        Ok(state
-            .nodes
-            .values()
-            .find(|node| node.token == token)
             .cloned())
     }
 
@@ -1291,43 +1258,6 @@ impl MeshStore for MemoryStore {
             .get(token)
             .filter(|session| session.expires_at > now)
             .cloned())
-    }
-
-    async fn oidc_device_flow_create(&self, flow: OidcDeviceFlow) -> Result<(), StoreError> {
-        let mut state = self.state.lock().await;
-        state
-            .oidc_device_flows
-            .insert(flow.poll_token.clone(), flow);
-        Ok(())
-    }
-
-    async fn oidc_device_flow_get(
-        &self,
-        poll_token: &str,
-    ) -> Result<Option<OidcDeviceFlow>, StoreError> {
-        let state = self.state.lock().await;
-        let now = Utc::now();
-        Ok(state
-            .oidc_device_flows
-            .get(poll_token)
-            .filter(|flow| flow.expires_at > now)
-            .cloned())
-    }
-
-    async fn oidc_device_flow_complete(
-        &self,
-        poll_token: &str,
-        node_token: &str,
-    ) -> Result<(), StoreError> {
-        let mut state = self.state.lock().await;
-        let Some(flow) = state.oidc_device_flows.get_mut(poll_token) else {
-            return Err(StoreError::NotFound);
-        };
-        if flow.expires_at <= Utc::now() {
-            return Err(StoreError::NotFound);
-        }
-        flow.node_token = node_token.to_string();
-        Ok(())
     }
 
     async fn access_grant_create(&self, grant: AccessGrant) -> Result<(), StoreError> {
@@ -2362,11 +2292,10 @@ impl MeshStore for PostgresMeshStore {
         sqlx::query(
             r#"
             INSERT INTO nodes
-                (network_id, name, token, peer_url, github_id, owner_subject, authorized_by,
+                (network_id, name, peer_url, github_id, owner_subject, authorized_by,
                  enrollment_id, authorized_at, last_seen_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
             ON CONFLICT (network_id, name) DO UPDATE SET
-                token = EXCLUDED.token,
                 peer_url = EXCLUDED.peer_url,
                 github_id = EXCLUDED.github_id,
                 owner_subject = EXCLUDED.owner_subject,
@@ -2377,7 +2306,6 @@ impl MeshStore for PostgresMeshStore {
         )
         .bind(&node.network_id)
         .bind(&node.name)
-        .bind(&node.token)
         .bind(&node.peer_url)
         .bind(node.github_id)
         .bind(&node.owner_subject)
@@ -2390,26 +2318,6 @@ impl MeshStore for PostgresMeshStore {
         Ok(())
     }
 
-    async fn node_get_by_token(&self, token: &str) -> Result<Option<NodeRecord>, StoreError> {
-        let row = sqlx::query(
-            r#"
-            SELECT network_id, name, token, peer_url, github_id, owner_subject, authorized_by,
-                   enrollment_id, authorized_at, last_seen_at
-            FROM nodes
-            WHERE token = $1
-            "#,
-        )
-        .bind(token)
-        .fetch_optional(&self.pool)
-        .await?;
-
-        if let Some(row) = row {
-            Ok(Some(row_to_node(row)?))
-        } else {
-            Ok(None)
-        }
-    }
-
     async fn node_get(
         &self,
         network_id: &str,
@@ -2417,7 +2325,7 @@ impl MeshStore for PostgresMeshStore {
     ) -> Result<Option<NodeRecord>, StoreError> {
         let row = sqlx::query(
             r#"
-            SELECT network_id, name, token, peer_url, github_id, owner_subject, authorized_by,
+            SELECT network_id, name, peer_url, github_id, owner_subject, authorized_by,
                    enrollment_id, authorized_at, last_seen_at
             FROM nodes
             WHERE network_id = $1 AND name = $2
@@ -2438,7 +2346,7 @@ impl MeshStore for PostgresMeshStore {
     async fn node_list(&self, network_id: &str) -> Result<Vec<NodeRecord>, StoreError> {
         let rows = sqlx::query(
             r#"
-            SELECT network_id, name, token, peer_url, github_id, owner_subject, authorized_by,
+            SELECT network_id, name, peer_url, github_id, owner_subject, authorized_by,
                    enrollment_id, authorized_at, last_seen_at
             FROM nodes
             WHERE network_id = $1
@@ -2455,7 +2363,7 @@ impl MeshStore for PostgresMeshStore {
     async fn node_list_all(&self) -> Result<Vec<NodeRecord>, StoreError> {
         let rows = sqlx::query(
             r#"
-            SELECT network_id, name, token, peer_url, github_id, owner_subject, authorized_by,
+            SELECT network_id, name, peer_url, github_id, owner_subject, authorized_by,
                    enrollment_id, authorized_at, last_seen_at
             FROM nodes
             ORDER BY network_id, name
@@ -2683,67 +2591,6 @@ impl MeshStore for PostgresMeshStore {
         .await?;
 
         row.map(row_to_oidc_session).transpose()
-    }
-
-    async fn oidc_device_flow_create(&self, flow: OidcDeviceFlow) -> Result<(), StoreError> {
-        sqlx::query(
-            r#"
-            INSERT INTO oidc_device_flows
-                (poll_token, device_code, network_id, node_name, node_token, expires_at)
-            VALUES ($1, $2, $3, $4, $5, $6)
-            "#,
-        )
-        .bind(&flow.poll_token)
-        .bind(&flow.device_code)
-        .bind(&flow.network_id)
-        .bind(&flow.node_name)
-        .bind(&flow.node_token)
-        .bind(flow.expires_at)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
-    }
-
-    async fn oidc_device_flow_get(
-        &self,
-        poll_token: &str,
-    ) -> Result<Option<OidcDeviceFlow>, StoreError> {
-        let row = sqlx::query(
-            r#"
-            SELECT poll_token, device_code, network_id, node_name, node_token, expires_at
-            FROM oidc_device_flows
-            WHERE poll_token = $1 AND expires_at > $2
-            "#,
-        )
-        .bind(poll_token)
-        .bind(Utc::now())
-        .fetch_optional(&self.pool)
-        .await?;
-
-        row.map(row_to_oidc_device_flow).transpose()
-    }
-
-    async fn oidc_device_flow_complete(
-        &self,
-        poll_token: &str,
-        node_token: &str,
-    ) -> Result<(), StoreError> {
-        let result = sqlx::query(
-            r#"
-            UPDATE oidc_device_flows
-            SET node_token = $1
-            WHERE poll_token = $2 AND expires_at > $3
-            "#,
-        )
-        .bind(node_token)
-        .bind(poll_token)
-        .bind(Utc::now())
-        .execute(&self.pool)
-        .await?;
-        if result.rows_affected() == 0 {
-            return Err(StoreError::NotFound);
-        }
-        Ok(())
     }
 
     async fn access_grant_create(&self, grant: AccessGrant) -> Result<(), StoreError> {
@@ -3103,7 +2950,6 @@ fn row_to_node(row: sqlx::postgres::PgRow) -> Result<NodeRecord, StoreError> {
     Ok(NodeRecord {
         network_id: row.try_get("network_id")?,
         name: row.try_get("name")?,
-        token: row.try_get("token")?,
         peer_url: row.try_get("peer_url")?,
         github_id: row.try_get("github_id")?,
         owner_subject: row.try_get("owner_subject")?,
@@ -3161,17 +3007,6 @@ fn row_to_oidc_session(row: sqlx::postgres::PgRow) -> Result<OidcSession, StoreE
         token: row.try_get("token")?,
         sub: row.try_get("sub")?,
         created_at: row.try_get("created_at")?,
-        expires_at: row.try_get("expires_at")?,
-    })
-}
-
-fn row_to_oidc_device_flow(row: sqlx::postgres::PgRow) -> Result<OidcDeviceFlow, StoreError> {
-    Ok(OidcDeviceFlow {
-        poll_token: row.try_get("poll_token")?,
-        device_code: row.try_get("device_code")?,
-        network_id: row.try_get("network_id")?,
-        node_name: row.try_get("node_name")?,
-        node_token: row.try_get("node_token")?,
         expires_at: row.try_get("expires_at")?,
     })
 }
@@ -3259,7 +3094,7 @@ mod migration_tests {
 
     use super::*;
 
-    const EXPECTED_MESH_MIGRATION_COUNT: usize = 3;
+    const EXPECTED_MESH_MIGRATION_COUNT: usize = 4;
 
     #[derive(Debug, PartialEq, Eq)]
     struct AppliedMigration {
@@ -3324,6 +3159,7 @@ mod migration_tests {
                 (1, "initial schema".to_string()),
                 (2, "network organization ownership".to_string()),
                 (3, "contract native invitations".to_string()),
+                (4, "retire persistent node bearer".to_string()),
             ]
         );
         assert!(
@@ -3590,6 +3426,132 @@ mod migration_tests {
                 "expired invitation was consumed"
             );
             anyhow::ensure!(store.invite_list("network-alpha").await?.is_empty());
+            anyhow::Ok(())
+        }
+        .await;
+        let cleanup = test_db.drop().await;
+        result.and(cleanup)
+    }
+
+    #[tokio::test]
+    #[ignore = "requires TEST_DATABASE_URL"]
+    async fn persistent_node_bearer_migration_scrubs_values_and_retires_index() -> anyhow::Result<()>
+    {
+        let test_db = TestDatabase::create(&test_database_url()?).await?;
+        let result = async {
+            let pool = PgPoolOptions::new()
+                .max_connections(1)
+                .connect(&test_db.url)
+                .await?;
+            sqlx::raw_sql(include_str!("../migrations/001_initial_schema.sql"))
+                .execute(&pool)
+                .await?;
+            sqlx::raw_sql(include_str!(
+                "../migrations/002_network_organization_ownership.sql"
+            ))
+            .execute(&pool)
+            .await?;
+            sqlx::raw_sql(include_str!(
+                "../migrations/003_contract_native_invitations.sql"
+            ))
+            .execute(&pool)
+            .await?;
+            sqlx::query(
+                r#"
+                CREATE TABLE _sqlx_migrations (
+                    version BIGINT PRIMARY KEY,
+                    description TEXT NOT NULL,
+                    installed_on TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    success BOOLEAN NOT NULL,
+                    checksum BYTEA NOT NULL,
+                    execution_time BIGINT NOT NULL
+                )
+                "#,
+            )
+            .execute(&pool)
+            .await?;
+            for migration in MESH_MIGRATOR.iter().take(3) {
+                sqlx::query(
+                    r#"
+                    INSERT INTO _sqlx_migrations
+                        (version, description, success, checksum, execution_time)
+                    VALUES ($1, $2, true, $3, 0)
+                    "#,
+                )
+                .bind(migration.version)
+                .bind(migration.description.as_ref())
+                .bind(migration.checksum.as_ref())
+                .execute(&pool)
+                .await?;
+            }
+            sqlx::query(
+                r#"
+                INSERT INTO networks (network_id, created_at, organization_id)
+                VALUES ('network-alpha', now(), 'org-alpha')
+                "#,
+            )
+            .execute(&pool)
+            .await?;
+            sqlx::query(
+                r#"
+                INSERT INTO nodes
+                    (network_id, name, token, authorized_at, last_seen_at)
+                VALUES ('network-alpha', 'node-alpha', 'persistent-node-bearer',
+                        now(), now())
+                "#,
+            )
+            .execute(&pool)
+            .await?;
+            sqlx::query(
+                r#"
+                INSERT INTO oidc_device_flows
+                    (poll_token, device_code, network_id, node_name, node_token,
+                     expires_at)
+                VALUES ('poll-alpha', 'device-alpha', 'network-alpha',
+                        'node-alpha', 'device-flow-node-bearer',
+                        now() + interval '1 hour')
+                "#,
+            )
+            .execute(&pool)
+            .await?;
+            drop(pool);
+
+            let store = PostgresMeshStore::connect(&test_db.url).await?;
+            let node_token: String =
+                sqlx::query_scalar("SELECT token FROM nodes WHERE name = 'node-alpha'")
+                    .fetch_one(&store.pool)
+                    .await?;
+            let device_flow_token: String = sqlx::query_scalar(
+                "SELECT node_token FROM oidc_device_flows WHERE poll_token = 'poll-alpha'",
+            )
+            .fetch_one(&store.pool)
+            .await?;
+            let token_index_exists: bool =
+                sqlx::query_scalar("SELECT to_regclass('public.idx_nodes_token') IS NOT NULL")
+                    .fetch_one(&store.pool)
+                    .await?;
+            let dormant_columns: i64 = sqlx::query_scalar(
+                r#"
+                SELECT count(*)
+                FROM information_schema.columns
+                WHERE table_schema = 'public'
+                  AND (
+                    (table_name = 'nodes' AND column_name = 'token')
+                    OR
+                    (table_name = 'oidc_device_flows' AND column_name = 'node_token')
+                  )
+                "#,
+            )
+            .fetch_one(&store.pool)
+            .await?;
+            let applied = applied_migrations(&store.pool).await?;
+
+            anyhow::ensure!(node_token.is_empty());
+            anyhow::ensure!(device_flow_token.is_empty());
+            anyhow::ensure!(!token_index_exists);
+            anyhow::ensure!(dormant_columns == 2);
+            anyhow::ensure!(applied.len() == EXPECTED_MESH_MIGRATION_COUNT);
+            anyhow::ensure!(applied.last().map(|migration| migration.version) == Some(4));
             anyhow::Ok(())
         }
         .await;

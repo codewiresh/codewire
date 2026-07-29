@@ -2,35 +2,13 @@ use codewire_proto::codewire::v1::{
     CreateMeshInviteRequest, CreateMeshInviteResponse, CreateMeshNetworkRequest,
     CreateMeshNetworkResponse, CreateMeshNodeEnrollmentRequest, CreateMeshNodeEnrollmentResponse,
     JoinMeshNetworkRequest, JoinMeshNetworkResponse, ListMeshNetworksRequest,
-    ListMeshNetworksResponse, ListMeshNodesRequest, ListMeshNodesResponse, RevokeMeshNodeRequest,
+    ListMeshNetworksResponse, ListMeshNodesRequest, ListMeshNodesResponse,
+    RedeemMeshNodeEnrollmentRequest, RedeemMeshNodeEnrollmentResponse, RevokeMeshNodeRequest,
     RevokeMeshNodeResponse,
 };
-use connectrpc::ErrorCode;
-use serde::{Deserialize, Serialize};
+use connectrpc::client::CallOptions;
 
 use crate::{ClientError, CodewireClient};
-
-/// Transitional result from the still-mounted enrollment-redemption endpoint.
-///
-/// WI-8A atomically replaces this with the generated redemption RPC and
-/// removes the persistent node bearer. Keeping this one runtime seam inside
-/// the shared façade prevents the CLI from owning a second transport.
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
-pub struct TransitionalMeshNodeEnrollmentRedemption {
-    #[serde(default)]
-    pub status: String,
-    pub node_token: String,
-    pub node_name: String,
-    pub network_id: String,
-    pub enrollment_id: String,
-}
-
-#[derive(Serialize)]
-struct TransitionalMeshNodeEnrollmentRedeemRequest<'a> {
-    #[serde(rename = "enrollment_token")]
-    enrollment_code: &'a str,
-    node_name: &'a str,
-}
 
 impl CodewireClient {
     pub async fn list_mesh_networks(
@@ -110,80 +88,26 @@ impl CodewireClient {
             .map_err(ClientError::from)
     }
 
-    /// Keep the pre-WI-8A runtime redemption call behind the one Rust façade.
-    ///
-    /// This method deliberately sends no bearer: the one-use enrollment code
-    /// is the capability consumed by the endpoint. It does not log or include
-    /// the code in an error.
-    pub async fn redeem_transitional_mesh_node_enrollment(
+    /// Redeem a one-use enrollment capability without sending a steady-state
+    /// credential. The generated response contains registration metadata only.
+    pub async fn redeem_mesh_node_enrollment(
         &self,
-        enrollment_code: &str,
-        node_name: &str,
-    ) -> Result<TransitionalMeshNodeEnrollmentRedemption, ClientError> {
-        let mut url = self.config.mesh_url().clone();
-        let base = url.path().trim_end_matches('/');
-        let path = "api/v1/node-enrollments/redeem";
-        let joined = if base.is_empty() {
-            format!("/{path}")
-        } else {
-            format!("{base}/{path}")
-        };
-        url.set_path(&joined);
-        url.set_query(None);
-        url.set_fragment(None);
-
-        let response = self
-            .http
-            .post(url)
-            .timeout(self.config.unary_timeout())
-            .json(&TransitionalMeshNodeEnrollmentRedeemRequest {
-                enrollment_code,
-                node_name,
-            })
-            .send()
-            .await
-            .map_err(|_| {
-                ClientError::new(
-                    ErrorCode::Unavailable,
-                    "redeem Mesh node enrollment request failed",
-                )
-            })?;
-        let status = response.status();
-        if !status.is_success() {
-            return Err(ClientError::new(
-                error_code_for_status(status),
-                format!("redeem Mesh node enrollment failed: HTTP {status}"),
-            ));
-        }
-        response.json().await.map_err(|_| {
-            ClientError::new(
-                ErrorCode::Internal,
-                "decode Mesh node enrollment redemption response",
+        request: RedeemMeshNodeEnrollmentRequest,
+    ) -> Result<RedeemMeshNodeEnrollmentResponse, ClientError> {
+        self.mesh_nodes
+            .redeem_mesh_node_enrollment_with_options(
+                request,
+                CallOptions::default().with_timeout(self.config.unary_timeout()),
             )
-        })
-    }
-}
-
-fn error_code_for_status(status: reqwest::StatusCode) -> ErrorCode {
-    match status {
-        reqwest::StatusCode::BAD_REQUEST => ErrorCode::InvalidArgument,
-        reqwest::StatusCode::UNAUTHORIZED => ErrorCode::Unauthenticated,
-        reqwest::StatusCode::FORBIDDEN => ErrorCode::PermissionDenied,
-        reqwest::StatusCode::NOT_FOUND => ErrorCode::NotFound,
-        reqwest::StatusCode::CONFLICT => ErrorCode::Aborted,
-        reqwest::StatusCode::TOO_MANY_REQUESTS => ErrorCode::ResourceExhausted,
-        reqwest::StatusCode::BAD_GATEWAY
-        | reqwest::StatusCode::SERVICE_UNAVAILABLE
-        | reqwest::StatusCode::GATEWAY_TIMEOUT => ErrorCode::Unavailable,
-        _ if status.is_server_error() => ErrorCode::Internal,
-        _ => ErrorCode::Unknown,
+            .await
+            .map(|response| response.into_owned())
+            .map_err(ClientError::from)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use buffa::Message as _;
-    use serde_json::json;
     use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -243,17 +167,35 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn transitional_redemption_uses_only_the_one_use_code() {
+    async fn generated_redemption_uses_only_the_one_use_code() {
         let mesh = MockServer::start().await;
+        let response = RedeemMeshNodeEnrollmentResponse {
+            node: Some(crate::MeshNode {
+                org_id: "org-alpha".into(),
+                network_id: "network-alpha".into(),
+                name: "builder".into(),
+                ..Default::default()
+            })
+            .into(),
+            enrollment: Some(crate::MeshNodeEnrollment {
+                id: "enrollment-alpha".into(),
+                org_id: "org-alpha".into(),
+                network_id: "network-alpha".into(),
+                node_name: "builder".into(),
+                ..Default::default()
+            })
+            .into(),
+            ..Default::default()
+        };
         Mock::given(method("POST"))
-            .and(path("/api/v1/node-enrollments/redeem"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "status": "redeemed",
-                "node_token": "node-secret",
-                "node_name": "builder",
-                "network_id": "network-alpha",
-                "enrollment_id": "enrollment-alpha"
-            })))
+            .and(path(
+                "/codewire.v1.MeshNodeService/RedeemMeshNodeEnrollment",
+            ))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "application/proto")
+                    .set_body_bytes(response.encode_to_vec()),
+            )
             .expect(1)
             .mount(&mesh)
             .await;
@@ -264,10 +206,14 @@ mod tests {
         )
         .expect("client");
         let redeemed = client
-            .redeem_transitional_mesh_node_enrollment("cw_enr_secret", "builder")
+            .redeem_mesh_node_enrollment(RedeemMeshNodeEnrollmentRequest {
+                enrollment_code: "cw_enr_secret".into(),
+                node_name: "builder".into(),
+                ..Default::default()
+            })
             .await
             .expect("redeem");
-        assert_eq!(redeemed.node_name, "builder");
+        assert_eq!(redeemed.node.as_option().unwrap().name, "builder");
 
         let requests = mesh
             .received_requests()
@@ -278,14 +224,9 @@ mod tests {
             !requests[0].headers.contains_key("authorization"),
             "enrollment redemption must not send a bearer"
         );
-        assert_eq!(
-            requests[0]
-                .body_json::<serde_json::Value>()
-                .expect("JSON request"),
-            json!({
-                "enrollment_token": "cw_enr_secret",
-                "node_name": "builder"
-            })
-        );
+        let mut body = requests[0].body.as_slice();
+        let request = RedeemMeshNodeEnrollmentRequest::decode(&mut body).expect("request body");
+        assert_eq!(request.enrollment_code, "cw_enr_secret");
+        assert_eq!(request.node_name, "builder");
     }
 }

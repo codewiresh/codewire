@@ -11,12 +11,12 @@ license-files = ["LICENSE", "LICENSE-APACHE"]
 requires-python = ">=3.10"
 dependencies = [
     "connectrpc==0.11.1",
-    # MeshClient is the separately-scoped raw Mesh HTTP API. The generated
-    # control-plane Connect transport does not import HTTPX.
-    "httpx==0.28.1",
     "protobuf==7.35.1",
 ]
 keywords = ["codewire", "sandbox", "environment", "sdk"]
+
+[project.optional-dependencies]
+test = ["httpx==0.28.1"]
 
 [project.urls]
 Homepage = "https://codewire.sh"

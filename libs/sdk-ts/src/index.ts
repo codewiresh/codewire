@@ -65,7 +65,7 @@ export type {
   MeshKVEntry,
   MeshNetwork,
   MeshNode,
-  MeshNodeCredentials,
+  MeshNodeRegistration,
   MeshTTL,
 } from "./mesh.js";
 export type {

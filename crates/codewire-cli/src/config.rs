@@ -354,8 +354,6 @@ pub struct MeshConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mesh_selected_network: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mesh_node_token: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mesh_node_network: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_target: Option<CurrentTargetConfig>,
@@ -1376,18 +1374,13 @@ pub fn save_current_target(
     })
 }
 
-pub fn save_node_enrollment(
+pub fn save_node_registration(
     data_dir: &Path,
     mesh_url: &str,
-    node_token: &str,
     network_id: &str,
     node_name: &str,
 ) -> Result<(), ConfigError> {
     let mesh_url = mesh_url.trim();
-    let node_token = node_token.trim();
-    if node_token.is_empty() {
-        return Err(ConfigError::InvalidNodeToken);
-    }
     let network_id = network_id.trim();
     let node_name = node_name.trim();
 
@@ -1395,7 +1388,6 @@ pub fn save_node_enrollment(
         if !mesh_url.is_empty() {
             config.mesh_url = Some(mesh_url.to_string());
         }
-        config.mesh_node_token = Some(node_token.to_string());
         if !network_id.is_empty() {
             config.mesh_node_network = Some(network_id.to_string());
         }
@@ -1768,8 +1760,6 @@ pub enum ConfigError {
     NoMeshAuth,
     #[error("invalid Mesh authentication configuration: {0}")]
     InvalidMeshAuth(String),
-    #[error("node enrollment response missing node token")]
-    InvalidNodeToken,
 }
 
 fn trim_opt(value: Option<String>) -> Option<String> {
@@ -2745,7 +2735,7 @@ name = "builder"
 
         let data = fs::read_to_string(paths.mesh_data_dir.join("config.toml")).unwrap();
         assert!(data.contains("mesh_url = \"https://mesh.example.com\""));
-        assert!(data.contains("mesh_node_token = \"node-token\""));
+        assert!(!data.contains("mesh_node_token"));
         assert!(data.contains("mesh_selected_network = \"project-alpha\""));
         assert!(data.contains("[node]"));
         assert!(data.contains("name = \"builder\""));
@@ -2769,27 +2759,28 @@ mesh_node_token = "node-token"
 
         let data = fs::read_to_string(paths.mesh_data_dir.join("config.toml")).unwrap();
         assert!(data.contains("mesh_url = \"https://mesh.example.com\""));
-        assert!(data.contains("mesh_node_token = \"node-token\""));
+        assert!(!data.contains("mesh_node_token"));
         assert!(!data.contains("mesh_selected_network"));
     }
 
     #[test]
-    fn save_node_enrollment_preserves_existing_config_and_writes_mesh_keys() {
+    fn save_node_registration_preserves_existing_config_and_scrubs_legacy_token() {
         let home = tempfile::tempdir().unwrap();
         let env = MapEnv::default();
         let paths = paths(home.path(), &env);
         write_mesh_config(
             &paths.mesh_data_dir,
             r#"
+mesh_node_token = "legacy-node-token"
+
 [node]
 name = "old-builder"
 "#,
         );
 
-        save_node_enrollment(
+        save_node_registration(
             &paths.mesh_data_dir,
             "https://mesh.example.com/",
-            "node-token",
             "project-alpha",
             "builder",
         )
@@ -2797,7 +2788,7 @@ name = "old-builder"
 
         let data = fs::read_to_string(paths.mesh_data_dir.join("config.toml")).unwrap();
         assert!(data.contains("mesh_url = \"https://mesh.example.com/\""));
-        assert!(data.contains("mesh_node_token = \"node-token\""));
+        assert!(!data.contains("mesh_node_token"));
         assert!(data.contains("mesh_node_network = \"project-alpha\""));
         assert!(data.contains("[node]"));
         assert!(data.contains("name = \"builder\""));
@@ -2831,6 +2822,6 @@ mesh_node_token = "mesh-node-token"
         let data = fs::read_to_string(paths.mesh_data_dir.join("config.toml")).unwrap();
         assert!(data.contains("mesh_url = \"https://mesh.example.com\""));
         assert!(data.contains("mesh_selected_network = \"project-alpha\""));
-        assert!(data.contains("mesh_node_token = \"mesh-node-token\""));
+        assert!(!data.contains("mesh_node_token"));
     }
 }

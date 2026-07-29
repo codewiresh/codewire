@@ -202,11 +202,31 @@ router.service(MeshNodeService, {
       enrollmentCode: "secret-one-use-code",
     };
   },
-  redeemMeshNodeEnrollment: () => {
-    throw new ConnectError(
-      "redemption must remain on the isolated raw route",
-      Code.Internal,
+  redeemMeshNodeEnrollment: (request, context) => {
+    calls.add("RedeemMeshNodeEnrollment");
+    assert(
+      context.requestHeader.get("authorization") === null,
+      "RedeemMeshNodeEnrollment sends no bearer",
     );
+    assert(
+      request.enrollmentCode === "one-use-token" &&
+        request.nodeName === "node-one",
+      "RedeemMeshNodeEnrollment uses the exact capability and node name",
+    );
+    return {
+      node: node("node-one"),
+      enrollment: {
+        id: "enrollment-one",
+        orgId,
+        networkId,
+        nodeName: "node-one",
+        ownerUserId: "owner-user",
+        issuedByUserId: "issuer-user",
+        expiresAt,
+        createdAt,
+        redeemedAt,
+      },
+    };
   },
 });
 router.service(MeshGroupService, {
@@ -368,41 +388,10 @@ async function handleConnectRequest(
   return true;
 }
 
-let rawRedemptionCalls = 0;
 const server = createServer(
   async (req: IncomingMessage, res: ServerResponse) => {
     const url = new URL(req.url!, `http://${req.headers.host}`);
     if (await handleConnectRequest(req, res, url)) return;
-    if (
-      req.method === "POST" &&
-      url.pathname === "/api/v1/node-enrollments/redeem"
-    ) {
-      rawRedemptionCalls++;
-      assert(
-        req.headers.authorization === undefined,
-        "raw redemption sends no bearer",
-      );
-      const chunks: Uint8Array[] = [];
-      for await (const chunk of rawBody(req)) chunks.push(chunk);
-      const body = JSON.parse(
-        new TextDecoder().decode(Buffer.concat(chunks)),
-      ) as Record<string, string>;
-      assert(
-        body.enrollment_token === "one-use-token" &&
-          body.node_name === "node-one",
-        "raw redemption uses the exact legacy payload",
-      );
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(
-        JSON.stringify({
-          node_token: "node-token-one",
-          node_name: "node-one",
-          network_id: networkId,
-          enrollment_id: "enrollment-one",
-        }),
-      );
-      return;
-    }
     res.writeHead(404);
     res.end();
   },
@@ -615,17 +604,17 @@ try {
     );
   }
 
-  const credentials = await client.nodes.redeemEnrollment(
+  const registration = await client.nodes.redeemEnrollment(
     "one-use-token",
     "node-one",
   );
   assert(
-    rawRedemptionCalls === 1 &&
-      credentials.node_token === "node-token-one" &&
-      credentials.node_name === "node-one" &&
-      credentials.network_id === networkId &&
-      credentials.enrollment_id === "enrollment-one",
-    "raw redemption is isolated and preserves its legacy response",
+    registration.node.org_id === orgId &&
+      registration.node.network_id === networkId &&
+      registration.node.name === "node-one" &&
+      registration.enrollment.id === "enrollment-one" &&
+      registration.enrollment.enrollment_code === "",
+    "generated redemption returns credential-free node and enrollment metadata",
   );
 
   const expectedOperations = [
@@ -641,6 +630,7 @@ try {
     "ListMeshKeyValues",
     "ListMeshNetworks",
     "ListMeshNodes",
+    "RedeemMeshNodeEnrollment",
     "RemoveMeshGroupMember",
     "RevokeMeshNode",
     "SetMeshGroupPolicy",
@@ -648,7 +638,7 @@ try {
   ];
   assert(
     JSON.stringify([...calls].sort()) === JSON.stringify(expectedOperations),
-    "generated clients cover exactly the sixteen mounted Mesh operations",
+    `generated clients cover exactly the seventeen mounted Mesh operations: got ${JSON.stringify([...calls].sort())}`,
   );
 } finally {
   await new Promise<void>((resolve, reject) =>

@@ -650,6 +650,112 @@ mesh_product_connect_ownership_smoke() {
     exit 1
   fi
 
+  # Enrollment redemption is a generated, unauthenticated one-use capability
+  # exchange. It returns registration metadata only and never mints or stores a
+  # steady-state node bearer.
+  curl_settled -X POST \
+    -H 'cookie: codewire.session_token=contract-admin-session-token' \
+    -H 'content-type: application/json' \
+    -d "{\"orgId\":\"org_contract_1\",\"networkId\":\"${network_id}\",\"nodeName\":\"mesh-kind-node\"}" \
+    "${KIND_INGRESS_URL}/codewire.v1.MeshNodeService/CreateMeshNodeEnrollment"
+  local enrollment_id enrollment_code
+  if [ "$PROBE_CODE" != "200" ] || ! jq -e \
+      --arg network_id "$network_id" \
+      '.enrollment.orgId == "org_contract_1" and
+       .enrollment.networkId == $network_id and
+       .enrollment.nodeName == "mesh-kind-node" and
+       (.enrollment.id | type == "string" and length > 0) and
+       (.enrollmentCode | type == "string" and startswith("cw_enr_"))' \
+      <<<"$PROBE_BODY" >/dev/null; then
+    echo "::error::Mesh generated enrollment create failed: code=$PROBE_CODE body=$PROBE_BODY"
+    exit 1
+  fi
+  if ! grep -qi '^x-codewire-service: mesh' "$PROBE_HEADERS"; then
+    echo "::error::MeshNodeService enrollment create did not reach the Mesh workload"
+    cat "$PROBE_HEADERS"
+    exit 1
+  fi
+  enrollment_id="$(jq -er '.enrollment.id' <<<"$PROBE_BODY")"
+  enrollment_code="$(jq -er '.enrollmentCode' <<<"$PROBE_BODY")"
+
+  curl_settled -X POST \
+    -H 'content-type: application/json' \
+    -d "{\"enrollmentCode\":\"${enrollment_code}\",\"nodeName\":\"mesh-kind-node\",\"peerUrl\":\"https://mesh-kind-node.test/peer\"}" \
+    "${KIND_INGRESS_URL}/codewire.v1.MeshNodeService/RedeemMeshNodeEnrollment"
+  if [ "$PROBE_CODE" != "200" ] || ! jq -e \
+      --arg network_id "$network_id" \
+      --arg enrollment_id "$enrollment_id" \
+      '.node.orgId == "org_contract_1" and
+       .node.networkId == $network_id and
+       .node.name == "mesh-kind-node" and
+       .node.peerUrl == "https://mesh-kind-node.test/peer" and
+       .enrollment.id == $enrollment_id and
+       .enrollment.orgId == "org_contract_1" and
+       .enrollment.networkId == $network_id and
+       .enrollment.ownerUserId == "usr_contract_admin" and
+       .enrollment.issuedByUserId == "usr_contract_admin" and
+       (.enrollment.redeemedAt | type == "string" and length > 0) and
+       ([.. | objects |
+          has("nodeToken") or has("credential") or has("token") or
+          has("enrollmentCode")] | any | not)' \
+      <<<"$PROBE_BODY" >/dev/null; then
+    echo "::error::Mesh generated enrollment redemption returned invalid or credential-shaped metadata: code=$PROBE_CODE body=$PROBE_BODY"
+    exit 1
+  fi
+  if ! grep -qi '^x-codewire-service: mesh' "$PROBE_HEADERS"; then
+    echo "::error::MeshNodeService redemption did not reach the Mesh workload"
+    cat "$PROBE_HEADERS"
+    exit 1
+  fi
+
+  curl_settled -X POST \
+    -H 'content-type: application/json' \
+    -d "{\"enrollmentCode\":\"${enrollment_code}\",\"nodeName\":\"mesh-kind-node\"}" \
+    "${KIND_INGRESS_URL}/codewire.v1.MeshNodeService/RedeemMeshNodeEnrollment"
+  if [ "$PROBE_CODE" != "403" ] || ! jq -e \
+      '.code == "permission_denied"' <<<"$PROBE_BODY" >/dev/null; then
+    echo "::error::Mesh enrollment capability was not exactly one-use: code=$PROBE_CODE body=$PROBE_BODY"
+    exit 1
+  fi
+
+  for retired_path in \
+    /api/v1/node-enrollments/redeem \
+    /api/v1/network-auth/runtime/node; do
+    curl_settled -X POST \
+      -H 'content-type: application/json' \
+      -d '{}' \
+      "${KIND_INGRESS_URL}${retired_path}"
+    if [ "$PROBE_CODE" != "404" ]; then
+      echo "::error::retired Mesh bearer route ${retired_path} returned ${PROBE_CODE}, want 404"
+      exit 1
+    fi
+  done
+
+  local node_registration token_rows token_index dormant_token_columns migration_004
+  node_registration="$(kubectl -n "$NS" exec deploy/postgres -- \
+    psql -U codewire -d codewire_mesh -tA -F '|' -c \
+      "SELECT network_id, name, owner_subject, authorized_by, enrollment_id, peer_url, token FROM nodes WHERE network_id = '${network_id}' AND name = 'mesh-kind-node'")"
+  token_rows="$(kubectl -n "$NS" exec deploy/postgres -- \
+    psql -U codewire -d codewire_mesh -tA -F '|' -c \
+      "SELECT (SELECT count(*) FROM nodes WHERE token <> ''), (SELECT count(*) FROM oidc_device_flows WHERE node_token <> '')")"
+  token_index="$(kubectl -n "$NS" exec deploy/postgres -- \
+    psql -U codewire -d codewire_mesh -tAc \
+      "SELECT count(*) FROM pg_indexes WHERE schemaname = 'public' AND indexname = 'idx_nodes_token'")"
+  dormant_token_columns="$(kubectl -n "$NS" exec deploy/postgres -- \
+    psql -U codewire -d codewire_mesh -tAc \
+      "SELECT count(*) FROM information_schema.columns WHERE table_schema = 'public' AND ((table_name = 'nodes' AND column_name = 'token') OR (table_name = 'oidc_device_flows' AND column_name = 'node_token'))")"
+  migration_004="$(kubectl -n "$NS" exec deploy/postgres -- \
+    psql -U codewire -d codewire_mesh -tA -F '|' -c \
+      "SELECT description, success FROM _sqlx_migrations WHERE version = 4")"
+  if [ "$node_registration" != "${network_id}|mesh-kind-node|usr_contract_admin|usr_contract_admin|${enrollment_id}|https://mesh-kind-node.test/peer|" ] \
+    || [ "$token_rows" != "0|0" ] \
+    || [ "$token_index" != "0" ] \
+    || [ "$dormant_token_columns" != "2" ] \
+    || [ "$migration_004" != "retire persistent node bearer|t" ]; then
+    echo "::error::Mesh bearer retirement persistence proof failed: node=${node_registration:-missing} token_rows=${token_rows:-missing} index=${token_index:-missing} columns=${dormant_token_columns:-missing} migration=${migration_004:-missing}"
+    exit 1
+  fi
+
   # The generated primary-origin path must reach Mesh, forward the presented
   # product credential through the same private HMAC receiver, and expose the
   # one-use capability only in the create response.
@@ -731,7 +837,7 @@ mesh_product_connect_ownership_smoke() {
     echo "::error::Mesh invitation consumption/provenance is not one-use and non-secret: rows=${invite_rows:-missing} provenance=${invite_provenance:-missing}"
     exit 1
   fi
-  log "Mesh primary-origin REST/Connect/HMAC/exact-org/invitation proof OK"
+  log "Mesh primary-origin REST/Connect/HMAC/exact-org/invitation/enrollment proof OK"
 }
 
 # Polls a path through the ingress until the expected status arrives —

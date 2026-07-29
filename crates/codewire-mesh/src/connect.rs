@@ -22,8 +22,7 @@ use crate::store::{
     KVEntry, Network, NodeEnrollment, NodeRecord,
 };
 
-/// Register retained procedures individually. Enrollment redemption remains
-/// absent until WI-8A removes the persistent node bearer in the same cutover.
+/// Register retained procedures individually.
 pub(crate) fn router(state: AppState) -> connectrpc::Router {
     let list_networks_state = state.clone();
     let create_network_state = state.clone();
@@ -31,6 +30,7 @@ pub(crate) fn router(state: AppState) -> connectrpc::Router {
     let list_nodes_state = state.clone();
     let revoke_node_state = state.clone();
     let create_enrollment_state = state.clone();
+    let redeem_enrollment_state = state.clone();
     let list_invites_state = state.clone();
     let create_invite_state = state.clone();
     let delete_invite_state = state.clone();
@@ -92,6 +92,14 @@ pub(crate) fn router(state: AppState) -> connectrpc::Router {
             }),
         )
         .with_spec(MESH_NODE_SERVICE_CREATE_MESH_NODE_ENROLLMENT_SPEC)
+        .route(
+            MESH_NODE_SERVICE_SERVICE_NAME,
+            "RedeemMeshNodeEnrollment",
+            handler_fn(move |ctx, request| {
+                redeem_mesh_node_enrollment(redeem_enrollment_state.clone(), ctx, request)
+            }),
+        )
+        .with_spec(MESH_NODE_SERVICE_REDEEM_MESH_NODE_ENROLLMENT_SPEC)
         .route_idempotent(
             MESH_INVITE_SERVICE_SERVICE_NAME,
             "ListMeshInvites",
@@ -313,6 +321,31 @@ async fn create_mesh_node_enrollment(
     connectrpc::Response::ok(CreateMeshNodeEnrollmentResponse {
         enrollment: Some(proto_enrollment(&request.org_id, created.enrollment)).into(),
         enrollment_code: created.enrollment_code,
+        ..Default::default()
+    })
+}
+
+async fn redeem_mesh_node_enrollment(
+    state: AppState,
+    ctx: RequestContext,
+    request: RedeemMeshNodeEnrollmentRequest,
+) -> ServiceResult<RedeemMeshNodeEnrollmentResponse> {
+    let redeemed = state
+        .product
+        .redeem_node_enrollment(
+            &request.enrollment_code,
+            &request.node_name,
+            &request.peer_url,
+        )
+        .await
+        .map_err(|e| rpc_app_error(&e, &ctx))?;
+    connectrpc::Response::ok(RedeemMeshNodeEnrollmentResponse {
+        node: Some(proto_node(&redeemed.organization_id, redeemed.node)).into(),
+        enrollment: Some(proto_enrollment(
+            &redeemed.organization_id,
+            redeemed.enrollment,
+        ))
+        .into(),
         ..Default::default()
     })
 }
@@ -828,10 +861,11 @@ mod tests {
     use connectrpc::client::{ClientConfig, HttpClient};
     use connectrpc::{ConnectError, ErrorCode};
     use reqwest::StatusCode;
+    use sha2::{Digest, Sha256};
 
     use super::*;
     use crate::config::LocalMeshAuthorizationConfig;
-    use crate::store::{MemoryStore, MeshStore};
+    use crate::store::{MemoryStore, MeshStore, NodeEnrollment};
     use crate::{AuthMode, Config};
 
     const ORG: &str = "org-mesh-contract";
@@ -885,6 +919,31 @@ mod tests {
 
     fn assert_code(error: ConnectError, expected: ErrorCode) {
         assert_eq!(error.code, expected, "{error:?}");
+    }
+
+    async fn seed_enrollment(
+        store: &MemoryStore,
+        code: &str,
+        id: &str,
+        node_name: &str,
+        uses_remaining: i32,
+        expires_at: chrono::DateTime<Utc>,
+    ) {
+        store
+            .node_enrollment_create(NodeEnrollment {
+                id: id.to_string(),
+                network_id: NETWORK.to_string(),
+                owner_subject: "user-mesh-contract".to_string(),
+                issued_by: "user-mesh-contract".to_string(),
+                node_name: node_name.to_string(),
+                token_hash: format!("{:x}", Sha256::digest(code.as_bytes())),
+                uses_remaining,
+                expires_at,
+                created_at: Utc::now(),
+                redeemed_at: None,
+            })
+            .await
+            .unwrap();
     }
 
     fn network_request() -> ListMeshNetworksRequest {
@@ -1018,7 +1077,6 @@ mod tests {
             .node_register(NodeRecord {
                 network_id: NETWORK.to_string(),
                 name: "node-a".to_string(),
-                token: "runtime-token-not-returned".to_string(),
                 peer_url: "https://node-a.mesh.test".to_string(),
                 github_id: None,
                 owner_subject: "user-mesh-contract".to_string(),
@@ -1246,15 +1304,156 @@ mod tests {
         assert_eq!(joined.network.as_option().unwrap().id, NETWORK);
         assert!(store.invite_list(NETWORK).await.unwrap().is_empty());
 
-        let unmounted = node_client
+        let public_node_client =
+            MeshNodeServiceClient::new(HttpClient::plaintext(), client_config(addr, None));
+        let enrollment_code = enrollment.enrollment_code;
+        let redeemed = public_node_client
             .redeem_mesh_node_enrollment(RedeemMeshNodeEnrollmentRequest {
-                enrollment_code: enrollment.enrollment_code,
+                enrollment_code: enrollment_code.clone(),
+                node_name: "node-b".to_string(),
+                peer_url: "https://node-b.mesh.test".to_string(),
+                ..Default::default()
+            })
+            .await
+            .unwrap()
+            .into_owned();
+        let redeemed_node = redeemed.node.as_option().unwrap();
+        assert_eq!(redeemed_node.org_id, ORG);
+        assert_eq!(redeemed_node.network_id, NETWORK);
+        assert_eq!(redeemed_node.name, "node-b");
+        assert_eq!(redeemed_node.peer_url, "https://node-b.mesh.test");
+        let redeemed_enrollment = redeemed.enrollment.as_option().unwrap();
+        assert_eq!(redeemed_enrollment.org_id, ORG);
+        assert_eq!(redeemed_enrollment.network_id, NETWORK);
+        assert_eq!(redeemed_enrollment.node_name, "node-b");
+        assert!(redeemed_enrollment.redeemed_at.as_option().is_some());
+        let second_use = public_node_client
+            .redeem_mesh_node_enrollment(RedeemMeshNodeEnrollmentRequest {
+                enrollment_code,
                 node_name: "node-b".to_string(),
                 ..Default::default()
             })
             .await
             .unwrap_err();
-        assert_code(unmounted, ErrorCode::Unimplemented);
+        assert_code(second_use, ErrorCode::PermissionDenied);
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn enrollment_redemption_enforces_lifecycle_and_name_contract() {
+        let store = MemoryStore::new();
+        store.network_create_owned(NETWORK, ORG).await.unwrap();
+        seed_enrollment(
+            &store,
+            "cw_enr_expired",
+            "enrollment-expired",
+            "fixed-expired",
+            1,
+            Utc::now() - Duration::seconds(1),
+        )
+        .await;
+        seed_enrollment(
+            &store,
+            "cw_enr_exhausted",
+            "enrollment-exhausted",
+            "fixed-exhausted",
+            0,
+            Utc::now() + Duration::hours(1),
+        )
+        .await;
+        seed_enrollment(
+            &store,
+            "cw_enr_fixed",
+            "enrollment-fixed",
+            "fixed-node",
+            1,
+            Utc::now() + Duration::hours(1),
+        )
+        .await;
+        seed_enrollment(
+            &store,
+            "cw_enr_free",
+            "enrollment-free",
+            "",
+            1,
+            Utc::now() + Duration::hours(1),
+        )
+        .await;
+        let (addr, task) = start(store).await;
+        let client = MeshNodeServiceClient::new(HttpClient::plaintext(), client_config(addr, None));
+
+        for code in ["cw_enr_expired", "cw_enr_exhausted"] {
+            assert_code(
+                client
+                    .redeem_mesh_node_enrollment(RedeemMeshNodeEnrollmentRequest {
+                        enrollment_code: code.to_string(),
+                        ..Default::default()
+                    })
+                    .await
+                    .unwrap_err(),
+                ErrorCode::PermissionDenied,
+            );
+        }
+
+        assert_code(
+            client
+                .redeem_mesh_node_enrollment(RedeemMeshNodeEnrollmentRequest {
+                    enrollment_code: "cw_enr_fixed".to_string(),
+                    node_name: "wrong-node".to_string(),
+                    ..Default::default()
+                })
+                .await
+                .unwrap_err(),
+            ErrorCode::PermissionDenied,
+        );
+        let fixed = client
+            .redeem_mesh_node_enrollment(RedeemMeshNodeEnrollmentRequest {
+                enrollment_code: "cw_enr_fixed".to_string(),
+                peer_url: "https://fixed.mesh.test".to_string(),
+                ..Default::default()
+            })
+            .await
+            .unwrap()
+            .into_owned();
+        let fixed_node = fixed.node.as_option().unwrap();
+        assert_eq!(fixed_node.org_id, ORG);
+        assert_eq!(fixed_node.network_id, NETWORK);
+        assert_eq!(fixed_node.name, "fixed-node");
+        assert_eq!(fixed_node.peer_url, "https://fixed.mesh.test");
+        let fixed_enrollment = fixed.enrollment.as_option().unwrap();
+        assert_eq!(fixed_enrollment.id, "enrollment-fixed");
+        assert_eq!(fixed_enrollment.owner_user_id, "user-mesh-contract");
+        assert_eq!(fixed_enrollment.issued_by_user_id, "user-mesh-contract");
+        assert!(fixed_enrollment.redeemed_at.as_option().is_some());
+
+        assert_code(
+            client
+                .redeem_mesh_node_enrollment(RedeemMeshNodeEnrollmentRequest {
+                    enrollment_code: "cw_enr_free".to_string(),
+                    ..Default::default()
+                })
+                .await
+                .unwrap_err(),
+            ErrorCode::InvalidArgument,
+        );
+        let free = client
+            .redeem_mesh_node_enrollment(RedeemMeshNodeEnrollmentRequest {
+                enrollment_code: "cw_enr_free".to_string(),
+                node_name: "chosen-node".to_string(),
+                ..Default::default()
+            })
+            .await
+            .unwrap()
+            .into_owned();
+        assert_eq!(free.node.as_option().unwrap().name, "chosen-node");
+        assert!(
+            free.enrollment
+                .as_option()
+                .unwrap()
+                .redeemed_at
+                .as_option()
+                .is_some()
+        );
         task.abort();
     }
 

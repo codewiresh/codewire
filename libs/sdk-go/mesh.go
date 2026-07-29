@@ -17,12 +17,13 @@ type MeshClient struct {
 	KV       *MeshKVService
 	Groups   *MeshGroupService
 
-	baseURL       string
-	httpClient    *http.Client
-	networkClient codewirev1connect.MeshNetworkServiceClient
-	nodeClient    codewirev1connect.MeshNodeServiceClient
-	kvClient      codewirev1connect.MeshKeyValueServiceClient
-	groupClient   codewirev1connect.MeshGroupServiceClient
+	baseURL          string
+	httpClient       *http.Client
+	networkClient    codewirev1connect.MeshNetworkServiceClient
+	nodeClient       codewirev1connect.MeshNodeServiceClient
+	publicNodeClient codewirev1connect.MeshNodeServiceClient
+	kvClient         codewirev1connect.MeshKeyValueServiceClient
+	groupClient      codewirev1connect.MeshGroupServiceClient
 }
 
 // MeshOption configures a MeshClient.
@@ -45,6 +46,7 @@ func NewMeshClient(meshURL, authToken string, opts ...MeshOption) *MeshClient {
 	connectOptions := connect.WithInterceptors(bearerInterceptor{apiKey: authToken})
 	c.networkClient = codewirev1connect.NewMeshNetworkServiceClient(c.httpClient, c.baseURL, connectOptions)
 	c.nodeClient = codewirev1connect.NewMeshNodeServiceClient(c.httpClient, c.baseURL, connectOptions)
+	c.publicNodeClient = codewirev1connect.NewMeshNodeServiceClient(c.httpClient, c.baseURL)
 	c.kvClient = codewirev1connect.NewMeshKeyValueServiceClient(c.httpClient, c.baseURL, connectOptions)
 	c.groupClient = codewirev1connect.NewMeshGroupServiceClient(c.httpClient, c.baseURL, connectOptions)
 	c.Networks = &MeshNetworkService{client: c}

@@ -208,16 +208,8 @@ fn router_from_state(state: AppState) -> Router {
     let mut public_routes = Router::new()
         .route("/api/v1/tailnet/coordinate", get(tailnet_coordinate))
         .route("/api/v1/nodes", get(node_list))
-        .route(
-            "/api/v1/node-enrollments/redeem",
-            post(node_enrollment_redeem),
-        )
         .route("/join", get(join_page))
         .route("/api/v1/network-auth/bundle", get(verifier_bundle))
-        .route(
-            "/api/v1/network-auth/runtime/node",
-            post(node_runtime_credential),
-        )
         .route(
             "/api/v1/network-auth/delegation/node",
             post(node_sender_delegation),
@@ -879,22 +871,6 @@ struct NodeEnrollmentResponse {
 }
 
 #[derive(Deserialize)]
-struct NodeEnrollmentRedeemRequest {
-    node_name: Option<String>,
-    enrollment_token: Option<String>,
-    peer_url: Option<String>,
-}
-
-#[derive(Serialize)]
-struct NodeEnrollmentRedeemResponse {
-    status: &'static str,
-    node_token: String,
-    node_name: String,
-    network_id: String,
-    enrollment_id: String,
-}
-
-#[derive(Deserialize)]
 struct NodesListQuery {
     network_id: Option<String>,
 }
@@ -922,13 +898,6 @@ struct SenderDelegationRequest {
 struct NodeRevokeResponse<'a> {
     status: &'static str,
     node: &'a str,
-}
-
-struct NodeRedeemResult {
-    node_token: String,
-    node_name: String,
-    network_id: String,
-    enrollment_id: String,
 }
 
 async fn node_enrollment_create(
@@ -987,47 +956,6 @@ async fn node_enrollment_create(
         })
         .into_response(),
         Err(error) => error.into_response(),
-    }
-}
-
-async fn node_enrollment_redeem(State(state): State<AppState>, body: Bytes) -> Response {
-    let req = match serde_json::from_slice::<NodeEnrollmentRedeemRequest>(&body) {
-        Ok(req) => req,
-        Err(_) => return plain_error(StatusCode::BAD_REQUEST, "bad request"),
-    };
-
-    match redeem_node_enrollment(
-        state.store.as_ref(),
-        req.enrollment_token.as_deref().unwrap_or_default(),
-        req.node_name.as_deref().unwrap_or_default(),
-        req.peer_url.as_deref().unwrap_or_default(),
-        None,
-    )
-    .await
-    {
-        Ok(redeemed) => Json(NodeEnrollmentRedeemResponse {
-            status: "registered",
-            node_token: redeemed.node_token,
-            node_name: redeemed.node_name,
-            network_id: redeemed.network_id,
-            enrollment_id: redeemed.enrollment_id,
-        })
-        .into_response(),
-        Err(NodeEnrollmentError::TokenRequired) => {
-            plain_error(StatusCode::BAD_REQUEST, "enrollment_token required")
-        }
-        Err(NodeEnrollmentError::NodeNameRequired) => {
-            plain_error(StatusCode::BAD_REQUEST, "node_name required")
-        }
-        Err(NodeEnrollmentError::Invalid) => {
-            plain_error(StatusCode::FORBIDDEN, "invalid or expired enrollment token")
-        }
-        Err(NodeEnrollmentError::NodeNameMismatch) => {
-            plain_error(StatusCode::FORBIDDEN, "node_name does not match enrollment")
-        }
-        Err(NodeEnrollmentError::Store) => {
-            plain_error(StatusCode::INTERNAL_SERVER_ERROR, "internal error")
-        }
     }
 }
 
@@ -1833,22 +1761,15 @@ async fn verifier_bundle(
         Err(message) => return plain_error(StatusCode::BAD_REQUEST, message),
     };
 
-    if let Some(node) = node_auth_from_headers(&headers, state.store.as_ref()).await {
-        if node.network_id != network_id {
-            return plain_error(StatusCode::FORBIDDEN, "forbidden");
-        }
-    } else {
-        let Some(identity) =
-            authenticate_headers(&headers, &state.config, state.store.as_ref()).await
-        else {
-            return unauthorized_response();
-        };
-        if !identity.is_admin {
-            match require_membership(&state, &network_id, &identity).await {
-                Ok(Some(_)) => {}
-                Ok(None) => return plain_error(StatusCode::FORBIDDEN, "membership required"),
-                Err(_) => return unauthorized_response(),
-            }
+    let Some(identity) = authenticate_headers(&headers, &state.config, state.store.as_ref()).await
+    else {
+        return unauthorized_response();
+    };
+    if !identity.is_admin {
+        match require_membership(&state, &network_id, &identity).await {
+            Ok(Some(_)) => {}
+            Ok(None) => return plain_error(StatusCode::FORBIDDEN, "membership required"),
+            Err(_) => return unauthorized_response(),
         }
     }
 
@@ -1904,35 +1825,6 @@ async fn client_runtime_credential(
     .into_response()
 }
 
-async fn node_runtime_credential(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    let Some(node) = node_auth_from_headers(&headers, state.store.as_ref()).await else {
-        return unauthorized_response();
-    };
-    let issuer = match load_or_create_issuer_state(&state, &node.network_id).await {
-        Ok(issuer) => issuer,
-        Err(_) => return plain_error(StatusCode::INTERNAL_SERVER_ERROR, "internal error"),
-    };
-    let (credential, claims) = match sign_runtime_credential(
-        &issuer,
-        SUBJECT_KIND_NODE,
-        &node.name,
-        Utc::now(),
-        DEFAULT_RUNTIME_TTL,
-    ) {
-        Ok(signed) => signed,
-        Err(_) => return plain_error(StatusCode::INTERNAL_SERVER_ERROR, "internal error"),
-    };
-
-    Json(RuntimeCredentialResponse {
-        credential,
-        network_id: claims.network_id,
-        subject_kind: claims.subject_kind,
-        subject_id: claims.subject_id,
-        expires_at: claims.expires_at,
-    })
-    .into_response()
-}
-
 async fn node_sender_delegation(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1944,53 +1836,33 @@ async fn node_sender_delegation(
     };
     let network_id = req.network_id.unwrap_or_default().trim().to_string();
     let source_node = req.source_node.unwrap_or_default().trim().to_string();
-    let node = match node_auth_from_headers(&headers, state.store.as_ref()).await {
-        Some(node) => {
-            if !network_id.is_empty() && network_id != node.network_id {
-                return plain_error(
-                    StatusCode::FORBIDDEN,
-                    "network_id must match authenticated node",
-                );
-            }
-            if !source_node.is_empty() && source_node != node.name {
-                return plain_error(
-                    StatusCode::FORBIDDEN,
-                    "source_node must match authenticated node",
-                );
-            }
-            node
-        }
-        None => {
-            let Some(identity) =
-                authenticate_headers(&headers, &state.config, state.store.as_ref()).await
-            else {
-                return unauthorized_response();
-            };
-            if source_node.is_empty() {
-                return plain_error(StatusCode::BAD_REQUEST, "source_node is required");
-            }
-            if network_id.is_empty() {
-                return plain_error(StatusCode::BAD_REQUEST, "network_id is required");
-            }
-            let nodes = match state.store.node_list_all().await {
-                Ok(nodes) => nodes
-                    .into_iter()
-                    .filter(|node| node.network_id == network_id && node.name == source_node)
-                    .collect::<Vec<_>>(),
-                Err(_) => return plain_error(StatusCode::INTERNAL_SERVER_ERROR, "internal error"),
-            };
-            let [node] = nodes.as_slice() else {
-                return plain_error(
-                    StatusCode::BAD_REQUEST,
-                    "source_node is ambiguous or unknown",
-                );
-            };
-            match require_membership(&state, &node.network_id, &identity).await {
-                Ok(Some(_)) => node.clone(),
-                Ok(None) => return plain_error(StatusCode::FORBIDDEN, "membership required"),
-                Err(_) => return unauthorized_response(),
-            }
-        }
+    let Some(identity) = authenticate_headers(&headers, &state.config, state.store.as_ref()).await
+    else {
+        return unauthorized_response();
+    };
+    if source_node.is_empty() {
+        return plain_error(StatusCode::BAD_REQUEST, "source_node is required");
+    }
+    if network_id.is_empty() {
+        return plain_error(StatusCode::BAD_REQUEST, "network_id is required");
+    }
+    let nodes = match state.store.node_list_all().await {
+        Ok(nodes) => nodes
+            .into_iter()
+            .filter(|node| node.network_id == network_id && node.name == source_node)
+            .collect::<Vec<_>>(),
+        Err(_) => return plain_error(StatusCode::INTERNAL_SERVER_ERROR, "internal error"),
+    };
+    let [node] = nodes.as_slice() else {
+        return plain_error(
+            StatusCode::BAD_REQUEST,
+            "source_node is ambiguous or unknown",
+        );
+    };
+    let node = match require_membership(&state, &node.network_id, &identity).await {
+        Ok(Some(_)) => node.clone(),
+        Ok(None) => return plain_error(StatusCode::FORBIDDEN, "membership required"),
+        Err(_) => return unauthorized_response(),
     };
     let from_session_name = req.from_session_name.unwrap_or_default().trim().to_string();
     let mut source_groups = Vec::new();
@@ -2403,18 +2275,6 @@ async fn require_auth(
     }
 }
 
-async fn node_auth_from_headers(
-    headers: &HeaderMap,
-    store: &dyn crate::store::MeshStore,
-) -> Option<NodeRecord> {
-    let header = headers.get(AUTHORIZATION)?.to_str().ok()?;
-    let token = header.strip_prefix("Bearer ")?;
-    if token.is_empty() {
-        return None;
-    }
-    store.node_get_by_token(token).await.ok().flatten()
-}
-
 fn node_responses(nodes: Vec<NodeRecord>) -> Vec<NodeResponse> {
     let now = Utc::now();
     nodes
@@ -2568,81 +2428,6 @@ fn client_subject_id(identity: &AuthIdentity) -> String {
     "client".to_string()
 }
 
-#[derive(Debug, PartialEq, Eq)]
-enum NodeEnrollmentError {
-    TokenRequired,
-    Invalid,
-    NodeNameMismatch,
-    NodeNameRequired,
-    Store,
-}
-
-async fn redeem_node_enrollment(
-    store: &dyn crate::store::MeshStore,
-    enrollment_token: &str,
-    node_name: &str,
-    peer_url: &str,
-    github_id: Option<i64>,
-) -> Result<NodeRedeemResult, NodeEnrollmentError> {
-    let enrollment_token = enrollment_token.trim();
-    if enrollment_token.is_empty() {
-        return Err(NodeEnrollmentError::TokenRequired);
-    }
-
-    let now = Utc::now();
-    let token_hash = hash_enrollment_token(enrollment_token);
-    let enrollment = store
-        .node_enrollment_get_by_token_hash(&token_hash)
-        .await
-        .map_err(|_| NodeEnrollmentError::Store)?
-        .ok_or(NodeEnrollmentError::Invalid)?;
-    if enrollment.expires_at < now || enrollment.uses_remaining <= 0 {
-        return Err(NodeEnrollmentError::Invalid);
-    }
-
-    let node_name = match (enrollment.node_name.trim(), node_name.trim()) {
-        (fixed, "") if !fixed.is_empty() => fixed.to_string(),
-        (fixed, requested) if !fixed.is_empty() && fixed != requested => {
-            return Err(NodeEnrollmentError::NodeNameMismatch);
-        }
-        (_, "") => return Err(NodeEnrollmentError::NodeNameRequired),
-        (_, requested) => requested.to_string(),
-    };
-
-    let consumed = store
-        .node_enrollment_consume(&token_hash, now)
-        .await
-        .map_err(|_| NodeEnrollmentError::Store)?
-        .ok_or(NodeEnrollmentError::Invalid)?;
-    if consumed.expires_at < now {
-        return Err(NodeEnrollmentError::Invalid);
-    }
-
-    let node_token = generate_hex_token();
-    store
-        .node_register(NodeRecord {
-            network_id: consumed.network_id.clone(),
-            name: node_name.clone(),
-            token: node_token.clone(),
-            peer_url: peer_url.trim().to_string(),
-            github_id,
-            owner_subject: consumed.owner_subject,
-            authorized_by: consumed.issued_by,
-            enrollment_id: consumed.id.clone(),
-            authorized_at: now,
-            last_seen_at: now,
-        })
-        .await
-        .map_err(|_| NodeEnrollmentError::Store)?;
-
-    Ok(NodeRedeemResult {
-        node_token,
-        node_name,
-        network_id: consumed.network_id,
-        enrollment_id: consumed.id,
-    })
-}
-
 fn group_response(
     group: Group,
     members: Vec<GroupMember>,
@@ -2735,16 +2520,6 @@ fn random_alphanumeric(len: usize) -> String {
         token.push(ALPHANUMERIC[usize::from(byte) % ALPHANUMERIC.len()] as char);
     }
     token
-}
-
-fn generate_hex_token() -> String {
-    let mut bytes = [0_u8; 32];
-    OsRng.fill_bytes(&mut bytes);
-    lower_hex(&bytes)
-}
-
-fn hash_enrollment_token(token: &str) -> String {
-    lower_hex(&Sha256::digest(token.trim().as_bytes()))
 }
 
 fn lower_hex(bytes: &[u8]) -> String {
@@ -2853,12 +2628,10 @@ mod tests {
 
     use super::*;
     use crate::AuthMode;
-    use crate::network_auth::{
-        VerifierBundle, verify_runtime_credential, verify_sender_delegation,
-    };
+    use crate::network_auth::{VerifierBundle, verify_runtime_credential};
     use crate::store::{
         GROUP_DEBUG_NONE, GROUP_DEBUG_OBSERVE_ONLY, GROUP_MESSAGES_INTERNAL_ONLY,
-        GROUP_MESSAGES_OPEN, NETWORK_ROLE_MEMBER, NodeEnrollment,
+        GROUP_MESSAGES_OPEN, NETWORK_ROLE_MEMBER,
     };
     use crate::{Invite, MemoryStore, MeshStore};
 
@@ -2979,7 +2752,6 @@ mod tests {
         store: &MemoryStore,
         network_id: &str,
         name: &str,
-        token: &str,
         peer_url: &str,
         last_seen_at: chrono::DateTime<Utc>,
     ) {
@@ -2988,7 +2760,6 @@ mod tests {
             .node_register(NodeRecord {
                 network_id: network_id.to_string(),
                 name: name.to_string(),
-                token: token.to_string(),
                 peer_url: peer_url.to_string(),
                 github_id: None,
                 owner_subject: String::new(),
@@ -4146,15 +3917,7 @@ mod tests {
     #[tokio::test]
     async fn group_member_handlers_reject_node_bearer_and_accept_primary_owner() {
         let store = MemoryStore::new();
-        seed_node(
-            &store,
-            "project-alpha",
-            "node-a",
-            "node-token",
-            "",
-            Utc::now(),
-        )
-        .await;
+        seed_node(&store, "project-alpha", "node-a", "", Utc::now()).await;
         store
             .group_create(Group {
                 network_id: "project-alpha".to_string(),
@@ -4503,94 +4266,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn node_enrollment_create_and_redeem_registers_node() {
-        let store = MemoryStore::new();
-        seed_network(&store, "network-a").await;
-        let router = router_with_store(
-            test_config(AuthMode::Token),
-            std::sync::Arc::new(store.clone()),
-        );
-
-        let create = router
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/v1/node-enrollments")
-                    .header(AUTHORIZATION, "Bearer cw_local-test")
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        r#"{"network_id":"network-a","node_name":"dev-1","ttl":"10m"}"#,
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(create.status(), StatusCode::OK);
-        let body = to_bytes(create.into_body(), usize::MAX).await.unwrap();
-        let created: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        let enrollment_id = created["enrollment"]["id"].as_str().unwrap().to_string();
-        let enrollment_token = created["enrollment_code"].as_str().unwrap().to_string();
-        assert_eq!(created["enrollment"]["org_id"], "local-test-org");
-        assert_eq!(created["enrollment"]["network_id"], "network-a");
-        assert_eq!(created["enrollment"]["node_name"], "dev-1");
-        assert_eq!(
-            created["enrollment"]["owner_user_id"],
-            "local-machine:local-test-environment"
-        );
-        assert_eq!(
-            created["enrollment"]["issued_by_user_id"],
-            "local-machine:local-test-environment"
-        );
-        assert!(created.get("enrollment_token").is_none());
-        assert!(created["enrollment"].get("uses_remaining").is_none());
-        assert_eq!(enrollment_id.len(), 64);
-        assert!(enrollment_token.starts_with("cw_enr_"));
-        assert_eq!(enrollment_token.len(), "cw_enr_".len() + 64);
-
-        let redeem = router
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/v1/node-enrollments/redeem")
-                    .header("content-type", "application/json")
-                    .body(Body::from(format!(
-                        r#"{{"enrollment_token":"{enrollment_token}","peer_url":"https://peer.dev"}}"#
-                    )))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(redeem.status(), StatusCode::OK);
-        let body = to_bytes(redeem.into_body(), usize::MAX).await.unwrap();
-        let redeemed: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        let node_token = redeemed["node_token"].as_str().unwrap();
-        assert_eq!(redeemed["status"], "registered");
-        assert_eq!(redeemed["node_name"], "dev-1");
-        assert_eq!(redeemed["network_id"], "network-a");
-        assert_eq!(redeemed["enrollment_id"], enrollment_id);
-        assert_eq!(node_token.len(), 64);
-
-        let node = store
-            .node_get_by_token(node_token)
-            .await
-            .unwrap()
-            .expect("registered node");
-        assert_eq!(node.network_id, "network-a");
-        assert_eq!(node.name, "dev-1");
-        assert_eq!(node.peer_url, "https://peer.dev");
-        assert_eq!(node.owner_subject, "local-machine:local-test-environment");
-        assert_eq!(node.authorized_by, "local-machine:local-test-environment");
-        assert_eq!(node.enrollment_id, enrollment_id);
-
-        let enrollment = store
-            .node_enrollment_get_by_token_hash(&hash_enrollment_token(&enrollment_token))
-            .await
-            .unwrap()
-            .expect("stored enrollment");
-        assert_eq!(enrollment.uses_remaining, 0);
-        assert!(enrollment.redeemed_at.is_some());
+    async fn retired_node_bearer_routes_are_absent() {
+        let router = router(test_config(AuthMode::Token));
+        for path in [
+            "/api/v1/node-enrollments/redeem",
+            "/api/v1/network-auth/runtime/node",
+        ] {
+            let response = router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(path)
+                        .header("content-type", "application/json")
+                        .body(Body::from("{}"))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
+        }
     }
 
     #[tokio::test]
@@ -4636,66 +4331,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn node_enrollment_redeem_rejects_missing_token_like_go_relay() {
-        let response = router(test_config(AuthMode::Token))
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/v1/node-enrollments/redeem")
-                    .header("content-type", "application/json")
-                    .body(Body::from(r#"{"node_name":"dev-1"}"#))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-        assert_eq!(&body[..], b"enrollment_token required\n");
-    }
-
-    #[tokio::test]
-    async fn node_enrollment_redeem_rejects_fixed_node_name_mismatch() {
-        let store = MemoryStore::new();
-        seed_network(&store, "network-a").await;
-        let now = Utc::now();
-        let enrollment_token = format!("cw_enr_{}", generate_hex_token());
-        store
-            .node_enrollment_create(NodeEnrollment {
-                id: generate_hex_token(),
-                network_id: "network-a".to_string(),
-                owner_subject: "local-machine:local-test-environment".to_string(),
-                issued_by: "local-machine:local-test-environment".to_string(),
-                node_name: "dev-1".to_string(),
-                token_hash: hash_enrollment_token(&enrollment_token),
-                uses_remaining: 1,
-                expires_at: now + Duration::minutes(10),
-                created_at: now,
-                redeemed_at: None,
-            })
-            .await
-            .unwrap();
-
-        let response = router_with_store(test_config(AuthMode::Token), std::sync::Arc::new(store))
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/v1/node-enrollments/redeem")
-                    .header("content-type", "application/json")
-                    .body(Body::from(format!(
-                        r#"{{"enrollment_token":"{enrollment_token}","node_name":"other"}}"#
-                    )))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::FORBIDDEN);
-        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-        assert_eq!(&body[..], b"node_name does not match enrollment\n");
-    }
-
-    #[tokio::test]
     async fn nodes_list_requires_primary_auth_and_explicit_network_scope() {
         let store = MemoryStore::new();
         seed_network(&store, "network-a").await;
@@ -4704,7 +4339,6 @@ mod tests {
             &store,
             "network-a",
             "shared-node",
-            "token-network-a",
             "https://network-a.example/ws",
             Utc::now(),
         )
@@ -4713,7 +4347,6 @@ mod tests {
             &store,
             "network-b",
             "shared-node",
-            "token-network-b",
             "https://network-b.example/ws",
             Utc::now(),
         )
@@ -4791,7 +4424,6 @@ mod tests {
             &store,
             "network-a",
             "builder",
-            "node-token",
             "https://builder.example/ws",
             Utc::now(),
         )
@@ -4800,7 +4432,6 @@ mod tests {
             &store,
             "network-b",
             "other",
-            "other-node-token",
             "https://other.example/ws",
             Utc::now(),
         )
@@ -4828,7 +4459,6 @@ mod tests {
             &store,
             "network-a",
             "builder",
-            "node-token",
             "",
             Utc::now() - Duration::minutes(5),
         )
@@ -4932,7 +4562,6 @@ mod tests {
             .node_register(NodeRecord {
                 network_id: "network-a".to_string(),
                 name: "builder".to_string(),
-                token: "node-token".to_string(),
                 peer_url: "https://builder.example/ws".to_string(),
                 github_id: None,
                 owner_subject: "github:101".to_string(),
@@ -4985,7 +4614,6 @@ mod tests {
             .node_register(NodeRecord {
                 network_id: "network-a".to_string(),
                 name: "builder".to_string(),
-                token: "node-token".to_string(),
                 peer_url: "https://builder.example/ws".to_string(),
                 github_id: None,
                 owner_subject: "github:101".to_string(),
@@ -5213,17 +4841,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn network_auth_node_runtime_and_bundle_use_node_token_like_go_relay() {
+    async fn network_auth_routes_reject_retired_persistent_node_bearer() {
         let store = MemoryStore::new();
-        seed_node(
-            &store,
-            "project-alpha",
-            "dev-2",
-            "node-token",
-            "",
-            Utc::now(),
-        )
-        .await;
+        seed_node(&store, "project-alpha", "dev-2", "", Utc::now()).await;
         let router = router_with_store(
             test_config(AuthMode::Token),
             std::sync::Arc::new(store.clone()),
@@ -5241,98 +4861,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-        let issued: RuntimeCredentialResponse = serde_json::from_slice(&body).unwrap();
-        assert_eq!(issued.subject_kind, SUBJECT_KIND_NODE);
-        assert_eq!(issued.subject_id, "dev-2");
-
-        let response = router
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri("/api/v1/network-auth/bundle?network_id=other-network")
-                    .header(AUTHORIZATION, "Bearer node-token")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::FORBIDDEN);
-        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-        assert_eq!(&body[..], b"forbidden\n");
-
-        let response = router
-            .oneshot(
-                Request::builder()
-                    .uri("/api/v1/network-auth/bundle?network_id=project-alpha")
-                    .header(AUTHORIZATION, "Bearer node-token")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-        let bundle: VerifierBundle = serde_json::from_slice(&body).unwrap();
-        assert_eq!(bundle.issuer, "mesh:project-alpha");
-        let claims = verify_runtime_credential(&issued.credential, &bundle, Utc::now()).unwrap();
-        assert_eq!(claims.subject_id, "dev-2");
-    }
-
-    #[tokio::test]
-    async fn network_auth_node_sender_delegation_carries_session_groups_like_go_relay() {
-        let store = MemoryStore::new();
-        let now = Utc::now();
-        seed_node(&store, "project-alpha", "dev-1", "node-token", "", now).await;
-        store
-            .group_create(Group {
-                network_id: "project-alpha".to_string(),
-                name: "mesh".to_string(),
-                created_at: now,
-                created_by: String::new(),
-            })
-            .await
-            .unwrap();
-        store
-            .group_member_add(GroupMember {
-                network_id: "project-alpha".to_string(),
-                group_name: "mesh".to_string(),
-                node_name: "dev-1".to_string(),
-                session_name: "planner".to_string(),
-                created_at: now,
-            })
-            .await
-            .unwrap();
-        let router = router_with_store(test_config(AuthMode::Token), std::sync::Arc::new(store));
-
-        let response = router
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/v1/network-auth/delegation/node")
-                    .header(AUTHORIZATION, "Bearer node-token")
-                    .body(Body::from(
-                        json!({
-                            "source_node": "dev-1",
-                            "from_session_id": 42,
-                            "from_session_name": "planner",
-                            "verbs": ["msg"],
-                            "audience_node": "dev-2"
-                        })
-                        .to_string(),
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-        let issued: SenderDelegationResponse = serde_json::from_slice(&body).unwrap();
-        assert_eq!(issued.source_node, "dev-1");
-        assert_eq!(issued.from_session_name, "planner");
-        assert_eq!(issued.source_groups, vec!["mesh"]);
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
 
         let response = router
             .clone()
@@ -5345,12 +4874,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-        let bundle: VerifierBundle = serde_json::from_slice(&body).unwrap();
-        let claims = verify_sender_delegation(&issued.delegation, &bundle, Utc::now()).unwrap();
-        assert_eq!(claims.audience_node, "dev-2");
-        assert_eq!(claims.source_groups, vec!["mesh"]);
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 
         let response = router
             .oneshot(
@@ -5358,9 +4882,11 @@ mod tests {
                     .method("POST")
                     .uri("/api/v1/network-auth/delegation/node")
                     .header(AUTHORIZATION, "Bearer node-token")
+                    .header("content-type", "application/json")
                     .body(Body::from(
                         json!({
-                            "source_node": "other-node",
+                            "network_id": "project-alpha",
+                            "source_node": "dev-2",
                             "from_session_name": "planner",
                             "verbs": ["msg"]
                         })
@@ -5370,9 +4896,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::FORBIDDEN);
-        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-        assert_eq!(&body[..], b"source_node must match authenticated node\n");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]
@@ -5386,8 +4910,8 @@ mod tests {
         )
         .await;
         let now = Utc::now();
-        seed_node(&store, "project-alpha", "dev-1", "alpha-token", "", now).await;
-        seed_node(&store, "other-network", "dev-1", "other-token", "", now).await;
+        seed_node(&store, "project-alpha", "dev-1", "", now).await;
+        seed_node(&store, "other-network", "dev-1", "", now).await;
         store
             .group_create(Group {
                 network_id: "project-alpha".to_string(),

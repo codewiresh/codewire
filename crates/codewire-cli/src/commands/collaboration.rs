@@ -916,10 +916,9 @@ pub(crate) fn save_redeemed_node_enrollment(
     mesh_url: &str,
     redeemed: &RedeemedNodeEnrollment,
 ) -> anyhow::Result<()> {
-    config::save_node_enrollment(
+    config::save_node_registration(
         data_dir,
         mesh_url,
-        &redeemed.node_token,
         &redeemed.network_id,
         &redeemed.node_name,
     )?;

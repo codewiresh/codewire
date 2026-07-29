@@ -1,9 +1,4 @@
-"""Generated-Connect-backed Mesh API client for the Codewire Python SDK.
-
-The ergonomic wrapper shares the SDK's generated Connect transport and keeps
-only enrollment redemption on its temporary unauthenticated raw route. That
-last raw call is removed when WS18 WI-8A mounts typed redemption.
-"""
+"""Generated-Connect-backed Mesh API client for the Codewire Python SDK."""
 
 from __future__ import annotations
 
@@ -12,14 +7,13 @@ from dataclasses import dataclass
 from datetime import timezone
 from typing import Any, Literal, TypeVar
 
-import httpx
 from connectrpc.errors import ConnectError
 from google.protobuf.descriptor import Descriptor
 from google.protobuf.duration_pb2 import Duration
 from google.protobuf.timestamp_pb2 import Timestamp
 
 from codewire._transport import ConnectTransport
-from codewire.errors import CodewireError, codewire_error_from_connect
+from codewire.errors import codewire_error_from_connect
 from codewire.v1 import (
     mesh_group_pb2,
     mesh_kv_pb2,
@@ -73,13 +67,11 @@ class MeshEnrollment:
 
 
 @dataclass
-class MeshNodeCredentials:
-    """Legacy raw response retained only until typed enrollment redemption."""
+class MeshNodeRegistration:
+    """Non-secret result of consuming a one-use enrollment capability."""
 
-    node_token: str
-    node_name: str
-    network_id: str
-    enrollment_id: str = ""
+    node: MeshNode
+    enrollment: MeshEnrollment
 
 
 @dataclass
@@ -452,13 +444,13 @@ class MeshNodes:
         self,
         transport: ConnectTransport,
         client: MeshNodeServiceClientSync,
-        base_url: str,
-        http_client: httpx.Client,
+        public_transport: ConnectTransport,
+        public_client: MeshNodeServiceClientSync,
     ) -> None:
         self._transport = transport
         self._client = client
-        self._base_url = base_url
-        self._http_client = http_client
+        self._public_transport = public_transport
+        self._public_client = public_client
 
     def list(self, org_id: str, network_id: str) -> list[MeshNode]:
         nodes: list[MeshNode] = []
@@ -517,29 +509,26 @@ class MeshNodes:
 
     def redeem_enrollment(
         self,
-        enrollment_token: str,
+        enrollment_code: str,
         node_name: str,
-    ) -> MeshNodeCredentials:
-        """Redeem through the last temporary raw Mesh client route."""
+    ) -> MeshNodeRegistration:
+        """Consume a one-use capability without sending a bearer."""
 
-        request = self._http_client.build_request(
-            "POST",
-            f"{self._base_url}/api/v1/node-enrollments/redeem",
-            json={
-                "enrollment_token": enrollment_token,
-                "node_name": node_name,
-            },
+        response = _unary(
+            self._public_transport,
+            self._public_client.redeem_mesh_node_enrollment,
+            mesh_node_pb2.RedeemMeshNodeEnrollmentRequest(
+                enrollment_code=enrollment_code,
+                node_name=node_name,
+            ),
         )
-        request.headers.pop("authorization", None)
-        response = self._http_client.send(request)
-        if response.status_code >= 400:
-            detail = response.text.strip() or response.reason_phrase
-            raise CodewireError(
-                response.status_code,
-                detail,
-                response.headers.get("x-request-id", ""),
-            )
-        return MeshNodeCredentials(**response.json())
+        return MeshNodeRegistration(
+            node=_node_from_proto(_message(response, "node", "redeem enrollment")),
+            enrollment=_enrollment_from_proto(
+                _message(response, "enrollment", "redeem enrollment"),
+                "",
+            ),
+        )
 
 
 class MeshGroups:
@@ -797,21 +786,28 @@ class MeshClient:
         auth_token: str,
         *,
         timeout: float = 30,
-        http_client: httpx.Client | None = None,
+        http_client: Any = None,
     ) -> None:
         self._base_url = mesh_url.rstrip("/")
-        self._owns_http_client = http_client is None
-        self._http_client = http_client or httpx.Client(timeout=timeout)
         self._transport = ConnectTransport(
             self._base_url,
             auth_token,
             timeout=timeout,
-            http_client=self._http_client,
+            http_client=http_client,
+        )
+        self._public_transport = ConnectTransport(
+            self._base_url,
+            "",
+            timeout=timeout,
+            http_client=http_client,
         )
         self._network_client = self._transport.client(
             MeshNetworkServiceClientSync
         )
         self._node_client = self._transport.client(MeshNodeServiceClientSync)
+        self._public_node_client = self._public_transport.client(
+            MeshNodeServiceClientSync
+        )
         self._group_client = self._transport.client(MeshGroupServiceClientSync)
         self._kv_client = self._transport.client(
             MeshKeyValueServiceClientSync
@@ -820,8 +816,8 @@ class MeshClient:
         self.nodes = MeshNodes(
             self._transport,
             self._node_client,
-            self._base_url,
-            self._http_client,
+            self._public_transport,
+            self._public_node_client,
         )
         self.groups = MeshGroups(self._transport, self._group_client)
         self.kv = MeshKV(self._transport, self._kv_client)
@@ -830,10 +826,9 @@ class MeshClient:
     def close(self) -> None:
         self._network_client.close()
         self._node_client.close()
+        self._public_node_client.close()
         self._group_client.close()
         self._kv_client.close()
-        if self._owns_http_client:
-            self._http_client.close()
 
     def __enter__(self) -> MeshClient:
         return self

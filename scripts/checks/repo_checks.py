@@ -916,6 +916,7 @@ MESH_EXPECTED_CONNECT_METHODS = {
     "MESH_NODE_SERVICE_SERVICE_NAME": {
         "CreateMeshNodeEnrollment",
         "ListMeshNodes",
+        "RedeemMeshNodeEnrollment",
         "RevokeMeshNode",
     },
     "MESH_INVITE_SERVICE_SERVICE_NAME": {
@@ -1727,7 +1728,7 @@ def mesh_connect_surface_failures(
             duplicate_registrations.append((service, method))
         methods.add(method)
 
-    if actual != MESH_EXPECTED_CONNECT_METHODS or len(registrations) != 20:
+    if actual != MESH_EXPECTED_CONNECT_METHODS or len(registrations) != 21:
         rendered_actual = {
             service: sorted(methods) for service, methods in actual.items()
         }
@@ -1752,7 +1753,7 @@ def mesh_connect_surface_failures(
             )
     expected_specs = set(expected_bindings.values())
     actual_specs = re.findall(r"\.with_spec\(\s*([A-Z0-9_]+)\s*\)", sanitized)
-    if set(actual_specs) != expected_specs or len(actual_specs) != 20:
+    if set(actual_specs) != expected_specs or len(actual_specs) != 21:
         failures.append(
             "retained Mesh Connect generated spec bindings drift: "
             f"found {stable_json(sorted(actual_specs))}"
@@ -1766,7 +1767,7 @@ def mesh_connect_surface_failures(
     actual_bindings = {
         (service, method): spec for service, method, spec in bound_routes
     }
-    if actual_bindings != expected_bindings or len(bound_routes) != 20:
+    if actual_bindings != expected_bindings or len(bound_routes) != 21:
         failures.append(
             "retained Mesh Connect RPC-to-spec binding drift: "
             f"found {stable_json(sorted(bound_routes))}"
@@ -2651,19 +2652,19 @@ def mesh_surface_self_test(
         raise RuntimeError("self-test accepted the retired Mesh session cookie")
 
     swapped_packages = copy.deepcopy(inventory)
-    enrollment_operation = operation(
+    node_list_operation = operation(
         swapped_packages,
-        "post",
-        "/api/v1/node-enrollments/redeem",
+        "get",
+        "/api/v1/nodes",
     )
     coordinate_operation = operation(
         swapped_packages,
         "get",
         "/api/v1/tailnet/coordinate",
     )
-    enrollment_operation["package"], coordinate_operation["package"] = (
+    node_list_operation["package"], coordinate_operation["package"] = (
         coordinate_operation["package"],
-        enrollment_operation["package"],
+        node_list_operation["package"],
     )
     swapped_package_failures = mesh_surface_failures(
         mesh_sources,

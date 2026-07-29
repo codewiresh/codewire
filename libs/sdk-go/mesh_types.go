@@ -34,12 +34,11 @@ type MeshEnrollment struct {
 	EnrollmentCode string     `json:"enrollment_code"`
 }
 
-// MeshNodeCredentials are returned when an enrollment token is redeemed.
-type MeshNodeCredentials struct {
-	NodeToken    string `json:"node_token"`
-	NodeName     string `json:"node_name"`
-	NetworkID    string `json:"network_id"`
-	EnrollmentID string `json:"enrollment_id,omitempty"`
+// MeshNodeRegistration is the non-secret result of consuming a one-use node
+// enrollment capability.
+type MeshNodeRegistration struct {
+	Node       MeshNode       `json:"node"`
+	Enrollment MeshEnrollment `json:"enrollment"`
 }
 
 // MeshKVEntry is a key-value pair in the mesh store.

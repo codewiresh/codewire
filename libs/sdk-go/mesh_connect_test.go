@@ -2,7 +2,6 @@ package codewire_test
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -73,6 +72,17 @@ func TestMeshGeneratedClientsCoverMountedOperations(t *testing.T) {
 		!enrollment.CreatedAt.Equal(handler.createdAt) ||
 		enrollment.RedeemedAt == nil || !enrollment.RedeemedAt.Equal(handler.redeemedAt) {
 		t.Fatalf("enrollment = %#v, want every MeshNodeEnrollment field and one-use code", enrollment)
+	}
+	registration, err := client.Nodes.RedeemEnrollment(ctx, "one-use-token", "node-one")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if registration.Node.OrgID != meshTestOrg ||
+		registration.Node.NetworkID != meshTestNetwork ||
+		registration.Node.Name != "node-one" ||
+		registration.Enrollment.ID != "enrollment-one" ||
+		registration.Enrollment.EnrollmentCode != "" {
+		t.Fatalf("registration = %#v, want credential-free generated metadata", registration)
 	}
 
 	createdGroup, err := client.Groups.Create(ctx, meshTestOrg, meshTestNetwork, "group-one")
@@ -182,6 +192,7 @@ func TestMeshGeneratedClientsCoverMountedOperations(t *testing.T) {
 		"ListMeshKeyValues",
 		"ListMeshNetworks",
 		"ListMeshNodes",
+		"RedeemMeshNodeEnrollment",
 		"RemoveMeshGroupMember",
 		"RevokeMeshNode",
 		"SetMeshGroupPolicy",
@@ -208,39 +219,6 @@ func TestMeshConnectErrorUsesCanonicalSDKError(t *testing.T) {
 	}
 	if sdkError.StatusCode != http.StatusBadRequest || sdkError.Detail != "invalid network" {
 		t.Fatalf("error = %#v, want canonical invalid_argument mapping", sdkError)
-	}
-}
-
-func TestMeshRedeemEnrollmentIsTheOnlyRawMeshCall(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost || r.URL.Path != "/api/v1/node-enrollments/redeem" {
-			t.Fatalf("request = %s %s, want exact raw redemption route", r.Method, r.URL.Path)
-		}
-		if authorization := r.Header.Get("Authorization"); authorization != "" {
-			t.Fatalf("Authorization = %q, want public redemption", authorization)
-		}
-		var request map[string]string
-		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
-			t.Fatal(err)
-		}
-		if request["enrollment_token"] != "one-use-token" || request["node_name"] != "node-one" {
-			t.Fatalf("request = %#v, want exact redemption payload", request)
-		}
-		_ = json.NewEncoder(w).Encode(codewire.MeshNodeCredentials{
-			NodeToken: "node-token-one", NodeName: "node-one",
-			NetworkID: meshTestNetwork, EnrollmentID: "enrollment-one",
-		})
-	}))
-	defer server.Close()
-
-	client := codewire.NewMeshClient(server.URL, "unused-bearer")
-	credentials, err := client.Nodes.RedeemEnrollment(context.Background(), "one-use-token", "node-one")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if credentials.NodeToken != "node-token-one" || credentials.NodeName != "node-one" ||
-		credentials.NetworkID != meshTestNetwork || credentials.EnrollmentID != "enrollment-one" {
-		t.Fatalf("credentials = %#v, want exact raw response", credentials)
 	}
 }
 
@@ -338,6 +316,27 @@ func (h *meshCapabilityHandler) CreateMeshNodeEnrollment(_ context.Context, requ
 			RedeemedAt: timestamppb.New(h.redeemedAt),
 		},
 		EnrollmentCode: "secret-one-use-code",
+	}), nil
+}
+
+func (h *meshCapabilityHandler) RedeemMeshNodeEnrollment(_ context.Context, request *connect.Request[codewirev1.RedeemMeshNodeEnrollmentRequest]) (*connect.Response[codewirev1.RedeemMeshNodeEnrollmentResponse], error) {
+	if authorization := request.Header().Get("Authorization"); authorization != "" {
+		h.t.Fatalf("RedeemMeshNodeEnrollment Authorization = %q, want no bearer", authorization)
+	}
+	if request.Msg.GetEnrollmentCode() != "one-use-token" || request.Msg.GetNodeName() != "node-one" {
+		h.t.Fatalf("redemption request = %#v, want exact one-use capability", request.Msg)
+	}
+	h.mu.Lock()
+	h.calls["RedeemMeshNodeEnrollment"]++
+	h.mu.Unlock()
+	return connect.NewResponse(&codewirev1.RedeemMeshNodeEnrollmentResponse{
+		Node: h.node("node-one"),
+		Enrollment: &codewirev1.MeshNodeEnrollment{
+			Id: "enrollment-one", OrgId: meshTestOrg, NetworkId: meshTestNetwork,
+			NodeName: "node-one", OwnerUserId: "owner-user", IssuedByUserId: "issuer-user",
+			ExpiresAt: timestamppb.New(h.expiresAt), CreatedAt: timestamppb.New(h.createdAt),
+			RedeemedAt: timestamppb.New(h.redeemedAt),
+		},
 	}), nil
 }
 
@@ -520,6 +519,7 @@ func (h *meshCapabilityHandler) calledOperations() []string {
 		"ListMeshKeyValues",
 		"ListMeshNetworks",
 		"ListMeshNodes",
+		"RedeemMeshNodeEnrollment",
 		"RemoveMeshGroupMember",
 		"RevokeMeshNode",
 		"SetMeshGroupPolicy",

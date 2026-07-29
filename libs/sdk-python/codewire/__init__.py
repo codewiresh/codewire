@@ -33,7 +33,7 @@ from codewire.mesh import (
     MeshNetwork,
     MeshNetworks,
     MeshNode,
-    MeshNodeCredentials,
+    MeshNodeRegistration,
     MeshNodes,
 )
 
@@ -64,6 +64,6 @@ __all__ = [
     "MeshNetwork",
     "MeshNetworks",
     "MeshNode",
-    "MeshNodeCredentials",
+    "MeshNodeRegistration",
     "MeshNodes",
 ]

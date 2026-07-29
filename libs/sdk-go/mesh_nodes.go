@@ -1,13 +1,7 @@
 package codewire
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
-	"fmt"
-	"io"
-	"net/http"
-	"strings"
 	"time"
 
 	"connectrpc.com/connect"
@@ -72,38 +66,26 @@ func (s *MeshNodeService) CreateEnrollment(ctx context.Context, orgID, networkID
 	return &enrollment, nil
 }
 
-// RedeemEnrollment redeems an enrollment token to register a node.
-// This is a public endpoint -- no auth token required.
-func (s *MeshNodeService) RedeemEnrollment(ctx context.Context, enrollmentToken, nodeName string) (*MeshNodeCredentials, error) {
-	body, err := json.Marshal(map[string]string{
-		"enrollment_token": enrollmentToken,
-		"node_name":        nodeName,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("mesh: marshal enrollment redemption: %w", err)
-	}
-	req, err := http.NewRequestWithContext(
+// RedeemEnrollment consumes a one-use enrollment capability without sending a
+// bearer. The generated response contains registration metadata only.
+func (s *MeshNodeService) RedeemEnrollment(ctx context.Context, enrollmentCode, nodeName string) (*MeshNodeRegistration, error) {
+	response, err := s.client.publicNodeClient.RedeemMeshNodeEnrollment(
 		ctx,
-		http.MethodPost,
-		s.client.baseURL+"/api/v1/node-enrollments/redeem",
-		bytes.NewReader(body),
+		connect.NewRequest(&codewirev1.RedeemMeshNodeEnrollmentRequest{
+			EnrollmentCode: enrollmentCode,
+			NodeName:       nodeName,
+		}),
 	)
 	if err != nil {
-		return nil, fmt.Errorf("mesh: create enrollment redemption request: %w", err)
+		return nil, connectSDKError(err)
 	}
-	req.Header.Set("Content-Type", "application/json")
-	response, err := s.client.httpClient.Do(req)
+	node, err := fromProtoMeshNode(response.Msg.GetNode())
 	if err != nil {
-		return nil, fmt.Errorf("mesh: enrollment redemption request: %w", err)
-	}
-	defer response.Body.Close()
-	if response.StatusCode >= 400 {
-		detail, _ := io.ReadAll(io.LimitReader(response.Body, 1024))
-		return nil, &Error{StatusCode: response.StatusCode, Detail: strings.TrimSpace(string(detail))}
-	}
-	var result MeshNodeCredentials
-	if err := json.NewDecoder(response.Body).Decode(&result); err != nil {
 		return nil, err
 	}
-	return &result, nil
+	enrollment, err := fromProtoMeshEnrollment(response.Msg.GetEnrollment())
+	if err != nil {
+		return nil, err
+	}
+	return &MeshNodeRegistration{Node: node, Enrollment: enrollment}, nil
 }

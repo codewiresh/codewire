@@ -1,8 +1,7 @@
 // Mesh API client for the Codewire TypeScript SDK.
 //
 // The ergonomic layer wraps the generated Connect clients for every mounted
-// product operation. Enrollment redemption remains one isolated raw call until
-// its typed contract replaces the legacy response in WS18 WI-8A.
+// product operation.
 
 import type { Client, Interceptor } from "@connectrpc/connect";
 import { createClient } from "@connectrpc/connect";
@@ -40,7 +39,7 @@ import {
   type MeshNode as ProtoMeshNode,
   type MeshNodeEnrollment as ProtoMeshNodeEnrollment,
 } from "@codewire/proto-ts/gen/codewire/v1/mesh_node_pb";
-import { CodewireError, mapConnectError } from "./types.js";
+import { mapConnectError } from "./types.js";
 
 // -- Types --------------------------------------------------------------------
 
@@ -73,12 +72,9 @@ export interface MeshEnrollment {
   enrollment_code: string;
 }
 
-/** Legacy raw response retained only until enrollment redemption moves in-contract. */
-export interface MeshNodeCredentials {
-  node_token: string;
-  node_name: string;
-  network_id: string;
-  enrollment_id?: string;
+export interface MeshNodeRegistration {
+  node: MeshNode;
+  enrollment: MeshEnrollment;
 }
 
 export interface MeshKVEntry {
@@ -490,9 +486,7 @@ export class MeshNetworksService {
 export class MeshNodesService {
   constructor(
     private readonly client: MeshNodeClient,
-    private readonly baseUrl: string,
-    private readonly timeout: number,
-    private readonly fetchImpl: typeof fetch,
+    private readonly publicClient: MeshNodeClient,
   ) {}
 
   async list(orgId: string, networkId: string): Promise<MeshNode[]> {
@@ -538,37 +532,24 @@ export class MeshNodesService {
     );
   }
 
-  /** Public legacy endpoint retained only until WI-8A; it sends no bearer. */
+  /** Consume a one-use capability without sending a bearer. */
   async redeemEnrollment(
-    enrollmentToken: string,
+    enrollmentCode: string,
     nodeName: string,
-  ): Promise<MeshNodeCredentials> {
-    const response = await this.fetchImpl(
-      this.baseUrl + "/api/v1/node-enrollments/redeem",
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          enrollment_token: enrollmentToken,
-          node_name: nodeName,
-        }),
-        signal: AbortSignal.timeout(this.timeout),
-      },
+  ): Promise<MeshNodeRegistration> {
+    const response = await connectCall(() =>
+      this.publicClient.redeemMeshNodeEnrollment({
+        enrollmentCode,
+        nodeName,
+      }),
     );
-    if (!response.ok) {
-      let detail = response.statusText;
-      try {
-        detail = (await response.text()).trim() || detail;
-      } catch {
-        // Keep the status text when a failed response body cannot be read.
-      }
-      throw new CodewireError(
-        response.status,
-        detail,
-        response.headers.get("x-request-id") ?? undefined,
-      );
-    }
-    return (await response.json()) as MeshNodeCredentials;
+    return {
+      node: fromProtoNode(required("redeemed node", response.node)),
+      enrollment: fromProtoEnrollment(
+        required("redeemed enrollment", response.enrollment),
+        "",
+      ),
+    };
   }
 }
 
@@ -775,14 +756,18 @@ export class MeshClient {
       interceptors: [bearerInterceptor],
       useBinaryFormat: false,
     });
+    const publicTransport = createConnectTransport({
+      baseUrl,
+      defaultTimeoutMs: opts.timeout ?? 30_000,
+      fetch: opts.fetch,
+      useBinaryFormat: false,
+    });
     this.networks = new MeshNetworksService(
       createClient(ProtoMeshNetworkService, transport),
     );
     this.nodes = new MeshNodesService(
       createClient(ProtoMeshNodeService, transport),
-      baseUrl,
-      opts.timeout ?? 30_000,
-      opts.fetch ?? fetch,
+      createClient(ProtoMeshNodeService, publicTransport),
     );
     this.groups = new MeshGroupsService(
       createClient(ProtoMeshGroupService, transport),

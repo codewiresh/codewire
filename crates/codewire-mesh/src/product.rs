@@ -42,6 +42,12 @@ pub(crate) struct CreatedNodeEnrollment {
     pub enrollment_code: String,
 }
 
+pub(crate) struct RedeemedNodeEnrollment {
+    pub organization_id: String,
+    pub node: NodeRecord,
+    pub enrollment: NodeEnrollment,
+}
+
 pub(crate) struct KeyValueWrite<'a> {
     pub organization_id: &'a str,
     pub network_id: &'a str,
@@ -337,6 +343,65 @@ impl MeshProductService {
         Ok(CreatedNodeEnrollment {
             enrollment,
             enrollment_code,
+        })
+    }
+
+    pub(crate) async fn redeem_node_enrollment(
+        &self,
+        enrollment_code: &str,
+        requested_node_name: &str,
+        peer_url: &str,
+    ) -> AppResult<RedeemedNodeEnrollment> {
+        let enrollment_code = required_identifier(enrollment_code, "enrollment_code")?;
+        let token_hash = hash_capability(&enrollment_code);
+        let now = Utc::now();
+        let enrollment = self
+            .store
+            .node_enrollment_get_by_token_hash(&token_hash)
+            .await
+            .map_err(store_error)?
+            .ok_or(AppError::Forbidden)?;
+        if enrollment.expires_at <= now || enrollment.uses_remaining <= 0 {
+            return Err(AppError::Forbidden);
+        }
+
+        let node_name = match (enrollment.node_name.trim(), requested_node_name.trim()) {
+            (fixed, "") if !fixed.is_empty() => fixed.to_owned(),
+            (fixed, requested) if !fixed.is_empty() && fixed != requested => {
+                return Err(AppError::Forbidden);
+            }
+            (_, "") => return Err(AppError::BadRequest("node_name is required".into())),
+            (_, requested) => requested.to_owned(),
+        };
+        let organization_id = self
+            .organization_for_network(&enrollment.network_id)
+            .await?;
+        let enrollment = self
+            .store
+            .node_enrollment_consume(&token_hash, now)
+            .await
+            .map_err(store_error)?
+            .ok_or(AppError::Forbidden)?;
+        let node = NodeRecord {
+            network_id: enrollment.network_id.clone(),
+            name: node_name,
+            peer_url: peer_url.trim().to_owned(),
+            github_id: None,
+            owner_subject: enrollment.owner_subject.clone(),
+            authorized_by: enrollment.issued_by.clone(),
+            enrollment_id: enrollment.id.clone(),
+            authorized_at: now,
+            last_seen_at: now,
+        };
+        self.store
+            .node_register(node.clone())
+            .await
+            .map_err(store_error)?;
+
+        Ok(RedeemedNodeEnrollment {
+            organization_id,
+            node,
+            enrollment,
         })
     }
 

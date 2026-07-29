@@ -84,7 +84,8 @@ pub use codewire_proto::codewire::v1::{
     CreateMeshNetworkResponse, CreateMeshNodeEnrollmentRequest, CreateMeshNodeEnrollmentResponse,
     JoinMeshNetworkRequest, JoinMeshNetworkResponse, ListMeshNetworksRequest,
     ListMeshNetworksResponse, ListMeshNodesRequest, ListMeshNodesResponse, MeshInvite, MeshNetwork,
-    MeshNode, MeshNodeEnrollment, RevokeMeshNodeRequest, RevokeMeshNodeResponse,
+    MeshNode, MeshNodeEnrollment, RedeemMeshNodeEnrollmentRequest,
+    RedeemMeshNodeEnrollmentResponse, RevokeMeshNodeRequest, RevokeMeshNodeResponse,
 };
 pub use codewire_proto::codewire::v1::{
     CreateSecretProjectRequest, CreateSecretProjectResponse, DeleteProjectSecretRequest,
@@ -103,8 +104,6 @@ pub use config::{
 };
 pub use connectrpc::ErrorCode;
 pub use error::{ClientError, ErrorInfo, ValidationError};
-pub use mesh::TransitionalMeshNodeEnrollmentRedemption;
-
 /// The one Rust client core consumed by the CLI and future native bindings.
 #[derive(Clone)]
 pub struct CodewireClient {

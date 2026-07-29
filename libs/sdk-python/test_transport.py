@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import io
-import json
 import sys
 import threading
 import unittest
@@ -77,6 +76,7 @@ from codewire.v1.mesh_node_pb2 import (
     ListMeshNodesResponse,
     MeshNode,
     MeshNodeEnrollment,
+    RedeemMeshNodeEnrollmentResponse,
     RevokeMeshNodeResponse,
 )
 from codewire.v1.port_pb2 import Port, PortAccess
@@ -456,12 +456,10 @@ MESH_REDEEMED_AT.FromJsonString("2026-04-01T02:00:00Z")
 
 class MeshServiceFixture:
     calls: set[str] = set()
-    raw_authorization: str | None = None
 
     @classmethod
     def reset(cls) -> None:
         cls.calls = set()
-        cls.raw_authorization = None
 
     @classmethod
     def _record(
@@ -631,9 +629,27 @@ class MeshServiceFixture:
         )
 
     def redeem_mesh_node_enrollment(self, request, ctx):
-        raise ConnectError(
-            Code.INTERNAL,
-            "redemption must remain on the isolated raw route",
+        self.calls.add("RedeemMeshNodeEnrollment")
+        if getattr(ctx, "request_headers").get("authorization") is not None:
+            raise ConnectError(Code.UNAUTHENTICATED, "unexpected bearer")
+        if (
+            request.enrollment_code != "secret-enrollment"
+            or request.node_name != "node-one"
+        ):
+            raise ConnectError(Code.INVALID_ARGUMENT, "wrong redemption")
+        return RedeemMeshNodeEnrollmentResponse(
+            node=self._node("node-one"),
+            enrollment=MeshNodeEnrollment(
+                id="enrollment-one",
+                org_id=MESH_ORG_ID,
+                network_id=MESH_NETWORK_ID,
+                node_name="node-one",
+                owner_user_id="owner-user",
+                issued_by_user_id="issuer-user",
+                expires_at=MESH_EXPIRES_AT,
+                created_at=MESH_CREATED_AT,
+                redeemed_at=MESH_REDEEMED_AT,
+            ),
         )
 
     def list_mesh_groups(self, request, ctx):
@@ -815,33 +831,6 @@ class MeshHandler(BaseHTTPRequestHandler):
         self.wfile.write(response_body)
 
     def do_POST(self) -> None:
-        path = self.path.partition("?")[0]
-        if path == "/api/v1/node-enrollments/redeem":
-            MeshServiceFixture.calls.add("RedeemEnrollmentRaw")
-            MeshServiceFixture.raw_authorization = self.headers.get(
-                "Authorization"
-            )
-            body = json.loads(self._read_body())
-            if body != {
-                "enrollment_token": "secret-enrollment",
-                "node_name": "node-one",
-            }:
-                self.send_error(400)
-                return
-            response = json.dumps(
-                {
-                    "node_token": "legacy-node-token",
-                    "node_name": "node-one",
-                    "network_id": MESH_NETWORK_ID,
-                    "enrollment_id": "enrollment-one",
-                }
-            ).encode()
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(response)))
-            self.end_headers()
-            self.wfile.write(response)
-            return
         self._serve_connect()
 
 
@@ -1035,12 +1024,14 @@ class MeshConnectTransportTestCase(unittest.TestCase):
             "key-one",
         )
 
-        credentials = self.client.nodes.redeem_enrollment(
+        registration = self.client.nodes.redeem_enrollment(
             "secret-enrollment", "node-one"
         )
-        self.assertEqual(credentials.node_token, "legacy-node-token")
-        self.assertEqual(credentials.network_id, MESH_NETWORK_ID)
-        self.assertIsNone(MeshServiceFixture.raw_authorization)
+        self.assertEqual(registration.node.org_id, MESH_ORG_ID)
+        self.assertEqual(registration.node.network_id, MESH_NETWORK_ID)
+        self.assertEqual(registration.node.name, "node-one")
+        self.assertEqual(registration.enrollment.id, "enrollment-one")
+        self.assertEqual(registration.enrollment.enrollment_code, "")
 
         self.assertEqual(
             MeshServiceFixture.calls,
@@ -1061,7 +1052,7 @@ class MeshConnectTransportTestCase(unittest.TestCase):
                 "GetMeshKeyValue",
                 "ListMeshKeyValues",
                 "DeleteMeshKeyValue",
-                "RedeemEnrollmentRaw",
+                "RedeemMeshNodeEnrollment",
             },
         )
 

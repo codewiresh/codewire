@@ -210,7 +210,7 @@ run_database() {
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
     cargo test -p codewire-mesh --lib 'store::migration_tests::' \
       -- --ignored --nocapture | tee "$logfile"
-  assert_passed_count "Mesh migration ledger" "$logfile" 7
+  assert_passed_count "Mesh migration ledger" "$logfile" 8
 
 }
 
