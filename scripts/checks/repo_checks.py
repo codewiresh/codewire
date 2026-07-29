@@ -1114,13 +1114,12 @@ def mesh_surface_policy_failures(policy: Any) -> list[str]:
         )
     package_counts = expected_counts.get("package_operations")
     if isinstance(package_counts, dict) and set(package_counts) != {
-        "codewire.internal.v1",
         "codewire.v1",
         "none",
     }:
         failures.append(
-            "surface.expected_counts.package_operations must name both Connect "
-            "audiences and none"
+            "surface.expected_counts.package_operations must name the remaining "
+            "raw-route dispositions"
         )
 
     network_callers = policy.get("network_operation_callers")
@@ -1676,20 +1675,27 @@ def mesh_surface_failures(
             f"{MESH_SERVER_REL} router_from_state must retain AppBuilder.with_health()"
         )
     compact_router_source = re.sub(r"\s+", "", sanitize_rust_source(router_source))
-    if (
-        compact_router_source.count(
-            ".with_connect_routes(crate::connect::router(state))"
-        )
-        != 1
-    ):
+    expected_connect_mount = ".with_connect_routes(crate::connect::router(state.clone()))"
+    if compact_router_source.count(expected_connect_mount) != 1:
         failures.append(
             f"{MESH_SERVER_REL} router_from_state must mount exactly one retained "
-            "Mesh Connect router"
+            "product Connect router"
         )
-    if ".with_routes(public_routes.merge(protected_routes))" not in compact_router_source:
+    expected_coordinate_mount = (
+        ".with_connect_routes_and_protocol_policy("
+        "crate::mesh_coordinate::router(state),"
+        "codewire_server_core::connect::ProtocolPolicy::ConnectAndGrpc,"
+        ")"
+    )
+    if compact_router_source.count(expected_coordinate_mount) != 1:
+        failures.append(
+            f"{MESH_SERVER_REL} router_from_state must mount exactly one "
+            "native-gRPC-capable Mesh coordinator router"
+        )
+    if ".with_routes(public_routes)" not in compact_router_source:
         failures.append(
             f"{MESH_SERVER_REL} router_from_state must mount exactly the frozen "
-            "public and protected route trees"
+            "public/OIDC route tree"
         )
     mesh_network_ownership_failures(
         failures,
@@ -1781,9 +1787,25 @@ def mesh_connect_surface_failures(
             mount_counts.append((source, count))
     if mount_counts != [(MESH_SERVER_REL, 1)]:
         failures.append(
-            "retained Mesh Connect mount count drift: "
+            "retained Mesh product Connect mount count drift: "
             f"found {stable_json(mount_counts)}"
         )
+
+    coordinate_source = mesh_sources.get(
+        "crates/codewire-mesh/src/mesh_coordinate.rs"
+    )
+    if coordinate_source is None:
+        failures.append("missing typed Mesh coordinator service")
+    else:
+        for fragment in (
+            "impl MeshCoordinatorService for MeshCoordinateService",
+            "MeshCoordinatorServiceCoordinateRequest",
+            "authorize_coordinate(&org_id, &network_id, credential)",
+        ):
+            if fragment not in coordinate_source:
+                failures.append(
+                    f"typed Mesh coordinator lost required shape {fragment!r}"
+                )
 
 
 def mesh_network_ownership_failures(
@@ -1912,10 +1934,10 @@ def mesh_route_registrations(source: str) -> list[dict[str, Any]]:
     function = rust_function_source(source, "router_from_state")
     sanitized = sanitize_rust_source(function)
     oidc_start = sanitized.find("if state.config.auth_mode == AuthMode::Oidc")
-    protected_start = sanitized.find("let protected_routes = Router::new()")
-    if oidc_start == -1 or protected_start == -1 or oidc_start >= protected_start:
+    app_builder_start = sanitized.find('AppBuilder::new("mesh")')
+    if oidc_start == -1 or app_builder_start == -1 or oidc_start >= app_builder_start:
         raise RuntimeError(
-            f"{MESH_SERVER_REL} router_from_state lost its public/OIDC/protected structure"
+            f"{MESH_SERVER_REL} router_from_state lost its public/OIDC structure"
         )
 
     registrations: list[dict[str, Any]] = []
@@ -1945,8 +1967,8 @@ def mesh_route_registrations(source: str) -> list[dict[str, Any]]:
             "public"
             if match.start() < oidc_start
             else "oidc"
-            if match.start() < protected_start
-            else "protected"
+            if match.start() < app_builder_start
+            else "application"
         )
         registrations.append(
             {
@@ -2379,10 +2401,9 @@ def mesh_surface_self_test(
 
     helper_route_sources = copy.deepcopy(mesh_sources)
     helper_route_sources[MESH_SERVER_REL] = server_source.replace(
-        ".with_routes(public_routes.merge(protected_routes))",
+        ".with_routes(public_routes)",
         ".with_routes(\n"
         "            public_routes\n"
-        "                .merge(protected_routes)\n"
         "                .merge(extra_mesh_routes()),\n"
         "        )",
         1,
@@ -2404,11 +2425,11 @@ def mesh_surface_self_test(
 
     alternate_router_sources = copy.deepcopy(mesh_sources)
     alternate_router_source = server_source.replace(
-        '.route("/api/v1/tailnet/coordinate", get(tailnet_coordinate))',
+        '.route("/api/v1/nodes", get(node_list))',
         '.route_service("/api/v1/new-service", get(new_mesh_service))\n'
         "        .route(\n"
-        '            "/api/v1/tailnet/coordinate",\n'
-        "            get(tailnet_coordinate)\n"
+        '            "/api/v1/nodes",\n'
+        "            get(node_list)\n"
         "                .on(MethodFilter::POST, new_handler)\n"
         "                .post_service(new_service),\n"
         "        )",
@@ -2651,32 +2672,6 @@ def mesh_surface_self_test(
     ):
         raise RuntimeError("self-test accepted the retired Mesh session cookie")
 
-    swapped_packages = copy.deepcopy(inventory)
-    node_list_operation = operation(
-        swapped_packages,
-        "get",
-        "/api/v1/nodes",
-    )
-    coordinate_operation = operation(
-        swapped_packages,
-        "get",
-        "/api/v1/tailnet/coordinate",
-    )
-    node_list_operation["package"], coordinate_operation["package"] = (
-        coordinate_operation["package"],
-        node_list_operation["package"],
-    )
-    swapped_package_failures = mesh_surface_failures(
-        mesh_sources,
-        client_sources,
-        swapped_packages,
-    )
-    if not any(
-        "per-operation semantic fingerprint drift" in failure
-        for failure in swapped_package_failures
-    ):
-        raise RuntimeError("self-test accepted a balanced audience-package swap")
-
     swapped_dispositions = copy.deepcopy(inventory)
     join_page_operation = operation(swapped_dispositions, "get", "/join")
     network_join_operation = operation(
@@ -2721,47 +2716,6 @@ def mesh_surface_self_test(
         for failure in swapped_caller_failures
     ):
         raise RuntimeError("self-test accepted a balanced caller swap")
-
-    declaration_as_caller = copy.deepcopy(inventory)
-    bundle_operation = operation(
-        declaration_as_caller,
-        "get",
-        "/api/v1/network-auth/bundle",
-    )
-    bundle_operation["callers"] = ["go-sdk"]
-    declaration_as_caller_failures = mesh_surface_failures(
-        mesh_sources,
-        client_sources,
-        declaration_as_caller,
-    )
-    if not any(
-        "semantic count drift" in failure
-        for failure in declaration_as_caller_failures
-    ):
-        raise RuntimeError(
-            "self-test accepted a caller on a declaration-only operation"
-        )
-
-    reverted_disposition = copy.deepcopy(inventory)
-    bundle_operation = operation(
-        reverted_disposition,
-        "get",
-        "/api/v1/network-auth/bundle",
-    )
-    bundle_operation["disposition"] = "connect"
-    bundle_operation["package"] = "codewire.internal.v1"
-    reverted_disposition_failures = mesh_surface_failures(
-        mesh_sources,
-        client_sources,
-        reverted_disposition,
-    )
-    if not any(
-        "semantic count drift" in failure
-        for failure in reverted_disposition_failures
-    ):
-        raise RuntimeError(
-            "self-test accepted a changed credential-route disposition"
-        )
 
     restored_python_wrapper_sources = copy.deepcopy(client_sources)
     caller, python_source = restored_python_wrapper_sources[
@@ -3372,7 +3326,6 @@ def check_license_map(_args: argparse.Namespace) -> int:
         "crates/codewire-gateway/Cargo.toml": "AGPL-3.0-only",
         "crates/codewire-idp/Cargo.toml": "AGPL-3.0-only",
         "crates/codewire-mesh/Cargo.toml": "AGPL-3.0-only",
-        "crates/codewire-network-auth/Cargo.toml": "workspace",
         "crates/codewire-oidc/Cargo.toml": "MIT OR Apache-2.0",
         "crates/codewire-orchestration/Cargo.toml": "AGPL-3.0-only",
         "crates/codewire-platform-native/Cargo.toml": "MIT",
@@ -3770,7 +3723,7 @@ def check_connect_edge_routing(_args: argparse.Namespace) -> int:
     fail = failures.append
 
     services: set[str] = set()
-    for directory in ["proto/codewire", "proto/coordinator"]:
+    for directory in ["proto/codewire"]:
         for file in sorted((ROOT / directory).rglob("*.proto")):
             services.update(services_in_proto(file))
 
@@ -3851,12 +3804,14 @@ def check_connect_edge_routing(_args: argparse.Namespace) -> int:
         try:
             internal_connect_listener_self_test()
             mesh_connect_backend_topology_self_test(ownership, owners, per_file)
+            mesh_coordinator_transport_self_test()
             mesh_primary_origin_rest_edge_self_test()
         except RuntimeError as error:
             fail(f"Connect edge self-test: {error}")
 
     for file in all_files:
         assert_coordinator_transport_shape(file, fail)
+        assert_mesh_coordinator_transport_shape(file, fail)
         assert_environment_session_transport_shape(file, fail)
     assert_native_grpc_opt_in_sites(fail)
     assert_rendered_dev_ingress_identities(fail)
@@ -4379,10 +4334,35 @@ def coordinator_ingress_document(text: str, label: str, fail: Callable[[str], No
     matching = [
         document
         for document in re.split(r"^\s*---\s*$", text, flags=re.MULTILINE)
-        if re.search(r"path:\s+/coordinator(?:\\\.|\.)v1(?:\\\.|\.)CoordinatorService/", document)
+        if re.search(
+            r"path:\s+/codewire(?:\\\.|\.)internal(?:\\\.|\.)v1"
+            r"(?:\\\.|\.)CoordinatorService/",
+            document,
+        )
     ]
     if len(matching) != 1:
         fail(f"{label}: expected exactly one separate CoordinatorService Ingress, found {len(matching)}")
+        return None
+    return matching[0]
+
+
+def mesh_coordinator_ingress_document(
+    text: str, label: str, fail: Callable[[str], None]
+) -> str | None:
+    matching = [
+        document
+        for document in re.split(r"^\s*---\s*$", text, flags=re.MULTILINE)
+        if re.search(
+            r"path:\s+/codewire(?:\\\.|\.)internal(?:\\\.|\.)v1"
+            r"(?:\\\.|\.)MeshCoordinatorService/",
+            document,
+        )
+    ]
+    if len(matching) != 1:
+        fail(
+            f"{label}: expected exactly one separate MeshCoordinatorService "
+            f"Ingress, found {len(matching)}"
+        )
         return None
     return matching[0]
 
@@ -4488,7 +4468,7 @@ def assert_coordinator_ingress_shape(document: str | None, label: str, fail: Cal
 def assert_coordinator_transport_shape(rel_path: str, fail: Callable[[str], None]) -> None:
     text = read_text(rel_path)
     if rel_path.startswith("Caddyfile"):
-        block = caddy_handle_block(text, "/coordinator.v1.CoordinatorService/*")
+        block = caddy_handle_block(text, "/codewire.internal.v1.CoordinatorService/*")
         if not block:
             fail(f"{rel_path}: missing explicit CoordinatorService handle block")
             return
@@ -4498,6 +4478,114 @@ def assert_coordinator_transport_shape(rel_path: str, fail: Callable[[str], None
             fail(f"{rel_path}: CoordinatorService backend transport must enable versions h2c 2")
         return
     assert_coordinator_ingress_shape(coordinator_ingress_document(text, rel_path, fail), rel_path, fail)
+
+
+def assert_mesh_coordinator_ingress_shape(
+    document: str | None,
+    label: str,
+    expected_backend: str,
+    fail: Callable[[str], None],
+) -> None:
+    if document is None:
+        return
+    if not re.search(r"^kind:\s+Ingress\s*$", document, re.MULTILINE):
+        fail(f"{label}: MeshCoordinatorService route must live in an Ingress object")
+    if not re.search(r"pathType:\s+ImplementationSpecific\b", document):
+        fail(
+            f"{label}: MeshCoordinatorService regex route must use "
+            "pathType ImplementationSpecific"
+        )
+    if not re.search(
+        r"nginx\.ingress\.kubernetes\.io/use-regex:\s+[\"']?true[\"']?",
+        document,
+    ):
+        fail(f"{label}: MeshCoordinatorService Ingress must enable use-regex explicitly")
+    if not re.search(
+        r"nginx\.ingress\.kubernetes\.io/backend-protocol:\s+[\"']?GRPC[\"']?",
+        document,
+    ):
+        fail(f"{label}: MeshCoordinatorService Ingress is missing backend-protocol GRPC")
+    if re.search(
+        r"nginx\.ingress\.kubernetes\.io/service-upstream:\s+[\"']?true[\"']?",
+        document,
+    ):
+        fail(f"{label}: MeshCoordinatorService must preserve endpoint routing")
+    for annotation in ["proxy-request-buffering", "proxy-buffering"]:
+        if not re.search(
+            rf"nginx\.ingress\.kubernetes\.io/{annotation}:\s+[\"']?off[\"']?",
+            document,
+        ):
+            fail(f"{label}: MeshCoordinatorService Ingress {annotation} must be off for bidi DATA")
+    for annotation in ["proxy-read-timeout", "proxy-send-timeout"]:
+        if not re.search(
+            rf"nginx\.ingress\.kubernetes\.io/{annotation}:\s+[\"']?3600[\"']?",
+            document,
+        ):
+            fail(f"{label}: MeshCoordinatorService Ingress {annotation} must be 3600")
+    if not re.search(rf"name:\s+{re.escape(expected_backend)}\b", document):
+        fail(
+            f"{label}: MeshCoordinatorService Ingress must target "
+            f"{expected_backend}:http"
+        )
+    if not re.search(r"port:\s*\n\s+name:\s+http\b", document):
+        fail(f"{label}: MeshCoordinatorService Ingress must target the named http port")
+
+
+def assert_mesh_coordinator_transport_shape(
+    rel_path: str, fail: Callable[[str], None]
+) -> None:
+    text = read_text(rel_path)
+    if rel_path.startswith("Caddyfile"):
+        block = caddy_handle_block(
+            text, "/codewire.internal.v1.MeshCoordinatorService/*"
+        )
+        if not block:
+            fail(f"{rel_path}: missing explicit MeshCoordinatorService handle block")
+            return
+        if not re.search(
+            r"reverse_proxy\s+(?:localhost|127\.0\.0\.1):18090\b", block
+        ):
+            fail(f"{rel_path}: MeshCoordinatorService must target Mesh :18090 explicitly")
+        if not re.search(
+            r"transport\s+http\s*\{[\s\S]*?versions\s+h2c\s+2\b", block
+        ):
+            fail(
+                f"{rel_path}: MeshCoordinatorService backend transport must enable "
+                "versions h2c 2"
+            )
+        return
+    assert_mesh_coordinator_ingress_shape(
+        mesh_coordinator_ingress_document(text, rel_path, fail),
+        rel_path,
+        MESH_KUBERNETES_BACKENDS[rel_path],
+        fail,
+    )
+
+
+def mesh_coordinator_transport_self_test() -> None:
+    """Demonstrate that the Mesh bidi route cannot fall back to HTTP/1."""
+    rel_path = "tests/e2e/kind/ingress.yaml"
+    document = mesh_coordinator_ingress_document(
+        read_text(rel_path), rel_path, lambda message: None
+    )
+    if document is None:
+        raise RuntimeError("Mesh coordinator transport fixture is missing")
+    broken = document.replace(
+        'nginx.ingress.kubernetes.io/backend-protocol: "GRPC"',
+        'nginx.ingress.kubernetes.io/backend-protocol: "HTTP"',
+        1,
+    )
+    failures: list[str] = []
+    assert_mesh_coordinator_ingress_shape(
+        broken,
+        rel_path,
+        MESH_KUBERNETES_BACKENDS[rel_path],
+        failures.append,
+    )
+    if not any("backend-protocol GRPC" in failure for failure in failures):
+        raise RuntimeError(
+            f"Mesh coordinator transport accepted an HTTP/1 backend: {failures!r}"
+        )
 
 
 def assert_environment_session_ingress_shape(
@@ -4581,6 +4669,7 @@ def assert_environment_session_transport_shape(
 def assert_native_grpc_opt_in_sites(fail: Callable[[str], None]) -> None:
     expected = {
         "crates/codewire-coordinator/src/connect.rs": 1,
+        "crates/codewire-mesh/src/server.rs": 1,
         "crates/codewire-orchestration/src/main.rs": 1,
     }
     actual: dict[str, int] = {}
@@ -4594,8 +4683,9 @@ def assert_native_grpc_opt_in_sites(fail: Callable[[str], None]) -> None:
             actual[rel_path] = count
     if actual != expected:
         fail(
-            "native-gRPC policy opt-ins must be exactly CoordinatorService and "
-            f"EnvironmentSessionService: got {actual}, want {expected}"
+            "native-gRPC policy opt-ins must be exactly CoordinatorService, "
+            "MeshCoordinatorService, and EnvironmentSessionService: "
+            f"got {actual}, want {expected}"
         )
 
 
@@ -4671,7 +4761,6 @@ def assert_rendered_dev_ingress_identities(fail: Callable[[str], None]) -> None:
     if result.returncode != 0:
         fail(f"{label}: kustomize build failed: {result.stderr.strip() or result.stdout.strip()}")
         return
-    websocket = ingress_document_by_name(result.stdout, "codewire-coordinator", label, fail)
     coordinator_connect = ingress_document_by_name(result.stdout, "codewire-coordinator-connect", label, fail)
     environment_session = ingress_document_by_name(
         result.stdout, "codewire-environment-session-grpc", label, fail
@@ -4692,7 +4781,6 @@ def assert_rendered_dev_ingress_identities(fail: Callable[[str], None]) -> None:
         fail,
     )
 
-    websocket_identity = ingress_identity(websocket, f"{label} codewire-coordinator", fail)
     coordinator_connect_identity = ingress_identity(
         coordinator_connect, f"{label} codewire-coordinator-connect", fail
     )
@@ -4701,8 +4789,7 @@ def assert_rendered_dev_ingress_identities(fail: Callable[[str], None]) -> None:
     )
     general_connect_identity = ingress_identity(general_connect, f"{label} codewire-connect", fail)
     if (
-        not websocket_identity
-        or not coordinator_connect_identity
+        not coordinator_connect_identity
         or not environment_session_identity
         or not general_connect_identity
     ):
@@ -4714,7 +4801,6 @@ def assert_rendered_dev_ingress_identities(fail: Callable[[str], None]) -> None:
         "tlsSecret": "codewire-dev-tls",
     }
     for name, identity in [
-        ("codewire-coordinator", websocket_identity),
         ("codewire-coordinator-connect", coordinator_connect_identity),
         ("codewire-environment-session-grpc", environment_session_identity),
         ("codewire-connect", general_connect_identity),
@@ -4722,8 +4808,6 @@ def assert_rendered_dev_ingress_identities(fail: Callable[[str], None]) -> None:
         for field, value in expected.items():
             if identity[field] != value:
                 fail(f"{label}: {name} {field} must be {value}, got {identity[field]}")
-    if websocket_identity != coordinator_connect_identity:
-        fail(f"{label}: coordinator WS and Connect Ingress host/TLS identities must match")
 
 
 # ---------------------------------------------------------------------------

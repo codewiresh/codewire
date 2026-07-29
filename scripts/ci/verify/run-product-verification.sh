@@ -139,10 +139,8 @@ run_contracts_proto() {
     cd proto
     rm -rf \
       ../libs/gen-go/codewire \
-      ../libs/gen-go/coordinator \
       ../libs/gen-python/codewire \
       ../packages/codewire-proto-ts/src/gen/codewire
-    buf generate
     buf generate --template buf.gen.codewire.yaml
     buf generate --template buf.gen.google-rpc-ts.yaml
     buf generate --template buf.gen.google-rpc-python.yaml
@@ -479,6 +477,9 @@ run_deploy() {
   grep -Fq 'name: CODEWIRE_MESH_AUTHORIZATION_URL' <<<"$dev_mesh_render"
   grep -Fq 'http://codewire-orchestration.dev.svc.cluster.local:8085' <<<"$dev_mesh_render"
   grep -Fq 'name: CODEWIRE_MESH_AUTHORIZATION_HMAC_SECRET' <<<"$dev_mesh_render"
+  grep -Fq 'name: codewire-mesh-coordinator' <<<"$dev_mesh_render"
+  grep -Fq 'nginx.ingress.kubernetes.io/backend-protocol: "GRPC"' <<<"$dev_mesh_render"
+  grep -Fq 'path: /codewire\.internal\.v1\.MeshCoordinatorService/' <<<"$dev_mesh_render"
   python3 scripts/checks/repo_checks.py production-source-ownership --self-test
 }
 

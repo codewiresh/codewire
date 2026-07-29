@@ -6,9 +6,10 @@ use std::sync::Arc;
 
 use axum::body::to_bytes;
 use axum::http::{HeaderMap, StatusCode};
-use codewire_proto::coordinator::v1::{
-    CoordinateRequest, CoordinateResponse, CoordinatorService, DerpMap, Hello, PeerRemove,
-    PeerUpdate, Ping, coordinate_request,
+use codewire_proto::codewire::internal::v1::{
+    CoordinateDerpMap as DerpMap, CoordinateHello as Hello, CoordinateNode,
+    CoordinatePeerRemove as PeerRemove, CoordinatePeerUpdate as PeerUpdate, CoordinatePing as Ping,
+    CoordinateRequest, CoordinateResponse, CoordinatorService, coordinate_request,
 };
 use codewire_server_core::auth::{AuthState, authenticate_headers_with_context};
 use codewire_server_core::connect::app_error_to_wire;
@@ -24,21 +25,6 @@ use crate::{
     CoordinationPlane, CoordinatorState, PeerEvent, PeerKind, PeerRegistry, SCOPE_COORDINATE,
     Transport, authorize_client, authorize_sidecar, bearer_token, sidecar_token,
 };
-
-pub(crate) const SERVE_CONNECT_ENV: &str = "COORDINATOR_SERVE_CONNECT";
-
-pub(crate) fn enabled() -> bool {
-    enabled_from(std::env::var(SERVE_CONNECT_ENV).ok().as_deref())
-}
-
-fn enabled_from(value: Option<&str>) -> bool {
-    !value.is_some_and(|value| {
-        matches!(
-            value.trim().to_ascii_lowercase().as_str(),
-            "0" | "false" | "no" | "off"
-        )
-    })
-}
 
 pub(crate) fn router(state: CoordinatorState, auth: AuthState) -> axum::Router {
     router_with_authorizer(
@@ -74,39 +60,6 @@ type AuthorizationFuture<'a> =
 
 trait CoordinateAuthorizer: Send + Sync {
     fn authorize<'a>(&'a self, ctx: &'a RequestContext, hello: Hello) -> AuthorizationFuture<'a>;
-}
-
-#[cfg(test)]
-struct FixedTestAuthorizer {
-    client_peer_id: Uuid,
-}
-
-#[cfg(test)]
-impl CoordinateAuthorizer for FixedTestAuthorizer {
-    fn authorize<'a>(&'a self, _ctx: &'a RequestContext, hello: Hello) -> AuthorizationFuture<'a> {
-        Box::pin(async move {
-            let environment_id = Uuid::parse_str(&hello.environment_id)
-                .map_err(|_| ConnectError::invalid_argument("invalid environment id"))?;
-            if hello.org_id.is_empty() {
-                Ok(AuthorizedPeer {
-                    peer_id: environment_id,
-                    sidecar_id: None,
-                    kind: PeerKind::Sidecar,
-                })
-            } else {
-                Ok(AuthorizedPeer {
-                    peer_id: self.client_peer_id,
-                    sidecar_id: Some(environment_id),
-                    kind: PeerKind::Client,
-                })
-            }
-        })
-    }
-}
-
-#[cfg(test)]
-pub(crate) fn fixed_test_router(state: CoordinatorState, client_peer_id: Uuid) -> axum::Router {
-    router_with_authorizer(state, Arc::new(FixedTestAuthorizer { client_peer_id }))
 }
 
 struct ProductionAuthorizer {
@@ -363,7 +316,7 @@ fn session_output_to_proto(output: SessionOutput) -> Result<CoordinateResponse, 
 }
 
 fn proto_node_to_tailnet(
-    node: codewire_proto::coordinator::v1::Node,
+    node: CoordinateNode,
 ) -> Result<codewire_tailnet::node::Node, ConnectError> {
     let mut value =
         serde_json::to_value(node).map_err(|_| ConnectError::invalid_argument("invalid node"))?;
@@ -391,7 +344,7 @@ fn proto_node_to_tailnet(
 
 fn tailnet_node_to_proto(
     node: codewire_tailnet::node::Node,
-) -> Result<codewire_proto::coordinator::v1::Node, ConnectError> {
+) -> Result<CoordinateNode, ConnectError> {
     serde_json::from_value(
         serde_json::to_value(node).map_err(|_| ConnectError::internal("encode node"))?,
     )
@@ -402,27 +355,21 @@ fn tailnet_node_to_proto(
 mod tests {
     use super::*;
     use axum::body::Body;
-    use axum::extract::State;
-    use axum::extract::ws::WebSocketUpgrade;
     use axum::response::IntoResponse;
     use base64::Engine;
-    use codewire_proto::coordinator::v1::{
-        CoordinatorServiceClient, Node as ProtoNode, coordinate_response,
+    use codewire_proto::codewire::internal::v1::{
+        CoordinateNode as ProtoNode, CoordinatorServiceClient, coordinate_response,
     };
     use codewire_server_core::auth::{
         api_key_prefix, authenticate_headers, generate_api_key, hash_api_key, hash_oauth_token,
     };
-    use codewire_tailnet::coordinator::{CoordinatorClient, Handlers};
-    use codewire_tailnet::coordinator_connect::{CoordinatorConnectClient, HelloIdentity};
-    use codewire_tailnet::node::{DiscoPublic, Node, NodePublic, prefix_from_uuid};
+    use codewire_tailnet::node::{DiscoPublic, NodePublic, prefix_from_uuid};
     use connectrpc::Protocol;
     use connectrpc::client::{ClientConfig, HttpClient};
     use hmac::{Hmac, Mac};
     use sha2::Sha256;
     use sqlx::postgres::PgPoolOptions;
     use tokio::task::JoinHandle;
-    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-    use tokio_tungstenite::tungstenite::http::HeaderValue;
 
     struct HermeticAuthorizer;
 
@@ -452,30 +399,6 @@ mod tests {
         }
     }
 
-    #[derive(Clone)]
-    struct TestWebSocketState {
-        peers: Arc<PeerRegistry>,
-        peer_id: Uuid,
-        sidecar_id: Option<Uuid>,
-        kind: PeerKind,
-    }
-
-    async fn test_websocket(
-        State(state): State<TestWebSocketState>,
-        ws: WebSocketUpgrade,
-    ) -> axum::response::Response {
-        ws.protocols(["coordinate"]).on_upgrade(move |socket| {
-            crate::run_peer_socket(
-                socket,
-                state.peers,
-                None,
-                state.peer_id,
-                state.sidecar_id,
-                state.kind,
-            )
-        })
-    }
-
     fn lazy_state() -> (CoordinatorState, AuthState) {
         let pool = PgPoolOptions::new()
             .connect_lazy("postgres://codewire:codewire@127.0.0.1:1/codewire")
@@ -486,20 +409,15 @@ mod tests {
         )
     }
 
-    async fn start_hermetic_app(with_websocket: bool) -> (std::net::SocketAddr, JoinHandle<()>) {
+    async fn start_hermetic_app() -> (std::net::SocketAddr, JoinHandle<()>) {
         let (state, _) = lazy_state();
-        let mut routes = router_with_authorizer(state.clone(), Arc::new(HermeticAuthorizer));
-        if with_websocket {
-            let websocket = axum::Router::new()
-                .route("/coordinate", axum::routing::get(test_websocket))
-                .with_state(TestWebSocketState {
-                    peers: state.peers.clone(),
-                    peer_id: Uuid::new_v4(),
-                    sidecar_id: None,
-                    kind: PeerKind::Sidecar,
-                });
-            routes = routes.merge(websocket);
-        }
+        start_hermetic_app_with_state(state).await
+    }
+
+    async fn start_hermetic_app_with_state(
+        state: CoordinatorState,
+    ) -> (std::net::SocketAddr, JoinHandle<()>) {
+        let routes = router_with_authorizer(state, Arc::new(HermeticAuthorizer));
         let app = codewire_server_core::AppBuilder::new("coordinator-connect-test")
             .with_routes(routes)
             .into_router();
@@ -756,104 +674,6 @@ mod tests {
             .unwrap();
     }
 
-    async fn start_mixed_app(
-        environment_id: Uuid,
-    ) -> (std::net::SocketAddr, CoordinatorState, JoinHandle<()>) {
-        let (state, _) = lazy_state();
-        let connect = router_with_authorizer(state.clone(), Arc::new(HermeticAuthorizer));
-        let websocket = axum::Router::new()
-            .route("/coordinate", axum::routing::get(test_websocket))
-            .with_state(TestWebSocketState {
-                peers: state.peers.clone(),
-                peer_id: environment_id,
-                sidecar_id: None,
-                kind: PeerKind::Sidecar,
-            });
-        start_test_app(connect.merge(websocket), state).await
-    }
-
-    async fn start_accumulation_app(
-        environment_id: Uuid,
-        first_client_id: Uuid,
-        second_client_id: Uuid,
-    ) -> (std::net::SocketAddr, CoordinatorState, JoinHandle<()>) {
-        let (state, _) = lazy_state();
-        let connect = router_with_authorizer(state.clone(), Arc::new(HermeticAuthorizer));
-        let first = axum::Router::new()
-            .route("/client-one", axum::routing::get(test_websocket))
-            .with_state(TestWebSocketState {
-                peers: state.peers.clone(),
-                peer_id: first_client_id,
-                sidecar_id: Some(environment_id),
-                kind: PeerKind::Client,
-            });
-        let second = axum::Router::new()
-            .route("/client-two", axum::routing::get(test_websocket))
-            .with_state(TestWebSocketState {
-                peers: state.peers.clone(),
-                peer_id: second_client_id,
-                sidecar_id: Some(environment_id),
-                kind: PeerKind::Client,
-            });
-        start_test_app(connect.merge(first).merge(second), state).await
-    }
-
-    async fn start_test_app(
-        routes: axum::Router,
-        state: CoordinatorState,
-    ) -> (std::net::SocketAddr, CoordinatorState, JoinHandle<()>) {
-        let app = codewire_server_core::AppBuilder::new("coordinator-connect-client-test")
-            .with_routes(routes)
-            .into_router();
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let task = tokio::spawn(async move {
-            codewire_server_core::serve_with_listener_h2_keepalive(
-                app,
-                listener,
-                codewire_server_core::Http2KeepaliveConfig::new(
-                    std::time::Duration::from_secs(15),
-                    std::time::Duration::from_secs(20),
-                ),
-            )
-            .await
-            .unwrap();
-        });
-        (addr, state, task)
-    }
-
-    fn sample_tailnet_node(id: Uuid, derp: i32) -> Node {
-        Node {
-            id,
-            as_of: "2026-07-12T12:00:00Z".parse().unwrap(),
-            key: NodePublic::from_raw([0x11; 32]),
-            disco_key: DiscoPublic::from_raw([0x22; 32]),
-            preferred_derp: derp,
-            derp_latency: None,
-            endpoints: vec![],
-            addresses: vec![prefix_from_uuid(&id)],
-        }
-    }
-
-    async fn next_snapshot(rx: &mut tokio::sync::mpsc::UnboundedReceiver<Vec<Node>>) -> Vec<Node> {
-        tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
-            .await
-            .expect("peer callback timed out")
-            .expect("peer callback channel closed")
-    }
-
-    async fn next_snapshot_with_len(
-        rx: &mut tokio::sync::mpsc::UnboundedReceiver<Vec<Node>>,
-        expected: usize,
-    ) -> Vec<Node> {
-        loop {
-            let snapshot = next_snapshot(rx).await;
-            if snapshot.len() == expected {
-                return snapshot;
-            }
-        }
-    }
-
     fn h2c_client(addr: std::net::SocketAddr) -> CoordinatorServiceClient<HttpClient> {
         h2c_client_with_protocol(addr, Protocol::Connect)
     }
@@ -890,7 +710,7 @@ mod tests {
         stream: &mut connectrpc::client::BidiStream<
             <HttpClient as connectrpc::client::ClientTransport>::ResponseBody,
             CoordinateRequest,
-            codewire_proto::coordinator::v1::CoordinateResponseView<'static>,
+            codewire_proto::codewire::internal::v1::CoordinateResponseView<'static>,
         >,
     ) -> CoordinateResponse {
         let message: connectrpc::StreamMessage<CoordinateResponse> =
@@ -913,15 +733,6 @@ mod tests {
         let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).unwrap();
         mac.update(payload.as_bytes());
         format!("{payload}.{}", engine.encode(mac.finalize().into_bytes()))
-    }
-
-    #[test]
-    fn kill_switch_defaults_on_and_recognizes_explicit_false_values() {
-        assert!(enabled_from(None));
-        assert!(enabled_from(Some("1")));
-        for value in ["0", "false", "FALSE", "no", "off"] {
-            assert!(!enabled_from(Some(value)), "{value}");
-        }
     }
 
     #[tokio::test]
@@ -1268,7 +1079,7 @@ mod tests {
     async fn first_non_hello_error_is_identical_for_connect_and_grpc() {
         let mut outcomes = Vec::new();
         for protocol in [Protocol::Connect, Protocol::Grpc] {
-            let (addr, server) = start_hermetic_app(false).await;
+            let (addr, server) = start_hermetic_app().await;
             let mut stream = h2c_client_with_protocol(addr, protocol)
                 .coordinate()
                 .await
@@ -1289,7 +1100,7 @@ mod tests {
 
     #[tokio::test]
     async fn empty_stream_requires_hello() {
-        let (addr, server) = start_hermetic_app(false).await;
+        let (addr, server) = start_hermetic_app().await;
         let mut stream = h2c_client(addr).coordinate().await.unwrap();
         stream.close_send();
         let error = stream.message::<CoordinateResponse>().await.unwrap_err();
@@ -1300,7 +1111,7 @@ mod tests {
     #[tokio::test]
     async fn connect_and_grpc_hello_derp_node_peer_update_roundtrip() {
         for protocol in [Protocol::Connect, Protocol::Grpc] {
-            let (addr, server) = start_hermetic_app(false).await;
+            let (addr, server) = start_hermetic_app().await;
             let client = h2c_client_with_protocol(addr, protocol);
             let environment_id = Uuid::new_v4();
             let mut sidecar = client.coordinate().await.unwrap();
@@ -1371,251 +1182,124 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn connect_client_accumulates_removes_and_stays_live_when_idle() {
-        let environment_id = Uuid::new_v4();
-        let first_client_id = Uuid::new_v4();
-        let second_client_id = Uuid::new_v4();
-        let (addr, _state, server) =
-            start_accumulation_app(environment_id, first_client_id, second_client_id).await;
-
-        let mut connect = CoordinatorConnectClient::connect(
-            &format!("http://{addr}/api/v1/internal/gateway/coordinate"),
-            "",
-            HelloIdentity::sidecar(environment_id),
-        )
-        .await
-        .unwrap();
-        let (snapshots_tx, mut snapshots_rx) = tokio::sync::mpsc::unbounded_channel();
-        let (derp_tx, mut derp_rx) = tokio::sync::mpsc::unbounded_channel();
-        let connect_task = tokio::spawn(async move {
-            connect
-                .run(Handlers {
-                    on_peers: move |peers: &[Node]| {
-                        let _ = snapshots_tx.send(peers.to_vec());
-                    },
-                    on_derp_map: move |derp: &serde_json::Value| {
-                        let _ = derp_tx.send(derp.clone());
-                    },
-                })
+    #[ignore = "requires NATS_URL pointing at a JetStream-enabled NATS server"]
+    async fn generated_protocol_cross_replica_fanout_round_trips_over_nats() {
+        let nats_url =
+            std::env::var("NATS_URL").expect("set NATS_URL to a JetStream-enabled NATS server");
+        let sidecar_plane =
+            CoordinationPlane::setup(async_nats::connect(nats_url.clone()).await.unwrap())
                 .await
-        });
-        tokio::time::timeout(std::time::Duration::from_secs(5), derp_rx.recv())
-            .await
-            .expect("DERP map callback timed out")
-            .expect("DERP map callback channel closed");
-
-        let mut first = CoordinatorClient::connect(&format!("ws://{addr}/client-one"), "")
-            .await
-            .unwrap();
-        first
-            .update_node(&sample_tailnet_node(first_client_id, 1))
-            .await
-            .unwrap();
-        let first_snapshot = next_snapshot_with_len(&mut snapshots_rx, 1).await;
-        assert_eq!(first_snapshot[0].id, first_client_id);
-
-        let mut second = CoordinatorClient::connect(&format!("ws://{addr}/client-two"), "")
-            .await
-            .unwrap();
-        second
-            .update_node(&sample_tailnet_node(second_client_id, 2))
-            .await
-            .unwrap();
-        let accumulated = next_snapshot_with_len(&mut snapshots_rx, 2).await;
-        let mut accumulated_ids = accumulated.iter().map(|node| node.id).collect::<Vec<_>>();
-        let mut expected_ids = vec![first_client_id, second_client_id];
-        accumulated_ids.sort_unstable();
-        expected_ids.sort_unstable();
-        assert_eq!(accumulated_ids, expected_ids);
-
-        drop(first);
-        let after_remove = next_snapshot_with_len(&mut snapshots_rx, 1).await;
-        assert_eq!(after_remove[0].id, second_client_id);
-
-        tokio::time::sleep(std::time::Duration::from_millis(15_250)).await;
-        assert!(
-            !connect_task.is_finished(),
-            "typed heartbeats must keep an otherwise-idle stream alive"
-        );
-
-        drop(second);
-        connect_task.abort();
-        server.abort();
-    }
-
-    #[tokio::test]
-    async fn websocket_and_connect_clients_have_identical_peer_progression() {
-        let environment_id = Uuid::new_v4();
-        let (addr, state, server) = start_mixed_app(environment_id).await;
-        let mut websocket = CoordinatorClient::connect(&format!("ws://{addr}/coordinate"), "")
-            .await
-            .unwrap();
-        let mut connect = CoordinatorConnectClient::connect(
-            &format!("http://{addr}/coordinate"),
-            "",
-            HelloIdentity::client("org-1", environment_id),
-        )
-        .await
-        .unwrap();
-
-        let (ws_snapshots_tx, mut ws_snapshots_rx) = tokio::sync::mpsc::unbounded_channel();
-        let (connect_snapshots_tx, mut connect_snapshots_rx) =
-            tokio::sync::mpsc::unbounded_channel();
-
-        websocket
-            .update_node(&sample_tailnet_node(environment_id, 3))
-            .await
-            .unwrap();
-        let (connect_updates_tx, connect_updates_rx) = tokio::sync::mpsc::unbounded_channel();
-
-        let mut websocket_task = tokio::spawn(async move {
-            websocket
-                .run(Handlers {
-                    on_peers: move |peers: &[Node]| {
-                        let _ = ws_snapshots_tx.send(peers.to_vec());
-                    },
-                    on_derp_map: |_: &serde_json::Value| {},
-                })
-                .await
-        });
-        let mut connect_task = tokio::spawn(async move {
-            connect
-                .run_with_node_updates(
-                    connect_updates_rx,
-                    Handlers {
-                        on_peers: move |peers: &[Node]| {
-                            let _ = connect_snapshots_tx.send(peers.to_vec());
-                        },
-                        on_derp_map: |_: &serde_json::Value| {},
-                    },
-                )
-                .await
-        });
-        connect_updates_tx
-            .send(sample_tailnet_node(Uuid::new_v4(), 4))
-            .unwrap();
-
-        tokio::task::yield_now().await;
-        if websocket_task.is_finished() {
-            panic!(
-                "WebSocket client loop exited before peer exchange: {:?}",
-                (&mut websocket_task).await
-            );
-        }
-        if connect_task.is_finished() {
-            panic!(
-                "Connect client loop exited before peer exchange: {:?}",
-                (&mut connect_task).await
-            );
-        }
-
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        {
-            let inner = state.peers.inner.lock().unwrap();
-            let registered = inner
-                .peers
-                .iter()
-                .map(|(id, peer)| (*id, peer.node.is_some()))
-                .collect::<Vec<_>>();
-            assert!(
-                registered
-                    .iter()
-                    .any(|(id, has_node)| *id == environment_id && *has_node),
-                "WebSocket node update did not reach registry: {registered:?}"
-            );
-            assert!(
-                registered
-                    .iter()
-                    .any(|(id, has_node)| *id != environment_id && *has_node),
-                "Connect node update did not reach registry: {registered:?}"
-            );
-        }
-
-        let connect_update = next_snapshot_with_len(&mut connect_snapshots_rx, 1).await;
-        let ws_update = next_snapshot_with_len(&mut ws_snapshots_rx, 1).await;
-        assert_eq!(connect_update[0].id, environment_id);
-
-        let connect_peer_id = {
-            let inner = state.peers.inner.lock().unwrap();
-            *inner
-                .tunnels
-                .iter()
-                .find_map(|(client_id, sidecar_id)| {
-                    (*sidecar_id == environment_id).then_some(client_id)
-                })
-                .expect("Connect client tunnel registered")
-        };
-        assert_eq!(ws_update[0].id, connect_peer_id);
-
-        {
-            let inner = state.peers.inner.lock().unwrap();
-            inner
-                .peers
-                .get(&environment_id)
-                .expect("WebSocket peer registered")
-                .tx
-                .send(PeerEvent::Remove(connect_peer_id))
                 .unwrap();
-            inner
-                .peers
-                .get(&connect_peer_id)
-                .expect("Connect peer registered")
-                .tx
-                .send(PeerEvent::Remove(environment_id))
-                .unwrap();
-        }
-
-        let ws_remove = next_snapshot_with_len(&mut ws_snapshots_rx, 0).await;
-        let connect_remove = next_snapshot_with_len(&mut connect_snapshots_rx, 0).await;
-        let ws_progression = vec![ws_update.len(), ws_remove.len()];
-        let connect_progression = vec![connect_update.len(), connect_remove.len()];
-        assert_eq!(ws_progression, vec![1, 0]);
-        assert_eq!(connect_progression, ws_progression);
-
-        websocket_task.abort();
-        connect_task.abort();
-        server.abort();
-    }
-
-    #[tokio::test]
-    async fn one_listener_serves_http1_websocket_and_h2c_connect() {
-        let (addr, server) = start_hermetic_app(true).await;
-        let mut websocket_request = format!("ws://{addr}/coordinate")
-            .into_client_request()
-            .unwrap();
-        websocket_request.headers_mut().insert(
-            "Sec-WebSocket-Protocol",
-            HeaderValue::from_static("coordinate"),
-        );
-        let (mut websocket, response) = tokio_tungstenite::connect_async(websocket_request)
+        let client_plane = CoordinationPlane::setup(async_nats::connect(nats_url).await.unwrap())
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::SWITCHING_PROTOCOLS);
-        let websocket_derp =
-            tokio::time::timeout(std::time::Duration::from_secs(5), websocket.next())
-                .await
-                .unwrap()
-                .unwrap()
-                .unwrap();
-        assert!(websocket_derp.is_text());
 
         let environment_id = Uuid::new_v4();
-        let mut connect = h2c_client(addr).coordinate().await.unwrap();
-        connect
+        let (mut sidecar_state, _) = lazy_state();
+        sidecar_state.coordination = Some(sidecar_plane.clone());
+        let (sidecar_addr, sidecar_server) = start_hermetic_app_with_state(sidecar_state).await;
+        let (mut client_state, _) = lazy_state();
+        client_state.coordination = Some(client_plane);
+        let (client_addr, client_server) = start_hermetic_app_with_state(client_state).await;
+
+        let mut sidecar = h2c_client_with_protocol(sidecar_addr, Protocol::Connect)
+            .coordinate()
+            .await
+            .unwrap();
+        let mut client = h2c_client_with_protocol(client_addr, Protocol::Grpc)
+            .coordinate()
+            .await
+            .unwrap();
+        sidecar
             .send(request(Hello {
                 environment_id: environment_id.to_string(),
                 ..Default::default()
             }))
             .await
             .unwrap();
-        assert!(matches!(
-            next_response(&mut connect).await.msg,
-            Some(coordinate_response::Msg::DerpMap(_))
-        ));
+        client
+            .send(request(Hello {
+                org_id: "org-1".into(),
+                environment_id: environment_id.to_string(),
+                ..Default::default()
+            }))
+            .await
+            .unwrap();
+        for stream in [&mut sidecar, &mut client] {
+            assert!(matches!(
+                next_response(stream).await.msg,
+                Some(coordinate_response::Msg::DerpMap(_))
+            ));
+        }
 
-        websocket.close(None).await.unwrap();
-        connect.close_send();
-        server.abort();
+        let sidecar_node = codewire_tailnet::node::Node {
+            id: environment_id,
+            as_of: "2026-07-11T12:00:00Z".parse().unwrap(),
+            key: NodePublic::from_raw([0x31; 32]),
+            disco_key: DiscoPublic::from_raw([0x32; 32]),
+            preferred_derp: 11,
+            derp_latency: None,
+            endpoints: vec![],
+            addresses: vec![prefix_from_uuid(&environment_id)],
+        };
+        sidecar
+            .send(request(tailnet_node_to_proto(sidecar_node).unwrap()))
+            .await
+            .unwrap();
+        let response = next_response(&mut client).await;
+        let Some(coordinate_response::Msg::PeerUpdate(update)) = response.msg else {
+            panic!("expected cross-replica sidecar peer update, got {response:?}");
+        };
+        assert_eq!(update.nodes.len(), 1);
+        assert_eq!(update.nodes[0].id, environment_id.to_string());
+        assert_eq!(update.nodes[0].preferred_derp, 11);
+        let persisted = sidecar_plane
+            .get_sidecar_node(environment_id)
+            .await
+            .unwrap()
+            .expect("sidecar node must be persisted in coordinator KV");
+        assert_eq!(persisted.id, environment_id);
+        assert_eq!(persisted.preferred_derp, 11);
+
+        let proposed_client_id = Uuid::new_v4();
+        let client_node = codewire_tailnet::node::Node {
+            id: proposed_client_id,
+            as_of: "2026-07-11T12:00:00Z".parse().unwrap(),
+            key: NodePublic::from_raw([0x41; 32]),
+            disco_key: DiscoPublic::from_raw([0x42; 32]),
+            preferred_derp: 7,
+            derp_latency: None,
+            endpoints: vec![],
+            addresses: vec![prefix_from_uuid(&proposed_client_id)],
+        };
+        client
+            .send(request(tailnet_node_to_proto(client_node).unwrap()))
+            .await
+            .unwrap();
+        let response = next_response(&mut sidecar).await;
+        let Some(coordinate_response::Msg::PeerUpdate(update)) = response.msg else {
+            panic!("expected cross-replica client peer update, got {response:?}");
+        };
+        assert_eq!(update.nodes.len(), 1);
+        assert_eq!(update.nodes[0].preferred_derp, 7);
+        let assigned_client_id = Uuid::parse_str(&update.nodes[0].id).unwrap();
+        assert_ne!(assigned_client_id, proposed_client_id);
+
+        client.close_send();
+        let response = next_response(&mut sidecar).await;
+        let Some(coordinate_response::Msg::PeerRemove(remove)) = response.msg else {
+            panic!("expected cross-replica client removal, got {response:?}");
+        };
+        assert_eq!(remove.peer_id, assigned_client_id.to_string());
+
+        sidecar.close_send();
+        sidecar_plane
+            .kv
+            .delete(crate::sidecar_key(environment_id))
+            .await
+            .ok();
+        sidecar_server.abort();
+        client_server.abort();
     }
 
     #[tokio::test]
@@ -1632,7 +1316,7 @@ mod tests {
         ] {
             let response = tower::ServiceExt::oneshot(
                 router.clone(),
-                axum::http::Request::post("/coordinator.v1.CoordinatorService/Coordinate")
+                axum::http::Request::post("/codewire.internal.v1.CoordinatorService/Coordinate")
                     .header("content-type", content_type)
                     .body(Body::empty())
                     .unwrap(),
@@ -1652,29 +1336,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn kill_switch_unmounts_only_connect_route() {
+    async fn generated_route_is_mounted_and_legacy_websocket_routes_are_absent() {
         let (state, auth) = lazy_state();
-        let app = super::super::router_with_connect(state, auth, false);
-        let response = tower::ServiceExt::oneshot(
-            app,
-            axum::http::Request::post("/coordinator.v1.CoordinatorService/Coordinate")
+        let app = super::super::router(state, auth);
+        let generated = tower::ServiceExt::oneshot(
+            app.clone(),
+            axum::http::Request::post("/codewire.internal.v1.CoordinatorService/Coordinate")
                 .header("content-type", "application/connect+proto")
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_ne!(generated.status(), StatusCode::NOT_FOUND);
 
-        let (state, auth) = lazy_state();
-        let response = tower::ServiceExt::oneshot(
-            super::super::router_with_connect(state, auth, false),
-            axum::http::Request::get("/api/v1/internal/gateway/coordinate")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        for path in [
+            "/api/v1/internal/gateway/coordinate",
+            "/api/v1/organizations/org/environments/env/coordinate",
+        ] {
+            let response = tower::ServiceExt::oneshot(
+                app.clone(),
+                axum::http::Request::get(path).body(Body::empty()).unwrap(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
+        }
     }
 }

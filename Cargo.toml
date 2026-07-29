@@ -17,7 +17,6 @@ members = [
     "crates/codewire-cli",
     "crates/codewire-cli-bin",
     "crates/codewire-mesh",
-    "crates/codewire-network-auth",
     "crates/codewire-oidc",
     "crates/codewire-orchestration",
     "crates/codewire-proto",
@@ -55,7 +54,6 @@ codewire-proto = { path = "crates/codewire-proto", default-features = false }
 codewire-daemon = { path = "crates/codewire-daemon" }
 codewire-derp = { path = "crates/codewire-derp" }
 codewire-tailnet = { path = "crates/codewire-tailnet" }
-codewire-network-auth = { path = "crates/codewire-network-auth" }
 codewire-udp-relay = { path = "crates/codewire-udp-relay" }
 
 # FFI

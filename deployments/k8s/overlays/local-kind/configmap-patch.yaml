@@ -24,7 +24,7 @@ data:
   SANDBOX_DOCKER_MODE: "local-dind-direct"
   SANDBOX_NETWORK_POLICY_MANAGEMENT: "Unmanaged"
   CODEWIRE_API_URL: "http://codewire-orchestration.default.svc.cluster.local:8084"
-  CODEWIRE_COORDINATOR_URL: "http://codewire-coordinator.default.svc.cluster.local:8090/api/v1/internal/gateway/coordinate"
+  CODEWIRE_COORDINATOR_URL: "http://codewire-coordinator.default.svc.cluster.local:8090"
   NAMESPACE_PREFIX: "local-tenant"
   INFISICAL_TENANT_ENABLED: "false"
   INFISICAL_TENANT_HOST: ""

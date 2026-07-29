@@ -3094,7 +3094,7 @@ mod migration_tests {
 
     use super::*;
 
-    const EXPECTED_MESH_MIGRATION_COUNT: usize = 4;
+    const EXPECTED_MESH_MIGRATION_COUNT: usize = 5;
 
     #[derive(Debug, PartialEq, Eq)]
     struct AppliedMigration {
@@ -3160,6 +3160,7 @@ mod migration_tests {
                 (2, "network organization ownership".to_string()),
                 (3, "contract native invitations".to_string()),
                 (4, "retire persistent node bearer".to_string()),
+                (5, "retire network auth issuer".to_string()),
             ]
         );
         assert!(
@@ -3551,7 +3552,87 @@ mod migration_tests {
             anyhow::ensure!(!token_index_exists);
             anyhow::ensure!(dormant_columns == 2);
             anyhow::ensure!(applied.len() == EXPECTED_MESH_MIGRATION_COUNT);
-            anyhow::ensure!(applied.last().map(|migration| migration.version) == Some(4));
+            anyhow::ensure!(applied.last().map(|migration| migration.version) == Some(5));
+            anyhow::Ok(())
+        }
+        .await;
+        let cleanup = test_db.drop().await;
+        result.and(cleanup)
+    }
+
+    #[tokio::test]
+    #[ignore = "requires TEST_DATABASE_URL"]
+    async fn network_auth_issuer_migration_deletes_only_legacy_namespace() -> anyhow::Result<()> {
+        let test_db = TestDatabase::create(&test_database_url()?).await?;
+        let result = async {
+            let pool = PgPoolOptions::new()
+                .max_connections(1)
+                .connect(&test_db.url)
+                .await?;
+            for migration_sql in [
+                include_str!("../migrations/001_initial_schema.sql"),
+                include_str!("../migrations/002_network_organization_ownership.sql"),
+                include_str!("../migrations/003_contract_native_invitations.sql"),
+                include_str!("../migrations/004_retire_persistent_node_bearer.sql"),
+            ] {
+                sqlx::raw_sql(migration_sql).execute(&pool).await?;
+            }
+            sqlx::query(
+                r#"
+                CREATE TABLE _sqlx_migrations (
+                    version BIGINT PRIMARY KEY,
+                    description TEXT NOT NULL,
+                    installed_on TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    success BOOLEAN NOT NULL,
+                    checksum BYTEA NOT NULL,
+                    execution_time BIGINT NOT NULL
+                )
+                "#,
+            )
+            .execute(&pool)
+            .await?;
+            for migration in MESH_MIGRATOR.iter().take(4) {
+                sqlx::query(
+                    r#"
+                    INSERT INTO _sqlx_migrations
+                        (version, description, success, checksum, execution_time)
+                    VALUES ($1, $2, true, $3, 0)
+                    "#,
+                )
+                .bind(migration.version)
+                .bind(migration.description.as_ref())
+                .bind(migration.checksum.as_ref())
+                .execute(&pool)
+                .await?;
+            }
+            sqlx::query(
+                r#"
+                INSERT INTO kv (network_id, namespace, key, value)
+                VALUES
+                    ('network-alpha', 'mesh.networkauth', 'issuer', '\x0102'),
+                    ('network-alpha', 'product.settings', 'retained', '\x0304')
+                "#,
+            )
+            .execute(&pool)
+            .await?;
+            drop(pool);
+
+            let store = PostgresMeshStore::connect(&test_db.url).await?;
+            let legacy_count: i64 =
+                sqlx::query_scalar("SELECT count(*) FROM kv WHERE namespace = 'mesh.networkauth'")
+                    .fetch_one(&store.pool)
+                    .await?;
+            let retained_value: Vec<u8> = sqlx::query_scalar(
+                "SELECT value FROM kv WHERE namespace = 'product.settings' AND key = 'retained'",
+            )
+            .fetch_one(&store.pool)
+            .await?;
+            let applied = applied_migrations(&store.pool).await?;
+
+            anyhow::ensure!(legacy_count == 0);
+            anyhow::ensure!(retained_value == vec![0x03, 0x04]);
+            anyhow::ensure!(applied.len() == EXPECTED_MESH_MIGRATION_COUNT);
+            anyhow::ensure!(applied.last().map(|migration| migration.version) == Some(5));
             anyhow::Ok(())
         }
         .await;

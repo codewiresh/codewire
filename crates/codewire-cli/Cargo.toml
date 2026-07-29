@@ -19,7 +19,6 @@ clap_complete = { workspace = true }
 codewire-client = { workspace = true }
 codewire-daemon = { workspace = true }
 codewire-tailnet = { workspace = true }
-codewire-network-auth = { workspace = true }
 futures-util = "0.3"
 portable-pty = { workspace = true }
 qrcode = { version = "0.14.1", default-features = false }

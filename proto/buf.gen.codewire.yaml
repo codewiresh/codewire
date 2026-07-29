@@ -1,9 +1,7 @@
 version: v2
 
-# Codegen template for the client-facing codewire/** contract packages
-# (docs/plans/connect-rpc/02-proto-authoring-guide.md WI-2). Separate from
-# buf.gen.yaml because the client-facing packages additionally generate
-# TypeScript and Python consumers. Run with
+# Codegen template for every audience-packaged codewire/** contract
+# (docs/plans/connect-rpc/02-proto-authoring-guide.md WI-2). Run with
 #   cd proto && buf generate --template buf.gen.codewire.yaml
 # (or `make proto-generate`, which runs every checked-in template).
 #

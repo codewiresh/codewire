@@ -17,7 +17,7 @@ A `(bin)` marker means the crate produces a service/app binary.
 | `codewire-idp`          | OIDC provider service (bin) — wires `codewire-oidc` to Postgres and the session/org model. | AGPL-3.0-only |
 | `codewire-orchestration`| Environment lifecycle: reconciliation, sandbox client, Temporal worker (bin).    | AGPL-3.0-only |
 | `codewire-billing`      | Billing service (bin): catalog, plans, Stripe webhooks.                          | AGPL-3.0-only |
-| `codewire-coordinator`  | Coordinate service (bin): peer/session fan-out over WebSocket + Connect.          | AGPL-3.0-only |
+| `codewire-coordinator`  | Generated Connect coordinate service (bin): peer/session fan-out.                 | AGPL-3.0-only |
 | `codewire-mesh`         | Hosted Codewire Mesh node/network control plane (bin).                            | AGPL-3.0-only |
 
 ### Networking & tunnel
@@ -28,8 +28,7 @@ A `(bin)` marker means the crate produces a service/app binary.
 | `codewire-daemon`      | Workspace daemon (bin): exec, PTY, and file RPCs inside the sandbox.               | AGPL-3.0-only |
 | `codewire-derp`        | DERP relay core (bin).                                                             | BSD-3-Clause  |
 | `codewire-udp-relay`   | UDP peer-relay allocation and forwarding (bin).                                    | AGPL-3.0-only |
-| `codewire-tailnet`     | Tailscale-style tailnet client: WireGuard (boringtun) + DERP + coordinator client. | BSD-3-Clause |
-| `codewire-network-auth`| Mesh runtime credential and delegation tokens.                                    | AGPL-3.0-only |
+| `codewire-tailnet`     | Tailscale-style tailnet mechanics: WireGuard (boringtun), direct UDP, and DERP.     | BSD-3-Clause |
 
 ### Contract & shared types
 
@@ -64,10 +63,10 @@ A `(bin)` marker means the crate produces a service/app binary.
 | `codewire-platform-native` | Native platform impls (reqwest, russh, keyring).          | MIT     |
 | `codewire-desktop`         | GPUI desktop app entrypoint (bin).                        | MIT     |
 
-The root workspace default is **AGPL-3.0-only**. `codewire-cli`,
-`codewire-cli-bin`, and `codewire-network-auth` intentionally inherit that
-default. Every permissive crate declares an explicit override, and every crate
-directory carries the applicable license text.
+The root workspace default is **AGPL-3.0-only**. `codewire-cli` and
+`codewire-cli-bin` intentionally inherit that default. Every permissive crate
+declares an explicit override, and every crate directory carries the
+applicable license text.
 
 `codewire-tailnet` and `codewire-derp` remain BSD-3-Clause as standalone
 crates. Their current dependency graph includes the AGPL-3.0-only

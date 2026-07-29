@@ -27,7 +27,6 @@ proto/
   codewire/internal/v1/
   codewire/testing/v1/    # never-routed probe fixture (03 D8) — see below
   google/rpc/             # vendored error-detail types (01 WI-1)
-  coordinator/v1/         # existing internal contract, unchanged
 ```
 
 (`gateway.v1` and `daemon.v1` are Rust-consumed internal protocols under
@@ -218,7 +217,7 @@ error surface. When a client WI flips an area (05 onward):
   default-on `client` feature. New proto files must be added to the crate's
   `build.rs` list, and `make proto-generate` refreshes the descriptor set.
 - **Go:** `protoc-gen-go` + `protoc-gen-connect-go` via
-  `proto/buf.gen.yaml` and `proto/buf.gen.codewire.yaml` into the one
+  `proto/buf.gen.codewire.yaml` into the one
   standalone `libs/gen-go/` module. buf managed mode supplies `go_package`
   for the client-facing `codewire.*` packages — those contract files carry no
   language-specific file options (adding one later is itself a breaking FILE

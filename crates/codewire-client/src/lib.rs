@@ -6,6 +6,7 @@
 
 mod auth;
 mod config;
+mod coordinator;
 mod error;
 mod mesh;
 
@@ -103,6 +104,10 @@ pub use config::{
     DEFAULT_UNARY_TIMEOUT,
 };
 pub use connectrpc::ErrorCode;
+pub use coordinator::{
+    COORDINATOR_SETUP_TIMEOUT, CoordinatorPeerSession, Handlers as CoordinatorHandlers,
+    MeshCoordinateIdentity, MeshCoordinatorPeerSession, PrimaryCoordinateIdentity,
+};
 pub use error::{ClientError, ErrorInfo, ValidationError};
 /// The one Rust client core consumed by the CLI and future native bindings.
 #[derive(Clone)]

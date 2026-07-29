@@ -26,7 +26,6 @@ pub const GATEWAY_TOKEN_ENV: &str = "CODEWIRE_GATEWAY_TOKEN";
 pub const API_URL_ENV: &str = "CODEWIRE_API_URL";
 pub const BINDING_URL_ENV: &str = "CODEWIRE_BINDING_URL";
 pub const COORDINATOR_URL_ENV: &str = "CODEWIRE_COORDINATOR_URL";
-pub const COORDINATE_TRANSPORT_ENV: &str = "CODEWIRE_COORDINATE_TRANSPORT";
 pub const DERP_URL_ENV: &str = "CODEWIRE_DERP_URL";
 pub const STUN_HOST_ENV: &str = "CODEWIRE_STUN_HOST";
 pub const STUN_PORT_ENV: &str = "CODEWIRE_STUN_PORT";
@@ -42,8 +41,6 @@ pub const DEBUG_TAILNET_ENV: &str = "CODEWIRE_DEBUG_TAILNET";
 pub const DOCKER_PROXY_SOCK_ENV: &str = "CODEWIRE_DOCKER_PROXY_SOCK";
 pub const DOCKER_UPSTREAM_SOCK_ENV: &str = "CODEWIRE_DOCKER_UPSTREAM_SOCK";
 
-const COORDINATOR_PATH: &str = "/api/v1/internal/gateway/coordinate";
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GatewayConfig {
     pub shim_addr: String,
@@ -55,7 +52,6 @@ pub struct GatewayConfig {
     pub api_url: Option<String>,
     pub binding_url: Option<String>,
     pub coordinator_url: Option<String>,
-    pub coordinate_transport: CoordinateTransport,
     pub derp_url: Option<String>,
     pub stun: Option<StunConfig>,
     pub stun_servers: Vec<StunConfig>,
@@ -74,15 +70,6 @@ pub struct TailnetConfig {
     pub environment_id: Uuid,
     pub gateway_token: String,
     pub coordinator_url: String,
-    pub coordinate_transport: CoordinateTransport,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum CoordinateTransport {
-    Ws,
-    Connect,
-    #[default]
-    Auto,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -111,8 +98,6 @@ pub enum ConfigError {
     },
     #[error("parse CODEWIRE_ENVIRONMENT_ID: {0}")]
     InvalidEnvironmentId(String),
-    #[error("CODEWIRE_COORDINATE_TRANSPORT must be exactly ws, connect, or auto; got {0:?}")]
-    InvalidCoordinateTransport(String),
     #[error("invalid Docker proxy config: {0}")]
     InvalidDockerProxy(String),
 }
@@ -150,8 +135,7 @@ impl GatewayConfig {
         let udp_relay_allocator_url = trim_env(&getenv, UDP_RELAY_ALLOCATOR_URL_ENV);
         let udp_relay_allocator_token = trim_env(&getenv, UDP_RELAY_ALLOCATOR_TOKEN_ENV);
         let udp_relay_bind_addrs = parse_csv_env(&getenv, UDP_RELAY_BIND_ADDRS_ENV);
-        let coordinate_transport = resolve_coordinate_transport(&getenv)?;
-        let tailnet = resolve_tailnet(&getenv, coordinator_url.as_deref(), coordinate_transport)?;
+        let tailnet = resolve_tailnet(&getenv, coordinator_url.as_deref())?;
         let docker_proxy = resolve_docker_proxy(&getenv)?;
 
         Ok(Self {
@@ -164,7 +148,6 @@ impl GatewayConfig {
             api_url,
             binding_url,
             coordinator_url,
-            coordinate_transport,
             derp_url,
             stun,
             stun_servers,
@@ -188,7 +171,6 @@ where
         return Some(value);
     }
     trim_env(getenv, API_URL_ENV)
-        .map(|api_url| format!("{}{}", api_url.trim_end_matches('/'), COORDINATOR_PATH))
 }
 
 fn resolve_ssh_listen_addr<F>(getenv: &F) -> String
@@ -323,7 +305,6 @@ where
 fn resolve_tailnet<F>(
     getenv: &F,
     coordinator_url: Option<&str>,
-    coordinate_transport: CoordinateTransport,
 ) -> Result<Option<TailnetConfig>, ConfigError>
 where
     F: Fn(&str) -> Option<String>,
@@ -344,23 +325,7 @@ where
         environment_id,
         gateway_token,
         coordinator_url: coordinator_url.to_string(),
-        coordinate_transport,
     }))
-}
-
-fn resolve_coordinate_transport<F>(getenv: &F) -> Result<CoordinateTransport, ConfigError>
-where
-    F: Fn(&str) -> Option<String>,
-{
-    match getenv(COORDINATE_TRANSPORT_ENV)
-        .filter(|value| !value.is_empty())
-        .as_deref()
-    {
-        None | Some("auto") => Ok(CoordinateTransport::Auto),
-        Some("ws") => Ok(CoordinateTransport::Ws),
-        Some("connect") => Ok(CoordinateTransport::Connect),
-        Some(value) => Err(ConfigError::InvalidCoordinateTransport(value.into())),
-    }
 }
 
 fn resolve_docker_proxy<F>(getenv: &F) -> Result<Option<DockerProxyConfig>, ConfigError>
@@ -498,7 +463,7 @@ mod tests {
         let cfg = config(&[(API_URL_ENV, "https://codewire.example/")]).unwrap();
         assert_eq!(
             cfg.coordinator_url.as_deref(),
-            Some("https://codewire.example/api/v1/internal/gateway/coordinate")
+            Some("https://codewire.example/")
         );
     }
 
@@ -518,7 +483,7 @@ mod tests {
         );
         assert_eq!(
             cfg.coordinator_url.as_deref(),
-            Some("https://codewire.example/api/v1/internal/gateway/coordinate")
+            Some("https://codewire.example/")
         );
     }
 
@@ -541,32 +506,7 @@ mod tests {
         let tailnet = cfg.tailnet.unwrap();
         assert_eq!(tailnet.environment_id, Uuid::parse_str(&env_id).unwrap());
         assert_eq!(tailnet.gateway_token, "token");
-        assert_eq!(tailnet.coordinate_transport, CoordinateTransport::Auto);
-    }
-
-    #[test]
-    fn coordinate_transport_accepts_only_exact_values_and_defaults_to_auto() {
-        for (raw, expected) in [
-            (None, CoordinateTransport::Auto),
-            (Some("ws"), CoordinateTransport::Ws),
-            (Some("connect"), CoordinateTransport::Connect),
-            (Some("auto"), CoordinateTransport::Auto),
-        ] {
-            assert_eq!(
-                resolve_coordinate_transport(&|key| {
-                    (key == COORDINATE_TRANSPORT_ENV).then(|| raw.unwrap_or_default().to_string())
-                })
-                .unwrap(),
-                expected
-            );
-        }
-
-        for raw in ["WS", "Connect", "automatic", "ws,connect", " ws", "auto "] {
-            assert_eq!(
-                config(&[(COORDINATE_TRANSPORT_ENV, raw)]).unwrap_err(),
-                ConfigError::InvalidCoordinateTransport(raw.into())
-            );
-        }
+        assert_eq!(tailnet.coordinator_url, "https://codewire.example");
     }
 
     #[test]

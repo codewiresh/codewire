@@ -185,10 +185,8 @@ proto-lint:
 proto-generate:
 	rm -rf \
 		libs/gen-go/codewire \
-		libs/gen-go/coordinator \
 		libs/gen-python/codewire \
 		packages/codewire-proto-ts/src/gen/codewire
-	cd proto && PATH="$(GO_BIN):$$PATH" $(BUF) generate
 	cd proto && PATH="$(abspath $(PROTOC_DIR))/bin:$(GO_BIN):$$PATH" $(BUF) generate --template buf.gen.codewire.yaml
 	cd proto && $(BUF) generate --template buf.gen.google-rpc-ts.yaml
 	cd proto && PATH="$(abspath $(PROTOC_DIR))/bin:$(GO_BIN):$$PATH" $(BUF) generate --template buf.gen.google-rpc-python.yaml

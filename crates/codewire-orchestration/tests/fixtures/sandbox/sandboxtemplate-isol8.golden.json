@@ -314,7 +314,7 @@
               },
               {
                 "name": "CODEWIRE_COORDINATOR_URL",
-                "value": "https://codewire.sh/api/v1/internal/gateway/coordinate"
+                "value": "https://codewire.sh"
               },
               {
                 "name": "CODEWIRE_SERVER_NAMESPACE",

@@ -73,6 +73,25 @@ impl AppBuilder {
         self
     }
 
+    /// [`with_connect_routes`](AppBuilder::with_connect_routes) with an
+    /// explicit wire-protocol policy for a self-authenticating generated
+    /// service.
+    ///
+    /// The ordinary unauthenticated mount remains Connect-only. No protocol
+    /// policy admits gRPC-Web.
+    pub fn with_connect_routes_and_protocol_policy(
+        mut self,
+        connect: connectrpc::Router,
+        protocol_policy: crate::connect::ProtocolPolicy,
+    ) -> Self {
+        self.connect_routes
+            .push(crate::connect::connect_router_with_protocol_policy(
+                connect,
+                protocol_policy,
+            ));
+        self
+    }
+
     /// [`with_connect_routes`](AppBuilder::with_connect_routes) behind a
     /// [`ConnectAuthLayer`](crate::connect::ConnectAuthLayer) — one mount per
     /// auth mode (doc 03 D3): `authenticated` for user-facing services,

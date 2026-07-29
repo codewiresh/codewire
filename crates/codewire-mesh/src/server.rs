@@ -1,48 +1,32 @@
-use std::collections::HashMap;
 use std::future::Future;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use axum::body::Bytes;
-use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Extension, Path, Query, State};
+use axum::extract::{Path, Query, State};
 use axum::http::header::{
     ACCEPT, AUTHORIZATION, CONTENT_TYPE, COOKIE, HeaderName, HeaderValue, LOCATION, SET_COOKIE,
 };
 use axum::http::{HeaderMap, StatusCode};
-use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
 use chrono::{DateTime, Duration, Utc};
 use codewire_server_core::AppError;
 use codewire_server_core::http::AppBuilder;
-use codewire_tailnet::node::Node as TailnetNode;
 use rand::RngCore;
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
-use serde_json::{Map as JsonMap, Value as JsonValue};
-use sha2::{Digest, Sha256};
 use tokio::net::TcpListener;
-use tokio::sync::{OnceCell, mpsc};
-use url::Url;
-use uuid::Uuid;
+use tokio::sync::OnceCell;
 
-use crate::auth::{AuthIdentity, authenticate_headers, bearer_token};
 use crate::mesh_authorization::{
     ForwardedMeshCredential, MeshAuthorizationAdapter, forwarded_mesh_credential,
 };
-use crate::network_auth::{
-    DEFAULT_BUNDLE_VALIDITY, DEFAULT_RUNTIME_TTL, DEFAULT_SENDER_TTL, IssuerState,
-    NETWORK_AUTH_ISSUER_KEY, NETWORK_AUTH_NAMESPACE, RuntimeClaims, RuntimeCredentialResponse,
-    SUBJECT_KIND_CLIENT, SUBJECT_KIND_NODE, SenderDelegationInput, SenderDelegationResponse,
-    new_issuer_state, parse_runtime_credential, sign_runtime_credential, sign_sender_delegation,
-    verify_runtime_credential,
-};
 use crate::product::{KeyValueWrite, MeshProductService};
 use crate::store::{
-    Group, GroupMember, GroupPolicy, NETWORK_ROLE_OWNER, NetworkMember, NodeRecord, OAuthState,
-    OidcSession, OidcUser, SharedStore, StoreError, store_from_config,
+    Group, GroupMember, GroupPolicy, NodeRecord, OAuthState, OidcSession, OidcUser, SharedStore,
+    store_from_config,
 };
 use crate::{AuthMode, Config};
 
@@ -50,11 +34,10 @@ const ALPHANUMERIC: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWX
 const MAX_KV_VALUE_BYTES: usize = 1 << 20;
 #[derive(Clone)]
 pub(crate) struct AppState {
-    config: Config,
+    pub(crate) config: Config,
     pub(crate) store: SharedStore,
     pub(crate) product: MeshProductService,
-    tailnet_coord: TailnetCoordinator,
-    runtime_replay: RuntimeCredentialReplay,
+    pub(crate) mesh_coordinate: crate::mesh_coordinate::MeshCoordinateState,
     oidc_client: OidcClient,
 }
 
@@ -197,8 +180,7 @@ impl AppState {
             config,
             store,
             product,
-            tailnet_coord: TailnetCoordinator::new(),
-            runtime_replay: RuntimeCredentialReplay::new(),
+            mesh_coordinate: crate::mesh_coordinate::MeshCoordinateState::new(),
             oidc_client: OidcClient::new(),
         }
     }
@@ -206,14 +188,8 @@ impl AppState {
 
 fn router_from_state(state: AppState) -> Router {
     let mut public_routes = Router::new()
-        .route("/api/v1/tailnet/coordinate", get(tailnet_coordinate))
         .route("/api/v1/nodes", get(node_list))
         .route("/join", get(join_page))
-        .route("/api/v1/network-auth/bundle", get(verifier_bundle))
-        .route(
-            "/api/v1/network-auth/delegation/node",
-            post(node_sender_delegation),
-        )
         // The temporary REST spelling is a primary-authenticated ownership
         // bridge. It must not pass through Mesh's retired cookie/admin
         // middleware: that would let the two identity systems diverge.
@@ -246,18 +222,14 @@ fn router_from_state(state: AppState) -> Router {
 
     let public_routes = public_routes.with_state(state.clone());
 
-    let protected_routes = Router::new()
-        .route(
-            "/api/v1/network-auth/runtime/client",
-            post(client_runtime_credential),
-        )
-        .route_layer(middleware::from_fn_with_state(state.clone(), require_auth))
-        .with_state(state.clone());
-
     AppBuilder::new("mesh")
         .with_health()
-        .with_connect_routes(crate::connect::router(state))
-        .with_routes(public_routes.merge(protected_routes))
+        .with_connect_routes(crate::connect::router(state.clone()))
+        .with_connect_routes_and_protocol_policy(
+            crate::mesh_coordinate::router(state),
+            codewire_server_core::connect::ProtocolPolicy::ConnectAndGrpc,
+        )
+        .with_routes(public_routes)
         .into_router()
 }
 
@@ -756,33 +728,6 @@ struct NetworkIDQuery {
 }
 
 #[derive(Deserialize)]
-struct TailnetCoordinateQuery {
-    role: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct TailnetCoordinateRequest {
-    #[serde(rename = "type")]
-    typ: String,
-    #[serde(default)]
-    node: Option<TailnetNode>,
-    #[serde(default)]
-    target_node: String,
-}
-
-#[derive(Serialize)]
-struct TailnetCoordinateResponse {
-    #[serde(rename = "type")]
-    typ: &'static str,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    nodes: Vec<TailnetNode>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    derp_map: Option<JsonValue>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<String>,
-}
-
-#[derive(Deserialize)]
 struct KVListQuery {
     network_id: Option<String>,
     prefix: Option<String>,
@@ -882,16 +827,6 @@ struct NodeResponse {
     #[serde(skip_serializing_if = "String::is_empty")]
     peer_url: String,
     connected: bool,
-}
-
-#[derive(Deserialize)]
-struct SenderDelegationRequest {
-    network_id: Option<String>,
-    source_node: Option<String>,
-    from_session_id: Option<u32>,
-    from_session_name: Option<String>,
-    verbs: Option<Vec<String>>,
-    audience_node: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -1443,480 +1378,6 @@ async fn node_revoke(
     }
 }
 
-async fn tailnet_coordinate(
-    State(state): State<AppState>,
-    Query(query): Query<TailnetCoordinateQuery>,
-    headers: HeaderMap,
-    ws: WebSocketUpgrade,
-) -> Response {
-    let claims = match verify_tailnet_runtime_credential(&state, &headers).await {
-        Ok(claims) => claims,
-        Err(status) if status == StatusCode::INTERNAL_SERVER_ERROR => {
-            return plain_error(StatusCode::INTERNAL_SERVER_ERROR, "internal error");
-        }
-        Err(_) => return unauthorized_response(),
-    };
-    let derp_map_url = state
-        .config
-        .derp_url
-        .as_deref()
-        .unwrap_or(&state.config.base_url);
-    let derp_map = match tailnet_derp_map_from_base_url(derp_map_url) {
-        Ok(derp_map) => derp_map,
-        Err(err) => {
-            tracing::error!(error = %err, derp_url = %derp_map_url, "invalid codewire-mesh DERP map URL");
-            return plain_error(StatusCode::INTERNAL_SERVER_ERROR, "internal error");
-        }
-    };
-    let peer_id = tailnet_peer_id(&claims, query.role.as_deref());
-
-    ws.protocols(["coordinate"]).on_upgrade(move |socket| {
-        tailnet_coordinate_session(socket, state, claims, peer_id, derp_map)
-    })
-}
-
-async fn tailnet_coordinate_session(
-    mut socket: WebSocket,
-    state: AppState,
-    claims: RuntimeClaims,
-    peer_id: Uuid,
-    derp_map: JsonValue,
-) {
-    let mut updates = state.tailnet_coord.register(
-        peer_id,
-        format!("{}:{}", claims.subject_kind, claims.subject_id),
-    );
-    tracing::info!(
-        %peer_id,
-        kind = %claims.subject_kind,
-        subject = %claims.subject_id,
-        network_id = %claims.network_id,
-        "tailnet coordinate connected"
-    );
-
-    let result = tailnet_coordinate_session_inner(
-        &mut socket,
-        &state,
-        &claims,
-        peer_id,
-        derp_map,
-        &mut updates,
-    )
-    .await;
-
-    state.tailnet_coord.deregister(peer_id);
-    tracing::info!(
-        %peer_id,
-        kind = %claims.subject_kind,
-        subject = %claims.subject_id,
-        network_id = %claims.network_id,
-        "tailnet coordinate disconnected"
-    );
-    if let Err(err) = result {
-        tracing::debug!(%peer_id, error = %err, "tailnet coordinate session closed");
-    }
-}
-
-async fn tailnet_coordinate_session_inner(
-    socket: &mut WebSocket,
-    state: &AppState,
-    claims: &RuntimeClaims,
-    peer_id: Uuid,
-    derp_map: JsonValue,
-    updates: &mut mpsc::Receiver<Vec<TailnetNode>>,
-) -> Result<(), String> {
-    send_tailnet_response(
-        socket,
-        TailnetCoordinateResponse {
-            typ: "derp_map",
-            nodes: Vec::new(),
-            derp_map: Some(derp_map),
-            error: None,
-        },
-    )
-    .await?;
-
-    loop {
-        tokio::select! {
-            update = updates.recv() => {
-                let Some(nodes) = update else {
-                    return Ok(());
-                };
-                if nodes.is_empty() {
-                    continue;
-                }
-                send_tailnet_response(
-                    socket,
-                    TailnetCoordinateResponse {
-                        typ: "peer_update",
-                        nodes,
-                        derp_map: None,
-                        error: None,
-                    },
-                ).await?;
-            }
-            message = socket.recv() => {
-                let data = match message {
-                    Some(Ok(Message::Text(text))) => text.as_bytes().to_vec(),
-                    Some(Ok(Message::Binary(bytes))) => bytes.to_vec(),
-                    Some(Ok(Message::Close(_))) | None => return Ok(()),
-                    Some(Ok(Message::Ping(_))) | Some(Ok(Message::Pong(_))) => continue,
-                    Some(Err(err)) => return Err(err.to_string()),
-                };
-                let req = match serde_json::from_slice::<TailnetCoordinateRequest>(&data) {
-                    Ok(req) => req,
-                    Err(_) => {
-                        send_tailnet_error(socket, "bad request").await?;
-                        continue;
-                    }
-                };
-                match req.typ.as_str() {
-                    "node" => {
-                        let Some(node) = req.node else {
-                            send_tailnet_error(socket, "node update requires node payload").await?;
-                            continue;
-                        };
-                        tracing::info!(
-                            %peer_id,
-                            subject = %claims.subject_id,
-                            "tailnet node update"
-                        );
-                        state.tailnet_coord.update_node(peer_id, node);
-                    }
-                    "subscribe" => {
-                        let target = req.target_node.trim();
-                        if target.is_empty() {
-                            send_tailnet_error(socket, "subscribe requires target_node").await?;
-                            continue;
-                        }
-                        let target_uuid =
-                            stable_principal_uuid(&claims.network_id, SUBJECT_KIND_NODE, target);
-                        let delivered = state.tailnet_coord.add_tunnel(peer_id, target_uuid);
-                        tracing::info!(
-                            %peer_id,
-                            target,
-                            %target_uuid,
-                            delivered,
-                            "tailnet subscribe"
-                        );
-                    }
-                    other => {
-                        send_tailnet_error(socket, format!("unsupported request type {other:?}")).await?;
-                    }
-                }
-            }
-        }
-    }
-}
-
-async fn send_tailnet_error(
-    socket: &mut WebSocket,
-    error: impl Into<String>,
-) -> Result<(), String> {
-    send_tailnet_response(
-        socket,
-        TailnetCoordinateResponse {
-            typ: "error",
-            nodes: Vec::new(),
-            derp_map: None,
-            error: Some(error.into()),
-        },
-    )
-    .await
-}
-
-async fn send_tailnet_response(
-    socket: &mut WebSocket,
-    response: TailnetCoordinateResponse,
-) -> Result<(), String> {
-    let payload = serde_json::to_string(&response).map_err(|err| err.to_string())?;
-    socket
-        .send(Message::Text(payload.into()))
-        .await
-        .map_err(|err| err.to_string())
-}
-
-async fn verify_tailnet_runtime_credential(
-    state: &AppState,
-    headers: &HeaderMap,
-) -> Result<RuntimeClaims, StatusCode> {
-    let token = bearer_token(headers)
-        .map(str::trim)
-        .filter(|token| !token.is_empty())
-        .ok_or(StatusCode::UNAUTHORIZED)?;
-    let (unverified, _, _) =
-        parse_runtime_credential(token).map_err(|_| StatusCode::UNAUTHORIZED)?;
-    let issuer = load_issuer_state(state, &unverified.network_id)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::UNAUTHORIZED)?;
-    let now = Utc::now();
-    let claims =
-        verify_runtime_credential(token, &issuer.bundle(now, DEFAULT_BUNDLE_VALIDITY), now)
-            .map_err(|_| StatusCode::UNAUTHORIZED)?;
-    if claims.subject_kind != SUBJECT_KIND_CLIENT && claims.subject_kind != SUBJECT_KIND_NODE {
-        return Err(StatusCode::UNAUTHORIZED);
-    }
-
-    match claims.subject_kind.as_str() {
-        SUBJECT_KIND_CLIENT if claims.subject_id != "admin" => {
-            match state
-                .store
-                .network_member_get(&claims.network_id, &claims.subject_id)
-                .await
-            {
-                Ok(Some(_)) => {}
-                Ok(None) => return Err(StatusCode::UNAUTHORIZED),
-                Err(_) => return Err(StatusCode::INTERNAL_SERVER_ERROR),
-            }
-        }
-        SUBJECT_KIND_NODE => {
-            match state
-                .store
-                .node_get(&claims.network_id, &claims.subject_id)
-                .await
-            {
-                Ok(Some(_)) => {}
-                Ok(None) => return Err(StatusCode::UNAUTHORIZED),
-                Err(_) => return Err(StatusCode::INTERNAL_SERVER_ERROR),
-            }
-        }
-        _ => {}
-    }
-
-    state.runtime_replay.remember(&claims, now);
-    Ok(claims)
-}
-
-fn tailnet_peer_id(claims: &RuntimeClaims, role: Option<&str>) -> Uuid {
-    if claims.subject_kind == SUBJECT_KIND_CLIENT || role == Some("dial") {
-        return Uuid::new_v4();
-    }
-    stable_principal_uuid(&claims.network_id, &claims.subject_kind, &claims.subject_id)
-}
-
-fn stable_principal_uuid(network_id: &str, subject_kind: &str, subject_id: &str) -> Uuid {
-    let mut hasher = Sha256::new();
-    hasher.update(network_id.trim().as_bytes());
-    hasher.update(b"\0");
-    hasher.update(subject_kind.trim().as_bytes());
-    hasher.update(b"\0");
-    hasher.update(subject_id.trim().as_bytes());
-    let sum = hasher.finalize();
-    let mut bytes = [0_u8; 16];
-    bytes.copy_from_slice(&sum[..16]);
-    bytes[6] = (bytes[6] & 0x0f) | 0x50;
-    bytes[8] = (bytes[8] & 0x3f) | 0x80;
-    Uuid::from_bytes(bytes)
-}
-
-fn tailnet_derp_map_from_base_url(base_url: &str) -> Result<JsonValue, String> {
-    let url = Url::parse(base_url.trim()).map_err(|err| err.to_string())?;
-    let hostname = url
-        .host_str()
-        .filter(|host| !host.is_empty())
-        .ok_or_else(|| "base URL has no hostname".to_string())?;
-    let port = match url.port() {
-        Some(port) => i64::from(port),
-        None => match url.scheme() {
-            "http" | "ws" => 80,
-            "https" | "wss" => 443,
-            scheme => return Err(format!("unsupported base URL scheme {scheme:?}")),
-        },
-    };
-    let insecure = matches!(url.scheme(), "http" | "ws");
-
-    let mut node = JsonMap::new();
-    node.insert("Name".to_string(), JsonValue::String("1a".to_string()));
-    node.insert("RegionID".to_string(), JsonValue::from(1));
-    node.insert(
-        "HostName".to_string(),
-        JsonValue::String(hostname.to_string()),
-    );
-    node.insert("DERPPort".to_string(), JsonValue::from(port));
-    node.insert("STUNPort".to_string(), JsonValue::from(-1));
-    if insecure {
-        node.insert("InsecureForTests".to_string(), JsonValue::Bool(true));
-    }
-
-    Ok(serde_json::json!({
-        "Regions": {
-            "1": {
-                "RegionID": 1,
-                "RegionCode": "cw",
-                "RegionName": "Codewire Embedded",
-                "Nodes": [JsonValue::Object(node)],
-            }
-        }
-    }))
-}
-
-async fn verifier_bundle(
-    State(state): State<AppState>,
-    Query(query): Query<NetworkIDQuery>,
-    headers: HeaderMap,
-) -> Response {
-    let network_id = match required_network_id(query.network_id.as_deref()) {
-        Ok(network_id) => network_id,
-        Err(message) => return plain_error(StatusCode::BAD_REQUEST, message),
-    };
-
-    let Some(identity) = authenticate_headers(&headers, &state.config, state.store.as_ref()).await
-    else {
-        return unauthorized_response();
-    };
-    if !identity.is_admin {
-        match require_membership(&state, &network_id, &identity).await {
-            Ok(Some(_)) => {}
-            Ok(None) => return plain_error(StatusCode::FORBIDDEN, "membership required"),
-            Err(_) => return unauthorized_response(),
-        }
-    }
-
-    match load_issuer_state(&state, &network_id).await {
-        Ok(Some(issuer)) => {
-            Json(issuer.bundle(Utc::now(), DEFAULT_BUNDLE_VALIDITY)).into_response()
-        }
-        Ok(None) => plain_error(StatusCode::NOT_FOUND, "not found"),
-        Err(_) => plain_error(StatusCode::INTERNAL_SERVER_ERROR, "internal error"),
-    }
-}
-
-async fn client_runtime_credential(
-    State(state): State<AppState>,
-    Extension(identity): Extension<AuthIdentity>,
-    Query(query): Query<NetworkIDQuery>,
-) -> Response {
-    let network_id = match required_network_id(query.network_id.as_deref()) {
-        Ok(network_id) => network_id,
-        Err(message) => return plain_error(StatusCode::BAD_REQUEST, message),
-    };
-    if !identity.is_admin {
-        match require_membership(&state, &network_id, &identity).await {
-            Ok(Some(_)) => {}
-            Ok(None) => return plain_error(StatusCode::FORBIDDEN, "membership required"),
-            Err(_) => return unauthorized_response(),
-        }
-    }
-
-    let issuer = match load_or_create_issuer_state(&state, &network_id).await {
-        Ok(issuer) => issuer,
-        Err(_) => return plain_error(StatusCode::INTERNAL_SERVER_ERROR, "internal error"),
-    };
-    let subject_id = client_subject_id(&identity);
-    let (credential, claims) = match sign_runtime_credential(
-        &issuer,
-        SUBJECT_KIND_CLIENT,
-        &subject_id,
-        Utc::now(),
-        DEFAULT_RUNTIME_TTL,
-    ) {
-        Ok(signed) => signed,
-        Err(_) => return plain_error(StatusCode::INTERNAL_SERVER_ERROR, "internal error"),
-    };
-
-    Json(RuntimeCredentialResponse {
-        credential,
-        network_id: claims.network_id,
-        subject_kind: claims.subject_kind,
-        subject_id: claims.subject_id,
-        expires_at: claims.expires_at,
-    })
-    .into_response()
-}
-
-async fn node_sender_delegation(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Response {
-    let req = match serde_json::from_slice::<SenderDelegationRequest>(&body) {
-        Ok(req) => req,
-        Err(_) => return plain_error(StatusCode::BAD_REQUEST, "bad request"),
-    };
-    let network_id = req.network_id.unwrap_or_default().trim().to_string();
-    let source_node = req.source_node.unwrap_or_default().trim().to_string();
-    let Some(identity) = authenticate_headers(&headers, &state.config, state.store.as_ref()).await
-    else {
-        return unauthorized_response();
-    };
-    if source_node.is_empty() {
-        return plain_error(StatusCode::BAD_REQUEST, "source_node is required");
-    }
-    if network_id.is_empty() {
-        return plain_error(StatusCode::BAD_REQUEST, "network_id is required");
-    }
-    let nodes = match state.store.node_list_all().await {
-        Ok(nodes) => nodes
-            .into_iter()
-            .filter(|node| node.network_id == network_id && node.name == source_node)
-            .collect::<Vec<_>>(),
-        Err(_) => return plain_error(StatusCode::INTERNAL_SERVER_ERROR, "internal error"),
-    };
-    let [node] = nodes.as_slice() else {
-        return plain_error(
-            StatusCode::BAD_REQUEST,
-            "source_node is ambiguous or unknown",
-        );
-    };
-    let node = match require_membership(&state, &node.network_id, &identity).await {
-        Ok(Some(_)) => node.clone(),
-        Ok(None) => return plain_error(StatusCode::FORBIDDEN, "membership required"),
-        Err(_) => return unauthorized_response(),
-    };
-    let from_session_name = req.from_session_name.unwrap_or_default().trim().to_string();
-    let mut source_groups = Vec::new();
-    if !from_session_name.is_empty() {
-        let bindings = match state
-            .store
-            .group_bindings_for_session(&node.network_id, &node.name, &from_session_name)
-            .await
-        {
-            Ok(bindings) => bindings,
-            Err(_) => return plain_error(StatusCode::INTERNAL_SERVER_ERROR, "internal error"),
-        };
-        source_groups = bindings
-            .into_iter()
-            .map(|binding| binding.group_name)
-            .collect();
-    }
-
-    let issuer = match load_or_create_issuer_state(&state, &node.network_id).await {
-        Ok(issuer) => issuer,
-        Err(_) => return plain_error(StatusCode::INTERNAL_SERVER_ERROR, "internal error"),
-    };
-    let verbs = req.verbs.unwrap_or_default();
-    let audience_node = req.audience_node.unwrap_or_default();
-    let (delegation, claims) = match sign_sender_delegation(
-        &issuer,
-        Utc::now(),
-        SenderDelegationInput {
-            source_node: node.name.clone(),
-            from_session_id: req.from_session_id,
-            from_session_name,
-            source_groups,
-            verbs,
-            audience_node,
-            ttl: DEFAULT_SENDER_TTL,
-        },
-    ) {
-        Ok(signed) => signed,
-        Err(_) => return plain_error(StatusCode::BAD_REQUEST, "bad request"),
-    };
-
-    Json(SenderDelegationResponse {
-        delegation,
-        network_id: claims.network_id,
-        source_node: claims.source_node,
-        from_session_id: claims.from_session_id,
-        from_session_name: claims.from_session_name,
-        source_groups: claims.source_groups,
-        audience_node: claims.audience_node,
-        expires_at: claims.expires_at,
-    })
-    .into_response()
-}
-
 async fn invite_create(State(state): State<AppState>, headers: HeaderMap, body: Bytes) -> Response {
     let req = match serde_json::from_slice::<InviteCreateRequest>(&body) {
         Ok(req) => req,
@@ -2114,167 +1575,6 @@ p{{color:#525252;line-height:1.6}}
         .into_response()
 }
 
-type RuntimeReplayKey = (String, String);
-type RuntimeReplayMap = HashMap<RuntimeReplayKey, DateTime<Utc>>;
-
-#[derive(Clone)]
-struct RuntimeCredentialReplay {
-    inner: Arc<Mutex<RuntimeReplayMap>>,
-}
-
-impl RuntimeCredentialReplay {
-    fn new() -> Self {
-        Self {
-            inner: Arc::new(Mutex::new(HashMap::new())),
-        }
-    }
-
-    fn remember(&self, claims: &RuntimeClaims, now: DateTime<Utc>) {
-        let mut used = self.inner.lock().unwrap();
-        used.retain(|_, expires_at| *expires_at > now);
-        let key = (claims.network_id.clone(), claims.jti.clone());
-        used.insert(key, claims.expires_at);
-    }
-}
-
-#[derive(Clone)]
-struct TailnetCoordinator {
-    inner: Arc<Mutex<TailnetCoordinatorState>>,
-}
-
-#[derive(Default)]
-struct TailnetCoordinatorState {
-    peers: HashMap<Uuid, TailnetPeer>,
-    tunnels: HashMap<Uuid, Uuid>,
-}
-
-struct TailnetPeer {
-    node: Option<TailnetNode>,
-    tx: mpsc::Sender<Vec<TailnetNode>>,
-}
-
-impl TailnetCoordinator {
-    fn new() -> Self {
-        Self {
-            inner: Arc::new(Mutex::new(TailnetCoordinatorState::default())),
-        }
-    }
-
-    fn register(&self, id: Uuid, _name: String) -> mpsc::Receiver<Vec<TailnetNode>> {
-        let (tx, rx) = mpsc::channel(64);
-        let mut state = self.inner.lock().unwrap();
-        state.peers.insert(id, TailnetPeer { node: None, tx });
-        rx
-    }
-
-    fn deregister(&self, id: Uuid) {
-        let mut state = self.inner.lock().unwrap();
-        state.peers.remove(&id);
-        state.tunnels.retain(|src, dst| *src != id && *dst != id);
-    }
-
-    fn update_node(&self, id: Uuid, node: TailnetNode) {
-        let updates = {
-            let mut state = self.inner.lock().unwrap();
-            let Some(peer) = state.peers.get_mut(&id) else {
-                return;
-            };
-            peer.node = Some(node);
-
-            let mut updates = Vec::new();
-            let tunnels = state
-                .tunnels
-                .iter()
-                .map(|(src, dst)| (*src, *dst))
-                .collect::<Vec<_>>();
-            for (src, dst) in tunnels {
-                if src == id
-                    && let Some((tx, nodes)) = collect_tunnel_client_nodes(&state, dst)
-                    && !nodes.is_empty()
-                {
-                    updates.push((tx, nodes));
-                }
-                if dst == id
-                    && let (Some(client), Some(agent)) =
-                        (state.peers.get(&src), state.peers.get(&dst))
-                    && let Some(agent_node) = agent.node.clone()
-                {
-                    updates.push((client.tx.clone(), vec![agent_node]));
-                }
-            }
-            updates
-        };
-        send_tailnet_updates(id, updates);
-    }
-
-    fn add_tunnel(&self, client_id: Uuid, agent_id: Uuid) -> bool {
-        let (delivered, updates) = {
-            let mut state = self.inner.lock().unwrap();
-            state.tunnels.insert(client_id, agent_id);
-
-            let mut updates = Vec::new();
-            let mut delivered = false;
-            if let (Some(client), Some(agent)) =
-                (state.peers.get(&client_id), state.peers.get(&agent_id))
-                && let Some(agent_node) = agent.node.clone()
-            {
-                updates.push((client.tx.clone(), vec![agent_node]));
-                delivered = true;
-            }
-            if let Some((tx, nodes)) = collect_tunnel_client_nodes(&state, agent_id)
-                && !nodes.is_empty()
-            {
-                updates.push((tx, nodes));
-            }
-            (delivered, updates)
-        };
-        send_tailnet_updates(client_id, updates);
-        delivered
-    }
-}
-
-fn collect_tunnel_client_nodes(
-    state: &TailnetCoordinatorState,
-    agent_id: Uuid,
-) -> Option<(mpsc::Sender<Vec<TailnetNode>>, Vec<TailnetNode>)> {
-    let agent = state.peers.get(&agent_id)?;
-    let nodes = state
-        .tunnels
-        .iter()
-        .filter_map(|(src, dst)| {
-            (*dst == agent_id)
-                .then(|| state.peers.get(src).and_then(|client| client.node.clone()))
-                .flatten()
-        })
-        .collect::<Vec<_>>();
-    Some((agent.tx.clone(), nodes))
-}
-
-fn send_tailnet_updates(
-    target: Uuid,
-    updates: Vec<(mpsc::Sender<Vec<TailnetNode>>, Vec<TailnetNode>)>,
-) {
-    for (tx, nodes) in updates {
-        if tx.try_send(nodes).is_err() {
-            tracing::warn!(%target, "tailnet coordinator dropped peer update for slow consumer");
-        }
-    }
-}
-
-async fn require_auth(
-    State(state): State<AppState>,
-    mut req: axum::extract::Request,
-    next: Next,
-) -> Response {
-    match authenticate_headers(req.headers(), &state.config, state.store.as_ref()).await {
-        Some(identity) => {
-            req.extensions_mut().insert(identity);
-            next.run(req).await
-        }
-        None => unauthorized_response(),
-    }
-}
-
 fn node_responses(nodes: Vec<NodeRecord>) -> Vec<NodeResponse> {
     let now = Utc::now();
     nodes
@@ -2301,10 +1601,6 @@ fn parse_xttl_header(headers: &HeaderMap) -> Result<Option<Duration>, &'static s
         .ok_or("invalid X-TTL header")
 }
 
-fn unauthorized_response() -> Response {
-    plain_error(StatusCode::UNAUTHORIZED, "unauthorized")
-}
-
 fn plain_error(status: StatusCode, message: &str) -> Response {
     (
         status,
@@ -2321,111 +1617,6 @@ fn plain_error(status: StatusCode, message: &str) -> Response {
         format!("{message}\n"),
     )
         .into_response()
-}
-
-fn normalize_identity_subject(sub: &str) -> String {
-    let sub = sub.trim();
-    if sub.is_empty()
-        || sub.starts_with("github:")
-        || sub.starts_with("oidc:")
-        || sub.starts_with("user:")
-    {
-        sub.to_string()
-    } else if let Some(rest) = sub.strip_prefix("platform:") {
-        format!("user:{rest}")
-    } else {
-        format!("oidc:{sub}")
-    }
-}
-
-fn membership_subject(identity: &AuthIdentity) -> Result<String, &'static str> {
-    if identity.is_admin {
-        return Ok("admin".to_string());
-    }
-    if let Some(sub) = identity.sub.as_deref().filter(|sub| !sub.is_empty()) {
-        return Ok(normalize_identity_subject(sub));
-    }
-    if let Some(user_id) = identity.user_id {
-        return Ok(format!("github:{user_id}"));
-    }
-    Err("unsupported identity")
-}
-
-async fn require_membership(
-    state: &AppState,
-    network_id: &str,
-    identity: &AuthIdentity,
-) -> Result<Option<NetworkMember>, &'static str> {
-    if identity.is_admin {
-        return Ok(Some(NetworkMember {
-            network_id: network_id.to_string(),
-            subject: "admin".to_string(),
-            role: NETWORK_ROLE_OWNER.to_string(),
-            created_at: Utc::now(),
-            created_by: String::new(),
-        }));
-    }
-    let subject = membership_subject(identity)?;
-    state
-        .store
-        .network_member_get(network_id, &subject)
-        .await
-        .map_err(|_| "store error")
-}
-
-async fn load_issuer_state(
-    state: &AppState,
-    network_id: &str,
-) -> Result<Option<IssuerState>, StoreError> {
-    let Some(raw) = state
-        .store
-        .kv_get(network_id, NETWORK_AUTH_NAMESPACE, NETWORK_AUTH_ISSUER_KEY)
-        .await?
-    else {
-        return Ok(None);
-    };
-    serde_json::from_slice(&raw)
-        .map(Some)
-        .map_err(|_| StoreError::NotFound)
-}
-
-async fn load_or_create_issuer_state(
-    state: &AppState,
-    network_id: &str,
-) -> Result<IssuerState, StoreError> {
-    if let Some(issuer) = load_issuer_state(state, network_id).await? {
-        return Ok(issuer);
-    }
-    state.store.network_ensure(network_id).await?;
-    let issuer = new_issuer_state(network_id);
-    let encoded = serde_json::to_vec(&issuer).map_err(|_| StoreError::NotFound)?;
-    state
-        .store
-        .kv_set(
-            network_id,
-            NETWORK_AUTH_NAMESPACE,
-            NETWORK_AUTH_ISSUER_KEY,
-            encoded,
-            None,
-        )
-        .await?;
-    Ok(issuer)
-}
-
-fn client_subject_id(identity: &AuthIdentity) -> String {
-    if identity.is_admin {
-        return "admin".to_string();
-    }
-    if let Some(sub) = identity.sub.as_deref().filter(|sub| !sub.trim().is_empty()) {
-        return normalize_identity_subject(sub);
-    }
-    if let Some(user_id) = identity.user_id {
-        return format!("github:{user_id}");
-    }
-    if !identity.username.trim().is_empty() {
-        return format!("user:{}", identity.username.trim());
-    }
-    "client".to_string()
 }
 
 fn group_response(
@@ -2616,22 +1807,16 @@ fn duration_unit(raw: &str) -> Option<(i128, usize)> {
 mod tests {
     use axum::body::{Body, to_bytes};
     use axum::http::header::{AUTHORIZATION, COOKIE, LOCATION, SET_COOKIE};
-    use axum::http::{HeaderValue, Request, StatusCode};
+    use axum::http::{Request, StatusCode};
     use chrono::{Duration, Utc};
-    use futures_util::{SinkExt, StreamExt};
     use serde_json::json;
-    use tokio::net::TcpStream;
-    use tokio_tungstenite::tungstenite::Message as ClientMessage;
-    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-    use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
     use tower::ServiceExt;
 
     use super::*;
     use crate::AuthMode;
-    use crate::network_auth::{VerifierBundle, verify_runtime_credential};
     use crate::store::{
         GROUP_DEBUG_NONE, GROUP_DEBUG_OBSERVE_ONLY, GROUP_MESSAGES_INTERNAL_ONLY,
-        GROUP_MESSAGES_OPEN, NETWORK_ROLE_MEMBER,
+        GROUP_MESSAGES_OPEN, NETWORK_ROLE_MEMBER, NETWORK_ROLE_OWNER, NetworkMember,
     };
     use crate::{Invite, MemoryStore, MeshStore};
 
@@ -2657,10 +1842,6 @@ mod tests {
                 ),
             }),
         }
-    }
-
-    fn test_state(auth_mode: AuthMode, store: MemoryStore) -> AppState {
-        AppState::new(test_config(auth_mode), std::sync::Arc::new(store))
     }
 
     async fn seeded_github_store(token: &str, github_id: i64, username: &str) -> MemoryStore {
@@ -2698,54 +1879,6 @@ mod tests {
             .await
             .unwrap();
         store
-    }
-
-    fn sample_tailnet_node(id: Uuid, preferred_derp: i32, seed: u8) -> TailnetNode {
-        use codewire_tailnet::node::{DiscoPublic, NodePublic, prefix_from_uuid};
-
-        TailnetNode {
-            id,
-            as_of: "2026-06-19T12:00:00Z".parse().unwrap(),
-            key: NodePublic::from_raw([seed; 32]),
-            disco_key: DiscoPublic::from_raw([seed.wrapping_add(1); 32]),
-            preferred_derp,
-            derp_latency: None,
-            endpoints: vec![],
-            addresses: vec![prefix_from_uuid(&id)],
-        }
-    }
-
-    fn coordinate_request(
-        addr: std::net::SocketAddr,
-        token: Option<&str>,
-        suffix: &str,
-    ) -> tokio_tungstenite::tungstenite::handshake::client::Request {
-        let mut request = format!("ws://{addr}/api/v1/tailnet/coordinate{suffix}")
-            .into_client_request()
-            .unwrap();
-        request.headers_mut().insert(
-            "Sec-WebSocket-Protocol",
-            HeaderValue::from_static("coordinate"),
-        );
-        if let Some(token) = token {
-            request.headers_mut().insert(
-                AUTHORIZATION,
-                HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
-            );
-        }
-        request
-    }
-
-    async fn next_ws_json(ws: &mut WebSocketStream<MaybeTlsStream<TcpStream>>) -> JsonValue {
-        let message = tokio::time::timeout(std::time::Duration::from_secs(2), ws.next())
-            .await
-            .expect("websocket frame")
-            .expect("open websocket")
-            .expect("valid websocket frame");
-        match message {
-            ClientMessage::Text(text) => serde_json::from_str(&text).unwrap(),
-            other => panic!("expected websocket text JSON, got {other:?}"),
-        }
     }
 
     async fn seed_node(
@@ -4266,17 +3399,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn retired_node_bearer_routes_are_absent() {
+    async fn retired_coordinate_and_network_auth_routes_are_absent() {
         let router = router(test_config(AuthMode::Token));
-        for path in [
-            "/api/v1/node-enrollments/redeem",
-            "/api/v1/network-auth/runtime/node",
+        for (method, path) in [
+            ("POST", "/api/v1/node-enrollments/redeem"),
+            ("POST", "/api/v1/network-auth/runtime/node"),
+            ("GET", "/api/v1/network-auth/bundle"),
+            ("POST", "/api/v1/network-auth/delegation/node"),
+            ("POST", "/api/v1/network-auth/runtime/client"),
+            ("GET", "/api/v1/tailnet/coordinate"),
         ] {
             let response = router
                 .clone()
                 .oneshot(
                     Request::builder()
-                        .method("POST")
+                        .method(method)
                         .uri(path)
                         .header("content-type", "application/json")
                         .body(Body::from("{}"))
@@ -4531,457 +3668,5 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-    }
-
-    #[tokio::test]
-    async fn tailnet_coordinate_rejects_missing_runtime_credential() {
-        let router = router_with_store(
-            test_config(AuthMode::Token),
-            std::sync::Arc::new(MemoryStore::new()),
-        );
-        let (addr, server) = spawn_test_server(router).await;
-
-        let err = tokio_tungstenite::connect_async(coordinate_request(addr, None, ""))
-            .await
-            .expect_err("missing runtime credential must reject websocket upgrade");
-        match err {
-            tokio_tungstenite::tungstenite::Error::Http(response) => {
-                assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-            }
-            other => panic!("expected HTTP 401 websocket rejection, got {other:?}"),
-        }
-        server.abort();
-    }
-
-    #[tokio::test]
-    async fn tailnet_coordinate_allows_runtime_credential_reconnect() {
-        let store =
-            seeded_member_store("sess_owner", 101, "owner", "network-a", NETWORK_ROLE_OWNER).await;
-        let now = Utc::now();
-        store
-            .node_register(NodeRecord {
-                network_id: "network-a".to_string(),
-                name: "builder".to_string(),
-                peer_url: "https://builder.example/ws".to_string(),
-                github_id: None,
-                owner_subject: "github:101".to_string(),
-                authorized_by: "github:101".to_string(),
-                enrollment_id: "enr_builder".to_string(),
-                authorized_at: now,
-                last_seen_at: now,
-            })
-            .await
-            .unwrap();
-
-        let state = test_state(AuthMode::Token, store);
-        let issuer = load_or_create_issuer_state(&state, "network-a")
-            .await
-            .unwrap();
-        let (node_token, _) = sign_runtime_credential(
-            &issuer,
-            SUBJECT_KIND_NODE,
-            "builder",
-            Utc::now(),
-            DEFAULT_RUNTIME_TTL,
-        )
-        .unwrap();
-
-        let router = router_from_state(state);
-        let (addr, server) = spawn_test_server(router).await;
-
-        let (mut first, _) =
-            tokio_tungstenite::connect_async(coordinate_request(addr, Some(&node_token), ""))
-                .await
-                .unwrap();
-        assert_eq!(next_ws_json(&mut first).await["type"], "derp_map");
-        let _ = first.close(None).await;
-
-        let (mut second, _) =
-            tokio_tungstenite::connect_async(coordinate_request(addr, Some(&node_token), ""))
-                .await
-                .unwrap();
-        assert_eq!(next_ws_json(&mut second).await["type"], "derp_map");
-        let _ = second.close(None).await;
-        server.abort();
-    }
-
-    #[tokio::test]
-    async fn tailnet_coordinate_exchanges_node_peer_updates_like_go_relay() {
-        let store =
-            seeded_member_store("sess_owner", 101, "owner", "network-a", NETWORK_ROLE_OWNER).await;
-        let now = Utc::now();
-        store
-            .node_register(NodeRecord {
-                network_id: "network-a".to_string(),
-                name: "builder".to_string(),
-                peer_url: "https://builder.example/ws".to_string(),
-                github_id: None,
-                owner_subject: "github:101".to_string(),
-                authorized_by: "github:101".to_string(),
-                enrollment_id: "enr_builder".to_string(),
-                authorized_at: now,
-                last_seen_at: now,
-            })
-            .await
-            .unwrap();
-
-        let mut state = test_state(AuthMode::Token, store);
-        state.config.derp_url = Some("http://127.0.0.1:18091".to_string());
-        let issuer = load_or_create_issuer_state(&state, "network-a")
-            .await
-            .unwrap();
-        let (node_token, _) = sign_runtime_credential(
-            &issuer,
-            SUBJECT_KIND_NODE,
-            "builder",
-            Utc::now(),
-            DEFAULT_RUNTIME_TTL,
-        )
-        .unwrap();
-        let (client_token, _) = sign_runtime_credential(
-            &issuer,
-            SUBJECT_KIND_CLIENT,
-            "github:101",
-            Utc::now(),
-            DEFAULT_RUNTIME_TTL,
-        )
-        .unwrap();
-
-        let router = router_from_state(state);
-        let (addr, server) = spawn_test_server(router).await;
-
-        let (mut node_ws, node_response) =
-            tokio_tungstenite::connect_async(coordinate_request(addr, Some(&node_token), ""))
-                .await
-                .unwrap();
-        assert_eq!(
-            node_response
-                .headers()
-                .get("Sec-WebSocket-Protocol")
-                .and_then(|value| value.to_str().ok()),
-            Some("coordinate")
-        );
-        let node_derp = next_ws_json(&mut node_ws).await;
-        assert_eq!(node_derp["type"], "derp_map");
-        assert_eq!(
-            node_derp["derp_map"]["Regions"]["1"]["Nodes"][0]["HostName"],
-            "127.0.0.1"
-        );
-        assert_eq!(
-            node_derp["derp_map"]["Regions"]["1"]["Nodes"][0]["DERPPort"],
-            18091
-        );
-        assert_eq!(
-            node_derp["derp_map"]["Regions"]["1"]["Nodes"][0]["InsecureForTests"],
-            true
-        );
-
-        let builder_id = stable_principal_uuid("network-a", SUBJECT_KIND_NODE, "builder");
-        let builder_node = sample_tailnet_node(builder_id, 1, 0x11);
-        node_ws
-            .send(ClientMessage::Text(
-                json!({"type": "node", "node": builder_node})
-                    .to_string()
-                    .into(),
-            ))
-            .await
-            .unwrap();
-
-        let (mut client_ws, _) = tokio_tungstenite::connect_async(coordinate_request(
-            addr,
-            Some(&client_token),
-            "?role=dial",
-        ))
-        .await
-        .unwrap();
-        let client_derp = next_ws_json(&mut client_ws).await;
-        assert_eq!(client_derp["type"], "derp_map");
-        client_ws
-            .send(ClientMessage::Text(
-                json!({"type": "subscribe", "target_node": "builder"})
-                    .to_string()
-                    .into(),
-            ))
-            .await
-            .unwrap();
-
-        let client_update = next_ws_json(&mut client_ws).await;
-        assert_eq!(client_update["type"], "peer_update");
-        assert_eq!(client_update["nodes"][0]["id"], builder_id.to_string());
-        assert_eq!(client_update["nodes"][0]["preferred_derp"], 1);
-
-        let client_id = Uuid::parse_str("00112233-4455-6677-8899-aabbccddeeff").unwrap();
-        let client_node = sample_tailnet_node(client_id, 3, 0x22);
-        client_ws
-            .send(ClientMessage::Text(
-                json!({"type": "node", "node": client_node})
-                    .to_string()
-                    .into(),
-            ))
-            .await
-            .unwrap();
-
-        let node_update = next_ws_json(&mut node_ws).await;
-        assert_eq!(node_update["type"], "peer_update");
-        assert_eq!(node_update["nodes"][0]["id"], client_id.to_string());
-        assert_eq!(node_update["nodes"][0]["preferred_derp"], 3);
-
-        let _ = client_ws.close(None).await;
-        let _ = node_ws.close(None).await;
-        server.abort();
-    }
-
-    #[tokio::test]
-    async fn network_auth_client_runtime_credential_matches_go_relay_shape() {
-        let store =
-            seeded_member_store("sess_member", 101, "member", "project-alpha", "owner").await;
-        let router = router_with_store(
-            test_config(AuthMode::Token),
-            std::sync::Arc::new(store.clone()),
-        );
-
-        let response = router
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/v1/network-auth/runtime/client?network_id=project-alpha")
-                    .header(AUTHORIZATION, "Bearer sess_member")
-                    .body(Body::from("{}"))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-        let issued: RuntimeCredentialResponse = serde_json::from_slice(&body).unwrap();
-        assert_eq!(issued.network_id, "project-alpha");
-        assert_eq!(issued.subject_kind, SUBJECT_KIND_CLIENT);
-        assert_eq!(issued.subject_id, "github:101");
-        assert!(issued.credential.starts_with("cwrt1."));
-
-        let response = router
-            .oneshot(
-                Request::builder()
-                    .uri("/api/v1/network-auth/bundle?network_id=project-alpha")
-                    .header(AUTHORIZATION, "Bearer sess_member")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-        let bundle: VerifierBundle = serde_json::from_slice(&body).unwrap();
-        assert_eq!(bundle.issuer, "mesh:project-alpha");
-        let claims = verify_runtime_credential(&issued.credential, &bundle, Utc::now()).unwrap();
-        assert_eq!(claims.subject_id, "github:101");
-    }
-
-    #[tokio::test]
-    async fn network_auth_client_runtime_requires_membership_like_go_relay() {
-        let store = MemoryStore::new();
-        store
-            .upsert_github_session(
-                "sess_member",
-                101,
-                "member",
-                Utc::now() + Duration::hours(1),
-            )
-            .await;
-        store
-            .upsert_github_session(
-                "sess_outsider",
-                202,
-                "outsider",
-                Utc::now() + Duration::hours(1),
-            )
-            .await;
-        seed_network(&store, "network-a").await;
-        store
-            .network_member_upsert(NetworkMember {
-                network_id: "network-a".to_string(),
-                subject: "github:101".to_string(),
-                role: NETWORK_ROLE_OWNER.to_string(),
-                created_at: Utc::now(),
-                created_by: "github:101".to_string(),
-            })
-            .await
-            .unwrap();
-
-        let router = router_with_store(test_config(AuthMode::Token), std::sync::Arc::new(store));
-        let response = router
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/v1/network-auth/runtime/client?network_id=network-a")
-                    .header(AUTHORIZATION, "Bearer sess_outsider")
-                    .body(Body::from("{}"))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::FORBIDDEN);
-        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-        assert_eq!(&body[..], b"membership required\n");
-
-        let response = router
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/v1/network-auth/runtime/client?network_id=network-a")
-                    .header(AUTHORIZATION, "Bearer sess_member")
-                    .body(Body::from("{}"))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-    }
-
-    #[tokio::test]
-    async fn network_auth_routes_reject_retired_persistent_node_bearer() {
-        let store = MemoryStore::new();
-        seed_node(&store, "project-alpha", "dev-2", "", Utc::now()).await;
-        let router = router_with_store(
-            test_config(AuthMode::Token),
-            std::sync::Arc::new(store.clone()),
-        );
-
-        let response = router
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/v1/network-auth/runtime/node")
-                    .header(AUTHORIZATION, "Bearer node-token")
-                    .body(Body::from("{}"))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
-
-        let response = router
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri("/api/v1/network-auth/bundle?network_id=project-alpha")
-                    .header(AUTHORIZATION, "Bearer node-token")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-
-        let response = router
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/v1/network-auth/delegation/node")
-                    .header(AUTHORIZATION, "Bearer node-token")
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        json!({
-                            "network_id": "project-alpha",
-                            "source_node": "dev-2",
-                            "from_session_name": "planner",
-                            "verbs": ["msg"]
-                        })
-                        .to_string(),
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-    }
-
-    #[tokio::test]
-    async fn network_auth_user_sender_delegation_uses_network_scoped_source_node() {
-        let store = seeded_member_store(
-            "sess_member",
-            101,
-            "member",
-            "project-alpha",
-            NETWORK_ROLE_MEMBER,
-        )
-        .await;
-        let now = Utc::now();
-        seed_node(&store, "project-alpha", "dev-1", "", now).await;
-        seed_node(&store, "other-network", "dev-1", "", now).await;
-        store
-            .group_create(Group {
-                network_id: "project-alpha".to_string(),
-                name: "mesh".to_string(),
-                created_at: now,
-                created_by: String::new(),
-            })
-            .await
-            .unwrap();
-        store
-            .group_member_add(GroupMember {
-                network_id: "project-alpha".to_string(),
-                group_name: "mesh".to_string(),
-                node_name: "dev-1".to_string(),
-                session_name: "planner".to_string(),
-                created_at: now,
-            })
-            .await
-            .unwrap();
-        let router = router_with_store(test_config(AuthMode::Token), std::sync::Arc::new(store));
-
-        let response = router
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/v1/network-auth/delegation/node")
-                    .header(AUTHORIZATION, "Bearer sess_member")
-                    .body(Body::from(
-                        json!({
-                            "network_id": "project-alpha",
-                            "source_node": "dev-1",
-                            "from_session_name": "planner",
-                            "verbs": ["request"],
-                            "audience_node": "dev-2"
-                        })
-                        .to_string(),
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-        let issued: SenderDelegationResponse = serde_json::from_slice(&body).unwrap();
-        assert_eq!(issued.network_id, "project-alpha");
-        assert_eq!(issued.source_node, "dev-1");
-        assert_eq!(issued.from_session_name, "planner");
-        assert_eq!(issued.source_groups, vec!["mesh"]);
-
-        let response = router
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/v1/network-auth/delegation/node")
-                    .header(AUTHORIZATION, "Bearer sess_member")
-                    .body(Body::from(
-                        json!({
-                            "source_node": "dev-1",
-                            "from_session_name": "planner",
-                            "verbs": ["request"]
-                        })
-                        .to_string(),
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-        assert_eq!(&body[..], b"network_id is required\n");
     }
 }

@@ -41,9 +41,8 @@ nodes:
       - containerPort: 30084
         hostPort: 8084
         protocol: TCP
-      # Coordinator direct Service leg for the gateway transport-selector
-      # proof. The sidecar uses this in-cluster shape rather than another
-      # generated-client ingress smoke.
+      # Coordinator direct Service leg for the generated sidecar h2c proof.
+      # The public native-gRPC leg uses the TLS ingress above.
       - containerPort: 30090
         hostPort: 18092
         protocol: TCP

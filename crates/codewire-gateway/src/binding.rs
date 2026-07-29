@@ -14,9 +14,7 @@ use tokio::sync::watch;
 use tokio::time::sleep;
 use uuid::Uuid;
 
-use crate::config::{
-    CoordinateTransport, DEFAULT_TAILNET_UDP_LISTEN_ADDR, GatewayConfig, TailnetConfig,
-};
+use crate::config::{DEFAULT_TAILNET_UDP_LISTEN_ADDR, GatewayConfig, TailnetConfig};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
 const SERVICEACCOUNT_NAMESPACE_PATH: &str =
@@ -26,7 +24,6 @@ const SERVICEACCOUNT_NAMESPACE_PATH: &str =
 pub struct BindingPollConfig {
     pub binding_url: String,
     pub coordinator_url: String,
-    pub coordinate_transport: CoordinateTransport,
     pub pod_name: String,
     pub pod_namespace: String,
 }
@@ -102,7 +99,6 @@ impl BindingPollConfig {
         Some(Self {
             binding_url,
             coordinator_url: coordinator_url.into(),
-            coordinate_transport: config.coordinate_transport,
             pod_name,
             pod_namespace,
         })
@@ -170,7 +166,6 @@ pub async fn poll_binding_once(
             environment_id,
             gateway_token: binding.sidecar_token,
             coordinator_url: config.coordinator_url.clone(),
-            coordinate_transport: config.coordinate_transport,
         },
         workspace_pod_ip: Some(binding.workspace_pod_ip)
             .map(|ip| ip.trim().to_string())
@@ -301,10 +296,7 @@ mod tests {
             listener_self_check_interval: None,
             api_url: api_url.map(str::to_string),
             binding_url: binding_url.map(str::to_string),
-            coordinator_url: Some(
-                "http://coordinator:8080/api/v1/internal/gateway/coordinate".into(),
-            ),
-            coordinate_transport: CoordinateTransport::Ws,
+            coordinator_url: Some("http://coordinator:8080".into()),
             daemon_auth_token: None,
             derp_url: None,
             stun: None,
@@ -323,8 +315,7 @@ mod tests {
     fn binding_config(binding_url: String) -> BindingPollConfig {
         BindingPollConfig {
             binding_url,
-            coordinator_url: "http://coordinator:8080/api/v1/internal/gateway/coordinate".into(),
-            coordinate_transport: CoordinateTransport::Connect,
+            coordinator_url: "http://coordinator:8080".into(),
             pod_name: "test-pod".into(),
             pod_namespace: "test-ns".into(),
         }
@@ -454,12 +445,8 @@ mod tests {
             tailnet.environment_id,
             Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap()
         );
-        assert_eq!(tailnet.coordinate_transport, CoordinateTransport::Connect);
         assert_eq!(tailnet.gateway_token, "test-token");
-        assert_eq!(
-            tailnet.coordinator_url,
-            "http://coordinator:8080/api/v1/internal/gateway/coordinate"
-        );
+        assert_eq!(tailnet.coordinator_url, "http://coordinator:8080");
         assert_eq!(binding.workspace_pod_ip.as_deref(), Some("10.244.0.42"));
         assert_eq!(binding.app_ports, vec![5173, 3000]);
         let runtime_transport = binding.runtime_transport.unwrap();

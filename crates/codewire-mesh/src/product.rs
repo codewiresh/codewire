@@ -118,6 +118,28 @@ impl MeshProductService {
         Ok(context)
     }
 
+    pub(crate) async fn authorize_coordinate(
+        &self,
+        organization_id: &str,
+        network_id: &str,
+        credential: ForwardedMeshCredential,
+    ) -> AppResult<MeshAuthorizationContext> {
+        let organization_id = required_identifier(organization_id, "org_id")?;
+        let network_id = validate_network_id(network_id)?;
+        let adapter = self.authorization.as_ref().ok_or_else(|| {
+            AppError::ServiceUnavailable("Mesh authorization is unavailable".into())
+        })?;
+        let context = adapter
+            .resolve(&organization_id, credential)
+            .await
+            .map_err(authorization_error)?;
+        if context.org_id != organization_id {
+            return Err(AppError::Forbidden);
+        }
+        self.network_for_org(&organization_id, &network_id).await?;
+        Ok(context)
+    }
+
     pub(crate) async fn organization_for_network(&self, network_id: &str) -> AppResult<String> {
         let network_id = validate_network_id(network_id)?;
         self.store

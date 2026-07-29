@@ -3,9 +3,11 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
+use codewire_client::{
+    COORDINATOR_SETUP_TIMEOUT, ClientConfig as CodewireClientConfig, CodewireClient,
+    CoordinatorHandlers, PrimaryCoordinateIdentity, StaticTokenProvider,
+};
 use codewire_tailnet::conn::{Conn, Options, PeerTransport, Transport};
-use codewire_tailnet::coordinator::{COORDINATOR_SETUP_TIMEOUT, CoordinatorClient, Handlers};
-use codewire_tailnet::coordinator_connect::{CoordinatorConnectClient, HelloIdentity};
 use codewire_tailnet::derp_transport::{DerpTarget, DerpTransport, connect_derp_transport};
 use codewire_tailnet::direct_udp;
 use codewire_tailnet::disco::{DiscoPrivate, UDPRelayEndpoint};
@@ -18,9 +20,8 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use tokio::net::lookup_host;
 use tokio::sync::{mpsc, watch};
 use url::Url;
-use uuid::Uuid;
 
-use crate::config::{CoordinateTransport, GatewayConfig, StunConfig, TailnetConfig};
+use crate::config::{GatewayConfig, StunConfig, TailnetConfig};
 
 const COORDINATOR_RETRY_DELAY: Duration = Duration::from_secs(5);
 const PEER_RELAY_ALLOCATION_RETRY_DELAY: Duration = Duration::from_secs(30);
@@ -486,14 +487,14 @@ pub async fn run_coordinator_loop(
 async fn run_coordinator_once(runtime: TailnetRuntime, config: &TailnetConfig) -> Result<()> {
     let conn = runtime.conn();
     let peer_relay_allocator = runtime.peer_relay_allocator;
-    let selected = select_coordinator_client(config).await?;
+    let mut coordinator = connect_coordinator(config).await?;
     let (node_tx, node_rx) = mpsc::unbounded_channel();
     conn.set_node_callback(move |node| {
         let _ = node_tx.send(node.clone());
     });
 
     let update_conn = conn.clone();
-    let handlers = Handlers {
+    let handlers = CoordinatorHandlers {
         on_peers: move |nodes: &[Node]| {
             let peer_count = nodes.len();
             let peer_endpoint_count = nodes.iter().map(|node| node.endpoints.len()).sum::<usize>();
@@ -513,121 +514,32 @@ async fn run_coordinator_once(runtime: TailnetRuntime, config: &TailnetConfig) -
             tracing::debug!("ignoring coordinator DERP map for gateway-local DERP target");
         },
     };
-    let result = match selected {
-        SelectedCoordinatorClient::WebSocket(mut client) => client
-            .run_with_node_updates(node_rx, handlers)
-            .await
-            .map_err(anyhow::Error::from),
-        SelectedCoordinatorClient::Connect(mut client) => client
-            .run_with_node_updates(node_rx, handlers)
-            .await
-            .map_err(anyhow::Error::from),
-    }
-    .context("run tailnet coordinator");
+    let result = coordinator
+        .run_with_node_updates(node_rx, handlers)
+        .await
+        .map_err(anyhow::Error::from)
+        .context("run typed tailnet coordinator");
     conn.clear_node_callback();
     result
 }
 
-enum SelectedSetup<C, W> {
-    Connect(C),
-    WebSocket(W),
-}
-
-enum SelectedCoordinatorClient {
-    Connect(Box<CoordinatorConnectClient>),
-    WebSocket(Box<CoordinatorClient>),
-}
-
-async fn select_setup<C, W, CF, WF, CFut, WFut>(
-    mode: CoordinateTransport,
-    setup_timeout: Duration,
-    connect: CF,
-    websocket: WF,
-) -> Result<SelectedSetup<C, W>>
-where
-    CF: FnOnce() -> CFut,
-    WF: FnOnce() -> WFut,
-    CFut: std::future::Future<Output = Result<C>>,
-    WFut: std::future::Future<Output = Result<W>>,
-{
-    async fn bounded<T>(
-        transport: &str,
-        setup_timeout: Duration,
-        setup: impl std::future::Future<Output = Result<T>>,
-    ) -> Result<T> {
-        tokio::time::timeout(setup_timeout, setup)
-            .await
-            .with_context(|| {
-                format!("{transport} coordinator setup timed out after {setup_timeout:?}")
-            })?
-    }
-
-    match mode {
-        CoordinateTransport::Ws => bounded("WebSocket", setup_timeout, websocket())
-            .await
-            .map(SelectedSetup::WebSocket),
-        CoordinateTransport::Connect => bounded("Connect", setup_timeout, connect())
-            .await
-            .map(SelectedSetup::Connect),
-        CoordinateTransport::Auto => match bounded("Connect", setup_timeout, connect()).await {
-            Ok(client) => Ok(SelectedSetup::Connect(client)),
-            Err(err) => {
-                tracing::warn!(
-                    error = %err,
-                    "gateway Connect coordinator setup failed; falling back to WebSocket"
-                );
-                bounded("WebSocket", setup_timeout, websocket())
-                    .await
-                    .map(SelectedSetup::WebSocket)
-            }
-        },
-    }
-}
-
-async fn select_coordinator_client(config: &TailnetConfig) -> Result<SelectedCoordinatorClient> {
-    let connect_url = config.coordinator_url.clone();
-    let connect_token = config.gateway_token.clone();
-    let environment_id = config.environment_id;
-    let websocket_url = config.coordinator_url.clone();
-    let websocket_token = config.gateway_token.clone();
-
-    match select_setup(
-        config.coordinate_transport,
-        COORDINATOR_SETUP_TIMEOUT,
-        move || async move {
-            CoordinatorConnectClient::connect(
-                &connect_url,
-                &connect_token,
-                HelloIdentity::sidecar(environment_id),
-            )
-            .await
-            .context("set up Connect tailnet coordinator")
-        },
-        move || async move {
-            let url = gateway_coordinator_url(&websocket_url, environment_id)?;
-            CoordinatorClient::connect(&url, &websocket_token)
-                .await
-                .context("set up WebSocket tailnet coordinator")
-        },
+async fn connect_coordinator(
+    config: &TailnetConfig,
+) -> Result<codewire_client::CoordinatorPeerSession> {
+    let client = CodewireClient::new(
+        CodewireClientConfig::new(&config.coordinator_url)
+            .context("parse coordinator service origin")?,
+        StaticTokenProvider::new(config.gateway_token.clone())
+            .context("validate gateway sidecar credential")?,
     )
-    .await?
-    {
-        SelectedSetup::Connect(client) => Ok(SelectedCoordinatorClient::Connect(Box::new(client))),
-        SelectedSetup::WebSocket(client) => {
-            Ok(SelectedCoordinatorClient::WebSocket(Box::new(client)))
-        }
-    }
-}
-
-/// Exercise the production coordinator selector without starting the DERP and
-/// WireGuard data plane. This is compiled only for the disposable KIND proof.
-#[cfg(feature = "kind-e2e")]
-#[doc(hidden)]
-pub async fn coordinator_selector_probe(config: &TailnetConfig) -> Result<CoordinateTransport> {
-    Ok(match select_coordinator_client(config).await? {
-        SelectedCoordinatorClient::Connect(_) => CoordinateTransport::Connect,
-        SelectedCoordinatorClient::WebSocket(_) => CoordinateTransport::Ws,
-    })
+    .context("construct shared Codewire client")?;
+    client
+        .connect_primary_coordinator_direct_with_setup_timeout(
+            PrimaryCoordinateIdentity::sidecar(config.environment_id),
+            COORDINATOR_SETUP_TIMEOUT,
+        )
+        .await
+        .context("set up typed Connect tailnet coordinator")
 }
 
 async fn wait_for_shutdown(mut shutdown_rx: watch::Receiver<bool>) {
@@ -675,40 +587,11 @@ fn derp_target_from_config(config: &GatewayConfig, tailnet: &TailnetConfig) -> R
     derp_target(raw)
 }
 
-fn gateway_coordinator_url(base: &str, environment_id: Uuid) -> Result<String> {
-    let mut url = Url::parse(base).with_context(|| format!("parse coordinator URL {base:?}"))?;
-    let scheme = match url.scheme() {
-        "https" => "wss",
-        "http" => "ws",
-        "wss" | "ws" => url.scheme(),
-        other => return Err(anyhow!("unsupported coordinator URL scheme {other:?}")),
-    }
-    .to_string();
-    url.set_scheme(&scheme)
-        .map_err(|_| anyhow!("set coordinator URL scheme to {scheme:?}"))?;
-
-    let existing = url
-        .query_pairs()
-        .filter(|(key, _)| key != "sidecar_id")
-        .map(|(key, value)| (key.into_owned(), value.into_owned()))
-        .collect::<Vec<_>>();
-    url.set_query(None);
-    {
-        let mut query = url.query_pairs_mut();
-        for (key, value) in existing {
-            query.append_pair(&key, &value);
-        }
-        query.append_pair("sidecar_id", &environment_id.to_string());
-    }
-
-    Ok(url.into())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::DockerProxyConfig;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use uuid::Uuid;
 
     fn gateway_config(
         api_url: Option<&str>,
@@ -725,7 +608,6 @@ mod tests {
             api_url: api_url.map(str::to_string),
             binding_url: None,
             coordinator_url: Some(coordinator_url.into()),
-            coordinate_transport: CoordinateTransport::Ws,
             daemon_auth_token: None,
             derp_url: derp_url.map(str::to_string),
             stun: None,
@@ -749,127 +631,7 @@ mod tests {
             environment_id: Uuid::new_v4(),
             gateway_token: "test-token".into(),
             coordinator_url: coordinator_url.into(),
-            coordinate_transport: CoordinateTransport::Ws,
         }
-    }
-
-    #[tokio::test]
-    async fn coordinator_selector_forced_modes_use_only_the_requested_setup() {
-        let connect_calls = Arc::new(AtomicUsize::new(0));
-        let websocket_calls = Arc::new(AtomicUsize::new(0));
-        let connect_count = connect_calls.clone();
-        let websocket_count = websocket_calls.clone();
-        let selected = select_setup(
-            CoordinateTransport::Connect,
-            Duration::from_secs(1),
-            move || async move {
-                connect_count.fetch_add(1, Ordering::SeqCst);
-                Ok::<_, anyhow::Error>("connect")
-            },
-            move || async move {
-                websocket_count.fetch_add(1, Ordering::SeqCst);
-                Ok::<_, anyhow::Error>("ws")
-            },
-        )
-        .await
-        .unwrap();
-        assert!(matches!(selected, SelectedSetup::Connect("connect")));
-        assert_eq!(connect_calls.load(Ordering::SeqCst), 1);
-        assert_eq!(websocket_calls.load(Ordering::SeqCst), 0);
-
-        let connect_calls = Arc::new(AtomicUsize::new(0));
-        let websocket_calls = Arc::new(AtomicUsize::new(0));
-        let connect_count = connect_calls.clone();
-        let websocket_count = websocket_calls.clone();
-        let selected = select_setup(
-            CoordinateTransport::Ws,
-            Duration::from_secs(1),
-            move || async move {
-                connect_count.fetch_add(1, Ordering::SeqCst);
-                Ok::<_, anyhow::Error>("connect")
-            },
-            move || async move {
-                websocket_count.fetch_add(1, Ordering::SeqCst);
-                Ok::<_, anyhow::Error>("ws")
-            },
-        )
-        .await
-        .unwrap();
-        assert!(matches!(selected, SelectedSetup::WebSocket("ws")));
-        assert_eq!(connect_calls.load(Ordering::SeqCst), 0);
-        assert_eq!(websocket_calls.load(Ordering::SeqCst), 1);
-    }
-
-    #[tokio::test]
-    async fn coordinator_selector_auto_falls_back_only_during_connect_setup() {
-        let websocket_calls = Arc::new(AtomicUsize::new(0));
-        let websocket_count = websocket_calls.clone();
-        let selected = select_setup(
-            CoordinateTransport::Auto,
-            Duration::from_secs(1),
-            || async { Err::<(), _>(anyhow!("Connect setup failed")) },
-            move || async move {
-                websocket_count.fetch_add(1, Ordering::SeqCst);
-                Ok::<_, anyhow::Error>("ws")
-            },
-        )
-        .await
-        .unwrap();
-        assert!(matches!(selected, SelectedSetup::WebSocket("ws")));
-        assert_eq!(websocket_calls.load(Ordering::SeqCst), 1);
-
-        let websocket_calls = Arc::new(AtomicUsize::new(0));
-        let websocket_count = websocket_calls.clone();
-        let selected = select_setup(
-            CoordinateTransport::Auto,
-            Duration::from_secs(1),
-            || async { Ok::<_, anyhow::Error>("established-connect") },
-            move || async move {
-                websocket_count.fetch_add(1, Ordering::SeqCst);
-                Ok::<_, anyhow::Error>("ws")
-            },
-        )
-        .await
-        .unwrap();
-        assert!(matches!(
-            selected,
-            SelectedSetup::Connect("established-connect")
-        ));
-
-        let later_stream_result = Err::<(), _>(anyhow!("established stream disconnected"));
-        assert!(later_stream_result.is_err());
-        assert_eq!(
-            websocket_calls.load(Ordering::SeqCst),
-            0,
-            "a post-setup disconnect returns to the outer reconnect loop without inline WS demotion"
-        );
-    }
-
-    #[tokio::test]
-    async fn coordinator_selector_bounds_stalled_connect_and_websocket_setup() {
-        let setup_timeout = Duration::from_millis(20);
-        let selected = select_setup(
-            CoordinateTransport::Auto,
-            setup_timeout,
-            std::future::pending::<Result<&'static str>>,
-            || async { Ok::<_, anyhow::Error>("ws") },
-        )
-        .await
-        .unwrap();
-        assert!(matches!(selected, SelectedSetup::WebSocket("ws")));
-
-        let result = tokio::time::timeout(
-            Duration::from_millis(100),
-            select_setup(
-                CoordinateTransport::Auto,
-                setup_timeout,
-                std::future::pending::<Result<&'static str>>,
-                std::future::pending::<Result<&'static str>>,
-            ),
-        )
-        .await
-        .expect("both setup attempts must fail finitely");
-        assert!(result.is_err());
     }
 
     #[tokio::test]
@@ -901,7 +663,7 @@ mod tests {
 
     #[test]
     fn derp_target_prefers_explicit_derp_url() {
-        let tailnet = tailnet_config("https://api.example/api/v1/internal/gateway/coordinate");
+        let tailnet = tailnet_config("https://api.example");
         let config = gateway_config(
             Some("https://api.example"),
             Some("https://derp.example:8443"),
@@ -1040,7 +802,7 @@ mod tests {
 
     #[test]
     fn peer_relay_allocator_without_static_endpoint_forces_udp_and_keeps_stun_advertising() {
-        let tailnet = tailnet_config("https://api.example/api/v1/internal/gateway/coordinate");
+        let tailnet = tailnet_config("https://api.example");
         let mut config = gateway_config(
             Some("https://api.example"),
             Some("https://derp.example"),
@@ -1063,20 +825,6 @@ mod tests {
                 host: "stun.codewire-dev.sh".into(),
                 port: 3478,
             }]
-        );
-    }
-
-    #[test]
-    fn coordinator_url_uses_websocket_scheme_and_replaces_sidecar_id() {
-        let env_id = Uuid::new_v4();
-        let url = gateway_coordinator_url(
-            "https://api.example/api/v1/internal/gateway/coordinate?sidecar_id=old&x=1",
-            env_id,
-        )
-        .unwrap();
-        assert_eq!(
-            url,
-            format!("wss://api.example/api/v1/internal/gateway/coordinate?x=1&sidecar_id={env_id}")
         );
     }
 }

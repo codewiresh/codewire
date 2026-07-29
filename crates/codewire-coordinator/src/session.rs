@@ -1,8 +1,7 @@
 //! Transport-independent coordinator peer session.
 //!
-//! The WebSocket and Connect adapters own only their wire codecs. Registry,
-//! NATS/KV fanout, heartbeat cadence, and teardown live here so both
-//! transports execute the same peer behavior.
+//! The generated Connect adapter owns the wire codec. Registry, NATS/KV
+//! fanout, heartbeat cadence, and teardown live here.
 
 use std::sync::Arc;
 
@@ -11,8 +10,8 @@ use tokio::sync::{Mutex as AsyncMutex, mpsc};
 use uuid::Uuid;
 
 use super::{
-    CoordinationPlane, PeerEvent, PeerKind, PeerRegistry, SIDECAR_KV_REFRESH, Transport,
-    WEBSOCKET_HEARTBEAT_INTERVAL, build_derp_map, derp_map_config_from_env, log_node,
+    COORDINATE_HEARTBEAT_INTERVAL, CoordinationPlane, PeerEvent, PeerKind, PeerRegistry,
+    SIDECAR_KV_REFRESH, Transport, build_derp_map, derp_map_config_from_env, log_node,
     spawn_node_subscription, spawn_remove_subscription,
 };
 
@@ -175,7 +174,7 @@ pub(crate) async fn run_peer_session<Source, Sink>(
         "coordinator derp_map sent"
     );
 
-    let mut heartbeat = tokio::time::interval(WEBSOCKET_HEARTBEAT_INTERVAL);
+    let mut heartbeat = tokio::time::interval(COORDINATE_HEARTBEAT_INTERVAL);
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     heartbeat.tick().await;
 
@@ -365,7 +364,7 @@ mod tests {
                 peer_id,
                 sidecar_id,
                 kind,
-                transport: Transport::WebSocket,
+                transport: Transport::Connect,
             },
         ));
         (input_tx, output_rx, task)

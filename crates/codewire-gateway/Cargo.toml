@@ -9,15 +9,11 @@ description = "Rust landing zone for the Codewire sandbox gateway."
 [features]
 kind-e2e = []
 
-[[bin]]
-name = "coordinator-selector-smoke"
-path = "src/bin/coordinator-selector-smoke.rs"
-required-features = ["kind-e2e"]
-
 [dependencies]
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 axum = { workspace = true }
+codewire-client = { workspace = true }
 codewire-gateway-proto = { workspace = true }
 codewire-proto = { workspace = true, features = ["client"] }
 codewire-tailnet = { workspace = true }

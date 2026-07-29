@@ -18,6 +18,7 @@ FROM rust-toolchain AS rust-builder
 WORKDIR /src
 COPY deployments/docker/gateway.Cargo.toml ./Cargo.toml
 COPY deployments/docker/gateway.Cargo.lock ./Cargo.lock
+COPY crates/codewire-client ./crates/codewire-client
 COPY crates/codewire-gateway ./crates/codewire-gateway
 COPY crates/codewire-gateway-proto ./crates/codewire-gateway-proto
 COPY crates/codewire-proto ./crates/codewire-proto

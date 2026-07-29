@@ -24,5 +24,11 @@ breaking:
   # internal Mesh RPC has the exact expected idempotency classification, with
   # demonstrated-red coverage for this method.
   ignore_only:
+    # WS18 WI-8B deliberately deletes the unpublished, out-of-audience
+    # coordinator.v1 pilot after every caller and server moved atomically to
+    # codewire.internal.v1.CoordinatorService. Keep the exception limited to
+    # the deleted file; published codewire.v1 files retain FILE_NO_DELETE.
+    FILE_NO_DELETE:
+      - coordinator/v1/coordinator.proto
     RPC_SAME_IDEMPOTENCY_LEVEL:
       - codewire/internal/v1/mesh_authorization.proto

@@ -1082,7 +1082,6 @@ mod tests {
             gateway_image: "gateway:v1".into(),
             runtime_class: runtime_class.into(),
             api_base_url: "https://api.codewire.test".into(),
-            coordinate_transport: "ws".into(),
             pod_namespace: "prod-ns".into(),
             derp_host: "derp.h".into(),
             derp_port: "443".into(),
@@ -1098,16 +1097,16 @@ mod tests {
         parse_canonical_full_warm_pool_profiles("").unwrap()[0].clone()
     }
 
-    // Stable Rust warm-pool revision goldens include the WI-6 coordinator
-    // transport selector so transport flips cannot reuse warm pods rendered
-    // for another coordinate path.
+    // Stable Rust warm-pool revision goldens include the coordinator service
+    // origin so endpoint changes cannot reuse warm pods rendered for another
+    // target.
     #[test]
     fn warm_pool_revision_hash_matches_checked_in_goldens() {
         let isol8 = warm_pool_template_opts(&warm_cfg("isol8"), &default_profile());
-        assert_eq!(warm_pool_revision_hash(&isol8), "997950e8");
+        assert_eq!(warm_pool_revision_hash(&isol8), "012b190d");
 
         let plain = warm_pool_template_opts(&warm_cfg(""), &default_profile());
-        assert_eq!(warm_pool_revision_hash(&plain), "9031ae11");
+        assert_eq!(warm_pool_revision_hash(&plain), "09d65527");
     }
 
     #[test]
@@ -1126,13 +1125,7 @@ mod tests {
 
         let mut changed = warm_cfg("isol8");
         changed.coordinator_url =
-            "http://coordinator.default.svc.cluster.local:8090/api/v1/internal/gateway/coordinate"
-                .into();
-        let opts2 = warm_pool_template_opts(&changed, &default_profile());
-        assert_ne!(warm_pool_revision_hash(&opts2), h1);
-
-        let mut changed = warm_cfg("isol8");
-        changed.coordinate_transport = "connect".into();
+            "http://codewire-coordinator.default.svc.cluster.local:8090".into();
         let opts2 = warm_pool_template_opts(&changed, &default_profile());
         assert_ne!(warm_pool_revision_hash(&opts2), h1);
 

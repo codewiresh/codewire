@@ -306,7 +306,7 @@
               },
               {
                 "name": "CODEWIRE_COORDINATOR_URL",
-                "value": "http://localhost:8080/api/v1/internal/gateway/coordinate"
+                "value": "http://localhost:8080"
               },
               {
                 "name": "CODEWIRE_SERVER_NAMESPACE",

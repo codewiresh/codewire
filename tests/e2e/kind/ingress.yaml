@@ -137,42 +137,7 @@ spec:
                   name: http
 
 ---
-# Real coordinator WebSocket routes. This object deliberately remains
-# HTTP/1.1 and separate from the GRPC-backed Connect object below.
-apiVersion: networking.k8s.io/v1
-kind: Ingress
-metadata:
-  name: codewire-coordinator-e2e
-  annotations:
-    nginx.ingress.kubernetes.io/use-regex: "true"
-    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
-    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
-spec:
-  ingressClassName: nginx
-  tls:
-    - hosts:
-        - localhost
-      secretName: codewire-kind-ingress-tls
-  rules:
-    - host: localhost
-      http:
-        paths:
-          - path: /api/v1/organizations/[^/]+/environments/[^/]+/coordinate
-            pathType: ImplementationSpecific
-            backend:
-              service:
-                name: codewire-coordinator
-                port:
-                  name: http
-          - path: /api/v1/internal/gateway/coordinate
-            pathType: ImplementationSpecific
-            backend:
-              service:
-                name: codewire-coordinator
-                port:
-                  name: http
----
-# Native coordinator Connect bidi stream. TLS+ALPN proves HTTP/2 on the
+# Native generated coordinator bidi stream. TLS+ALPN proves HTTP/2 on the
 # client leg; GRPC retains HTTP/2 from ingress-nginx to the coordinator.
 apiVersion: networking.k8s.io/v1
 kind: Ingress
@@ -195,11 +160,41 @@ spec:
     - host: localhost
       http:
         paths:
-          - path: /coordinator\.v1\.CoordinatorService/
+          - path: /codewire\.internal\.v1\.CoordinatorService/
             pathType: ImplementationSpecific
             backend:
               service:
                 name: codewire-coordinator
+                port:
+                  name: http
+---
+# Native generated Mesh coordinator bidi stream.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: codewire-mesh-coordinator-grpc-e2e
+  annotations:
+    nginx.ingress.kubernetes.io/use-regex: "true"
+    nginx.ingress.kubernetes.io/backend-protocol: "GRPC"
+    nginx.ingress.kubernetes.io/proxy-request-buffering: "off"
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - localhost
+      secretName: codewire-kind-ingress-tls
+  rules:
+    - host: localhost
+      http:
+        paths:
+          - path: /codewire\.internal\.v1\.MeshCoordinatorService/
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: codewire-mesh
                 port:
                   name: http
 ---

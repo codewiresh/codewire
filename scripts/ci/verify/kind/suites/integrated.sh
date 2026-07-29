@@ -37,7 +37,6 @@ run_integrated_kind_suite() {
   internal_connect_listener_probes
   mesh_product_connect_ownership_smoke
   coordinator_ingress_smoke
-  gateway_selector_smoke
   billing_contract_through_ingress
   deploy_agent_sandbox_and_smoke
   rust_reconciler_ttl_e2e

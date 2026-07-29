@@ -6,20 +6,36 @@ authors.workspace = true
 license = "AGPL-3.0-only"
 description = "Shared ergonomic Rust client over Codewire's generated Connect-RPC stubs."
 
+[features]
+kind-e2e = []
+
+[[example]]
+name = "coordinator-ingress-smoke"
+required-features = ["kind-e2e"]
+
 [dependencies]
 async-trait = { workspace = true }
 base64 = { workspace = true }
 buffa = { workspace = true }
 buffa-types = { workspace = true }
 codewire-proto = { workspace = true, features = ["client"] }
+codewire-tailnet = { workspace = true }
+chrono = { workspace = true }
 connectrpc = { workspace = true, features = ["client"] }
 http = { workspace = true }
 http-body-util = { workspace = true }
+hyper-util = { workspace = true }
 reqwest = { workspace = true }
+rustls = { version = "=0.23.40", default-features = false, features = ["ring"] }
+rustls-pki-types = "=1.14.1"
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+tokio-rustls = { version = "=0.26.4", default-features = false, features = ["ring"] }
+tower = { workspace = true }
 url = { workspace = true }
+uuid = { workspace = true }
+webpki-roots = "=1.0.7"
 
 tokio = { workspace = true }
 wiremock = { workspace = true }

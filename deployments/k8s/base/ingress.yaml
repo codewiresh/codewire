@@ -135,50 +135,7 @@ spec:
                 port:
                   name: http
 ---
-# Routes the tailnet coordinate paths to codewire-coordinator (deployed from
-# deployments/k8s/coordinator, like derp). Separate Ingress because these
-# paths need regex matching; nginx gives regex locations priority over the
-# /api fallback in the main ingress.
-apiVersion: networking.k8s.io/v1
-kind: Ingress
-metadata:
-  name: codewire-coordinator
-  namespace: prod
-  annotations:
-    nginx.ingress.kubernetes.io/ssl-redirect: "true"
-    nginx.ingress.kubernetes.io/use-regex: "true"
-    # Coordinate WebSockets stay open for the life of the tunnel.
-    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
-    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
-    cert-manager.io/cluster-issuer: letsencrypt-codewire
-spec:
-  ingressClassName: nginx
-  tls:
-    - hosts:
-        - codewire.sh
-      secretName: codewire-tls
-  rules:
-    - host: codewire.sh
-      http:
-        paths:
-          - path: /api/v1/organizations/[^/]+/environments/[^/]+/coordinate
-            pathType: ImplementationSpecific
-            backend:
-              service:
-                name: codewire-coordinator
-                port:
-                  name: http
-          - path: /api/v1/internal/gateway/coordinate
-            pathType: ImplementationSpecific
-            backend:
-              service:
-                name: codewire-coordinator
-                port:
-                  name: http
----
-# Native coordinator Connect bidi stream. This must remain a separate
-# Ingress from codewire-coordinator above: backend-protocol applies to the
-# whole object, while the existing coordinate WebSockets need HTTP/1.1.
+# Native coordinator generated bidi stream.
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
@@ -203,11 +160,44 @@ spec:
     - host: codewire.sh
       http:
         paths:
-          - path: /coordinator\.v1\.CoordinatorService/
+          - path: /codewire\.internal\.v1\.CoordinatorService/
             pathType: ImplementationSpecific
             backend:
               service:
                 name: codewire-coordinator
+                port:
+                  name: http
+---
+# Native Mesh coordinator generated bidi stream.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: codewire-mesh-coordinator-grpc
+  namespace: prod
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/use-regex: "true"
+    nginx.ingress.kubernetes.io/backend-protocol: "GRPC"
+    nginx.ingress.kubernetes.io/proxy-request-buffering: "off"
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    cert-manager.io/cluster-issuer: letsencrypt-codewire
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - codewire.sh
+      secretName: codewire-tls
+  rules:
+    - host: codewire.sh
+      http:
+        paths:
+          - path: /codewire\.internal\.v1\.MeshCoordinatorService/
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: codewire-mesh-http
                 port:
                   name: http
 ---
@@ -471,8 +461,8 @@ spec:
 # Connect-RPC path routing (docs/plans/connect-rpc/03, D5). Connect routes
 # are /{package}.{Service}/{Method}; packages span binaries, so routing is
 # per-Service. Billing-owned Services gain regex rules in the billing Ingress
-# above as their protos land. CoordinatorService has its own h2
-# Ingress beside the WebSocket object. This regex fallback sends every other
+# above as their protos land. CoordinatorService has its own h2 Ingress. This
+# regex fallback sends every other
 # Connect path to orchestration so an unmatched RPC gets a
 # Connect-shaped answer from a service, never dashboard HTML (the `/`
 # Prefix rule it would otherwise hit). Response and request buffering are off

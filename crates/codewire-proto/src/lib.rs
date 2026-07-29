@@ -9,7 +9,7 @@
 //! [`codewire::admin::v1`]; `codewire.internal.v1` is
 //! [`codewire::internal::v1`]; `codewire.testing.v1` (the
 //! never-routed Connect-infrastructure probe, doc 03 D8) is
-//! [`codewire::testing::v1`]; `coordinator.v1` is [`coordinator::v1`].
+//! [`codewire::testing::v1`].
 //! The vendored `google.rpc` error-detail types
 //! (doc 01 D1: `BadRequest`, `ErrorInfo`, `RetryInfo`) compile to
 //! [`google::rpc`] for the Connect error renderer's wire encoding
@@ -714,30 +714,6 @@ mod tests {
         };
         let json = serde_json::to_string(&ping).expect("proto3 JSON serialization");
         assert!(json.contains("probe"), "unexpected JSON: {json}");
-    }
-
-    #[test]
-    fn coordinator_package_generates_bidi_service() {
-        use super::coordinator::v1::{
-            COORDINATOR_SERVICE_SERVICE_NAME, CoordinateRequest, Hello, coordinate_request,
-        };
-
-        assert_eq!(
-            COORDINATOR_SERVICE_SERVICE_NAME,
-            "coordinator.v1.CoordinatorService"
-        );
-        let request = CoordinateRequest {
-            msg: Hello {
-                environment_id: "00000000-0000-0000-0000-000000000001".into(),
-                ..Default::default()
-            }
-            .into(),
-            ..Default::default()
-        };
-        assert!(matches!(
-            request.msg,
-            Some(coordinate_request::Msg::Hello(_))
-        ));
     }
 
     #[test]

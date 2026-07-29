@@ -1,16 +1,16 @@
 {
-  "$comment": "Phased hosted-Mesh caller, declaration, source-shape, count, and fingerprint policy after WI-8A enrollment redemption and persistent-node-bearer retirement. The route inventory, dispositions, credentials, packages, and raw URL records remain in rest-surface-baseline.json; parser and guard semantics remain in repo_checks.py.",
+  "$comment": "Phased hosted-Mesh caller, source-shape, count, and fingerprint policy after WI-8B typed coordinate convergence and runtime-credential retirement. The route inventory, dispositions, credentials, packages, and raw URL records remain in rest-surface-baseline.json; parser and guard semantics remain in repo_checks.py.",
   "schema_version": 1,
   "surface": {
-    "route_registrations": 22,
-    "method_path_operations": 29,
-    "router_from_state_sha256": "49d3eed81771c06177a4214d8ee975734e04040183275ed415175dcef12498a0",
-    "semantics_sha256": "a1a58a2bb14c515af1a84afd8f308c9bcb1cb6e288c1aa9b69177fab8ca9e824",
+    "route_registrations": 18,
+    "method_path_operations": 25,
+    "router_from_state_sha256": "5ee732919d238e9c8b9793f712f2d77901b86a31e74ca3a510a579037614f6ec",
+    "semantics_sha256": "7535ed1da1c15164593f18d59c17c5dc502463bd6bc47d4c750efcb70be44a90",
     "expected_counts": {
-      "route_registrations": 36,
-      "method_path_operations": 29,
+      "route_registrations": 32,
+      "method_path_operations": 25,
       "router_new_expressions": 3,
-      "router_merges": 1,
+      "router_merges": 0,
       "app_builder_route_mounts": 1,
       "caller_operation_references": {
         "browser": 5,
@@ -36,25 +36,23 @@
       },
       "credential_operations": {
         "invite-code": 1,
-        "mesh-identity": 3,
+        "mesh-identity": 0,
         "mesh-session-bearer-or-cookie": 1,
         "none": 2,
         "oidc-device-code": 0,
         "oidc-state-and-code": 1,
         "primary-product-identity": 19,
-        "primary-product-identity-plus-invite-code": 1,
-        "runtime-credential": 1
+        "primary-product-identity-plus-invite-code": 1
       },
       "disposition_operations": {
-        "connect": 21,
-        "delete": 8
+        "connect": 20,
+        "delete": 5
       },
       "package_operations": {
-        "codewire.internal.v1": 1,
         "codewire.v1": 20,
-        "none": 8
+        "none": 5
       },
-      "operations_without_callers": 17,
+      "operations_without_callers": 13,
       "wrapper_declaration_records": 0,
       "client_url_template_records": 6,
       "client_url_template_occurrences": 11
@@ -143,8 +141,16 @@
     "crates/codewire-mesh/src/server.rs": [
       "\"/api/v1/node-enrollments/redeem\", post(",
       "\"/api/v1/network-auth/runtime/node\", post(",
+      "\"/api/v1/network-auth/bundle\", get(",
+      "\"/api/v1/network-auth/delegation/node\",",
+      "\"/api/v1/network-auth/runtime/client\",",
+      "\"/api/v1/tailnet/coordinate\", get(",
       "async fn node_enrollment_redeem(",
-      "async fn node_runtime_credential("
+      "async fn node_runtime_credential(",
+      "async fn verifier_bundle(",
+      "async fn client_runtime_credential(",
+      "async fn node_sender_delegation(",
+      "async fn tailnet_coordinate("
     ],
     "crates/codewire-mesh/src/store.rs": [
       "async fn node_get_by_token(",

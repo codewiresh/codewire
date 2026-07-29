@@ -9,8 +9,6 @@
 //!   crypto).
 //! - **DERP relay client** (transport) — interops with the Codewire
 //!   `codewire-derp` server binary (#46).
-//! - **Coordinator HTTP/WS client** — interops with the existing Go
-//!   coordinator; app-level JSON, no Tailscale dep (#47).
 //! - **Peer / node state** — the `Node` wire model + ULA addressing (#48).
 //! - A userspace TCP listener/dialer so consumers get `Listen("tcp", ":22")`
 //!   / `DialContextTCP` (gvisor `netstack` → `smoltcp`-class, ours).
@@ -56,13 +54,6 @@ pub mod endpoint_tracker;
 
 /// Minimal RFC5389 STUN binding client used by the direct UDP transport.
 pub mod stun;
-
-/// Coordinator HTTP/WebSocket client (#47). Interops with the existing Go
-/// coordinator (app-level JSON over WebSocket).
-pub mod coordinator;
-
-/// Native Connect-RPC coordinator client (Connect bidi over HTTP/2).
-pub mod coordinator_connect;
 
 /// Userspace TCP/IP netstack (transport → sockets). The
 /// gvisor-`netstack` equivalent (`smoltcp`-based) that turns the WireGuard

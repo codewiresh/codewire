@@ -2,12 +2,12 @@ pub mod auth;
 pub mod config;
 mod connect;
 pub mod mesh_authorization;
+mod mesh_coordinate;
 mod product;
 pub mod server;
 pub mod store;
 
 pub use auth::{AuthIdentity, SESSION_COOKIE_NAME, SESSION_TOKEN_PREFIX, authenticate_headers};
-pub use codewire_network_auth as network_auth;
 pub use config::{
     AUTH_MODE_ENV, AUTH_TOKEN_ENV, AuthMode, Config, ConfigError, DATABASE_URL_ENV,
     DEFAULT_LISTEN_ADDR, LISTEN_ADDR_ENV, LOCAL_API_KEY_HASH_ENV, LOCAL_ENVIRONMENT_ID_ENV,

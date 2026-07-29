@@ -141,7 +141,6 @@ pub struct TemplateOpts {
     pub gateway_token: String,
     pub api_base_url: String,
     pub coordinator_url: String,
-    pub coordinate_transport: String,
     pub server_namespace: String,
     pub derp_host: String,
     pub derp_port: i64,
@@ -1016,12 +1015,6 @@ fn build_sidecar_env(opts: &TemplateOpts) -> Vec<Value> {
             "value": coordinator_url,
         }));
     }
-    if !opts.coordinate_transport.is_empty() {
-        env.push(json!({
-            "name": "CODEWIRE_COORDINATE_TRANSPORT",
-            "value": opts.coordinate_transport,
-        }));
-    }
     if !opts.server_namespace.is_empty() {
         env.push(json!({ "name": "CODEWIRE_SERVER_NAMESPACE", "value": opts.server_namespace }));
     }
@@ -1647,10 +1640,7 @@ fn gateway_coordinator_url(opts: &TemplateOpts) -> Option<String> {
     if opts.api_base_url.is_empty() {
         return None;
     }
-    Some(format!(
-        "{}/api/v1/internal/gateway/coordinate",
-        opts.api_base_url.trim_end_matches('/')
-    ))
+    Some(opts.api_base_url.trim_end_matches('/').to_string())
 }
 
 fn gateway_binding_url(opts: &TemplateOpts) -> Option<String> {
@@ -3100,8 +3090,7 @@ mod tests {
     fn explicit_coordinator_url_and_internal_binding_url_are_independent_of_public_api_url() {
         let env = build_sidecar_env(&TemplateOpts {
             api_base_url: "https://codewire.example".into(),
-            coordinator_url: "http://codewire-coordinator.default.svc.cluster.local:8090/api/v1/internal/gateway/coordinate".into(),
-            coordinate_transport: "connect".into(),
+            coordinator_url: "http://codewire-coordinator.default.svc.cluster.local:8090".into(),
             server_namespace: "default".into(),
             ..Default::default()
         });
@@ -3119,13 +3108,7 @@ mod tests {
         );
         assert_eq!(
             get("CODEWIRE_COORDINATOR_URL").as_deref(),
-            Some(
-                "http://codewire-coordinator.default.svc.cluster.local:8090/api/v1/internal/gateway/coordinate"
-            )
-        );
-        assert_eq!(
-            get("CODEWIRE_COORDINATE_TRANSPORT").as_deref(),
-            Some("connect")
+            Some("http://codewire-coordinator.default.svc.cluster.local:8090")
         );
         assert_eq!(
             get("CODEWIRE_BINDING_URL").as_deref(),

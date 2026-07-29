@@ -16,18 +16,16 @@ stability postures, codegen — live in
 ```
 proto/
 ├── buf.yaml               # buf v2 module config (lint: STANDARD, breaking: FILE)
-├── buf.gen.yaml           # codegen config for internal packages (local plugins)
-├── buf.gen.codewire.yaml  # codegen config for the client-facing codewire/** packages
+├── buf.gen.codewire.yaml  # codegen config for all audience-packaged codewire/** contracts
 ├── buf.gen.google-rpc-ts.yaml # TypeScript vendored google.rpc detail schemas
 ├── buf.gen.google-rpc-python.yaml # Python vendored google.rpc detail schemas
 ├── google/rpc/            # vendored googleapis error-model protos (see below)
-├── <service>/v1/          # one package per service, versioned (internal contracts)
-└── codewire/**/v1/        # client-facing contract packages (Connect-RPC migration)
+└── codewire/**/v1/        # public, console, admin, internal, and testing packages
 ```
 
-Generated Go clients for both internal and client-facing packages live in the
-standalone `libs/gen-go/` module and are checked in. The client-facing
-`codewire.*` packages (`docs/plans/connect-rpc/`) additionally generate into
+Generated Go clients for every audience package live in the standalone
+`libs/gen-go/` module and are checked in. The `codewire.*` packages
+(`docs/plans/connect-rpc/`) additionally generate into
 `libs/gen-python/` and `packages/codewire-proto-ts/src/gen/` (checked in), and
 are compiled for Rust at build time by `crates/codewire-proto`.
 
@@ -35,7 +33,7 @@ are compiled for Rust at build time by `crates/codewire-proto`.
 
 | Package | Service | Consumers |
 |---|---|---|
-| `coordinator.v1` | `CoordinatorService` — tailnet coordinate (WireGuard key exchange). Production transport is currently WebSocket+JSON with field names matching these messages; the schema is the source of truth for the wire shapes. | CLI, environment sidecars, desktop |
+| `codewire.internal.v1` | `CoordinatorService`, `MeshCoordinatorService`, environment credentials, gateway binding, and Mesh authorization. | First-party runtime clients only |
 
 `libs/gateway-proto/proto/` holds the Rust-consumed daemon/gateway protocol.
 It has no independent Go module or generated Go copy. New client-facing
@@ -61,7 +59,7 @@ Rules for the vendored files:
 - They are exempt from `buf lint` (upstream predates buf's STANDARD rules)
   via the `lint.ignore` entry in `buf.yaml`; `buf breaking` still covers
   them.
-- They are excluded from codegen in `buf.gen.yaml`: canonical generated
+- They are excluded from the Codewire-package codegen templates: canonical generated
   code for `google.rpc` already ships in the Go ecosystem (for example Go's
   `google.golang.org/genproto`), so generating a Go copy here would duplicate
   types. TypeScript and Python decode `ConnectError` details with checked-in

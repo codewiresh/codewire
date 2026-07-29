@@ -56,39 +56,7 @@ spec:
                 port:
                   number: 5173
 ---
-# Tailnet coordinate paths → codewire-coordinator. Separate ingress because
-# these need regex matching; nginx gives regex locations priority over the
-# /api prefix above.
-apiVersion: networking.k8s.io/v1
-kind: Ingress
-metadata:
-  name: codewire-coordinator-local
-  annotations:
-    nginx.ingress.kubernetes.io/use-regex: "true"
-    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
-    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
-spec:
-  ingressClassName: nginx
-  rules:
-    - http:
-        paths:
-          - path: /api/v1/organizations/[^/]+/environments/[^/]+/coordinate
-            pathType: ImplementationSpecific
-            backend:
-              service:
-                name: codewire-coordinator
-                port:
-                  name: http
-          - path: /api/v1/internal/gateway/coordinate
-            pathType: ImplementationSpecific
-            backend:
-              service:
-                name: codewire-coordinator
-                port:
-                  name: http
----
-# Native coordinator Connect bidi stream. Keep this separate from the
-# WebSocket Ingress above because backend-protocol applies to the whole object.
+# Native coordinator generated bidi stream.
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
@@ -105,11 +73,36 @@ spec:
   rules:
     - http:
         paths:
-          - path: /coordinator\.v1\.CoordinatorService/
+          - path: /codewire\.internal\.v1\.CoordinatorService/
             pathType: ImplementationSpecific
             backend:
               service:
                 name: codewire-coordinator
+                port:
+                  name: http
+---
+# Native Mesh coordinator generated bidi stream.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: codewire-mesh-coordinator-grpc-local
+  annotations:
+    nginx.ingress.kubernetes.io/use-regex: "true"
+    nginx.ingress.kubernetes.io/backend-protocol: "GRPC"
+    nginx.ingress.kubernetes.io/proxy-request-buffering: "off"
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+spec:
+  ingressClassName: nginx
+  rules:
+    - http:
+        paths:
+          - path: /codewire\.internal\.v1\.MeshCoordinatorService/
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: codewire-mesh
                 port:
                   name: http
 ---

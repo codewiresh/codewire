@@ -99,7 +99,6 @@ connect_edge_probes() { record connect-edge; }
 internal_connect_listener_probes() { record internal-connect; }
 mesh_product_connect_ownership_smoke() { record mesh-product-connect-ownership; }
 coordinator_ingress_smoke() { record coordinator; }
-gateway_selector_smoke() { record gateway-selector; }
 billing_contract_through_ingress() { record billing; }
 deploy_agent_sandbox_and_smoke() { record sandbox-temporal; }
 rust_reconciler_ttl_e2e() { record ttl; }
@@ -120,7 +119,6 @@ connect-edge
 internal-connect
 mesh-product-connect-ownership
 coordinator
-gateway-selector
 billing
 sandbox-temporal
 ttl

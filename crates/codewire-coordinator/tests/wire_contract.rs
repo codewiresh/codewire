@@ -4,14 +4,15 @@
 //! starts `codewire-coordinator`, and runs this test against its TCP listener.
 //! Hermetic unit tests retain the protocol-policy and mixed-transport matrix;
 //! this suite owns the deployed health, raw-WebSocket guards, production
-//! credential dispatch, canonical Connect errors, and peer round trip.
+//! deleted-route guards, production credential dispatch, canonical Connect
+//! errors, and peer round trip.
 
 use std::time::Duration;
 
 use base64::Engine as _;
-use codewire_proto::coordinator::v1::{
-    CoordinateRequest, CoordinateResponse, CoordinatorServiceClient, Hello, Node,
-    coordinate_request, coordinate_response,
+use codewire_proto::codewire::internal::v1::{
+    CoordinateHello as Hello, CoordinateNode as Node, CoordinateRequest, CoordinateResponse,
+    CoordinatorServiceClient, coordinate_request, coordinate_response,
 };
 use connectrpc::client::{ClientConfig, HttpClient};
 use connectrpc::{ConnectError, ErrorCode};
@@ -79,35 +80,15 @@ impl Harness {
             assert_eq!(response.status(), StatusCode::OK, "GET {path}");
         }
 
-        let client_path = format!(
-            "/api/v1/organizations/00000000-0000-0000-0000-000000000000/environments/{RUNNING_ENV_ID}/coordinate"
-        );
-        self.assert_raw_status(&client_path, None, StatusCode::UNAUTHORIZED)
-            .await;
-        self.assert_raw_status(
-            "/api/v1/internal/gateway/coordinate",
-            None,
-            StatusCode::BAD_REQUEST,
-        )
-        .await;
-        self.assert_raw_status(
-            "/api/v1/internal/gateway/coordinate?sidecar_id=not-a-uuid",
-            None,
-            StatusCode::BAD_REQUEST,
-        )
-        .await;
-        self.assert_raw_status(
-            &format!("/api/v1/internal/gateway/coordinate?sidecar_id={RUNNING_ENV_ID}"),
-            None,
-            StatusCode::UNAUTHORIZED,
-        )
-        .await;
-        self.assert_raw_status(
-            &format!("/api/v1/internal/gateway/coordinate?sidecar_id={RUNNING_ENV_ID}"),
-            Some("not-a-real-token"),
-            StatusCode::UNAUTHORIZED,
-        )
-        .await;
+        for path in [
+            format!(
+                "/api/v1/organizations/00000000-0000-0000-0000-000000000000/environments/{RUNNING_ENV_ID}/coordinate"
+            ),
+            "/api/v1/internal/gateway/coordinate".into(),
+        ] {
+            self.assert_raw_status(&path, None, StatusCode::NOT_FOUND)
+                .await;
+        }
     }
 
     async fn assert_raw_status(&self, path: &str, bearer: Option<&str>, expected: StatusCode) {
@@ -120,14 +101,6 @@ impl Harness {
             .await
             .unwrap_or_else(|error| panic!("GET {path}: {error}"));
         assert_eq!(response.status(), expected, "GET {path}");
-        if expected.is_client_error() && expected != StatusCode::UNAUTHORIZED {
-            let body: serde_json::Value = response.json().await.expect("JSON error envelope");
-            assert!(
-                body["error"]
-                    .as_str()
-                    .is_some_and(|value| !value.is_empty())
-            );
-        }
     }
 
     async fn assert_rejection_codes(&self) {
@@ -315,7 +288,7 @@ fn request(message: impl Into<coordinate_request::Msg>) -> CoordinateRequest {
 fn sample_node(key_byte: u8, disco_byte: u8) -> Node {
     let mut node = Node {
         id: Uuid::new_v4().to_string(),
-        as_of: "2026-07-12T12:00:00Z".into(),
+        as_of: Some(buffa_types::Timestamp::from_unix_secs(1_752_321_600)).into(),
         key: format!("nodekey:{}", format!("{key_byte:02x}").repeat(32)),
         disco_key: format!("discokey:{}", format!("{disco_byte:02x}").repeat(32)),
         preferred_derp: 1,
@@ -343,7 +316,7 @@ fn sidecar_token(secret: &str, environment_id: &str, scope: &str) -> String {
 type CoordinateStream = connectrpc::client::BidiStream<
     <HttpClient as connectrpc::client::ClientTransport>::ResponseBody,
     CoordinateRequest,
-    codewire_proto::coordinator::v1::CoordinateResponseView<'static>,
+    codewire_proto::codewire::internal::v1::CoordinateResponseView<'static>,
 >;
 
 async fn next_message(stream: &mut CoordinateStream) -> Result<CoordinateResponse, ConnectError> {

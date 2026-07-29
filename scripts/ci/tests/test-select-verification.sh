@@ -656,6 +656,7 @@ grep -qF -- '--exact --ignored --nocapture' "$go_support_runner"
 for retired_path in \
     apps/api \
     autoagent \
+    libs/gen-go/coordinator \
     libs/gatewayauth \
     libs/gateway-proto/gen \
     tests/contract/coordinator \
@@ -668,7 +669,6 @@ for retired_path in \
 done
 if rg -n 'apps/api/gen' \
     "$ROOT/Makefile" \
-    "$ROOT/proto/buf.gen.yaml" \
     "$ROOT/proto/buf.gen.codewire.yaml" \
     "$ROOT/proto/buf.gen.google-rpc-ts.yaml" \
     "$ROOT/proto/buf.gen.google-rpc-python.yaml" \
@@ -683,8 +683,8 @@ if rg -n 'prepare_go_workspace|agent-sandbox|AGENT_SANDBOX' \
   echo 'automatic verification still constructs the former external Go workspace' >&2
   exit 1
 fi
-grep -qF 'github.com/codewiresh/codewire/libs/gen-go/coordinator/v1' \
-  "$ROOT/libs/gen-go/coordinator/v1/coordinatorv1connect/coordinator.connect.go"
+grep -qF 'CoordinatorServiceName = "codewire.internal.v1.CoordinatorService"' \
+  "$ROOT/libs/gen-go/codewire/internal/v1/internalv1connect/coordinate.connect.go"
 if grep -qF 'replace github.com/codewiresh/codewire =>' \
     "$ROOT/tests/contract/go.mod"; then
   echo 'contract module still resolves through the retired apps/api module' >&2

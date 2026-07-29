@@ -210,7 +210,7 @@ run_database() {
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
     cargo test -p codewire-mesh --lib 'store::migration_tests::' \
       -- --ignored --nocapture | tee "$logfile"
-  assert_passed_count "Mesh migration ledger" "$logfile" 8
+  assert_passed_count "Mesh migration ledger" "$logfile" 9
 
 }
 
@@ -381,7 +381,7 @@ run_coordinator() {
     -f "$ROOT/tests/fixtures/coordinator/seed.sql"
   start_proc coordinator "$COORDINATOR_PORT" env \
     DATABASE_URL="$DATABASE_URL_RUST" SESSION_SECRET="$SESSION_SECRET" \
-    COORDINATOR_PORT="$COORDINATOR_PORT" COORDINATOR_SERVE_CONNECT=1 \
+    COORDINATOR_PORT="$COORDINATOR_PORT" \
     CODEWIRE_API_URL="http://127.0.0.1:${COORDINATOR_PORT}" NATS_URL= \
     ENVIRONMENT=local "$CARGO_CI_DIR/codewire-coordinator"
   wait_http coordinator-ready "http://127.0.0.1:${COORDINATOR_PORT}/readyz" \
@@ -729,11 +729,11 @@ run_nats() {
     --lib coordination_plane_round_trips_nats_and_kv -- --ignored --nocapture \
     | tee "$logfile"
   assert_passed_count "coordinator NATS/KV smoke" "$logfile" 1
-  logfile="$RUN_DIR/coordinator-mixed-transport.log"
+  logfile="$RUN_DIR/coordinator-generated-cross-replica.log"
   NATS_URL="$NATS_URL" cargo test --profile ci -p codewire-coordinator \
-    --lib mixed_transport_cross_replica_fanout_round_trips_over_nats \
+    --lib generated_protocol_cross_replica_fanout_round_trips_over_nats \
     -- --ignored --nocapture | tee "$logfile"
-  assert_passed_count "coordinator mixed-transport smoke" "$logfile" 1
+  assert_passed_count "coordinator generated cross-replica smoke" "$logfile" 1
 }
 
 run_services() {

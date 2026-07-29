@@ -3,10 +3,10 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, anyhow};
-use codewire_client::CodewireClient;
+use codewire_client::{
+    CodewireClient, CoordinatorHandlers, CoordinatorPeerSession, PrimaryCoordinateIdentity,
+};
 use codewire_tailnet::conn::{Conn, Options as ConnOptions, PeerPath, PeerTransport};
-use codewire_tailnet::coordinator::{CoordinatorClient, Handlers};
-use codewire_tailnet::coordinator_connect::{CoordinatorConnectClient, HelloIdentity};
 use codewire_tailnet::derp_transport::{DerpTarget, DerpTransport, connect_derp_transport};
 use codewire_tailnet::direct_udp;
 use codewire_tailnet::disco::DiscoPrivate;
@@ -14,7 +14,7 @@ use codewire_tailnet::node::{Node, NodePublic, prefix_from_uuid};
 use codewire_tailnet::wg::{PublicKey, StaticSecret};
 use futures_util::{SinkExt, StreamExt};
 use rand::rngs::OsRng;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::Value;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::net::lookup_host;
@@ -50,30 +50,6 @@ impl SshTransportMode {
             "websocket" | "ws" => Ok(Self::WebSocket),
             value => anyhow::bail!(
                 "invalid CW_SSH_TRANSPORT {value:?} (expected auto, tailnet, or websocket)"
-            ),
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CoordinateTransportMode {
-    Ws,
-    Connect,
-    Auto,
-}
-
-impl CoordinateTransportMode {
-    pub fn from_env() -> anyhow::Result<Self> {
-        let value = std::env::var_os("CW_COORDINATE_TRANSPORT").unwrap_or_default();
-        let value = value
-            .to_str()
-            .ok_or_else(|| anyhow!("CW_COORDINATE_TRANSPORT must be valid UTF-8"))?;
-        match value {
-            "" | "auto" => Ok(Self::Auto),
-            "ws" => Ok(Self::Ws),
-            "connect" => Ok(Self::Connect),
-            value => anyhow::bail!(
-                "invalid CW_COORDINATE_TRANSPORT {value:?} (expected ws, connect, or auto)"
             ),
         }
     }
@@ -183,22 +159,11 @@ async fn connect_tailnet_session(
 ) -> anyhow::Result<TailnetSession> {
     let environment_uuid = Uuid::parse_str(environment_id)
         .with_context(|| format!("parse environment ID {environment_id:?}"))?;
-    let coordinate_transport = CoordinateTransportMode::from_env()?;
-    let websocket_coordinator_url = coordinator_url(client.server_url(), org_id, environment_id)?;
-    let connect_coordinator_url = client.server_url().as_str().to_owned();
-    let hello = HelloIdentity::client(org_id, environment_uuid);
-    let token = client.bearer_token().await?;
+    let identity = PrimaryCoordinateIdentity::client(org_id, environment_uuid);
 
-    let derp_map = fetch_initial_derp_map(
-        coordinate_transport,
-        &websocket_coordinator_url,
-        &connect_coordinator_url,
-        token.expose_secret(),
-        hello.clone(),
-        peer_timeout,
-    )
-    .await
-    .context("fetch coordinator DERP map")?;
+    let derp_map = fetch_initial_derp_map(client, identity.clone(), peer_timeout)
+        .await
+        .context("fetch coordinator DERP map")?;
     let derp_target = derp_target_from_map(derp_map.as_ref())
         .unwrap_or_else(|| derp_target_from_platform_url(client.server_url()));
     let stun_servers = if force_derp {
@@ -246,20 +211,10 @@ async fn connect_tailnet_session(
 
     let target_peer = Arc::new(Mutex::new(None::<Node>));
     let target_notify = Arc::new(Notify::new());
-    // Complete only transport/stream setup before spawning. This is the
-    // auto-fallback boundary: once a stream is established, a disconnect ends
-    // this coordinator task just as it did on the WebSocket-only path and does
-    // not demote a future session away from Connect.
-    let coordinator = select_coordinator_client(
-        coordinate_transport,
-        &websocket_coordinator_url,
-        &connect_coordinator_url,
-        token.expose_secret(),
-        hello,
-        peer_timeout,
-    )
-    .await
-    .context("set up coordinator session")?;
+    let coordinator = client
+        .connect_primary_coordinator_with_setup_timeout(identity, peer_timeout)
+        .await
+        .context("set up typed coordinator session")?;
     let coordinator_task = spawn_coordinator_task(
         conn.clone(),
         coordinator,
@@ -304,7 +259,7 @@ fn tailnet_direct_udp_options(
 
 fn spawn_coordinator_task(
     conn: Arc<Conn>,
-    coordinator: SelectedCoordinatorClient,
+    mut coordinator: CoordinatorPeerSession,
     environment_uuid: Uuid,
     target_peer: Arc<Mutex<Option<Node>>>,
     target_notify: Arc<Notify>,
@@ -317,7 +272,7 @@ fn spawn_coordinator_task(
         });
 
         let update_conn = conn.clone();
-        let handlers = Handlers {
+        let handlers = CoordinatorHandlers {
             on_peers: move |nodes: &[Node]| {
                 let nodes = maybe_suppress_peer_direct_udp(nodes, suppress_peer_direct_udp);
                 let _ = update_conn.update_peers(&nodes);
@@ -328,89 +283,9 @@ fn spawn_coordinator_task(
             },
             on_derp_map: |_| {},
         };
-        match coordinator {
-            SelectedCoordinatorClient::WebSocket(mut client) => {
-                let _ = client.run_with_node_updates(node_rx, handlers).await;
-            }
-            SelectedCoordinatorClient::Connect(mut client) => {
-                let _ = client.run_with_node_updates(node_rx, handlers).await;
-            }
-        }
+        let _ = coordinator.run_with_node_updates(node_rx, handlers).await;
         conn.clear_node_callback();
     })
-}
-
-enum SelectedSetup<C, W> {
-    Connect(C),
-    WebSocket(W),
-}
-
-enum SelectedCoordinatorClient {
-    Connect(Box<CoordinatorConnectClient>),
-    WebSocket(Box<CoordinatorClient>),
-}
-
-async fn select_coordinate_setup<C, W, CF, WF, CFut, WFut>(
-    mode: CoordinateTransportMode,
-    connect: CF,
-    websocket: WF,
-) -> anyhow::Result<SelectedSetup<C, W>>
-where
-    CF: FnOnce() -> CFut,
-    WF: FnOnce() -> WFut,
-    CFut: std::future::Future<Output = anyhow::Result<C>>,
-    WFut: std::future::Future<Output = anyhow::Result<W>>,
-{
-    match mode {
-        CoordinateTransportMode::Ws => websocket().await.map(SelectedSetup::WebSocket),
-        CoordinateTransportMode::Connect => connect().await.map(SelectedSetup::Connect),
-        CoordinateTransportMode::Auto => match connect().await {
-            Ok(client) => Ok(SelectedSetup::Connect(client)),
-            Err(err) => {
-                if std::env::var_os("CW_DEBUG_TAILNET").is_some() {
-                    eprintln!(
-                        "cw tailnet: native gRPC coordinator setup failed, falling back to WebSocket: {err:#}"
-                    );
-                }
-                websocket().await.map(SelectedSetup::WebSocket)
-            }
-        },
-    }
-}
-
-async fn select_coordinator_client(
-    mode: CoordinateTransportMode,
-    websocket_url: &str,
-    connect_url: &str,
-    token: &str,
-    hello: HelloIdentity,
-    timeout: Duration,
-) -> anyhow::Result<SelectedCoordinatorClient> {
-    match select_coordinate_setup(
-        mode,
-        || async {
-            CoordinatorConnectClient::connect_public_edge_grpc_with_setup_timeout(
-                connect_url,
-                token,
-                hello,
-                timeout,
-            )
-            .await
-            .context("set up native gRPC coordinator")
-        },
-        || async {
-            CoordinatorClient::connect_with_setup_timeout(websocket_url, token, timeout)
-                .await
-                .context("set up WebSocket coordinator")
-        },
-    )
-    .await?
-    {
-        SelectedSetup::Connect(client) => Ok(SelectedCoordinatorClient::Connect(Box::new(client))),
-        SelectedSetup::WebSocket(client) => {
-            Ok(SelectedCoordinatorClient::WebSocket(Box::new(client)))
-        }
-    }
 }
 
 fn maybe_suppress_peer_direct_udp(nodes: &[Node], suppress: bool) -> Vec<Node> {
@@ -989,14 +864,6 @@ fn ssh_identification_prefix_len(bytes: &[u8]) -> Option<usize> {
         .map(|idx| idx + 1)
 }
 
-#[derive(Deserialize)]
-struct CoordinateResponse {
-    #[serde(rename = "type")]
-    typ: String,
-    #[serde(default)]
-    derp_map: Option<Value>,
-}
-
 fn derp_target_from_platform_url(url: &Url) -> DerpTarget {
     let host = url.host_str().unwrap_or("localhost").to_string();
     let port = url.port().unwrap_or(match url.scheme() {
@@ -1017,92 +884,19 @@ fn derp_target_from_platform_url(url: &Url) -> DerpTarget {
 }
 
 async fn fetch_initial_derp_map(
-    mode: CoordinateTransportMode,
-    websocket_url: &str,
-    connect_url: &str,
-    token: &str,
-    hello: HelloIdentity,
-    timeout: Duration,
-) -> anyhow::Result<Option<Value>> {
-    match select_coordinate_setup(
-        mode,
-        || fetch_initial_derp_map_connect(connect_url, token, hello, timeout),
-        || fetch_initial_derp_map_websocket(websocket_url, token, timeout),
-    )
-    .await?
-    {
-        SelectedSetup::Connect(map) | SelectedSetup::WebSocket(map) => Ok(map),
-    }
-}
-
-async fn fetch_initial_derp_map_websocket(
-    coordinator_url: &str,
-    token: &str,
+    client: &CodewireClient,
+    identity: PrimaryCoordinateIdentity,
     timeout: Duration,
 ) -> anyhow::Result<Option<Value>> {
     let deadline = tokio::time::Instant::now() + timeout;
-    let mut request = coordinator_url
-        .into_client_request()
-        .map_err(|err| anyhow!("invalid coordinator WebSocket request: {err}"))?;
-    let headers = request.headers_mut();
-    headers.insert(
-        "Sec-WebSocket-Protocol",
-        HeaderValue::from_static("coordinate"),
-    );
-    headers.insert(
-        "Authorization",
-        HeaderValue::from_str(&format!("Bearer {token}")).context("build authorization header")?,
-    );
-
-    let (mut ws, _) = tokio::time::timeout_at(deadline, tokio_tungstenite::connect_async(request))
+    let mut coordinator = client
+        .connect_primary_coordinator_with_setup_timeout(identity, timeout)
         .await
-        .with_context(|| format!("coordinator connect timed out after {}", humantime(timeout)))?
-        .context("connect coordinator")?;
-
-    for _ in 0..8 {
-        let frame = tokio::time::timeout_at(deadline, ws.next())
-            .await
-            .with_context(|| format!("DERP map wait timed out after {}", humantime(timeout)))?;
-        let Some(frame) = frame else {
-            return Ok(None);
-        };
-        let frame = frame.context("read coordinator frame")?;
-        let payload = match frame {
-            Message::Text(text) => text.to_string(),
-            Message::Binary(bytes) => String::from_utf8(bytes.to_vec()).unwrap_or_default(),
-            Message::Close(_) => return Ok(None),
-            Message::Ping(_) | Message::Pong(_) | Message::Frame(_) => continue,
-        };
-        let Ok(response) = serde_json::from_str::<CoordinateResponse>(&payload) else {
-            continue;
-        };
-        if response.typ == "derp_map" {
-            let _ = ws.close(None).await;
-            return Ok(response.derp_map);
-        }
-    }
-    Ok(None)
-}
-
-async fn fetch_initial_derp_map_connect(
-    coordinator_url: &str,
-    token: &str,
-    hello: HelloIdentity,
-    timeout: Duration,
-) -> anyhow::Result<Option<Value>> {
-    let deadline = tokio::time::Instant::now() + timeout;
-    let mut coordinator = CoordinatorConnectClient::connect_public_edge_grpc_with_setup_timeout(
-        coordinator_url,
-        token,
-        hello,
-        timeout,
-    )
-    .await
-    .context("connect coordinator over native gRPC")?;
+        .context("connect typed coordinator")?;
 
     let (derp_map_tx, derp_map_rx) = tokio::sync::oneshot::channel();
     let mut derp_map_tx = Some(derp_map_tx);
-    let run = coordinator.run(Handlers {
+    let run = coordinator.run(CoordinatorHandlers {
         on_peers: |_| {},
         on_derp_map: move |map: &Value| {
             if let Some(tx) = derp_map_tx.take() {
@@ -1115,10 +909,10 @@ async fn fetch_initial_derp_map_connect(
     let map = tokio::time::timeout_at(deadline, async {
         tokio::select! {
             result = &mut run => {
-                result.context("read initial native gRPC coordinator stream")?;
-                anyhow::bail!("native gRPC coordinator stream closed before DERP map")
+                result.context("read initial typed coordinator stream")?;
+                anyhow::bail!("typed coordinator stream closed before DERP map")
             }
-            result = derp_map_rx => result.context("native gRPC coordinator stream closed before DERP map"),
+            result = derp_map_rx => result.context("typed coordinator stream closed before DERP map"),
         }
     })
     .await
@@ -1235,13 +1029,6 @@ async fn resolve_stun_servers(servers: Vec<StunServer>) -> anyhow::Result<Vec<So
     Ok(resolved)
 }
 
-fn coordinator_url(server_url: &Url, org_id: &str, environment_id: &str) -> anyhow::Result<String> {
-    websocket_path_url(
-        server_url,
-        &format!("api/v1/organizations/{org_id}/environments/{environment_id}/coordinate"),
-    )
-}
-
 fn ssh_proxy_url(server_url: &Url, org_id: &str, environment_id: &str) -> anyhow::Result<String> {
     websocket_path_url(
         server_url,
@@ -1317,41 +1104,10 @@ pub(crate) fn humantime(duration: Duration) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
-    use std::sync::Mutex;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-    // Environment variables are process-global. Keep the selector test from
-    // racing any future tests that exercise the same variable.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
-
-    async fn accept_http2_settings(socket: &mut tokio::net::TcpStream) {
-        let mut preface = [0_u8; 24];
-        socket.read_exact(&mut preface).await.unwrap();
-        assert_eq!(&preface, b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n");
-
-        let mut header = [0_u8; 9];
-        socket.read_exact(&mut header).await.unwrap();
-        let payload_len =
-            usize::from(header[0]) << 16 | usize::from(header[1]) << 8 | usize::from(header[2]);
-        assert_eq!(header[3], 4, "first client frame must be SETTINGS");
-        let mut payload = vec![0_u8; payload_len];
-        socket.read_exact(&mut payload).await.unwrap();
-        socket
-            .write_all(&[
-                0, 0, 0, 4, 0, 0, 0, 0, 0, // server SETTINGS
-                0, 0, 0, 4, 1, 0, 0, 0, 0, // ACK client SETTINGS
-            ])
-            .await
-            .unwrap();
-    }
 
     #[test]
-    fn websocket_urls_preserve_platform_base_path() {
+    fn ssh_proxy_websocket_url_preserves_platform_base_path() {
         let base = Url::parse("https://codewire.test/base").unwrap();
-        assert_eq!(
-            coordinator_url(&base, "org_123", "env_456").unwrap(),
-            "wss://codewire.test/base/api/v1/organizations/org_123/environments/env_456/coordinate"
-        );
         assert_eq!(
             ssh_proxy_url(&base, "org_123", "env_456").unwrap(),
             "wss://codewire.test/base/api/v1/organizations/org_123/environments/env_456/ssh-proxy"
@@ -1439,232 +1195,6 @@ mod tests {
         unsafe {
             std::env::remove_var("CW_SSH_TRANSPORT");
         }
-    }
-
-    #[test]
-    fn coordinate_transport_mode_accepts_only_exact_values_and_defaults_to_auto() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
-        unsafe {
-            std::env::remove_var("CW_COORDINATE_TRANSPORT");
-        }
-        assert_eq!(
-            CoordinateTransportMode::from_env().unwrap(),
-            CoordinateTransportMode::Auto
-        );
-
-        for (value, expected) in [
-            ("ws", CoordinateTransportMode::Ws),
-            ("connect", CoordinateTransportMode::Connect),
-            ("auto", CoordinateTransportMode::Auto),
-        ] {
-            unsafe {
-                std::env::set_var("CW_COORDINATE_TRANSPORT", value);
-            }
-            assert_eq!(CoordinateTransportMode::from_env().unwrap(), expected);
-        }
-
-        for value in ["WS", "websocket", " connect", "tailnet"] {
-            unsafe {
-                std::env::set_var("CW_COORDINATE_TRANSPORT", value);
-            }
-            assert!(CoordinateTransportMode::from_env().is_err(), "{value:?}");
-        }
-        unsafe {
-            std::env::remove_var("CW_COORDINATE_TRANSPORT");
-        }
-    }
-
-    #[tokio::test]
-    async fn coordinate_auto_prefers_native_grpc_and_falls_back_only_on_setup_failure() {
-        let selected = select_coordinate_setup(
-            CoordinateTransportMode::Auto,
-            || async { Ok::<_, anyhow::Error>("grpc") },
-            || async { Err::<&str, _>(anyhow!("WebSocket must not run")) },
-        )
-        .await
-        .unwrap();
-        assert!(matches!(selected, SelectedSetup::Connect("grpc")));
-
-        let selected = select_coordinate_setup(
-            CoordinateTransportMode::Auto,
-            || async { Err::<&str, _>(anyhow!("native gRPC setup failed")) },
-            || async { Ok::<_, anyhow::Error>("ws") },
-        )
-        .await
-        .unwrap();
-        assert!(matches!(selected, SelectedSetup::WebSocket("ws")));
-    }
-
-    #[tokio::test]
-    async fn coordinate_forced_modes_do_not_cross_fallback_boundary() {
-        let selected = select_coordinate_setup(
-            CoordinateTransportMode::Connect,
-            || async { Ok::<_, anyhow::Error>("grpc") },
-            || async { Err::<&str, _>(anyhow!("WebSocket must not run")) },
-        )
-        .await
-        .unwrap();
-        assert!(matches!(selected, SelectedSetup::Connect("grpc")));
-
-        let selected = select_coordinate_setup(
-            CoordinateTransportMode::Ws,
-            || async { Err::<&str, _>(anyhow!("Connect must not run")) },
-            || async { Ok::<_, anyhow::Error>("ws") },
-        )
-        .await
-        .unwrap();
-        assert!(matches!(selected, SelectedSetup::WebSocket("ws")));
-    }
-
-    #[tokio::test]
-    #[allow(clippy::result_large_err)] // tokio-tungstenite's handshake callback error type.
-    async fn coordinate_auto_falls_back_before_derp_map_when_native_grpc_is_unavailable() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let fixture = tokio::spawn(async move {
-            // Simulate a disabled native gRPC route at the protocol boundary:
-            // the h2c client reaches the local server, but setup is rejected
-            // before any response message (and therefore before a DERP map).
-            let (mut connect_socket, _) = listener.accept().await.unwrap();
-            let mut h2_preface = [0_u8; 24];
-            connect_socket.read_exact(&mut h2_preface).await.unwrap();
-            assert_eq!(&h2_preface, b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n");
-            drop(connect_socket);
-
-            let (websocket_socket, _) = listener.accept().await.unwrap();
-            let mut websocket = tokio_tungstenite::accept_hdr_async(
-                websocket_socket,
-                |_: &tokio_tungstenite::tungstenite::handshake::server::Request,
-                 mut response: tokio_tungstenite::tungstenite::handshake::server::Response| {
-                    response.headers_mut().insert(
-                        "Sec-WebSocket-Protocol",
-                        HeaderValue::from_static("coordinate"),
-                    );
-                    Ok(response)
-                },
-            )
-            .await
-            .unwrap();
-            websocket
-                .send(Message::Text(
-                    serde_json::to_string(&json!({
-                        "type": "derp_map",
-                        "derp_map": {"Regions": {}}
-                    }))
-                    .unwrap()
-                    .into(),
-                ))
-                .await
-                .unwrap();
-        });
-
-        let map = fetch_initial_derp_map(
-            CoordinateTransportMode::Auto,
-            &format!("ws://{addr}/api/v1/coordinate"),
-            &format!("http://{addr}"),
-            "test-token",
-            HelloIdentity::client("org-test", Uuid::new_v4()),
-            Duration::from_secs(2),
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(map, Some(json!({"Regions": {}})));
-        fixture.await.unwrap();
-    }
-
-    #[tokio::test]
-    #[allow(clippy::result_large_err)] // tokio-tungstenite's handshake callback error type.
-    async fn coordinate_auto_falls_back_when_http2_accepts_then_stalls() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let fixture = tokio::spawn(async move {
-            let (mut connect_socket, _) = listener.accept().await.unwrap();
-            accept_http2_settings(&mut connect_socket).await;
-
-            let (websocket_socket, _) = listener.accept().await.unwrap();
-            let mut websocket = tokio_tungstenite::accept_hdr_async(
-                websocket_socket,
-                |_: &tokio_tungstenite::tungstenite::handshake::server::Request,
-                 mut response: tokio_tungstenite::tungstenite::handshake::server::Response| {
-                    response.headers_mut().insert(
-                        "Sec-WebSocket-Protocol",
-                        HeaderValue::from_static("coordinate"),
-                    );
-                    Ok(response)
-                },
-            )
-            .await
-            .unwrap();
-            websocket
-                .send(Message::Text(
-                    serde_json::to_string(&json!({
-                        "type": "derp_map",
-                        "derp_map": {"Regions": {}}
-                    }))
-                    .unwrap()
-                    .into(),
-                ))
-                .await
-                .unwrap();
-        });
-
-        let map = fetch_initial_derp_map(
-            CoordinateTransportMode::Auto,
-            &format!("ws://{addr}/api/v1/coordinate"),
-            &format!("http://{addr}"),
-            "test-token",
-            HelloIdentity::client("org-test", Uuid::new_v4()),
-            Duration::from_millis(100),
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(map, Some(json!({"Regions": {}})));
-        fixture.await.unwrap();
-    }
-
-    #[tokio::test]
-    #[allow(clippy::result_large_err)] // tokio-tungstenite's handshake callback error type.
-    async fn coordinate_auto_fails_finitely_when_connect_and_websocket_setup_stall() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let fixture = tokio::spawn(async move {
-            let (mut connect_socket, _) = listener.accept().await.unwrap();
-            accept_http2_settings(&mut connect_socket).await;
-
-            let (websocket_socket, _) = listener.accept().await.unwrap();
-            let _websocket = tokio_tungstenite::accept_hdr_async(
-                websocket_socket,
-                |_: &tokio_tungstenite::tungstenite::handshake::server::Request,
-                 mut response: tokio_tungstenite::tungstenite::handshake::server::Response| {
-                    response.headers_mut().insert(
-                        "Sec-WebSocket-Protocol",
-                        HeaderValue::from_static("coordinate"),
-                    );
-                    Ok(response)
-                },
-            )
-            .await
-            .unwrap();
-            std::future::pending::<()>().await;
-        });
-
-        let result = tokio::time::timeout(
-            Duration::from_secs(1),
-            fetch_initial_derp_map(
-                CoordinateTransportMode::Auto,
-                &format!("ws://{addr}/api/v1/coordinate"),
-                &format!("http://{addr}"),
-                "test-token",
-                HelloIdentity::client("org-test", Uuid::new_v4()),
-                Duration::from_millis(100),
-            ),
-        )
-        .await
-        .expect("both stalled transports must fail finitely");
-        assert!(result.is_err());
-        fixture.abort();
     }
 
     #[test]

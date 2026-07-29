@@ -428,8 +428,7 @@ build_images_and_smokes() {
     cd "$ROOT"
     cargo build --profile ci -p codewire-orchestration --bin crd-smoke --bin environment-setup-smoke --bin exec-smoke --bin exec-stream-smoke --bin file-service-smoke --bin prepare-stream-smoke --bin log-stream-smoke --bin temporal-smoke --bin temporal-fencing-smoke --bin reconciler-ttl-smoke --bin sidecar-smoke --features kind-e2e
     cargo build --profile ci -p codewire-client --example platform-run-smoke --example environment-session-smoke
-    cargo build --profile ci -p codewire-tailnet --example coordinator-ingress-smoke --features kind-e2e
-    cargo build --profile ci -p codewire-gateway --bin coordinator-selector-smoke --features kind-e2e
+    cargo build --profile ci -p codewire-client --example coordinator-ingress-smoke --features kind-e2e
   )
 }
 
@@ -718,20 +717,26 @@ mesh_product_connect_ownership_smoke() {
     exit 1
   fi
 
-  for retired_path in \
-    /api/v1/node-enrollments/redeem \
-    /api/v1/network-auth/runtime/node; do
-    curl_settled -X POST \
+  while read -r retired_method retired_path; do
+    curl_settled -X "$retired_method" \
       -H 'content-type: application/json' \
       -d '{}' \
       "${KIND_INGRESS_URL}${retired_path}"
     if [ "$PROBE_CODE" != "404" ]; then
-      echo "::error::retired Mesh bearer route ${retired_path} returned ${PROBE_CODE}, want 404"
+      echo "::error::retired Mesh coordinate/auth route ${retired_path} returned ${PROBE_CODE}, want 404"
       exit 1
     fi
-  done
+  done <<'EOF'
+POST /api/v1/node-enrollments/redeem
+POST /api/v1/network-auth/runtime/node
+GET /api/v1/network-auth/bundle
+POST /api/v1/network-auth/delegation/node
+POST /api/v1/network-auth/runtime/client
+GET /api/v1/tailnet/coordinate
+EOF
 
   local node_registration token_rows token_index dormant_token_columns migration_004
+  local migration_005 network_auth_rows
   node_registration="$(kubectl -n "$NS" exec deploy/postgres -- \
     psql -U codewire -d codewire_mesh -tA -F '|' -c \
       "SELECT network_id, name, owner_subject, authorized_by, enrollment_id, peer_url, token FROM nodes WHERE network_id = '${network_id}' AND name = 'mesh-kind-node'")"
@@ -747,12 +752,20 @@ mesh_product_connect_ownership_smoke() {
   migration_004="$(kubectl -n "$NS" exec deploy/postgres -- \
     psql -U codewire -d codewire_mesh -tA -F '|' -c \
       "SELECT description, success FROM _sqlx_migrations WHERE version = 4")"
+  migration_005="$(kubectl -n "$NS" exec deploy/postgres -- \
+    psql -U codewire -d codewire_mesh -tA -F '|' -c \
+      "SELECT description, success FROM _sqlx_migrations WHERE version = 5")"
+  network_auth_rows="$(kubectl -n "$NS" exec deploy/postgres -- \
+    psql -U codewire -d codewire_mesh -tAc \
+      "SELECT count(*) FROM kv WHERE namespace = 'mesh.networkauth'")"
   if [ "$node_registration" != "${network_id}|mesh-kind-node|usr_contract_admin|usr_contract_admin|${enrollment_id}|https://mesh-kind-node.test/peer|" ] \
     || [ "$token_rows" != "0|0" ] \
     || [ "$token_index" != "0" ] \
     || [ "$dormant_token_columns" != "2" ] \
-    || [ "$migration_004" != "retire persistent node bearer|t" ]; then
-    echo "::error::Mesh bearer retirement persistence proof failed: node=${node_registration:-missing} token_rows=${token_rows:-missing} index=${token_index:-missing} columns=${dormant_token_columns:-missing} migration=${migration_004:-missing}"
+    || [ "$migration_004" != "retire persistent node bearer|t" ] \
+    || [ "$migration_005" != "retire network auth issuer|t" ] \
+    || [ "$network_auth_rows" != "0" ]; then
+    echo "::error::Mesh bearer/issuer retirement persistence proof failed: node=${node_registration:-missing} token_rows=${token_rows:-missing} index=${token_index:-missing} columns=${dormant_token_columns:-missing} migration_004=${migration_004:-missing} migration_005=${migration_005:-missing} network_auth_rows=${network_auth_rows:-missing}"
     exit 1
   fi
 
@@ -1319,16 +1332,16 @@ SQL
     fi
     sidecar_token="$(jq -er '.sidecarToken // .sidecar_token // empty' <<<"$PROBE_BODY")"
 
-    # The selector opens a real Connect Coordinate stream. Its successful
-    # setup proves the just-issued HMAC token crossed the service boundary and
-    # was accepted by the coordinator, not only parsed by the issuer.
+    # The one Rust client core opens a real generated Coordinate stream. Its
+    # successful setup proves the just-issued HMAC token crossed the service
+    # boundary and was accepted by the coordinator, not only parsed by the
+    # issuer.
     for i in $(seq 1 20); do
-      if CODEWIRE_COORDINATOR_URL="http://127.0.0.1:18092/api/v1/internal/gateway/coordinate" \
-        CODEWIRE_ENVIRONMENT_ID="$bound_environment_id" \
-        CODEWIRE_GATEWAY_TOKEN="$sidecar_token" \
-        CODEWIRE_COORDINATE_TRANSPORT=connect \
-        KIND_EXPECTED_COORDINATE_TRANSPORT=connect \
-        timeout --kill-after=5s 15s "$CARGO_CI_DIR/coordinator-selector-smoke"; then
+      if KIND_COORDINATOR_DIRECT_URL="http://127.0.0.1:18092" \
+        KIND_COORDINATOR_ENVIRONMENT="$bound_environment_id" \
+        KIND_COORDINATOR_SIDECAR_TOKEN="$sidecar_token" \
+        KIND_COORDINATOR_BINDING_PROBE=1 \
+        timeout --kill-after=5s 15s "$CARGO_CI_DIR/examples/coordinator-ingress-smoke"; then
         break
       fi
       if [ "$i" = 20 ]; then
@@ -1356,8 +1369,24 @@ SQL
 }
 
 coordinator_ingress_smoke() {
-  log "running coordinator public gRPC + direct-h2c Connect + WebSocket smoke"
+  log "running generated primary and Mesh coordinator native-gRPC/direct-h2c smoke"
   local certificate_dir certificate_pem certificate_der alpn_output
+
+  curl_settled -X GET \
+    "http://127.0.0.1:18092/api/v1/internal/gateway/coordinate"
+  if [ "$PROBE_CODE" != "404" ]; then
+    echo "::error::retired primary coordinator WebSocket returned ${PROBE_CODE}, want 404"
+    exit 1
+  fi
+  curl_settled -X POST \
+    -H 'content-type: application/connect+proto' \
+    --data-binary '' \
+    "http://127.0.0.1:18092/coordinator.v1.CoordinatorService/Coordinate"
+  if [ "$PROBE_CODE" != "404" ]; then
+    echo "::error::retired coordinator.v1 route returned ${PROBE_CODE}, want 404"
+    exit 1
+  fi
+
   certificate_dir="$(mktemp -d)"
   certificate_pem="$certificate_dir/ca.pem"
   certificate_der="$certificate_dir/ca.der"
@@ -1388,45 +1417,6 @@ coordinator_ingress_smoke() {
     KIND_COORDINATOR_CA_DER="$certificate_der" \
     "$CARGO_CI_DIR/examples/coordinator-ingress-smoke"
   rm -rf "$certificate_dir"
-}
-
-gateway_selector_smoke() {
-  log "running gateway coordinator selector smoke against the real coordinator"
-  local direct_url environment_id sidecar_token mode expected i
-  direct_url="http://127.0.0.1:18092/api/v1/internal/gateway/coordinate"
-  environment_id="00000000-0000-4000-8000-000000000501"
-  sidecar_token="eyJlbnZpcm9ubWVudF9pZCI6IjAwMDAwMDAwLTAwMDAtNDAwMC04MDAwLTAwMDAwMDAwMDUwMSIsInNjb3BlIjoiY29vcmRpbmF0ZSJ9.QgWM7yPYYatgrwWm5GpQ5COmBfEqjIInpqo-trLVS1w"
-
-  run_selector() {
-    mode="$1"
-    expected="$2"
-    for i in $(seq 1 20); do
-      if CODEWIRE_COORDINATOR_URL="$direct_url" \
-        CODEWIRE_ENVIRONMENT_ID="$environment_id" \
-        CODEWIRE_GATEWAY_TOKEN="$sidecar_token" \
-        CODEWIRE_COORDINATE_TRANSPORT="$mode" \
-        KIND_EXPECTED_COORDINATE_TRANSPORT="$expected" \
-        timeout --kill-after=5s 15s "$CARGO_CI_DIR/coordinator-selector-smoke"; then
-        return 0
-      fi
-      echo "gateway selector ${mode} probe not ready (${i}/20)"
-      sleep 2
-    done
-    echo "::error::gateway selector ${mode} probe did not select ${expected}"
-    return 1
-  }
-
-  run_selector ws ws
-  run_selector connect connect
-
-  log "disabling the coordinator Connect route for auto fallback proof"
-  kubectl -n "$NS" set env deploy/codewire-coordinator COORDINATOR_SERVE_CONNECT=false
-  kubectl -n "$NS" rollout status deploy/codewire-coordinator --timeout=300s
-  run_selector auto ws
-
-  log "restoring the coordinator Connect route after auto fallback proof"
-  kubectl -n "$NS" set env deploy/codewire-coordinator COORDINATOR_SERVE_CONNECT-
-  kubectl -n "$NS" rollout status deploy/codewire-coordinator --timeout=300s
 }
 
 exec_service_parity_smoke() {

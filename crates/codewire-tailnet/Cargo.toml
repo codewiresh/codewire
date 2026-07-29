@@ -5,17 +5,8 @@ edition = "2021"
 # BSD-3-Clause keeps the public extraction compatible with the
 # Tailscale-derived protocol vectors used by this crate's parity tests.
 license = "BSD-3-Clause"
-description = "Minimal Tailscale-style tailnet client (WireGuard data plane via boringtun + DERP relay client + coordinator client) for Codewire. Port of libs/tailnet (#59)."
+description = "Minimal Tailscale-style tailnet data plane for Codewire: WireGuard, DERP, direct UDP, and userspace networking."
 repository = "https://github.com/codewiresh/codewire"
-
-[features]
-# Test-only hooks used by the disposable KIND ingress smoke. Runtime clients
-# never enable this feature, and the example is not copied into shipped images.
-kind-e2e = []
-
-[[example]]
-name = "coordinator-ingress-smoke"
-required-features = ["kind-e2e"]
 
 [dependencies]
 # WireGuard Noise handshake + ChaCha20-Poly1305 transport. We use the
@@ -45,9 +36,9 @@ smoltcp = { version = "0.13", default-features = false, features = [
     "socket-tcp",
 ] }
 
-# Node wire types (#48) + coordinator client (#47). The Node JSON preserves
-# the original Go wire contract, so serde drives the byte-for-byte parity;
-# uuid/chrono mirror Go's uuid.UUID / time.Time.
+# Node wire types (#48). The Node JSON preserves the Tailscale-compatible
+# shape, so serde drives the byte-for-byte parity; uuid/chrono mirror Go's
+# uuid.UUID / time.Time.
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 uuid = { version = "1", features = ["serde", "v4"] }
@@ -55,22 +46,14 @@ chrono = { version = "0.4", default-features = false, features = ["serde", "std"
 thiserror = "2"
 crc32fast = { workspace = true }
 tracing = { workspace = true }
-codewire-proto = { workspace = true, features = ["client"] }
-connectrpc = { workspace = true, features = ["client"] }
-http = { workspace = true }
-hyper-util = { workspace = true }
-tower = { workspace = true }
 
 # Fresh WireGuard static-key generation in `Conn::new` (#59 capstone) when the
 # caller does not supply one — boringtun's `StaticSecret::random_from_rng`
 # needs an `RngCore + CryptoRng`. `OsRng` is the OS CSPRNG.
 rand = "0.8"
 
-# Async + WebSocket (#47 coordinator) + the netstack's sync primitives (#59).
-# `rustls-tls-webpki-roots` enables wss:// without native-tls (ring backend).
-futures-util = "0.3"
+# Async transport and netstack synchronization.
 tokio = { version = "1", features = ["net", "io-util", "rt", "macros", "time", "sync"] }
-tokio-tungstenite = { version = "0.28", default-features = false, features = ["connect", "handshake", "rustls-tls-webpki-roots"] }
 
 [dev-dependencies]
 rand = "0.8"

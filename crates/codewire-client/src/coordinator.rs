@@ -1,33 +1,48 @@
-//! Native Connect-RPC flavor of the coordinator client.
+//! Generated Connect-RPC coordinator ownership for the one Rust client core.
 //!
-//! This client mirrors [`crate::coordinator::CoordinatorClient`]'s functional
-//! surface while using the typed `coordinator.v1.CoordinatorService/Coordinate`
-//! bidi stream. It sends the required [`HelloIdentity`] first, then carries
-//! node updates, peer updates/removals, DERP-map callbacks, and typed 15-second
-//! heartbeats over one HTTP/2 stream.
+//! Both primary and Mesh callers use the audience-owned
+//! `codewire.internal.v1` services. This module owns generated stub
+//! construction, auth injection, protocol selection, TLS, and retry/setup
+//! policy; `codewire-tailnet` remains the packet and node-mechanics crate.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::io;
 use std::sync::Arc;
 use std::time::Duration;
 
-use codewire_proto::coordinator::v1::{
-    coordinate_response, CoordinateRequest, CoordinateResponse, CoordinateResponseView,
-    CoordinatorServiceClient, Hello, Ping,
+use codewire_proto::codewire::internal::v1::{
+    CoordinateHello, CoordinatePing, CoordinateRequest, CoordinateResponse, CoordinateResponseView,
+    CoordinatorServiceClient, MeshCoordinateHello, MeshCoordinateRole, MeshCoordinateSubscribe,
+    MeshCoordinatorServiceClient, MeshCoordinatorServiceCoordinateRequest,
+    MeshCoordinatorServiceCoordinateResponse, MeshCoordinatorServiceCoordinateResponseView,
+    coordinate_response, mesh_coordinator_service_coordinate_request,
+    mesh_coordinator_service_coordinate_response,
 };
+use codewire_tailnet::node::Node;
+use connectrpc::Protocol;
 use connectrpc::client::{
     BidiStream, ClientConfig, ClientTransport, Http2Connection, SharedHttp2Connection,
 };
-use connectrpc::Protocol;
 use tokio::sync::mpsc;
 use uuid::Uuid;
-
-use crate::coordinator::{Handlers, COORDINATOR_SETUP_TIMEOUT};
-use crate::node::Node;
 
 const COORDINATOR_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
 const HTTP2_KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(20);
 const HTTP2_REQUEST_BUFFER: usize = 32;
+/// Maximum transport and hello-first setup time for a coordinator stream.
+pub const COORDINATOR_SETUP_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Callbacks supplied by the tailnet data-plane owner.
+pub struct Handlers<P, D>
+where
+    P: FnMut(&[Node]),
+    D: FnMut(&serde_json::Value),
+{
+    /// Receives the complete peer snapshot after an update or removal.
+    pub on_peers: P,
+    /// Receives the opaque Tailscale DERP map.
+    pub on_derp_map: D,
+}
 
 type CoordinateStream = BidiStream<
     <SharedHttp2Connection as ClientTransport>::ResponseBody,
@@ -35,7 +50,19 @@ type CoordinateStream = BidiStream<
     CoordinateResponseView<'static>,
 >;
 
+type MeshCoordinateStream = BidiStream<
+    <SharedHttp2Connection as ClientTransport>::ResponseBody,
+    MeshCoordinatorServiceCoordinateRequest,
+    MeshCoordinatorServiceCoordinateResponseView<'static>,
+>;
+
 fn usable_setup_response(response: CoordinateResponse) -> Option<CoordinateResponse> {
+    response.msg.is_some().then_some(response)
+}
+
+fn usable_mesh_setup_response(
+    response: MeshCoordinatorServiceCoordinateResponse,
+) -> Option<MeshCoordinatorServiceCoordinateResponse> {
     response.msg.is_some().then_some(response)
 }
 
@@ -57,6 +84,9 @@ impl CoordinatorWireProtocol {
 /// Errors from the Connect coordinator client.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    /// The shared token provider could not resolve the current credential.
+    #[error("credential: {0}")]
+    Credential(#[from] crate::ClientError),
     /// Connect-RPC transport, protocol, or server error.
     #[error("connect: {0}")]
     Connect(#[from] connectrpc::ConnectError),
@@ -71,14 +101,98 @@ pub enum Error {
     SetupTimeout(Duration),
 }
 
+impl crate::CodewireClient {
+    /// Open the primary coordinator through the public native-gRPC edge.
+    pub async fn connect_primary_coordinator(
+        &self,
+        identity: PrimaryCoordinateIdentity,
+    ) -> Result<CoordinatorPeerSession, Error> {
+        self.connect_primary_coordinator_with_setup_timeout(identity, COORDINATOR_SETUP_TIMEOUT)
+            .await
+    }
+
+    /// Open the primary public edge with one explicit setup bound.
+    pub async fn connect_primary_coordinator_with_setup_timeout(
+        &self,
+        identity: PrimaryCoordinateIdentity,
+        setup_timeout: Duration,
+    ) -> Result<CoordinatorPeerSession, Error> {
+        let token = self.bearer_token().await?;
+        CoordinatorPeerSession::connect_public_edge_grpc_with_setup_timeout(
+            self.config.server_url().as_str(),
+            token.expose_secret(),
+            identity,
+            setup_timeout,
+        )
+        .await
+    }
+
+    /// Open the primary coordinator directly over cluster-local h2c Connect.
+    pub async fn connect_primary_coordinator_direct(
+        &self,
+        identity: PrimaryCoordinateIdentity,
+    ) -> Result<CoordinatorPeerSession, Error> {
+        self.connect_primary_coordinator_direct_with_setup_timeout(
+            identity,
+            COORDINATOR_SETUP_TIMEOUT,
+        )
+        .await
+    }
+
+    /// Open the primary cluster-local service with one explicit setup bound.
+    pub async fn connect_primary_coordinator_direct_with_setup_timeout(
+        &self,
+        identity: PrimaryCoordinateIdentity,
+        setup_timeout: Duration,
+    ) -> Result<CoordinatorPeerSession, Error> {
+        let token = self.bearer_token().await?;
+        CoordinatorPeerSession::connect_with_setup_timeout(
+            self.config.server_url().as_str(),
+            token.expose_secret(),
+            identity,
+            setup_timeout,
+        )
+        .await
+    }
+
+    /// Open the separately deployed Mesh coordinator using the configured
+    /// Mesh origin and the shared token provider.
+    pub async fn connect_mesh_coordinator(
+        &self,
+        identity: MeshCoordinateIdentity,
+    ) -> Result<MeshCoordinatorPeerSession, Error> {
+        self.connect_mesh_coordinator_with_setup_timeout(identity, COORDINATOR_SETUP_TIMEOUT)
+            .await
+    }
+
+    /// Open the Mesh coordinator with one explicit setup bound.
+    ///
+    /// Hosted TLS origins use native gRPC; local and cluster-local cleartext
+    /// origins use h2c Connect. The generated client owns the RPC path.
+    pub async fn connect_mesh_coordinator_with_setup_timeout(
+        &self,
+        identity: MeshCoordinateIdentity,
+        setup_timeout: Duration,
+    ) -> Result<MeshCoordinatorPeerSession, Error> {
+        let token = self.bearer_token().await?;
+        MeshCoordinatorPeerSession::connect_with_setup_timeout(
+            self.config.mesh_url().as_str(),
+            token.expose_secret(),
+            identity,
+            setup_timeout,
+        )
+        .await
+    }
+}
+
 /// The identity carried in the hello-first Connect stream contract.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct HelloIdentity {
+pub struct PrimaryCoordinateIdentity {
     org_id: Option<String>,
     environment_id: Uuid,
 }
 
-impl HelloIdentity {
+impl PrimaryCoordinateIdentity {
     /// Identify a user-facing coordinate client in one organization and
     /// environment.
     pub fn client(org_id: impl Into<String>, environment_id: Uuid) -> Self {
@@ -97,8 +211,8 @@ impl HelloIdentity {
         }
     }
 
-    fn into_hello(self) -> Hello {
-        Hello {
+    fn into_hello(self) -> CoordinateHello {
+        CoordinateHello {
             org_id: self.org_id.unwrap_or_default(),
             environment_id: self.environment_id.to_string(),
             ..Default::default()
@@ -106,8 +220,45 @@ impl HelloIdentity {
     }
 }
 
+/// The identity carried by the hello-first Mesh coordinate contract.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MeshCoordinateIdentity {
+    org_id: String,
+    network_id: String,
+    role: MeshCoordinateRole,
+}
+
+impl MeshCoordinateIdentity {
+    /// Join one Mesh network as a regular peer.
+    pub fn peer(org_id: impl Into<String>, network_id: impl Into<String>) -> Self {
+        Self {
+            org_id: org_id.into(),
+            network_id: network_id.into(),
+            role: MeshCoordinateRole::Peer,
+        }
+    }
+
+    /// Join one Mesh network as a dial-only subscriber.
+    pub fn dial(org_id: impl Into<String>, network_id: impl Into<String>) -> Self {
+        Self {
+            org_id: org_id.into(),
+            network_id: network_id.into(),
+            role: MeshCoordinateRole::Dial,
+        }
+    }
+
+    fn into_hello(self) -> MeshCoordinateHello {
+        MeshCoordinateHello {
+            org_id: self.org_id,
+            network_id: self.network_id,
+            role: self.role.into(),
+            ..Default::default()
+        }
+    }
+}
+
 /// An async client connected to the coordinator over native Connect bidi.
-pub struct CoordinatorConnectClient {
+pub struct CoordinatorPeerSession {
     stream: CoordinateStream,
     peers: BTreeMap<Uuid, Node>,
     pending_responses: VecDeque<CoordinateResponse>,
@@ -117,25 +268,24 @@ pub struct CoordinatorConnectClient {
 #[cfg(feature = "kind-e2e")]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct KindE2eHeartbeatStats {
-    /// Typed `Ping` requests sent as HTTP/2 DATA by the WI-4 client.
+    /// Typed `CoordinatePing` requests sent as HTTP/2 DATA by the WI-4 client.
     pub sent: usize,
-    /// Typed `Ping` responses received as HTTP/2 DATA from the coordinator.
+    /// Typed `CoordinatePing` responses received as HTTP/2 DATA from the coordinator.
     pub received: usize,
 }
 
-impl CoordinatorConnectClient {
+impl CoordinatorPeerSession {
     /// Dial the coordinator and start `Coordinate`, sending `identity` as the
     /// first message before returning.
     ///
-    /// `url` may be an API/coordinator origin or an existing coordinate URL;
-    /// only its scheme and authority are used because the generated client
-    /// owns the RPC path. `http://` uses prior-knowledge h2c. `https://` uses
-    /// WebPKI roots and requires HTTP/2 through TLS ALPN. Both transports send
-    /// HTTP/2 keepalive PINGs every 15 seconds, including while idle.
+    /// `url` is an API/coordinator origin. The generated client owns the RPC
+    /// path. `http://` uses prior-knowledge h2c. `https://` uses WebPKI roots
+    /// and requires HTTP/2 through TLS ALPN. Both transports send HTTP/2
+    /// keepalive PINGs every 15 seconds, including while idle.
     pub async fn connect(
         url: &str,
         bearer_token: &str,
-        identity: HelloIdentity,
+        identity: PrimaryCoordinateIdentity,
     ) -> Result<Self, Error> {
         Self::connect_with_setup_timeout(url, bearer_token, identity, COORDINATOR_SETUP_TIMEOUT)
             .await
@@ -148,7 +298,7 @@ impl CoordinatorConnectClient {
     pub async fn connect_with_setup_timeout(
         url: &str,
         bearer_token: &str,
-        identity: HelloIdentity,
+        identity: PrimaryCoordinateIdentity,
         setup_timeout: Duration,
     ) -> Result<Self, Error> {
         Self::connect_bounded(
@@ -171,7 +321,7 @@ impl CoordinatorConnectClient {
     pub async fn connect_public_edge_grpc(
         url: &str,
         bearer_token: &str,
-        identity: HelloIdentity,
+        identity: PrimaryCoordinateIdentity,
     ) -> Result<Self, Error> {
         Self::connect_public_edge_grpc_with_setup_timeout(
             url,
@@ -186,7 +336,7 @@ impl CoordinatorConnectClient {
     pub async fn connect_public_edge_grpc_with_setup_timeout(
         url: &str,
         bearer_token: &str,
-        identity: HelloIdentity,
+        identity: PrimaryCoordinateIdentity,
         setup_timeout: Duration,
     ) -> Result<Self, Error> {
         Self::connect_bounded(
@@ -208,7 +358,7 @@ impl CoordinatorConnectClient {
     pub async fn connect_for_kind_e2e(
         url: &str,
         bearer_token: &str,
-        identity: HelloIdentity,
+        identity: PrimaryCoordinateIdentity,
         root_certificate_der: Vec<u8>,
     ) -> Result<Self, Error> {
         let tls_config = coordinator_tls_config_with_root(root_certificate_der)?;
@@ -232,7 +382,7 @@ impl CoordinatorConnectClient {
     pub async fn connect_for_kind_e2e_grpc(
         url: &str,
         bearer_token: &str,
-        identity: HelloIdentity,
+        identity: PrimaryCoordinateIdentity,
         root_certificate_der: Vec<u8>,
     ) -> Result<Self, Error> {
         let tls_config = coordinator_tls_config_with_root(root_certificate_der)?;
@@ -250,7 +400,7 @@ impl CoordinatorConnectClient {
     async fn connect_bounded(
         url: &str,
         bearer_token: &str,
-        identity: HelloIdentity,
+        identity: PrimaryCoordinateIdentity,
         protocol: CoordinatorWireProtocol,
         tls_config: Option<Arc<rustls::ClientConfig>>,
         setup_timeout: Duration,
@@ -266,7 +416,7 @@ impl CoordinatorConnectClient {
     async fn connect_inner(
         url: &str,
         bearer_token: &str,
-        identity: HelloIdentity,
+        identity: PrimaryCoordinateIdentity,
         protocol: CoordinatorWireProtocol,
         tls_config: Option<Arc<rustls::ClientConfig>>,
     ) -> Result<Self, Error> {
@@ -304,7 +454,7 @@ impl CoordinatorConnectClient {
         }
         let client = CoordinatorServiceClient::new(connection.shared(HTTP2_REQUEST_BUFFER), config);
         let mut stream = client.coordinate().await?;
-        stream.send(request(identity.into_hello())).await?;
+        stream.send(primary_request(identity.into_hello())).await?;
         let first_response = loop {
             let response = stream
                 .message::<CoordinateResponse>()
@@ -327,7 +477,9 @@ impl CoordinatorConnectClient {
 
     /// Send this client's current node to the coordinator.
     pub async fn update_node(&mut self, node: &Node) -> Result<(), Error> {
-        self.stream.send(request(node_to_proto(node)?)).await?;
+        self.stream
+            .send(primary_request(node_to_proto(node)?))
+            .await?;
         Ok(())
     }
 
@@ -410,7 +562,7 @@ impl CoordinatorConnectClient {
                     handle_response(&mut self.peers, response, &mut handlers)?;
                 }
                 _ = heartbeat.tick() => {
-                    self.stream.send(request(Ping::default())).await?;
+                    self.stream.send(primary_request(CoordinatePing::default())).await?;
                     stats.sent += 1;
                 }
                 () = &mut deadline => return Ok(stats),
@@ -465,7 +617,292 @@ impl CoordinatorConnectClient {
                     }
                 }
                 _ = heartbeat.tick() => {
-                self.stream.send(request(Ping::default())).await?;
+                self.stream.send(primary_request(CoordinatePing::default())).await?;
+                }
+            }
+        }
+    }
+}
+
+/// A typed non-browser session with the separately deployed Mesh coordinator.
+pub struct MeshCoordinatorPeerSession {
+    stream: MeshCoordinateStream,
+    peers: BTreeMap<Uuid, Node>,
+    pending_responses: VecDeque<MeshCoordinatorServiceCoordinateResponse>,
+}
+
+impl MeshCoordinatorPeerSession {
+    /// Dial the configured Mesh origin and send the required hello first.
+    pub async fn connect(
+        url: &str,
+        bearer_token: &str,
+        identity: MeshCoordinateIdentity,
+    ) -> Result<Self, Error> {
+        Self::connect_with_setup_timeout(url, bearer_token, identity, COORDINATOR_SETUP_TIMEOUT)
+            .await
+    }
+
+    /// Dial the Mesh coordinator with one explicit transport/setup bound.
+    pub async fn connect_with_setup_timeout(
+        url: &str,
+        bearer_token: &str,
+        identity: MeshCoordinateIdentity,
+        setup_timeout: Duration,
+    ) -> Result<Self, Error> {
+        tokio::time::timeout(
+            setup_timeout,
+            Self::connect_inner(url, bearer_token, identity, None),
+        )
+        .await
+        .map_err(|_| Error::SetupTimeout(setup_timeout))?
+    }
+
+    /// Connect to the public Mesh gRPC route with one disposable KIND root.
+    #[cfg(feature = "kind-e2e")]
+    pub async fn connect_for_kind_e2e_grpc(
+        url: &str,
+        bearer_token: &str,
+        identity: MeshCoordinateIdentity,
+        root_certificate_der: Vec<u8>,
+    ) -> Result<Self, Error> {
+        let tls_config = coordinator_tls_config_with_root(root_certificate_der)?;
+        tokio::time::timeout(
+            COORDINATOR_SETUP_TIMEOUT,
+            Self::connect_inner(url, bearer_token, identity, Some(tls_config)),
+        )
+        .await
+        .map_err(|_| Error::SetupTimeout(COORDINATOR_SETUP_TIMEOUT))?
+    }
+
+    async fn connect_inner(
+        url: &str,
+        bearer_token: &str,
+        identity: MeshCoordinateIdentity,
+        tls_config: Option<Arc<rustls::ClientConfig>>,
+    ) -> Result<Self, Error> {
+        let base_uri = coordinator_origin(url)?;
+        let scheme = base_uri
+            .scheme_str()
+            .ok_or_else(|| Error::Url("Mesh coordinator URL must include a scheme".into()))?;
+
+        let (connection, protocol) = match scheme {
+            "http" => (
+                http2_builder().connect_plaintext(base_uri.clone()).await?,
+                Protocol::Connect,
+            ),
+            "https" => (
+                {
+                    let tls_config = match tls_config {
+                        Some(tls_config) => tls_config,
+                        None => coordinator_tls_config()?,
+                    };
+                    http2_builder()
+                        .connect_with_connector(
+                            tower::service_fn(move |uri| {
+                                connect_ring_tls(uri, Arc::clone(&tls_config))
+                            }),
+                            base_uri.clone(),
+                        )
+                        .await?
+                },
+                Protocol::Grpc,
+            ),
+            other => {
+                return Err(Error::Url(format!(
+                    "unsupported Mesh coordinator URL scheme {other:?}"
+                )));
+            }
+        };
+
+        let mut config = ClientConfig::new(base_uri).with_protocol(protocol);
+        if !bearer_token.is_empty() {
+            config = config.with_default_header(
+                http::header::AUTHORIZATION,
+                format!("Bearer {bearer_token}"),
+            );
+        }
+        let client =
+            MeshCoordinatorServiceClient::new(connection.shared(HTTP2_REQUEST_BUFFER), config);
+        let mut stream = client.coordinate().await?;
+        stream.send(mesh_request(identity.into_hello())).await?;
+        let first_response = loop {
+            let response = stream
+                .message::<MeshCoordinatorServiceCoordinateResponse>()
+                .await?
+                .ok_or_else(|| {
+                    connectrpc::ConnectError::unavailable(
+                        "Mesh coordinate stream closed during setup",
+                    )
+                })?
+                .to_owned_message();
+            if let Some(response) = usable_mesh_setup_response(response) {
+                break response;
+            }
+        };
+
+        Ok(Self {
+            stream,
+            peers: BTreeMap::new(),
+            pending_responses: VecDeque::from([first_response]),
+        })
+    }
+
+    /// Publish this peer's current node.
+    pub async fn update_node(&mut self, node: &Node) -> Result<(), Error> {
+        self.stream.send(mesh_request(node_to_proto(node)?)).await?;
+        Ok(())
+    }
+
+    /// Subscribe a dial-only session to one target node.
+    pub async fn subscribe(&mut self, target_node: impl Into<String>) -> Result<(), Error> {
+        self.stream
+            .send(mesh_request(MeshCoordinateSubscribe {
+                target_node: target_node.into(),
+                ..Default::default()
+            }))
+            .await?;
+        Ok(())
+    }
+
+    /// The current known Mesh peer set.
+    pub fn peers(&self) -> Vec<Node> {
+        self.peers.values().cloned().collect()
+    }
+
+    /// Drive the Mesh receive loop until the stream closes.
+    pub async fn run<P, D>(&mut self, mut handlers: Handlers<P, D>) -> Result<(), Error>
+    where
+        P: FnMut(&[Node]),
+        D: FnMut(&serde_json::Value),
+    {
+        self.run_inner(None, &mut handlers).await
+    }
+
+    /// Drive the Mesh receive loop while publishing local node updates.
+    pub async fn run_with_node_updates<P, D>(
+        &mut self,
+        node_updates: mpsc::UnboundedReceiver<Node>,
+        mut handlers: Handlers<P, D>,
+    ) -> Result<(), Error>
+    where
+        P: FnMut(&[Node]),
+        D: FnMut(&serde_json::Value),
+    {
+        self.run_inner(Some(node_updates), &mut handlers).await
+    }
+
+    /// Drive a bounded disposable KIND Mesh probe.
+    #[cfg(feature = "kind-e2e")]
+    pub async fn run_for_kind_e2e<P, D>(
+        &mut self,
+        duration: Duration,
+        mut handlers: Handlers<P, D>,
+    ) -> Result<KindE2eHeartbeatStats, Error>
+    where
+        P: FnMut(&[Node]),
+        D: FnMut(&serde_json::Value),
+    {
+        let mut stats = KindE2eHeartbeatStats::default();
+        while let Some(response) = self.pending_responses.pop_front() {
+            let response = mesh_response_to_primary(response);
+            if matches!(response.msg, Some(coordinate_response::Msg::Ping(_))) {
+                stats.received += 1;
+            }
+            handle_response(&mut self.peers, response, &mut handlers)?;
+        }
+
+        let deadline = tokio::time::sleep(duration);
+        tokio::pin!(deadline);
+        let mut heartbeat = tokio::time::interval_at(
+            tokio::time::Instant::now() + COORDINATOR_HEARTBEAT_INTERVAL,
+            COORDINATOR_HEARTBEAT_INTERVAL,
+        );
+        heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+        loop {
+            tokio::select! {
+                response = self.stream.message::<MeshCoordinatorServiceCoordinateResponse>() => {
+                    let Some(response) = response? else {
+                        return Err(connectrpc::ConnectError::unavailable(
+                            "Mesh coordinate stream closed during KIND probe",
+                        ).into());
+                    };
+                    let response =
+                        mesh_response_to_primary(response.to_owned_message());
+                    if matches!(response.msg, Some(coordinate_response::Msg::Ping(_))) {
+                        stats.received += 1;
+                    }
+                    handle_response(&mut self.peers, response, &mut handlers)?;
+                }
+                _ = heartbeat.tick() => {
+                    self.stream.send(mesh_request(CoordinatePing::default())).await?;
+                    stats.sent += 1;
+                }
+                () = &mut deadline => return Ok(stats),
+            }
+        }
+    }
+
+    /// Half-close and drain a disposable KIND Mesh stream.
+    #[cfg(feature = "kind-e2e")]
+    pub async fn finish_for_kind_e2e(&mut self) -> Result<(), Error> {
+        self.stream.close_send();
+        while self
+            .stream
+            .message::<MeshCoordinatorServiceCoordinateResponse>()
+            .await?
+            .is_some()
+        {}
+        Ok(())
+    }
+
+    async fn run_inner<P, D>(
+        &mut self,
+        node_updates: Option<mpsc::UnboundedReceiver<Node>>,
+        handlers: &mut Handlers<P, D>,
+    ) -> Result<(), Error>
+    where
+        P: FnMut(&[Node]),
+        D: FnMut(&serde_json::Value),
+    {
+        let mut node_updates = node_updates;
+        let mut heartbeat = tokio::time::interval_at(
+            tokio::time::Instant::now() + COORDINATOR_HEARTBEAT_INTERVAL,
+            COORDINATOR_HEARTBEAT_INTERVAL,
+        );
+        heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+        while let Some(response) = self.pending_responses.pop_front() {
+            handle_response(
+                &mut self.peers,
+                mesh_response_to_primary(response),
+                handlers,
+            )?;
+        }
+
+        loop {
+            tokio::select! {
+                biased;
+                response = self.stream.message::<MeshCoordinatorServiceCoordinateResponse>() => {
+                    let Some(response) = response? else {
+                        return Ok(());
+                    };
+                    handle_response(
+                        &mut self.peers,
+                        mesh_response_to_primary(response.to_owned_message()),
+                        handlers,
+                    )?;
+                }
+                maybe = async {
+                    node_updates.as_mut().expect("guarded node update receiver").recv().await
+                }, if node_updates.is_some() => {
+                    match maybe {
+                        Some(node) => self.update_node(&node).await?,
+                        None => node_updates = None,
+                    }
+                }
+                _ = heartbeat.tick() => {
+                    self.stream.send(mesh_request(CoordinatePing::default())).await?;
                 }
             }
         }
@@ -600,8 +1037,8 @@ fn http2_builder() -> connectrpc::client::Http2ConnectionBuilder {
         .keep_alive_while_idle(true)
 }
 
-fn request(
-    message: impl Into<Option<codewire_proto::coordinator::v1::coordinate_request::Msg>>,
+fn primary_request(
+    message: impl Into<Option<codewire_proto::codewire::internal::v1::coordinate_request::Msg>>,
 ) -> CoordinateRequest {
     CoordinateRequest {
         msg: message.into(),
@@ -609,39 +1046,126 @@ fn request(
     }
 }
 
-fn node_to_proto(node: &Node) -> Result<codewire_proto::coordinator::v1::Node, serde_json::Error> {
-    serde_json::from_value(serde_json::to_value(node)?)
+fn mesh_request(
+    message: impl Into<Option<mesh_coordinator_service_coordinate_request::Msg>>,
+) -> MeshCoordinatorServiceCoordinateRequest {
+    MeshCoordinatorServiceCoordinateRequest {
+        msg: message.into(),
+        ..Default::default()
+    }
 }
 
-fn proto_to_node(node: codewire_proto::coordinator::v1::Node) -> Result<Node, serde_json::Error> {
-    let mut value = serde_json::to_value(node)?;
-    let Some(object) = value.as_object_mut() else {
-        return serde_json::from_value(value);
-    };
-    for (proto, tailnet) in [
-        ("asOf", "as_of"),
-        ("discoKey", "disco_key"),
-        ("preferredDerp", "preferred_derp"),
-        ("derpLatency", "derp_latency"),
-    ] {
-        if let Some(value) = object.remove(proto) {
-            object.insert(tailnet.to_owned(), value);
+fn mesh_response_to_primary(
+    response: MeshCoordinatorServiceCoordinateResponse,
+) -> CoordinateResponse {
+    let msg = match response.msg {
+        Some(mesh_coordinator_service_coordinate_response::Msg::PeerUpdate(update)) => {
+            coordinate_response::Msg::PeerUpdate(update)
         }
+        Some(mesh_coordinator_service_coordinate_response::Msg::PeerRemove(remove)) => {
+            coordinate_response::Msg::PeerRemove(remove)
+        }
+        Some(mesh_coordinator_service_coordinate_response::Msg::DerpMap(derp)) => {
+            coordinate_response::Msg::DerpMap(derp)
+        }
+        Some(mesh_coordinator_service_coordinate_response::Msg::Ping(ping)) => {
+            coordinate_response::Msg::Ping(ping)
+        }
+        None => {
+            return CoordinateResponse::default();
+        }
+    };
+    CoordinateResponse {
+        msg: Some(msg),
+        ..Default::default()
     }
-    object
-        .entry("endpoints".to_owned())
-        .or_insert_with(|| serde_json::Value::Array(Vec::new()));
-    object
-        .entry("addresses".to_owned())
-        .or_insert_with(|| serde_json::Value::Array(Vec::new()));
-    serde_json::from_value(value)
+}
+fn node_to_proto(
+    node: &Node,
+) -> Result<codewire_proto::codewire::internal::v1::CoordinateNode, serde_json::Error> {
+    Ok(codewire_proto::codewire::internal::v1::CoordinateNode {
+        id: node.id.to_string(),
+        as_of: Some(buffa_types::Timestamp {
+            seconds: node.as_of.timestamp(),
+            nanos: node.as_of.timestamp_subsec_nanos() as i32,
+            ..Default::default()
+        })
+        .into(),
+        key: json_wire_string(&node.key)?,
+        disco_key: json_wire_string(&node.disco_key)?,
+        preferred_derp: node.preferred_derp,
+        derp_latency: node
+            .derp_latency
+            .clone()
+            .unwrap_or_default()
+            .into_iter()
+            .collect(),
+        endpoints: node
+            .endpoints
+            .iter()
+            .map(|endpoint| endpoint.0.to_string())
+            .collect(),
+        addresses: node.addresses.iter().map(ToString::to_string).collect(),
+        ..Default::default()
+    })
+}
+
+fn proto_to_node(
+    node: codewire_proto::codewire::internal::v1::CoordinateNode,
+) -> Result<Node, serde_json::Error> {
+    let timestamp = node
+        .as_of
+        .as_option()
+        .ok_or_else(|| node_conversion_error("coordinate node omitted as_of"))?;
+    let nanos = u32::try_from(timestamp.nanos)
+        .ok()
+        .filter(|nanos| *nanos < 1_000_000_000)
+        .ok_or_else(|| node_conversion_error("coordinate node has invalid timestamp nanos"))?;
+    let as_of = chrono::DateTime::<chrono::Utc>::from_timestamp(timestamp.seconds, nanos)
+        .ok_or_else(|| node_conversion_error("coordinate node has invalid timestamp"))?;
+
+    Ok(Node {
+        id: Uuid::parse_str(&node.id)
+            .map_err(|_| node_conversion_error("coordinate node has invalid id"))?,
+        as_of,
+        key: json_wire_value(node.key)?,
+        disco_key: json_wire_value(node.disco_key)?,
+        preferred_derp: node.preferred_derp,
+        derp_latency: (!node.derp_latency.is_empty())
+            .then(|| node.derp_latency.into_iter().collect()),
+        endpoints: node
+            .endpoints
+            .into_iter()
+            .map(json_wire_value)
+            .collect::<Result<_, _>>()?,
+        addresses: node
+            .addresses
+            .into_iter()
+            .map(json_wire_value)
+            .collect::<Result<_, _>>()?,
+    })
+}
+
+fn json_wire_string<T: serde::Serialize>(value: &T) -> Result<String, serde_json::Error> {
+    serde_json::to_value(value)?
+        .as_str()
+        .map(str::to_owned)
+        .ok_or_else(|| node_conversion_error("tailnet wire value is not a string"))
+}
+
+fn json_wire_value<T: serde::de::DeserializeOwned>(value: String) -> Result<T, serde_json::Error> {
+    serde_json::from_value(serde_json::Value::String(value))
+}
+
+fn node_conversion_error(message: &'static str) -> serde_json::Error {
+    serde_json::Error::io(io::Error::new(io::ErrorKind::InvalidData, message))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::node::{prefix_from_uuid, DiscoPublic, NodePublic};
-    use codewire_proto::coordinator::v1::{PeerRemove, PeerUpdate};
+    use codewire_proto::codewire::internal::v1::{CoordinatePeerRemove, CoordinatePeerUpdate};
+    use codewire_tailnet::node::{DiscoPublic, NodePublic, prefix_from_uuid};
     use std::future::Future;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -670,16 +1194,13 @@ mod tests {
     }
 
     #[test]
-    fn coordinate_url_is_reduced_to_connect_origin() {
+    fn coordinator_origin_accepts_service_origins() {
         assert_eq!(
-            coordinator_origin(
-                "http://coordinator:8090/api/v1/internal/gateway/coordinate?sidecar_id=x"
-            )
-            .unwrap(),
+            coordinator_origin("http://coordinator:8090").unwrap(),
             "http://coordinator:8090/".parse::<http::Uri>().unwrap()
         );
         assert_eq!(
-            coordinator_origin("https://api.example.invalid/api/v1/coordinate").unwrap(),
+            coordinator_origin("https://api.example.invalid").unwrap(),
             "https://api.example.invalid/".parse::<http::Uri>().unwrap()
         );
     }
@@ -730,10 +1251,10 @@ mod tests {
         let setup_timeout = Duration::from_secs(1);
         let url = format!("http://{addr}");
         let client = tokio::spawn(async move {
-            CoordinatorConnectClient::connect_with_setup_timeout(
+            CoordinatorPeerSession::connect_with_setup_timeout(
                 &url,
                 "",
-                HelloIdentity::sidecar(Uuid::new_v4()),
+                PrimaryCoordinateIdentity::sidecar(Uuid::new_v4()),
                 setup_timeout,
             )
             .await
@@ -759,7 +1280,7 @@ mod tests {
         let mut responses = VecDeque::from([
             CoordinateResponse::default(),
             CoordinateResponse {
-                msg: Ping::default().into(),
+                msg: CoordinatePing::default().into(),
                 ..Default::default()
             },
         ]);
@@ -792,11 +1313,11 @@ mod tests {
     #[test]
     fn hello_identity_preserves_client_and_sidecar_addressing() {
         let environment_id = Uuid::new_v4();
-        let client = HelloIdentity::client("org-1", environment_id).into_hello();
+        let client = PrimaryCoordinateIdentity::client("org-1", environment_id).into_hello();
         assert_eq!(client.org_id, "org-1");
         assert_eq!(client.environment_id, environment_id.to_string());
 
-        let sidecar = HelloIdentity::sidecar(environment_id).into_hello();
+        let sidecar = PrimaryCoordinateIdentity::sidecar(environment_id).into_hello();
         assert!(sidecar.org_id.is_empty());
         assert_eq!(sidecar.environment_id, environment_id.to_string());
     }
@@ -834,7 +1355,7 @@ mod tests {
 
         let peer = sample_node(Uuid::new_v4(), 7);
         let update = CoordinateResponse {
-            msg: PeerUpdate {
+            msg: CoordinatePeerUpdate {
                 nodes: vec![node_to_proto(&peer).unwrap()],
                 ..Default::default()
             }
@@ -847,7 +1368,7 @@ mod tests {
         ));
 
         let remove = CoordinateResponse {
-            msg: PeerRemove {
+            msg: CoordinatePeerRemove {
                 peer_id: peer.id.to_string(),
                 ..Default::default()
             }

@@ -26,7 +26,6 @@ use crate::sandbox::{
 
 /// Mirrors `sandbox.CanonicalWorkspaceRuntimeTemplateName`.
 pub const CANONICAL_WORKSPACE_RUNTIME_TEMPLATE_NAME: &str = "workspace";
-const DEFAULT_COORDINATE_TRANSPORT: &str = "auto";
 
 // ── Create action policy (port of environmentlifecycle/create.go) ──────
 
@@ -233,7 +232,6 @@ pub fn warm_pool_template_opts(cfg: &SandboxWorkerCfg, profile: &WarmPoolProfile
         sidecar_resource_mode: runtime_spec.sidecar_resource_mode.clone(),
         api_base_url: cfg.api_base_url.clone(),
         coordinator_url: cfg.coordinator_url.clone(),
-        coordinate_transport: cfg.coordinate_transport.clone(),
         server_namespace: cfg.pod_namespace.clone(),
         derp_host: cfg.derp_host.clone(),
         derp_port: parse_derp_port(&cfg.derp_port),
@@ -301,7 +299,6 @@ pub struct SandboxWorkerCfg {
     pub full_warm_profiles: String,
     pub api_base_url: String,
     pub coordinator_url: String,
-    pub coordinate_transport: String,
     pub derp_host: String,
     pub derp_port: String,
     pub stun_host: String,
@@ -320,12 +317,6 @@ pub struct SandboxWorkerCfg {
     pub runtime_transport_zones_json: String,
     pub pod_namespace: String,
     pub debug_tailnet: bool,
-}
-
-fn resolve_coordinate_transport(value: Option<String>) -> String {
-    value
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| DEFAULT_COORDINATE_TRANSPORT.to_string())
 }
 
 impl SandboxWorkerCfg {
@@ -374,9 +365,6 @@ impl SandboxWorkerCfg {
             full_warm_profiles: getenv("SANDBOX_FULL_WARM_PROFILES", ""),
             api_base_url: getenv("CODEWIRE_API_URL", ""),
             coordinator_url: getenv("CODEWIRE_COORDINATOR_URL", ""),
-            coordinate_transport: resolve_coordinate_transport(
-                std::env::var("CODEWIRE_COORDINATE_TRANSPORT").ok(),
-            ),
             derp_host: getenv("DERP_HOST", ""),
             derp_port: getenv("DERP_PORT", ""),
             stun_host: getenv("STUN_HOST", ""),
@@ -513,7 +501,6 @@ pub fn environment_template_opts(
         gateway_token: gateway_token.to_string(),
         api_base_url: cfg.api_base_url.clone(),
         coordinator_url: cfg.coordinator_url.clone(),
-        coordinate_transport: cfg.coordinate_transport.clone(),
         server_namespace: cfg.pod_namespace.clone(),
         derp_host: cfg.derp_host.clone(),
         derp_port: parse_derp_port(&cfg.derp_port),
@@ -1274,15 +1261,6 @@ fn _claim_name_used(env_id: &str) -> String {
 mod tests {
     use super::*;
 
-    #[test]
-    fn worker_coordinate_transport_defaults_to_auto_and_preserves_overrides() {
-        assert_eq!(resolve_coordinate_transport(None), "auto");
-        assert_eq!(resolve_coordinate_transport(Some(String::new())), "auto");
-        for value in ["ws", "connect", "auto"] {
-            assert_eq!(resolve_coordinate_transport(Some(value.to_string())), value);
-        }
-    }
-
     fn backend(ns: &str, claim: &str, ip: &str, setup_complete: bool) -> BackendRow {
         BackendRow {
             namespace: ns.into(),
@@ -1563,44 +1541,6 @@ mod tests {
             opts.node_selector,
             vec![("pool".to_string(), "custom".to_string())]
         );
-    }
-
-    #[test]
-    fn coordinate_transport_reaches_ordinary_and_warm_pool_template_opts() {
-        let cfg = SandboxWorkerCfg {
-            coordinate_transport: "connect".into(),
-            ..Default::default()
-        };
-        let env = EnvironmentRow {
-            id: "env-1".into(),
-            org_id: "org-1".into(),
-            preset_id: None,
-            env_type: "sandbox".into(),
-            state: "pending".into(),
-            desired_state: "started".into(),
-            external_cleanup_completed_at: None,
-            cpu_millicores: 1000,
-            memory_mb: 2048,
-            disk_gb: 10,
-            auth_token: None,
-            ttl_seconds: None,
-            setup_config: None,
-            secret_project_id: None,
-        };
-
-        let ordinary = environment_template_opts(
-            &cfg,
-            "ghcr.io/codewiresh/workspace:latest",
-            "workspace",
-            &env,
-            "env-1",
-            "token",
-        );
-        assert_eq!(ordinary.coordinate_transport, "connect");
-
-        let profile = parse_canonical_full_warm_pool_profiles("").unwrap()[0].clone();
-        let warm = warm_pool_template_opts(&cfg, &profile);
-        assert_eq!(warm.coordinate_transport, "connect");
     }
 
     #[test]

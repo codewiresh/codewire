@@ -104,10 +104,6 @@ pub fn warm_pool_revision_hash(opts: &TemplateOpts) -> String {
     if !opts.coordinator_url.is_empty() {
         buf.push_str(&format!("CoordinatorURL={}\n", opts.coordinator_url));
     }
-    buf.push_str(&format!(
-        "CoordinateTransport={}\n",
-        opts.coordinate_transport
-    ));
     buf.push_str(&format!("ServerNamespace={}\n", opts.server_namespace));
     buf.push_str(&format!("DERPHost={}\n", opts.derp_host));
     buf.push_str(&format!("DERPPort={}\n", opts.derp_port));

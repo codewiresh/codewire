@@ -36,8 +36,13 @@ check_workspace() {
   }
 
   if ! output="$(run_locked_metadata)"; then
-    if grep -qF 'no matching package named' <<<"$output" \
-      && grep -qF 'offline mode' <<<"$output"; then
+    if {
+      grep -qF 'no matching package named' <<<"$output" \
+        && grep -qF 'offline mode' <<<"$output"
+    } || {
+      grep -qF "can't checkout from" <<<"$output" \
+        && grep -qF 'offline mode' <<<"$output"
+    }; then
       printf '[curated-rust-locks] %s: populating exact locked Cargo inputs\n' "$name"
       "$CARGO_BIN" fetch --locked --manifest-path "$stage/Cargo.toml"
       if output="$(run_locked_metadata)"; then
