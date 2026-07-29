@@ -44,12 +44,15 @@ pub async fn ensure_schema_logged(database_url: &str) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::borrow::Cow;
+
     use sqlx::{PgPool, postgres::PgPoolOptions};
 
     use super::*;
 
     const ACCEPTED_APPLICATION_SCHEMA_FINGERPRINT: &str =
         "19a356668dea83f08fd2e476d7ba3113860ab47ff0a559afea375417d0beb197";
+    const RETIRE_MESH_OIDC_CLIENT_VERSION: i64 = 5;
 
     async fn startup(database_url: String) -> anyhow::Result<()> {
         ensure_schema(&database_url).await
@@ -57,17 +60,36 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires TEST_DATABASE_URL"]
-    async fn standard_migrator_applies_history_and_second_run_is_noop() -> anyhow::Result<()> {
+    async fn standard_migrator_applies_history_retires_mesh_oidc_client_and_second_run_is_noop()
+    -> anyhow::Result<()> {
         let admin_url = std::env::var("TEST_DATABASE_URL")
             .context("TEST_DATABASE_URL is required for migration tests")?;
         let test_db = TestDatabase::create(&admin_url).await?;
         let result = async {
+            apply_migrations_before(&test_db.url, RETIRE_MESH_OIDC_CLIENT_VERSION).await?;
+
+            let pool = PgPoolOptions::new()
+                .max_connections(1)
+                .connect(&test_db.url)
+                .await?;
+            seed_retired_mesh_oidc_client(&pool).await?;
+            pool.close().await;
+
             ensure_schema(&test_db.url).await?;
 
             let pool = PgPoolOptions::new()
                 .max_connections(1)
                 .connect(&test_db.url)
                 .await?;
+            anyhow::ensure!(
+                oidc_client_row_counts(&pool, "codewire-mesh").await? == (0, 0, 0, 0, 0),
+                "retired Mesh OIDC client or dependent rows remain"
+            );
+            anyhow::ensure!(
+                oidc_client_row_counts(&pool, "retained-client").await? == (1, 1, 0, 0, 0),
+                "primary OIDC migration changed an unrelated client or token"
+            );
+
             let first = applied_migrations(&pool).await?;
             let embedded: Vec<_> = MIGRATOR
                 .iter()
@@ -268,6 +290,118 @@ mod tests {
         )
         .fetch_all(pool)
         .await?)
+    }
+
+    async fn apply_migrations_before(database_url: &str, version: i64) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            MIGRATOR.version_exists(version),
+            "embedded migration {version} is missing"
+        );
+        // Construct the exact SQLx ledger state immediately before the
+        // migration under test, then let the normal application migrator
+        // apply it with its ordinary checksum and locking behavior.
+        let prior = Migrator {
+            migrations: Cow::Owned(
+                MIGRATOR
+                    .iter()
+                    .filter(|migration| migration.version < version)
+                    .cloned()
+                    .collect(),
+            ),
+            ..Migrator::DEFAULT
+        };
+        let mut connection = PgConnection::connect(database_url).await?;
+        prior.run_direct(&mut connection).await?;
+        connection.close().await?;
+        Ok(())
+    }
+
+    async fn seed_retired_mesh_oidc_client(pool: &PgPool) -> anyhow::Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO oidc_clients (id, name, redirect_uris)
+            VALUES
+                ('codewire-mesh', 'Retired Mesh', ARRAY['https://mesh.invalid/callback']),
+                ('retained-client', 'Retained client', ARRAY['https://retained.invalid/callback'])
+            "#,
+        )
+        .execute(pool)
+        .await?;
+        sqlx::query(
+            r#"
+            INSERT INTO users (id, email)
+            VALUES
+                ('mesh-user', 'mesh-user@example.invalid'),
+                ('retained-user', 'retained-user@example.invalid')
+            "#,
+        )
+        .execute(pool)
+        .await?;
+        sqlx::query(
+            r#"
+            INSERT INTO oidc_access_tokens (token_hash, client_id, user_id, scopes, expires_at)
+            VALUES
+                ('retired-mesh-access-token', 'codewire-mesh', 'mesh-user', ARRAY['openid'], NOW() + INTERVAL '1 hour'),
+                ('retained-access-token', 'retained-client', 'retained-user', ARRAY['openid'], NOW() + INTERVAL '1 hour')
+            "#,
+        )
+        .execute(pool)
+        .await?;
+        sqlx::query(
+            r#"
+            INSERT INTO oidc_auth_requests (id, client_id, scopes, redirect_uri, expires_at)
+            VALUES ('retired-mesh-request', 'codewire-mesh', ARRAY['openid'], 'https://mesh.invalid/callback', NOW() + INTERVAL '1 hour')
+            "#,
+        )
+        .execute(pool)
+        .await?;
+        sqlx::query(
+            r#"
+            INSERT INTO oidc_refresh_tokens (id, token_hash, client_id, user_id, scopes, auth_time, expires_at)
+            VALUES ('retired-mesh-refresh', 'retired-mesh-refresh-token', 'codewire-mesh', 'mesh-user', ARRAY['openid'], NOW(), NOW() + INTERVAL '1 hour')
+            "#,
+        )
+        .execute(pool)
+        .await?;
+        sqlx::query(
+            r#"
+            INSERT INTO oidc_device_authorizations (device_code, user_code, client_id, scopes, expires_at)
+            VALUES ('retired-mesh-device', 'RETIRED-MESH', 'codewire-mesh', ARRAY['openid'], NOW() + INTERVAL '1 hour')
+            "#,
+        )
+        .execute(pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn oidc_client_row_counts(
+        pool: &PgPool,
+        client_id: &str,
+    ) -> anyhow::Result<(i64, i64, i64, i64, i64)> {
+        Ok((
+            sqlx::query_scalar("SELECT COUNT(*) FROM oidc_clients WHERE id = $1")
+                .bind(client_id)
+                .fetch_one(pool)
+                .await?,
+            sqlx::query_scalar("SELECT COUNT(*) FROM oidc_access_tokens WHERE client_id = $1")
+                .bind(client_id)
+                .fetch_one(pool)
+                .await?,
+            sqlx::query_scalar("SELECT COUNT(*) FROM oidc_auth_requests WHERE client_id = $1")
+                .bind(client_id)
+                .fetch_one(pool)
+                .await?,
+            sqlx::query_scalar("SELECT COUNT(*) FROM oidc_refresh_tokens WHERE client_id = $1")
+                .bind(client_id)
+                .fetch_one(pool)
+                .await?,
+            sqlx::query_scalar(
+                "SELECT COUNT(*) FROM oidc_device_authorizations WHERE client_id = $1",
+            )
+            .bind(client_id)
+            .fetch_one(pool)
+            .await?,
+        ))
     }
 
     fn embedded_max_version() -> anyhow::Result<i64> {
