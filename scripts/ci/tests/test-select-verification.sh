@@ -75,7 +75,7 @@ run_paths_case ci_self pull_request refs/pull/2/head false \
   scripts/ci/tests/test-require-verification-results.sh \
   scripts/ci/tests/test-verify-tested-tree-receipt.sh
 run_paths_case ci_rewrite pull_request refs/pull/20/head false \
-  'policy rust_curated_locks' \
+  'deploy policy rust_curated_locks' \
   .githooks/pre-push scripts/dev/preflight.sh scripts/ci/select/select-deploy-dev.sh \
   scripts/ci/verify/integration-postgres.sh \
   scripts/ci/verify/resolve-cargo-target-dir.sh \
@@ -89,6 +89,14 @@ run_paths_case ci_rewrite pull_request refs/pull/20/head false \
   scripts/ci/tests/test-rust-owned-fixtures.sh \
   scripts/ci/tests/test-select-deploy-dev.sh \
   scripts/ci/tests/test-select-verification.sh
+run_paths_case artifact_impact_ci pull_request refs/pull/201/head false \
+  'deploy go_consumer_interop go_support policy release runtime_confidential' \
+  scripts/ci/deploy/resolve-deployed-source.sh \
+  scripts/ci/select/artifact-impact.py \
+  scripts/ci/select/select-deploy-dev.sh \
+  scripts/ci/select/select-support-images.sh \
+  scripts/ci/tests/test-artifact-impact.py \
+  scripts/ci/tests/test-resolve-deployed-source.sh
 run_paths_case repo_checks pull_request refs/pull/21/head false \
   'contracts contracts_rest deploy edge_kind go_consumer_interop go_support policy release runtime_confidential security security_idp_kek' \
   scripts/checks/repo_checks.py

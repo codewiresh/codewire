@@ -342,7 +342,11 @@ elif [ "$event_selected" = false ]; then
       scripts/dev/preflight.sh|scripts/ci/select/select-verification.sh|\
       scripts/ci/select/require-verification-results.sh|\
       scripts/ci/select/verify-tested-tree-receipt.sh|\
+      scripts/ci/select/artifact-impact.py|\
+      scripts/ci/select/select-support-images.sh|\
       scripts/ci/tests/test-select-verification.sh|scripts/ci/tests/test-select-deploy-dev.sh|\
+      scripts/ci/tests/test-artifact-impact.py|\
+      scripts/ci/tests/test-resolve-deployed-source.sh|\
       scripts/ci/tests/test-require-verification-results.sh|\
       scripts/ci/tests/test-verify-tested-tree-receipt.sh|\
       scripts/ci/tests/test-pre-push-worktree.sh|\
@@ -871,6 +875,7 @@ elif [ "$event_selected" = false ]; then
       scripts/ci/*observer*.tsv|\
       scripts/ci/*promot*.sh|scripts/ci/*promot*.py|\
       scripts/ci/deploy/dispatch-deploy-dev.sh|scripts/ci/deploy/dispatch-deploy-prod.sh|\
+      scripts/ci/select/artifact-impact.py|scripts/ci/select/select-deploy-dev.sh|\
       scripts/ci/tests/test-deploy-*.sh|scripts/ci/tests/test-dispatch-deploy-*.sh)
         select_token deploy
         recognized=true
@@ -890,6 +895,8 @@ elif [ "$event_selected" = false ]; then
       .gitea/workflows/claude-e2e.yaml|.gitea/workflows/cli-release.yaml|\
       .gitea/workflows/mirror-github.yaml|\
       .gitea/workflows/support-images.yaml|\
+      scripts/ci/select/artifact-impact.py|\
+      scripts/ci/select/select-support-images.sh|\
       keys/production-release.asc|\
       .gitea/workflows/observe-*.yaml|\
       scripts/ci/images/build-push-image.sh|scripts/ci/images/compute-image-tags.sh|\

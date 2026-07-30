@@ -25,9 +25,30 @@ fi
 if grep -Fq 'CODEWIRE_GHCR_PUBLISH_ENABLED' "$WORKFLOW"; then
   fail 'support GHCR publication retains its rollout flag'
 fi
+selection_job="$(sed -n '/^  support-selection:/,/^  build-base-image:/p' "$WORKFLOW")"
+grep -Fq '          fetch-depth: 2' <<<"$selection_job" ||
+  fail 'support selection does not receive the parent and exact main commit'
+grep -Fq 'base_sha="$(git rev-parse "$GITHUB_SHA^")"' <<<"$selection_job" ||
+  fail 'support selection does not resolve the exact parent SHA'
+grep -Fq 'scripts/ci/select/select-support-images.sh "$base_sha" "$GITHUB_SHA"' \
+  <<<"$selection_job" || fail 'support selection is not bound to the exact push range'
+if grep -Fq 'secrets.' <<<"$selection_job"; then
+  fail 'support selection unexpectedly receives a credential'
+fi
+grep -qF -- "- 'scripts/ci/select/artifact-impact.py'" "$WORKFLOW" ||
+  fail 'artifact classifier changes do not activate support selection'
+grep -qF -- "- 'scripts/ci/select/select-support-images.sh'" "$WORKFLOW" ||
+  fail 'support wrapper changes do not activate support selection'
+grep -qF -- "- 'rust-toolchain.toml'" "$WORKFLOW" ||
+  fail 'Rust toolchain changes do not activate support selection'
+[[ "$(grep -Fc "if: \${{ needs.support-selection.outputs.build_support_images == 'true' }}" \
+  "$WORKFLOW")" -eq 3 ]] ||
+  fail 'all support build/publication jobs are not gated by one selection'
+grep -qF 'needs: [support-selection]' "$WORKFLOW" ||
+  fail 'base build does not wait for support selection'
 grep -qF 'scripts/ci/images/build-push-image.sh base images/base/Dockerfile images/base' \
   "$WORKFLOW" || fail 'base is not built by the canonical Gitea helper'
-grep -qF 'needs: [build-base-image]' "$WORKFLOW" ||
+grep -qF 'needs: [support-selection, build-base-image]' "$WORKFLOW" ||
   fail 'workspace does not wait for the exact base build'
 # shellcheck disable=SC2016
 grep -qF 'CODEWIRE_BASE_IMAGE_REF: ${{ needs.build-base-image.outputs.candidate_ref }}' \
@@ -35,6 +56,8 @@ grep -qF 'CODEWIRE_BASE_IMAGE_REF: ${{ needs.build-base-image.outputs.candidate_
 grep -qF 'scripts/ci/images/build-push-image.sh workspace images/workspace/Dockerfile .' \
   "$WORKFLOW" || fail 'workspace is not built by the canonical Gitea helper'
 publish_job="$(sed -n '/^  publish-support-images:/,$p' "$WORKFLOW")"
+grep -qF 'needs: [support-selection, build-base-image, build-workspace-image]' \
+  <<<"$publish_job" || fail 'support publisher is not bound to selection and both builds'
 # shellcheck disable=SC2016
 grep -Fq 'GHCR_PUBLISH_USERNAME: ${{ vars.GHCR_PUBLISH_USERNAME }}' \
   <<<"$publish_job" || fail 'support publisher identity is not repository configuration'

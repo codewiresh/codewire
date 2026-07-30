@@ -113,6 +113,7 @@ run_policy() {
     bash -n "${runtime_shell_files[@]}"
   fi
   scripts/ci/tests/test-select-deploy-dev.sh
+  scripts/ci/tests/test-resolve-deployed-source.sh
   scripts/ci/tests/test-select-verification.sh
   scripts/ci/tests/test-go-source-ownership.sh
   scripts/ci/tests/test-rust-owned-fixtures.sh

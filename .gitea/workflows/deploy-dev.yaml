@@ -17,14 +17,26 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       deploy_dev: ${{ steps.select.outputs.deploy_dev }}
+      reason: ${{ steps.select.outputs.reason }}
+      matched_categories: ${{ steps.select.outputs.matched_categories }}
+      baseline_sha: ${{ steps.select.outputs.baseline_sha }}
+      head_sha: ${{ steps.select.outputs.head_sha }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with:
-          fetch-depth: 2
+          fetch-depth: 0
+
+      - name: Resolve deployed dev source
+        id: baseline
+        env:
+          CODEWIRE_DEPLOY_PROMOTION_TOKEN: ${{ secrets.CODEWIRE_DEPLOY_PROMOTION_TOKEN }}
+        run: scripts/ci/deploy/resolve-deployed-source.sh
 
       - name: Select dev deploy
         id: select
-        run: scripts/ci/select/select-deploy-dev.sh
+        env:
+          DEPLOYED_SOURCE_SHA: ${{ steps.baseline.outputs.baseline_sha }}
+        run: scripts/ci/select/select-deploy-dev.sh "$DEPLOYED_SOURCE_SHA" "$GITHUB_SHA"
 
   build-gateway-image:
     name: Build Gateway Image

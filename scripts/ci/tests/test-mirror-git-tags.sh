@@ -7,7 +7,6 @@ MIRROR="$ROOT/scripts/ci/release/mirror-git-tags.sh"
 MIRROR_CANONICAL="$ROOT/scripts/ci/release/mirror-canonical-release-tag.sh"
 MIRROR_WORKFLOW="$ROOT/.gitea/workflows/mirror-github.yaml"
 GITHUB_WORKFLOW_ROOT="$ROOT/.github/workflows"
-SELECT_DEPLOY="$ROOT/scripts/ci/select/select-deploy-dev.sh"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
@@ -184,19 +183,5 @@ if grep -Fq 'git push github "${GITHUB_REF}:${GITHUB_REF}"' "$MIRROR_WORKFLOW"; 
   echo 'tag workflow still trusts the checkout-created local tag ref' >&2
   exit 1
 fi
-
-cat > "$TMP/mirror-changed-files" <<'EOF'
-.gitea/workflows/ci.yaml
-.gitea/workflows/mirror-github.yaml
-scripts/ci/release/mirror-canonical-release-tag.sh
-scripts/ci/release/mirror-git-tags.sh
-scripts/ci/tests/test-mirror-git-tags.sh
-EOF
-selector_output="$(GITHUB_EVENT_NAME=push "$SELECT_DEPLOY" "$TMP/mirror-changed-files")"
-grep -Fqx 'deploy_dev=false' <<< "$selector_output"
-
-printf 'Cargo.toml\n' > "$TMP/runtime-changed-files"
-selector_output="$(GITHUB_EVENT_NAME=push "$SELECT_DEPLOY" "$TMP/runtime-changed-files")"
-grep -Fqx 'deploy_dev=true' <<< "$selector_output"
 
 echo 'mirror git tag tests passed'

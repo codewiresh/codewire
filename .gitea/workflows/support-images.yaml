@@ -6,6 +6,7 @@ on:
     paths:
       - 'Cargo.toml'
       - 'Cargo.lock'
+      - 'rust-toolchain.toml'
       - 'crates/codewire-cli/**'
       - 'crates/codewire-cli-bin/**'
       - 'crates/codewire-client/**'
@@ -24,6 +25,8 @@ on:
       - 'scripts/ci/images/image-bundle.py'
       - 'scripts/ci/images/publish-image-to-ghcr.sh'
       - 'scripts/ci/images/run-skopeo-container.sh'
+      - 'scripts/ci/select/artifact-impact.py'
+      - 'scripts/ci/select/select-support-images.sh'
       - '.gitea/workflows/support-images.yaml'
 permissions:
   contents: read
@@ -32,9 +35,31 @@ env:
   REGISTRY_HOST: ${{ vars.REGISTRY_HOST }}
 
 jobs:
+  support-selection:
+    name: Support image selection
+    runs-on: ubuntu-latest
+    outputs:
+      build_support_images: ${{ steps.select.outputs.build_support_images }}
+      reason: ${{ steps.select.outputs.reason }}
+      matched_categories: ${{ steps.select.outputs.matched_categories }}
+      baseline_sha: ${{ steps.select.outputs.baseline_sha }}
+      head_sha: ${{ steps.select.outputs.head_sha }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          fetch-depth: 2
+
+      - name: Select atomic support build
+        id: select
+        run: |
+          base_sha="$(git rev-parse "$GITHUB_SHA^")"
+          scripts/ci/select/select-support-images.sh "$base_sha" "$GITHUB_SHA"
+
   build-base-image:
     name: Build Base Image
     runs-on: ubuntu-latest
+    needs: [support-selection]
+    if: ${{ needs.support-selection.outputs.build_support_images == 'true' }}
     outputs:
       source_sha: ${{ steps.build.outputs.source_sha }}
       candidate_ref: ${{ steps.build.outputs.candidate_ref }}
@@ -48,7 +73,8 @@ jobs:
   build-workspace-image:
     name: Build Workspace Image
     runs-on: ubuntu-latest
-    needs: [build-base-image]
+    needs: [support-selection, build-base-image]
+    if: ${{ needs.support-selection.outputs.build_support_images == 'true' }}
     outputs:
       source_sha: ${{ steps.build.outputs.source_sha }}
       candidate_ref: ${{ steps.build.outputs.candidate_ref }}
@@ -64,7 +90,8 @@ jobs:
   publish-support-images:
     name: Publish exact support manifests to GHCR
     runs-on: ubuntu-latest
-    needs: [build-base-image, build-workspace-image]
+    needs: [support-selection, build-base-image, build-workspace-image]
+    if: ${{ needs.support-selection.outputs.build_support_images == 'true' }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
 

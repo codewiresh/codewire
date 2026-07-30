@@ -36,6 +36,31 @@ if grep -Eq 'CODEWIRE_(GHCR_PUBLISH|DEPLOY_SHA_DISPATCH)_ENABLED' "$WORKFLOW"; t
   fail "dev publication or dispatch retains a rollout flag"
 fi
 
+selection_job="$(sed -n '/^  deploy-selection:/,/^  build-gateway-image:/p' "$WORKFLOW")"
+grep -Fq '          fetch-depth: 0' <<<"$selection_job" ||
+  fail "deploy selection does not receive the complete cumulative history"
+grep -Fq 'run: scripts/ci/deploy/resolve-deployed-source.sh' <<<"$selection_job" ||
+  fail "deploy selection does not resolve the private desired source"
+# shellcheck disable=SC2016
+[[ "$(grep -Fc 'CODEWIRE_DEPLOY_PROMOTION_TOKEN: ${{ secrets.CODEWIRE_DEPLOY_PROMOTION_TOKEN }}' \
+  <<<"$selection_job")" -eq 1 ]] ||
+  fail "baseline resolver credential has an unexpected consumer count"
+# shellcheck disable=SC2016
+grep -Fq 'DEPLOYED_SOURCE_SHA: ${{ steps.baseline.outputs.baseline_sha }}' \
+  <<<"$selection_job" || fail "classifier is not bound to the resolved baseline"
+grep -Fq 'scripts/ci/select/select-deploy-dev.sh "$DEPLOYED_SOURCE_SHA" "$GITHUB_SHA"' \
+  <<<"$selection_job" || fail "classifier is not cumulative through exact current main"
+select_step="$(sed -n '/      - name: Select dev deploy/,/^  build-gateway-image:/p' \
+  <<<"$selection_job")"
+if grep -Fq 'secrets.' <<<"$select_step"; then
+  fail "artifact classifier receives the private deploy credential"
+fi
+for output in deploy_dev reason matched_categories baseline_sha head_sha; do
+  # shellcheck disable=SC2016
+  grep -Fq "$output: \${{ steps.select.outputs.$output }}" <<<"$selection_job" ||
+    fail "deploy selection does not expose $output"
+done
+
 publish_job="$(sed -n '/^  publish-runtime-images:/,/^  dispatch-deploy-dev:/p' "$WORKFLOW")"
 # shellcheck disable=SC2016
 grep -Fq 'GHCR_PUBLISH_USERNAME: ${{ vars.GHCR_PUBLISH_USERNAME }}' \
@@ -92,6 +117,9 @@ grep -Fq "github.ref == 'refs/heads/main'" <<<"$dispatch_job" ||
 [[ "$(grep -Fc 'CODEWIRE_DEPLOY_PROMOTION_TOKEN: ${{ secrets.CODEWIRE_DEPLOY_PROMOTION_TOKEN }}' \
   <<<"$dispatch_job")" -eq 1 ]] ||
   fail "deploy dispatch credential has an unexpected consumer count"
+[[ "$(grep -Fc 'CODEWIRE_DEPLOY_PROMOTION_TOKEN: ${{ secrets.CODEWIRE_DEPLOY_PROMOTION_TOKEN }}' \
+  "$WORKFLOW")" -eq 2 ]] ||
+  fail "deploy credential must be isolated to baseline read and SHA-only dispatch"
 # shellcheck disable=SC2016
 grep -Fq 'scripts/ci/deploy/dispatch-deploy-dev.sh "${GITHUB_SHA:?}"' <<<"$dispatch_job" ||
   fail "deploy dispatch sends anything other than the workflow source SHA"

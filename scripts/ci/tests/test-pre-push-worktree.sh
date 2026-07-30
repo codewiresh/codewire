@@ -2,7 +2,6 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
-DEPLOY_SELECTOR="$ROOT/scripts/ci/select/select-deploy-dev.sh"
 mkdir -p "$ROOT/.tmp"
 TMP="$(mktemp -d "$ROOT/.tmp/pre-push-worktree.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT
@@ -309,72 +308,4 @@ assert_contains sdk_tooling_tools "$(cat "$sdk_tooling_log")" 'product sdk-pytho
 assert_not_contains sdk_tooling_tools "$(cat "$sdk_tooling_log")" 'integration '
 assert_not_contains sdk_tooling_tools "$(cat "$sdk_tooling_log")" 'kind'
 
-pr_paths="$TMP/pr.paths"
-printf '%s\n' \
-  .githooks/pre-push \
-  .gitea/workflows/support-images.yaml \
-  CONTRIBUTING.md \
-  images/base/Dockerfile \
-  images/base/entrypoint.sh \
-  keys/production-release.asc \
-  scripts/ci/verify/integration-postgres.sh \
-  scripts/ci/verify/run-integration-verification.sh \
-  scripts/ci/verify/run-product-verification.sh \
-  scripts/ci/images/copy-image-to-ghcr.sh \
-  scripts/ci/deploy/dispatch-deploy-dev.sh \
-  scripts/ci/deploy/dispatch-deploy-prod.sh \
-  scripts/ci/images/publish-image-to-ghcr.sh \
-  scripts/ci/images/run-skopeo-container.sh \
-  scripts/ci/verify/rust-stack-rehearsal.sh \
-  scripts/ci/select/select-deploy-dev.sh \
-  scripts/ci/select/select-verification.sh \
-  scripts/ci/tests/test-base-image-source.sh \
-  scripts/ci/tests/test-integration-postgres.sh \
-  scripts/ci/tests/test-pre-push-worktree.sh \
-  scripts/ci/tests/test-copy-image-to-ghcr.sh \
-  scripts/ci/tests/test-dispatch-deploy-dev.sh \
-  scripts/ci/tests/test-dispatch-deploy-prod.sh \
-  scripts/ci/tests/test-publish-image-to-ghcr.sh \
-  scripts/ci/tests/test-deploy-prod-workflow.sh \
-  scripts/ci/tests/test-run-skopeo-container.sh \
-  scripts/ci/tests/test-support-images-workflow.sh \
-  scripts/ci/tests/test-select-deploy-dev.sh \
-  scripts/ci/tests/test-select-verification.sh \
-  scripts/dev/install-hooks.sh \
-  scripts/dev/preflight.sh > "$pr_paths"
-deploy_output="$(env -u GITHUB_OUTPUT GITHUB_EVENT_NAME=push \
-  "$DEPLOY_SELECTOR" "$pr_paths")"
-assert_contains tooling_deploy "$deploy_output" 'deploy_dev=false'
-
-printf '%s\n' scripts/ci/tests/test-deploy-dev.sh > "$pr_paths"
-deploy_output="$(env -u GITHUB_OUTPUT GITHUB_EVENT_NAME=push \
-  "$DEPLOY_SELECTOR" "$pr_paths")"
-assert_contains deploy_contract_test "$deploy_output" 'deploy_dev=false'
-
-for deploy_path in \
-  Cargo.toml \
-  __unknown__; do
-  printf '%s\n' "$deploy_path" > "$pr_paths"
-  deploy_output="$(env -u GITHUB_OUTPUT GITHUB_EVENT_NAME=push \
-    "$DEPLOY_SELECTOR" "$pr_paths")"
-  assert_contains deploy_input "$deploy_output" 'deploy_dev=true'
-done
-
-printf '%s\n' crates/codewire-server-core/src/lib.rs > "$pr_paths"
-deploy_output="$(env -u GITHUB_OUTPUT GITHUB_EVENT_NAME=push \
-  "$DEPLOY_SELECTOR" "$pr_paths")"
-assert_contains runtime_deploy "$deploy_output" 'deploy_dev=true'
-
-printf '%s\n' \
-  Makefile \
-  libs/sdk-scripts/filter-openapi.py \
-  docs/plans/connect-rpc/13-rest-sunset-and-openapi-removal.md \
-  libs/sdk-python/codewire/client.py \
-  scripts/runtime/dev/run-sdk-python-e2e.sh \
-  scripts/runtime/tests/test-run-sdk-python-e2e.sh \
-  crates/codewire-server-core/tests/org_deletion_lifecycle.rs > "$pr_paths"
-deploy_output="$(env -u GITHUB_OUTPUT GITHUB_EVENT_NAME=push \
-  "$DEPLOY_SELECTOR" "$pr_paths")"
-assert_contains ci_only_inputs "$deploy_output" 'deploy_dev=false'
-
-printf '[test-pre-push-worktree] shared selection, worktree, fail-closed, and deploy cases passed\n'
+printf '[test-pre-push-worktree] shared selection, worktree, and fail-closed cases passed\n'
