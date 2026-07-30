@@ -87,6 +87,12 @@ Method context can add procedure but cannot widen repository authority.
   schema, and persistence consequences; auth and sensitive-data flow;
   deployment, support-image, and verification selectors; CI token permissions
   and evidence APIs; and the rollback artifact plus local/live smoke shape.
+  For a networking or infrastructure correction, the audit must also identify
+  the exact enforced object—pod endpoint, host endpoint, load balancer, node or
+  provider firewall, or routing boundary—and attach direct flow or verdict
+  evidence that the object handled or dropped the failing traffic. A valid
+  render/plan, enforcement on an adjacent object, or outbound-only packet
+  observation is not attribution.
   Resolve every finding in the cluster definition before source mutation.
   Do not split predictable audit findings into a sequence of implementation-
   time replans.
