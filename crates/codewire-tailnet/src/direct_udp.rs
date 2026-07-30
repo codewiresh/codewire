@@ -217,6 +217,19 @@ impl Handle {
         path_for_peer(&self.shared, *peer)
     }
 
+    /// Report the lifecycle of the relay endpoint owned by this adapter.
+    ///
+    /// This is independent of the currently selected peer path: a direct UDP
+    /// path may be active while a relay endpoint remains available as the
+    /// next fallback.
+    pub fn peer_relay_endpoint_state(
+        &self,
+        peer: &NodePublic,
+        peer_disco: &DiscoPublic,
+    ) -> PeerRelayEndpointState {
+        peer_relay_endpoint_state(&self.shared, *peer, *peer_disco, Instant::now())
+    }
+
     /// Ask the direct-UDP adapter to start a shared UDP peer-relay path for a
     /// known peer. The endpoint descriptor must come from a trusted allocator
     /// and include this node's disco key plus the peer's disco key.
@@ -294,6 +307,17 @@ impl Handle {
 pub enum PeerRelayRequestError {
     #[error("direct UDP transport stopped")]
     Closed,
+}
+
+/// Lifecycle state of a peer relay endpoint known to the direct-UDP adapter.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PeerRelayEndpointState {
+    /// No fresh relay endpoint is known for the peer.
+    Missing,
+    /// A fresh endpoint is binding or waiting for path verification.
+    Negotiating,
+    /// The endpoint is bound, verified, and within its steady-state lifetime.
+    Active,
 }
 
 struct PeerRelayRequest {
@@ -1243,8 +1267,9 @@ fn apply_peer_update(shared: &Shared, nodes: Vec<Node>) -> Vec<DiscoAction> {
             None
         };
         let relay_endpoint = previous_peer
+            .filter(|peer| peer.disco_key == node.disco_key)
             .and_then(|peer| peer.relay_endpoint.clone())
-            .filter(|relay| relay.is_fresh(now));
+            .filter(|relay| relay.remote_disco == node.disco_key && relay.is_fresh(now));
         let direct_probe = if verified_endpoint.is_some() || endpoints.is_empty() {
             DirectProbeState::Inactive
         } else if candidates_unchanged {
@@ -1807,6 +1832,12 @@ fn apply_peer_relay_request(shared: &Shared, request: PeerRelayRequest) -> Vec<D
     let peer_key = *request.peer.as_bytes();
     let mut state = shared.state.lock().unwrap();
     if !state.peers_by_node.contains_key(&peer_key) {
+        if request.response_generation.is_none() {
+            tracing::debug!(
+                "rust tailnet discarded proactive UDP peer relay request for absent peer"
+            );
+            return Vec::new();
+        }
         state.pending_peer_relays.insert(
             peer_key,
             PendingPeerRelayRequest {
@@ -1845,7 +1876,7 @@ fn apply_known_peer_relay_request(
     if let Some(relay) = peer
         .relay_endpoint
         .as_ref()
-        .filter(|relay| relay.is_fresh(now))
+        .filter(|relay| relay.remote_disco == peer.disco_key && relay.is_fresh(now))
     {
         tracing::debug!(
             relay_addr = %relay.addr,
@@ -2304,6 +2335,34 @@ fn path_for_peer(shared: &Shared, peer: NodePublic) -> PeerPath {
         state.remove_relay_keys_for_peer(peer.as_bytes());
     }
     PeerPath::derp_relay(preferred_derp)
+}
+
+fn peer_relay_endpoint_state(
+    shared: &Shared,
+    peer: NodePublic,
+    peer_disco: DiscoPublic,
+    now: Instant,
+) -> PeerRelayEndpointState {
+    let state = shared.state.lock().unwrap();
+    let Some(peer) = state.peers_by_node.get(peer.as_bytes()) else {
+        return PeerRelayEndpointState::Missing;
+    };
+    if peer.disco_key != peer_disco {
+        return PeerRelayEndpointState::Missing;
+    }
+    let Some(relay) = peer.relay_endpoint.as_ref() else {
+        return PeerRelayEndpointState::Missing;
+    };
+    if relay.remote_disco != peer_disco {
+        return PeerRelayEndpointState::Missing;
+    }
+    if relay.active_addr(now).is_some() {
+        PeerRelayEndpointState::Active
+    } else if relay.is_fresh(now) {
+        PeerRelayEndpointState::Negotiating
+    } else {
+        PeerRelayEndpointState::Missing
+    }
 }
 
 fn is_usable_direct_endpoint(endpoint: SocketAddr) -> bool {
@@ -3061,7 +3120,15 @@ mod tests {
 
     #[test]
     fn unverified_peer_relay_retries_bind_and_notification() {
-        let (shared, _peer_node) = peer_relay_retry_fixture();
+        let (shared, peer_node) = peer_relay_retry_fixture();
+        let peer_disco = shared
+            .state
+            .lock()
+            .unwrap()
+            .peers_by_node
+            .get(peer_node.as_bytes())
+            .unwrap()
+            .disco_key;
 
         let retries = retry_unverified_peer_relay_negotiation(&shared, Instant::now());
 
@@ -3071,6 +3138,135 @@ mod tests {
             Message::BindUDPRelayEndpoint(_)
         ));
         assert!(matches!(retries[1].message, Message::CallMeMaybeVia(_)));
+        assert_eq!(
+            peer_relay_endpoint_state(&shared, peer_node, peer_disco, Instant::now()),
+            PeerRelayEndpointState::Negotiating
+        );
+    }
+
+    #[test]
+    fn peer_relay_endpoint_state_reports_active_then_expired() {
+        let (shared, peer_node) = peer_relay_retry_fixture();
+        let now = Instant::now();
+        let peer_disco = {
+            let mut state = shared.state.lock().unwrap();
+            let peer = state.peers_by_node.get_mut(peer_node.as_bytes()).unwrap();
+            let peer_disco = peer.disco_key;
+            let relay = peer.relay_endpoint.as_mut().unwrap();
+            relay.mark_bound(now);
+            relay.mark_verified(now);
+            peer_disco
+        };
+        assert_eq!(
+            peer_relay_endpoint_state(&shared, peer_node, peer_disco, now),
+            PeerRelayEndpointState::Active
+        );
+
+        {
+            let mut state = shared.state.lock().unwrap();
+            state
+                .peers_by_node
+                .get_mut(peer_node.as_bytes())
+                .unwrap()
+                .relay_endpoint
+                .as_mut()
+                .unwrap()
+                .steady_expires_at = Some(now - Duration::from_millis(1));
+        }
+        assert_eq!(
+            peer_relay_endpoint_state(&shared, peer_node, peer_disco, now),
+            PeerRelayEndpointState::Missing
+        );
+    }
+
+    #[test]
+    fn peer_disco_rotation_discards_old_relay_identity() {
+        let local_secret = StaticSecret::random_from_rng(OsRng);
+        let peer_secret = StaticSecret::random_from_rng(OsRng);
+        let local_node = NodePublic::from_raw(PublicKey::from(&local_secret).to_bytes());
+        let peer_node = NodePublic::from_raw(PublicKey::from(&peer_secret).to_bytes());
+        let local_disco = DiscoPrivate::generate(&mut OsRng);
+        let old_peer_disco = DiscoPrivate::generate(&mut OsRng).public();
+        let new_peer_disco = DiscoPrivate::generate(&mut OsRng).public();
+        let options = Options::new(
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+            Vec::new(),
+            local_node,
+            local_disco.clone(),
+        );
+        let shared = shared_for_test(&options);
+        let _ = apply_peer_update(
+            &shared,
+            vec![node_with_endpoints(
+                peer_node,
+                old_peer_disco,
+                Vec::new(),
+                B_IP,
+            )],
+        );
+
+        let relay_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 41641);
+        let endpoint = udp_relay_endpoint(
+            DiscoPrivate::generate(&mut OsRng).public(),
+            local_disco.public(),
+            old_peer_disco,
+            9001,
+            relay_addr,
+        );
+        assert_eq!(
+            apply_peer_relay_request(
+                &shared,
+                PeerRelayRequest {
+                    peer: peer_node,
+                    bind_endpoint: endpoint.clone(),
+                    advertise_endpoint: endpoint,
+                    response_generation: None,
+                },
+            )
+            .len(),
+            2
+        );
+        {
+            let mut state = shared.state.lock().unwrap();
+            let relay = state
+                .peers_by_node
+                .get_mut(peer_node.as_bytes())
+                .unwrap()
+                .relay_endpoint
+                .as_mut()
+                .unwrap();
+            let now = Instant::now();
+            relay.mark_bound(now);
+            relay.mark_verified(now);
+        }
+        assert_eq!(
+            peer_relay_endpoint_state(&shared, peer_node, old_peer_disco, Instant::now()),
+            PeerRelayEndpointState::Active
+        );
+
+        let _ = apply_peer_update(
+            &shared,
+            vec![node_with_endpoints(
+                peer_node,
+                new_peer_disco,
+                Vec::new(),
+                B_IP,
+            )],
+        );
+
+        assert_eq!(
+            peer_relay_endpoint_state(&shared, peer_node, old_peer_disco, Instant::now()),
+            PeerRelayEndpointState::Missing
+        );
+        assert_eq!(
+            peer_relay_endpoint_state(&shared, peer_node, new_peer_disco, Instant::now()),
+            PeerRelayEndpointState::Missing
+        );
+        let state = shared.state.lock().unwrap();
+        let peer = state.peers_by_node.get(peer_node.as_bytes()).unwrap();
+        assert_eq!(peer.disco_key, new_peer_disco);
+        assert!(peer.relay_endpoint.is_none());
+        assert!(state.peers_by_relay.is_empty());
     }
 
     #[test]
@@ -3536,7 +3732,7 @@ mod tests {
     }
 
     #[test]
-    fn peer_relay_request_waits_for_late_peer_update() {
+    fn peer_relay_allocation_answer_waits_for_late_peer_update() {
         let local_secret = StaticSecret::random_from_rng(OsRng);
         let peer_secret = StaticSecret::random_from_rng(OsRng);
         let local_node = NodePublic::from_raw(PublicKey::from(&local_secret).to_bytes());
@@ -3571,12 +3767,12 @@ mod tests {
                 peer: peer_node,
                 bind_endpoint: endpoint,
                 advertise_endpoint: advertised_endpoint.clone(),
-                response_generation: None,
+                response_generation: Some(77),
             },
         );
         assert!(
             actions.is_empty(),
-            "unknown-peer relay requests should wait for the peer update"
+            "authenticated allocation answers should wait for the peer update"
         );
 
         let actions = apply_peer_update(
@@ -3593,16 +3789,73 @@ mod tests {
             _ => panic!("expected relay bind action"),
         }
         match &actions[1].message {
-            Message::CallMeMaybeVia(CallMeMaybeVia { endpoint }) => {
-                assert_eq!(endpoint.addr_ports, vec![advertised_addr]);
-                assert_eq!(endpoint.vni, 9001);
+            Message::AllocateUDPRelayEndpointResponse(response) => {
+                assert_eq!(response.generation, 77);
+                assert_eq!(response.endpoint.addr_ports, vec![advertised_addr]);
+                assert_eq!(response.endpoint.vni, 9001);
             }
-            other => panic!("expected CallMeMaybeVia action, got {other:?}"),
+            other => panic!("expected AllocateUDPRelayEndpointResponse action, got {other:?}"),
         }
         let state = shared.state.lock().unwrap();
         assert!(state.pending_peer_relays.is_empty());
         let peer = state.peers_by_node.get(peer_node.as_bytes()).unwrap();
         assert_eq!(peer.relay_endpoint.as_ref().unwrap().addr, bind_addr);
+    }
+
+    #[test]
+    fn proactive_peer_relay_completion_while_absent_is_not_deferred() {
+        let local_secret = StaticSecret::random_from_rng(OsRng);
+        let peer_secret = StaticSecret::random_from_rng(OsRng);
+        let local_node = NodePublic::from_raw(PublicKey::from(&local_secret).to_bytes());
+        let peer_node = NodePublic::from_raw(PublicKey::from(&peer_secret).to_bytes());
+        let local_disco = DiscoPrivate::generate(&mut OsRng);
+        let peer_disco = DiscoPrivate::generate(&mut OsRng).public();
+        let options = Options::new(
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+            Vec::new(),
+            local_node,
+            local_disco.clone(),
+        );
+        let shared = shared_for_test(&options);
+        let endpoint = udp_relay_endpoint(
+            DiscoPrivate::generate(&mut OsRng).public(),
+            local_disco.public(),
+            peer_disco,
+            9001,
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 41641),
+        );
+
+        let actions = apply_peer_relay_request(
+            &shared,
+            PeerRelayRequest {
+                peer: peer_node,
+                bind_endpoint: endpoint.clone(),
+                advertise_endpoint: endpoint,
+                response_generation: None,
+            },
+        );
+        assert!(actions.is_empty());
+        assert!(
+            shared.state.lock().unwrap().pending_peer_relays.is_empty(),
+            "a proactive completion for an absent peer must not persist"
+        );
+
+        let actions = apply_peer_update(
+            &shared,
+            vec![node_with_endpoints(peer_node, peer_disco, Vec::new(), B_IP)],
+        );
+        assert!(actions.is_empty());
+        let state = shared.state.lock().unwrap();
+        assert!(state.pending_peer_relays.is_empty());
+        assert!(
+            state
+                .peers_by_node
+                .get(peer_node.as_bytes())
+                .unwrap()
+                .relay_endpoint
+                .is_none(),
+            "a later peer update must not resurrect the stale completion"
+        );
     }
 
     #[tokio::test]
