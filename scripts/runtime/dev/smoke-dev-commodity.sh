@@ -2155,12 +2155,65 @@ run_tailnet_doctor() {
     if [[ -s "$stdout" ]]; then
       sed 's/[[:cntrl:]]//g' "$stdout" >&2 || true
     fi
+    capture_tailnet_doctor_failure_diagnostics
     die "tailnet doctor probe failed; evidence in $stdout and $stderr"
   fi
   log "tailnet doctor probe passed; evidence in $stdout"
   assert_tailnet_doctor_endpoint_evidence "$stdout"
   discover_runtime_objects
   assert_gateway_tailnet_log_evidence
+}
+
+capture_tailnet_doctor_failure_diagnostics() {
+  local marker="rust gateway UDP peer relay allocation diagnostic"
+  local output="$TMPDIR_SMOKE/gateway-tailnet-allocator-doctor-failure.log"
+  local -a pipeline_status
+
+  if [[ -z "$GATEWAY_POD_NAME" ]] && ! gateway_pod_exists; then
+    log "tailnet doctor failure allocator diagnostics unavailable: gateway pod not found"
+    return 0
+  fi
+
+  set +e
+  kubectl_dev -n "$SANDBOX_NAMESPACE" logs "$GATEWAY_POD_NAME" -c codewire-gateway --tail=200 2>/dev/null \
+    | awk -v marker="$marker" '
+        index($0, marker) {
+          outcome = path = peer_count = queued_count = in_flight_count = attempt_count = failure_count = ""
+          for (field = 1; field <= NF; field++) {
+            split($field, pair, "=")
+            value = pair[2]
+            gsub(/"/, "", value)
+            if (pair[1] == "outcome") outcome = value
+            if (pair[1] == "path") path = value
+            if (pair[1] == "peer_count") peer_count = value
+            if (pair[1] == "queued_count") queued_count = value
+            if (pair[1] == "in_flight_count") in_flight_count = value
+            if (pair[1] == "attempt_count") attempt_count = value
+            if (pair[1] == "failure_count") failure_count = value
+          }
+          if (outcome ~ /^(started|queued|retry_scheduled|answer_retry_deferred)$/ &&
+              path == "peer_relay" &&
+              peer_count ~ /^[0-9]+$/ && queued_count ~ /^[0-9]+$/ &&
+              in_flight_count ~ /^[0-9]+$/ && attempt_count ~ /^[0-9]+$/ &&
+              failure_count ~ /^[0-9]+$/) {
+            printf "outcome=%s path=%s peer_count=%s queued_count=%s in_flight_count=%s attempt_count=%s failure_count=%s\\n", outcome, path, peer_count, queued_count, in_flight_count, attempt_count, failure_count
+          }
+        }
+      ' >"$output"
+  pipeline_status=("${PIPESTATUS[@]}")
+  set -e
+
+  if (( pipeline_status[0] != 0 )); then
+    log "tailnet doctor failure allocator diagnostics unavailable: gateway log read failed"
+    return 0
+  fi
+  if (( pipeline_status[1] != 0 )) || [[ ! -s "$output" ]]; then
+    log "tailnet doctor failure allocator diagnostics found no value-blind events"
+    return 0
+  fi
+
+  sed 's/[[:cntrl:]]//g' "$output" >&2 || true
+  log "tailnet doctor failure allocator diagnostics captured in $output"
 }
 
 assert_tailnet_doctor_endpoint_evidence() {

@@ -24,7 +24,8 @@ use url::Url;
 use crate::config::{GatewayConfig, StunConfig, TailnetConfig};
 
 const COORDINATOR_RETRY_DELAY: Duration = Duration::from_secs(5);
-const PEER_RELAY_ALLOCATION_RETRY_DELAY: Duration = Duration::from_secs(30);
+const PEER_RELAY_ALLOCATION_RETRY_DELAY: Duration = Duration::from_millis(250);
+const PEER_RELAY_ALLOCATION_RECONCILE_INTERVAL: Duration = Duration::from_millis(100);
 
 #[derive(Clone)]
 pub struct TailnetRuntime {
@@ -82,7 +83,8 @@ pub async fn connect_tailnet(
             )
         })
     });
-    if let (Some(allocator), Some(handle)) = (&peer_relay_allocator, &direct_udp_handle)
+    if let Some(allocator) = &peer_relay_allocator
+        && let Some(handle) = &direct_udp_handle
         && let Some(events) = handle.take_peer_relay_allocation_events()
     {
         allocator.spawn_allocation_responder(events);
@@ -197,29 +199,83 @@ struct PeerRelayKey {
 
 #[derive(Default)]
 struct PeerRelayAllocationTracker {
+    peers: HashSet<PeerRelayKey>,
+    queued: HashSet<PeerRelayKey>,
     in_flight: HashSet<PeerRelayKey>,
     last_started: HashMap<PeerRelayKey, Instant>,
+    attempts: usize,
+    failures: usize,
+}
+
+#[derive(Clone, Copy)]
+struct PeerRelayAllocationState {
+    peer_count: usize,
+    queued_count: usize,
+    in_flight_count: usize,
+    attempts: usize,
+    failures: usize,
 }
 
 impl PeerRelayAllocationTracker {
-    fn begin(&mut self, key: PeerRelayKey, now: Instant) -> bool {
-        if self.in_flight.contains(&key) {
-            return false;
-        }
-        if self
-            .last_started
-            .get(&key)
-            .is_some_and(|last| now.duration_since(*last) < PEER_RELAY_ALLOCATION_RETRY_DELAY)
-        {
-            return false;
-        }
-        self.in_flight.insert(key);
-        self.last_started.insert(key, now);
-        true
+    fn replace_peers(&mut self, peers: impl IntoIterator<Item = PeerRelayKey>) {
+        self.peers = peers.into_iter().collect();
+        self.queued.retain(|key| self.peers.contains(key));
+        self.in_flight.retain(|key| self.peers.contains(key));
+        self.last_started.retain(|key, _| self.peers.contains(key));
     }
 
-    fn finish(&mut self, key: PeerRelayKey) {
+    fn begin_pending(
+        &mut self,
+        now: Instant,
+        mut peer_relay_ready: impl FnMut(PeerRelayKey) -> bool,
+    ) -> Vec<PeerRelayKey> {
+        let keys = self.peers.iter().copied().collect::<Vec<_>>();
+        let mut started = Vec::new();
+        for key in keys {
+            if self.queued.contains(&key) || self.in_flight.contains(&key) {
+                continue;
+            }
+            if peer_relay_ready(key) {
+                self.queued.insert(key);
+                continue;
+            }
+            if self
+                .last_started
+                .get(&key)
+                .is_some_and(|last| now.duration_since(*last) < PEER_RELAY_ALLOCATION_RETRY_DELAY)
+            {
+                continue;
+            }
+            self.in_flight.insert(key);
+            self.last_started.insert(key, now);
+            self.attempts += 1;
+            started.push(key);
+        }
+        started
+    }
+
+    fn finish_success(&mut self, key: PeerRelayKey) -> PeerRelayAllocationState {
         self.in_flight.remove(&key);
+        if self.peers.contains(&key) {
+            self.queued.insert(key);
+        }
+        self.state()
+    }
+
+    fn finish_failure(&mut self, key: PeerRelayKey) -> PeerRelayAllocationState {
+        self.in_flight.remove(&key);
+        self.failures += 1;
+        self.state()
+    }
+
+    fn state(&self) -> PeerRelayAllocationState {
+        PeerRelayAllocationState {
+            peer_count: self.peers.len(),
+            queued_count: self.queued.len(),
+            in_flight_count: self.in_flight.len(),
+            attempts: self.attempts,
+            failures: self.failures,
+        }
     }
 }
 
@@ -242,42 +298,83 @@ impl PeerRelayAllocator {
         }
     }
 
-    fn request_for_peers(&self, nodes: &[Node]) {
-        for node in nodes {
+    fn observe_peers(&self, nodes: &[Node]) {
+        let peers = nodes.iter().filter_map(|node| {
             if node.key.is_zero() || node.disco_key.is_zero() || node.disco_key == self.local_disco
             {
-                continue;
+                return None;
             }
-            if self.handle.path_for_peer(&node.key).transport == PeerTransport::PeerRelay {
-                continue;
-            }
-            let key = PeerRelayKey {
+            Some(PeerRelayKey {
                 peer: node.key,
                 peer_disco: node.disco_key,
-            };
-            if !self.begin_allocation(key) {
-                continue;
+            })
+        });
+        self.allocations.lock().unwrap().replace_peers(peers);
+        self.reconcile_allocations();
+    }
+
+    fn spawn_reconciler(&self) -> tokio::task::JoinHandle<()> {
+        let allocator = self.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(PEER_RELAY_ALLOCATION_RECONCILE_INTERVAL);
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                interval.tick().await;
+                allocator.reconcile_allocations();
             }
+        })
+    }
+
+    fn reconcile_allocations(&self) {
+        let (pending, state) = {
+            let mut allocations = self.allocations.lock().unwrap();
+            let pending = allocations.begin_pending(Instant::now(), |key| {
+                self.handle.path_for_peer(&key.peer).transport == PeerTransport::PeerRelay
+            });
+            let state = allocations.state();
+            (pending, state)
+        };
+        for key in pending {
+            self.log_allocation_diagnostic("started", state);
             let allocator = self.clone();
             tokio::spawn(async move {
-                if let Err(err) = allocator.allocate_once(key).await {
-                    tracing::debug!(
-                        peer = ?key.peer,
-                        error = %err,
-                        "rust gateway UDP peer relay allocation failed"
-                    );
+                match allocator.allocate_once(key).await {
+                    Ok(()) => {
+                        let state = allocator.finish_allocation_success(key);
+                        allocator.log_allocation_diagnostic("queued", state);
+                    }
+                    Err(_) => {
+                        let state = allocator.finish_allocation_failure(key);
+                        allocator.log_allocation_diagnostic("retry_scheduled", state);
+                    }
                 }
-                allocator.finish_allocation(key);
             });
         }
     }
 
-    fn begin_allocation(&self, key: PeerRelayKey) -> bool {
-        self.allocations.lock().unwrap().begin(key, Instant::now())
+    fn finish_allocation_success(&self, key: PeerRelayKey) -> PeerRelayAllocationState {
+        self.allocations.lock().unwrap().finish_success(key)
     }
 
-    fn finish_allocation(&self, key: PeerRelayKey) {
-        self.allocations.lock().unwrap().finish(key);
+    fn finish_allocation_failure(&self, key: PeerRelayKey) -> PeerRelayAllocationState {
+        self.allocations.lock().unwrap().finish_failure(key)
+    }
+
+    fn allocation_state(&self) -> PeerRelayAllocationState {
+        self.allocations.lock().unwrap().state()
+    }
+
+    fn log_allocation_diagnostic(&self, outcome: &str, state: PeerRelayAllocationState) {
+        tracing::info!(
+            outcome,
+            path = "peer_relay",
+            peer_count = state.peer_count,
+            queued_count = state.queued_count,
+            in_flight_count = state.in_flight_count,
+            attempt_count = state.attempts,
+            failure_count = state.failures,
+            "rust gateway UDP peer relay allocation diagnostic"
+        );
     }
 
     async fn allocate_once(&self, key: PeerRelayKey) -> Result<()> {
@@ -296,8 +393,9 @@ impl PeerRelayAllocator {
         event: direct_udp::PeerRelayAllocationEvent,
     ) -> Result<()> {
         tracing::info!(
-            generation = event.generation,
-            "rust gateway UDP peer relay allocation request accepted"
+            outcome = "answer_requested",
+            path = "peer_relay",
+            "rust gateway UDP peer relay allocation responder"
         );
         let (endpoint, bind_endpoint) = self
             .allocate_endpoint(event.client_disco, event.generation)
@@ -311,8 +409,9 @@ impl PeerRelayAllocator {
             )
             .context("answer UDP peer relay allocation")?;
         tracing::info!(
-            generation = event.generation,
-            "rust gateway UDP peer relay allocation response queued"
+            outcome = "answer_queued",
+            path = "peer_relay",
+            "rust gateway UDP peer relay allocation responder"
         );
         Ok(())
     }
@@ -342,9 +441,8 @@ impl PeerRelayAllocator {
             .json()
             .await
             .context("decode UDP peer relay allocation")?;
-        tracing::info!(
-            generation = response.generation,
-            relay_vni = response.endpoint.vni,
+        tracing::debug!(
+            outcome = "endpoint_received",
             relay_addr_count = response.endpoint.addr_ports.len(),
             "rust gateway UDP peer relay allocator returned endpoint"
         );
@@ -367,10 +465,10 @@ impl PeerRelayAllocator {
             while let Some(event) = events.recv().await {
                 let allocator = allocator.clone();
                 tokio::spawn(async move {
-                    if let Err(err) = allocator.answer_allocation_once(event).await {
-                        tracing::debug!(
-                            error = %err,
-                            "rust gateway UDP peer relay allocation response failed"
+                    if allocator.answer_allocation_once(event).await.is_err() {
+                        allocator.log_allocation_diagnostic(
+                            "answer_retry_deferred",
+                            allocator.allocation_state(),
                         );
                     }
                 });
@@ -488,6 +586,9 @@ async fn run_coordinator_once(runtime: TailnetRuntime, config: &TailnetConfig) -
     let conn = runtime.conn();
     let peer_relay_allocator = runtime.peer_relay_allocator;
     let mut coordinator = connect_coordinator(config).await?;
+    let peer_relay_reconciler = peer_relay_allocator
+        .as_ref()
+        .map(PeerRelayAllocator::spawn_reconciler);
     let (node_tx, node_rx) = mpsc::unbounded_channel();
     conn.set_node_callback(move |node| {
         let _ = node_tx.send(node.clone());
@@ -507,7 +608,7 @@ async fn run_coordinator_once(runtime: TailnetRuntime, config: &TailnetConfig) -
                 tracing::warn!(error = %err, "apply tailnet peer update failed");
             }
             if let Some(allocator) = &peer_relay_allocator {
-                allocator.request_for_peers(nodes);
+                allocator.observe_peers(nodes);
             }
         },
         on_derp_map: |_| {
@@ -519,6 +620,9 @@ async fn run_coordinator_once(runtime: TailnetRuntime, config: &TailnetConfig) -
         .await
         .map_err(anyhow::Error::from)
         .context("run typed tailnet coordinator");
+    if let Some(reconciler) = peer_relay_reconciler {
+        reconciler.abort();
+    }
     conn.clear_node_callback();
     result
 }
@@ -772,7 +876,7 @@ mod tests {
     }
 
     #[test]
-    fn peer_relay_allocation_tracker_rate_limits_repeated_peer_updates() {
+    fn peer_relay_allocation_tracker_recovers_without_a_peer_update() {
         let key = PeerRelayKey {
             peer: NodePublic::from_raw([0x11; 32]),
             peer_disco: DiscoPublic::from_raw([0x22; 32]),
@@ -780,23 +884,54 @@ mod tests {
         let mut tracker = PeerRelayAllocationTracker::default();
         let now = Instant::now();
 
-        assert!(tracker.begin(key, now));
-        assert!(
-            !tracker.begin(key, now + Duration::from_secs(1)),
-            "in-flight allocation should suppress duplicate peer updates"
+        tracker.replace_peers([key]);
+        assert_eq!(
+            tracker.begin_pending(now, |_| false),
+            vec![key],
+            "the first observed peer starts one allocation"
         );
+        assert!(tracker.begin_pending(now, |_| false).is_empty());
 
-        tracker.finish(key);
+        let failure = tracker.finish_failure(key);
+        assert_eq!(failure.attempts, 1);
+        assert_eq!(failure.failures, 1);
         assert!(
-            !tracker.begin(key, now + Duration::from_secs(1)),
-            "recently attempted allocation should stay rate-limited after completion"
+            tracker
+                .begin_pending(
+                    now + PEER_RELAY_ALLOCATION_RETRY_DELAY - Duration::from_millis(1),
+                    |_| false
+                )
+                .is_empty(),
+            "the retry cadence still suppresses rapid duplicates"
         );
-        assert!(
-            tracker.begin(
-                key,
-                now + PEER_RELAY_ALLOCATION_RETRY_DELAY + Duration::from_millis(1)
+        assert_eq!(
+            tracker.begin_pending(
+                now + PEER_RELAY_ALLOCATION_RETRY_DELAY + Duration::from_millis(1),
+                |_| false,
             ),
-            "allocation can retry after the cooldown"
+            vec![key],
+            "the failed first attempt retries without another peer snapshot"
+        );
+    }
+
+    #[test]
+    fn peer_relay_allocation_tracker_preserves_unverified_relay_notification_retry() {
+        let key = PeerRelayKey {
+            peer: NodePublic::from_raw([0x11; 32]),
+            peer_disco: DiscoPublic::from_raw([0x22; 32]),
+        };
+        let mut tracker = PeerRelayAllocationTracker::default();
+        let now = Instant::now();
+
+        tracker.replace_peers([key]);
+        assert_eq!(tracker.begin_pending(now, |_| false), vec![key]);
+        let success = tracker.finish_success(key);
+        assert_eq!(success.queued_count, 1);
+        assert!(
+            tracker
+                .begin_pending(now + PEER_RELAY_ALLOCATION_RETRY_DELAY * 4, |_| false)
+                .is_empty(),
+            "a queued relay leaves bind and CallMeMaybe retry ownership to codewire-tailnet"
         );
     }
 
