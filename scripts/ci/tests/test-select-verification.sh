@@ -1063,6 +1063,11 @@ fi
 standard_toolchain_condition="$(grep -A1 -F \
   'uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b' \
   "$standard_block")"
+grep -qF "contains(needs.verification-selection.outputs.selection, '|policy|')" \
+  <<<"$standard_toolchain_condition" || {
+  echo 'standard: Rust toolchain omits policy artifact-impact fixtures' >&2
+  exit 1
+}
 grep -qF "contains(needs.verification-selection.outputs.selection, '|contracts_rest|')" \
   <<<"$standard_toolchain_condition" || {
   echo 'standard: Rust toolchain omits transitional REST mode' >&2
