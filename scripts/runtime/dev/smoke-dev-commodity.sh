@@ -2422,7 +2422,10 @@ run_tailnet_doctor() {
   fi
   if [[ "$doctor_rc" != "0" ]]; then
     sed 's/[[:cntrl:]]//g' "$stderr" >&2 || true
-    capture_tailnet_client_failure_diagnostics "$stdout"
+    if ! capture_tailnet_client_failure_diagnostics "$stdout"; then
+      capture_tailnet_doctor_failure_diagnostics
+      die "tailnet doctor client diagnostics unavailable: invalid report"
+    fi
     if [[ -n "$SMOKE_ARTIFACT_DIR" \
       && -s "$SMOKE_ARTIFACT_DIR/client-tailnet-peer-relay.json" ]]; then
       sed 's/[[:cntrl:]]//g' \
@@ -2443,11 +2446,18 @@ capture_tailnet_client_failure_diagnostics() {
   local doctor_json="$1"
   local output
 
-  [[ -n "$SMOKE_ARTIFACT_DIR" && -s "$doctor_json" ]] || return 0
+  [[ -n "$SMOKE_ARTIFACT_DIR" ]] || return 0
+  if [[ ! -s "$doctor_json" ]]; then
+    log "tailnet doctor client diagnostics unavailable: missing report"
+    return 1
+  fi
   output="$SMOKE_ARTIFACT_DIR/client-tailnet-peer-relay.json"
   mkdir -p "$SMOKE_ARTIFACT_DIR"
   if ! jq -e '
-      {
+      .direct
+      | select(type == "object")
+      | select(.stages | type == "array")
+      | {
         schema: "codewire-tailnet-peer-relay-diagnostic-v1",
         stages: [
           .stages[]?
@@ -2502,11 +2512,10 @@ capture_tailnet_client_failure_diagnostics() {
             end
         )
       }
-      | select(.stages | type == "array")
     ' "$doctor_json" >"$output"; then
     rm -f "$output"
-    log "tailnet doctor client diagnostics unavailable: invalid JSON"
-    return 0
+    log "tailnet doctor client diagnostics unavailable: invalid report"
+    return 1
   fi
   log "tailnet doctor client diagnostics captured in $output"
 }

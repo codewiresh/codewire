@@ -132,50 +132,56 @@ run_safe_client_diagnostic_case() {
   jq -n --arg sentinel "$SENSITIVE_SENTINEL" '{
     environment_id: $sentinel,
     server_url: $sentinel,
-    forced_derp: false,
-    direct_wait: "5s",
-    stages: [{
-      name: "path",
-      status: "failed",
-      detail: $sentinel,
-      duration_ms: 5001
-    }],
-    peer: {
-      id: $sentinel,
-      preferred_derp: 1,
-      endpoints: [$sentinel],
-      addresses: [$sentinel]
+    expect: "udp_relay",
+    direct: {
+      environment_id: $sentinel,
+      server_url: $sentinel,
+      forced_derp: false,
+      direct_wait: "5s",
+      stages: [{
+        name: "path",
+        status: "fail",
+        detail: $sentinel,
+        duration_ms: 5001
+      }],
+      peer: {
+        id: $sentinel,
+        preferred_derp: 1,
+        endpoints: [$sentinel],
+        addresses: [$sentinel]
+      },
+      direct_path: {
+        ready: true,
+        transport: "derp",
+        endpoint: $sentinel,
+        derp_region_id: 1,
+        error: $sentinel
+      },
+      final_path: {
+        ready: true,
+        transport: "derp",
+        endpoint: $sentinel,
+        derp_region_id: 1,
+        error: $sentinel
+      },
+      peer_relay: {
+        state: "negotiating",
+        derp_disco_received: 2,
+        notifications_opened: 2,
+        notifications_unknown_peer: 1,
+        notifications_received: 1,
+        notification_actions: 1,
+        notification_no_actions: 0,
+        relay_disco_sent: 3,
+        relay_disco_send_failures: 0,
+        relay_disco_received: 0,
+        relay_drops: 0,
+        relay_unmatched: 0,
+        relay_wg_sent: 0,
+        relay_wg_received: 0
+      }
     },
-    direct_path: {
-      ready: true,
-      transport: "derp",
-      endpoint: $sentinel,
-      derp_region_id: 1,
-      error: $sentinel
-    },
-    final_path: {
-      ready: true,
-      transport: "derp",
-      endpoint: $sentinel,
-      derp_region_id: 1,
-      error: $sentinel
-    },
-    peer_relay: {
-      state: "negotiating",
-      derp_disco_received: 2,
-      notifications_opened: 2,
-      notifications_unknown_peer: 1,
-      notifications_received: 1,
-      notification_actions: 1,
-      notification_no_actions: 0,
-      relay_disco_sent: 3,
-      relay_disco_send_failures: 0,
-      relay_disco_received: 0,
-      relay_drops: 0,
-      relay_unmatched: 0,
-      relay_wg_sent: 0,
-      relay_wg_received: 0
-    }
+    forced_derp: null
   }' >"$doctor_json"
 
   (
@@ -188,7 +194,7 @@ run_safe_client_diagnostic_case() {
     .schema == "codewire-tailnet-peer-relay-diagnostic-v1"
     and .stages == [{
       name: "path",
-      status: "failed",
+      status: "fail",
       duration_ms: 5001
     }]
     and .direct_path == {
@@ -224,6 +230,26 @@ run_safe_client_diagnostic_case() {
   if jq -e 'has("environment_id") or has("server_url") or has("peer")' \
       "$captured" >/dev/null; then
     fail "client diagnostic retained identity or server fields"
+  fi
+
+  jq '.direct' "$doctor_json" >"$case_dir/inner-only.json"
+  if (
+    source <(sed '$d' "$SMOKE")
+    SMOKE_ARTIFACT_DIR="$case_dir/inner-only-artifact"
+    capture_tailnet_client_failure_diagnostics "$case_dir/inner-only.json"
+  ); then
+    fail "client diagnostic accepted the obsolete inner-only report shape"
+  fi
+  [[ ! -e "$case_dir/inner-only-artifact/client-tailnet-peer-relay.json" ]] || \
+    fail "invalid client diagnostic left a misleading artifact"
+
+  : >"$case_dir/empty.json"
+  if (
+    source <(sed '$d' "$SMOKE")
+    SMOKE_ARTIFACT_DIR="$case_dir/empty-artifact"
+    capture_tailnet_client_failure_diagnostics "$case_dir/empty.json"
+  ); then
+    fail "client diagnostic accepted a missing doctor report"
   fi
 }
 
