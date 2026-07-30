@@ -88,6 +88,8 @@ SMOKE_PACKET_CAPTURE_PID=""
 SMOKE_PACKET_CAPTURE_RAW=""
 SMOKE_PACKET_CAPTURE_ERROR=""
 SMOKE_PACKET_CAPTURE_SUMMARY=""
+SMOKE_PACKET_CAPTURE_STATUS=""
+SMOKE_PACKET_CAPTURE_UNAVAILABLE=0
 declare -a SMOKE_ONLY_PHASES=()
 
 usage() {
@@ -482,8 +484,45 @@ summarize_peer_relay_packet_headers() {
     }' >"$output_file"
 }
 
+classify_peer_relay_packet_capture_error() {
+  local error_file="$1"
+
+  if grep -Eqi 'permission denied|operation not permitted|not permitted to capture|do not have permission' \
+      "$error_file"; then
+    printf 'permission_denied\n'
+  elif grep -Eqi 'not supported|unsupported|does not support' "$error_file"; then
+    printf 'unsupported\n'
+  elif grep -Eqi 'no such device|device not found|cannot find device' "$error_file"; then
+    printf 'device_unavailable\n'
+  elif grep -Eqi 'syntax error|parse error|invalid filter' "$error_file"; then
+    printf 'filter_invalid\n'
+  else
+    printf 'startup_failed\n'
+  fi
+}
+
+record_peer_relay_packet_capture_unavailable() {
+  local error_file="$1"
+  local output_file="$2"
+  local exit_code="$3"
+  local failure_class
+
+  failure_class="$(classify_peer_relay_packet_capture_error "$error_file")"
+  jq -n \
+    --arg state "unavailable" \
+    --arg failure_class "$failure_class" \
+    --argjson exit_code "$exit_code" \
+    '{
+      state: $state,
+      failure_class: $failure_class,
+      exit_code: $exit_code,
+      payload_captured: false
+    }' >"$output_file"
+}
+
 start_peer_relay_packet_diagnostics() {
   local relay_ip relay_port endpoint_parts route_file staged_headers
+  local capture_exit=0
 
   require_bool01 SMOKE_PACKET_DIAGNOSTICS "$SMOKE_PACKET_DIAGNOSTICS"
   [[ "$SMOKE_PACKET_DIAGNOSTICS" == "1" ]] || return 0
@@ -503,6 +542,7 @@ start_peer_relay_packet_diagnostics() {
   SMOKE_PACKET_CAPTURE_RAW="$TMPDIR_SMOKE/peer-relay-packet-headers.raw"
   SMOKE_PACKET_CAPTURE_ERROR="$TMPDIR_SMOKE/peer-relay-packet-headers.err"
   SMOKE_PACKET_CAPTURE_SUMMARY="$SMOKE_ARTIFACT_DIR/peer-relay-packet-summary.json"
+  SMOKE_PACKET_CAPTURE_STATUS="$SMOKE_ARTIFACT_DIR/peer-relay-packet-capture.json"
 
   ip -j route get "$relay_ip" \
     | jq -e --arg destination "$relay_ip" '
@@ -525,9 +565,27 @@ start_peer_relay_packet_diagnostics() {
     >"$SMOKE_PACKET_CAPTURE_RAW" 2>"$SMOKE_PACKET_CAPTURE_ERROR" &
   SMOKE_PACKET_CAPTURE_PID="$!"
   sleep 1
-  kill -0 "$SMOKE_PACKET_CAPTURE_PID" 2>/dev/null || \
-    die "peer-relay packet diagnostic failed to start"
+  if ! kill -0 "$SMOKE_PACKET_CAPTURE_PID" 2>/dev/null; then
+    set +e
+    wait "$SMOKE_PACKET_CAPTURE_PID" 2>/dev/null
+    capture_exit="$?"
+    set -e
+    SMOKE_PACKET_CAPTURE_PID=""
+    record_peer_relay_packet_capture_unavailable \
+      "$SMOKE_PACKET_CAPTURE_ERROR" \
+      "$SMOKE_PACKET_CAPTURE_STATUS" \
+      "$capture_exit"
+    rm -f "$SMOKE_PACKET_CAPTURE_RAW" "$SMOKE_PACKET_CAPTURE_ERROR"
+    SMOKE_PACKET_CAPTURE_RAW=""
+    SMOKE_PACKET_CAPTURE_ERROR=""
+    SMOKE_PACKET_CAPTURE_UNAVAILABLE=1
+    log "local peer-relay packet capture unavailable; continuing doctor for external exact-tuple observation"
+    return 0
+  fi
   : >"$staged_headers"
+  jq -n \
+    '{state: "active", payload_captured: false}' \
+    >"$SMOKE_PACKET_CAPTURE_STATUS"
   log "started header-only peer-relay packet diagnostic"
 }
 
@@ -553,6 +611,14 @@ stop_peer_relay_packet_diagnostics() {
   SMOKE_PACKET_CAPTURE_RAW=""
   SMOKE_PACKET_CAPTURE_ERROR=""
   outbound="$(jq -er '.packets.outbound' "$SMOKE_PACKET_CAPTURE_SUMMARY")"
+  jq -n \
+    --argjson outbound "$outbound" \
+    --argjson inbound "$(jq -er '.packets.inbound' "$SMOKE_PACKET_CAPTURE_SUMMARY")" \
+    '{
+      state: "complete",
+      packets: {outbound: $outbound, inbound: $inbound},
+      payload_captured: false
+    }' >"$SMOKE_PACKET_CAPTURE_STATUS"
   log "captured peer-relay packet metadata (outbound=$outbound)"
   [[ "$outbound" -gt 0 ]] || {
     log "peer-relay packet diagnostic captured no outbound request"
@@ -2331,6 +2397,9 @@ run_tailnet_doctor() {
   doctor_rc="$?"
   set -e
   stop_peer_relay_packet_diagnostics || packet_rc="$?"
+  if [[ "$SMOKE_PACKET_CAPTURE_UNAVAILABLE" == "1" ]]; then
+    packet_rc=1
+  fi
   if [[ "$doctor_rc" != "0" ]]; then
     sed 's/[[:cntrl:]]//g' "$stderr" >&2 || true
     if [[ -s "$stdout" ]]; then
@@ -2340,7 +2409,7 @@ run_tailnet_doctor() {
     die "tailnet doctor probe failed; evidence in $stdout and $stderr"
   fi
   [[ "$packet_rc" == "0" ]] || \
-    die "peer-relay packet diagnostic did not capture an outbound request"
+    die "local peer-relay packet evidence is incomplete; correlate the external exact-tuple observers"
   log "tailnet doctor probe passed; evidence in $stdout"
   assert_tailnet_doctor_endpoint_evidence "$stdout"
   discover_runtime_objects

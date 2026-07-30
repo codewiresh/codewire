@@ -51,6 +51,11 @@ assert_static_contract() {
     | rg -e '(^|[[:space:]])(-A|-X|-XX|-w)([[:space:]]|$)' >/dev/null; then
     fail "packet diagnostics must not capture packet payloads or pcap files"
   fi
+  rg -F 'local peer-relay packet capture unavailable; continuing doctor' \
+    "$SMOKE" >/dev/null || \
+    fail "packet capture startup failure still suppresses the doctor traffic"
+  rg -F 'peer-relay-packet-capture.json' "$SMOKE" >/dev/null || \
+    fail "packet capture startup status is not preserved"
   if awk '/^capture_tailnet_doctor_failure_diagnostics\(\)/,/^}/' "$SMOKE" \
     | rg -F 'capture_container_log' >/dev/null; then
     fail "tailnet doctor failure diagnostics must not capture full container logs"
@@ -169,9 +174,56 @@ run_packet_header_summary_case() {
   fi
 }
 
+run_packet_capture_startup_failure_case() {
+  local case_dir="$TEST_TMP/packet-capture-startup"
+  local bin_dir="$case_dir/bin"
+  local artifact_dir="$case_dir/artifact"
+  local runtime_dir="$case_dir/runtime"
+  local status_file="$artifact_dir/peer-relay-packet-capture.json"
+
+  mkdir -p "$bin_dir" "$artifact_dir" "$runtime_dir"
+  printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'printf '"'"'%s\n'"'"' '"'"'[{"dst":"192.0.2.35","dev":"eth0","prefsrc":"198.51.100.157","gateway":"172.31.1.1"}]'"'"'' \
+    >"$bin_dir/ip"
+  printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'printf '"'"'%s\n'"'"' '"'"'tcpdump: any: You do not have permission to perform this capture'"'"' >&2' \
+    "printf '%s\\n' 'diagnostic context $SENSITIVE_SENTINEL' >&2" \
+    'exit 1' \
+    >"$bin_dir/tcpdump"
+  chmod +x "$bin_dir/ip" "$bin_dir/tcpdump"
+
+  (
+    source <(sed '$d' "$SMOKE")
+    PATH="$bin_dir:$PATH"
+    TMPDIR_SMOKE="$runtime_dir"
+    SMOKE_ARTIFACT_DIR="$artifact_dir"
+    SMOKE_PACKET_DIAGNOSTICS=1
+    SMOKE_KEEP_ENV=1
+    EXPECTED_TAILNET_PATH_TRANSPORT=peer_relay
+    EXPECTED_TAILNET_PEER_RELAY_ENDPOINT=192.0.2.35:41641
+    start_peer_relay_packet_diagnostics
+    [[ "$SMOKE_PACKET_CAPTURE_UNAVAILABLE" == "1" ]] || \
+      fail "packet capture startup failure did not remain externally observable"
+  )
+
+  jq -e '
+    .state == "unavailable"
+    and .failure_class == "permission_denied"
+    and .exit_code == 1
+    and .payload_captured == false
+  ' "$status_file" >/dev/null || \
+    fail "packet capture startup failure was not classified safely"
+  if grep -F "$SENSITIVE_SENTINEL" "$status_file" >/dev/null; then
+    fail "packet capture status retained raw startup stderr"
+  fi
+}
+
 assert_static_contract
 run_safe_diagnostic_case
 run_environment_artifact_case
 run_packet_header_summary_case
+run_packet_capture_startup_failure_case
 
 printf 'dev commodity smoke safe diagnostic tests: OK\n'
