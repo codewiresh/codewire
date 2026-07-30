@@ -5,6 +5,7 @@ mod assets;
 mod chat;
 mod command_palette;
 mod desktop_settings;
+mod dialogs;
 mod diff_view;
 mod editor;
 mod file_browser;
@@ -28,11 +29,12 @@ mod tests;
 use app_layout::AppLayout;
 use chat::ChatPanel;
 use codewire_client::{
-    ClientConfig, CodewireClient, CredentialStore, EnvironmentState, KeyringCredentialStore,
-    ListEnvironmentsRequest, ListOrganizationsRequest, NativeClientFacade, OAuthClient, OrgRole,
-    RefreshingTokenProvider,
+    ClientConfig, CodewireClient, CredentialStore, DesiredState, Environment, EnvironmentState,
+    KeyringCredentialStore, ListEnvironmentsRequest, ListOrganizationsRequest, NativeClientFacade,
+    OAuthClient, OrgRole, PortAccess, RefreshingTokenProvider,
 };
 use codewire_types::{GitStatus, MergeableState, PrState, PullRequest};
+use dialogs::{LoginDialog, UnavailableDialog, UnavailableDialogDismissed};
 use editor::{
     EditorBackspace, EditorCopy, EditorCut, EditorDelete, EditorEnter, EditorLeft, EditorPaste,
     EditorRight, EditorSelectAll, MoveDown, MoveLineEnd, MoveLineStart, MoveUp, RedoEdit, SaveFile,
@@ -47,14 +49,14 @@ use gpui::{
 use input::{Backspace, Copy, Cut, Delete, Left, Paste, Right, SelectAll};
 use pane_tree::{RemoteConnection, SplitDirection};
 use sidebar::{
-    AddLocalProjectRequested, BillingRequested, CodewireSignInRequested, DashboardRequested,
-    EnvironmentTerminalRequested, LocalBrowseRequested, LocalDiffRequested, LocalProjectExpanded,
-    LocalProjectRemoved, NewOrganizationRequested, NewTerminalRequested,
+    AddLocalProjectRequested, BillingRequested, CodewireSignInRequested, CodewireSignOutRequested,
+    DashboardRequested, EnvironmentTerminalRequested, LocalBrowseRequested, LocalDiffRequested,
+    LocalProjectExpanded, LocalProjectRemoved, NewOrganizationRequested, NewTerminalRequested,
     OrganizationBillingRequested, OrganizationCreateEnvironmentRequested, OrganizationRequested,
-    SettingsRequested, Sidebar, SidebarEnvironment, SidebarOrganization,
+    SettingsRequested, Sidebar, SidebarOrganization,
 };
 use theme::Theme;
-use workspace::WorkspaceIdentity;
+use workspace::{EnvironmentPortSummary, EnvironmentSummary, WorkspaceIdentity};
 
 const DEFAULT_CODEWIRE_URL: &str = "https://codewire.sh";
 const CODEWIRE_POLL_INTERVAL_SECS: u64 = 10;
@@ -103,6 +105,77 @@ pub(crate) fn connected_client() -> Result<Option<CodewireClient>, String> {
 
 pub(crate) fn native_client() -> Result<Option<NativeClientFacade>, String> {
     connected_client().map(|client| client.map(NativeClientFacade::new))
+}
+
+fn environment_summary(environment: Environment) -> EnvironmentSummary {
+    EnvironmentSummary {
+        id: environment.id,
+        name: environment.name,
+        state: environment_state_label(environment.state.as_known()).to_string(),
+        desired_state: desired_state_label(environment.desired_state.as_known()).to_string(),
+        error_reason: environment.error_reason,
+        setup_error: environment.setup_error,
+        cpu_millicores: environment.cpu_millicores,
+        memory_mb: environment.memory_mb,
+        disk_gb: environment.disk_gb,
+        total_running_seconds: environment.total_running_seconds,
+        protected: environment.protected,
+        preset_name: environment.preset_name,
+        network: environment.network,
+        ports: environment
+            .ports
+            .into_iter()
+            .map(|port| EnvironmentPortSummary {
+                port: port.port,
+                label: port.label,
+                access: port_access_label(port.access.as_known()).to_string(),
+                preview_url: port.preview_url,
+            })
+            .collect(),
+    }
+}
+
+fn environment_state_label(state: Option<EnvironmentState>) -> &'static str {
+    match state {
+        Some(EnvironmentState::Pending) => "pending",
+        Some(EnvironmentState::PendingBuild) => "pending_build",
+        Some(EnvironmentState::Building) => "building",
+        Some(EnvironmentState::BuildFailed) => "build_failed",
+        Some(EnvironmentState::PullingSnapshot) => "pulling_snapshot",
+        Some(EnvironmentState::Creating) => "creating",
+        Some(EnvironmentState::Starting) => "starting",
+        Some(EnvironmentState::Running) => "running",
+        Some(EnvironmentState::Stopping) => "stopping",
+        Some(EnvironmentState::Stopped) => "stopped",
+        Some(EnvironmentState::Archiving) => "archiving",
+        Some(EnvironmentState::Archived) => "archived",
+        Some(EnvironmentState::Restoring) => "restoring",
+        Some(EnvironmentState::Resizing) => "resizing",
+        Some(EnvironmentState::Destroying) => "destroying",
+        Some(EnvironmentState::Destroyed) => "destroyed",
+        Some(EnvironmentState::Error) => "error",
+        Some(EnvironmentState::Unknown) | Some(EnvironmentState::Unspecified) | None => "unknown",
+    }
+}
+
+fn desired_state_label(state: Option<DesiredState>) -> &'static str {
+    match state {
+        Some(DesiredState::Started) => "started",
+        Some(DesiredState::Stopped) => "stopped",
+        Some(DesiredState::Destroyed) => "destroyed",
+        Some(DesiredState::Archived) => "archived",
+        Some(DesiredState::Resized) => "resized",
+        Some(DesiredState::Unspecified) | None => "unspecified",
+    }
+}
+
+fn port_access_label(access: Option<PortAccess>) -> &'static str {
+    match access {
+        Some(PortAccess::Public) => "public",
+        Some(PortAccess::OrgMembers) => "organization",
+        Some(PortAccess::Creator) => "creator",
+        Some(PortAccess::Unspecified) | None => "unspecified",
+    }
 }
 
 /// Shared application state available to all windows via GPUI's global system.
@@ -810,6 +883,8 @@ struct AppView {
     status_bar: gpui::Entity<status_bar::StatusBar>,
     quick_open: gpui::Entity<quick_open::QuickOpen>,
     command_palette: gpui::Entity<command_palette::CommandPalette>,
+    login_dialog: Option<gpui::Entity<LoginDialog>>,
+    unavailable_dialog: Option<gpui::Entity<UnavailableDialog>>,
     sidebar_visible: bool,
     focus_handle: FocusHandle,
 }
@@ -825,6 +900,9 @@ impl AppView {
         let chat_panel = cx.new(|cx| ChatPanel::new(cx));
         let wid = window_id.clone();
         let app_layout = cx.new(|cx| AppLayout::new(wid, chat_panel, None, cx));
+        app_layout.update(cx, |layout, cx| {
+            layout.open_workspace(WorkspaceIdentity::dashboard(), cx);
+        });
         let status_bar = cx.new(|cx| status_bar::StatusBar::new(cx));
         let quick_open = cx.new(|cx| quick_open::QuickOpen::new(cx));
         let command_palette = cx.new(|cx| command_palette::CommandPalette::new(cx));
@@ -841,6 +919,8 @@ impl AppView {
         cx.subscribe(&sidebar, Self::on_settings_requested).detach();
         cx.subscribe(&sidebar, Self::on_billing_requested).detach();
         cx.subscribe(&sidebar, Self::on_codewire_sign_in_requested)
+            .detach();
+        cx.subscribe(&sidebar, Self::on_codewire_sign_out_requested)
             .detach();
         cx.subscribe(&sidebar, Self::on_new_organization_requested)
             .detach();
@@ -929,6 +1009,8 @@ impl AppView {
             status_bar,
             quick_open,
             command_palette,
+            login_dialog: None,
+            unavailable_dialog: None,
             sidebar_visible: true,
             focus_handle: cx.focus_handle(),
         }
@@ -1026,36 +1108,7 @@ impl AppView {
                 left.cmp(&right)
             });
 
-            let environments = environments
-                .into_iter()
-                .map(|environment| SidebarEnvironment {
-                    id: environment.id,
-                    name: environment.name,
-                    state: match environment.state.as_known() {
-                        Some(EnvironmentState::Pending) => "pending",
-                        Some(EnvironmentState::PendingBuild) => "pending_build",
-                        Some(EnvironmentState::Building) => "building",
-                        Some(EnvironmentState::BuildFailed) => "build_failed",
-                        Some(EnvironmentState::PullingSnapshot) => "pulling_snapshot",
-                        Some(EnvironmentState::Creating) => "creating",
-                        Some(EnvironmentState::Starting) => "starting",
-                        Some(EnvironmentState::Running) => "running",
-                        Some(EnvironmentState::Stopping) => "stopping",
-                        Some(EnvironmentState::Stopped) => "stopped",
-                        Some(EnvironmentState::Archiving) => "archiving",
-                        Some(EnvironmentState::Archived) => "archived",
-                        Some(EnvironmentState::Restoring) => "restoring",
-                        Some(EnvironmentState::Resizing) => "resizing",
-                        Some(EnvironmentState::Destroying) => "destroying",
-                        Some(EnvironmentState::Destroyed) => "destroyed",
-                        Some(EnvironmentState::Error)
-                        | Some(EnvironmentState::Unknown)
-                        | Some(EnvironmentState::Unspecified)
-                        | None => "unknown",
-                    }
-                    .to_string(),
-                })
-                .collect();
+            let environments = environments.into_iter().map(environment_summary).collect();
             sidebar_orgs.push(SidebarOrganization {
                 id: org.id,
                 slug: org.slug,
@@ -1091,6 +1144,33 @@ impl AppView {
             .map_err(|_| "Failed to save Codewire credentials to the system keyring".to_string())
     }
 
+    fn sign_out_codewire() -> Result<Option<String>, String> {
+        let store = KeyringCredentialStore::desktop();
+        let credentials = store.load().map_err(|_| {
+            "Failed to read Codewire credentials from the system keyring".to_string()
+        })?;
+        let warning = if let Some(credentials) = credentials {
+            match (
+                OAuthClient::for_server_url(codewire_base_url()),
+                tokio::runtime::Runtime::new(),
+            ) {
+                (Ok(oauth), Ok(runtime)) => runtime
+                    .block_on(oauth.revoke_credentials(&credentials))
+                    .err()
+                    .map(|_| {
+                        "Signed out locally; the remote token could not be revoked.".to_string()
+                    }),
+                _ => Some("Signed out locally; the remote token could not be revoked.".to_string()),
+            }
+        } else {
+            None
+        };
+        store.delete().map_err(|_| {
+            "Failed to remove Codewire credentials from the system keyring".to_string()
+        })?;
+        Ok(warning)
+    }
+
     fn ensure_dashboard_workspace(
         &mut self,
         cx: &mut Context<Self>,
@@ -1107,15 +1187,13 @@ impl AppView {
         &mut self,
         org_id: &str,
         org_slug: &str,
-        env_id: &str,
-        env_name: &str,
+        environment: EnvironmentSummary,
         cx: &mut Context<Self>,
     ) -> gpui::Entity<split_container::SplitContainer> {
         let identity = WorkspaceIdentity::codewire_environment(
             org_id.to_string(),
             org_slug.to_string(),
-            env_id.to_string(),
-            env_name.to_string(),
+            environment,
         );
         let mut container = None;
         self.app_layout.update(cx, |layout, cx| {
@@ -1124,12 +1202,26 @@ impl AppView {
         container.expect("environment workspace should exist")
     }
 
-    fn open_dashboard_route(&mut self, route: &str, cx: &mut Context<Self>) {
-        let url = format!("{}{}", codewire_base_url(), route);
-        let container = self.ensure_dashboard_workspace(cx);
-        container.update(cx, |container, cx| {
-            container.open_web_browser(url, None, cx);
-        });
+    fn show_unavailable_dialog(
+        &mut self,
+        title: impl Into<SharedString>,
+        detail: impl Into<SharedString>,
+        cx: &mut Context<Self>,
+    ) {
+        let dialog = cx.new(|cx| UnavailableDialog::new(title, detail, cx));
+        cx.subscribe(&dialog, Self::on_unavailable_dialog_dismissed)
+            .detach();
+        self.unavailable_dialog = Some(dialog);
+        cx.notify();
+    }
+
+    fn on_unavailable_dialog_dismissed(
+        &mut self,
+        _dialog: gpui::Entity<UnavailableDialog>,
+        _event: &UnavailableDialogDismissed,
+        cx: &mut Context<Self>,
+    ) {
+        self.unavailable_dialog = None;
         cx.notify();
     }
 
@@ -1139,7 +1231,8 @@ impl AppView {
         _event: &DashboardRequested,
         cx: &mut Context<Self>,
     ) {
-        self.open_dashboard_route("/dashboard", cx);
+        self.ensure_dashboard_workspace(cx);
+        cx.notify();
     }
 
     fn on_settings_requested(
@@ -1148,7 +1241,11 @@ impl AppView {
         _event: &SettingsRequested,
         cx: &mut Context<Self>,
     ) {
-        self.open_dashboard_route("/dashboard/settings", cx);
+        self.show_unavailable_dialog(
+            "Settings",
+            "Settings are not yet backed by a typed native service. No legacy web or REST client was opened.",
+            cx,
+        );
     }
 
     fn on_billing_requested(
@@ -1157,7 +1254,11 @@ impl AppView {
         _event: &BillingRequested,
         cx: &mut Context<Self>,
     ) {
-        self.open_dashboard_route("/dashboard/billing", cx);
+        self.show_unavailable_dialog(
+            "Billing",
+            "Billing remains unavailable in the native desktop until its retained UI is connected to the typed client.",
+            cx,
+        );
     }
 
     fn on_new_organization_requested(
@@ -1166,7 +1267,11 @@ impl AppView {
         _event: &NewOrganizationRequested,
         cx: &mut Context<Self>,
     ) {
-        self.open_dashboard_route("/dashboard/orgs/new", cx);
+        self.show_unavailable_dialog(
+            "New organization",
+            "Organization creation is not part of this desktop correction. Existing organizations are loaded through Connect.",
+            cx,
+        );
     }
 
     fn on_organization_requested(
@@ -1175,7 +1280,9 @@ impl AppView {
         event: &OrganizationRequested,
         cx: &mut Context<Self>,
     ) {
-        self.open_dashboard_route(&format!("/dashboard/orgs/{}", event.org_slug), cx);
+        tracing::info!("Open organization: {}", event.org_slug);
+        self.ensure_dashboard_workspace(cx);
+        cx.notify();
     }
 
     fn on_organization_billing_requested(
@@ -1184,7 +1291,14 @@ impl AppView {
         event: &OrganizationBillingRequested,
         cx: &mut Context<Self>,
     ) {
-        self.open_dashboard_route(&format!("/dashboard/orgs/{}/billing", event.org_slug), cx);
+        self.show_unavailable_dialog(
+            "Organization billing",
+            format!(
+                "Billing for {} is not available in this native migration slice.",
+                event.org_slug
+            ),
+            cx,
+        );
     }
 
     fn on_organization_create_environment_requested(
@@ -1193,9 +1307,10 @@ impl AppView {
         event: &OrganizationCreateEnvironmentRequested,
         cx: &mut Context<Self>,
     ) {
-        self.open_dashboard_route(
-            &format!(
-                "/dashboard/orgs/{}/environments?create=true",
+        self.show_unavailable_dialog(
+            "Create environment",
+            format!(
+                "Environment creation for {} is not available in this native migration slice.",
                 event.org_slug
             ),
             cx,
@@ -1210,21 +1325,21 @@ impl AppView {
     ) {
         tracing::info!(
             "Open environment terminal: {} ({}/{})",
-            event.env_name,
+            event.environment.name,
             event.org_slug,
-            event.env_id
+            event.environment.id
         );
 
-        let workspace_id = format!("codewire:env:{}:{}", event.org_id, event.env_id);
+        let workspace_id = format!("codewire:env:{}:{}", event.org_id, event.environment.id);
+        let environment = event.environment.clone();
         let container = self.ensure_environment_workspace(
             &event.org_id,
             &event.org_slug,
-            &event.env_id,
-            &event.env_name,
+            environment.clone(),
             cx,
         );
-        let env_name = event.env_name.clone();
-        let env_id = event.env_id.clone();
+        let env_name = environment.name;
+        let env_id = environment.id;
         let org_id = event.org_id.clone();
 
         container.update(cx, |container, cx| {
@@ -1261,9 +1376,10 @@ impl AppView {
             loading: true,
             error: None,
         };
+        self.login_dialog = Some(cx.new(LoginDialog::new));
         cx.notify();
 
-        cx.spawn(async move |_, cx| {
+        cx.spawn(async move |this, cx| {
             let (tx, rx) = futures::channel::oneshot::channel();
             std::thread::spawn(move || {
                 let result = (|| {
@@ -1277,36 +1393,80 @@ impl AppView {
                 let _ = tx.send(result);
             });
 
-            match rx.await {
-                Ok(Ok(state)) => {
-                    cx.update(|cx| {
-                        cx.global_mut::<AppState>().codewire_sidebar = state;
-                    })
-                    .ok();
-                }
-                Ok(Err(error)) => {
-                    cx.update(|cx| {
-                        cx.global_mut::<AppState>().codewire_sidebar = CodewireSidebarState {
-                            organizations: Vec::new(),
-                            authenticated: false,
-                            loading: false,
-                            error: Some(error),
-                        };
-                    })
-                    .ok();
-                }
-                Err(_) => {
-                    cx.update(|cx| {
-                        cx.global_mut::<AppState>().codewire_sidebar = CodewireSidebarState {
-                            organizations: Vec::new(),
-                            authenticated: false,
-                            loading: false,
-                            error: Some("Codewire sign-in task cancelled".to_string()),
-                        };
-                    })
-                    .ok();
-                }
-            }
+            let state = match rx.await {
+                Ok(Ok(state)) => state,
+                Ok(Err(error)) => CodewireSidebarState {
+                    organizations: Vec::new(),
+                    authenticated: false,
+                    loading: false,
+                    error: Some(error),
+                },
+                Err(_) => CodewireSidebarState {
+                    organizations: Vec::new(),
+                    authenticated: false,
+                    loading: false,
+                    error: Some("Codewire sign-in task cancelled".to_string()),
+                },
+            };
+            cx.update(|cx| {
+                cx.global_mut::<AppState>().codewire_sidebar = state;
+                let _ = this.update(cx, |view, cx| {
+                    view.login_dialog = None;
+                    cx.notify();
+                });
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn on_codewire_sign_out_requested(
+        &mut self,
+        _sidebar: gpui::Entity<Sidebar>,
+        _event: &CodewireSignOutRequested,
+        cx: &mut Context<Self>,
+    ) {
+        let current_orgs = cx
+            .global::<AppState>()
+            .codewire_sidebar
+            .organizations
+            .clone();
+        cx.global_mut::<AppState>().codewire_sidebar = CodewireSidebarState {
+            organizations: current_orgs,
+            authenticated: true,
+            loading: true,
+            error: None,
+        };
+        cx.notify();
+
+        cx.spawn(async move |_, cx| {
+            let (tx, rx) = futures::channel::oneshot::channel();
+            std::thread::spawn(move || {
+                let _ = tx.send(Self::sign_out_codewire());
+            });
+
+            let (error, authenticated) = match rx.await {
+                Ok(Ok(warning)) => (warning, false),
+                Ok(Err(error)) => (Some(error), true),
+                Err(_) => (Some("Codewire sign-out task cancelled".to_string()), true),
+            };
+            cx.update(|cx| {
+                let organizations = if authenticated {
+                    cx.global::<AppState>()
+                        .codewire_sidebar
+                        .organizations
+                        .clone()
+                } else {
+                    Vec::new()
+                };
+                cx.global_mut::<AppState>().codewire_sidebar = CodewireSidebarState {
+                    organizations,
+                    authenticated,
+                    loading: false,
+                    error,
+                };
+            })
+            .ok();
         })
         .detach();
     }
@@ -1901,6 +2061,14 @@ impl Render for AppView {
             .child(self.quick_open.clone())
             // Command palette overlay
             .child(self.command_palette.clone())
+            // Browser-owned OAuth PKCE progress
+            .when(self.login_dialog.is_some(), |view| {
+                view.child(self.login_dialog.clone().expect("login dialog exists"))
+            })
+            // Explicit native unavailable-state dialog
+            .when(self.unavailable_dialog.is_some(), |view| {
+                view.child(self.unavailable_dialog.clone().expect("dialog exists"))
+            })
     }
 }
 

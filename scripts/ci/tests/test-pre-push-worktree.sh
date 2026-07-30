@@ -44,6 +44,7 @@ write_stub_tree() {
     "$repo/docs" \
     "$repo/libs/tailnet" \
     "$repo/scripts/checks" \
+    "$repo/scripts/checks/source" \
     "$repo/scripts/ci/select" \
     "$repo/scripts/ci/verify" \
     "$repo/scripts/dev"
@@ -79,11 +80,19 @@ import sys
 with open(os.environ["PREFLIGHT_TEST_TOOL_LOG"], "a", encoding="utf-8") as log:
     log.write("repo_checks " + " ".join(sys.argv[1:]) + "\n")
 EOF
+  cat > "$repo/scripts/checks/source/check-native-desktop-ui.py" <<'EOF'
+#!/usr/bin/env python3
+import os
+
+with open(os.environ["PREFLIGHT_TEST_TOOL_LOG"], "a", encoding="utf-8") as log:
+    log.write("native_desktop_ui\n")
+EOF
   chmod +x \
     "$repo/scripts/ci/verify/run-product-verification.sh" \
     "$repo/scripts/ci/verify/run-integration-verification.sh" \
     "$repo/scripts/ci/verify/kind-e2e.sh" \
-    "$repo/scripts/checks/repo_checks.py"
+    "$repo/scripts/checks/repo_checks.py" \
+    "$repo/scripts/checks/source/check-native-desktop-ui.py"
 
   cat > "$repo/.gitea/workflows/ci.yaml" <<'EOF'
 name: fixture
@@ -145,6 +154,7 @@ assert_contains normal_tools "$(cat "$normal_log")" \
   'repo_checks rest-surface-freeze'
 assert_contains normal_tools "$(cat "$normal_log")" \
   'repo_checks retired-reference-source'
+assert_contains normal_tools "$(cat "$normal_log")" 'native_desktop_ui'
 assert_not_contains normal_tools "$(cat "$normal_log")" 'product '
 assert_not_contains normal_tools "$(cat "$normal_log")" 'integration '
 git -C "$repo" switch -q main

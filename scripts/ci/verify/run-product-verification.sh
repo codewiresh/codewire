@@ -127,6 +127,7 @@ run_policy() {
   python3 scripts/checks/repo_checks.py rest-surface-freeze
   python3 scripts/checks/repo_checks.py rust-validation-source
   python3 scripts/checks/repo_checks.py retired-reference-source
+  python3 scripts/checks/source/check-native-desktop-ui.py
   python3 scripts/checks/repo_checks.py go-source-classification
 }
 

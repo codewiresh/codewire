@@ -1,6 +1,7 @@
 //! Sidebar for Codewire environments and local projects.
 
 use crate::theme::Theme;
+use crate::workspace::EnvironmentSummary;
 use codewire_types::{GitStatus, PrState, PullRequest};
 use codewire_ui::{chevron, selection_bar, status_dot};
 use gpui::{
@@ -20,6 +21,9 @@ pub struct BillingRequested;
 
 #[derive(Clone, Debug)]
 pub struct CodewireSignInRequested;
+
+#[derive(Clone, Debug)]
+pub struct CodewireSignOutRequested;
 
 #[derive(Clone, Debug)]
 pub struct NewOrganizationRequested;
@@ -43,8 +47,7 @@ pub struct OrganizationCreateEnvironmentRequested {
 pub struct EnvironmentTerminalRequested {
     pub org_id: String,
     pub org_slug: String,
-    pub env_id: String,
-    pub env_name: String,
+    pub environment: EnvironmentSummary,
 }
 
 /// Event emitted when the user wants to add a local project.
@@ -90,12 +93,7 @@ pub struct SidebarOrganization {
     pub environments: Vec<SidebarEnvironment>,
 }
 
-#[derive(Clone, Debug)]
-pub struct SidebarEnvironment {
-    pub id: String,
-    pub name: String,
-    pub state: String,
-}
+pub type SidebarEnvironment = EnvironmentSummary;
 
 /// A local project in the sidebar.
 #[derive(Clone, Debug)]
@@ -121,6 +119,7 @@ impl EventEmitter<DashboardRequested> for Sidebar {}
 impl EventEmitter<SettingsRequested> for Sidebar {}
 impl EventEmitter<BillingRequested> for Sidebar {}
 impl EventEmitter<CodewireSignInRequested> for Sidebar {}
+impl EventEmitter<CodewireSignOutRequested> for Sidebar {}
 impl EventEmitter<NewOrganizationRequested> for Sidebar {}
 impl EventEmitter<OrganizationRequested> for Sidebar {}
 impl EventEmitter<OrganizationBillingRequested> for Sidebar {}
@@ -330,8 +329,8 @@ impl Sidebar {
         } else {
             env.name.clone()
         };
-        let env_name_for_click = env_name.clone();
         let env_state = env.state.clone();
+        let environment_for_click = env.clone();
 
         div()
             .id(ElementId::Name(SharedString::from(format!(
@@ -356,8 +355,7 @@ impl Sidebar {
                 cx.emit(EnvironmentTerminalRequested {
                     org_id: org_id.clone(),
                     org_slug: org_slug.clone(),
-                    env_id: env_id.clone(),
-                    env_name: env_name_for_click.clone(),
+                    environment: environment_for_click.clone(),
                 });
             }))
             .child(selection_bar(false))
@@ -798,24 +796,45 @@ impl Render for Sidebar {
                             .text_color(theme.foreground)
                             .child("Codewire"),
                     )
-                    .when(self.codewire_authenticated, |el| {
-                        el.child(
-                            div()
-                                .id("new-org-btn")
-                                .text_color(theme.muted)
-                                .hover(|s| s.text_color(theme.foreground))
-                                .cursor_pointer()
-                                .on_click(cx.listener(|_this, _, _, cx| {
-                                    cx.emit(NewOrganizationRequested);
-                                }))
-                                .child(
-                                    svg()
-                                        .path("icons/add.svg")
-                                        .size(px(16.0))
-                                        .text_color(theme.muted),
-                                ),
-                        )
-                    }),
+                    .when(
+                        self.codewire_authenticated && !self.codewire_loading,
+                        |el| {
+                            el.child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(10.0))
+                                    .child(
+                                        div()
+                                            .id("codewire-sign-out-btn")
+                                            .text_size(px(11.0))
+                                            .text_color(theme.muted)
+                                            .hover(|s| s.text_color(theme.foreground))
+                                            .cursor_pointer()
+                                            .on_click(cx.listener(|_this, _, _, cx| {
+                                                cx.emit(CodewireSignOutRequested);
+                                            }))
+                                            .child("Sign Out"),
+                                    )
+                                    .child(
+                                        div()
+                                            .id("new-org-btn")
+                                            .text_color(theme.muted)
+                                            .hover(|s| s.text_color(theme.foreground))
+                                            .cursor_pointer()
+                                            .on_click(cx.listener(|_this, _, _, cx| {
+                                                cx.emit(NewOrganizationRequested);
+                                            }))
+                                            .child(
+                                                svg()
+                                                    .path("icons/add.svg")
+                                                    .size(px(16.0))
+                                                    .text_color(theme.muted),
+                                            ),
+                                    ),
+                            )
+                        },
+                    ),
             )
             .child(
                 div()

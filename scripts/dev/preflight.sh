@@ -150,6 +150,8 @@ run_policy_local() {
   run_step "REST surface freeze ratchet" python3 scripts/checks/repo_checks.py rest-surface-freeze
   run_step "Rust validation source guard" python3 scripts/checks/repo_checks.py rust-validation-source
   run_step "retired reference guard" python3 scripts/checks/repo_checks.py retired-reference-source
+  run_step "native desktop UI guard" \
+    python3 scripts/checks/source/check-native-desktop-ui.py
   run_step "Go source classification guard" python3 scripts/checks/repo_checks.py go-source-classification
 }
 

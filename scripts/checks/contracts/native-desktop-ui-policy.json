@@ -1,0 +1,56 @@
+{
+  "$comment": "WI-N1A-U retains the native GPUI product surface while forbidding restored legacy client behavior. The June 10 source is reference provenance only.",
+  "schema_version": 1,
+  "reference_commit": "3da4e264455a1bf5f50ba19e46d48873ebaa8f40",
+  "reference_tree": "f7c3768722473d198c98816ec1a248b46f3d8bf7",
+  "source_roots": [
+    "crates/codewire-desktop/src/"
+  ],
+  "required_paths": [
+    "crates/codewire-desktop/src/app_layout.rs",
+    "crates/codewire-desktop/src/dialogs/login.rs",
+    "crates/codewire-desktop/src/dialogs/mod.rs",
+    "crates/codewire-desktop/src/dialogs/unavailable.rs",
+    "crates/codewire-desktop/src/editor.rs",
+    "crates/codewire-desktop/src/sidebar.rs",
+    "crates/codewire-desktop/src/split_container.rs",
+    "crates/codewire-desktop/src/terminal/view.rs",
+    "crates/codewire-desktop/src/workspace.rs",
+    "crates/codewire-desktop/src/workspace_home.rs"
+  ],
+  "required_fragments": {
+    "crates/codewire-desktop/src/main.rs": [
+      "login_desktop_pkce()",
+      "revoke_credentials(&credentials)",
+      "KeyringCredentialStore::desktop()",
+      ".list_organizations(",
+      ".list_environments(",
+      "LoginDialog",
+      "UnavailableDialog"
+    ],
+    "crates/codewire-desktop/src/sidebar.rs": [
+      "CodewireSignOutRequested",
+      "\"Sign Out\""
+    ],
+    "crates/codewire-desktop/src/workspace.rs": [
+      "pub struct EnvironmentSummary",
+      "pub struct EnvironmentPortSummary"
+    ],
+    "crates/codewire-desktop/src/workspace_home.rs": [
+      "fn render_dashboard",
+      "fn render_environment",
+      "\"Files & editor\"",
+      "\"Build logs\""
+    ]
+  },
+  "forbidden_source_fragments": [
+    "/api/v1/",
+    "/api/auth/sign-in",
+    "codewire_core::",
+    "codewire_api_types::",
+    "codewire-api-types",
+    "cw shell",
+    "login_with_password",
+    "verify_totp"
+  ]
+}

@@ -171,6 +171,10 @@ run_paths_case detached_platform_native pull_request refs/pull/402/head false \
 run_paths_case detached_ui pull_request refs/pull/403/head false \
   'policy rust rust_pkg_codewire_desktop' \
   crates/codewire-ui/src/lib.rs
+run_paths_case native_desktop_ui_guard pull_request refs/pull/4031/head false \
+  'policy rust rust_pkg_codewire_desktop' \
+  scripts/checks/source/check-native-desktop-ui.py \
+  scripts/checks/contracts/native-desktop-ui-policy.json
 run_paths_case detached_desktop_package pull_request refs/pull/404/head false \
   'policy rust rust_pkg_codewire_desktop' \
   .gitea/workflows/desktop-package.yaml \
@@ -1223,6 +1227,10 @@ if grep -qF 'diagnostics' "$required_block" \
   exit 1
 fi
 grep -qF 'scripts/ci/select/select-verification.sh' "$ROOT/scripts/dev/preflight.sh"
+grep -qF 'scripts/checks/source/check-native-desktop-ui.py' \
+  "$ROOT/scripts/dev/preflight.sh"
+grep -qF 'scripts/checks/source/check-native-desktop-ui.py' \
+  "$ROOT/scripts/ci/verify/run-product-verification.sh"
 if [ "$(grep -c '^run_selected_family edge_kind edge ' \
     "$ROOT/scripts/dev/preflight.sh")" -ne 1 ]; then
   echo 'local preflight must invoke edge static verification exactly once' >&2

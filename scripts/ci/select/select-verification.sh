@@ -370,7 +370,9 @@ elif [ "$event_selected" = false ]; then
     case "$path" in
       .gitea/workflows/desktop-package.yaml|\
       scripts/ci/release/package-codewire-desktop.sh|\
-      scripts/ci/tests/test-package-codewire-desktop.sh)
+      scripts/ci/tests/test-package-codewire-desktop.sh|\
+      scripts/checks/source/check-native-desktop-ui.py|\
+      scripts/checks/contracts/native-desktop-ui-policy.json)
         select_token policy
         select_token rust
         select_token rust_pkg_codewire_desktop
