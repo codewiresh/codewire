@@ -29,9 +29,28 @@ assert_static_contract() {
     fail "safe allocator diagnostic marker is missing"
   rg -F 'retain_environment:' "$WORKFLOW" >/dev/null || \
     fail "named workflow does not expose retained-environment diagnosis"
+  rg -F 'packet_diagnostics:' "$WORKFLOW" >/dev/null || \
+    fail "named workflow does not expose packet diagnostics"
+  rg -F "always() && inputs.packet_diagnostics == 'true'" "$WORKFLOW" >/dev/null || \
+    fail "packet diagnostics do not have an always-run cleanup guard"
+  rg -F 'environment-cleanup.json' "$WORKFLOW" >/dev/null || \
+    fail "packet diagnostics do not preserve cleanup evidence"
+  awk '/name: Verify packet-diagnostic environment cleanup/,/name: Upload value-blind/' \
+    "$WORKFLOW" | rg -F 'env rm --yes "$environment_id"' >/dev/null || \
+    fail "packet diagnostic cleanup does not delete the exact environment"
+  awk '/name: Verify packet-diagnostic environment cleanup/,/name: Upload value-blind/' \
+    "$WORKFLOW" | rg -F 'env list --output json' >/dev/null || \
+    fail "packet diagnostic cleanup does not verify authenticated absence"
   rg -F 'christopherhx/gitea-upload-artifact@8818363695ca2d5782c64f6453273341374767b7' \
     "$WORKFLOW" >/dev/null || \
     fail "named workflow does not pin its failure-evidence uploader"
+  awk '/^start_peer_relay_packet_diagnostics\(\)/,/^}/' "$SMOKE" \
+    | rg -F 'tcpdump -i any -Q inout -nn -tttt -l -s 48' >/dev/null || \
+    fail "packet diagnostics do not inspect the actual host-network namespace"
+  if awk '/^start_peer_relay_packet_diagnostics\(\)/,/^}/' "$SMOKE" \
+    | rg -e '(^|[[:space:]])(-A|-X|-XX|-w)([[:space:]]|$)' >/dev/null; then
+    fail "packet diagnostics must not capture packet payloads or pcap files"
+  fi
   if awk '/^capture_tailnet_doctor_failure_diagnostics\(\)/,/^}/' "$SMOKE" \
     | rg -F 'capture_container_log' >/dev/null; then
     fail "tailnet doctor failure diagnostics must not capture full container logs"
@@ -109,8 +128,50 @@ run_environment_artifact_case() {
     fail "retained environment identity was not staged for explicit cleanup"
 }
 
+run_packet_header_summary_case() {
+  local case_dir="$TEST_TMP/packet-headers"
+  local raw="$case_dir/raw.log"
+  local route="$case_dir/route.json"
+  local summary="$case_dir/summary.json"
+  local staged="$case_dir/staged.log"
+
+  mkdir -p "$case_dir"
+  printf '%s\n' \
+    '2026-07-30 16:12:01.123456 eth0 Out IP 10.0.0.10.50123 > 192.0.2.35.41641: UDP, length 148' \
+    '2026-07-30 16:12:01.223456 eth0 In IP 192.0.2.35.41641 > 10.0.0.10.50123: UDP, length 92' \
+    '2026-07-30 16:12:01.323456 eth0 Out IP 10.0.0.10.50123 > 192.0.2.35.41641: UDP, length 148' \
+    "payload $SENSITIVE_SENTINEL" >"$raw"
+  jq -n '{
+    destination: "192.0.2.35",
+    interface: "eth0",
+    source: "10.0.0.10",
+    gateway: "10.0.0.1"
+  }' >"$route"
+
+  (
+    source <(sed '$d' "$SMOKE")
+    summarize_peer_relay_packet_headers \
+      "$raw" "192.0.2.35" "41641" "$route" "$summary" "$staged"
+  )
+
+  jq -e '
+    .relay == {ip: "192.0.2.35", port: 41641, protocol: "UDP"}
+    and .route.interface == "eth0"
+    and .route.source == "10.0.0.10"
+    and .packets == {outbound: 2, inbound: 1}
+  ' "$summary" >/dev/null || fail "packet header summary is incorrect"
+  grep -F 'direction=outbound' "$staged" >/dev/null || \
+    fail "outbound packet header was not staged"
+  grep -F 'direction=inbound' "$staged" >/dev/null || \
+    fail "inbound packet header was not staged"
+  if grep -F "$SENSITIVE_SENTINEL" "$staged" "$summary" >/dev/null; then
+    fail "packet diagnostic staged non-header input"
+  fi
+}
+
 assert_static_contract
 run_safe_diagnostic_case
 run_environment_artifact_case
+run_packet_header_summary_case
 
 printf 'dev commodity smoke safe diagnostic tests: OK\n'

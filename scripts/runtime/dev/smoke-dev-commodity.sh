@@ -42,6 +42,7 @@ SMOKE_ARTIFACT_DIR="${SMOKE_ARTIFACT_DIR:-}"
 SMOKE_CW_BUILD_TIMEOUT="${SMOKE_CW_BUILD_TIMEOUT:-600s}"
 SMOKE_EXISTING_ENV_ID="${SMOKE_EXISTING_ENV_ID:-}"
 SMOKE_COLLECT_FAILURE_DIAGNOSTICS="${SMOKE_COLLECT_FAILURE_DIAGNOSTICS:-1}"
+SMOKE_PACKET_DIAGNOSTICS="${SMOKE_PACKET_DIAGNOSTICS:-0}"
 SANDBOX_NAMESPACE="${SANDBOX_NAMESPACE:-dev-sandboxes}"
 CODEWIRE_SERVER_NAMESPACE="${CODEWIRE_SERVER_NAMESPACE:-dev}"
 KUBE_CONTEXT="${KUBE_CONTEXT:-}"
@@ -83,6 +84,10 @@ GATEWAY_POD_NAME=""
 GATEWAY_OLD_POD_NAME=""
 SMOKE_LAST_WAIT_DETAIL=""
 SMOKE_FAILURE_DIAGNOSTICS_CAPTURED=0
+SMOKE_PACKET_CAPTURE_PID=""
+SMOKE_PACKET_CAPTURE_RAW=""
+SMOKE_PACKET_CAPTURE_ERROR=""
+SMOKE_PACKET_CAPTURE_SUMMARY=""
 declare -a SMOKE_ONLY_PHASES=()
 
 usage() {
@@ -177,6 +182,10 @@ Environment:
                            Defaults to 1. On failure, captures Kubernetes
                            claim/template/pod/event/log evidence into the
                            smoke evidence directory before deleting the env.
+  SMOKE_PACKET_DIAGNOSTICS
+                           Defaults to 0. Set to 1 only for the admitted
+                           host-network diagnostic. Captures route metadata and
+                           UDP headers for 192.0.2.35:41641 without payload.
   EXPECTED_GATEWAY_IMAGE   Optional exact image assertion for codewire-gateway
   EXPECTED_DOCKER_MODE     Expected workspace Docker mode. Defaults to
                            guest-dind, expecting workspace+dind containers.
@@ -372,6 +381,7 @@ done
 
 cleanup() {
   local rc=$?
+  stop_peer_relay_packet_diagnostics || true
   if [[ "$rc" != "0" ]]; then
     collect_failure_diagnostics "failure" || true
   fi
@@ -404,6 +414,151 @@ handle_signal() {
 trap cleanup EXIT
 trap 'handle_signal INT' INT
 trap 'handle_signal TERM' TERM
+
+split_peer_relay_endpoint() {
+  local endpoint="$1"
+
+  [[ "$endpoint" == "192.0.2.35:41641" ]] || \
+    die "packet diagnostics require exact peer relay 192.0.2.35:41641"
+  printf '%s\t%s\n' "${endpoint%:*}" "${endpoint##*:}"
+}
+
+sanitize_peer_relay_packet_headers() {
+  local raw_file="$1"
+  local output_file="$2"
+  local relay_ip="$3"
+  local relay_port="$4"
+
+  awk -v endpoint="${relay_ip}.${relay_port}" '
+    $5 == "IP" && $7 == ">" {
+      source = $6
+      destination = $8
+      sub(/:$/, "", destination)
+      if (destination == endpoint) {
+        direction = "outbound"
+      } else if (source == endpoint) {
+        direction = "inbound"
+      } else {
+        next
+      }
+      packet_length = 0
+      for (i = 9; i <= NF; i++) {
+        if ($i == "length" && (i + 1) <= NF && $(i + 1) ~ /^[0-9]+$/) {
+          packet_length = $(i + 1)
+          break
+        }
+      }
+      printf "timestamp=%sT%s interface=%s direction=%s source=%s destination=%s protocol=UDP length=%d\n",
+        $1, $2, $3, direction, source, destination, packet_length
+    }
+  ' "$raw_file" >"$output_file"
+}
+
+summarize_peer_relay_packet_headers() {
+  local raw_file="$1"
+  local relay_ip="$2"
+  local relay_port="$3"
+  local route_file="$4"
+  local output_file="$5"
+  local staged_headers="$6"
+  local outbound inbound
+
+  sanitize_peer_relay_packet_headers \
+    "$raw_file" "$staged_headers" "$relay_ip" "$relay_port"
+  outbound="$(awk '$0 ~ / direction=outbound / { count++ } END { print count + 0 }' \
+    "$staged_headers")"
+  inbound="$(awk '$0 ~ / direction=inbound / { count++ } END { print count + 0 }' \
+    "$staged_headers")"
+  jq -n \
+    --slurpfile route "$route_file" \
+    --arg relay_ip "$relay_ip" \
+    --argjson relay_port "$relay_port" \
+    --argjson outbound "$outbound" \
+    --argjson inbound "$inbound" \
+    '{
+      relay: {ip: $relay_ip, port: $relay_port, protocol: "UDP"},
+      route: $route[0],
+      packets: {outbound: $outbound, inbound: $inbound}
+    }' >"$output_file"
+}
+
+start_peer_relay_packet_diagnostics() {
+  local relay_ip relay_port endpoint_parts route_file staged_headers
+
+  require_bool01 SMOKE_PACKET_DIAGNOSTICS "$SMOKE_PACKET_DIAGNOSTICS"
+  [[ "$SMOKE_PACKET_DIAGNOSTICS" == "1" ]] || return 0
+  expect_tailnet_peer_relay || \
+    die "packet diagnostics require EXPECTED_TAILNET_PATH_TRANSPORT=peer_relay"
+  [[ -n "$SMOKE_ARTIFACT_DIR" ]] || \
+    die "SMOKE_PACKET_DIAGNOSTICS requires SMOKE_ARTIFACT_DIR"
+  require_cmd ip
+  require_cmd jq
+  require_cmd tcpdump
+
+  endpoint_parts="$(split_peer_relay_endpoint "$EXPECTED_TAILNET_PEER_RELAY_ENDPOINT")"
+  IFS=$'\t' read -r relay_ip relay_port <<<"$endpoint_parts"
+  mkdir -p "$SMOKE_ARTIFACT_DIR"
+  route_file="$SMOKE_ARTIFACT_DIR/peer-relay-route.json"
+  staged_headers="$SMOKE_ARTIFACT_DIR/peer-relay-packet-headers.log"
+  SMOKE_PACKET_CAPTURE_RAW="$TMPDIR_SMOKE/peer-relay-packet-headers.raw"
+  SMOKE_PACKET_CAPTURE_ERROR="$TMPDIR_SMOKE/peer-relay-packet-headers.err"
+  SMOKE_PACKET_CAPTURE_SUMMARY="$SMOKE_ARTIFACT_DIR/peer-relay-packet-summary.json"
+
+  ip -j route get "$relay_ip" \
+    | jq -e --arg destination "$relay_ip" '
+        .[0]
+        | {
+            destination: (.dst // $destination),
+            interface: .dev,
+            source: (.prefsrc // .src),
+            gateway: (.gateway // null)
+          }
+        | select(
+            (.interface | type == "string" and length > 0)
+            and (.source | type == "string" and length > 0)
+          )
+      ' >"$route_file"
+
+  # Linux cooked v2 (20) + IPv4 (20) + UDP (8) headers exactly; no UDP payload.
+  tcpdump -i any -Q inout -nn -tttt -l -s 48 \
+    "host $relay_ip and udp port $relay_port" \
+    >"$SMOKE_PACKET_CAPTURE_RAW" 2>"$SMOKE_PACKET_CAPTURE_ERROR" &
+  SMOKE_PACKET_CAPTURE_PID="$!"
+  sleep 1
+  kill -0 "$SMOKE_PACKET_CAPTURE_PID" 2>/dev/null || \
+    die "peer-relay packet diagnostic failed to start"
+  : >"$staged_headers"
+  log "started header-only peer-relay packet diagnostic"
+}
+
+stop_peer_relay_packet_diagnostics() {
+  local relay_ip relay_port endpoint_parts staged_headers outbound
+
+  [[ -n "$SMOKE_PACKET_CAPTURE_PID" ]] || return 0
+  kill -INT "$SMOKE_PACKET_CAPTURE_PID" 2>/dev/null || true
+  wait "$SMOKE_PACKET_CAPTURE_PID" 2>/dev/null || true
+  SMOKE_PACKET_CAPTURE_PID=""
+
+  endpoint_parts="$(split_peer_relay_endpoint "$EXPECTED_TAILNET_PEER_RELAY_ENDPOINT")"
+  IFS=$'\t' read -r relay_ip relay_port <<<"$endpoint_parts"
+  staged_headers="$SMOKE_ARTIFACT_DIR/peer-relay-packet-headers.log"
+  summarize_peer_relay_packet_headers \
+    "$SMOKE_PACKET_CAPTURE_RAW" \
+    "$relay_ip" \
+    "$relay_port" \
+    "$SMOKE_ARTIFACT_DIR/peer-relay-route.json" \
+    "$SMOKE_PACKET_CAPTURE_SUMMARY" \
+    "$staged_headers"
+  rm -f "$SMOKE_PACKET_CAPTURE_RAW" "$SMOKE_PACKET_CAPTURE_ERROR"
+  SMOKE_PACKET_CAPTURE_RAW=""
+  SMOKE_PACKET_CAPTURE_ERROR=""
+  outbound="$(jq -er '.packets.outbound' "$SMOKE_PACKET_CAPTURE_SUMMARY")"
+  log "captured peer-relay packet metadata (outbound=$outbound)"
+  [[ "$outbound" -gt 0 ]] || {
+    log "peer-relay packet diagnostic captured no outbound request"
+    return 1
+  }
+}
 
 cw() {
   "$CW_BIN" --server "$CODEWIRE_SERVER_URL" "$@"
@@ -2145,6 +2300,7 @@ run_tailnet_doctor() {
   local stdout stderr
   local -a args
   local -a env_args=()
+  local doctor_rc=0 packet_rc=0
 
   require_bool01 SMOKE_DERP_FALLBACK "$SMOKE_DERP_FALLBACK"
   if expect_tailnet_peer_relay; then
@@ -2168,7 +2324,14 @@ run_tailnet_doctor() {
   fi
 
   log "running tailnet doctor probe (expect=$expect direct_wait=$SMOKE_TAILNET_DIRECT_WAIT peer_timeout=$SMOKE_TAILNET_PEER_TIMEOUT)"
-  if ! timeout "$SMOKE_TAILNET_DOCTOR_TIMEOUT" env "${env_args[@]}" "$CW_BIN" --server "$CODEWIRE_SERVER_URL" "${args[@]}" >"$stdout" 2>"$stderr"; then
+  start_peer_relay_packet_diagnostics
+  set +e
+  timeout "$SMOKE_TAILNET_DOCTOR_TIMEOUT" env "${env_args[@]}" "$CW_BIN" \
+    --server "$CODEWIRE_SERVER_URL" "${args[@]}" >"$stdout" 2>"$stderr"
+  doctor_rc="$?"
+  set -e
+  stop_peer_relay_packet_diagnostics || packet_rc="$?"
+  if [[ "$doctor_rc" != "0" ]]; then
     sed 's/[[:cntrl:]]//g' "$stderr" >&2 || true
     if [[ -s "$stdout" ]]; then
       sed 's/[[:cntrl:]]//g' "$stdout" >&2 || true
@@ -2176,6 +2339,8 @@ run_tailnet_doctor() {
     capture_tailnet_doctor_failure_diagnostics
     die "tailnet doctor probe failed; evidence in $stdout and $stderr"
   fi
+  [[ "$packet_rc" == "0" ]] || \
+    die "peer-relay packet diagnostic did not capture an outbound request"
   log "tailnet doctor probe passed; evidence in $stdout"
   assert_tailnet_doctor_endpoint_evidence "$stdout"
   discover_runtime_objects
@@ -2740,9 +2905,11 @@ main() {
     log "using existing environment $ENV_ID"
   else
     create_environment
-    wait_environment
   fi
   record_environment_artifact
+  if [[ -z "$SMOKE_EXISTING_ENV_ID" ]]; then
+    wait_environment
+  fi
 
   if smoke_only_configured; then
     run_selected_phases
