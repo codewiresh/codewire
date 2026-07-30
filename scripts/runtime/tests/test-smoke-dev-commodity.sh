@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 SMOKE="$ROOT/scripts/runtime/dev/smoke-dev-commodity.sh"
-WORKFLOW="$ROOT/.gitea/workflows/runtime-dev-commodity-smoke.yaml"
+WRAPPER="$ROOT/scripts/ci/verify/runtime-dev-commodity-smoke.sh"
 mkdir -p "$ROOT/.tmp"
 TEST_TMP="$(mktemp -d "$ROOT/.tmp/codewire-dev-commodity-smoke-tests.XXXXXX")"
 chmod 0700 "$TEST_TMP"
@@ -22,30 +22,37 @@ fail() {
 
 assert_static_contract() {
   bash -n "$SMOKE"
+  bash -n "$WRAPPER"
+  for required in \
+    CODEWIRE_SERVER_URL \
+    EXPECTED_CODEWIRE_DEV_SERVER_URL \
+    KUBE_CONTEXT \
+    CODEWIRE_SERVER_NAMESPACE \
+    SANDBOX_NAMESPACE \
+    EXPECTED_NODE \
+    EXPECTED_TAILNET_PEER_RELAY_ENDPOINT \
+    EXPECTED_UDP_RELAY_BIND_ADDRS \
+    EXPECTED_UDP_RELAY_ALLOCATOR_URL \
+    EXPECTED_TAILNET_DIRECT_UDP_LB_IP \
+    EXPECTED_TAILNET_DIRECT_UDP_TRANSPORT_ZONE \
+    EXPECTED_RUNTIME_TRANSPORT_REGION; do
+    grep -Fq "$required=\"\${$required:-}\"" "$WRAPPER" ||
+      fail "CI wrapper gives $required a committed topology default"
+  done
+  grep -Fq '[[ "$CODEWIRE_SERVER_URL" == "$EXPECTED_CODEWIRE_DEV_SERVER_URL"' \
+    "$SMOKE" || fail "smoke no longer checks its externally configured dev endpoint"
   awk '/^run_tailnet_doctor\(\)/,/^}/' "$SMOKE" \
     | rg -F 'capture_tailnet_doctor_failure_diagnostics' >/dev/null || \
     fail "tailnet doctor no longer captures safe allocator diagnostics"
+  awk '/^run_tailnet_doctor\(\)/,/^}/' "$SMOKE" \
+    | rg -F 'capture_tailnet_client_failure_diagnostics "$stdout"' >/dev/null || \
+    fail "tailnet doctor no longer captures safe client diagnostics"
+  if awk '/^run_tailnet_doctor\(\)/,/^}/' "$SMOKE" \
+    | rg -F '"$stdout" >&2' >/dev/null; then
+    fail "tailnet doctor failure still prints the unfiltered client report"
+  fi
   rg -F 'rust gateway UDP peer relay allocation diagnostic' "$SMOKE" >/dev/null || \
     fail "safe allocator diagnostic marker is missing"
-  rg -F 'retain_environment:' "$WORKFLOW" >/dev/null || \
-    fail "named workflow does not expose retained-environment diagnosis"
-  rg -F 'packet_diagnostics:' "$WORKFLOW" >/dev/null || \
-    fail "named workflow does not expose packet diagnostics"
-  rg -F 'args+=(--only kube --only doctor)' "$WORKFLOW" >/dev/null || \
-    fail "packet diagnostics do not establish the terminal gateway-ready topology before the doctor"
-  rg -F "always() && inputs.packet_diagnostics == 'true'" "$WORKFLOW" >/dev/null || \
-    fail "packet diagnostics do not have an always-run cleanup guard"
-  rg -F 'environment-cleanup.json' "$WORKFLOW" >/dev/null || \
-    fail "packet diagnostics do not preserve cleanup evidence"
-  awk '/name: Verify packet-diagnostic environment cleanup/,/name: Upload value-blind/' \
-    "$WORKFLOW" | rg -F 'env rm --yes "$environment_id"' >/dev/null || \
-    fail "packet diagnostic cleanup does not delete the exact environment"
-  awk '/name: Verify packet-diagnostic environment cleanup/,/name: Upload value-blind/' \
-    "$WORKFLOW" | rg -F 'env list --output json' >/dev/null || \
-    fail "packet diagnostic cleanup does not verify authenticated absence"
-  rg -F 'christopherhx/gitea-upload-artifact@8818363695ca2d5782c64f6453273341374767b7' \
-    "$WORKFLOW" >/dev/null || \
-    fail "named workflow does not pin its failure-evidence uploader"
   awk '/^start_peer_relay_packet_diagnostics\(\)/,/^}/' "$SMOKE" \
     | rg -F 'tcpdump -i any -Q inout -nn -tttt -l -s 48' >/dev/null || \
     fail "packet diagnostics do not inspect the actual host-network namespace"
@@ -115,6 +122,111 @@ run_safe_diagnostic_case() {
   fi
 }
 
+run_safe_client_diagnostic_case() {
+  local case_dir="$TEST_TMP/client-diagnostic"
+  local artifact_dir="$case_dir/artifact"
+  local doctor_json="$case_dir/doctor.json"
+  local captured="$artifact_dir/client-tailnet-peer-relay.json"
+
+  mkdir -p "$case_dir"
+  jq -n --arg sentinel "$SENSITIVE_SENTINEL" '{
+    environment_id: $sentinel,
+    server_url: $sentinel,
+    forced_derp: false,
+    direct_wait: "5s",
+    stages: [{
+      name: "path",
+      status: "failed",
+      detail: $sentinel,
+      duration_ms: 5001
+    }],
+    peer: {
+      id: $sentinel,
+      preferred_derp: 1,
+      endpoints: [$sentinel],
+      addresses: [$sentinel]
+    },
+    direct_path: {
+      ready: true,
+      transport: "derp",
+      endpoint: $sentinel,
+      derp_region_id: 1,
+      error: $sentinel
+    },
+    final_path: {
+      ready: true,
+      transport: "derp",
+      endpoint: $sentinel,
+      derp_region_id: 1,
+      error: $sentinel
+    },
+    peer_relay: {
+      state: "negotiating",
+      derp_disco_received: 2,
+      notifications_opened: 2,
+      notifications_unknown_peer: 1,
+      notifications_received: 1,
+      notification_actions: 1,
+      notification_no_actions: 0,
+      relay_disco_sent: 3,
+      relay_disco_send_failures: 0,
+      relay_disco_received: 0,
+      relay_drops: 0,
+      relay_unmatched: 0,
+      relay_wg_sent: 0,
+      relay_wg_received: 0
+    }
+  }' >"$doctor_json"
+
+  (
+    source <(sed '$d' "$SMOKE")
+    SMOKE_ARTIFACT_DIR="$artifact_dir"
+    capture_tailnet_client_failure_diagnostics "$doctor_json"
+  )
+
+  jq -e '
+    .schema == "codewire-tailnet-peer-relay-diagnostic-v1"
+    and .stages == [{
+      name: "path",
+      status: "failed",
+      duration_ms: 5001
+    }]
+    and .direct_path == {
+      ready: true,
+      transport: "derp",
+      derp_region_id: 1
+    }
+    and .final_path == {
+      ready: true,
+      transport: "derp",
+      derp_region_id: 1
+    }
+    and .peer_relay == {
+      state: "negotiating",
+      derp_disco_received: 2,
+      notifications_opened: 2,
+      notifications_unknown_peer: 1,
+      notifications_received: 1,
+      notification_actions: 1,
+      notification_no_actions: 0,
+      relay_disco_sent: 3,
+      relay_disco_send_failures: 0,
+      relay_disco_received: 0,
+      relay_drops: 0,
+      relay_unmatched: 0,
+      relay_wg_sent: 0,
+      relay_wg_received: 0
+    }
+  ' "$captured" >/dev/null || fail "client diagnostic whitelist is incorrect"
+  if grep -F "$SENSITIVE_SENTINEL" "$captured" >/dev/null; then
+    fail "client diagnostic retained a sensitive value"
+  fi
+  if jq -e 'has("environment_id") or has("server_url") or has("peer")' \
+      "$captured" >/dev/null; then
+    fail "client diagnostic retained identity or server fields"
+  fi
+}
+
 run_environment_artifact_case() {
   local artifact_dir="$TEST_TMP/environment-artifact"
 
@@ -144,27 +256,27 @@ run_packet_header_summary_case() {
 
   mkdir -p "$case_dir"
   printf '%s\n' \
-    '2026-07-30 16:12:01.123456 eth0 Out IP 10.0.0.10.50123 > 192.0.2.35.41641: UDP, length 148' \
-    '2026-07-30 16:12:01.223456 eth0 In IP 192.0.2.35.41641 > 10.0.0.10.50123: UDP, length 92' \
-    '2026-07-30 16:12:01.323456 eth0 Out IP 10.0.0.10.50123 > 192.0.2.35.41641: UDP, length 148' \
+    '2026-07-30 16:12:01.123456 eth0 Out IP 192.0.2.10.50123 > 192.0.2.20.41641: UDP, length 148' \
+    '2026-07-30 16:12:01.223456 eth0 In IP 192.0.2.20.41641 > 192.0.2.10.50123: UDP, length 92' \
+    '2026-07-30 16:12:01.323456 eth0 Out IP 192.0.2.10.50123 > 192.0.2.20.41641: UDP, length 148' \
     "payload $SENSITIVE_SENTINEL" >"$raw"
   jq -n '{
-    destination: "192.0.2.35",
+    destination: "192.0.2.20",
     interface: "eth0",
-    source: "10.0.0.10",
-    gateway: "10.0.0.1"
+    source: "192.0.2.10",
+    gateway: "192.0.2.1"
   }' >"$route"
 
   (
     source <(sed '$d' "$SMOKE")
     summarize_peer_relay_packet_headers \
-      "$raw" "192.0.2.35" "41641" "$route" "$summary" "$staged"
+      "$raw" "192.0.2.20" "41641" "$route" "$summary" "$staged"
   )
 
   jq -e '
-    .relay == {ip: "192.0.2.35", port: 41641, protocol: "UDP"}
+    .relay == {ip: "192.0.2.20", port: 41641, protocol: "UDP"}
     and .route.interface == "eth0"
-    and .route.source == "10.0.0.10"
+    and .route.source == "192.0.2.10"
     and .packets == {outbound: 2, inbound: 1}
   ' "$summary" >/dev/null || fail "packet header summary is incorrect"
   grep -F 'direction=outbound' "$staged" >/dev/null || \
@@ -186,7 +298,7 @@ run_packet_capture_startup_failure_case() {
   mkdir -p "$bin_dir" "$artifact_dir" "$runtime_dir"
   printf '%s\n' \
     '#!/usr/bin/env bash' \
-    'printf '"'"'%s\n'"'"' '"'"'[{"dst":"192.0.2.35","dev":"eth0","prefsrc":"198.51.100.157","gateway":"172.31.1.1"}]'"'"'' \
+    'printf '"'"'%s\n'"'"' '"'"'[{"dst":"192.0.2.20","dev":"eth0","prefsrc":"192.0.2.10","gateway":"192.0.2.1"}]'"'"'' \
     >"$bin_dir/ip"
   printf '%s\n' \
     '#!/usr/bin/env bash' \
@@ -204,7 +316,7 @@ run_packet_capture_startup_failure_case() {
     SMOKE_PACKET_DIAGNOSTICS=1
     SMOKE_KEEP_ENV=1
     EXPECTED_TAILNET_PATH_TRANSPORT=peer_relay
-    EXPECTED_TAILNET_PEER_RELAY_ENDPOINT=192.0.2.35:41641
+    EXPECTED_TAILNET_PEER_RELAY_ENDPOINT=192.0.2.20:41641
     start_peer_relay_packet_diagnostics
     [[ "$SMOKE_PACKET_CAPTURE_UNAVAILABLE" == "1" ]] || \
       fail "packet capture startup failure did not remain externally observable"
@@ -243,6 +355,7 @@ run_packet_diagnostic_phase_order_case() {
 
 assert_static_contract
 run_safe_diagnostic_case
+run_safe_client_diagnostic_case
 run_environment_artifact_case
 run_packet_header_summary_case
 run_packet_capture_startup_failure_case

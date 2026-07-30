@@ -137,6 +137,10 @@ run_paths_case release pull_request refs/pull/3/head false \
   install.sh
 run_paths_case dev_deploy_contract pull_request refs/pull/30/head false \
   'deploy go_consumer_interop go_support policy release runtime_confidential' scripts/ci/tests/test-deploy-dev.sh
+run_paths_case dev_smoke_receipt pull_request refs/pull/302/head false \
+  'policy' \
+  .gitea/workflows/dev-deployment-smoke-receipt.yaml \
+  scripts/ci/tests/test-dev-deployment-smoke-receipt.sh
 run_paths_case retired_promotion_control pull_request refs/pull/300/head false \
   'deploy go_consumer_interop go_support policy release runtime_confidential' \
   scripts/ci/deprecated-promotion-control.sh \

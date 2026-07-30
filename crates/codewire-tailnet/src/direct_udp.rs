@@ -132,6 +132,12 @@ pub struct Stats {
     pub peer_relay_wg_received: u64,
     pub peer_relay_disco_sent: u64,
     pub peer_relay_disco_received: u64,
+    pub peer_relay_notifications_opened: u64,
+    pub peer_relay_notifications_unknown_peer: u64,
+    pub peer_relay_notifications_received: u64,
+    pub peer_relay_notification_actions: u64,
+    pub peer_relay_notification_no_actions: u64,
+    pub peer_relay_disco_send_failures: u64,
     pub peer_relay_drops: u64,
     pub peer_relay_unmatched: u64,
     pub fallback_wg_sent: u64,
@@ -149,6 +155,12 @@ struct StatsAtoms {
     peer_relay_wg_received: AtomicU64,
     peer_relay_disco_sent: AtomicU64,
     peer_relay_disco_received: AtomicU64,
+    peer_relay_notifications_opened: AtomicU64,
+    peer_relay_notifications_unknown_peer: AtomicU64,
+    peer_relay_notifications_received: AtomicU64,
+    peer_relay_notification_actions: AtomicU64,
+    peer_relay_notification_no_actions: AtomicU64,
+    peer_relay_disco_send_failures: AtomicU64,
     peer_relay_drops: AtomicU64,
     peer_relay_unmatched: AtomicU64,
     fallback_wg_sent: AtomicU64,
@@ -167,6 +179,24 @@ impl StatsAtoms {
             peer_relay_wg_received: self.peer_relay_wg_received.load(Ordering::Relaxed),
             peer_relay_disco_sent: self.peer_relay_disco_sent.load(Ordering::Relaxed),
             peer_relay_disco_received: self.peer_relay_disco_received.load(Ordering::Relaxed),
+            peer_relay_notifications_opened: self
+                .peer_relay_notifications_opened
+                .load(Ordering::Relaxed),
+            peer_relay_notifications_unknown_peer: self
+                .peer_relay_notifications_unknown_peer
+                .load(Ordering::Relaxed),
+            peer_relay_notifications_received: self
+                .peer_relay_notifications_received
+                .load(Ordering::Relaxed),
+            peer_relay_notification_actions: self
+                .peer_relay_notification_actions
+                .load(Ordering::Relaxed),
+            peer_relay_notification_no_actions: self
+                .peer_relay_notification_no_actions
+                .load(Ordering::Relaxed),
+            peer_relay_disco_send_failures: self
+                .peer_relay_disco_send_failures
+                .load(Ordering::Relaxed),
             peer_relay_drops: self.peer_relay_drops.load(Ordering::Relaxed),
             peer_relay_unmatched: self.peer_relay_unmatched.load(Ordering::Relaxed),
             fallback_wg_sent: self.fallback_wg_sent.load(Ordering::Relaxed),
@@ -1580,6 +1610,13 @@ async fn handle_disco_packet(
         }
     };
     let message_kind = disco_message_kind(&opened.message);
+    let peer_relay_notification_opened = matches!(&opened.message, Message::CallMeMaybeVia(_));
+    if peer_relay_notification_opened {
+        shared
+            .stats
+            .peer_relay_notifications_opened
+            .fetch_add(1, Ordering::Relaxed);
+    }
     tracing::debug!(
         source = source_addr
             .map(|addr| addr.to_string())
@@ -1598,6 +1635,12 @@ async fn handle_disco_packet(
         let peer_key = match peer_key {
             Some(peer_key) => peer_key,
             None => {
+                if peer_relay_notification_opened {
+                    shared
+                        .stats
+                        .peer_relay_notifications_unknown_peer
+                        .fetch_add(1, Ordering::Relaxed);
+                }
                 tracing::debug!(
                     source = source_addr
                         .map(|addr| addr.to_string())
@@ -1697,7 +1740,23 @@ async fn handle_disco_packet(
                 if source_key != peer_key {
                     return;
                 }
-                apply_call_me_maybe_via(&mut state, shared, peer_key, endpoint)
+                shared
+                    .stats
+                    .peer_relay_notifications_received
+                    .fetch_add(1, Ordering::Relaxed);
+                let actions = apply_call_me_maybe_via(&mut state, shared, peer_key, endpoint);
+                if actions.is_empty() {
+                    shared
+                        .stats
+                        .peer_relay_notification_no_actions
+                        .fetch_add(1, Ordering::Relaxed);
+                } else {
+                    shared
+                        .stats
+                        .peer_relay_notification_actions
+                        .fetch_add(actions.len() as u64, Ordering::Relaxed);
+                }
+                actions
             }
             Message::AllocateUDPRelayEndpointRequest(request) => {
                 if source_addr.is_some() {
@@ -2161,6 +2220,10 @@ async fn send_disco_actions(
                         );
                     }
                     Err(err) => {
+                        shared
+                            .stats
+                            .peer_relay_disco_send_failures
+                            .fetch_add(1, Ordering::Relaxed);
                         tracing::warn!(
                             relay_addr = %addr,
                             relay_vni = vni,
@@ -3859,6 +3922,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn call_me_maybe_via_before_peer_update_is_counted() {
+        let local_secret = StaticSecret::random_from_rng(OsRng);
+        let peer_secret = StaticSecret::random_from_rng(OsRng);
+        let local_node = NodePublic::from_raw(PublicKey::from(&local_secret).to_bytes());
+        let peer_node = NodePublic::from_raw(PublicKey::from(&peer_secret).to_bytes());
+        let local_disco = DiscoPrivate::generate(&mut OsRng);
+        let peer_disco = DiscoPrivate::generate(&mut OsRng);
+        let options = Options::new(
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+            Vec::new(),
+            local_node,
+            local_disco.clone(),
+        );
+        let shared = shared_arc_for_test(&options);
+        let endpoint = udp_relay_endpoint(
+            DiscoPrivate::generate(&mut OsRng).public(),
+            local_disco.public(),
+            peer_disco.public(),
+            41,
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 41641),
+        );
+        let packet = peer_disco
+            .seal_to(
+                &local_disco.public(),
+                &Message::CallMeMaybeVia(CallMeMaybeVia { endpoint }),
+                &mut OsRng,
+            )
+            .expect("seal CallMeMaybeVia");
+        let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let (fallback_tx, _fallback_rx) = mpsc::unbounded_channel();
+
+        handle_disco_packet(
+            &shared,
+            &socket,
+            &fallback_tx,
+            None,
+            Some(derp_public_from_node(peer_node)),
+            &packet,
+        )
+        .await;
+
+        let stats = shared.stats.snapshot();
+        assert_eq!(stats.peer_relay_notifications_opened, 1);
+        assert_eq!(stats.peer_relay_notifications_unknown_peer, 1);
+        assert_eq!(stats.peer_relay_notifications_received, 0);
+        assert_eq!(stats.peer_relay_notification_actions, 0);
+        assert_eq!(stats.peer_relay_notification_no_actions, 0);
+    }
+
+    #[tokio::test]
     async fn allocate_udp_relay_endpoint_request_emits_event() {
         let local_secret = StaticSecret::random_from_rng(OsRng);
         let peer_secret = StaticSecret::random_from_rng(OsRng);
@@ -5079,6 +5192,18 @@ mod tests {
             1,
             "fallback must drop exactly the first CallMeMaybeVia"
         );
+        wait_stats(
+            &b_handle,
+            |stats| {
+                stats.peer_relay_notifications_opened > 0
+                    && stats.peer_relay_notifications_unknown_peer == 0
+                    && stats.peer_relay_notifications_received > 0
+                    && stats.peer_relay_notification_actions > 0
+            },
+            "b should count the accepted peer relay notification",
+        )
+        .await;
+        assert_eq!(b_handle.stats().peer_relay_notification_no_actions, 0);
 
         let request = b"peer relay request after lossy notification".to_vec();
         a_transport

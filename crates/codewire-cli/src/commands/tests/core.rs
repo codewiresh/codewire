@@ -151,10 +151,9 @@
                 derp_region_id: None,
                 error: String::new(),
             }),
+            peer_relay: None,
         }
     }
-
-
 
     #[test]
     fn format_tailnet_doctor_text_uses_current_transport_terms() {

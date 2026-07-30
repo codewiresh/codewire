@@ -336,6 +336,7 @@ elif [ "$event_selected" = false ]; then
     case "$path" in
       .gitea/workflows/ci.yaml|.gitea/workflows/manual-diagnostics.yaml|\
       .gitea/workflows/connect-apikey-smoke.yaml|\
+      .gitea/workflows/dev-deployment-smoke-receipt.yaml|\
       .gitea/workflows/prod-readonly-smoke.yaml|\
       .gitea/workflows/runtime-dev-commodity-smoke.yaml|\
       .githooks/pre-push|Makefile|scripts/dev/install-hooks.sh|\
@@ -351,6 +352,7 @@ elif [ "$event_selected" = false ]; then
       scripts/ci/tests/test-verify-tested-tree-receipt.sh|\
       scripts/ci/tests/test-pre-push-worktree.sh|\
       scripts/ci/tests/test-go-source-ownership.sh|\
+      scripts/ci/tests/test-dev-deployment-smoke-receipt.sh|\
       scripts/ci/tests/test-rust-owned-fixtures.sh|\
       scripts/ci/verify/integration-postgres.sh|scripts/ci/tests/test-integration-postgres.sh|\
       scripts/ci/verify/resolve-cargo-target-dir.sh|\

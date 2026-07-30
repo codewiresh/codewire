@@ -3,7 +3,8 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 
-CODEWIRE_SERVER_URL="${CODEWIRE_SERVER_URL:-https://codewire-dev.sh}"
+CODEWIRE_SERVER_URL="${CODEWIRE_SERVER_URL:-}"
+EXPECTED_CODEWIRE_DEV_SERVER_URL="${EXPECTED_CODEWIRE_DEV_SERVER_URL:-}"
 SMOKE_NAME="${SMOKE_NAME:-commodity-$(date -u +%Y%m%d%H%M%S)}"
 SMOKE_IMAGE="${SMOKE_IMAGE:-workspace}"
 SMOKE_TTL="${SMOKE_TTL:-2h}"
@@ -43,8 +44,8 @@ SMOKE_CW_BUILD_TIMEOUT="${SMOKE_CW_BUILD_TIMEOUT:-600s}"
 SMOKE_EXISTING_ENV_ID="${SMOKE_EXISTING_ENV_ID:-}"
 SMOKE_COLLECT_FAILURE_DIAGNOSTICS="${SMOKE_COLLECT_FAILURE_DIAGNOSTICS:-1}"
 SMOKE_PACKET_DIAGNOSTICS="${SMOKE_PACKET_DIAGNOSTICS:-0}"
-SANDBOX_NAMESPACE="${SANDBOX_NAMESPACE:-dev-sandboxes}"
-CODEWIRE_SERVER_NAMESPACE="${CODEWIRE_SERVER_NAMESPACE:-dev}"
+SANDBOX_NAMESPACE="${SANDBOX_NAMESPACE:-}"
+CODEWIRE_SERVER_NAMESPACE="${CODEWIRE_SERVER_NAMESPACE:-}"
 KUBE_CONTEXT="${KUBE_CONTEXT:-}"
 EXPECTED_RUNTIME_CLASS="${EXPECTED_RUNTIME_CLASS:-commodity}"
 EXPECTED_DOCKER_MODE="${EXPECTED_DOCKER_MODE:-guest-dind}"
@@ -54,12 +55,12 @@ EXPECTED_NODE="${EXPECTED_NODE:-}"
 EXPECTED_NODE_KATA_LABEL="${EXPECTED_NODE_KATA_LABEL:-katacontainers.io/kata-runtime}"
 EXPECTED_NODE_KATA_VALUE="${EXPECTED_NODE_KATA_VALUE:-true}"
 EXPECTED_RUNTIME_NODE_MIN_EPHEMERAL_GIB="${EXPECTED_RUNTIME_NODE_MIN_EPHEMERAL_GIB:-500}"
-EXPECTED_GATEWAY_STUN_HOST="${EXPECTED_GATEWAY_STUN_HOST:-stun.codewire-dev.sh}"
+EXPECTED_GATEWAY_STUN_HOST="${EXPECTED_GATEWAY_STUN_HOST:-}"
 EXPECTED_GATEWAY_STUN_PORT="${EXPECTED_GATEWAY_STUN_PORT:-3478}"
-EXPECTED_TAILNET_DIRECT_UDP_LB_IP="${EXPECTED_TAILNET_DIRECT_UDP_LB_IP:-192.0.2.36}"
-EXPECTED_TAILNET_DIRECT_UDP_TRANSPORT_ZONE="${EXPECTED_TAILNET_DIRECT_UDP_TRANSPORT_ZONE:-prod-node}"
-EXPECTED_TAILNET_PEER_RELAY_ENDPOINT="${EXPECTED_TAILNET_PEER_RELAY_ENDPOINT:-192.0.2.35:41641}"
-EXPECTED_UDP_RELAY_BIND_ADDRS="${EXPECTED_UDP_RELAY_BIND_ADDRS:-codewire-udp-relay.dev.svc.cluster.local:41641}"
+EXPECTED_TAILNET_DIRECT_UDP_LB_IP="${EXPECTED_TAILNET_DIRECT_UDP_LB_IP:-}"
+EXPECTED_TAILNET_DIRECT_UDP_TRANSPORT_ZONE="${EXPECTED_TAILNET_DIRECT_UDP_TRANSPORT_ZONE:-}"
+EXPECTED_TAILNET_PEER_RELAY_ENDPOINT="${EXPECTED_TAILNET_PEER_RELAY_ENDPOINT:-}"
+EXPECTED_UDP_RELAY_BIND_ADDRS="${EXPECTED_UDP_RELAY_BIND_ADDRS:-}"
 REQUIRE_TAILNET_PATH_PROBE="${REQUIRE_TAILNET_PATH_PROBE:-0}"
 EXPECTED_TAILNET_PATH_TRANSPORT="${EXPECTED_TAILNET_PATH_TRANSPORT:-direct_udp}"
 EXPECTED_KATA_AGENT_POLICY_ANNOTATION="${EXPECTED_KATA_AGENT_POLICY_ANNOTATION:-0}"
@@ -119,15 +120,17 @@ Options:
   -h, --help               Show this help
 
 Environment:
-  CODEWIRE_SERVER_URL      Defaults to https://codewire-dev.sh
+  CODEWIRE_SERVER_URL      Required API endpoint for the selected environment
+  EXPECTED_CODEWIRE_DEV_SERVER_URL
+                           Required dev endpoint safety assertion
   CODEWIRE_DEV_SMOKE_API_KEY
                            Required by default; copied to CODEWIRE_API_KEY for cw
   CODEWIRE_API_KEY         Accepted only with ALLOW_GENERIC_CODEWIRE_API_KEY_FOR_SMOKE=1
   KUBECONFIG               Optional; defaults to ~/src/infra/kubeconfig-oidc.yaml when present
   KUBE_CONTEXT             Optional; if unset, prefers codewire-dev, then default, then current-context
-  SANDBOX_NAMESPACE        Defaults to dev-sandboxes
+  SANDBOX_NAMESPACE        Required sandbox namespace when Kubernetes checks run
   CODEWIRE_SERVER_NAMESPACE
-                           Defaults to dev; namespace containing codewire-derp/coordinator
+                           Required namespace containing codewire-derp/coordinator
   SMOKE_TMP_PARENT         Defaults to repo .tmp so built cw can run on noexec /tmp
   SMOKE_ARTIFACT_DIR       Optional directory for value-blind failure evidence
                            suitable for CI artifact upload. Full pod logs and
@@ -187,7 +190,7 @@ Environment:
   SMOKE_PACKET_DIAGNOSTICS
                            Defaults to 0. Set to 1 only for the admitted
                            host-network diagnostic. Captures route metadata and
-                           UDP headers for 192.0.2.35:41641 without payload.
+                           UDP headers for the configured peer relay without payload.
   EXPECTED_GATEWAY_IMAGE   Optional exact image assertion for codewire-gateway
   EXPECTED_DOCKER_MODE     Expected workspace Docker mode. Defaults to
                            guest-dind, expecting workspace+dind containers.
@@ -211,11 +214,11 @@ Environment:
                            Non-any tailnet SSH checks also pass this to cw as
                            CW_TAILNET_EXPECTED_TRANSPORT before dialing.
   EXPECTED_TAILNET_PEER_RELAY_ENDPOINT
-                           Defaults to 192.0.2.35:41641; used when
+                           Required configured endpoint when
                            EXPECTED_TAILNET_PATH_TRANSPORT=peer_relay.
   EXPECTED_UDP_RELAY_BIND_ADDRS
-                           Defaults to codewire-udp-relay.dev.svc.cluster.local:41641;
-                           expected on gateway pods in peer_relay mode.
+                           Required configured bind address expected on gateway
+                           pods in peer_relay mode.
 	  REQUIRE_TAILNET_PATH_PROBE
 	                           Defaults to 0; with SMOKE_TAILNET_DEBUG=1, requires
 	                           cw shell --stdio to emit a path probe line even when
@@ -419,10 +422,24 @@ trap 'handle_signal TERM' TERM
 
 split_peer_relay_endpoint() {
   local endpoint="$1"
+  local relay_ip relay_port octet
+  local -a octets
 
-  [[ "$endpoint" == "192.0.2.35:41641" ]] || \
-    die "packet diagnostics require exact peer relay 192.0.2.35:41641"
-  printf '%s\t%s\n' "${endpoint%:*}" "${endpoint##*:}"
+  [[ "$endpoint" == *:* ]] || \
+    die "packet diagnostics require an IPv4 peer relay endpoint"
+  relay_ip="${endpoint%:*}"
+  relay_port="${endpoint##*:}"
+  [[ "$relay_ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ \
+    && "$relay_port" =~ ^[0-9]+$ \
+    && "$relay_port" -ge 1 \
+    && "$relay_port" -le 65535 ]] || \
+    die "packet diagnostics require an IPv4 peer relay endpoint"
+  IFS=. read -r -a octets <<<"$relay_ip"
+  for octet in "${octets[@]}"; do
+    [[ "$octet" -le 255 ]] || \
+      die "packet diagnostics require an IPv4 peer relay endpoint"
+  done
+  printf '%s\t%s\n' "$relay_ip" "$relay_port"
 }
 
 sanitize_peer_relay_packet_headers() {
@@ -716,7 +733,10 @@ select_kube_context() {
 }
 
 prepare_cli() {
-  [[ "$CODEWIRE_SERVER_URL" == "https://codewire-dev.sh" || "$ALLOW_NON_DEV" == "1" ]] || \
+  [[ -n "$CODEWIRE_SERVER_URL" ]] || die "CODEWIRE_SERVER_URL is required"
+  [[ -n "$EXPECTED_CODEWIRE_DEV_SERVER_URL" || "$ALLOW_NON_DEV" == "1" ]] || \
+    die "EXPECTED_CODEWIRE_DEV_SERVER_URL is required"
+  [[ "$CODEWIRE_SERVER_URL" == "$EXPECTED_CODEWIRE_DEV_SERVER_URL" || "$ALLOW_NON_DEV" == "1" ]] || \
     die "refusing to run against $CODEWIRE_SERVER_URL without ALLOW_NON_DEV=1"
   if [[ -n "${CODEWIRE_DEV_SMOKE_API_KEY:-}" ]]; then
     export CODEWIRE_API_KEY="$CODEWIRE_DEV_SMOKE_API_KEY"
@@ -2402,8 +2422,11 @@ run_tailnet_doctor() {
   fi
   if [[ "$doctor_rc" != "0" ]]; then
     sed 's/[[:cntrl:]]//g' "$stderr" >&2 || true
-    if [[ -s "$stdout" ]]; then
-      sed 's/[[:cntrl:]]//g' "$stdout" >&2 || true
+    capture_tailnet_client_failure_diagnostics "$stdout"
+    if [[ -n "$SMOKE_ARTIFACT_DIR" \
+      && -s "$SMOKE_ARTIFACT_DIR/client-tailnet-peer-relay.json" ]]; then
+      sed 's/[[:cntrl:]]//g' \
+        "$SMOKE_ARTIFACT_DIR/client-tailnet-peer-relay.json" >&2 || true
     fi
     capture_tailnet_doctor_failure_diagnostics
     die "tailnet doctor probe failed; evidence in $stdout and $stderr"
@@ -2414,6 +2437,78 @@ run_tailnet_doctor() {
   assert_tailnet_doctor_endpoint_evidence "$stdout"
   discover_runtime_objects
   assert_gateway_tailnet_log_evidence
+}
+
+capture_tailnet_client_failure_diagnostics() {
+  local doctor_json="$1"
+  local output
+
+  [[ -n "$SMOKE_ARTIFACT_DIR" && -s "$doctor_json" ]] || return 0
+  output="$SMOKE_ARTIFACT_DIR/client-tailnet-peer-relay.json"
+  mkdir -p "$SMOKE_ARTIFACT_DIR"
+  if ! jq -e '
+      {
+        schema: "codewire-tailnet-peer-relay-diagnostic-v1",
+        stages: [
+          .stages[]?
+          | {
+              name,
+              status,
+              duration_ms: (.duration_ms // null)
+            }
+        ],
+        direct_path: (
+          .direct_path
+          | if type == "object" then
+              {
+                ready,
+                transport,
+                derp_region_id: (.derp_region_id // null)
+              }
+            else null
+            end
+        ),
+        final_path: (
+          .final_path
+          | if type == "object" then
+              {
+                ready,
+                transport,
+                derp_region_id: (.derp_region_id // null)
+              }
+            else null
+            end
+        ),
+        peer_relay: (
+          .peer_relay
+          | if type == "object" then
+              {
+                state,
+                derp_disco_received,
+                notifications_opened,
+                notifications_unknown_peer,
+                notifications_received,
+                notification_actions,
+                notification_no_actions,
+                relay_disco_sent,
+                relay_disco_send_failures,
+                relay_disco_received,
+                relay_drops,
+                relay_unmatched,
+                relay_wg_sent,
+                relay_wg_received
+              }
+            else null
+            end
+        )
+      }
+      | select(.stages | type == "array")
+    ' "$doctor_json" >"$output"; then
+    rm -f "$output"
+    log "tailnet doctor client diagnostics unavailable: invalid JSON"
+    return 0
+  fi
+  log "tailnet doctor client diagnostics captured in $output"
 }
 
 capture_tailnet_doctor_failure_diagnostics() {

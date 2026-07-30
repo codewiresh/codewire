@@ -1,0 +1,56 @@
+name: Dev deployment smoke receipt
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Exact deployed Codewire source commit
+        required: true
+        type: string
+      deploy_commit:
+        description: Exact deploy receipt commit
+        required: true
+        type: string
+      deploy_run_id:
+        description: Deploy Actions run that owns the smoke
+        required: true
+        type: string
+      smoke_status:
+        description: Exact deploy-owned smoke result
+        required: true
+        type: choice
+        options:
+          - success
+          - failure
+
+permissions:
+  contents: read
+
+jobs:
+  receipt:
+    name: Record deploy-owned dev smoke result
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate immutable receipt
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          DEPLOY_COMMIT: ${{ inputs.deploy_commit }}
+          DEPLOY_RUN_ID: ${{ inputs.deploy_run_id }}
+          SMOKE_STATUS: ${{ inputs.smoke_status }}
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$SOURCE_SHA" != "0000000000000000000000000000000000000000" ]]
+          [[ "$DEPLOY_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$DEPLOY_COMMIT" != "0000000000000000000000000000000000000000" ]]
+          [[ "$DEPLOY_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          case "$SMOKE_STATUS" in
+            success|failure) ;;
+            *) echo "::error::smoke_status must be success or failure"; exit 2 ;;
+          esac
+          printf 'Deploy run %s reported %s for source %s at deploy commit %s.\n' \
+            "$DEPLOY_RUN_ID" "$SMOKE_STATUS" "$SOURCE_SHA" "$DEPLOY_COMMIT"
+          [[ "$SMOKE_STATUS" == "success" ]] || {
+            echo "::error::deploy-owned dev smoke failed"
+            exit 1
+          }

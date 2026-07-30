@@ -213,6 +213,7 @@ struct TailnetSession {
     peer: Node,
     coordinator_task: tokio::task::JoinHandle<()>,
     derp_map: Option<Value>,
+    direct_udp: Option<direct_udp::Handle>,
 }
 
 async fn connect_tailnet_session(
@@ -249,8 +250,8 @@ async fn connect_tailnet_session(
         .await
         .context("connect DERP relay")?;
 
-    let (transport, endpoints) = if force_derp {
-        (fallback_transport, Vec::new())
+    let (transport, endpoints, direct_udp) = if force_derp {
+        (fallback_transport, Vec::new(), None)
     } else {
         let (transport, handle) = direct_udp::wrap_transport(
             fallback_transport,
@@ -263,7 +264,8 @@ async fn connect_tailnet_session(
         )
         .await
         .context("bind direct UDP transport")?;
-        (transport, handle.advertised_endpoints())
+        let endpoints = handle.advertised_endpoints();
+        (transport, endpoints, Some(handle))
     };
 
     let mut conn_options = ConnOptions::new(client_id);
@@ -299,6 +301,7 @@ async fn connect_tailnet_session(
         peer,
         coordinator_task,
         derp_map,
+        direct_udp,
     })
 }
 
@@ -446,6 +449,8 @@ pub struct EnvironmentTailnetDiagnostic {
     pub direct_path: Option<TailnetPathDiagnostic>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub final_path: Option<TailnetPathDiagnostic>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub peer_relay: Option<TailnetPeerRelayDiagnostic>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -486,6 +491,24 @@ pub struct TailnetPathDiagnostic {
     pub error: String,
 }
 
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct TailnetPeerRelayDiagnostic {
+    pub state: &'static str,
+    pub derp_disco_received: u64,
+    pub notifications_opened: u64,
+    pub notifications_unknown_peer: u64,
+    pub notifications_received: u64,
+    pub notification_actions: u64,
+    pub notification_no_actions: u64,
+    pub relay_disco_sent: u64,
+    pub relay_disco_send_failures: u64,
+    pub relay_disco_received: u64,
+    pub relay_drops: u64,
+    pub relay_unmatched: u64,
+    pub relay_wg_sent: u64,
+    pub relay_wg_received: u64,
+}
+
 pub async fn diagnose_environment_tailnet(
     client: &CodewireClient,
     org_id: &str,
@@ -502,6 +525,7 @@ pub async fn diagnose_environment_tailnet(
         peer: None,
         direct_path: None,
         final_path: None,
+        peer_relay: None,
     };
 
     let started = Instant::now();
@@ -563,7 +587,36 @@ pub async fn diagnose_environment_tailnet(
     if diagnostic.final_path.is_none() {
         diagnostic.final_path = Some(probe_path_diagnostic(&session.conn, &session.peer));
     }
+    diagnostic.peer_relay = session
+        .direct_udp
+        .as_ref()
+        .map(|handle| peer_relay_diagnostic(handle, &session.peer));
     diagnostic
+}
+
+fn peer_relay_diagnostic(handle: &direct_udp::Handle, peer: &Node) -> TailnetPeerRelayDiagnostic {
+    let stats = handle.stats();
+    let state = match handle.peer_relay_endpoint_state(&peer.key, &peer.disco_key) {
+        direct_udp::PeerRelayEndpointState::Missing => "missing",
+        direct_udp::PeerRelayEndpointState::Negotiating => "negotiating",
+        direct_udp::PeerRelayEndpointState::Active => "active",
+    };
+    TailnetPeerRelayDiagnostic {
+        state,
+        derp_disco_received: stats.disco_derp_received,
+        notifications_opened: stats.peer_relay_notifications_opened,
+        notifications_unknown_peer: stats.peer_relay_notifications_unknown_peer,
+        notifications_received: stats.peer_relay_notifications_received,
+        notification_actions: stats.peer_relay_notification_actions,
+        notification_no_actions: stats.peer_relay_notification_no_actions,
+        relay_disco_sent: stats.peer_relay_disco_sent,
+        relay_disco_send_failures: stats.peer_relay_disco_send_failures,
+        relay_disco_received: stats.peer_relay_disco_received,
+        relay_drops: stats.peer_relay_drops,
+        relay_unmatched: stats.peer_relay_unmatched,
+        relay_wg_sent: stats.peer_relay_wg_sent,
+        relay_wg_received: stats.peer_relay_wg_received,
+    }
 }
 
 async fn wait_for_preferred_path(
