@@ -2,6 +2,11 @@ name: Runtime Dev Commodity Smoke
 
 on:
   workflow_dispatch:
+    inputs:
+      retain_environment:
+        description: Retain the diagnosed environment for explicit inspection and cleanup
+        required: false
+        default: "false"
 
 permissions:
   contents: read
@@ -24,6 +29,8 @@ env:
   INFISICAL_WORKSPACE_SLUG: codewire
   INFISICAL_ENVIRONMENT: dev
   INFISICAL_SECRET_PATH: /
+  SMOKE_TMP_PARENT: ${{ runner.temp }}/codewire-runtime-smoke-evidence
+  SMOKE_ARTIFACT_DIR: ${{ runner.temp }}/codewire-runtime-smoke-artifact
 
 jobs:
   smoke:
@@ -86,4 +93,25 @@ jobs:
         run: scripts/ci/setup/export-infisical-secrets.sh CODEWIRE_DEV_SMOKE_API_KEY EXPECTED_CODEWIRE_SMOKE_USER_EMAIL
 
       - name: Run commodity smoke
-        run: scripts/ci/verify/runtime-dev-commodity-smoke.sh
+        id: runtime-smoke
+        env:
+          RETAIN_ENVIRONMENT: ${{ inputs.retain_environment }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$SMOKE_TMP_PARENT" "$SMOKE_ARTIFACT_DIR"
+          args=()
+          case "$RETAIN_ENVIRONMENT" in
+            true) args+=(--keep) ;;
+            false) ;;
+            *) echo "::error::retain_environment must be true or false"; exit 2 ;;
+          esac
+          scripts/ci/verify/runtime-dev-commodity-smoke.sh "${args[@]}"
+
+      - name: Upload value-blind smoke failure evidence
+        if: ${{ (failure() && steps.runtime-smoke.outcome == 'failure') || inputs.retain_environment == 'true' }}
+        uses: christopherhx/gitea-upload-artifact@8818363695ca2d5782c64f6453273341374767b7 # v7 from actions/upload-artifact v7.0.1
+        with:
+          name: runtime-dev-commodity-smoke-${{ github.run_id }}
+          path: ${{ runner.temp }}/codewire-runtime-smoke-artifact
+          if-no-files-found: error
+          retention-days: 7

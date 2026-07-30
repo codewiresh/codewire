@@ -38,6 +38,7 @@ SMOKE_APP_PREVIEW="${SMOKE_APP_PREVIEW:-0}"
 SMOKE_APP_PREVIEW_PORT="${SMOKE_APP_PREVIEW_PORT:-8080}"
 SMOKE_APP_PREVIEW_LABEL="${SMOKE_APP_PREVIEW_LABEL:-app}"
 SMOKE_TMP_PARENT="${SMOKE_TMP_PARENT:-$ROOT/.tmp}"
+SMOKE_ARTIFACT_DIR="${SMOKE_ARTIFACT_DIR:-}"
 SMOKE_CW_BUILD_TIMEOUT="${SMOKE_CW_BUILD_TIMEOUT:-600s}"
 SMOKE_EXISTING_ENV_ID="${SMOKE_EXISTING_ENV_ID:-}"
 SMOKE_COLLECT_FAILURE_DIAGNOSTICS="${SMOKE_COLLECT_FAILURE_DIAGNOSTICS:-1}"
@@ -121,6 +122,9 @@ Environment:
   CODEWIRE_SERVER_NAMESPACE
                            Defaults to dev; namespace containing codewire-derp/coordinator
   SMOKE_TMP_PARENT         Defaults to repo .tmp so built cw can run on noexec /tmp
+  SMOKE_ARTIFACT_DIR       Optional directory for value-blind failure evidence
+                           suitable for CI artifact upload. Full pod logs and
+                           credentials are never copied there.
   SMOKE_CW_BUILD_TIMEOUT   Defaults to 600s when CW_BIN is not provided
   SMOKE_TAILNET_DEBUG      Defaults to 0; when set to 1, captures
                            CW_DEBUG_TAILNET output for tailnet SSH.
@@ -619,6 +623,20 @@ create_environment() {
     die "failed to parse environment ID from cw env create output"
   }
   log "environment id $ENV_ID"
+}
+
+record_environment_artifact() {
+  [[ -n "$SMOKE_ARTIFACT_DIR" ]] || return 0
+  mkdir -p "$SMOKE_ARTIFACT_DIR"
+  jq -n \
+    --arg environment_id "$ENV_ID" \
+    --arg environment_name "$SMOKE_NAME" \
+    --argjson retained "$([[ "$SMOKE_KEEP_ENV" == "1" ]] && printf true || printf false)" \
+    '{
+      environment_id: $environment_id,
+      environment_name: $environment_name,
+      retained: $retained
+    }' >"$SMOKE_ARTIFACT_DIR/environment.json"
 }
 
 env_is_running() {
@@ -2167,6 +2185,8 @@ run_tailnet_doctor() {
 capture_tailnet_doctor_failure_diagnostics() {
   local marker="rust gateway UDP peer relay allocation diagnostic"
   local output="$TMPDIR_SMOKE/gateway-tailnet-allocator-doctor-failure.log"
+  local raw_output="$TMPDIR_SMOKE/gateway-tailnet-allocator-doctor-failure.jsonl"
+  local kubectl_error="$TMPDIR_SMOKE/gateway-tailnet-allocator-doctor-failure.err"
   local -a pipeline_status
 
   if [[ -z "$GATEWAY_POD_NAME" ]] && ! gateway_pod_exists; then
@@ -2175,31 +2195,25 @@ capture_tailnet_doctor_failure_diagnostics() {
   fi
 
   set +e
-  kubectl_dev -n "$SANDBOX_NAMESPACE" logs "$GATEWAY_POD_NAME" -c codewire-gateway --tail=200 2>/dev/null \
-    | awk -v marker="$marker" '
-        index($0, marker) {
-          outcome = path = peer_count = queued_count = in_flight_count = attempt_count = failure_count = ""
-          for (field = 1; field <= NF; field++) {
-            split($field, pair, "=")
-            value = pair[2]
-            gsub(/"/, "", value)
-            if (pair[1] == "outcome") outcome = value
-            if (pair[1] == "path") path = value
-            if (pair[1] == "peer_count") peer_count = value
-            if (pair[1] == "queued_count") queued_count = value
-            if (pair[1] == "in_flight_count") in_flight_count = value
-            if (pair[1] == "attempt_count") attempt_count = value
-            if (pair[1] == "failure_count") failure_count = value
-          }
-          if (outcome ~ /^(started|queued|retry_scheduled|answer_retry_deferred)$/ &&
-              path == "peer_relay" &&
-              peer_count ~ /^[0-9]+$/ && queued_count ~ /^[0-9]+$/ &&
-              in_flight_count ~ /^[0-9]+$/ && attempt_count ~ /^[0-9]+$/ &&
-              failure_count ~ /^[0-9]+$/) {
-            printf "outcome=%s path=%s peer_count=%s queued_count=%s in_flight_count=%s attempt_count=%s failure_count=%s\\n", outcome, path, peer_count, queued_count, in_flight_count, attempt_count, failure_count
-          }
-        }
-      ' >"$output"
+  kubectl_dev -n "$SANDBOX_NAMESPACE" logs "$GATEWAY_POD_NAME" -c codewire-gateway --tail=400 2>"$kubectl_error" \
+    | jq -Rc --arg marker "$marker" '
+        fromjson?
+        | select(.fields.message == $marker)
+        | select(.fields.outcome | IN(
+            "started",
+            "queued",
+            "retry_scheduled",
+            "answer_retry_deferred"
+          ))
+        | select(.fields.path == "peer_relay")
+        | select([
+            .fields.peer_count,
+            .fields.queued_count,
+            .fields.in_flight_count,
+            .fields.attempt_count,
+            .fields.failure_count
+          ] | all(type == "number" and . >= 0 and floor == .))
+      ' >"$raw_output"
   pipeline_status=("${PIPESTATUS[@]}")
   set -e
 
@@ -2207,13 +2221,21 @@ capture_tailnet_doctor_failure_diagnostics() {
     log "tailnet doctor failure allocator diagnostics unavailable: gateway log read failed"
     return 0
   fi
-  if (( pipeline_status[1] != 0 )) || [[ ! -s "$output" ]]; then
+  if (( pipeline_status[1] != 0 )) || [[ ! -s "$raw_output" ]]; then
     log "tailnet doctor failure allocator diagnostics found no value-blind events"
     return 0
   fi
 
+  jq -r '
+      .fields
+      | "outcome=\(.outcome) path=\(.path) peer_count=\(.peer_count) queued_count=\(.queued_count) in_flight_count=\(.in_flight_count) attempt_count=\(.attempt_count) failure_count=\(.failure_count)"
+    ' "$raw_output" >"$output"
+  if [[ -n "$SMOKE_ARTIFACT_DIR" ]]; then
+    mkdir -p "$SMOKE_ARTIFACT_DIR"
+    cp "$raw_output" "$output" "$SMOKE_ARTIFACT_DIR/"
+  fi
   sed 's/[[:cntrl:]]//g' "$output" >&2 || true
-  log "tailnet doctor failure allocator diagnostics captured in $output"
+  log "tailnet doctor failure allocator diagnostics captured in $raw_output and $output"
 }
 
 assert_tailnet_doctor_endpoint_evidence() {
@@ -2720,6 +2742,7 @@ main() {
     create_environment
     wait_environment
   fi
+  record_environment_artifact
 
   if smoke_only_configured; then
     run_selected_phases
