@@ -1,7 +1,7 @@
 //! Sidebar for Codewire environments and local projects.
 
 use crate::theme::Theme;
-use codewire_core::{Environment, GitStatus, OrgWithRole, PullRequest};
+use codewire_types::{GitStatus, PrState, PullRequest};
 use codewire_ui::{chevron, selection_bar, status_dot};
 use gpui::{
     App, Context, ElementId, EventEmitter, FocusHandle, Focusable, SharedString, Window, div,
@@ -83,8 +83,18 @@ pub struct NewTerminalRequested {
 
 #[derive(Clone, Debug)]
 pub struct SidebarOrganization {
-    pub org: OrgWithRole,
-    pub environments: Vec<Environment>,
+    pub id: String,
+    pub slug: String,
+    pub name: String,
+    pub role: String,
+    pub environments: Vec<SidebarEnvironment>,
+}
+
+#[derive(Clone, Debug)]
+pub struct SidebarEnvironment {
+    pub id: String,
+    pub name: String,
+    pub state: String,
 }
 
 /// A local project in the sidebar.
@@ -146,7 +156,7 @@ impl Sidebar {
         cx: &mut Context<Self>,
     ) {
         for org in &organizations {
-            self.expanded_orgs.insert(org.org.id.clone());
+            self.expanded_orgs.insert(org.id.clone());
         }
 
         self.codewire_orgs = organizations;
@@ -308,17 +318,18 @@ impl Sidebar {
     fn render_environment(
         &self,
         org: &SidebarOrganization,
-        env: &Environment,
+        env: &SidebarEnvironment,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        let org_id = org.org.id.clone();
-        let org_slug = org.org.slug.clone();
+        let org_id = org.id.clone();
+        let org_slug = org.slug.clone();
         let env_id = env.id.clone();
-        let env_name = env
-            .name
-            .clone()
-            .unwrap_or_else(|| env.id[..8.min(env.id.len())].to_string());
+        let env_name = if env.name.is_empty() {
+            env.id[..8.min(env.id.len())].to_string()
+        } else {
+            env.name.clone()
+        };
         let env_name_for_click = env_name.clone();
         let env_state = env.state.clone();
 
@@ -381,9 +392,9 @@ impl Sidebar {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        let org_id = org.org.id.clone();
-        let org_slug = org.org.slug.clone();
-        let org_name = org.org.name.clone();
+        let org_id = org.id.clone();
+        let org_slug = org.slug.clone();
+        let org_name = org.name.clone();
         let is_expanded = self.expanded_orgs.contains(&org_id);
         let org_toggle_id = org_id.clone();
         let org_slug_for_dashboard = org_slug.clone();
@@ -434,7 +445,7 @@ impl Sidebar {
                         .text_size(px(10.0))
                         .text_color(theme.muted)
                         .font_family("monospace")
-                        .child(org.org.role.clone()),
+                        .child(org.role.clone()),
                 )
                 .child(chevron(is_expanded, theme.muted)),
         );
@@ -452,7 +463,7 @@ impl Sidebar {
                 div()
                     .id(ElementId::Name(SharedString::from(format!(
                         "org-billing-{}",
-                        org.org.id
+                        org.id
                     ))))
                     .relative()
                     .py(px(6.0))
@@ -487,7 +498,7 @@ impl Sidebar {
                 div()
                     .id(ElementId::Name(SharedString::from(format!(
                         "org-create-env-{}",
-                        org.org.id
+                        org.id
                     ))))
                     .relative()
                     .py(px(6.0))
@@ -590,9 +601,9 @@ impl Sidebar {
 
         if let Some(pr) = &pr {
             let pr_color = match pr.state {
-                codewire_core::PrState::Open => theme.status_running,
-                codewire_core::PrState::Closed => theme.git_deletions,
-                codewire_core::PrState::Merged => gpui::hsla(270.0 / 360.0, 0.6, 0.6, 1.0),
+                PrState::Open => theme.status_running,
+                PrState::Closed => theme.git_deletions,
+                PrState::Merged => gpui::hsla(270.0 / 360.0, 0.6, 0.6, 1.0),
             };
             project_row = project_row.child(
                 div()

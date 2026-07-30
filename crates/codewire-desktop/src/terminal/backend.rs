@@ -41,6 +41,28 @@ impl EventListener for Listener {}
 /// Shared terminal state: the alacritty_terminal grid wrapped in a mutex.
 pub type SharedTerm = Arc<Mutex<Term<Listener>>>;
 
+/// Stateful ANSI parser shared by local PTY and typed Connect terminal
+/// transports. Rendering remains transport-neutral.
+pub struct TerminalOutputParser {
+    parser: alacritty_terminal::vte::ansi::Processor<alacritty_terminal::vte::ansi::StdSyncHandler>,
+}
+
+impl Default for TerminalOutputParser {
+    fn default() -> Self {
+        Self {
+            parser: alacritty_terminal::vte::ansi::Processor::new(),
+        }
+    }
+}
+
+impl TerminalOutputParser {
+    pub fn feed(&mut self, term: &SharedTerm, bytes: &[u8]) {
+        if let Ok(mut term) = term.lock() {
+            self.parser.advance(&mut *term, bytes);
+        }
+    }
+}
+
 /// Create a new terminal grid with the given dimensions.
 pub fn new_term(size: TermSize) -> SharedTerm {
     let config = TermConfig {
@@ -125,18 +147,14 @@ pub fn read_loop(
     mut reader: Box<dyn IoRead + Send>,
     repaint: Box<dyn Fn() + Send>,
 ) {
-    let mut parser = alacritty_terminal::vte::ansi::Processor::<
-        alacritty_terminal::vte::ansi::StdSyncHandler,
-    >::new();
+    let mut parser = TerminalOutputParser::default();
     let mut buf = [0u8; 4096];
 
     loop {
         match reader.read(&mut buf) {
             Ok(0) => break, // EOF
             Ok(n) => {
-                let mut term = term.lock().unwrap();
-                parser.advance(&mut *term, &buf[..n]);
-                drop(term);
+                parser.feed(&term, &buf[..n]);
                 repaint();
             }
             Err(_) => break,

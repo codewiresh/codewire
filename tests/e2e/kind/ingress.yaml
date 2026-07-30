@@ -302,6 +302,119 @@ spec:
                 port:
                   name: http
 ---
+# Full Kind OIDC/browser identity plane. These are permanent raw IdP routes;
+# generated product calls continue through the Connect ingresses above.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: codewire-idp-e2e
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+spec:
+  ingressClassName: nginx
+  rules:
+    - http:
+        paths:
+          - path: /api/oauth
+            pathType: Prefix
+            backend:
+              service:
+                name: codewire-idp
+                port:
+                  name: http
+          - path: /api/auth/two-factor
+            pathType: Prefix
+            backend:
+              service:
+                name: codewire-idp
+                port:
+                  name: http
+          - path: /api/auth/verify-email
+            pathType: Prefix
+            backend:
+              service:
+                name: codewire-idp
+                port:
+                  name: http
+          - path: /api/auth/forget-password
+            pathType: Prefix
+            backend:
+              service:
+                name: codewire-idp
+                port:
+                  name: http
+          - path: /api/auth/reset-password
+            pathType: Prefix
+            backend:
+              service:
+                name: codewire-idp
+                port:
+                  name: http
+          - path: /api/auth/send-verification-email
+            pathType: Prefix
+            backend:
+              service:
+                name: codewire-idp
+                port:
+                  name: http
+          - path: /api/auth/sign-up
+            pathType: Prefix
+            backend:
+              service:
+                name: codewire-idp
+                port:
+                  name: http
+          - path: /api/auth/sign-in
+            pathType: Prefix
+            backend:
+              service:
+                name: codewire-idp
+                port:
+                  name: http
+          - path: /api/auth/sign-out
+            pathType: Prefix
+            backend:
+              service:
+                name: codewire-idp
+                port:
+                  name: http
+          - path: /api/auth/get-session
+            pathType: Prefix
+            backend:
+              service:
+                name: codewire-idp
+                port:
+                  name: http
+          - path: /api/oidc
+            pathType: Prefix
+            backend:
+              service:
+                name: codewire-idp
+                port:
+                  name: http
+          - path: /.well-known/openid-configuration
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: codewire-idp
+                port:
+                  name: http
+          - path: /.well-known/oauth-authorization-server
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: codewire-idp
+                port:
+                  name: http
+          - path: /.well-known/jwks.json
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: codewire-idp
+                port:
+                  name: http
+---
 # The hostless ingress above keeps the existing direct HTTP probes. This
 # localhost TLS twin exercises the public HTTP/2 edge used by the interactive
 # platform Run client without changing that product route's ownership.

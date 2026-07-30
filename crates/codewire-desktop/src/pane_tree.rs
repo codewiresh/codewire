@@ -68,7 +68,7 @@ pub enum SplitDirection {
 pub enum RemoteConnection {
     /// Plain SSH: `ssh <host>`
     Ssh { host: String },
-    /// Via Codewire CLI: `cw shell <env>`
+    /// Via the native Connect client facade.
     CodewireEnv {
         org_id: String,
         env_id: String,

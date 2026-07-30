@@ -1,0 +1,62 @@
+name: Private desktop package dry run
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.gitea/workflows/desktop-package.yaml'
+      - 'scripts/ci/release/package-codewire-desktop.sh'
+      - 'scripts/ci/tests/test-package-codewire-desktop.sh'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'crates/codewire-client/**'
+      - 'crates/codewire-desktop/**'
+      - 'crates/codewire-platform-native/**'
+      - 'crates/codewire-proto/**'
+      - 'crates/codewire-tailnet/**'
+      - 'crates/codewire-types/**'
+      - 'crates/codewire-ui/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  package-dry-run:
+    name: Build private desktop package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+
+      - uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b
+        with:
+          toolchain: stable
+
+      - name: Install native desktop build prerequisites
+        run: |
+          set -euo pipefail
+          if command -v sudo >/dev/null 2>&1; then APT='sudo apt-get'; else APT=apt-get; fi
+          $APT update -qq || true
+          $APT install -y -qq pkg-config libgtk-3-dev libwebkit2gtk-4.1-dev libxkbcommon-x11-dev
+
+      - name: Install pinned protobuf compiler
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /tmp/protoc.zip \
+            https://github.com/protocolbuffers/protobuf/releases/download/v35.1/protoc-35.1-linux-x86_64.zip
+          echo '6930ebf62bd4ea607b98fff052596c6ee564b9835b4ce172c75a3f53ae9d91b7  /tmp/protoc.zip' | sha256sum -c -
+          mkdir -p "$HOME/.proto-tools/protoc"
+          unzip -o -q /tmp/protoc.zip -d "$HOME/.proto-tools/protoc"
+          echo "$HOME/.proto-tools/protoc/bin" >> "$GITHUB_PATH"
+
+      - name: Test package boundary
+        run: scripts/ci/tests/test-package-codewire-desktop.sh
+
+      - name: Build private package dry run
+        run: scripts/ci/release/package-codewire-desktop.sh --dry-run 0.0.0-ci
+
+      - name: Verify packaged desktop payload
+        run: |
+          set -euo pipefail
+          (cd dist/codewire-desktop && sha256sum --check SHA256SUMS)
+          test -f dist/codewire-desktop/codewire-desktop-0.0.0-ci-$(rustc -vV | awk '/^host:/ {print $2}').tar.gz

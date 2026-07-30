@@ -9,6 +9,7 @@ mod config;
 mod coordinator;
 mod error;
 mod mesh;
+mod tailnet;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -25,11 +26,15 @@ use connectrpc::client::{BoxFuture, CallOptions, ClientBody, ClientTransport};
 use http::{Request, Response};
 use http_body_util::BodyExt as _;
 
+#[cfg(feature = "desktop-keyring")]
+pub use auth::KeyringCredentialStore;
 pub use auth::{
     AuthClient, AuthClientError, AuthResponse, AuthSession, AuthUser, BearerToken,
-    CODEWIRE_CLI_OAUTH_CLIENT_ID, CODEWIRE_CLI_OAUTH_SCOPES, CredentialStore, FileCredentialStore,
-    OAuthClient, OAuthCredentials, OAuthDeviceAuthorization, OAuthDiscovery, OAuthTokenResponse,
-    OAuthUserInfo, RefreshingTokenProvider, StaticTokenProvider, TokenProvider,
+    CODEWIRE_CLI_OAUTH_CLIENT_ID, CODEWIRE_CLI_OAUTH_SCOPES, CODEWIRE_DESKTOP_OAUTH_CLIENT_ID,
+    CODEWIRE_DESKTOP_OAUTH_REDIRECT_URI, CODEWIRE_DESKTOP_OAUTH_SCOPES, CredentialStore,
+    FileCredentialStore, OAuthClient, OAuthCredentials, OAuthDeviceAuthorization, OAuthDiscovery,
+    OAuthPkceAuthorization, OAuthTokenResponse, OAuthUserInfo, RefreshingTokenProvider,
+    StaticTokenProvider, TokenProvider,
 };
 pub use buffa_types::{Duration as ProtoDuration, Empty as ProtoEmpty, Timestamp};
 pub use codewire_proto::codewire::console::v1::{
@@ -109,6 +114,12 @@ pub use coordinator::{
     MeshCoordinateIdentity, MeshCoordinatorPeerSession, PrimaryCoordinateIdentity,
 };
 pub use error::{ClientError, ErrorInfo, ValidationError};
+pub use tailnet::{
+    EnvironmentTailnetDiagnostic, ExpectedTransport, NativeClientFacade, SshTransportMode,
+    TailnetConnection, TailnetDerpMapDiagnostic, TailnetDiagnosticOptions, TailnetDiagnosticStage,
+    TailnetPathDiagnostic, TailnetPeerDiagnostic, diagnose_environment_tailnet, parse_duration,
+    pipe_shell_stdio,
+};
 /// The one Rust client core consumed by the CLI and future native bindings.
 #[derive(Clone)]
 pub struct CodewireClient {

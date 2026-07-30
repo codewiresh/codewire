@@ -213,6 +213,14 @@ jobs:
           $APT install -y -qq protobuf-compiler
           protoc --version
 
+      - name: Install detached desktop build prerequisites
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|rust_pkg_codewire_desktop|') }}
+        run: |
+          set -euo pipefail
+          if command -v sudo >/dev/null 2>&1; then APT='sudo apt-get'; else APT=apt-get; fi
+          $APT update -qq || true
+          $APT install -y -qq pkg-config libgtk-3-dev libwebkit2gtk-4.1-dev libxkbcommon-x11-dev
+
       - name: Verify curated Rust image workspace locks
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|rust_curated_locks|') }}
         env:

@@ -46,9 +46,11 @@ dump_cluster_state() {
 
   kubectl --context "$context" get pods -A || true
   kubectl --context "$context" -n "$NS" describe deploy/codewire-billing || true
+  kubectl --context "$context" -n "$NS" describe deploy/codewire-idp || true
   kubectl --context "$context" -n "$NS" describe deploy/codewire-orchestration || true
   kubectl --context "$context" -n "$NS" describe deploy/codewire-coordinator || true
   kubectl --context "$context" -n "$NS" logs deploy/codewire-billing --tail=100 || true
+  kubectl --context "$context" -n "$NS" logs deploy/codewire-idp --tail=160 || true
   kubectl --context "$context" -n "$NS" logs deploy/codewire-orchestration --tail=160 || true
   kubectl --context "$context" -n "$NS" logs deploy/codewire-coordinator --tail=160 || true
   kubectl --context "$context" -n "$NS" get svc/codewire-coordinator-nodeport -o wide || true
@@ -77,6 +79,30 @@ cleanup() {
     rm -rf "$GATEWAY_SMOKE_TMPDIR"
   fi
   exit "$status"
+}
+
+assert_kind_idp_topology() {
+  local issuer ingress_paths
+
+  issuer="$(kubectl -n "$NS" get configmap codewire-config \
+    -o jsonpath='{.data.PUBLIC_OIDC_ISSUER_URL}')"
+  if [ "$issuer" != "$KIND_INGRESS_URL" ]; then
+    echo "::error::Kind IdP issuer must match the host ingress: expected ${KIND_INGRESS_URL}, got ${issuer:-missing}"
+    return 1
+  fi
+
+  kubectl -n "$NS" get deployment/codewire-idp >/dev/null
+  kubectl -n "$NS" get service/codewire-idp >/dev/null
+  ingress_paths="$(kubectl -n "$NS" get ingress codewire-idp-e2e \
+    -o jsonpath='{range .spec.rules[*].http.paths[*]}{.path}{"\n"}{end}')"
+  for required_path in \
+      /api/oauth /api/auth/sign-up /api/auth/sign-in /api/oidc \
+      /.well-known/openid-configuration /.well-known/jwks.json; do
+    if ! grep -Fqx "$required_path" <<<"$ingress_paths"; then
+      echo "::error::Kind IdP ingress is missing permanent raw path ${required_path}"
+      return 1
+    fi
+  done
 }
 
 retained_suite_cleanup() {
@@ -488,6 +514,7 @@ deploy_overlay() {
     echo "::error::kubectl apply -k tests/e2e/kind did not succeed"
     exit 1
   fi
+  assert_kind_idp_topology
   # Staged rollout: the services fail fast (correctly) when Postgres or
   # Temporal is unreachable, so park them at zero replicas until their
   # dependencies are Ready — otherwise a slow runner leaves them in
@@ -499,6 +526,7 @@ deploy_overlay() {
   # pulls of the side-loaded tags).
   kubectl -n "$NS" scale \
     deploy/codewire-billing \
+    deploy/codewire-idp \
     deploy/codewire-mesh \
     deploy/codewire-orchestration \
     deploy/codewire-coordinator \
@@ -532,14 +560,16 @@ deploy_overlay() {
   kubectl -n "$NS" exec -i deploy/postgres -- \
     psql -U codewire -d codewire -v ON_ERROR_STOP=1 < "$ROOT/tests/e2e/kind/coordinator-seed.sql"
 
-  log "starting billing, primary authorization, Mesh, and coordinator (dependencies ready)"
+  log "starting billing, IdP, primary authorization, Mesh, and coordinator (dependencies ready)"
   kubectl -n "$NS" scale \
     deploy/codewire-billing \
+    deploy/codewire-idp \
     deploy/codewire-mesh \
     deploy/codewire-orchestration \
     deploy/codewire-coordinator \
     --replicas=1
   kubectl -n "$NS" rollout status deploy/codewire-billing --timeout=300s
+  kubectl -n "$NS" rollout status deploy/codewire-idp --timeout=300s
   kubectl -n "$NS" rollout status deploy/codewire-orchestration --timeout=300s
   kubectl -n "$NS" rollout status deploy/codewire-mesh --timeout=300s
   kubectl -n "$NS" rollout status deploy/codewire-coordinator --timeout=300s
@@ -2174,11 +2204,24 @@ EOF
 }
 
 billing_contract_through_ingress() {
+  local frontend_url
+
+  # Exercise redirects against the origin the deployed billing service actually
+  # accepts. The Kind browser proof serves the dashboard from Vite while its
+  # API proxy uses the separate ingress origin, so these are intentionally not
+  # interchangeable.
+  frontend_url="$(kubectl -n "$NS" get configmap codewire-config \
+    -o jsonpath='{.data.FRONTEND_URL}')"
+  if [ -z "$frontend_url" ]; then
+    echo "::error::Kind billing contract requires codewire-config FRONTEND_URL"
+    return 1
+  fi
+
   log "running configured Rust billing wire contract through ingress"
   (
     cd "$ROOT"
     BILLING_BASE_URL="$KIND_INGRESS_URL" \
-      BILLING_FRONTEND_URL="http://127.0.0.1:8080" \
+      BILLING_FRONTEND_URL="$frontend_url" \
       BILLING_ADMIN_SESSION_TOKEN=contract-admin-session-token \
       BILLING_USER_SESSION_TOKEN=contract-user-session-token \
       BILLING_SEEDED=1 \

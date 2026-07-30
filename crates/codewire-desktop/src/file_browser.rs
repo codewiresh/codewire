@@ -962,7 +962,6 @@ async fn read_ssh_directory(
     root_path: &str,
     relative_path: &str,
 ) -> Result<Vec<FileNode>, String> {
-    use codewire_core::{SshClient, SshSession};
     use codewire_platform_native::RusshClient;
 
     let ssh_client = RusshClient::new();
@@ -982,7 +981,8 @@ async fn read_ssh_directory(
         "ls -1Fp --group-directories-first '{}' 2>/dev/null || ls -1Fp '{}'",
         full_path, full_path
     );
-    let output = SshSession::exec(&connection, &cmd)
+    let output = connection
+        .exec(&cmd)
         .await
         .map_err(|e| format!("Failed to list directory: {}", e))?;
 
@@ -1103,7 +1103,6 @@ async fn run_git_status_ssh(
     ssh_host: &str,
     root_path: &str,
 ) -> Result<HashMap<String, FileGitStatus>, String> {
-    use codewire_core::{SshClient, SshSession};
     use codewire_platform_native::RusshClient;
 
     let ssh_client = RusshClient::new();
@@ -1113,7 +1112,8 @@ async fn run_git_status_ssh(
         .map_err(|e| format!("SSH connection failed: {}", e))?;
 
     let cmd = format!("cd '{}' && git status --porcelain 2>/dev/null", root_path);
-    let output = SshSession::exec(&connection, &cmd)
+    let output = connection
+        .exec(&cmd)
         .await
         .map_err(|e| format!("Failed to run git status: {}", e))?;
 

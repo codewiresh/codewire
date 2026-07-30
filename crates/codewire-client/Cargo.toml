@@ -8,12 +8,15 @@ description = "Shared ergonomic Rust client over Codewire's generated Connect-RP
 
 [features]
 kind-e2e = []
+desktop-keyring = ["dep:keyring"]
+desktop-pkce-loopback = ["dep:open", "dep:tiny_http"]
 
 [[example]]
 name = "coordinator-ingress-smoke"
 required-features = ["kind-e2e"]
 
 [dependencies]
+anyhow = { workspace = true }
 async-trait = { workspace = true }
 base64 = { workspace = true }
 buffa = { workspace = true }
@@ -25,7 +28,12 @@ connectrpc = { workspace = true, features = ["client"] }
 http = { workspace = true }
 http-body-util = { workspace = true }
 hyper-util = { workspace = true }
+futures-util = "0.3"
 reqwest = { workspace = true }
+rand = { workspace = true }
+sha2 = { workspace = true }
+open = { workspace = true, optional = true }
+tiny_http = { workspace = true, optional = true }
 rustls = { version = "=0.23.40", default-features = false, features = ["ring"] }
 rustls-pki-types = "=1.14.1"
 serde = { workspace = true }
@@ -38,8 +46,17 @@ uuid = { workspace = true }
 webpki-roots = "=1.0.7"
 
 tokio = { workspace = true }
+tokio-tungstenite = { version = "0.28", default-features = false, features = ["connect", "handshake", "rustls-tls-webpki-roots"] }
 wiremock = { workspace = true }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { workspace = true, optional = true, features = ["apple-native"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+keyring = { workspace = true, optional = true, features = ["windows-native"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { workspace = true, optional = true, features = ["linux-native-sync-persistent"] }
+
 [dev-dependencies]
-anyhow = { workspace = true }
 tempfile = { workspace = true }

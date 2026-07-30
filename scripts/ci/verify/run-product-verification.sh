@@ -76,6 +76,31 @@ run_rust_packages() {
   cargo test "${RUST_PACKAGE_ARGS[@]}" --all-targets
 }
 
+run_detached_desktop() {
+  local manifest="crates/codewire-desktop/Cargo.toml"
+  cargo fmt --manifest-path "$manifest" --check
+  cargo check --locked --manifest-path "$manifest"
+  cargo test --locked --manifest-path "$manifest"
+  scripts/ci/release/package-codewire-desktop.sh --dry-run 0.0.0-ci
+}
+
+has_root_rust_selection() {
+  local manifest dir token
+  if selected rust_workspace; then
+    return 0
+  fi
+  for manifest in crates/*/Cargo.toml; do
+    dir="${manifest%/Cargo.toml}"
+    token="${dir#crates/}"
+    token="${token//-/_}"
+    [ "$token" = codewire_desktop ] && continue
+    if selected "rust_pkg_${token}"; then
+      return 0
+    fi
+  done
+  return 1
+}
+
 run_policy() {
   local runtime_shell_files=()
   local runtime_shell_file
@@ -94,6 +119,7 @@ run_policy() {
   scripts/ci/tests/test-require-verification-results.sh
   scripts/ci/tests/test-verify-tested-tree-receipt.sh
   scripts/ci/tests/test-resolve-cargo-target-dir.sh
+  scripts/ci/tests/test-package-codewire-desktop.sh
   scripts/ci/tests/test-sdk-local-cli-contract.sh
   scripts/ci/tests/test-integration-postgres.sh
   python3 scripts/checks/repo_checks.py license-map
@@ -279,7 +305,12 @@ run_runtime_confidential() {
 }
 
 run_rust() {
-  run_rust_packages rust_pkg_
+  if selected rust_pkg_codewire_desktop; then
+    run_detached_desktop
+  fi
+  if has_root_rust_selection; then
+    run_rust_packages rust_pkg_
+  fi
   if selected rust_pkg_codewire_oidc; then
     cargo check -p codewire-oidc --no-default-features
     cargo test -p codewire-oidc --features axum

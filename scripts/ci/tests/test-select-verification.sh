@@ -151,14 +151,19 @@ run_paths_case leaf_rust pull_request refs/pull/4/head false \
   'policy rust rust_pkg_codewire_cli' \
   crates/codewire-cli/src/commands/info.rs
 run_paths_case detached_desktop pull_request refs/pull/401/head false \
-  'policy' \
+  'policy rust rust_pkg_codewire_desktop' \
   crates/codewire-desktop/src/main.rs
 run_paths_case detached_platform_native pull_request refs/pull/402/head false \
-  'policy' \
+  'policy rust rust_pkg_codewire_desktop' \
   crates/codewire-platform-native/src/lib.rs
 run_paths_case detached_ui pull_request refs/pull/403/head false \
-  'policy' \
+  'policy rust rust_pkg_codewire_desktop' \
   crates/codewire-ui/src/lib.rs
+run_paths_case detached_desktop_package pull_request refs/pull/404/head false \
+  'policy rust rust_pkg_codewire_desktop' \
+  .gitea/workflows/desktop-package.yaml \
+  scripts/ci/release/package-codewire-desktop.sh \
+  scripts/ci/tests/test-package-codewire-desktop.sh
 run_paths_case rust_root pull_request refs/pull/5/head false \
   'policy rust rust_curated_locks rust_workspace' Cargo.lock
 run_paths_case curated_gateway_member_manifest pull_request refs/pull/501/head false \
@@ -451,7 +456,7 @@ run_paths_case temporal_installer_without_kind pull_request refs/pull/171/head f
 run_paths_case temporal_installer_with_kind pull_request refs/pull/172/head true \
   'edge_kind kind policy' scripts/dev/kind/install-temporal.sh scripts/ci/tests/test-install-temporal.sh
 run_paths_case ws17_wi_c3 pull_request refs/pull/173/head false \
-  'go_consumer_interop go_support policy release runtime_confidential rust rust_pkg_codewire_cli rust_pkg_codewire_cli_bin rust_pkg_codewire_orchestration sdk_go sdk_python sdk_ts service_integration service_orchestration service_temporal web' \
+  'go_consumer_interop go_support policy release runtime_confidential rust rust_pkg_codewire_cli rust_pkg_codewire_cli_bin rust_pkg_codewire_desktop rust_pkg_codewire_orchestration sdk_go sdk_python sdk_ts service_integration service_orchestration service_temporal web' \
   CONTRIBUTING.md \
   README.md \
   apps/cli/.env.example \

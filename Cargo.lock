@@ -155,6 +155,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "ascii"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d92bec98840b8f03a5ff5413de5293bfcd8bf96467cf5452609f939ec6f5de16"
+
+[[package]]
 name = "askama"
 version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1016,6 +1022,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "chunked_transfer"
+version = "1.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6e4de3bc4ea267985becf712dc6d9eed8b04c953b3fcfb339ebc87acd9804901"
+
+[[package]]
 name = "cipher"
 version = "0.4.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1175,8 +1187,6 @@ dependencies = [
  "clap_complete",
  "codewire-client",
  "codewire-daemon",
- "codewire-tailnet",
- "futures-util",
  "portable-pty",
  "rand 0.8.6",
  "reqwest 0.12.28",
@@ -1187,7 +1197,6 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
- "tokio-tungstenite 0.28.0",
  "toml 1.1.2+spec-1.1.0",
  "url",
  "uuid",
@@ -1215,18 +1224,25 @@ dependencies = [
  "codewire-proto",
  "codewire-tailnet",
  "connectrpc",
+ "futures-util",
  "http",
  "http-body-util",
  "hyper-util",
+ "keyring",
+ "open",
+ "rand 0.8.6",
  "reqwest 0.12.28",
  "rustls",
  "rustls-pki-types",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
  "thiserror 2.0.18",
+ "tiny_http",
  "tokio",
  "tokio-rustls",
+ "tokio-tungstenite 0.28.0",
  "tower 0.5.3",
  "url",
  "uuid",
@@ -1729,6 +1745,16 @@ dependencies = [
 
 [[package]]
 name = "core-foundation"
+version = "0.9.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "91e195e091a93c46f7102ec7818a2aa394e1e1771c3ab4825963fa03e45afb8f"
+dependencies = [
+ "core-foundation-sys",
+ "libc",
+]
+
+[[package]]
+name = "core-foundation"
 version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b55271e5c8c478ad3f38ad24ef34923091e0548492a266d19b3c0b4d82574c63"
@@ -2018,6 +2044,27 @@ name = "data-encoding"
 version = "2.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a4ae5f15dda3c708c0ade84bfee31ccab44a3da4f88015ed22f63732abe300c8"
+
+[[package]]
+name = "dbus"
+version = "0.9.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3ab69f03cc8c4340c9c8e315114e1658e6775a9b16a04357973aa21cec22b32e"
+dependencies = [
+ "libc",
+ "libdbus-sys",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "dbus-secret-service"
+version = "4.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "708b509edf7889e53d7efb0ffadd994cc6c2345ccb62f55cfd6b0682165e4fa6"
+dependencies = [
+ "dbus",
+ "zeroize",
+]
 
 [[package]]
 name = "deadpool"
@@ -3358,6 +3405,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d98f6fed1fde3f8c21bc40a1abb88dd75e67924f9cffc3ef95607bad8017f8e2"
 
 [[package]]
+name = "is-docker"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "928bae27f42bc99b60d9ac7334e3a21d10ad8f1835a4e12ec3ec0464765ed1b3"
+dependencies = [
+ "once_cell",
+]
+
+[[package]]
+name = "is-wsl"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "173609498df190136aa7dea1a91db051746d339e18476eed5ca40521f02d7aa5"
+dependencies = [
+ "is-docker",
+ "once_cell",
+]
+
+[[package]]
 name = "itertools"
 version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3491,6 +3557,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "keyring"
+version = "3.6.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "eebcc3aff044e5944a8fbaf69eb277d11986064cba30c468730e8b9909fb551c"
+dependencies = [
+ "byteorder",
+ "dbus-secret-service",
+ "linux-keyutils",
+ "log",
+ "security-framework 2.11.1",
+ "security-framework 3.7.0",
+ "windows-sys 0.60.2",
+ "zeroize",
+]
+
+[[package]]
 name = "kube"
 version = "3.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3576,6 +3658,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
 
 [[package]]
+name = "libdbus-sys"
+version = "0.2.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "328c4789d42200f1eeec05bd86c9c13c7f091d2ba9a6ea35acdf51f31bc0f043"
+dependencies = [
+ "pkg-config",
+]
+
+[[package]]
 name = "libm"
 version = "0.2.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3601,6 +3692,16 @@ checksum = "2e99fb7a497b1e3339bc746195567ed8d3e24945ecd636e3619d20b9de9e9149"
 dependencies = [
  "pkg-config",
  "vcpkg",
+]
+
+[[package]]
+name = "linux-keyutils"
+version = "0.2.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "83270a18e9f90d0707c41e9f35efada77b64c0e6f3f1810e71c8368a864d5590"
+dependencies = [
+ "bitflags 2.11.1",
+ "libc",
 ]
 
 [[package]]
@@ -4030,6 +4131,16 @@ name = "opaque-debug"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c08d65885ee38876c4f86fa503fb49d7b507c2b62552df7c70b2fce627e06381"
+
+[[package]]
+name = "open"
+version = "5.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a0b3d059e795d52b8a72fef45658620edd4d9c359b338564aa14391ffa511ed5"
+dependencies = [
+ "is-wsl",
+ "libc",
+]
 
 [[package]]
 name = "openapiv3"
@@ -5509,7 +5620,7 @@ dependencies = [
  "openssl-probe",
  "rustls-pki-types",
  "schannel",
- "security-framework",
+ "security-framework 3.7.0",
 ]
 
 [[package]]
@@ -5687,12 +5798,25 @@ dependencies = [
 
 [[package]]
 name = "security-framework"
+version = "2.11.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "897b2245f0b511c87893af39b033e5ca9cce68824c4d7e7630b5a1d339658d02"
+dependencies = [
+ "bitflags 2.11.1",
+ "core-foundation 0.9.4",
+ "core-foundation-sys",
+ "libc",
+ "security-framework-sys",
+]
+
+[[package]]
+name = "security-framework"
 version = "3.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b7f4bc775c73d9a02cde8bf7b2ec4c9d12743edf609006c7facc23998404cd1d"
 dependencies = [
  "bitflags 2.11.1",
- "core-foundation",
+ "core-foundation 0.10.0",
  "core-foundation-sys",
  "libc",
  "security-framework-sys",
@@ -6773,6 +6897,18 @@ checksum = "2e70e4c5a0e0a8a4823ad65dfe1a6930e4f4d756dcd9dd7939022b5e8c501215"
 dependencies = [
  "num-conv",
  "time-core",
+]
+
+[[package]]
+name = "tiny_http"
+version = "0.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "389915df6413a2e74fb181895f933386023c71110878cd0825588928e64cdc82"
+dependencies = [
+ "ascii",
+ "chunked_transfer",
+ "httpdate",
+ "log",
 ]
 
 [[package]]

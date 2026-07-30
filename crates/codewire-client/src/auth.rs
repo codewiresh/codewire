@@ -9,9 +9,11 @@ use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
+use base64::Engine as _;
 use connectrpc::ErrorCode;
 use http::HeaderValue;
 use serde::{Deserialize, Deserializer, Serialize};
+use sha2::{Digest as _, Sha256};
 use tokio::sync::Mutex;
 use url::Url;
 
@@ -94,16 +96,108 @@ impl TokenProvider for StaticTokenProvider {
 pub const CODEWIRE_CLI_OAUTH_CLIENT_ID: &str = "codewire-cli";
 /// The exact scopes granted to the public Codewire CLI device flow.
 pub const CODEWIRE_CLI_OAUTH_SCOPES: &str = "openid profile email offline_access codewire.api";
+/// The fixed native public client used by the replacement desktop application.
+pub const CODEWIRE_DESKTOP_OAUTH_CLIENT_ID: &str = "codewire-desktop";
+/// The fixed loopback callback registered for the replacement desktop client.
+pub const CODEWIRE_DESKTOP_OAUTH_REDIRECT_URI: &str = "http://localhost:9876/callback";
+/// The desktop needs the same product capability as every other native client.
+pub const CODEWIRE_DESKTOP_OAUTH_SCOPES: &str = CODEWIRE_CLI_OAUTH_SCOPES;
 
 /// OIDC metadata needed by the public CLI. Endpoint URLs are validated against
 /// the configured issuer before a credential can be sent to them.
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 pub struct OAuthDiscovery {
     pub issuer: String,
+    #[serde(default)]
+    pub authorization_endpoint: Option<String>,
     pub token_endpoint: String,
     pub userinfo_endpoint: String,
     pub revocation_endpoint: String,
     pub device_authorization_endpoint: Option<String>,
+}
+
+/// The opaque state required to complete one authorization-code PKCE login.
+/// It is intentionally not serializable or debuggable because the verifier is
+/// a one-time credential.
+pub struct OAuthPkceAuthorization {
+    authorization_url: Url,
+    state: String,
+    code_verifier: String,
+    client_id: String,
+    redirect_uri: String,
+}
+
+impl OAuthPkceAuthorization {
+    pub fn authorization_url(&self) -> &Url {
+        &self.authorization_url
+    }
+}
+
+impl fmt::Debug for OAuthPkceAuthorization {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("OAuthPkceAuthorization")
+            .field("authorization_url", &self.authorization_url)
+            .field("state", &"[REDACTED]")
+            .field("code_verifier", &"[REDACTED]")
+            .field("client_id", &self.client_id)
+            .field("redirect_uri", &self.redirect_uri)
+            .finish()
+    }
+}
+
+/// One atomic credential entry in the operating-system keyring. The complete
+/// rotating OAuth pair is serialized into one keyring value, so readers never
+/// observe an access token and refresh token from different generations.
+#[cfg(feature = "desktop-keyring")]
+#[derive(Clone, Debug)]
+pub struct KeyringCredentialStore {
+    service: String,
+    account: String,
+}
+
+#[cfg(feature = "desktop-keyring")]
+impl KeyringCredentialStore {
+    pub fn new(service: impl Into<String>, account: impl Into<String>) -> Self {
+        Self {
+            service: service.into(),
+            account: account.into(),
+        }
+    }
+
+    pub fn desktop() -> Self {
+        Self::new("codewire-desktop", "oauth")
+    }
+
+    fn entry(&self) -> Result<keyring::Entry, ClientError> {
+        keyring::Entry::new(&self.service, &self.account)
+            .map_err(|_| credential_error("open OAuth keyring entry"))
+    }
+}
+
+#[cfg(feature = "desktop-keyring")]
+impl CredentialStore for KeyringCredentialStore {
+    fn load(&self) -> Result<Option<OAuthCredentials>, ClientError> {
+        match self.entry()?.get_password() {
+            Ok(serialized) => decode_keyring_credentials(&serialized).map(Some),
+            Err(keyring::Error::NoEntry) => Ok(None),
+            Err(_) => Err(credential_error("read OAuth keyring credentials")),
+        }
+    }
+
+    fn save(&self, credentials: &OAuthCredentials) -> Result<(), ClientError> {
+        let serialized = encode_keyring_credentials(credentials)?;
+        self.entry()?
+            .set_password(&serialized)
+            .map_err(|_| credential_error("write OAuth keyring credentials"))
+    }
+
+    fn delete(&self) -> Result<(), ClientError> {
+        match self.entry()?.delete_credential() {
+            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+            Err(_) => Err(credential_error("delete OAuth keyring credentials")),
+        }
+    }
 }
 
 /// RFC 8628 device-authorization response. The CLI deliberately presents the
@@ -388,6 +482,7 @@ impl CredentialStore for FileCredentialStore {
 #[derive(Clone)]
 pub struct OAuthClient {
     discovery: OAuthDiscovery,
+    authorization_endpoint: Option<Url>,
     token_endpoint: Url,
     userinfo_endpoint: Url,
     revocation_endpoint: Url,
@@ -429,6 +524,9 @@ impl OAuthClient {
             .to_string();
         let discovery = OAuthDiscovery {
             issuer,
+            authorization_endpoint: Some(
+                endpoint_from_config(&config, "api/oauth/authorize").to_string(),
+            ),
             token_endpoint: endpoint_from_config(&config, "api/oauth/token").to_string(),
             userinfo_endpoint: endpoint_from_config(&config, "api/oauth/userinfo").to_string(),
             revocation_endpoint: endpoint_from_config(&config, "api/oauth/revoke").to_string(),
@@ -448,6 +546,11 @@ impl OAuthClient {
         let issuer = validated_oauth_endpoint(configured_server, &discovery.issuer, "issuer")?;
         let token_endpoint =
             validated_oauth_endpoint(&issuer, &discovery.token_endpoint, "token endpoint")?;
+        let authorization_endpoint = discovery
+            .authorization_endpoint
+            .as_deref()
+            .map(|endpoint| validated_oauth_endpoint(&issuer, endpoint, "authorization endpoint"))
+            .transpose()?;
         let userinfo_endpoint =
             validated_oauth_endpoint(&issuer, &discovery.userinfo_endpoint, "userinfo endpoint")?;
         let revocation_endpoint = validated_oauth_endpoint(
@@ -466,6 +569,7 @@ impl OAuthClient {
             })?;
         Ok(Self {
             discovery,
+            authorization_endpoint,
             token_endpoint,
             userinfo_endpoint,
             revocation_endpoint,
@@ -477,6 +581,156 @@ impl OAuthClient {
 
     pub fn issuer(&self) -> &str {
         &self.discovery.issuer
+    }
+
+    /// Start a standard authorization-code flow with RFC 7636 S256 PKCE.
+    /// The returned value is intentionally opaque; callers only open its URL
+    /// and hand the final loopback callback back to this client.
+    pub fn begin_pkce_authorization(
+        &self,
+        client_id: impl Into<String>,
+        redirect_uri: impl Into<String>,
+        scopes: impl AsRef<str>,
+    ) -> Result<OAuthPkceAuthorization, AuthClientError> {
+        let client_id = client_id.into();
+        if client_id.trim().is_empty() {
+            return Err(AuthClientError::Response {
+                message: "OAuth client id must not be empty".into(),
+            });
+        }
+        let redirect_uri = redirect_uri.into();
+        let callback = Url::parse(&redirect_uri).map_err(|_| AuthClientError::Response {
+            message: "OAuth redirect URI is not a valid URL".into(),
+        })?;
+        if callback.scheme() != "http"
+            || !matches!(
+                callback.host_str(),
+                Some("localhost") | Some("127.0.0.1") | Some("::1")
+            )
+            || callback.port().is_none()
+        {
+            return Err(AuthClientError::Response {
+                message: "native OAuth redirect URI must be an explicit loopback HTTP URL".into(),
+            });
+        }
+        let authorization_endpoint =
+            self.authorization_endpoint
+                .clone()
+                .ok_or_else(|| AuthClientError::Response {
+                    message: "issuer does not advertise OAuth authorization".into(),
+                })?;
+        let code_verifier = random_urlsafe(48);
+        let code_challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(Sha256::digest(code_verifier.as_bytes()));
+        let state = random_urlsafe(32);
+        let mut authorization_url = authorization_endpoint;
+        authorization_url
+            .query_pairs_mut()
+            .append_pair("client_id", &client_id)
+            .append_pair("redirect_uri", &redirect_uri)
+            .append_pair("response_type", "code")
+            .append_pair("scope", scopes.as_ref())
+            .append_pair("state", &state)
+            .append_pair("code_challenge", &code_challenge)
+            .append_pair("code_challenge_method", "S256");
+        Ok(OAuthPkceAuthorization {
+            authorization_url,
+            state,
+            code_verifier,
+            client_id,
+            redirect_uri,
+        })
+    }
+
+    /// Complete a PKCE login from the complete loopback callback URL. The
+    /// callback's origin and path must exactly match the registered redirect,
+    /// and its state must match the one-time request before any token request
+    /// is sent.
+    pub async fn complete_pkce_authorization(
+        &self,
+        authorization: OAuthPkceAuthorization,
+        callback_url: &str,
+    ) -> Result<OAuthCredentials, AuthClientError> {
+        let callback = Url::parse(callback_url).map_err(|_| AuthClientError::Response {
+            message: "OAuth callback is not a valid URL".into(),
+        })?;
+        let expected =
+            Url::parse(&authorization.redirect_uri).map_err(|_| AuthClientError::Response {
+                message: "OAuth redirect URI is not a valid URL".into(),
+            })?;
+        if callback.scheme() != expected.scheme()
+            || callback.host_str() != expected.host_str()
+            || callback.port_or_known_default() != expected.port_or_known_default()
+            || callback.path() != expected.path()
+        {
+            return Err(AuthClientError::Response {
+                message: "OAuth callback did not match the registered redirect URI".into(),
+            });
+        }
+        let mut state = None;
+        let mut code = None;
+        for (key, value) in callback.query_pairs() {
+            let value = value.into_owned();
+            let duplicate = match key.as_ref() {
+                "state" => state.replace(value).is_some(),
+                "code" => code.replace(value).is_some(),
+                _ => false,
+            };
+            if duplicate {
+                let message = if key == "state" {
+                    "OAuth callback contained duplicate state values"
+                } else {
+                    "OAuth callback contained duplicate authorization codes"
+                };
+                return Err(AuthClientError::Response {
+                    message: message.into(),
+                });
+            }
+        }
+        if state.as_deref() != Some(authorization.state.as_str()) {
+            return Err(AuthClientError::Response {
+                message: "OAuth callback state did not match the authorization request".into(),
+            });
+        }
+        let code = code
+            .as_deref()
+            .filter(|code| !code.is_empty())
+            .ok_or_else(|| AuthClientError::Response {
+                message: "OAuth callback did not contain an authorization code".into(),
+            })?;
+        let response = self
+            .token_request(&[
+                ("client_id", authorization.client_id.as_str()),
+                ("grant_type", "authorization_code"),
+                ("code", code),
+                ("redirect_uri", authorization.redirect_uri.as_str()),
+                ("code_verifier", authorization.code_verifier.as_str()),
+            ])
+            .await?;
+        OAuthCredentials::from_token_response(
+            self.discovery.issuer.clone(),
+            authorization.client_id,
+            response,
+            None,
+        )
+        .map_err(AuthClientError::Client)
+    }
+
+    /// Complete the fixed desktop PKCE flow through the system browser and its
+    /// registered loopback callback. The login page remains the only owner of
+    /// passwords, 2FA, and passkeys; this adapter receives only the resulting
+    /// authorization code on its registered localhost loopback callback.
+    #[cfg(feature = "desktop-pkce-loopback")]
+    pub async fn login_desktop_pkce(&self) -> Result<OAuthCredentials, AuthClientError> {
+        let authorization = self.begin_pkce_authorization(
+            CODEWIRE_DESKTOP_OAUTH_CLIENT_ID,
+            CODEWIRE_DESKTOP_OAUTH_REDIRECT_URI,
+            CODEWIRE_DESKTOP_OAUTH_SCOPES,
+        )?;
+        let callback =
+            receive_desktop_loopback_callback(authorization.authorization_url().clone()).await?;
+        self.complete_pkce_authorization(authorization, &callback)
+            .await
     }
 
     pub async fn authorize_device(&self) -> Result<OAuthDeviceAuthorization, AuthClientError> {
@@ -507,23 +761,21 @@ impl OAuthClient {
         &self,
         credentials: &OAuthCredentials,
     ) -> Result<OAuthCredentials, AuthClientError> {
-        if credentials.issuer != self.discovery.issuer
-            || credentials.client_id != CODEWIRE_CLI_OAUTH_CLIENT_ID
-        {
+        if credentials.issuer != self.discovery.issuer {
             return Err(AuthClientError::Response {
                 message: "OAuth credentials are not for this Codewire server".to_string(),
             });
         }
         let response = self
             .token_request(&[
-                ("client_id", CODEWIRE_CLI_OAUTH_CLIENT_ID),
+                ("client_id", credentials.client_id()),
                 ("grant_type", "refresh_token"),
                 ("refresh_token", credentials.refresh_token()),
             ])
             .await?;
         OAuthCredentials::from_token_response(
             self.discovery.issuer.clone(),
-            CODEWIRE_CLI_OAUTH_CLIENT_ID.to_string(),
+            credentials.client_id().to_string(),
             response,
             Some(credentials.refresh_token()),
         )
@@ -573,9 +825,7 @@ impl OAuthClient {
         &self,
         credentials: &OAuthCredentials,
     ) -> Result<(), AuthClientError> {
-        if credentials.issuer != self.discovery.issuer
-            || credentials.client_id != CODEWIRE_CLI_OAUTH_CLIENT_ID
-        {
+        if credentials.issuer != self.discovery.issuer {
             return Err(AuthClientError::Response {
                 message: "OAuth credentials are not for this Codewire server".to_string(),
             });
@@ -619,9 +869,7 @@ impl<S: CredentialStore> RefreshingTokenProvider<S> {
         let credentials = store.load()?.ok_or_else(|| {
             ClientError::new(ErrorCode::Unauthenticated, "OAuth credentials unavailable")
         })?;
-        if credentials.issuer != client.discovery.issuer
-            || credentials.client_id != CODEWIRE_CLI_OAUTH_CLIENT_ID
-        {
+        if credentials.issuer != client.discovery.issuer {
             return Err(ClientError::new(
                 ErrorCode::Unauthenticated,
                 "OAuth credentials are not for this Codewire server",
@@ -639,9 +887,7 @@ impl<S: CredentialStore> RefreshingTokenProvider<S> {
         store: S,
         credentials: OAuthCredentials,
     ) -> Result<Self, ClientError> {
-        if credentials.issuer != client.discovery.issuer
-            || credentials.client_id != CODEWIRE_CLI_OAUTH_CLIENT_ID
-        {
+        if credentials.issuer != client.discovery.issuer {
             return Err(ClientError::new(
                 ErrorCode::Unauthenticated,
                 "OAuth credentials are not for this Codewire server",
@@ -975,8 +1221,84 @@ fn now_unix() -> u64 {
         .as_secs()
 }
 
+fn random_urlsafe(bytes: usize) -> String {
+    use rand::RngCore as _;
+
+    let mut value = vec![0u8; bytes];
+    rand::rngs::OsRng.fill_bytes(&mut value);
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(value)
+}
+
+#[cfg(feature = "desktop-pkce-loopback")]
+async fn receive_desktop_loopback_callback(
+    authorization_url: Url,
+) -> Result<String, AuthClientError> {
+    tokio::task::spawn_blocking(move || {
+        // Bind the registered hostname rather than one numeric family. On
+        // systems where localhost prefers IPv6, a 127.0.0.1-only listener
+        // leaves the browser callback unreachable even though PKCE completed.
+        let server = tiny_http::Server::http("localhost:9876").map_err(|_| {
+            AuthClientError::Response {
+                message: "unable to bind the desktop OAuth loopback callback".into(),
+            }
+        })?;
+        open::that(authorization_url.as_str()).map_err(|_| AuthClientError::Response {
+            message: "unable to open the system browser for OAuth login".into(),
+        })?;
+        let request = server
+            .recv_timeout(Duration::from_secs(300))
+            .map_err(|_| AuthClientError::Response {
+                message: "desktop OAuth loopback callback failed".into(),
+            })?
+            .ok_or_else(|| AuthClientError::Response {
+                message: "desktop OAuth login timed out".into(),
+            })?;
+        let path_and_query = request.url().to_string();
+        let valid_path = path_and_query
+            .split('?')
+            .next()
+            .is_some_and(|path| path == "/callback");
+        let body = if valid_path {
+            "<html><body><h1>Authentication complete</h1><p>You can return to Codewire.</p></body></html>"
+        } else {
+            "<html><body><h1>Authentication failed</h1></body></html>"
+        };
+        let status = if valid_path { 200 } else { 400 };
+        let _ = request.respond(
+            tiny_http::Response::from_string(body)
+                .with_status_code(status)
+                .with_header(
+                    tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"text/html; charset=utf-8"[..])
+                        .expect("static content-type header"),
+                ),
+        );
+        if !valid_path {
+            return Err(AuthClientError::Response {
+                message: "desktop OAuth callback used an unexpected path".into(),
+            });
+        }
+        Ok(format!("http://localhost:9876{path_and_query}"))
+    })
+    .await
+    .map_err(|_| AuthClientError::Response {
+        message: "desktop OAuth callback task failed".into(),
+    })?
+}
+
 fn credential_error(action: &str) -> ClientError {
     ClientError::new(ErrorCode::Internal, format!("unable to {action}"))
+}
+
+#[cfg(feature = "desktop-keyring")]
+fn encode_keyring_credentials(credentials: &OAuthCredentials) -> Result<String, ClientError> {
+    serde_json::to_string(credentials)
+        .map_err(|_| credential_error("serialize OAuth keyring credentials"))
+}
+
+#[cfg(feature = "desktop-keyring")]
+fn decode_keyring_credentials(serialized: &str) -> Result<OAuthCredentials, ClientError> {
+    serde_json::from_str(serialized)
+        .map_err(|_| credential_error("parse OAuth keyring credentials"))
 }
 
 fn credential_temp_path(path: &Path) -> PathBuf {
@@ -1128,6 +1450,118 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pkce_authorization_code_flow_binds_loopback_state_and_product_scope() {
+        let server = MockServer::start().await;
+        Mock::given(matchers::method("GET"))
+            .and(matchers::path("/.well-known/openid-configuration"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "issuer": server.uri(),
+                "authorization_endpoint": format!("{}/api/oauth/authorize", server.uri()),
+                "token_endpoint": format!("{}/api/oauth/token", server.uri()),
+                "userinfo_endpoint": format!("{}/api/oauth/userinfo", server.uri()),
+                "revocation_endpoint": format!("{}/api/oauth/revoke", server.uri()),
+                "device_authorization_endpoint": format!("{}/api/oauth/device_authorization", server.uri())
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(matchers::method("POST"))
+            .and(matchers::path("/api/oauth/token"))
+            .and(matchers::body_string_contains(
+                "grant_type=authorization_code",
+            ))
+            .and(matchers::body_string_contains("client_id=codewire-desktop"))
+            .and(matchers::body_string_contains(
+                "redirect_uri=http%3A%2F%2Flocalhost%3A9876%2Fcallback",
+            ))
+            .and(matchers::body_string_contains("code_verifier="))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "access_token": "desktop-access",
+                "token_type": "Bearer",
+                "expires_in": 3600,
+                "refresh_token": "desktop-refresh",
+                "scope": CODEWIRE_DESKTOP_OAUTH_SCOPES
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = OAuthClient::discover(server.uri()).await.expect("discover");
+        let authorization = client
+            .begin_pkce_authorization(
+                CODEWIRE_DESKTOP_OAUTH_CLIENT_ID,
+                CODEWIRE_DESKTOP_OAUTH_REDIRECT_URI,
+                CODEWIRE_DESKTOP_OAUTH_SCOPES,
+            )
+            .expect("start pkce");
+        let query = authorization
+            .authorization_url()
+            .query_pairs()
+            .collect::<std::collections::HashMap<_, _>>();
+        assert_eq!(
+            query.get("response_type").map(|value| value.as_ref()),
+            Some("code")
+        );
+        assert_eq!(
+            query
+                .get("code_challenge_method")
+                .map(|value| value.as_ref()),
+            Some("S256")
+        );
+        assert_eq!(
+            query.get("scope").map(|value| value.as_ref()),
+            Some(CODEWIRE_DESKTOP_OAUTH_SCOPES)
+        );
+        assert_ne!(query.get("state").map(|value| value.as_ref()), Some(""));
+        let callback = format!(
+            "{}?code=desktop-code&state={}",
+            CODEWIRE_DESKTOP_OAUTH_REDIRECT_URI, authorization.state
+        );
+        let credentials = client
+            .complete_pkce_authorization(authorization, &callback)
+            .await
+            .expect("exchange pkce code");
+        assert_eq!(credentials.client_id(), CODEWIRE_DESKTOP_OAUTH_CLIENT_ID);
+        assert_eq!(
+            credentials.bearer_token().expect("token").expose_secret(),
+            "desktop-access"
+        );
+    }
+
+    #[tokio::test]
+    async fn pkce_callback_rejects_duplicate_or_untrusted_parameters_before_exchange() {
+        let client = OAuthClient::for_server_url("https://codewire.test").expect("OAuth client");
+        let authorization = client
+            .begin_pkce_authorization(
+                CODEWIRE_DESKTOP_OAUTH_CLIENT_ID,
+                CODEWIRE_DESKTOP_OAUTH_REDIRECT_URI,
+                CODEWIRE_DESKTOP_OAUTH_SCOPES,
+            )
+            .expect("start pkce");
+        let duplicate_code = format!(
+            "{}?code=first&code=second&state={}",
+            CODEWIRE_DESKTOP_OAUTH_REDIRECT_URI, authorization.state
+        );
+        let error = client
+            .complete_pkce_authorization(authorization, &duplicate_code)
+            .await
+            .expect_err("duplicate code must be rejected before token exchange");
+        assert!(matches!(
+            error,
+            AuthClientError::Response { ref message }
+                if message == "OAuth callback contained duplicate authorization codes"
+        ));
+
+        let error = client
+            .begin_pkce_authorization(
+                CODEWIRE_DESKTOP_OAUTH_CLIENT_ID,
+                "http://example.test:9876/callback",
+                CODEWIRE_DESKTOP_OAUTH_SCOPES,
+            )
+            .expect_err("non-loopback redirect must be rejected");
+        assert!(matches!(error, AuthClientError::Response { .. }));
+    }
+
+    #[tokio::test]
     async fn refresh_provider_replaces_the_pair_atomically() {
         let server = MockServer::start().await;
         Mock::given(matchers::method("POST"))
@@ -1182,6 +1616,31 @@ mod tests {
                     .file_name()
                     .to_string_lossy()
                     .ends_with(".tmp"))
+        );
+    }
+
+    #[cfg(feature = "desktop-keyring")]
+    #[test]
+    fn desktop_keyring_payload_is_one_complete_rotating_credential_pair() {
+        let store = KeyringCredentialStore::desktop();
+        assert_eq!(store.service, "codewire-desktop");
+        assert_eq!(store.account, "oauth");
+
+        let credentials = OAuthCredentials::new(
+            "https://codewire.test",
+            CODEWIRE_DESKTOP_OAUTH_CLIENT_ID,
+            "desktop-access",
+            "desktop-refresh",
+            4_102_444_800,
+            CODEWIRE_DESKTOP_OAUTH_SCOPES,
+        )
+        .expect("valid desktop credentials");
+        let serialized = encode_keyring_credentials(&credentials).expect("serialize one entry");
+        assert!(serialized.contains("desktop-access"));
+        assert!(serialized.contains("desktop-refresh"));
+        assert_eq!(
+            decode_keyring_credentials(&serialized).expect("decode one entry"),
+            credentials
         );
     }
 

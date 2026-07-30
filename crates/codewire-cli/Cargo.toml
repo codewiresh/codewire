@@ -18,8 +18,6 @@ clap = { workspace = true }
 clap_complete = { workspace = true }
 codewire-client = { workspace = true }
 codewire-daemon = { workspace = true }
-codewire-tailnet = { workspace = true }
-futures-util = "0.3"
 portable-pty = { workspace = true }
 rand = { workspace = true }
 reqwest = { workspace = true }
@@ -29,7 +27,6 @@ serde_yaml = { workspace = true }
 sha2 = { workspace = true }
 thiserror = { workspace = true }
 tokio = { version = "1", features = ["io-std", "io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
-tokio-tungstenite = { version = "0.28", default-features = false, features = ["connect", "handshake", "rustls-tls-webpki-roots"] }
 toml = { workspace = true }
 url = { workspace = true }
 uuid = { workspace = true }

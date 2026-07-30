@@ -1,4 +1,4 @@
-use codewire_core::{CoreError, SshClient, SshSession};
+use codewire_types::CoreError;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -168,10 +168,9 @@ fn spawn_proxy_command(cmd: &str) -> Result<(ChildStream, Child), CoreError> {
     Ok((ChildStream { stdout, stdin }, child))
 }
 
-impl SshClient for RusshClient {
-    type Session = RusshSession;
-
-    async fn connect(&self, host: &str) -> Result<Self::Session, CoreError> {
+impl RusshClient {
+    /// Connect to an SSH host using the user's native SSH configuration.
+    pub async fn connect(&self, host: &str) -> Result<RusshSession, CoreError> {
         // Parse host:port, default to port 22
         let (hostname, port) = if let Some((h, p)) = host.rsplit_once(':') {
             let port = p.parse::<u16>().unwrap_or(22);
@@ -249,8 +248,9 @@ pub struct RusshSession {
     _proxy_child: Option<Child>,
 }
 
-impl SshSession for RusshSession {
-    async fn exec(&self, command: &str) -> Result<String, CoreError> {
+impl RusshSession {
+    /// Execute a command and return its standard output.
+    pub async fn exec(&self, command: &str) -> Result<String, CoreError> {
         let handle = self.handle.lock().await;
         let mut channel = handle
             .channel_open_session()
@@ -281,17 +281,17 @@ impl SshSession for RusshSession {
         })
     }
 
-    fn host(&self) -> &str {
+    /// Return the host this session connected to.
+    pub fn host(&self) -> &str {
         &self.host
     }
 
-    async fn is_alive(&self) -> bool {
+    /// Check whether a new channel can be opened on this session.
+    pub async fn is_alive(&self) -> bool {
         let handle = self.handle.lock().await;
         handle.channel_open_session().await.is_ok()
     }
-}
 
-impl RusshSession {
     /// Open a new SSH channel with PTY allocation and shell.
     ///
     /// Returns the raw russh Channel for bidirectional byte I/O.

@@ -362,6 +362,17 @@ elif [ "$event_selected" = false ]; then
     esac
 
     case "$path" in
+      .gitea/workflows/desktop-package.yaml|\
+      scripts/ci/release/package-codewire-desktop.sh|\
+      scripts/ci/tests/test-package-codewire-desktop.sh)
+        select_token policy
+        select_token rust
+        select_token rust_pkg_codewire_desktop
+        recognized=true
+        ;;
+    esac
+
+    case "$path" in
       .gitea/workflows/ci.yaml|scripts/dev/preflight.sh|\
       scripts/ci/select/select-verification.sh|\
       scripts/ci/tests/test-select-verification.sh|\
@@ -599,6 +610,9 @@ elif [ "$event_selected" = false ]; then
       crate_token="${crate//-/_}"
       case "$crate" in
         codewire-desktop|codewire-platform-native|codewire-ui)
+          select_token policy
+          select_token rust
+          select_token rust_pkg_codewire_desktop
           ;;
         codewire-tailnet|codewire-gateway|codewire-daemon|codewire-mesh|\
         codewire-derp|codewire-udp-relay|codewire-coordinator)

@@ -145,7 +145,6 @@ impl EditorView {
                     std::thread::spawn(move || {
                         let rt = tokio::runtime::Runtime::new().expect("Failed to create runtime");
                         let result = rt.block_on(async {
-                            use codewire_core::{SshClient, SshSession};
                             use codewire_platform_native::RusshClient;
 
                             let ssh_client = RusshClient::new();
@@ -154,10 +153,10 @@ impl EditorView {
                                 .await
                                 .map_err(|e| format!("SSH connection failed: {}", e))?;
 
-                            let content =
-                                SshSession::exec(&connection, &format!("cat '{}'", root_path))
-                                    .await
-                                    .map_err(|e| format!("Failed to read file: {}", e))?;
+                            let content = connection
+                                .exec(&format!("cat '{}'", root_path))
+                                .await
+                                .map_err(|e| format!("Failed to read file: {}", e))?;
 
                             Ok::<String, String>(content)
                         });
@@ -496,7 +495,6 @@ impl EditorView {
                     std::thread::spawn(move || {
                         let rt = tokio::runtime::Runtime::new().expect("Failed to create runtime");
                         let result = rt.block_on(async {
-                            use codewire_core::{SshClient, SshSession};
                             use codewire_platform_native::RusshClient;
 
                             let ssh_client = RusshClient::new();
@@ -507,12 +505,10 @@ impl EditorView {
 
                             // Write via stdin to cat
                             let escaped = content.replace('\'', "'\\''");
-                            SshSession::exec(
-                                &connection,
-                                &format!("printf '%s' '{}' > '{}'", escaped, root_path),
-                            )
-                            .await
-                            .map_err(|e| format!("Failed to save: {}", e))?;
+                            connection
+                                .exec(&format!("printf '%s' '{}' > '{}'", escaped, root_path))
+                                .await
+                                .map_err(|e| format!("Failed to save: {}", e))?;
 
                             Ok::<(), String>(())
                         });

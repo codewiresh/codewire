@@ -6,8 +6,10 @@
 
 use sqlx::PgPool;
 
-/// Upsert the `codewire-desktop` public client (idempotent; refreshes the
-/// redirect URIs + grant types on conflict, exactly as the Go provider does).
+/// Upsert the `codewire-desktop` public client. Conflict updates are
+/// deliberate: a pre-replacement identity-only registration must converge to
+/// the public native product-client scope rather than silently remain unable
+/// to call generated Connect services.
 /// Lifetimes match Go: 720h access (= the desktop session), 2160h refresh,
 /// 1h id_token.
 pub async fn ensure_desktop_client(pool: &PgPool) -> anyhow::Result<()> {
@@ -22,13 +24,22 @@ pub async fn ensure_desktop_client(pool: &PgPool) -> anyhow::Result<()> {
             ARRAY['http://localhost:9876/callback'],
             ARRAY['authorization_code', 'refresh_token'],
             ARRAY['code'],
-            ARRAY['openid', 'profile', 'email', 'offline_access'],
+            ARRAY['openid', 'profile', 'email', 'offline_access', 'codewire.api'],
             true,
             interval '720 hours', interval '2160 hours', interval '1 hour'
         )
         ON CONFLICT (id) DO UPDATE SET
+            name = EXCLUDED.name,
+            application_type = EXCLUDED.application_type,
+            auth_method = EXCLUDED.auth_method,
             redirect_uris = EXCLUDED.redirect_uris,
             grant_types = EXCLUDED.grant_types,
+            response_types = EXCLUDED.response_types,
+            scopes = EXCLUDED.scopes,
+            skip_consent = EXCLUDED.skip_consent,
+            access_token_lifetime = EXCLUDED.access_token_lifetime,
+            refresh_token_lifetime = EXCLUDED.refresh_token_lifetime,
+            id_token_lifetime = EXCLUDED.id_token_lifetime,
             updated_at = NOW()
         "#,
     )

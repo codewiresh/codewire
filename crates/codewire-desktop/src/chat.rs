@@ -3,9 +3,11 @@
 use crate::SendMessage;
 use crate::input::TextInput;
 use crate::theme::Theme;
-use codewire_core::ai::{AiClient, StreamCallback};
-use codewire_core::{AiConfig, AiProvider, ChatMessage, MessageRole, StreamEvent};
-use codewire_platform_native::ReqwestHttpClient;
+use codewire_types::{
+    AiConfig, AiProvider, ChatMessage, MessageRole, StreamEvent, parse_anthropic_sse_event,
+    parse_openai_sse_event,
+};
+use futures::StreamExt as _;
 use gpui::{
     App, Context, Entity, FocusHandle, Focusable, SharedString, Window, div, prelude::*, px,
 };
@@ -18,7 +20,7 @@ pub struct ChatPanel {
     focus_handle: FocusHandle,
     is_streaming: bool,
     current_response: String,
-    ai_client: Option<Arc<AiClient<ReqwestHttpClient>>>,
+    ai_client: Option<Arc<DesktopAiClient>>,
 }
 
 impl ChatPanel {
@@ -28,15 +30,12 @@ impl ChatPanel {
 
         // Try to create AI client from environment
         let ai_client = std::env::var("ANTHROPIC_API_KEY").ok().map(|api_key| {
-            Arc::new(AiClient::new(
-                AiConfig {
-                    provider: AiProvider::Anthropic,
-                    api_key,
-                    model: "claude-sonnet-4-20250514".into(),
-                    base_url: None,
-                },
-                ReqwestHttpClient::new(),
-            ))
+            Arc::new(DesktopAiClient::new(AiConfig {
+                provider: AiProvider::Anthropic,
+                api_key,
+                model: "claude-sonnet-4-20250514".into(),
+                base_url: None,
+            }))
         });
 
         // Welcome message
@@ -99,7 +98,7 @@ impl ChatPanel {
                     response: Arc<Mutex<String>>,
                 }
 
-                impl StreamCallback for Callback {
+                impl DesktopStreamCallback for Callback {
                     fn on_event(&self, event: StreamEvent) {
                         match event {
                             StreamEvent::Token { text } => {
@@ -157,6 +156,157 @@ impl ChatPanel {
         }
 
         cx.notify();
+    }
+}
+
+/// A desktop-local adapter for third-party AI providers. It intentionally
+/// keeps raw provider HTTP at the application edge; Codewire product traffic
+/// uses `codewire-client` Connect APIs instead.
+struct DesktopAiClient {
+    config: AiConfig,
+    http: reqwest::Client,
+}
+
+trait DesktopStreamCallback: Send + Sync {
+    fn on_event(&self, event: StreamEvent);
+}
+
+impl DesktopAiClient {
+    fn new(config: AiConfig) -> Self {
+        Self {
+            config,
+            http: reqwest::Client::new(),
+        }
+    }
+
+    async fn stream_message(
+        &self,
+        messages: Vec<ChatMessage>,
+        callback: Box<dyn DesktopStreamCallback>,
+    ) -> Result<(), String> {
+        match self.config.provider {
+            AiProvider::Anthropic => self.stream_anthropic(messages, callback).await,
+            AiProvider::OpenAi | AiProvider::OpenRouter => {
+                self.stream_openai_compatible(messages, callback).await
+            }
+        }
+    }
+
+    async fn stream_anthropic(
+        &self,
+        messages: Vec<ChatMessage>,
+        callback: Box<dyn DesktopStreamCallback>,
+    ) -> Result<(), String> {
+        let base_url = self
+            .config
+            .base_url
+            .as_deref()
+            .unwrap_or("https://api.anthropic.com")
+            .trim_end_matches('/');
+        let request = serde_json::json!({
+            "model": self.config.model,
+            "max_tokens": 4096,
+            "stream": true,
+            "messages": messages.into_iter()
+                .filter(|message| !matches!(message.role, MessageRole::System))
+                .map(|message| serde_json::json!({
+                    "role": match message.role {
+                        MessageRole::User => "user",
+                        MessageRole::Assistant => "assistant",
+                        MessageRole::System => "user",
+                    },
+                    "content": message.content,
+                }))
+                .collect::<Vec<_>>(),
+        });
+        let response = self
+            .http
+            .post(format!("{base_url}/v1/messages"))
+            .header("x-api-key", &self.config.api_key)
+            .header("anthropic-version", "2023-06-01")
+            .json(&request)
+            .send()
+            .await
+            .map_err(|_| "Anthropic request failed".to_string())?;
+        self.consume_sse(response, callback, parse_anthropic_sse_event)
+            .await
+    }
+
+    async fn stream_openai_compatible(
+        &self,
+        messages: Vec<ChatMessage>,
+        callback: Box<dyn DesktopStreamCallback>,
+    ) -> Result<(), String> {
+        let default_base_url = match self.config.provider {
+            AiProvider::OpenAi => "https://api.openai.com",
+            AiProvider::OpenRouter => "https://openrouter.ai/api",
+            AiProvider::Anthropic => "https://api.anthropic.com",
+        };
+        let base_url = self
+            .config
+            .base_url
+            .as_deref()
+            .unwrap_or(default_base_url)
+            .trim_end_matches('/');
+        let request = serde_json::json!({
+            "model": self.config.model,
+            "stream": true,
+            "messages": messages.into_iter()
+                .map(|message| serde_json::json!({
+                    "role": match message.role {
+                        MessageRole::User => "user",
+                        MessageRole::Assistant => "assistant",
+                        MessageRole::System => "system",
+                    },
+                    "content": message.content,
+                }))
+                .collect::<Vec<_>>(),
+        });
+        let response = self
+            .http
+            .post(format!("{base_url}/v1/chat/completions"))
+            .bearer_auth(&self.config.api_key)
+            .json(&request)
+            .send()
+            .await
+            .map_err(|_| "OpenAI-compatible request failed".to_string())?;
+        self.consume_sse(response, callback, parse_openai_sse_event)
+            .await
+    }
+
+    async fn consume_sse(
+        &self,
+        response: reqwest::Response,
+        callback: Box<dyn DesktopStreamCallback>,
+        parse_event: fn(&str) -> Option<String>,
+    ) -> Result<(), String> {
+        if !response.status().is_success() {
+            return Err(format!("AI provider returned HTTP {}", response.status()));
+        }
+        let mut stream = response.bytes_stream();
+        let mut buffer = String::new();
+        let mut full_content = String::new();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|_| "AI provider stream failed".to_string())?;
+            buffer.push_str(&String::from_utf8_lossy(&chunk));
+            while let Some(event_end) = buffer.find("\n\n") {
+                let event = buffer[..event_end].to_owned();
+                buffer.drain(..event_end + 2);
+                if let Some(token) = parse_event(&event) {
+                    full_content.push_str(&token);
+                    callback.on_event(StreamEvent::Token { text: token });
+                }
+            }
+        }
+        callback.on_event(StreamEvent::Done {
+            message: ChatMessage {
+                id: uuid::Uuid::new_v4().to_string(),
+                role: MessageRole::Assistant,
+                content: full_content,
+                timestamp: chrono::Utc::now().timestamp_millis() as u64,
+            },
+        });
+        Ok(())
     }
 }
 

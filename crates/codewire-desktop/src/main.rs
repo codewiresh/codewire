@@ -4,6 +4,7 @@ mod app_layout;
 mod assets;
 mod chat;
 mod command_palette;
+mod desktop_settings;
 mod diff_view;
 mod editor;
 mod file_browser;
@@ -26,10 +27,12 @@ mod tests;
 
 use app_layout::AppLayout;
 use chat::ChatPanel;
-use codewire_core::{CodewireAuthManager, CodewireClient, ConfigStorage};
-use codewire_platform_native::{
-    FsPersistentStorage, KeyringSecureStorage, NativeOAuthHandler, ReqwestHttpClient,
+use codewire_client::{
+    ClientConfig, CodewireClient, CredentialStore, EnvironmentState, KeyringCredentialStore,
+    ListEnvironmentsRequest, ListOrganizationsRequest, NativeClientFacade, OAuthClient, OrgRole,
+    RefreshingTokenProvider,
 };
+use codewire_types::{GitStatus, MergeableState, PrState, PullRequest};
 use editor::{
     EditorBackspace, EditorCopy, EditorCut, EditorDelete, EditorEnter, EditorLeft, EditorPaste,
     EditorRight, EditorSelectAll, MoveDown, MoveLineEnd, MoveLineStart, MoveUp, RedoEdit, SaveFile,
@@ -48,7 +51,7 @@ use sidebar::{
     EnvironmentTerminalRequested, LocalBrowseRequested, LocalDiffRequested, LocalProjectExpanded,
     LocalProjectRemoved, NewOrganizationRequested, NewTerminalRequested,
     OrganizationBillingRequested, OrganizationCreateEnvironmentRequested, OrganizationRequested,
-    SettingsRequested, Sidebar, SidebarOrganization,
+    SettingsRequested, Sidebar, SidebarEnvironment, SidebarOrganization,
 };
 use theme::Theme;
 use workspace::WorkspaceIdentity;
@@ -73,6 +76,33 @@ impl Default for CodewireSidebarState {
             error: None,
         }
     }
+}
+
+/// Build the single native Connect client from the desktop's atomic keyring
+/// credential. The desktop never reads browser cookies or legacy REST state.
+pub(crate) fn connected_client() -> Result<Option<CodewireClient>, String> {
+    let store = KeyringCredentialStore::desktop();
+    let Some(credentials) = store
+        .load()
+        .map_err(|_| "Failed to read Codewire credentials from the system keyring".to_string())?
+    else {
+        return Ok(None);
+    };
+    let oauth = OAuthClient::for_server_url(codewire_base_url())
+        .map_err(|_| "Failed to configure Codewire OAuth".to_string())?;
+    let provider = RefreshingTokenProvider::new(oauth, store, credentials)
+        .map_err(|_| "Stored Codewire credentials are invalid".to_string())?;
+    CodewireClient::new(
+        ClientConfig::new(codewire_base_url())
+            .map_err(|_| "Invalid Codewire server URL".to_string())?,
+        provider,
+    )
+    .map(Some)
+    .map_err(|_| "Failed to configure Codewire Connect client".to_string())
+}
+
+pub(crate) fn native_client() -> Result<Option<NativeClientFacade>, String> {
+    connected_client().map(|client| client.map(NativeClientFacade::new))
 }
 
 /// Shared application state available to all windows via GPUI's global system.
@@ -866,8 +896,7 @@ impl AppView {
 
         // Restore persisted local projects into sidebar
         {
-            let config_storage = ConfigStorage::new(FsPersistentStorage::new());
-            if let Ok(paths) = config_storage.load_local_projects() {
+            if let Ok(paths) = desktop_settings::load_local_projects() {
                 for path in paths {
                     if std::path::Path::new(&path).exists() {
                         sidebar.update(cx, |sidebar, cx| {
@@ -907,44 +936,13 @@ impl AppView {
 }
 
 impl AppView {
-    async fn resolve_codewire_access_token() -> Result<Option<String>, String> {
-        let auth = CodewireAuthManager::new(
-            ReqwestHttpClient::new(),
-            KeyringSecureStorage::new(),
-            NativeOAuthHandler::default(),
-        );
-
-        let token = match auth.get_token() {
-            Ok(Some(token)) => token,
-            Ok(None) => return Ok(None),
-            Err(e) => return Err(format!("Failed to read Codewire token: {}", e)),
-        };
-
-        if !token.is_expired() {
-            return Ok(Some(token.access_token));
-        }
-
-        let Some(refresh_token) = token.refresh_token.as_deref() else {
-            let _ = auth.delete_token();
-            return Ok(None);
-        };
-
-        match auth.refresh_token(refresh_token).await {
-            Ok(new_token) => {
-                let _ = auth.store_token(&new_token);
-                Ok(Some(new_token.access_token))
-            }
-            Err(e) => {
-                tracing::warn!("Codewire token refresh failed: {}", e);
-                let _ = auth.delete_token();
-                Ok(None)
-            }
-        }
+    fn connected_client() -> Result<Option<CodewireClient>, String> {
+        crate::connected_client()
     }
 
     async fn sync_codewire_sidebar_state() -> CodewireSidebarState {
-        let access_token = match Self::resolve_codewire_access_token().await {
-            Ok(token) => token,
+        let client = match Self::connected_client() {
+            Ok(client) => client,
             Err(error) => {
                 return CodewireSidebarState {
                     organizations: Vec::new(),
@@ -955,7 +953,7 @@ impl AppView {
             }
         };
 
-        let Some(access_token) = access_token else {
+        let Some(client) = client else {
             return CodewireSidebarState {
                 organizations: Vec::new(),
                 authenticated: false,
@@ -964,9 +962,14 @@ impl AppView {
             };
         };
 
-        let client = CodewireClient::new(access_token, ReqwestHttpClient::new());
-        let mut organizations = match client.list_organizations().await {
-            Ok(orgs) => orgs,
+        let mut organizations = match client
+            .list_organizations(ListOrganizationsRequest {
+                page_size: 100,
+                ..Default::default()
+            })
+            .await
+        {
+            Ok(response) => response.organizations,
             Err(e) => {
                 return CodewireSidebarState {
                     organizations: Vec::new(),
@@ -977,12 +980,33 @@ impl AppView {
             }
         };
 
-        organizations.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+        organizations.sort_by(|left, right| {
+            left.organization
+                .as_option()
+                .map(|organization| organization.name.to_lowercase())
+                .cmp(
+                    &right
+                        .organization
+                        .as_option()
+                        .map(|organization| organization.name.to_lowercase()),
+                )
+        });
 
         let mut sidebar_orgs = Vec::with_capacity(organizations.len());
-        for org in organizations {
-            let mut environments = match client.list_environments(&org.id).await {
-                Ok(envs) => envs,
+        for membership in organizations {
+            let role = membership.role;
+            let Some(org) = membership.organization.into_option() else {
+                continue;
+            };
+            let mut environments = match client
+                .list_environments(ListEnvironmentsRequest {
+                    org_id: org.id.clone(),
+                    page_size: 100,
+                    ..Default::default()
+                })
+                .await
+            {
+                Ok(response) => response.environments,
                 Err(e) => {
                     return CodewireSidebarState {
                         organizations: sidebar_orgs,
@@ -997,20 +1021,54 @@ impl AppView {
             };
 
             environments.sort_by(|a, b| {
-                let left = a
-                    .name
-                    .clone()
-                    .unwrap_or_else(|| a.id.clone())
-                    .to_lowercase();
-                let right = b
-                    .name
-                    .clone()
-                    .unwrap_or_else(|| b.id.clone())
-                    .to_lowercase();
+                let left = a.name.clone().to_lowercase();
+                let right = b.name.clone().to_lowercase();
                 left.cmp(&right)
             });
 
-            sidebar_orgs.push(SidebarOrganization { org, environments });
+            let environments = environments
+                .into_iter()
+                .map(|environment| SidebarEnvironment {
+                    id: environment.id,
+                    name: environment.name,
+                    state: match environment.state.as_known() {
+                        Some(EnvironmentState::Pending) => "pending",
+                        Some(EnvironmentState::PendingBuild) => "pending_build",
+                        Some(EnvironmentState::Building) => "building",
+                        Some(EnvironmentState::BuildFailed) => "build_failed",
+                        Some(EnvironmentState::PullingSnapshot) => "pulling_snapshot",
+                        Some(EnvironmentState::Creating) => "creating",
+                        Some(EnvironmentState::Starting) => "starting",
+                        Some(EnvironmentState::Running) => "running",
+                        Some(EnvironmentState::Stopping) => "stopping",
+                        Some(EnvironmentState::Stopped) => "stopped",
+                        Some(EnvironmentState::Archiving) => "archiving",
+                        Some(EnvironmentState::Archived) => "archived",
+                        Some(EnvironmentState::Restoring) => "restoring",
+                        Some(EnvironmentState::Resizing) => "resizing",
+                        Some(EnvironmentState::Destroying) => "destroying",
+                        Some(EnvironmentState::Destroyed) => "destroyed",
+                        Some(EnvironmentState::Error)
+                        | Some(EnvironmentState::Unknown)
+                        | Some(EnvironmentState::Unspecified)
+                        | None => "unknown",
+                    }
+                    .to_string(),
+                })
+                .collect();
+            sidebar_orgs.push(SidebarOrganization {
+                id: org.id,
+                slug: org.slug,
+                name: org.name,
+                role: match role.as_known() {
+                    Some(OrgRole::Owner) => "owner",
+                    Some(OrgRole::Admin) => "admin",
+                    Some(OrgRole::Member) => "member",
+                    Some(OrgRole::Unspecified) | None => "unknown",
+                }
+                .to_string(),
+                environments,
+            });
         }
 
         CodewireSidebarState {
@@ -1021,60 +1079,16 @@ impl AppView {
         }
     }
 
-    fn do_full_codewire_auth(
-        codewire_auth: &mut CodewireAuthManager<
-            ReqwestHttpClient,
-            KeyringSecureStorage,
-            NativeOAuthHandler,
-        >,
-    ) -> Result<String, String> {
-        let auth_url = codewire_auth
-            .start_auth_flow()
-            .map_err(|e| format!("{}", e))?;
-        open::that(&auth_url).map_err(|e| format!("Failed to open browser: {}", e))?;
-
-        let rt = tokio::runtime::Runtime::new().map_err(|e| format!("Runtime error: {}", e))?;
-        let code = rt
-            .block_on(codewire_auth.wait_for_callback())
-            .map_err(|e| format!("{}", e))?;
-
-        let token_info = rt
-            .block_on(codewire_auth.exchange_code(&code))
-            .map_err(|e| format!("{}", e))?;
-
-        codewire_auth
-            .store_token(&token_info)
-            .map_err(|e| format!("{}", e))?;
-
-        Ok(token_info.access_token)
-    }
-
-    fn authenticate_codewire() -> Result<String, String> {
-        let mut codewire_auth = CodewireAuthManager::new(
-            ReqwestHttpClient::new(),
-            KeyringSecureStorage::new(),
-            NativeOAuthHandler::default(),
-        );
-
-        match codewire_auth.get_token() {
-            Ok(Some(token)) if !token.is_expired() => Ok(token.access_token),
-            Ok(Some(token)) => match token.refresh_token.as_deref() {
-                Some(refresh) => {
-                    let rt = tokio::runtime::Runtime::new()
-                        .map_err(|e| format!("Runtime error: {}", e))?;
-                    match rt.block_on(codewire_auth.refresh_token(refresh)) {
-                        Ok(new_token) => {
-                            let _ = codewire_auth.store_token(&new_token);
-                            Ok(new_token.access_token)
-                        }
-                        Err(_) => Self::do_full_codewire_auth(&mut codewire_auth),
-                    }
-                }
-                None => Self::do_full_codewire_auth(&mut codewire_auth),
-            },
-            Ok(None) => Self::do_full_codewire_auth(&mut codewire_auth),
-            Err(e) => Err(format!("Failed to read Codewire token: {}", e)),
-        }
+    fn authenticate_codewire() -> Result<(), String> {
+        let oauth = OAuthClient::for_server_url(codewire_base_url())
+            .map_err(|_| "Failed to configure Codewire OAuth".to_string())?;
+        let credentials = tokio::runtime::Runtime::new()
+            .map_err(|_| "Failed to start Codewire authentication runtime".to_string())?
+            .block_on(oauth.login_desktop_pkce())
+            .map_err(|_| "Codewire authentication did not complete".to_string())?;
+        KeyringCredentialStore::desktop()
+            .save(&credentials)
+            .map_err(|_| "Failed to save Codewire credentials to the system keyring".to_string())
     }
 
     fn ensure_dashboard_workspace(
@@ -1323,8 +1337,7 @@ impl AppView {
 
     fn persist_local_projects(&self, cx: &mut Context<Self>) {
         let paths = self.sidebar.read(cx).local_project_paths();
-        let config_storage = ConfigStorage::new(FsPersistentStorage::new());
-        if let Err(e) = config_storage.save_local_projects(paths) {
+        if let Err(e) = desktop_settings::save_local_projects(&paths) {
             tracing::warn!("Failed to persist local projects: {}", e);
         }
     }
@@ -1895,13 +1908,7 @@ impl Render for AppView {
 /// Runs on a background thread (no tokio needed — uses std::process::Command).
 fn discover_local_git_status(
     path: &str,
-) -> Result<
-    (
-        Option<codewire_core::GitStatus>,
-        Option<codewire_core::PullRequest>,
-    ),
-    String,
-> {
+) -> Result<(Option<GitStatus>, Option<PullRequest>), String> {
     use std::process::Command;
 
     // Check if this is a git repo
@@ -1969,7 +1976,7 @@ fn discover_local_git_status(
         _ => (0, 0),
     };
 
-    let git_status = codewire_core::GitStatus {
+    let git_status = GitStatus {
         ahead,
         behind,
         dirty,
@@ -1997,12 +2004,12 @@ fn discover_local_git_status(
                 let number = lines[0].parse().unwrap_or(0);
                 let title = lines[1].to_string();
                 let state = match lines[2].to_lowercase().as_str() {
-                    "open" => codewire_core::PrState::Open,
-                    "closed" => codewire_core::PrState::Closed,
-                    "merged" => codewire_core::PrState::Merged,
-                    _ => codewire_core::PrState::Open,
+                    "open" => PrState::Open,
+                    "closed" => PrState::Closed,
+                    "merged" => PrState::Merged,
+                    _ => PrState::Open,
                 };
-                Some(codewire_core::PullRequest {
+                Some(PullRequest {
                     number,
                     title,
                     url: String::new(),
@@ -2010,7 +2017,7 @@ fn discover_local_git_status(
                     is_draft: false,
                     head_ref: String::new(),
                     base_ref: String::new(),
-                    mergeable: codewire_core::MergeableState::Unknown,
+                    mergeable: MergeableState::Unknown,
                     has_failed_checks: false,
                     has_pending_checks: false,
                 })

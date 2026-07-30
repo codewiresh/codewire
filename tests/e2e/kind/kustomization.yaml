@@ -13,11 +13,13 @@ resources:
   - ../../../deployments/k8s/billing
   - ../../../deployments/k8s/orchestration
   - ../../../deployments/k8s/coordinator
+  - ../../../deployments/k8s/idp
   - mesh.yaml
   - postgres.yaml
   - db-migrate-job.yaml
   - temporal.yaml
   - support.yaml
+  - idp-signing-keks.yaml
   - ingress.yaml
   - orchestration-nodeport.yaml
   - coordinator-nodeport.yaml
@@ -144,6 +146,25 @@ patches:
           spec:
             containers:
               - name: coordinator
+                image: codewire-services:e2e
+                imagePullPolicy: Never
+  - target:
+      kind: Deployment
+      name: codewire-idp
+    patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: codewire-idp
+      spec:
+        # The shared Kind harness starts application services only after the
+        # disposable SQLx ledger is complete. Keep IdP in that same lifecycle
+        # so OIDC provisioning cannot race the schema baseline.
+        replicas: 0
+        template:
+          spec:
+            containers:
+              - name: idp
                 image: codewire-services:e2e
                 imagePullPolicy: Never
 

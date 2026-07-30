@@ -85,7 +85,7 @@ async fn seed(pool: &PgPool) {
              access_token_lifetime, refresh_token_lifetime, id_token_lifetime)
            VALUES ($1,'Codewire Desktop','native','none',ARRAY[$2],
              ARRAY['authorization_code','refresh_token'],ARRAY['code'],
-             ARRAY['openid','profile','email','offline_access'],true,
+             ARRAY['openid'],false,
              interval '1 hour', interval '720 hours', interval '1 hour')
            ON CONFLICT (id) DO UPDATE SET
              name = EXCLUDED.name,
@@ -143,6 +143,25 @@ async fn desktop_client_full_flow_against_postgres() {
     };
     let pool = PgPool::connect(&url).await.expect("connect");
     seed(&pool).await;
+    codewire_idp::provisioning::ensure_desktop_client(&pool)
+        .await
+        .expect("converge replacement desktop client");
+    let desktop_scopes: Vec<String> =
+        sqlx::query_scalar("SELECT scopes FROM oidc_clients WHERE id = 'codewire-desktop'")
+            .fetch_one(&pool)
+            .await
+            .expect("read converged desktop client scopes");
+    assert_eq!(
+        desktop_scopes,
+        vec![
+            "openid",
+            "profile",
+            "email",
+            "offline_access",
+            "codewire.api"
+        ],
+        "startup provisioning must repair the pre-replacement identity-only desktop client"
+    );
 
     let cfg = IdpConfig {
         issuer: "https://idp.codewire.test".into(),
@@ -153,6 +172,7 @@ async fn desktop_client_full_flow_against_postgres() {
             "profile".into(),
             "email".into(),
             "offline_access".into(),
+            "codewire.api".into(),
         ],
     };
     let p = build_provider(pool.clone(), &cfg, test_signing_keyring())
@@ -172,7 +192,7 @@ async fn desktop_client_full_flow_against_postgres() {
         client_id: Some(CLIENT.into()),
         redirect_uri: Some(REDIRECT.into()),
         response_type: Some("code".into()),
-        scope: Some("openid profile email offline_access".into()),
+        scope: Some("openid profile email offline_access codewire.api".into()),
         state: Some("st".into()),
         nonce: Some("no".into()),
         code_challenge: Some(CHALLENGE.into()),
@@ -199,6 +219,10 @@ async fn desktop_client_full_flow_against_postgres() {
         .await
         .unwrap();
     assert_eq!(tokens.token_type, "Bearer");
+    assert_eq!(
+        tokens.scope, "openid profile email offline_access codewire.api",
+        "replacement desktop credentials must carry the product scope"
+    );
     assert!(
         tokens.refresh_token.is_some(),
         "offline_access → refresh token"

@@ -140,7 +140,7 @@ test.describe("OIDC Provider", () => {
     await expect(page.locator("#password")).toBeVisible();
   });
 
-  test("full OIDC PKCE flow: published JWKS → authorize → login → exchange → verified ID token", async ({
+  test("full OIDC PKCE flow: published JWKS → authorize → login → Connect bearer", async ({
     page,
     request,
   }) => {
@@ -152,7 +152,8 @@ test.describe("OIDC Provider", () => {
     expect(publishedJwks.keys.length).toBeGreaterThan(0);
 
     // Step 2: Hit authorize endpoint (unauthenticated)
-    const authorizeUrl = `${SERVER_URL}/api/oauth/authorize?client_id=codewire-desktop&response_type=code&redirect_uri=http://localhost:9876/callback&code_challenge=E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM&code_challenge_method=S256&scope=openid+profile+email&state=teststate`;
+    const requestedScope = "openid profile email offline_access codewire.api";
+    const authorizeUrl = `${SERVER_URL}/api/oauth/authorize?client_id=codewire-desktop&response_type=code&redirect_uri=http://localhost:9876/callback&code_challenge=E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM&code_challenge_method=S256&scope=${encodeURIComponent(requestedScope)}&state=teststate`;
 
     await page.goto(authorizeUrl, { waitUntil: "commit" });
 
@@ -199,9 +200,31 @@ test.describe("OIDC Provider", () => {
       },
     });
     expect(tokenResponse.ok()).toBeTruthy();
-    const tokens = await tokenResponse.json() as { id_token?: string };
+    const tokens = await tokenResponse.json() as {
+      access_token?: string;
+      id_token?: string;
+      scope?: string;
+    };
+    expect(tokens.access_token).toBeTruthy();
     expect(tokens.id_token).toBeTruthy();
+    expect(tokens.scope?.split(" ")).toEqual(
+      expect.arrayContaining(requestedScope.split(" ")),
+    );
     expect(verifyIdTokenAgainstPublishedJwks(tokens.id_token!, publishedJwks)).toBeTruthy();
+
+    // The desktop's browser-issued token must enter the product plane through
+    // generated Connect, rather than only proving an IdP-local ID token.
+    const productRpc = await request.post(
+      `${SERVER_URL}/codewire.v1.OrganizationService/ListOrganizations`,
+      {
+        headers: {
+          Authorization: `Bearer ${tokens.access_token}`,
+          "content-type": "application/json",
+        },
+        data: {},
+      },
+    );
+    expect(productRpc.ok()).toBeTruthy();
   });
 
   test("CLI device grant uses browser approval, refresh, UserInfo, and a scoped product RPC", async ({

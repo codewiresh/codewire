@@ -3,12 +3,13 @@
 //! Renders the terminal grid from a SharedTerm and forwards keyboard
 //! input to the PTY backend via an mpsc channel.
 
-use crate::terminal::backend::{self, PtyInput, SharedTerm, TermSize};
+use crate::terminal::backend::{self, PtyInput, SharedTerm, TermSize, TerminalOutputParser};
 use crate::theme::{self, Theme};
 use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::index::{Column, Line};
 use alacritty_terminal::term::cell::Flags as CellFlags;
 use alacritty_terminal::term::{TermMode, point_to_viewport};
+use codewire_client::{RunRequest, RunResize, run_request, run_response};
 use futures::StreamExt;
 use gpui::{
     AnyElement, App, Bounds, Context, Element, ElementId, Entity, FocusHandle, Focusable,
@@ -17,6 +18,26 @@ use gpui::{
     div, font, prelude::*, px,
 };
 use std::sync::mpsc;
+
+/// The input half of a terminal transport. Local terminals keep their PTY;
+/// platform environments use the typed Connect Run stream directly.
+enum TerminalInputSender {
+    Pty(mpsc::Sender<PtyInput>),
+    Connect(tokio::sync::mpsc::UnboundedSender<PtyInput>),
+}
+
+impl TerminalInputSender {
+    fn send(&self, input: PtyInput) {
+        match self {
+            Self::Pty(sender) => {
+                let _ = sender.send(input);
+            }
+            Self::Connect(sender) => {
+                let _ = sender.send(input);
+            }
+        }
+    }
+}
 
 /// Events sent from the background PTY thread back to the GPUI foreground.
 enum TermEvent {
@@ -40,8 +61,8 @@ const GRID_PADDING: f32 = 8.0;
 pub struct TerminalView {
     /// Shared terminal grid state (written by backend, read by render)
     term: SharedTerm,
-    /// Channel to send input bytes to the PTY write loop
-    pty_tx: Option<mpsc::Sender<PtyInput>>,
+    /// Channel to send input bytes to the active terminal transport.
+    pty_tx: Option<TerminalInputSender>,
     /// Connection metadata
     host: Option<String>,
     session_name: Option<String>,
@@ -122,7 +143,7 @@ impl TerminalView {
         }
 
         if let Some(tx) = &self.pty_tx {
-            let _ = tx.send(PtyInput::Resize {
+            tx.send(PtyInput::Resize {
                 cols: cols as u32,
                 rows: rows as u32,
             });
@@ -157,10 +178,10 @@ impl TerminalView {
 
         // Create the input channel (std mpsc)
         let (tx, rx) = mpsc::channel();
-        self.pty_tx = Some(tx);
+        self.pty_tx = Some(TerminalInputSender::Pty(tx));
 
         // Event channel: background threads -> GPUI foreground
-        let (event_tx, mut event_rx) = futures::channel::mpsc::unbounded::<TermEvent>();
+        let (event_tx, event_rx) = futures::channel::mpsc::unbounded::<TermEvent>();
 
         let command = command.to_string();
         let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
@@ -207,8 +228,17 @@ impl TerminalView {
             let _ = write_handle.join();
         });
 
-        // GPUI foreground task: process events with frame-rate throttled repaints (~120fps)
-        let label = label.to_string();
+        self.watch_terminal_events(label.to_string(), event_rx, cx);
+    }
+
+    /// Process transport events on the GPUI foreground with frame-rate
+    /// throttled repaints. Both PTY and Connect transports share this state.
+    fn watch_terminal_events(
+        &mut self,
+        label: String,
+        mut event_rx: futures::channel::mpsc::UnboundedReceiver<TermEvent>,
+        cx: &mut Context<Self>,
+    ) {
         cx.spawn(async move |this, cx| {
             use std::time::{Duration, Instant};
             const MIN_REPAINT_INTERVAL: Duration = Duration::from_millis(8);
@@ -258,6 +288,7 @@ impl TerminalView {
                         let _ = this.update(cx, |this, cx| {
                             this.status = msg;
                             this.connected = false;
+                            this.pty_tx = None;
                             cx.notify();
                         });
                         break;
@@ -296,10 +327,10 @@ impl TerminalView {
         self.spawn("ssh", &[host], &format!("ssh {}", host), cx);
     }
 
-    /// Open a terminal via the canonical environment-owned `cw shell`.
+    /// Open a platform environment shell over the typed Connect Run stream.
     pub fn connect_codewire_env(
         &mut self,
-        _org_id: &str,
+        org_id: &str,
         env_id: &str,
         env_name: &str,
         cx: &mut Context<Self>,
@@ -308,14 +339,97 @@ impl TerminalView {
         self.session_name = Some(env_name.to_string());
         self.session_type = Some("codewire-env".to_string());
 
-        let label = format!("cw shell {}", env_name);
-        self.spawn("cw", &["shell", env_id], &label, cx);
+        let label = format!("environment shell {}", env_name);
+        self.status = format!("Connecting to {}...", label);
+        cx.notify();
+
+        let term = self.term.clone();
+        let columns = self.grid_cols as u32;
+        let rows = self.grid_rows as u32;
+        let (input_tx, mut input_rx) = tokio::sync::mpsc::unbounded_channel();
+        self.pty_tx = Some(TerminalInputSender::Connect(input_tx));
+        let (event_tx, event_rx) = futures::channel::mpsc::unbounded::<TermEvent>();
+        let org_id = org_id.to_string();
+        let env_id = env_id.to_string();
+
+        std::thread::spawn(move || {
+            let stream_events = event_tx.clone();
+            let result = tokio::runtime::Runtime::new()
+                .map_err(|_| "could not start the desktop terminal runtime".to_string())
+                .and_then(|runtime| {
+                    runtime.block_on(async move {
+                        let Some(client) = crate::native_client()? else {
+                            return Err("Sign in to Codewire before opening an environment terminal".to_string());
+                        };
+                        let mut session = client
+                            .start_environment_shell(org_id, env_id, columns, rows)
+                            .await
+                            .map_err(|_| "could not open the environment terminal".to_string())?;
+                        let input = session.input_handle();
+                        let _ = stream_events.unbounded_send(TermEvent::Connected);
+                        let mut parser = TerminalOutputParser::default();
+                        loop {
+                            tokio::select! {
+                                command = input_rx.recv() => {
+                                    let Some(command) = command else { break; };
+                                    let shutting_down = matches!(command, PtyInput::Shutdown);
+                                    let request = match command {
+                                        PtyInput::Data(data) => RunRequest {
+                                            input: Some(run_request::Input::Stdin(data)),
+                                            ..Default::default()
+                                        },
+                                        PtyInput::Resize { cols, rows } => RunRequest {
+                                            input: Some(run_request::Input::Resize(Box::new(RunResize {
+                                                columns: cols,
+                                                rows,
+                                                ..Default::default()
+                                            }))),
+                                            ..Default::default()
+                                        },
+                                        PtyInput::Shutdown => RunRequest {
+                                            input: Some(run_request::Input::CloseStdin(Box::default())),
+                                            ..Default::default()
+                                        },
+                                    };
+                                    input
+                                        .send(request)
+                                        .await
+                                        .map_err(|_| "environment terminal stream closed".to_string())?;
+                                    if shutting_down { break; }
+                                }
+                                response = session.next_output() => match response {
+                                    Ok(Some(response)) => match response.event {
+                                        Some(run_response::Event::Stdout(data)) | Some(run_response::Event::Stderr(data)) => {
+                                            parser.feed(&term, &data);
+                                            let _ = stream_events.unbounded_send(TermEvent::Repaint);
+                                        }
+                                        Some(run_response::Event::ExitCode(_)) | None => break,
+                                    },
+                                    Ok(None) => break,
+                                    Err(_) => return Err("environment terminal stream failed".to_string()),
+                                },
+                            }
+                        }
+                        Ok(())
+                    })
+                });
+            match result {
+                Ok(()) => {
+                    let _ = event_tx.unbounded_send(TermEvent::Disconnected);
+                }
+                Err(error) => {
+                    let _ = event_tx.unbounded_send(TermEvent::Error(error));
+                }
+            }
+        });
+
+        self.watch_terminal_events(label, event_rx, cx);
     }
 
     /// Disconnect from current session
     pub fn disconnect(&mut self, cx: &mut Context<Self>) {
         if let Some(tx) = self.pty_tx.take() {
-            let _ = tx.send(PtyInput::Shutdown);
+            tx.send(PtyInput::Shutdown);
         }
         self.connected = false;
         self.status = "Disconnected".to_string();
@@ -328,7 +442,7 @@ impl TerminalView {
     /// Send raw bytes to the PTY
     fn send_bytes(&self, bytes: Vec<u8>) {
         if let Some(tx) = &self.pty_tx {
-            let _ = tx.send(PtyInput::Data(bytes));
+            tx.send(PtyInput::Data(bytes));
         }
     }
 

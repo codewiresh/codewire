@@ -8,7 +8,12 @@ metadata:
   name: codewire-config
 data:
   DATABASE_URL: postgres://codewire:codewire@postgres:5432/codewire?sslmode=disable
-  FRONTEND_URL: http://127.0.0.1:8080
+  # Browser proofs serve the current-worktree dashboard from Vite. Its proxy
+  # reaches the separate Kind ingress origin below.
+  FRONTEND_URL: http://127.0.0.1:5173
+  # Kind ingress maps HTTP to host port 8090. The IdP advertises this public
+  # issuer while the browser login UI remains the Vite origin above.
+  PUBLIC_OIDC_ISSUER_URL: http://127.0.0.1:8090
   PREVIEW_BASE_DOMAIN: codewire-dev.local
 ---
 apiVersion: v1

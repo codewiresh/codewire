@@ -7,11 +7,7 @@ use crate::input::TextInput;
 use crate::local_diff::{self, DiffSource};
 use crate::theme::Theme;
 use crate::{FocusDiffSearch, NextDiffFile, PrevDiffFile, RefreshDiff, ToggleDiffFile};
-use codewire_core::{
-    DiffDiscovery, DiffLine, DiffLineType, FileChangeType, FileDiff, PrDiscovery, PullRequest,
-    SshClient,
-};
-use codewire_platform_native::RusshClient;
+use codewire_types::{DiffLine, DiffLineType, FileChangeType, FileDiff, PrState, PullRequest};
 use codewire_ui::icon_button;
 use gpui::{
     App, Context, ElementId, Entity, FocusHandle, Focusable, ScrollStrategy, SharedString,
@@ -123,27 +119,9 @@ impl DiffView {
                 DiffSource::Ssh { ssh_host, .. } => {
                     std::thread::spawn(move || {
                         let rt = tokio::runtime::Runtime::new().expect("Failed to create runtime");
-                        let result = rt.block_on(async {
-                            let ssh_client = RusshClient::new();
-                            let connection = ssh_client
-                                .connect(&ssh_host)
-                                .await
-                                .map_err(|e| format!("SSH connection failed: {}", e))?;
-
-                            let pr_discovery = PrDiscovery::new();
-                            let pr = pr_discovery
-                                .discover(&connection)
-                                .await
-                                .map_err(|e| format!("PR discovery failed: {}", e))?;
-
-                            let diff_discovery = DiffDiscovery::new();
-                            let files = diff_discovery
-                                .discover(&connection)
-                                .await
-                                .map_err(|e| format!("Diff discovery failed: {}", e))?;
-
-                            Ok::<_, String>((pr, files))
-                        });
+                        let result = rt
+                            .block_on(local_diff::discover_ssh_diff(&ssh_host))
+                            .map(|result| (result.pr, result.files));
                         let _ = tx.send(result);
                     });
                 }
@@ -886,14 +864,14 @@ impl DiffView {
 
     fn render_pr_header(&self, pr: &PullRequest, theme: &Theme) -> gpui::AnyElement {
         let state_text = match pr.state {
-            codewire_core::PrState::Open => "Open",
-            codewire_core::PrState::Closed => "Closed",
-            codewire_core::PrState::Merged => "Merged",
+            PrState::Open => "Open",
+            PrState::Closed => "Closed",
+            PrState::Merged => "Merged",
         };
         let state_color = match pr.state {
-            codewire_core::PrState::Open => theme.status_running,
-            codewire_core::PrState::Closed => theme.git_deletions,
-            codewire_core::PrState::Merged => gpui::hsla(270.0 / 360.0, 0.6, 0.6, 1.0),
+            PrState::Open => theme.status_running,
+            PrState::Closed => theme.git_deletions,
+            PrState::Merged => gpui::hsla(270.0 / 360.0, 0.6, 0.6, 1.0),
         };
 
         div()
