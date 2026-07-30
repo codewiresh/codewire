@@ -39,6 +39,15 @@ fi
 selection_job="$(sed -n '/^  deploy-selection:/,/^  build-gateway-image:/p' "$WORKFLOW")"
 grep -Fq '          fetch-depth: 0' <<<"$selection_job" ||
   fail "deploy selection does not receive the complete cumulative history"
+grep -Fq 'uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b' \
+  <<<"$selection_job" ||
+  fail "deploy selection does not install the pinned Rust toolchain for artifact classification"
+toolchain_line="$(grep -n -m1 'uses: dtolnay/rust-toolchain@' \
+  <<<"$selection_job" | cut -d: -f1)"
+classifier_line="$(grep -n -m1 'name: Select dev deploy' \
+  <<<"$selection_job" | cut -d: -f1)"
+[[ "$toolchain_line" -lt "$classifier_line" ]] ||
+  fail "deploy selection installs Rust after artifact classification"
 grep -Fq 'run: scripts/ci/deploy/resolve-deployed-source.sh' <<<"$selection_job" ||
   fail "deploy selection does not resolve the private desired source"
 # shellcheck disable=SC2016

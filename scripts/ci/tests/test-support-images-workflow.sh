@@ -28,6 +28,15 @@ fi
 selection_job="$(sed -n '/^  support-selection:/,/^  build-base-image:/p' "$WORKFLOW")"
 grep -Fq '          fetch-depth: 2' <<<"$selection_job" ||
   fail 'support selection does not receive the parent and exact main commit'
+grep -Fq 'uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b' \
+  <<<"$selection_job" ||
+  fail 'support selection does not install the pinned Rust toolchain for artifact classification'
+toolchain_line="$(grep -n -m1 'uses: dtolnay/rust-toolchain@' \
+  <<<"$selection_job" | cut -d: -f1)"
+classifier_line="$(grep -n -m1 'name: Select atomic support build' \
+  <<<"$selection_job" | cut -d: -f1)"
+[[ "$toolchain_line" -lt "$classifier_line" ]] ||
+  fail 'support selection installs Rust after artifact classification'
 grep -Fq 'base_sha="$(git rev-parse "$GITHUB_SHA^")"' <<<"$selection_job" ||
   fail 'support selection does not resolve the exact parent SHA'
 grep -Fq 'scripts/ci/select/select-support-images.sh "$base_sha" "$GITHUB_SHA"' \
