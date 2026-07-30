@@ -195,6 +195,33 @@ Method context can add procedure but cannot widen repository authority.
 - The GitHub mirror is maintained by the Gitea mirror workflow using GitHub App
   secrets. Do not add PAT or SSH deploy-key mirror credentials.
 
+## Live smoke topology and evidence
+
+- Before treating a live smoke as product acceptance, name the initiating
+  network actor and execution topology—developer workstation, Kubernetes pod,
+  host-network Actions job, VM, or another concrete boundary—and explain why
+  it represents the supported client path under test. Do not silently promote
+  a runner-specific topology into a product gate.
+- When a representative client path and a CI runner path differ, classify and
+  track their results separately. A runner-only failure blocks product
+  acceptance only when that runner topology is itself a supported product path
+  or a same-topology reproduction attributes the failure to product behavior.
+  Otherwise it is infrastructure coverage and must receive its own bounded
+  diagnosis and correction.
+- A manual or live acceptance receipt must preserve the exact source and Git
+  tree, client binary checksum, deployed image digest, disposable environment
+  identifier, named assertions, evidence-bundle digest, authenticated cleanup,
+  and zero-resource cleanup proof. Manual does not mean informal; missing
+  provenance means the result is diagnostic, not acceptance evidence.
+- Do not weaken transport assertions or timeouts to accommodate an executor.
+  Change or repair the executor/topology, and keep the product expectation
+  fixed. Prefer the representative local/manual smoke as the development loop;
+  use CI for exact-tree attestation and separately identified runner coverage.
+- A diagnostic must observe the boundary it claims to test. If permissions or
+  topology prevent that observation, report the diagnostic as inconclusive and
+  preserve its available evidence; do not infer a drop, product regression, or
+  successful path from an adjacent endpoint or missing output.
+
 ## Local verification before pushing
 
 - Choose verification by what the change actually touches — pick the
