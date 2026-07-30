@@ -125,7 +125,7 @@ jobs:
                 exit 2
               fi
               export SMOKE_PACKET_DIAGNOSTICS=1
-              args+=(--only doctor)
+              args+=(--only kube --only doctor)
               ;;
             false) export SMOKE_PACKET_DIAGNOSTICS=0 ;;
             *) echo "::error::packet_diagnostics must be true or false"; exit 2 ;;

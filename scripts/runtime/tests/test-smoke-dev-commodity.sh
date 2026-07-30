@@ -31,6 +31,8 @@ assert_static_contract() {
     fail "named workflow does not expose retained-environment diagnosis"
   rg -F 'packet_diagnostics:' "$WORKFLOW" >/dev/null || \
     fail "named workflow does not expose packet diagnostics"
+  rg -F 'args+=(--only kube --only doctor)' "$WORKFLOW" >/dev/null || \
+    fail "packet diagnostics do not establish the terminal gateway-ready topology before the doctor"
   rg -F "always() && inputs.packet_diagnostics == 'true'" "$WORKFLOW" >/dev/null || \
     fail "packet diagnostics do not have an always-run cleanup guard"
   rg -F 'environment-cleanup.json' "$WORKFLOW" >/dev/null || \
@@ -220,10 +222,30 @@ run_packet_capture_startup_failure_case() {
   fi
 }
 
+run_packet_diagnostic_phase_order_case() {
+  local output="$TEST_TMP/packet-diagnostic-phase-order"
+
+  (
+    source <(sed '$d' "$SMOKE")
+    SMOKE_ONLY_PHASES=(kube doctor)
+    run_kube_assertions() {
+      printf 'kube-ready\n'
+    }
+    run_tailnet_doctor() {
+      printf 'doctor\n'
+    }
+    run_selected_phases
+  ) >"$output" 2>/dev/null
+
+  printf 'kube-ready\ndoctor\n' | cmp - "$output" >/dev/null || \
+    fail "packet diagnostic phases do not execute gateway readiness before the doctor"
+}
+
 assert_static_contract
 run_safe_diagnostic_case
 run_environment_artifact_case
 run_packet_header_summary_case
 run_packet_capture_startup_failure_case
+run_packet_diagnostic_phase_order_case
 
 printf 'dev commodity smoke safe diagnostic tests: OK\n'
