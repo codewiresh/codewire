@@ -1,0 +1,45 @@
+{{- if .Values.prelaunchLegacyAuthRetirement.enabled }}
+{{- if not .Values.database.enabled }}
+{{- fail "prelaunchLegacyAuthRetirement requires database.enabled" }}
+{{- end }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "codewire-mesh.fullname" . }}-retire-legacy-auth
+  labels:
+    {{- include "codewire-mesh.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-upgrade
+    "helm.sh/hook-weight": "-10"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 300
+  template:
+    metadata:
+      labels:
+        {{- include "codewire-mesh.labels" . | nindent 8 }}
+    spec:
+      automountServiceAccountToken: false
+      restartPolicy: Never
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: retire-legacy-auth
+          image: "{{ include "codewire-mesh.imageRef" . }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["codewire-mesh"]
+          args: ["prelaunch-retire-legacy-auth"]
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.database.secretName }}
+                  key: {{ .Values.database.uriKey }}
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+{{- end }}

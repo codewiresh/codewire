@@ -670,6 +670,12 @@ elif [ "$event_selected" = false ]; then
         # server-core Rust closure are selected by the exact test path.
         select_token database
         ;;
+      crates/codewire-mesh/src/store.rs)
+        # Mesh's PostgreSQL store owns its embedded SQLx ledger and the
+        # fail-closed prelaunch retirement path. Compile-only transport checks
+        # cannot exercise those database state transitions.
+        select_token database
+        ;;
       crates/codewire-server-core/*)
         select_services
         ;;

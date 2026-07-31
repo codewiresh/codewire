@@ -372,6 +372,9 @@ run_paths_case mesh_policy_runtime pull_request refs/pull/1174/head false \
   'policy transport transport_pkg_codewire_mesh' \
   scripts/checks/contracts/mesh-final-surface-policy.json \
   crates/codewire-mesh/src/server.rs
+run_paths_case mesh_store_database pull_request refs/pull/1175/head false \
+  'database policy transport transport_pkg_codewire_mesh' \
+  crates/codewire-mesh/src/store.rs
 run_paths_case package_contract_tooling pull_request refs/pull/118/head false \
   'contracts contracts_proto contracts_rest policy security security_js web' \
   package.json

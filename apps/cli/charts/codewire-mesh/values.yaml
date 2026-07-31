@@ -7,6 +7,12 @@ database:
   secretName: "codewire-mesh-db-app"
   uriKey: "uri"
 
+# Hosted production upgrades can opt into the bounded, idempotent cleanup that
+# removes the legacy auth/session/device rows required by SQLx migration 6.
+# Fresh installs and standalone Mesh do not need this pre-upgrade hook.
+prelaunchLegacyAuthRetirement:
+  enabled: false
+
 # Hosted Mesh requires this cluster-local primary-control-plane authorization
 # hop whenever it owns a database. Standalone `cw mesh up` supplies its own
 # explicit local identity and does not use these chart values.

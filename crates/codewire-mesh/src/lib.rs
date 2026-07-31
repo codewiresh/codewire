@@ -16,7 +16,9 @@ pub use server::{router, router_with_store, serve};
 pub use store::{
     AccessGrant, AccessGrantFilter, GROUP_DEBUG_FULL, GROUP_DEBUG_NONE, GROUP_DEBUG_OBSERVE_ONLY,
     GROUP_MESSAGES_INTERNAL_ONLY, GROUP_MESSAGES_OPEN, Group, GroupBinding, GroupMember,
-    GroupPolicy, Invite, KVEntry, LatestTaskValue, MemoryStore, MeshStore, NETWORK_ROLE_MEMBER,
-    NETWORK_ROLE_OWNER, Network, NetworkMember, PostgresMeshStore, SharedStore, StoreError,
-    TaskEvent, TaskFilter, TaskWatchEvent, store_from_config,
+    GroupPolicy, Invite, KVEntry, LatestTaskValue, LegacyAuthRetirementCounts,
+    LegacyAuthRetirementOutcome, LegacyAuthRetirementReport, MemoryStore, MeshStore,
+    NETWORK_ROLE_MEMBER, NETWORK_ROLE_OWNER, Network, NetworkMember, PostgresMeshStore,
+    SharedStore, StoreError, TaskEvent, TaskFilter, TaskWatchEvent, prelaunch_retire_legacy_auth,
+    store_from_config,
 };

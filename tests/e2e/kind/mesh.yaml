@@ -7,7 +7,10 @@ kind: Deployment
 metadata:
   name: codewire-mesh
 spec:
-  replicas: 1
+  # The harness seeds the exact SQLx 1-5 retirement fixture and runs the
+  # prelaunch command before it scales Mesh up. Keeping the initial replica at
+  # zero prevents startup migration 6 from racing that proof.
+  replicas: 0
   selector:
     matchLabels:
       app: codewire-mesh

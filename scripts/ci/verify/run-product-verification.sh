@@ -491,6 +491,38 @@ run_deploy() {
   helm template test apps/cli/charts/codewire-mesh \
     --set mesh.baseURL=https://mesh.test \
     | grep -q 'exec codewire-mesh'
+  local default_mesh_render retirement_mesh_render retirement_job
+  default_mesh_render="$(helm template test apps/cli/charts/codewire-mesh \
+    --set mesh.baseURL=https://mesh.test)"
+  if grep -Fq 'prelaunch-retire-legacy-auth' <<<"$default_mesh_render"; then
+    echo "::error::legacy-auth retirement hook rendered without explicit opt-in"
+    return 1
+  fi
+  retirement_mesh_render="$(helm template codewire-mesh-retirement \
+    apps/cli/charts/codewire-mesh \
+    --set mesh.baseURL=https://mesh.test \
+    --set database.enabled=true \
+    --set database.secretName=mesh-database-only \
+    --set prelaunchLegacyAuthRetirement.enabled=true \
+    --set image.repository=registry.test/codewire/mesh \
+    --set image.digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+    --set meshAuthorization.url=http://authorization.test \
+    --set meshAuthorization.hmacSecretRef.name=must-not-enter-hook)"
+  retirement_job="$(awk 'BEGIN { RS="---" } /kind: Job/ && /prelaunch-retire-legacy-auth/ { print }' \
+    <<<"$retirement_mesh_render")"
+  grep -Fq '"helm.sh/hook": pre-upgrade' <<<"$retirement_job"
+  grep -Fq '"helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded' \
+    <<<"$retirement_job"
+  grep -Fq 'automountServiceAccountToken: false' <<<"$retirement_job"
+  grep -Fq 'registry.test/codewire/mesh@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' \
+    <<<"$retirement_job"
+  grep -Fq 'name: DATABASE_URL' <<<"$retirement_job"
+  grep -Fq 'name: mesh-database-only' <<<"$retirement_job"
+  grep -Fq 'args: ["prelaunch-retire-legacy-auth"]' <<<"$retirement_job"
+  if grep -Fq 'must-not-enter-hook' <<<"$retirement_job"; then
+    echo "::error::Mesh authorization credential entered the database-only retirement hook"
+    return 1
+  fi
   local dev_mesh_render
   dev_mesh_render="$(helm template codewire-mesh-dev apps/cli/charts/codewire-mesh \
     -f deployments/k8s/mesh-dev/values.yaml \

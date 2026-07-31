@@ -482,6 +482,130 @@ load_images_into_kind() {
   kind load docker-image --name "$KIND_CLUSTER_NAME" codewire-gateway:e2e
 }
 
+mesh_legacy_auth_retirement_transition() {
+  log "seeding the exact Mesh SQLx 1-5 legacy-auth retirement fixture"
+  local mesh_database_exists
+  mesh_database_exists="$(kubectl -n "$NS" exec deploy/postgres -- \
+    psql -U codewire -d postgres -At -v ON_ERROR_STOP=1 \
+      -c "SELECT 1 FROM pg_database WHERE datname = 'codewire_mesh'")"
+  if [[ "$mesh_database_exists" != "1" ]]; then
+    kubectl -n "$NS" exec deploy/postgres -- \
+      psql -U codewire -d postgres -v ON_ERROR_STOP=1 \
+        -c 'CREATE DATABASE codewire_mesh'
+  fi
+  kubectl -n "$NS" exec deploy/postgres -- \
+    psql -U codewire -d codewire_mesh -v ON_ERROR_STOP=1 -c '
+      CREATE TABLE _sqlx_migrations (
+        version BIGINT PRIMARY KEY,
+        description TEXT NOT NULL,
+        installed_on TIMESTAMPTZ NOT NULL DEFAULT now(),
+        success BOOLEAN NOT NULL,
+        checksum BYTEA NOT NULL,
+        execution_time BIGINT NOT NULL
+      )'
+
+  local migration version description checksum
+  for migration in "$ROOT"/crates/codewire-mesh/migrations/00[1-5]_*.sql; do
+    version="$(basename "$migration")"
+    version="${version%%_*}"
+    version="$((10#$version))"
+    description="$(basename "$migration" .sql)"
+    description="${description#*_}"
+    description="${description//_/ }"
+    checksum="$(sha384sum "$migration" | awk '{ print $1 }')"
+    kubectl -n "$NS" exec -i deploy/postgres -- \
+      psql -U codewire -d codewire_mesh -v ON_ERROR_STOP=1 < "$migration"
+    kubectl -n "$NS" exec -i deploy/postgres -- \
+      psql -U codewire -d codewire_mesh -v ON_ERROR_STOP=1 \
+        -v version="$version" -v description="$description" -v checksum="$checksum" <<'SQL'
+INSERT INTO _sqlx_migrations
+  (version, description, success, checksum, execution_time)
+VALUES
+  (:'version', :'description', true, decode(:'checksum', 'hex'), 0);
+SQL
+  done
+
+  kubectl -n "$NS" exec -i deploy/postgres -- \
+    psql -U codewire -d codewire_mesh -v ON_ERROR_STOP=1 <<'SQL'
+INSERT INTO networks (network_id, created_at, organization_id)
+VALUES ('kind-retained', now(), 'kind-org-retained');
+INSERT INTO nodes
+  (network_id, name, token, peer_url, owner_subject, authorized_by,
+   enrollment_id, authorized_at, last_seen_at)
+VALUES
+  ('kind-retained', 'kind-node-retained', 'legacy-kind-node-secret',
+   'udp://127.0.0.1:10000', 'kind-subject-retained', 'kind-issuer-retained',
+   'kind-enrollment-retained', now(), now());
+INSERT INTO invites
+  (id, network_id, organization_id, created_by_user_id, code_hash,
+   expires_at, created_at)
+VALUES
+  ('kind-invite-retained', 'kind-retained', 'kind-org-retained',
+   'kind-primary-user-retained', 'kind-hash-retained',
+   now() + interval '1 hour', now());
+INSERT INTO kv (network_id, namespace, key, value)
+VALUES ('kind-retained', 'product.settings', 'retained', '\x0102');
+INSERT INTO users (github_id, username, created_at, last_login_at)
+VALUES (7, 'legacy-kind-user', now(), now());
+INSERT INTO sessions (token, github_id, created_at, expires_at)
+VALUES ('legacy-kind-session', 7, now(), now() + interval '1 hour');
+INSERT INTO oauth_state (state, created_at, expires_at)
+VALUES ('legacy-kind-oauth', now(), now() + interval '1 hour');
+INSERT INTO oidc_users (sub, username, created_at, last_login_at)
+VALUES ('legacy-kind-subject', 'legacy-kind-oidc-user', now(), now());
+INSERT INTO oidc_sessions (token, sub, created_at, expires_at)
+VALUES ('legacy-kind-oidc-session', 'legacy-kind-subject', now(), now() + interval '1 hour');
+INSERT INTO oidc_device_flows
+  (poll_token, device_code, network_id, node_name, node_token, expires_at)
+VALUES
+  ('legacy-kind-poll', 'legacy-kind-device', 'kind-retained',
+   'kind-node-retained', 'legacy-kind-device-node', now() + interval '1 hour');
+INSERT INTO device_codes
+  (code, public_key, node_name, created_at, expires_at)
+VALUES
+  ('legacy-kind-code', 'legacy-kind-public-key', 'kind-node-retained',
+   now(), now() + interval '1 hour');
+INSERT INTO github_app
+  (id, app_id, client_id, client_secret, pem, webhook_secret, owner, created_at)
+VALUES
+  (1, 7, 'legacy-kind-client', 'legacy-kind-client-secret',
+   'legacy-kind-pem', 'legacy-kind-webhook', 'legacy-kind-owner', now());
+SQL
+
+  log "running the Mesh prelaunch retirement command in-cluster"
+  kubectl -n "$NS" delete pod codewire-mesh-retire-legacy-auth --ignore-not-found --wait=true
+  kubectl -n "$NS" run codewire-mesh-retire-legacy-auth \
+    --image=codewire-mesh:e2e --image-pull-policy=Never --restart=Never \
+    --env=DATABASE_URL=postgres://codewire:codewire@postgres:5432/codewire_mesh?sslmode=disable \
+    --command -- codewire-mesh prelaunch-retire-legacy-auth
+  if ! kubectl -n "$NS" wait pod/codewire-mesh-retire-legacy-auth \
+      --for=jsonpath='{.status.phase}'=Succeeded --timeout=300s; then
+    kubectl -n "$NS" logs pod/codewire-mesh-retire-legacy-auth || true
+    return 1
+  fi
+  kubectl -n "$NS" logs pod/codewire-mesh-retire-legacy-auth
+
+  local prelaunch_state
+  prelaunch_state="$(kubectl -n "$NS" exec deploy/postgres -- \
+    psql -U codewire -d codewire_mesh -At -v ON_ERROR_STOP=1 -c \
+      "SELECT (SELECT count(*) FROM _sqlx_migrations), (SELECT count(*) FROM users) + (SELECT count(*) FROM sessions) + (SELECT count(*) FROM oauth_state) + (SELECT count(*) FROM oidc_users) + (SELECT count(*) FROM oidc_sessions) + (SELECT count(*) FROM oidc_device_flows) + (SELECT count(*) FROM device_codes) + (SELECT count(*) FROM github_app), (SELECT count(*) FROM nodes WHERE token <> '')")"
+  if [[ "$prelaunch_state" != "5|0|0" ]]; then
+    echo "::error::Mesh prelaunch retirement did not leave exact ledger/count state: ${prelaunch_state}"
+    return 1
+  fi
+}
+
+verify_mesh_legacy_auth_retirement_transition() {
+  local final_state
+  final_state="$(kubectl -n "$NS" exec deploy/postgres -- \
+    psql -U codewire -d codewire_mesh -At -v ON_ERROR_STOP=1 -c \
+      "SELECT (SELECT count(*) FROM _sqlx_migrations WHERE success = true), (SELECT count(*) FROM pg_class WHERE relnamespace = 'public'::regnamespace AND relname IN ('users','sessions','oauth_state','oidc_users','oidc_sessions','oidc_device_flows','device_codes','github_app')), (SELECT count(*) FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'nodes' AND column_name = 'token'), (SELECT count(*) FROM networks WHERE network_id = 'kind-retained'), (SELECT count(*) FROM nodes WHERE network_id = 'kind-retained' AND name = 'kind-node-retained'), (SELECT count(*) FROM invites WHERE id = 'kind-invite-retained'), (SELECT count(*) FROM kv WHERE network_id = 'kind-retained' AND namespace = 'product.settings' AND key = 'retained' AND value = '\x0102')")"
+  if [[ "$final_state" != "6|0|0|1|1|1|1" ]]; then
+    echo "::error::Mesh retirement-to-healthy transition lost schema or product sentinels: ${final_state}"
+    return 1
+  fi
+}
+
 deploy_overlay() {
   log "deploying vendored ingress-nginx"
   kubectl_apply --validate=false -f "$ROOT/tests/e2e/kind/vendor/ingress-nginx-deploy.yaml"
@@ -543,6 +667,7 @@ deploy_overlay() {
     return 1
   fi
   kubectl -n "$NS" logs job/codewire-db-migrate --all-containers=true
+  mesh_legacy_auth_retirement_transition
   local expected_migration_rows migration_rows
   expected_migration_rows="$(find "$ROOT/crates/codewire-server-core/migrations" \
     -maxdepth 1 -type f -name '*.sql' -print | wc -l | tr -d '[:space:]')"
@@ -572,6 +697,7 @@ deploy_overlay() {
   kubectl -n "$NS" rollout status deploy/codewire-idp --timeout=300s
   kubectl -n "$NS" rollout status deploy/codewire-orchestration --timeout=300s
   kubectl -n "$NS" rollout status deploy/codewire-mesh --timeout=300s
+  verify_mesh_legacy_auth_retirement_transition
   kubectl -n "$NS" rollout status deploy/codewire-coordinator --timeout=300s
 }
 

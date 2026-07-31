@@ -7,13 +7,285 @@ use async_trait::async_trait;
 use base64::Engine;
 use chrono::{DateTime, Duration, SecondsFormat, Utc};
 use serde::{Serialize, Serializer};
-use sqlx::migrate::Migrator;
-use sqlx::{PgPool, Row};
+use sqlx::migrate::{Migrate, Migrator};
+use sqlx::{Acquire, PgPool, Row};
 use tokio::sync::Mutex;
 
 use crate::Config;
 
 static MESH_MIGRATOR: Migrator = sqlx::migrate!("./migrations");
+
+const LEGACY_AUTH_RELATIONS: [&str; 8] = [
+    "users",
+    "sessions",
+    "oauth_state",
+    "oidc_users",
+    "oidc_sessions",
+    "oidc_device_flows",
+    "device_codes",
+    "github_app",
+];
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LegacyAuthRetirementOutcome {
+    Purged,
+    AlreadyRetired,
+}
+
+/// Value-blind evidence from the bounded legacy-auth retirement operation.
+///
+/// The report deliberately contains only affected row counts. It never holds
+/// or formats the retired credential, session, device, or OAuth values.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct LegacyAuthRetirementCounts {
+    pub sessions: u64,
+    pub oauth_state: u64,
+    pub oidc_sessions: u64,
+    pub oidc_device_flows: u64,
+    pub oidc_users: u64,
+    pub device_codes: u64,
+    pub github_app: u64,
+    pub users: u64,
+    pub node_tokens: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct LegacyAuthRetirementReport {
+    pub outcome: LegacyAuthRetirementOutcome,
+    pub counts: LegacyAuthRetirementCounts,
+}
+
+struct RetirementLedgerRow {
+    version: i64,
+    description: String,
+    success: bool,
+    checksum: Vec<u8>,
+}
+
+/// Purges the Mesh-local auth/session/device state retired by migration 6.
+///
+/// This is intentionally separate from normal startup so a Helm pre-upgrade
+/// hook can remove disposable legacy state before the new Deployment starts.
+/// SQLx remains the sole migration owner: this function validates but never
+/// edits `_sqlx_migrations`, and migration 6 performs the schema retirement.
+pub async fn prelaunch_retire_legacy_auth(
+    database_url: &str,
+) -> anyhow::Result<LegacyAuthRetirementReport> {
+    anyhow::ensure!(!database_url.trim().is_empty(), "DATABASE_URL is empty");
+
+    let pool = codewire_server_core::db::connect(database_url)
+        .await
+        .context("connect codewire-mesh database for legacy-auth retirement")?;
+    let mut connection = pool
+        .acquire()
+        .await
+        .context("acquire codewire-mesh retirement connection")?;
+
+    Migrate::lock(&mut *connection)
+        .await
+        .context("acquire SQLx migration lock for legacy-auth retirement")?;
+    let retirement = retire_legacy_auth_under_migration_lock(&mut connection).await;
+    let unlock = Migrate::unlock(&mut *connection)
+        .await
+        .context("release SQLx migration lock after legacy-auth retirement");
+
+    match retirement {
+        Ok(report) => {
+            unlock?;
+            Ok(report)
+        }
+        Err(error) => {
+            // Preserve the operation failure as the primary diagnostic. The
+            // pooled connection is dropped immediately afterwards, which also
+            // releases a session-level advisory lock if unlock itself failed.
+            let _ = unlock;
+            Err(error)
+        }
+    }
+}
+
+async fn retire_legacy_auth_under_migration_lock(
+    connection: &mut sqlx::pool::PoolConnection<sqlx::Postgres>,
+) -> anyhow::Result<LegacyAuthRetirementReport> {
+    let mut transaction = connection
+        .begin()
+        .await
+        .context("begin legacy-auth retirement transaction")?;
+    sqlx::query("SET LOCAL lock_timeout = '15s'")
+        .execute(&mut *transaction)
+        .await?;
+    sqlx::query("SET LOCAL statement_timeout = '60s'")
+        .execute(&mut *transaction)
+        .await?;
+    sqlx::query("LOCK TABLE _sqlx_migrations IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *transaction)
+        .await
+        .context("lock SQLx migration ledger")?;
+
+    let ledger = sqlx::query(
+        r#"
+        SELECT version, description, success, checksum
+        FROM _sqlx_migrations
+        ORDER BY version
+        "#,
+    )
+    .fetch_all(&mut *transaction)
+    .await
+    .context("read SQLx migration ledger")?
+    .into_iter()
+    .map(|row| {
+        Ok(RetirementLedgerRow {
+            version: row.try_get("version")?,
+            description: row.try_get("description")?,
+            success: row.try_get("success")?,
+            checksum: row.try_get("checksum")?,
+        })
+    })
+    .collect::<Result<Vec<_>, sqlx::Error>>()?;
+    let applied_count = validate_retirement_ledger(&ledger)?;
+
+    let report = if applied_count == 5 {
+        validate_legacy_auth_schema(&mut transaction, true).await?;
+        sqlx::query(
+            r#"
+            LOCK TABLE
+                sessions, oauth_state, oidc_sessions, oidc_device_flows,
+                oidc_users, device_codes, github_app, users, nodes
+            IN ACCESS EXCLUSIVE MODE
+            "#,
+        )
+        .execute(&mut *transaction)
+        .await
+        .context("lock legacy Mesh auth/session/device state")?;
+        validate_legacy_auth_schema(&mut transaction, true).await?;
+
+        let counts = LegacyAuthRetirementCounts {
+            sessions: sqlx::query("DELETE FROM sessions")
+                .execute(&mut *transaction)
+                .await?
+                .rows_affected(),
+            oauth_state: sqlx::query("DELETE FROM oauth_state")
+                .execute(&mut *transaction)
+                .await?
+                .rows_affected(),
+            oidc_sessions: sqlx::query("DELETE FROM oidc_sessions")
+                .execute(&mut *transaction)
+                .await?
+                .rows_affected(),
+            oidc_device_flows: sqlx::query("DELETE FROM oidc_device_flows")
+                .execute(&mut *transaction)
+                .await?
+                .rows_affected(),
+            oidc_users: sqlx::query("DELETE FROM oidc_users")
+                .execute(&mut *transaction)
+                .await?
+                .rows_affected(),
+            device_codes: sqlx::query("DELETE FROM device_codes")
+                .execute(&mut *transaction)
+                .await?
+                .rows_affected(),
+            github_app: sqlx::query("DELETE FROM github_app")
+                .execute(&mut *transaction)
+                .await?
+                .rows_affected(),
+            users: sqlx::query("DELETE FROM users")
+                .execute(&mut *transaction)
+                .await?
+                .rows_affected(),
+            node_tokens: sqlx::query("UPDATE nodes SET token = '' WHERE token <> ''")
+                .execute(&mut *transaction)
+                .await?
+                .rows_affected(),
+        };
+        LegacyAuthRetirementReport {
+            outcome: LegacyAuthRetirementOutcome::Purged,
+            counts,
+        }
+    } else {
+        validate_legacy_auth_schema(&mut transaction, false).await?;
+        LegacyAuthRetirementReport {
+            outcome: LegacyAuthRetirementOutcome::AlreadyRetired,
+            counts: LegacyAuthRetirementCounts::default(),
+        }
+    };
+
+    transaction
+        .commit()
+        .await
+        .context("commit legacy-auth retirement transaction")?;
+    Ok(report)
+}
+
+fn validate_retirement_ledger(ledger: &[RetirementLedgerRow]) -> anyhow::Result<usize> {
+    anyhow::ensure!(
+        matches!(ledger.len(), 5 | 6),
+        "legacy-auth retirement requires an exact successful SQLx 1-5 or 1-6 ledger"
+    );
+    for (applied, expected) in ledger.iter().zip(MESH_MIGRATOR.iter()) {
+        anyhow::ensure!(
+            applied.version == expected.version
+                && applied.description == expected.description.as_ref()
+                && applied.success
+                && applied.checksum == expected.checksum.as_ref(),
+            "legacy-auth retirement rejected SQLx ledger entry at version {}",
+            applied.version
+        );
+    }
+    Ok(ledger.len())
+}
+
+async fn validate_legacy_auth_schema(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    legacy_expected: bool,
+) -> anyhow::Result<()> {
+    let legacy_relation_count: i64 = sqlx::query_scalar(
+        r#"
+        SELECT count(*)
+        FROM pg_class
+        WHERE relnamespace = 'public'::regnamespace
+          AND relkind IN ('r', 'p')
+          AND relname = ANY($1)
+        "#,
+    )
+    .bind(LEGACY_AUTH_RELATIONS.as_slice())
+    .fetch_one(&mut **transaction)
+    .await?;
+    let nodes_table_exists: bool =
+        sqlx::query_scalar("SELECT to_regclass('public.nodes') IS NOT NULL")
+            .fetch_one(&mut **transaction)
+            .await?;
+    let node_token_column_exists: bool = sqlx::query_scalar(
+        r#"
+        SELECT EXISTS (
+            SELECT 1
+            FROM information_schema.columns
+            WHERE table_schema = 'public'
+              AND table_name = 'nodes'
+              AND column_name = 'token'
+        )
+        "#,
+    )
+    .fetch_one(&mut **transaction)
+    .await?;
+
+    anyhow::ensure!(
+        nodes_table_exists,
+        "legacy-auth retirement requires nodes table"
+    );
+    if legacy_expected {
+        anyhow::ensure!(
+            legacy_relation_count == LEGACY_AUTH_RELATIONS.len() as i64 && node_token_column_exists,
+            "SQLx 1-5 ledger does not match the expected pre-retirement schema"
+        );
+    } else {
+        anyhow::ensure!(
+            legacy_relation_count == 0 && !node_token_column_exists,
+            "SQLx 1-6 ledger does not match the expected retired schema"
+        );
+    }
+    Ok(())
+}
 
 pub const NETWORK_ROLE_OWNER: &str = "owner";
 pub const NETWORK_ROLE_MEMBER: &str = "member";
@@ -2661,6 +2933,47 @@ mod migration_tests {
         .collect()
     }
 
+    async fn prepare_mesh_through_migration_five(pool: &PgPool) -> anyhow::Result<()> {
+        for migration_sql in [
+            include_str!("../migrations/001_initial_schema.sql"),
+            include_str!("../migrations/002_network_organization_ownership.sql"),
+            include_str!("../migrations/003_contract_native_invitations.sql"),
+            include_str!("../migrations/004_retire_persistent_node_bearer.sql"),
+            include_str!("../migrations/005_retire_network_auth_issuer.sql"),
+        ] {
+            sqlx::raw_sql(migration_sql).execute(pool).await?;
+        }
+        sqlx::query(
+            r#"
+            CREATE TABLE _sqlx_migrations (
+                version BIGINT PRIMARY KEY,
+                description TEXT NOT NULL,
+                installed_on TIMESTAMPTZ NOT NULL DEFAULT now(),
+                success BOOLEAN NOT NULL,
+                checksum BYTEA NOT NULL,
+                execution_time BIGINT NOT NULL
+            )
+            "#,
+        )
+        .execute(pool)
+        .await?;
+        for migration in MESH_MIGRATOR.iter().take(5) {
+            sqlx::query(
+                r#"
+                INSERT INTO _sqlx_migrations
+                    (version, description, success, checksum, execution_time)
+                VALUES ($1, $2, true, $3, 0)
+                "#,
+            )
+            .bind(migration.version)
+            .bind(migration.description.as_ref())
+            .bind(migration.checksum.as_ref())
+            .execute(pool)
+            .await?;
+        }
+        Ok(())
+    }
+
     async fn startup(database_url: String) -> anyhow::Result<()> {
         PostgresMeshStore::connect(&database_url).await?;
         Ok(())
@@ -3155,6 +3468,236 @@ mod migration_tests {
         .await;
         let cleanup = test_db.drop().await;
         result.and(cleanup)
+    }
+
+    #[tokio::test]
+    #[ignore = "requires TEST_DATABASE_URL"]
+    async fn prelaunch_retirement_purges_all_legacy_state_and_preserves_product_rows()
+    -> anyhow::Result<()> {
+        let test_db = TestDatabase::create(&test_database_url()?).await?;
+        let result = async {
+            let pool = PgPoolOptions::new()
+                .max_connections(1)
+                .connect(&test_db.url)
+                .await?;
+            prepare_mesh_through_migration_five(&pool).await?;
+            sqlx::raw_sql(
+                r#"
+                INSERT INTO networks (network_id, created_at, organization_id)
+                VALUES ('network-retained', now(), 'org-retained');
+                INSERT INTO network_members
+                    (network_id, subject, role, created_at, created_by)
+                VALUES ('network-retained', 'subject-retained', 'owner', now(), 'issuer-retained');
+                INSERT INTO nodes
+                    (network_id, name, token, peer_url, owner_subject,
+                     authorized_by, enrollment_id, authorized_at, last_seen_at)
+                VALUES
+                    ('network-retained', 'node-retained', 'legacy-node-secret',
+                     'udp://127.0.0.1:10000', 'subject-retained',
+                     'issuer-retained', 'enrollment-retained', now(), now());
+                INSERT INTO invites
+                    (id, network_id, organization_id, created_by_user_id,
+                     code_hash, expires_at, created_at)
+                VALUES
+                    ('invite-retained', 'network-retained', 'org-retained',
+                     'primary-user-retained', 'hash-retained',
+                     now() + interval '1 hour', now());
+                INSERT INTO kv (network_id, namespace, key, value)
+                VALUES ('network-retained', 'product.settings', 'retained', '\x0102');
+
+                INSERT INTO users
+                    (github_id, username, created_at, last_login_at)
+                VALUES (7, 'legacy-user-secret', now(), now());
+                INSERT INTO sessions (token, github_id, created_at, expires_at)
+                VALUES ('legacy-session-secret', 7, now(), now() + interval '1 hour');
+                INSERT INTO oauth_state (state, created_at, expires_at)
+                VALUES ('legacy-oauth-secret', now(), now() + interval '1 hour');
+                INSERT INTO oidc_users (sub, username, created_at, last_login_at)
+                VALUES ('legacy-oidc-subject', 'legacy-oidc-user', now(), now());
+                INSERT INTO oidc_sessions (token, sub, created_at, expires_at)
+                VALUES ('legacy-oidc-session', 'legacy-oidc-subject', now(), now() + interval '1 hour');
+                INSERT INTO oidc_device_flows
+                    (poll_token, device_code, network_id, node_name, node_token, expires_at)
+                VALUES
+                    ('legacy-poll-secret', 'legacy-device-secret', 'network-retained',
+                     'node-retained', 'legacy-device-node-secret', now() + interval '1 hour');
+                INSERT INTO device_codes
+                    (code, public_key, node_name, created_at, expires_at)
+                VALUES
+                    ('legacy-code-secret', 'legacy-public-key', 'node-retained',
+                     now(), now() + interval '1 hour');
+                INSERT INTO github_app
+                    (id, app_id, client_id, client_secret, pem, webhook_secret,
+                     owner, created_at)
+                VALUES
+                    (1, 7, 'legacy-client-id', 'legacy-client-secret',
+                     'legacy-pem-secret', 'legacy-webhook-secret', 'legacy-owner', now());
+                "#,
+            )
+            .execute(&pool)
+            .await?;
+            drop(pool);
+
+            let report = prelaunch_retire_legacy_auth(&test_db.url).await?;
+            anyhow::ensure!(
+                report
+                    == LegacyAuthRetirementReport {
+                        outcome: LegacyAuthRetirementOutcome::Purged,
+                        counts: LegacyAuthRetirementCounts {
+                            sessions: 1,
+                            oauth_state: 1,
+                            oidc_sessions: 1,
+                            oidc_device_flows: 1,
+                            oidc_users: 1,
+                            device_codes: 1,
+                            github_app: 1,
+                            users: 1,
+                            node_tokens: 1,
+                        },
+                    }
+            );
+            let evidence = serde_json::to_string(&report)?;
+            anyhow::ensure!(!evidence.contains("legacy-"));
+
+            let store = PostgresMeshStore::connect(&test_db.url).await?;
+            let retained: (String, String, String, Vec<u8>) = sqlx::query_as(
+                r#"
+                SELECT n.organization_id, nd.owner_subject, i.created_by_user_id, kv.value
+                FROM networks n
+                JOIN nodes nd ON nd.network_id = n.network_id
+                JOIN invites i ON i.network_id = n.network_id
+                JOIN kv ON kv.network_id = n.network_id
+                WHERE n.network_id = 'network-retained'
+                  AND nd.name = 'node-retained'
+                  AND i.id = 'invite-retained'
+                  AND kv.namespace = 'product.settings'
+                  AND kv.key = 'retained'
+                "#,
+            )
+            .fetch_one(&store.pool)
+            .await?;
+            anyhow::ensure!(
+                retained
+                    == (
+                        "org-retained".to_string(),
+                        "subject-retained".to_string(),
+                        "primary-user-retained".to_string(),
+                        vec![1, 2],
+                    )
+            );
+            let applied = applied_migrations(&store.pool).await?;
+            let expected = MESH_MIGRATOR.iter().collect::<Vec<_>>();
+            anyhow::ensure!(
+                applied.iter().zip(expected).all(|(applied, expected)| {
+                    applied.version == expected.version
+                        && applied.description == expected.description
+                        && applied.success
+                        && applied.checksum == expected.checksum.as_ref()
+                })
+            );
+            anyhow::Ok(())
+        }
+        .await;
+        let cleanup = test_db.drop().await;
+        result.and(cleanup)
+    }
+
+    #[tokio::test]
+    #[ignore = "requires TEST_DATABASE_URL"]
+    async fn prelaunch_retirement_is_an_exact_migration_six_noop() -> anyhow::Result<()> {
+        let test_db = TestDatabase::create(&test_database_url()?).await?;
+        let result = async {
+            let store = PostgresMeshStore::connect(&test_db.url).await?;
+            let before = applied_migrations(&store.pool).await?;
+            drop(store);
+
+            let report = prelaunch_retire_legacy_auth(&test_db.url).await?;
+            anyhow::ensure!(
+                report
+                    == LegacyAuthRetirementReport {
+                        outcome: LegacyAuthRetirementOutcome::AlreadyRetired,
+                        counts: LegacyAuthRetirementCounts::default(),
+                    }
+            );
+
+            let pool = PgPoolOptions::new()
+                .max_connections(1)
+                .connect(&test_db.url)
+                .await?;
+            anyhow::ensure!(applied_migrations(&pool).await? == before);
+            anyhow::Ok(())
+        }
+        .await;
+        let cleanup = test_db.drop().await;
+        result.and(cleanup)
+    }
+
+    #[tokio::test]
+    #[ignore = "requires TEST_DATABASE_URL"]
+    async fn prelaunch_retirement_rejects_checksum_drift_without_deleting_rows()
+    -> anyhow::Result<()> {
+        let test_db = TestDatabase::create(&test_database_url()?).await?;
+        let result = async {
+            let pool = PgPoolOptions::new()
+                .max_connections(1)
+                .connect(&test_db.url)
+                .await?;
+            prepare_mesh_through_migration_five(&pool).await?;
+            sqlx::query(
+                "INSERT INTO oauth_state (state, created_at, expires_at) VALUES ('must-remain', now(), now() + interval '1 hour')",
+            )
+            .execute(&pool)
+            .await?;
+            sqlx::query("UPDATE _sqlx_migrations SET checksum = decode('00', 'hex') WHERE version = 5")
+                .execute(&pool)
+                .await?;
+            drop(pool);
+
+            let error = prelaunch_retire_legacy_auth(&test_db.url)
+                .await
+                .expect_err("checksum drift unexpectedly allowed retirement");
+            anyhow::ensure!(error.to_string().contains("version 5"));
+
+            let pool = PgPoolOptions::new()
+                .max_connections(1)
+                .connect(&test_db.url)
+                .await?;
+            let retained: i64 = sqlx::query_scalar("SELECT count(*) FROM oauth_state")
+                .fetch_one(&pool)
+                .await?;
+            anyhow::ensure!(retained == 1);
+            anyhow::Ok(())
+        }
+        .await;
+        let cleanup = test_db.drop().await;
+        result.and(cleanup)
+    }
+
+    #[tokio::test]
+    #[ignore = "requires TEST_DATABASE_URL"]
+    async fn prelaunch_retirement_rejects_partial_or_dirty_ledgers() -> anyhow::Result<()> {
+        for ledger_mutation in [
+            "DELETE FROM _sqlx_migrations WHERE version = 5",
+            "UPDATE _sqlx_migrations SET success = false WHERE version = 5",
+        ] {
+            let test_db = TestDatabase::create(&test_database_url()?).await?;
+            let result = async {
+                let pool = PgPoolOptions::new()
+                    .max_connections(1)
+                    .connect(&test_db.url)
+                    .await?;
+                prepare_mesh_through_migration_five(&pool).await?;
+                sqlx::query(ledger_mutation).execute(&pool).await?;
+                drop(pool);
+
+                anyhow::ensure!(prelaunch_retire_legacy_auth(&test_db.url).await.is_err());
+                anyhow::Ok(())
+            }
+            .await;
+            let cleanup = test_db.drop().await;
+            result.and(cleanup)?;
+        }
+        Ok(())
     }
 
     #[tokio::test]

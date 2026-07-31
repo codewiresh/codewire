@@ -203,8 +203,8 @@ run_mesh_migration_ledger() {
       -- --ignored --nocapture | tee "$logfile"
   local passed_count
   passed_count="$(sed -nE 's/.*test result: ok\. ([0-9]+) passed.*/\1/p' "$logfile" | tail -n 1)"
-  if [[ "$passed_count" != "10" ]]; then
-    echo "::error::Mesh migration ledger did not execute exactly 10 DB-backed tests"
+  if [[ "$passed_count" != "14" ]]; then
+    echo "::error::Mesh migration ledger did not execute exactly 14 DB-backed tests"
     return 1
   fi
 }
