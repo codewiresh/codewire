@@ -162,6 +162,27 @@ def self_test(sources: dict[str, str], policy: dict[str, Any]) -> None:
     ):
         raise RuntimeError("self-test did not detect a missing shared-core UI fragment")
 
+    with_replacement_dashboard = dict(sources)
+    with_replacement_dashboard[
+        "crates/codewire-desktop/src/replacement_dashboard_fixture.rs"
+    ] = 'struct DashboardRequested;\nconst TITLE: &str = "Your development workspace";\n'
+    if not any(
+        "replacement_dashboard_fixture.rs restores forbidden native legacy fragment"
+        in item
+        for item in failures_for(with_replacement_dashboard, policy)
+    ):
+        raise RuntimeError("self-test did not reject the replacement dashboard shell")
+
+    with_retired_provider = dict(sources)
+    with_retired_provider[
+        "crates/codewire-desktop/src/retired_provider_fixture.rs"
+    ] = "struct CoderWorkspace;\n"
+    if not any(
+        "retired_provider_fixture.rs restores forbidden native legacy fragment" in item
+        for item in failures_for(with_retired_provider, policy)
+    ):
+        raise RuntimeError("self-test did not reject a new retired provider source file")
+
     with_new_legacy_file = dict(sources)
     with_new_legacy_file[
         "crates/codewire-desktop/src/legacy_client_fixture.rs"

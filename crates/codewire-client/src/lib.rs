@@ -36,6 +36,8 @@ pub use auth::{
     OAuthPkceAuthorization, OAuthTokenResponse, OAuthUserInfo, RefreshingTokenProvider,
     StaticTokenProvider, TokenProvider,
 };
+#[cfg(feature = "desktop-pkce-loopback")]
+pub use auth::{DesktopOAuthCancellation, DesktopOAuthLogin};
 pub use buffa_types::{Duration as ProtoDuration, Empty as ProtoEmpty, Timestamp};
 pub use codewire_proto::codewire::console::v1::{
     BillingLimitUsage, BillingLimits, DeleteGitHubTokenRequest, DeleteGitHubTokenResponse,

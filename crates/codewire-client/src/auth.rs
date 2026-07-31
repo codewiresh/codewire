@@ -8,6 +8,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[cfg(feature = "desktop-pkce-loopback")]
+use std::sync::atomic::AtomicBool;
+#[cfg(feature = "desktop-pkce-loopback")]
+use std::time::Instant;
+
 use async_trait::async_trait;
 use base64::Engine as _;
 use connectrpc::ErrorCode;
@@ -137,12 +142,53 @@ impl fmt::Debug for OAuthPkceAuthorization {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("OAuthPkceAuthorization")
-            .field("authorization_url", &self.authorization_url)
+            .field("authorization_url", &"[REDACTED]")
             .field("state", &"[REDACTED]")
             .field("code_verifier", &"[REDACTED]")
             .field("client_id", &self.client_id)
             .field("redirect_uri", &self.redirect_uri)
             .finish()
+    }
+}
+
+/// One pre-bound desktop OAuth login attempt.
+///
+/// The loopback listener is created before the browser is opened, so a fast
+/// redirect cannot race listener startup. The authorization URL remains in
+/// memory and is deliberately omitted from `Debug` output.
+#[cfg(feature = "desktop-pkce-loopback")]
+pub struct DesktopOAuthLogin {
+    authorization: OAuthPkceAuthorization,
+    callback_server: tiny_http::Server,
+    cancellation: DesktopOAuthCancellation,
+}
+
+#[cfg(feature = "desktop-pkce-loopback")]
+impl DesktopOAuthLogin {
+    pub fn authorization_url(&self) -> &Url {
+        self.authorization.authorization_url()
+    }
+
+    pub fn cancellation(&self) -> DesktopOAuthCancellation {
+        self.cancellation.clone()
+    }
+}
+
+/// Cancellation handle for one desktop OAuth login attempt.
+#[cfg(feature = "desktop-pkce-loopback")]
+#[derive(Clone, Default)]
+pub struct DesktopOAuthCancellation {
+    cancelled: Arc<AtomicBool>,
+}
+
+#[cfg(feature = "desktop-pkce-loopback")]
+impl DesktopOAuthCancellation {
+    pub fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Release);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Acquire)
     }
 }
 
@@ -669,18 +715,24 @@ impl OAuthClient {
         }
         let mut state = None;
         let mut code = None;
+        let mut oauth_error = None;
+        let mut error_description = None;
         for (key, value) in callback.query_pairs() {
             let value = value.into_owned();
             let duplicate = match key.as_ref() {
                 "state" => state.replace(value).is_some(),
                 "code" => code.replace(value).is_some(),
+                "error" => oauth_error.replace(value).is_some(),
+                "error_description" => error_description.replace(value).is_some(),
                 _ => false,
             };
             if duplicate {
-                let message = if key == "state" {
-                    "OAuth callback contained duplicate state values"
-                } else {
-                    "OAuth callback contained duplicate authorization codes"
+                let message = match key.as_ref() {
+                    "state" => "OAuth callback contained duplicate state values",
+                    "code" => "OAuth callback contained duplicate authorization codes",
+                    "error" => "OAuth callback contained duplicate error codes",
+                    "error_description" => "OAuth callback contained duplicate error descriptions",
+                    _ => unreachable!("only handled callback parameters can be duplicates"),
                 };
                 return Err(AuthClientError::Response {
                     message: message.into(),
@@ -690,6 +742,32 @@ impl OAuthClient {
         if state.as_deref() != Some(authorization.state.as_str()) {
             return Err(AuthClientError::Response {
                 message: "OAuth callback state did not match the authorization request".into(),
+            });
+        }
+        if let Some(oauth_error) = oauth_error {
+            if oauth_error.trim().is_empty() {
+                return Err(AuthClientError::Response {
+                    message: "OAuth callback contained an empty error code".into(),
+                });
+            }
+            if code.as_deref().is_some_and(|code| !code.is_empty()) {
+                return Err(AuthClientError::Response {
+                    message: "OAuth callback contained both a code and an error".into(),
+                });
+            }
+            let description = error_description
+                .filter(|description| !description.trim().is_empty())
+                .map(|description| format!(": {description}"))
+                .unwrap_or_default();
+            return Err(AuthClientError::OAuth {
+                code: oauth_error,
+                description,
+            });
+        }
+        if error_description.is_some() {
+            return Err(AuthClientError::Response {
+                message: "OAuth callback contained an error description without an error code"
+                    .into(),
             });
         }
         let code = code
@@ -716,21 +794,67 @@ impl OAuthClient {
         .map_err(AuthClientError::Client)
     }
 
-    /// Complete the fixed desktop PKCE flow through the system browser and its
-    /// registered loopback callback. The login page remains the only owner of
-    /// passwords, 2FA, and passkeys; this adapter receives only the resulting
-    /// authorization code on its registered localhost loopback callback.
+    /// Prepare the fixed desktop PKCE flow and bind its registered loopback
+    /// callback before returning the system-browser URL to the caller.
     #[cfg(feature = "desktop-pkce-loopback")]
-    pub async fn login_desktop_pkce(&self) -> Result<OAuthCredentials, AuthClientError> {
+    pub fn begin_desktop_pkce_login(&self) -> Result<DesktopOAuthLogin, AuthClientError> {
         let authorization = self.begin_pkce_authorization(
             CODEWIRE_DESKTOP_OAUTH_CLIENT_ID,
             CODEWIRE_DESKTOP_OAUTH_REDIRECT_URI,
             CODEWIRE_DESKTOP_OAUTH_SCOPES,
         )?;
-        let callback =
-            receive_desktop_loopback_callback(authorization.authorization_url().clone()).await?;
-        self.complete_pkce_authorization(authorization, &callback)
-            .await
+        let callback_server =
+            tiny_http::Server::http("localhost:9876").map_err(|_| AuthClientError::Response {
+                message: "unable to bind the desktop OAuth loopback callback".into(),
+            })?;
+        Ok(DesktopOAuthLogin {
+            authorization,
+            callback_server,
+            cancellation: DesktopOAuthCancellation::default(),
+        })
+    }
+
+    /// Wait for and exchange one prepared desktop PKCE callback.
+    #[cfg(feature = "desktop-pkce-loopback")]
+    pub async fn complete_desktop_pkce_login(
+        &self,
+        login: DesktopOAuthLogin,
+    ) -> Result<OAuthCredentials, AuthClientError> {
+        let DesktopOAuthLogin {
+            authorization,
+            callback_server,
+            cancellation,
+        } = login;
+        let callback = receive_desktop_loopback_callback(
+            callback_server,
+            cancellation.clone(),
+            Duration::from_secs(300),
+        )
+        .await?;
+        if cancellation.is_cancelled() {
+            return Err(desktop_oauth_cancelled_error());
+        }
+        let credentials = self
+            .complete_pkce_authorization(authorization, &callback)
+            .await?;
+        if cancellation.is_cancelled() {
+            return Err(desktop_oauth_cancelled_error());
+        }
+        Ok(credentials)
+    }
+
+    /// Complete the fixed desktop PKCE flow through the system browser and its
+    /// registered loopback callback. UI applications should use
+    /// [`begin_desktop_pkce_login`](Self::begin_desktop_pkce_login), open the
+    /// returned URL through their native application framework, and then call
+    /// [`complete_desktop_pkce_login`](Self::complete_desktop_pkce_login).
+    #[cfg(feature = "desktop-pkce-loopback")]
+    pub async fn login_desktop_pkce(&self) -> Result<OAuthCredentials, AuthClientError> {
+        let login = self.begin_desktop_pkce_login()?;
+        open::that(login.authorization_url().as_str()).map_err(|_| AuthClientError::Response {
+            message: "unable to open the system browser for OAuth login".into(),
+        })?;
+        self.complete_desktop_pkce_login(login).await
     }
 
     pub async fn authorize_device(&self) -> Result<OAuthDeviceAuthorization, AuthClientError> {
@@ -1231,39 +1355,57 @@ fn random_urlsafe(bytes: usize) -> String {
 
 #[cfg(feature = "desktop-pkce-loopback")]
 async fn receive_desktop_loopback_callback(
-    authorization_url: Url,
+    server: tiny_http::Server,
+    cancellation: DesktopOAuthCancellation,
+    timeout: Duration,
 ) -> Result<String, AuthClientError> {
     tokio::task::spawn_blocking(move || {
-        // Bind the registered hostname rather than one numeric family. On
-        // systems where localhost prefers IPv6, a 127.0.0.1-only listener
-        // leaves the browser callback unreachable even though PKCE completed.
-        let server = tiny_http::Server::http("localhost:9876").map_err(|_| {
-            AuthClientError::Response {
-                message: "unable to bind the desktop OAuth loopback callback".into(),
+        let deadline = Instant::now() + timeout;
+        let request = loop {
+            if cancellation.is_cancelled() {
+                return Err(desktop_oauth_cancelled_error());
             }
-        })?;
-        open::that(authorization_url.as_str()).map_err(|_| AuthClientError::Response {
-            message: "unable to open the system browser for OAuth login".into(),
-        })?;
-        let request = server
-            .recv_timeout(Duration::from_secs(300))
-            .map_err(|_| AuthClientError::Response {
-                message: "desktop OAuth loopback callback failed".into(),
-            })?
-            .ok_or_else(|| AuthClientError::Response {
-                message: "desktop OAuth login timed out".into(),
-            })?;
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(AuthClientError::Response {
+                    message: "desktop OAuth login timed out".into(),
+                });
+            }
+            match server
+                .recv_timeout(remaining.min(Duration::from_millis(100)))
+                .map_err(|_| AuthClientError::Response {
+                    message: "desktop OAuth loopback callback failed".into(),
+                })? {
+                Some(request) => break request,
+                None => continue,
+            }
+        };
+        if cancellation.is_cancelled() {
+            return Err(desktop_oauth_cancelled_error());
+        }
         let path_and_query = request.url().to_string();
-        let valid_path = path_and_query
-            .split('?')
-            .next()
-            .is_some_and(|path| path == "/callback");
-        let body = if valid_path {
+        let callback_url = Url::parse(&format!("http://localhost:9876{path_and_query}"));
+        let valid_path = callback_url
+            .as_ref()
+            .is_ok_and(|callback| callback.path() == "/callback");
+        let callback_succeeded = callback_url.as_ref().is_ok_and(|callback| {
+            let mut has_code = false;
+            let mut has_error = false;
+            for (key, value) in callback.query_pairs() {
+                match key.as_ref() {
+                    "code" if !value.is_empty() => has_code = true,
+                    "error" if !value.is_empty() => has_error = true,
+                    _ => {}
+                }
+            }
+            valid_path && has_code && !has_error
+        });
+        let body = if callback_succeeded {
             "<html><body><h1>Authentication complete</h1><p>You can return to Codewire.</p></body></html>"
         } else {
-            "<html><body><h1>Authentication failed</h1></body></html>"
+            "<html><body><h1>Authentication failed</h1><p>You can return to Codewire.</p></body></html>"
         };
-        let status = if valid_path { 200 } else { 400 };
+        let status = if callback_succeeded { 200 } else { 400 };
         let _ = request.respond(
             tiny_http::Response::from_string(body)
                 .with_status_code(status)
@@ -1283,6 +1425,13 @@ async fn receive_desktop_loopback_callback(
     .map_err(|_| AuthClientError::Response {
         message: "desktop OAuth callback task failed".into(),
     })?
+}
+
+#[cfg(feature = "desktop-pkce-loopback")]
+fn desktop_oauth_cancelled_error() -> AuthClientError {
+    AuthClientError::Response {
+        message: "desktop OAuth login cancelled".into(),
+    }
 }
 
 fn credential_error(action: &str) -> ClientError {
@@ -1559,6 +1708,84 @@ mod tests {
             )
             .expect_err("non-loopback redirect must be rejected");
         assert!(matches!(error, AuthClientError::Response { .. }));
+    }
+
+    #[tokio::test]
+    async fn pkce_callback_preserves_oauth_error_after_state_validation() {
+        let client = OAuthClient::for_server_url("https://codewire.test").expect("OAuth client");
+        let authorization = client
+            .begin_pkce_authorization(
+                CODEWIRE_DESKTOP_OAUTH_CLIENT_ID,
+                CODEWIRE_DESKTOP_OAUTH_REDIRECT_URI,
+                CODEWIRE_DESKTOP_OAUTH_SCOPES,
+            )
+            .expect("start pkce");
+        let callback = format!(
+            "{}?error=invalid_scope&error_description=scope%20not%20allowed&state={}",
+            CODEWIRE_DESKTOP_OAUTH_REDIRECT_URI, authorization.state
+        );
+        let error = client
+            .complete_pkce_authorization(authorization, &callback)
+            .await
+            .expect_err("OAuth error callback must not reach token exchange");
+        assert!(matches!(
+            error,
+            AuthClientError::OAuth {
+                ref code,
+                ref description,
+            } if code == "invalid_scope" && description == ": scope not allowed"
+        ));
+
+        let authorization = client
+            .begin_pkce_authorization(
+                CODEWIRE_DESKTOP_OAUTH_CLIENT_ID,
+                CODEWIRE_DESKTOP_OAUTH_REDIRECT_URI,
+                CODEWIRE_DESKTOP_OAUTH_SCOPES,
+            )
+            .expect("start pkce");
+        let callback = format!(
+            "{}?error=invalid_scope&error_description=sensitive&state=wrong-state",
+            CODEWIRE_DESKTOP_OAUTH_REDIRECT_URI
+        );
+        let error = client
+            .complete_pkce_authorization(authorization, &callback)
+            .await
+            .expect_err("untrusted OAuth error must fail state validation first");
+        assert!(matches!(
+            error,
+            AuthClientError::Response { ref message }
+                if message == "OAuth callback state did not match the authorization request"
+        ));
+    }
+
+    #[cfg(feature = "desktop-pkce-loopback")]
+    #[tokio::test]
+    async fn desktop_loopback_cancellation_stops_waiting_and_releases_listener() {
+        let server = tiny_http::Server::http("127.0.0.1:0").expect("bind loopback listener");
+        let address = server
+            .server_addr()
+            .to_ip()
+            .expect("loopback listener has an IP address");
+        let cancellation = DesktopOAuthCancellation::default();
+        let cancel_from_ui = cancellation.clone();
+        let waiter = tokio::spawn(async move {
+            receive_desktop_loopback_callback(server, cancellation, Duration::from_secs(5)).await
+        });
+
+        tokio::task::yield_now().await;
+        cancel_from_ui.cancel();
+
+        let error = tokio::time::timeout(Duration::from_secs(1), waiter)
+            .await
+            .expect("cancelled listener stops promptly")
+            .expect("callback task joins")
+            .expect_err("cancelled listener does not produce a callback");
+        assert!(matches!(
+            error,
+            AuthClientError::Response { ref message }
+                if message == "desktop OAuth login cancelled"
+        ));
+        std::net::TcpListener::bind(address).expect("cancelled listener releases its port");
     }
 
     #[tokio::test]

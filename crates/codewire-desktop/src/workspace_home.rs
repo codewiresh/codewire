@@ -18,122 +18,6 @@ impl WorkspaceHome {
         }
     }
 
-    fn render_dashboard(&self, theme: &Theme) -> gpui::AnyElement {
-        div()
-            .id("native-dashboard-scroll")
-            .size_full()
-            .overflow_y_scroll()
-            .bg(theme.surface)
-            .font_family(".AppleSystemUIFont")
-            .track_focus(&self.focus_handle)
-            .child(
-                div()
-                    .max_w(px(980.0))
-                    .mx_auto()
-                    .px(px(40.0))
-                    .py(px(44.0))
-                    .flex()
-                    .flex_col()
-                    .gap(px(28.0))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap(px(10.0))
-                            .child(
-                                div()
-                                    .text_size(px(12.0))
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .text_color(theme.accent)
-                                    .child("CODEWIRE DESKTOP"),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(30.0))
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .text_color(theme.foreground)
-                                    .child("Your development workspace"),
-                            )
-                            .child(
-                                div()
-                                    .max_w(px(680.0))
-                                    .text_size(px(14.0))
-                                    .line_height(gpui::relative(1.5))
-                                    .text_color(theme.muted)
-                                    .child(
-                                        "Choose an environment or local project in the sidebar. \
-                                         Code, terminals, diffs, and workspace layouts stay in \
-                                         this native interface.",
-                                    ),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_wrap()
-                            .gap(px(12.0))
-                            .child(self.render_tool_card(
-                                "Editor",
-                                "Open files without leaving the workspace.",
-                                "Available",
-                                theme.status_running,
-                                theme,
-                            ))
-                            .child(self.render_tool_card(
-                                "Terminal",
-                                "Connect to a Codewire environment or work locally.",
-                                "Available",
-                                theme.status_running,
-                                theme,
-                            ))
-                            .child(self.render_tool_card(
-                                "Diff",
-                                "Review changes alongside your editor and terminal.",
-                                "Available",
-                                theme.status_running,
-                                theme,
-                            ))
-                            .child(self.render_tool_card(
-                                "Platform actions",
-                                "Creation and billing remain in migration.",
-                                "Unavailable here",
-                                theme.status_needs_auth,
-                                theme,
-                            )),
-                    )
-                    .child(
-                        div()
-                            .p(px(18.0))
-                            .rounded(px(8.0))
-                            .border_1()
-                            .border_color(theme.border)
-                            .bg(theme.background)
-                            .flex()
-                            .flex_col()
-                            .gap(px(6.0))
-                            .child(
-                                div()
-                                    .text_size(px(13.0))
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .text_color(theme.foreground)
-                                    .child("Native by default"),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(12.0))
-                                    .line_height(gpui::relative(1.45))
-                                    .text_color(theme.muted)
-                                    .child(
-                                        "The desktop uses the shared Connect client and opens \
-                                         sign-in in your system browser. It does not embed a \
-                                         replacement dashboard or handle your password.",
-                                    ),
-                            ),
-                    ),
-            )
-            .into_any_element()
-    }
-
     fn render_local(&self, path: &str, theme: &Theme) -> gpui::AnyElement {
         div()
             .size_full()
@@ -500,7 +384,6 @@ impl Render for WorkspaceHome {
         let theme = Theme::dark();
         match &self.identity.source {
             WorkspaceSource::Local { path } => self.render_local(path, theme),
-            WorkspaceSource::Dashboard => self.render_dashboard(theme),
             WorkspaceSource::CodewireEnvironment {
                 org_slug,
                 env_id,

@@ -1,5 +1,6 @@
-//! Status bar at the bottom of the window.
+//! Native workspace status and transmission bar.
 
+use crate::sidebar::WorkspaceStatusCounts;
 use crate::theme::Theme;
 use gpui::{App, Context, FocusHandle, Focusable, Hsla, Window, div, prelude::*, px, svg};
 
@@ -12,7 +13,7 @@ pub struct TransmissionStats {
 }
 
 pub struct StatusBar {
-    local_project_count: usize,
+    workspace_counts: WorkspaceStatusCounts,
     transmission: TransmissionStats,
     focus_handle: FocusHandle,
 }
@@ -20,14 +21,18 @@ pub struct StatusBar {
 impl StatusBar {
     pub fn new(cx: &mut Context<Self>) -> Self {
         Self {
-            local_project_count: 0,
+            workspace_counts: WorkspaceStatusCounts::default(),
             transmission: TransmissionStats::default(),
             focus_handle: cx.focus_handle(),
         }
     }
 
-    pub fn update_local_project_count(&mut self, count: usize, cx: &mut Context<Self>) {
-        self.local_project_count = count;
+    pub fn update_workspace_counts(
+        &mut self,
+        counts: WorkspaceStatusCounts,
+        cx: &mut Context<Self>,
+    ) {
+        self.workspace_counts = counts;
         cx.notify();
     }
 
@@ -57,7 +62,7 @@ fn format_bytes(bytes: u64) -> String {
 
 fn icon_value_pair(
     icon_path: &'static str,
-    value: &str,
+    value: impl ToString,
     icon_color: Hsla,
     text_color: Hsla,
 ) -> impl IntoElement {
@@ -95,6 +100,7 @@ fn separator(muted: Hsla) -> impl IntoElement {
 impl Render for StatusBar {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::dark();
+        let counts = &self.workspace_counts;
         let muted = theme.muted;
         let fg = theme.foreground;
 
@@ -128,22 +134,52 @@ impl Render for StatusBar {
             .font_family(".AppleSystemUIFont")
             .child(
                 div()
+                    .h_full()
                     .flex()
                     .items_center()
                     .gap(px(4.0))
-                    .child(div().text_color(muted).mr(px(4.0)).child("Local"))
+                    .child(
+                        div()
+                            .h_full()
+                            .flex()
+                            .items_center()
+                            .text_color(muted)
+                            .mr(px(4.0))
+                            .line_height(px(24.0))
+                            .child("Workspaces"),
+                    )
                     .child(icon_value_pair(
-                        "icons/folder.svg",
-                        &format!(
-                            "{} project{}",
-                            self.local_project_count,
-                            if self.local_project_count == 1 {
-                                ""
-                            } else {
-                                "s"
-                            }
-                        ),
-                        theme.accent,
+                        "icons/status-pending.svg",
+                        counts.pending,
+                        theme.status_needs_auth,
+                        fg,
+                    ))
+                    .child(separator(muted))
+                    .child(icon_value_pair(
+                        "icons/status-building.svg",
+                        counts.building,
+                        theme.status_needs_auth,
+                        fg,
+                    ))
+                    .child(separator(muted))
+                    .child(icon_value_pair(
+                        "icons/status-running.svg",
+                        counts.running,
+                        theme.status_running,
+                        fg,
+                    ))
+                    .child(separator(muted))
+                    .child(icon_value_pair(
+                        "icons/status-stopped.svg",
+                        counts.stopped,
+                        theme.status_stopped,
+                        fg,
+                    ))
+                    .child(separator(muted))
+                    .child(icon_value_pair(
+                        "icons/status-failed.svg",
+                        counts.failed,
+                        theme.git_deletions,
                         fg,
                     )),
             )
@@ -152,6 +188,16 @@ impl Render for StatusBar {
                     .flex()
                     .items_center()
                     .gap(px(4.0))
+                    .child(
+                        div()
+                            .h_full()
+                            .flex()
+                            .items_center()
+                            .text_color(muted)
+                            .mr(px(4.0))
+                            .line_height(px(24.0))
+                            .child("Transmission"),
+                    )
                     .child(icon_value_pair("icons/arrow-down.svg", &rx_text, muted, fg))
                     .child(separator(muted))
                     .child(icon_value_pair("icons/arrow-up.svg", &tx_text, muted, fg))

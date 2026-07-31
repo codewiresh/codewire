@@ -38,8 +38,6 @@ pub struct EnvironmentSummary {
 pub enum WorkspaceSource {
     /// A local folder on disk.
     Local { path: String },
-    /// The native Codewire landing surface.
-    Dashboard,
     /// A Codewire environment workspace backed by typed Connect reads.
     CodewireEnvironment {
         org_id: String,
@@ -76,15 +74,6 @@ impl WorkspaceIdentity {
             id: format!("local:{}", path),
             name,
             source: WorkspaceSource::Local { path },
-        }
-    }
-
-    /// Create identity for the shared Codewire dashboard workspace.
-    pub fn dashboard() -> Self {
-        Self {
-            id: "codewire:dashboard".to_string(),
-            name: "Dashboard".to_string(),
-            source: WorkspaceSource::Dashboard,
         }
     }
 

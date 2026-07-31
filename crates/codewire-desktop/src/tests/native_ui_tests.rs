@@ -1,7 +1,8 @@
 use codewire_client::{DesiredState, Environment, EnvironmentState, Port, PortAccess};
+use gpui::Keystroke;
 
-use crate::environment_summary;
 use crate::workspace::{WorkspaceIdentity, WorkspaceSource};
+use crate::{PRIMARY_QUIT_KEY, environment_summary};
 
 #[test]
 fn typed_environment_becomes_wire_independent_native_ui_data() {
@@ -69,4 +70,14 @@ fn typed_environment_becomes_wire_independent_native_ui_data() {
     assert_eq!(env_id, "env-1");
     assert_eq!(env_name, "design-system");
     assert!(environment.is_none());
+}
+
+#[test]
+fn quit_shortcut_uses_the_platform_primary_modifier() {
+    let keystroke = Keystroke::parse(PRIMARY_QUIT_KEY).expect("quit shortcut should parse");
+    assert_eq!(keystroke.key, "q");
+    assert!(
+        keystroke.modifiers.secondary(),
+        "quit must be Cmd+Q on macOS and Ctrl+Q on Linux/Windows"
+    );
 }

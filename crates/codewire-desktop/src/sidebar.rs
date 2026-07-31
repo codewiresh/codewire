@@ -1,4 +1,4 @@
-//! Sidebar for Codewire environments and local projects.
+//! Native Workspaces sidebar backed by Codewire environments and local projects.
 
 use crate::theme::Theme;
 use crate::workspace::EnvironmentSummary;
@@ -11,37 +11,10 @@ use gpui::{
 use std::collections::HashSet;
 
 #[derive(Clone, Debug)]
-pub struct DashboardRequested;
-
-#[derive(Clone, Debug)]
-pub struct SettingsRequested;
-
-#[derive(Clone, Debug)]
-pub struct BillingRequested;
-
-#[derive(Clone, Debug)]
 pub struct CodewireSignInRequested;
 
 #[derive(Clone, Debug)]
 pub struct CodewireSignOutRequested;
-
-#[derive(Clone, Debug)]
-pub struct NewOrganizationRequested;
-
-#[derive(Clone, Debug)]
-pub struct OrganizationRequested {
-    pub org_slug: String,
-}
-
-#[derive(Clone, Debug)]
-pub struct OrganizationBillingRequested {
-    pub org_slug: String,
-}
-
-#[derive(Clone, Debug)]
-pub struct OrganizationCreateEnvironmentRequested {
-    pub org_slug: String,
-}
 
 #[derive(Clone, Debug)]
 pub struct EnvironmentTerminalRequested {
@@ -104,26 +77,29 @@ pub struct LocalProject {
     pub pr: Option<PullRequest>,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct WorkspaceStatusCounts {
+    pub pending: usize,
+    pub building: usize,
+    pub running: usize,
+    pub stopped: usize,
+    pub failed: usize,
+}
+
 pub struct Sidebar {
     codewire_orgs: Vec<SidebarOrganization>,
     codewire_authenticated: bool,
     codewire_loading: bool,
     codewire_error: Option<String>,
     expanded_orgs: HashSet<String>,
+    local_group_expanded: bool,
     local_projects: Vec<LocalProject>,
     expanded_local_projects: HashSet<String>,
     focus_handle: FocusHandle,
 }
 
-impl EventEmitter<DashboardRequested> for Sidebar {}
-impl EventEmitter<SettingsRequested> for Sidebar {}
-impl EventEmitter<BillingRequested> for Sidebar {}
 impl EventEmitter<CodewireSignInRequested> for Sidebar {}
 impl EventEmitter<CodewireSignOutRequested> for Sidebar {}
-impl EventEmitter<NewOrganizationRequested> for Sidebar {}
-impl EventEmitter<OrganizationRequested> for Sidebar {}
-impl EventEmitter<OrganizationBillingRequested> for Sidebar {}
-impl EventEmitter<OrganizationCreateEnvironmentRequested> for Sidebar {}
 impl EventEmitter<EnvironmentTerminalRequested> for Sidebar {}
 impl EventEmitter<AddLocalProjectRequested> for Sidebar {}
 impl EventEmitter<LocalProjectExpanded> for Sidebar {}
@@ -140,6 +116,7 @@ impl Sidebar {
             codewire_loading: true,
             codewire_error: None,
             expanded_orgs: HashSet::new(),
+            local_group_expanded: true,
             local_projects: Vec::new(),
             expanded_local_projects: HashSet::new(),
             focus_handle: cx.focus_handle(),
@@ -227,8 +204,25 @@ impl Sidebar {
             .collect()
     }
 
-    pub fn local_project_count(&self) -> usize {
-        self.local_projects.len()
+    pub fn workspace_status_counts(&self) -> WorkspaceStatusCounts {
+        let mut counts = WorkspaceStatusCounts::default();
+        for environment in self
+            .codewire_orgs
+            .iter()
+            .flat_map(|organization| organization.environments.iter())
+        {
+            match environment.state.as_str() {
+                "pending" | "pending_build" => counts.pending += 1,
+                "building" | "pulling_snapshot" | "creating" | "starting" | "stopping"
+                | "archiving" | "restoring" | "resizing" | "destroying" => {
+                    counts.building += 1;
+                }
+                "running" => counts.running += 1,
+                "stopped" | "archived" | "destroyed" => counts.stopped += 1,
+                _ => counts.failed += 1,
+            }
+        }
+        counts
     }
 
     fn icon_box_svg(&self, icon_path: &'static str, theme: &Theme) -> impl IntoElement {
@@ -273,45 +267,6 @@ impl Sidebar {
             .when(status.dirty, |el| {
                 el.child(div().text_color(theme.git_dirty).child("*"))
             })
-    }
-
-    fn render_nav_item(
-        &self,
-        id: String,
-        label: &'static str,
-        icon_path: &'static str,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-        on_click: impl Fn(&mut Sidebar, &mut Context<Sidebar>) + 'static,
-    ) -> gpui::AnyElement {
-        div()
-            .id(ElementId::Name(SharedString::from(id)))
-            .relative()
-            .py(px(6.0))
-            .pl(px(12.0))
-            .pr_2()
-            .mx(px(6.0))
-            .rounded(px(6.0))
-            .flex()
-            .items_center()
-            .gap_2()
-            .hover({
-                let hover_bg = theme.hover;
-                move |s| s.bg(hover_bg)
-            })
-            .cursor_pointer()
-            .on_click(cx.listener(move |this, _, _, cx| {
-                on_click(this, cx);
-            }))
-            .child(selection_bar(false))
-            .child(self.icon_box_svg(icon_path, theme))
-            .child(
-                div()
-                    .text_size(px(12.5))
-                    .text_color(theme.foreground)
-                    .child(label),
-            )
-            .into_any_element()
     }
 
     fn render_environment(
@@ -359,17 +314,29 @@ impl Sidebar {
                 });
             }))
             .child(selection_bar(false))
-            .child(self.icon_box_svg("icons/terminal.svg", theme))
-            .child(status_dot(match env_state.as_str() {
-                "running" => theme.status_running,
-                "starting" | "creating" | "pending" => theme.status_needs_auth,
-                "stopped" => theme.status_stopped,
-                _ => theme.git_deletions,
-            }))
+            .child(
+                div()
+                    .w(px(18.0))
+                    .h(px(18.0))
+                    .rounded(px(3.0))
+                    .bg(theme.surface)
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .flex_shrink_0()
+                    .child(status_dot(match env_state.as_str() {
+                        "running" => theme.status_running,
+                        "pending" | "pending_build" | "building" | "pulling_snapshot"
+                        | "creating" | "starting" | "stopping" | "archiving" | "restoring"
+                        | "resizing" | "destroying" => theme.status_needs_auth,
+                        "stopped" | "archived" | "destroyed" => theme.status_stopped,
+                        _ => theme.git_deletions,
+                    })),
+            )
             .child(
                 div()
                     .flex_1()
-                    .text_size(px(12.0))
+                    .text_size(px(13.0))
                     .text_color(theme.foreground)
                     .child(env_name),
             )
@@ -391,13 +358,9 @@ impl Sidebar {
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let org_id = org.id.clone();
-        let org_slug = org.slug.clone();
         let org_name = org.name.clone();
         let is_expanded = self.expanded_orgs.contains(&org_id);
         let org_toggle_id = org_id.clone();
-        let org_slug_for_dashboard = org_slug.clone();
-        let org_slug_for_billing = org_slug.clone();
-        let org_slug_for_create = org_slug.clone();
 
         let mut container = div().flex().flex_col();
 
@@ -405,14 +368,14 @@ impl Sidebar {
             div()
                 .id(ElementId::Name(SharedString::from(format!("org-{}", idx))))
                 .relative()
-                .py(px(6.0))
-                .pl(px(12.0))
-                .pr_2()
+                .py_2()
+                .pl_2()
+                .pr_3()
                 .mx(px(6.0))
                 .rounded(px(6.0))
                 .flex()
                 .items_center()
-                .gap_2()
+                .gap(px(6.0))
                 .hover({
                     let hover_bg = theme.hover;
                     move |s| s.bg(hover_bg)
@@ -424,17 +387,15 @@ impl Sidebar {
                     } else {
                         this.expanded_orgs.insert(org_toggle_id.clone());
                     }
-                    cx.emit(OrganizationRequested {
-                        org_slug: org_slug_for_dashboard.clone(),
-                    });
                     cx.notify();
                 }))
                 .child(selection_bar(false))
-                .child(self.icon_box_svg("icons/folder.svg", theme))
+                .child(chevron(is_expanded, theme.muted))
                 .child(
                     div()
                         .flex_1()
                         .text_size(px(13.0))
+                        .font_weight(gpui::FontWeight::MEDIUM)
                         .text_color(theme.foreground)
                         .child(org_name),
                 )
@@ -444,88 +405,29 @@ impl Sidebar {
                         .text_color(theme.muted)
                         .font_family("monospace")
                         .child(org.role.clone()),
-                )
-                .child(chevron(is_expanded, theme.muted)),
+                ),
         );
 
         if is_expanded {
-            for env in org
+            let visible_environments: Vec<_> = org
                 .environments
                 .iter()
                 .filter(|env| !matches!(env.state.as_str(), "destroyed" | "destroying"))
-            {
+                .collect();
+            for env in &visible_environments {
                 container = container.child(self.render_environment(org, env, theme, cx));
             }
-
-            container = container.child(
-                div()
-                    .id(ElementId::Name(SharedString::from(format!(
-                        "org-billing-{}",
-                        org.id
-                    ))))
-                    .relative()
-                    .py(px(6.0))
-                    .pl(px(24.0))
-                    .pr_2()
-                    .mx(px(6.0))
-                    .rounded(px(6.0))
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .hover({
-                        let hover_bg = theme.hover;
-                        move |s| s.bg(hover_bg)
-                    })
-                    .cursor_pointer()
-                    .on_click(cx.listener(move |_this, _, _, cx| {
-                        cx.emit(OrganizationBillingRequested {
-                            org_slug: org_slug_for_billing.clone(),
-                        });
-                    }))
-                    .child(selection_bar(false))
-                    .child(self.icon_box_svg("icons/folder.svg", theme))
-                    .child(
-                        div()
-                            .text_size(px(12.0))
-                            .text_color(theme.accent)
-                            .child("Billing"),
-                    ),
-            );
-
-            container = container.child(
-                div()
-                    .id(ElementId::Name(SharedString::from(format!(
-                        "org-create-env-{}",
-                        org.id
-                    ))))
-                    .relative()
-                    .py(px(6.0))
-                    .pl(px(24.0))
-                    .pr_2()
-                    .mx(px(6.0))
-                    .rounded(px(6.0))
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .hover({
-                        let hover_bg = theme.hover;
-                        move |s| s.bg(hover_bg)
-                    })
-                    .cursor_pointer()
-                    .on_click(cx.listener(move |_this, _, _, cx| {
-                        cx.emit(OrganizationCreateEnvironmentRequested {
-                            org_slug: org_slug_for_create.clone(),
-                        });
-                    }))
-                    .child(selection_bar(false))
-                    .child(self.icon_box_svg("icons/add.svg", theme))
-                    .child(
-                        div()
-                            .text_size(px(12.0))
-                            .text_color(theme.accent)
-                            .child("Create Env"),
-                    ),
-            );
+            if visible_environments.is_empty() {
+                container = container.child(
+                    div()
+                        .py(px(6.0))
+                        .pl(px(32.0))
+                        .pr_3()
+                        .text_size(px(11.0))
+                        .text_color(theme.muted)
+                        .child("No environments"),
+                );
+            }
         }
 
         container.into_any_element()
@@ -556,7 +458,7 @@ impl Sidebar {
             ))))
             .relative()
             .py(px(6.0))
-            .pl(px(12.0))
+            .pl(px(24.0))
             .pr_2()
             .mx(px(6.0))
             .rounded(px(6.0))
@@ -632,7 +534,7 @@ impl Sidebar {
                     ))))
                     .relative()
                     .py(px(6.0))
-                    .pl(px(24.0))
+                    .pl(px(36.0))
                     .pr_2()
                     .mx(px(6.0))
                     .rounded(px(6.0))
@@ -666,7 +568,7 @@ impl Sidebar {
                         ))))
                         .relative()
                         .py(px(6.0))
-                        .pl(px(24.0))
+                        .pl(px(36.0))
                         .pr_2()
                         .mx(px(6.0))
                         .rounded(px(6.0))
@@ -700,7 +602,7 @@ impl Sidebar {
                     ))))
                     .relative()
                     .py(px(6.0))
-                    .pl(px(24.0))
+                    .pl(px(36.0))
                     .pr_2()
                     .mx(px(6.0))
                     .rounded(px(6.0))
@@ -732,7 +634,7 @@ impl Sidebar {
                     ))))
                     .relative()
                     .py(px(6.0))
-                    .pl(px(24.0))
+                    .pl(px(36.0))
                     .pr_2()
                     .mx(px(6.0))
                     .rounded(px(6.0))
@@ -757,6 +659,50 @@ impl Sidebar {
 
         container.into_any_element()
     }
+
+    fn render_local_group(&self, theme: &Theme, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let is_expanded = self.local_group_expanded;
+        let hover_bg = theme.hover;
+        let mut container = div().flex().flex_col();
+
+        container = container.child(
+            div()
+                .id("local-provider")
+                .relative()
+                .py_2()
+                .pl_2()
+                .pr_3()
+                .mx(px(6.0))
+                .rounded(px(6.0))
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .hover(move |style| style.bg(hover_bg))
+                .cursor_pointer()
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.local_group_expanded = !this.local_group_expanded;
+                    cx.notify();
+                }))
+                .child(selection_bar(false))
+                .child(chevron(is_expanded, theme.muted))
+                .child(
+                    div()
+                        .flex_1()
+                        .text_size(px(13.0))
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(theme.foreground)
+                        .child("Local"),
+                ),
+        );
+
+        if is_expanded {
+            for (idx, project) in self.local_projects.iter().enumerate() {
+                container = container.child(self.render_local_project(idx, project, theme, cx));
+            }
+        }
+
+        container.into_any_element()
+    }
 }
 
 impl Focusable for Sidebar {
@@ -770,7 +716,7 @@ impl Render for Sidebar {
         let theme = Theme::dark();
 
         div()
-            .w(px(280.0))
+            .w(px(260.0))
             .h_full()
             .font_family(".AppleSystemUIFont")
             .flex()
@@ -784,7 +730,7 @@ impl Render for Sidebar {
             .track_focus(&self.focus_handle(cx))
             .child(
                 div()
-                    .h(px(52.0))
+                    .h(px(48.0))
                     .px_4()
                     .flex()
                     .items_center()
@@ -794,247 +740,146 @@ impl Render for Sidebar {
                             .text_size(px(13.0))
                             .font_weight(gpui::FontWeight::MEDIUM)
                             .text_color(theme.foreground)
-                            .child("Codewire"),
+                            .child("Workspaces"),
                     )
-                    .when(
-                        self.codewire_authenticated && !self.codewire_loading,
-                        |el| {
-                            el.child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(10.0))
-                                    .child(
-                                        div()
-                                            .id("codewire-sign-out-btn")
-                                            .text_size(px(11.0))
-                                            .text_color(theme.muted)
-                                            .hover(|s| s.text_color(theme.foreground))
-                                            .cursor_pointer()
-                                            .on_click(cx.listener(|_this, _, _, cx| {
-                                                cx.emit(CodewireSignOutRequested);
-                                            }))
-                                            .child("Sign Out"),
-                                    )
-                                    .child(
-                                        div()
-                                            .id("new-org-btn")
-                                            .text_color(theme.muted)
-                                            .hover(|s| s.text_color(theme.foreground))
-                                            .cursor_pointer()
-                                            .on_click(cx.listener(|_this, _, _, cx| {
-                                                cx.emit(NewOrganizationRequested);
-                                            }))
-                                            .child(
-                                                svg()
-                                                    .path("icons/add.svg")
-                                                    .size(px(16.0))
-                                                    .text_color(theme.muted),
-                                            ),
-                                    ),
-                            )
-                        },
+                    .child(
+                        div()
+                            .id("add-local-project-btn")
+                            .text_color(theme.muted)
+                            .hover(|style| style.text_color(theme.foreground))
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.request_add_local_project(cx);
+                            }))
+                            .child(
+                                svg()
+                                    .path("icons/add.svg")
+                                    .size(px(16.0))
+                                    .text_color(theme.muted),
+                            ),
                     ),
             )
             .child(
                 div()
+                    .id("workspaces-sidebar-scroll")
                     .flex_1()
-                    .overflow_hidden()
-                    .child(
-                        div()
-                            .px_2()
-                            .py_3()
-                            .flex()
-                            .flex_col()
-                            .gap(px(14.0))
-                            .child(
+                    .overflow_y_scroll()
+                    .py(px(4.0))
+                    .flex()
+                    .flex_col()
+                    .when(!self.local_projects.is_empty(), |content| {
+                        content.child(self.render_local_group(&theme, cx))
+                    })
+                    .when(self.codewire_loading, |content| {
+                        content.child(
+                            div()
+                                .px(px(14.0))
+                                .py(px(8.0))
+                                .text_size(px(12.0))
+                                .text_color(theme.muted)
+                                .child("Loading Codewire environments..."),
+                        )
+                    })
+                    .when(
+                        !self.codewire_loading && !self.codewire_authenticated,
+                        |content| {
+                            content.child(
                                 div()
+                                    .id("codewire-sign-in-btn")
+                                    .relative()
+                                    .py_2()
+                                    .pl_2()
+                                    .pr_3()
+                                    .mx(px(6.0))
+                                    .rounded(px(6.0))
                                     .flex()
-                                    .flex_col()
-                                    .gap(px(4.0))
+                                    .items_center()
+                                    .gap(px(6.0))
+                                    .hover(|style| style.bg(theme.hover))
+                                    .cursor_pointer()
+                                    .on_click(cx.listener(|_this, _, _, cx| {
+                                        cx.emit(CodewireSignInRequested);
+                                    }))
+                                    .child(selection_bar(false))
                                     .child(
                                         div()
-                                            .px(px(10.0))
-                                            .text_size(px(10.0))
-                                            .text_color(theme.muted)
-                                            .child("CODEWIRE"),
-                                    )
-                                    .child(self.render_nav_item(
-                                        "dashboard-link".to_string(),
-                                        "Dashboard",
-                                        "icons/folder.svg",
-                                        &theme,
-                                        cx,
-                                        |_this, cx| {
-                                            cx.emit(DashboardRequested);
-                                        },
-                                    ))
-                                    .child(self.render_nav_item(
-                                        "settings-link".to_string(),
-                                        "Settings",
-                                        "icons/folder.svg",
-                                        &theme,
-                                        cx,
-                                        |_this, cx| {
-                                            cx.emit(SettingsRequested);
-                                        },
-                                    ))
-                                    .child(self.render_nav_item(
-                                        "billing-link".to_string(),
-                                        "Billing",
-                                        "icons/folder.svg",
-                                        &theme,
-                                        cx,
-                                        |_this, cx| {
-                                            cx.emit(BillingRequested);
-                                        },
-                                    )),
-                            )
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_col()
-                                    .gap(px(4.0))
-                                    .child(
-                                        div()
-                                            .px(px(10.0))
-                                            .text_size(px(10.0))
-                                            .text_color(theme.muted)
-                                            .child("ENVIRONMENTS"),
-                                    )
-                                    .when(self.codewire_loading, |el| {
-                                        el.child(
-                                            div()
-                                                .px(px(10.0))
-                                                .py(px(8.0))
-                                                .text_size(px(12.0))
-                                                .text_color(theme.muted)
-                                                .child("Loading organizations..."),
-                                        )
-                                    })
-                                    .when(!self.codewire_loading && !self.codewire_authenticated, |el| {
-                                        el.child(
-                                            div()
-                                                .px(px(10.0))
-                                                .py(px(8.0))
-                                                .flex()
-                                                .flex_col()
-                                                .gap(px(8.0))
-                                                .child(
-                                                    div()
-                                                        .text_size(px(12.0))
-                                                        .text_color(theme.muted)
-                                                        .child("Sign in to load your Codewire organizations and environments."),
-                                                )
-                                                .child(
-                                                    div()
-                                                        .id("codewire-sign-in-btn")
-                                                        .relative()
-                                                        .py(px(6.0))
-                                                        .px(px(10.0))
-                                                        .rounded(px(6.0))
-                                                        .bg(theme.accent)
-                                                        .text_size(px(12.0))
-                                                        .text_color(gpui::hsla(0.0, 0.0, 1.0, 1.0))
-                                                        .cursor_pointer()
-                                                        .on_click(cx.listener(|_this, _, _, cx| {
-                                                            cx.emit(CodewireSignInRequested);
-                                                        }))
-                                                        .child("Sign In"),
-                                                ),
-                                        )
-                                    })
-                                    .when(self.codewire_error.is_some(), |el| {
-                                        el.child(
-                                            div()
-                                                .px(px(10.0))
-                                                .text_size(px(11.0))
-                                                .text_color(theme.git_deletions)
-                                                .child(self.codewire_error.clone().unwrap_or_default()),
-                                        )
-                                    })
-                                    .when(
-                                        self.codewire_authenticated
-                                            && !self.codewire_loading
-                                            && self.codewire_orgs.is_empty(),
-                                        |el| {
-                                            el.child(
-                                                div()
-                                                    .px(px(10.0))
-                                                    .py(px(8.0))
-                                                    .text_size(px(12.0))
-                                                    .text_color(theme.muted)
-                                                    .child("No organizations yet."),
-                                            )
-                                        },
-                                    )
-                                    .children(
-                                        self.codewire_orgs
-                                            .iter()
-                                            .enumerate()
-                                            .map(|(idx, org)| self.render_org(idx, org, &theme, cx)),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .h(px(1.0))
-                                    .mx(px(10.0))
-                                    .bg(theme.border),
-                            )
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_col()
-                                    .gap(px(4.0))
-                                    .child(
-                                        div()
-                                            .h(px(32.0))
-                                            .px_4()
+                                            .w(px(14.0))
+                                            .h(px(14.0))
                                             .flex()
                                             .items_center()
-                                            .justify_between()
+                                            .justify_center()
                                             .child(
-                                                div()
-                                                    .text_size(px(10.0))
-                                                    .text_color(theme.muted)
-                                                    .child("LOCAL PROJECTS"),
-                                            )
-                                            .child(
-                                                div()
-                                                    .id("add-local-project-btn")
-                                                    .text_color(theme.muted)
-                                                    .hover(|s| s.text_color(theme.foreground))
-                                                    .cursor_pointer()
-                                                    .on_click(cx.listener(|this, _, _, cx| {
-                                                        this.request_add_local_project(cx);
-                                                    }))
-                                                    .child(
-                                                        svg()
-                                                            .path("icons/add.svg")
-                                                            .size(px(16.0))
-                                                            .text_color(theme.muted),
-                                                    ),
+                                                svg()
+                                                    .path("icons/sign-in.svg")
+                                                    .size(px(14.0))
+                                                    .text_color(theme.accent),
                                             ),
                                     )
-                                    .when(self.local_projects.is_empty(), |el| {
-                                        el.child(
-                                            div()
-                                                .px(px(10.0))
-                                                .py(px(8.0))
-                                                .text_size(px(12.0))
-                                                .text_color(theme.muted)
-                                                .child("Open a local folder to get started."),
-                                        )
-                                    })
-                                    .children(
-                                        self.local_projects
-                                            .iter()
-                                            .enumerate()
-                                            .map(|(idx, project)| {
-                                                self.render_local_project(idx, project, &theme, cx)
-                                            }),
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .text_size(px(13.0))
+                                            .font_weight(gpui::FontWeight::MEDIUM)
+                                            .text_color(theme.accent)
+                                            .child("Sign in to Codewire"),
                                     ),
-                            ),
+                            )
+                        },
+                    )
+                    .when(self.codewire_error.is_some(), |content| {
+                        content.child(
+                            div()
+                                .px(px(14.0))
+                                .py(px(6.0))
+                                .text_size(px(11.0))
+                                .text_color(theme.git_deletions)
+                                .child(self.codewire_error.clone().unwrap_or_default()),
+                        )
+                    })
+                    .when(
+                        self.codewire_authenticated
+                            && !self.codewire_loading
+                            && self.codewire_orgs.is_empty(),
+                        |content| {
+                            content.child(
+                                div()
+                                    .px(px(14.0))
+                                    .py(px(8.0))
+                                    .text_size(px(12.0))
+                                    .text_color(theme.muted)
+                                    .child("No Codewire organizations"),
+                            )
+                        },
+                    )
+                    .children(
+                        self.codewire_orgs
+                            .iter()
+                            .enumerate()
+                            .map(|(idx, org)| self.render_org(idx, org, &theme, cx)),
+                    )
+                    .when(
+                        self.codewire_authenticated && !self.codewire_loading,
+                        |content| {
+                            content.child(
+                                div()
+                                    .id("codewire-sign-out-btn")
+                                    .py(px(6.0))
+                                    .pl(px(32.0))
+                                    .pr_3()
+                                    .mx(px(6.0))
+                                    .rounded(px(6.0))
+                                    .text_size(px(11.0))
+                                    .text_color(theme.muted)
+                                    .hover(|style| {
+                                        style.bg(theme.hover).text_color(theme.foreground)
+                                    })
+                                    .cursor_pointer()
+                                    .on_click(cx.listener(|_this, _, _, cx| {
+                                        cx.emit(CodewireSignOutRequested);
+                                    }))
+                                    .child("Sign Out"),
+                            )
+                        },
                     ),
             )
     }

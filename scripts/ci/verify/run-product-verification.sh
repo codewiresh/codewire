@@ -50,6 +50,11 @@ rust_package_args() {
     dir="${manifest%/Cargo.toml}"
     token="${dir#crates/}"
     token="${token//-/_}"
+    # The desktop crate is intentionally detached from the root workspace and
+    # is verified by run_detached_desktop instead of Cargo's workspace runner.
+    if [ "$prefix" = rust_pkg_ ] && [ "$token" = codewire_desktop ]; then
+      continue
+    fi
     if selected "${prefix}${token}"; then
       package="$(sed -nE 's/^name = "([^"]+)"/\1/p' "$manifest" | head -n 1)"
       [ -n "$package" ] || {

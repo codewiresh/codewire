@@ -1236,6 +1236,31 @@ grep -qF 'scripts/checks/source/check-native-desktop-ui.py' \
   "$ROOT/scripts/dev/preflight.sh"
 grep -qF 'scripts/checks/source/check-native-desktop-ui.py' \
   "$ROOT/scripts/ci/verify/run-product-verification.sh"
+desktop_package_args="$TMP/desktop-package-args.sh"
+awk '
+  /^rust_package_args\(\) \{/ { capture = 1 }
+  /^run_rust_packages\(\) \{/ { exit }
+  capture { print }
+' "$ROOT/scripts/ci/verify/run-product-verification.sh" > "$desktop_package_args"
+desktop_packages="$(
+  cd "$ROOT"
+  bash -c '
+    set -euo pipefail
+    selected() {
+      [ "$1" = rust_pkg_codewire_client ] || [ "$1" = rust_pkg_codewire_desktop ]
+    }
+    RUST_PACKAGE_ARGS=()
+    source "$1"
+    rust_package_args rust_pkg_
+    printf "%s\\n" "${RUST_PACKAGE_ARGS[@]}"
+  ' bash "$desktop_package_args"
+)"
+if ! grep -qx -- '-p' <<<"$desktop_packages" \
+    || ! grep -qx -- 'codewire-client' <<<"$desktop_packages" \
+    || grep -qx -- 'codewire-desktop' <<<"$desktop_packages"; then
+  echo 'detached desktop package leaked into root Cargo workspace arguments' >&2
+  exit 1
+fi
 if [ "$(grep -c '^run_selected_family edge_kind edge ' \
     "$ROOT/scripts/dev/preflight.sh")" -ne 1 ]; then
   echo 'local preflight must invoke edge static verification exactly once' >&2

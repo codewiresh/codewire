@@ -29,12 +29,13 @@ mod tests;
 use app_layout::AppLayout;
 use chat::ChatPanel;
 use codewire_client::{
-    ClientConfig, CodewireClient, CredentialStore, DesiredState, Environment, EnvironmentState,
-    KeyringCredentialStore, ListEnvironmentsRequest, ListOrganizationsRequest, NativeClientFacade,
-    OAuthClient, OrgRole, PortAccess, RefreshingTokenProvider,
+    ClientConfig, CodewireClient, CredentialStore, DesiredState, DesktopOAuthCancellation,
+    DesktopOAuthLogin, Environment, EnvironmentState, KeyringCredentialStore,
+    ListEnvironmentsRequest, ListOrganizationsRequest, NativeClientFacade, OAuthClient, OrgRole,
+    PortAccess, RefreshingTokenProvider,
 };
 use codewire_types::{GitStatus, MergeableState, PrState, PullRequest};
-use dialogs::{LoginDialog, UnavailableDialog, UnavailableDialogDismissed};
+use dialogs::{LoginDialog, LoginDialogEvent};
 use editor::{
     EditorBackspace, EditorCopy, EditorCut, EditorDelete, EditorEnter, EditorLeft, EditorPaste,
     EditorRight, EditorSelectAll, MoveDown, MoveLineEnd, MoveLineStart, MoveUp, RedoEdit, SaveFile,
@@ -49,17 +50,16 @@ use gpui::{
 use input::{Backspace, Copy, Cut, Delete, Left, Paste, Right, SelectAll};
 use pane_tree::{RemoteConnection, SplitDirection};
 use sidebar::{
-    AddLocalProjectRequested, BillingRequested, CodewireSignInRequested, CodewireSignOutRequested,
-    DashboardRequested, EnvironmentTerminalRequested, LocalBrowseRequested, LocalDiffRequested,
-    LocalProjectExpanded, LocalProjectRemoved, NewOrganizationRequested, NewTerminalRequested,
-    OrganizationBillingRequested, OrganizationCreateEnvironmentRequested, OrganizationRequested,
-    SettingsRequested, Sidebar, SidebarOrganization,
+    AddLocalProjectRequested, CodewireSignInRequested, CodewireSignOutRequested,
+    EnvironmentTerminalRequested, LocalBrowseRequested, LocalDiffRequested, LocalProjectExpanded,
+    LocalProjectRemoved, NewTerminalRequested, Sidebar, SidebarOrganization,
 };
 use theme::Theme;
 use workspace::{EnvironmentPortSummary, EnvironmentSummary, WorkspaceIdentity};
 
 const DEFAULT_CODEWIRE_URL: &str = "https://codewire.sh";
 const CODEWIRE_POLL_INTERVAL_SECS: u64 = 10;
+const PRIMARY_QUIT_KEY: &str = "secondary-q";
 
 #[derive(Clone, Debug)]
 struct CodewireSidebarState {
@@ -191,6 +191,7 @@ actions!(
     app,
     [
         Quit,
+        CancelLogin,
         SendMessage,
         FocusInput,
         DisconnectTerminal,
@@ -328,6 +329,32 @@ fn codewire_base_url() -> String {
         .to_string()
 }
 
+fn cancel_window_login(window: &mut Window, cx: &mut App) {
+    if let Some(view) = window.root::<AppView>().flatten() {
+        view.update(cx, |view, cx| view.cancel_codewire_login(cx));
+    }
+}
+
+fn prepare_window_close(window_id: &layout_storage::WindowId, window: &mut Window, cx: &mut App) {
+    cancel_window_login(window, cx);
+    save_window_bounds_to_manifest(window_id, window, cx);
+    let closing_window_id = window.window_handle().window_id();
+    cx.global_mut::<AppState>()
+        .windows
+        .retain(|(_, handle)| handle.window_id() != closing_window_id);
+    update_window_manifest(cx);
+    update_window_menu(cx);
+}
+
+fn cancel_all_codewire_logins(cx: &mut App) {
+    let windows = cx.windows();
+    for handle in windows {
+        if let Some(view) = handle.downcast::<AppView>() {
+            let _ = view.update(cx, |view, _window, cx| view.cancel_codewire_login(cx));
+        }
+    }
+}
+
 /// Open a new application window. If `restore` is provided, restores that window's layout
 /// and bounds. Otherwise creates a fresh window with a new WindowId.
 /// Registers the window in AppState.windows.
@@ -368,29 +395,10 @@ fn open_new_window(
         },
         |window, cx| {
             window.on_window_should_close(cx, move |window, cx| {
-                let window_count = cx.global::<AppState>().windows.len();
-
-                // Save this window's bounds to the manifest before closing
-                save_window_bounds_to_manifest(&close_wid, window, cx);
-
-                // Remove from AppState.windows
-                let closing_handle = window.window_handle();
-                cx.global_mut::<AppState>()
-                    .windows
-                    .retain(|(_, h)| h.window_id() != closing_handle.window_id());
-
-                // Update manifest and menus to remove this window
-                update_window_manifest(cx);
-                update_window_menu(cx);
-
-                if window_count <= 1 {
-                    // Last window — hide to dock (macOS behavior)
-                    cx.hide();
-                    false
-                } else {
-                    // Not the last window — allow close
-                    true
-                }
+                prepare_window_close(&close_wid, window, cx);
+                // GPUI's default quit mode closes the process after the last
+                // window on Linux/Windows and keeps the app active on macOS.
+                true
             });
             cx.new(|cx| AppView::new(wid, saved_layout, cx))
         },
@@ -545,7 +553,9 @@ fn main() {
     app.run(|cx: &mut App| {
         // Register key bindings
         cx.bind_keys([
-            KeyBinding::new("cmd-q", Quit, None),
+            // `secondary` is Cmd on macOS and Ctrl on Linux/Windows.
+            KeyBinding::new(PRIMARY_QUIT_KEY, Quit, None),
+            KeyBinding::new("escape", CancelLogin, None),
             KeyBinding::new("enter", SendMessage, Some("ChatInput")),
             KeyBinding::new("cmd-l", FocusInput, None),
             KeyBinding::new("cmd-b", ToggleSidebar, None),
@@ -637,6 +647,7 @@ fn main() {
         ]);
 
         cx.on_action(|_: &Quit, cx| {
+            cancel_all_codewire_logins(cx);
             save_all_windows(cx);
             cx.quit();
         });
@@ -646,49 +657,36 @@ fn main() {
         });
 
         cx.on_action(|_: &CloseWindow, cx| {
-            // Simulate the close button: save bounds, remove from state, hide if last
             if let Some(active) = cx.active_window() {
-                let window_count = cx.global::<AppState>().windows.len();
-
-                // Find our WindowId for this window
                 let wid = cx
                     .global::<AppState>()
                     .windows
                     .iter()
                     .find(|(_, h)| h.window_id() == active.window_id())
                     .map(|(wid, _)| wid.clone());
-
-                // Save bounds
-                if let Some(ref wid) = wid {
-                    active
-                        .update(cx, |_, window, cx| {
-                            save_window_bounds_to_manifest(wid, window, cx);
-                        })
-                        .ok();
-                }
-
-                // Remove from AppState
-                cx.global_mut::<AppState>()
-                    .windows
-                    .retain(|(_, h)| h.window_id() != active.window_id());
-                update_window_manifest(cx);
-                update_window_menu(cx);
-
-                if window_count <= 1 {
-                    cx.hide();
-                }
-                // Note: non-last windows are removed from tracking but GPUI
-                // doesn't expose programmatic window close. The window stays
-                // visible but is no longer tracked. Users should use the
-                // close button (red dot) or Cmd+Q for full close.
+                active
+                    .update(cx, |_, window, cx| {
+                        if let Some(ref wid) = wid {
+                            prepare_window_close(wid, window, cx);
+                        } else {
+                            cancel_window_login(window, cx);
+                        }
+                        window.remove_window();
+                    })
+                    .ok();
             }
         });
 
         cx.on_action(|_: &CloseAllWindows, cx| {
-            save_all_windows(cx);
-            cx.global_mut::<AppState>().windows.clear();
-            update_window_manifest(cx);
-            cx.hide();
+            let windows = cx.global::<AppState>().windows.clone();
+            for (wid, handle) in windows {
+                handle
+                    .update(cx, |_, window, cx| {
+                        prepare_window_close(&wid, window, cx);
+                        window.remove_window();
+                    })
+                    .ok();
+            }
         });
 
         cx.on_action(|action: &FocusWindowByIndex, cx| {
@@ -884,7 +882,8 @@ struct AppView {
     quick_open: gpui::Entity<quick_open::QuickOpen>,
     command_palette: gpui::Entity<command_palette::CommandPalette>,
     login_dialog: Option<gpui::Entity<LoginDialog>>,
-    unavailable_dialog: Option<gpui::Entity<UnavailableDialog>>,
+    login_cancellation: Option<DesktopOAuthCancellation>,
+    login_attempt: u64,
     sidebar_visible: bool,
     focus_handle: FocusHandle,
 }
@@ -900,9 +899,6 @@ impl AppView {
         let chat_panel = cx.new(|cx| ChatPanel::new(cx));
         let wid = window_id.clone();
         let app_layout = cx.new(|cx| AppLayout::new(wid, chat_panel, None, cx));
-        app_layout.update(cx, |layout, cx| {
-            layout.open_workspace(WorkspaceIdentity::dashboard(), cx);
-        });
         let status_bar = cx.new(|cx| status_bar::StatusBar::new(cx));
         let quick_open = cx.new(|cx| quick_open::QuickOpen::new(cx));
         let command_palette = cx.new(|cx| command_palette::CommandPalette::new(cx));
@@ -914,21 +910,9 @@ impl AppView {
             .detach();
 
         // Subscribe to sidebar events
-        cx.subscribe(&sidebar, Self::on_dashboard_requested)
-            .detach();
-        cx.subscribe(&sidebar, Self::on_settings_requested).detach();
-        cx.subscribe(&sidebar, Self::on_billing_requested).detach();
         cx.subscribe(&sidebar, Self::on_codewire_sign_in_requested)
             .detach();
         cx.subscribe(&sidebar, Self::on_codewire_sign_out_requested)
-            .detach();
-        cx.subscribe(&sidebar, Self::on_new_organization_requested)
-            .detach();
-        cx.subscribe(&sidebar, Self::on_organization_requested)
-            .detach();
-        cx.subscribe(&sidebar, Self::on_organization_billing_requested)
-            .detach();
-        cx.subscribe(&sidebar, Self::on_organization_create_environment_requested)
             .detach();
         cx.subscribe(&sidebar, Self::on_environment_terminal_requested)
             .detach();
@@ -945,7 +929,7 @@ impl AppView {
         cx.subscribe(&sidebar, Self::on_new_terminal_requested)
             .detach();
 
-        // Observe sidebar changes to update status bar local project counts.
+        // Keep the native status bar synchronized with typed environment state.
         {
             let sidebar_for_obs = sidebar.clone();
             cx.observe_global::<AppState>(move |_this: &mut AppView, cx| {
@@ -966,9 +950,9 @@ impl AppView {
         {
             let status_bar_for_obs = status_bar.clone();
             cx.observe(&sidebar, move |_this, sidebar_entity, cx| {
-                let count = sidebar_entity.read(cx).local_project_count();
+                let counts = sidebar_entity.read(cx).workspace_status_counts();
                 status_bar_for_obs.update(cx, |bar, cx| {
-                    bar.update_local_project_count(count, cx);
+                    bar.update_workspace_counts(counts, cx);
                 });
             })
             .detach();
@@ -987,10 +971,6 @@ impl AppView {
             }
         }
 
-        let local_project_count = sidebar.read(cx).local_project_count();
-        status_bar.update(cx, |bar, cx| {
-            bar.update_local_project_count(local_project_count, cx);
-        });
         let codewire_state = cx.global::<AppState>().codewire_sidebar.clone();
         sidebar.update(cx, |sidebar, cx| {
             sidebar.set_codewire_state(
@@ -1001,6 +981,10 @@ impl AppView {
                 cx,
             );
         });
+        let workspace_counts = sidebar.read(cx).workspace_status_counts();
+        status_bar.update(cx, |bar, cx| {
+            bar.update_workspace_counts(workspace_counts, cx);
+        });
 
         Self {
             window_id,
@@ -1010,7 +994,8 @@ impl AppView {
             quick_open,
             command_palette,
             login_dialog: None,
-            unavailable_dialog: None,
+            login_cancellation: None,
+            login_attempt: 0,
             sidebar_visible: true,
             focus_handle: cx.focus_handle(),
         }
@@ -1132,13 +1117,18 @@ impl AppView {
         }
     }
 
-    fn authenticate_codewire() -> Result<(), String> {
-        let oauth = OAuthClient::for_server_url(codewire_base_url())
-            .map_err(|_| "Failed to configure Codewire OAuth".to_string())?;
-        let credentials = tokio::runtime::Runtime::new()
-            .map_err(|_| "Failed to start Codewire authentication runtime".to_string())?
-            .block_on(oauth.login_desktop_pkce())
-            .map_err(|_| "Codewire authentication did not complete".to_string())?;
+    fn authenticate_codewire(
+        runtime: &tokio::runtime::Runtime,
+        oauth: &OAuthClient,
+        login: DesktopOAuthLogin,
+        cancellation: &DesktopOAuthCancellation,
+    ) -> Result<(), String> {
+        let credentials = runtime
+            .block_on(oauth.complete_desktop_pkce_login(login))
+            .map_err(|error| format!("Codewire authentication did not complete: {error}"))?;
+        if cancellation.is_cancelled() {
+            return Err("Codewire authentication was cancelled".to_string());
+        }
         KeyringCredentialStore::desktop()
             .save(&credentials)
             .map_err(|_| "Failed to save Codewire credentials to the system keyring".to_string())
@@ -1171,18 +1161,6 @@ impl AppView {
         Ok(warning)
     }
 
-    fn ensure_dashboard_workspace(
-        &mut self,
-        cx: &mut Context<Self>,
-    ) -> gpui::Entity<split_container::SplitContainer> {
-        let identity = WorkspaceIdentity::dashboard();
-        let mut container = None;
-        self.app_layout.update(cx, |layout, cx| {
-            container = Some(layout.open_workspace(identity, cx));
-        });
-        container.expect("dashboard workspace should exist")
-    }
-
     fn ensure_environment_workspace(
         &mut self,
         org_id: &str,
@@ -1200,121 +1178,6 @@ impl AppView {
             container = Some(layout.open_workspace(identity, cx));
         });
         container.expect("environment workspace should exist")
-    }
-
-    fn show_unavailable_dialog(
-        &mut self,
-        title: impl Into<SharedString>,
-        detail: impl Into<SharedString>,
-        cx: &mut Context<Self>,
-    ) {
-        let dialog = cx.new(|cx| UnavailableDialog::new(title, detail, cx));
-        cx.subscribe(&dialog, Self::on_unavailable_dialog_dismissed)
-            .detach();
-        self.unavailable_dialog = Some(dialog);
-        cx.notify();
-    }
-
-    fn on_unavailable_dialog_dismissed(
-        &mut self,
-        _dialog: gpui::Entity<UnavailableDialog>,
-        _event: &UnavailableDialogDismissed,
-        cx: &mut Context<Self>,
-    ) {
-        self.unavailable_dialog = None;
-        cx.notify();
-    }
-
-    fn on_dashboard_requested(
-        &mut self,
-        _sidebar: gpui::Entity<Sidebar>,
-        _event: &DashboardRequested,
-        cx: &mut Context<Self>,
-    ) {
-        self.ensure_dashboard_workspace(cx);
-        cx.notify();
-    }
-
-    fn on_settings_requested(
-        &mut self,
-        _sidebar: gpui::Entity<Sidebar>,
-        _event: &SettingsRequested,
-        cx: &mut Context<Self>,
-    ) {
-        self.show_unavailable_dialog(
-            "Settings",
-            "Settings are not yet backed by a typed native service. No legacy web or REST client was opened.",
-            cx,
-        );
-    }
-
-    fn on_billing_requested(
-        &mut self,
-        _sidebar: gpui::Entity<Sidebar>,
-        _event: &BillingRequested,
-        cx: &mut Context<Self>,
-    ) {
-        self.show_unavailable_dialog(
-            "Billing",
-            "Billing remains unavailable in the native desktop until its retained UI is connected to the typed client.",
-            cx,
-        );
-    }
-
-    fn on_new_organization_requested(
-        &mut self,
-        _sidebar: gpui::Entity<Sidebar>,
-        _event: &NewOrganizationRequested,
-        cx: &mut Context<Self>,
-    ) {
-        self.show_unavailable_dialog(
-            "New organization",
-            "Organization creation is not part of this desktop correction. Existing organizations are loaded through Connect.",
-            cx,
-        );
-    }
-
-    fn on_organization_requested(
-        &mut self,
-        _sidebar: gpui::Entity<Sidebar>,
-        event: &OrganizationRequested,
-        cx: &mut Context<Self>,
-    ) {
-        tracing::info!("Open organization: {}", event.org_slug);
-        self.ensure_dashboard_workspace(cx);
-        cx.notify();
-    }
-
-    fn on_organization_billing_requested(
-        &mut self,
-        _sidebar: gpui::Entity<Sidebar>,
-        event: &OrganizationBillingRequested,
-        cx: &mut Context<Self>,
-    ) {
-        self.show_unavailable_dialog(
-            "Organization billing",
-            format!(
-                "Billing for {} is not available in this native migration slice.",
-                event.org_slug
-            ),
-            cx,
-        );
-    }
-
-    fn on_organization_create_environment_requested(
-        &mut self,
-        _sidebar: gpui::Entity<Sidebar>,
-        event: &OrganizationCreateEnvironmentRequested,
-        cx: &mut Context<Self>,
-    ) {
-        self.show_unavailable_dialog(
-            "Create environment",
-            format!(
-                "Environment creation for {} is not available in this native migration slice.",
-                event.org_slug
-            ),
-            cx,
-        );
     }
 
     fn on_environment_terminal_requested(
@@ -1365,6 +1228,41 @@ impl AppView {
         _event: &CodewireSignInRequested,
         cx: &mut Context<Self>,
     ) {
+        if self.login_dialog.is_some() {
+            return;
+        }
+        let oauth = match OAuthClient::for_server_url(codewire_base_url()) {
+            Ok(oauth) => oauth,
+            Err(_) => {
+                cx.global_mut::<AppState>().codewire_sidebar = CodewireSidebarState {
+                    organizations: Vec::new(),
+                    authenticated: false,
+                    loading: false,
+                    error: Some("Failed to configure Codewire OAuth".to_string()),
+                };
+                cx.notify();
+                return;
+            }
+        };
+        let login = match oauth.begin_desktop_pkce_login() {
+            Ok(login) => login,
+            Err(error) => {
+                cx.global_mut::<AppState>().codewire_sidebar = CodewireSidebarState {
+                    organizations: Vec::new(),
+                    authenticated: false,
+                    loading: false,
+                    error: Some(format!("Unable to start Codewire sign-in: {error}")),
+                };
+                cx.notify();
+                return;
+            }
+        };
+        let authorization_url = login.authorization_url().to_string();
+        let cancellation = login.cancellation();
+        self.login_attempt = self.login_attempt.wrapping_add(1);
+        let login_attempt = self.login_attempt;
+        self.login_cancellation = Some(cancellation.clone());
+
         let current_orgs = cx
             .global::<AppState>()
             .codewire_sidebar
@@ -1376,16 +1274,22 @@ impl AppView {
             loading: true,
             error: None,
         };
-        self.login_dialog = Some(cx.new(LoginDialog::new));
+        let login_dialog = cx.new(|cx| LoginDialog::new(authorization_url.clone(), cx));
+        cx.subscribe(&login_dialog, Self::on_login_dialog_event)
+            .detach();
+        self.login_dialog = Some(login_dialog);
         cx.notify();
+        // Use GPUI's native opener while still handling the initiating click.
+        // On Wayland this carries the activation context through the portal.
+        cx.open_url(&authorization_url);
 
         cx.spawn(async move |this, cx| {
             let (tx, rx) = futures::channel::oneshot::channel();
             std::thread::spawn(move || {
                 let result = (|| {
-                    Self::authenticate_codewire()?;
                     let rt = tokio::runtime::Runtime::new()
                         .map_err(|e| format!("Runtime error: {}", e))?;
+                    Self::authenticate_codewire(&rt, &oauth, login, &cancellation)?;
                     Ok::<CodewireSidebarState, String>(
                         rt.block_on(Self::sync_codewire_sidebar_state()),
                     )
@@ -1409,15 +1313,62 @@ impl AppView {
                 },
             };
             cx.update(|cx| {
-                cx.global_mut::<AppState>().codewire_sidebar = state;
                 let _ = this.update(cx, |view, cx| {
+                    if view.login_attempt != login_attempt {
+                        return;
+                    }
+                    cx.global_mut::<AppState>().codewire_sidebar = state;
                     view.login_dialog = None;
+                    view.login_cancellation = None;
                     cx.notify();
                 });
             })
             .ok();
         })
         .detach();
+    }
+
+    fn on_login_dialog_event(
+        &mut self,
+        _dialog: gpui::Entity<LoginDialog>,
+        event: &LoginDialogEvent,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            LoginDialogEvent::Cancelled => self.cancel_codewire_login(cx),
+        }
+    }
+
+    fn cancel_codewire_login(&mut self, cx: &mut Context<Self>) {
+        let was_active = self.login_dialog.take().is_some();
+        if let Some(cancellation) = self.login_cancellation.take() {
+            cancellation.cancel();
+        }
+        if !was_active {
+            return;
+        }
+        self.login_attempt = self.login_attempt.wrapping_add(1);
+        let current_orgs = cx
+            .global::<AppState>()
+            .codewire_sidebar
+            .organizations
+            .clone();
+        cx.global_mut::<AppState>().codewire_sidebar = CodewireSidebarState {
+            organizations: current_orgs,
+            authenticated: false,
+            loading: false,
+            error: None,
+        };
+        cx.notify();
+    }
+
+    fn cancel_login_action(
+        &mut self,
+        _: &CancelLogin,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.cancel_codewire_login(cx);
     }
 
     fn on_codewire_sign_out_requested(
@@ -1950,6 +1901,7 @@ impl Render for AppView {
             .text_color(theme.foreground)
             .font_family("Menlo")
             .track_focus(&self.focus_handle(cx))
+            .on_action(cx.listener(Self::cancel_login_action))
             .on_action(cx.listener(Self::focus_input))
             .on_action(cx.listener(Self::disconnect_terminal))
             .on_action(cx.listener(Self::open_local_terminal))
@@ -2064,10 +2016,6 @@ impl Render for AppView {
             // Browser-owned OAuth PKCE progress
             .when(self.login_dialog.is_some(), |view| {
                 view.child(self.login_dialog.clone().expect("login dialog exists"))
-            })
-            // Explicit native unavailable-state dialog
-            .when(self.unavailable_dialog.is_some(), |view| {
-                view.child(self.unavailable_dialog.clone().expect("dialog exists"))
             })
     }
 }
