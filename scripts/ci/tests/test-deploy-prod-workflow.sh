@@ -12,7 +12,7 @@ fail() {
 
 bash -n "$0"
 
-publish_job="$(sed -n '/^  publish-runtime-images:/,/^  publish-support-release-images:/p' "$WORKFLOW")"
+publish_job="$(sed -n '/^  publish-runtime-images:/,/^  dispatch-deploy-prod:/p' "$WORKFLOW")"
 [[ "$(grep -Fc 'scripts/ci/images/image-bundle.py create' <<<"$publish_job")" -eq 1 ]] ||
   fail "production must validate exactly one complete runtime candidate set"
 [[ "$(grep -Fc '            --candidate ' <<<"$publish_job")" -eq 5 ]] ||
@@ -40,8 +40,8 @@ fi
 [[ "$(grep -Fc '      source_sha: ${{ steps.build.outputs.source_sha }}' "$WORKFLOW")" -eq 5 ]] ||
   fail "all five production runtime jobs must expose source provenance"
 # shellcheck disable=SC2016
-[[ "$(grep -Fc '      candidate_ref: ${{ steps.build.outputs.candidate_ref }}' "$WORKFLOW")" -eq 7 ]] ||
-  fail "all seven production image jobs must expose digest candidates"
+[[ "$(grep -Fc '      candidate_ref: ${{ steps.build.outputs.candidate_ref }}' "$WORKFLOW")" -eq 5 ]] ||
+  fail "all five production runtime jobs must expose digest candidates"
 [[ "$(grep -Fc 'scripts/ci/images/publish-image-to-ghcr.sh' "$WORKFLOW")" -eq 7 ]] ||
   fail "production must copy exactly seven image manifests to GHCR"
 # shellcheck disable=SC2016
@@ -51,6 +51,27 @@ for family in base workspace; do
   grep -Fq "            ghcr.io/codewiresh/$family" "$WORKFLOW" ||
     fail "production omits the $family support image"
 done
+
+support_job="$(sed -n '/^  publish-support-release-images:/,/^  publish-runtime-images:/p' "$WORKFLOW")"
+grep -Fq '    needs: [release-selection]' <<<"$support_job" ||
+  fail "support release job must depend only on release selection"
+grep -Fq '        id: base' <<<"$support_job" ||
+  fail "support release job does not retain the base step output"
+grep -Fq '        id: workspace' <<<"$support_job" ||
+  fail "support release job does not retain the workspace step output"
+# shellcheck disable=SC2016
+grep -Fq 'CODEWIRE_BASE_IMAGE_REF: ${{ steps.base.outputs.candidate_ref }}' \
+  <<<"$support_job" || fail "workspace does not consume the same-job base digest"
+# shellcheck disable=SC2016
+grep -Fq '"${{ steps.workspace.outputs.candidate_ref }}"' <<<"$support_job" ||
+  fail "publisher does not consume the same-job workspace digest"
+if grep -Fq 'needs.build-' <<<"$support_job"; then
+  fail "support release publication still crosses a runner job-output boundary"
+fi
+workspace_line="$(grep -n 'id: workspace' <<<"$support_job" | cut -d: -f1)"
+support_copy_line="$(grep -n 'scripts/ci/images/publish-image-to-ghcr.sh' <<<"$support_job" | head -1 | cut -d: -f1)"
+[[ -n "$workspace_line" && -n "$support_copy_line" && "$workspace_line" -lt "$support_copy_line" ]] ||
+  fail "support release publication can run before the same-job workspace build"
 
 dispatch_job="$(sed -n '/^  dispatch-deploy-prod:/,$p' "$WORKFLOW")"
 grep -Fq '      - publish-runtime-images' <<<"$dispatch_job" ||

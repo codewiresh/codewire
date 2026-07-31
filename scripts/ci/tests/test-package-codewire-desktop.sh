@@ -48,14 +48,17 @@ grep -Fq 'desktop package dry-run:' "$TMP/output"
   cd "$TMP/package"
   sha256sum --check SHA256SUMS
 )
-tar -tzf "$TMP/package/codewire-desktop-0.0.0-ci-x86_64-unknown-linux-gnu.tar.gz" |
-  grep -Fq 'codewire-desktop-0.0.0-ci-x86_64-unknown-linux-gnu/bin/codewire'
-tar -tzf "$TMP/package/codewire-desktop-0.0.0-ci-x86_64-unknown-linux-gnu.tar.gz" |
-  grep -Fq 'codewire-desktop-0.0.0-ci-x86_64-unknown-linux-gnu/LICENSE'
-tar -tzf "$TMP/package/codewire-desktop-0.0.0-ci-x86_64-unknown-linux-gnu.tar.gz" |
-  grep -Fq 'codewire-desktop-0.0.0-ci-x86_64-unknown-linux-gnu/BUILD-INFO'
-tar -xOzf "$TMP/package/codewire-desktop-0.0.0-ci-x86_64-unknown-linux-gnu.tar.gz" \
-  codewire-desktop-0.0.0-ci-x86_64-unknown-linux-gnu/BUILD-INFO | grep -Fqx 'version=0.0.0-ci'
+archive="$TMP/package/codewire-desktop-0.0.0-ci-x86_64-unknown-linux-gnu.tar.gz"
+archive_entries="$(tar -tzf "$archive")"
+grep -Fq 'codewire-desktop-0.0.0-ci-x86_64-unknown-linux-gnu/bin/codewire' \
+  <<<"$archive_entries"
+grep -Fq 'codewire-desktop-0.0.0-ci-x86_64-unknown-linux-gnu/LICENSE' \
+  <<<"$archive_entries"
+grep -Fq 'codewire-desktop-0.0.0-ci-x86_64-unknown-linux-gnu/BUILD-INFO' \
+  <<<"$archive_entries"
+build_info="$(tar -xOzf "$archive" \
+  codewire-desktop-0.0.0-ci-x86_64-unknown-linux-gnu/BUILD-INFO)"
+grep -Fqx 'version=0.0.0-ci' <<<"$build_info"
 
 if PATH="$TMP/bin:$PATH" \
   CARGO_TARGET_DIR="$TMP/target" \

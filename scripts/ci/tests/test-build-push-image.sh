@@ -224,6 +224,15 @@ case "${1:-} ${2:-} ${3:-}" in
   login\ git.example.invalid\ *)
     credential="$(cat)"
     [[ "$credential" == "${FAKE_REGISTRY_TOKEN:?}" ]]
+    if [ -n "${FAKE_LOGIN_FAILURES:-}" ]; then
+      login_state="${FAKE_LOGIN_STATE:?}"
+      login_count="$(cat "$login_state")"
+      if [ "$login_count" -lt "$FAKE_LOGIN_FAILURES" ]; then
+        printf '%s\n' "$((login_count + 1))" >"$login_state"
+        echo 'Error response from daemon: login attempt to git.example.invalid failed with status: 401 Unauthorized' >&2
+        exit 1
+      fi
+    fi
     mkdir -p "${DOCKER_CONFIG:?}"
     printf '{}\n' >"$DOCKER_CONFIG/config.json"
     ;;
@@ -242,6 +251,15 @@ case "${1:-} ${2:-} ${3:-}" in
       esac
     done
     [[ -n "$reference" ]]
+    if [ "$reference" = "${FAKE_INSPECT_AUTH_ONCE_REF:-}" ]; then
+      auth_state="${FAKE_INSPECT_AUTH_STATE:?}"
+      auth_count="$(cat "$auth_state")"
+      if [ "$auth_count" -eq 0 ]; then
+        printf '1\n' >"$auth_state"
+        echo 'ERROR: failed to authorize: unexpected status from GET /v2/token: 401 Unauthorized' >&2
+        exit 1
+      fi
+    fi
     if [ "$reference" = "${FAKE_INSPECT_ERROR_REF:-}" ]; then
       echo 'ERROR: registry authorization failed' >&2
       exit 1
@@ -274,6 +292,15 @@ case "${1:-} ${2:-} ${3:-}" in
       esac
     done
     [[ -n "$destination" && "$source" =~ @sha256:[0-9a-f]{64}$ ]]
+    if [ "$destination" = "${FAKE_CREATE_AUTH_ONCE_REF:-}" ]; then
+      auth_state="${FAKE_CREATE_AUTH_STATE:?}"
+      auth_count="$(cat "$auth_state")"
+      if [ "$auth_count" -eq 0 ]; then
+        printf '1\n' >"$auth_state"
+        echo 'ERROR: failed to authorize: unexpected status from GET /v2/token: 401 Unauthorized' >&2
+        exit 1
+      fi
+    fi
     set_manifest "$destination" "${source##*@}"
     ;;
   buildx\ build\ *)
@@ -352,6 +379,18 @@ grep -qF -- '--label org.opencontainers.image.title=codewire-gateway' \
 [[ "$(grep -c 'buildx build' "$FAKE_DOCKER_CALLS")" -eq 1 ]] ||
   fail 'image was not built exactly once'
 
+printf '0\n' >"$work/login-state"
+login_calls_before="$(grep -c ' login ' "$FAKE_DOCKER_CALLS" || true)"
+(
+  cd "$ROOT"
+  FAKE_LOGIN_FAILURES=1 FAKE_LOGIN_STATE="$work/login-state" \
+    "$BUILDER" gateway deployments/docker/gateway.Dockerfile .
+) >"$work/transient-login.out" 2>&1
+grep -qF 'Registry login was rejected; retrying authentication' \
+  "$work/transient-login.out" || fail 'transient initial registry login was not reported'
+[[ "$(grep -c ' login ' "$FAKE_DOCKER_CALLS")" -eq $((login_calls_before + 2)) ]] ||
+  fail 'transient initial registry login was not retried exactly once'
+
 : >"$GITHUB_OUTPUT"
 (
   cd "$ROOT"
@@ -425,6 +464,42 @@ grep -qF 'Required immutable source image is missing' \
 [[ "$(grep -c 'buildx imagetools create' "$FAKE_DOCKER_CALLS")" -eq $((create_calls_before + 1)) ]] ||
   fail 'matching release alias was rewritten'
 
+printf '0\n' >"$work/inspect-auth-state"
+login_calls_before="$(grep -c ' login ' "$FAKE_DOCKER_CALLS" || true)"
+create_calls_before_auth="$(grep -c 'buildx imagetools create' "$FAKE_DOCKER_CALLS" || true)"
+(
+  cd "$ROOT"
+  FAKE_INSPECT_AUTH_ONCE_REF='git.example.invalid/codewire/gateway:v0.3.997' \
+  FAKE_INSPECT_AUTH_STATE="$work/inspect-auth-state" \
+  CODEWIRE_RELEASE_TAG='v0.3.997' \
+  CODEWIRE_SOURCE_SHA="$source_sha" \
+    "$BUILDER" gateway deployments/docker/gateway.Dockerfile .
+) >"$work/transient-auth.out" 2>&1
+grep -qF 'Registry authentication expired while inspecting' \
+  "$work/transient-auth.out" || fail 'transient registry auth was not reported'
+[[ "$(grep -c ' login ' "$FAKE_DOCKER_CALLS")" -eq $((login_calls_before + 2)) ]] ||
+  fail 'transient registry auth did not perform exactly one bounded re-login'
+[[ "$(grep -c 'buildx imagetools create' "$FAKE_DOCKER_CALLS")" -eq $((create_calls_before_auth + 1)) ]] ||
+  fail 'transient registry auth did not resume immutable alias creation'
+
+printf '0\n' >"$work/create-auth-state"
+login_calls_before="$(grep -c ' login ' "$FAKE_DOCKER_CALLS" || true)"
+create_calls_before_auth="$(grep -c 'buildx imagetools create' "$FAKE_DOCKER_CALLS" || true)"
+(
+  cd "$ROOT"
+  FAKE_CREATE_AUTH_ONCE_REF='git.example.invalid/codewire/gateway:v0.3.996' \
+  FAKE_CREATE_AUTH_STATE="$work/create-auth-state" \
+  CODEWIRE_RELEASE_TAG='v0.3.996' \
+  CODEWIRE_SOURCE_SHA="$source_sha" \
+    "$BUILDER" gateway deployments/docker/gateway.Dockerfile .
+) >"$work/transient-create-auth.out" 2>&1
+grep -qF 'Registry authentication expired while creating' \
+  "$work/transient-create-auth.out" || fail 'transient create auth was not reported'
+[[ "$(grep -c ' login ' "$FAKE_DOCKER_CALLS")" -eq $((login_calls_before + 2)) ]] ||
+  fail 'transient create auth did not perform exactly one bounded re-login'
+[[ "$(grep -c 'buildx imagetools create' "$FAKE_DOCKER_CALLS")" -eq $((create_calls_before_auth + 2)) ]] ||
+  fail 'transient create auth was not retried exactly once'
+
 printf '%s\t%s\n' \
   'git.example.invalid/codewire/gateway:v0.3.998' "$mismatch_digest" \
   >>"$FAKE_MANIFESTS"
@@ -442,6 +517,7 @@ grep -qF 'Refusing to replace immutable image tag' "$work/mismatched-alias.out" 
   fail 'mismatched release alias triggered a build'
 
 export FAKE_INSPECT_ERROR_REF="git.example.invalid/codewire/mesh:$source_sha"
+login_calls_before="$(grep -c ' login ' "$FAKE_DOCKER_CALLS" || true)"
 if (
   cd "$ROOT"
   "$BUILDER" mesh deployments/docker/mesh.Dockerfile .
@@ -453,6 +529,8 @@ grep -qF 'Unable to determine whether immutable image tag exists' \
   "$work/inspect-error.out" || fail 'registry inspection error was not reported'
 [[ "$(grep -c 'buildx build' "$FAKE_DOCKER_CALLS")" -eq 2 ]] ||
   fail 'registry inspection error reached a build'
+[[ "$(grep -c ' login ' "$FAKE_DOCKER_CALLS")" -eq $((login_calls_before + 3)) ]] ||
+  fail 'persistent registry auth did not stop after two bounded re-logins'
 
 fetch_calls_before="$(wc -l <"$FAKE_FETCH_CALLS")"
 if (

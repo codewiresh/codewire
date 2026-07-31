@@ -54,6 +54,17 @@ write_stub_tree() {
   install -m 755 "$ROOT/scripts/dev/install-hooks.sh" "$repo/scripts/dev/install-hooks.sh"
   install -m 755 "$ROOT/scripts/ci/select/select-verification.sh" \
     "$repo/scripts/ci/select/select-verification.sh"
+cat > "$repo/scripts/ci/select/verify-release-tag-receipt.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+if [ "${PREFLIGHT_TEST_RECEIPT_FAIL:-0}" = 1 ]; then
+  exit 2
+fi
+printf 'receipt-ref=%s remote=%s\n' \
+  "${PREFLIGHT_RELEASE_TAG_REF:-}" "${PREFLIGHT_PUSH_REMOTE_NAME:-}" \
+  >> "${PREFLIGHT_TEST_TOOL_LOG:?}"
+printf 'release_tag_receipt=accepted\nrelease_tag_reason=fixture\nrelease_tag_run=1\n'
+EOF
 
   cat > "$repo/scripts/ci/verify/run-product-verification.sh" <<'EOF'
 #!/usr/bin/env bash
@@ -91,6 +102,7 @@ EOF
     "$repo/scripts/ci/verify/run-product-verification.sh" \
     "$repo/scripts/ci/verify/run-integration-verification.sh" \
     "$repo/scripts/ci/verify/kind-e2e.sh" \
+    "$repo/scripts/ci/select/verify-release-tag-receipt.sh" \
     "$repo/scripts/checks/repo_checks.py" \
     "$repo/scripts/checks/source/check-native-desktop-ui.py"
 
@@ -158,6 +170,40 @@ assert_contains normal_tools "$(cat "$normal_log")" 'native_desktop_ui'
 assert_not_contains normal_tools "$(cat "$normal_log")" 'product '
 assert_not_contains normal_tools "$(cat "$normal_log")" 'integration '
 git -C "$repo" switch -q main
+
+git -C "$repo" tag -a -m 'release fixture' v1.2.3 main
+tag_log="$TMP/tag-tools.log"
+tag_output="$(
+  cd "$repo"
+  PATH="$TMP/bin:$PATH" PREFLIGHT_TEST_TOOL_LOG="$tag_log" \
+    git push -q origin refs/tags/v1.2.3 2>&1
+)"
+assert_contains release_tag "$tag_output" \
+  'preflight: exact-main CI receipt accepted; signed release tag verified'
+assert_contains release_tag_tools "$(cat "$tag_log")" \
+  'receipt-ref=refs/tags/v1.2.3 remote=origin'
+assert_not_contains release_tag_tools "$(cat "$tag_log")" 'integration '
+assert_not_contains release_tag_tools "$(cat "$tag_log")" 'kind'
+
+failed_receipt_log="$TMP/failed-receipt-tools.log"
+failed_receipt_output="$({
+  cd "$repo"
+  PATH="$TMP/bin:$PATH" \
+    PREFLIGHT_TEST_TOOL_LOG="$failed_receipt_log" \
+    PREFLIGHT_TEST_RECEIPT_FAIL=1 \
+    PREFLIGHT_RELEASE_TAG_REF=refs/tags/v1.2.3 \
+    PREFLIGHT_RELEASE_TAG_OBJECT_SHA="$(git rev-parse refs/tags/v1.2.3)" \
+    PREFLIGHT_PUSH_REMOTE_NAME=origin \
+    PREFLIGHT_HEAD_SHA="$(git rev-parse refs/tags/v1.2.3)" \
+    "$repo/scripts/dev/preflight.sh"
+} 2>&1)"
+assert_contains failed_receipt "$failed_receipt_output" \
+  'release-tag receipt: checker failed unexpectedly; full local verification required'
+assert_contains failed_receipt "$failed_receipt_output" \
+  'preflight: release receipt unavailable; running full fail-closed verification'
+assert_contains failed_receipt_tools "$(cat "$failed_receipt_log")" \
+  'integration database '
+assert_contains failed_receipt_tools "$(cat "$failed_receipt_log")" 'kind'
 
 linked_docs="$TMP/linked-docs"
 git -C "$repo" worktree add -q -b linked-docs "$linked_docs" main

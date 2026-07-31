@@ -219,8 +219,14 @@ if grep -Fq '.release-control' "$deploy_workflow"; then
   exit 1
 fi
 [[ "$(grep -Fc '    needs: [release-selection]' "$deploy_workflow")" -eq 6 ]]
-grep -Fq '    needs: [release-selection, build-base-support-image]' "$deploy_workflow"
-[[ "$(grep -Fc '          ref: refs/tags/${{ needs.release-selection.outputs.release_tag }}' "$deploy_workflow")" -eq 8 ]]
+if grep -Eq 'build-(base|workspace)-support-image' "$deploy_workflow"; then
+  echo 'production support publication still crosses a runner job-output boundary' >&2
+  exit 1
+fi
+# shellcheck disable=SC2016
+grep -Fq 'CODEWIRE_BASE_IMAGE_REF: ${{ steps.base.outputs.candidate_ref }}' \
+  "$deploy_workflow"
+[[ "$(grep -Fc '          ref: refs/tags/${{ needs.release-selection.outputs.release_tag }}' "$deploy_workflow")" -eq 7 ]]
 [[ "$(grep -Fc '          CODEWIRE_RELEASE_TAG: ${{ needs.release-selection.outputs.release_tag }}' "$deploy_workflow")" -eq 7 ]]
 [[ "$(grep -Fc '          CODEWIRE_SOURCE_SHA: ${{ needs.release-selection.outputs.source_sha }}' "$deploy_workflow")" -eq 7 ]]
 [[ "$(grep -Fc '          CODEWIRE_SOURCE_DIR: .release-source' "$deploy_workflow")" -eq 7 ]]

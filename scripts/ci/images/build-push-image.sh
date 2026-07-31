@@ -99,37 +99,96 @@ if [ ! -x "$secret_fetcher" ]; then
   exit 1
 fi
 "$secret_fetcher" GITEA_REGISTRY_TOKEN "$registry_token_file"
-DOCKER_CONFIG="$docker_config" docker login "${REGISTRY_HOST}" \
-  -u ci --password-stdin <"$registry_token_file" >/dev/null
-shred -u "$registry_token_file" 2>/dev/null || rm -f "$registry_token_file"
+
+registry_auth_error() {
+  grep -Eqi \
+    '(unauthorized|authorization failed|failed to authorize|status[^[:cntrl:]]*401|status code: 401)' \
+    "$1"
+}
+
+registry_login() {
+  local login_error attempt
+  for attempt in 1 2 3; do
+    login_error="$(mktemp "$work/login-error.XXXXXX")"
+    if DOCKER_CONFIG="$docker_config" docker login "${REGISTRY_HOST}" \
+      -u ci --password-stdin <"$registry_token_file" \
+      >/dev/null 2>"$login_error"; then
+      return 0
+    fi
+    if registry_auth_error "$login_error" && [ "$attempt" -lt 3 ]; then
+      echo "Registry login was rejected; retrying authentication (attempt $((attempt + 1))/3)" >&2
+      continue
+    fi
+    echo "Unable to authenticate to registry ${REGISTRY_HOST}" >&2
+    sed -n '1,20p' "$login_error" >&2
+    return 1
+  done
+}
+
+registry_login
 
 inspect_manifest_digest() {
   local reference="$1"
-  local inspect_output inspect_error digest
-  inspect_output="$(mktemp "$work/inspect-output.XXXXXX")"
-  inspect_error="$(mktemp "$work/inspect-error.XXXXXX")"
+  local inspect_output inspect_error digest attempt
+  for attempt in 1 2 3; do
+    inspect_output="$(mktemp "$work/inspect-output.XXXXXX")"
+    inspect_error="$(mktemp "$work/inspect-error.XXXXXX")"
 
-  if DOCKER_CONFIG="$docker_config" docker buildx imagetools inspect \
-    --format '{{json .Manifest}}' "$reference" \
-    >"$inspect_output" 2>"$inspect_error"; then
-    if ! digest="$(jq -er '.digest | select(type == "string")' "$inspect_output")" \
-      || [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-      echo "Registry returned an invalid manifest digest for $reference" >&2
-      return 1
+    if DOCKER_CONFIG="$docker_config" docker buildx imagetools inspect \
+      --format '{{json .Manifest}}' "$reference" \
+      >"$inspect_output" 2>"$inspect_error"; then
+      if ! digest="$(jq -er '.digest | select(type == "string")' "$inspect_output")" \
+        || [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+        echo "Registry returned an invalid manifest digest for $reference" >&2
+        return 1
+      fi
+      printf '%s\n' "$digest"
+      return 0
     fi
-    printf '%s\n' "$digest"
-    return 0
-  fi
 
-  if grep -Eqi \
-    '(manifest unknown|manifest[^[:cntrl:]]*not found|name unknown|: not found|status code: 404|unexpected status[^[:cntrl:]]*404)' \
-    "$inspect_error"; then
-    return 3
-  fi
+    if grep -Eqi \
+      '(manifest unknown|manifest[^[:cntrl:]]*not found|name unknown|: not found|status code: 404|unexpected status[^[:cntrl:]]*404)' \
+      "$inspect_error"; then
+      return 3
+    fi
 
-  echo "Unable to determine whether immutable image tag exists: $reference" >&2
-  sed -n '1,20p' "$inspect_error" >&2
-  return 1
+    if registry_auth_error "$inspect_error" && [ "$attempt" -lt 3 ]; then
+      echo "Registry authentication expired while inspecting $reference; re-authenticating (attempt $((attempt + 1))/3)" >&2
+      if ! registry_login; then
+        echo "Unable to refresh registry authentication for $reference" >&2
+        return 1
+      fi
+      continue
+    fi
+
+    echo "Unable to determine whether immutable image tag exists: $reference" >&2
+    sed -n '1,20p' "$inspect_error" >&2
+    return 1
+  done
+}
+
+create_immutable_tag() {
+  local tag="$1" expected_digest="$2"
+  local create_error attempt
+  for attempt in 1 2 3; do
+    create_error="$(mktemp "$work/create-error.XXXXXX")"
+    if DOCKER_CONFIG="$docker_config" docker buildx imagetools create \
+      --tag "$tag" "${canonical_repository}@${expected_digest}" \
+      2>"$create_error"; then
+      return 0
+    fi
+    if registry_auth_error "$create_error" && [ "$attempt" -lt 3 ]; then
+      echo "Registry authentication expired while creating $tag; re-authenticating (attempt $((attempt + 1))/3)" >&2
+      if ! registry_login; then
+        echo "Unable to refresh registry authentication for $tag" >&2
+        return 1
+      fi
+      continue
+    fi
+    echo "Unable to create immutable image tag: $tag" >&2
+    sed -n '1,20p' "$create_error" >&2
+    return 1
+  done
 }
 
 ensure_immutable_tag() {
@@ -150,8 +209,7 @@ ensure_immutable_tag() {
     return "$inspect_status"
   fi
 
-  DOCKER_CONFIG="$docker_config" docker buildx imagetools create \
-    --tag "$tag" "${canonical_repository}@${expected_digest}"
+  create_immutable_tag "$tag" "$expected_digest"
   if ! actual_digest="$(inspect_manifest_digest "$tag")"; then
     echo "Unable to verify immutable image tag after creation: $tag" >&2
     return 1

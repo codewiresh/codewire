@@ -207,12 +207,10 @@ jobs:
           REQUIRE_EXISTING_SOURCE_IMAGE: '1'
         run: scripts/ci/images/build-push-image.sh dashboard .release-source/apps/dashboard/Dockerfile .release-source
 
-  build-base-support-image:
-    name: Publish Base Release Image
+  publish-support-release-images:
+    name: Build and Publish Exact Support Release Images
     runs-on: ubuntu-latest
     needs: [release-selection]
-    outputs:
-      candidate_ref: ${{ steps.build.outputs.candidate_ref }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
 
@@ -222,35 +220,37 @@ jobs:
           path: .release-source
 
       - name: Reuse or build and alias base image
-        id: build
+        id: base
         env:
           CODEWIRE_RELEASE_TAG: ${{ needs.release-selection.outputs.release_tag }}
           CODEWIRE_SOURCE_SHA: ${{ needs.release-selection.outputs.source_sha }}
           CODEWIRE_SOURCE_DIR: .release-source
         run: scripts/ci/images/build-push-image.sh base .release-source/images/base/Dockerfile .release-source/images/base
 
-  build-workspace-support-image:
-    name: Publish Workspace Release Image
-    runs-on: ubuntu-latest
-    needs: [release-selection, build-base-support-image]
-    outputs:
-      candidate_ref: ${{ steps.build.outputs.candidate_ref }}
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
-
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
-        with:
-          ref: refs/tags/${{ needs.release-selection.outputs.release_tag }}
-          path: .release-source
-
       - name: Reuse or build workspace from the exact release base
-        id: build
+        id: workspace
         env:
-          CODEWIRE_BASE_IMAGE_REF: ${{ needs.build-base-support-image.outputs.candidate_ref }}
+          CODEWIRE_BASE_IMAGE_REF: ${{ steps.base.outputs.candidate_ref }}
           CODEWIRE_RELEASE_TAG: ${{ needs.release-selection.outputs.release_tag }}
           CODEWIRE_SOURCE_SHA: ${{ needs.release-selection.outputs.source_sha }}
           CODEWIRE_SOURCE_DIR: .release-source
         run: scripts/ci/images/build-push-image.sh workspace .release-source/images/workspace/Dockerfile .release-source
+
+      - name: Copy both support release manifests without rebuilding
+        env:
+          RELEASE_TAG: ${{ needs.release-selection.outputs.release_tag }}
+          SOURCE_SHA: ${{ needs.release-selection.outputs.source_sha }}
+          GHCR_PUBLISH_USERNAME: ${{ vars.GHCR_PUBLISH_USERNAME }}
+        run: |
+          set -euo pipefail
+          scripts/ci/images/publish-image-to-ghcr.sh \
+            "${{ steps.base.outputs.candidate_ref }}" \
+            ghcr.io/codewiresh/base \
+            "$SOURCE_SHA" "$RELEASE_TAG"
+          scripts/ci/images/publish-image-to-ghcr.sh \
+            "${{ steps.workspace.outputs.candidate_ref }}" \
+            ghcr.io/codewiresh/workspace \
+            "$SOURCE_SHA" "$RELEASE_TAG"
 
   publish-runtime-images:
     name: Validate and Publish Exact Runtime Bundle
@@ -309,32 +309,6 @@ jobs:
           scripts/ci/images/publish-image-to-ghcr.sh \
             "${{ needs.build-mesh-image.outputs.candidate_ref }}" \
             ghcr.io/codewiresh/mesh \
-            "$SOURCE_SHA" "$RELEASE_TAG"
-
-  publish-support-release-images:
-    name: Publish Exact Support Release Images
-    runs-on: ubuntu-latest
-    needs:
-      - release-selection
-      - build-base-support-image
-      - build-workspace-support-image
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
-
-      - name: Copy both support release manifests without rebuilding
-        env:
-          RELEASE_TAG: ${{ needs.release-selection.outputs.release_tag }}
-          SOURCE_SHA: ${{ needs.release-selection.outputs.source_sha }}
-          GHCR_PUBLISH_USERNAME: ${{ vars.GHCR_PUBLISH_USERNAME }}
-        run: |
-          set -euo pipefail
-          scripts/ci/images/publish-image-to-ghcr.sh \
-            "${{ needs.build-base-support-image.outputs.candidate_ref }}" \
-            ghcr.io/codewiresh/base \
-            "$SOURCE_SHA" "$RELEASE_TAG"
-          scripts/ci/images/publish-image-to-ghcr.sh \
-            "${{ needs.build-workspace-support-image.outputs.candidate_ref }}" \
-            ghcr.io/codewiresh/workspace \
             "$SOURCE_SHA" "$RELEASE_TAG"
 
   dispatch-deploy-prod:

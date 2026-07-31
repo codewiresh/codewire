@@ -67,13 +67,15 @@ run_paths_case license_texts pull_request refs/pull/1011/head false "$policy" \
 run_paths_case local_compose pull_request refs/pull/11/head false \
   'database policy' docker-compose.yml
 run_paths_case ci_self pull_request refs/pull/2/head false \
-  'policy rust_curated_locks' \
+  'go_consumer_interop go_support policy release runtime_confidential rust_curated_locks' \
   .gitea/workflows/ci.yaml .gitea/workflows/manual-diagnostics.yaml \
   scripts/ci/select/select-verification.sh \
   scripts/ci/select/require-verification-results.sh \
   scripts/ci/select/verify-tested-tree-receipt.sh \
+  scripts/ci/select/verify-release-tag-receipt.sh \
   scripts/ci/tests/test-require-verification-results.sh \
-  scripts/ci/tests/test-verify-tested-tree-receipt.sh
+  scripts/ci/tests/test-verify-tested-tree-receipt.sh \
+  scripts/ci/tests/test-verify-release-tag-receipt.sh
 run_paths_case ci_rewrite pull_request refs/pull/20/head false \
   'deploy policy rust_curated_locks' \
   .githooks/pre-push scripts/dev/preflight.sh scripts/ci/select/select-deploy-dev.sh \
@@ -1260,8 +1262,10 @@ bash -n \
   "$SELECTOR" \
   "$ROOT/scripts/ci/select/require-verification-results.sh" \
   "$ROOT/scripts/ci/select/verify-tested-tree-receipt.sh" \
+  "$ROOT/scripts/ci/select/verify-release-tag-receipt.sh" \
   "$ROOT/scripts/ci/tests/test-require-verification-results.sh" \
   "$ROOT/scripts/ci/tests/test-verify-tested-tree-receipt.sh" \
+  "$ROOT/scripts/ci/tests/test-verify-release-tag-receipt.sh" \
   "$ROOT/scripts/ci/verify/run-product-verification.sh" \
   "$ROOT/scripts/ci/tests/test-sdk-local-cli-contract.sh" \
   "$ROOT/scripts/ci/verify/integration-postgres.sh" \

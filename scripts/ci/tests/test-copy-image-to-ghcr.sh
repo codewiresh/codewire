@@ -41,6 +41,15 @@ case "$command" in
   login)
     credential="$(cat)"
     [ -n "$credential" ]
+    host="${!#}"
+    if [ "$host" = git.example.invalid ] && [ -n "${FAKE_GITEA_LOGIN_FAILURES:-}" ]; then
+      count="$(cat "${FAKE_GITEA_LOGIN_STATE:?}")"
+      if [ "$count" -lt "$FAKE_GITEA_LOGIN_FAILURES" ]; then
+        printf '%s\n' "$((count + 1))" >"$FAKE_GITEA_LOGIN_STATE"
+        echo 'time="fixture" level=fatal msg="logging into git.example.invalid: invalid username/password"' >&2
+        exit 1
+      fi
+    fi
     ;;
   inspect)
     ref="${!#}"
@@ -97,7 +106,15 @@ export GHCR_PUBLISH_USERNAME="codewire-package-publisher"
 export GHCR_PUBLISH_TOKEN_FILE="$work/ghcr-token"
 export GITHUB_OUTPUT="$work/output"
 
-"$COPY_IMAGE" "$source_ref" "$target_repository" "$source_sha" "$release_tag"
+printf '0\n' >"$work/gitea-login-state"
+FAKE_GITEA_LOGIN_FAILURES=1 \
+FAKE_GITEA_LOGIN_STATE="$work/gitea-login-state" \
+  "$COPY_IMAGE" "$source_ref" "$target_repository" "$source_sha" "$release_tag" \
+  >"$work/transient-login.out" 2>&1
+grep -qF 'Gitea registry login was rejected; retrying authentication' \
+  "$work/transient-login.out" || fail 'transient Gitea login was not reported'
+[[ "$(grep -c '^login .*git.example.invalid ' "$FAKE_CALLS")" -eq 2 ]] ||
+  fail 'transient Gitea login was not retried exactly once'
 
 for tag in "$source_sha" "$release_tag"; do
   [[ "$(<"$work/state/$tag")" == "$expected_digest" ]] ||
@@ -153,6 +170,19 @@ if "$COPY_IMAGE" "$source_ref" "$target_repository" latest \
     >"$work/moving-tag.out" 2>&1; then
   fail "runtime moving destination tag was accepted"
 fi
+
+printf '0\n' >"$work/persistent-gitea-login-state"
+gitea_login_calls_before="$(grep -c '^login .*git.example.invalid ' "$FAKE_CALLS")"
+if FAKE_GITEA_LOGIN_FAILURES=3 \
+  FAKE_GITEA_LOGIN_STATE="$work/persistent-gitea-login-state" \
+  "$COPY_IMAGE" "$source_ref" "$target_repository" "$source_sha" \
+    >"$work/persistent-login.out" 2>&1; then
+  fail 'persistent Gitea login failure was accepted'
+fi
+grep -qF 'Unable to authenticate to Gitea registry' \
+  "$work/persistent-login.out" || fail 'persistent Gitea login failure was not explicit'
+[[ "$(grep -c '^login .*git.example.invalid ' "$FAKE_CALLS")" -eq $((gitea_login_calls_before + 3)) ]] ||
+  fail 'persistent Gitea login did not stop after three bounded attempts'
 
 support_source_ref="git.example.invalid/codewire/base@$expected_digest"
 support_target_repository='ghcr.io/codewiresh/base'

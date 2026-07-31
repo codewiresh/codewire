@@ -59,60 +59,38 @@ jobs:
           base_sha="$(git rev-parse "$GITHUB_SHA^")"
           scripts/ci/select/select-support-images.sh "$base_sha" "$GITHUB_SHA"
 
-  build-base-image:
-    name: Build Base Image
+  publish-support-images:
+    name: Build and publish exact support images
     runs-on: ubuntu-latest
     needs: [support-selection]
     if: ${{ needs.support-selection.outputs.build_support_images == 'true' }}
-    outputs:
-      source_sha: ${{ steps.build.outputs.source_sha }}
-      candidate_ref: ${{ steps.build.outputs.candidate_ref }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
 
       - name: Build canonical base image
-        id: build
+        id: base
         run: scripts/ci/images/build-push-image.sh base images/base/Dockerfile images/base
 
-  build-workspace-image:
-    name: Build Workspace Image
-    runs-on: ubuntu-latest
-    needs: [support-selection, build-base-image]
-    if: ${{ needs.support-selection.outputs.build_support_images == 'true' }}
-    outputs:
-      source_sha: ${{ steps.build.outputs.source_sha }}
-      candidate_ref: ${{ steps.build.outputs.candidate_ref }}
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
-
       - name: Build workspace from exact canonical base
-        id: build
+        id: workspace
         env:
-          CODEWIRE_BASE_IMAGE_REF: ${{ needs.build-base-image.outputs.candidate_ref }}
+          CODEWIRE_BASE_IMAGE_REF: ${{ steps.base.outputs.candidate_ref }}
         run: scripts/ci/images/build-push-image.sh workspace images/workspace/Dockerfile .
-
-  publish-support-images:
-    name: Publish exact support manifests to GHCR
-    runs-on: ubuntu-latest
-    needs: [support-selection, build-base-image, build-workspace-image]
-    if: ${{ needs.support-selection.outputs.build_support_images == 'true' }}
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
 
       - name: Copy both support images without rebuilding
         env:
           GHCR_PUBLISH_USERNAME: ${{ vars.GHCR_PUBLISH_USERNAME }}
         run: |
           set -euo pipefail
-          [[ "${{ needs.build-base-image.outputs.source_sha }}" == "$GITHUB_SHA" ]]
-          [[ "${{ needs.build-workspace-image.outputs.source_sha }}" == "$GITHUB_SHA" ]]
+          [[ "${{ steps.base.outputs.source_sha }}" == "$GITHUB_SHA" ]]
+          [[ "${{ steps.workspace.outputs.source_sha }}" == "$GITHUB_SHA" ]]
           scripts/ci/images/publish-image-to-ghcr.sh \
-            "${{ needs.build-base-image.outputs.candidate_ref }}" \
+            "${{ steps.base.outputs.candidate_ref }}" \
             ghcr.io/codewiresh/base \
-            "${{ needs.build-base-image.outputs.source_sha }}" \
+            "${{ steps.base.outputs.source_sha }}" \
             latest
           scripts/ci/images/publish-image-to-ghcr.sh \
-            "${{ needs.build-workspace-image.outputs.candidate_ref }}" \
+            "${{ steps.workspace.outputs.candidate_ref }}" \
             ghcr.io/codewiresh/workspace \
-            "${{ needs.build-workspace-image.outputs.source_sha }}" \
+            "${{ steps.workspace.outputs.source_sha }}" \
             latest

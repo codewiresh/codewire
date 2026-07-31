@@ -6,6 +6,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SELECTOR="$REPO_ROOT/scripts/ci/select/select-verification.sh"
+RELEASE_TAG_RECEIPT="$REPO_ROOT/scripts/ci/select/verify-release-tag-receipt.sh"
 PRODUCT_RUNNER="$REPO_ROOT/scripts/ci/verify/run-product-verification.sh"
 INTEGRATION_RUNNER="$REPO_ROOT/scripts/ci/verify/run-integration-verification.sh"
 cd "$REPO_ROOT"
@@ -127,7 +128,9 @@ run_policy_local() {
       scripts/dev/preflight.sh \
       scripts/dev/install-hooks.sh \
       scripts/ci/select/select-verification.sh \
+      scripts/ci/select/verify-release-tag-receipt.sh \
       scripts/ci/tests/test-select-verification.sh \
+      scripts/ci/tests/test-verify-release-tag-receipt.sh \
       scripts/ci/tests/test-pre-push-worktree.sh \
       scripts/ci/verify/integration-postgres.sh \
       scripts/ci/verify/run-product-verification.sh \
@@ -165,6 +168,24 @@ run_selected_family() {
 }
 
 collect_changed_paths "$PREFLIGHT_CHANGED_PATHS"
+
+if [ -n "${PREFLIGHT_RELEASE_TAG_REF:-}" ]; then
+  printf '==> release tag tested-tree receipt\n'
+  if ! receipt_output="$($RELEASE_TAG_RECEIPT 2>&1)"; then
+    printf 'release-tag receipt: checker failed unexpectedly; full local verification required\n' >&2
+    receipt_output='release_tag_receipt=fallback
+release_tag_reason=checker-failed
+release_tag_run='
+  fi
+  printf '%s\n' "$receipt_output"
+  if grep -Fxq 'release_tag_receipt=accepted' <<<"$receipt_output"; then
+    printf 'preflight: exact-main CI receipt accepted; signed release tag verified\n'
+    printf 'preflight: OK\n'
+    exit 0
+  fi
+  printf 'preflight: release receipt unavailable; running full fail-closed verification\n'
+  printf '__unknown__\n' > "$PREFLIGHT_CHANGED_PATHS"
+fi
 
 printf '==> preflight path selection\n'
 if [ -s "$PREFLIGHT_CHANGED_PATHS" ]; then

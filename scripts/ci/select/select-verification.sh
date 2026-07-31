@@ -343,6 +343,7 @@ elif [ "$event_selected" = false ]; then
       scripts/dev/preflight.sh|scripts/ci/select/select-verification.sh|\
       scripts/ci/select/require-verification-results.sh|\
       scripts/ci/select/verify-tested-tree-receipt.sh|\
+      scripts/ci/select/verify-release-tag-receipt.sh|\
       scripts/ci/select/artifact-impact.py|\
       scripts/ci/select/select-support-images.sh|\
       scripts/ci/tests/test-select-verification.sh|scripts/ci/tests/test-select-deploy-dev.sh|\
@@ -350,6 +351,7 @@ elif [ "$event_selected" = false ]; then
       scripts/ci/tests/test-resolve-deployed-source.sh|\
       scripts/ci/tests/test-require-verification-results.sh|\
       scripts/ci/tests/test-verify-tested-tree-receipt.sh|\
+      scripts/ci/tests/test-verify-release-tag-receipt.sh|\
       scripts/ci/tests/test-pre-push-worktree.sh|\
       scripts/ci/tests/test-go-source-ownership.sh|\
       scripts/ci/tests/test-dev-deployment-smoke-receipt.sh|\
@@ -935,6 +937,8 @@ elif [ "$event_selected" = false ]; then
       scripts/ci/tests/test-deploy-dev.sh|\
       scripts/ci/tests/test-verify-cw-release-signing-key.sh|\
       scripts/ci/tests/test-verify-release-tag-ref.sh|\
+      scripts/ci/select/verify-release-tag-receipt.sh|\
+      scripts/ci/tests/test-verify-release-tag-receipt.sh|\
       scripts/ci/*observe*.sh|scripts/ci/*observe*.py|\
       scripts/ci/*observer*.tsv|\
       scripts/ci/release/verify-cw-release-signing-key.sh|scripts/ci/release/verify-release-tag-ref.sh|\

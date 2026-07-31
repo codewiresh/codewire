@@ -92,12 +92,36 @@ auth_volume="$("$docker_bin" volume create)"
 }
 readonly auth_volume
 
-SKOPEO_AUTH_VOLUME="$auth_volume" \
-  "$skopeo_runner" login --authfile /auth/auth.json --username "$gitea_username" \
-  --password-stdin git.example.invalid <"$GITEA_REGISTRY_TOKEN_FILE" >/dev/null
-SKOPEO_AUTH_VOLUME="$auth_volume" \
-  "$skopeo_runner" login --authfile /auth/auth.json --username "$GHCR_PUBLISH_USERNAME" \
-  --password-stdin ghcr.io <"$GHCR_PUBLISH_TOKEN_FILE" >/dev/null
+registry_auth_error() {
+  grep -Eqi \
+    '(unauthorized|invalid username/password|authorization failed|failed to authorize|status[^[:cntrl:]]*401|status code: 401)' \
+    "$1"
+}
+
+registry_login() {
+  local label="$1" host="$2" username="$3" credential_file="$4"
+  local login_error attempt
+  for attempt in 1 2 3; do
+    login_error="$(mktemp "$work/login-error.XXXXXX")"
+    if SKOPEO_AUTH_VOLUME="$auth_volume" \
+      "$skopeo_runner" login --authfile /auth/auth.json --username "$username" \
+      --password-stdin "$host" <"$credential_file" \
+      >/dev/null 2>"$login_error"; then
+      return 0
+    fi
+    if registry_auth_error "$login_error" && [ "$attempt" -lt 3 ]; then
+      printf '%s registry login was rejected; retrying authentication (attempt %s/3)\n' \
+        "$label" "$((attempt + 1))" >&2
+      continue
+    fi
+    printf 'Unable to authenticate to %s registry\n' "$label" >&2
+    sed -n '1,20p' "$login_error" >&2
+    return 1
+  done
+}
+
+registry_login Gitea git.example.invalid "$gitea_username" "$GITEA_REGISTRY_TOKEN_FILE"
+registry_login GHCR ghcr.io "$GHCR_PUBLISH_USERNAME" "$GHCR_PUBLISH_TOKEN_FILE"
 
 inspect_digest() {
   local ref="$1"

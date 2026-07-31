@@ -3,9 +3,6 @@ name: Claude E2E
 # Gated: real Anthropic API call per run. Don't trigger from every PR.
 on:
   workflow_dispatch:
-  push:
-    tags:
-      - "v*"
 
 permissions:
   contents: read
@@ -15,8 +12,9 @@ jobs:
     name: Run claude in all three SDKs
     runs-on: ubuntu-latest
     # Uses ANTHROPIC_API_KEY (sk-ant-api…), not the OAuth token. The established
-    # Codewire Infisical exporter selects the codewire project root: dev for a
-    # manually dispatched branch and prod for a signed release tag. The cw CLI
+    # Codewire Infisical exporter selects the Codewire development project.
+    # This expensive parity smoke is manually dispatched; release tags do not
+    # repeat it after exact-main CI has already succeeded. The cw CLI
     # forwards $ANTHROPIC_API_KEY into the container automatically.
     #
     # Tests run against Haiku — cheapest model, plenty for an "is it alive"
@@ -25,7 +23,7 @@ jobs:
       CW_EXAMPLE_IMAGE: ghcr.io/codewiresh/workspace@sha256:93623453cf2046fbca5f77a8f24d606e9dde9e5d9514e84d4b110a19f9661145
       CW_EXAMPLE_CMD: 'claude --model haiku -p "Reply with exactly one word: hello"'
       INFISICAL_WORKSPACE_SLUG: codewire
-      INFISICAL_ENVIRONMENT: ${{ startsWith(github.ref, 'refs/tags/v') && 'prod' || 'dev' }}
+      INFISICAL_ENVIRONMENT: dev
       INFISICAL_SECRET_PATH: /
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5

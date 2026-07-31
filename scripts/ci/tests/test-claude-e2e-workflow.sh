@@ -25,9 +25,11 @@ grep -qF 'INFISICAL_WORKSPACE_SLUG: codewire' "$WORKFLOW" ||
   fail 'Claude E2E does not select the Codewire Infisical project'
 grep -qF 'INFISICAL_SECRET_PATH: /' "$WORKFLOW" ||
   fail 'Claude E2E does not select the Codewire project root'
-# shellcheck disable=SC2016
-grep -qF "INFISICAL_ENVIRONMENT: \${{ startsWith(github.ref, 'refs/tags/v') && 'prod' || 'dev' }}" \
-  "$WORKFLOW" || fail 'Claude E2E does not map tags to prod and branches to dev'
+grep -qF 'INFISICAL_ENVIRONMENT: dev' "$WORKFLOW" ||
+  fail 'manually dispatched Claude E2E does not use the development environment'
+if grep -qF 'tags:' "$WORKFLOW"; then
+  fail 'Claude E2E still runs redundantly for release tags'
+fi
 grep -qF 'scripts/ci/setup/export-infisical-secrets.sh ANTHROPIC_API_KEY' \
   "$WORKFLOW" || fail 'Claude E2E bypasses the established Codewire exporter'
 if grep -Fq 'secrets.ANTHROPIC_API_KEY' "$WORKFLOW"; then
