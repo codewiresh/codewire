@@ -773,6 +773,7 @@ async fn reconcile_sandbox_liveness(ctx: &WorkerContext) {
              FROM environments e
              JOIN sandbox_environment_backend b ON b.environment_id = e.id
             WHERE e.type = 'sandbox'
+              AND e.desired_state = 'started'
               AND e.state IN ('running', 'creating', 'starting')"#,
     )
     .fetch_all(&ctx.pool)
@@ -819,6 +820,15 @@ async fn reconcile_single_sandbox_liveness(
     now: chrono::DateTime<chrono::Utc>,
     row: LivenessRow,
 ) {
+    if row.desired_state != "started" {
+        tracing::debug!(
+            environment_id = row.id,
+            state = row.state,
+            desired_state = row.desired_state,
+            "sandbox liveness: lifecycle transition owns sandbox readiness"
+        );
+        return;
+    }
     if setup_activity_active(&row) {
         tracing::debug!(
             environment_id = row.id,
@@ -887,6 +897,9 @@ fn sandbox_liveness_reason(
     row: &LivenessRow,
     probe: &ProbeResult,
 ) -> Option<String> {
+    if row.desired_state != "started" {
+        return None;
+    }
     let grace = chrono::Duration::from_std(SANDBOX_TRANSITIONAL_LIVENESS_GRACE).unwrap();
     match row.state.as_str() {
         "running" => {
@@ -1250,6 +1263,23 @@ mod tests {
             ),
             None
         );
+
+        // Stop and destroy intent transfer readiness ownership to the
+        // lifecycle workflow. A suspended or deleted claim during teardown is
+        // expected and must never overwrite that intent with state=error.
+        for desired_state in ["stopped", "destroyed"] {
+            let mut transitioning = row("running", 300);
+            transitioning.desired_state = desired_state.into();
+            assert_eq!(
+                sandbox_liveness_reason(
+                    now,
+                    &transitioning,
+                    &probe(true, false, "SandboxSuspended", false, "", "")
+                ),
+                None,
+                "liveness interfered with desired_state={desired_state}"
+            );
+        }
 
         // Transitional states get the 60s grace window.
         assert_eq!(
