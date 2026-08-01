@@ -1880,6 +1880,7 @@ def check_license_map(_args: argparse.Namespace) -> int:
         "crates/codewire-client/Cargo.toml": "AGPL-3.0-only",
         "crates/codewire-coordinator/Cargo.toml": "AGPL-3.0-only",
         "crates/codewire-core/Cargo.toml": "MIT",
+        "crates/codewire-dashboard-web/Cargo.toml": "AGPL-3.0-only",
         "crates/codewire-daemon/Cargo.toml": "AGPL-3.0-only",
         "crates/codewire-derp/Cargo.toml": "BSD-3-Clause",
         "crates/codewire-desktop/Cargo.toml": "MIT",
@@ -1939,6 +1940,7 @@ def check_license_map(_args: argparse.Namespace) -> int:
         "libs/sdk-examples/run-claude/typescript/package.json": "MIT",
         "libs/sdk-ts/package.json": "MIT",
         "packages/auth/package.json": "MIT",
+        "packages/codewire-design/package.json": "AGPL-3.0-only",
         "packages/codewire-proto-ts/package.json": "MIT",
         "packages/codewire-types/package.json": "MIT",
     }

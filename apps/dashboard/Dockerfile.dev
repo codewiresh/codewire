@@ -4,6 +4,7 @@ WORKDIR /app
 COPY package.json bun.lock ./
 COPY apps/dashboard/package.json ./apps/dashboard/package.json
 COPY apps/docs/package.json ./apps/docs/package.json
+COPY packages/codewire-design/package.json ./packages/codewire-design/package.json
 COPY packages/codewire-types/package.json ./packages/codewire-types/package.json
 COPY packages/codewire-proto-ts/package.json ./packages/codewire-proto-ts/package.json
 COPY packages/auth/package.json ./packages/auth/package.json
@@ -12,6 +13,7 @@ RUN bun install --frozen-lockfile --ignore-scripts
 
 COPY packages/codewire-types ./packages/codewire-types
 COPY packages/codewire-proto-ts ./packages/codewire-proto-ts
+COPY packages/codewire-design ./packages/codewire-design
 COPY apps/dashboard ./apps/dashboard
 
 WORKDIR /app/apps/dashboard

@@ -197,6 +197,11 @@ def main() -> None:
         fixture.commit("dashboard source")
         fixture.assert_selected("dashboard source", True)
 
+        fixture.reset("dashboard-design")
+        fixture.append("packages/codewire-design/styles.css", "\n/* selector fixture */\n")
+        fixture.commit("dashboard design source")
+        fixture.assert_selected("dashboard design source", True)
+
         fixture.reset("product-docs")
         fixture.append("apps/docs/src/content/docs/selector-fixture.md", "# Built\n")
         fixture.commit("built docs source")

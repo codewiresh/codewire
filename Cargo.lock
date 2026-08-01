@@ -1324,6 +1324,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "codewire-dashboard-web"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "askama",
+ "axum 0.8.9",
+ "codewire-proto",
+ "codewire-server-core",
+ "connectrpc",
+ "http",
+ "http-body-util",
+ "reqwest 0.12.28",
+ "serde",
+ "tokio",
+ "url",
+]
+
+[[package]]
 name = "codewire-derp"
 version = "0.1.0"
 dependencies = [

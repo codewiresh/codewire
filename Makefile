@@ -1,4 +1,4 @@
-.PHONY: help up up-billing down dev dev-down db-init web e2e e2e-kind kind-billing-listen kind-forwards-start kind-forwards-stop kind-forwards-status kind-forwards-cleanup kind-clean-runtime test-ui test-ui-kind-billing test-billing-smoke-kind seed-test-user seed-e2e-users build clean wasm build-gateway build-dashboard-local build-docs-local build-sandbox-controller build-derp-local build-services-local rollout-local-runtime local-runtime deploy-local deploy-local-static prune-local-legacy-runtime kind-cluster kind-ingress kind-label-local-nodes kind-sandbox-namespace ios ios-test ios-clean proto-tools proto-lint proto-generate proto-drift-check api-client-tools api-client-generate api-client-generate-go api-client-generate-ts api-client-generate-py
+.PHONY: help up up-billing down dev dev-down db-init web dashboard-ssr-dev e2e e2e-kind kind-billing-listen kind-forwards-start kind-forwards-stop kind-forwards-status kind-forwards-cleanup kind-clean-runtime test-ui test-ui-dashboard-ssr test-ui-kind-billing test-billing-smoke-kind seed-test-user seed-e2e-users build clean wasm build-gateway build-dashboard-local build-docs-local build-sandbox-controller build-derp-local build-services-local rollout-local-runtime local-runtime deploy-local deploy-local-static prune-local-legacy-runtime kind-cluster kind-ingress kind-label-local-nodes kind-sandbox-namespace ios ios-test ios-clean proto-tools proto-lint proto-generate proto-drift-check api-client-tools api-client-generate api-client-generate-go api-client-generate-ts api-client-generate-py
 .PHONY: cli-build cli-smoke cli-install cli-install-user cli-install-system
 
 # Default target
@@ -14,10 +14,12 @@ help:
 	@echo ""
 	@echo "Development:"
 	@echo "  make web          - Run web frontend dev server"
+	@echo "  make dashboard-ssr-dev - Run the side-by-side Askama dashboard on 5174"
 	@echo "  make wasm         - Build WASM package for the dashboard"
 	@echo ""
 	@echo "Testing:"
 	@echo "  make test-ui      - Run Playwright UI tests"
+	@echo "  make test-ui-dashboard-ssr - Run the opt-in Askama dashboard browser proof"
 	@echo "  make test-ui-kind-billing - Run Playwright billing tests against local kind"
 	@echo "  make test-billing-smoke-kind - Run Rust billing runtime smoke + Playwright billing against local kind"
 	@echo "  make e2e-kind     - Run the isolated Rust-owned Kind product gate"
@@ -110,6 +112,12 @@ dev-down:
 # Run web frontend
 web:
 	cd apps/dashboard && bun run dev
+
+dashboard-ssr-dev:
+	CODEWIRE_PUBLIC_ORIGIN="$${CODEWIRE_PUBLIC_ORIGIN:-http://127.0.0.1:5174}" \
+	CODEWIRE_API_ORIGIN="$${CODEWIRE_API_ORIGIN:-http://127.0.0.1:8080}" \
+	CODEWIRE_LEGACY_UI_ORIGIN="$${CODEWIRE_LEGACY_UI_ORIGIN:-http://127.0.0.1:5173}" \
+	cargo run --locked -p codewire-dashboard-web
 
 # Build WASM package
 wasm:
@@ -222,6 +230,9 @@ seed-test-user: seed-e2e-users
 # Run Playwright UI tests
 test-ui: seed-test-user
 	cd apps/dashboard && bun run test:e2e
+
+test-ui-dashboard-ssr: seed-test-user
+	./apps/dashboard/node_modules/.bin/playwright test --config apps/dashboard/playwright.dashboard-ssr.config.ts
 
 # Run Playwright UI tests with browser visible
 test-ui-headed: seed-test-user

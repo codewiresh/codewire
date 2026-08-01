@@ -16,6 +16,7 @@
       "version": "0.1.0",
       "dependencies": {
         "@bufbuild/protobuf": "2.12.1",
+        "@codewire/design": "workspace:*",
         "@codewire/proto-ts": "workspace:*",
         "@connectrpc/connect": "2.1.2",
         "@connectrpc/connect-query": "2.2.0",
@@ -86,6 +87,10 @@
       "optionalPeers": [
         "expo-secure-store",
       ],
+    },
+    "packages/codewire-design": {
+      "name": "@codewire/design",
+      "version": "0.1.0",
     },
     "packages/codewire-proto-ts": {
       "name": "@codewire/proto-ts",
@@ -180,6 +185,8 @@
     "@codewire/auth": ["@codewire/auth@workspace:packages/auth"],
 
     "@codewire/dashboard": ["@codewire/dashboard@workspace:apps/dashboard"],
+
+    "@codewire/design": ["@codewire/design@workspace:packages/codewire-design"],
 
     "@codewire/docs": ["@codewire/docs@workspace:apps/docs"],
 

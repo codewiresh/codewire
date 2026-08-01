@@ -56,11 +56,11 @@ function DashboardPage() {
   const orgs = orgsResponse?.organizations ?? [];
 
   return (
-    <div className="animate-page-enter py-6 md:py-8 max-w-4xl mx-auto">
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6 md:mb-8">
+    <div className="cw-page animate-page-enter py-6 md:py-8 max-w-4xl mx-auto">
+      <div className="cw-page-header flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6 md:mb-8">
         <div>
-          <h1 className="text-2xl md:text-3xl font-bold text-[color:var(--fg-primary)]">Dashboard</h1>
-          <p className="text-[color:var(--fg-secondary)] mt-1 text-sm md:text-base">
+          <h1 className="cw-page-title text-2xl md:text-3xl font-bold text-[color:var(--fg-primary)]">Dashboard</h1>
+          <p className="cw-page-description text-[color:var(--fg-secondary)] mt-1 text-sm md:text-base">
             Manage your organizations and environments
           </p>
         </div>

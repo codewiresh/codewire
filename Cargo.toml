@@ -7,6 +7,7 @@ members = [
     "crates/codewire-api-types",
     "crates/codewire-billing",
     "crates/codewire-client",
+    "crates/codewire-dashboard-web",
     "crates/codewire-coordinator",
     "crates/codewire-core",
     "crates/codewire-daemon",
@@ -197,6 +198,7 @@ jsonwebtoken = "9"
 # Config & misc
 serde_yaml = "0.9"
 toml = "1"
+askama = "=0.14.0"
 
 # Testing
 tempfile = "3"

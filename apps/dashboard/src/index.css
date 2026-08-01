@@ -1,56 +1,7 @@
 @import "tailwindcss";
+@import "@codewire/design/styles.css";
 
 /* ── Design System: Kernel Dark Theme ─────────────────────────────── */
-
-:root {
-  /* Core palette */
-  --bg-primary: #08090a;
-  --bg-secondary: #0f1011;
-  --bg-base: #08090a;
-  --bg-surface: #0f1011;
-  --bg-surface-hover: #161719;
-
-  --fg-primary: #f7f8f8;
-  --fg-secondary: #8a8f98;
-  --fg-tertiary: #565b63;
-
-  --border: rgba(255,255,255,0.08);
-  --border-hover: rgba(255,255,255,0.15);
-  --border-subtle: rgba(255,255,255,0.04);
-
-  --accent: #0EA5E9;
-  --accent-hover: #0284C7;
-  --accent-muted: rgba(14,165,233,0.12);
-
-  --success: #22C55E;
-  --warning: #EAB308;
-  --info: #3B82F6;
-  --destructive: #EF4444;
-
-  --font-mono: 'JetBrains Mono', monospace;
-  --font-sans: 'Inter Variable', 'Inter', system-ui, sans-serif;
-
-  /* ── shadcn/ui CSS variables (resolved to kernel values) ── */
-  --color-background: #08090a;
-  --color-foreground: #f7f8f8;
-  --color-card: #0f1011;
-  --color-card-foreground: #f7f8f8;
-  --color-popover: #0f1011;
-  --color-popover-foreground: #f7f8f8;
-  --color-primary: #0EA5E9;
-  --color-primary-foreground: #000000;
-  --color-secondary: rgba(255,255,255,0.08);
-  --color-secondary-foreground: #f7f8f8;
-  --color-muted: rgba(255,255,255,0.08);
-  --color-muted-foreground: #8a8f98;
-  --color-accent: rgba(255,255,255,0.08);
-  --color-accent-foreground: #f7f8f8;
-  --color-destructive: #EF4444;
-  --color-destructive-foreground: #f7f8f8;
-  --color-border: rgba(255,255,255,0.08);
-  --color-input: rgba(255,255,255,0.08);
-  --color-ring: #0EA5E9;
-}
 
 @theme {
   --color-accent-brand: #0EA5E9;

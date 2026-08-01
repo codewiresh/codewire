@@ -1,0 +1,34 @@
+<section
+  id="organization-list"
+  aria-live="polite"
+  hx-get="/dashboard/_fragments/organizations"
+  hx-trigger="dashboard:refresh from:body"
+  hx-swap="outerHTML"
+>
+  {% if has_organizations %}
+  <div class="cw-org-list" aria-label="Organizations">
+    {% for organization in organizations %}
+    <a class="cw-card cw-org-card" href="{{ organization.legacy_url }}">
+      <div class="cw-org-summary">
+        <span class="cw-org-icon" aria-hidden="true">
+          <svg class="cw-icon" viewBox="0 0 24 24"><path d="M3 21h18M6 21V5l6-3 6 3v16M9 9h.01M9 13h.01M9 17h.01M15 9h.01M15 13h.01M15 17h.01"/></svg>
+        </span>
+        <div>
+          <h2 class="cw-org-name">{{ organization.name }} <span class="cw-badge">{{ organization.role }}</span></h2>
+          <p class="cw-org-meta">Plan: {{ organization.billing_plan }} · {{ organization.slug }}</p>
+        </div>
+      </div>
+      <svg class="cw-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg>
+    </a>
+    {% endfor %}
+  </div>
+  {% else %}
+  <div class="cw-card cw-empty">
+    <span class="cw-empty-icon" aria-hidden="true">
+      <svg class="cw-icon" viewBox="0 0 24 24"><path d="M3 21h18M6 21V5l6-3 6 3v16M9 9h.01M9 13h.01M9 17h.01M15 9h.01M15 13h.01M15 17h.01"/></svg>
+    </span>
+    <h2 class="cw-empty-title">No organizations yet</h2>
+    <p class="cw-empty-copy">Create your first organization to start creating environments.</p>
+  </div>
+  {% endif %}
+</section>

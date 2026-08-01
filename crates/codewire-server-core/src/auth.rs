@@ -534,7 +534,7 @@ pub(crate) fn bearer_token(headers: &HeaderMap) -> Option<&str> {
 /// `name=value; name2=value2; …` with no quoting for our purposes
 /// (the service emits a hex-encoded 32-byte token), so a hand-rolled
 /// parser avoids dragging in `axum-extra` for one field.
-pub(crate) fn session_cookie(headers: &HeaderMap) -> Option<&str> {
+pub fn session_cookie(headers: &HeaderMap) -> Option<&str> {
     let raw = headers.get(COOKIE)?.to_str().ok()?;
     for pair in raw.split(';') {
         let pair = pair.trim_start();

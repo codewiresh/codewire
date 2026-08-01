@@ -1,0 +1,21 @@
+[package]
+name = "codewire-dashboard-web"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license = "AGPL-3.0-only"
+description = "Production server-rendered Codewire dashboard adapter."
+
+[dependencies]
+anyhow = { workspace = true }
+askama = { workspace = true }
+axum = { workspace = true }
+codewire-proto = { workspace = true, features = ["client"] }
+codewire-server-core = { workspace = true }
+connectrpc = { workspace = true, features = ["client"] }
+http = { workspace = true }
+http-body-util = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+tokio = { workspace = true }
+url = { workspace = true }

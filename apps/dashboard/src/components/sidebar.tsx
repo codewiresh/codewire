@@ -163,12 +163,12 @@ export function Sidebar({
 
   return (
     <nav
-      className="flex flex-col h-full"
+      className="cw-sidebar flex flex-col h-full"
       style={{ background: "var(--bg-primary)", fontFamily: "var(--font-sans)" }}
       aria-label="Main navigation"
     >
       {/* Logo + User */}
-      <div className="px-4 py-4 border-b border-[var(--border-subtle)]">
+      <div className="cw-sidebar-header px-4 py-4 border-b border-[var(--border-subtle)]">
         <Link to="/dashboard" className="flex items-center gap-2 no-underline" onClick={handleNavigate}>
           <svg width="20" height="20" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
             <rect width="32" height="32" rx="8" fill="#0EA5E9" />

@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="htmx-config" content='{"responseHandling":[{"code":"204","swap":false},{"code":"[23]..","swap":true},{"code":"422","swap":true},{"code":"[45]..","swap":false,"error":true},{"code":"...","swap":true}]}' >
+    <title>Dashboard · Codewire</title>
+    <link rel="stylesheet" href="/assets/codewire/design-v1.css">
+    <script src="/assets/codewire/htmx-2.0.10.min.js" integrity="sha384-q2oWHKMnJry5BOtYUZkXcyieUmqzXIjdmKDYicmMspegPENZr4UrGc656JYEgJoo" defer></script>
+    <script src="/assets/codewire/dashboard-v1.js" defer></script>
+  </head>
+  <body class="cw-body">
+    <div class="cw-app" data-dashboard-app data-mobile-open="false">
+      <aside class="cw-sidebar-slot">
+        {% include "sidebar.html" %}
+      </aside>
+      <header class="cw-mobile-bar">
+        <button class="cw-mobile-toggle" type="button" data-sidebar-toggle aria-label="Toggle sidebar">
+          <svg class="cw-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
+        </button>
+        <a class="cw-brand" href="/dashboard"><img src="/assets/codewire/logo-v1.svg" alt=""><span>Codewire</span></a>
+      </header>
+      <button class="cw-mobile-overlay" type="button" data-sidebar-close aria-label="Close sidebar"></button>
+      <aside class="cw-mobile-drawer">
+        {% include "sidebar.html" %}
+      </aside>
+      <main class="cw-main">
+        <div class="cw-main-inner">
+          <div class="cw-page">
+            <header class="cw-page-header">
+              <div>
+                <h1 class="cw-page-title">Dashboard</h1>
+                <p class="cw-page-description">Manage your organizations and environments</p>
+              </div>
+              <a class="cw-button cw-button--outline" href="{{ view.new_organization_url }}">
+                <svg class="cw-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 21h18M6 21V5l6-3 6 3v16M9 9h.01M9 13h.01M9 17h.01M15 9h.01M15 13h.01M15 17h.01"/></svg>
+                New Organization
+              </a>
+            </header>
+            {% if view.show_checklist %}
+            <section class="cw-card cw-checklist" aria-labelledby="setup-title">
+              <div class="cw-card-header">
+                <h2 id="setup-title" class="cw-card-title">Get started</h2>
+                <p class="cw-card-description">Complete these steps to start creating environments</p>
+              </div>
+              <div class="cw-card-content">
+                <div class="cw-checklist-item" data-complete="{{ view.has_organizations }}">
+                  <span class="cw-check" data-complete="{{ view.has_organizations }}" aria-hidden="true"></span>
+                  <div>
+                    <span>Create an organization</span>
+                    {% if !view.has_organizations %}
+                    <div><a class="cw-button cw-button--outline cw-button--small" href="{{ view.new_organization_url }}">Create</a></div>
+                    {% endif %}
+                  </div>
+                </div>
+                <div class="cw-checklist-item" data-complete="{{ view.github_connected }}">
+                  <span class="cw-check" data-complete="{{ view.github_connected }}" aria-hidden="true"></span>
+                  <div>
+                    <span>Connect GitHub</span>
+                    {% if !view.github_connected %}
+                    <p class="cw-help">Connect GitHub to create environments from private repositories.</p>
+                    {% if view.github_available %}
+                    <a class="cw-button cw-button--outline cw-button--small" href="{{ view.github_connect_url }}">Connect</a>
+                    {% else %}
+                    <p class="cw-service-note">GitHub status is temporarily unavailable.</p>
+                    {% endif %}
+                    {% endif %}
+                  </div>
+                </div>
+              </div>
+            </section>
+            {% endif %}
+            {% include "organization-list.html" %}
+          </div>
+        </div>
+      </main>
+    </div>
+  </body>
+</html>

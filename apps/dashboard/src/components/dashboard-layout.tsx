@@ -13,14 +13,14 @@ export function DashboardLayout({
   const [sidebarOpen, setSidebarOpen] = useState(false);
 
   return (
-    <div className="flex min-h-screen" style={{ background: "var(--bg-base)", color: "var(--fg-primary)" }}>
+    <div className="cw-app flex min-h-screen" style={{ background: "var(--bg-base)", color: "var(--fg-primary)" }}>
       {/* Desktop sidebar */}
-      <div className="hidden lg:block w-60 shrink-0 fixed top-0 left-0 bottom-0 z-40 border-r border-[var(--border-subtle)]">
+      <div className="cw-sidebar-slot hidden lg:block w-60 shrink-0 fixed top-0 left-0 bottom-0 z-40 border-r border-[var(--border-subtle)]">
         <Sidebar isAdmin={isAdmin} userName={userName} />
       </div>
 
       {/* Mobile top bar */}
-      <div className="lg:hidden fixed top-0 left-0 right-0 z-40 h-14 flex items-center px-4 border-b border-[var(--border-subtle)]" style={{ background: "var(--bg-primary)" }}>
+      <div className="cw-mobile-bar lg:hidden fixed top-0 left-0 right-0 z-40 h-14 flex items-center px-4 border-b border-[var(--border-subtle)]" style={{ background: "var(--bg-primary)" }}>
         <button
           onClick={() => setSidebarOpen(!sidebarOpen)}
           className="p-2 -ml-2 text-[color:var(--fg-secondary)] hover:text-[color:var(--fg-primary)] cursor-pointer"
@@ -54,8 +54,8 @@ export function DashboardLayout({
       )}
 
       {/* Main content */}
-      <main className="flex-1 lg:ml-60 min-w-0 pt-14 lg:pt-0">
-        <div className="px-4 md:px-8">
+      <main className="cw-main flex-1 lg:ml-60 min-w-0 pt-14 lg:pt-0">
+        <div className="cw-main-inner px-4 md:px-8">
           <Outlet />
         </div>
       </main>
