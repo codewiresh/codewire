@@ -1,7 +1,8 @@
 import { expect, test } from "@playwright/test";
 
 test.describe("server-rendered dashboard", () => {
-  test("renders the shared shell and refreshes its organization fragment", async ({ page }) => {
+  test("renders the shared shell and refreshes its organization fragment", async ({ page, isMobile }) => {
+    test.skip(!!isMobile, "desktop visual contract");
     const browserRequests: string[] = [];
     page.on("request", (request) => browserRequests.push(request.url()));
 
@@ -11,7 +12,7 @@ test.describe("server-rendered dashboard", () => {
     await expect(page.getByRole("navigation", { name: "Main navigation" }).first()).toBeVisible();
     await expect(page.getByRole("link", { name: "New Organization" }).first()).toHaveAttribute(
       "href",
-      "http://127.0.0.1:5173/dashboard/orgs/new",
+      "/dashboard/orgs/new",
     );
 
     const style = await page.request.get("/assets/codewire/design-v1.css");
@@ -34,7 +35,8 @@ test.describe("server-rendered dashboard", () => {
     await expect(page).toHaveScreenshot("dashboard-desktop.png", { fullPage: true });
   });
 
-  test("sends an unauthenticated visitor to the legacy login", async ({ browser }) => {
+  test("sends an unauthenticated visitor to the legacy login", async ({ browser, isMobile }) => {
+    test.skip(!!isMobile, "covered by the desktop adapter contract");
     const context = await browser.newContext();
     await context.clearCookies();
     const page = await context.newPage();
@@ -45,7 +47,8 @@ test.describe("server-rendered dashboard", () => {
     await context.close();
   });
 
-  test("mobile shell opens and closes the shared sidebar", async ({ page }) => {
+  test("mobile shell opens and closes the shared sidebar", async ({ page, isMobile }) => {
+    test.skip(!isMobile, "mobile visual contract");
     await page.goto("/dashboard");
     await expect(page).toHaveScreenshot("dashboard-mobile.png", { fullPage: true });
     await page.getByRole("button", { name: "Toggle sidebar" }).click();

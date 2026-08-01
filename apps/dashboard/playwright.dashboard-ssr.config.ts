@@ -33,8 +33,7 @@ export default defineConfig({
     },
     {
       name: "dashboard-ssr-desktop",
-      testMatch: /apps\/dashboard\/e2e\/ssr-dashboard\.read\.ssr\.ts/,
-      grepInvert: /mobile shell/,
+      testMatch: /apps\/dashboard\/e2e\/ssr-dashboard\..*\.ssr\.ts/,
       dependencies: ["setup"],
       use: {
         ...devices["Desktop Chrome"],
@@ -47,8 +46,7 @@ export default defineConfig({
     },
     {
       name: "dashboard-ssr-mobile",
-      testMatch: /apps\/dashboard\/e2e\/ssr-dashboard\.read\.ssr\.ts/,
-      grep: /mobile shell/,
+      testMatch: /apps\/dashboard\/e2e\/ssr-dashboard\..*\.ssr\.ts/,
       dependencies: ["setup"],
       use: {
         ...devices["Pixel 5"],

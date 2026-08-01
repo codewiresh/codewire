@@ -10,12 +10,16 @@ description = "Production server-rendered Codewire dashboard adapter."
 anyhow = { workspace = true }
 askama = { workspace = true }
 axum = { workspace = true }
+base64 = { workspace = true }
+buffa = { workspace = true }
 codewire-proto = { workspace = true, features = ["client"] }
 codewire-server-core = { workspace = true }
 connectrpc = { workspace = true, features = ["client"] }
 http = { workspace = true }
 http-body-util = { workspace = true }
 reqwest = { workspace = true }
+rand = { workspace = true }
 serde = { workspace = true }
+subtle = { workspace = true }
 tokio = { workspace = true }
 url = { workspace = true }

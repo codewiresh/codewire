@@ -10,31 +10,43 @@ use anyhow::{Context as _, bail};
 use askama::Template;
 use axum::{
     Router,
-    extract::State,
+    extract::{Form, State},
     http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
-    routing::get,
+    routing::{get, post},
 };
+use base64::{
+    Engine as _,
+    engine::general_purpose::{STANDARD, STANDARD_NO_PAD, URL_SAFE_NO_PAD},
+};
+use buffa::Message as _;
 use codewire_proto::codewire::{
     console::v1::{GetGitHubStatusRequest, GitHubServiceClient},
-    v1::{ListOrganizationsRequest, OrganizationServiceClient},
+    v1::{CreateOrganizationRequest, ListOrganizationsRequest, OrganizationServiceClient},
 };
+use codewire_proto::google::rpc::BadRequest;
 use codewire_server_core::auth::{SESSION_COOKIE_NAME, session_cookie};
 use connectrpc::client::{BoxFuture, ClientConfig, ClientTransport};
 use connectrpc::{ConnectError, ErrorCode};
 use http::{Request, Response as HttpResponse};
 use http_body_util::BodyExt as _;
+use rand::{RngCore as _, rngs::OsRng};
 use serde::Deserialize;
+use subtle::ConstantTimeEq as _;
 use url::Url;
 
 const DASHBOARD_PATH: &str = "/dashboard";
 const ORGANIZATIONS_FRAGMENT_PATH: &str = "/dashboard/_fragments/organizations";
+const NEW_ORGANIZATION_PATH: &str = "/dashboard/orgs/new";
+const CREATE_ORGANIZATION_PATH: &str = "/dashboard/orgs";
 const HTMX_PATH: &str = "/assets/codewire/htmx-2.0.10.min.js";
 const STYLE_PATH: &str = "/assets/codewire/design-v1.css";
 const SCRIPT_PATH: &str = "/assets/codewire/dashboard-v1.js";
 const LOGO_PATH: &str = "/assets/codewire/logo-v1.svg";
 const HTMX_REQUEST: &str = "hx-request";
 const HTMX_REDIRECT: &str = "hx-redirect";
+const CSRF_COOKIE_NAME: &str = "codewire_csrf";
+const CSRF_TOKEN_BYTES: usize = 32;
 const CONTENT_SECURITY_POLICY: &str = "default-src 'self'; base-uri 'none'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; img-src 'self'; object-src 'none'; script-src 'self'; style-src 'self'";
 const HTMX: &str = include_str!("../assets/htmx-2.0.10.min.js");
 const STYLES: &str = include_str!("../../../packages/codewire-design/styles.css");
@@ -124,6 +136,8 @@ pub fn app(config: Config) -> Router {
         .route("/healthz", get(healthz))
         .route(DASHBOARD_PATH, get(dashboard))
         .route(ORGANIZATIONS_FRAGMENT_PATH, get(organization_fragment))
+        .route(NEW_ORGANIZATION_PATH, get(new_organization))
+        .route(CREATE_ORGANIZATION_PATH, post(create_organization))
         .route(HTMX_PATH, get(htmx_asset))
         .route(STYLE_PATH, get(stylesheet))
         .route(SCRIPT_PATH, get(dashboard_script))
@@ -168,6 +182,88 @@ async fn organization_fragment(State(state): State<AppState>, headers: HeaderMap
     }
 }
 
+async fn new_organization(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    match dashboard_view(&state, &headers).await {
+        Ok(view) => {
+            let token = new_csrf_token();
+            let form = OrganizationFormView::default();
+            let response = render_page(NewOrganizationTemplate {
+                view: &view,
+                form: &form,
+                csrf_token: &token,
+            });
+            with_csrf_cookie(response, csrf_cookie(&state.public_origin, &token))
+        }
+        Err(WebError::Unauthorized) => login_redirect(&state.legacy_origin, &headers),
+        Err(WebError::TwoFactorRequired) => two_factor_redirect(&state.legacy_origin, &headers),
+        Err(error) => error_page(error),
+    }
+}
+
+async fn create_organization(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Form(submission): Form<OrganizationFormSubmission>,
+) -> Response {
+    let view = match dashboard_view(&state, &headers).await {
+        Ok(view) => view,
+        Err(WebError::Unauthorized) => return login_redirect(&state.legacy_origin, &headers),
+        Err(WebError::TwoFactorRequired) => {
+            return two_factor_redirect(&state.legacy_origin, &headers);
+        }
+        Err(error) => return error_page(error),
+    };
+
+    if !request_has_same_origin(&headers, &state.public_origin)
+        || !valid_csrf_token(&headers, &submission.csrf)
+    {
+        return error_page(WebError::CsrfRejected);
+    }
+
+    let mut form = OrganizationFormView {
+        name: submission.name.trim().to_owned(),
+        slug: submission.slug.trim().to_owned(),
+        ..Default::default()
+    };
+    validate_organization_form(&mut form);
+    if form.has_errors() {
+        return form_response(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            &headers,
+            &view,
+            &form,
+            &submission.csrf,
+        );
+    }
+
+    let cookie = match canonical_cookie(&headers) {
+        Ok(cookie) => cookie,
+        Err(_) => return login_redirect(&state.legacy_origin, &headers),
+    };
+    match create_organization_rpc(&state, cookie, &form).await {
+        Ok(()) => {
+            let rotated = new_csrf_token();
+            with_csrf_cookie(
+                redirect(DASHBOARD_PATH.to_owned(), &headers),
+                csrf_cookie(&state.public_origin, &rotated),
+            )
+        }
+        Err(error) if error.code == ErrorCode::Unauthenticated => {
+            login_redirect(&state.legacy_origin, &headers)
+        }
+        Err(error) => {
+            apply_organization_error(&mut form, &error);
+            form_response(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                &headers,
+                &view,
+                &form,
+                &submission.csrf,
+            )
+        }
+    }
+}
+
 async fn dashboard_view(state: &AppState, headers: &HeaderMap) -> Result<DashboardView, WebError> {
     let identity = authenticated_identity(state, headers).await?;
     enforce_two_factor(&identity)?;
@@ -195,7 +291,7 @@ async fn dashboard_view(state: &AppState, headers: &HeaderMap) -> Result<Dashboa
         github_connected,
         github_available,
         show_checklist,
-        new_organization_url: format!("{}/dashboard/orgs/new", state.legacy_origin),
+        new_organization_url: NEW_ORGANIZATION_PATH.to_owned(),
         legacy_settings_url: format!("{}/dashboard/settings", state.legacy_origin),
         legacy_admin_url: format!("{}/admin", state.legacy_origin),
         legacy_home_url: format!("{}/dashboard", state.legacy_origin),
@@ -335,6 +431,168 @@ async fn github_status(state: &AppState, cookie: HeaderValue) -> Result<bool, We
         .connected)
 }
 
+async fn create_organization_rpc(
+    state: &AppState,
+    cookie: HeaderValue,
+    form: &OrganizationFormView,
+) -> Result<(), ConnectError> {
+    let client = OrganizationServiceClient::new(
+        SessionCookieTransport {
+            http: state.http.clone(),
+            cookie,
+        },
+        ClientConfig::new(state.api_origin.clone()).with_default_timeout(Duration::from_secs(10)),
+    );
+    client
+        .create_organization(CreateOrganizationRequest {
+            name: form.name.clone(),
+            slug: form.slug.clone(),
+            ..Default::default()
+        })
+        .await?;
+    Ok(())
+}
+
+#[derive(Debug, Deserialize)]
+struct OrganizationFormSubmission {
+    name: String,
+    slug: String,
+    #[serde(rename = "_csrf")]
+    csrf: String,
+}
+
+#[derive(Debug, Default)]
+struct OrganizationFormView {
+    name: String,
+    slug: String,
+    name_error: String,
+    slug_error: String,
+    form_error: String,
+}
+
+impl OrganizationFormView {
+    fn has_errors(&self) -> bool {
+        !self.name_error.is_empty() || !self.slug_error.is_empty() || !self.form_error.is_empty()
+    }
+}
+
+fn validate_organization_form(form: &mut OrganizationFormView) {
+    if form.name.is_empty() {
+        form.name_error = "Name is required".to_owned();
+    }
+    if form.slug.len() < 3 || form.slug.len() > 48 {
+        form.slug_error = "Slug must be between 3 and 48 characters".to_owned();
+    } else if !valid_organization_slug(&form.slug) {
+        form.slug_error = "Slug must contain only lowercase letters, numbers, and hyphens (no leading/trailing hyphens)".to_owned();
+    }
+}
+
+fn valid_organization_slug(slug: &str) -> bool {
+    slug.split('-').all(|part| {
+        !part.is_empty()
+            && part
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+    })
+}
+
+fn apply_organization_error(form: &mut OrganizationFormView, error: &ConnectError) {
+    for (field, description) in bad_request_fields(error) {
+        match field.trim_start_matches('/') {
+            "name" => form.name_error = description,
+            "slug" => form.slug_error = description,
+            _ => {}
+        }
+    }
+    if matches!(error.code, ErrorCode::AlreadyExists | ErrorCode::Aborted) {
+        form.slug_error = "An organization with this slug already exists".to_owned();
+    }
+    if form.name_error.is_empty() && form.slug_error.is_empty() {
+        form.form_error = "The organization could not be created. Please try again.".to_owned();
+    }
+}
+
+fn bad_request_fields(error: &ConnectError) -> Vec<(String, String)> {
+    error
+        .details
+        .iter()
+        .filter(|detail| {
+            detail.type_url == "google.rpc.BadRequest"
+                || detail.type_url.rsplit('/').next() == Some("google.rpc.BadRequest")
+        })
+        .filter_map(|detail| detail.value.as_deref())
+        .filter_map(|encoded| {
+            STANDARD_NO_PAD
+                .decode(encoded)
+                .or_else(|_| STANDARD.decode(encoded))
+                .ok()
+        })
+        .filter_map(|bytes| BadRequest::decode_from_slice(&bytes).ok())
+        .flat_map(|detail| detail.field_violations)
+        .map(|violation| (violation.field, violation.description))
+        .collect()
+}
+
+fn new_csrf_token() -> String {
+    let mut token = [0_u8; CSRF_TOKEN_BYTES];
+    OsRng.fill_bytes(&mut token);
+    URL_SAFE_NO_PAD.encode(token)
+}
+
+fn csrf_cookie(public_origin: &str, token: &str) -> String {
+    let secure = if public_origin.starts_with("https://") {
+        "; Secure"
+    } else {
+        ""
+    };
+    format!("{CSRF_COOKIE_NAME}={token}; Path=/dashboard; HttpOnly; SameSite=Strict{secure}")
+}
+
+fn with_csrf_cookie(mut response: Response, cookie: String) -> Response {
+    if let Ok(value) = HeaderValue::from_str(&cookie) {
+        response.headers_mut().append(header::SET_COOKIE, value);
+    }
+    response
+}
+
+fn request_has_same_origin(headers: &HeaderMap, public_origin: &str) -> bool {
+    if let Some(origin) = headers.get(header::ORIGIN) {
+        return origin.to_str().ok() == Some(public_origin);
+    }
+    headers
+        .get(header::REFERER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| Url::parse(value).ok())
+        .is_some_and(|url| url.origin().ascii_serialization() == public_origin)
+}
+
+fn valid_csrf_token(headers: &HeaderMap, submitted: &str) -> bool {
+    let Some(cookie) = cookie_value(headers, CSRF_COOKIE_NAME) else {
+        return false;
+    };
+    let (Ok(cookie), Ok(submitted)) = (
+        URL_SAFE_NO_PAD.decode(cookie),
+        URL_SAFE_NO_PAD.decode(submitted),
+    ) else {
+        return false;
+    };
+    let (Ok(cookie), Ok(submitted)): (
+        Result<[u8; CSRF_TOKEN_BYTES], _>,
+        Result<[u8; CSRF_TOKEN_BYTES], _>,
+    ) = (cookie.try_into(), submitted.try_into()) else {
+        return false;
+    };
+    bool::from(cookie.ct_eq(&submitted))
+}
+
+fn cookie_value<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
+    let raw = headers.get(header::COOKIE)?.to_str().ok()?;
+    raw.split(';').find_map(|pair| {
+        let (candidate, value) = pair.trim().split_once('=')?;
+        (candidate == name).then_some(value)
+    })
+}
+
 fn role_name(value: i32) -> &'static str {
     match value {
         1 => "Owner",
@@ -389,17 +647,43 @@ fn session_cookie_headers(mut headers: HeaderMap, cookie: HeaderValue) -> Header
 enum WebError {
     Unauthorized,
     TwoFactorRequired,
+    CsrfRejected,
     IdentityUnavailable,
     Connect(ConnectError),
 }
 
 fn render_page(template: impl Template) -> Response {
+    render_template(StatusCode::OK, template)
+}
+
+fn render_template(status: StatusCode, template: impl Template) -> Response {
     match template.render() {
-        Ok(body) => html_response(StatusCode::OK, body),
+        Ok(body) => html_response(status, body),
         Err(_) => render_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "The dashboard could not be rendered.",
         ),
+    }
+}
+
+fn form_response(
+    status: StatusCode,
+    headers: &HeaderMap,
+    view: &DashboardView,
+    form: &OrganizationFormView,
+    csrf_token: &str,
+) -> Response {
+    if headers.contains_key(HTMX_REQUEST) {
+        render_template(status, OrganizationFormTemplate { form, csrf_token })
+    } else {
+        render_template(
+            status,
+            NewOrganizationTemplate {
+                view,
+                form,
+                csrf_token,
+            },
+        )
     }
 }
 
@@ -409,6 +693,10 @@ fn error_page(error: WebError) -> Response {
         WebError::TwoFactorRequired => (
             StatusCode::FORBIDDEN,
             "Two-factor setup is required before opening the dashboard.",
+        ),
+        WebError::CsrfRejected => (
+            StatusCode::FORBIDDEN,
+            "The form expired or came from another site. Reload it and try again.",
         ),
         WebError::Connect(error) if error.code == ErrorCode::Unauthenticated => {
             (StatusCode::UNAUTHORIZED, "Sign in is required.")
@@ -555,6 +843,21 @@ struct OrganizationListTemplate<'a> {
 }
 
 #[derive(Template)]
+#[template(path = "new-organization.html")]
+struct NewOrganizationTemplate<'a> {
+    view: &'a DashboardView,
+    form: &'a OrganizationFormView,
+    csrf_token: &'a str,
+}
+
+#[derive(Template)]
+#[template(path = "organization-form.html")]
+struct OrganizationFormTemplate<'a> {
+    form: &'a OrganizationFormView,
+    csrf_token: &'a str,
+}
+
+#[derive(Template)]
 #[template(path = "error.html")]
 struct ErrorTemplate<'a> {
     message: &'a str,
@@ -563,6 +866,16 @@ struct ErrorTemplate<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn csrf_headers(token: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            HeaderValue::from_str(&format!("other=value; {CSRF_COOKIE_NAME}={token}"))
+                .expect("valid cookie"),
+        );
+        headers
+    }
 
     #[test]
     fn origins_require_clean_http_origins() {
@@ -589,6 +902,157 @@ mod tests {
         .expect("render organization fragment");
         assert!(body.contains("&lt;unsafe&gt;") || body.contains("&#60;unsafe&#62;"));
         assert!(!body.contains("<unsafe>"));
+    }
+
+    #[test]
+    fn organization_form_escapes_preserved_values_and_csrf_token() {
+        let form = OrganizationFormView {
+            name: "<script>alert('name')</script>".into(),
+            slug: "safe-slug".into(),
+            slug_error: "<unsafe error>".into(),
+            ..Default::default()
+        };
+        let body = OrganizationFormTemplate {
+            form: &form,
+            csrf_token: "csrf-token",
+        }
+        .render()
+        .expect("render organization form");
+
+        assert!(body.contains("name=\"_csrf\" value=\"csrf-token\""));
+        assert!(body.contains("safe-slug"));
+        assert!(!body.contains("<script>"));
+        assert!(!body.contains("<unsafe error>"));
+    }
+
+    #[test]
+    fn organization_form_validation_matches_the_public_contract() {
+        for slug in ["acme", "acme-2", "a2b", "123"] {
+            assert!(valid_organization_slug(slug), "expected {slug} to be valid");
+        }
+        for slug in ["Acme", "-acme", "acme-", "acme--corp", "acme_corp", ""] {
+            assert!(
+                !valid_organization_slug(slug),
+                "expected {slug:?} to be invalid"
+            );
+        }
+
+        let mut form = OrganizationFormView {
+            name: String::new(),
+            slug: "ab".into(),
+            ..Default::default()
+        };
+        validate_organization_form(&mut form);
+        assert_eq!(form.name_error, "Name is required");
+        assert_eq!(form.slug_error, "Slug must be between 3 and 48 characters");
+    }
+
+    #[test]
+    fn csrf_tokens_are_fixed_width_and_compared_to_the_cookie() {
+        let token = new_csrf_token();
+        assert_eq!(
+            URL_SAFE_NO_PAD.decode(&token).expect("decode token").len(),
+            CSRF_TOKEN_BYTES
+        );
+
+        let headers = csrf_headers(&token);
+        assert!(valid_csrf_token(&headers, &token));
+        assert!(!valid_csrf_token(&headers, &new_csrf_token()));
+        assert!(!valid_csrf_token(&headers, "short"));
+        assert!(!valid_csrf_token(&HeaderMap::new(), &token));
+    }
+
+    #[test]
+    fn csrf_cookie_is_host_only_strict_and_https_aware() {
+        let http = csrf_cookie("http://127.0.0.1:5174", "token");
+        assert_eq!(
+            http,
+            "codewire_csrf=token; Path=/dashboard; HttpOnly; SameSite=Strict"
+        );
+        assert!(!http.contains("Domain="));
+        assert!(!http.contains("Secure"));
+
+        let https = csrf_cookie("https://dashboard.example.test", "token");
+        assert!(https.ends_with("; Secure"));
+    }
+
+    #[test]
+    fn form_posts_require_an_exact_same_origin_signal() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("https://dashboard.example.test"),
+        );
+        assert!(request_has_same_origin(
+            &headers,
+            "https://dashboard.example.test"
+        ));
+        assert!(!request_has_same_origin(
+            &headers,
+            "https://other.example.test"
+        ));
+
+        headers.remove(header::ORIGIN);
+        headers.insert(
+            header::REFERER,
+            HeaderValue::from_static("https://dashboard.example.test/dashboard/orgs/new"),
+        );
+        assert!(request_has_same_origin(
+            &headers,
+            "https://dashboard.example.test"
+        ));
+
+        headers.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("https://attacker.example.test"),
+        );
+        assert!(!request_has_same_origin(
+            &headers,
+            "https://dashboard.example.test"
+        ));
+        assert!(!request_has_same_origin(
+            &HeaderMap::new(),
+            "https://dashboard.example.test"
+        ));
+    }
+
+    #[test]
+    fn typed_bad_request_details_are_mapped_to_form_fields() {
+        let detail = BadRequest {
+            field_violations: vec![
+                codewire_proto::google::rpc::bad_request::FieldViolation {
+                    field: "/name".into(),
+                    description: "Choose a name".into(),
+                    ..Default::default()
+                },
+                codewire_proto::google::rpc::bad_request::FieldViolation {
+                    field: "/slug".into(),
+                    description: "Choose another slug".into(),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let error = ConnectError::invalid_argument("validation failed").with_detail(
+            connectrpc::ErrorDetail::from_message("google.rpc.BadRequest", &detail),
+        );
+        let mut form = OrganizationFormView::default();
+        apply_organization_error(&mut form, &error);
+        assert_eq!(form.name_error, "Choose a name");
+        assert_eq!(form.slug_error, "Choose another slug");
+        assert!(form.form_error.is_empty());
+    }
+
+    #[test]
+    fn organization_conflicts_are_attached_to_the_slug() {
+        let error = ConnectError::aborted("organization slug already exists");
+        let mut form = OrganizationFormView::default();
+        apply_organization_error(&mut form, &error);
+        assert_eq!(
+            form.slug_error,
+            "An organization with this slug already exists"
+        );
+        assert!(form.form_error.is_empty());
     }
 
     #[test]

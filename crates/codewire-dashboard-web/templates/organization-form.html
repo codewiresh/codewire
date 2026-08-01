@@ -1,0 +1,63 @@
+<form
+  id="organization-form"
+  class="cw-card-content cw-form"
+  method="post"
+  action="/dashboard/orgs"
+  hx-post="/dashboard/orgs"
+  hx-target="this"
+  hx-swap="outerHTML"
+>
+  <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+  {% if !form.form_error.is_empty() %}
+  <div class="cw-alert cw-alert--error" role="alert">{{ form.form_error }}</div>
+  {% endif %}
+  <div class="cw-field">
+    <label class="cw-label" for="organization-name">Organization Name</label>
+    <input
+      class="cw-input"
+      id="organization-name"
+      name="name"
+      type="text"
+      value="{{ form.name }}"
+      placeholder="Acme Corp"
+      autocomplete="organization"
+      data-slug-source
+      aria-describedby="organization-name-help{% if !form.name_error.is_empty() %} organization-name-error{% endif %}"
+      {% if !form.name_error.is_empty() %}aria-invalid="true"{% endif %}
+      required
+    >
+    {% if !form.name_error.is_empty() %}
+    <p class="cw-field-error" id="organization-name-error" role="alert">{{ form.name_error }}</p>
+    {% endif %}
+    <p class="cw-field-help" id="organization-name-help">A display name for your organization</p>
+  </div>
+  <div class="cw-field">
+    <label class="cw-label" for="organization-slug">Slug</label>
+    <input
+      class="cw-input cw-input--mono"
+      id="organization-slug"
+      name="slug"
+      type="text"
+      value="{{ form.slug }}"
+      placeholder="acme-corp"
+      pattern="[a-z0-9]+(-[a-z0-9]+)*"
+      minlength="3"
+      maxlength="48"
+      data-slug-target
+      aria-describedby="organization-slug-help{% if !form.slug_error.is_empty() %} organization-slug-error{% endif %}"
+      {% if !form.slug_error.is_empty() %}aria-invalid="true"{% endif %}
+      required
+    >
+    {% if !form.slug_error.is_empty() %}
+    <p class="cw-field-error" id="organization-slug-error" role="alert">{{ form.slug_error }}</p>
+    {% endif %}
+    <p class="cw-field-help" id="organization-slug-help">URL-safe identifier. Used in organization URLs and API calls.</p>
+  </div>
+  <div class="cw-form-actions">
+    <a class="cw-button cw-button--outline" href="/dashboard">Cancel</a>
+    <button class="cw-button" type="submit">
+      <span class="cw-submit-idle">Create Organization</span>
+      <span class="cw-submit-busy">Creating…</span>
+    </button>
+  </div>
+</form>

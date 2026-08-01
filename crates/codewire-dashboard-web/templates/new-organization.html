@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="htmx-config" content='{"responseHandling":[{"code":"204","swap":false},{"code":"[23]..","swap":true},{"code":"422","swap":true},{"code":"[45]..","swap":false,"error":true},{"code":"...","swap":true}]}' >
+    <title>Create Organization · Codewire</title>
+    <link rel="stylesheet" href="/assets/codewire/design-v1.css">
+    <script src="/assets/codewire/htmx-2.0.10.min.js" integrity="sha384-q2oWHKMnJry5BOtYUZkXcyieUmqzXIjdmKDYicmMspegPENZr4UrGc656JYEgJoo" defer></script>
+    <script src="/assets/codewire/dashboard-v1.js" defer></script>
+  </head>
+  <body class="cw-body">
+    <div class="cw-app" data-dashboard-app data-mobile-open="false">
+      <aside class="cw-sidebar-slot">
+        {% include "sidebar.html" %}
+      </aside>
+      <header class="cw-mobile-bar">
+        <button class="cw-mobile-toggle" type="button" data-sidebar-toggle aria-label="Toggle sidebar">
+          <svg class="cw-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
+        </button>
+        <a class="cw-brand" href="/dashboard"><img src="/assets/codewire/logo-v1.svg" alt=""><span>Codewire</span></a>
+      </header>
+      <button class="cw-mobile-overlay" type="button" data-sidebar-close aria-label="Close sidebar"></button>
+      <aside class="cw-mobile-drawer">
+        {% include "sidebar.html" %}
+      </aside>
+      <main class="cw-main">
+        <div class="cw-main-inner">
+          <div class="cw-page cw-form-page">
+            <a class="cw-back-link" href="/dashboard">
+              <svg class="cw-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg>
+              Back to Dashboard
+            </a>
+            <section class="cw-card">
+              <div class="cw-card-header cw-form-header">
+                <span class="cw-form-icon" aria-hidden="true">
+                  <svg class="cw-icon" viewBox="0 0 24 24"><path d="M3 21h18M6 21V5l6-3 6 3v16M9 9h.01M9 13h.01M9 17h.01M15 9h.01M15 13h.01M15 17h.01"/></svg>
+                </span>
+                <h1 class="cw-page-title">Create Organization</h1>
+                <p class="cw-card-description">Organizations group your environments and team members together</p>
+              </div>
+              {% include "organization-form.html" %}
+            </section>
+          </div>
+        </div>
+      </main>
+    </div>
+  </body>
+</html>
