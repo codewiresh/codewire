@@ -47,7 +47,117 @@
 
         assert!(Cli::try_parse_from(["cw", "env", "--local", "--platform", "list"]).is_err());
         assert!(Cli::try_parse_from(["cw", "environment", "list"]).is_err());
-        assert!(Cli::try_parse_from(["cw", "env", "--local", "resize", "workspace"]).is_err());
+        let cli = Cli::try_parse_from([
+            "cw",
+            "env",
+            "--local",
+            "resize",
+            "workspace",
+            "--cpu",
+            "0.5",
+            "--memory",
+            "512Mi",
+            "--disk",
+            "20Gi",
+            "--yes",
+        ])
+        .unwrap();
+        let Command::Env(EnvArgs {
+            local,
+            platform,
+            command: EnvCommand::Resize(args),
+        }) = cli.command
+        else {
+            panic!("expected local env resize command");
+        };
+        assert!(local);
+        assert!(!platform);
+        assert_eq!(args.environment, "workspace");
+        assert_eq!(args.cpu.as_deref(), Some("0.5"));
+        assert_eq!(args.memory.as_deref(), Some("512Mi"));
+        assert_eq!(args.disk.as_deref(), Some("20Gi"));
+        assert!(args.yes);
+    }
+
+    #[test]
+    fn resize_quantity_and_automation_validation_is_human_safe() {
+        assert_eq!(parse_resize_cpu("500m").unwrap(), 500);
+        assert_eq!(parse_resize_cpu("0.5").unwrap(), 500);
+        assert_eq!(parse_resize_cpu("4").unwrap(), 4000);
+        assert!(parse_resize_cpu("0").is_err());
+        assert!(parse_resize_cpu("1.2345").is_err());
+        assert_eq!(parse_resize_memory("512Mi").unwrap(), 512);
+        assert_eq!(parse_resize_memory("4Gi").unwrap(), 4096);
+        assert!(parse_resize_memory("4GB").is_err());
+        assert_eq!(parse_resize_disk("20Gi").unwrap(), 20);
+        assert!(parse_resize_disk("0Gi").is_err());
+
+        let args = EnvResizeArgs {
+            environment: "workspace".to_string(),
+            cpu: None,
+            memory: None,
+            disk: None,
+            yes: false,
+            output: OutputFormat::Text,
+        };
+        assert!(resize_requires_interactive_wizard(&args, true).unwrap());
+        assert!(resize_requires_interactive_wizard(&args, false).is_err());
+
+        let explicit = EnvResizeArgs {
+            cpu: Some("4".to_string()),
+            ..args
+        };
+        assert!(!resize_requires_interactive_wizard(&explicit, true).unwrap());
+        assert!(resize_requires_interactive_wizard(&explicit, false).is_err());
+        assert!(resize_requires_interactive_wizard(
+            &EnvResizeArgs {
+                yes: true,
+                output: OutputFormat::Json,
+                ..explicit
+            },
+            false
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn local_resize_plan_normalizes_lima_cpu_and_warns_before_irreversible_work() {
+        let args = EnvResizeArgs {
+            environment: "workspace".to_string(),
+            cpu: Some("0.5".to_string()),
+            memory: Some("12Gi".to_string()),
+            disk: Some("120Gi".to_string()),
+            yes: false,
+            output: OutputFormat::Text,
+        };
+        let current = LocalLimaResources {
+            cpu_millicores: 4000,
+            memory_mb: 8192,
+            disk_gb: 100,
+        };
+        let plan =
+            resolve_local_resize_plan(&args, current.clone(), vec!["session-a".to_string()])
+                .unwrap();
+        assert_eq!(plan.desired.cpu_millicores, 1000);
+        assert_eq!(plan.desired.memory_mb, 12 * 1024);
+        assert_eq!(plan.desired.disk_gb, 120);
+        let rendered = format_local_resize_plan("workspace", &plan);
+        assert!(rendered.contains("session-a"));
+        assert!(rendered.contains("500m is normalized to 1"));
+        assert!(rendered.contains("Disk growth cannot be reversed"));
+
+        let shrink = EnvResizeArgs {
+            environment: "workspace".to_string(),
+            cpu: Some("0.5".to_string()),
+            memory: Some("12Gi".to_string()),
+            disk: Some("99Gi".to_string()),
+            yes: false,
+            output: OutputFormat::Text,
+        };
+        assert!(resolve_local_resize_plan(&shrink, current, Vec::new())
+            .unwrap_err()
+            .to_string()
+            .contains("disk shrink"));
     }
 
     #[test]

@@ -2794,12 +2794,25 @@ pub(crate) struct LocalResizeResult {
     pub(crate) status_after_resize: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct LocalLimaResources {
+    pub(crate) cpu_millicores: i32,
+    pub(crate) memory_mb: i32,
+    pub(crate) disk_gb: i32,
+}
+
 #[derive(Debug, serde::Deserialize)]
 pub(crate) struct LimaListEntry {
     #[serde(default)]
     pub(crate) name: String,
     #[serde(default)]
     pub(crate) status: String,
+    #[serde(default)]
+    pub(crate) cpus: i32,
+    #[serde(default)]
+    pub(crate) memory: i64,
+    #[serde(default)]
+    pub(crate) disk: i64,
 }
 
 pub(crate) fn validate_local_resize_args(args: &LocalResizeArgs) -> anyhow::Result<()> {
@@ -2840,6 +2853,14 @@ pub(crate) fn resize_local_lima_instance(
             instance.name
         );
     }
+    let current = local_lima_instance_resources(name)?;
+    if args.disk > 0 && args.disk < current.disk_gb {
+        anyhow::bail!(
+            "Lima disk shrink is not supported (current: {} Gi, requested: {} Gi)",
+            current.disk_gb,
+            args.disk
+        );
+    }
 
     let mut restart_after_resize = false;
     if status == "running" {
@@ -2865,16 +2886,23 @@ pub(crate) fn resize_local_lima_instance(
             String::from_utf8_lossy(&output.stderr)
         );
         let trimmed = combined.trim();
-        if trimmed.is_empty() {
-            anyhow::bail!(
+        let message = if trimmed.is_empty() {
+            format!(
                 "limactl edit {name}: exit code {}",
                 output.status.code().unwrap_or(1)
-            );
+            )
+        } else {
+            format!(
+                "limactl edit {name}: exit code {}\n{trimmed}",
+                output.status.code().unwrap_or(1)
+            )
+        };
+        if restart_after_resize {
+            run_local_lifecycle_command(instance, LocalLifecycleAction::Start).with_context(
+                || format!("restore running Lima environment after failed resize ({message})"),
+            )?;
         }
-        anyhow::bail!(
-            "limactl edit {name}: exit code {}\n{trimmed}",
-            output.status.code().unwrap_or(1)
-        );
+        anyhow::bail!(message);
     }
 
     if args.cpu > 0 {
@@ -2956,28 +2984,22 @@ pub(crate) fn local_lima_instance_status(name: &str) -> anyhow::Result<String> {
     parse_lima_instance_status(name, &output.stdout)
 }
 
-pub(crate) fn parse_lima_instance_status(name: &str, data: &[u8]) -> anyhow::Result<String> {
-    let data = trim_ascii_bytes(data);
-    if data.is_empty() {
-        return Ok("missing".to_string());
+pub(crate) fn local_lima_instance_resources(name: &str) -> anyhow::Result<LocalLimaResources> {
+    let output = ProcessCommand::new("limactl")
+        .args(["list", "--format", "json"])
+        .output()
+        .context("limactl list --format json")?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "limactl list --format json: exit code {}",
+            output.status.code().unwrap_or(1)
+        );
     }
+    parse_lima_instance_resources(name, &output.stdout)
+}
 
-    let entries = if data[0] == b'[' {
-        serde_json::from_slice::<Vec<LimaListEntry>>(data).context("parse limactl list output")?
-    } else {
-        let mut entries = Vec::new();
-        for line in data.split(|byte| *byte == b'\n') {
-            let line = trim_ascii_bytes(line);
-            if line.first() != Some(&b'{') {
-                continue;
-            }
-            entries.push(
-                serde_json::from_slice::<LimaListEntry>(line)
-                    .context("parse limactl list output")?,
-            );
-        }
-        entries
-    };
+pub(crate) fn parse_lima_instance_status(name: &str, data: &[u8]) -> anyhow::Result<String> {
+    let entries = parse_lima_list_entries(data)?;
 
     for entry in entries {
         if entry.name.trim() == name {
@@ -2990,6 +3012,48 @@ pub(crate) fn parse_lima_instance_status(name: &str, data: &[u8]) -> anyhow::Res
         }
     }
     Ok("missing".to_string())
+}
+
+pub(crate) fn parse_lima_instance_resources(
+    name: &str,
+    data: &[u8],
+) -> anyhow::Result<LocalLimaResources> {
+    let entry = parse_lima_list_entries(data)?
+        .into_iter()
+        .find(|entry| entry.name.trim() == name)
+        .ok_or_else(|| anyhow::anyhow!("Lima instance {name:?} is missing"))?;
+    let memory_mb = entry.memory / (1024 * 1024);
+    let disk_gb = entry.disk / (1024 * 1024 * 1024);
+    if entry.cpus <= 0 || memory_mb <= 0 || disk_gb <= 0 {
+        anyhow::bail!("Lima instance {name:?} did not report valid resources");
+    }
+    Ok(LocalLimaResources {
+        cpu_millicores: entry.cpus.saturating_mul(1000),
+        memory_mb: memory_mb.try_into().context("Lima memory exceeds i32")?,
+        disk_gb: disk_gb.try_into().context("Lima disk exceeds i32")?,
+    })
+}
+
+fn parse_lima_list_entries(data: &[u8]) -> anyhow::Result<Vec<LimaListEntry>> {
+    let data = trim_ascii_bytes(data);
+    if data.is_empty() {
+        return Ok(Vec::new());
+    }
+    if data[0] == b'[' {
+        return serde_json::from_slice::<Vec<LimaListEntry>>(data)
+            .context("parse limactl list output");
+    }
+    let mut entries = Vec::new();
+    for line in data.split(|byte| *byte == b'\n') {
+        let line = trim_ascii_bytes(line);
+        if line.first() != Some(&b'{') {
+            continue;
+        }
+        entries.push(
+            serde_json::from_slice::<LimaListEntry>(line).context("parse limactl list output")?,
+        );
+    }
+    Ok(entries)
 }
 
 pub(crate) fn trim_ascii_bytes(mut data: &[u8]) -> &[u8] {
@@ -3006,8 +3070,8 @@ pub(crate) fn lima_cpus_from_millicores(millicores: i32) -> i32 {
     ((millicores + 999) / 1000).max(1)
 }
 
-pub(crate) fn lima_memory_gib_from_mb(memory_mb: i32) -> i32 {
-    ((memory_mb + 1023) / 1024).max(1)
+pub(crate) fn lima_memory_gib_from_mb(memory_mb: i32) -> f32 {
+    (memory_mb.max(1) as f32) / 1024.0
 }
 
 fn install_local_docker_daemon_before_start(

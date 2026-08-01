@@ -1999,6 +1999,18 @@ workdir = "/workspace"
                 ],
             }
         );
+
+        let half_gib = LocalResizeArgs {
+            memory: 512,
+            ..args
+        };
+        let command = local_resize_command_spec(&instance, &half_gib).unwrap();
+        let memory = command
+            .args
+            .windows(2)
+            .find(|args| args[0] == "--memory")
+            .map(|args| args[1].as_str());
+        assert_eq!(memory, Some("0.5"));
     }
 
     #[test]
@@ -2047,6 +2059,22 @@ not-json
             parse_lima_instance_status("missing", lines).unwrap(),
             "missing"
         );
+    }
+
+    #[test]
+    fn parse_lima_instance_resources_uses_the_runtime_not_stale_local_defaults() {
+        let lines = br#"
+{"name":"cw-repo","status":"Running","cpus":4,"memory":8589934592,"disk":107374182400}
+"#;
+        assert_eq!(
+            parse_lima_instance_resources("cw-repo", lines).unwrap(),
+            LocalLimaResources {
+                cpu_millicores: 4000,
+                memory_mb: 8192,
+                disk_gb: 100,
+            }
+        );
+        assert!(parse_lima_instance_resources("missing", lines).is_err());
     }
 
     #[test]

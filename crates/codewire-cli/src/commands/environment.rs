@@ -13,6 +13,9 @@ pub(crate) async fn handle_env_command(globals: &Globals, args: EnvArgs) -> anyh
         }
         EnvCommand::List(list) => handle_unified_environment_list(globals, placement, list).await,
         EnvCommand::Info(info) => handle_unified_environment_info(globals, placement, info).await,
+        EnvCommand::Resize(resize) => {
+            handle_unified_environment_resize(globals, placement, resize).await
+        }
         EnvCommand::Start(target) => {
             handle_unified_environment_lifecycle(
                 globals,
@@ -367,6 +370,9 @@ pub(crate) async fn handle_platform_env_command(
                 print_environment_logs_historical(&logs);
             }
         }
+        EnvCommand::Resize(_) => {
+            anyhow::bail!("platform environment resize is not implemented yet; see #860")
+        }
         EnvCommand::Daemon(args) => {
             handle_environment_daemon_command(&environment_client, &org_id, args.command).await?;
         }
@@ -402,6 +408,219 @@ impl UnifiedEnvironmentLifecycle {
 enum UnifiedEnvironmentTarget {
     Local(String),
     Platform(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct LocalResizePlan {
+    pub(crate) current: LocalLimaResources,
+    pub(crate) desired: LocalLimaResources,
+    pub(crate) active_sessions: Vec<String>,
+    pub(crate) normalized_cpu_request: Option<i32>,
+}
+
+pub(crate) fn parse_resize_cpu(value: &str) -> anyhow::Result<i32> {
+    let value = value.trim();
+    if let Some(millicores) = value.strip_suffix('m') {
+        let millicores: i32 = millicores
+            .parse()
+            .with_context(|| format!("invalid CPU quantity {value:?}"))?;
+        if millicores <= 0 {
+            anyhow::bail!("CPU must be greater than zero");
+        }
+        return Ok(millicores);
+    }
+
+    let (whole, fraction) = match value.split_once('.') {
+        Some((whole, fraction)) => (whole, Some(fraction)),
+        None => (value, None),
+    };
+    if whole.is_empty() || !whole.bytes().all(|byte| byte.is_ascii_digit()) {
+        anyhow::bail!("invalid CPU quantity {value:?}; use values such as 500m, 0.5, or 4");
+    }
+    let whole: i32 = whole
+        .parse()
+        .with_context(|| format!("invalid CPU quantity {value:?}"))?;
+    let fractional_millicores = match fraction {
+        None => 0,
+        Some(fraction)
+            if !fraction.is_empty()
+                && fraction.len() <= 3
+                && fraction.bytes().all(|byte| byte.is_ascii_digit()) =>
+        {
+            let scale = 10_i32.pow((3 - fraction.len()) as u32);
+            let fraction: i32 = fraction
+                .parse()
+                .with_context(|| format!("invalid CPU quantity {value:?}"))?;
+            fraction * scale
+        }
+        _ => anyhow::bail!(
+            "invalid CPU quantity {value:?}; CPU fractions may have at most three decimal places"
+        ),
+    };
+    let millicores = whole
+        .checked_mul(1000)
+        .and_then(|whole| whole.checked_add(fractional_millicores))
+        .ok_or_else(|| anyhow::anyhow!("CPU quantity {value:?} is too large"))?;
+    if millicores <= 0 {
+        anyhow::bail!("CPU must be greater than zero");
+    }
+    Ok(millicores)
+}
+
+fn parse_resize_binary_quantity(value: &str, unit: &str, label: &str) -> anyhow::Result<i32> {
+    let value = value.trim();
+    let amount = value.strip_suffix(unit).ok_or_else(|| {
+        anyhow::anyhow!("invalid {label} quantity {value:?}; use a value such as 512Mi or 4Gi")
+    })?;
+    let amount: i32 = amount
+        .parse()
+        .with_context(|| format!("invalid {label} quantity {value:?}"))?;
+    if amount <= 0 {
+        anyhow::bail!("{label} must be greater than zero");
+    }
+    Ok(amount)
+}
+
+pub(crate) fn parse_resize_memory(value: &str) -> anyhow::Result<i32> {
+    if value.trim().ends_with("Mi") {
+        return parse_resize_binary_quantity(value, "Mi", "memory");
+    }
+    let gib = parse_resize_binary_quantity(value, "Gi", "memory")?;
+    gib.checked_mul(1024)
+        .ok_or_else(|| anyhow::anyhow!("memory quantity {value:?} is too large"))
+}
+
+pub(crate) fn parse_resize_disk(value: &str) -> anyhow::Result<i32> {
+    parse_resize_binary_quantity(value, "Gi", "disk")
+}
+
+fn format_resize_cpu(millicores: i32) -> String {
+    if millicores % 1000 == 0 {
+        (millicores / 1000).to_string()
+    } else {
+        format!("{millicores}m")
+    }
+}
+
+fn format_resize_memory(memory_mb: i32) -> String {
+    if memory_mb % 1024 == 0 {
+        format!("{} Gi", memory_mb / 1024)
+    } else {
+        format!("{memory_mb} Mi")
+    }
+}
+
+fn format_resize_disk(disk_gb: i32) -> String {
+    format!("{disk_gb} Gi")
+}
+
+pub(crate) fn resolve_local_resize_plan(
+    args: &EnvResizeArgs,
+    current: LocalLimaResources,
+    active_sessions: Vec<String>,
+) -> anyhow::Result<LocalResizePlan> {
+    let (cpu_millicores, normalized_cpu_request) = match args.cpu.as_deref() {
+        Some(value) => {
+            let requested = parse_resize_cpu(value)?;
+            let normalized = lima_cpus_from_millicores(requested).saturating_mul(1000);
+            (normalized, (requested != normalized).then_some(requested))
+        }
+        None => (current.cpu_millicores, None),
+    };
+    let memory_mb = match args.memory.as_deref() {
+        Some(value) => parse_resize_memory(value)?,
+        None => current.memory_mb,
+    };
+    let disk_gb = match args.disk.as_deref() {
+        Some(value) => parse_resize_disk(value)?,
+        None => current.disk_gb,
+    };
+    if disk_gb < current.disk_gb {
+        anyhow::bail!(
+            "Lima disk shrink is not supported (current: {}, requested: {})",
+            format_resize_disk(current.disk_gb),
+            format_resize_disk(disk_gb)
+        );
+    }
+    let desired = LocalLimaResources {
+        cpu_millicores,
+        memory_mb,
+        disk_gb,
+    };
+    if desired == current {
+        anyhow::bail!("the requested resources already match the current Lima environment");
+    }
+    Ok(LocalResizePlan {
+        current,
+        desired,
+        active_sessions,
+        normalized_cpu_request,
+    })
+}
+
+pub(crate) fn format_local_resize_plan(name: &str, plan: &LocalResizePlan) -> String {
+    let mut output = format!(
+        "Environment: {name} (local · Lima)\n\n              Current   Desired\nCPU       {:<9} {}\nMemory    {:<9} {}\nDisk      {:<9} {}\n\n",
+        format_resize_cpu(plan.current.cpu_millicores),
+        format_resize_cpu(plan.desired.cpu_millicores),
+        format_resize_memory(plan.current.memory_mb),
+        format_resize_memory(plan.desired.memory_mb),
+        format_resize_disk(plan.current.disk_gb),
+        format_resize_disk(plan.desired.disk_gb),
+    );
+    if plan.active_sessions.is_empty() {
+        output.push_str("Active sessions: none\n");
+    } else {
+        output.push_str(&format!(
+            "Active sessions ({}): {}\n",
+            plan.active_sessions.len(),
+            plan.active_sessions.join(", ")
+        ));
+        output.push_str("The required Lima restart will terminate these sessions.\n");
+    }
+    if let Some(requested) = plan.normalized_cpu_request {
+        output.push_str(&format!(
+            "Lima uses whole CPU cores; {} is normalized to {}.\n",
+            format_resize_cpu(requested),
+            format_resize_cpu(plan.desired.cpu_millicores)
+        ));
+    }
+    output.push_str(
+        "Lima will stop, resize, and restart this environment. Disk growth cannot be reversed.\n",
+    );
+    output
+}
+
+pub(crate) fn resize_requires_interactive_wizard(
+    args: &EnvResizeArgs,
+    stdin_is_terminal: bool,
+) -> anyhow::Result<bool> {
+    let has_resources = args.cpu.is_some() || args.memory.is_some() || args.disk.is_some();
+    let interactive = stdin_is_terminal && matches!(args.output, OutputFormat::Text);
+    if !has_resources {
+        if interactive {
+            return Ok(true);
+        }
+        anyhow::bail!(
+            "non-interactive resize requires at least one of --cpu, --memory, or --disk and --yes"
+        );
+    }
+    if !interactive && !args.yes {
+        anyhow::bail!("non-interactive resize requires --yes after explicit resource validation");
+    }
+    Ok(false)
+}
+
+fn prompt_resize_quantity(label: &str, current: &str) -> anyhow::Result<Option<String>> {
+    eprint!("{label} [{current}]: ");
+    std::io::stderr()
+        .flush()
+        .context("flush resize wizard prompt")?;
+    let mut input = String::new();
+    std::io::stdin()
+        .read_line(&mut input)
+        .context("read resize wizard input")?;
+    Ok(trimmed_optional(Some(input)))
 }
 
 impl EnvDaemonCommand {
@@ -565,6 +784,107 @@ async fn handle_unified_environment_info(
             .await
         }
     }
+}
+
+async fn active_local_resize_sessions(
+    instance: &config::LocalInstanceConfig,
+    lifecycle_state: &str,
+) -> anyhow::Result<Vec<String>> {
+    if lifecycle_state != "running" {
+        return Ok(Vec::new());
+    }
+    let sessions = super::sessions::local_environment_session_client(instance)
+        .await?
+        .list()
+        .await?;
+    Ok(sessions
+        .into_iter()
+        .filter(|session| {
+            !matches!(
+                codewire_daemon::client::v1::SessionLifecycleState::try_from(session.state),
+                Ok(codewire_daemon::client::v1::SessionLifecycleState::Stopped
+                    | codewire_daemon::client::v1::SessionLifecycleState::Exited
+                    | codewire_daemon::client::v1::SessionLifecycleState::Failed
+                    | codewire_daemon::client::v1::SessionLifecycleState::Interrupted)
+            )
+        })
+        .map(|session| session.session_id)
+        .collect())
+}
+
+async fn handle_unified_environment_resize(
+    globals: &Globals,
+    placement: Option<EnvironmentPlacement>,
+    mut args: EnvResizeArgs,
+) -> anyhow::Result<()> {
+    let target =
+        resolve_unified_environment_target(globals, placement, &args.environment, "resize").await?;
+    let UnifiedEnvironmentTarget::Local(name) = target else {
+        anyhow::bail!(
+            "platform environment resize is not implemented yet; see #860 (use `cw env --local resize ENV` for Lima environments)"
+        );
+    };
+
+    let env = OsEnv;
+    let paths = ResolvePaths::from_env(&env);
+    let config = config::load_local_instances_config(&paths.mesh_data_dir)?;
+    let instance = config
+        .instances
+        .get(&name)
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("local environment {name:?} not found"))?;
+    if instance.backend != "lima" {
+        anyhow::bail!(
+            "local resize is currently only supported for Lima-backed environments; {:?} uses {}",
+            name,
+            instance.backend
+        );
+    }
+
+    let current = local_lima_instance_resources(local_lima_instance_name(&instance)?)?;
+    if resize_requires_interactive_wizard(&args, stdin_is_interactive())? {
+        args.cpu = prompt_resize_quantity("CPU", &format_resize_cpu(current.cpu_millicores))?;
+        args.memory = prompt_resize_quantity("Memory", &format_resize_memory(current.memory_mb))?;
+        args.disk = prompt_resize_quantity("Disk", &format_resize_disk(current.disk_gb))?;
+    }
+    let lifecycle_state = local_environment_lifecycle_status(&instance)?;
+    let active_sessions = active_local_resize_sessions(&instance, &lifecycle_state).await?;
+    let plan = resolve_local_resize_plan(&args, current, active_sessions)?;
+
+    if matches!(args.output, OutputFormat::Text) {
+        print!("{}", format_local_resize_plan(&name, &plan));
+    }
+    if !args.yes && !prompt_confirm_default_no("Apply this resize")? {
+        println!("Aborted.");
+        return Ok(());
+    }
+
+    handle_local_command(
+        globals,
+        LocalArgs {
+            output: args.output,
+            command: LocalCommand::Resize(LocalResizeArgs {
+                name: Some(name),
+                cpu: if plan.desired.cpu_millicores != plan.current.cpu_millicores {
+                    plan.desired.cpu_millicores
+                } else {
+                    0
+                },
+                memory: if plan.desired.memory_mb != plan.current.memory_mb {
+                    plan.desired.memory_mb
+                } else {
+                    0
+                },
+                disk: if plan.desired.disk_gb != plan.current.disk_gb {
+                    plan.desired.disk_gb
+                } else {
+                    0
+                },
+                restart: true,
+            }),
+        },
+    )
+    .await
 }
 
 async fn handle_unified_environment_daemon_command(

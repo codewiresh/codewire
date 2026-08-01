@@ -456,6 +456,8 @@ pub(crate) enum EnvCommand {
     List(EnvListArgs),
     #[command(about = "Show environment details")]
     Info(EnvInfoArgs),
+    #[command(about = "Resize a local environment or show platform resize availability")]
+    Resize(EnvResizeArgs),
     #[command(
         name = "trust-report",
         alias = "attest",
@@ -614,6 +616,30 @@ pub(crate) struct EnvInfoArgs {
     environment: String,
     #[arg(long, value_enum, default_value_t = OutputFormat::Text, help = "Output format")]
     output: OutputFormat,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct EnvResizeArgs {
+    #[arg(value_name = "ENV")]
+    pub(crate) environment: String,
+    #[arg(long, value_name = "CPU", help = "CPU (for example 500m, 0.5, or 4)")]
+    pub(crate) cpu: Option<String>,
+    #[arg(
+        long,
+        value_name = "MEMORY",
+        help = "Memory (for example 512Mi or 4Gi)"
+    )]
+    pub(crate) memory: Option<String>,
+    #[arg(long, value_name = "DISK", help = "Disk size (for example 20Gi)")]
+    pub(crate) disk: Option<String>,
+    #[arg(
+        short,
+        long,
+        help = "Apply a validated resize without the default-no prompt"
+    )]
+    pub(crate) yes: bool,
+    #[arg(long, value_enum, default_value_t = OutputFormat::Text, help = "Output format")]
+    pub(crate) output: OutputFormat,
 }
 
 #[derive(Debug, Args)]

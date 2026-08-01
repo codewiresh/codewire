@@ -64,7 +64,19 @@ cargo build -p codewire-cli-bin --bin cw
 
 # Inspect and manage the same environment through the unified lifecycle.
 ./target/debug/cw env --local info codewire-dev
+
+# Resize a Lima environment. A terminal shows the current-to-desired plan,
+# active-session warning, and a default-no confirmation before the restart.
+./target/debug/cw env --local resize codewire-dev --cpu 6 --memory 12Gi --disk 120Gi
+
+# Automation must provide explicit resources and --yes.
+./target/debug/cw env --local resize codewire-dev --cpu 6 --yes --output json
 ```
+
+`cw env resize ENV` resolves the placement when it is unambiguous. Local resize
+currently supports Lima only; it stops and restarts a running VM without
+recreating it, and disk growth cannot be reversed. Platform resize is tracked
+separately in #860.
 
 ### Local database and dashboard loop
 
