@@ -99,6 +99,38 @@
     }
 
     #[test]
+    fn environment_run_tty_selection_preserves_interactive_and_machine_modes() {
+        let Command::Run(interactive) = Cli::try_parse_from(["cw", "run", "builder", "--", "codex"])
+            .unwrap()
+            .command
+        else {
+            panic!("expected run command");
+        };
+        assert!(environment_run_allocates_tty_for_streams(&interactive, true, true));
+        assert!(!environment_run_allocates_tty_for_streams(&interactive, true, false));
+
+        let Command::Run(no_tty) = Cli::try_parse_from([
+            "cw", "run", "--no-tty", "builder", "--", "codex",
+        ])
+        .unwrap()
+        .command
+        else {
+            panic!("expected run command");
+        };
+        assert!(!environment_run_allocates_tty_for_streams(&no_tty, true, true));
+
+        let Command::Run(json) = Cli::try_parse_from([
+            "cw", "run", "--output", "json", "builder", "--", "codex",
+        ])
+        .unwrap()
+        .command
+        else {
+            panic!("expected run command");
+        };
+        assert!(!environment_run_allocates_tty_for_streams(&json, true, true));
+    }
+
+    #[test]
     fn platform_session_states_match_local_presentation_names() {
         use codewire_client::EnvironmentSessionState;
 

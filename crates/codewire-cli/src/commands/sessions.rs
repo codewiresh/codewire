@@ -35,6 +35,13 @@ enum EnvironmentSessionTarget {
 }
 
 impl EnvironmentSessionTarget {
+    fn ensure_ready_for_run(&self) -> anyhow::Result<()> {
+        match self {
+            Self::Local { instance, .. } => ensure_local_environment_runtime_ready(instance),
+            Self::Platform { .. } => Ok(()),
+        }
+    }
+
     async fn list(&self) -> anyhow::Result<Vec<EnvironmentSessionView>> {
         match self {
             Self::Local { instance, .. } => Ok(local_environment_session_client(instance)
@@ -471,10 +478,22 @@ fn session_terminal_size(pty: bool) -> anyhow::Result<(u16, u16)> {
 }
 
 fn environment_run_allocates_tty(args: &EnvironmentRunArgs) -> bool {
+    environment_run_allocates_tty_for_streams(
+        args,
+        std::io::stdin().is_terminal(),
+        std::io::stdout().is_terminal(),
+    )
+}
+
+pub(crate) fn environment_run_allocates_tty_for_streams(
+    args: &EnvironmentRunArgs,
+    stdin_is_terminal: bool,
+    stdout_is_terminal: bool,
+) -> bool {
     if args.no_tty || matches!(args.output, OutputFormat::Json) {
         return false;
     }
-    args.tty || (std::io::stdin().is_terminal() && std::io::stdout().is_terminal())
+    args.tty || (stdin_is_terminal && stdout_is_terminal)
 }
 
 fn print_environment_sessions(
@@ -505,6 +524,7 @@ pub(crate) async fn handle_environment_run_command(
     let target = resolve_environment_session_target(globals, args.environment.as_deref()).await?;
     let pty = environment_run_allocates_tty(&args);
     let working_dir = args.workdir.unwrap_or_else(|| target.default_working_dir());
+    target.ensure_ready_for_run()?;
     let session = target
         .launch(
             args.command,

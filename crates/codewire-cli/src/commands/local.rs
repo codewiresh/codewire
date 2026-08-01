@@ -2634,6 +2634,108 @@ pub(crate) fn repair_local_daemon(instance: &config::LocalInstanceConfig) -> any
     Ok(())
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LocalLimaWorkspaceRecovery {
+    AlreadyRunning,
+    StartVmAndWorkspace,
+    StartWorkspace,
+}
+
+pub(crate) fn classify_local_lima_workspace_recovery(
+    vm_status: &str,
+    workspace_status: Option<&str>,
+) -> anyhow::Result<LocalLimaWorkspaceRecovery> {
+    match vm_status.trim().to_ascii_lowercase().as_str() {
+        "missing" => anyhow::bail!(
+            "saved local Lima environment is missing; recreate it instead of starting a new runtime implicitly"
+        ),
+        "running" => match workspace_status
+            .map(str::trim)
+            .map(str::to_ascii_lowercase)
+            .as_deref()
+        {
+            Some("running") => Ok(LocalLimaWorkspaceRecovery::AlreadyRunning),
+            Some("missing") => anyhow::bail!(
+                "saved local Lima environment has no managed cw-workspace container; recreate it instead of creating one implicitly"
+            ),
+            Some(_) => Ok(LocalLimaWorkspaceRecovery::StartWorkspace),
+            None => anyhow::bail!(
+                "Lima VM is running but its managed workspace container status was unavailable"
+            ),
+        },
+        _ => Ok(LocalLimaWorkspaceRecovery::StartVmAndWorkspace),
+    }
+}
+
+pub(crate) fn local_lima_workspace_recovery_command_specs(
+    instance: &config::LocalInstanceConfig,
+    recovery: LocalLimaWorkspaceRecovery,
+) -> anyhow::Result<Vec<LocalRuntimeCommand>> {
+    match recovery {
+        LocalLimaWorkspaceRecovery::AlreadyRunning => Ok(Vec::new()),
+        LocalLimaWorkspaceRecovery::StartVmAndWorkspace => Ok(vec![
+            local_lima_vm_start_command_spec(instance)?,
+            local_lima_docker_service_start_command_spec(instance)?,
+            local_lima_workspace_start_command_spec(instance)?,
+        ]),
+        LocalLimaWorkspaceRecovery::StartWorkspace => {
+            Ok(vec![local_lima_workspace_start_command_spec(instance)?])
+        }
+    }
+}
+
+pub(crate) fn local_lima_vm_start_command_spec(
+    instance: &config::LocalInstanceConfig,
+) -> anyhow::Result<LocalRuntimeCommand> {
+    Ok(LocalRuntimeCommand {
+        program: "limactl".to_string(),
+        args: vec![
+            "start".to_string(),
+            "--tty=false".to_string(),
+            local_lima_instance_name(instance)?.to_string(),
+        ],
+    })
+}
+
+pub(crate) fn ensure_local_environment_runtime_ready(
+    instance: &config::LocalInstanceConfig,
+) -> anyhow::Result<()> {
+    match trimmed_required(&instance.backend, "local backend")? {
+        "docker" => {
+            match docker_workspace_container_status(local_runtime_name(instance)?)?.as_str() {
+                "running" => Ok(()),
+                "missing" => anyhow::bail!(
+                    "saved local Docker environment is missing; recreate it instead of starting a new runtime implicitly"
+                ),
+                _ => {
+                    run_local_command_combined(&local_lifecycle_command_spec(
+                        instance,
+                        LocalLifecycleAction::Start,
+                    )?)
+                    .context("start saved local Docker environment before session launch")?;
+                    Ok(())
+                }
+            }
+        }
+        "lima" => {
+            let lima_name = local_lima_instance_name(instance)?;
+            let vm_status = local_lima_instance_status(lima_name)?;
+            let workspace_status = vm_status
+                .eq_ignore_ascii_case("running")
+                .then(|| lima_workspace_container_status(lima_name))
+                .transpose()?;
+            let recovery =
+                classify_local_lima_workspace_recovery(&vm_status, workspace_status.as_deref())?;
+            for command in local_lima_workspace_recovery_command_specs(instance, recovery)? {
+                run_local_command_combined(&command)
+                    .context("recover saved Lima environment before session launch")?;
+            }
+            Ok(())
+        }
+        other => anyhow::bail!("unsupported local backend {other:?}"),
+    }
+}
+
 pub(crate) fn local_environment_lifecycle_status(
     instance: &config::LocalInstanceConfig,
 ) -> anyhow::Result<String> {

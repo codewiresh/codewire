@@ -1803,6 +1803,67 @@ workdir = "/workspace"
     }
 
     #[test]
+    fn stopped_lima_workspace_recovery_starts_only_the_missing_layer() {
+        assert_eq!(
+            classify_local_lima_workspace_recovery("stopped", None).unwrap(),
+            LocalLimaWorkspaceRecovery::StartVmAndWorkspace
+        );
+        assert_eq!(
+            classify_local_lima_workspace_recovery("running", Some("exited")).unwrap(),
+            LocalLimaWorkspaceRecovery::StartWorkspace
+        );
+        assert_eq!(
+            classify_local_lima_workspace_recovery("running", Some("running")).unwrap(),
+            LocalLimaWorkspaceRecovery::AlreadyRunning
+        );
+        assert!(classify_local_lima_workspace_recovery("missing", None)
+            .unwrap_err()
+            .to_string()
+            .contains("recreate"));
+        assert!(classify_local_lima_workspace_recovery("running", Some("missing"))
+            .unwrap_err()
+            .to_string()
+            .contains("recreate"));
+    }
+
+    #[test]
+    fn lima_workspace_recovery_runs_vm_container_steps_before_session_launch() {
+        let instance = config::LocalInstanceConfig {
+            backend: "lima".to_string(),
+            lima_instance_name: "cw-repo-vm".to_string(),
+            ..config::LocalInstanceConfig::default()
+        };
+
+        assert_eq!(
+            local_lima_workspace_recovery_command_specs(
+                &instance,
+                LocalLimaWorkspaceRecovery::StartVmAndWorkspace,
+            )
+            .unwrap(),
+            vec![
+                LocalRuntimeCommand {
+                    program: "limactl".to_string(),
+                    args: vec![
+                        "start".to_string(),
+                        "--tty=false".to_string(),
+                        "cw-repo-vm".to_string(),
+                    ],
+                },
+                local_lima_docker_service_start_command_spec(&instance).unwrap(),
+                local_lima_workspace_start_command_spec(&instance).unwrap(),
+            ]
+        );
+        assert_eq!(
+            local_lima_workspace_recovery_command_specs(
+                &instance,
+                LocalLimaWorkspaceRecovery::StartWorkspace,
+            )
+            .unwrap(),
+            vec![local_lima_workspace_start_command_spec(&instance).unwrap()]
+        );
+    }
+
+    #[test]
     fn local_daemon_supervisor_commands_are_backend_native_and_bounded() {
         let docker = config::LocalInstanceConfig {
             backend: "docker".to_string(),
