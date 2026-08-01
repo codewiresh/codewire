@@ -439,6 +439,7 @@ run_release() {
   scripts/ci/tests/test-publish-image-to-ghcr.sh
   scripts/ci/tests/test-run-skopeo-container.sh
   scripts/ci/tests/test-support-images-workflow.sh
+  scripts/ci/tests/test-workspace-image-verify-workflow.sh
   python3 scripts/ci/tests/test-image-bundle.py
   scripts/ci/tests/test-deploy-prod-workflow.sh
   python3 scripts/checks/repo_checks.py production-source-ownership --self-test

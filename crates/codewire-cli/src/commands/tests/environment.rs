@@ -924,6 +924,27 @@
     }
 
     #[test]
+    fn env_create_canonicalizes_supported_agent_aliases() {
+        let cli = Cli::try_parse_from([
+            "cw",
+            "env",
+            "create",
+            "--coding-agent",
+            "kimi",
+        ])
+        .unwrap();
+        let Command::Env(EnvArgs { command, .. }) = cli.command else {
+            panic!("expected env command");
+        };
+        let EnvCommand::Create(args) = command else {
+            panic!("expected env create command");
+        };
+        let request = env_create_request_from_args(&args).unwrap();
+        assert_eq!(request.agent, "kimi-code");
+        assert_eq!(request.agents[0].agent_type, "kimi-code");
+    }
+
+    #[test]
     fn env_create_mesh_bootstrap_injects_mesh_first_setup_env() {
         let mut request = CreateEnvironmentRequest::default();
 

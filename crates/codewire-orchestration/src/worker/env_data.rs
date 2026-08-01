@@ -101,11 +101,6 @@ impl SetupConfig {
             .iter()
             .any(|a| a.agent_type == agent_type)
     }
-
-    /// Mirrors `shouldInstallAgents`.
-    pub fn should_install_agents(&self) -> bool {
-        self.install_agents == Some(true)
-    }
 }
 
 /// Mirrors `worker.environmentRow`.
@@ -238,7 +233,7 @@ mod tests {
         assert_eq!(sc.install_command, "npm ci");
         assert_eq!(sc.env_vars.get("A").map(String::as_str), Some("1"));
         assert_eq!(sc.agents[0].agent_type, "claude-code");
-        assert!(sc.should_install_agents());
+        assert_eq!(sc.install_agents, Some(true));
         assert_eq!(sc.app_ports[0].port, 3000);
         assert_eq!(sc.include_org_secrets, Some(false));
         assert_eq!(sc.include_user_secrets, None);

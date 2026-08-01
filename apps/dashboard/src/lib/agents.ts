@@ -35,6 +35,18 @@ export const AGENT_CATALOG: AgentCatalogEntry[] = [
     ],
   },
   {
+    id: "kimi-code",
+    label: "Kimi Code",
+    // Kimi Code owns its own provider configuration. Do not present a
+    // generic shell-secret field that implies it consumes one.
+    envVars: [],
+  },
+  {
+    id: "pi",
+    label: "Pi",
+    envVars: [],
+  },
+  {
     id: "aider",
     label: "Aider",
     envVars: [

@@ -148,7 +148,6 @@ export function EnvCreateForm({
   const [name, setName] = useState("");
   const [selectedAgents, setSelectedAgents] = useState<string[]>([]);
   const [agentSecretValues, setAgentSecretValues] = useState<Record<string, string>>({});
-  const [installAgents, setInstallAgents] = useState(false);
   const [secretProject, setSecretProject] = useState("");
   const [secretProjectDialogOpen, setSecretProjectDialogOpen] = useState(false);
   const [newProjectName, setNewProjectName] = useState("");
@@ -211,7 +210,6 @@ export function EnvCreateForm({
     if (draft.ttlSeconds) setTTL(`${draft.ttlSeconds}s`);
     if (draft.name) setName(draft.name);
     setSelectedAgents(draft.agents?.map((agent: { type: string }) => agent.type) ?? []);
-    setInstallAgents(Boolean(draft.installAgents));
     setSecretProject(draft.secretProject ?? "");
     setIncludeOrgSecrets(draft.includeOrgSecrets !== false);
     setIncludeUserSecrets(draft.includeUserSecrets !== false);
@@ -243,7 +241,6 @@ export function EnvCreateForm({
       name: name || undefined,
       envVars: {},
       agents: selectedAgents.map((type) => ({ type })),
-      installAgents: installAgents || undefined,
       agent: "",
       agentEnv: {},
       secretProject,
@@ -299,7 +296,7 @@ export function EnvCreateForm({
         setError(errorMessage(error));
       },
     });
-  }, [orgId, repoUrl, branch, repos, mode, image, installCommand, startupScript, name, cpu, memory, ttl, selectedAgents, installAgents, secretProject, includeOrgSecrets, includeUserSecrets, appPorts, applyDraftResult, runServerStream]);
+  }, [orgId, repoUrl, branch, repos, mode, image, installCommand, startupScript, name, cpu, memory, ttl, selectedAgents, secretProject, includeOrgSecrets, includeUserSecrets, appPorts, applyDraftResult, runServerStream]);
 
   const resetDetect = useCallback(() => {
     abortDetect();
@@ -320,7 +317,6 @@ export function EnvCreateForm({
     if (preset.defaultSetupConfig?.installCommand) setInstallCommand(preset.defaultSetupConfig.installCommand);
     if (preset.defaultSetupConfig?.startupScript) setStartupScript(preset.defaultSetupConfig.startupScript);
     setSelectedAgents(preset.defaultSetupConfig?.agents?.map((agent) => agent.type) ?? []);
-    setInstallAgents(Boolean(preset.defaultSetupConfig?.installAgents));
     setImageReady(true);
     setError("");
   }
@@ -336,7 +332,6 @@ export function EnvCreateForm({
     setInstallCommand("");
     setStartupScript("");
     setSelectedAgents([]);
-    setInstallAgents(false);
     setImageReady(true);
     setError("");
   }
@@ -403,7 +398,6 @@ export function EnvCreateForm({
         name: name || undefined,
         envVars: {},
         agents: selectedAgents.map((type) => ({ type })),
-        installAgents: installAgents || undefined,
         agent: "",
         agentEnv: {},
         secretProject,
@@ -433,7 +427,7 @@ export function EnvCreateForm({
     setPreparedPresetId("");
     setImage(""); setInstallCommand(""); setStartupScript("");
     setCpu(DEFAULT_FULL_CPU); setMemory(DEFAULT_FULL_MEMORY); setDisk(DEFAULT_FULL_DISK); setTTL("");
-    setName(""); setSelectedAgents([]); setAgentSecretValues({}); setInstallAgents(false); setSecretProject("");
+    setName(""); setSelectedAgents([]); setAgentSecretValues({}); setSecretProject("");
     setSecretProjectDialogOpen(false); setNewProjectName(""); setShowProjectPicker(false);
     setIncludeOrgSecrets(true); setIncludeUserSecrets(true); setAppPorts([]);
     setShowAdvanced(false);
@@ -951,7 +945,7 @@ export function EnvCreateForm({
                         <div>
                           <div className="text-sm font-medium text-[color:var(--fg-primary)]">{agent.label}</div>
                           <div className="text-xs text-[color:var(--fg-tertiary)]">
-                            Expected in the image{installAgents ? ", or installed during setup" : ""}.
+                            Included in the canonical workspace image. Custom images must provide it.
                           </div>
                         </div>
                         <button
@@ -1027,18 +1021,6 @@ export function EnvCreateForm({
                     className="rounded border-[var(--border)]"
                   />
                   <span className="text-[color:var(--fg-secondary)]">Include org secrets</span>
-                </label>
-                <label className="flex items-center gap-2 text-sm cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={installAgents}
-                    onChange={(e) => setInstallAgents(e.target.checked)}
-                    className="rounded border-[var(--border)]"
-                  />
-                  <span className="text-[color:var(--fg-secondary)]">Install selected agent tools during setup</span>
-                  <span className="text-xs text-[color:var(--fg-tertiary)]">
-                    Advanced fallback for custom images. Slower and less reliable than agent-ready images.
-                  </span>
                 </label>
               </div>
             </div>

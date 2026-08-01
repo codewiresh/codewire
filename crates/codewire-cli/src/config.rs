@@ -833,6 +833,8 @@ pub fn canonical_agent_id(raw: &str) -> String {
         "claude" | "claude-code" => "claude-code".to_string(),
         "codex" => "codex".to_string(),
         "gemini" | "gemini-cli" => "gemini-cli".to_string(),
+        "kimi" | "kimi-code" => "kimi-code".to_string(),
+        "pi" | "pi-coding-agent" => "pi".to_string(),
         "aider" => "aider".to_string(),
         _ => raw.trim().to_string(),
     }
@@ -842,6 +844,7 @@ pub fn display_agent_id(raw: &str) -> String {
     match canonical_agent_id(raw).as_str() {
         "claude-code" => "claude".to_string(),
         "gemini-cli" => "gemini".to_string(),
+        "kimi-code" => "kimi".to_string(),
         other => other.to_string(),
     }
 }
@@ -1930,7 +1933,10 @@ mounts:
             })
         );
         assert_eq!(canonical_agent_id("gemini"), "gemini-cli");
+        assert_eq!(canonical_agent_id("kimi"), "kimi-code");
+        assert_eq!(canonical_agent_id("pi-coding-agent"), "pi");
         assert_eq!(display_agent_id("claude-code"), "claude");
+        assert_eq!(display_agent_id("kimi-code"), "kimi");
     }
 
     #[test]

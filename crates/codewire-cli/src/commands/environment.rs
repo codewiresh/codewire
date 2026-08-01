@@ -1226,7 +1226,9 @@ pub(crate) fn env_create_request_from_args(
             }
         })
         .unwrap_or_default();
-    let agent = trimmed_optional(args.coding_agent.clone()).unwrap_or_default();
+    let agent = trimmed_optional(args.coding_agent.clone())
+        .map(|agent| config::canonical_agent_id(&agent))
+        .unwrap_or_default();
     let agents = if agent.is_empty() {
         Vec::new()
     } else {

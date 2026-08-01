@@ -1305,6 +1305,8 @@ fn canonical_agent_type_from_yaml(raw: &str) -> anyhow::Result<Option<String>> {
         "claude" | "claude-code" => Ok(Some("claude-code".to_string())),
         "codex" => Ok(Some("codex".to_string())),
         "gemini" | "gemini-cli" => Ok(Some("gemini-cli".to_string())),
+        "kimi" | "kimi-code" => Ok(Some("kimi-code".to_string())),
+        "pi" | "pi-coding-agent" => Ok(Some("pi".to_string())),
         "aider" => Ok(Some("aider".to_string())),
         other => anyhow::bail!("parse codewire.yaml agents: unsupported agent \"{other}\""),
     }
@@ -1402,6 +1404,10 @@ secrets:
         let r = parse_codewire_yaml("agent: gemini\nsecrets: proj2\n", "repo").unwrap();
         assert_eq!(r.agents[0].agent_type, "gemini-cli");
         assert_eq!(r.secret_project, "proj2");
+
+        let r = parse_codewire_yaml("agents: [kimi, pi-coding-agent]\n", "repo").unwrap();
+        assert_eq!(r.agents[0].agent_type, "kimi-code");
+        assert_eq!(r.agents[1].agent_type, "pi");
 
         // Unsupported agent errors like Go.
         assert!(parse_codewire_yaml("agent: skynet\n", "repo").is_err());

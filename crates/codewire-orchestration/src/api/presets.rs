@@ -63,7 +63,7 @@ async fn require_org_role(
 }
 
 fn valid_agent_type(agent: &str) -> bool {
-    crate::worker::scripts::agent_install_cmd(agent).is_some()
+    crate::worker::agents::is_supported_agent(agent)
 }
 
 // ── Create ──────────────────────────────────────────────────────────────

@@ -205,7 +205,7 @@ fn validate_environment_resources(
 
 /// Mirrors `worker.ValidAgentType` via the shared agent registry.
 fn valid_agent_type(agent: &str) -> bool {
-    crate::worker::scripts::agent_install_cmd(agent).is_some()
+    crate::worker::agents::is_supported_agent(agent)
 }
 
 /// Mirrors `generateShortID` (2 random bytes, hex).
@@ -966,6 +966,21 @@ mod tests {
         assert_eq!(b.repo_url, "https://github.com/x/y");
         assert_eq!(b.branch, "dev");
         assert_eq!(b.repos.len(), 2);
+    }
+
+    #[test]
+    fn create_accepts_every_curated_workspace_agent() {
+        for agent in [
+            "claude-code",
+            "codex",
+            "gemini-cli",
+            "kimi-code",
+            "pi",
+            "aider",
+        ] {
+            assert!(valid_agent_type(agent), "{agent}");
+        }
+        assert!(!valid_agent_type("not-an-agent"));
     }
 
     #[test]

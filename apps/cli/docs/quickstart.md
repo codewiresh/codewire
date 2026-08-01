@@ -43,6 +43,19 @@ cw init --image workspace --coding-agent codex
 cw env --local create --backend lima --name my-app --file codewire.yaml
 ```
 
+## Coding-agent tools and credentials
+
+The canonical `workspace` image includes Codex, Claude Code, Gemini CLI, Kimi
+Code, Pi, and Aider as the `codewire` user. Agent selection records the tool
+you intend to use; setup validates that the selected command is present and
+does not download packages. Choose a current `workspace` image or recreate a
+legacy environment rather than modifying it in place.
+
+Use the normal vendor login or update command inside the workspace. The Web
+form can save the supported agent credential fields as user secrets for
+injection during setup. Kimi Code follows its own configuration flow, so it is
+deliberately not represented as a generic raw environment-variable field.
+
 ## Run durable sessions
 
 Pass the environment first and the command after `--`:

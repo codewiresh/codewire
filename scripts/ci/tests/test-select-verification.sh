@@ -107,6 +107,7 @@ run_paths_case release pull_request refs/pull/3/head false \
   .gitea/workflows/claude-e2e.yaml \
   .gitea/workflows/cli-release.yaml \
   .gitea/workflows/mirror-github.yaml \
+  .gitea/workflows/workspace-image-verify.yaml \
   apps/cli/GPG_PUBLIC_KEY.asc \
   keys/production-release.asc \
   apps/cli/README.md \
@@ -127,6 +128,7 @@ run_paths_case release pull_request refs/pull/3/head false \
   scripts/ci/tests/test-publish-image-to-ghcr.sh \
   scripts/ci/tests/test-run-skopeo-container.sh \
   scripts/ci/tests/test-support-images-workflow.sh \
+  scripts/ci/tests/test-workspace-image-verify-workflow.sh \
   scripts/ci/tests/test-build-push-image.sh \
   scripts/ci/tests/test-claude-e2e-workflow.sh \
   scripts/ci/tests/test-fetch-infisical-ci-secret.sh \

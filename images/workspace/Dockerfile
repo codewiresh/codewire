@@ -6,7 +6,18 @@
 # The Gitea support-image workflow overrides this with the base digest built
 # from the same canonical source revision. The public default keeps standalone
 # OSS builds immutable while that workflow is being established.
-ARG BASE_IMAGE_REF=ghcr.io/codewiresh/base@sha256:04eeaa84ac61ebf06a63f6baa6bc2c275d6b4055ef1d624885e4a639dfd2d1e2
+ARG BASE_IMAGE_REF=ghcr.io/codewiresh/base@sha256:96f70ee3cedb863d0d5b96f5c1c7b6c3800c1bb4212aa868b73b2f3ed10f8ea8
+ARG AIDER_VERSION=0.16.0
+
+# Aider 0.16.0 pins NumPy 1.24, whose wheels support Python through 3.11.
+# Keep that runtime isolated and pinned so the canonical Noble base can retain
+# its system Python 3.12 for general workspace use.
+FROM python:3.11-slim-bookworm@sha256:b18992999dbe963a45a8a4da40ac2b1975be1a776d939d098c647482bcad5cba AS aider-builder
+ARG AIDER_VERSION
+RUN apt-get update && apt-get install -y --no-install-recommends build-essential && \
+    rm -rf /var/lib/apt/lists/*
+RUN python -m venv --copies /opt/aider && \
+    /opt/aider/bin/pip install --no-cache-dir "aider-chat==${AIDER_VERSION}"
 
 FROM rust:1.91-bookworm AS cw-builder
 WORKDIR /src
@@ -22,6 +33,17 @@ RUN cargo build --locked --release -p codewire-cli-bin --bin cw
 FROM ${BASE_IMAGE_REF}
 USER root
 ARG GO_VERSION=1.26.3
+ARG CODEX_VERSION=0.146.0
+ARG CLAUDE_CODE_VERSION=2.1.220
+ARG GEMINI_CLI_VERSION=0.53.1
+ARG KIMI_CODE_VERSION=0.31.1
+ARG PI_VERSION=0.73.1
+
+COPY --from=aider-builder --chown=codewire:codewire \
+    /usr/local/lib/libpython3.11.so.1.0 /usr/local/lib/libpython3.11.so.1.0
+COPY --from=aider-builder /usr/local/lib/python3.11 /usr/local/lib/python3.11
+COPY --from=aider-builder --chown=codewire:codewire /opt/aider /opt/aider
+RUN ldconfig
 
 # Go
 RUN curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" | tar -C /usr/local -xzf -
@@ -32,7 +54,8 @@ ENV GOPATH="/home/codewire/go"
 # the agent CLIs go under USER codewire below into ~/.npm-global so they can
 # self-update at runtime without sudo).
 RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
-    apt-get install -y nodejs && rm -rf /var/lib/apt/lists/*
+    apt-get install -y nodejs && rm -rf /var/lib/apt/lists/* && \
+    node -e 'const [major, minor] = process.versions.node.split(".").map(Number); if (major < 22 || (major === 22 && minor < 19)) { throw new Error(`Node ${process.versions.node} is too old for Kimi Code`); }'
 RUN npm install -g pnpm yarn && \
     curl -fsSL https://bun.sh/install | bash && mv /root/.bun/bin/bun /usr/local/bin/
 
@@ -64,27 +87,24 @@ RUN /usr/local/bin/cw --version && \
     mkdir -p /home/codewire/go && chown -R codewire:codewire /home/codewire/go
 
 USER codewire
-RUN curl -fsSL https://claude.ai/install.sh | bash && \
-    go install golang.org/x/tools/gopls@latest && \
+ENV PATH="/home/codewire/.npm-global/bin:/opt/aider/bin:/home/codewire/.cargo/bin:/home/codewire/.local/bin:${PATH}"
+RUN go install golang.org/x/tools/gopls@latest && \
     pipx install poetry && pipx install uv
 
-# Agent CLIs (codex, pi-coding-agent) installed as `codewire` user into a
-# user-owned npm prefix so they can self-update at runtime without sudo.
-# This is the original "permission denied" rabbit hole — installing globally
-# as root puts them at /usr/lib/node_modules/@openai/codex with /usr/bin/codex
-# as a root-owned symlink, and codex's startup self-update fails EACCES.
+# Curated coding-agent CLIs are installed as `codewire` into user-owned
+# prefixes. Workspace setup validates this fixed image contract and never
+# downloads an agent at runtime. Vendor update mechanisms remain available to
+# the normal interactive user without sudo.
 RUN mkdir -p /home/codewire/.npm-global && \
     npm config set prefix /home/codewire/.npm-global && \
-    npm install -g @openai/codex @mariozechner/pi-coding-agent
+    npm install -g \
+      "@openai/codex@${CODEX_VERSION}" \
+      "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
+      "@google/gemini-cli@${GEMINI_CLI_VERSION}" \
+      "@moonshot-ai/kimi-code@${KIMI_CODE_VERSION}" \
+      "@mariozechner/pi-coding-agent@${PI_VERSION}"
 
 # Rust toolchain (stable). Installed as the codewire user so CARGO_HOME and
 # RUSTUP_HOME live under $HOME and per-user invariants stay clean.
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
         | sh -s -- -y --default-toolchain stable --no-modify-path
-
-USER root
-RUN cp "$(readlink -f /home/codewire/.local/bin/claude)" /usr/local/bin/claude && \
-    chmod 0755 /usr/local/bin/claude
-
-USER codewire
-ENV PATH="/home/codewire/.npm-global/bin:/home/codewire/.cargo/bin:/home/codewire/.local/bin:${PATH}"

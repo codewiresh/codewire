@@ -17,6 +17,7 @@ use std::time::Duration;
 use temporalio_sdk::activities::ActivityContext;
 
 use super::activity_authority::{ActivityAuthority, is_authority_lost};
+use super::agents::agent_definition;
 use super::env_data::{
     BackendRow, EnvironmentRow, SetupConfig, load_backend_row, load_environment, repo_name_from_url,
 };
@@ -24,8 +25,8 @@ use super::env_data::{
 use super::fencing_evidence::{FencingEvidence as SetupFencingEvidence, emit};
 use super::github::{get_github_token_for_user, get_github_username_for_user};
 use super::scripts::{
-    agent_install_cmd, build_claude_bootstrap_script, build_codex_bootstrap_script,
-    build_gh_cli_auth_script, build_ssh_setup_script, build_workspace_env_script,
+    build_claude_bootstrap_script, build_codex_bootstrap_script, build_gh_cli_auth_script,
+    build_ssh_setup_script, build_workspace_env_script,
 };
 use super::secrets::merge_secrets;
 use super::setup_lease::{
@@ -141,7 +142,6 @@ pub struct Inputs {
     pub repos: Vec<Repo>,
     pub install_command: String,
     pub startup_script: String,
-    pub install_agents: bool,
     pub agents: Vec<String>,
     pub app_ports: Vec<(i32, String, String)>, // (port, label, access)
     pub has_mesh: bool,
@@ -216,10 +216,9 @@ pub trait SetupOps {
         input: &Inputs,
         work_dir: &str,
     ) -> impl std::future::Future<Output = anyhow::Result<()>> + Send;
-    fn install_agents(
+    fn validate_agents(
         &mut self,
         input: &Inputs,
-        work_dir: &str,
     ) -> impl std::future::Future<Output = anyhow::Result<()>> + Send;
     fn register_ports(
         &mut self,
@@ -393,20 +392,35 @@ impl<S: SetupStore, O: SetupOps> Runner<S, O> {
             }
         }
 
-        if input.setup_phase <= 5 && input.install_agents && !input.agents.is_empty() {
+        if input.setup_phase <= 5 && !input.agents.is_empty() {
             let phase = input.setup_phase;
             if !self.begin_phase(input, phase).await? {
                 return Ok(());
             }
             self.ops
-                .emit_log(&env_id, phase, "agent_install", "started", "", None)
+                .emit_log(&env_id, phase, "agent_validation", "started", "", None)
                 .await?;
-            self.ops.install_agents(input, &work_dir).await?;
+            if let Err(e) = self.ops.validate_agents(input).await {
+                if is_setup_control_flow(&e) {
+                    return Err(e);
+                }
+                self.ops
+                    .emit_log(
+                        &env_id,
+                        phase,
+                        "agent_validation",
+                        "failed",
+                        &format!("{e:#}"),
+                        Some(serde_json::json!({ "count": input.agents.len() })),
+                    )
+                    .await?;
+                return Err(anyhow::anyhow!("agent validation: {e:#}"));
+            }
             self.finish_phase(
                 input,
                 phase,
                 6,
-                "agent_install",
+                "agent_validation",
                 "completed",
                 "",
                 Some(serde_json::json!({ "count": input.agents.len() })),
@@ -583,7 +597,6 @@ pub fn to_setup_inputs(env: &EnvironmentRow, backend: &BackendRow) -> Inputs {
     input.include_user_secrets = sc.include_user_secrets.unwrap_or(true);
     input.install_command = sc.install_command.clone();
     input.startup_script = sc.startup_script.clone();
-    input.install_agents = sc.should_install_agents();
     for repo in sc.normalized_repos() {
         input.repos.push(Repo {
             url: repo.url,
@@ -1770,63 +1783,38 @@ impl SetupOps for WorkerSetupOps<'_> {
         .await
     }
 
-    async fn install_agents(&mut self, input: &Inputs, work_dir: &str) -> anyhow::Result<()> {
+    async fn validate_agents(&mut self, input: &Inputs) -> anyhow::Result<()> {
         self.phase_authority
             .ensure_active(self.active_phase)
             .await?;
-        let agents = self
-            .env
-            .setup_config
-            .as_ref()
-            .map(|sc| sc.configured_agents())
-            .unwrap_or_default();
-        for agent in agents {
+        for agent_type in &input.agents {
             if self.cancellation_requested() {
                 return Err(SetupActivityCancelled.into());
             }
             self.phase_authority
                 .ensure_active(self.active_phase)
                 .await?;
-            match agent_install_cmd(&agent.agent_type) {
-                Some(cmd) => {
-                    let env = self.agent_install_env(&agent.agent_type);
-                    if let Err(e) = self
-                        .workspace_exec(
-                            &input.namespace,
-                            &input.environment_id,
-                            &cmd,
-                            work_dir,
-                            &env,
-                        )
-                        .await
-                    {
-                        if is_setup_control_flow(&e) {
-                            return Err(e);
-                        }
-                        tracing::warn!(env = input.environment_id, agent = agent.agent_type, error = %e, "setup: agent install failed");
-                        self.emit_log(
-                            &input.environment_id,
-                            input.setup_phase,
-                            "agent_install",
-                            "warning",
-                            &format!("{e:#}"),
-                            Some(serde_json::json!({ "agent": agent.agent_type })),
-                        )
-                        .await?;
-                    }
-                }
-                None => {
-                    self.emit_log(
-                        &input.environment_id,
-                        input.setup_phase,
-                        "agent_install",
-                        "warning",
-                        &format!("unknown agent type: {}", agent.agent_type),
-                        Some(serde_json::json!({ "agent": agent.agent_type })),
-                    )
-                    .await?;
-                }
-            }
+            let agent = agent_definition(agent_type)
+                .ok_or_else(|| anyhow::anyhow!("unsupported configured agent: {agent_type}"))?;
+            let command = vec![
+                "sh".to_string(),
+                "-c".to_string(),
+                format!("command -v {} >/dev/null 2>&1", agent.command),
+            ];
+            self.workspace_exec(
+                &input.namespace,
+                &input.environment_id,
+                &command,
+                "",
+                &BTreeMap::new(),
+            )
+            .await
+            .map_err(|error| {
+                anyhow::anyhow!(
+                    "selected agent `{}` is unavailable in the workspace image; recreate this environment with a canonical agent-ready image. No runtime installation was attempted: {error:#}",
+                    agent.id,
+                )
+            })?;
         }
         Ok(())
     }
@@ -1874,19 +1862,6 @@ impl SetupOps for WorkerSetupOps<'_> {
             "post-boot: optional Mesh is owned by the supervised runtime"
         );
         Ok(())
-    }
-}
-
-impl WorkerSetupOps<'_> {
-    /// Mirrors `agentInstallEnv`.
-    fn agent_install_env(&self, agent_type: &str) -> BTreeMap<String, String> {
-        let Some(sc) = &self.env.setup_config else {
-            return BTreeMap::new();
-        };
-        if sc.has_configured_agent(agent_type) && !sc.agent_env.is_empty() {
-            return sc.agent_env.clone();
-        }
-        BTreeMap::new()
     }
 }
 
@@ -2252,8 +2227,8 @@ mod tests {
         async fn run_startup_script(&mut self, _input: &Inputs, _wd: &str) -> anyhow::Result<()> {
             self.call("run_startup_script")
         }
-        async fn install_agents(&mut self, _input: &Inputs, _wd: &str) -> anyhow::Result<()> {
-            self.call("install_agents")
+        async fn validate_agents(&mut self, _input: &Inputs) -> anyhow::Result<()> {
+            self.call("validate_agents")
         }
         async fn register_ports(&mut self, _input: &Inputs) -> anyhow::Result<()> {
             self.call("register_ports")
@@ -2277,7 +2252,6 @@ mod tests {
             }],
             install_command: "npm ci".into(),
             startup_script: "npm start".into(),
-            install_agents: true,
             agents: vec!["claude-code".into()],
             app_ports: vec![(3000, "web".into(), "public".into())],
             has_mesh: true,
@@ -2310,7 +2284,7 @@ mod tests {
                 "clone_repos",
                 "run_install",
                 "run_startup_script",
-                "install_agents",
+                "validate_agents",
                 "register_ports",
                 "start_mesh_node"
             ]
@@ -2363,7 +2337,7 @@ mod tests {
             [
                 "run_install",
                 "run_startup_script",
-                "install_agents",
+                "validate_agents",
                 "register_ports",
                 "start_mesh_node"
             ]
@@ -2417,6 +2391,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unavailable_selected_agent_fails_setup_without_a_download() {
+        let mock = Mock::failing("validate_agents");
+        let mut runner = Runner {
+            store: mock.clone(),
+            ops: mock.clone(),
+        };
+        let mut input = full_inputs();
+        let error = runner.run(&mut input).await.unwrap_err();
+        assert!(
+            format!("{error:#}").starts_with("agent validation: validate_agents boom"),
+            "{error:#}"
+        );
+        let state = mock.state();
+        assert!(!state.complete);
+        assert_eq!(state.phases, vec![1, 2, 3, 4, 5]);
+        assert!(
+            state
+                .calls
+                .contains(&"log:agent_validation:failed".to_string())
+        );
+        assert!(!state.calls.iter().any(|call| call == "install_agents"));
+    }
+
+    #[tokio::test]
     async fn mesh_node_failure_is_warning_only() {
         let mock = Mock::failing("start_mesh_node");
         let mut runner = Runner {
@@ -2438,7 +2436,7 @@ mod tests {
             "clone_repos",
             "run_install",
             "run_startup_script",
-            "install_agents",
+            "validate_agents",
             "register_ports",
             "start_mesh_node",
         ] {
@@ -2481,7 +2479,7 @@ mod tests {
             "clone_repos",
             "run_install",
             "run_startup_script",
-            "install_agents",
+            "validate_agents",
             "register_ports",
             "start_mesh_node",
         ] {
@@ -2635,7 +2633,6 @@ mod tests {
         );
         assert!(input.include_user_secrets);
         assert!(input.has_mesh);
-        assert!(input.install_agents);
         assert_eq!(input.repos.len(), 1);
         assert_eq!(input.repos[0].branch, "dev");
         assert_eq!(input.agents, vec!["codex".to_string()]);

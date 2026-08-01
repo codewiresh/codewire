@@ -141,19 +141,6 @@ pub fn build_gh_cli_auth_script(token: &str, username: &str) -> String {
     )
 }
 
-/// The agent install registry (`agentRegistry` in
-/// environment_setup_helpers.go).
-pub fn agent_install_cmd(agent_type: &str) -> Option<Vec<String>> {
-    let script = match agent_type {
-        "claude-code" => "curl -fsSL https://claude.ai/install.sh | sh",
-        "codex" => "npm install -g @openai/codex",
-        "gemini-cli" => "npm install -g @google/gemini-cli",
-        "aider" => "pipx install aider-chat || pip install aider-chat",
-        _ => return None,
-    };
-    Some(vec!["sh".into(), "-c".into(), script.into()])
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -218,14 +205,5 @@ mod tests {
             build_gh_cli_auth_script("gho_goldentoken", "octocat"),
             golden("gh_cli_auth.golden.txt")
         );
-    }
-
-    #[test]
-    fn agent_registry_mirrors_go() {
-        assert!(agent_install_cmd("claude-code").is_some());
-        assert!(agent_install_cmd("codex").is_some());
-        assert!(agent_install_cmd("gemini-cli").is_some());
-        assert!(agent_install_cmd("aider").is_some());
-        assert!(agent_install_cmd("unknown").is_none());
     }
 }
