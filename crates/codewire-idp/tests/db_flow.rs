@@ -26,6 +26,8 @@ const CHALLENGE: &str = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM";
 const USER: &str = "u_idp_e2e";
 const CLIENT: &str = "codewire-desktop";
 const REDIRECT: &str = "http://localhost:9876/callback";
+const IOS_CLIENT: &str = "codewire-ios";
+const IOS_REDIRECT: &str = "sh.codewire.ios:/oauth/callback";
 type PersistedNewKeyRow = (String, String, Vec<u8>, Vec<u8>, String, i16);
 type PersistedEnvelopeFields = (
     Option<Vec<u8>>,
@@ -136,7 +138,7 @@ fn verify_against_jwks(jwt: &str, jwks: &codewire_oidc::Jwks) -> bool {
 }
 
 #[tokio::test]
-async fn desktop_client_full_flow_against_postgres() {
+async fn native_clients_full_flow_against_postgres() {
     let Ok(url) = std::env::var("DATABASE_URL") else {
         eprintln!("DATABASE_URL unset — skipping idp DB e2e");
         return;
@@ -146,6 +148,9 @@ async fn desktop_client_full_flow_against_postgres() {
     codewire_idp::provisioning::ensure_desktop_client(&pool)
         .await
         .expect("converge replacement desktop client");
+    codewire_idp::provisioning::ensure_ios_client(&pool)
+        .await
+        .expect("provision iOS public client");
     let desktop_scopes: Vec<String> =
         sqlx::query_scalar("SELECT scopes FROM oidc_clients WHERE id = 'codewire-desktop'")
             .fetch_one(&pool)
@@ -161,6 +166,35 @@ async fn desktop_client_full_flow_against_postgres() {
             "codewire.api"
         ],
         "startup provisioning must repair the pre-replacement identity-only desktop client"
+    );
+    let ios_client: (String, String, Vec<String>, Vec<String>, Vec<String>, bool) = sqlx::query_as(
+        "SELECT application_type, auth_method, redirect_uris, grant_types, scopes, skip_consent \
+         FROM oidc_clients WHERE id = 'codewire-ios'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("read provisioned iOS client");
+    assert_eq!(ios_client.0, "native");
+    assert_eq!(ios_client.1, "none");
+    assert_eq!(ios_client.2, vec![IOS_REDIRECT]);
+    assert_eq!(
+        ios_client.3,
+        vec!["authorization_code", "refresh_token"],
+        "iOS must use authorization-code PKCE and refresh only"
+    );
+    assert_eq!(
+        ios_client.4,
+        vec![
+            "openid",
+            "profile",
+            "email",
+            "offline_access",
+            "codewire.api"
+        ]
+    );
+    assert!(
+        ios_client.5,
+        "public native iOS consent is intentionally skipped"
     );
 
     let cfg = IdpConfig {
@@ -281,6 +315,40 @@ async fn desktop_client_full_flow_against_postgres() {
         "old RT dead"
     );
 
+    // 7. The iOS public client accepts only its exact custom callback and
+    // completes the same PKCE authorization-code flow.
+    let ios_params = RawAuthorizeParams {
+        client_id: Some(IOS_CLIENT.into()),
+        redirect_uri: Some(IOS_REDIRECT.into()),
+        response_type: Some("code".into()),
+        scope: Some("openid profile email offline_access codewire.api".into()),
+        state: Some("ios-state".into()),
+        code_challenge: Some(CHALLENGE.into()),
+        code_challenge_method: Some("S256".into()),
+        ..Default::default()
+    };
+    let ios_url = match p.authorize(&ctx, ios_params).await.unwrap() {
+        AuthorizeOutcome::Redirect(url) => url,
+        other => panic!("expected iOS redirect, got {other:?}"),
+    };
+    assert!(ios_url.starts_with(IOS_REDIRECT), "got {ios_url}");
+    let ios_code = ios_url
+        .split("code=")
+        .nth(1)
+        .unwrap()
+        .split('&')
+        .next()
+        .unwrap()
+        .to_string();
+    let ios_tokens = p
+        .exchange_authorization_code(IOS_CLIENT, None, &ios_code, IOS_REDIRECT, Some(VERIFIER))
+        .await
+        .expect("iOS public PKCE exchange");
+    assert!(
+        ios_tokens.refresh_token.is_some(),
+        "offline_access → refresh token"
+    );
+
     // Best-effort cleanup (CI's DB is ephemeral, but keep reruns clean).
     for sql in [
         "DELETE FROM oidc_access_tokens WHERE user_id = $1",
@@ -292,6 +360,10 @@ async fn desktop_client_full_flow_against_postgres() {
     }
     let _ = sqlx::query("DELETE FROM oidc_clients WHERE id = $1")
         .bind(CLIENT)
+        .execute(&pool)
+        .await;
+    let _ = sqlx::query("DELETE FROM oidc_clients WHERE id = $1")
+        .bind(IOS_CLIENT)
         .execute(&pool)
         .await;
     let _ = sqlx::query("DELETE FROM users WHERE id = $1")

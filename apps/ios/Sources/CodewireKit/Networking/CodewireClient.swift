@@ -21,6 +21,9 @@ public enum CodewireClientError: Error, Equatable, LocalizedError {
     }
 }
 
+/// Thin Connect JSON client for the iOS environment browser. The app keeps
+/// display models separate from wire messages so a proto field or enum cannot
+/// silently become a UI contract.
 public actor CodewireClient {
     private let baseURL: URL
     private let session: HTTPSession
@@ -31,112 +34,88 @@ public actor CodewireClient {
     }
 
     public func listOrganizations(token: String) async throws -> [Organization] {
-        try await get(path: "/api/v1/organizations", token: token)
+        let response: ListOrganizationsResponse = try await postConnect(
+            path: "codewire.v1.OrganizationService/ListOrganizations",
+            token: token,
+            request: EmptyRequest()
+        )
+        return try response.organizations.map(Self.organization(from:))
     }
 
     public func listEnvironments(token: String, orgID: String) async throws -> [Environment] {
-        try await get(path: "/api/v1/organizations/\(orgID)/environments", token: token)
+        let response: ListEnvironmentsResponse = try await postConnect(
+            path: "codewire.v1.EnvironmentService/ListEnvironments",
+            token: token,
+            request: OrganizationRequest(orgId: orgID)
+        )
+        return try response.environments.map(Self.environment(from:))
     }
 
-    // MARK: - Private
-
     public func startEnvironment(token: String, orgID: String, envID: String) async throws {
-        try await post(path: "/api/v1/organizations/\(orgID)/environments/\(envID)/start", token: token)
+        let _: EmptyResponse = try await postConnect(
+            path: "codewire.v1.EnvironmentService/StartEnvironment",
+            token: token,
+            request: EnvironmentRequest(orgId: orgID, environmentId: envID)
+        )
     }
 
     public func stopEnvironment(token: String, orgID: String, envID: String) async throws {
-        try await post(path: "/api/v1/organizations/\(orgID)/environments/\(envID)/stop", token: token)
+        let _: EmptyResponse = try await postConnect(
+            path: "codewire.v1.EnvironmentService/StopEnvironment",
+            token: token,
+            request: EnvironmentRequest(orgId: orgID, environmentId: envID)
+        )
     }
 
     public func deleteEnvironment(token: String, orgID: String, envID: String) async throws {
-        try await delete(path: "/api/v1/organizations/\(orgID)/environments/\(envID)", token: token)
+        let _: EmptyResponse = try await postConnect(
+            path: "codewire.v1.EnvironmentService/DeleteEnvironment",
+            token: token,
+            request: EnvironmentRequest(orgId: orgID, environmentId: envID)
+        )
     }
 
-    private func get<T: Decodable>(path: String, token: String) async throws -> T {
-        var req = URLRequest(url: baseURL.appendingPathComponent(path))
-        req.httpMethod = "GET"
-        req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        req.setValue("application/json", forHTTPHeaderField: "Accept")
-        let (data, response) = try await session.data(for: req)
-        try checkStatus(response)
-        return try JSONDecoder().decode(T.self, from: data)
-    }
+    // MARK: - Connect JSON transport
 
-    private func post(path: String, token: String) async throws {
-        var req = URLRequest(url: baseURL.appendingPathComponent(path))
-        req.httpMethod = "POST"
-        req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        let (_, response) = try await session.data(for: req)
-        try checkStatus(response)
-    }
+    private func postConnect<Request: Encodable, Response: Decodable>(
+        path: String,
+        token: String,
+        request: Request
+    ) async throws -> Response {
+        var urlRequest = URLRequest(url: baseURL.appendingPathComponent(path))
+        urlRequest.httpMethod = "POST"
+        urlRequest.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        urlRequest.setValue("application/json", forHTTPHeaderField: "Accept")
+        urlRequest.httpBody = try JSONEncoder().encode(request)
 
-    private func delete(path: String, token: String) async throws {
-        var req = URLRequest(url: baseURL.appendingPathComponent(path))
-        req.httpMethod = "DELETE"
-        req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        let (_, response) = try await session.data(for: req)
-        try checkStatus(response)
-    }
-
-    // MARK: - Sign In
-
-    public struct SignInResponse: Decodable, Sendable {
-        public let user: SignInUser?
-        public let session: SignInSession?
-        public let twoFactorRequired: Bool?
-        public let twoFactorToken: String?
-
-        public struct SignInUser: Decodable, Sendable {
-            public let id: String
-            public let email: String
-            public let name: String?
-        }
-
-        public struct SignInSession: Decodable, Sendable {
-            public let id: String
-            public let token: String
-            public let expiresAt: String
-
-            enum CodingKeys: String, CodingKey {
-                case id, token
-                case expiresAt = "expires_at"
-            }
+        let (data, response) = try await session.data(for: urlRequest)
+        try checkStatus(response, data: data)
+        do {
+            return try JSONDecoder().decode(Response.self, from: data)
+        } catch {
+            throw CodewireClientError.invalidResponse
         }
     }
 
-    public func signIn(email: String, password: String) async throws -> SignInResponse {
-        var req = URLRequest(url: baseURL.appendingPathComponent("/api/auth/sign-in"))
-        req.httpMethod = "POST"
-        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        let body = ["email": email, "password": password]
-        req.httpBody = try JSONEncoder().encode(body)
-        let (data, response) = try await session.data(for: req)
-        try checkStatus(response)
-        return try JSONDecoder().decode(SignInResponse.self, from: data)
-    }
-
-    public struct TwoFactorResponse: Decodable, Sendable {
-        public let user: SignInResponse.SignInUser
-        public let session: SignInResponse.SignInSession
-    }
-
-    public func validateTOTP(code: String, token: String) async throws -> TwoFactorResponse {
-        var req = URLRequest(url: baseURL.appendingPathComponent("/api/auth/two-factor/validate"))
-        req.httpMethod = "POST"
-        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        let body = ["code": code, "token": token]
-        req.httpBody = try JSONEncoder().encode(body)
-        let (data, response) = try await session.data(for: req)
-        try checkStatus(response)
-        return try JSONDecoder().decode(TwoFactorResponse.self, from: data)
-    }
-
-    private func checkStatus(_ response: URLResponse) throws {
+    private func checkStatus(_ response: URLResponse, data: Data) throws {
         guard let http = response as? HTTPURLResponse else {
             throw CodewireClientError.invalidResponse
         }
+        guard !(200...299).contains(http.statusCode) else { return }
+
+        // Connect error bodies carry canonical codes. Prefer them when they
+        // exist, then retain HTTP mapping for gateway-level failures.
+        if let connectError = try? JSONDecoder().decode(ConnectError.self, from: data),
+           let code = connectError.code {
+            switch code {
+            case "unauthenticated": throw CodewireClientError.unauthorized
+            case "permission_denied": throw CodewireClientError.forbidden
+            case "not_found": throw CodewireClientError.notFound
+            default: break
+            }
+        }
         switch http.statusCode {
-        case 200...299: return
         case 401: throw CodewireClientError.unauthorized
         case 403: throw CodewireClientError.forbidden
         case 404: throw CodewireClientError.notFound
@@ -144,4 +123,135 @@ public actor CodewireClient {
         default: throw CodewireClientError.invalidResponse
         }
     }
+
+    // MARK: - Wire mapping
+
+    private static func organization(from membership: OrganizationMembership) throws -> Organization {
+        guard let organization = membership.organization,
+              !organization.id.isEmpty,
+              !organization.name.isEmpty,
+              !organization.slug.isEmpty,
+              let role = organizationRole(membership.role)
+        else {
+            throw CodewireClientError.invalidResponse
+        }
+        return Organization(
+            id: organization.id,
+            name: organization.name,
+            slug: organization.slug,
+            role: role
+        )
+    }
+
+    private static func environment(from wire: EnvironmentWire) throws -> Environment {
+        guard let id = wire.id, !id.isEmpty,
+              let name = wire.name, !name.isEmpty,
+              let orgID = wire.orgId, !orgID.isEmpty,
+              let desiredState = desiredState(wire.desiredState),
+              let state = environmentState(wire.state),
+              let cpuMillicores = wire.cpuMillicores,
+              let memoryMb = wire.memoryMb,
+              let diskGb = wire.diskGb,
+              let createdAt = wire.createdAt, !createdAt.isEmpty
+        else {
+            throw CodewireClientError.invalidResponse
+        }
+        return Environment(
+            id: id,
+            name: name,
+            orgId: orgID,
+            desiredState: desiredState,
+            state: state,
+            cpuMillicores: cpuMillicores,
+            memoryMb: memoryMb,
+            diskGb: diskGb,
+            errorReason: wire.errorReason,
+            createdAt: createdAt
+        )
+    }
+
+    private static func organizationRole(_ value: String?) -> String? {
+        switch value {
+        case "ORG_ROLE_OWNER": return "owner"
+        case "ORG_ROLE_ADMIN": return "admin"
+        case "ORG_ROLE_MEMBER": return "member"
+        default: return nil
+        }
+    }
+
+    private static func desiredState(_ value: String?) -> String? {
+        switch value {
+        case "DESIRED_STATE_STARTED": return "started"
+        case "DESIRED_STATE_STOPPED": return "stopped"
+        case "DESIRED_STATE_DESTROYED": return "destroyed"
+        case "DESIRED_STATE_ARCHIVED": return "archived"
+        case "DESIRED_STATE_RESIZED": return "resized"
+        default: return nil
+        }
+    }
+
+    private static func environmentState(_ value: String?) -> String? {
+        switch value {
+        case "ENVIRONMENT_STATE_PENDING": return "pending"
+        case "ENVIRONMENT_STATE_PENDING_BUILD": return "pending_build"
+        case "ENVIRONMENT_STATE_BUILDING": return "building"
+        case "ENVIRONMENT_STATE_BUILD_FAILED": return "build_failed"
+        case "ENVIRONMENT_STATE_PULLING_SNAPSHOT": return "pulling_snapshot"
+        case "ENVIRONMENT_STATE_CREATING": return "creating"
+        case "ENVIRONMENT_STATE_STARTING": return "starting"
+        case "ENVIRONMENT_STATE_RUNNING": return "running"
+        case "ENVIRONMENT_STATE_STOPPING": return "stopping"
+        case "ENVIRONMENT_STATE_STOPPED": return "stopped"
+        case "ENVIRONMENT_STATE_ARCHIVING": return "archiving"
+        case "ENVIRONMENT_STATE_ARCHIVED": return "archived"
+        case "ENVIRONMENT_STATE_RESTORING": return "restoring"
+        case "ENVIRONMENT_STATE_RESIZING": return "resizing"
+        case "ENVIRONMENT_STATE_DESTROYING": return "destroying"
+        case "ENVIRONMENT_STATE_DESTROYED": return "destroyed"
+        case "ENVIRONMENT_STATE_ERROR": return "error"
+        case "ENVIRONMENT_STATE_UNKNOWN": return "unknown"
+        default: return nil
+        }
+    }
+}
+
+private struct EmptyRequest: Encodable {}
+private struct EmptyResponse: Decodable {}
+private struct OrganizationRequest: Encodable { let orgId: String }
+private struct EnvironmentRequest: Encodable { let orgId: String; let environmentId: String }
+
+private struct ConnectError: Decodable {
+    let code: String?
+}
+
+private struct ListOrganizationsResponse: Decodable {
+    let organizations: [OrganizationMembership]
+}
+
+private struct OrganizationMembership: Decodable {
+    let organization: OrganizationWire?
+    let role: String?
+}
+
+private struct OrganizationWire: Decodable {
+    let id: String
+    let name: String
+    let slug: String
+}
+
+private struct ListEnvironmentsResponse: Decodable {
+    let environments: [EnvironmentWire]
+}
+
+private struct EnvironmentWire: Decodable {
+    let id: String?
+    let orgId: String?
+    let name: String?
+    let desiredState: String?
+    let state: String?
+    let cpuMillicores: Int?
+    let memoryMb: Int?
+    let diskGb: Int?
+    let errorReason: String?
+    let createdAt: String?
 }

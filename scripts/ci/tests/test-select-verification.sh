@@ -56,6 +56,9 @@ run_paths_case() {
 policy=policy
 run_paths_case docs pull_request refs/pull/1/head false "$policy" \
   docs/guide.md README.md AGENTS.md crates/README.md
+run_paths_case ios pull_request refs/pull/1/head false 'ios policy' \
+  apps/ios/Sources/CodewireKit/Networking/CodewireClient.swift \
+  apps/ios/Resources/Info.plist
 run_paths_case repository_ignores pull_request refs/pull/10/head false "$policy" \
   .gitignore .dockerignore
 run_paths_case repository_attributes pull_request refs/pull/1010/head false "$policy" \
@@ -614,6 +617,12 @@ dispatch_output="$(env -u GITHUB_OUTPUT GITHUB_EVENT_NAME=workflow_dispatch \
 assert_tokens dispatch_go_support \
   'go_consumer_interop go_support go_tailnet' "$dispatch_output"
 dispatch_output="$(env -u GITHUB_OUTPUT GITHUB_EVENT_NAME=workflow_dispatch \
+  VERIFICATION_REQUEST=ios "$SELECTOR")"
+assert_tokens dispatch_ios 'ios' "$dispatch_output"
+dispatch_output="$(env -u GITHUB_OUTPUT GITHUB_EVENT_NAME=workflow_dispatch \
+  VERIFICATION_REQUEST=all "$SELECTOR")"
+assert_tokens dispatch_all "${all_product} ios" "$dispatch_output"
+dispatch_output="$(env -u GITHUB_OUTPUT GITHUB_EVENT_NAME=workflow_dispatch \
   VERIFICATION_REQUEST=release "$SELECTOR")"
 assert_tokens dispatch_release \
   'go_consumer_interop go_support release runtime_confidential' "$dispatch_output"
@@ -1044,6 +1053,7 @@ for contract in \
     'Run Contracts|contracts' \
     'Run Go support|go_support' \
     'Run Web|web' \
+    'Run iOS package tests|ios' \
     'Run SDK Go|sdk_go' \
     'Run SDK TypeScript|sdk_ts' \
     'Run SDK Python|sdk_python' \
@@ -1061,6 +1071,41 @@ for contract in \
     exit 1
   }
 done
+
+ios_run_line="$(grep -n -m1 'name: Run iOS package tests' \
+  "$standard_block" | cut -d: -f1)"
+ios_run_block="$(sed -n "${ios_run_line},$((ios_run_line + 10))p" "$standard_block")"
+grep -qF "contains(needs.verification-selection.outputs.selection, '|ios|')" \
+  <<<"$ios_run_block" || {
+  echo 'standard: iOS verification is not isolated to the iOS selection' >&2
+  exit 1
+}
+grep -qF 'scripts/ci/verify/run-product-verification.sh ios-config' \
+  <<<"$ios_run_block" || {
+  echo 'standard: iOS callback configuration is not verified before package tests' >&2
+  exit 1
+}
+grep -qF "docker build --file - apps/ios <<'DOCKERFILE'" <<<"$ios_run_block" || {
+  echo 'standard: iOS package tests do not stream their package context to Docker' >&2
+  exit 1
+}
+grep -qF 'swift@sha256:0ff707a48519cf1473616c759e019bcff21cfbafa3d2687bf8fd41a2757adc9a' \
+  <<<"$ios_run_block" || {
+  echo 'standard: iOS package tests do not use the pinned Swift image' >&2
+  exit 1
+}
+grep -qF 'RUN swift test --scratch-path /tmp/codewire-ios-build' <<<"$ios_run_block" || {
+  echo 'standard: iOS package tests must build outside the checkout' >&2
+  exit 1
+}
+if grep -qF -- '--mount "type=bind' <<<"$ios_run_block"; then
+  echo 'standard: iOS package tests must not assume the nested runner host path' >&2
+  exit 1
+fi
+if grep -qF 'swift-actions/setup-swift@' "$standard_block"; then
+  echo 'standard: iOS verification must not depend on an external Swift keyserver' >&2
+  exit 1
+fi
 
 grep -qF '      - uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b' \
   "$standard_block" || {

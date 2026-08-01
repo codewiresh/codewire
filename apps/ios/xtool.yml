@@ -1,5 +1,3 @@
 version: 1
 bundleID: sh.codewire.ios
-displayName: Codewire
-associatedDomains:
-  - "webcredentials:codewire.sh"
+infoPath: Resources/Info.plist

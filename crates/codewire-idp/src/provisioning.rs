@@ -48,6 +48,47 @@ pub async fn ensure_desktop_client(pool: &PgPool) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Upsert the public iOS OAuth client. The custom callback is deliberately
+/// exact: native authorization responses must return only to the Codewire iOS
+/// bundle, never to a broad scheme or a web URL.
+/// Lifetimes match the other public native clients: 720h access, 2160h
+/// refresh, and 1h id_token.
+pub async fn ensure_ios_client(pool: &PgPool) -> anyhow::Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO oidc_clients
+            (id, name, application_type, auth_method, redirect_uris,
+             grant_types, response_types, scopes, skip_consent,
+             access_token_lifetime, refresh_token_lifetime, id_token_lifetime)
+        VALUES (
+            'codewire-ios', 'Codewire iOS', 'native', 'none',
+            ARRAY['sh.codewire.ios:/oauth/callback'],
+            ARRAY['authorization_code', 'refresh_token'],
+            ARRAY['code'],
+            ARRAY['openid', 'profile', 'email', 'offline_access', 'codewire.api'],
+            true,
+            interval '720 hours', interval '2160 hours', interval '1 hour'
+        )
+        ON CONFLICT (id) DO UPDATE SET
+            name = EXCLUDED.name,
+            application_type = EXCLUDED.application_type,
+            auth_method = EXCLUDED.auth_method,
+            redirect_uris = EXCLUDED.redirect_uris,
+            grant_types = EXCLUDED.grant_types,
+            response_types = EXCLUDED.response_types,
+            scopes = EXCLUDED.scopes,
+            skip_consent = EXCLUDED.skip_consent,
+            access_token_lifetime = EXCLUDED.access_token_lifetime,
+            refresh_token_lifetime = EXCLUDED.refresh_token_lifetime,
+            id_token_lifetime = EXCLUDED.id_token_lifetime,
+            updated_at = NOW()
+        "#,
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 /// Upsert the public CLI OAuth client used by the RFC 8628 device grant.
 ///
 /// Conflict updates are deliberate: an older registration must converge its

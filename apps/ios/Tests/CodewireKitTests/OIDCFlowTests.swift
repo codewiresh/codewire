@@ -15,46 +15,71 @@ final class OIDCFlowTests: XCTestCase {
     }
 
     func testGeneratedVerifier_IsURLSafe_And43Chars() {
-        let v = OIDCFlow.generateVerifier()
-        XCTAssertEqual(v.count, 43)
+        let verifier = OIDCFlow.generateVerifier()
+        XCTAssertEqual(verifier.count, 43)
         let allowed = CharacterSet(charactersIn:
             "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_")
-        XCTAssertTrue(v.unicodeScalars.allSatisfy { allowed.contains($0) })
+        XCTAssertTrue(verifier.unicodeScalars.allSatisfy { allowed.contains($0) })
     }
 
-    func testBuildAuthorizeURL_IncludesRequiredParams() {
-        let url = OIDCFlow.buildAuthorizeURL(
-            baseURL: URL(string: "https://codewire.sh")!,
-            clientID: "ios-app",
-            redirectURI: "codewire://callback",
-            codeChallenge: "abc123",
-            state: "state-xyz"
-        )
-        let comps = URLComponents(url: url, resolvingAgainstBaseURL: false)!
+    func testNativeAuthorization_usesExactPublicClientAndCallback() {
+        let request = OIDCFlow.startNativeAuthorization(baseURL: URL(string: "https://codewire.sh")!)
+        let components = URLComponents(url: request.url, resolvingAgainstBaseURL: false)!
         let items = Dictionary(uniqueKeysWithValues:
-            (comps.queryItems ?? []).map { ($0.name, $0.value ?? "") })
-        XCTAssertEqual(items["client_id"], "ios-app")
-        XCTAssertEqual(items["redirect_uri"], "codewire://callback")
-        XCTAssertEqual(items["code_challenge"], "abc123")
+            (components.queryItems ?? []).map { ($0.name, $0.value ?? "") })
+
+        XCTAssertEqual(request.url.path, "/api/oauth/authorize")
+        XCTAssertEqual(items["client_id"], "codewire-ios")
+        XCTAssertEqual(items["redirect_uri"], "sh.codewire.ios:/oauth/callback")
+        XCTAssertEqual(items["scope"], "openid profile email offline_access codewire.api")
+        XCTAssertEqual(items["code_challenge"], OIDCFlow.computeS256Challenge(verifier: request.verifier))
         XCTAssertEqual(items["code_challenge_method"], "S256")
         XCTAssertEqual(items["response_type"], "code")
-        XCTAssertEqual(items["state"], "state-xyz")
+        XCTAssertEqual(items["state"], request.state)
     }
 
-    func testExchangeCode_parsesTokenResponse() async throws {
+    func testAuthorizationCode_requiresExactCallbackAndState() throws {
+        let callback = URL(string: "sh.codewire.ios:/oauth/callback?code=the-code&state=state-xyz")!
+        XCTAssertEqual(
+            try OIDCFlow.authorizationCode(from: callback, expectedState: "state-xyz"),
+            "the-code"
+        )
+
+        XCTAssertThrowsError(
+            try OIDCFlow.authorizationCode(
+                from: URL(string: "sh.codewire.ios:/wrong?code=the-code&state=state-xyz")!,
+                expectedState: "state-xyz"
+            )
+        ) { error in
+            XCTAssertEqual(error as? OAuthFlowError, .invalidCallback)
+        }
+        XCTAssertThrowsError(
+            try OIDCFlow.authorizationCode(from: callback, expectedState: "other-state")
+        ) { error in
+            XCTAssertEqual(error as? OAuthFlowError, .stateMismatch)
+        }
+        XCTAssertThrowsError(
+            try OIDCFlow.authorizationCode(
+                from: URL(string: "sh.codewire.ios:/oauth/callback?error=access_denied&state=other-state")!,
+                expectedState: "state-xyz"
+            )
+        ) { error in
+            XCTAssertEqual(error as? OAuthFlowError, .stateMismatch)
+        }
+    }
+
+    func testExchangeCode_usesPermanentOAuthEndpointAndEncodesForm() async throws {
         let session = MockHTTPSession()
-        let url = URL(string: "https://codewire.sh/oauth/token")!
+        let url = URL(string: "https://codewire.sh/api/oauth/token")!
         session.responses[url.absoluteString] = (
             Data(#"""
             {"access_token":"acc","refresh_token":"ref","expires_in":3600,"token_type":"Bearer"}
             """#.utf8),
             HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!
         )
-        let token = try await OIDCFlow.exchangeCode(
+        let token = try await OIDCFlow.exchangeNativeAuthorizationCode(
             baseURL: URL(string: "https://codewire.sh")!,
-            clientID: "ios-app",
-            redirectURI: "codewire://cb",
-            code: "the-code",
+            code: "a code&more",
             verifier: "the-verifier",
             session: session
         )
@@ -63,22 +88,28 @@ final class OIDCFlowTests: XCTestCase {
         XCTAssertGreaterThan(token.expiresAt, Date())
 
         XCTAssertEqual(session.recordedRequests.count, 1)
-        let req = session.recordedRequests.first!
-        XCTAssertEqual(req.httpMethod, "POST")
-        XCTAssertEqual(req.value(forHTTPHeaderField: "Content-Type"),
-                       "application/x-www-form-urlencoded")
+        let request = session.recordedRequests[0]
+        XCTAssertEqual(request.httpMethod, "POST")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "Content-Type"), "application/x-www-form-urlencoded")
+        let body = String(data: request.httpBody ?? Data(), encoding: .utf8)!
+        let form = URLComponents(string: "https://form.invalid/?\(body)")!
+        let values = Dictionary(uniqueKeysWithValues:
+            (form.queryItems ?? []).map { ($0.name, $0.value ?? "") })
+        XCTAssertEqual(values["client_id"], "codewire-ios")
+        XCTAssertEqual(values["redirect_uri"], "sh.codewire.ios:/oauth/callback")
+        XCTAssertEqual(values["code"], "a code&more")
     }
 
     func testRefreshToken_returnsNewToken() async throws {
         let session = MockHTTPSession()
-        let url = URL(string: "https://codewire.sh/oauth/token")!
+        let url = URL(string: "https://codewire.sh/api/oauth/token")!
         session.responses[url.absoluteString] = (
             Data(#"{"access_token":"new","refresh_token":"ref2","expires_in":3600}"#.utf8),
             HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!
         )
         let token = try await OIDCFlow.refresh(
             baseURL: URL(string: "https://codewire.sh")!,
-            clientID: "ios-app",
+            clientID: "codewire-ios",
             refreshToken: "old-ref",
             session: session
         )

@@ -2,37 +2,36 @@ import XCTest
 @testable import CodewireKit
 
 final class ModelsTests: XCTestCase {
-    func testOrganization_decodes() throws {
-        let json = #"{"id":"org_123","name":"Acme","slug":"acme","role":"admin"}"#
-        let org = try JSONDecoder().decode(Organization.self, from: Data(json.utf8))
-        XCTAssertEqual(org.id, "org_123")
-        XCTAssertEqual(org.name, "Acme")
-        XCTAssertEqual(org.slug, "acme")
-        XCTAssertEqual(org.role, "admin")
+    func testOrganization_initializesDisplayModel() {
+        let organization = Organization(id: "org_123", name: "Acme", slug: "acme", role: "admin")
+        XCTAssertEqual(organization.id, "org_123")
+        XCTAssertEqual(organization.name, "Acme")
+        XCTAssertEqual(organization.slug, "acme")
+        XCTAssertEqual(organization.role, "admin")
     }
 
-    func testEnvironment_decodes() throws {
-        let json = #"""
-        {"id":"env_1","name":"dev","org_id":"org_1","desired_state":"running","state":"running","cpu_millicores":2000,"memory_mb":4096,"disk_gb":20,"error_reason":null,"created_at":"2026-04-01T00:00:00Z"}
-        """#
-        let env = try JSONDecoder().decode(Environment.self, from: Data(json.utf8))
-        XCTAssertEqual(env.id, "env_1")
-        XCTAssertEqual(env.name, "dev")
-        XCTAssertEqual(env.orgId, "org_1")
-        XCTAssertEqual(env.desiredState, "running")
-        XCTAssertEqual(env.state, "running")
-        XCTAssertEqual(env.cpuMillicores, 2000)
-        XCTAssertEqual(env.memoryMb, 4096)
-        XCTAssertEqual(env.diskGb, 20)
-        XCTAssertNil(env.errorReason)
-        XCTAssertEqual(env.createdAt, "2026-04-01T00:00:00Z")
-    }
-
-    func testEnvironment_decodesErrorReason() throws {
-        let json = #"""
-        {"id":"env_2","name":"broken","org_id":"org_1","desired_state":"running","state":"error","cpu_millicores":1000,"memory_mb":2048,"disk_gb":10,"error_reason":"sidecar crashed","created_at":"2026-04-01T00:00:00Z"}
-        """#
-        let env = try JSONDecoder().decode(Environment.self, from: Data(json.utf8))
-        XCTAssertEqual(env.errorReason, "sidecar crashed")
+    func testEnvironment_initializesDisplayModel() {
+        let environment = Environment(
+            id: "env_1",
+            name: "dev",
+            orgId: "org_1",
+            desiredState: "started",
+            state: "running",
+            cpuMillicores: 2000,
+            memoryMb: 4096,
+            diskGb: 20,
+            errorReason: nil,
+            createdAt: "2026-04-01T00:00:00Z"
+        )
+        XCTAssertEqual(environment.id, "env_1")
+        XCTAssertEqual(environment.name, "dev")
+        XCTAssertEqual(environment.orgId, "org_1")
+        XCTAssertEqual(environment.desiredState, "started")
+        XCTAssertEqual(environment.state, "running")
+        XCTAssertEqual(environment.cpuMillicores, 2000)
+        XCTAssertEqual(environment.memoryMb, 4096)
+        XCTAssertEqual(environment.diskGb, 20)
+        XCTAssertNil(environment.errorReason)
+        XCTAssertEqual(environment.createdAt, "2026-04-01T00:00:00Z")
     }
 }

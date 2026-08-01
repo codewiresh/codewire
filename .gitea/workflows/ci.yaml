@@ -148,6 +148,17 @@ jobs:
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|web|') }}
         run: scripts/ci/verify/run-product-verification.sh web
 
+      - name: Run iOS package tests
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|ios|') }}
+        run: |
+          scripts/ci/verify/run-product-verification.sh ios-config
+          docker build --file - apps/ios <<'DOCKERFILE'
+          FROM swift@sha256:0ff707a48519cf1473616c759e019bcff21cfbafa3d2687bf8fd41a2757adc9a
+          WORKDIR /workspace
+          COPY . .
+          RUN swift test --scratch-path /tmp/codewire-ios-build
+          DOCKERFILE
+
       - name: Run SDK Go
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|sdk_go|') }}
         run: scripts/ci/verify/run-product-verification.sh sdk-go

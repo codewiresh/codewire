@@ -1,6 +1,6 @@
 import Foundation
 
-public struct Environment: Codable, Identifiable, Equatable, Sendable {
+public struct Environment: Identifiable, Equatable, Sendable {
     public let id: String
     public let name: String
     public let orgId: String
@@ -34,17 +34,5 @@ public struct Environment: Codable, Identifiable, Equatable, Sendable {
         self.diskGb = diskGb
         self.errorReason = errorReason
         self.createdAt = createdAt
-    }
-
-    private enum CodingKeys: String, CodingKey {
-        case id, name
-        case orgId = "org_id"
-        case desiredState = "desired_state"
-        case state
-        case cpuMillicores = "cpu_millicores"
-        case memoryMb = "memory_mb"
-        case diskGb = "disk_gb"
-        case errorReason = "error_reason"
-        case createdAt = "created_at"
     }
 }

@@ -1,6 +1,6 @@
 import Foundation
 
-public struct Organization: Codable, Identifiable, Equatable, Sendable {
+public struct Organization: Identifiable, Equatable, Sendable {
     public let id: String
     public let name: String
     public let slug: String

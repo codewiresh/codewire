@@ -143,13 +143,18 @@ select_all_contracts() {
 }
 
 select_all_product() {
-  local family
+  local include_ios="${1:-false}" family
   for family in \
       policy rust go_support web sdk_go sdk_ts sdk_python database \
       service_integration edge_kind release deploy security \
       runtime_confidential; do
     select_token "$family"
   done
+  # The iOS package is independently hermetic and comparatively expensive.
+  # Only its own paths, or an operator's explicit all request, select it.
+  if [ "$include_ios" = true ]; then
+    select_token ios
+  fi
   select_all_contracts
   select_all_transport
   select_token rust_workspace
@@ -168,7 +173,7 @@ select_dispatch_request() {
   local request="${VERIFICATION_REQUEST:-policy}"
   case "$request" in
     all)
-      select_all_product
+      select_all_product true
       ;;
     service_integration)
       select_services
@@ -200,7 +205,7 @@ select_dispatch_request() {
     contracts)
       select_all_contracts
       ;;
-    policy|web|sdk_go|sdk_ts|sdk_python|database|release|deploy)
+    policy|web|sdk_go|sdk_ts|sdk_python|database|release|deploy|ios)
       select_token "$request"
       ;;
     rust-stack)
@@ -598,6 +603,10 @@ elif [ "$event_selected" = false ]; then
     case "$path" in
       apps/dashboard/*|apps/docs/*)
         select_token web
+        recognized=true
+        ;;
+      apps/ios/*)
+        select_token ios
         recognized=true
         ;;
       apps/cli/Makefile)

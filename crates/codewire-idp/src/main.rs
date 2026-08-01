@@ -80,6 +80,9 @@ async fn serve() -> anyhow::Result<()> {
     if let Err(e) = codewire_idp::provisioning::ensure_desktop_client(&pool).await {
         tracing::warn!(error = %e, "oidc: failed to seed desktop client");
     }
+    if let Err(e) = codewire_idp::provisioning::ensure_ios_client(&pool).await {
+        tracing::warn!(error = %e, "oidc: failed to seed iOS client");
+    }
     if let Err(e) = codewire_idp::provisioning::ensure_cli_client(&pool).await {
         tracing::warn!(error = %e, "oidc: failed to seed CLI client");
     }

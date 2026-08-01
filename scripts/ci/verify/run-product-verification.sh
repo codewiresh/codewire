@@ -265,6 +265,31 @@ run_web() {
   bun --filter @codewire/docs build
 }
 
+run_ios_config() {
+  python3 - <<'PY'
+from pathlib import Path
+import plistlib
+
+root = Path("apps/ios")
+if "infoPath: Resources/Info.plist" not in (root / "xtool.yml").read_text():
+    raise SystemExit("xtool must use the source-owned Info.plist")
+with (root / "Resources/Info.plist").open("rb") as stream:
+    info = plistlib.load(stream)
+schemes = [
+    scheme
+    for entry in info.get("CFBundleURLTypes", [])
+    for scheme in entry.get("CFBundleURLSchemes", [])
+]
+if schemes != ["sh.codewire.ios"]:
+    raise SystemExit("Info.plist must register exactly the iOS OAuth callback scheme")
+PY
+}
+
+run_ios() {
+  run_ios_config
+  make ios-test
+}
+
 run_sdk_go() {
   (cd libs/sdk-go && GOWORK=off go build ./... && GOWORK=off go vet ./... \
     && GOWORK=off go test ./... -count=1 -timeout 60s)
@@ -583,6 +608,8 @@ case "$FAMILY" in
   contracts) run_contracts ;;
   go-support) run_go_support ;;
   web) run_web ;;
+  ios) run_ios ;;
+  ios-config) run_ios_config ;;
   sdk-go) run_sdk_go ;;
   sdk-ts) run_sdk_ts ;;
   sdk-python) run_sdk_python ;;
@@ -596,7 +623,7 @@ case "$FAMILY" in
   deploy) run_deploy ;;
   security) run_security ;;
   *)
-    echo "usage: run-product-verification.sh policy|contracts|go-support|web|sdk-go|sdk-ts|sdk-python|service-apikey-smoke|runtime-confidential|rust|rust-curated-locks|transport|edge|release|deploy|security" >&2
+    echo "usage: run-product-verification.sh policy|contracts|go-support|web|ios|sdk-go|sdk-ts|sdk-python|service-apikey-smoke|runtime-confidential|rust|rust-curated-locks|transport|edge|release|deploy|security" >&2
     exit 2
     ;;
 esac
