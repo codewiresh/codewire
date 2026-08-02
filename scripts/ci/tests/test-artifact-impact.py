@@ -3,12 +3,14 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 from pathlib import Path
 import shutil
 import subprocess
 import tempfile
+import time
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -42,10 +44,25 @@ class Fixture:
             cwd=self.repo,
         )
         run(["git", "config", "commit.gpgsign", "false"], cwd=self.repo)
+        # Each fixture creates many commits.  Disable Git's background
+        # maintenance so it cannot recreate a file while close() removes the
+        # disposable clone.
+        run(["git", "config", "maintenance.auto", "false"], cwd=self.repo)
+        run(["git", "config", "gc.auto", "0"], cwd=self.repo)
         self.base = run(["git", "rev-parse", "HEAD"], cwd=self.repo).stdout.strip()
 
     def close(self) -> None:
-        shutil.rmtree(self.temp)
+        # A Git process started before the local maintenance setting took
+        # effect can still finish asynchronously.  Retry only that transient
+        # directory-entry race; every other cleanup error remains a failure.
+        for attempt in range(5):
+            try:
+                shutil.rmtree(self.temp)
+                return
+            except OSError as error:
+                if error.errno != errno.ENOTEMPTY or attempt == 4:
+                    raise
+                time.sleep(0.05 * (attempt + 1))
 
     def reset(self, name: str) -> None:
         run(["git", "reset", "--hard", self.base], cwd=self.repo)
