@@ -155,7 +155,7 @@ final class AuthViewModel: ObservableObject {
         } catch let flowError as OAuthFlowError {
             error = flowError.localizedDescription
         } catch {
-            error = "Unable to complete sign in. Please try again."
+            self.error = "Unable to complete sign in. Please try again."
         }
     }
     #else
