@@ -460,6 +460,14 @@ run_paths_case dashboard_sandbox_image_inputs pull_request refs/pull/1231/head f
   'edge_kind policy rust rust_pkg_codewire_orchestration service_integration service_orchestration' \
   crates/codewire-orchestration/src/sandbox/mod.rs \
   crates/codewire-orchestration/src/sandbox/template.rs
+run_paths_case local_image_verifiers pull_request refs/pull/1231/head false \
+  'policy' \
+  scripts/ci/images/build-local-image.sh \
+  scripts/ci/tests/test-build-local-image.sh \
+  scripts/ci/tests/test-workspace-agent-contract.sh \
+  scripts/ci/verify/rehearse-build-local-image.sh \
+  scripts/ci/verify/verify-workspace-image.sh \
+  scripts/ci/verify/workspace-agent-contract.sh
 run_paths_case javascript_dependency_inputs pull_request refs/pull/120/head false \
   'policy sdk_ts security security_js web' \
   apps/dashboard/package.json \

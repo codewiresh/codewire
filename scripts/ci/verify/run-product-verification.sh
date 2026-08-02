@@ -124,6 +124,9 @@ run_policy() {
   scripts/ci/tests/test-verify-tested-tree-receipt.sh
   scripts/ci/tests/test-resolve-cargo-target-dir.sh
   scripts/ci/tests/test-package-codewire-desktop.sh
+  scripts/ci/tests/test-build-local-image.sh
+  scripts/ci/tests/test-workspace-agent-contract.sh
+  scripts/ci/tests/test-workspace-image-verify-workflow.sh
   scripts/ci/tests/test-sdk-local-cli-contract.sh
   scripts/ci/tests/test-integration-postgres.sh
   python3 scripts/checks/repo_checks.py license-map

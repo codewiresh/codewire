@@ -1024,6 +1024,15 @@ elif [ "$event_selected" = false ]; then
         kind_relevant=true
         recognized=true
         ;;
+      scripts/ci/images/build-local-image.sh|\
+      scripts/ci/tests/test-build-local-image.sh|\
+      scripts/ci/tests/test-workspace-agent-contract.sh|\
+      scripts/ci/verify/rehearse-build-local-image.sh|\
+      scripts/ci/verify/verify-workspace-image.sh|\
+      scripts/ci/verify/workspace-agent-contract.sh)
+        select_token policy
+        recognized=true
+        ;;
       crates/codewire-orchestration/src/sandbox/mod.rs|\
       crates/codewire-orchestration/src/sandbox/template.rs)
         select_token edge_kind

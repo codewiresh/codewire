@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# Build one image through an isolated Docker-container Buildx builder and load
+# the result into the caller's Docker image store for immediate verification.
+set -euo pipefail
+
+usage() {
+  echo "usage: $0 TAG DOCKERFILE CONTEXT [BUILDX_ARG ...]" >&2
+}
+
+if [[ $# -lt 3 ]]; then
+  usage
+  exit 2
+fi
+
+readonly tag="$1"
+readonly dockerfile="$2"
+readonly context="$3"
+readonly docker_bin="${CODEWIRE_DOCKER_BIN:-docker}"
+shift 3
+readonly -a build_args=("$@")
+
+builder=""
+
+cleanup() {
+  local status=$? cleanup_status=0
+  trap - EXIT INT TERM
+
+  if [[ -n "$builder" ]]; then
+    "$docker_bin" buildx rm --force "$builder" >/dev/null 2>&1 || cleanup_status=$?
+  fi
+
+  if [[ "$status" -eq 0 && "$cleanup_status" -ne 0 ]]; then
+    echo "local image build: failed to remove ephemeral builder $builder" >&2
+    status="$cleanup_status"
+  fi
+  exit "$status"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+# Let Buildx generate the name. Its daemon-wide allocator avoids collisions
+# between concurrent runner containers even when their PID namespaces overlap.
+builder="$("$docker_bin" buildx create --driver docker-container)"
+if [[ ! "$builder" =~ ^[[:alnum:]][[:alnum:]_.-]*$ ]]; then
+  echo "local image build: Buildx returned an invalid builder name" >&2
+  exit 1
+fi
+
+"$docker_bin" buildx build \
+  --builder "$builder" \
+  --pull \
+  --load \
+  --tag "$tag" \
+  --file "$dockerfile" \
+  "${build_args[@]}" \
+  "$context"

@@ -6,25 +6,14 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 readonly ROOT
 tag="codewire-workspace-verify:${GITHUB_SHA:-local}"
+docker_bin="${CODEWIRE_DOCKER_BIN:-docker}"
 
-# Gitea runners use Buildx's docker-container driver. Request a local image
-# explicitly so the inspection below never falls back to a registry pull.
-docker buildx build \
-  --load \
-  --tag "$tag" \
-  --file "$ROOT/images/workspace/Dockerfile" \
+# Use the same isolated Docker-container builder locally and in CI. The helper
+# loads the exact result into Docker without changing the selected builder.
+CODEWIRE_DOCKER_BIN="$docker_bin" "$ROOT/scripts/ci/images/build-local-image.sh" \
+  "$tag" \
+  "$ROOT/images/workspace/Dockerfile" \
   "$ROOT"
 
-docker run --rm --user codewire --entrypoint sh "$tag" -eu -c '
-  test "$(id -un)" = codewire
-  for agent in codex claude gemini kimi pi aider; do
-    executable="$(command -v "$agent")"
-    test -n "$executable"
-    test -O "$(readlink -f "$executable")"
-    "$agent" --version
-  done
-
-  # Codex is installed in the interactive-user npm prefix. A dry run proves
-  # the real vendor update path without mutating the verification image.
-  npm update --global --dry-run @openai/codex
-'
+"$docker_bin" run --rm --interactive --pids-limit=2048 --user codewire --entrypoint bash \
+  "$tag" -eu -s <"$ROOT/scripts/ci/verify/workspace-agent-contract.sh"
