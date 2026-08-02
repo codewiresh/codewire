@@ -1,8 +1,8 @@
-//! Shared account service layer for the REST handlers and AccountService.
+//! Shared account service layer for AccountService.
 //!
 //! Transport adapters own wire validation and response formatting. Database,
 //! secret-store, authorization, key generation, and lifecycle behavior live
-//! here so the dual-served surfaces cannot diverge.
+//! here so every Connect procedure uses the same policy and persistence.
 
 use base64::Engine;
 use codewire_server_core::auth::AuthUser;

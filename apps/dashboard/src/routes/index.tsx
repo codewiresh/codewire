@@ -1,5 +1,5 @@
 import { createFileRoute, Link, redirect } from "@tanstack/react-router";
-import { ArrowRight, Loader2 } from "lucide-react";
+import { ArrowRight } from "lucide-react";
 import { useEffect, useState } from "react";
 
 export const Route = createFileRoute("/")({
@@ -14,9 +14,6 @@ export const Route = createFileRoute("/")({
 const colors = ["#EF4444", "#0EA5E9", "#3B82F6", "#8B5CF6", "#EAB308"];
 
 function HomePage() {
-  const [email, setEmail] = useState("");
-  const [status, setStatus] = useState<"idle" | "loading" | "success" | "error">("idle");
-  const [errorMessage, setErrorMessage] = useState("");
   const [activeIndex, setActiveIndex] = useState(0);
 
   useEffect(() => {
@@ -25,32 +22,6 @@ function HomePage() {
     }, 2500);
     return () => clearInterval(interval);
   }, []);
-
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!email) return;
-
-    setStatus("loading");
-    setErrorMessage("");
-
-    try {
-      const res = await fetch("/api/v1/waitlist", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email }),
-      });
-      if (res.ok) {
-        setStatus("success");
-      } else {
-        const data = await res.json().catch(() => ({}));
-        setStatus("error");
-        setErrorMessage(data.error || "Something went wrong");
-      }
-    } catch {
-      setStatus("error");
-      setErrorMessage("Something went wrong");
-    }
-  };
 
   return (
     <>
@@ -855,7 +826,7 @@ function HomePage() {
         </div>
       </section>
 
-      {/* ── 7. CTA — Waitlist ── */}
+      {/* ── 7. CTA ── */}
       <section id="cta" className="relative overflow-hidden py-28 px-6 text-center dot-bg" style={{ background: "var(--bg-primary)" }}>
         <div className="relative max-w-[700px] mx-auto">
           <h2
@@ -865,54 +836,24 @@ function HomePage() {
             Ready to multiply your stack?
           </h2>
           <p className="mb-10" style={{ color: "var(--fg-secondary)", fontSize: "1.25rem" }}>
-            We're onboarding teams one at a time during the private beta.
+            Create an account to start building with your team.
           </p>
 
-          {status === "success" ? (
-            <div className="text-center">
-              <p className="text-lg font-medium" style={{ color: "var(--accent)" }}>You're on the list!</p>
-              <p className="text-sm mt-2" style={{ color: "var(--fg-tertiary)" }}>We'll notify you when we're ready for you.</p>
-            </div>
-          ) : (
-            <form onSubmit={handleSubmit} className="flex flex-col items-center gap-4">
-              <div className="flex flex-col sm:flex-row gap-3 w-full max-w-md">
-                <input
-                  type="email"
-                  placeholder="Enter your email"
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                  className="flex-1 px-4 py-3.5 rounded-lg focus:outline-none transition-colors"
-                  style={{ background: "var(--bg-surface)", border: "1px solid var(--border)", color: "var(--fg-primary)" }}
-                  onFocus={(e) => { e.currentTarget.style.borderColor = "var(--accent)"; e.currentTarget.style.boxShadow = "0 0 0 2px var(--accent-muted)"; }}
-                  onBlur={(e) => { e.currentTarget.style.borderColor = "var(--border)"; e.currentTarget.style.boxShadow = "none"; }}
-                  required
-                  disabled={status === "loading"}
-                />
-                <button
-                  type="submit"
-                  disabled={status === "loading"}
-                  className="inline-flex items-center justify-center gap-2 rounded-lg transition-all duration-150 whitespace-nowrap cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
-                  style={{
-                    fontSize: "13px",
-                    fontWeight: 510,
-                    textTransform: "uppercase",
-                    letterSpacing: "0.06em",
-                    padding: "12px 28px",
-                    background: "var(--accent)",
-                    color: "#000",
-                    border: "none",
-                  }}
-                >
-                  {status === "loading" ? (
-                    <><Loader2 className="w-4 h-4 animate-spin" />Joining...</>
-                  ) : (
-                    <>Join Waitlist <ArrowRight className="w-4 h-4" /></>
-                  )}
-                </button>
-              </div>
-              {status === "error" && <p className="text-sm" style={{ color: "var(--destructive)" }}>{errorMessage}</p>}
-            </form>
-          )}
+          <Link
+            to="/login"
+            className="inline-flex items-center justify-center gap-2 rounded-lg transition-all duration-150 no-underline"
+            style={{
+              fontSize: "13px",
+              fontWeight: 510,
+              textTransform: "uppercase",
+              letterSpacing: "0.06em",
+              padding: "12px 28px",
+              background: "var(--accent)",
+              color: "#000",
+            }}
+          >
+            Get started <ArrowRight className="w-4 h-4" />
+          </Link>
 
           <div className="mt-8">
             <Link to="/login" className="text-sm transition-colors no-underline" style={{ color: "var(--fg-tertiary)" }}>

@@ -1,22 +1,18 @@
-//! Billing catalog read handlers.
+//! Billing catalog queries for BillingCatalogService.
 //!
 //! The catalog model (plans + prices + settings) is the source of truth
 //! for what each resource type costs. Admin handlers write the same tables;
 //! this handler only reads.
 //!
-//! The response shape is the published dashboard/client contract.
+//! BillingCatalogService maps these rows into the published proto contract.
 
-use axum::Json;
-use axum::extract::State;
 use codewire_server_core::AppResult;
-use schemars::JsonSchema;
-use serde::Serialize;
 use sqlx::PgPool;
 
 // Numeric field widths match the schema exactly (`integer` → `i32`,
 // `double precision` → `f64`): sqlx rejects integer-width coercions at
 // row-decode time, so an `i64` here would 500 on the first real row.
-#[derive(Debug, Serialize, JsonSchema, sqlx::FromRow)]
+#[derive(Debug, sqlx::FromRow)]
 pub struct CatalogPlan {
     pub resource_type: String,
     pub plan_key: String,
@@ -31,17 +27,13 @@ pub struct CatalogPlan {
     pub included_cpu_hours: i32,
     pub included_mem_gb_hours: i32,
     pub included_disk_gb_hours: i32,
-    // Go's encoding/json prints integral floats without a decimal point.
-    #[serde(serialize_with = "crate::plans::go_float")]
     pub cpu_overage_cents: f64,
-    #[serde(serialize_with = "crate::plans::go_float")]
     pub mem_overage_cents: f64,
-    #[serde(serialize_with = "crate::plans::go_float")]
     pub disk_overage_cents: f64,
     pub archived: bool,
 }
 
-#[derive(Debug, Serialize, JsonSchema, sqlx::FromRow)]
+#[derive(Debug, sqlx::FromRow)]
 pub struct CatalogPrice {
     pub resource_type: String,
     pub plan_key: String,
@@ -51,20 +43,20 @@ pub struct CatalogPrice {
     pub archived: bool,
 }
 
-#[derive(Debug, Serialize, JsonSchema, sqlx::FromRow)]
+#[derive(Debug, sqlx::FromRow)]
 pub struct CatalogSetting {
     pub setting_key: String,
     pub int_value: i32,
 }
 
-#[derive(Debug, Serialize, JsonSchema)]
+#[derive(Debug)]
 pub struct CatalogResponse {
     pub plans: Vec<CatalogPlan>,
     pub prices: Vec<CatalogPrice>,
     pub settings: Vec<CatalogSetting>,
 }
 
-/// Shared catalog read used by REST and BillingCatalogService.
+/// Shared catalog read used by BillingCatalogService.
 pub async fn get_catalog_core(pool: &PgPool) -> AppResult<CatalogResponse> {
     let plans = sqlx::query_as::<_, CatalogPlan>(
         r#"
@@ -124,12 +116,4 @@ pub async fn get_catalog_core(pool: &PgPool) -> AppResult<CatalogResponse> {
         prices,
         settings,
     })
-}
-
-/// `GET /api/v1/admin/billing/catalog`.
-///
-/// Auth (require_auth + require_admin) is applied in `routes.rs`,
-/// matching the Go `registerAdminRoutes` middleware chain.
-pub async fn get_catalog(State(pool): State<PgPool>) -> AppResult<Json<CatalogResponse>> {
-    Ok(Json(get_catalog_core(&pool).await?))
 }

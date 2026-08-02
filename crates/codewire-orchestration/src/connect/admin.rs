@@ -1,7 +1,7 @@
 //! Connect-RPC adapter for global administrator reads.
 //!
-//! REST and Connect both call [`crate::api::admin`] core functions. This
-//! module owns only protobuf mapping and Connect error rendering.
+//! This module maps [`crate::api::admin`] core functions to protobuf and
+//! renders Connect errors.
 
 use std::sync::Arc;
 

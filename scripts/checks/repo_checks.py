@@ -385,13 +385,10 @@ def check_openapi_contract_source(_args: argparse.Namespace) -> int:
 
     assert_no_boolean_schemas(spec, "$", fail)
 
-    for path in [
-        "/api/auth/sign-in",
-        "/api/v1/git-credentials",
-        "/api/v1/organizations",
-        "/api/v1/organizations/{orgId}/billing",
-        "/api/v1/github/repos",
-    ]:
+    # WS13/S1 removed the control-plane REST contract. Identity remains the
+    # only non-health public OpenAPI surface until S2 deletes this transitional
+    # OpenAPI production line entirely.
+    for path in ["/api/auth/sign-in"]:
         if path not in (spec.get("paths") or {}):
             fail(f"openapi.json is missing expected path {path}")
 

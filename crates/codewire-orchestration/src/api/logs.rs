@@ -1,27 +1,15 @@
-//! Environment logs (#38 slice 5) — port of `environment_logs.go`.
+//! Environment-log query and follow support for Connect EnvironmentService.
 //!
-//! A RAW handler in Go (chi, not huma): rejections are `http.Error`
-//! text/plain `{"error":…}` bodies, the JSON list is `json.NewEncoder`
-//! output, and SSE mode streams `data: {log}\n\n` frames fed by
-//! `LISTEN environment_logs` with 15s keepalive comments and a
-//! terminal short-circuit (phase=complete or status=failed).
-//!
-//! Byte-parity notes:
-//! - `metadata` is embedded as the raw `jsonb::text` rendering (Go's
-//!   `json.RawMessage`), NOT re-serialized — jsonb's text form uses
-//!   `{"k": "v"}` spacing that a Value round-trip would normalize.
-//! - `created_at` is Go `time.RFC3339` of a timestamptz: seconds
-//!   precision, `Z` for UTC.
+//! The shared source backfills persisted logs, follows PostgreSQL
+//! `LISTEN environment_logs`, emits a heartbeat every 15 seconds, and stops
+//! when the environment reaches a terminal phase. Connect owns the wire
+//! framing and typed heartbeat representation.
 
-use std::convert::Infallible;
 use std::time::Duration;
 
-use axum::body::Body;
-use axum::extract::{Path, State};
-use axum::http::{HeaderMap, StatusCode, header};
-use axum::response::Response;
+use axum::http::StatusCode;
 use chrono::{DateTime, Utc};
-use codewire_server_core::auth::{AuthUser, authenticate};
+use codewire_server_core::auth::AuthUser;
 use codewire_server_core::{AppError, AppResult};
 use serde::Serialize;
 use sqlx::postgres::PgListener;
@@ -29,7 +17,6 @@ use sqlx::{PgPool, Row};
 
 use super::ApiState;
 use super::environments::{require_environment_access, require_org_member};
-use super::prepare::{json_response, plain_error, read_bearer, read_session_cookie};
 
 const LOG_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
 
@@ -140,9 +127,9 @@ async fn query_environment_logs(
         .collect()
 }
 
-/// Opens the one authorized backfill/follow source used by REST JSON, SSE, and
-/// Connect. Membership is checked before environment existence and access so
-/// every renderer shares the same existence-hiding boundary.
+/// Opens the authorized backfill/follow source used by Connect. Membership is
+/// checked before environment existence and access so the service preserves
+/// the same existence-hiding boundary for every stream.
 pub(crate) async fn open_environment_log_stream(
     state: &ApiState,
     user: &AuthUser,
@@ -274,119 +261,6 @@ fn start_environment_log_stream(
     rx
 }
 
-/// `GET /api/v1/organizations/{org_id}/environments/{env_id}/logs` —
-/// mirrors `environmentLogsHandler` (raw; SSE on Accept).
-pub async fn environment_logs(
-    State(state): State<ApiState>,
-    Path((org_id, env_id)): Path<(String, String)>,
-    headers: HeaderMap,
-) -> Response {
-    let session_token = read_session_cookie(&headers);
-    let bearer = read_bearer(&headers);
-    let user = match authenticate(&state.auth, session_token.as_deref(), bearer.as_deref()).await {
-        Ok(u) => u,
-        Err(err) if err.is_forbidden() => {
-            return plain_error(StatusCode::FORBIDDEN, r#"{"error":"forbidden"}"#);
-        }
-        Err(_) => return plain_error(StatusCode::UNAUTHORIZED, r#"{"error":"unauthorized"}"#),
-    };
-
-    let wants_sse = headers
-        .get(header::ACCEPT)
-        .and_then(|v| v.to_str().ok())
-        .is_some_and(|v| v.contains("text/event-stream"));
-
-    let stream =
-        match open_environment_log_stream(&state, &user, &org_id, &env_id, "", wants_sse).await {
-            Ok(stream) => stream,
-            Err(error) => return raw_log_error(error),
-        };
-
-    if wants_sse {
-        stream_environment_logs(stream)
-    } else {
-        match collect_environment_logs(stream).await {
-            Ok(logs) => json_response(StatusCode::OK, &logs),
-            Err(error) => raw_log_error(error),
-        }
-    }
-}
-
-async fn collect_environment_logs(
-    mut stream: tokio::sync::mpsc::UnboundedReceiver<AppResult<LogStreamEvent>>,
-) -> AppResult<Vec<EnvironmentLog>> {
-    let mut logs = Vec::new();
-    while let Some(event) = stream.recv().await {
-        match event? {
-            LogStreamEvent::Log(log) => logs.push(log),
-            LogStreamEvent::Heartbeat(_) => {}
-        }
-    }
-    Ok(logs)
-}
-
-fn raw_log_error(error: AppError) -> Response {
-    match error {
-        AppError::Coded {
-            code: "org_not_found",
-            ..
-        } => plain_error(
-            StatusCode::NOT_FOUND,
-            r#"{"error":"organization not found"}"#,
-        ),
-        AppError::Coded {
-            code: "env_not_found",
-            ..
-        } => plain_error(
-            StatusCode::NOT_FOUND,
-            r#"{"error":"environment not found"}"#,
-        ),
-        AppError::Coded {
-            code: "access_denied",
-            ..
-        } => plain_error(StatusCode::FORBIDDEN, r#"{"error":"access denied"}"#),
-        error => {
-            tracing::error!(%error, "environment logs source failed");
-            plain_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                r#"{"error":"internal error"}"#,
-            )
-        }
-    }
-}
-
-pub(crate) fn environment_log_sse_frame(event: &LogStreamEvent) -> String {
-    match event {
-        LogStreamEvent::Log(log) => serde_json::to_string(log)
-            .map(|data| format!("data: {data}\n\n"))
-            .unwrap_or_default(),
-        LogStreamEvent::Heartbeat(_) => ": keepalive\n\n".to_owned(),
-    }
-}
-
-/// Mirrors `streamEnvironmentLogs` while consuming the shared typed source.
-fn stream_environment_logs(
-    stream: tokio::sync::mpsc::UnboundedReceiver<AppResult<LogStreamEvent>>,
-) -> Response {
-    let stream = futures::stream::unfold(stream, |mut rx| async move {
-        match rx.recv().await? {
-            Ok(event) => Some((Ok::<_, Infallible>(environment_log_sse_frame(&event)), rx)),
-            Err(error) => {
-                tracing::error!(%error, "environment logs SSE source failed");
-                None
-            }
-        }
-    });
-
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "text/event-stream")
-        .header(header::CACHE_CONTROL, "no-cache")
-        .header(header::CONNECTION, "keep-alive")
-        .body(Body::from_stream(stream))
-        .expect("sse response")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -437,29 +311,5 @@ mod tests {
         let s = serde_json::to_string(&l2).unwrap();
         assert!(s.contains(r#""metadata":null"#), "{s}");
         assert!(s.contains(r#""message":"hi""#), "{s}");
-    }
-
-    #[test]
-    fn sse_frames_remain_frozen_and_heartbeats_are_comments() {
-        let log = EnvironmentLog {
-            id: "log_1".into(),
-            environment_id: "env_1".into(),
-            phase: "setup".into(),
-            status: "running".into(),
-            message: "installing".into(),
-            metadata: serde_json::value::RawValue::from_string(
-                r#"{"step":2,"nested":{"ok":true}}"#.into(),
-            )
-            .ok(),
-            created_at: "2026-07-18T21:00:00Z".into(),
-        };
-        assert_eq!(
-            environment_log_sse_frame(&LogStreamEvent::Log(log)),
-            "data: {\"id\":\"log_1\",\"environment_id\":\"env_1\",\"phase\":\"setup\",\"status\":\"running\",\"message\":\"installing\",\"metadata\":{\"step\":2,\"nested\":{\"ok\":true}},\"created_at\":\"2026-07-18T21:00:00Z\"}\n\n"
-        );
-        assert_eq!(
-            environment_log_sse_frame(&LogStreamEvent::Heartbeat(Utc::now())),
-            ": keepalive\n\n"
-        );
     }
 }

@@ -1,8 +1,7 @@
 //! Connect-RPC adapter for the organization-scoped API-key service.
 //!
-//! REST and Connect both call [`crate::api::api_keys::service`]; this module
-//! owns only Connect request validation, pagination shaping, error rendering,
-//! and protobuf mapping.
+//! This module maps [`crate::api::api_keys::service`] to Connect requests,
+//! pagination, errors, and protobuf.
 
 use std::borrow::Cow;
 use std::sync::Arc;

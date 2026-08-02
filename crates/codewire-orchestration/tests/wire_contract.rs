@@ -3,7 +3,7 @@
 //! The service-integration and all-up diagnostic harnesses start the real
 //! binary, load the deterministic fixture, and run this test over its network
 //! listener. The complete scope owns the current Connect, authentication,
-//! canonical-error, streaming, and REST/Connect parity contract. The runtime
+//! canonical-error, streaming, and retired-route contract. The runtime
 //! scope repeats only the fake-Kubernetes boundary after the harness restarts
 //! orchestration without a Kubernetes client.
 

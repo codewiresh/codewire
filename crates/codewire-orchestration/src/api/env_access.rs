@@ -18,12 +18,10 @@
 //! - Grant/revoke emit `info`-severity audit events, matching Go's
 //!   `auth.LogAuditEvent(..., "info")`.
 
-use axum::Json;
-use axum::extract::{Path, State};
 use axum::http::StatusCode;
+use codewire_server_core::AppResult;
 use codewire_server_core::auth::AuthUser;
 use codewire_server_core::org_deletion::run_organization_database_mutation;
-use codewire_server_core::{AppResult, ValidatedJson};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, Row};
@@ -67,18 +65,6 @@ async fn log_audit_info(pool: &PgPool, action: &str, user_id: &str, metadata: se
     {
         tracing::error!(action, error = %e, "failed to log audit event");
     }
-}
-
-/// Mirrors `listEnvironmentAccess`.
-/// `GET /api/v1/organizations/{org_id}/environments/{env_id}/access`.
-pub async fn list_environment_access(
-    State(state): State<ApiState>,
-    user: AuthUser,
-    Path((org_id, env_id)): Path<(String, String)>,
-) -> AppResult<Json<Vec<AccessGrant>>> {
-    Ok(Json(
-        list_environment_access_core(&state, &user, &org_id, &env_id).await?,
-    ))
 }
 
 pub(crate) async fn list_environment_access_core(
@@ -134,18 +120,6 @@ pub(crate) async fn list_environment_access_core(
         .collect::<Result<Vec<_>, _>>()?;
 
     Ok(grants)
-}
-
-/// Mirrors `grantEnvironmentAccess` (201).
-/// `POST /api/v1/organizations/{org_id}/environments/{env_id}/access`.
-pub async fn grant_environment_access(
-    State(state): State<ApiState>,
-    user: AuthUser,
-    Path((org_id, env_id)): Path<(String, String)>,
-    ValidatedJson(body): ValidatedJson<GrantAccessBody>,
-) -> AppResult<(StatusCode, Json<AccessGrant>)> {
-    let grant = grant_environment_access_core(&state, &user, &org_id, &env_id, body).await?;
-    Ok((StatusCode::CREATED, Json(grant)))
 }
 
 pub(crate) async fn grant_environment_access_core(
@@ -239,17 +213,6 @@ pub(crate) async fn grant_environment_access_core(
         Ok(grant)
     })
     .await
-}
-
-/// Mirrors `revokeEnvironmentAccess` (204).
-/// `DELETE /api/v1/organizations/{org_id}/environments/{env_id}/access/{user_id}`.
-pub async fn revoke_environment_access(
-    State(state): State<ApiState>,
-    user: AuthUser,
-    Path((org_id, env_id, target_user_id)): Path<(String, String, String)>,
-) -> AppResult<StatusCode> {
-    revoke_environment_access_core(&state, &user, &org_id, &env_id, &target_user_id).await?;
-    Ok(StatusCode::NO_CONTENT)
 }
 
 pub(crate) async fn revoke_environment_access_core(

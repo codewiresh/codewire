@@ -1,8 +1,7 @@
 //! Connect-RPC adapter for sandbox file operations.
 //!
-//! REST and Connect use the same SFTP/exec service layer in `api::proxy`.
-//! This module owns only protobuf mapping, streaming protocol validation, and
-//! the documented Connect normalization for missing files/directories.
+//! This module maps the SFTP/exec service layer in `api::proxy`, validates the
+//! streaming protocol, and normalizes missing files/directories for Connect.
 
 use std::borrow::Cow;
 use std::sync::Arc;
@@ -349,7 +348,6 @@ mod tests {
     #[test]
     fn download_errors_have_stable_codes_and_details() {
         let missing = file_read_app_error(WorkspaceFileReadError::Missing {
-            operation: "stat",
             detail: "gone".into(),
         });
         let rendered = rendered_workspace_error(&missing, Some("req-file"));

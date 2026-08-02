@@ -248,7 +248,7 @@ run_paths_case orchestration_wire_contract pull_request refs/pull/71/head false 
   crates/codewire-orchestration/tests/wire_contract/environment.rs
 run_paths_case billing_contract pull_request refs/pull/8/head false \
   'policy rust rust_pkg_codewire_billing service_billing service_integration' \
-  crates/codewire-billing/tests/wire_contract.rs
+  crates/codewire-billing/src/connect/billing.rs
 run_paths_case retired_billing_driver_deletion pull_request refs/pull/800/head false \
   'policy service_billing service_integration' \
   tests/contract/billing/billing_test.go
@@ -829,8 +829,7 @@ for billing_runner in \
     "$integration_runner" \
     "$ROOT/scripts/ci/verify/rust-stack-rehearsal.sh" \
     "$ROOT/scripts/ci/verify/kind/common.sh"; do
-  grep -qF -- '--test wire_contract configured_billing_wire_contract' \
-    "$billing_runner"
+  grep -qF -- '--test wire_contract configured_billing_wire_contract' "$billing_runner"
   if rg -n '(^|[[:space:]])go test.*billing|\./billing/\.\.\.|BILLING_STRIPE_CONFIGURED.*absent|billing is not enabled' \
       "$billing_runner"; then
     echo "Automatic gate still carries a retired Go or Stripe-disabled billing contract: $billing_runner" >&2

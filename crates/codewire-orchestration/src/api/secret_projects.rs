@@ -1,60 +1,29 @@
-//! `/organizations/{org}/secret-projects` (#38).
-//!
-//! Project-scoped secrets: a `secret_projects` row groups secrets stored in
-//! the tenant `SecretStore` at `/projects/{org_id}/{project_id}`. Same
-//! owner/admin gating + audit + parity discipline as the `/secrets` port;
-//! shares its helpers.
+//! Shared project-secret service logic.
 
-use axum::Json;
-use axum::extract::{Path, State};
 use codewire_server_core::auth::AuthUser;
 use codewire_server_core::org_deletion::{
     OrganizationTenantSecretMutationError, run_organization_database_mutation,
     run_organization_tenant_secret_mutation,
 };
-use codewire_server_core::{AppError, AppResult, ValidatedJson};
-use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use codewire_server_core::{AppError, AppResult};
 use sqlx::Row;
 
 use super::ApiState;
 use super::environments::format_time;
 use super::secrets::{
-    ListSecretsResponse, StatusResponse, ambiguous_secret_provider_error, forbidden, log_audit,
-    org_role, rename_provider_error, to_metadata, validate_secret_key,
+    ListSecretsResponse, ambiguous_secret_provider_error, forbidden, log_audit, org_role,
+    rename_provider_error, to_metadata, validate_secret_key,
 };
 
 // ── Types ──────────────────────────────────────────────────────────────
 
-/// Mirrors `api.SecretProject` (`secret_count` is `omitempty` — omitted at 0).
-#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[derive(Debug, Clone)]
 pub struct SecretProject {
     pub id: String,
     pub org_id: String,
     pub name: String,
-    #[serde(skip_serializing_if = "is_zero")]
     pub secret_count: i64,
     pub created_at: String,
-}
-
-fn is_zero(n: &i64) -> bool {
-    *n == 0
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct CreateProjectBody {
-    pub name: String,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct SetProjectSecretBody {
-    pub key: String,
-    pub value: String,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct RenameProjectSecretBody {
-    pub new_key: String,
 }
 
 fn secret_project_path(org_id: &str, project_id: &str) -> String {
@@ -106,20 +75,6 @@ async fn require_manage(
     }
     Ok(())
 }
-
-// ── Handlers ─────────────────────────────────────────────────────────────
-
-/// `POST /…/secret-projects` — mirrors `createSecretProject` (201).
-pub async fn create_secret_project(
-    State(state): State<ApiState>,
-    user: AuthUser,
-    Path(org_id): Path<String>,
-    ValidatedJson(body): ValidatedJson<CreateProjectBody>,
-) -> AppResult<(axum::http::StatusCode, Json<SecretProject>)> {
-    let project = create_secret_project_core(&state, &user, &org_id, &body.name).await?;
-    Ok((axum::http::StatusCode::CREATED, Json(project)))
-}
-
 pub(crate) async fn create_secret_project_core(
     state: &ApiState,
     user: &AuthUser,
@@ -171,17 +126,6 @@ pub(crate) async fn create_secret_project_core(
     .await
 }
 
-/// `GET /…/secret-projects` — mirrors `listSecretProjects` (enriched counts).
-pub async fn list_secret_projects(
-    State(state): State<ApiState>,
-    user: AuthUser,
-    Path(org_id): Path<String>,
-) -> AppResult<Json<Vec<SecretProject>>> {
-    Ok(Json(
-        list_secret_projects_core(&state, &user, &org_id).await?,
-    ))
-}
-
 pub(crate) async fn list_secret_projects_core(
     state: &ApiState,
     user: &AuthUser,
@@ -214,16 +158,6 @@ pub(crate) async fn list_secret_projects_core(
         projects.push(p);
     }
     Ok(projects)
-}
-
-/// `DELETE /…/secret-projects/{projectId}` — mirrors `deleteSecretProject` (204).
-pub async fn delete_secret_project(
-    State(state): State<ApiState>,
-    user: AuthUser,
-    Path((org_id, project_id)): Path<(String, String)>,
-) -> AppResult<axum::http::StatusCode> {
-    delete_secret_project_core(&state, &user, &org_id, &project_id).await?;
-    Ok(axum::http::StatusCode::NO_CONTENT)
 }
 
 pub(crate) async fn delete_secret_project_core(
@@ -284,17 +218,6 @@ pub(crate) async fn delete_secret_project_storage(
     Ok(())
 }
 
-/// `GET /…/secret-projects/{projectId}/secrets` — mirrors `listProjectSecrets`.
-pub async fn list_project_secrets(
-    State(state): State<ApiState>,
-    user: AuthUser,
-    Path((org_id, project_id)): Path<(String, String)>,
-) -> AppResult<Json<ListSecretsResponse>> {
-    Ok(Json(
-        list_project_secrets_core(&state, &user, &org_id, &project_id).await?,
-    ))
-}
-
 pub(crate) async fn list_project_secrets_core(
     state: &ApiState,
     user: &AuthUser,
@@ -315,17 +238,6 @@ pub(crate) async fn list_project_secrets_core(
     Ok(ListSecretsResponse {
         secrets: to_metadata(secrets),
     })
-}
-
-/// `PUT /…/secret-projects/{projectId}/secrets` — mirrors `setProjectSecret`.
-pub async fn set_project_secret(
-    State(state): State<ApiState>,
-    user: AuthUser,
-    Path((org_id, project_id)): Path<(String, String)>,
-    ValidatedJson(body): ValidatedJson<SetProjectSecretBody>,
-) -> AppResult<Json<StatusResponse>> {
-    set_project_secret_core(&state, &user, &org_id, &project_id, &body.key, &body.value).await?;
-    Ok(Json(StatusResponse { status: "ok" }))
 }
 
 pub(crate) async fn set_project_secret_core(
@@ -381,16 +293,6 @@ pub(crate) async fn set_project_secret_core(
     Ok(())
 }
 
-/// `DELETE /…/secret-projects/{projectId}/secrets/{key}` — mirrors `deleteProjectSecret` (204).
-pub async fn delete_project_secret(
-    State(state): State<ApiState>,
-    user: AuthUser,
-    Path((org_id, project_id, key)): Path<(String, String, String)>,
-) -> AppResult<axum::http::StatusCode> {
-    delete_project_secret_core(&state, &user, &org_id, &project_id, &key).await?;
-    Ok(axum::http::StatusCode::NO_CONTENT)
-}
-
 pub(crate) async fn delete_project_secret_core(
     state: &ApiState,
     user: &AuthUser,
@@ -427,17 +329,6 @@ pub(crate) async fn delete_project_secret_core(
     )
     .await;
     Ok(())
-}
-
-/// `POST /…/secret-projects/{projectId}/secrets/{key}/rename` — mirrors `renameProjectSecret`.
-pub async fn rename_project_secret(
-    State(state): State<ApiState>,
-    user: AuthUser,
-    Path((org_id, project_id, key)): Path<(String, String, String)>,
-    ValidatedJson(body): ValidatedJson<RenameProjectSecretBody>,
-) -> AppResult<Json<StatusResponse>> {
-    rename_project_secret_core(&state, &user, &org_id, &project_id, &key, &body.new_key).await?;
-    Ok(Json(StatusResponse { status: "ok" }))
 }
 
 pub(crate) async fn rename_project_secret_core(
@@ -484,93 +375,4 @@ pub(crate) async fn rename_project_secret_core(
     )
     .await;
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use codewire_server_core::validation::validate_value;
-
-    #[test]
-    fn project_path_matches_go() {
-        assert_eq!(secret_project_path("o1", "p1"), "/projects/o1/p1");
-    }
-
-    #[test]
-    fn secret_count_omitted_at_zero() {
-        let v = serde_json::to_value(SecretProject {
-            id: "p1".into(),
-            org_id: "o1".into(),
-            name: "proj".into(),
-            secret_count: 0,
-            created_at: "2026-01-01T00:00:00Z".into(),
-        })
-        .unwrap();
-        assert!(!v.as_object().unwrap().contains_key("secret_count"));
-        let v2 = serde_json::to_value(SecretProject {
-            id: "p1".into(),
-            org_id: "o1".into(),
-            name: "proj".into(),
-            secret_count: 3,
-            created_at: "2026-01-01T00:00:00Z".into(),
-        })
-        .unwrap();
-        assert_eq!(v2["secret_count"], 3);
-    }
-
-    #[test]
-    fn project_secret_schemas_require_go_required_fields() {
-        let create_schema = serde_json::to_value(schemars::schema_for!(CreateProjectBody)).unwrap();
-        assert_eq!(create_schema["required"], serde_json::json!(["name"]));
-
-        let set_schema = serde_json::to_value(schemars::schema_for!(SetProjectSecretBody)).unwrap();
-        assert_eq!(set_schema["required"], serde_json::json!(["key", "value"]));
-
-        let rename_schema =
-            serde_json::to_value(schemars::schema_for!(RenameProjectSecretBody)).unwrap();
-        assert_eq!(rename_schema["required"], serde_json::json!(["new_key"]));
-    }
-
-    #[test]
-    fn create_project_validation_rejects_missing_required_fields() {
-        let Err(AppError::Validation { errors }) =
-            validate_value::<CreateProjectBody>(serde_json::json!({}))
-        else {
-            panic!("expected missing name to be rejected");
-        };
-
-        assert_eq!(errors.len(), 1);
-        assert_eq!(errors[0].path, "/");
-        assert!(errors[0].message.contains("name"));
-    }
-
-    #[test]
-    fn set_project_secret_validation_rejects_missing_required_fields() {
-        let Err(AppError::Validation { errors }) =
-            validate_value::<SetProjectSecretBody>(serde_json::json!({
-                "key": "DATABASE_URL"
-            }))
-        else {
-            panic!("expected missing value to be rejected");
-        };
-
-        assert_eq!(errors.len(), 1);
-        assert_eq!(errors[0].path, "/");
-        assert!(errors[0].message.contains("value"));
-    }
-
-    #[test]
-    fn rename_project_secret_validation_rejects_type_errors() {
-        let Err(AppError::Validation { errors }) =
-            validate_value::<RenameProjectSecretBody>(serde_json::json!({
-                "new_key": 7
-            }))
-        else {
-            panic!("expected type-invalid new_key to be rejected");
-        };
-
-        assert_eq!(errors.len(), 1);
-        assert_eq!(errors[0].path, "/new_key");
-        assert!(errors[0].message.contains("string"));
-    }
 }

@@ -1,9 +1,7 @@
 //! Connect-RPC adapter for the first-party environment-creation setup UX.
 //!
-//! REST and Connect both call the service functions in [`crate::api::prepare`]
-//! and [`crate::api::terminal`]. The content-negotiated prepare handler is
-//! represented by EnvironmentService.WatchEnvironmentCreate, while the
-//! terminal WebSocket remains raw HTTP.
+//! This module maps shared preparation and terminal-ticket service logic to
+//! Connect. The terminal WebSocket remains raw HTTP.
 
 use std::borrow::Cow;
 use std::sync::Arc;

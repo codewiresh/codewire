@@ -1,9 +1,10 @@
 -- Contract-suite fixture for the billing service.
 --
 -- Loaded by CI (build-test.yml integration + kind-e2e jobs) after
--- the baseline schema, before the billing contract suite runs with
+-- the baseline schema, before the billing Connect contract runs with
 -- BILLING_SEEDED=1. The plan keys and tokens here are asserted by
--- crates/codewire-billing/tests/wire_contract.rs — keep the two in sync.
+-- crates/codewire-billing/tests/wire_contract.rs — keep the fixture and
+-- retained Connect assertions in sync.
 --
 -- The schema baseline now materializes the default catalog (#69), so
 -- every catalog insert here is ON CONFLICT DO NOTHING: fixture rows
@@ -29,7 +30,7 @@ VALUES
     -- expiry UPDATE must not resurrect it.
     ('ses_contract_stale', 'usr_contract_user',  encode(digest('contract-stale-session-token', 'sha256'), 'hex'), NOW() - INTERVAL '1 minute', '127.0.0.1', 'contract-suite');
 
--- A seeded SSH key makes GET /api/v1/user/ssh-key deterministic: the
+-- A seeded SSH key makes the authenticated account-key contract deterministic: the
 -- lazy-generate-on-first-access path would mint a random keypair. With a row
 -- present, the handler returns this fixed key verbatim (it reads the stored
 -- values, it does not recompute the fingerprint).

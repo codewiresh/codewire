@@ -283,39 +283,6 @@ FAKE
   chmod +x "$path"
 }
 
-make_fake_rest_curl() {
-  local path="$1"
-  cat >"$path" <<'FAKE'
-#!/usr/bin/env bash
-set -euo pipefail
-[[ "${1:-}" == "--config" ]]
-config="$2"
-[[ -f "$config" && "$(stat -c '%a' "$config")" == "600" ]]
-output="$(awk -F'"' '$1 ~ /^output = / { print $2; exit }' "$config")"
-url="$(awk -F'"' '$1 ~ /^url = / { print $2; exit }' "$config")"
-[[ -n "$output" && -n "$url" ]]
-printf '%s\n' "$url" >>"$FAKE_CW_STATE/rest-operations"
-grep -F "header = \"Authorization: Bearer $(<"$FAKE_CW_STATE/bootstrap")\"" \
-  "$config" >/dev/null
-case "$url" in
-  https://codewire-dev.sh/api/v1/organizations/9bef2654d4ac6824ead235fdb9bb8598/api-keys)
-    org_id="9bef2654d4ac6824ead235fdb9bb8598"
-    ;;
-  https://codewire.sh/api/v1/organizations/3289cbf3e0ca05c5ef2ac7cb696d5318/api-keys)
-    org_id="3289cbf3e0ca05c5ef2ac7cb696d5318"
-    ;;
-  https://codewire.sh/api/v1/organizations/63742e203ad7e3c65f25af8e221ccf21/api-keys)
-    org_id="63742e203ad7e3c65f25af8e221ccf21"
-    ;;
-  *) exit 69 ;;
-esac
-printf '[{"id":"%s","org_id":"%s","name":"%s","key_prefix":"aaaaaaaa"}]\n' \
-  "$(<"$FAKE_CW_STATE/id")" "$org_id" "$(<"$FAKE_CW_STATE/name")" >"$output"
-printf '200'
-FAKE
-  chmod +x "$path"
-}
-
 run_lifecycle_case() {
   local name="$1"
   local expected_rc="$2"
@@ -324,7 +291,6 @@ run_lifecycle_case() {
   local case_dir="$TEST_TMP/$name"
   mkdir -p "$case_dir/state" "$case_dir/bin"
   make_fake_cw "$case_dir/cw"
-  make_fake_rest_curl "$case_dir/bin/curl"
   : >"$case_dir/state/operations"
 
   set +e
@@ -352,7 +318,6 @@ run_secondary_lifecycle_case() {
   local case_dir="$TEST_TMP/lifecycle-secondary"
   mkdir -p "$case_dir/state" "$case_dir/bin"
   make_fake_cw "$case_dir/cw"
-  make_fake_rest_curl "$case_dir/bin/curl"
   : >"$case_dir/state/operations"
 
   PATH="$case_dir/bin:$PATH" \
@@ -516,7 +481,6 @@ test_g4_evidence_runner() {
   mkdir -p "$case_dir/state"
   make_fake_infisical "$bin_dir"
   make_fake_cw "$case_dir/cw"
-  make_fake_rest_curl "$bin_dir/curl"
   : >"$case_dir/infisical.log"
   : >"$case_dir/state/operations"
 
@@ -544,8 +508,6 @@ test_g4_evidence_runner() {
     fail "G4 evidence runner did not execute exactly 50 ApiKeyService CLI operations"
   [[ "$(grep -c '^whoami$' "$case_dir/state/operations")" == "10" ]] || \
     fail "G4 evidence runner did not execute exactly ten identity checks"
-  [[ "$(wc -l <"$case_dir/state/rest-operations")" == "10" ]] || \
-    fail "G4 evidence runner did not execute exactly ten REST parity checks"
   [[ "$(grep -c 'CODEWIRE_APIKEY_PROD_SMOKE_BOOTSTRAP_KEY' "$case_dir/infisical.log")" == "5" ]] || \
     fail "G4 evidence runner did not load the primary fixture exactly five times"
   [[ "$(grep -c 'CODEWIRE_APIKEY_PROD_EVIDENCE_SECONDARY_BOOTSTRAP_KEY' "$case_dir/infisical.log")" == "5" ]] || \

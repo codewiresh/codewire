@@ -1,63 +1,22 @@
-//! Sandbox exec proxy (#38 slice 6a) — port of the `execInEnvironment`
-//! huma handler in `environment_proxy.go` plus the shared
-//! `resolveRunningSandboxTarget` gate (reused by the file/stream
-//! handlers in slice 6b).
-//!
-//! Verification note: the happy path proxies to a live sandbox pod over the
-//! kube exec transport, so contract tests cover every gate error path (shared
-//! by all proxy routes) and kind e2e covers the live path.
-//!
-//! The Go `humaError` helper includes the same status mapping used
-//! here, including 403 for the shared access gate. Raw stream/file
-//! handlers still keep their non-huma JSON error envelope.
+//! Shared sandbox exec and file service logic.
 
 use std::collections::BTreeMap;
-use std::convert::Infallible;
 
-use axum::Json;
-use axum::body::Body;
-use axum::extract::{Path, Query, State};
-use axum::http::{HeaderValue, StatusCode, header};
-use axum::response::Response;
+use axum::http::StatusCode;
 use codewire_server_core::auth::AuthUser;
 use codewire_server_core::org::user_org_role;
 use codewire_server_core::org_deletion::{
     acquire_environment_runtime_mutation_lease, mark_organization_mutation_resolution_required,
     release_organization_mutation_lease,
 };
-use codewire_server_core::{AppError, AppResult, ValidatedJson};
-use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use codewire_server_core::{AppError, AppResult};
 use sqlx::Row;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use super::ApiState;
 use super::environments::require_environment_access;
-use super::prepare::json_response;
 use crate::sandbox::client::SandboxClient;
 use crate::sandbox::exec::WorkspaceExecResult;
-
-fn safe_attachment_filename(remote_path: &str) -> String {
-    let candidate = remote_path.rsplit(['/', '\\']).next().unwrap_or_default();
-    let sanitized: String = candidate
-        .chars()
-        .map(|character| {
-            if character.is_ascii_alphanumeric()
-                || matches!(character, ' ' | '.' | '-' | '_' | '(' | ')')
-            {
-                character
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    let sanitized = sanitized.trim();
-    if sanitized.is_empty() || sanitized == "." || sanitized == ".." {
-        "download".to_string()
-    } else {
-        sanitized.to_string()
-    }
-}
 
 /// Mirrors `sandboxTarget`.
 pub(crate) struct SandboxTarget {
@@ -66,9 +25,7 @@ pub(crate) struct SandboxTarget {
     pub pod_name: String,
 }
 
-/// Mirrors `resolveRunningSandboxTarget`: returns the target or a
-/// `(status, message)` pair. Each handler maps the raw gate status to
-/// the envelope it uses.
+/// Resolves a running sandbox target or returns its typed gate failure.
 pub(crate) async fn resolve_running_sandbox_target(
     state: &ApiState,
     user: &AuthUser,
@@ -158,7 +115,7 @@ pub(crate) async fn resolve_running_sandbox_target_for_role(
     })
 }
 
-/// Mirrors `humaError`: plain huma errors keyed by status.
+/// Maps sandbox gate failures into application errors for Connect handlers.
 pub(crate) fn huma_error(status: StatusCode, msg: &'static str) -> AppError {
     match status {
         StatusCode::UNAUTHORIZED => AppError::Coded {
@@ -187,38 +144,7 @@ fn sandbox_client(state: &ApiState, namespace: &str) -> Option<SandboxClient> {
         .map(|c| SandboxClient::new(c.clone(), namespace))
 }
 
-// ── exec (POST .../exec) ────────────────────────────────────────────────
-
-/// Mirrors `api.ExecBody`.
-#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
-pub struct ExecBody {
-    #[serde(default)]
-    pub command: Vec<String>,
-    #[serde(default)]
-    pub working_dir: String,
-    #[serde(default)]
-    pub env: BTreeMap<String, String>,
-    #[serde(default)]
-    pub timeout: i64,
-}
-
-/// Mirrors `api.ExecResult`.
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct ExecResult {
-    pub exit_code: i32,
-    pub stdout: String,
-    pub stderr: String,
-}
-
 pub(crate) const DEFAULT_EXEC_TIMEOUT_SECS: u64 = 600;
-
-fn exec_timeout(timeout_seconds: i64) -> std::time::Duration {
-    if timeout_seconds <= 0 {
-        std::time::Duration::from_secs(DEFAULT_EXEC_TIMEOUT_SECS)
-    } else {
-        std::time::Duration::from_secs(timeout_seconds as u64)
-    }
-}
 
 #[derive(Debug, Clone)]
 pub(crate) struct ExecInput {
@@ -235,18 +161,8 @@ pub(crate) struct ExecStreamInput {
     pub env: BTreeMap<String, String>,
 }
 
-impl From<ExecBody> for ExecStreamInput {
-    fn from(body: ExecBody) -> Self {
-        Self {
-            command: body.command,
-            working_dir: body.working_dir,
-            env: body.env,
-        }
-    }
-}
-
-/// Raw event feed shared by the legacy SSE renderer and StreamExec. Output
-/// stays as bytes until a renderer deliberately chooses its wire shape.
+/// Output stays as bytes until the Connect renderer deliberately chooses its
+/// wire shape.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum ExecStreamEvent {
     Stdout(Vec<u8>),
@@ -255,19 +171,8 @@ pub(crate) enum ExecStreamEvent {
     UpstreamError(String),
 }
 
-impl From<ExecBody> for ExecInput {
-    fn from(body: ExecBody) -> Self {
-        Self {
-            command: body.command,
-            working_dir: body.working_dir,
-            env: body.env,
-            timeout: exec_timeout(body.timeout),
-        }
-    }
-}
-
-/// Shared unary exec source. REST and Connect render the same gate, command,
-/// timeout, Kubernetes attachment, raw output bytes, and exit status.
+/// Shared unary exec source: gate, command, timeout, Kubernetes attachment,
+/// raw output bytes, and exit status.
 pub(crate) async fn exec_in_environment_core(
     state: &ApiState,
     user: &AuthUser,
@@ -348,9 +253,7 @@ pub(crate) async fn exec_in_environment_core(
     }
 }
 
-/// Shared streaming exec source. Both the SSE and Connect handlers use this
-/// gate, pod resolution, Kubernetes attachment, chunk channel, and terminal
-/// status so the dual-served routes cannot diverge.
+/// Shared streaming exec source with one gate, attachment, and byte lifecycle.
 pub(crate) async fn exec_stream_in_environment_core(
     state: &ApiState,
     user: &AuthUser,
@@ -451,252 +354,14 @@ pub(crate) async fn exec_stream_in_environment_core(
 
     Ok(event_rx)
 }
-
-/// `POST /api/v1/organizations/{org_id}/environments/{env_id}/exec` —
-/// mirrors `execInEnvironment`.
-pub async fn exec_in_environment(
-    State(state): State<ApiState>,
-    user: AuthUser,
-    Path((org_id, env_id)): Path<(String, String)>,
-    ValidatedJson(body): ValidatedJson<ExecBody>,
-) -> AppResult<Json<ExecResult>> {
-    let result = exec_in_environment_core(&state, &user, &org_id, &env_id, body.into()).await?;
-
-    Ok(Json(ExecResult {
-        exit_code: result.exit_code,
-        stdout: String::from_utf8_lossy(&result.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&result.stderr).into_owned(),
-    }))
-}
-
-// ── file cat (GET .../files/cat) — exec `cat`, raw handler ───────────────
-
-/// `writeProxyJSONError` / `writeExecStreamJSONError` parity:
-/// application/json, status, `{"error": msg}` + trailing newline.
-fn proxy_json_error(status: StatusCode, msg: &str) -> Response {
-    json_response(status, &serde_json::json!({ "error": msg }))
-}
-
-#[derive(Debug, Deserialize)]
-pub struct PathQuery {
-    #[serde(default)]
-    pub path: String,
-}
-
-/// `GET .../environments/{env_id}/files/cat` — mirrors
-/// `downloadFileExecHandler` (reads a file via k8s exec `cat`, more
-/// reliable than SFTP on isol8 sandboxes). Middleware-authed raw
-/// handler: gate keeps raw status codes (403 stays 403).
-pub async fn download_file_exec(
-    State(state): State<ApiState>,
-    user: AuthUser,
-    Path((org_id, env_id)): Path<(String, String)>,
-    Query(q): Query<PathQuery>,
-) -> Response {
-    if state.kube.is_none() {
-        return proxy_json_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "sandbox client not configured",
-        );
-    }
-    let remote_path = q.path.trim();
-    if remote_path.is_empty() {
-        return proxy_json_error(StatusCode::BAD_REQUEST, "path parameter is required");
-    }
-    let target = match resolve_workspace_file_target(&state, &user, &org_id, &env_id).await {
-        Ok(target) => target,
-        Err(error) => return exec_stream_json_error(error),
-    };
-    let mut download = match prepare_exec_file_download(&target, remote_path).await {
-        Ok(download) => download,
-        Err(WorkspaceFileReadError::CommandFailed(detail)) => {
-            return proxy_json_error(StatusCode::NOT_FOUND, &detail);
-        }
-        Err(WorkspaceFileReadError::App(error)) => return exec_stream_json_error(error),
-        Err(WorkspaceFileReadError::Missing { detail, .. }) => {
-            return proxy_json_error(StatusCode::NOT_FOUND, &detail);
-        }
-        Err(WorkspaceFileReadError::Directory) => {
-            return proxy_json_error(StatusCode::NOT_FOUND, "path is a directory");
-        }
-    };
-    let mut data = Vec::with_capacity(download.entry.size.max(0) as usize);
-    loop {
-        match download.next_chunk().await {
-            Ok(Some(chunk)) => data.extend_from_slice(&chunk),
-            Ok(None) => break,
-            Err(error) => return exec_stream_json_error(error),
-        }
-    }
-
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "application/octet-stream")
-        .header(header::CONTENT_LENGTH, data.len())
-        .body(Body::from(data))
-        .expect("octet-stream response")
-}
-
-// ── exec stream (POST .../exec/stream) — SSE, raw handler ────────────────
-
-/// Mirrors `execStreamFrame` (omitempty data/exit_code/error).
-#[derive(Debug, Serialize)]
-struct ExecStreamFrame<'a> {
-    #[serde(rename = "type")]
-    typ: &'a str,
-    #[serde(skip_serializing_if = "str::is_empty")]
-    data: &'a str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    exit_code: Option<i32>,
-    #[serde(skip_serializing_if = "str::is_empty")]
-    error: &'a str,
-}
-
-fn sse_frame(event: &str, frame: &ExecStreamFrame) -> String {
-    let payload = serde_json::to_string(frame).unwrap_or_default();
-    format!("event: {event}\ndata: {payload}\n\n")
-}
-
-/// `POST .../environments/{env_id}/exec/stream` — mirrors
-/// `environmentExecStreamHandler` (SSE stdout/stderr/exit frames).
-pub async fn exec_stream(
-    State(state): State<ApiState>,
-    user: AuthUser,
-    Path((org_id, env_id)): Path<(String, String)>,
-    body_bytes: axum::body::Bytes,
-) -> Response {
-    // Preserve the legacy SSE setup-error ordering while the route dual-serves:
-    // an unavailable Kubernetes client wins even when the request body is bad.
-    if state.kube.is_none() {
-        return proxy_json_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "sandbox client not configured",
-        );
-    }
-
-    let body: ExecBody = match serde_json::from_slice(&body_bytes) {
-        Ok(b) => b,
-        Err(_) => return proxy_json_error(StatusCode::BAD_REQUEST, "invalid JSON body"),
-    };
-    let events =
-        match exec_stream_in_environment_core(&state, &user, &org_id, &env_id, body.into()).await {
-            Ok(events) => events,
-            Err(error) => return exec_stream_json_error(error),
-        };
-
-    let stream = futures::stream::unfold(events, |mut events| async move {
-        let event = events.recv().await?;
-        let frame = match event {
-            ExecStreamEvent::Stdout(bytes) => {
-                let data = String::from_utf8_lossy(&bytes);
-                sse_frame(
-                    "stdout",
-                    &ExecStreamFrame {
-                        typ: "stdout",
-                        data: &data,
-                        exit_code: None,
-                        error: "",
-                    },
-                )
-            }
-            ExecStreamEvent::Stderr(bytes) => {
-                let data = String::from_utf8_lossy(&bytes);
-                sse_frame(
-                    "stderr",
-                    &ExecStreamFrame {
-                        typ: "stderr",
-                        data: &data,
-                        exit_code: None,
-                        error: "",
-                    },
-                )
-            }
-            ExecStreamEvent::Exit(exit_code) => sse_frame(
-                "exit",
-                &ExecStreamFrame {
-                    typ: "exit",
-                    data: "",
-                    exit_code: Some(exit_code),
-                    error: "",
-                },
-            ),
-            ExecStreamEvent::UpstreamError(error) => sse_frame(
-                "error",
-                &ExecStreamFrame {
-                    typ: "error",
-                    data: "",
-                    exit_code: None,
-                    error: &error,
-                },
-            ),
-        };
-        Some((Ok::<_, Infallible>(frame), events))
-    });
-
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "text/event-stream")
-        .header(header::CACHE_CONTROL, "no-cache")
-        .header(header::CONNECTION, "keep-alive")
-        .header("X-Accel-Buffering", "no")
-        .body(Body::from_stream(stream))
-        .expect("sse response")
-}
-
-fn exec_stream_json_error(error: AppError) -> Response {
-    let (status, detail) = match error {
-        AppError::NotFound(detail) => (StatusCode::NOT_FOUND, detail),
-        AppError::BadRequest(detail) | AppError::Precondition(detail) => {
-            (StatusCode::BAD_REQUEST, detail)
-        }
-        AppError::Unauthorized => (StatusCode::UNAUTHORIZED, "unauthorized".into()),
-        AppError::Forbidden => (StatusCode::FORBIDDEN, "forbidden".into()),
-        AppError::Conflict(detail) => (StatusCode::CONFLICT, detail),
-        AppError::Validation { .. } => {
-            (StatusCode::UNPROCESSABLE_ENTITY, "validation failed".into())
-        }
-        AppError::Upstream(detail) => (StatusCode::BAD_GATEWAY, detail),
-        AppError::ServiceUnavailable(detail) => (StatusCode::SERVICE_UNAVAILABLE, detail),
-        AppError::InternalMsg(detail) => (StatusCode::INTERNAL_SERVER_ERROR, detail),
-        AppError::Coded { status, detail, .. } => (status, detail),
-        AppError::Internal(error) => {
-            tracing::error!(error = ?error, "exec stream setup failed");
-            (StatusCode::INTERNAL_SERVER_ERROR, "internal error".into())
-        }
-    };
-    proxy_json_error(status, &detail)
-}
-
-// ── file ops over SFTP (#38 slice 6b-2) ──────────────────────────────────
-//
-// Port of listFiles (huma) + uploadFileHandler / downloadFileHandler
-// (raw) in environment_proxy.go. The connection path mirrors Go's
-// connectEnvironmentSFTPWithRetry → ConnectSidecarSFTP (port-forward to
-// the gateway sidecar's SSH, none-auth, sftp subsystem). Contract tests cover
-// the gate/disabled error paths; the live transfer is covered by the kind SFTP
-// smoke. For Kata sandboxes,
-// `SandboxClient` uses direct pod-IP TCP first because kubelet
-// port-forward cannot reach listeners inside the guest VM loopback.
+// ── file operations over SFTP ─────────────────────────────────────────────
 
 const SFTP_CONNECT_ATTEMPTS: usize = 3;
 const DEFAULT_WORKSPACE_ROOT: &str = "/workspace";
 const FILE_CAT_TIMEOUT_SECS: u64 = 120;
 pub(crate) const CONNECT_SFTP_REQUEST_TIMEOUT_SECS: u64 = 30;
 pub(crate) const FILE_STREAM_CHUNK_SIZE: usize = 64 * 1024;
-
-/// Mirrors `api.FileEntry`.
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct FileEntry {
-    pub name: String,
-    pub size: i64,
-    pub is_dir: bool,
-    pub mode: String,
-    pub mod_time: String,
-}
-
-/// Transport-neutral file metadata shared by the REST and Connect renderers.
-/// `mode` deliberately retains the raw SFTP permission bits; REST formats the
-/// low permission bits as its historical four-digit octal string.
+/// File metadata used by the Connect service.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct WorkspaceFileEntry {
     pub name: String,
@@ -712,17 +377,11 @@ struct WorkspaceFileTarget {
     sandbox: SandboxClient,
 }
 
-/// Semantic download failures. Both public transports consume the same
-/// backend result, then retain their documented renderer differences while
-/// REST dual-serves: Connect normalizes missing files and directories, while
-/// REST keeps the existing raw status/body shapes.
+/// Semantic download failures consumed by the Connect service.
 #[derive(Debug)]
 pub(crate) enum WorkspaceFileReadError {
     App(AppError),
-    Missing {
-        operation: &'static str,
-        detail: String,
-    },
+    Missing { detail: String },
     Directory,
     CommandFailed(String),
 }
@@ -744,8 +403,7 @@ enum WorkspaceFileDownloadSource {
     },
 }
 
-/// A prepared download. The source stays incremental even though the legacy
-/// REST renderer still joins chunks to preserve its content-length response.
+/// A prepared incremental download.
 pub(crate) struct WorkspaceFileDownload {
     pub entry: WorkspaceFileEntry,
     source: WorkspaceFileDownloadSource,
@@ -1035,7 +693,6 @@ async fn prepare_sftp_file_download(
         Ok(metadata) => metadata,
         Err(error) if sftp_missing(&error) => {
             return Err(WorkspaceFileReadError::Missing {
-                operation: "stat",
                 detail: error.to_string(),
             });
         }
@@ -1052,7 +709,6 @@ async fn prepare_sftp_file_download(
         Ok(file) => file,
         Err(error) if sftp_missing(&error) => {
             return Err(WorkspaceFileReadError::Missing {
-                operation: "open",
                 detail: error.to_string(),
             });
         }
@@ -1103,10 +759,7 @@ pub(crate) async fn prepare_workspace_file_download(
             if detail.to_ascii_lowercase().contains("is a directory") {
                 Err(WorkspaceFileReadError::Directory)
             } else {
-                Err(WorkspaceFileReadError::Missing {
-                    operation: "cat",
-                    detail,
-                })
+                Err(WorkspaceFileReadError::Missing { detail })
             }
         }
         Err(error) => Err(error),
@@ -1133,353 +786,5 @@ fn parent_dir(path: &str) -> String {
         Some(0) => "/".to_string(),
         Some(i) => path[..i].to_string(),
         None => ".".to_string(),
-    }
-}
-
-/// Mirrors `modeString`: 4-digit octal of the permission bits.
-fn mode_string(perms: u32) -> String {
-    format!("{:04o}", perms & 0o777)
-}
-
-/// `time.RFC3339` in UTC (Go: `ModTime().UTC().Format(time.RFC3339)`).
-fn mod_time_rfc3339(mtime: Option<u32>) -> String {
-    mtime
-        .and_then(|s| chrono::DateTime::<chrono::Utc>::from_timestamp(s as i64, 0))
-        .map(|dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string())
-        .unwrap_or_default()
-}
-
-/// `GET .../environments/{env_id}/files` — mirrors `listFiles` (huma
-/// envelope, 502 on connect/list failures).
-pub async fn list_files(
-    State(state): State<ApiState>,
-    user: AuthUser,
-    Path((org_id, env_id)): Path<(String, String)>,
-    Query(q): Query<PathQuery>,
-) -> AppResult<Json<Vec<FileEntry>>> {
-    let entries = list_workspace_files(&state, &user, &org_id, &env_id, &q.path, None).await?;
-    Ok(Json(
-        entries
-            .into_iter()
-            .map(|entry| FileEntry {
-                name: entry.name,
-                size: entry.size,
-                is_dir: entry.is_dir,
-                mode: mode_string(entry.mode),
-                mod_time: mod_time_rfc3339(entry.mod_time),
-            })
-            .collect(),
-    ))
-}
-
-/// `POST .../environments/{env_id}/files/upload?path=` — mirrors
-/// `uploadFileHandler` (raw: gate keeps raw codes, 502 on transfer
-/// failures, `{path,size}` JSON on success).
-pub async fn upload_file(
-    State(state): State<ApiState>,
-    user: AuthUser,
-    Path((org_id, env_id)): Path<(String, String)>,
-    Query(q): Query<PathQuery>,
-    body: axum::body::Bytes,
-) -> Response {
-    if state.kube.is_none() {
-        return proxy_json_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "sandbox client not configured",
-        );
-    }
-    let mut upload =
-        match begin_workspace_file_upload(&state, &user, &org_id, &env_id, &q.path, None).await {
-            Ok(upload) => upload,
-            Err(error) => return exec_stream_json_error(error),
-        };
-    if let Err(error) = upload.write_chunk(body.as_ref()).await {
-        upload.abort().await;
-        return exec_stream_json_error(error);
-    }
-    let result = match upload.finish().await {
-        Ok(result) => result,
-        Err(error) => {
-            upload.abort().await;
-            return exec_stream_json_error(error);
-        }
-    };
-    json_response(
-        StatusCode::OK,
-        &serde_json::json!({ "path": result.path, "size": result.size }),
-    )
-}
-
-/// `GET .../environments/{env_id}/files/download?path=` — mirrors
-/// `downloadFileHandler` (raw: 400 on a directory, octet-stream body).
-pub async fn download_file(
-    State(state): State<ApiState>,
-    user: AuthUser,
-    Path((org_id, env_id)): Path<(String, String)>,
-    Query(q): Query<PathQuery>,
-) -> Response {
-    if state.kube.is_none() {
-        return proxy_json_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "sandbox client not configured",
-        );
-    }
-    let remote_path = q.path.trim().to_string();
-    if remote_path.is_empty() {
-        return proxy_json_error(StatusCode::BAD_REQUEST, "path parameter is required");
-    }
-    let target = match resolve_workspace_file_target(&state, &user, &org_id, &env_id).await {
-        Ok(target) => target,
-        Err(error) => return exec_stream_json_error(error),
-    };
-    let mut download = match prepare_sftp_file_download(&target, &remote_path, None).await {
-        Ok(download) => download,
-        Err(WorkspaceFileReadError::Missing { operation, detail }) => {
-            return proxy_json_error(
-                StatusCode::BAD_GATEWAY,
-                &format!("workspace file {operation} failed: {detail}"),
-            );
-        }
-        Err(WorkspaceFileReadError::Directory) => {
-            return proxy_json_error(StatusCode::BAD_REQUEST, "path is a directory");
-        }
-        Err(WorkspaceFileReadError::App(error)) => return exec_stream_json_error(error),
-        Err(WorkspaceFileReadError::CommandFailed(detail)) => {
-            return proxy_json_error(StatusCode::BAD_GATEWAY, &detail);
-        }
-    };
-    let mut data = Vec::new();
-    loop {
-        match download.next_chunk().await {
-            Ok(Some(chunk)) => data.extend_from_slice(&chunk),
-            Ok(None) => break,
-            Err(error) => return exec_stream_json_error(error),
-        }
-    }
-
-    let filename = safe_attachment_filename(&remote_path);
-    let disposition = match HeaderValue::from_str(&format!("attachment; filename=\"{filename}\"")) {
-        Ok(value) => value,
-        Err(_) => {
-            return proxy_json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "failed to build file response",
-            );
-        }
-    };
-    match Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "application/octet-stream")
-        .header(header::CONTENT_LENGTH, data.len())
-        .header(header::CONTENT_DISPOSITION, disposition)
-        .body(Body::from(data))
-    {
-        Ok(response) => response,
-        Err(_) => proxy_json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "failed to build file response",
-        ),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use axum::response::IntoResponse;
-    use codewire_server_core::validation::validate_value;
-
-    #[test]
-    fn exec_stream_frames_match_go_shapes() {
-        let f = ExecStreamFrame {
-            typ: "stdout",
-            data: "hello",
-            exit_code: None,
-            error: "",
-        };
-        assert_eq!(
-            serde_json::to_string(&f).unwrap(),
-            r#"{"type":"stdout","data":"hello"}"#
-        );
-        let f = ExecStreamFrame {
-            typ: "exit",
-            data: "",
-            exit_code: Some(0),
-            error: "",
-        };
-        assert_eq!(
-            serde_json::to_string(&f).unwrap(),
-            r#"{"type":"exit","exit_code":0}"#
-        );
-        let f = ExecStreamFrame {
-            typ: "error",
-            data: "",
-            exit_code: None,
-            error: "boom",
-        };
-        assert_eq!(
-            serde_json::to_string(&f).unwrap(),
-            r#"{"type":"error","error":"boom"}"#
-        );
-        assert_eq!(
-            sse_frame(
-                "stdout",
-                &ExecStreamFrame {
-                    typ: "stdout",
-                    data: "x",
-                    exit_code: None,
-                    error: ""
-                }
-            ),
-            "event: stdout\ndata: {\"type\":\"stdout\",\"data\":\"x\"}\n\n"
-        );
-    }
-
-    #[test]
-    fn exec_timeout_defaults_to_ten_minutes() {
-        assert_eq!(exec_timeout(0).as_secs(), 600);
-        assert_eq!(exec_timeout(-5).as_secs(), 600);
-        assert_eq!(exec_timeout(30).as_secs(), 30);
-    }
-
-    #[test]
-    fn exec_body_schema_has_no_required_fields() {
-        let schema = serde_json::to_value(schemars::schema_for!(ExecBody)).unwrap();
-
-        assert!(
-            schema.get("required").is_none(),
-            "Go/huma exec body keeps command required as handler-level validation"
-        );
-    }
-
-    #[test]
-    fn exec_body_validation_accepts_empty_body() {
-        let parsed = validate_value::<ExecBody>(serde_json::json!({})).expect("empty body");
-
-        assert!(parsed.command.is_empty());
-        assert_eq!(parsed.working_dir, "");
-        assert!(parsed.env.is_empty());
-        assert_eq!(parsed.timeout, 0);
-    }
-
-    #[test]
-    fn exec_body_validation_rejects_type_errors() {
-        let Err(AppError::Validation { errors }) = validate_value::<ExecBody>(serde_json::json!({
-            "command": "echo hi"
-        })) else {
-            panic!("expected type-invalid command to be rejected");
-        };
-
-        assert_eq!(errors.len(), 1);
-        assert_eq!(errors[0].path, "/command");
-        assert!(errors[0].message.contains("array"));
-    }
-
-    #[tokio::test]
-    async fn huma_error_mirrors_go_status_mapping() {
-        // Plain mappings.
-        let cases = [
-            (
-                StatusCode::NOT_FOUND,
-                "organization not found",
-                StatusCode::NOT_FOUND,
-            ),
-            (
-                StatusCode::BAD_REQUEST,
-                "environment must be running",
-                StatusCode::BAD_REQUEST,
-            ),
-            (
-                StatusCode::SERVICE_UNAVAILABLE,
-                "sandbox backend not found",
-                StatusCode::SERVICE_UNAVAILABLE,
-            ),
-            (
-                StatusCode::FORBIDDEN,
-                "access denied",
-                StatusCode::FORBIDDEN,
-            ),
-        ];
-        for (gate, msg, want) in cases {
-            let resp = huma_error(gate, msg).into_response();
-            assert_eq!(resp.status(), want, "gate {gate} msg {msg}");
-        }
-    }
-
-    #[test]
-    fn mode_string_is_four_digit_octal_perms() {
-        assert_eq!(mode_string(0o644), "0644");
-        assert_eq!(mode_string(0o755), "0755");
-        // Type/setuid bits above 0o777 are masked off, like Go's
-        // FileMode.Perm().
-        assert_eq!(mode_string(0o100644), "0644");
-        assert_eq!(mode_string(0o040755), "0755");
-    }
-
-    #[test]
-    fn parent_dir_mirrors_path_dir() {
-        assert_eq!(parent_dir("/workspace/a/b.txt"), "/workspace/a");
-        assert_eq!(parent_dir("/file"), "/");
-        assert_eq!(parent_dir("file"), ".");
-    }
-
-    #[test]
-    fn attachment_filename_is_ascii_header_safe() {
-        assert_eq!(
-            safe_attachment_filename("/workspace/release notes (final).txt"),
-            "release notes (final).txt"
-        );
-        assert_eq!(
-            safe_attachment_filename("/workspace/report\r\nInjected: value\".txt"),
-            "report__Injected_ value_.txt"
-        );
-        assert_eq!(
-            safe_attachment_filename("/workspace/naïve.txt"),
-            "na_ve.txt"
-        );
-        assert_eq!(
-            safe_attachment_filename("/workspace/path\\escape.txt"),
-            "escape.txt"
-        );
-        assert_eq!(safe_attachment_filename("/workspace/"), "download");
-        assert_eq!(safe_attachment_filename(".."), "download");
-
-        for path in [
-            "/workspace/report\r\nInjected: value\".txt",
-            "/workspace/naïve.txt",
-            "/workspace/path\\escape.txt",
-        ] {
-            let value = format!(
-                "attachment; filename=\"{}\"",
-                safe_attachment_filename(path)
-            );
-            HeaderValue::from_str(&value).expect("sanitized filename must be a valid header");
-        }
-    }
-
-    #[test]
-    fn mod_time_is_rfc3339_utc_z() {
-        // 2021-01-01T00:00:00Z = 1609459200.
-        assert_eq!(
-            mod_time_rfc3339(Some(1_609_459_200)),
-            "2021-01-01T00:00:00Z"
-        );
-        assert_eq!(mod_time_rfc3339(None), "");
-    }
-
-    #[test]
-    fn file_entry_serializes_with_go_field_names() {
-        let e = FileEntry {
-            name: "x.txt".into(),
-            size: 12,
-            is_dir: false,
-            mode: "0644".into(),
-            mod_time: "2021-01-01T00:00:00Z".into(),
-        };
-        let v = serde_json::to_value(&e).unwrap();
-        assert_eq!(v["name"], "x.txt");
-        assert_eq!(v["size"], 12);
-        assert_eq!(v["is_dir"], false);
-        assert_eq!(v["mode"], "0644");
-        assert_eq!(v["mod_time"], "2021-01-01T00:00:00Z");
     }
 }

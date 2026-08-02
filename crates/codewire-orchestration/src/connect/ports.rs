@@ -1,8 +1,7 @@
 //! Connect-RPC adapter for environment ports.
 //!
-//! REST and Connect both call the shared functions in [`crate::api::ports`].
-//! This module owns only protobuf mapping, pagination validation, and Connect
-//! error rendering.
+//! This module maps shared port service logic to protobuf, validates
+//! pagination, and renders Connect errors.
 
 use std::borrow::Cow;
 use std::sync::Arc;

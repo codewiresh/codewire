@@ -1,7 +1,7 @@
 //! Connect-RPC adapter for non-interactive environment exec.
 //!
-//! REST and Connect call the same byte-preserving exec core. This module owns
-//! protobuf duration conversion and the D12 Connect error renderer only.
+//! This module maps the byte-preserving exec core, protobuf durations, and
+//! Connect errors.
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;

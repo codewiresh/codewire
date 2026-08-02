@@ -1,7 +1,4 @@
-//! Org-scoped billing reads.
-//!
-//! - `GET /api/v1/organizations/{org_id}/billing/invoices`.
-//! - `GET /api/v1/organizations/{org_id}/billing/events`.
+//! Org-scoped billing reads for the Connect service.
 //!
 //! Both require an authenticated org member (`require_org_member`,
 //! 404 "organization not found" otherwise — non-members can't probe org
@@ -21,20 +18,16 @@
 //! 2. `billing_events` no longer carries resource-model columns; the Rust
 //!    response shape only exposes the current append-only event fields.
 //!
-//! The contract suite pins the corrected behavior.
+//! The Connect contract pins the corrected behavior.
 
-use axum::Json;
-use axum::extract::{Path, State};
 use chrono::{DateTime, NaiveDateTime, Utc};
 use codewire_server_core::AppResult;
 use codewire_server_core::auth::AuthUser;
 use codewire_server_core::org::require_org_member;
-use schemars::JsonSchema;
-use serde::Serialize;
 use sqlx::PgPool;
 
 /// Mirrors `billing.go::InvoiceResponse` (all fields, same JSON names).
-#[derive(Debug, Serialize, JsonSchema)]
+#[derive(Debug)]
 pub struct InvoiceResponse {
     pub id: String,
     pub stripe_invoice_id: String,
@@ -72,15 +65,7 @@ fn fmt_naive_utc(t: NaiveDateTime) -> String {
         .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
-pub async fn list_invoices(
-    State(pool): State<PgPool>,
-    user: AuthUser,
-    Path(org_id): Path<String>,
-) -> AppResult<Json<Vec<InvoiceResponse>>> {
-    Ok(Json(list_invoices_core(&pool, &user, &org_id).await?))
-}
-
-/// Shared invoice-list operation used by REST and Connect.
+/// Shared invoice-list operation used by the Connect adapter.
 pub async fn list_invoices_core(
     pool: &PgPool,
     user: &AuthUser,
@@ -122,9 +107,8 @@ pub async fn list_invoices_core(
     Ok(invoices)
 }
 
-/// Mirrors `responses.go::BillingEventResponse`; `metadata` is omitted when
-/// NULL, like Go's `omitempty`.
-#[derive(Debug, Serialize, JsonSchema)]
+/// Billing event data mapped into the Connect response.
+#[derive(Debug)]
 pub struct BillingEventResponse {
     pub id: i64,
     pub event_type: String,
@@ -132,7 +116,6 @@ pub struct BillingEventResponse {
     pub amount_cents: Option<i32>,
     pub currency: String,
     pub stripe_item_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata: Option<serde_json::Value>,
     pub created_at: String,
 }
@@ -150,15 +133,7 @@ struct BillingEventRow {
     created_at: DateTime<Utc>,
 }
 
-pub async fn list_events(
-    State(pool): State<PgPool>,
-    user: AuthUser,
-    Path(org_id): Path<String>,
-) -> AppResult<Json<Vec<BillingEventResponse>>> {
-    Ok(Json(list_events_core(&pool, &user, &org_id).await?))
-}
-
-/// Shared billing-event list operation used by REST and Connect.
+/// Shared billing-event list operation used by the Connect adapter.
 pub async fn list_events_core(
     pool: &PgPool,
     user: &AuthUser,
@@ -208,24 +183,5 @@ mod tests {
         // Go: t.UTC().Format(time.RFC3339) → "2026-06-02T10:30:00Z".
         let t = NaiveDateTime::parse_from_str("2026-06-02 10:30:00", "%Y-%m-%d %H:%M:%S").unwrap();
         assert_eq!(fmt_naive_utc(t), "2026-06-02T10:30:00Z");
-    }
-
-    #[test]
-    fn metadata_null_is_omitted_like_go_omitempty() {
-        let e = BillingEventResponse {
-            id: 1,
-            event_type: "x".into(),
-            org_id: None,
-            amount_cents: None,
-            currency: "usd".into(),
-            stripe_item_id: None,
-            metadata: None,
-            created_at: "2026-06-02T10:30:00Z".into(),
-        };
-        let v = serde_json::to_value(&e).unwrap();
-        assert!(v.get("metadata").is_none());
-        // Nullable fields without omitempty stay present as null.
-        assert!(v["org_id"].is_null());
-        assert!(v["amount_cents"].is_null());
     }
 }

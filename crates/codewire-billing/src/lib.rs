@@ -1,7 +1,7 @@
 //! Codewire billing service.
 //!
-//! This crate owns the billing REST/Connect surface, Stripe webhook and
-//! checkout behavior, catalog, metering, email, and Temporal billing work.
+//! This crate owns the billing Connect surface, Stripe webhook and checkout
+//! behavior, catalog, metering, email, and Temporal billing work.
 //! Rust-owned listener contracts and service integration are its correctness
 //! authority.
 

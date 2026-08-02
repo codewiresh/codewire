@@ -7,8 +7,6 @@
 
 use std::collections::BTreeMap;
 
-use axum::Json;
-use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use codewire_server_core::AppResult;
 use codewire_server_core::auth::AuthUser;
@@ -16,8 +14,6 @@ use k8s_openapi::api::apps::v1::Deployment;
 use k8s_openapi::api::core::v1::{Node, Pod};
 use kube::Api;
 use kube::api::ListParams;
-use schemars::JsonSchema;
-use serde::Serialize;
 use sqlx::Row;
 
 use crate::sandbox::template::{
@@ -33,7 +29,7 @@ const TRUST_LEVEL_DEV_PROOF: &str = "dev_proof";
 const TRUST_LEVEL_NOT_CONFIDENTIAL: &str = "not_confidential";
 const TRUST_LEVEL_UNVERIFIED: &str = "unverified";
 
-#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[derive(Debug, Clone)]
 pub struct EnvironmentTrustReport {
     pub environment: TrustReportEnvironment,
     pub runtime: TrustReportRuntime,
@@ -45,16 +41,15 @@ pub struct EnvironmentTrustReport {
     pub summary: TrustReportSummary,
 }
 
-#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[derive(Debug, Clone)]
 pub struct TrustReportEnvironment {
     pub id: String,
     pub org_id: String,
-    #[serde(rename = "type")]
     pub env_type: String,
     pub state: String,
 }
 
-#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[derive(Debug, Clone)]
 pub struct TrustReportRuntime {
     pub profile: String,
     pub runtime_class: String,
@@ -62,88 +57,61 @@ pub struct TrustReportRuntime {
     pub confidential: bool,
 }
 
-#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[derive(Debug, Clone)]
 pub struct TrustReportPlacement {
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub namespace: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub workspace_pod: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub pod_ip: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub node: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub zone: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub region: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[derive(Debug, Clone)]
 pub struct TrustReportImages {
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub workspace_image: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub workspace_image_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub gateway_image: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub gateway_image_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub dind_image: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub dind_image_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub daemon_init_image: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub daemon_init_image_id: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[derive(Debug, Clone)]
 pub struct TrustReportProvenance {
     pub status: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub guest_kernel: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub guest_initrd: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub guest_image: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub firmware: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub notes: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[derive(Debug, Clone)]
 pub struct TrustReportAttestation {
     pub status: String,
     pub tee: String,
     pub report_available: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub report_source: Option<String>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub metadata: BTreeMap<String, String>,
 }
 
-#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[derive(Debug, Clone)]
 pub struct TrustReportTrustee {
     pub status: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub resource_uri: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub reference_values: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub policy: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub evidence_issues: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[derive(Debug, Clone)]
 pub struct TrustReportSummary {
     pub trust_level: String,
     pub production_verified: bool,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
 }
 
@@ -165,17 +133,6 @@ struct LiveObservation {
     zone: Option<String>,
     region: Option<String>,
     images: TrustReportImages,
-}
-
-/// `GET /api/v1/organizations/{org_id}/environments/{env_id}/trust-report`.
-pub async fn get_environment_trust_report(
-    State(state): State<ApiState>,
-    user: AuthUser,
-    Path((org_id, env_id)): Path<(String, String)>,
-) -> AppResult<Json<EnvironmentTrustReport>> {
-    Ok(Json(
-        get_environment_trust_report_core(&state, &user, &org_id, &env_id).await?,
-    ))
 }
 
 pub(crate) async fn get_environment_trust_report_core(

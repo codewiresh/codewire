@@ -3,14 +3,12 @@
 //! `pg_notify('port_dns_events', …)` (the channel's listener story is
 //! tracked in the Temporal cutover doc).
 
-use axum::Json;
-use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use codewire_server_core::auth::AuthUser;
 use codewire_server_core::org_deletion::{
     OrganizationRuntimeMutationError, run_environment_runtime_mutation,
 };
-use codewire_server_core::{AppError, AppResult, ValidatedJson};
+use codewire_server_core::{AppError, AppResult};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use sqlx::{PgPool, Row};
@@ -69,17 +67,6 @@ pub struct CreatePortBody {
     pub label: String,
     #[serde(default)]
     pub access: String,
-}
-
-/// Mirrors `createEnvironmentPort` (201).
-pub async fn create_port(
-    State(state): State<ApiState>,
-    user: AuthUser,
-    Path((org_id, env_id)): Path<(String, String)>,
-    ValidatedJson(body): ValidatedJson<CreatePortBody>,
-) -> AppResult<(StatusCode, Json<EnvironmentPort>)> {
-    let port = create_port_core(&state, &user, &org_id, &env_id, body).await?;
-    Ok((StatusCode::CREATED, Json(port)))
 }
 
 pub(crate) async fn create_port_core(
@@ -199,17 +186,6 @@ pub(crate) async fn create_port_core(
     .await
 }
 
-/// Mirrors `listEnvironmentPorts`.
-pub async fn list_ports(
-    State(state): State<ApiState>,
-    user: AuthUser,
-    Path((org_id, env_id)): Path<(String, String)>,
-) -> AppResult<Json<Vec<EnvironmentPort>>> {
-    Ok(Json(
-        list_ports_core(&state, &user, &org_id, &env_id).await?,
-    ))
-}
-
 pub(crate) async fn list_ports_core(
     state: &ApiState,
     user: &AuthUser,
@@ -262,16 +238,6 @@ pub(crate) async fn list_ports_core(
         .collect::<Result<Vec<_>, _>>()?;
 
     Ok(ports)
-}
-
-/// Mirrors `deleteEnvironmentPort` (204).
-pub async fn delete_port(
-    State(state): State<ApiState>,
-    user: AuthUser,
-    Path((org_id, env_id, port_id)): Path<(String, String, String)>,
-) -> AppResult<StatusCode> {
-    delete_port_core(&state, &user, &org_id, &env_id, &port_id).await?;
-    Ok(StatusCode::NO_CONTENT)
 }
 
 pub(crate) async fn delete_port_core(

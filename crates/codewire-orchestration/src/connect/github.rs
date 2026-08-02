@@ -1,8 +1,7 @@
 //! Connect-RPC adapter for the account-global GitHub connection.
 //!
-//! REST and Connect both call the service functions in
-//! [`crate::api::github`]. This module owns only protobuf mapping and Connect
-//! error rendering; the browser OAuth redirects remain raw HTTP.
+//! This module maps shared GitHub service functions to protobuf and Connect
+//! errors; browser OAuth redirects remain raw HTTP.
 
 use std::borrow::Cow;
 use std::sync::Arc;

@@ -15,8 +15,7 @@ Usage:
 
 Runs the real cw CLI through the fixed public edge: expected-identity check,
 create with one-day expiry, list/resolve, authenticate with the new key,
-confirm the dual-served REST list sees the same resource, restore bootstrap
-auth, delete, and confirm absence.
+restore bootstrap auth, delete, and confirm absence.
 
 Use scripts/runtime/apikey/with-apikey-smoke-auth.sh for value-blind secret loading.
 The smoke accepts no arbitrary server URL, organization, identity, or key.
@@ -85,17 +84,14 @@ case "$TARGET" in
   dev)
     CODEWIRE_SERVER_URL="https://codewire-dev.sh"
     EXPECTED_USER_EMAIL="connect-apikey-smoke-dev@codewire-dev.sh"
-    EXPECTED_ORG_ID="9bef2654d4ac6824ead235fdb9bb8598"
     ;;
   prod)
     CODEWIRE_SERVER_URL="https://codewire.sh"
     EXPECTED_USER_EMAIL="connect-apikey-smoke-prod@codewire.sh"
-    EXPECTED_ORG_ID="3289cbf3e0ca05c5ef2ac7cb696d5318"
     ;;
   prod-evidence-secondary)
     CODEWIRE_SERVER_URL="https://codewire.sh"
     EXPECTED_USER_EMAIL="connect-apikey-evidence-prod-secondary@codewire.sh"
-    EXPECTED_ORG_ID="63742e203ad7e3c65f25af8e221ccf21"
     ;;
   *)
     die "--target must be dev, prod, or prod-evidence-secondary"
@@ -103,7 +99,7 @@ case "$TARGET" in
 esac
 export CODEWIRE_SERVER_URL
 
-for command in awk curl jq; do
+for command in awk jq; do
   command -v "$command" >/dev/null 2>&1 || die "missing required command: $command"
 done
 [[ "${CODEWIRE_API_KEY:-}" =~ ^cw_[0-9a-f]{64}$ ]] || \
@@ -167,41 +163,6 @@ CREATED_KEY_ID="${matching_rows[0]#*|}"
 [[ "$KEY_PREFIX" =~ ^[0-9a-f]{8}$ ]] || die "new key list row had a malformed prefix"
 [[ -n "$CREATED_KEY_ID" && "$CREATED_KEY_ID" != *[[:space:]]* ]] || \
   die "new key list row had a malformed key ID"
-
-# Keep the bearer out of argv while proving the still-supported REST read sees
-# the exact resource returned through Connect. This is WI-6's deployed
-# REST-regression check; the REST event is not part of the G4 Connect numerator.
-REST_LIST="$TMPDIR_SMOKE/list-rest.json"
-REST_CURL_CONFIG="$TMPDIR_SMOKE/list-rest.curl"
-{
-  printf 'url = "%s/api/v1/organizations/%s/api-keys"\n' \
-    "$CODEWIRE_SERVER_URL" "$EXPECTED_ORG_ID"
-  printf 'header = "Authorization: Bearer %s"\n' "$BOOTSTRAP_API_KEY"
-  printf 'output = "%s"\n' "$REST_LIST"
-  printf 'silent\nshow-error\nconnect-timeout = 10\nmax-time = 20\n'
-} >"$REST_CURL_CONFIG"
-chmod 0600 "$REST_CURL_CONFIG"
-REST_STATUS="$(curl --config "$REST_CURL_CONFIG" --write-out '%{http_code}')" || \
-  die "dual-served REST api-keys list failed"
-[[ "$REST_STATUS" == "200" ]] || \
-  die "dual-served REST api-keys list returned HTTP $REST_STATUS"
-if ! jq -e \
-  --arg id "$CREATED_KEY_ID" \
-  --arg org_id "$EXPECTED_ORG_ID" \
-  --arg name "$KEY_NAME" \
-  --arg key_prefix "$KEY_PREFIX" \
-  'type == "array" and
-   all(.[]; has("key") | not) and
-   ([.[] | select(
-     .id == $id and .org_id == $org_id and .name == $name and
-     .key_prefix == $key_prefix
-   )] | length == 1)' \
-  "$REST_LIST" >/dev/null; then
-  die "REST and Connect api-keys list results diverged"
-fi
-if grep -F -f "$NEW_KEY_FILE" "$REST_LIST" >/dev/null; then
-  die "REST api-keys list exposed raw key material"
-fi
 
 CODEWIRE_API_KEY="$(awk 'NR == 1 { print; exit }' "$NEW_KEY_FILE")"
 export CODEWIRE_API_KEY

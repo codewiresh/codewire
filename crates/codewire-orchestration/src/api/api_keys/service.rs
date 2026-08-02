@@ -1,9 +1,7 @@
-//! Transport-independent API-key operations shared by REST and Connect.
+//! Transport-independent API-key operations used by Connect.
 //!
-//! REST passes raw semantic values so authorization remains ahead of the
-//! legacy `BadRequest` checks. Connect prevalidates the same predicates into
-//! typed validation details, while these operations still reject invalid
-//! direct calls defensively.
+//! Connect prevalidates the same predicates into typed validation details,
+//! while these operations still reject invalid direct calls defensively.
 
 use axum::http::StatusCode;
 use chrono::{Duration, NaiveDateTime, Utc};

@@ -19,9 +19,7 @@ mod enabled {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use codewire_orchestration::api::organizations::{
-        OrganizationDeletionResponse, OrganizationDeletionState,
-    };
+    use anyhow::Context as _;
     use codewire_orchestration::sandbox::CANONICAL_WORKSPACE_RUNTIME_IMAGE;
     use codewire_orchestration::sandbox::client::SandboxClient;
     use codewire_orchestration::sandbox::template::gateway_host_key_secret_name;
@@ -36,12 +34,18 @@ mod enabled {
     };
     use codewire_orchestration::worker::env_data::{load_backend_row, load_environment};
     use codewire_orchestration::worker::organization_deletion::OrganizationDeletionWorkflowInput;
+    use codewire_proto::codewire::v1::{
+        DeleteOrganizationRequest, DeleteOrganizationResponse, GetOrganizationRequest,
+        Organization, OrganizationDeletionState, OrganizationServiceClient,
+    };
     use codewire_server_core::auth::{SESSION_COOKIE_NAME, hash_session_token};
     use codewire_server_core::org_deletion::{
         OrganizationMutationClass, acquire_organization_mutation_lease,
         mark_organization_deletion_started, organization_deletion_operation,
         record_organization_deletion_start_attempt, release_organization_mutation_lease,
     };
+    use connectrpc::ErrorCode;
+    use connectrpc::client::{ClientConfig, HttpClient};
     use k8s_openapi::api::core::v1::Secret;
     use kube::Api;
     use reqwest::header::COOKIE;
@@ -211,7 +215,6 @@ mod enabled {
         database_url: String,
         temporal_address: String,
         orchestration_url: String,
-        http: reqwest::Client,
         pool: PgPool,
         temporal: Client,
         sandbox: SandboxClient,
@@ -247,7 +250,6 @@ mod enabled {
                 database_url,
                 temporal_address,
                 orchestration_url,
-                http: reqwest::Client::new(),
                 pool,
                 temporal,
                 sandbox: SandboxClient::new(kube, SANDBOX_NAMESPACE),
@@ -259,56 +261,61 @@ mod enabled {
             self.run_dir.join(format!("{scenario}-{suffix}"))
         }
 
-        async fn delete_organization_via_api(
+        fn organization_client(
             &self,
-            organization_id: &str,
             session_token: &str,
-        ) -> anyhow::Result<OrganizationDeletionResponse> {
-            let response = self
-                .http
-                .delete(format!(
-                    "{}/api/v1/organizations/{organization_id}",
-                    self.orchestration_url
-                ))
-                .header(COOKIE, format!("{SESSION_COOKIE_NAME}={session_token}"))
-                .send()
-                .await?;
-            let status = response.status();
-            let body = response.text().await?;
-            anyhow::ensure!(
-                status == reqwest::StatusCode::ACCEPTED,
-                "organization DELETE returned {status}: {body}"
-            );
-            serde_json::from_str(&body)
-                .map_err(|error| anyhow::anyhow!("decode organization DELETE response: {error}"))
+        ) -> anyhow::Result<OrganizationServiceClient<HttpClient>> {
+            let config = ClientConfig::new(
+                self.orchestration_url
+                    .parse()
+                    .context("parse orchestration Connect URL")?,
+            )
+            .with_default_header(COOKIE, format!("{SESSION_COOKIE_NAME}={session_token}"));
+            Ok(OrganizationServiceClient::new(
+                HttpClient::plaintext(),
+                config,
+            ))
         }
 
-        async fn get_organization_via_api(
+        async fn delete_organization_via_connect(
             &self,
             organization_id: &str,
             session_token: &str,
-        ) -> anyhow::Result<(reqwest::StatusCode, Option<Value>)> {
-            let response = self
-                .http
-                .get(format!(
-                    "{}/api/v1/organizations/{organization_id}",
-                    self.orchestration_url
-                ))
-                .header(COOKIE, format!("{SESSION_COOKIE_NAME}={session_token}"))
-                .send()
-                .await?;
-            let status = response.status();
-            let body = response.text().await?;
-            if status == reqwest::StatusCode::NOT_FOUND {
-                return Ok((status, None));
+        ) -> anyhow::Result<DeleteOrganizationResponse> {
+            self.organization_client(session_token)?
+                .delete_organization(DeleteOrganizationRequest {
+                    org_id: organization_id.into(),
+                    ..Default::default()
+                })
+                .await
+                .context("OrganizationService DeleteOrganization")
+                .map(|response| response.into_owned())
+        }
+
+        async fn get_organization_via_connect(
+            &self,
+            organization_id: &str,
+            session_token: &str,
+        ) -> anyhow::Result<Option<Organization>> {
+            match self
+                .organization_client(session_token)?
+                .get_organization(GetOrganizationRequest {
+                    org_id: organization_id.into(),
+                    ..Default::default()
+                })
+                .await
+            {
+                Ok(response) => response
+                    .into_owned()
+                    .organization
+                    .into_option()
+                    .map(Some)
+                    .ok_or_else(|| anyhow::anyhow!("GetOrganization returned no organization")),
+                Err(error) if error.code == ErrorCode::NotFound => Ok(None),
+                Err(error) => Err(anyhow::anyhow!(
+                    "OrganizationService GetOrganization: {error}"
+                )),
             }
-            anyhow::ensure!(
-                status == reqwest::StatusCode::OK,
-                "organization GET returned {status}: {body}"
-            );
-            let body = serde_json::from_str(&body)
-                .map_err(|error| anyhow::anyhow!("decode organization GET response: {error}"))?;
-            Ok((status, Some(body)))
         }
 
         fn spawn_worker(
@@ -1380,26 +1387,31 @@ mod enabled {
             .await?;
 
             let first_response = self
-                .delete_organization_via_api(&org_id, &session_token)
+                .delete_organization_via_connect(&org_id, &session_token)
                 .await?;
             anyhow::ensure!(
-                first_response.state == OrganizationDeletionState::Deleting
+                first_response.state.as_known() == Some(OrganizationDeletionState::Deleting)
                     && !first_response.operation_id.is_empty(),
                 "organization DELETE did not return a durable deleting operation: {first_response:?}"
             );
-            let (_, first_get) = self
-                .get_organization_via_api(&org_id, &session_token)
+            let first_get = self
+                .get_organization_via_connect(&org_id, &session_token)
                 .await?;
             let first_get = first_get
                 .ok_or_else(|| anyhow::anyhow!("organization vanished before deletion ran"))?;
             anyhow::ensure!(
-                first_get["deletion_state"] == "deleting"
-                    && first_get["deletion_operation_id"] == first_response.operation_id
-                    && first_get.get("deletion_failure_code").is_none(),
-                "organization GET did not expose the retained deleting state: {first_get}"
+                first_get
+                    .deletion_state
+                    .as_ref()
+                    .and_then(|state| state.as_known())
+                    == Some(OrganizationDeletionState::Deleting)
+                    && first_get.deletion_operation_id.as_deref()
+                        == Some(first_response.operation_id.as_str())
+                    && first_get.deletion_failure_code.is_none(),
+                "organization GET did not expose the retained deleting state: {first_get:?}"
             );
             let duplicate = self
-                .delete_organization_via_api(&org_id, &session_token)
+                .delete_organization_via_connect(&org_id, &session_token)
                 .await?;
             anyhow::ensure!(
                 duplicate == first_response,
@@ -1440,17 +1452,22 @@ mod enabled {
                     && retained.2.as_deref() == Some("tenant_secret_cleanup_failed"),
                 "injected secret failure did not retain safe forward state: {retained:?}"
             );
-            let (_, failed_get) = self
-                .get_organization_via_api(&org_id, &session_token)
+            let failed_get = self
+                .get_organization_via_connect(&org_id, &session_token)
                 .await?;
             let failed_get = failed_get.ok_or_else(|| {
                 anyhow::anyhow!("failed deletion did not retain the organization")
             })?;
             anyhow::ensure!(
-                failed_get["deletion_state"] == "delete_failed"
-                    && failed_get["deletion_operation_id"] == first.id
-                    && failed_get["deletion_failure_code"] == "tenant_secret_cleanup_failed",
-                "organization GET did not expose safe retained failure state: {failed_get}"
+                failed_get
+                    .deletion_state
+                    .as_ref()
+                    .and_then(|state| state.as_known())
+                    == Some(OrganizationDeletionState::DeleteFailed)
+                    && failed_get.deletion_operation_id.as_deref() == Some(first.id.as_str())
+                    && failed_get.deletion_failure_code.as_deref()
+                        == Some("tenant_secret_cleanup_failed"),
+                "organization GET did not expose safe retained failure state: {failed_get:?}"
             );
             let runtime_state: (String, String, bool) = sqlx::query_as(
                 r#"SELECT state, desired_state,
@@ -1487,10 +1504,10 @@ mod enabled {
                 .await?;
 
             let retry_response = self
-                .delete_organization_via_api(&org_id, &session_token)
+                .delete_organization_via_connect(&org_id, &session_token)
                 .await?;
             anyhow::ensure!(
-                retry_response.state == OrganizationDeletionState::Deleting
+                retry_response.state.as_known() == Some(OrganizationDeletionState::Deleting)
                     && retry_response.operation_id != first.id,
                 "failed organization retry did not return a new deleting operation: {retry_response:?}"
             );
@@ -1547,12 +1564,12 @@ mod enabled {
             .fetch_one(&self.pool)
             .await?;
             anyhow::ensure!(!org_exists && secret_count == 0);
-            let (deleted_status, deleted_get) = self
-                .get_organization_via_api(&org_id, &session_token)
+            let deleted_get = self
+                .get_organization_via_connect(&org_id, &session_token)
                 .await?;
             anyhow::ensure!(
-                deleted_status == reqwest::StatusCode::NOT_FOUND && deleted_get.is_none(),
-                "completed organization deletion remained visible through GET"
+                deleted_get.is_none(),
+                "completed organization deletion remained visible through Connect"
             );
             worker.stop().await?;
             println!("temporal-fencing-smoke: organization deletion failure/retry/no-residue PASS");

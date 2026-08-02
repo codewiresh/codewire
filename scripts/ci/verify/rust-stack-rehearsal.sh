@@ -613,23 +613,21 @@ start_proc billing "$BILLING_PORT" env \
 
 probe_connect_surface billing "$BILLING_PORT"
 
-log "running configured Rust billing wire contract"
+log "running configured Rust billing Connect contract"
 (
   cd "$ROOT"
   BILLING_BASE_URL="http://127.0.0.1:${BILLING_PORT}" \
-    BILLING_FRONTEND_URL="http://127.0.0.1:${BILLING_PORT}" \
     BILLING_ADMIN_SESSION_TOKEN=contract-admin-session-token \
     BILLING_USER_SESSION_TOKEN=contract-user-session-token \
     BILLING_SEEDED=1 \
-    BILLING_STRIPE_CONFIGURED=1 \
     cargo test --locked --profile ci -p codewire-billing \
       --test wire_contract configured_billing_wire_contract \
       -- --ignored --exact --nocapture | tee "$RUN_DIR/billing-contract.log"
   passed_count="$(sed -nE \
-    's/.*test result: ok\. ([0-9]+) passed.*/\1/p' \
+    's/.*test result: ok\\. ([0-9]+) passed.*/\\1/p' \
     "$RUN_DIR/billing-contract.log" | tail -n 1)"
   if [ "$passed_count" != "1" ]; then
-    echo "::error::configured Rust billing wire contract reported ${passed_count:-no} passing tests; expected 1"
+    echo "::error::configured Rust billing Connect contract reported ${passed_count:-no} passing tests; expected 1"
     exit 1
   fi
 )

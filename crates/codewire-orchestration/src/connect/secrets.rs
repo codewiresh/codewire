@@ -1,9 +1,8 @@
 //! Connect-RPC adapter for organization, user, and project secrets.
 //!
-//! REST and Connect call the same shared functions in [`crate::api::secrets`]
-//! and [`crate::api::secret_projects`]. This module owns only protobuf
-//! mapping, pagination validation, and Connect error rendering. It never logs
-//! request bodies or secret values.
+//! This module maps shared secret service logic to protobuf, validates
+//! pagination, and renders Connect errors. It never logs request bodies or
+//! secret values.
 
 use std::borrow::Cow;
 use std::sync::Arc;

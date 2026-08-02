@@ -19,7 +19,7 @@ pub(super) async fn run(harness: &Harness) {
 
 fn client(
     harness: &Harness,
-    auth: Auth<'_>,
+    auth: Auth,
     codec: CodecFormat,
     protocol: Protocol,
 ) -> EnvironmentSessionServiceClient<HttpClient> {

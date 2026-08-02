@@ -1,15 +1,6 @@
-mod account;
-mod admin;
-mod api_keys;
-mod environment;
+mod connect_smoke;
 mod environment_session;
-mod environment_setup;
 mod exec_file;
-mod github;
-mod organizations;
-mod ports;
-mod presets;
-mod secrets;
 
 use std::env;
 use std::time::Duration;
@@ -19,13 +10,12 @@ use buffa::Message as _;
 use codewire_proto::google::rpc::{BadRequest, ErrorInfo, RetryInfo};
 use connectrpc::client::ClientConfig;
 use connectrpc::{CodecFormat, ConnectError, ErrorCode};
-use reqwest::header::{AUTHORIZATION, COOKIE};
+use reqwest::header::COOKIE;
 use reqwest::{Client, Method, StatusCode};
 use serde_json::{Map, Value};
 
 const SESSION_COOKIE: &str = "codewire.session_token";
 pub(super) const PRIMARY_ORG: &str = "org_apikey_contract_1";
-pub(super) const SECONDARY_ORG: &str = "org_apikey_contract_2";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum KubeMode {
@@ -40,12 +30,11 @@ enum Scope {
 }
 
 #[derive(Clone, Copy)]
-pub(super) enum Auth<'a> {
+pub(super) enum Auth {
     None,
     GlobalAdmin,
     Admin,
     User,
-    Bearer(&'a str),
 }
 
 #[derive(Debug)]
@@ -127,22 +116,13 @@ impl Harness {
 
     pub async fn run(&self) {
         if self.scope == Scope::RuntimeBoundary {
-            environment_setup::assert_detection_unconfigured(self).await;
+            connect_smoke::assert_detection_unconfigured(self).await;
             exec_file::assert_runtime_boundaries(self).await;
             return;
         }
 
         self.assert_health().await;
-        admin::run(self).await;
-        api_keys::run(self).await;
-        account::run(self).await;
-        github::run(self).await;
-        environment_setup::run(self).await;
-        organizations::run(self).await;
-        secrets::run(self).await;
-        presets::run(self).await;
-        ports::run(self).await;
-        environment::run(self).await;
+        connect_smoke::run(self).await;
         environment_session::run(self).await;
         exec_file::run(self).await;
     }
@@ -160,7 +140,7 @@ impl Harness {
         service: &str,
         method: &str,
         body: Value,
-        auth: Auth<'_>,
+        auth: Auth,
     ) -> WireResponse {
         self.request(
             Method::POST,
@@ -176,7 +156,7 @@ impl Harness {
         method: Method,
         path: &str,
         body: Option<Value>,
-        auth: Auth<'_>,
+        auth: Auth,
     ) -> WireResponse {
         self.request(method, path, auth, body).await
     }
@@ -185,7 +165,7 @@ impl Harness {
         &self,
         method: Method,
         path: &str,
-        auth: Auth<'_>,
+        auth: Auth,
         body: Option<Value>,
     ) -> WireResponse {
         let mut request = self
@@ -199,7 +179,6 @@ impl Harness {
             ),
             Auth::Admin => request.header(COOKIE, format!("{SESSION_COOKIE}={}", self.admin_token)),
             Auth::User => request.header(COOKIE, format!("{SESSION_COOKIE}={}", self.user_token)),
-            Auth::Bearer(token) => request.header(AUTHORIZATION, format!("Bearer {token}")),
         };
         if let Some(body) = body {
             request = request.json(&body);
@@ -222,7 +201,7 @@ impl Harness {
         }
     }
 
-    pub fn client_config(&self, auth: Auth<'_>, codec: CodecFormat) -> ClientConfig {
+    pub fn client_config(&self, auth: Auth, codec: CodecFormat) -> ClientConfig {
         let mut config = ClientConfig::new(self.base_url.parse().expect("Connect base URI"))
             .with_codec_format(codec)
             .with_default_timeout(Duration::from_secs(30));
@@ -237,9 +216,6 @@ impl Harness {
                     .with_default_header(COOKIE, format!("{SESSION_COOKIE}={}", self.admin_token)),
                 Auth::User => config
                     .with_default_header(COOKIE, format!("{SESSION_COOKIE}={}", self.user_token)),
-                Auth::Bearer(token) => {
-                    config.with_default_header(AUTHORIZATION, format!("Bearer {token}"))
-                }
             };
         config
     }
@@ -288,17 +264,6 @@ pub(super) fn assert_rpc_error(error: &ConnectError, code: ErrorCode, message: &
             error.message
         );
     }
-}
-
-pub(super) fn rpc_error_info_reason(error: &ConnectError) -> Option<String> {
-    error.details.iter().find_map(|detail| {
-        if detail.type_url != "google.rpc.ErrorInfo"
-            && detail.type_url.rsplit('/').next() != Some("google.rpc.ErrorInfo")
-        {
-            return None;
-        }
-        decode_rpc_detail::<ErrorInfo>(detail).map(|info| info.reason)
-    })
 }
 
 pub(super) fn rpc_has_retry_info(error: &ConnectError) -> bool {

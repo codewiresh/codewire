@@ -49,19 +49,11 @@ fn stream_request(org_id: &str, environment_id: &str, command: &[&str]) -> Strea
     }
 }
 
-fn exec_client(
-    harness: &Harness,
-    auth: Auth<'_>,
-    codec: CodecFormat,
-) -> ExecServiceClient<HttpClient> {
+fn exec_client(harness: &Harness, auth: Auth, codec: CodecFormat) -> ExecServiceClient<HttpClient> {
     ExecServiceClient::new(HttpClient::plaintext(), harness.client_config(auth, codec))
 }
 
-fn file_client(
-    harness: &Harness,
-    auth: Auth<'_>,
-    codec: CodecFormat,
-) -> FileServiceClient<HttpClient> {
+fn file_client(harness: &Harness, auth: Auth, codec: CodecFormat) -> FileServiceClient<HttpClient> {
     FileServiceClient::new(HttpClient::plaintext(), harness.client_config(auth, codec))
 }
 

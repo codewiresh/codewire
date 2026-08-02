@@ -24,9 +24,8 @@ codewire.localhost {
 		reverse_proxy 127.0.0.1:8091
 	}
 
-	# Billing service (codewire-billing binary). Transitional REST routes and
-	# the permanent Stripe webhook are matched before the broad /api fallback.
-	@billing path_regexp ^(/api/webhooks/stripe|/api/v1/admin/billing(/.*)?|/api/v1/billing/plans(/.*)?|/api/v1/organizations/[^/]+/billing(/.*)?|/api/v1/organizations/[^/]+/environments/usage)$
+	# Stripe delivery is the only permanent non-Connect billing route.
+	@billing path /api/webhooks/stripe
 	handle @billing {
 		reverse_proxy 127.0.0.1:8081
 	}

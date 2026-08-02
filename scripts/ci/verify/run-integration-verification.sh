@@ -429,15 +429,13 @@ run_billing() {
   (
     cd "$ROOT"
     BILLING_BASE_URL="http://127.0.0.1:${BILLING_PORT}" \
-      BILLING_FRONTEND_URL="http://127.0.0.1:${BILLING_PORT}" \
       BILLING_ADMIN_SESSION_TOKEN=contract-admin-session-token \
       BILLING_USER_SESSION_TOKEN=contract-user-session-token BILLING_SEEDED=1 \
-      BILLING_STRIPE_CONFIGURED=1 \
       cargo test --locked --profile ci -p codewire-billing \
         --test wire_contract configured_billing_wire_contract \
         -- --ignored --exact --nocapture | tee "$RUN_DIR/billing-contract.log"
     assert_passed_count \
-      "configured Rust billing wire contract" "$RUN_DIR/billing-contract.log" 1
+      "configured Rust billing Connect contract" "$RUN_DIR/billing-contract.log" 1
   )
   stop_proc billing
 }

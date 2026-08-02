@@ -1,8 +1,7 @@
 //! Connect-RPC adapter for organization and official presets.
 //!
-//! REST and Connect both call the shared functions in
-//! [`crate::api::presets`]. This module owns only protobuf mapping,
-//! pagination validation, and Connect error rendering.
+//! This module maps the shared preset service logic to protobuf, validates
+//! pagination, and renders Connect errors.
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;

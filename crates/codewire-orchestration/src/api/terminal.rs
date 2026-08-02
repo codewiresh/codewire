@@ -2,7 +2,6 @@
 
 use std::future::Future;
 
-use axum::Json;
 use axum::body::Body;
 use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{FromRequestParts, Path, Query, State};
@@ -51,24 +50,10 @@ enum TerminalAttachment<T> {
     TransportClosed,
 }
 
-#[derive(Debug, Serialize)]
-pub struct TicketResponse {
-    ticket: String,
-}
-
 #[derive(Debug, Deserialize)]
 pub struct TerminalQuery {
     #[serde(default)]
     ticket: String,
-}
-
-/// `POST /api/v1/terminal/ticket` — mirrors `ticketHandler`.
-pub async fn terminal_ticket(
-    State(state): State<ApiState>,
-    user: AuthUser,
-) -> Result<Json<TicketResponse>, AppError> {
-    let ticket = issue_terminal_ticket_core(&state, &user)?;
-    Ok(Json(TicketResponse { ticket }))
 }
 
 pub(crate) fn issue_terminal_ticket_core(

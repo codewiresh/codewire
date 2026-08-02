@@ -12,14 +12,12 @@
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use axum::Json;
-use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use codewire_server_core::auth::AuthUser;
 use codewire_server_core::org_deletion::{
     OrganizationRuntimeMutationError, run_organization_runtime_mutation,
 };
-use codewire_server_core::{AppError, AppResult, ValidatedJson};
+use codewire_server_core::{AppError, AppResult};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
@@ -467,22 +465,8 @@ async fn insert_environment(
     Ok(scan_environment(&row)?)
 }
 
-// ── Handler ──────────────────────────────────────────────────────────────
-
 fn int_or_default(v: Option<i32>, default: i32) -> i32 {
     v.unwrap_or(default)
-}
-
-/// `POST /api/v1/organizations/{org_id}/environments` — mirrors
-/// `createEnvironment` (201 + the created environment).
-pub async fn create_environment(
-    State(state): State<ApiState>,
-    user: AuthUser,
-    Path(org_id): Path<String>,
-    ValidatedJson(input): ValidatedJson<CreateEnvironmentBody>,
-) -> AppResult<(StatusCode, Json<Environment>)> {
-    let environment = create_environment_core(&state, &user, &org_id, input).await?;
-    Ok((StatusCode::CREATED, Json(environment)))
 }
 
 pub(crate) async fn create_environment_core(

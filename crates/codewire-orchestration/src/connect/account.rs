@@ -1,7 +1,7 @@
 //! Connect-RPC adapter for account-global user settings.
 //!
-//! REST and Connect both call [`crate::api::account::service`]. This module
-//! owns only protobuf mapping and Connect error rendering.
+//! This module maps [`crate::api::account::service`] to protobuf and renders
+//! Connect errors.
 
 use std::sync::Arc;
 

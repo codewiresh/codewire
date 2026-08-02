@@ -387,14 +387,6 @@ kubectl_apply() {
 ingress_path_drift_check() {
   log "checking kind/base ingress routing drift"
   local billing_paths=(
-    '/api/v1/admin/billing/catalog$'
-    '/api/v1/admin/billing/catalog/(plans|prices|settings|subscription-migrations)'
-    '/api/v1/billing/plans'
-    '/api/v1/organizations/[^/]+/billing$'
-    '/api/v1/organizations/[^/]+/billing/invoices'
-    '/api/v1/organizations/[^/]+/billing/events'
-    '/api/v1/organizations/[^/]+/billing/(checkout|portal|setup)'
-    '/api/v1/organizations/[^/]+/environments/usage'
     '/api/webhooks/stripe'
     '/codewire\.console\.v1\.BillingService/'
   )
@@ -1056,23 +1048,22 @@ wait_edge_upstream() {
 edge_routing_probes() {
   log "running ingress edge routing probes"
 
-  # Both upstreams must be reachable through the ingress before any
-  # unretried probe runs — the orchestration-backed probes used to run
-  # before orchestration's readiness loop and could catch a 503 during
-  # endpoint sync (observed in CI as "checkout returned 503, want 404").
-  wait_edge_upstream billing /api/v1/billing/plans/sandbox 401
-  wait_edge_upstream orchestration /api/v1/organizations/org_contract_1/environments 401
+  # The retained orchestration browser transport must be reachable through the
+  # ingress before unretried probes run; this absorbs endpoint propagation.
+  wait_edge_upstream orchestration /api/v1/organizations/org_contract_1/environments/env_contract_1/ssh-proxy 401
   local code path
 
   for path in \
+    /api/v1/billing/plans/sandbox \
     /api/v1/organizations/org_contract_1/billing/invoices \
     /api/v1/organizations/org_contract_1/billing \
-    /api/v1/organizations/org_contract_1/environments/usage; do
-    require_get_code "$path" 401 "flipped billing path $path"
+    /api/v1/organizations/org_contract_1/environments/usage \
+    /api/v1/admin/billing/catalog/plans; do
+    require_get_code "$path" 404 "retired billing REST path $path"
   done
 
   for path in billing/checkout billing/portal billing/setup; do
-    require_post_code "/api/v1/organizations/org_contract_1/${path}" 401 "flipped billing POST $path"
+    require_post_code "/api/v1/organizations/org_contract_1/${path}" 404 "retired billing REST POST $path"
   done
 
   curl_settled -X POST --data '{}' "${KIND_INGRESS_URL}/api/webhooks/stripe"
@@ -1088,10 +1079,10 @@ edge_routing_probes() {
     /api/v1/admin/billing/catalog/prices \
     /api/v1/admin/billing/catalog/settings/trial_days \
     /api/v1/admin/billing/catalog/subscription-migrations; do
-    require_get_code "$path" 401 "flipped catalog write path $path"
+    require_get_code "$path" 404 "retired catalog REST path $path"
   done
 
-  require_get_code /api/v1/organizations/org_contract_1/environments 401 "flipped environments path"
+  require_get_code /api/v1/organizations/org_contract_1/environments 404 "retired environments REST path"
 
   for path in \
     /api/v1/organizations/org_contract_1 \
@@ -1105,13 +1096,13 @@ edge_routing_probes() {
     /api/v1/organizations/org_contract_1/repo-configs \
     /api/v1/organizations/org_contract_1/api-keys \
     /api/v1/environment-create/detect; do
-    require_get_code "$path" 401 "flipped orchestration path $path"
+    require_get_code "$path" 404 "retired orchestration REST path $path"
   done
 
-  require_post_code /api/v1/organizations/org_contract_1/environments/env_contract_1/exec 401 "flipped exec path"
-  require_post_code /api/v1/terminal/ticket 401 "flipped terminal ticket path"
-  require_get_code /api/v1/organizations/org_contract_1/environments/env_contract_1/ssh-proxy 401 "flipped ssh-proxy websocket path"
-  require_get_code /api/v1/organizations/org_contract_1/environments/env_contract_1/ssh-proxy/check 401 "flipped ssh-proxy check path"
+  require_post_code /api/v1/organizations/org_contract_1/environments/env_contract_1/exec 404 "retired exec REST path"
+  require_post_code /api/v1/terminal/ticket 404 "retired terminal-ticket REST path"
+  require_get_code /api/v1/organizations/org_contract_1/environments/env_contract_1/ssh-proxy 401 "permanent ssh-proxy websocket path"
+  require_get_code /api/v1/organizations/org_contract_1/environments/env_contract_1/ssh-proxy/check 401 "permanent ssh-proxy check path"
 
   curl_settled -H 'Host: web.codewire-dev.local' "${KIND_INGRESS_URL}/"
   if [ "$PROBE_CODE" != "400" ]; then
@@ -1266,9 +1257,9 @@ connect_edge_probes() {
   fi
 
   # 2d. BillingCatalogService shares codewire.admin.v1 with AdminService but
-  # must reach the billing binary. The full billing wire contract below
-  # exercises every method; this probe makes the per-Service edge split
-  # immediately diagnosable.
+  # must reach the billing binary. The full billing Connect contract below
+  # exercises the retained read surface; this probe makes the per-Service edge
+  # split immediately diagnosable.
   local billing_catalog_base="${KIND_INGRESS_URL}/codewire.admin.v1.BillingCatalogService"
   curl_settled -X POST -H 'content-type: application/json' \
     -d '{}' "${billing_catalog_base}/GetCatalog"
@@ -1598,13 +1589,11 @@ coordinator_ingress_smoke() {
   rm -rf "$certificate_dir"
 }
 
-exec_service_parity_smoke() {
-  log "running ExecService Connect/REST same-pod parity smoke"
+exec_service_connect_smoke() {
+  log "running ExecService Connect same-pod smoke and REST-retirement probe"
   local environment_id=env_contract_1
-  local ascii_command ascii_rest_payload ascii_connect_payload
-  local ascii_rest ascii_connect
-  local invalid_command invalid_rest_payload invalid_connect_payload
-  local invalid_rest invalid_connect
+  local ascii_command ascii_connect_payload ascii_connect
+  local invalid_command invalid_connect_payload invalid_connect
 
   kubectl -n "$NS" exec -i deploy/postgres -- \
     psql -U codewire -d codewire -v ON_ERROR_STOP=1 <<SQL
@@ -1647,8 +1636,6 @@ SQL
     "$CARGO_CI_DIR/exec-stream-smoke"
 
   ascii_command="printf 'stdout\\n'; printf 'stderr\\n' >&2; exit 17"
-  ascii_rest_payload="$(jq -cn --arg command "$ascii_command" \
-    '{command:["sh","-c",$command]}')"
   ascii_connect_payload="$(jq -cn \
     --arg org_id org_contract_1 \
     --arg environment_id "$environment_id" \
@@ -1658,13 +1645,12 @@ SQL
   curl_settled -X POST \
     -H 'content-type: application/json' \
     -H 'cookie: codewire.session_token=contract-user-session-token' \
-    -d "$ascii_rest_payload" \
+    -d "$ascii_connect_payload" \
     "${KIND_INGRESS_URL}/api/v1/organizations/org_contract_1/environments/${environment_id}/exec"
-  if [ "$PROBE_CODE" != "200" ]; then
-    echo "::error::REST same-pod exec returned ${PROBE_CODE}: ${PROBE_BODY}"
+  if [ "$PROBE_CODE" != "404" ]; then
+    echo "::error::retired authenticated REST exec returned ${PROBE_CODE}: ${PROBE_BODY}"
     return 1
   fi
-  ascii_rest="$PROBE_BODY"
 
   curl_settled -X POST \
     -H 'content-type: application/json' \
@@ -1681,38 +1667,19 @@ SQL
   fi
   ascii_connect="$PROBE_BODY"
 
-  if [ "$(jq -r '.exit_code' <<<"$ascii_rest")" != "$(jq -r '.exitCode' <<<"$ascii_connect")" ]; then
-    echo "::error::REST/Connect exec exit codes diverged: REST=${ascii_rest} Connect=${ascii_connect}"
-    return 1
-  fi
-  if [ "$(jq -j '.stdout' <<<"$ascii_rest" | base64 -w0)" != "$(jq -r '.stdout' <<<"$ascii_connect")" ]; then
-    echo "::error::REST/Connect exec stdout diverged: REST=${ascii_rest} Connect=${ascii_connect}"
-    return 1
-  fi
-  if [ "$(jq -j '.stderr' <<<"$ascii_rest" | base64 -w0)" != "$(jq -r '.stderr' <<<"$ascii_connect")" ]; then
-    echo "::error::REST/Connect exec stderr diverged: REST=${ascii_rest} Connect=${ascii_connect}"
+  if ! jq -e \
+    '.exitCode == 17 and .stdout == "c3Rkb3V0Cg==" and .stderr == "c3RkZXJyCg=="' \
+    <<<"$ascii_connect" >/dev/null; then
+    echo "::error::Connect Exec did not preserve stdout/stderr and exit status: ${ascii_connect}"
     return 1
   fi
 
   invalid_command="printf 'out\\377\\n'; printf 'err\\376\\n' >&2; exit 23"
-  invalid_rest_payload="$(jq -cn --arg command "$invalid_command" \
-    '{command:["sh","-c",$command]}')"
   invalid_connect_payload="$(jq -cn \
     --arg org_id org_contract_1 \
     --arg environment_id "$environment_id" \
     --arg command "$invalid_command" \
     '{orgId:$org_id,environmentId:$environment_id,command:["sh","-c",$command]}')"
-
-  curl_settled -X POST \
-    -H 'content-type: application/json' \
-    -H 'cookie: codewire.session_token=contract-user-session-token' \
-    -d "$invalid_rest_payload" \
-    "${KIND_INGRESS_URL}/api/v1/organizations/org_contract_1/environments/${environment_id}/exec"
-  if [ "$PROBE_CODE" != "200" ]; then
-    echo "::error::REST invalid-byte exec returned ${PROBE_CODE}: ${PROBE_BODY}"
-    return 1
-  fi
-  invalid_rest="$PROBE_BODY"
 
   curl_settled -X POST \
     -H 'content-type: application/json' \
@@ -1726,19 +1693,13 @@ SQL
   invalid_connect="$PROBE_BODY"
 
   if ! jq -e \
-    '.exit_code == 23 and .stdout == ("out" + "\uFFFD" + "\n") and .stderr == ("err" + "\uFFFD" + "\n")' \
-    <<<"$invalid_rest" >/dev/null; then
-    echo "::error::REST renderer did not preserve its documented lossy UTF-8 behavior: ${invalid_rest}"
-    return 1
-  fi
-  if ! jq -e \
     '.exitCode == 23 and .stdout == "b3V0/wo=" and .stderr == "ZXJy/go="' \
     <<<"$invalid_connect" >/dev/null; then
     echo "::error::Connect Exec did not preserve exact stdout/stderr bytes: ${invalid_connect}"
     return 1
   fi
 
-  log "ExecService Connect/REST parity and lossless bytes green; retaining its pod for FileService"
+  log "ExecService Connect semantics and REST retirement green; retaining its pod for FileService"
 }
 
 environment_setup_terminal_smoke() (
@@ -1870,7 +1831,7 @@ EOF
 )
 
 file_service_smoke() {
-  log "running FileService client/server streaming and REST parity smoke"
+  log "running FileService client/server streaming and Connect contract smoke"
   local sftp_environment_id=env-crd-smoke
   local exec_environment_id=env_contract_1
   local daemon_pod=crd-smoke-workspace-daemon
@@ -1946,7 +1907,7 @@ SQL
   kubectl -n "$SANDBOX_NS" delete pod "$daemon_pod" --wait=true >/dev/null
   rm -rf "$GATEWAY_SMOKE_TMPDIR"
   GATEWAY_SMOKE_TMPDIR=""
-  log "FileService streaming, backend selection, REST parity, and black-box contract green"
+  log "FileService streaming, backend selection, and black-box Connect contract green"
 }
 
 platform_run_connect_smoke() {
@@ -2140,7 +2101,7 @@ workspace_service_smokes() {
 
   log "running workspace exec smoke"
   SMOKE_NAMESPACE="$SANDBOX_NS" SMOKE_KEEP_POD=1 "$CARGO_CI_DIR/exec-smoke"
-  exec_service_parity_smoke
+  exec_service_connect_smoke
   environment_setup_terminal_smoke
   file_service_smoke
 }
@@ -2330,28 +2291,13 @@ EOF
 }
 
 billing_contract_through_ingress() {
-  local frontend_url
-
-  # Exercise redirects against the origin the deployed billing service actually
-  # accepts. The Kind browser proof serves the dashboard from Vite while its
-  # API proxy uses the separate ingress origin, so these are intentionally not
-  # interchangeable.
-  frontend_url="$(kubectl -n "$NS" get configmap codewire-config \
-    -o jsonpath='{.data.FRONTEND_URL}')"
-  if [ -z "$frontend_url" ]; then
-    echo "::error::Kind billing contract requires codewire-config FRONTEND_URL"
-    return 1
-  fi
-
-  log "running configured Rust billing wire contract through ingress"
+  log "running configured Rust billing Connect contract through ingress"
   (
     cd "$ROOT"
     BILLING_BASE_URL="$KIND_INGRESS_URL" \
-      BILLING_FRONTEND_URL="$frontend_url" \
       BILLING_ADMIN_SESSION_TOKEN=contract-admin-session-token \
       BILLING_USER_SESSION_TOKEN=contract-user-session-token \
       BILLING_SEEDED=1 \
-      BILLING_STRIPE_CONFIGURED=1 \
       BILLING_SKIP_HEALTH=1 \
       cargo test --locked --profile ci -p codewire-billing \
         --test wire_contract configured_billing_wire_contract \
@@ -2361,7 +2307,7 @@ billing_contract_through_ingress() {
       's/.*test result: ok\. ([0-9]+) passed.*/\1/p' \
       "$RUN_DIR/billing-contract.log" | tail -n 1)"
     if [ "$passed_count" != "1" ]; then
-      echo "::error::configured Rust billing wire contract reported ${passed_count:-no} passing tests; expected 1"
+      echo "::error::configured Rust billing Connect contract reported ${passed_count:-no} passing tests; expected 1"
       exit 1
     fi
   )

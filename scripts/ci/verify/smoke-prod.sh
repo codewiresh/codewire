@@ -237,7 +237,6 @@ run_public_checks() {
     jq -e --arg issuer "$CODEWIRE_IDP_URL" '.issuer == $issuer' >/dev/null
   printf '%-28s %s %s\n' "idp discovery" "ok" "$CODEWIRE_IDP_URL/.well-known/openid-configuration"
 
-  assert_http_status "billing session route" "$CODEWIRE_SERVER_URL/api/v1/billing/session" 200 401 403 405
   assert_http_status "derp latency" "$CODEWIRE_DERP_URL/derp/latency-check" 200
 }
 

@@ -1,95 +1,44 @@
-//! `/github/config` and `/github/status` read routes (#38).
-//!
-//! Scope note: the two reads, DB-only token writes
-//! (`POST/DELETE /github/token`, the CLI device-flow store/disconnect),
-//! `GET /github/repos`, and the browser OAuth redirect/callback handlers port
-//! here. The edge flips ONLY the exact ported paths, so there is no collision
-//! with any future `/github/*` routes (the matchers list literal paths, not a
-//! prefix).
-//!
-//! These are huma handlers on the Go side, so the success bodies are the
-//! bare struct JSON and the (unused) error envelope is the
-//! `{status,title,detail}` shape. Both routes are `CookieAuth`-only on
-//! Go; the orchestration `require_auth` layer accepts cookie or bearer,
-//! matching the api_keys precedent. Wire-shape unit tests are the parity gate.
+//! Shared GitHub account state for GitHubService and the permanent browser
+//! OAuth redirect/callback routes.
 
 use std::borrow::Cow;
 
-use axum::Json;
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::http::header::{CONTENT_TYPE, LOCATION};
 use axum::response::{IntoResponse, Response};
 use chrono::{DateTime, Utc};
 use codewire_server_core::auth::AuthUser;
-use codewire_server_core::validation::ValidatedJson;
 use codewire_server_core::{AppError, AppResult};
-use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use sqlx::Row;
 use url::Url;
 
 use super::ApiState;
-use super::environments::format_time;
 use crate::worker::github::{GitHubAppConfig, get_github_token_for_user};
 
 // ── Wire types ───────────────────────────────────────────────────────────
 
-/// Mirrors `api.GitHubConfigOutput.Body`.
-#[derive(Debug, Serialize, JsonSchema)]
+#[derive(Debug)]
 pub struct GitHubConfig {
     pub client_id: String,
     pub app_slug: String,
 }
 
-/// Mirrors `api.GitHubStatusOutput.Body` (huma serializes struct fields
-/// in declaration order; the `omitempty`/pointer fields drop when empty).
-#[derive(Debug, Serialize, JsonSchema)]
+#[derive(Debug)]
 pub struct GitHubStatus {
     pub connected: bool,
-    #[serde(skip_serializing_if = "String::is_empty")]
     pub username: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub installation_id: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub connected_at: Option<String>,
 }
 
-/// Mirrors `api.SaveGitHubTokenInput.Body`. `access_token` is required; the
-/// rest are `omitempty`. The two `*_at` fields are RFC3339 strings the handler
-/// parses (best-effort, like Go's `time.Parse`).
-#[derive(Debug, Default, Deserialize, JsonSchema)]
-pub struct SaveGitHubTokenBody {
-    pub access_token: String,
-    #[serde(default)]
-    pub refresh_token: String,
-    #[serde(default)]
-    pub token_type: String,
-    #[serde(default)]
-    pub expires_at: Option<String>,
-    #[serde(default)]
-    pub refresh_token_expires_at: Option<String>,
-    #[serde(default)]
-    pub installation_id: Option<i64>,
-    #[serde(default)]
-    pub github_username: String,
-}
-
-/// `{ "ok": true }` — mirrors the `SaveGitHubTokenOutput`/`DeleteGitHubTokenOutput` bodies.
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct OkResponse {
-    pub ok: bool,
-}
-
-/// Mirrors `api.GitHubRepo`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GitHubRepo {
     pub full_name: String,
     pub html_url: String,
     pub clone_url: String,
-    #[serde(skip_serializing_if = "String::is_empty")]
     pub description: String,
-    #[serde(skip_serializing_if = "String::is_empty")]
     pub language: String,
     pub private: bool,
     pub default_branch: String,
@@ -114,18 +63,14 @@ struct GitHubRepoApi {
     updated_at: String,
 }
 
-/// Mirrors `api.ListGitHubReposInput`.
-#[derive(Debug, Default, Deserialize, JsonSchema)]
+#[derive(Debug, Default)]
 pub struct ListGitHubReposQuery {
-    #[serde(default)]
     pub page: i32,
-    #[serde(default)]
     pub per_page: i32,
-    #[serde(default)]
     pub search: String,
 }
 
-/// Transport-neutral status record shared by REST and Connect.
+/// Status record shared by browser OAuth and Connect operations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct GitHubStatusRecord {
     pub connected: bool,
@@ -134,7 +79,7 @@ pub(crate) struct GitHubStatusRecord {
     pub connected_at: Option<DateTime<Utc>>,
 }
 
-/// Transport-neutral token write parameters shared by REST and Connect.
+/// Token write parameters shared by browser OAuth and Connect operations.
 #[derive(Debug, Clone)]
 pub(crate) struct SaveGitHubTokenParams {
     pub access_token: String,
@@ -183,13 +128,6 @@ struct GitHubUserResponse {
 /// Mirrors Go's `nilIfEmpty`: empty string → SQL NULL.
 fn nil_if_empty(s: &str) -> Option<&str> {
     if s.is_empty() { None } else { Some(s) }
-}
-
-/// Mirrors Go's `time.Parse(time.RFC3339, …)` guarded by a nil check: an
-/// absent or unparseable value yields `None` (no error).
-fn parse_rfc3339(s: Option<&str>) -> Option<DateTime<Utc>> {
-    s.and_then(|s| DateTime::parse_from_rfc3339(s).ok())
-        .map(|t| t.with_timezone(&Utc))
 }
 
 fn normalized_repo_pagination(query: &ListGitHubReposQuery) -> (i32, i32) {
@@ -506,80 +444,6 @@ pub(crate) async fn delete_github_token_core(state: &ApiState, user: &AuthUser) 
     Ok(())
 }
 
-// ── REST handlers ───────────────────────────────────────────────────────
-
-/// `GET /github/config` — mirrors `getGitHubConfig`. Pure config read; no
-/// auth-scoped data, but registered behind `require_auth` like the Go
-/// `CookieAuth` security requirement.
-pub async fn get_github_config(
-    State(state): State<ApiState>,
-    user: AuthUser,
-) -> AppResult<Json<GitHubConfig>> {
-    Ok(Json(get_github_config_core(&state, &user)?))
-}
-
-/// `GET /github/status` — mirrors `getGitHubStatus`. Single read of
-/// `user_github_tokens`; `ErrNoRows` → `{connected:false}`.
-pub async fn get_github_status(
-    State(state): State<ApiState>,
-    user: AuthUser,
-) -> AppResult<Json<GitHubStatus>> {
-    let status = get_github_status_core(&state, &user).await?;
-    Ok(Json(GitHubStatus {
-        connected: status.connected,
-        username: status.username,
-        installation_id: status.installation_id,
-        // Go: connectedAt.Format(time.RFC3339). pgx returns UTC, so this
-        // renders with a `Z` at seconds precision — identical to format_time.
-        connected_at: status
-            .connected_at
-            .map(|timestamp| format_time(timestamp.naive_utc())),
-    }))
-}
-
-/// `GET /github/repos` — mirrors `listGitHubRepos`. Uses the stored GitHub
-/// user token, refreshing when needed via the shared worker helper.
-pub async fn list_github_repos(
-    State(state): State<ApiState>,
-    user: AuthUser,
-    Query(query): Query<ListGitHubReposQuery>,
-) -> AppResult<Json<Vec<GitHubRepo>>> {
-    Ok(Json(list_github_repos_core(&state, &user, query).await?))
-}
-
-/// `POST /github/token` — mirrors `saveGitHubToken`. Upserts the CLI
-/// device-flow token into `user_github_tokens` (PK `user_id`).
-pub async fn save_github_token(
-    State(state): State<ApiState>,
-    user: AuthUser,
-    ValidatedJson(body): ValidatedJson<SaveGitHubTokenBody>,
-) -> AppResult<Json<OkResponse>> {
-    save_github_token_core(
-        &state,
-        &user,
-        SaveGitHubTokenParams {
-            access_token: body.access_token,
-            refresh_token: body.refresh_token,
-            token_type: body.token_type,
-            expires_at: parse_rfc3339(body.expires_at.as_deref()),
-            refresh_token_expires_at: parse_rfc3339(body.refresh_token_expires_at.as_deref()),
-            installation_id: body.installation_id,
-            github_username: body.github_username,
-        },
-    )
-    .await?;
-    Ok(Json(OkResponse { ok: true }))
-}
-
-/// `DELETE /github/token` — mirrors `deleteGitHubToken` (disconnect).
-pub async fn delete_github_token(
-    State(state): State<ApiState>,
-    user: AuthUser,
-) -> AppResult<Json<OkResponse>> {
-    delete_github_token_core(&state, &user).await?;
-    Ok(Json(OkResponse { ok: true }))
-}
-
 /// `GET /github/oauth/authorize` — starts the browser OAuth flow. Mirrors the
 /// Go raw handler: generate a one-time state row, then 307 to GitHub.
 pub async fn github_oauth_authorize(
@@ -740,139 +604,11 @@ pub async fn github_oauth_callback(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use codewire_server_core::validation::validate_value;
 
     #[test]
     fn nil_if_empty_maps_blank_to_none() {
         assert_eq!(nil_if_empty(""), None);
         assert_eq!(nil_if_empty("x"), Some("x"));
-    }
-
-    #[test]
-    fn parse_rfc3339_best_effort() {
-        assert!(parse_rfc3339(None).is_none());
-        assert!(parse_rfc3339(Some("not-a-date")).is_none());
-        assert_eq!(
-            parse_rfc3339(Some("2026-06-19T10:00:00Z")),
-            Some("2026-06-19T10:00:00Z".parse::<DateTime<Utc>>().unwrap())
-        );
-    }
-
-    #[test]
-    fn ok_response_shape() {
-        let v = serde_json::to_value(OkResponse { ok: true }).unwrap();
-        assert_eq!(v, serde_json::json!({"ok": true}));
-    }
-
-    #[test]
-    fn save_token_schema_requires_access_token() {
-        let schema = serde_json::to_value(schemars::schema_for!(SaveGitHubTokenBody)).unwrap();
-
-        assert_eq!(
-            schema["properties"]["access_token"]["type"],
-            serde_json::json!("string")
-        );
-        assert_eq!(
-            schema["required"],
-            serde_json::json!(["access_token"]),
-            "only access_token is required; OAuth metadata fields remain optional"
-        );
-    }
-
-    #[test]
-    fn save_token_validation_rejects_missing_access_token() {
-        let value = serde_json::json!({
-            "refresh_token": "refresh",
-            "token_type": "bearer"
-        });
-
-        let Err(AppError::Validation { errors }) = validate_value::<SaveGitHubTokenBody>(value)
-        else {
-            panic!("expected missing access_token to be rejected");
-        };
-
-        assert_eq!(errors.len(), 1);
-        assert_eq!(errors[0].path, "/");
-        assert!(errors[0].message.contains("access_token"));
-    }
-
-    #[test]
-    fn save_token_validation_rejects_type_errors() {
-        let value = serde_json::json!({
-            "access_token": 7
-        });
-
-        let Err(AppError::Validation { errors }) = validate_value::<SaveGitHubTokenBody>(value)
-        else {
-            panic!("expected type-invalid access_token to be rejected");
-        };
-
-        assert_eq!(errors.len(), 1);
-        assert_eq!(errors[0].path, "/access_token");
-        assert!(errors[0].message.contains("string"));
-    }
-
-    #[test]
-    fn config_serializes_both_fields() {
-        let v = serde_json::to_value(GitHubConfig {
-            client_id: "Iv1.abc".into(),
-            app_slug: "codewire".into(),
-        })
-        .unwrap();
-        assert_eq!(v["client_id"], "Iv1.abc");
-        assert_eq!(v["app_slug"], "codewire");
-    }
-
-    #[test]
-    fn status_disconnected_omits_optionals_like_go() {
-        let v = serde_json::to_value(GitHubStatus {
-            connected: false,
-            username: String::new(),
-            installation_id: None,
-            connected_at: None,
-        })
-        .unwrap();
-        let obj = v.as_object().unwrap();
-        assert_eq!(v["connected"], false);
-        // username (omitempty), installation_id + connected_at (pointers)
-        // are absent when empty — matching Go's struct tags.
-        for k in ["username", "installation_id", "connected_at"] {
-            assert!(obj.get(k).is_none(), "{k} should be omitted when empty");
-        }
-    }
-
-    #[test]
-    fn status_connected_includes_present_fields() {
-        let v = serde_json::to_value(GitHubStatus {
-            connected: true,
-            username: "octocat".into(),
-            installation_id: Some(42),
-            connected_at: Some("2026-06-19T10:00:00Z".into()),
-        })
-        .unwrap();
-        assert_eq!(v["connected"], true);
-        assert_eq!(v["username"], "octocat");
-        assert_eq!(v["installation_id"], 42);
-        assert_eq!(v["connected_at"], "2026-06-19T10:00:00Z");
-    }
-
-    #[test]
-    fn status_field_order_matches_go_declaration() {
-        // huma emits fields in struct declaration order; serde's serializer
-        // writes them in declaration order too, so the on-the-wire byte
-        // order is identical. (Assert on the serialized string — a
-        // serde_json::Value reorders keys alphabetically.)
-        let s = serde_json::to_string(&GitHubStatus {
-            connected: true,
-            username: "x".into(),
-            installation_id: Some(1),
-            connected_at: Some("2026-06-19T10:00:00Z".into()),
-        })
-        .unwrap();
-        assert_eq!(
-            s,
-            r#"{"connected":true,"username":"x","installation_id":1,"connected_at":"2026-06-19T10:00:00Z"}"#
-        );
     }
 
     #[test]
@@ -984,8 +720,6 @@ mod tests {
         assert_eq!(repos.len(), 1);
         assert_eq!(repos[0].full_name, "codewiresh/codewire");
         assert_eq!(repos[0].description, "");
-        let v = serde_json::to_value(&repos[0]).unwrap();
-        assert!(v.get("description").is_none());
-        assert_eq!(v["language"], "Rust");
+        assert_eq!(repos[0].language, "Rust");
     }
 }

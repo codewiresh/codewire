@@ -1,7 +1,7 @@
 //! Connect-RPC adapter for administrator billing-catalog operations.
 //!
-//! REST and Connect both call the catalog and catalog-admin core operations.
-//! This module owns only protobuf mapping and Connect error rendering.
+//! This module owns protobuf mapping and Connect error rendering for the
+//! catalog and catalog-admin core operations.
 
 use std::borrow::Cow;
 use std::sync::Arc;
@@ -32,7 +32,7 @@ use crate::routes::BillingState;
 
 /// Registers all eleven BillingCatalogService RPCs on their generated Connect
 /// routes. The billing binary mounts this router behind the global-admin auth
-/// layer; REST remains mounted from the same core operations.
+/// layer.
 pub fn router(state: BillingState) -> connectrpc::Router {
     connectrpc::Router::new().add_service(Arc::new(BillingCatalogConnectService { state }))
 }

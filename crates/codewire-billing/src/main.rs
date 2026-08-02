@@ -110,7 +110,7 @@ async fn main() -> anyhow::Result<()> {
         // Connect conformance probe (doc 03 D8) — no-op unless
         // CONNECT_TESTING_SURFACE=1 (dev-stack/CI/kind only).
         .with_connect_testing_surface(auth.clone())
-        .with_routes(codewire_billing::router(state, auth))
+        .with_routes(codewire_billing::router(state))
         .into_router();
 
     codewire_server_core::serve(app, cfg.bind_addr).await

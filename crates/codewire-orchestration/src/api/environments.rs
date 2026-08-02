@@ -11,8 +11,6 @@
 use std::borrow::Cow;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use axum::Json;
-use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use codewire_server_core::auth::AuthUser;
 use codewire_server_core::org::user_org_role;
@@ -20,7 +18,7 @@ use codewire_server_core::org_deletion::{
     OrganizationRuntimeMutationError, run_environment_runtime_mutation,
     run_organization_database_mutation,
 };
-use codewire_server_core::{AppError, AppResult, ValidatedJson};
+use codewire_server_core::{AppError, AppResult};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use sqlx::postgres::PgRow;
@@ -319,18 +317,6 @@ pub struct ListEnvironmentsQuery {
     pub include_destroyed: bool,
 }
 
-/// `GET /api/v1/organizations/{org_id}/environments`.
-pub async fn list_environments(
-    State(state): State<ApiState>,
-    user: AuthUser,
-    Path(org_id): Path<String>,
-    Query(q): Query<ListEnvironmentsQuery>,
-) -> AppResult<Json<Vec<Environment>>> {
-    Ok(Json(
-        list_environments_core(&state, &user, &org_id, q).await?,
-    ))
-}
-
 pub(crate) async fn list_environments_core(
     state: &ApiState,
     user: &AuthUser,
@@ -394,17 +380,6 @@ pub(crate) async fn list_environments_core(
             )
         })?;
     Ok(envs)
-}
-
-/// `GET /api/v1/organizations/{org_id}/environments/{env_id}`.
-pub async fn get_environment(
-    State(state): State<ApiState>,
-    user: AuthUser,
-    Path((org_id, env_id)): Path<(String, String)>,
-) -> AppResult<Json<Environment>> {
-    Ok(Json(
-        get_environment_core(&state, &user, &org_id, &env_id).await?,
-    ))
 }
 
 pub(crate) async fn get_environment_core(
@@ -894,19 +869,6 @@ pub(crate) async fn check_rate_limit(
     Ok(true)
 }
 
-// ── Handlers ────────────────────────────────────────────────────────────
-
-/// `DELETE /api/v1/organizations/{org_id}/environments/{env_id}` —
-/// mirrors `deleteEnvironment` (204, no body).
-pub async fn delete_environment(
-    State(state): State<ApiState>,
-    user: AuthUser,
-    Path((org_id, env_id)): Path<(String, String)>,
-) -> AppResult<StatusCode> {
-    delete_environment_core(&state, &user, &org_id, &env_id).await?;
-    Ok(StatusCode::NO_CONTENT)
-}
-
 pub(crate) async fn delete_environment_core(
     state: &ApiState,
     user: &AuthUser,
@@ -1002,17 +964,6 @@ pub(crate) async fn delete_environment_core(
     .await
 }
 
-/// `POST .../stop` — mirrors `stopEnvironment`.
-pub async fn stop_environment(
-    State(state): State<ApiState>,
-    user: AuthUser,
-    Path((org_id, env_id)): Path<(String, String)>,
-) -> AppResult<Json<StatusResponse>> {
-    Ok(Json(
-        stop_environment_core(&state, &user, &org_id, &env_id).await?,
-    ))
-}
-
 pub(crate) async fn stop_environment_core(
     state: &ApiState,
     user: &AuthUser,
@@ -1076,19 +1027,6 @@ pub(crate) async fn stop_environment_core(
         }
     })
     .await
-}
-
-/// `POST .../start` — mirrors `startEnvironment` (stopped → start;
-/// error/pending → reset + re-create; rate-limited + quota-checked).
-pub async fn start_environment(
-    State(state): State<ApiState>,
-    user: AuthUser,
-    Path((org_id, env_id)): Path<(String, String)>,
-) -> AppResult<Json<StatusResponse>> {
-    let result = start_environment_core(&state, &user, &org_id, &env_id).await?;
-    Ok(Json(StatusResponse {
-        status: result.status,
-    }))
 }
 
 pub(crate) async fn start_environment_core(
@@ -1207,19 +1145,6 @@ pub(crate) async fn start_environment_core(
     .await
 }
 
-/// `POST .../protect` — mirrors `protectEnvironment` (sets protected
-/// and cancels any pending deletion; result bool intentionally unused,
-/// like Go).
-pub async fn protect_environment(
-    State(state): State<ApiState>,
-    user: AuthUser,
-    Path((org_id, env_id)): Path<(String, String)>,
-) -> AppResult<Json<StatusResponse>> {
-    Ok(Json(
-        protect_environment_core(&state, &user, &org_id, &env_id).await?,
-    ))
-}
-
 pub(crate) async fn protect_environment_core(
     state: &ApiState,
     user: &AuthUser,
@@ -1253,17 +1178,6 @@ pub(crate) async fn protect_environment_core(
     .await
 }
 
-/// `POST .../unprotect` — mirrors `unprotectEnvironment`.
-pub async fn unprotect_environment(
-    State(state): State<ApiState>,
-    user: AuthUser,
-    Path((org_id, env_id)): Path<(String, String)>,
-) -> AppResult<Json<StatusResponse>> {
-    Ok(Json(
-        unprotect_environment_core(&state, &user, &org_id, &env_id).await?,
-    ))
-}
-
 pub(crate) async fn unprotect_environment_core(
     state: &ApiState,
     user: &AuthUser,
@@ -1295,17 +1209,6 @@ pub(crate) async fn unprotect_environment_core(
         })
     })
     .await
-}
-
-/// `POST .../cancel-deletion` — mirrors `cancelEnvironmentDeletion`.
-pub async fn cancel_environment_deletion(
-    State(state): State<ApiState>,
-    user: AuthUser,
-    Path((org_id, env_id)): Path<(String, String)>,
-) -> AppResult<Json<StatusResponse>> {
-    Ok(Json(
-        cancel_environment_deletion_core(&state, &user, &org_id, &env_id).await?,
-    ))
 }
 
 pub(crate) async fn cancel_environment_deletion_core(
@@ -1344,19 +1247,6 @@ pub(crate) async fn cancel_environment_deletion_core(
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ExtendTtlBody {
     pub additional_seconds: i32,
-}
-
-/// `POST .../extend-ttl` — mirrors `extendEnvironmentTTL`.
-pub async fn extend_environment_ttl(
-    State(state): State<ApiState>,
-    user: AuthUser,
-    Path((org_id, env_id)): Path<(String, String)>,
-    ValidatedJson(body): ValidatedJson<ExtendTtlBody>,
-) -> AppResult<Json<StatusResponse>> {
-    Ok(Json(
-        extend_environment_ttl_core(&state, &user, &org_id, &env_id, body.additional_seconds)
-            .await?,
-    ))
 }
 
 pub(crate) async fn extend_environment_ttl_core(

@@ -1,8 +1,8 @@
 //! Live ingress proof for WS06 WI-6 FileService.
 //!
 //! Exercises the first client-streaming public RPC with a payload larger than
-//! 8 MiB, then proves list/download framing, byte identity, exec-first and
-//! SFTP-fallback selection, and the still-dual-served REST file renderers.
+//! 8 MiB, then proves list/download framing, byte identity, and exec-first
+//! and SFTP-fallback selection.
 
 use anyhow::Context as _;
 use codewire_proto::codewire::v1::{
@@ -11,27 +11,15 @@ use codewire_proto::codewire::v1::{
 };
 use connectrpc::client::{ClientConfig, HttpClient};
 use connectrpc::{CodecFormat, ErrorCode};
-use reqwest::header::{CONTENT_DISPOSITION, COOKIE};
-use serde::Deserialize;
+use reqwest::header::COOKIE;
 
 const CONNECT_PATH: &str = "/workspace/connect-file-service.bin";
 const JSON_PATH: &str = "/workspace/connect-file-service-json.bin";
-const REST_PATH: &str = "/workspace/rest-file-service.txt";
 const EXEC_PATH: &str = "/workspace/exec-file-service.txt";
 const TRANSFER_SIZE: usize = 8 * 1024 * 1024 + 12_345;
 const JSON_TRANSFER_SIZE: usize = 3 * 64 * 1024 + 777;
 const TRANSFER_CHUNK_SIZE: usize = 64 * 1024;
-const REST_PAYLOAD: &[u8] = b"REST upload through the shared FileService layer\n";
 const EXEC_PAYLOAD: &[u8] = b"exec-only FileService download\n";
-
-#[derive(Debug, Deserialize)]
-struct RestFileEntry {
-    name: String,
-    size: i64,
-    is_dir: bool,
-    mode: String,
-    mod_time: String,
-}
 
 #[derive(Clone, Copy)]
 enum DownloadMetadata {
@@ -94,16 +82,6 @@ async fn main() -> anyhow::Result<()> {
         "Connect SFTP fallback changed file bytes"
     );
 
-    rest_sftp_parity(
-        &base_url,
-        &cookie,
-        &client,
-        &org_id,
-        &sftp_environment_id,
-        &expected,
-    )
-    .await?;
-
     let exec_downloaded = download_connect(
         &client,
         &org_id,
@@ -162,8 +140,6 @@ async fn main() -> anyhow::Result<()> {
         ErrorCode::InvalidArgument,
     )
     .await?;
-    rest_exec_parity(&base_url, &cookie, &org_id, &exec_environment_id).await?;
-
     // ProtoJSON is a first-class Connect codec, not a client-language
     // behavior. Exercise it against the same real SFTP and exec backends.
     let json_config = ClientConfig::new(base_url.parse().context("parse Connect base URL")?)
@@ -255,7 +231,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     println!(
-        "file-service-smoke: binary and ProtoJSON client/server streams, exec primary, SFTP fallback, and REST parity green"
+        "file-service-smoke: binary and ProtoJSON client/server streams, exec primary, and SFTP fallback green"
     );
     Ok(())
 }
@@ -518,131 +494,6 @@ where
         );
     }
     Ok(data)
-}
-
-async fn rest_sftp_parity<T>(
-    base_url: &str,
-    cookie: &str,
-    connect: &FileServiceClient<T>,
-    org_id: &str,
-    environment_id: &str,
-    expected: &[u8],
-) -> anyhow::Result<()>
-where
-    T: connectrpc::client::ClientTransport,
-    T::ResponseBody: Unpin,
-    <T::ResponseBody as connectrpc::http_body::Body>::Error: std::fmt::Display,
-{
-    let http = reqwest::Client::new();
-    let prefix =
-        format!("{base_url}/api/v1/organizations/{org_id}/environments/{environment_id}/files");
-    let entries = http
-        .get(&prefix)
-        .header(COOKIE, cookie)
-        .query(&[("path", "/workspace")])
-        .send()
-        .await
-        .context("REST list files")?
-        .error_for_status()
-        .context("REST list files status")?
-        .json::<Vec<RestFileEntry>>()
-        .await
-        .context("decode REST list files")?;
-    let entry = entries
-        .iter()
-        .find(|entry| entry.name == "connect-file-service.bin")
-        .context("Connect upload absent from REST list")?;
-    anyhow::ensure!(
-        entry.size == expected.len() as i64,
-        "REST list size mismatch"
-    );
-    anyhow::ensure!(!entry.is_dir, "REST list marked file as directory");
-    anyhow::ensure!(!entry.mode.is_empty(), "REST list omitted octal mode");
-    anyhow::ensure!(!entry.mod_time.is_empty(), "REST list omitted mod_time");
-
-    let response = http
-        .get(format!("{prefix}/download"))
-        .header(COOKIE, cookie)
-        .query(&[("path", CONNECT_PATH)])
-        .send()
-        .await
-        .context("REST SFTP download")?
-        .error_for_status()
-        .context("REST SFTP download status")?;
-    anyhow::ensure!(
-        response.headers().contains_key(CONTENT_DISPOSITION),
-        "REST download lost Content-Disposition"
-    );
-    let body = response.bytes().await.context("read REST SFTP download")?;
-    anyhow::ensure!(
-        body.as_ref() == expected,
-        "REST SFTP download changed file bytes"
-    );
-
-    let upload_response = http
-        .post(format!("{prefix}/upload"))
-        .header(COOKIE, cookie)
-        .query(&[("path", REST_PATH)])
-        .body(REST_PAYLOAD)
-        .send()
-        .await
-        .context("REST upload")?
-        .error_for_status()
-        .context("REST upload status")?;
-    let upload_body: serde_json::Value = upload_response
-        .json()
-        .await
-        .context("decode REST upload response")?;
-    anyhow::ensure!(
-        upload_body["path"] == REST_PATH,
-        "REST upload path mismatch"
-    );
-    anyhow::ensure!(
-        upload_body["size"] == REST_PAYLOAD.len() as i64,
-        "REST upload size mismatch"
-    );
-    let downloaded = download_connect(
-        connect,
-        org_id,
-        environment_id,
-        REST_PATH,
-        DownloadMetadata::Sftp,
-        false,
-    )
-    .await?;
-    anyhow::ensure!(
-        downloaded == REST_PAYLOAD,
-        "Connect did not observe REST upload bytes"
-    );
-    Ok(())
-}
-
-async fn rest_exec_parity(
-    base_url: &str,
-    cookie: &str,
-    org_id: &str,
-    environment_id: &str,
-) -> anyhow::Result<()> {
-    let response = reqwest::Client::new()
-        .get(format!(
-            "{base_url}/api/v1/organizations/{org_id}/environments/{environment_id}/files/cat"
-        ))
-        .header(COOKIE, cookie)
-        .query(&[("path", EXEC_PATH)])
-        .send()
-        .await
-        .context("REST exec-cat download")?
-        .error_for_status()
-        .context("REST exec-cat download status")?;
-    let body = response
-        .bytes()
-        .await
-        .context("read REST exec-cat download")?;
-    anyhow::ensure!(
-        body.as_ref() == EXEC_PAYLOAD,
-        "REST exec-cat changed file bytes"
-    );
-    Ok(())
 }
 
 fn required_env(name: &str) -> anyhow::Result<String> {

@@ -1,28 +1,22 @@
-//! Rust-owned organization REST compatibility surface. Organization deletion
-//! is an asynchronous, durable Temporal operation; the REST routes remain only
-//! for the planned Connect per-area dual-serving window.
+//! Shared organization service logic. Organization deletion is an asynchronous,
+//! durable Temporal operation.
 
 use axum::Json;
 use axum::extract::{Path, State};
-use axum::http::StatusCode;
 use codewire_server_core::auth::AuthUser;
 use codewire_server_core::org::{can_admin, user_assignments, user_org_role};
 use codewire_server_core::org_deletion::{
     begin_organization_deletion, run_organization_database_mutation,
 };
-use codewire_server_core::{AppError, AppResult, ValidatedJson};
-use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use codewire_server_core::{AppError, AppResult};
+use serde::Serialize;
 use sqlx::Row;
 
 use super::ApiState;
 use super::environments::format_time;
-use super::secrets::{StatusResponse, forbidden, log_audit};
+use super::secrets::{forbidden, log_audit};
 
-/// Mirrors `api.OrgMember`. `name`/`image` are Go `*string` with no
-/// `omitempty` → serialize as `null` when absent (serde `Option` default).
-/// `assignments` is `omitempty` → dropped when empty.
-#[derive(Debug, Serialize, JsonSchema)]
+#[derive(Debug)]
 pub struct OrgMember {
     pub id: String,
     pub org_id: String,
@@ -31,7 +25,6 @@ pub struct OrgMember {
     pub email: String,
     pub name: Option<String>,
     pub image: Option<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub assignments: Vec<String>,
     pub created_at: String,
 }
@@ -86,19 +79,10 @@ pub(crate) async fn list_members_core(
     Ok(members)
 }
 
-pub async fn list_members(
-    State(state): State<ApiState>,
-    user: AuthUser,
-    Path(org_id): Path<String>,
-) -> AppResult<Json<Vec<OrgMember>>> {
-    Ok(Json(list_members_core(state, user, org_id).await?))
-}
-
 /// Organization lifecycle state exposed while an asynchronous deletion is
 /// retained. Successful deletion has no terminal enum value because the
 /// organization then becomes `404 Not Found`.
-#[derive(Debug, Clone, Copy, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OrganizationDeletionState {
     Active,
     Deleting,
@@ -119,7 +103,7 @@ impl OrganizationDeletionState {
 }
 
 /// Accepted asynchronous organization deletion.
-#[derive(Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct OrganizationDeletionResponse {
     pub operation_id: String,
     pub state: OrganizationDeletionState,
@@ -129,7 +113,7 @@ pub struct OrganizationDeletionResponse {
 /// fields flattened (Go struct embedding) plus the member list. The optional
 /// deletion fields allow mixed-version consumers during the asynchronous
 /// deletion rollout.
-#[derive(Debug, Serialize, JsonSchema)]
+#[derive(Debug)]
 pub struct OrgWithMembers {
     pub id: String,
     pub name: String,
@@ -138,20 +122,11 @@ pub struct OrgWithMembers {
     pub created_at: String,
     pub updated_at: String,
     pub members: Vec<OrgMember>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub deletion_state: Option<OrganizationDeletionState>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub deletion_operation_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub deletion_failure_code: Option<String>,
 }
 
-/// `GET /api/v1/organizations/{org_id}` — mirrors `getOrganization`.
-///
-/// Any member may read; non-members get `404 organization not found`.
-/// The member list here omits `assignments` (the Go scan doesn't select
-/// them and the field is `omitempty`), so the reused `OrgMember` carries
-/// an empty `assignments` vec, which serde drops.
 pub(crate) async fn get_organization_core(
     state: ApiState,
     user: AuthUser,
@@ -234,29 +209,6 @@ pub(crate) async fn get_organization_core(
     })
 }
 
-pub async fn get_organization(
-    State(state): State<ApiState>,
-    user: AuthUser,
-    Path(org_id): Path<String>,
-) -> AppResult<Json<OrgWithMembers>> {
-    Ok(Json(get_organization_core(state, user, org_id).await?))
-}
-
-/// `DELETE /api/v1/organizations/{org_id}` atomically fences the organization
-/// and persists a recoverable Temporal start intent. The reconciler starts the
-/// deterministic workflow; duplicate requests return the same accepted
-/// operation instead of executing a second deletion.
-pub async fn delete_organization(
-    State(state): State<ApiState>,
-    user: AuthUser,
-    Path(org_id): Path<String>,
-) -> AppResult<(StatusCode, Json<OrganizationDeletionResponse>)> {
-    Ok((
-        StatusCode::ACCEPTED,
-        Json(delete_organization_core(state, user, org_id).await?),
-    ))
-}
-
 pub(crate) async fn delete_organization_core(
     state: ApiState,
     user: AuthUser,
@@ -291,23 +243,9 @@ async fn target_member_role(
         .map_err(AppError::from)
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug)]
 pub struct UpdateRoleBody {
     pub role: String,
-}
-
-/// `PUT /organizations/{org_id}/members/{user_id}` — mirrors
-/// `updateMemberRole`. Owner/admin gate, role validation, last-owner +
-/// admin-restriction rules, then `UPDATE` + audit.
-pub async fn update_member_role(
-    State(state): State<ApiState>,
-    user: AuthUser,
-    Path((org_id, user_id)): Path<(String, String)>,
-    ValidatedJson(body): ValidatedJson<UpdateRoleBody>,
-) -> AppResult<Json<StatusResponse>> {
-    Ok(Json(
-        update_member_role_core(state, user, org_id, user_id, body).await?,
-    ))
 }
 
 pub(crate) async fn update_member_role_core(
@@ -316,7 +254,7 @@ pub(crate) async fn update_member_role_core(
     org_id: String,
     user_id: String,
     body: UpdateRoleBody,
-) -> AppResult<StatusResponse> {
+) -> AppResult<()> {
     let caller_role = user_org_role(&state.pool, &user, &org_id)
         .await?
         .ok_or_else(|| AppError::NotFound("organization not found".into()))?;
@@ -383,21 +321,9 @@ pub(crate) async fn update_member_role_core(
             "info",
         )
         .await;
-        Ok(StatusResponse { status: "updated" })
+        Ok(())
     })
     .await
-}
-
-/// `DELETE /organizations/{org_id}/members/{user_id}` — mirrors
-/// `removeMember` (204). Self-removal allowed; otherwise owner/admin, with
-/// the owner-protection + admin-cannot-remove-admin rules.
-pub async fn remove_member(
-    State(state): State<ApiState>,
-    user: AuthUser,
-    Path((org_id, user_id)): Path<(String, String)>,
-) -> AppResult<StatusCode> {
-    remove_member_core(state, user, org_id, user_id).await?;
-    Ok(StatusCode::NO_CONTENT)
 }
 
 pub(crate) async fn remove_member_core(
@@ -453,10 +379,8 @@ pub(crate) async fn remove_member_core(
 
 // ── Invitations (org-scoped CRUD) ────────────────────────────────────────
 
-/// Mirrors `api.OrgInvitation`. `org_name`/`inviter_name` have no
-/// `omitempty` (inviter_name is `*string` → `null`); `accepted_at` is
-/// `omitempty`.
-#[derive(Debug, Serialize, JsonSchema)]
+/// The invitation hand-off stays a permanent browser-facing JSON route.
+#[derive(Debug, Serialize)]
 pub struct OrgInvitation {
     pub id: String,
     pub org_id: String,
@@ -473,11 +397,10 @@ pub struct OrgInvitation {
     pub accepted_at: Option<String>,
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug)]
 pub struct InviteMemberBody {
     pub email: String,
     pub role: String,
-    #[serde(default)]
     pub assignments: Vec<String>,
 }
 
@@ -561,14 +484,6 @@ pub(crate) async fn get_invitation_by_token_core(
 }
 
 /// `GET /organizations/{org_id}/invitations` — mirrors `listInvitations`.
-pub async fn list_invitations(
-    State(state): State<ApiState>,
-    user: AuthUser,
-    Path(org_id): Path<String>,
-) -> AppResult<Json<Vec<OrgInvitation>>> {
-    Ok(Json(list_invitations_core(state, user, org_id).await?))
-}
-
 pub(crate) async fn list_invitations_core(
     state: ApiState,
     user: AuthUser,
@@ -604,19 +519,6 @@ pub(crate) async fn list_invitations_core(
         invitations.push(invitation_row(r)?);
     }
     Ok(invitations)
-}
-
-/// `POST /organizations/{org_id}/invitations` — mirrors `createInvitation` (201).
-pub async fn create_invitation(
-    State(state): State<ApiState>,
-    user: AuthUser,
-    Path(org_id): Path<String>,
-    ValidatedJson(body): ValidatedJson<InviteMemberBody>,
-) -> AppResult<(StatusCode, Json<OrgInvitation>)> {
-    Ok((
-        StatusCode::CREATED,
-        Json(create_invitation_core(state, user, org_id, body).await?),
-    ))
 }
 
 pub(crate) async fn create_invitation_core(
@@ -763,17 +665,6 @@ pub(crate) async fn create_invitation_core(
     .await
 }
 
-/// `DELETE /organizations/{org_id}/invitations/{invitation_id}` — mirrors
-/// `revokeInvitation` (204). Only flips a still-`pending` row.
-pub async fn revoke_invitation(
-    State(state): State<ApiState>,
-    user: AuthUser,
-    Path((org_id, invitation_id)): Path<(String, String)>,
-) -> AppResult<StatusCode> {
-    revoke_invitation_core(state, user, org_id, invitation_id).await?;
-    Ok(StatusCode::NO_CONTENT)
-}
-
 pub(crate) async fn revoke_invitation_core(
     state: ApiState,
     user: AuthUser,
@@ -811,25 +702,10 @@ pub(crate) async fn revoke_invitation_core(
     .await
 }
 
-/// Mirrors `api.AcceptInvitationResult` — note `org_id` serializes as the
-/// camelCase `orgId` (Go's json tag), unlike the snake_case elsewhere.
-#[derive(Debug, Serialize, JsonSchema)]
+#[derive(Debug)]
 pub struct AcceptInvitationResult {
     pub status: String,
-    #[serde(rename = "orgId")]
     pub org_id: String,
-}
-
-/// `POST /invitations/{token}/accept` — mirrors `acceptInvitation`.
-/// Authenticated (main router): the caller joins the org the invitation
-/// targets, in one transaction. Mints membership + assignments and marks
-/// the invitation accepted.
-pub async fn accept_invitation(
-    State(state): State<ApiState>,
-    user: AuthUser,
-    Path(token): Path<String>,
-) -> AppResult<Json<AcceptInvitationResult>> {
-    Ok(Json(accept_invitation_core(state, user, token).await?))
 }
 
 pub(crate) async fn accept_invitation_core(
@@ -973,10 +849,7 @@ pub(crate) async fn accept_invitation_core(
 
 // ── Org list / create (#38) ──────────────────────────────────────────────
 
-/// Mirrors `api.OrgWithRole` (Go embeds `Organization`, so the JSON is flat).
-/// `assignments` is `omitempty`; `trial_ends_at` is `*string` with no
-/// `omitempty` → `null` when absent.
-#[derive(Debug, Serialize, JsonSchema)]
+#[derive(Debug)]
 pub struct OrgWithRole {
     pub id: String,
     pub name: String,
@@ -985,15 +858,13 @@ pub struct OrgWithRole {
     pub created_at: String,
     pub updated_at: String,
     pub role: String,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub assignments: Vec<String>,
     pub billing_plan: String,
     pub billing_status: String,
     pub trial_ends_at: Option<String>,
 }
 
-/// Mirrors `api.Organization` (the bare create response).
-#[derive(Debug, Serialize, JsonSchema)]
+#[derive(Debug)]
 pub struct Organization {
     pub id: String,
     pub name: String,
@@ -1003,19 +874,10 @@ pub struct Organization {
     pub updated_at: String,
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug)]
 pub struct CreateOrgBody {
     pub name: String,
     pub slug: String,
-}
-
-/// `GET /organizations` — mirrors `listOrganizations`. Lists the orgs the
-/// caller is a member of (an org-scoped API key narrows to its org).
-pub async fn list_organizations(
-    State(state): State<ApiState>,
-    user: AuthUser,
-) -> AppResult<Json<Vec<OrgWithRole>>> {
-    Ok(Json(list_organizations_core(state, user).await?))
 }
 
 pub(crate) async fn list_organizations_core(
@@ -1069,19 +931,6 @@ pub(crate) async fn list_organizations_core(
         });
     }
     Ok(result)
-}
-
-/// `POST /organizations` — mirrors `createOrganization` (201). Creates the
-/// org and the caller's owner membership in one transaction.
-pub async fn create_organization(
-    State(state): State<ApiState>,
-    user: AuthUser,
-    ValidatedJson(body): ValidatedJson<CreateOrgBody>,
-) -> AppResult<(StatusCode, Json<Organization>)> {
-    Ok((
-        StatusCode::CREATED,
-        Json(create_organization_core(state, user, body).await?),
-    ))
 }
 
 pub(crate) async fn create_organization_core(
@@ -1162,153 +1011,4 @@ pub(crate) async fn create_organization_core(
         created_at: format_time(now),
         updated_at: format_time(now),
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use codewire_server_core::validation::validate_value;
-
-    #[test]
-    fn valid_role_matches_go() {
-        for r in ["owner", "admin", "member"] {
-            assert!(is_valid_role(r));
-        }
-        assert!(!is_valid_role("superuser"));
-        assert!(!is_valid_role(""));
-    }
-
-    #[test]
-    fn member_shape_matches_go() {
-        // name/image null when absent (no omitempty); assignments dropped
-        // when empty (omitempty).
-        let v = serde_json::to_value(OrgMember {
-            id: "m1".into(),
-            org_id: "o1".into(),
-            user_id: "u1".into(),
-            role: "owner".into(),
-            email: "a@b.c".into(),
-            name: None,
-            image: None,
-            assignments: vec![],
-            created_at: "2026-01-10T00:00:00Z".into(),
-        })
-        .unwrap();
-        let obj = v.as_object().unwrap();
-        assert!(obj.get("name").unwrap().is_null());
-        assert!(obj.get("image").unwrap().is_null());
-        assert!(!obj.contains_key("assignments"));
-
-        let v2 = serde_json::to_value(OrgMember {
-            id: "m2".into(),
-            org_id: "o1".into(),
-            user_id: "u2".into(),
-            role: "member".into(),
-            email: "x@y.z".into(),
-            name: Some("Nm".into()),
-            image: None,
-            assignments: vec!["developer".into(), "viewer".into()],
-            created_at: "2026-01-11T00:00:00Z".into(),
-        })
-        .unwrap();
-        assert_eq!(
-            v2["assignments"],
-            serde_json::json!(["developer", "viewer"])
-        );
-        assert_eq!(v2["name"], "Nm");
-    }
-
-    #[test]
-    fn organization_deletion_wire_shapes_expose_active_and_accepted_states() {
-        let active = serde_json::to_value(OrgWithMembers {
-            id: "org_test".into(),
-            name: "Test".into(),
-            slug: "test".into(),
-            created_by: "user_test".into(),
-            created_at: "2026-07-19T00:00:00Z".into(),
-            updated_at: "2026-07-19T00:00:00Z".into(),
-            members: Vec::new(),
-            deletion_state: Some(OrganizationDeletionState::Active),
-            deletion_operation_id: None,
-            deletion_failure_code: None,
-        })
-        .unwrap();
-        let active = active.as_object().unwrap();
-        assert_eq!(active["deletion_state"], "active");
-        assert!(!active.contains_key("deletion_operation_id"));
-        assert!(!active.contains_key("deletion_failure_code"));
-
-        assert_eq!(
-            serde_json::to_value(OrganizationDeletionResponse {
-                operation_id: "op_test".into(),
-                state: OrganizationDeletionState::Deleting,
-            })
-            .unwrap(),
-            serde_json::json!({"operation_id": "op_test", "state": "deleting"})
-        );
-
-        assert!(matches!(
-            OrganizationDeletionState::from_database("unexpected"),
-            Err(AppError::Internal(_))
-        ));
-    }
-
-    #[test]
-    fn organization_request_schemas_require_go_required_fields() {
-        let create_schema = serde_json::to_value(schemars::schema_for!(CreateOrgBody)).unwrap();
-        assert_eq!(
-            create_schema["required"],
-            serde_json::json!(["name", "slug"])
-        );
-
-        let role_schema = serde_json::to_value(schemars::schema_for!(UpdateRoleBody)).unwrap();
-        assert_eq!(role_schema["required"], serde_json::json!(["role"]));
-
-        let invite_schema = serde_json::to_value(schemars::schema_for!(InviteMemberBody)).unwrap();
-        assert_eq!(
-            invite_schema["required"],
-            serde_json::json!(["email", "role"])
-        );
-    }
-
-    #[test]
-    fn create_org_validation_rejects_missing_required_fields() {
-        let Err(AppError::Validation { errors }) =
-            validate_value::<CreateOrgBody>(serde_json::json!({
-                "name": "Acme"
-            }))
-        else {
-            panic!("expected missing slug to be rejected");
-        };
-
-        assert_eq!(errors.len(), 1);
-        assert_eq!(errors[0].path, "/");
-        assert!(errors[0].message.contains("slug"));
-    }
-
-    #[test]
-    fn update_role_validation_rejects_type_errors() {
-        let Err(AppError::Validation { errors }) =
-            validate_value::<UpdateRoleBody>(serde_json::json!({
-                "role": 7
-            }))
-        else {
-            panic!("expected type-invalid role to be rejected");
-        };
-
-        assert_eq!(errors.len(), 1);
-        assert_eq!(errors[0].path, "/role");
-        assert!(errors[0].message.contains("string"));
-    }
-
-    #[test]
-    fn invite_member_validation_defaults_missing_assignments() {
-        let body = validate_value::<InviteMemberBody>(serde_json::json!({
-            "email": "new@example.com",
-            "role": "member"
-        }))
-        .expect("assignments should remain optional");
-
-        assert!(body.assignments.is_empty());
-    }
 }

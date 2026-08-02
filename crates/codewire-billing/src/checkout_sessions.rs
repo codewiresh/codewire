@@ -1,65 +1,36 @@
-//! Stripe session creation: checkout, billing portal, setup.
+//! Stripe session creation for the BillingService Connect methods.
 //!
-//! - `POST /api/v1/organizations/{org_id}/billing/checkout` — mirrors
-//!   `billing.go::createOrgCheckoutSession` + `billing.CreateOrgCheckoutSession`.
-//! - `POST /api/v1/organizations/{org_id}/billing/portal` — mirrors
-//!   `createPortalSession` + `billing.CreatePortalSession`.
-//! - `POST /api/v1/organizations/{org_id}/billing/setup` — mirrors
-//!   `createBillingSetup` + `billing.CreateSetupCheckoutSession`.
-//!
-//! Gate ordering is now Rust-native:
-//! 1. Auth still runs before body extraction.
-//! 2. Missing or type-invalid body fields → Rust-native 422.
-//! 3. Stripe not configured → 404 "billing is not enabled".
-//! 4. Non-member / unknown org → 404 "organization not found".
-//! 5. Member without owner/admin role or super_admin assignment →
-//!    403 "only owner or admin can manage billing".
-//! 6. Present-but-empty strings return the Go handlers' literal 400 details.
-//! 7. Stripe/plan failures → 500 with the handler-level detail (Go logs
-//!    the cause and returns the generic message; same here).
+//! Authorization and input validation are applied by the Connect adapter
+//! before these shared operations reach Stripe.
 
-use axum::Json;
-use axum::extract::{Path, State};
 use codewire_server_core::auth::AuthUser;
 use codewire_server_core::org::{can_admin, user_assignments, user_org_role};
 use codewire_server_core::org_deletion::{
     OrganizationBillingMutationError, run_organization_billing_mutation,
 };
-use codewire_server_core::{AppError, AppResult, ValidatedJson};
-use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use codewire_server_core::{AppError, AppResult};
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use url::{Origin, Url};
 
 use crate::routes::BillingState;
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug)]
 pub struct CheckoutRequest {
     pub plan: String,
     pub success_url: String,
     pub cancel_url: String,
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug)]
 pub struct PortalRequest {
     pub return_url: String,
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug)]
 pub struct SetupRequest {
     pub success_url: String,
     pub cancel_url: String,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct CheckoutUrlResponse {
-    pub checkout_url: String,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct PortalUrlResponse {
-    pub portal_url: String,
 }
 
 /// Configured frontend origin used to constrain Stripe navigation targets.
@@ -157,17 +128,7 @@ async fn existing_managed_org_subscription(
     .await?)
 }
 
-pub async fn create_checkout(
-    State(state): State<BillingState>,
-    user: AuthUser,
-    Path(org_id): Path<String>,
-    ValidatedJson(body): ValidatedJson<CheckoutRequest>,
-) -> AppResult<Json<CheckoutUrlResponse>> {
-    let checkout_url = create_checkout_session(&state, &user, &org_id, body).await?;
-    Ok(Json(CheckoutUrlResponse { checkout_url }))
-}
-
-/// Shared checkout-session operation used by REST and Connect.
+/// Shared checkout-session operation used by the Connect adapter.
 pub async fn create_checkout_session(
     state: &BillingState,
     user: &AuthUser,
@@ -347,17 +308,7 @@ fn hex_lower(bytes: &[u8]) -> String {
     out
 }
 
-pub async fn create_portal(
-    State(state): State<BillingState>,
-    user: AuthUser,
-    Path(org_id): Path<String>,
-    ValidatedJson(body): ValidatedJson<PortalRequest>,
-) -> AppResult<Json<PortalUrlResponse>> {
-    let portal_url = create_portal_session(&state, &user, &org_id, body).await?;
-    Ok(Json(PortalUrlResponse { portal_url }))
-}
-
-/// Shared portal-session operation used by REST and Connect.
+/// Shared portal-session operation used by the Connect adapter.
 pub async fn create_portal_session(
     state: &BillingState,
     user: &AuthUser,
@@ -404,17 +355,7 @@ pub async fn create_portal_session(
     }
 }
 
-pub async fn create_setup(
-    State(state): State<BillingState>,
-    user: AuthUser,
-    Path(org_id): Path<String>,
-    ValidatedJson(body): ValidatedJson<SetupRequest>,
-) -> AppResult<Json<CheckoutUrlResponse>> {
-    let checkout_url = create_setup_session(&state, &user, &org_id, body).await?;
-    Ok(Json(CheckoutUrlResponse { checkout_url }))
-}
-
-/// Shared setup-session operation used by REST and Connect.
+/// Shared setup-session operation used by the Connect adapter.
 pub async fn create_setup_session(
     state: &BillingState,
     user: &AuthUser,
@@ -484,67 +425,6 @@ pub async fn create_setup_session(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use codewire_server_core::validation::validate_value;
-
-    #[test]
-    fn billing_session_schemas_require_go_body_fields() {
-        let checkout = serde_json::to_value(schemars::schema_for!(CheckoutRequest)).unwrap();
-        assert_eq!(
-            checkout["required"],
-            serde_json::json!(["plan", "success_url", "cancel_url"])
-        );
-
-        let portal = serde_json::to_value(schemars::schema_for!(PortalRequest)).unwrap();
-        assert_eq!(portal["required"], serde_json::json!(["return_url"]));
-
-        let setup = serde_json::to_value(schemars::schema_for!(SetupRequest)).unwrap();
-        assert_eq!(
-            setup["required"],
-            serde_json::json!(["success_url", "cancel_url"])
-        );
-    }
-
-    #[test]
-    fn billing_session_validation_rejects_missing_required_fields() {
-        let err = validate_value::<CheckoutRequest>(serde_json::json!({
-            "plan": "starter",
-            "success_url": "https://example.com/success"
-        }))
-        .expect_err("missing cancel_url should be rejected before handler logic");
-
-        let AppError::Validation { errors } = err else {
-            panic!("expected validation error");
-        };
-        assert_eq!(errors.len(), 1);
-        assert_eq!(errors[0].path, "/");
-        assert!(errors[0].message.contains("cancel_url"));
-    }
-
-    #[test]
-    fn billing_session_validation_rejects_type_errors() {
-        let err = validate_value::<PortalRequest>(serde_json::json!({
-            "return_url": 7
-        }))
-        .expect_err("type-invalid return_url should be rejected before handler logic");
-
-        let AppError::Validation { errors } = err else {
-            panic!("expected validation error");
-        };
-        assert_eq!(errors[0].path, "/return_url");
-    }
-
-    #[test]
-    fn billing_session_validation_preserves_empty_string_handler_checks() {
-        let parsed = validate_value::<SetupRequest>(serde_json::json!({
-            "success_url": "",
-            "cancel_url": ""
-        }))
-        .expect("present empty strings pass schema validation");
-
-        assert_eq!(parsed.success_url, "");
-        assert_eq!(parsed.cancel_url, "");
-    }
-
     #[test]
     fn checkout_idempotency_key_is_stable_bounded_and_body_sensitive() {
         let first = checkout_idempotency_key(

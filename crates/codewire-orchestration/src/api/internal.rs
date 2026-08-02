@@ -1,4 +1,4 @@
-//! Internal sidecar endpoints (#140).
+//! Internal sidecar service logic (#140).
 //!
 //! These are the endpoints the in-pod gateway sidecar (and warm pods)
 //! call to fetch their binding + credentials. They are authenticated by
@@ -6,28 +6,13 @@
 //! cookie — except `gateway/binding`, which is keyed by the requesting
 //! pod's `(pod, ns)` and issues a coordinate-scoped sidecar token.
 //!
-//! Routes (mirroring the Go registration):
-//! - `GET /api/v1/internal/gateway/binding`      — `gatewayBindingHandler`
-//! - `GET /api/v1/internal/credentials/github`   — `handleInternalGitHubCredentials`
-//! - `GET /api/v1/internal/credentials/git`      — `handleInternalGitCredentials`
-//!
-//! Wire-parity notes:
-//! - The binding handler is a RAW chi handler in Go: 400/500 are
-//!   `http.Error` text/plain bodies; 404 is a bare `WriteHeader(404)`
-//!   (no body); the 200 is `json.NewEncoder` JSON with a trailing `\n`.
-//! - The credentials handlers route every response through `respondJSON`
-//!   (`Content-Type: application/json`, trailing `\n`); errors are
-//!   `{"error": msg}`.
+//! Connect-RPC owns the binding and credential wire contracts. The shared
+//! functions below stay transport-neutral so that policy, persistence, and
+//! token issuance remain in one service layer.
 
-use axum::body::Body;
-use axum::extract::{Query, State};
-use axum::http::{HeaderMap, StatusCode, header};
-use axum::response::Response;
 use codewire_server_core::{AppError, AppResult};
 use k8s_openapi::api::core::v1::{Node, Pod};
 use kube::Api;
-use serde::Deserialize;
-use serde_json::{Map, Value, json};
 
 use crate::runtime_transport::{
     RUNTIME_REGION_LABEL, RuntimeTransportBinding, TRANSPORT_ZONE_LABEL, load_enabled_zone,
@@ -37,33 +22,6 @@ use crate::worker::github::{get_github_token_for_user, get_github_username_for_u
 
 use super::ApiState;
 use super::detect::{resolve_forge_token, user_secret_path};
-use super::prepare::{json_response, read_bearer};
-
-/// `http.Error` parity: text/plain with a trailing newline and the
-/// nosniff header chi's `http.Error` sets.
-fn text_error(status: StatusCode, body: &str) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
-        .header("X-Content-Type-Options", "nosniff")
-        .body(Body::from(format!("{body}\n")))
-        .expect("static response")
-}
-
-/// `respondJSONError` parity: `{"error": msg}` JSON via `respondJSON`.
-fn json_error(status: StatusCode, msg: &str) -> Response {
-    json_response(status, &serde_json::json!({ "error": msg }))
-}
-
-// ── GET /api/v1/internal/gateway/binding ───────────────────────────────
-
-#[derive(Debug, Deserialize)]
-pub struct BindingQuery {
-    #[serde(default)]
-    pod: String,
-    #[serde(default)]
-    ns: String,
-}
 
 #[derive(Debug)]
 struct BindingTarget {
@@ -72,9 +30,7 @@ struct BindingTarget {
     workspace_pod_ip: Option<String>,
 }
 
-/// Shared service-layer result for the raw REST handler and
-/// `GatewayBindingService`. Keep this independent of either wire shape so the
-/// temporary dual serve cannot diverge.
+/// Shared service-layer result for `GatewayBindingService`.
 #[derive(Debug, Clone)]
 pub struct GatewayBinding {
     pub environment_id: String,
@@ -84,8 +40,7 @@ pub struct GatewayBinding {
     pub runtime_transport: Option<RuntimeTransportBinding>,
 }
 
-/// Shared service-layer result for the raw credential handlers and
-/// `EnvironmentCredentialService`.
+/// Shared service-layer result for `EnvironmentCredentialService`.
 #[derive(Debug, Clone)]
 pub struct IssuedCredentials {
     pub token: String,
@@ -93,29 +48,8 @@ pub struct IssuedCredentials {
     pub host: String,
 }
 
-/// Mirrors `gatewayBindingHandler`. Keyed by the requesting pod's
-/// `(pod, ns)` — looks up the bound environment and issues a
-/// coordinate-scoped sidecar token for it.
-pub async fn gateway_binding(
-    State(state): State<ApiState>,
-    Query(q): Query<BindingQuery>,
-) -> Response {
-    match issue_gateway_binding_core(&state, &q.pod, &q.ns).await {
-        Ok(binding) => json_response(StatusCode::OK, &gateway_binding_json(binding)),
-        Err(AppError::BadRequest(detail)) => text_error(StatusCode::BAD_REQUEST, &detail),
-        Err(AppError::NotFound(_)) => Response::builder()
-            .status(StatusCode::NOT_FOUND)
-            .body(Body::empty())
-            .expect("static response"),
-        Err(error) => {
-            tracing::error!(pod = %q.pod, namespace = %q.ns, error = %error, "gateway binding failed");
-            text_error(StatusCode::INTERNAL_SERVER_ERROR, "internal error")
-        }
-    }
-}
-
 /// Resolves a gateway pod binding and issues its coordinate-scoped token.
-/// Both the raw REST endpoint and the internal Connect command delegate here.
+/// The internal Connect command delegates here.
 pub async fn issue_gateway_binding_core(
     state: &ApiState,
     pod: &str,
@@ -184,27 +118,6 @@ pub async fn issue_gateway_binding_core(
         app_ports,
         runtime_transport,
     })
-}
-
-fn gateway_binding_json(binding: GatewayBinding) -> Value {
-    let mut body = Map::new();
-    body.insert("environment_id".to_string(), json!(binding.environment_id));
-    body.insert("sidecar_token".to_string(), json!(binding.sidecar_token));
-    if let Some(pod_ip) = binding.workspace_pod_ip {
-        body.insert("workspace_pod_ip".to_string(), json!(pod_ip));
-    }
-    if !binding.app_ports.is_empty() {
-        body.insert("app_ports".to_string(), json!(binding.app_ports));
-    }
-    if let Some(runtime_transport) = binding.runtime_transport {
-        body.insert(
-            "runtime_transport".to_string(),
-            serde_json::to_value(runtime_transport)
-                .expect("runtime transport binding serializes to JSON"),
-        );
-    }
-
-    Value::Object(body)
 }
 
 async fn resolve_binding_target(
@@ -377,64 +290,8 @@ async fn runtime_transport_for_node(
     Ok(Some(zone.binding()))
 }
 
-// ── GET /api/v1/internal/credentials/github ────────────────────────────
-
-/// Mirrors `handleInternalGitHubCredentials`. Returns the GitHub token
-/// for the user who owns the environment identified by the Bearer
-/// `auth_token`.
-pub async fn internal_github_credentials(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-) -> Response {
-    let auth_token = match read_bearer(&headers) {
-        Some(t) => t,
-        None => return json_error(StatusCode::UNAUTHORIZED, "missing bearer token"),
-    };
-
-    let user_id = match environment_owner(&state, &auth_token).await {
-        Some(id) => id,
-        None => {
-            return json_error(StatusCode::UNAUTHORIZED, "invalid or expired auth token");
-        }
-    };
-
-    credentials_response(issue_github_credentials_core(&state, &user_id).await)
-}
-
-// ── GET /api/v1/internal/credentials/git ───────────────────────────────
-
-#[derive(Debug, Deserialize)]
-pub struct GitCredentialsQuery {
-    #[serde(default)]
-    host: String,
-}
-
-/// Mirrors `handleInternalGitCredentials`. Returns a forge token for the
-/// user who owns the environment identified by the Bearer `auth_token`;
-/// the target forge host comes from the `host` query param (default
-/// `github.com`).
-pub async fn internal_git_credentials(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-    Query(q): Query<GitCredentialsQuery>,
-) -> Response {
-    let auth_token = match read_bearer(&headers) {
-        Some(t) => t,
-        None => return json_error(StatusCode::UNAUTHORIZED, "missing bearer token"),
-    };
-
-    let user_id = match environment_owner(&state, &auth_token).await {
-        Some(id) => id,
-        None => {
-            return json_error(StatusCode::UNAUTHORIZED, "invalid or expired auth token");
-        }
-    };
-
-    credentials_response(issue_git_credentials_core(&state, &user_id, &q.host).await)
-}
-
-/// Issues the caller's GitHub credential through the service layer shared by
-/// REST and Connect. The underlying GitHub lookup may refresh stored tokens.
+/// Issues the caller's GitHub credential through the Connect service layer.
+/// The underlying GitHub lookup may refresh stored tokens.
 pub async fn issue_github_credentials_core(
     state: &ApiState,
     user_id: &str,
@@ -450,8 +307,8 @@ pub async fn issue_github_credentials_core(
     })
 }
 
-/// Issues a credential for one forge host through the service layer shared by
-/// REST and Connect. An empty host keeps the raw endpoint's github.com default.
+/// Issues a credential for one forge host through the Connect service layer.
+/// An empty host defaults to github.com.
 pub async fn issue_git_credentials_core(
     state: &ApiState,
     user_id: &str,
@@ -498,41 +355,6 @@ pub async fn issue_git_credentials_core(
     })
 }
 
-fn credentials_response(result: AppResult<IssuedCredentials>) -> Response {
-    match result {
-        Ok(credentials) => json_response(
-            StatusCode::OK,
-            &serde_json::json!({
-                "token": credentials.token,
-                "username": credentials.username,
-                "host": credentials.host,
-            }),
-        ),
-        Err(AppError::NotFound(detail)) => json_error(StatusCode::NOT_FOUND, &detail),
-        Err(error) => {
-            tracing::error!(error = %error, "internal credential issue failed");
-            json_error(StatusCode::INTERNAL_SERVER_ERROR, "internal error")
-        }
-    }
-}
-
-// ── helpers ────────────────────────────────────────────────────────────
-
-/// Look up the `created_by` of the active environment owning `auth_token`.
-/// Mirrors the shared lookup in both credentials handlers.
-async fn environment_owner(state: &ApiState, auth_token: &str) -> Option<String> {
-    let row: Option<(String,)> = sqlx::query_as(
-        r#"SELECT created_by FROM environments
-           WHERE auth_token = $1 AND state NOT IN ('destroyed', 'destroying')"#,
-    )
-    .bind(auth_token)
-    .fetch_optional(&state.pool)
-    .await
-    .ok()
-    .flatten();
-    row.map(|(id,)| id)
-}
-
 /// Mirrors `resolveGitCredentialUsername`: stored username for a host
 /// from `user_git_credentials`.
 async fn resolve_git_credential_username(pool: &sqlx::PgPool, user_id: &str, host: &str) -> String {
@@ -545,110 +367,4 @@ async fn resolve_git_credential_username(pool: &sqlx::PgPool, user_id: &str, hos
     .await
     .unwrap_or(None);
     row.and_then(|(u,)| u).unwrap_or_default()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use axum::body::to_bytes;
-    use axum::http::header::CONTENT_TYPE;
-
-    async fn body_string(resp: Response) -> String {
-        let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
-        String::from_utf8(bytes.to_vec()).unwrap()
-    }
-
-    #[tokio::test]
-    async fn text_error_mirrors_http_error_wire() {
-        // chi's http.Error: text/plain + nosniff + trailing newline.
-        let resp = text_error(StatusCode::BAD_REQUEST, "pod and ns query params required");
-        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-        assert_eq!(
-            resp.headers().get(CONTENT_TYPE).unwrap(),
-            "text/plain; charset=utf-8"
-        );
-        assert_eq!(
-            resp.headers().get("X-Content-Type-Options").unwrap(),
-            "nosniff"
-        );
-        assert_eq!(
-            body_string(resp).await,
-            "pod and ns query params required\n"
-        );
-    }
-
-    #[tokio::test]
-    async fn json_error_mirrors_respond_json_error() {
-        // respondJSONError: application/json {"error":…} + trailing \n.
-        let resp = json_error(StatusCode::UNAUTHORIZED, "missing bearer token");
-        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
-        assert_eq!(
-            resp.headers().get(CONTENT_TYPE).unwrap(),
-            "application/json"
-        );
-        assert_eq!(
-            body_string(resp).await,
-            "{\"error\":\"missing bearer token\"}\n"
-        );
-    }
-
-    #[tokio::test]
-    async fn binding_success_body_matches_go() {
-        // The 200 path: json.NewEncoder of {environment_id, sidecar_token}.
-        let token = issue_token("parity-secret", "env-parity-1", SCOPE_COORDINATE).unwrap();
-        let resp = json_response(
-            StatusCode::OK,
-            &serde_json::json!({
-                "environment_id": "env-parity-1",
-                "sidecar_token": token,
-            }),
-        );
-        assert_eq!(resp.status(), StatusCode::OK);
-        assert_eq!(
-            resp.headers().get(CONTENT_TYPE).unwrap(),
-            "application/json"
-        );
-        let v: serde_json::Value =
-            serde_json::from_str(body_string(resp).await.trim_end()).unwrap();
-        assert_eq!(v["environment_id"], "env-parity-1");
-        assert_eq!(v["sidecar_token"].as_str().unwrap(), token);
-    }
-
-    #[tokio::test]
-    async fn credentials_success_shape_matches_go() {
-        // handleInternal*Credentials 200 shape: {token, username, host}.
-        let resp = json_response(
-            StatusCode::OK,
-            &serde_json::json!({
-                "token": "gho_abc",
-                "username": "octocat",
-                "host": "github.com",
-            }),
-        );
-        let v: serde_json::Value =
-            serde_json::from_str(body_string(resp).await.trim_end()).unwrap();
-        assert_eq!(v["token"], "gho_abc");
-        assert_eq!(v["username"], "octocat");
-        assert_eq!(v["host"], "github.com");
-    }
-
-    #[test]
-    fn read_bearer_extracts_and_rejects() {
-        use axum::http::HeaderValue;
-        // Accept: strips the "Bearer " prefix.
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            header::AUTHORIZATION,
-            HeaderValue::from_static("Bearer tok-123"),
-        );
-        assert_eq!(read_bearer(&headers).as_deref(), Some("tok-123"));
-
-        // Reject: non-bearer scheme.
-        let mut headers = HeaderMap::new();
-        headers.insert(header::AUTHORIZATION, HeaderValue::from_static("Basic xyz"));
-        assert_eq!(read_bearer(&headers), None);
-
-        // Reject: absent header.
-        assert_eq!(read_bearer(&HeaderMap::new()), None);
-    }
 }

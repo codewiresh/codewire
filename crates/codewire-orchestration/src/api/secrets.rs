@@ -1,81 +1,24 @@
-//! `/secrets` (org) + `/user/secrets` (#38).
-//!
-//! Org + user secret-key management. Names + metadata are listed (never
-//! values); values live in the tenant `SecretStore` at `/org-secrets/{org_id}`
-//! or `/users/{user_id}`. Org mutations require owner/admin; user secrets are
-//! scoped to the authenticated user.
-//!
-//! Wire-parity notes:
-//! - huma single-object success bodies carried `$schema` on the Go side only
-//!   (accepted drift). `{ "status": "ok" }` on
-//!   set/delete/rename success; the user-delete is 204.
-//! - The list body is `{ "secrets": [ { key, created_at?, updated_at? } ] }`;
-//!   `created_at`/`updated_at` are `omitempty` (skipped when empty).
-//! - The Go handlers guard `infisical == nil → 503`; the Rust `SecretStore` is
-//!   always present (same accepted drift as the other ports), so that branch
-//!   is unreachable here.
+//! Shared organization and user secret service logic.
 
-use axum::Json;
-use axum::extract::{Path, Query, State};
 use codewire_server_core::auth::AuthUser;
 use codewire_server_core::org::user_org_role;
 use codewire_server_core::org_deletion::{
     OrganizationTenantSecretMutationError, run_organization_tenant_secret_mutation,
 };
-use codewire_server_core::{AppError, AppResult, ValidatedJson};
-use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use codewire_server_core::{AppError, AppResult};
 
 use super::ApiState;
 
-// ── Wire types ───────────────────────────────────────────────────────────
-
-#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[derive(Debug, Clone)]
 pub struct SecretMetadata {
     pub key: String,
-    #[serde(skip_serializing_if = "String::is_empty")]
     pub created_at: String,
-    #[serde(skip_serializing_if = "String::is_empty")]
     pub updated_at: String,
 }
 
-#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[derive(Debug, Clone)]
 pub struct ListSecretsResponse {
     pub secrets: Vec<SecretMetadata>,
-}
-
-#[derive(Debug, Clone, Serialize, JsonSchema)]
-pub struct StatusResponse {
-    pub status: &'static str,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct OrgIdQuery {
-    pub org_id: String,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct SetSecretBody {
-    pub org_id: String,
-    pub key: String,
-    pub value: String,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct RenameSecretBody {
-    pub org_id: String,
-    pub new_key: String,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct SetUserSecretBody {
-    pub key: String,
-    pub value: String,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct RenameUserSecretBody {
-    pub new_key: String,
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────
@@ -105,8 +48,7 @@ pub(super) fn validate_secret_key(key: &str) -> AppResult<()> {
     }
     Ok(())
 }
-
-/// Shared existence-hiding organization gate for REST and Connect.
+/// Shared existence-hiding organization gate for Connect services.
 pub(super) async fn org_role(state: &ApiState, user: &AuthUser, org_id: &str) -> AppResult<String> {
     user_org_role(&state.pool, user, org_id)
         .await?
@@ -190,17 +132,6 @@ pub(super) fn rename_provider_error(error: anyhow::Error) -> OrganizationTenantS
     }
 }
 
-// ── Org secrets handlers ─────────────────────────────────────────────────
-
-/// `GET /api/v1/secrets?org_id=` — mirrors `listSecrets`.
-pub async fn list_secrets(
-    State(state): State<ApiState>,
-    user: AuthUser,
-    Query(q): Query<OrgIdQuery>,
-) -> AppResult<Json<ListSecretsResponse>> {
-    Ok(Json(list_secrets_core(&state, &user, &q.org_id).await?))
-}
-
 pub(crate) async fn list_secrets_core(
     state: &ApiState,
     user: &AuthUser,
@@ -218,16 +149,6 @@ pub(crate) async fn list_secrets_core(
     Ok(ListSecretsResponse {
         secrets: to_metadata(secrets),
     })
-}
-
-/// `PUT /api/v1/secrets` — mirrors `setSecret`.
-pub async fn set_secret(
-    State(state): State<ApiState>,
-    user: AuthUser,
-    ValidatedJson(body): ValidatedJson<SetSecretBody>,
-) -> AppResult<Json<StatusResponse>> {
-    set_secret_core(&state, &user, &body.org_id, &body.key, &body.value).await?;
-    Ok(Json(StatusResponse { status: "ok" }))
 }
 
 pub(crate) async fn set_secret_core(
@@ -269,17 +190,6 @@ pub(crate) async fn set_secret_core(
     Ok(())
 }
 
-/// `DELETE /api/v1/secrets/{key}?org_id=` — mirrors `deleteSecret`.
-pub async fn delete_secret(
-    State(state): State<ApiState>,
-    user: AuthUser,
-    Path(key): Path<String>,
-    Query(q): Query<OrgIdQuery>,
-) -> AppResult<Json<StatusResponse>> {
-    delete_secret_core(&state, &user, &q.org_id, &key).await?;
-    Ok(Json(StatusResponse { status: "ok" }))
-}
-
 pub(crate) async fn delete_secret_core(
     state: &ApiState,
     user: &AuthUser,
@@ -309,17 +219,6 @@ pub(crate) async fn delete_secret_core(
     )
     .await;
     Ok(())
-}
-
-/// `POST /api/v1/secrets/{key}/rename` — mirrors `renameSecret`.
-pub async fn rename_secret(
-    State(state): State<ApiState>,
-    user: AuthUser,
-    Path(key): Path<String>,
-    ValidatedJson(body): ValidatedJson<RenameSecretBody>,
-) -> AppResult<Json<StatusResponse>> {
-    rename_secret_core(&state, &user, &body.org_id, &key, &body.new_key).await?;
-    Ok(Json(StatusResponse { status: "ok" }))
 }
 
 pub(crate) async fn rename_secret_core(
@@ -360,16 +259,6 @@ pub(crate) async fn rename_secret_core(
     Ok(())
 }
 
-// ── User secrets handlers ────────────────────────────────────────────────
-
-/// `GET /api/v1/user/secrets` — mirrors `listUserSecrets`.
-pub async fn list_user_secrets(
-    State(state): State<ApiState>,
-    user: AuthUser,
-) -> AppResult<Json<ListSecretsResponse>> {
-    Ok(Json(list_user_secrets_core(&state, &user).await?))
-}
-
 pub(crate) async fn list_user_secrets_core(
     state: &ApiState,
     user: &AuthUser,
@@ -385,16 +274,6 @@ pub(crate) async fn list_user_secrets_core(
     Ok(ListSecretsResponse {
         secrets: to_metadata(secrets),
     })
-}
-
-/// `PUT /api/v1/user/secrets` — mirrors `setUserSecret`.
-pub async fn set_user_secret(
-    State(state): State<ApiState>,
-    user: AuthUser,
-    ValidatedJson(body): ValidatedJson<SetUserSecretBody>,
-) -> AppResult<Json<StatusResponse>> {
-    set_user_secret_core(&state, &user, &body.key, &body.value).await?;
-    Ok(Json(StatusResponse { status: "ok" }))
 }
 
 pub(crate) async fn set_user_secret_core(
@@ -432,16 +311,6 @@ pub(crate) async fn set_user_secret_core(
     Ok(())
 }
 
-/// `DELETE /api/v1/user/secrets/{key}` — mirrors `deleteUserSecret` (204).
-pub async fn delete_user_secret(
-    State(state): State<ApiState>,
-    user: AuthUser,
-    Path(key): Path<String>,
-) -> AppResult<axum::http::StatusCode> {
-    delete_user_secret_core(&state, &user, &key).await?;
-    Ok(axum::http::StatusCode::NO_CONTENT)
-}
-
 pub(crate) async fn delete_user_secret_core(
     state: &ApiState,
     user: &AuthUser,
@@ -466,17 +335,6 @@ pub(crate) async fn delete_user_secret_core(
     )
     .await;
     Ok(())
-}
-
-/// `POST /api/v1/user/secrets/{key}/rename` — mirrors `renameUserSecret`.
-pub async fn rename_user_secret(
-    State(state): State<ApiState>,
-    user: AuthUser,
-    Path(key): Path<String>,
-    ValidatedJson(body): ValidatedJson<RenameUserSecretBody>,
-) -> AppResult<Json<StatusResponse>> {
-    rename_user_secret_core(&state, &user, &key, &body.new_key).await?;
-    Ok(Json(StatusResponse { status: "ok" }))
 }
 
 pub(crate) async fn rename_user_secret_core(
@@ -507,116 +365,4 @@ pub(crate) async fn rename_user_secret_core(
     )
     .await;
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use codewire_server_core::validation::validate_value;
-
-    #[test]
-    fn secret_paths_match_go() {
-        assert_eq!(org_secret_path("org_1"), "/org-secrets/org_1");
-        assert_eq!(user_secret_path("usr_1"), "/users/usr_1");
-    }
-
-    #[test]
-    fn rename_error_maps_to_go_status() {
-        assert!(matches!(
-            rename_error(anyhow::anyhow!("secret \"x\" not found")),
-            AppError::NotFound(_)
-        ));
-        assert!(matches!(
-            rename_error(anyhow::anyhow!("secret \"y\" already exists")),
-            AppError::Conflict(_)
-        ));
-        assert!(matches!(
-            rename_error(anyhow::anyhow!("connection reset")),
-            AppError::InternalMsg(_)
-        ));
-    }
-
-    #[test]
-    fn manage_role_gate_allows_owner_admin_only() {
-        assert!(require_manage_role("owner").is_ok());
-        assert!(require_manage_role("admin").is_ok());
-        assert!(require_manage_role("member").is_err());
-        assert!(require_manage_role("viewer").is_err());
-    }
-
-    #[test]
-    fn secret_key_contract_blocks_infisical_path_shaping() {
-        for valid in ["A", "DATABASE_URL", "github_token", "KEY123"] {
-            assert!(validate_secret_key(valid).is_ok(), "rejected {valid:?}");
-        }
-        for invalid in [
-            "",
-            "db/password",
-            "stage?prod",
-            "name#fragment",
-            "..",
-            "na-me",
-        ] {
-            assert!(
-                validate_secret_key(invalid).is_err(),
-                "accepted {invalid:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn org_secret_schemas_require_go_required_fields() {
-        let set_schema = serde_json::to_value(schemars::schema_for!(SetSecretBody)).unwrap();
-        assert_eq!(
-            set_schema["required"],
-            serde_json::json!(["org_id", "key", "value"])
-        );
-
-        let rename_schema = serde_json::to_value(schemars::schema_for!(RenameSecretBody)).unwrap();
-        assert_eq!(
-            rename_schema["required"],
-            serde_json::json!(["org_id", "new_key"])
-        );
-    }
-
-    #[test]
-    fn user_secret_schemas_require_go_required_fields() {
-        let set_schema = serde_json::to_value(schemars::schema_for!(SetUserSecretBody)).unwrap();
-        assert_eq!(set_schema["required"], serde_json::json!(["key", "value"]));
-
-        let rename_schema =
-            serde_json::to_value(schemars::schema_for!(RenameUserSecretBody)).unwrap();
-        assert_eq!(rename_schema["required"], serde_json::json!(["new_key"]));
-    }
-
-    #[test]
-    fn set_secret_validation_rejects_missing_required_fields() {
-        let Err(AppError::Validation { errors }) =
-            validate_value::<SetSecretBody>(serde_json::json!({
-                "org_id": "org_1",
-                "key": "DATABASE_URL"
-            }))
-        else {
-            panic!("expected missing value to be rejected");
-        };
-
-        assert_eq!(errors.len(), 1);
-        assert_eq!(errors[0].path, "/");
-        assert!(errors[0].message.contains("value"));
-    }
-
-    #[test]
-    fn rename_user_secret_validation_rejects_type_errors() {
-        let Err(AppError::Validation { errors }) =
-            validate_value::<RenameUserSecretBody>(serde_json::json!({
-                "new_key": 7
-            }))
-        else {
-            panic!("expected type-invalid new_key to be rejected");
-        };
-
-        assert_eq!(errors.len(), 1);
-        assert_eq!(errors[0].path, "/new_key");
-        assert!(errors[0].message.contains("string"));
-    }
 }

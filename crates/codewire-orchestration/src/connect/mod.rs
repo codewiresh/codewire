@@ -26,7 +26,7 @@ pub mod secrets;
 
 /// Shared D12 renderer for sandbox-gated RPCs. ExecService and FileService
 /// both call the same target gate, so state/access/upstream failures must keep
-/// one canonical Connect meaning while the REST renderers retain their wire.
+/// one canonical Connect meaning.
 pub(crate) fn rendered_workspace_error(
     error: &AppError,
     request_id: Option<&str>,

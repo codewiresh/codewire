@@ -5,13 +5,11 @@
 
 use std::collections::BTreeMap;
 
-use axum::Json;
-use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use codewire_server_core::auth::AuthUser;
 use codewire_server_core::org::user_org_role;
 use codewire_server_core::org_deletion::run_organization_database_mutation;
-use codewire_server_core::{AppError, AppResult, ValidatedJson};
+use codewire_server_core::{AppError, AppResult};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use sqlx::PgPool;
@@ -115,7 +113,6 @@ pub struct CreatePresetBody {
 /// project ID; both resolve through the same organization-scoped lookup.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum SecretProjectSelection {
-    Name(String),
     Id(String),
     Clear,
 }
@@ -126,10 +123,6 @@ async fn resolve_secret_project_id(
     selection: &SecretProjectSelection,
 ) -> AppResult<Option<String>> {
     let (sql, value) = match selection {
-        SecretProjectSelection::Name(name) => (
-            "SELECT id FROM secret_projects WHERE org_id = $1 AND name = $2",
-            name,
-        ),
         SecretProjectSelection::Id(id) => (
             "SELECT id FROM secret_projects WHERE org_id = $1 AND id = $2",
             id,
@@ -157,19 +150,6 @@ async fn resolve_secret_project_id(
             )
         })
         .map(Some)
-}
-
-/// Mirrors `createPreset` (201).
-pub async fn create_preset(
-    State(state): State<ApiState>,
-    user: AuthUser,
-    Path(org_id): Path<String>,
-    ValidatedJson(body): ValidatedJson<CreatePresetBody>,
-) -> AppResult<(StatusCode, Json<PresetWire>)> {
-    let secret_project = (!body.secret_project.is_empty())
-        .then(|| SecretProjectSelection::Name(body.secret_project.clone()));
-    let preset = create_preset_core(&state, &user, &org_id, body, secret_project).await?;
-    Ok((StatusCode::CREATED, Json(preset)))
 }
 
 pub(crate) async fn create_preset_core(
@@ -338,15 +318,6 @@ pub(crate) async fn create_preset_core(
 
 // ── Read ────────────────────────────────────────────────────────────────
 
-/// Mirrors `listPresets` (the handler).
-pub async fn list_presets_handler(
-    State(state): State<ApiState>,
-    user: AuthUser,
-    Path(org_id): Path<String>,
-) -> AppResult<Json<Vec<PresetWire>>> {
-    Ok(Json(list_presets_core(&state, &user, &org_id).await?))
-}
-
 pub(crate) async fn list_presets_core(
     state: &ApiState,
     user: &AuthUser,
@@ -362,18 +333,6 @@ pub(crate) async fn list_presets_core(
         )
     })?;
     Ok(presets)
-}
-
-/// Mirrors `getPreset` (the handler — official presets readable
-/// cross-org; foreign non-official 404).
-pub async fn get_preset_handler(
-    State(state): State<ApiState>,
-    user: AuthUser,
-    Path((org_id, preset_id)): Path<(String, String)>,
-) -> AppResult<Json<PresetWire>> {
-    Ok(Json(
-        get_preset_core(&state, &user, &org_id, &preset_id).await?,
-    ))
 }
 
 pub(crate) async fn get_preset_core(
@@ -613,25 +572,6 @@ async fn update_preset_db(
     Ok(())
 }
 
-/// Mirrors `updatePreset` (the handler — PATCH).
-pub async fn update_preset_handler(
-    State(state): State<ApiState>,
-    user: AuthUser,
-    Path((org_id, preset_id)): Path<(String, String)>,
-    ValidatedJson(body): ValidatedJson<UpdatePresetBody>,
-) -> AppResult<Json<PresetWire>> {
-    let secret_project = body.secret_project.as_ref().map(|value| {
-        if value.is_empty() {
-            SecretProjectSelection::Clear
-        } else {
-            SecretProjectSelection::Name(value.clone())
-        }
-    });
-    Ok(Json(
-        update_preset_core(&state, &user, &org_id, &preset_id, body, secret_project).await?,
-    ))
-}
-
 pub(crate) async fn update_preset_core(
     state: &ApiState,
     user: &AuthUser,
@@ -698,17 +638,6 @@ pub(crate) async fn update_preset_core(
 }
 
 // ── Delete ──────────────────────────────────────────────────────────────
-
-/// Mirrors `deletePreset` (204; refuses while active environments use
-/// it; purges destroyed rows to satisfy the FK).
-pub async fn delete_preset_handler(
-    State(state): State<ApiState>,
-    user: AuthUser,
-    Path((org_id, preset_id)): Path<(String, String)>,
-) -> AppResult<StatusCode> {
-    delete_preset_core(&state, &user, &org_id, &preset_id).await?;
-    Ok(StatusCode::NO_CONTENT)
-}
 
 pub(crate) async fn delete_preset_core(
     state: &ApiState,

@@ -1,13 +1,11 @@
-//! Admin read surface (#38), mounted at `/api/v1/admin`. These are
-//! `is_admin`-gated reads, so the
-//! router layers [`require_admin`](codewire_server_core::auth::require_admin)
-//! on top of `require_auth`, mirroring the Go `adminSecurity`.
+//! Admin read models and queries for the Connect AdminService. These are
+//! `is_admin`-gated reads, so the Connect service layers
+//! [`require_admin`](codewire_server_core::auth::require_admin) on top of
+//! `require_auth`.
 //!
 //! `getAdminStats`, `listAdminOrganizations`, `listAuditLogs`,
 //! lifecycle journal, and environment startup timing/summary port here.
 
-use axum::Json;
-use axum::extract::{Query, State};
 use chrono::{Datelike, TimeZone, Utc};
 use codewire_server_core::AppError;
 use codewire_server_core::AppResult;
@@ -45,14 +43,7 @@ where
     }
 }
 
-/// `GET /api/v1/admin/stats` — mirrors `getAdminStats`. Admin-only;
-/// dashboard overview cards consume this live, so it cannot remain on
-/// the Go fallback for Rust-only closeout.
-pub async fn get_admin_stats(State(state): State<ApiState>) -> AppResult<Json<AdminStatsResponse>> {
-    Ok(Json(get_admin_stats_core(&state).await?))
-}
-
-/// Shared global-statistics query used by REST and AdminService.
+/// Shared global-statistics query used by AdminService.
 pub(crate) async fn get_admin_stats_core(state: &ApiState) -> AppResult<AdminStatsResponse> {
     let total_environments: i64 = sqlx::query_scalar(r#"SELECT COUNT(*) FROM environments"#)
         .fetch_one(&state.pool)
@@ -114,15 +105,7 @@ pub struct AdminOrg {
     pub created_at: String,
 }
 
-/// `GET /api/v1/admin/organizations` — mirrors `listAdminOrganizations`.
-/// Lists every organization (admin-only) ordered by name.
-pub async fn list_admin_organizations(
-    State(state): State<ApiState>,
-) -> AppResult<Json<Vec<AdminOrg>>> {
-    Ok(Json(list_admin_organizations_core(&state).await?))
-}
-
-/// Shared global organization query used by REST and AdminService.
+/// Shared global organization query used by AdminService.
 pub(crate) async fn list_admin_organizations_core(state: &ApiState) -> AppResult<Vec<AdminOrg>> {
     let rows = sqlx::query(
         r#"SELECT id, name, slug, created_at
@@ -205,16 +188,7 @@ pub struct AuditLogEntry {
     pub severity: String,
 }
 
-/// `GET /api/v1/admin/audit-logs` — mirrors `listAuditLogs`. Admin-only;
-/// optional `action`/`severity` filters; newest first, paginated.
-pub async fn list_audit_logs(
-    State(state): State<ApiState>,
-    Query(params): Query<ListAuditLogsParams>,
-) -> AppResult<Json<Vec<AuditLogEntry>>> {
-    Ok(Json(list_audit_logs_core(&state, params).await?))
-}
-
-/// Shared audit-log query used by REST and AdminService.
+/// Shared audit-log query used by AdminService.
 pub(crate) async fn list_audit_logs_core(
     state: &ApiState,
     params: ListAuditLogsParams,
@@ -310,21 +284,7 @@ pub struct AdminEnvironmentLifecycleJournalEntry {
     pub created_at: String,
 }
 
-/// `GET /api/v1/admin/environments/{environment_id}/lifecycle-journal` —
-/// mirrors `listAdminEnvironmentLifecycleJournal`. Admin-only; `404` when
-/// the environment does not exist; newest-first, limited.
-pub async fn list_admin_environment_lifecycle_journal(
-    State(state): State<ApiState>,
-    axum::extract::Path(environment_id): axum::extract::Path<String>,
-    Query(params): Query<LifecycleJournalParams>,
-) -> AppResult<Json<Vec<AdminEnvironmentLifecycleJournalEntry>>> {
-    Ok(Json(
-        list_admin_environment_lifecycle_journal_core(&state, &environment_id, params.limit)
-            .await?,
-    ))
-}
-
-/// Shared lifecycle-journal query used by REST and AdminService.
+/// Shared lifecycle-journal query used by AdminService.
 pub(crate) async fn list_admin_environment_lifecycle_journal_core(
     state: &ApiState,
     environment_id: &str,
@@ -438,19 +398,7 @@ fn extract_duration_ms(metadata: &serde_json::Value) -> Option<i64> {
     value.as_f64().map(|n| n as i64)
 }
 
-/// `GET /api/v1/admin/environments/startup-summary` — mirrors
-/// `getAdminEnvironmentStartupSummary`. Admin-only; returns backlog counts
-/// plus recent phase duration percentiles for the startup lifecycle.
-pub async fn get_admin_environment_startup_summary(
-    State(state): State<ApiState>,
-    Query(params): Query<StartupSummaryParams>,
-) -> AppResult<Json<AdminEnvironmentStartupSummary>> {
-    Ok(Json(
-        get_admin_environment_startup_summary_core(&state, params.window_minutes).await?,
-    ))
-}
-
-/// Shared startup-summary query used by REST and AdminService.
+/// Shared startup-summary query used by AdminService.
 pub(crate) async fn get_admin_environment_startup_summary_core(
     state: &ApiState,
     window_minutes: i32,
@@ -588,19 +536,7 @@ pub struct AdminEnvironmentStartupTimings {
     pub timings: Vec<AdminEnvironmentStartupTiming>,
 }
 
-/// `GET /api/v1/admin/environments/{environment_id}/startup-timings` —
-/// mirrors `getAdminEnvironmentStartupTimings`. Admin-only; returns the latest
-/// startup log entry per lifecycle phase in Go's fixed phase order.
-pub async fn get_admin_environment_startup_timings(
-    State(state): State<ApiState>,
-    axum::extract::Path(environment_id): axum::extract::Path<String>,
-) -> AppResult<Json<AdminEnvironmentStartupTimings>> {
-    Ok(Json(
-        get_admin_environment_startup_timings_core(&state, &environment_id).await?,
-    ))
-}
-
-/// Shared startup-timing query used by REST and AdminService.
+/// Shared startup-timing query used by AdminService.
 pub(crate) async fn get_admin_environment_startup_timings_core(
     state: &ApiState,
     environment_id: &str,

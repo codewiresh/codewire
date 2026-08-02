@@ -1,10 +1,8 @@
 //! Connect-RPC adapter for organizations, members, assignments, and
 //! invitations.
 //!
-//! REST and Connect both call the shared functions in
-//! [`crate::api::organizations`] and [`crate::api::assignments`]. This module
-//! owns only protobuf mapping, pagination validation, and Connect error
-//! rendering.
+//! This module maps the shared organization and assignment service logic to
+//! protobuf, validates pagination, and renders Connect errors.
 
 use std::borrow::Cow;
 use std::sync::Arc;

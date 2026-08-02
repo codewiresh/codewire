@@ -31,9 +31,6 @@ const DEFAULT_WORKER_LOOPS: &[&str] = &[
 ];
 const CONNECT_SYNTHETIC_USER_IDS_ENV: &str = "CONNECT_SYNTHETIC_USER_IDS";
 
-// WS13 WI-2 introduces observation only. Future area-specific sunset WIs add
-// their route-template prefixes here after their client-flip prerequisites.
-const DEPRECATED_REST_AREAS: &[codewire_server_core::rest_sunset::DeprecatedArea] = &[];
 const PUBLIC_CONNECT_METHODS: [&str; 1] = ["/codewire.v1.OrganizationService/GetInvitationByToken"];
 const ORCHESTRATION_INTERNAL_CONNECT_PORT_ENV: &str = "ORCHESTRATION_INTERNAL_CONNECT_PORT";
 const DEFAULT_ORCHESTRATION_INTERNAL_CONNECT_PORT: u16 = 8085;
@@ -330,11 +327,7 @@ async fn main() -> anyhow::Result<()> {
         // Connect conformance probe (doc 03 D8) — no-op unless
         // CONNECT_TESTING_SURFACE=1 (dev-stack/CI/kind only).
         .with_connect_testing_surface(auth.clone())
-        .with_routes(codewire_orchestration::api::router(
-            api_state.clone(),
-            auth,
-            codewire_server_core::rest_sunset::RestSunsetConfig::new(DEPRECATED_REST_AREAS),
-        ))
+        .with_routes(codewire_orchestration::api::router(api_state.clone(), auth))
         .into_router()
         .layer(middleware::from_fn_with_state(
             api_state,

@@ -9,12 +9,10 @@
 //! shape. Both responses are a bare JSON array (`Body []string`), which huma
 //! serializes without a `$schema` member.
 
-use axum::Json;
-use axum::extract::{Path, State};
 use codewire_server_core::auth::AuthUser;
 use codewire_server_core::org::{can_admin, user_assignments, user_org_role};
 use codewire_server_core::org_deletion::run_organization_database_mutation;
-use codewire_server_core::{AppError, AppResult, ValidatedJson};
+use codewire_server_core::{AppError, AppResult};
 use schemars::JsonSchema;
 use serde::Deserialize;
 
@@ -48,20 +46,6 @@ async fn require_org_role(state: &ApiState, user: &AuthUser, org_id: &str) -> Ap
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct UpdateMemberAssignmentsBody {
     pub assignments: Vec<String>,
-}
-
-/// `GET /…/members/{member_id}/assignments` — mirrors `getMemberAssignments`.
-///
-/// Any member of the path org may read. The target member is scoped to that
-/// same organization before its assignments are loaded.
-pub async fn get_member_assignments(
-    State(state): State<ApiState>,
-    user: AuthUser,
-    Path((org_id, member_id)): Path<(String, String)>,
-) -> AppResult<Json<Vec<String>>> {
-    Ok(Json(
-        get_member_assignments_core(state, user, org_id, member_id).await?,
-    ))
 }
 
 pub(crate) async fn get_member_assignments_core(
@@ -98,20 +82,6 @@ pub(crate) async fn get_member_assignments_core(
     })?;
 
     Ok(assignments)
-}
-
-/// `PUT /…/members/{member_id}/assignments` — mirrors
-/// `updateMemberAssignments` (owner/admin gate, validate, keep viewer,
-/// transactional replace).
-pub async fn update_member_assignments(
-    State(state): State<ApiState>,
-    user: AuthUser,
-    Path((org_id, member_id)): Path<(String, String)>,
-    ValidatedJson(body): ValidatedJson<UpdateMemberAssignmentsBody>,
-) -> AppResult<Json<Vec<String>>> {
-    Ok(Json(
-        update_member_assignments_core(state, user, org_id, member_id, body).await?,
-    ))
 }
 
 pub(crate) async fn update_member_assignments_core(

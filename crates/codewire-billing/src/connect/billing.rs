@@ -1,7 +1,7 @@
 //! Connect-RPC adapter for the first-party billing surface.
 //!
-//! REST and Connect both call the shared operations in the existing billing
-//! modules. This module owns only protobuf mapping and Connect error rendering.
+//! This module owns protobuf mapping, Connect error rendering, and the public
+//! transport for the shared billing operations.
 
 use std::sync::Arc;
 

@@ -430,11 +430,19 @@ run_edge() {
   local file pattern
   for file in Caddyfile Caddyfile.docker; do
     grep -qF '*.codewire.localhost {' "$file"
-    grep -qF '@billing path_regexp' "$file"
+    grep -qF '@billing path /api/webhooks/stripe' "$file"
+    grep -qF '/codewire.admin.v1.BillingCatalogService/*' "$file"
+    grep -qF '/codewire.console.v1.BillingService/*' "$file"
     for pattern in \
-        /api/webhooks/stripe /api/v1/admin/billing /api/v1/billing/plans \
+        /api/v1/admin/billing /api/v1/billing/plans \
         '/api/v1/organizations/[^/]+/billing' \
         '/api/v1/organizations/[^/]+/environments/usage'; do
+      if grep -qF "$pattern" "$file"; then
+        echo "::error file=${file}::retired billing REST matcher remains: ${pattern}"
+        return 1
+      fi
+    done
+    for pattern in /api/webhooks/stripe; do
       grep -qF "$pattern" "$file"
     done
     grep -qF 'handle /api/* {' "$file"

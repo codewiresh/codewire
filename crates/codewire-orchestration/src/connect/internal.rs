@@ -1,9 +1,8 @@
 //! Connect-RPC adapters for the cluster-local `codewire.internal.v1` surface.
 //!
-//! The raw REST handlers remain during dual serve, but both wires delegate to
-//! the shared functions in [`crate::api::internal`]. The binding service is
-//! deliberately anonymous and validates its pod identity in the handler;
-//! credentials use the environment-token Connect layer.
+//! The binding service is deliberately anonymous and validates its pod
+//! identity in the handler; credentials use the environment-token Connect
+//! layer.
 
 use std::sync::Arc;
 
@@ -27,7 +26,7 @@ use crate::runtime_transport::{
 };
 
 /// Registers the anonymous pod-keyed binding command. The handler itself
-/// resolves `(pod, namespace)` exactly as the temporary REST handler does.
+/// resolves `(pod, namespace)` in the shared service layer.
 pub fn gateway_binding_router(state: ApiState) -> connectrpc::Router {
     connectrpc::Router::new().add_service(Arc::new(GatewayBindingConnectService { state }))
 }

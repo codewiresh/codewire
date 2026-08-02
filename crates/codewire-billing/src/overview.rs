@@ -1,12 +1,9 @@
-//! Org billing overview + environment usage.
-//!
-//! - `GET /api/v1/organizations/{org_id}/billing`.
-//! - `GET /api/v1/organizations/{org_id}/environments/usage`.
+//! Org billing overview + environment usage for the Connect service.
 //!
 //! Both require an authenticated org member and hide organization existence
 //! from non-members with a 404.
 //!
-//! The plan catalog lives in `billing_catalog_*`; these handlers read it
+//! The plan catalog lives in `billing_catalog_*`; these queries read it
 //! directly. Lookups do not filter `archived_at`; only the public listing does.
 //!
 //! Stripe `has_payment_method` is a read-only Customers retrieve
@@ -14,45 +11,37 @@
 //! `STRIPE_SECRET_KEY` configured the service reports
 //! `billing_enabled:false, has_payment_method:false`.
 
-use axum::Json;
-use axum::extract::{Path, State};
 use chrono::{DateTime, Datelike, Duration, NaiveDateTime, TimeZone, Utc};
 use codewire_server_core::AppResult;
 use codewire_server_core::auth::AuthUser;
 use codewire_server_core::org::require_org_member;
-use schemars::JsonSchema;
-use serde::Serialize;
 use sqlx::PgPool;
 
-use crate::plans::go_float;
 use crate::routes::BillingState;
 
-// ── Response shapes (JSON names match responses.go) ────────────────
+// ── Response shapes ─────────────────────────────────────────────────
 
-#[derive(Debug, Serialize, JsonSchema)]
+#[derive(Debug)]
 pub struct BillingLimitUsage {
     pub used: i32,
     pub max: i32,
 }
 
-#[derive(Debug, Serialize, JsonSchema)]
+#[derive(Debug)]
 pub struct BillingLimits {
     pub team_members: BillingLimitUsage,
     pub concurrent_workspaces: i32,
     pub storage_gb: i32,
 }
 
-#[derive(Debug, Serialize, JsonSchema)]
+#[derive(Debug)]
 pub struct UsageSummary {
-    #[serde(serialize_with = "go_float")]
     pub cpu_hours: f64,
-    #[serde(serialize_with = "go_float")]
     pub memory_gb_hours: f64,
-    #[serde(serialize_with = "go_float")]
     pub storage_gb_hours: f64,
 }
 
-#[derive(Debug, Serialize, JsonSchema)]
+#[derive(Debug)]
 pub struct SubscriptionSummary {
     pub resource_type: String,
     pub plan: String,
@@ -61,7 +50,7 @@ pub struct SubscriptionSummary {
     pub monthly_cost_cents: i32,
 }
 
-#[derive(Debug, Serialize, JsonSchema)]
+#[derive(Debug)]
 pub struct BillingOverviewResponse {
     pub billing_enabled: bool,
     pub has_payment_method: bool,
@@ -272,17 +261,7 @@ fn coalesce_plan_display_name(values: &[&str]) -> String {
     "No plan".to_string()
 }
 
-// ── Handlers ────────────────────────────────────────────────────────
-
-pub async fn get_billing_overview(
-    State(state): State<BillingState>,
-    user: AuthUser,
-    Path(org_id): Path<String>,
-) -> AppResult<Json<BillingOverviewResponse>> {
-    Ok(Json(billing_overview(&state, &user, &org_id).await?))
-}
-
-/// Shared billing-overview operation used by REST and Connect.
+/// Shared billing-overview operation used by the Connect adapter.
 pub async fn billing_overview(
     state: &BillingState,
     user: &AuthUser,
@@ -454,30 +433,25 @@ async fn session_usage_sums(
 
 // ── Environment usage ───────────────────────────────────────────────
 
-#[derive(Debug, Serialize, JsonSchema)]
+#[derive(Debug)]
 pub struct EnvironmentUsageMonth {
-    #[serde(serialize_with = "go_float")]
     pub cpu_hours: f64,
-    #[serde(serialize_with = "go_float")]
     pub mem_gb_hours: f64,
-    #[serde(serialize_with = "go_float")]
     pub disk_gb_hours: f64,
     pub cost_cents: i32,
     pub included_cpu_hours: i32,
     pub included_mem_gb_hours: i32,
 }
 
-#[derive(Debug, Serialize, JsonSchema)]
+#[derive(Debug)]
 pub struct EnvironmentUsageHour {
     pub hour: String,
-    #[serde(serialize_with = "go_float")]
     pub cpu_hours: f64,
-    #[serde(serialize_with = "go_float")]
     pub mem_gb_hours: f64,
     pub cost_cents: i32,
 }
 
-#[derive(Debug, Serialize, JsonSchema)]
+#[derive(Debug)]
 pub struct EnvironmentUsageEntry {
     pub id: String,
     pub name: String,
@@ -488,7 +462,7 @@ pub struct EnvironmentUsageEntry {
     pub hourly_cents: i32,
 }
 
-#[derive(Debug, Serialize, JsonSchema)]
+#[derive(Debug)]
 pub struct EnvironmentUsageResponse {
     pub current_month: EnvironmentUsageMonth,
     /// Go appends to nil slices, so empty marshals as null — `None`
@@ -497,15 +471,7 @@ pub struct EnvironmentUsageResponse {
     pub per_environment: Option<Vec<EnvironmentUsageEntry>>,
 }
 
-pub async fn get_environment_usage(
-    State(state): State<BillingState>,
-    user: AuthUser,
-    Path(org_id): Path<String>,
-) -> AppResult<Json<EnvironmentUsageResponse>> {
-    Ok(Json(environment_usage(&state, &user, &org_id).await?))
-}
-
-/// Shared environment-usage operation used by REST and Connect.
+/// Shared environment-usage operation used by the Connect adapter.
 pub async fn environment_usage(
     state: &BillingState,
     user: &AuthUser,
@@ -800,33 +766,6 @@ mod tests {
         assert_eq!(
             coalesce_plan_display_name(&["Custom", "Starter", "x"]),
             "Custom"
-        );
-    }
-
-    #[test]
-    fn nil_slice_semantics_serialize_as_null() {
-        let resp = EnvironmentUsageResponse {
-            current_month: EnvironmentUsageMonth {
-                cpu_hours: 0.0,
-                mem_gb_hours: 0.0,
-                disk_gb_hours: 0.0,
-                cost_cents: 0,
-                included_cpu_hours: 0,
-                included_mem_gb_hours: 0,
-            },
-            hourly_breakdown: None,
-            per_environment: None,
-        };
-        let v = serde_json::to_value(&resp).unwrap();
-        assert!(v["hourly_breakdown"].is_null());
-        assert!(v["per_environment"].is_null());
-        // Integral floats print Go-style.
-        assert_eq!(
-            serde_json::to_string(&v["current_month"])
-                .unwrap()
-                .matches("0.0")
-                .count(),
-            0
         );
     }
 }

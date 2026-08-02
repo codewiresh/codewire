@@ -55,9 +55,9 @@ implementation is not an oracle or specification.
 |---|---|---|
 | `crates/codewire-server-core/tests/connect_{mount,auth,stream}.rs` | shared Connect serving infrastructure | Rust-owned serving, auth, error, and stream matrix |
 | `crates/codewire-orchestration/tests/wire_contract.rs` | codewire-orchestration | Rust-owned real-listener contract |
-| `crates/codewire-billing/tests/wire_contract.rs` | codewire-billing | Rust-owned real-listener contract; Stripe is configured with an inert key |
+| `crates/codewire-billing/tests/wire_contract.rs` | codewire-billing | Rust-owned real-listener Connect contract; both codecs, auth, retained reads, catalog authorization, and retired REST absence |
 | `crates/codewire-coordinator/tests/wire_contract.rs` | codewire-coordinator | Rust-owned real-listener HTTP, WebSocket, Connect, auth, and peer-exchange contract |
-| `crates/codewire-orchestration/src/bin/file-service-smoke.rs` | FileService | Rust-owned generated-client streaming, backend-selection, framing, and REST-parity Kind contract |
+| `crates/codewire-orchestration/src/bin/file-service-smoke.rs` | FileService | Rust-owned generated-client streaming, backend-selection, and framing Kind contract |
 | `tests/contract/derp` | codewire-derp | Keep the real Tailscale Go-client cases as transport interoperability |
 | `crates/codewire-orchestration/src/bin/deploy-shape-smoke.rs` | Connect create and Temporal/Port-DNS dispatch | Rust-owned all-up deploy-shaped proof; historical Go workflow-failure expectations are not product behavior |
 | `libs/gen-go/interop` through `crates/codewire-server-core/tests/go_consumer_interop.rs` | generated Go client against the Rust Connect probe | Retain as the selected unary/error/stream Go-consumer proof, not service completeness |

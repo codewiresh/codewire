@@ -1,8 +1,8 @@
 //! Connect-RPC adapter for environment resources and lifecycle operations.
 //!
-//! REST and Connect both call the shared functions in the environment API
-//! modules. This module owns only protobuf mapping, pagination validation,
-//! polling hints, typed outcomes, and Connect error rendering.
+//! This module maps shared environment service logic to protobuf, validates
+//! pagination, supplies polling hints and typed outcomes, and renders Connect
+//! errors.
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;
@@ -1182,7 +1182,6 @@ fn environment_connect_error(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::prepare::prepare_sse_frame;
     use codewire_server_core::connect_error::{ConnectCode, ConnectError, ConnectErrorDetail};
 
     #[test]
@@ -1332,7 +1331,7 @@ mod tests {
     }
 
     #[test]
-    fn prepare_renderers_preserve_one_recorded_sequence() {
+    fn prepare_connect_stream_preserves_one_recorded_sequence() {
         let repo = "https://example.test/acme/repo";
         let events = [
             PrepareStreamEvent::Progress {
@@ -1372,22 +1371,12 @@ mod tests {
                 repo_config: None,
             })),
         ];
-        let expected_sse = [
-            "event: progress\ndata: {\"message\":\"Checking saved configuration...\",\"phase\":\"repo_config\"}\n\n",
-            "event: progress\ndata: {\"message\":\"Resolving preset...\",\"phase\":\"resolving\"}\n\n",
-            "event: progress\ndata: {\"message\":\"Fetching repository context...\",\"phase\":\"repo_fetch\",\"total\":1}\n\n",
-            "event: repo_fetched\ndata: {\"index\":0,\"message\":\"\",\"ok\":true,\"phase\":\"repo_fetch\",\"repo\":\"https://example.test/acme/repo\"}\n\n",
-            "event: complete\ndata: {\"draft\":{\"repo_url\":\"https://example.test/acme/repo\",\"repos\":[{\"url\":\"https://example.test/acme/repo\"}]}}\n\n",
-        ];
-
         let connect = events
             .iter()
             .cloned()
             .map(|event| proto_prepare_event(event, "org_contract").unwrap())
             .collect::<Vec<_>>();
-        let sse = events.iter().map(prepare_sse_frame).collect::<Vec<_>>();
-        assert_eq!(sse, expected_sse);
-        assert_eq!(connect.len(), sse.len());
+        assert_eq!(connect.len(), events.len());
 
         use proto::watch_environment_create_response::Event;
         assert!(
