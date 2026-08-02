@@ -4,21 +4,36 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-usage: select-verification.sh [changed-files]
+usage: select-verification.sh [--diagnostic-changed-files] [changed-files]
 
 changed-files may be a file containing one path per line, or "-" for stdin.
 Without an argument the script discovers pull-request or main-push changes.
 
 Writes one versioned selection token set to stdout and to $GITHUB_OUTPUT.
+Routine output is limited to selector_version and selection. Use
+--diagnostic-changed-files to append the classified path set to stdout.
 Pull requests run Kind only for a Kind-relevant path with explicit opt-in.
 Set VERIFICATION_REQUEST for product workflow_dispatch to a family token or
 all. The separate Manual diagnostics workflow uses rust-stack or go-tailnet.
 EOF
 }
 
-if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
-  usage
-  exit 0
+selector_version=v2
+diagnostic_changed_files=false
+case "${1:-}" in
+  --help|-h)
+    usage
+    exit 0
+    ;;
+  --diagnostic-changed-files)
+    diagnostic_changed_files=true
+    shift
+    ;;
+esac
+
+if [ $# -gt 1 ]; then
+  usage >&2
+  exit 2
 fi
 
 repo_root="$(git rev-parse --show-toplevel 2>/dev/null || pwd -P)"
@@ -413,8 +428,19 @@ elif [ "$event_selected" = false ]; then
         select_token policy
         recognized=true
         ;;
+      .gitleaks.toml)
+        # Gitea runs the instance source scan independently. Repository CI
+        # needs only its policy contract and security capability, not every
+        # product family, for a scanner-configuration-only change.
+        select_token security
+        recognized=true
+        ;;
       docker-compose.yml)
         select_token database
+        select_token deploy
+        select_token edge_kind
+        select_token web
+        kind_relevant=true
         recognized=true
         ;;
       Cargo.toml|Cargo.lock|rust-toolchain.toml)
@@ -562,6 +588,14 @@ elif [ "$event_selected" = false ]; then
     esac
 
     case "$path" in
+      .supplychain/vendor-artifacts.json)
+        # The external instance-scoped scanner verifies the package registry
+        # signature, tarball, and exact local bytes. Repository CI still runs
+        # the focused JavaScript security policy without fanning a provenance-
+        # only edit out to unrelated product families.
+        select_js_security
+        recognized=true
+        ;;
       packages/codewire-types/package.json)
         # Deletion-only tombstone; no JavaScript package remains here.
         recognized=true
@@ -577,6 +611,15 @@ elif [ "$event_selected" = false ]; then
     esac
 
     case "$path" in
+      apps/dashboard/runtime-inventory.json|apps/dashboard/rollback.json)
+        select_token deploy
+        select_token edge_kind
+        select_token release
+        select_token security
+        select_token web
+        kind_relevant=true
+        recognized=true
+        ;;
       apps/dashboard/*|apps/docs/*)
         select_token web
         recognized=true
@@ -624,6 +667,12 @@ elif [ "$event_selected" = false ]; then
           select_token "rust_pkg_${crate_token}"
           ;;
       esac
+      if [ "$crate" = codewire-dashboard-web ]; then
+        select_token deploy
+        select_token edge_kind
+        select_token web
+        kind_relevant=true
+      fi
       if [ "$path" = "crates/$crate/Cargo.toml" ]; then
         case "$crate" in
           codewire-daemon|codewire-gateway|codewire-gateway-proto|\
@@ -959,6 +1008,27 @@ elif [ "$event_selected" = false ]; then
         select_token security_js
         recognized=true
         ;;
+      scripts/checks/security/audit-runtime-images.sh)
+        select_token security
+        select_token deploy
+        select_token edge_kind
+        select_token release
+        recognized=true
+        ;;
+      scripts/ci/verify/dashboard-image.sh)
+        select_token security
+        select_token deploy
+        select_token edge_kind
+        select_token release
+        select_token web
+        kind_relevant=true
+        recognized=true
+        ;;
+      crates/codewire-orchestration/src/sandbox/mod.rs|\
+      crates/codewire-orchestration/src/sandbox/template.rs)
+        select_token edge_kind
+        recognized=true
+        ;;
     esac
 
     if [ "$recognized" = false ]; then
@@ -997,7 +1067,7 @@ for token in "${!selected[@]}"; do
   printf '%s\n' "$token"
 done | LC_ALL=C sort > "$tokens_tmp"
 
-selection='|valid:v2|'
+selection="|valid:${selector_version}|"
 while IFS= read -r token; do
   [ -n "$token" ] || continue
   selection="${selection}${token}|"
@@ -1005,6 +1075,7 @@ done < "$tokens_tmp"
 selection="${selection}complete|"
 
 emit_outputs() {
+  printf 'selector_version=%s\n' "$selector_version"
   printf 'selection=%s\n' "$selection"
 }
 
@@ -1014,6 +1085,8 @@ else
   emit_outputs
 fi
 
-printf 'changed_files<<EOF\n'
-cat "$tmp"
-printf 'EOF\n'
+if [ "$diagnostic_changed_files" = true ]; then
+  printf 'changed_files<<EOF\n'
+  cat "$tmp"
+  printf 'EOF\n'
+fi

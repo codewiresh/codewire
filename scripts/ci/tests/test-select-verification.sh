@@ -5,6 +5,9 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 SELECTOR="$ROOT/scripts/ci/select/select-verification.sh"
 WORKFLOW="$ROOT/.gitea/workflows/ci.yaml"
 DIAGNOSTICS_WORKFLOW="$ROOT/.gitea/workflows/manual-diagnostics.yaml"
+DESKTOP_WORKFLOW="$ROOT/.gitea/workflows/desktop-package.yaml"
+WORKSPACE_IMAGE_WORKFLOW="$ROOT/.gitea/workflows/workspace-image-verify.yaml"
+CLI_PACKAGE_WORKFLOW="$ROOT/.gitea/workflows/cli-release.yaml"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
@@ -25,6 +28,13 @@ expected_tokens() {
 
 assert_tokens() {
   local name="$1" expected="$2" output="$3" actual want selection
+  if [ "$(wc -l <<<"$output")" -ne 2 ] \
+      || [ "$(sed -n '1p' <<<"$output")" != 'selector_version=v2' ] \
+      || [[ "$(sed -n '2p' <<<"$output")" != selection='|valid:v2|'* ]]; then
+    echo "${name}: routine selector output is not compact and versioned" >&2
+    printf '%s\n' "$output" >&2
+    exit 1
+  fi
   selection="$(selection_value "$output")"
   if [[ "$selection" != '|valid:v2|'* ]] || [[ "$selection" != *'|complete|' ]]; then
     echo "${name}: invalid selection envelope: ${selection:-missing}" >&2
@@ -40,6 +50,60 @@ assert_tokens() {
     printf '%s\n' "$actual" >&2
     exit 1
   fi
+}
+
+workflow_pull_request_paths() {
+  local workflow="$1"
+  awk '
+    $0 == "  pull_request:" { in_pull_request = 1; next }
+    in_pull_request && /^  [[:alnum:]_-]+:/ { exit }
+    in_pull_request && $0 == "    paths:" { in_paths = 1; next }
+    in_paths && /^      - / {
+      value = $0
+      sub(/^      - /, "", value)
+      gsub(/\047/, "", value)
+      print value
+      next
+    }
+    in_paths && NF { exit }
+  ' "$workflow"
+}
+
+assert_workflow_ignores_paths() {
+  local name="$1" workflow="$2"
+  shift 2
+  local changed_path pattern
+  local patterns=()
+  mapfile -t patterns < <(workflow_pull_request_paths "$workflow")
+  if [ "${#patterns[@]}" -eq 0 ]; then
+    echo "${name}: pull-request path filter is missing" >&2
+    exit 1
+  fi
+  for changed_path in "$@"; do
+    for pattern in "${patterns[@]}"; do
+      # shellcheck disable=SC2254 # Workflow entries are intentional globs.
+      case "$changed_path" in
+        $pattern)
+          echo "${name}: ${changed_path} unexpectedly selects ${pattern}" >&2
+          exit 1
+          ;;
+      esac
+    done
+  done
+}
+
+assert_workflow_selects_path() {
+  local name="$1" workflow="$2" changed_path="$3" pattern
+  local patterns=()
+  mapfile -t patterns < <(workflow_pull_request_paths "$workflow")
+  for pattern in "${patterns[@]}"; do
+    # shellcheck disable=SC2254 # Workflow entries are intentional globs.
+    case "$changed_path" in
+      $pattern) return ;;
+    esac
+  done
+  echo "${name}: ${changed_path} is missing from the pull-request path filter" >&2
+  exit 1
 }
 
 run_paths_case() {
@@ -63,12 +127,16 @@ run_paths_case repository_ignores pull_request refs/pull/10/head false "$policy"
   .gitignore .dockerignore
 run_paths_case repository_attributes pull_request refs/pull/1010/head false "$policy" \
   .gitattributes
+run_paths_case gitleaks_policy pull_request refs/pull/10101/head false \
+  'policy security' .gitleaks.toml
 run_paths_case license_texts pull_request refs/pull/1011/head false "$policy" \
   LICENSE LICENSE-MIT LICENSE-APACHE LICENSE-BSD-3-CLAUSE \
   crates/codewire-cli/LICENSE packages/codewire-proto-ts/LICENSE-APACHE \
   proto/LICENSE-APACHE tests/contract/LICENSE
 run_paths_case local_compose pull_request refs/pull/11/head false \
-  'database policy' docker-compose.yml
+  'database deploy edge_kind policy web' docker-compose.yml
+run_paths_case local_compose_kind_opt_in pull_request refs/pull/111/head true \
+  'database deploy edge_kind kind policy web' docker-compose.yml
 run_paths_case ci_self pull_request refs/pull/2/head false \
   'go_consumer_interop go_support policy release runtime_confidential rust_curated_locks' \
   .gitea/workflows/ci.yaml .gitea/workflows/manual-diagnostics.yaml \
@@ -373,12 +441,32 @@ run_paths_case package_contract_tooling pull_request refs/pull/118/head false \
 run_paths_case generic_package pull_request refs/pull/119/head false \
   'policy web' packages/shared/src/index.ts
 run_paths_case dashboard pull_request refs/pull/12/head false \
-  'policy web' apps/dashboard/src/app.tsx
+  'policy web' apps/dashboard/src/app.tsx apps/dashboard/playwright.config.ts
+run_paths_case dashboard_runtime_inventory pull_request refs/pull/121/head false \
+  'deploy edge_kind go_consumer_interop go_support policy release runtime_confidential security web' \
+  apps/dashboard/runtime-inventory.json
+run_paths_case dashboard_rust_route pull_request refs/pull/122/head false \
+  'deploy edge_kind policy rust rust_pkg_codewire_dashboard_web web' \
+  crates/codewire-dashboard-web/src/docs.rs
+run_paths_case dashboard_rust_surface pull_request refs/pull/1221/head false \
+  'deploy edge_kind policy rust rust_pkg_codewire_dashboard_web web' \
+  crates/codewire-dashboard-web/src/routes/environments.rs \
+  crates/codewire-dashboard-web/templates/dashboard.html \
+  crates/codewire-dashboard-web/assets/htmx/htmx-2.0.8.min.js
+run_paths_case dashboard_image_verifier pull_request refs/pull/123/head false \
+  'deploy edge_kind go_consumer_interop go_support policy release runtime_confidential security web' \
+  scripts/ci/verify/dashboard-image.sh
+run_paths_case dashboard_sandbox_image_inputs pull_request refs/pull/1231/head false \
+  'edge_kind policy rust rust_pkg_codewire_orchestration service_integration service_orchestration' \
+  crates/codewire-orchestration/src/sandbox/mod.rs \
+  crates/codewire-orchestration/src/sandbox/template.rs
 run_paths_case javascript_dependency_inputs pull_request refs/pull/120/head false \
   'policy sdk_ts security security_js web' \
   apps/dashboard/package.json \
   packages/auth/package.json \
   libs/sdk-ts/package-lock.json
+run_paths_case vendored_browser_manifest pull_request refs/pull/1201/head false \
+  'policy security security_js' .supplychain/vendor-artifacts.json
 run_paths_case sdk_go pull_request refs/pull/13/head false \
   'go_consumer_interop go_support policy sdk_go' libs/sdk-go/client.go
 run_paths_case go_consumer_interop_harness pull_request refs/pull/131/head false \
@@ -440,6 +528,21 @@ run_paths_case runtime_confidential pull_request refs/pull/1518/head false \
   scripts/runtime/tests/test-resolve-coco-support-lock.sh
 run_paths_case makefile_only pull_request refs/pull/152/head false \
   'policy' Makefile
+run_paths_case buildx_two_file_replay pull_request refs/pull/1520/head false \
+  'deploy edge_kind go_consumer_interop go_support policy release runtime_confidential security' \
+  Makefile scripts/checks/security/audit-runtime-images.sh
+for workflow_case in \
+    "desktop:$DESKTOP_WORKFLOW" \
+    "workspace-image:$WORKSPACE_IMAGE_WORKFLOW" \
+    "cli-package:$CLI_PACKAGE_WORKFLOW"; do
+  assert_workflow_ignores_paths \
+    "buildx_two_file_replay_${workflow_case%%:*}" "${workflow_case#*:}" \
+    Makefile scripts/checks/security/audit-runtime-images.sh
+done
+assert_workflow_selects_path workspace_image_source "$WORKSPACE_IMAGE_WORKFLOW" \
+  images/workspace/Dockerfile
+assert_workflow_selects_path workspace_verifier "$WORKSPACE_IMAGE_WORKFLOW" \
+  scripts/ci/verify/verify-workspace-image.sh
 run_paths_case cli_makefile pull_request refs/pull/1521/head false \
   'policy rust rust_pkg_codewire_cli rust_pkg_codewire_cli_bin' \
   apps/cli/Makefile
@@ -574,6 +677,26 @@ run_paths_case empty pull_request refs/pull/19/head false "$all_product" ''
 dispatch_output="$(env -u GITHUB_OUTPUT GITHUB_EVENT_NAME=workflow_dispatch \
   VERIFICATION_REQUEST=rust-stack "$SELECTOR")"
 assert_tokens dispatch_rust_stack diagnostic_rust_stack "$dispatch_output"
+
+diagnostic_paths="$TMP/diagnostic-output.paths"
+printf '%s\n' Makefile scripts/checks/security/audit-runtime-images.sh \
+  > "$diagnostic_paths"
+diagnostic_output="$(env -u GITHUB_OUTPUT -u GITHUB_EVENT_PATH \
+  GITHUB_EVENT_NAME=pull_request GITHUB_REF=refs/pull/1520/head \
+  KIND_E2E_OPT_IN=false \
+  "$SELECTOR" --diagnostic-changed-files "$diagnostic_paths")"
+if [ "$(sed -n '1p' <<<"$diagnostic_output")" != 'selector_version=v2' ] \
+    || [[ "$(sed -n '2p' <<<"$diagnostic_output")" != selection='|valid:v2|'* ]] \
+    || [ "$(sed -n '3p' <<<"$diagnostic_output")" != 'changed_files<<EOF' ] \
+    || [ "$(sed -n '4p' <<<"$diagnostic_output")" != 'Makefile' ] \
+    || [ "$(sed -n '5p' <<<"$diagnostic_output")" != \
+      'scripts/checks/security/audit-runtime-images.sh' ] \
+    || [ "$(sed -n '6p' <<<"$diagnostic_output")" != 'EOF' ] \
+    || [ "$(wc -l <<<"$diagnostic_output")" -ne 6 ]; then
+  echo 'explicit changed-file diagnostic output contract is malformed' >&2
+  printf '%s\n' "$diagnostic_output" >&2
+  exit 1
+fi
 dispatch_output="$(env -u GITHUB_OUTPUT GITHUB_EVENT_NAME=workflow_dispatch \
   VERIFICATION_REQUEST=rust "$SELECTOR")"
 assert_tokens dispatch_rust \
