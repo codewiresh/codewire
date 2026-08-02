@@ -248,6 +248,50 @@ def main() -> None:
         fixture.commit("local kind only")
         fixture.assert_selected("local-kind-only state", False)
 
+        fixture.reset("local-image-helper")
+        fixture.append(
+            "scripts/ci/images/build-local-image.sh",
+            "\n# local verification fixture\n",
+        )
+        local_image_head = fixture.commit("local image verification helper")
+        fixture.assert_selected("local image helper runtime", False)
+        fixture.assert_selected(
+            "local image helper support",
+            False,
+            mode="support",
+        )
+        fixture.append("docs/local-image-neutral.md", "neutral\n")
+        cumulative_local_head = fixture.commit("neutral follow-up")
+        fixture.assert_selected(
+            "cumulative local image helper range",
+            False,
+            base=fixture.base,
+            head=cumulative_local_head,
+        )
+        fixture.assert_selected(
+            "neutral range after local image helper",
+            False,
+            base=local_image_head,
+            head=cumulative_local_head,
+        )
+
+        fixture.reset("image-publication-helper")
+        fixture.append(
+            "scripts/ci/images/build-push-image.sh",
+            "\n# publication fixture\n",
+        )
+        fixture.commit("image publication helper")
+        publication = fixture.assert_selected("publication helper runtime", True)
+        if "image-publication" not in publication.get("matched_categories", ""):
+            raise AssertionError(
+                f"publication helper category mismatch: {publication}"
+            )
+        fixture.assert_selected(
+            "publication helper support",
+            True,
+            mode="support",
+        )
+
         fixture.reset("support-base")
         fixture.append("images/base/entrypoint.sh", "\n# selector fixture\n")
         fixture.commit("support base")

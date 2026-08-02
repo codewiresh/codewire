@@ -76,6 +76,14 @@ SUPPORT_EXACT_INPUTS = {
     "scripts/ci/setup/fetch-infisical-ci-secret.sh",
 }
 
+# These helpers build disposable, locally loaded verification images. They do
+# not build, tag, copy, sign, bundle, or publish a release artifact. Keep this
+# allowlist exact so new scripts below scripts/ci/images continue to fail
+# closed as publication inputs until they are deliberately classified.
+LOCAL_ONLY_IMAGE_HELPERS = {
+    "scripts/ci/images/build-local-image.sh",
+}
+
 RUNTIME_DOCKERFILES = {
     "deployments/docker/gateway.Dockerfile": ".",
     "deployments/docker/derp.Dockerfile": ".",
@@ -656,7 +664,10 @@ def classify(
             continue
         if path in exact_inputs:
             categories.add("ci-contract")
-        if path.startswith("scripts/ci/images/"):
+        if (
+            path.startswith("scripts/ci/images/")
+            and path not in LOCAL_ONLY_IMAGE_HELPERS
+        ):
             categories.add("image-publication")
         if mode == "runtime":
             if path.startswith("deployments/docker/") and (
