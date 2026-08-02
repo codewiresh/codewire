@@ -35,16 +35,26 @@ Use this heartbeat prompt:
 
 ```text
 Use $codewire-loop. Inspect the active goal, newest user messages, git state,
-Gitea issues/PRs, CI status, and any running Codewire sessions. Continue the
-next unblocked step. Do not stop merely because one turn ended. Report only
-when the goal is complete, genuinely blocked, or a user decision is required.
-If complete, summarize evidence and stop the automation.
+Gitea issues/PRs, relevant CI transitions, and any running Codewire sessions.
+Continue the next unblocked step. Do not stop merely because one turn ended.
+Do not wake solely to re-read an unchanged healthy CI run. Report only when the
+goal is complete, genuinely blocked, or a user decision is required. If
+complete, summarize evidence and stop the automation.
 ```
 
 Default cadence:
 
-- Active implementation or CI babysitting: every 10 minutes.
+- Active implementation with an actionable next step: every 10 minutes.
 - Slow infra, provisioning, or external dependency work: every 30 minutes.
+
+Healthy CI is a passive exact-head attestation, not heartbeat work. Capture the
+workflow, run ID, and head SHA once. If CI is the only remaining gate, hand it
+to a transition-only observer that waits outside the model and wakes the thread
+on failure, stall, or success. Keep the goal active until that terminal result
+is handled; reducing token use must never abandon the gate. When no observer is
+available, retain responsibility with sparse checks near the expected terminal
+horizon. Never use a periodic model automation merely to narrate unchanged CI
+state.
 
 If Codex app automations are unavailable, do not claim scheduling was created.
 Instead, give an explicit fallback using Codewire `cw`, cron, systemd, or a
@@ -60,7 +70,8 @@ At the start of every turn or wakeup:
 3. Inspect repo state before edits:
    - `git status --short --branch`
    - relevant Gitea issue/PR state with command-scoped `tea` flags
-   - CI runs and failing logs when a PR or merge run exists
+   - CI transitions when a failure notification, credible stall, terminal
+     horizon, or merge decision makes them relevant
    - active program-coordinate claims in issues, branches, worktrees, and PRs
 4. Continue the smallest unblocked step through implementation, validation,
    PR, CI, merge, and issue closure.
@@ -113,9 +124,14 @@ independent and does not grant authority for those actions.
 - Use Gitea and `tea` for issues, PRs, merges, CI, and deploy state.
 - Prefer `tea ... --login noel --remote gitea --output yaml` or JSON in the
   Codewire repo; adjust the remote name only after inspecting `git remote -v`.
-- Poll CI with `tea actions runs list`, `tea actions runs view`, and
-  `tea actions runs logs`; inspect logs on failures. For CLI-only fast-lane
-  slices, do not stream logs for healthy in-progress runs.
+- Bind CI once with `tea actions runs list` and `tea actions runs view`,
+  recording the workflow, run ID, and exact head. Prefer a transition-only
+  observer when available. Do not repeatedly print full YAML/JSON or healthy
+  log tails. On failure, credible stall, empty output, or run/job disagreement,
+  inspect only the affected job and cap the returned log tail.
+- Retry a runner-owned failure once on the same SHA without changing source.
+  If it repeats, record an infrastructure finding instead of entering a retry
+  or observation loop.
 - Close issues with evidence when their acceptance criteria are met.
 - Do not add AI attribution to commits, PRs, issues, or docs.
 - Preserve unrelated user changes in dirty worktrees.

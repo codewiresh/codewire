@@ -173,10 +173,21 @@ Method context can add procedure but cannot widen repository authority.
   A required exact-head CI result still controls merge when the repository or
   program says so, and an old-head result never proves a refreshed head.
 - Do not continuously watch a healthy CI run. Capture its run ID and exact
-  head once, poll after a state transition or when it is the only remaining
-  blocker, and inspect logs only on failure, stall, empty output, or
-  run/job disagreement. Continue independently authorized local work while CI
-  runs; a running check grants no authority for unrelated work.
+  head once. When CI is the only remaining gate, hand it to a transition-only
+  observer that waits outside the model and wakes the session on failure,
+  stall, or success. Keep the task active until the terminal result is handled;
+  token efficiency must never abandon a red run. When no observer is available,
+  retain responsibility with sparse checks near the expected terminal horizon.
+  Continue independently authorized local work while CI runs; a running check
+  grants no authority for unrelated work.
+- CI observation output is transition-only: initial run/head binding, changed
+  status or conclusion, stall/recovery, and the terminal summary. Do not dump
+  complete YAML/JSON repeatedly or read healthy log tails. Inspect only the
+  affected job, with a capped tail, on failure, credible stall, empty output,
+  or run/job disagreement.
+- Retry a runner-owned failure once on the same SHA without a source change.
+  If the same failure class repeats, record an infrastructure finding instead
+  of entering a retry loop.
 - Use CI as the primary reproduction environment only for CI-owned failure
   classes such as runner timing, hosted-cache behavior, workflow permissions,
   or hosted credentials. Locally reproducible product, integration, Kind, or
