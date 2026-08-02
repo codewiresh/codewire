@@ -292,6 +292,19 @@ def main() -> None:
             mode="support",
         )
 
+        fixture.reset("selector-implementation")
+        fixture.append(
+            "scripts/ci/select/artifact-impact.py",
+            "\n# selector implementation fixture\n",
+        )
+        fixture.commit("selector implementation only")
+        fixture.assert_selected("selector implementation runtime", False)
+        fixture.assert_selected(
+            "selector implementation support",
+            False,
+            mode="support",
+        )
+
         fixture.reset("support-base")
         fixture.append("images/base/entrypoint.sh", "\n# selector fixture\n")
         fixture.commit("support base")

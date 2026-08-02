@@ -63,7 +63,6 @@ RUNTIME_EXACT_INPUTS = {
     "rust-toolchain.toml",
     "scripts/ci/deploy/dispatch-deploy-dev.sh",
     "scripts/ci/deploy/resolve-deployed-source.sh",
-    "scripts/ci/select/artifact-impact.py",
     "scripts/ci/select/select-deploy-dev.sh",
     "scripts/ci/setup/fetch-infisical-ci-secret.sh",
 }
@@ -71,7 +70,6 @@ SUPPORT_EXACT_INPUTS = {
     ".gitea/workflows/support-images.yaml",
     "Cargo.lock",
     "rust-toolchain.toml",
-    "scripts/ci/select/artifact-impact.py",
     "scripts/ci/select/select-support-images.sh",
     "scripts/ci/setup/fetch-infisical-ci-secret.sh",
 }
