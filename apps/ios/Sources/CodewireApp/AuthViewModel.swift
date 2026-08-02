@@ -13,9 +13,14 @@ final class AuthViewModel: ObservableObject {
     @Published var error: String?
     @Published var isLoading = false
 
-    let baseURL: URL
-    let client: CodewireClient
-    private let tokenStore: TokenStore
+    @Published private(set) var environment: CodewireEndpoint
+    private(set) var baseURL: URL
+    private(set) var client: CodewireClient
+    private var tokenStore: TokenStore
+
+    #if DEBUG
+    private static let environmentPreferenceKey = "codewire.ios.debug.endpoint"
+    #endif
 
     #if canImport(AuthenticationServices) && canImport(UIKit)
     private var authenticationSession: ASWebAuthenticationSession?
@@ -23,16 +28,49 @@ final class AuthViewModel: ObservableObject {
     #endif
 
     init(
-        baseURL: URL? = nil,
+        environment: CodewireEndpoint? = nil,
         tokenStore: TokenStore? = nil
     ) {
-        let resolvedURL = baseURL ?? URL(string:
-            ProcessInfo.processInfo.environment["CODEWIRE_URL"] ?? "https://codewire.sh"
-        )!
-        self.baseURL = resolvedURL
-        self.tokenStore = tokenStore ?? KeychainTokenStore()
-        self.client = CodewireClient(baseURL: resolvedURL)
+        #if DEBUG
+        let selected = environment ?? Self.selectedDebugEnvironment()
+        #else
+        _ = environment
+        let selected = CodewireEndpoint.production
+        #endif
+        self.environment = selected
+        self.baseURL = selected.baseURL
+        self.tokenStore = tokenStore ?? KeychainTokenStore(account: selected.keychainAccount)
+        self.client = CodewireClient(baseURL: selected.baseURL)
     }
+
+    #if DEBUG
+    func selectEnvironment(_ environment: CodewireEndpoint) {
+        guard environment != self.environment, !isLoading else { return }
+
+        Self.saveDebugEnvironment(environment)
+        self.environment = environment
+        baseURL = environment.baseURL
+        client = CodewireClient(baseURL: environment.baseURL)
+        tokenStore = KeychainTokenStore(account: environment.keychainAccount)
+        accessToken = nil
+        isAuthenticated = false
+        error = nil
+        checkExistingToken()
+    }
+
+    private static func selectedDebugEnvironment() -> CodewireEndpoint {
+        guard let rawValue = UserDefaults.standard.string(forKey: environmentPreferenceKey),
+              let environment = CodewireEndpoint(rawValue: rawValue)
+        else {
+            return .development
+        }
+        return environment
+    }
+
+    private static func saveDebugEnvironment(_ environment: CodewireEndpoint) {
+        UserDefaults.standard.set(environment.rawValue, forKey: environmentPreferenceKey)
+    }
+    #endif
 
     func checkExistingToken() {
         do {

@@ -1,5 +1,6 @@
 #if canImport(SwiftUI)
 import SwiftUI
+import CodewireKit
 
 struct AuthView: View {
     @EnvironmentObject var auth: AuthViewModel
@@ -46,6 +47,23 @@ struct AuthView: View {
                     .foregroundStyle(.white)
                     .clipShape(RoundedRectangle(cornerRadius: 12))
                     .disabled(auth.isLoading)
+
+                    #if DEBUG
+                    Picker(
+                        "Test server",
+                        selection: Binding(
+                            get: { auth.environment },
+                            set: { auth.selectEnvironment($0) }
+                        )
+                    ) {
+                        ForEach(CodewireEndpoint.allCases) { environment in
+                            Text(environment.displayName).tag(environment)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .disabled(auth.isLoading)
+                    .accessibilityHint("Debug builds only")
+                    #endif
 
                     if let error = auth.error {
                         Text(error)
