@@ -139,7 +139,6 @@ select_all_transport() {
 select_all_contracts() {
   select_token contracts
   select_token contracts_proto
-  select_token contracts_rest
 }
 
 select_all_product() {
@@ -410,7 +409,7 @@ elif [ "$event_selected" = false ]; then
     esac
 
     case "$path" in
-      .gitattributes|.gitignore|.dockerignore)
+      .gitattributes|.gitignore|.dockerignore|turbo.json)
         select_token policy
         recognized=true
         ;;
@@ -441,7 +440,7 @@ elif [ "$event_selected" = false ]; then
         ;;
       scripts/checks/repo_checks.py)
         select_token contracts
-        select_token contracts_rest
+        select_token contracts_proto
         select_token deploy
         select_token edge_kind
         select_token policy
@@ -461,26 +460,9 @@ elif [ "$event_selected" = false ]; then
         select_token go_consumer_interop
         recognized=true
         ;;
-      openapi.json)
-        select_token contracts
-        select_token contracts_rest
-        select_token sdk_go
-        select_token sdk_ts
-        select_token sdk_python
-        recognized=true
-        ;;
-      crates/codewire-api-contract/*|crates/codewire-api-types/*)
-        select_token contracts
-        select_token contracts_rest
-        recognized=true
-        ;;
       crates/codewire-proto/*)
         select_token contracts
         select_token contracts_proto
-        recognized=true
-        ;;
-      scripts/checks/contracts/rest-surface-baseline.json)
-        # These lightweight ratchet/source guards already run once in Policy.
         recognized=true
         ;;
       scripts/checks/contracts/mesh-final-surface-policy.json)
@@ -494,17 +476,6 @@ elif [ "$event_selected" = false ]; then
         select_token edge_kind
         recognized=true
         ;;
-      libs/api-client-go/*)
-        select_token contracts
-        select_token contracts_rest
-        recognized=true
-        ;;
-      libs/api-client-python/*)
-        select_token contracts
-        select_token contracts_rest
-        select_token sdk_python
-        recognized=true
-        ;;
       libs/gen-go/*)
         select_token contracts
         select_token contracts_proto
@@ -512,10 +483,20 @@ elif [ "$event_selected" = false ]; then
         select_token go_consumer_interop
         recognized=true
         ;;
-      libs/api-client-ts/*|packages/codewire-types/generated/*)
-        select_token contracts
-        select_token contracts_rest
-        select_token sdk_ts
+      scripts/checks/contracts/permanent-raw-surface-policy.json)
+        # The permanent raw-surface policy is checked in Policy; product paths
+        # in the same change continue through their own classifiers.
+        recognized=true
+        ;;
+      openapi.json|crates/codewire-api-contract/*|crates/codewire-api-types/*|\
+      crates/codewire-core/*|libs/api-client-go/*|libs/api-client-python/*|\
+      libs/api-client-ts/*|packages/codewire-types/*)
+        # These paths are deletion-only migration tombstones. A future
+        # recreation is rejected by the permanent raw-surface policy.
+        if [ -e "$repo_root/$path" ]; then
+          echo "::error::retired OpenAPI source path recreated: $path" >&2
+          exit 1
+        fi
         recognized=true
         ;;
       packages/codewire-proto-ts/*)
@@ -558,22 +539,14 @@ elif [ "$event_selected" = false ]; then
     esac
 
     case "$path" in
-      # Shared SDK code-generation tooling feeds all three hand-written SDKs,
-      # but is neither a contract source nor a deployable runtime input.
-      libs/sdk-scripts/*)
-        select_token sdk_go
-        select_token sdk_ts
-        select_token sdk_python
-        recognized=true
-        ;;
-      libs/sdk-go/*|libs/api-client-go/*|\
+      libs/sdk-go/*|\
       libs/sdk-examples/run-claude/go/*)
         select_token sdk_go
         select_token go_support
         select_token go_consumer_interop
         recognized=true
         ;;
-      libs/sdk-ts/*|libs/api-client-ts/*|\
+      libs/sdk-ts/*|\
       libs/sdk-examples/run-claude/typescript/*)
         select_token sdk_ts
         recognized=true
@@ -589,9 +562,12 @@ elif [ "$event_selected" = false ]; then
     esac
 
     case "$path" in
+      packages/codewire-types/package.json)
+        # Deletion-only tombstone; no JavaScript package remains here.
+        recognized=true
+        ;;
       apps/dashboard/package.json|apps/docs/package.json|\
       packages/*/package.json|\
-      libs/api-client-ts/package.json|libs/api-client-ts/bun.lock|\
       libs/sdk-ts/package.json|libs/sdk-ts/package-lock.json|\
       libs/sdk-examples/run-claude/typescript/package.json|\
       libs/sdk-examples/run-claude/typescript/package-lock.json)
@@ -617,13 +593,18 @@ elif [ "$event_selected" = false ]; then
         ;;
       packages/codewire-proto-ts/*)
         ;;
+      packages/codewire-types/*)
+        # Deletion-only tombstone; the earlier OpenAPI case rejects revival.
+        ;;
       packages/*)
         select_token web
         recognized=true
         ;;
     esac
 
-    if [[ "$path" == crates/*/* ]]; then
+    if [[ "$path" == crates/*/* ]] && [[ "$path" != crates/codewire-api-contract/* ]] \
+        && [[ "$path" != crates/codewire-api-types/* ]] \
+        && [[ "$path" != crates/codewire-core/* ]]; then
       crate="${path#crates/}"
       crate="${crate%%/*}"
       crate_token="${crate//-/_}"

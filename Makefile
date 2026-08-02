@@ -1,4 +1,4 @@
-.PHONY: help up up-billing down dev dev-down db-init web dashboard-ssr-dev e2e e2e-kind kind-billing-listen kind-forwards-start kind-forwards-stop kind-forwards-status kind-forwards-cleanup kind-clean-runtime test-ui test-ui-dashboard-ssr test-ui-kind-billing test-billing-smoke-kind seed-test-user seed-e2e-users build clean wasm build-gateway build-dashboard-local build-docs-local build-sandbox-controller build-derp-local build-services-local rollout-local-runtime local-runtime deploy-local deploy-local-static prune-local-legacy-runtime kind-cluster kind-ingress kind-label-local-nodes kind-sandbox-namespace ios ios-test ios-clean proto-tools proto-lint proto-generate proto-drift-check api-client-tools api-client-generate api-client-generate-go api-client-generate-ts api-client-generate-py
+.PHONY: help up up-billing down dev dev-down db-init web dashboard-ssr-dev e2e e2e-kind kind-billing-listen kind-forwards-start kind-forwards-stop kind-forwards-status kind-forwards-cleanup kind-clean-runtime test-ui test-ui-dashboard-ssr test-ui-kind-billing test-billing-smoke-kind seed-test-user seed-e2e-users build clean wasm build-gateway build-dashboard-local build-docs-local build-sandbox-controller build-derp-local build-services-local rollout-local-runtime local-runtime deploy-local deploy-local-static prune-local-legacy-runtime kind-cluster kind-ingress kind-label-local-nodes kind-sandbox-namespace ios ios-test ios-clean proto-tools proto-lint proto-generate proto-drift-check
 .PHONY: cli-build cli-smoke cli-install cli-install-user cli-install-system
 
 # Default target
@@ -205,24 +205,6 @@ proto-drift-check: proto-generate
 	@untracked="$$(git ls-files --others --exclude-standard -- crates/codewire-proto/codewire_descriptor.bin libs/gen-go libs/gen-python packages/codewire-proto-ts/src/gen)"; \
 	git diff --exit-code crates/codewire-proto/codewire_descriptor.bin libs/gen-go libs/gen-python packages/codewire-proto-ts/src/gen && [ -z "$$untracked" ] || \
 	(echo "ERROR: generated proto code is stale; run 'make proto-generate' and commit"; [ -z "$$untracked" ] || printf '%s\n' "$$untracked"; exit 1)
-
-# Full generated API clients (libs/api-client-*) from the canonical
-# openapi.json. Pinned generator versions; regenerate after API changes
-# (after `bun run types:generate` refreshes openapi.json).
-api-client-tools:
-	go install github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen@v2.6.0
-	python3 -m pip install --quiet 'openapi-python-client==0.*'
-
-api-client-generate: api-client-generate-go api-client-generate-ts api-client-generate-py
-
-api-client-generate-go:
-	cd libs/api-client-go && oapi-codegen -config oapi-codegen.yaml ../../openapi.json
-
-api-client-generate-ts:
-	cd libs/api-client-ts && ../../node_modules/.bin/openapi-typescript ../../openapi.json -o src/schema.gen.ts
-
-api-client-generate-py:
-	cd libs/api-client-python && openapi-python-client generate --path ../../openapi.json --config config.yaml --output-path . --overwrite --meta pdm
 
 # Backward-compatible alias
 seed-test-user: seed-e2e-users

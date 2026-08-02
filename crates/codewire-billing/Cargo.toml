@@ -11,10 +11,6 @@ name = "codewire-billing"
 path = "src/main.rs"
 
 [[bin]]
-name = "billing-openapi-preview"
-path = "src/bin/openapi-preview.rs"
-
-[[bin]]
 name = "billing-runtime-smoke"
 path = "src/bin/runtime-smoke.rs"
 
@@ -23,7 +19,6 @@ name = "codewire_billing"
 path = "src/lib.rs"
 
 [dependencies]
-codewire-api-contract = { workspace = true }
 codewire-proto = { workspace = true }
 codewire-server-core = { workspace = true }
 

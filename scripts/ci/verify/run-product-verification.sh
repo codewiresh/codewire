@@ -20,7 +20,6 @@ install_bun_dependencies() {
 }
 
 GO_MODULE_DIRS=(
-  libs/api-client-go
   libs/gen-go
   libs/sdk-examples/run-claude/go
   libs/sdk-go
@@ -28,7 +27,6 @@ GO_MODULE_DIRS=(
   tests/contract
 )
 GO_PACKAGE_PATTERNS=(
-  ./libs/api-client-go/...
   ./libs/gen-go/...
   ./libs/sdk-examples/run-claude/go/...
   ./libs/sdk-go/...
@@ -129,7 +127,7 @@ run_policy() {
   scripts/ci/tests/test-sdk-local-cli-contract.sh
   scripts/ci/tests/test-integration-postgres.sh
   python3 scripts/checks/repo_checks.py license-map
-  python3 scripts/checks/repo_checks.py rest-surface-freeze
+  python3 scripts/checks/repo_checks.py permanent-raw-surface --self-test
   python3 scripts/checks/repo_checks.py rust-validation-source
   python3 scripts/checks/repo_checks.py retired-reference-source
   python3 scripts/checks/source/check-native-desktop-ui.py
@@ -217,33 +215,14 @@ print(f"generated Python message imports: {len(modules)}; Connect stubs compiled
 PY
 }
 
-run_contracts_rest() {
-  (cd libs/api-client-go && GOWORK=off go build ./... && GOWORK=off go vet ./...)
-  bun run openapi:check-source
-  bun run openapi:check-rust-source
-  bun run types:generate:ts
-  git diff --exit-code \
-    packages/codewire-types/generated/api.d.ts \
-    libs/api-client-ts/src/schema.gen.ts
-}
-
 run_contracts() {
-  local run_proto=false run_rest=false
-  selected contracts_proto && run_proto=true
-  selected contracts_rest && run_rest=true
-
-  if [ "$run_proto" = false ] && [ "$run_rest" = false ]; then
-    echo "::error::Contracts selected without contracts_proto or contracts_rest"
+  if ! selected contracts_proto; then
+    echo "::error::Contracts selected without contracts_proto"
     exit 1
   fi
 
   install_bun_dependencies
-  if [ "$run_proto" = true ]; then
-    run_contracts_proto
-  fi
-  if [ "$run_rest" = true ]; then
-    run_contracts_rest
-  fi
+  run_contracts_proto
 }
 
 run_go_support() {

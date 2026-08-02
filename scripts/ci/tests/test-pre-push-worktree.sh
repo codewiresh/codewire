@@ -163,7 +163,7 @@ assert_contains normal "$normal_output" '  docs/normal.md'
 assert_contains normal "$normal_output" \
   'preflight selection: |valid:v2|policy|complete|'
 assert_contains normal_tools "$(cat "$normal_log")" \
-  'repo_checks rest-surface-freeze'
+  'repo_checks permanent-raw-surface --self-test'
 assert_contains normal_tools "$(cat "$normal_log")" \
   'repo_checks retired-reference-source'
 assert_contains normal_tools "$(cat "$normal_log")" 'native_desktop_ui'
@@ -348,7 +348,7 @@ assert_not_contains confidential_tooling_tools \
 sdk_tooling_paths="$TMP/sdk-tooling.paths"
 printf '%s\n' \
   Makefile \
-  libs/sdk-scripts/filter-openapi.py \
+  libs/sdk-go/client.go \
   docs/plans/connect-rpc/13-rest-sunset-and-openapi-removal.md > "$sdk_tooling_paths"
 sdk_tooling_log="$TMP/sdk-tooling-tools.log"
 sdk_tooling_output="$({
@@ -357,10 +357,8 @@ sdk_tooling_output="$({
     PREFLIGHT_CHANGED_FILES="$sdk_tooling_paths" "$repo/.githooks/pre-push"
 } 2>&1)"
 assert_contains sdk_tooling "$sdk_tooling_output" \
-  'preflight selection: |valid:v2|go_consumer_interop|go_support|policy|sdk_go|sdk_python|sdk_ts|complete|'
+  'preflight selection: |valid:v2|go_consumer_interop|go_support|policy|sdk_go|complete|'
 assert_contains sdk_tooling_tools "$(cat "$sdk_tooling_log")" 'product sdk-go '
-assert_contains sdk_tooling_tools "$(cat "$sdk_tooling_log")" 'product sdk-ts '
-assert_contains sdk_tooling_tools "$(cat "$sdk_tooling_log")" 'product sdk-python '
 assert_not_contains sdk_tooling_tools "$(cat "$sdk_tooling_log")" 'integration '
 assert_not_contains sdk_tooling_tools "$(cat "$sdk_tooling_log")" 'kind'
 

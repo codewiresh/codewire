@@ -27,18 +27,6 @@
     "rust:build": "cargo build",
     "rust:test": "cargo test",
     "rust:check": "cargo check",
-    "types:generate": "bun run types:generate:ts",
-    "types:generate:ts": "openapi-typescript openapi.json --default-non-nullable false -o packages/codewire-types/generated/api.d.ts && openapi-typescript openapi.json --default-non-nullable false -o libs/api-client-ts/src/schema.gen.ts",
-    "openapi:check-source": "python3 scripts/checks/repo_checks.py openapi-check-source",
-    "openapi:preview:check": "python3 scripts/checks/repo_checks.py openapi-preview-check",
-    "openapi:preview:export": "python3 scripts/checks/repo_checks.py openapi-preview-export",
-    "openapi:preview:export:3.0": "python3 scripts/checks/repo_checks.py openapi-preview-export --openapi 3.0.3",
-    "openapi:preview:types:check": "python3 scripts/checks/repo_checks.py openapi-preview-types-check",
-    "openapi:export:rust": "python3 scripts/checks/repo_checks.py openapi-preview-export --openapi 3.0.3 --output openapi.json",
-    "openapi:refresh-from-rust": "bun run openapi:export:rust && bun run types:generate:ts",
-    "openapi:check-rust-source": "python3 scripts/checks/repo_checks.py openapi-check-rust-source",
-    "rest:freeze:check": "python3 scripts/checks/repo_checks.py rest-surface-freeze",
-    "rest:freeze:update": "python3 scripts/checks/repo_checks.py rest-surface-freeze --update",
     "validation:check-source": "python3 scripts/checks/repo_checks.py rust-validation-source",
     "retired:check-source": "python3 scripts/checks/repo_checks.py retired-reference-source",
     "go:check-source": "python3 scripts/checks/repo_checks.py go-source-classification",
@@ -57,7 +45,6 @@
   },
   "devDependencies": {
     "@bufbuild/protoc-gen-es": "2.12.1",
-    "openapi-typescript": "7.13.0",
     "turbo": "2.9.16",
     "typescript": "6.0.3"
   }

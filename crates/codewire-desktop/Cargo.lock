@@ -1447,23 +1447,10 @@ dependencies = [
 name = "codewire-platform-native"
 version = "0.1.0"
 dependencies = [
- "async-trait",
- "bytes",
- "chrono",
  "codewire-types",
  "dirs 5.0.1",
- "futures",
- "keyring",
- "open",
- "reqwest",
  "russh",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tiny_http",
  "tokio",
- "tracing",
- "uuid",
 ]
 
 [[package]]

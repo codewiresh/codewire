@@ -26,7 +26,6 @@ for path in "${retired_paths[@]}"; do
 done
 
 expected_modules="$(cat <<'EOF'
-libs/api-client-go/go.mod
 libs/gen-go/go.mod
 libs/sdk-examples/run-claude/go/go.mod
 libs/sdk-go/go.mod

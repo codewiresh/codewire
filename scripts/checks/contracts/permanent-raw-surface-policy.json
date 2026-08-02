@@ -1,0 +1,71 @@
+{
+  "$comment": "Permanent Connect-RPC raw HTTP policy. Generated Connect owns every control-plane procedure; this exact list is limited to identity/OIDC, third-party webhooks/OAuth redirects, browser terminal/SSH transports, and probes.",
+  "schema_version": 1,
+  "allowed_raw_routes": [
+    "/.well-known/jwks.json",
+    "/.well-known/oauth-authorization-server",
+    "/.well-known/openid-configuration",
+    "/api/auth/forget-password",
+    "/api/auth/get-session",
+    "/api/auth/reset-password",
+    "/api/auth/send-verification-email",
+    "/api/auth/sign-in",
+    "/api/auth/sign-out",
+    "/api/auth/sign-up",
+    "/api/auth/two-factor/disable",
+    "/api/auth/two-factor/enable",
+    "/api/auth/two-factor/validate",
+    "/api/auth/two-factor/verify",
+    "/api/auth/verify-email",
+    "/api/oauth/authorize",
+    "/api/oauth/device_authorization",
+    "/api/oauth/device_verification",
+    "/api/oauth/end_session",
+    "/api/oauth/introspect",
+    "/api/oauth/revoke",
+    "/api/oauth/token",
+    "/api/oauth/userinfo",
+    "/api/oidc/callback",
+    "/api/v1/github/oauth/authorize",
+    "/api/v1/github/oauth/callback",
+    "/api/v1/organizations/{org_id}/environments/{env_id}/ssh-proxy",
+    "/api/v1/organizations/{org_id}/environments/{env_id}/ssh-proxy/check",
+    "/api/v1/organizations/{org_id}/environments/{env_id}/terminal",
+    "/api/webhooks/stripe",
+    "/healthz",
+    "/readyz"
+  ],
+  "required_server_fragments": {
+    "crates/codewire-orchestration/src/main.rs": [
+      "AppBuilder::new(\"codewire-orchestration\")",
+      ".with_health_and_db(pool.clone())",
+      ".with_routes(codewire_orchestration::api::router(api_state.clone(), auth))"
+    ],
+    "crates/codewire-billing/src/main.rs": [
+      "AppBuilder::new(\"codewire-billing\")",
+      ".with_health_and_db(pool.clone())",
+      ".with_routes(codewire_billing::router(state))"
+    ],
+    "crates/codewire-idp/src/main.rs": [
+      "AppBuilder::new(\"codewire-idp\")",
+      ".with_health_and_db(pool)",
+      ".merge(oidc)"
+    ],
+    "crates/codewire-coordinator/src/main.rs": [
+      "AppBuilder::new(\"codewire-coordinator\")",
+      ".with_health_and_db(pool)",
+      ".with_routes(router(state, auth))"
+    ],
+    "crates/codewire-mesh/src/server.rs": [
+      "AppBuilder::new(\"mesh\")",
+      ".with_health()",
+      ".with_connect_routes(crate::connect::router(state.clone()))"
+    ]
+  },
+  "oidc_config_route_count": 8,
+  "client_raw_v1_suffixes": [
+    "/github/oauth/authorize",
+    "/ssh-proxy",
+    "/terminal"
+  ]
+}

@@ -3,13 +3,10 @@ resolver = "2"
 # The root workspace is for server/runtime/shared crates. Desktop app crates
 # are excluded so non-desktop Cargo commands never resolve GPUI/font-kit.
 members = [
-    "crates/codewire-api-contract",
-    "crates/codewire-api-types",
     "crates/codewire-billing",
     "crates/codewire-client",
     "crates/codewire-dashboard-web",
     "crates/codewire-coordinator",
-    "crates/codewire-core",
     "crates/codewire-daemon",
     "crates/codewire-derp",
     "crates/codewire-gateway",
@@ -40,11 +37,8 @@ authors = ["Sonica"]
 
 [workspace.dependencies]
 # Internal crates
-codewire-api-types = { path = "crates/codewire-api-types" }
-codewire-api-contract = { path = "crates/codewire-api-contract" }
 codewire-client = { path = "crates/codewire-client" }
 codewire-types = { path = "crates/codewire-types" }
-codewire-core = { path = "crates/codewire-core" }
 codewire-server-core = { path = "crates/codewire-server-core" }
 codewire-oidc = { path = "crates/codewire-oidc" }
 codewire-gateway-proto = { path = "crates/codewire-gateway-proto" }

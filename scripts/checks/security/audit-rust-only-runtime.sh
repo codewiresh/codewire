@@ -187,7 +187,7 @@ audit_static_overlay() {
 
   if [ "${overlay##*/}" = "local-kind-static" ]; then
     record_grep "$overlay" "static local-kind overlay mounts mutable source path" \
-      'path:[[:space:]]+/src/(codewire/apps/dashboard|codewire/packages/codewire-types|dashboard|docs|codewire-types)(/|$)' "$rendered"
+      'path:[[:space:]]+/src/(codewire/apps/dashboard|dashboard|docs)(/|$)' "$rendered"
   fi
 }
 

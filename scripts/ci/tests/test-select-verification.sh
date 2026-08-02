@@ -103,7 +103,7 @@ run_paths_case artifact_impact_ci pull_request refs/pull/201/head false \
   scripts/ci/tests/test-artifact-impact.py \
   scripts/ci/tests/test-resolve-deployed-source.sh
 run_paths_case repo_checks pull_request refs/pull/21/head false \
-  'contracts contracts_rest deploy edge_kind go_consumer_interop go_support policy release runtime_confidential security security_idp_kek' \
+  'contracts contracts_proto deploy edge_kind go_consumer_interop go_support policy release runtime_confidential security security_idp_kek' \
   scripts/checks/repo_checks.py
 run_paths_case release pull_request refs/pull/3/head false \
   'go_consumer_interop go_support policy release runtime_confidential' \
@@ -335,36 +335,21 @@ run_paths_case generated_connect_go pull_request refs/pull/111/head false \
 run_paths_case retired_generated_connect_oracle_go pull_request refs/pull/1110/head false \
   'policy' \
   apps/api/gen/coordinator/v1/coordinator.pb.go
-run_paths_case generated_rest_go pull_request refs/pull/1111/head false \
-  'contracts contracts_rest go_consumer_interop go_support policy sdk_go' libs/api-client-go/client.gen.go
-run_paths_case generated_rest_python pull_request refs/pull/1112/head false \
-  'contracts contracts_rest policy sdk_python' \
-  libs/api-client-python/codewire_api_client/models/organization_deletion_response.py
 run_paths_case generated_connect_ts pull_request refs/pull/112/head false \
   'contracts contracts_proto policy' \
   packages/codewire-proto-ts/src/gen/codewire/v1/api_key_pb.ts
 run_paths_case generated_google_rpc_ts pull_request refs/pull/1124/head false \
   'contracts contracts_proto policy' \
   packages/codewire-proto-ts/src/gen/google/rpc/error_details_pb.ts
-run_paths_case generated_rest_ts pull_request refs/pull/1121/head false \
-  'contracts contracts_rest policy sdk_ts web' \
-  libs/api-client-ts/src/schema.gen.ts \
-  packages/codewire-types/generated/api.d.ts
 run_paths_case generated_connect_python pull_request refs/pull/113/head false \
   'contracts contracts_proto policy' libs/gen-python/codewire/v1/api_key_pb2.py
-run_paths_case rest_contract_sources pull_request refs/pull/1131/head false \
-  'contracts contracts_rest policy rust rust_pkg_codewire_api_contract rust_pkg_codewire_api_types' \
-  crates/codewire-api-contract/src/lib.rs crates/codewire-api-types/src/lib.rs
-run_paths_case rest_generators pull_request refs/pull/1132/head false \
-  'contracts contracts_rest deploy edge_kind go_consumer_interop go_support policy release runtime_confidential security security_idp_kek' \
-  scripts/checks/repo_checks.py
-run_paths_case openapi pull_request refs/pull/115/head false \
-  'contracts contracts_rest go_consumer_interop go_support policy sdk_go sdk_python sdk_ts' openapi.json
-run_paths_case mixed_contracts pull_request refs/pull/116/head false \
-  'contracts contracts_proto contracts_rest edge_kind go_consumer_interop go_support policy sdk_go sdk_python sdk_ts' \
-  proto/codewire/v1/api_key.proto openapi.json
-run_paths_case rest_policy_guard pull_request refs/pull/117/head false \
-  'policy' scripts/checks/contracts/rest-surface-baseline.json
+run_paths_case permanent_raw_policy_guard pull_request refs/pull/117/head false \
+  'policy' scripts/checks/contracts/permanent-raw-surface-policy.json
+run_paths_case retired_openapi_deletions pull_request refs/pull/1175/head false \
+  'policy' openapi.json crates/codewire-api-contract/src/lib.rs \
+  crates/codewire-api-types/src/lib.rs crates/codewire-core/src/lib.rs \
+  libs/api-client-go/client_gen.go libs/api-client-python/pyproject.toml \
+  libs/api-client-ts/package.json packages/codewire-types/package.json
 run_paths_case mesh_policy_guard pull_request refs/pull/1171/head false \
   'policy' scripts/checks/contracts/mesh-final-surface-policy.json
 run_paths_case mesh_policy_go_sdk pull_request refs/pull/1172/head false \
@@ -383,7 +368,7 @@ run_paths_case mesh_store_database pull_request refs/pull/1175/head false \
   'database policy transport transport_pkg_codewire_mesh' \
   crates/codewire-mesh/src/store.rs
 run_paths_case package_contract_tooling pull_request refs/pull/118/head false \
-  'contracts contracts_proto contracts_rest policy security security_js web' \
+  'contracts contracts_proto policy security security_js web' \
   package.json
 run_paths_case generic_package pull_request refs/pull/119/head false \
   'policy web' packages/shared/src/index.ts
@@ -406,13 +391,6 @@ run_paths_case sdk_ts pull_request refs/pull/14/head false \
   'policy sdk_ts' libs/sdk-ts/src/index.ts
 run_paths_case sdk_python pull_request refs/pull/15/head false \
   'policy sdk_python' libs/sdk-python/codewire/client.py
-run_paths_case sdk_tooling pull_request refs/pull/155/head false \
-  'go_consumer_interop go_support policy sdk_go sdk_python sdk_ts' \
-  libs/sdk-scripts/filter-openapi.py
-run_paths_case sdk_tooling_wi12_paths pull_request refs/pull/156/head false \
-  'go_consumer_interop go_support policy sdk_go sdk_python sdk_ts' \
-  Makefile libs/sdk-scripts/filter-openapi.py \
-  docs/plans/connect-rpc/13-rest-sunset-and-openapi-removal.md
 run_paths_case sdk_python_runner pull_request refs/pull/151/head false \
   'policy sdk_python' \
   scripts/runtime/dev/run-sdk-python-e2e.sh \
@@ -470,9 +448,6 @@ run_paths_case edge_harness pull_request refs/pull/153/head false \
 run_paths_case mixed_sdk_and_runtime pull_request refs/pull/154/head false \
   'policy rust rust_pkg_codewire_server_core sdk_python service_apikey_smoke service_billing service_connectcore service_coordinator service_idp service_integration service_nats service_orchestration service_temporal' \
   libs/sdk-python/codewire/client.py crates/codewire-server-core/src/lib.rs
-run_paths_case mixed_sdk_tooling_and_runtime pull_request refs/pull/157/head false \
-  'go_consumer_interop go_support policy rust rust_pkg_codewire_server_core sdk_go sdk_python sdk_ts service_apikey_smoke service_billing service_connectcore service_coordinator service_idp service_integration service_nats service_orchestration service_temporal' \
-  libs/sdk-scripts/filter-openapi.py crates/codewire-server-core/src/lib.rs
 run_paths_case edge_without_kind pull_request refs/pull/16/head false \
   'edge_kind policy' Caddyfile
 run_paths_case edge_with_kind pull_request refs/pull/17/head true \
@@ -588,7 +563,7 @@ run_paths_case ws17_wi_c3 pull_request refs/pull/173/head false \
 run_paths_case tag push refs/tags/v1.2.3 false \
   'deploy go_consumer_interop go_support release runtime_confidential' docs/tag-path-is-ignored.md
 
-all_product='contracts contracts_proto contracts_rest database deploy edge_kind go_consumer_interop go_support go_tailnet kind policy release runtime_confidential rust rust_curated_locks rust_workspace sdk_go sdk_python sdk_ts security security_dev_smoke_auth security_go security_idp_kek security_js service_apikey_smoke service_billing service_connectcore service_coordinator service_idp service_integration service_nats service_orchestration service_temporal transport transport_derp_contract transport_pkg_codewire_coordinator transport_pkg_codewire_daemon transport_pkg_codewire_derp transport_pkg_codewire_gateway transport_pkg_codewire_mesh transport_pkg_codewire_tailnet transport_pkg_codewire_udp_relay web'
+all_product='contracts contracts_proto database deploy edge_kind go_consumer_interop go_support go_tailnet kind policy release runtime_confidential rust rust_curated_locks rust_workspace sdk_go sdk_python sdk_ts security security_dev_smoke_auth security_go security_idp_kek security_js service_apikey_smoke service_billing service_connectcore service_coordinator service_idp service_integration service_nats service_orchestration service_temporal transport transport_derp_contract transport_pkg_codewire_coordinator transport_pkg_codewire_daemon transport_pkg_codewire_derp transport_pkg_codewire_gateway transport_pkg_codewire_mesh transport_pkg_codewire_tailnet transport_pkg_codewire_udp_relay web'
 run_paths_case unknown pull_request refs/pull/18/head false "$all_product" \
   unexplained/new-surface.txt
 run_paths_case mesh_policy_unknown pull_request refs/pull/181/head false "$all_product" \
@@ -611,7 +586,7 @@ assert_tokens dispatch_transport \
 dispatch_output="$(env -u GITHUB_OUTPUT GITHUB_EVENT_NAME=workflow_dispatch \
   VERIFICATION_REQUEST=contracts "$SELECTOR")"
 assert_tokens dispatch_contracts \
-  'contracts contracts_proto contracts_rest' "$dispatch_output"
+  'contracts contracts_proto' "$dispatch_output"
 dispatch_output="$(env -u GITHUB_OUTPUT GITHUB_EVENT_NAME=workflow_dispatch \
   VERIFICATION_REQUEST=go_support "$SELECTOR")"
 assert_tokens dispatch_go_support \
@@ -634,19 +609,13 @@ grep -qF '"$CARGO_BIN" fetch --locked --manifest-path "$stage/Cargo.toml"' \
   "$ROOT/scripts/ci/verify/check-curated-rust-locks.sh"
 
 contracts_proto_runner="$TMP/contracts-proto.sh"
-contracts_rest_runner="$TMP/contracts-rest.sh"
 contracts_dispatcher="$TMP/contracts-dispatcher.sh"
 go_support_runner="$TMP/go-support.sh"
 awk '
   /^run_contracts_proto\(\) \{/ { capture = 1 }
-  capture && /^run_contracts_rest\(\) \{/ { exit }
-  capture { print }
-' "$ROOT/scripts/ci/verify/run-product-verification.sh" > "$contracts_proto_runner"
-awk '
-  /^run_contracts_rest\(\) \{/ { capture = 1 }
   capture && /^run_contracts\(\) \{/ { exit }
   capture { print }
-' "$ROOT/scripts/ci/verify/run-product-verification.sh" > "$contracts_rest_runner"
+' "$ROOT/scripts/ci/verify/run-product-verification.sh" > "$contracts_proto_runner"
 awk '
   /^run_contracts\(\) \{/ { capture = 1 }
   capture && /^run_go_support\(\) \{/ { exit }
@@ -736,20 +705,8 @@ if rg -n 'openapi:|rest:freeze|validation:check-source|types:generate|api-client
   exit 1
 fi
 
-grep -qF 'libs/api-client-go' "$contracts_rest_runner"
-grep -qF 'openapi:check-source' "$contracts_rest_runner"
-grep -qF 'openapi:check-rust-source' "$contracts_rest_runner"
-grep -qF 'types:generate:ts' "$contracts_rest_runner"
-if rg -n 'buf (lint|breaking|generate)|libs/gen-(go|python)|proto-ts|tests/contract|rest:freeze|validation:check-source' \
-    "$contracts_rest_runner"; then
-  echo 'Transitional REST contract mode contains Proto/Connect or duplicate Policy work' >&2
-  exit 1
-fi
-
-grep -qF 'selected contracts_proto && run_proto=true' "$contracts_dispatcher"
-grep -qF 'selected contracts_rest && run_rest=true' "$contracts_dispatcher"
-grep -qF 'Contracts selected without contracts_proto or contracts_rest' \
-  "$contracts_dispatcher"
+grep -qF 'if ! selected contracts_proto; then' "$contracts_dispatcher"
+grep -qF 'Contracts selected without contracts_proto' "$contracts_dispatcher"
 [[ "$(grep -c 'install_bun_dependencies' "$contracts_dispatcher")" -eq 1 ]] || {
   echo 'Contracts dispatcher must install shared Bun dependencies exactly once' >&2
   exit 1
@@ -759,7 +716,7 @@ if missing_mode_output="$(VERIFICATION_SELECTION='|valid:v2|contracts|complete|'
   echo 'Contracts runner accepted a selected family without a sub-mode' >&2
   exit 1
 fi
-grep -qF 'Contracts selected without contracts_proto or contracts_rest' \
+grep -qF 'Contracts selected without contracts_proto' \
   <<<"$missing_mode_output"
 
 integration_runner="$ROOT/scripts/ci/verify/run-integration-verification.sh"
@@ -1127,9 +1084,9 @@ grep -qF "contains(needs.verification-selection.outputs.selection, '|policy|')" 
   echo 'standard: Rust toolchain omits policy artifact-impact fixtures' >&2
   exit 1
 }
-grep -qF "contains(needs.verification-selection.outputs.selection, '|contracts_rest|')" \
+grep -qF "contains(needs.verification-selection.outputs.selection, '|contracts_proto|')" \
   <<<"$standard_toolchain_condition" || {
-  echo 'standard: Rust toolchain omits transitional REST mode' >&2
+  echo 'standard: Rust toolchain omits Proto/Connect mode' >&2
   exit 1
 }
 go_support_run_line="$(grep -n -m1 'name: Run Go support' \
@@ -1159,7 +1116,7 @@ fi
 standard_protoc_condition="$(grep -A1 -F \
   'name: Install pinned protoc for Rust-backed standard checks' \
   "$standard_block")"
-for token in contracts_rest go_tailnet go_consumer_interop; do
+for token in contracts_proto go_tailnet go_consumer_interop; do
   grep -qF "contains(needs.verification-selection.outputs.selection, '|${token}|')" \
     <<<"$standard_protoc_condition" || {
     echo "standard: pinned protoc omits ${token}" >&2

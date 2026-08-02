@@ -8,7 +8,6 @@ pub(crate) mod account;
 pub mod admin;
 pub mod api_keys;
 pub mod assignments;
-pub mod contract;
 pub mod create;
 pub mod detect;
 pub mod env_access;
@@ -82,10 +81,8 @@ pub struct ApiState {
 
 /// The deliberately permanent browser-facing routes.
 ///
-/// Connect-RPC / Wave 5 / WS13 / WI-S1 retired all control-plane REST
-/// registrations. OAuth redirects, the public invitation hand-off, and
-/// browser terminal/SSH transports are not unary control-plane procedures and
-/// remain raw by design. WS18 owns the later invitation-route retirement.
+/// Connect-RPC owns control-plane procedures. OAuth redirects and browser
+/// terminal/SSH transports remain raw by design.
 pub fn router(state: ApiState, auth: AuthState) -> Router {
     let raw = Router::new()
         .route(
@@ -103,11 +100,6 @@ pub fn router(state: ApiState, auth: AuthState) -> Router {
         .route(
             "/api/v1/github/oauth/callback",
             get(github::github_oauth_callback),
-        )
-        // Public invitation hand-off is explicitly owned by WS18, not S1.
-        .route(
-            "/api/v1/invitations/{token}",
-            get(organizations::get_invitation_by_token),
         );
 
     // The OAuth redirect start still needs an account session. Its callback is

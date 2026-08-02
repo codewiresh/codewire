@@ -10,7 +10,6 @@ license = "AGPL-3.0-only"
 description = "Codewire OIDC provider service — wires the codewire-oidc library to Postgres and the Codewire session/org model."
 
 [dependencies]
-codewire-api-contract = { workspace = true }
 codewire-server-core = { workspace = true }
 codewire-oidc = { workspace = true, features = ["axum"] }
 anyhow = { workspace = true }

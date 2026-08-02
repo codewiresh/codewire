@@ -101,7 +101,6 @@ RUNTIME_DOCKER_MODELED_ROOTS = {
     "apps/docs",
     "packages/auth/package.json",
     "packages/codewire-design",
-    "packages/codewire-types",
     "packages/codewire-proto-ts",
 }
 SUPPORT_DOCKER_MODELED_ROOTS = {
@@ -595,7 +594,6 @@ def classify_web(root: Path, base: str, head: str, paths: Iterable[str]) -> set[
         "apps/docs/package.json",
         "packages/auth/package.json",
         "packages/codewire-design/package.json",
-        "packages/codewire-types/package.json",
         "packages/codewire-proto-ts/package.json",
     }
     for path in paths:
@@ -615,7 +613,6 @@ def classify_web(root: Path, base: str, head: str, paths: Iterable[str]) -> set[
         if path.startswith(
             (
                 "packages/codewire-design/",
-                "packages/codewire-types/",
                 "packages/codewire-proto-ts/",
             )
         ):

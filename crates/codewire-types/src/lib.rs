@@ -7,8 +7,7 @@
 //! - Error types (CoreError)
 //! - Pure parsing functions (SSE, git status, tmux/zellij sessions, URLs)
 //!
-//! Platform-specific logic lives in `codewire-core` (which re-exports
-//! everything from this crate).
+//! Platform-specific clients consume this crate directly.
 
 #[cfg(feature = "uniffi")]
 uniffi::setup_scaffolding!();

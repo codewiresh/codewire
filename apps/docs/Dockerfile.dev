@@ -5,7 +5,6 @@ COPY package.json bun.lock ./
 COPY apps/docs/package.json ./apps/docs/package.json
 COPY apps/dashboard/package.json ./apps/dashboard/package.json
 COPY packages/codewire-design/package.json ./packages/codewire-design/package.json
-COPY packages/codewire-types/package.json ./packages/codewire-types/package.json
 COPY packages/codewire-proto-ts/package.json ./packages/codewire-proto-ts/package.json
 COPY packages/auth/package.json ./packages/auth/package.json
 

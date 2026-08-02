@@ -35,8 +35,6 @@ A `(bin)` marker means the crate produces a service/app binary.
 | Crate                   | Role                                                            | License  |
 | ----------------------- | -------------------------------------------------------------- | -------- |
 | `codewire-types`        | Pure shared types and functions (no tokio, WASM-safe).         | MIT             |
-| `codewire-api-types`    | Generated Rust models for the OpenAPI surface.                 | MIT             |
-| `codewire-api-contract` | Rust-owned OpenAPI contract assembly helpers.                  | AGPL-3.0-only   |
 | `codewire-client`       | Shared ergonomic Rust client over generated Connect-RPC stubs. | AGPL-3.0-only   |
 | `codewire-proto`        | Generated Connect-RPC contract types for the control-plane API. | AGPL-3.0-only   |
 | `codewire-gateway-proto`| Generated protobuf types for the gateway/daemon boundary.      | AGPL-3.0-only   |
@@ -58,9 +56,8 @@ A `(bin)` marker means the crate produces a service/app binary.
 
 | Crate                      | Role                                                       | License |
 | -------------------------- | ---------------------------------------------------------- | ------- |
-| `codewire-core`            | Platform-agnostic app business logic.                      | MIT     |
 | `codewire-ui`              | Reusable GPUI components.                                  | MIT     |
-| `codewire-platform-native` | Native platform impls (reqwest, russh, keyring).          | MIT     |
+| `codewire-platform-native` | Native SSH transport helper.                              | MIT     |
 | `codewire-desktop`         | GPUI desktop app entrypoint (bin).                        | MIT     |
 
 The root workspace default is **AGPL-3.0-only**. `codewire-cli` and

@@ -62,8 +62,6 @@
     "/api/v1/",
     "/api/auth/sign-in",
     "codewire_core::",
-    "codewire_api_types::",
-    "codewire-api-types",
     "cw shell",
     "login_with_password",
     "verify_totp",

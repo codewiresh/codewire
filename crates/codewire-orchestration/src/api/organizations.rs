@@ -1,8 +1,6 @@
 //! Shared organization service logic. Organization deletion is an asynchronous,
 //! durable Temporal operation.
 
-use axum::Json;
-use axum::extract::{Path, State};
 use codewire_server_core::auth::AuthUser;
 use codewire_server_core::org::{can_admin, user_assignments, user_org_role};
 use codewire_server_core::org_deletion::{
@@ -445,19 +443,6 @@ fn invitation_row(r: &sqlx::postgres::PgRow) -> Result<OrgInvitation, AppError> 
         created_at: format_time(created_at),
         accepted_at: accepted_at.map(format_time),
     })
-}
-
-/// `GET /api/v1/invitations/{token}` — mirrors `getInvitationByToken`
-/// (`registerPublicInvitationRoutes`). UNAUTHENTICATED: registered outside
-/// `require_auth`, looks an invitation up by its opaque token. 404 when no
-/// row matches. The companion `POST /invitations/{token}/accept` mints
-/// membership and stays on Go, so the edge flip anchors this path
-/// (`…/invitations/[^/]+$`) to avoid catching `…/accept`.
-pub async fn get_invitation_by_token(
-    State(state): State<ApiState>,
-    Path(token): Path<String>,
-) -> AppResult<Json<OrgInvitation>> {
-    Ok(Json(get_invitation_by_token_core(state, token).await?))
 }
 
 pub(crate) async fn get_invitation_by_token_core(

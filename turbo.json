@@ -37,10 +37,6 @@
     "wasm:build": {
       "inputs": ["crates/codewire-types/src/**", "crates/codewire-wasm/src/**", "crates/codewire-wasm/Cargo.toml"],
       "outputs": ["packages/codewire-wasm/pkg/**"]
-    },
-    "types:generate": {
-      "inputs": ["openapi.json"],
-      "outputs": ["packages/codewire-types/generated/**"]
     }
   }
 }

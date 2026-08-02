@@ -50,7 +50,6 @@ path = "src/bin/deploy-shape-smoke.rs"
 required-features = ["kind-e2e"]
 
 [dependencies]
-codewire-api-contract = { workspace = true }
 codewire-gateway-proto = { workspace = true }
 codewire-proto = { workspace = true }
 codewire-server-core = { workspace = true }

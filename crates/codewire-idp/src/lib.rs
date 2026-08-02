@@ -18,7 +18,6 @@
 pub mod auth_requests;
 pub mod auth_session;
 pub mod clients;
-pub mod contract;
 pub mod customizer;
 pub mod device_authorizations;
 pub mod device_verification;

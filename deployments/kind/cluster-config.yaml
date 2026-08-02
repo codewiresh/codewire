@@ -38,9 +38,6 @@ nodes:
       # Web frontend source for Vite HMR
       - hostPath: ./apps/dashboard
         containerPath: /src/dashboard
-      # Shared types package
-      - hostPath: ./packages/codewire-types
-        containerPath: /src/codewire-types
       # Docs source
       - hostPath: ./apps/docs
         containerPath: /src/docs

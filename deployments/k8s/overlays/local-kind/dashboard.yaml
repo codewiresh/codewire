@@ -26,16 +26,10 @@ spec:
           volumeMounts:
             - name: dashboard-source
               mountPath: /app/apps/dashboard
-            - name: types-source
-              mountPath: /app/packages/codewire-types
       volumes:
         - name: dashboard-source
           hostPath:
             path: /src/codewire/apps/dashboard
-            type: Directory
-        - name: types-source
-          hostPath:
-            path: /src/codewire/packages/codewire-types
             type: Directory
 ---
 apiVersion: v1

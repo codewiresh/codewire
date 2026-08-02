@@ -1,9 +1,0 @@
-package: apiclient
-generate:
-  models: true
-  client: true
-output: client_gen.go
-output-options:
-  # Avoid collisions between operation response wrappers and schemas that
-  # already end in "Response" (e.g. CreateAPIKeyResponse).
-  response-type-suffix: HTTPResponse

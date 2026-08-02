@@ -11,7 +11,6 @@ COPY apps/dashboard/package.json ./apps/dashboard/package.json
 COPY apps/docs/package.json ./apps/docs/package.json
 COPY packages/auth/package.json ./packages/auth/package.json
 COPY packages/codewire-design/package.json ./packages/codewire-design/package.json
-COPY packages/codewire-types/package.json ./packages/codewire-types/package.json
 COPY packages/codewire-proto-ts/package.json ./packages/codewire-proto-ts/package.json
 
 RUN bun install --frozen-lockfile --ignore-scripts
@@ -20,7 +19,6 @@ COPY apps/dashboard ./apps/dashboard
 COPY apps/docs ./apps/docs
 COPY packages/codewire-design ./packages/codewire-design
 COPY packages/codewire-proto-ts ./packages/codewire-proto-ts
-COPY packages/codewire-types ./packages/codewire-types
 
 WORKDIR /app/apps/dashboard
 RUN bun run build

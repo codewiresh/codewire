@@ -280,7 +280,6 @@ pub struct TenantInfo {
 #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 #[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
-#[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
 pub enum OrgRole {
     Owner,
     Admin,
@@ -314,7 +313,6 @@ impl std::str::FromStr for OrgRole {
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 #[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
-#[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
 pub struct OrgMember {
     pub id: String,
     pub user_id: String,
@@ -333,7 +331,6 @@ pub struct OrgMember {
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 #[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
-#[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
 pub struct OrgInvitation {
     pub id: String,
     pub email: String,
@@ -351,7 +348,6 @@ pub struct OrgInvitation {
 
 /// Request to invite a member to an organization
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
 pub struct InviteMemberRequest {
     pub email: String,
     pub role: OrgRole,
@@ -359,7 +355,6 @@ pub struct InviteMemberRequest {
 
 /// Request to update a member's role
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
 pub struct UpdateMemberRoleRequest {
     pub role: OrgRole,
 }

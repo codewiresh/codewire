@@ -33,7 +33,6 @@ services:
     volumes:
       - ./apps/dashboard:/app/apps/dashboard
       - /app/apps/dashboard/node_modules
-      - ./packages/codewire-types:/app/packages/codewire-types
 
   # Docs (Astro Starlight — served at /docs)
   docs:

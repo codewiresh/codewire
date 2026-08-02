@@ -18,14 +18,12 @@ import re
 import shutil
 import subprocess
 import sys
-import tempfile
 import tomllib
 from pathlib import Path
 from typing import Any, Callable
 
 
 ROOT = Path(__file__).resolve().parents[2]
-OPENAPI_METHODS = {"delete", "get", "head", "options", "patch", "post", "put", "trace"}
 
 
 def read_text(rel: str) -> str:
@@ -35,13 +33,6 @@ def read_text(rel: str) -> str:
 def read_json(rel: str) -> Any:
     return json.loads(read_text(rel))
 
-
-def write_json(rel: str, value: Any) -> None:
-    (ROOT / rel).write_text(json_string(value), encoding="utf-8")
-
-
-def json_string(value: Any) -> str:
-    return json.dumps(value, indent=2, ensure_ascii=False) + "\n"
 
 
 def stable_json(value: Any) -> str:
@@ -114,650 +105,240 @@ def git_source_files() -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# OpenAPI preview helpers
+# Permanent control-plane raw surface guard
 
 
-RUST_OPENAPI_PREVIEW_COMMANDS: list[tuple[str, list[str]]] = [
-    (
-        "orchestration",
-        ["cargo", "run", "-q", "-p", "codewire-orchestration", "--bin", "openapi-preview"],
-    ),
-    (
-        "billing",
-        ["cargo", "run", "-q", "-p", "codewire-billing", "--bin", "billing-openapi-preview"],
-    ),
-    ("idp", ["cargo", "run", "-q", "-p", "codewire-idp", "--bin", "openapi-preview"]),
-]
+PERMANENT_RAW_POLICY_REL = "scripts/checks/contracts/permanent-raw-surface-policy.json"
+PERMANENT_RAW_SERVICE_ROOTS = (
+    "crates/codewire-orchestration",
+    "crates/codewire-billing",
+    "crates/codewire-idp",
+    "crates/codewire-coordinator",
+)
+PERMANENT_RAW_OIDC_TRANSPORT = "crates/codewire-oidc/src/transport.rs"
+PERMANENT_RAW_OIDC_DEFAULTS = "crates/codewire-oidc/src/discovery.rs"
+PERMANENT_RAW_CLIENT_ROOTS = (
+    "apps/dashboard/src/",
+    "apps/ios/Sources/",
+    "crates/codewire-cli/src/",
+    "crates/codewire-client/src/",
+    "crates/codewire-desktop/src/",
+    "libs/sdk-go/",
+    "libs/sdk-python/",
+    "libs/sdk-ts/",
+)
+PERMANENT_RAW_CLIENT_SUFFIXES = {".go", ".py", ".rs", ".swift", ".ts", ".tsx"}
+RETIRED_OPENAPI_PATHS = (
+    "openapi.json",
+    "crates/codewire-api-contract/",
+    "crates/codewire-api-types/",
+    "crates/codewire-core/",
+    "libs/api-client-go/",
+    "libs/api-client-python/",
+    "libs/api-client-ts/",
+    "packages/codewire-types/",
+)
+PERMANENT_RAW_POLICY_KEYS = {
+    "$comment",
+    "schema_version",
+    "allowed_raw_routes",
+    "required_server_fragments",
+    "oidc_config_route_count",
+    "client_raw_v1_suffixes",
+}
 
 
-def load_rust_openapi_previews(fail: Callable[[str], None]) -> list[tuple[str, Any | None]]:
-    previews: list[tuple[str, Any | None]] = []
-    for name, args in RUST_OPENAPI_PREVIEW_COMMANDS:
-        previews.append((name, run_preview_json(name, args, fail)))
-    return previews
-
-
-def run_preview_json(name: str, args: list[str], fail: Callable[[str], None]) -> Any | None:
-    result = run(args, check=False)
-    if result.returncode != 0:
-        fail(f"{name} preview command failed")
-        if result.stdout:
-            print(result.stdout, end="")
-        if result.stderr:
-            print(result.stderr, end="", file=sys.stderr)
-        return None
+def check_permanent_raw_surface(args: argparse.Namespace) -> int:
     try:
-        return json.loads(result.stdout)
-    except json.JSONDecodeError as error:
-        fail(f"{name} preview did not emit valid JSON: {error}")
-        return None
-
-
-def merge_rust_openapi_previews(
-    previews: list[tuple[str, Any | None]],
-    fail: Callable[[str], None],
-) -> dict[str, Any]:
-    merged: dict[str, Any] = {
-        "openapi": "3.1.0",
-        "info": {
-            "title": "Codewire API (Rust preview)",
-            "version": "0.1.0",
-        },
-        "paths": {},
-        "components": {
-            "schemas": {},
-        },
-    }
-
-    for name, doc in previews:
-        if doc is None:
-            continue
-        if doc.get("openapi") != "3.1.0":
-            fail(f"{name} preview must be OpenAPI 3.1.0, got {doc.get('openapi', '<missing>')}")
-            continue
-        merge_paths(merged["paths"], doc.get("paths") or {}, name, fail)
-        merge_components(
-            merged["components"]["schemas"],
-            (doc.get("components") or {}).get("schemas") or {},
-            name,
-            "schema",
-            fail,
-        )
-
-    return sort_json(merged)
-
-
-def merge_paths(
-    target: dict[str, Any],
-    paths: dict[str, Any],
-    service_name: str,
-    fail: Callable[[str], None],
-) -> None:
-    for path, item in paths.items():
-        target.setdefault(path, {})
-        for method, operation in (item or {}).items():
-            existing = target[path].get(method)
-            if existing is None:
-                target[path][method] = operation
-                continue
-            if stable_json(existing) == stable_json(operation):
-                continue
-            fail(f"{service_name} preview conflicts with existing operation {method.upper()} {path}")
-
-
-def merge_components(
-    target: dict[str, Any],
-    components: dict[str, Any],
-    service_name: str,
-    component_kind: str,
-    fail: Callable[[str], None],
-) -> None:
-    for name, component in components.items():
-        existing = target.get(name)
-        if existing is None:
-            target[name] = component
-            continue
-        if stable_json(existing) == stable_json(component):
-            continue
-        fail(f"{service_name} preview conflicts with existing {component_kind} component {name}")
-
-
-def downgrade_openapi_31_to_30(doc: dict[str, Any], fail: Callable[[str], None]) -> dict[str, Any]:
-    downgraded = copy.deepcopy(doc)
-    downgraded["openapi"] = "3.0.3"
-    downgrade_boolean_schemas(downgraded, "$", fail)
-    downgrade_nullable_types(downgraded, "$", fail)
-    return sort_json(downgraded)
-
-
-def downgrade_boolean_schemas(value: Any, path: str, fail: Callable[[str], None]) -> None:
-    if isinstance(value, list):
-        for index, item in enumerate(value):
-            downgrade_boolean_schemas(item, f"{path}[{index}]", fail)
-        return
-    if not isinstance(value, dict):
-        return
-
-    components = value.get("components")
-    schemas = components.get("schemas") if isinstance(components, dict) else None
-    if isinstance(schemas, dict):
-        for name, schema in list(schemas.items()):
-            schemas[name] = downgrade_schema(schema, f"{path}.components.schemas.{name}", fail)
-
-    for key, child in list(value.items()):
-        if key == "schema":
-            value[key] = downgrade_schema(child, f"{path}.{key}", fail)
-        else:
-            downgrade_boolean_schemas(child, f"{path}.{key}", fail)
-
-
-def downgrade_schema(schema: Any, path: str, fail: Callable[[str], None]) -> Any:
-    if schema is True:
-        return {}
-    if schema is False:
-        fail(f"{path} is boolean schema false, which cannot be downgraded to OpenAPI 3.0")
-        return {}
-    if isinstance(schema, list) or not isinstance(schema, dict):
-        return schema
-
-    downgrade_nullable_any_of(schema)
-
-    for key in [
-        "additionalProperties",
-        "contains",
-        "if",
-        "items",
-        "not",
-        "propertyNames",
-        "then",
-        "else",
-        "unevaluatedProperties",
-    ]:
-        if key in schema:
-            schema[key] = downgrade_schema(schema[key], f"{path}.{key}", fail)
-
-    for key in ["allOf", "anyOf", "oneOf", "prefixItems"]:
-        if isinstance(schema.get(key), list):
-            schema[key] = [
-                downgrade_schema(child, f"{path}.{key}[{index}]", fail)
-                for index, child in enumerate(schema[key])
-            ]
-
-    for key in ["properties", "patternProperties", "dependentSchemas"]:
-        if isinstance(schema.get(key), dict):
-            for name, child in list(schema[key].items()):
-                schema[key][name] = downgrade_schema(child, f"{path}.{key}.{name}", fail)
-
-    return schema
-
-
-def downgrade_nullable_any_of(schema: dict[str, Any]) -> None:
-    any_of = schema.get("anyOf")
-    if not isinstance(any_of, list):
-        return
-    non_null_schemas = [child for child in any_of if not is_null_schema(child)]
-    if len(non_null_schemas) == len(any_of):
-        return
-    schema["anyOf"] = non_null_schemas
-    schema["nullable"] = True
-
-
-def is_null_schema(schema: Any) -> bool:
-    return isinstance(schema, dict) and schema.get("type") == "null" and "$ref" not in schema
-
-
-def downgrade_nullable_types(value: Any, path: str, fail: Callable[[str], None]) -> None:
-    if isinstance(value, list):
-        for index, item in enumerate(value):
-            downgrade_nullable_types(item, f"{path}[{index}]", fail)
-        return
-    if not isinstance(value, dict):
-        return
-
-    schema_type = value.get("type")
-    if isinstance(schema_type, list):
-        non_null_types = [item for item in schema_type if item != "null"]
-        if "null" not in schema_type or len(non_null_types) != 1:
-            fail(
-                f"{path}.type cannot be downgraded from OpenAPI 3.1 array type "
-                f"{json.dumps(schema_type, ensure_ascii=False)}"
-            )
-        else:
-            value["type"] = non_null_types[0]
-            value["nullable"] = True
-
-    for key, child in list(value.items()):
-        downgrade_nullable_types(child, f"{path}.{key}", fail)
-
-
-def openapi_operations(paths: dict[str, Any]) -> list[str]:
-    operations: list[str] = []
-    for path, item in (paths or {}).items():
-        for method in (item or {}).keys():
-            if method in OPENAPI_METHODS:
-                operations.append(f"{method.upper()} {path}")
-    return sorted(operations)
-
-
-def check_openapi_contract_source(_args: argparse.Namespace) -> int:
-    failures: list[str] = []
-
-    def fail(message: str) -> None:
-        failures.append(f"openapi contract source: {message}")
-
-    pkg = read_json("package.json")
-    scripts = pkg.get("scripts") or {}
-
-    if scripts.get("types:generate") != "bun run types:generate:ts":
-        fail("types:generate must only consume the checked-in openapi.json")
-
-    for name in ["types:generate", "types:generate:ts"]:
-        script = scripts.get(name) or ""
-        if re.search(r"\bgo\s+test\b", script) or "TestExportOpenAPISpec" in script:
-            fail(f"{name} must not invoke an OpenAPI exporter")
-
-    for name, script in scripts.items():
-        references_go_exporter = "TestExportOpenAPISpec" in script or re.search(
-            r"\bopenapi:export:go\b", script
-        )
-        if "openapi" in name and references_go_exporter:
-            fail(f"{name} must not reference the retired Go/huma OpenAPI exporter")
-
-    rust_export = scripts.get("openapi:export:rust") or ""
-    if (
-        "repo_checks.py openapi-preview-export" not in rust_export
-        or "--openapi 3.0.3" not in rust_export
-        or "--output openapi.json" not in rust_export
-    ):
-        fail("openapi:export:rust must write the Rust-generated OpenAPI 3.0.3 contract to openapi.json")
-
-    rust_refresh = scripts.get("openapi:refresh-from-rust") or ""
-    if "openapi:export:rust" not in rust_refresh or "types:generate:ts" not in rust_refresh:
-        fail("openapi:refresh-from-rust must refresh the Rust spec and generated TypeScript types together")
-
-    rust_source = scripts.get("openapi:check-rust-source") or ""
-    if "repo_checks.py openapi-check-rust-source" not in rust_source:
-        fail("openapi:check-rust-source must verify openapi.json against the merged Rust previews")
-
-    spec = read_json("openapi.json")
-    if spec.get("openapi") != "3.0.3":
-        fail(f"openapi.json must remain the downgraded 3.0.3 contract, got {spec.get('openapi', '<missing>')}")
-
-    assert_no_boolean_schemas(spec, "$", fail)
-
-    # WS13/S1 removed the control-plane REST contract. Identity remains the
-    # only non-health public OpenAPI surface until S2 deletes this transitional
-    # OpenAPI production line entirely.
-    for path in ["/api/auth/sign-in"]:
-        if path not in (spec.get("paths") or {}):
-            fail(f"openapi.json is missing expected path {path}")
+        policy = load_permanent_raw_policy()
+        sources = permanent_raw_service_sources()
+        client_sources = permanent_raw_client_sources()
+        failures = permanent_raw_surface_failures(sources, policy, client_sources)
+        if not failures and args.self_test:
+            permanent_raw_surface_self_test(sources, policy, client_sources)
+    except Exception as error:  # noqa: BLE001 - repository guard boundary
+        failures = [str(error)]
 
     if failures:
         for failure in failures:
-            print(failure, file=sys.stderr)
-        return 1
-    print("openapi contract source: OK")
-    return 0
-
-
-def assert_no_boolean_schemas(value: Any, path: str, fail: Callable[[str], None]) -> None:
-    if isinstance(value, list):
-        for index, item in enumerate(value):
-            assert_no_boolean_schemas(item, f"{path}[{index}]", fail)
-        return
-    if not isinstance(value, dict):
-        return
-
-    components = value.get("components")
-    schemas = components.get("schemas") if isinstance(components, dict) else None
-    if isinstance(schemas, dict):
-        for name, schema in schemas.items():
-            assert_schema_no_boolean(schema, f"{path}.components.schemas.{name}", fail)
-
-    for key, child in value.items():
-        if key == "schema":
-            assert_schema_no_boolean(child, f"{path}.{key}", fail)
-        else:
-            assert_no_boolean_schemas(child, f"{path}.{key}", fail)
-
-
-def assert_schema_no_boolean(schema: Any, path: str, fail: Callable[[str], None]) -> None:
-    if isinstance(schema, bool):
-        fail(f"{path} must not be a boolean schema in the checked-in OpenAPI 3.0.3 contract")
-        return
-    if isinstance(schema, list) or not isinstance(schema, dict):
-        return
-    if schema.get("type") == "null":
-        fail(f'{path}.type must not be "null" in the checked-in OpenAPI 3.0.3 contract')
-    if isinstance(schema.get("type"), list) and "null" in schema["type"]:
-        fail(f'{path}.type must not include "null" in the checked-in OpenAPI 3.0.3 contract')
-
-    for key in [
-        "additionalProperties",
-        "contains",
-        "if",
-        "items",
-        "not",
-        "propertyNames",
-        "then",
-        "else",
-        "unevaluatedProperties",
-    ]:
-        if key in schema:
-            assert_schema_no_boolean(schema[key], f"{path}.{key}", fail)
-
-    for key in ["allOf", "anyOf", "oneOf", "prefixItems"]:
-        if isinstance(schema.get(key), list):
-            for index, child in enumerate(schema[key]):
-                assert_schema_no_boolean(child, f"{path}.{key}[{index}]", fail)
-
-    for key in ["properties", "patternProperties", "dependentSchemas"]:
-        if isinstance(schema.get(key), dict):
-            for name, child in schema[key].items():
-                assert_schema_no_boolean(child, f"{path}.{key}.{name}", fail)
-
-
-def check_rust_openapi_preview(_args: argparse.Namespace) -> int:
-    failures: list[str] = []
-    fail = lambda message: failures.append(f"rust openapi preview: {message}")
-    canonical = read_json("openapi.json")
-    previews = load_rust_openapi_previews(fail)
-    merged = merge_rust_openapi_previews(previews, fail)
-
-    canonical_paths = sorted((canonical.get("paths") or {}).keys())
-    rust_paths = sorted((merged.get("paths") or {}).keys())
-    missing = [path for path in canonical_paths if path not in (merged.get("paths") or {})]
-    extra = [path for path in rust_paths if path not in (canonical.get("paths") or {})]
-    canonical_operations = openapi_operations(canonical.get("paths") or {})
-    rust_operations = set(openapi_operations(merged.get("paths") or {}))
-    missing_operations = [op for op in canonical_operations if op not in rust_operations]
-
-    if missing:
-        fail("missing %d canonical path(s):\n%s" % (len(missing), "\n".join(f"  {path}" for path in missing)))
-    if missing_operations:
-        fail(
-            "missing %d canonical operation(s):\n%s"
-            % (len(missing_operations), "\n".join(f"  {operation}" for operation in missing_operations))
-        )
-    if extra:
-        print(f"rust openapi preview: {len(extra)} Rust-only preview path(s):")
-        for path in extra:
-            print(f"  {path}")
-
-    if failures:
-        for failure in failures:
-            print(failure, file=sys.stderr)
-        return 1
-    print(
-        f"rust openapi preview: OK ({len(canonical_operations)} canonical operations "
-        f"across {len(canonical_paths)} paths covered)"
-    )
-    return 0
-
-
-def check_rust_openapi_source(_args: argparse.Namespace) -> int:
-    failures: list[str] = []
-    fail = lambda message: failures.append(f"rust openapi source: {message}")
-    checked_in = read_json("openapi.json")
-    previews = load_rust_openapi_previews(fail)
-    generated = downgrade_openapi_31_to_30(merge_rust_openapi_previews(previews, fail), fail)
-    if stable_json(checked_in) != stable_json(generated):
-        fail("openapi.json is stale; run `bun run openapi:refresh-from-rust`")
-    if failures:
-        for failure in failures:
-            print(failure, file=sys.stderr)
-        return 1
-    print("rust openapi source: OK")
-    return 0
-
-
-def export_rust_openapi_preview(args: argparse.Namespace) -> int:
-    failures: list[str] = []
-    fail = lambda message: failures.append(f"rust openapi preview export: {message}")
-    if args.openapi not in {"3.1.0", "3.0.3"}:
-        fail("--openapi must be 3.1.0 or 3.0.3")
-    previews = load_rust_openapi_previews(fail)
-    merged31 = merge_rust_openapi_previews(previews, fail)
-    merged = downgrade_openapi_31_to_30(merged31, fail) if args.openapi == "3.0.3" else merged31
-    if failures:
-        for failure in failures:
-            print(failure, file=sys.stderr)
-        return 1
-    rendered = json_string(merged)
-    if args.output:
-        Path(args.output).resolve().write_text(rendered, encoding="utf-8")
-    else:
-        print(rendered, end="")
-    return 0
-
-
-def check_rust_openapi_types(_args: argparse.Namespace) -> int:
-    failures: list[str] = []
-    fail = lambda message: failures.append(f"rust openapi types: {message}")
-    temp_dir = Path(tempfile.mkdtemp(prefix="codewire-rust-openapi-types-"))
-    try:
-        previews = load_rust_openapi_previews(fail)
-        merged31 = merge_rust_openapi_previews(previews, fail)
-        merged30 = downgrade_openapi_31_to_30(merged31, fail)
-        spec_path = temp_dir / "openapi.json"
-        spec_path.write_text(json_string(merged30), encoding="utf-8")
-
-        openapi_typescript = ROOT / "node_modules" / ".bin" / "openapi-typescript"
-        command = str(openapi_typescript) if openapi_typescript.exists() else "openapi-typescript"
-        for output_path in [
-            "packages/codewire-types/generated/api.d.ts",
-            "libs/api-client-ts/src/schema.gen.ts",
-        ]:
-            absolute_output_path = temp_dir / output_path
-            absolute_output_path.parent.mkdir(parents=True, exist_ok=True)
-            result = run(
-                [
-                    command,
-                    str(spec_path),
-                    "--default-non-nullable",
-                    "false",
-                    "-o",
-                    str(absolute_output_path),
-                ],
-                check=False,
-            )
-            if result.returncode != 0:
-                fail(f"openapi-typescript failed for {output_path}")
-                if result.stdout:
-                    print(result.stdout, end="")
-                if result.stderr:
-                    print(result.stderr, end="", file=sys.stderr)
-    finally:
-        shutil.rmtree(temp_dir, ignore_errors=True)
-
-    if failures:
-        for failure in failures:
-            print(failure, file=sys.stderr)
-        return 1
-    print("rust openapi types: OK")
-    return 0
-
-
-# ---------------------------------------------------------------------------
-# REST surface freeze
-
-
-def check_rest_surface_freeze(args: argparse.Namespace) -> int:
-    failures: list[str] = []
-
-    def fail(message: str) -> None:
-        failures.append(f"rest surface freeze: {message}")
-
-    freeze_doc = "docs/plans/connect-rpc/13-rest-sunset-and-openapi-removal.md"
-    baseline_rel = "scripts/checks/contracts/rest-surface-baseline.json"
-    service_crates = [
-        "crates/codewire-orchestration",
-        "crates/codewire-billing",
-        "crates/codewire-idp",
-        "crates/codewire-coordinator",
-    ]
-    oidc_transport_rel = "crates/codewire-oidc/src/transport.rs"
-    oidc_defaults_rel = "crates/codewire-oidc/src/discovery.rs"
-    expected_oidc_config_routes = 8
-
-    spec = read_json("openapi.json")
-    spec_operations = set(openapi_operations(spec.get("paths") or {}))
-
-    swept_routes: set[str] = set()
-    for crate in service_crates:
-        for file in walk_files(ROOT / crate / "src"):
-            if file.suffix != ".rs":
-                continue
-            rel = file.relative_to(ROOT).as_posix()
-            text = file.read_text(encoding="utf-8")
-            sanitized = sanitize_rust_source(text)
-            for match in re.finditer(r"\.nest(?:_service)?\(", sanitized):
-                fail(
-                    f"{rel}:{line_number(text, match.start())} uses "
-                    f"{match.group(0)[:-1]}; nested routers hide the mounted prefix from the "
-                    "REST-freeze sweep — register full literal paths with .route("
-                )
-            for index, path in route_registrations(sanitized):
-                if path is None:
-                    fail(
-                        f"{rel}:{line_number(text, index)} registers a route from a non-literal "
-                        "path expression; the REST-freeze sweep only sees literal paths — use a "
-                        f"string literal (config-mounted library routes need a baseline decision, see {freeze_doc})"
-                    )
-                    continue
-                if path.startswith("/api/"):
-                    swept_routes.add(path)
-
-    transport_text = read_text(oidc_transport_rel)
-    transport_sanitized = sanitize_rust_source(transport_text)
-    for match in re.finditer(r"\.nest(?:_service)?\(", transport_sanitized):
-        fail(
-            f"{oidc_transport_rel}:{line_number(transport_text, match.start())} uses "
-            f"{match.group(0)[:-1]}; nested routers hide the mounted prefix from the REST-freeze sweep"
-        )
-    transport_config_routes = [
-        route for route in route_registrations(transport_sanitized) if route[1] is None
-    ]
-    if len(transport_config_routes) != expected_oidc_config_routes:
-        fail(
-            f"{oidc_transport_rel} has {len(transport_config_routes)} config-mounted route "
-            f"registrations, expected {expected_oidc_config_routes}; the OIDC transport surface "
-            f"is frozen (permanent raw HTTP, {freeze_doc})"
-        )
-
-    defaults_text = read_text(oidc_defaults_rel)
-    oidc_seeded_routes = endpoint_path_defaults(sanitize_rust_source(defaults_text))
-    if len(oidc_seeded_routes) != expected_oidc_config_routes:
-        fail(
-            f"{oidc_defaults_rel} declares {len(oidc_seeded_routes)} EndpointPaths defaults, "
-            f"expected {expected_oidc_config_routes}; the OIDC transport surface is frozen "
-            f"(permanent raw HTTP, {freeze_doc})"
-        )
-
-    current_routes = set(swept_routes) | set(oidc_seeded_routes)
-
-    try:
-        baseline = read_json(baseline_rel)
-    except Exception as error:  # noqa: BLE001 - this is a repo check script
-        fail(f"cannot read {baseline_rel}: {error}")
-        for failure in failures:
-            print(failure, file=sys.stderr)
-        return 1
-
-    baseline_operations = set(baseline.get("operations") or [])
-    baseline_routes = set(baseline.get("raw_routes") or [])
-    allowlist = baseline.get("allowlist") or []
-
-    allowed_operations: set[str] = set()
-    allowed_routes: set[str] = set()
-    for index, entry in enumerate(allowlist):
-        label = f"{baseline_rel} allowlist[{index}]"
-        if not isinstance(entry.get("issue"), str) or entry.get("issue", "").strip() == "":
-            fail(f"{label} is missing the required issue field")
-        if not isinstance(entry.get("justification"), str) or entry.get("justification", "").strip() == "":
-            fail(f"{label} is missing the required justification field")
-        if "operation" not in entry and "raw_route" not in entry:
-            fail(f"{label} must name an operation or a raw_route")
-            continue
-        if "operation" in entry:
-            if entry["operation"] in baseline_operations:
-                fail(
-                    f"{label} operation {entry['operation']} is already in the frozen baseline; "
-                    "drop the allowlist entry"
-                )
-            allowed_operations.add(entry["operation"])
-        if "raw_route" in entry:
-            if entry["raw_route"] in baseline_routes:
-                fail(
-                    f"{label} raw_route {entry['raw_route']} is already in the frozen baseline; "
-                    "drop the allowlist entry"
-                )
-            allowed_routes.add(entry["raw_route"])
-
-    new_operations = sorted(spec_operations - baseline_operations - allowed_operations)
-    new_routes = sorted(current_routes - baseline_routes - allowed_routes)
-    stale_operations = sorted(baseline_operations - spec_operations)
-    stale_routes = sorted(baseline_routes - current_routes)
-    stale_allowlist = [
-        entry
-        for entry in allowlist
-        if ("operation" in entry and entry["operation"] not in spec_operations)
-        or ("raw_route" in entry and entry["raw_route"] not in current_routes)
-    ]
-
-    for operation in new_operations:
-        fail(
-            f"new REST operation not in the freeze baseline: {operation} — the REST surface is "
-            f"frozen (gate G3, {freeze_doc}); new endpoints are proto-first. A genuinely exempt "
-            "endpoint needs an allowlist entry with issue + justification."
-        )
-    for route in new_routes:
-        fail(
-            f"new /api route not in the freeze baseline: {route} — the REST surface is frozen "
-            f"(gate G3, {freeze_doc}); new endpoints are proto-first. A genuinely exempt route "
-            "needs an allowlist entry with issue + justification."
-        )
-
-    if args.update:
-        removed = len(stale_operations) + len(stale_routes) + len(stale_allowlist)
-        baseline["operations"] = sorted(
-            [operation for operation in (baseline.get("operations") or []) if operation in spec_operations]
-        )
-        baseline["raw_routes"] = sorted(
-            [route for route in (baseline.get("raw_routes") or []) if route in current_routes]
-        )
-        baseline["allowlist"] = [entry for entry in allowlist if entry not in stale_allowlist]
-        write_json(baseline_rel, baseline)
-        suffix = "y" if removed == 1 else "ies"
-        print(
-            f"rest surface freeze: baseline updated ({removed} stale entr{suffix} removed; "
-            "additions are never written — the baseline only shrinks)"
-        )
-    else:
-        for operation in stale_operations:
-            fail(f"baseline operation no longer exists: {operation}; run 'bun run rest:freeze:update'")
-        for route in stale_routes:
-            fail(f"baseline raw route no longer exists: {route}; run 'bun run rest:freeze:update'")
-        for entry in stale_allowlist:
-            fail(
-                f"allowlist entry for {entry.get('operation') or entry.get('raw_route')} no longer "
-                "matches a live operation/route; run 'bun run rest:freeze:update'"
-            )
-
-    if failures:
-        for failure in failures:
-            print(failure, file=sys.stderr)
+            print(f"permanent raw surface: {failure}", file=sys.stderr)
         return 1
     mesh_result = check_mesh_surface_freeze(argparse.Namespace(self_test=True))
     if mesh_result != 0:
         return mesh_result
-    if not args.update:
-        print(
-            f"rest surface freeze: OK ({len(baseline_operations)} operations, "
-            f"{len(baseline_routes)} raw routes frozen, {len(allowlist)} allowlisted)"
-        )
+    print(
+        "permanent raw surface: OK "
+        f"({len(policy['allowed_raw_routes'])} approved raw routes; Connect owns the remainder)"
+    )
     return 0
 
+
+def load_permanent_raw_policy() -> dict[str, Any]:
+    policy = read_json(PERMANENT_RAW_POLICY_REL)
+    if not isinstance(policy, dict) or set(policy) != PERMANENT_RAW_POLICY_KEYS:
+        raise RuntimeError(
+            "permanent raw policy keys must be exactly "
+            f"{stable_json(sorted(PERMANENT_RAW_POLICY_KEYS))}"
+        )
+    if policy.get("schema_version") != 1:
+        raise RuntimeError("permanent raw policy schema_version must equal 1")
+    if not isinstance(policy.get("$comment"), str) or not policy["$comment"].strip():
+        raise RuntimeError("permanent raw policy must have a non-empty $comment")
+    for key in ("allowed_raw_routes", "client_raw_v1_suffixes"):
+        values = policy.get(key)
+        if not isinstance(values, list) or not values or not all(
+            isinstance(value, str) and value.startswith("/") for value in values
+        ):
+            raise RuntimeError(f"permanent raw policy {key} must be a non-empty route list")
+        if len(values) != len(set(values)):
+            raise RuntimeError(f"permanent raw policy {key} contains duplicate values")
+    fragments = policy.get("required_server_fragments")
+    if not isinstance(fragments, dict) or not fragments:
+        raise RuntimeError("permanent raw policy requires server fragments for every binary")
+    for rel, values in fragments.items():
+        if (
+            not isinstance(rel, str)
+            or not rel.startswith("crates/")
+            or not isinstance(values, list)
+            or not values
+            or not all(isinstance(value, str) and value for value in values)
+        ):
+            raise RuntimeError("permanent raw policy server fragments are malformed")
+    count = policy.get("oidc_config_route_count")
+    if not isinstance(count, int) or count <= 0:
+        raise RuntimeError("permanent raw policy oidc_config_route_count must be positive")
+    return policy
+
+
+def permanent_raw_service_sources() -> dict[str, str]:
+    sources: dict[str, str] = {}
+    for root in PERMANENT_RAW_SERVICE_ROOTS:
+        for path in walk_files(ROOT / root / "src"):
+            if path.suffix == ".rs":
+                sources[path.relative_to(ROOT).as_posix()] = path.read_text(encoding="utf-8")
+    for rel in (PERMANENT_RAW_OIDC_TRANSPORT, PERMANENT_RAW_OIDC_DEFAULTS):
+        sources[rel] = read_text(rel)
+    return sources
+
+
+def is_permanent_raw_client_source(rel_path: str) -> bool:
+    path = Path(rel_path)
+    if not rel_path.startswith(PERMANENT_RAW_CLIENT_ROOTS):
+        return False
+    if path.suffix not in PERMANENT_RAW_CLIENT_SUFFIXES:
+        return False
+    if any(part in {"fixtures", "test", "tests"} for part in path.parts):
+        return False
+    if path.name.startswith("test_") or path.name.endswith(
+        ("_test.go", "_test.py", "_test.rs", ".test.ts", ".test.tsx", ".spec.ts", ".spec.tsx")
+    ):
+        return False
+    return rel_path not in {
+        "apps/dashboard/src/routeTree.gen.ts",
+        "apps/dashboard/src/routes/api/v1/$.ts",
+    }
+
+
+def permanent_raw_client_sources(source_corpus: dict[str, str] | None = None) -> dict[str, str]:
+    if source_corpus is None:
+        source_corpus = {
+            rel_path: (ROOT / rel_path).read_text(encoding="utf-8")
+            for rel_path in git_source_files()
+            if is_permanent_raw_client_source(rel_path)
+        }
+    return {
+        rel_path: source
+        for rel_path, source in source_corpus.items()
+        if is_permanent_raw_client_source(rel_path)
+    }
+
+
+def permanent_raw_surface_failures(
+    sources: dict[str, str], policy: dict[str, Any], client_sources: dict[str, str]
+) -> list[str]:
+    failures: list[str] = []
+    for rel in git_source_files():
+        if any(rel == path or rel.startswith(path) for path in RETIRED_OPENAPI_PATHS):
+            failures.append(f"retired OpenAPI source path was restored: {rel}")
+    routes = {"/healthz", "/readyz"}
+    oidc_non_literal = 0
+
+    for rel, source in sorted(sources.items()):
+        sanitized = sanitize_rust_source(source)
+        for match in re.finditer(r"\.(?:nest|nest_service|route_service)\s*\(", sanitized):
+            failures.append(
+                f"{rel}:{line_number(source, match.start())} hides a raw route behind {match.group(0)[:-1]}"
+            )
+        for index, path in route_registrations(sanitized):
+            if path is None:
+                if rel == PERMANENT_RAW_OIDC_TRANSPORT:
+                    oidc_non_literal += 1
+                else:
+                    failures.append(
+                        f"{rel}:{line_number(source, index)} has a non-literal raw route registration"
+                    )
+            elif path.startswith("/"):
+                routes.add(path)
+
+    oidc_defaults = endpoint_path_defaults(sanitize_rust_source(sources[PERMANENT_RAW_OIDC_DEFAULTS]))
+    if len(oidc_defaults) != policy["oidc_config_route_count"]:
+        failures.append(
+            f"{PERMANENT_RAW_OIDC_DEFAULTS} declares {len(oidc_defaults)} OIDC paths; expected "
+            f"{policy['oidc_config_route_count']}"
+        )
+    if oidc_non_literal != policy["oidc_config_route_count"]:
+        failures.append(
+            f"{PERMANENT_RAW_OIDC_TRANSPORT} has {oidc_non_literal} config-mounted routes; expected "
+            f"{policy['oidc_config_route_count']}"
+        )
+    routes.update(oidc_defaults)
+
+    allowed = set(policy["allowed_raw_routes"])
+    unexpected = sorted(routes - allowed)
+    missing = sorted(allowed - routes)
+    if unexpected:
+        failures.append(f"unapproved raw routes: {stable_json(unexpected)}")
+    if missing:
+        failures.append(f"approved raw routes are no longer mounted: {stable_json(missing)}")
+
+    for rel, fragments in policy["required_server_fragments"].items():
+        path = ROOT / rel
+        if not path.is_file():
+            failures.append(f"serving binary source is missing: {rel}")
+            continue
+        source = path.read_text(encoding="utf-8")
+        for fragment in fragments:
+            if fragment not in source:
+                failures.append(f"{rel} lost required serving shape {fragment!r}")
+
+    for rel, source in sorted(client_sources.items()):
+        sanitized = sanitize_rust_source(source) if rel.endswith(".rs") else source
+        for match in re.finditer(r"/api/v1/[A-Za-z0-9_./${}?=-]+", sanitized):
+            fragment = match.group(0)
+            if not any(suffix in fragment for suffix in policy["client_raw_v1_suffixes"]):
+                failures.append(f"{rel} formats retired control-plane URL {fragment!r}")
+
+    return failures
+
+
+def permanent_raw_surface_self_test(
+    sources: dict[str, str], policy: dict[str, Any], client_sources: dict[str, str]
+) -> None:
+    restored_route = dict(sources)
+    restored_route["crates/codewire-orchestration/src/restored_raw.rs"] = (
+        'fn restored() { Router::new().route("/api/v1/restored", get(handler)); }'
+    )
+    if not permanent_raw_surface_failures(restored_route, policy, client_sources):
+        raise RuntimeError("permanent raw guard accepted a restored control-plane route")
+
+    restored_client = dict(client_sources)
+    restored_client["libs/sdk-ts/src/restored-raw.ts"] = (
+        'export const restored = "/api/v1/organizations";\n'
+    )
+    if not permanent_raw_surface_failures(
+        sources, policy, permanent_raw_client_sources(restored_client)
+    ):
+        raise RuntimeError("permanent raw guard accepted a restored client REST URL")
 
 def route_registrations(sanitized: str) -> list[tuple[int, str | None]]:
     routes: list[tuple[int, str | None]] = []
@@ -1869,14 +1450,11 @@ def check_license_map(_args: argparse.Namespace) -> int:
         )
 
     cargo_declarations = {
-        "crates/codewire-api-contract/Cargo.toml": "AGPL-3.0-only",
-        "crates/codewire-api-types/Cargo.toml": "MIT",
         "crates/codewire-billing/Cargo.toml": "AGPL-3.0-only",
         "crates/codewire-cli-bin/Cargo.toml": "workspace",
         "crates/codewire-cli/Cargo.toml": "workspace",
         "crates/codewire-client/Cargo.toml": "AGPL-3.0-only",
         "crates/codewire-coordinator/Cargo.toml": "AGPL-3.0-only",
-        "crates/codewire-core/Cargo.toml": "MIT",
         "crates/codewire-dashboard-web/Cargo.toml": "AGPL-3.0-only",
         "crates/codewire-daemon/Cargo.toml": "AGPL-3.0-only",
         "crates/codewire-derp/Cargo.toml": "BSD-3-Clause",
@@ -1933,13 +1511,11 @@ def check_license_map(_args: argparse.Namespace) -> int:
         "package.json": "AGPL-3.0-only",
         "apps/dashboard/package.json": "AGPL-3.0-only",
         "apps/docs/package.json": "AGPL-3.0-only",
-        "libs/api-client-ts/package.json": "MIT",
         "libs/sdk-examples/run-claude/typescript/package.json": "MIT",
         "libs/sdk-ts/package.json": "MIT",
         "packages/auth/package.json": "MIT",
         "packages/codewire-design/package.json": "AGPL-3.0-only",
         "packages/codewire-proto-ts/package.json": "MIT",
-        "packages/codewire-types/package.json": "MIT",
     }
     actual_package_json = {
         rel
@@ -1962,7 +1538,6 @@ def check_license_map(_args: argparse.Namespace) -> int:
             check_copy((Path(rel).parent / "LICENSE").as_posix(), expected)
 
     python_licenses = {
-        "libs/api-client-python/pyproject.toml": ("MIT", ["LICENSE"]),
         "libs/sdk-python/pyproject.toml": (
             "MIT",
             ["LICENSE", "LICENSE-APACHE"],
@@ -1997,7 +1572,6 @@ def check_license_map(_args: argparse.Namespace) -> int:
             )
 
     go_licenses = {
-        "libs/api-client-go/go.mod": "MIT",
         "libs/gen-go/go.mod": "MIT",
         "libs/sdk-examples/run-claude/go/go.mod": "MIT",
         "libs/sdk-go/go.mod": "MIT",
@@ -2215,7 +1789,7 @@ def check_go_source_classification(_args: argparse.Namespace) -> int:
         ("bounded Go Tailnet oracle", re.compile(r"^libs/tailnet/.*\.go$")),
         (
             "generated Go API consumers",
-            re.compile(r"^(libs/api-client-go|libs/gen-go)/.*\.go$"),
+            re.compile(r"^libs/gen-go/.*\.go$"),
         ),
         (
             "public Go SDK and examples",
@@ -4011,17 +3585,9 @@ def main(argv: list[str] | None = None) -> int:
     edge_parser = subparsers.add_parser("connect-edge-routing")
     edge_parser.add_argument("--self-test", action="store_true")
     edge_parser.set_defaults(func=check_connect_edge_routing)
-    subparsers.add_parser("openapi-check-source").set_defaults(func=check_openapi_contract_source)
-    subparsers.add_parser("openapi-preview-check").set_defaults(func=check_rust_openapi_preview)
-    export_parser = subparsers.add_parser("openapi-preview-export")
-    export_parser.add_argument("--output")
-    export_parser.add_argument("--openapi", default="3.1.0")
-    export_parser.set_defaults(func=export_rust_openapi_preview)
-    subparsers.add_parser("openapi-preview-types-check").set_defaults(func=check_rust_openapi_types)
-    subparsers.add_parser("openapi-check-rust-source").set_defaults(func=check_rust_openapi_source)
-    rest_parser = subparsers.add_parser("rest-surface-freeze")
-    rest_parser.add_argument("--update", action="store_true")
-    rest_parser.set_defaults(func=check_rest_surface_freeze)
+    permanent_raw_parser = subparsers.add_parser("permanent-raw-surface")
+    permanent_raw_parser.add_argument("--self-test", action="store_true")
+    permanent_raw_parser.set_defaults(func=check_permanent_raw_surface)
     mesh_parser = subparsers.add_parser("mesh-surface-freeze")
     mesh_parser.add_argument("--self-test", action="store_true")
     mesh_parser.set_defaults(func=check_mesh_surface_freeze)
