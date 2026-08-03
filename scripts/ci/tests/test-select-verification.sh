@@ -392,6 +392,11 @@ run_paths_case derp_contract pull_request refs/pull/101/head false \
 run_paths_case proto pull_request refs/pull/11/head false \
   'contracts contracts_proto edge_kind go_consumer_interop go_support policy' \
   proto/codewire/v1/api_key.proto
+run_paths_case admin_rust_proto_boundary pull_request refs/pull/1111/head false \
+  'contracts contracts_proto policy rust rust_pkg_codewire_admin_proto' \
+  crates/codewire-admin-proto/Cargo.toml \
+  scripts/ci/proto/build-rust-descriptors.sh \
+  scripts/ci/tests/test-admin-proto-boundary.sh
 run_paths_case google_rpc_ts_template pull_request refs/pull/1114/head false \
   'contracts contracts_proto edge_kind go_consumer_interop go_support policy' \
   proto/buf.gen.google-rpc-ts.yaml
