@@ -50,6 +50,7 @@ path = "src/bin/deploy-shape-smoke.rs"
 required-features = ["kind-e2e"]
 
 [dependencies]
+codewire-admin-proto = { workspace = true }
 codewire-gateway-proto = { workspace = true }
 codewire-proto = { workspace = true }
 codewire-server-core = { workspace = true }
@@ -69,6 +70,7 @@ tokio-stream = { workspace = true }
 tonic = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+prometheus = { workspace = true }
 # Sidecar readiness probes speak SSH/SFTP over a pod port-forward, the
 # same path the Go worker's CheckSidecarReady takes.
 russh = { workspace = true }

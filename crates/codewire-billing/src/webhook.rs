@@ -7,8 +7,8 @@
 //! - handler failure → 500 `{"error":"webhook processing failed"}`
 //! - success → 200 `{"status":"ok"}`
 //!
-//! The endpoint reads at most 64KiB of body and fails signature verification
-//! on a truncated payload.
+//! The endpoint accepts a complete body up to 64KiB. Oversized payloads are
+//! rejected before parsing; signatures are never calculated over a truncation.
 //!
 //! Event handling starts with an idempotency check on
 //! `stripe_webhook_events` first (duplicates are a silent 200), one
@@ -29,7 +29,6 @@ use stripe_webhook::{Event, EventObject, Webhook};
 
 use crate::email::{EmailClient, ReceiptData};
 use crate::routes::BillingState;
-use crate::stripe_client::AdminCreditItemInput;
 
 const MAX_BODY: usize = 65536;
 
@@ -46,7 +45,14 @@ pub async fn stripe_webhook(
         return err_response(StatusCode::NOT_FOUND, "billing is not enabled");
     }
 
-    let payload = &body[..body.len().min(MAX_BODY)];
+    if body.len() > MAX_BODY {
+        tracing::warn!(
+            body_len = body.len(),
+            "billing: oversized Stripe webhook rejected"
+        );
+        return err_response(StatusCode::PAYLOAD_TOO_LARGE, "webhook payload too large");
+    }
+    let payload = &body;
     let Ok(payload) = std::str::from_utf8(payload) else {
         return err_response(StatusCode::BAD_REQUEST, "invalid signature");
     };
@@ -78,51 +84,60 @@ pub async fn stripe_webhook(
 pub async fn handle_webhook_event(state: &BillingState, event: Event) -> anyhow::Result<()> {
     let pool = &state.pool;
 
-    let exists: bool =
-        sqlx::query_scalar(r#"SELECT EXISTS(SELECT 1 FROM stripe_webhook_events WHERE id = $1)"#)
-            .bind(event.id.as_str())
-            .fetch_one(pool)
-            .await?;
-    if exists {
+    // The unique insert is the claim. `SELECT EXISTS` followed by a later
+    // best-effort insert races across replicas and can double-apply an event.
+    let claimed: Option<String> = sqlx::query_scalar(
+        r#"INSERT INTO stripe_webhook_events (id, event_type, stripe_created_at, processed_at)
+           VALUES ($1, $2, to_timestamp($3), NOW())
+           ON CONFLICT (id) DO NOTHING
+           RETURNING id"#,
+    )
+    .bind(event.id.as_str())
+    .bind(event.type_.to_string())
+    .bind(event.created)
+    .fetch_optional(pool)
+    .await?;
+    if claimed.is_none() {
         tracing::debug!(event_id = %event.id, "billing: skipping duplicate webhook event");
         return Ok(());
     }
 
-    match &event.data.object {
-        EventObject::CheckoutSessionCompleted(session) => {
-            handle_checkout_completed(state, session).await?
+    let result: anyhow::Result<()> = async {
+        match &event.data.object {
+            EventObject::CheckoutSessionCompleted(session) => {
+                handle_checkout_completed(state, session).await?
+            }
+            EventObject::CustomerSubscriptionUpdated(sub) => {
+                handle_subscription_updated(pool, sub, event.created, event.id.as_str()).await?
+            }
+            EventObject::CustomerSubscriptionDeleted(sub) => {
+                handle_subscription_deleted(pool, sub, event.created, event.id.as_str()).await?
+            }
+            EventObject::CustomerSubscriptionTrialWillEnd(sub) => {
+                handle_trial_will_end(pool, &state.email, sub).await?
+            }
+            EventObject::InvoiceCreated(inv) => handle_invoice_created(state, inv).await?,
+            EventObject::InvoicePaid(inv) => handle_invoice_paid(state, inv).await?,
+            EventObject::InvoicePaymentFailed(inv) => {
+                handle_invoice_payment_failed(state, inv).await?
+            }
+            EventObject::InvoiceFinalized(inv) => upsert_invoice(pool, inv).await?,
+            _ => {
+                tracing::debug!(event_type = %event.type_, "billing: unhandled webhook event type");
+            }
         }
-        EventObject::CustomerSubscriptionUpdated(sub) => {
-            handle_subscription_updated(pool, sub).await?
-        }
-        EventObject::CustomerSubscriptionDeleted(sub) => {
-            handle_subscription_deleted(pool, sub).await?
-        }
-        EventObject::CustomerSubscriptionTrialWillEnd(sub) => {
-            handle_trial_will_end(pool, &state.email, sub).await?
-        }
-        EventObject::InvoiceCreated(inv) => handle_invoice_created(state, inv).await?,
-        EventObject::InvoicePaid(inv) => handle_invoice_paid(state, inv).await?,
-        EventObject::InvoicePaymentFailed(inv) => handle_invoice_payment_failed(state, inv).await?,
-        EventObject::InvoiceFinalized(inv) => {
-            upsert_invoice(pool, inv).await?;
-        }
-        _ => {
-            tracing::debug!(event_type = %event.type_, "billing: unhandled webhook event type");
-        }
+        Ok(())
     }
-
-    // Best-effort idempotency record, like the Go `_, _ = pool.Exec`.
-    let _ = sqlx::query(
-        r#"INSERT INTO stripe_webhook_events (id, event_type) VALUES ($1, $2)
-           ON CONFLICT (id) DO NOTHING"#,
-    )
-    .bind(event.id.as_str())
-    .bind(event.type_.to_string())
-    .execute(pool)
     .await;
-
-    Ok(())
+    if result.is_err() {
+        // A failed delivery must be retryable. The receipt is the claim, not
+        // an irreversible acknowledgement; Stripe receives a 500 and retries.
+        sqlx::query("DELETE FROM stripe_webhook_events WHERE id = $1")
+            .bind(event.id.as_str())
+            .execute(pool)
+            .await?;
+    }
+    result
 }
 
 fn expandable_id<T: stripe_types::Object>(e: &stripe_types::Expandable<T>) -> String
@@ -342,6 +357,8 @@ fn db_status(status: &stripe_shared::SubscriptionStatus) -> String {
 async fn handle_subscription_updated(
     pool: &PgPool,
     sub: &stripe_shared::Subscription,
+    event_created: i64,
+    event_id: &str,
 ) -> anyhow::Result<()> {
     let status = db_status(&sub.status);
     let plan_name = sub.metadata.get("plan").cloned().unwrap_or_default();
@@ -354,23 +371,31 @@ async fn handle_subscription_updated(
     .await?;
 
     if let Some(env_org_id) = env_org.filter(|o| !o.is_empty()) {
-        let _ = sqlx::query(
-            r#"UPDATE environment_subscriptions SET status = $1, updated_at = NOW()
-               WHERE stripe_subscription_id = $2"#,
+        let updated = sqlx::query(
+            r#"UPDATE environment_subscriptions
+                  SET status = $1,
+                      plan = CASE WHEN $2 = '' THEN plan ELSE $2 END,
+                      stripe_event_created_at = to_timestamp($3),
+                      stripe_event_id = $4,
+                      updated_at = NOW()
+                WHERE stripe_subscription_id = $5
+                  AND (stripe_event_created_at IS NULL
+                       OR stripe_event_created_at < to_timestamp($3)
+                       OR (stripe_event_created_at = to_timestamp($3)
+                           AND COALESCE(stripe_event_id, '') < $4))"#,
         )
         .bind(&status)
+        .bind(&plan_name)
+        .bind(event_created)
+        .bind(event_id)
         .bind(sub.id.as_str())
         .execute(pool)
         .await;
-        if !plan_name.is_empty() {
-            let _ = sqlx::query(
-                r#"UPDATE environment_subscriptions SET plan = $1, updated_at = NOW()
-                   WHERE stripe_subscription_id = $2"#,
-            )
-            .bind(&plan_name)
-            .bind(sub.id.as_str())
-            .execute(pool)
-            .await;
+        if updated
+            .map(|result| result.rows_affected() == 0)
+            .unwrap_or(true)
+        {
+            return Ok(());
         }
         log_billing_event(
             pool,
@@ -385,24 +410,28 @@ async fn handle_subscription_updated(
         return Ok(());
     }
 
-    sqlx::query(
-        r#"UPDATE org_subscriptions SET status = $1, updated_at = NOW()
-           WHERE stripe_subscription_id = $2"#,
+    let updated = sqlx::query(
+        r#"UPDATE org_subscriptions
+              SET status = $1,
+                  plan = CASE WHEN $2 = '' THEN plan ELSE $2 END,
+                  stripe_event_created_at = to_timestamp($3),
+                  stripe_event_id = $4,
+                  updated_at = NOW()
+            WHERE stripe_subscription_id = $5
+              AND (stripe_event_created_at IS NULL
+                   OR stripe_event_created_at < to_timestamp($3)
+                   OR (stripe_event_created_at = to_timestamp($3)
+                       AND COALESCE(stripe_event_id, '') < $4))"#,
     )
     .bind(&status)
+    .bind(&plan_name)
+    .bind(event_created)
+    .bind(event_id)
     .bind(sub.id.as_str())
     .execute(pool)
     .await?;
-
-    if !plan_name.is_empty() {
-        let _ = sqlx::query(
-            r#"UPDATE org_subscriptions SET plan = $1, updated_at = NOW()
-               WHERE stripe_subscription_id = $2"#,
-        )
-        .bind(&plan_name)
-        .bind(sub.id.as_str())
-        .execute(pool)
-        .await;
+    if updated.rows_affected() == 0 {
+        return Ok(());
     }
 
     let org_id: Option<String> = sqlx::query_scalar(
@@ -436,6 +465,8 @@ async fn handle_subscription_updated(
 async fn handle_subscription_deleted(
     pool: &PgPool,
     sub: &stripe_shared::Subscription,
+    event_created: i64,
+    event_id: &str,
 ) -> anyhow::Result<()> {
     let env_org: Option<String> = sqlx::query_scalar(
         r#"SELECT org_id FROM environment_subscriptions WHERE stripe_subscription_id = $1"#,
@@ -445,13 +476,27 @@ async fn handle_subscription_deleted(
     .await?;
 
     if let Some(env_org_id) = env_org.filter(|o| !o.is_empty()) {
-        let _ = sqlx::query(
-            r#"UPDATE environment_subscriptions SET status = 'canceled', updated_at = NOW()
-               WHERE stripe_subscription_id = $1"#,
+        let updated = sqlx::query(
+            r#"UPDATE environment_subscriptions
+                  SET status = 'canceled', stripe_event_created_at = to_timestamp($1),
+                      stripe_event_id = $2, updated_at = NOW()
+                WHERE stripe_subscription_id = $3
+                  AND (stripe_event_created_at IS NULL
+                       OR stripe_event_created_at < to_timestamp($1)
+                       OR (stripe_event_created_at = to_timestamp($1)
+                           AND COALESCE(stripe_event_id, '') < $2))"#,
         )
+        .bind(event_created)
+        .bind(event_id)
         .bind(sub.id.as_str())
         .execute(pool)
         .await;
+        if updated
+            .map(|result| result.rows_affected() == 0)
+            .unwrap_or(true)
+        {
+            return Ok(());
+        }
         log_billing_event(
             pool,
             "env_subscription_canceled",
@@ -469,13 +514,24 @@ async fn handle_subscription_deleted(
         return Ok(());
     }
 
-    sqlx::query(
-        r#"UPDATE org_subscriptions SET status = 'canceled', updated_at = NOW()
-           WHERE stripe_subscription_id = $1"#,
+    let updated = sqlx::query(
+        r#"UPDATE org_subscriptions
+              SET status = 'canceled', stripe_event_created_at = to_timestamp($1),
+                  stripe_event_id = $2, updated_at = NOW()
+            WHERE stripe_subscription_id = $3
+              AND (stripe_event_created_at IS NULL
+                   OR stripe_event_created_at < to_timestamp($1)
+                   OR (stripe_event_created_at = to_timestamp($1)
+                       AND COALESCE(stripe_event_id, '') < $2))"#,
     )
+    .bind(event_created)
+    .bind(event_id)
     .bind(sub.id.as_str())
     .execute(pool)
     .await?;
+    if updated.rows_affected() == 0 {
+        return Ok(());
+    }
 
     let org_id: Option<String> = sqlx::query_scalar(
         r#"SELECT org_id FROM org_subscriptions WHERE stripe_subscription_id = $1"#,
@@ -531,88 +587,6 @@ async fn handle_invoice_created(
 ) -> anyhow::Result<()> {
     let pool = &state.pool;
     upsert_invoice(pool, inv).await?;
-
-    let org_id = resolve_invoice_org_id(pool, inv).await;
-    if org_id.is_empty() || !org_owner_is_admin(pool, &org_id).await {
-        return Ok(());
-    }
-    let Some(customer) = &inv.customer else {
-        return Ok(());
-    };
-    let customer_id = expandable_id(customer);
-    if customer_id.is_empty() {
-        return Ok(());
-    }
-
-    let credit_cents = calculate_admin_subscription_credit(inv);
-    if credit_cents <= 0 {
-        return Ok(());
-    }
-
-    let invoice_id = inv.id.as_deref().unwrap_or_default();
-    let existing: bool = sqlx::query_scalar(
-        r#"SELECT EXISTS(
-              SELECT 1 FROM admin_invoice_credits
-              WHERE stripe_invoice_id = $1 AND credit_kind = 'subscription_base')"#,
-    )
-    .bind(invoice_id)
-    .fetch_one(pool)
-    .await
-    .unwrap_or(false);
-    if existing {
-        return Ok(());
-    }
-
-    let currency = inv.currency.to_string();
-    let description = admin_subscription_credit_description(inv);
-    let idempotency_key =
-        provider_idempotency_key("admin-credit", &[&org_id, invoice_id, "subscription-base"]);
-    let credit_item_id = run_organization_billing_mutation(pool, &org_id, async {
-        let credit_item_id = state
-            .stripe
-            .create_admin_credit_item(AdminCreditItemInput {
-                customer_id: &customer_id,
-                invoice_id,
-                amount_cents: -credit_cents,
-                currency: &currency,
-                description: &description,
-                org_id: &org_id,
-                idempotency_key: &idempotency_key,
-            })
-            .await
-            .map_err(OrganizationBillingMutationError::ambiguous)?;
-
-        sqlx::query(
-            r#"INSERT INTO admin_invoice_credits
-               (org_id, stripe_invoice_id, credit_kind, amount_cents, stripe_invoice_item_id, created_at, updated_at)
-               VALUES ($1, $2, 'subscription_base', $3, $4, NOW(), NOW())
-               ON CONFLICT (stripe_invoice_id, credit_kind) DO NOTHING"#,
-        )
-        .bind(&org_id)
-        .bind(invoice_id)
-        .bind(credit_cents as i32)
-        .bind(&credit_item_id)
-        .execute(pool)
-        .await
-        .map_err(|error| {
-            OrganizationBillingMutationError::ambiguous(codewire_server_core::AppError::from(
-                error,
-            ))
-        })?;
-        Ok(credit_item_id)
-    })
-    .await?;
-
-    log_billing_event(
-        pool,
-        "admin_subscription_credit",
-        &org_id,
-        Some(-(credit_cents as i32)),
-        &currency,
-        &credit_item_id,
-        serde_json::json!({"invoice_id": invoice_id}),
-    )
-    .await;
     Ok(())
 }
 
@@ -853,21 +827,6 @@ async fn org_owner_email_by_id(pool: &PgPool, org_id: &str) -> Option<String> {
     .flatten()
 }
 
-async fn org_owner_is_admin(pool: &PgPool, org_id: &str) -> bool {
-    sqlx::query_scalar(
-        r#"SELECT u.is_admin FROM org_members m
-           JOIN users u ON u.id = m.user_id
-           WHERE m.org_id = $1 AND m.role = 'owner'
-           ORDER BY m.created_at ASC LIMIT 1"#,
-    )
-    .bind(org_id)
-    .fetch_optional(pool)
-    .await
-    .ok()
-    .flatten()
-    .unwrap_or(false)
-}
-
 /// Mirrors `LogBillingEvent` (fire-and-forget; resource columns were
 /// dropped from billing_events).
 async fn log_billing_event(
@@ -899,33 +858,6 @@ async fn log_billing_event(
     {
         tracing::warn!(event_type, error = ?e, "billing: failed to log event");
     }
-}
-
-fn line_is_subscription(line: &stripe_shared::InvoiceLineItem) -> bool {
-    matches!(
-        line.parent.as_ref().map(|p| &p.type_),
-        Some(stripe_shared::BillingBillResourceInvoicingLinesParentsInvoiceLineItemParentType::SubscriptionItemDetails)
-    )
-}
-
-fn calculate_admin_subscription_credit(inv: &stripe_shared::Invoice) -> i64 {
-    inv.lines
-        .data
-        .iter()
-        .filter(|l| l.amount > 0 && line_is_subscription(l))
-        .map(|l| l.amount)
-        .sum()
-}
-
-fn admin_subscription_credit_description(inv: &stripe_shared::Invoice) -> String {
-    use stripe_shared::InvoiceBillingReason as R;
-    match inv.billing_reason {
-        Some(R::SubscriptionCreate) => "Admin credit for billing visibility: subscription start",
-        Some(R::SubscriptionCycle) => "Admin credit for billing visibility: subscription renewal",
-        Some(R::SubscriptionUpdate) => "Admin credit for billing visibility: subscription update",
-        _ => "Admin credit for billing visibility: subscription charges",
-    }
-    .to_string()
 }
 
 fn invoice_subtotal(inv: &stripe_shared::Invoice) -> i64 {

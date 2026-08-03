@@ -392,6 +392,11 @@ run_paths_case derp_contract pull_request refs/pull/101/head false \
 run_paths_case proto pull_request refs/pull/11/head false \
   'contracts contracts_proto edge_kind go_consumer_interop go_support policy' \
   proto/codewire/v1/api_key.proto
+run_paths_case admin_rust_proto_boundary pull_request refs/pull/1111/head false \
+  'contracts contracts_proto policy rust rust_pkg_codewire_admin_proto' \
+  crates/codewire-admin-proto/Cargo.toml \
+  scripts/ci/proto/build-rust-descriptors.sh \
+  scripts/ci/tests/test-admin-proto-boundary.sh
 run_paths_case google_rpc_ts_template pull_request refs/pull/1114/head false \
   'contracts contracts_proto edge_kind go_consumer_interop go_support policy' \
   proto/buf.gen.google-rpc-ts.yaml
@@ -765,8 +770,9 @@ grep -qF 'buf breaking' "$contracts_proto_runner"
 grep -qF 'buf generate --template buf.gen.codewire.yaml' "$contracts_proto_runner"
 grep -qF 'buf generate --template buf.gen.google-rpc-ts.yaml' "$contracts_proto_runner"
 grep -qF 'buf generate --template buf.gen.google-rpc-python.yaml' "$contracts_proto_runner"
-grep -qF 'buf build --as-file-descriptor-set' "$contracts_proto_runner"
+grep -qF 'build-rust-descriptors.sh' "$contracts_proto_runner"
 grep -qF 'crates/codewire-proto/codewire_descriptor.bin' "$contracts_proto_runner"
+grep -qF 'crates/codewire-admin-proto/codewire_admin_descriptor.bin' "$contracts_proto_runner"
 grep -qF 'libs/gen-go' "$contracts_proto_runner"
 grep -qF 'git ls-files --others --exclude-standard' "$contracts_proto_runner"
 grep -qF 'PYTHONPATH=libs/gen-python' "$contracts_proto_runner"
@@ -776,7 +782,13 @@ grep -qF '../libs/gen-go/codewire' "$contracts_proto_runner"
 grep -qF '../libs/gen-python/codewire' "$contracts_proto_runner"
 grep -qF '../packages/codewire-proto-ts/src/gen/codewire' "$contracts_proto_runner"
 grep -qF 'proto-package-boundaries --self-test' "$contracts_proto_runner"
-grep -qF 'cargo test --locked -p codewire-proto' "$contracts_proto_runner"
+grep -qF 'cargo test --locked -p codewire-proto -p codewire-admin-proto' "$contracts_proto_runner"
+rust_descriptor_builder="$ROOT/scripts/ci/proto/build-rust-descriptors.sh"
+grep -qF -- '--path codewire/admin/v1/admin.proto' "$rust_descriptor_builder"
+grep -qF -- '--path codewire/admin/v1/billing_catalog.proto' "$rust_descriptor_builder"
+grep -qF -- '--path codewire/v1/environment.proto' "$rust_descriptor_builder"
+grep -qF 'codewire-admin-proto/codewire_admin_descriptor.bin' "$rust_descriptor_builder"
+grep -qF 'test-admin-proto-boundary.sh' "$ROOT/scripts/ci/verify/run-product-verification.sh"
 grep -qF 'github.com/bufbuild/buf/cmd/buf@v1.50.0' "$ROOT/Makefile"
 if rg -n 'tests/contract' "$contracts_proto_runner"; then
   echo 'Proto regeneration runs a general Go service-driver suite' >&2

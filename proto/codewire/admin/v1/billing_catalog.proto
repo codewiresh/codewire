@@ -50,6 +50,12 @@ service BillingCatalogService {
       returns (ListSubscriptionMigrationsResponse) {
     option idempotency_level = NO_SIDE_EFFECTS;
   }
+
+  // SetOrganizationBillingExemption explicitly controls internal billing
+  // exemption. It is global-admin only and never infers exemption from the
+  // owner account.
+  rpc SetOrganizationBillingExemption(SetOrganizationBillingExemptionRequest)
+      returns (SetOrganizationBillingExemptionResponse);
 }
 
 message GetCatalogRequest {}
@@ -222,4 +228,14 @@ message ListSubscriptionMigrationsRequest {
 
 message ListSubscriptionMigrationsResponse {
   repeated MigrationRun migrations = 1;
+}
+
+message SetOrganizationBillingExemptionRequest {
+  string organization_id = 1;
+  bool billing_exempt = 2;
+}
+
+message SetOrganizationBillingExemptionResponse {
+  string organization_id = 1;
+  bool billing_exempt = 2;
 }

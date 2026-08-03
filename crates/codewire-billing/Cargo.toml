@@ -19,6 +19,7 @@ name = "codewire_billing"
 path = "src/lib.rs"
 
 [dependencies]
+codewire-admin-proto = { workspace = true }
 codewire-proto = { workspace = true }
 codewire-server-core = { workspace = true }
 
@@ -61,5 +62,6 @@ futures-util = "0.3"
 [dev-dependencies]
 # The wire contract drives generated BillingCatalogService clients over both
 # Connect codecs; production billing stays server-only.
+codewire-admin-proto = { workspace = true, features = ["client"] }
 codewire-proto = { workspace = true, features = ["client"] }
 connectrpc = { workspace = true, features = ["client"] }

@@ -31,10 +31,12 @@
 //! a row.
 
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use kube::api::DynamicObject;
+use prometheus::{IntCounterVec, IntGauge, Opts, register_int_counter_vec, register_int_gauge};
 use serde_json::Value;
 use sqlx::{PgPool, Row};
 
@@ -78,10 +80,44 @@ struct Identity {
     namespace: String,
 }
 
+#[derive(Debug)]
+enum IdentityResolution {
+    NotManaged,
+    Resolved(Identity),
+    Unresolved(&'static str),
+}
+
+static UNRESOLVED_IDENTITIES: OnceLock<IntCounterVec> = OnceLock::new();
+static UNBILLABLE_RUNNING: OnceLock<IntGauge> = OnceLock::new();
+
+fn unresolved_identities_metric() -> &'static IntCounterVec {
+    UNRESOLVED_IDENTITIES.get_or_init(|| {
+        register_int_counter_vec!(
+            Opts::new(
+                "codewire_billing_identity_resolution_failures_total",
+                "Running Codewire Sandboxes whose billable identity could not be resolved."
+            ),
+            &["reason"]
+        )
+        .expect("billing identity metric registration must be unique")
+    })
+}
+
+fn unbillable_running_metric() -> &'static IntGauge {
+    UNBILLABLE_RUNNING.get_or_init(|| {
+        register_int_gauge!(
+            "codewire_billing_unbillable_running_environments",
+            "Current running Codewire Sandboxes that lack a resolved billable identity."
+        )
+        .expect("unbillable billing metric registration must be unique")
+    })
+}
+
 /// Mirrors `sessions.OpenSession`.
 struct OpenSession {
     id: String,
     runtime_uid: String,
+    last_observed_at: chrono::DateTime<chrono::Utc>,
 }
 
 // ── resources.go ───────────────────────────────────────────────────────
@@ -287,7 +323,7 @@ async fn resolve_identity(
     runtime_name: &str,
     runtime_uid: &str,
     labels: &serde_json::Map<String, Value>,
-) -> anyhow::Result<Option<Identity>> {
+) -> anyhow::Result<IdentityResolution> {
     let mut env_id = labels
         .get(LABEL_ENV_ID)
         .and_then(Value::as_str)
@@ -316,12 +352,12 @@ async fn resolve_identity(
         .await
         .map_err(|e| anyhow::anyhow!("resolve environment by claim uid: {e}"))?;
         match row {
-            None => return Ok(None),
+            None => return Ok(IdentityResolution::Unresolved("claim_not_found")),
             Some(r) => env_id = r.try_get::<String, _>(0).unwrap_or_default(),
         }
     }
     if env_id.is_empty() {
-        return Ok(None);
+        return Ok(IdentityResolution::NotManaged);
     }
 
     if org_id.is_empty() {
@@ -331,7 +367,7 @@ async fn resolve_identity(
             .await
             .map_err(|e| anyhow::anyhow!("resolve organization by environment: {e}"))?;
         match row {
-            None => return Ok(None),
+            None => return Ok(IdentityResolution::Unresolved("environment_not_found")),
             Some(r) => org_id = r.try_get::<String, _>(0).unwrap_or_default(),
         }
     }
@@ -341,10 +377,10 @@ async fn resolve_identity(
         || runtime_name.is_empty()
         || namespace.is_empty()
     {
-        return Ok(None);
+        return Ok(IdentityResolution::Unresolved("invalid_runtime_identity"));
     }
 
-    Ok(Some(Identity {
+    Ok(IdentityResolution::Resolved(Identity {
         environment_id: env_id,
         org_id,
         runtime_uid: runtime_uid.to_string(),
@@ -430,7 +466,7 @@ async fn close_by_uid(
 /// empty) the namespace, for the recovery sweep.
 async fn list_open(pool: &PgPool, namespace: &str) -> anyhow::Result<Vec<OpenSession>> {
     let rows = sqlx::query(
-        r#"SELECT id, runtime_uid
+        r#"SELECT id, runtime_uid, last_observed_at
              FROM sandbox_running_sessions
             WHERE runtime_type = 'sandbox'
               AND ended_at IS NULL
@@ -445,6 +481,9 @@ async fn list_open(pool: &PgPool, namespace: &str) -> anyhow::Result<Vec<OpenSes
         .map(|r| OpenSession {
             id: r.try_get("id").unwrap_or_default(),
             runtime_uid: r.try_get("runtime_uid").unwrap_or_default(),
+            last_observed_at: r
+                .try_get("last_observed_at")
+                .unwrap_or_else(|_| chrono::Utc::now()),
         })
         .collect())
 }
@@ -453,12 +492,12 @@ async fn list_open(pool: &PgPool, namespace: &str) -> anyhow::Result<Vec<OpenSes
 
 /// Mirrors `handler.reconcile`: resolve identity, classify, then open/
 /// heartbeat (Running) or close (Terminated). Pending is a no-op.
-async fn reconcile(pool: &PgPool, sb: &DynamicObject) {
+async fn reconcile(pool: &PgPool, sb: &DynamicObject) -> bool {
     let value = match serde_json::to_value(sb) {
         Ok(v) => v,
         Err(e) => {
             tracing::warn!(error = %e, "billing-session: serialize Sandbox failed");
-            return;
+            return false;
         }
     };
     let namespace = sb.metadata.namespace.clone().unwrap_or_default();
@@ -470,16 +509,32 @@ async fn reconcile(pool: &PgPool, sb: &DynamicObject) {
         .and_then(Value::as_object)
         .unwrap_or(&empty);
 
+    let (phase, reason) = classify(&value);
     let id = match resolve_identity(pool, &namespace, &name, &uid, labels_map).await {
-        Ok(Some(id)) => id,
-        Ok(None) => return,
+        Ok(IdentityResolution::Resolved(id)) => id,
+        Ok(IdentityResolution::NotManaged) => return false,
+        Ok(IdentityResolution::Unresolved(reason)) => {
+            if phase == Phase::Running {
+                unresolved_identities_metric()
+                    .with_label_values(&[reason])
+                    .inc();
+                tracing::error!(reason, runtime_uid = %uid, "billing_identity_unresolved");
+                return true;
+            }
+            return false;
+        }
         Err(e) => {
-            tracing::error!(namespace, name, error = %e, "billing-session: resolve identity");
-            return;
+            if phase == Phase::Running {
+                unresolved_identities_metric()
+                    .with_label_values(&["database_error"])
+                    .inc();
+                tracing::error!(error = %e, runtime_uid = %uid, reason = "database_error", "billing_identity_unresolved");
+                return true;
+            }
+            tracing::error!(error = %e, "billing-session: resolve identity");
+            return false;
         }
     };
-
-    let (phase, reason) = classify(&value);
     let now = chrono::Utc::now();
     match phase {
         Phase::Running => {
@@ -500,6 +555,7 @@ async fn reconcile(pool: &PgPool, sb: &DynamicObject) {
         }
         Phase::Pending => {}
     }
+    false
 }
 
 /// One reconcile cycle: list every Sandbox, reconcile it, then close DB
@@ -518,12 +574,14 @@ async fn run_cycle(ctx: &WorkerContext, namespace: &str) {
     };
 
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut unbillable_running = 0i64;
     for sb in &sandboxes {
         if let Some(uid) = &sb.metadata.uid {
             seen.insert(uid.clone());
         }
-        reconcile(&ctx.pool, sb).await;
+        unbillable_running += i64::from(reconcile(&ctx.pool, sb).await);
     }
+    unbillable_running_metric().set(unbillable_running);
 
     let open = match list_open(&ctx.pool, namespace).await {
         Ok(o) => o,
@@ -532,13 +590,20 @@ async fn run_cycle(ctx: &WorkerContext, namespace: &str) {
             return;
         }
     };
-    let now = chrono::Utc::now();
     for row in open {
         if seen.contains(&row.runtime_uid) {
             continue;
         }
         if let Err(e) =
-            close_by_uid(&ctx.pool, &row.runtime_uid, "controller_lost_track", now).await
+            // A vanished runtime stopped contributing billable usage when it
+            // was last observed, not when a later recovery poll noticed it.
+            close_by_uid(
+                &ctx.pool,
+                &row.runtime_uid,
+                "controller_lost_track",
+                row.last_observed_at,
+            )
+            .await
         {
             tracing::error!(session_id = row.id, runtime_uid = row.runtime_uid, error = %e, "billing-session: recover missing session");
         }

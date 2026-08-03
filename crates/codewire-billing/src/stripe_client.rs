@@ -11,7 +11,7 @@ use std::time::Duration;
 use sqlx::PgPool;
 use stripe::{IdempotencyKey, RequestStrategy, StripeRequest};
 use stripe_billing::billing_portal_session::CreateBillingPortalSession;
-use stripe_billing::invoice_item::CreateInvoiceItem;
+use stripe_billing::invoice_item::{CreateInvoiceItem, UpdateInvoiceItem};
 use stripe_billing::subscription::{CancelSubscription, ListSubscription, RetrieveSubscription};
 use stripe_billing::subscription_item::{
     UpdateSubscriptionItem, UpdateSubscriptionItemProrationBehavior,
@@ -35,16 +35,6 @@ pub struct StripeHandle {
     /// `billing.stripeMode`.
     live: bool,
     webhook_secret: String,
-}
-
-pub(crate) struct AdminCreditItemInput<'a> {
-    pub customer_id: &'a str,
-    pub invoice_id: &'a str,
-    pub amount_cents: i64,
-    pub currency: &'a str,
-    pub description: &'a str,
-    pub org_id: &'a str,
-    pub idempotency_key: &'a str,
 }
 
 impl StripeHandle {
@@ -132,6 +122,29 @@ impl StripeHandle {
             .customer(customer_id)
             .amount(amount_cents)
             .currency(stripe_types::Currency::USD)
+            .description(description)
+            .customize()
+            .request_strategy(RequestStrategy::Idempotent(idempotency_key))
+            .send(client)
+            .await
+            .map_err(stripe_err)?;
+        Ok(item.id.to_string())
+    }
+
+    /// Reconciles an existing pending overage item to its cumulative
+    /// month-to-date amount. This deliberately updates in place: deleting and
+    /// recreating a pending Stripe item loses the stable provider identity.
+    pub async fn update_overage_invoice_item(
+        &self,
+        item_id: &str,
+        amount_cents: i64,
+        description: &str,
+        idempotency_key: &str,
+    ) -> Result<String, AppError> {
+        let client = self.client()?;
+        let idempotency_key = IdempotencyKey::new(idempotency_key).map_err(stripe_err)?;
+        let item = UpdateInvoiceItem::new(item_id)
+            .amount(amount_cents)
             .description(description)
             .customize()
             .request_strategy(RequestStrategy::Idempotent(idempotency_key))
@@ -629,40 +642,5 @@ impl StripeHandle {
         .await
         .map_err(stripe_err)?;
         Ok(())
-    }
-
-    /// Negative InvoiceItem for the admin-credit flow
-    /// (webhook.go::handleInvoiceCreated). Returns the item ID.
-    pub(crate) async fn create_admin_credit_item(
-        &self,
-        input: AdminCreditItemInput<'_>,
-    ) -> Result<String, AppError> {
-        let client = self.client()?;
-        let currency: stripe_types::Currency = input.currency.parse().map_err(stripe_err)?;
-        let idempotency_key = IdempotencyKey::new(input.idempotency_key).map_err(stripe_err)?;
-        let item = CreateInvoiceItem::new()
-            .customer(input.customer_id)
-            .invoice(input.invoice_id)
-            .amount(input.amount_cents)
-            .currency(currency)
-            .description(input.description)
-            .discountable(false)
-            .metadata([
-                (
-                    "admin_credit_kind".to_string(),
-                    "subscription_base".to_string(),
-                ),
-                (
-                    "stripe_invoice_id".to_string(),
-                    input.invoice_id.to_string(),
-                ),
-                ("org_id".to_string(), input.org_id.to_string()),
-            ])
-            .customize()
-            .request_strategy(RequestStrategy::Idempotent(idempotency_key))
-            .send(client)
-            .await
-            .map_err(stripe_err)?;
-        Ok(item.id.to_string())
     }
 }

@@ -67,6 +67,7 @@ url = { workspace = true }
 # Tracing
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+prometheus = { workspace = true }
 
 # Optional OpenTelemetry
 opentelemetry = { workspace = true, optional = true }

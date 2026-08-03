@@ -209,13 +209,17 @@ error surface. When a client WI flips an area (05 onward):
 
 ## Codegen pipeline
 
-- **Rust (server + client):** pinned contract generation writes the checked-in
-  `crates/codewire-proto/codewire_descriptor.bin` descriptor set.
-  `crates/codewire-proto` feeds that exact artifact to `connectrpc-build`, so
-  ordinary Rust and image builds do not invoke ambient `protoc`. Server traits
-  and client stubs come from the same crate; client stubs sit behind its
-  default-on `client` feature. New proto files must be added to the crate's
-  `build.rs` list, and `make proto-generate` refreshes the descriptor set.
+- **Rust (server + client):** pinned contract generation writes two checked-in
+  descriptor sets: customer/control-plane contracts in
+  `crates/codewire-proto/codewire_descriptor.bin`, and global-administrator
+  contracts in `crates/codewire-admin-proto/codewire_admin_descriptor.bin`.
+  Each crate feeds only its descriptor to `connectrpc-build`, so ordinary Rust
+  and image builds do not invoke ambient `protoc`; a customer binary cannot
+  pull billing-admin contracts through `codewire-proto`. Server traits and
+  client stubs remain in their audience-specific crate, with client stubs
+  behind the default-on `client` feature. New proto files must be added to the
+  appropriate crate's `build.rs` list, and `make proto-generate` refreshes
+  both descriptor sets.
 - **Go:** `protoc-gen-go` + `protoc-gen-connect-go` via
   `proto/buf.gen.codewire.yaml` into the one
   standalone `libs/gen-go/` module. buf managed mode supplies `go_package`

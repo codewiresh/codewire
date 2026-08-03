@@ -487,7 +487,15 @@ elif [ "$event_selected" = false ]; then
         select_token go_consumer_interop
         recognized=true
         ;;
-      crates/codewire-proto/*)
+      crates/codewire-proto/*|crates/codewire-admin-proto/*)
+        select_token contracts
+        select_token contracts_proto
+        recognized=true
+        ;;
+      scripts/ci/proto/build-rust-descriptors.sh|\
+      scripts/ci/tests/test-admin-proto-boundary.sh)
+        # The Rust audience-descriptor builder and its CLI dependency-boundary
+        # guard alter generated contract inputs, not runtime behavior.
         select_token contracts
         select_token contracts_proto
         recognized=true

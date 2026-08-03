@@ -424,23 +424,6 @@ pub async fn resolve_effective_org_environment_plan(pool: &PgPool, org_id: &str)
     EffectivePlan::default()
 }
 
-/// Mirrors `OrgOwnerIsAdmin`.
-pub async fn org_owner_is_admin(pool: &PgPool, org_id: &str) -> bool {
-    sqlx::query_as::<_, (bool,)>(
-        r#"SELECT u.is_admin FROM org_members m
-           JOIN users u ON u.id = m.user_id
-           WHERE m.org_id = $1 AND m.role = 'owner'
-           ORDER BY m.created_at ASC LIMIT 1"#,
-    )
-    .bind(org_id)
-    .fetch_optional(pool)
-    .await
-    .ok()
-    .flatten()
-    .map(|(b,)| b)
-    .unwrap_or(false)
-}
-
 /// The overage-relevant slice of a sandbox plan, from the DB catalog
 /// (Go reads the in-memory catalog loaded from the same rows;
 /// archived plans are excluded there too).
@@ -571,7 +554,6 @@ pub async fn report_environment_overages(deps: &MeteringDeps) -> anyhow::Result<
             continue;
         }
 
-        let owner_is_admin = org_owner_is_admin(pool, &org_id).await;
         checked += 1;
 
         let (cpu_hours, mem_gb_hours, disk_gb_hours) =
@@ -584,6 +566,15 @@ pub async fn report_environment_overages(deps: &MeteringDeps) -> anyhow::Result<
             };
 
         let overage_cents = calculate_overage_cents(&plan, cpu_hours, mem_gb_hours, disk_gb_hours);
+        let billing_exempt: bool = sqlx::query_scalar(
+            "SELECT COALESCE(billing_exempt, false) FROM organizations WHERE id = $1",
+        )
+        .bind(&org_id)
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or(false);
 
         let existing: Option<(i32, Option<String>)> = match sqlx::query_as(
             r#"SELECT last_overage_cents, stripe_invoice_item_id
@@ -609,7 +600,8 @@ pub async fn report_environment_overages(deps: &MeteringDeps) -> anyhow::Result<
         }
 
         // Below minimum threshold.
-        if overage_cents > 0 && overage_cents < deps.stripe.min_overage_cents() {
+        if billing_exempt || (overage_cents > 0 && overage_cents < deps.stripe.min_overage_cents())
+        {
             sqlx::query(
                 r#"INSERT INTO environment_usage_billing
                    (org_id, billing_period_start, last_cpu_hours, last_mem_gb_hours, last_disk_gb_hours, last_overage_cents, stripe_invoice_item_id, updated_at)
@@ -629,12 +621,19 @@ pub async fn report_environment_overages(deps: &MeteringDeps) -> anyhow::Result<
             .map_err(|e| anyhow::anyhow!("record below-threshold environment overage: {e}"))?;
             log_billing_event(
                 pool,
-                "env_below_threshold",
+                if billing_exempt {
+                    "env_billing_exempt"
+                } else {
+                    "env_below_threshold"
+                },
                 &org_id,
                 Some(overage_cents),
                 "usd",
                 "",
-                Some(serde_json::json!({ "threshold": deps.stripe.min_overage_cents() })),
+                Some(serde_json::json!({
+                    "threshold": deps.stripe.min_overage_cents(),
+                    "billing_exempt": billing_exempt,
+                })),
             )
             .await;
             updated += 1;
@@ -662,92 +661,94 @@ pub async fn report_environment_overages(deps: &MeteringDeps) -> anyhow::Result<
             .is_some_and(|s| !s.is_empty());
 
         if has_stripe_sub {
-            // Pending items are replaced wholesale; the subscription's
-            // billing cycle invoices them.
-            if let Some(old_id) = existing_item_id.as_deref().filter(|s| !s.is_empty()) {
-                let idempotency_key = metering_idempotency_key("delete-item", &[&org_id, old_id]);
-                if let Err(e) = run_organization_billing_mutation(pool, &org_id, async {
-                    deps.stripe
-                        .delete_invoice_item(old_id, &idempotency_key)
-                        .await
-                        .map_err(OrganizationBillingMutationError::ambiguous)
-                })
-                .await
-                {
-                    tracing::warn!(id = old_id, error = %e, "env overage: delete old invoice item");
-                    continue;
-                }
-            }
-
             let mut new_item_id: Option<String> = None;
             if overage_cents > 0 {
                 let amount = overage_cents.to_string();
-                let idempotency_key = metering_idempotency_key(
-                    "subscription-overage",
-                    &[&org_id, &period_label, &amount],
-                );
-                match run_organization_billing_mutation(pool, &org_id, async {
-                    deps.stripe
-                        .create_overage_invoice_item(
-                            &customer_id,
-                            i64::from(overage_cents),
-                            &format!("Environment compute overage ({period_label})"),
-                            &idempotency_key,
+                let description = format!("Environment compute overage ({period_label})");
+                let (operation_kind, idempotency_key) =
+                    if let Some(item_id) = existing_item_id.as_deref() {
+                        (
+                            "subscription_overage_update",
+                            metering_idempotency_key(
+                                "subscription-overage-update",
+                                &[&org_id, &period_label, item_id, &amount],
+                            ),
                         )
-                        .await
-                        .map_err(OrganizationBillingMutationError::ambiguous)
-                })
-                .await
-                {
+                    } else {
+                        (
+                            "subscription_overage_create",
+                            metering_idempotency_key(
+                                "subscription-overage-create",
+                                &[&org_id, &period_label, &amount],
+                            ),
+                        )
+                    };
+                begin_external_operation(
+                    pool,
+                    &org_id,
+                    month_start,
+                    operation_kind,
+                    &idempotency_key,
+                    overage_cents,
+                )
+                .await?;
+                let operation = if let Some(item_id) = existing_item_id.as_deref() {
+                    run_organization_billing_mutation(pool, &org_id, async {
+                        deps.stripe
+                            .update_overage_invoice_item(
+                                item_id,
+                                i64::from(overage_cents),
+                                &description,
+                                &idempotency_key,
+                            )
+                            .await
+                            .map_err(OrganizationBillingMutationError::ambiguous)
+                    })
+                    .await
+                } else {
+                    run_organization_billing_mutation(pool, &org_id, async {
+                        deps.stripe
+                            .create_overage_invoice_item(
+                                &customer_id,
+                                i64::from(overage_cents),
+                                &description,
+                                &idempotency_key,
+                            )
+                            .await
+                            .map_err(OrganizationBillingMutationError::ambiguous)
+                    })
+                    .await
+                };
+                match operation {
                     Err(e) => {
                         tracing::error!(org_id, error = %e, "env overage: create invoice item");
                         continue;
                     }
                     Ok(id) => {
-                        log_billing_event(
+                        let watermark = UsageWatermark {
+                            org_id: &org_id,
+                            period_start: month_start,
+                            cpu_hours,
+                            mem_gb_hours,
+                            disk_gb_hours,
+                            overage_cents,
+                        };
+                        complete_subscription_operation_and_watermark(
                             pool,
-                            "env_overage_charge",
-                            &org_id,
-                            Some(overage_cents),
-                            "usd",
+                            &idempotency_key,
                             &id,
-                            Some(serde_json::json!({
-                                "cpu_hours": cpu_hours, "mem_gb_hours": mem_gb_hours, "disk_gb_hours": disk_gb_hours,
-                            })),
+                            watermark,
                         )
-                        .await;
+                        .await?;
                         new_item_id = Some(id);
                     }
                 }
             }
 
-            if overage_cents > 0 && owner_is_admin && new_item_id.is_some() {
-                let amount = overage_cents.to_string();
-                let idempotency_key = metering_idempotency_key(
-                    "subscription-overage-admin-credit",
-                    &[&org_id, &period_label, &amount],
-                );
-                match run_organization_billing_mutation(pool, &org_id, async {
-                    deps.stripe
-                        .create_overage_invoice_item(
-                            &customer_id,
-                            -i64::from(overage_cents),
-                            &format!("Admin credit for billing visibility: environment overage ({period_label})"),
-                            &idempotency_key,
-                        )
-                        .await
-                        .map_err(OrganizationBillingMutationError::ambiguous)
-                })
-                .await
-                {
-                    Err(e) => tracing::error!(org_id, error = %e, "env overage: create admin credit"),
-                    Ok(credit_id) => {
-                        log_billing_event(pool, "env_admin_credit", &org_id, Some(-overage_cents), "usd", &credit_id, None).await;
-                    }
-                }
-            }
-
-            sqlx::query(
+            // A zero target has no provider object; it can safely advance the
+            // local observation watermark without an external mutation.
+            if overage_cents == 0 {
+                sqlx::query(
                 r#"INSERT INTO environment_usage_billing
                    (org_id, billing_period_start, last_cpu_hours, last_mem_gb_hours, last_disk_gb_hours, last_overage_cents, stripe_invoice_item_id, updated_at)
                    VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
@@ -765,6 +766,7 @@ pub async fn report_environment_overages(deps: &MeteringDeps) -> anyhow::Result<
             .execute(pool)
             .await
             .map_err(|e| anyhow::anyhow!("record subscription environment overage: {e}"))?;
+            }
         } else {
             // No Stripe subscription — invoice the incremental
             // difference immediately.
@@ -779,6 +781,15 @@ pub async fn report_environment_overages(deps: &MeteringDeps) -> anyhow::Result<
                 "incremental-overage",
                 &[&org_id, &period_label, &previous, &diff],
             );
+            begin_external_operation(
+                pool,
+                &org_id,
+                month_start,
+                "direct_overage_invoice_item",
+                &idempotency_key,
+                diff_cents,
+            )
+            .await?;
             let charge_id = match run_organization_billing_mutation(pool, &org_id, async {
                 deps.stripe
                     .create_overage_invoice_item(
@@ -798,6 +809,7 @@ pub async fn report_environment_overages(deps: &MeteringDeps) -> anyhow::Result<
                 }
                 Ok(id) => id,
             };
+            complete_external_operation(pool, &idempotency_key, &charge_id).await?;
             log_billing_event(
                 pool,
                 "env_overage_charge",
@@ -812,36 +824,20 @@ pub async fn report_environment_overages(deps: &MeteringDeps) -> anyhow::Result<
             )
             .await;
 
-            if owner_is_admin {
-                let idempotency_key = metering_idempotency_key(
-                    "incremental-overage-admin-credit",
-                    &[&org_id, &period_label, &previous, &diff],
-                );
-                match run_organization_billing_mutation(pool, &org_id, async {
-                    deps.stripe
-                        .create_overage_invoice_item(
-                            &customer_id,
-                            -i64::from(diff_cents),
-                            &format!("Admin credit for billing visibility: environment overage ({period_label})"),
-                            &idempotency_key,
-                        )
-                        .await
-                        .map_err(OrganizationBillingMutationError::ambiguous)
-                })
-                .await
-                {
-                    Err(e) => tracing::error!(org_id, error = %e, "env overage: create admin credit"),
-                    Ok(credit_id) => {
-                        log_billing_event(pool, "env_admin_credit", &org_id, Some(-diff_cents), "usd", &credit_id, None).await;
-                    }
-                }
-            }
-
             let invoice_key = metering_idempotency_key(
                 "overage-invoice",
                 &[&org_id, &period_label, &previous, &diff],
             );
-            match run_organization_billing_mutation(pool, &org_id, async {
+            begin_external_operation(
+                pool,
+                &org_id,
+                month_start,
+                "direct_overage_invoice",
+                &invoice_key,
+                diff_cents,
+            )
+            .await?;
+            let invoice_id = match run_organization_billing_mutation(pool, &org_id, async {
                 deps.stripe
                     .create_auto_advancing_invoice(
                         &customer_id,
@@ -853,50 +849,66 @@ pub async fn report_environment_overages(deps: &MeteringDeps) -> anyhow::Result<
             })
             .await
             {
-                Err(e) => tracing::error!(org_id, error = %e, "env overage: create invoice"),
-                Ok(invoice_id) => {
-                    let finalize_key =
-                        metering_idempotency_key("finalize-invoice", &[&org_id, &invoice_id]);
-                    match run_organization_billing_mutation(pool, &org_id, async {
-                        deps.stripe
-                            .finalize_invoice(&invoice_id, &finalize_key)
-                            .await
-                            .map_err(OrganizationBillingMutationError::ambiguous)
-                    })
-                    .await
-                    {
-                        Err(e) => {
-                            tracing::error!(org_id, invoice = invoice_id, error = %e, "env overage: finalize invoice")
-                        }
-                        Ok(()) => {
-                            tracing::info!(
-                                org_id,
-                                invoice = invoice_id,
-                                amount_cents = diff_cents,
-                                "env overage: invoice created"
-                            )
-                        }
-                    }
+                Err(e) => {
+                    tracing::error!(org_id, error = %e, "env overage: create invoice");
+                    continue;
                 }
+                Ok(invoice_id) => invoice_id,
+            };
+            complete_external_operation(pool, &invoice_key, &invoice_id).await?;
+            let finalize_key =
+                metering_idempotency_key("finalize-invoice", &[&org_id, &invoice_id]);
+            begin_external_operation(
+                pool,
+                &org_id,
+                month_start,
+                "direct_overage_invoice_finalize",
+                &finalize_key,
+                diff_cents,
+            )
+            .await?;
+            let finalized = match run_organization_billing_mutation(pool, &org_id, async {
+                deps.stripe
+                    .finalize_invoice(&invoice_id, &finalize_key)
+                    .await
+                    .map_err(OrganizationBillingMutationError::ambiguous)
+            })
+            .await
+            {
+                Err(e) => {
+                    tracing::error!(org_id, invoice = invoice_id, error = %e, "env overage: finalize invoice");
+                    false
+                }
+                Ok(()) => true,
+            };
+            // The usage watermark represents a settled external charge. A
+            // failed create/finalize is retried with the same idempotency keys
+            // on the next meter cycle rather than being silently skipped.
+            if !finalized {
+                continue;
             }
 
-            sqlx::query(
-                r#"INSERT INTO environment_usage_billing
-                   (org_id, billing_period_start, last_cpu_hours, last_mem_gb_hours, last_disk_gb_hours, last_overage_cents, stripe_invoice_item_id, updated_at)
-                   VALUES ($1, $2, $3, $4, $5, $6, NULL, NOW())
-                   ON CONFLICT (org_id, billing_period_start)
-                   DO UPDATE SET last_cpu_hours = $3, last_mem_gb_hours = $4, last_disk_gb_hours = $5,
-                                last_overage_cents = $6, stripe_invoice_item_id = NULL, updated_at = NOW()"#,
+            let watermark = UsageWatermark {
+                org_id: &org_id,
+                period_start: month_start,
+                cpu_hours,
+                mem_gb_hours,
+                disk_gb_hours,
+                overage_cents,
+            };
+            complete_direct_invoice_operation_and_watermark(
+                pool,
+                &finalize_key,
+                &invoice_id,
+                watermark,
             )
-            .bind(&org_id)
-            .bind(month_start)
-            .bind(cpu_hours)
-            .bind(mem_gb_hours)
-            .bind(disk_gb_hours)
-            .bind(overage_cents)
-            .execute(pool)
-            .await
-            .map_err(|e| anyhow::anyhow!("record invoiced environment overage: {e}"))?;
+            .await?;
+            tracing::info!(
+                org_id,
+                invoice = invoice_id,
+                amount_cents = diff_cents,
+                "env overage: invoice created"
+            );
         }
 
         updated += 1;
@@ -918,6 +930,161 @@ fn metering_idempotency_key(kind: &str, parts: &[&str]) -> String {
         hasher.update(part.as_bytes());
     }
     format!("cw-{kind}-{:x}", hasher.finalize())
+}
+
+/// Persist a provider operation before calling Stripe. The Stripe idempotency
+/// key is the durable recovery handle: a retry after a process crash receives
+/// the same provider object rather than charging twice.
+async fn begin_external_operation(
+    pool: &PgPool,
+    org_id: &str,
+    period_start: chrono::DateTime<chrono::Utc>,
+    kind: &str,
+    idempotency_key: &str,
+    amount_cents: i32,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        r#"INSERT INTO billing_external_operations
+               (organization_id, billing_period_start, operation_kind, idempotency_key, requested_amount_cents)
+           VALUES ($1, $2, $3, $4, $5)
+           ON CONFLICT (idempotency_key) DO NOTHING"#,
+    )
+    .bind(org_id)
+    .bind(period_start)
+    .bind(kind)
+    .bind(idempotency_key)
+    .bind(amount_cents)
+    .execute(pool)
+    .await
+    .map_err(|error| anyhow::anyhow!("record pending external billing operation: {error}"))?;
+    Ok(())
+}
+
+struct UsageWatermark<'a> {
+    org_id: &'a str,
+    period_start: chrono::DateTime<chrono::Utc>,
+    cpu_hours: f64,
+    mem_gb_hours: f64,
+    disk_gb_hours: f64,
+    overage_cents: i32,
+}
+
+/// Record the provider result and its usage watermark in one database
+/// transaction. The watermark is therefore never ahead of durable evidence
+/// that identifies the exact Stripe mutation which produced it.
+async fn complete_subscription_operation_and_watermark(
+    pool: &PgPool,
+    idempotency_key: &str,
+    provider_object_id: &str,
+    watermark: UsageWatermark<'_>,
+) -> anyhow::Result<()> {
+    let mut tx = pool.begin().await?;
+    let updated = sqlx::query(
+        r#"UPDATE billing_external_operations
+              SET provider_object_id = $2, provider_state = 'completed', completed_at = NOW()
+            WHERE idempotency_key = $1"#,
+    )
+    .bind(idempotency_key)
+    .bind(provider_object_id)
+    .execute(&mut *tx)
+    .await?;
+    if updated.rows_affected() != 1 {
+        return Err(anyhow::anyhow!(
+            "external billing operation disappeared before completion"
+        ));
+    }
+    sqlx::query(
+        r#"INSERT INTO environment_usage_billing
+               (org_id, billing_period_start, last_cpu_hours, last_mem_gb_hours,
+                last_disk_gb_hours, last_overage_cents, stripe_invoice_item_id, updated_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
+           ON CONFLICT (org_id, billing_period_start)
+           DO UPDATE SET last_cpu_hours = EXCLUDED.last_cpu_hours,
+                         last_mem_gb_hours = EXCLUDED.last_mem_gb_hours,
+                         last_disk_gb_hours = EXCLUDED.last_disk_gb_hours,
+                         last_overage_cents = EXCLUDED.last_overage_cents,
+                         stripe_invoice_item_id = EXCLUDED.stripe_invoice_item_id,
+                         updated_at = NOW()"#,
+    )
+    .bind(watermark.org_id)
+    .bind(watermark.period_start)
+    .bind(watermark.cpu_hours)
+    .bind(watermark.mem_gb_hours)
+    .bind(watermark.disk_gb_hours)
+    .bind(watermark.overage_cents)
+    .bind(provider_object_id)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+async fn complete_external_operation(
+    pool: &PgPool,
+    idempotency_key: &str,
+    provider_object_id: &str,
+) -> anyhow::Result<()> {
+    let updated = sqlx::query(
+        r#"UPDATE billing_external_operations
+              SET provider_object_id = $2, provider_state = 'completed', completed_at = NOW()
+            WHERE idempotency_key = $1"#,
+    )
+    .bind(idempotency_key)
+    .bind(provider_object_id)
+    .execute(pool)
+    .await?;
+    if updated.rows_affected() != 1 {
+        return Err(anyhow::anyhow!(
+            "external billing operation disappeared before completion"
+        ));
+    }
+    Ok(())
+}
+
+async fn complete_direct_invoice_operation_and_watermark(
+    pool: &PgPool,
+    idempotency_key: &str,
+    provider_object_id: &str,
+    watermark: UsageWatermark<'_>,
+) -> anyhow::Result<()> {
+    let mut tx = pool.begin().await?;
+    let updated = sqlx::query(
+        r#"UPDATE billing_external_operations
+              SET provider_object_id = $2, provider_state = 'completed', completed_at = NOW()
+            WHERE idempotency_key = $1"#,
+    )
+    .bind(idempotency_key)
+    .bind(provider_object_id)
+    .execute(&mut *tx)
+    .await?;
+    if updated.rows_affected() != 1 {
+        return Err(anyhow::anyhow!(
+            "external billing operation disappeared before finalization"
+        ));
+    }
+    sqlx::query(
+        r#"INSERT INTO environment_usage_billing
+               (org_id, billing_period_start, last_cpu_hours, last_mem_gb_hours,
+                last_disk_gb_hours, last_overage_cents, stripe_invoice_item_id, updated_at)
+           VALUES ($1, $2, $3, $4, $5, $6, NULL, NOW())
+           ON CONFLICT (org_id, billing_period_start)
+           DO UPDATE SET last_cpu_hours = EXCLUDED.last_cpu_hours,
+                         last_mem_gb_hours = EXCLUDED.last_mem_gb_hours,
+                         last_disk_gb_hours = EXCLUDED.last_disk_gb_hours,
+                         last_overage_cents = EXCLUDED.last_overage_cents,
+                         stripe_invoice_item_id = NULL,
+                         updated_at = NOW()"#,
+    )
+    .bind(watermark.org_id)
+    .bind(watermark.period_start)
+    .bind(watermark.cpu_hours)
+    .bind(watermark.mem_gb_hours)
+    .bind(watermark.disk_gb_hours)
+    .bind(watermark.overage_cents)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(())
 }
 
 #[cfg(test)]

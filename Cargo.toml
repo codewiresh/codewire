@@ -3,6 +3,7 @@ resolver = "2"
 # The root workspace is for server/runtime/shared crates. Desktop app crates
 # are excluded so non-desktop Cargo commands never resolve GPUI/font-kit.
 members = [
+    "crates/codewire-admin-proto",
     "crates/codewire-billing",
     "crates/codewire-client",
     "crates/codewire-dashboard-web",
@@ -46,6 +47,10 @@ codewire-gateway-proto = { path = "crates/codewire-gateway-proto" }
 # message/service types without the Connect HTTP client stack; test/client
 # consumers opt back in with `features = ["client"]`.
 codewire-proto = { path = "crates/codewire-proto", default-features = false }
+# Global-administrator contracts have their own descriptor and generated-code
+# crate. Customer clients must not pull billing/admin surfaces into their
+# dependency graph.
+codewire-admin-proto = { path = "crates/codewire-admin-proto", default-features = false }
 codewire-daemon = { path = "crates/codewire-daemon" }
 codewire-derp = { path = "crates/codewire-derp" }
 codewire-tailnet = { path = "crates/codewire-tailnet" }
@@ -77,6 +82,7 @@ clap = { version = "4", default-features = false, features = ["derive", "error-c
 clap_complete = "4"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+prometheus = "0.14"
 
 # Time
 chrono = { version = "0.4", default-features = false, features = ["now", "serde", "std"] }
