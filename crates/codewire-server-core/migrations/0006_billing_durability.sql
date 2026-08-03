@@ -36,3 +36,7 @@ CREATE INDEX IF NOT EXISTS billing_external_operations_org_period_idx
 ALTER TABLE org_subscriptions
     ADD COLUMN IF NOT EXISTS stripe_event_created_at timestamp without time zone,
     ADD COLUMN IF NOT EXISTS stripe_event_id text;
+
+ALTER TABLE environment_subscriptions
+    ADD COLUMN IF NOT EXISTS stripe_event_created_at timestamp without time zone,
+    ADD COLUMN IF NOT EXISTS stripe_event_id text;

@@ -85,51 +85,60 @@ pub async fn stripe_webhook(
 pub async fn handle_webhook_event(state: &BillingState, event: Event) -> anyhow::Result<()> {
     let pool = &state.pool;
 
-    let exists: bool =
-        sqlx::query_scalar(r#"SELECT EXISTS(SELECT 1 FROM stripe_webhook_events WHERE id = $1)"#)
-            .bind(event.id.as_str())
-            .fetch_one(pool)
-            .await?;
-    if exists {
+    // The unique insert is the claim. `SELECT EXISTS` followed by a later
+    // best-effort insert races across replicas and can double-apply an event.
+    let claimed: Option<String> = sqlx::query_scalar(
+        r#"INSERT INTO stripe_webhook_events (id, event_type, stripe_created_at, processed_at)
+           VALUES ($1, $2, to_timestamp($3), NOW())
+           ON CONFLICT (id) DO NOTHING
+           RETURNING id"#,
+    )
+    .bind(event.id.as_str())
+    .bind(event.type_.to_string())
+    .bind(event.created)
+    .fetch_optional(pool)
+    .await?;
+    if claimed.is_none() {
         tracing::debug!(event_id = %event.id, "billing: skipping duplicate webhook event");
         return Ok(());
     }
 
-    match &event.data.object {
-        EventObject::CheckoutSessionCompleted(session) => {
-            handle_checkout_completed(state, session).await?
+    let result: anyhow::Result<()> = async {
+        match &event.data.object {
+            EventObject::CheckoutSessionCompleted(session) => {
+                handle_checkout_completed(state, session).await?
+            }
+            EventObject::CustomerSubscriptionUpdated(sub) => {
+                handle_subscription_updated(pool, sub, event.created, event.id.as_str()).await?
+            }
+            EventObject::CustomerSubscriptionDeleted(sub) => {
+                handle_subscription_deleted(pool, sub, event.created, event.id.as_str()).await?
+            }
+            EventObject::CustomerSubscriptionTrialWillEnd(sub) => {
+                handle_trial_will_end(pool, &state.email, sub).await?
+            }
+            EventObject::InvoiceCreated(inv) => handle_invoice_created(state, inv).await?,
+            EventObject::InvoicePaid(inv) => handle_invoice_paid(state, inv).await?,
+            EventObject::InvoicePaymentFailed(inv) => {
+                handle_invoice_payment_failed(state, inv).await?
+            }
+            EventObject::InvoiceFinalized(inv) => upsert_invoice(pool, inv).await?,
+            _ => {
+                tracing::debug!(event_type = %event.type_, "billing: unhandled webhook event type");
+            }
         }
-        EventObject::CustomerSubscriptionUpdated(sub) => {
-            handle_subscription_updated(pool, sub).await?
-        }
-        EventObject::CustomerSubscriptionDeleted(sub) => {
-            handle_subscription_deleted(pool, sub).await?
-        }
-        EventObject::CustomerSubscriptionTrialWillEnd(sub) => {
-            handle_trial_will_end(pool, &state.email, sub).await?
-        }
-        EventObject::InvoiceCreated(inv) => handle_invoice_created(state, inv).await?,
-        EventObject::InvoicePaid(inv) => handle_invoice_paid(state, inv).await?,
-        EventObject::InvoicePaymentFailed(inv) => handle_invoice_payment_failed(state, inv).await?,
-        EventObject::InvoiceFinalized(inv) => {
-            upsert_invoice(pool, inv).await?;
-        }
-        _ => {
-            tracing::debug!(event_type = %event.type_, "billing: unhandled webhook event type");
-        }
+        Ok(())
     }
-
-    // Best-effort idempotency record, like the Go `_, _ = pool.Exec`.
-    let _ = sqlx::query(
-        r#"INSERT INTO stripe_webhook_events (id, event_type) VALUES ($1, $2)
-           ON CONFLICT (id) DO NOTHING"#,
-    )
-    .bind(event.id.as_str())
-    .bind(event.type_.to_string())
-    .execute(pool)
     .await;
-
-    Ok(())
+    if result.is_err() {
+        // A failed delivery must be retryable. The receipt is the claim, not
+        // an irreversible acknowledgement; Stripe receives a 500 and retries.
+        sqlx::query("DELETE FROM stripe_webhook_events WHERE id = $1")
+            .bind(event.id.as_str())
+            .execute(pool)
+            .await?;
+    }
+    result
 }
 
 fn expandable_id<T: stripe_types::Object>(e: &stripe_types::Expandable<T>) -> String
@@ -349,6 +358,8 @@ fn db_status(status: &stripe_shared::SubscriptionStatus) -> String {
 async fn handle_subscription_updated(
     pool: &PgPool,
     sub: &stripe_shared::Subscription,
+    event_created: i64,
+    event_id: &str,
 ) -> anyhow::Result<()> {
     let status = db_status(&sub.status);
     let plan_name = sub.metadata.get("plan").cloned().unwrap_or_default();
@@ -361,23 +372,31 @@ async fn handle_subscription_updated(
     .await?;
 
     if let Some(env_org_id) = env_org.filter(|o| !o.is_empty()) {
-        let _ = sqlx::query(
-            r#"UPDATE environment_subscriptions SET status = $1, updated_at = NOW()
-               WHERE stripe_subscription_id = $2"#,
+        let updated = sqlx::query(
+            r#"UPDATE environment_subscriptions
+                  SET status = $1,
+                      plan = CASE WHEN $2 = '' THEN plan ELSE $2 END,
+                      stripe_event_created_at = to_timestamp($3),
+                      stripe_event_id = $4,
+                      updated_at = NOW()
+                WHERE stripe_subscription_id = $5
+                  AND (stripe_event_created_at IS NULL
+                       OR stripe_event_created_at < to_timestamp($3)
+                       OR (stripe_event_created_at = to_timestamp($3)
+                           AND COALESCE(stripe_event_id, '') < $4))"#,
         )
         .bind(&status)
+        .bind(&plan_name)
+        .bind(event_created)
+        .bind(event_id)
         .bind(sub.id.as_str())
         .execute(pool)
         .await;
-        if !plan_name.is_empty() {
-            let _ = sqlx::query(
-                r#"UPDATE environment_subscriptions SET plan = $1, updated_at = NOW()
-                   WHERE stripe_subscription_id = $2"#,
-            )
-            .bind(&plan_name)
-            .bind(sub.id.as_str())
-            .execute(pool)
-            .await;
+        if updated
+            .map(|result| result.rows_affected() == 0)
+            .unwrap_or(true)
+        {
+            return Ok(());
         }
         log_billing_event(
             pool,
@@ -392,24 +411,28 @@ async fn handle_subscription_updated(
         return Ok(());
     }
 
-    sqlx::query(
-        r#"UPDATE org_subscriptions SET status = $1, updated_at = NOW()
-           WHERE stripe_subscription_id = $2"#,
+    let updated = sqlx::query(
+        r#"UPDATE org_subscriptions
+              SET status = $1,
+                  plan = CASE WHEN $2 = '' THEN plan ELSE $2 END,
+                  stripe_event_created_at = to_timestamp($3),
+                  stripe_event_id = $4,
+                  updated_at = NOW()
+            WHERE stripe_subscription_id = $5
+              AND (stripe_event_created_at IS NULL
+                   OR stripe_event_created_at < to_timestamp($3)
+                   OR (stripe_event_created_at = to_timestamp($3)
+                       AND COALESCE(stripe_event_id, '') < $4))"#,
     )
     .bind(&status)
+    .bind(&plan_name)
+    .bind(event_created)
+    .bind(event_id)
     .bind(sub.id.as_str())
     .execute(pool)
     .await?;
-
-    if !plan_name.is_empty() {
-        let _ = sqlx::query(
-            r#"UPDATE org_subscriptions SET plan = $1, updated_at = NOW()
-               WHERE stripe_subscription_id = $2"#,
-        )
-        .bind(&plan_name)
-        .bind(sub.id.as_str())
-        .execute(pool)
-        .await;
+    if updated.rows_affected() == 0 {
+        return Ok(());
     }
 
     let org_id: Option<String> = sqlx::query_scalar(
@@ -443,6 +466,8 @@ async fn handle_subscription_updated(
 async fn handle_subscription_deleted(
     pool: &PgPool,
     sub: &stripe_shared::Subscription,
+    event_created: i64,
+    event_id: &str,
 ) -> anyhow::Result<()> {
     let env_org: Option<String> = sqlx::query_scalar(
         r#"SELECT org_id FROM environment_subscriptions WHERE stripe_subscription_id = $1"#,
@@ -452,13 +477,27 @@ async fn handle_subscription_deleted(
     .await?;
 
     if let Some(env_org_id) = env_org.filter(|o| !o.is_empty()) {
-        let _ = sqlx::query(
-            r#"UPDATE environment_subscriptions SET status = 'canceled', updated_at = NOW()
-               WHERE stripe_subscription_id = $1"#,
+        let updated = sqlx::query(
+            r#"UPDATE environment_subscriptions
+                  SET status = 'canceled', stripe_event_created_at = to_timestamp($1),
+                      stripe_event_id = $2, updated_at = NOW()
+                WHERE stripe_subscription_id = $3
+                  AND (stripe_event_created_at IS NULL
+                       OR stripe_event_created_at < to_timestamp($1)
+                       OR (stripe_event_created_at = to_timestamp($1)
+                           AND COALESCE(stripe_event_id, '') < $2))"#,
         )
+        .bind(event_created)
+        .bind(event_id)
         .bind(sub.id.as_str())
         .execute(pool)
         .await;
+        if updated
+            .map(|result| result.rows_affected() == 0)
+            .unwrap_or(true)
+        {
+            return Ok(());
+        }
         log_billing_event(
             pool,
             "env_subscription_canceled",
@@ -476,13 +515,24 @@ async fn handle_subscription_deleted(
         return Ok(());
     }
 
-    sqlx::query(
-        r#"UPDATE org_subscriptions SET status = 'canceled', updated_at = NOW()
-           WHERE stripe_subscription_id = $1"#,
+    let updated = sqlx::query(
+        r#"UPDATE org_subscriptions
+              SET status = 'canceled', stripe_event_created_at = to_timestamp($1),
+                  stripe_event_id = $2, updated_at = NOW()
+            WHERE stripe_subscription_id = $3
+              AND (stripe_event_created_at IS NULL
+                   OR stripe_event_created_at < to_timestamp($1)
+                   OR (stripe_event_created_at = to_timestamp($1)
+                       AND COALESCE(stripe_event_id, '') < $2))"#,
     )
+    .bind(event_created)
+    .bind(event_id)
     .bind(sub.id.as_str())
     .execute(pool)
     .await?;
+    if updated.rows_affected() == 0 {
+        return Ok(());
+    }
 
     let org_id: Option<String> = sqlx::query_scalar(
         r#"SELECT org_id FROM org_subscriptions WHERE stripe_subscription_id = $1"#,
