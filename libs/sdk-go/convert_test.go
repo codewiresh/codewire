@@ -217,6 +217,7 @@ func TestEnvironmentConvertersGolden(t *testing.T) {
 		DeletionRequestedAt: timestamppb.New(time.Date(2026, 3, 1, 0, 4, 0, 0, time.UTC)),
 		DeletionGraceUntil:  timestamppb.New(time.Date(2026, 3, 1, 0, 5, 0, 0, time.UTC)),
 		PresetName:          "Starter", Network: "tailnet",
+		IsolationTier: codewirev1.IsolationTier_ISOLATION_TIER_CONFIDENTIAL,
 		Ports: []*codewirev1.Port{{
 			Id: "port_1", EnvironmentId: "env_1", Port: 3000, Label: "web", Access: codewirev1.PortAccess_PORT_ACCESS_PUBLIC,
 			PreviewUrl: testStringPointer("https://preview.example.test"), CreatedAt: timestamppb.New(time.Date(2026, 3, 1, 0, 6, 0, 0, time.UTC)),
@@ -230,7 +231,7 @@ func TestEnvironmentConvertersGolden(t *testing.T) {
 		CpuMillicores: 2000, CreatedAt: "2026-03-01T00:00:00Z", CreatedBy: "user_1",
 		DeletionGraceUntil: testStringPointer("2026-03-01T00:05:00Z"), DeletionRequestedAt: testStringPointer("2026-03-01T00:04:00Z"),
 		DesiredState: "started", DestroyedAt: testStringPointer("2026-03-01T00:03:00Z"), DiskGb: 20, ErrorReason: testStringPointer("retrying"),
-		Id: "env_1", MemoryMb: 4096, Name: testStringPointer("work"), Network: testStringPointer("tailnet"), OrgId: "org_1",
+		Id: "env_1", IsolationTier: "confidential", MemoryMb: 4096, Name: testStringPointer("work"), Network: testStringPointer("tailnet"), OrgId: "org_1",
 		Ports:    &[]EnvironmentPort{{Access: "public", CreatedAt: "2026-03-01T00:06:00Z", EnvironmentId: "env_1", Id: "port_1", Label: "web", Port: 3000, PreviewUrl: testStringPointer("https://preview.example.test")}},
 		PresetId: testStringPointer("preset_1"), PresetName: testStringPointer("Starter"), Protected: true, Recoverable: true,
 		RetryCount: 2, SetupComplete: true, SetupError: testStringPointer("setup warning"), SetupPhase: 3,
@@ -262,6 +263,7 @@ func TestCreateEnvironmentRequestPreservesOwnedNestedValues(t *testing.T) {
 	empty := ""
 	zero := int64(0)
 	falseValue := false
+	confidential := "confidential"
 	emptyMap := map[string]string{}
 	agents := []SetupAgent{{Type: "codex"}}
 	ports := []AppPort{{Port: 3000, Label: "web", Access: &empty}}
@@ -269,7 +271,7 @@ func TestCreateEnvironmentRequestPreservesOwnedNestedValues(t *testing.T) {
 	request, err := createEnvironmentRequest("org_1", CreateEnvironmentBody{
 		Agent: &empty, AgentEnv: &emptyMap, Agents: &agents, AppPorts: &ports, Branch: &empty,
 		CpuMillicores: &zero, DiskGb: &zero, EnvVars: &emptyMap, Image: &empty, IncludeOrgSecrets: &falseValue,
-		IncludeUserSecrets: &falseValue, InstallAgents: &falseValue, InstallCommand: &empty, MemoryMb: &zero,
+		IncludeUserSecrets: &falseValue, InstallAgents: &falseValue, InstallCommand: &empty, IsolationTier: &confidential, MemoryMb: &zero,
 		Name: &empty, PresetId: &empty, PresetSlug: &empty, RepoUrl: &empty, Repos: &repos, SecretProject: &empty,
 		StartupScript: &empty, TtlSeconds: &zero,
 	})
@@ -281,6 +283,9 @@ func TestCreateEnvironmentRequestPreservesOwnedNestedValues(t *testing.T) {
 	}
 	if request.EnvVars == nil || request.AgentEnv == nil || len(request.Agents) != 1 || len(request.AppPorts) != 1 || len(request.Repos) != 1 {
 		t.Errorf("request lost collection values: %#v", request)
+	}
+	if request.GetIsolationTier() != codewirev1.IsolationTier_ISOLATION_TIER_CONFIDENTIAL {
+		t.Errorf("request changed isolation tier: %#v", request)
 	}
 	if request.GetAgents()[0].GetType() != "codex" || request.GetAppPorts()[0].GetPort() != 3000 || request.GetAppPorts()[0].GetLabel() != "web" || request.GetAppPorts()[0].GetAccess() != "" || request.GetRepos()[0].GetUrl() != "https://example.test/repo" || request.GetRepos()[0].GetBranch() != "" {
 		t.Errorf("request changed nested values: %#v", request)

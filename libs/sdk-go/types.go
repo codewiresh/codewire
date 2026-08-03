@@ -50,6 +50,7 @@ type EnvironmentData struct {
 	DiskGb              int64              `json:"disk_gb"`
 	ErrorReason         *string            `json:"error_reason,omitempty"`
 	Id                  string             `json:"id"`
+	IsolationTier       string             `json:"isolation_tier"`
 	MemoryMb            int64              `json:"memory_mb"`
 	Name                *string            `json:"name,omitempty"`
 	Network             *string            `json:"network,omitempty"`
@@ -89,6 +90,7 @@ type CreateEnvironmentBody struct {
 	IncludeUserSecrets *bool              `json:"include_user_secrets,omitempty"`
 	InstallAgents      *bool              `json:"install_agents,omitempty"`
 	InstallCommand     *string            `json:"install_command,omitempty"`
+	IsolationTier      *string            `json:"isolation_tier,omitempty"`
 	MemoryMb           *int64             `json:"memory_mb,omitempty"`
 	Name               *string            `json:"name,omitempty"`
 	PresetId           *string            `json:"preset_id,omitempty"`
