@@ -29,20 +29,22 @@
     "warmPoolRef": {
       "name": "shadow-pool-tmpl-golden"
     },
-    "workspaceResources": {
-      "containerName": "workspace",
-      "resources": {
-        "limits": {
-          "cpu": "2000m",
-          "ephemeral-storage": "10Gi",
-          "memory": "4096Mi"
-        },
-        "requests": {
-          "cpu": "2000m",
-          "ephemeral-storage": "10Gi",
-          "memory": "4096Mi"
+    "workspaceResources": [
+      {
+        "containerName": "workspace",
+        "resources": {
+          "limits": {
+            "cpu": "2000m",
+            "ephemeral-storage": "10Gi",
+            "memory": "4096Mi"
+          },
+          "requests": {
+            "cpu": "2000m",
+            "ephemeral-storage": "10Gi",
+            "memory": "4096Mi"
+          }
         }
       }
-    }
+    ]
   }
 }

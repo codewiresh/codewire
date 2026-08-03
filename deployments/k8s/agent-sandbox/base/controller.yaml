@@ -104,7 +104,7 @@ spec:
       serviceAccountName: agent-sandbox-controller
       containers:
       - name: agent-sandbox-controller
-        image: ghcr.io/noeljackson/agent-sandbox-controller@sha256:de51d435509eed2db113a64adb72475252909cebf79fc61b44687f46ef4a7849
+        image: ghcr.io/noeljackson/agent-sandbox-controller@sha256:555146af2337dd5d8baf0844d7f5de9a3cd8fc7b032b85756ae244bc2583fb41
         args:
         - --leader-elect=true
         - --extensions

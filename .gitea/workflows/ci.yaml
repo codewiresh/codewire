@@ -28,7 +28,7 @@ env:
   KIND_VERSION: v0.30.0
   KUBECTL_VERSION: v1.34.0
   CARGO_INCREMENTAL: '0'
-  AGENT_SANDBOX_SHA: 85e19118bfa3157bd59360a15a26d7bdd2a7524a
+  AGENT_SANDBOX_SHA: 4c528d3940ac5eb7c0194ce537fc4f4067417c72
 
 # Gitea assigns static jobs to runners before evaluating job-level conditions.
 # Keep the selector's family precision, but execute it through four fixed

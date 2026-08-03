@@ -270,13 +270,13 @@ pub fn render_sandbox_claim(namespace: &str, opts: &ClaimOpts) -> Value {
         }
         spec.insert(
             "workspaceResources".into(),
-            json!({
+            json!([{
                 "containerName": "workspace",
                 "resources": {
                     "requests": Value::Object(requests),
                     "limits": Value::Object(limits),
                 },
-            }),
+            }]),
         );
     }
 

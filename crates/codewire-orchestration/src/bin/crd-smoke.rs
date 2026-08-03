@@ -73,20 +73,21 @@ async fn main() -> anyhow::Result<()> {
         spec["warmPoolRef"]["name"] == "shadow-pool-tmpl-crd-smoke",
         "warmPoolRef did not round-trip: {spec}"
     );
+    let workspace_resources = &spec["workspaceResources"][0];
     anyhow::ensure!(
-        spec["workspaceResources"]["containerName"] == "workspace"
-            && spec["workspaceResources"]["resources"]["requests"]["cpu"] == "1000m"
-            && spec["workspaceResources"]["resources"]["requests"]["memory"] == "2048Mi"
-            && spec["workspaceResources"]["resources"]["requests"]["ephemeral-storage"] == "5Gi"
-            && spec["workspaceResources"]["resources"]["limits"]["cpu"] == "1000m"
-            && spec["workspaceResources"]["resources"]["limits"]["memory"] == "2048Mi"
-            && spec["workspaceResources"]["resources"]["limits"]["ephemeral-storage"] == "5Gi",
+        workspace_resources["containerName"] == "workspace"
+            && workspace_resources["resources"]["requests"]["cpu"] == "1000m"
+            && workspace_resources["resources"]["requests"]["memory"] == "2048Mi"
+            && workspace_resources["resources"]["requests"]["ephemeral-storage"] == "5Gi"
+            && workspace_resources["resources"]["limits"]["cpu"] == "1000m"
+            && workspace_resources["resources"]["limits"]["memory"] == "2048Mi"
+            && workspace_resources["resources"]["limits"]["ephemeral-storage"] == "5Gi",
         "workspaceResources did not round-trip: {spec}"
     );
     anyhow::ensure!(
-        spec["workspaceResources"].get("cpuMillicores").is_none()
-            && spec["workspaceResources"].get("memoryMiB").is_none()
-            && spec["workspaceResources"].get("diskGiB").is_none(),
+        workspace_resources.get("cpuMillicores").is_none()
+            && workspace_resources.get("memoryMiB").is_none()
+            && workspace_resources.get("diskGiB").is_none(),
         "legacy workspaceResources fields unexpectedly survived: {spec}"
     );
     anyhow::ensure!(
