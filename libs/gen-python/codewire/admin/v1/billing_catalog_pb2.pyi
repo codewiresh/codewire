@@ -307,3 +307,19 @@ class ListSubscriptionMigrationsResponse(_message.Message):
     MIGRATIONS_FIELD_NUMBER: _ClassVar[int]
     migrations: _containers.RepeatedCompositeFieldContainer[MigrationRun]
     def __init__(self, migrations: _Optional[_Iterable[_Union[MigrationRun, _Mapping]]] = ...) -> None: ...
+
+class SetOrganizationBillingExemptionRequest(_message.Message):
+    __slots__ = ("organization_id", "billing_exempt")
+    ORGANIZATION_ID_FIELD_NUMBER: _ClassVar[int]
+    BILLING_EXEMPT_FIELD_NUMBER: _ClassVar[int]
+    organization_id: str
+    billing_exempt: bool
+    def __init__(self, organization_id: _Optional[str] = ..., billing_exempt: _Optional[bool] = ...) -> None: ...
+
+class SetOrganizationBillingExemptionResponse(_message.Message):
+    __slots__ = ("organization_id", "billing_exempt")
+    ORGANIZATION_ID_FIELD_NUMBER: _ClassVar[int]
+    BILLING_EXEMPT_FIELD_NUMBER: _ClassVar[int]
+    organization_id: str
+    billing_exempt: bool
+    def __init__(self, organization_id: _Optional[str] = ..., billing_exempt: _Optional[bool] = ...) -> None: ...

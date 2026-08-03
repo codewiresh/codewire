@@ -11,7 +11,7 @@ use std::time::Duration;
 use sqlx::PgPool;
 use stripe::{IdempotencyKey, RequestStrategy, StripeRequest};
 use stripe_billing::billing_portal_session::CreateBillingPortalSession;
-use stripe_billing::invoice_item::CreateInvoiceItem;
+use stripe_billing::invoice_item::{CreateInvoiceItem, UpdateInvoiceItem};
 use stripe_billing::subscription::{CancelSubscription, ListSubscription, RetrieveSubscription};
 use stripe_billing::subscription_item::{
     UpdateSubscriptionItem, UpdateSubscriptionItemProrationBehavior,
@@ -132,6 +132,29 @@ impl StripeHandle {
             .customer(customer_id)
             .amount(amount_cents)
             .currency(stripe_types::Currency::USD)
+            .description(description)
+            .customize()
+            .request_strategy(RequestStrategy::Idempotent(idempotency_key))
+            .send(client)
+            .await
+            .map_err(stripe_err)?;
+        Ok(item.id.to_string())
+    }
+
+    /// Reconciles an existing pending overage item to its cumulative
+    /// month-to-date amount. This deliberately updates in place: deleting and
+    /// recreating a pending Stripe item loses the stable provider identity.
+    pub async fn update_overage_invoice_item(
+        &self,
+        item_id: &str,
+        amount_cents: i64,
+        description: &str,
+        idempotency_key: &str,
+    ) -> Result<String, AppError> {
+        let client = self.client()?;
+        let idempotency_key = IdempotencyKey::new(idempotency_key).map_err(stripe_err)?;
+        let item = UpdateInvoiceItem::new(item_id)
+            .amount(amount_cents)
             .description(description)
             .customize()
             .request_strategy(RequestStrategy::Idempotent(idempotency_key))

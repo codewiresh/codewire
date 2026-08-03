@@ -13,6 +13,7 @@ use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetReques
 use tower_http::trace::TraceLayer;
 
 use crate::health::{HealthState, router as health_router};
+use crate::metrics::router as metrics_router;
 
 /// Fluent builder for the per-service `axum::Router`.
 pub struct AppBuilder {
@@ -197,6 +198,8 @@ impl AppBuilder {
             )
             .layer(CatchPanicLayer::new());
 
+        // Metrics are mounted after caller routes, alongside health, so an
+        // application cannot accidentally shadow the operational endpoint.
         let mut app = Router::new().merge(self.user_routes);
         for connect in self.connect_routes {
             app = app.merge(connect);
@@ -204,6 +207,7 @@ impl AppBuilder {
         if let Some(health) = self.health {
             app = app.merge(health_router(health));
         }
+        app = app.merge(metrics_router(&self.service_name));
         app.layer(middleware)
             .layer(axum::middleware::from_fn(move |req, next| {
                 let service = self.service_name.clone();

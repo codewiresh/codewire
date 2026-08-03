@@ -7,8 +7,8 @@
 //! - handler failure → 500 `{"error":"webhook processing failed"}`
 //! - success → 200 `{"status":"ok"}`
 //!
-//! The endpoint reads at most 64KiB of body and fails signature verification
-//! on a truncated payload.
+//! The endpoint accepts a complete body up to 64KiB. Oversized payloads are
+//! rejected before parsing; signatures are never calculated over a truncation.
 //!
 //! Event handling starts with an idempotency check on
 //! `stripe_webhook_events` first (duplicates are a silent 200), one
@@ -46,7 +46,14 @@ pub async fn stripe_webhook(
         return err_response(StatusCode::NOT_FOUND, "billing is not enabled");
     }
 
-    let payload = &body[..body.len().min(MAX_BODY)];
+    if body.len() > MAX_BODY {
+        tracing::warn!(
+            body_len = body.len(),
+            "billing: oversized Stripe webhook rejected"
+        );
+        return err_response(StatusCode::PAYLOAD_TOO_LARGE, "webhook payload too large");
+    }
+    let payload = &body;
     let Ok(payload) = std::str::from_utf8(payload) else {
         return err_response(StatusCode::BAD_REQUEST, "invalid signature");
     };

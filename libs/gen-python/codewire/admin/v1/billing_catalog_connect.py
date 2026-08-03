@@ -18,7 +18,7 @@ from connectrpc.protocol import ProtocolType
 from connectrpc.server import ConnectASGIApplication, ConnectWSGIApplication, Endpoint, EndpointSync
 from pyqwest import Client, SyncClient
 
-from .billing_catalog_pb2 import CreatePlanRequest, CreatePlanResponse, CreatePriceRequest, CreatePriceResponse, GetCatalogRequest, GetCatalogResponse, ListSubscriptionMigrationsRequest, ListSubscriptionMigrationsResponse, PreviewSubscriptionMigrationRequest, PreviewSubscriptionMigrationResponse, RunSubscriptionMigrationRequest, RunSubscriptionMigrationResponse, SetPlanArchivedRequest, SetPlanArchivedResponse, SetPriceArchivedRequest, SetPriceArchivedResponse, UpdatePlanRequest, UpdatePlanResponse, UpdatePriceRequest, UpdatePriceResponse, UpdateSettingRequest, UpdateSettingResponse
+from .billing_catalog_pb2 import CreatePlanRequest, CreatePlanResponse, CreatePriceRequest, CreatePriceResponse, GetCatalogRequest, GetCatalogResponse, ListSubscriptionMigrationsRequest, ListSubscriptionMigrationsResponse, PreviewSubscriptionMigrationRequest, PreviewSubscriptionMigrationResponse, RunSubscriptionMigrationRequest, RunSubscriptionMigrationResponse, SetOrganizationBillingExemptionRequest, SetOrganizationBillingExemptionResponse, SetPlanArchivedRequest, SetPlanArchivedResponse, SetPriceArchivedRequest, SetPriceArchivedResponse, UpdatePlanRequest, UpdatePlanResponse, UpdatePriceRequest, UpdatePriceResponse, UpdateSettingRequest, UpdateSettingResponse
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Iterable, Mapping
@@ -66,6 +66,9 @@ class BillingCatalogService(Protocol):
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
     async def list_subscription_migrations(self, request: ListSubscriptionMigrationsRequest, ctx: RequestContext[ListSubscriptionMigrationsRequest, ListSubscriptionMigrationsResponse]) -> ListSubscriptionMigrationsResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    async def set_organization_billing_exemption(self, request: SetOrganizationBillingExemptionRequest, ctx: RequestContext[SetOrganizationBillingExemptionRequest, SetOrganizationBillingExemptionResponse]) -> SetOrganizationBillingExemptionResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
 
@@ -191,6 +194,16 @@ class BillingCatalogServiceASGIApplication(ConnectASGIApplication[BillingCatalog
                         idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
                     ),
                     function=svc.list_subscription_migrations,
+                ),
+                "/codewire.admin.v1.BillingCatalogService/SetOrganizationBillingExemption": Endpoint.unary(
+                    method=MethodInfo(
+                        name="SetOrganizationBillingExemption",
+                        service_name="codewire.admin.v1.BillingCatalogService",
+                        input=SetOrganizationBillingExemptionRequest,
+                        output=SetOrganizationBillingExemptionResponse,
+                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                    ),
+                    function=svc.set_organization_billing_exemption,
                 ),
             },
             interceptors=interceptors,
@@ -454,6 +467,26 @@ class BillingCatalogServiceClient(ConnectClient):
             use_get=use_get,
         )
 
+    async def set_organization_billing_exemption(
+        self,
+        request: SetOrganizationBillingExemptionRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+    ) -> SetOrganizationBillingExemptionResponse:
+        return await self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="SetOrganizationBillingExemption",
+                service_name="codewire.admin.v1.BillingCatalogService",
+                input=SetOrganizationBillingExemptionRequest,
+                output=SetOrganizationBillingExemptionResponse,
+                idempotency_level=IdempotencyLevel.UNKNOWN,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+
 class BillingCatalogServiceSync(Protocol):
     def get_catalog(self, request: GetCatalogRequest, ctx: RequestContext[GetCatalogRequest, GetCatalogResponse]) -> GetCatalogResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
@@ -486,6 +519,9 @@ class BillingCatalogServiceSync(Protocol):
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
     def list_subscription_migrations(self, request: ListSubscriptionMigrationsRequest, ctx: RequestContext[ListSubscriptionMigrationsRequest, ListSubscriptionMigrationsResponse]) -> ListSubscriptionMigrationsResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    def set_organization_billing_exemption(self, request: SetOrganizationBillingExemptionRequest, ctx: RequestContext[SetOrganizationBillingExemptionRequest, SetOrganizationBillingExemptionResponse]) -> SetOrganizationBillingExemptionResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
 
@@ -609,6 +645,16 @@ class BillingCatalogServiceWSGIApplication(ConnectWSGIApplication):
                         idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
                     ),
                     function=service.list_subscription_migrations,
+                ),
+                "/codewire.admin.v1.BillingCatalogService/SetOrganizationBillingExemption": EndpointSync.unary(
+                    method=MethodInfo(
+                        name="SetOrganizationBillingExemption",
+                        service_name="codewire.admin.v1.BillingCatalogService",
+                        input=SetOrganizationBillingExemptionRequest,
+                        output=SetOrganizationBillingExemptionResponse,
+                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                    ),
+                    function=service.set_organization_billing_exemption,
                 ),
             },
             interceptors=interceptors,
@@ -860,4 +906,23 @@ class BillingCatalogServiceClientSync(ConnectClientSync):
             headers=headers,
             timeout_ms=timeout_ms,
             use_get=use_get,
+        )
+    def set_organization_billing_exemption(
+        self,
+        request: SetOrganizationBillingExemptionRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+    ) -> SetOrganizationBillingExemptionResponse:
+        return self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="SetOrganizationBillingExemption",
+                service_name="codewire.admin.v1.BillingCatalogService",
+                input=SetOrganizationBillingExemptionRequest,
+                output=SetOrganizationBillingExemptionResponse,
+                idempotency_level=IdempotencyLevel.UNKNOWN,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
         )

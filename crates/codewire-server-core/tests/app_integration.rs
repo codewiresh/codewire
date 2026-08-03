@@ -69,6 +69,31 @@ async fn app_builder_serves_health_and_propagates_error_envelope() {
     assert!(health.status().is_success());
     assert_eq!(health.text().await.unwrap(), "ok");
 
+    // `/metrics` is an internal Service endpoint for Prometheus. It exposes
+    // only the static service label and carries the Prometheus text type.
+    let metrics = client
+        .get(format!("http://{addr}/metrics"))
+        .send()
+        .await
+        .unwrap();
+    assert!(metrics.status().is_success());
+    assert!(
+        metrics
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .starts_with("text/plain; version=0.0.4")
+    );
+    assert!(
+        metrics
+            .text()
+            .await
+            .unwrap()
+            .contains("codewire_control_plane_service_info{service=\"test-service\"} 1")
+    );
+
     // /protected — handler returns AppError::Forbidden; envelope is the
     // wire shape the SDKs parse.
     let resp = client

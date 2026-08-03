@@ -15,7 +15,8 @@ use codewire_proto::codewire::admin::v1::{
     MigrationRun as ProtoMigrationRun, MigrationSample as ProtoMigrationSample,
     PlanSpec as ProtoPlanSpec, PreviewSubscriptionMigrationRequest,
     PreviewSubscriptionMigrationResponse, RunSubscriptionMigrationRequest,
-    RunSubscriptionMigrationResponse, SetPlanArchivedRequest, SetPlanArchivedResponse,
+    RunSubscriptionMigrationResponse, SetOrganizationBillingExemptionRequest,
+    SetOrganizationBillingExemptionResponse, SetPlanArchivedRequest, SetPlanArchivedResponse,
     SetPriceArchivedRequest, SetPriceArchivedResponse, UpdatePlanRequest, UpdatePlanResponse,
     UpdatePriceRequest, UpdatePriceResponse, UpdateSettingRequest, UpdateSettingResponse,
 };
@@ -306,6 +307,73 @@ impl BillingCatalogService for BillingCatalogConnectService {
             .map_err(|error| rpc_app_error(&error, &ctx))?;
         connectrpc::Response::ok(ListSubscriptionMigrationsResponse {
             migrations,
+            ..Default::default()
+        })
+    }
+
+    async fn set_organization_billing_exemption(
+        &self,
+        ctx: RequestContext,
+        request: ServiceRequest<'_, SetOrganizationBillingExemptionRequest>,
+    ) -> ServiceResult<SetOrganizationBillingExemptionResponse> {
+        let actor = auth_user(&ctx)?.clone();
+        let request = request.view();
+        validate_required(&[(request.organization_id, "/organization_id")])
+            .map_err(|error| rpc_app_error(&error, &ctx))?;
+
+        let mut tx = self.state.pool.begin().await.map_err(|_| {
+            rpc_app_error(
+                &AppError::InternalMsg("failed to start billing exemption update".into()),
+                &ctx,
+            )
+        })?;
+        let updated: Option<String> = sqlx::query_scalar(
+            r#"UPDATE organizations
+                  SET billing_exempt = $2, updated_at = NOW()
+                WHERE id = $1
+              RETURNING id"#,
+        )
+        .bind(request.organization_id)
+        .bind(request.billing_exempt)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|_| {
+            rpc_app_error(
+                &AppError::InternalMsg("failed to update billing exemption".into()),
+                &ctx,
+            )
+        })?;
+        let organization_id = updated.ok_or_else(|| {
+            rpc_app_error(&AppError::NotFound("organization not found".into()), &ctx)
+        })?;
+        sqlx::query(
+            r#"INSERT INTO audit_logs
+                   (id, timestamp, action, user_id, metadata, severity)
+               VALUES
+                   (gen_random_uuid()::text, NOW(), 'admin.billing.organization_exemption', $1,
+                    jsonb_build_object('organization_id', $2, 'billing_exempt', $3), 'warn')"#,
+        )
+        .bind(&actor.user_id)
+        .bind(&organization_id)
+        .bind(request.billing_exempt)
+        .execute(&mut *tx)
+        .await
+        .map_err(|_| {
+            rpc_app_error(
+                &AppError::InternalMsg("failed to audit billing exemption update".into()),
+                &ctx,
+            )
+        })?;
+        tx.commit().await.map_err(|_| {
+            rpc_app_error(
+                &AppError::InternalMsg("failed to commit billing exemption update".into()),
+                &ctx,
+            )
+        })?;
+
+        connectrpc::Response::ok(SetOrganizationBillingExemptionResponse {
+            organization_id,
+            billing_exempt: request.billing_exempt,
             ..Default::default()
         })
     }

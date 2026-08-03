@@ -571,7 +571,6 @@ pub async fn report_environment_overages(deps: &MeteringDeps) -> anyhow::Result<
             continue;
         }
 
-        let owner_is_admin = org_owner_is_admin(pool, &org_id).await;
         checked += 1;
 
         let (cpu_hours, mem_gb_hours, disk_gb_hours) =
@@ -584,6 +583,15 @@ pub async fn report_environment_overages(deps: &MeteringDeps) -> anyhow::Result<
             };
 
         let overage_cents = calculate_overage_cents(&plan, cpu_hours, mem_gb_hours, disk_gb_hours);
+        let billing_exempt: bool = sqlx::query_scalar(
+            "SELECT COALESCE(billing_exempt, false) FROM organizations WHERE id = $1",
+        )
+        .bind(&org_id)
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or(false);
 
         let existing: Option<(i32, Option<String>)> = match sqlx::query_as(
             r#"SELECT last_overage_cents, stripe_invoice_item_id
@@ -609,7 +617,8 @@ pub async fn report_environment_overages(deps: &MeteringDeps) -> anyhow::Result<
         }
 
         // Below minimum threshold.
-        if overage_cents > 0 && overage_cents < deps.stripe.min_overage_cents() {
+        if billing_exempt || (overage_cents > 0 && overage_cents < deps.stripe.min_overage_cents())
+        {
             sqlx::query(
                 r#"INSERT INTO environment_usage_billing
                    (org_id, billing_period_start, last_cpu_hours, last_mem_gb_hours, last_disk_gb_hours, last_overage_cents, stripe_invoice_item_id, updated_at)
@@ -629,12 +638,19 @@ pub async fn report_environment_overages(deps: &MeteringDeps) -> anyhow::Result<
             .map_err(|e| anyhow::anyhow!("record below-threshold environment overage: {e}"))?;
             log_billing_event(
                 pool,
-                "env_below_threshold",
+                if billing_exempt {
+                    "env_billing_exempt"
+                } else {
+                    "env_below_threshold"
+                },
                 &org_id,
                 Some(overage_cents),
                 "usd",
                 "",
-                Some(serde_json::json!({ "threshold": deps.stripe.min_overage_cents() })),
+                Some(serde_json::json!({
+                    "threshold": deps.stripe.min_overage_cents(),
+                    "billing_exempt": billing_exempt,
+                })),
             )
             .await;
             updated += 1;
@@ -662,43 +678,46 @@ pub async fn report_environment_overages(deps: &MeteringDeps) -> anyhow::Result<
             .is_some_and(|s| !s.is_empty());
 
         if has_stripe_sub {
-            // Pending items are replaced wholesale; the subscription's
-            // billing cycle invoices them.
-            if let Some(old_id) = existing_item_id.as_deref().filter(|s| !s.is_empty()) {
-                let idempotency_key = metering_idempotency_key("delete-item", &[&org_id, old_id]);
-                if let Err(e) = run_organization_billing_mutation(pool, &org_id, async {
-                    deps.stripe
-                        .delete_invoice_item(old_id, &idempotency_key)
-                        .await
-                        .map_err(OrganizationBillingMutationError::ambiguous)
-                })
-                .await
-                {
-                    tracing::warn!(id = old_id, error = %e, "env overage: delete old invoice item");
-                    continue;
-                }
-            }
-
             let mut new_item_id: Option<String> = None;
             if overage_cents > 0 {
                 let amount = overage_cents.to_string();
-                let idempotency_key = metering_idempotency_key(
-                    "subscription-overage",
-                    &[&org_id, &period_label, &amount],
-                );
-                match run_organization_billing_mutation(pool, &org_id, async {
-                    deps.stripe
-                        .create_overage_invoice_item(
-                            &customer_id,
-                            i64::from(overage_cents),
-                            &format!("Environment compute overage ({period_label})"),
-                            &idempotency_key,
-                        )
-                        .await
-                        .map_err(OrganizationBillingMutationError::ambiguous)
-                })
-                .await
-                {
+                let description = format!("Environment compute overage ({period_label})");
+                let operation = if let Some(item_id) = existing_item_id.as_deref() {
+                    let idempotency_key = metering_idempotency_key(
+                        "subscription-overage-update",
+                        &[&org_id, &period_label, item_id, &amount],
+                    );
+                    run_organization_billing_mutation(pool, &org_id, async {
+                        deps.stripe
+                            .update_overage_invoice_item(
+                                item_id,
+                                i64::from(overage_cents),
+                                &description,
+                                &idempotency_key,
+                            )
+                            .await
+                            .map_err(OrganizationBillingMutationError::ambiguous)
+                    })
+                    .await
+                } else {
+                    let idempotency_key = metering_idempotency_key(
+                        "subscription-overage-create",
+                        &[&org_id, &period_label, &amount],
+                    );
+                    run_organization_billing_mutation(pool, &org_id, async {
+                        deps.stripe
+                            .create_overage_invoice_item(
+                                &customer_id,
+                                i64::from(overage_cents),
+                                &description,
+                                &idempotency_key,
+                            )
+                            .await
+                            .map_err(OrganizationBillingMutationError::ambiguous)
+                    })
+                    .await
+                };
+                match operation {
                     Err(e) => {
                         tracing::error!(org_id, error = %e, "env overage: create invoice item");
                         continue;
@@ -717,32 +736,6 @@ pub async fn report_environment_overages(deps: &MeteringDeps) -> anyhow::Result<
                         )
                         .await;
                         new_item_id = Some(id);
-                    }
-                }
-            }
-
-            if overage_cents > 0 && owner_is_admin && new_item_id.is_some() {
-                let amount = overage_cents.to_string();
-                let idempotency_key = metering_idempotency_key(
-                    "subscription-overage-admin-credit",
-                    &[&org_id, &period_label, &amount],
-                );
-                match run_organization_billing_mutation(pool, &org_id, async {
-                    deps.stripe
-                        .create_overage_invoice_item(
-                            &customer_id,
-                            -i64::from(overage_cents),
-                            &format!("Admin credit for billing visibility: environment overage ({period_label})"),
-                            &idempotency_key,
-                        )
-                        .await
-                        .map_err(OrganizationBillingMutationError::ambiguous)
-                })
-                .await
-                {
-                    Err(e) => tracing::error!(org_id, error = %e, "env overage: create admin credit"),
-                    Ok(credit_id) => {
-                        log_billing_event(pool, "env_admin_credit", &org_id, Some(-overage_cents), "usd", &credit_id, None).await;
                     }
                 }
             }
@@ -811,31 +804,6 @@ pub async fn report_environment_overages(deps: &MeteringDeps) -> anyhow::Result<
                 })),
             )
             .await;
-
-            if owner_is_admin {
-                let idempotency_key = metering_idempotency_key(
-                    "incremental-overage-admin-credit",
-                    &[&org_id, &period_label, &previous, &diff],
-                );
-                match run_organization_billing_mutation(pool, &org_id, async {
-                    deps.stripe
-                        .create_overage_invoice_item(
-                            &customer_id,
-                            -i64::from(diff_cents),
-                            &format!("Admin credit for billing visibility: environment overage ({period_label})"),
-                            &idempotency_key,
-                        )
-                        .await
-                        .map_err(OrganizationBillingMutationError::ambiguous)
-                })
-                .await
-                {
-                    Err(e) => tracing::error!(org_id, error = %e, "env overage: create admin credit"),
-                    Ok(credit_id) => {
-                        log_billing_event(pool, "env_admin_credit", &org_id, Some(-diff_cents), "usd", &credit_id, None).await;
-                    }
-                }
-            }
 
             let invoice_key = metering_idempotency_key(
                 "overage-invoice",

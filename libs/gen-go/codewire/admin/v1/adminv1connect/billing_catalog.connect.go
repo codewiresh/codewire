@@ -66,6 +66,9 @@ const (
 	// BillingCatalogServiceListSubscriptionMigrationsProcedure is the fully-qualified name of the
 	// BillingCatalogService's ListSubscriptionMigrations RPC.
 	BillingCatalogServiceListSubscriptionMigrationsProcedure = "/codewire.admin.v1.BillingCatalogService/ListSubscriptionMigrations"
+	// BillingCatalogServiceSetOrganizationBillingExemptionProcedure is the fully-qualified name of the
+	// BillingCatalogService's SetOrganizationBillingExemption RPC.
+	BillingCatalogServiceSetOrganizationBillingExemptionProcedure = "/codewire.admin.v1.BillingCatalogService/SetOrganizationBillingExemption"
 )
 
 // BillingCatalogServiceClient is a client for the codewire.admin.v1.BillingCatalogService service.
@@ -93,6 +96,10 @@ type BillingCatalogServiceClient interface {
 	RunSubscriptionMigration(context.Context, *connect.Request[v1.RunSubscriptionMigrationRequest]) (*connect.Response[v1.RunSubscriptionMigrationResponse], error)
 	// ListSubscriptionMigrations returns newest-first recorded migrations.
 	ListSubscriptionMigrations(context.Context, *connect.Request[v1.ListSubscriptionMigrationsRequest]) (*connect.Response[v1.ListSubscriptionMigrationsResponse], error)
+	// SetOrganizationBillingExemption explicitly controls internal billing
+	// exemption. It is global-admin only and never infers exemption from the
+	// owner account.
+	SetOrganizationBillingExemption(context.Context, *connect.Request[v1.SetOrganizationBillingExemptionRequest]) (*connect.Response[v1.SetOrganizationBillingExemptionResponse], error)
 }
 
 // NewBillingCatalogServiceClient constructs a client for the
@@ -174,22 +181,29 @@ func NewBillingCatalogServiceClient(httpClient connect.HTTPClient, baseURL strin
 			connect.WithIdempotency(connect.IdempotencyNoSideEffects),
 			connect.WithClientOptions(opts...),
 		),
+		setOrganizationBillingExemption: connect.NewClient[v1.SetOrganizationBillingExemptionRequest, v1.SetOrganizationBillingExemptionResponse](
+			httpClient,
+			baseURL+BillingCatalogServiceSetOrganizationBillingExemptionProcedure,
+			connect.WithSchema(billingCatalogServiceMethods.ByName("SetOrganizationBillingExemption")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
 // billingCatalogServiceClient implements BillingCatalogServiceClient.
 type billingCatalogServiceClient struct {
-	getCatalog                   *connect.Client[v1.GetCatalogRequest, v1.GetCatalogResponse]
-	createPlan                   *connect.Client[v1.CreatePlanRequest, v1.CreatePlanResponse]
-	updatePlan                   *connect.Client[v1.UpdatePlanRequest, v1.UpdatePlanResponse]
-	setPlanArchived              *connect.Client[v1.SetPlanArchivedRequest, v1.SetPlanArchivedResponse]
-	createPrice                  *connect.Client[v1.CreatePriceRequest, v1.CreatePriceResponse]
-	updatePrice                  *connect.Client[v1.UpdatePriceRequest, v1.UpdatePriceResponse]
-	setPriceArchived             *connect.Client[v1.SetPriceArchivedRequest, v1.SetPriceArchivedResponse]
-	updateSetting                *connect.Client[v1.UpdateSettingRequest, v1.UpdateSettingResponse]
-	previewSubscriptionMigration *connect.Client[v1.PreviewSubscriptionMigrationRequest, v1.PreviewSubscriptionMigrationResponse]
-	runSubscriptionMigration     *connect.Client[v1.RunSubscriptionMigrationRequest, v1.RunSubscriptionMigrationResponse]
-	listSubscriptionMigrations   *connect.Client[v1.ListSubscriptionMigrationsRequest, v1.ListSubscriptionMigrationsResponse]
+	getCatalog                      *connect.Client[v1.GetCatalogRequest, v1.GetCatalogResponse]
+	createPlan                      *connect.Client[v1.CreatePlanRequest, v1.CreatePlanResponse]
+	updatePlan                      *connect.Client[v1.UpdatePlanRequest, v1.UpdatePlanResponse]
+	setPlanArchived                 *connect.Client[v1.SetPlanArchivedRequest, v1.SetPlanArchivedResponse]
+	createPrice                     *connect.Client[v1.CreatePriceRequest, v1.CreatePriceResponse]
+	updatePrice                     *connect.Client[v1.UpdatePriceRequest, v1.UpdatePriceResponse]
+	setPriceArchived                *connect.Client[v1.SetPriceArchivedRequest, v1.SetPriceArchivedResponse]
+	updateSetting                   *connect.Client[v1.UpdateSettingRequest, v1.UpdateSettingResponse]
+	previewSubscriptionMigration    *connect.Client[v1.PreviewSubscriptionMigrationRequest, v1.PreviewSubscriptionMigrationResponse]
+	runSubscriptionMigration        *connect.Client[v1.RunSubscriptionMigrationRequest, v1.RunSubscriptionMigrationResponse]
+	listSubscriptionMigrations      *connect.Client[v1.ListSubscriptionMigrationsRequest, v1.ListSubscriptionMigrationsResponse]
+	setOrganizationBillingExemption *connect.Client[v1.SetOrganizationBillingExemptionRequest, v1.SetOrganizationBillingExemptionResponse]
 }
 
 // GetCatalog calls codewire.admin.v1.BillingCatalogService.GetCatalog.
@@ -249,6 +263,12 @@ func (c *billingCatalogServiceClient) ListSubscriptionMigrations(ctx context.Con
 	return c.listSubscriptionMigrations.CallUnary(ctx, req)
 }
 
+// SetOrganizationBillingExemption calls
+// codewire.admin.v1.BillingCatalogService.SetOrganizationBillingExemption.
+func (c *billingCatalogServiceClient) SetOrganizationBillingExemption(ctx context.Context, req *connect.Request[v1.SetOrganizationBillingExemptionRequest]) (*connect.Response[v1.SetOrganizationBillingExemptionResponse], error) {
+	return c.setOrganizationBillingExemption.CallUnary(ctx, req)
+}
+
 // BillingCatalogServiceHandler is an implementation of the codewire.admin.v1.BillingCatalogService
 // service.
 type BillingCatalogServiceHandler interface {
@@ -275,6 +295,10 @@ type BillingCatalogServiceHandler interface {
 	RunSubscriptionMigration(context.Context, *connect.Request[v1.RunSubscriptionMigrationRequest]) (*connect.Response[v1.RunSubscriptionMigrationResponse], error)
 	// ListSubscriptionMigrations returns newest-first recorded migrations.
 	ListSubscriptionMigrations(context.Context, *connect.Request[v1.ListSubscriptionMigrationsRequest]) (*connect.Response[v1.ListSubscriptionMigrationsResponse], error)
+	// SetOrganizationBillingExemption explicitly controls internal billing
+	// exemption. It is global-admin only and never infers exemption from the
+	// owner account.
+	SetOrganizationBillingExemption(context.Context, *connect.Request[v1.SetOrganizationBillingExemptionRequest]) (*connect.Response[v1.SetOrganizationBillingExemptionResponse], error)
 }
 
 // NewBillingCatalogServiceHandler builds an HTTP handler from the service implementation. It
@@ -352,6 +376,12 @@ func NewBillingCatalogServiceHandler(svc BillingCatalogServiceHandler, opts ...c
 		connect.WithIdempotency(connect.IdempotencyNoSideEffects),
 		connect.WithHandlerOptions(opts...),
 	)
+	billingCatalogServiceSetOrganizationBillingExemptionHandler := connect.NewUnaryHandler(
+		BillingCatalogServiceSetOrganizationBillingExemptionProcedure,
+		svc.SetOrganizationBillingExemption,
+		connect.WithSchema(billingCatalogServiceMethods.ByName("SetOrganizationBillingExemption")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/codewire.admin.v1.BillingCatalogService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case BillingCatalogServiceGetCatalogProcedure:
@@ -376,6 +406,8 @@ func NewBillingCatalogServiceHandler(svc BillingCatalogServiceHandler, opts ...c
 			billingCatalogServiceRunSubscriptionMigrationHandler.ServeHTTP(w, r)
 		case BillingCatalogServiceListSubscriptionMigrationsProcedure:
 			billingCatalogServiceListSubscriptionMigrationsHandler.ServeHTTP(w, r)
+		case BillingCatalogServiceSetOrganizationBillingExemptionProcedure:
+			billingCatalogServiceSetOrganizationBillingExemptionHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -427,4 +459,8 @@ func (UnimplementedBillingCatalogServiceHandler) RunSubscriptionMigration(contex
 
 func (UnimplementedBillingCatalogServiceHandler) ListSubscriptionMigrations(context.Context, *connect.Request[v1.ListSubscriptionMigrationsRequest]) (*connect.Response[v1.ListSubscriptionMigrationsResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.admin.v1.BillingCatalogService.ListSubscriptionMigrations is not implemented"))
+}
+
+func (UnimplementedBillingCatalogServiceHandler) SetOrganizationBillingExemption(context.Context, *connect.Request[v1.SetOrganizationBillingExemptionRequest]) (*connect.Response[v1.SetOrganizationBillingExemptionResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.admin.v1.BillingCatalogService.SetOrganizationBillingExemption is not implemented"))
 }
