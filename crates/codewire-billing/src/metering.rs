@@ -424,23 +424,6 @@ pub async fn resolve_effective_org_environment_plan(pool: &PgPool, org_id: &str)
     EffectivePlan::default()
 }
 
-/// Mirrors `OrgOwnerIsAdmin`.
-pub async fn org_owner_is_admin(pool: &PgPool, org_id: &str) -> bool {
-    sqlx::query_as::<_, (bool,)>(
-        r#"SELECT u.is_admin FROM org_members m
-           JOIN users u ON u.id = m.user_id
-           WHERE m.org_id = $1 AND m.role = 'owner'
-           ORDER BY m.created_at ASC LIMIT 1"#,
-    )
-    .bind(org_id)
-    .fetch_optional(pool)
-    .await
-    .ok()
-    .flatten()
-    .map(|(b,)| b)
-    .unwrap_or(false)
-}
-
 /// The overage-relevant slice of a sandbox plan, from the DB catalog
 /// (Go reads the in-memory catalog loaded from the same rows;
 /// archived plans are excluded there too).
@@ -795,6 +778,15 @@ pub async fn report_environment_overages(deps: &MeteringDeps) -> anyhow::Result<
                 "incremental-overage",
                 &[&org_id, &period_label, &previous, &diff],
             );
+            begin_external_operation(
+                pool,
+                &org_id,
+                month_start,
+                "direct_overage_invoice_item",
+                &idempotency_key,
+                diff_cents,
+            )
+            .await?;
             let charge_id = match run_organization_billing_mutation(pool, &org_id, async {
                 deps.stripe
                     .create_overage_invoice_item(
@@ -814,6 +806,7 @@ pub async fn report_environment_overages(deps: &MeteringDeps) -> anyhow::Result<
                 }
                 Ok(id) => id,
             };
+            complete_external_operation(pool, &idempotency_key, &charge_id).await?;
             log_billing_event(
                 pool,
                 "env_overage_charge",
@@ -832,7 +825,16 @@ pub async fn report_environment_overages(deps: &MeteringDeps) -> anyhow::Result<
                 "overage-invoice",
                 &[&org_id, &period_label, &previous, &diff],
             );
-            let finalized = match run_organization_billing_mutation(pool, &org_id, async {
+            begin_external_operation(
+                pool,
+                &org_id,
+                month_start,
+                "direct_overage_invoice",
+                &invoice_key,
+                diff_cents,
+            )
+            .await?;
+            let invoice_id = match run_organization_billing_mutation(pool, &org_id, async {
                 deps.stripe
                     .create_auto_advancing_invoice(
                         &customer_id,
@@ -846,34 +848,35 @@ pub async fn report_environment_overages(deps: &MeteringDeps) -> anyhow::Result<
             {
                 Err(e) => {
                     tracing::error!(org_id, error = %e, "env overage: create invoice");
+                    continue;
+                }
+                Ok(invoice_id) => invoice_id,
+            };
+            complete_external_operation(pool, &invoice_key, &invoice_id).await?;
+            let finalize_key =
+                metering_idempotency_key("finalize-invoice", &[&org_id, &invoice_id]);
+            begin_external_operation(
+                pool,
+                &org_id,
+                month_start,
+                "direct_overage_invoice_finalize",
+                &finalize_key,
+                diff_cents,
+            )
+            .await?;
+            let finalized = match run_organization_billing_mutation(pool, &org_id, async {
+                deps.stripe
+                    .finalize_invoice(&invoice_id, &finalize_key)
+                    .await
+                    .map_err(OrganizationBillingMutationError::ambiguous)
+            })
+            .await
+            {
+                Err(e) => {
+                    tracing::error!(org_id, invoice = invoice_id, error = %e, "env overage: finalize invoice");
                     false
                 }
-                Ok(invoice_id) => {
-                    let finalize_key =
-                        metering_idempotency_key("finalize-invoice", &[&org_id, &invoice_id]);
-                    match run_organization_billing_mutation(pool, &org_id, async {
-                        deps.stripe
-                            .finalize_invoice(&invoice_id, &finalize_key)
-                            .await
-                            .map_err(OrganizationBillingMutationError::ambiguous)
-                    })
-                    .await
-                    {
-                        Err(e) => {
-                            tracing::error!(org_id, invoice = invoice_id, error = %e, "env overage: finalize invoice");
-                            false
-                        }
-                        Ok(()) => {
-                            tracing::info!(
-                                org_id,
-                                invoice = invoice_id,
-                                amount_cents = diff_cents,
-                                "env overage: invoice created"
-                            );
-                            true
-                        }
-                    }
-                }
+                Ok(()) => true,
             };
             // The usage watermark represents a settled external charge. A
             // failed create/finalize is retried with the same idempotency keys
@@ -882,23 +885,24 @@ pub async fn report_environment_overages(deps: &MeteringDeps) -> anyhow::Result<
                 continue;
             }
 
-            sqlx::query(
-                r#"INSERT INTO environment_usage_billing
-                   (org_id, billing_period_start, last_cpu_hours, last_mem_gb_hours, last_disk_gb_hours, last_overage_cents, stripe_invoice_item_id, updated_at)
-                   VALUES ($1, $2, $3, $4, $5, $6, NULL, NOW())
-                   ON CONFLICT (org_id, billing_period_start)
-                   DO UPDATE SET last_cpu_hours = $3, last_mem_gb_hours = $4, last_disk_gb_hours = $5,
-                                last_overage_cents = $6, stripe_invoice_item_id = NULL, updated_at = NOW()"#,
+            complete_direct_invoice_operation_and_watermark(
+                pool,
+                &finalize_key,
+                &invoice_id,
+                &org_id,
+                month_start,
+                cpu_hours,
+                mem_gb_hours,
+                disk_gb_hours,
+                overage_cents,
             )
-            .bind(&org_id)
-            .bind(month_start)
-            .bind(cpu_hours)
-            .bind(mem_gb_hours)
-            .bind(disk_gb_hours)
-            .bind(overage_cents)
-            .execute(pool)
-            .await
-            .map_err(|e| anyhow::anyhow!("record invoiced environment overage: {e}"))?;
+            .await?;
+            tracing::info!(
+                org_id,
+                invoice = invoice_id,
+                amount_cents = diff_cents,
+                "env overage: invoice created"
+            );
         }
 
         updated += 1;
@@ -999,6 +1003,79 @@ async fn complete_subscription_operation_and_watermark(
     .bind(disk_gb_hours)
     .bind(overage_cents)
     .bind(provider_object_id)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+async fn complete_external_operation(
+    pool: &PgPool,
+    idempotency_key: &str,
+    provider_object_id: &str,
+) -> anyhow::Result<()> {
+    let updated = sqlx::query(
+        r#"UPDATE billing_external_operations
+              SET provider_object_id = $2, provider_state = 'completed', completed_at = NOW()
+            WHERE idempotency_key = $1"#,
+    )
+    .bind(idempotency_key)
+    .bind(provider_object_id)
+    .execute(pool)
+    .await?;
+    if updated.rows_affected() != 1 {
+        return Err(anyhow::anyhow!(
+            "external billing operation disappeared before completion"
+        ));
+    }
+    Ok(())
+}
+
+async fn complete_direct_invoice_operation_and_watermark(
+    pool: &PgPool,
+    idempotency_key: &str,
+    provider_object_id: &str,
+    org_id: &str,
+    period_start: chrono::DateTime<chrono::Utc>,
+    cpu_hours: f64,
+    mem_gb_hours: f64,
+    disk_gb_hours: f64,
+    overage_cents: i32,
+) -> anyhow::Result<()> {
+    let mut tx = pool.begin().await?;
+    let updated = sqlx::query(
+        r#"UPDATE billing_external_operations
+              SET provider_object_id = $2, provider_state = 'completed', completed_at = NOW()
+            WHERE idempotency_key = $1"#,
+    )
+    .bind(idempotency_key)
+    .bind(provider_object_id)
+    .execute(&mut *tx)
+    .await?;
+    if updated.rows_affected() != 1 {
+        return Err(anyhow::anyhow!(
+            "external billing operation disappeared before finalization"
+        ));
+    }
+    sqlx::query(
+        r#"INSERT INTO environment_usage_billing
+               (org_id, billing_period_start, last_cpu_hours, last_mem_gb_hours,
+                last_disk_gb_hours, last_overage_cents, stripe_invoice_item_id, updated_at)
+           VALUES ($1, $2, $3, $4, $5, $6, NULL, NOW())
+           ON CONFLICT (org_id, billing_period_start)
+           DO UPDATE SET last_cpu_hours = EXCLUDED.last_cpu_hours,
+                         last_mem_gb_hours = EXCLUDED.last_mem_gb_hours,
+                         last_disk_gb_hours = EXCLUDED.last_disk_gb_hours,
+                         last_overage_cents = EXCLUDED.last_overage_cents,
+                         stripe_invoice_item_id = NULL,
+                         updated_at = NOW()"#,
+    )
+    .bind(org_id)
+    .bind(period_start)
+    .bind(cpu_hours)
+    .bind(mem_gb_hours)
+    .bind(disk_gb_hours)
+    .bind(overage_cents)
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;

@@ -29,7 +29,6 @@ use stripe_webhook::{Event, EventObject, Webhook};
 
 use crate::email::{EmailClient, ReceiptData};
 use crate::routes::BillingState;
-use crate::stripe_client::AdminCreditItemInput;
 
 const MAX_BODY: usize = 65536;
 
@@ -588,88 +587,6 @@ async fn handle_invoice_created(
 ) -> anyhow::Result<()> {
     let pool = &state.pool;
     upsert_invoice(pool, inv).await?;
-
-    let org_id = resolve_invoice_org_id(pool, inv).await;
-    if org_id.is_empty() || !org_owner_is_admin(pool, &org_id).await {
-        return Ok(());
-    }
-    let Some(customer) = &inv.customer else {
-        return Ok(());
-    };
-    let customer_id = expandable_id(customer);
-    if customer_id.is_empty() {
-        return Ok(());
-    }
-
-    let credit_cents = calculate_admin_subscription_credit(inv);
-    if credit_cents <= 0 {
-        return Ok(());
-    }
-
-    let invoice_id = inv.id.as_deref().unwrap_or_default();
-    let existing: bool = sqlx::query_scalar(
-        r#"SELECT EXISTS(
-              SELECT 1 FROM admin_invoice_credits
-              WHERE stripe_invoice_id = $1 AND credit_kind = 'subscription_base')"#,
-    )
-    .bind(invoice_id)
-    .fetch_one(pool)
-    .await
-    .unwrap_or(false);
-    if existing {
-        return Ok(());
-    }
-
-    let currency = inv.currency.to_string();
-    let description = admin_subscription_credit_description(inv);
-    let idempotency_key =
-        provider_idempotency_key("admin-credit", &[&org_id, invoice_id, "subscription-base"]);
-    let credit_item_id = run_organization_billing_mutation(pool, &org_id, async {
-        let credit_item_id = state
-            .stripe
-            .create_admin_credit_item(AdminCreditItemInput {
-                customer_id: &customer_id,
-                invoice_id,
-                amount_cents: -credit_cents,
-                currency: &currency,
-                description: &description,
-                org_id: &org_id,
-                idempotency_key: &idempotency_key,
-            })
-            .await
-            .map_err(OrganizationBillingMutationError::ambiguous)?;
-
-        sqlx::query(
-            r#"INSERT INTO admin_invoice_credits
-               (org_id, stripe_invoice_id, credit_kind, amount_cents, stripe_invoice_item_id, created_at, updated_at)
-               VALUES ($1, $2, 'subscription_base', $3, $4, NOW(), NOW())
-               ON CONFLICT (stripe_invoice_id, credit_kind) DO NOTHING"#,
-        )
-        .bind(&org_id)
-        .bind(invoice_id)
-        .bind(credit_cents as i32)
-        .bind(&credit_item_id)
-        .execute(pool)
-        .await
-        .map_err(|error| {
-            OrganizationBillingMutationError::ambiguous(codewire_server_core::AppError::from(
-                error,
-            ))
-        })?;
-        Ok(credit_item_id)
-    })
-    .await?;
-
-    log_billing_event(
-        pool,
-        "admin_subscription_credit",
-        &org_id,
-        Some(-(credit_cents as i32)),
-        &currency,
-        &credit_item_id,
-        serde_json::json!({"invoice_id": invoice_id}),
-    )
-    .await;
     Ok(())
 }
 
@@ -910,21 +827,6 @@ async fn org_owner_email_by_id(pool: &PgPool, org_id: &str) -> Option<String> {
     .flatten()
 }
 
-async fn org_owner_is_admin(pool: &PgPool, org_id: &str) -> bool {
-    sqlx::query_scalar(
-        r#"SELECT u.is_admin FROM org_members m
-           JOIN users u ON u.id = m.user_id
-           WHERE m.org_id = $1 AND m.role = 'owner'
-           ORDER BY m.created_at ASC LIMIT 1"#,
-    )
-    .bind(org_id)
-    .fetch_optional(pool)
-    .await
-    .ok()
-    .flatten()
-    .unwrap_or(false)
-}
-
 /// Mirrors `LogBillingEvent` (fire-and-forget; resource columns were
 /// dropped from billing_events).
 async fn log_billing_event(
@@ -956,33 +858,6 @@ async fn log_billing_event(
     {
         tracing::warn!(event_type, error = ?e, "billing: failed to log event");
     }
-}
-
-fn line_is_subscription(line: &stripe_shared::InvoiceLineItem) -> bool {
-    matches!(
-        line.parent.as_ref().map(|p| &p.type_),
-        Some(stripe_shared::BillingBillResourceInvoicingLinesParentsInvoiceLineItemParentType::SubscriptionItemDetails)
-    )
-}
-
-fn calculate_admin_subscription_credit(inv: &stripe_shared::Invoice) -> i64 {
-    inv.lines
-        .data
-        .iter()
-        .filter(|l| l.amount > 0 && line_is_subscription(l))
-        .map(|l| l.amount)
-        .sum()
-}
-
-fn admin_subscription_credit_description(inv: &stripe_shared::Invoice) -> String {
-    use stripe_shared::InvoiceBillingReason as R;
-    match inv.billing_reason {
-        Some(R::SubscriptionCreate) => "Admin credit for billing visibility: subscription start",
-        Some(R::SubscriptionCycle) => "Admin credit for billing visibility: subscription renewal",
-        Some(R::SubscriptionUpdate) => "Admin credit for billing visibility: subscription update",
-        _ => "Admin credit for billing visibility: subscription charges",
-    }
-    .to_string()
 }
 
 fn invoice_subtotal(inv: &stripe_shared::Invoice) -> i64 {

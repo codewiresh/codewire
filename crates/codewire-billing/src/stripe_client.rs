@@ -37,16 +37,6 @@ pub struct StripeHandle {
     webhook_secret: String,
 }
 
-pub(crate) struct AdminCreditItemInput<'a> {
-    pub customer_id: &'a str,
-    pub invoice_id: &'a str,
-    pub amount_cents: i64,
-    pub currency: &'a str,
-    pub description: &'a str,
-    pub org_id: &'a str,
-    pub idempotency_key: &'a str,
-}
-
 impl StripeHandle {
     /// Builds the handle from `STRIPE_SECRET_KEY`; unset/empty →
     /// billing disabled, same as the Go service.
@@ -652,40 +642,5 @@ impl StripeHandle {
         .await
         .map_err(stripe_err)?;
         Ok(())
-    }
-
-    /// Negative InvoiceItem for the admin-credit flow
-    /// (webhook.go::handleInvoiceCreated). Returns the item ID.
-    pub(crate) async fn create_admin_credit_item(
-        &self,
-        input: AdminCreditItemInput<'_>,
-    ) -> Result<String, AppError> {
-        let client = self.client()?;
-        let currency: stripe_types::Currency = input.currency.parse().map_err(stripe_err)?;
-        let idempotency_key = IdempotencyKey::new(input.idempotency_key).map_err(stripe_err)?;
-        let item = CreateInvoiceItem::new()
-            .customer(input.customer_id)
-            .invoice(input.invoice_id)
-            .amount(input.amount_cents)
-            .currency(currency)
-            .description(input.description)
-            .discountable(false)
-            .metadata([
-                (
-                    "admin_credit_kind".to_string(),
-                    "subscription_base".to_string(),
-                ),
-                (
-                    "stripe_invoice_id".to_string(),
-                    input.invoice_id.to_string(),
-                ),
-                ("org_id".to_string(), input.org_id.to_string()),
-            ])
-            .customize()
-            .request_strategy(RequestStrategy::Idempotent(idempotency_key))
-            .send(client)
-            .await
-            .map_err(stripe_err)?;
-        Ok(item.id.to_string())
     }
 }

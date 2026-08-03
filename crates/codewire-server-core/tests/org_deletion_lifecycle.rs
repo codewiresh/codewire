@@ -1380,6 +1380,7 @@ async fn schema_guard_enumerates_org_preset_and_environment_dependencies() {
         vec![
             "admin_invoice_credits:cascade",
             "api_keys:no_action",
+            "billing_external_operations:cascade",
             "environment_presets:no_action",
             "environment_quotas:no_action",
             "environment_subscriptions:cascade",
