@@ -46,12 +46,10 @@ else
   mkdir -p "$(dirname "$KUBECONFIG")"
 fi
 
-TOKEN="$(<"$TOKEN_PATH")"
 kubectl config set-cluster "$KUBE_CLUSTER" \
   --server="$K8S_SERVER" \
   --insecure-skip-tls-verify=true >/dev/null
-kubectl config set-credentials "$KUBE_USER" --token="$TOKEN" >/dev/null
-unset TOKEN
+kubectl config set "users.${KUBE_USER}.user.tokenFile" "$TOKEN_PATH" >/dev/null
 kubectl config set-context "$KUBE_CONTEXT" \
   --cluster="$KUBE_CLUSTER" \
   --user="$KUBE_USER" >/dev/null

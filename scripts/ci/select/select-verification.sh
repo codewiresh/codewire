@@ -366,6 +366,7 @@ elif [ "$event_selected" = false ]; then
       scripts/ci/select/artifact-impact.py|\
       scripts/ci/select/select-support-images.sh|\
       scripts/ci/tests/test-select-verification.sh|scripts/ci/tests/test-select-deploy-dev.sh|\
+      scripts/ci/tests/test-setup-kubeconfig.sh|\
       scripts/ci/tests/test-artifact-impact.py|\
       scripts/ci/tests/test-resolve-deployed-source.sh|\
       scripts/ci/tests/test-require-verification-results.sh|\
