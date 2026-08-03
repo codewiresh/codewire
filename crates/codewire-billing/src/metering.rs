@@ -809,7 +809,7 @@ pub async fn report_environment_overages(deps: &MeteringDeps) -> anyhow::Result<
                 "overage-invoice",
                 &[&org_id, &period_label, &previous, &diff],
             );
-            match run_organization_billing_mutation(pool, &org_id, async {
+            let finalized = match run_organization_billing_mutation(pool, &org_id, async {
                 deps.stripe
                     .create_auto_advancing_invoice(
                         &customer_id,
@@ -821,7 +821,10 @@ pub async fn report_environment_overages(deps: &MeteringDeps) -> anyhow::Result<
             })
             .await
             {
-                Err(e) => tracing::error!(org_id, error = %e, "env overage: create invoice"),
+                Err(e) => {
+                    tracing::error!(org_id, error = %e, "env overage: create invoice");
+                    false
+                }
                 Ok(invoice_id) => {
                     let finalize_key =
                         metering_idempotency_key("finalize-invoice", &[&org_id, &invoice_id]);
@@ -834,7 +837,8 @@ pub async fn report_environment_overages(deps: &MeteringDeps) -> anyhow::Result<
                     .await
                     {
                         Err(e) => {
-                            tracing::error!(org_id, invoice = invoice_id, error = %e, "env overage: finalize invoice")
+                            tracing::error!(org_id, invoice = invoice_id, error = %e, "env overage: finalize invoice");
+                            false
                         }
                         Ok(()) => {
                             tracing::info!(
@@ -842,10 +846,17 @@ pub async fn report_environment_overages(deps: &MeteringDeps) -> anyhow::Result<
                                 invoice = invoice_id,
                                 amount_cents = diff_cents,
                                 "env overage: invoice created"
-                            )
+                            );
+                            true
                         }
                     }
                 }
+            };
+            // The usage watermark represents a settled external charge. A
+            // failed create/finalize is retried with the same idempotency keys
+            // on the next meter cycle rather than being silently skipped.
+            if !finalized {
+                continue;
             }
 
             sqlx::query(
