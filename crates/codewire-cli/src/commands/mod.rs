@@ -211,6 +211,8 @@ pub(crate) struct InitArgs {
     memory: Option<i32>,
     #[arg(long, help = "Disk in GB")]
     disk: Option<i32>,
+    #[arg(long, value_parser = ["standard", "confidential"], help = "Product isolation tier")]
+    isolation: Option<String>,
     #[arg(long = "repo", help = "Git repo URL (repeatable, url@branch syntax)")]
     repo_flags: Vec<String>,
     #[arg(long, help = "Branch to checkout")]
@@ -548,6 +550,8 @@ pub(crate) struct EnvCreateArgs {
     memory: Option<i32>,
     #[arg(long, help = "Disk in GB")]
     disk: Option<i32>,
+    #[arg(long, value_parser = ["standard", "confidential"], help = "Product isolation tier")]
+    isolation: Option<String>,
     #[arg(long = "repo", help = "Git repo URL (repeatable, url@branch syntax)")]
     repo_flags: Vec<String>,
     #[arg(long, help = "Branch to checkout")]

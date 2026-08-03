@@ -66,7 +66,7 @@ pub use codewire_proto::codewire::v1::{
     GetEnvironmentDaemonStatusRequest, GetEnvironmentDaemonStatusResponse, GetEnvironmentRequest,
     GetEnvironmentResponse, GetEnvironmentTrustReportRequest, GetEnvironmentTrustReportResponse,
     GetOrganizationRequest, GetOrganizationResponse, GetSessionRequest, GetSessionResponse,
-    GrantEnvironmentAccessRequest, GrantEnvironmentAccessResponse, InvitationStatus,
+    GrantEnvironmentAccessRequest, GrantEnvironmentAccessResponse, InvitationStatus, IsolationTier,
     LaunchSessionRequest, LaunchSessionResponse, ListApiKeysRequest, ListApiKeysResponse,
     ListEnvironmentAccessRequest, ListEnvironmentAccessResponse, ListEnvironmentsRequest,
     ListEnvironmentsResponse, ListFilesRequest, ListFilesResponse, ListOrganizationsRequest,

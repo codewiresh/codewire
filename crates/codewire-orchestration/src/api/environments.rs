@@ -57,6 +57,7 @@ pub struct Environment {
     pub cpu_millicores: i32,
     pub memory_mb: i32,
     pub disk_gb: i32,
+    pub isolation_tier: String,
     pub total_running_seconds: i32,
     pub created_at: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -148,7 +149,7 @@ pub(crate) const ENV_SELECT_COLS: &str = r#"e.id, e.org_id, e.created_by, e.pres
     COALESCE(b.setup_phase, 0) AS setup_phase, COALESCE(b.setup_complete, false) AS setup_complete,
     COALESCE(b.setup_error, '') AS setup_error,
     e.ttl_seconds, e.shutdown_at,
-    e.cpu_millicores, e.memory_mb, e.disk_gb,
+    e.cpu_millicores, e.memory_mb, e.disk_gb, e.isolation_tier,
     e.total_running_seconds,
     e.created_at, e.started_at, e.stopped_at, e.destroyed_at,
     e.protected, e.deletion_requested_at, e.deletion_grace_until,
@@ -186,6 +187,7 @@ pub(crate) fn scan_environment(row: &PgRow) -> Result<Environment, sqlx::Error> 
         cpu_millicores: row.try_get("cpu_millicores")?,
         memory_mb: row.try_get("memory_mb")?,
         disk_gb: row.try_get("disk_gb")?,
+        isolation_tier: row.try_get("isolation_tier")?,
         total_running_seconds: row.try_get("total_running_seconds")?,
         created_at: format_time(row.try_get("created_at")?),
         started_at: format_time_opt(row.try_get("started_at")?),
@@ -526,6 +528,7 @@ pub(crate) struct EnvSummary {
     pub(crate) env_type: String,
     pub(crate) cpu_millicores: i32,
     pub(crate) memory_mb: i32,
+    pub(crate) isolation_tier: String,
 }
 
 pub(crate) async fn fetch_env_summary(
@@ -534,7 +537,7 @@ pub(crate) async fn fetch_env_summary(
     env_id: &str,
 ) -> Result<EnvSummary, AppError> {
     let row = sqlx::query(
-        r#"SELECT id, state, protected, type, cpu_millicores, memory_mb
+        r#"SELECT id, state, protected, type, cpu_millicores, memory_mb, isolation_tier
            FROM environments WHERE id = $1 AND org_id = $2"#,
     )
     .bind(env_id)
@@ -557,6 +560,7 @@ pub(crate) async fn fetch_env_summary(
         env_type: row.try_get("type")?,
         cpu_millicores: row.try_get("cpu_millicores")?,
         memory_mb: row.try_get("memory_mb")?,
+        isolation_tier: row.try_get("isolation_tier")?,
     })
 }
 
@@ -1055,7 +1059,19 @@ pub(crate) async fn start_environment_core(
                 "stopped" => {} // normal start flow below
                 "error" | "pending" => {
                     // Reset for immediate re-creation.
-                    if lifecycle.reset_for_retry(&env.id).await.is_err() {
+                    let retry = if env.state == "error" && env.isolation_tier == "confidential" {
+                        lifecycle.retry_confidential_start(&env.id, org_id).await
+                    } else {
+                        lifecycle.reset_for_retry(&env.id).await
+                    };
+                    if let Err(error) = retry {
+                        if error.to_string().contains("CONFIDENTIAL_CAPACITY_UNAVAILABLE") {
+                            return Err(coded(
+                                StatusCode::CONFLICT,
+                                "CONFIDENTIAL_CAPACITY_UNAVAILABLE",
+                                "confidential environment capacity is currently unavailable",
+                            ));
+                        }
                         return Err(coded(
                             StatusCode::INTERNAL_SERVER_ERROR,
                             "internal_error",
@@ -1109,11 +1125,18 @@ pub(crate) async fn start_environment_core(
             )
             .await?;
 
-            if lifecycle
-                .set_desired_state(&env.id, "started")
+            if let Err(error) = lifecycle
+                .admit_confidential_start(&env.id, org_id, &env.isolation_tier)
                 .await
-                .is_err()
             {
+                if error.to_string().contains("CONFIDENTIAL_CAPACITY_UNAVAILABLE") {
+                    return Err(coded(
+                        StatusCode::CONFLICT,
+                        "CONFIDENTIAL_CAPACITY_UNAVAILABLE",
+                        "confidential environment capacity is currently unavailable",
+                    ));
+                }
+                tracing::error!(%error, environment_id = env.id, "start environment admission failed");
                 return Err(coded(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "internal_error",
@@ -1427,6 +1450,7 @@ mod tests {
             name: Some("n".into()),
             state: "running".into(),
             desired_state: "started".into(),
+            isolation_tier: "standard".into(),
             error_reason: None,
             recoverable: true,
             state_changed_at: "2026-06-12T00:00:00Z".into(),

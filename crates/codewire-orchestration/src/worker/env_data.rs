@@ -116,6 +116,7 @@ pub struct EnvironmentRow {
     pub cpu_millicores: i32,
     pub memory_mb: i32,
     pub disk_gb: i32,
+    pub isolation_tier: String,
     pub auth_token: Option<String>,
     pub ttl_seconds: Option<i32>,
     pub setup_config: Option<SetupConfig>,
@@ -126,7 +127,7 @@ pub async fn load_environment(pool: &PgPool, env_id: &str) -> anyhow::Result<Env
     let row = sqlx::query(
         r#"SELECT id, org_id, preset_id, type, state, desired_state,
                   external_cleanup_completed_at,
-                  cpu_millicores, memory_mb, disk_gb, auth_token, ttl_seconds,
+                  cpu_millicores, memory_mb, disk_gb, isolation_tier, auth_token, ttl_seconds,
                   setup_config, secret_project_id
            FROM environments WHERE id = $1"#,
     )
@@ -155,6 +156,7 @@ pub async fn load_environment(pool: &PgPool, env_id: &str) -> anyhow::Result<Env
         cpu_millicores: row.try_get("cpu_millicores")?,
         memory_mb: row.try_get("memory_mb")?,
         disk_gb: row.try_get("disk_gb")?,
+        isolation_tier: row.try_get("isolation_tier")?,
         auth_token: row.try_get("auth_token")?,
         ttl_seconds: row.try_get("ttl_seconds")?,
         setup_config,

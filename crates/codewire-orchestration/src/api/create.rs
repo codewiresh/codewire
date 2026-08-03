@@ -141,6 +141,8 @@ pub struct CreateEnvironmentBody {
     pub include_org_secrets: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub include_user_secrets: Option<bool>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub isolation_tier: String,
 }
 
 /// Mirrors `api.Preset` (the slice the create flow consumes; the full
@@ -410,6 +412,7 @@ struct InsertEnvironmentParams<'a> {
     cpu_millicores: i32,
     memory_mb: i32,
     disk_gb: i32,
+    isolation_tier: &'a str,
     ttl_seconds: Option<i32>,
     setup_config: Option<&'a SetupConfig>,
     secret_project_id: Option<String>,
@@ -418,9 +421,16 @@ struct InsertEnvironmentParams<'a> {
 async fn insert_environment(
     pool: &PgPool,
     p: InsertEnvironmentParams<'_>,
-) -> anyhow::Result<Environment> {
+) -> AppResult<Environment> {
     let setup_json = match p.setup_config {
-        Some(cfg) => Some(serde_json::to_value(cfg)?),
+        Some(cfg) => Some(serde_json::to_value(cfg).map_err(|error| {
+            tracing::error!(%error, "serialize environment setup config");
+            coded(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "failed to serialize environment setup",
+            )
+        })?),
         None => None,
     };
 
@@ -436,17 +446,21 @@ async fn insert_environment(
         r#"WITH ins AS (
             INSERT INTO environments
                 (org_id, created_by, preset_id, type, name,
-                 cpu_millicores, memory_mb, disk_gb, ttl_seconds,
+                 cpu_millicores, memory_mb, disk_gb, isolation_tier, ttl_seconds,
                  shutdown_at, auth_token, setup_config, secret_project_id)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9,
-                 CASE WHEN $10::int IS NOT NULL THEN NOW() + make_interval(secs => $10::int) END,
-                 gen_random_uuid()::text, $11, $12)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+                 CASE WHEN $11::int IS NOT NULL THEN NOW() + make_interval(secs => $11::int) END,
+                 gen_random_uuid()::text, $12, $13)
              RETURNING *
          )
          SELECT {ENV_SELECT_COLS}
          FROM ins e
          {ENV_SELECT_JOINS}"#
     );
+    let mut transaction = pool.begin().await?;
+    if p.isolation_tier == "confidential" {
+        reserve_confidential_capacity(&mut transaction, p.org_id).await?;
+    }
     let row = sqlx::query(&sql)
         .bind(p.org_id)
         .bind(p.created_by)
@@ -456,13 +470,94 @@ async fn insert_environment(
         .bind(p.cpu_millicores)
         .bind(p.memory_mb)
         .bind(p.disk_gb)
+        .bind(p.isolation_tier)
         .bind(p.ttl_seconds)
         .bind(p.ttl_seconds)
         .bind(setup_json)
         .bind(p.secret_project_id)
-        .fetch_one(pool)
+        .fetch_one(&mut *transaction)
         .await?;
+    transaction.commit().await?;
     Ok(scan_environment(&row)?)
+}
+
+/// Checks the catalog entitlement and concurrent capacity while holding an
+/// organization-row lock. The new environment row is inserted in the same
+/// transaction, so a successful check is a reservation and a failed check
+/// creates no environment.
+async fn reserve_confidential_capacity(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    org_id: &str,
+) -> AppResult<()> {
+    sqlx::query("SELECT id FROM organizations WHERE id = $1 FOR UPDATE")
+        .bind(org_id)
+        .fetch_optional(&mut **transaction)
+        .await?
+        .ok_or_else(|| {
+            coded(
+                StatusCode::NOT_FOUND,
+                "org_not_found",
+                "organization not found",
+            )
+        })?;
+
+    let plan: String = sqlx::query_scalar(
+        r#"SELECT COALESCE(
+              (SELECT plan FROM environment_subscriptions
+                WHERE org_id = $1 AND status IN ('active', 'trialing', 'past_due')
+                ORDER BY updated_at DESC LIMIT 1),
+              (SELECT plan FROM org_subscriptions
+                WHERE org_id = $1 AND status IN ('active', 'trialing', 'past_due')
+                ORDER BY updated_at DESC LIMIT 1),
+              (SELECT billing_plan FROM organizations
+                WHERE id = $1 AND billing_plan NOT IN ('', 'none')
+                  AND billing_status IN ('active', 'trialing', 'past_due')),
+              '')"#,
+    )
+    .bind(org_id)
+    .fetch_one(&mut **transaction)
+    .await?;
+
+    let catalog: Option<(i32, f64, f64)> = sqlx::query_as(
+        r#"SELECT max_concurrent_ws, cpu_overage_cents, mem_overage_cents
+           FROM billing_catalog_plans
+           WHERE resource_type = 'confidential_sandbox' AND plan_key = $1
+             AND archived_at IS NULL"#,
+    )
+    .bind(&plan)
+    .fetch_optional(&mut **transaction)
+    .await?;
+    let Some((max_concurrent, cpu_rate, memory_rate)) = catalog else {
+        return Err(coded(
+            StatusCode::CONFLICT,
+            "CONFIDENTIAL_CAPACITY_UNAVAILABLE",
+            "confidential environments are not available for this plan",
+        ));
+    };
+    if cpu_rate <= 0.0 || memory_rate <= 0.0 || max_concurrent == 0 {
+        return Err(coded(
+            StatusCode::CONFLICT,
+            "CONFIDENTIAL_CAPACITY_UNAVAILABLE",
+            "confidential environments are currently unavailable",
+        ));
+    }
+    let active: i64 = sqlx::query_scalar(
+        r#"SELECT COUNT(*) FROM environments
+           WHERE org_id = $1 AND isolation_tier = 'confidential'
+             AND state NOT IN ('destroyed', 'destroying', 'error', 'archived')
+             AND NOT (state = 'stopped' AND desired_state = 'stopped')"#,
+    )
+    .bind(org_id)
+    .fetch_one(&mut **transaction)
+    .await?;
+    if max_concurrent != -1 && active >= i64::from(max_concurrent) {
+        return Err(coded(
+            StatusCode::CONFLICT,
+            "CONFIDENTIAL_CAPACITY_UNAVAILABLE",
+            "confidential environment capacity is currently unavailable",
+        ));
+    }
+    Ok(())
 }
 
 fn int_or_default(v: Option<i32>, default: i32) -> i32 {
@@ -623,6 +718,17 @@ pub(crate) async fn create_environment_core(
             };
 
             validate_environment_resources(Some(cpu), Some(mem), Some(disk), ttl)?;
+            let isolation_tier = match body.isolation_tier.trim() {
+                "" | "standard" => "standard",
+                "confidential" => "confidential",
+                _ => {
+                    return Err(coded(
+                        StatusCode::BAD_REQUEST,
+                        "invalid_isolation_tier",
+                        "isolation_tier must be standard or confidential",
+                    ));
+                }
+            };
 
             // Check quota before inserting.
             check_quota(pool, org_id, "sandbox", cpu, mem).await?;
@@ -701,20 +807,13 @@ pub(crate) async fn create_environment_core(
                     cpu_millicores: cpu,
                     memory_mb: mem,
                     disk_gb: disk,
+                    isolation_tier,
                     ttl_seconds: ttl,
                     setup_config: setup_cfg.as_ref(),
                     secret_project_id,
                 },
             )
-            .await
-            .map_err(|e| {
-                tracing::error!(error = %e, "insert environment failed");
-                coded(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "internal_error",
-                    "failed to create environment",
-                )
-            })?;
+            .await?;
 
             // Auto-grant owner access to the creator (best-effort, like Go).
             let _ = sqlx::query(
@@ -909,6 +1008,7 @@ mod tests {
     use super::*;
     use codewire_server_core::AppError;
     use codewire_server_core::validation::validate_value;
+    use sqlx::postgres::PgPoolOptions;
 
     #[test]
     fn normalize_mirrors_go() {
@@ -950,6 +1050,173 @@ mod tests {
         assert_eq!(b.repo_url, "https://github.com/x/y");
         assert_eq!(b.branch, "dev");
         assert_eq!(b.repos.len(), 2);
+    }
+
+    #[test]
+    fn isolation_tier_is_an_explicit_product_choice() {
+        let mut body = CreateEnvironmentBody {
+            isolation_tier: "confidential".into(),
+            ..Default::default()
+        };
+        normalize_create_environment_body(&mut body);
+        assert_eq!(body.isolation_tier, "confidential");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires TEST_DATABASE_URL"]
+    async fn db_confidential_capacity_is_atomic_and_plan_scoped() {
+        let database_url =
+            std::env::var("TEST_DATABASE_URL").expect("ignored DB test requires TEST_DATABASE_URL");
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&database_url)
+            .await
+            .unwrap();
+        let suffix = uuid::Uuid::new_v4().simple().to_string();
+        let user_id = format!("user_confidential_{suffix}");
+        let org_id = format!("org_confidential_{suffix}");
+        let preset_id = format!("preset_confidential_{suffix}");
+        let environment_id = format!("env_confidential_{suffix}");
+        let plan_key = format!("confidential_{suffix}");
+
+        sqlx::query("INSERT INTO users (id, email) VALUES ($1, $2)")
+            .bind(&user_id)
+            .bind(format!("{user_id}@example.test"))
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO organizations (id, name, slug, created_by, billing_plan, billing_status) VALUES ($1, $2, $3, $4, $5, 'active')",
+        )
+        .bind(&org_id)
+        .bind(format!("Confidential {suffix}"))
+        .bind(format!("confidential-{suffix}"))
+        .bind(&user_id)
+        .bind(&plan_key)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO billing_catalog_plans (resource_type, plan_key, display_name, price_cents, max_concurrent_ws, cpu_overage_cents, mem_overage_cents) VALUES ('confidential_sandbox', $1, 'Confidential test', 0, 1, 1, 1)",
+        )
+        .bind(&plan_key)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO environment_presets (id, org_id, name, build_status) VALUES ($1, $2, 'Confidential test', 'ready')",
+        )
+        .bind(&preset_id)
+        .bind(&org_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let mut transaction = pool.begin().await.unwrap();
+        reserve_confidential_capacity(&mut transaction, &org_id)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO environments (id, org_id, created_by, type, preset_id, state, desired_state, isolation_tier) VALUES ($1, $2, $3, 'sandbox', $4, 'pending', 'started', 'confidential')",
+        )
+        .bind(&environment_id)
+        .bind(&org_id)
+        .bind(&user_id)
+        .bind(&preset_id)
+        .execute(&mut *transaction)
+        .await
+        .unwrap();
+        transaction.commit().await.unwrap();
+
+        let mut transaction = pool.begin().await.unwrap();
+        let error = reserve_confidential_capacity(&mut transaction, &org_id)
+            .await
+            .expect_err("the second active confidential environment must be rejected");
+        transaction.rollback().await.unwrap();
+        assert!(matches!(
+            error,
+            AppError::Coded {
+                code: "CONFIDENTIAL_CAPACITY_UNAVAILABLE",
+                ..
+            }
+        ));
+
+        sqlx::query(
+            "UPDATE environments SET state = 'stopped', desired_state = 'stopped' WHERE id = $1",
+        )
+        .bind(&environment_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let mut transaction = pool.begin().await.unwrap();
+        reserve_confidential_capacity(&mut transaction, &org_id)
+            .await
+            .expect("a fully stopped environment must release confidential capacity");
+        transaction.rollback().await.unwrap();
+
+        crate::lifecycle::Service::for_pool(pool.clone())
+            .admit_confidential_start(&environment_id, &org_id, "confidential")
+            .await
+            .expect("a stopped environment can atomically reserve confidential capacity");
+        let mut transaction = pool.begin().await.unwrap();
+        let error = reserve_confidential_capacity(&mut transaction, &org_id)
+            .await
+            .expect_err("a stopped environment with start intent must reserve capacity");
+        transaction.rollback().await.unwrap();
+        assert!(matches!(
+            error,
+            AppError::Coded {
+                code: "CONFIDENTIAL_CAPACITY_UNAVAILABLE",
+                ..
+            }
+        ));
+
+        sqlx::query(
+            "UPDATE environments SET state = 'error', desired_state = 'stopped' WHERE id = $1",
+        )
+        .bind(&environment_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        crate::lifecycle::Service::for_pool(pool.clone())
+            .retry_confidential_start(&environment_id, &org_id)
+            .await
+            .expect("an errored environment must reacquire capacity before retry");
+        let retried: (String, String) =
+            sqlx::query_as("SELECT state, desired_state FROM environments WHERE id = $1")
+                .bind(&environment_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(retried, ("pending".to_owned(), "started".to_owned()));
+
+        sqlx::query("DELETE FROM environments WHERE id = $1")
+            .bind(&environment_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM environment_presets WHERE id = $1")
+            .bind(&preset_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "DELETE FROM billing_catalog_plans WHERE resource_type = 'confidential_sandbox' AND plan_key = $1",
+        )
+        .bind(&plan_key)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("DELETE FROM organizations WHERE id = $1")
+            .bind(&org_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM users WHERE id = $1")
+            .bind(&user_id)
+            .execute(&pool)
+            .await
+            .unwrap();
     }
 
     #[test]

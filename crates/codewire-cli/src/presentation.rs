@@ -15,6 +15,8 @@ pub struct Environment {
     pub preset_id: String,
     #[serde(rename = "type")]
     pub environment_type: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub isolation_tier: String,
     pub name: Option<String>,
     pub state: String,
     pub desired_state: String,
@@ -87,6 +89,7 @@ pub struct TrustReportEnvironment {
     #[serde(rename = "type")]
     pub environment_type: String,
     pub state: String,
+    pub isolation_tier: String,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -209,6 +212,8 @@ pub struct CreateEnvironmentRequest {
     pub include_org_secrets: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub include_user_secrets: Option<bool>,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub isolation_tier: String,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]

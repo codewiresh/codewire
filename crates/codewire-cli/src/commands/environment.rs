@@ -1579,6 +1579,7 @@ pub(crate) fn env_create_request_from_args(
         app_ports: Vec::new(),
         include_org_secrets: args.no_org_secrets.then_some(false),
         include_user_secrets: args.no_user_secrets.then_some(false),
+        isolation_tier: args.isolation.clone().unwrap_or_default(),
     })
 }
 
@@ -1856,10 +1857,15 @@ pub(crate) fn parse_env_create_repo_spec(spec: &str) -> anyhow::Result<(String, 
 pub(crate) fn format_env_create_text(environment: &Environment) -> String {
     let env_name = environment.name.as_deref().unwrap_or(&environment.id);
     format!(
-        "Environment created: {env_name}\n  ID:    {}\n  State: {}\n  Type:  {}\n  CPU:   {}m\n  Mem:   {}MB\n  Disk:  {}GB\n",
+        "Environment created: {env_name}\n  ID:        {}\n  State:     {}\n  Type:      {}\n  Isolation: {}\n  CPU:       {}m\n  Mem:       {}MB\n  Disk:      {}GB\n",
         environment.id,
         environment.state,
         environment.environment_type,
+        if environment.isolation_tier.is_empty() {
+            "standard"
+        } else {
+            &environment.isolation_tier
+        },
         environment.cpu_millicores,
         environment.memory_mb,
         environment.disk_gb
@@ -2272,9 +2278,10 @@ pub(crate) fn format_env_trust_report_text(report: &EnvironmentTrustReport) -> S
         }
     ));
     output.push_str(&format!(
-        "  Environment: {} ({})\n",
+        "  Environment: {} ({}, {})\n",
         display_str(&report.environment.environment_type),
-        display_str(&report.environment.state)
+        display_str(&report.environment.state),
+        display_str(&report.environment.isolation_tier)
     ));
     output.push_str(&format!(
         "  Runtime: {} / RuntimeClass {} / handler {}\n",
@@ -2907,6 +2914,10 @@ pub(crate) fn format_env_info_text(environment: &Environment) -> String {
         output.push_str(&format!("{:<14} {}\n", "Network:", network));
     }
     output.push_str(&format!("CPU:           {}m\n", environment.cpu_millicores));
+    output.push_str(&format!(
+        "Isolation:     {}\n",
+        trimmed_str(&environment.isolation_tier).unwrap_or("standard")
+    ));
     output.push_str(&format!("Memory:        {}MB\n", environment.memory_mb));
     output.push_str(&format!("Disk:          {}GB\n", environment.disk_gb));
     output.push_str(&format!(

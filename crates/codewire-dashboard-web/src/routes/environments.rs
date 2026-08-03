@@ -15,8 +15,8 @@ use axum::{
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use codewire_proto::codewire::v1::{
-    AppPort, CreateEnvironmentRequest, CreatePortRequest, DeletePortRequest, PortAccess, RepoEntry,
-    SetupAgent,
+    AppPort, CreateEnvironmentRequest, CreatePortRequest, DeletePortRequest, IsolationTier,
+    PortAccess, RepoEntry, SetupAgent,
 };
 use connectrpc::{ConnectError, ErrorCode, http_body};
 use serde::{Deserialize, Serialize};
@@ -63,6 +63,8 @@ pub(super) struct EnvironmentsQuery {
     #[serde(default)]
     ports: String,
     #[serde(default)]
+    trust: String,
+    #[serde(default)]
     message: String,
     #[serde(default)]
     error: String,
@@ -108,6 +110,7 @@ struct EnvironmentSubmission {
     memory: String,
     disk: String,
     ttl: String,
+    isolation_tier: String,
     repositories: Vec<(String, String)>,
     agents: Vec<String>,
     secret_project: String,
@@ -200,6 +203,7 @@ impl EnvironmentSubmission {
             memory: take(&mut values, "memory"),
             disk: take(&mut values, "disk"),
             ttl: take(&mut values, "ttl"),
+            isolation_tier: take(&mut values, "isolation_tier"),
             repositories: repositories.into_values().collect(),
             agents,
             secret_project: take(&mut values, "secret_project"),
@@ -231,6 +235,9 @@ impl EnvironmentSubmission {
             memory: self.memory.trim().to_owned(),
             disk: self.disk.trim().to_owned(),
             ttl: self.ttl.trim().to_owned(),
+            isolation_tier: self.isolation_tier.trim().to_owned(),
+            confidential_available: false,
+            confidential_price: String::new(),
             selected_agents: self.agents.clone(),
             secret_project: self.secret_project.trim().to_owned(),
             include_org_secrets: self.include_org_secrets,
@@ -378,6 +385,19 @@ impl EnvironmentSubmission {
         if agents.len() != self.agents.len() {
             form.form_error = "One of the selected agents is not supported.".to_owned();
         }
+        let isolation_tier = match self.isolation_tier.trim() {
+            "" | "standard" => IsolationTier::Standard,
+            "confidential" if form.confidential_available => IsolationTier::Confidential,
+            "confidential" => {
+                form.form_error =
+                    "Confidential environments are not available for this organization.".to_owned();
+                IsolationTier::Unspecified
+            }
+            _ => {
+                form.form_error = "Choose a valid isolation tier.".to_owned();
+                IsolationTier::Unspecified
+            }
+        };
 
         let mut ports = Vec::new();
         for (port, label, access) in &self.app_ports {
@@ -440,6 +460,7 @@ impl EnvironmentSubmission {
             app_ports: ports,
             include_org_secrets: (!self.include_org_secrets).then_some(false),
             include_user_secrets: (!self.include_user_secrets).then_some(false),
+            isolation_tier: isolation_tier.into(),
             ..Default::default()
         })
     }
@@ -513,6 +534,7 @@ pub(super) async fn list_fragment(
         environments,
         create_form: default_create_form(token, false),
         port_panel: None,
+        trust_summary: None,
         search: bounded_query(&query.search),
         state: allowlisted_state(&query.state).to_owned(),
         message: String::new(),
@@ -1194,8 +1216,13 @@ async fn build_page(
     };
     let port_panel = match port_panel {
         Some((environment_id, environment_name)) => Some(EnvironmentPortPanelView {
-            ports: environment_connect::ports(state, cookie, &organization.id, &environment_id)
-                .await?,
+            ports: environment_connect::ports(
+                state,
+                cookie.clone(),
+                &organization.id,
+                &environment_id,
+            )
+            .await?,
             environment_id,
             environment_name,
             port: String::new(),
@@ -1205,10 +1232,31 @@ async fn build_page(
         }),
         None => None,
     };
+    let trust_summary = if valid_identifier(&query.trust) {
+        match environments
+            .iter()
+            .find(|environment| environment.id == query.trust)
+        {
+            Some(environment) => Some(
+                environment_connect::environment_trust_summary(
+                    state,
+                    cookie,
+                    &organization.id,
+                    &environment.id,
+                    environment.name.clone(),
+                )
+                .await?,
+            ),
+            None => None,
+        }
+    } else {
+        None
+    };
     Ok(EnvironmentsPageView {
         environments,
         create_form: form,
         port_panel,
+        trust_summary,
         search: bounded_query(&query.search),
         state: allowlisted_state(&query.state).to_owned(),
         message: page_message(&query.message).to_owned(),
@@ -1310,6 +1358,9 @@ fn default_create_form(token: String, expanded: bool) -> EnvironmentCreateFormVi
         memory: "2048".to_owned(),
         disk: "10".to_owned(),
         ttl: String::new(),
+        isolation_tier: "standard".to_owned(),
+        confidential_available: false,
+        confidential_price: String::new(),
         selected_agents: Vec::new(),
         secret_project: String::new(),
         include_org_secrets: true,
@@ -1342,6 +1393,8 @@ fn hydrate_options(form: &mut EnvironmentCreateFormView, options: EnvironmentCre
     form.presets = options.presets;
     form.secret_projects = options.secret_projects;
     form.agents = options.agents;
+    form.confidential_available = options.confidential_available;
+    form.confidential_price = options.confidential_price;
 }
 
 fn apply_prepared_draft(
@@ -1372,6 +1425,10 @@ fn apply_prepared_draft(
         .ttl_seconds
         .map(|value| format!("{value}s"))
         .unwrap_or_default();
+    form.isolation_tier = match draft.isolation_tier.as_known() {
+        Some(IsolationTier::Confidential) => "confidential".to_owned(),
+        _ => "standard".to_owned(),
+    };
     form.selected_agents = draft.agents.into_iter().map(|agent| agent.r#type).collect();
     form.secret_project = draft.secret_project;
     form.include_org_secrets = draft.include_org_secrets.unwrap_or(true);
@@ -1801,6 +1858,8 @@ mod tests {
         let mut submission =
             EnvironmentSubmission::parse(b"preset_id=preset-id&cpu=750").expect("submission");
         let options = EnvironmentCreateOptions {
+            confidential_available: false,
+            confidential_price: String::new(),
             github_connected: false,
             github_username: String::new(),
             github_repositories_available: false,

@@ -704,6 +704,11 @@ fn proto_create_environment_request(
             .collect(),
         include_org_secrets: request.include_org_secrets,
         include_user_secrets: request.include_user_secrets,
+        isolation_tier: match request.isolation_tier.as_str() {
+            "" | "standard" => rpc::IsolationTier::Standard.into(),
+            "confidential" => rpc::IsolationTier::Confidential.into(),
+            _ => rpc::IsolationTier::Unspecified.into(),
+        },
         ..Default::default()
     }
 }
@@ -805,6 +810,12 @@ fn legacy_create_environment_request(
             .collect(),
         include_org_secrets: value.include_org_secrets,
         include_user_secrets: value.include_user_secrets,
+        isolation_tier: match value.isolation_tier.as_known() {
+            Some(rpc::IsolationTier::Confidential) => "confidential".into(),
+            Some(rpc::IsolationTier::Standard) | Some(rpc::IsolationTier::Unspecified) | None => {
+                String::new()
+            }
+        },
     }
 }
 
@@ -932,6 +943,12 @@ fn legacy_environment(value: rpc::Environment) -> Environment {
         created_by: value.created_by,
         preset_id: value.preset_id,
         environment_type: value.r#type,
+        isolation_tier: match value.isolation_tier.as_known() {
+            Some(rpc::IsolationTier::Confidential) => "confidential".into(),
+            Some(rpc::IsolationTier::Standard) | Some(rpc::IsolationTier::Unspecified) | None => {
+                "standard".into()
+            }
+        },
         name: empty_to_none(value.name),
         state: state.to_string(),
         desired_state: desired_state.to_string(),
@@ -1030,6 +1047,10 @@ fn legacy_environment_trust_report(value: rpc::EnvironmentTrustReport) -> Enviro
             org_id: environment.org_id,
             environment_type: environment.r#type,
             state: environment.state,
+            isolation_tier: match environment.isolation_tier.as_known() {
+                Some(rpc::IsolationTier::Confidential) => "confidential".to_owned(),
+                _ => "standard".to_owned(),
+            },
         },
         runtime: TrustReportRuntime {
             profile: runtime.profile,

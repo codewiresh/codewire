@@ -1229,6 +1229,13 @@ async fn configured_finalizer_is_dependency_ordered_idempotent_and_value_blind()
     .execute(&pool)
     .await
     .unwrap();
+    sqlx::query(
+        "INSERT INTO environment_usage_billing_tiers (org_id, billing_period_start, runtime_tier) VALUES ($1, NOW(), 'confidential')",
+    )
+    .bind(&fixture.org_id)
+    .execute(&pool)
+    .await
+    .unwrap();
     sqlx::query("INSERT INTO secret_projects (id, org_id, name) VALUES ($1, $2, 'fixture')")
         .bind(&project_id)
         .bind(&fixture.org_id)
@@ -1297,6 +1304,7 @@ async fn configured_finalizer_is_dependency_ordered_idempotent_and_value_blind()
         "api_keys",
         "environment_quotas",
         "environment_usage_billing",
+        "environment_usage_billing_tiers",
         "secret_projects",
         "org_invitations",
         "org_members",
@@ -1385,6 +1393,7 @@ async fn schema_guard_enumerates_org_preset_and_environment_dependencies() {
             "environment_quotas:no_action",
             "environment_subscriptions:cascade",
             "environment_usage_billing:no_action",
+            "environment_usage_billing_tiers:no_action",
             "environments:no_action",
             "org_invitations:cascade",
             "org_members:cascade",

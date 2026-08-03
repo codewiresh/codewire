@@ -75,6 +75,7 @@ pub struct Resources {
 struct Identity {
     environment_id: String,
     org_id: String,
+    runtime_tier: String,
     runtime_uid: String,
     runtime_name: String,
     namespace: String,
@@ -360,16 +361,20 @@ async fn resolve_identity(
         return Ok(IdentityResolution::NotManaged);
     }
 
+    let row = sqlx::query("SELECT org_id, isolation_tier FROM environments WHERE id = $1")
+        .bind(&env_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| anyhow::anyhow!("resolve environment billing identity: {e}"))?;
+    let Some(row) = row else {
+        return Ok(IdentityResolution::Unresolved("environment_not_found"));
+    };
+    let stored_org_id: String = row.try_get(0).unwrap_or_default();
+    let runtime_tier: String = row.try_get(1).unwrap_or_default();
     if org_id.is_empty() {
-        let row = sqlx::query("SELECT org_id FROM environments WHERE id = $1")
-            .bind(&env_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|e| anyhow::anyhow!("resolve organization by environment: {e}"))?;
-        match row {
-            None => return Ok(IdentityResolution::Unresolved("environment_not_found")),
-            Some(r) => org_id = r.try_get::<String, _>(0).unwrap_or_default(),
-        }
+        org_id = stored_org_id;
+    } else if org_id != stored_org_id {
+        return Ok(IdentityResolution::Unresolved("organization_mismatch"));
     }
 
     if org_id.is_empty()
@@ -383,6 +388,7 @@ async fn resolve_identity(
     Ok(IdentityResolution::Resolved(Identity {
         environment_id: env_id,
         org_id,
+        runtime_tier,
         runtime_uid: runtime_uid.to_string(),
         runtime_name: runtime_name.to_string(),
         namespace: namespace.to_string(),
@@ -402,10 +408,10 @@ async fn open_or_heartbeat(
     sqlx::query(
         r#"INSERT INTO sandbox_running_sessions (
                environment_id, organization_id, runtime_type, runtime_uid, runtime_name,
-               runtime_namespace, cpu_millicores, memory_mib, disk_gib, runtime_class,
+               runtime_namespace, cpu_millicores, memory_mib, disk_gib, runtime_class, runtime_tier,
                started_at, last_observed_at, updated_at
            )
-           VALUES ($1, $2, 'sandbox', $3, $4, $5, $6, $7, $8, $9, $10, $10, $10)
+           VALUES ($1, $2, 'sandbox', $3, $4, $5, $6, $7, $8, $9, $10, $11, $11, $11)
            ON CONFLICT (runtime_type, runtime_uid) WHERE ended_at IS NULL
            DO UPDATE SET
                environment_id = EXCLUDED.environment_id,
@@ -416,6 +422,7 @@ async fn open_or_heartbeat(
                memory_mib = EXCLUDED.memory_mib,
                disk_gib = EXCLUDED.disk_gib,
                runtime_class = EXCLUDED.runtime_class,
+               runtime_tier = EXCLUDED.runtime_tier,
                last_observed_at = EXCLUDED.last_observed_at,
                updated_at = EXCLUDED.updated_at"#,
     )
@@ -428,6 +435,7 @@ async fn open_or_heartbeat(
     .bind(res.memory_mib)
     .bind(res.disk_gib)
     .bind(&res.runtime_class)
+    .bind(&id.runtime_tier)
     .bind(observed_at)
     .execute(pool)
     .await

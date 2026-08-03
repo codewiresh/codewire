@@ -566,6 +566,13 @@ fn create_body(request: proto::CreateEnvironmentRequest) -> CreateEnvironmentBod
             .collect(),
         include_org_secrets: request.include_org_secrets,
         include_user_secrets: request.include_user_secrets,
+        isolation_tier: match request.isolation_tier.as_known() {
+            Some(proto::IsolationTier::Unspecified) | Some(proto::IsolationTier::Standard) => {
+                String::new()
+            }
+            Some(proto::IsolationTier::Confidential) => "confidential".to_string(),
+            None => format!("unknown-enum-value-{}", request.isolation_tier.to_i32()),
+        },
     }
 }
 
@@ -1001,6 +1008,11 @@ fn proto_environment(environment: Environment) -> AppResult<proto::Environment> 
             .into_iter()
             .map(proto_port)
             .collect::<AppResult<Vec<_>>>()?,
+        isolation_tier: match environment.isolation_tier.as_str() {
+            "standard" => proto::IsolationTier::Standard.into(),
+            "confidential" => proto::IsolationTier::Confidential.into(),
+            unexpected => return invalid_stored_value("environment isolation tier", unexpected),
+        },
         ..Default::default()
     })
 }
@@ -1070,6 +1082,11 @@ fn proto_trust_report(report: EnvironmentTrustReport) -> proto::EnvironmentTrust
             org_id: report.environment.org_id,
             r#type: report.environment.env_type,
             state: report.environment.state,
+            isolation_tier: match report.environment.isolation_tier.as_str() {
+                "standard" => proto::IsolationTier::Standard.into(),
+                "confidential" => proto::IsolationTier::Confidential.into(),
+                _ => proto::IsolationTier::Unspecified.into(),
+            },
             ..Default::default()
         })
         .into(),
@@ -1524,6 +1541,7 @@ mod tests {
             name: None,
             state: state.into(),
             desired_state: "started".into(),
+            isolation_tier: "standard".into(),
             error_reason: None,
             recoverable: false,
             state_changed_at: "2026-07-18T12:34:56Z".into(),

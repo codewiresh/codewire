@@ -47,6 +47,7 @@ pub struct TrustReportEnvironment {
     pub org_id: String,
     pub env_type: String,
     pub state: String,
+    pub isolation_tier: String,
 }
 
 #[derive(Debug, Clone)]
@@ -120,6 +121,7 @@ struct TrustReportRow {
     org_id: String,
     env_type: String,
     state: String,
+    isolation_tier: String,
     namespace: Option<String>,
     pod_name: Option<String>,
     pod_ip: Option<String>,
@@ -178,6 +180,7 @@ pub(crate) async fn get_environment_trust_report_core(
             org_id: row.org_id,
             env_type: row.env_type,
             state: row.state,
+            isolation_tier: row.isolation_tier,
         },
         runtime,
         placement,
@@ -196,7 +199,7 @@ async fn load_trust_report_row(
 ) -> AppResult<TrustReportRow> {
     let row = sqlx::query(
         r#"
-        SELECT e.id, e.org_id, e.type, e.state,
+        SELECT e.id, e.org_id, e.type, e.state, e.isolation_tier,
                b.namespace, b.pod_name, b.pod_ip,
                (
                  SELECT runtime_class
@@ -236,6 +239,7 @@ async fn load_trust_report_row(
         org_id: row.try_get("org_id")?,
         env_type: row.try_get("type")?,
         state: row.try_get("state")?,
+        isolation_tier: row.try_get("isolation_tier")?,
         namespace: row.try_get("namespace")?,
         pod_name: row.try_get("pod_name")?,
         pod_ip: row.try_get("pod_ip")?,

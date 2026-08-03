@@ -51,4 +51,11 @@
     </div>
   </section>
   {% when None %}{% endmatch %}
+
+  {% match page.trust_summary %}{% when Some with (trust) %}
+  <section class="cw-card" aria-labelledby="trust-summary-title">
+    <div class="cw-card-header"><div><h2 id="trust-summary-title" class="cw-card-title">Trust · {{ trust.environment_name }}</h2><p class="cw-card-description">Product-level attestation summary for this confidential environment.</p></div><a class="cw-button cw-button--outline cw-button--small" href="/dashboard/orgs/{{ organization.slug }}/environments">Close</a></div>
+    <div class="cw-card-content"><p><strong>Trust level:</strong> {{ trust.trust_level }}</p><p><strong>Production verified:</strong> {% if trust.production_verified %}yes{% else %}no{% endif %}</p><p><strong>Attestation:</strong> {{ trust.attestation_status }}{% if !trust.tee.is_empty() %} ({{ trust.tee }}){% endif %}</p>{% if !trust.warnings.is_empty() %}<div class="cw-alert cw-alert--warning" role="status">{% for warning in trust.warnings %}{{ warning }}{% if !loop.last %}; {% endif %}{% endfor %}</div>{% endif %}</div>
+  </section>
+  {% when None %}{% endmatch %}
 </section>

@@ -347,6 +347,7 @@ pub(crate) fn env_create_request_from_init_args(
         cpu: args.cpu,
         memory: args.memory,
         disk: args.disk,
+        isolation: args.isolation.clone(),
         repo_flags: args.repo_flags.clone(),
         branch: args.branch.clone(),
         image: args.image.clone(),

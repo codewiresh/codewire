@@ -138,6 +138,138 @@ impl Service<PgLifecycleStore> {
             },
         }
     }
+
+    /// Reserves Confidential capacity and records the normal start intent in
+    /// one transaction. Standard environments retain the ordinary intent
+    /// path. This prevents concurrent stopped environments from both passing
+    /// admission before either becomes active.
+    pub async fn admit_confidential_start(
+        &self,
+        env_id: &str,
+        org_id: &str,
+        isolation_tier: &str,
+    ) -> anyhow::Result<()> {
+        if isolation_tier == "standard" {
+            return self.set_desired_state(env_id, "started").await;
+        }
+        if isolation_tier != "confidential" {
+            anyhow::bail!("unsupported environment isolation tier {isolation_tier:?}");
+        }
+
+        let mut tx = self.store.pool.begin().await?;
+        reserve_confidential_capacity(&mut tx, org_id).await?;
+        let changed = sqlx::query(
+            "UPDATE environments SET desired_state = 'started', state_changed_at = NOW() WHERE id = $1 AND org_id = $2 AND state = 'stopped'",
+        )
+        .bind(env_id)
+        .bind(org_id)
+        .execute(&mut *tx)
+        .await?;
+        if changed.rows_affected() != 1 {
+            anyhow::bail!("environment is no longer stopped");
+        }
+        PgLifecycleStore::append_log_and_journal(
+            &mut tx,
+            env_id,
+            LogEntry {
+                phase: "lifecycle_intent",
+                status: "completed",
+                message: "desired state -> started (confidential capacity reserved)".into(),
+                metadata: serde_json::json!({"kind": "desired_state", "desired_state": "started", "isolation_tier": "confidential"}),
+            },
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Reacquires Confidential capacity atomically with the existing
+    /// error-to-pending retry transition. A retry cannot over-admit while a
+    /// different stopped start is being accepted for the same organization.
+    pub async fn retry_confidential_start(&self, env_id: &str, org_id: &str) -> anyhow::Result<()> {
+        let mut tx = self.store.pool.begin().await?;
+        reserve_confidential_capacity(&mut tx, org_id).await?;
+        let changed = sqlx::query(
+            r#"UPDATE environments SET state = 'pending', desired_state = 'started', error_reason = NULL,
+               retry_count = retry_count + 1, state_changed_at = NOW()
+               WHERE id = $1 AND org_id = $2 AND state = 'error'"#,
+        )
+        .bind(env_id)
+        .bind(org_id)
+        .execute(&mut *tx)
+        .await?;
+        if changed.rows_affected() != 1 {
+            anyhow::bail!("environment is no longer errored");
+        }
+        PgLifecycleStore::append_log_and_journal(
+            &mut tx,
+            env_id,
+            LogEntry {
+                phase: "lifecycle_transition",
+                status: "completed",
+                message: "state transition error -> pending (confidential capacity reserved)"
+                    .into(),
+                metadata: serde_json::json!({
+                    "kind": "state_transition",
+                    "from": "error",
+                    "to": "pending",
+                    "strategy": "retry_reset",
+                    "isolation_tier": "confidential",
+                }),
+            },
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+}
+
+async fn reserve_confidential_capacity(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    org_id: &str,
+) -> anyhow::Result<()> {
+    sqlx::query("SELECT id FROM organizations WHERE id = $1 FOR UPDATE")
+        .bind(org_id)
+        .fetch_one(&mut **tx)
+        .await?;
+    let plan: String = sqlx::query_scalar(
+            r#"SELECT COALESCE(
+                  (SELECT plan FROM environment_subscriptions WHERE org_id = $1 AND status IN ('active', 'trialing', 'past_due') ORDER BY updated_at DESC LIMIT 1),
+                  (SELECT plan FROM org_subscriptions WHERE org_id = $1 AND status IN ('active', 'trialing', 'past_due') ORDER BY updated_at DESC LIMIT 1),
+                  (SELECT billing_plan FROM organizations WHERE id = $1 AND billing_plan NOT IN ('', 'none') AND billing_status IN ('active', 'trialing', 'past_due')),
+                  '')"#,
+        )
+        .bind(org_id)
+        .fetch_one(&mut **tx)
+        .await?;
+    let catalog: Option<(i32, f64, f64)> = sqlx::query_as(
+        r#"SELECT max_concurrent_ws, cpu_overage_cents, mem_overage_cents
+               FROM billing_catalog_plans WHERE resource_type = 'confidential_sandbox'
+                 AND plan_key = $1 AND archived_at IS NULL"#,
+    )
+    .bind(&plan)
+    .fetch_optional(&mut **tx)
+    .await?;
+    let Some((limit, cpu_rate, memory_rate)) = catalog else {
+        anyhow::bail!("CONFIDENTIAL_CAPACITY_UNAVAILABLE");
+    };
+    let active: i64 = sqlx::query_scalar(
+        r#"SELECT COUNT(*) FROM environments WHERE org_id = $1
+               AND isolation_tier = 'confidential'
+               AND state NOT IN ('destroyed', 'destroying', 'error', 'archived')
+               AND NOT (state = 'stopped' AND desired_state = 'stopped')"#,
+    )
+    .bind(org_id)
+    .fetch_one(&mut **tx)
+    .await?;
+    if limit == 0
+        || cpu_rate <= 0.0
+        || memory_rate <= 0.0
+        || (limit != -1 && active >= i64::from(limit))
+    {
+        anyhow::bail!("CONFIDENTIAL_CAPACITY_UNAVAILABLE");
+    }
+    Ok(())
 }
 
 impl<S: LifecycleStore> Service<S> {

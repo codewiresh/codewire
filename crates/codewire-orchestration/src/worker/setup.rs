@@ -2596,6 +2596,7 @@ mod tests {
             env_type: "sandbox".into(),
             state: "running".into(),
             desired_state: "started".into(),
+            isolation_tier: "standard".into(),
             external_cleanup_completed_at: None,
             cpu_millicores: 2000,
             memory_mb: 4096,

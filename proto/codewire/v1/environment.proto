@@ -81,6 +81,15 @@ enum DesiredState {
   DESIRED_STATE_RESIZED = 5;
 }
 
+// IsolationTier is the customer-facing execution isolation selected when an
+// environment is created. RuntimeClass and platform implementation details
+// remain internal.
+enum IsolationTier {
+  ISOLATION_TIER_UNSPECIFIED = 0;
+  ISOLATION_TIER_STANDARD = 1;
+  ISOLATION_TIER_CONFIDENTIAL = 2;
+}
+
 message Environment {
   string id = 1;
   string org_id = 2;
@@ -113,6 +122,7 @@ message Environment {
   string preset_name = 29;
   string network = 30;
   repeated Port ports = 31;
+  IsolationTier isolation_tier = 32;
 }
 
 message ListEnvironmentsRequest {
@@ -154,6 +164,7 @@ message CreateEnvironmentRequest {
   repeated AppPort app_ports = 21;
   optional bool include_org_secrets = 22;
   optional bool include_user_secrets = 23;
+  IsolationTier isolation_tier = 24;
 }
 
 message CreateEnvironmentResponse {
@@ -311,6 +322,7 @@ message TrustReportEnvironment {
   string org_id = 2;
   string type = 3;
   string state = 4;
+  IsolationTier isolation_tier = 5;
 }
 
 message TrustReportRuntime {

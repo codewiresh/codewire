@@ -1275,6 +1275,7 @@
     fn env_create_text_matches_go_messages() {
         let mut environment = test_environment("env_123", Some("builder"), "creating");
         environment.environment_type = "sandbox".to_string();
+        environment.isolation_tier = "confidential".to_string();
         environment.cpu_millicores = 2000;
         environment.memory_mb = 4096;
         environment.disk_gb = 40;
@@ -1283,12 +1284,13 @@
             format_env_create_text(&environment),
             concat!(
                 "Environment created: builder\n",
-                "  ID:    env_123\n",
-                "  State: creating\n",
-                "  Type:  sandbox\n",
-                "  CPU:   2000m\n",
-                "  Mem:   4096MB\n",
-                "  Disk:  40GB\n",
+                "  ID:        env_123\n",
+                "  State:     creating\n",
+                "  Type:      sandbox\n",
+                "  Isolation: confidential\n",
+                "  CPU:       2000m\n",
+                "  Mem:       4096MB\n",
+                "  Disk:      40GB\n",
             )
         );
     }

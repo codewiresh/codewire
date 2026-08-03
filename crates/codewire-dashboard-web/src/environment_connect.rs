@@ -6,16 +6,17 @@ use std::{
 use axum::http::HeaderValue;
 use codewire_proto::codewire::{
     console::v1::{
-        EnvironmentSetupServiceClient, GetEnvironmentCreateOptionsRequest, GitHubServiceClient,
-        ListGitHubReposRequest,
+        BillingServiceClient, EnvironmentSetupServiceClient, GetBillingOverviewRequest,
+        GetEnvironmentCreateOptionsRequest, GitHubServiceClient, ListGitHubReposRequest,
+        ListResourcePlansRequest,
     },
     v1::{
         CreateEnvironmentRequest, CreatePortRequest, DeleteEnvironmentRequest, DeletePortRequest,
         DetectionResult, Environment, EnvironmentServiceClient, EnvironmentState,
-        GetEnvironmentRequest, ListEnvironmentsRequest, ListPortsRequest, ListUserSecretsRequest,
-        Port, PortAccess, PortServiceClient, SecretServiceClient, SetUserSecretRequest,
-        StartEnvironmentRequest, StopEnvironmentRequest, WatchEnvironmentCreateRequest,
-        watch_environment_create_response,
+        GetEnvironmentRequest, GetEnvironmentTrustReportRequest, ListEnvironmentsRequest,
+        ListPortsRequest, ListUserSecretsRequest, Port, PortAccess, PortServiceClient,
+        SecretServiceClient, SetUserSecretRequest, StartEnvironmentRequest, StopEnvironmentRequest,
+        WatchEnvironmentCreateRequest, watch_environment_create_response,
     },
 };
 use connectrpc::{ConnectError, ErrorCode, client::ClientConfig};
@@ -27,7 +28,7 @@ use crate::{
     view::{
         EnvironmentAgentSecretView, EnvironmentAgentView, EnvironmentDetectionView,
         EnvironmentPortRow, EnvironmentPresetOption, EnvironmentRow,
-        EnvironmentSecretProjectOption, GitHubRepositoryOption,
+        EnvironmentSecretProjectOption, EnvironmentTrustSummaryView, GitHubRepositoryOption,
     },
 };
 
@@ -42,6 +43,8 @@ pub(crate) struct EnvironmentCreateOptions {
     pub(crate) presets: Vec<EnvironmentPresetOption>,
     pub(crate) secret_projects: Vec<EnvironmentSecretProjectOption>,
     pub(crate) agents: Vec<EnvironmentAgentView>,
+    pub(crate) confidential_available: bool,
+    pub(crate) confidential_price: String,
 }
 
 pub(crate) enum EnvironmentPrepareEvent {
@@ -79,6 +82,13 @@ fn environment_client(
     EnvironmentServiceClient::new(
         transport(state, cookie),
         client_config(state, UNARY_TIMEOUT),
+    )
+}
+
+fn billing_client(state: &AppState, cookie: HeaderValue) -> BillingServiceClient<BrowserTransport> {
+    BillingServiceClient::new(
+        transport(state, cookie),
+        ClientConfig::new(state.billing_origin.clone()).with_default_timeout(UNARY_TIMEOUT),
     )
 }
 
@@ -130,6 +140,36 @@ pub(crate) async fn environment(
         .into_option()
         .map(environment_row)
         .ok_or_else(|| ConnectError::not_found("environment not found"))
+}
+
+pub(crate) async fn environment_trust_summary(
+    state: &AppState,
+    cookie: HeaderValue,
+    org_id: &str,
+    environment_id: &str,
+    environment_name: String,
+) -> Result<EnvironmentTrustSummaryView, ConnectError> {
+    let report = environment_client(state, cookie)
+        .get_environment_trust_report(GetEnvironmentTrustReportRequest {
+            org_id: org_id.to_owned(),
+            environment_id: environment_id.to_owned(),
+            ..Default::default()
+        })
+        .await?
+        .into_owned()
+        .trust_report
+        .into_option()
+        .ok_or_else(|| ConnectError::not_found("environment trust report not found"))?;
+    let attestation = report.attestation.into_option().unwrap_or_default();
+    let summary = report.summary.into_option().unwrap_or_default();
+    Ok(EnvironmentTrustSummaryView {
+        environment_name,
+        trust_level: summary.trust_level,
+        production_verified: summary.production_verified,
+        attestation_status: attestation.status,
+        tee: attestation.tee,
+        warnings: summary.warnings,
+    })
 }
 
 pub(crate) async fn create_options(
@@ -184,7 +224,7 @@ pub(crate) async fn create_options(
     };
 
     let configured_user_secrets: HashSet<String> = SecretServiceClient::new(
-        transport(state, cookie),
+        transport(state, cookie.clone()),
         client_config(state, UNARY_TIMEOUT),
     )
     .list_user_secrets(ListUserSecretsRequest {
@@ -197,6 +237,45 @@ pub(crate) async fn create_options(
     .into_iter()
     .map(|secret| secret.key)
     .collect();
+
+    // The catalog is public to organization members.  Failure to read it does
+    // not block the create form; the server still performs authoritative,
+    // atomic admission when a confidential environment is submitted.
+    let overview_client = billing_client(state, cookie.clone());
+    let plans_client = billing_client(state, cookie.clone());
+    let (overview, plans) = tokio::join!(
+        overview_client.get_billing_overview(GetBillingOverviewRequest {
+            org_id: org_id.to_owned(),
+            ..Default::default()
+        }),
+        plans_client.list_resource_plans(ListResourcePlansRequest {
+            resource_type: "confidential_sandbox".to_owned(),
+            ..Default::default()
+        }),
+    );
+    let (confidential_available, confidential_price) = match (overview, plans) {
+        (Ok(overview), Ok(plans)) => {
+            let plan_key = overview.into_owned().plan;
+            let plans = plans.into_owned().plans;
+            plans
+                .get(&plan_key)
+                .map(|plan| {
+                    let available = plan.max_concurrent_ws != 0
+                        && plan.cpu_overage_millicents > 0
+                        && plan.mem_overage_millicents > 0;
+                    let price = available.then(|| {
+                        format!(
+                            "${:.4} / CPU-hour + ${:.4} / GiB-hour",
+                            plan.cpu_overage_millicents as f64 / 100_000.0,
+                            plan.mem_overage_millicents as f64 / 100_000.0,
+                        )
+                    });
+                    (available, price.unwrap_or_default())
+                })
+                .unwrap_or_default()
+        }
+        _ => (false, String::new()),
+    };
 
     let secret_projects = setup
         .secret_projects
@@ -264,6 +343,8 @@ pub(crate) async fn create_options(
         presets,
         secret_projects,
         agents: agent_catalog(&configured_user_secrets),
+        confidential_available,
+        confidential_price,
     })
 }
 
@@ -496,6 +577,10 @@ fn environment_row(environment: Environment) -> EnvironmentRow {
         state_tone: state_tone(state),
         state_symbol: state_symbol(state),
         preset_name: environment.preset_name,
+        isolation_tier: match environment.isolation_tier.as_known() {
+            Some(codewire_proto::codewire::v1::IsolationTier::Confidential) => "confidential",
+            _ => "standard",
+        },
         last_event: environment
             .state_changed_at
             .into_option()

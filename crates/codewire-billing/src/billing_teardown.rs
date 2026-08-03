@@ -336,31 +336,39 @@ async fn finalize_usage(
             .and_hms_opt(0, 0, 0)
             .expect("valid midnight")
             .and_utc();
-    let (cpu_hours, mem_gb_hours, disk_gb_hours) =
-        aggregate_monthly_usage(pool, &input.organization_id, period_start)
-            .await
-            .map_err(AppError::Internal)?;
+    let mut usage_by_tier = Vec::with_capacity(2);
+    for runtime_tier in ["standard", "confidential"] {
+        usage_by_tier.push((
+            runtime_tier,
+            aggregate_monthly_usage(pool, &input.organization_id, period_start, runtime_tier)
+                .await
+                .map_err(AppError::Internal)?,
+        ));
+    }
 
     let mut tx = pool.begin().await.map_err(AppError::from)?;
-    sqlx::query(
-        r#"INSERT INTO environment_usage_billing
-               (org_id, billing_period_start, last_cpu_hours, last_mem_gb_hours,
-                last_disk_gb_hours, last_overage_cents, updated_at)
-           VALUES ($1, $2, $3, $4, $5, 0, NOW())
-           ON CONFLICT (org_id, billing_period_start) DO UPDATE
-           SET last_cpu_hours = EXCLUDED.last_cpu_hours,
-               last_mem_gb_hours = EXCLUDED.last_mem_gb_hours,
-               last_disk_gb_hours = EXCLUDED.last_disk_gb_hours,
-               updated_at = NOW()"#,
-    )
-    .bind(&input.organization_id)
-    .bind(period_start)
-    .bind(cpu_hours)
-    .bind(mem_gb_hours)
-    .bind(disk_gb_hours)
-    .execute(&mut *tx)
-    .await
-    .map_err(AppError::from)?;
+    for (runtime_tier, (cpu_hours, mem_gb_hours, disk_gb_hours)) in usage_by_tier {
+        sqlx::query(
+            r#"INSERT INTO environment_usage_billing_tiers
+                   (org_id, billing_period_start, runtime_tier, last_cpu_hours, last_mem_gb_hours,
+                    last_disk_gb_hours, last_overage_cents, updated_at)
+               VALUES ($1, $2, $3, $4, $5, $6, 0, NOW())
+               ON CONFLICT (org_id, billing_period_start, runtime_tier) DO UPDATE
+               SET last_cpu_hours = EXCLUDED.last_cpu_hours,
+                   last_mem_gb_hours = EXCLUDED.last_mem_gb_hours,
+                   last_disk_gb_hours = EXCLUDED.last_disk_gb_hours,
+                   updated_at = NOW()"#,
+        )
+        .bind(&input.organization_id)
+        .bind(period_start)
+        .bind(runtime_tier)
+        .bind(cpu_hours)
+        .bind(mem_gb_hours)
+        .bind(disk_gb_hours)
+        .execute(&mut *tx)
+        .await
+        .map_err(AppError::from)?;
+    }
     sqlx::query(
         r#"UPDATE organization_deletion_billing_phases
            SET final_usage_completed_at = COALESCE(final_usage_completed_at, NOW()),
@@ -766,7 +774,7 @@ mod tests {
     }
 
     async fn cleanup(pool: &PgPool, fixture: &Fixture) {
-        let _ = sqlx::query("DELETE FROM environment_usage_billing WHERE org_id = $1")
+        let _ = sqlx::query("DELETE FROM environment_usage_billing_tiers WHERE org_id = $1")
             .bind(&fixture.organization_id)
             .execute(pool)
             .await;
@@ -1012,8 +1020,8 @@ mod tests {
         assert_eq!(result.terminal_subscription_count, 0);
         let usage: (f64, f64, f64) = sqlx::query_as(
             r#"SELECT last_cpu_hours, last_mem_gb_hours, last_disk_gb_hours
-               FROM environment_usage_billing
-               WHERE org_id = $1"#,
+               FROM environment_usage_billing_tiers
+               WHERE org_id = $1 AND runtime_tier = 'standard'"#,
         )
         .bind(&fixture.organization_id)
         .fetch_one(&pool)

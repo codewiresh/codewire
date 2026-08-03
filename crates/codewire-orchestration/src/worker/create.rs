@@ -15,8 +15,8 @@ use super::{JobPayload, WorkerContext};
 use crate::lifecycle::{PgLifecycleStore, Service};
 use crate::sandbox::client::{ProbeResult, SandboxClient};
 use crate::sandbox::template::{
-    DOCKER_MODE_LOCAL_DIND_DIRECT, TemplateOpts, default_tolerations, runtime_profile_spec,
-    validate_managed_runtime_profile,
+    DOCKER_MODE_LOCAL_DIND_DIRECT, RUNTIME_PROFILE_CONFIDENTIAL, TemplateOpts, default_tolerations,
+    runtime_profile_spec, validate_managed_runtime_profile,
 };
 use crate::sandbox::{
     CANONICAL_WORKSPACE_RUNTIME_IMAGE, ClaimOpts, claim_name, environment_pod_selector,
@@ -473,12 +473,17 @@ pub fn environment_template_opts(
     };
 
     let override_selector = parse_node_selector(&cfg.node_selector);
-    let runtime_spec = runtime_profile_spec(
-        &cfg.runtime_profile,
-        &cfg.runtime_class,
-        &cfg.docker_mode,
-        cfg.dind_enabled,
-    );
+    let runtime_spec = match runtime_profile_for_isolation_tier(&env.isolation_tier)
+        .expect("environment isolation tier is validated at creation")
+    {
+        Some(profile) => runtime_profile_spec(profile, "", &cfg.docker_mode, cfg.dind_enabled),
+        None => runtime_profile_spec(
+            &cfg.runtime_profile,
+            &cfg.runtime_class,
+            &cfg.docker_mode,
+            cfg.dind_enabled,
+        ),
+    };
     let template_base = if is_canonical_workspace_runtime_image(image_ref) {
         CANONICAL_WORKSPACE_RUNTIME_TEMPLATE_NAME
     } else {
@@ -551,6 +556,17 @@ pub fn environment_template_opts(
         kata_coco_test_resource_uri: cfg.kata_coco_test_resource_uri.clone(),
         kata_coco_test_resource_path: cfg.kata_coco_test_resource_path.clone(),
         debug_tailnet: cfg.debug_tailnet,
+    }
+}
+
+/// Product tiers deliberately select the existing approved runtime profiles.
+/// The Environment row, not a mutable process-wide runtime setting, is the
+/// source of truth for a created environment's isolation.
+pub fn runtime_profile_for_isolation_tier(tier: &str) -> anyhow::Result<Option<&'static str>> {
+    match tier {
+        "standard" => Ok(None),
+        "confidential" => Ok(Some(RUNTIME_PROFILE_CONFIDENTIAL)),
+        other => anyhow::bail!("unsupported environment isolation tier {other:?}"),
     }
 }
 
@@ -1261,6 +1277,19 @@ fn _claim_name_used(env_id: &str) -> String {
 mod tests {
     use super::*;
 
+    #[test]
+    fn isolation_tier_selects_only_the_product_runtime_profile() {
+        assert_eq!(
+            runtime_profile_for_isolation_tier("standard").unwrap(),
+            None
+        );
+        assert_eq!(
+            runtime_profile_for_isolation_tier("confidential").unwrap(),
+            Some(RUNTIME_PROFILE_CONFIDENTIAL)
+        );
+        assert!(runtime_profile_for_isolation_tier("unknown").is_err());
+    }
+
     fn backend(ns: &str, claim: &str, ip: &str, setup_complete: bool) -> BackendRow {
         BackendRow {
             namespace: ns.into(),
@@ -1387,6 +1416,7 @@ mod tests {
             env_type: "sandbox".into(),
             state: "pending".into(),
             desired_state: "started".into(),
+            isolation_tier: "standard".into(),
             external_cleanup_completed_at: None,
             cpu_millicores: 1000,
             memory_mb: 2048,
@@ -1468,6 +1498,7 @@ mod tests {
             env_type: "sandbox".into(),
             state: "pending".into(),
             desired_state: "started".into(),
+            isolation_tier: "standard".into(),
             external_cleanup_completed_at: None,
             cpu_millicores: 2000,
             memory_mb: 4096,
@@ -1552,6 +1583,7 @@ mod tests {
             env_type: "sandbox".into(),
             state: "pending".into(),
             desired_state: "started".into(),
+            isolation_tier: "standard".into(),
             external_cleanup_completed_at: None,
             cpu_millicores: 1000,
             memory_mb: 2048,
@@ -1617,6 +1649,7 @@ mod tests {
             env_type: "sandbox".into(),
             state: "pending".into(),
             desired_state: "started".into(),
+            isolation_tier: "standard".into(),
             external_cleanup_completed_at: None,
             cpu_millicores: 1000,
             memory_mb: 2048,

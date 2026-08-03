@@ -269,6 +269,7 @@ pub(crate) struct EnvironmentRow {
     pub(crate) state_tone: &'static str,
     pub(crate) state_symbol: &'static str,
     pub(crate) preset_name: String,
+    pub(crate) isolation_tier: &'static str,
     pub(crate) last_event: String,
     pub(crate) created: String,
     pub(crate) cost: String,
@@ -389,6 +390,9 @@ pub(crate) struct EnvironmentCreateFormView {
     pub(crate) memory: String,
     pub(crate) disk: String,
     pub(crate) ttl: String,
+    pub(crate) isolation_tier: String,
+    pub(crate) confidential_available: bool,
+    pub(crate) confidential_price: String,
     pub(crate) selected_agents: Vec<String>,
     pub(crate) secret_project: String,
     pub(crate) include_org_secrets: bool,
@@ -419,6 +423,10 @@ impl EnvironmentCreateFormView {
 
     pub(crate) fn preset_selected(&self, value: &str) -> bool {
         self.preset_id == value
+    }
+
+    pub(crate) fn isolation_selected(&self, value: &str) -> bool {
+        self.isolation_tier == value
     }
 
     pub(crate) fn repository_selected(&self, value: &str) -> bool {
@@ -458,6 +466,16 @@ pub(crate) struct EnvironmentPortPanelView {
     pub(crate) form_error: String,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct EnvironmentTrustSummaryView {
+    pub(crate) environment_name: String,
+    pub(crate) trust_level: String,
+    pub(crate) production_verified: bool,
+    pub(crate) attestation_status: String,
+    pub(crate) tee: String,
+    pub(crate) warnings: Vec<String>,
+}
+
 impl EnvironmentPortPanelView {
     pub(crate) fn access_selected(&self, value: &str) -> bool {
         self.access == value
@@ -469,6 +487,7 @@ pub(crate) struct EnvironmentsPageView {
     pub(crate) environments: Vec<EnvironmentRow>,
     pub(crate) create_form: EnvironmentCreateFormView,
     pub(crate) port_panel: Option<EnvironmentPortPanelView>,
+    pub(crate) trust_summary: Option<EnvironmentTrustSummaryView>,
     pub(crate) search: String,
     pub(crate) state: String,
     pub(crate) message: String,

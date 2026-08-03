@@ -1238,6 +1238,7 @@ pub async fn finalize_organization_deletion_database(
         "DELETE FROM api_keys WHERE org_id = $1",
         "DELETE FROM environment_quotas WHERE org_id = $1",
         "DELETE FROM environment_usage_billing WHERE org_id = $1",
+        "DELETE FROM environment_usage_billing_tiers WHERE org_id = $1",
         "DELETE FROM secret_projects WHERE org_id = $1",
         "DELETE FROM org_invitations WHERE org_id = $1",
         "DELETE FROM org_members WHERE org_id = $1",
