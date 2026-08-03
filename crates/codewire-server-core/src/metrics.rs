@@ -1,8 +1,9 @@
 //! Bounded Prometheus exposition shared by Rust control-plane services.
 //!
-//! Metrics are intentionally cluster-internal: deployment Services expose the
-//! endpoint to Prometheus, but no ingress route is added. Metric labels must
-//! be finite operational categories; customer identifiers never belong here.
+//! Deployment Services expose this endpoint to Prometheus; no dedicated
+//! ingress route is added. Its registry is deliberately bounded: metric
+//! labels are finite operational categories, and customer, environment,
+//! session, and secret identifiers never belong here.
 
 use axum::{Router, http::header, response::IntoResponse, routing::get};
 use prometheus::{Encoder, IntGaugeVec, Opts, TextEncoder, register_int_gauge_vec};
