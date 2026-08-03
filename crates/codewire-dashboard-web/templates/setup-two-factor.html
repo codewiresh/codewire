@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Set up two-factor authentication · Codewire</title>
+    <link rel="stylesheet" href="/assets/codewire/design-v1.css">
+    <link rel="stylesheet" href="/assets/codewire/routes/auth-v1.css">
+  </head>
+  <body class="cw-body cw-auth-body" data-route="setup-two-factor">
+    <main class="cw-auth-shell cw-auth-shell--wide">
+      <a class="cw-auth-brand" href="/"><img src="/assets/codewire/logo-v1.svg" alt=""><span>Codewire</span></a>
+      <section class="cw-card cw-auth-card cw-auth-card--wide" aria-labelledby="setup-title">
+        <header class="cw-card-header cw-auth-header">
+          <div class="cw-auth-mark" aria-hidden="true"><svg class="cw-icon"><use href="/assets/codewire/icons-v2.svg#icon-shield"/></svg></div>
+          <h1 id="setup-title" class="cw-page-title">Secure your account</h1>
+          <p class="cw-card-description">Scan this one-time QR code with your authenticator, then enter the current six-digit code. Recovery codes are shown after verification.</p>
+        </header>
+        <div class="cw-card-content cw-setup-grid">
+          {% if !view.error.is_empty() %}<div class="cw-alert cw-alert--error" role="alert">{{ view.error }}</div>{% endif %}
+          <section aria-labelledby="qr-title">
+            <h2 id="qr-title" class="cw-card-title">1. Scan the QR code</h2>
+            <div class="cw-qr" aria-label="Authenticator setup QR code">{{ view.qr_svg|safe }}</div>
+            <p class="cw-help">Can't scan it? Enter this setup key manually:</p>
+            <p><code data-testid="totp-secret">{{ view.secret }}</code></p>
+          </section>
+          <form class="cw-form cw-setup-form" method="post" action="/setup-2fa/_actions/verify">
+            <input type="hidden" name="_csrf" value="{{ view.csrf_token }}">
+            {% if !view.return_to.is_empty() %}<input type="hidden" name="return_to" value="{{ view.return_to }}">{% endif %}
+            <div class="cw-field">
+              <label class="cw-label" for="code">2. Enter the current code</label>
+              <input class="cw-input cw-input--mono cw-auth-code" id="code" name="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" required autofocus>
+            </div>
+            <button class="cw-button cw-auth-submit" type="submit">Enable two-factor authentication</button>
+          </form>
+        </div>
+      </section>
+    </main>
+  </body>
+</html>

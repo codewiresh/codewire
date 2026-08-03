@@ -13,6 +13,8 @@ fi
 source "$ROOT/scripts/ci/verify/kind/common.sh"
 # shellcheck source=scripts/ci/verify/kind/suites/integrated.sh
 source "$ROOT/scripts/ci/verify/kind/suites/integrated.sh"
+# shellcheck source=scripts/ci/verify/kind/suites/dashboard-browser.sh
+source "$ROOT/scripts/ci/verify/kind/suites/dashboard-browser.sh"
 # shellcheck source=scripts/ci/verify/kind/suites/final-fencing.sh
 source "$ROOT/scripts/ci/verify/kind/suites/final-fencing.sh"
 # shellcheck source=scripts/ci/verify/kind/suites/environment-session.sh
@@ -22,6 +24,7 @@ kind_e2e_usage() {
   cat >&2 <<'EOF'
 usage:
   scripts/ci/verify/kind-e2e.sh
+  KIND_CLUSTER_NAME=<retained-cluster> scripts/ci/verify/kind-e2e.sh suite dashboard-browser
   KIND_CLUSTER_NAME=<retained-cluster> scripts/ci/verify/kind-e2e.sh suite final-fencing
   KIND_CLUSTER_NAME=<retained-cluster> scripts/ci/verify/kind-e2e.sh suite environment-session
 EOF
@@ -44,6 +47,9 @@ dispatch_kind_e2e() {
   fi
 
   case "$2" in
+    dashboard-browser)
+      run_retained_dashboard_browser_suite
+      ;;
     environment-session)
       run_retained_environment_session_suite
       ;;

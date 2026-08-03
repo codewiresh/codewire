@@ -1,0 +1,107 @@
+<section id="environment-create-card" class="cw-card cw-environment-create" aria-labelledby="environment-create-title">
+  <div class="cw-card-header cw-environment-create-header">
+    <div>
+      <h2 id="environment-create-title" class="cw-card-title">Create Environment</h2>
+      {% if form.github_connected %}
+      <p class="cw-github-banner" data-tone="success"><svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-check"/></svg>GitHub connected{% if !form.github_username.is_empty() %} as <strong>@{{ form.github_username }}</strong>{% endif %}</p>
+      {% else %}
+      <p class="cw-github-banner"><span><svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-github"/></svg>Connect GitHub for private repositories</span><a href="/api/v1/github/oauth/authorize?return_url=/dashboard/orgs/{{ organization.slug }}/environments?create=true">Connect</a></p>
+      {% endif %}
+    </div>
+    <a class="cw-button cw-button--outline cw-button--small" href="/dashboard/orgs/{{ organization.slug }}/environments">Close</a>
+  </div>
+
+  <div class="cw-card-content">
+    {% if !form.form_error.is_empty() %}<div class="cw-alert cw-alert--error" role="alert">{{ form.form_error }}</div>{% endif %}
+    <form class="cw-environment-form" method="post" action="/dashboard/orgs/{{ organization.slug }}/environments/_actions/prepare" data-environment-prepare data-event-action="/dashboard/orgs/{{ organization.slug }}/environments/_events/prepare">
+      <input type="hidden" name="_csrf" value="{{ form.csrf_token }}">
+      {% if form.prepared %}<input type="hidden" name="prepared" value="true">{% endif %}
+
+      <fieldset class="cw-choice-tabs" data-environment-modes>
+        <legend class="cw-sr-only">Environment source</legend>
+        <label><input type="radio" name="mode" value="repo"{% if form.mode_selected("repo") %} checked{% endif %}><svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-git-branch"/></svg>From Repository</label>
+        <label><input type="radio" name="mode" value="image"{% if form.mode_selected("image") %} checked{% endif %}><svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-box"/></svg>From Image</label>
+      </fieldset>
+
+      <section class="cw-environment-source" data-environment-mode-panel="repo">
+        {% if !form.prepared %}
+          {% if form.github_connected %}
+          <div class="cw-repository-picker" data-github-repository-picker>
+            <div class="cw-field cw-repository-search"><label class="cw-sr-only" for="repository-search">Search repositories</label><input class="cw-input" id="repository-search" type="search" placeholder="Search your repositories…" data-repository-search></div>
+            <div class="cw-repository-options" role="group" aria-label="GitHub repositories">
+              {% if form.github_repositories.is_empty() %}<p class="cw-empty-inline">No repositories found.</p>{% endif %}
+              {% for repository in form.github_repositories %}
+              <label class="cw-repository-option" data-repository-option data-search-text="{{ repository.full_name }} {{ repository.description }} {{ repository.language }}">
+                <input type="checkbox" name="repo_url_{{ loop.index0 }}" value="{{ repository.url }}"{% if form.repository_selected(repository.url) %} checked{% endif %}>
+                <svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-github"/></svg>
+                <span><strong>{{ repository.full_name }}</strong>{% if !repository.description.is_empty() %}<small>{{ repository.description }}</small>{% endif %}</span>
+                {% if repository.private %}<span class="cw-repository-private">Private</span>{% endif %}
+                {% if !repository.language.is_empty() %}<span class="cw-repository-language">{{ repository.language }}</span>{% endif %}
+              </label>
+              {% endfor %}
+            </div>
+            <div class="cw-source-actions"><button class="cw-link-button" type="button" data-show-manual-repositories>Paste a URL instead</button><button class="cw-button cw-button--small" type="submit" data-environment-prepare-submit data-selected-repository-submit disabled>Continue with selected repositories</button></div>
+          </div>
+          {% endif %}
+
+          <div class="cw-manual-repositories" data-manual-repositories{% if form.github_connected %} hidden{% endif %}>
+            <div class="cw-section-heading"><span class="cw-label">Repositories</span>{% if form.github_connected %}<button class="cw-link-button" type="button" data-show-github-repositories>Pick from list</button>{% endif %}</div>
+            <div class="cw-stack" data-repository-rows>
+              {% for repository in form.repositories %}
+              <div class="cw-repository-row" data-repository-row><div class="cw-field"><label class="cw-label" for="repo-url-{{ repository.index }}">Repository URL</label><input class="cw-input" id="repo-url-{{ repository.index }}" name="repo_url_{{ repository.index }}" value="{{ repository.url }}" type="url" placeholder="https://github.com/owner/repo"></div><div class="cw-field"><label class="cw-label" for="repo-branch-{{ repository.index }}">Branch</label><input class="cw-input" id="repo-branch-{{ repository.index }}" name="repo_branch_{{ repository.index }}" value="{{ repository.branch }}" placeholder="optional"></div><button class="cw-button cw-button--outline cw-button--small" type="button" data-remove-repository>Remove</button></div>
+              {% endfor %}
+            </div>
+            <button class="cw-link-button" type="button" data-add-repository><svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-plus"/></svg>Add another repository</button>
+            <button class="cw-button" type="submit" data-environment-prepare-submit>Analyze</button>
+          </div>
+        {% else %}
+          <div class="cw-selected-sources">
+            {% for repository in form.repositories %}<div class="cw-selected-source"><svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-git-branch"/></svg><span>{{ repository.url }}{% if !repository.branch.is_empty() %} <small>@ {{ repository.branch }}</small>{% endif %}</span></div>{% endfor %}
+          </div>
+          <button class="cw-link-button" type="button" data-reset-environment-source>Clear all</button>
+        {% endif %}
+        {% if !form.repo_error.is_empty() %}<p class="cw-field-error" role="alert">{{ form.repo_error }}</p>{% endif %}
+      </section>
+
+      <section class="cw-environment-source" data-environment-mode-panel="image">
+        {% if !form.prepared %}
+        <div class="cw-image-options">
+          <button class="cw-image-option" type="submit" name="image" value="ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467" data-environment-prepare-submit>
+            <svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-box"/></svg><span><strong>Universal environment image</strong><small class="cw-mono">ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467</small></span>
+          </button>
+          {% if !form.presets.is_empty() %}
+          <div class="cw-field"><label class="cw-label" for="environment-preset">Preset</label><select class="cw-select" id="environment-preset" data-preset-picker><option value="">Select a preset (optional)…</option><optgroup label="System">{% for preset in form.presets %}{% if preset.official %}<option value="{{ preset.id }}" data-image="{{ preset.image }}">{{ preset.name }}{% if !preset.description.is_empty() %} — {{ preset.description }}{% endif %}</option>{% endif %}{% endfor %}</optgroup><optgroup label="Your Presets">{% for preset in form.presets %}{% if !preset.official %}<option value="{{ preset.id }}" data-image="{{ preset.image }}">{{ preset.name }}{% if !preset.description.is_empty() %} — {{ preset.description }}{% endif %}</option>{% endif %}{% endfor %}</optgroup></select></div>
+          <button class="cw-button cw-button--outline" type="submit" name="preset_id" value="" data-preset-submit data-environment-prepare-submit disabled>Use preset</button>
+          {% endif %}
+          <div class="cw-custom-image"><div class="cw-field"><label class="cw-label" for="custom-environment-image">Custom image</label><input class="cw-input cw-mono" id="custom-environment-image" name="image" value="{{ form.image }}" placeholder="e.g. ghcr.io/org/image:tag"></div><button class="cw-button cw-button--outline cw-button--small" type="submit" data-environment-prepare-submit data-custom-image-submit>Use image</button></div>
+        </div>
+        {% else %}
+        <div class="cw-selected-source"><svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-box"/></svg><span>{% if !form.preset_id.is_empty() %}{% for preset in form.presets %}{% if form.preset_selected(preset.id) %}<strong>{{ preset.name }}</strong><small class="cw-mono" title="{{ form.image }}">{{ form.image }}</small>{% endif %}{% endfor %}{% else %}<strong>Selected image</strong><small class="cw-mono" title="{{ form.image }}">{{ form.image }}</small>{% endif %}</span><button class="cw-icon-button" type="button" aria-label="Clear image" data-reset-environment-source>×</button></div>
+        {% endif %}
+        {% if !form.image_error.is_empty() %}<p class="cw-field-error" role="alert">{{ form.image_error }}</p>{% endif %}
+      </section>
+
+      <div class="cw-stream-status" data-environment-stream-status hidden><span class="cw-skeleton"></span><div><p data-environment-stream-message>Preparing environment…</p><div data-environment-repo-progress></div></div><button class="cw-button cw-button--outline cw-button--small" type="button" data-environment-cancel>Cancel</button></div>
+
+      {% if form.prepared %}
+      <section class="cw-environment-prepared" aria-labelledby="prepared-title">
+        <h3 id="prepared-title" class="cw-sr-only">Environment configuration</h3>
+        {% if !form.detection.project_type.is_empty() %}<div class="cw-detection-summary"><p>{{ form.detection.setup_notes }}</p>{% if !form.detection.image.is_empty() %}<div><span>Image</span><strong>{{ form.detection.image }}</strong></div>{% endif %}<div><span>Type</span><strong>{{ form.detection.project_type }}</strong></div><div><span>Language</span><strong>{% if form.detection.language.is_empty() %}—{% else %}{{ form.detection.language }}{% endif %}</strong></div><div><span>Framework</span><strong>{% if form.detection.framework.is_empty() %}—{% else %}{{ form.detection.framework }}{% endif %}</strong></div><div><span>Docker</span><strong>{% if form.detection.needs_docker %}Yes{% else %}No{% endif %}</strong></div><div><span>Compose</span><strong>{% if form.detection.has_compose %}Yes{% else %}No{% endif %}</strong></div></div>{% endif %}
+
+        <section class="cw-config-panel"><div class="cw-section-heading"><div><h3>Ports</h3><p>Expose services from the environment.</p></div><button class="cw-link-button" type="button" data-add-app-port><svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-plus"/></svg>Add</button></div><div class="cw-stack" data-app-port-rows>{% if form.app_ports.is_empty() %}<p class="cw-empty-inline" data-empty-app-ports>No ports configured.</p>{% endif %}{% for port in form.app_ports %}<div class="cw-app-port-row" data-app-port-row><input class="cw-input" name="app_port_{{ port.index }}" type="number" min="1" max="65535" value="{{ port.port }}" placeholder="Port" aria-label="Application port"><input class="cw-input" name="app_label_{{ port.index }}" value="{{ port.label }}" placeholder="Label (e.g. web)" aria-label="Port label"><select class="cw-select" name="app_access_{{ port.index }}" aria-label="Port access"><option value="creator"{% if port.access_selected("creator") %} selected{% endif %}>Creator</option><option value="org_members"{% if port.access_selected("org_members") %} selected{% endif %}>Organization</option><option value="public"{% if port.access_selected("public") %} selected{% endif %}>Public</option></select><button class="cw-icon-button" type="button" aria-label="Remove port" data-remove-app-port>×</button></div>{% endfor %}</div></section>
+
+        <section class="cw-config-panel cw-agent-picker"><div class="cw-section-heading"><div><h3>Agents</h3><p>Pick the tools this environment should have. Selected credentials are read from user secrets by default.</p></div></div><div class="cw-agent-pills">{% for agent in form.agents %}<label><input type="checkbox" name="agent" value="{{ agent.id }}"{% if form.agent_selected(agent.id) %} checked{% endif %}><span>{{ agent.label }}</span></label>{% endfor %}</div><div class="cw-selected-agents">{% for agent in form.agents %}<article class="cw-agent-card" data-agent-card="{{ agent.id }}"><div><strong>{{ agent.label }}</strong><small>Included in the canonical workspace image. Custom images must provide it.</small></div>{% for secret in agent.secrets %}<div class="cw-agent-secret"><div><code>{{ secret.key }}</code><small>{{ secret.label }}</small></div>{% if secret.configured %}<span class="cw-status" data-tone="success">Saved in user secrets</span>{% else %}<span class="cw-status">Missing from user secrets</span><input class="cw-input cw-mono" name="agent_secret_{{ secret.key }}" type="password" value="" placeholder="{{ secret.placeholder }}" autocomplete="off" spellcheck="false"><small>Saved to your user secrets when you create the environment.</small>{% endif %}</div>{% endfor %}</article>{% endfor %}</div><div class="cw-secret-inclusion"><label><input type="checkbox" name="include_user_secrets" value="true"{% if form.include_user_secrets %} checked{% endif %}><span>Include user secrets</span><small>Injects saved agent credentials and other personal secrets.</small></label><label><input type="checkbox" name="include_org_secrets" value="true"{% if form.include_org_secrets %} checked{% endif %}><span>Include organization secrets</span><small>Injects secrets shared by this organization.</small></label></div></section>
+
+        <section class="cw-config-panel cw-secret-project-picker" aria-labelledby="secret-project-title"><div class="cw-section-heading"><div><h3 id="secret-project-title">Secret project</h3><p>Optionally inject secrets shared through one organization project.</p></div><a class="cw-button cw-button--outline cw-button--small" data-manage-secret-project href="/dashboard/orgs/{{ organization.slug }}/secrets">Manage</a></div><div class="cw-field"><label class="cw-label" for="environment-secret-project">Project</label><select class="cw-select" id="environment-secret-project" name="secret_project" data-secret-project-picker><option value="">No secret project</option>{% for project in form.secret_projects %}<option value="{{ project.name }}" data-project-id="{{ project.id }}" data-secret-count="{{ project.secret_count }}"{% if form.secret_project_selected(project.name) %} selected{% endif %}>{{ project.name }} — {{ project.secret_count }} secrets</option>{% endfor %}</select></div><div class="cw-field"><label class="cw-label" for="new-secret-project">New project</label><div class="cw-inline-create"><input class="cw-input" id="new-secret-project" type="text" maxlength="128" placeholder="Project name" data-new-secret-project-name><button class="cw-button cw-button--outline cw-button--small" type="button" data-create-secret-project data-action="/dashboard/orgs/{{ organization.slug }}/environments/_actions/secret-projects/create">Create</button></div></div><p class="cw-field-error" role="alert" data-secret-project-error hidden></p></section>
+
+        <details class="cw-config-panel cw-advanced-options"><summary>Advanced</summary><div class="cw-advanced-grid"><div class="cw-field"><label class="cw-label" for="environment-name">Name</label><input class="cw-input" id="environment-name" name="name" value="{{ form.name }}" maxlength="128" placeholder="Environment name">{% if !form.name_error.is_empty() %}<p class="cw-field-error" role="alert">{{ form.name_error }}</p>{% endif %}</div><div class="cw-field"><label class="cw-label" for="environment-image">Image</label><input class="cw-input cw-mono" id="environment-image" name="image" value="{{ form.image }}" placeholder="Container image" data-advanced-image></div><div class="cw-field"><label class="cw-label" for="install-command">Install Command</label><input class="cw-input cw-mono" id="install-command" name="install_command" value="{{ form.install_command }}" placeholder="e.g. bun install"></div><div class="cw-field cw-field--full"><label class="cw-label" for="startup-script">Startup Script</label><textarea class="cw-textarea cw-code-input" id="startup-script" name="startup_script" rows="3" placeholder="Post-install commands…">{{ form.startup_script }}</textarea></div><div class="cw-field"><label class="cw-label" for="environment-cpu">CPU</label><select class="cw-select" id="environment-cpu" name="cpu"><option value="1000"{% if form.cpu == "1000" %} selected{% endif %}>1 Core</option><option value="2000"{% if form.cpu == "2000" %} selected{% endif %}>2 Cores</option><option value="4000"{% if form.cpu == "4000" %} selected{% endif %}>4 Cores</option><option value="8000"{% if form.cpu == "8000" %} selected{% endif %}>8 Cores</option></select>{% if !form.cpu_error.is_empty() %}<p class="cw-field-error" role="alert">{{ form.cpu_error }}</p>{% endif %}</div><div class="cw-field"><label class="cw-label" for="environment-memory">Memory</label><select class="cw-select" id="environment-memory" name="memory"><option value="2048"{% if form.memory == "2048" %} selected{% endif %}>2 GB</option><option value="4096"{% if form.memory == "4096" %} selected{% endif %}>4 GB</option><option value="8192"{% if form.memory == "8192" %} selected{% endif %}>8 GB</option><option value="16384"{% if form.memory == "16384" %} selected{% endif %}>16 GB</option></select>{% if !form.memory_error.is_empty() %}<p class="cw-field-error" role="alert">{{ form.memory_error }}</p>{% endif %}</div><div class="cw-field"><label class="cw-label" for="environment-disk">Disk (GB)</label><input class="cw-input" id="environment-disk" name="disk" type="number" min="1" value="{{ form.disk }}">{% if !form.disk_error.is_empty() %}<p class="cw-field-error" role="alert">{{ form.disk_error }}</p>{% endif %}</div><div class="cw-field"><label class="cw-label" for="environment-ttl">TTL</label><input class="cw-input" id="environment-ttl" name="ttl" value="{{ form.ttl }}" placeholder="e.g. 1h, 30m">{% if !form.ttl_error.is_empty() %}<p class="cw-field-error" role="alert">{{ form.ttl_error }}</p>{% endif %}</div></div></details>
+        <input type="hidden" name="preset_id" value="{{ form.preset_id }}" data-prepared-preset-id>
+        <button class="cw-button cw-button--full" type="submit" formaction="/dashboard/orgs/{{ organization.slug }}/environments/_actions/create">Create Environment</button>
+      </section>
+      {% endif %}
+    </form>
+  </div>
+</section>
+
+<template data-repository-template><div class="cw-repository-row" data-repository-row><div class="cw-field"><label class="cw-label">Repository URL</label><input class="cw-input" data-name-prefix="repo_url_" type="url" placeholder="https://github.com/owner/repo"></div><div class="cw-field"><label class="cw-label">Branch</label><input class="cw-input" data-name-prefix="repo_branch_" placeholder="optional"></div><button class="cw-button cw-button--outline cw-button--small" type="button" data-remove-repository>Remove</button></div></template>
+<template data-app-port-template><div class="cw-app-port-row" data-app-port-row><input class="cw-input" data-name-prefix="app_port_" type="number" min="1" max="65535" placeholder="Port" aria-label="Application port"><input class="cw-input" data-name-prefix="app_label_" placeholder="Label (e.g. web)" aria-label="Port label"><select class="cw-select" data-name-prefix="app_access_" aria-label="Port access"><option value="creator">Creator</option><option value="org_members">Organization</option><option value="public">Public</option></select><button class="cw-icon-button" type="button" aria-label="Remove port" data-remove-app-port>×</button></div></template>

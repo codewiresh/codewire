@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="htmx-config" content='{"allowEval":false,"allowScriptTags":false,"responseHandling":[{"code":"204","swap":false},{"code":"[23]..","swap":true},{"code":"422","swap":true},{"code":"[45]..","swap":false,"error":true},{"code":"...","swap":true}]}' >
+    <title>Billing · {{ organization.name }} · Codewire</title>
+    <link rel="stylesheet" href="/assets/codewire/design-v1.css">
+    <link rel="stylesheet" href="/assets/codewire/routes/dashboard-v1.css">
+    <link rel="stylesheet" href="/assets/codewire/routes/organizations-v1.css">
+    <link rel="stylesheet" href="/assets/codewire/routes/billing-admin-v1.css">
+    <script src="/assets/codewire/htmx-2.0.10.min.js" integrity="sha384-H5SrcfygHmAuTDZphMHqBJLc3FhssKjG7w/CeCpFReSfwBWDTKpkzPP8c+cLsK+V" defer></script>
+    <script src="/assets/codewire/dashboard-v1.js" defer></script>
+  </head>
+  <body class="cw-body" data-route="organization">
+    <div class="cw-app" data-dashboard-app data-mobile-open="false">
+      <aside class="cw-sidebar-slot">{% include "sidebar.html" %}</aside>
+      <header class="cw-mobile-bar">
+        <button class="cw-mobile-toggle" type="button" data-sidebar-toggle aria-label="Toggle sidebar"><svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-menu"/></svg></button>
+        <a class="cw-brand" href="/dashboard"><img src="/assets/codewire/logo-v1.svg" alt=""><span>Codewire</span></a>
+      </header>
+      <button class="cw-mobile-overlay" type="button" data-sidebar-close aria-label="Close sidebar"></button>
+      <aside class="cw-mobile-drawer">{% include "sidebar.html" %}</aside>
+      <main class="cw-main"><div class="cw-main-inner"><div class="cw-page">
+        <a class="cw-back-link" href="/dashboard"><svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-chevron-left"/></svg>Dashboard</a>
+        <header class="cw-org-header"><h1 class="cw-page-title">{{ organization.name }}</h1><span class="cw-badge">{{ organization.role }}</span></header>
+        {% include "organization-tabs.html" %}
+
+        <div class="cw-billing-stack">
+          {% if !billing.message.is_empty() %}<div class="cw-alert cw-alert--success" role="status">{{ billing.message }}</div>{% endif %}
+          {% if !billing.error.is_empty() %}<div class="cw-alert cw-alert--error" role="alert">{{ billing.error }}</div>{% endif %}
+          {% if !billing.billing_enabled %}
+          <section class="cw-card cw-empty-card"><p>Billing is not configured. Environments run freely in dev mode.</p></section>
+          {% endif %}
+
+          <section class="cw-card">
+            <header class="cw-card-header"><div><h2>Plan</h2><p>Organization-level billing.</p></div></header>
+            <div class="cw-card-body cw-plan-row">
+              <div>
+                <div class="cw-badge-row"><span class="cw-badge">{{ billing.plan_name }}</span>{% if !billing.status.is_empty() %}<span class="cw-badge" data-tone="{{ billing.status_tone }}">{{ billing.status }}</span>{% endif %}</div>
+                {% if billing.has_trial_end %}<p class="cw-muted">Trial ends {{ billing.trial_end }}</p>{% endif %}
+                {% if billing.has_period_end %}<p class="cw-muted">Current period ends {{ billing.period_end }}</p>{% endif %}
+              </div>
+              {% if billing.can_manage && billing.billing_enabled %}
+              <form method="post" action="{% if billing.has_payment_method %}/dashboard/orgs/{{ organization.slug }}/billing/_actions/portal{% else %}/dashboard/orgs/{{ organization.slug }}/billing/_actions/setup{% endif %}">
+                <input type="hidden" name="_csrf" value="{{ billing.csrf_token }}">
+                <button class="cw-button{% if billing.has_payment_method %} cw-button--outline{% endif %}" type="submit">{% if billing.has_payment_method %}Manage in Stripe ↗{% else %}Add payment method{% endif %}</button>
+              </form>
+              {% endif %}
+            </div>
+          </section>
+
+          <section class="cw-card">
+            <header class="cw-card-header"><div><h2>Environment Usage</h2><p>Per-second compute billing for this month.</p></div></header>
+            <div class="cw-card-body">
+              {% if billing.has_current_month %}
+              <div class="cw-stat-grid cw-stat-grid--three">
+                <div class="cw-stat"><span>Current Month</span><strong>{{ billing.current_cost }}</strong></div>
+                <div class="cw-stat"><span>CPU Hours</span><strong>{{ billing.cpu_hours }}{% if billing.has_included_cpu_hours %}<small> / {{ billing.included_cpu_hours }}</small>{% endif %}</strong></div>
+                <div class="cw-stat"><span>Memory GiB-Hours</span><strong>{{ billing.memory_hours }}{% if billing.has_included_memory_hours %}<small> / {{ billing.included_memory_hours }}</small>{% endif %}</strong></div>
+              </div>
+              {% if !billing.usage_bars.is_empty() %}
+              <figure class="cw-usage-chart">
+                <figcaption>Hourly cost, most recent 24 hours</figcaption>
+                <svg viewBox="0 0 304 88" role="img" aria-labelledby="usage-chart-title usage-chart-description">
+                  <title id="usage-chart-title">Hourly environment cost</title>
+                  <desc id="usage-chart-description">Bar chart of hourly environment cost. Exact values are available from each bar and the environment table.</desc>
+                  <path class="cw-chart-axis" d="M4 80H300"/>
+                  {% for bar in billing.usage_bars %}<rect class="cw-chart-bar" x="{{ bar.x }}" y="{{ bar.y }}" width="8" height="{{ bar.height }}" tabindex="0"><title>{{ bar.label }}</title></rect>{% endfor %}
+                </svg>
+              </figure>
+              {% endif %}
+              {% if !billing.usage.is_empty() %}
+              <div class="cw-table-wrap"><table class="cw-table"><caption>Usage by environment</caption><thead><tr><th scope="col">Environment</th><th scope="col">Cost</th></tr></thead><tbody>{% for row in billing.usage %}<tr><td>{{ row.name }}</td><td>{{ row.cost }}</td></tr>{% endfor %}</tbody></table></div>
+              {% endif %}
+              {% else %}<p class="cw-muted">No usage yet this month.</p>{% endif %}
+            </div>
+          </section>
+
+          <section class="cw-card">
+            <header class="cw-card-header"><div><h2>Invoices</h2><p>Past billing periods.</p></div></header>
+            <div class="cw-card-body">
+              {% if billing.invoices.is_empty() %}<p class="cw-muted">No invoices yet.</p>{% else %}
+              <div class="cw-table-wrap"><table class="cw-table"><thead><tr><th scope="col">Period</th><th scope="col">Amount</th><th scope="col">Status</th><th scope="col">Documents</th></tr></thead><tbody>
+                {% for invoice in billing.invoices %}<tr><td>{{ invoice.period }}</td><td>{{ invoice.amount }}</td><td><span class="cw-badge">{{ invoice.status }}</span></td><td>{% if invoice.has_hosted_url %}<a href="{{ invoice.hosted_url }}" target="_blank" rel="noreferrer">View ↗</a>{% endif %}{% if invoice.has_pdf_url %} <a href="{{ invoice.pdf_url }}" target="_blank" rel="noreferrer">PDF ↗</a>{% endif %}</td></tr>{% endfor %}
+              </tbody></table></div>{% endif %}
+            </div>
+          </section>
+
+          {% if !billing.events.is_empty() %}<section class="cw-card">
+            <header class="cw-card-header"><div><h2>Recent Activity</h2><p>Latest account-level billing activity.</p></div></header>
+            <div class="cw-card-body"><div class="cw-table-wrap"><table class="cw-table"><thead><tr><th scope="col">Event</th><th scope="col">Occurred</th><th scope="col">Amount</th></tr></thead><tbody>{% for event in billing.events %}<tr><td><code>{{ event.event_type }}</code></td><td>{{ event.occurred }}</td><td>{% if event.has_amount %}{{ event.amount }}{% else %}—{% endif %}</td></tr>{% endfor %}</tbody></table></div></div>
+          </section>{% endif %}
+        </div>
+      </div></div></main>
+    </div>
+  </body>
+</html>

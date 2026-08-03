@@ -48,7 +48,9 @@ nodes:
         protocol: TCP
       # Postgres (NodePort 30432) — lets the host-side Go e2e suite seed
       # an API key and assert lifecycle journal rows against the in-cluster DB
-      # without relying on kubectl port-forward.
+      # without relying on kubectl port-forward. The integrated harness may
+      # render a different host port through KIND_POSTGRES_HOST_PORT when the
+      # default is already occupied; the in-cluster NodePort remains fixed.
       - containerPort: 30432
         hostPort: 25432
         protocol: TCP

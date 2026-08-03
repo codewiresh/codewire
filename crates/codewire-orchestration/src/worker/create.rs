@@ -1399,7 +1399,7 @@ mod tests {
         // Canonical image + matching SKU → shared warm-pool template.
         let opts = environment_claim_opts(
             &cfg,
-            "ghcr.io/codewiresh/workspace:latest",
+            "ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467",
             "tmpl-base",
             &env,
             "env-1",
@@ -1421,7 +1421,7 @@ mod tests {
         big.cpu_millicores = 8000;
         let opts = environment_claim_opts(
             &cfg,
-            "ghcr.io/codewiresh/workspace:latest",
+            "ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467",
             "tmpl-base",
             &big,
             "env-1",
@@ -1480,7 +1480,7 @@ mod tests {
         // First-party image: no image command; canonical name swap.
         let opts = environment_template_opts(
             &cfg,
-            "ghcr.io/codewiresh/workspace:latest",
+            "ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467",
             "preset-base",
             &env,
             "env-1",
@@ -1575,7 +1575,7 @@ mod tests {
 
         let opts = environment_template_opts(
             &cfg,
-            "ghcr.io/codewiresh/workspace:latest",
+            "ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467",
             "workspace",
             &env,
             "env-1",
@@ -1640,7 +1640,7 @@ mod tests {
 
         let opts = environment_template_opts(
             &cfg,
-            "ghcr.io/codewiresh/workspace:latest",
+            "ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467",
             "workspace",
             &env,
             "env-1",

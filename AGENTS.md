@@ -28,8 +28,10 @@ request, and merge—may be authorized directly in conversation. Existing
 Codewire instructions and applicable gates still apply.
 
 External state, persistence, or a multi-turn conversation does not force
-resolved mode. Release publication, deployment, production or live-state
-mutation, and credential access require separate explicit authority.
+resolved mode. An explicitly authorized merge to `gitea/main` includes the
+repository's configured automatic shared-dev deployment; no second deployment
+confirmation is required. Release publication, production promotion, other
+live-state mutation, and credential access require separate explicit authority.
 
 Load an extra Method protocol only when the task needs it: Program for
 persistent dependent work, Experiment for a controlled comparison, and Secrets

@@ -13,8 +13,8 @@ This repository contains the control plane, dashboard, CLI, SDKs, and generated 
 ```
 apps/
   api/         Go support module: database schema, e2e tests, and temporary parity oracle
-  dashboard/   Vite/React web UI
-  docs/        Starlight documentation site
+  dashboard/   Playwright contract and Rust/Zola production image
+  docs/        Zola documentation source
   desktop/, ios/, mobile/  client apps
 
 libs/
@@ -25,7 +25,7 @@ libs/
   sdk-examples/       end-to-end SDK parity smoke (run-claude)
   tailnet/            Tailscale userspace helpers
 
-crates/        Rust workspace for services, CLI, desktop, and shared clients
+crates/        Rust workspace for services, web UI, CLI, desktop, and shared clients
 deployments/   k8s manifests + kustomize overlays
 docs/          stable docs + planning notes
 ```

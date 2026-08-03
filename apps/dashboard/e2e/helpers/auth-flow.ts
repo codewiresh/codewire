@@ -10,27 +10,25 @@ export const fillField = async (page: Page, selector: string, value: string) => 
 };
 
 export const completeTwoFactorSetup = async (page: Page) => {
-  await expect(page.getByRole("heading", { name: /set up two-factor authentication/i }))
+  await expect(page.getByRole("heading", { name: /secure your account/i }))
     .toBeVisible({ timeout: 15000 });
 
-  const secret = (await page
-    .locator("p")
-    .filter({ hasText: /^[A-Z2-7]{16,}$/ })
-    .first()
-    .textContent())?.trim();
+  const secret = (await page.getByTestId("totp-secret").textContent())?.trim();
   if (!secret) throw new Error("2FA setup secret was not visible");
 
   const code = new OTPAuth.TOTP({ secret }).generate();
   await fillField(page, "#code", code);
-  await page.getByRole("button", { name: /verify & enable/i }).click();
-  await page.getByRole("button", { name: /continue to dashboard/i })
-    .click({ timeout: 15000 });
+  await page.getByRole("button", { name: /enable two-factor authentication/i }).click();
+  await expect(page.getByRole("heading", { name: /two-factor authentication enabled/i }))
+    .toBeVisible({ timeout: 15000 });
+  await expect(page.getByTestId("recovery-code")).toHaveCount(10);
+  await page.getByRole("link", { name: /continue to codewire/i }).click();
   await page.waitForURL(/\/dashboard/, { timeout: 15000 });
 };
 
 export const completeSetupIfRequired = async (page: Page) => {
   const setupHeading = page.getByRole("heading", {
-    name: /set up two-factor authentication/i,
+    name: /secure your account/i,
   });
   if (await setupHeading.isVisible({ timeout: 15000 }).catch(() => false)) {
     await completeTwoFactorSetup(page);

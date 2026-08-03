@@ -35,6 +35,9 @@
         name: codewire-config
     - secretRef:
         name: codewire-local-secrets
+    - secretRef:
+        name: codewire-local-anthropic
+        optional: true
 - op: add
   path: /spec/template/spec/initContainers
   value:

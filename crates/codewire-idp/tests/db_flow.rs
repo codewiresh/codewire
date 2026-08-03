@@ -2307,6 +2307,31 @@ async fn two_factor_flow_against_postgres() {
     );
     let backup_code = body["backupCodes"][0].as_str().unwrap().to_string();
 
+    // A pending setup is idempotent. SSR retries and rejected form posts must
+    // never rotate the secret out from under the authenticator the user just
+    // scanned.
+    let first_uri = body["totpUri"].clone();
+    let first_codes = body["backupCodes"].clone();
+    let (st, repeated, _) = sess_req(
+        &app,
+        "POST",
+        "/api/auth/two-factor/enable",
+        Some(session),
+        "",
+    )
+    .await;
+    assert_eq!(st, 200, "repeat enable: {repeated}");
+    assert_eq!(repeated["secret"], secret);
+    assert_eq!(repeated["totpUri"], first_uri);
+    assert_eq!(repeated["backupCodes"], first_codes);
+
+    let uri = url::Url::parse(repeated["totpUri"].as_str().unwrap()).unwrap();
+    let qr_secret = uri
+        .query_pairs()
+        .find_map(|(key, value)| (key == "secret").then(|| value.into_owned()))
+        .expect("QR URI secret");
+    assert_eq!(qr_secret, secret, "QR payload and server secret diverged");
+
     let enabled: bool = sqlx::query_scalar("SELECT two_factor_enabled FROM users WHERE id=$1")
         .bind(user)
         .fetch_one(&pool)
@@ -2315,7 +2340,7 @@ async fn two_factor_flow_against_postgres() {
     assert!(!enabled);
 
     // 2. verify with a current TOTP → user is 2FA-enabled.
-    let code = current_totp_code(&secret, email);
+    let code = current_totp_code(&qr_secret, email);
     let (st, body, _) = sess_req(
         &app,
         "POST",

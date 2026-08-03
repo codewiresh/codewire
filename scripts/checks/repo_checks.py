@@ -492,11 +492,11 @@ MESH_FINAL_POLICY_KEYS = {
     "forbidden_edge_fragments",
 }
 MESH_FINAL_CLIENT_SOURCE_ROOTS = (
-    "apps/dashboard/src/",
     "apps/desktop/",
     "apps/ios/",
     "crates/codewire-cli/src/",
     "crates/codewire-client/",
+    "crates/codewire-dashboard-web/",
     "crates/codewire-desktop/",
     "libs/sdk-go/",
     "libs/sdk-python/",
@@ -1510,11 +1510,9 @@ def check_license_map(_args: argparse.Namespace) -> int:
     npm_licenses = {
         "package.json": "AGPL-3.0-only",
         "apps/dashboard/package.json": "AGPL-3.0-only",
-        "apps/docs/package.json": "AGPL-3.0-only",
         "libs/sdk-examples/run-claude/typescript/package.json": "MIT",
         "libs/sdk-ts/package.json": "MIT",
         "packages/auth/package.json": "MIT",
-        "packages/codewire-design/package.json": "AGPL-3.0-only",
         "packages/codewire-proto-ts/package.json": "MIT",
     }
     actual_package_json = {

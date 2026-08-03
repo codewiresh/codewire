@@ -1,0 +1,86 @@
+{
+  "schema_version": 1,
+  "npm": [
+    {
+      "package": "htmx.org",
+      "version": "2.0.10",
+      "member": "dist/htmx.min.js",
+      "path": "crates/codewire-dashboard-web/assets/htmx-2.0.10.min.js",
+      "integrity": "sha512-kdeJe7ZVwaS6QMz/ebBIVtZdpwen6L0OQ5GOhPV9MKBb196TCZeZu4yA7ZIQsaLKv7EpXz+So7KSXNuHXhj7Cw==",
+      "size": 51238,
+      "sha384": "sha384-H5SrcfygHmAuTDZphMHqBJLc3FhssKjG7w/CeCpFReSfwBWDTKpkzPP8c+cLsK+V"
+    },
+    {
+      "package": "htmx.org",
+      "version": "2.0.10",
+      "member": "LICENSE",
+      "path": "crates/codewire-dashboard-web/assets/LICENSE-HTMX",
+      "integrity": "sha512-kdeJe7ZVwaS6QMz/ebBIVtZdpwen6L0OQ5GOhPV9MKBb196TCZeZu4yA7ZIQsaLKv7EpXz+So7KSXNuHXhj7Cw==",
+      "size": 642,
+      "sha384": "sha384-hU3SbIwDRi3Fq5qi+gLVwm7zNVOKB3ddD795kmN4Dg7C86VuGoDrWKa/TPGW6BWA"
+    },
+    {
+      "package": "@xterm/xterm",
+      "version": "6.0.0",
+      "member": "lib/xterm.js",
+      "path": "crates/codewire-dashboard-web/assets/xterm/xterm-6.0.0.js",
+      "integrity": "sha512-TQwDdQGtwwDt+2cgKDLn0IRaSxYu1tSUjgKarSDkUM0ZNiSRXFpjxEsvc/Zgc5kq5omJ+V0a8/kIM2WD3sMOYg==",
+      "size": 488663,
+      "sha384": "sha384-f/1U6Z9wM4D71a5eRXEZnyOTMOvjqxr2XLwh+Go1OvIl3L3tOcvUrzudnhbECwl4"
+    },
+    {
+      "package": "@xterm/xterm",
+      "version": "6.0.0",
+      "member": "css/xterm.css",
+      "path": "crates/codewire-dashboard-web/assets/xterm/xterm-6.0.0.css",
+      "integrity": "sha512-TQwDdQGtwwDt+2cgKDLn0IRaSxYu1tSUjgKarSDkUM0ZNiSRXFpjxEsvc/Zgc5kq5omJ+V0a8/kIM2WD3sMOYg==",
+      "size": 7112,
+      "sha384": "sha384-n2n7twoohnW+d3myBKaUgl7DSiwidw6MkQy9oesGzkPpMjejKRR3XlnD+5yCdtBD"
+    },
+    {
+      "package": "@xterm/xterm",
+      "version": "6.0.0",
+      "member": "LICENSE",
+      "path": "crates/codewire-dashboard-web/assets/xterm/LICENSE-xterm-6.0.0",
+      "integrity": "sha512-TQwDdQGtwwDt+2cgKDLn0IRaSxYu1tSUjgKarSDkUM0ZNiSRXFpjxEsvc/Zgc5kq5omJ+V0a8/kIM2WD3sMOYg==",
+      "size": 1261,
+      "sha384": "sha384-leMU5q3wxWpTpzcIAd9qvhx7xbWkMZxhy0Lqtjb0C8hqFQ2AGF2jt0HpKPGzHovt"
+    },
+    {
+      "package": "@xterm/addon-fit",
+      "version": "0.11.0",
+      "member": "lib/addon-fit.js",
+      "path": "crates/codewire-dashboard-web/assets/xterm/addon-fit-0.11.0.js",
+      "integrity": "sha512-jYcgT6xtVYhnhgxh3QgYDnnNMYTcf8ElbxxFzX0IZo+vabQqSPAjC3c1wJrKB5E19VwQei89QCiZZP86DCPF7g==",
+      "size": 1521,
+      "sha384": "sha384-txoiwu4RR2GD3qySbaj+BbzibkLbSJRcfqGYMu6z1EqHil4A2dyBiBW5dlacG6OR"
+    },
+    {
+      "package": "@xterm/addon-fit",
+      "version": "0.11.0",
+      "member": "LICENSE",
+      "path": "crates/codewire-dashboard-web/assets/xterm/LICENSE-addon-fit-0.11.0",
+      "integrity": "sha512-jYcgT6xtVYhnhgxh3QgYDnnNMYTcf8ElbxxFzX0IZo+vabQqSPAjC3c1wJrKB5E19VwQei89QCiZZP86DCPF7g==",
+      "size": 1103,
+      "sha384": "sha384-tWhllTtK/zz3AqVMIrnZ2P6fCxA4hV3PnYoUEeZSqfWK//RePt5zGYqu4nB/t7VD"
+    },
+    {
+      "package": "@xterm/addon-web-links",
+      "version": "0.12.0",
+      "member": "lib/addon-web-links.js",
+      "path": "crates/codewire-dashboard-web/assets/xterm/addon-web-links-0.12.0.js",
+      "integrity": "sha512-4Smom3RPyVp7ZMYOYDoC/9eGJJJqYhnPLGGqJ6wOBfB8VxPViJNSKdgRYb8NpaM6YSelEKbA2SStD7lGyqaobw==",
+      "size": 3100,
+      "sha384": "sha384-0IIwkXq0LAkIxEVKxlOxWbje2g/VT+5CzVTZiEukyiZ02pOl/O+M0fkpEKAYqto9"
+    },
+    {
+      "package": "@xterm/addon-web-links",
+      "version": "0.12.0",
+      "member": "LICENSE",
+      "path": "crates/codewire-dashboard-web/assets/xterm/LICENSE-addon-web-links-0.12.0",
+      "integrity": "sha512-4Smom3RPyVp7ZMYOYDoC/9eGJJJqYhnPLGGqJ6wOBfB8VxPViJNSKdgRYb8NpaM6YSelEKbA2SStD7lGyqaobw==",
+      "size": 1103,
+      "sha384": "sha384-bniI+JB8zL1vreD+pp5VYLLlWl+gTajqJCwFtGaiRTCQtOTp2hUVXpkd9iv3ZMHp"
+    }
+  ]
+}

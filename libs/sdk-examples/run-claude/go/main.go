@@ -24,7 +24,7 @@ import (
 )
 
 // Image override: set CW_EXAMPLE_IMAGE to use a preset with `claude` in PATH
-// (e.g. `ghcr.io/codewiresh/workspace:latest`). The default image is alpine so the
+// (e.g. `ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467`). The default image is alpine so the
 // example boots without extra dependencies — swap it once you have a
 // claude-ready base image.
 const (

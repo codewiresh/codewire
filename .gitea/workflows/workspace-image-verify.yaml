@@ -19,8 +19,6 @@ on:
       - 'crates/codewire-tailnet/**'
       - 'libs/gateway-proto/**'
       - 'proto/**'
-      - 'apps/dashboard/src/components/env-create-form.tsx'
-      - 'apps/dashboard/src/lib/agents.ts'
       - 'scripts/ci/images/build-local-image.sh'
       - 'scripts/ci/tests/test-build-local-image.sh'
       - 'scripts/ci/tests/test-workspace-agent-contract.sh'

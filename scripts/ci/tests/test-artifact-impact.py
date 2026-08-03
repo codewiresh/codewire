@@ -210,7 +210,7 @@ def main() -> None:
         fixture.assert_selected("support test-only path", False, mode="support")
 
         fixture.reset("dashboard")
-        fixture.append("apps/dashboard/src/selector-fixture.ts", "export {};\n")
+        fixture.append("apps/dashboard/playwright.config.ts", "\n// selector fixture\n")
         fixture.commit("dashboard source")
         fixture.assert_selected("dashboard source", True)
 
@@ -220,7 +220,7 @@ def main() -> None:
         fixture.assert_selected("dashboard design source", True)
 
         fixture.reset("product-docs")
-        fixture.append("apps/docs/src/content/docs/selector-fixture.md", "# Built\n")
+        fixture.append("apps/docs/zola/content/selector-fixture.md", "# Built\n")
         fixture.commit("built docs source")
         fixture.assert_selected("built product docs", True)
 
@@ -311,6 +311,21 @@ def main() -> None:
         fixture.assert_selected("support base input", True, mode="support")
         fixture.assert_selected("support input is not dev runtime", False)
 
+        fixture.reset("dashboard-installer")
+        fixture.append("apps/cli/install.sh", "\n# dashboard image fixture\n")
+        fixture.commit("dashboard installer input")
+        fixture.assert_selected("dashboard installer input", True)
+
+        fixture.reset("dashboard-root-license")
+        fixture.append("LICENSE", "\nDashboard runtime fixture\n")
+        fixture.commit("dashboard root license input")
+        fixture.assert_selected("dashboard root license input", True)
+        fixture.assert_selected(
+            "dashboard root license is not a support input",
+            False,
+            mode="support",
+        )
+
         fixture.reset("rename")
         source = fixture.repo / "crates/codewire-cli/src/lib.rs"
         renamed = fixture.repo / "crates/codewire-cli/src/lib-renamed.rs"
@@ -395,6 +410,32 @@ def main() -> None:
         if contract.returncode == 0 or "uncovered source root" not in contract.stderr:
             raise AssertionError(
                 f"uncovered Docker root did not fail contract: {contract.stderr}"
+            )
+
+        fixture.reset("remote-docker-source")
+        fixture.append(
+            "apps/dashboard/Dockerfile",
+            "\nADD https://example.invalid/unverified.tar.gz /tmp/unverified.tar.gz\n",
+        )
+        fixture.commit("unverified remote Docker source")
+        fixture.assert_selected("unverified remote Docker source", True)
+        remote_contract = run(
+            [
+                "python3",
+                str(CLASSIFIER),
+                "check-contract",
+                "--mode",
+                "runtime",
+            ],
+            cwd=fixture.repo,
+            check=False,
+        )
+        if (
+            remote_contract.returncode == 0
+            or "checksum-pinned HTTPS ADD" not in remote_contract.stderr
+        ):
+            raise AssertionError(
+                "unverified remote Docker source did not fail the contract"
             )
 
         fixture.reset("kustomize-contract")

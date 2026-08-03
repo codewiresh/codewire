@@ -15,7 +15,6 @@ resources:
   - idp-signing-keks.yaml
   - postgres.yaml
   - dashboard.yaml
-  - docs.yaml
   - storage-class.yaml
 
 images:

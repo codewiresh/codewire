@@ -431,7 +431,7 @@
                 "value": "loop"
               }
             ],
-            "image": "docker:dind",
+            "image": "ghcr.io/codewiresh/dind@sha256:00815afb718e35fa8c71e8eb411df2919f74a149908593ae3fe94b55b34feec9",
             "name": "dind",
             "resources": {
               "limits": {

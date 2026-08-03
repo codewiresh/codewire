@@ -1,0 +1,9 @@
+<div class="docs-card-grid">
+  {% for title in titles %}
+    <a class="docs-link-card" href="{{ hrefs[loop.index0] | trim_end_matches(pat="/") | safe }}">
+      <strong>{{ title }}</strong>
+      <span>{{ descriptions[loop.index0] }}</span>
+      <span class="docs-link-card-arrow" aria-hidden="true">→</span>
+    </a>
+  {% endfor %}
+</div>

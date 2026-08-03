@@ -1,3 +1,4 @@
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import postgres from "postgres";
 
 const sql = postgres(process.env.DATABASE_URL!);
@@ -22,7 +23,25 @@ export async function disableTwoFactor(email: string) {
   await sql`UPDATE users SET two_factor_enabled = false WHERE email = ${email}`;
 }
 
-// Note: Invite codes are hardcoded in apps/dashboard/src/lib/invite.server.ts
+export async function createAuthenticatedSession(email: string) {
+  const [user] = await sql`SELECT id FROM users WHERE email = ${email}`;
+  if (!user) throw new Error(`Cannot create an E2E session for missing user ${email}`);
+
+  const id = `e2e_${randomUUID()}`;
+  const token = randomBytes(32).toString("hex");
+  const tokenHash = createHash("sha256").update(token).digest("hex");
+  await sql`
+    INSERT INTO sessions (id, user_id, token_hash, expires_at, ip_address, user_agent)
+    VALUES (${id}, ${user.id}, ${tokenHash}, NOW() + interval '1 hour', '127.0.0.1', 'Playwright E2E')
+  `;
+  return { id, token };
+}
+
+export async function deleteSession(id: string) {
+  await sql`DELETE FROM sessions WHERE id = ${id}`;
+}
+
+// Note: BETA-001 is the accepted local E2E invite contract.
 // Valid codes: BETA2024, EARLYBIRD, CODEWIRE1, PRIVATEBETA, DEVACCESS
 export const TEST_INVITE_CODE = "BETA2024";
 
@@ -33,11 +52,11 @@ export async function makeUserAdmin(email: string) {
 // Get password reset token from Better Auth verifications table
 export async function getPasswordResetToken(identifier: string): Promise<string | null> {
   const [result] = await sql`
-    SELECT id FROM verifications
+    SELECT value FROM verifications
     WHERE identifier = ${identifier}
     ORDER BY created_at DESC LIMIT 1
   `;
-  return result?.id ?? null;
+  return result?.value ?? null;
 }
 
 // Get user ID by email
@@ -199,7 +218,10 @@ export async function getEnvUsageBilling(
     WHERE org_id = ${orgId}
     ORDER BY billing_period_start DESC LIMIT 1
   `;
-  return result ?? null;
+  return result ? {
+    last_overage_cents: Number(result.last_overage_cents),
+    last_cpu_hours: Number(result.last_cpu_hours),
+  } : null;
 }
 
 /** Insert an environment_subscriptions row */

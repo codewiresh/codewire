@@ -602,8 +602,8 @@
                 "workspace_image_id": "docker-pullable://ghcr.io/codewiresh/workspace@sha256:abc",
                 "gateway_image": "ghcr.io/codewiresh/codewire-gateway@sha256:def",
                 "gateway_image_id": "docker-pullable://ghcr.io/codewiresh/codewire-gateway@sha256:def",
-                "dind_image": "docker:dind",
-                "dind_image_id": "docker-pullable://docker:dind@sha256:123",
+                "dind_image": "ghcr.io/codewiresh/dind@sha256:00815afb718e35fa8c71e8eb411df2919f74a149908593ae3fe94b55b34feec9",
+                "dind_image_id": "docker-pullable://ghcr.io/codewiresh/dind@sha256:00815afb718e35fa8c71e8eb411df2919f74a149908593ae3fe94b55b34feec9@sha256:123",
                 "daemon_init_image": "ghcr.io/codewiresh/codewire-daemon@sha256:456",
                 "daemon_init_image_id": "docker-pullable://ghcr.io/codewiresh/codewire-daemon@sha256:456"
             },

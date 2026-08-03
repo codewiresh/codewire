@@ -19,6 +19,7 @@ http = { workspace = true }
 http-body-util = { workspace = true }
 reqwest = { workspace = true }
 rand = { workspace = true }
+qrcode = { workspace = true }
 serde = { workspace = true }
 subtle = { workspace = true }
 tokio = { workspace = true }

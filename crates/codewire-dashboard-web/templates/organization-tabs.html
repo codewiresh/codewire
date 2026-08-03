@@ -1,0 +1,8 @@
+<nav class="cw-org-tabs" aria-label="Organization navigation">
+  <a class="cw-org-tab" href="{{ organization.environments_url }}"{% if active_tab == "environments" %} aria-current="page"{% endif %}>Environments</a>
+  <a class="cw-org-tab" href="{{ organization.presets_url }}"{% if active_tab == "presets" %} aria-current="page"{% endif %}>Presets</a>
+  <a class="cw-org-tab" href="{{ organization.secrets_url }}"{% if active_tab == "secrets" %} aria-current="page"{% endif %}>Secrets</a>
+  <a class="cw-org-tab" href="{{ organization.api_keys_url }}"{% if active_tab == "api-keys" %} aria-current="page"{% endif %}>API Keys</a>
+  <a class="cw-org-tab" href="{{ organization.members_url }}"{% if active_tab == "members" %} aria-current="page"{% endif %}>Members</a>
+  <a class="cw-org-tab" href="{{ organization.billing_url }}"{% if active_tab == "billing" %} aria-current="page"{% endif %}>Billing</a>
+</nav>

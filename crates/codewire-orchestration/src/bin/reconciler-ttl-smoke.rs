@@ -24,7 +24,7 @@ async fn main() -> anyhow::Result<()> {
     let session_token = required_env("SMOKE_SESSION_TOKEN")?;
     let org_id = required_env("SMOKE_ORG_ID")?;
     let image = std::env::var("SMOKE_WORKSPACE_IMAGE")
-        .unwrap_or_else(|_| "ghcr.io/codewiresh/workspace:latest".into());
+        .unwrap_or_else(|_| "ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467".into());
     let repo_url = std::env::var("SMOKE_REPO_URL")
         .unwrap_or_else(|_| "https://github.com/codewiresh/example".into());
 

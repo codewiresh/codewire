@@ -487,7 +487,7 @@
         assert_eq!(request.branch, "main");
         assert_eq!(request.repos.len(), 1);
         assert_eq!(request.repos[0].branch, "main");
-        assert_eq!(request.image, "ghcr.io/codewiresh/workspace:latest");
+        assert_eq!(request.image, "ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467");
         assert_eq!(request.install_command, "go mod download");
         assert_eq!(request.startup_script, "go test ./...");
         assert_eq!(request.env_vars["FOO"], "bar");
@@ -522,7 +522,7 @@
 
         assert!(args.write_preset);
         assert_eq!(args.save_preset.as_deref(), Some("Fullstack Dev"));
-        assert_eq!(request.image, "ghcr.io/codewiresh/workspace:latest");
+        assert_eq!(request.image, "ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467");
     }
 
     #[test]
@@ -537,7 +537,7 @@
 
         let request = prepare_platform_env_create_request(&args).unwrap();
 
-        assert_eq!(request.image, "ghcr.io/codewiresh/workspace:latest");
+        assert_eq!(request.image, "ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467");
         assert!(request.preset_id.is_none());
         assert!(request.preset_slug.is_empty());
         assert!(request.repo_url.is_empty());
@@ -672,7 +672,7 @@
 
         let yaml = fs::read_to_string(&path).unwrap();
         let parsed: config::CodewireConfig = serde_yaml::from_str(&yaml).unwrap();
-        assert_eq!(parsed.image, "ghcr.io/codewiresh/workspace:latest");
+        assert_eq!(parsed.image, "ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467");
         assert_eq!(parsed.install, "pnpm install");
         assert_eq!(parsed.startup, "pnpm dev");
         assert_eq!(parsed.env["FOO"], "bar");
@@ -865,7 +865,7 @@
     #[test]
     fn codewire_yaml_from_request_matches_go_authoring_shape() {
         let request = CreateEnvironmentRequest {
-            image: "ghcr.io/codewiresh/workspace:latest".to_string(),
+            image: "ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467".to_string(),
             install_command: "bun install".to_string(),
             startup_script: "bun dev".to_string(),
             env_vars: BTreeMap::from([("FOO".to_string(), "bar".to_string())]),
@@ -888,7 +888,7 @@
         let parsed: config::CodewireConfig = serde_yaml::from_str(&yaml).unwrap();
 
         assert!(!yaml.contains("preset:"));
-        assert_eq!(parsed.image, "ghcr.io/codewiresh/workspace:latest");
+        assert_eq!(parsed.image, "ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467");
         assert_eq!(parsed.install, "bun install");
         assert_eq!(parsed.startup, "bun dev");
         assert_eq!(parsed.env["FOO"], "bar");
@@ -912,7 +912,7 @@
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("nested/codewire.yaml");
         let request = CreateEnvironmentRequest {
-            image: "ghcr.io/codewiresh/workspace:latest".to_string(),
+            image: "ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467".to_string(),
             install_command: "go mod download".to_string(),
             ..CreateEnvironmentRequest::default()
         };
@@ -920,7 +920,7 @@
         write_resolved_codewire_yaml(&path, &request).unwrap();
 
         let parsed = config::load_codewire_config(&path).unwrap();
-        assert_eq!(parsed.image, "ghcr.io/codewiresh/workspace:latest");
+        assert_eq!(parsed.image, "ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467");
         assert_eq!(parsed.install, "go mod download");
     }
 
@@ -931,7 +931,7 @@
             memory_mb: Some(4096),
             disk_gb: Some(40),
             ttl_seconds: Some(3600),
-            image: "ghcr.io/codewiresh/workspace:latest".to_string(),
+            image: "ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467".to_string(),
             install_command: "bun install".to_string(),
             startup_script: "bun dev".to_string(),
             env_vars: BTreeMap::from([("FOO".to_string(), "bar".to_string())]),
@@ -958,7 +958,7 @@
         assert_eq!(preset.slug, "fullstack-dev");
         assert_eq!(preset.default_cpu_millicores, Some(2000));
         assert_eq!(preset.default_ttl_seconds, Some(3600));
-        assert_eq!(preset.image, "ghcr.io/codewiresh/workspace:latest");
+        assert_eq!(preset.image, "ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467");
         assert_eq!(preset.env_vars["FOO"], "bar");
         assert_eq!(preset.agents[0]["type"], "claude-code");
         assert_eq!(preset.app_ports[0]["port"], 8080);

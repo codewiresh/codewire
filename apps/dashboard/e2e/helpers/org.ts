@@ -66,5 +66,9 @@ export async function getOrgForUser(
     WHERE u.email = ${email}
     ORDER BY o.created_at DESC LIMIT 1
   `;
-  return result ?? null;
+  return result ? {
+    id: String(result.id),
+    name: String(result.name),
+    slug: String(result.slug),
+  } : null;
 }

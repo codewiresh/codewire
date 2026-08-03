@@ -62,8 +62,8 @@ legacy_doc_hits="$(
     'cw local|cw exec|cw node|cw run --local|cw run --node|node:session' \
     "$ROOT/README.md" \
     "$ROOT/CONTRIBUTING.md" \
-    "$ROOT/apps/dashboard/src" \
-    "$ROOT/apps/docs/src" \
+    "$ROOT/crates/codewire-dashboard-web" \
+    "$ROOT/apps/docs/zola/content" \
     "$ROOT/docs/dev" \
     "$ROOT/docs/runbooks" || true
 )"

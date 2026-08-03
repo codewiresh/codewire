@@ -13,5 +13,5 @@ spec:
     app.kubernetes.io/component: dashboard
   ports:
     - port: 80
-      targetPort: 80
+      targetPort: 5173
       name: http

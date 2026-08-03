@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "captured_at": "2026-08-02T09:42:00+02:00",
+  "environment": "dev",
+  "source_commit": "5426202d865db3a959af3e672b13ad38b218e242",
+  "dashboard_image": "ghcr.io/codewiresh/dashboard@sha256:96047f863dfffaaf386a58ff8453027d78acc7549fff40b0d4532d44da97ef76",
+  "evidence": {
+    "selection_run": 13288,
+    "build_run": 13230,
+    "deploy_run": 13235,
+    "smoke_run": 13236,
+    "deploy_commit": "6f4e8f7c7329c8df2d8142eb9715535cdb7f641e"
+  },
+  "local_smoke_paths": [
+    "/",
+    "/dashboard",
+    "/docs",
+    "/install.sh",
+    "/.well-known/apple-app-site-association",
+    "/healthz"
+  ]
+}

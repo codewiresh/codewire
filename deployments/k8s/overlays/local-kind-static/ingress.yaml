@@ -31,9 +31,9 @@ spec:
             pathType: Prefix
             backend:
               service:
-                name: codewire-orchestration
+                name: dashboard
                 port:
-                  name: http
+                  number: 5173
           - path: /readyz
             pathType: Prefix
             backend:

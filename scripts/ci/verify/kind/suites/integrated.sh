@@ -39,6 +39,8 @@ run_integrated_kind_suite() {
   coordinator_ingress_smoke
   billing_contract_through_ingress
   deploy_agent_sandbox_and_smoke
+  dashboard_browser_e2e
+  assert_sandbox_supply_chain
   rust_reconciler_ttl_e2e
   log "green"
 }

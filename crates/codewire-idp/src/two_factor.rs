@@ -193,9 +193,40 @@ async fn enable(
     State(state): State<TwoFactorState>,
     auth: AuthUser,
 ) -> Result<Json<EnableResponse>, AppError> {
-    let user = load_two_factor_user(&state.pool, &auth.user_id).await?;
+    let mut tx = state.pool.begin().await?;
+    let user: TwoFactorUser = sqlx::query_as(
+        r#"
+        SELECT id, email, two_factor_enabled
+        FROM users WHERE id = $1
+        FOR UPDATE
+        "#,
+    )
+    .bind(&auth.user_id)
+    .fetch_optional(&mut *tx)
+    .await?
+    .ok_or(AppError::Unauthorized)?;
     if user.two_factor_enabled.unwrap_or(false) {
         return Err(AppError::BadRequest("2FA is already enabled".into()));
+    }
+
+    let pending: Option<(String, String)> =
+        sqlx::query_as("SELECT secret, backup_codes FROM two_factor WHERE user_id = $1")
+            .bind(&user.id)
+            .fetch_optional(&mut *tx)
+            .await?;
+    if let Some((encrypted_secret, encrypted_backup_codes)) = pending {
+        let secret = decrypt(&encrypted_secret, &state.session_secret)
+            .map_err(|_| AppError::InternalMsg("Failed to decrypt 2FA secret".into()))?;
+        let backup_json = decrypt(&encrypted_backup_codes, &state.session_secret)
+            .map_err(|_| AppError::InternalMsg("Failed to decrypt backup codes".into()))?;
+        let backup_codes = serde_json::from_str(&backup_json)
+            .map_err(|_| AppError::InternalMsg("Failed to decrypt backup codes".into()))?;
+        tx.commit().await?;
+        return Ok(Json(EnableResponse {
+            totp_uri: pquerna_totp_uri(&secret, &user.email),
+            secret,
+            backup_codes,
+        }));
     }
 
     let raw_secret = Secret::generate_secret();
@@ -214,20 +245,20 @@ async fn enable(
         r#"
         INSERT INTO two_factor (id, user_id, secret, backup_codes)
         VALUES ($1, $2, $3, $4)
-        ON CONFLICT (user_id) DO UPDATE SET secret = $3, backup_codes = $4
         "#,
     )
     .bind(hex_id())
     .bind(&user.id)
     .bind(&enc_secret)
     .bind(&enc_backup)
-    .execute(&state.pool)
+    .execute(&mut *tx)
     .await
     .map_err(|e| {
         tracing::error!(error = %e, "failed to store 2FA data");
         AppError::InternalMsg("Failed to store 2FA data".into())
     })?;
 
+    tx.commit().await?;
     Ok(Json(EnableResponse {
         totp_uri,
         secret,

@@ -31,6 +31,7 @@ trap './scripts/dev/kind/kind-forwards.sh stop postgres' EXIT INT TERM
     PLAYWRIGHT_BASE_URL="$KIND_PLAYWRIGHT_BASE_URL" \
     ./apps/dashboard/node_modules/.bin/playwright test \
       --config apps/dashboard/playwright.config.ts \
-      --project=setup \
-      --project=billing \
+      --project=dashboard-ssr-desktop \
+      --project=dashboard-ssr-mobile \
+      apps/dashboard/e2e/ssr-dashboard.billing-admin.ssr.ts \
       "$@"

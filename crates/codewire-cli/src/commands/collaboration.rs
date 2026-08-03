@@ -1,5 +1,7 @@
 use super::*;
 
+pub(crate) const CANONICAL_WORKSPACE_IMAGE: &str = "ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467";
+
 pub(crate) fn selected_network_or_error(mesh: &config::ResolvedMeshConfig) -> anyhow::Result<&str> {
     mesh.selected_network
         .as_deref()
@@ -620,14 +622,21 @@ pub(crate) fn format_preset_list_text(presets: &[Preset]) -> String {
         return "No presets found.\n".to_string();
     }
 
+    let image_width = presets
+        .iter()
+        .filter_map(|preset| preset.image.as_deref().and_then(trimmed_str))
+        .map(str::len)
+        .chain([40])
+        .max()
+        .unwrap_or(40);
     let mut output = format!(
-        "{:<24} {:<12} {:<40} {:<8} CPU/MEM/DISK\n",
+        "{:<24} {:<12} {:<image_width$} {:<8} CPU/MEM/DISK\n",
         "NAME", "LANGUAGE", "IMAGE", "OFFICIAL"
     );
     for preset in presets {
         let official = if preset.official { "yes" } else { "" };
         output.push_str(&format!(
-            "{:<24} {:<12} {:<40} {:<8} {}m/{}MB/{}GB\n",
+            "{:<24} {:<12} {:<image_width$} {:<8} {}m/{}MB/{}GB\n",
             preset_label(preset),
             optional_label(preset.language.as_deref()),
             optional_label(preset.image.as_deref()),
@@ -691,6 +700,9 @@ pub(crate) fn positive_i32(value: Option<i32>) -> Option<i32> {
 }
 
 pub(crate) fn expand_image_ref(image: &str) -> String {
+    if image == "workspace" {
+        return CANONICAL_WORKSPACE_IMAGE.to_string();
+    }
     let (name, tag) = match image.split_once(':') {
         Some((name, tag)) => (name, Some(tag)),
         None => (image, None),

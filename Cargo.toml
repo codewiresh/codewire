@@ -193,6 +193,7 @@ jsonwebtoken = "9"
 serde_yaml = "0.9"
 toml = "1"
 askama = "=0.14.0"
+qrcode = { version = "=0.14.1", default-features = false, features = ["svg"] }
 
 # Testing
 tempfile = "3"

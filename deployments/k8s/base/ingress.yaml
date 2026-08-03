@@ -50,7 +50,7 @@ spec:
             pathType: Prefix
             backend:
               service:
-                name: codewire-orchestration
+                name: codewire-dashboard
                 port:
                   name: http
           - path: /readyz

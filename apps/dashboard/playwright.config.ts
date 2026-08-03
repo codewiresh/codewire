@@ -3,83 +3,81 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const dashboardDir = path.dirname(fileURLToPath(import.meta.url));
-const sourceViteUrl = "http://127.0.0.1:5173";
+const repoRoot = path.resolve(dashboardDir, "../..");
+const dashboardUrl = (process.env.PLAYWRIGHT_BASE_URL || "http://127.0.0.1:5173").replace(/\/$/, "");
+const apiOrigin = process.env.CODEWIRE_API_ORIGIN
+  || process.env.SERVER_URL
+  || "http://127.0.0.1:8080";
+const identityOrigin = process.env.CODEWIRE_IDENTITY_ORIGIN || apiOrigin;
+const billingOrigin = process.env.CODEWIRE_BILLING_ORIGIN || "http://127.0.0.1:8081";
+const browserApiOrigin = process.env.CODEWIRE_BROWSER_API_ORIGIN || apiOrigin;
+const chromiumExecutable = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH;
+const snapshotEnvironment = process.env.CODEWIRE_PLAYWRIGHT_SNAPSHOT_ENV || "{platform}";
+const authState = path.join(dashboardDir, "playwright/.auth/user.json");
+const skipSharedSetup = process.env.PLAYWRIGHT_SKIP_SHARED_SETUP === "1";
 
 export default defineConfig({
-  testDir: "./e2e",
-  globalSetup: "./e2e/global-setup.ts",
-  fullyParallel: true,
+  testDir: repoRoot,
+  globalSetup: skipSharedSetup ? undefined : path.join(dashboardDir, "e2e/global-setup.ts"),
+  fullyParallel: false,
   forbidOnly: !!process.env.CI,
   retries: process.env.CI ? 2 : 0,
-  workers: process.env.CI ? 1 : undefined,
+  workers: 1,
   reporter: "html",
-
-  use: {
-    baseURL: process.env.PLAYWRIGHT_BASE_URL || sourceViteUrl,
-    trace: "on-first-retry",
-    screenshot: "only-on-failure",
+  snapshotPathTemplate: `{testDir}/{testFilePath}-snapshots/{arg}-{projectName}-${snapshotEnvironment}{ext}`,
+  expect: {
+    toHaveScreenshot: { maxDiffPixelRatio: 0.015 },
   },
-
+  use: {
+    launchOptions: chromiumExecutable
+      ? { executablePath: chromiumExecutable }
+      : undefined,
+  },
   projects: [
-    // Auth setup project - runs first to save auth state
-    { name: "setup", testMatch: /.*\.setup\.ts/ },
-
-    // Main tests depend on auth setup (exclude tests that handle their own auth)
     {
-      name: "chromium",
-      use: { ...devices["Desktop Chrome"] },
-      dependencies: ["setup"],
-      testIgnore: [
-        /admin\.spec\.ts/,
-        /oidc\.spec\.ts/,
-        /signup\.spec\.ts/,
-        /twofactor\.spec\.ts/,
-        /environments\.spec\.ts/,
-      ],
+      name: "setup",
+      testMatch: /apps\/dashboard\/e2e\/auth\.setup\.ts/,
+      use: { baseURL: dashboardUrl },
     },
-
-    // Signup UI test - isolated, handles its own auth
     {
-      name: "signup",
-      use: { ...devices["Desktop Chrome"] },
-      testMatch: /signup\.spec\.ts/,
+      name: "dashboard-ssr-desktop",
+      testMatch: /apps\/dashboard\/e2e\/ssr-dashboard\..*\.ssr\.ts/,
+      dependencies: skipSharedSetup ? [] : ["setup"],
+      use: {
+        ...devices["Desktop Chrome"],
+        baseURL: dashboardUrl,
+        storageState: authState,
+        viewport: { width: 1440, height: 900 },
+        trace: "on-first-retry",
+        screenshot: "only-on-failure",
+      },
     },
-
-    // Two-factor auth tests - isolated, handles its own auth
     {
-      name: "twofactor",
-      use: { ...devices["Desktop Chrome"] },
-      testMatch: /twofactor\.spec\.ts/,
-    },
-
-    // Admin panel tests - isolated, handles its own auth
-    {
-      name: "admin",
-      use: { ...devices["Desktop Chrome"] },
-      testMatch: /admin\.spec\.ts/,
-    },
-
-    // OIDC provider tests - isolated, handles its own auth
-    {
-      name: "oidc",
-      use: { ...devices["Desktop Chrome"] },
-      testMatch: /oidc\.spec\.ts/,
-    },
-
-    // Environments E2E tests - isolated, handles its own auth
-    {
-      name: "environments",
-      use: { ...devices["Desktop Chrome"] },
-      testMatch: /environments\.spec\.ts/,
+      name: "dashboard-ssr-mobile",
+      testMatch: /apps\/dashboard\/e2e\/ssr-dashboard\..*\.ssr\.ts/,
+      dependencies: skipSharedSetup ? [] : ["setup"],
+      use: {
+        ...devices["Pixel 5"],
+        baseURL: dashboardUrl,
+        storageState: authState,
+        viewport: { width: 390, height: 844 },
+        trace: "on-first-retry",
+      },
     },
   ],
-
-  // Start the current-worktree Vite server before tests (if not already running).
-  // A deployed-dashboard test can set PLAYWRIGHT_BASE_URL to skip auto-start.
   webServer: process.env.PLAYWRIGHT_BASE_URL ? undefined : {
-    command: "bun run dev -- --host 127.0.0.1",
-    cwd: dashboardDir,
-    url: sourceViteUrl,
+    command: 'CARGO_TARGET_DIR="$(scripts/ci/verify/resolve-cargo-target-dir.sh)" cargo run --locked -p codewire-dashboard-web',
+    cwd: repoRoot,
+    env: {
+      ...process.env,
+      CODEWIRE_DASHBOARD_LISTEN_ADDR: "127.0.0.1:5173",
+      CODEWIRE_PUBLIC_ORIGIN: dashboardUrl,
+      CODEWIRE_API_ORIGIN: apiOrigin,
+      CODEWIRE_IDENTITY_ORIGIN: identityOrigin,
+      CODEWIRE_BILLING_ORIGIN: billingOrigin,
+      CODEWIRE_BROWSER_API_ORIGIN: browserApiOrigin,
+    },
+    url: `${dashboardUrl}/healthz`,
     reuseExistingServer: !process.env.CI,
     timeout: 120000,
   },

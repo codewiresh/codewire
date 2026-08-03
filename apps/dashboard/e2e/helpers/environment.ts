@@ -246,6 +246,11 @@ export async function cleanupEnvironments(slugPrefix: string): Promise<void> {
     )
   `;
   await sql`
+    DELETE FROM repo_configs WHERE org_id IN (
+      SELECT id FROM organizations WHERE slug LIKE ${slugPrefix + "%"}
+    )
+  `;
+  await sql`
     DELETE FROM sandbox_template_config WHERE preset_id IN (
       SELECT ep.id FROM environment_presets ep
       JOIN organizations o ON ep.org_id = o.id

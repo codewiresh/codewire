@@ -3,7 +3,6 @@ use std::io::Write as _;
 use super::*;
 
 const PLATFORM_DAEMON_READY_TIMEOUT: Duration = Duration::from_secs(180);
-const DEFAULT_PLATFORM_WORKSPACE_IMAGE: &str = "ghcr.io/codewiresh/workspace:latest";
 
 pub(crate) async fn handle_env_command(globals: &Globals, args: EnvArgs) -> anyhow::Result<()> {
     let placement = args.placement();
@@ -1593,7 +1592,7 @@ pub(crate) fn prepare_platform_env_create_request(
         && request.repos.is_empty()
         && request.image.is_empty()
     {
-        request.image = DEFAULT_PLATFORM_WORKSPACE_IMAGE.to_string();
+        request.image = CANONICAL_WORKSPACE_IMAGE.to_string();
     }
     if !args.no_network {
         validate_env_create_mesh_bootstrap_env(&request)?;

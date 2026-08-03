@@ -14,7 +14,8 @@ if [ -z "${BILLING_RUNTIME_WEBHOOK_SECRET:-}" ]; then
 fi
 
 cd "$PROJECT_ROOT"
-export CARGO_TARGET_DIR="$(scripts/ci/verify/resolve-cargo-target-dir.sh)"
+CARGO_TARGET_DIR="$(scripts/ci/verify/resolve-cargo-target-dir.sh)"
+export CARGO_TARGET_DIR
 DATABASE_URL="$KIND_DATABASE_URL" \
 BILLING_RUNTIME_BASE_URL="$KIND_SERVER_URL" \
 cargo run --locked --profile ci -p codewire-billing --bin billing-runtime-smoke
@@ -24,5 +25,6 @@ SERVER_URL="$KIND_SERVER_URL" \
 PLAYWRIGHT_BASE_URL="$KIND_PLAYWRIGHT_BASE_URL" \
 ./apps/dashboard/node_modules/.bin/playwright test \
   --config apps/dashboard/playwright.config.ts \
-  --project=setup \
-  --project=billing
+  --project=dashboard-ssr-desktop \
+  --project=dashboard-ssr-mobile \
+  apps/dashboard/e2e/ssr-dashboard.billing-admin.ssr.ts

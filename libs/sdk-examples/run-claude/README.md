@@ -76,7 +76,7 @@ CW_EXAMPLE_CMD='cat /etc/os-release' \
 Swap the defaults to hit an image that has `claude` preinstalled:
 
 ```
-CW_EXAMPLE_IMAGE=ghcr.io/codewiresh/workspace:latest \
+CW_EXAMPLE_IMAGE=ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467 \
 CW_EXAMPLE_CMD='claude -p "Reply with exactly one word: hello"' \
   make run-claude-examples
 ```

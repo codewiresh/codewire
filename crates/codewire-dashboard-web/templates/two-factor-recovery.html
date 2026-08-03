@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Save recovery codes · Codewire</title>
+    <link rel="stylesheet" href="/assets/codewire/design-v1.css">
+    <link rel="stylesheet" href="/assets/codewire/routes/auth-v1.css">
+  </head>
+  <body class="cw-body cw-auth-body" data-route="two-factor-recovery">
+    <main class="cw-auth-shell cw-auth-shell--wide">
+      <a class="cw-auth-brand" href="/"><img src="/assets/codewire/logo-v1.svg" alt=""><span>Codewire</span></a>
+      <section class="cw-card cw-auth-card cw-auth-card--wide" aria-labelledby="recovery-title">
+        <header class="cw-card-header cw-auth-header">
+          <div class="cw-auth-mark" aria-hidden="true"><svg class="cw-icon"><use href="/assets/codewire/icons-v2.svg#icon-shield"/></svg></div>
+          <h1 id="recovery-title" class="cw-page-title">Two-factor authentication enabled</h1>
+          <p class="cw-card-description">Save these recovery codes now. Each code works once, and Codewire will not show this set again.</p>
+        </header>
+        <div class="cw-card-content cw-setup-grid">
+          <section aria-labelledby="backup-title">
+            <h2 id="backup-title" class="cw-card-title">Save recovery codes</h2>
+            <ul class="cw-backup-codes">
+              {% for code in view.backup_codes %}<li><code data-testid="recovery-code">{{ code }}</code></li>{% endfor %}
+            </ul>
+          </section>
+          <a class="cw-button cw-auth-submit" href="{{ view.return_to }}">Continue to Codewire</a>
+        </div>
+      </section>
+    </main>
+  </body>
+</html>

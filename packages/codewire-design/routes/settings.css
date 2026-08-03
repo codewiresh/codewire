@@ -1,0 +1,33 @@
+.cw-settings-page { max-width: 44rem; }
+.cw-settings-page > .cw-alert { margin-bottom: var(--space-4); }
+.cw-alert--success { border-color: rgba(34, 197, 94, 0.25); background: rgba(34, 197, 94, 0.1); color: var(--success); }
+.cw-settings-card + .cw-settings-card { margin-top: var(--space-4); }
+.cw-settings-card .cw-card-title { display: flex; align-items: center; gap: var(--space-2); }
+.cw-settings-card form + p, .cw-settings-card p + form { margin-top: var(--space-3); }
+.cw-settings-muted { color: var(--fg-tertiary); font-size: .875rem; }
+.cw-mono { font-family: var(--font-mono); }
+.cw-credential-list { overflow: hidden; border: 1px solid var(--border); border-radius: var(--radius-md); }
+.cw-credential-row { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); padding: var(--space-3); }
+.cw-credential-row + .cw-credential-row { border-top: 1px solid var(--border); }
+.cw-credential-row strong, .cw-credential-row span { display: block; }
+.cw-credential-row span { color: var(--fg-tertiary); font-size: .75rem; }
+.cw-settings-details-panel summary { width: fit-content; list-style: none; }
+.cw-settings-details-panel summary::-webkit-details-marker { display: none; }
+.cw-settings-form { margin-top: var(--space-4); }
+.cw-public-key { display: block; overflow-wrap: anywhere; padding: var(--space-3); border-radius: var(--radius-md); background: var(--bg-surface-hover); font: .75rem/1.6 var(--font-mono); white-space: pre-wrap; user-select: all; }
+.cw-settings-account-links { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-4); }
+.cw-settings-account-links > a { color: var(--accent); }
+.cw-settings-account-links form { margin-left: auto; }
+.cw-settings-standalone { min-height: 100vh; }
+.cw-settings-topbar { display: flex; min-height: 4rem; align-items: center; justify-content: space-between; padding: 0 var(--space-6); border-bottom: 1px solid var(--border-subtle); }
+.cw-settings-standalone-main { width: min(100% - 2rem, 42rem); margin: 0 auto; padding: var(--space-8) 0; }
+.cw-settings-tabs { display: flex; gap: var(--space-4); margin-bottom: var(--space-8); color: var(--fg-secondary); }
+.cw-settings-details { display: grid; gap: var(--space-3); margin: 0; }
+.cw-settings-details div { display: grid; grid-template-columns: 8rem 1fr; gap: var(--space-4); }
+.cw-settings-details dt { color: var(--fg-secondary); }.cw-settings-details dd { margin: 0; }
+
+@media (max-width: 40rem) {
+  .cw-settings-account-links { align-items: stretch; flex-direction: column; }
+  .cw-settings-account-links form { width: 100%; margin-left: 0; }
+  .cw-settings-account-links form .cw-button { width: 100%; }
+}

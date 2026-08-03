@@ -622,7 +622,7 @@ mod tests {
             org_id: Some("org_123".into()),
             name: "Rust".into(),
             slug: Some("rust".into()),
-            image: Some("ghcr.io/codewiresh/workspace:latest".into()),
+            image: Some("ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467".into()),
             created_at: Some(rpc::Timestamp {
                 seconds: 1_767_225_600,
                 ..Default::default()

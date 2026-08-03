@@ -684,7 +684,7 @@ runtime_name = "cw-repo"
             project.join("codewire.yaml"),
             r#"
 preset: workspace
-image: ghcr.io/codewiresh/workspace:latest
+image: ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467
 install: pnpm install
 startup: pnpm dev
 cpu: 1000
@@ -766,7 +766,7 @@ agents:
             backend: "docker".to_string(),
             runtime_name: "cw-repo".to_string(),
             repo_path: "/tmp/repo".to_string(),
-            image: "ghcr.io/codewiresh/workspace:latest".to_string(),
+            image: "ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467".to_string(),
             cpu: 1500,
             memory: 4096,
             env,
@@ -844,7 +844,7 @@ agents:
                 "A=1",
                 "--env",
                 "B=2",
-                "ghcr.io/codewiresh/workspace:latest",
+                "ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467",
                 "-lc",
                 "exec /usr/local/bin/cw daemon",
             ]
@@ -923,7 +923,7 @@ ports:
             lima_mount_type: "9p".to_string(),
             repo_path: "/tmp/repo".to_string(),
             workdir: "/tmp/repo".to_string(),
-            image: "ghcr.io/codewiresh/workspace:latest".to_string(),
+            image: "ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467".to_string(),
             cpu: 1500,
             memory: 4096,
             disk: 20,
@@ -1024,7 +1024,7 @@ ports:
             lima_instance_name: "cw-repo".to_string(),
             repo_path: "/tmp/repo".to_string(),
             workdir: "/tmp/repo".to_string(),
-            image: "ghcr.io/codewiresh/workspace:latest".to_string(),
+            image: "ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467".to_string(),
             daemon_host_port: 17777,
             daemon_auth_token: "daemon-test-token".to_string(),
             mounts: vec![config::LocalMountConfig {
@@ -1097,7 +1097,7 @@ ports:
                 "/tmp/shared:/mnt/shared:ro",
                 "--workdir",
                 "/tmp/repo",
-                "ghcr.io/codewiresh/workspace:latest",
+                "ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467",
                 "-lc",
                 "exec /usr/local/bin/cw daemon"
             ]

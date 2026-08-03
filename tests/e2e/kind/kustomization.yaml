@@ -10,6 +10,7 @@ namespace: codewire-e2e
 
 resources:
   - namespace.yaml
+  - ../../../deployments/k8s/dashboard
   - ../../../deployments/k8s/billing
   - ../../../deployments/k8s/orchestration
   - ../../../deployments/k8s/coordinator
@@ -25,6 +26,33 @@ resources:
   - coordinator-nodeport.yaml
 
 patches:
+  - target:
+      kind: Deployment
+      name: codewire-dashboard
+    patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: codewire-dashboard
+      spec:
+        replicas: 1
+        template:
+          spec:
+            containers:
+              - name: dashboard
+                image: codewire-dashboard:e2e
+                imagePullPolicy: Never
+                env:
+                  - name: CODEWIRE_PUBLIC_ORIGIN
+                    value: http://127.0.0.1:8090
+                  - name: CODEWIRE_API_ORIGIN
+                    value: http://codewire-orchestration:8084
+                  - name: CODEWIRE_IDENTITY_ORIGIN
+                    value: http://codewire-idp:8091
+                  - name: CODEWIRE_BILLING_ORIGIN
+                    value: http://codewire-billing:8081
+                  - name: CODEWIRE_BROWSER_API_ORIGIN
+                    value: http://127.0.0.1:8090
   - target:
       kind: Deployment
       name: codewire-orchestration

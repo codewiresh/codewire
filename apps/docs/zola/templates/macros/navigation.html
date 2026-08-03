@@ -1,0 +1,5 @@
+{% macro item(path, label, current) %}
+  {% set normalized_current = current | trim_end_matches(pat="/") %}
+  {% set normalized_target = path | replace(from="/docs", to="") %}
+  <a class="docs-nav-link" href="{{ path | trim_end_matches(pat="/") | safe }}"{% if normalized_current == normalized_target %} aria-current="page"{% endif %}>{{ label }}</a>
+{% endmacro item %}

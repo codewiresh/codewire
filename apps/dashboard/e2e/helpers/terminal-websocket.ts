@@ -8,7 +8,7 @@ export interface TerminalWebSocketTarget {
 /**
  * Builds the raw terminal endpoint that the browser E2E probe exercises.
  * Browser cookies are host-scoped (not port-scoped), so the direct edge must
- * share the page hostname even when a local Vite server uses another port.
+ * share the page hostname even when the API listener uses another port.
  */
 export function terminalWebSocketUrl({
   serverUrl,

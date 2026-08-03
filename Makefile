@@ -1,5 +1,5 @@
-.PHONY: help up up-billing down dev dev-down db-init web dashboard-ssr-dev e2e e2e-kind kind-billing-listen kind-forwards-start kind-forwards-stop kind-forwards-status kind-forwards-cleanup kind-clean-runtime test-ui test-ui-dashboard-ssr test-ui-kind-billing test-billing-smoke-kind seed-test-user seed-e2e-users build clean wasm build-gateway build-dashboard-local build-docs-local build-sandbox-controller build-derp-local build-services-local rollout-local-runtime local-runtime deploy-local deploy-local-static prune-local-legacy-runtime kind-cluster kind-ingress kind-label-local-nodes kind-sandbox-namespace ios ios-test ios-clean proto-tools proto-lint proto-generate proto-drift-check
-.PHONY: cli-build cli-smoke cli-install cli-install-user cli-install-system
+.PHONY: help up up-billing down dev dev-down db-init web dashboard-ssr-dev e2e e2e-kind kind-billing-listen kind-forwards-start kind-forwards-stop kind-forwards-status kind-forwards-cleanup kind-clean-runtime test-ui test-ui-dashboard-ssr test-ui-kind test-ui-kind-billing test-billing-smoke-kind seed-test-user seed-e2e-users build build-web clean wasm build-gateway build-dashboard-local build-sandbox-controller build-derp-local build-services-local rollout-local-runtime local-runtime deploy-local deploy-local-static prune-local-legacy-runtime kind-cluster kind-ingress kind-label-local-nodes kind-sandbox-namespace ios ios-test ios-clean proto-tools proto-lint proto-generate proto-drift-check
+.PHONY: cli-build cli-smoke cli-install cli-install-user cli-install-system scan-supply-chain verify-dashboard-image sync-local-secrets
 
 # Default target
 help:
@@ -13,22 +13,25 @@ help:
 	@echo "  make db-init      - Apply pending SQLx application migrations"
 	@echo ""
 	@echo "Development:"
-	@echo "  make web          - Run web frontend dev server"
-	@echo "  make dashboard-ssr-dev - Run the side-by-side Askama dashboard on 5174"
+	@echo "  make web          - Run the Rust web server on 5173"
+	@echo "  make dashboard-ssr-dev - Alias for make web"
 	@echo "  make wasm         - Build WASM package for the dashboard"
 	@echo ""
 	@echo "Testing:"
 	@echo "  make test-ui      - Run Playwright UI tests"
-	@echo "  make test-ui-dashboard-ssr - Run the opt-in Askama dashboard browser proof"
+	@echo "  make test-ui-dashboard-ssr - Alias for the canonical Rust browser proof"
+	@echo "  make test-ui-kind - Run the complete Rust dashboard suite against interactive Kind"
 	@echo "  make test-ui-kind-billing - Run Playwright billing tests against local kind"
 	@echo "  make test-billing-smoke-kind - Run Rust billing runtime smoke + Playwright billing against local kind"
 	@echo "  make e2e-kind     - Run the isolated Rust-owned Kind product gate"
+	@echo "  make scan-supply-chain - Run local policy plus the strict external-scanner equivalent"
+	@echo "  make verify-dashboard-image - Build and inspect the production Rust/Zola image"
 	@echo "  make seed-e2e-users - Seed local E2E login users"
 	@echo "  make seed-test-user - Alias for seed-e2e-users"
 	@echo ""
 	@echo "Build:"
-	@echo "  make build        - Build local frontend artifacts"
-	@echo "  make build-web    - Build web frontend"
+	@echo "  make build        - Build the Rust web binary"
+	@echo "  make build-web    - Build the Rust web binary"
 	@echo ""
 	@echo "CLI:"
 	@echo "  make cli-build          - Build the release CLI"
@@ -51,6 +54,7 @@ help:
 	@echo "  make kind-forwards-status - Show helper-owned local kind forwards"
 	@echo "  make kind-forwards-cleanup - Stop only helper-owned local kind forwards"
 	@echo "  make kind-clean-runtime - Delete orphaned local env workloads from kind"
+	@echo "  make sync-local-secrets - Opaquely sync local AI credentials into Kind"
 	@echo "  make kind-billing-listen - Start stripe listen, patch kind webhook secret, restart billing"
 	@echo ""
 	@echo "iOS:"
@@ -84,6 +88,8 @@ REGISTRY ?= git.example.com
 INFISICAL_HOST ?= infisical.example.com
 BUF ?= $(shell command -v buf 2>/dev/null || echo "$(HOME)/go/bin/buf")
 GO_BIN ?= $(shell go env GOPATH)/bin
+SUPPLYCHAIN ?= supplychain
+override SUPPLYCHAIN_REQUIRED_REVISION := ea79415
 # protoc is pinned because buf.gen.codewire.yaml uses protoc's built-in
 # python/pyi generators, whose output is protoc-version-dependent and
 # checked in (libs/gen-python). Keep version + checksum in lockstep with
@@ -92,6 +98,28 @@ GO_BIN ?= $(shell go env GOPATH)/bin
 PROTOC_VERSION := 35.1
 PROTOC_SHA256_LINUX_X86_64 := 6930ebf62bd4ea607b98fff052596c6ee564b9835b4ce172c75a3f53ae9d91b7
 PROTOC_DIR := .proto-tools/protoc-$(PROTOC_VERSION)
+
+scan-supply-chain:
+	@command -v "$(SUPPLYCHAIN)" >/dev/null 2>&1 || { \
+		echo "scan-supply-chain: supplychain is not installed; install a reviewed build and set SUPPLYCHAIN=/path/to/supplychain" >&2; \
+		exit 1; \
+	}
+	@version="$$($(SUPPLYCHAIN) version)"; case "$$version" in \
+		*"$(SUPPLYCHAIN_REQUIRED_REVISION)"*) ;; \
+		*) echo "scan-supply-chain: expected reviewed Supplychain revision $(SUPPLYCHAIN_REQUIRED_REVISION), got $$version" >&2; exit 1 ;; \
+	esac
+	scripts/checks/security/audit-js-supply-chain.sh
+	scripts/checks/security/audit-runtime-images.sh
+	"$(SUPPLYCHAIN)" --source-policy=.supplychain/source-policy.json ci \
+		--policy=strict \
+		--gitleaks-config=.gitleaks.toml \
+		--baseline=.supplychain/bun-baseline.json \
+		.
+
+DASHBOARD_VERIFY_IMAGE ?= codewire-dashboard:verification
+verify-dashboard-image:
+	docker buildx build --pull --load --tag "$(DASHBOARD_VERIFY_IMAGE)" -f apps/dashboard/Dockerfile .
+	scripts/ci/verify/dashboard-image.sh "$(DASHBOARD_VERIFY_IMAGE)"
 
 # Start core development services
 dev:
@@ -109,15 +137,16 @@ db-init:
 dev-down:
 	docker compose down
 
-# Run web frontend
+# Run the canonical Rust web server.
 web:
-	cd apps/dashboard && bun run dev
-
-dashboard-ssr-dev:
-	CODEWIRE_PUBLIC_ORIGIN="$${CODEWIRE_PUBLIC_ORIGIN:-http://127.0.0.1:5174}" \
+	CODEWIRE_PUBLIC_ORIGIN="$${CODEWIRE_PUBLIC_ORIGIN:-http://127.0.0.1:5173}" \
 	CODEWIRE_API_ORIGIN="$${CODEWIRE_API_ORIGIN:-http://127.0.0.1:8080}" \
-	CODEWIRE_LEGACY_UI_ORIGIN="$${CODEWIRE_LEGACY_UI_ORIGIN:-http://127.0.0.1:5173}" \
+	CODEWIRE_IDENTITY_ORIGIN="$${CODEWIRE_IDENTITY_ORIGIN:-http://127.0.0.1:8080}" \
+	CODEWIRE_BILLING_ORIGIN="$${CODEWIRE_BILLING_ORIGIN:-http://127.0.0.1:8081}" \
+	CODEWIRE_BROWSER_API_ORIGIN="$${CODEWIRE_BROWSER_API_ORIGIN:-http://127.0.0.1:8080}" \
 	cargo run --locked -p codewire-dashboard-web
+
+dashboard-ssr-dev: web
 
 # Build WASM package
 wasm:
@@ -211,25 +240,26 @@ seed-test-user: seed-e2e-users
 
 # Run Playwright UI tests
 test-ui: seed-test-user
-	cd apps/dashboard && bun run test:e2e
+	./apps/dashboard/node_modules/.bin/playwright test --config apps/dashboard/playwright.config.ts
 
-test-ui-dashboard-ssr: seed-test-user
-	./apps/dashboard/node_modules/.bin/playwright test --config apps/dashboard/playwright.dashboard-ssr.config.ts
+test-ui-dashboard-ssr: test-ui
+
+test-ui-kind:
+	./scripts/dev/kind/test-dashboard-kind.sh
 
 # Run Playwright UI tests with browser visible
 test-ui-headed: seed-test-user
-	cd apps/dashboard && bun run test:e2e:headed
+	./apps/dashboard/node_modules/.bin/playwright test --config apps/dashboard/playwright.config.ts --headed
 
 # Run Playwright UI tests with interactive UI
 test-ui-debug: seed-test-user
-	cd apps/dashboard && bun run test:e2e:ui
+	./apps/dashboard/node_modules/.bin/playwright test --config apps/dashboard/playwright.config.ts --ui
 
-# Build all local frontend artifacts.
+# Build the canonical web binary.
 build: build-web
 
-# Build web frontend
 build-web:
-	cd apps/dashboard && bun run build
+	cargo build --locked -p codewire-dashboard-web
 
 # Build and install the CLI from this source checkout.
 cli-build:
@@ -252,48 +282,49 @@ build-gateway:
 	docker build -t $(REGISTRY)/codewire/gateway:local -f deployments/docker/gateway.Dockerfile .
 
 # Deploy the local Rust runtime into kind.
-deploy-local: local-runtime build-dashboard-local build-docs-local
+deploy-local: local-runtime build-dashboard-local
 	@$(MAKE) kind-label-local-nodes
+	@$(MAKE) kind-sandbox-namespace
 	kind load docker-image codewire-dashboard:local --name codewire
-	kind load docker-image codewire-docs:local --name codewire
 	$(KUBECTL) apply -k deployments/k8s/overlays/local-kind/
+	@$(MAKE) sync-local-secrets
 	@$(MAKE) prune-local-legacy-runtime
 	@$(KUBECTL) -n default rollout status deployment postgres --timeout=60s
 	./scripts/dev/kind/install-temporal.sh local-kind
 	@$(MAKE) kind-clean-runtime
-	$(KUBECTL) -n default rollout restart deployment codewire-dashboard codewire-docs
+	$(KUBECTL) -n default rollout restart deployment codewire-dashboard
 	@$(MAKE) rollout-local-runtime
 	@$(KUBECTL) -n default rollout status deployment codewire-dashboard --timeout=60s
-	@$(KUBECTL) -n default rollout status deployment codewire-docs --timeout=60s
 
 # Deploy the static local Rust runtime into kind.
-deploy-local-static: local-runtime build-dashboard-local build-docs-local
+deploy-local-static: local-runtime build-dashboard-local
 	@$(MAKE) kind-label-local-nodes
+	@$(MAKE) kind-sandbox-namespace
 	kind load docker-image codewire-dashboard:local --name codewire
-	kind load docker-image codewire-docs:local --name codewire
 	$(KUBECTL) apply -k deployments/k8s/overlays/local-kind-static/
+	@$(MAKE) sync-local-secrets
 	@$(MAKE) prune-local-legacy-runtime
 	@$(KUBECTL) -n default rollout status deployment postgres --timeout=60s
 	./scripts/dev/kind/install-temporal.sh local-kind-static
 	@$(MAKE) kind-clean-runtime
-	$(KUBECTL) -n default rollout restart deployment codewire-dashboard codewire-docs
+	$(KUBECTL) -n default rollout restart deployment codewire-dashboard
 	@$(MAKE) rollout-local-runtime
 	@$(KUBECTL) -n default rollout status deployment codewire-dashboard --timeout=60s
-	@$(KUBECTL) -n default rollout status deployment codewire-docs --timeout=60s
 
 # Build all local images and deploy everything into local kind.
 # Shared/prod agent-sandbox is applied from this repo via CI/CD.
-up: build-gateway build-dashboard-local build-docs-local build-sandbox-controller build-derp-local build-services-local
+up: build-gateway build-dashboard-local build-sandbox-controller build-derp-local build-services-local
 	@kind get clusters | grep -q codewire || $(MAKE) kind-cluster
 	@$(MAKE) kind-ingress
 	@$(MAKE) kind-label-local-nodes
+	@$(MAKE) kind-sandbox-namespace
 	kind load docker-image $(REGISTRY)/codewire/gateway:local --name codewire
 	kind load docker-image codewire-dashboard:local --name codewire
-	kind load docker-image codewire-docs:local --name codewire
 	kind load docker-image agent-sandbox-controller:local --name codewire
 	kind load docker-image codewire-derp:local --name codewire
 	kind load docker-image codewire-services:local --name codewire
 	$(KUBECTL) apply -k deployments/k8s/overlays/local-kind/
+	@$(MAKE) sync-local-secrets
 	@$(MAKE) prune-local-legacy-runtime
 	$(KUBECTL) apply -k deployments/k8s/agent-sandbox/overlays/local-kind/
 	helm upgrade --install infisical-operator secrets-operator \
@@ -312,10 +343,9 @@ up: build-gateway build-dashboard-local build-docs-local build-sandbox-controlle
 	@$(KUBECTL) -n default rollout status deployment postgres --timeout=60s
 	./scripts/dev/kind/install-temporal.sh local-kind
 	@$(MAKE) kind-clean-runtime
-	$(KUBECTL) -n default rollout restart deployment codewire-dashboard codewire-docs
+	$(KUBECTL) -n default rollout restart deployment codewire-dashboard
 	@$(MAKE) rollout-local-runtime
 	@$(KUBECTL) -n default rollout status deployment codewire-dashboard --timeout=60s
-	@$(KUBECTL) -n default rollout status deployment codewire-docs --timeout=60s
 	@$(KUBECTL) -n agent-sandbox-system rollout status deployment agent-sandbox-controller --timeout=60s
 
 up-billing: up
@@ -325,13 +355,9 @@ up-billing: up
 down:
 	kind delete cluster --name codewire
 
-# Build web dev image for kind
+# Build the production-equivalent Rust/Zola image for local Kind.
 build-dashboard-local:
-	docker build -t codewire-dashboard:local -f apps/dashboard/Dockerfile.dev .
-
-# Build docs dev image for kind
-build-docs-local:
-	docker build -t codewire-docs:local -f apps/docs/Dockerfile.dev .
+	docker build -t codewire-dashboard:local -f apps/dashboard/Dockerfile .
 
 # Build the pinned sandbox controller image for local kind only. A sibling
 # checkout may be used as an object source, but HEAD is never used implicitly.
@@ -371,8 +397,11 @@ rollout-local-runtime:
 	@$(KUBECTL) -n default rollout status deployment codewire-orchestration --timeout=90s
 	@$(KUBECTL) -n default rollout status deployment codewire-derp --timeout=90s
 
+sync-local-secrets:
+	@KUBE_CONTEXT="$(KUBE_CONTEXT)" ./scripts/dev/kind/sync-local-secrets.sh
+
 prune-local-legacy-runtime:
-	-$(KUBECTL) -n default delete deployment/codewire-server service/codewire-server deployment/nats service/nats serviceaccount/codewire-server secret/codewire-server-token --ignore-not-found
+	-$(KUBECTL) -n default delete deployment/codewire-server service/codewire-server deployment/codewire-docs service/docs deployment/nats service/nats serviceaccount/codewire-server secret/codewire-server-token --ignore-not-found
 	-$(KUBECTL) delete clusterrole/codewire-server clusterrolebinding/codewire-server clusterrolebinding/codewire-server-auth-delegator --ignore-not-found
 
 # Load and apply the local runtime pieces needed for sandbox-backed environments.
@@ -403,6 +432,9 @@ kind-sandbox-namespace:
 		app.kubernetes.io/managed-by=codewire \
 		codewire.sh/resource-type=sandbox \
 		codewire.sh/runtime-scope=shared --overwrite
+	@$(KUBECTL) -n dev-sandboxes create serviceaccount codewire-sandbox --dry-run=client -o yaml | $(KUBECTL) apply -f -
+	@$(KUBECTL) -n dev-sandboxes patch serviceaccount codewire-sandbox --type=merge -p '{"automountServiceAccountToken":false}'
+	@test "$$($(KUBECTL) -n dev-sandboxes get serviceaccount codewire-sandbox -o jsonpath='{.automountServiceAccountToken}')" = false
 
 kind-ingress:
 	$(KUBECTL) apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/main/deploy/static/provider/kind/deploy.yaml

@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="Cloud machines for AI coding agents">
+    <title>Codewire — Cloud Machines for AI Agents</title>
+    <link rel="icon" href="/assets/codewire/logo-v1.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="/assets/codewire/design-v1.css">
+    <link rel="stylesheet" href="/assets/codewire/routes/public-v1.css">
+    <script src="/assets/codewire/public-v1.js" defer></script>
+  </head>
+  <body class="cw-body cw-landing" data-route="home">
+    <div class="cw-announcement">
+      <strong>Beta:</strong> Cloud machines for AI coding agents — now accepting teams
+      <a href="#cta">Get early access</a>
+    </div>
+
+    <header class="cw-landing-header">
+      <nav class="cw-landing-nav" aria-label="Primary navigation">
+        <a class="cw-landing-brand" href="/"><img src="/assets/codewire/logo-v1.svg" alt=""><span>Codewire</span></a>
+        <button class="cw-menu-toggle" type="button" aria-expanded="false" aria-controls="landing-menu">
+          <span class="cw-menu-open" aria-hidden="true">☰</span><span class="cw-menu-close" aria-hidden="true">×</span>
+          <span class="cw-visually-hidden">Toggle menu</span>
+        </button>
+        <div class="cw-landing-links" id="landing-menu">
+          <a href="#features">Features</a><a href="#pricing">Pricing</a><a href="/docs">Docs</a>
+          <a href="/login">Sign in</a><a class="cw-landing-button cw-landing-button--compact" href="#cta">Get started</a>
+        </div>
+      </nav>
+    </header>
+
+    <main>
+      <section class="cw-landing-section cw-landing-hero cw-dot-bg">
+        <div class="cw-landing-glow" aria-hidden="true"></div>
+        <div class="cw-landing-container cw-landing-hero-content">
+          <h1>Give every AI agent <span>its own machine.</span></h1>
+          <p class="cw-landing-lede">Run Claude Code, Codex, or any AI tool on dedicated cloud environments. Run them in parallel. Check in tomorrow.</p>
+          <a class="cw-landing-button" href="#cta">Get early access <span aria-hidden="true">→</span></a>
+
+          <div class="cw-terminal-demo" aria-label="Codewire command example">
+            <div class="cw-terminal-bar"><i></i><i></i><i></i></div>
+            <div class="cw-terminal-body">
+              <p><b>$</b> cw env create github.com/acme/api</p>
+              <p class="cw-terminal-output">Environment "api" running (4 vCPU, 16GB RAM)</p>
+              <p><b>$</b> cw run api -- claude "fix the auth bug in src/middleware"</p>
+              <p class="cw-terminal-output">Session 1 started</p>
+              <p><b>$</b> cw run api -- claude "add pagination to /api/users"</p>
+              <p class="cw-terminal-output">Session 2 started</p>
+              <p><b>$</b> cw list api</p>
+              <div class="cw-terminal-table"><span>WORKSPACE</span><span>SESSIONS</span><span>STATUS</span><strong>api</strong><strong>2 active</strong><strong>running</strong></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="cw-landing-section">
+        <div class="cw-landing-container">
+          <p class="cw-section-label">The problem</p>
+          <h2>Your AI tools are stuck on one machine.</h2>
+          <p class="cw-section-lede">Claude, Cursor, Copilot — they could work in parallel. But your laptop can't run them all at once.</p>
+
+          <div class="cw-workflow-grid">
+            <article class="cw-landing-card">
+              <p class="cw-card-label">Monday morning</p><h3>5 tasks, 1 machine.</h3>
+              <div class="cw-serial-visual" data-serial-visual>
+                <div class="cw-task-row" aria-label="Five queued tasks">
+                  <span class="cw-task cw-task--red is-active" data-task-index="0">1</span>
+                  <span class="cw-task cw-task--cyan" data-task-index="1">2</span>
+                  <span class="cw-task cw-task--blue" data-task-index="2">3</span>
+                  <span class="cw-task cw-task--purple" data-task-index="3">4</span>
+                  <span class="cw-task cw-task--yellow" data-task-index="4">5</span>
+                </div>
+                <div class="cw-flow-arrow" aria-hidden="true"></div>
+                <div class="cw-laptop"><span class="cw-laptop-icon" aria-hidden="true"></span><small>Your laptop</small><b class="cw-task cw-task--red cw-task-current" data-current-task>1</b></div>
+                <div class="cw-total">Total: <strong>5 days</strong></div>
+              </div>
+            </article>
+
+            <article class="cw-landing-card">
+              <p class="cw-card-label cw-accent">Monday morning</p><h3>5 tasks, 5 machines. Done by lunch.</h3>
+              <div class="cw-parallel-visual" aria-label="Five tasks running in parallel">
+                <div class="cw-workspace cw-workspace--red"><span>1</span><i></i><div><b></b></div><small>ws-1</small></div>
+                <div class="cw-workspace cw-workspace--cyan"><span>2</span><i></i><div><b></b></div><small>ws-2</small></div>
+                <div class="cw-workspace cw-workspace--blue"><span>3</span><i></i><div><b></b></div><small>ws-3</small></div>
+                <div class="cw-workspace cw-workspace--purple"><span>4</span><i></i><div><b></b></div><small>ws-4</small></div>
+                <div class="cw-workspace cw-workspace--yellow"><span>5</span><i></i><div><b></b></div><small>ws-5</small></div>
+                <div class="cw-total">Total: <strong>1 day</strong></div>
+              </div>
+            </article>
+          </div>
+          <div class="cw-section-action"><a class="cw-landing-button" href="#cta">Get early access <span aria-hidden="true">→</span></a></div>
+        </div>
+      </section>
+
+      <section class="cw-landing-section">
+        <div class="cw-landing-container">
+          <p class="cw-section-label">Security</p>
+          <h2>AI agents write and run code you haven't reviewed. They need real isolation.</h2>
+          <p class="cw-section-lede">Every competitor runs shared-kernel containers. One escape compromises every tenant. Codewire runs each environment in its own Xen VM with a dedicated kernel.</p>
+
+          <div class="cw-security-grid">
+            <article class="cw-landing-card cw-security-card cw-security-card--danger">
+              <p class="cw-card-label">Standard containers</p><h3>Shared kernel. One escape compromises all.</h3>
+              <svg viewBox="0 0 320 220" role="img" aria-label="Three pods sharing one kernel">
+                <g class="cw-danger-stroke"><rect x="35" y="20" width="50" height="40" rx="6"/><rect x="115" y="20" width="50" height="40" rx="6"/><rect x="195" y="20" width="50" height="40" rx="6"/></g>
+                <g class="cw-diagram-text"><text x="60" y="45">Pod</text><text x="140" y="45">Pod</text><text x="220" y="45">Pod</text></g>
+                <g class="cw-diagram-lines"><line x1="60" y1="60" x2="160" y2="110"/><line x1="140" y1="60" x2="160" y2="110"/><line x1="220" y1="60" x2="160" y2="110"/></g>
+                <rect class="cw-danger-stroke" x="40" y="110" width="240" height="36" rx="6"/><text class="cw-danger-text" x="160" y="133">Shared Kernel</text>
+                <rect class="cw-danger-fill" x="80" y="170" width="160" height="28" rx="14"/><text class="cw-danger-text" x="160" y="189">container escape</text>
+              </svg>
+            </article>
+            <article class="cw-landing-card cw-security-card cw-security-card--safe">
+              <p class="cw-card-label cw-accent">Codewire</p><h3>Dedicated kernel per environment. Hypervisor enforced.</h3>
+              <svg viewBox="0 0 320 220" role="img" aria-label="Three pods each with a dedicated kernel">
+                <g class="cw-safe-stroke"><rect x="30" y="20" width="60" height="36" rx="6"/><rect x="130" y="20" width="60" height="36" rx="6"/><rect x="230" y="20" width="60" height="36" rx="6"/><rect x="30" y="72" width="60" height="28" rx="4"/><rect x="130" y="72" width="60" height="28" rx="4"/><rect x="230" y="72" width="60" height="28" rx="4"/></g>
+                <g class="cw-diagram-text"><text x="60" y="43">Pod</text><text x="160" y="43">Pod</text><text x="260" y="43">Pod</text></g>
+                <g class="cw-safe-text"><text x="60" y="91">Kernel</text><text x="160" y="91">Kernel</text><text x="260" y="91">Kernel</text></g>
+                <g class="cw-safe-lines"><line x1="60" y1="56" x2="60" y2="72"/><line x1="160" y1="56" x2="160" y2="72"/><line x1="260" y1="56" x2="260" y2="72"/><line x1="60" y1="100" x2="60" y2="140"/><line x1="160" y1="100" x2="160" y2="140"/><line x1="260" y1="100" x2="260" y2="140"/></g>
+                <rect class="cw-safe-stroke" x="20" y="140" width="280" height="36" rx="6"/><text class="cw-safe-text" x="160" y="163">Xen Hypervisor</text>
+                <rect class="cw-hardware" x="20" y="190" width="280" height="24" rx="4"/><text class="cw-diagram-muted" x="160" y="207">Hardware</text>
+              </svg>
+            </article>
+          </div>
+
+          <div class="cw-table-card"><table><thead><tr><th>Platform</th><th>Isolation model</th></tr></thead><tbody>
+            <tr><td>GitHub Codespaces</td><td>Shared kernel (containers)</td></tr><tr><td>Gitpod</td><td>Shared kernel (containers)</td></tr><tr><td>DevPod</td><td>Shared kernel (containers)</td></tr><tr><td>vCluster</td><td>Shared kernel (virtual K8s)</td></tr><tr class="cw-highlight-row"><td>Codewire</td><td>Dedicated kernel (Xen VM)</td></tr>
+          </tbody></table></div>
+        </div>
+      </section>
+
+      <section class="cw-landing-section cw-landing-section--surface cw-dot-bg-subtle" id="features">
+        <div class="cw-landing-container">
+          <p class="cw-section-label">Platform</p><h2>What you get</h2>
+          <p class="cw-section-lede">Dev environments, AI sessions, multi-agent coordination, and remote access. One control plane.</p>
+          <div class="cw-bento-grid">
+            <article class="cw-bento-card"><i>⚡</i><h3>Cloud Environments</h3><p>Full dev environments in the cloud. Your repo, your deps, your tools, on dedicated compute.</p><pre><b>✓</b> Environment "api" provisioned in 45s</pre></article>
+            <article class="cw-bento-card"><i>↗</i><h3>Persistent AI Sessions</h3><p>AI agents run in persistent sessions that survive disconnects. Start, detach, check back later.</p><pre><b>$</b> cw run api -- claude "fix the bug"\n<b>$</b> cw attach api</pre></article>
+            <article class="cw-bento-card"><i>⚙</i><h3>Durable Agent Sessions</h3><p>Run multiple agents in one environment. Their supervised sessions retain output and survive CLI disconnects.</p><pre><b>$</b> cw run --detach api -- codex</pre></article>
+            <article class="cw-bento-card"><i>◎</i><h3>SSH Access</h3><p>Connect to any environment over SSH. No VPN, no port forwarding. Works behind NAT.</p><pre><b>$</b> cw shell api</pre></article>
+          </div>
+          <div class="cw-section-action"><a class="cw-landing-button cw-landing-button--outline" href="#cta">Get early access <span aria-hidden="true">→</span></a></div>
+        </div>
+      </section>
+
+      <section class="cw-landing-section">
+        <div class="cw-landing-container"><p class="cw-section-label">How it works</p><h2>Up and running in 3 commands</h2>
+          <div class="cw-step-grid">
+            <article><span>Step 1</span><h3>Install the CLI</h3><p>From an authorized private source checkout.</p><pre><b>$</b> make cli-install</pre></article>
+            <article><span>Step 2</span><h3>Create an environment</h3><p>Cloud dev environment, ready in seconds.</p><pre><b>$</b> cw env create github.com/acme/api</pre></article>
+            <article><span>Step 3</span><h3>Run an AI agent</h3><p>Runs in the background. Attach anytime.</p><pre><b>$</b> cw run -- claude "fix the tests"</pre></article>
+          </div>
+        </div>
+      </section>
+
+      <section class="cw-landing-section cw-landing-section--surface" id="pricing">
+        <div class="cw-landing-container cw-pricing"><h2>No seat tax on AI agents</h2><p class="cw-section-lede">Pay for machines, not for how many agents use them. Half the cost of Codespaces.</p>
+          <div class="cw-pricing-grid">
+            <article class="cw-price-card"><p><i></i>Starter</p><h3>$49</h3><small>/month</small><ul><li>1 developer included</li><li>500 compute hours/mo</li><li>5 concurrent environments</li><li>2 vCPU / 8 GB default</li><li>AI agents don't count as seats</li></ul><a href="#cta">Get started</a></article>
+            <article class="cw-price-card cw-price-card--featured"><p><i></i>Pro</p><h3>$199</h3><small>/month</small><ul><li>10 developers included</li><li>2,000 compute hours/mo</li><li>25 concurrent environments</li><li>4 vCPU / 16 GB default</li><li>AI agents don't count as seats</li></ul><a href="#cta">Get started →</a></article>
+            <article class="cw-price-card"><p><i></i>Team</p><h3>$499</h3><small>/month</small><ul><li>30 developers included</li><li>6,000 compute hours/mo</li><li>100 concurrent environments</li><li>8 vCPU / 32 GB default</li><li>AI agents don't count as seats</li></ul><a href="#cta">Get started</a></article>
+            <article class="cw-price-card"><p><i></i>Enterprise</p><h3>Contact</h3><small>us</small><ul><li>Unlimited developers</li><li>Unlimited compute hours</li><li>Unlimited environments</li><li>Custom machine sizes</li><li>Dedicated support + SLA</li></ul><a href="#cta">Get started</a></article>
+          </div>
+          <p class="cw-pricing-note">Additional developer seats: $18/dev/month across all tiers. All plans include a 14-day free trial.</p>
+          <div class="cw-table-card cw-compute-card"><h3>Compute pricing</h3><p>Uniform usage rates by machine type across all plans.</p><table><thead><tr><th>Machine</th><th>vCPU</th><th>RAM</th><th>Rate</th></tr></thead><tbody><tr><td>Small</td><td>2</td><td>8 GB</td><td>$0.10/hr</td></tr><tr class="cw-highlight-row"><td>Medium</td><td>4</td><td>16 GB</td><td>$0.18/hr</td></tr><tr><td>Large</td><td>8</td><td>32 GB</td><td>$0.32/hr</td></tr><tr><td>XL</td><td>16</td><td>64 GB</td><td>$0.60/hr</td></tr></tbody></table><small>GitHub Codespaces charges $0.36/hr for 4-core. You're saving 50%+.</small></div>
+          <div class="cw-custom-card"><div><h3>Custom setup</h3><p>Complex stack? Legacy services? We'll make it boot perfectly. Every dependency, every weird thing.</p></div><a class="cw-landing-button cw-landing-button--outline" href="mailto:hello@codewire.sh">Contact us →</a></div>
+        </div>
+      </section>
+
+      <section class="cw-landing-section cw-waitlist cw-dot-bg" id="cta">
+        <div class="cw-waitlist-inner"><h2>Ready to multiply your stack?</h2><p>We're onboarding teams one at a time during the private beta.</p>
+          <form class="cw-waitlist-form" data-waitlist-form>
+            <div><label class="cw-visually-hidden" for="waitlist-email">Email address</label><input id="waitlist-email" name="email" type="email" autocomplete="email" placeholder="Enter your email" required><button type="submit">Join waitlist <span aria-hidden="true">→</span></button></div>
+            <p class="cw-waitlist-status" data-waitlist-status aria-live="polite"></p>
+          </form>
+          <a class="cw-invite-link" href="/login">Already have an invite? Sign in</a>
+        </div>
+      </section>
+    </main>
+
+    <footer class="cw-landing-footer"><div class="cw-landing-container">
+      <div class="cw-footer-grid"><div><a class="cw-landing-brand" href="/"><img src="/assets/codewire/logo-v1.svg" alt=""><span>Codewire</span></a><p>Cloud machines for AI coding agents. Isolated environments, persistent sessions, and multi-agent coordination.</p></div><div><strong>Product</strong><a href="#features">Features</a><a href="#pricing">Pricing</a></div><div><strong>Developers</strong><a href="/docs">Documentation</a><a href="/docs/cli/overview">CLI Docs</a></div><div><strong>Company</strong><a href="mailto:hello@codewire.sh">Contact</a></div></div>
+      <div class="cw-footer-bottom"><span>© 2026 Codewire</span><div><a href="#">Terms</a><a href="#">Privacy</a></div></div>
+    </div></footer>
+  </body>
+</html>

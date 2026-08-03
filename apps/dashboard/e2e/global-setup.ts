@@ -3,7 +3,7 @@ import { cleanupKubernetesSandboxes } from "./helpers/environment";
 import { USERS, TEST_PASSWORD } from "./helpers/seed";
 import { assertIdentityTopology } from "./helpers/topology";
 
-const SERVER_URL = process.env.SERVER_URL || "http://localhost:8080";
+const SERVER_URL = process.env.SERVER_URL || "http://127.0.0.1:8080";
 const TOPOLOGY_PROBE_EMAIL = "e2e-topology-probe@codewire.sh";
 
 function directDatabaseEndpoint(databaseUrl: string): string {

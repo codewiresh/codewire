@@ -1,0 +1,176 @@
+schema = 1
+base_path = "/docs"
+
+[[routes]]
+canonical = "/docs"
+redirect_from = "/docs/"
+source = "content/_index.md"
+output = "index.html"
+
+[[routes]]
+canonical = "/docs/quickstart"
+redirect_from = "/docs/quickstart/"
+source = "content/quickstart.md"
+output = "quickstart/index.html"
+
+[[routes]]
+canonical = "/docs/getting-started/create-account"
+redirect_from = "/docs/getting-started/create-account/"
+source = "content/getting-started/create-account.md"
+output = "getting-started/create-account/index.html"
+
+[[routes]]
+canonical = "/docs/getting-started/sign-in"
+redirect_from = "/docs/getting-started/sign-in/"
+source = "content/getting-started/sign-in.md"
+output = "getting-started/sign-in/index.html"
+
+[[routes]]
+canonical = "/docs/getting-started/create-organization"
+redirect_from = "/docs/getting-started/create-organization/"
+source = "content/getting-started/create-organization.md"
+output = "getting-started/create-organization/index.html"
+
+[[routes]]
+canonical = "/docs/getting-started/create-your-first-environment"
+redirect_from = "/docs/getting-started/create-your-first-environment/"
+source = "content/getting-started/create-your-first-environment.md"
+output = "getting-started/create-your-first-environment/index.html"
+
+[[routes]]
+canonical = "/docs/getting-started/navigate-the-dashboard"
+redirect_from = "/docs/getting-started/navigate-the-dashboard/"
+source = "content/getting-started/navigate-the-dashboard.md"
+output = "getting-started/navigate-the-dashboard/index.html"
+
+[[routes]]
+canonical = "/docs/getting-started/connect-to-an-environment"
+redirect_from = "/docs/getting-started/connect-to-an-environment/"
+source = "content/getting-started/connect-to-an-environment.md"
+output = "getting-started/connect-to-an-environment/index.html"
+
+[[routes]]
+canonical = "/docs/organizations/overview"
+redirect_from = "/docs/organizations/overview/"
+source = "content/organizations/overview.md"
+output = "organizations/overview/index.html"
+
+[[routes]]
+canonical = "/docs/organizations/manage-members"
+redirect_from = "/docs/organizations/manage-members/"
+source = "content/organizations/manage-members.md"
+output = "organizations/manage-members/index.html"
+
+[[routes]]
+canonical = "/docs/organizations/invite-members"
+redirect_from = "/docs/organizations/invite-members/"
+source = "content/organizations/invite-members.md"
+output = "organizations/invite-members/index.html"
+
+[[routes]]
+canonical = "/docs/organizations/accept-invitation"
+redirect_from = "/docs/organizations/accept-invitation/"
+source = "content/organizations/accept-invitation.md"
+output = "organizations/accept-invitation/index.html"
+
+[[routes]]
+canonical = "/docs/organizations/billing"
+redirect_from = "/docs/organizations/billing/"
+source = "content/organizations/billing.md"
+output = "organizations/billing/index.html"
+
+[[routes]]
+canonical = "/docs/organizations/secrets"
+redirect_from = "/docs/organizations/secrets/"
+source = "content/organizations/secrets.md"
+output = "organizations/secrets/index.html"
+
+[[routes]]
+canonical = "/docs/environments/overview"
+redirect_from = "/docs/environments/overview/"
+source = "content/environments/overview.md"
+output = "environments/overview/index.html"
+
+[[routes]]
+canonical = "/docs/environments/create-environment"
+redirect_from = "/docs/environments/create-environment/"
+source = "content/environments/create-environment.md"
+output = "environments/create-environment/index.html"
+
+[[routes]]
+canonical = "/docs/environments/manage-environments"
+redirect_from = "/docs/environments/manage-environments/"
+source = "content/environments/manage-environments.md"
+output = "environments/manage-environments/index.html"
+
+[[routes]]
+canonical = "/docs/environments/connect"
+redirect_from = "/docs/environments/connect/"
+source = "content/environments/connect.md"
+output = "environments/connect/index.html"
+
+[[routes]]
+canonical = "/docs/settings/github-integration"
+redirect_from = "/docs/settings/github-integration/"
+source = "content/settings/github-integration.md"
+output = "settings/github-integration/index.html"
+
+[[routes]]
+canonical = "/docs/settings/security"
+redirect_from = "/docs/settings/security/"
+source = "content/settings/security.md"
+output = "settings/security/index.html"
+
+[[routes]]
+canonical = "/docs/reference/environment-statuses"
+redirect_from = "/docs/reference/environment-statuses/"
+source = "content/reference/environment-statuses.md"
+output = "reference/environment-statuses/index.html"
+
+[[routes]]
+canonical = "/docs/reference/provisioning-events"
+redirect_from = "/docs/reference/provisioning-events/"
+source = "content/reference/provisioning-events.md"
+output = "reference/provisioning-events/index.html"
+
+[[routes]]
+canonical = "/docs/reference/subscription-plans"
+redirect_from = "/docs/reference/subscription-plans/"
+source = "content/reference/subscription-plans.md"
+output = "reference/subscription-plans/index.html"
+
+[[routes]]
+canonical = "/docs/reference/faq"
+redirect_from = "/docs/reference/faq/"
+source = "content/reference/faq.md"
+output = "reference/faq/index.html"
+
+[[routes]]
+canonical = "/docs/cli/overview"
+redirect_from = "/docs/cli/overview/"
+source = "content/cli/overview.md"
+output = "cli/overview/index.html"
+
+[[routes]]
+canonical = "/docs/cli/platform"
+redirect_from = "/docs/cli/platform/"
+source = "content/cli/platform.md"
+output = "cli/platform/index.html"
+
+[[routes]]
+canonical = "/docs/cli/sessions"
+redirect_from = "/docs/cli/sessions/"
+source = "content/cli/sessions.md"
+output = "cli/sessions/index.html"
+
+[[routes]]
+canonical = "/docs/cli/mesh"
+redirect_from = "/docs/cli/mesh/"
+source = "content/cli/mesh.md"
+output = "cli/mesh/index.html"
+
+[[routes]]
+canonical = "/docs/cli/configuration"
+redirect_from = "/docs/cli/configuration/"
+source = "content/cli/configuration.md"
+output = "cli/configuration/index.html"

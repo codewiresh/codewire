@@ -17,6 +17,14 @@ mkdir -p "$RUN_DIR"
 # coordinator TLS ingress intentionally owns Host/SNI localhost below.
 KIND_INGRESS_URL="${KIND_INGRESS_URL:-http://127.0.0.1:8090}"
 KIND_INGRESS_TLS_URL="${KIND_INGRESS_TLS_URL:-https://localhost:10443}"
+KIND_POSTGRES_HOST_PORT="${KIND_POSTGRES_HOST_PORT:-25432}"
+if ! [[ "$KIND_POSTGRES_HOST_PORT" =~ ^[0-9]+$ ]] \
+    || [ "$KIND_POSTGRES_HOST_PORT" -lt 1024 ] \
+    || [ "$KIND_POSTGRES_HOST_PORT" -gt 65535 ]; then
+  echo "::error::KIND_POSTGRES_HOST_PORT must be an unprivileged TCP port"
+  exit 2
+fi
+KIND_DATABASE_URL="postgres://codewire:codewire@127.0.0.1:${KIND_POSTGRES_HOST_PORT}/codewire"
 KEEP_KIND_CLUSTER="${KEEP_KIND_CLUSTER:-0}"
 NS=codewire-e2e
 SANDBOX_NS=dev-sandboxes
@@ -28,6 +36,13 @@ GATEWAY_PUBLIC_FINGERPRINT=""
 KIND_E2E_COMPATIBILITY_VERSION=1
 KIND_E2E_PREPARED_CONFIGMAP=codewire-kind-e2e-prepared
 RETAINED_KUBECONFIG=""
+if [ -z "${KIND_WORKSPACE_IMAGE+x}" ]; then
+  KIND_WORKSPACE_IMAGE='ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467'
+fi
+if [ -z "${KIND_DIND_IMAGE+x}" ]; then
+  KIND_DIND_IMAGE='ghcr.io/codewiresh/dind@sha256:00815afb718e35fa8c71e8eb411df2919f74a149908593ae3fe94b55b34feec9'
+fi
+readonly KIND_WORKSPACE_IMAGE KIND_DIND_IMAGE
 
 log() {
   printf '[kind-e2e] %s\n' "$*"
@@ -46,10 +61,12 @@ dump_cluster_state() {
 
   kubectl --context "$context" get pods -A || true
   kubectl --context "$context" -n "$NS" describe deploy/codewire-billing || true
+  kubectl --context "$context" -n "$NS" describe deploy/codewire-dashboard || true
   kubectl --context "$context" -n "$NS" describe deploy/codewire-idp || true
   kubectl --context "$context" -n "$NS" describe deploy/codewire-orchestration || true
   kubectl --context "$context" -n "$NS" describe deploy/codewire-coordinator || true
   kubectl --context "$context" -n "$NS" logs deploy/codewire-billing --tail=100 || true
+  kubectl --context "$context" -n "$NS" logs deploy/codewire-dashboard --tail=160 || true
   kubectl --context "$context" -n "$NS" logs deploy/codewire-idp --tail=160 || true
   kubectl --context "$context" -n "$NS" logs deploy/codewire-orchestration --tail=160 || true
   kubectl --context "$context" -n "$NS" logs deploy/codewire-coordinator --tail=160 || true
@@ -429,6 +446,10 @@ ingress_path_drift_check() {
 }
 
 build_images_and_smokes() {
+  log "building production-equivalent Rust dashboard image"
+  docker buildx build --load -f "$ROOT/apps/dashboard/Dockerfile" -t codewire-dashboard:e2e "$ROOT"
+  docker image inspect codewire-dashboard:e2e >/dev/null
+
   log "building Rust services image"
   docker buildx build --load -f "$ROOT/deployments/docker/services.Dockerfile" -t codewire-services:e2e "$ROOT"
   docker image inspect codewire-services:e2e >/dev/null
@@ -451,6 +472,7 @@ build_images_and_smokes() {
 }
 
 create_cluster() {
+  local kind_config rendered_kind_config
   if kind get clusters | grep -qx "$KIND_CLUSTER_NAME"; then
     log "deleting existing kind cluster ${KIND_CLUSTER_NAME}"
     kind delete cluster --name "$KIND_CLUSTER_NAME"
@@ -461,7 +483,15 @@ create_cluster() {
   docker info --format 'Server={{.ServerVersion}} Driver={{.Driver}} CgroupDriver={{.CgroupDriver}} SecurityOptions={{json .SecurityOptions}}' || docker info || true
 
   log "creating kind cluster ${KIND_CLUSTER_NAME}"
-  if ! kind create cluster --name "$KIND_CLUSTER_NAME" --config "$ROOT/tests/e2e/kind/kind-config.yaml" --wait 120s; then
+  kind_config="$ROOT/tests/e2e/kind/kind-config.yaml"
+  rendered_kind_config="$RUN_DIR/kind-config.yaml"
+  if [ "$(grep -Fc 'hostPort: 25432' "$kind_config")" -ne 1 ]; then
+    echo "::error::Kind config must contain exactly one default Postgres host-port mapping"
+    exit 1
+  fi
+  sed "s/hostPort: 25432/hostPort: ${KIND_POSTGRES_HOST_PORT}/" \
+    "$kind_config" >"$rendered_kind_config"
+  if ! kind create cluster --name "$KIND_CLUSTER_NAME" --config "$rendered_kind_config" --wait 120s; then
     echo "::error::kind cluster creation failed. This gate needs a runner with a real privileged Docker runtime capable of starting kind node containers; rootless Podman/netavark runners are not sufficient."
     exit 1
   fi
@@ -469,6 +499,7 @@ create_cluster() {
 
 load_images_into_kind() {
   log "loading images into kind"
+  kind load docker-image --name "$KIND_CLUSTER_NAME" codewire-dashboard:e2e
   kind load docker-image --name "$KIND_CLUSTER_NAME" codewire-services:e2e
   kind load docker-image --name "$KIND_CLUSTER_NAME" codewire-mesh:e2e
   kind load docker-image --name "$KIND_CLUSTER_NAME" codewire-gateway:e2e
@@ -686,11 +717,42 @@ deploy_overlay() {
     deploy/codewire-coordinator \
     --replicas=1
   kubectl -n "$NS" rollout status deploy/codewire-billing --timeout=300s
+  kubectl -n "$NS" rollout status deploy/codewire-dashboard --timeout=300s
   kubectl -n "$NS" rollout status deploy/codewire-idp --timeout=300s
   kubectl -n "$NS" rollout status deploy/codewire-orchestration --timeout=300s
   kubectl -n "$NS" rollout status deploy/codewire-mesh --timeout=300s
   verify_mesh_legacy_auth_retirement_transition
   kubectl -n "$NS" rollout status deploy/codewire-coordinator --timeout=300s
+}
+
+dashboard_browser_e2e() {
+  local playwright chromium
+  playwright="$ROOT/apps/dashboard/node_modules/.bin/playwright"
+  if [ ! -x "$playwright" ]; then
+    echo "::error::dashboard Playwright dependencies are missing; run PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 bun install --frozen-lockfile --ignore-scripts"
+    return 1
+  fi
+
+  chromium="${PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH:-}"
+  if [ -z "$chromium" ]; then
+    chromium="$(command -v chromium || command -v google-chrome || command -v google-chrome-stable || true)"
+  fi
+  if [ -z "$chromium" ] || [ ! -x "$chromium" ]; then
+    echo "::error::the Kind browser gate requires a pre-provisioned Chromium executable; set PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH"
+    return 1
+  fi
+
+  log "running full Rust dashboard Playwright suite through Kind ingress"
+  require_get_code /healthz 204 "dashboard health"
+  require_get_code /login 200 "dashboard login page"
+  DATABASE_URL="${KIND_DATABASE_URL}?sslmode=disable" \
+    SERVER_URL="$KIND_INGRESS_URL" \
+    PLAYWRIGHT_BASE_URL="$KIND_INGRESS_URL" \
+    PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH="$chromium" \
+    KUBE_CONTEXT="kind-${KIND_CLUSTER_NAME}" \
+    PLAYWRIGHT_KUBE_CONTEXT="kind-${KIND_CLUSTER_NAME}" \
+    PLAYWRIGHT_SANDBOX_NAMESPACE="$SANDBOX_NS" \
+    "$playwright" test --config "$ROOT/apps/dashboard/playwright.config.ts"
 }
 
 mesh_product_connect_ownership_smoke() {
@@ -1370,7 +1432,7 @@ connect_edge_probes() {
   # The two typed heartbeat arrivals below are the end-to-end no-buffering
   # assertion at this edge.
   SMOKE_CONNECT_BASE_URL="$KIND_INGRESS_URL" \
-    SMOKE_DATABASE_URL="postgres://codewire:codewire@127.0.0.1:25432/codewire" \
+    SMOKE_DATABASE_URL="$KIND_DATABASE_URL" \
     SMOKE_ORG_ID=org_contract_1 \
     SMOKE_ENVIRONMENT_ID=env_contract_1 \
     SMOKE_SESSION_TOKEN=contract-user-session-token \
@@ -2117,7 +2179,7 @@ INSERT INTO environments (id, org_id, created_by, type, state, desired_state,
 VALUES ('$env_id', 'org_contract_1', 'usr_contract_admin', 'sandbox', 'pending', 'started',
         2000, 4096, 10, 'preset_contract_1');
 SQL
-  if ! DATABASE_URL="postgres://codewire:codewire@127.0.0.1:25432/codewire" \
+  if ! DATABASE_URL="$KIND_DATABASE_URL" \
     SMOKE_ENV_ID="$env_id" "$CARGO_CI_DIR/temporal-smoke"; then
     kubectl -n "$NS" logs deploy/codewire-orchestration --tail=80 || true
     kubectl -n "$NS" logs deploy/temporal --tail=50 || true
@@ -2136,7 +2198,7 @@ SQL
 
 temporal_fencing_smoke() {
   log "running final Temporal activity-fencing smoke"
-  DATABASE_URL="postgres://codewire:codewire@127.0.0.1:25432/codewire" \
+  DATABASE_URL="$KIND_DATABASE_URL" \
     TEMPORAL_ADDRESS="http://127.0.0.1:7233" \
     SMOKE_ORCHESTRATION_URL="http://127.0.0.1:8084" \
     "$CARGO_CI_DIR/temporal-fencing-smoke"
@@ -2148,6 +2210,89 @@ deploy_agent_sandbox_and_smoke() {
   temporal_workflow_smoke
   mark_retained_cluster_prepared
   temporal_fencing_smoke
+}
+
+assert_sandbox_supply_chain() {
+  local service_account pods templates events
+
+  log "verifying sandbox service-account and runtime-image provenance"
+  service_account="$(kubectl -n "$SANDBOX_NS" get serviceaccount/codewire-sandbox -o json)"
+  if ! jq -e '.automountServiceAccountToken == false' \
+      <<<"$service_account" >/dev/null; then
+    echo "::error::sandbox service account permits Kubernetes API token automount"
+    return 1
+  fi
+
+  pods="$(kubectl get pods -A -o json)"
+  if ! jq -e --arg workspace "$KIND_WORKSPACE_IMAGE" --arg dind "$KIND_DIND_IMAGE" '
+    [
+      .items[]
+      | ((.spec.initContainers // []) + (.spec.containers // []))[]
+      | .image
+    ]
+    | all(.[];
+        if startswith("ghcr.io/codewiresh/workspace:") or
+           startswith("ghcr.io/codewiresh/workspace@")
+        then . == $workspace
+        elif startswith("ghcr.io/codewiresh/dind:") or
+             startswith("ghcr.io/codewiresh/dind@") or
+             startswith("docker:" + "dind")
+        then . == $dind
+        else true
+        end)
+  ' <<<"$pods" >/dev/null; then
+    echo "::error::Kind pod spec contains an unaccepted workspace or DinD image reference"
+    jq -r '
+      .items[]
+      | ((.spec.initContainers // []) + (.spec.containers // []))[]
+      | .image
+      | select(startswith("ghcr.io/codewiresh/workspace") or
+               startswith("ghcr.io/codewiresh/dind") or
+               startswith("docker:" + "dind"))
+    ' <<<"$pods" | LC_ALL=C sort -u >&2
+    return 1
+  fi
+
+  templates="$(kubectl get sandboxtemplates -A -o json)"
+  if ! jq -e --arg workspace "$KIND_WORKSPACE_IMAGE" --arg dind "$KIND_DIND_IMAGE" '
+    [.. | strings
+      | select(startswith("ghcr.io/codewiresh/workspace") or
+               startswith("ghcr.io/codewiresh/dind") or
+               startswith("docker:" + "dind"))]
+    | all(.[]; . == $workspace or . == $dind)
+  ' <<<"$templates" >/dev/null; then
+    echo "::error::rendered SandboxTemplate contains an unaccepted workspace or DinD image reference"
+    jq -r '[.. | strings
+      | select(startswith("ghcr.io/codewiresh/workspace") or
+               startswith("ghcr.io/codewiresh/dind") or
+               startswith("docker:" + "dind"))] | unique[]' \
+      <<<"$templates" >&2
+    return 1
+  fi
+
+  events="$(kubectl get events -A -o json)"
+  if ! jq -e '
+    [
+      .items[] as $event
+      | select(
+          (["ErrImagePull", "Failed", "FailedToRetrieveImagePullSecret", "ImagePullBackOff"]
+            | index($event.reason)) != null and
+          (($event.message // "")
+            | test("(ghcr\\.io/codewiresh/(workspace|dind)|docker:din[d])"))
+        )
+      | $event
+    ] | length == 0
+  ' <<<"$events" >/dev/null; then
+    echo "::error::Kind recorded a workspace or DinD image-provenance failure"
+    jq -r '.items[]
+      | select((.message // "")
+          | test("(ghcr\\.io/codewiresh/(workspace|dind)|docker:din[d])"))
+      | "\(.metadata.namespace // "default")/\(.involvedObject.name): \(.reason)"' \
+      <<<"$events" >&2
+    return 1
+  fi
+
+  log "sandbox token automount disabled and observed workspace/DinD references are immutable"
 }
 
 start_gateway_port_forward() {
@@ -2315,7 +2460,7 @@ billing_contract_through_ingress() {
 
 rust_reconciler_ttl_e2e() {
   log "running Rust reconciler TTL Kubernetes e2e"
-  DATABASE_URL="postgres://codewire:codewire@127.0.0.1:25432/codewire" \
+  DATABASE_URL="$KIND_DATABASE_URL" \
     SMOKE_ORCHESTRATION_URL="http://127.0.0.1:8084" \
     SMOKE_SANDBOX_NAMESPACE="$SANDBOX_NS" \
     SMOKE_SESSION_TOKEN=contract-admin-session-token \

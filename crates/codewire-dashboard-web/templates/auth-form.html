@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{{ view.title }} · Codewire</title>
+    <link rel="stylesheet" href="/assets/codewire/design-v1.css">
+    <link rel="stylesheet" href="/assets/codewire/routes/auth-v1.css">
+  </head>
+  <body class="cw-body cw-auth-body" data-route="auth">
+    <main class="cw-auth-shell">
+      <a class="cw-auth-brand" href="/" aria-label="Codewire home">
+        <img src="/assets/codewire/logo-v1.svg" alt="">
+        <span>Codewire</span>
+      </a>
+      <section class="cw-card cw-auth-card" aria-labelledby="auth-title">
+        <header class="cw-card-header cw-auth-header">
+          <div class="cw-auth-mark" aria-hidden="true">
+            <svg class="cw-icon"><use href="/assets/codewire/icons-v2.svg#icon-key"/></svg>
+          </div>
+          <h1 id="auth-title" class="cw-page-title">{{ view.title }}</h1>
+          <p class="cw-card-description">{{ view.description }}</p>
+        </header>
+        <div class="cw-card-content">
+          {% if !view.error.is_empty() %}
+          <div class="cw-alert cw-alert--error" role="alert">{{ view.error }}</div>
+          {% endif %}
+          <form class="cw-form" method="post" action="{{ view.action }}">
+            <input type="hidden" name="_csrf" value="{{ view.csrf_token }}">
+            {% if !view.auth_request_id.is_empty() %}
+            <input type="hidden" name="authRequestID" value="{{ view.auth_request_id }}">
+            {% endif %}
+            {% if !view.return_to.is_empty() %}
+            <input type="hidden" name="return_to" value="{{ view.return_to }}">
+            {% endif %}
+            {% if view.show_invite_code %}
+            <div class="cw-field">
+              <label class="cw-label" for="invite-code">Invite code</label>
+              <input class="cw-input cw-input--mono" id="invite-code" name="invite_code" autocomplete="off" required>
+            </div>
+            {% endif %}
+            {% if view.show_name %}
+            <div class="cw-field">
+              <label class="cw-label" for="name">Name</label>
+              <input class="cw-input" id="name" name="name" autocomplete="name" required>
+            </div>
+            {% endif %}
+            {% if view.show_email %}
+            <div class="cw-field">
+              <label class="cw-label" for="email">Email</label>
+              <input class="cw-input" id="email" name="email" type="email" autocomplete="email" placeholder="you@example.com" required>
+            </div>
+            {% endif %}
+            {% if view.show_password %}
+            <div class="cw-field">
+              <div class="cw-field-heading">
+                <label class="cw-label" for="password">{% if view.new_password %}New password{% else %}Password{% endif %}</label>
+                {% if view.forgot_password_link %}<a href="/forgot-password">Forgot password?</a>{% endif %}
+              </div>
+              <input class="cw-input" id="password" name="password" type="password" {% if view.new_password %}autocomplete="new-password" minlength="12"{% else %}autocomplete="current-password"{% endif %} required>
+              {% if view.new_password %}<p class="cw-help">Use at least 12 characters with uppercase, lowercase, a number, and a symbol.</p>{% endif %}
+            </div>
+            {% endif %}
+            {% if view.show_confirm_password %}
+            <div class="cw-field">
+              <label class="cw-label" for="confirm-password">Confirm new password</label>
+              <input class="cw-input" id="confirm-password" name="confirm_password" type="password" autocomplete="new-password" minlength="12" required>
+            </div>
+            {% endif %}
+            {% if view.show_totp_code %}
+            <div class="cw-field">
+              <label class="cw-label" for="code">Verification code</label>
+              <input class="cw-input cw-input--mono cw-auth-code" id="code" name="code" autocomplete="one-time-code" pattern="[0-9A-Fa-f]{6,10}" maxlength="10" required autofocus>
+            </div>
+            {% endif %}
+            <button class="cw-button cw-auth-submit" type="submit">{{ view.submit_label }}</button>
+          </form>
+          {% if !view.secondary_label.is_empty() %}
+          <p class="cw-auth-secondary"><a href="{{ view.secondary_url }}">{{ view.secondary_label }}</a></p>
+          {% endif %}
+        </div>
+      </section>
+    </main>
+  </body>
+</html>

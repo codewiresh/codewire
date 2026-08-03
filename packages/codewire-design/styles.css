@@ -20,6 +20,19 @@
   --destructive: #ef4444;
   --font-mono: "JetBrains Mono", ui-monospace, monospace;
   --font-sans: "Inter Variable", Inter, ui-sans-serif, system-ui, sans-serif;
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-6: 1.5rem;
+  --space-8: 2rem;
+  --radius-sm: 0.375rem;
+  --radius-md: 0.625rem;
+  --radius-pill: 999px;
+  --shadow-overlay: 0 24px 80px rgba(0, 0, 0, 0.55);
+  --content-narrow: 32rem;
+  --content-default: 56rem;
+  --content-wide: 76rem;
   --color-background: var(--bg-base);
   --color-foreground: var(--fg-primary);
   --color-card: var(--bg-secondary);
@@ -62,6 +75,11 @@
 .cw-body a {
   color: inherit;
   text-decoration: none;
+}
+
+.cw-icon use,
+.cw-nav-icon use {
+  pointer-events: none;
 }
 
 .cw-app {
@@ -187,6 +205,10 @@
 .cw-nav-group {
   display: grid;
   gap: 0.25rem;
+}
+
+.cw-sidebar-new {
+  margin-top: var(--space-2);
 }
 
 .cw-divider {
@@ -496,6 +518,7 @@
 
 .cw-field {
   display: grid;
+  min-width: 0;
   gap: 0.5rem;
 }
 
@@ -505,31 +528,62 @@
   font-weight: 510;
 }
 
-.cw-input {
+.cw-input,
+.cw-select,
+.cw-textarea {
   width: 100%;
+  min-width: 0;
   min-height: 2.5rem;
   padding: 0.5rem 0.75rem;
   border: 1px solid var(--border);
   border-radius: 0.375rem;
   background: var(--bg-primary);
   color: var(--fg-primary);
+  color-scheme: dark;
   font: inherit;
   font-size: 0.875rem;
   outline: none;
   transition: border-color 150ms ease, box-shadow 150ms ease;
 }
 
-.cw-input::placeholder {
+.cw-select {
+  padding-right: 2rem;
+}
+
+.cw-select option,
+.cw-select optgroup {
+  background: var(--bg-primary);
+  color: var(--fg-primary);
+}
+
+.cw-textarea {
+  min-height: 6rem;
+  resize: vertical;
+}
+
+.cw-input::placeholder,
+.cw-textarea::placeholder {
   color: var(--fg-tertiary);
 }
 
-.cw-input:hover {
+.cw-input:hover,
+.cw-select:hover,
+.cw-textarea:hover {
   border-color: var(--border-hover);
 }
 
-.cw-input:focus {
+.cw-input:focus,
+.cw-select:focus,
+.cw-textarea:focus {
   border-color: var(--accent);
   box-shadow: 0 0 0 3px var(--accent-muted);
+}
+
+.cw-input:disabled,
+.cw-select:disabled,
+.cw-textarea:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
 }
 
 .cw-input--mono {

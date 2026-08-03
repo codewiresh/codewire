@@ -1,0 +1,26 @@
+{% if page.environments.is_empty() %}
+<section class="cw-card"><div class="cw-state"><svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-grid"/></svg><p>No environments found. Create one to get started.</p></div></section>
+{% else %}
+<div class="cw-table-shell">
+  <table class="cw-table cw-environment-table">
+    <thead><tr><th>Environment</th><th>State</th><th>Last event</th><th>Created</th><th><span class="cw-sr-only">Actions</span></th></tr></thead>
+    <tbody>
+      {% for environment in page.environments %}
+      <tr>
+        <td><strong class="cw-environment-name" title="{{ environment.id }}">{{ environment.name }}</strong>{% if !environment.preset_name.is_empty() %}<small class="cw-environment-preset">{{ environment.preset_name }}</small>{% endif %}</td>
+        <td><span class="cw-status" data-tone="{{ environment.state_tone }}"><span aria-hidden="true">{{ environment.state_symbol }}</span>{{ environment.state }}</span></td>
+        <td>{{ environment.last_event }}</td><td>{{ environment.created }}</td>
+        <td><div class="cw-row-actions">
+          {% if environment.can_stop %}<form method="post" action="/dashboard/orgs/{{ organization.slug }}/environments/_actions/stop" hx-post="/dashboard/orgs/{{ organization.slug }}/environments/_actions/stop"><input type="hidden" name="_csrf" value="{{ page.create_form.csrf_token }}"><input type="hidden" name="environment_id" value="{{ environment.id }}"><button class="cw-button cw-button--outline cw-button--small" type="submit">Stop</button></form>{% endif %}
+          {% if environment.can_start %}<form method="post" action="/dashboard/orgs/{{ organization.slug }}/environments/_actions/start" hx-post="/dashboard/orgs/{{ organization.slug }}/environments/_actions/start"><input type="hidden" name="_csrf" value="{{ page.create_form.csrf_token }}"><input type="hidden" name="environment_id" value="{{ environment.id }}"><button class="cw-button cw-button--outline cw-button--small" type="submit">Start</button></form>{% endif %}
+          <a class="cw-button cw-button--outline cw-button--small" href="/dashboard/orgs/{{ organization.slug }}/environments?ports={{ environment.id }}">Ports</a>
+          {% if environment.can_stop %}<a class="cw-button cw-button--outline cw-button--small" href="/terminal/{{ organization.id }}/{{ environment.id }}" data-terminal-open data-terminal-org-id="{{ organization.id }}" data-terminal-environment-id="{{ environment.id }}" data-terminal-environment-name="{{ environment.name }}" data-terminal-environment-state="{{ environment.state }}">Terminal</a><a class="cw-button cw-button--outline cw-button--small" href="{{ environment.vscode_url }}">VS Code</a>{% endif %}
+          {% if environment.can_destroy %}<details class="cw-delete-confirmation"><summary class="cw-button cw-button--outline cw-button--small cw-danger-button">Destroy</summary><div class="cw-delete-panel"><p>Destroy <strong>{{ environment.name }}</strong>? This cannot be undone.</p><form method="post" action="/dashboard/orgs/{{ organization.slug }}/environments/_actions/delete" hx-post="/dashboard/orgs/{{ organization.slug }}/environments/_actions/delete"><input type="hidden" name="_csrf" value="{{ page.create_form.csrf_token }}"><input type="hidden" name="environment_id" value="{{ environment.id }}"><button class="cw-button cw-button--small" type="submit">Destroy permanently</button></form></div></details>{% endif %}
+        </div></td>
+      </tr>
+      {% if environment.state == "running" %}<tr class="cw-environment-usage"><td></td><td colspan="4"><div class="cw-environment-facts"><span><strong>{{ environment.cost }}</strong> usage</span><span>{{ environment.running_time }}</span><span>{{ environment.resources }}</span><span>{{ environment.hourly_rate }}</span>{% for port in environment.ports %}{% if port.has_preview %}<a href="{{ port.preview_url }}" target="_blank" rel="noopener noreferrer">{{ port.label }} · {{ port.access }}</a>{% endif %}{% endfor %}</div></td></tr>{% endif %}
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}

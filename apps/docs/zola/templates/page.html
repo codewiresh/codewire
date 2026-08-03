@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% import "macros/toc.html" as toc %}
+{% block head_title %}{{ page.title }} · Codewire{% endblock head_title %}
+{% block head_description %}{{ page.description | default(value="Codewire documentation") }}{% endblock head_description %}
+{% block canonical_url %}{{ page.permalink | trim_end_matches(pat="/") | safe }}{% endblock canonical_url %}
+{% block document %}
+  <header class="docs-document-header">
+    <p class="docs-eyebrow">Documentation</p>
+    <h1>{{ page.title }}</h1>
+    {% if page.description %}<p>{{ page.description }}</p>{% endif %}
+  </header>
+  <div class="docs-prose">{{ page.content | safe }}</div>
+{% endblock document %}
+{% block table_of_contents %}{{ toc::render(items=page.toc) }}{% endblock table_of_contents %}

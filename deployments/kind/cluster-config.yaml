@@ -24,10 +24,6 @@ nodes:
       - containerPort: 3478
         hostPort: 3478
         protocol: UDP
-      # docs (NodePort 30321 → host 4321)
-      - containerPort: 30321
-        hostPort: 4321
-        protocol: TCP
     extraMounts:
       # CodeWire repo root for workspace-aware Air hot reload
       - hostPath: .
@@ -35,9 +31,3 @@ nodes:
       # Sibling workspace repo required by codewire/go.work
       - hostPath: ../agent-sandbox
         containerPath: /src/agent-sandbox
-      # Web frontend source for Vite HMR
-      - hostPath: ./apps/dashboard
-        containerPath: /src/dashboard
-      # Docs source
-      - hostPath: ./apps/docs
-        containerPath: /src/docs

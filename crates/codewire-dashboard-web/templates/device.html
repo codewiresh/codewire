@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Authorize device · Codewire</title>
+    <link rel="stylesheet" href="/assets/codewire/design-v1.css">
+    <link rel="stylesheet" href="/assets/codewire/routes/auth-v1.css">
+  </head>
+  <body class="cw-body cw-auth-body" data-route="device">
+    <main class="cw-auth-shell">
+      <a class="cw-auth-brand" href="/"><img src="/assets/codewire/logo-v1.svg" alt=""><span>Codewire</span></a>
+      <section class="cw-card cw-auth-card">
+        <header class="cw-card-header cw-auth-header">
+          <div class="cw-auth-mark" aria-hidden="true"><svg class="cw-icon"><use href="/assets/codewire/icons-v2.svg#icon-device"/></svg></div>
+          <h1 class="cw-page-title">Authorize a device</h1>
+          <p class="cw-card-description">Enter the code shown by the Codewire CLI. Only approve a device you started yourself.</p>
+        </header>
+        <div class="cw-card-content">
+          {% if view.approved %}
+          <div class="cw-alert cw-alert--success" role="status">Device approved. You can return to the CLI.</div>
+          <a class="cw-button cw-auth-submit" href="/dashboard">Go to dashboard</a>
+          {% else %}
+          {% if !view.error.is_empty() %}<div class="cw-alert cw-alert--error" role="alert">{{ view.error }}</div>{% endif %}
+          <form class="cw-form" method="post" action="/device/_actions/approve">
+            <input type="hidden" name="_csrf" value="{{ view.csrf_token }}">
+            <div class="cw-field"><label class="cw-label" for="user-code">Device code</label><input class="cw-input cw-input--mono cw-device-code" id="user-code" name="user_code" value="{{ view.user_code }}" autocomplete="one-time-code" required autofocus></div>
+            <button class="cw-button cw-auth-submit" type="submit">Approve device</button>
+          </form>
+          {% endif %}
+        </div>
+      </section>
+    </main>
+  </body>
+</html>

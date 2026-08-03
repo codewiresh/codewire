@@ -242,9 +242,15 @@ run_go_support() {
 
 run_web() {
   install_bun_dependencies
-  bun --filter @codewire/dashboard typecheck
-  bun --filter @codewire/dashboard test:unit
-  bun --filter @codewire/docs build
+  cargo test --locked -p codewire-dashboard-web --lib
+  bun run --cwd apps/dashboard typecheck
+  ./apps/dashboard/node_modules/.bin/playwright test \
+    --config apps/dashboard/playwright.config.ts --list
+  scripts/ci/tests/test-dashboard-browser-gate.sh
+  scripts/checks/security/audit-js-supply-chain.sh
+  scripts/checks/security/audit-runtime-images.sh
+  make verify-dashboard-image \
+    DASHBOARD_VERIFY_IMAGE="codewire-dashboard:verification-${GITHUB_RUN_ID:-local}"
 }
 
 run_ios_config() {
@@ -506,6 +512,24 @@ run_deploy() {
       deployments/k8s/overlays/dev deployments/k8s/overlays/production \
       tests/e2e/kind; do
     kustomize build "$overlay" >/dev/null
+  done
+
+  local dashboard_manifest dashboard_source
+  for dashboard_source in \
+      deployments/k8s/dashboard/deployment.yaml \
+      deployments/k8s/overlays/dev/dashboard-deployment.yaml \
+      deployments/k8s/overlays/local-kind/dashboard.yaml \
+      deployments/k8s/overlays/local-kind-static/dashboard.yaml; do
+    dashboard_manifest="$(<"$dashboard_source")"
+    grep -Fq 'name: CODEWIRE_IDENTITY_ORIGIN' <<<"$dashboard_manifest"
+    grep -Fq 'http://codewire-idp:8091' <<<"$dashboard_manifest"
+    grep -Fq 'automountServiceAccountToken: false' <<<"$dashboard_manifest"
+    grep -Fq 'allowPrivilegeEscalation: false' <<<"$dashboard_manifest"
+    grep -Fq 'drop: ["ALL"]' <<<"$dashboard_manifest"
+    grep -Fq 'readOnlyRootFilesystem: true' <<<"$dashboard_manifest"
+    grep -Fq 'runAsUser: 65532' <<<"$dashboard_manifest"
+    grep -Fq 'runAsGroup: 65532' <<<"$dashboard_manifest"
+    grep -Fq 'type: RuntimeDefault' <<<"$dashboard_manifest"
   done
 
   install_helm

@@ -567,6 +567,7 @@
 
     #[test]
     fn format_preset_list_text_matches_go_columns() {
+        let workspace_image = "ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467";
         let presets = vec![
             Preset {
                 official: true,
@@ -574,7 +575,7 @@
                     "preset_1",
                     "Workspace",
                     "workspace",
-                    "ghcr.io/codewiresh/workspace:latest",
+                    workspace_image,
                 )
             },
             Preset {
@@ -585,14 +586,25 @@
             },
         ];
 
-        assert_eq!(
-            format_preset_list_text(&presets),
-            concat!(
-                "NAME                     LANGUAGE     IMAGE                                    OFFICIAL CPU/MEM/DISK\n",
-                "workspace                rust         ghcr.io/codewiresh/workspace:latest      yes      2000m/4096MB/20GB\n",
-                "private                  --           --                                                2000m/4096MB/10GB\n",
-            )
+        let image_width = workspace_image.len();
+        let expected = format!(
+            "{:<24} {:<12} {:<image_width$} {:<8} CPU/MEM/DISK\n\
+             {:<24} {:<12} {:<image_width$} {:<8} 2000m/4096MB/20GB\n\
+             {:<24} {:<12} {:<image_width$} {:<8} 2000m/4096MB/10GB\n",
+            "NAME",
+            "LANGUAGE",
+            "IMAGE",
+            "OFFICIAL",
+            "workspace",
+            "rust",
+            workspace_image,
+            "yes",
+            "private",
+            "--",
+            "--",
+            "",
         );
+        assert_eq!(format_preset_list_text(&presets), expected);
     }
 
     #[test]
@@ -606,7 +618,7 @@
             "preset_1",
             "Workspace",
             "workspace",
-            "ghcr.io/codewiresh/workspace:latest",
+            "ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467",
         );
 
         assert_eq!(
@@ -616,7 +628,7 @@
                 "Name:      Workspace\n",
                 "Slug:      workspace\n",
                 "Language:  rust\n",
-                "Image:     ghcr.io/codewiresh/workspace:latest\n",
+                "Image:     ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467\n",
                 "Official:  false\n",
                 "Build:     ready\n",
                 "CPU:      2000m\n",
@@ -632,7 +644,7 @@
             "preset_1",
             "Workspace",
             "workspace",
-            "ghcr.io/codewiresh/workspace:latest",
+            "ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467",
         )];
 
         assert_eq!(find_preset(&presets, "preset_1").unwrap().name, "Workspace");
@@ -644,7 +656,7 @@
     fn expand_image_ref_matches_go_direct_preset_shorthand() {
         assert_eq!(
             expand_image_ref("workspace"),
-            "ghcr.io/codewiresh/workspace:latest"
+            "ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467"
         );
         assert_eq!(
             expand_image_ref("workspace:v2"),

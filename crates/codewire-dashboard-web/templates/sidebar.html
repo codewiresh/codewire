@@ -12,8 +12,8 @@
       {% if view.has_organizations %}
       <div class="cw-nav-group">
         {% for organization in view.organizations %}
-        <a class="cw-nav-link" href="{{ organization.legacy_url }}">
-          <svg class="cw-nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg>
+        <a class="cw-nav-link" href="{{ organization.url }}">
+          <svg class="cw-nav-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-chevron-right"/></svg>
           <span>{{ organization.name }}</span>
         </a>
         {% endfor %}
@@ -21,9 +21,9 @@
       {% else %}
       <p class="cw-sidebar-empty">No organizations</p>
       {% endif %}
-      <div style="margin-top:.5rem">
+      <div class="cw-sidebar-new">
         <a class="cw-nav-link cw-nav-link--quiet" href="{{ view.new_organization_url }}">
-          <svg class="cw-nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+          <svg class="cw-nav-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-plus"/></svg>
           New Organization
         </a>
       </div>
@@ -32,25 +32,29 @@
     <div class="cw-divider"></div>
     <section class="cw-sidebar-section">
       <h2 class="cw-section-label">Admin</h2>
-      <a class="cw-nav-link" href="{{ view.legacy_admin_url }}">
-        <svg class="cw-nav-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
+      <a class="cw-nav-link" href="{{ view.admin_url }}">
+        <svg class="cw-nav-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-grid"/></svg>
         Overview
+      </a>
+      <a class="cw-nav-link" href="/admin/billing">
+        <svg class="cw-nav-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-building"/></svg>
+        Billing Catalog
+      </a>
+      <a class="cw-nav-link" href="/admin/audit">
+        <svg class="cw-nav-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-key"/></svg>
+        Audit Log
       </a>
     </section>
     {% endif %}
   </div>
   <div class="cw-sidebar-footer">
-    <a class="cw-nav-link" href="{{ view.legacy_settings_url }}">
-      <svg class="cw-nav-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-2.83 2.83-.06-.06A1.7 1.7 0 0 0 15 19.4a1.7 1.7 0 0 0-1 .6 1.7 1.7 0 0 0-.4 1.1V21H9.6v-.09A1.7 1.7 0 0 0 8.5 19.4a1.7 1.7 0 0 0-1.88.34l-.06.06-2.83-2.83.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-.6-1 1.7 1.7 0 0 0-1.1-.4H3V9.6h.09A1.7 1.7 0 0 0 4.6 8.5a1.7 1.7 0 0 0-.34-1.88l-.06-.06 2.83-2.83.06.06A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-.6 1.7 1.7 0 0 0 .4-1.1V3h4v.09A1.7 1.7 0 0 0 15.5 4.6a1.7 1.7 0 0 0 1.88-.34l.06-.06 2.83 2.83-.06.06A1.7 1.7 0 0 0 19.4 9c.26.37.47.66.6 1 .13.33.2.7.2 1.1h.8v4h-.09A1.7 1.7 0 0 0 19.4 15Z"/></svg>
+    <a class="cw-nav-link" href="{{ view.settings_url }}">
+      <svg class="cw-nav-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-settings"/></svg>
       Settings
     </a>
-    <a class="cw-nav-link" href="https://codewire.sh/docs">
-      <svg class="cw-nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2Z"/></svg>
+    <a class="cw-nav-link" href="/docs">
+      <svg class="cw-nav-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-book"/></svg>
       Docs
-    </a>
-    <a class="cw-nav-link" href="{{ view.legacy_home_url }}">
-      <svg class="cw-nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 18l6-6-6-6"/></svg>
-      Legacy dashboard
     </a>
   </div>
 </nav>

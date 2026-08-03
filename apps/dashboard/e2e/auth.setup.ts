@@ -7,13 +7,13 @@ import * as OTPAuth from "otpauth";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const authFile = path.join(__dirname, "../playwright/.auth/user.json");
 
-// Use "commit" waitUntil because Vite HMR keeps page in loading state
+// Use an explicit commit wait so authentication redirects are observed.
 const goto = async (page: Page, url: string) => {
   await page.goto(url, { waitUntil: "commit" });
   await page.waitForLoadState("domcontentloaded");
 };
 
-// Helper to fill a form field (React controlled inputs need pressSequentially)
+// Fill fields through the same keyboard path users exercise.
 const fillField = async (page: Page, selector: string, value: string) => {
   const field = page.locator(selector);
   await field.waitFor({ state: "attached" });
@@ -23,21 +23,19 @@ const fillField = async (page: Page, selector: string, value: string) => {
 };
 
 const completeTwoFactorSetup = async (page: Page) => {
-  await expect(page.getByRole("heading", { name: /set up two-factor authentication/i }))
+  await expect(page.getByRole("heading", { name: /secure your account/i }))
     .toBeVisible({ timeout: 15000 });
 
-  const secret = (await page
-    .locator("p")
-    .filter({ hasText: /^[A-Z2-7]{16,}$/ })
-    .first()
-    .textContent())?.trim();
+  const secret = (await page.getByTestId("totp-secret").textContent())?.trim();
   if (!secret) throw new Error("2FA setup secret was not visible");
 
   const code = new OTPAuth.TOTP({ secret }).generate();
   await fillField(page, "#code", code);
-  await page.getByRole("button", { name: /verify & enable/i }).click();
-  await page.getByRole("button", { name: /continue to dashboard/i })
-    .click({ timeout: 15000 });
+  await page.getByRole("button", { name: /enable two-factor authentication/i }).click();
+  await expect(page.getByRole("heading", { name: /two-factor authentication enabled/i }))
+    .toBeVisible({ timeout: 15000 });
+  await expect(page.getByTestId("recovery-code")).toHaveCount(10);
+  await page.getByRole("link", { name: /continue to codewire/i }).click();
   await page.waitForURL(/\/dashboard/, { timeout: 15000 });
 };
 
@@ -49,7 +47,14 @@ setup("authenticate", async ({ page }) => {
   await fillField(page, "#email", USERS.master.email);
   await fillField(page, "#password", TEST_PASSWORD);
 
+  const signInResponse = page.waitForResponse((response) => (
+    response.url().endsWith("/login/_actions/sign-in")
+      && response.request().method() === "POST"
+  ));
   await page.getByRole("button", { name: /sign in/i }).click();
+  const response = await signInResponse;
+  expect(response.status()).toBe(303);
+  expect(response.headers().location).toMatch(/^\/(dashboard|setup-2fa)/);
 
   await page.waitForURL(/\/(dashboard|setup-2fa)/, { timeout: 15000 });
   await page.waitForTimeout(1000);
@@ -60,6 +65,11 @@ setup("authenticate", async ({ page }) => {
 
   // Verify we're logged in
   await expect(page).toHaveURL(/\/dashboard/);
+  await expect(page.getByRole("heading", { name: "Dashboard", exact: true })).toBeVisible();
+  const session = (await page.context().cookies()).find((cookie) => (
+    cookie.name === "codewire.session_token"
+  ));
+  expect(session).toMatchObject({ httpOnly: true, sameSite: "Lax" });
 
   // Save authentication state
   await page.context().storageState({ path: authFile });

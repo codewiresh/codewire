@@ -18,14 +18,38 @@ spec:
         app.kubernetes.io/name: codewire
         app.kubernetes.io/component: dashboard
     spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
       imagePullSecrets:
         - name: gitea-registry
       containers:
         - name: dashboard
           image: git.example.com/codewire/dashboard:latest
+          env:
+            - name: CODEWIRE_PUBLIC_ORIGIN
+              value: https://codewire.sh
+            - name: CODEWIRE_API_ORIGIN
+              value: http://codewire-orchestration:8084
+            - name: CODEWIRE_IDENTITY_ORIGIN
+              value: http://codewire-idp:8091
+            - name: CODEWIRE_BILLING_ORIGIN
+              value: http://codewire-billing:8081
+            - name: CODEWIRE_BROWSER_API_ORIGIN
+              value: https://codewire.sh
           ports:
-            - containerPort: 80
+            - containerPort: 5173
               name: http
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
           resources:
             requests:
               cpu: 25m
@@ -35,13 +59,13 @@ spec:
               memory: 256Mi
           livenessProbe:
             httpGet:
-              path: /
+              path: /healthz
               port: http
             initialDelaySeconds: 10
             periodSeconds: 10
           readinessProbe:
             httpGet:
-              path: /
+              path: /healthz
               port: http
             initialDelaySeconds: 5
             periodSeconds: 5

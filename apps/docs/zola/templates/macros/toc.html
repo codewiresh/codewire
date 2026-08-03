@@ -1,0 +1,17 @@
+{% macro render(items) %}
+  {% if items | length > 0 %}
+    <h2>On this page</h2>
+    <ol>
+      {% for item in items %}
+        <li>
+          <a href="#{{ item.id }}">{{ item.title }}</a>
+          {% if item.children | length > 0 %}
+            <ol>
+              {% for child in item.children %}<li><a href="#{{ child.id }}">{{ child.title }}</a></li>{% endfor %}
+            </ol>
+          {% endif %}
+        </li>
+      {% endfor %}
+    </ol>
+  {% endif %}
+{% endmacro render %}

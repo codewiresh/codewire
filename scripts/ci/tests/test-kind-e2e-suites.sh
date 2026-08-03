@@ -5,6 +5,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 SCRIPT="$ROOT/scripts/ci/verify/kind-e2e.sh"
 COMMON="$ROOT/scripts/ci/verify/kind/common.sh"
 INTEGRATED="$ROOT/scripts/ci/verify/kind/suites/integrated.sh"
+DASHBOARD_BROWSER="$ROOT/scripts/ci/verify/kind/suites/dashboard-browser.sh"
 FINAL_FENCING="$ROOT/scripts/ci/verify/kind/suites/final-fencing.sh"
 ENVIRONMENT_SESSION="$ROOT/scripts/ci/verify/kind/suites/environment-session.sh"
 mkdir -p "$ROOT/.tmp"
@@ -33,13 +34,20 @@ record() {
   printf '%s\n' "$1" >>"$CALLS"
 }
 
-bash -n "$SCRIPT" "$COMMON" "$INTEGRATED" "$FINAL_FENCING" \
+bash -n "$SCRIPT" "$COMMON" "$INTEGRATED" "$DASHBOARD_BROWSER" "$FINAL_FENCING" \
   "$ENVIRONMENT_SESSION" "$0"
 grep -Fq 'CRD_SMOKE_GATEWAY_TOKEN="$daemon_token"' "$COMMON" ||
   fail 'local gateway and workspace daemon do not share the derived credential'
 grep -Fq 'CRD_SMOKE_GATEWAY_TOKEN is required with CRD_SMOKE_LOCAL_GATEWAY=1' \
   "$ROOT/crates/codewire-orchestration/src/bin/crd-smoke.rs" ||
   fail 'local CRD smoke permits an unrelated literal gateway credential'
+grep -Fq 'KIND_POSTGRES_HOST_PORT="${KIND_POSTGRES_HOST_PORT:-25432}"' "$COMMON" ||
+  fail 'Kind Postgres host port is not configurable with the accepted default'
+grep -Fq 'sed "s/hostPort: 25432/hostPort: ${KIND_POSTGRES_HOST_PORT}/"' "$COMMON" ||
+  fail 'Kind cluster creation does not render the configured Postgres host port'
+if grep -Fq '127.0.0.1:25432/codewire' "$COMMON"; then
+  fail 'Kind smoke callers bypass the configurable Postgres URL'
+fi
 
 # Sourcing the dispatcher defines every suite without executing one.
 # shellcheck source=scripts/ci/verify/kind-e2e.sh
@@ -49,10 +57,16 @@ source "$SCRIPT"
 # the exact two-token command and unknown input fails closed.
 : >"$CALLS"
 run_integrated_kind_suite() { record integrated; }
+run_retained_dashboard_browser_suite() { record dashboard-browser-retained; }
 run_retained_final_fencing_suite() { record final-fencing; }
 run_retained_environment_session_suite() { record environment-session; }
 dispatch_kind_e2e
 printf '%s\n' integrated | cmp -s - "$CALLS" || fail 'no-argument dispatch changed'
+
+: >"$CALLS"
+dispatch_kind_e2e suite dashboard-browser
+printf '%s\n' dashboard-browser-retained | cmp -s - "$CALLS" ||
+  fail 'dashboard-browser dispatch changed'
 
 : >"$CALLS"
 dispatch_kind_e2e suite final-fencing
@@ -76,6 +90,8 @@ grep -Fq 'unknown Kind e2e command: retained' "$FIXTURE/unknown-command.out" ||
 # Restore the production suite functions replaced by the dispatcher spies.
 # shellcheck source=scripts/ci/verify/kind/suites/integrated.sh
 source "$INTEGRATED"
+# shellcheck source=scripts/ci/verify/kind/suites/dashboard-browser.sh
+source "$DASHBOARD_BROWSER"
 # shellcheck source=scripts/ci/verify/kind/suites/final-fencing.sh
 source "$FINAL_FENCING"
 # shellcheck source=scripts/ci/verify/kind/suites/environment-session.sh
@@ -101,6 +117,8 @@ mesh_product_connect_ownership_smoke() { record mesh-product-connect-ownership; 
 coordinator_ingress_smoke() { record coordinator; }
 billing_contract_through_ingress() { record billing; }
 deploy_agent_sandbox_and_smoke() { record sandbox-temporal; }
+dashboard_browser_e2e() { record dashboard-browser; }
+assert_sandbox_supply_chain() { record sandbox-supply-chain; }
 rust_reconciler_ttl_e2e() { record ttl; }
 log() { record "log:$*"; }
 run_integrated_kind_suite
@@ -121,6 +139,8 @@ mesh-product-connect-ownership
 coordinator
 billing
 sandbox-temporal
+dashboard-browser
+sandbox-supply-chain
 ttl
 log:green
 EOF

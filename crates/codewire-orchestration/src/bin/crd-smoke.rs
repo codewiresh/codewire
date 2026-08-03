@@ -169,7 +169,7 @@ fn gateway_template_opts(namespace: &str) -> anyhow::Result<TemplateOpts> {
         resolve_gateway_token(local_gateway, std::env::var("CRD_SMOKE_GATEWAY_TOKEN").ok())?;
     Ok(TemplateOpts {
         name: "tmpl-crd-smoke".into(),
-        image: "ghcr.io/codewiresh/workspace:latest".into(),
+        image: "ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467".into(),
         support_image: if local_gateway {
             "codewire-gateway:e2e".into()
         } else {

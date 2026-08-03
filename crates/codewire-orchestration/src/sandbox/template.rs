@@ -14,7 +14,7 @@ use super::EXTENSIONS_API_VERSION;
 
 // Constants mirrored from internal/sandbox/types.go and internal/shim.
 pub const DEFAULT_GATEWAY_IMAGE: &str = "ghcr.io/codewiresh/gateway@sha256:1141293d909627af0e303f4ec0c5788dbda58495acd273cb243580a47828c4ca";
-pub const DEFAULT_DIND_IMAGE: &str = "docker:dind";
+pub const DEFAULT_DIND_IMAGE: &str = "ghcr.io/codewiresh/dind@sha256:00815afb718e35fa8c71e8eb411df2919f74a149908593ae3fe94b55b34feec9";
 pub const DEFAULT_GATEWAY_READYZ_PORT: i64 = 2223;
 pub const DEFAULT_GATEWAY_SSH_PORT: i64 = 2222;
 pub const GATEWAY_TAILNET_UDP_PORT: i64 = 31000;
@@ -2230,7 +2230,7 @@ mod tests {
                 "codewire-runtime",
                 &TemplateOpts {
                     name: format!("tmpl-dind-memory-{name}"),
-                    image: "ghcr.io/codewiresh/workspace:latest".into(),
+                    image: "ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467".into(),
                     runtime_profile: RUNTIME_PROFILE_COMMODITY.into(),
                     memory_mib,
                     disk_gib: 50,
@@ -2258,7 +2258,7 @@ mod tests {
             "codewire-runtime",
             &TemplateOpts {
                 name: "tmpl-dind-image".into(),
-                image: "ghcr.io/codewiresh/workspace:latest".into(),
+                image: "ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467".into(),
                 dind_image: image.into(),
                 runtime_profile: RUNTIME_PROFILE_COMMODITY.into(),
                 disk_gib: 50,

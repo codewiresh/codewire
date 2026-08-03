@@ -5,7 +5,7 @@ import { cleanupTestOrg } from "./helpers/org";
 
 const dashboardDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const authState = path.join(dashboardDir, "playwright/.auth/user.json");
-const ssrUrl = "http://127.0.0.1:5174";
+const ssrUrl = (process.env.PLAYWRIGHT_BASE_URL || "http://127.0.0.1:5173").replace(/\/$/, "");
 const slugPrefix = `ssr-create-${Date.now()}`;
 
 test.describe("server-rendered organization creation", () => {
@@ -34,7 +34,7 @@ test.describe("server-rendered organization creation", () => {
     await page.getByLabel("Slug").fill(slug);
 
     const post = page.waitForResponse((response) => (
-      response.url().endsWith("/dashboard/orgs")
+      response.url().endsWith("/dashboard/_actions/organizations")
       && response.request().method() === "POST"
     ));
     await page.getByRole("button", { name: "Create Organization" }).click();
@@ -48,6 +48,44 @@ test.describe("server-rendered organization creation", () => {
     await expect(organization).toContainText("Owner");
   });
 
+  test("creates an organization with a legacy dashboard-scoped CSRF cookie present", async ({ page, isMobile }) => {
+    test.skip(!!isMobile, "desktop upgrade regression contract");
+    const slug = `${slugPrefix}-legacy-csrf`;
+    const origin = new URL(ssrUrl);
+    await page.context().addCookies([{
+      name: "codewire_csrf",
+      value: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      domain: origin.hostname,
+      path: "/dashboard",
+      httpOnly: true,
+      secure: origin.protocol === "https:",
+      sameSite: "Strict",
+    }]);
+    expect((await page.context().cookies()).some((cookie) => (
+      cookie.name === "codewire_csrf" && cookie.path === "/dashboard"
+    ))).toBe(true);
+
+    await page.goto("/dashboard/orgs/new");
+    expect((await page.context().cookies()).filter((cookie) => (
+      cookie.name === "codewire_csrf"
+    ))).toHaveLength(0);
+    await page.getByLabel("Organization Name").fill("SSR Legacy Cookie Organization");
+    await page.getByLabel("Slug").fill(slug);
+
+    const post = page.waitForResponse((response) => (
+      response.url().endsWith("/dashboard/_actions/organizations")
+      && response.request().method() === "POST"
+    ));
+    await page.getByRole("button", { name: "Create Organization" }).click();
+    const response = await post;
+    expect(response.status()).toBe(200);
+    expect(response.headers()["hx-redirect"]).toBe("/dashboard");
+    await expect(page).toHaveURL(`${ssrUrl}/dashboard`);
+    await expect(page.locator(".cw-org-card", {
+      hasText: "SSR Legacy Cookie Organization",
+    })).toContainText("Owner");
+  });
+
   test("returns an HTMX validation fragment and preserves submitted values", async ({ page, isMobile }) => {
     test.skip(!!isMobile, "covered by the desktop interaction contract");
     await page.goto("/dashboard/orgs/new");
@@ -59,7 +97,7 @@ test.describe("server-rendered organization creation", () => {
     await page.getByLabel("Slug").fill("ab");
 
     const post = page.waitForResponse((response) => (
-      response.url().endsWith("/dashboard/orgs")
+      response.url().endsWith("/dashboard/_actions/organizations")
       && response.request().method() === "POST"
     ));
     await page.getByRole("button", { name: "Create Organization" }).click();
@@ -75,7 +113,7 @@ test.describe("server-rendered organization creation", () => {
     test.skip(!!isMobile, "covered by the desktop no-JavaScript contract");
     await page.goto("/dashboard/orgs/new");
     const csrf = await page.locator('input[name="_csrf"]').inputValue();
-    const response = await page.request.post("/dashboard/orgs", {
+    const response = await page.request.post("/dashboard/_actions/organizations", {
       form: {
         name: "Normal Validation Organization",
         slug: "ab",
@@ -103,7 +141,7 @@ test.describe("server-rendered organization creation", () => {
     await page.getByLabel("Organization Name").fill("Duplicate Organization");
     await page.getByLabel("Slug").fill(slug);
     const post = page.waitForResponse((response) => (
-      response.url().endsWith("/dashboard/orgs")
+      response.url().endsWith("/dashboard/_actions/organizations")
       && response.request().method() === "POST"
     ));
     await page.getByRole("button", { name: "Create Organization" }).click();
@@ -126,7 +164,7 @@ test.describe("server-rendered organization creation", () => {
     await page.getByLabel("Organization Name").fill("SSR No JavaScript Organization");
     await page.getByLabel("Slug").fill(slug);
     const post = page.waitForResponse((response) => (
-      response.url().endsWith("/dashboard/orgs")
+      response.url().endsWith("/dashboard/_actions/organizations")
       && response.request().method() === "POST"
     ));
     await page.getByLabel("Slug").press("Enter");
@@ -141,7 +179,7 @@ test.describe("server-rendered organization creation", () => {
   test("rejects a form post without the double-submit token", async ({ page, isMobile }) => {
     test.skip(!!isMobile, "covered by the desktop security contract");
     await page.goto("/dashboard/orgs/new");
-    const response = await page.request.post("/dashboard/orgs", {
+    const response = await page.request.post("/dashboard/_actions/organizations", {
       form: {
         name: "Missing Token",
         slug: `${slugPrefix}-missing-token`,

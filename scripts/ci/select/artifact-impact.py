@@ -66,6 +66,14 @@ RUNTIME_EXACT_INPUTS = {
     "scripts/ci/select/select-deploy-dev.sh",
     "scripts/ci/setup/fetch-infisical-ci-secret.sh",
 }
+RUNTIME_IMAGE_EXACT_INPUTS = {
+    "LICENSE",
+    "apps/cli/install.sh",
+    "crates/codewire-dashboard-web/assets/LICENSE-HTMX",
+    "crates/codewire-dashboard-web/assets/xterm/LICENSE-addon-fit-0.11.0",
+    "crates/codewire-dashboard-web/assets/xterm/LICENSE-addon-web-links-0.12.0",
+    "crates/codewire-dashboard-web/assets/xterm/LICENSE-xterm-6.0.0",
+}
 SUPPORT_EXACT_INPUTS = {
     ".gitea/workflows/support-images.yaml",
     "Cargo.lock",
@@ -105,6 +113,8 @@ RUNTIME_DOCKER_MODELED_ROOTS = {
     "bun.lock",
     "apps/dashboard",
     "apps/docs",
+    "apps/cli/install.sh",
+    "LICENSE",
     "packages/auth/package.json",
     "packages/codewire-design",
     "packages/codewire-proto-ts",
@@ -495,7 +505,17 @@ def parse_docker_copy_sources(dockerfile: Path, context: str) -> list[str]:
             tokens = shlex.split(line)
         except ValueError as error:
             raise ImpactError(f"cannot parse Docker instruction in {dockerfile}") from error
-        arguments = tokens[1:]
+        instruction = tokens[0].upper()
+        raw_arguments = tokens[1:]
+        checksum = next(
+            (
+                argument.removeprefix("--checksum=")
+                for argument in raw_arguments
+                if argument.startswith("--checksum=")
+            ),
+            None,
+        )
+        arguments = raw_arguments
         from_stage = any(argument.startswith("--from=") for argument in arguments)
         arguments = [argument for argument in arguments if not argument.startswith("--")]
         if from_stage:
@@ -503,6 +523,18 @@ def parse_docker_copy_sources(dockerfile: Path, context: str) -> list[str]:
         if len(arguments) < 2:
             raise ImpactError(f"malformed Docker copy in {dockerfile}")
         for source in arguments[:-1]:
+            if "://" in source:
+                if (
+                    instruction != "ADD"
+                    or not source.startswith("https://")
+                    or checksum is None
+                    or not re.fullmatch(r"sha256:[0-9a-f]{64}", checksum)
+                    or len(arguments) != 2
+                ):
+                    raise ImpactError(
+                        f"remote Docker source is not one checksum-pinned HTTPS ADD in {dockerfile}: {source}"
+                    )
+                continue
             if any(character in source for character in ("$", "*", "?", "[", "]")):
                 raise ImpactError(f"dynamic Docker copy source in {dockerfile}: {source}")
             if source in {".", "./"}:
@@ -597,9 +629,7 @@ def classify_web(root: Path, base: str, head: str, paths: Iterable[str]) -> set[
     relevant_manifests = {
         "package.json",
         "apps/dashboard/package.json",
-        "apps/docs/package.json",
         "packages/auth/package.json",
-        "packages/codewire-design/package.json",
         "packages/codewire-proto-ts/package.json",
     }
     for path in paths:
@@ -658,6 +688,8 @@ def classify(
     categories: set[str] = set()
     exact_inputs = RUNTIME_EXACT_INPUTS if mode == "runtime" else SUPPORT_EXACT_INPUTS
     for path in paths:
+        if mode == "runtime" and path in RUNTIME_IMAGE_EXACT_INPUTS:
+            categories.add("runtime-image-input")
         if is_legal_or_repository_text(path):
             continue
         if path in exact_inputs:

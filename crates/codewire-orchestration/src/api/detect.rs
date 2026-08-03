@@ -84,7 +84,7 @@ pub struct RepoRoleResult {
 }
 
 pub const DEFAULT_DETECTION_PRESET_SLUG: &str = "workspace";
-pub const DEFAULT_DETECTION_PRESET_IMAGE: &str = "ghcr.io/codewiresh/workspace:latest";
+pub const DEFAULT_DETECTION_PRESET_IMAGE: &str = "ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467";
 
 // ── Repo URL parsing ─────────────────────────────────────────────────
 
@@ -193,6 +193,22 @@ const CONFIG_FILE_NAMES: &[&str] = &[
     "Dockerfile",
 ];
 
+const FORGE_USER_AGENT: &str = "codewire-orchestration";
+
+fn forge_client() -> anyhow::Result<reqwest::Client> {
+    Ok(reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()?)
+}
+
+fn forge_request(client: &reqwest::Client, url: &str) -> reqwest::RequestBuilder {
+    // GitHub rejects REST requests without a User-Agent. Go supplied one
+    // implicitly; reqwest does not, so make the parity requirement explicit.
+    client
+        .get(url)
+        .header(reqwest::header::USER_AGENT, FORGE_USER_AGENT)
+}
+
 fn truncate_str(s: &str, max_len: usize) -> String {
     if s.len() <= max_len {
         s.to_string()
@@ -215,7 +231,7 @@ fn truncate_with(s: String, max_len: usize, suffix: &str) -> String {
 }
 
 async fn forge_get(client: &reqwest::Client, url: &str, token: &str) -> anyhow::Result<Vec<u8>> {
-    let mut req = client.get(url).header("Accept", "application/json");
+    let mut req = forge_request(client, url).header("Accept", "application/json");
     if !token.is_empty() {
         req = req.header("Authorization", format!("Bearer {token}"));
     }
@@ -272,9 +288,7 @@ pub async fn fetch_repo_context(
     branch: &str,
     token: &str,
 ) -> anyhow::Result<RepoContext> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()?;
+    let client = forge_client()?;
 
     let branch_ref = if branch.is_empty() { "HEAD" } else { branch };
     let tree_raw = forge_get(
@@ -400,7 +414,7 @@ Look at the file tree and config files to determine what this project IS:
 ## Step 2: preset_slug + preset_image
 Image selection is NOT repo-dependent in this system. Always return:
 - preset_slug: "workspace"
-- preset_image: "ghcr.io/codewiresh/workspace:latest"
+- preset_image: "ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467"
 
 Do not make per-language image decisions. Focus your analysis effort on install_command, startup_script, and app_ports.
 
@@ -450,7 +464,7 @@ Ports the APPLICATION exposes for the user to access.
             "properties": {
                 "project_type": {"type": "string", "enum": ["cli", "lib", "web", "api", "monorepo"], "description": "What this project IS based on its structure and entrypoints"},
                 "preset_slug": {"type": "string", "description": "Always return full"},
-                "preset_image": {"type": "string", "description": "Always return ghcr.io/codewiresh/workspace:latest"},
+                "preset_image": {"type": "string", "description": "Always return ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467"},
                 "install_command": {"type": "string", "description": "Dependency install command"},
                 "startup_script": {"type": "string", "description": "Post-install bash script. Empty string if no evidence of required setup steps."},
                 "language": {"type": "string", "description": "Primary language"},
@@ -554,7 +568,7 @@ For each repo, determine its role:
 ## Step 2: Determine workspace-level config
 Based on ALL repos together:
 - project_type: use "monorepo" for multi-repo workspaces
-- preset_slug / preset_image: this is fixed for repo detection, always use slug "workspace", image "ghcr.io/codewiresh/workspace:latest"
+- preset_slug / preset_image: this is fixed for repo detection, always use slug "workspace", image "ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467"
 - language: primary language across all repos
 - framework: primary framework, or empty if mixed/none
 
@@ -613,7 +627,7 @@ Collect all user-facing ports from all repos. If two repos expose the same port,
             "properties": {
                 "project_type": {"type": "string", "enum": ["cli", "lib", "web", "api", "monorepo"], "description": "Workspace type based on combined repos"},
                 "preset_slug": {"type": "string", "description": "Always return full"},
-                "preset_image": {"type": "string", "description": "Always return ghcr.io/codewiresh/workspace:latest"},
+                "preset_image": {"type": "string", "description": "Always return ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467"},
                 "install_command": {"type": "string", "description": "Combined install command (all repos, dependency order)"},
                 "startup_script": {"type": "string", "description": "Combined startup script (all repos, correct order)"},
                 "language": {"type": "string", "description": "Primary language across all repos"},
@@ -1335,6 +1349,21 @@ mod tests {
         assert!(!r.is_github());
         assert_eq!(r.api_url("/x"), "https://gitea.example.com/api/v1/x");
         assert!(parse_repo_url("https://github.com/onlyowner").is_err());
+    }
+
+    #[test]
+    fn forge_client_identifies_codewire_to_public_forge_apis() {
+        let client = forge_client().unwrap();
+        let request = forge_request(&client, "https://api.github.com/repos/codewire/codewire")
+            .build()
+            .unwrap();
+        assert_eq!(
+            request
+                .headers()
+                .get(reqwest::header::USER_AGENT)
+                .and_then(|value| value.to_str().ok()),
+            Some(FORGE_USER_AGENT)
+        );
     }
 
     #[test]

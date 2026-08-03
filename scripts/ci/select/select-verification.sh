@@ -600,7 +600,7 @@ elif [ "$event_selected" = false ]; then
         # Deletion-only tombstone; no JavaScript package remains here.
         recognized=true
         ;;
-      apps/dashboard/package.json|apps/docs/package.json|\
+      apps/dashboard/package.json|\
       packages/*/package.json|\
       libs/sdk-ts/package.json|libs/sdk-ts/package-lock.json|\
       libs/sdk-examples/run-claude/typescript/package.json|\

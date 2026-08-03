@@ -1,0 +1,11 @@
+[data-route="dashboard"] .cw-page {
+  max-width: var(--content-default);
+}
+
+[data-route="dashboard"] .cw-checklist {
+  border-color: rgba(14, 165, 233, 0.2);
+}
+
+[data-route="organization-create"] .cw-page {
+  max-width: var(--content-narrow);
+}

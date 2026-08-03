@@ -387,7 +387,7 @@ mod enabled {
             sqlx::query(
                 "INSERT INTO sandbox_template_config
                         (preset_id, image_ref, sandbox_template_name, warm_pool_size, persistent_storage)
-                 VALUES ($1, 'ghcr.io/codewiresh/workspace:latest', 'wi-f-kind', 0, true)",
+                 VALUES ($1, 'ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467', 'wi-f-kind', 0, true)",
             )
             .bind(&preset_id)
             .execute(&self.pool)

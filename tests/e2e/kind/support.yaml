@@ -8,11 +8,10 @@ metadata:
   name: codewire-config
 data:
   DATABASE_URL: postgres://codewire:codewire@postgres:5432/codewire?sslmode=disable
-  # Browser proofs serve the current-worktree dashboard from Vite. Its proxy
-  # reaches the separate Kind ingress origin below.
-  FRONTEND_URL: http://127.0.0.1:5173
+# Browser proofs use the production-equivalent Rust dashboard through Kind.
+  FRONTEND_URL: http://127.0.0.1:8090
   # Kind ingress maps HTTP to host port 8090. The IdP advertises this public
-  # issuer while the browser login UI remains the Vite origin above.
+  # issuer while the browser uses the Rust dashboard through local ingress.
   PUBLIC_OIDC_ISSUER_URL: http://127.0.0.1:8090
   PREVIEW_BASE_DOMAIN: codewire-dev.local
 ---
@@ -106,12 +105,13 @@ stringData:
 # crates/codewire-orchestration/src/sandbox/template.rs). In prod/dev that SA
 # is provisioned per sandbox namespace; kind never created it, so pod creation
 # was rejected ("serviceaccount codewire-sandbox not found") and the env hung
-# in `creating`. A bare SA is sufficient — the workspace + side-loaded gateway
-# images are public, so no imagePullSecrets are needed here.
+# in `creating`. Keep token automount disabled; the workspace must not inherit
+# Kubernetes API credentials.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: codewire-sandbox
+automountServiceAccountToken: false
 ---
 # kind e2e exercises environment lifecycle, not the real sandbox isolation
 # runtime. Product configs can render explicit RuntimeClasses even when the

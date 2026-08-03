@@ -12,25 +12,43 @@ spec:
       labels:
         app: codewire-dashboard
     spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: dashboard
           image: codewire-dashboard:local
-          command: ["sh", "-c", "cd /app && bun run --cwd apps/dashboard dev -- --host"]
           env:
-            - name: DASHBOARD_API_PROXY_TARGET
-              value: "http://ingress-nginx-controller.ingress-nginx.svc.cluster.local"
-            - name: VITE_RESOURCE_BASE_DOMAIN
-              value: "codewire-dev.sh"
+            - name: CODEWIRE_PUBLIC_ORIGIN
+              value: "http://127.0.0.1:8080"
+            - name: CODEWIRE_API_ORIGIN
+              value: "http://codewire-orchestration:8084"
+            - name: CODEWIRE_IDENTITY_ORIGIN
+              value: "http://codewire-idp:8091"
+            - name: CODEWIRE_BILLING_ORIGIN
+              value: "http://codewire-billing:8081"
+            - name: CODEWIRE_BROWSER_API_ORIGIN
+              value: "http://127.0.0.1:8080"
           ports:
             - containerPort: 5173
-          volumeMounts:
-            - name: dashboard-source
-              mountPath: /app/apps/dashboard
-      volumes:
-        - name: dashboard-source
-          hostPath:
-            path: /src/codewire/apps/dashboard
-            type: Directory
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 5173
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 5173
 ---
 apiVersion: v1
 kind: Service

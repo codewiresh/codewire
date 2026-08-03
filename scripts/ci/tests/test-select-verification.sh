@@ -441,7 +441,7 @@ run_paths_case package_contract_tooling pull_request refs/pull/118/head false \
 run_paths_case generic_package pull_request refs/pull/119/head false \
   'policy web' packages/shared/src/index.ts
 run_paths_case dashboard pull_request refs/pull/12/head false \
-  'policy web' apps/dashboard/src/app.tsx apps/dashboard/playwright.config.ts
+  'policy web' apps/dashboard/playwright.config.ts
 run_paths_case dashboard_runtime_inventory pull_request refs/pull/121/head false \
   'deploy edge_kind go_consumer_interop go_support policy release runtime_confidential security web' \
   apps/dashboard/runtime-inventory.json
@@ -452,7 +452,7 @@ run_paths_case dashboard_rust_surface pull_request refs/pull/1221/head false \
   'deploy edge_kind policy rust rust_pkg_codewire_dashboard_web web' \
   crates/codewire-dashboard-web/src/routes/environments.rs \
   crates/codewire-dashboard-web/templates/dashboard.html \
-  crates/codewire-dashboard-web/assets/htmx/htmx-2.0.8.min.js
+  crates/codewire-dashboard-web/assets/htmx-2.0.10.min.js
 run_paths_case dashboard_image_verifier pull_request refs/pull/123/head false \
   'deploy edge_kind go_consumer_interop go_support policy release runtime_confidential security web' \
   scripts/ci/verify/dashboard-image.sh

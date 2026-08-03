@@ -1,0 +1,123 @@
+{% import "macros/navigation.html" as nav %}
+{% set canonical_docs_root = config.base_url | trim_end_matches(pat="/") %}
+{% set browser_docs_root = "/docs" %}
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark">
+    <meta name="theme-color" content="#08090a">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'none'; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'">
+    <title>{% block head_title %}Codewire documentation{% endblock head_title %}</title>
+    <meta name="description" content="{% block head_description %}Codewire documentation{% endblock head_description %}">
+    <meta name="codewire-docs-root" content="{{ browser_docs_root | safe }}">
+    <meta name="codewire-docs-search-index" content="{{ get_url(path="search_index.en.json") | replace(from=canonical_docs_root, to=browser_docs_root) | safe }}">
+    <link rel="canonical" href="{% block canonical_url %}https://codewire.sh/docs{% endblock canonical_url %}">
+    <link rel="icon" href="{{ get_url(path="favicon.svg", cachebust=true) | replace(from=canonical_docs_root, to=browser_docs_root) | safe }}" type="image/svg+xml">
+    <link rel="stylesheet" href="{{ get_url(path="giallo.css", cachebust=true) | replace(from=canonical_docs_root, to=browser_docs_root) | safe }}">
+    <link rel="stylesheet" href="{{ get_url(path="docs.css", cachebust=true) | replace(from=canonical_docs_root, to=browser_docs_root) | safe }}">
+    <script src="{{ get_url(path="search.js", cachebust=true) | replace(from=canonical_docs_root, to=browser_docs_root) | safe }}" defer></script>
+  </head>
+  <body class="cw-body docs-body">
+    <a class="docs-skip-link" href="#docs-content">Skip to content</a>
+    <div class="docs-app" data-docs-app data-nav-open="false">
+      <header class="docs-topbar">
+        <button class="docs-nav-toggle" type="button" aria-label="Open documentation navigation" aria-controls="docs-sidebar" aria-expanded="false" data-docs-nav-toggle>
+          <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+        </button>
+        <a class="docs-brand" href="{{ browser_docs_root | safe }}" aria-label="Codewire documentation home">
+          <img src="{{ get_url(path="logo.svg", cachebust=true) | replace(from=canonical_docs_root, to=browser_docs_root) | safe }}" width="24" height="24" alt="">
+          <span>Codewire</span>
+          <span class="docs-brand-suffix">Docs</span>
+        </a>
+        <div class="docs-search" data-docs-search>
+          <label class="docs-search-label" for="docs-search-input">Search documentation</label>
+          <div class="docs-search-field">
+            <svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m16 16 4 4"/></svg>
+            <input id="docs-search-input" type="search" placeholder="Search docs" autocomplete="off" spellcheck="false" role="combobox" aria-autocomplete="list" aria-controls="docs-search-results" aria-expanded="false" data-docs-search-input>
+            <kbd aria-hidden="true">/</kbd>
+          </div>
+          <div class="docs-search-panel" hidden data-docs-search-panel>
+            <p class="docs-search-status" aria-live="polite" data-docs-search-status></p>
+            <ul id="docs-search-results" class="docs-search-results" role="listbox" data-docs-search-results></ul>
+          </div>
+        </div>
+        <a class="cw-button cw-button--outline cw-button--small docs-dashboard-link" href="/dashboard">Dashboard</a>
+      </header>
+
+      <div class="docs-shell">
+        <aside id="docs-sidebar" class="docs-sidebar" aria-label="Documentation navigation">
+          <nav class="docs-nav">
+            <section>
+              <h2>Overview</h2>
+              {{ nav::item(path="/docs", label="What is Codewire?", current=current_path) }}
+              {{ nav::item(path="/docs/quickstart", label="Quickstart", current=current_path) }}
+            </section>
+            <section>
+              <h2>Getting Started</h2>
+              {{ nav::item(path="/docs/getting-started/create-account", label="Create Account", current=current_path) }}
+              {{ nav::item(path="/docs/getting-started/sign-in", label="Sign In", current=current_path) }}
+              {{ nav::item(path="/docs/getting-started/create-organization", label="Create Organization", current=current_path) }}
+              {{ nav::item(path="/docs/getting-started/create-your-first-environment", label="Create Your First Environment", current=current_path) }}
+              {{ nav::item(path="/docs/getting-started/navigate-the-dashboard", label="Navigate the Dashboard", current=current_path) }}
+              {{ nav::item(path="/docs/getting-started/connect-to-an-environment", label="Connect to an Environment", current=current_path) }}
+            </section>
+            <section>
+              <h2>Organizations</h2>
+              {{ nav::item(path="/docs/organizations/overview", label="Overview", current=current_path) }}
+              {{ nav::item(path="/docs/organizations/manage-members", label="Manage Members", current=current_path) }}
+              {{ nav::item(path="/docs/organizations/invite-members", label="Invite Members", current=current_path) }}
+              {{ nav::item(path="/docs/organizations/accept-invitation", label="Accept Invitation", current=current_path) }}
+              {{ nav::item(path="/docs/organizations/billing", label="Billing", current=current_path) }}
+              {{ nav::item(path="/docs/organizations/secrets", label="Secrets", current=current_path) }}
+            </section>
+            <section>
+              <h2>Environments</h2>
+              {{ nav::item(path="/docs/environments/overview", label="Overview", current=current_path) }}
+              {{ nav::item(path="/docs/environments/create-environment", label="Create Environment", current=current_path) }}
+              {{ nav::item(path="/docs/environments/manage-environments", label="Manage Environments", current=current_path) }}
+              {{ nav::item(path="/docs/environments/connect", label="Connect", current=current_path) }}
+            </section>
+            <section>
+              <h2>Settings</h2>
+              {{ nav::item(path="/docs/settings/github-integration", label="GitHub Integration", current=current_path) }}
+              {{ nav::item(path="/docs/settings/security", label="Security", current=current_path) }}
+            </section>
+            <section>
+              <h2>Reference</h2>
+              {{ nav::item(path="/docs/reference/environment-statuses", label="Environment Statuses", current=current_path) }}
+              {{ nav::item(path="/docs/reference/provisioning-events", label="Provisioning Events", current=current_path) }}
+              {{ nav::item(path="/docs/reference/subscription-plans", label="Subscription Plans", current=current_path) }}
+              {{ nav::item(path="/docs/reference/faq", label="FAQ", current=current_path) }}
+            </section>
+            <section>
+              <h2>CLI</h2>
+              {{ nav::item(path="/docs/cli/overview", label="Overview", current=current_path) }}
+              {{ nav::item(path="/docs/cli/platform", label="Platform", current=current_path) }}
+              {{ nav::item(path="/docs/cli/sessions", label="Sessions", current=current_path) }}
+              {{ nav::item(path="/docs/cli/mesh", label="Mesh", current=current_path) }}
+              {{ nav::item(path="/docs/cli/configuration", label="Configuration", current=current_path) }}
+            </section>
+          </nav>
+        </aside>
+
+        <main id="docs-content" class="docs-main" tabindex="-1">
+          <div class="docs-document-grid">
+            <article class="docs-document">
+              {% block document %}{% endblock document %}
+            </article>
+            <aside class="docs-on-this-page" aria-label="On this page">
+              {% block table_of_contents %}{% endblock table_of_contents %}
+            </aside>
+          </div>
+          <footer class="docs-footer">
+            <span>Codewire documentation</span>
+            <a href="/dashboard">Back to dashboard</a>
+          </footer>
+        </main>
+      </div>
+      <button class="docs-overlay" type="button" aria-label="Close documentation navigation" data-docs-nav-close></button>
+    </div>
+  </body>
+</html>

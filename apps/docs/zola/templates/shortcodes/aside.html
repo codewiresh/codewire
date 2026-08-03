@@ -1,0 +1,5 @@
+{% set label = kind | capitalize %}
+<aside class="docs-aside docs-aside--{{ kind }}" role="note" aria-label="{{ label }}">
+  <strong>{{ label }}</strong>
+  <div>{{ body | markdown | safe }}</div>
+</aside>

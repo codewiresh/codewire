@@ -1,6 +1,7 @@
-# E2E ingress mirrors the shipped routing shape: preview hosts and the broad
-# /api fallback go to codewire-orchestration, while the billing ingress below
-# carries the permanent codewire-billing override paths.
+# E2E ingress mirrors the shipped routing shape: the Rust dashboard owns the
+# browser route tree, preview hosts and the broad /api fallback go to
+# codewire-orchestration, and the service-specific ingresses below retain their
+# permanent overrides.
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
@@ -28,6 +29,13 @@ spec:
             backend:
               service:
                 name: codewire-orchestration
+                port:
+                  name: http
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: codewire-dashboard
                 port:
                   name: http
 ---

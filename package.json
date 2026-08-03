@@ -6,8 +6,7 @@
   "description": "Environment-first control plane for agent-oriented development",
   "workspaces": ["packages/*", "apps/*"],
   "overrides": {
-    "js-yaml": "4.3.0",
-    "sharp": "0.35.0"
+    "js-yaml": "4.3.0"
   },
   "scripts": {
     "preflight": "./scripts/dev/preflight.sh",
@@ -31,11 +30,11 @@
     "retired:check-source": "python3 scripts/checks/repo_checks.py retired-reference-source",
     "go:check-source": "python3 scripts/checks/repo_checks.py go-source-classification",
     "docker:build": "docker build -t codewire-test .",
-    "test": "infisical run --env=local -- env DATABASE_URL=postgres://codewire:codewire@localhost:54320/codewire?sslmode=disable ./apps/dashboard/node_modules/.bin/playwright test --config apps/dashboard/playwright.config.ts",
-    "test:billing": "infisical run --env=local -- env DATABASE_URL=postgres://codewire:codewire@localhost:54320/codewire?sslmode=disable ./apps/dashboard/node_modules/.bin/playwright test --config apps/dashboard/playwright.config.ts --project=setup --project=billing",
+    "test": "make test-ui-kind",
+    "test:billing": "infisical run --env=local -- env DATABASE_URL=postgres://codewire:codewire@localhost:54320/codewire?sslmode=disable ./apps/dashboard/node_modules/.bin/playwright test --config apps/dashboard/playwright.config.ts --project=dashboard-ssr-desktop --project=dashboard-ssr-mobile apps/dashboard/e2e/ssr-dashboard.billing-admin.ssr.ts",
     "test:billing:kind": "infisical run --env=local --path=/ -- make test-ui-kind-billing",
     "test:billing:smoke:kind": "infisical run --env=local --path=/ -- make test-billing-smoke-kind",
-    "test:lifecycle": "infisical run --env=local -- env DATABASE_URL=postgres://codewire:codewire@localhost:54320/codewire?sslmode=disable ./apps/dashboard/node_modules/.bin/playwright test --config apps/dashboard/playwright.config.ts --project=setup --project=lifecycle",
+    "test:lifecycle": "scripts/dev/kind/test-dashboard-kind.sh apps/dashboard/e2e/ssr-dashboard.environments.ssr.ts --project=dashboard-ssr-desktop",
     "kind:billing": "infisical run --env=local --path=/ -- make kind-billing-listen",
     "stripe": "XDG_CONFIG_HOME=/tmp/stripe-config stripe listen --forward-to localhost:8080/api/webhooks/stripe"
   },
