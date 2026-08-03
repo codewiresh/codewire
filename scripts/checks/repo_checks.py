@@ -1450,6 +1450,7 @@ def check_license_map(_args: argparse.Namespace) -> int:
         )
 
     cargo_declarations = {
+        "crates/codewire-admin-proto/Cargo.toml": "AGPL-3.0-only",
         "crates/codewire-billing/Cargo.toml": "AGPL-3.0-only",
         "crates/codewire-cli-bin/Cargo.toml": "workspace",
         "crates/codewire-cli/Cargo.toml": "workspace",
@@ -1587,6 +1588,7 @@ def check_license_map(_args: argparse.Namespace) -> int:
         check_copy((Path(rel).parent / "LICENSE").as_posix(), expected)
 
     apache_copies = [
+        "crates/codewire-admin-proto/LICENSE-APACHE",
         "crates/codewire-proto/LICENSE-APACHE",
         "libs/gen-go/LICENSE-APACHE",
         "libs/gen-python/LICENSE-APACHE",

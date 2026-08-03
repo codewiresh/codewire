@@ -227,12 +227,12 @@ proto-generate:
 	cd proto && PATH="$(abspath $(PROTOC_DIR))/bin:$(GO_BIN):$$PATH" $(BUF) generate --template buf.gen.codewire.yaml
 	cd proto && $(BUF) generate --template buf.gen.google-rpc-ts.yaml
 	cd proto && PATH="$(abspath $(PROTOC_DIR))/bin:$(GO_BIN):$$PATH" $(BUF) generate --template buf.gen.google-rpc-python.yaml
-	cd proto && $(BUF) build --as-file-descriptor-set -o ../crates/codewire-proto/codewire_descriptor.bin
+	PATH="$(abspath $(PROTOC_DIR))/bin:$(GO_BIN):$$PATH" BUF="$(BUF)" scripts/ci/proto/build-rust-descriptors.sh
 
 # Fails if generated code is out of sync with proto/ definitions.
 proto-drift-check: proto-generate
-	@untracked="$$(git ls-files --others --exclude-standard -- crates/codewire-proto/codewire_descriptor.bin libs/gen-go libs/gen-python packages/codewire-proto-ts/src/gen)"; \
-	git diff --exit-code crates/codewire-proto/codewire_descriptor.bin libs/gen-go libs/gen-python packages/codewire-proto-ts/src/gen && [ -z "$$untracked" ] || \
+	@untracked="$$(git ls-files --others --exclude-standard -- crates/codewire-proto/codewire_descriptor.bin crates/codewire-admin-proto/codewire_admin_descriptor.bin libs/gen-go libs/gen-python packages/codewire-proto-ts/src/gen)"; \
+	git diff --exit-code crates/codewire-proto/codewire_descriptor.bin crates/codewire-admin-proto/codewire_admin_descriptor.bin libs/gen-go libs/gen-python packages/codewire-proto-ts/src/gen && [ -z "$$untracked" ] || \
 	(echo "ERROR: generated proto code is stale; run 'make proto-generate' and commit"; [ -z "$$untracked" ] || printf '%s\n' "$$untracked"; exit 1)
 
 # Backward-compatible alias

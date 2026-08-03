@@ -125,6 +125,7 @@ run_policy() {
   scripts/ci/tests/test-verify-tested-tree-receipt.sh
   scripts/ci/tests/test-resolve-cargo-target-dir.sh
   scripts/ci/tests/test-package-codewire-desktop.sh
+  scripts/ci/tests/test-admin-proto-boundary.sh
   scripts/ci/tests/test-build-local-image.sh
   scripts/ci/tests/test-workspace-agent-contract.sh
   scripts/ci/tests/test-workspace-image-verify-workflow.sh
@@ -179,15 +180,16 @@ run_contracts_proto() {
     buf generate --template buf.gen.codewire.yaml
     buf generate --template buf.gen.google-rpc-ts.yaml
     buf generate --template buf.gen.google-rpc-python.yaml
-    buf build --as-file-descriptor-set \
-      -o ../crates/codewire-proto/codewire_descriptor.bin
   )
+  scripts/ci/proto/build-rust-descriptors.sh
   git diff --exit-code \
     crates/codewire-proto/codewire_descriptor.bin \
+    crates/codewire-admin-proto/codewire_admin_descriptor.bin \
     libs/gen-go libs/gen-python packages/codewire-proto-ts/src/gen
   local generated_untracked
   generated_untracked="$(git ls-files --others --exclude-standard -- \
-    crates/codewire-proto/codewire_descriptor.bin libs/gen-go libs/gen-python \
+    crates/codewire-proto/codewire_descriptor.bin \
+    crates/codewire-admin-proto/codewire_admin_descriptor.bin libs/gen-go libs/gen-python \
     packages/codewire-proto-ts/src/gen)"
   if [ -n "$generated_untracked" ]; then
     printf '%s\n' "$generated_untracked" >&2
@@ -198,7 +200,7 @@ run_contracts_proto() {
   (cd libs/gen-go && GOWORK=off go build ./... && GOWORK=off go vet ./...)
   bun --filter @codewire/proto-ts typecheck
   python3 scripts/checks/repo_checks.py proto-package-boundaries --self-test
-  cargo test --locked -p codewire-proto
+  cargo test --locked -p codewire-proto -p codewire-admin-proto
 
   PYTHONPATH=libs/gen-python .venv-proto/bin/python - <<'PY'
 import py_compile

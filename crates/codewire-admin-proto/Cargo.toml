@@ -1,0 +1,26 @@
+[package]
+name = "codewire-admin-proto"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license = "AGPL-3.0-only"
+description = "Generated Connect-RPC contract types for Codewire global-administrator APIs."
+
+[lib]
+doctest = false
+
+[features]
+default = ["client"]
+# Generated `*Client` stubs are cfg-gated so server-only billing and
+# orchestration builds do not bring in the Connect HTTP client transport.
+client = ["connectrpc/client"]
+
+[dependencies]
+connectrpc = { workspace = true }
+buffa = { workspace = true }
+buffa-types = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[build-dependencies]
+connectrpc-build = { workspace = true }

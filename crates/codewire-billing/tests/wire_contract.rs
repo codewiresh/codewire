@@ -8,7 +8,7 @@
 use std::env;
 use std::time::Duration;
 
-use codewire_proto::codewire::admin::v1::{
+use codewire_admin_proto::codewire::admin::v1::{
     BillingCatalogServiceClient, GetCatalogRequest, ListSubscriptionMigrationsRequest,
 };
 use codewire_proto::codewire::console::v1::{

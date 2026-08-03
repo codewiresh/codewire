@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use axum::http::HeaderValue;
-use codewire_proto::codewire::admin::v1::{
+use codewire_admin_proto::codewire::admin::v1::{
     AdminServiceClient, BillingCatalogServiceClient, CreatePlanRequest, CreatePriceRequest,
     GetCatalogRequest, GetStatsRequest, ListAuditLogsRequest, ListSubscriptionMigrationsRequest,
     PlanSpec, PreviewSubscriptionMigrationRequest, RunSubscriptionMigrationRequest,
@@ -476,7 +476,7 @@ pub(crate) async fn run_migration(
         .ok_or_else(|| ConnectError::internal("migration result missing"))
 }
 
-fn plan_view(plan: codewire_proto::codewire::admin::v1::CatalogPlan) -> CatalogPlanView {
+fn plan_view(plan: codewire_admin_proto::codewire::admin::v1::CatalogPlan) -> CatalogPlanView {
     let spec = plan.plan.into_option().unwrap_or_default();
     CatalogPlanView {
         resource_type: plan.resource_type,
@@ -519,7 +519,9 @@ fn plan_spec(plan: CatalogPlanView) -> PlanSpec {
     }
 }
 
-fn migration_view(run: codewire_proto::codewire::admin::v1::MigrationRun) -> MigrationRunView {
+fn migration_view(
+    run: codewire_admin_proto::codewire::admin::v1::MigrationRun,
+) -> MigrationRunView {
     MigrationRunView {
         occurred: run
             .created_at

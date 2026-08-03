@@ -5,8 +5,7 @@
 //! `client` feature — Connect client stubs are generated at build time by
 //! `connectrpc-build` from the schema-of-record protos. Packages map to modules:
 //! `codewire.v1` is [`codewire::v1`]; `codewire.console.v1` is
-//! [`codewire::console::v1`]; `codewire.admin.v1` is
-//! [`codewire::admin::v1`]; `codewire.internal.v1` is
+//! [`codewire::console::v1`]; `codewire.internal.v1` is
 //! [`codewire::internal::v1`]; `codewire.testing.v1` (the
 //! never-routed Connect-infrastructure probe, doc 03 D8) is
 //! [`codewire::testing::v1`].
@@ -23,10 +22,6 @@ connectrpc::include_generated!();
 
 #[cfg(test)]
 mod tests {
-    use super::codewire::admin::v1::{
-        ADMIN_SERVICE_SERVICE_NAME, BILLING_CATALOG_SERVICE_SERVICE_NAME, GetCatalogResponse,
-        GetEnvironmentStartupSummaryRequest, GetStatsResponse, ListAuditLogsRequest, PlanSpec,
-    };
     use super::codewire::console::v1::{
         ACCOUNT_SERVICE_SERVICE_NAME, BILLING_SERVICE_SERVICE_NAME, CreateGitCredentialRequest,
         DetectRepoRequest, ENVIRONMENT_SETUP_SERVICE_SERVICE_NAME, GIT_HUB_SERVICE_SERVICE_NAME,
@@ -234,66 +229,6 @@ mod tests {
             node_json.get("disco_key").is_none(),
             "unexpected JSON: {node_json}"
         );
-    }
-
-    #[test]
-    fn admin_proto_json_surface_and_typed_window_are_pinned() {
-        assert_eq!(ADMIN_SERVICE_SERVICE_NAME, "codewire.admin.v1.AdminService");
-
-        let stats = GetStatsResponse {
-            monthly_cost_cents: 1_234,
-            ..Default::default()
-        };
-        let json = serde_json::to_value(stats).expect("admin stats proto3 JSON");
-        assert_eq!(json["monthlyCostCents"], "1234");
-        assert!(json.get("monthly_cost_cents").is_none());
-
-        let filters = ListAuditLogsRequest {
-            limit: 50,
-            action: "contract.audit.fixture".into(),
-            ..Default::default()
-        };
-        let json = serde_json::to_value(filters).expect("admin filters proto3 JSON");
-        assert_eq!(json["limit"], 50);
-        assert_eq!(json["action"], "contract.audit.fixture");
-
-        let summary = GetEnvironmentStartupSummaryRequest {
-            window: Some(buffa_types::Duration::from_secs(300)).into(),
-            ..Default::default()
-        };
-        let json = serde_json::to_value(summary).expect("admin window proto3 JSON");
-        assert_eq!(json["window"], "300s");
-    }
-
-    #[test]
-    fn billing_catalog_proto_json_surface_and_fractional_rates_are_pinned() {
-        assert_eq!(
-            BILLING_CATALOG_SERVICE_SERVICE_NAME,
-            "codewire.admin.v1.BillingCatalogService"
-        );
-
-        let plan = PlanSpec {
-            display_name: "Standard".into(),
-            cpu_overage_cents: 0.5,
-            mem_overage_cents: 0.25,
-            disk_overage_cents: 0.125,
-            ..Default::default()
-        };
-        let json = serde_json::to_value(plan).expect("billing catalog proto3 JSON");
-        assert_eq!(json["displayName"], "Standard");
-        assert_eq!(json["cpuOverageCents"], 0.5);
-        assert_eq!(json["memOverageCents"], 0.25);
-        assert_eq!(json["diskOverageCents"], 0.125);
-        assert!(
-            json.get("cpu_overage_cents").is_none(),
-            "unexpected JSON: {json}"
-        );
-
-        let catalog = serde_json::to_value(GetCatalogResponse::default())
-            .expect("billing catalog repeated JSON serialization");
-        for field in ["plans", "prices", "settings"] {
-            assert_ne!(catalog.get(field), Some(&serde_json::Value::Null));
-        }
     }
 
     #[test]

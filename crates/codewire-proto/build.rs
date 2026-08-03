@@ -4,11 +4,11 @@ fn main() {
     let manifest_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("manifest dir"));
     let descriptor_set = manifest_dir.join("codewire_descriptor.bin");
 
-    // Every Rust Connect contract is compiled here; add new files to this
-    // list as packages grow (docs/dev/PROTO-STYLE.md is the authoring guide).
+    // Customer, console, internal, and infrastructure Rust Connect contracts
+    // compile here. Global-administrator contracts are intentionally emitted
+    // by `codewire-admin-proto`, so command-line/customer consumers do not
+    // build BillingCatalogService.
     let protos = [
-        "codewire/admin/v1/admin.proto",
-        "codewire/admin/v1/billing_catalog.proto",
         "codewire/console/v1/account.proto",
         "codewire/console/v1/billing.proto",
         "codewire/console/v1/environment_setup.proto",

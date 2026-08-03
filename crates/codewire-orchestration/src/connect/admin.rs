@@ -6,7 +6,7 @@
 use std::sync::Arc;
 
 use buffa_types::{Duration, Struct, Timestamp, Value};
-use codewire_proto::codewire::admin::v1::{
+use codewire_admin_proto::codewire::admin::v1::{
     AdminService, AuditLogEntry as ProtoAuditLogEntry, EnvironmentLifecycleJournalEntry,
     EnvironmentStartupTiming, GetEnvironmentStartupSummaryRequest,
     GetEnvironmentStartupSummaryResponse, GetEnvironmentStartupTimingsRequest,

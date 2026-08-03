@@ -7,7 +7,7 @@ use std::borrow::Cow;
 use std::sync::Arc;
 
 use buffa_types::{Struct, Timestamp};
-use codewire_proto::codewire::admin::v1::{
+use codewire_admin_proto::codewire::admin::v1::{
     BillingCatalogService, CatalogPlan as ProtoCatalogPlan, CatalogPrice as ProtoCatalogPrice,
     CatalogSetting as ProtoCatalogSetting, CreatePlanRequest, CreatePlanResponse,
     CreatePriceRequest, CreatePriceResponse, GetCatalogRequest, GetCatalogResponse,
