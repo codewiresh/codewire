@@ -191,8 +191,8 @@ def main() -> None:
         fixture.reset("npm-dependency")
         fixture.replace(
             "package.json",
-            '"turbo": "2.9.16"',
-            '"turbo": "2.9.17"',
+            '"typescript": "6.0.3"',
+            '"typescript": "6.0.4"',
         )
         fixture.commit("npm dependency")
         fixture.assert_selected("npm dependency", True)

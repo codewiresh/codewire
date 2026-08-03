@@ -12,20 +12,20 @@ This repository contains the control plane, dashboard, CLI, SDKs, and generated 
 
 ```
 apps/
-  api/         Go support module: database schema, e2e tests, and temporary parity oracle
+  cli/         cw packaging, installers, charts, and release metadata
   dashboard/   Playwright contract and Rust/Zola production image
   docs/        Zola documentation source
-  desktop/, ios/, mobile/  client apps
+  ios/         native iOS client
 
 libs/
-  daemon/             shared gateway↔daemon protocol types
-  gatewayauth/        JWT helpers shared between API and gateway
-  gateway-proto/      Connect proto + generated Go (gateway.v1, daemon.v1)
-  sdk-go/, sdk-ts/, sdk-python/  language SDKs (consume the OpenAPI surface)
+  gateway-proto/      internal gateway/daemon Connect contract
+  gen-go/, gen-python/  generated public Connect clients
+  sdk-go/, sdk-ts/, sdk-python/  public language SDKs
   sdk-examples/       end-to-end SDK parity smoke (run-claude)
-  tailnet/            Tailscale userspace helpers
+  tailnet/            bounded Tailscale interoperability support
 
 crates/        Rust workspace for services, web UI, CLI, desktop, and shared clients
+packages/      shared design assets and generated TypeScript Connect schemas
 deployments/   k8s manifests + kustomize overlays
 docs/          stable docs + planning notes
 ```

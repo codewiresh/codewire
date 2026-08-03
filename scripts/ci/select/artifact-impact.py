@@ -115,7 +115,6 @@ RUNTIME_DOCKER_MODELED_ROOTS = {
     "apps/docs",
     "apps/cli/install.sh",
     "LICENSE",
-    "packages/auth/package.json",
     "packages/codewire-design",
     "packages/codewire-proto-ts",
 }
@@ -630,7 +629,6 @@ def classify_web(root: Path, base: str, head: str, paths: Iterable[str]) -> set[
     relevant_manifests = {
         "package.json",
         "apps/dashboard/package.json",
-        "packages/auth/package.json",
         "packages/codewire-proto-ts/package.json",
     }
     for path in paths:

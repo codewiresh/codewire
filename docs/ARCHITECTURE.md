@@ -34,8 +34,9 @@ oracle code; it is not a product server.
   `scripts/ci/verify/rust-stack-rehearsal.sh` remains available for explicit
   diagnosis, not as an automatic gate for every change.
 
-The desktop app (`crates/codewire-desktop`) was Rust from the start. The web
-dashboard and mobile app stay in TypeScript / React Native.
+The desktop app (`crates/codewire-desktop`) is Rust. The web dashboard is a
+Rust server-rendered application with HTMX progressive enhancement and embeds
+the Zola documentation site; the retained mobile client is native Swift/iOS.
 
 ---
 

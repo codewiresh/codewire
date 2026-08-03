@@ -482,9 +482,9 @@ run_paths_case local_image_verifiers pull_request refs/pull/1231/head false \
   scripts/ci/verify/verify-workspace-image.sh \
   scripts/ci/verify/workspace-agent-contract.sh
 run_paths_case javascript_dependency_inputs pull_request refs/pull/120/head false \
-  'policy sdk_ts security security_js web' \
+  'contracts contracts_proto policy sdk_ts security security_js web' \
   apps/dashboard/package.json \
-  packages/auth/package.json \
+  packages/codewire-proto-ts/package.json \
   libs/sdk-ts/package-lock.json
 run_paths_case vendored_browser_manifest pull_request refs/pull/1201/head false \
   'policy security security_js' .supplychain/vendor-artifacts.json

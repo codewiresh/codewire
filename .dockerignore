@@ -1,6 +1,5 @@
 .git
 .gitea
-.turbo
 target
 node_modules
 *.md
