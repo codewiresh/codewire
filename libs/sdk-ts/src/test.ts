@@ -9,6 +9,7 @@ import {
   EnvironmentSchema,
   EnvironmentService,
   EnvironmentState,
+  IsolationTier,
 } from "@codewire/proto-ts/gen/codewire/v1/environment_pb";
 import { ExecResponseSchema, ExecService } from "@codewire/proto-ts/gen/codewire/v1/exec_pb";
 import { FileEntrySchema, FileService } from "@codewire/proto-ts/gen/codewire/v1/file_pb";
@@ -35,6 +36,7 @@ import {
   fromProtoSecretProject,
   numberFromInt64,
   pollIntervalMs,
+  toProtoCreateEnvironmentRequest,
 } from "./convert.js";
 
 let passed = 0;
@@ -161,6 +163,7 @@ async function runTests() {
     type: "sandbox",
     state,
     desiredState: DesiredState.STARTED,
+    isolationTier: IsolationTier.STANDARD,
     protected: false,
     recoverable: true,
     setupComplete: false,
@@ -522,6 +525,7 @@ async function runTests() {
     startedAt: timestamp,
     stoppedAt: timestamp,
     destroyedAt: timestamp,
+    isolationTier: IsolationTier.CONFIDENTIAL,
     presetName: "Go",
     ports: [{
       id: "port_1",
@@ -536,9 +540,25 @@ async function runTests() {
   assert(convertedEnvironment.created_at === "2026-01-01T00:00:00Z", "environment timestamps keep REST second precision");
   assert(convertedEnvironment.cpu_millicores === 2000, "environment numbers keep SDK number values");
   assert(convertedEnvironment.desired_state === "started", "environment desired state preserves REST value");
+  assert(convertedEnvironment.isolation_tier === "confidential", "environment isolation tier preserves the public value");
   assert(convertedEnvironment.ports?.[0]?.access === "org_members", "environment ports preserve access values");
   assert(convertedEnvironment.ports?.[0]?.preview_url === "https://preview.example.test", "environment ports preserve optional URLs");
   assert(convertedEnvironment.ttl_seconds === 300, "environment optional numbers are retained");
+
+  const createEnvironment = toProtoCreateEnvironmentRequest("org_test", {
+    preset_slug: "python",
+    isolation_tier: "confidential",
+  });
+  assert(createEnvironment.isolationTier === IsolationTier.CONFIDENTIAL, "create environment preserves confidential isolation");
+  let rejectedUnknownIsolation = false;
+  try {
+    toProtoCreateEnvironmentRequest("org_test", {
+      isolation_tier: "container" as never,
+    });
+  } catch {
+    rejectedUnknownIsolation = true;
+  }
+  assert(rejectedUnknownIsolation, "create environment rejects unknown isolation tiers");
 
   const convertedPort = fromProtoEnvironmentPort(create(PortSchema, {
     id: "port_2",
@@ -664,6 +684,7 @@ async function runTests() {
     assert(env instanceof Environment, "create returns Environment instance");
     assert(env.id === "env_123", "env.id matches");
     assert(env.state === "running", "env.state matches");
+    assert(env.isolation_tier === "standard", "env.isolation_tier matches");
 
     // Test: Get environment
     const env2 = await cw.environments.get("env_123");
@@ -951,7 +972,7 @@ async function runTests() {
     server.close();
   }
 
-  const expectedAssertions = 87;
+  const expectedAssertions = 91;
   if (passed !== expectedAssertions) {
     failed++;
     console.error(

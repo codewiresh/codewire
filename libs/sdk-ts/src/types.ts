@@ -62,6 +62,8 @@ export interface EnvironmentPort {
   preview_url?: string;
 }
 
+export type IsolationTier = "standard" | "confidential";
+
 export interface EnvironmentData {
   cpu_millicores: number;
   created_at: string;
@@ -73,6 +75,7 @@ export interface EnvironmentData {
   disk_gb: number;
   error_reason?: string | null;
   id: string;
+  isolation_tier: IsolationTier;
   memory_mb: number;
   name?: string | null;
   network?: string | null;
@@ -145,6 +148,7 @@ export interface CreateEnvironmentRequest {
   include_user_secrets?: boolean | null;
   install_agents?: boolean | null;
   install_command?: string;
+  isolation_tier?: IsolationTier;
   memory_mb?: number | null;
   name?: string | null;
   preset_id?: string | null;

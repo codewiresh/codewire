@@ -39,6 +39,7 @@ from codewire.v1.environment_pb2 import (
     DesiredState,
     Environment,
     EnvironmentState,
+    IsolationTier,
 )
 from codewire.v1.file_pb2 import FileEntry
 from codewire.v1.mesh_group_connect import MeshGroupServiceWSGIApplication
@@ -246,6 +247,7 @@ class TransportTestCase(unittest.TestCase):
                 state=EnvironmentState.ENVIRONMENT_STATE_RUNNING,
                 desired_state=DesiredState.DESIRED_STATE_STARTED,
                 error_reason="none",
+                isolation_tier=IsolationTier.ISOLATION_TIER_CONFIDENTIAL,
                 recoverable=True,
                 state_changed_at=created_at,
                 retry_count=2,
@@ -293,6 +295,7 @@ class TransportTestCase(unittest.TestCase):
                 "state": "running",
                 "desired_state": "started",
                 "error_reason": "none",
+                "isolation_tier": "confidential",
                 "recoverable": True,
                 "state_changed_at": "2026-01-01T00:00:00Z",
                 "retry_count": 2,

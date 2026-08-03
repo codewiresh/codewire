@@ -17,6 +17,7 @@ import {
   type ExecRequest,
   type ExecResult,
   type FileEntry,
+  type IsolationTier,
 } from "./types.js";
 
 export class Environment implements EnvironmentData {
@@ -30,6 +31,7 @@ export class Environment implements EnvironmentData {
   readonly state: string;
   readonly desired_state: string;
   readonly error_reason: string | undefined;
+  readonly isolation_tier: IsolationTier;
   readonly protected: boolean;
   readonly recoverable: boolean;
   readonly state_changed_at: string;
@@ -70,6 +72,7 @@ export class Environment implements EnvironmentData {
     this.state = data.state;
     this.desired_state = data.desired_state;
     this.error_reason = data.error_reason ?? undefined;
+    this.isolation_tier = data.isolation_tier;
     this.protected = data.protected;
     this.recoverable = data.recoverable;
     this.state_changed_at = data.state_changed_at;

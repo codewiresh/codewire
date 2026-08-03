@@ -10,6 +10,30 @@ from google.protobuf.message import Message
 from google.protobuf.timestamp_pb2 import Timestamp
 
 
+_ENVIRONMENT_DESCRIPTOR_FIELDS = {
+    1: "id", 2: "org_id", 3: "created_by", 4: "preset_id", 5: "type",
+    6: "name", 7: "state", 8: "desired_state", 9: "error_reason",
+    10: "recoverable", 11: "state_changed_at", 12: "retry_count",
+    13: "setup_phase", 14: "setup_complete", 15: "setup_error",
+    16: "ttl_seconds", 17: "shutdown_at", 18: "cpu_millicores",
+    19: "memory_mb", 20: "disk_gb", 21: "total_running_seconds",
+    22: "created_at", 23: "started_at", 24: "stopped_at",
+    25: "destroyed_at", 26: "protected", 27: "deletion_requested_at",
+    28: "deletion_grace_until", 29: "preset_name", 30: "network",
+    31: "ports", 32: "isolation_tier",
+}
+
+_CREATE_ENVIRONMENT_DESCRIPTOR_FIELDS = {
+    1: "org_id", 2: "preset_id", 3: "name", 4: "cpu_millicores",
+    5: "memory_mb", 6: "disk_gb", 7: "ttl_seconds", 8: "preset_slug",
+    9: "repo_url", 10: "branch", 11: "repos", 12: "image",
+    13: "install_command", 14: "startup_script", 15: "env_vars",
+    16: "agents", 17: "install_agents", 18: "agent", 19: "agent_env",
+    20: "secret_project", 21: "app_ports", 22: "include_org_secrets",
+    23: "include_user_secrets", 24: "isolation_tier",
+}
+
+
 def timestamp_string(value: Timestamp) -> str:
     """Render a protobuf timestamp in the SDK's existing second-precision form."""
     return datetime.fromtimestamp(value.seconds, tz=timezone.utc).strftime(
@@ -42,13 +66,47 @@ def api_key_to_dict(message: Message) -> dict[str, Any]:
 
 def environment_to_dict(message: Message) -> dict[str, Any]:
     """Render an environment with REST's state and port-access spellings."""
+    assert_environment_converter_coverage()
     value = proto_to_dict(message)
     value["state"] = _enum_suffix(message, "state", "ENVIRONMENT_STATE_")
     value["desired_state"] = _enum_suffix(
         message, "desired_state", "DESIRED_STATE_"
     )
+    isolation_tier = _enum_suffix(message, "isolation_tier", "ISOLATION_TIER_")
+    value["isolation_tier"] = (
+        "standard" if isolation_tier in ("unspecified", "standard") else isolation_tier
+    )
     value["ports"] = [port_to_dict(port) for port in message.ports]
     return value
+
+
+def assert_environment_converter_coverage() -> None:
+    """Fail when either owned environment adapter drifts from protobuf."""
+    from codewire.v1.environment_pb2 import CreateEnvironmentRequest, Environment
+
+    _assert_descriptor_coverage(
+        "environment", Environment.DESCRIPTOR, _ENVIRONMENT_DESCRIPTOR_FIELDS
+    )
+    _assert_descriptor_coverage(
+        "create environment request",
+        CreateEnvironmentRequest.DESCRIPTOR,
+        _CREATE_ENVIRONMENT_DESCRIPTOR_FIELDS,
+    )
+
+
+def _assert_descriptor_coverage(name: str, descriptor: Any, expected: dict[int, str]) -> None:
+    fields = descriptor.fields
+    if len(fields) != len(expected):
+        raise RuntimeError(
+            f"codewire: {name} converter covers {len(expected)} descriptor fields, "
+            f"expected {len(fields)}"
+        )
+    for field in fields:
+        if expected.get(field.number) != field.name:
+            raise RuntimeError(
+                f"codewire: {name} converter does not cover descriptor field "
+                f"{field.full_name}"
+            )
 
 
 def port_to_dict(message: Message) -> dict[str, Any]:

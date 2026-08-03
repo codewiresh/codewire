@@ -36,6 +36,7 @@ from codewire.v1.environment_pb2 import (
     ListEnvironmentsResponse,
     StartEnvironmentResponse,
     StopEnvironmentResponse,
+    IsolationTier,
 )
 from codewire.v1.exec_connect import ExecServiceWSGIApplication
 from codewire.v1.exec_pb2 import ExecResponse
@@ -101,6 +102,7 @@ ENV_JSON = {
     "total_running_seconds": 0,
     "created_at": "2026-01-01T00:00:00Z",
     "retry_count": 0,
+    "isolation_tier": "confidential",
 }
 
 TMPL_JSON = {
@@ -235,6 +237,9 @@ def _environment(data: dict | None = None) -> ProtoEnvironment:
         total_running_seconds=value["total_running_seconds"],
         created_at=_timestamp(value["created_at"]),
         retry_count=value["retry_count"],
+        isolation_tier=IsolationTier.Value(
+            f"ISOLATION_TIER_{value.get('isolation_tier', 'standard').upper()}"
+        ),
     )
 
 
@@ -259,6 +264,7 @@ class ControlPlaneFixture:
     env_get_count = 0
     env_get_sequence: list[dict] | None = None
     last_create_secret_project = ""
+    last_create_isolation_tier = IsolationTier.ISOLATION_TIER_UNSPECIFIED
 
     def __getattr__(self, name):
         def unimplemented(*args, **kwargs):
@@ -290,6 +296,7 @@ class ControlPlaneFixture:
     def create_environment(self, request, ctx):
         self._require_auth(ctx)
         type(self).last_create_secret_project = request.secret_project
+        type(self).last_create_isolation_tier = request.isolation_tier
         return CreateEnvironmentResponse(environment=_environment())
 
     def get_environment(self, request, ctx):
@@ -562,10 +569,21 @@ class SDKTestCase(unittest.TestCase):
         cls.cw.close()
 
     def test_environment_create(self):
-        env = self.cw.environments.create(template_slug="python")
+        env = self.cw.environments.create(
+            template_slug="python", isolation_tier="confidential"
+        )
         self.assertIsInstance(env, Environment)
         self.assertEqual(env.id, "env_123")
         self.assertEqual(env.state, "running")
+        self.assertEqual(env.isolation_tier, "confidential")
+        self.assertEqual(
+            ControlPlaneFixture.last_create_isolation_tier,
+            IsolationTier.ISOLATION_TIER_CONFIDENTIAL,
+        )
+
+    def test_environment_create_rejects_unknown_isolation_tier(self):
+        with self.assertRaisesRegex(ValueError, "isolation_tier"):
+            self.cw.environments.create(isolation_tier="container")
 
     def test_environment_get(self):
         env = self.cw.environments.get("env_123")

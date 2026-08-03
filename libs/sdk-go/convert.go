@@ -473,6 +473,9 @@ func toProtoRepoEntries(repos *[]RepoEntry) []*codewirev1.RepoEntry {
 }
 
 func createEnvironmentRequest(orgID string, body CreateEnvironmentBody) (*codewirev1.CreateEnvironmentRequest, error) {
+	if err := ensureEnvironmentConverterCoverage(); err != nil {
+		return nil, err
+	}
 	cpu, err := int32FromInt64("cpu_millicores", body.CpuMillicores)
 	if err != nil {
 		return nil, err
@@ -497,6 +500,10 @@ func createEnvironmentRequest(orgID string, body CreateEnvironmentBody) (*codewi
 	if err != nil {
 		return nil, err
 	}
+	isolation, err := toProtoIsolationTier(body.IsolationTier)
+	if err != nil {
+		return nil, err
+	}
 	return &codewirev1.CreateEnvironmentRequest{
 		OrgId: orgID, PresetId: copyStringPointer(body.PresetId), Name: copyStringPointer(body.Name),
 		CpuMillicores: cpu, MemoryMb: memory, DiskGb: disk, TtlSeconds: ttl,
@@ -507,7 +514,7 @@ func createEnvironmentRequest(orgID string, body CreateEnvironmentBody) (*codewi
 		Agent: valueOrEmpty(body.Agent), AgentEnv: copyStringMapPointer(body.AgentEnv),
 		SecretProject: valueOrEmpty(body.SecretProject), AppPorts: ports,
 		IncludeOrgSecrets: copyBoolPointer(body.IncludeOrgSecrets), IncludeUserSecrets: copyBoolPointer(body.IncludeUserSecrets),
-		IsolationTier: toProtoIsolationTier(body.IsolationTier),
+		IsolationTier: isolation,
 	}, nil
 }
 
@@ -554,6 +561,10 @@ func fromProtoEnvironment(environment *codewirev1.Environment) (EnvironmentData,
 	if err != nil {
 		return EnvironmentData{}, err
 	}
+	isolation, err := isolationTier(environment.GetIsolationTier())
+	if err != nil {
+		return EnvironmentData{}, err
+	}
 	var ttl *int64
 	if environment.TtlSeconds != nil {
 		value := int64(*environment.TtlSeconds)
@@ -564,7 +575,7 @@ func fromProtoEnvironment(environment *codewirev1.Environment) (EnvironmentData,
 		CreatedBy: environment.GetCreatedBy(), DeletionGraceUntil: deletionGraceUntil,
 		DeletionRequestedAt: deletionRequestedAt, DesiredState: environmentDesiredState(environment.GetDesiredState()),
 		DestroyedAt: destroyedAt, DiskGb: int64(environment.GetDiskGb()), ErrorReason: stringPointer(environment.GetErrorReason()),
-		Id: environment.GetId(), IsolationTier: isolationTier(environment.GetIsolationTier()),
+		Id: environment.GetId(), IsolationTier: isolation,
 		MemoryMb: int64(environment.GetMemoryMb()), Name: stringPointer(environment.GetName()),
 		Network: stringPointer(environment.GetNetwork()), OrgId: environment.GetOrgId(), Ports: ports,
 		PresetId: stringPointer(environment.GetPresetId()), PresetName: stringPointer(environment.GetPresetName()),
@@ -697,26 +708,26 @@ func environmentDesiredState(state codewirev1.DesiredState) string {
 	}
 }
 
-func isolationTier(tier codewirev1.IsolationTier) string {
+func isolationTier(tier codewirev1.IsolationTier) (string, error) {
 	switch tier {
 	case codewirev1.IsolationTier_ISOLATION_TIER_UNSPECIFIED,
 		codewirev1.IsolationTier_ISOLATION_TIER_STANDARD:
-		return "standard"
+		return "standard", nil
 	case codewirev1.IsolationTier_ISOLATION_TIER_CONFIDENTIAL:
-		return "confidential"
+		return "confidential", nil
 	default:
-		return "unknown"
+		return "", fmt.Errorf("codewire: unknown environment isolation tier %d", tier)
 	}
 }
 
-func toProtoIsolationTier(tier *string) codewirev1.IsolationTier {
+func toProtoIsolationTier(tier *string) (codewirev1.IsolationTier, error) {
 	if tier == nil || *tier == "" || *tier == "standard" {
-		return codewirev1.IsolationTier_ISOLATION_TIER_STANDARD
+		return codewirev1.IsolationTier_ISOLATION_TIER_STANDARD, nil
 	}
 	if *tier == "confidential" {
-		return codewirev1.IsolationTier_ISOLATION_TIER_CONFIDENTIAL
+		return codewirev1.IsolationTier_ISOLATION_TIER_CONFIDENTIAL, nil
 	}
-	return codewirev1.IsolationTier(-1)
+	return codewirev1.IsolationTier_ISOLATION_TIER_UNSPECIFIED, fmt.Errorf("codewire: isolation_tier must be standard or confidential")
 }
 
 func toProtoEnvironmentState(state *string) codewirev1.EnvironmentState {
@@ -815,6 +826,12 @@ func ensureEnvironmentConverterCoverage() error {
 	environmentCoverageOnce.Do(func() {
 		environmentCoverageErr = ensureDescriptorCoverage("environment", codewirev1.File_codewire_v1_environment_proto.Messages().ByName("Environment"), map[protoreflect.FieldNumber]protoreflect.Name{
 			1: "id", 2: "org_id", 3: "created_by", 4: "preset_id", 5: "type", 6: "name", 7: "state", 8: "desired_state", 9: "error_reason", 10: "recoverable", 11: "state_changed_at", 12: "retry_count", 13: "setup_phase", 14: "setup_complete", 15: "setup_error", 16: "ttl_seconds", 17: "shutdown_at", 18: "cpu_millicores", 19: "memory_mb", 20: "disk_gb", 21: "total_running_seconds", 22: "created_at", 23: "started_at", 24: "stopped_at", 25: "destroyed_at", 26: "protected", 27: "deletion_requested_at", 28: "deletion_grace_until", 29: "preset_name", 30: "network", 31: "ports", 32: "isolation_tier",
+		})
+		if environmentCoverageErr != nil {
+			return
+		}
+		environmentCoverageErr = ensureDescriptorCoverage("create environment request", codewirev1.File_codewire_v1_environment_proto.Messages().ByName("CreateEnvironmentRequest"), map[protoreflect.FieldNumber]protoreflect.Name{
+			1: "org_id", 2: "preset_id", 3: "name", 4: "cpu_millicores", 5: "memory_mb", 6: "disk_gb", 7: "ttl_seconds", 8: "preset_slug", 9: "repo_url", 10: "branch", 11: "repos", 12: "image", 13: "install_command", 14: "startup_script", 15: "env_vars", 16: "agents", 17: "install_agents", 18: "agent", 19: "agent_env", 20: "secret_project", 21: "app_ports", 22: "include_org_secrets", 23: "include_user_secrets", 24: "isolation_tier",
 		})
 	})
 	return environmentCoverageErr

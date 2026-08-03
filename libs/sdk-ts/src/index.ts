@@ -85,6 +85,7 @@ export type {
   FieldViolation,
   CreateEnvironmentRequest,
   EnvironmentData,
+  IsolationTier,
   TemplateData,
   CreateTemplateRequest,
   UpdateTemplateRequest,

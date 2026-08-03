@@ -5,7 +5,11 @@ from typing import BinaryIO
 from google.protobuf.duration_pb2 import Duration
 
 from codewire._context import ConnectContext
-from codewire._convert import environment_to_dict, port_to_dict
+from codewire._convert import (
+    assert_environment_converter_coverage,
+    environment_to_dict,
+    port_to_dict,
+)
 from codewire.environment import Environment
 from codewire.environment_ops import exec_environment, list_environment_ports
 from codewire.files import Files
@@ -19,6 +23,7 @@ from codewire.v1.environment_pb2 import (
     ListEnvironmentsRequest,
     StartEnvironmentRequest,
     StopEnvironmentRequest,
+    IsolationTier,
 )
 from codewire.v1.port_connect import PortServiceClientSync
 from codewire.v1.port_pb2 import (
@@ -44,6 +49,14 @@ def _port_access(value: str | None) -> int:
         return PortAccess.Value(f"PORT_ACCESS_{value.upper()}")
     except ValueError:
         return -1
+
+
+def _isolation_tier(value: str | None) -> int:
+    if value is None or value == "" or value == "standard":
+        return IsolationTier.ISOLATION_TIER_STANDARD
+    if value == "confidential":
+        return IsolationTier.ISOLATION_TIER_CONFIDENTIAL
+    raise ValueError("codewire: isolation_tier must be standard or confidential")
 
 
 class Environments:
@@ -74,6 +87,7 @@ class Environments:
         app_ports: list[dict] | None = None,
         include_org_secrets: bool | None = None,
         include_user_secrets: bool | None = None,
+        isolation_tier: str | None = None,
         secret_project: str | None = None,
         wait: bool = False,
         wait_timeout: float = 300,
@@ -82,7 +96,11 @@ class Environments:
         # ``type`` was never accepted by the REST create body. Keep the frozen
         # public argument but do not invent a second wire representation for it.
         del type
-        request = CreateEnvironmentRequest(org_id=self._context.resolve_org_id())
+        assert_environment_converter_coverage()
+        request = CreateEnvironmentRequest(
+            org_id=self._context.resolve_org_id(),
+            isolation_tier=_isolation_tier(isolation_tier),
+        )
         if template_slug is not None:
             request.preset_slug = template_slug
         if template_id is not None:

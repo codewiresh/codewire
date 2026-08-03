@@ -548,6 +548,17 @@ elif [ "$event_selected" = false ]; then
     esac
 
     case "$path" in
+      proto/codewire/v1/environment.proto)
+        # The public environment adapters are hand-owned in every SDK. Run all
+        # three whenever their canonical request/response schema changes.
+        select_token sdk_go
+        select_token sdk_python
+        select_token sdk_ts
+        recognized=true
+        ;;
+    esac
+
+    case "$path" in
       apps/api/*|autoagent/*|libs/gatewayauth/*|\
       libs/gateway-proto/gen/*|libs/gateway-proto/buf.gen.yaml|\
       libs/gateway-proto/go.mod|libs/gateway-proto/go.sum|\

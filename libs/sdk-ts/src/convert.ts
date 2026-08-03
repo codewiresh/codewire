@@ -11,9 +11,11 @@ import {
   type SetupConfig as ProtoSetupConfig,
 } from "@codewire/proto-ts/gen/codewire/v1/common_pb";
 import {
+  CreateEnvironmentRequestSchema,
   DesiredState,
   EnvironmentSchema,
   EnvironmentState,
+  IsolationTier as ProtoIsolationTier,
   type Environment as ProtoEnvironment,
 } from "@codewire/proto-ts/gen/codewire/v1/environment_pb";
 import type { ExecResponse } from "@codewire/proto-ts/gen/codewire/v1/exec_pb";
@@ -47,6 +49,7 @@ import type {
   ExecRequest,
   ExecResult,
   FileEntry,
+  IsolationTier,
   ListEnvironmentsParams,
   SecretMetadata,
   SecretProject,
@@ -157,6 +160,30 @@ function mapDesiredState(state: DesiredState): string {
       return "resized";
     default:
       return "unknown";
+  }
+}
+
+function mapIsolationTier(value: ProtoIsolationTier): IsolationTier {
+  switch (value) {
+    case ProtoIsolationTier.UNSPECIFIED:
+    case ProtoIsolationTier.STANDARD:
+      return "standard";
+    case ProtoIsolationTier.CONFIDENTIAL:
+      return "confidential";
+    default:
+      throw new Error(`codewire: unknown isolation tier ${value}`);
+  }
+}
+
+function toProtoIsolationTier(value: IsolationTier | undefined): ProtoIsolationTier {
+  switch (value) {
+    case undefined:
+    case "standard":
+      return ProtoIsolationTier.STANDARD;
+    case "confidential":
+      return ProtoIsolationTier.CONFIDENTIAL;
+    default:
+      throw new Error("codewire: isolation_tier must be standard or confidential");
   }
 }
 
@@ -353,6 +380,7 @@ export function fromProtoEnvironment(value: ProtoEnvironment): EnvironmentData {
     disk_gb: value.diskGb,
     error_reason: optionalString(value.errorReason),
     id: value.id,
+    isolation_tier: mapIsolationTier(value.isolationTier),
     memory_mb: value.memoryMb,
     name: optionalString(value.name),
     network: optionalString(value.network),
@@ -475,6 +503,7 @@ export function toProtoCreateEnvironmentRequest(
     appPorts: toProtoAppPorts(body.app_ports),
     includeOrgSecrets: body.include_org_secrets ?? undefined,
     includeUserSecrets: body.include_user_secrets ?? undefined,
+    isolationTier: toProtoIsolationTier(body.isolation_tier),
   };
 }
 
@@ -606,7 +635,10 @@ export function assertAPIKeyConverterCoverage(): void {
 /** Throws when a future runtime proto field has no owned SDK conversion. */
 export function assertRuntimeConverterCoverage(): void {
   assertDescriptorCoverage("environment", EnvironmentSchema.fields, new Map([
-    [1, "id"], [2, "org_id"], [3, "created_by"], [4, "preset_id"], [5, "type"], [6, "name"], [7, "state"], [8, "desired_state"], [9, "error_reason"], [10, "recoverable"], [11, "state_changed_at"], [12, "retry_count"], [13, "setup_phase"], [14, "setup_complete"], [15, "setup_error"], [16, "ttl_seconds"], [17, "shutdown_at"], [18, "cpu_millicores"], [19, "memory_mb"], [20, "disk_gb"], [21, "total_running_seconds"], [22, "created_at"], [23, "started_at"], [24, "stopped_at"], [25, "destroyed_at"], [26, "protected"], [27, "deletion_requested_at"], [28, "deletion_grace_until"], [29, "preset_name"], [30, "network"], [31, "ports"],
+    [1, "id"], [2, "org_id"], [3, "created_by"], [4, "preset_id"], [5, "type"], [6, "name"], [7, "state"], [8, "desired_state"], [9, "error_reason"], [10, "recoverable"], [11, "state_changed_at"], [12, "retry_count"], [13, "setup_phase"], [14, "setup_complete"], [15, "setup_error"], [16, "ttl_seconds"], [17, "shutdown_at"], [18, "cpu_millicores"], [19, "memory_mb"], [20, "disk_gb"], [21, "total_running_seconds"], [22, "created_at"], [23, "started_at"], [24, "stopped_at"], [25, "destroyed_at"], [26, "protected"], [27, "deletion_requested_at"], [28, "deletion_grace_until"], [29, "preset_name"], [30, "network"], [31, "ports"], [32, "isolation_tier"],
+  ]));
+  assertDescriptorCoverage("create environment request", CreateEnvironmentRequestSchema.fields, new Map([
+    [1, "org_id"], [2, "preset_id"], [3, "name"], [4, "cpu_millicores"], [5, "memory_mb"], [6, "disk_gb"], [7, "ttl_seconds"], [8, "preset_slug"], [9, "repo_url"], [10, "branch"], [11, "repos"], [12, "image"], [13, "install_command"], [14, "startup_script"], [15, "env_vars"], [16, "agents"], [17, "install_agents"], [18, "agent"], [19, "agent_env"], [20, "secret_project"], [21, "app_ports"], [22, "include_org_secrets"], [23, "include_user_secrets"], [24, "isolation_tier"],
   ]));
   assertDescriptorCoverage("environment port", PortSchema.fields, new Map([
     [1, "id"], [2, "environment_id"], [3, "port"], [4, "label"], [5, "access"], [6, "preview_url"], [7, "created_at"],

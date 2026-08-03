@@ -242,6 +242,10 @@ func TestEnvironmentConvertersGolden(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("converted environment mismatch (-want +got):\nwant: %#v\n got: %#v", want, got)
 	}
+	invalidEnvironment := &codewirev1.Environment{IsolationTier: codewirev1.IsolationTier(-1)}
+	if _, err := fromProtoEnvironment(invalidEnvironment); err == nil {
+		t.Error("environment converter accepted an unknown isolation tier")
+	}
 
 	file, err := fromProtoFileEntry(&codewirev1.FileEntry{
 		Name: "main.go", Size: 42, IsDir: false, Mode: 0o100755,
@@ -295,6 +299,10 @@ func TestCreateEnvironmentRequestPreservesOwnedNestedValues(t *testing.T) {
 		return err == nil
 	}() {
 		t.Error("create environment request accepted overflow CPU value")
+	}
+	invalidIsolation := "container"
+	if _, err := createEnvironmentRequest("org_1", CreateEnvironmentBody{IsolationTier: &invalidIsolation}); err == nil {
+		t.Error("create environment request accepted an unknown isolation tier")
 	}
 }
 
