@@ -725,16 +725,19 @@ pub async fn report_environment_overages(deps: &MeteringDeps) -> anyhow::Result<
                         continue;
                     }
                     Ok(id) => {
-                        complete_subscription_operation_and_watermark(
-                            pool,
-                            &idempotency_key,
-                            &id,
-                            &org_id,
-                            month_start,
+                        let watermark = UsageWatermark {
+                            org_id: &org_id,
+                            period_start: month_start,
                             cpu_hours,
                             mem_gb_hours,
                             disk_gb_hours,
                             overage_cents,
+                        };
+                        complete_subscription_operation_and_watermark(
+                            pool,
+                            &idempotency_key,
+                            &id,
+                            watermark,
                         )
                         .await?;
                         new_item_id = Some(id);
@@ -885,16 +888,19 @@ pub async fn report_environment_overages(deps: &MeteringDeps) -> anyhow::Result<
                 continue;
             }
 
-            complete_direct_invoice_operation_and_watermark(
-                pool,
-                &finalize_key,
-                &invoice_id,
-                &org_id,
-                month_start,
+            let watermark = UsageWatermark {
+                org_id: &org_id,
+                period_start: month_start,
                 cpu_hours,
                 mem_gb_hours,
                 disk_gb_hours,
                 overage_cents,
+            };
+            complete_direct_invoice_operation_and_watermark(
+                pool,
+                &finalize_key,
+                &invoice_id,
+                watermark,
             )
             .await?;
             tracing::info!(
@@ -954,6 +960,15 @@ async fn begin_external_operation(
     Ok(())
 }
 
+struct UsageWatermark<'a> {
+    org_id: &'a str,
+    period_start: chrono::DateTime<chrono::Utc>,
+    cpu_hours: f64,
+    mem_gb_hours: f64,
+    disk_gb_hours: f64,
+    overage_cents: i32,
+}
+
 /// Record the provider result and its usage watermark in one database
 /// transaction. The watermark is therefore never ahead of durable evidence
 /// that identifies the exact Stripe mutation which produced it.
@@ -961,12 +976,7 @@ async fn complete_subscription_operation_and_watermark(
     pool: &PgPool,
     idempotency_key: &str,
     provider_object_id: &str,
-    org_id: &str,
-    period_start: chrono::DateTime<chrono::Utc>,
-    cpu_hours: f64,
-    mem_gb_hours: f64,
-    disk_gb_hours: f64,
-    overage_cents: i32,
+    watermark: UsageWatermark<'_>,
 ) -> anyhow::Result<()> {
     let mut tx = pool.begin().await?;
     let updated = sqlx::query(
@@ -996,12 +1006,12 @@ async fn complete_subscription_operation_and_watermark(
                          stripe_invoice_item_id = EXCLUDED.stripe_invoice_item_id,
                          updated_at = NOW()"#,
     )
-    .bind(org_id)
-    .bind(period_start)
-    .bind(cpu_hours)
-    .bind(mem_gb_hours)
-    .bind(disk_gb_hours)
-    .bind(overage_cents)
+    .bind(watermark.org_id)
+    .bind(watermark.period_start)
+    .bind(watermark.cpu_hours)
+    .bind(watermark.mem_gb_hours)
+    .bind(watermark.disk_gb_hours)
+    .bind(watermark.overage_cents)
     .bind(provider_object_id)
     .execute(&mut *tx)
     .await?;
@@ -1035,12 +1045,7 @@ async fn complete_direct_invoice_operation_and_watermark(
     pool: &PgPool,
     idempotency_key: &str,
     provider_object_id: &str,
-    org_id: &str,
-    period_start: chrono::DateTime<chrono::Utc>,
-    cpu_hours: f64,
-    mem_gb_hours: f64,
-    disk_gb_hours: f64,
-    overage_cents: i32,
+    watermark: UsageWatermark<'_>,
 ) -> anyhow::Result<()> {
     let mut tx = pool.begin().await?;
     let updated = sqlx::query(
@@ -1070,12 +1075,12 @@ async fn complete_direct_invoice_operation_and_watermark(
                          stripe_invoice_item_id = NULL,
                          updated_at = NOW()"#,
     )
-    .bind(org_id)
-    .bind(period_start)
-    .bind(cpu_hours)
-    .bind(mem_gb_hours)
-    .bind(disk_gb_hours)
-    .bind(overage_cents)
+    .bind(watermark.org_id)
+    .bind(watermark.period_start)
+    .bind(watermark.cpu_hours)
+    .bind(watermark.mem_gb_hours)
+    .bind(watermark.disk_gb_hours)
+    .bind(watermark.overage_cents)
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
