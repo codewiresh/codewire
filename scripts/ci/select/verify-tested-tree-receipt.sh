@@ -11,6 +11,9 @@ reason='unverified'
 pr_number=''
 tested_head=''
 tested_run=''
+tested_policy_commit=''
+tested_policy_sha256=''
+tested_plan_sha256=''
 
 emit_outputs() {
   local output
@@ -18,7 +21,10 @@ emit_outputs() {
 tested_tree_reason=${reason}
 tested_tree_pr=${pr_number}
 tested_tree_head=${tested_head}
-tested_tree_run=${tested_run}"
+tested_tree_run=${tested_run}
+tested_tree_policy_commit=${tested_policy_commit}
+tested_tree_policy_sha256=${tested_policy_sha256}
+tested_tree_plan_sha256=${tested_plan_sha256}"
   if [ -n "${GITHUB_OUTPUT:-}" ]; then
     printf '%s\n' "$output" >> "$GITHUB_OUTPUT"
   fi
@@ -69,6 +75,7 @@ while IFS= read -r path; do
     scripts/ci/select/select-verification.sh|\
     scripts/ci/select/require-verification-results.sh|\
     scripts/ci/select/verify-tested-tree-receipt.sh|\
+    scripts/ci/plan/*|\
     scripts/ci/tests/test-select-verification.sh|\
     scripts/ci/tests/test-require-verification-results.sh|\
     scripts/ci/tests/test-verify-tested-tree-receipt.sh)
@@ -77,7 +84,7 @@ while IFS= read -r path; do
   esac
 done < "$changed_paths"
 
-for required_tool in curl jq; do
+for required_tool in base64 curl jq; do
   command -v "$required_tool" >/dev/null 2>&1 \
     || fallback "${required_tool}-unavailable"
 done
@@ -186,7 +193,7 @@ jobs_json="$tmp/jobs.json"
 api_get "/actions/runs/${tested_run}/jobs?page=1&limit=100" "$jobs_json" \
   || fallback 'tested-run-jobs-unavailable'
 
-if ! jq -e --arg head "$tested_head" --argjson attempt "$run_attempt" '
+if ! required_job_id="$(jq -er --arg head "$tested_head" --argjson attempt "$run_attempt" '
     select(.total_count | type == "number" and . >= 0 and . <= 100)
     | [
         .jobs[]
@@ -196,12 +203,75 @@ if ! jq -e --arg head "$tested_head" --argjson attempt "$run_attempt" '
             and .run_attempt == $attempt
           )
       ]
-    | length == 1
-      and .[0].status == "completed"
-      and .[0].conclusion == "success"
-  ' "$jobs_json" >/dev/null; then
+    | select(length == 1)
+    | .[0]
+    | select(.status == "completed" and .conclusion == "success")
+    | .id
+    | select(type == "number" and . > 0)
+  ' "$jobs_json")"; then
   fallback 'required-verification-not-successful'
 fi
+[[ "$required_job_id" =~ ^[1-9][0-9]*$ ]] \
+  || fallback 'required-verification-job-invalid'
+
+job_log="$tmp/required-verification.log"
+api_get "/actions/jobs/${required_job_id}/logs" "$job_log" \
+  || fallback 'required-verification-log-unavailable'
+
+mapfile -t encoded_receipts < <(
+  grep -oE 'CODEWIRE_CI_VERIFICATION_RECEIPT=[A-Za-z0-9+/=]+' "$job_log" \
+    || true
+)
+[ "${#encoded_receipts[@]}" -eq 1 ] \
+  || fallback 'verification-receipt-count-invalid'
+encoded_receipt="${encoded_receipts[0]#CODEWIRE_CI_VERIFICATION_RECEIPT=}"
+receipt_json="$tmp/verification-receipt.json"
+if ! printf '%s' "$encoded_receipt" | base64 --decode > "$receipt_json" 2>/dev/null; then
+  fallback 'verification-receipt-encoding-invalid'
+fi
+
+if ! jq -e \
+    --arg repository "$repository" \
+    --arg workflow "$workflow_path" \
+    --argjson pr "$pr_number" \
+    --argjson run "$tested_run" \
+    --argjson attempt "$run_attempt" \
+    --arg base "$parent_sha" \
+    --arg head "$tested_head" \
+    --arg tree "$tested_tree" '
+      select(type == "object")
+      | select(.schema == "codewire.ci-verification-receipt/v1")
+      | select(.repository == $repository and .event == "pull_request")
+      | select(.pull_request == $pr and .workflow_path == $workflow)
+      | select(.run == {id: $run, attempt: $attempt, job: "Required verification"})
+      | select(.source == {base_commit: $base, head_commit: $head, head_tree: $tree})
+      | select(.plan.schema == "codewire.ci-plan/v1" and .plan.status == "trusted")
+      | select(.plan.trusted_policy_commit == $base and .plan.baseline_commit == $base)
+      | select(.plan.sha256 | test("^[0-9a-f]{64}$"))
+      | select(.plan.policy_sha256 | test("^[0-9a-f]{64}$"))
+      | select(.plan.graph_sha256 | test("^[0-9a-f]{64}$"))
+      | select((.plan.artifacts | keys | sort) == ["cw_cli_release_assets", "desktop_package"])
+      | select([.plan.artifacts[]] | all(. == "affected" or . == "unaffected" or . == "unclassified"))
+      | select(.selection | startswith("|valid:v2|") and endswith("|complete|"))
+      | select(
+          (.plan.artifacts.desktop_package != "unaffected")
+          == (.selection | contains("|rust_pkg_codewire_desktop|"))
+        )
+      | select(.results == {
+          selection: "success",
+          standard: "success",
+          rust_transport: "success",
+          database_services: "success",
+          edge_kind: "success",
+          cw_release_assets: "success"
+        })
+    ' "$receipt_json" >/dev/null; then
+  fallback 'verification-receipt-mismatch'
+fi
+
+tested_policy_commit="$(jq -r '.plan.trusted_policy_commit' "$receipt_json")"
+tested_policy_sha256="$(jq -r '.plan.policy_sha256' "$receipt_json")"
+tested_plan_sha256="$(jq -r '.plan.sha256' "$receipt_json")"
 
 receipt='accepted'
 reason='exact-tested-tree'

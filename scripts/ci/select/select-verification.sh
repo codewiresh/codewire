@@ -365,6 +365,7 @@ elif [ "$event_selected" = false ]; then
       scripts/ci/select/verify-release-tag-receipt.sh|\
       scripts/ci/select/artifact-impact.py|\
       scripts/ci/select/select-support-images.sh|\
+      scripts/ci/plan/*|\
       scripts/ci/tests/test-select-verification.sh|scripts/ci/tests/test-select-deploy-dev.sh|\
       scripts/ci/tests/test-setup-kubeconfig.sh|\
       scripts/ci/tests/test-artifact-impact.py|\
@@ -391,7 +392,15 @@ elif [ "$event_selected" = false ]; then
     esac
 
     case "$path" in
-      .gitea/workflows/desktop-package.yaml|\
+      .gitea/workflows/desktop-package.yaml)
+        # Deletion-only tombstone. The canonical artifact plan now owns the
+        # desktop package decision inside the Rust capability group.
+        select_token policy
+        recognized=true
+        ;;
+    esac
+
+    case "$path" in
       scripts/ci/release/package-codewire-desktop.sh|\
       scripts/ci/tests/test-package-codewire-desktop.sh|\
       scripts/checks/source/check-native-desktop-ui.py|\

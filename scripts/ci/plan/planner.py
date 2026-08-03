@@ -751,8 +751,13 @@ def policy_changed(paths: Iterable[str]) -> str | None:
         "scripts/ci/receipts/",
         "scripts/ci/receipt/",
     )
+    sensitive_files = {
+        "scripts/ci/select/require-verification-results.sh",
+        "scripts/ci/select/select-verification.sh",
+        "scripts/ci/select/verify-tested-tree-receipt.sh",
+    }
     for path in paths:
-        if path.startswith(sensitive_prefixes):
+        if path in sensitive_files or path.startswith(sensitive_prefixes):
             return path
     return None
 

@@ -4,17 +4,17 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 PACKAGE="$ROOT/scripts/ci/release/package-codewire-desktop.sh"
 CI_WORKFLOW="$ROOT/.gitea/workflows/ci.yaml"
-PACKAGE_WORKFLOW="$ROOT/.gitea/workflows/desktop-package.yaml"
 mkdir -p "$ROOT/.tmp"
 TMP="$(mktemp -d "$ROOT/.tmp/test-package-codewire-desktop.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT
 
-# Wry links xkbcommon-x11 directly. Keep both CI paths honest: the selected
-# Rust gate and the private package workflow must install the development
-# library that provides the linker-visible unversioned shared object.
-for workflow in "$CI_WORKFLOW" "$PACKAGE_WORKFLOW"; do
-  grep -Fq 'libxkbcommon-x11-dev' "$workflow"
-done
+# Wry links xkbcommon-x11 directly. The planner-selected Rust capability group
+# is the one PR package path and must install the linker-visible development
+# library before the detached package dry run.
+grep -Fq 'libxkbcommon-x11-dev' "$CI_WORKFLOW"
+grep -Fq "contains(needs.verification-selection.outputs.selection, '|rust_pkg_codewire_desktop|')" \
+  "$CI_WORKFLOW"
+[ ! -e "$ROOT/.gitea/workflows/desktop-package.yaml" ]
 
 mkdir -p "$TMP/bin" "$TMP/target/release"
 printf '#!/usr/bin/env sh\nexit 0\n' >"$TMP/target/release/codewire"

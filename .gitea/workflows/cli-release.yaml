@@ -3,29 +3,6 @@ name: Release cw CLI
 on:
   push:
     tags: ['v*']
-  pull_request:
-    branches: [main]
-    paths:
-      - '.gitea/workflows/cli-release.yaml'
-      - 'scripts/ci/release/verify-release-tag-ref.sh'
-      - 'scripts/ci/tests/test-verify-release-tag-ref.sh'
-      - 'scripts/ci/tests/test-cw-install-signature.sh'
-      - 'scripts/ci/tests/test-publish-cw-release.sh'
-      - 'scripts/ci/release/check-cw-darwin-sdkless.sh'
-      - 'scripts/ci/release/package-cw-release.sh'
-      - 'scripts/ci/release/publish-cw-release.sh'
-      - 'scripts/ci/release/verify-cw-release-signing-key.sh'
-      - 'scripts/ci/tests/test-verify-cw-release-signing-key.sh'
-      - 'apps/cli/GPG_PUBLIC_KEY.asc'
-      - 'keys/production-release.asc'
-      - 'apps/cli/install.sh'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - 'crates/codewire-cli/**'
-      - 'crates/codewire-cli-bin/**'
-      - 'crates/codewire-daemon/**'
-      - 'crates/codewire-gateway-proto/**'
-      - 'libs/gateway-proto/**'
   workflow_dispatch:
     inputs:
       release_tag:
@@ -44,7 +21,6 @@ env:
 jobs:
   release-selection:
     name: Verify canonical CLI release tag
-    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     outputs:
       release_tag: ${{ steps.select.outputs.release_tag }}
@@ -108,62 +84,6 @@ jobs:
           printf 'release_tag=%s\n' "$selected_tag" >> "$GITHUB_OUTPUT"
           printf 'source_sha=%s\n' "$source_sha" >> "$GITHUB_OUTPUT"
           printf 'tag_object_sha=%s\n' "$remote_object_sha" >> "$GITHUB_OUTPUT"
-
-  package-dry-run:
-    name: Package Rust cw release assets
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
-
-      - uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b
-        with:
-          toolchain: stable
-          targets: x86_64-unknown-linux-musl,aarch64-unknown-linux-gnu,x86_64-apple-darwin,aarch64-apple-darwin
-
-      - name: Install protoc (pinned)
-        run: |
-          set -euo pipefail
-          curl -fsSL -o /tmp/protoc.zip "https://github.com/protocolbuffers/protobuf/releases/download/v35.1/protoc-35.1-linux-x86_64.zip"
-          echo "6930ebf62bd4ea607b98fff052596c6ee564b9835b4ce172c75a3f53ae9d91b7  /tmp/protoc.zip" | sha256sum -c -
-          mkdir -p "$HOME/.proto-tools/protoc"
-          unzip -o -q /tmp/protoc.zip -d "$HOME/.proto-tools/protoc"
-          echo "$HOME/.proto-tools/protoc/bin" >> "$GITHUB_PATH"
-          "$HOME/.proto-tools/protoc/bin/protoc" --version
-
-      - name: Install cross-build tools
-        run: |
-          set -euo pipefail
-          if command -v sudo >/dev/null 2>&1; then
-            APT="sudo apt-get"
-          else
-            APT="apt-get"
-          fi
-          $APT update -qq || true
-          $APT install -y -qq ca-certificates curl xz-utils
-
-          zig_url="https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${ZIG_VERSION}.tar.xz"
-          curl -fsSLo zig.tar.xz "$zig_url"
-          echo "${ZIG_X86_64_LINUX_SHA256}  zig.tar.xz" | sha256sum -c -
-          tar -xf zig.tar.xz
-          echo "$PWD/zig-x86_64-linux-${ZIG_VERSION}" >> "$GITHUB_PATH"
-
-          cargo install --locked cargo-zigbuild --version "$CARGO_ZIGBUILD_VERSION"
-
-      - name: Reject Darwin SDK framework dependencies
-        run: scripts/ci/release/check-cw-darwin-sdkless.sh
-
-      - name: Package four-target dry-run assets
-        run: |
-          set -euo pipefail
-          CW_RELEASE_PROFILE=ci \
-            CW_RELEASE_BUILD_CMD='cargo zigbuild' \
-            CW_RELEASE_REQUIRE_SIGNATURE=0 \
-            CW_RELEASE_TARGETS='x86_64-unknown-linux-musl aarch64-unknown-linux-gnu x86_64-apple-darwin aarch64-apple-darwin' \
-            scripts/ci/release/package-cw-release.sh v0.0.0-ci
-          "dist/cw-release/cw-v0.0.0-ci-x86_64-unknown-linux-musl" --version | grep -F 'v0.0.0-ci'
-          [ "$(wc -l < dist/cw-release/SHA256SUMS)" -eq 4 ]
-          (cd dist/cw-release && sha256sum --check --ignore-missing SHA256SUMS)
 
   package-release:
     name: Package and publish signed Rust cw release

@@ -375,6 +375,11 @@ class PlannerFixtureTests(unittest.TestCase):
         document = self.repo.plan()
         self.assertTrue(all(value["state"] == "unclassified" for value in document["artifacts"].values()))
 
+    def test_legacy_selector_change_fails_every_artifact_closed(self) -> None:
+        self.repo.change("scripts/ci/select/select-verification.sh", "#!/bin/sh\nexit 0\n")
+        document = self.repo.plan()
+        self.assertTrue(all(value["state"] == "unclassified" for value in document["artifacts"].values()))
+
     def test_unrelated_app_change_does_not_package_rust(self) -> None:
         self.repo.change("apps/dashboard/README.md", "billing-only equivalent\n")
         self.assertEqual(self.states(self.repo.plan()), ("unaffected", "unaffected"))

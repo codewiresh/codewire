@@ -11,6 +11,7 @@ green_results=(
   VERIFICATION_RUST_TRANSPORT_RESULT=success
   VERIFICATION_DATABASE_SERVICES_RESULT=success
   VERIFICATION_EDGE_KIND_RESULT=success
+  VERIFICATION_CW_RELEASE_ASSETS_RESULT=success
 )
 
 expect_failure() {
@@ -39,6 +40,9 @@ env "${green_results[@]}" \
   VERIFICATION_TESTED_TREE_PR=42 \
   VERIFICATION_TESTED_TREE_HEAD=0123456789abcdef0123456789abcdef01234567 \
   VERIFICATION_TESTED_TREE_RUN=501 \
+  VERIFICATION_TESTED_TREE_POLICY_COMMIT=0123456789abcdef0123456789abcdef01234567 \
+  VERIFICATION_TESTED_TREE_POLICY_SHA256=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef \
+  VERIFICATION_TESTED_TREE_PLAN_SHA256=abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789 \
   "$CHECK" >/dev/null
 
 expect_failure standard_failure 'standard capability group concluded failure' \
@@ -58,6 +62,11 @@ expect_failure database_services_skip \
 expect_failure edge_kind_missing 'edge-kind capability group concluded missing' \
   VERIFICATION_SELECTION='|valid:v2|policy|complete|' \
   VERIFICATION_EDGE_KIND_RESULT=
+
+expect_failure cw_release_assets_failure \
+  'cw-release-assets capability group concluded failure' \
+  VERIFICATION_SELECTION='|valid:v2|policy|complete|' \
+  VERIFICATION_CW_RELEASE_ASSETS_RESULT=failure
 
 expect_failure malformed_selection 'verification selection is invalid or incomplete' \
   VERIFICATION_SELECTION='|valid:v2|policy|'

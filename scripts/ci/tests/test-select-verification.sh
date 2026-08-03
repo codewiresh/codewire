@@ -5,9 +5,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 SELECTOR="$ROOT/scripts/ci/select/select-verification.sh"
 WORKFLOW="$ROOT/.gitea/workflows/ci.yaml"
 DIAGNOSTICS_WORKFLOW="$ROOT/.gitea/workflows/manual-diagnostics.yaml"
-DESKTOP_WORKFLOW="$ROOT/.gitea/workflows/desktop-package.yaml"
 WORKSPACE_IMAGE_WORKFLOW="$ROOT/.gitea/workflows/workspace-image-verify.yaml"
-CLI_PACKAGE_WORKFLOW="$ROOT/.gitea/workflows/cli-release.yaml"
+CLI_RELEASE_WORKFLOW="$ROOT/.gitea/workflows/cli-release.yaml"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
@@ -255,9 +254,12 @@ run_paths_case native_desktop_ui_guard pull_request refs/pull/4031/head false \
   scripts/checks/contracts/native-desktop-ui-policy.json
 run_paths_case detached_desktop_package pull_request refs/pull/404/head false \
   'policy rust rust_pkg_codewire_desktop' \
-  .gitea/workflows/desktop-package.yaml \
   scripts/ci/release/package-codewire-desktop.sh \
   scripts/ci/tests/test-package-codewire-desktop.sh
+run_paths_case retired_desktop_workflow pull_request refs/pull/405/head false \
+  'policy' .gitea/workflows/desktop-package.yaml
+run_paths_case artifact_plan_policy pull_request refs/pull/406/head false \
+  'policy' scripts/ci/plan/planner.py scripts/ci/plan/artifact-graph.json
 run_paths_case rust_root pull_request refs/pull/5/head false \
   'policy rust rust_curated_locks rust_workspace' Cargo.lock
 run_paths_case curated_gateway_member_manifest pull_request refs/pull/501/head false \
@@ -550,14 +552,19 @@ run_paths_case makefile_only pull_request refs/pull/152/head false \
 run_paths_case buildx_two_file_replay pull_request refs/pull/1520/head false \
   'deploy edge_kind go_consumer_interop go_support policy release runtime_confidential security' \
   Makefile scripts/checks/security/audit-runtime-images.sh
-for workflow_case in \
-    "desktop:$DESKTOP_WORKFLOW" \
-    "workspace-image:$WORKSPACE_IMAGE_WORKFLOW" \
-    "cli-package:$CLI_PACKAGE_WORKFLOW"; do
-  assert_workflow_ignores_paths \
-    "buildx_two_file_replay_${workflow_case%%:*}" "${workflow_case#*:}" \
-    Makefile scripts/checks/security/audit-runtime-images.sh
-done
+assert_workflow_ignores_paths buildx_two_file_replay_workspace_image \
+  "$WORKSPACE_IMAGE_WORKFLOW" Makefile scripts/checks/security/audit-runtime-images.sh
+[ ! -e "$ROOT/.gitea/workflows/desktop-package.yaml" ] || {
+  echo 'standalone desktop package workflow still exists' >&2
+  exit 1
+}
+if grep -qF '  pull_request:' "$CLI_RELEASE_WORKFLOW" \
+    || grep -qF '  package-dry-run:' "$CLI_RELEASE_WORKFLOW"; then
+  echo 'CLI release workflow still exposes PR packaging' >&2
+  exit 1
+fi
+grep -qF "    tags: ['v*']" "$CLI_RELEASE_WORKFLOW"
+grep -qF '  workflow_dispatch:' "$CLI_RELEASE_WORKFLOW"
 assert_workflow_selects_path workspace_image_source "$WORKSPACE_IMAGE_WORKFLOW" \
   images/workspace/Dockerfile
 assert_workflow_selects_path workspace_verifier "$WORKSPACE_IMAGE_WORKFLOW" \
@@ -1094,8 +1101,13 @@ awk '
   capture && $0 ~ /^  [A-Za-z0-9_-]+:$/ && $0 != "  verification-selection:" { exit }
   capture { print }
 ' "$WORKFLOW" > "$selection_block"
-for output in tested_tree_receipt tested_tree_reason tested_tree_pr \
-    tested_tree_head tested_tree_run; do
+for output in selection ci_plan_status ci_plan_schema ci_plan_sha256 \
+    ci_policy_commit ci_policy_sha256 ci_graph_sha256 \
+    ci_target_base_commit ci_baseline_commit ci_head_commit ci_head_tree \
+    cw_package_state cw_package_selected desktop_package_state \
+    desktop_package_selected tested_tree_receipt tested_tree_reason \
+    tested_tree_pr tested_tree_head tested_tree_run tested_tree_policy_commit \
+    tested_tree_policy_sha256 tested_tree_plan_sha256; do
   grep -qF "      ${output}:" "$selection_block" || {
     echo "verification selection omits ${output}" >&2
     exit 1
@@ -1103,7 +1115,16 @@ for output in tested_tree_receipt tested_tree_reason tested_tree_pr \
 done
 grep -qF 'name: Verify exact tested-tree receipt' "$selection_block"
 grep -qF 'GITEA_TOKEN: ${{ github.token }}' "$selection_block"
-grep -qF 'run: scripts/ci/select/verify-tested-tree-receipt.sh' "$selection_block"
+grep -qF "receipt_checker='.trusted-ci-policy/scripts/ci/select/verify-tested-tree-receipt.sh'" \
+  "$selection_block"
+grep -qF 'ref: ${{ github.event.pull_request.base.sha }}' "$selection_block"
+grep -qF 'path: .trusted-ci-policy' "$selection_block"
+grep -qF 'persist-credentials: false' "$selection_block"
+grep -qF "trusted_planner='.trusted-ci-policy/scripts/ci/plan/planner.py'" \
+  "$selection_block"
+grep -qF "legacy_selector='.trusted-ci-policy/scripts/ci/select/select-verification.sh'" \
+  "$selection_block"
+grep -qF 'ref: ${{ github.event.before }}' "$selection_block"
 
 permissions_block="$(awk '
   $0 == "permissions:" { capture = 1 }
@@ -1124,8 +1145,8 @@ top_level_jobs="$(awk '
   in_jobs && /^  [A-Za-z0-9_-]+:$/ { count++ }
   END { print count + 0 }
 ' "$WORKFLOW")"
-if [ "$top_level_jobs" != 6 ]; then
-  echo "product CI defines ${top_level_jobs} jobs; expected selector, four groups, and aggregate" >&2
+if [ "$top_level_jobs" != 7 ]; then
+  echo "product CI defines ${top_level_jobs} jobs; expected selector, CW package, four groups, and aggregate" >&2
   exit 1
 fi
 for legacy_job in policy contracts rust go-support web sdk-go sdk-ts sdk-python \
@@ -1135,6 +1156,42 @@ for legacy_job in policy contracts rust go-support web sdk-go sdk-ts sdk-python 
     exit 1
   fi
 done
+
+cw_block="$TMP/cw-release-assets.yaml"
+awk '
+  $0 == "  cw-release-assets:" { capture = 1 }
+  capture && $0 ~ /^  [A-Za-z0-9_-]+:$/ && $0 != "  cw-release-assets:" { exit }
+  capture { print }
+' "$WORKFLOW" > "$cw_block"
+grep -qF '  cw-release-assets:' "$cw_block"
+grep -qF '    name: CW release-assets verification' "$cw_block"
+grep -qF '    runs-on: ubuntu-latest' "$cw_block"
+grep -qF 'name: CW release assets not selected' "$cw_block"
+grep -qF "needs.verification-selection.outputs.cw_package_selected != 'true'" \
+  "$cw_block"
+grep -qF "needs.verification-selection.outputs.cw_package_selected == 'true'" \
+  "$cw_block"
+grep -qF "CW_RELEASE_TARGETS='x86_64-unknown-linux-musl aarch64-unknown-linux-gnu x86_64-apple-darwin aarch64-apple-darwin'" \
+  "$cw_block"
+grep -qF 'scripts/ci/release/package-cw-release.sh v0.0.0-ci' "$cw_block"
+jq -e '
+  .artifacts.cw_cli_release_assets.release_targets == [
+    "x86_64-unknown-linux-musl",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin"
+  ]
+' "$ROOT/scripts/ci/plan/artifact-graph.json" >/dev/null
+if grep -Eiq 'publish|contents: write|secrets\.' "$cw_block"; then
+  echo 'PR CW release-assets verification crosses a publication boundary' >&2
+  exit 1
+fi
+cw_selected_steps="$(grep -Ec '^      - (name:|uses:)' "$cw_block")"
+cw_guarded_steps="$(grep -Ec '^        if:' "$cw_block")"
+if [ "$cw_selected_steps" != "$cw_guarded_steps" ]; then
+  echo 'every CW verification step must be guarded by receipt/package selection' >&2
+  exit 1
+fi
 
 standard_block="$TMP/standard.yaml"
 bun_setup_condition="$(grep -A1 -F \
@@ -1357,14 +1414,15 @@ grep -qF '    name: Required verification' "$WORKFLOW"
 # shellcheck disable=SC2016 # Match the literal Actions expression.
 grep -qF '    if: ${{ always() }}' "$WORKFLOW"
 grep -qF 'scripts/ci/select/require-verification-results.sh' "$required_block"
-for group in standard rust-transport database-services edge-kind; do
+for group in cw-release-assets standard rust-transport database-services edge-kind; do
   grep -qF "      - ${group}" "$required_block" || {
     echo "required CI does not wait on ${group}" >&2
     exit 1
   }
 done
-for result in VERIFICATION_STANDARD_RESULT VERIFICATION_RUST_TRANSPORT_RESULT \
-    VERIFICATION_DATABASE_SERVICES_RESULT VERIFICATION_EDGE_KIND_RESULT; do
+for result in VERIFICATION_CW_RELEASE_ASSETS_RESULT VERIFICATION_STANDARD_RESULT \
+    VERIFICATION_RUST_TRANSPORT_RESULT VERIFICATION_DATABASE_SERVICES_RESULT \
+    VERIFICATION_EDGE_KIND_RESULT; do
   grep -qF "${result}:" "$required_block" || {
     echo "required CI omits ${result}" >&2
     exit 1
@@ -1372,12 +1430,17 @@ for result in VERIFICATION_STANDARD_RESULT VERIFICATION_RUST_TRANSPORT_RESULT \
 done
 for receipt_input in VERIFICATION_TESTED_TREE_RECEIPT \
     VERIFICATION_TESTED_TREE_REASON VERIFICATION_TESTED_TREE_PR \
-    VERIFICATION_TESTED_TREE_HEAD VERIFICATION_TESTED_TREE_RUN; do
+    VERIFICATION_TESTED_TREE_HEAD VERIFICATION_TESTED_TREE_RUN \
+    VERIFICATION_TESTED_TREE_POLICY_COMMIT \
+    VERIFICATION_TESTED_TREE_POLICY_SHA256 \
+    VERIFICATION_TESTED_TREE_PLAN_SHA256; do
   grep -qF "${receipt_input}:" "$required_block" || {
     echo "required CI omits ${receipt_input}" >&2
     exit 1
   }
 done
+grep -qF 'name: Emit exact-head verification receipt' "$required_block"
+grep -qF 'run: scripts/ci/plan/emit-verification-receipt.py' "$required_block"
 if grep -qF 'diagnostics' "$required_block" \
   || grep -qF 'DIAGNOSTICS_RESULT' "$required_block"; then
   echo 'required CI must not wait on manual diagnostics' >&2

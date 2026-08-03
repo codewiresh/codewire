@@ -127,6 +127,20 @@ case "$url" in
     esac
     body="{\"jobs\":[{\"id\":601,\"name\":\"${name}\",\"run_attempt\":1,\"head_sha\":\"${FIXTURE_HEAD_SHA}\",\"status\":\"completed\",\"conclusion\":\"${conclusion}\"}],\"total_count\":1}"
     ;;
+  */actions/jobs/601/logs)
+    case "$mode" in
+      missing_receipt)
+        body='required verification completed without a receipt'
+        ;;
+      duplicate_receipt)
+        body="CODEWIRE_CI_VERIFICATION_RECEIPT=${FIXTURE_RECEIPT_B64}
+CODEWIRE_CI_VERIFICATION_RECEIPT=${FIXTURE_RECEIPT_B64}"
+        ;;
+      *)
+        body="2026-01-01T00:00:00Z CODEWIRE_CI_VERIFICATION_RECEIPT=${FIXTURE_RECEIPT_B64}"
+        ;;
+    esac
+    ;;
   *)
     echo "unexpected API URL: $url" >&2
     exit 2
@@ -141,6 +155,46 @@ chmod +x "$mock_bin/curl"
 run_case() {
   local name="$1" expected="$2" merge_sha="$3" pr="$4" head="$5" mode="$6"
   local output="$TMP/${name}.output" log="$TMP/${name}.log"
+  local policy_sha="$base_sha" receipt_json receipt_b64
+  if [ "$mode" = receipt_mismatch ]; then policy_sha="$unrelated_parent"; fi
+  receipt_json="$(jq -cn \
+    --arg repository codewire/codewire \
+    --argjson pr "$pr" \
+    --arg workflow "ci.yaml@refs/pull/${pr}/head" \
+    --arg base "$base_sha" \
+    --arg head "$head" \
+    --arg tree "$tested_tree" \
+    --arg policy "$policy_sha" '
+      {
+        schema: "codewire.ci-verification-receipt/v1",
+        repository: $repository,
+        event: "pull_request",
+        pull_request: $pr,
+        workflow_path: $workflow,
+        run: {id: 501, attempt: 1, job: "Required verification"},
+        source: {base_commit: $base, head_commit: $head, head_tree: $tree},
+        plan: {
+          schema: "codewire.ci-plan/v1",
+          sha256: ("d" * 64),
+          status: "trusted",
+          trusted_policy_commit: $policy,
+          policy_sha256: ("e" * 64),
+          graph_sha256: ("f" * 64),
+          baseline_commit: $base,
+          artifacts: {cw_cli_release_assets: "unaffected", desktop_package: "unaffected"}
+        },
+        selection: "|valid:v2|policy|complete|",
+        results: {
+          selection: "success",
+          standard: "success",
+          rust_transport: "success",
+          database_services: "success",
+          edge_kind: "success",
+          cw_release_assets: "success"
+        }
+      }
+    ')"
+  receipt_b64="$(printf '%s' "$receipt_json" | base64 -w0)"
   git -C "$repo" checkout -q --detach "$merge_sha"
   : > "$output"
   if ! (cd "$repo" && env \
@@ -150,6 +204,7 @@ run_case() {
       FIXTURE_HEAD_SHA="$head" \
       FIXTURE_BASE_SHA="$base_sha" \
       FIXTURE_PR_NUMBER="$pr" \
+      FIXTURE_RECEIPT_B64="$receipt_b64" \
       GITEA_TOKEN=fixture-token \
       GITHUB_EVENT_NAME=push \
       GITHUB_REF=refs/heads/main \
@@ -173,6 +228,9 @@ run_case() {
     grep -Fxq "tested_tree_pr=${pr}" "$output"
     grep -Fxq "tested_tree_head=${head}" "$output"
     grep -Fxq 'tested_tree_run=501' "$output"
+    grep -Fxq "tested_tree_policy_commit=${base_sha}" "$output"
+    grep -Fxq "tested_tree_policy_sha256=$(printf 'e%.0s' {1..64})" "$output"
+    grep -Fxq "tested_tree_plan_sha256=$(printf 'd%.0s' {1..64})" "$output"
   fi
 }
 
@@ -190,6 +248,9 @@ run_case run_failed fallback "$good_merge" 42 "$tested_head" run_failed
 run_case missing_required fallback "$good_merge" 42 "$tested_head" missing_required
 run_case required_failed fallback "$good_merge" 42 "$tested_head" required_failed
 run_case required_skipped fallback "$good_merge" 42 "$tested_head" required_skipped
+run_case missing_receipt fallback "$good_merge" 42 "$tested_head" missing_receipt
+run_case duplicate_receipt fallback "$good_merge" 42 "$tested_head" duplicate_receipt
+run_case receipt_mismatch fallback "$good_merge" 42 "$tested_head" receipt_mismatch
 run_case control_self_certification fallback "$control_merge" 43 "$control_head" success
 
 echo 'tested-tree receipt fixtures: green'

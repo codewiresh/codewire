@@ -1,10 +1,16 @@
 {
   "schema": "codewire.ci-artifact-graph/v1",
   "policy_files": [
+    "scripts/ci/plan/apply-verification-plan.py",
     "scripts/ci/plan/artifact-graph.json",
+    "scripts/ci/plan/emit-verification-receipt.py",
     "scripts/ci/plan/planner.py",
     "scripts/ci/plan/schemas/baseline.schema.json",
-    "scripts/ci/plan/schemas/plan.schema.json"
+    "scripts/ci/plan/schemas/plan.schema.json",
+    "scripts/ci/plan/schemas/receipt.schema.json",
+    "scripts/ci/select/require-verification-results.sh",
+    "scripts/ci/select/select-verification.sh",
+    "scripts/ci/select/verify-tested-tree-receipt.sh"
   ],
   "artifacts": {
     "cw_cli_release_assets": {
@@ -14,7 +20,7 @@
       "lockfile": "Cargo.lock",
       "profiles": ["release", "ci"],
       "release_targets": [
-        "x86_64-unknown-linux-gnu",
+        "x86_64-unknown-linux-musl",
         "aarch64-unknown-linux-gnu",
         "x86_64-apple-darwin",
         "aarch64-apple-darwin"

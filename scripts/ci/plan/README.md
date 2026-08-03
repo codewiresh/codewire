@@ -24,6 +24,16 @@ The output is `codewire.ci-plan/v1`. Artifact state is exactly `affected`,
 `unclassified`. The planner reports impact facts only. It does not authorize
 publication or deployment.
 
+`apply-verification-plan.py` is the event adapter. It validates the trusted
+plan, removes the legacy desktop-package decision, and adds that decision back
+from the canonical artifact fact. Every other legacy selection token remains
+authoritative until its artifact migrates, so PRs execute that selector from
+the same exact target-base checkout and include it in the policy hash.
+`emit-verification-receipt.py`
+serializes the successful required-job inputs into one canonical base64 log
+record. The post-merge receipt validator attests that record; it never repeats
+change-impact classification.
+
 Run the focused no-network tests and the current-repository Cargo oracle with:
 
 ```sh

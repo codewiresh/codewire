@@ -30,6 +30,8 @@ require_group_success rust-transport \
 require_group_success database-services \
   "${VERIFICATION_DATABASE_SERVICES_RESULT:-missing}"
 require_group_success edge-kind "${VERIFICATION_EDGE_KIND_RESULT:-missing}"
+require_group_success cw-release-assets \
+  "${VERIFICATION_CW_RELEASE_ASSETS_RESULT:-missing}"
 
 case "$tested_tree_receipt" in
   fallback)
@@ -42,6 +44,12 @@ case "$tested_tree_receipt" in
       || fail 'accepted tested-tree receipt has invalid head'
     [[ "${VERIFICATION_TESTED_TREE_RUN:-}" =~ ^[1-9][0-9]*$ ]] \
       || fail 'accepted tested-tree receipt has invalid run'
+    [[ "${VERIFICATION_TESTED_TREE_POLICY_COMMIT:-}" =~ ^[0-9a-f]{40}$ ]] \
+      || fail 'accepted tested-tree receipt has invalid policy commit'
+    [[ "${VERIFICATION_TESTED_TREE_POLICY_SHA256:-}" =~ ^[0-9a-f]{64}$ ]] \
+      || fail 'accepted tested-tree receipt has invalid policy hash'
+    [[ "${VERIFICATION_TESTED_TREE_PLAN_SHA256:-}" =~ ^[0-9a-f]{64}$ ]] \
+      || fail 'accepted tested-tree receipt has invalid plan hash'
     [ "${VERIFICATION_TESTED_TREE_REASON:-}" = exact-tested-tree ] \
       || fail 'accepted tested-tree receipt has invalid reason'
     echo "required verification: exact tested tree from PR #${VERIFICATION_TESTED_TREE_PR} run ${VERIFICATION_TESTED_TREE_RUN} accepted"
