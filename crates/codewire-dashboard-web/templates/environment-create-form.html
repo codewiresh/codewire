@@ -25,7 +25,10 @@
 
       <section class="cw-environment-source" data-environment-mode-panel="repo">
         {% if !form.prepared %}
-          {% if form.github_connected %}
+          {% if form.github_connected && !form.github_repositories_available %}
+          <div class="cw-alert cw-alert--warning" role="status">GitHub repositories are temporarily unavailable. Paste a repository URL to continue.</div>
+          {% endif %}
+          {% if form.github_connected && form.github_repositories_available %}
           <div class="cw-repository-picker" data-github-repository-picker>
             <div class="cw-field cw-repository-search"><label class="cw-sr-only" for="repository-search">Search repositories</label><input class="cw-input" id="repository-search" type="search" placeholder="Search your repositories…" data-repository-search></div>
             <div class="cw-repository-options" role="group" aria-label="GitHub repositories">
@@ -44,8 +47,8 @@
           </div>
           {% endif %}
 
-          <div class="cw-manual-repositories" data-manual-repositories{% if form.github_connected %} hidden{% endif %}>
-            <div class="cw-section-heading"><span class="cw-label">Repositories</span>{% if form.github_connected %}<button class="cw-link-button" type="button" data-show-github-repositories>Pick from list</button>{% endif %}</div>
+          <div class="cw-manual-repositories" data-manual-repositories{% if form.github_connected && form.github_repositories_available %} hidden{% endif %}>
+            <div class="cw-section-heading"><span class="cw-label">Repositories</span>{% if form.github_connected && form.github_repositories_available %}<button class="cw-link-button" type="button" data-show-github-repositories>Pick from list</button>{% endif %}</div>
             <div class="cw-stack" data-repository-rows>
               {% for repository in form.repositories %}
               <div class="cw-repository-row" data-repository-row><div class="cw-field"><label class="cw-label" for="repo-url-{{ repository.index }}">Repository URL</label><input class="cw-input" id="repo-url-{{ repository.index }}" name="repo_url_{{ repository.index }}" value="{{ repository.url }}" type="url" placeholder="https://github.com/owner/repo"></div><div class="cw-field"><label class="cw-label" for="repo-branch-{{ repository.index }}">Branch</label><input class="cw-input" id="repo-branch-{{ repository.index }}" name="repo_branch_{{ repository.index }}" value="{{ repository.branch }}" placeholder="optional"></div><button class="cw-button cw-button--outline cw-button--small" type="button" data-remove-repository>Remove</button></div>

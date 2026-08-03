@@ -17,6 +17,18 @@ use url::Url;
 use super::ApiState;
 use crate::worker::github::{GitHubAppConfig, get_github_token_for_user};
 
+const GITHUB_USER_AGENT: &str = concat!("codewire-orchestration/", env!("CARGO_PKG_VERSION"));
+
+fn github_client(timeout: std::time::Duration) -> Result<reqwest::Client, reqwest::Error> {
+    reqwest::Client::builder().timeout(timeout).build()
+}
+
+fn github_get(client: &reqwest::Client, url: &str) -> reqwest::RequestBuilder {
+    client
+        .get(url)
+        .header(reqwest::header::USER_AGENT, GITHUB_USER_AGENT)
+}
+
 // ── Wire types ───────────────────────────────────────────────────────────
 
 #[derive(Debug)]
@@ -249,8 +261,7 @@ fn truncate_str(s: &str, max_len: usize) -> Cow<'_, str> {
 }
 
 async fn forge_get(client: &reqwest::Client, url: &str, token: &str) -> anyhow::Result<Vec<u8>> {
-    let resp = client
-        .get(url)
+    let resp = github_get(client, url)
         .header("Accept", "application/json")
         .bearer_auth(token)
         .send()
@@ -271,11 +282,10 @@ async fn exchange_github_code(
     cfg: &GitHubAppConfig,
     code: &str,
 ) -> anyhow::Result<GitHubOAuthTokenResponse> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
-        .build()?;
+    let client = github_client(std::time::Duration::from_secs(15))?;
     let resp = client
         .post("https://github.com/login/oauth/access_token")
+        .header(reqwest::header::USER_AGENT, GITHUB_USER_AGENT)
         .header("Accept", "application/json")
         .form(&[
             ("client_id", cfg.client_id.as_str()),
@@ -297,11 +307,8 @@ async fn exchange_github_code(
 }
 
 async fn fetch_github_username(token: &str) -> anyhow::Result<String> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .build()?;
-    let user = client
-        .get("https://api.github.com/user")
+    let client = github_client(std::time::Duration::from_secs(10))?;
+    let user = github_get(&client, "https://api.github.com/user")
         .bearer_auth(token)
         .header("Accept", "application/vnd.github+json")
         .send()
@@ -373,9 +380,7 @@ pub(crate) async fn list_github_repos_core(
 
     let (page, per_page) = normalized_repo_pagination(&query);
     let url = github_repos_url(page, per_page);
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
-        .build()
+    let client = github_client(std::time::Duration::from_secs(15))
         .map_err(|e| AppError::Internal(anyhow::Error::from(e)))?;
     let data = forge_get(&client, &url, &token).await.map_err(|e| {
         tracing::error!(error = %e, "github repos: fetch failed");
@@ -604,6 +609,22 @@ pub async fn github_oauth_callback(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn github_client_identifies_codewire_to_github() {
+        let client = github_client(std::time::Duration::from_secs(1)).unwrap();
+        let request = github_get(&client, "https://api.github.com/user/repos")
+            .build()
+            .unwrap();
+
+        assert_eq!(
+            request
+                .headers()
+                .get(reqwest::header::USER_AGENT)
+                .and_then(|value| value.to_str().ok()),
+            Some(GITHUB_USER_AGENT)
+        );
+    }
 
     #[test]
     fn nil_if_empty_maps_blank_to_none() {

@@ -396,6 +396,7 @@ pub(crate) struct EnvironmentCreateFormView {
     pub(crate) app_ports: Vec<EnvironmentAppPortFormRow>,
     pub(crate) github_connected: bool,
     pub(crate) github_username: String,
+    pub(crate) github_repositories_available: bool,
     pub(crate) github_repositories: Vec<GitHubRepositoryOption>,
     pub(crate) presets: Vec<EnvironmentPresetOption>,
     pub(crate) secret_projects: Vec<EnvironmentSecretProjectOption>,

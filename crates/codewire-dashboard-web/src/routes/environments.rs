@@ -238,6 +238,7 @@ impl EnvironmentSubmission {
             app_ports: app_port_rows(&self.app_ports),
             github_connected: false,
             github_username: String::new(),
+            github_repositories_available: false,
             github_repositories: Vec::new(),
             presets: Vec::new(),
             secret_projects: Vec::new(),
@@ -1316,6 +1317,7 @@ fn default_create_form(token: String, expanded: bool) -> EnvironmentCreateFormVi
         app_ports: Vec::new(),
         github_connected: false,
         github_username: String::new(),
+        github_repositories_available: false,
         github_repositories: Vec::new(),
         presets: Vec::new(),
         secret_projects: Vec::new(),
@@ -1335,6 +1337,7 @@ fn default_create_form(token: String, expanded: bool) -> EnvironmentCreateFormVi
 fn hydrate_options(form: &mut EnvironmentCreateFormView, options: EnvironmentCreateOptions) {
     form.github_connected = options.github_connected;
     form.github_username = options.github_username;
+    form.github_repositories_available = options.github_repositories_available;
     form.github_repositories = options.github_repositories;
     form.presets = options.presets;
     form.secret_projects = options.secret_projects;
@@ -1800,6 +1803,7 @@ mod tests {
         let options = EnvironmentCreateOptions {
             github_connected: false,
             github_username: String::new(),
+            github_repositories_available: false,
             github_repositories: Vec::new(),
             presets: vec![crate::view::EnvironmentPresetOption {
                 id: "preset-id".to_owned(),
@@ -1885,6 +1889,7 @@ mod tests {
             private: true,
         }];
         form.github_connected = true;
+        form.github_repositories_available = true;
         form.presets = vec![crate::view::EnvironmentPresetOption {
             id: "preset-id".to_owned(),
             name: "<b>unsafe preset</b>".to_owned(),
@@ -1942,6 +1947,41 @@ mod tests {
         .expect("prepared environment form");
         assert!(prepared_html.contains("unsafe type"));
         assert!(!prepared_html.contains("<b>unsafe"));
+    }
+
+    #[test]
+    fn connected_github_outage_keeps_manual_repository_entry_available() {
+        let mut form = default_create_form("csrf-token".to_owned(), true);
+        form.github_connected = true;
+        form.github_username = "octocat".to_owned();
+        form.github_repositories_available = false;
+        let organization = OrganizationContext {
+            id: "organization-id".to_owned(),
+            name: "Organization".to_owned(),
+            slug: "organization".to_owned(),
+            role: "owner",
+            can_admin: true,
+            environments_url: "/dashboard/orgs/organization/environments".to_owned(),
+            presets_url: "/dashboard/orgs/organization/presets".to_owned(),
+            secrets_url: "/dashboard/orgs/organization/secrets".to_owned(),
+            api_keys_url: "/dashboard/orgs/organization/api-keys".to_owned(),
+            members_url: "/dashboard/orgs/organization/members".to_owned(),
+            billing_url: "/dashboard/orgs/organization/billing".to_owned(),
+        };
+
+        let html = EnvironmentCreateFormTemplate {
+            organization: &organization,
+            form: &form,
+        }
+        .render()
+        .expect("environment form");
+
+        assert!(html.contains("GitHub repositories are temporarily unavailable"));
+        assert!(html.contains("Repository URL"));
+        assert!(html.contains("data-manual-repositories"));
+        assert!(!html.contains("data-manual-repositories hidden"));
+        assert!(!html.contains("data-github-repository-picker"));
+        assert!(!html.contains("data-show-github-repositories"));
     }
 
     #[test]

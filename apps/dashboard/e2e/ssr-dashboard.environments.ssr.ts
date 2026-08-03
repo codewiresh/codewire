@@ -146,6 +146,28 @@ async function seedPinnedPreset() {
   `;
 }
 
+async function disconnectSyntheticGitHub() {
+  await sql`DELETE FROM user_github_tokens WHERE user_id = ${ownerId}`;
+}
+
+async function connectSyntheticUnavailableGitHub() {
+  await sql`
+    INSERT INTO user_github_tokens
+      (user_id, access_token, token_type, github_username)
+    VALUES
+      (${ownerId}, 'e2e-intentionally-invalid-token', 'bearer', 'e2e-unavailable')
+    ON CONFLICT (user_id) DO UPDATE SET
+      access_token = EXCLUDED.access_token,
+      refresh_token = NULL,
+      token_type = EXCLUDED.token_type,
+      expires_at = NULL,
+      refresh_token_expires_at = NULL,
+      installation_id = NULL,
+      github_username = EXCLUDED.github_username,
+      updated_at = NOW()
+  `;
+}
+
 async function openPreparedImageForm(page: Page) {
   await page.goto(`/dashboard/orgs/${slug}/environments?create=true`);
   await page.locator(".cw-choice-tabs label", { hasText: "From Image" }).click();
@@ -167,13 +189,35 @@ test.describe.serial("server-rendered environments", () => {
     const seededOwnerId = await getUserId(USERS.master.email);
     if (!seededOwnerId) throw new Error("E2E owner was not seeded");
     ownerId = seededOwnerId;
+    await disconnectSyntheticGitHub();
     orgId = await ensureTestOrg(orgName, slug, ownerId);
     await seedPinnedPreset();
   });
 
   test.afterAll(async () => {
+    await disconnectSyntheticGitHub();
     await cleanupEnvironments(slug);
     await cleanupTestOrg(slug);
+  });
+
+  test("keeps repository entry usable when the connected GitHub picker is unavailable", async ({ page, isMobile }) => {
+    test.skip(!!isMobile, "desktop connected-GitHub failure contract");
+    await connectSyntheticUnavailableGitHub();
+
+    try {
+      const response = await page.goto(`/dashboard/orgs/${slug}/environments?create=true`);
+      expect(response?.status()).toBe(200);
+      await expect(page.getByText("GitHub connected as @e2e-unavailable", { exact: true })).toBeVisible();
+      await expect(page.getByText(
+        "GitHub repositories are temporarily unavailable. Paste a repository URL to continue.",
+        { exact: true },
+      )).toBeVisible();
+      await expect(page.getByLabel("Repository URL", { exact: true })).toBeVisible();
+      await expect(page.locator("[data-github-repository-picker]")).toHaveCount(0);
+      await expect(page.getByRole("button", { name: "Pick from list" })).toHaveCount(0);
+    } finally {
+      await disconnectSyntheticGitHub();
+    }
   });
 
   test("renders server-owned create options and resources with no browser service caller", async ({ page, isMobile }) => {

@@ -18,7 +18,7 @@ use codewire_proto::codewire::{
         watch_environment_create_response,
     },
 };
-use connectrpc::{ConnectError, client::ClientConfig};
+use connectrpc::{ConnectError, ErrorCode, client::ClientConfig};
 use tokio::sync::mpsc;
 
 use crate::{
@@ -37,6 +37,7 @@ const PREPARE_TIMEOUT: Duration = Duration::from_secs(300);
 pub(crate) struct EnvironmentCreateOptions {
     pub(crate) github_connected: bool,
     pub(crate) github_username: String,
+    pub(crate) github_repositories_available: bool,
     pub(crate) github_repositories: Vec<GitHubRepositoryOption>,
     pub(crate) presets: Vec<EnvironmentPresetOption>,
     pub(crate) secret_projects: Vec<EnvironmentSecretProjectOption>,
@@ -148,8 +149,8 @@ pub(crate) async fn create_options(
     .into_owned();
 
     let github = setup.github_status.into_option().unwrap_or_default();
-    let github_repositories = if github.connected {
-        GitHubServiceClient::new(
+    let (github_repositories, github_repositories_available) = if github.connected {
+        match GitHubServiceClient::new(
             transport(state, cookie.clone()),
             client_config(state, UNARY_TIMEOUT),
         )
@@ -158,20 +159,28 @@ pub(crate) async fn create_options(
             per_page: 100,
             ..Default::default()
         })
-        .await?
-        .into_owned()
-        .repos
-        .into_iter()
-        .map(|repository| GitHubRepositoryOption {
-            full_name: repository.full_name,
-            url: repository.html_url,
-            description: repository.description,
-            language: repository.language,
-            private: repository.private,
-        })
-        .collect()
+        .await
+        {
+            Ok(response) => (
+                response
+                    .into_owned()
+                    .repos
+                    .into_iter()
+                    .map(|repository| GitHubRepositoryOption {
+                        full_name: repository.full_name,
+                        url: repository.html_url,
+                        description: repository.description,
+                        language: repository.language,
+                        private: repository.private,
+                    })
+                    .collect(),
+                true,
+            ),
+            Err(error) if error.code == ErrorCode::Unauthenticated => return Err(error),
+            Err(_) => (Vec::new(), false),
+        }
     } else {
-        Vec::new()
+        (Vec::new(), false)
     };
 
     let configured_user_secrets: HashSet<String> = SecretServiceClient::new(
@@ -250,6 +259,7 @@ pub(crate) async fn create_options(
     Ok(EnvironmentCreateOptions {
         github_connected: github.connected,
         github_username: github.username,
+        github_repositories_available,
         github_repositories,
         presets,
         secret_projects,
