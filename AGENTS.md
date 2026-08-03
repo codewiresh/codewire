@@ -167,21 +167,25 @@ Method context can add procedure but cannot widen repository authority.
 - Open and manage PRs in Gitea with `tea pulls create`, `tea pulls <id>`, and
   `tea pulls merge`. Branch from `gitea/main` and push feature branches to
   `gitea`.
-- Poll CI with `tea actions runs list`, `tea actions runs view <run-id>`, and
-  `tea actions runs logs <run-id> --job <job-id>`. Always inspect logs when a
-  run conclusion is failure; job tables may not expose the failing step.
+- Discover CI once with `tea actions runs list` and `tea actions runs view
+  <run-id>`. For an exact-head merge gate, use
+  `tea actions runs watch <run-id> --expect-head <sha> --login noel --remote
+  gitea --output ndjson`; it reports only the binding, state changes,
+  stalls/recovery, and terminal summary. Diagnose a failed run with the bounded
+  `tea actions runs logs <run-id> --failed --tail 200`, then inspect a specific
+  job only when that output requires it.
 - Local verification is the development loop; CI is the attestation for the
   exact pushed tree. Run the cheapest meaningful local gates before pushing.
   A required exact-head CI result still controls merge when the repository or
   program says so, and an old-head result never proves a refreshed head.
 - Do not continuously watch a healthy CI run. Capture its run ID and exact
   head once. When CI is the only remaining gate, hand it to a transition-only
-  observer that waits outside the model and wakes the session on failure,
-  stall, or success. Keep the task active until the terminal result is handled;
-  token efficiency must never abandon a red run. When no observer is available,
-  retain responsibility with sparse checks near the expected terminal horizon.
-  Continue independently authorized local work while CI runs; a running check
-  grants no authority for unrelated work.
+  `tea actions runs watch` observer that waits outside the model and wakes the
+  session on failure, stall, or success. Keep the task active until the terminal
+  result is handled; token efficiency must never abandon a red run. When the
+  watcher is unavailable, retain responsibility with sparse checks near the
+  expected terminal horizon. Continue independently authorized local work while
+  CI runs; a running check grants no authority for unrelated work.
 - CI observation output is transition-only: initial run/head binding, changed
   status or conclusion, stall/recovery, and the terminal summary. Do not dump
   complete YAML/JSON repeatedly or read healthy log tails. Inspect only the

@@ -49,12 +49,13 @@ Default cadence:
 
 Healthy CI is a passive exact-head attestation, not heartbeat work. Capture the
 workflow, run ID, and head SHA once. If CI is the only remaining gate, hand it
-to a transition-only observer that waits outside the model and wakes the thread
-on failure, stall, or success. Keep the goal active until that terminal result
-is handled; reducing token use must never abandon the gate. When no observer is
-available, retain responsibility with sparse checks near the expected terminal
-horizon. Never use a periodic model automation merely to narrate unchanged CI
-state.
+to `tea actions runs watch <run-id> --expect-head <sha> --login noel --remote
+gitea --output ndjson`, a transition-only observer that waits outside the model
+and wakes the thread on failure, stall, or success. Keep the goal active until
+that terminal result is handled; reducing token use must never abandon the gate.
+When the watcher is unavailable, retain responsibility with sparse checks near
+the expected terminal horizon. Never use periodic model automation merely to
+narrate unchanged CI state.
 
 If Codex app automations are unavailable, do not claim scheduling was created.
 Instead, give an explicit fallback using Codewire `cw`, cron, systemd, or a
@@ -125,10 +126,12 @@ independent and does not grant authority for those actions.
 - Prefer `tea ... --login noel --remote gitea --output yaml` or JSON in the
   Codewire repo; adjust the remote name only after inspecting `git remote -v`.
 - Bind CI once with `tea actions runs list` and `tea actions runs view`,
-  recording the workflow, run ID, and exact head. Prefer a transition-only
-  observer when available. Do not repeatedly print full YAML/JSON or healthy
-  log tails. On failure, credible stall, empty output, or run/job disagreement,
-  inspect only the affected job and cap the returned log tail.
+  recording the workflow, run ID, and exact head. Use `tea actions runs watch
+  <run-id> --expect-head <sha> --login noel --remote gitea --output ndjson` for
+  the transition-only observer. Do not repeatedly print full YAML/JSON or
+  healthy log tails. On failure, credible stall, empty output, or run/job
+  disagreement, start with `tea actions runs logs <run-id> --failed --tail 200`
+  and inspect a specific affected job only if necessary.
 - Retry a runner-owned failure once on the same SHA without changing source.
   If it repeats, record an infrastructure finding instead of entering a retry
   or observation loop.
