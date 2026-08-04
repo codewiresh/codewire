@@ -17,7 +17,7 @@ EXPECTED_TAILNET_PEER_RELAY_ENDPOINT="${EXPECTED_TAILNET_PEER_RELAY_ENDPOINT:-19
 EXPECTED_UDP_RELAY_ALLOCATOR_URL="${EXPECTED_UDP_RELAY_ALLOCATOR_URL:-http://codewire-udp-relay.dev.svc.cluster.local:8095/internal/udp-relay/allocations}"
 EXPECTED_UDP_RELAY_BIND_ADDRS="${EXPECTED_UDP_RELAY_BIND_ADDRS:-codewire-udp-relay.dev.svc.cluster.local:41641}"
 EXPECTED_RUNTIME_NODE_SELECTOR="${EXPECTED_RUNTIME_NODE_SELECTOR:-katacontainers.io/kata-runtime=true}"
-EXPECTED_RUNTIME_NODE_MIN_EPHEMERAL_GIB="${EXPECTED_RUNTIME_NODE_MIN_EPHEMERAL_GIB:-500}"
+EXPECTED_RUNTIME_NODE_MIN_EPHEMERAL_GIB="${EXPECTED_RUNTIME_NODE_MIN_EPHEMERAL_GIB:-400}"
 CANDIDATE_WORKER_LOOPS="${CANDIDATE_WORKER_LOOPS:-}"
 CANDIDATE_SEED_SANDBOX_TEMPLATES_FROM_NAMESPACE="${CANDIDATE_SEED_SANDBOX_TEMPLATES_FROM_NAMESPACE:-}"
 CANDIDATE_SEED_SANDBOX_TEMPLATE_NAMES="${CANDIDATE_SEED_SANDBOX_TEMPLATE_NAMES:-workspace workspace-2000m-4096mib-10gib}"
@@ -114,7 +114,7 @@ Environment:
                              preflight. Defaults to katacontainers.io/kata-runtime=true.
   EXPECTED_RUNTIME_NODE_MIN_EPHEMERAL_GIB
                              Minimum allocatable ephemeral-storage per runtime
-                             node. Defaults to 500; set 0 to skip.
+                             node. Defaults to 400; set 0 to skip.
 
 Examples:
   scripts/runtime/dev/smoke-dev-candidate.sh --current-dev
@@ -1262,6 +1262,10 @@ run_smoke() {
   export EXPECTED_TAILNET_PATH_TRANSPORT
   export EXPECTED_TAILNET_PEER_RELAY_ENDPOINT
   export EXPECTED_UDP_RELAY_BIND_ADDRS
+  export EXPECTED_UDP_RELAY_ALLOCATOR_URL
+  export EXPECTED_TAILNET_DIRECT_UDP_LB_IP
+  export EXPECTED_TAILNET_DIRECT_UDP_TRANSPORT_ZONE
+  export EXPECTED_RUNTIME_TRANSPORT_REGION
 
   if [[ -n "${IMAGE_SELECTED[gateway]:-}" ]]; then
     export EXPECTED_GATEWAY_IMAGE

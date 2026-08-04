@@ -2012,10 +2012,134 @@ fn workspace_resources_match(pod: &Pod, cpu: &str, memory: &str) -> bool {
         .into_iter()
         .all(|class| {
             class.is_some_and(|values| {
-                values.get("cpu").is_some_and(|value| value.0 == cpu)
-                    && values.get("memory").is_some_and(|value| value.0 == memory)
+                values
+                    .get("cpu")
+                    .is_some_and(|value| quantities_equal(&value.0, cpu))
+                    && values
+                        .get("memory")
+                        .is_some_and(|value| quantities_equal(&value.0, memory))
             })
         })
+}
+
+/// Compare Kubernetes quantities by value rather than serialized form.
+///
+/// The kubelet canonicalizes equivalent requests (for example `3000m` to `3`
+/// and `5120Mi` to `5Gi`). Resource convergence must accept that formatting
+/// change without accepting a different value or a malformed observation.
+fn quantities_equal(left: &str, right: &str) -> bool {
+    let Some((left_numerator, left_denominator)) = parse_quantity_ratio(left) else {
+        return false;
+    };
+    let Some((right_numerator, right_denominator)) = parse_quantity_ratio(right) else {
+        return false;
+    };
+    match (
+        left_numerator.checked_mul(right_denominator),
+        right_numerator.checked_mul(left_denominator),
+    ) {
+        (Some(left), Some(right)) => left == right,
+        _ => false,
+    }
+}
+
+fn parse_quantity_ratio(quantity: &str) -> Option<(i128, i128)> {
+    let quantity = quantity.trim();
+    if quantity.is_empty() {
+        return None;
+    }
+
+    let (number, numerator_scale, denominator_scale) =
+        if let Some(number) = quantity.strip_suffix("Ei") {
+            (number, 1_i128.checked_shl(60)?, 1)
+        } else if let Some(number) = quantity.strip_suffix("Pi") {
+            (number, 1_i128.checked_shl(50)?, 1)
+        } else if let Some(number) = quantity.strip_suffix("Ti") {
+            (number, 1_i128.checked_shl(40)?, 1)
+        } else if let Some(number) = quantity.strip_suffix("Gi") {
+            (number, 1_i128.checked_shl(30)?, 1)
+        } else if let Some(number) = quantity.strip_suffix("Mi") {
+            (number, 1_i128.checked_shl(20)?, 1)
+        } else if let Some(number) = quantity.strip_suffix("Ki") {
+            (number, 1_i128.checked_shl(10)?, 1)
+        } else if let Some((number, exponent)) = split_decimal_exponent(quantity) {
+            if exponent >= 0 {
+                (number, 10_i128.checked_pow(exponent.unsigned_abs())?, 1)
+            } else {
+                (number, 1, 10_i128.checked_pow(exponent.unsigned_abs())?)
+            }
+        } else if let Some(number) = quantity.strip_suffix('E') {
+            (number, 10_i128.checked_pow(18)?, 1)
+        } else if let Some(number) = quantity.strip_suffix('P') {
+            (number, 10_i128.checked_pow(15)?, 1)
+        } else if let Some(number) = quantity.strip_suffix('T') {
+            (number, 10_i128.checked_pow(12)?, 1)
+        } else if let Some(number) = quantity.strip_suffix('G') {
+            (number, 10_i128.checked_pow(9)?, 1)
+        } else if let Some(number) = quantity.strip_suffix('M') {
+            (number, 10_i128.checked_pow(6)?, 1)
+        } else if let Some(number) = quantity
+            .strip_suffix('k')
+            .or_else(|| quantity.strip_suffix('K'))
+        {
+            (number, 10_i128.checked_pow(3)?, 1)
+        } else if let Some(number) = quantity.strip_suffix('m') {
+            (number, 1, 10_i128.checked_pow(3)?)
+        } else if let Some(number) = quantity.strip_suffix('u') {
+            (number, 1, 10_i128.checked_pow(6)?)
+        } else if let Some(number) = quantity.strip_suffix('n') {
+            (number, 1, 10_i128.checked_pow(9)?)
+        } else {
+            (quantity, 1, 1)
+        };
+
+    let (numerator, denominator) = parse_decimal_ratio(number)?;
+    let numerator = numerator.checked_mul(numerator_scale)?;
+    let denominator = denominator.checked_mul(denominator_scale)?;
+    if numerator <= 0 || denominator <= 0 {
+        return None;
+    }
+    Some((numerator, denominator))
+}
+
+fn split_decimal_exponent(quantity: &str) -> Option<(&str, i32)> {
+    let index = quantity.rfind(['e', 'E'])?;
+    let (number, exponent) = quantity.split_at(index);
+    let exponent = exponent.get(1..)?.parse::<i32>().ok()?;
+    (!number.is_empty()).then_some((number, exponent))
+}
+
+fn parse_decimal_ratio(number: &str) -> Option<(i128, i128)> {
+    let number = number.trim();
+    if number.is_empty() || number.starts_with('-') {
+        return None;
+    }
+    let number = number.strip_prefix('+').unwrap_or(number);
+    let mut parts = number.split('.');
+    let whole = parts.next()?;
+    let fractional = parts.next().unwrap_or("");
+    if parts.next().is_some()
+        || (whole.is_empty() && fractional.is_empty())
+        || !whole.bytes().all(|byte| byte.is_ascii_digit())
+        || !fractional.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return None;
+    }
+    let denominator = 10_i128.checked_pow(u32::try_from(fractional.len()).ok()?)?;
+    let whole = if whole.is_empty() {
+        0
+    } else {
+        whole.parse::<i128>().ok()?
+    };
+    let fractional = if fractional.is_empty() {
+        0
+    } else {
+        fractional.parse::<i128>().ok()?
+    };
+    Some((
+        whole.checked_mul(denominator)?.checked_add(fractional)?,
+        denominator,
+    ))
 }
 
 fn terminal_pod_resize_failure(pod: &Pod) -> Option<String> {
@@ -2157,6 +2281,62 @@ mod tests {
             terminal_pod_resize_failure(&pod).as_deref(),
             Some("node has insufficient memory")
         );
+    }
+
+    #[test]
+    fn live_resize_observation_accepts_semantically_equal_quantities() {
+        let pod: Pod = serde_json::from_value(json!({
+            "apiVersion": "v1",
+            "kind": "Pod",
+            "metadata": {"name": "workspace", "uid": "uid-1"},
+            "spec": {"containers": [{"name": "workspace"}]},
+            "status": {
+                "containerStatuses": [{
+                    "name": "workspace",
+                    "image": "workspace:test",
+                    "imageID": "workspace:test",
+                    "ready": true,
+                    "restartCount": 0,
+                    "resources": {
+                        "requests": {"cpu": "3", "memory": "5Gi"},
+                        "limits": {"cpu": "3e0", "memory": "5242880Ki"}
+                    },
+                    "state": {"running": {"startedAt": "2026-08-04T00:00:00Z"}}
+                }]
+            }
+        }))
+        .unwrap();
+
+        assert!(workspace_resources_match(&pod, "3000m", "5120Mi"));
+        assert!(!workspace_resources_match(&pod, "2999m", "5120Mi"));
+        assert!(!workspace_resources_match(&pod, "3000m", "5119Mi"));
+        assert!(quantities_equal("1500000u", "1500m"));
+        assert!(quantities_equal("1.5Gi", "1536Mi"));
+        assert!(!quantities_equal("invalid", "3000m"));
+        assert!(!quantities_equal("0", "0"));
+    }
+
+    #[test]
+    fn live_resize_observation_fails_closed_without_reported_resources() {
+        let pod: Pod = serde_json::from_value(json!({
+            "apiVersion": "v1",
+            "kind": "Pod",
+            "metadata": {"name": "workspace", "uid": "uid-1"},
+            "spec": {"containers": [{"name": "workspace"}]},
+            "status": {
+                "containerStatuses": [{
+                    "name": "workspace",
+                    "image": "workspace:test",
+                    "imageID": "workspace:test",
+                    "ready": true,
+                    "restartCount": 0,
+                    "state": {"running": {"startedAt": "2026-08-04T00:00:00Z"}}
+                }]
+            }
+        }))
+        .unwrap();
+
+        assert!(!workspace_resources_match(&pod, "3000m", "5120Mi"));
     }
 
     #[test]

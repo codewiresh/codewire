@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 SMOKE="$ROOT/scripts/runtime/dev/smoke-dev-commodity.sh"
 WRAPPER="$ROOT/scripts/ci/verify/runtime-dev-commodity-smoke.sh"
+CANDIDATE="$ROOT/scripts/runtime/dev/smoke-dev-candidate.sh"
 mkdir -p "$ROOT/.tmp"
 TEST_TMP="$(mktemp -d "$ROOT/.tmp/codewire-dev-commodity-smoke-tests.XXXXXX")"
 chmod 0700 "$TEST_TMP"
@@ -23,6 +24,7 @@ fail() {
 assert_static_contract() {
   bash -n "$SMOKE"
   bash -n "$WRAPPER"
+  bash -n "$CANDIDATE"
   for required in \
     CODEWIRE_SERVER_URL \
     EXPECTED_CODEWIRE_DEV_SERVER_URL \
@@ -38,6 +40,20 @@ assert_static_contract() {
     EXPECTED_RUNTIME_TRANSPORT_REGION; do
     grep -Fq "$required=\"\${$required:-}\"" "$WRAPPER" ||
       fail "CI wrapper gives $required a committed topology default"
+  done
+  candidate_run_smoke="$(awk '/^run_smoke\(\)/,/^}/' "$CANDIDATE")"
+  grep -Fq 'EXPECTED_RUNTIME_NODE_MIN_EPHEMERAL_GIB:-400' "$CANDIDATE" ||
+    fail "candidate smoke no longer accepts nominal 500 GB runtime nodes"
+  for required in \
+    EXPECTED_TAILNET_PATH_TRANSPORT \
+    EXPECTED_TAILNET_PEER_RELAY_ENDPOINT \
+    EXPECTED_UDP_RELAY_BIND_ADDRS \
+    EXPECTED_UDP_RELAY_ALLOCATOR_URL \
+    EXPECTED_TAILNET_DIRECT_UDP_LB_IP \
+    EXPECTED_TAILNET_DIRECT_UDP_TRANSPORT_ZONE \
+    EXPECTED_RUNTIME_TRANSPORT_REGION; do
+    grep -Fq "export $required" <<<"$candidate_run_smoke" ||
+      fail "candidate smoke does not export $required to the verifier"
   done
   grep -Fq '[[ "$CODEWIRE_SERVER_URL" == "$EXPECTED_CODEWIRE_DEV_SERVER_URL"' \
     "$SMOKE" || fail "smoke no longer checks its externally configured dev endpoint"
