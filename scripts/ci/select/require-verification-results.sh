@@ -32,6 +32,8 @@ require_group_success database-services \
 require_group_success edge-kind "${VERIFICATION_EDGE_KIND_RESULT:-missing}"
 require_group_success cw-release-assets \
   "${VERIFICATION_CW_RELEASE_ASSETS_RESULT:-missing}"
+require_group_success workspace-image \
+  "${VERIFICATION_WORKSPACE_IMAGE_RESULT:-missing}"
 
 case "$tested_tree_receipt" in
   fallback)

@@ -181,7 +181,11 @@ run_case() {
           policy_sha256: ("e" * 64),
           graph_sha256: ("f" * 64),
           baseline_commit: $base,
-          artifacts: {cw_cli_release_assets: "unaffected", desktop_package: "unaffected"}
+          artifacts: {
+            cw_cli_release_assets: "unaffected",
+            desktop_package: "unaffected",
+            workspace_image: "unaffected"
+          }
         },
         selection: "|valid:v2|policy|complete|",
         results: {
@@ -190,7 +194,8 @@ run_case() {
           rust_transport: "success",
           database_services: "success",
           edge_kind: "success",
-          cw_release_assets: "success"
+          cw_release_assets: "success",
+          workspace_image: "success"
         }
       }
     ')"

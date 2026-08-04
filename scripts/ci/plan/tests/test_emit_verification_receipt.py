@@ -43,6 +43,7 @@ def environment() -> dict[str, str]:
         "CODEWIRE_PLAN_STATUS": "trusted",
         "CODEWIRE_CW_PACKAGE_STATE": "unaffected",
         "CODEWIRE_DESKTOP_PACKAGE_STATE": "affected",
+        "CODEWIRE_WORKSPACE_IMAGE_STATE": "unaffected",
         "CODEWIRE_SELECTION": "|valid:v2|policy|rust|rust_pkg_codewire_desktop|complete|",
         "CODEWIRE_SELECTION_RESULT": "success",
         "CODEWIRE_STANDARD_RESULT": "success",
@@ -50,6 +51,7 @@ def environment() -> dict[str, str]:
         "CODEWIRE_DATABASE_SERVICES_RESULT": "success",
         "CODEWIRE_EDGE_KIND_RESULT": "success",
         "CODEWIRE_CW_RELEASE_ASSETS_RESULT": "success",
+        "CODEWIRE_WORKSPACE_IMAGE_RESULT": "success",
     }
 
 
@@ -61,6 +63,8 @@ class ReceiptEmitterTests(unittest.TestCase):
         self.assertEqual(receipt["source"]["head_tree"], TREE)
         self.assertEqual(receipt["plan"]["sha256"], HASH)
         self.assertEqual(receipt["results"]["cw_release_assets"], "success")
+        self.assertEqual(receipt["results"]["workspace_image"], "success")
+        self.assertEqual(receipt["plan"]["artifacts"]["workspace_image"], "unaffected")
 
     def test_missing_gitea_first_attempt_defaults_to_one(self) -> None:
         env = environment()
@@ -94,6 +98,12 @@ class ReceiptEmitterTests(unittest.TestCase):
         env = environment()
         env["CODEWIRE_CW_RELEASE_ASSETS_RESULT"] = "skipped"
         with self.assertRaisesRegex(emitter.ReceiptError, "concluded skipped"):
+            emitter.build_receipt(env)
+
+    def test_workspace_dependency_must_have_succeeded(self) -> None:
+        env = environment()
+        env["CODEWIRE_WORKSPACE_IMAGE_RESULT"] = "failure"
+        with self.assertRaisesRegex(emitter.ReceiptError, "concluded failure"):
             emitter.build_receipt(env)
 
 

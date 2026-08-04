@@ -68,7 +68,8 @@ def build_receipt(env: Mapping[str, str]) -> dict[str, object]:
 
     cw_state = require(env, "CODEWIRE_CW_PACKAGE_STATE")
     desktop_state = require(env, "CODEWIRE_DESKTOP_PACKAGE_STATE")
-    if cw_state not in STATES or desktop_state not in STATES:
+    workspace_state = require(env, "CODEWIRE_WORKSPACE_IMAGE_STATE")
+    if cw_state not in STATES or desktop_state not in STATES or workspace_state not in STATES:
         raise ReceiptError("receipt contains an invalid artifact state")
     selection = require(env, "CODEWIRE_SELECTION")
     if not selection.startswith("|valid:v2|") or not selection.endswith("|complete|"):
@@ -103,6 +104,7 @@ def build_receipt(env: Mapping[str, str]) -> dict[str, object]:
             "artifacts": {
                 "cw_cli_release_assets": cw_state,
                 "desktop_package": desktop_state,
+                "workspace_image": workspace_state,
             },
         },
         "selection": selection,
@@ -113,6 +115,7 @@ def build_receipt(env: Mapping[str, str]) -> dict[str, object]:
             "database_services": require_success(env, "CODEWIRE_DATABASE_SERVICES_RESULT"),
             "edge_kind": require_success(env, "CODEWIRE_EDGE_KIND_RESULT"),
             "cw_release_assets": require_success(env, "CODEWIRE_CW_RELEASE_ASSETS_RESULT"),
+            "workspace_image": require_success(env, "CODEWIRE_WORKSPACE_IMAGE_RESULT"),
         },
     }
 

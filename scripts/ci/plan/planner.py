@@ -1101,6 +1101,7 @@ def plan(
             "rust": True,
             "cw_cli_package": selected("cw_cli_release_assets"),
             "desktop_package": selected("desktop_package"),
+            "workspace_image": selected("workspace_image"),
         },
         "artifacts": artifacts,
         "degraded_reasons": sorted(set(degraded)),

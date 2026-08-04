@@ -977,7 +977,6 @@ elif [ "$event_selected" = false ]; then
       images/*|\
       .gitea/workflows/claude-e2e.yaml|.gitea/workflows/cli-release.yaml|\
       .gitea/workflows/mirror-github.yaml|\
-      .gitea/workflows/workspace-image-verify.yaml|\
       .gitea/workflows/support-images.yaml|\
       scripts/ci/select/artifact-impact.py|\
       scripts/ci/select/select-support-images.sh|\

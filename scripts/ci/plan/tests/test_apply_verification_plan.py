@@ -24,7 +24,11 @@ HASH_D = "d" * 64
 HASH_E = "e" * 64
 
 
-def fixture_plan(cw_state: str = "unaffected", desktop_state: str = "unaffected") -> dict[str, object]:
+def fixture_plan(
+    cw_state: str = "unaffected",
+    desktop_state: str = "unaffected",
+    workspace_state: str = "unaffected",
+) -> dict[str, object]:
     return {
         "schema": "codewire.ci-plan/v1",
         "trusted_policy": {
@@ -44,10 +48,12 @@ def fixture_plan(cw_state: str = "unaffected", desktop_state: str = "unaffected"
             "rust": True,
             "cw_cli_package": cw_state != "unaffected",
             "desktop_package": desktop_state != "unaffected",
+            "workspace_image": workspace_state != "unaffected",
         },
         "artifacts": {
             "cw_cli_release_assets": {"state": cw_state},
             "desktop_package": {"state": desktop_state},
+            "workspace_image": {"state": workspace_state},
         },
         "degraded_reasons": [],
     }
@@ -80,6 +86,7 @@ class PlanAdapterTests(unittest.TestCase):
         )
         self.assertEqual(outputs["cw_package_selected"], "false")
         self.assertEqual(outputs["desktop_package_selected"], "false")
+        self.assertEqual(outputs["workspace_image_selected"], "false")
         self.assertEqual(outputs["selection"], "|valid:v2|policy|rust|service_billing|complete|")
 
     def test_affected_cw_and_unclassified_desktop_are_selected(self) -> None:
@@ -94,10 +101,24 @@ class PlanAdapterTests(unittest.TestCase):
             "|valid:v2|policy|rust|rust_pkg_codewire_desktop|service_billing|complete|",
         )
 
+    def test_affected_workspace_image_is_selected(self) -> None:
+        outputs = self.invoke(
+            fixture_plan(workspace_state="affected"),
+            "|valid:v2|policy|complete|",
+        )
+        self.assertEqual(outputs["workspace_image_state"], "affected")
+        self.assertEqual(outputs["workspace_image_selected"], "true")
+
     def test_plan_verification_boolean_cannot_override_artifact_state(self) -> None:
         plan = fixture_plan()
         plan["verification"]["cw_cli_package"] = True  # type: ignore[index]
         with self.assertRaisesRegex(adapter.AdapterError, "disagrees"):
+            self.invoke(plan, "|valid:v2|policy|complete|")
+
+    def test_workspace_verification_boolean_cannot_override_artifact_state(self) -> None:
+        plan = fixture_plan()
+        plan["verification"]["workspace_image"] = True  # type: ignore[index]
+        with self.assertRaisesRegex(adapter.AdapterError, "workspace verification fact disagrees"):
             self.invoke(plan, "|valid:v2|policy|complete|")
 
     def test_invalid_legacy_selection_fails_closed(self) -> None:
@@ -121,6 +142,8 @@ class PlanAdapterTests(unittest.TestCase):
             outputs = adapter.build_outputs(args)
         self.assertEqual(outputs["ci_plan_status"], "unclassified")
         self.assertEqual(outputs["cw_package_state"], "unclassified")
+        self.assertEqual(outputs["workspace_image_state"], "unclassified")
+        self.assertEqual(outputs["workspace_image_selected"], "true")
         self.assertIn("|rust_pkg_codewire_desktop|", outputs["selection"])
 
 

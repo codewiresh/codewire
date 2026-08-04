@@ -250,7 +250,7 @@ if ! jq -e \
       | select(.plan.sha256 | test("^[0-9a-f]{64}$"))
       | select(.plan.policy_sha256 | test("^[0-9a-f]{64}$"))
       | select(.plan.graph_sha256 | test("^[0-9a-f]{64}$"))
-      | select((.plan.artifacts | keys | sort) == ["cw_cli_release_assets", "desktop_package"])
+      | select((.plan.artifacts | keys | sort) == ["cw_cli_release_assets", "desktop_package", "workspace_image"])
       | select([.plan.artifacts[]] | all(. == "affected" or . == "unaffected" or . == "unclassified"))
       | select(.selection | startswith("|valid:v2|") and endswith("|complete|"))
       | select(
@@ -263,7 +263,8 @@ if ! jq -e \
           rust_transport: "success",
           database_services: "success",
           edge_kind: "success",
-          cw_release_assets: "success"
+          cw_release_assets: "success",
+          workspace_image: "success"
         })
     ' "$receipt_json" >/dev/null; then
   fallback 'verification-receipt-mismatch'

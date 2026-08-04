@@ -91,12 +91,16 @@ def trusted_plan_outputs(plan_path: Path) -> dict[str, str]:
 
     cw_state = artifact_state(plan, "cw_cli_release_assets")
     desktop_state = artifact_state(plan, "desktop_package")
+    workspace_state = artifact_state(plan, "workspace_image")
     cw_selected = cw_state != "unaffected"
     desktop_selected = desktop_state != "unaffected"
+    workspace_selected = workspace_state != "unaffected"
     if verification.get("cw_cli_package") is not cw_selected:
         raise AdapterError("plan CW verification fact disagrees with artifact state")
     if verification.get("desktop_package") is not desktop_selected:
         raise AdapterError("plan desktop verification fact disagrees with artifact state")
+    if verification.get("workspace_image") is not workspace_selected:
+        raise AdapterError("plan workspace verification fact disagrees with artifact state")
     if verification.get("legacy_selectors_authoritative") is not True:
         raise AdapterError("plan does not preserve unmigrated legacy selectors")
 
@@ -115,6 +119,8 @@ def trusted_plan_outputs(plan_path: Path) -> dict[str, str]:
         "cw_package_selected": str(cw_selected).lower(),
         "desktop_package_state": desktop_state,
         "desktop_package_selected": str(desktop_selected).lower(),
+        "workspace_image_state": workspace_state,
+        "workspace_image_selected": str(workspace_selected).lower(),
     }
 
 
@@ -139,6 +145,8 @@ def unclassified_outputs(args: argparse.Namespace) -> dict[str, str]:
         "cw_package_selected": "true",
         "desktop_package_state": "unclassified",
         "desktop_package_selected": "true",
+        "workspace_image_state": "unclassified",
+        "workspace_image_selected": "true",
         **commits,
     }
 

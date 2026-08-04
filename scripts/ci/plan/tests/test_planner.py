@@ -339,12 +339,14 @@ class PlannerFixtureTests(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertEqual(self.states(first), ("unaffected", "unaffected"))
         self.assertEqual(self.workspace_states(first), ("unaffected", "unaffected", "unaffected"))
+        self.assertFalse(first["verification"]["workspace_image"])
 
     def test_direct_cli_change_affects_only_cli(self) -> None:
         self.repo.change("cli/src/main.rs", "fn main() { core::run(); /* changed */ }\n")
         document = self.repo.plan()
         self.assertEqual(self.states(document), ("affected", "unaffected"))
         self.assertEqual(self.workspace_states(document), ("affected", "unaffected", "affected"))
+        self.assertTrue(document["verification"]["workspace_image"])
 
     def test_reachable_normal_dependency_affects_both_packages(self) -> None:
         self.repo.change("core/src/lib.rs", "pub fn run() { println!(\"changed\"); }\n")
@@ -375,6 +377,7 @@ class PlannerFixtureTests(unittest.TestCase):
         document = self.repo.plan()
         self.assertEqual(self.states(document), ("unaffected", "unaffected"))
         self.assertEqual(self.workspace_states(document), ("unaffected", "unaffected", "unaffected"))
+        self.assertFalse(document["verification"]["workspace_image"])
 
     def test_relevant_generated_input_affects_both_packages(self) -> None:
         self.repo.change("generated/descriptor.bin", "descriptor-v2\n")
@@ -493,9 +496,10 @@ class PlannerFixtureTests(unittest.TestCase):
         outputs = dict(line.split("=", 1) for line in completed.stdout.splitlines())
         self.assertEqual(outputs["cw_package_selected"], "false")
         self.assertEqual(outputs["desktop_package_selected"], "false")
+        self.assertEqual(outputs["workspace_image_selected"], "false")
         print(
             "non-Rust planner fixture: cw_package_selected=false "
-            "desktop_package_selected=false"
+            "desktop_package_selected=false workspace_image_selected=false"
         )
 
     def test_missing_cargo_fails_closed_with_diagnostic(self) -> None:

@@ -3,7 +3,8 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 readonly ROOT
-readonly WORKFLOW="$ROOT/.gitea/workflows/workspace-image-verify.yaml"
+readonly WORKFLOW="$ROOT/.gitea/workflows/ci.yaml"
+readonly STANDALONE_WORKFLOW="$ROOT/.gitea/workflows/workspace-image-verify.yaml"
 readonly VERIFY="$ROOT/scripts/ci/verify/verify-workspace-image.sh"
 readonly HELPER="$ROOT/scripts/ci/images/build-local-image.sh"
 readonly AGENT_CONTRACT="$ROOT/scripts/ci/verify/workspace-agent-contract.sh"
@@ -13,17 +14,48 @@ fail() {
   exit 1
 }
 
-[[ -f "$WORKFLOW" ]] || fail 'workspace-image verification workflow is missing'
+[[ -f "$WORKFLOW" ]] || fail 'required CI workflow is missing'
+[[ ! -e "$STANDALONE_WORKFLOW" ]] || fail 'standalone workspace-image workflow still exists'
 [[ -x "$VERIFY" ]] || fail 'workspace-image verification script is not executable'
 [[ -x "$HELPER" ]] || fail 'local Buildx image helper is missing'
 [[ -x "$AGENT_CONTRACT" ]] || fail 'workspace agent contract is missing'
-grep -q '^  pull_request:$' "$WORKFLOW" || fail 'verification must run for pull requests'
-if grep -q '^  push:$\|^  workflow_dispatch:$\|secrets\.' "$WORKFLOW"; then
-  fail 'verification must be pull-request-only and credential-free'
+workspace_job="$(awk '
+  $0 == "  workspace-image:" { capture = 1 }
+  capture && $0 ~ /^  [A-Za-z0-9_-]+:$/ && $0 != "  workspace-image:" { exit }
+  capture { print }
+' "$WORKFLOW")"
+grep -qF '  workspace-image:' <<<"$workspace_job" || fail 'workspace-image job is missing'
+grep -qF '    name: Workspace image verification' <<<"$workspace_job" ||
+  fail 'workspace job has misleading publication wording'
+grep -qF '    runs-on: ubuntu-latest' <<<"$workspace_job" ||
+  fail 'workspace job is not assigned to a generic runner'
+grep -qF '    needs: [verification-selection]' <<<"$workspace_job" ||
+  fail 'workspace job does not consume the canonical verification plan'
+if grep -qE '^    if:' <<<"$workspace_job"; then
+  fail 'workspace job must remain a static required runner task'
+fi
+grep -qF 'name: Workspace image not selected' <<<"$workspace_job" ||
+  fail 'workspace job has no explicit unaffected path'
+grep -qF 'no checkout, download, installation, or build required' <<<"$workspace_job" ||
+  fail 'workspace no-op does not prove its cheap behavior'
+grep -qF "workspace_image_selected != 'true'" <<<"$workspace_job" ||
+  fail 'workspace no-op does not use canonical planner selection'
+grep -qF "workspace_image_selected == 'true'" <<<"$workspace_job" ||
+  fail 'workspace positive path does not use canonical planner selection'
+grep -qF "if ! grep -q '^workspace_image_state=' \"\$workflow_output\"; then" "$WORKFLOW" ||
+  fail 'WI-4 does not bridge the preceding trusted adapter fail-closed'
+grep -qF '.artifacts.workspace_image.state == "unclassified"' "$WORKFLOW" ||
+  fail 'WI-4 adapter bridge can reduce an untrusted workspace state'
+step_count="$(grep -Ec '^      - (name:|uses:)' <<<"$workspace_job")"
+guard_count="$(grep -Ec '^        if:' <<<"$workspace_job")"
+[[ "$step_count" == "$guard_count" ]] ||
+  fail 'every workspace job step must have a receipt/artifact selection guard'
+if grep -Eiq 'docker push|--push|contents: write|secrets\.' <<<"$workspace_job"; then
+  fail 'workspace verification must remain credential-free and non-publishing'
 fi
 grep -qF 'permissions:' "$WORKFLOW" || fail 'workflow does not declare permissions'
 grep -qF 'contents: read' "$WORKFLOW" || fail 'workflow does not use read-only contents permission'
-grep -qF 'scripts/ci/verify/verify-workspace-image.sh' "$WORKFLOW" ||
+grep -qF 'scripts/ci/verify/verify-workspace-image.sh' <<<"$workspace_job" ||
   fail 'workflow does not invoke the image verifier'
 if grep -Eq 'docker (buildx )?build.*--push|docker push' "$VERIFY"; then
   fail 'verification must not publish an image'
@@ -42,11 +74,11 @@ grep -qF -- '--load' "$VERIFY" ||
   fail 'workspace verification does not load its final image for inspection'
 grep -qF 'images/base/Dockerfile' "$VERIFY" ||
   fail 'workspace verification omits the base image build'
-grep -qF 'scripts/ci/tests/test-build-local-image.sh' "$WORKFLOW" ||
+grep -qF 'scripts/ci/tests/test-build-local-image.sh' <<<"$workspace_job" ||
   fail 'workflow does not run the mocked helper contract'
-grep -qF 'scripts/ci/tests/test-workspace-agent-contract.sh' "$WORKFLOW" ||
+grep -qF 'scripts/ci/tests/test-workspace-agent-contract.sh' <<<"$workspace_job" ||
   fail 'workflow does not run the mocked PID/agent contract'
-grep -qF 'scripts/ci/verify/rehearse-build-local-image.sh' "$WORKFLOW" ||
+grep -qF 'scripts/ci/verify/rehearse-build-local-image.sh' <<<"$workspace_job" ||
   fail 'workflow does not run the real no-load/load rehearsal'
 grep -qF -- '--pids-limit=2048' "$VERIFY" ||
   fail 'nested workspace verification does not declare its PID limit'

@@ -12,6 +12,7 @@ green_results=(
   VERIFICATION_DATABASE_SERVICES_RESULT=success
   VERIFICATION_EDGE_KIND_RESULT=success
   VERIFICATION_CW_RELEASE_ASSETS_RESULT=success
+  VERIFICATION_WORKSPACE_IMAGE_RESULT=success
 )
 
 expect_failure() {
@@ -67,6 +68,11 @@ expect_failure cw_release_assets_failure \
   'cw-release-assets capability group concluded failure' \
   VERIFICATION_SELECTION='|valid:v2|policy|complete|' \
   VERIFICATION_CW_RELEASE_ASSETS_RESULT=failure
+
+expect_failure workspace_image_failure \
+  'workspace-image capability group concluded failure' \
+  VERIFICATION_SELECTION='|valid:v2|policy|complete|' \
+  VERIFICATION_WORKSPACE_IMAGE_RESULT=failure
 
 expect_failure malformed_selection 'verification selection is invalid or incomplete' \
   VERIFICATION_SELECTION='|valid:v2|policy|'

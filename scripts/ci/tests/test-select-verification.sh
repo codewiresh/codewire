@@ -5,7 +5,6 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 SELECTOR="$ROOT/scripts/ci/select/select-verification.sh"
 WORKFLOW="$ROOT/.gitea/workflows/ci.yaml"
 DIAGNOSTICS_WORKFLOW="$ROOT/.gitea/workflows/manual-diagnostics.yaml"
-WORKSPACE_IMAGE_WORKFLOW="$ROOT/.gitea/workflows/workspace-image-verify.yaml"
 CLI_RELEASE_WORKFLOW="$ROOT/.gitea/workflows/cli-release.yaml"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
@@ -49,60 +48,6 @@ assert_tokens() {
     printf '%s\n' "$actual" >&2
     exit 1
   fi
-}
-
-workflow_pull_request_paths() {
-  local workflow="$1"
-  awk '
-    $0 == "  pull_request:" { in_pull_request = 1; next }
-    in_pull_request && /^  [[:alnum:]_-]+:/ { exit }
-    in_pull_request && $0 == "    paths:" { in_paths = 1; next }
-    in_paths && /^      - / {
-      value = $0
-      sub(/^      - /, "", value)
-      gsub(/\047/, "", value)
-      print value
-      next
-    }
-    in_paths && NF { exit }
-  ' "$workflow"
-}
-
-assert_workflow_ignores_paths() {
-  local name="$1" workflow="$2"
-  shift 2
-  local changed_path pattern
-  local patterns=()
-  mapfile -t patterns < <(workflow_pull_request_paths "$workflow")
-  if [ "${#patterns[@]}" -eq 0 ]; then
-    echo "${name}: pull-request path filter is missing" >&2
-    exit 1
-  fi
-  for changed_path in "$@"; do
-    for pattern in "${patterns[@]}"; do
-      # shellcheck disable=SC2254 # Workflow entries are intentional globs.
-      case "$changed_path" in
-        $pattern)
-          echo "${name}: ${changed_path} unexpectedly selects ${pattern}" >&2
-          exit 1
-          ;;
-      esac
-    done
-  done
-}
-
-assert_workflow_selects_path() {
-  local name="$1" workflow="$2" changed_path="$3" pattern
-  local patterns=()
-  mapfile -t patterns < <(workflow_pull_request_paths "$workflow")
-  for pattern in "${patterns[@]}"; do
-    # shellcheck disable=SC2254 # Workflow entries are intentional globs.
-    case "$changed_path" in
-      $pattern) return ;;
-    esac
-  done
-  echo "${name}: ${changed_path} is missing from the pull-request path filter" >&2
-  exit 1
 }
 
 run_paths_case() {
@@ -185,7 +130,6 @@ run_paths_case release pull_request refs/pull/3/head false \
   .gitea/workflows/claude-e2e.yaml \
   .gitea/workflows/cli-release.yaml \
   .gitea/workflows/mirror-github.yaml \
-  .gitea/workflows/workspace-image-verify.yaml \
   apps/cli/GPG_PUBLIC_KEY.asc \
   keys/production-release.asc \
   apps/cli/README.md \
@@ -559,8 +503,6 @@ run_paths_case makefile_only pull_request refs/pull/152/head false \
 run_paths_case buildx_two_file_replay pull_request refs/pull/1520/head false \
   'deploy edge_kind go_consumer_interop go_support policy release runtime_confidential security' \
   Makefile scripts/checks/security/audit-runtime-images.sh
-assert_workflow_ignores_paths buildx_two_file_replay_workspace_image \
-  "$WORKSPACE_IMAGE_WORKFLOW" Makefile scripts/checks/security/audit-runtime-images.sh
 [ ! -e "$ROOT/.gitea/workflows/desktop-package.yaml" ] || {
   echo 'standalone desktop package workflow still exists' >&2
   exit 1
@@ -572,10 +514,10 @@ if grep -qF '  pull_request:' "$CLI_RELEASE_WORKFLOW" \
 fi
 grep -qF "    tags: ['v*']" "$CLI_RELEASE_WORKFLOW"
 grep -qF '  workflow_dispatch:' "$CLI_RELEASE_WORKFLOW"
-assert_workflow_selects_path workspace_image_source "$WORKSPACE_IMAGE_WORKFLOW" \
-  images/workspace/Dockerfile
-assert_workflow_selects_path workspace_verifier "$WORKSPACE_IMAGE_WORKFLOW" \
-  scripts/ci/verify/verify-workspace-image.sh
+[ ! -e "$ROOT/.gitea/workflows/workspace-image-verify.yaml" ] || {
+  echo 'standalone workspace image workflow still exists' >&2
+  exit 1
+}
 run_paths_case cli_makefile pull_request refs/pull/1521/head false \
   'policy rust rust_pkg_codewire_cli rust_pkg_codewire_cli_bin' \
   apps/cli/Makefile
@@ -1112,7 +1054,8 @@ for output in selection ci_plan_status ci_plan_schema ci_plan_sha256 \
     ci_policy_commit ci_policy_sha256 ci_graph_sha256 \
     ci_target_base_commit ci_baseline_commit ci_head_commit ci_head_tree \
     cw_package_state cw_package_selected desktop_package_state \
-    desktop_package_selected tested_tree_receipt tested_tree_reason \
+    desktop_package_selected workspace_image_state workspace_image_selected \
+    tested_tree_receipt tested_tree_reason \
     tested_tree_pr tested_tree_head tested_tree_run tested_tree_policy_commit \
     tested_tree_policy_sha256 tested_tree_plan_sha256; do
   grep -qF "      ${output}:" "$selection_block" || {
@@ -1147,6 +1090,11 @@ grep -A4 -F 'name: Set up pinned Cargo for trusted artifact planning' \
   "$selection_block" | grep -qF 'toolchain: 1.91.1'
 grep -qF "jq -e '.degraded_reasons | length > 0'" "$selection_block"
 grep -qF "jq -c '.degraded_reasons'" "$selection_block"
+grep -qF "if ! grep -q '^workspace_image_state=' \"\$workflow_output\"; then" \
+  "$selection_block"
+grep -qF ".artifacts.workspace_image.state == \"unclassified\"" "$selection_block"
+grep -qF "echo 'workspace_image_state=unclassified'" "$selection_block"
+grep -qF "echo 'workspace_image_selected=true'" "$selection_block"
 
 python3 "$ROOT/scripts/ci/plan/tests/test_planner.py" \
   PlannerFixtureTests.test_go_sdk_only_change_emits_unselected_cw_and_desktop_outputs \
@@ -1171,8 +1119,8 @@ top_level_jobs="$(awk '
   in_jobs && /^  [A-Za-z0-9_-]+:$/ { count++ }
   END { print count + 0 }
 ' "$WORKFLOW")"
-if [ "$top_level_jobs" != 7 ]; then
-  echo "product CI defines ${top_level_jobs} jobs; expected selector, CW package, four groups, and aggregate" >&2
+if [ "$top_level_jobs" != 8 ]; then
+  echo "product CI defines ${top_level_jobs} jobs; expected selector, two artifact jobs, four groups, and aggregate" >&2
   exit 1
 fi
 for legacy_job in policy contracts rust go-support web sdk-go sdk-ts sdk-python \
@@ -1216,6 +1164,43 @@ cw_selected_steps="$(grep -Ec '^      - (name:|uses:)' "$cw_block")"
 cw_guarded_steps="$(grep -Ec '^        if:' "$cw_block")"
 if [ "$cw_selected_steps" != "$cw_guarded_steps" ]; then
   echo 'every CW verification step must be guarded by receipt/package selection' >&2
+  exit 1
+fi
+
+workspace_block="$TMP/workspace-image.yaml"
+awk '
+  $0 == "  workspace-image:" { capture = 1 }
+  capture && $0 ~ /^  [A-Za-z0-9_-]+:$/ && $0 != "  workspace-image:" { exit }
+  capture { print }
+' "$WORKFLOW" > "$workspace_block"
+grep -qF '  workspace-image:' "$workspace_block"
+grep -qF '    name: Workspace image verification' "$workspace_block"
+grep -qF '    runs-on: ubuntu-latest' "$workspace_block"
+grep -qF '    needs: [verification-selection]' "$workspace_block"
+grep -qF 'name: Workspace image not selected' "$workspace_block"
+grep -qF 'no checkout, download, installation, or build required' "$workspace_block"
+grep -qF "needs.verification-selection.outputs.workspace_image_selected != 'true'" \
+  "$workspace_block"
+grep -qF "needs.verification-selection.outputs.workspace_image_selected == 'true'" \
+  "$workspace_block"
+for command in \
+    scripts/ci/tests/test-build-local-image.sh \
+    scripts/ci/tests/test-workspace-agent-contract.sh \
+    scripts/ci/verify/rehearse-build-local-image.sh \
+    scripts/ci/verify/verify-workspace-image.sh; do
+  grep -qF "$command" "$workspace_block" || {
+    echo "workspace image verification omits ${command}" >&2
+    exit 1
+  }
+done
+workspace_steps="$(grep -Ec '^      - (name:|uses:)' "$workspace_block")"
+workspace_guards="$(grep -Ec '^        if:' "$workspace_block")"
+if [ "$workspace_steps" != "$workspace_guards" ]; then
+  echo 'every workspace verification step must be guarded by receipt/artifact selection' >&2
+  exit 1
+fi
+if grep -Eiq 'docker push|--push|contents: write|secrets\.' "$workspace_block"; then
+  echo 'PR workspace image verification crosses a publication boundary' >&2
   exit 1
 fi
 
@@ -1440,7 +1425,7 @@ grep -qF '    name: Required verification' "$WORKFLOW"
 # shellcheck disable=SC2016 # Match the literal Actions expression.
 grep -qF '    if: ${{ always() }}' "$WORKFLOW"
 grep -qF 'scripts/ci/select/require-verification-results.sh' "$required_block"
-for group in cw-release-assets standard rust-transport database-services edge-kind; do
+for group in cw-release-assets workspace-image standard rust-transport database-services edge-kind; do
   grep -qF "      - ${group}" "$required_block" || {
     echo "required CI does not wait on ${group}" >&2
     exit 1
@@ -1448,7 +1433,7 @@ for group in cw-release-assets standard rust-transport database-services edge-ki
 done
 for result in VERIFICATION_CW_RELEASE_ASSETS_RESULT VERIFICATION_STANDARD_RESULT \
     VERIFICATION_RUST_TRANSPORT_RESULT VERIFICATION_DATABASE_SERVICES_RESULT \
-    VERIFICATION_EDGE_KIND_RESULT; do
+    VERIFICATION_EDGE_KIND_RESULT VERIFICATION_WORKSPACE_IMAGE_RESULT; do
   grep -qF "${result}:" "$required_block" || {
     echo "required CI omits ${result}" >&2
     exit 1
@@ -1467,6 +1452,14 @@ for receipt_input in VERIFICATION_TESTED_TREE_RECEIPT \
 done
 grep -qF 'name: Emit exact-head verification receipt' "$required_block"
 grep -qF 'run: scripts/ci/plan/emit-verification-receipt.py' "$required_block"
+for receipt_input in CODEWIRE_CW_PACKAGE_STATE CODEWIRE_DESKTOP_PACKAGE_STATE \
+    CODEWIRE_WORKSPACE_IMAGE_STATE CODEWIRE_CW_RELEASE_ASSETS_RESULT \
+    CODEWIRE_WORKSPACE_IMAGE_RESULT; do
+  grep -qF "${receipt_input}:" "$required_block" || {
+    echo "verification receipt omits ${receipt_input}" >&2
+    exit 1
+  }
+done
 if grep -qF 'diagnostics' "$required_block" \
   || grep -qF 'DIAGNOSTICS_RESULT' "$required_block"; then
   echo 'required CI must not wait on manual diagnostics' >&2
