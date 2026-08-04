@@ -7,7 +7,8 @@ ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 FAMILY="${1:-}"
 SELECTION="${VERIFICATION_SELECTION:-|valid:v2|complete|}"
 cd "$ROOT"
-export CARGO_TARGET_DIR="$(scripts/ci/verify/resolve-cargo-target-dir.sh "$ROOT")"
+CARGO_TARGET_DIR="$(scripts/ci/verify/resolve-cargo-target-dir.sh "$ROOT")"
+export CARGO_TARGET_DIR
 CARGO_DEBUG_DIR="$CARGO_TARGET_DIR/debug"
 
 selected() {
@@ -124,6 +125,7 @@ run_policy() {
   scripts/ci/tests/test-require-verification-results.sh
   scripts/ci/tests/test-verify-tested-tree-receipt.sh
   scripts/ci/tests/test-resolve-cargo-target-dir.sh
+  scripts/ci/tests/test-cargo-target-runner-failures.sh
   scripts/ci/tests/test-package-codewire-desktop.sh
   scripts/ci/tests/test-admin-proto-boundary.sh
   scripts/ci/tests/test-build-local-image.sh
@@ -131,6 +133,8 @@ run_policy() {
   scripts/ci/tests/test-workspace-image-verify-workflow.sh
   scripts/ci/tests/test-sdk-local-cli-contract.sh
   scripts/ci/tests/test-integration-postgres.sh
+  scripts/ci/verify/check-shell-scripts.sh --self-test
+  scripts/ci/verify/check-shell-scripts.sh
   python3 scripts/checks/repo_checks.py license-map
   python3 scripts/checks/repo_checks.py permanent-raw-surface --self-test
   python3 scripts/checks/repo_checks.py rust-validation-source
@@ -472,9 +476,7 @@ run_edge() {
         return 1
       fi
     done
-    for pattern in /api/webhooks/stripe; do
-      grep -qF "$pattern" "$file"
-    done
+    grep -qF '/api/webhooks/stripe' "$file"
     grep -qF 'handle /api/* {' "$file"
     grep -qE 'reverse_proxy (localhost|127.0.0.1):8084' "$file"
     if grep -qE 'reverse_proxy (localhost|127.0.0.1):8080' "$file"; then

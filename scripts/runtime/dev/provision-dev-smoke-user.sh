@@ -1,8 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
-
 KUBE_CONTEXT="${KUBE_CONTEXT:-codewire-dev}"
 KUBE_NAMESPACE="${KUBE_NAMESPACE:-dev}"
 POSTGRES_POD="${POSTGRES_POD:-codewire-db-1}"

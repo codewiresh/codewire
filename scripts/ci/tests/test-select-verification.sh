@@ -158,6 +158,7 @@ run_paths_case ci_rewrite pull_request refs/pull/20/head false \
   scripts/ci/tests/test-integration-postgres.sh \
   scripts/ci/tests/test-go-source-ownership.sh \
   scripts/ci/tests/test-resolve-cargo-target-dir.sh \
+  scripts/ci/tests/test-cargo-target-runner-failures.sh \
   scripts/ci/tests/test-agent-sandbox-pin.sh \
   scripts/ci/tests/test-rust-owned-fixtures.sh \
   scripts/ci/tests/test-select-deploy-dev.sh \

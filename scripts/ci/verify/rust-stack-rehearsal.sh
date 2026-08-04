@@ -9,9 +9,10 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
-export CARGO_TARGET_DIR="$(
+CARGO_TARGET_DIR="$(
   "$ROOT/scripts/ci/verify/resolve-cargo-target-dir.sh" "$ROOT"
 )"
+export CARGO_TARGET_DIR
 CARGO_CI_DIR="$CARGO_TARGET_DIR/ci"
 RUN_DIR="${RUN_DIR:-$ROOT/.tmp/codewire-rust-stack-rehearsal}"
 mkdir -p "$RUN_DIR/bin"

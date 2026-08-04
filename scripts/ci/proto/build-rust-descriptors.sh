@@ -5,7 +5,8 @@ set -euo pipefail
 # global-administrator contracts. Keep their checked-in descriptor inputs
 # separate so a customer binary cannot accidentally compile the billing-admin
 # surface merely by depending on `codewire-proto`.
-readonly ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+readonly ROOT
 readonly BUF_BIN="${BUF:-buf}"
 
 cd "$ROOT/proto"

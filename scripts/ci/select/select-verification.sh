@@ -381,6 +381,7 @@ elif [ "$event_selected" = false ]; then
       scripts/ci/verify/integration-postgres.sh|scripts/ci/tests/test-integration-postgres.sh|\
       scripts/ci/verify/resolve-cargo-target-dir.sh|\
       scripts/ci/tests/test-resolve-cargo-target-dir.sh|\
+      scripts/ci/tests/test-cargo-target-runner-failures.sh|\
       scripts/ci/verify/run-product-verification.sh|\
       scripts/ci/tests/test-sdk-local-cli-contract.sh|\
       scripts/checks/security/audit-rust-only-runtime.sh|\

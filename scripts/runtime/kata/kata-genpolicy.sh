@@ -291,6 +291,7 @@ smoke() {
   fi
 
   if [[ -n "$cleanup_registry_name" ]]; then
+    # shellcheck disable=SC2064 # Capture the per-smoke registry name while it is still in scope.
     trap "docker rm -f '$cleanup_registry_name' >/dev/null 2>&1 || true" EXIT
   fi
 

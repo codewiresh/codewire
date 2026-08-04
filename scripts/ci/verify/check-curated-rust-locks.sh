@@ -27,12 +27,14 @@ check_workspace() {
   ln -s "$ROOT/libs" "$stage/libs"
 
   run_locked_metadata() {
-    "$CARGO_BIN" metadata \
-      --locked \
-      --offline \
-      --manifest-path "$stage/Cargo.toml" \
-      --format-version 1 \
-      2>&1 >/dev/null
+    {
+      "$CARGO_BIN" metadata \
+        --locked \
+        --offline \
+        --manifest-path "$stage/Cargo.toml" \
+        --format-version 1 \
+        >/dev/null
+    } 2>&1
   }
 
   if ! output="$(run_locked_metadata)"; then

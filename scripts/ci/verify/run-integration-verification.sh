@@ -6,9 +6,10 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 MODE="${1:-}"
 SELECTION="${VERIFICATION_SELECTION:-|valid:v2|complete|}"
-export CARGO_TARGET_DIR="$(
+CARGO_TARGET_DIR="$(
   "$ROOT/scripts/ci/verify/resolve-cargo-target-dir.sh" "$ROOT"
 )"
+export CARGO_TARGET_DIR
 CARGO_CI_DIR="$CARGO_TARGET_DIR/ci"
 RUN_DIR="${RUN_DIR:-$ROOT/.tmp/codewire-product-integration-${GITHUB_RUN_ID:-local-$$}}"
 DATABASE_URL_EXPLICIT=false
