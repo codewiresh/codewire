@@ -53,7 +53,9 @@
           <section class="cw-card">
             <header class="cw-card-header"><div><h2>Environment Usage</h2><p>Per-second compute billing for this month.</p></div></header>
             <div class="cw-card-body">
-              {% if billing.has_current_month %}
+              {% if !billing.usage_available %}
+              <div class="cw-alert cw-alert--warning" role="status">Usage is temporarily unavailable. Plan and payment controls remain usable.</div>
+              {% else if billing.has_current_month %}
               <div class="cw-stat-grid cw-stat-grid--three">
                 <div class="cw-stat"><span>Current Month</span><strong>{{ billing.current_cost }}</strong></div>
                 <div class="cw-stat"><span>CPU Hours</span><strong>{{ billing.cpu_hours }}{% if billing.has_included_cpu_hours %}<small> / {{ billing.included_cpu_hours }}</small>{% endif %}</strong></div>
@@ -80,14 +82,17 @@
           <section class="cw-card">
             <header class="cw-card-header"><div><h2>Invoices</h2><p>Past billing periods.</p></div></header>
             <div class="cw-card-body">
-              {% if billing.invoices.is_empty() %}<p class="cw-muted">No invoices yet.</p>{% else %}
+              {% if !billing.invoices_available %}<div class="cw-alert cw-alert--warning" role="status">Invoice history is temporarily unavailable.</div>{% else if billing.invoices.is_empty() %}<p class="cw-muted">No invoices yet.</p>{% else %}
               <div class="cw-table-wrap"><table class="cw-table"><thead><tr><th scope="col">Period</th><th scope="col">Amount</th><th scope="col">Status</th><th scope="col">Documents</th></tr></thead><tbody>
                 {% for invoice in billing.invoices %}<tr><td>{{ invoice.period }}</td><td>{{ invoice.amount }}</td><td><span class="cw-badge">{{ invoice.status }}</span></td><td>{% if invoice.has_hosted_url %}<a href="{{ invoice.hosted_url }}" target="_blank" rel="noreferrer">View ↗</a>{% endif %}{% if invoice.has_pdf_url %} <a href="{{ invoice.pdf_url }}" target="_blank" rel="noreferrer">PDF ↗</a>{% endif %}</td></tr>{% endfor %}
               </tbody></table></div>{% endif %}
             </div>
           </section>
 
-          {% if !billing.events.is_empty() %}<section class="cw-card">
+          {% if !billing.events_available %}<section class="cw-card">
+            <header class="cw-card-header"><div><h2>Recent Activity</h2><p>Latest account-level billing activity.</p></div></header>
+            <div class="cw-card-body"><div class="cw-alert cw-alert--warning" role="status">Recent billing activity is temporarily unavailable.</div></div>
+          </section>{% else if !billing.events.is_empty() %}<section class="cw-card">
             <header class="cw-card-header"><div><h2>Recent Activity</h2><p>Latest account-level billing activity.</p></div></header>
             <div class="cw-card-body"><div class="cw-table-wrap"><table class="cw-table"><thead><tr><th scope="col">Event</th><th scope="col">Occurred</th><th scope="col">Amount</th></tr></thead><tbody>{% for event in billing.events %}<tr><td><code>{{ event.event_type }}</code></td><td>{{ event.occurred }}</td><td>{% if event.has_amount %}{{ event.amount }}{% else %}—{% endif %}</td></tr>{% endfor %}</tbody></table></div></div>
           </section>{% endif %}

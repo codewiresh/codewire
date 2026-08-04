@@ -10,6 +10,7 @@ mod auth;
 mod billing_connect;
 mod config;
 mod connect;
+mod dependency;
 mod docs;
 mod environment_connect;
 mod error;

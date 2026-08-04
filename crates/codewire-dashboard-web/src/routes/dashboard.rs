@@ -1,10 +1,10 @@
 use axum::{extract::State, http::HeaderMap, response::Response};
-use connectrpc::ErrorCode;
 use url::Url;
 
 use crate::{
     auth::{IdentityUser, authenticated_identity, enforce_two_factor},
     connect::{github_status, organizations},
+    dependency::{DependencyResult, PageDependency, resolve_web},
     error::WebError,
     response::{error_page, login_redirect, render_page, two_factor_redirect},
     routes::{DASHBOARD_PATH, NEW_ORGANIZATION_PATH},
@@ -38,14 +38,17 @@ pub(super) async fn dashboard_view(
         organizations(state, cookie.clone()),
         github_status(state, cookie),
     );
-    let organizations = organizations?;
-    let (github_connected, github_available) = match github_status {
-        Ok(connected) => (connected, true),
-        Err(WebError::Connect(error)) if error.code == ErrorCode::Unauthenticated => {
-            return Err(WebError::Unauthorized);
+    let organizations = match resolve_web(PageDependency::DashboardOrganizations, organizations)? {
+        DependencyResult::Available(organizations) => organizations,
+        DependencyResult::Unavailable => {
+            unreachable!("required dashboard organizations cannot degrade")
         }
-        Err(_) => (false, false),
     };
+    let (github_connected, github_available) =
+        match resolve_web(PageDependency::DashboardGithubStatus, github_status)? {
+            DependencyResult::Available(connected) => (connected, true),
+            DependencyResult::Unavailable => (false, false),
+        };
     let has_organizations = !organizations.is_empty();
     let show_checklist = !has_organizations || !github_connected;
 

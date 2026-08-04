@@ -16,6 +16,7 @@ use codewire_proto::codewire::{
 use connectrpc::{ConnectError, ErrorCode, client::ClientConfig};
 
 use crate::{
+    dependency::{DependencyResult, PageDependency, resolve_connect},
     error::WebError,
     state::AppState,
     transport::BrowserTransport,
@@ -152,18 +153,50 @@ pub(crate) async fn settings_data(
         account.get_git_identity(GetGitIdentityRequest::default()),
         account.get_ssh_key(GetSshKeyRequest::default()),
     );
-    let github = github.map_err(WebError::Connect)?.into_owned();
-    let credentials = credentials.map_err(WebError::Connect)?.into_owned();
-    let identity = identity.map_err(WebError::Connect)?.into_owned();
+    let github = resolve_connect(
+        PageDependency::SettingsGithubStatus,
+        github.map(|response| response.into_owned()),
+    )
+    .map_err(WebError::Connect)?;
+    let (github, github_available) = match github {
+        DependencyResult::Available(github) => (github, true),
+        DependencyResult::Unavailable => (Default::default(), false),
+    };
+    let credentials = resolve_connect(
+        PageDependency::SettingsCredentials,
+        credentials.map(|response| response.into_owned()),
+    )
+    .map_err(WebError::Connect)?;
+    let (credentials, credentials_available) = match credentials {
+        DependencyResult::Available(credentials) => (credentials, true),
+        DependencyResult::Unavailable => (Default::default(), false),
+    };
+    let identity = resolve_connect(
+        PageDependency::SettingsGitIdentity,
+        identity.map(|response| response.into_owned()),
+    )
+    .map_err(WebError::Connect)?;
+    let (identity, git_identity_available) = match identity {
+        DependencyResult::Available(identity) => (identity, true),
+        DependencyResult::Unavailable => (Default::default(), false),
+    };
     let ssh_key = match ssh_key {
-        Ok(response) => response.into_owned().ssh_key.into_option(),
-        Err(error) if error.code == ErrorCode::NotFound => None,
-        Err(error) => return Err(WebError::Connect(error)),
+        Ok(response) => Ok(response.into_owned().ssh_key.into_option()),
+        Err(error) if error.code == ErrorCode::NotFound => Ok(None),
+        Err(error) => Err(error),
+    };
+    let ssh_key =
+        resolve_connect(PageDependency::SettingsSshKey, ssh_key).map_err(WebError::Connect)?;
+    let (ssh_key, ssh_key_status_available) = match ssh_key {
+        DependencyResult::Available(ssh_key) => (ssh_key, true),
+        DependencyResult::Unavailable => (None, false),
     };
     let identity = identity.git_identity.into_option().unwrap_or_default();
     Ok(SettingsData {
+        github_available,
         github_connected: github.connected,
         github_username: github.username,
+        credentials_available,
         credentials: credentials
             .git_credentials
             .into_iter()
@@ -174,8 +207,10 @@ pub(crate) async fn settings_data(
                 username: credential.username.unwrap_or_default(),
             })
             .collect(),
+        git_identity_available,
         git_name: identity.git_name,
         git_email: identity.git_email,
+        ssh_key_status_available,
         ssh_key_available: ssh_key.is_some(),
         ssh_public_key: ssh_key
             .as_ref()

@@ -43,7 +43,7 @@ pub(super) async fn settings(
     headers: HeaderMap,
     Query(query): Query<SettingsQuery>,
 ) -> Response {
-    let dashboard = match super::dashboard::dashboard_view(&state, &headers).await {
+    let dashboard = match super::dashboard::dashboard_shell_view(&state, &headers).await {
         Ok(view) => view,
         Err(WebError::Unauthorized) => return login_redirect(SETTINGS_PATH, &headers),
         Err(WebError::TwoFactorRequired) => return two_factor_redirect(SETTINGS_PATH, &headers),
@@ -337,5 +337,103 @@ fn approved_error(code: &str) -> &'static str {
         "identity-invalid" => "The Git identity values are too long.",
         "request-failed" => "The settings change could not be completed. Try again.",
         _ => "",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use askama::Template as _;
+
+    use super::*;
+    use crate::{
+        templates::SettingsTemplate,
+        view::{DashboardView, SettingsData},
+    };
+
+    type SettingsOutage = (&'static str, fn(&mut SettingsData), &'static str);
+
+    fn dashboard_view() -> DashboardView {
+        DashboardView {
+            user_name: "Dashboard User".into(),
+            is_admin: false,
+            organizations: Vec::new(),
+            has_organizations: false,
+            github_connected: false,
+            github_available: false,
+            show_checklist: false,
+            new_organization_url: "/dashboard/orgs/new".into(),
+            settings_url: SETTINGS_PATH.into(),
+            admin_url: "/admin".into(),
+            github_connect_url: String::new(),
+        }
+    }
+
+    #[test]
+    fn optional_outages_keep_unaffected_controls_and_hide_unknown_mutations() {
+        let outages: [SettingsOutage; 4] = [
+            (
+                "github",
+                |data| data.github_available = false,
+                "Other settings remain usable",
+            ),
+            (
+                "credentials",
+                |data| data.credentials_available = false,
+                "You can still add a credential",
+            ),
+            (
+                "identity",
+                |data| data.git_identity_available = false,
+                "Reload before changing it",
+            ),
+            (
+                "ssh",
+                |data| data.ssh_key_status_available = false,
+                "Reload before changing it",
+            ),
+        ];
+
+        for (name, inject, notice) in outages {
+            let mut data = SettingsData {
+                github_available: true,
+                credentials_available: true,
+                git_identity_available: true,
+                ssh_key_status_available: true,
+                ..Default::default()
+            };
+            inject(&mut data);
+            let settings = SettingsPageView {
+                data,
+                csrf_token: "csrf".into(),
+                github_connect_url: "/github/connect".into(),
+                message: String::new(),
+                error: String::new(),
+            };
+            let body = SettingsTemplate {
+                view: &dashboard_view(),
+                settings: &settings,
+            }
+            .render()
+            .expect("render degraded settings");
+
+            assert!(body.contains(notice), "{name}");
+            assert!(body.contains("/settings/account"), "{name}");
+            assert!(
+                body.contains("/dashboard/settings/_actions/credentials/create"),
+                "{name}"
+            );
+            assert!(!body.contains("upstream-sensitive-detail"), "{name}");
+            if name == "identity" {
+                assert!(!body.contains("/dashboard/settings/_actions/git-identity"));
+            }
+            if name == "ssh" {
+                assert!(!body.contains("/dashboard/settings/_actions/ssh/ensure"));
+                assert!(!body.contains("/dashboard/settings/_actions/ssh/regenerate"));
+            }
+            if name == "github" {
+                assert!(!body.contains("/dashboard/settings/_actions/github/disconnect"));
+                assert!(!body.contains("/github/connect"));
+            }
+        }
     }
 }

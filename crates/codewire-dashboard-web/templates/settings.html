@@ -26,7 +26,9 @@
         <section class="cw-card cw-settings-card" aria-labelledby="github-title">
           <div class="cw-card-header"><h2 id="github-title" class="cw-card-title"><svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-github"/></svg> GitHub</h2><p class="cw-card-description">Connect GitHub to create environments from private repositories.</p></div>
           <div class="cw-card-content">
-            {% if settings.data.github_connected %}
+            {% if !settings.data.github_available %}
+            <div class="cw-alert cw-alert--warning" role="status">GitHub status is temporarily unavailable. Other settings remain usable.</div>
+            {% else if settings.data.github_connected %}
             <p class="cw-status" data-tone="success">Connected{% if !settings.data.github_username.is_empty() %} as @{{ settings.data.github_username }}{% endif %}</p>
             <form method="post" action="/dashboard/settings/_actions/github/disconnect"><input type="hidden" name="_csrf" value="{{ settings.csrf_token }}"><button class="cw-button cw-button--outline cw-button--small" type="submit">Disconnect</button></form>
             {% else %}
@@ -38,6 +40,7 @@
         <section class="cw-card cw-settings-card" aria-labelledby="credentials-title">
           <div class="cw-card-header"><h2 id="credentials-title" class="cw-card-title"><svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-key"/></svg> Git authentication</h2><p class="cw-card-description">Add a token or password for Gitea, GitLab, Bitbucket, or another Git host. Credentials match by host when cloning.</p></div>
           <div class="cw-card-content cw-stack">
+            {% if !settings.data.credentials_available %}<div class="cw-alert cw-alert--warning" role="status">Saved credentials are temporarily unavailable. You can still add a credential.</div>{% endif %}
             {% if !settings.data.credentials.is_empty() %}
             <div class="cw-credential-list">
               {% for credential in settings.data.credentials %}
@@ -60,18 +63,20 @@
 
         <section class="cw-card cw-settings-card" aria-labelledby="identity-title">
           <div class="cw-card-header"><h2 id="identity-title" class="cw-card-title"><svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-user"/></svg> Git identity</h2><p class="cw-card-description">Used for commits in environments. Empty fields fall back to your account identity.</p></div>
-          <div class="cw-card-content"><form class="cw-form cw-settings-form" method="post" action="/dashboard/settings/_actions/git-identity">
+          <div class="cw-card-content">{% if settings.data.git_identity_available %}<form class="cw-form cw-settings-form" method="post" action="/dashboard/settings/_actions/git-identity">
             <input type="hidden" name="_csrf" value="{{ settings.csrf_token }}">
             <div class="cw-field"><label class="cw-label" for="git-name">Name</label><input class="cw-input" id="git-name" name="git_name" value="{{ settings.data.git_name }}" autocomplete="name"></div>
             <div class="cw-field"><label class="cw-label" for="git-email">Email</label><input class="cw-input" id="git-email" name="git_email" value="{{ settings.data.git_email }}" type="email" autocomplete="email"></div>
             <button class="cw-button" type="submit">Save identity</button>
-          </form></div>
+          </form>{% else %}<div class="cw-alert cw-alert--warning" role="status">Git identity is temporarily unavailable. Reload before changing it.</div>{% endif %}</div>
         </section>
 
         <section class="cw-card cw-settings-card" aria-labelledby="ssh-title">
           <div class="cw-card-header"><h2 id="ssh-title" class="cw-card-title"><svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-terminal"/></svg> SSH key</h2><p class="cw-card-description">Added to every environment. Add the public key to GitHub, GitLab, or another server.</p></div>
           <div class="cw-card-content cw-stack">
-            {% if settings.data.ssh_key_available %}
+            {% if !settings.data.ssh_key_status_available %}
+            <div class="cw-alert cw-alert--warning" role="status">SSH key status is temporarily unavailable. Reload before changing it.</div>
+            {% else if settings.data.ssh_key_available %}
             <code class="cw-public-key">{{ settings.data.ssh_public_key }}</code><p class="cw-settings-muted cw-mono">{{ settings.data.ssh_fingerprint }}</p>
             <form method="post" action="/dashboard/settings/_actions/ssh/regenerate"><input type="hidden" name="_csrf" value="{{ settings.csrf_token }}"><button class="cw-button cw-button--outline cw-button--small" type="submit">Regenerate key</button><p class="cw-help">The old key will stop working immediately.</p></form>
             {% else %}

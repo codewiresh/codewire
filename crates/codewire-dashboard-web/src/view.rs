@@ -160,13 +160,17 @@ pub(crate) struct GitCredentialRow {
     pub(crate) username: String,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub(crate) struct SettingsData {
+    pub(crate) github_available: bool,
     pub(crate) github_connected: bool,
     pub(crate) github_username: String,
+    pub(crate) credentials_available: bool,
     pub(crate) credentials: Vec<GitCredentialRow>,
+    pub(crate) git_identity_available: bool,
     pub(crate) git_name: String,
     pub(crate) git_email: String,
+    pub(crate) ssh_key_status_available: bool,
     pub(crate) ssh_key_available: bool,
     pub(crate) ssh_public_key: String,
     pub(crate) ssh_fingerprint: String,

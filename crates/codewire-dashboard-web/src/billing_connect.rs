@@ -8,7 +8,12 @@ use codewire_proto::codewire::console::v1::{
 };
 use connectrpc::{ConnectError, client::ClientConfig};
 
-use crate::{state::AppState, time_display::calendar_date, transport::BrowserTransport};
+use crate::{
+    dependency::{DependencyResult, PageDependency, resolve_connect},
+    state::AppState,
+    time_display::calendar_date,
+    transport::BrowserTransport,
+};
 
 const CLIENT_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -45,7 +50,7 @@ pub(crate) struct BillingUsageBar {
     pub(crate) label: String,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub(crate) struct BillingPageView {
     pub(crate) billing_enabled: bool,
     pub(crate) has_payment_method: bool,
@@ -57,6 +62,7 @@ pub(crate) struct BillingPageView {
     pub(crate) period_end: String,
     pub(crate) has_period_end: bool,
     pub(crate) can_manage: bool,
+    pub(crate) usage_available: bool,
     pub(crate) has_current_month: bool,
     pub(crate) current_cost: String,
     pub(crate) cpu_hours: String,
@@ -67,7 +73,9 @@ pub(crate) struct BillingPageView {
     pub(crate) has_included_memory_hours: bool,
     pub(crate) usage: Vec<BillingUsageRow>,
     pub(crate) usage_bars: Vec<BillingUsageBar>,
+    pub(crate) invoices_available: bool,
     pub(crate) invoices: Vec<BillingInvoiceRow>,
+    pub(crate) events_available: bool,
     pub(crate) events: Vec<BillingEventRow>,
     pub(crate) csrf_token: String,
     pub(crate) message: String,
@@ -115,19 +123,39 @@ pub(crate) async fn billing_page(
             ..Default::default()
         }),
     );
-    let overview = overview?.into_owned();
-    let usage = usage?.into_owned();
-    let invoices = invoices?.into_owned();
-    let events = events?.into_owned();
+    let overview = match resolve_connect(PageDependency::BillingOverview, overview)? {
+        DependencyResult::Available(overview) => overview.into_owned(),
+        DependencyResult::Unavailable => {
+            unreachable!("required billing overview cannot degrade")
+        }
+    };
+    let usage = resolve_connect(PageDependency::BillingUsage, usage)?
+        .into_option()
+        .map(|response| response.into_owned());
+    let invoices = resolve_connect(PageDependency::BillingInvoices, invoices)?
+        .into_option()
+        .map(|response| response.into_owned());
+    let events = resolve_connect(PageDependency::BillingEvents, events)?
+        .into_option()
+        .map(|response| response.into_owned());
 
     let trial_end = overview.trial_end.into_option().map(|value| value.seconds);
     let period_end = overview
         .current_period_end
         .into_option()
         .map(|value| value.seconds);
-    let current_month = usage.current_month.into_option();
-    let hourly = usage
-        .hourly_breakdown
+    let usage_available = usage.is_some();
+    let (current_month, hourly, usage_rows) = usage.map_or_else(
+        || (None, Vec::new(), Vec::new()),
+        |usage| {
+            (
+                usage.current_month.into_option(),
+                usage.hourly_breakdown,
+                usage.per_environment,
+            )
+        },
+    );
+    let hourly = hourly
         .into_iter()
         .rev()
         .take(24)
@@ -209,6 +237,7 @@ pub(crate) async fn billing_page(
         period_end: period_end.map(calendar_date).unwrap_or_default(),
         has_period_end: period_end.is_some(),
         can_manage,
+        usage_available,
         has_current_month,
         current_cost,
         cpu_hours,
@@ -217,8 +246,7 @@ pub(crate) async fn billing_page(
         memory_hours,
         included_memory_hours,
         has_included_memory_hours,
-        usage: usage
-            .per_environment
+        usage: usage_rows
             .into_iter()
             .map(|entry| BillingUsageRow {
                 name: entry.name,
@@ -226,9 +254,10 @@ pub(crate) async fn billing_page(
             })
             .collect(),
         usage_bars,
+        invoices_available: invoices.is_some(),
         invoices: invoices
-            .invoices
             .into_iter()
+            .flat_map(|response| response.invoices)
             .map(|invoice| {
                 let start = invoice
                     .period_start
@@ -253,9 +282,10 @@ pub(crate) async fn billing_page(
                 }
             })
             .collect(),
+        events_available: events.is_some(),
         events: events
-            .events
             .into_iter()
+            .flat_map(|response| response.events)
             .take(10)
             .map(|event| BillingEventRow {
                 event_type: event.event_type,
@@ -377,7 +407,31 @@ fn relative_time(seconds: i64) -> String {
 
 #[cfg(test)]
 mod tests {
+    use askama::Template as _;
+
     use super::*;
+    use crate::{
+        templates::OrganizationBillingTemplate,
+        view::{DashboardView, OrganizationContext, OrganizationRow},
+    };
+
+    type BillingOutage = (&'static str, fn(&mut BillingPageView), &'static str);
+
+    fn dashboard_view() -> DashboardView {
+        DashboardView {
+            user_name: "Dashboard User".into(),
+            is_admin: false,
+            organizations: Vec::new(),
+            has_organizations: false,
+            github_connected: false,
+            github_available: false,
+            show_checklist: false,
+            new_organization_url: "/dashboard/orgs/new".into(),
+            settings_url: "/dashboard/settings".into(),
+            admin_url: "/admin".into(),
+            github_connect_url: String::new(),
+        }
+    }
 
     #[test]
     fn stripe_redirects_fail_closed() {
@@ -399,5 +453,65 @@ mod tests {
     fn money_formatting_is_bounded_and_currency_aware() {
         assert_eq!(money(1234, "usd"), "$12.34");
         assert_eq!(money(-50, "eur"), "-0.50 EUR");
+    }
+
+    #[test]
+    fn optional_outages_keep_plan_and_payment_controls() {
+        let organization = OrganizationContext::from_row(&OrganizationRow {
+            id: "org-test".into(),
+            name: "Test organization".into(),
+            slug: "test".into(),
+            role: "Owner",
+            can_admin: true,
+            billing_plan: "paid".into(),
+            url: "/dashboard/orgs/test/environments".into(),
+        });
+        let outages: [BillingOutage; 3] = [
+            (
+                "usage",
+                |billing| billing.usage_available = false,
+                "Usage is temporarily unavailable",
+            ),
+            (
+                "invoices",
+                |billing| billing.invoices_available = false,
+                "Invoice history is temporarily unavailable",
+            ),
+            (
+                "events",
+                |billing| billing.events_available = false,
+                "Recent billing activity is temporarily unavailable",
+            ),
+        ];
+
+        for (name, inject, notice) in outages {
+            let mut billing = BillingPageView {
+                billing_enabled: true,
+                can_manage: true,
+                plan_name: "Team".into(),
+                usage_available: true,
+                invoices_available: true,
+                events_available: true,
+                csrf_token: "csrf".into(),
+                ..Default::default()
+            };
+            inject(&mut billing);
+            let body = OrganizationBillingTemplate {
+                view: &dashboard_view(),
+                organization: &organization,
+                billing: &billing,
+                active_tab: "billing",
+            }
+            .render()
+            .expect("render degraded billing");
+
+            assert!(body.contains(notice), "{name}");
+            assert!(body.contains("Team"), "{name}");
+            assert!(
+                body.contains("/dashboard/orgs/test/billing/_actions/setup"),
+                "{name}"
+            );
+            assert!(!body.contains("upstream-sensitive-detail"), "{name}");
+        }
     }
 }
