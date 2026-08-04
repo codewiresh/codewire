@@ -42,6 +42,15 @@ const (
 	// EnvironmentServiceGetEnvironmentProcedure is the fully-qualified name of the EnvironmentService's
 	// GetEnvironment RPC.
 	EnvironmentServiceGetEnvironmentProcedure = "/codewire.v1.EnvironmentService/GetEnvironment"
+	// EnvironmentServicePlanEnvironmentResizeProcedure is the fully-qualified name of the
+	// EnvironmentService's PlanEnvironmentResize RPC.
+	EnvironmentServicePlanEnvironmentResizeProcedure = "/codewire.v1.EnvironmentService/PlanEnvironmentResize"
+	// EnvironmentServiceResizeEnvironmentProcedure is the fully-qualified name of the
+	// EnvironmentService's ResizeEnvironment RPC.
+	EnvironmentServiceResizeEnvironmentProcedure = "/codewire.v1.EnvironmentService/ResizeEnvironment"
+	// EnvironmentServiceGetEnvironmentResizeOperationProcedure is the fully-qualified name of the
+	// EnvironmentService's GetEnvironmentResizeOperation RPC.
+	EnvironmentServiceGetEnvironmentResizeOperationProcedure = "/codewire.v1.EnvironmentService/GetEnvironmentResizeOperation"
 	// EnvironmentServiceDeleteEnvironmentProcedure is the fully-qualified name of the
 	// EnvironmentService's DeleteEnvironment RPC.
 	EnvironmentServiceDeleteEnvironmentProcedure = "/codewire.v1.EnvironmentService/DeleteEnvironment"
@@ -97,6 +106,9 @@ type EnvironmentServiceClient interface {
 	ListEnvironments(context.Context, *connect.Request[v1.ListEnvironmentsRequest]) (*connect.Response[v1.ListEnvironmentsResponse], error)
 	CreateEnvironment(context.Context, *connect.Request[v1.CreateEnvironmentRequest]) (*connect.Response[v1.CreateEnvironmentResponse], error)
 	GetEnvironment(context.Context, *connect.Request[v1.GetEnvironmentRequest]) (*connect.Response[v1.GetEnvironmentResponse], error)
+	PlanEnvironmentResize(context.Context, *connect.Request[v1.PlanEnvironmentResizeRequest]) (*connect.Response[v1.PlanEnvironmentResizeResponse], error)
+	ResizeEnvironment(context.Context, *connect.Request[v1.ResizeEnvironmentRequest]) (*connect.Response[v1.ResizeEnvironmentResponse], error)
+	GetEnvironmentResizeOperation(context.Context, *connect.Request[v1.GetEnvironmentResizeOperationRequest]) (*connect.Response[v1.GetEnvironmentResizeOperationResponse], error)
 	DeleteEnvironment(context.Context, *connect.Request[v1.DeleteEnvironmentRequest]) (*connect.Response[v1.DeleteEnvironmentResponse], error)
 	StopEnvironment(context.Context, *connect.Request[v1.StopEnvironmentRequest]) (*connect.Response[v1.StopEnvironmentResponse], error)
 	StartEnvironment(context.Context, *connect.Request[v1.StartEnvironmentRequest]) (*connect.Response[v1.StartEnvironmentResponse], error)
@@ -143,6 +155,26 @@ func NewEnvironmentServiceClient(httpClient connect.HTTPClient, baseURL string, 
 			httpClient,
 			baseURL+EnvironmentServiceGetEnvironmentProcedure,
 			connect.WithSchema(environmentServiceMethods.ByName("GetEnvironment")),
+			connect.WithIdempotency(connect.IdempotencyNoSideEffects),
+			connect.WithClientOptions(opts...),
+		),
+		planEnvironmentResize: connect.NewClient[v1.PlanEnvironmentResizeRequest, v1.PlanEnvironmentResizeResponse](
+			httpClient,
+			baseURL+EnvironmentServicePlanEnvironmentResizeProcedure,
+			connect.WithSchema(environmentServiceMethods.ByName("PlanEnvironmentResize")),
+			connect.WithIdempotency(connect.IdempotencyNoSideEffects),
+			connect.WithClientOptions(opts...),
+		),
+		resizeEnvironment: connect.NewClient[v1.ResizeEnvironmentRequest, v1.ResizeEnvironmentResponse](
+			httpClient,
+			baseURL+EnvironmentServiceResizeEnvironmentProcedure,
+			connect.WithSchema(environmentServiceMethods.ByName("ResizeEnvironment")),
+			connect.WithClientOptions(opts...),
+		),
+		getEnvironmentResizeOperation: connect.NewClient[v1.GetEnvironmentResizeOperationRequest, v1.GetEnvironmentResizeOperationResponse](
+			httpClient,
+			baseURL+EnvironmentServiceGetEnvironmentResizeOperationProcedure,
+			connect.WithSchema(environmentServiceMethods.ByName("GetEnvironmentResizeOperation")),
 			connect.WithIdempotency(connect.IdempotencyNoSideEffects),
 			connect.WithClientOptions(opts...),
 		),
@@ -252,25 +284,28 @@ func NewEnvironmentServiceClient(httpClient connect.HTTPClient, baseURL string, 
 
 // environmentServiceClient implements EnvironmentServiceClient.
 type environmentServiceClient struct {
-	listEnvironments            *connect.Client[v1.ListEnvironmentsRequest, v1.ListEnvironmentsResponse]
-	createEnvironment           *connect.Client[v1.CreateEnvironmentRequest, v1.CreateEnvironmentResponse]
-	getEnvironment              *connect.Client[v1.GetEnvironmentRequest, v1.GetEnvironmentResponse]
-	deleteEnvironment           *connect.Client[v1.DeleteEnvironmentRequest, v1.DeleteEnvironmentResponse]
-	stopEnvironment             *connect.Client[v1.StopEnvironmentRequest, v1.StopEnvironmentResponse]
-	startEnvironment            *connect.Client[v1.StartEnvironmentRequest, v1.StartEnvironmentResponse]
-	protectEnvironment          *connect.Client[v1.ProtectEnvironmentRequest, v1.ProtectEnvironmentResponse]
-	unprotectEnvironment        *connect.Client[v1.UnprotectEnvironmentRequest, v1.UnprotectEnvironmentResponse]
-	cancelEnvironmentDeletion   *connect.Client[v1.CancelEnvironmentDeletionRequest, v1.CancelEnvironmentDeletionResponse]
-	extendEnvironmentTtl        *connect.Client[v1.ExtendEnvironmentTtlRequest, v1.ExtendEnvironmentTtlResponse]
-	getEnvironmentTrustReport   *connect.Client[v1.GetEnvironmentTrustReportRequest, v1.GetEnvironmentTrustReportResponse]
-	getEnvironmentDaemonStatus  *connect.Client[v1.GetEnvironmentDaemonStatusRequest, v1.GetEnvironmentDaemonStatusResponse]
-	streamEnvironmentDaemonLogs *connect.Client[v1.StreamEnvironmentDaemonLogsRequest, v1.StreamEnvironmentDaemonLogsResponse]
-	repairEnvironmentDaemon     *connect.Client[v1.RepairEnvironmentDaemonRequest, v1.RepairEnvironmentDaemonResponse]
-	listEnvironmentAccess       *connect.Client[v1.ListEnvironmentAccessRequest, v1.ListEnvironmentAccessResponse]
-	grantEnvironmentAccess      *connect.Client[v1.GrantEnvironmentAccessRequest, v1.GrantEnvironmentAccessResponse]
-	revokeEnvironmentAccess     *connect.Client[v1.RevokeEnvironmentAccessRequest, v1.RevokeEnvironmentAccessResponse]
-	watchEnvironmentCreate      *connect.Client[v1.WatchEnvironmentCreateRequest, v1.WatchEnvironmentCreateResponse]
-	streamLogs                  *connect.Client[v1.StreamLogsRequest, v1.StreamLogsResponse]
+	listEnvironments              *connect.Client[v1.ListEnvironmentsRequest, v1.ListEnvironmentsResponse]
+	createEnvironment             *connect.Client[v1.CreateEnvironmentRequest, v1.CreateEnvironmentResponse]
+	getEnvironment                *connect.Client[v1.GetEnvironmentRequest, v1.GetEnvironmentResponse]
+	planEnvironmentResize         *connect.Client[v1.PlanEnvironmentResizeRequest, v1.PlanEnvironmentResizeResponse]
+	resizeEnvironment             *connect.Client[v1.ResizeEnvironmentRequest, v1.ResizeEnvironmentResponse]
+	getEnvironmentResizeOperation *connect.Client[v1.GetEnvironmentResizeOperationRequest, v1.GetEnvironmentResizeOperationResponse]
+	deleteEnvironment             *connect.Client[v1.DeleteEnvironmentRequest, v1.DeleteEnvironmentResponse]
+	stopEnvironment               *connect.Client[v1.StopEnvironmentRequest, v1.StopEnvironmentResponse]
+	startEnvironment              *connect.Client[v1.StartEnvironmentRequest, v1.StartEnvironmentResponse]
+	protectEnvironment            *connect.Client[v1.ProtectEnvironmentRequest, v1.ProtectEnvironmentResponse]
+	unprotectEnvironment          *connect.Client[v1.UnprotectEnvironmentRequest, v1.UnprotectEnvironmentResponse]
+	cancelEnvironmentDeletion     *connect.Client[v1.CancelEnvironmentDeletionRequest, v1.CancelEnvironmentDeletionResponse]
+	extendEnvironmentTtl          *connect.Client[v1.ExtendEnvironmentTtlRequest, v1.ExtendEnvironmentTtlResponse]
+	getEnvironmentTrustReport     *connect.Client[v1.GetEnvironmentTrustReportRequest, v1.GetEnvironmentTrustReportResponse]
+	getEnvironmentDaemonStatus    *connect.Client[v1.GetEnvironmentDaemonStatusRequest, v1.GetEnvironmentDaemonStatusResponse]
+	streamEnvironmentDaemonLogs   *connect.Client[v1.StreamEnvironmentDaemonLogsRequest, v1.StreamEnvironmentDaemonLogsResponse]
+	repairEnvironmentDaemon       *connect.Client[v1.RepairEnvironmentDaemonRequest, v1.RepairEnvironmentDaemonResponse]
+	listEnvironmentAccess         *connect.Client[v1.ListEnvironmentAccessRequest, v1.ListEnvironmentAccessResponse]
+	grantEnvironmentAccess        *connect.Client[v1.GrantEnvironmentAccessRequest, v1.GrantEnvironmentAccessResponse]
+	revokeEnvironmentAccess       *connect.Client[v1.RevokeEnvironmentAccessRequest, v1.RevokeEnvironmentAccessResponse]
+	watchEnvironmentCreate        *connect.Client[v1.WatchEnvironmentCreateRequest, v1.WatchEnvironmentCreateResponse]
+	streamLogs                    *connect.Client[v1.StreamLogsRequest, v1.StreamLogsResponse]
 }
 
 // ListEnvironments calls codewire.v1.EnvironmentService.ListEnvironments.
@@ -286,6 +321,21 @@ func (c *environmentServiceClient) CreateEnvironment(ctx context.Context, req *c
 // GetEnvironment calls codewire.v1.EnvironmentService.GetEnvironment.
 func (c *environmentServiceClient) GetEnvironment(ctx context.Context, req *connect.Request[v1.GetEnvironmentRequest]) (*connect.Response[v1.GetEnvironmentResponse], error) {
 	return c.getEnvironment.CallUnary(ctx, req)
+}
+
+// PlanEnvironmentResize calls codewire.v1.EnvironmentService.PlanEnvironmentResize.
+func (c *environmentServiceClient) PlanEnvironmentResize(ctx context.Context, req *connect.Request[v1.PlanEnvironmentResizeRequest]) (*connect.Response[v1.PlanEnvironmentResizeResponse], error) {
+	return c.planEnvironmentResize.CallUnary(ctx, req)
+}
+
+// ResizeEnvironment calls codewire.v1.EnvironmentService.ResizeEnvironment.
+func (c *environmentServiceClient) ResizeEnvironment(ctx context.Context, req *connect.Request[v1.ResizeEnvironmentRequest]) (*connect.Response[v1.ResizeEnvironmentResponse], error) {
+	return c.resizeEnvironment.CallUnary(ctx, req)
+}
+
+// GetEnvironmentResizeOperation calls codewire.v1.EnvironmentService.GetEnvironmentResizeOperation.
+func (c *environmentServiceClient) GetEnvironmentResizeOperation(ctx context.Context, req *connect.Request[v1.GetEnvironmentResizeOperationRequest]) (*connect.Response[v1.GetEnvironmentResizeOperationResponse], error) {
+	return c.getEnvironmentResizeOperation.CallUnary(ctx, req)
 }
 
 // DeleteEnvironment calls codewire.v1.EnvironmentService.DeleteEnvironment.
@@ -373,6 +423,9 @@ type EnvironmentServiceHandler interface {
 	ListEnvironments(context.Context, *connect.Request[v1.ListEnvironmentsRequest]) (*connect.Response[v1.ListEnvironmentsResponse], error)
 	CreateEnvironment(context.Context, *connect.Request[v1.CreateEnvironmentRequest]) (*connect.Response[v1.CreateEnvironmentResponse], error)
 	GetEnvironment(context.Context, *connect.Request[v1.GetEnvironmentRequest]) (*connect.Response[v1.GetEnvironmentResponse], error)
+	PlanEnvironmentResize(context.Context, *connect.Request[v1.PlanEnvironmentResizeRequest]) (*connect.Response[v1.PlanEnvironmentResizeResponse], error)
+	ResizeEnvironment(context.Context, *connect.Request[v1.ResizeEnvironmentRequest]) (*connect.Response[v1.ResizeEnvironmentResponse], error)
+	GetEnvironmentResizeOperation(context.Context, *connect.Request[v1.GetEnvironmentResizeOperationRequest]) (*connect.Response[v1.GetEnvironmentResizeOperationResponse], error)
 	DeleteEnvironment(context.Context, *connect.Request[v1.DeleteEnvironmentRequest]) (*connect.Response[v1.DeleteEnvironmentResponse], error)
 	StopEnvironment(context.Context, *connect.Request[v1.StopEnvironmentRequest]) (*connect.Response[v1.StopEnvironmentResponse], error)
 	StartEnvironment(context.Context, *connect.Request[v1.StartEnvironmentRequest]) (*connect.Response[v1.StartEnvironmentResponse], error)
@@ -415,6 +468,26 @@ func NewEnvironmentServiceHandler(svc EnvironmentServiceHandler, opts ...connect
 		EnvironmentServiceGetEnvironmentProcedure,
 		svc.GetEnvironment,
 		connect.WithSchema(environmentServiceMethods.ByName("GetEnvironment")),
+		connect.WithIdempotency(connect.IdempotencyNoSideEffects),
+		connect.WithHandlerOptions(opts...),
+	)
+	environmentServicePlanEnvironmentResizeHandler := connect.NewUnaryHandler(
+		EnvironmentServicePlanEnvironmentResizeProcedure,
+		svc.PlanEnvironmentResize,
+		connect.WithSchema(environmentServiceMethods.ByName("PlanEnvironmentResize")),
+		connect.WithIdempotency(connect.IdempotencyNoSideEffects),
+		connect.WithHandlerOptions(opts...),
+	)
+	environmentServiceResizeEnvironmentHandler := connect.NewUnaryHandler(
+		EnvironmentServiceResizeEnvironmentProcedure,
+		svc.ResizeEnvironment,
+		connect.WithSchema(environmentServiceMethods.ByName("ResizeEnvironment")),
+		connect.WithHandlerOptions(opts...),
+	)
+	environmentServiceGetEnvironmentResizeOperationHandler := connect.NewUnaryHandler(
+		EnvironmentServiceGetEnvironmentResizeOperationProcedure,
+		svc.GetEnvironmentResizeOperation,
+		connect.WithSchema(environmentServiceMethods.ByName("GetEnvironmentResizeOperation")),
 		connect.WithIdempotency(connect.IdempotencyNoSideEffects),
 		connect.WithHandlerOptions(opts...),
 	)
@@ -527,6 +600,12 @@ func NewEnvironmentServiceHandler(svc EnvironmentServiceHandler, opts ...connect
 			environmentServiceCreateEnvironmentHandler.ServeHTTP(w, r)
 		case EnvironmentServiceGetEnvironmentProcedure:
 			environmentServiceGetEnvironmentHandler.ServeHTTP(w, r)
+		case EnvironmentServicePlanEnvironmentResizeProcedure:
+			environmentServicePlanEnvironmentResizeHandler.ServeHTTP(w, r)
+		case EnvironmentServiceResizeEnvironmentProcedure:
+			environmentServiceResizeEnvironmentHandler.ServeHTTP(w, r)
+		case EnvironmentServiceGetEnvironmentResizeOperationProcedure:
+			environmentServiceGetEnvironmentResizeOperationHandler.ServeHTTP(w, r)
 		case EnvironmentServiceDeleteEnvironmentProcedure:
 			environmentServiceDeleteEnvironmentHandler.ServeHTTP(w, r)
 		case EnvironmentServiceStopEnvironmentProcedure:
@@ -578,6 +657,18 @@ func (UnimplementedEnvironmentServiceHandler) CreateEnvironment(context.Context,
 
 func (UnimplementedEnvironmentServiceHandler) GetEnvironment(context.Context, *connect.Request[v1.GetEnvironmentRequest]) (*connect.Response[v1.GetEnvironmentResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.v1.EnvironmentService.GetEnvironment is not implemented"))
+}
+
+func (UnimplementedEnvironmentServiceHandler) PlanEnvironmentResize(context.Context, *connect.Request[v1.PlanEnvironmentResizeRequest]) (*connect.Response[v1.PlanEnvironmentResizeResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.v1.EnvironmentService.PlanEnvironmentResize is not implemented"))
+}
+
+func (UnimplementedEnvironmentServiceHandler) ResizeEnvironment(context.Context, *connect.Request[v1.ResizeEnvironmentRequest]) (*connect.Response[v1.ResizeEnvironmentResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.v1.EnvironmentService.ResizeEnvironment is not implemented"))
+}
+
+func (UnimplementedEnvironmentServiceHandler) GetEnvironmentResizeOperation(context.Context, *connect.Request[v1.GetEnvironmentResizeOperationRequest]) (*connect.Response[v1.GetEnvironmentResizeOperationResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.v1.EnvironmentService.GetEnvironmentResizeOperation is not implemented"))
 }
 
 func (UnimplementedEnvironmentServiceHandler) DeleteEnvironment(context.Context, *connect.Request[v1.DeleteEnvironmentRequest]) (*connect.Response[v1.DeleteEnvironmentResponse], error) {

@@ -22,7 +22,7 @@ run_integrated_kind_suite() {
   # The dedicated CI runner has capacity 1 and gives each replica its own DinD
   # sidecar. At job startup, every cluster with this exact CI-owned prefix on
   # the current daemon is therefore stale, including a retry of this run.
-  reclaim_cancelled_ci_clusters "$ROOT/tests/e2e/kind/kind-config.yaml"
+  reclaim_cancelled_ci_clusters "$KIND_CONFIG"
 
   trap cleanup EXIT
 

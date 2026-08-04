@@ -251,6 +251,18 @@ pub(crate) fn router() -> Router<AppState> {
             post(environments::delete),
         )
         .route(
+            "/dashboard/orgs/{slug}/environments/_actions/resize/plan",
+            post(environments::resize_plan),
+        )
+        .route(
+            "/dashboard/orgs/{slug}/environments/_actions/resize/apply",
+            post(environments::resize_apply),
+        )
+        .route(
+            "/dashboard/orgs/{slug}/environments/_fragments/resize",
+            get(environments::resize_operation_fragment),
+        )
+        .route(
             "/dashboard/orgs/{slug}/environments/_actions/ports/create",
             post(environments::create_port),
         )

@@ -42,6 +42,60 @@ pub struct Environment {
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default)]
+pub struct EnvironmentResizeResources {
+    pub cpu_millicores: i32,
+    pub memory_mb: i32,
+    pub disk_gb: i32,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct EnvironmentResizeFailure {
+    pub code: String,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct EnvironmentResizeOperation {
+    pub id: String,
+    pub environment_id: String,
+    pub request_id: String,
+    pub previous_resources: EnvironmentResizeResources,
+    pub desired_resources: EnvironmentResizeResources,
+    pub last_applied_resources: EnvironmentResizeResources,
+    pub state: String,
+    pub disruption_policy: String,
+    pub planned_mode: String,
+    pub applied_mode: String,
+    pub pod_replaced: bool,
+    pub failure: Option<EnvironmentResizeFailure>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub completed_at: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct EnvironmentResizePlan {
+    pub previous_resources: EnvironmentResizeResources,
+    pub desired_resources: EnvironmentResizeResources,
+    pub execution_mode: String,
+    pub active_session_count: i32,
+    pub active_sessions_will_be_terminated: bool,
+    pub reason: String,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct EnvironmentResizeResult {
+    pub operation: EnvironmentResizeOperation,
+    pub environment: Environment,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default)]
 pub struct EnvironmentDaemonDiagnostic {
     pub name: String,
     pub healthy: bool,
@@ -375,5 +429,57 @@ mod tests {
         assert_eq!(value["repos"][0]["branch"], "main");
         assert_eq!(value["env_vars"]["FOO"], "bar");
         assert_eq!(value["agents"][0]["type"], "codex");
+    }
+
+    #[test]
+    fn environment_resize_result_keeps_operation_and_environment_shape() {
+        let result = EnvironmentResizeResult {
+            operation: EnvironmentResizeOperation {
+                id: "resize_1".to_string(),
+                environment_id: "env_1".to_string(),
+                request_id: "request_1".to_string(),
+                previous_resources: EnvironmentResizeResources {
+                    cpu_millicores: 2000,
+                    memory_mb: 4096,
+                    disk_gb: 20,
+                },
+                desired_resources: EnvironmentResizeResources {
+                    cpu_millicores: 3000,
+                    memory_mb: 6144,
+                    disk_gb: 30,
+                },
+                last_applied_resources: EnvironmentResizeResources {
+                    cpu_millicores: 3000,
+                    memory_mb: 6144,
+                    disk_gb: 30,
+                },
+                state: "completed".to_string(),
+                disruption_policy: "allow_restart".to_string(),
+                planned_mode: "restart".to_string(),
+                applied_mode: "restart".to_string(),
+                pod_replaced: true,
+                created_at: "2026-08-02T00:00:00Z".to_string(),
+                updated_at: "2026-08-02T00:01:00Z".to_string(),
+                completed_at: Some("2026-08-02T00:01:00Z".to_string()),
+                ..Default::default()
+            },
+            environment: Environment {
+                id: "env_1".to_string(),
+                cpu_millicores: 3000,
+                memory_mb: 6144,
+                disk_gb: 30,
+                ..Default::default()
+            },
+        };
+
+        let value = serde_json::to_value(result).expect("serialize resize result");
+        assert_eq!(value["operation"]["request_id"], "request_1");
+        assert_eq!(value["operation"]["state"], "completed");
+        assert_eq!(value["operation"]["disruption_policy"], "allow_restart");
+        assert_eq!(value["operation"]["planned_mode"], "restart");
+        assert_eq!(value["operation"]["applied_mode"], "restart");
+        assert_eq!(value["operation"]["pod_replaced"], true);
+        assert_eq!(value["operation"]["last_applied_resources"]["disk_gb"], 30);
+        assert_eq!(value["environment"]["cpu_millicores"], 3000);
     }
 }

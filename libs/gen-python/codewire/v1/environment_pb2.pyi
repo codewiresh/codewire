@@ -52,6 +52,29 @@ class IsolationTier(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     ISOLATION_TIER_STANDARD: _ClassVar[IsolationTier]
     ISOLATION_TIER_CONFIDENTIAL: _ClassVar[IsolationTier]
 
+class EnvironmentResizeOperationState(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
+    __slots__ = ()
+    ENVIRONMENT_RESIZE_OPERATION_STATE_UNSPECIFIED: _ClassVar[EnvironmentResizeOperationState]
+    ENVIRONMENT_RESIZE_OPERATION_STATE_PENDING: _ClassVar[EnvironmentResizeOperationState]
+    ENVIRONMENT_RESIZE_OPERATION_STATE_APPLYING: _ClassVar[EnvironmentResizeOperationState]
+    ENVIRONMENT_RESIZE_OPERATION_STATE_RESTARTING: _ClassVar[EnvironmentResizeOperationState]
+    ENVIRONMENT_RESIZE_OPERATION_STATE_COMPLETED: _ClassVar[EnvironmentResizeOperationState]
+    ENVIRONMENT_RESIZE_OPERATION_STATE_FAILED: _ClassVar[EnvironmentResizeOperationState]
+
+class EnvironmentResizeDisruptionPolicy(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
+    __slots__ = ()
+    ENVIRONMENT_RESIZE_DISRUPTION_POLICY_UNSPECIFIED: _ClassVar[EnvironmentResizeDisruptionPolicy]
+    ENVIRONMENT_RESIZE_DISRUPTION_POLICY_LIVE_ONLY: _ClassVar[EnvironmentResizeDisruptionPolicy]
+    ENVIRONMENT_RESIZE_DISRUPTION_POLICY_ALLOW_RESTART: _ClassVar[EnvironmentResizeDisruptionPolicy]
+
+class EnvironmentResizeExecutionMode(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
+    __slots__ = ()
+    ENVIRONMENT_RESIZE_EXECUTION_MODE_UNSPECIFIED: _ClassVar[EnvironmentResizeExecutionMode]
+    ENVIRONMENT_RESIZE_EXECUTION_MODE_NOOP: _ClassVar[EnvironmentResizeExecutionMode]
+    ENVIRONMENT_RESIZE_EXECUTION_MODE_APPLY_ON_START: _ClassVar[EnvironmentResizeExecutionMode]
+    ENVIRONMENT_RESIZE_EXECUTION_MODE_IN_PLACE: _ClassVar[EnvironmentResizeExecutionMode]
+    ENVIRONMENT_RESIZE_EXECUTION_MODE_RESTART: _ClassVar[EnvironmentResizeExecutionMode]
+
 class StartOutcome(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     __slots__ = ()
     START_OUTCOME_UNSPECIFIED: _ClassVar[StartOutcome]
@@ -101,6 +124,20 @@ DESIRED_STATE_RESIZED: DesiredState
 ISOLATION_TIER_UNSPECIFIED: IsolationTier
 ISOLATION_TIER_STANDARD: IsolationTier
 ISOLATION_TIER_CONFIDENTIAL: IsolationTier
+ENVIRONMENT_RESIZE_OPERATION_STATE_UNSPECIFIED: EnvironmentResizeOperationState
+ENVIRONMENT_RESIZE_OPERATION_STATE_PENDING: EnvironmentResizeOperationState
+ENVIRONMENT_RESIZE_OPERATION_STATE_APPLYING: EnvironmentResizeOperationState
+ENVIRONMENT_RESIZE_OPERATION_STATE_RESTARTING: EnvironmentResizeOperationState
+ENVIRONMENT_RESIZE_OPERATION_STATE_COMPLETED: EnvironmentResizeOperationState
+ENVIRONMENT_RESIZE_OPERATION_STATE_FAILED: EnvironmentResizeOperationState
+ENVIRONMENT_RESIZE_DISRUPTION_POLICY_UNSPECIFIED: EnvironmentResizeDisruptionPolicy
+ENVIRONMENT_RESIZE_DISRUPTION_POLICY_LIVE_ONLY: EnvironmentResizeDisruptionPolicy
+ENVIRONMENT_RESIZE_DISRUPTION_POLICY_ALLOW_RESTART: EnvironmentResizeDisruptionPolicy
+ENVIRONMENT_RESIZE_EXECUTION_MODE_UNSPECIFIED: EnvironmentResizeExecutionMode
+ENVIRONMENT_RESIZE_EXECUTION_MODE_NOOP: EnvironmentResizeExecutionMode
+ENVIRONMENT_RESIZE_EXECUTION_MODE_APPLY_ON_START: EnvironmentResizeExecutionMode
+ENVIRONMENT_RESIZE_EXECUTION_MODE_IN_PLACE: EnvironmentResizeExecutionMode
+ENVIRONMENT_RESIZE_EXECUTION_MODE_RESTART: EnvironmentResizeExecutionMode
 START_OUTCOME_UNSPECIFIED: StartOutcome
 START_OUTCOME_STARTED: StartOutcome
 START_OUTCOME_RETRIED: StartOutcome
@@ -296,6 +333,148 @@ class GetEnvironmentResponse(_message.Message):
     environment: Environment
     poll_interval: _duration_pb2.Duration
     def __init__(self, environment: _Optional[_Union[Environment, _Mapping]] = ..., poll_interval: _Optional[_Union[datetime.timedelta, _duration_pb2.Duration, _Mapping]] = ...) -> None: ...
+
+class EnvironmentResources(_message.Message):
+    __slots__ = ("cpu_millicores", "memory_mb", "disk_gb")
+    CPU_MILLICORES_FIELD_NUMBER: _ClassVar[int]
+    MEMORY_MB_FIELD_NUMBER: _ClassVar[int]
+    DISK_GB_FIELD_NUMBER: _ClassVar[int]
+    cpu_millicores: int
+    memory_mb: int
+    disk_gb: int
+    def __init__(self, cpu_millicores: _Optional[int] = ..., memory_mb: _Optional[int] = ..., disk_gb: _Optional[int] = ...) -> None: ...
+
+class EnvironmentResizePlan(_message.Message):
+    __slots__ = ("previous_resources", "desired_resources", "execution_mode", "active_session_count", "active_sessions_will_be_terminated", "reason", "warnings")
+    PREVIOUS_RESOURCES_FIELD_NUMBER: _ClassVar[int]
+    DESIRED_RESOURCES_FIELD_NUMBER: _ClassVar[int]
+    EXECUTION_MODE_FIELD_NUMBER: _ClassVar[int]
+    ACTIVE_SESSION_COUNT_FIELD_NUMBER: _ClassVar[int]
+    ACTIVE_SESSIONS_WILL_BE_TERMINATED_FIELD_NUMBER: _ClassVar[int]
+    REASON_FIELD_NUMBER: _ClassVar[int]
+    WARNINGS_FIELD_NUMBER: _ClassVar[int]
+    previous_resources: EnvironmentResources
+    desired_resources: EnvironmentResources
+    execution_mode: EnvironmentResizeExecutionMode
+    active_session_count: int
+    active_sessions_will_be_terminated: bool
+    reason: str
+    warnings: _containers.RepeatedScalarFieldContainer[str]
+    def __init__(self, previous_resources: _Optional[_Union[EnvironmentResources, _Mapping]] = ..., desired_resources: _Optional[_Union[EnvironmentResources, _Mapping]] = ..., execution_mode: _Optional[_Union[EnvironmentResizeExecutionMode, str]] = ..., active_session_count: _Optional[int] = ..., active_sessions_will_be_terminated: _Optional[bool] = ..., reason: _Optional[str] = ..., warnings: _Optional[_Iterable[str]] = ...) -> None: ...
+
+class EnvironmentResizeFailure(_message.Message):
+    __slots__ = ("code", "message")
+    CODE_FIELD_NUMBER: _ClassVar[int]
+    MESSAGE_FIELD_NUMBER: _ClassVar[int]
+    code: str
+    message: str
+    def __init__(self, code: _Optional[str] = ..., message: _Optional[str] = ...) -> None: ...
+
+class EnvironmentResizeOperation(_message.Message):
+    __slots__ = ("id", "environment_id", "request_id", "previous_resources", "desired_resources", "last_applied_resources", "state", "failure", "created_at", "updated_at", "completed_at", "disruption_policy", "planned_mode", "applied_mode", "pod_replaced")
+    ID_FIELD_NUMBER: _ClassVar[int]
+    ENVIRONMENT_ID_FIELD_NUMBER: _ClassVar[int]
+    REQUEST_ID_FIELD_NUMBER: _ClassVar[int]
+    PREVIOUS_RESOURCES_FIELD_NUMBER: _ClassVar[int]
+    DESIRED_RESOURCES_FIELD_NUMBER: _ClassVar[int]
+    LAST_APPLIED_RESOURCES_FIELD_NUMBER: _ClassVar[int]
+    STATE_FIELD_NUMBER: _ClassVar[int]
+    FAILURE_FIELD_NUMBER: _ClassVar[int]
+    CREATED_AT_FIELD_NUMBER: _ClassVar[int]
+    UPDATED_AT_FIELD_NUMBER: _ClassVar[int]
+    COMPLETED_AT_FIELD_NUMBER: _ClassVar[int]
+    DISRUPTION_POLICY_FIELD_NUMBER: _ClassVar[int]
+    PLANNED_MODE_FIELD_NUMBER: _ClassVar[int]
+    APPLIED_MODE_FIELD_NUMBER: _ClassVar[int]
+    POD_REPLACED_FIELD_NUMBER: _ClassVar[int]
+    id: str
+    environment_id: str
+    request_id: str
+    previous_resources: EnvironmentResources
+    desired_resources: EnvironmentResources
+    last_applied_resources: EnvironmentResources
+    state: EnvironmentResizeOperationState
+    failure: EnvironmentResizeFailure
+    created_at: _timestamp_pb2.Timestamp
+    updated_at: _timestamp_pb2.Timestamp
+    completed_at: _timestamp_pb2.Timestamp
+    disruption_policy: EnvironmentResizeDisruptionPolicy
+    planned_mode: EnvironmentResizeExecutionMode
+    applied_mode: EnvironmentResizeExecutionMode
+    pod_replaced: bool
+    def __init__(self, id: _Optional[str] = ..., environment_id: _Optional[str] = ..., request_id: _Optional[str] = ..., previous_resources: _Optional[_Union[EnvironmentResources, _Mapping]] = ..., desired_resources: _Optional[_Union[EnvironmentResources, _Mapping]] = ..., last_applied_resources: _Optional[_Union[EnvironmentResources, _Mapping]] = ..., state: _Optional[_Union[EnvironmentResizeOperationState, str]] = ..., failure: _Optional[_Union[EnvironmentResizeFailure, _Mapping]] = ..., created_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., updated_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., completed_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., disruption_policy: _Optional[_Union[EnvironmentResizeDisruptionPolicy, str]] = ..., planned_mode: _Optional[_Union[EnvironmentResizeExecutionMode, str]] = ..., applied_mode: _Optional[_Union[EnvironmentResizeExecutionMode, str]] = ..., pod_replaced: _Optional[bool] = ...) -> None: ...
+
+class PlanEnvironmentResizeRequest(_message.Message):
+    __slots__ = ("org_id", "environment_id", "cpu_millicores", "memory_mb", "disk_gb")
+    ORG_ID_FIELD_NUMBER: _ClassVar[int]
+    ENVIRONMENT_ID_FIELD_NUMBER: _ClassVar[int]
+    CPU_MILLICORES_FIELD_NUMBER: _ClassVar[int]
+    MEMORY_MB_FIELD_NUMBER: _ClassVar[int]
+    DISK_GB_FIELD_NUMBER: _ClassVar[int]
+    org_id: str
+    environment_id: str
+    cpu_millicores: int
+    memory_mb: int
+    disk_gb: int
+    def __init__(self, org_id: _Optional[str] = ..., environment_id: _Optional[str] = ..., cpu_millicores: _Optional[int] = ..., memory_mb: _Optional[int] = ..., disk_gb: _Optional[int] = ...) -> None: ...
+
+class PlanEnvironmentResizeResponse(_message.Message):
+    __slots__ = ("plan", "environment")
+    PLAN_FIELD_NUMBER: _ClassVar[int]
+    ENVIRONMENT_FIELD_NUMBER: _ClassVar[int]
+    plan: EnvironmentResizePlan
+    environment: Environment
+    def __init__(self, plan: _Optional[_Union[EnvironmentResizePlan, _Mapping]] = ..., environment: _Optional[_Union[Environment, _Mapping]] = ...) -> None: ...
+
+class ResizeEnvironmentRequest(_message.Message):
+    __slots__ = ("org_id", "environment_id", "cpu_millicores", "memory_mb", "disk_gb", "request_id", "force", "disruption_policy")
+    ORG_ID_FIELD_NUMBER: _ClassVar[int]
+    ENVIRONMENT_ID_FIELD_NUMBER: _ClassVar[int]
+    CPU_MILLICORES_FIELD_NUMBER: _ClassVar[int]
+    MEMORY_MB_FIELD_NUMBER: _ClassVar[int]
+    DISK_GB_FIELD_NUMBER: _ClassVar[int]
+    REQUEST_ID_FIELD_NUMBER: _ClassVar[int]
+    FORCE_FIELD_NUMBER: _ClassVar[int]
+    DISRUPTION_POLICY_FIELD_NUMBER: _ClassVar[int]
+    org_id: str
+    environment_id: str
+    cpu_millicores: int
+    memory_mb: int
+    disk_gb: int
+    request_id: str
+    force: bool
+    disruption_policy: EnvironmentResizeDisruptionPolicy
+    def __init__(self, org_id: _Optional[str] = ..., environment_id: _Optional[str] = ..., cpu_millicores: _Optional[int] = ..., memory_mb: _Optional[int] = ..., disk_gb: _Optional[int] = ..., request_id: _Optional[str] = ..., force: _Optional[bool] = ..., disruption_policy: _Optional[_Union[EnvironmentResizeDisruptionPolicy, str]] = ...) -> None: ...
+
+class ResizeEnvironmentResponse(_message.Message):
+    __slots__ = ("operation", "environment", "poll_interval")
+    OPERATION_FIELD_NUMBER: _ClassVar[int]
+    ENVIRONMENT_FIELD_NUMBER: _ClassVar[int]
+    POLL_INTERVAL_FIELD_NUMBER: _ClassVar[int]
+    operation: EnvironmentResizeOperation
+    environment: Environment
+    poll_interval: _duration_pb2.Duration
+    def __init__(self, operation: _Optional[_Union[EnvironmentResizeOperation, _Mapping]] = ..., environment: _Optional[_Union[Environment, _Mapping]] = ..., poll_interval: _Optional[_Union[datetime.timedelta, _duration_pb2.Duration, _Mapping]] = ...) -> None: ...
+
+class GetEnvironmentResizeOperationRequest(_message.Message):
+    __slots__ = ("org_id", "environment_id", "operation_id")
+    ORG_ID_FIELD_NUMBER: _ClassVar[int]
+    ENVIRONMENT_ID_FIELD_NUMBER: _ClassVar[int]
+    OPERATION_ID_FIELD_NUMBER: _ClassVar[int]
+    org_id: str
+    environment_id: str
+    operation_id: str
+    def __init__(self, org_id: _Optional[str] = ..., environment_id: _Optional[str] = ..., operation_id: _Optional[str] = ...) -> None: ...
+
+class GetEnvironmentResizeOperationResponse(_message.Message):
+    __slots__ = ("operation", "environment", "poll_interval")
+    OPERATION_FIELD_NUMBER: _ClassVar[int]
+    ENVIRONMENT_FIELD_NUMBER: _ClassVar[int]
+    POLL_INTERVAL_FIELD_NUMBER: _ClassVar[int]
+    operation: EnvironmentResizeOperation
+    environment: Environment
+    poll_interval: _duration_pb2.Duration
+    def __init__(self, operation: _Optional[_Union[EnvironmentResizeOperation, _Mapping]] = ..., environment: _Optional[_Union[Environment, _Mapping]] = ..., poll_interval: _Optional[_Union[datetime.timedelta, _duration_pb2.Duration, _Mapping]] = ...) -> None: ...
 
 class DeleteEnvironmentRequest(_message.Message):
     __slots__ = ("org_id", "environment_id")

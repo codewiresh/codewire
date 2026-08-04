@@ -37,9 +37,9 @@ use organization_client::{
 };
 use presentation::{
     CreateEnvironmentRequest, Environment, EnvironmentAccessGrant, EnvironmentDaemonDiagnostic,
-    EnvironmentDaemonRepair, EnvironmentDaemonStatus, EnvironmentLog, EnvironmentTrustReport,
-    ExtendTtlRequest, GrantEnvironmentAccessRequest, PrepareEnvironmentRequest, RepoEntry,
-    SetupAgent, StatusResponse,
+    EnvironmentDaemonRepair, EnvironmentDaemonStatus, EnvironmentLog, EnvironmentResizeResources,
+    EnvironmentTrustReport, ExtendTtlRequest, GrantEnvironmentAccessRequest,
+    PrepareEnvironmentRequest, RepoEntry, SetupAgent, StatusResponse,
 };
 use rand::{RngCore, rngs::OsRng};
 use secret_client::{CreateSecretProjectRequest, SecretClient, SecretMetadata, SecretProject};

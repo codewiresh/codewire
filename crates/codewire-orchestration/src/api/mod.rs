@@ -12,6 +12,7 @@ pub mod create;
 pub mod detect;
 pub mod env_access;
 pub mod environment_daemon;
+pub mod environment_resize;
 pub mod environments;
 pub mod github;
 pub mod internal;

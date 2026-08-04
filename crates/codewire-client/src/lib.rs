@@ -38,6 +38,7 @@ pub use auth::{
 };
 #[cfg(feature = "desktop-pkce-loopback")]
 pub use auth::{DesktopOAuthCancellation, DesktopOAuthLogin};
+pub use buffa::EnumValue;
 pub use buffa_types::{Duration as ProtoDuration, Empty as ProtoEmpty, Timestamp};
 pub use codewire_proto::codewire::console::v1::{
     BillingLimitUsage, BillingLimits, DeleteGitHubTokenRequest, DeleteGitHubTokenResponse,
@@ -57,13 +58,16 @@ pub use codewire_proto::codewire::v1::{
     DeletePortRequest, DeletePortResponse, DeletePresetRequest, DeletePresetResponse, DesiredState,
     DetectionResult, DownloadFileRequest, DownloadFileResponse, Environment,
     EnvironmentDaemonDiagnostic, EnvironmentDaemonState, EnvironmentDaemonStatus, EnvironmentLog,
-    EnvironmentServiceClient as GeneratedEnvironmentServiceClient, EnvironmentSession,
-    EnvironmentSessionOutputChunk, EnvironmentSessionOutputStream,
+    EnvironmentResizeDisruptionPolicy, EnvironmentResizeExecutionMode, EnvironmentResizeFailure,
+    EnvironmentResizeOperation, EnvironmentResizeOperationState, EnvironmentResizePlan,
+    EnvironmentResources, EnvironmentServiceClient as GeneratedEnvironmentServiceClient,
+    EnvironmentSession, EnvironmentSessionOutputChunk, EnvironmentSessionOutputStream,
     EnvironmentSessionServiceClient as GeneratedEnvironmentSessionServiceClient,
     EnvironmentSessionState, EnvironmentState, EnvironmentTrustReport, ExecRequest, ExecResponse,
     ExecServiceClient as GeneratedExecServiceClient, ExtendEnvironmentTtlRequest,
     ExtendEnvironmentTtlResponse, FileEntry, FileServiceClient as GeneratedFileServiceClient,
     GetEnvironmentDaemonStatusRequest, GetEnvironmentDaemonStatusResponse, GetEnvironmentRequest,
+    GetEnvironmentResizeOperationRequest, GetEnvironmentResizeOperationResponse,
     GetEnvironmentResponse, GetEnvironmentTrustReportRequest, GetEnvironmentTrustReportResponse,
     GetOrganizationRequest, GetOrganizationResponse, GetSessionRequest, GetSessionResponse,
     GrantEnvironmentAccessRequest, GrantEnvironmentAccessResponse, InvitationStatus, IsolationTier,
@@ -72,20 +76,21 @@ pub use codewire_proto::codewire::v1::{
     ListEnvironmentsResponse, ListFilesRequest, ListFilesResponse, ListOrganizationsRequest,
     ListOrganizationsResponse, ListPortsRequest, ListPortsResponse, ListPresetsRequest,
     ListPresetsResponse, ListSessionsRequest, ListSessionsResponse, OrgInvitation, OrgRole,
-    Organization, OrganizationDeletionState, OrganizationMembership, Port, PortAccess,
-    PrepareComplete, Preset, ProtectEnvironmentRequest, ProtectEnvironmentResponse,
-    ReadSessionOutputRequest, ReadSessionOutputResponse, RepairEnvironmentDaemonRequest,
-    RepairEnvironmentDaemonResponse, RepoConfig, RepoEntry, RestartSessionRequest,
-    RestartSessionResponse, RevokeEnvironmentAccessRequest, RevokeEnvironmentAccessResponse,
-    RunRequest, RunResize, RunResponse, RunResponseView, RunStart, SecretMetadata, SecretProject,
-    SetProjectSecretRequest, SetProjectSecretResponse, SetSecretRequest, SetSecretResponse,
-    SetUserSecretRequest, SetUserSecretResponse, SetupAgent, StartEnvironmentRequest,
-    StartEnvironmentResponse, StopEnvironmentRequest, StopEnvironmentResponse, StopSessionRequest,
-    StopSessionResponse, StreamEnvironmentDaemonLogsRequest, StreamEnvironmentDaemonLogsResponse,
-    StreamLogsRequest, StreamLogsResponse, UnprotectEnvironmentRequest,
-    UnprotectEnvironmentResponse, UpdateApiKeyRequest, UpdateApiKeyResponse, UploadFileHeader,
-    UploadFileRequest, UploadFileResponse, WatchEnvironmentCreateRequest,
-    WatchEnvironmentCreateResponse,
+    Organization, OrganizationDeletionState, OrganizationMembership, PlanEnvironmentResizeRequest,
+    PlanEnvironmentResizeResponse, Port, PortAccess, PrepareComplete, Preset,
+    ProtectEnvironmentRequest, ProtectEnvironmentResponse, ReadSessionOutputRequest,
+    ReadSessionOutputResponse, RepairEnvironmentDaemonRequest, RepairEnvironmentDaemonResponse,
+    RepoConfig, RepoEntry, ResizeEnvironmentRequest, ResizeEnvironmentResponse,
+    RestartSessionRequest, RestartSessionResponse, RevokeEnvironmentAccessRequest,
+    RevokeEnvironmentAccessResponse, RunRequest, RunResize, RunResponse, RunResponseView, RunStart,
+    SecretMetadata, SecretProject, SetProjectSecretRequest, SetProjectSecretResponse,
+    SetSecretRequest, SetSecretResponse, SetUserSecretRequest, SetUserSecretResponse, SetupAgent,
+    StartEnvironmentRequest, StartEnvironmentResponse, StopEnvironmentRequest,
+    StopEnvironmentResponse, StopSessionRequest, StopSessionResponse,
+    StreamEnvironmentDaemonLogsRequest, StreamEnvironmentDaemonLogsResponse, StreamLogsRequest,
+    StreamLogsResponse, UnprotectEnvironmentRequest, UnprotectEnvironmentResponse,
+    UpdateApiKeyRequest, UpdateApiKeyResponse, UploadFileHeader, UploadFileRequest,
+    UploadFileResponse, WatchEnvironmentCreateRequest, WatchEnvironmentCreateResponse,
 };
 pub use codewire_proto::codewire::v1::{
     CreateMeshInviteRequest, CreateMeshInviteResponse, CreateMeshNetworkRequest,
@@ -703,6 +708,39 @@ impl CodewireClient {
     ) -> Result<GetEnvironmentResponse, ClientError> {
         self.environments
             .get_environment_with_options(request, self.auth_options().await?)
+            .await
+            .map(|response| response.into_owned())
+            .map_err(ClientError::from)
+    }
+
+    pub async fn resize_environment(
+        &self,
+        request: ResizeEnvironmentRequest,
+    ) -> Result<ResizeEnvironmentResponse, ClientError> {
+        self.environments
+            .resize_environment_with_options(request, self.auth_options().await?)
+            .await
+            .map(|response| response.into_owned())
+            .map_err(ClientError::from)
+    }
+
+    pub async fn plan_environment_resize(
+        &self,
+        request: PlanEnvironmentResizeRequest,
+    ) -> Result<PlanEnvironmentResizeResponse, ClientError> {
+        self.environments
+            .plan_environment_resize_with_options(request, self.auth_options().await?)
+            .await
+            .map(|response| response.into_owned())
+            .map_err(ClientError::from)
+    }
+
+    pub async fn get_environment_resize_operation(
+        &self,
+        request: GetEnvironmentResizeOperationRequest,
+    ) -> Result<GetEnvironmentResizeOperationResponse, ClientError> {
+        self.environments
+            .get_environment_resize_operation_with_options(request, self.auth_options().await?)
             .await
             .map(|response| response.into_owned())
             .map_err(ClientError::from)

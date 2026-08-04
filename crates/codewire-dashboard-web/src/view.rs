@@ -275,12 +275,45 @@ pub(crate) struct EnvironmentRow {
     pub(crate) cost: String,
     pub(crate) running_time: String,
     pub(crate) resources: String,
+    pub(crate) cpu_millicores: i32,
+    pub(crate) memory_mb: i32,
+    pub(crate) disk_gb: i32,
     pub(crate) hourly_rate: String,
     pub(crate) can_start: bool,
     pub(crate) can_stop: bool,
     pub(crate) can_destroy: bool,
     pub(crate) vscode_url: String,
     pub(crate) ports: Vec<EnvironmentPortRow>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct EnvironmentResizeConfirmationView {
+    pub(crate) environment_id: String,
+    pub(crate) environment_name: String,
+    pub(crate) request_id: String,
+    pub(crate) previous_resources: String,
+    pub(crate) desired_resources: String,
+    pub(crate) cpu_millicores: i32,
+    pub(crate) memory_mb: i32,
+    pub(crate) disk_gb: i32,
+    pub(crate) execution_mode: &'static str,
+    pub(crate) requires_restart: bool,
+    pub(crate) active_session_count: i32,
+    pub(crate) active_sessions_will_be_terminated: bool,
+    pub(crate) reason: String,
+    pub(crate) warnings: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct EnvironmentResizeOperationView {
+    pub(crate) environment_id: String,
+    pub(crate) operation_id: String,
+    pub(crate) state: &'static str,
+    pub(crate) desired_resources: String,
+    pub(crate) applied_resources: String,
+    pub(crate) failure: String,
+    pub(crate) active: bool,
+    pub(crate) pod_replaced: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -488,6 +521,8 @@ pub(crate) struct EnvironmentsPageView {
     pub(crate) create_form: EnvironmentCreateFormView,
     pub(crate) port_panel: Option<EnvironmentPortPanelView>,
     pub(crate) trust_summary: Option<EnvironmentTrustSummaryView>,
+    pub(crate) resize_confirmation: Option<EnvironmentResizeConfirmationView>,
+    pub(crate) resize_operation: Option<EnvironmentResizeOperationView>,
     pub(crate) search: String,
     pub(crate) state: String,
     pub(crate) message: String,

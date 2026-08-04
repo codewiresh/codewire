@@ -11,6 +11,7 @@ CARGO_TARGET_DIR="$(
 export CARGO_TARGET_DIR
 CARGO_CI_DIR="$CARGO_TARGET_DIR/ci"
 KIND_CLUSTER_NAME="${KIND_CLUSTER_NAME:-codewire-e2e-ci}"
+KIND_CONFIG="${KIND_CONFIG:-$ROOT/tests/e2e/kind/kind-config.yaml}"
 RUN_DIR="${RUN_DIR:-$ROOT/.tmp/codewire-kind-e2e-${KIND_CLUSTER_NAME}}"
 mkdir -p "$RUN_DIR"
 # Use the hostless HTTP server for the edge and transitional REST probes. The
@@ -483,7 +484,7 @@ create_cluster() {
   docker info --format 'Server={{.ServerVersion}} Driver={{.Driver}} CgroupDriver={{.CgroupDriver}} SecurityOptions={{json .SecurityOptions}}' || docker info || true
 
   log "creating kind cluster ${KIND_CLUSTER_NAME}"
-  kind_config="$ROOT/tests/e2e/kind/kind-config.yaml"
+  kind_config="$KIND_CONFIG"
   rendered_kind_config="$RUN_DIR/kind-config.yaml"
   if [ "$(grep -Fc 'hostPort: 25432' "$kind_config")" -ne 1 ]; then
     echo "::error::Kind config must contain exactly one default Postgres host-port mapping"
@@ -2166,7 +2167,388 @@ workspace_service_smokes() {
   exec_service_connect_smoke
   environment_setup_terminal_smoke
   file_service_smoke
+  environment_resize_smoke
 }
+
+environment_resize_smoke() (
+  log "running public environment resize against the agent-sandbox controller"
+  local environment_id="env-resize-kind-${RANDOM}"
+  local request_id="kind-resize-${RANDOM}-${RANDOM}"
+  local template_name="resize-template-${environment_id}"
+  local warm_pool_name="resize-pool-${environment_id}"
+  local claim_name="sandbox-${environment_id}"
+  local daemon_service="cw-daemon-${environment_id}"
+  local daemon_token sandbox_name old_pod_uid new_pod_uid old_restart_count new_restart_count pod_name pod_ip pvc_name pvc_uid
+  local operation_id operation_state response runtime_state marker image resources
+  daemon_token="$(daemon_auth_token_for_environment "$environment_id")"
+
+  # shellcheck disable=SC2329 # Invoked indirectly by the EXIT trap below.
+  cleanup_environment_resize_smoke() {
+    set +e
+    kubectl -n "$NS" exec -i deploy/postgres -- \
+      psql -U codewire -d codewire -v ON_ERROR_STOP=1 <<SQL
+DELETE FROM sandbox_environment_backend WHERE environment_id = '$environment_id';
+DELETE FROM environments WHERE id = '$environment_id';
+SQL
+    kubectl -n "$SANDBOX_NS" delete sandboxclaim "$claim_name" \
+      --ignore-not-found=true --wait=false >/dev/null
+    kubectl -n "$SANDBOX_NS" delete sandboxwarmpool "$warm_pool_name" \
+      --ignore-not-found=true --wait=false >/dev/null
+    kubectl -n "$SANDBOX_NS" delete sandboxtemplate "$template_name" \
+      --ignore-not-found=true --wait=false >/dev/null
+    kubectl -n "$SANDBOX_NS" delete service "$daemon_service" \
+      --ignore-not-found=true --wait=false >/dev/null
+  }
+  trap cleanup_environment_resize_smoke EXIT
+
+  kubectl_apply -f - <<EOF
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxTemplate
+metadata:
+  name: ${template_name}
+  namespace: ${SANDBOX_NS}
+spec:
+  networkPolicy:
+    ingress:
+      - from:
+          - namespaceSelector:
+              matchLabels:
+                kubernetes.io/metadata.name: ${NS}
+            podSelector:
+              matchLabels:
+                app.kubernetes.io/name: codewire
+                app.kubernetes.io/component: orchestration
+        ports:
+          - protocol: TCP
+            port: 7777
+  podTemplate:
+    metadata:
+      labels:
+        codewire.sh/environment-id: ${environment_id}
+        codewire.sh/type: workspace
+        codewire.sh/resize-smoke-marker: preserved
+    spec:
+      restartPolicy: Never
+      serviceAccountName: codewire-sandbox
+      containers:
+        - name: workspace
+          image: codewire-gateway:e2e
+          imagePullPolicy: Never
+          command: ["/usr/local/bin/cw", "daemon"]
+          env:
+            - name: CODEWIRE_WORKSPACE_SHIM_ADDR
+              value: 0.0.0.0:7777
+            - name: CODEWIRE_DAEMON_AUTH_TOKEN
+              value: ${daemon_token}
+            - name: CODEWIRE_RESIZE_SMOKE_IDENTITY
+              value: preserved
+          ports:
+            - name: daemon
+              containerPort: 7777
+          readinessProbe:
+            tcpSocket:
+              port: 7777
+            periodSeconds: 1
+            timeoutSeconds: 1
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+          resizePolicy:
+            - resourceName: cpu
+              restartPolicy: NotRequired
+            - resourceName: memory
+              restartPolicy: NotRequired
+          volumeMounts:
+            - name: workspace
+              mountPath: /workspace
+  volumeClaimTemplates:
+    - metadata:
+        name: workspace
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: standard
+        resources:
+          requests:
+            storage: 1Gi
+---
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxWarmPool
+metadata:
+  name: ${warm_pool_name}
+  namespace: ${SANDBOX_NS}
+spec:
+  replicas: 1
+  sandboxTemplateRef:
+    name: ${template_name}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ${daemon_service}
+  namespace: ${SANDBOX_NS}
+spec:
+  selector:
+    codewire.sh/environment-id: ${environment_id}
+    codewire.sh/type: workspace
+  ports:
+    - name: daemon
+      port: 7777
+      targetPort: 7777
+EOF
+
+  kubectl -n "$SANDBOX_NS" wait "sandboxwarmpool/${warm_pool_name}" \
+    --for=jsonpath='{.status.readyReplicas}'=1 --timeout=180s
+  kubectl_apply -f - <<EOF
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxClaim
+metadata:
+  name: ${claim_name}
+  namespace: ${SANDBOX_NS}
+  labels:
+    codewire.sh/environment-id: ${environment_id}
+    codewire.sh/org-id: org_contract_1
+    codewire.sh/type: sandbox
+spec:
+  warmPoolRef:
+    name: ${warm_pool_name}
+  additionalPodMetadata:
+    labels:
+      codewire.sh/environment-id: ${environment_id}
+      codewire.sh/type: workspace
+      codewire.sh/resize-smoke-marker: preserved
+  workspaceResources:
+    - containerName: workspace
+      resources:
+        requests:
+          cpu: 250m
+          memory: 256Mi
+        limits:
+          cpu: 250m
+          memory: 256Mi
+EOF
+  kubectl -n "$SANDBOX_NS" wait "sandboxclaim/${claim_name}" \
+    --for=condition=Ready --timeout=180s
+  sandbox_name="$(kubectl -n "$SANDBOX_NS" get sandboxclaim "$claim_name" \
+    -o jsonpath='{.status.sandbox.name}')"
+  if [ -z "$sandbox_name" ]; then
+    echo "::error::resize smoke claim did not resolve a Sandbox"
+    return 1
+  fi
+  pod_name="$sandbox_name"
+  kubectl -n "$SANDBOX_NS" wait "pod/${pod_name}" \
+    --for=condition=Ready --timeout=180s
+  old_pod_uid="$(kubectl -n "$SANDBOX_NS" get pod "$pod_name" -o jsonpath='{.metadata.uid}')"
+  old_restart_count="$(kubectl -n "$SANDBOX_NS" get pod "$pod_name" -o jsonpath='{.status.containerStatuses[?(@.name=="workspace")].restartCount}')"
+  pod_ip="$(kubectl -n "$SANDBOX_NS" get pod "$pod_name" -o jsonpath='{.status.podIP}')"
+  pvc_name="workspace-${sandbox_name}"
+  kubectl -n "$SANDBOX_NS" wait "pvc/${pvc_name}" \
+    --for=jsonpath='{.status.phase}'=Bound --timeout=120s
+  pvc_uid="$(kubectl -n "$SANDBOX_NS" get pvc "$pvc_name" -o jsonpath='{.metadata.uid}')"
+  kubectl -n "$SANDBOX_NS" exec "$pod_name" -c workspace -- \
+    sh -ceu 'printf codewire-resize-data > /workspace/resize-smoke-marker'
+
+  kubectl -n "$NS" exec -i deploy/postgres -- \
+    psql -U codewire -d codewire -v ON_ERROR_STOP=1 <<SQL
+INSERT INTO environments (
+  id, org_id, created_by, type, name, state, desired_state, preset_id,
+  cpu_millicores, memory_mb, disk_gb,
+  state_changed_at
+)
+VALUES (
+  '$environment_id', 'org_contract_1', 'usr_contract_admin', 'sandbox',
+  'kind-resize-smoke', 'running', 'started', 'preset_contract_1',
+  250, 256, 1, NOW()
+);
+INSERT INTO sandbox_environment_backend (
+  environment_id, namespace, sandbox_claim_name, sandbox_claim_uid, pod_name, pod_ip
+)
+VALUES (
+  '$environment_id', '$SANDBOX_NS', '$claim_name',
+  '$(kubectl -n "$SANDBOX_NS" get sandboxclaim "$claim_name" -o jsonpath='{.metadata.uid}')',
+  '$pod_name', '$pod_ip'
+);
+SQL
+
+  curl_settled -X POST \
+    -H 'cookie: codewire.session_token=contract-admin-session-token' \
+    -H 'content-type: application/json' \
+    -d "{\"orgId\":\"org_contract_1\",\"environmentId\":\"${environment_id}\",\"cpuMillicores\":500,\"memoryMb\":512,\"diskGb\":1,\"requestId\":\"${request_id}\"}" \
+    "${KIND_INGRESS_URL}/codewire.v1.EnvironmentService/ResizeEnvironment"
+  if [ "$PROBE_CODE" != "200" ]; then
+    echo "::error::public resize request failed: code=$PROBE_CODE body=$PROBE_BODY"
+    return 1
+  fi
+  operation_id="$(jq -r '.operation.id // empty' <<<"$PROBE_BODY")"
+  if [ -z "$operation_id" ]; then
+    echo "::error::public resize response omitted operation identity: $PROBE_BODY"
+    return 1
+  fi
+
+  operation_state=""
+  for _ in $(seq 1 180); do
+    curl_settled -X POST \
+      -H 'cookie: codewire.session_token=contract-admin-session-token' \
+      -H 'content-type: application/json' \
+      -d "{\"orgId\":\"org_contract_1\",\"environmentId\":\"${environment_id}\",\"operationId\":\"${operation_id}\"}" \
+      "${KIND_INGRESS_URL}/codewire.v1.EnvironmentService/GetEnvironmentResizeOperation"
+    if [ "$PROBE_CODE" != "200" ]; then
+      echo "::error::resize operation poll failed: code=$PROBE_CODE body=$PROBE_BODY"
+      return 1
+    fi
+    response="$PROBE_BODY"
+    operation_state="$(jq -r '.operation.state // empty' <<<"$response")"
+    case "$operation_state" in
+      ENVIRONMENT_RESIZE_OPERATION_STATE_COMPLETED) break ;;
+      ENVIRONMENT_RESIZE_OPERATION_STATE_FAILED)
+        echo "::error::resize operation failed: $response"
+        return 1
+        ;;
+    esac
+    sleep 1
+  done
+  if [ "$operation_state" != "ENVIRONMENT_RESIZE_OPERATION_STATE_COMPLETED" ]; then
+    echo "::error::resize operation did not complete: state=${operation_state:-missing} body=$response"
+    return 1
+  fi
+  if ! jq -e '
+      .operation.previousResources == {"cpuMillicores":250,"memoryMb":256,"diskGb":1}
+      and .operation.desiredResources == {"cpuMillicores":500,"memoryMb":512,"diskGb":1}
+      and .operation.lastAppliedResources == {"cpuMillicores":500,"memoryMb":512,"diskGb":1}
+      and .operation.appliedMode == "ENVIRONMENT_RESIZE_EXECUTION_MODE_IN_PLACE"
+      and (.operation.podReplaced // false) == false
+      and .environment.cpuMillicores == 500
+      and .environment.memoryMb == 512
+      and .environment.diskGb == 1
+    ' <<<"$response" >/dev/null; then
+    echo "::error::resize terminal response did not preserve exact resources: $response"
+    return 1
+  fi
+
+  pod_name="$(kubectl -n "$NS" exec deploy/postgres -- \
+    psql -U codewire -d codewire -Atc \
+      "SELECT pod_name FROM sandbox_environment_backend WHERE environment_id = '$environment_id'")"
+  new_pod_uid="$(kubectl -n "$SANDBOX_NS" get pod "$pod_name" -o jsonpath='{.metadata.uid}')"
+  new_restart_count="$(kubectl -n "$SANDBOX_NS" get pod "$pod_name" -o jsonpath='{.status.containerStatuses[?(@.name=="workspace")].restartCount}')"
+  if [ -z "$new_pod_uid" ] || [ "$new_pod_uid" != "$old_pod_uid" ]; then
+    echo "::error::live resize replaced the owned workspace Pod UID"
+    return 1
+  fi
+  if [ "$new_restart_count" != "$old_restart_count" ]; then
+    echo "::error::live resize changed workspace restart count: before=$old_restart_count after=$new_restart_count"
+    return 1
+  fi
+  runtime_state="$(kubectl -n "$NS" exec deploy/postgres -- \
+    psql -U codewire -d codewire -Atc \
+      "SELECT state || ':' || cpu_millicores || ':' || memory_mb || ':' || disk_gb FROM environments WHERE id = '$environment_id'")"
+  if [ "$runtime_state" != "running:500:512:1" ]; then
+    echo "::error::resize durable resource state is ${runtime_state:-missing}"
+    return 1
+  fi
+  resources="$(kubectl -n "$SANDBOX_NS" get pod "$pod_name" \
+    -o jsonpath='{.spec.containers[?(@.name=="workspace")].resources.requests.cpu}:{.spec.containers[?(@.name=="workspace")].resources.requests.memory}')"
+  image="$(kubectl -n "$SANDBOX_NS" get pod "$pod_name" \
+    -o jsonpath='{.spec.containers[?(@.name=="workspace")].image}')"
+  marker="$(kubectl -n "$SANDBOX_NS" exec "$pod_name" -c workspace -- \
+    sh -ceu 'cat /workspace/resize-smoke-marker')"
+  if [ "$resources" != "500m:512Mi" ] || [ "$image" != "codewire-gateway:e2e" ] \
+      || [ "$marker" != "codewire-resize-data" ]; then
+    echo "::error::live-resized Pod lost resources/image/data: resources=$resources image=$image marker=$marker"
+    return 1
+  fi
+  if [ "$(kubectl -n "$SANDBOX_NS" get pvc "$pvc_name" -o jsonpath='{.metadata.uid}')" != "$pvc_uid" ]; then
+    echo "::error::workspace PVC identity changed across resize"
+    return 1
+  fi
+  if [ "$(kubectl -n "$SANDBOX_NS" get pod "$pod_name" -o jsonpath='{.metadata.labels.codewire\.sh/resize-smoke-marker}')" != "preserved" ]; then
+    echo "::error::live-resized Pod lost the resize identity label"
+    return 1
+  fi
+  if [ "$(kubectl -n "$SANDBOX_NS" get sandbox "$sandbox_name" -o jsonpath='{.spec.podTemplate.spec.containers[?(@.name=="workspace")].resources.requests.cpu}')" != "500m" ] \
+      || [ "$(kubectl -n "$SANDBOX_NS" get sandboxclaim "$claim_name" -o jsonpath='{.spec.workspaceResources[?(@.containerName=="workspace")].resources.requests.cpu}')" != "500m" ]; then
+    echo "::error::Sandbox or SandboxClaim did not retain the desired resize"
+    return 1
+  fi
+
+  # A restart-class plan queries the daemon to enforce the active-session
+  # policy. The in-place Pod /resize acknowledgement precedes Service endpoint
+  # reconciliation, so prove the existing daemon is ready before exercising
+  # that subsequent public request.
+  local daemon_endpoints=""
+  for _ in $(seq 1 120); do
+    daemon_endpoints="$(kubectl -n "$SANDBOX_NS" get endpoints "$daemon_service" \
+      -o jsonpath='{.subsets[*].addresses[*].ip}' 2>/dev/null || true)"
+    if [ -n "$daemon_endpoints" ]; then
+      break
+    fi
+    sleep 1
+  done
+  if [ -z "$daemon_endpoints" ]; then
+    echo "::error::live-resized workspace daemon did not regain a ready Service endpoint"
+    return 1
+  fi
+
+  # Memory shrink is intentionally disruptive. Prove that explicit consent
+  # replaces only the Pod while preserving the PVC and workspace data.
+  request_id="${request_id}-restart"
+  curl_settled -X POST \
+    -H 'cookie: codewire.session_token=contract-admin-session-token' \
+    -H 'content-type: application/json' \
+    -d "{\"orgId\":\"org_contract_1\",\"environmentId\":\"${environment_id}\",\"cpuMillicores\":500,\"memoryMb\":384,\"diskGb\":1,\"requestId\":\"${request_id}\",\"disruptionPolicy\":\"ENVIRONMENT_RESIZE_DISRUPTION_POLICY_ALLOW_RESTART\"}" \
+    "${KIND_INGRESS_URL}/codewire.v1.EnvironmentService/ResizeEnvironment"
+  if [ "$PROBE_CODE" != "200" ]; then
+    echo "::error::explicit restart resize request failed: code=$PROBE_CODE body=$PROBE_BODY"
+    return 1
+  fi
+  operation_id="$(jq -r '.operation.id // empty' <<<"$PROBE_BODY")"
+  operation_state=""
+  for _ in $(seq 1 180); do
+    curl_settled -X POST \
+      -H 'cookie: codewire.session_token=contract-admin-session-token' \
+      -H 'content-type: application/json' \
+      -d "{\"orgId\":\"org_contract_1\",\"environmentId\":\"${environment_id}\",\"operationId\":\"${operation_id}\"}" \
+      "${KIND_INGRESS_URL}/codewire.v1.EnvironmentService/GetEnvironmentResizeOperation"
+    response="$PROBE_BODY"
+    operation_state="$(jq -r '.operation.state // empty' <<<"$response")"
+    case "$operation_state" in
+      ENVIRONMENT_RESIZE_OPERATION_STATE_COMPLETED) break ;;
+      ENVIRONMENT_RESIZE_OPERATION_STATE_FAILED)
+        echo "::error::explicit restart resize failed: $response"
+        return 1
+        ;;
+    esac
+    sleep 1
+  done
+  if [ "$operation_state" != "ENVIRONMENT_RESIZE_OPERATION_STATE_COMPLETED" ] \
+      || ! jq -e '.operation.appliedMode == "ENVIRONMENT_RESIZE_EXECUTION_MODE_RESTART" and .operation.podReplaced == true' <<<"$response" >/dev/null; then
+    echo "::error::explicit restart was not recorded accurately: $response"
+    return 1
+  fi
+  pod_name="$(kubectl -n "$NS" exec deploy/postgres -- \
+    psql -U codewire -d codewire -Atc \
+      "SELECT pod_name FROM sandbox_environment_backend WHERE environment_id = '$environment_id'")"
+  new_pod_uid="$(kubectl -n "$SANDBOX_NS" get pod "$pod_name" -o jsonpath='{.metadata.uid}')"
+  if [ -z "$new_pod_uid" ] || [ "$new_pod_uid" = "$old_pod_uid" ]; then
+    echo "::error::explicit restart did not replace the workspace Pod"
+    return 1
+  fi
+  if [ "$(kubectl -n "$SANDBOX_NS" get pvc "$pvc_name" -o jsonpath='{.metadata.uid}')" != "$pvc_uid" ] \
+      || [ "$(kubectl -n "$SANDBOX_NS" exec "$pod_name" -c workspace -- sh -ceu 'cat /workspace/resize-smoke-marker')" != "codewire-resize-data" ]; then
+    echo "::error::explicit restart failed to preserve PVC identity or workspace data"
+    return 1
+  fi
+
+  local as_user="system:serviceaccount:${NS}:codewire-orchestration"
+  if [ "$(kubectl auth can-i get storageclasses.storage.k8s.io --as "$as_user")" != "yes" ] \
+      || [ "$(kubectl auth can-i patch persistentvolumeclaims --namespace "$SANDBOX_NS" --as "$as_user")" != "yes" ]; then
+    echo "::error::orchestration resize RBAC is incomplete"
+    return 1
+  fi
+  log "public live resize preserved Pod identity; explicit restart preserved PVC identity and data"
+)
 
 temporal_workflow_smoke() {
   log "running Temporal workflow smoke"

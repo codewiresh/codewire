@@ -32,6 +32,12 @@ use crate::api::environment_daemon::{
     EnvironmentDaemonStatus as ApiEnvironmentDaemonStatus, get_environment_daemon_logs_core,
     get_environment_daemon_status_core, repair_environment_daemon_core,
 };
+use crate::api::environment_resize::{
+    EnvironmentResizeDisruptionPolicy, EnvironmentResizeExecutionMode, EnvironmentResizeOperation,
+    EnvironmentResizePlan, EnvironmentResources, PlanEnvironmentResizeParams,
+    ResizeEnvironmentParams, get_resize_operation_core, plan_environment_resize_core,
+    resize_environment_core,
+};
 use crate::api::environments::{
     Environment, EnvironmentPort, ListEnvironmentsQuery, StartOutcomeCore,
     cancel_environment_deletion_core, delete_environment_core, extend_environment_ttl_core,
@@ -137,6 +143,118 @@ impl proto::EnvironmentService for EnvironmentConnectService {
         connectrpc::Response::ok(proto::GetEnvironmentResponse {
             environment: Some(
                 proto_environment(environment)
+                    .map_err(|error| environment_rpc_error(&error, &ctx))?,
+            )
+            .into(),
+            poll_interval: poll_interval.into(),
+            ..Default::default()
+        })
+    }
+
+    async fn resize_environment(
+        &self,
+        ctx: RequestContext,
+        request: ServiceRequest<'_, proto::ResizeEnvironmentRequest>,
+    ) -> ServiceResult<proto::ResizeEnvironmentResponse> {
+        let user = auth_user(&ctx)?.clone();
+        let request = request.view();
+        let result = resize_environment_core(
+            &self.state,
+            &user,
+            ResizeEnvironmentParams {
+                org_id: request.org_id.to_owned(),
+                environment_id: request.environment_id.to_owned(),
+                desired_resources: EnvironmentResources {
+                    cpu_millicores: request.cpu_millicores,
+                    memory_mb: request.memory_mb,
+                    disk_gb: request.disk_gb,
+                },
+                request_id: request.request_id.to_owned(),
+                force: request.force,
+                disruption_policy: api_resize_disruption_policy(request.disruption_policy)
+                    .map_err(|error| environment_rpc_error(&error, &ctx))?,
+            },
+        )
+        .await
+        .map_err(|error| environment_rpc_error(&error, &ctx))?;
+        let poll_interval = result.operation.is_active().then(|| Duration::from_secs(1));
+
+        connectrpc::Response::ok(proto::ResizeEnvironmentResponse {
+            operation: Some(
+                proto_environment_resize_operation(result.operation)
+                    .map_err(|error| environment_rpc_error(&error, &ctx))?,
+            )
+            .into(),
+            environment: Some(
+                proto_environment(result.environment)
+                    .map_err(|error| environment_rpc_error(&error, &ctx))?,
+            )
+            .into(),
+            poll_interval: poll_interval.into(),
+            ..Default::default()
+        })
+    }
+
+    async fn plan_environment_resize(
+        &self,
+        ctx: RequestContext,
+        request: ServiceRequest<'_, proto::PlanEnvironmentResizeRequest>,
+    ) -> ServiceResult<proto::PlanEnvironmentResizeResponse> {
+        let user = auth_user(&ctx)?.clone();
+        let request = request.view();
+        let result = plan_environment_resize_core(
+            &self.state,
+            &user,
+            PlanEnvironmentResizeParams {
+                org_id: request.org_id.to_owned(),
+                environment_id: request.environment_id.to_owned(),
+                desired_resources: EnvironmentResources {
+                    cpu_millicores: request.cpu_millicores,
+                    memory_mb: request.memory_mb,
+                    disk_gb: request.disk_gb,
+                },
+            },
+        )
+        .await
+        .map_err(|error| environment_rpc_error(&error, &ctx))?;
+
+        connectrpc::Response::ok(proto::PlanEnvironmentResizeResponse {
+            plan: Some(proto_environment_resize_plan(result.plan)).into(),
+            environment: Some(
+                proto_environment(result.environment)
+                    .map_err(|error| environment_rpc_error(&error, &ctx))?,
+            )
+            .into(),
+            ..Default::default()
+        })
+    }
+
+    async fn get_environment_resize_operation(
+        &self,
+        ctx: RequestContext,
+        request: ServiceRequest<'_, proto::GetEnvironmentResizeOperationRequest>,
+    ) -> ServiceResult<proto::GetEnvironmentResizeOperationResponse> {
+        let user = auth_user(&ctx)?.clone();
+        let request = request.view();
+        let result = get_resize_operation_core(
+            &self.state,
+            &user,
+            request.org_id,
+            request.environment_id,
+            request.operation_id,
+        )
+        .await
+        .map_err(|error| environment_rpc_error(&error, &ctx))?;
+        let poll_interval = result.operation.is_active().then(|| Duration::from_secs(1));
+
+        connectrpc::Response::ok(proto::GetEnvironmentResizeOperationResponse {
+            operation: Some(
+                proto_environment_resize_operation(result.operation)
+                    .map_err(|error| environment_rpc_error(&error, &ctx))?,
+            )
+            .into(),
+            environment: Some(
+                proto_environment(result.environment)
                     .map_err(|error| environment_rpc_error(&error, &ctx))?,
             )
             .into(),
@@ -1017,6 +1135,116 @@ fn proto_environment(environment: Environment) -> AppResult<proto::Environment> 
     })
 }
 
+fn proto_environment_resources(resources: EnvironmentResources) -> proto::EnvironmentResources {
+    proto::EnvironmentResources {
+        cpu_millicores: resources.cpu_millicores,
+        memory_mb: resources.memory_mb,
+        disk_gb: resources.disk_gb,
+        ..Default::default()
+    }
+}
+
+fn api_resize_disruption_policy(
+    policy: EnumValue<proto::EnvironmentResizeDisruptionPolicy>,
+) -> AppResult<EnvironmentResizeDisruptionPolicy> {
+    match policy.as_known() {
+        None
+        | Some(proto::EnvironmentResizeDisruptionPolicy::Unspecified)
+        | Some(proto::EnvironmentResizeDisruptionPolicy::LiveOnly) => {
+            Ok(EnvironmentResizeDisruptionPolicy::LiveOnly)
+        }
+        Some(proto::EnvironmentResizeDisruptionPolicy::AllowRestart) => {
+            Ok(EnvironmentResizeDisruptionPolicy::AllowRestart)
+        }
+    }
+}
+
+fn proto_resize_disruption_policy(
+    policy: EnvironmentResizeDisruptionPolicy,
+) -> proto::EnvironmentResizeDisruptionPolicy {
+    match policy {
+        EnvironmentResizeDisruptionPolicy::LiveOnly => {
+            proto::EnvironmentResizeDisruptionPolicy::LiveOnly
+        }
+        EnvironmentResizeDisruptionPolicy::AllowRestart => {
+            proto::EnvironmentResizeDisruptionPolicy::AllowRestart
+        }
+    }
+}
+
+fn proto_resize_execution_mode(
+    mode: EnvironmentResizeExecutionMode,
+) -> proto::EnvironmentResizeExecutionMode {
+    match mode {
+        EnvironmentResizeExecutionMode::Noop => proto::EnvironmentResizeExecutionMode::Noop,
+        EnvironmentResizeExecutionMode::ApplyOnStart => {
+            proto::EnvironmentResizeExecutionMode::ApplyOnStart
+        }
+        EnvironmentResizeExecutionMode::InPlace => proto::EnvironmentResizeExecutionMode::InPlace,
+        EnvironmentResizeExecutionMode::Restart => proto::EnvironmentResizeExecutionMode::Restart,
+    }
+}
+
+fn proto_environment_resize_plan(plan: EnvironmentResizePlan) -> proto::EnvironmentResizePlan {
+    proto::EnvironmentResizePlan {
+        previous_resources: Some(proto_environment_resources(plan.previous_resources)).into(),
+        desired_resources: Some(proto_environment_resources(plan.desired_resources)).into(),
+        execution_mode: proto_resize_execution_mode(plan.execution_mode).into(),
+        active_session_count: plan.active_session_count,
+        active_sessions_will_be_terminated: plan.active_sessions_will_be_terminated,
+        reason: plan.reason,
+        warnings: plan.warnings,
+        ..Default::default()
+    }
+}
+
+fn proto_environment_resize_operation(
+    operation: EnvironmentResizeOperation,
+) -> AppResult<proto::EnvironmentResizeOperation> {
+    let state = match operation.state.as_str() {
+        "pending" => proto::EnvironmentResizeOperationState::Pending,
+        "applying" => proto::EnvironmentResizeOperationState::Applying,
+        "restarting" => proto::EnvironmentResizeOperationState::Restarting,
+        "completed" => proto::EnvironmentResizeOperationState::Completed,
+        "failed" => proto::EnvironmentResizeOperationState::Failed,
+        unexpected => {
+            return invalid_stored_value("environment resize operation state", unexpected);
+        }
+    };
+    Ok(proto::EnvironmentResizeOperation {
+        id: operation.id,
+        environment_id: operation.environment_id,
+        request_id: operation.request_id,
+        previous_resources: Some(proto_environment_resources(operation.previous_resources)).into(),
+        desired_resources: Some(proto_environment_resources(operation.desired_resources)).into(),
+        last_applied_resources: Some(proto_environment_resources(
+            operation.last_applied_resources,
+        ))
+        .into(),
+        state: state.into(),
+        failure: operation
+            .failure
+            .map(|failure| proto::EnvironmentResizeFailure {
+                code: failure.code,
+                message: failure.message,
+                ..Default::default()
+            })
+            .into(),
+        created_at: Some(proto_naive_timestamp(operation.created_at)).into(),
+        updated_at: Some(proto_naive_timestamp(operation.updated_at)).into(),
+        completed_at: operation.completed_at.map(proto_naive_timestamp).into(),
+        disruption_policy: proto_resize_disruption_policy(operation.disruption_policy).into(),
+        planned_mode: proto_resize_execution_mode(operation.planned_mode).into(),
+        applied_mode: operation
+            .applied_mode
+            .map(proto_resize_execution_mode)
+            .unwrap_or(proto::EnvironmentResizeExecutionMode::Unspecified)
+            .into(),
+        pod_replaced: operation.pod_replaced,
+        ..Default::default()
+    })
+}
+
 fn proto_port(port: EnvironmentPort) -> AppResult<proto::Port> {
     Ok(proto::Port {
         id: port.id,
@@ -1069,6 +1297,11 @@ fn proto_postgres_timestamp(value: &str) -> AppResult<Timestamp> {
         value.timestamp(),
         value.timestamp_subsec_nanos() as i32,
     ))
+}
+
+fn proto_naive_timestamp(value: NaiveDateTime) -> Timestamp {
+    let value = value.and_utc();
+    Timestamp::from_unix(value.timestamp(), value.timestamp_subsec_nanos() as i32)
 }
 
 fn optional_timestamp(value: Option<String>) -> AppResult<buffa::MessageField<Timestamp>> {

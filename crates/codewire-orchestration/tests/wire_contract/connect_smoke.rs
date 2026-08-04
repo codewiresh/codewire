@@ -1,4 +1,7 @@
-use codewire_proto::codewire::v1::{ListOrganizationsRequest, OrganizationServiceClient};
+use codewire_proto::codewire::v1::{
+    EnvironmentResizeExecutionMode, EnvironmentServiceClient, ListOrganizationsRequest,
+    OrganizationServiceClient, PlanEnvironmentResizeRequest,
+};
 use connectrpc::CodecFormat;
 use reqwest::{Method, StatusCode};
 use serde_json::json;
@@ -20,6 +23,7 @@ pub(super) async fn run(harness: &Harness) {
     assert_json_connect_routes(harness).await;
     assert_proto_connect_route(harness).await;
     assert_auth_boundary(harness).await;
+    assert_resize_contract(harness).await;
     assert_retired_routes_absent(harness).await;
 }
 
@@ -135,6 +139,27 @@ async fn assert_proto_connect_route(harness: &Harness) {
         .expect("OrganizationService ListOrganizations Proto round trip")
         .into_owned();
     assert_eq!(response.organizations.len(), 2);
+
+    let client = EnvironmentServiceClient::new(
+        connectrpc::client::HttpClient::plaintext(),
+        harness.client_config(Auth::Admin, CodecFormat::Proto),
+    );
+    let response = client
+        .plan_environment_resize(PlanEnvironmentResizeRequest {
+            org_id: PRIMARY_ORG.into(),
+            environment_id: "env_environment_contract_invalid_state".into(),
+            cpu_millicores: 3_000,
+            memory_mb: 4_096,
+            disk_gb: 10,
+            ..Default::default()
+        })
+        .await
+        .expect("PlanEnvironmentResize Proto round trip")
+        .into_owned();
+    assert_eq!(
+        response.plan.as_option().unwrap().execution_mode,
+        EnvironmentResizeExecutionMode::ApplyOnStart
+    );
 }
 
 async fn assert_auth_boundary(harness: &Harness) {
@@ -152,6 +177,94 @@ async fn assert_auth_boundary(harness: &Harness) {
         "unauthenticated",
         "unauthorized",
     );
+}
+
+async fn assert_resize_contract(harness: &Harness) {
+    let operation_id = "resize_environment_contract_completed";
+    let got = harness
+        .connect_json(
+            ENVIRONMENT_SERVICE,
+            "GetEnvironmentResizeOperation",
+            json!({
+                "orgId": PRIMARY_ORG,
+                "environmentId": "env_environment_contract_read",
+                "operationId": operation_id,
+            }),
+            Auth::Admin,
+        )
+        .await;
+    got.assert_status(StatusCode::OK, "GetEnvironmentResizeOperation");
+    let body = got.json();
+    assert_eq!(body["operation"]["id"], operation_id);
+    assert_eq!(
+        body["operation"]["state"],
+        "ENVIRONMENT_RESIZE_OPERATION_STATE_COMPLETED"
+    );
+    assert_eq!(
+        body["operation"]["disruptionPolicy"],
+        "ENVIRONMENT_RESIZE_DISRUPTION_POLICY_LIVE_ONLY"
+    );
+    assert_eq!(
+        body["operation"]["appliedMode"],
+        "ENVIRONMENT_RESIZE_EXECUTION_MODE_IN_PLACE"
+    );
+    assert!(
+        body["operation"]["podReplaced"].is_null() || body["operation"]["podReplaced"] == false
+    );
+    assert_eq!(
+        body["operation"]["previousResources"]["cpuMillicores"],
+        2000
+    );
+    assert_eq!(body["operation"]["desiredResources"]["diskGb"], 20);
+    assert_eq!(body["operation"]["lastAppliedResources"]["memoryMb"], 6144);
+    assert!(body.get("pollInterval").is_none());
+
+    let denied = harness
+        .connect_json(
+            ENVIRONMENT_SERVICE,
+            "GetEnvironmentResizeOperation",
+            json!({
+                "orgId": PRIMARY_ORG,
+                "environmentId": "env_environment_contract_read",
+                "operationId": operation_id,
+            }),
+            Auth::User,
+        )
+        .await;
+    assert_connect_error(&denied, StatusCode::FORBIDDEN, "permission_denied", "");
+
+    let denied_plan = harness
+        .connect_json(
+            ENVIRONMENT_SERVICE,
+            "PlanEnvironmentResize",
+            json!({
+                "orgId": PRIMARY_ORG,
+                "environmentId": "env_environment_contract_read",
+                "cpuMillicores": 3000,
+                "memoryMb": 4096,
+                "diskGb": 10,
+            }),
+            Auth::User,
+        )
+        .await;
+    assert_connect_error(&denied_plan, StatusCode::FORBIDDEN, "permission_denied", "");
+
+    let invalid = harness
+        .connect_json(
+            ENVIRONMENT_SERVICE,
+            "ResizeEnvironment",
+            json!({
+                "orgId": PRIMARY_ORG,
+                "environmentId": "env_environment_contract_read",
+                "cpuMillicores": 0,
+                "memoryMb": 4096,
+                "diskGb": 10,
+                "requestId": "wire-invalid-resize",
+            }),
+            Auth::Admin,
+        )
+        .await;
+    assert_connect_error(&invalid, StatusCode::BAD_REQUEST, "invalid_argument", "");
 }
 
 async fn assert_retired_routes_absent(harness: &Harness) {

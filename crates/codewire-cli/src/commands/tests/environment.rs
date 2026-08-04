@@ -97,6 +97,8 @@
             cpu: None,
             memory: None,
             disk: None,
+            force: false,
+            allow_restart: false,
             yes: false,
             output: OutputFormat::Text,
         };
@@ -127,6 +129,8 @@
             cpu: Some("0.5".to_string()),
             memory: Some("12Gi".to_string()),
             disk: Some("120Gi".to_string()),
+            force: false,
+            allow_restart: false,
             yes: false,
             output: OutputFormat::Text,
         };
@@ -151,6 +155,8 @@
             cpu: Some("0.5".to_string()),
             memory: Some("12Gi".to_string()),
             disk: Some("99Gi".to_string()),
+            force: false,
+            allow_restart: false,
             yes: false,
             output: OutputFormat::Text,
         };
@@ -158,6 +164,48 @@
             .unwrap_err()
             .to_string()
             .contains("disk shrink"));
+    }
+
+    #[test]
+    fn platform_resize_plan_preserves_millicores_and_requires_force_for_automation() {
+        let args = EnvResizeArgs {
+            environment: "workspace".to_string(),
+            cpu: Some("500m".to_string()),
+            memory: Some("6Gi".to_string()),
+            disk: Some("30Gi".to_string()),
+            force: false,
+            allow_restart: false,
+            yes: true,
+            output: OutputFormat::Json,
+        };
+        let mut plan = resolve_platform_resize_plan(
+            &args,
+            EnvironmentResizeResources {
+                cpu_millicores: 2000,
+                memory_mb: 4096,
+                disk_gb: 20,
+            },
+        )
+        .unwrap();
+        plan.active_session_count = 1;
+        plan.execution_mode = "restart".to_string();
+        plan.reason = "runtime requires replacement".to_string();
+        plan.warnings = vec![
+            "The required restart will terminate active sessions".to_string(),
+            "Disk growth cannot be reversed".to_string(),
+        ];
+
+        assert_eq!(plan.desired.cpu_millicores, 500);
+        assert_eq!(plan.desired.memory_mb, 6144);
+        assert_eq!(plan.desired.disk_gb, 30);
+        let rendered = format_platform_resize_plan("workspace", &plan);
+        assert!(rendered.contains("Current   Requested"));
+        assert!(rendered.contains("restart will terminate active sessions"));
+        assert!(rendered.contains("Disk growth cannot be reversed"));
+        assert!(validate_platform_resize_force(1, "restart", false, false).is_err());
+        assert!(validate_platform_resize_force(1, "restart", true, false).is_ok());
+        assert!(validate_platform_resize_force(1, "restart", false, true).is_ok());
+        assert!(validate_platform_resize_force(1, "in_place", false, false).is_ok());
     }
 
     #[test]

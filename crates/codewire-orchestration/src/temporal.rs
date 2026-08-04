@@ -36,7 +36,7 @@ use crate::worker::organization_deletion::{
     OrganizationDeletionWorkflowInput,
 };
 use crate::worker::setup_lease::SetupActivityIdentity;
-use crate::worker::{JobPayload, WorkerContext, create, lifecycle, setup};
+use crate::worker::{JobPayload, WorkerContext, create, lifecycle, resize, setup};
 
 pub const DEFAULT_TASK_QUEUE: &str = "codewire-lifecycle";
 
@@ -373,6 +373,51 @@ impl EnvironmentActivities {
         .await
     }
 
+    #[activity(name = "EnvironmentResizeActivity")]
+    pub async fn resize(
+        self: Arc<Self>,
+        ctx: ActivityContext,
+        cmd: EnvironmentActivityCommand,
+    ) -> Result<(), ActivityError> {
+        let attempt = ctx.info().attempt;
+        let Some(authority) = required_authority(&self.wctx, &cmd, "resized").await? else {
+            return Ok(());
+        };
+        run_environment_activity(ctx, async {
+            match resize::handle_environment_resize(&self.wctx, &cmd.environment_id, &authority)
+                .await
+            {
+                Ok(()) => Ok(()),
+                Err(error) => {
+                    let terminal = resize::terminal_failure(&error)
+                        .map(|failure| (failure.code, failure.message.clone()));
+                    if let Some((code, message)) = terminal {
+                        resize::mark_environment_resize_failed(
+                            &self.wctx,
+                            &cmd.environment_id,
+                            &authority,
+                            code,
+                            &message,
+                        )
+                        .await
+                    } else if attempt >= 3 {
+                        resize::mark_environment_resize_failed(
+                            &self.wctx,
+                            &cmd.environment_id,
+                            &authority,
+                            "runtime_apply_failed",
+                            &format!("environment resize did not converge: {error:#}"),
+                        )
+                        .await
+                    } else {
+                        Err(error)
+                    }
+                }
+            }
+        })
+        .await
+    }
+
     #[activity(name = "EnvironmentReconcileActivity")]
     pub async fn reconcile(
         self: Arc<Self>,
@@ -432,7 +477,7 @@ fn short_activity_opts() -> ActivityOptions {
 fn known_environment_action(action: &str) -> bool {
     matches!(
         action,
-        "create" | "start" | "stop" | "destroy" | "reconcile"
+        "create" | "start" | "stop" | "destroy" | "resize" | "reconcile"
     )
 }
 
@@ -552,6 +597,14 @@ impl EnvironmentWorkflow {
                     )
                     .await?;
                     return Ok(());
+                }
+                "resize" => {
+                    ctx.start_activity(
+                        EnvironmentActivities::resize,
+                        activity_cmd,
+                        environment_activity_opts(),
+                    )
+                    .await?;
                 }
                 "reconcile" => {
                     let outcome = ctx
@@ -1276,6 +1329,7 @@ mod tests {
             ActivityCancellationType::WaitCancellationCompleted
         );
         assert_eq!(opts.retry_policy.as_ref().unwrap().maximum_attempts, 3);
+        assert!(known_environment_action("resize"));
     }
 
     #[test]

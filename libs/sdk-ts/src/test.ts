@@ -6,6 +6,8 @@ import { BadRequestSchema, ErrorInfoSchema } from "@codewire/proto-ts";
 import { ApiKeySchema, ApiKeyService } from "@codewire/proto-ts/gen/codewire/v1/api_key_pb";
 import {
   DesiredState,
+  EnvironmentResizeExecutionMode,
+  EnvironmentResizeOperationState,
   EnvironmentSchema,
   EnvironmentService,
   EnvironmentState,
@@ -176,6 +178,18 @@ async function runTests() {
     createdAt: timestamp,
     retryCount: 0,
   });
+  const resizeOperation = (requestId: string) => ({
+    id: "resize_123",
+    environmentId: "env_123",
+    requestId,
+    previousResources: { cpuMillicores: 2000, memoryMb: 4096, diskGb: 20 },
+    desiredResources: { cpuMillicores: 3000, memoryMb: 6144, diskGb: 30 },
+    lastAppliedResources: { cpuMillicores: 3000, memoryMb: 6144, diskGb: 30 },
+    state: EnvironmentResizeOperationState.COMPLETED,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+    completedAt: timestamp,
+  });
   const preset = (name = "Go", cpu = 2000) => ({
     id: "tmpl_1",
     orgId: "org_test",
@@ -236,6 +250,39 @@ async function runTests() {
       return {
         environment: environment("env_123", EnvironmentState.RUNNING),
         pollInterval: { seconds: 0n, nanos: 100_000_000 },
+      };
+    },
+    resizeEnvironment: (request, context) => {
+      requireTestKey(context);
+      return {
+        operation: resizeOperation(request.requestId),
+        environment: environment(request.environmentId, EnvironmentState.RUNNING),
+      };
+    },
+    planEnvironmentResize: (request, context) => {
+      requireTestKey(context);
+      return {
+        plan: {
+          previousResources: { cpuMillicores: 2000, memoryMb: 4096, diskGb: 20 },
+          desiredResources: {
+            cpuMillicores: request.cpuMillicores,
+            memoryMb: request.memoryMb,
+            diskGb: request.diskGb,
+          },
+          executionMode: EnvironmentResizeExecutionMode.IN_PLACE,
+          activeSessionCount: 0,
+          activeSessionsWillBeTerminated: false,
+          reason: "runtime supports live resize",
+          warnings: [],
+        },
+        environment: environment(request.environmentId, EnvironmentState.RUNNING),
+      };
+    },
+    getEnvironmentResizeOperation: (_request, context) => {
+      requireTestKey(context);
+      return {
+        operation: resizeOperation("stable-request"),
+        environment: environment("env_123", EnvironmentState.RUNNING),
       };
     },
     deleteEnvironment: (_request, context) => {
@@ -703,6 +750,25 @@ async function runTests() {
     assert(directExec.exit_code === 0, "direct exec exit code 0");
     await cw.environments.start("env_123");
     await cw.environments.stop("env_123");
+    const directPlan = await cw.environments.planResize("env_123", {
+      cpu_millicores: 3000,
+      memory_mb: 6144,
+      disk_gb: 30,
+    });
+    assert(directPlan.execution_mode === "in_place", "direct resize plan maps mode");
+    const directResize = await cw.environments.resize("env_123", {
+      cpu_millicores: 3000,
+      memory_mb: 6144,
+      disk_gb: 30,
+      request_id: "stable-request",
+    });
+    assert(directResize.state === "completed", "direct resize returns typed terminal state");
+    assert(directResize.desired_resources?.disk_gb === 30, "direct resize maps resources");
+    const fetchedResize = await cw.environments.getResizeOperation(
+      "env_123",
+      directResize.id,
+    );
+    assert(fetchedResize.request_id === "stable-request", "resize operation identity is stable");
 
     const directFiles = await cw.environments.listFiles(
       "env_123",
@@ -745,6 +811,20 @@ async function runTests() {
     console.log("Test: Environment start/stop/remove");
     await env.start();
     await env.stop();
+    assert(
+      (await env.planResize({ cpu_millicores: 3000, memory_mb: 6144, disk_gb: 30 }))
+        .execution_mode === "in_place",
+      "wrapper exposes resize plan",
+    );
+    const wrapperResize = await env.resize({
+      cpu_millicores: 3000,
+      memory_mb: 6144,
+      disk_gb: 30,
+      request_id: "wrapper-request",
+      force: true,
+    });
+    assert(wrapperResize.last_applied_resources?.cpu_millicores === 3000, "wrapper resize maps applied CPU");
+    assert((await env.getResizeOperation(wrapperResize.id)).state === "completed", "wrapper reads resize operation");
     await env.remove();
 
     // Test: Templates
@@ -972,7 +1052,7 @@ async function runTests() {
     server.close();
   }
 
-  const expectedAssertions = 91;
+  const expectedAssertions = 98;
   if (passed !== expectedAssertions) {
     failed++;
     console.error(

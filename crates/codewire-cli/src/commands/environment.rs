@@ -369,8 +369,8 @@ pub(crate) async fn handle_platform_env_command(
                 print_environment_logs_historical(&logs);
             }
         }
-        EnvCommand::Resize(_) => {
-            anyhow::bail!("platform environment resize is not implemented yet; see #860")
+        EnvCommand::Resize(args) => {
+            handle_platform_environment_resize(&environment_client, &org_id, args).await?;
         }
         EnvCommand::Daemon(args) => {
             handle_environment_daemon_command(&environment_client, &org_id, args.command).await?;
@@ -415,6 +415,16 @@ pub(crate) struct LocalResizePlan {
     pub(crate) desired: LocalLimaResources,
     pub(crate) active_sessions: Vec<String>,
     pub(crate) normalized_cpu_request: Option<i32>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PlatformResizePlan {
+    pub(crate) current: EnvironmentResizeResources,
+    pub(crate) desired: EnvironmentResizeResources,
+    pub(crate) active_session_count: i32,
+    pub(crate) execution_mode: String,
+    pub(crate) reason: String,
+    pub(crate) warnings: Vec<String>,
 }
 
 pub(crate) fn parse_resize_cpu(value: &str) -> anyhow::Result<i32> {
@@ -557,6 +567,50 @@ pub(crate) fn resolve_local_resize_plan(
     })
 }
 
+pub(crate) fn resolve_platform_resize_plan(
+    args: &EnvResizeArgs,
+    current: EnvironmentResizeResources,
+) -> anyhow::Result<PlatformResizePlan> {
+    let desired = EnvironmentResizeResources {
+        cpu_millicores: args
+            .cpu
+            .as_deref()
+            .map(parse_resize_cpu)
+            .transpose()?
+            .unwrap_or(current.cpu_millicores),
+        memory_mb: args
+            .memory
+            .as_deref()
+            .map(parse_resize_memory)
+            .transpose()?
+            .unwrap_or(current.memory_mb),
+        disk_gb: args
+            .disk
+            .as_deref()
+            .map(parse_resize_disk)
+            .transpose()?
+            .unwrap_or(current.disk_gb),
+    };
+    if desired.disk_gb < current.disk_gb {
+        anyhow::bail!(
+            "persistent disk shrink is not supported (current: {}, requested: {})",
+            format_resize_disk(current.disk_gb),
+            format_resize_disk(desired.disk_gb)
+        );
+    }
+    if desired == current {
+        anyhow::bail!("the requested resources already match the current platform environment");
+    }
+    Ok(PlatformResizePlan {
+        current,
+        desired,
+        active_session_count: 0,
+        execution_mode: String::new(),
+        reason: String::new(),
+        warnings: Vec::new(),
+    })
+}
+
 pub(crate) fn format_local_resize_plan(name: &str, plan: &LocalResizePlan) -> String {
     let mut output = format!(
         "Environment: {name} (local · Lima)\n\n              Current   Desired\nCPU       {:<9} {}\nMemory    {:<9} {}\nDisk      {:<9} {}\n\n",
@@ -590,6 +644,31 @@ pub(crate) fn format_local_resize_plan(name: &str, plan: &LocalResizePlan) -> St
     output
 }
 
+pub(crate) fn format_platform_resize_plan(name: &str, plan: &PlatformResizePlan) -> String {
+    let mut output = format!(
+        "Environment: {name} (platform)\n\n              Current   Requested\nCPU       {:<9} {}\nMemory    {:<9} {}\nDisk      {:<9} {}\n\n",
+        format_resize_cpu(plan.current.cpu_millicores),
+        format_resize_cpu(plan.desired.cpu_millicores),
+        format_resize_memory(plan.current.memory_mb),
+        format_resize_memory(plan.desired.memory_mb),
+        format_resize_disk(plan.current.disk_gb),
+        format_resize_disk(plan.desired.disk_gb),
+    );
+    output.push_str(&format!("Execution: {}\n", plan.execution_mode));
+    if !plan.reason.is_empty() {
+        output.push_str(&format!("Reason: {}\n", plan.reason));
+    }
+    if plan.active_session_count == 0 {
+        output.push_str("Active sessions: none\n");
+    } else {
+        output.push_str(&format!("Active sessions: {}\n", plan.active_session_count,));
+    }
+    for warning in &plan.warnings {
+        output.push_str(&format!("Warning: {warning}\n"));
+    }
+    output
+}
+
 pub(crate) fn resize_requires_interactive_wizard(
     args: &EnvResizeArgs,
     stdin_is_terminal: bool,
@@ -608,6 +687,20 @@ pub(crate) fn resize_requires_interactive_wizard(
         anyhow::bail!("non-interactive resize requires --yes after explicit resource validation");
     }
     Ok(false)
+}
+
+pub(crate) fn validate_platform_resize_force(
+    active_session_count: i32,
+    execution_mode: &str,
+    force: bool,
+    interactive: bool,
+) -> anyhow::Result<()> {
+    if !interactive && execution_mode == "restart" && active_session_count > 0 && !force {
+        anyhow::bail!(
+            "active sessions would be terminated; non-interactive platform resize requires --force"
+        );
+    }
+    Ok(())
 }
 
 fn prompt_resize_quantity(label: &str, current: &str) -> anyhow::Result<Option<String>> {
@@ -818,10 +911,12 @@ async fn handle_unified_environment_resize(
 ) -> anyhow::Result<()> {
     let target =
         resolve_unified_environment_target(globals, placement, &args.environment, "resize").await?;
-    let UnifiedEnvironmentTarget::Local(name) = target else {
-        anyhow::bail!(
-            "platform environment resize is not implemented yet; see #860 (use `cw env --local resize ENV` for Lima environments)"
-        );
+    let name = match target {
+        UnifiedEnvironmentTarget::Local(name) => name,
+        UnifiedEnvironmentTarget::Platform(environment_id) => {
+            args.environment = environment_id;
+            return handle_platform_env_command(globals, EnvCommand::Resize(args)).await;
+        }
     };
 
     let env = OsEnv;
@@ -884,6 +979,124 @@ async fn handle_unified_environment_resize(
         },
     )
     .await
+}
+
+async fn handle_platform_environment_resize(
+    client: &EnvironmentClient,
+    org_id: &str,
+    mut args: EnvResizeArgs,
+) -> anyhow::Result<()> {
+    let environment_id = resolve_environment_id(client, org_id, &args.environment).await?;
+    let environment = client
+        .get_environment(org_id, &environment_id)
+        .await
+        .context("get environment before resize")?;
+    let current = EnvironmentResizeResources {
+        cpu_millicores: environment.cpu_millicores,
+        memory_mb: environment.memory_mb,
+        disk_gb: environment.disk_gb,
+    };
+    if resize_requires_interactive_wizard(&args, stdin_is_interactive())? {
+        args.cpu = prompt_resize_quantity("CPU", &format_resize_cpu(current.cpu_millicores))?;
+        args.memory = prompt_resize_quantity("Memory", &format_resize_memory(current.memory_mb))?;
+        args.disk = prompt_resize_quantity("Disk", &format_resize_disk(current.disk_gb))?;
+    }
+    let requested = resolve_platform_resize_plan(&args, current)?;
+    let runtime_plan = client
+        .plan_environment_resize(org_id, &environment_id, &requested.desired)
+        .await
+        .context("plan platform environment resize")?;
+    let plan = PlatformResizePlan {
+        current: runtime_plan.previous_resources,
+        desired: runtime_plan.desired_resources,
+        active_session_count: runtime_plan.active_session_count,
+        execution_mode: runtime_plan.execution_mode,
+        reason: runtime_plan.reason,
+        warnings: runtime_plan.warnings,
+    };
+    let interactive = stdin_is_interactive() && matches!(args.output, OutputFormat::Text);
+    if !interactive && plan.execution_mode == "restart" && !args.allow_restart {
+        anyhow::bail!(
+            "this resize requires workspace Pod replacement; non-interactive use requires --allow-restart"
+        );
+    }
+    validate_platform_resize_force(
+        plan.active_session_count,
+        &plan.execution_mode,
+        args.force,
+        interactive,
+    )?;
+    if matches!(args.output, OutputFormat::Text) {
+        print!("{}", format_platform_resize_plan(&args.environment, &plan));
+    }
+    if interactive
+        && plan.execution_mode == "restart"
+        && !args.allow_restart
+        && !prompt_confirm_default_no(
+            "Kubernetes cannot apply this live. Delete and replace the workspace Pod while preserving its PVC",
+        )?
+    {
+        println!("Aborted.");
+        return Ok(());
+    }
+    if !args.yes && !prompt_confirm_default_no("Apply this resize")? {
+        println!("Aborted.");
+        return Ok(());
+    }
+
+    let allow_restart = args.allow_restart || (interactive && plan.execution_mode == "restart");
+    let force = args.force
+        || (interactive && plan.execution_mode == "restart" && plan.active_session_count > 0);
+    let request_id = uuid::Uuid::new_v4().simple().to_string();
+    let (mut result, mut poll_interval) = client
+        .resize_environment(
+            org_id,
+            &environment_id,
+            &plan.desired,
+            &request_id,
+            force,
+            allow_restart,
+        )
+        .await
+        .context("start platform environment resize")?;
+    let mut last_state = String::new();
+    while matches!(
+        result.operation.state.as_str(),
+        "pending" | "applying" | "restarting"
+    ) {
+        if matches!(args.output, OutputFormat::Text) && result.operation.state != last_state {
+            eprintln!("Resize: {}", result.operation.state);
+            last_state.clone_from(&result.operation.state);
+        }
+        tokio::time::sleep(poll_interval.unwrap_or(Duration::from_secs(1))).await;
+        (result, poll_interval) = client
+            .get_environment_resize_operation(org_id, &environment_id, &result.operation.id)
+            .await
+            .context("follow platform environment resize")?;
+    }
+
+    match args.output {
+        OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&result)?),
+        OutputFormat::Text if result.operation.state == "completed" => {
+            let applied = &result.operation.last_applied_resources;
+            println!(
+                "Resize completed: CPU {}, memory {}, disk {}.",
+                format_resize_cpu(applied.cpu_millicores),
+                format_resize_memory(applied.memory_mb),
+                format_resize_disk(applied.disk_gb)
+            );
+        }
+        OutputFormat::Text => {}
+    }
+    if result.operation.state == "failed" {
+        let failure = result.operation.failure.unwrap_or_default();
+        anyhow::bail!(
+            "platform resize failed ({}): {}",
+            failure.code,
+            failure.message
+        );
+    }
+    Ok(())
 }
 
 async fn handle_unified_environment_daemon_command(

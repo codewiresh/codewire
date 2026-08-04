@@ -418,6 +418,10 @@ pub fn render_sandbox_template(namespace: &str, opts: &TemplateOpts) -> Value {
                 "ephemeral-storage": format!("{WORKSPACE_EPHEMERAL_STORAGE_GI}Gi"),
             },
         },
+        "resizePolicy": [
+            { "resourceName": "cpu", "restartPolicy": "NotRequired" },
+            { "resourceName": "memory", "restartPolicy": "NotRequired" },
+        ],
         "volumeMounts": [
             { "name": "workspace", "mountPath": "/home/codewire" },
             { "name": "workspace", "mountPath": "/workspace" },
@@ -1768,6 +1772,18 @@ mod tests {
             workspace_storage_class: "local-path".into(),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn workspace_declares_live_cpu_and_memory_resize_policy() {
+        let template = render_sandbox_template("dev-sandboxes", &commodity_opts());
+        assert_eq!(
+            template.pointer("/spec/podTemplate/spec/containers/0/resizePolicy"),
+            Some(&json!([
+                {"resourceName": "cpu", "restartPolicy": "NotRequired"},
+                {"resourceName": "memory", "restartPolicy": "NotRequired"}
+            ]))
+        );
     }
 
     #[test]

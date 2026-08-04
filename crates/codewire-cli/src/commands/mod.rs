@@ -458,7 +458,7 @@ pub(crate) enum EnvCommand {
     List(EnvListArgs),
     #[command(about = "Show environment details")]
     Info(EnvInfoArgs),
-    #[command(about = "Resize a local environment or show platform resize availability")]
+    #[command(about = "Resize a local or platform environment")]
     Resize(EnvResizeArgs),
     #[command(
         name = "trust-report",
@@ -636,6 +636,16 @@ pub(crate) struct EnvResizeArgs {
     pub(crate) memory: Option<String>,
     #[arg(long, value_name = "DISK", help = "Disk size (for example 20Gi)")]
     pub(crate) disk: Option<String>,
+    #[arg(
+        long,
+        help = "Terminate active platform sessions before the required restart"
+    )]
+    pub(crate) force: bool,
+    #[arg(
+        long,
+        help = "Allow workspace Pod replacement when Kubernetes cannot apply the resize live"
+    )]
+    pub(crate) allow_restart: bool,
     #[arg(
         short,
         long,

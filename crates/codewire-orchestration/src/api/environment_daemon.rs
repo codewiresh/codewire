@@ -158,6 +158,50 @@ pub async fn list_environment_daemon_sessions_core(
         .sessions)
 }
 
+/// Worker-only daemon session path. The caller already owns durable
+/// environment activity authority, so this resolves the same private daemon
+/// service without manufacturing a public user identity.
+pub(crate) async fn list_environment_daemon_sessions_for_worker(
+    session_secret: &str,
+    namespace: &str,
+    environment_id: &str,
+) -> AppResult<Vec<v1::SessionRecord>> {
+    let (channel, token) =
+        daemon_channel_for_runtime(session_secret, namespace, environment_id).await?;
+    let mut client = v1::daemon_service_client::DaemonServiceClient::new(channel);
+    require_ready_daemon(&mut client, &token, &[DAEMON_CAPABILITY_SESSIONS]).await?;
+    Ok(client
+        .list_sessions(authorize(v1::ListSessionsRequest {}, &token)?)
+        .await
+        .map_err(daemon_session_error)?
+        .into_inner()
+        .sessions)
+}
+
+pub(crate) async fn stop_environment_daemon_session_for_worker(
+    session_secret: &str,
+    namespace: &str,
+    environment_id: &str,
+    session_id: &str,
+) -> AppResult<v1::SessionRecord> {
+    let (channel, token) =
+        daemon_channel_for_runtime(session_secret, namespace, environment_id).await?;
+    let mut client = v1::daemon_service_client::DaemonServiceClient::new(channel);
+    require_ready_daemon(&mut client, &token, &[DAEMON_CAPABILITY_SESSIONS]).await?;
+    client
+        .stop_session(authorize(
+            v1::StopSessionRequest {
+                session_id: session_id.to_string(),
+            },
+            &token,
+        )?)
+        .await
+        .map_err(daemon_session_error)?
+        .into_inner()
+        .session
+        .ok_or_else(|| AppError::InternalMsg("environment daemon returned no session".into()))
+}
+
 pub async fn get_environment_daemon_session_core(
     state: &ApiState,
     user: &AuthUser,
@@ -695,11 +739,18 @@ async fn daemon_channel_for_target(
     namespace: &str,
     environment_id: &str,
 ) -> AppResult<(Channel, String)> {
-    let token =
-        issue_token(&state.session_secret, environment_id, SCOPE_COORDINATE).map_err(|error| {
-            tracing::error!(environment_id, %error, "issue environment daemon token failed");
-            AppError::InternalMsg("failed to authorize environment daemon".into())
-        })?;
+    daemon_channel_for_runtime(&state.session_secret, namespace, environment_id).await
+}
+
+async fn daemon_channel_for_runtime(
+    session_secret: &str,
+    namespace: &str,
+    environment_id: &str,
+) -> AppResult<(Channel, String)> {
+    let token = issue_token(session_secret, environment_id, SCOPE_COORDINATE).map_err(|error| {
+        tracing::error!(environment_id, %error, "issue environment daemon token failed");
+        AppError::InternalMsg("failed to authorize environment daemon".into())
+    })?;
     let endpoint = format!(
         "http://{}.{}.svc.cluster.local:{}",
         workspace_daemon_service_name(environment_id),

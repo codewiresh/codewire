@@ -109,6 +109,33 @@ def _assert_descriptor_coverage(name: str, descriptor: Any, expected: dict[int, 
             )
 
 
+def environment_resize_operation_to_dict(message: Message) -> dict[str, Any]:
+    """Render a durable resize operation with the public short state value."""
+    value = proto_to_dict(message)
+    value["state"] = _enum_suffix(
+        message, "state", "ENVIRONMENT_RESIZE_OPERATION_STATE_"
+    )
+    value["disruption_policy"] = _enum_suffix(
+        message, "disruption_policy", "ENVIRONMENT_RESIZE_DISRUPTION_POLICY_"
+    )
+    value["planned_mode"] = _enum_suffix(
+        message, "planned_mode", "ENVIRONMENT_RESIZE_EXECUTION_MODE_"
+    )
+    value["applied_mode"] = _enum_suffix(
+        message, "applied_mode", "ENVIRONMENT_RESIZE_EXECUTION_MODE_"
+    )
+    return value
+
+
+def environment_resize_plan_to_dict(message: Message) -> dict[str, Any]:
+    """Render an authoritative resize plan with its short execution mode."""
+    value = proto_to_dict(message)
+    value["execution_mode"] = _enum_suffix(
+        message, "execution_mode", "ENVIRONMENT_RESIZE_EXECUTION_MODE_"
+    )
+    return value
+
+
 def port_to_dict(message: Message) -> dict[str, Any]:
     """Render a port with REST's short access value."""
     value = proto_to_dict(message)

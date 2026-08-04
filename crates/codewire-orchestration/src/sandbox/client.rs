@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use crc32fast::Hasher as Crc32Hasher;
 use k8s_openapi::api::core::v1::{Namespace, PersistentVolumeClaim, Pod};
+use k8s_openapi::api::storage::v1::StorageClass;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use kube::Client;
 use kube::api::{
@@ -54,6 +55,31 @@ pub struct ProbeResult {
 pub struct WorkspacePodIdentity {
     pub name: String,
     pub uid: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspacePodResizeState {
+    pub identity: WorkspacePodIdentity,
+    pub runtime_class_name: String,
+    pub restart_count: i32,
+    pub live_resize_compatible: bool,
+    pub incompatibility_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceStorage {
+    pub pvc_name: String,
+    pub storage_class_name: String,
+    pub requested_disk_gb: i32,
+    pub applied_disk_gb: Option<i32>,
+    pub filesystem_resize_pending: bool,
+    pub expansion_allowed: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkspaceStorageResizeOutcome {
+    Applied,
+    RequiresPodRestart,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -201,6 +227,125 @@ impl SandboxClient {
         }
     }
 
+    /// Read the runtime facts that determine whether CPU/memory can be
+    /// changed without replacing or restarting the workspace container.
+    pub async fn workspace_pod_resize_state(
+        &self,
+        env_id: &str,
+    ) -> anyhow::Result<WorkspacePodResizeState> {
+        let pod_name = self.get_pod_name(env_id).await?;
+        let pod = self
+            .pods()
+            .get(&pod_name)
+            .await
+            .map_err(|error| anyhow::anyhow!("get workspace Pod {pod_name}: {error}"))?;
+        workspace_pod_resize_state(&pod, &pod_name)
+    }
+
+    /// Apply CPU and memory through the Kubernetes Pod `/resize` subresource
+    /// and wait for the kubelet-reported resources to converge. This path
+    /// never deletes the Pod and fails if its identity or restart count moves.
+    pub async fn resize_workspace_pod_in_place(
+        &self,
+        env_id: &str,
+        expected_uid: &str,
+        cpu_millicores: i32,
+        memory_mb: i32,
+        timeout: Duration,
+    ) -> anyhow::Result<WorkspacePodResizeState> {
+        if expected_uid.trim().is_empty() {
+            anyhow::bail!("expected workspace Pod UID is required");
+        }
+        if cpu_millicores <= 0 || memory_mb <= 0 {
+            anyhow::bail!("workspace CPU and memory must be greater than zero");
+        }
+
+        let before = self.workspace_pod_resize_state(env_id).await?;
+        if before.identity.uid != expected_uid {
+            anyhow::bail!(
+                "workspace Pod identity changed before live resize: expected UID {expected_uid}, got {}",
+                before.identity.uid
+            );
+        }
+        if !before.live_resize_compatible {
+            anyhow::bail!(
+                "workspace container cannot be resized live: {}",
+                before
+                    .incompatibility_reason
+                    .as_deref()
+                    .unwrap_or("incompatible resize policy")
+            );
+        }
+
+        let cpu = format!("{cpu_millicores}m");
+        let memory = format!("{memory_mb}Mi");
+        let patch = serde_json::json!({
+            "spec": {
+                "containers": [{
+                    "name": "workspace",
+                    "resources": {
+                        "requests": { "cpu": cpu, "memory": memory },
+                        "limits": { "cpu": cpu, "memory": memory },
+                    },
+                }],
+            },
+        });
+        self.pods()
+            .patch_resize(
+                &before.identity.name,
+                &PatchParams::default(),
+                &Patch::Strategic(&patch),
+            )
+            .await
+            .map_err(|error| {
+                anyhow::anyhow!(
+                    "resize workspace Pod {} through /resize: {error}",
+                    before.identity.name
+                )
+            })?;
+
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let pod = self
+                .pods()
+                .get(&before.identity.name)
+                .await
+                .map_err(|error| {
+                    anyhow::anyhow!(
+                        "observe resized workspace Pod {}: {error}",
+                        before.identity.name
+                    )
+                })?;
+            let observed = workspace_pod_resize_state(&pod, &before.identity.name)?;
+            if observed.identity.uid != expected_uid {
+                anyhow::bail!(
+                    "workspace Pod was replaced during live resize: expected UID {expected_uid}, got {}",
+                    observed.identity.uid
+                );
+            }
+            if observed.restart_count != before.restart_count {
+                anyhow::bail!(
+                    "workspace container restarted during live resize: restart count changed from {} to {}",
+                    before.restart_count,
+                    observed.restart_count
+                );
+            }
+            if let Some(failure) = terminal_pod_resize_failure(&pod) {
+                anyhow::bail!("workspace Pod live resize failed: {failure}");
+            }
+            if workspace_resources_match(&pod, &cpu, &memory) {
+                return Ok(observed);
+            }
+            if tokio::time::Instant::now() >= deadline {
+                anyhow::bail!(
+                    "timeout waiting for workspace Pod {} live resize to converge",
+                    before.identity.name
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    }
+
     /// Enumerate every Pod carrying the stable environment label. Recovery
     /// proves environment-wide absence because a replacement may use another
     /// Pod name.
@@ -242,9 +387,35 @@ impl SandboxClient {
             .await?
             .ok_or_else(|| anyhow::anyhow!("workspace Pod {pod_name} not found"))?;
 
+        self.delete_workspace_pod_if_uid(&pod_name, &old.uid)
+            .await?;
+        self.wait_for_replacement_workspace_pod(&pod_name, &old.uid, timeout)
+            .await
+    }
+
+    /// Delete the old workspace incarnation only when it still has the
+    /// checkpointed UID. A retried resize must never delete the replacement.
+    pub async fn delete_workspace_pod_if_uid(
+        &self,
+        pod_name: &str,
+        previous_uid: &str,
+    ) -> anyhow::Result<()> {
+        if pod_name.trim().is_empty() {
+            anyhow::bail!("workspace Pod name is required");
+        }
+        if previous_uid.trim().is_empty() {
+            anyhow::bail!("previous workspace Pod UID is required");
+        }
+        let Some(current) = self.get_workspace_pod_identity_by_name(pod_name).await? else {
+            return Ok(());
+        };
+        if current.uid != previous_uid {
+            return Ok(());
+        }
+
         match self
             .pods()
-            .delete(&old.name, &DeleteParams::default())
+            .delete(&current.name, &DeleteParams::default())
             .await
         {
             Ok(_) => {}
@@ -252,46 +423,56 @@ impl SandboxClient {
             Err(error) => {
                 return Err(anyhow::anyhow!(
                     "restart workspace Pod {}: {error}",
-                    old.name
+                    current.name
                 ));
             }
         }
+        Ok(())
+    }
 
+    /// Wait until the owning Sandbox controller has produced a ready
+    /// incarnation of the same stable Pod name with a different UID. The
+    /// environment label is intentionally insufficient: a private warm-pool
+    /// Pod can carry the same label before it is claimed.
+    pub async fn wait_for_replacement_workspace_pod(
+        &self,
+        pod_name: &str,
+        previous_uid: &str,
+        timeout: Duration,
+    ) -> anyhow::Result<WorkspacePodIdentity> {
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
-            let pods = self
-                .pods()
-                .list(&ListParams::default().labels(&workspace_pod_selector(env_id)))
-                .await
-                .map_err(|error| {
-                    anyhow::anyhow!("list replacement workspace Pods for {env_id}: {error}")
-                })?;
-            for pod in pods {
-                let name = pod.metadata.name.unwrap_or_default();
-                let uid = pod.metadata.uid.unwrap_or_default();
-                let ready = pod
-                    .status
-                    .as_ref()
-                    .is_some_and(|status| status.phase.as_deref() == Some("Running"))
-                    && pod
+            match self.pods().get(pod_name).await {
+                Ok(pod) => {
+                    let name = pod.metadata.name.unwrap_or_default();
+                    let uid = pod.metadata.uid.unwrap_or_default();
+                    let ready = pod
                         .status
                         .as_ref()
-                        .and_then(|status| status.container_statuses.as_ref())
-                        .is_some_and(|statuses| {
-                            statuses
-                                .iter()
-                                .find(|status| status.name == "workspace")
-                                .is_some_and(|status| status.ready)
-                        });
-                if !uid.is_empty() && uid != old.uid && ready {
-                    return Ok(WorkspacePodIdentity { name, uid });
+                        .is_some_and(|status| status.phase.as_deref() == Some("Running"))
+                        && pod
+                            .status
+                            .as_ref()
+                            .and_then(|status| status.container_statuses.as_ref())
+                            .is_some_and(|statuses| {
+                                statuses
+                                    .iter()
+                                    .find(|status| status.name == "workspace")
+                                    .is_some_and(|status| status.ready)
+                            });
+                    if !uid.is_empty() && uid != previous_uid && ready {
+                        return Ok(WorkspacePodIdentity { name, uid });
+                    }
+                }
+                Err(kube::Error::Api(error)) if error.code == 404 => {}
+                Err(error) => {
+                    return Err(anyhow::anyhow!(
+                        "get replacement workspace Pod {pod_name}: {error}"
+                    ));
                 }
             }
             if tokio::time::Instant::now() >= deadline {
-                anyhow::bail!(
-                    "timeout waiting for replacement of workspace Pod {}",
-                    old.name
-                );
+                anyhow::bail!("timeout waiting for replacement workspace Pod {pod_name}");
             }
             tokio::time::sleep(Duration::from_millis(250)).await;
         }
@@ -415,6 +596,298 @@ impl SandboxClient {
 
     fn persistent_volume_claims(&self) -> Api<PersistentVolumeClaim> {
         Api::namespaced(self.client.clone(), &self.namespace)
+    }
+
+    fn storage_classes(&self) -> Api<StorageClass> {
+        Api::all(self.client.clone())
+    }
+
+    /// Resolve the per-environment workspace PVC and the expansion capability
+    /// advertised by its StorageClass. The Sandbox owns the volume template;
+    /// Codewire never guesses a PVC from a user-supplied name.
+    pub async fn workspace_storage(&self, env_id: &str) -> anyhow::Result<WorkspaceStorage> {
+        let sandbox_name = self.get_pod_name(env_id).await?;
+        let sandbox = self
+            .sandboxes()
+            .get(&sandbox_name)
+            .await
+            .map_err(|error| anyhow::anyhow!("get Sandbox {sandbox_name}: {error}"))?;
+        let has_workspace_claim = sandbox
+            .data
+            .pointer("/spec/volumeClaimTemplates")
+            .and_then(Value::as_array)
+            .is_some_and(|templates| {
+                templates.iter().any(|template| {
+                    template.pointer("/metadata/name").and_then(Value::as_str) == Some("workspace")
+                })
+            });
+        if !has_workspace_claim {
+            anyhow::bail!("environment {env_id} has no persistent workspace volume");
+        }
+
+        let pvc_name = format!("workspace-{sandbox_name}");
+        let pvc = self
+            .persistent_volume_claims()
+            .get(&pvc_name)
+            .await
+            .map_err(|error| anyhow::anyhow!("get workspace PVC {pvc_name}: {error}"))?;
+        let spec = pvc
+            .spec
+            .ok_or_else(|| anyhow::anyhow!("workspace PVC {pvc_name} has no spec"))?;
+        let storage_class_name = spec.storage_class_name.unwrap_or_default();
+        if storage_class_name.trim().is_empty() {
+            anyhow::bail!("workspace PVC {pvc_name} has no explicit StorageClass");
+        }
+        let requested = spec
+            .resources
+            .and_then(|resources| resources.requests)
+            .and_then(|requests| requests.get("storage").cloned())
+            .ok_or_else(|| anyhow::anyhow!("workspace PVC {pvc_name} has no storage request"))?;
+        let requested_disk_gb = parse_gib_quantity(&requested.0)?;
+        let applied_disk_gb = pvc
+            .status
+            .as_ref()
+            .and_then(|status| status.capacity.as_ref())
+            .and_then(|capacity| capacity.get("storage"))
+            .map(|quantity| parse_gib_quantity(&quantity.0))
+            .transpose()?;
+        let filesystem_resize_pending = pvc
+            .status
+            .as_ref()
+            .and_then(|status| status.conditions.as_deref())
+            .is_some_and(|conditions| {
+                conditions.iter().any(|condition| {
+                    condition.type_ == "FileSystemResizePending" && condition.status == "True"
+                })
+            });
+        let storage_class = self
+            .storage_classes()
+            .get(&storage_class_name)
+            .await
+            .map_err(|error| {
+                anyhow::anyhow!("get StorageClass {storage_class_name} for {pvc_name}: {error}")
+            })?;
+
+        Ok(WorkspaceStorage {
+            pvc_name,
+            storage_class_name,
+            requested_disk_gb,
+            applied_disk_gb,
+            filesystem_resize_pending,
+            expansion_allowed: storage_class.allow_volume_expansion == Some(true),
+        })
+    }
+
+    /// Verify a requested disk size before the resize operation is admitted.
+    pub async fn require_workspace_storage_resize(
+        &self,
+        env_id: &str,
+        desired_disk_gb: i32,
+    ) -> anyhow::Result<WorkspaceStorage> {
+        let storage = self.workspace_storage(env_id).await?;
+        if desired_disk_gb < storage.requested_disk_gb {
+            anyhow::bail!(
+                "persistent storage cannot shrink from {} Gi to {} Gi",
+                storage.requested_disk_gb,
+                desired_disk_gb
+            );
+        }
+        if desired_disk_gb > storage.requested_disk_gb && !storage.expansion_allowed {
+            anyhow::bail!(
+                "StorageClass {} does not allow volume expansion",
+                storage.storage_class_name
+            );
+        }
+        Ok(storage)
+    }
+
+    /// Persist desired compute on the current claim, its private
+    /// per-environment template when present, and the already-owned Sandbox.
+    /// Storage is applied to the PVC directly; the pinned Sandbox CRD makes
+    /// an existing Sandbox's volumeClaimTemplates immutable.
+    /// The existing agent-sandbox controller does not copy claim resource
+    /// changes to an existing Sandbox, so the Sandbox patch is intentional.
+    pub async fn apply_resize_desired_state(
+        &self,
+        env_id: &str,
+        cpu_millicores: i32,
+        memory_mb: i32,
+        disk_gb: i32,
+    ) -> anyhow::Result<()> {
+        if cpu_millicores <= 0 || memory_mb <= 0 || disk_gb <= 0 {
+            anyhow::bail!("resize resources must be greater than zero");
+        }
+        let cpu = format!("{cpu_millicores}m");
+        let memory = format!("{memory_mb}Mi");
+        let storage = format!("{disk_gb}Gi");
+
+        let claim = claim_name(env_id);
+        let claim_patch = serde_json::json!({
+            "spec": {
+                "workspaceResources": [{
+                    "containerName": "workspace",
+                    "resources": {
+                        "requests": { "cpu": cpu, "memory": memory },
+                        "limits": { "cpu": cpu, "memory": memory },
+                    },
+                }],
+            },
+        });
+        self.claims
+            .patch(&claim, &PatchParams::default(), &Patch::Merge(&claim_patch))
+            .await
+            .map_err(|error| anyhow::anyhow!("patch SandboxClaim {claim}: {error}"))?;
+
+        let sandbox_name = self.get_pod_name(env_id).await?;
+        let sandboxes = self.sandboxes();
+        let mut sandbox = sandboxes
+            .get(&sandbox_name)
+            .await
+            .map_err(|error| anyhow::anyhow!("get Sandbox {sandbox_name}: {error}"))?;
+        set_workspace_resources(&mut sandbox.data, &cpu, &memory)?;
+        sandboxes
+            .replace(&sandbox_name, &PostParams::default(), &sandbox)
+            .await
+            .map_err(|error| anyhow::anyhow!("update Sandbox {sandbox_name}: {error}"))?;
+
+        if let Some(template_name) = self.claim_template_name(env_id).await?
+            && template_name.ends_with(&format!("-{env_id}"))
+        {
+            let templates = self.templates();
+            let mut template = templates
+                .get(&template_name)
+                .await
+                .map_err(|error| anyhow::anyhow!("get SandboxTemplate {template_name}: {error}"))?;
+            set_workspace_resources(&mut template.data, &cpu, &memory)?;
+            set_workspace_volume_request(&mut template.data, &storage)?;
+            templates
+                .replace(&template_name, &PostParams::default(), &template)
+                .await
+                .map_err(|error| {
+                    anyhow::anyhow!("update SandboxTemplate {template_name}: {error}")
+                })?;
+        }
+
+        Ok(())
+    }
+
+    async fn claim_template_name(&self, env_id: &str) -> anyhow::Result<Option<String>> {
+        let Some(claim) = self.get_sandbox_claim(env_id).await? else {
+            anyhow::bail!("SandboxClaim {} not found", claim_name(env_id));
+        };
+        let Some(warm_pool_name) = claim
+            .data
+            .pointer("/spec/warmPoolRef/name")
+            .and_then(Value::as_str)
+        else {
+            return Ok(None);
+        };
+        let warm_pool = self
+            .warm_pools()
+            .get(warm_pool_name)
+            .await
+            .map_err(|error| anyhow::anyhow!("get SandboxWarmPool {warm_pool_name}: {error}"))?;
+        Ok(warm_pool
+            .data
+            .pointer("/spec/sandboxTemplateRef/name")
+            .and_then(Value::as_str)
+            .map(str::to_string))
+    }
+
+    /// Apply only the PVC request. StorageClass capability was checked before
+    /// admission and is rechecked here so a changed class fails closed.
+    pub async fn apply_workspace_storage_resize(
+        &self,
+        env_id: &str,
+        desired_disk_gb: i32,
+    ) -> anyhow::Result<WorkspaceStorage> {
+        let storage = self
+            .require_workspace_storage_resize(env_id, desired_disk_gb)
+            .await?;
+        if desired_disk_gb == storage.requested_disk_gb {
+            return Ok(storage);
+        }
+        let patch = serde_json::json!({
+            "spec": {
+                "resources": {
+                    "requests": { "storage": format!("{desired_disk_gb}Gi") },
+                },
+            },
+        });
+        self.persistent_volume_claims()
+            .patch(
+                &storage.pvc_name,
+                &PatchParams::default(),
+                &Patch::Merge(&patch),
+            )
+            .await
+            .map_err(|error| {
+                anyhow::anyhow!("expand workspace PVC {}: {error}", storage.pvc_name)
+            })?;
+        Ok(WorkspaceStorage {
+            requested_disk_gb: desired_disk_gb,
+            ..storage
+        })
+    }
+
+    /// Observe PVC expansion before Codewire advances durable applied resources.
+    /// A filesystem resize that Kubernetes explicitly defers to Pod restart is
+    /// returned to the workflow; this method never replaces the Pod itself.
+    pub async fn wait_for_workspace_storage_resize(
+        &self,
+        env_id: &str,
+        desired_disk_gb: i32,
+        timeout: Duration,
+    ) -> anyhow::Result<WorkspaceStorageResizeOutcome> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let storage = self.workspace_storage(env_id).await?;
+            if storage
+                .applied_disk_gb
+                .is_some_and(|size| size >= desired_disk_gb)
+            {
+                return Ok(WorkspaceStorageResizeOutcome::Applied);
+            }
+            if storage.filesystem_resize_pending {
+                return Ok(WorkspaceStorageResizeOutcome::RequiresPodRestart);
+            }
+            if tokio::time::Instant::now() >= deadline {
+                anyhow::bail!(
+                    "workspace PVC {} did not report {} Gi capacity before timeout",
+                    storage.pvc_name,
+                    desired_disk_gb
+                );
+            }
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        }
+    }
+
+    /// Wait for the post-restart filesystem capacity, ignoring the transient
+    /// FileSystemResizePending condition which is expected to clear on mount.
+    pub async fn wait_for_workspace_storage_capacity(
+        &self,
+        env_id: &str,
+        desired_disk_gb: i32,
+        timeout: Duration,
+    ) -> anyhow::Result<()> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let storage = self.workspace_storage(env_id).await?;
+            if storage
+                .applied_disk_gb
+                .is_some_and(|size| size >= desired_disk_gb)
+            {
+                return Ok(());
+            }
+            if tokio::time::Instant::now() >= deadline {
+                anyhow::bail!(
+                    "workspace PVC {} did not report {} Gi capacity after Pod restart",
+                    storage.pvc_name,
+                    desired_disk_gb
+                );
+            }
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        }
     }
 
     fn deployments(&self) -> Api<DynamicObject> {
@@ -1463,6 +1936,158 @@ pub fn claim_ready_status(claim: &DynamicObject) -> (bool, String) {
     (false, "no Ready condition".to_string())
 }
 
+fn parse_gib_quantity(value: &str) -> anyhow::Result<i32> {
+    let gib = value
+        .strip_suffix("Gi")
+        .ok_or_else(|| anyhow::anyhow!("unsupported workspace storage quantity {value:?}"))?
+        .parse::<i32>()?;
+    if gib <= 0 {
+        anyhow::bail!("workspace storage quantity must be positive");
+    }
+    Ok(gib)
+}
+
+fn workspace_pod_resize_state(
+    pod: &Pod,
+    fallback_name: &str,
+) -> anyhow::Result<WorkspacePodResizeState> {
+    let spec = pod
+        .spec
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("workspace Pod {fallback_name} has no spec"))?;
+    let workspace = spec
+        .containers
+        .iter()
+        .find(|container| container.name == "workspace")
+        .ok_or_else(|| {
+            anyhow::anyhow!("workspace Pod {fallback_name} has no workspace container")
+        })?;
+    let incompatible = workspace
+        .resize_policy
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .find(|policy| {
+            matches!(policy.resource_name.as_str(), "cpu" | "memory")
+                && !matches!(policy.restart_policy.as_str(), "" | "NotRequired")
+        });
+    let restart_count = pod
+        .status
+        .as_ref()
+        .and_then(|status| status.container_statuses.as_deref())
+        .and_then(|statuses| statuses.iter().find(|status| status.name == "workspace"))
+        .map_or(0, |status| status.restart_count);
+    Ok(WorkspacePodResizeState {
+        identity: WorkspacePodIdentity {
+            name: pod
+                .metadata
+                .name
+                .clone()
+                .unwrap_or_else(|| fallback_name.to_string()),
+            uid: pod.metadata.uid.clone().unwrap_or_default(),
+        },
+        runtime_class_name: spec.runtime_class_name.clone().unwrap_or_default(),
+        restart_count,
+        live_resize_compatible: incompatible.is_none(),
+        incompatibility_reason: incompatible.map(|policy| {
+            format!(
+                "{} uses restartPolicy {}",
+                policy.resource_name, policy.restart_policy
+            )
+        }),
+    })
+}
+
+fn workspace_resources_match(pod: &Pod, cpu: &str, memory: &str) -> bool {
+    let Some(resources) = pod
+        .status
+        .as_ref()
+        .and_then(|status| status.container_statuses.as_deref())
+        .and_then(|statuses| statuses.iter().find(|status| status.name == "workspace"))
+        .and_then(|status| status.resources.as_ref())
+    else {
+        return false;
+    };
+    [resources.requests.as_ref(), resources.limits.as_ref()]
+        .into_iter()
+        .all(|class| {
+            class.is_some_and(|values| {
+                values.get("cpu").is_some_and(|value| value.0 == cpu)
+                    && values.get("memory").is_some_and(|value| value.0 == memory)
+            })
+        })
+}
+
+fn terminal_pod_resize_failure(pod: &Pod) -> Option<String> {
+    pod.status
+        .as_ref()?
+        .conditions
+        .as_deref()?
+        .iter()
+        .find(|condition| {
+            condition.type_ == "PodResizePending"
+                && condition.status == "True"
+                && condition.reason.as_deref() == Some("Infeasible")
+        })
+        .map(|condition| {
+            condition
+                .message
+                .clone()
+                .filter(|message| !message.trim().is_empty())
+                .unwrap_or_else(|| {
+                    "Kubernetes reported the requested resources as infeasible".into()
+                })
+        })
+}
+
+fn set_workspace_resources(data: &mut Value, cpu: &str, memory: &str) -> anyhow::Result<()> {
+    let containers = data
+        .pointer_mut("/spec/podTemplate/spec/containers")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| anyhow::anyhow!("runtime object has no PodTemplate containers"))?;
+    let workspace = containers
+        .iter_mut()
+        .find(|container| container.get("name").and_then(Value::as_str) == Some("workspace"))
+        .ok_or_else(|| anyhow::anyhow!("runtime object has no workspace container"))?;
+    for class in ["requests", "limits"] {
+        let resources = workspace
+            .as_object_mut()
+            .ok_or_else(|| anyhow::anyhow!("workspace container is not an object"))?
+            .entry("resources")
+            .or_insert_with(|| serde_json::json!({}));
+        let class_values = resources
+            .as_object_mut()
+            .ok_or_else(|| anyhow::anyhow!("workspace resources are not an object"))?
+            .entry(class)
+            .or_insert_with(|| serde_json::json!({}));
+        let class_values = class_values
+            .as_object_mut()
+            .ok_or_else(|| anyhow::anyhow!("workspace resource {class} are not an object"))?;
+        class_values.insert("cpu".to_string(), Value::String(cpu.to_string()));
+        class_values.insert("memory".to_string(), Value::String(memory.to_string()));
+    }
+    Ok(())
+}
+
+fn set_workspace_volume_request(data: &mut Value, storage: &str) -> anyhow::Result<()> {
+    let templates = data
+        .pointer_mut("/spec/volumeClaimTemplates")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| anyhow::anyhow!("runtime object has no volumeClaimTemplates"))?;
+    let workspace = templates
+        .iter_mut()
+        .find(|template| {
+            template.pointer("/metadata/name").and_then(Value::as_str) == Some("workspace")
+        })
+        .ok_or_else(|| anyhow::anyhow!("runtime object has no workspace volumeClaimTemplate"))?;
+    let requests = workspace
+        .pointer_mut("/spec/resources/requests")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| anyhow::anyhow!("workspace volume has no resource requests"))?;
+    requests.insert("storage".to_string(), Value::String(storage.to_string()));
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1479,6 +2104,175 @@ mod tests {
         assert_eq!(
             workspace_pod_selector("env-test"),
             "codewire.sh/environment-id=env-test,codewire.sh/type=workspace"
+        );
+    }
+
+    #[test]
+    fn live_resize_observation_locks_uid_restart_count_and_terminal_failure() {
+        let pod: Pod = serde_json::from_value(json!({
+            "apiVersion": "v1",
+            "kind": "Pod",
+            "metadata": {"name": "workspace", "uid": "uid-1"},
+            "spec": {
+                "runtimeClassName": "commodity",
+                "containers": [{
+                    "name": "workspace",
+                    "image": "workspace:test",
+                    "resizePolicy": [
+                        {"resourceName": "cpu", "restartPolicy": "NotRequired"},
+                        {"resourceName": "memory", "restartPolicy": "NotRequired"}
+                    ]
+                }]
+            },
+            "status": {
+                "containerStatuses": [{
+                    "name": "workspace",
+                    "image": "workspace:test",
+                    "imageID": "workspace:test",
+                    "ready": true,
+                    "restartCount": 3,
+                    "started": true,
+                    "state": {"running": {"startedAt": "2026-08-02T00:00:00Z"}},
+                    "resources": {
+                        "requests": {"cpu": "500m", "memory": "512Mi"},
+                        "limits": {"cpu": "500m", "memory": "512Mi"}
+                    }
+                }],
+                "conditions": [{
+                    "type": "PodResizePending",
+                    "status": "True",
+                    "reason": "Infeasible",
+                    "message": "node has insufficient memory",
+                    "lastTransitionTime": "2026-08-02T00:00:00Z"
+                }]
+            }
+        }))
+        .unwrap();
+        let observed = workspace_pod_resize_state(&pod, "fallback").unwrap();
+        assert_eq!(observed.identity.uid, "uid-1");
+        assert_eq!(observed.restart_count, 3);
+        assert!(observed.live_resize_compatible);
+        assert!(workspace_resources_match(&pod, "500m", "512Mi"));
+        assert_eq!(
+            terminal_pod_resize_failure(&pod).as_deref(),
+            Some("node has insufficient memory")
+        );
+    }
+
+    #[test]
+    fn live_resize_rejects_container_restart_policy() {
+        let pod: Pod = serde_json::from_value(json!({
+            "apiVersion": "v1",
+            "kind": "Pod",
+            "metadata": {"name": "workspace", "uid": "uid-1"},
+            "spec": {
+                "containers": [{
+                    "name": "workspace",
+                    "image": "workspace:test",
+                    "resizePolicy": [{"resourceName": "memory", "restartPolicy": "RestartContainer"}]
+                }]
+            }
+        }))
+        .unwrap();
+        let observed = workspace_pod_resize_state(&pod, "fallback").unwrap();
+        assert!(!observed.live_resize_compatible);
+        assert_eq!(
+            observed.incompatibility_reason.as_deref(),
+            Some("memory uses restartPolicy RestartContainer")
+        );
+    }
+
+    #[test]
+    fn resize_mutates_only_workspace_resources_and_preserves_runtime_identity() {
+        let mut runtime = json!({
+            "metadata": {"labels": {"codewire.sh/isolation-tier": "future-tier"}},
+            "spec": {
+                "podTemplate": {"spec": {
+                    "runtimeClassName": "kata-future",
+                    "initContainers": [{"name": "daemon-inject", "image": "daemon:init"}],
+                    "containers": [
+                        {"name": "workspace", "image": "custom.example/workspace@sha256:abc", "ports": [{"containerPort": 8080}], "resources": {
+                            "requests": {"cpu": "1", "memory": "1Gi", "ephemeral-storage": "5Gi"},
+                            "limits": {"cpu": "1", "memory": "1Gi", "ephemeral-storage": "5Gi"}
+                        }},
+                        {"name": "codewire-gateway", "image": "gateway:stable", "resources": {"requests": {"cpu": "250m"}}}
+                    ]
+                }},
+                "volumeClaimTemplates": [{"metadata": {"name": "workspace"}, "spec": {
+                    "accessModes": ["ReadWriteOnce"],
+                    "storageClassName": "expandable",
+                    "resources": {"requests": {"storage": "10Gi"}}
+                }}]
+            }
+        });
+        set_workspace_resources(&mut runtime, "1500m", "2048Mi").unwrap();
+        set_workspace_volume_request(&mut runtime, "20Gi").unwrap();
+        assert_eq!(
+            runtime.pointer("/spec/podTemplate/spec/containers/0/image"),
+            Some(&json!("custom.example/workspace@sha256:abc"))
+        );
+        assert_eq!(
+            runtime.pointer("/spec/podTemplate/spec/containers/0/resources/requests/cpu"),
+            Some(&json!("1500m"))
+        );
+        assert_eq!(
+            runtime.pointer(
+                "/spec/podTemplate/spec/containers/0/resources/requests/ephemeral-storage"
+            ),
+            Some(&json!("5Gi"))
+        );
+        assert_eq!(
+            runtime.pointer("/spec/podTemplate/spec/containers/1/image"),
+            Some(&json!("gateway:stable"))
+        );
+        assert_eq!(
+            runtime.pointer("/spec/podTemplate/spec/runtimeClassName"),
+            Some(&json!("kata-future"))
+        );
+        assert_eq!(
+            runtime.pointer("/spec/podTemplate/spec/initContainers/0/image"),
+            Some(&json!("daemon:init"))
+        );
+        assert_eq!(
+            runtime.pointer("/spec/volumeClaimTemplates/0/spec/resources/requests/storage"),
+            Some(&json!("20Gi"))
+        );
+        assert_eq!(
+            runtime.pointer("/spec/volumeClaimTemplates/0/spec/storageClassName"),
+            Some(&json!("expandable"))
+        );
+    }
+
+    #[tokio::test]
+    async fn workspace_storage_growth_requires_storage_class_expansion_and_never_shrinks() {
+        let (client, _) = sandbox_client_with_secret_responses(storage_lookup_responses(true));
+        let supported = client
+            .require_workspace_storage_resize("env-test", 20)
+            .await
+            .unwrap();
+        assert_eq!(supported.requested_disk_gb, 10);
+        assert_eq!(supported.applied_disk_gb, Some(10));
+        assert!(!supported.filesystem_resize_pending);
+        assert!(supported.expansion_allowed);
+
+        let (client, _) = sandbox_client_with_secret_responses(storage_lookup_responses(false));
+        assert!(
+            client
+                .require_workspace_storage_resize("env-test", 20)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("does not allow volume expansion")
+        );
+
+        let (client, _) = sandbox_client_with_secret_responses(storage_lookup_responses(true));
+        assert!(
+            client
+                .require_workspace_storage_resize("env-test", 5)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("cannot shrink")
         );
     }
 
@@ -1647,6 +2441,18 @@ mod tests {
                 StatusCode::OK,
                 json!({
                     "apiVersion": "v1",
+                    "kind": "Pod",
+                    "metadata": {
+                        "name": "workspace-old",
+                        "namespace": "dev-sandboxes",
+                        "uid": "uid-old",
+                    },
+                }),
+            ),
+            (
+                StatusCode::OK,
+                json!({
+                    "apiVersion": "v1",
                     "kind": "Status",
                     "status": "Success",
                     "code": 200,
@@ -1656,33 +2462,28 @@ mod tests {
                 StatusCode::OK,
                 json!({
                     "apiVersion": "v1",
-                    "kind": "PodList",
-                    "metadata": {},
-                    "items": [{
-                        "apiVersion": "v1",
-                        "kind": "Pod",
-                        "metadata": {
-                            "name": "workspace-new",
-                            "namespace": "dev-sandboxes",
-                            "uid": "uid-new",
-                        },
-                        "status": {
-                            "phase": "Running",
-                            "containerStatuses": [{
-                                "image": "workspace:test",
-                                "imageID": "workspace@test",
-                                "name": "workspace",
-                                "ready": true,
-                                "restartCount": 0,
-                                "started": true,
-                                "state": {
-                                    "running": {
-                                        "startedAt": "2026-07-25T00:00:00Z"
-                                    }
+                    "kind": "Pod",
+                    "metadata": {
+                        "name": "workspace-old",
+                        "namespace": "dev-sandboxes",
+                        "uid": "uid-new",
+                    },
+                    "status": {
+                        "phase": "Running",
+                        "containerStatuses": [{
+                            "image": "workspace:test",
+                            "imageID": "workspace@test",
+                            "name": "workspace",
+                            "ready": true,
+                            "restartCount": 0,
+                            "started": true,
+                            "state": {
+                                "running": {
+                                    "startedAt": "2026-07-25T00:00:00Z"
                                 }
-                            }]
-                        }
-                    }]
+                            }
+                        }]
+                    }
                 }),
             ),
         ]);
@@ -1695,7 +2496,7 @@ mod tests {
         assert_eq!(
             replacement,
             WorkspacePodIdentity {
-                name: "workspace-new".into(),
+                name: "workspace-old".into(),
                 uid: "uid-new".into(),
             }
         );
@@ -1707,14 +2508,47 @@ mod tests {
                     "/api/v1/namespaces/dev-sandboxes/pods/workspace-old".to_string(),
                 ),
                 (
+                    Method::GET,
+                    "/api/v1/namespaces/dev-sandboxes/pods/workspace-old".to_string(),
+                ),
+                (
                     Method::DELETE,
                     "/api/v1/namespaces/dev-sandboxes/pods/workspace-old".to_string(),
                 ),
                 (
                     Method::GET,
-                    "/api/v1/namespaces/dev-sandboxes/pods".to_string(),
+                    "/api/v1/namespaces/dev-sandboxes/pods/workspace-old".to_string(),
                 ),
             ]
+        );
+    }
+
+    #[tokio::test]
+    async fn retried_resize_never_deletes_the_replacement_workspace_pod() {
+        let (client, requests) = sandbox_client_with_secret_responses(vec![(
+            StatusCode::OK,
+            json!({
+                "apiVersion": "v1",
+                "kind": "Pod",
+                "metadata": {
+                    "name": "workspace-old",
+                    "namespace": "dev-sandboxes",
+                    "uid": "uid-new",
+                },
+            }),
+        )]);
+
+        client
+            .delete_workspace_pod_if_uid("workspace-old", "uid-old")
+            .await
+            .unwrap();
+
+        assert_eq!(
+            requests.lock().unwrap().as_slice(),
+            &[(
+                Method::GET,
+                "/api/v1/namespaces/dev-sandboxes/pods/workspace-old".to_string(),
+            )]
         );
     }
 
@@ -1737,6 +2571,53 @@ mod tests {
     }
 
     type RecordedRequests = Arc<Mutex<Vec<(Method, String)>>>;
+
+    fn storage_lookup_responses(expansion_allowed: bool) -> Vec<(StatusCode, Value)> {
+        vec![
+            (
+                StatusCode::OK,
+                json!({
+                    "apiVersion": "extensions.agents.x-k8s.io/v1alpha1",
+                    "kind": "SandboxClaim",
+                    "metadata": {"name": "sandbox-env-test", "namespace": "dev-sandboxes"},
+                    "status": {"sandbox": {"name": "workspace-env-test"}}
+                }),
+            ),
+            (
+                StatusCode::OK,
+                json!({
+                    "apiVersion": "agents.x-k8s.io/v1alpha1",
+                    "kind": "Sandbox",
+                    "metadata": {"name": "workspace-env-test", "namespace": "dev-sandboxes"},
+                    "spec": {"volumeClaimTemplates": [{"metadata": {"name": "workspace"}}]}
+                }),
+            ),
+            (
+                StatusCode::OK,
+                json!({
+                    "apiVersion": "v1",
+                    "kind": "PersistentVolumeClaim",
+                    "metadata": {"name": "workspace-workspace-env-test", "namespace": "dev-sandboxes"},
+                    "spec": {
+                        "storageClassName": "expandable",
+                        "accessModes": ["ReadWriteOnce"],
+                        "resources": {"requests": {"storage": "10Gi"}}
+                    },
+                    "status": {"phase": "Bound", "capacity": {"storage": "10Gi"}}
+                }),
+            ),
+            (
+                StatusCode::OK,
+                json!({
+                    "apiVersion": "storage.k8s.io/v1",
+                    "kind": "StorageClass",
+                    "metadata": {"name": "expandable"},
+                    "provisioner": "example.test/provisioner",
+                    "allowVolumeExpansion": expansion_allowed
+                }),
+            ),
+        ]
+    }
 
     fn sandbox_client_with_secret_responses(
         responses: Vec<(StatusCode, Value)>,

@@ -1,6 +1,9 @@
 import { Files } from "./files.js";
+import { EnvironmentResizeDisruptionPolicy } from "@codewire/proto-ts/gen/codewire/v1/environment_pb";
 import {
   fromProtoEnvironment,
+  fromProtoEnvironmentResizeOperation,
+  fromProtoEnvironmentResizePlan,
   fromProtoEnvironmentPort,
   fromProtoExecResult,
   pollIntervalMs,
@@ -14,10 +17,14 @@ import {
   type CreatePortRequest,
   type EnvironmentData,
   type EnvironmentPort,
+  type EnvironmentResizeOperation,
+  type EnvironmentResizePlan,
+  type EnvironmentResources,
   type ExecRequest,
   type ExecResult,
   type FileEntry,
   type IsolationTier,
+  type ResizeEnvironmentRequest,
 } from "./types.js";
 
 export class Environment implements EnvironmentData {
@@ -134,6 +141,61 @@ export class Environment implements EnvironmentData {
         orgId: this.orgId,
         environmentId: this.id,
       });
+    } catch (error) {
+      throw mapConnectError(error);
+    }
+  }
+
+  /** Start an idempotent platform resize for this environment. */
+  async resize(request: ResizeEnvironmentRequest): Promise<EnvironmentResizeOperation> {
+    try {
+      const response = await this.clients.environments.resizeEnvironment({
+        orgId: this.orgId,
+        environmentId: this.id,
+        cpuMillicores: request.cpu_millicores,
+        memoryMb: request.memory_mb,
+        diskGb: request.disk_gb,
+        requestId: request.request_id,
+        force: request.force ?? false,
+        disruptionPolicy: request.allow_restart
+          ? EnvironmentResizeDisruptionPolicy.ALLOW_RESTART
+          : EnvironmentResizeDisruptionPolicy.LIVE_ONLY,
+      });
+      if (!response.operation) throw new Error("resize response omitted operation");
+      return fromProtoEnvironmentResizeOperation(response.operation);
+    } catch (error) {
+      throw mapConnectError(error);
+    }
+  }
+
+  /** Ask the platform whether a resize is live, deferred, or disruptive. */
+  async planResize(desired: EnvironmentResources): Promise<EnvironmentResizePlan> {
+    try {
+      const response = await this.clients.environments.planEnvironmentResize({
+        orgId: this.orgId,
+        environmentId: this.id,
+        cpuMillicores: desired.cpu_millicores,
+        memoryMb: desired.memory_mb,
+        diskGb: desired.disk_gb,
+      });
+      if (!response.plan) throw new Error("resize plan response omitted plan");
+      return fromProtoEnvironmentResizePlan(response.plan);
+    } catch (error) {
+      throw mapConnectError(error);
+    }
+  }
+
+  /** Read a durable platform resize operation for this environment. */
+  async getResizeOperation(operationId: string): Promise<EnvironmentResizeOperation> {
+    try {
+      const response =
+        await this.clients.environments.getEnvironmentResizeOperation({
+          orgId: this.orgId,
+          environmentId: this.id,
+          operationId,
+        });
+      if (!response.operation) throw new Error("resize response omitted operation");
+      return fromProtoEnvironmentResizeOperation(response.operation);
     } catch (error) {
       throw mapConnectError(error);
     }

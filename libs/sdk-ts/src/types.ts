@@ -99,6 +99,51 @@ export interface EnvironmentData {
   type: string;
 }
 
+export interface EnvironmentResources {
+  cpu_millicores: number;
+  memory_mb: number;
+  disk_gb: number;
+}
+
+export interface ResizeEnvironmentRequest extends EnvironmentResources {
+  request_id: string;
+  force?: boolean;
+  allow_restart?: boolean;
+}
+
+export interface EnvironmentResizePlan {
+  previous_resources?: EnvironmentResources;
+  desired_resources?: EnvironmentResources;
+  execution_mode: string;
+  active_session_count: number;
+  active_sessions_will_be_terminated: boolean;
+  reason: string;
+  warnings: string[];
+}
+
+export interface EnvironmentResizeFailure {
+  code: string;
+  message: string;
+}
+
+export interface EnvironmentResizeOperation {
+  id: string;
+  environment_id: string;
+  request_id: string;
+  previous_resources?: EnvironmentResources;
+  desired_resources?: EnvironmentResources;
+  last_applied_resources?: EnvironmentResources;
+  state: string;
+  disruption_policy: string;
+  planned_mode: string;
+  applied_mode: string;
+  pod_replaced: boolean;
+  failure?: EnvironmentResizeFailure;
+  created_at?: string;
+  updated_at?: string;
+  completed_at?: string;
+}
+
 export interface TemplateData {
   build_error?: string | null;
   build_status: string;

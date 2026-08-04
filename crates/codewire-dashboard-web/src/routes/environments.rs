@@ -15,8 +15,9 @@ use axum::{
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use codewire_proto::codewire::v1::{
-    AppPort, CreateEnvironmentRequest, CreatePortRequest, DeletePortRequest, IsolationTier,
-    PortAccess, RepoEntry, SetupAgent,
+    AppPort, CreateEnvironmentRequest, CreatePortRequest, DeletePortRequest,
+    EnvironmentResizeDisruptionPolicy, IsolationTier, PortAccess, RepoEntry,
+    ResizeEnvironmentRequest, SetupAgent,
 };
 use connectrpc::{ConnectError, ErrorCode, http_body};
 use serde::{Deserialize, Serialize};
@@ -36,7 +37,7 @@ use crate::{
     security::{csrf_cookie, csrf_cookie_value, new_csrf_token, with_csrf_cookie},
     state::AppState,
     templates::{
-        EnvironmentCreateFormTemplate, EnvironmentListTemplate,
+        EnvironmentCreateFormTemplate, EnvironmentListTemplate, EnvironmentResizeOperationTemplate,
         OrganizationEnvironmentsContentTemplate, OrganizationEnvironmentsTemplate,
     },
     view::{
@@ -64,6 +65,10 @@ pub(super) struct EnvironmentsQuery {
     ports: String,
     #[serde(default)]
     trust: String,
+    #[serde(default)]
+    resize_environment: String,
+    #[serde(default)]
+    resize_operation: String,
     #[serde(default)]
     message: String,
     #[serde(default)]
@@ -93,6 +98,31 @@ pub(super) struct PortDeleteSubmission {
     csrf: String,
     environment_id: String,
     port_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct ResizePlanSubmission {
+    #[serde(rename = "_csrf")]
+    csrf: String,
+    environment_id: String,
+    cpu_millicores: String,
+    memory_mb: String,
+    disk_gb: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct ResizeApplySubmission {
+    #[serde(rename = "_csrf")]
+    csrf: String,
+    environment_id: String,
+    cpu_millicores: String,
+    memory_mb: String,
+    disk_gb: String,
+    request_id: String,
+    #[serde(default)]
+    allow_restart: String,
+    #[serde(default)]
+    force: String,
 }
 
 // Deliberately not Debug. Agent credential values are write-only and must not
@@ -535,6 +565,8 @@ pub(super) async fn list_fragment(
         create_form: default_create_form(token, false),
         port_panel: None,
         trust_summary: None,
+        resize_confirmation: None,
+        resize_operation: None,
         search: bounded_query(&query.search),
         state: allowlisted_state(&query.state).to_owned(),
         message: String::new(),
@@ -1022,6 +1054,191 @@ pub(super) async fn delete(
     .await
 }
 
+pub(super) async fn resize_plan(
+    State(state): State<AppState>,
+    Path(slug): Path<String>,
+    headers: HeaderMap,
+    Form(submission): Form<ResizePlanSubmission>,
+) -> Response {
+    let (dashboard, organization, cookie) = match action_context(
+        &state,
+        &headers,
+        &slug,
+        &submission.csrf,
+        environments_path(&slug),
+    )
+    .await
+    {
+        Ok(context) => context,
+        Err(response) => return response,
+    };
+    let Some((cpu_millicores, memory_mb, disk_gb)) = resize_submission_resources(
+        &submission.environment_id,
+        &submission.cpu_millicores,
+        &submission.memory_mb,
+        &submission.disk_gb,
+    ) else {
+        return mutation_redirect(&state, environments_path(&slug), "", "invalid", &headers);
+    };
+    let result = environment_connect::plan_environment_resize(
+        &state,
+        cookie.clone(),
+        organization.id.clone(),
+        submission.environment_id,
+        cpu_millicores,
+        memory_mb,
+        disk_gb,
+    )
+    .await;
+    let response = match result {
+        Ok(response) => response,
+        Err(error) if error.code == ErrorCode::Unauthenticated => {
+            return login_redirect(&environments_path(&slug), &headers);
+        }
+        Err(error) => {
+            return mutation_redirect(
+                &state,
+                environments_path(&slug),
+                "",
+                mutation_error(&error),
+                &headers,
+            );
+        }
+    };
+    let (plan, environment) = response;
+    let form = default_create_form(submission.csrf, false);
+    let query = EnvironmentsQuery::default();
+    let mut page = match build_page(&state, cookie, &organization, &query, form).await {
+        Ok(page) => page,
+        Err(error) => return connect_page_error(error, &environments_path(&slug), &headers),
+    };
+    page.resize_confirmation = Some(environment_connect::resize_confirmation(
+        environment,
+        plan,
+        uuid::Uuid::new_v4().simple().to_string(),
+    ));
+    render_environments_page(
+        &state,
+        &headers,
+        dashboard,
+        organization,
+        page,
+        StatusCode::OK,
+    )
+}
+
+pub(super) async fn resize_apply(
+    State(state): State<AppState>,
+    Path(slug): Path<String>,
+    headers: HeaderMap,
+    Form(submission): Form<ResizeApplySubmission>,
+) -> Response {
+    let (_, organization, cookie) = match action_context(
+        &state,
+        &headers,
+        &slug,
+        &submission.csrf,
+        environments_path(&slug),
+    )
+    .await
+    {
+        Ok(context) => context,
+        Err(response) => return response,
+    };
+    let Some((cpu_millicores, memory_mb, disk_gb)) = resize_submission_resources(
+        &submission.environment_id,
+        &submission.cpu_millicores,
+        &submission.memory_mb,
+        &submission.disk_gb,
+    ) else {
+        return mutation_redirect(&state, environments_path(&slug), "", "invalid", &headers);
+    };
+    if submission.request_id.trim().is_empty() || submission.request_id.len() > 128 {
+        return mutation_redirect(&state, environments_path(&slug), "", "invalid", &headers);
+    }
+    let allow_restart = checkbox_checked(&submission.allow_restart);
+    let force = checkbox_checked(&submission.force);
+    let response = environment_connect::resize_environment(
+        &state,
+        cookie,
+        ResizeEnvironmentRequest {
+            org_id: organization.id,
+            environment_id: submission.environment_id.clone(),
+            cpu_millicores,
+            memory_mb,
+            disk_gb,
+            request_id: submission.request_id,
+            force,
+            disruption_policy: if allow_restart {
+                EnvironmentResizeDisruptionPolicy::AllowRestart
+            } else {
+                EnvironmentResizeDisruptionPolicy::LiveOnly
+            }
+            .into(),
+            ..Default::default()
+        },
+    )
+    .await;
+    let response = match response {
+        Ok(response) => response,
+        Err(error) if error.code == ErrorCode::Unauthenticated => {
+            return login_redirect(&environments_path(&slug), &headers);
+        }
+        Err(error) => {
+            return mutation_redirect(
+                &state,
+                environments_path(&slug),
+                "",
+                mutation_error(&error),
+                &headers,
+            );
+        }
+    };
+    resize_operation_redirect(
+        &state,
+        &headers,
+        &slug,
+        &submission.environment_id,
+        &response.id,
+    )
+}
+
+pub(super) async fn resize_operation_fragment(
+    State(state): State<AppState>,
+    Path(slug): Path<String>,
+    Query(query): Query<EnvironmentsQuery>,
+    headers: HeaderMap,
+) -> Response {
+    let continuation = environments_path(&slug);
+    let (_, organization, cookie) = match get_context(&state, &headers, &slug, &continuation).await
+    {
+        Ok(context) => context,
+        Err(response) => return response,
+    };
+    if !valid_identifier(&query.resize_environment) || !valid_identifier(&query.resize_operation) {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    let operation = environment_connect::environment_resize_operation(
+        &state,
+        cookie,
+        organization.id.clone(),
+        query.resize_environment,
+        query.resize_operation,
+    )
+    .await;
+    let (operation, _) = match operation {
+        Ok(operation) => operation,
+        Err(error) => return connect_page_error(error, &continuation, &headers),
+    };
+    render_template(
+        StatusCode::OK,
+        EnvironmentResizeOperationTemplate {
+            organization: &organization,
+            operation: &environment_connect::resize_operation_view(operation),
+        },
+    )
+}
+
 pub(super) async fn create_port(
     State(state): State<AppState>,
     Path(slug): Path<String>,
@@ -1240,7 +1457,7 @@ async fn build_page(
             Some(environment) => Some(
                 environment_connect::environment_trust_summary(
                     state,
-                    cookie,
+                    cookie.clone(),
                     &organization.id,
                     &environment.id,
                     environment.name.clone(),
@@ -1252,11 +1469,28 @@ async fn build_page(
     } else {
         None
     };
+    let resize_operation = if valid_identifier(&query.resize_environment)
+        && valid_identifier(&query.resize_operation)
+    {
+        let (operation, _) = environment_connect::environment_resize_operation(
+            state,
+            cookie.clone(),
+            organization.id.clone(),
+            query.resize_environment.clone(),
+            query.resize_operation.clone(),
+        )
+        .await?;
+        Some(environment_connect::resize_operation_view(operation))
+    } else {
+        None
+    };
     Ok(EnvironmentsPageView {
         environments,
         create_form: form,
         port_panel,
         trust_summary,
+        resize_confirmation: None,
+        resize_operation,
         search: bounded_query(&query.search),
         state: allowlisted_state(&query.state).to_owned(),
         message: page_message(&query.message).to_owned(),
@@ -1308,6 +1542,44 @@ async fn render_action_page(
             return connect_page_error(error, &environments_path(&organization.slug), headers);
         }
     };
+    let websocket_origin = match crate::routes::terminal::browser_websocket_origin(
+        &state.public_origin,
+        &state.browser_api_origin,
+    ) {
+        Some(origin) => origin,
+        None => return error_page(WebError::BrowserConfigurationUnavailable),
+    };
+    if headers.contains_key(HTMX_REQUEST) {
+        render_template(
+            status,
+            OrganizationEnvironmentsContentTemplate {
+                organization: &organization,
+                page: &page,
+            },
+        )
+    } else {
+        render_template_with_connect_origin(
+            status,
+            OrganizationEnvironmentsTemplate {
+                view: &dashboard,
+                organization: &organization,
+                page: &page,
+                active_tab: "environments",
+                terminal_websocket_origin: &websocket_origin,
+            },
+            &websocket_origin,
+        )
+    }
+}
+
+fn render_environments_page(
+    state: &AppState,
+    headers: &HeaderMap,
+    dashboard: crate::view::DashboardView,
+    organization: OrganizationContext,
+    page: EnvironmentsPageView,
+    status: StatusCode,
+) -> Response {
     let websocket_origin = match crate::routes::terminal::browser_websocket_origin(
         &state.public_origin,
         &state.browser_api_origin,
@@ -1754,6 +2026,65 @@ fn page_message(value: &str) -> &'static str {
     }
 }
 
+fn resize_submission_resources(
+    environment_id: &str,
+    cpu_millicores: &str,
+    memory_mb: &str,
+    disk_gb: &str,
+) -> Option<(i32, i32, i32)> {
+    if !valid_identifier(environment_id) {
+        return None;
+    }
+    Some((
+        cpu_millicores
+            .trim()
+            .parse()
+            .ok()
+            .filter(|value: &i32| (100..=128_000).contains(value))?,
+        memory_mb
+            .trim()
+            .parse()
+            .ok()
+            .filter(|value: &i32| (128..=1_048_576).contains(value))?,
+        disk_gb
+            .trim()
+            .parse()
+            .ok()
+            .filter(|value: &i32| (1..=16_384).contains(value))?,
+    ))
+}
+
+fn checkbox_checked(value: &str) -> bool {
+    matches!(value, "on" | "true")
+}
+
+fn resize_operation_redirect(
+    state: &AppState,
+    headers: &HeaderMap,
+    slug: &str,
+    environment_id: &str,
+    operation_id: &str,
+) -> Response {
+    let mut target = Url::parse(&format!(
+        "http://codewire.invalid{}",
+        environments_path(slug)
+    ))
+    .expect("fixed dashboard URL is valid");
+    target
+        .query_pairs_mut()
+        .append_pair("resize_environment", environment_id)
+        .append_pair("resize_operation", operation_id);
+    let target = format!(
+        "{}{}",
+        target.path(),
+        target
+            .query()
+            .map(|query| format!("?{query}"))
+            .unwrap_or_default()
+    );
+    mutation_redirect(state, target, "", "", headers)
+}
+
 fn page_error(value: &str) -> &'static str {
     match value {
         "invalid" => "The environment request was invalid for its current state.",
@@ -2006,6 +2337,131 @@ mod tests {
         .expect("prepared environment form");
         assert!(prepared_html.contains("unsafe type"));
         assert!(!prepared_html.contains("<b>unsafe"));
+    }
+
+    #[test]
+    fn resize_confirmation_requires_explicit_restart_and_session_consent() {
+        let organization = OrganizationContext {
+            id: "organization-id".to_owned(),
+            name: "Organization".to_owned(),
+            slug: "organization".to_owned(),
+            role: "owner",
+            can_admin: true,
+            environments_url: "/dashboard/orgs/organization/environments".to_owned(),
+            presets_url: String::new(),
+            secrets_url: String::new(),
+            api_keys_url: String::new(),
+            members_url: String::new(),
+            billing_url: String::new(),
+        };
+        let page = EnvironmentsPageView {
+            environments: Vec::new(),
+            create_form: default_create_form("csrf-token".to_owned(), false),
+            port_panel: None,
+            trust_summary: None,
+            resize_confirmation: Some(crate::view::EnvironmentResizeConfirmationView {
+                environment_id: "environment-id".to_owned(),
+                environment_name: "<unsafe>".to_owned(),
+                request_id: "stable-request".to_owned(),
+                previous_resources: "1 vCPU / 2 GiB / 10 GiB disk".to_owned(),
+                desired_resources: "2 vCPU / 4 GiB / 20 GiB disk".to_owned(),
+                cpu_millicores: 2_000,
+                memory_mb: 4_096,
+                disk_gb: 20,
+                execution_mode: "restart required",
+                requires_restart: true,
+                active_session_count: 2,
+                active_sessions_will_be_terminated: true,
+                reason: "live resize is unavailable".to_owned(),
+                warnings: vec!["<unsafe warning>".to_owned()],
+            }),
+            resize_operation: None,
+            search: String::new(),
+            state: "all".to_owned(),
+            message: String::new(),
+            error: String::new(),
+        };
+
+        let html = OrganizationEnvironmentsContentTemplate {
+            organization: &organization,
+            page: &page,
+        }
+        .render()
+        .expect("resize confirmation template");
+
+        assert!(html.contains("name=\"allow_restart\""));
+        assert!(html.contains("name=\"force\""));
+        assert!(html.contains("name=\"request_id\" value=\"stable-request\""));
+        assert!(html.contains("does not delete or recreate storage"));
+        assert!(!html.contains("<unsafe>"));
+        assert!(!html.contains("<unsafe warning>"));
+    }
+
+    #[test]
+    fn resize_inputs_are_bounded_before_any_connect_call() {
+        assert_eq!(
+            resize_submission_resources("environment-id", "2000", "4096", "20"),
+            Some((2_000, 4_096, 20))
+        );
+        assert_eq!(
+            resize_submission_resources("environment-id", "99", "4096", "20"),
+            None
+        );
+        assert_eq!(
+            resize_submission_resources("environment-id", "2000", "4096", "19"),
+            Some((2_000, 4_096, 19))
+        );
+        assert!(checkbox_checked("true"));
+        assert!(!checkbox_checked("yes"));
+    }
+
+    #[test]
+    fn active_resize_operation_polls_only_until_terminal() {
+        let organization = OrganizationContext {
+            id: "organization-id".to_owned(),
+            name: "Organization".to_owned(),
+            slug: "organization".to_owned(),
+            role: "owner",
+            can_admin: true,
+            environments_url: String::new(),
+            presets_url: String::new(),
+            secrets_url: String::new(),
+            api_keys_url: String::new(),
+            members_url: String::new(),
+            billing_url: String::new(),
+        };
+        let active = crate::view::EnvironmentResizeOperationView {
+            environment_id: "environment-id".to_owned(),
+            operation_id: "operation-id".to_owned(),
+            state: "applying",
+            desired_resources: "2 vCPU / 4 GiB / 20 GiB disk".to_owned(),
+            applied_resources: "1 vCPU / 2 GiB / 10 GiB disk".to_owned(),
+            failure: String::new(),
+            active: true,
+            pod_replaced: false,
+        };
+        let active_html = EnvironmentResizeOperationTemplate {
+            organization: &organization,
+            operation: &active,
+        }
+        .render()
+        .expect("active resize operation template");
+        assert!(active_html.contains("_fragments/resize?resize_environment=environment-id"));
+        assert!(active_html.contains("every 2s"));
+
+        let completed = crate::view::EnvironmentResizeOperationView {
+            state: "completed",
+            active: false,
+            ..active
+        };
+        let completed_html = EnvironmentResizeOperationTemplate {
+            organization: &organization,
+            operation: &completed,
+        }
+        .render()
+        .expect("completed resize operation template");
+        assert!(!completed_html.contains("every 2s"));
+        assert!(completed_html.contains("Close"));
     }
 
     #[test]

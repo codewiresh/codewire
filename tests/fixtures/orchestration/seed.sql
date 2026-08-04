@@ -439,6 +439,24 @@ VALUES
         NULL, false, NULL, NULL, '2026-07-10 10:34:00'
     );
 
+INSERT INTO environment_resize_operations (
+    id, org_id, environment_id, request_id,
+    previous_cpu_millicores, previous_memory_mb, previous_disk_gb,
+    desired_cpu_millicores, desired_memory_mb, desired_disk_gb,
+    last_applied_cpu_millicores, last_applied_memory_mb, last_applied_disk_gb,
+    previous_state, previous_desired_state, state, force,
+    disruption_policy, planned_mode, applied_mode, pod_replaced,
+    created_at, updated_at, completed_at
+)
+VALUES (
+    'resize_environment_contract_completed', 'org_apikey_contract_1',
+    'env_environment_contract_read', 'request-environment-contract-completed',
+    2000, 4096, 10, 3000, 6144, 20, 3000, 6144, 20,
+    'running', 'started', 'completed', false,
+    'live_only', 'in_place', 'in_place', false,
+    '2026-07-10 10:40:00', '2026-07-10 10:42:00', '2026-07-10 10:42:00'
+);
+
 -- WI-7 pins every database state and desired-state enum as a literal proto
 -- JSON name. Polling fixtures additionally distinguish running setup in
 -- progress from setup complete; the lifecycle fixture remains untouched by

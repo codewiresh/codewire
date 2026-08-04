@@ -4,7 +4,12 @@ import time
 from typing import BinaryIO
 
 from codewire._context import ConnectContext
-from codewire._convert import environment_to_dict, port_to_dict
+from codewire._convert import (
+    environment_resize_operation_to_dict,
+    environment_resize_plan_to_dict,
+    environment_to_dict,
+    port_to_dict,
+)
 from codewire.environment_ops import (
     exec_environment,
     list_environment_ports,
@@ -14,7 +19,11 @@ from codewire.files import Files
 from codewire.v1.environment_connect import EnvironmentServiceClientSync
 from codewire.v1.environment_pb2 import (
     DeleteEnvironmentRequest,
+    EnvironmentResizeDisruptionPolicy,
+    GetEnvironmentResizeOperationRequest,
     GetEnvironmentRequest,
+    PlanEnvironmentResizeRequest,
+    ResizeEnvironmentRequest,
     StartEnvironmentRequest,
     StopEnvironmentRequest,
 )
@@ -78,6 +87,74 @@ class Environment:
                 org_id=self._context.resolve_org_id(), environment_id=self.id
             ),
         )
+
+    def resize(
+        self,
+        *,
+        cpu_millicores: int,
+        memory_mb: int,
+        disk_gb: int,
+        request_id: str,
+        force: bool = False,
+        allow_restart: bool = False,
+    ) -> dict:
+        """Start an idempotent platform resize for this environment."""
+        response = self._context.unary(
+            self._environments.resize_environment,
+            ResizeEnvironmentRequest(
+                org_id=self._context.resolve_org_id(),
+                environment_id=self.id,
+                cpu_millicores=cpu_millicores,
+                memory_mb=memory_mb,
+                disk_gb=disk_gb,
+                request_id=request_id,
+                force=force,
+                disruption_policy=(
+                    EnvironmentResizeDisruptionPolicy.ENVIRONMENT_RESIZE_DISRUPTION_POLICY_ALLOW_RESTART
+                    if allow_restart
+                    else EnvironmentResizeDisruptionPolicy.ENVIRONMENT_RESIZE_DISRUPTION_POLICY_LIVE_ONLY
+                ),
+            ),
+        )
+        if not response.HasField("operation"):
+            raise RuntimeError("resize response omitted operation")
+        return environment_resize_operation_to_dict(response.operation)
+
+    def plan_resize(
+        self,
+        *,
+        cpu_millicores: int,
+        memory_mb: int,
+        disk_gb: int,
+    ) -> dict:
+        """Return the authoritative live/restart plan for this environment."""
+        response = self._context.unary(
+            self._environments.plan_environment_resize,
+            PlanEnvironmentResizeRequest(
+                org_id=self._context.resolve_org_id(),
+                environment_id=self.id,
+                cpu_millicores=cpu_millicores,
+                memory_mb=memory_mb,
+                disk_gb=disk_gb,
+            ),
+        )
+        if not response.HasField("plan"):
+            raise RuntimeError("resize plan response omitted plan")
+        return environment_resize_plan_to_dict(response.plan)
+
+    def get_resize_operation(self, operation_id: str) -> dict:
+        """Read a durable resize operation for this environment."""
+        response = self._context.unary(
+            self._environments.get_environment_resize_operation,
+            GetEnvironmentResizeOperationRequest(
+                org_id=self._context.resolve_org_id(),
+                environment_id=self.id,
+                operation_id=operation_id,
+            ),
+        )
+        if not response.HasField("operation"):
+            raise RuntimeError("resize response omitted operation")
+        return environment_resize_operation_to_dict(response.operation)
 
     def remove(self) -> None:
         self._context.unary(

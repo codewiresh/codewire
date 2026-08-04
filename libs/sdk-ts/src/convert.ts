@@ -13,10 +13,15 @@ import {
 import {
   CreateEnvironmentRequestSchema,
   DesiredState,
+  EnvironmentResizeDisruptionPolicy,
+  EnvironmentResizeExecutionMode,
+  EnvironmentResizeOperationState,
   EnvironmentSchema,
   EnvironmentState,
   IsolationTier as ProtoIsolationTier,
   type Environment as ProtoEnvironment,
+  type EnvironmentResizeOperation as ProtoEnvironmentResizeOperation,
+  type EnvironmentResizePlan as ProtoEnvironmentResizePlan,
 } from "@codewire/proto-ts/gen/codewire/v1/environment_pb";
 import type { ExecResponse } from "@codewire/proto-ts/gen/codewire/v1/exec_pb";
 import {
@@ -45,6 +50,7 @@ import type {
   CreatePortRequest,
   CreateTemplateRequest,
   EnvironmentData,
+  EnvironmentResizeOperation,
   EnvironmentPort,
   ExecRequest,
   ExecResult,
@@ -402,6 +408,81 @@ export function fromProtoEnvironment(value: ProtoEnvironment): EnvironmentData {
     total_running_seconds: value.totalRunningSeconds,
     ttl_seconds: value.ttlSeconds,
     type: value.type,
+  };
+}
+
+export function fromProtoEnvironmentResizeOperation(
+  value: ProtoEnvironmentResizeOperation,
+): EnvironmentResizeOperation {
+  const state = {
+    [EnvironmentResizeOperationState.UNSPECIFIED]: "unspecified",
+    [EnvironmentResizeOperationState.PENDING]: "pending",
+    [EnvironmentResizeOperationState.APPLYING]: "applying",
+    [EnvironmentResizeOperationState.RESTARTING]: "restarting",
+    [EnvironmentResizeOperationState.COMPLETED]: "completed",
+    [EnvironmentResizeOperationState.FAILED]: "failed",
+  }[value.state] ?? "unknown";
+  const disruptionPolicy = {
+    [EnvironmentResizeDisruptionPolicy.UNSPECIFIED]: "unspecified",
+    [EnvironmentResizeDisruptionPolicy.LIVE_ONLY]: "live_only",
+    [EnvironmentResizeDisruptionPolicy.ALLOW_RESTART]: "allow_restart",
+  }[value.disruptionPolicy] ?? "unknown";
+  const resources = (resource: typeof value.previousResources) =>
+    resource
+      ? {
+          cpu_millicores: resource.cpuMillicores,
+          memory_mb: resource.memoryMb,
+          disk_gb: resource.diskGb,
+        }
+      : undefined;
+  return {
+    id: value.id,
+    environment_id: value.environmentId,
+    request_id: value.requestId,
+    previous_resources: resources(value.previousResources),
+    desired_resources: resources(value.desiredResources),
+    last_applied_resources: resources(value.lastAppliedResources),
+    state,
+    disruption_policy: disruptionPolicy,
+    planned_mode: resizeExecutionMode(value.plannedMode),
+    applied_mode: resizeExecutionMode(value.appliedMode),
+    pod_replaced: value.podReplaced,
+    failure: value.failure
+      ? { code: value.failure.code, message: value.failure.message }
+      : undefined,
+    created_at: timestampString(value.createdAt),
+    updated_at: timestampString(value.updatedAt),
+    completed_at: timestampString(value.completedAt),
+  };
+}
+
+function resizeExecutionMode(value: EnvironmentResizeExecutionMode): string {
+  return {
+    [EnvironmentResizeExecutionMode.UNSPECIFIED]: "unspecified",
+    [EnvironmentResizeExecutionMode.NOOP]: "noop",
+    [EnvironmentResizeExecutionMode.APPLY_ON_START]: "apply_on_start",
+    [EnvironmentResizeExecutionMode.IN_PLACE]: "in_place",
+    [EnvironmentResizeExecutionMode.RESTART]: "restart",
+  }[value] ?? "unknown";
+}
+
+export function fromProtoEnvironmentResizePlan(value: ProtoEnvironmentResizePlan) {
+  const resources = (resource: typeof value.previousResources) =>
+    resource
+      ? {
+          cpu_millicores: resource.cpuMillicores,
+          memory_mb: resource.memoryMb,
+          disk_gb: resource.diskGb,
+        }
+      : undefined;
+  return {
+    previous_resources: resources(value.previousResources),
+    desired_resources: resources(value.desiredResources),
+    execution_mode: resizeExecutionMode(value.executionMode),
+    active_session_count: value.activeSessionCount,
+    active_sessions_will_be_terminated: value.activeSessionsWillBeTerminated,
+    reason: value.reason,
+    warnings: value.warnings,
   };
 }
 

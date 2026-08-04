@@ -43,14 +43,25 @@ rules:
   - apiGroups: [""]
     resources: ["pods"]
     verbs: ["get", "list", "watch", "delete"]
+  # Live CPU/memory changes use the dedicated resize subresource. Delete on
+  # the parent Pod remains a separate, explicitly consented restart path.
+  - apiGroups: [""]
+    resources: ["pods/resize"]
+    verbs: ["patch"]
   - apiGroups: [""]
     resources: ["pods/log"]
     verbs: ["get", "list", "watch"]
   # Environment deletion independently proves and removes retained workspace
-  # storage after the Sandbox/SandboxClaim controllers have quiesced.
+  # storage after the Sandbox/SandboxClaim controllers have quiesced. Resize
+  # may only patch the existing claim's requested capacity.
   - apiGroups: [""]
     resources: ["persistentvolumeclaims"]
-    verbs: ["get", "list", "watch", "delete"]
+    verbs: ["get", "list", "watch", "patch", "delete"]
+  # Disk growth is admitted only when the PVC's StorageClass explicitly
+  # advertises allowVolumeExpansion.
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["storageclasses"]
+    verbs: ["get"]
   # Gateway binding selects transport-zone capabilities from the scheduled
   # runtime node labels.
   - apiGroups: [""]

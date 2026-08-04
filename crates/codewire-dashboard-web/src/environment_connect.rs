@@ -12,11 +12,15 @@ use codewire_proto::codewire::{
     },
     v1::{
         CreateEnvironmentRequest, CreatePortRequest, DeleteEnvironmentRequest, DeletePortRequest,
-        DetectionResult, Environment, EnvironmentServiceClient, EnvironmentState,
-        GetEnvironmentRequest, GetEnvironmentTrustReportRequest, ListEnvironmentsRequest,
-        ListPortsRequest, ListUserSecretsRequest, Port, PortAccess, PortServiceClient,
-        SecretServiceClient, SetUserSecretRequest, StartEnvironmentRequest, StopEnvironmentRequest,
-        WatchEnvironmentCreateRequest, watch_environment_create_response,
+        DetectionResult, Environment, EnvironmentResizeExecutionMode, EnvironmentResizeOperation,
+        EnvironmentResizeOperationState, EnvironmentResizePlan, EnvironmentResources,
+        EnvironmentServiceClient, EnvironmentState, GetEnvironmentRequest,
+        GetEnvironmentResizeOperationRequest, GetEnvironmentTrustReportRequest,
+        ListEnvironmentsRequest, ListPortsRequest, ListUserSecretsRequest,
+        PlanEnvironmentResizeRequest, Port, PortAccess, PortServiceClient,
+        ResizeEnvironmentRequest, SecretServiceClient, SetUserSecretRequest,
+        StartEnvironmentRequest, StopEnvironmentRequest, WatchEnvironmentCreateRequest,
+        watch_environment_create_response,
     },
 };
 use connectrpc::{ConnectError, ErrorCode, client::ClientConfig};
@@ -27,8 +31,9 @@ use crate::{
     transport::BrowserTransport,
     view::{
         EnvironmentAgentSecretView, EnvironmentAgentView, EnvironmentDetectionView,
-        EnvironmentPortRow, EnvironmentPresetOption, EnvironmentRow,
-        EnvironmentSecretProjectOption, EnvironmentTrustSummaryView, GitHubRepositoryOption,
+        EnvironmentPortRow, EnvironmentPresetOption, EnvironmentResizeConfirmationView,
+        EnvironmentResizeOperationView, EnvironmentRow, EnvironmentSecretProjectOption,
+        EnvironmentTrustSummaryView, GitHubRepositoryOption,
     },
 };
 
@@ -510,6 +515,154 @@ pub(crate) async fn delete_environment(
     Ok(())
 }
 
+pub(crate) async fn plan_environment_resize(
+    state: &AppState,
+    cookie: HeaderValue,
+    org_id: String,
+    environment_id: String,
+    cpu_millicores: i32,
+    memory_mb: i32,
+    disk_gb: i32,
+) -> Result<(EnvironmentResizePlan, Environment), ConnectError> {
+    let response = environment_client(state, cookie)
+        .plan_environment_resize(PlanEnvironmentResizeRequest {
+            org_id,
+            environment_id,
+            cpu_millicores,
+            memory_mb,
+            disk_gb,
+            ..Default::default()
+        })
+        .await?
+        .into_owned();
+    let plan = response
+        .plan
+        .into_option()
+        .ok_or_else(|| ConnectError::internal("resize plan was omitted"))?;
+    let environment = response
+        .environment
+        .into_option()
+        .ok_or_else(|| ConnectError::internal("resize environment was omitted"))?;
+    Ok((plan, environment))
+}
+
+pub(crate) async fn resize_environment(
+    state: &AppState,
+    cookie: HeaderValue,
+    request: ResizeEnvironmentRequest,
+) -> Result<EnvironmentResizeOperation, ConnectError> {
+    let response = environment_client(state, cookie)
+        .resize_environment(request)
+        .await?
+        .into_owned();
+    response
+        .operation
+        .into_option()
+        .ok_or_else(|| ConnectError::internal("resize operation was omitted"))
+}
+
+pub(crate) async fn environment_resize_operation(
+    state: &AppState,
+    cookie: HeaderValue,
+    org_id: String,
+    environment_id: String,
+    operation_id: String,
+) -> Result<(EnvironmentResizeOperation, Environment), ConnectError> {
+    let response = environment_client(state, cookie)
+        .get_environment_resize_operation(GetEnvironmentResizeOperationRequest {
+            org_id,
+            environment_id,
+            operation_id,
+            ..Default::default()
+        })
+        .await?
+        .into_owned();
+    let operation = response
+        .operation
+        .into_option()
+        .ok_or_else(|| ConnectError::internal("resize operation was omitted"))?;
+    let environment = response
+        .environment
+        .into_option()
+        .ok_or_else(|| ConnectError::internal("resize environment was omitted"))?;
+    Ok((operation, environment))
+}
+
+pub(crate) fn resize_confirmation(
+    environment: Environment,
+    plan: EnvironmentResizePlan,
+    request_id: String,
+) -> EnvironmentResizeConfirmationView {
+    let previous_resources = plan.previous_resources.into_option();
+    let desired_resources = plan.desired_resources.into_option().unwrap_or_default();
+    let execution_mode = match plan.execution_mode.as_known() {
+        Some(EnvironmentResizeExecutionMode::InPlace) => "live in-place update",
+        Some(EnvironmentResizeExecutionMode::ApplyOnStart) => "apply when started",
+        Some(EnvironmentResizeExecutionMode::Restart) => "restart required",
+        Some(EnvironmentResizeExecutionMode::Noop) => "already applied",
+        _ => "review required",
+    };
+    let requires_restart = matches!(
+        plan.execution_mode.as_known(),
+        Some(EnvironmentResizeExecutionMode::Restart)
+    );
+    EnvironmentResizeConfirmationView {
+        environment_id: environment.id,
+        environment_name: environment.name,
+        request_id,
+        previous_resources: resize_resources_label(previous_resources),
+        desired_resources: resize_resources_label(Some(desired_resources.clone())),
+        cpu_millicores: desired_resources.cpu_millicores,
+        memory_mb: desired_resources.memory_mb,
+        disk_gb: desired_resources.disk_gb,
+        execution_mode,
+        requires_restart,
+        active_session_count: plan.active_session_count,
+        active_sessions_will_be_terminated: plan.active_sessions_will_be_terminated,
+        reason: plan.reason,
+        warnings: plan.warnings,
+    }
+}
+
+pub(crate) fn resize_operation_view(
+    operation: EnvironmentResizeOperation,
+) -> EnvironmentResizeOperationView {
+    let state = match operation.state.as_known() {
+        Some(EnvironmentResizeOperationState::Pending) => "pending",
+        Some(EnvironmentResizeOperationState::Applying) => "applying",
+        Some(EnvironmentResizeOperationState::Restarting) => "restarting",
+        Some(EnvironmentResizeOperationState::Completed) => "completed",
+        Some(EnvironmentResizeOperationState::Failed) => "failed",
+        _ => "unknown",
+    };
+    let active = matches!(state, "pending" | "applying" | "restarting");
+    let failure = operation
+        .failure
+        .into_option()
+        .map(|failure| format!("{}: {}", failure.code, failure.message))
+        .unwrap_or_default();
+    EnvironmentResizeOperationView {
+        environment_id: operation.environment_id,
+        operation_id: operation.id,
+        state,
+        desired_resources: resize_resources_label(operation.desired_resources.into_option()),
+        applied_resources: resize_resources_label(operation.last_applied_resources.into_option()),
+        failure,
+        active,
+        pod_replaced: operation.pod_replaced,
+    }
+}
+
+fn resize_resources_label(resources: Option<EnvironmentResources>) -> String {
+    let resources = resources.unwrap_or_default();
+    format!(
+        "{} vCPU / {} GiB / {} GiB disk",
+        compact_decimal(f64::from(resources.cpu_millicores) / 1_000.0),
+        compact_decimal(f64::from(resources.memory_mb) / 1_024.0),
+        resources.disk_gb,
+    )
+}
+
 pub(crate) async fn ports(
     state: &AppState,
     cookie: HeaderValue,
@@ -598,6 +751,9 @@ fn environment_row(environment: Environment) -> EnvironmentRow {
             compact_decimal(cpu_vcpu),
             compact_decimal(memory_gib)
         ),
+        cpu_millicores: environment.cpu_millicores,
+        memory_mb: environment.memory_mb,
+        disk_gb: environment.disk_gb,
         hourly_rate: format!("${:.2}/h", per_second * 3_600.0),
         can_start: state == "stopped",
         can_stop: state == "running",

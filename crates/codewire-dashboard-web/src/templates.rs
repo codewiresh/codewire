@@ -246,6 +246,13 @@ pub(crate) struct EnvironmentListTemplate<'a> {
 }
 
 #[derive(Template)]
+#[template(path = "environment-resize-operation.html")]
+pub(crate) struct EnvironmentResizeOperationTemplate<'a> {
+    pub(crate) organization: &'a crate::view::OrganizationContext,
+    pub(crate) operation: &'a crate::view::EnvironmentResizeOperationView,
+}
+
+#[derive(Template)]
 #[template(path = "terminal.html")]
 pub(crate) struct TerminalTemplate<'a> {
     pub(crate) page: &'a TerminalPageView,

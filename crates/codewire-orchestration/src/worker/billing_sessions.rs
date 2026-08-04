@@ -178,6 +178,113 @@ pub fn declared_resources(sb: &Value) -> Resources {
     out
 }
 
+fn workspace_declared_resources(sb: &Value) -> Resources {
+    let mut out = Resources::default();
+    if let Some(workspace) = sb
+        .pointer("/spec/podTemplate/spec/containers")
+        .and_then(Value::as_array)
+        .and_then(|containers| {
+            containers.iter().find(|container| {
+                container.get("name").and_then(Value::as_str) == Some("workspace")
+            })
+        })
+    {
+        let requests = workspace.pointer("/resources/requests");
+        if let Some(cpu) = requests
+            .and_then(|value| value.get("cpu"))
+            .and_then(Value::as_str)
+        {
+            out.cpu_millicores = parse_quantity_millicores(cpu);
+        }
+        if let Some(memory) = requests
+            .and_then(|value| value.get("memory"))
+            .and_then(Value::as_str)
+        {
+            out.memory_mib = (parse_quantity_bytes(memory) >> 20) as i32;
+        }
+    }
+    out.disk_gib = sb
+        .pointer("/spec/volumeClaimTemplates")
+        .and_then(Value::as_array)
+        .and_then(|claims| {
+            claims.iter().find(|claim| {
+                claim.pointer("/metadata/name").and_then(Value::as_str) == Some("workspace")
+            })
+        })
+        .and_then(|claim| claim.pointer("/spec/resources/requests/storage"))
+        .and_then(Value::as_str)
+        .map(|storage| (parse_quantity_bytes(storage) >> 30) as i32)
+        .unwrap_or_default();
+    out
+}
+
+fn replace_workspace_billing_resources(
+    sandbox: &Value,
+    declared: Resources,
+    applied_cpu_millicores: i32,
+    applied_memory_mib: i32,
+    applied_disk_gib: i32,
+) -> Resources {
+    let workspace = workspace_declared_resources(sandbox);
+    Resources {
+        cpu_millicores: declared.cpu_millicores - workspace.cpu_millicores + applied_cpu_millicores,
+        memory_mib: declared.memory_mib - workspace.memory_mib + applied_memory_mib,
+        disk_gib: declared.disk_gib - workspace.disk_gib + applied_disk_gib,
+        runtime_class: declared.runtime_class,
+    }
+}
+
+/// Freeze an open billing session while a resize is active. Once a failed
+/// operation is terminal, charge the durable last-applied workspace resources
+/// even if Kubernetes desired-state rollback is still converging.
+async fn resize_billing_resources(
+    pool: &PgPool,
+    environment_id: &str,
+    sandbox: &Value,
+    declared: Resources,
+) -> anyhow::Result<Resources> {
+    let operation: Option<(String, i32, i32, i32)> = sqlx::query_as(
+        "SELECT state, last_applied_cpu_millicores, last_applied_memory_mb,
+                last_applied_disk_gb
+           FROM environment_resize_operations
+          WHERE environment_id = $1
+            AND state IN ('pending', 'applying', 'restarting', 'failed')
+          ORDER BY created_at DESC
+          LIMIT 1",
+    )
+    .bind(environment_id)
+    .fetch_optional(pool)
+    .await?;
+    let Some((state, cpu, memory, disk)) = operation else {
+        return Ok(declared);
+    };
+
+    if state != "failed" {
+        let existing: Option<(i32, i32, i32, Option<String>)> = sqlx::query_as(
+            "SELECT cpu_millicores, memory_mib, disk_gib, runtime_class
+               FROM sandbox_running_sessions
+              WHERE environment_id = $1 AND ended_at IS NULL
+              ORDER BY started_at DESC
+              LIMIT 1",
+        )
+        .bind(environment_id)
+        .fetch_optional(pool)
+        .await?;
+        if let Some((cpu_millicores, memory_mib, disk_gib, runtime_class)) = existing {
+            return Ok(Resources {
+                cpu_millicores,
+                memory_mib,
+                disk_gib,
+                runtime_class,
+            });
+        }
+    }
+
+    Ok(replace_workspace_billing_resources(
+        sandbox, declared, cpu, memory, disk,
+    ))
+}
+
 /// Mirrors `sessions.Classify`: drive the (phase, reason) state machine
 /// off the Sandbox's deletion timestamp, operatingMode, and Ready condition.
 pub fn classify(sb: &Value) -> (Phase, String) {
@@ -546,7 +653,16 @@ async fn reconcile(pool: &PgPool, sb: &DynamicObject) -> bool {
     let now = chrono::Utc::now();
     match phase {
         Phase::Running => {
-            let res = declared_resources(&value);
+            let declared = declared_resources(&value);
+            let res = match resize_billing_resources(pool, &id.environment_id, &value, declared)
+                .await
+            {
+                Ok(resources) => resources,
+                Err(error) => {
+                    tracing::error!(environment_id = id.environment_id, sandbox = name, %error, "billing-session: resolve resize resources");
+                    return false;
+                }
+            };
             if let Err(e) = open_or_heartbeat(pool, &id, &res, now).await {
                 tracing::error!(environment_id = id.environment_id, sandbox = name, error = %e, "billing-session: open/heartbeat session");
             }
@@ -685,6 +801,34 @@ mod tests {
         assert_eq!(parse_quantity_bytes("512Mi") >> 20, 512);
         // Storage: 20Gi → bytes → GiB.
         assert_eq!(parse_quantity_bytes("20Gi") >> 30, 20);
+    }
+
+    #[test]
+    fn resize_billing_replaces_only_workspace_resources() {
+        let sandbox = json!({
+            "spec": {
+                "podTemplate": { "spec": {
+                    "runtimeClassName": "isol8",
+                    "containers": [
+                        { "name": "workspace", "resources": { "requests": {
+                            "cpu": "4", "memory": "8Gi" } } },
+                        { "name": "codewire-gateway", "resources": { "requests": {
+                            "cpu": "250m", "memory": "512Mi" } } }
+                    ]
+                } },
+                "volumeClaimTemplates": [{
+                    "metadata": { "name": "workspace" },
+                    "spec": { "resources": { "requests": { "storage": "40Gi" } } }
+                }]
+            }
+        });
+        let declared = declared_resources(&sandbox);
+        let applied = replace_workspace_billing_resources(&sandbox, declared, 2000, 4096, 30);
+
+        assert_eq!(applied.cpu_millicores, 2250);
+        assert_eq!(applied.memory_mib, 4608);
+        assert_eq!(applied.disk_gib, 30);
+        assert_eq!(applied.runtime_class.as_deref(), Some("isol8"));
     }
 
     // Mirrors `TestClassify`.

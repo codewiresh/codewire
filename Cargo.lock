@@ -1312,6 +1312,7 @@ dependencies = [
  "subtle",
  "tokio",
  "url",
+ "uuid",
 ]
 
 [[package]]

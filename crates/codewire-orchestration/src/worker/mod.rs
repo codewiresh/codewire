@@ -27,6 +27,7 @@ pub mod lifecycle;
 pub mod loops;
 pub mod organization_deletion;
 pub mod port_dns;
+pub mod resize;
 pub mod scripts;
 pub mod secrets;
 pub mod setup;

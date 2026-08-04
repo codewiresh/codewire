@@ -592,11 +592,11 @@ struct OrgEnvironmentUsage {
 
 /// Mirrors `api.OrgQuota`.
 #[derive(Debug, Default, Clone, Copy)]
-struct OrgQuota {
-    max_concurrent_environments: i32,
-    max_concurrent_sandbox: i32,
-    max_cpu_millicores: i32,
-    max_memory_mb: i32,
+pub(crate) struct OrgQuota {
+    pub(crate) max_concurrent_environments: i32,
+    pub(crate) max_concurrent_sandbox: i32,
+    pub(crate) max_cpu_millicores: i32,
+    pub(crate) max_memory_mb: i32,
 }
 
 /// Mirrors `countActiveEnvironments` (active = consuming compute).
@@ -656,7 +656,7 @@ fn resolve_quota_from_plan(plan_max_ws: i32) -> OrgQuota {
 
 /// Mirrors `getOrgQuota`: explicit environment_quotas row →
 /// plan-derived → hardcoded defaults.
-async fn get_org_quota(pool: &PgPool, org_id: &str) -> OrgQuota {
+pub(crate) async fn get_org_quota(pool: &PgPool, org_id: &str) -> OrgQuota {
     if let Ok(Some((envs, sandbox, cpu, mem))) = sqlx::query_as::<_, (i32, i32, i32, i32)>(
         r#"SELECT max_concurrent_environments, max_concurrent_sandbox,
                   max_cpu_millicores, max_memory_mb

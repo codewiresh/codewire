@@ -18,7 +18,7 @@ from connectrpc.protocol import ProtocolType
 from connectrpc.server import ConnectASGIApplication, ConnectWSGIApplication, Endpoint, EndpointSync
 from pyqwest import Client, SyncClient
 
-from .environment_pb2 import CancelEnvironmentDeletionRequest, CancelEnvironmentDeletionResponse, CreateEnvironmentRequest, CreateEnvironmentResponse, DeleteEnvironmentRequest, DeleteEnvironmentResponse, ExtendEnvironmentTtlRequest, ExtendEnvironmentTtlResponse, GetEnvironmentDaemonStatusRequest, GetEnvironmentDaemonStatusResponse, GetEnvironmentRequest, GetEnvironmentResponse, GetEnvironmentTrustReportRequest, GetEnvironmentTrustReportResponse, GrantEnvironmentAccessRequest, GrantEnvironmentAccessResponse, ListEnvironmentAccessRequest, ListEnvironmentAccessResponse, ListEnvironmentsRequest, ListEnvironmentsResponse, ProtectEnvironmentRequest, ProtectEnvironmentResponse, RepairEnvironmentDaemonRequest, RepairEnvironmentDaemonResponse, RevokeEnvironmentAccessRequest, RevokeEnvironmentAccessResponse, StartEnvironmentRequest, StartEnvironmentResponse, StopEnvironmentRequest, StopEnvironmentResponse, StreamEnvironmentDaemonLogsRequest, StreamEnvironmentDaemonLogsResponse, StreamLogsRequest, StreamLogsResponse, UnprotectEnvironmentRequest, UnprotectEnvironmentResponse, WatchEnvironmentCreateRequest, WatchEnvironmentCreateResponse
+from .environment_pb2 import CancelEnvironmentDeletionRequest, CancelEnvironmentDeletionResponse, CreateEnvironmentRequest, CreateEnvironmentResponse, DeleteEnvironmentRequest, DeleteEnvironmentResponse, ExtendEnvironmentTtlRequest, ExtendEnvironmentTtlResponse, GetEnvironmentDaemonStatusRequest, GetEnvironmentDaemonStatusResponse, GetEnvironmentRequest, GetEnvironmentResizeOperationRequest, GetEnvironmentResizeOperationResponse, GetEnvironmentResponse, GetEnvironmentTrustReportRequest, GetEnvironmentTrustReportResponse, GrantEnvironmentAccessRequest, GrantEnvironmentAccessResponse, ListEnvironmentAccessRequest, ListEnvironmentAccessResponse, ListEnvironmentsRequest, ListEnvironmentsResponse, PlanEnvironmentResizeRequest, PlanEnvironmentResizeResponse, ProtectEnvironmentRequest, ProtectEnvironmentResponse, RepairEnvironmentDaemonRequest, RepairEnvironmentDaemonResponse, ResizeEnvironmentRequest, ResizeEnvironmentResponse, RevokeEnvironmentAccessRequest, RevokeEnvironmentAccessResponse, StartEnvironmentRequest, StartEnvironmentResponse, StopEnvironmentRequest, StopEnvironmentResponse, StreamEnvironmentDaemonLogsRequest, StreamEnvironmentDaemonLogsResponse, StreamLogsRequest, StreamLogsResponse, UnprotectEnvironmentRequest, UnprotectEnvironmentResponse, WatchEnvironmentCreateRequest, WatchEnvironmentCreateResponse
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Iterable, Iterator, Mapping
@@ -42,6 +42,15 @@ class EnvironmentService(Protocol):
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
     async def get_environment(self, request: GetEnvironmentRequest, ctx: RequestContext[GetEnvironmentRequest, GetEnvironmentResponse]) -> GetEnvironmentResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    async def plan_environment_resize(self, request: PlanEnvironmentResizeRequest, ctx: RequestContext[PlanEnvironmentResizeRequest, PlanEnvironmentResizeResponse]) -> PlanEnvironmentResizeResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    async def resize_environment(self, request: ResizeEnvironmentRequest, ctx: RequestContext[ResizeEnvironmentRequest, ResizeEnvironmentResponse]) -> ResizeEnvironmentResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    async def get_environment_resize_operation(self, request: GetEnvironmentResizeOperationRequest, ctx: RequestContext[GetEnvironmentResizeOperationRequest, GetEnvironmentResizeOperationResponse]) -> GetEnvironmentResizeOperationResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
     async def delete_environment(self, request: DeleteEnvironmentRequest, ctx: RequestContext[DeleteEnvironmentRequest, DeleteEnvironmentResponse]) -> DeleteEnvironmentResponse:
@@ -135,6 +144,36 @@ class EnvironmentServiceASGIApplication(ConnectASGIApplication[EnvironmentServic
                         idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
                     ),
                     function=svc.get_environment,
+                ),
+                "/codewire.v1.EnvironmentService/PlanEnvironmentResize": Endpoint.unary(
+                    method=MethodInfo(
+                        name="PlanEnvironmentResize",
+                        service_name="codewire.v1.EnvironmentService",
+                        input=PlanEnvironmentResizeRequest,
+                        output=PlanEnvironmentResizeResponse,
+                        idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
+                    ),
+                    function=svc.plan_environment_resize,
+                ),
+                "/codewire.v1.EnvironmentService/ResizeEnvironment": Endpoint.unary(
+                    method=MethodInfo(
+                        name="ResizeEnvironment",
+                        service_name="codewire.v1.EnvironmentService",
+                        input=ResizeEnvironmentRequest,
+                        output=ResizeEnvironmentResponse,
+                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                    ),
+                    function=svc.resize_environment,
+                ),
+                "/codewire.v1.EnvironmentService/GetEnvironmentResizeOperation": Endpoint.unary(
+                    method=MethodInfo(
+                        name="GetEnvironmentResizeOperation",
+                        service_name="codewire.v1.EnvironmentService",
+                        input=GetEnvironmentResizeOperationRequest,
+                        output=GetEnvironmentResizeOperationResponse,
+                        idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
+                    ),
+                    function=svc.get_environment_resize_operation,
                 ),
                 "/codewire.v1.EnvironmentService/DeleteEnvironment": Endpoint.unary(
                     method=MethodInfo(
@@ -391,6 +430,70 @@ class EnvironmentServiceClient(ConnectClient):
                 service_name="codewire.v1.EnvironmentService",
                 input=GetEnvironmentRequest,
                 output=GetEnvironmentResponse,
+                idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+            use_get=use_get,
+        )
+
+    async def plan_environment_resize(
+        self,
+        request: PlanEnvironmentResizeRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+        use_get: bool = False,
+    ) -> PlanEnvironmentResizeResponse:
+        return await self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="PlanEnvironmentResize",
+                service_name="codewire.v1.EnvironmentService",
+                input=PlanEnvironmentResizeRequest,
+                output=PlanEnvironmentResizeResponse,
+                idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+            use_get=use_get,
+        )
+
+    async def resize_environment(
+        self,
+        request: ResizeEnvironmentRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+    ) -> ResizeEnvironmentResponse:
+        return await self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="ResizeEnvironment",
+                service_name="codewire.v1.EnvironmentService",
+                input=ResizeEnvironmentRequest,
+                output=ResizeEnvironmentResponse,
+                idempotency_level=IdempotencyLevel.UNKNOWN,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+
+    async def get_environment_resize_operation(
+        self,
+        request: GetEnvironmentResizeOperationRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+        use_get: bool = False,
+    ) -> GetEnvironmentResizeOperationResponse:
+        return await self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="GetEnvironmentResizeOperation",
+                service_name="codewire.v1.EnvironmentService",
+                input=GetEnvironmentResizeOperationRequest,
+                output=GetEnvironmentResizeOperationResponse,
                 idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
             ),
             headers=headers,
@@ -734,6 +837,15 @@ class EnvironmentServiceSync(Protocol):
     def get_environment(self, request: GetEnvironmentRequest, ctx: RequestContext[GetEnvironmentRequest, GetEnvironmentResponse]) -> GetEnvironmentResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
+    def plan_environment_resize(self, request: PlanEnvironmentResizeRequest, ctx: RequestContext[PlanEnvironmentResizeRequest, PlanEnvironmentResizeResponse]) -> PlanEnvironmentResizeResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    def resize_environment(self, request: ResizeEnvironmentRequest, ctx: RequestContext[ResizeEnvironmentRequest, ResizeEnvironmentResponse]) -> ResizeEnvironmentResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    def get_environment_resize_operation(self, request: GetEnvironmentResizeOperationRequest, ctx: RequestContext[GetEnvironmentResizeOperationRequest, GetEnvironmentResizeOperationResponse]) -> GetEnvironmentResizeOperationResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
     def delete_environment(self, request: DeleteEnvironmentRequest, ctx: RequestContext[DeleteEnvironmentRequest, DeleteEnvironmentResponse]) -> DeleteEnvironmentResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
@@ -823,6 +935,36 @@ class EnvironmentServiceWSGIApplication(ConnectWSGIApplication):
                         idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
                     ),
                     function=service.get_environment,
+                ),
+                "/codewire.v1.EnvironmentService/PlanEnvironmentResize": EndpointSync.unary(
+                    method=MethodInfo(
+                        name="PlanEnvironmentResize",
+                        service_name="codewire.v1.EnvironmentService",
+                        input=PlanEnvironmentResizeRequest,
+                        output=PlanEnvironmentResizeResponse,
+                        idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
+                    ),
+                    function=service.plan_environment_resize,
+                ),
+                "/codewire.v1.EnvironmentService/ResizeEnvironment": EndpointSync.unary(
+                    method=MethodInfo(
+                        name="ResizeEnvironment",
+                        service_name="codewire.v1.EnvironmentService",
+                        input=ResizeEnvironmentRequest,
+                        output=ResizeEnvironmentResponse,
+                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                    ),
+                    function=service.resize_environment,
+                ),
+                "/codewire.v1.EnvironmentService/GetEnvironmentResizeOperation": EndpointSync.unary(
+                    method=MethodInfo(
+                        name="GetEnvironmentResizeOperation",
+                        service_name="codewire.v1.EnvironmentService",
+                        input=GetEnvironmentResizeOperationRequest,
+                        output=GetEnvironmentResizeOperationResponse,
+                        idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
+                    ),
+                    function=service.get_environment_resize_operation,
                 ),
                 "/codewire.v1.EnvironmentService/DeleteEnvironment": EndpointSync.unary(
                     method=MethodInfo(
@@ -1077,6 +1219,67 @@ class EnvironmentServiceClientSync(ConnectClientSync):
                 service_name="codewire.v1.EnvironmentService",
                 input=GetEnvironmentRequest,
                 output=GetEnvironmentResponse,
+                idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+            use_get=use_get,
+        )
+    def plan_environment_resize(
+        self,
+        request: PlanEnvironmentResizeRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+        use_get: bool = False,
+    ) -> PlanEnvironmentResizeResponse:
+        return self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="PlanEnvironmentResize",
+                service_name="codewire.v1.EnvironmentService",
+                input=PlanEnvironmentResizeRequest,
+                output=PlanEnvironmentResizeResponse,
+                idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+            use_get=use_get,
+        )
+    def resize_environment(
+        self,
+        request: ResizeEnvironmentRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+    ) -> ResizeEnvironmentResponse:
+        return self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="ResizeEnvironment",
+                service_name="codewire.v1.EnvironmentService",
+                input=ResizeEnvironmentRequest,
+                output=ResizeEnvironmentResponse,
+                idempotency_level=IdempotencyLevel.UNKNOWN,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+    def get_environment_resize_operation(
+        self,
+        request: GetEnvironmentResizeOperationRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+        use_get: bool = False,
+    ) -> GetEnvironmentResizeOperationResponse:
+        return self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="GetEnvironmentResizeOperation",
+                service_name="codewire.v1.EnvironmentService",
+                input=GetEnvironmentResizeOperationRequest,
+                output=GetEnvironmentResizeOperationResponse,
                 idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
             ),
             headers=headers,

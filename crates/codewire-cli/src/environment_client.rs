@@ -128,6 +128,90 @@ impl EnvironmentClient {
         Ok((environment, poll_interval))
     }
 
+    pub async fn resize_environment(
+        &self,
+        org_id: &str,
+        environment_id: &str,
+        desired: &EnvironmentResizeResources,
+        request_id: &str,
+        force: bool,
+        allow_restart: bool,
+    ) -> anyhow::Result<(EnvironmentResizeResult, Option<Duration>)> {
+        let response = self
+            .inner
+            .resize_environment(rpc::ResizeEnvironmentRequest {
+                org_id: org_id.to_string(),
+                environment_id: environment_id.to_string(),
+                cpu_millicores: desired.cpu_millicores,
+                memory_mb: desired.memory_mb,
+                disk_gb: desired.disk_gb,
+                request_id: request_id.to_string(),
+                force,
+                disruption_policy: if allow_restart {
+                    rpc::EnvironmentResizeDisruptionPolicy::AllowRestart
+                } else {
+                    rpc::EnvironmentResizeDisruptionPolicy::LiveOnly
+                }
+                .into(),
+                ..Default::default()
+            })
+            .await
+            .map_err(display_client_error)?;
+        legacy_environment_resize_response(
+            response.operation.into_option(),
+            response.environment.into_option(),
+            response.poll_interval.into_option(),
+        )
+    }
+
+    pub async fn plan_environment_resize(
+        &self,
+        org_id: &str,
+        environment_id: &str,
+        desired: &EnvironmentResizeResources,
+    ) -> anyhow::Result<EnvironmentResizePlan> {
+        let response = self
+            .inner
+            .plan_environment_resize(rpc::PlanEnvironmentResizeRequest {
+                org_id: org_id.to_string(),
+                environment_id: environment_id.to_string(),
+                cpu_millicores: desired.cpu_millicores,
+                memory_mb: desired.memory_mb,
+                disk_gb: desired.disk_gb,
+                ..Default::default()
+            })
+            .await
+            .map_err(display_client_error)?;
+        response
+            .plan
+            .into_option()
+            .map(legacy_environment_resize_plan)
+            .ok_or_else(|| anyhow::anyhow!("PlanEnvironmentResize returned no plan"))
+    }
+
+    pub async fn get_environment_resize_operation(
+        &self,
+        org_id: &str,
+        environment_id: &str,
+        operation_id: &str,
+    ) -> anyhow::Result<(EnvironmentResizeResult, Option<Duration>)> {
+        let response = self
+            .inner
+            .get_environment_resize_operation(rpc::GetEnvironmentResizeOperationRequest {
+                org_id: org_id.to_string(),
+                environment_id: environment_id.to_string(),
+                operation_id: operation_id.to_string(),
+                ..Default::default()
+            })
+            .await
+            .map_err(display_client_error)?;
+        legacy_environment_resize_response(
+            response.operation.into_option(),
+            response.environment.into_option(),
+            response.poll_interval.into_option(),
+        )
+    }
+
     pub async fn get_environment_trust_report(
         &self,
         org_id: &str,
@@ -984,6 +1068,137 @@ fn legacy_environment(value: rpc::Environment) -> Environment {
             .into_option()
             .map(timestamp_to_rfc3339),
         network: empty_to_none(value.network),
+    }
+}
+
+fn legacy_environment_resize_response(
+    operation: Option<rpc::EnvironmentResizeOperation>,
+    environment: Option<rpc::Environment>,
+    poll_interval: Option<rpc::ProtoDuration>,
+) -> anyhow::Result<(EnvironmentResizeResult, Option<Duration>)> {
+    let operation = operation
+        .map(legacy_environment_resize_operation)
+        .ok_or_else(|| anyhow::anyhow!("EnvironmentService returned no resize operation"))?;
+    let environment = environment
+        .map(legacy_environment)
+        .ok_or_else(|| anyhow::anyhow!("EnvironmentService returned no environment"))?;
+    Ok((
+        EnvironmentResizeResult {
+            operation,
+            environment,
+        },
+        poll_interval.and_then(proto_duration_to_std),
+    ))
+}
+
+fn legacy_environment_resize_operation(
+    value: rpc::EnvironmentResizeOperation,
+) -> EnvironmentResizeOperation {
+    let state = match value.state.as_known() {
+        Some(rpc::EnvironmentResizeOperationState::Pending) => "pending",
+        Some(rpc::EnvironmentResizeOperationState::Applying) => "applying",
+        Some(rpc::EnvironmentResizeOperationState::Restarting) => "restarting",
+        Some(rpc::EnvironmentResizeOperationState::Completed) => "completed",
+        Some(rpc::EnvironmentResizeOperationState::Failed) => "failed",
+        Some(rpc::EnvironmentResizeOperationState::Unspecified) => "unspecified",
+        None => "unknown",
+    };
+    EnvironmentResizeOperation {
+        id: value.id,
+        environment_id: value.environment_id,
+        request_id: value.request_id,
+        previous_resources: value
+            .previous_resources
+            .into_option()
+            .map(legacy_environment_resize_resources)
+            .unwrap_or_default(),
+        desired_resources: value
+            .desired_resources
+            .into_option()
+            .map(legacy_environment_resize_resources)
+            .unwrap_or_default(),
+        last_applied_resources: value
+            .last_applied_resources
+            .into_option()
+            .map(legacy_environment_resize_resources)
+            .unwrap_or_default(),
+        state: state.to_string(),
+        disruption_policy: resize_disruption_policy(value.disruption_policy).to_string(),
+        planned_mode: resize_execution_mode(value.planned_mode).to_string(),
+        applied_mode: resize_execution_mode(value.applied_mode).to_string(),
+        pod_replaced: value.pod_replaced,
+        failure: value
+            .failure
+            .into_option()
+            .map(|failure| EnvironmentResizeFailure {
+                code: failure.code,
+                message: failure.message,
+            }),
+        created_at: value
+            .created_at
+            .into_option()
+            .map(timestamp_to_rfc3339)
+            .unwrap_or_default(),
+        updated_at: value
+            .updated_at
+            .into_option()
+            .map(timestamp_to_rfc3339)
+            .unwrap_or_default(),
+        completed_at: value.completed_at.into_option().map(timestamp_to_rfc3339),
+    }
+}
+
+fn legacy_environment_resize_plan(value: rpc::EnvironmentResizePlan) -> EnvironmentResizePlan {
+    EnvironmentResizePlan {
+        previous_resources: value
+            .previous_resources
+            .into_option()
+            .map(legacy_environment_resize_resources)
+            .unwrap_or_default(),
+        desired_resources: value
+            .desired_resources
+            .into_option()
+            .map(legacy_environment_resize_resources)
+            .unwrap_or_default(),
+        execution_mode: resize_execution_mode(value.execution_mode).to_string(),
+        active_session_count: value.active_session_count,
+        active_sessions_will_be_terminated: value.active_sessions_will_be_terminated,
+        reason: value.reason,
+        warnings: value.warnings,
+    }
+}
+
+fn resize_disruption_policy(
+    value: rpc::EnumValue<rpc::EnvironmentResizeDisruptionPolicy>,
+) -> &'static str {
+    match value.as_known() {
+        Some(rpc::EnvironmentResizeDisruptionPolicy::LiveOnly) => "live_only",
+        Some(rpc::EnvironmentResizeDisruptionPolicy::AllowRestart) => "allow_restart",
+        Some(rpc::EnvironmentResizeDisruptionPolicy::Unspecified) => "unspecified",
+        None => "unknown",
+    }
+}
+
+fn resize_execution_mode(
+    value: rpc::EnumValue<rpc::EnvironmentResizeExecutionMode>,
+) -> &'static str {
+    match value.as_known() {
+        Some(rpc::EnvironmentResizeExecutionMode::Noop) => "noop",
+        Some(rpc::EnvironmentResizeExecutionMode::ApplyOnStart) => "apply_on_start",
+        Some(rpc::EnvironmentResizeExecutionMode::InPlace) => "in_place",
+        Some(rpc::EnvironmentResizeExecutionMode::Restart) => "restart",
+        Some(rpc::EnvironmentResizeExecutionMode::Unspecified) => "unspecified",
+        None => "unknown",
+    }
+}
+
+fn legacy_environment_resize_resources(
+    value: rpc::EnvironmentResources,
+) -> EnvironmentResizeResources {
+    EnvironmentResizeResources {
+        cpu_millicores: value.cpu_millicores,
+        memory_mb: value.memory_mb,
+        disk_gb: value.disk_gb,
     }
 }
 

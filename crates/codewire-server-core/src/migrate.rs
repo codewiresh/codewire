@@ -51,7 +51,7 @@ mod tests {
     use super::*;
 
     const ACCEPTED_APPLICATION_SCHEMA_FINGERPRINT: &str =
-        "28030ada696221a7a9e138029481aed5f0900e12355337a389f56e65ef5d9f62";
+        "a99abee88113dce678c803019e230db031567958e5c1df6ef6c5f240389fe49f";
     const RETIRE_MESH_OIDC_CLIENT_VERSION: i64 = 5;
 
     async fn startup(database_url: String) -> anyhow::Result<()> {

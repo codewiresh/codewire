@@ -31,9 +31,17 @@ from codewire.v1.environment_pb2 import (
     DeleteEnvironmentResponse,
     DesiredState,
     Environment as ProtoEnvironment,
+    EnvironmentResizeOperation,
+    EnvironmentResizeExecutionMode,
+    EnvironmentResizePlan,
+    EnvironmentResizeOperationState,
+    EnvironmentResources,
     EnvironmentState,
     GetEnvironmentResponse,
+    GetEnvironmentResizeOperationResponse,
+    PlanEnvironmentResizeResponse,
     ListEnvironmentsResponse,
+    ResizeEnvironmentResponse,
     StartEnvironmentResponse,
     StopEnvironmentResponse,
     IsolationTier,
@@ -321,6 +329,59 @@ class ControlPlaneFixture:
         self._require_auth(ctx)
         return StartEnvironmentResponse(status="started")
 
+    @staticmethod
+    def _resize_operation(request_id: str = "req_resize") -> EnvironmentResizeOperation:
+        return EnvironmentResizeOperation(
+            id="resize_1",
+            environment_id="env_123",
+            request_id=request_id,
+            previous_resources=EnvironmentResources(
+                cpu_millicores=2000, memory_mb=4096, disk_gb=20
+            ),
+            desired_resources=EnvironmentResources(
+                cpu_millicores=3000, memory_mb=6144, disk_gb=30
+            ),
+            last_applied_resources=EnvironmentResources(
+                cpu_millicores=3000, memory_mb=6144, disk_gb=30
+            ),
+            state=EnvironmentResizeOperationState.ENVIRONMENT_RESIZE_OPERATION_STATE_COMPLETED,
+            created_at=_timestamp("2026-01-02T00:00:00Z"),
+            updated_at=_timestamp("2026-01-02T00:01:00Z"),
+            completed_at=_timestamp("2026-01-02T00:01:00Z"),
+        )
+
+    def resize_environment(self, request, ctx):
+        self._require_auth(ctx)
+        return ResizeEnvironmentResponse(
+            operation=self._resize_operation(request.request_id),
+            environment=_environment(),
+        )
+
+    def plan_environment_resize(self, request, ctx):
+        self._require_auth(ctx)
+        return PlanEnvironmentResizeResponse(
+            plan=EnvironmentResizePlan(
+                previous_resources=EnvironmentResources(
+                    cpu_millicores=2000, memory_mb=4096, disk_gb=20
+                ),
+                desired_resources=EnvironmentResources(
+                    cpu_millicores=request.cpu_millicores,
+                    memory_mb=request.memory_mb,
+                    disk_gb=request.disk_gb,
+                ),
+                execution_mode=EnvironmentResizeExecutionMode.ENVIRONMENT_RESIZE_EXECUTION_MODE_IN_PLACE,
+                reason="runtime supports live resize",
+            ),
+            environment=_environment(),
+        )
+
+    def get_environment_resize_operation(self, request, ctx):
+        self._require_auth(ctx)
+        return GetEnvironmentResizeOperationResponse(
+            operation=self._resize_operation(),
+            environment=_environment(),
+        )
+
     def exec(self, request, ctx):
         self._require_auth(ctx)
         return ExecResponse(exit_code=0, stdout=b"hello\n", stderr=b"")
@@ -603,6 +664,44 @@ class SDKTestCase(unittest.TestCase):
     def test_environment_stop(self):
         env = self.cw.environments.create(template_slug="python")
         env.stop()  # should not raise
+
+    def test_environment_resize(self):
+        plan = self.cw.environments.plan_resize(
+            "env_123", cpu_millicores=3000, memory_mb=6144, disk_gb=30
+        )
+        self.assertEqual(plan["execution_mode"], "in_place")
+        operation = self.cw.environments.resize(
+            "env_123",
+            cpu_millicores=3000,
+            memory_mb=6144,
+            disk_gb=30,
+            request_id="req_direct",
+            force=True,
+        )
+        self.assertEqual(operation["id"], "resize_1")
+        self.assertEqual(operation["request_id"], "req_direct")
+        self.assertEqual(operation["state"], "completed")
+        self.assertEqual(operation["last_applied_resources"]["disk_gb"], 30)
+
+        fetched = self.cw.environments.get_resize_operation("env_123", "resize_1")
+        self.assertEqual(fetched["request_id"], "req_resize")
+
+    def test_environment_wrapper_resize(self):
+        env = self.cw.environments.create(template_slug="python")
+        self.assertEqual(
+            env.plan_resize(cpu_millicores=3000, memory_mb=6144, disk_gb=30)[
+                "execution_mode"
+            ],
+            "in_place",
+        )
+        operation = env.resize(
+            cpu_millicores=3000,
+            memory_mb=6144,
+            disk_gb=30,
+            request_id="req_wrapper",
+        )
+        self.assertEqual(operation["request_id"], "req_wrapper")
+        self.assertEqual(env.get_resize_operation("resize_1")["state"], "completed")
 
     def test_environment_remove(self):
         env = self.cw.environments.create(template_slug="python")

@@ -19,6 +19,13 @@ service EnvironmentService {
   rpc GetEnvironment(GetEnvironmentRequest) returns (GetEnvironmentResponse) {
     option idempotency_level = NO_SIDE_EFFECTS;
   }
+  rpc PlanEnvironmentResize(PlanEnvironmentResizeRequest) returns (PlanEnvironmentResizeResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+  rpc ResizeEnvironment(ResizeEnvironmentRequest) returns (ResizeEnvironmentResponse);
+  rpc GetEnvironmentResizeOperation(GetEnvironmentResizeOperationRequest) returns (GetEnvironmentResizeOperationResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
   rpc DeleteEnvironment(DeleteEnvironmentRequest) returns (DeleteEnvironmentResponse);
   rpc StopEnvironment(StopEnvironmentRequest) returns (StopEnvironmentResponse);
   rpc StartEnvironment(StartEnvironmentRequest) returns (StartEnvironmentResponse);
@@ -179,6 +186,110 @@ message GetEnvironmentRequest {
 message GetEnvironmentResponse {
   Environment environment = 1;
   google.protobuf.Duration poll_interval = 2;
+}
+
+message EnvironmentResources {
+  int32 cpu_millicores = 1;
+  int32 memory_mb = 2;
+  int32 disk_gb = 3;
+}
+
+enum EnvironmentResizeOperationState {
+  ENVIRONMENT_RESIZE_OPERATION_STATE_UNSPECIFIED = 0;
+  ENVIRONMENT_RESIZE_OPERATION_STATE_PENDING = 1;
+  ENVIRONMENT_RESIZE_OPERATION_STATE_APPLYING = 2;
+  ENVIRONMENT_RESIZE_OPERATION_STATE_RESTARTING = 3;
+  ENVIRONMENT_RESIZE_OPERATION_STATE_COMPLETED = 4;
+  ENVIRONMENT_RESIZE_OPERATION_STATE_FAILED = 5;
+}
+
+enum EnvironmentResizeDisruptionPolicy {
+  ENVIRONMENT_RESIZE_DISRUPTION_POLICY_UNSPECIFIED = 0;
+  ENVIRONMENT_RESIZE_DISRUPTION_POLICY_LIVE_ONLY = 1;
+  ENVIRONMENT_RESIZE_DISRUPTION_POLICY_ALLOW_RESTART = 2;
+}
+
+enum EnvironmentResizeExecutionMode {
+  ENVIRONMENT_RESIZE_EXECUTION_MODE_UNSPECIFIED = 0;
+  ENVIRONMENT_RESIZE_EXECUTION_MODE_NOOP = 1;
+  ENVIRONMENT_RESIZE_EXECUTION_MODE_APPLY_ON_START = 2;
+  ENVIRONMENT_RESIZE_EXECUTION_MODE_IN_PLACE = 3;
+  ENVIRONMENT_RESIZE_EXECUTION_MODE_RESTART = 4;
+}
+
+message EnvironmentResizePlan {
+  EnvironmentResources previous_resources = 1;
+  EnvironmentResources desired_resources = 2;
+  EnvironmentResizeExecutionMode execution_mode = 3;
+  int32 active_session_count = 4;
+  bool active_sessions_will_be_terminated = 5;
+  string reason = 6;
+  repeated string warnings = 7;
+}
+
+message EnvironmentResizeFailure {
+  string code = 1;
+  string message = 2;
+}
+
+message EnvironmentResizeOperation {
+  string id = 1;
+  string environment_id = 2;
+  string request_id = 3;
+  EnvironmentResources previous_resources = 4;
+  EnvironmentResources desired_resources = 5;
+  EnvironmentResources last_applied_resources = 6;
+  EnvironmentResizeOperationState state = 7;
+  EnvironmentResizeFailure failure = 8;
+  google.protobuf.Timestamp created_at = 9;
+  google.protobuf.Timestamp updated_at = 10;
+  google.protobuf.Timestamp completed_at = 11;
+  EnvironmentResizeDisruptionPolicy disruption_policy = 12;
+  EnvironmentResizeExecutionMode planned_mode = 13;
+  EnvironmentResizeExecutionMode applied_mode = 14;
+  bool pod_replaced = 15;
+}
+
+message PlanEnvironmentResizeRequest {
+  string org_id = 1;
+  string environment_id = 2;
+  int32 cpu_millicores = 3;
+  int32 memory_mb = 4;
+  int32 disk_gb = 5;
+}
+
+message PlanEnvironmentResizeResponse {
+  EnvironmentResizePlan plan = 1;
+  Environment environment = 2;
+}
+
+message ResizeEnvironmentRequest {
+  string org_id = 1;
+  string environment_id = 2;
+  int32 cpu_millicores = 3;
+  int32 memory_mb = 4;
+  int32 disk_gb = 5;
+  string request_id = 6;
+  bool force = 7;
+  EnvironmentResizeDisruptionPolicy disruption_policy = 8;
+}
+
+message ResizeEnvironmentResponse {
+  EnvironmentResizeOperation operation = 1;
+  Environment environment = 2;
+  google.protobuf.Duration poll_interval = 3;
+}
+
+message GetEnvironmentResizeOperationRequest {
+  string org_id = 1;
+  string environment_id = 2;
+  string operation_id = 3;
+}
+
+message GetEnvironmentResizeOperationResponse {
+  EnvironmentResizeOperation operation = 1;
+  Environment environment = 2;
+  google.protobuf.Duration poll_interval = 3;
 }
 
 message DeleteEnvironmentRequest {
