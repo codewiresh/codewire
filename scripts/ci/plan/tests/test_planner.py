@@ -11,6 +11,7 @@ import tarfile
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 PLANNER_PATH = Path(__file__).parents[1] / "planner.py"
@@ -294,6 +295,7 @@ dependencies = ["core"]
         self.write("generated/descriptor.bin", "descriptor-v1\n")
         self.write("scripts/ci/release/package-cli.sh", "#!/bin/sh\nexit 0\n", 0o755)
         self.write("apps/dashboard/README.md", "unrelated app\n")
+        self.write("libs/sdk-go/environment.go", "package codewire\n")
         self.write("images/base/Dockerfile", "FROM fixture-base@sha256:base\n")
         self.write("images/base/entrypoint.sh", "#!/bin/sh\nexec \"$@\"\n", 0o755)
         self.write("images/workspace/Dockerfile", "FROM ${BASE_IMAGE_REF}\n")
@@ -456,6 +458,61 @@ class PlannerFixtureTests(unittest.TestCase):
     def test_unrelated_app_change_does_not_package_rust(self) -> None:
         self.repo.change("apps/dashboard/README.md", "billing-only equivalent\n")
         self.assertEqual(self.states(self.repo.plan()), ("unaffected", "unaffected"))
+
+    def test_go_sdk_only_change_emits_unselected_cw_and_desktop_outputs(self) -> None:
+        self.repo.change(
+            "libs/sdk-go/environment.go",
+            "package codewire\n\nfunc ResizeEnvironment() {}\n",
+        )
+        document = self.repo.plan()
+        self.assertEqual(self.states(document), ("unaffected", "unaffected"))
+
+        with tempfile.TemporaryDirectory(prefix="codewire-plan-adapter-test-") as temporary:
+            root = Path(temporary)
+            legacy = root / "legacy-output"
+            plan_path = root / "plan.json"
+            legacy.write_text(
+                "selector_version=v2\n"
+                "selection=|valid:v2|policy|rust|rust_pkg_codewire_desktop|sdk_go|complete|\n"
+            )
+            plan_path.write_text(json.dumps(document, sort_keys=True, indent=2) + "\n")
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(PLANNER_PATH.parent / "apply-verification-plan.py"),
+                    "--legacy-output",
+                    str(legacy),
+                    "--plan",
+                    str(plan_path),
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        outputs = dict(line.split("=", 1) for line in completed.stdout.splitlines())
+        self.assertEqual(outputs["cw_package_selected"], "false")
+        self.assertEqual(outputs["desktop_package_selected"], "false")
+        print(
+            "non-Rust planner fixture: cw_package_selected=false "
+            "desktop_package_selected=false"
+        )
+
+    def test_missing_cargo_fails_closed_with_diagnostic(self) -> None:
+        original_run = subprocess.run
+
+        def run_without_cargo(argv: list[str], *args: object, **kwargs: object) -> subprocess.CompletedProcess:
+            if argv[0] == "cargo":
+                raise FileNotFoundError(2, "No such file or directory", "cargo")
+            return original_run(argv, *args, **kwargs)
+
+        with mock.patch.object(planner.subprocess, "run", side_effect=run_without_cargo):
+            document = self.repo.plan()
+
+        self.assertEqual(self.states(document), ("unclassified", "unclassified"))
+        diagnostic = json.dumps(document["degraded_reasons"], sort_keys=True)
+        self.assertIn("command could not run: cargo", diagnostic)
+        print(f"missing-Cargo planner fixture fails closed: {diagnostic}")
 
     def test_candidate_cargo_configuration_fails_closed(self) -> None:
         self.repo.change(".cargo/config.toml", "[net]\noffline = false\n")

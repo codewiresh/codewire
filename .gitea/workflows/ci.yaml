@@ -90,6 +90,12 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Set up pinned Cargo for trusted artifact planning
+        uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b
+        if: ${{ github.event_name == 'pull_request' }}
+        with:
+          toolchain: 1.91.1
+
       - name: Select verification from trusted artifact plan
         id: select
         env:
@@ -127,6 +133,10 @@ jobs:
               --head "$GITHUB_SHA" \
               --trusted-policy "$PR_BASE_SHA" \
               --output "$plan_output"
+            if jq -e '.degraded_reasons | length > 0' "$plan_output" >/dev/null; then
+              echo 'Trusted artifact planner degraded; affected artifacts remain selected:'
+              jq -c '.degraded_reasons' "$plan_output"
+            fi
             if [ -f "$trusted_adapter" ]; then
               python3 "$trusted_adapter" --legacy-output "$legacy_output" --plan "$plan_output"
             else
