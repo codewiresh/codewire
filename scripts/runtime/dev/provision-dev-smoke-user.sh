@@ -12,6 +12,7 @@ SMOKE_NAME="${SMOKE_NAME:-Codewire Dev Smoke}"
 SMOKE_ORG_NAME="${SMOKE_ORG_NAME:-Codewire Dev Smoke}"
 SMOKE_ORG_SLUG="${SMOKE_ORG_SLUG:-codewire-dev-smoke}"
 SMOKE_KEY_NAME="${SMOKE_KEY_NAME:-runtime-dev-commodity-smoke}"
+SMOKE_PLAN_KEY="${SMOKE_PLAN_KEY:-unlimited}"
 INFISICAL_ENV="${INFISICAL_ENV:-dev}"
 INFISICAL_PATH="${INFISICAL_PATH:-/}"
 INFISICAL_DOMAIN="${INFISICAL_DOMAIN:-https://infisical.example.invalid}"
@@ -35,6 +36,7 @@ Options:
   --org-name NAME           Smoke organization name
   --org-slug SLUG           Smoke organization slug
   --key-name NAME           Smoke API key name
+  --plan-key KEY            Billing plan used by the smoke org (default: unlimited)
   --context NAME            Kubernetes context (default: codewire-dev)
   --namespace NAME          Kubernetes namespace (default: dev)
   --postgres-pod NAME       Postgres pod (default: codewire-db-1)
@@ -97,6 +99,11 @@ while (($# > 0)); do
     --key-name)
       [[ $# -ge 2 ]] || die "--key-name requires a value"
       SMOKE_KEY_NAME="$2"
+      shift 2
+      ;;
+    --plan-key)
+      [[ $# -ge 2 ]] || die "--plan-key requires a value"
+      SMOKE_PLAN_KEY="$2"
       shift 2
       ;;
     --context)
@@ -181,6 +188,7 @@ run_psql \
   --set "org_name=$SMOKE_ORG_NAME" \
   --set "org_slug=$SMOKE_ORG_SLUG" \
   --set "key_name=$SMOKE_KEY_NAME" \
+  --set "plan_key=$SMOKE_PLAN_KEY" \
   >"$KEY_FILE" <<'SQL'
 CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA public;
 BEGIN;
@@ -190,7 +198,8 @@ WITH input AS (
     :'smoke_name'::text AS smoke_name,
     :'org_name'::text AS org_name,
     :'org_slug'::text AS org_slug,
-    :'key_name'::text AS key_name
+    :'key_name'::text AS key_name,
+    :'plan_key'::text AS plan_key
 ),
 smoke_user AS (
   INSERT INTO users (id, email, email_verified, name, created_at, updated_at)
@@ -202,12 +211,43 @@ smoke_user AS (
         updated_at = NOW()
   RETURNING id
 ),
+confidential_plan AS (
+  INSERT INTO billing_catalog_plans (
+    resource_type, plan_key, display_name, price_cents,
+    max_concurrent_ws, is_admin_only,
+    cpu_overage_cents, mem_overage_cents, disk_overage_cents,
+    created_at, updated_at
+  )
+  SELECT
+    'confidential_sandbox', plan_key, 'Dev smoke confidential sandbox', 0,
+    1, true, 5.04, 1.62, 0.01, NOW(), NOW()
+  FROM input
+  ON CONFLICT (resource_type, plan_key) DO UPDATE
+    SET display_name = EXCLUDED.display_name,
+        price_cents = EXCLUDED.price_cents,
+        max_concurrent_ws = EXCLUDED.max_concurrent_ws,
+        is_admin_only = EXCLUDED.is_admin_only,
+        cpu_overage_cents = EXCLUDED.cpu_overage_cents,
+        mem_overage_cents = EXCLUDED.mem_overage_cents,
+        disk_overage_cents = EXCLUDED.disk_overage_cents,
+        archived_at = NULL,
+        updated_at = NOW()
+  RETURNING plan_key
+),
 smoke_org AS (
-  INSERT INTO organizations (id, name, slug, created_by, created_at, updated_at)
-  SELECT encode(public.gen_random_bytes(16), 'hex'), org_name, org_slug, smoke_user.id, NOW(), NOW()
-  FROM input, smoke_user
+  INSERT INTO organizations (
+    id, name, slug, created_by, billing_plan, billing_status, billing_exempt,
+    created_at, updated_at
+  )
+  SELECT
+    encode(public.gen_random_bytes(16), 'hex'), org_name, org_slug,
+    smoke_user.id, input.plan_key, 'active', true, NOW(), NOW()
+  FROM input, smoke_user, confidential_plan
   ON CONFLICT (slug) DO UPDATE
     SET name = EXCLUDED.name,
+        billing_plan = EXCLUDED.billing_plan,
+        billing_status = EXCLUDED.billing_status,
+        billing_exempt = EXCLUDED.billing_exempt,
         updated_at = NOW()
   RETURNING id
 ),
@@ -270,6 +310,7 @@ run_psql \
   --set "smoke_email=$SMOKE_EMAIL" \
   --set "org_slug=$SMOKE_ORG_SLUG" \
   --set "key_name=$SMOKE_KEY_NAME" \
+  --set "plan_key=$SMOKE_PLAN_KEY" \
   >"$META_FILE" <<'SQL'
 WITH smoke_user AS (
   SELECT id, email FROM users WHERE email = :'smoke_email'
@@ -280,6 +321,9 @@ smoke_org AS (
 SELECT
   smoke_user.email,
   smoke_org.slug,
+  (SELECT billing_plan FROM organizations WHERE id = smoke_org.id),
+  (SELECT billing_status FROM organizations WHERE id = smoke_org.id),
+  (SELECT billing_exempt FROM organizations WHERE id = smoke_org.id),
   (SELECT COUNT(*) FROM org_members WHERE user_id = smoke_user.id),
   (SELECT COUNT(*) FROM org_members WHERE user_id = smoke_user.id AND org_id = smoke_org.id AND role = 'owner'),
   (SELECT COUNT(*) FROM api_keys WHERE user_id = smoke_user.id AND disabled_at IS NULL),
@@ -287,9 +331,12 @@ SELECT
 FROM smoke_user, smoke_org;
 SQL
 
-IFS='|' read -r actual_email actual_slug membership_count owner_count active_key_count key_prefix <"$META_FILE"
+IFS='|' read -r actual_email actual_slug actual_plan actual_billing_status actual_billing_exempt membership_count owner_count active_key_count key_prefix <"$META_FILE"
 [[ "$actual_email" == "$SMOKE_EMAIL" ]] || die "metadata verification failed for smoke email"
 [[ "$actual_slug" == "$SMOKE_ORG_SLUG" ]] || die "metadata verification failed for smoke org slug"
+[[ "$actual_plan" == "$SMOKE_PLAN_KEY" ]] || die "smoke organization must use the requested billing plan"
+[[ "$actual_billing_status" == "active" ]] || die "smoke organization billing status must be active"
+[[ "$actual_billing_exempt" == "t" ]] || die "smoke organization must remain billing exempt"
 [[ "$membership_count" == "1" ]] || die "smoke user must belong to exactly one organization"
 [[ "$owner_count" == "1" ]] || die "smoke user must own the smoke organization"
 [[ "$active_key_count" == "1" ]] || die "smoke user must have exactly one active API key"
