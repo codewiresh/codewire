@@ -1,10 +1,11 @@
 //! Host-based app preview proxy, ported from `environment_preview.go`.
 
-use axum::body::{Body, to_bytes};
+use axum::body::{Body, Bytes};
 use axum::extract::State;
 use axum::http::{HeaderMap, HeaderName, HeaderValue, Request, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::Response;
+use futures_util::{TryStream, TryStreamExt};
 use sqlx::Row;
 
 use super::ApiState;
@@ -293,14 +294,6 @@ async fn proxy_to_preview_target(
     let Ok(method) = method.as_str().parse::<reqwest::Method>() else {
         return preview_error(StatusCode::BAD_GATEWAY, "preview backend unreachable");
     };
-    let body_bytes = match to_bytes(body, usize::MAX).await {
-        Ok(b) => b,
-        Err(err) => {
-            tracing::warn!(env = %target.env_id, error = %err, "preview proxy body read failed");
-            return preview_error(StatusCode::BAD_GATEWAY, "preview backend unreachable");
-        }
-    };
-
     let mut req = state.http_client.request(method, target_url);
     for (name, value) in headers.iter() {
         if is_hop_by_hop(name.as_str()) || name == header::HOST {
@@ -312,7 +305,7 @@ async fn proxy_to_preview_target(
         .header(header::HOST.as_str(), original_host)
         .header("x-forwarded-host", original_host)
         .header("x-forwarded-proto", "https")
-        .body(body_bytes);
+        .body(stream_preview_request(body));
 
     let resp = match req.send().await {
         Ok(resp) => resp,
@@ -323,8 +316,34 @@ async fn proxy_to_preview_target(
     };
 
     let status = StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    let builder = preview_response_builder(status, resp.headers());
+    let body = stream_preview_response(resp.bytes_stream(), target.env_id.clone());
+    builder
+        .body(body)
+        .unwrap_or_else(|_| preview_error(StatusCode::BAD_GATEWAY, "preview backend unreachable"))
+}
+
+fn stream_preview_request(body: Body) -> reqwest::Body {
+    reqwest::Body::wrap_stream(body.into_data_stream())
+}
+
+fn stream_preview_response<S, E>(stream: S, env_id: String) -> Body
+where
+    S: TryStream<Ok = Bytes, Error = E> + Send + 'static,
+    E: Into<axum::BoxError> + std::fmt::Display + Send + Sync + 'static,
+{
+    Body::from_stream(stream.map_err(move |error| {
+        tracing::warn!(env = %env_id, error = %error, "preview proxy response stream failed");
+        error
+    }))
+}
+
+fn preview_response_builder(
+    status: StatusCode,
+    headers: &HeaderMap,
+) -> axum::http::response::Builder {
     let mut builder = Response::builder().status(status);
-    for (name, value) in resp.headers().iter() {
+    for (name, value) in headers {
         if is_hop_by_hop(name.as_str()) {
             continue;
         }
@@ -336,17 +355,7 @@ async fn proxy_to_preview_target(
         };
         builder = builder.header(name, value);
     }
-    builder = builder.header(PREVIEW_SERVICE_HEADER, PREVIEW_SERVICE_NAME);
-
-    match resp.bytes().await {
-        Ok(bytes) => builder.body(Body::from(bytes)).unwrap_or_else(|_| {
-            preview_error(StatusCode::BAD_GATEWAY, "preview backend unreachable")
-        }),
-        Err(err) => {
-            tracing::warn!(env = %target.env_id, error = %err, "preview proxy response read failed");
-            preview_error(StatusCode::BAD_GATEWAY, "preview backend unreachable")
-        }
-    }
+    builder.header(PREVIEW_SERVICE_HEADER, PREVIEW_SERVICE_NAME)
 }
 
 fn preview_error(status: StatusCode, message: &'static str) -> Response {
@@ -391,7 +400,12 @@ fn is_hop_by_hop(name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::io;
+    use std::time::Duration;
+
     use super::*;
+    use futures_util::StreamExt;
+    use tokio_stream::wrappers::ReceiverStream;
 
     #[test]
     fn non_preview_hosts_pass_through() {
@@ -434,5 +448,96 @@ mod tests {
                 env_prefix: "env_1".to_string()
             }))
         );
+    }
+
+    #[tokio::test]
+    async fn preview_body_bridges_forward_each_chunk_before_end_of_stream() {
+        let (request_tx, request_rx) = tokio::sync::mpsc::channel(1);
+        let request = Body::from_stream(ReceiverStream::new(request_rx));
+        let mut forwarded_request = Body::new(stream_preview_request(request)).into_data_stream();
+
+        request_tx
+            .send(Ok::<_, io::Error>(Bytes::from_static(b"request-one")))
+            .await
+            .unwrap();
+        assert_eq!(
+            next_chunk(&mut forwarded_request).await,
+            Bytes::from_static(b"request-one")
+        );
+        request_tx
+            .send(Ok::<_, io::Error>(Bytes::from_static(b"request-two")))
+            .await
+            .unwrap();
+        assert_eq!(
+            next_chunk(&mut forwarded_request).await,
+            Bytes::from_static(b"request-two")
+        );
+
+        let (response_tx, response_rx) = tokio::sync::mpsc::channel(1);
+        let mut forwarded_response =
+            stream_preview_response(ReceiverStream::new(response_rx), "env_test".to_string())
+                .into_data_stream();
+
+        response_tx
+            .send(Ok::<_, io::Error>(Bytes::from_static(b"response-one")))
+            .await
+            .unwrap();
+        assert_eq!(
+            next_chunk(&mut forwarded_response).await,
+            Bytes::from_static(b"response-one")
+        );
+        response_tx
+            .send(Ok::<_, io::Error>(Bytes::from_static(b"response-two")))
+            .await
+            .unwrap();
+        assert_eq!(
+            next_chunk(&mut forwarded_response).await,
+            Bytes::from_static(b"response-two")
+        );
+    }
+
+    #[test]
+    fn preview_response_preserves_end_to_end_headers_and_filters_hop_by_hop_headers() {
+        let headers = HeaderMap::from_iter([
+            (
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("text/event-stream"),
+            ),
+            (header::CONNECTION, HeaderValue::from_static("keep-alive")),
+            (
+                HeaderName::from_static("x-upstream"),
+                HeaderValue::from_static("preserved"),
+            ),
+        ]);
+
+        let response = preview_response_builder(StatusCode::PARTIAL_CONTENT, &headers)
+            .body(Body::empty())
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(
+            response.headers().get(header::CONTENT_TYPE),
+            Some(&HeaderValue::from_static("text/event-stream"))
+        );
+        assert_eq!(
+            response.headers().get("x-upstream"),
+            Some(&HeaderValue::from_static("preserved"))
+        );
+        assert_eq!(
+            response.headers().get(PREVIEW_SERVICE_HEADER),
+            Some(&HeaderValue::from_static(PREVIEW_SERVICE_NAME))
+        );
+        assert!(!response.headers().contains_key(header::CONNECTION));
+    }
+
+    async fn next_chunk<S>(stream: &mut S) -> Bytes
+    where
+        S: futures_util::Stream<Item = Result<Bytes, axum::Error>> + Unpin,
+    {
+        tokio::time::timeout(Duration::from_secs(1), stream.next())
+            .await
+            .expect("body bridge waited for end-of-stream")
+            .expect("body bridge ended before the next chunk")
+            .expect("body bridge returned an error")
     }
 }
