@@ -1125,6 +1125,25 @@ grep -qF "trusted_planner='.trusted-ci-policy/scripts/ci/plan/planner.py'" \
 grep -qF "legacy_selector='.trusted-ci-policy/scripts/ci/select/select-verification.sh'" \
   "$selection_block"
 grep -qF 'ref: ${{ github.event.before }}' "$selection_block"
+planner_toolchain_line="$(grep -n -m1 'name: Set up pinned Cargo for trusted artifact planning' \
+  "$selection_block" | cut -d: -f1)"
+planner_select_line="$(grep -n -m1 'name: Select verification from trusted artifact plan' \
+  "$selection_block" | cut -d: -f1)"
+test -n "$planner_toolchain_line"
+test -n "$planner_select_line"
+test "$planner_toolchain_line" -lt "$planner_select_line"
+grep -qF 'uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b' \
+  "$selection_block"
+grep -A3 -F 'name: Set up pinned Cargo for trusted artifact planning' \
+  "$selection_block" | grep -qF "if: \${{ github.event_name == 'pull_request' }}"
+grep -A4 -F 'name: Set up pinned Cargo for trusted artifact planning' \
+  "$selection_block" | grep -qF 'toolchain: 1.91.1'
+grep -qF "jq -e '.degraded_reasons | length > 0'" "$selection_block"
+grep -qF "jq -c '.degraded_reasons'" "$selection_block"
+
+python3 "$ROOT/scripts/ci/plan/tests/test_planner.py" \
+  PlannerFixtureTests.test_go_sdk_only_change_emits_unselected_cw_and_desktop_outputs \
+  PlannerFixtureTests.test_missing_cargo_fails_closed_with_diagnostic
 
 permissions_block="$(awk '
   $0 == "permissions:" { capture = 1 }
