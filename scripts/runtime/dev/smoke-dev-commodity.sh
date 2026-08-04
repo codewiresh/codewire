@@ -2687,6 +2687,294 @@ select_kube_context_best_effort() {
   fi
 }
 
+stage_kubernetes_failure_diagnostics() {
+  local source_dir="$1"
+  local label="$2"
+  local bundle_dir manifest_file pool_source="" candidate manifest_entries
+  local file file_name byte_count
+
+  [[ -n "$SMOKE_ARTIFACT_DIR" ]] || return 0
+  bundle_dir="$SMOKE_ARTIFACT_DIR/kubernetes-failure"
+  manifest_file="$SMOKE_ARTIFACT_DIR/kubernetes-failure-manifest.json"
+  mkdir -p "$bundle_dir"
+
+  if [[ -s "$source_dir/sandboxclaims.json" ]] \
+      && jq -e 'type == "object" and (.items | type == "array")' \
+        "$source_dir/sandboxclaims.json" >/dev/null 2>&1; then
+    jq '
+      def safe_token:
+        if type == "string"
+            and length > 0
+            and length <= 316
+            and test("^[A-Za-z0-9][A-Za-z0-9_.:/-]*$")
+        then . else null end;
+      {
+        schema: "codewire-kubernetes-claim-diagnostic-v1",
+        read_state: "available",
+        count: (.items | length),
+        claims: [
+          .items[]?
+          | {
+              name: (.metadata.name | safe_token),
+              generation: (
+                .metadata.generation
+                | if type == "number" and . >= 0 then . else null end
+              ),
+              deleting: (.metadata.deletionTimestamp != null),
+              warm_pool: (.spec.warmPoolRef.name | safe_token),
+              template: (.spec.sandboxTemplateRef.name | safe_token),
+              sandbox_assigned: (
+                (.status.sandbox.name | safe_token) != null
+              ),
+              conditions: [
+                .status.conditions[]?
+                | {
+                    type: (.type | safe_token),
+                    status: (
+                      .status
+                      | if . == "True" or . == "False" or . == "Unknown"
+                        then . else null end
+                    ),
+                    reason: (.reason | safe_token),
+                    observed_generation: (
+                      .observedGeneration
+                      | if type == "number" and . >= 0 then . else null end
+                    )
+                  }
+                  | with_entries(select(.value != null))
+              ]
+            }
+            | with_entries(select(.value != null))
+        ]
+      }
+    ' "$source_dir/sandboxclaims.json" >"$bundle_dir/claim.json"
+  else
+    jq -n '{
+      schema: "codewire-kubernetes-claim-diagnostic-v1",
+      read_state: "unavailable",
+      count: 0,
+      claims: []
+    }' >"$bundle_dir/claim.json"
+  fi
+
+  for candidate in "$source_dir"/sandboxwarmpool-*.json; do
+    [[ -f "$candidate" ]] || continue
+    pool_source="$candidate"
+    break
+  done
+  if [[ -n "$pool_source" && -s "$pool_source" ]] \
+      && jq -e 'type == "object"' "$pool_source" >/dev/null 2>&1; then
+    jq '
+      def safe_token:
+        if type == "string"
+            and length > 0
+            and length <= 316
+            and test("^[A-Za-z0-9][A-Za-z0-9_.:/-]*$")
+        then . else null end;
+      def count_value:
+        if type == "number" and . >= 0 and floor == . then . else null end;
+      {
+        schema: "codewire-kubernetes-warm-pool-diagnostic-v1",
+        read_state: "available",
+        name: (.metadata.name | safe_token),
+        generation: (.metadata.generation | count_value),
+        template: (.spec.sandboxTemplateRef.name | safe_token),
+        desired_replicas: (.spec.replicas | count_value),
+        current_replicas: (.status.replicas | count_value),
+        ready_replicas: (.status.readyReplicas | count_value)
+      }
+      | with_entries(select(.value != null))
+    ' "$pool_source" >"$bundle_dir/warm-pool.json"
+  else
+    jq -n '{
+      schema: "codewire-kubernetes-warm-pool-diagnostic-v1",
+      read_state: "unavailable"
+    }' >"$bundle_dir/warm-pool.json"
+  fi
+
+  if [[ -s "$source_dir/pods.json" ]] \
+      && jq -e 'type == "object" and (.items | type == "array")' \
+        "$source_dir/pods.json" >/dev/null 2>&1; then
+    jq '
+      def safe_token:
+        if type == "string"
+            and length > 0
+            and length <= 316
+            and test("^[A-Za-z0-9][A-Za-z0-9_.:/-]*$")
+        then . else null end;
+      def count_value:
+        if type == "number" and . >= 0 and floor == . then . else null end;
+      def container_state:
+        if .waiting != null then
+          {
+            state: "waiting",
+            reason: (.waiting.reason | safe_token)
+          }
+        elif .terminated != null then
+          {
+            state: "terminated",
+            reason: (.terminated.reason | safe_token),
+            exit_code: (
+              .terminated.exitCode
+              | if type == "number" and floor == . then . else null end
+            ),
+            signal: (.terminated.signal | count_value)
+          }
+        elif .running != null then
+          {state: "running"}
+        else
+          {state: "unknown"}
+        end
+        | with_entries(select(.value != null));
+      {
+        schema: "codewire-kubernetes-pod-diagnostic-v1",
+        read_state: "available",
+        count: (.items | length),
+        pods: [
+          .items[]?
+          | {
+              name: (.metadata.name | safe_token),
+              phase: (.status.phase | safe_token),
+              node_assigned: ((.spec.nodeName | safe_token) != null),
+              runtime_class_configured: (
+                (.spec.runtimeClassName | safe_token) != null
+              ),
+              conditions: [
+                .status.conditions[]?
+                | {
+                    type: (.type | safe_token),
+                    status: (
+                      .status
+                      | if . == "True" or . == "False" or . == "Unknown"
+                        then . else null end
+                    ),
+                    reason: (.reason | safe_token)
+                  }
+                  | with_entries(select(.value != null))
+              ],
+              containers: [
+                .status.containerStatuses[]?
+                | {
+                    name: (.name | safe_token),
+                    ready: (.ready == true),
+                    restart_count: (.restartCount | count_value),
+                    image_resolved: (
+                      .imageID | type == "string" and length > 0
+                    ),
+                    state: (.state | container_state)
+                  }
+                  | with_entries(select(.value != null))
+              ]
+            }
+            | with_entries(select(.value != null))
+        ]
+      }
+    ' "$source_dir/pods.json" >"$bundle_dir/pods.json"
+  else
+    jq -n '{
+      schema: "codewire-kubernetes-pod-diagnostic-v1",
+      read_state: "unavailable",
+      count: 0,
+      pods: []
+    }' >"$bundle_dir/pods.json"
+  fi
+
+  if [[ -s "$source_dir/events.json" ]] \
+      && jq -e 'type == "object" and (.items | type == "array")' \
+        "$source_dir/events.json" >/dev/null 2>&1; then
+    jq \
+      --slurpfile claims "$bundle_dir/claim.json" \
+      --slurpfile pods "$bundle_dir/pods.json" '
+        def safe_token:
+          if type == "string"
+              and length > 0
+              and length <= 316
+              and test("^[A-Za-z0-9][A-Za-z0-9_.:/-]*$")
+          then . else null end;
+        def safe_timestamp:
+          if type == "string"
+              and length <= 64
+              and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.+-]+Z?$")
+          then . else null end;
+        def count_value:
+          if type == "number" and . >= 0 and floor == . then . else null end;
+        def message_class:
+          ascii_downcase
+          | if test("schedul|insufficient|affinity|taint") then "scheduling"
+            elif test("image.*pull|pull.*image|registry") then "image_pull"
+            elif test("sandbox|runtimeclass|runtime") then "runtime"
+            elif test("volume|mount|persistentvolume|pvc") then "storage"
+            else "other"
+            end;
+        (
+          (($claims[0].claims // []) | map(.name))
+          + (($pods[0].pods // []) | map(.name))
+          | map(select(type == "string"))
+        ) as $object_names
+        | {
+            schema: "codewire-kubernetes-event-diagnostic-v1",
+            read_state: "available",
+            events: [
+              .items[]?
+              | select(
+                  .involvedObject.name as $name
+                  | $object_names
+                  | index($name)
+                )
+              | {
+                  object_kind: (.involvedObject.kind | safe_token),
+                  object_name: (.involvedObject.name | safe_token),
+                  type: (.type | safe_token),
+                  reason: (.reason | safe_token),
+                  reporting_controller: (
+                    (.reportingController // .source.component) | safe_token
+                  ),
+                  count: (.count | count_value),
+                  first_timestamp: (
+                    (.firstTimestamp // .eventTime) | safe_timestamp
+                  ),
+                  last_timestamp: (
+                    (.lastTimestamp // .eventTime) | safe_timestamp
+                  ),
+                  message_class: (
+                    ((.reason // "") + " " + (.message // ""))
+                    | message_class
+                  )
+                }
+                | with_entries(select(.value != null))
+            ]
+          }
+      ' "$source_dir/events.json" >"$bundle_dir/events.json"
+  else
+    jq -n '{
+      schema: "codewire-kubernetes-event-diagnostic-v1",
+      read_state: "unavailable",
+      events: []
+    }' >"$bundle_dir/events.json"
+  fi
+
+  manifest_entries="$({
+    for file in "$bundle_dir"/*.json; do
+      file_name="$(basename "$file")"
+      byte_count="$(wc -c <"$file" | tr -d '[:space:]')"
+      jq -n \
+        --arg path "kubernetes-failure/$file_name" \
+        --argjson bytes "$byte_count" \
+        '{path: $path, bytes: $bytes}'
+    done
+  } | jq -s 'sort_by(.path)')"
+  jq -n \
+    --arg failure_label "$label" \
+    --argjson files "$manifest_entries" \
+    '{
+      schema: "codewire-kubernetes-failure-manifest-v1",
+      failure_label: $failure_label,
+      data_contract: "allowlisted-structured-fields-only",
+      files: $files
+    }' >"$manifest_file"
+  log "staged value-blind Kubernetes failure diagnostics in $bundle_dir"
+}
+
 collect_failure_diagnostics() {
   local label="$1"
   local dir pods_json pod container containers claim_json warm_pool_name template_name
@@ -2755,6 +3043,8 @@ collect_failure_diagnostics() {
       done <<<"$containers"
     done < <(jq -r '.items[].metadata.name // empty' "$pods_json" 2>/dev/null || true)
   fi
+
+  stage_kubernetes_failure_diagnostics "$dir" "$label"
 }
 
 capture_container_log() {

@@ -273,6 +273,135 @@ run_environment_artifact_case() {
     fail "retained environment identity was not staged for explicit cleanup"
 }
 
+run_kubernetes_failure_artifact_case() {
+  local case_dir="$TEST_TMP/kubernetes-failure"
+  local runtime_dir="$case_dir/runtime"
+  local artifact_dir="$case_dir/artifact"
+  local manifest="$artifact_dir/kubernetes-failure-manifest.json"
+
+  mkdir -p "$runtime_dir" "$artifact_dir"
+  (
+    source <(sed '$d' "$SMOKE")
+    TMPDIR_SMOKE="$runtime_dir"
+    SMOKE_ARTIFACT_DIR="$artifact_dir"
+    SMOKE_COLLECT_FAILURE_DIAGNOSTICS=1
+    SMOKE_FAILURE_DIAGNOSTICS_CAPTURED=0
+    SMOKE_KEEP_ENV=1
+    ENV_ID="test-environment-id"
+    CLAIM_NAME=""
+    SANDBOX_NAMESPACE="test-sandboxes"
+    KUBE_CONTEXT="test-context"
+    kubectl() {
+      return 0
+    }
+    maybe_default_kubeconfig() {
+      return 0
+    }
+    select_kube_context_best_effort() {
+      return 0
+    }
+    kubectl_dev() {
+      case "$*" in
+        *"version --client"*)
+          return 0
+          ;;
+        *" get sandboxclaim -l "*)
+          printf '%s\n' "{\"items\":[{\"metadata\":{\"name\":\"claim-one\",\"generation\":7,\"annotations\":{\"unsafe\":\"$SENSITIVE_SENTINEL\"}},\"spec\":{\"warmPoolRef\":{\"name\":\"pool-one\"},\"env\":[{\"name\":\"TOKEN\",\"value\":\"$SENSITIVE_SENTINEL\"}]},\"status\":{\"conditions\":[{\"type\":\"Ready\",\"status\":\"False\",\"reason\":\"SandboxPending\",\"message\":\"$SENSITIVE_SENTINEL\",\"observedGeneration\":7}]}}]}"
+          ;;
+        *" get sandboxclaim claim-one "*)
+          printf '%s\n' "{\"metadata\":{\"name\":\"claim-one\"},\"spec\":{\"warmPoolRef\":{\"name\":\"pool-one\"},\"env\":[{\"name\":\"TOKEN\",\"value\":\"$SENSITIVE_SENTINEL\"}]},\"status\":{\"conditions\":[{\"type\":\"Ready\",\"status\":\"False\",\"reason\":\"SandboxPending\",\"message\":\"$SENSITIVE_SENTINEL\"}]}}"
+          ;;
+        *" get sandboxwarmpool pool-one "*)
+          printf '%s\n' '{"metadata":{"name":"pool-one","generation":3},"spec":{"replicas":1,"sandboxTemplateRef":{"name":"template-one"}},"status":{"replicas":1,"readyReplicas":0}}'
+          ;;
+        *" get sandboxtemplate template-one "*)
+          printf '%s\n' "{\"metadata\":{\"name\":\"template-one\",\"annotations\":{\"unsafe\":\"$SENSITIVE_SENTINEL\"}},\"spec\":{\"podTemplate\":{\"spec\":{\"containers\":[{\"env\":[{\"value\":\"$SENSITIVE_SENTINEL\"}]}]}}}}"
+          ;;
+        *" get pod "*" -o wide"*)
+          printf '%s\n' "raw wide output $SENSITIVE_SENTINEL"
+          ;;
+        *" get pod "*" -o json"*)
+          printf '%s\n' "{\"items\":[{\"metadata\":{\"name\":\"pod-one\",\"annotations\":{\"unsafe\":\"$SENSITIVE_SENTINEL\"}},\"spec\":{\"runtimeClassName\":\"commodity\",\"containers\":[{\"name\":\"workspace\",\"image\":\"registry.invalid/$SENSITIVE_SENTINEL\",\"env\":[{\"value\":\"$SENSITIVE_SENTINEL\"}]}]},\"status\":{\"phase\":\"Pending\",\"conditions\":[{\"type\":\"PodScheduled\",\"status\":\"False\",\"reason\":\"Unschedulable\",\"message\":\"$SENSITIVE_SENTINEL\"}],\"containerStatuses\":[{\"name\":\"workspace\",\"ready\":false,\"restartCount\":2,\"imageID\":\"\",\"state\":{\"waiting\":{\"reason\":\"ImagePullBackOff\",\"message\":\"$SENSITIVE_SENTINEL\"}}}]}}]}"
+          ;;
+        *" describe pod "*)
+          printf '%s\n' "raw describe output $SENSITIVE_SENTINEL"
+          ;;
+        *" get events "*" -o json"*)
+          printf '%s\n' "{\"items\":[{\"involvedObject\":{\"kind\":\"Pod\",\"name\":\"pod-one\"},\"type\":\"Warning\",\"reason\":\"FailedScheduling\",\"reportingController\":\"default-scheduler\",\"count\":2,\"firstTimestamp\":\"2026-08-03T12:00:00Z\",\"lastTimestamp\":\"2026-08-03T12:01:00Z\",\"message\":\"0/1 nodes available: $SENSITIVE_SENTINEL\"},{\"involvedObject\":{\"kind\":\"Secret\",\"name\":\"unrelated\"},\"type\":\"Warning\",\"reason\":\"Unsafe\",\"message\":\"$SENSITIVE_SENTINEL\"}]}"
+          ;;
+        *" get events "*)
+          printf '%s\n' "raw event output $SENSITIVE_SENTINEL"
+          ;;
+        *" logs "*)
+          printf '%s\n' "raw container log $SENSITIVE_SENTINEL"
+          ;;
+        *)
+          printf '%s\n' "unexpected kubectl invocation $SENSITIVE_SENTINEL" >&2
+          return 97
+          ;;
+      esac
+    }
+
+    collect_failure_diagnostics failure
+  )
+
+  jq -e '
+    .schema == "codewire-kubernetes-failure-manifest-v1"
+    and .failure_label == "failure"
+    and .data_contract == "allowlisted-structured-fields-only"
+    and (.files | length) == 4
+    and ([.files[].path] | unique | length) == 4
+    and ([.files[].bytes | select(. > 0)] | length) == 4
+  ' "$manifest" >/dev/null || fail "Kubernetes failure manifest is incomplete"
+  jq -e '
+    .read_state == "available"
+    and .count == 1
+    and .claims[0].name == "claim-one"
+    and .claims[0].warm_pool == "pool-one"
+    and .claims[0].conditions[0] == {
+      type: "Ready",
+      status: "False",
+      reason: "SandboxPending",
+      observed_generation: 7
+    }
+  ' "$artifact_dir/kubernetes-failure/claim.json" >/dev/null || \
+    fail "claim readiness summary is incomplete"
+  jq -e '
+    .name == "pool-one"
+    and .template == "template-one"
+    and .desired_replicas == 1
+    and .current_replicas == 1
+    and .ready_replicas == 0
+  ' "$artifact_dir/kubernetes-failure/warm-pool.json" >/dev/null || \
+    fail "warm-pool readiness summary is incomplete"
+  jq -e '
+    .pods[0].phase == "Pending"
+    and .pods[0].node_assigned == false
+    and .pods[0].runtime_class_configured == true
+    and .pods[0].conditions[0].reason == "Unschedulable"
+    and .pods[0].containers[0].state == {
+      state: "waiting",
+      reason: "ImagePullBackOff"
+    }
+  ' "$artifact_dir/kubernetes-failure/pods.json" >/dev/null || \
+    fail "pod scheduling and image summary is incomplete"
+  jq -e '
+    (.events | length) == 1
+    and .events[0].object_name == "pod-one"
+    and .events[0].reason == "FailedScheduling"
+    and .events[0].reporting_controller == "default-scheduler"
+    and .events[0].message_class == "scheduling"
+  ' "$artifact_dir/kubernetes-failure/events.json" >/dev/null || {
+    jq . "$artifact_dir/kubernetes-failure/events.json" >&2 || true
+    fail "bounded event summary is incomplete"
+  }
+  rg -F "$SENSITIVE_SENTINEL" "$runtime_dir/kube-diagnostics-failure" >/dev/null || \
+    fail "synthetic raw diagnostic did not exercise sensitive input"
+  if rg -F "$SENSITIVE_SENTINEL" "$artifact_dir" >/dev/null; then
+    fail "Kubernetes failure artifact retained non-allowlisted content"
+  fi
+}
+
 run_packet_header_summary_case() {
   local case_dir="$TEST_TMP/packet-headers"
   local raw="$case_dir/raw.log"
@@ -383,6 +512,7 @@ assert_static_contract
 run_safe_diagnostic_case
 run_safe_client_diagnostic_case
 run_environment_artifact_case
+run_kubernetes_failure_artifact_case
 run_packet_header_summary_case
 run_packet_capture_startup_failure_case
 run_packet_diagnostic_phase_order_case
