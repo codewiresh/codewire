@@ -4,14 +4,16 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 PACKAGE="$ROOT/scripts/ci/release/package-codewire-desktop.sh"
 CI_WORKFLOW="$ROOT/.gitea/workflows/ci.yaml"
+RUNNER_ASSERTION="$ROOT/scripts/ci/setup/assert-ci-runner-image.sh"
 mkdir -p "$ROOT/.tmp"
 TMP="$(mktemp -d "$ROOT/.tmp/test-package-codewire-desktop.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT
 
-# Wry links xkbcommon-x11 directly. The planner-selected Rust capability group
-# is the one PR package path and must install the linker-visible development
-# library before the detached package dry run.
-grep -Fq 'libxkbcommon-x11-dev' "$CI_WORKFLOW"
+# Wry links xkbcommon-x11 directly. The immutable runner image owns the native
+# package, and the planner-selected Rust capability group must assert that
+# contract before the detached package dry run.
+grep -Fq 'libxkbcommon-x11-dev' "$RUNNER_ASSERTION"
+grep -Fq 'scripts/ci/setup/assert-ci-runner-image.sh' "$CI_WORKFLOW"
 grep -Fq "contains(needs.verification-selection.outputs.selection, '|rust_pkg_codewire_desktop|')" \
   "$CI_WORKFLOW"
 [ ! -e "$ROOT/.gitea/workflows/desktop-package.yaml" ]

@@ -129,16 +129,10 @@ jobs:
           echo "$HOME/.proto-tools/protoc/bin" >> "$GITHUB_PATH"
           "$HOME/.proto-tools/protoc/bin/protoc" --version
 
-      - name: Install cross-build tools
+      - name: Set up cross-build tools
         run: |
           set -euo pipefail
-          if command -v sudo >/dev/null 2>&1; then
-            APT="sudo apt-get"
-          else
-            APT="apt-get"
-          fi
-          $APT update -qq || true
-          $APT install -y -qq ca-certificates curl xz-utils
+          scripts/ci/setup/assert-ci-runner-image.sh
 
           zig_url="https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${ZIG_VERSION}.tar.xz"
           curl -fsSLo zig.tar.xz "$zig_url"

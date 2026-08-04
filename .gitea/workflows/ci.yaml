@@ -74,6 +74,11 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Verify CI runner image contract
+        run: |
+          scripts/ci/setup/assert-ci-runner-image.sh
+          scripts/ci/tests/test-ci-runner-image-contract.sh
+
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         if: ${{ github.event_name == 'pull_request' }}
         with:
@@ -215,13 +220,11 @@ jobs:
           echo "$HOME/.proto-tools/protoc/bin" >> "$GITHUB_PATH"
           "$HOME/.proto-tools/protoc/bin/protoc" --version
 
-      - name: Install pinned cross-build tools
+      - name: Set up pinned cross-build tools
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && needs.verification-selection.outputs.cw_package_selected == 'true' }}
         run: |
           set -euo pipefail
-          if command -v sudo >/dev/null 2>&1; then APT='sudo apt-get'; else APT='apt-get'; fi
-          $APT update -qq || true
-          $APT install -y -qq ca-certificates curl xz-utils
+          scripts/ci/setup/assert-ci-runner-image.sh
           zig_url="https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${ZIG_VERSION}.tar.xz"
           curl -fsSLo zig.tar.xz "$zig_url"
           echo "${ZIG_X86_64_LINUX_SHA256}  zig.tar.xz" | sha256sum -c -
@@ -384,23 +387,17 @@ jobs:
           toolchain: stable
           components: rustfmt, clippy
 
-      - name: Install Rust protobuf compiler
+      - name: Verify Rust protobuf compiler
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|rust|') || contains(needs.verification-selection.outputs.selection, '|transport|')) }}
         run: |
           set -euo pipefail
-          if command -v protoc >/dev/null 2>&1; then protoc --version; exit 0; fi
-          if command -v sudo >/dev/null 2>&1; then APT='sudo apt-get'; else APT=apt-get; fi
-          $APT update -qq || true
-          $APT install -y -qq protobuf-compiler
-          protoc --version
+          scripts/ci/setup/assert-ci-runner-image.sh
 
-      - name: Install detached desktop build prerequisites
+      - name: Verify GPUI and Wry build prerequisites
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|rust_pkg_codewire_desktop|') }}
         run: |
           set -euo pipefail
-          if command -v sudo >/dev/null 2>&1; then APT='sudo apt-get'; else APT=apt-get; fi
-          $APT update -qq || true
-          $APT install -y -qq pkg-config libgtk-3-dev libwebkit2gtk-4.1-dev libxkbcommon-x11-dev
+          scripts/ci/setup/assert-ci-runner-image.sh
 
       - name: Verify curated Rust image workspace locks
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|rust_curated_locks|') }}
@@ -441,13 +438,11 @@ jobs:
         with:
           toolchain: stable
 
-      - name: Install integration tools
+      - name: Verify integration tools
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|database|') || contains(needs.verification-selection.outputs.selection, '|service_integration|')) }}
         run: |
           set -euo pipefail
-          if command -v sudo >/dev/null 2>&1; then APT='sudo apt-get'; else APT=apt-get; fi
-          $APT update -qq || true
-          $APT install -y -qq ca-certificates curl jq postgresql-client protobuf-compiler
+          scripts/ci/setup/assert-ci-runner-image.sh
 
       - name: Start integration Postgres
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|database|') || contains(needs.verification-selection.outputs.selection, '|service_integration|')) }}
@@ -534,13 +529,11 @@ jobs:
           "$chromium" --version
           echo "PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=$chromium" >> "$GITHUB_ENV"
 
-      - name: Install Kind tools
+      - name: Verify Kind runner tools
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|kind|') }}
         run: |
           set -euo pipefail
-          if command -v sudo >/dev/null 2>&1; then APT='sudo apt-get'; else APT=apt-get; fi
-          $APT update -qq || true
-          $APT install -y -qq ca-certificates curl jq postgresql-client protobuf-compiler
+          scripts/ci/setup/assert-ci-runner-image.sh
           mkdir -p "$HOME/.local/bin"
           cd /tmp
           curl -fsSLO "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl"

@@ -55,13 +55,11 @@ jobs:
         with:
           toolchain: stable
 
-      - name: Install Rust stack diagnostic tools
+      - name: Verify Rust stack diagnostic tools
         if: ${{ contains(steps.select.outputs.selection, '|diagnostic_rust_stack|') }}
         run: |
           set -euo pipefail
-          if command -v sudo >/dev/null 2>&1; then APT='sudo apt-get'; else APT=apt-get; fi
-          $APT update -qq || true
-          $APT install -y -qq ca-certificates curl jq postgresql-client protobuf-compiler
+          scripts/ci/setup/assert-ci-runner-image.sh
 
       - name: Start Rust stack diagnostic Postgres
         if: ${{ contains(steps.select.outputs.selection, '|diagnostic_rust_stack|') }}
