@@ -311,6 +311,12 @@ def main() -> None:
         fixture.assert_selected("support base input", True, mode="support")
         fixture.assert_selected("support input is not dev runtime", False)
 
+        fixture.reset("support-workspace")
+        fixture.append("images/workspace/debian.sources", "\n# selector fixture\n")
+        fixture.commit("support workspace")
+        fixture.assert_selected("support workspace input", True, mode="support")
+        fixture.assert_selected("workspace input is not dev runtime", False)
+
         fixture.reset("dashboard-installer")
         fixture.append("apps/cli/install.sh", "\n# dashboard image fixture\n")
         fixture.commit("dashboard installer input")

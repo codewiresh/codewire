@@ -1,110 +1,116 @@
-# codewire workspace image — the rootfs that runs inside every sandbox pod.
-#
-# Build context: the codewire repo root.
-#   docker build -t codewire-workspace:local -f images/workspace/Dockerfile .
-#
-# The Gitea support-image workflow overrides this with the base digest built
-# from the same canonical source revision. The public default keeps standalone
-# OSS builds immutable while that workflow is being established.
-ARG BASE_IMAGE_REF=ghcr.io/codewiresh/base@sha256:96f70ee3cedb863d0d5b96f5c1c7b6c3800c1bb4212aa868b73b2f3ed10f8ea8
-ARG AIDER_VERSION=0.16.0
+# syntax=docker/dockerfile:1.7
+# Codewire developer workspace. The production workflow and local verifier must
+# supply the exact base image built from the same source tree.
+ARG BASE_IMAGE_REF
 
-# Aider 0.16.0 pins NumPy 1.24, whose wheels support Python through 3.11.
-# Keep that runtime isolated and pinned so the canonical Noble base can retain
-# its system Python 3.12 for general workspace use.
-FROM python:3.11-slim-bookworm@sha256:b18992999dbe963a45a8a4da40ac2b1975be1a776d939d098c647482bcad5cba AS aider-builder
-ARG AIDER_VERSION
-RUN apt-get update && apt-get install -y --no-install-recommends build-essential && \
+FROM rust:1.91.1-slim-bookworm@sha256:8514999d4786ef12efe89239e86b3d0a021b94b9d35108c8efe6c79ca7dc1a65 AS cw-builder
+COPY images/workspace/debian.sources /etc/apt/sources.list.d/debian.sources
+RUN rm -f /etc/apt/sources.list && \
+    apt-get update && \
+    grep -RqsF 'snapshot.debian.org/archive/debian/20251208T000000Z/' /etc/apt/sources.list.d && \
+    ! grep -RqsE '(deb|security)\.debian\.org' /etc/apt/sources.list /etc/apt/sources.list.d && \
+    apt-get install -y --no-install-recommends libprotobuf-dev protobuf-compiler && \
     rm -rf /var/lib/apt/lists/*
-RUN python -m venv --copies /opt/aider && \
-    /opt/aider/bin/pip install --no-cache-dir "aider-chat==${AIDER_VERSION}"
 
-FROM rust:1.91-bookworm AS cw-builder
-WORKDIR /src
-RUN apt-get update && apt-get install -y --no-install-recommends \
-      libprotobuf-dev protobuf-compiler && \
-    rm -rf /var/lib/apt/lists/*
-COPY Cargo.toml Cargo.lock ./
-COPY crates ./crates
-COPY proto ./proto
-COPY libs/gateway-proto ./libs/gateway-proto
-RUN cargo build --locked --release -p codewire-cli-bin --bin cw
+# The source tree stays read-only and is never copied into an image layer. Cargo
+# owns normal/build dependency closure; only the resulting cw binary crosses
+# into the final stage.
+RUN --mount=type=bind,target=/src,readonly \
+    --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    cargo build --manifest-path /src/Cargo.toml --locked --release \
+      -p codewire-cli-bin --bin cw --target-dir /tmp/cargo-target && \
+    install -D -m 0755 /tmp/cargo-target/release/cw /out/cw
 
 FROM ${BASE_IMAGE_REF}
 USER root
-ARG GO_VERSION=1.26.3
-ARG CODEX_VERSION=0.146.0
-ARG CLAUDE_CODE_VERSION=2.1.220
-ARG GEMINI_CLI_VERSION=0.53.1
-ARG KIMI_CODE_VERSION=0.31.1
-ARG PI_VERSION=0.73.1
+ARG TARGETARCH
+ARG NODE_VERSION=22.23.2
+ARG GO_VERSION=1.26.5
 
-COPY --from=aider-builder --chown=codewire:codewire \
-    /usr/local/lib/libpython3.11.so.1.0 /usr/local/lib/libpython3.11.so.1.0
-COPY --from=aider-builder /usr/local/lib/python3.11 /usr/local/lib/python3.11
-COPY --from=aider-builder --chown=codewire:codewire /opt/aider /opt/aider
-RUN ldconfig
+# Node and Go are direct, checksum-verified upstream archives on both supported
+# architectures. Unknown architectures fail closed.
+RUN set -euo pipefail; \
+    case "$TARGETARCH" in \
+      amd64) \
+        node_arch=x64; \
+        node_sha=b294a556e639d64338823920e5866c21c02741742d2e1529ee1a225c1ec9252a; \
+        go_sha=5c2c3b16caefa1d968a94c1daca04a7ca301a496d9b086e17ad77bb81393f053 ;; \
+      arm64) \
+        node_arch=arm64; \
+        node_sha=013b59cfd2819703a6f4a14ab891fc46fc2a4e3f5bcd92de3fb4929b43e35b30; \
+        go_sha=fe4789e92b1f33358680864bbe8704289e7bb5fc207d80623c308935bd696d49 ;; \
+      *) echo "unsupported workspace image architecture: $TARGETARCH" >&2; exit 1 ;; \
+    esac; \
+    curl --proto '=https' --tlsv1.2 -fsSL \
+      "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${node_arch}.tar.gz" \
+      -o /tmp/node.tgz; \
+    echo "${node_sha}  /tmp/node.tgz" | sha256sum -c -; \
+    tar -xzf /tmp/node.tgz -C /usr/local --strip-components=1; \
+    curl --proto '=https' --tlsv1.2 -fsSL \
+      "https://go.dev/dl/go${GO_VERSION}.linux-${TARGETARCH}.tar.gz" -o /tmp/go.tgz; \
+    echo "${go_sha}  /tmp/go.tgz" | sha256sum -c -; \
+    tar -xzf /tmp/go.tgz -C /usr/local; \
+    rm -f /tmp/node.tgz /tmp/go.tgz; \
+    node --version; npm --version; /usr/local/go/bin/go version
 
-# Go
-RUN curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" | tar -C /usr/local -xzf -
 ENV PATH="/usr/local/go/bin:/home/codewire/go/bin:${PATH}"
 ENV GOPATH="/home/codewire/go"
 
-# Node 22 + bun + pnpm + yarn (npm globals as root for system-wide tooling;
-# the agent CLIs go under USER codewire below into ~/.npm-global so they can
-# self-update at runtime without sudo).
-RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
-    apt-get install -y nodejs && rm -rf /var/lib/apt/lists/* && \
-    node -e 'const [major, minor] = process.versions.node.split(".").map(Number); if (major < 22 || (major === 22 && minor < 19)) { throw new Error(`Node ${process.versions.node} is too old for Kimi Code`); }'
-RUN npm install -g pnpm yarn && \
-    curl -fsSL https://bun.sh/install | bash && mv /root/.bun/bin/bun /usr/local/bin/
+# Moving convenience channels intentionally resolve at image-build time. Their
+# result remains visible to the SBOM and is identified by the immutable output
+# image digest.
+RUN npm install -g --ignore-scripts npm@latest pnpm yarn && \
+    npm cache clean --force && \
+    curl --proto '=https' --tlsv1.2 -fsSL https://bun.sh/install | bash && \
+    install -m 0755 /root/.bun/bin/bun /usr/local/bin/bun && \
+    ln -s bun /usr/local/bin/bunx && \
+    rm -rf /root/.bun
 
-# Python (with venv/pipx, plus a few debug tools)
-RUN apt-get update && apt-get install -y python3-full python3-venv pipx strace gdb file && \
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      file gdb pipx pkg-config protobuf-compiler python3-full python3-venv strace && \
     rm -rf /var/lib/apt/lists/*
 
-# Rust build deps (pkg-config for crates needing system libs; protobuf-compiler
-# for crates that build .proto via prost-build).
-RUN apt-get update && apt-get install -y pkg-config protobuf-compiler && \
+RUN curl --proto '=https' --tlsv1.2 -1sLf https://artifacts-cli.infisical.com/setup.deb.sh | bash && \
+    apt-get install -y --no-install-recommends infisical && \
     rm -rf /var/lib/apt/lists/*
 
-# hcloud CLI (latest stable GitHub release for linux-amd64)
-RUN curl -fsSL https://api.github.com/repos/hetznercloud/cli/releases/latest -o /tmp/hcloud-release.json && \
-    hcloud_url=$(jq -r ".assets[] | select(.browser_download_url | test(\"linux-amd64.tar.gz$\")) | .browser_download_url" /tmp/hcloud-release.json | head -n 1) && \
-    curl -fsSL "${hcloud_url}" -o /tmp/hcloud.tar.gz && \
-    tar -xzf /tmp/hcloud.tar.gz -C /tmp/ hcloud && \
-    install -m 0755 /tmp/hcloud /usr/local/bin/hcloud && \
-    rm -f /tmp/hcloud-release.json /tmp/hcloud.tar.gz /tmp/hcloud
-
-# Infisical CLI (upstream apt repo)
-RUN curl -1sLf 'https://artifacts-cli.infisical.com/setup.deb.sh' | bash && \
-    apt-get install -y infisical && rm -rf /var/lib/apt/lists/*
-
-COPY --from=cw-builder /src/target/release/cw /usr/local/bin/cw
-RUN /usr/local/bin/cw --version && \
-    ln -s cw /usr/local/bin/daemon && \
-    ln -s cw /usr/local/bin/codewire-daemon && \
-    mkdir -p /home/codewire/go && chown -R codewire:codewire /home/codewire/go
+RUN mkdir -p /home/codewire/go /home/codewire/.npm-global && \
+    chown -R codewire:codewire /home/codewire/go /home/codewire/.npm-global
 
 USER codewire
-ENV PATH="/home/codewire/.npm-global/bin:/opt/aider/bin:/home/codewire/.cargo/bin:/home/codewire/.local/bin:${PATH}"
+ENV PATH="/home/codewire/.npm-global/bin:/home/codewire/.cargo/bin:/home/codewire/.local/bin:${PATH}"
+
 RUN go install golang.org/x/tools/gopls@latest && \
-    pipx install poetry && pipx install uv
+    go install github.com/hetznercloud/cli/cmd/hcloud@latest && \
+    pipx install poetry && \
+    pipx install uv && \
+    pipx install aider-chat
 
-# Curated coding-agent CLIs are installed as `codewire` into user-owned
-# prefixes. Workspace setup validates this fixed image contract and never
-# downloads an agent at runtime. Vendor update mechanisms remain available to
-# the normal interactive user without sudo.
-RUN mkdir -p /home/codewire/.npm-global && \
-    npm config set prefix /home/codewire/.npm-global && \
-    npm install -g \
-      "@openai/codex@${CODEX_VERSION}" \
-      "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
-      "@google/gemini-cli@${GEMINI_CLI_VERSION}" \
-      "@moonshot-ai/kimi-code@${KIMI_CODE_VERSION}" \
-      "@mariozechner/pi-coding-agent@${PI_VERSION}"
+# Coding agents are deliberately current rather than version-pinned. They are
+# installed into the interactive user prefix, remain scan-visible, and can be
+# updated without sudo. Lifecycle scripts stay disabled except for Claude's
+# official package, whose native binary is installed by its required
+# postinstall hook.
+RUN npm config set prefix /home/codewire/.npm-global && \
+    npm config set allow-scripts=@anthropic-ai/claude-code --location=user && \
+    npm install -g --ignore-scripts \
+      @openai/codex \
+      @google/gemini-cli \
+      @moonshot-ai/kimi-code \
+      @earendil-works/pi-coding-agent && \
+    npm install -g @anthropic-ai/claude-code
 
-# Rust toolchain (stable). Installed as the codewire user so CARGO_HOME and
-# RUSTUP_HOME live under $HOME and per-user invariants stay clean.
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-        | sh -s -- -y --default-toolchain stable --no-modify-path
+      | sh -s -- -y --default-toolchain stable --no-modify-path
+
+# Keep the source-built CLI after the moving developer tools. A cw-only source
+# change then reuses those expensive layers while the final image still proves
+# and exposes the exact binary built from this source tree.
+USER root
+COPY --from=cw-builder /out/cw /usr/local/bin/cw
+RUN /usr/local/bin/cw --version && \
+    ln -s cw /usr/local/bin/daemon && \
+    ln -s cw /usr/local/bin/codewire-daemon
+
+USER codewire

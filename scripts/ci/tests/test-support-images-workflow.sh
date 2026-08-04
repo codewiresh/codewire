@@ -99,29 +99,48 @@ grep -qF -- "- 'crates/codewire-proto/**'" "$WORKFLOW" ||
   fail 'workspace Rust protobuf package changes do not trigger the support build'
 grep -qF -- "- 'proto/**'" "$WORKFLOW" ||
   fail 'workspace protobuf contract changes do not trigger the support build'
-grep -qF 'cargo build --locked --release -p codewire-cli-bin --bin cw' \
-  "$WORKSPACE_DOCKERFILE" || fail 'workspace builds cw from the wrong Rust package'
+grep -qF -- '-p codewire-cli-bin --bin cw' "$WORKSPACE_DOCKERFILE" ||
+  fail 'workspace builds cw from the wrong Rust package'
 builder_stage="$(sed -n '/^FROM rust:.* AS cw-builder$/,/^FROM /p' "$WORKSPACE_DOCKERFILE")"
 grep -qF 'protobuf-compiler' <<<"$builder_stage" ||
   fail 'workspace Rust builder does not install protoc'
 grep -qF 'libprotobuf-dev' <<<"$builder_stage" ||
   fail 'workspace Rust builder does not install well-known protobuf contracts'
-grep -qF 'COPY proto ./proto' <<<"$builder_stage" ||
-  fail 'workspace Rust builder does not receive protobuf contracts'
-grep -qF 'COPY libs/gateway-proto ./libs/gateway-proto' <<<"$builder_stage" ||
-  fail 'workspace Rust builder does not receive the daemon protocol schema'
+grep -qF -- '--mount=type=bind,target=/src,readonly' <<<"$builder_stage" ||
+  fail 'workspace Rust builder does not consume the source tree read-only'
+grep -qF -- '--manifest-path /src/Cargo.toml' <<<"$builder_stage" ||
+  fail 'workspace Rust builder does not build the canonical workspace manifest'
+if grep -Eq '^COPY (Cargo|crates|proto|libs)' <<<"$builder_stage"; then
+  fail 'workspace Rust builder still copies repository source into image layers'
+fi
+grep -qF 'COPY --from=cw-builder /out/cw /usr/local/bin/cw' \
+  "$WORKSPACE_DOCKERFILE" || fail 'workspace final stage receives more than the exported cw binary'
 grep -qF 'ln -s cw /usr/local/bin/daemon' "$WORKSPACE_DOCKERFILE" ||
   fail 'workspace image does not expose the daemon process alias through cw'
 grep -qF 'ln -s cw /usr/local/bin/codewire-daemon' "$WORKSPACE_DOCKERFILE" ||
   fail 'workspace image does not expose the codewire-daemon process alias through cw'
+cw_copy_line="$(grep -n -m1 'COPY --from=cw-builder /out/cw /usr/local/bin/cw' \
+  "$WORKSPACE_DOCKERFILE" | cut -d: -f1)"
+for moving_tool_pattern in \
+  'go install golang.org/x/tools/gopls@latest' \
+  'pipx install aider-chat' \
+  'npm install -g --ignore-scripts' \
+  'https://sh.rustup.rs'; do
+  moving_tool_line="$(grep -n -m1 -F "$moving_tool_pattern" \
+    "$WORKSPACE_DOCKERFILE" | cut -d: -f1)"
+  [[ -n "$moving_tool_line" && "$moving_tool_line" -lt "$cw_copy_line" ]] ||
+    fail "moving tool layer '$moving_tool_pattern' must precede the source-built cw handoff"
+done
+[[ "$(tail -n 1 "$WORKSPACE_DOCKERFILE")" == 'USER codewire' ]] ||
+  fail 'workspace image does not restore the unprivileged runtime user after installing cw'
 
 if grep -Eq '(git\.example\.invalid/codewire|ghcr\.io/codewiresh)/(base|workspace):(latest|main)' \
     "$WORKFLOW"; then
   fail 'support-image publication contains a moving image tag'
 fi
-grep -Eq '^ARG BASE_IMAGE_REF=(git\.example\.invalid/codewire/base|ghcr\.io/codewiresh/base)@sha256:[0-9a-f]{64}$' \
-  "$WORKSPACE_DOCKERFILE" || fail 'standalone workspace base is not digest-pinned'
-base_arg_line="$(grep -n '^ARG BASE_IMAGE_REF=' "$WORKSPACE_DOCKERFILE" | cut -d: -f1)"
+grep -qxF 'ARG BASE_IMAGE_REF' "$WORKSPACE_DOCKERFILE" ||
+  fail 'workspace build does not require an explicit exact base'
+base_arg_line="$(grep -n '^ARG BASE_IMAGE_REF$' "$WORKSPACE_DOCKERFILE" | cut -d: -f1)"
 first_from_line="$(grep -n '^FROM ' "$WORKSPACE_DOCKERFILE" | head -1 | cut -d: -f1)"
 [[ "$base_arg_line" -lt "$first_from_line" ]] ||
   fail 'workspace base argument must be declared before the first build stage'
@@ -131,5 +150,44 @@ grep -qF 'FROM ${BASE_IMAGE_REF}' "$WORKSPACE_DOCKERFILE" ||
 if grep -qF 'ghcr.io/codewiresh/base:latest' "$WORKSPACE_DOCKERFILE"; then
   fail 'workspace Dockerfile still consumes the moving base tag'
 fi
+grep -Eq '^FROM ubuntu:noble@sha256:[0-9a-f]{64}$' "$ROOT/images/base/Dockerfile" ||
+  fail 'base image foundation is not digest-pinned'
+grep -Eq '^FROM rust:1\.91\.1-slim-bookworm@sha256:[0-9a-f]{64} AS cw-builder$' \
+  "$WORKSPACE_DOCKERFILE" || fail 'workspace builder foundation is not digest-pinned'
+for dockerfile in "$ROOT/images/base/Dockerfile" "$WORKSPACE_DOCKERFILE"; do
+  grep -qF 'amd64)' "$dockerfile" || fail "$dockerfile omits amd64 installers"
+  grep -qF 'arm64)' "$dockerfile" || fail "$dockerfile omits arm64 installers"
+  grep -qF 'sha256sum -c -' "$dockerfile" || fail "$dockerfile omits checksum verification"
+done
+for checksum_var in docker_sha buildx_sha compose_sha gh_sha; do
+  [[ "$(grep -Ec "${checksum_var}=[0-9a-f]{64}" "$ROOT/images/base/Dockerfile")" -eq 2 ]] ||
+    fail "base image does not define $checksum_var exactly once per supported architecture"
+done
+for checksum_var in node_sha go_sha; do
+  [[ "$(grep -Ec "${checksum_var}=[0-9a-f]{64}" "$WORKSPACE_DOCKERFILE")" -eq 2 ]] ||
+    fail "workspace image does not define $checksum_var exactly once per supported architecture"
+done
+grep -qF 'snapshot.ubuntu.com/ubuntu/20260803T000000Z/' "$ROOT/images/base/ubuntu.sources" ||
+  fail 'base apt inputs are not bound to the reviewed Ubuntu snapshot'
+grep -qF 'snapshot.debian.org/archive/debian/20251208T000000Z/' \
+  "$ROOT/images/workspace/debian.sources" ||
+  fail 'workspace builder apt inputs are not bound to the reviewed Debian snapshot'
+for agent_package in @openai/codex @anthropic-ai/claude-code @google/gemini-cli \
+  @moonshot-ai/kimi-code @earendil-works/pi-coding-agent; do
+  grep -qF "$agent_package" "$WORKSPACE_DOCKERFILE" ||
+    fail "workspace omits moving agent package $agent_package"
+  if grep -Fq "${agent_package}@" "$WORKSPACE_DOCKERFILE"; then
+    fail "moving agent package $agent_package is unexpectedly version-pinned"
+  fi
+done
+grep -qF 'npm@latest pnpm yarn' "$WORKSPACE_DOCKERFILE" ||
+  fail 'workspace does not update the Node archive npm together with its package managers'
+grep -qF 'npm cache clean --force' "$WORKSPACE_DOCKERFILE" ||
+  fail 'workspace retains the root package-manager installer cache'
+grep -qF -- 'allow-scripts=@anthropic-ai/claude-code --location=user' \
+  "$WORKSPACE_DOCKERFILE" ||
+  fail 'workspace does not persist the narrow Claude update policy under current npm'
+[[ "$(grep -Fc -- 'allow-scripts=' "$WORKSPACE_DOCKERFILE")" -eq 1 ]] ||
+  fail 'workspace grants lifecycle-script permission beyond the Claude installer'
 
 echo 'support-image workflow contract: OK'

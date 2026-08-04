@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Trusted, no-network artifact impact planner for Codewire CI.
 
-This first version resolves Rust package artifacts. Image nodes intentionally
-remain unclassified until their Docker inputs are migrated in later WIs.
+The planner resolves Rust package closures plus migrated file-set and composite
+artifacts. Nodes without a trusted resolver remain unclassified and fail closed.
 """
 
 from __future__ import annotations
@@ -255,6 +255,8 @@ class TreeIndex:
                         for chunk in iter(lambda: source.read(1024 * 1024), b""):
                             digest.update(chunk)
                     self.entries[relative] = IndexedPath(relative, "file", info.st_mode & 0o777, digest.hexdigest())
+                elif not stat.S_ISDIR(info.st_mode):
+                    raise PlannerError(f"tree contains an unsupported path type: {relative}")
 
     def matching(self, pattern: str) -> list[IndexedPath]:
         if pattern.endswith("/**"):
@@ -604,6 +606,64 @@ def add_pattern_entries(index: TreeIndex, pattern: str, destination: dict[str, d
         destination[entry.path] = indexed_file_record(entry)
 
 
+def normalized_input_patterns(spec: dict[str, Any], artifact_kind: str) -> list[str]:
+    raw_patterns = spec.get("inputs")
+    if not isinstance(raw_patterns, list) or not raw_patterns:
+        raise PlannerError(f"{artifact_kind} inputs must be a non-empty list")
+    patterns: list[str] = []
+    for raw_pattern in raw_patterns:
+        if not isinstance(raw_pattern, str) or not raw_pattern:
+            raise PlannerError(f"{artifact_kind} input pattern must be a non-empty string")
+        if "\x00" in raw_pattern or "\\" in raw_pattern or raw_pattern.startswith("/"):
+            raise PlannerError(f"unsafe {artifact_kind} input pattern: {raw_pattern!r}")
+        normalized = posixpath.normpath(raw_pattern)
+        if (
+            normalized in ("", ".", "..")
+            or normalized.startswith("../")
+            or normalized != raw_pattern
+        ):
+            raise PlannerError(f"non-normalized {artifact_kind} input pattern: {raw_pattern!r}")
+        patterns.append(normalized)
+    if len(patterns) != len(set(patterns)):
+        raise PlannerError(f"{artifact_kind} input patterns contain a duplicate")
+    return patterns
+
+
+@dataclass
+class ArtifactFingerprint:
+    fingerprint: str
+    document: dict[str, Any]
+
+
+def file_set_fingerprint(
+    tree: Path,
+    spec: dict[str, Any],
+    index: TreeIndex | None = None,
+    *,
+    artifact_kind: str = "file-set",
+) -> ArtifactFingerprint:
+    allowed_fields = {"kind", "inputs"}
+    unexpected = sorted(set(spec) - allowed_fields)
+    if unexpected:
+        raise PlannerError(f"{artifact_kind} has unsupported fields: {unexpected}")
+    patterns = normalized_input_patterns(spec, artifact_kind)
+    tree_index = index or TreeIndex(tree)
+    files: dict[str, dict[str, Any]] = {}
+    for pattern in patterns:
+        matches = tree_index.matching(pattern)
+        if not matches:
+            raise PlannerError(f"{artifact_kind} input pattern matched no files: {pattern}")
+        for entry in matches:
+            if entry.kind != "file":
+                raise PlannerError(f"{artifact_kind} input is not a regular file: {entry.path}")
+            files[entry.path] = indexed_file_record(entry)
+    document = {
+        "patterns": patterns,
+        "files": [files[path] for path in sorted(files)],
+    }
+    return ArtifactFingerprint(sha256_bytes(canonical_json(document)), document)
+
+
 @dataclass
 class RustFingerprint:
     fingerprint: str
@@ -614,33 +674,35 @@ class RustFingerprint:
 
 
 def rust_fingerprint(
-    tree: Path, spec: dict[str, Any], trusted_toolchain: str | None = None
+    tree: Path,
+    spec: dict[str, Any],
+    trusted_toolchain: str | None = None,
+    index: TreeIndex | None = None,
 ) -> RustFingerprint:
-    validate_exported_tree(tree)
     with tempfile.TemporaryDirectory(prefix="codewire-ci-cargo-") as cargo_temp:
         cargo_env = isolated_cargo_environment(Path(cargo_temp), trusted_toolchain)
         universe = discover_cargo_universe(tree, spec["manifest"], cargo_env)
     closure = cargo_local_closure(tree, universe, spec["package"], spec["manifest"])
-    index = TreeIndex(tree)
+    tree_index = index or TreeIndex(tree)
     files: dict[str, dict[str, Any]] = {}
     for package in closure:
         directory = package["_directory_relative"]
         source_prefix = posixpath.join(directory, "src") if directory else "src"
-        add_pattern_entries(index, source_prefix + "/**", files)
+        add_pattern_entries(tree_index, source_prefix + "/**", files)
         for target in package.get("targets", []):
             kinds = set(target.get("kind") or [])
             if kinds & {"test", "example", "bench"}:
                 continue
             target_path = relative_to_tree(target["src_path"], tree)
-            if target_path in index.entries:
-                files[target_path] = indexed_file_record(index.entries[target_path])
+            if target_path in tree_index.entries:
+                files[target_path] = indexed_file_record(tree_index.entries[target_path])
         build_rs = posixpath.join(directory, "build.rs") if directory else "build.rs"
-        if build_rs in index.entries:
-            files[build_rs] = indexed_file_record(index.entries[build_rs])
+        if build_rs in tree_index.entries:
+            files[build_rs] = indexed_file_record(tree_index.entries[build_rs])
         for pattern in spec.get("package_inputs", {}).get(package["name"], []):
-            add_pattern_entries(index, pattern, files)
+            add_pattern_entries(tree_index, pattern, files)
     for pattern in spec.get("explicit_inputs", []):
-        add_pattern_entries(index, pattern, files)
+        add_pattern_entries(tree_index, pattern, files)
 
     document = {
         "package": spec["package"],
@@ -658,6 +720,80 @@ def rust_fingerprint(
         {package["_directory_relative"] for package in closure},
         universe.package_dirs,
     )
+
+
+def composite_dependencies(spec: dict[str, Any]) -> list[str]:
+    allowed_fields = {"kind", "dependencies", "inputs"}
+    unexpected = sorted(set(spec) - allowed_fields)
+    if unexpected:
+        raise PlannerError(f"composite has unsupported fields: {unexpected}")
+    raw_dependencies = spec.get("dependencies")
+    if not isinstance(raw_dependencies, list) or not raw_dependencies:
+        raise PlannerError("composite dependencies must be a non-empty list")
+    if not all(isinstance(value, str) and value for value in raw_dependencies):
+        raise PlannerError("composite dependency names must be non-empty strings")
+    if len(raw_dependencies) != len(set(raw_dependencies)):
+        raise PlannerError("composite dependencies contain a duplicate")
+    return list(raw_dependencies)
+
+
+def artifact_fingerprint(
+    name: str,
+    tree: Path,
+    graph: dict[str, Any],
+    trusted_toolchain: str | None,
+    tree_index: TreeIndex,
+    cache: dict[str, ArtifactFingerprint | RustFingerprint],
+    resolving: list[str] | None = None,
+) -> ArtifactFingerprint | RustFingerprint:
+    if name in cache:
+        return cache[name]
+    path = list(resolving or [])
+    if name in path:
+        raise PlannerError(f"artifact dependency cycle: {' -> '.join([*path, name])}")
+    spec = graph.get("artifacts", {}).get(name)
+    if not isinstance(spec, dict):
+        raise PlannerError(f"artifact dependency is missing: {name}")
+    kind = spec.get("kind")
+    if kind == "rust-package":
+        result: ArtifactFingerprint | RustFingerprint = rust_fingerprint(
+            tree, spec, trusted_toolchain, tree_index
+        )
+    elif kind == "file-set":
+        result = file_set_fingerprint(tree, spec, tree_index)
+    elif kind == "composite":
+        dependencies = composite_dependencies(spec)
+        own = file_set_fingerprint(
+            tree,
+            {"kind": "file-set", "inputs": spec.get("inputs")},
+            tree_index,
+            artifact_kind="composite",
+        )
+        dependency_records = []
+        for dependency in dependencies:
+            resolved = artifact_fingerprint(
+                dependency,
+                tree,
+                graph,
+                trusted_toolchain,
+                tree_index,
+                cache,
+                [*path, name],
+            )
+            dependency_records.append(
+                {"artifact": dependency, "fingerprint": resolved.fingerprint}
+            )
+        document = {
+            "dependencies": dependency_records,
+            "inputs": own.document,
+        }
+        result = ArtifactFingerprint(sha256_bytes(canonical_json(document)), document)
+    elif kind == "unmigrated":
+        raise PlannerError("artifact resolver has not migrated to the canonical graph")
+    else:
+        raise PlannerError(f"unsupported artifact kind: {kind}")
+    cache[name] = result
+    return result
 
 
 def changed_paths(repository: Path, baseline: str, head: str) -> list[str]:
@@ -682,7 +818,7 @@ def changed_paths(repository: Path, baseline: str, head: str) -> list[str]:
 
 def component_changes(before: dict[str, Any], after: dict[str, Any]) -> list[str]:
     explanations: list[str] = []
-    for component in ("release_targets", "profiles", "packages", "lock_records", "files"):
+    for component in sorted(set(before) | set(after)):
         if before.get(component) != after.get(component):
             explanations.append(f"{component} fingerprint changed")
     return explanations or ["artifact fingerprint changed"]
@@ -844,48 +980,112 @@ def plan(
                 for candidate in graph["artifacts"].values()
                 if candidate.get("kind") == "rust-package"
             }
-            for name, spec in graph["artifacts"].items():
+            baseline_index = TreeIndex(baseline_tree)
+            head_index = TreeIndex(head_tree)
+            baseline_fingerprints: dict[str, ArtifactFingerprint | RustFingerprint] = {}
+            head_fingerprints: dict[str, ArtifactFingerprint | RustFingerprint] = {}
+            classifying: set[str] = set()
+
+            def classify(name: str) -> dict[str, Any]:
+                if name in artifacts:
+                    return artifacts[name]
+                spec = graph["artifacts"].get(name)
+                if not isinstance(spec, dict):
+                    return unclassified_result(f"artifact definition is missing: {name}")
                 if changed_policy_path:
-                    artifacts[name] = unclassified_result(f"trusted policy surface changed: {changed_policy_path}")
-                    continue
+                    result = unclassified_result(
+                        f"trusted policy surface changed: {changed_policy_path}"
+                    )
+                    artifacts[name] = result
+                    return result
                 if spec.get("kind") == "unmigrated":
-                    artifacts[name] = unclassified_result("artifact resolver has not migrated to the canonical graph")
-                    continue
-                if spec.get("kind") != "rust-package":
-                    artifacts[name] = unclassified_result(f"unsupported artifact kind: {spec.get('kind')}")
-                    continue
+                    result = unclassified_result(
+                        "artifact resolver has not migrated to the canonical graph"
+                    )
+                    artifacts[name] = result
+                    return result
+                if name in classifying:
+                    result = unclassified_result(f"artifact dependency cycle includes: {name}")
+                    artifacts[name] = result
+                    return result
+                classifying.add(name)
                 try:
-                    before = rust_fingerprint(baseline_tree, spec, rust_toolchain)
-                    after = rust_fingerprint(head_tree, spec, rust_toolchain)
-                    if before.fingerprint != after.fingerprint:
-                        artifacts[name] = {
+                    before = artifact_fingerprint(
+                        name,
+                        baseline_tree,
+                        graph,
+                        rust_toolchain,
+                        baseline_index,
+                        baseline_fingerprints,
+                    )
+                    after = artifact_fingerprint(
+                        name,
+                        head_tree,
+                        graph,
+                        rust_toolchain,
+                        head_index,
+                        head_fingerprints,
+                    )
+                    dependency_failure = None
+                    if spec.get("kind") == "composite":
+                        for dependency in composite_dependencies(spec):
+                            dependency_result = classify(dependency)
+                            if dependency_result["state"] == "unclassified":
+                                dependency_failure = (
+                                    f"dependency {dependency} is unclassified: "
+                                    f"{dependency_result['explanations'][0]}"
+                                )
+                                break
+                    if dependency_failure:
+                        result = {
+                            "state": "unclassified",
+                            "baseline_fingerprint": before.fingerprint,
+                            "head_fingerprint": after.fingerprint,
+                            "explanations": [dependency_failure],
+                        }
+                    elif before.fingerprint != after.fingerprint:
+                        result = {
                             "state": "affected",
                             "baseline_fingerprint": before.fingerprint,
                             "head_fingerprint": after.fingerprint,
                             "explanations": component_changes(before.document, after.document),
                         }
-                    else:
+                    elif not dependency_failure and isinstance(before, RustFingerprint) and isinstance(after, RustFingerprint):
                         unknown = has_unknown_reachable_path(
                             paths, before, after, known_artifact_directories
                         )
                         if unknown:
-                            artifacts[name] = {
+                            result = {
                                 "state": "unclassified",
                                 "baseline_fingerprint": before.fingerprint,
                                 "head_fingerprint": after.fingerprint,
                                 "explanations": [f"changed path has no trusted ownership rule: {unknown}"],
                             }
                         else:
-                            artifacts[name] = {
+                            result = {
                                 "state": "unaffected",
                                 "baseline_fingerprint": before.fingerprint,
                                 "head_fingerprint": after.fingerprint,
                                 "explanations": ["artifact fingerprint and owned inputs are unchanged"],
                             }
+                    elif not dependency_failure:
+                        result = {
+                            "state": "unaffected",
+                            "baseline_fingerprint": before.fingerprint,
+                            "head_fingerprint": after.fingerprint,
+                            "explanations": ["artifact fingerprint and owned inputs are unchanged"],
+                        }
                 except (OSError, UnicodeError, tomllib.TOMLDecodeError, PlannerError) as exc:
                     reason = f"{name} classification failed: {exc}"
                     degraded.append(reason)
-                    artifacts[name] = unclassified_result(reason)
+                    result = unclassified_result(reason)
+                finally:
+                    classifying.discard(name)
+                artifacts[name] = result
+                return result
+
+            for name in graph["artifacts"]:
+                classify(name)
 
     selected = lambda artifact: artifacts[artifact]["state"] != "unaffected"
     return {

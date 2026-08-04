@@ -52,12 +52,32 @@
         "crates/codewire-desktop/resources/**"
       ]
     },
+    "workspace_cw_binary": {
+      "kind": "rust-package",
+      "manifest": "Cargo.toml",
+      "package": "codewire-cli-bin",
+      "lockfile": "Cargo.lock",
+      "profiles": ["release"],
+      "release_targets": ["host"],
+      "package_inputs": {
+        "codewire-proto": ["crates/codewire-proto/codewire_descriptor.bin"],
+        "codewire-gateway-proto": ["libs/gateway-proto/proto/**"]
+      },
+      "explicit_inputs": ["rust-toolchain.toml"]
+    },
     "dashboard_image": {"kind": "unmigrated"},
     "gateway_image": {"kind": "unmigrated"},
     "derp_image": {"kind": "unmigrated"},
     "services_image": {"kind": "unmigrated"},
     "mesh_image": {"kind": "unmigrated"},
-    "base_image": {"kind": "unmigrated"},
-    "workspace_image": {"kind": "unmigrated"}
+    "base_image": {
+      "kind": "file-set",
+      "inputs": ["images/base/**"]
+    },
+    "workspace_image": {
+      "kind": "composite",
+      "dependencies": ["base_image", "workspace_cw_binary"],
+      "inputs": ["images/workspace/**"]
+    }
   }
 }

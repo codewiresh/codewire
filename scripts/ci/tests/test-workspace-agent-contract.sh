@@ -17,7 +17,11 @@ fail() {
 
 cat >"$work/bin/id" <<'EOF'
 #!/bin/sh
-printf 'codewire\n'
+case "${1:-}" in
+  -un) printf 'codewire\n' ;;
+  -u) printf '1000\n' ;;
+  *) printf 'codewire\n' ;;
+esac
 EOF
 cat >"$work/bin/agent" <<'EOF'
 #!/bin/sh
@@ -28,11 +32,19 @@ printf '%s test-version\n' "$(basename "$0")"
 EOF
 cat >"$work/bin/npm" <<'EOF'
 #!/bin/sh
+if [ "$*" = "config get allow-scripts" ]; then
+  printf '@anthropic-ai/claude-code\n'
+  exit 0
+fi
 printf 'npm dry-run OK\n'
 EOF
 chmod +x "$work/bin/id" "$work/bin/agent" "$work/bin/npm"
 for agent in codex claude gemini kimi pi aider; do
   ln -s agent "$work/bin/$agent"
+done
+for tool in cw daemon codewire-daemon docker dockerd docker-compose gh git go gopls hcloud \
+  node bun bun""x pnpm yarn python3 pipx poetry uv cargo rustc infisical psql protoc; do
+  ln -s agent "$work/bin/$tool"
 done
 
 run_contract() {

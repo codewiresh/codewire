@@ -126,6 +126,7 @@ SUPPORT_DOCKER_MODELED_ROOTS = {
     "proto",
     "libs/gateway-proto",
     "images/base",
+    "images/workspace",
 }
 
 DEV_FIXED_PREFIXES = (

@@ -28,8 +28,20 @@ grep -qF 'scripts/ci/verify/verify-workspace-image.sh' "$WORKFLOW" ||
 if grep -Eq 'docker (buildx )?build.*--push|docker push' "$VERIFY"; then
   fail 'verification must not publish an image'
 fi
-grep -qF 'scripts/ci/images/build-local-image.sh' "$VERIFY" ||
-  fail 'verification does not use the isolated local-image helper'
+[[ "$(grep -Fc '"$docker_bin" buildx build' "$VERIFY")" -eq 2 ]] ||
+  fail 'verification does not build the exact local base/workspace pair'
+grep -qF -- '--output "type=oci,dest=$base_layout,tar=false"' "$VERIFY" ||
+  fail 'base verification does not export a local OCI layout'
+grep -qF -- '--metadata-file "$base_metadata"' "$VERIFY" ||
+  fail 'base verification does not capture its immutable output digest'
+grep -qF -- '--build-context "$base_context_name=oci-layout://$base_layout@$base_digest"' \
+  "$VERIFY" || fail 'workspace verification does not consume its exact OCI base digest'
+grep -qF -- '--build-arg "BASE_IMAGE_REF=$base_context_name"' "$VERIFY" ||
+  fail 'workspace verification does not bind FROM to the local OCI context'
+grep -qF -- '--load' "$VERIFY" ||
+  fail 'workspace verification does not load its final image for inspection'
+grep -qF 'images/base/Dockerfile' "$VERIFY" ||
+  fail 'workspace verification omits the base image build'
 grep -qF 'scripts/ci/tests/test-build-local-image.sh' "$WORKFLOW" ||
   fail 'workflow does not run the mocked helper contract'
 grep -qF 'scripts/ci/tests/test-workspace-agent-contract.sh' "$WORKFLOW" ||
@@ -53,8 +65,106 @@ grep -qF '"$cgroup_root/pids.events"' "$AGENT_CONTRACT" ||
 for agent in codex claude gemini kimi pi aider; do
   grep -qF "$agent" "$AGENT_CONTRACT" || fail "verification omits $agent"
 done
+for tool in cw docker dockerd docker-compose gh git go gopls hcloud node npm bun pnpm yarn \
+  python3 pipx poetry uv cargo rustc infisical psql protoc; do
+  grep -qF "$tool" "$AGENT_CONTRACT" || fail "verification omits $tool"
+done
+grep -qF 'dynamic_bun_runner="bun""x"' "$AGENT_CONTRACT" ||
+  fail 'verification omits the installed Bun package runner without invoking it literally'
 grep -qF 'test -O' "$AGENT_CONTRACT" || fail 'verification does not prove user ownership'
 grep -qF 'npm update --global --dry-run @openai/codex' "$AGENT_CONTRACT" ||
   fail 'verification does not prove the user-scoped Codex update path'
+
+# Execute the verifier against a fake Docker client. This catches command-order,
+# digest-handoff, cleanup, and fail-closed regressions without building an image.
+mkdir -p "$ROOT/.tmp"
+work="$(mktemp -d "$ROOT/.tmp/workspace-image-verifier-test.XXXXXX")"
+trap 'rm -rf "$work"' EXIT
+mkdir -p "$work/bin" "$work/tmp"
+cat >"$work/bin/docker" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%q ' "$@" >>"$FAKE_DOCKER_LOG"
+printf '\n' >>"$FAKE_DOCKER_LOG"
+
+case "${1:-} ${2:-}" in
+  'buildx inspect')
+    printf 'Name: %s\n' "${FAKE_SELECTED_BUILDER:-selected-verifier}"
+    printf 'Driver: %s\n' "${FAKE_SELECTED_DRIVER:-docker-container}"
+    ;;
+  'buildx create')
+    printf 'workspace-verifier-%s\n' "$FAKE_BUILDER_SUFFIX"
+    ;;
+  'buildx build')
+    metadata_file=''
+    while [[ $# -gt 0 ]]; do
+      if [[ "$1" == '--metadata-file' ]]; then
+        metadata_file="$2"
+        break
+      fi
+      shift
+    done
+    if [[ -n "$metadata_file" ]]; then
+      case "${FAKE_METADATA_MODE:-valid}" in
+        valid) printf '{"containerimage.digest":"sha256:%064d"}\n' 0 >"$metadata_file" ;;
+        missing) printf '{}\n' >"$metadata_file" ;;
+        malformed) printf '{not-json}\n' >"$metadata_file" ;;
+        *) exit 98 ;;
+      esac
+    fi
+    ;;
+  'buildx rm'|'run --rm')
+    ;;
+  *)
+    printf 'unexpected docker command: %s\n' "$*" >&2
+    exit 99
+    ;;
+esac
+EOF
+chmod +x "$work/bin/docker"
+
+run_mock_verifier() {
+  env PATH="$work/bin:$PATH" \
+    CODEWIRE_DOCKER_BIN=docker \
+    FAKE_DOCKER_LOG="$work/docker.log" \
+    FAKE_BUILDER_SUFFIX="$1" \
+    FAKE_METADATA_MODE="${2:-valid}" \
+    FAKE_SELECTED_DRIVER="${3:-docker-container}" \
+    GITHUB_SHA=mock-source \
+    TMPDIR="$work/tmp" \
+    "$VERIFY"
+}
+
+: >"$work/docker.log"
+run_mock_verifier success >/dev/null
+mapfile -t docker_calls <"$work/docker.log"
+[[ "${#docker_calls[@]}" -eq 4 ]] ||
+  fail "verifier issued an unexpected number of Docker calls: ${#docker_calls[@]}"
+[[ "${docker_calls[0]}" == 'buildx inspect ' ]] ||
+  fail "verifier selected-builder inspection drifted: ${docker_calls[0]}"
+[[ "${docker_calls[1]}" == *'buildx build --builder selected-verifier --pull --metadata-file '* ]] ||
+  fail 'verifier did not build base metadata with the selected container builder'
+[[ "${docker_calls[1]}" == *'--output type=oci\,dest='*'/base.oci\,tar=false '* ]] ||
+  fail 'verifier did not export the base OCI layout'
+[[ "${docker_calls[2]}" == *'--build-context codewire-verified-base=oci-layout://'*'/base.oci@sha256:'* ]] ||
+  fail 'verifier did not hand the exact base digest to the workspace build'
+[[ "${docker_calls[2]}" == *'--load --build-arg BASE_IMAGE_REF=codewire-verified-base '* ]] ||
+  fail 'verifier did not load a workspace built from the named base context'
+[[ "${docker_calls[3]}" == 'run --rm --interactive --pids-limit=2048 --user codewire --entrypoint bash codewire-workspace-verify:mock-source -eu -s ' ]] ||
+  fail "workspace runtime contract invocation drifted: ${docker_calls[3]}"
+if grep -qF 'buildx create' "$work/docker.log" || grep -qF 'buildx rm' "$work/docker.log"; then
+  fail 'verifier replaced or removed the caller-selected container builder'
+fi
+
+: >"$work/docker.log"
+set +e
+run_mock_verifier invalid missing docker >/dev/null 2>&1
+mock_status=$?
+set -e
+[[ "$mock_status" -ne 0 ]] || fail 'verifier accepted missing base digest metadata'
+[[ "$(grep -Fc 'buildx build' "$work/docker.log")" -eq 1 ]] ||
+  fail 'verifier continued into workspace build after invalid base metadata'
+grep -Fxq 'buildx rm --force workspace-verifier-invalid ' "$work/docker.log" ||
+  fail 'verifier did not clean its Docker-driver fallback after invalid metadata'
 
 echo 'workspace-image verification workflow contract: OK'
