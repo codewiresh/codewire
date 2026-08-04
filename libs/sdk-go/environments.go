@@ -108,6 +108,106 @@ func (s *EnvironmentService) Get(ctx context.Context, envID string) (*Environmen
 	return s.wrap(orgID, data, environmentPollInterval(response.Msg.GetPollInterval())), nil
 }
 
+// Resize starts an idempotent platform resize for an environment.
+func (s *EnvironmentService) Resize(ctx context.Context, envID string, body ResizeEnvironmentRequest) (*EnvironmentResizeOperation, error) {
+	if err := ensureResizeRequestConverterCoverage(); err != nil {
+		return nil, err
+	}
+	orgID, err := s.client.resolveOrgID()
+	if err != nil {
+		return nil, err
+	}
+	resources, err := toProtoEnvironmentResources(body.EnvironmentResources)
+	if err != nil {
+		return nil, err
+	}
+	disruptionPolicy := codewirev1.EnvironmentResizeDisruptionPolicy_ENVIRONMENT_RESIZE_DISRUPTION_POLICY_LIVE_ONLY
+	if body.AllowRestart {
+		disruptionPolicy = codewirev1.EnvironmentResizeDisruptionPolicy_ENVIRONMENT_RESIZE_DISRUPTION_POLICY_ALLOW_RESTART
+	}
+	response, err := s.client.environments.ResizeEnvironment(ctx, connect.NewRequest(&codewirev1.ResizeEnvironmentRequest{
+		OrgId:            orgID,
+		EnvironmentId:    envID,
+		CpuMillicores:    resources.GetCpuMillicores(),
+		MemoryMb:         resources.GetMemoryMb(),
+		DiskGb:           resources.GetDiskGb(),
+		RequestId:        body.RequestId,
+		Force:            body.Force,
+		DisruptionPolicy: disruptionPolicy,
+	}))
+	if err != nil {
+		return nil, connectSDKError(err)
+	}
+	if response.Msg.GetOperation() == nil {
+		return nil, fmt.Errorf("codewire: resize response omitted operation")
+	}
+	operation, err := fromProtoEnvironmentResizeOperation(response.Msg.GetOperation())
+	if err != nil {
+		return nil, err
+	}
+	return &operation, nil
+}
+
+// PlanResize asks whether a desired allocation is live, deferred, or disruptive.
+func (s *EnvironmentService) PlanResize(ctx context.Context, envID string, desired EnvironmentResources) (*EnvironmentResizePlan, error) {
+	if err := ensureResizeRequestConverterCoverage(); err != nil {
+		return nil, err
+	}
+	orgID, err := s.client.resolveOrgID()
+	if err != nil {
+		return nil, err
+	}
+	resources, err := toProtoEnvironmentResources(desired)
+	if err != nil {
+		return nil, err
+	}
+	response, err := s.client.environments.PlanEnvironmentResize(ctx, connect.NewRequest(&codewirev1.PlanEnvironmentResizeRequest{
+		OrgId:         orgID,
+		EnvironmentId: envID,
+		CpuMillicores: resources.GetCpuMillicores(),
+		MemoryMb:      resources.GetMemoryMb(),
+		DiskGb:        resources.GetDiskGb(),
+	}))
+	if err != nil {
+		return nil, connectSDKError(err)
+	}
+	if response.Msg.GetPlan() == nil {
+		return nil, fmt.Errorf("codewire: resize plan response omitted plan")
+	}
+	plan, err := fromProtoEnvironmentResizePlan(response.Msg.GetPlan())
+	if err != nil {
+		return nil, err
+	}
+	return &plan, nil
+}
+
+// GetResizeOperation reads a durable platform resize operation.
+func (s *EnvironmentService) GetResizeOperation(ctx context.Context, envID, operationID string) (*EnvironmentResizeOperation, error) {
+	if err := ensureResizeRequestConverterCoverage(); err != nil {
+		return nil, err
+	}
+	orgID, err := s.client.resolveOrgID()
+	if err != nil {
+		return nil, err
+	}
+	response, err := s.client.environments.GetEnvironmentResizeOperation(ctx, connect.NewRequest(&codewirev1.GetEnvironmentResizeOperationRequest{
+		OrgId:         orgID,
+		EnvironmentId: envID,
+		OperationId:   operationID,
+	}))
+	if err != nil {
+		return nil, connectSDKError(err)
+	}
+	if response.Msg.GetOperation() == nil {
+		return nil, fmt.Errorf("codewire: resize response omitted operation")
+	}
+	operation, err := fromProtoEnvironmentResizeOperation(response.Msg.GetOperation())
+	if err != nil {
+		return nil, err
+	}
+	return &operation, nil
+}
+
 // Delete destroys an environment by ID.
 func (s *EnvironmentService) Delete(ctx context.Context, envID string) error {
 	orgID, err := s.client.resolveOrgID()

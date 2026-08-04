@@ -35,6 +35,21 @@ func (e *Environment) Stop(ctx context.Context) error {
 	return e.client.Environments.Stop(ctx, e.Id)
 }
 
+// Resize starts an idempotent platform resize for this environment.
+func (e *Environment) Resize(ctx context.Context, body ResizeEnvironmentRequest) (*EnvironmentResizeOperation, error) {
+	return e.client.Environments.Resize(ctx, e.Id, body)
+}
+
+// PlanResize asks how the platform will apply a desired allocation.
+func (e *Environment) PlanResize(ctx context.Context, desired EnvironmentResources) (*EnvironmentResizePlan, error) {
+	return e.client.Environments.PlanResize(ctx, e.Id, desired)
+}
+
+// GetResizeOperation reads a durable resize operation for this environment.
+func (e *Environment) GetResizeOperation(ctx context.Context, operationID string) (*EnvironmentResizeOperation, error) {
+	return e.client.Environments.GetResizeOperation(ctx, e.Id, operationID)
+}
+
 // Remove destroys the environment.
 func (e *Environment) Remove(ctx context.Context) error {
 	return e.client.Environments.Delete(ctx, e.Id)

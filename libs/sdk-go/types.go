@@ -74,6 +74,57 @@ type EnvironmentData struct {
 	Type                string             `json:"type"`
 }
 
+// EnvironmentResources is a complete environment compute/storage allocation.
+type EnvironmentResources struct {
+	CpuMillicores int64 `json:"cpu_millicores"`
+	MemoryMb      int64 `json:"memory_mb"`
+	DiskGb        int64 `json:"disk_gb"`
+}
+
+// ResizeEnvironmentRequest configures an idempotent platform resize.
+type ResizeEnvironmentRequest struct {
+	EnvironmentResources
+	RequestId    string `json:"request_id"`
+	Force        bool   `json:"force,omitempty"`
+	AllowRestart bool   `json:"allow_restart,omitempty"`
+}
+
+// EnvironmentResizePlan describes how the platform will apply desired resources.
+type EnvironmentResizePlan struct {
+	PreviousResources              *EnvironmentResources `json:"previous_resources,omitempty"`
+	DesiredResources               *EnvironmentResources `json:"desired_resources,omitempty"`
+	ExecutionMode                  string                `json:"execution_mode"`
+	ActiveSessionCount             int64                 `json:"active_session_count"`
+	ActiveSessionsWillBeTerminated bool                  `json:"active_sessions_will_be_terminated"`
+	Reason                         string                `json:"reason"`
+	Warnings                       []string              `json:"warnings"`
+}
+
+// EnvironmentResizeFailure is the terminal failure attached to a resize operation.
+type EnvironmentResizeFailure struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
+}
+
+// EnvironmentResizeOperation is the durable state of a platform resize.
+type EnvironmentResizeOperation struct {
+	Id                   string                    `json:"id"`
+	EnvironmentId        string                    `json:"environment_id"`
+	RequestId            string                    `json:"request_id"`
+	PreviousResources    *EnvironmentResources     `json:"previous_resources,omitempty"`
+	DesiredResources     *EnvironmentResources     `json:"desired_resources,omitempty"`
+	LastAppliedResources *EnvironmentResources     `json:"last_applied_resources,omitempty"`
+	State                string                    `json:"state"`
+	DisruptionPolicy     string                    `json:"disruption_policy"`
+	PlannedMode          string                    `json:"planned_mode"`
+	AppliedMode          string                    `json:"applied_mode"`
+	PodReplaced          bool                      `json:"pod_replaced"`
+	Failure              *EnvironmentResizeFailure `json:"failure,omitempty"`
+	CreatedAt            *string                   `json:"created_at,omitempty"`
+	UpdatedAt            *string                   `json:"updated_at,omitempty"`
+	CompletedAt          *string                   `json:"completed_at,omitempty"`
+}
+
 // CreateEnvironmentBody configures environment creation.
 type CreateEnvironmentBody struct {
 	Schema             *string            `json:"$schema,omitempty"`

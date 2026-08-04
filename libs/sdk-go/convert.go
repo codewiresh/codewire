@@ -22,6 +22,12 @@ var (
 	secretProjectCoverageErr    error
 	environmentCoverageOnce     sync.Once
 	environmentCoverageErr      error
+	resizePlanCoverageOnce      sync.Once
+	resizePlanCoverageErr       error
+	resizeOperationCoverageOnce sync.Once
+	resizeOperationCoverageErr  error
+	resizeRequestCoverageOnce   sync.Once
+	resizeRequestCoverageErr    error
 	portCoverageOnce            sync.Once
 	portCoverageErr             error
 	fileEntryCoverageOnce       sync.Once
@@ -587,6 +593,149 @@ func fromProtoEnvironment(environment *codewirev1.Environment) (EnvironmentData,
 	}, nil
 }
 
+func toProtoEnvironmentResources(resources EnvironmentResources) (*codewirev1.EnvironmentResources, error) {
+	cpu, err := int32FromInt64("cpu_millicores", &resources.CpuMillicores)
+	if err != nil {
+		return nil, err
+	}
+	memory, err := int32FromInt64("memory_mb", &resources.MemoryMb)
+	if err != nil {
+		return nil, err
+	}
+	disk, err := int32FromInt64("disk_gb", &resources.DiskGb)
+	if err != nil {
+		return nil, err
+	}
+	return &codewirev1.EnvironmentResources{
+		CpuMillicores: valueOrZero(cpu),
+		MemoryMb:      valueOrZero(memory),
+		DiskGb:        valueOrZero(disk),
+	}, nil
+}
+
+func fromProtoEnvironmentResources(resources *codewirev1.EnvironmentResources) *EnvironmentResources {
+	if resources == nil {
+		return nil
+	}
+	return &EnvironmentResources{
+		CpuMillicores: int64(resources.GetCpuMillicores()),
+		MemoryMb:      int64(resources.GetMemoryMb()),
+		DiskGb:        int64(resources.GetDiskGb()),
+	}
+}
+
+func fromProtoEnvironmentResizePlan(plan *codewirev1.EnvironmentResizePlan) (EnvironmentResizePlan, error) {
+	if err := ensureResizePlanConverterCoverage(); err != nil {
+		return EnvironmentResizePlan{}, err
+	}
+	if plan == nil {
+		return EnvironmentResizePlan{}, nil
+	}
+	return EnvironmentResizePlan{
+		PreviousResources:              fromProtoEnvironmentResources(plan.GetPreviousResources()),
+		DesiredResources:               fromProtoEnvironmentResources(plan.GetDesiredResources()),
+		ExecutionMode:                  environmentResizeExecutionMode(plan.GetExecutionMode()),
+		ActiveSessionCount:             int64(plan.GetActiveSessionCount()),
+		ActiveSessionsWillBeTerminated: plan.GetActiveSessionsWillBeTerminated(),
+		Reason:                         plan.GetReason(),
+		Warnings:                       append([]string{}, plan.GetWarnings()...),
+	}, nil
+}
+
+func fromProtoEnvironmentResizeOperation(operation *codewirev1.EnvironmentResizeOperation) (EnvironmentResizeOperation, error) {
+	if err := ensureResizeOperationConverterCoverage(); err != nil {
+		return EnvironmentResizeOperation{}, err
+	}
+	if operation == nil {
+		return EnvironmentResizeOperation{}, nil
+	}
+	createdAt, err := formatSDKTimestamp("environment resize created_at", operation.GetCreatedAt())
+	if err != nil {
+		return EnvironmentResizeOperation{}, err
+	}
+	updatedAt, err := formatSDKTimestamp("environment resize updated_at", operation.GetUpdatedAt())
+	if err != nil {
+		return EnvironmentResizeOperation{}, err
+	}
+	completedAt, err := formatSDKTimestamp("environment resize completed_at", operation.GetCompletedAt())
+	if err != nil {
+		return EnvironmentResizeOperation{}, err
+	}
+	var failure *EnvironmentResizeFailure
+	if operation.GetFailure() != nil {
+		failure = &EnvironmentResizeFailure{
+			Code:    operation.GetFailure().GetCode(),
+			Message: operation.GetFailure().GetMessage(),
+		}
+	}
+	return EnvironmentResizeOperation{
+		Id:                   operation.GetId(),
+		EnvironmentId:        operation.GetEnvironmentId(),
+		RequestId:            operation.GetRequestId(),
+		PreviousResources:    fromProtoEnvironmentResources(operation.GetPreviousResources()),
+		DesiredResources:     fromProtoEnvironmentResources(operation.GetDesiredResources()),
+		LastAppliedResources: fromProtoEnvironmentResources(operation.GetLastAppliedResources()),
+		State:                environmentResizeOperationState(operation.GetState()),
+		DisruptionPolicy:     environmentResizeDisruptionPolicy(operation.GetDisruptionPolicy()),
+		PlannedMode:          environmentResizeExecutionMode(operation.GetPlannedMode()),
+		AppliedMode:          environmentResizeExecutionMode(operation.GetAppliedMode()),
+		PodReplaced:          operation.GetPodReplaced(),
+		Failure:              failure,
+		CreatedAt:            createdAt,
+		UpdatedAt:            updatedAt,
+		CompletedAt:          completedAt,
+	}, nil
+}
+
+func environmentResizeOperationState(state codewirev1.EnvironmentResizeOperationState) string {
+	switch state {
+	case codewirev1.EnvironmentResizeOperationState_ENVIRONMENT_RESIZE_OPERATION_STATE_UNSPECIFIED:
+		return "unspecified"
+	case codewirev1.EnvironmentResizeOperationState_ENVIRONMENT_RESIZE_OPERATION_STATE_PENDING:
+		return "pending"
+	case codewirev1.EnvironmentResizeOperationState_ENVIRONMENT_RESIZE_OPERATION_STATE_APPLYING:
+		return "applying"
+	case codewirev1.EnvironmentResizeOperationState_ENVIRONMENT_RESIZE_OPERATION_STATE_RESTARTING:
+		return "restarting"
+	case codewirev1.EnvironmentResizeOperationState_ENVIRONMENT_RESIZE_OPERATION_STATE_COMPLETED:
+		return "completed"
+	case codewirev1.EnvironmentResizeOperationState_ENVIRONMENT_RESIZE_OPERATION_STATE_FAILED:
+		return "failed"
+	default:
+		return "unknown"
+	}
+}
+
+func environmentResizeDisruptionPolicy(policy codewirev1.EnvironmentResizeDisruptionPolicy) string {
+	switch policy {
+	case codewirev1.EnvironmentResizeDisruptionPolicy_ENVIRONMENT_RESIZE_DISRUPTION_POLICY_UNSPECIFIED:
+		return "unspecified"
+	case codewirev1.EnvironmentResizeDisruptionPolicy_ENVIRONMENT_RESIZE_DISRUPTION_POLICY_LIVE_ONLY:
+		return "live_only"
+	case codewirev1.EnvironmentResizeDisruptionPolicy_ENVIRONMENT_RESIZE_DISRUPTION_POLICY_ALLOW_RESTART:
+		return "allow_restart"
+	default:
+		return "unknown"
+	}
+}
+
+func environmentResizeExecutionMode(mode codewirev1.EnvironmentResizeExecutionMode) string {
+	switch mode {
+	case codewirev1.EnvironmentResizeExecutionMode_ENVIRONMENT_RESIZE_EXECUTION_MODE_UNSPECIFIED:
+		return "unspecified"
+	case codewirev1.EnvironmentResizeExecutionMode_ENVIRONMENT_RESIZE_EXECUTION_MODE_NOOP:
+		return "noop"
+	case codewirev1.EnvironmentResizeExecutionMode_ENVIRONMENT_RESIZE_EXECUTION_MODE_APPLY_ON_START:
+		return "apply_on_start"
+	case codewirev1.EnvironmentResizeExecutionMode_ENVIRONMENT_RESIZE_EXECUTION_MODE_IN_PLACE:
+		return "in_place"
+	case codewirev1.EnvironmentResizeExecutionMode_ENVIRONMENT_RESIZE_EXECUTION_MODE_RESTART:
+		return "restart"
+	default:
+		return "unknown"
+	}
+}
+
 func fromProtoEnvironmentPorts(ports []*codewirev1.Port) (*[]EnvironmentPort, error) {
 	if len(ports) == 0 {
 		return nil, nil
@@ -835,6 +984,70 @@ func ensureEnvironmentConverterCoverage() error {
 		})
 	})
 	return environmentCoverageErr
+}
+
+func ensureResizePlanConverterCoverage() error {
+	resizePlanCoverageOnce.Do(func() {
+		messages := codewirev1.File_codewire_v1_environment_proto.Messages()
+		if err := ensureDescriptorCoverage("environment resources", messages.ByName("EnvironmentResources"), map[protoreflect.FieldNumber]protoreflect.Name{
+			1: "cpu_millicores", 2: "memory_mb", 3: "disk_gb",
+		}); err != nil {
+			resizePlanCoverageErr = err
+			return
+		}
+		resizePlanCoverageErr = ensureDescriptorCoverage("environment resize plan", messages.ByName("EnvironmentResizePlan"), map[protoreflect.FieldNumber]protoreflect.Name{
+			1: "previous_resources", 2: "desired_resources", 3: "execution_mode", 4: "active_session_count",
+			5: "active_sessions_will_be_terminated", 6: "reason", 7: "warnings",
+		})
+	})
+	return resizePlanCoverageErr
+}
+
+func ensureResizeOperationConverterCoverage() error {
+	resizeOperationCoverageOnce.Do(func() {
+		messages := codewirev1.File_codewire_v1_environment_proto.Messages()
+		if err := ensureDescriptorCoverage("environment resources", messages.ByName("EnvironmentResources"), map[protoreflect.FieldNumber]protoreflect.Name{
+			1: "cpu_millicores", 2: "memory_mb", 3: "disk_gb",
+		}); err != nil {
+			resizeOperationCoverageErr = err
+			return
+		}
+		if err := ensureDescriptorCoverage("environment resize failure", messages.ByName("EnvironmentResizeFailure"), map[protoreflect.FieldNumber]protoreflect.Name{
+			1: "code", 2: "message",
+		}); err != nil {
+			resizeOperationCoverageErr = err
+			return
+		}
+		resizeOperationCoverageErr = ensureDescriptorCoverage("environment resize operation", messages.ByName("EnvironmentResizeOperation"), map[protoreflect.FieldNumber]protoreflect.Name{
+			1: "id", 2: "environment_id", 3: "request_id", 4: "previous_resources", 5: "desired_resources",
+			6: "last_applied_resources", 7: "state", 8: "failure", 9: "created_at", 10: "updated_at",
+			11: "completed_at", 12: "disruption_policy", 13: "planned_mode", 14: "applied_mode", 15: "pod_replaced",
+		})
+	})
+	return resizeOperationCoverageErr
+}
+
+func ensureResizeRequestConverterCoverage() error {
+	resizeRequestCoverageOnce.Do(func() {
+		messages := codewirev1.File_codewire_v1_environment_proto.Messages()
+		if err := ensureDescriptorCoverage("plan environment resize request", messages.ByName("PlanEnvironmentResizeRequest"), map[protoreflect.FieldNumber]protoreflect.Name{
+			1: "org_id", 2: "environment_id", 3: "cpu_millicores", 4: "memory_mb", 5: "disk_gb",
+		}); err != nil {
+			resizeRequestCoverageErr = err
+			return
+		}
+		if err := ensureDescriptorCoverage("resize environment request", messages.ByName("ResizeEnvironmentRequest"), map[protoreflect.FieldNumber]protoreflect.Name{
+			1: "org_id", 2: "environment_id", 3: "cpu_millicores", 4: "memory_mb", 5: "disk_gb",
+			6: "request_id", 7: "force", 8: "disruption_policy",
+		}); err != nil {
+			resizeRequestCoverageErr = err
+			return
+		}
+		resizeRequestCoverageErr = ensureDescriptorCoverage("get environment resize operation request", messages.ByName("GetEnvironmentResizeOperationRequest"), map[protoreflect.FieldNumber]protoreflect.Name{
+			1: "org_id", 2: "environment_id", 3: "operation_id",
+		})
+	})
+	return resizeRequestCoverageErr
 }
 
 func ensurePortConverterCoverage() error {

@@ -21,12 +21,15 @@ import (
 
 type environmentServiceHandler struct {
 	codewirev1connect.UnimplementedEnvironmentServiceHandler
-	list   func(context.Context, *connect.Request[codewirev1.ListEnvironmentsRequest]) (*connect.Response[codewirev1.ListEnvironmentsResponse], error)
-	create func(context.Context, *connect.Request[codewirev1.CreateEnvironmentRequest]) (*connect.Response[codewirev1.CreateEnvironmentResponse], error)
-	get    func(context.Context, *connect.Request[codewirev1.GetEnvironmentRequest]) (*connect.Response[codewirev1.GetEnvironmentResponse], error)
-	delete func(context.Context, *connect.Request[codewirev1.DeleteEnvironmentRequest]) (*connect.Response[codewirev1.DeleteEnvironmentResponse], error)
-	stop   func(context.Context, *connect.Request[codewirev1.StopEnvironmentRequest]) (*connect.Response[codewirev1.StopEnvironmentResponse], error)
-	start  func(context.Context, *connect.Request[codewirev1.StartEnvironmentRequest]) (*connect.Response[codewirev1.StartEnvironmentResponse], error)
+	list       func(context.Context, *connect.Request[codewirev1.ListEnvironmentsRequest]) (*connect.Response[codewirev1.ListEnvironmentsResponse], error)
+	create     func(context.Context, *connect.Request[codewirev1.CreateEnvironmentRequest]) (*connect.Response[codewirev1.CreateEnvironmentResponse], error)
+	get        func(context.Context, *connect.Request[codewirev1.GetEnvironmentRequest]) (*connect.Response[codewirev1.GetEnvironmentResponse], error)
+	planResize func(context.Context, *connect.Request[codewirev1.PlanEnvironmentResizeRequest]) (*connect.Response[codewirev1.PlanEnvironmentResizeResponse], error)
+	resize     func(context.Context, *connect.Request[codewirev1.ResizeEnvironmentRequest]) (*connect.Response[codewirev1.ResizeEnvironmentResponse], error)
+	getResize  func(context.Context, *connect.Request[codewirev1.GetEnvironmentResizeOperationRequest]) (*connect.Response[codewirev1.GetEnvironmentResizeOperationResponse], error)
+	delete     func(context.Context, *connect.Request[codewirev1.DeleteEnvironmentRequest]) (*connect.Response[codewirev1.DeleteEnvironmentResponse], error)
+	stop       func(context.Context, *connect.Request[codewirev1.StopEnvironmentRequest]) (*connect.Response[codewirev1.StopEnvironmentResponse], error)
+	start      func(context.Context, *connect.Request[codewirev1.StartEnvironmentRequest]) (*connect.Response[codewirev1.StartEnvironmentResponse], error)
 }
 
 func (h environmentServiceHandler) ListEnvironments(ctx context.Context, req *connect.Request[codewirev1.ListEnvironmentsRequest]) (*connect.Response[codewirev1.ListEnvironmentsResponse], error) {
@@ -46,6 +49,24 @@ func (h environmentServiceHandler) GetEnvironment(ctx context.Context, req *conn
 		return h.get(ctx, req)
 	}
 	return h.UnimplementedEnvironmentServiceHandler.GetEnvironment(ctx, req)
+}
+func (h environmentServiceHandler) PlanEnvironmentResize(ctx context.Context, req *connect.Request[codewirev1.PlanEnvironmentResizeRequest]) (*connect.Response[codewirev1.PlanEnvironmentResizeResponse], error) {
+	if h.planResize != nil {
+		return h.planResize(ctx, req)
+	}
+	return h.UnimplementedEnvironmentServiceHandler.PlanEnvironmentResize(ctx, req)
+}
+func (h environmentServiceHandler) ResizeEnvironment(ctx context.Context, req *connect.Request[codewirev1.ResizeEnvironmentRequest]) (*connect.Response[codewirev1.ResizeEnvironmentResponse], error) {
+	if h.resize != nil {
+		return h.resize(ctx, req)
+	}
+	return h.UnimplementedEnvironmentServiceHandler.ResizeEnvironment(ctx, req)
+}
+func (h environmentServiceHandler) GetEnvironmentResizeOperation(ctx context.Context, req *connect.Request[codewirev1.GetEnvironmentResizeOperationRequest]) (*connect.Response[codewirev1.GetEnvironmentResizeOperationResponse], error) {
+	if h.getResize != nil {
+		return h.getResize(ctx, req)
+	}
+	return h.UnimplementedEnvironmentServiceHandler.GetEnvironmentResizeOperation(ctx, req)
 }
 func (h environmentServiceHandler) DeleteEnvironment(ctx context.Context, req *connect.Request[codewirev1.DeleteEnvironmentRequest]) (*connect.Response[codewirev1.DeleteEnvironmentResponse], error) {
 	if h.delete != nil {
