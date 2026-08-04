@@ -476,7 +476,8 @@ elif [ "$event_selected" = false ]; then
         select_js_security
         recognized=true
         ;;
-      scripts/checks/repo_checks.py)
+      scripts/checks/repo_checks.py|scripts/checks/repo_policy/*.py|\
+      scripts/ci/tests/test-repo-checks-modules.py)
         select_token contracts
         select_token contracts_proto
         select_token deploy

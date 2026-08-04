@@ -135,6 +135,7 @@ run_policy() {
   scripts/ci/tests/test-integration-postgres.sh
   scripts/ci/verify/check-shell-scripts.sh --self-test
   scripts/ci/verify/check-shell-scripts.sh
+  python3 scripts/ci/tests/test-repo-checks-modules.py
   python3 scripts/checks/repo_checks.py license-map
   python3 scripts/checks/repo_checks.py permanent-raw-surface --self-test
   python3 scripts/checks/repo_checks.py rust-validation-source

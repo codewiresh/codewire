@@ -174,6 +174,12 @@ run_paths_case artifact_impact_ci pull_request refs/pull/201/head false \
 run_paths_case repo_checks pull_request refs/pull/21/head false \
   'contracts contracts_proto deploy edge_kind go_consumer_interop go_support policy release runtime_confidential security security_idp_kek' \
   scripts/checks/repo_checks.py
+run_paths_case repo_policy_modules pull_request refs/pull/22/head false \
+  'contracts contracts_proto deploy edge_kind go_consumer_interop go_support policy release runtime_confidential security security_idp_kek' \
+  scripts/checks/repo_policy/mesh.py
+run_paths_case repo_policy_fixture pull_request refs/pull/23/head false \
+  'contracts contracts_proto deploy edge_kind go_consumer_interop go_support policy release runtime_confidential security security_idp_kek' \
+  scripts/ci/tests/test-repo-checks-modules.py
 run_paths_case release pull_request refs/pull/3/head false \
   'go_consumer_interop go_support policy release runtime_confidential' \
   .gitea/workflows/claude-e2e.yaml \
