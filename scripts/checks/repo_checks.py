@@ -663,10 +663,6 @@ PROTO_TS_EXPORTS = {
     "./gen/codewire/admin/v1/*": "./src/gen/codewire/admin/v1/*.ts",
     "./gen/google/rpc/*": "./src/gen/google/rpc/*.ts",
 }
-PYTHON_GENERATED_INCLUDES = {
-    "../gen-python/codewire/v1": "codewire/v1",
-    "../gen-python/google": "google",
-}
 MESH_EXPECTED_CONNECT_METHODS = {
     "MESH_NETWORK_SERVICE_SERVICE_NAME": {
         "CreateMeshNetwork",
@@ -1221,18 +1217,27 @@ def proto_package_boundary_failures(
                 f"TypeScript root exports forbidden non-public package {match.group(1)}"
             )
 
-    python_includes = (
+    python_wheel = (
         python_manifest.get("tool", {})
         .get("hatch", {})
         .get("build", {})
         .get("targets", {})
         .get("wheel", {})
-        .get("force-include", {})
     )
-    if python_includes != PYTHON_GENERATED_INCLUDES:
+    if python_wheel.get("force-include"):
         failures.append(
-            "Python wheel generated includes differ from codewire/v1 plus google.rpc"
+            "Python wheel must not depend on repository-relative generated includes"
         )
+    python_hooks = (
+        python_manifest.get("tool", {})
+        .get("hatch", {})
+        .get("build", {})
+        .get("hooks", {})
+    )
+    if python_hooks != {"custom": {}} or not (
+        ROOT / "libs/sdk-python/hatch_build.py"
+    ).is_file():
+        failures.append("Python SDK must use the self-contained custom build hook")
 
     forbidden_sdk_package = re.compile(
         r"(?:codewire[./](?:admin|console|internal|testing)[./]v1"
@@ -1324,6 +1329,32 @@ def proto_package_boundary_self_test(
             proto_sources, internal_export, ts_index, python_manifest, sdk_sources
         ),
         "TypeScript generated exports differ",
+    )
+
+    repository_relative_python = copy.deepcopy(python_manifest)
+    repository_relative_python["tool"]["hatch"]["build"]["targets"]["wheel"][
+        "force-include"
+    ] = {"../gen-python/codewire/v1": "codewire/v1"}
+    require_failure(
+        "a repository-relative Python generated include",
+        proto_package_boundary_failures(
+            proto_sources,
+            ts_manifest,
+            ts_index,
+            repository_relative_python,
+            sdk_sources,
+        ),
+        "must not depend on repository-relative generated includes",
+    )
+
+    missing_python_hook = copy.deepcopy(python_manifest)
+    missing_python_hook["tool"]["hatch"]["build"]["hooks"] = {}
+    require_failure(
+        "a Python package without the self-contained build hook",
+        proto_package_boundary_failures(
+            proto_sources, ts_manifest, ts_index, missing_python_hook, sdk_sources
+        ),
+        "must use the self-contained custom build hook",
     )
 
     internal_import = dict(sdk_sources)

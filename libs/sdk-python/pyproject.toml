@@ -1,5 +1,5 @@
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling==1.28.0"]
 build-backend = "hatchling.build"
 
 [project]
@@ -18,6 +18,12 @@ keywords = ["codewire", "sandbox", "environment", "sdk"]
 [project.optional-dependencies]
 test = ["httpx==0.28.1"]
 
+[dependency-groups]
+build = [
+    "build==1.4.3",
+    "hatchling==1.28.0",
+]
+
 [project.urls]
 Homepage = "https://codewire.sh"
 Repository = "https://github.com/codewiresh/codewire"
@@ -25,6 +31,13 @@ Repository = "https://github.com/codewiresh/codewire"
 [tool.hatch.build.targets.wheel]
 packages = ["codewire"]
 
-[tool.hatch.build.targets.wheel.force-include]
-"../gen-python/codewire/v1" = "codewire/v1"
-"../gen-python/google" = "google"
+[tool.hatch.build.targets.sdist]
+include = [
+    "codewire",
+    "hatch_build.py",
+    "LICENSE",
+    "LICENSE-APACHE",
+    "pyproject.toml",
+]
+
+[tool.hatch.build.hooks.custom]
