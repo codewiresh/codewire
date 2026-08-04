@@ -20,7 +20,7 @@ jobs:
     # Tests run against Haiku — cheapest model, plenty for an "is it alive"
     # smoke check. Each parity run = three short Haiku calls.
     env:
-      CW_EXAMPLE_IMAGE: ghcr.io/codewiresh/workspace@sha256:93623453cf2046fbca5f77a8f24d606e9dde9e5d9514e84d4b110a19f9661145
+      CW_EXAMPLE_IMAGE: ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467
       CW_EXAMPLE_CMD: 'claude --model haiku -p "Reply with exactly one word: hello"'
       INFISICAL_WORKSPACE_SLUG: codewire
       INFISICAL_ENVIRONMENT: dev

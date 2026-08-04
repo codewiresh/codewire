@@ -60,9 +60,9 @@ jq -e '
   type == "object" and
   .schemaVersion == 2 and
   (.images | type == "object" and (keys | sort) == ["dind"]) and
-  (.images.dind | type == "string" and test("^ghcr\\.io/codewiresh/dind@sha256:[0-9a-f]{64}$"))
+  (.images.dind | type == "string" and test("^docker\\.io/library/docker:[0-9]+\\.[0-9]+\\.[0-9]+-dind@sha256:[0-9a-f]{64}$"))
 ' "$LOCK_PATH" >/dev/null || \
-  die "lock must contain schemaVersion 2 and exactly one pinned public dind image"
+  die "lock must contain schemaVersion 2 and exactly one versioned, digest-pinned official Docker DinD image"
 
 dind_image="$(jq -r '.images.dind' "$LOCK_PATH")"
 gateway_digest="${GATEWAY_IMAGE##*@}"

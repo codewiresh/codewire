@@ -13,8 +13,8 @@ use serde_json::{Map, Value, json};
 use super::EXTENSIONS_API_VERSION;
 
 // Constants mirrored from internal/sandbox/types.go and internal/shim.
-pub const DEFAULT_GATEWAY_IMAGE: &str = "ghcr.io/codewiresh/gateway@sha256:1141293d909627af0e303f4ec0c5788dbda58495acd273cb243580a47828c4ca";
-pub const DEFAULT_DIND_IMAGE: &str = "ghcr.io/codewiresh/dind@sha256:00815afb718e35fa8c71e8eb411df2919f74a149908593ae3fe94b55b34feec9";
+pub const DEFAULT_GATEWAY_IMAGE: &str = "ghcr.io/codewiresh/gateway@sha256:686a2437f023fe2a4759e87ba93b8d4a71885eefdc5ec7c3486a95f3d6da2836";
+pub const DEFAULT_DIND_IMAGE: &str = "docker.io/library/docker:29.7.1-dind@sha256:e8faad5a8dc5279dff929afc5449f2791736912fff9f99351d742db2fad01b4c";
 pub const DEFAULT_GATEWAY_READYZ_PORT: i64 = 2223;
 pub const DEFAULT_GATEWAY_SSH_PORT: i64 = 2222;
 pub const GATEWAY_TAILNET_UDP_PORT: i64 = 31000;
@@ -2269,7 +2269,7 @@ mod tests {
 
     #[test]
     fn dind_image_override_preserves_guest_dind_shape() {
-        let image = "ghcr.io/codewiresh/dind@sha256:00815afb718e35fa8c71e8eb411df2919f74a149908593ae3fe94b55b34feec9";
+        let image = "docker.io/library/docker:29.7.0-dind@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         let rendered = render_sandbox_template(
             "codewire-runtime",
             &TemplateOpts {

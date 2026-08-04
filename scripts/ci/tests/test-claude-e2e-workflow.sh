@@ -8,7 +8,7 @@ readonly FETCHER="$ROOT/scripts/ci/setup/fetch-infisical-ci-secret.sh"
 readonly EXPORTER="$ROOT/scripts/ci/setup/export-infisical-secrets.sh"
 readonly GO_EXAMPLE_MOD="$ROOT/libs/sdk-examples/run-claude/go/go.mod"
 readonly GO_EXAMPLE_SUM="$ROOT/libs/sdk-examples/run-claude/go/go.sum"
-readonly WORKSPACE_REF='ghcr.io/codewiresh/workspace@sha256:93623453cf2046fbca5f77a8f24d606e9dde9e5d9514e84d4b110a19f9661145'
+readonly WORKSPACE_REF='ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467'
 
 fail() {
   printf '[test-claude-e2e-workflow] ERROR: %s\n' "$*" >&2

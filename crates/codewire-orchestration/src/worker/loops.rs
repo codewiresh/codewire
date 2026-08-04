@@ -1116,10 +1116,10 @@ mod tests {
     #[test]
     fn warm_pool_revision_hash_matches_checked_in_goldens() {
         let isol8 = warm_pool_template_opts(&warm_cfg("isol8"), &default_profile());
-        assert_eq!(warm_pool_revision_hash(&isol8), "ca432e08");
+        assert_eq!(warm_pool_revision_hash(&isol8), "09442930");
 
         let plain = warm_pool_template_opts(&warm_cfg(""), &default_profile());
-        assert_eq!(warm_pool_revision_hash(&plain), "6ddc3603");
+        assert_eq!(warm_pool_revision_hash(&plain), "1d272f19");
     }
 
     #[test]
@@ -1133,6 +1133,11 @@ mod tests {
         // (gateway image) produces a different hash.
         let mut changed = warm_cfg("isol8");
         changed.gateway_image = "gateway:v2".into();
+        let opts2 = warm_pool_template_opts(&changed, &default_profile());
+        assert_ne!(warm_pool_revision_hash(&opts2), h1);
+
+        let mut changed = warm_cfg("isol8");
+        changed.dind_image = "docker.io/library/docker:29.7.0-dind@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into();
         let opts2 = warm_pool_template_opts(&changed, &default_profile());
         assert_ne!(warm_pool_revision_hash(&opts2), h1);
 

@@ -79,6 +79,13 @@ pub fn warm_pool_revision_hash(opts: &TemplateOpts) -> String {
         opts.image_command.join(" ")
     ));
     buf.push_str(&format!("SupportImage={}\n", opts.support_image));
+    let configured_dind_image = opts.dind_image.trim();
+    let effective_dind_image = if configured_dind_image.is_empty() {
+        template::DEFAULT_DIND_IMAGE
+    } else {
+        configured_dind_image
+    };
+    buf.push_str(&format!("DindImage={effective_dind_image}\n"));
     buf.push_str(&format!("RuntimeProfile={}\n", opts.runtime_profile));
     buf.push_str(&format!("RuntimeClassName={}\n", opts.runtime_class_name));
     buf.push_str(&format!("DockerMode={}\n", opts.docker_mode));

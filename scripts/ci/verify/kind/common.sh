@@ -41,7 +41,7 @@ if [ -z "${KIND_WORKSPACE_IMAGE+x}" ]; then
   KIND_WORKSPACE_IMAGE='ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467'
 fi
 if [ -z "${KIND_DIND_IMAGE+x}" ]; then
-  KIND_DIND_IMAGE='ghcr.io/codewiresh/dind@sha256:00815afb718e35fa8c71e8eb411df2919f74a149908593ae3fe94b55b34feec9'
+  KIND_DIND_IMAGE='docker.io/library/docker:29.7.1-dind@sha256:e8faad5a8dc5279dff929afc5449f2791736912fff9f99351d742db2fad01b4c'
 fi
 readonly KIND_WORKSPACE_IMAGE KIND_DIND_IMAGE
 
@@ -2616,9 +2616,10 @@ assert_sandbox_supply_chain() {
         if startswith("ghcr.io/codewiresh/workspace:") or
            startswith("ghcr.io/codewiresh/workspace@")
         then . == $workspace
-        elif startswith("ghcr.io/codewiresh/dind:") or
-             startswith("ghcr.io/codewiresh/dind@") or
-             startswith("docker:" + "dind")
+        elif startswith("ghcr.io/codewiresh/" + "dind") or
+             startswith("docker:" + "dind") or
+             startswith("docker.io/library/docker:") or
+             startswith("docker.io/library/docker@")
         then . == $dind
         else true
         end)
@@ -2629,8 +2630,9 @@ assert_sandbox_supply_chain() {
       | ((.spec.initContainers // []) + (.spec.containers // []))[]
       | .image
       | select(startswith("ghcr.io/codewiresh/workspace") or
-               startswith("ghcr.io/codewiresh/dind") or
-               startswith("docker:" + "dind"))
+               startswith("ghcr.io/codewiresh/" + "dind") or
+               startswith("docker:" + "dind") or
+               startswith("docker.io/library/docker"))
     ' <<<"$pods" | LC_ALL=C sort -u >&2
     return 1
   fi
@@ -2639,15 +2641,17 @@ assert_sandbox_supply_chain() {
   if ! jq -e --arg workspace "$KIND_WORKSPACE_IMAGE" --arg dind "$KIND_DIND_IMAGE" '
     [.. | strings
       | select(startswith("ghcr.io/codewiresh/workspace") or
-               startswith("ghcr.io/codewiresh/dind") or
-               startswith("docker:" + "dind"))]
+               startswith("ghcr.io/codewiresh/" + "dind") or
+               startswith("docker:" + "dind") or
+               startswith("docker.io/library/docker"))]
     | all(.[]; . == $workspace or . == $dind)
   ' <<<"$templates" >/dev/null; then
     echo "::error::rendered SandboxTemplate contains an unaccepted workspace or DinD image reference"
     jq -r '[.. | strings
       | select(startswith("ghcr.io/codewiresh/workspace") or
-               startswith("ghcr.io/codewiresh/dind") or
-               startswith("docker:" + "dind"))] | unique[]' \
+               startswith("ghcr.io/codewiresh/" + "dind") or
+               startswith("docker:" + "dind") or
+               startswith("docker.io/library/docker"))] | unique[]' \
       <<<"$templates" >&2
     return 1
   fi
@@ -2660,7 +2664,7 @@ assert_sandbox_supply_chain() {
           (["ErrImagePull", "Failed", "FailedToRetrieveImagePullSecret", "ImagePullBackOff"]
             | index($event.reason)) != null and
           (($event.message // "")
-            | test("(ghcr\\.io/codewiresh/(workspace|dind)|docker:din[d])"))
+            | test("(ghcr\\.io/codewiresh/(workspace|dind)|docker:din[d]|docker\\.io/library/docker)"))
         )
       | $event
     ] | length == 0
@@ -2668,7 +2672,7 @@ assert_sandbox_supply_chain() {
     echo "::error::Kind recorded a workspace or DinD image-provenance failure"
     jq -r '.items[]
       | select((.message // "")
-          | test("(ghcr\\.io/codewiresh/(workspace|dind)|docker:din[d])"))
+          | test("(ghcr\\.io/codewiresh/(workspace|dind)|docker:din[d]|docker\\.io/library/docker)"))
       | "\(.metadata.namespace // "default")/\(.involvedObject.name): \(.reason)"' \
       <<<"$events" >&2
     return 1

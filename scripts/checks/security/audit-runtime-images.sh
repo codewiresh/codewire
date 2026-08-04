@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 cd "$ROOT"
 
 readonly workspace_image='ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467'
-readonly dind_image='ghcr.io/codewiresh/dind@sha256:00815afb718e35fa8c71e8eb411df2919f74a149908593ae3fe94b55b34feec9'
+readonly dind_image='docker.io/library/docker:29.7.1-dind@sha256:e8faad5a8dc5279dff929afc5449f2791736912fff9f99351d742db2fad01b4c'
 readonly dashboard_runtime='gcr.io/distroless/cc-debian12:nonroot@sha256:fccdbb0a547c14e23fcf4ce8ad62ca5d43b4faae8d22cd292f490fef9946c96e'
 readonly dashboard_dockerfile='apps/dashboard/Dockerfile'
 
@@ -23,6 +23,13 @@ if moving_dind="$(git grep -nF 'docker:dind' -- \
   && [[ -n "$moving_dind" ]]; then
   echo "runtime image audit: upstream moving DinD references are forbidden" >&2
   echo "$moving_dind" >&2
+  fail=1
+fi
+if retired_dind="$(git grep -nF 'ghcr.io/codewiresh/dind' -- \
+    ':!docs/**' ':!scripts/checks/security/audit-runtime-images.sh' || true)" \
+  && [[ -n "$retired_dind" ]]; then
+  echo "runtime image audit: retired custom DinD references are forbidden" >&2
+  echo "$retired_dind" >&2
   fail=1
 fi
 

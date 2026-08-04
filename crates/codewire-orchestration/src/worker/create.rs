@@ -338,7 +338,7 @@ impl SandboxWorkerCfg {
             sandbox_namespace: getenv("SANDBOX_NAMESPACE", &format!("{env_prefix}-sandboxes")),
             gateway_image: getenv(
                 "SANDBOX_GATEWAY_IMAGE",
-                "ghcr.io/codewiresh/gateway@sha256:1141293d909627af0e303f4ec0c5788dbda58495acd273cb243580a47828c4ca",
+                "ghcr.io/codewiresh/gateway@sha256:686a2437f023fe2a4759e87ba93b8d4a71885eefdc5ec7c3486a95f3d6da2836",
             ),
             dind_image: getenv("SANDBOX_DIND_IMAGE", ""),
             runtime_profile: std::env::var("SANDBOX_RUNTIME_PROFILE").unwrap_or_default(),
