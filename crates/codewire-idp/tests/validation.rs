@@ -2,6 +2,7 @@ use axum::Router;
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode, header};
 use codewire_server_core::auth::AuthState;
+use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use tower::ServiceExt;
 
@@ -25,7 +26,11 @@ async fn post_json(app: Router, path: &str, body: &str) -> (StatusCode, serde_js
 #[tokio::test]
 async fn sign_up_type_errors_use_rust_validation_envelope() {
     let pool = lazy_pool();
-    let app = codewire_idp::auth_session::router(pool, false);
+    let app = codewire_idp::auth_session::router(
+        pool,
+        false,
+        codewire_idp::auth_session::SignupInvitePolicy::open(),
+    );
 
     let (status, body) = post_json(
         app,
@@ -44,7 +49,11 @@ async fn sign_up_type_errors_use_rust_validation_envelope() {
 #[tokio::test]
 async fn sign_up_missing_required_fields_uses_rust_validation_envelope() {
     let pool = lazy_pool();
-    let app = codewire_idp::auth_session::router(pool, false);
+    let app = codewire_idp::auth_session::router(
+        pool,
+        false,
+        codewire_idp::auth_session::SignupInvitePolicy::open(),
+    );
 
     let (status, body) = post_json(app, "/api/auth/sign-up", r#"{"email":"n@example.com"}"#).await;
 
@@ -58,6 +67,26 @@ async fn sign_up_missing_required_fields_uses_rust_validation_envelope() {
             .unwrap()
             .contains("password")
     );
+}
+
+#[tokio::test]
+async fn configured_signup_invite_policy_rejects_before_database_access() {
+    let pool = lazy_pool();
+    let accepted_hash = format!("{:x}", Sha256::digest(b"synthetic-accepted-invite"));
+    let policy =
+        codewire_idp::auth_session::SignupInvitePolicy::from_sha256_hashes(Some(&accepted_hash))
+            .unwrap();
+    let app = codewire_idp::auth_session::router(pool, false, policy);
+
+    for invite_code in ["", "synthetic-rejected-invite"] {
+        let body = format!(
+            r#"{{"email":"n@example.com","password":"CorrectHorse9#xy","invite_code":"{invite_code}"}}"#
+        );
+        let (status, body) = post_json(app.clone(), "/api/auth/sign-up", &body).await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["detail"], "Invalid invitation code");
+    }
 }
 
 #[tokio::test]

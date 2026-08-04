@@ -23,7 +23,7 @@ use sqlx::PgPool;
 
 use crate::{
     PgAuthorizationStore, PgClientStore, PgDeviceAuthorizationStore, PgKeyStore, PgTokenCustomizer,
-    PgTokenStore, PgUserAuthenticator, SigningKekKeyring,
+    PgTokenStore, PgUserAuthenticator, SigningKekKeyring, auth_session::SignupInvitePolicy,
 };
 
 /// Static configuration for the idp service.
@@ -35,6 +35,9 @@ pub struct IdpConfig {
     pub frontend_url: String,
     /// Resend API key for transactional auth emails. Empty disables delivery.
     pub resend_api_key: String,
+    /// Signup invite policy. An absent/blank hash list explicitly leaves
+    /// signup open; configured hashes require a matching invite code.
+    pub signup_invite_policy: SignupInvitePolicy,
     /// Scopes advertised in discovery.
     pub scopes_supported: Vec<String>,
 }
@@ -73,10 +76,14 @@ impl IdpConfig {
         let frontend_url = pick(&["FRONTEND_URL", "CODEWIRE_API_URL"], &mut value)
             .unwrap_or_else(|| issuer.clone());
         let resend_api_key = pick(&["RESEND_API_KEY"], &mut value).unwrap_or_default();
+        let signup_invite_policy = SignupInvitePolicy::from_sha256_hashes(
+            value("IDP_SIGNUP_INVITE_CODE_HASHES").as_deref(),
+        )?;
         Ok(Self {
             issuer,
             frontend_url,
             resend_api_key,
+            signup_invite_policy,
             scopes_supported: vec![
                 "openid".into(),
                 "profile".into(),
@@ -221,6 +228,7 @@ mod tests {
         assert_eq!(cfg.issuer, "http://127.0.0.1:8080");
         assert_eq!(cfg.frontend_url, "http://frontend.example");
         assert_eq!(cfg.resend_api_key, "");
+        assert!(!cfg.signup_invite_policy.is_configured());
         assert!(
             cfg.scopes_supported
                 .iter()
@@ -246,5 +254,46 @@ mod tests {
         assert_eq!(cfg.issuer, "http://codewire-server:8080");
         assert_eq!(cfg.frontend_url, "http://codewire-server:8080");
         assert_eq!(cfg.resend_api_key, "");
+        assert!(!cfg.signup_invite_policy.is_configured());
+    }
+
+    #[test]
+    fn signup_invite_hashes_are_owned_by_idp_configuration() {
+        let values = [
+            ("PUBLIC_OIDC_ISSUER_URL", "https://idp.example"),
+            (
+                "IDP_SIGNUP_INVITE_CODE_HASHES",
+                "0000000000000000000000000000000000000000000000000000000000000000",
+            ),
+        ];
+
+        let cfg = IdpConfig::from_values(|key| {
+            values
+                .iter()
+                .find(|(candidate, _)| *candidate == key)
+                .map(|(_, value)| (*value).to_string())
+        })
+        .expect("configured invite policy resolves");
+
+        assert!(cfg.signup_invite_policy.is_configured());
+    }
+
+    #[test]
+    fn malformed_signup_invite_hashes_fail_configuration() {
+        let values = [
+            ("PUBLIC_OIDC_ISSUER_URL", "https://idp.example"),
+            ("IDP_SIGNUP_INVITE_CODE_HASHES", "plaintext-is-not-valid"),
+        ];
+
+        let error = IdpConfig::from_values(|key| {
+            values
+                .iter()
+                .find(|(candidate, _)| *candidate == key)
+                .map(|(_, value)| (*value).to_string())
+        })
+        .unwrap_err();
+
+        assert!(error.to_string().contains("IDP_SIGNUP_INVITE_CODE_HASHES"));
+        assert!(!error.to_string().contains("plaintext-is-not-valid"));
     }
 }

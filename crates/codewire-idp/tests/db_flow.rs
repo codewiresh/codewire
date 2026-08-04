@@ -16,6 +16,7 @@ use codewire_server_core::auth::{
     AuthState, AuthUser, CredentialContext, api_key_prefix, generate_api_key, hash_api_key,
     hash_oauth_token, hash_session_token, require_auth,
 };
+use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use totp_rs::{Algorithm, Secret, TOTP};
 
@@ -201,6 +202,7 @@ async fn native_clients_full_flow_against_postgres() {
         issuer: "https://idp.codewire.test".into(),
         frontend_url: "https://app.codewire.test".into(),
         resend_api_key: String::new(),
+        signup_invite_policy: codewire_idp::auth_session::SignupInvitePolicy::open(),
         scopes_supported: vec![
             "openid".into(),
             "profile".into(),
@@ -444,6 +446,7 @@ async fn oidc_access_token_authenticates_product_api_against_postgres() {
         issuer: "https://idp.codewire.test".into(),
         frontend_url: "https://app.codewire.test".into(),
         resend_api_key: String::new(),
+        signup_invite_policy: codewire_idp::auth_session::SignupInvitePolicy::open(),
         scopes_supported: vec![
             "openid".into(),
             "profile".into(),
@@ -771,6 +774,7 @@ async fn provider_startup_publishes_jwks_before_token_issuance() {
             issuer: "https://idp.codewire.test".into(),
             frontend_url: "https://app.codewire.test".into(),
             resend_api_key: String::new(),
+            signup_invite_policy: codewire_idp::auth_session::SignupInvitePolicy::open(),
             scopes_supported: vec!["openid".into()],
         };
 
@@ -1375,6 +1379,7 @@ async fn jwk_final_schema_uses_only_envelopes_and_fails_closed() {
             issuer: "https://idp.codewire.test".into(),
             frontend_url: "https://app.codewire.test".into(),
             resend_api_key: String::new(),
+            signup_invite_policy: codewire_idp::auth_session::SignupInvitePolicy::open(),
             scopes_supported: vec!["openid".into()],
         };
         let error = build_provider(pool.clone(), &cfg, test_signing_keyring())
@@ -1556,6 +1561,7 @@ async fn standard_cli_device_grant_uses_browser_approval_against_postgres() {
         issuer: "https://idp.codewire.test".into(),
         frontend_url: "https://app.codewire.test".into(),
         resend_api_key: String::new(),
+        signup_invite_policy: codewire_idp::auth_session::SignupInvitePolicy::open(),
         scopes_supported: vec![
             "openid".into(),
             "profile".into(),
@@ -1740,6 +1746,7 @@ async fn session_auth_flow_against_postgres() {
 
     let email = "sess-flow@example.com";
     let pw = "Sup3rStrong!Pass";
+    let invite_code = "synthetic-db-flow-invite";
     let cleanup = |p: PgPool| async move {
         sqlx::query("DELETE FROM sessions WHERE user_id IN (SELECT id FROM users WHERE email=$1)")
             .bind(email)
@@ -1759,15 +1766,40 @@ async fn session_auth_flow_against_postgres() {
     };
     cleanup(pool.clone()).await;
 
-    let app = codewire_idp::auth_session::router(pool.clone(), false);
+    let invite_hash = format!("{:x}", Sha256::digest(invite_code.as_bytes()));
+    let invite_policy =
+        codewire_idp::auth_session::SignupInvitePolicy::from_sha256_hashes(Some(&invite_hash))
+            .unwrap();
+    let app = codewire_idp::auth_session::router(pool.clone(), false, invite_policy);
 
-    // 1. sign-up → 200 + Set-Cookie + AuthResponse.
+    // 1. A wrong configured invite fails before any user is inserted.
+    let (st, body, _) = sess_req(
+        &app,
+        "POST",
+        "/api/auth/sign-up",
+        None,
+        &format!(
+            r#"{{"email":"{email}","password":"{pw}","name":"Sess Flow","invite_code":"synthetic-wrong-invite"}}"#
+        ),
+    )
+    .await;
+    assert_eq!(st, 400, "invalid invite: {body}");
+    let inserted: i64 = sqlx::query_scalar("SELECT count(*) FROM users WHERE email=$1")
+        .bind(email)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(inserted, 0, "invalid invite must not create an account");
+
+    // 2. A configured valid invite signs up and returns a session.
     let (st, body, cookie) = sess_req(
         &app,
         "POST",
         "/api/auth/sign-up",
         None,
-        &format!(r#"{{"email":"{email}","password":"{pw}","name":"Sess Flow"}}"#),
+        &format!(
+            r#"{{"email":"{email}","password":"{pw}","name":"Sess Flow","invite_code":"{invite_code}"}}"#
+        ),
     )
     .await;
     assert_eq!(st, 200, "signup: {body}");
@@ -1787,23 +1819,25 @@ async fn session_auth_flow_against_postgres() {
             .unwrap();
     assert_eq!(created, hash_session_token(&token));
 
-    // 2. get-session with the cookie → AuthResponse.
+    // 3. get-session with the cookie → AuthResponse.
     let (st, body, _) = sess_req(&app, "GET", "/api/auth/get-session", Some(&token), "").await;
     assert_eq!(st, 200);
     assert_eq!(body["user"]["email"], email);
 
-    // 3. duplicate sign-up → 409.
+    // 4. duplicate sign-up → 409.
     let (st, _b, _) = sess_req(
         &app,
         "POST",
         "/api/auth/sign-up",
         None,
-        &format!(r#"{{"email":"{email}","password":"{pw}","name":"x"}}"#),
+        &format!(
+            r#"{{"email":"{email}","password":"{pw}","name":"x","invite_code":"{invite_code}"}}"#
+        ),
     )
     .await;
     assert_eq!(st, 409);
 
-    // 4. sign-in (correct) → 200 + cookie. (Proves Argon2id verify of the
+    // 5. sign-in (correct) → 200 + cookie. (Proves Argon2id verify of the
     //    stored hash.)
     let (st, body, cookie) = sess_req(
         &app,
@@ -1817,7 +1851,7 @@ async fn session_auth_flow_against_postgres() {
     assert!(cookie.is_some());
     assert_eq!(body["user"]["email"], email);
 
-    // 5. sign-in (wrong) → 401, then four more wrong → lockout (429).
+    // 6. sign-in (wrong) → 401, then four more wrong → lockout (429).
     let bad = format!(r#"{{"email":"{email}","password":"nope"}}"#);
     let (st, _b, _) = sess_req(&app, "POST", "/api/auth/sign-in", None, &bad).await;
     assert_eq!(st, 401);
@@ -1841,13 +1875,13 @@ async fn session_auth_flow_against_postgres() {
         .await
         .unwrap();
 
-    // 6. sign-out → {success:true} + clear-cookie (Max-Age=0).
+    // 7. sign-out → {success:true} + clear-cookie (Max-Age=0).
     let (st, body, clear) = sess_req(&app, "POST", "/api/auth/sign-out", Some(&token), "").await;
     assert_eq!(st, 200);
     assert_eq!(body["success"], true);
     assert!(clear.unwrap().contains("Max-Age=0"));
 
-    // 7. get-session after sign-out → null (session deleted).
+    // 8. get-session after sign-out → null (session deleted).
     let (st, body, _) = sess_req(&app, "GET", "/api/auth/get-session", Some(&token), "").await;
     assert_eq!(st, 200);
     assert!(body.is_null());
@@ -1931,7 +1965,11 @@ async fn get_session_accepts_codewire_api_key_against_postgres() {
         .await
         .unwrap();
 
-    let app = codewire_idp::auth_session::router(pool.clone(), false);
+    let app = codewire_idp::auth_session::router(
+        pool.clone(),
+        false,
+        codewire_idp::auth_session::SignupInvitePolicy::open(),
+    );
     let (st, body, _) = sess_req_bearer(&app, "GET", "/api/auth/get-session", &raw_key, "").await;
     assert_eq!(st, 200, "api-key get-session: {body}");
     assert_eq!(body["user"]["email"], email);
@@ -2205,7 +2243,11 @@ async fn email_password_flow_against_postgres() {
             .unwrap();
     assert_eq!(reset_remaining, 0);
 
-    let session_app = codewire_idp::auth_session::router(pool.clone(), false);
+    let session_app = codewire_idp::auth_session::router(
+        pool.clone(),
+        false,
+        codewire_idp::auth_session::SignupInvitePolicy::open(),
+    );
     let (st, body, cookie) = sess_req(
         &session_app,
         "POST",
@@ -2507,14 +2549,17 @@ async fn two_factor_attempts_lock_account_against_postgres() {
     };
     cleanup(pool.clone()).await;
 
-    let app = codewire_idp::auth_session::router(pool.clone(), false).merge(
-        codewire_idp::two_factor::router(
-            pool.clone(),
-            session_secret.to_string(),
-            false,
-            AuthState { pool: pool.clone() },
-        ),
-    );
+    let app = codewire_idp::auth_session::router(
+        pool.clone(),
+        false,
+        codewire_idp::auth_session::SignupInvitePolicy::open(),
+    )
+    .merge(codewire_idp::two_factor::router(
+        pool.clone(),
+        session_secret.to_string(),
+        false,
+        AuthState { pool: pool.clone() },
+    ));
 
     // Create a real credential account, then enable and verify 2FA through
     // the same HTTP handlers used by the login page.

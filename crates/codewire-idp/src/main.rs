@@ -97,7 +97,11 @@ async fn serve() -> anyhow::Result<()> {
     // Session-core credential auth (`/api/auth/{sign-up,sign-in,sign-out,
     // get-session}`). Cookies are `Secure` only for HTTPS frontends.
     let secure = idp_cfg.frontend_url.starts_with("https");
-    let session_auth = codewire_idp::auth_session::router(pool.clone(), secure);
+    let session_auth = codewire_idp::auth_session::router(
+        pool.clone(),
+        secure,
+        idp_cfg.signup_invite_policy.clone(),
+    );
     let email_password = codewire_idp::email_password::router(
         pool.clone(),
         idp_cfg.frontend_url.clone(),
