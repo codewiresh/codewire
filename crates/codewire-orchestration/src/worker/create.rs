@@ -580,6 +580,18 @@ pub fn environment_claim_opts(
     _gateway_token: &str,
 ) -> ClaimOpts {
     if is_canonical_workspace_runtime_image(image_ref) {
+        if env.isolation_tier != "standard" {
+            let template_ref =
+                environment_template_name(CANONICAL_WORKSPACE_RUNTIME_TEMPLATE_NAME, env_id);
+            return ClaimOpts {
+                environment_id: env_id.to_string(),
+                org_id: env.org_id.clone(),
+                warm_pool_ref: shadow_warm_pool_name(&template_ref),
+                template_ref,
+                additional_pod_labels: environment_pod_selector(env_id),
+                ..Default::default()
+            };
+        }
         match parse_canonical_full_warm_pool_profiles(&cfg.full_warm_profiles) {
             Err(e) => {
                 tracing::warn!(error = %e, "environment claim: invalid canonical full warm profiles, falling back to per-environment template");
@@ -634,6 +646,16 @@ pub fn environment_per_env_template_name(
     env_id: &str,
 ) -> Option<String> {
     if is_canonical_workspace_runtime_image(image_ref) {
+        // Canonical warm pools are rendered from the process-wide standard
+        // runtime configuration. A confidential environment must instead use
+        // its tier-derived per-environment template so its Sandbox and Pod are
+        // created with the confidential RuntimeClass.
+        if env.isolation_tier != "standard" {
+            return Some(environment_template_name(
+                CANONICAL_WORKSPACE_RUNTIME_TEMPLATE_NAME,
+                env_id,
+            ));
+        }
         if let Ok(profiles) = parse_canonical_full_warm_pool_profiles(&cfg.full_warm_profiles)
             && match_canonical_full_warm_pool_profile(
                 &profiles,
@@ -1445,6 +1467,32 @@ mod tests {
             )
         );
         assert!(opts.env_overrides.is_empty());
+
+        // Confidential environments must never adopt a standard canonical
+        // warm-pool Sandbox. Their per-environment template carries the
+        // tier-derived confidential RuntimeClass.
+        let mut confidential = env.clone();
+        confidential.isolation_tier = "confidential".into();
+        let opts = environment_claim_opts(
+            &cfg,
+            "ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467",
+            "tmpl-base",
+            &confidential,
+            "env-1",
+            "gateway-token",
+        );
+        assert_eq!(opts.template_ref, "workspace-env-1");
+        assert_eq!(opts.warm_pool_ref, "shadow-pool-workspace-env-1");
+        assert_eq!(
+            environment_per_env_template_name(
+                &cfg,
+                "ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467",
+                "tmpl-base",
+                &confidential,
+                "env-1",
+            ),
+            Some("workspace-env-1".into())
+        );
 
         // Canonical image, non-matching SKU → per-env canonical template.
         let mut big = env.clone();
