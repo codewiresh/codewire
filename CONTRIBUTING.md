@@ -35,8 +35,9 @@ Useful repo-level checks:
 
 ```bash
 bun run build
+bun run typecheck
 bun run rust:check
-bun run types:generate
+make proto-drift-check
 cw env --local create --backend lima --name codewire-dev
 ```
 

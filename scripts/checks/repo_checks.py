@@ -1513,7 +1513,6 @@ def check_license_map(_args: argparse.Namespace) -> int:
         "apps/dashboard/package.json": "AGPL-3.0-only",
         "libs/sdk-examples/run-claude/typescript/package.json": "MIT",
         "libs/sdk-ts/package.json": "MIT",
-        "packages/auth/package.json": "MIT",
         "packages/codewire-proto-ts/package.json": "MIT",
     }
     actual_package_json = {

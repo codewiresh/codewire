@@ -11,11 +11,9 @@
   "scripts": {
     "preflight": "./scripts/dev/preflight.sh",
     "hooks:install": "./scripts/dev/install-hooks.sh",
-    "build": "turbo build",
-    "dev": "infisical run -- turbo dev",
-    "dev:local": "turbo dev",
-    "lint": "turbo lint",
-    "typecheck": "turbo typecheck",
+    "build": "make build",
+    "dev": "make web",
+    "typecheck": "bun run --cwd packages/codewire-proto-ts typecheck && bun run --cwd apps/dashboard typecheck",
     "up": "infisical run --env=local --path=/local-kind -- make up",
     "up:billing": "infisical run --env=local --path=/ -- make up-billing",
     "down": "make down",
@@ -44,7 +42,6 @@
   },
   "devDependencies": {
     "@bufbuild/protoc-gen-es": "2.12.1",
-    "turbo": "2.9.16",
     "typescript": "6.0.3"
   }
 }
