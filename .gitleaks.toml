@@ -53,7 +53,7 @@ regexes = ['''sidecar_token="[[:alnum:]_.-]{100,200}"''']
 description = "Codewire sandbox template tests embed an OpenSSH private-key fixture"
 targetRules = ["private-key"]
 condition = "AND"
-paths = ['''(^|/)crates/codewire-orchestration/src/sandbox/template\.rs$''']
+paths = ['''(^|/)crates/codewire-orchestration/src/sandbox/template/tests\.rs$''']
 regexTarget = "match"
 regexes = ['''BEGIN[[:space:]]+OPENSSH[[:space:]]+PRIVATE[[:space:]]+KEY''']
 

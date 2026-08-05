@@ -1073,7 +1073,8 @@ elif [ "$event_selected" = false ]; then
         recognized=true
         ;;
       crates/codewire-orchestration/src/sandbox/mod.rs|\
-      crates/codewire-orchestration/src/sandbox/template.rs)
+      crates/codewire-orchestration/src/sandbox/template.rs|\
+      crates/codewire-orchestration/src/sandbox/template/*)
         select_token edge_kind
         recognized=true
         ;;

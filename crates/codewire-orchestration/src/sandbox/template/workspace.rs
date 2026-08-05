@@ -1,0 +1,421 @@
+//! Workspace SandboxTemplate, pod, storage, and daemon-service rendering.
+
+use serde_json::{Map, Value, json};
+
+use super::encoding::kata_policy_init_data_annotation;
+use super::naming::{workspace_daemon_service_name, workspace_selector, workspace_template_labels};
+use super::network::workspace_egress_rules;
+use super::runtime_policy::{
+    DOCKER_MODE_GUEST_DIND, DOCKER_MODE_LOCAL_DIND_DIRECT, RUNTIME_PROFILE_CONFIDENTIAL,
+    RUNTIME_PROFILE_EXTERNAL_ISOL8_XEN, RuntimeProfileSpec, dind_image, dind_memory_limit_gib,
+    docker_data_size_gib, kata_coco_kernel_params_annotation, uses_kata_policy_init_data,
+    workspace_storage_class,
+};
+use super::{
+    DAEMON_AUTH_TOKEN_ENV, DEFAULT_GATEWAY_IMAGE, EXTENSIONS_API_VERSION,
+    GATEWAY_DOCKER_UPSTREAM_SOCK_PATH, HOME_ROOT, ISOL8_DISK_GIB_ANNOTATION_KEY,
+    ISOL8_WORKSPACE_ANNOTATION_KEY, KATA_COCO_INIT_DATA_ANNOTATION_KEY,
+    KATA_HYPERVISOR_KERNEL_PARAMS_ANNOTATION_KEY, SANDBOX_SERVICE_ACCOUNT, TemplateOpts,
+    WORKSPACE_ANNOTATION_KEY, WORKSPACE_DAEMON_LISTEN_ADDR, WORKSPACE_DAEMON_PORT,
+    WORKSPACE_DISK_GIB_ANNOTATION_KEY, WORKSPACE_EPHEMERAL_STORAGE_GI,
+};
+
+/// Mirrors `sandbox.RenderSandboxTemplate`.
+pub fn render_sandbox_template(namespace: &str, opts: &TemplateOpts) -> Value {
+    let support_image = if opts.support_image.is_empty() {
+        DEFAULT_GATEWAY_IMAGE
+    } else {
+        &opts.support_image
+    };
+
+    const ENSURE_USER_CMD: &str = "user_shell=/bin/bash; [ -x /bin/bash ] || user_shell=/bin/sh; grep -q '^[^:]*:[^:]*:1000:' /etc/passwd || echo \"codewire:x:1000:1000:codewire:/home/codewire:${user_shell}\" >> /etc/passwd; grep -q '^[^:]*:[^:]*:1000:' /etc/group || echo 'codewire:x:1000:' >> /etc/group;";
+    const WAIT_DAEMON_CMD: &str = "while [ ! -x /codewire/bin/cw ]; do sleep 0.1; done;";
+
+    let ws_command: Vec<Value> = if !opts.image_command.is_empty() {
+        let entrypoint = opts.image_command.join(" ");
+        vec![
+            "sh".into(),
+            "-c".into(),
+            custom_workspace_supervisor_command(
+                ENSURE_USER_CMD,
+                WAIT_DAEMON_CMD,
+                "/codewire/bin/cw daemon",
+                &entrypoint,
+            )
+            .into(),
+        ]
+    } else {
+        vec![
+            "sh".into(),
+            "-c".into(),
+            format!("{ENSURE_USER_CMD} {WAIT_DAEMON_CMD} exec /codewire/bin/cw daemon").into(),
+        ]
+    };
+
+    let mut ws_container = json!({
+        "name": "workspace",
+        "image": opts.image,
+        "command": ws_command,
+        "env": build_workspace_env(opts),
+        "ports": [
+            { "name": "daemon", "containerPort": WORKSPACE_DAEMON_PORT, "protocol": "TCP" },
+        ],
+        "resources": {
+            "requests": {
+                "cpu": format!("{}m", opts.cpu_millicores),
+                "memory": format!("{}Mi", opts.memory_mib),
+                "ephemeral-storage": format!("{WORKSPACE_EPHEMERAL_STORAGE_GI}Gi"),
+            },
+            "limits": {
+                "cpu": format!("{}m", opts.cpu_millicores),
+                "memory": format!("{}Mi", opts.memory_mib),
+                "ephemeral-storage": format!("{WORKSPACE_EPHEMERAL_STORAGE_GI}Gi"),
+            },
+        },
+        "resizePolicy": [
+            { "resourceName": "cpu", "restartPolicy": "NotRequired" },
+            { "resourceName": "memory", "restartPolicy": "NotRequired" },
+        ],
+        "volumeMounts": [
+            { "name": "workspace", "mountPath": "/home/codewire" },
+            { "name": "workspace", "mountPath": "/workspace" },
+            { "name": "codewire-bin", "mountPath": "/codewire/bin" },
+            { "name": "codewire-run", "mountPath": "/codewire/run" },
+        ],
+    });
+
+    json!({
+        "apiVersion": EXTENSIONS_API_VERSION,
+        "kind": "SandboxTemplate",
+        "metadata": { "name": opts.name, "namespace": namespace },
+        "spec": build_template_spec(opts, &mut ws_container, support_image),
+    })
+}
+
+pub(super) fn custom_workspace_supervisor_command(
+    ensure_user: &str,
+    wait_daemon: &str,
+    daemon_command: &str,
+    entrypoint: &str,
+) -> String {
+    format!(
+        "{ensure_user} {wait_daemon} \
+         {daemon_command} & daemon_pid=$!; \
+         {entrypoint} & workload_pid=$!; \
+         shutdown() {{ \
+           kill \"$workload_pid\" \"$daemon_pid\" 2>/dev/null || true; \
+           wait \"$workload_pid\" 2>/dev/null || true; \
+           wait \"$daemon_pid\" 2>/dev/null || true; \
+         }}; \
+         trap 'shutdown; exit 0' TERM INT; \
+         while kill -0 \"$workload_pid\" 2>/dev/null; do \
+           if ! kill -0 \"$daemon_pid\" 2>/dev/null; then \
+             wait \"$daemon_pid\" 2>/dev/null || true; \
+             sleep 1; \
+             {daemon_command} & daemon_pid=$!; \
+           fi; \
+           sleep 1; \
+         done; \
+         wait \"$workload_pid\"; status=$?; \
+         kill \"$daemon_pid\" 2>/dev/null || true; \
+         wait \"$daemon_pid\" 2>/dev/null || true; \
+         exit \"$status\""
+    )
+}
+
+fn build_template_spec(opts: &TemplateOpts, ws: &mut Value, support_image: &str) -> Value {
+    let runtime_spec = opts.runtime_profile_spec();
+    let mut annotations = Map::new();
+    annotations.insert(WORKSPACE_ANNOTATION_KEY.into(), "true".into());
+    if opts.disk_gib > 0 {
+        annotations.insert(
+            WORKSPACE_DISK_GIB_ANNOTATION_KEY.into(),
+            format!("{}", opts.disk_gib).into(),
+        );
+    }
+    if runtime_spec.profile == RUNTIME_PROFILE_EXTERNAL_ISOL8_XEN {
+        annotations.insert(ISOL8_WORKSPACE_ANNOTATION_KEY.into(), "true".into());
+        if opts.disk_gib > 0 {
+            annotations.insert(
+                ISOL8_DISK_GIB_ANNOTATION_KEY.into(),
+                format!("{}", opts.disk_gib).into(),
+            );
+        }
+    }
+    if uses_kata_policy_init_data(opts, &runtime_spec) {
+        annotations.insert(
+            KATA_COCO_INIT_DATA_ANNOTATION_KEY.into(),
+            kata_policy_init_data_annotation(opts).into(),
+        );
+    }
+    if let Some(kernel_params) = kata_coco_kernel_params_annotation(opts, &runtime_spec) {
+        annotations.insert(
+            KATA_HYPERVISOR_KERNEL_PARAMS_ANNOTATION_KEY.into(),
+            kernel_params.into(),
+        );
+    }
+
+    let labels = workspace_template_labels();
+    let mut spec = Map::new();
+    spec.insert(
+        "podTemplate".into(),
+        json!({
+            "metadata": { "annotations": annotations, "labels": labels },
+            "spec": build_pod_spec(opts, ws, support_image),
+        }),
+    );
+    if !opts.network_policy_management.is_empty() && opts.network_policy_management != "Managed" {
+        spec.insert(
+            "networkPolicyManagement".into(),
+            opts.network_policy_management.clone().into(),
+        );
+    }
+
+    if opts.disk_gib > 0 {
+        let storage_class = workspace_storage_class(opts);
+        spec.insert(
+            "volumeClaimTemplates".into(),
+            json!([{
+                "metadata": { "name": "workspace" },
+                "spec": {
+                    "accessModes": ["ReadWriteOnce"],
+                    "storageClassName": storage_class,
+                    "resources": { "requests": { "storage": format!("{}Gi", opts.disk_gib) } },
+                },
+            }]),
+        );
+    }
+
+    let egress = workspace_egress_rules(opts);
+    spec.insert("networkPolicy".into(), json!({ "egress": egress }));
+
+    Value::Object(spec)
+}
+
+fn build_pod_spec(opts: &TemplateOpts, ws: &mut Value, support_image: &str) -> Value {
+    let runtime_spec = opts.runtime_profile_spec();
+    let mut volumes = vec![
+        json!({ "name": "codewire-bin", "emptyDir": {} }),
+        json!({ "name": "codewire-run", "emptyDir": {} }),
+    ];
+    if opts.disk_gib == 0 {
+        volumes.insert(0, json!({ "name": "workspace", "emptyDir": {} }));
+    }
+
+    let mut spec = Map::new();
+    spec.insert("restartPolicy".into(), "Never".into());
+    spec.insert("serviceAccountName".into(), SANDBOX_SERVICE_ACCOUNT.into());
+    spec.insert(
+        "securityContext".into(),
+        json!({ "runAsUser": 1000, "runAsGroup": 1000, "fsGroup": 1000 }),
+    );
+    spec.insert("dnsPolicy".into(), "ClusterFirst".into());
+
+    if !runtime_spec.runtime_class_name.is_empty() {
+        spec.insert(
+            "runtimeClassName".into(),
+            runtime_spec.runtime_class_name.clone().into(),
+        );
+    }
+    if !opts.node_selector.is_empty() {
+        let sel: Map<String, Value> = opts
+            .node_selector
+            .iter()
+            .map(|(k, v)| (k.clone(), Value::String(v.clone())))
+            .collect();
+        spec.insert("nodeSelector".into(), Value::Object(sel));
+    }
+    if !opts.tolerations.is_empty() {
+        let tolerations: Vec<Value> = opts
+            .tolerations
+            .iter()
+            .map(|t| {
+                let mut tol = Map::new();
+                tol.insert("key".into(), t.key.clone().into());
+                tol.insert("operator".into(), t.operator.clone().into());
+                tol.insert("effect".into(), t.effect.clone().into());
+                if !t.value.is_empty() {
+                    tol.insert("value".into(), t.value.clone().into());
+                }
+                Value::Object(tol)
+            })
+            .collect();
+        spec.insert("tolerations".into(), Value::Array(tolerations));
+    }
+
+    let mut containers: Vec<Value> = Vec::new();
+    if runtime_spec.docker_mode == DOCKER_MODE_LOCAL_DIND_DIRECT
+        || runtime_spec.docker_mode == DOCKER_MODE_GUEST_DIND
+    {
+        volumes.push(json!({ "name": "docker-sock", "emptyDir": {} }));
+    }
+
+    if runtime_spec.docker_mode == DOCKER_MODE_LOCAL_DIND_DIRECT {
+        ws["env"]
+            .as_array_mut()
+            .expect("ws env array")
+            .push(json!({ "name": "DOCKER_HOST", "value": "unix:///var/run/docker/docker.sock" }));
+        ws["volumeMounts"]
+            .as_array_mut()
+            .expect("ws mounts array")
+            .push(json!({ "name": "docker-sock", "mountPath": "/var/run/docker" }));
+
+        containers.push(ws.clone());
+        containers.push(dind_container(opts, &runtime_spec, false));
+    } else if runtime_spec.docker_mode == DOCKER_MODE_GUEST_DIND {
+        ws["env"]
+            .as_array_mut()
+            .expect("ws env array")
+            .push(json!({ "name": "DOCKER_HOST", "value": "unix:///var/run/docker/docker.sock" }));
+        ws["volumeMounts"]
+            .as_array_mut()
+            .expect("ws mounts array")
+            .push(json!({ "name": "docker-sock", "mountPath": "/var/run/docker" }));
+
+        containers.push(ws.clone());
+        containers.push(dind_container(opts, &runtime_spec, true));
+    } else {
+        containers.push(ws.clone());
+    }
+
+    spec.insert(
+        "initContainers".into(),
+        json!([daemon_init_container(support_image)]),
+    );
+    spec.insert("containers".into(), Value::Array(containers));
+    spec.insert("volumes".into(), Value::Array(volumes));
+    Value::Object(spec)
+}
+
+fn daemon_init_container(support_image: &str) -> Value {
+    json!({
+        "name": "codewire-daemon-init",
+        "image": support_image,
+        "command": [
+            "sh", "-c",
+            "cp /usr/local/bin/cw /codewire/bin/.cw.tmp && chmod 0755 /codewire/bin/.cw.tmp && mv /codewire/bin/.cw.tmp /codewire/bin/cw && ln -sf cw /codewire/bin/daemon && ln -sf cw /codewire/bin/codewire-daemon",
+        ],
+        "volumeMounts": [
+            { "name": "codewire-bin", "mountPath": "/codewire/bin" },
+        ],
+        "resources": {
+            "requests": { "cpu": "25m", "memory": "32Mi" },
+            "limits": { "cpu": "100m", "memory": "128Mi" },
+        },
+    })
+}
+
+pub(super) fn dind_bootstrap_script() -> String {
+    format!(
+        r#"data_image="${{CODEWIRE_DOCKER_DATA_IMAGE:-/workspace/.codewire/docker-data.ext4}}"
+data_root="${{CODEWIRE_DOCKER_DATA_ROOT:-/var/lib/docker}}"
+data_size="${{CODEWIRE_DOCKER_DATA_SIZE:-8G}}"
+mount_mode="${{CODEWIRE_DOCKER_MOUNT_MODE:-loop}}"
+codewire_dir="$(dirname "$data_image")"
+mkdir -p "$codewire_dir" "$data_root"
+chown 1000:1000 "$codewire_dir"
+chmod 0775 "$codewire_dir"
+if [ "$mount_mode" = "loop" ]; then
+  if [ ! -s "$data_image" ]; then
+    truncate -s "$data_size" "$data_image"
+    mkfs.ext4 -q -F "$data_image"
+  fi
+  if ! awk -v target="$data_root" '$2 == target && $3 == "ext4" {{ found = 1 }} END {{ exit found ? 0 : 1 }}' /proc/mounts; then
+    mount -o loop "$data_image" "$data_root"
+  fi
+elif [ "$mount_mode" != "none" ]; then
+  echo "unsupported CODEWIRE_DOCKER_MOUNT_MODE=$mount_mode" >&2
+  exit 1
+fi
+exec dockerd --host "unix://{GATEWAY_DOCKER_UPSTREAM_SOCK_PATH}" --group 1000 --data-root "$data_root" --storage-driver vfs"#
+    )
+}
+
+fn dind_container(
+    opts: &TemplateOpts,
+    runtime_spec: &RuntimeProfileSpec,
+    ext4_data_root: bool,
+) -> Value {
+    let command = if ext4_data_root {
+        json!(["sh", "-ec", dind_bootstrap_script()])
+    } else {
+        json!([
+            "dockerd",
+            "--host",
+            format!("unix://{GATEWAY_DOCKER_UPSTREAM_SOCK_PATH}"),
+            "--group",
+            "1000",
+            "--storage-driver",
+            "vfs"
+        ])
+    };
+    let env = if ext4_data_root {
+        let (data_root, mount_mode) = if runtime_spec.profile == RUNTIME_PROFILE_CONFIDENTIAL {
+            ("/workspace/.codewire/docker-root", "none")
+        } else {
+            ("/var/lib/docker", "loop")
+        };
+        json!([
+            { "name": "DOCKER_TLS_CERTDIR", "value": "" },
+            { "name": "CODEWIRE_DOCKER_DATA_IMAGE", "value": "/workspace/.codewire/docker-data.ext4" },
+            { "name": "CODEWIRE_DOCKER_DATA_ROOT", "value": data_root },
+            { "name": "CODEWIRE_DOCKER_DATA_SIZE", "value": format!("{}G", docker_data_size_gib(opts.disk_gib)) },
+            { "name": "CODEWIRE_DOCKER_MOUNT_MODE", "value": mount_mode },
+        ])
+    } else {
+        json!([ { "name": "DOCKER_TLS_CERTDIR", "value": "" } ])
+    };
+
+    json!({
+        "name": "dind",
+        "image": dind_image(opts),
+        "command": command,
+        "securityContext": { "privileged": true, "runAsUser": 0, "runAsGroup": 0 },
+        "env": env,
+        "volumeMounts": [
+            { "name": "docker-sock", "mountPath": "/var/run/docker" },
+            { "name": "workspace", "mountPath": "/workspace" },
+        ],
+        "resources": {
+            "requests": { "cpu": "500m", "memory": "1Gi" },
+            "limits": { "cpu": "2", "memory": format!("{}Gi", dind_memory_limit_gib(opts.memory_mib)) },
+        },
+    })
+}
+
+fn build_workspace_env(opts: &TemplateOpts) -> Vec<Value> {
+    let mut env = vec![
+        json!({ "name": "CODEWIRE_WORKSPACE_SHIM_ADDR", "value": WORKSPACE_DAEMON_LISTEN_ADDR }),
+        json!({ "name": "HOME", "value": HOME_ROOT }),
+        json!({ "name": "USER", "value": "codewire" }),
+    ];
+    if !opts.gateway_token.is_empty() {
+        env.push(json!({ "name": DAEMON_AUTH_TOKEN_ENV, "value": opts.gateway_token }));
+    }
+    env
+}
+
+pub fn render_workspace_daemon_service(namespace: &str, opts: &TemplateOpts) -> Value {
+    json!({
+        "apiVersion": "v1",
+        "kind": "Service",
+        "metadata": {
+            "name": workspace_daemon_service_name(&opts.environment_id),
+            "namespace": namespace,
+            "labels": {
+                "app.kubernetes.io/name": "codewire-workspace-daemon",
+                "app.kubernetes.io/component": "workspace-daemon",
+                "app.kubernetes.io/managed-by": "codewire",
+                "codewire.sh/environment-id": opts.environment_id,
+                "codewire.sh/type": "workspace-daemon",
+            },
+        },
+        "spec": {
+            "type": "ClusterIP",
+            "selector": workspace_selector(opts),
+            "ports": [
+                { "name": "daemon", "protocol": "TCP", "port": WORKSPACE_DAEMON_PORT, "targetPort": WORKSPACE_DAEMON_PORT },
+            ],
+        },
+    })
+}

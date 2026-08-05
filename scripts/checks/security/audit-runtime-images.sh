@@ -63,7 +63,7 @@ for assertion in \
   "crates/codewire-orchestration/src/sandbox/mod.rs:$workspace_image" \
   "crates/codewire-orchestration/src/api/detect.rs:$workspace_image" \
   "crates/codewire-cli/src/commands/collaboration.rs:$workspace_image" \
-  "crates/codewire-orchestration/src/sandbox/template.rs:$dind_image"; do
+  "crates/codewire-orchestration/src/sandbox/template/mod.rs:$dind_image"; do
   path="${assertion%%:*}"
   expected="${assertion#*:}"
   if ! grep -Fq "$expected" "$path"; then

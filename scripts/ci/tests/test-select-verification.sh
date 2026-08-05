@@ -434,7 +434,8 @@ run_paths_case dashboard_image_verifier pull_request refs/pull/123/head false \
 run_paths_case dashboard_sandbox_image_inputs pull_request refs/pull/1231/head false \
   'edge_kind policy rust rust_pkg_codewire_orchestration service_integration service_orchestration' \
   crates/codewire-orchestration/src/sandbox/mod.rs \
-  crates/codewire-orchestration/src/sandbox/template.rs
+  crates/codewire-orchestration/src/sandbox/template.rs \
+  crates/codewire-orchestration/src/sandbox/template/network.rs
 run_paths_case local_image_verifiers pull_request refs/pull/1231/head false \
   'policy' \
   scripts/ci/images/build-local-image.sh \
