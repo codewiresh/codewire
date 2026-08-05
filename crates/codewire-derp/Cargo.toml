@@ -2,6 +2,7 @@
 name = "codewire-derp"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 # Explicit permissive license (not the MIT workspace default): DERP is part of
 # the extractable tailnet stack, matching codewire-tailnet (BSD-3-Clause).
 license = "BSD-3-Clause"

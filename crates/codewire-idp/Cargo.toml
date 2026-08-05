@@ -2,6 +2,7 @@
 name = "codewire-idp"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 # Server-side crate: AGPL like the other Phase 2+ services. The OIDC
 # *mechanics* live in the dual-licensed codewire-oidc library; this service
 # is the Codewire-specific glue (Postgres stores, the session/org-gating

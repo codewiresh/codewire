@@ -2,6 +2,7 @@
 name = "codewire-daemon"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 authors.workspace = true
 license = "AGPL-3.0-only"
 description = "Rust workspace daemon for Codewire sandbox exec, PTY, and file RPCs."

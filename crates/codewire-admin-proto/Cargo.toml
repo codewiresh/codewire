@@ -2,6 +2,7 @@
 name = "codewire-admin-proto"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 authors.workspace = true
 license = "AGPL-3.0-only"
 description = "Generated Connect-RPC contract types for Codewire global-administrator APIs."

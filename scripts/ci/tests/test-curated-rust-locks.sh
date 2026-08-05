@@ -32,9 +32,34 @@ if CURATED_RUST_MANIFEST_DIR="$fixture_dir" "$GUARD" >"$stale_log" 2>&1; then
   echo 'curated Rust lock guard accepted a stale gateway lock' >&2
   exit 1
 fi
-grep -qF 'curated Rust workspace gateway has manifest/lock drift' "$stale_log"
-grep -qF 'cannot update the lock file' "$stale_log"
-grep -qF -- '--locked was passed' "$stale_log"
+
+assert_stale_log_contains() {
+  local expected="$1"
+  if ! grep -qF -- "$expected" "$stale_log"; then
+    printf 'stale-lock rejection omitted expected diagnostic: %s\n' "$expected" >&2
+    sed -n '1,80p' "$stale_log" >&2
+    exit 1
+  fi
+}
+
+assert_stale_log_contains_any() {
+  local expected
+  for expected in "$@"; do
+    if grep -qF -- "$expected" "$stale_log"; then
+      return
+    fi
+  done
+  printf 'stale-lock rejection omitted every accepted Cargo diagnostic form\n' >&2
+  sed -n '1,80p' "$stale_log" >&2
+  exit 1
+}
+
+assert_stale_log_contains 'curated Rust workspace gateway has manifest/lock drift'
+assert_stale_log_contains 'lock file'
+assert_stale_log_contains '--locked was passed'
+assert_stale_log_contains_any \
+  'needs to be updated' \
+  'cannot update the lock file'
 
 fake_cargo="$EXEC_TMP/fake-cargo"
 fake_state="$TMP/fake-cargo-state"

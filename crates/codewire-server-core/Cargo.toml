@@ -2,6 +2,7 @@
 name = "codewire-server-core"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 authors.workspace = true
 description = "Shared platform for Codewire backend services: HTTP scaffold, auth, error envelope, tracing, DB and NATS helpers"
 # Server crates are AGPL-3.0-only (matching the repository); intentional

@@ -2,6 +2,7 @@
 name = "codewire-coordinator"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 # Server-side crate: AGPL like the other backend services.
 license = "AGPL-3.0-only"
 

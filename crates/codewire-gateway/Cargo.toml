@@ -2,6 +2,7 @@
 name = "codewire-gateway"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 authors.workspace = true
 license = "AGPL-3.0-only"
 description = "Rust landing zone for the Codewire sandbox gateway."

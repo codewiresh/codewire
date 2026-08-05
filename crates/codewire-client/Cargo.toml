@@ -2,6 +2,7 @@
 name = "codewire-client"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 authors.workspace = true
 license = "AGPL-3.0-only"
 description = "Shared ergonomic Rust client over Codewire's generated Connect-RPC stubs."

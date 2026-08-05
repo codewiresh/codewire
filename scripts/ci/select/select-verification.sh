@@ -354,6 +354,7 @@ elif [ "$event_selected" = false ]; then
     # files in the same PR still add their own families below.
     case "$path" in
       .gitea/workflows/ci.yaml|.gitea/workflows/manual-diagnostics.yaml|\
+      .gitea/workflows/rust-latest-canary.yaml|\
       .gitea/workflows/connect-apikey-smoke.yaml|\
       .gitea/workflows/dev-deployment-smoke-receipt.yaml|\
       .gitea/workflows/prod-readonly-smoke.yaml|\
@@ -380,6 +381,9 @@ elif [ "$event_selected" = false ]; then
       scripts/ci/tests/test-dev-deployment-smoke-receipt.sh|\
       scripts/ci/tests/test-agent-sandbox-pin.sh|\
       scripts/ci/tests/test-rust-owned-fixtures.sh|\
+      scripts/ci/tests/test-rust-toolchain.sh|\
+      scripts/ci/tests/test-cargo-cache-capacity.sh|\
+      scripts/ci/tests/fixtures/cargo-cache-df.sh|\
       scripts/ci/verify/integration-postgres.sh|scripts/ci/tests/test-integration-postgres.sh|\
       scripts/ci/verify/resolve-cargo-target-dir.sh|\
       scripts/ci/tests/test-resolve-cargo-target-dir.sh|\

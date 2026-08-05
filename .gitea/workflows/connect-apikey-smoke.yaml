@@ -74,7 +74,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b
         if: ${{ inputs.target != 'prod-evidence' }}
         with:
-          toolchain: stable
+          toolchain: 1.91.1
 
       - name: Install protoc (pinned)
         if: ${{ inputs.target != 'prod-evidence' }}

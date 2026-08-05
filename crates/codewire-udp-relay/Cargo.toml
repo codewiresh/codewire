@@ -2,6 +2,7 @@
 name = "codewire-udp-relay"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 authors.workspace = true
 license = "AGPL-3.0-only"
 description = "Codewire UDP peer relay service for shared tailnet peer-relay allocation and forwarding."

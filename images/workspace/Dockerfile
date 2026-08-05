@@ -102,7 +102,7 @@ RUN npm config set prefix /home/codewire/.npm-global && \
     npm install -g @anthropic-ai/claude-code
 
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-      | sh -s -- -y --default-toolchain stable --no-modify-path
+      | sh -s -- -y --default-toolchain 1.91.1 --no-modify-path
 
 # Keep the source-built CLI after the moving developer tools. A cw-only source
 # change then reuses those expensive layers while the final image still proves

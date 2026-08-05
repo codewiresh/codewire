@@ -2,6 +2,7 @@
 name = "codewire-oidc"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 authors.workspace = true
 description = "A standalone OpenID Connect / OAuth 2.0 provider (OP) library — protocol mechanics behind storage traits, transport-agnostic with an optional axum integration."
 # Dual-licensed so a public extraction stays cheap (the same posture as

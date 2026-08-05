@@ -2,6 +2,7 @@
 name = "codewire-tailnet"
 version = "0.1.0"
 edition = "2021"
+rust-version.workspace = true
 # BSD-3-Clause keeps the public extraction compatible with the
 # Tailscale-derived protocol vectors used by this crate's parity tests.
 license = "BSD-3-Clause"

@@ -106,6 +106,8 @@ run_paths_case ci_rewrite pull_request refs/pull/20/head false \
   scripts/ci/tests/test-cargo-target-runner-failures.sh \
   scripts/ci/tests/test-agent-sandbox-pin.sh \
   scripts/ci/tests/test-rust-owned-fixtures.sh \
+  scripts/ci/tests/test-cargo-cache-capacity.sh \
+  scripts/ci/tests/fixtures/cargo-cache-df.sh \
   scripts/ci/tests/test-select-deploy-dev.sh \
   scripts/ci/tests/test-select-verification.sh
 run_paths_case artifact_impact_ci pull_request refs/pull/201/head false \
@@ -233,6 +235,11 @@ run_paths_case curated_lock_guard pull_request refs/pull/505/head false \
   'policy rust_curated_locks' \
   scripts/ci/verify/check-curated-rust-locks.sh \
   scripts/ci/tests/test-curated-rust-locks.sh
+run_paths_case rust_toolchain_guard pull_request refs/pull/506/head false \
+  'policy' \
+  .gitea/workflows/rust-latest-canary.yaml \
+  scripts/ci/verify/check-rust-toolchain.sh \
+  scripts/ci/tests/test-rust-toolchain.sh
 run_paths_case application_migration pull_request refs/pull/6/head false \
   'database policy rust rust_pkg_codewire_server_core service_apikey_smoke service_billing service_connectcore service_coordinator service_idp service_integration service_nats service_orchestration service_temporal' \
   crates/codewire-server-core/migrations/0001_baseline.sql

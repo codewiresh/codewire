@@ -53,7 +53,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b
         if: ${{ contains(steps.select.outputs.selection, '|diagnostic_rust_stack|') || contains(steps.select.outputs.selection, '|diagnostic_go_tailnet|') }}
         with:
-          toolchain: stable
+          toolchain: 1.91.1
 
       - name: Verify Rust stack diagnostic tools
         if: ${{ contains(steps.select.outputs.selection, '|diagnostic_rust_stack|') }}
