@@ -3,7 +3,10 @@
 # The image runs the Rust `codewire-gateway` startup path and ships the Rust
 # workspace daemon used inside sandbox pods.
 
-FROM rust:1.91-bookworm AS rust-toolchain
+ARG RUST_IMAGE=rust:1.91-bookworm@sha256:c1e5f19e773b7878c3f7a805dd00a495e747acbdc76fb2337a4ebf0418896b33
+ARG DEBIAN_IMAGE=debian:bookworm-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818
+
+FROM ${RUST_IMAGE} AS rust-toolchain
 ARG PROTOC_VERSION=35.1
 ARG PROTOC_SHA256_LINUX_X86_64=6930ebf62bd4ea607b98fff052596c6ee564b9835b4ce172c75a3f53ae9d91b7
 RUN apt-get update -qq && apt-get install -y -qq curl unzip && rm -rf /var/lib/apt/lists/* \
@@ -35,7 +38,7 @@ COPY proto ./proto
 COPY libs/gateway-proto ./libs/gateway-proto
 RUN cargo build --locked --release -p codewire-cli-bin --bin cw
 
-FROM debian:bookworm-slim
+FROM ${DEBIAN_IMAGE}
 LABEL org.opencontainers.image.source="https://github.com/codewiresh/codewire" \
       org.opencontainers.image.title="codewire-gateway"
 RUN apt-get update -qq && apt-get install -y -qq ca-certificates bash && rm -rf /var/lib/apt/lists/*

@@ -1,9 +1,10 @@
 # Codewire CI planner
 
 This directory is the versioned impact-policy kernel for Codewire CI. It
-classifies the packaged `cw` CLI, desktop, workspace binary, and atomic support
-image inputs. Runtime image nodes remain `unclassified`, and existing workflow
-selectors remain authoritative only for unmigrated artifacts.
+classifies the packaged `cw` CLI, desktop, workspace binary, atomic support
+image inputs, and the five runtime image input sets. Runtime file sets mirror
+the current Docker COPY boundaries conservatively; the deployment workflow
+continues to use its existing selector until its event adapter migrates.
 
 For a pull request, the workflow must execute the copy of `planner.py`, the
 graph, and schemas from the trusted target-base commit. The proposed-head copy

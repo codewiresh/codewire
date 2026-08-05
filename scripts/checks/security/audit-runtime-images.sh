@@ -6,27 +6,45 @@ cd "$ROOT"
 
 readonly workspace_image='ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467'
 readonly dind_image='docker.io/library/docker:29.7.1-dind@sha256:e8faad5a8dc5279dff929afc5449f2791736912fff9f99351d742db2fad01b4c'
+readonly rust_build_image='rust:1.91-bookworm@sha256:c1e5f19e773b7878c3f7a805dd00a495e747acbdc76fb2337a4ebf0418896b33'
+readonly debian_runtime_image='debian:bookworm-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818'
 readonly dashboard_runtime='gcr.io/distroless/cc-debian12:nonroot@sha256:fccdbb0a547c14e23fcf4ce8ad62ca5d43b4faae8d22cd292f490fef9946c96e'
 readonly dashboard_dockerfile='apps/dashboard/Dockerfile'
+readonly -a runtime_dockerfiles=(
+  "$dashboard_dockerfile"
+  'deployments/docker/gateway.Dockerfile'
+  'deployments/docker/derp.Dockerfile'
+  'deployments/docker/services.Dockerfile'
+  'deployments/docker/mesh.Dockerfile'
+)
 
 fail=0
 
+# CI tests intentionally model rejected and publication-destination references.
+# They are not shipped runtime callers, so keep their fixtures outside these
+# repository-wide moving-reference guards.
+readonly -a runtime_reference_paths=(
+  ':!docs/**'
+  ':!scripts/ci/tests/**'
+  ':!scripts/checks/security/audit-runtime-images.sh'
+)
+
 if moving_workspace="$(git grep -nF 'ghcr.io/codewiresh/workspace:latest' -- \
-    ':!docs/**' ':!scripts/checks/security/audit-runtime-images.sh' || true)" \
+    "${runtime_reference_paths[@]}" || true)" \
   && [[ -n "$moving_workspace" ]]; then
   echo "runtime image audit: moving canonical workspace references are forbidden" >&2
   echo "$moving_workspace" >&2
   fail=1
 fi
 if moving_dind="$(git grep -nF 'docker:dind' -- \
-    ':!docs/**' ':!scripts/checks/security/audit-runtime-images.sh' || true)" \
+    "${runtime_reference_paths[@]}" || true)" \
   && [[ -n "$moving_dind" ]]; then
   echo "runtime image audit: upstream moving DinD references are forbidden" >&2
   echo "$moving_dind" >&2
   fail=1
 fi
 if retired_dind="$(git grep -nF 'ghcr.io/codewiresh/dind' -- \
-    ':!docs/**' ':!scripts/checks/security/audit-runtime-images.sh' || true)" \
+    "${runtime_reference_paths[@]}" || true)" \
   && [[ -n "$retired_dind" ]]; then
   echo "runtime image audit: retired custom DinD references are forbidden" >&2
   echo "$retired_dind" >&2
@@ -52,14 +70,29 @@ if ! grep -Fq 'request.image = CANONICAL_WORKSPACE_IMAGE.to_string();' \
   fail=1
 fi
 
-while IFS= read -r declaration; do
-  [[ -z "$declaration" ]] && continue
-  value="${declaration#*=}"
-  if [[ ! "$value" =~ @sha256:[0-9a-f]{64}$ ]]; then
-    echo "runtime image audit: dashboard build image is not digest-pinned: $declaration" >&2
+for dockerfile in "${runtime_dockerfiles[@]}"; do
+  while IFS= read -r declaration; do
+    [[ -z "$declaration" ]] && continue
+    value="${declaration#*=}"
+    if [[ ! "$value" =~ @sha256:[0-9a-f]{64}$ ]]; then
+      echo "runtime image audit: build image is not digest-pinned in $dockerfile: $declaration" >&2
+      fail=1
+    fi
+  done < <(sed -nE '/^ARG [A-Z_]+_IMAGE=/p' "$dockerfile")
+
+  if ! grep -Fxq "ARG RUST_IMAGE=$rust_build_image" "$dockerfile"; then
+    echo "runtime image audit: reviewed Rust foundation is missing from $dockerfile" >&2
     fail=1
   fi
-done < <(sed -nE '/^ARG [A-Z_]+_IMAGE=/p' "$dashboard_dockerfile")
+  if ! grep -Fxq "ARG DEBIAN_IMAGE=$debian_runtime_image" "$dockerfile"; then
+    echo "runtime image audit: reviewed Debian foundation is missing from $dockerfile" >&2
+    fail=1
+  fi
+  if grep -En '^FROM (rust|debian):' "$dockerfile" >&2; then
+    echo "runtime image audit: mutable literal foundation remains in $dockerfile" >&2
+    fail=1
+  fi
+done
 
 if ! grep -Fq "ARG RUNTIME_IMAGE=$dashboard_runtime" "$dashboard_dockerfile"; then
   echo "runtime image audit: dashboard runtime digest drifted from the accepted inventory" >&2
@@ -70,6 +103,8 @@ if ! grep -Fq 'cargo metadata --locked --offline --no-deps --format-version 1' \
   echo "runtime image audit: dashboard metadata collection must stay locked, offline, and dependency-free" >&2
   fail=1
 fi
+# The Make expression must be matched literally.
+# shellcheck disable=SC2016
 if ! grep -Fq 'docker buildx build --pull --load --tag "$(DASHBOARD_VERIFY_IMAGE)" -f apps/dashboard/Dockerfile .' \
     Makefile; then
   echo "runtime image audit: dashboard verification must load the exact Buildx result before inspection" >&2

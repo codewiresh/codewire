@@ -68,11 +68,73 @@
       },
       "explicit_inputs": ["rust-toolchain.toml"]
     },
-    "dashboard_image": {"kind": "unmigrated"},
-    "gateway_image": {"kind": "unmigrated"},
-    "derp_image": {"kind": "unmigrated"},
-    "services_image": {"kind": "unmigrated"},
-    "mesh_image": {"kind": "unmigrated"},
+    "dashboard_image": {
+      "kind": "file-set",
+      "inputs": [
+        ".dockerignore",
+        "Cargo.toml",
+        "Cargo.lock",
+        "LICENSE",
+        "apps/cli/install.sh",
+        "apps/dashboard/Dockerfile",
+        "apps/dashboard/runtime-inventory.json",
+        "apps/docs/zola/**",
+        "crates/**",
+        "libs/gateway-proto/**",
+        "packages/codewire-design/**",
+        "proto/**"
+      ]
+    },
+    "gateway_image": {
+      "kind": "file-set",
+      "inputs": [
+        "Cargo.toml",
+        "Cargo.lock",
+        "crates/**",
+        "deployments/docker/gateway.Cargo.lock",
+        "deployments/docker/gateway.Cargo.toml",
+        "deployments/docker/gateway.Dockerfile",
+        "deployments/docker/gateway.Dockerfile.dockerignore",
+        "libs/gateway-proto/**",
+        "proto/**"
+      ]
+    },
+    "derp_image": {
+      "kind": "file-set",
+      "inputs": [
+        "crates/codewire-derp/**",
+        "crates/codewire-proto/**",
+        "crates/codewire-tailnet/**",
+        "deployments/docker/derp.Cargo.lock",
+        "deployments/docker/derp.Cargo.toml",
+        "deployments/docker/derp.Dockerfile",
+        "deployments/docker/derp.Dockerfile.dockerignore",
+        "proto/**"
+      ]
+    },
+    "services_image": {
+      "kind": "file-set",
+      "inputs": [
+        "Cargo.toml",
+        "Cargo.lock",
+        "crates/**",
+        "deployments/docker/services.Dockerfile",
+        "deployments/docker/services.Dockerfile.dockerignore",
+        "libs/gateway-proto/**",
+        "proto/**"
+      ]
+    },
+    "mesh_image": {
+      "kind": "file-set",
+      "inputs": [
+        "Cargo.toml",
+        "Cargo.lock",
+        "crates/**",
+        "deployments/docker/mesh.Dockerfile",
+        "deployments/docker/mesh.Dockerfile.dockerignore",
+        "proto/**"
+      ]
+    },
     "base_image": {
       "kind": "file-set",
       "inputs": ["images/base/**"]

@@ -107,11 +107,73 @@ class FixtureRepository:
                     "package_inputs": {"core": ["generated/descriptor.bin"]},
                     "explicit_inputs": [],
                 },
-                "dashboard_image": {"kind": "unmigrated"},
-                "gateway_image": {"kind": "unmigrated"},
-                "derp_image": {"kind": "unmigrated"},
-                "services_image": {"kind": "unmigrated"},
-                "mesh_image": {"kind": "unmigrated"},
+                "dashboard_image": {
+                    "kind": "file-set",
+                    "inputs": [
+                        ".dockerignore",
+                        "Cargo.toml",
+                        "Cargo.lock",
+                        "LICENSE",
+                        "apps/cli/install.sh",
+                        "apps/dashboard/Dockerfile",
+                        "apps/dashboard/runtime-inventory.json",
+                        "apps/docs/zola/**",
+                        "crates/**",
+                        "libs/gateway-proto/**",
+                        "packages/codewire-design/**",
+                        "proto/**",
+                    ],
+                },
+                "gateway_image": {
+                    "kind": "file-set",
+                    "inputs": [
+                        "Cargo.toml",
+                        "Cargo.lock",
+                        "crates/**",
+                        "deployments/docker/gateway.Cargo.lock",
+                        "deployments/docker/gateway.Cargo.toml",
+                        "deployments/docker/gateway.Dockerfile",
+                        "deployments/docker/gateway.Dockerfile.dockerignore",
+                        "libs/gateway-proto/**",
+                        "proto/**",
+                    ],
+                },
+                "derp_image": {
+                    "kind": "file-set",
+                    "inputs": [
+                        "crates/codewire-derp/**",
+                        "crates/codewire-proto/**",
+                        "crates/codewire-tailnet/**",
+                        "deployments/docker/derp.Cargo.lock",
+                        "deployments/docker/derp.Cargo.toml",
+                        "deployments/docker/derp.Dockerfile",
+                        "deployments/docker/derp.Dockerfile.dockerignore",
+                        "proto/**",
+                    ],
+                },
+                "services_image": {
+                    "kind": "file-set",
+                    "inputs": [
+                        "Cargo.toml",
+                        "Cargo.lock",
+                        "crates/**",
+                        "deployments/docker/services.Dockerfile",
+                        "deployments/docker/services.Dockerfile.dockerignore",
+                        "libs/gateway-proto/**",
+                        "proto/**",
+                    ],
+                },
+                "mesh_image": {
+                    "kind": "file-set",
+                    "inputs": [
+                        "Cargo.toml",
+                        "Cargo.lock",
+                        "crates/**",
+                        "deployments/docker/mesh.Dockerfile",
+                        "deployments/docker/mesh.Dockerfile.dockerignore",
+                        "proto/**",
+                    ],
+                },
                 "base_image": {
                     "kind": "file-set",
                     "inputs": ["images/base/**"],
@@ -310,8 +372,33 @@ dependencies = ["core"]
         )
         self.write("generated/descriptor.bin", "descriptor-v1\n")
         self.write("scripts/ci/release/package-cli.sh", "#!/bin/sh\nexit 0\n", 0o755)
+        self.write(".dockerignore", "target\n")
+        self.write("LICENSE", "fixture license\n")
+        self.write("apps/cli/install.sh", "#!/bin/sh\nexit 0\n", 0o755)
+        self.write("apps/dashboard/Dockerfile", "FROM fixture-dashboard@sha256:one\n")
+        self.write("apps/dashboard/runtime-inventory.json", "{}\n")
         self.write("apps/dashboard/README.md", "unrelated app\n")
+        self.write("apps/docs/zola/content/_index.md", "fixture docs\n")
+        self.write("crates/codewire-derp/src/lib.rs", "pub fn derp() {}\n")
+        self.write("crates/codewire-proto/src/lib.rs", "pub fn proto() {}\n")
+        self.write("crates/codewire-tailnet/src/lib.rs", "pub fn tailnet() {}\n")
+        self.write("crates/unrelated/src/lib.rs", "pub fn runtime_unrelated() {}\n")
+        self.write("libs/gateway-proto/proto/gateway.proto", "syntax = \"proto3\";\n")
         self.write("libs/sdk-go/environment.go", "package codewire\n")
+        self.write("packages/codewire-design/styles.css", ":root {}\n")
+        self.write("proto/codewire/v1/api.proto", "syntax = \"proto3\";\n")
+        for family in ("gateway", "derp", "services", "mesh"):
+            self.write(
+                f"deployments/docker/{family}.Dockerfile",
+                f"FROM fixture-{family}@sha256:one\n",
+            )
+            self.write(
+                f"deployments/docker/{family}.Dockerfile.dockerignore",
+                "*\n!fixture\n",
+            )
+        for family in ("gateway", "derp"):
+            self.write(f"deployments/docker/{family}.Cargo.toml", "[workspace]\n")
+            self.write(f"deployments/docker/{family}.Cargo.lock", "version = 4\n")
         self.write("images/base/Dockerfile", "FROM fixture-base@sha256:base\n")
         self.write("images/base/entrypoint.sh", "#!/bin/sh\nexec \"$@\"\n", 0o755)
         self.write("images/workspace/Dockerfile", "FROM ${BASE_IMAGE_REF}\n")
@@ -394,13 +481,89 @@ class PlannerFixtureTests(unittest.TestCase):
             artifacts["workspace_image"]["state"],
         )
 
+    def runtime_states(self, document: dict) -> tuple[str, str, str, str, str]:
+        artifacts = document["artifacts"]
+        return tuple(
+            artifacts[name]["state"]
+            for name in (
+                "dashboard_image",
+                "gateway_image",
+                "derp_image",
+                "services_image",
+                "mesh_image",
+            )
+        )
+
     def test_same_tree_is_deterministic_and_rust_artifacts_are_unaffected(self) -> None:
         first = self.repo.plan(self.repo.base)
         second = self.repo.plan(self.repo.base)
         self.assertEqual(first, second)
         self.assertEqual(self.states(first), ("unaffected", "unaffected"))
         self.assertEqual(self.workspace_states(first), ("unaffected", "unaffected", "unaffected"))
+        self.assertEqual(self.runtime_states(first), ("unaffected",) * 5)
         self.assertFalse(first["verification"]["workspace_image"])
+
+    def test_each_runtime_direct_input_affects_only_its_image(self) -> None:
+        cases = (
+            ("apps/dashboard/runtime-inventory.json", '{"changed":true}\n', 0),
+            ("deployments/docker/gateway.Dockerfile", "FROM changed-gateway\n", 1),
+            ("deployments/docker/derp.Cargo.lock", "version = 4\n# changed\n", 2),
+            (
+                "deployments/docker/services.Dockerfile.dockerignore",
+                "*\n!changed\n",
+                3,
+            ),
+            ("deployments/docker/mesh.Dockerfile", "FROM changed-mesh\n", 4),
+        )
+        for path, content, affected_index in cases:
+            with self.subTest(path=path), tempfile.TemporaryDirectory(
+                prefix="codewire-runtime-image-test-"
+            ) as temporary:
+                repository = FixtureRepository(Path(temporary))
+                repository.change(path, content)
+                expected = ["unaffected"] * 5
+                expected[affected_index] = "affected"
+                artifacts = repository.plan()["artifacts"]
+                self.assertEqual(
+                    tuple(
+                        artifacts[name]["state"]
+                        for name in (
+                            "dashboard_image",
+                            "gateway_image",
+                            "derp_image",
+                            "services_image",
+                            "mesh_image",
+                        )
+                    ),
+                    tuple(expected),
+                )
+
+    def test_broad_runtime_crate_contexts_remain_broad(self) -> None:
+        self.repo.change(
+            "crates/unrelated/src/lib.rs",
+            "pub fn runtime_unrelated() { panic!(); }\n",
+        )
+        self.assertEqual(
+            self.runtime_states(self.repo.plan()),
+            ("affected", "affected", "unaffected", "affected", "affected"),
+        )
+
+    def test_proto_input_affects_every_runtime_image(self) -> None:
+        self.repo.change(
+            "proto/codewire/v1/api.proto",
+            'syntax = "proto3";\n// changed\n',
+        )
+        self.assertEqual(self.runtime_states(self.repo.plan()), ("affected",) * 5)
+
+    def test_gateway_proto_input_affects_exact_consumers(self) -> None:
+        self.repo.change(
+            "libs/gateway-proto/proto/gateway.proto",
+            'syntax = "proto3";\n// changed\n',
+        )
+        self.assertEqual(
+            self.runtime_states(self.repo.plan()),
+            ("affected", "affected", "unaffected", "affected", "unaffected"),
+        )
 
     def test_matching_published_support_pair_uses_exact_ancestor(self) -> None:
         head = self.repo.change("apps/dashboard/README.md", "unrelated support baseline change\n")

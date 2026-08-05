@@ -51,10 +51,14 @@ verify_services_dockerfile_contract() {
   if grep -qF 'COPY --from=builder /src/target/' "$SERVICES_DOCKERFILE"; then
     fail 'services runtime stage reads from the non-persistent Cargo target mount'
   fi
-  grep -qF 'FROM rust:1.91-bookworm AS builder' "$SERVICES_DOCKERFILE" ||
-    fail 'services Rust builder pin changed'
-  grep -qF 'FROM debian:bookworm-slim' "$SERVICES_DOCKERFILE" ||
-    fail 'services runtime base changed'
+  grep -qF 'ARG RUST_IMAGE=rust:1.91-bookworm@sha256:c1e5f19e773b7878c3f7a805dd00a495e747acbdc76fb2337a4ebf0418896b33' \
+    "$SERVICES_DOCKERFILE" || fail 'services Rust builder pin changed'
+  grep -qF 'ARG DEBIAN_IMAGE=debian:bookworm-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818' \
+    "$SERVICES_DOCKERFILE" || fail 'services runtime base changed'
+  grep -qF "FROM \${RUST_IMAGE} AS builder" "$SERVICES_DOCKERFILE" ||
+    fail 'services builder does not consume the reviewed Rust image'
+  grep -qF "FROM \${DEBIAN_IMAGE}" "$SERVICES_DOCKERFILE" ||
+    fail 'services runtime does not consume the reviewed Debian image'
   grep -qF 'USER 65532:65532' "$SERVICES_DOCKERFILE" ||
     fail 'services runtime user changed'
 

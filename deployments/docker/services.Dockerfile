@@ -21,7 +21,10 @@
 # temporalio-sdk family (prost-wkt-types); idp/billing don't need it but the
 # single builder installs it once.
 
-FROM rust:1.91-bookworm AS builder
+ARG RUST_IMAGE=rust:1.91-bookworm@sha256:c1e5f19e773b7878c3f7a805dd00a495e747acbdc76fb2337a4ebf0418896b33
+ARG DEBIAN_IMAGE=debian:bookworm-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818
+
+FROM ${RUST_IMAGE} AS builder
 RUN apt-get update -qq && apt-get install -y -qq protobuf-compiler && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
@@ -65,7 +68,7 @@ RUN --mount=type=cache,id=codewire-services-cargo-registry,target=/usr/local/car
     cp target/release/codewire-db-migrate /out/codewire-db-migrate && \
     cp target/release/codewire-udp-relay /out/codewire-udp-relay
 
-FROM debian:bookworm-slim
+FROM ${DEBIAN_IMAGE}
 COPY --from=builder /out/codewire-idp /codewire-idp
 COPY --from=builder /out/codewire-orchestration /codewire-orchestration
 COPY --from=builder /out/sidecar-smoke /sidecar-smoke
