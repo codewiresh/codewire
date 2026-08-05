@@ -1186,6 +1186,39 @@ ports:
     }
 
     #[test]
+    fn local_runtime_debug_output_redacts_host_credentials_and_arguments() {
+        let context = LocalDockerHostContext {
+            github_token: Some("github-test-token".to_string()),
+            claude_oauth_token: Some("claude-test-token".to_string()),
+            anthropic_api_key: Some("anthropic-test-token".to_string()),
+            ..LocalDockerHostContext::default()
+        };
+        let command = LocalRuntimeCommand {
+            program: "docker".to_string(),
+            args: vec![
+                "exec".to_string(),
+                "-e".to_string(),
+                "GH_TOKEN=github-test-token".to_string(),
+                "daemon-test-token".to_string(),
+            ],
+        };
+
+        let context_debug = format!("{context:?}");
+        let command_debug = format!("{command:?}");
+        for secret in [
+            "github-test-token",
+            "claude-test-token",
+            "anthropic-test-token",
+            "daemon-test-token",
+        ] {
+            assert!(!context_debug.contains(secret));
+            assert!(!command_debug.contains(secret));
+        }
+        assert!(context_debug.contains("<redacted>"));
+        assert!(command_debug.contains("args: \"<redacted>\""));
+    }
+
+    #[test]
     fn plan_lima_port_forwards_adds_only_new_mappings() {
         let instance = config::LocalInstanceConfig {
             name: "repo".to_string(),
