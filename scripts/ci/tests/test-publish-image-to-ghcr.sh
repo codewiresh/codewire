@@ -17,9 +17,15 @@ mkdir -p "$work/bin"
 
 expected_digest="sha256:$(printf 'a%.0s' {1..64})"
 other_digest="sha256:$(printf 'b%.0s' {1..64})"
+base_digest="sha256:$(printf 'd%.0s' {1..64})"
+workspace_digest="sha256:$(printf 'e%.0s' {1..64})"
 source_sha="$(printf 'c%.0s' {1..40})"
 source_ref="git.example.invalid/codewire/gateway@$expected_digest"
 target_repository='ghcr.io/codewiresh/gateway'
+base_source_ref="git.example.invalid/codewire/base@$base_digest"
+workspace_source_ref="git.example.invalid/codewire/workspace@$workspace_digest"
+base_repository='ghcr.io/codewiresh/base'
+workspace_repository='ghcr.io/codewiresh/workspace'
 gitea_token='gitea-wrapper-test-token'
 ghcr_token='ghcr-wrapper-test-token'
 
@@ -49,6 +55,14 @@ set -euo pipefail
 [[ "$(stat -c '%a' "$GITEA_REGISTRY_TOKEN_FILE")" == 600 ]]
 [[ "$(stat -c '%a' "$GHCR_PUBLISH_TOKEN_FILE")" == 600 ]]
 printf '%s\n' "$*" >>"${FAKE_COPY_CALLS:?}"
+call=1
+if [ -n "${FAKE_COPY_COUNTER:-}" ]; then
+  if [ -s "$FAKE_COPY_COUNTER" ]; then
+    call="$(( $(<"$FAKE_COPY_COUNTER") + 1 ))"
+  fi
+  printf '%s\n' "$call" >"$FAKE_COPY_COUNTER"
+fi
+[ "${FAKE_COPY_FAIL_AT:-}" != "$call" ] || exit 1
 EOF
 
 cat >"$work/bin/skopeo-runner" <<'EOF'
@@ -57,8 +71,30 @@ set -euo pipefail
 [[ -z "${SKOPEO_AUTH_VOLUME:-}" ]]
 printf '%s\n' "$*" >>"${FAKE_SKOPEO_CALLS:?}"
 [ "${FAKE_ANON_FAIL:-0}" != 1 ] || exit 1
-[[ "$*" == *'inspect --no-creds --format {{.Digest}} docker://'* ]]
-printf '%s\n' "${FAKE_ANON_DIGEST:?}"
+case "$1" in
+  list-tags)
+    [[ "$#" -eq 3 && "$2" == --no-creds && "$3" == docker://* ]]
+    repository="${3#docker://}"
+    [ "${FAKE_PREFLIGHT_FAIL_REPOSITORY:-}" != "$repository" ] || exit 1
+    printf '{"Repository":"%s","Tags":["existing"]}\n' "$repository"
+    ;;
+  inspect)
+    [[ "$*" == *'inspect --no-creds --format {{.Digest}} docker://'* ]]
+    public_ref="${!#}"
+    public_ref="${public_ref#docker://}"
+    [ "${FAKE_ANON_FAIL_REF:-}" != "$public_ref" ] || exit 1
+    case "$public_ref" in
+      ghcr.io/codewiresh/base@*|ghcr.io/codewiresh/base:latest)
+        printf '%s\n' "${FAKE_BASE_DIGEST:?}"
+        ;;
+      ghcr.io/codewiresh/workspace@*|ghcr.io/codewiresh/workspace:latest)
+        printf '%s\n' "${FAKE_WORKSPACE_DIGEST:?}"
+        ;;
+      *) printf '%s\n' "${FAKE_ANON_DIGEST:?}" ;;
+    esac
+    ;;
+  *) exit 1 ;;
+esac
 EOF
 chmod +x "$work/bin/fetch-secret" "$work/bin/copy-image" "$work/bin/skopeo-runner"
 
@@ -70,8 +106,11 @@ export FAKE_GITEA_TOKEN="$gitea_token"
 export FAKE_GHCR_TOKEN="$ghcr_token"
 export FAKE_FETCH_CALLS="$work/fetch-calls"
 export FAKE_COPY_CALLS="$work/copy-calls"
+export FAKE_COPY_COUNTER="$work/copy-counter"
 export FAKE_SKOPEO_CALLS="$work/skopeo-calls"
 export FAKE_ANON_DIGEST="$expected_digest"
+export FAKE_BASE_DIGEST="$base_digest"
+export FAKE_WORKSPACE_DIGEST="$workspace_digest"
 export GITHUB_OUTPUT="$work/output"
 
 "$PUBLISH_IMAGE" "$source_ref" "$target_repository" "$source_sha"
@@ -129,5 +168,68 @@ if "$PUBLISH_IMAGE" "$source_ref" 'ghcr.io/codewiresh/services' \
 fi
 [[ "$(wc -l <"$FAKE_FETCH_CALLS")" -eq "$fetch_calls_before" ]] ||
   fail 'family mismatch reached credential retrieval'
+
+: >"$FAKE_FETCH_CALLS"
+: >"$FAKE_COPY_CALLS"
+: >"$FAKE_COPY_COUNTER"
+: >"$FAKE_SKOPEO_CALLS"
+: >"$GITHUB_OUTPUT"
+"$PUBLISH_IMAGE" --support-pair "$base_source_ref" "$workspace_source_ref" \
+  "$source_sha"
+
+mapfile -t pair_copy_calls <"$FAKE_COPY_CALLS"
+[[ "${#pair_copy_calls[@]}" -eq 4 ]] ||
+  fail 'support pair does not perform exactly four ordered copy operations'
+[[ "${pair_copy_calls[0]}" == "$base_source_ref $base_repository $source_sha" ]] ||
+  fail 'support base immutable tag is not staged first'
+[[ "${pair_copy_calls[1]}" == "$workspace_source_ref $workspace_repository $source_sha" ]] ||
+  fail 'support workspace immutable tag is not staged second'
+[[ "${pair_copy_calls[2]}" == "$base_source_ref $base_repository latest" ]] ||
+  fail 'support base latest alias moved before both immutable tags verified'
+[[ "${pair_copy_calls[3]}" == "$workspace_source_ref $workspace_repository latest" ]] ||
+  fail 'support workspace latest alias ordering changed'
+mapfile -t pair_skopeo_calls <"$FAKE_SKOPEO_CALLS"
+[[ "${pair_skopeo_calls[0]}" == "list-tags --no-creds docker://$base_repository" ]] ||
+  fail 'support base public preflight is not first'
+[[ "${pair_skopeo_calls[1]}" == "list-tags --no-creds docker://$workspace_repository" ]] ||
+  fail 'support workspace public preflight is not before credential retrieval'
+grep -qxF "base_ghcr_public_ref=$base_repository@$base_digest" "$GITHUB_OUTPUT" ||
+  fail 'support base immutable receipt is absent'
+grep -qxF "workspace_ghcr_public_ref=$workspace_repository@$workspace_digest" \
+  "$GITHUB_OUTPUT" || fail 'support workspace immutable receipt is absent'
+
+for unavailable_repository in "$base_repository" "$workspace_repository"; do
+  : >"$FAKE_FETCH_CALLS"
+  : >"$FAKE_COPY_CALLS"
+  : >"$FAKE_COPY_COUNTER"
+  : >"$FAKE_SKOPEO_CALLS"
+  if FAKE_PREFLIGHT_FAIL_REPOSITORY="$unavailable_repository" \
+      "$PUBLISH_IMAGE" --support-pair "$base_source_ref" \
+        "$workspace_source_ref" "$source_sha" \
+        >"$work/preflight-failure.out" 2>&1; then
+    fail "unreadable support package was accepted: $unavailable_repository"
+  fi
+  [[ ! -s "$FAKE_FETCH_CALLS" ]] ||
+    fail "unreadable support package reached credential retrieval: $unavailable_repository"
+  [[ ! -s "$FAKE_COPY_CALLS" ]] ||
+    fail "unreadable support package caused GHCR mutation: $unavailable_repository"
+done
+
+: >"$FAKE_FETCH_CALLS"
+: >"$FAKE_COPY_CALLS"
+: >"$FAKE_COPY_COUNTER"
+: >"$FAKE_SKOPEO_CALLS"
+if FAKE_ANON_FAIL_REF="$workspace_repository@$workspace_digest" \
+    "$PUBLISH_IMAGE" --support-pair "$base_source_ref" \
+      "$workspace_source_ref" "$source_sha" \
+      >"$work/workspace-verify-failure.out" 2>&1; then
+  fail 'unverified workspace immutable tag was accepted'
+fi
+mapfile -t failed_pair_copy_calls <"$FAKE_COPY_CALLS"
+[[ "${#failed_pair_copy_calls[@]}" -eq 2 ]] ||
+  fail 'compatibility aliases were attempted before both immutable tags verified'
+if grep -qE ' latest$' "$FAKE_COPY_CALLS"; then
+  fail 'an unverified immutable pair reached compatibility alias mutation'
+fi
 
 echo 'publish-image-to-ghcr tests passed'

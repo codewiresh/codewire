@@ -91,10 +91,10 @@ grep -qF 'needs: [support-selection]' <<<"$publish_job" ||
 # shellcheck disable=SC2016
 grep -Fq 'GHCR_PUBLISH_USERNAME: ${{ vars.GHCR_PUBLISH_USERNAME }}' \
   <<<"$publish_job" || fail 'support publisher identity is not repository configuration'
-[[ "$(grep -Fc 'scripts/ci/images/publish-image-to-ghcr.sh' <<<"$publish_job")" -eq 2 ]] ||
-  fail 'support publisher does not copy exactly two image families'
-[[ "$(grep -Ec '^[[:space:]]+latest$' <<<"$publish_job")" -eq 2 ]] ||
-  fail 'both public support families must refresh their compatibility latest alias'
+[[ "$(grep -Fc 'scripts/ci/images/publish-image-to-ghcr.sh' <<<"$publish_job")" -eq 1 ]] ||
+  fail 'support publisher does not use one pair publication boundary'
+grep -Fq -- '--support-pair' <<<"$publish_job" ||
+  fail 'support publisher does not require pair preflight and ordering'
 # shellcheck disable=SC2016
 [[ "$(grep -Fc 'steps.' <<<"$publish_job" | tr -d '[:space:]')" -gt 0 ]] ||
   fail 'support publisher does not consume same-job step outputs'
@@ -103,10 +103,12 @@ grep -Fq 'GHCR_PUBLISH_USERNAME: ${{ vars.GHCR_PUBLISH_USERNAME }}' \
 if grep -Fq 'needs.build-' <<<"$publish_job"; then
   fail 'support publisher still crosses a runner job-output boundary'
 fi
-for family in base workspace; do
-  grep -Fq "ghcr.io/codewiresh/$family" <<<"$publish_job" ||
-    fail "support publisher omits $family"
-done
+# shellcheck disable=SC2016
+grep -Fq '"${{ steps.base.outputs.candidate_ref }}"' <<<"$publish_job" ||
+  fail 'support publisher omits the immutable base candidate'
+# shellcheck disable=SC2016
+grep -Fq '"${{ steps.workspace.outputs.candidate_ref }}"' <<<"$publish_job" ||
+  fail 'support publisher omits the immutable workspace candidate'
 if grep -Fq 'secrets.' <<<"$publish_job"; then
   fail 'support publisher bypasses the Infisical credential handoff'
 fi

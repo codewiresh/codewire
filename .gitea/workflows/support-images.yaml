@@ -86,7 +86,7 @@ jobs:
           CODEWIRE_BASE_IMAGE_REF: ${{ steps.base.outputs.candidate_ref }}
         run: scripts/ci/images/build-push-image.sh workspace images/workspace/Dockerfile .
 
-      - name: Copy both support images without rebuilding
+      - name: Publish verified public support pair without rebuilding
         env:
           GHCR_PUBLISH_USERNAME: ${{ vars.GHCR_PUBLISH_USERNAME }}
         run: |
@@ -94,12 +94,7 @@ jobs:
           [[ "${{ steps.base.outputs.source_sha }}" == "$GITHUB_SHA" ]]
           [[ "${{ steps.workspace.outputs.source_sha }}" == "$GITHUB_SHA" ]]
           scripts/ci/images/publish-image-to-ghcr.sh \
+            --support-pair \
             "${{ steps.base.outputs.candidate_ref }}" \
-            ghcr.io/codewiresh/base \
-            "${{ steps.base.outputs.source_sha }}" \
-            latest
-          scripts/ci/images/publish-image-to-ghcr.sh \
             "${{ steps.workspace.outputs.candidate_ref }}" \
-            ghcr.io/codewiresh/workspace \
-            "${{ steps.workspace.outputs.source_sha }}" \
-            latest
+            "$GITHUB_SHA"
