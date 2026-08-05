@@ -317,6 +317,8 @@ run_selected_family service_apikey_smoke service-apikey-smoke \
   "API key smoke tooling verification"
 run_selected_family runtime_confidential runtime-confidential \
   "confidential runtime tooling verification"
+run_selected_family runtime_dev_smoke runtime-dev-smoke \
+  "Dev smoke tooling verification"
 
 if selection_has database; then
   run_step "database verification" env \

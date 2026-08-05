@@ -53,6 +53,13 @@ fi
 # shellcheck source=scripts/ci/verify/kind-e2e.sh
 source "$SCRIPT"
 
+missing_tool=codewire-deliberately-missing-kind-tool
+if (require_tool "$missing_tool") >"$FIXTURE/missing-tool.out" 2>&1; then
+  fail 'missing Kind prerequisite unexpectedly succeeded'
+fi
+grep -Fq "missing required tool: $missing_tool" "$FIXTURE/missing-tool.out" ||
+  fail 'missing Kind prerequisite did not explain its failure'
+
 # No arguments retain the complete integrated gate; the retained suite requires
 # the exact two-token command and unknown input fails closed.
 : >"$CALLS"
@@ -100,7 +107,7 @@ source "$ENVIRONMENT_SESSION"
 # The integrated suite retains the exact existing order. Stub every expensive
 # action so this fixture proves dispatch and order without creating a cluster.
 : >"$CALLS"
-require_tool() { :; }
+require_tool() { record "require:$1"; }
 reclaim_cancelled_ci_clusters() { record reclaim; }
 # shellcheck disable=SC2329 # Invoked indirectly by the integrated EXIT trap.
 cleanup() { :; }
@@ -125,6 +132,16 @@ run_integrated_kind_suite
 trap - EXIT
 trap cleanup_fixture EXIT
 cat >"$FIXTURE/want-order" <<'EOF'
+require:curl
+require:base64
+require:docker
+require:jq
+require:kind
+require:kubectl
+require:openssl
+require:psql
+require:ssh-keygen
+require:ssh-keyscan
 reclaim
 ingress-drift
 create-cluster

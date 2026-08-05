@@ -357,6 +357,10 @@ jobs:
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|runtime_confidential|') }}
         run: scripts/ci/verify/run-product-verification.sh runtime-confidential
 
+      - name: Run Dev smoke tooling
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|runtime_dev_smoke|') }}
+        run: scripts/ci/verify/run-product-verification.sh runtime-dev-smoke
+
       - name: Run Release provenance
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|release|') }}
         env:

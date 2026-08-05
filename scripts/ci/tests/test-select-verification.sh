@@ -101,7 +101,7 @@ run_paths_case local_compose pull_request refs/pull/11/head false \
 run_paths_case local_compose_kind_opt_in pull_request refs/pull/111/head true \
   'database deploy edge_kind kind policy web' docker-compose.yml
 run_paths_case ci_self pull_request refs/pull/2/head false \
-  'go_consumer_interop go_support policy release runtime_confidential rust_curated_locks' \
+  'go_consumer_interop go_support policy release runtime_confidential runtime_dev_smoke rust_curated_locks' \
   .gitea/workflows/ci.yaml .gitea/workflows/manual-diagnostics.yaml \
   scripts/ci/select/select-verification.sh \
   scripts/ci/select/require-verification-results.sh \
@@ -111,7 +111,7 @@ run_paths_case ci_self pull_request refs/pull/2/head false \
   scripts/ci/tests/test-verify-tested-tree-receipt.sh \
   scripts/ci/tests/test-verify-release-tag-receipt.sh
 run_paths_case ci_rewrite pull_request refs/pull/20/head false \
-  'deploy policy rust_curated_locks' \
+  'deploy policy runtime_dev_smoke rust_curated_locks' \
   .githooks/pre-push scripts/dev/preflight.sh scripts/ci/select/select-deploy-dev.sh \
   scripts/ci/verify/integration-postgres.sh \
   scripts/ci/verify/resolve-cargo-target-dir.sh \
@@ -348,6 +348,10 @@ run_paths_case kind_harness_opt_in pull_request refs/pull/846/head true \
   'edge_kind kind policy' \
   scripts/ci/verify/kind/suites/final-fencing.sh \
   scripts/ci/verify/kind/suites/environment-session.sh
+run_paths_case kind_fixture_only pull_request refs/pull/847/head false \
+  'edge_kind policy' \
+  scripts/ci/tests/test-kind-e2e-suites.sh \
+  scripts/ci/tests/test-kind-forwards.sh
 run_paths_case temporal_shared_fixture pull_request refs/pull/841/head false \
   'policy service_billing service_integration service_orchestration service_temporal' \
   tests/e2e/flip-state.env
@@ -515,12 +519,12 @@ run_paths_case cli_deploy_assets pull_request refs/pull/1515/head false \
   apps/cli/charts/codewire-mesh/values.yaml \
   apps/cli/k8s/demo-site/deployment.yaml
 run_paths_case runtime_dev_tooling pull_request refs/pull/1516/head false \
-  'policy' \
+  'policy runtime_dev_smoke' \
   scripts/runtime/dev/measure-dev-commodity-overhead.sh \
   scripts/runtime/dev/smoke-dev-commodity.sh \
   scripts/runtime/kata/kata-genpolicy.sh
 run_paths_case runtime_dev_auth pull_request refs/pull/1517/head false \
-  'policy security security_dev_smoke_auth' \
+  'policy runtime_dev_smoke security security_dev_smoke_auth' \
   scripts/runtime/dev/provision-dev-smoke-user.sh \
   scripts/runtime/dev/with-dev-smoke-auth.sh \
   scripts/runtime/tests/test-with-dev-smoke-auth.sh
@@ -565,7 +569,7 @@ run_paths_case temporal_installer_without_kind pull_request refs/pull/171/head f
 run_paths_case temporal_installer_with_kind pull_request refs/pull/172/head true \
   'edge_kind kind policy' scripts/dev/kind/install-temporal.sh scripts/ci/tests/test-install-temporal.sh
 run_paths_case ws17_wi_c3 pull_request refs/pull/173/head false \
-  'go_consumer_interop go_support policy release runtime_confidential rust rust_pkg_codewire_cli rust_pkg_codewire_cli_bin rust_pkg_codewire_desktop rust_pkg_codewire_orchestration sdk_go sdk_python sdk_ts service_integration service_orchestration service_temporal web' \
+  'go_consumer_interop go_support policy release runtime_confidential runtime_dev_smoke rust rust_pkg_codewire_cli rust_pkg_codewire_cli_bin rust_pkg_codewire_desktop rust_pkg_codewire_orchestration sdk_go sdk_python sdk_ts service_integration service_orchestration service_temporal web' \
   CONTRIBUTING.md \
   README.md \
   apps/cli/.env.example \
@@ -671,7 +675,7 @@ run_paths_case ws17_wi_c3 pull_request refs/pull/173/head false \
 run_paths_case tag push refs/tags/v1.2.3 false \
   'deploy go_consumer_interop go_support release runtime_confidential' docs/tag-path-is-ignored.md
 
-all_product='contracts contracts_proto database deploy edge_kind go_consumer_interop go_support go_tailnet kind policy release runtime_confidential rust rust_curated_locks rust_workspace sdk_go sdk_python sdk_ts security security_dev_smoke_auth security_go security_idp_kek security_js service_apikey_smoke service_billing service_connectcore service_coordinator service_idp service_integration service_nats service_orchestration service_temporal transport transport_derp_contract transport_pkg_codewire_coordinator transport_pkg_codewire_daemon transport_pkg_codewire_derp transport_pkg_codewire_gateway transport_pkg_codewire_mesh transport_pkg_codewire_tailnet transport_pkg_codewire_udp_relay web'
+all_product='contracts contracts_proto database deploy edge_kind go_consumer_interop go_support go_tailnet kind policy release runtime_confidential runtime_dev_smoke rust rust_curated_locks rust_workspace sdk_go sdk_python sdk_ts security security_dev_smoke_auth security_go security_idp_kek security_js service_apikey_smoke service_billing service_connectcore service_coordinator service_idp service_integration service_nats service_orchestration service_temporal transport transport_derp_contract transport_pkg_codewire_coordinator transport_pkg_codewire_daemon transport_pkg_codewire_derp transport_pkg_codewire_gateway transport_pkg_codewire_mesh transport_pkg_codewire_tailnet transport_pkg_codewire_udp_relay web'
 run_paths_case unknown pull_request refs/pull/18/head false "$all_product" \
   unexplained/new-surface.txt
 run_paths_case mesh_policy_unknown pull_request refs/pull/181/head false "$all_product" \
@@ -697,6 +701,17 @@ contract_output="$(env -u GITHUB_OUTPUT -u GITHUB_EVENT_PATH \
   GITHUB_EVENT_NAME=pull_request GITHUB_REF=refs/pull/1911/head \
   KIND_E2E_OPT_IN=false "$SELECTOR" "$contract_paths")"
 assert_contract_field edge "$contract_output" required_local_mode kind
+printf '%s\n' scripts/ci/tests/test-kind-e2e-suites.sh > "$contract_paths"
+contract_output="$(env -u GITHUB_OUTPUT -u GITHUB_EVENT_PATH \
+  GITHUB_EVENT_NAME=pull_request GITHUB_REF=refs/pull/1912/head \
+  KIND_E2E_OPT_IN=false "$SELECTOR" "$contract_paths")"
+assert_contract_field kind_fixture "$contract_output" required_local_mode default
+printf '%s\n' scripts/ci/tests/test-kind-e2e-suites.sh \
+  scripts/ci/verify/kind/suites/integrated.sh > "$contract_paths"
+contract_output="$(env -u GITHUB_OUTPUT -u GITHUB_EVENT_PATH \
+  GITHUB_EVENT_NAME=pull_request GITHUB_REF=refs/pull/1913/head \
+  KIND_E2E_OPT_IN=false "$SELECTOR" "$contract_paths")"
+assert_contract_field kind_fixture_mixed "$contract_output" required_local_mode kind
 printf '%s\n' unexplained/new-surface.txt > "$contract_paths"
 contract_output="$(env -u GITHUB_OUTPUT -u GITHUB_EVENT_PATH \
   GITHUB_EVENT_NAME=pull_request GITHUB_REF=refs/pull/192/head \
@@ -1590,6 +1605,16 @@ grep -qF 'scripts/runtime/tests/test-run-sdk-ts-e2e.sh' \
   "$ROOT/scripts/ci/verify/run-product-verification.sh"
 grep -qF 'scripts/runtime/tests/test-with-dev-smoke-auth.sh' \
   "$ROOT/scripts/ci/verify/run-product-verification.sh"
+grep -qF 'scripts/runtime/tests/test-provision-dev-smoke-user.sh' \
+  "$ROOT/scripts/ci/verify/run-product-verification.sh"
+grep -qF 'scripts/runtime/tests/test-smoke-dev-commodity.sh' \
+  "$ROOT/scripts/ci/verify/run-product-verification.sh"
+grep -qF 'run_selected_family runtime_dev_smoke runtime-dev-smoke' \
+  "$ROOT/scripts/dev/preflight.sh"
+grep -qF "contains(needs.verification-selection.outputs.selection, '|runtime_dev_smoke|')" \
+  "$WORKFLOW"
+grep -qF 'run: scripts/ci/verify/run-product-verification.sh runtime-dev-smoke' \
+  "$WORKFLOW"
 if grep -qF 'select-migration-gates' "$WORKFLOW"; then
   echo 'workflow still calls the retired selector' >&2
   exit 1

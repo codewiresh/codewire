@@ -163,7 +163,7 @@ select_all_product() {
   for family in \
       policy rust go_support web sdk_go sdk_ts sdk_python database \
       service_integration edge_kind release deploy security \
-      runtime_confidential; do
+      runtime_confidential runtime_dev_smoke; do
     select_token "$family"
   done
   # The iOS package is independently hermetic and comparatively expensive.
@@ -425,6 +425,18 @@ if [ "$event_selected" = false ]; then
       scripts/ci/verify/check-curated-rust-locks.sh|\
       scripts/ci/tests/test-curated-rust-locks.sh)
         select_token rust_curated_locks
+        recognized=true
+        ;;
+    esac
+
+    case "$path" in
+      .gitea/workflows/ci.yaml|scripts/dev/preflight.sh|\
+      scripts/ci/select/select-verification.sh|\
+      scripts/ci/tests/test-select-verification.sh|\
+      scripts/ci/verify/run-product-verification.sh)
+        # Changes to the capability's routing must execute the capability on
+        # the candidate tree, not merely assert that its token is present.
+        select_token runtime_dev_smoke
         recognized=true
         ;;
     esac
@@ -873,10 +885,20 @@ if [ "$event_selected" = false ]; then
         recognized=true
         ;;
       scripts/runtime/dev/provision-dev-smoke-user.sh|\
+      scripts/runtime/dev/smoke-dev-commodity.sh|\
       scripts/runtime/dev/with-dev-smoke-auth.sh|\
+      scripts/runtime/tests/test-provision-dev-smoke-user.sh|\
+      scripts/runtime/tests/test-smoke-dev-commodity.sh|\
       scripts/runtime/tests/test-with-dev-smoke-auth.sh)
-        select_token security
-        select_token security_dev_smoke_auth
+        select_token runtime_dev_smoke
+        case "$path" in
+          scripts/runtime/dev/provision-dev-smoke-user.sh|\
+          scripts/runtime/dev/with-dev-smoke-auth.sh|\
+          scripts/runtime/tests/test-with-dev-smoke-auth.sh)
+            select_token security
+            select_token security_dev_smoke_auth
+            ;;
+        esac
         recognized=true
         ;;
       scripts/runtime/*)
@@ -926,12 +948,18 @@ if [ "$event_selected" = false ]; then
         ;;
       Caddyfile|Caddyfile.docker|tests/e2e/kind/*|tests/e2e/*kind*|\
       scripts/ci/verify/kind-e2e.sh|scripts/ci/verify/kind/*|\
-      scripts/ci/tests/test-kind-e2e-*.sh|scripts/ci/tests/test-kind-forwards.sh|\
       scripts/dev/kind/install-temporal.sh|scripts/ci/tests/test-install-temporal.sh|\
       deployments/k8s/*ingress*|\
       deployments/k8s/overlays/local-kind/*|deployments/k8s/overlays/local-kind-static/*)
         select_token edge_kind
         kind_relevant=true
+        recognized=true
+        ;;
+      scripts/ci/tests/test-kind-e2e-*.sh|scripts/ci/tests/test-kind-forwards.sh)
+        # These hermetic fixtures exercise the dispatcher and cleanup contract
+        # without provisioning a cluster. A real harness/runtime path in the
+        # same change still marks the selection Kind-relevant above.
+        select_token edge_kind
         recognized=true
         ;;
       scripts/checks/contracts/connect-edge-ownership.json)

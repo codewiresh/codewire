@@ -242,9 +242,11 @@ workflow_output="$(push_branch "$linked_workflow" linked-workflow "$workflow_log
 assert_contains linked_workflow "$workflow_output" \
   '  .gitea/workflows/ci.yaml'
 assert_contains linked_workflow "$workflow_output" \
-  'preflight selection: |valid:v3|policy|rust_curated_locks|complete|'
+  'preflight selection: |valid:v3|policy|runtime_dev_smoke|rust_curated_locks|complete|'
 assert_contains workflow_tools "$(cat "$workflow_log")" \
   'product rust-curated-locks '
+assert_contains workflow_tools "$(cat "$workflow_log")" \
+  'product runtime-dev-smoke '
 assert_not_contains workflow_tools "$(cat "$workflow_log")" 'integration '
 
 linked_database="$TMP/linked-database"
@@ -373,6 +375,25 @@ assert_not_contains confidential_tooling_tools \
   "$(cat "$confidential_tooling_log")" 'product release '
 assert_not_contains confidential_tooling_tools \
   "$(cat "$confidential_tooling_log")" 'integration '
+
+dev_smoke_tooling_paths="$TMP/dev-smoke-tooling.paths"
+printf '%s\n' \
+  scripts/runtime/dev/smoke-dev-commodity.sh \
+  scripts/runtime/tests/test-smoke-dev-commodity.sh \
+  > "$dev_smoke_tooling_paths"
+dev_smoke_tooling_log="$TMP/dev-smoke-tooling.log"
+dev_smoke_tooling_output="$({
+  cd "$repo"
+  PATH="$TMP/bin:$PATH" PREFLIGHT_TEST_TOOL_LOG="$dev_smoke_tooling_log" \
+    PREFLIGHT_CHANGED_FILES="$dev_smoke_tooling_paths" \
+    "$repo/.githooks/pre-push"
+} 2>&1)"
+assert_contains dev_smoke_tooling "$dev_smoke_tooling_output" \
+  'preflight selection: |valid:v3|policy|runtime_dev_smoke|complete|'
+assert_contains dev_smoke_tooling_tools "$(cat "$dev_smoke_tooling_log")" \
+  'product runtime-dev-smoke '
+assert_not_contains dev_smoke_tooling_tools \
+  "$(cat "$dev_smoke_tooling_log")" 'integration '
 
 sdk_tooling_paths="$TMP/sdk-tooling.paths"
 printf '%s\n' \

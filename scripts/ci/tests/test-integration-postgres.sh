@@ -91,4 +91,55 @@ if integration_postgres_configure >/dev/null 2>&1; then
 fi
 [ ! -s "$FAKE_DOCKER_LOG" ]
 
-printf '[test-integration-postgres] hermetic selection and cleanup cases passed\n'
+reset_case
+mkdir -p "$TMP/no-tools" "$TMP/docker-only"
+ln -s "$TMP/docker" "$TMP/docker-only/docker"
+if missing_docker_output="$(PATH="$TMP/no-tools" integration_postgres_configure 2>&1)"; then
+  echo "missing Docker was accepted for managed local PostgreSQL" >&2
+  exit 1
+fi
+grep -Fq 'local integration verification requires Docker or explicit DATABASE_URL and DATABASE_URL_RUST' \
+  <<<"$missing_docker_output"
+[ ! -s "$FAKE_DOCKER_LOG" ]
+
+reset_case
+if missing_psql_output="$(PATH="$TMP/docker-only" integration_postgres_configure 2>&1)"; then
+  echo "missing psql was accepted for managed local PostgreSQL" >&2
+  exit 1
+fi
+grep -Fq 'local integration verification requires psql' \
+  <<<"$missing_psql_output"
+[ ! -s "$FAKE_DOCKER_LOG" ]
+
+cat > "$TMP/cargo" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >> "$FAKE_CARGO_LOG"
+EOF
+chmod +x "$TMP/cargo"
+mkdir -p "$TMP/target/ci"
+cat > "$TMP/target/ci/codewire-db-migrate" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+EOF
+chmod +x "$TMP/target/ci/codewire-db-migrate"
+FAKE_CARGO_LOG="$TMP/cargo.log"
+export FAKE_CARGO_LOG
+: > "$FAKE_CARGO_LOG"
+if missing_scope_output="$(
+  CARGO_TARGET_DIR="$TMP/target" \
+    RUN_DIR="$TMP/missing-service-scope" \
+    DATABASE_URL='postgres://synthetic:synthetic@127.0.0.1:60003/synthetic' \
+    DATABASE_URL_RUST='postgres://synthetic:synthetic@127.0.0.1:60003/synthetic' \
+    VERIFICATION_SELECTION='|valid:v3|service_integration|complete|' \
+    "$ROOT/scripts/ci/verify/run-integration-verification.sh" services 2>&1
+)"; then
+  echo "service integration without a service scope was accepted" >&2
+  exit 1
+fi
+grep -Fq 'service integration selected without a service scope' \
+  <<<"$missing_scope_output"
+grep -Fq -- '--locked --profile ci -p codewire-server-core --bin codewire-db-migrate' \
+  "$FAKE_CARGO_LOG"
+
+printf '[test-integration-postgres] hermetic selection, prerequisite, scope, and cleanup cases passed\n'

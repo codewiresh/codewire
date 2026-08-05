@@ -373,6 +373,11 @@ run_runtime_confidential() {
   scripts/runtime/tests/test-confidential-snp-smoke-contract.sh
 }
 
+run_runtime_dev_smoke() {
+  scripts/runtime/tests/test-provision-dev-smoke-user.sh
+  scripts/runtime/tests/test-smoke-dev-commodity.sh
+}
+
 run_rust() {
   if selected rust_pkg_codewire_desktop; then
     run_detached_desktop
@@ -677,6 +682,7 @@ case "$FAMILY" in
   sdk-python) run_sdk_python ;;
   service-apikey-smoke) run_apikey_smoke_tooling ;;
   runtime-confidential) run_runtime_confidential ;;
+  runtime-dev-smoke) run_runtime_dev_smoke ;;
   rust) run_rust ;;
   rust-curated-locks) run_rust_curated_locks ;;
   transport) run_transport ;;
@@ -685,7 +691,7 @@ case "$FAMILY" in
   deploy) run_deploy ;;
   security) run_security ;;
   *)
-    echo "usage: run-product-verification.sh policy|contracts|go-support|web|ios|sdk-go|sdk-ts|sdk-python|service-apikey-smoke|runtime-confidential|rust|rust-curated-locks|transport|edge|release|deploy|security" >&2
+    echo "usage: run-product-verification.sh policy|contracts|go-support|web|ios|sdk-go|sdk-ts|sdk-python|service-apikey-smoke|runtime-confidential|runtime-dev-smoke|rust|rust-curated-locks|transport|edge|release|deploy|security" >&2
     exit 2
     ;;
 esac
