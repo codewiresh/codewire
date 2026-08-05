@@ -72,10 +72,8 @@ def build_receipt(env: Mapping[str, str]) -> dict[str, object]:
     if cw_state not in STATES or desktop_state not in STATES or workspace_state not in STATES:
         raise ReceiptError("receipt contains an invalid artifact state")
     selection = require(env, "CODEWIRE_SELECTION")
-    if not selection.startswith("|valid:v2|") or not selection.endswith("|complete|"):
+    if not selection.startswith("|valid:v3|") or not selection.endswith("|complete|"):
         raise ReceiptError("receipt selection is invalid")
-    if (desktop_state != "unaffected") != ("|rust_pkg_codewire_desktop|" in selection):
-        raise ReceiptError("desktop artifact state disagrees with selected verification")
 
     return {
         "schema": RECEIPT_SCHEMA,

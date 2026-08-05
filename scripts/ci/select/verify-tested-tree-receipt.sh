@@ -252,11 +252,7 @@ if ! jq -e \
       | select(.plan.graph_sha256 | test("^[0-9a-f]{64}$"))
       | select((.plan.artifacts | keys | sort) == ["cw_cli_release_assets", "desktop_package", "workspace_image"])
       | select([.plan.artifacts[]] | all(. == "affected" or . == "unaffected" or . == "unclassified"))
-      | select(.selection | startswith("|valid:v2|") and endswith("|complete|"))
-      | select(
-          (.plan.artifacts.desktop_package != "unaffected")
-          == (.selection | contains("|rust_pkg_codewire_desktop|"))
-        )
+      | select(.selection | startswith("|valid:v3|") and endswith("|complete|"))
       | select(.results == {
           selection: "success",
           standard: "success",

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Apply trusted artifact facts to the legacy product-verification selection."""
+"""Emit validated artifact facts without changing verification capabilities."""
 
 from __future__ import annotations
 
@@ -22,32 +22,6 @@ ZERO_HASH = "0" * 64
 
 class AdapterError(RuntimeError):
     pass
-
-
-def read_legacy_output(path: Path) -> tuple[str, set[str]]:
-    values: dict[str, str] = {}
-    for raw_line in path.read_text().splitlines():
-        if not raw_line or "=" not in raw_line:
-            continue
-        key, value = raw_line.split("=", 1)
-        if key in values:
-            raise AdapterError(f"legacy selector output repeats {key}")
-        values[key] = value
-
-    version = values.get("selector_version", "")
-    selection = values.get("selection", "")
-    expected_prefix = f"|valid:{version}|"
-    if version != "v2" or not selection.startswith(expected_prefix) or not selection.endswith("|complete|"):
-        raise AdapterError("legacy selector output is invalid or incomplete")
-    parts = selection.split("|")
-    if len(parts) < 5 or parts[0] or parts[-1] or parts[1] != f"valid:{version}" or parts[-2] != "complete":
-        raise AdapterError("legacy selector token framing is invalid")
-    tokens = parts[2:-2]
-    if any(not re.fullmatch(r"[a-z0-9_:-]+", token) for token in tokens):
-        raise AdapterError("legacy selector contains an invalid token")
-    if len(tokens) != len(set(tokens)):
-        raise AdapterError("legacy selector contains duplicate tokens")
-    return version, set(tokens)
 
 
 def require_string(mapping: dict[str, Any], key: str, pattern: re.Pattern[str]) -> str:
@@ -78,9 +52,8 @@ def trusted_plan_outputs(plan_path: Path) -> dict[str, str]:
 
     trusted = plan.get("trusted_policy")
     baseline = plan.get("baseline")
-    verification = plan.get("verification")
-    if not isinstance(trusted, dict) or not isinstance(baseline, dict) or not isinstance(verification, dict):
-        raise AdapterError("plan omits trusted policy, baseline, or verification facts")
+    if not isinstance(trusted, dict) or not isinstance(baseline, dict):
+        raise AdapterError("plan omits trusted policy or baseline facts")
     validation = baseline.get("validation")
     if (
         not isinstance(validation, dict)
@@ -92,18 +65,6 @@ def trusted_plan_outputs(plan_path: Path) -> dict[str, str]:
     cw_state = artifact_state(plan, "cw_cli_release_assets")
     desktop_state = artifact_state(plan, "desktop_package")
     workspace_state = artifact_state(plan, "workspace_image")
-    cw_selected = cw_state != "unaffected"
-    desktop_selected = desktop_state != "unaffected"
-    workspace_selected = workspace_state != "unaffected"
-    if verification.get("cw_cli_package") is not cw_selected:
-        raise AdapterError("plan CW verification fact disagrees with artifact state")
-    if verification.get("desktop_package") is not desktop_selected:
-        raise AdapterError("plan desktop verification fact disagrees with artifact state")
-    if verification.get("workspace_image") is not workspace_selected:
-        raise AdapterError("plan workspace verification fact disagrees with artifact state")
-    if verification.get("legacy_selectors_authoritative") is not True:
-        raise AdapterError("plan does not preserve unmigrated legacy selectors")
-
     return {
         "ci_plan_status": "trusted",
         "ci_plan_schema": PLAN_SCHEMA,
@@ -116,11 +77,11 @@ def trusted_plan_outputs(plan_path: Path) -> dict[str, str]:
         "ci_head_commit": require_string(baseline, "head_commit", HEX40_RE),
         "ci_head_tree": require_string(baseline, "head_tree", HEX40_RE),
         "cw_package_state": cw_state,
-        "cw_package_selected": str(cw_selected).lower(),
+        "cw_package_selected": str(cw_state != "unaffected").lower(),
         "desktop_package_state": desktop_state,
-        "desktop_package_selected": str(desktop_selected).lower(),
+        "desktop_package_selected": str(desktop_state != "unaffected").lower(),
         "workspace_image_state": workspace_state,
-        "workspace_image_selected": str(workspace_selected).lower(),
+        "workspace_image_selected": str(workspace_state != "unaffected").lower(),
     }
 
 
@@ -151,25 +112,6 @@ def unclassified_outputs(args: argparse.Namespace) -> dict[str, str]:
     }
 
 
-def apply_tokens(version: str, tokens: set[str], outputs: dict[str, str]) -> str:
-    tokens.discard("rust_pkg_codewire_desktop")
-    if outputs["desktop_package_selected"] == "true":
-        tokens.update({"policy", "rust", "rust_pkg_codewire_desktop"})
-    ordered = "|".join(sorted(tokens))
-    middle = f"{ordered}|" if ordered else ""
-    return f"|valid:{version}|{middle}complete|"
-
-
-def build_outputs(args: argparse.Namespace) -> dict[str, str]:
-    version, tokens = read_legacy_output(Path(args.legacy_output))
-    plan_outputs = trusted_plan_outputs(Path(args.plan)) if args.plan else unclassified_outputs(args)
-    return {
-        "selector_version": version,
-        "selection": apply_tokens(version, tokens, plan_outputs),
-        **plan_outputs,
-    }
-
-
 def emit(outputs: dict[str, str]) -> None:
     rendered = "".join(f"{key}={value}\n" for key, value in outputs.items())
     output_path = os.environ.get("GITHUB_OUTPUT")
@@ -181,7 +123,6 @@ def emit(outputs: dict[str, str]) -> None:
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--legacy-output", required=True)
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--plan")
     mode.add_argument("--unclassified", action="store_true")
@@ -193,11 +134,20 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def build_outputs(args: argparse.Namespace) -> dict[str, str]:
+    return (
+        trusted_plan_outputs(Path(args.plan))
+        if args.plan
+        else unclassified_outputs(args)
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     try:
-        emit(build_outputs(parse_args(argv or sys.argv[1:])))
+        args = parse_args(argv or sys.argv[1:])
+        emit(build_outputs(args))
     except (OSError, AdapterError) as exc:
-        print(f"verification plan adapter: {exc}", file=sys.stderr)
+        print(f"artifact plan adapter: {exc}", file=sys.stderr)
         return 2
     return 0
 

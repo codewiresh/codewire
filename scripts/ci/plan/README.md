@@ -39,11 +39,10 @@ pair policy: publish both support images when either planner artifact is
 `affected` or `unclassified`; skip only when both are `unaffected`. It does not
 inspect source paths or dependency graphs.
 
-`apply-verification-plan.py` is the event adapter. It validates the trusted
-plan, removes the legacy desktop-package decision, and adds that decision back
-from the canonical artifact fact. Every other legacy selection token remains
-authoritative until its artifact migrates, so PRs execute that selector from
-the same exact target-base checkout and include it in the policy hash.
+`apply-verification-plan.py` is an artifact-only event adapter. It validates
+the trusted plan and emits package/image facts for the `cw`, desktop, and
+workspace artifact jobs. It never adds, removes, or rewrites verification
+capability tokens; `select-verification.sh` owns that contract.
 `emit-verification-receipt.py`
 serializes the successful required-job inputs into one canonical base64 log
 record. The post-merge receipt validator attests that record; it never repeats

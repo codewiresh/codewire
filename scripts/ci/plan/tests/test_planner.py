@@ -767,19 +767,12 @@ class PlannerFixtureTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory(prefix="codewire-plan-adapter-test-") as temporary:
             root = Path(temporary)
-            legacy = root / "legacy-output"
             plan_path = root / "plan.json"
-            legacy.write_text(
-                "selector_version=v2\n"
-                "selection=|valid:v2|policy|rust|rust_pkg_codewire_desktop|sdk_go|complete|\n"
-            )
             plan_path.write_text(json.dumps(document, sort_keys=True, indent=2) + "\n")
             completed = subprocess.run(
                 [
                     sys.executable,
                     str(PLANNER_PATH.parent / "apply-verification-plan.py"),
-                    "--legacy-output",
-                    str(legacy),
                     "--plan",
                     str(plan_path),
                 ],
@@ -792,6 +785,8 @@ class PlannerFixtureTests(unittest.TestCase):
         self.assertEqual(outputs["cw_package_selected"], "false")
         self.assertEqual(outputs["desktop_package_selected"], "false")
         self.assertEqual(outputs["workspace_image_selected"], "false")
+        self.assertNotIn("selection", outputs)
+        self.assertNotIn("selector_version", outputs)
         print(
             "non-Rust planner fixture: cw_package_selected=false "
             "desktop_package_selected=false workspace_image_selected=false"

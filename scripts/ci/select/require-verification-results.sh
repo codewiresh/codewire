@@ -13,7 +13,7 @@ fail() {
 if [ "$selection_result" != success ]; then
   fail "verification selection concluded $selection_result"
 fi
-if [[ "$selection" != '|valid:v2|'* ]] || [[ "$selection" != *'|complete|' ]]; then
+if [[ "$selection" != '|valid:v3|'* ]] || [[ "$selection" != *'|complete|' ]]; then
   fail "verification selection is invalid or incomplete"
 fi
 

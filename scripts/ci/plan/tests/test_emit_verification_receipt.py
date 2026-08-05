@@ -44,7 +44,7 @@ def environment() -> dict[str, str]:
         "CODEWIRE_CW_PACKAGE_STATE": "unaffected",
         "CODEWIRE_DESKTOP_PACKAGE_STATE": "affected",
         "CODEWIRE_WORKSPACE_IMAGE_STATE": "unaffected",
-        "CODEWIRE_SELECTION": "|valid:v2|policy|rust|rust_pkg_codewire_desktop|complete|",
+        "CODEWIRE_SELECTION": "|valid:v3|policy|rust|rust_pkg_codewire_desktop|complete|",
         "CODEWIRE_SELECTION_RESULT": "success",
         "CODEWIRE_STANDARD_RESULT": "success",
         "CODEWIRE_RUST_TRANSPORT_RESULT": "success",
@@ -88,11 +88,12 @@ class ReceiptEmitterTests(unittest.TestCase):
         with self.assertRaisesRegex(emitter.ReceiptError, "exact PR base"):
             emitter.build_receipt(env)
 
-    def test_desktop_state_must_match_selection(self) -> None:
+    def test_artifact_state_is_orthogonal_to_capability_selection(self) -> None:
         env = environment()
-        env["CODEWIRE_SELECTION"] = "|valid:v2|policy|rust|complete|"
-        with self.assertRaisesRegex(emitter.ReceiptError, "disagrees"):
-            emitter.build_receipt(env)
+        env["CODEWIRE_SELECTION"] = "|valid:v3|policy|rust|complete|"
+        receipt = emitter.build_receipt(env)
+        self.assertEqual(receipt["plan"]["artifacts"]["desktop_package"], "affected")
+        self.assertNotIn("|rust_pkg_codewire_desktop|", receipt["selection"])
 
     def test_every_dependency_must_have_succeeded(self) -> None:
         env = environment()

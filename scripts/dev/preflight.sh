@@ -11,6 +11,39 @@ PRODUCT_RUNNER="$REPO_ROOT/scripts/ci/verify/run-product-verification.sh"
 INTEGRATION_RUNNER="$REPO_ROOT/scripts/ci/verify/run-integration-verification.sh"
 cd "$REPO_ROOT"
 
+usage() {
+  cat <<'EOF'
+usage: scripts/dev/preflight.sh [--default|--integration|--kind|--full|--explain]
+
+default runs lightweight selected checks. Integration and Kind are explicit
+environment escalations. --full runs the complete local-safe verification
+universe; it never publishes, deploys, releases, or mutates live state.
+EOF
+}
+
+PREFLIGHT_MODE="${CODEWIRE_PREFLIGHT_MODE:-default}"
+if [ "$#" -gt 1 ]; then
+  usage >&2
+  exit 2
+fi
+case "${1:-}" in
+  '') ;;
+  --default) PREFLIGHT_MODE=default ;;
+  --integration) PREFLIGHT_MODE=integration ;;
+  --kind) PREFLIGHT_MODE=kind ;;
+  --full) PREFLIGHT_MODE=full ;;
+  --explain) PREFLIGHT_MODE=explain ;;
+  --help|-h) usage; exit 0 ;;
+  *) usage >&2; exit 2 ;;
+esac
+case "$PREFLIGHT_MODE" in
+  default|integration|kind|full|explain) ;;
+  *)
+    printf 'preflight: unsupported mode %s\n' "$PREFLIGHT_MODE" >&2
+    exit 2
+    ;;
+esac
+
 while IFS= read -r git_env_name; do
   unset "$git_env_name"
 done < <(git rev-parse --local-env-vars)
@@ -72,8 +105,7 @@ collect_changed_paths() {
   local head base
   head="${PREFLIGHT_HEAD_SHA:-HEAD}"
   if ! head="$(git rev-parse --verify "$head^{commit}" 2>/dev/null)"; then
-    printf '__unknown__\n' > "$out"
-    return
+    fail "head commit is unavailable"
   fi
 
   base="${PREFLIGHT_BASE_SHA:-}"
@@ -84,16 +116,14 @@ collect_changed_paths() {
     base="$(preflight_base_ref)"
   fi
   if [ -z "$base" ] || ! ref_exists "$base"; then
-    printf '__unknown__\n' > "$out"
-    return
+    fail "canonical baseline is unavailable"
   fi
   base="$(git rev-parse --verify "$base^{commit}")"
   PREFLIGHT_EFFECTIVE_BASE_SHA="$base"
 
   if ! git diff --name-only "$base...$head" > "$out" 2>/dev/null \
     && ! git diff --name-only "$base" "$head" > "$out" 2>/dev/null; then
-    printf '__unknown__\n' > "$out"
-    return
+    fail "changed paths cannot be derived from the canonical baseline"
   fi
 
   # Direct invocation also covers uncommitted work. A real pre-push supplies
@@ -114,6 +144,24 @@ collect_changed_paths() {
 
 selection_value() {
   sed -n 's/^selection=//p' <<<"$1"
+}
+
+classification_value() {
+  sed -n 's/^classification=//p' <<<"$1"
+}
+
+required_mode_value() {
+  sed -n 's/^required_local_mode=//p' <<<"$1"
+}
+
+mode_rank() {
+  case "$1" in
+    default) printf '0\n' ;;
+    integration) printf '1\n' ;;
+    kind) printf '2\n' ;;
+    full) printf '3\n' ;;
+    *) return 1 ;;
+  esac
 }
 
 selection_has() {
@@ -185,6 +233,7 @@ release_tag_run='
   fi
   printf 'preflight: release receipt unavailable; running full fail-closed verification\n'
   printf '__unknown__\n' > "$PREFLIGHT_CHANGED_PATHS"
+  PREFLIGHT_MODE=full
 fi
 
 printf '==> preflight path selection\n'
@@ -194,21 +243,61 @@ else
   printf '  (no changed paths)\n'
 fi
 
+selector_kind_opt_in=false
+if [ "$PREFLIGHT_MODE" = kind ] || [ "$PREFLIGHT_MODE" = full ]; then
+  selector_kind_opt_in=true
+fi
 selector_output="$(
   env -u GITHUB_OUTPUT -u GITHUB_EVENT_PATH \
     GITHUB_EVENT_NAME=pull_request \
-    KIND_E2E_OPT_IN="${PREFLIGHT_KIND_OPT_IN:-false}" \
+    KIND_E2E_OPT_IN="${PREFLIGHT_KIND_OPT_IN:-$selector_kind_opt_in}" \
     "$SELECTOR" "$PREFLIGHT_CHANGED_PATHS"
 )"
 VERIFICATION_SELECTION="$(selection_value "$selector_output")"
+PREFLIGHT_CLASSIFICATION="$(classification_value "$selector_output")"
+PREFLIGHT_REQUIRED_MODE="$(required_mode_value "$selector_output")"
 export VERIFICATION_SELECTION
 
-if [[ "$VERIFICATION_SELECTION" != '|valid:v2|'* ]] \
-  || [[ "$VERIFICATION_SELECTION" != *'|complete|' ]]; then
+if [[ "$VERIFICATION_SELECTION" != '|valid:v3|'* ]] \
+  || [[ "$VERIFICATION_SELECTION" != *'|complete|' ]] \
+  || [[ ! "$PREFLIGHT_CLASSIFICATION" =~ ^(changed|unchanged|unclassified)$ ]] \
+  || [[ ! "$PREFLIGHT_REQUIRED_MODE" =~ ^(default|integration|kind|full)$ ]]; then
   fail "verification selection is missing or malformed"
 fi
 
+printf 'preflight classification: %s\n' "$PREFLIGHT_CLASSIFICATION"
+printf 'preflight required local mode: %s\n' "$PREFLIGHT_REQUIRED_MODE"
 printf 'preflight selection: %s\n' "$VERIFICATION_SELECTION"
+
+if [ "$PREFLIGHT_MODE" = explain ]; then
+  printf 'preflight: explanation complete; no checks executed\n'
+  exit 0
+fi
+
+if [ "$(mode_rank "$PREFLIGHT_MODE")" -lt "$(mode_rank "$PREFLIGHT_REQUIRED_MODE")" ]; then
+  if [ -n "${PREFLIGHT_HEAD_SHA:-}" ]; then
+    printf 'preflight: valid selection is incomplete; retry with CODEWIRE_PREFLIGHT_MODE=%s git push\n' \
+      "$PREFLIGHT_REQUIRED_MODE" >&2
+  else
+    printf 'preflight: valid selection is incomplete; retry with scripts/dev/preflight.sh --%s\n' \
+      "$PREFLIGHT_REQUIRED_MODE" >&2
+  fi
+  exit 3
+fi
+
+if [ "$PREFLIGHT_MODE" = full ]; then
+  full_selector_output="$(
+    env -u GITHUB_OUTPUT -u GITHUB_EVENT_PATH \
+      GITHUB_EVENT_NAME=workflow_dispatch VERIFICATION_REQUEST=all \
+      "$SELECTOR"
+  )"
+  VERIFICATION_SELECTION="$(selection_value "$full_selector_output")"
+  export VERIFICATION_SELECTION
+  [[ "$VERIFICATION_SELECTION" == '|valid:v3|'* ]] \
+    && [[ "$VERIFICATION_SELECTION" == *'|complete|' ]] \
+    || fail "full verification selection is missing or malformed"
+  printf 'preflight full selection: %s\n' "$VERIFICATION_SELECTION"
+fi
 
 if selection_has policy; then
   run_policy_local
@@ -220,6 +309,7 @@ run_selected_family rust_curated_locks rust-curated-locks \
   "curated Rust workspace lock verification"
 run_selected_family go_support go-support "Go support verification"
 run_selected_family web web "web verification"
+run_selected_family ios ios "iOS verification"
 run_selected_family sdk_go sdk-go "Go SDK verification"
 run_selected_family sdk_ts sdk-ts "TypeScript SDK verification"
 run_selected_family sdk_python sdk-python "Python SDK verification"

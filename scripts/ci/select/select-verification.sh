@@ -9,8 +9,9 @@ usage: select-verification.sh [--diagnostic-changed-files] [changed-files]
 changed-files may be a file containing one path per line, or "-" for stdin.
 Without an argument the script discovers pull-request or main-push changes.
 
-Writes one versioned selection token set to stdout and to $GITHUB_OUTPUT.
-Routine output is limited to selector_version and selection. Use
+Writes one versioned classification, capability token set, and required local
+mode to stdout and to $GITHUB_OUTPUT. A failed discovery or malformed input
+emits no machine-readable output. Use
 --diagnostic-changed-files to append the classified path set to stdout.
 Pull requests run Kind only for a Kind-relevant path with explicit opt-in.
 Set VERIFICATION_REQUEST for product workflow_dispatch to a family token or
@@ -18,7 +19,8 @@ all. The separate Manual diagnostics workflow uses rust-stack or go-tailnet.
 EOF
 }
 
-selector_version=v2
+selector_version=v3
+classification=changed
 diagnostic_changed_files=false
 case "${1:-}" in
   --help|-h)
@@ -264,19 +266,18 @@ elif [ "$event" = push ] \
   event_selected=true
 fi
 
-force_all=false
 if [ "$event_selected" = false ] && [ "$explicit_paths" = false ]; then
   case "$event" in
     pull_request)
       if ! discover_pr_changed_files "$tmp"; then
-        echo "warning: unable to discover pull-request changes; selecting all product verification" >&2
-        force_all=true
+        echo "selector: pull-request baseline is unavailable" >&2
+        exit 2
       fi
       ;;
     push)
       if ! discover_push_changed_files "$tmp"; then
-        echo "warning: unable to discover push changes; selecting all product verification" >&2
-        force_all=true
+        echo "selector: push baseline is unavailable" >&2
+        exit 2
       fi
       ;;
     workflow_dispatch)
@@ -284,8 +285,8 @@ if [ "$event_selected" = false ] && [ "$explicit_paths" = false ]; then
       event_selected=true
       ;;
     *)
-      echo "warning: unsupported event '${event:-unset}'; selecting all product verification" >&2
-      force_all=true
+      echo "selector: unsupported event '${event:-unset}'" >&2
+      exit 2
       ;;
   esac
 fi
@@ -293,9 +294,7 @@ fi
 kind_relevant=false
 saw_path=false
 
-if [ "$force_all" = true ]; then
-  select_all_product
-elif [ "$event_selected" = false ]; then
+if [ "$event_selected" = false ]; then
   # Policy is the lightweight invariant for every path-selected PR/main run.
   select_token policy
 
@@ -1083,12 +1082,12 @@ elif [ "$event_selected" = false ]; then
     if [ "$recognized" = false ]; then
       echo "warning: unclassified path '${path}'; selecting all product verification" >&2
       select_all_product
+      classification=unclassified
     fi
   done < "$tmp"
 
   if [ "$saw_path" = false ]; then
-    echo "warning: empty changed path set; selecting all product verification" >&2
-    select_all_product
+    classification=unchanged
   elif [ "$kind_relevant" = true ]; then
     if [ "$event" = pull_request ]; then
       if [ "$pr_kind_opt_in" = true ]; then
@@ -1097,6 +1096,14 @@ elif [ "$event_selected" = false ]; then
     else
       select_token kind
     fi
+  fi
+fi
+
+if [ "$event_selected" = true ]; then
+  if [ "$event" = workflow_dispatch ]; then
+    classification=requested
+  else
+    classification=release
   fi
 fi
 
@@ -1123,9 +1130,22 @@ while IFS= read -r token; do
 done < "$tokens_tmp"
 selection="${selection}complete|"
 
+required_local_mode=default
+if [ "$classification" = unclassified ] \
+  || [ "$classification" = release ] \
+  || { [ "$classification" = requested ] && [ "${VERIFICATION_REQUEST:-policy}" = all ]; }; then
+  required_local_mode=full
+elif [ "$kind_relevant" = true ] || token_selected kind; then
+  required_local_mode=kind
+elif token_selected database || token_selected service_integration; then
+  required_local_mode=integration
+fi
+
 emit_outputs() {
   printf 'selector_version=%s\n' "$selector_version"
+  printf 'classification=%s\n' "$classification"
   printf 'selection=%s\n' "$selection"
+  printf 'required_local_mode=%s\n' "$required_local_mode"
 }
 
 if [ -n "${GITHUB_OUTPUT:-}" ]; then

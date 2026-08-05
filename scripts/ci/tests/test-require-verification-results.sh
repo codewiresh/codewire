@@ -31,11 +31,11 @@ expect_failure() {
 }
 
 env "${green_results[@]}" \
-  VERIFICATION_SELECTION='|valid:v2|policy|rust|complete|' \
+  VERIFICATION_SELECTION='|valid:v3|policy|rust|complete|' \
   "$CHECK" >/dev/null
 
 env "${green_results[@]}" \
-  VERIFICATION_SELECTION='|valid:v2|policy|rust|complete|' \
+  VERIFICATION_SELECTION='|valid:v3|policy|rust|complete|' \
   VERIFICATION_TESTED_TREE_RECEIPT=accepted \
   VERIFICATION_TESTED_TREE_REASON=exact-tested-tree \
   VERIFICATION_TESTED_TREE_PR=42 \
@@ -47,47 +47,47 @@ env "${green_results[@]}" \
   "$CHECK" >/dev/null
 
 expect_failure standard_failure 'standard capability group concluded failure' \
-  VERIFICATION_SELECTION='|valid:v2|policy|rust|complete|' \
+  VERIFICATION_SELECTION='|valid:v3|policy|rust|complete|' \
   VERIFICATION_STANDARD_RESULT=failure
 
 expect_failure rust_transport_cancel \
   'rust-transport capability group concluded cancelled' \
-  VERIFICATION_SELECTION='|valid:v2|policy|rust|complete|' \
+  VERIFICATION_SELECTION='|valid:v3|policy|rust|complete|' \
   VERIFICATION_RUST_TRANSPORT_RESULT=cancelled
 
 expect_failure database_services_skip \
   'database-services capability group concluded skipped' \
-  VERIFICATION_SELECTION='|valid:v2|policy|complete|' \
+  VERIFICATION_SELECTION='|valid:v3|policy|complete|' \
   VERIFICATION_DATABASE_SERVICES_RESULT=skipped
 
 expect_failure edge_kind_missing 'edge-kind capability group concluded missing' \
-  VERIFICATION_SELECTION='|valid:v2|policy|complete|' \
+  VERIFICATION_SELECTION='|valid:v3|policy|complete|' \
   VERIFICATION_EDGE_KIND_RESULT=
 
 expect_failure cw_release_assets_failure \
   'cw-release-assets capability group concluded failure' \
-  VERIFICATION_SELECTION='|valid:v2|policy|complete|' \
+  VERIFICATION_SELECTION='|valid:v3|policy|complete|' \
   VERIFICATION_CW_RELEASE_ASSETS_RESULT=failure
 
 expect_failure workspace_image_failure \
   'workspace-image capability group concluded failure' \
-  VERIFICATION_SELECTION='|valid:v2|policy|complete|' \
+  VERIFICATION_SELECTION='|valid:v3|policy|complete|' \
   VERIFICATION_WORKSPACE_IMAGE_RESULT=failure
 
 expect_failure malformed_selection 'verification selection is invalid or incomplete' \
-  VERIFICATION_SELECTION='|valid:v2|policy|'
+  VERIFICATION_SELECTION='|valid:v3|policy|'
 
 expect_failure failed_selector 'verification selection concluded failure' \
-  VERIFICATION_SELECTION='|valid:v2|policy|complete|' \
+  VERIFICATION_SELECTION='|valid:v3|policy|complete|' \
   VERIFICATION_SELECTION_RESULT=failure
 
 expect_failure invalid_receipt 'tested-tree receipt has invalid result malformed' \
-  VERIFICATION_SELECTION='|valid:v2|policy|complete|' \
+  VERIFICATION_SELECTION='|valid:v3|policy|complete|' \
   VERIFICATION_TESTED_TREE_RECEIPT=malformed
 
 expect_failure accepted_receipt_missing_head \
   'accepted tested-tree receipt has invalid head' \
-  VERIFICATION_SELECTION='|valid:v2|policy|complete|' \
+  VERIFICATION_SELECTION='|valid:v3|policy|complete|' \
   VERIFICATION_TESTED_TREE_RECEIPT=accepted \
   VERIFICATION_TESTED_TREE_REASON=exact-tested-tree \
   VERIFICATION_TESTED_TREE_PR=42 \

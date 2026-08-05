@@ -46,7 +46,10 @@ jobs:
     name: Verification selection
     runs-on: ubuntu-latest
     outputs:
+      selector_version: ${{ steps.select.outputs.selector_version }}
+      classification: ${{ steps.select.outputs.classification }}
       selection: ${{ steps.select.outputs.selection }}
+      required_local_mode: ${{ steps.select.outputs.required_local_mode }}
       ci_plan_status: ${{ steps.select.outputs.ci_plan_status }}
       ci_plan_schema: ${{ steps.select.outputs.ci_plan_schema }}
       ci_plan_sha256: ${{ steps.select.outputs.ci_plan_sha256 }}
@@ -103,7 +106,7 @@ jobs:
         with:
           toolchain: 1.91.1
 
-      - name: Select verification from trusted artifact plan
+      - name: Select capabilities and artifact facts
         id: select
         env:
           PUSH_BEFORE_SHA: ${{ github.event.before }}
@@ -120,20 +123,33 @@ jobs:
           esac
 
           workflow_output="$GITHUB_OUTPUT"
-          legacy_output="$(mktemp)"
+          capability_output="$(mktemp)"
           plan_output="$(mktemp)"
-          trap 'rm -f "$legacy_output" "$plan_output"' EXIT
-          legacy_selector='scripts/ci/select/select-verification.sh'
-          if [ "$GITHUB_EVENT_NAME" = pull_request ] || [ "$GITHUB_EVENT_NAME" = push ]; then
-            legacy_selector='.trusted-ci-policy/scripts/ci/select/select-verification.sh'
+          trap 'rm -f "$capability_output" "$plan_output"' EXIT
+          capability_selector='scripts/ci/select/select-verification.sh'
+          if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
+            capability_selector='.trusted-ci-policy/scripts/ci/select/select-verification.sh'
           fi
-          [ -f "$legacy_selector" ]
-          GITHUB_OUTPUT="$legacy_output" "$legacy_selector"
+          [ -f "$capability_selector" ]
+          GITHUB_OUTPUT="$capability_output" "$capability_selector"
+          selector_version="$(sed -n 's/^selector_version=//p' "$capability_output")"
+          if [ "$selector_version" = v2 ]; then
+            # One-time contract bridge: preserve every trusted-base capability
+            # token while advancing only the output envelope to v3.
+            selection="$(sed -n 's/^selection=//p' "$capability_output")"
+            [[ "$selection" == '|valid:v2|'* && "$selection" == *'|complete|' ]]
+            printf 'selector_version=v3\nclassification=transition\nselection=%s\nrequired_local_mode=full\n' \
+              "${selection/|valid:v2|/|valid:v3|}" >> "$workflow_output"
+          elif [ "$selector_version" = v3 ]; then
+            cat "$capability_output" >> "$workflow_output"
+          else
+            echo '::error::trusted capability selector output is unsupported'
+            exit 1
+          fi
           export GITHUB_OUTPUT="$workflow_output"
 
           if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
             trusted_planner='.trusted-ci-policy/scripts/ci/plan/planner.py'
-            trusted_adapter='.trusted-ci-policy/scripts/ci/plan/apply-verification-plan.py'
             python3 "$trusted_planner" \
               --repository . \
               --target-base "$PR_BASE_SHA" \
@@ -144,30 +160,25 @@ jobs:
               echo 'Trusted artifact planner degraded; affected artifacts remain selected:'
               jq -c '.degraded_reasons' "$plan_output"
             fi
-            if [ -f "$trusted_adapter" ]; then
-              python3 "$trusted_adapter" --legacy-output "$legacy_output" --plan "$plan_output"
-              if ! grep -q '^workspace_image_state=' "$workflow_output"; then
-                # One-time WI-4 cutover: the trusted planner already owns the
-                # workspace graph, but the preceding adapter does not expose
-                # its state. Only bridge the trusted fail-closed result.
-                jq -e '.artifacts.workspace_image.state == "unclassified"' \
-                  "$plan_output" >/dev/null
-                echo 'workspace_image_state=unclassified' >> "$workflow_output"
-                echo 'workspace_image_selected=true' >> "$workflow_output"
-              fi
+            trusted_adapter='.trusted-ci-policy/scripts/ci/plan/apply-verification-plan.py'
+            if grep -Fq 'without changing verification capabilities' "$trusted_adapter"; then
+              python3 "$trusted_adapter" --plan "$plan_output"
             else
-              # One-time bootstrap: WI-1 shipped the planner before the event
-              # adapter. The trusted planner marks this workflow/policy change
-              # unclassified; refuse the bootstrap unless both packages are on.
+              # One-time v3 cutover: the target-base adapter still mutates
+              # capabilities. Use the proposed artifact-only adapter only when
+              # the trusted plan has already selected every migrated artifact.
               jq -e '
                 .artifacts.cw_cli_release_assets.state == "unclassified"
                 and .artifacts.desktop_package.state == "unclassified"
+                and .artifacts.workspace_image.state == "unclassified"
               ' "$plan_output" >/dev/null
-              python3 scripts/ci/plan/apply-verification-plan.py \
-                --legacy-output "$legacy_output" --plan "$plan_output"
+              python3 scripts/ci/plan/apply-verification-plan.py --plan "$plan_output"
               grep -Fxq 'cw_package_state=unclassified' "$workflow_output"
               grep -Fxq 'desktop_package_state=unclassified' "$workflow_output"
-              grep -Fq '|rust_pkg_codewire_desktop|' "$workflow_output"
+              grep -Fxq 'workspace_image_state=unclassified' "$workflow_output"
+              grep -Fxq 'cw_package_selected=true' "$workflow_output"
+              grep -Fxq 'desktop_package_selected=true' "$workflow_output"
+              grep -Fxq 'workspace_image_selected=true' "$workflow_output"
             fi
           else
             baseline="$GITHUB_SHA"
@@ -175,7 +186,6 @@ jobs:
               baseline="$(git rev-parse "$GITHUB_SHA^")"
             fi
             python3 scripts/ci/plan/apply-verification-plan.py \
-              --legacy-output "$legacy_output" \
               --unclassified \
               --trusted-policy "$baseline" \
               --target-base "$baseline" \
@@ -422,7 +432,7 @@ jobs:
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
 
       - uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b
-        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|rust|') || contains(needs.verification-selection.outputs.selection, '|rust_curated_locks|') || contains(needs.verification-selection.outputs.selection, '|transport|')) }}
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|rust|') || contains(needs.verification-selection.outputs.selection, '|rust_curated_locks|') || contains(needs.verification-selection.outputs.selection, '|transport|') || needs.verification-selection.outputs.desktop_package_selected == 'true') }}
         with:
           toolchain: 1.91.1
           components: rustfmt, clippy
@@ -434,13 +444,13 @@ jobs:
           scripts/ci/setup/assert-ci-runner-image.sh
 
       - name: Verify GPUI and Wry build prerequisites
-        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|rust_pkg_codewire_desktop|') }}
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && needs.verification-selection.outputs.desktop_package_selected == 'true' }}
         run: |
           set -euo pipefail
           scripts/ci/setup/assert-ci-runner-image.sh
 
       - name: Verify Rust cache capacity
-        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|rust|') || contains(needs.verification-selection.outputs.selection, '|rust_curated_locks|') || contains(needs.verification-selection.outputs.selection, '|transport|')) }}
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|rust|') || contains(needs.verification-selection.outputs.selection, '|rust_curated_locks|') || contains(needs.verification-selection.outputs.selection, '|transport|') || needs.verification-selection.outputs.desktop_package_selected == 'true') }}
         run: scripts/ci/setup/assert-cargo-cache-capacity.sh "$CARGO_HOME"
 
       - name: Verify curated Rust image workspace locks
@@ -457,6 +467,12 @@ jobs:
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|rust|') }}
         env:
           VERIFICATION_SELECTION: ${{ needs.verification-selection.outputs.selection }}
+        run: scripts/ci/verify/run-product-verification.sh rust
+
+      - name: Run artifact-selected desktop package
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && needs.verification-selection.outputs.desktop_package_selected == 'true' && !contains(needs.verification-selection.outputs.selection, '|rust_pkg_codewire_desktop|') }}
+        env:
+          VERIFICATION_SELECTION: '|valid:v3|rust_pkg_codewire_desktop|complete|'
         run: scripts/ci/verify/run-product-verification.sh rust
 
       - name: Run Rust transport

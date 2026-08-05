@@ -183,11 +183,11 @@ run_case() {
           baseline_commit: $base,
           artifacts: {
             cw_cli_release_assets: "unaffected",
-            desktop_package: "unaffected",
+            desktop_package: "affected",
             workspace_image: "unaffected"
           }
         },
-        selection: "|valid:v2|policy|complete|",
+        selection: "|valid:v3|policy|complete|",
         results: {
           selection: "success",
           standard: "success",

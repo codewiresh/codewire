@@ -15,7 +15,7 @@ selection_value() {
 
 selection_tokens() {
   local selection="$1"
-  selection="${selection#|valid:v2|}"
+  selection="${selection#|valid:v3|}"
   selection="${selection%complete|}"
   tr '|' '\n' <<<"$selection" | sed '/^$/d' | LC_ALL=C sort
 }
@@ -26,15 +26,25 @@ expected_tokens() {
 
 assert_tokens() {
   local name="$1" expected="$2" output="$3" actual want selection
-  if [ "$(wc -l <<<"$output")" -ne 2 ] \
-      || [ "$(sed -n '1p' <<<"$output")" != 'selector_version=v2' ] \
-      || [[ "$(sed -n '2p' <<<"$output")" != selection='|valid:v2|'* ]]; then
+  if [ "$(wc -l <<<"$output")" -ne 4 ] \
+      || [ "$(sed -n '1p' <<<"$output")" != 'selector_version=v3' ] \
+      || [[ "$(sed -n '2p' <<<"$output")" != classification=* ]] \
+      || [[ "$(sed -n '3p' <<<"$output")" != selection='|valid:v3|'* ]] \
+      || [[ "$(sed -n '4p' <<<"$output")" != required_local_mode=* ]]; then
     echo "${name}: routine selector output is not compact and versioned" >&2
     printf '%s\n' "$output" >&2
     exit 1
   fi
+  case "$(sed -n '2s/^classification=//p' <<<"$output")" in
+    changed|unchanged|unclassified|requested|release) ;;
+    *) echo "${name}: invalid classification" >&2; exit 1 ;;
+  esac
+  case "$(sed -n '4s/^required_local_mode=//p' <<<"$output")" in
+    default|integration|kind|full) ;;
+    *) echo "${name}: invalid required local mode" >&2; exit 1 ;;
+  esac
   selection="$(selection_value "$output")"
-  if [[ "$selection" != '|valid:v2|'* ]] || [[ "$selection" != *'|complete|' ]]; then
+  if [[ "$selection" != '|valid:v3|'* ]] || [[ "$selection" != *'|complete|' ]]; then
     echo "${name}: invalid selection envelope: ${selection:-missing}" >&2
     exit 1
   fi
@@ -59,6 +69,15 @@ run_paths_case() {
     GITHUB_EVENT_NAME="$event" GITHUB_REF="$ref" \
     KIND_E2E_OPT_IN="$opt_in" "$SELECTOR" "$paths")"
   assert_tokens "$name" "$expected" "$output"
+}
+
+assert_contract_field() {
+  local name="$1" output="$2" field="$3" expected="$4" actual
+  actual="$(sed -n "s/^${field}=//p" <<<"$output")"
+  if [ "$actual" != "$expected" ]; then
+    echo "${name}: expected ${field}=${expected}, got ${actual:-missing}" >&2
+    exit 1
+  fi
 }
 
 policy=policy
@@ -659,7 +678,32 @@ run_paths_case unknown pull_request refs/pull/18/head false "$all_product" \
 run_paths_case mesh_policy_unknown pull_request refs/pull/181/head false "$all_product" \
   scripts/checks/contracts/mesh-final-surface-policy.json \
   unexplained/new-surface.txt
-run_paths_case empty pull_request refs/pull/19/head false "$all_product" ''
+run_paths_case empty pull_request refs/pull/19/head false "$policy" ''
+
+contract_paths="$TMP/contract-fields.paths"
+printf '%s\n' docs/guide.md > "$contract_paths"
+contract_output="$(env -u GITHUB_OUTPUT -u GITHUB_EVENT_PATH \
+  GITHUB_EVENT_NAME=pull_request GITHUB_REF=refs/pull/190/head \
+  KIND_E2E_OPT_IN=false "$SELECTOR" "$contract_paths")"
+assert_contract_field docs "$contract_output" classification changed
+assert_contract_field docs "$contract_output" required_local_mode default
+printf '%s\n' crates/codewire-server-core/tests/org_deletion_lifecycle.rs \
+  > "$contract_paths"
+contract_output="$(env -u GITHUB_OUTPUT -u GITHUB_EVENT_PATH \
+  GITHUB_EVENT_NAME=pull_request GITHUB_REF=refs/pull/191/head \
+  KIND_E2E_OPT_IN=false "$SELECTOR" "$contract_paths")"
+assert_contract_field database "$contract_output" required_local_mode integration
+printf '%s\n' Caddyfile > "$contract_paths"
+contract_output="$(env -u GITHUB_OUTPUT -u GITHUB_EVENT_PATH \
+  GITHUB_EVENT_NAME=pull_request GITHUB_REF=refs/pull/1911/head \
+  KIND_E2E_OPT_IN=false "$SELECTOR" "$contract_paths")"
+assert_contract_field edge "$contract_output" required_local_mode kind
+printf '%s\n' unexplained/new-surface.txt > "$contract_paths"
+contract_output="$(env -u GITHUB_OUTPUT -u GITHUB_EVENT_PATH \
+  GITHUB_EVENT_NAME=pull_request GITHUB_REF=refs/pull/192/head \
+  KIND_E2E_OPT_IN=false "$SELECTOR" "$contract_paths" 2>/dev/null)"
+assert_contract_field unknown "$contract_output" classification unclassified
+assert_contract_field unknown "$contract_output" required_local_mode full
 
 dispatch_output="$(env -u GITHUB_OUTPUT GITHUB_EVENT_NAME=workflow_dispatch \
   VERIFICATION_REQUEST=rust-stack "$SELECTOR")"
@@ -672,14 +716,16 @@ diagnostic_output="$(env -u GITHUB_OUTPUT -u GITHUB_EVENT_PATH \
   GITHUB_EVENT_NAME=pull_request GITHUB_REF=refs/pull/1520/head \
   KIND_E2E_OPT_IN=false \
   "$SELECTOR" --diagnostic-changed-files "$diagnostic_paths")"
-if [ "$(sed -n '1p' <<<"$diagnostic_output")" != 'selector_version=v2' ] \
-    || [[ "$(sed -n '2p' <<<"$diagnostic_output")" != selection='|valid:v2|'* ]] \
-    || [ "$(sed -n '3p' <<<"$diagnostic_output")" != 'changed_files<<EOF' ] \
-    || [ "$(sed -n '4p' <<<"$diagnostic_output")" != 'Makefile' ] \
-    || [ "$(sed -n '5p' <<<"$diagnostic_output")" != \
+if [ "$(sed -n '1p' <<<"$diagnostic_output")" != 'selector_version=v3' ] \
+    || [ "$(sed -n '2p' <<<"$diagnostic_output")" != 'classification=changed' ] \
+    || [[ "$(sed -n '3p' <<<"$diagnostic_output")" != selection='|valid:v3|'* ]] \
+    || [ "$(sed -n '4p' <<<"$diagnostic_output")" != 'required_local_mode=default' ] \
+    || [ "$(sed -n '5p' <<<"$diagnostic_output")" != 'changed_files<<EOF' ] \
+    || [ "$(sed -n '6p' <<<"$diagnostic_output")" != 'Makefile' ] \
+    || [ "$(sed -n '7p' <<<"$diagnostic_output")" != \
       'scripts/checks/security/audit-runtime-images.sh' ] \
-    || [ "$(sed -n '6p' <<<"$diagnostic_output")" != 'EOF' ] \
-    || [ "$(wc -l <<<"$diagnostic_output")" -ne 6 ]; then
+    || [ "$(sed -n '8p' <<<"$diagnostic_output")" != 'EOF' ] \
+    || [ "$(wc -l <<<"$diagnostic_output")" -ne 8 ]; then
   echo 'explicit changed-file diagnostic output contract is malformed' >&2
   printf '%s\n' "$diagnostic_output" >&2
   exit 1
@@ -828,7 +874,7 @@ grep -qF 'Contracts selected without contracts_proto' "$contracts_dispatcher"
   echo 'Contracts dispatcher must install shared Bun dependencies exactly once' >&2
   exit 1
 }
-if missing_mode_output="$(VERIFICATION_SELECTION='|valid:v2|contracts|complete|' \
+if missing_mode_output="$(VERIFICATION_SELECTION='|valid:v3|contracts|complete|' \
     "$ROOT/scripts/ci/verify/run-product-verification.sh" contracts 2>&1)"; then
   echo 'Contracts runner accepted a selected family without a sub-mode' >&2
   exit 1
@@ -993,10 +1039,20 @@ output="$(cd "$repo" && env -u GITHUB_OUTPUT -u GITHUB_EVENT_PATH \
   GITHUB_EVENT_NAME=pull_request GITHUB_BASE_REF=main \
   VERIFICATION_REMOTE=origin KIND_E2E_OPT_IN=false "$SELECTOR")"
 assert_tokens discovered_pr 'policy rust rust_pkg_codewire_cli' "$output"
-output="$(cd "$repo" && env -u GITHUB_OUTPUT -u GITHUB_EVENT_PATH \
-  GITHUB_EVENT_NAME=pull_request GITHUB_BASE_REF= \
-  VERIFICATION_REMOTE=origin KIND_E2E_OPT_IN=false "$SELECTOR")"
-assert_tokens missing_pr_base "$all_product" "$output"
+missing_stdout="$TMP/missing-pr.stdout"
+missing_stderr="$TMP/missing-pr.stderr"
+if (cd "$repo" && env -u GITHUB_OUTPUT -u GITHUB_EVENT_PATH \
+    GITHUB_EVENT_NAME=pull_request GITHUB_BASE_REF= \
+    VERIFICATION_REMOTE=origin KIND_E2E_OPT_IN=false \
+    "$SELECTOR" >"$missing_stdout" 2>"$missing_stderr"); then
+  echo 'selector accepted a pull request without a baseline' >&2
+  exit 1
+fi
+[ ! -s "$missing_stdout" ] || {
+  echo 'failed baseline discovery emitted machine-readable output' >&2
+  exit 1
+}
+grep -qF 'pull-request baseline is unavailable' "$missing_stderr"
 
 git -C "$repo" switch -q main
 printf 'main update\n' >> "$repo/docs/range.md"
@@ -1007,11 +1063,20 @@ output="$(cd "$repo" && env -u GITHUB_OUTPUT \
   GITHUB_EVENT_NAME=push GITHUB_REF=refs/heads/main \
   PUSH_BEFORE_SHA="$base" PUSH_AFTER_SHA="$head" "$SELECTOR")"
 assert_tokens discovered_push policy "$output"
-output="$(cd "$repo" && env -u GITHUB_OUTPUT \
-  GITHUB_EVENT_NAME=push GITHUB_REF=refs/heads/main \
-  PUSH_BEFORE_SHA=0000000000000000000000000000000000000000 \
-  PUSH_AFTER_SHA="$head" "$SELECTOR")"
-assert_tokens zero_push_base "$all_product" "$output"
+missing_stdout="$TMP/zero-push.stdout"
+missing_stderr="$TMP/zero-push.stderr"
+if (cd "$repo" && env -u GITHUB_OUTPUT \
+    GITHUB_EVENT_NAME=push GITHUB_REF=refs/heads/main \
+    PUSH_BEFORE_SHA=0000000000000000000000000000000000000000 \
+    PUSH_AFTER_SHA="$head" "$SELECTOR" >"$missing_stdout" 2>"$missing_stderr"); then
+  echo 'selector accepted a push without a baseline' >&2
+  exit 1
+fi
+[ ! -s "$missing_stdout" ] || {
+  echo 'failed push baseline discovery emitted machine-readable output' >&2
+  exit 1
+}
+grep -qF 'push baseline is unavailable' "$missing_stderr"
 
 # Workflow contract: four fixed capability groups. Gitea assigns static jobs
 # before evaluating job-level conditions, so family-level fan-out is forbidden.
@@ -1062,7 +1127,8 @@ awk '
   capture && $0 ~ /^  [A-Za-z0-9_-]+:$/ && $0 != "  verification-selection:" { exit }
   capture { print }
 ' "$WORKFLOW" > "$selection_block"
-for output in selection ci_plan_status ci_plan_schema ci_plan_sha256 \
+for output in selector_version classification selection required_local_mode \
+    ci_plan_status ci_plan_schema ci_plan_sha256 \
     ci_policy_commit ci_policy_sha256 ci_graph_sha256 \
     ci_target_base_commit ci_baseline_commit ci_head_commit ci_head_tree \
     cw_package_state cw_package_selected desktop_package_state \
@@ -1084,12 +1150,12 @@ grep -qF 'path: .trusted-ci-policy' "$selection_block"
 grep -qF 'persist-credentials: false' "$selection_block"
 grep -qF "trusted_planner='.trusted-ci-policy/scripts/ci/plan/planner.py'" \
   "$selection_block"
-grep -qF "legacy_selector='.trusted-ci-policy/scripts/ci/select/select-verification.sh'" \
+grep -qF "capability_selector='.trusted-ci-policy/scripts/ci/select/select-verification.sh'" \
   "$selection_block"
 grep -qF 'ref: ${{ github.event.before }}' "$selection_block"
 planner_toolchain_line="$(grep -n -m1 'name: Set up pinned Cargo for trusted artifact planning' \
   "$selection_block" | cut -d: -f1)"
-planner_select_line="$(grep -n -m1 'name: Select verification from trusted artifact plan' \
+planner_select_line="$(grep -n -m1 'name: Select capabilities and artifact facts' \
   "$selection_block" | cut -d: -f1)"
 test -n "$planner_toolchain_line"
 test -n "$planner_select_line"
@@ -1102,11 +1168,18 @@ grep -A4 -F 'name: Set up pinned Cargo for trusted artifact planning' \
   "$selection_block" | grep -qF 'toolchain: 1.91.1'
 grep -qF "jq -e '.degraded_reasons | length > 0'" "$selection_block"
 grep -qF "jq -c '.degraded_reasons'" "$selection_block"
-grep -qF "if ! grep -q '^workspace_image_state=' \"\$workflow_output\"; then" \
+grep -qF "trusted_adapter='.trusted-ci-policy/scripts/ci/plan/apply-verification-plan.py'" \
+  "$selection_block"
+grep -qF 'python3 scripts/ci/plan/apply-verification-plan.py --plan "$plan_output"' \
   "$selection_block"
 grep -qF ".artifacts.workspace_image.state == \"unclassified\"" "$selection_block"
-grep -qF "echo 'workspace_image_state=unclassified'" "$selection_block"
-grep -qF "echo 'workspace_image_selected=true'" "$selection_block"
+grep -qF "grep -Fxq 'workspace_image_state=unclassified'" "$selection_block"
+grep -qF "grep -Fxq 'workspace_image_selected=true'" "$selection_block"
+grep -qF 'without changing verification capabilities' "$selection_block"
+grep -qF 'One-time contract bridge' "$selection_block"
+grep -qF 'name: Run artifact-selected desktop package' "$WORKFLOW"
+grep -qF "VERIFICATION_SELECTION: '|valid:v3|rust_pkg_codewire_desktop|complete|'" \
+  "$WORKFLOW"
 
 python3 "$ROOT/scripts/ci/plan/tests/test_planner.py" \
   PlannerFixtureTests.test_go_sdk_only_change_emits_unselected_cw_and_desktop_outputs \

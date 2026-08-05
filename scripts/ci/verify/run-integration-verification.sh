@@ -5,7 +5,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 MODE="${1:-}"
-SELECTION="${VERIFICATION_SELECTION:-|valid:v2|complete|}"
+SELECTION="${VERIFICATION_SELECTION:-|valid:v3|complete|}"
 CARGO_TARGET_DIR="$(
   "$ROOT/scripts/ci/verify/resolve-cargo-target-dir.sh" "$ROOT"
 )"

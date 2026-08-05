@@ -60,15 +60,11 @@ def fixture_plan(
 
 
 class PlanAdapterTests(unittest.TestCase):
-    def invoke(self, plan: dict[str, object], selection: str) -> dict[str, str]:
+    def invoke(self, plan: dict[str, object]) -> dict[str, str]:
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            legacy = root / "legacy"
-            plan_path = root / "plan.json"
-            legacy.write_text(f"selector_version=v2\nselection={selection}\n")
+            plan_path = Path(temporary) / "plan.json"
             plan_path.write_text(json.dumps(plan, sort_keys=True, indent=2) + "\n")
             args = argparse.Namespace(
-                legacy_output=str(legacy),
                 plan=str(plan_path),
                 unclassified=False,
                 trusted_policy=None,
@@ -79,72 +75,52 @@ class PlanAdapterTests(unittest.TestCase):
             )
             return adapter.build_outputs(args)
 
-    def test_unaffected_artifacts_remove_legacy_desktop_false_positive(self) -> None:
-        outputs = self.invoke(
-            fixture_plan(),
-            "|valid:v2|policy|rust|rust_pkg_codewire_desktop|service_billing|complete|",
-        )
+    def test_unaffected_artifacts_are_not_selected(self) -> None:
+        outputs = self.invoke(fixture_plan())
         self.assertEqual(outputs["cw_package_selected"], "false")
         self.assertEqual(outputs["desktop_package_selected"], "false")
         self.assertEqual(outputs["workspace_image_selected"], "false")
-        self.assertEqual(outputs["selection"], "|valid:v2|policy|rust|service_billing|complete|")
+        self.assertNotIn("selection", outputs)
+        self.assertNotIn("selector_version", outputs)
 
     def test_affected_cw_and_unclassified_desktop_are_selected(self) -> None:
-        outputs = self.invoke(
-            fixture_plan("affected", "unclassified"),
-            "|valid:v2|service_billing|complete|",
-        )
+        outputs = self.invoke(fixture_plan("affected", "unclassified"))
         self.assertEqual(outputs["cw_package_selected"], "true")
         self.assertEqual(outputs["desktop_package_selected"], "true")
-        self.assertEqual(
-            outputs["selection"],
-            "|valid:v2|policy|rust|rust_pkg_codewire_desktop|service_billing|complete|",
-        )
 
     def test_affected_workspace_image_is_selected(self) -> None:
-        outputs = self.invoke(
-            fixture_plan(workspace_state="affected"),
-            "|valid:v2|policy|complete|",
-        )
+        outputs = self.invoke(fixture_plan(workspace_state="affected"))
         self.assertEqual(outputs["workspace_image_state"], "affected")
         self.assertEqual(outputs["workspace_image_selected"], "true")
 
-    def test_plan_verification_boolean_cannot_override_artifact_state(self) -> None:
+    def test_legacy_verification_boolean_cannot_override_artifact_state(self) -> None:
         plan = fixture_plan()
         plan["verification"]["cw_cli_package"] = True  # type: ignore[index]
-        with self.assertRaisesRegex(adapter.AdapterError, "disagrees"):
-            self.invoke(plan, "|valid:v2|policy|complete|")
-
-    def test_workspace_verification_boolean_cannot_override_artifact_state(self) -> None:
-        plan = fixture_plan()
         plan["verification"]["workspace_image"] = True  # type: ignore[index]
-        with self.assertRaisesRegex(adapter.AdapterError, "workspace verification fact disagrees"):
-            self.invoke(plan, "|valid:v2|policy|complete|")
+        outputs = self.invoke(plan)
+        self.assertEqual(outputs["cw_package_selected"], "false")
+        self.assertEqual(outputs["workspace_image_selected"], "false")
 
-    def test_invalid_legacy_selection_fails_closed(self) -> None:
-        with self.assertRaisesRegex(adapter.AdapterError, "invalid or incomplete"):
-            self.invoke(fixture_plan(), "|valid:v2|policy|")
+    def test_invalid_artifact_state_fails_closed(self) -> None:
+        with self.assertRaisesRegex(adapter.AdapterError, "invalid state"):
+            self.invoke(fixture_plan(desktop_state="maybe"))
 
     def test_non_pr_mode_is_explicitly_unclassified(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            legacy = Path(temporary) / "legacy"
-            legacy.write_text("selector_version=v2\nselection=|valid:v2|policy|complete|\n")
-            args = argparse.Namespace(
-                legacy_output=str(legacy),
-                plan=None,
-                unclassified=True,
-                trusted_policy=COMMIT_A,
-                target_base=COMMIT_A,
-                baseline=COMMIT_A,
-                head=COMMIT_B,
-                head_tree=TREE_C,
-            )
-            outputs = adapter.build_outputs(args)
+        args = argparse.Namespace(
+            plan=None,
+            unclassified=True,
+            trusted_policy=COMMIT_A,
+            target_base=COMMIT_A,
+            baseline=COMMIT_A,
+            head=COMMIT_B,
+            head_tree=TREE_C,
+        )
+        outputs = adapter.build_outputs(args)
         self.assertEqual(outputs["ci_plan_status"], "unclassified")
         self.assertEqual(outputs["cw_package_state"], "unclassified")
         self.assertEqual(outputs["workspace_image_state"], "unclassified")
         self.assertEqual(outputs["workspace_image_selected"], "true")
-        self.assertIn("|rust_pkg_codewire_desktop|", outputs["selection"])
+        self.assertNotIn("selection", outputs)
 
 
 if __name__ == "__main__":
