@@ -364,7 +364,6 @@ if [ "$event_selected" = false ]; then
       scripts/ci/select/verify-tested-tree-receipt.sh|\
       scripts/ci/select/verify-release-tag-receipt.sh|\
       scripts/ci/select/artifact-impact.py|\
-      scripts/ci/select/select-support-images.sh|\
       scripts/ci/images/resolve-published-support-pair.sh|\
       scripts/ci/plan/*|\
       scripts/ci/tests/test-select-verification.sh|scripts/ci/tests/test-select-deploy-dev.sh|\
@@ -984,7 +983,6 @@ if [ "$event_selected" = false ]; then
       .gitea/workflows/mirror-github.yaml|\
       .gitea/workflows/support-images.yaml|\
       scripts/ci/select/artifact-impact.py|\
-      scripts/ci/select/select-support-images.sh|\
       keys/production-release.asc|\
       .gitea/workflows/observe-*.yaml|\
       scripts/ci/images/build-push-image.sh|scripts/ci/images/compute-image-tags.sh|\

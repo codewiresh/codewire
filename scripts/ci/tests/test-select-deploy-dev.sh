@@ -4,7 +4,6 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 readonly ROOT
 readonly SELECTOR="$ROOT/scripts/ci/select/select-deploy-dev.sh"
-readonly SUPPORT_SELECTOR="$ROOT/scripts/ci/select/select-support-images.sh"
 
 tmp="$(mktemp -d)"
 cleanup() {
@@ -29,14 +28,7 @@ github_output="$tmp/github-output"
 grep -Fxq 'deploy_dev=false' "$github_output"
 grep -Fxq 'reason=no_changes' "$github_output"
 
-support_output="$(
-  cd "$ROOT"
-  env -u GITHUB_OUTPUT "$SUPPORT_SELECTOR" "$head_sha" "$head_sha"
-)"
-grep -Fxq 'build_support_images=false' <<<"$support_output"
-grep -Fxq 'reason=no_changes' <<<"$support_output"
-
 python3 "$ROOT/scripts/ci/tests/test-artifact-impact.py"
-python3 "$ROOT/scripts/ci/select/artifact-impact.py" check-contract --mode all
+python3 "$ROOT/scripts/ci/select/artifact-impact.py" check-contract --mode runtime
 
 printf '[test-select-deploy-dev] wrapper fail-safe and artifact-impact cases passed\n'

@@ -50,14 +50,6 @@ jobs:
       classification: ${{ steps.select.outputs.classification }}
       selection: ${{ steps.select.outputs.selection }}
       required_local_mode: ${{ steps.select.outputs.required_local_mode }}
-      ci_plan_status: ${{ steps.select.outputs.ci_plan_status }}
-      ci_plan_schema: ${{ steps.select.outputs.ci_plan_schema }}
-      ci_plan_sha256: ${{ steps.select.outputs.ci_plan_sha256 }}
-      ci_policy_commit: ${{ steps.select.outputs.ci_policy_commit }}
-      ci_policy_sha256: ${{ steps.select.outputs.ci_policy_sha256 }}
-      ci_graph_sha256: ${{ steps.select.outputs.ci_graph_sha256 }}
-      ci_target_base_commit: ${{ steps.select.outputs.ci_target_base_commit }}
-      ci_baseline_commit: ${{ steps.select.outputs.ci_baseline_commit }}
       ci_head_commit: ${{ steps.select.outputs.ci_head_commit }}
       ci_head_tree: ${{ steps.select.outputs.ci_head_tree }}
       cw_package_state: ${{ steps.select.outputs.cw_package_state }}
@@ -71,9 +63,6 @@ jobs:
       tested_tree_pr: ${{ steps.receipt.outputs.tested_tree_pr }}
       tested_tree_head: ${{ steps.receipt.outputs.tested_tree_head }}
       tested_tree_run: ${{ steps.receipt.outputs.tested_tree_run }}
-      tested_tree_policy_commit: ${{ steps.receipt.outputs.tested_tree_policy_commit }}
-      tested_tree_policy_sha256: ${{ steps.receipt.outputs.tested_tree_policy_sha256 }}
-      tested_tree_plan_sha256: ${{ steps.receipt.outputs.tested_tree_plan_sha256 }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
@@ -132,20 +121,8 @@ jobs:
           fi
           [ -f "$capability_selector" ]
           GITHUB_OUTPUT="$capability_output" "$capability_selector"
-          selector_version="$(sed -n 's/^selector_version=//p' "$capability_output")"
-          if [ "$selector_version" = v2 ]; then
-            # One-time contract bridge: preserve every trusted-base capability
-            # token while advancing only the output envelope to v3.
-            selection="$(sed -n 's/^selection=//p' "$capability_output")"
-            [[ "$selection" == '|valid:v2|'* && "$selection" == *'|complete|' ]]
-            printf 'selector_version=v3\nclassification=transition\nselection=%s\nrequired_local_mode=full\n' \
-              "${selection/|valid:v2|/|valid:v3|}" >> "$workflow_output"
-          elif [ "$selector_version" = v3 ]; then
-            cat "$capability_output" >> "$workflow_output"
-          else
-            echo '::error::trusted capability selector output is unsupported'
-            exit 1
-          fi
+          grep -Fxq 'selector_version=v3' "$capability_output"
+          cat "$capability_output" >> "$workflow_output"
           export GITHUB_OUTPUT="$workflow_output"
 
           if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
@@ -161,25 +138,7 @@ jobs:
               jq -c '.degraded_reasons' "$plan_output"
             fi
             trusted_adapter='.trusted-ci-policy/scripts/ci/plan/apply-verification-plan.py'
-            if grep -Fq 'without changing verification capabilities' "$trusted_adapter"; then
-              python3 "$trusted_adapter" --plan "$plan_output"
-            else
-              # One-time v3 cutover: the target-base adapter still mutates
-              # capabilities. Use the proposed artifact-only adapter only when
-              # the trusted plan has already selected every migrated artifact.
-              jq -e '
-                .artifacts.cw_cli_release_assets.state == "unclassified"
-                and .artifacts.desktop_package.state == "unclassified"
-                and .artifacts.workspace_image.state == "unclassified"
-              ' "$plan_output" >/dev/null
-              python3 scripts/ci/plan/apply-verification-plan.py --plan "$plan_output"
-              grep -Fxq 'cw_package_state=unclassified' "$workflow_output"
-              grep -Fxq 'desktop_package_state=unclassified' "$workflow_output"
-              grep -Fxq 'workspace_image_state=unclassified' "$workflow_output"
-              grep -Fxq 'cw_package_selected=true' "$workflow_output"
-              grep -Fxq 'desktop_package_selected=true' "$workflow_output"
-              grep -Fxq 'workspace_image_selected=true' "$workflow_output"
-            fi
+            python3 "$trusted_adapter" --plan "$plan_output"
           else
             baseline="$GITHUB_SHA"
             if git rev-parse --verify "$GITHUB_SHA^" >/dev/null 2>&1; then
@@ -187,9 +146,6 @@ jobs:
             fi
             python3 scripts/ci/plan/apply-verification-plan.py \
               --unclassified \
-              --trusted-policy "$baseline" \
-              --target-base "$baseline" \
-              --baseline "$baseline" \
               --head "$GITHUB_SHA" \
               --head-tree "$(git rev-parse "$GITHUB_SHA^{tree}")"
           fi
@@ -634,9 +590,6 @@ jobs:
           VERIFICATION_TESTED_TREE_PR: ${{ needs.verification-selection.outputs.tested_tree_pr }}
           VERIFICATION_TESTED_TREE_HEAD: ${{ needs.verification-selection.outputs.tested_tree_head }}
           VERIFICATION_TESTED_TREE_RUN: ${{ needs.verification-selection.outputs.tested_tree_run }}
-          VERIFICATION_TESTED_TREE_POLICY_COMMIT: ${{ needs.verification-selection.outputs.tested_tree_policy_commit }}
-          VERIFICATION_TESTED_TREE_POLICY_SHA256: ${{ needs.verification-selection.outputs.tested_tree_policy_sha256 }}
-          VERIFICATION_TESTED_TREE_PLAN_SHA256: ${{ needs.verification-selection.outputs.tested_tree_plan_sha256 }}
           VERIFICATION_STANDARD_RESULT: ${{ needs.standard.result }}
           VERIFICATION_RUST_TRANSPORT_RESULT: ${{ needs.rust-transport.result }}
           VERIFICATION_DATABASE_SERVICES_RESULT: ${{ needs.database-services.result }}
@@ -652,23 +605,4 @@ jobs:
           CODEWIRE_BASE_COMMIT: ${{ github.event.pull_request.base.sha }}
           CODEWIRE_HEAD_COMMIT: ${{ needs.verification-selection.outputs.ci_head_commit }}
           CODEWIRE_HEAD_TREE: ${{ needs.verification-selection.outputs.ci_head_tree }}
-          CODEWIRE_POLICY_COMMIT: ${{ needs.verification-selection.outputs.ci_policy_commit }}
-          CODEWIRE_POLICY_SHA256: ${{ needs.verification-selection.outputs.ci_policy_sha256 }}
-          CODEWIRE_GRAPH_SHA256: ${{ needs.verification-selection.outputs.ci_graph_sha256 }}
-          CODEWIRE_TARGET_BASE_COMMIT: ${{ needs.verification-selection.outputs.ci_target_base_commit }}
-          CODEWIRE_BASELINE_COMMIT: ${{ needs.verification-selection.outputs.ci_baseline_commit }}
-          CODEWIRE_PLAN_STATUS: ${{ needs.verification-selection.outputs.ci_plan_status }}
-          CODEWIRE_PLAN_SCHEMA: ${{ needs.verification-selection.outputs.ci_plan_schema }}
-          CODEWIRE_PLAN_SHA256: ${{ needs.verification-selection.outputs.ci_plan_sha256 }}
-          CODEWIRE_CW_PACKAGE_STATE: ${{ needs.verification-selection.outputs.cw_package_state }}
-          CODEWIRE_DESKTOP_PACKAGE_STATE: ${{ needs.verification-selection.outputs.desktop_package_state }}
-          CODEWIRE_WORKSPACE_IMAGE_STATE: ${{ needs.verification-selection.outputs.workspace_image_state }}
-          CODEWIRE_SELECTION: ${{ needs.verification-selection.outputs.selection }}
-          CODEWIRE_SELECTION_RESULT: ${{ needs.verification-selection.result }}
-          CODEWIRE_STANDARD_RESULT: ${{ needs.standard.result }}
-          CODEWIRE_RUST_TRANSPORT_RESULT: ${{ needs.rust-transport.result }}
-          CODEWIRE_DATABASE_SERVICES_RESULT: ${{ needs.database-services.result }}
-          CODEWIRE_EDGE_KIND_RESULT: ${{ needs.edge-kind.result }}
-          CODEWIRE_CW_RELEASE_ASSETS_RESULT: ${{ needs.cw-release-assets.result }}
-          CODEWIRE_WORKSPACE_IMAGE_RESULT: ${{ needs.workspace-image.result }}
         run: scripts/ci/plan/emit-verification-receipt.py

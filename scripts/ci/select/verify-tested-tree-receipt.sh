@@ -11,9 +11,6 @@ reason='unverified'
 pr_number=''
 tested_head=''
 tested_run=''
-tested_policy_commit=''
-tested_policy_sha256=''
-tested_plan_sha256=''
 
 emit_outputs() {
   local output
@@ -21,10 +18,7 @@ emit_outputs() {
 tested_tree_reason=${reason}
 tested_tree_pr=${pr_number}
 tested_tree_head=${tested_head}
-tested_tree_run=${tested_run}
-tested_tree_policy_commit=${tested_policy_commit}
-tested_tree_policy_sha256=${tested_policy_sha256}
-tested_tree_plan_sha256=${tested_plan_sha256}"
+tested_tree_run=${tested_run}"
   if [ -n "${GITHUB_OUTPUT:-}" ]; then
     printf '%s\n' "$output" >> "$GITHUB_OUTPUT"
   fi
@@ -245,30 +239,10 @@ if ! jq -e \
       | select(.pull_request == $pr and .workflow_path == $workflow)
       | select(.run == {id: $run, attempt: $attempt, job: "Required verification"})
       | select(.source == {base_commit: $base, head_commit: $head, head_tree: $tree})
-      | select(.plan.schema == "codewire.ci-plan/v1" and .plan.status == "trusted")
-      | select(.plan.trusted_policy_commit == $base and .plan.baseline_commit == $base)
-      | select(.plan.sha256 | test("^[0-9a-f]{64}$"))
-      | select(.plan.policy_sha256 | test("^[0-9a-f]{64}$"))
-      | select(.plan.graph_sha256 | test("^[0-9a-f]{64}$"))
-      | select((.plan.artifacts | keys | sort) == ["cw_cli_release_assets", "desktop_package", "workspace_image"])
-      | select([.plan.artifacts[]] | all(. == "affected" or . == "unaffected" or . == "unclassified"))
-      | select(.selection | startswith("|valid:v3|") and endswith("|complete|"))
-      | select(.results == {
-          selection: "success",
-          standard: "success",
-          rust_transport: "success",
-          database_services: "success",
-          edge_kind: "success",
-          cw_release_assets: "success",
-          workspace_image: "success"
-        })
+      | select((keys | sort) == ["event", "pull_request", "repository", "run", "schema", "source", "workflow_path"])
     ' "$receipt_json" >/dev/null; then
   fallback 'verification-receipt-mismatch'
 fi
-
-tested_policy_commit="$(jq -r '.plan.trusted_policy_commit' "$receipt_json")"
-tested_policy_sha256="$(jq -r '.plan.policy_sha256' "$receipt_json")"
-tested_plan_sha256="$(jq -r '.plan.sha256' "$receipt_json")"
 
 receipt='accepted'
 reason='exact-tested-tree'

@@ -1244,7 +1244,6 @@ def plan(
                 for name in graph["artifacts"]:
                     classify(name)
 
-    selected = lambda artifact: artifacts[artifact]["state"] != "unaffected"
     return {
         "schema": PLAN_SCHEMA,
         "trusted_policy": {
@@ -1253,13 +1252,6 @@ def plan(
             "graph_sha256": graph_digest,
         },
         "baseline": baseline,
-        "verification": {
-            "legacy_selectors_authoritative": True,
-            "rust": True,
-            "cw_cli_package": selected("cw_cli_release_assets"),
-            "desktop_package": selected("desktop_package"),
-            "workspace_image": selected("workspace_image"),
-        },
         "artifacts": artifacts,
         "degraded_reasons": sorted(set(degraded)),
     }

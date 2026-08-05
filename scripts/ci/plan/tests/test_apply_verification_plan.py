@@ -43,13 +43,6 @@ def fixture_plan(
             "head_tree": TREE_C,
             "validation": {"valid": True, "reasons": []},
         },
-        "verification": {
-            "legacy_selectors_authoritative": True,
-            "rust": True,
-            "cw_cli_package": cw_state != "unaffected",
-            "desktop_package": desktop_state != "unaffected",
-            "workspace_image": workspace_state != "unaffected",
-        },
         "artifacts": {
             "cw_cli_release_assets": {"state": cw_state},
             "desktop_package": {"state": desktop_state},
@@ -67,9 +60,6 @@ class PlanAdapterTests(unittest.TestCase):
             args = argparse.Namespace(
                 plan=str(plan_path),
                 unclassified=False,
-                trusted_policy=None,
-                target_base=None,
-                baseline=None,
                 head=None,
                 head_tree=None,
             )
@@ -93,30 +83,24 @@ class PlanAdapterTests(unittest.TestCase):
         self.assertEqual(outputs["workspace_image_state"], "affected")
         self.assertEqual(outputs["workspace_image_selected"], "true")
 
-    def test_legacy_verification_boolean_cannot_override_artifact_state(self) -> None:
-        plan = fixture_plan()
-        plan["verification"]["cw_cli_package"] = True  # type: ignore[index]
-        plan["verification"]["workspace_image"] = True  # type: ignore[index]
-        outputs = self.invoke(plan)
-        self.assertEqual(outputs["cw_package_selected"], "false")
-        self.assertEqual(outputs["workspace_image_selected"], "false")
-
     def test_invalid_artifact_state_fails_closed(self) -> None:
         with self.assertRaisesRegex(adapter.AdapterError, "invalid state"):
             self.invoke(fixture_plan(desktop_state="maybe"))
+
+    def test_policy_and_baseline_identity_must_match(self) -> None:
+        plan = fixture_plan()
+        plan["baseline"]["baseline_commit"] = COMMIT_B  # type: ignore[index]
+        with self.assertRaisesRegex(adapter.AdapterError, "do not match"):
+            self.invoke(plan)
 
     def test_non_pr_mode_is_explicitly_unclassified(self) -> None:
         args = argparse.Namespace(
             plan=None,
             unclassified=True,
-            trusted_policy=COMMIT_A,
-            target_base=COMMIT_A,
-            baseline=COMMIT_A,
             head=COMMIT_B,
             head_tree=TREE_C,
         )
         outputs = adapter.build_outputs(args)
-        self.assertEqual(outputs["ci_plan_status"], "unclassified")
         self.assertEqual(outputs["cw_package_state"], "unclassified")
         self.assertEqual(outputs["workspace_image_state"], "unclassified")
         self.assertEqual(outputs["workspace_image_selected"], "true")

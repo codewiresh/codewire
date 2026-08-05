@@ -134,7 +134,6 @@ run_paths_case artifact_impact_ci pull_request refs/pull/201/head false \
   scripts/ci/deploy/resolve-deployed-source.sh \
   scripts/ci/select/artifact-impact.py \
   scripts/ci/select/select-deploy-dev.sh \
-  scripts/ci/select/select-support-images.sh \
   scripts/ci/images/resolve-published-support-pair.sh \
   scripts/ci/tests/test-artifact-impact.py \
   scripts/ci/tests/test-resolve-published-support-pair.sh \
@@ -1128,14 +1127,11 @@ awk '
   capture { print }
 ' "$WORKFLOW" > "$selection_block"
 for output in selector_version classification selection required_local_mode \
-    ci_plan_status ci_plan_schema ci_plan_sha256 \
-    ci_policy_commit ci_policy_sha256 ci_graph_sha256 \
-    ci_target_base_commit ci_baseline_commit ci_head_commit ci_head_tree \
+    ci_head_commit ci_head_tree \
     cw_package_state cw_package_selected desktop_package_state \
     desktop_package_selected workspace_image_state workspace_image_selected \
     tested_tree_receipt tested_tree_reason \
-    tested_tree_pr tested_tree_head tested_tree_run tested_tree_policy_commit \
-    tested_tree_policy_sha256 tested_tree_plan_sha256; do
+    tested_tree_pr tested_tree_head tested_tree_run; do
   grep -qF "      ${output}:" "$selection_block" || {
     echo "verification selection omits ${output}" >&2
     exit 1
@@ -1170,13 +1166,14 @@ grep -qF "jq -e '.degraded_reasons | length > 0'" "$selection_block"
 grep -qF "jq -c '.degraded_reasons'" "$selection_block"
 grep -qF "trusted_adapter='.trusted-ci-policy/scripts/ci/plan/apply-verification-plan.py'" \
   "$selection_block"
-grep -qF 'python3 scripts/ci/plan/apply-verification-plan.py --plan "$plan_output"' \
+grep -qF 'python3 "$trusted_adapter" --plan "$plan_output"' \
   "$selection_block"
-grep -qF ".artifacts.workspace_image.state == \"unclassified\"" "$selection_block"
-grep -qF "grep -Fxq 'workspace_image_state=unclassified'" "$selection_block"
-grep -qF "grep -Fxq 'workspace_image_selected=true'" "$selection_block"
-grep -qF 'without changing verification capabilities' "$selection_block"
-grep -qF 'One-time contract bridge' "$selection_block"
+grep -qF "grep -Fxq 'selector_version=v3'" "$selection_block"
+if grep -qF 'selector_version=v2' "$selection_block" \
+    || grep -qF 'One-time contract bridge' "$selection_block"; then
+  echo 'verification selection retains a superseded v2 transition bridge' >&2
+  exit 1
+fi
 grep -qF 'name: Run artifact-selected desktop package' "$WORKFLOW"
 grep -qF "VERIFICATION_SELECTION: '|valid:v3|rust_pkg_codewire_desktop|complete|'" \
   "$WORKFLOW"
@@ -1526,10 +1523,7 @@ for result in VERIFICATION_CW_RELEASE_ASSETS_RESULT VERIFICATION_STANDARD_RESULT
 done
 for receipt_input in VERIFICATION_TESTED_TREE_RECEIPT \
     VERIFICATION_TESTED_TREE_REASON VERIFICATION_TESTED_TREE_PR \
-    VERIFICATION_TESTED_TREE_HEAD VERIFICATION_TESTED_TREE_RUN \
-    VERIFICATION_TESTED_TREE_POLICY_COMMIT \
-    VERIFICATION_TESTED_TREE_POLICY_SHA256 \
-    VERIFICATION_TESTED_TREE_PLAN_SHA256; do
+    VERIFICATION_TESTED_TREE_HEAD VERIFICATION_TESTED_TREE_RUN; do
   grep -qF "${receipt_input}:" "$required_block" || {
     echo "required CI omits ${receipt_input}" >&2
     exit 1
@@ -1537,9 +1531,8 @@ for receipt_input in VERIFICATION_TESTED_TREE_RECEIPT \
 done
 grep -qF 'name: Emit exact-head verification receipt' "$required_block"
 grep -qF 'run: scripts/ci/plan/emit-verification-receipt.py' "$required_block"
-for receipt_input in CODEWIRE_CW_PACKAGE_STATE CODEWIRE_DESKTOP_PACKAGE_STATE \
-    CODEWIRE_WORKSPACE_IMAGE_STATE CODEWIRE_CW_RELEASE_ASSETS_RESULT \
-    CODEWIRE_WORKSPACE_IMAGE_RESULT; do
+for receipt_input in CODEWIRE_PR_NUMBER CODEWIRE_BASE_COMMIT \
+    CODEWIRE_HEAD_COMMIT CODEWIRE_HEAD_TREE; do
   grep -qF "${receipt_input}:" "$required_block" || {
     echo "verification receipt omits ${receipt_input}" >&2
     exit 1

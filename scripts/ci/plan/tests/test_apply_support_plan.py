@@ -40,7 +40,6 @@ def plan_document(
                 "reasons": [] if baseline_valid else ["candidate unavailable"],
             },
         },
-        "verification": {},
         "artifacts": {
             "base_image": {"state": base_state},
             "workspace_image": {"state": workspace_state},

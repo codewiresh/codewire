@@ -44,14 +44,14 @@ grep -qF "workspace_image_selected == 'true'" <<<"$workspace_job" ||
   fail 'workspace positive path does not use canonical planner selection'
 grep -qF "trusted_adapter='.trusted-ci-policy/scripts/ci/plan/apply-verification-plan.py'" \
   "$WORKFLOW" || fail 'artifact facts do not come from the trusted adapter'
-grep -qF 'without changing verification capabilities' "$WORKFLOW" ||
-  fail 'artifact adapter cutover does not detect the capability-free contract'
-grep -qF '.artifacts.workspace_image.state == "unclassified"' "$WORKFLOW" ||
-  fail 'v3 cutover can reduce an untrusted workspace state'
-grep -qF "grep -Fxq 'workspace_image_state=unclassified'" "$WORKFLOW" ||
-  fail 'v3 cutover does not assert the fail-closed workspace state'
-grep -qF "grep -Fxq 'workspace_image_selected=true'" "$WORKFLOW" ||
-  fail 'v3 cutover does not assert workspace verification selection'
+grep -qF 'python3 "$trusted_adapter" --plan "$plan_output"' "$WORKFLOW" ||
+  fail 'trusted artifact adapter is not applied directly'
+grep -qF -- '--unclassified' "$WORKFLOW" ||
+  fail 'non-PR artifact selection does not fail closed'
+if grep -qF 'selector_version=v2' "$WORKFLOW" \
+    || grep -qF 'One-time v3 cutover' "$WORKFLOW"; then
+  fail 'workspace selection retains a superseded transition bridge'
+fi
 step_count="$(grep -Ec '^      - (name:|uses:)' <<<"$workspace_job")"
 guard_count="$(grep -Ec '^        if:' <<<"$workspace_job")"
 [[ "$step_count" == "$guard_count" ]] ||

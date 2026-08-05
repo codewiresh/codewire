@@ -155,16 +155,15 @@ chmod +x "$mock_bin/curl"
 run_case() {
   local name="$1" expected="$2" merge_sha="$3" pr="$4" head="$5" mode="$6"
   local output="$TMP/${name}.output" log="$TMP/${name}.log"
-  local policy_sha="$base_sha" receipt_json receipt_b64
-  if [ "$mode" = receipt_mismatch ]; then policy_sha="$unrelated_parent"; fi
+  local receipt_base="$base_sha" receipt_json receipt_b64
+  if [ "$mode" = receipt_mismatch ]; then receipt_base="$unrelated_parent"; fi
   receipt_json="$(jq -cn \
     --arg repository codewire/codewire \
     --argjson pr "$pr" \
     --arg workflow "ci.yaml@refs/pull/${pr}/head" \
-    --arg base "$base_sha" \
+    --arg base "$receipt_base" \
     --arg head "$head" \
-    --arg tree "$tested_tree" \
-    --arg policy "$policy_sha" '
+    --arg tree "$tested_tree" '
       {
         schema: "codewire.ci-verification-receipt/v1",
         repository: $repository,
@@ -172,31 +171,7 @@ run_case() {
         pull_request: $pr,
         workflow_path: $workflow,
         run: {id: 501, attempt: 1, job: "Required verification"},
-        source: {base_commit: $base, head_commit: $head, head_tree: $tree},
-        plan: {
-          schema: "codewire.ci-plan/v1",
-          sha256: ("d" * 64),
-          status: "trusted",
-          trusted_policy_commit: $policy,
-          policy_sha256: ("e" * 64),
-          graph_sha256: ("f" * 64),
-          baseline_commit: $base,
-          artifacts: {
-            cw_cli_release_assets: "unaffected",
-            desktop_package: "affected",
-            workspace_image: "unaffected"
-          }
-        },
-        selection: "|valid:v3|policy|complete|",
-        results: {
-          selection: "success",
-          standard: "success",
-          rust_transport: "success",
-          database_services: "success",
-          edge_kind: "success",
-          cw_release_assets: "success",
-          workspace_image: "success"
-        }
+        source: {base_commit: $base, head_commit: $head, head_tree: $tree}
       }
     ')"
   receipt_b64="$(printf '%s' "$receipt_json" | base64 -w0)"
@@ -233,9 +208,6 @@ run_case() {
     grep -Fxq "tested_tree_pr=${pr}" "$output"
     grep -Fxq "tested_tree_head=${head}" "$output"
     grep -Fxq 'tested_tree_run=501' "$output"
-    grep -Fxq "tested_tree_policy_commit=${base_sha}" "$output"
-    grep -Fxq "tested_tree_policy_sha256=$(printf 'e%.0s' {1..64})" "$output"
-    grep -Fxq "tested_tree_plan_sha256=$(printf 'd%.0s' {1..64})" "$output"
   fi
 }
 

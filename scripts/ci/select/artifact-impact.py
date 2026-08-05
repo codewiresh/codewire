@@ -29,7 +29,6 @@ RUNTIME_PACKAGES = {
     "codewire-udp-relay",
     "codewire-mesh",
 }
-SUPPORT_PACKAGES = {"codewire-cli-bin"}
 
 CARGO_PRESENTATION_KEYS = {
     "authors",
@@ -74,14 +73,6 @@ RUNTIME_IMAGE_EXACT_INPUTS = {
     "crates/codewire-dashboard-web/assets/xterm/LICENSE-addon-web-links-0.12.0",
     "crates/codewire-dashboard-web/assets/xterm/LICENSE-xterm-6.0.0",
 }
-SUPPORT_EXACT_INPUTS = {
-    ".gitea/workflows/support-images.yaml",
-    "Cargo.lock",
-    "rust-toolchain.toml",
-    "scripts/ci/select/select-support-images.sh",
-    "scripts/ci/setup/fetch-infisical-ci-secret.sh",
-}
-
 # These helpers build disposable, locally loaded verification images. They do
 # not build, tag, copy, sign, bundle, or publish a release artifact. Keep this
 # allowlist exact so new scripts below scripts/ci/images continue to fail
@@ -97,11 +88,6 @@ RUNTIME_DOCKERFILES = {
     "deployments/docker/mesh.Dockerfile": ".",
     "apps/dashboard/Dockerfile": ".",
 }
-SUPPORT_DOCKERFILES = {
-    "images/base/Dockerfile": "images/base",
-    "images/workspace/Dockerfile": ".",
-}
-
 RUNTIME_DOCKER_MODELED_ROOTS = {
     "Cargo.toml",
     "Cargo.lock",
@@ -118,16 +104,6 @@ RUNTIME_DOCKER_MODELED_ROOTS = {
     "packages/codewire-design",
     "packages/codewire-proto-ts",
 }
-SUPPORT_DOCKER_MODELED_ROOTS = {
-    "Cargo.toml",
-    "Cargo.lock",
-    "crates",
-    "proto",
-    "libs/gateway-proto",
-    "images/base",
-    "images/workspace",
-}
-
 DEV_FIXED_PREFIXES = (
     "deployments/k8s/flux/temporal-dev/",
     "deployments/k8s/flux/mesh-dev/",
@@ -548,33 +524,26 @@ def modeled_path(path: str, roots: set[str]) -> bool:
     return any(path == root or path.startswith(f"{root}/") for root in roots)
 
 
-def docker_contract_errors(root: Path, mode: str) -> list[str]:
-    definitions = RUNTIME_DOCKERFILES if mode == "runtime" else SUPPORT_DOCKERFILES
-    modeled_roots = (
-        RUNTIME_DOCKER_MODELED_ROOTS
-        if mode == "runtime"
-        else SUPPORT_DOCKER_MODELED_ROOTS
-    )
+def docker_contract_errors(root: Path) -> list[str]:
     errors: list[str] = []
-    for dockerfile, context in sorted(definitions.items()):
+    for dockerfile, context in sorted(RUNTIME_DOCKERFILES.items()):
         try:
             sources = parse_docker_copy_sources(root / dockerfile, context)
         except ImpactError as error:
             errors.append(str(error))
             continue
         for source in sources:
-            if not modeled_path(source, modeled_roots):
+            if not modeled_path(source, RUNTIME_DOCKER_MODELED_ROOTS):
                 errors.append(f"{dockerfile} consumes uncovered source root {source}")
     return errors
 
 
-def artifact_contract_errors(root: Path, mode: str) -> list[str]:
-    errors = docker_contract_errors(root, mode)
-    if mode == "runtime":
-        try:
-            dev_kustomize_closure(root)
-        except ImpactError as error:
-            errors.append(str(error))
+def artifact_contract_errors(root: Path) -> list[str]:
+    errors = docker_contract_errors(root)
+    try:
+        dev_kustomize_closure(root)
+    except ImpactError as error:
+        errors.append(str(error))
     return errors
 
 
@@ -583,7 +552,6 @@ def classify_rust(
     base: str,
     head: str,
     paths: Iterable[str],
-    mode: str,
 ) -> set[str]:
     path_set = set(paths)
     if not any(
@@ -595,10 +563,7 @@ def classify_rust(
     ):
         return set()
 
-    roots, manifests = cargo_closure(
-        root,
-        RUNTIME_PACKAGES if mode == "runtime" else SUPPORT_PACKAGES,
-    )
+    roots, manifests = cargo_closure(root, RUNTIME_PACKAGES)
     categories: set[str] = set()
     for path in path_set:
         if is_legal_or_repository_text(path):
@@ -660,7 +625,6 @@ def classify(
     root: Path,
     base: str,
     head: str,
-    mode: str,
 ) -> tuple[bool, str, list[str]]:
     if not valid_commit(root, head):
         return True, "head_invalid", ["ambiguous-baseline"]
@@ -685,63 +649,55 @@ def classify(
         return False, "no_changes", []
 
     categories: set[str] = set()
-    exact_inputs = RUNTIME_EXACT_INPUTS if mode == "runtime" else SUPPORT_EXACT_INPUTS
     for path in paths:
-        if mode == "runtime" and path in RUNTIME_IMAGE_EXACT_INPUTS:
+        if path in RUNTIME_IMAGE_EXACT_INPUTS:
             categories.add("runtime-image-input")
         if is_legal_or_repository_text(path):
             continue
-        if path in exact_inputs:
+        if path in RUNTIME_EXACT_INPUTS:
             categories.add("ci-contract")
         if (
             path.startswith("scripts/ci/images/")
             and path not in LOCAL_ONLY_IMAGE_HELPERS
         ):
             categories.add("image-publication")
-        if mode == "runtime":
-            if path.startswith("deployments/docker/") and (
-                path.endswith(".Dockerfile")
-                or path.endswith(".Cargo.toml")
-                or path.endswith(".Cargo.lock")
-            ):
-                categories.add("runtime-image-definition")
-            if path in RUNTIME_DOCKERFILES:
-                categories.add("runtime-image-definition")
-            if path.startswith(("proto/", "libs/gateway-proto/")):
-                categories.add("protocol")
-        else:
-            if path.startswith(("images/base/", "images/workspace/")):
-                categories.add("support-image-definition")
-            if path.startswith(("proto/", "libs/gateway-proto/")):
-                categories.add("protocol")
+        if path.startswith("deployments/docker/") and (
+            path.endswith(".Dockerfile")
+            or path.endswith(".Cargo.toml")
+            or path.endswith(".Cargo.lock")
+        ):
+            categories.add("runtime-image-definition")
+        if path in RUNTIME_DOCKERFILES:
+            categories.add("runtime-image-definition")
+        if path.startswith(("proto/", "libs/gateway-proto/")):
+            categories.add("protocol")
 
     try:
-        categories.update(classify_rust(root, base, head, paths, mode))
-        if mode == "runtime":
-            categories.update(classify_web(root, base, head, paths))
-            if any(
-                path.startswith("deployments/k8s/")
-                or path.startswith("apps/cli/charts/codewire-mesh/")
-                for path in paths
-            ):
-                closure_files, closure_directories = dev_kustomize_closure(root)
-                for path in paths:
-                    if is_legal_or_repository_text(path):
-                        continue
-                    if (
-                        path in DEV_FIXED_FILES
-                        or path.startswith(DEV_FIXED_PREFIXES)
-                        or path in closure_files
-                        or any(
-                            PurePosixPath(path).parent.as_posix() == directory
-                            for directory in closure_directories
-                        )
-                    ):
-                        categories.add("dev-render")
+        categories.update(classify_rust(root, base, head, paths))
+        categories.update(classify_web(root, base, head, paths))
+        if any(
+            path.startswith("deployments/k8s/")
+            or path.startswith("apps/cli/charts/codewire-mesh/")
+            for path in paths
+        ):
+            closure_files, closure_directories = dev_kustomize_closure(root)
+            for path in paths:
+                if is_legal_or_repository_text(path):
+                    continue
+                if (
+                    path in DEV_FIXED_FILES
+                    or path.startswith(DEV_FIXED_PREFIXES)
+                    or path in closure_files
+                    or any(
+                        PurePosixPath(path).parent.as_posix() == directory
+                        for directory in closure_directories
+                    )
+                ):
+                    categories.add("dev-render")
     except ImpactError:
         return True, "relevant_definition_ambiguous", ["ambiguous-definition"]
 
-    contract_errors = artifact_contract_errors(root, mode)
+    contract_errors = artifact_contract_errors(root)
     if contract_errors:
         return True, "build_contract_ambiguous", ["ambiguous-build-contract"]
 
@@ -773,7 +729,7 @@ def main() -> int:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     select_parser = subparsers.add_parser("select")
-    select_parser.add_argument("--mode", choices=("runtime", "support"), required=True)
+    select_parser.add_argument("--mode", choices=("runtime",), required=True)
     select_parser.add_argument("--base", required=True)
     select_parser.add_argument("--head", required=True)
     select_parser.add_argument("--output", type=Path)
@@ -781,19 +737,14 @@ def main() -> int:
     contract_parser = subparsers.add_parser("check-contract")
     contract_parser.add_argument(
         "--mode",
-        choices=("runtime", "support", "all"),
-        default="all",
+        choices=("runtime",),
+        default="runtime",
     )
 
     args = parser.parse_args()
     root = Path.cwd().resolve()
     if args.command == "check-contract":
-        modes = ("runtime", "support") if args.mode == "all" else (args.mode,)
-        errors = [
-            error
-            for mode in modes
-            for error in artifact_contract_errors(root, mode)
-        ]
+        errors = artifact_contract_errors(root)
         if errors:
             for error in errors:
                 print(f"[artifact-impact] ERROR: {error}", file=sys.stderr)
@@ -801,7 +752,7 @@ def main() -> int:
         print("[artifact-impact] build and dev-render input contract: OK")
         return 0
 
-    selected, reason, categories = classify(root, args.base, args.head, args.mode)
+    selected, reason, categories = classify(root, args.base, args.head)
     write_result(selected, reason, categories, args.output)
     return 0
 

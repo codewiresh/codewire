@@ -12,12 +12,9 @@ from typing import Mapping
 
 
 RECEIPT_SCHEMA = "codewire.ci-verification-receipt/v1"
-PLAN_SCHEMA = "codewire.ci-plan/v1"
 PREFIX = "CODEWIRE_CI_VERIFICATION_RECEIPT="
 HEX40_RE = re.compile(r"^[0-9a-f]{40}$")
-HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
 POSITIVE_RE = re.compile(r"^[1-9][0-9]*$")
-STATES = {"affected", "unaffected", "unclassified"}
 
 
 class ReceiptError(RuntimeError):
@@ -28,13 +25,6 @@ def require(env: Mapping[str, str], key: str, pattern: re.Pattern[str] | None = 
     value = env.get(key, "")
     if not value or (pattern and not pattern.fullmatch(value)):
         raise ReceiptError(f"receipt input {key} is invalid")
-    return value
-
-
-def require_success(env: Mapping[str, str], key: str) -> str:
-    value = require(env, key)
-    if value != "success":
-        raise ReceiptError(f"receipt dependency {key} concluded {value}")
     return value
 
 
@@ -59,21 +49,8 @@ def build_receipt(env: Mapping[str, str]) -> dict[str, object]:
     base_commit = require(env, "CODEWIRE_BASE_COMMIT", HEX40_RE)
     head_commit = require(env, "CODEWIRE_HEAD_COMMIT", HEX40_RE)
     head_tree = require(env, "CODEWIRE_HEAD_TREE", HEX40_RE)
-    policy_commit = require(env, "CODEWIRE_POLICY_COMMIT", HEX40_RE)
-    target_base = require(env, "CODEWIRE_TARGET_BASE_COMMIT", HEX40_RE)
-    if policy_commit != base_commit or target_base != base_commit:
-        raise ReceiptError("trusted policy and target base must equal the exact PR base")
     if head_commit != require(env, "GITHUB_SHA", HEX40_RE):
         raise ReceiptError("receipt head does not equal the workflow head")
-
-    cw_state = require(env, "CODEWIRE_CW_PACKAGE_STATE")
-    desktop_state = require(env, "CODEWIRE_DESKTOP_PACKAGE_STATE")
-    workspace_state = require(env, "CODEWIRE_WORKSPACE_IMAGE_STATE")
-    if cw_state not in STATES or desktop_state not in STATES or workspace_state not in STATES:
-        raise ReceiptError("receipt contains an invalid artifact state")
-    selection = require(env, "CODEWIRE_SELECTION")
-    if not selection.startswith("|valid:v3|") or not selection.endswith("|complete|"):
-        raise ReceiptError("receipt selection is invalid")
 
     return {
         "schema": RECEIPT_SCHEMA,
@@ -91,30 +68,6 @@ def build_receipt(env: Mapping[str, str]) -> dict[str, object]:
             "head_commit": head_commit,
             "head_tree": head_tree,
         },
-        "plan": {
-            "schema": require(env, "CODEWIRE_PLAN_SCHEMA"),
-            "sha256": require(env, "CODEWIRE_PLAN_SHA256", HEX64_RE),
-            "status": require(env, "CODEWIRE_PLAN_STATUS"),
-            "trusted_policy_commit": policy_commit,
-            "policy_sha256": require(env, "CODEWIRE_POLICY_SHA256", HEX64_RE),
-            "graph_sha256": require(env, "CODEWIRE_GRAPH_SHA256", HEX64_RE),
-            "baseline_commit": require(env, "CODEWIRE_BASELINE_COMMIT", HEX40_RE),
-            "artifacts": {
-                "cw_cli_release_assets": cw_state,
-                "desktop_package": desktop_state,
-                "workspace_image": workspace_state,
-            },
-        },
-        "selection": selection,
-        "results": {
-            "selection": require_success(env, "CODEWIRE_SELECTION_RESULT"),
-            "standard": require_success(env, "CODEWIRE_STANDARD_RESULT"),
-            "rust_transport": require_success(env, "CODEWIRE_RUST_TRANSPORT_RESULT"),
-            "database_services": require_success(env, "CODEWIRE_DATABASE_SERVICES_RESULT"),
-            "edge_kind": require_success(env, "CODEWIRE_EDGE_KIND_RESULT"),
-            "cw_release_assets": require_success(env, "CODEWIRE_CW_RELEASE_ASSETS_RESULT"),
-            "workspace_image": require_success(env, "CODEWIRE_WORKSPACE_IMAGE_RESULT"),
-        },
     }
 
 
@@ -126,10 +79,6 @@ def encode_receipt(receipt: dict[str, object]) -> str:
 def main() -> int:
     try:
         receipt = build_receipt(os.environ)
-        if receipt["plan"]["schema"] != PLAN_SCHEMA:  # type: ignore[index]
-            raise ReceiptError("receipt plan schema is unsupported")
-        if receipt["plan"]["status"] != "trusted":  # type: ignore[index]
-            raise ReceiptError("pull-request receipt requires a trusted plan")
     except ReceiptError as exc:
         print(f"verification receipt: {exc}", file=sys.stderr)
         return 2

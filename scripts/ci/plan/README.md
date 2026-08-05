@@ -1,17 +1,19 @@
-# Codewire CI planner
+# Codewire artifact planner
 
-This directory is the versioned impact-policy kernel for Codewire CI. It
-classifies the packaged `cw` CLI, desktop, workspace binary, atomic support
-image inputs, and the five runtime image input sets. Runtime file sets mirror
-the current Docker COPY boundaries conservatively; the deployment workflow
-continues to use its existing selector until its event adapter migrates.
+This directory classifies artifact impact for the packaged `cw` CLI, desktop
+package, workspace `cw` binary, atomic base/workspace support-image pair, and
+the dashboard, gateway, DERP, services, and mesh runtime images.
+Verification capabilities are owned only by
+`scripts/ci/select/select-verification.sh`; the planner never adds or removes
+capability tokens. Runtime artifact facts remain independent of PR verification
+selection. Until Dev consumes those facts through its event adapter,
+`scripts/ci/select/select-deploy-dev.sh` is a temporary compatibility path.
 
-For a pull request, the workflow must execute the copy of `planner.py`, the
-graph, and schemas from the trusted target-base commit. The proposed-head copy
-may be tested, but it must never be allowed to reduce work. A policy-path
-change makes every artifact `unclassified` under the old policy.
-
-Run it locally with:
+Pull requests execute `planner.py` and `artifact-graph.json` from the trusted
+target-base commit. Proposed policy may be tested but cannot reduce work. A
+policy-path change makes every artifact `unclassified` under the trusted
+policy. Artifact state is `affected`, `unaffected`, or `unclassified`, and
+consumers schedule both `affected` and `unclassified`.
 
 ```sh
 python3 scripts/ci/plan/planner.py \
@@ -20,41 +22,25 @@ python3 scripts/ci/plan/planner.py \
   --head HEAD
 ```
 
-The output is `codewire.ci-plan/v1`. Artifact state is exactly `affected`,
-`unaffected`, or `unclassified`; consumers must schedule `affected` and
-`unclassified`. The planner reports impact facts only. It does not authorize
-publication or deployment.
+For canonical-main support publication, the support workflow resolves the
+published base/workspace pair, removes registry credentials, and supplies the
+untrusted metadata as `--baseline-candidate`. The planner accepts only a
+matching immutable pair whose revision is an ancestor of the exact head.
+`apply-support-plan.py` preserves pair atomicity: if either artifact is not
+proven unaffected, both are selected.
 
-Canonical-main support publication uses the same planner with
-`--baseline-candidate`. The support workflow resolves untrusted `base:latest`
-and `workspace:latest` registry metadata through its existing credential
-boundary, then removes the credential before planning. The planner validates
-that both repositories, immutable digests, and revision labels form one
-matching Git ancestor and emits `codewire.ci-baseline/v1` in
-`published_support_pair` mode. Missing, malformed, mismatched, inaccessible,
-or non-ancestor candidates make every artifact `unclassified`.
+`apply-verification-plan.py` validates the plan and emits only the three
+artifact-job facts used by CI. `emit-verification-receipt.py` binds a successful
+Required-verification job to its exact base, head, and tree. Post-merge reuse
+validates that identity and falls back whenever receipt-control files changed.
 
-`apply-support-plan.py` is the support event adapter. It owns only the atomic
-pair policy: publish both support images when either planner artifact is
-`affected` or `unclassified`; skip only when both are `unaffected`. It does not
-inspect source paths or dependency graphs.
-
-`apply-verification-plan.py` is an artifact-only event adapter. It validates
-the trusted plan and emits package/image facts for the `cw`, desktop, and
-workspace artifact jobs. It never adds, removes, or rewrites verification
-capability tokens; `select-verification.sh` owns that contract.
-`emit-verification-receipt.py`
-serializes the successful required-job inputs into one canonical base64 log
-record. The post-merge receipt validator attests that record; it never repeats
-change-impact classification.
-
-Run the focused no-network tests and the current-repository Cargo oracle with:
+Run the focused no-network tests and current-tree Cargo oracle with:
 
 ```sh
 scripts/ci/plan/test.sh
 ```
 
-The planner exports candidate Git trees to isolated temporary directories,
-validates archive paths and symlinks, rejects Cargo configuration supplied by
-the candidate, and invokes only offline `cargo metadata --locked --no-deps`.
-It never executes build scripts or source helpers.
+The planner exports Git trees into isolated temporary directories, rejects
+unsafe archive paths, symlinks, and candidate Cargo configuration, and invokes
+only offline `cargo metadata --locked --no-deps`. It never executes candidate
+build scripts or helpers.

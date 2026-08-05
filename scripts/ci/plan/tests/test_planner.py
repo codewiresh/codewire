@@ -15,6 +15,7 @@ from unittest import mock
 
 
 PLANNER_PATH = Path(__file__).parents[1] / "planner.py"
+SELECTOR_PATH = PLANNER_PATH.parents[1] / "select" / "select-verification.sh"
 SPEC = importlib.util.spec_from_file_location("codewire_ci_planner", PLANNER_PATH)
 assert SPEC and SPEC.loader
 planner = importlib.util.module_from_spec(SPEC)
@@ -27,6 +28,33 @@ def run(argv: list[str], cwd: Path) -> str:
     if completed.returncode:
         raise AssertionError(f"command failed: {argv}\n{completed.stderr}")
     return completed.stdout.strip()
+
+
+def select_capabilities(paths: list[str]) -> dict[str, str]:
+    with tempfile.TemporaryDirectory(prefix="codewire-selector-boundary-") as temporary:
+        path_file = Path(temporary) / "paths"
+        path_file.write_text("\n".join(paths) + "\n")
+        env = os.environ.copy()
+        env.pop("GITHUB_OUTPUT", None)
+        env.pop("GITHUB_EVENT_PATH", None)
+        env.update(
+            {
+                "GITHUB_EVENT_NAME": "pull_request",
+                "GITHUB_REF": "refs/pull/fixture/head",
+                "KIND_E2E_OPT_IN": "false",
+            }
+        )
+        completed = subprocess.run(
+            [str(SELECTOR_PATH), str(path_file)],
+            cwd=PLANNER_PATH.parents[3],
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if completed.returncode:
+            raise AssertionError(f"selector failed:\n{completed.stderr}")
+        return dict(line.split("=", 1) for line in completed.stdout.splitlines())
 
 
 class FixtureRepository:
@@ -48,7 +76,7 @@ class FixtureRepository:
 
     def _write_policy(self) -> None:
         policy_root = self.root / "scripts/ci/plan"
-        (policy_root / "schemas").mkdir(parents=True)
+        policy_root.mkdir(parents=True)
         shutil.copy2(PLANNER_PATH, policy_root / "planner.py")
         shutil.copy2(PLANNER_PATH.parent / "apply-support-plan.py", policy_root / "apply-support-plan.py")
         images_root = self.root / "scripts/ci/images"
@@ -63,8 +91,6 @@ class FixtureRepository:
             PLANNER_PATH.parents[3] / ".gitea" / "workflows" / "support-images.yaml",
             workflow_root / "support-images.yaml",
         )
-        for name in ("baseline.schema.json", "plan.schema.json"):
-            shutil.copy2(PLANNER_PATH.parent / "schemas" / name, policy_root / "schemas" / name)
         graph = {
             "schema": "codewire.ci-artifact-graph/v1",
             "policy_files": [
@@ -73,8 +99,6 @@ class FixtureRepository:
                 "scripts/ci/plan/apply-support-plan.py",
                 "scripts/ci/plan/artifact-graph.json",
                 "scripts/ci/plan/planner.py",
-                "scripts/ci/plan/schemas/baseline.schema.json",
-                "scripts/ci/plan/schemas/plan.schema.json",
             ],
             "artifacts": {
                 "cw_cli_release_assets": {
@@ -501,7 +525,6 @@ class PlannerFixtureTests(unittest.TestCase):
         self.assertEqual(self.states(first), ("unaffected", "unaffected"))
         self.assertEqual(self.workspace_states(first), ("unaffected", "unaffected", "unaffected"))
         self.assertEqual(self.runtime_states(first), ("unaffected",) * 5)
-        self.assertFalse(first["verification"]["workspace_image"])
 
     def test_each_runtime_direct_input_affects_only_its_image(self) -> None:
         cases = (
@@ -523,20 +546,24 @@ class PlannerFixtureTests(unittest.TestCase):
                 repository.change(path, content)
                 expected = ["unaffected"] * 5
                 expected[affected_index] = "affected"
-                artifacts = repository.plan()["artifacts"]
-                self.assertEqual(
-                    tuple(
-                        artifacts[name]["state"]
-                        for name in (
-                            "dashboard_image",
-                            "gateway_image",
-                            "derp_image",
-                            "services_image",
-                            "mesh_image",
-                        )
-                    ),
-                    tuple(expected),
-                )
+                self.assertEqual(self.runtime_states(repository.plan()), tuple(expected))
+
+    def test_runtime_artifact_fact_does_not_change_capability_ownership(self) -> None:
+        path = "deployments/docker/gateway.Dockerfile"
+        capabilities_before = select_capabilities([path])
+        self.repo.change(path, "FROM changed-gateway\n")
+        self.assertEqual(
+            self.runtime_states(self.repo.plan()),
+            ("unaffected", "affected", "unaffected", "unaffected", "unaffected"),
+        )
+        capabilities_after = select_capabilities([path])
+        self.assertEqual(capabilities_after, capabilities_before)
+        self.assertEqual(capabilities_after["selector_version"], "v3")
+        self.assertEqual(
+            capabilities_after["selection"],
+            "|valid:v3|deploy|edge_kind|go_consumer_interop|go_support|policy|"
+            "release|runtime_confidential|complete|",
+        )
 
     def test_broad_runtime_crate_contexts_remain_broad(self) -> None:
         self.repo.change(
@@ -641,7 +668,6 @@ class PlannerFixtureTests(unittest.TestCase):
         document = self.repo.plan()
         self.assertEqual(self.states(document), ("affected", "unaffected"))
         self.assertEqual(self.workspace_states(document), ("affected", "unaffected", "affected"))
-        self.assertTrue(document["verification"]["workspace_image"])
 
     def test_reachable_normal_dependency_affects_both_packages(self) -> None:
         self.repo.change("core/src/lib.rs", "pub fn run() { println!(\"changed\"); }\n")
@@ -672,7 +698,6 @@ class PlannerFixtureTests(unittest.TestCase):
         document = self.repo.plan()
         self.assertEqual(self.states(document), ("unaffected", "unaffected"))
         self.assertEqual(self.workspace_states(document), ("unaffected", "unaffected", "unaffected"))
-        self.assertFalse(document["verification"]["workspace_image"])
 
     def test_relevant_generated_input_affects_both_packages(self) -> None:
         self.repo.change("generated/descriptor.bin", "descriptor-v2\n")

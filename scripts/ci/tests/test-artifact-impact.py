@@ -89,7 +89,6 @@ class Fixture:
 
     def select(
         self,
-        mode: str,
         base: str,
         head: str,
     ) -> dict[str, str]:
@@ -99,7 +98,7 @@ class Fixture:
                 str(CLASSIFIER),
                 "select",
                 "--mode",
-                mode,
+                "runtime",
                 "--base",
                 base,
                 "--head",
@@ -118,11 +117,10 @@ class Fixture:
         name: str,
         expected: bool,
         *,
-        mode: str = "runtime",
         base: str | None = None,
         head: str | None = None,
     ) -> dict[str, str]:
-        result = self.select(mode, base or self.base, head or self.head())
+        result = self.select(base or self.base, head or self.head())
         actual = result.get("selected")
         expected_text = "true" if expected else "false"
         if actual != expected_text:
@@ -159,7 +157,6 @@ def main() -> None:
         fixture.append("crates/codewire-cli/LICENSE-TEST", "synthetic legal text\n")
         fixture.commit("legal text")
         fixture.assert_selected("runtime legal text", False)
-        fixture.assert_selected("support legal text", False, mode="support")
 
         fixture.reset("cargo-presentation")
         fixture.replace(
@@ -169,13 +166,11 @@ def main() -> None:
         )
         fixture.commit("cargo presentation")
         fixture.assert_selected("runtime Cargo presentation", False)
-        fixture.assert_selected("support Cargo presentation", False, mode="support")
 
         fixture.reset("cargo-version")
         fixture.replace("Cargo.toml", 'version = "0.1.0"', 'version = "0.1.1"')
         fixture.commit("cargo version")
         fixture.assert_selected("runtime Cargo version", True)
-        fixture.assert_selected("support Cargo version", True, mode="support")
 
         fixture.reset("npm-presentation")
         package_path = fixture.repo / "package.json"
@@ -201,13 +196,11 @@ def main() -> None:
         fixture.append("crates/codewire-cli/src/lib.rs", "\n// selector fixture\n")
         fixture.commit("runtime source")
         fixture.assert_selected("runtime Rust source", True)
-        fixture.assert_selected("support Rust source", True, mode="support")
 
         fixture.reset("rust-test")
         fixture.append("crates/codewire-cli/tests/selector-neutral.rs", "// test\n")
         fixture.commit("test only")
         fixture.assert_selected("runtime test-only path", False)
-        fixture.assert_selected("support test-only path", False, mode="support")
 
         fixture.reset("dashboard")
         fixture.append("apps/dashboard/playwright.config.ts", "\n// selector fixture\n")
@@ -255,11 +248,6 @@ def main() -> None:
         )
         local_image_head = fixture.commit("local image verification helper")
         fixture.assert_selected("local image helper runtime", False)
-        fixture.assert_selected(
-            "local image helper support",
-            False,
-            mode="support",
-        )
         fixture.append("docs/local-image-neutral.md", "neutral\n")
         cumulative_local_head = fixture.commit("neutral follow-up")
         fixture.assert_selected(
@@ -286,11 +274,6 @@ def main() -> None:
             raise AssertionError(
                 f"publication helper category mismatch: {publication}"
             )
-        fixture.assert_selected(
-            "publication helper support",
-            True,
-            mode="support",
-        )
 
         fixture.reset("selector-implementation")
         fixture.append(
@@ -299,23 +282,6 @@ def main() -> None:
         )
         fixture.commit("selector implementation only")
         fixture.assert_selected("selector implementation runtime", False)
-        fixture.assert_selected(
-            "selector implementation support",
-            False,
-            mode="support",
-        )
-
-        fixture.reset("support-base")
-        fixture.append("images/base/entrypoint.sh", "\n# selector fixture\n")
-        fixture.commit("support base")
-        fixture.assert_selected("support base input", True, mode="support")
-        fixture.assert_selected("support input is not dev runtime", False)
-
-        fixture.reset("support-workspace")
-        fixture.append("images/workspace/debian.sources", "\n# selector fixture\n")
-        fixture.commit("support workspace")
-        fixture.assert_selected("support workspace input", True, mode="support")
-        fixture.assert_selected("workspace input is not dev runtime", False)
 
         fixture.reset("dashboard-installer")
         fixture.append("apps/cli/install.sh", "\n# dashboard image fixture\n")
@@ -326,11 +292,6 @@ def main() -> None:
         fixture.append("LICENSE", "\nDashboard runtime fixture\n")
         fixture.commit("dashboard root license input")
         fixture.assert_selected("dashboard root license input", True)
-        fixture.assert_selected(
-            "dashboard root license is not a support input",
-            False,
-            mode="support",
-        )
 
         fixture.reset("rename")
         source = fixture.repo / "crates/codewire-cli/src/lib.rs"

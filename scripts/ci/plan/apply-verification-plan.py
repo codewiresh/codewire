@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import re
@@ -15,9 +14,7 @@ from typing import Any
 
 PLAN_SCHEMA = "codewire.ci-plan/v1"
 HEX40_RE = re.compile(r"^[0-9a-f]{40}$")
-HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
 STATE_VALUES = {"affected", "unaffected", "unclassified"}
-ZERO_HASH = "0" * 64
 
 
 class AdapterError(RuntimeError):
@@ -42,7 +39,7 @@ def artifact_state(plan: dict[str, Any], name: str) -> str:
 
 
 def trusted_plan_outputs(plan_path: Path) -> dict[str, str]:
-    raw = plan_path.read_bytes()
+    raw = plan_path.read_text()
     try:
         plan = json.loads(raw)
     except json.JSONDecodeError as exc:
@@ -62,18 +59,16 @@ def trusted_plan_outputs(plan_path: Path) -> dict[str, str]:
     ):
         raise AdapterError("plan baseline validation is not trusted")
 
+    policy_commit = require_string(trusted, "commit", HEX40_RE)
+    target_base = require_string(baseline, "target_base_commit", HEX40_RE)
+    baseline_commit = require_string(baseline, "baseline_commit", HEX40_RE)
+    if policy_commit != target_base or baseline_commit != target_base:
+        raise AdapterError("trusted policy, target base, and baseline do not match")
+
     cw_state = artifact_state(plan, "cw_cli_release_assets")
     desktop_state = artifact_state(plan, "desktop_package")
     workspace_state = artifact_state(plan, "workspace_image")
     return {
-        "ci_plan_status": "trusted",
-        "ci_plan_schema": PLAN_SCHEMA,
-        "ci_plan_sha256": hashlib.sha256(raw).hexdigest(),
-        "ci_policy_commit": require_string(trusted, "commit", HEX40_RE),
-        "ci_policy_sha256": require_string(trusted, "policy_sha256", HEX64_RE),
-        "ci_graph_sha256": require_string(trusted, "graph_sha256", HEX64_RE),
-        "ci_target_base_commit": require_string(baseline, "target_base_commit", HEX40_RE),
-        "ci_baseline_commit": require_string(baseline, "baseline_commit", HEX40_RE),
         "ci_head_commit": require_string(baseline, "head_commit", HEX40_RE),
         "ci_head_tree": require_string(baseline, "head_tree", HEX40_RE),
         "cw_package_state": cw_state,
@@ -87,9 +82,6 @@ def trusted_plan_outputs(plan_path: Path) -> dict[str, str]:
 
 def unclassified_outputs(args: argparse.Namespace) -> dict[str, str]:
     commits = {
-        "ci_policy_commit": args.trusted_policy,
-        "ci_target_base_commit": args.target_base,
-        "ci_baseline_commit": args.baseline,
         "ci_head_commit": args.head,
         "ci_head_tree": args.head_tree,
     }
@@ -97,11 +89,6 @@ def unclassified_outputs(args: argparse.Namespace) -> dict[str, str]:
         if not isinstance(value, str) or not HEX40_RE.fullmatch(value):
             raise AdapterError(f"fail-closed field {key} is invalid")
     return {
-        "ci_plan_status": "unclassified",
-        "ci_plan_schema": PLAN_SCHEMA,
-        "ci_plan_sha256": ZERO_HASH,
-        "ci_policy_sha256": ZERO_HASH,
-        "ci_graph_sha256": ZERO_HASH,
         "cw_package_state": "unclassified",
         "cw_package_selected": "true",
         "desktop_package_state": "unclassified",
@@ -126,9 +113,6 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--plan")
     mode.add_argument("--unclassified", action="store_true")
-    parser.add_argument("--trusted-policy")
-    parser.add_argument("--target-base")
-    parser.add_argument("--baseline")
     parser.add_argument("--head")
     parser.add_argument("--head-tree")
     return parser.parse_args(argv)
@@ -146,7 +130,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         args = parse_args(argv or sys.argv[1:])
         emit(build_outputs(args))
-    except (OSError, AdapterError) as exc:
+    except (OSError, UnicodeError, AdapterError) as exc:
         print(f"artifact plan adapter: {exc}", file=sys.stderr)
         return 2
     return 0
