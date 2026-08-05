@@ -35,11 +35,11 @@ Do not set, request, infer, enforce, or report goal token or time budgets.
 
 ## Noel Method
 
-Codewire is pinned to the immutable Noel Method v0.7.0 runtime pack:
+Codewire is pinned to the immutable Noel Method v0.8.0 runtime pack:
 
-- Commit: `705a7a3f1aa117cb2ef1358cc75d3bc109cd928f`
-- Manifest SHA-256: `44b08fb6aa6f239c878f09bb16fcad246583b3f72f2d3eca627b0d9743dbdcba`
-- Index: `https://raw.githubusercontent.com/noeljackson/method/v0.7.0/dist/pack/INDEX.md`
+- Commit: `9c70fcff465efd46c570a002e8b86ce255f8252d`
+- Manifest SHA-256: `895c1cc8f6400270f2caaf26c5440f8d2e2ab3138faf6912bf93c032eefb88dc`
+- Index: `https://raw.githubusercontent.com/noeljackson/method/v0.8.0/dist/pack/INDEX.md`
 
 Resolve Method links only beneath that published pack. Direct mode is the
 default. Select protocols independently of repository risk:
