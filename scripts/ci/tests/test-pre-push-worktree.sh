@@ -142,17 +142,70 @@ commit_all "$repo" 'test: seed checkout fixture'
 git -C "$repo" remote add origin "$remote"
 git -C "$repo" push --no-verify -q -u origin main
 
-install_output="$(cd "$repo" && ./scripts/dev/install-hooks.sh)"
+installer_worktree="$TMP/hook-installer"
+git -C "$repo" worktree add -q -b hook-installer "$installer_worktree" main
+install_output="$(cd "$installer_worktree" && ./scripts/dev/install-hooks.sh)"
 assert_contains installer "$install_output" \
-  'pre-push resolves scripts/dev/preflight.sh from the worktree invoking git push'
-[ "$(git -C "$repo" config --get core.hooksPath)" = "$repo/.githooks" ] ||
-  fail 'installer did not set the expected absolute shared hooksPath'
+  'stable pre-push dispatcher copied into the common Git directory'
+assert_contains installer "$install_output" \
+  'dispatcher resolves scripts/dev/preflight.sh from the pushing worktree'
+dispatcher_dir="$repo/.git/codewire-hooks"
+dispatcher="$dispatcher_dir/pre-push"
+[ "$(git -C "$repo" config --get core.hooksPath)" = "$dispatcher_dir" ] ||
+  fail 'installer did not set the common-directory hooksPath'
+[ -x "$dispatcher" ] || fail 'installer did not create an executable dispatcher'
+cmp "$installer_worktree/.githooks/pre-push" "$dispatcher" ||
+  fail 'installed dispatcher differs from its tracked source'
 
-if unresolved_output="$(cd / && "$repo/.githooks/pre-push" 2>&1)"; then
+git -C "$repo" worktree remove "$installer_worktree"
+[ ! -e "$installer_worktree" ] || fail 'installer worktree was not removed'
+[ -x "$dispatcher" ] || fail 'dispatcher disappeared with its installing worktree'
+
+if unresolved_output="$(cd / && "$dispatcher" 2>&1)"; then
   fail 'hook unexpectedly succeeded outside a worktree'
 fi
 assert_contains unresolved_root "$unresolved_output" \
   'pre-push: could not resolve the invoking worktree root'
+
+invalid_mode_log="$TMP/invalid-mode-tools.log"
+if invalid_mode_output="$({
+  cd "$repo"
+  PATH="$TMP/bin:$PATH" PREFLIGHT_TEST_TOOL_LOG="$invalid_mode_log" \
+    CODEWIRE_PREFLIGHT_MODE=explain "$dispatcher" </dev/null
+} 2>&1)"; then
+  fail 'pre-push accepted explain mode without verification'
+fi
+assert_contains invalid_mode "$invalid_mode_output" \
+  'CODEWIRE_PREFLIGHT_MODE must be default, integration, kind, or full'
+[ ! -s "$invalid_mode_log" ] || fail 'invalid mode ran verification tools'
+
+multi_ref_log="$TMP/multi-ref-tools.log"
+multi_ref_head="$(git -C "$repo" rev-parse main)"
+zero_sha=0000000000000000000000000000000000000000
+if multi_ref_output="$({
+  printf '%s\n' \
+    "refs/heads/one $multi_ref_head refs/heads/one $zero_sha" \
+    "(delete) $zero_sha refs/heads/two $multi_ref_head" |
+    {
+      cd "$repo"
+      PATH="$TMP/bin:$PATH" PREFLIGHT_TEST_TOOL_LOG="$multi_ref_log" \
+        "$dispatcher"
+    }
+} 2>&1)"; then
+  fail 'pre-push accepted an ambiguous multi-ref push'
+fi
+assert_contains multi_ref "$multi_ref_output" \
+  'multi-ref pushes are unsupported; push one ref at a time'
+[ ! -s "$multi_ref_log" ] || fail 'multi-ref rejection ran verification tools'
+
+delete_ref_log="$TMP/delete-ref-tools.log"
+printf '%s\n' "(delete) $zero_sha refs/heads/obsolete $multi_ref_head" |
+  {
+    cd "$repo"
+    PATH="$TMP/bin:$PATH" PREFLIGHT_TEST_TOOL_LOG="$delete_ref_log" \
+      "$dispatcher"
+  }
+[ ! -s "$delete_ref_log" ] || fail 'single-ref deletion ran verification tools'
 
 git -C "$repo" switch -q -c normal-docs main
 printf 'normal docs\n' > "$repo/docs/normal.md"
@@ -319,12 +372,39 @@ diagnostic_log="$TMP/diagnostic-tools.log"
 diagnostic_output="$({
   cd "$repo"
   PATH="$TMP/bin:$PATH" PREFLIGHT_TEST_TOOL_LOG="$diagnostic_log" \
-    PREFLIGHT_CHANGED_FILES="$diagnostic_paths" "$repo/.githooks/pre-push"
+    PREFLIGHT_CHANGED_FILES="$diagnostic_paths" "$dispatcher"
 } 2>&1)"
 assert_contains diagnostic "$diagnostic_output" '  docs/diagnostic.md'
 assert_contains diagnostic "$diagnostic_output" \
   'preflight selection: |valid:v3|policy|complete|'
 assert_not_contains diagnostic_tools "$(cat "$diagnostic_log")" 'product '
+
+kind_mode_paths="$TMP/kind-mode.paths"
+printf 'Caddyfile\n' > "$kind_mode_paths"
+kind_mode_log="$TMP/kind-mode-tools.log"
+kind_mode_output="$({
+  cd "$repo"
+  PATH="$TMP/bin:$PATH" PREFLIGHT_TEST_TOOL_LOG="$kind_mode_log" \
+    PREFLIGHT_CHANGED_FILES="$kind_mode_paths" CODEWIRE_PREFLIGHT_MODE=kind \
+    "$dispatcher"
+} 2>&1)"
+assert_contains kind_mode "$kind_mode_output" \
+  'preflight required local mode: kind'
+assert_contains kind_mode_tools "$(cat "$kind_mode_log")" 'product edge '
+assert_contains kind_mode_tools "$(cat "$kind_mode_log")" 'kind'
+
+full_mode_paths="$TMP/full-mode.paths"
+printf 'docs/full.md\n' > "$full_mode_paths"
+full_mode_log="$TMP/full-mode-tools.log"
+full_mode_output="$({
+  cd "$repo"
+  PATH="$TMP/bin:$PATH" PREFLIGHT_TEST_TOOL_LOG="$full_mode_log" \
+    PREFLIGHT_CHANGED_FILES="$full_mode_paths" CODEWIRE_PREFLIGHT_MODE=full \
+    "$dispatcher"
+} 2>&1)"
+assert_contains full_mode "$full_mode_output" 'preflight full selection: |valid:v3|'
+assert_contains full_mode_tools "$(cat "$full_mode_log")" 'integration database '
+assert_contains full_mode_tools "$(cat "$full_mode_log")" 'kind'
 
 sdk_runner_paths="$TMP/sdk-runner.paths"
 printf '%s\n' \

@@ -16,7 +16,20 @@ if [ -n "${CARGO_TARGET_DIR:-}" ]; then
   exit 0
 fi
 
-common_dir="$(
-  git -C "$repo_root" rev-parse --path-format=absolute --git-common-dir
-)"
-printf '%s/target\n' "$(dirname "$common_dir")"
+target_mode="${CODEWIRE_CARGO_TARGET_MODE:-isolated}"
+case "$target_mode" in
+  isolated)
+    worktree_root="$(git -C "$repo_root" rev-parse --show-toplevel)"
+    printf '%s/target\n' "$worktree_root"
+    ;;
+  shared)
+    common_dir="$(
+      git -C "$repo_root" rev-parse --path-format=absolute --git-common-dir
+    )"
+    printf '%s/target\n' "$(dirname "$common_dir")"
+    ;;
+  *)
+    echo "resolve-cargo-target-dir: CODEWIRE_CARGO_TARGET_MODE must be isolated or shared" >&2
+    exit 2
+    ;;
+esac

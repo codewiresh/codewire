@@ -56,10 +56,15 @@ Install a `pre-push` hook so this runs automatically — pushes fail fast if the
 bun run hooks:install
 ```
 
-The hook lives at `.githooks/pre-push` and is set via an absolute
-`core.hooksPath`. Linked worktrees can share that physical hook; it resolves
-and runs `scripts/dev/preflight.sh` from the worktree that invoked `git push`.
-Bypass with `git push --no-verify` only when you know what you're doing.
+The installer copies the tracked `.githooks/pre-push` dispatcher into the
+repository's common Git directory and sets that stable directory as
+`core.hooksPath`. The dispatcher survives deletion of the worktree that ran
+the installer and resolves `scripts/dev/preflight.sh` from the worktree that
+invoked `git push`. Re-run `bun run hooks:install` after pulling a dispatcher
+change. If the default mode reports incomplete verification, retry the push
+with the exact `CODEWIRE_PREFLIGHT_MODE=integration|kind|full` command it
+prints. Push one ref at a time. Bypass with `git push --no-verify` only when
+the equivalent required verification has already been run deliberately.
 
 `PREFLIGHT_CHANGED_FILES` is an explicit diagnostic/CI interface for
 reproducing path selection. Set it to a file containing one repository-relative

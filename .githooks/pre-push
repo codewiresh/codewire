@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Pre-push gate: refuse to push if the same checks CI runs would fail locally.
-# Install via `bun run hooks:install` (sets a shared absolute hooksPath).
+# Pre-push dispatcher: resolve the pushing worktree and invoke its preflight.
+# Install via `bun run hooks:install` (copies this dispatcher into the common
+# Git directory so deleting the installing worktree cannot break every hook).
 # Bypass for a one-off (NOT recommended): `git push --no-verify`.
 
 set -euo pipefail
@@ -17,6 +18,16 @@ if [ ! -x "$PREFLIGHT" ]; then
   exit 1
 fi
 
+preflight_mode="${CODEWIRE_PREFLIGHT_MODE:-default}"
+case "$preflight_mode" in
+  default|integration|kind|full) ;;
+  *)
+    echo "pre-push: CODEWIRE_PREFLIGHT_MODE must be default, integration, kind, or full" >&2
+    exit 2
+    ;;
+esac
+export CODEWIRE_PREFLIGHT_MODE="$preflight_mode"
+
 push_count=0
 local_ref=""
 head_sha=""
@@ -25,9 +36,6 @@ remote_ref=""
 if [ ! -t 0 ]; then
   while read -r candidate_local_ref candidate_head candidate_remote_ref candidate_base; do
     [ -n "${candidate_head:-}" ] || continue
-    if [[ "$candidate_head" =~ ^0+$ ]]; then
-      continue
-    fi
     push_count=$((push_count + 1))
     local_ref="$candidate_local_ref"
     head_sha="$candidate_head"
@@ -37,8 +45,12 @@ if [ ! -t 0 ]; then
 fi
 
 if [ "$push_count" -gt 1 ]; then
-  export PREFLIGHT_FORCE_UNKNOWN=true
+  echo "pre-push: multi-ref pushes are unsupported; push one ref at a time" >&2
+  exit 1
 elif [ "$push_count" -eq 1 ]; then
+  if [[ "$head_sha" =~ ^0+$ ]]; then
+    exit 0
+  fi
   export PREFLIGHT_HEAD_SHA="$head_sha"
   if [[ "$local_ref" =~ ^refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$ ]] \
     && [ "$remote_ref" = "$local_ref" ]; then

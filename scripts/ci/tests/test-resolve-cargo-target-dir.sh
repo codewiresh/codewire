@@ -37,10 +37,18 @@ git -C "$repo" commit -q -m fixture
 git -C "$repo" worktree add -q -b linked-one "$worktree_one"
 git -C "$repo" worktree add -q -b linked-two "$worktree_two"
 
-expected="$repo/target"
-assert_eq primary-with-links "$expected" "$($RESOLVER "$repo")"
-assert_eq linked-one "$expected" "$($RESOLVER "$worktree_one")"
-assert_eq linked-two "$expected" "$($RESOLVER "$worktree_two")"
+assert_eq primary-with-links "$repo/target" "$($RESOLVER "$repo")"
+assert_eq linked-one-isolated "$worktree_one/target" "$($RESOLVER "$worktree_one")"
+assert_eq linked-two-isolated "$worktree_two/target" "$($RESOLVER "$worktree_two")"
+assert_eq explicit-isolated "$worktree_one/target" \
+  "$(CODEWIRE_CARGO_TARGET_MODE=isolated "$RESOLVER" "$worktree_one")"
+
+assert_eq primary-shared "$repo/target" \
+  "$(CODEWIRE_CARGO_TARGET_MODE=shared "$RESOLVER" "$repo")"
+assert_eq linked-one-shared "$repo/target" \
+  "$(CODEWIRE_CARGO_TARGET_MODE=shared "$RESOLVER" "$worktree_one")"
+assert_eq linked-two-shared "$repo/target" \
+  "$(CODEWIRE_CARGO_TARGET_MODE=shared "$RESOLVER" "$worktree_two")"
 
 relative_actual="$(
   cd "$TMP"
@@ -53,6 +61,21 @@ absolute_actual="$(
   CARGO_TARGET_DIR="$absolute_override" "$RESOLVER" "$worktree_two"
 )"
 assert_eq absolute-override "$absolute_override" "$absolute_actual"
+
+invalid_mode_output="$(
+  CODEWIRE_CARGO_TARGET_MODE=invalid "$RESOLVER" "$worktree_one" 2>&1 || true
+)"
+if CODEWIRE_CARGO_TARGET_MODE=invalid "$RESOLVER" "$worktree_one" >/dev/null 2>&1; then
+  fail 'invalid Cargo target mode was accepted'
+fi
+grep -qF 'CODEWIRE_CARGO_TARGET_MODE must be isolated or shared' \
+  <<<"$invalid_mode_output" || fail 'invalid target mode was not explained'
+
+override_with_invalid_mode="$(
+  CODEWIRE_CARGO_TARGET_MODE=invalid CARGO_TARGET_DIR="$absolute_override" \
+    "$RESOLVER" "$worktree_one"
+)"
+assert_eq override-before-mode "$absolute_override" "$override_with_invalid_mode"
 
 mkdir -p "$TMP/not-a-repository"
 if "$RESOLVER" "$TMP/not-a-repository" >"$TMP/nonrepo.out" 2>"$TMP/nonrepo.err"; then
