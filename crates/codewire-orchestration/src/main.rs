@@ -128,6 +128,7 @@ async fn main() -> anyhow::Result<()> {
 
     codewire_server_core::migrate::ensure_schema_logged(&cfg.database_url).await?;
     let pool = codewire_server_core::db::connect(&cfg.database_url).await?;
+    codewire_orchestration::resize_metrics::start_active_refresh(pool.clone());
 
     let loops = env_list("WORKER_LOOPS");
 

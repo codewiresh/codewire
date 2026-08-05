@@ -12,6 +12,7 @@ use crate::api::environment_resize::{
     EnvironmentResizeDisruptionPolicy, EnvironmentResizeExecutionMode, EnvironmentResizeOperation,
     classify_execution_mode, scan_operation,
 };
+use crate::resize_metrics;
 use crate::sandbox::client::{SandboxClient, WorkspaceStorageResizeOutcome};
 use codewire_gateway_proto::daemon::v1::SessionLifecycleState;
 
@@ -80,7 +81,7 @@ async fn set_operation_state(
     operation_id: &str,
     state: &str,
 ) -> anyhow::Result<()> {
-    authority
+    let result = authority
         .execute_for_states(
             RESIZE_MUTATION_STATES,
             sqlx::query(
@@ -93,6 +94,9 @@ async fn set_operation_state(
             .bind(operation_id),
         )
         .await?;
+    if result.rows_affected() == 1 {
+        resize_metrics::refresh_active_best_effort(authority.pool()).await;
+    }
     Ok(())
 }
 
@@ -242,7 +246,7 @@ async fn complete_resize(
         .execute(&mut *tx)
         .await?;
     }
-    sqlx::query(
+    let terminal: Option<(chrono::NaiveDateTime, chrono::NaiveDateTime)> = sqlx::query_as(
         "UPDATE environment_resize_operations
             SET last_applied_cpu_millicores = desired_cpu_millicores,
                 last_applied_memory_mb = desired_memory_mb,
@@ -250,14 +254,20 @@ async fn complete_resize(
                 state = 'completed', failure_code = NULL, failure_message = NULL,
                 applied_mode = $2, pod_replaced = $3,
                 updated_at = NOW(), completed_at = NOW()
-          WHERE id = $1",
+          WHERE id = $1
+            AND state IN ('pending', 'applying', 'restarting')
+          RETURNING created_at, completed_at",
     )
     .bind(&operation.id)
     .bind(applied_mode.as_str())
     .bind(pod_replaced)
-    .execute(&mut *tx)
+    .fetch_optional(&mut *tx)
     .await?;
     tx.commit().await?;
+    if terminal.is_some() {
+        resize_metrics::record_terminal_after_commit("completed", applied_mode, terminal);
+        resize_metrics::refresh_active_best_effort(authority.pool()).await;
+    }
     Ok(())
 }
 
@@ -509,18 +519,25 @@ pub async fn mark_environment_resize_failed(
     .bind(environment_id)
     .execute(&mut *tx)
     .await?;
-    sqlx::query(
+    let terminal: Option<(chrono::NaiveDateTime, chrono::NaiveDateTime)> = sqlx::query_as(
         "UPDATE environment_resize_operations
             SET state = 'failed', failure_code = $1, failure_message = $2,
                 updated_at = NOW(), completed_at = NOW()
-          WHERE id = $3",
+          WHERE id = $3
+            AND state IN ('pending', 'applying', 'restarting')
+          RETURNING created_at, completed_at",
     )
     .bind(code)
     .bind(&failure_message)
     .bind(&operation.id)
-    .execute(&mut *tx)
+    .fetch_optional(&mut *tx)
     .await?;
     tx.commit().await?;
+    if terminal.is_some() {
+        resize_metrics::record_terminal_after_commit("failed", operation.planned_mode, terminal);
+        resize_metrics::record_failure(code);
+        resize_metrics::refresh_active_best_effort(authority.pool()).await;
+    }
     Ok(())
 }
 

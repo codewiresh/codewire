@@ -21,6 +21,7 @@ use super::environments::{
     Environment, get_environment_core, get_org_quota, require_environment_access,
     require_org_member, trigger_environment,
 };
+use crate::resize_metrics::{self, RequestOutcome};
 use crate::sandbox::client::SandboxClient;
 use crate::sandbox::client::WorkspacePodResizeState;
 
@@ -492,8 +493,39 @@ pub async fn plan_environment_resize_core(
 pub async fn resize_environment_core(
     state: &ApiState,
     user: &AuthUser,
-    mut params: ResizeEnvironmentParams,
+    params: ResizeEnvironmentParams,
 ) -> AppResult<ResizeEnvironmentResult> {
+    let result = resize_environment_core_inner(state, user, params).await;
+    match &result {
+        Ok((result, outcome)) => {
+            resize_metrics::record_request(*outcome);
+            if *outcome == RequestOutcome::Accepted {
+                if result.operation.state == "completed" {
+                    resize_metrics::record_terminal_after_commit(
+                        "completed",
+                        result
+                            .operation
+                            .applied_mode
+                            .unwrap_or(result.operation.planned_mode),
+                        result
+                            .operation
+                            .completed_at
+                            .map(|completed_at| (result.operation.created_at, completed_at)),
+                    );
+                }
+                resize_metrics::refresh_active_best_effort(&state.pool).await;
+            }
+        }
+        Err(_) => resize_metrics::record_request(RequestOutcome::Rejected),
+    }
+    result.map(|(result, _)| result)
+}
+
+async fn resize_environment_core_inner(
+    state: &ApiState,
+    user: &AuthUser,
+    mut params: ResizeEnvironmentParams,
+) -> AppResult<(ResizeEnvironmentResult, RequestOutcome)> {
     params.request_id = params.request_id.trim().to_string();
     validate_request(&params)?;
     require_org_member(&state.pool, user, &params.org_id).await?;
@@ -529,11 +561,19 @@ pub async fn resize_environment_core(
                     )
                 })?;
         }
-        return Ok(ResizeEnvironmentResult {
-            operation,
-            environment: get_environment_core(state, user, &params.org_id, &params.environment_id)
+        return Ok((
+            ResizeEnvironmentResult {
+                operation,
+                environment: get_environment_core(
+                    state,
+                    user,
+                    &params.org_id,
+                    &params.environment_id,
+                )
                 .await?,
-        });
+            },
+            RequestOutcome::Idempotent,
+        ));
     }
     if active_operation_exists(state, &params.environment_id).await? {
         return Err(coded(
@@ -585,8 +625,8 @@ pub async fn resize_environment_core(
         &params.org_id,
         &params.environment_id,
         async {
-            let result: AppResult<EnvironmentResizeOperation> = async {
-                let operation = begin_resize_operation(
+            let result: AppResult<(EnvironmentResizeOperation, bool)> = async {
+                let (operation, admitted) = begin_resize_operation(
                     &state.pool,
                     &params,
                     &plan,
@@ -606,7 +646,7 @@ pub async fn resize_environment_core(
                         "failed to dispatch environment resize",
                     ));
                 }
-                Ok(operation)
+                Ok((operation, admitted))
             }
             .await;
             match result {
@@ -620,12 +660,20 @@ pub async fn resize_environment_core(
     )
     .await?;
 
+    let (operation, admitted) = operation;
     let environment =
         get_environment_core(state, user, &params.org_id, &params.environment_id).await?;
-    Ok(ResizeEnvironmentResult {
-        operation,
-        environment,
-    })
+    Ok((
+        ResizeEnvironmentResult {
+            operation,
+            environment,
+        },
+        if admitted {
+            RequestOutcome::Accepted
+        } else {
+            RequestOutcome::Idempotent
+        },
+    ))
 }
 
 async fn find_existing_operation(
@@ -663,7 +711,7 @@ async fn begin_resize_operation(
     plan: &EnvironmentResizePlan,
     max_cpu_millicores: i32,
     max_memory_mb: i32,
-) -> AppResult<EnvironmentResizeOperation> {
+) -> AppResult<(EnvironmentResizeOperation, bool)> {
     let mut tx = pool.begin().await?;
     let org_exists: Option<String> =
         sqlx::query_scalar("SELECT id FROM organizations WHERE id = $1 FOR UPDATE")
@@ -692,7 +740,7 @@ async fn begin_resize_operation(
             ));
         }
         tx.commit().await?;
-        return Ok(existing);
+        return Ok((existing, false));
     }
 
     let row = sqlx::query(
@@ -868,7 +916,7 @@ async fn begin_resize_operation(
     }
     let operation = scan_operation(&row)?;
     tx.commit().await?;
-    Ok(operation)
+    Ok((operation, true))
 }
 
 pub async fn get_resize_operation_core(
@@ -1207,13 +1255,17 @@ mod tests {
 
         params.desired_resources.cpu_millicores = 1_500;
         params.request_id = "stable-request".into();
-        let admitted = begin_resize_operation(&pool, &params, &plan_for(&params), 3_500, -1)
-            .await
-            .unwrap();
+        let (admitted, newly_admitted) =
+            begin_resize_operation(&pool, &params, &plan_for(&params), 3_500, -1)
+                .await
+                .unwrap();
+        assert!(newly_admitted);
         assert_eq!(admitted.reserved_cpu_millicores, 500);
-        let repeated = begin_resize_operation(&pool, &params, &plan_for(&params), 3_500, -1)
-            .await
-            .unwrap();
+        let (repeated, newly_admitted) =
+            begin_resize_operation(&pool, &params, &plan_for(&params), 3_500, -1)
+                .await
+                .unwrap();
+        assert!(!newly_admitted);
         assert_eq!(repeated.id, admitted.id);
 
         let mut concurrent = params.clone();
@@ -1244,10 +1296,11 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
-        let after_failure =
+        let (after_failure, newly_admitted) =
             begin_resize_operation(&pool, &concurrent, &plan_for(&concurrent), 3_500, -1)
                 .await
                 .unwrap();
+        assert!(newly_admitted);
         assert_eq!(after_failure.reserved_cpu_millicores, 400);
 
         sqlx::query("DELETE FROM environments WHERE org_id = $1")

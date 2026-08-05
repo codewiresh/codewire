@@ -9,6 +9,7 @@
 pub mod api;
 pub mod connect;
 pub mod lifecycle;
+pub mod resize_metrics;
 pub mod runtime_transport;
 pub mod sandbox;
 pub mod temporal;
