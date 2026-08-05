@@ -33,13 +33,20 @@ except ModuleNotFoundError as exc:  # pragma: no cover - Codewire uses Python 3.
 
 BASELINE_SCHEMA = "codewire.ci-baseline/v1"
 PLAN_SCHEMA = "codewire.ci-plan/v1"
+SUPPORT_CANDIDATE_SCHEMA = "codewire.ci-published-support-candidate/v1"
 MAX_ARCHIVE_MEMBERS = 30_000
 MAX_ARCHIVE_FILE_BYTES = 64 * 1024 * 1024
 MAX_ARCHIVE_TOTAL_BYTES = 512 * 1024 * 1024
+MAX_BASELINE_CANDIDATE_BYTES = 1024 * 1024
 MAX_CARGO_PACKAGES = 512
 METADATA_TIMEOUT_SECONDS = 90
 HEX40_RE = re.compile(r"^[0-9a-f]{40}$")
+SHA256_DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 LOCK_REF_RE = re.compile(r"^(?P<name>\S+?)(?:\s+(?P<version>\S+))?(?:\s+\((?P<source>.+)\))?$")
+SUPPORT_REPOSITORIES = {
+    "base": "ghcr.io/codewiresh/base",
+    "workspace": "ghcr.io/codewiresh/workspace",
+}
 
 
 class PlannerError(RuntimeError):
@@ -910,7 +917,7 @@ def policy_hash(policy_tree: Path, graph: dict[str, Any]) -> tuple[str, str]:
     return sha256_bytes(canonical_json(records)), graph_digest
 
 
-def make_baseline(repository: Path, target_base: str, head: str) -> dict[str, Any]:
+def make_pull_request_baseline(repository: Path, target_base: str, head: str) -> dict[str, Any]:
     merge_base = git(repository, "merge-base", target_base, head)
     valid = bool(HEX40_RE.fullmatch(merge_base))
     reasons = [] if valid else ["git merge-base did not return one commit"]
@@ -923,6 +930,122 @@ def make_baseline(repository: Path, target_base: str, head: str) -> dict[str, An
         "head_tree": git(repository, "rev-parse", f"{head}^{{tree}}"),
         "provenance": {"provider": "git", "comparison": "target-base merge-base to exact head"},
         "validation": {"valid": valid, "reasons": reasons},
+    }
+
+
+def _bounded_candidate(path: Path) -> tuple[dict[str, Any] | None, str, list[str]]:
+    try:
+        with path.open("rb") as handle:
+            raw = handle.read(MAX_BASELINE_CANDIDATE_BYTES + 1)
+    except OSError:
+        return None, "0" * 64, ["published support candidate is unavailable"]
+    if len(raw) > MAX_BASELINE_CANDIDATE_BYTES:
+        return None, "0" * 64, ["published support candidate exceeds the size limit"]
+    digest = sha256_bytes(raw)
+    try:
+        candidate = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None, digest, ["published support candidate is malformed"]
+    if not isinstance(candidate, dict):
+        return None, digest, ["published support candidate is not an object"]
+    return candidate, digest, []
+
+
+def _git_is_ancestor(repository: Path, ancestor: str, head: str) -> bool:
+    completed = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", ancestor, head],
+        cwd=repository,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    if completed.returncode not in (0, 1):
+        raise PlannerError("Git could not validate the published support ancestor")
+    return completed.returncode == 0
+
+
+def make_published_support_baseline(
+    repository: Path,
+    target_base: str,
+    head: str,
+    candidate_path: Path,
+) -> dict[str, Any]:
+    candidate, candidate_digest, reasons = _bounded_candidate(candidate_path)
+    provenance: dict[str, Any] = {
+        "provider": "ghcr",
+        "candidate_sha256": candidate_digest,
+        "images": {},
+    }
+    baseline_commit = head
+    revisions: dict[str, str] = {}
+
+    if target_base != head:
+        reasons.append("published support planning target is not the exact canonical head")
+    if candidate is not None:
+        if candidate.get("schema") != SUPPORT_CANDIDATE_SCHEMA:
+            reasons.append("published support candidate schema is unsupported")
+        retrieval = candidate.get("retrieval")
+        if not isinstance(retrieval, dict):
+            reasons.append("published support candidate omits retrieval status")
+        elif retrieval.get("valid") is not True or retrieval.get("reasons") != []:
+            reasons.append("published support candidate retrieval did not succeed")
+
+        images = candidate.get("images")
+        if not isinstance(images, dict):
+            reasons.append("published support candidate omits image metadata")
+        else:
+            for name, expected_repository in SUPPORT_REPOSITORIES.items():
+                image = images.get(name)
+                if not isinstance(image, dict):
+                    reasons.append(f"published support candidate omits {name} metadata")
+                    continue
+                repository_value = image.get("repository")
+                tag = image.get("tag")
+                digest = image.get("digest")
+                revision = image.get("revision")
+                provenance["images"][name] = {
+                    "repository": repository_value if isinstance(repository_value, str) else None,
+                    "tag": tag if isinstance(tag, str) else None,
+                    "digest": digest if isinstance(digest, str) else None,
+                    "revision": revision if isinstance(revision, str) else None,
+                }
+                if repository_value != expected_repository:
+                    reasons.append(f"published support {name} repository is invalid")
+                if tag != "latest":
+                    reasons.append(f"published support {name} tag is not latest")
+                if not isinstance(digest, str) or not SHA256_DIGEST_RE.fullmatch(digest):
+                    reasons.append(f"published support {name} digest is invalid")
+                if not isinstance(revision, str) or not HEX40_RE.fullmatch(revision):
+                    reasons.append(f"published support {name} revision is invalid")
+                else:
+                    revisions[name] = revision
+
+    if len(revisions) == 2:
+        source = revisions["base"]
+        if source != revisions["workspace"]:
+            reasons.append("published support image revisions do not match")
+        else:
+            try:
+                resolved_source = resolve_commit(repository, source)
+            except PlannerError:
+                reasons.append("published support source is absent from canonical Git history")
+            else:
+                if not _git_is_ancestor(repository, resolved_source, head):
+                    reasons.append("published support source is not an ancestor of the exact head")
+                else:
+                    baseline_commit = resolved_source
+
+    normalized_reasons = sorted(set(reasons))
+    return {
+        "schema": BASELINE_SCHEMA,
+        "mode": "published_support_pair",
+        "target_base_commit": target_base,
+        "baseline_commit": baseline_commit,
+        "head_commit": head,
+        "head_tree": git(repository, "rev-parse", f"{head}^{{tree}}"),
+        "provenance": provenance,
+        "validation": {"valid": not normalized_reasons, "reasons": normalized_reasons},
     }
 
 
@@ -940,12 +1063,21 @@ def plan(
     target_base_revision: str,
     head_revision: str,
     trusted_policy_revision: str | None = None,
+    baseline_candidate: Path | None = None,
 ) -> dict[str, Any]:
     repository = repository.resolve()
     target_base = resolve_commit(repository, target_base_revision)
     head = resolve_commit(repository, head_revision)
     trusted_policy = resolve_commit(repository, trusted_policy_revision or target_base_revision)
-    baseline = make_baseline(repository, target_base, head)
+    if baseline_candidate is None:
+        baseline = make_pull_request_baseline(repository, target_base, head)
+    else:
+        baseline = make_published_support_baseline(
+            repository,
+            target_base,
+            head,
+            baseline_candidate,
+        )
     degraded: list[str] = []
     artifacts: dict[str, Any] = {}
 
@@ -965,127 +1097,152 @@ def plan(
         except (OSError, json.JSONDecodeError, PlannerError) as exc:
             raise PlannerError(f"trusted policy could not be loaded: {exc}") from exc
 
-        paths = changed_paths(repository, baseline["baseline_commit"], head)
-        changed_policy_path = policy_changed(paths)
-        try:
-            export_git_tree(repository, baseline["baseline_commit"], baseline_tree)
-            export_git_tree(repository, head, head_tree)
-        except PlannerError as exc:
-            degraded.append(str(exc))
+        baseline_validation = baseline.get("validation")
+        if (
+            not isinstance(baseline_validation, dict)
+            or baseline_validation.get("valid") is not True
+            or baseline_validation.get("reasons") != []
+        ):
+            baseline_reasons = (
+                baseline_validation.get("reasons")
+                if isinstance(baseline_validation, dict)
+                and isinstance(baseline_validation.get("reasons"), list)
+                else ["baseline validation result is malformed"]
+            )
+            reason = "baseline validation failed: " + "; ".join(
+                value for value in baseline_reasons if isinstance(value, str)
+            )
+            degraded.append(reason)
             for name in graph["artifacts"]:
-                artifacts[name] = unclassified_result(str(exc))
+                artifacts[name] = unclassified_result(reason)
         else:
-            known_artifact_directories = {
-                posixpath.dirname(candidate.get("manifest", ""))
-                for candidate in graph["artifacts"].values()
-                if candidate.get("kind") == "rust-package"
-            }
-            baseline_index = TreeIndex(baseline_tree)
-            head_index = TreeIndex(head_tree)
-            baseline_fingerprints: dict[str, ArtifactFingerprint | RustFingerprint] = {}
-            head_fingerprints: dict[str, ArtifactFingerprint | RustFingerprint] = {}
-            classifying: set[str] = set()
+            paths = changed_paths(repository, baseline["baseline_commit"], head)
+            changed_policy_path = policy_changed(paths)
+            try:
+                export_git_tree(repository, baseline["baseline_commit"], baseline_tree)
+                export_git_tree(repository, head, head_tree)
+            except PlannerError as exc:
+                degraded.append(str(exc))
+                for name in graph["artifacts"]:
+                    artifacts[name] = unclassified_result(str(exc))
+            else:
+                known_artifact_directories = {
+                    posixpath.dirname(candidate.get("manifest", ""))
+                    for candidate in graph["artifacts"].values()
+                    if candidate.get("kind") == "rust-package"
+                }
+                baseline_index = TreeIndex(baseline_tree)
+                head_index = TreeIndex(head_tree)
+                baseline_fingerprints: dict[str, ArtifactFingerprint | RustFingerprint] = {}
+                head_fingerprints: dict[str, ArtifactFingerprint | RustFingerprint] = {}
+                classifying: set[str] = set()
 
-            def classify(name: str) -> dict[str, Any]:
-                if name in artifacts:
-                    return artifacts[name]
-                spec = graph["artifacts"].get(name)
-                if not isinstance(spec, dict):
-                    return unclassified_result(f"artifact definition is missing: {name}")
-                if changed_policy_path:
-                    result = unclassified_result(
-                        f"trusted policy surface changed: {changed_policy_path}"
-                    )
-                    artifacts[name] = result
-                    return result
-                if spec.get("kind") == "unmigrated":
-                    result = unclassified_result(
-                        "artifact resolver has not migrated to the canonical graph"
-                    )
-                    artifacts[name] = result
-                    return result
-                if name in classifying:
-                    result = unclassified_result(f"artifact dependency cycle includes: {name}")
-                    artifacts[name] = result
-                    return result
-                classifying.add(name)
-                try:
-                    before = artifact_fingerprint(
-                        name,
-                        baseline_tree,
-                        graph,
-                        rust_toolchain,
-                        baseline_index,
-                        baseline_fingerprints,
-                    )
-                    after = artifact_fingerprint(
-                        name,
-                        head_tree,
-                        graph,
-                        rust_toolchain,
-                        head_index,
-                        head_fingerprints,
-                    )
-                    dependency_failure = None
-                    if spec.get("kind") == "composite":
-                        for dependency in composite_dependencies(spec):
-                            dependency_result = classify(dependency)
-                            if dependency_result["state"] == "unclassified":
-                                dependency_failure = (
-                                    f"dependency {dependency} is unclassified: "
-                                    f"{dependency_result['explanations'][0]}"
-                                )
-                                break
-                    if dependency_failure:
-                        result = {
-                            "state": "unclassified",
-                            "baseline_fingerprint": before.fingerprint,
-                            "head_fingerprint": after.fingerprint,
-                            "explanations": [dependency_failure],
-                        }
-                    elif before.fingerprint != after.fingerprint:
-                        result = {
-                            "state": "affected",
-                            "baseline_fingerprint": before.fingerprint,
-                            "head_fingerprint": after.fingerprint,
-                            "explanations": component_changes(before.document, after.document),
-                        }
-                    elif not dependency_failure and isinstance(before, RustFingerprint) and isinstance(after, RustFingerprint):
-                        unknown = has_unknown_reachable_path(
-                            paths, before, after, known_artifact_directories
+                def classify(name: str) -> dict[str, Any]:
+                    if name in artifacts:
+                        return artifacts[name]
+                    spec = graph["artifacts"].get(name)
+                    if not isinstance(spec, dict):
+                        return unclassified_result(f"artifact definition is missing: {name}")
+                    if changed_policy_path:
+                        result = unclassified_result(
+                            f"trusted policy surface changed: {changed_policy_path}"
                         )
-                        if unknown:
+                        artifacts[name] = result
+                        return result
+                    if spec.get("kind") == "unmigrated":
+                        result = unclassified_result(
+                            "artifact resolver has not migrated to the canonical graph"
+                        )
+                        artifacts[name] = result
+                        return result
+                    if name in classifying:
+                        result = unclassified_result(f"artifact dependency cycle includes: {name}")
+                        artifacts[name] = result
+                        return result
+                    classifying.add(name)
+                    try:
+                        before = artifact_fingerprint(
+                            name,
+                            baseline_tree,
+                            graph,
+                            rust_toolchain,
+                            baseline_index,
+                            baseline_fingerprints,
+                        )
+                        after = artifact_fingerprint(
+                            name,
+                            head_tree,
+                            graph,
+                            rust_toolchain,
+                            head_index,
+                            head_fingerprints,
+                        )
+                        dependency_failure = None
+                        if spec.get("kind") == "composite":
+                            for dependency in composite_dependencies(spec):
+                                dependency_result = classify(dependency)
+                                if dependency_result["state"] == "unclassified":
+                                    dependency_failure = (
+                                        f"dependency {dependency} is unclassified: "
+                                        f"{dependency_result['explanations'][0]}"
+                                    )
+                                    break
+                        if dependency_failure:
                             result = {
                                 "state": "unclassified",
                                 "baseline_fingerprint": before.fingerprint,
                                 "head_fingerprint": after.fingerprint,
-                                "explanations": [f"changed path has no trusted ownership rule: {unknown}"],
+                                "explanations": [dependency_failure],
                             }
+                        elif before.fingerprint != after.fingerprint:
+                            result = {
+                                "state": "affected",
+                                "baseline_fingerprint": before.fingerprint,
+                                "head_fingerprint": after.fingerprint,
+                                "explanations": component_changes(before.document, after.document),
+                            }
+                        elif isinstance(before, RustFingerprint) and isinstance(after, RustFingerprint):
+                            unknown = has_unknown_reachable_path(
+                                paths, before, after, known_artifact_directories
+                            )
+                            if unknown:
+                                result = {
+                                    "state": "unclassified",
+                                    "baseline_fingerprint": before.fingerprint,
+                                    "head_fingerprint": after.fingerprint,
+                                    "explanations": [
+                                        f"changed path has no trusted ownership rule: {unknown}"
+                                    ],
+                                }
+                            else:
+                                result = {
+                                    "state": "unaffected",
+                                    "baseline_fingerprint": before.fingerprint,
+                                    "head_fingerprint": after.fingerprint,
+                                    "explanations": [
+                                        "artifact fingerprint and owned inputs are unchanged"
+                                    ],
+                                }
                         else:
                             result = {
                                 "state": "unaffected",
                                 "baseline_fingerprint": before.fingerprint,
                                 "head_fingerprint": after.fingerprint,
-                                "explanations": ["artifact fingerprint and owned inputs are unchanged"],
+                                "explanations": [
+                                    "artifact fingerprint and owned inputs are unchanged"
+                                ],
                             }
-                    elif not dependency_failure:
-                        result = {
-                            "state": "unaffected",
-                            "baseline_fingerprint": before.fingerprint,
-                            "head_fingerprint": after.fingerprint,
-                            "explanations": ["artifact fingerprint and owned inputs are unchanged"],
-                        }
-                except (OSError, UnicodeError, tomllib.TOMLDecodeError, PlannerError) as exc:
-                    reason = f"{name} classification failed: {exc}"
-                    degraded.append(reason)
-                    result = unclassified_result(reason)
-                finally:
-                    classifying.discard(name)
-                artifacts[name] = result
-                return result
+                    except (OSError, UnicodeError, tomllib.TOMLDecodeError, PlannerError) as exc:
+                        reason = f"{name} classification failed: {exc}"
+                        degraded.append(reason)
+                        result = unclassified_result(reason)
+                    finally:
+                        classifying.discard(name)
+                    artifacts[name] = result
+                    return result
 
-            for name in graph["artifacts"]:
-                classify(name)
+                for name in graph["artifacts"]:
+                    classify(name)
 
     selected = lambda artifact: artifacts[artifact]["state"] != "unaffected"
     return {
@@ -1161,6 +1318,10 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "--trusted-policy",
         help="revision containing the executing policy (defaults to --target-base)",
     )
+    parser.add_argument(
+        "--baseline-candidate",
+        help="untrusted published-support registry candidate to validate before planning",
+    )
     parser.add_argument("--output", help="write the canonical JSON plan to this path instead of stdout")
     parser.add_argument("--check-cargo-oracle", action="store_true", help="compare local closure with cargo tree")
     return parser.parse_args(argv)
@@ -1169,7 +1330,13 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv or sys.argv[1:])
     try:
-        document = plan(Path(args.repository), args.target_base, args.head, args.trusted_policy)
+        document = plan(
+            Path(args.repository),
+            args.target_base,
+            args.head,
+            args.trusted_policy,
+            Path(args.baseline_candidate) if args.baseline_candidate else None,
+        )
         if args.check_cargo_oracle:
             cargo_oracle(Path(args.repository).resolve(), document)
     except PlannerError as exc:

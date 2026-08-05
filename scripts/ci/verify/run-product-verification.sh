@@ -503,6 +503,7 @@ run_release() {
   scripts/ci/tests/test-dispatch-deploy-dev.sh
   scripts/ci/tests/test-dispatch-deploy-prod.sh
   scripts/ci/tests/test-publish-image-to-ghcr.sh
+  scripts/ci/tests/test-resolve-published-support-pair.sh
   scripts/ci/tests/test-run-skopeo-container.sh
   scripts/ci/tests/test-support-images-workflow.sh
   scripts/ci/tests/test-workspace-image-verify-workflow.sh

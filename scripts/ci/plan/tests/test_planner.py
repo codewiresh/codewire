@@ -50,11 +50,27 @@ class FixtureRepository:
         policy_root = self.root / "scripts/ci/plan"
         (policy_root / "schemas").mkdir(parents=True)
         shutil.copy2(PLANNER_PATH, policy_root / "planner.py")
+        shutil.copy2(PLANNER_PATH.parent / "apply-support-plan.py", policy_root / "apply-support-plan.py")
+        images_root = self.root / "scripts/ci/images"
+        images_root.mkdir(parents=True)
+        shutil.copy2(
+            PLANNER_PATH.parents[1] / "images" / "resolve-published-support-pair.sh",
+            images_root / "resolve-published-support-pair.sh",
+        )
+        workflow_root = self.root / ".gitea/workflows"
+        workflow_root.mkdir(parents=True)
+        shutil.copy2(
+            PLANNER_PATH.parents[3] / ".gitea" / "workflows" / "support-images.yaml",
+            workflow_root / "support-images.yaml",
+        )
         for name in ("baseline.schema.json", "plan.schema.json"):
             shutil.copy2(PLANNER_PATH.parent / "schemas" / name, policy_root / "schemas" / name)
         graph = {
             "schema": "codewire.ci-artifact-graph/v1",
             "policy_files": [
+                ".gitea/workflows/support-images.yaml",
+                "scripts/ci/images/resolve-published-support-pair.sh",
+                "scripts/ci/plan/apply-support-plan.py",
                 "scripts/ci/plan/artifact-graph.json",
                 "scripts/ci/plan/planner.py",
                 "scripts/ci/plan/schemas/baseline.schema.json",
@@ -312,6 +328,51 @@ dependencies = ["core"]
     def plan(self, head: str | None = None) -> dict:
         return planner.plan(self.root, self.base, head or "HEAD", self.base)
 
+    def support_candidate(
+        self,
+        source: str,
+        *,
+        base_source: str | None = None,
+        workspace_source: str | None = None,
+        retrieval_valid: bool = True,
+        base_digest: str = "sha256:" + "1" * 64,
+        workspace_digest: str = "sha256:" + "2" * 64,
+    ) -> Path:
+        path = self.root / ".support-candidate.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "schema": planner.SUPPORT_CANDIDATE_SCHEMA,
+                    "retrieval": {
+                        "valid": retrieval_valid,
+                        "reasons": [] if retrieval_valid else ["workspace_registry_lookup_failed"],
+                    },
+                    "images": {
+                        "base": {
+                            "repository": "ghcr.io/codewiresh/base",
+                            "tag": "latest",
+                            "digest": base_digest,
+                            "revision": base_source or source,
+                        },
+                        "workspace": {
+                            "repository": "ghcr.io/codewiresh/workspace",
+                            "tag": "latest",
+                            "digest": workspace_digest,
+                            "revision": workspace_source or source,
+                        },
+                    },
+                },
+                sort_keys=True,
+                indent=2,
+            )
+            + "\n"
+        )
+        return path
+
+    def support_plan(self, candidate: Path, head: str | None = None) -> dict:
+        exact_head = head or run(["git", "rev-parse", "HEAD"], self.root)
+        return planner.plan(self.root, exact_head, exact_head, exact_head, candidate)
+
 
 class PlannerFixtureTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -340,6 +401,77 @@ class PlannerFixtureTests(unittest.TestCase):
         self.assertEqual(self.states(first), ("unaffected", "unaffected"))
         self.assertEqual(self.workspace_states(first), ("unaffected", "unaffected", "unaffected"))
         self.assertFalse(first["verification"]["workspace_image"])
+
+    def test_matching_published_support_pair_uses_exact_ancestor(self) -> None:
+        head = self.repo.change("apps/dashboard/README.md", "unrelated support baseline change\n")
+        candidate = self.repo.support_candidate(self.repo.base)
+        document = self.repo.support_plan(candidate, head)
+        self.assertTrue(document["baseline"]["validation"]["valid"])
+        self.assertEqual(document["baseline"]["mode"], "published_support_pair")
+        self.assertEqual(document["baseline"]["baseline_commit"], self.repo.base)
+        self.assertEqual(self.workspace_states(document), ("unaffected", "unaffected", "unaffected"))
+
+    def test_published_support_pair_selects_relevant_changes(self) -> None:
+        self.repo.write("images/base/entrypoint.sh", "#!/bin/sh\nset -eu\nexec \"$@\"\n", 0o755)
+        head = self.repo.commit("base image change")
+        candidate = self.repo.support_candidate(self.repo.base)
+        document = self.repo.support_plan(candidate, head)
+        self.assertEqual(self.workspace_states(document), ("unaffected", "affected", "affected"))
+
+    def test_missing_or_failed_support_candidate_fails_pair_closed(self) -> None:
+        missing = self.repo.root / "missing-candidate.json"
+        missing_document = self.repo.support_plan(missing, self.repo.base)
+        self.assertFalse(missing_document["baseline"]["validation"]["valid"])
+        self.assertEqual(self.workspace_states(missing_document), ("unclassified", "unclassified", "unclassified"))
+
+        failed = self.repo.support_candidate(self.repo.base, retrieval_valid=False)
+        failed_document = self.repo.support_plan(failed, self.repo.base)
+        self.assertFalse(failed_document["baseline"]["validation"]["valid"])
+        self.assertEqual(self.workspace_states(failed_document), ("unclassified", "unclassified", "unclassified"))
+
+        oversized = self.repo.root / "oversized-candidate.json"
+        oversized.write_bytes(b"x" * (planner.MAX_BASELINE_CANDIDATE_BYTES + 1))
+        oversized_document = self.repo.support_plan(oversized, self.repo.base)
+        self.assertIn(
+            "published support candidate exceeds the size limit",
+            oversized_document["baseline"]["validation"]["reasons"],
+        )
+        self.assertEqual(
+            self.workspace_states(oversized_document),
+            ("unclassified", "unclassified", "unclassified"),
+        )
+
+    def test_mismatched_or_malformed_support_pair_fails_closed(self) -> None:
+        head = self.repo.change("apps/dashboard/README.md", "head\n")
+        mismatch = self.repo.support_candidate(
+            self.repo.base,
+            workspace_source=head,
+        )
+        mismatch_document = self.repo.support_plan(mismatch, head)
+        self.assertIn(
+            "published support image revisions do not match",
+            mismatch_document["baseline"]["validation"]["reasons"],
+        )
+        self.assertEqual(self.workspace_states(mismatch_document), ("unclassified", "unclassified", "unclassified"))
+
+        malformed = self.repo.support_candidate(self.repo.base, base_digest="not-a-digest")
+        malformed_document = self.repo.support_plan(malformed, head)
+        self.assertIn(
+            "published support base digest is invalid",
+            malformed_document["baseline"]["validation"]["reasons"],
+        )
+        self.assertEqual(self.workspace_states(malformed_document), ("unclassified", "unclassified", "unclassified"))
+
+    def test_non_ancestor_support_source_fails_closed(self) -> None:
+        tree = run(["git", "rev-parse", "HEAD^{tree}"], self.repo.root)
+        unrelated = run(["git", "commit-tree", tree, "-m", "unrelated published source"], self.repo.root)
+        candidate = self.repo.support_candidate(unrelated)
+        document = self.repo.support_plan(candidate, self.repo.base)
+        self.assertIn(
+            "published support source is not an ancestor of the exact head",
+            document["baseline"]["validation"]["reasons"],
+        )
+        self.assertEqual(self.workspace_states(document), ("unclassified", "unclassified", "unclassified"))
 
     def test_direct_cli_change_affects_only_cli(self) -> None:
         self.repo.change("cli/src/main.rs", "fn main() { core::run(); /* changed */ }\n")

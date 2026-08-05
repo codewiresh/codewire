@@ -26,30 +26,53 @@ if grep -Fq 'CODEWIRE_GHCR_PUBLISH_ENABLED' "$WORKFLOW"; then
   fail 'support GHCR publication retains its rollout flag'
 fi
 selection_job="$(sed -n '/^  support-selection:/,/^  publish-support-images:/p' "$WORKFLOW")"
-grep -Fq '          fetch-depth: 2' <<<"$selection_job" ||
-  fail 'support selection does not receive the parent and exact main commit'
+if grep -q '^    paths:' "$WORKFLOW"; then
+  fail 'support publication still duplicates artifact impact in workflow paths'
+fi
+grep -Fq '          fetch-depth: 0' <<<"$selection_job" ||
+  fail 'support selection does not receive canonical history for ancestry validation'
+grep -Fq 'actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5' \
+  <<<"$selection_job" || fail 'support selection checkout action is not pinned'
 grep -Fq 'uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b' \
   <<<"$selection_job" ||
   fail 'support selection does not install the pinned Rust toolchain for artifact classification'
+grep -Fq '          toolchain: 1.91.1' <<<"$selection_job" ||
+  fail 'support selection does not use the repository Rust toolchain'
 toolchain_line="$(grep -n -m1 'uses: dtolnay/rust-toolchain@' \
   <<<"$selection_job" | cut -d: -f1)"
-classifier_line="$(grep -n -m1 'name: Select atomic support build' \
+classifier_line="$(grep -n -m1 'name: Plan atomic support build from validated baseline' \
   <<<"$selection_job" | cut -d: -f1)"
 [[ "$toolchain_line" -lt "$classifier_line" ]] ||
   fail 'support selection installs Rust after artifact classification'
-grep -Fq 'base_sha="$(git rev-parse "$GITHUB_SHA^")"' <<<"$selection_job" ||
-  fail 'support selection does not resolve the exact parent SHA'
-grep -Fq 'scripts/ci/select/select-support-images.sh "$base_sha" "$GITHUB_SHA"' \
-  <<<"$selection_job" || fail 'support selection is not bound to the exact push range'
-if grep -Fq 'secrets.' <<<"$selection_job"; then
-  fail 'support selection unexpectedly receives a credential'
+grep -Fq 'scripts/ci/images/resolve-published-support-pair.sh "$candidate"' \
+  <<<"$selection_job" || fail 'support selection does not resolve published pair metadata'
+grep -Fq 'GHCR_PUBLISH_USERNAME: ${{ vars.GHCR_PUBLISH_USERNAME }}' \
+  <<<"$selection_job" || fail 'support baseline resolver omits configured registry identity'
+grep -Fq -- '--baseline-candidate "$RUNNER_TEMP/codewire-published-support-candidate.json"' \
+  <<<"$selection_job" || fail 'planner does not consume the untrusted registry candidate'
+grep -Fq -- '--target-base "$GITHUB_SHA"' <<<"$selection_job" ||
+  fail 'support planner target is not the exact canonical head'
+grep -Fq -- '--trusted-policy "$GITHUB_SHA"' <<<"$selection_job" ||
+  fail 'support planner policy is not the exact canonical head'
+grep -Fq 'scripts/ci/plan/apply-support-plan.py' <<<"$selection_job" ||
+  fail 'support event adapter does not consume planner facts'
+grep -Fq 'name: Remove untrusted registry candidate' <<<"$selection_job" ||
+  fail 'support selection does not remove candidate metadata'
+grep -Fq 'rm -f -- "$RUNNER_TEMP/codewire-published-support-candidate.json"' \
+  <<<"$selection_job" || fail 'support selection cleanup does not use the fixed runner-temp path'
+if grep -Fq '"$GITHUB_SHA^"' <<<"$selection_job" \
+  || grep -Eq 'artifact-impact\.py|select-support-images\.sh' <<<"$selection_job"; then
+  fail 'support selection retains HEAD-parent or legacy path classification'
 fi
-grep -qF -- "- 'scripts/ci/select/artifact-impact.py'" "$WORKFLOW" ||
-  fail 'artifact classifier changes do not activate support selection'
-grep -qF -- "- 'scripts/ci/select/select-support-images.sh'" "$WORKFLOW" ||
-  fail 'support wrapper changes do not activate support selection'
-grep -qF -- "- 'rust-toolchain.toml'" "$WORKFLOW" ||
-  fail 'Rust toolchain changes do not activate support selection'
+if grep -Fq 'secrets.' <<<"$selection_job"; then
+  fail 'support selection bypasses the existing Infisical credential handoff'
+fi
+for output in build_support_images reason matched_categories base_image_state \
+  workspace_image_state baseline_sha head_sha head_tree ci_plan_sha256 \
+  ci_policy_sha256 baseline_valid; do
+  grep -Fq "      ${output}: \${{ steps.select.outputs.${output} }}" <<<"$selection_job" ||
+    fail "support selection omits ${output} planner output"
+done
 [[ "$(grep -Fc "if: \${{ needs.support-selection.outputs.build_support_images == 'true' }}" \
   "$WORKFLOW")" -eq 1 ]] ||
   fail 'the atomic support build/publication job is not gated by one selection'
@@ -87,18 +110,6 @@ done
 if grep -Fq 'secrets.' <<<"$publish_job"; then
   fail 'support publisher bypasses the Infisical credential handoff'
 fi
-grep -qF -- "- 'crates/codewire-cli-bin/**'" "$WORKFLOW" ||
-  fail 'workspace binary package changes do not trigger the support build'
-grep -qF -- "- 'crates/codewire-daemon/**'" "$WORKFLOW" ||
-  fail 'environment daemon core changes do not trigger the support build'
-grep -qF -- "- 'crates/codewire-gateway-proto/**'" "$WORKFLOW" ||
-  fail 'environment daemon protocol changes do not trigger the support build'
-grep -qF -- "- 'libs/gateway-proto/**'" "$WORKFLOW" ||
-  fail 'environment daemon schema changes do not trigger the support build'
-grep -qF -- "- 'crates/codewire-proto/**'" "$WORKFLOW" ||
-  fail 'workspace Rust protobuf package changes do not trigger the support build'
-grep -qF -- "- 'proto/**'" "$WORKFLOW" ||
-  fail 'workspace protobuf contract changes do not trigger the support build'
 grep -qF -- '-p codewire-cli-bin --bin cw' "$WORKSPACE_DOCKERFILE" ||
   fail 'workspace builds cw from the wrong Rust package'
 builder_stage="$(sed -n '/^FROM rust:.* AS cw-builder$/,/^FROM /p' "$WORKSPACE_DOCKERFILE")"

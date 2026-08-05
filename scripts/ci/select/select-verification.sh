@@ -365,10 +365,12 @@ elif [ "$event_selected" = false ]; then
       scripts/ci/select/verify-release-tag-receipt.sh|\
       scripts/ci/select/artifact-impact.py|\
       scripts/ci/select/select-support-images.sh|\
+      scripts/ci/images/resolve-published-support-pair.sh|\
       scripts/ci/plan/*|\
       scripts/ci/tests/test-select-verification.sh|scripts/ci/tests/test-select-deploy-dev.sh|\
       scripts/ci/tests/test-setup-kubeconfig.sh|\
       scripts/ci/tests/test-artifact-impact.py|\
+      scripts/ci/tests/test-resolve-published-support-pair.sh|\
       scripts/ci/tests/test-resolve-deployed-source.sh|\
       scripts/ci/tests/test-require-verification-results.sh|\
       scripts/ci/tests/test-verify-tested-tree-receipt.sh|\
@@ -987,6 +989,7 @@ elif [ "$event_selected" = false ]; then
       scripts/ci/deploy/dispatch-deploy-dev.sh|scripts/ci/deploy/dispatch-deploy-prod.sh|\
       scripts/ci/setup/fetch-infisical-ci-secret.sh|\
       scripts/ci/images/publish-image-to-ghcr.sh|\
+      scripts/ci/images/resolve-published-support-pair.sh|\
       scripts/ci/images/run-skopeo-container.sh|\
       scripts/ci/images/image-bundle.py|scripts/ci/release/mirror-canonical-release-tag.sh|\
       scripts/ci/release/mirror-git-tags.sh|\
@@ -996,6 +999,7 @@ elif [ "$event_selected" = false ]; then
       scripts/ci/tests/test-copy-image-to-ghcr.sh|\
       scripts/ci/tests/test-dispatch-deploy-dev.sh|scripts/ci/tests/test-dispatch-deploy-prod.sh|\
       scripts/ci/tests/test-publish-image-to-ghcr.sh|\
+      scripts/ci/tests/test-resolve-published-support-pair.sh|\
       scripts/ci/tests/test-run-skopeo-container.sh|\
       scripts/ci/tests/test-support-images-workflow.sh|\
       scripts/ci/tests/test-workspace-image-verify-workflow.sh|\

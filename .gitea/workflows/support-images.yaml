@@ -3,31 +3,6 @@ name: Build support images
 on:
   push:
     branches: [main]
-    paths:
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - 'rust-toolchain.toml'
-      - 'crates/codewire-cli/**'
-      - 'crates/codewire-cli-bin/**'
-      - 'crates/codewire-client/**'
-      - 'crates/codewire-daemon/**'
-      - 'crates/codewire-gateway-proto/**'
-      - 'crates/codewire-proto/**'
-      - 'crates/codewire-tailnet/**'
-      - 'images/base/**'
-      - 'images/workspace/**'
-      - 'libs/gateway-proto/**'
-      - 'proto/**'
-      - 'scripts/ci/images/build-push-image.sh'
-      - 'scripts/ci/images/compute-image-tags.sh'
-      - 'scripts/ci/images/copy-image-to-ghcr.sh'
-      - 'scripts/ci/setup/fetch-infisical-ci-secret.sh'
-      - 'scripts/ci/images/image-bundle.py'
-      - 'scripts/ci/images/publish-image-to-ghcr.sh'
-      - 'scripts/ci/images/run-skopeo-container.sh'
-      - 'scripts/ci/select/artifact-impact.py'
-      - 'scripts/ci/select/select-support-images.sh'
-      - '.gitea/workflows/support-images.yaml'
 permissions:
   contents: read
 
@@ -42,22 +17,56 @@ jobs:
       build_support_images: ${{ steps.select.outputs.build_support_images }}
       reason: ${{ steps.select.outputs.reason }}
       matched_categories: ${{ steps.select.outputs.matched_categories }}
+      base_image_state: ${{ steps.select.outputs.base_image_state }}
+      workspace_image_state: ${{ steps.select.outputs.workspace_image_state }}
       baseline_sha: ${{ steps.select.outputs.baseline_sha }}
       head_sha: ${{ steps.select.outputs.head_sha }}
+      head_tree: ${{ steps.select.outputs.head_tree }}
+      ci_plan_sha256: ${{ steps.select.outputs.ci_plan_sha256 }}
+      ci_policy_sha256: ${{ steps.select.outputs.ci_policy_sha256 }}
+      baseline_valid: ${{ steps.select.outputs.baseline_valid }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
-          fetch-depth: 2
+          fetch-depth: 0
 
       - uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b
         with:
-          toolchain: stable
+          toolchain: 1.91.1
 
-      - name: Select atomic support build
+      - name: Resolve untrusted published support pair
+        env:
+          GHCR_PUBLISH_USERNAME: ${{ vars.GHCR_PUBLISH_USERNAME }}
+        run: |
+          set -euo pipefail
+          candidate="$RUNNER_TEMP/codewire-published-support-candidate.json"
+          scripts/ci/images/resolve-published-support-pair.sh "$candidate"
+
+      - name: Plan atomic support build from validated baseline
         id: select
         run: |
-          base_sha="$(git rev-parse "$GITHUB_SHA^")"
-          scripts/ci/select/select-support-images.sh "$base_sha" "$GITHUB_SHA"
+          set -euo pipefail
+          plan="$(mktemp)"
+          trap 'rm -f "$plan"' EXIT
+          python3 scripts/ci/plan/planner.py \
+            --repository . \
+            --target-base "$GITHUB_SHA" \
+            --head "$GITHUB_SHA" \
+            --trusted-policy "$GITHUB_SHA" \
+            --baseline-candidate "$RUNNER_TEMP/codewire-published-support-candidate.json" \
+            --output "$plan"
+          if jq -e '.degraded_reasons | length > 0' "$plan" >/dev/null; then
+            echo 'Support artifact planner degraded; the atomic pair remains selected:'
+            jq -c '.degraded_reasons' "$plan"
+          fi
+          python3 scripts/ci/plan/apply-support-plan.py \
+            --plan "$plan" \
+            --head "$GITHUB_SHA" \
+            --head-tree "$(git rev-parse "$GITHUB_SHA^{tree}")"
+
+      - name: Remove untrusted registry candidate
+        if: ${{ always() }}
+        run: rm -f -- "$RUNNER_TEMP/codewire-published-support-candidate.json"
 
   publish-support-images:
     name: Build and publish exact support images
@@ -65,7 +74,7 @@ jobs:
     needs: [support-selection]
     if: ${{ needs.support-selection.outputs.build_support_images == 'true' }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
 
       - name: Build canonical base image
         id: base

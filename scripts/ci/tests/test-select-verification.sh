@@ -114,7 +114,9 @@ run_paths_case artifact_impact_ci pull_request refs/pull/201/head false \
   scripts/ci/select/artifact-impact.py \
   scripts/ci/select/select-deploy-dev.sh \
   scripts/ci/select/select-support-images.sh \
+  scripts/ci/images/resolve-published-support-pair.sh \
   scripts/ci/tests/test-artifact-impact.py \
+  scripts/ci/tests/test-resolve-published-support-pair.sh \
   scripts/ci/tests/test-resolve-deployed-source.sh
 run_paths_case repo_checks pull_request refs/pull/21/head false \
   'contracts contracts_proto deploy edge_kind go_consumer_interop go_support policy release runtime_confidential security security_idp_kek' \
@@ -142,12 +144,14 @@ run_paths_case release pull_request refs/pull/3/head false \
   scripts/ci/images/copy-image-to-ghcr.sh \
   scripts/ci/setup/fetch-infisical-ci-secret.sh \
   scripts/ci/images/publish-image-to-ghcr.sh \
+  scripts/ci/images/resolve-published-support-pair.sh \
   scripts/ci/images/run-skopeo-container.sh \
   scripts/ci/release/package-cw-release.sh \
   scripts/ci/release/publish-cw-release.sh \
   scripts/ci/tests/test-cw-install-signature.sh \
   scripts/ci/tests/test-copy-image-to-ghcr.sh \
   scripts/ci/tests/test-publish-image-to-ghcr.sh \
+  scripts/ci/tests/test-resolve-published-support-pair.sh \
   scripts/ci/tests/test-run-skopeo-container.sh \
   scripts/ci/tests/test-support-images-workflow.sh \
   scripts/ci/tests/test-workspace-image-verify-workflow.sh \

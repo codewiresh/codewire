@@ -1,9 +1,9 @@
 # Codewire CI planner
 
-This directory is the versioned impact-policy kernel for Codewire CI. In its
-first migration slice it classifies the packaged `cw` CLI and desktop
-artifacts. Image nodes deliberately remain `unclassified`, and the existing
-workflow selectors remain authoritative.
+This directory is the versioned impact-policy kernel for Codewire CI. It
+classifies the packaged `cw` CLI, desktop, workspace binary, and atomic support
+image inputs. Runtime image nodes remain `unclassified`, and existing workflow
+selectors remain authoritative only for unmigrated artifacts.
 
 For a pull request, the workflow must execute the copy of `planner.py`, the
 graph, and schemas from the trusted target-base commit. The proposed-head copy
@@ -23,6 +23,20 @@ The output is `codewire.ci-plan/v1`. Artifact state is exactly `affected`,
 `unaffected`, or `unclassified`; consumers must schedule `affected` and
 `unclassified`. The planner reports impact facts only. It does not authorize
 publication or deployment.
+
+Canonical-main support publication uses the same planner with
+`--baseline-candidate`. The support workflow resolves untrusted `base:latest`
+and `workspace:latest` registry metadata through its existing credential
+boundary, then removes the credential before planning. The planner validates
+that both repositories, immutable digests, and revision labels form one
+matching Git ancestor and emits `codewire.ci-baseline/v1` in
+`published_support_pair` mode. Missing, malformed, mismatched, inaccessible,
+or non-ancestor candidates make every artifact `unclassified`.
+
+`apply-support-plan.py` is the support event adapter. It owns only the atomic
+pair policy: publish both support images when either planner artifact is
+`affected` or `unclassified`; skip only when both are `unaffected`. It does not
+inspect source paths or dependency graphs.
 
 `apply-verification-plan.py` is the event adapter. It validates the trusted
 plan, removes the legacy desktop-package decision, and adds that decision back
