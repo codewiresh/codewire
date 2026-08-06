@@ -42,6 +42,8 @@ Continue the next unblocked step. Do not stop merely because one turn ended.
 Do not wake solely to re-read an unchanged healthy CI run. Report only when the
 goal is complete, genuinely blocked, or a user decision is required. If
 complete, summarize evidence and stop the automation.
+An eventual authority gate is not a blocker while authorized dispatchable work
+remains.
 ```
 
 Default cadence:
@@ -68,8 +70,9 @@ human reminder to resume Codex with the same goal and heartbeat prompt.
 At the start of every turn or wakeup:
 
 1. Re-read the newest user message and let it override older instructions.
-2. Check the active goal and decide whether it is complete, blocked, or still
-   actionable.
+2. Check the active goal and live control's dispatchable work before evaluating
+   the terminal goal. If authorized work is actionable, the Program is not
+   blocked by a future gate; continue the smallest useful item.
 3. Inspect repo state before edits:
    - `git status --short --branch`
    - relevant Gitea issue/PR state with command-scoped `tea` flags
@@ -80,6 +83,12 @@ At the start of every turn or wakeup:
 4. Continue the smallest unblocked step through implementation, validation,
    PR, CI, merge, and issue closure.
 5. Give brief progress updates during long work.
+
+At a material transition or after canonical main advances, compare the bound
+instruction revision with current `AGENTS.md`, the invoked `SKILL.md`, and any
+routed workflow document. Re-read only instruction files that changed, then
+bind the new revision. Do not keep acting from stale loaded instructions or
+re-read unchanged files every iteration.
 
 For bounded Rust CLI-only slices that qualify for the fast lane in
 `docs/dev/RUST-PORT-PLAYBOOK.md`, treat local CLI gates as the primary loop and
@@ -92,7 +101,10 @@ the normal verification ladder.
 
 Do not ask "should I continue?" while the goal is actionable. Ask only for a
 decision that materially changes scope, risk, credentials, production impact,
-or an unresolved ambiguity that cannot be discovered locally.
+or an unresolved ambiguity that cannot be discovered locally. Request external
+authority only when the exact operation is ready, immediate, and all authorized
+useful work is exhausted. Classify automatic consequences first, and never
+batch later operations whose prerequisites remain unsatisfied.
 
 ## Coordinate Program Work
 
@@ -104,7 +116,8 @@ When a live Program is `ACTIVE`:
 2. If this is the named coordinating session, update the live control only at
    admission, material transition, merge, or external mutation. Otherwise work
    only an already dispatched claim and report evidence without changing live
-   state.
+   state. Replace superseded live state at transitions and link completed
+   evidence from comments or child issues instead of appending action history.
 3. Make readiness relative to the next proposed mutation. Reuse accepted issue
    evidence and inspect only unresolved facts capable of changing that
    mutation's design, ownership, rollback, verification, or acceptance. Defer
@@ -146,8 +159,9 @@ Stop the loop only when one of these is true:
 - The same blocker has repeated after real attempts to make progress, and
   further work needs user input or an external state change.
 - The user explicitly pauses, stops, or changes the goal.
-- Continuing would require destructive or high-risk action that lacks explicit
-  authorization.
+- The immediate next useful action requires destructive or high-risk authority,
+  all authorized dispatchable work is exhausted, and no prerequisite work can
+  proceed. Eventual gated operations do not satisfy this stop condition.
 
 When stopping, report the current goal status, branch/PR/issue state, completed
 evidence, and the exact next unblock step.

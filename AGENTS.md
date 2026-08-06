@@ -26,6 +26,12 @@ credentials that the agent cannot read is not direct credential access.
 Workflow changes, manual reruns, recovery, release tags, production actions,
 new destinations, and direct credential handling remain separate operations.
 
+Request separate authority just in time: the exact operation must be ready,
+its prerequisites satisfied, and it must be the immediate next useful action
+after authorized work is exhausted. First classify whether the effect is an
+unchanged automatic consequence. Do not request or batch authority for later
+operations whose prerequisites are not yet satisfied.
+
 Preserve unrelated user changes and worktrees. Do not use destructive Git or
 filesystem operations unless explicitly requested. A Gitea outage permits only
 collision-free local preparation: no canonical claim, push, merge, shared
@@ -99,9 +105,21 @@ Comments, PRs, commits, and receipts supply evidence but cannot change live
 state, claims, gates, queue, or frontier. Checked-in plans are design or archive,
 never live control.
 
+Keep the live body current and compact. At a transition, replace superseded
+frontier, claim, queue, and gate state rather than appending an action history.
+Link completed evidence from comments or child issues instead of copying its
+full receipts into the live control.
+
 Describe the current frontier in actionable detail. Future work may remain at
 dependency level; resolving every later claim, repository base, branch, and
 operational gate is not a prerequisite for dispatching the first safe claim.
+
+A future authority or downstream gate is not a current blocker. The Program is
+blocked only when no authorized dispatchable work remains and the immediate
+next useful action requires missing authority or an external state change.
+`Blockers` contains only conditions preventing every dispatchable action;
+later conditions stay under downstream-start gates. Non-empty dispatchable
+work means the Program itself is not blocked.
 
 Bind a claim or coordinate once; routine actions inherit it. Reconcile on
 admission, material change, merge, and external mutation rather than before
@@ -125,8 +143,12 @@ Local verification is the development loop; CI attests the exact pushed tree.
 Run the cheapest gate able to catch the affected failure class. Diagnose
 locally reproducible product, integration, contract, or Kind failures locally
 first. Use CI first only for CI-owned behavior such as hosted timing, cache,
-permissions, or credentials. Poll healthy CI on transitions or when it is the
-sole blocker, and inspect component logs on failure.
+permissions, or credentials. Bind remote CI once to its exact head and run. A
+transition-aware watcher may surface early failure or terminal completion when
+that feedback matters; it must not create recurring model turns or unchanged-
+state narration. Continue independent authorized work while CI runs. Inspect
+targeted logs after failure, run/job disagreement, empty output, or credible
+stall.
 
 Verification must use the repository-owned topology and documented invocation
 for the exact tree under test. Never introduce an ad-hoc network relay, proxy,
