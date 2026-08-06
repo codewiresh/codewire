@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import tomllib
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -21,6 +22,54 @@ assert SPEC and SPEC.loader
 planner = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = planner
 SPEC.loader.exec_module(planner)
+
+
+def fixture_cargo_metadata(tree: Path, manifest: Path, _cargo_env: dict[str, str]) -> dict:
+    """Small deterministic Cargo-metadata model for this synthetic fixture.
+
+    Production planning still invokes isolated Cargo.  The fixture's package
+    grammar is intentionally narrow and is checked against one real Cargo
+    metadata invocation below; it avoids making every unit case a cold Cargo
+    subprocess test on CI.
+    """
+    root_document = tomllib.loads((tree / "Cargo.toml").read_text())
+    relative_manifest = manifest.resolve().relative_to(tree.resolve()).as_posix()
+    if relative_manifest == "Cargo.toml":
+        manifests = [f"{member}/Cargo.toml" for member in root_document["workspace"]["members"]]
+    else:
+        manifests = [relative_manifest]
+
+    def dependencies(document: dict, package_manifest: Path) -> list[dict]:
+        result: list[dict] = []
+        sections = [("dependencies", None), ("build-dependencies", "build"), ("dev-dependencies", "dev")]
+        for section, kind in sections:
+            for name, spec in document.get(section, {}).items():
+                detail = spec if isinstance(spec, dict) else {}
+                path = detail.get("path")
+                result.append({"name": detail.get("package", name), "path": str((package_manifest.parent / path).resolve()) if path else None, "req": "*" if path else detail.get("version", "*"), "kind": kind, "rename": name if detail.get("package") else None, "optional": bool(detail.get("optional")), "uses_default_features": detail.get("default-features", True), "features": detail.get("features", []), "target": None})
+        for target, table in document.get("target", {}).items():
+            for name, spec in table.get("dependencies", {}).items():
+                detail = spec if isinstance(spec, dict) else {}
+                path = detail.get("path")
+                result.append({"name": detail.get("package", name), "path": str((package_manifest.parent / path).resolve()) if path else None, "req": "*" if path else detail.get("version", "*"), "kind": None, "rename": name if detail.get("package") else None, "optional": bool(detail.get("optional")), "uses_default_features": detail.get("default-features", True), "features": detail.get("features", []), "target": target})
+        return result
+
+    packages = []
+    for relative in manifests:
+        package_manifest = tree / relative
+        document = tomllib.loads(package_manifest.read_text())
+        package = document["package"]
+        package_root = package_manifest.parent
+        targets = []
+        if (package_root / "src/lib.rs").is_file():
+            targets.append({"name": package["name"].replace("-", "_"), "kind": ["lib"], "crate_types": ["lib"], "src_path": str(package_root / "src/lib.rs"), "edition": package.get("edition"), "required-features": []})
+        if (package_root / "src/main.rs").is_file():
+            targets.append({"name": package["name"], "kind": ["bin"], "crate_types": ["bin"], "src_path": str(package_root / "src/main.rs"), "edition": package.get("edition"), "required-features": []})
+        build_path = package_root / package.get("build", "build.rs")
+        if build_path.is_file():
+            targets.append({"name": "build-script-build", "kind": ["custom-build"], "crate_types": ["bin"], "src_path": str(build_path), "edition": package.get("edition"), "required-features": []})
+        packages.append({"name": package["name"], "version": package["version"], "edition": package.get("edition"), "authors": package.get("authors", []), "license": package.get("license"), "license_file": package.get("license-file"), "description": package.get("description"), "homepage": package.get("homepage"), "documentation": package.get("documentation"), "repository": package.get("repository"), "readme": package.get("readme"), "keywords": package.get("keywords", []), "categories": package.get("categories", []), "rust_version": package.get("rust-version"), "links": package.get("links"), "default_run": package.get("default-run"), "metadata": package.get("metadata"), "manifest_path": str(package_manifest), "dependencies": dependencies(document, package_manifest), "targets": targets, "features": document.get("features", {})})
+    return {"packages": packages}
 
 
 def run(argv: list[str], cwd: Path) -> str:
@@ -78,7 +127,14 @@ class FixtureRepository:
         policy_root = self.root / "scripts/ci/plan"
         policy_root.mkdir(parents=True)
         shutil.copy2(PLANNER_PATH, policy_root / "planner.py")
+        shutil.copy2(PLANNER_PATH.parent / "apply-deploy-plan.py", policy_root / "apply-deploy-plan.py")
         shutil.copy2(PLANNER_PATH.parent / "apply-support-plan.py", policy_root / "apply-support-plan.py")
+        deploy_root = self.root / "scripts/ci/deploy"
+        deploy_root.mkdir(parents=True)
+        shutil.copy2(
+            PLANNER_PATH.parents[1] / "deploy" / "resolve-deployed-source.sh",
+            deploy_root / "resolve-deployed-source.sh",
+        )
         images_root = self.root / "scripts/ci/images"
         images_root.mkdir(parents=True)
         shutil.copy2(
@@ -91,11 +147,18 @@ class FixtureRepository:
             PLANNER_PATH.parents[3] / ".gitea" / "workflows" / "support-images.yaml",
             workflow_root / "support-images.yaml",
         )
+        shutil.copy2(
+            PLANNER_PATH.parents[3] / ".gitea" / "workflows" / "deploy-dev.yaml",
+            workflow_root / "deploy-dev.yaml",
+        )
         graph = {
             "schema": "codewire.ci-artifact-graph/v1",
             "policy_files": [
+                ".gitea/workflows/deploy-dev.yaml",
                 ".gitea/workflows/support-images.yaml",
+                "scripts/ci/deploy/resolve-deployed-source.sh",
                 "scripts/ci/images/resolve-published-support-pair.sh",
+                "scripts/ci/plan/apply-deploy-plan.py",
                 "scripts/ci/plan/apply-support-plan.py",
                 "scripts/ci/plan/artifact-graph.json",
                 "scripts/ci/plan/planner.py",
@@ -437,7 +500,8 @@ dependencies = ["core"]
         return self.commit(message)
 
     def plan(self, head: str | None = None) -> dict:
-        return planner.plan(self.root, self.base, head or "HEAD", self.base)
+        with mock.patch.object(planner, "cargo_metadata", side_effect=fixture_cargo_metadata):
+            return planner.plan(self.root, self.base, head or "HEAD", self.base)
 
     def support_candidate(
         self,
@@ -482,7 +546,58 @@ dependencies = ["core"]
 
     def support_plan(self, candidate: Path, head: str | None = None) -> dict:
         exact_head = head or run(["git", "rev-parse", "HEAD"], self.root)
-        return planner.plan(self.root, exact_head, exact_head, exact_head, candidate)
+        with mock.patch.object(planner, "cargo_metadata", side_effect=fixture_cargo_metadata):
+            return planner.plan(self.root, exact_head, exact_head, exact_head, candidate)
+
+    def deployed_source_candidate(
+        self,
+        source: str,
+        head: str,
+        *,
+        retrieval_valid: bool = True,
+        target_repository: str = "codewire/codewire",
+        source_repository: str = "codewire/codewire",
+    ) -> Path:
+        path = self.root / ".deployed-source-candidate.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "schema": planner.DEPLOYED_SOURCE_CANDIDATE_SCHEMA,
+                    "retrieval": {
+                        "valid": retrieval_valid,
+                        "reasons": [] if retrieval_valid else ["api_unavailable"],
+                    },
+                    "target": {
+                        "repository": target_repository,
+                        "head_sha": head,
+                    },
+                    "release": {
+                        "repository": "codewire/deploy",
+                        "path": "environments/dev/release.json",
+                        "ref": "main",
+                    },
+                    "source": {
+                        "repository": source_repository,
+                        "sha": source,
+                    },
+                },
+                sort_keys=True,
+                indent=2,
+            )
+            + "\n"
+        )
+        return path
+
+    def deployed_source_plan(self, candidate: Path, head: str | None = None) -> dict:
+        exact_head = head or run(["git", "rev-parse", "HEAD"], self.root)
+        with mock.patch.object(planner, "cargo_metadata", side_effect=fixture_cargo_metadata):
+            return planner.plan(
+                self.root,
+                exact_head,
+                exact_head,
+                trusted_policy_revision=exact_head,
+                deployed_source_candidate=candidate,
+            )
 
 
 class PlannerFixtureTests(unittest.TestCase):
@@ -517,6 +632,30 @@ class PlannerFixtureTests(unittest.TestCase):
                 "mesh_image",
             )
         )
+
+    def test_fixture_metadata_matches_real_cargo_for_each_artifact_root(self) -> None:
+        for manifest in ("Cargo.toml", "desktop/Cargo.toml"):
+            with self.subTest(manifest=manifest):
+                with tempfile.TemporaryDirectory(
+                    prefix="codewire-fixture-cargo-equivalence-"
+                ) as temporary:
+                    environment = planner.isolated_cargo_environment(
+                        Path(temporary),
+                        planner.trusted_rust_toolchain(PLANNER_PATH.parents[3]),
+                    )
+                    real = planner.discover_cargo_universe(self.repo.root, manifest, environment)
+                    with mock.patch.object(planner, "cargo_metadata", side_effect=fixture_cargo_metadata):
+                        modeled = planner.discover_cargo_universe(self.repo.root, manifest, environment)
+                self.assertEqual(
+                    {
+                        key: planner.normalized_package(value, self.repo.root)
+                        for key, value in real.packages.items()
+                    },
+                    {
+                        key: planner.normalized_package(value, self.repo.root)
+                        for key, value in modeled.packages.items()
+                    },
+                )
 
     def test_same_tree_is_deterministic_and_rust_artifacts_are_unaffected(self) -> None:
         first = self.repo.plan(self.repo.base)
@@ -591,6 +730,119 @@ class PlannerFixtureTests(unittest.TestCase):
             self.runtime_states(self.repo.plan()),
             ("affected", "affected", "unaffected", "affected", "unaffected"),
         )
+
+    def test_matching_deployed_source_uses_exact_ancestor(self) -> None:
+        head = self.repo.change("apps/dashboard/README.md", "unrelated deploy baseline change\n")
+        candidate = self.repo.deployed_source_candidate(self.repo.base, head)
+        document = self.repo.deployed_source_plan(candidate, head)
+        self.assertTrue(document["baseline"]["validation"]["valid"])
+        self.assertEqual(document["baseline"]["mode"], "deployed_source")
+        self.assertEqual(document["baseline"]["baseline_commit"], self.repo.base)
+        self.assertEqual(self.runtime_states(document), ("unaffected",) * 5)
+
+    def test_each_runtime_positive_is_visible_from_deployed_source(self) -> None:
+        cases = (
+            ("apps/dashboard/runtime-inventory.json", '{"changed":true}\n', 0),
+            ("deployments/docker/gateway.Dockerfile", "FROM changed-gateway\n", 1),
+            ("deployments/docker/derp.Cargo.lock", "version = 4\n# changed\n", 2),
+            ("deployments/docker/services.Dockerfile.dockerignore", "*\n!changed\n", 3),
+            ("deployments/docker/mesh.Dockerfile", "FROM changed-mesh\n", 4),
+        )
+        for path, content, affected_index in cases:
+            with self.subTest(path=path), tempfile.TemporaryDirectory(
+                prefix="codewire-deployed-source-test-"
+            ) as temporary:
+                repository = FixtureRepository(Path(temporary))
+                head = repository.change(path, content)
+                candidate = repository.deployed_source_candidate(repository.base, head)
+                expected = ["unaffected"] * 5
+                expected[affected_index] = "affected"
+                document = repository.deployed_source_plan(candidate, head)
+                self.assertEqual(
+                    tuple(
+                        document["artifacts"][name]["state"]
+                        for name in (
+                            "dashboard_image",
+                            "gateway_image",
+                            "derp_image",
+                            "services_image",
+                            "mesh_image",
+                        )
+                    ),
+                    tuple(expected),
+                )
+
+    def test_missing_failed_or_stale_deployed_source_fails_closed(self) -> None:
+        missing = self.repo.root / "missing-deployed-source.json"
+        missing_document = self.repo.deployed_source_plan(missing, self.repo.base)
+        self.assertIn(
+            "deployed source candidate is unavailable",
+            missing_document["baseline"]["validation"]["reasons"],
+        )
+        self.assertEqual(self.runtime_states(missing_document), ("unclassified",) * 5)
+
+        failed = self.repo.deployed_source_candidate(
+            self.repo.base, self.repo.base, retrieval_valid=False
+        )
+        failed_document = self.repo.deployed_source_plan(failed, self.repo.base)
+        self.assertIn(
+            "deployed source candidate retrieval did not succeed",
+            failed_document["baseline"]["validation"]["reasons"],
+        )
+        self.assertEqual(self.runtime_states(failed_document), ("unclassified",) * 5)
+
+        head = self.repo.change("apps/dashboard/README.md", "new exact head\n")
+        stale = self.repo.deployed_source_candidate(self.repo.base, self.repo.base)
+        stale_document = self.repo.deployed_source_plan(stale, head)
+        self.assertIn(
+            "deployed source candidate is stale for the exact head",
+            stale_document["baseline"]["validation"]["reasons"],
+        )
+        self.assertEqual(self.runtime_states(stale_document), ("unclassified",) * 5)
+
+    def test_ambiguous_or_wrong_deployed_source_identity_fails_closed(self) -> None:
+        wrong_repository = self.repo.deployed_source_candidate(
+            self.repo.base,
+            self.repo.base,
+            source_repository="other/repository",
+        )
+        wrong_document = self.repo.deployed_source_plan(wrong_repository, self.repo.base)
+        self.assertIn(
+            "deployed source repository is invalid",
+            wrong_document["baseline"]["validation"]["reasons"],
+        )
+        self.assertEqual(self.runtime_states(wrong_document), ("unclassified",) * 5)
+
+        duplicate = self.repo.root / ".duplicate-deployed-source.json"
+        duplicate.write_text(
+            '{"schema":"codewire.ci-deployed-source-candidate/v1",'
+            '"schema":"ambiguous"}\n'
+        )
+        duplicate_document = self.repo.deployed_source_plan(duplicate, self.repo.base)
+        self.assertIn(
+            "deployed source candidate is malformed",
+            duplicate_document["baseline"]["validation"]["reasons"],
+        )
+        self.assertEqual(self.runtime_states(duplicate_document), ("unclassified",) * 5)
+
+    def test_absent_or_non_ancestor_deployed_source_fails_closed(self) -> None:
+        absent = self.repo.deployed_source_candidate("f" * 40, self.repo.base)
+        absent_document = self.repo.deployed_source_plan(absent, self.repo.base)
+        self.assertIn(
+            "deployed source is absent from canonical Git history",
+            absent_document["baseline"]["validation"]["reasons"],
+        )
+        self.assertEqual(self.runtime_states(absent_document), ("unclassified",) * 5)
+
+        tree = run(["git", "rev-parse", "HEAD^{tree}"], self.repo.root)
+        unrelated = run(["git", "commit-tree", tree, "-m", "unrelated deployed source"], self.repo.root)
+        candidate = self.repo.deployed_source_candidate(unrelated, self.repo.base)
+        document = self.repo.deployed_source_plan(candidate, self.repo.base)
+        self.assertIn(
+            "deployed source is not an ancestor of the exact head",
+            document["baseline"]["validation"]["reasons"],
+        )
+        self.assertEqual(self.runtime_states(document), ("unclassified",) * 5)
 
     def test_matching_published_support_pair_uses_exact_ancestor(self) -> None:
         head = self.repo.change("apps/dashboard/README.md", "unrelated support baseline change\n")
@@ -826,7 +1078,7 @@ class PlannerFixtureTests(unittest.TestCase):
             return original_run(argv, *args, **kwargs)
 
         with mock.patch.object(planner.subprocess, "run", side_effect=run_without_cargo):
-            document = self.repo.plan()
+            document = planner.plan(self.repo.root, self.repo.base, "HEAD", self.repo.base)
 
         self.assertEqual(self.states(document), ("unclassified", "unclassified"))
         diagnostic = json.dumps(document["degraded_reasons"], sort_keys=True)

@@ -1,14 +1,60 @@
 #!/usr/bin/env bash
-# Resolve only the dev release source SHA from the private deploy repository.
+# Resolve untrusted Dev release metadata. The credential-free planner validates
+# repository identity, exact-head binding, Git presence, and ancestry later.
 set -euo pipefail
+
+readonly CANDIDATE_SCHEMA='codewire.ci-deployed-source-candidate/v1'
+readonly RELEASE_URL='https://git.example.invalid/api/v1/repos/codewire/deploy/contents/environments/dev/release.json?ref=main'
+
+[[ $# -eq 2 ]] || {
+  echo 'Usage: resolve-deployed-source.sh OUTPUT_JSON EXPECTED_HEAD_SHA' >&2
+  exit 2
+}
+output="$1"
+expected_head="$2"
+[[ "$expected_head" =~ ^[0-9a-f]{40}$ && "$expected_head" != 0000000000000000000000000000000000000000 ]] || {
+  echo '[resolve-deployed-source] expected head is invalid' >&2
+  exit 2
+}
+[[ ! -L "$output" ]] || {
+  echo '[resolve-deployed-source] candidate output must not be a symlink' >&2
+  exit 2
+}
+umask 077
+
+write_candidate() {
+  local valid="$1" reason="$2" source_sha="${3:-}"
+  python3 - "$output" "$CANDIDATE_SCHEMA" "$expected_head" "$valid" "$reason" "$source_sha" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+path, schema, head, valid_text, reason, source_sha = sys.argv[1:]
+valid = valid_text == "true"
+document = {
+    "schema": schema,
+    "retrieval": {"valid": valid, "reasons": [] if valid else [reason]},
+    "target": {"repository": "codewire/codewire", "head_sha": head},
+    "release": {
+        "repository": "codewire/deploy",
+        "path": "environments/dev/release.json",
+        "ref": "main",
+    },
+    "source": (
+        {"repository": "codewire/codewire", "sha": source_sha}
+        if valid
+        else {}
+    ),
+}
+Path(path).write_text(json.dumps(document, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+PY
+  chmod 600 "$output"
+}
 
 fail_safe() {
   local reason="$1"
-  printf '[resolve-deployed-source] baseline unavailable: %s\n' "$reason" >&2
-  if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
-    printf 'baseline_available=false\nbaseline_sha=\nbaseline_reason=%s\n' \
-      "$reason" >>"$GITHUB_OUTPUT"
-  fi
+  printf '[resolve-deployed-source] candidate unavailable: %s\n' "$reason" >&2
+  write_candidate false "$reason"
   exit 0
 }
 
@@ -26,7 +72,6 @@ elif ! command -v "$curl_bin" >/dev/null 2>&1; then
   fail_safe curl_unavailable
 fi
 
-umask 077
 work="$(mktemp -d)"
 auth_header="$work/auth-header"
 response_body="$work/response.json"
@@ -39,14 +84,13 @@ trap cleanup EXIT
 
 printf 'Authorization: token %s\n' "$deploy_token" >"$auth_header"
 deploy_token=''
-readonly release_url='https://git.example.invalid/api/v1/repos/codewire/deploy/contents/environments/dev/release.json?ref=main'
 
 if ! status="$(
   "$curl_bin" --silent --show-error \
     --proto '=https' --tlsv1.2 \
     --connect-timeout 15 --max-time 60 \
     --output "$response_body" --write-out '%{http_code}' \
-    --request GET "$release_url" \
+    --request GET "$RELEASE_URL" \
     --header "@$auth_header" \
     --header 'Accept: application/json'
 )"; then
@@ -64,17 +108,34 @@ from pathlib import Path
 import re
 import sys
 
+
+def reject_duplicate_keys(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate JSON key")
+        result[key] = value
+    return result
+
+
 try:
-    envelope = json.loads(Path(sys.argv[1]).read_bytes())
+    envelope = json.loads(
+        Path(sys.argv[1]).read_bytes(), object_pairs_hook=reject_duplicate_keys
+    )
     encoded = envelope["content"]
     if envelope.get("encoding") != "base64" or not isinstance(encoded, str):
         raise ValueError
     compact = "".join(encoded.split())
-    release = json.loads(base64.b64decode(compact, validate=True))
+    release = json.loads(
+        base64.b64decode(compact, validate=True),
+        object_pairs_hook=reject_duplicate_keys,
+    )
     source = release["source"]
     sha = source["sha"]
     if (
-        source.get("repository") != "codewire/codewire"
+        not isinstance(source, dict)
+        or source.get("repository") != "codewire/codewire"
+        or set(source) != {"repository", "sha"}
         or not isinstance(sha, str)
         or not re.fullmatch(r"[0-9a-f]{40}", sha)
         or sha == "0" * 40
@@ -88,8 +149,6 @@ PY
   fail_safe manifest_invalid
 fi
 
-printf '[resolve-deployed-source] resolved dev source %s\n' "$source_sha"
-if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
-  printf 'baseline_available=true\nbaseline_sha=%s\nbaseline_reason=resolved\n' \
-    "$source_sha" >>"$GITHUB_OUTPUT"
-fi
+printf '[resolve-deployed-source] resolved Dev source %s for head %s\n' \
+  "$source_sha" "$expected_head"
+write_candidate true resolved "$source_sha"

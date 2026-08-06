@@ -44,33 +44,53 @@ grep -Fq 'uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b'
   fail "deploy selection does not install the pinned Rust toolchain for artifact classification"
 toolchain_line="$(grep -n -m1 'uses: dtolnay/rust-toolchain@' \
   <<<"$selection_job" | cut -d: -f1)"
-classifier_line="$(grep -n -m1 'name: Select dev deploy' \
+classifier_line="$(grep -n -m1 'name: Plan and select atomic Dev deployment' \
   <<<"$selection_job" | cut -d: -f1)"
 [[ "$toolchain_line" -lt "$classifier_line" ]] ||
   fail "deploy selection installs Rust after artifact classification"
-grep -Fq 'run: scripts/ci/deploy/resolve-deployed-source.sh' <<<"$selection_job" ||
-  fail "deploy selection does not resolve the private desired source"
+grep -Fq "scripts/ci/deploy/resolve-deployed-source.sh \"\$candidate\" \"\$GITHUB_SHA\"" \
+  <<<"$selection_job" || fail "deploy selection does not resolve an exact-head candidate"
 # shellcheck disable=SC2016
 [[ "$(grep -Fc 'CODEWIRE_DEPLOY_PROMOTION_TOKEN: ${{ secrets.CODEWIRE_DEPLOY_PROMOTION_TOKEN }}' \
   <<<"$selection_job")" -eq 1 ]] ||
   fail "baseline resolver credential has an unexpected consumer count"
-# shellcheck disable=SC2016
-grep -Fq 'DEPLOYED_SOURCE_SHA: ${{ steps.baseline.outputs.baseline_sha }}' \
-  <<<"$selection_job" || fail "classifier is not bound to the resolved baseline"
-grep -Fq 'scripts/ci/select/select-deploy-dev.sh "$DEPLOYED_SOURCE_SHA" "$GITHUB_SHA"' \
-  <<<"$selection_job" || fail "classifier is not cumulative through exact current main"
-select_step="$(sed -n '/      - name: Select dev deploy/,/^  build-gateway-image:/p' \
+grep -Fq -- "--deployed-source-candidate \"\$RUNNER_TEMP/codewire-deployed-source-candidate.json\"" \
+  <<<"$selection_job" || fail "planner is not bound to the resolved candidate"
+grep -Fq -- "--target-base \"\$GITHUB_SHA\"" <<<"$selection_job" ||
+  fail "planner target is not exact current main"
+grep -Fq -- "--head \"\$GITHUB_SHA\"" <<<"$selection_job" ||
+  fail "planner head is not exact current main"
+grep -Fq -- "--trusted-policy \"\$GITHUB_SHA\"" <<<"$selection_job" ||
+  fail "planner policy is not exact current main"
+grep -Fq 'scripts/ci/plan/apply-deploy-plan.py' <<<"$selection_job" ||
+  fail "deploy selection does not apply trusted runtime artifact facts"
+if grep -Fq 'scripts/ci/select/select-deploy-dev.sh' <<<"$selection_job"; then
+  fail "deploy workflow still invokes the legacy deploy classifier"
+fi
+select_step="$(sed -n '/      - name: Plan and select atomic Dev deployment/,/^  build-gateway-image:/p' \
   <<<"$selection_job")"
 if grep -Fq 'secrets.' <<<"$select_step"; then
   fail "artifact classifier receives the private deploy credential"
 fi
-for output in deploy_dev reason matched_categories baseline_sha head_sha; do
+grep -Fq "if: \${{ always() }}" <<<"$selection_job" ||
+  fail "untrusted deployed-source candidate is not cleaned up unconditionally"
+grep -Fq "rm -f -- \"\$RUNNER_TEMP/codewire-deployed-source-candidate.json\"" \
+  <<<"$selection_job" || fail "untrusted deployed-source candidate cleanup is missing"
+for output in deploy_dev reason matched_categories \
+  dashboard_image_state gateway_image_state derp_image_state services_image_state mesh_image_state \
+  baseline_sha head_sha head_tree ci_plan_sha256 ci_policy_sha256 baseline_valid; do
   # shellcheck disable=SC2016
   grep -Fq "$output: \${{ steps.select.outputs.$output }}" <<<"$selection_job" ||
     fail "deploy selection does not expose $output"
 done
 
+[[ "$(grep -Fc "if: \${{ needs.deploy-selection.outputs.deploy_dev == 'true' }}" \
+  "$WORKFLOW")" -eq 6 ]] ||
+  fail "all-unaffected selection does not skip all five builds and runtime publication"
+
 publish_job="$(sed -n '/^  publish-runtime-images:/,/^  dispatch-deploy-dev:/p' "$WORKFLOW")"
+grep -Fq "if: \${{ needs.deploy-selection.outputs.deploy_dev == 'true' }}" \
+  <<<"$publish_job" || fail "all-unaffected selection does not skip runtime publication"
 # shellcheck disable=SC2016
 grep -Fq 'GHCR_PUBLISH_USERNAME: ${{ vars.GHCR_PUBLISH_USERNAME }}' \
   <<<"$publish_job" || fail "runtime publisher identity is not repository configuration"

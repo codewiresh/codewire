@@ -19,8 +19,17 @@ jobs:
       deploy_dev: ${{ steps.select.outputs.deploy_dev }}
       reason: ${{ steps.select.outputs.reason }}
       matched_categories: ${{ steps.select.outputs.matched_categories }}
+      dashboard_image_state: ${{ steps.select.outputs.dashboard_image_state }}
+      gateway_image_state: ${{ steps.select.outputs.gateway_image_state }}
+      derp_image_state: ${{ steps.select.outputs.derp_image_state }}
+      services_image_state: ${{ steps.select.outputs.services_image_state }}
+      mesh_image_state: ${{ steps.select.outputs.mesh_image_state }}
       baseline_sha: ${{ steps.select.outputs.baseline_sha }}
       head_sha: ${{ steps.select.outputs.head_sha }}
+      head_tree: ${{ steps.select.outputs.head_tree }}
+      ci_plan_sha256: ${{ steps.select.outputs.ci_plan_sha256 }}
+      ci_policy_sha256: ${{ steps.select.outputs.ci_policy_sha256 }}
+      baseline_valid: ${{ steps.select.outputs.baseline_valid }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with:
@@ -30,17 +39,39 @@ jobs:
         with:
           toolchain: 1.91.1
 
-      - name: Resolve deployed dev source
-        id: baseline
+      - name: Resolve untrusted deployed Dev source
         env:
           CODEWIRE_DEPLOY_PROMOTION_TOKEN: ${{ secrets.CODEWIRE_DEPLOY_PROMOTION_TOKEN }}
-        run: scripts/ci/deploy/resolve-deployed-source.sh
+        run: |
+          set -euo pipefail
+          candidate="$RUNNER_TEMP/codewire-deployed-source-candidate.json"
+          scripts/ci/deploy/resolve-deployed-source.sh "$candidate" "$GITHUB_SHA"
 
-      - name: Select dev deploy
+      - name: Plan and select atomic Dev deployment
         id: select
-        env:
-          DEPLOYED_SOURCE_SHA: ${{ steps.baseline.outputs.baseline_sha }}
-        run: scripts/ci/select/select-deploy-dev.sh "$DEPLOYED_SOURCE_SHA" "$GITHUB_SHA"
+        run: |
+          set -euo pipefail
+          plan="$(mktemp)"
+          trap 'rm -f "$plan"' EXIT
+          python3 scripts/ci/plan/planner.py \
+            --repository . \
+            --target-base "$GITHUB_SHA" \
+            --head "$GITHUB_SHA" \
+            --trusted-policy "$GITHUB_SHA" \
+            --deployed-source-candidate "$RUNNER_TEMP/codewire-deployed-source-candidate.json" \
+            --output "$plan"
+          if jq -e '.degraded_reasons | length > 0' "$plan" >/dev/null; then
+            echo 'Runtime artifact planner degraded; the atomic set remains selected:'
+            jq -c '.degraded_reasons' "$plan"
+          fi
+          python3 scripts/ci/plan/apply-deploy-plan.py \
+            --plan "$plan" \
+            --head "$GITHUB_SHA" \
+            --head-tree "$(git rev-parse "$GITHUB_SHA^{tree}")"
+
+      - name: Remove untrusted deployed-source candidate
+        if: ${{ always() }}
+        run: rm -f -- "$RUNNER_TEMP/codewire-deployed-source-candidate.json"
 
   build-gateway-image:
     name: Build Gateway Image

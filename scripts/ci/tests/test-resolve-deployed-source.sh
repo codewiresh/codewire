@@ -5,6 +5,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 readonly ROOT
 readonly RESOLVER="$ROOT/scripts/ci/deploy/resolve-deployed-source.sh"
 readonly SOURCE_SHA='1111111111111111111111111111111111111111'
+readonly HEAD_SHA='2222222222222222222222222222222222222222'
 readonly TEST_TOKEN='test-only-resolver-token-1234567890'
 
 fail() {
@@ -64,21 +65,29 @@ printf '%s' "${MOCK_HTTP_STATUS:-200}"
 MOCK
 chmod +x "$mock_curl"
 
-github_output="$work/github-output"
+candidate="$work/candidate.json"
 success_output="$work/success.out"
 if ! env CODEWIRE_DEPLOY_PROMOTION_TOKEN="$TEST_TOKEN" \
   CURL_BIN="$mock_curl" MOCK_CAPTURE_DIR="$work/capture" \
-  MOCK_RESPONSE="$work/valid.json" GITHUB_OUTPUT="$github_output" \
-  "$RESOLVER" >"$success_output" 2>&1; then
+  MOCK_RESPONSE="$work/valid.json" \
+  "$RESOLVER" "$candidate" "$HEAD_SHA" >"$success_output" 2>&1; then
   fail "valid release manifest was rejected"
 fi
-grep -Fxq 'baseline_available=true' "$github_output" ||
-  fail "valid baseline was not marked available"
-grep -Fxq "baseline_sha=$SOURCE_SHA" "$github_output" ||
-  fail "valid baseline SHA was not returned"
-grep -Fq "resolved dev source $SOURCE_SHA" "$success_output" ||
-  fail "successful resolution did not identify the non-sensitive SHA"
-if grep -Fq "$TEST_TOKEN" "$success_output" "$work/capture/args"; then
+jq -e --arg source "$SOURCE_SHA" --arg head "$HEAD_SHA" '
+  .schema == "codewire.ci-deployed-source-candidate/v1" and
+  .retrieval == {valid: true, reasons: []} and
+  .target == {repository: "codewire/codewire", head_sha: $head} and
+  .release == {
+    repository: "codewire/deploy",
+    path: "environments/dev/release.json",
+    ref: "main"
+  } and
+  .source == {repository: "codewire/codewire", sha: $source}
+' "$candidate" >/dev/null || fail "valid untrusted candidate has the wrong contract"
+[[ "$(stat -c '%a' "$candidate")" == 600 ]] || fail "candidate permissions are not private"
+grep -Fq "resolved Dev source $SOURCE_SHA for head $HEAD_SHA" "$success_output" ||
+  fail "successful resolution did not identify the non-sensitive source and head"
+if grep -Fq "$TEST_TOKEN" "$success_output" "$work/capture/args" "$candidate"; then
   fail "resolver exposed its credential"
 fi
 grep -Fxq "Authorization: token $TEST_TOKEN" "$work/capture/auth-header" ||
@@ -107,17 +116,17 @@ for case_name in forbidden malformed oversized; do
       ;;
   esac
   case_output="$work/$case_name.out"
-  case_github_output="$work/$case_name.github"
+  case_candidate="$work/$case_name-candidate.json"
   env CODEWIRE_DEPLOY_PROMOTION_TOKEN="$TEST_TOKEN" \
     CURL_BIN="$mock_curl" MOCK_CAPTURE_DIR="$work/capture" \
     MOCK_RESPONSE="$response" MOCK_HTTP_STATUS="$status" \
-    GITHUB_OUTPUT="$case_github_output" \
-    "$RESOLVER" >"$case_output" 2>&1
-  grep -Fxq 'baseline_available=false' "$case_github_output" ||
-    fail "$case_name response did not fail safe"
-  grep -Fxq "baseline_reason=$expected" "$case_github_output" ||
-    fail "$case_name response returned the wrong reason"
-  if grep -Fq "$TEST_TOKEN" "$case_output"; then
+    "$RESOLVER" "$case_candidate" "$HEAD_SHA" >"$case_output" 2>&1
+  jq -e --arg reason "$expected" --arg head "$HEAD_SHA" '
+    .schema == "codewire.ci-deployed-source-candidate/v1" and
+    .retrieval == {valid: false, reasons: [$reason]} and
+    .target.head_sha == $head and .source == {}
+  ' "$case_candidate" >/dev/null || fail "$case_name response returned the wrong fail-safe candidate"
+  if grep -Fq "$TEST_TOKEN" "$case_output" "$case_candidate"; then
     fail "$case_name response exposed its credential"
   fi
 done
@@ -129,11 +138,17 @@ touch '$marker'
 exit 99
 MOCK
 chmod +x "$work/curl-never"
-missing_output="$work/missing.github"
-GITHUB_OUTPUT="$missing_output" CURL_BIN="$work/curl-never" \
-  "$RESOLVER" >"$work/missing.out" 2>&1
-grep -Fxq 'baseline_reason=token_unavailable' "$missing_output" ||
-  fail "missing credential did not select the token-unavailable fail-safe"
+missing_candidate="$work/missing-candidate.json"
+CURL_BIN="$work/curl-never" \
+  "$RESOLVER" "$missing_candidate" "$HEAD_SHA" >"$work/missing.out" 2>&1
+jq -e '.retrieval == {valid: false, reasons: ["token_unavailable"]}' \
+  "$missing_candidate" >/dev/null || fail "missing credential did not produce a token-unavailable candidate"
 [[ ! -e "$marker" ]] || fail "missing credential reached curl"
 
-printf '[test-resolve-deployed-source] private baseline and fail-safe cases passed\n'
+if CURL_BIN="$work/curl-never" \
+  "$RESOLVER" "$work/invalid-head.json" invalid >"$work/invalid-head.out" 2>&1; then
+  fail "invalid exact-head binding was accepted"
+fi
+[[ ! -e "$marker" ]] || fail "invalid exact-head binding reached curl"
+
+printf '[test-resolve-deployed-source] untrusted candidate and credential-isolation cases passed\n'

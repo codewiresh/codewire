@@ -34,6 +34,20 @@ artifact-job facts used by CI. `emit-verification-receipt.py` binds a successful
 Required-verification job to its exact base, head, and tree. Post-merge reuse
 validates that identity and falls back whenever receipt-control files changed.
 
+Canonical-main Dev deployment uses `--deployed-source-candidate`. The deploy
+workflow resolves an untrusted release document through its existing private
+credential boundary. The candidate binds that retrieval to the exact workflow
+head, then the credential-free planner validates the release identity, source
+repository, Git object, and ancestry before emitting a `deployed_source`
+baseline. A missing, malformed, stale-head, absent-history, or non-ancestor
+candidate makes every artifact `unclassified`.
+
+`apply-deploy-plan.py` owns only the existing atomic runtime policy. It selects
+the complete five-image build, publication, and exact-source dispatch when any
+runtime image is `affected` or `unclassified`; it skips only when all five are
+`unaffected`. The adapter does not inspect source paths, resolve external
+state, publish images, or authorize deployment.
+
 Run the focused no-network tests and current-tree Cargo oracle with:
 
 ```sh

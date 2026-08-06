@@ -1197,6 +1197,16 @@ python3 "$ROOT/scripts/ci/plan/tests/test_planner.py" \
   PlannerFixtureTests.test_go_sdk_only_change_emits_unselected_cw_and_desktop_outputs \
   PlannerFixtureTests.test_missing_cargo_fails_closed_with_diagnostic
 
+standard_block="$TMP/standard.yaml"
+deploy_toolchain_line="$(grep -n -m1 'dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b' \
+  "$standard_block" | cut -d: -f1)"
+deploy_run_line="$(grep -n -m1 'name: Run Deploy' "$standard_block" | cut -d: -f1)"
+test -n "$deploy_toolchain_line"
+test -n "$deploy_run_line"
+test "$deploy_toolchain_line" -lt "$deploy_run_line"
+grep -A2 -F 'uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b' \
+  "$standard_block" | grep -qF "contains(needs.verification-selection.outputs.selection, '|deploy|')"
+
 permissions_block="$(awk '
   $0 == "permissions:" { capture = 1 }
   capture && $0 != "permissions:" && $0 ~ /^[^[:space:]]/ { exit }

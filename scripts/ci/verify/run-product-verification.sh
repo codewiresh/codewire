@@ -549,6 +549,7 @@ install_helm() {
 
 run_deploy() {
   scripts/ci/tests/test-install-temporal.sh
+  scripts/ci/plan/test.sh
   scripts/ci/tests/test-deploy-dev.sh
   install_kustomize
   python3 scripts/checks/repo_checks.py orchestration-host-key-authz --self-test

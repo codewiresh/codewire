@@ -1,8 +1,11 @@
 {
   "schema": "codewire.ci-artifact-graph/v1",
   "policy_files": [
+    ".gitea/workflows/deploy-dev.yaml",
     ".gitea/workflows/support-images.yaml",
+    "scripts/ci/deploy/resolve-deployed-source.sh",
     "scripts/ci/images/resolve-published-support-pair.sh",
+    "scripts/ci/plan/apply-deploy-plan.py",
     "scripts/ci/plan/apply-support-plan.py",
     "scripts/ci/plan/apply-verification-plan.py",
     "scripts/ci/plan/artifact-graph.json",

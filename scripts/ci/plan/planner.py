@@ -34,6 +34,7 @@ except ModuleNotFoundError as exc:  # pragma: no cover - Codewire uses Python 3.
 BASELINE_SCHEMA = "codewire.ci-baseline/v1"
 PLAN_SCHEMA = "codewire.ci-plan/v1"
 SUPPORT_CANDIDATE_SCHEMA = "codewire.ci-published-support-candidate/v1"
+DEPLOYED_SOURCE_CANDIDATE_SCHEMA = "codewire.ci-deployed-source-candidate/v1"
 MAX_ARCHIVE_MEMBERS = 30_000
 MAX_ARCHIVE_FILE_BYTES = 64 * 1024 * 1024
 MAX_ARCHIVE_TOTAL_BYTES = 512 * 1024 * 1024
@@ -933,25 +934,38 @@ def make_pull_request_baseline(repository: Path, target_base: str, head: str) ->
     }
 
 
-def _bounded_candidate(path: Path) -> tuple[dict[str, Any] | None, str, list[str]]:
+def _bounded_candidate(
+    path: Path, label: str = "published support"
+) -> tuple[dict[str, Any] | None, str, list[str]]:
     try:
         with path.open("rb") as handle:
             raw = handle.read(MAX_BASELINE_CANDIDATE_BYTES + 1)
     except OSError:
-        return None, "0" * 64, ["published support candidate is unavailable"]
+        return None, "0" * 64, [f"{label} candidate is unavailable"]
     if len(raw) > MAX_BASELINE_CANDIDATE_BYTES:
-        return None, "0" * 64, ["published support candidate exceeds the size limit"]
+        return None, "0" * 64, [f"{label} candidate exceeds the size limit"]
     digest = sha256_bytes(raw)
+
+    def reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        value: dict[str, Any] = {}
+        for key, item in pairs:
+            if key in value:
+                raise ValueError("duplicate JSON key")
+            value[key] = item
+        return value
+
     try:
-        candidate = json.loads(raw)
-    except (UnicodeDecodeError, json.JSONDecodeError):
-        return None, digest, ["published support candidate is malformed"]
+        candidate = json.loads(raw, object_pairs_hook=reject_duplicate_keys)
+    except (UnicodeDecodeError, ValueError):
+        return None, digest, [f"{label} candidate is malformed"]
     if not isinstance(candidate, dict):
-        return None, digest, ["published support candidate is not an object"]
+        return None, digest, [f"{label} candidate is not an object"]
     return candidate, digest, []
 
 
-def _git_is_ancestor(repository: Path, ancestor: str, head: str) -> bool:
+def _git_is_ancestor(
+    repository: Path, ancestor: str, head: str, label: str = "published support"
+) -> bool:
     completed = subprocess.run(
         ["git", "merge-base", "--is-ancestor", ancestor, head],
         cwd=repository,
@@ -961,7 +975,7 @@ def _git_is_ancestor(repository: Path, ancestor: str, head: str) -> bool:
         check=False,
     )
     if completed.returncode not in (0, 1):
-        raise PlannerError("Git could not validate the published support ancestor")
+        raise PlannerError(f"Git could not validate the {label} ancestor")
     return completed.returncode == 0
 
 
@@ -1049,6 +1063,112 @@ def make_published_support_baseline(
     }
 
 
+def make_deployed_source_baseline(
+    repository: Path,
+    target_base: str,
+    head: str,
+    candidate_path: Path,
+) -> dict[str, Any]:
+    candidate, candidate_digest, reasons = _bounded_candidate(
+        candidate_path, "deployed source"
+    )
+    provenance: dict[str, Any] = {
+        "provider": "codewire/deploy release",
+        "candidate_sha256": candidate_digest,
+        "release": {},
+        "source": {},
+    }
+    baseline_commit = head
+    source_sha: str | None = None
+
+    if target_base != head:
+        reasons.append("deployed-source planning target is not the exact canonical head")
+    if candidate is not None:
+        if candidate.get("schema") != DEPLOYED_SOURCE_CANDIDATE_SCHEMA:
+            reasons.append("deployed source candidate schema is unsupported")
+
+        retrieval = candidate.get("retrieval")
+        if not isinstance(retrieval, dict):
+            reasons.append("deployed source candidate omits retrieval status")
+        elif retrieval.get("valid") is not True or retrieval.get("reasons") != []:
+            reasons.append("deployed source candidate retrieval did not succeed")
+
+        target = candidate.get("target")
+        if not isinstance(target, dict):
+            reasons.append("deployed source candidate omits target binding")
+        else:
+            target_repository = target.get("repository")
+            target_head = target.get("head_sha")
+            if set(target) != {"repository", "head_sha"}:
+                reasons.append("deployed source target binding is ambiguous")
+            if target_repository != "codewire/codewire":
+                reasons.append("deployed source target repository is invalid")
+            if target_head != head:
+                reasons.append("deployed source candidate is stale for the exact head")
+
+        release = candidate.get("release")
+        if not isinstance(release, dict):
+            reasons.append("deployed source candidate omits release identity")
+        else:
+            provenance["release"] = {
+                "repository": release.get("repository"),
+                "path": release.get("path"),
+                "ref": release.get("ref"),
+            }
+            if set(release) != {"repository", "path", "ref"}:
+                reasons.append("deployed source release identity is ambiguous")
+            if release.get("repository") != "codewire/deploy":
+                reasons.append("deployed source release repository is invalid")
+            if release.get("path") != "environments/dev/release.json":
+                reasons.append("deployed source release path is invalid")
+            if release.get("ref") != "main":
+                reasons.append("deployed source release ref is invalid")
+
+        source = candidate.get("source")
+        if not isinstance(source, dict):
+            reasons.append("deployed source candidate omits source identity")
+        else:
+            repository_value = source.get("repository")
+            sha_value = source.get("sha")
+            provenance["source"] = {
+                "repository": repository_value if isinstance(repository_value, str) else None,
+                "sha": sha_value if isinstance(sha_value, str) else None,
+            }
+            if set(source) != {"repository", "sha"}:
+                reasons.append("deployed source identity is ambiguous")
+            if repository_value != "codewire/codewire":
+                reasons.append("deployed source repository is invalid")
+            if not isinstance(sha_value, str) or not HEX40_RE.fullmatch(sha_value):
+                reasons.append("deployed source SHA is invalid")
+            elif sha_value == "0" * 40:
+                reasons.append("deployed source SHA is invalid")
+            else:
+                source_sha = sha_value
+
+    if source_sha is not None:
+        try:
+            resolved_source = resolve_commit(repository, source_sha)
+        except PlannerError:
+            reasons.append("deployed source is absent from canonical Git history")
+        else:
+            if not _git_is_ancestor(repository, resolved_source, head, "deployed source"):
+                reasons.append("deployed source is not an ancestor of the exact head")
+            else:
+                baseline_commit = resolved_source
+
+    normalized_reasons = sorted(set(reasons))
+    return {
+        "schema": BASELINE_SCHEMA,
+        "mode": "deployed_source",
+        "target_base_commit": target_base,
+        "baseline_commit": baseline_commit,
+        "head_commit": head,
+        "head_tree": git(repository, "rev-parse", f"{head}^{{tree}}"),
+        "provenance": provenance,
+        "validation": {"valid": not normalized_reasons, "reasons": normalized_reasons},
+    }
+
+
 def unclassified_result(reason: str) -> dict[str, Any]:
     return {
         "state": "unclassified",
@@ -1064,12 +1184,22 @@ def plan(
     head_revision: str,
     trusted_policy_revision: str | None = None,
     baseline_candidate: Path | None = None,
+    deployed_source_candidate: Path | None = None,
 ) -> dict[str, Any]:
     repository = repository.resolve()
     target_base = resolve_commit(repository, target_base_revision)
     head = resolve_commit(repository, head_revision)
     trusted_policy = resolve_commit(repository, trusted_policy_revision or target_base_revision)
-    if baseline_candidate is None:
+    if baseline_candidate is not None and deployed_source_candidate is not None:
+        raise PlannerError("baseline candidate modes are mutually exclusive")
+    if deployed_source_candidate is not None:
+        baseline = make_deployed_source_baseline(
+            repository,
+            target_base,
+            head,
+            deployed_source_candidate,
+        )
+    elif baseline_candidate is None:
         baseline = make_pull_request_baseline(repository, target_base, head)
     else:
         baseline = make_published_support_baseline(
@@ -1314,6 +1444,10 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "--baseline-candidate",
         help="untrusted published-support registry candidate to validate before planning",
     )
+    parser.add_argument(
+        "--deployed-source-candidate",
+        help="untrusted deployed-source release candidate to validate before planning",
+    )
     parser.add_argument("--output", help="write the canonical JSON plan to this path instead of stdout")
     parser.add_argument("--check-cargo-oracle", action="store_true", help="compare local closure with cargo tree")
     return parser.parse_args(argv)
@@ -1326,8 +1460,15 @@ def main(argv: list[str] | None = None) -> int:
             Path(args.repository),
             args.target_base,
             args.head,
-            args.trusted_policy,
-            Path(args.baseline_candidate) if args.baseline_candidate else None,
+            trusted_policy_revision=args.trusted_policy,
+            baseline_candidate=(
+                Path(args.baseline_candidate) if args.baseline_candidate else None
+            ),
+            deployed_source_candidate=(
+                Path(args.deployed_source_candidate)
+                if args.deployed_source_candidate
+                else None
+            ),
         )
         if args.check_cargo_oracle:
             cargo_oracle(Path(args.repository).resolve(), document)
