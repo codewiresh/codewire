@@ -128,6 +128,19 @@ first. Use CI first only for CI-owned behavior such as hosted timing, cache,
 permissions, or credentials. Poll healthy CI on transitions or when it is the
 sole blocker, and inspect component logs on failure.
 
+Verification must use the repository-owned topology and documented invocation
+for the exact tree under test. Never introduce an ad-hoc network relay, proxy,
+listener, tunnel, port-forward shim, alternate ingress path, host route, hosts
+entry, firewall rule, or tracked-fixture rewrite to make a hook or required
+gate pass. Do not bypass or disable a hook or gate. This prohibition applies
+even when the workaround is local, temporary, non-secret, or outside the
+worktree. A network component may be created only when it is itself requested
+work or an already checked-in, documented part of the selected verification.
+If the documented gate cannot run because of the local environment, stop the
+affected push or merge, preserve the failure evidence, and report the blocker;
+resume only with the documented topology on a suitable runner or after a
+repository change has been separately reviewed and merged.
+
 Unknown or ambiguous change impact fails closed. Selected required work must
 not report success when a prerequisite is absent or the relevant test skipped.
 Preserve exact-tree reuse when a squash merge has the same tested tree and
