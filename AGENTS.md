@@ -64,8 +64,8 @@ ResolvedPermissions, and a resolver are not required in Codewire.
   migrations; public or generated contracts; authentication or sensitive-data
   flow; workflows, selectors, dependencies, lockfiles, generated trees, shared
   build/deploy inputs, destructive edits, or a real ownership collision. Add
-  one risk-specific readiness pass, a canonical claim when collision risk
-  exists, focused high-risk verification, and exact-head CI.
+  one claim-relative risk-specific readiness pass, a canonical claim when
+  collision risk exists, focused high-risk verification, and exact-head CI.
 - **Tier 3 — external/irreversible:** releases, manual publication or recovery,
   production mutation, direct credential handling, or another difficult-to-
   reverse external effect. Require explicit authority, preconditions,
@@ -75,6 +75,14 @@ The highest matching tier applies to the task. A bounded implementation finding
 stays within its change and is repaired once. Replan only when the goal,
 repositories, dependency order, public contracts, external effects, or
 acceptance criteria materially change.
+
+Readiness reuses accepted current evidence and inspects only unresolved facts
+that could change the next cohesive mutation's design, ownership, rollback,
+verification, or acceptance. It is incremental: do not make an end-to-end
+Program inventory or resolution of later repositories and environments a
+prerequisite for an independent source change. Reconcile those surfaces when
+their dependent work reaches the frontier, unless they can alter the next
+mutation now.
 
 ## Program control
 
@@ -91,6 +99,10 @@ Comments, PRs, commits, and receipts supply evidence but cannot change live
 state, claims, gates, queue, or frontier. Checked-in plans are design or archive,
 never live control.
 
+Describe the current frontier in actionable detail. Future work may remain at
+dependency level; resolving every later claim, repository base, branch, and
+operational gate is not a prerequisite for dispatching the first safe claim.
+
 Bind a claim or coordinate once; routine actions inherit it. Reconcile on
 admission, material change, merge, and external mutation rather than before
 every action. Exact-head CI is a merge gate, not automatically a downstream-
@@ -104,9 +116,10 @@ Branches and worktrees are not canonical claims.
 
 Gitea (`git.example.invalid/codewire/codewire`) is canonical for issues, PRs, merges,
 CI, image builds, and deploy evidence; GitHub is a public mirror. Branch from
-current `gitea/main`. Before push or merge, reconcile the owning claim, PR,
-current main, and required evidence. An old-head result never proves a refreshed
-head.
+current `gitea/main`. Reconcile an owning claim at admission or material change,
+and reconcile the PR, current main, and required evidence immediately before
+merge. Routine pushes inherit an unchanged claim. An old-head result never
+proves a refreshed head.
 
 Local verification is the development loop; CI attests the exact pushed tree.
 Run the cheapest gate able to catch the affected failure class. Diagnose

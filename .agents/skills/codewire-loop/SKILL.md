@@ -20,9 +20,11 @@ Claude-style `/loop` command.
 3. If a goal tool or `/goal` surface is available, set or update the active
    goal. Keep the goal under 4,000 characters; put long context in a doc or
    Gitea issue and reference it.
-4. If no issue tracks non-trivial work, create or identify a Gitea issue before
-   implementation. Use GitHub only as a public mirror unless local repo rules
-   explicitly say otherwise.
+4. Use a durable Gitea tracker when repository rules require one, Program is
+   selected, a real collision risk needs a canonical claim, or closure depends
+   on evidence across sessions. Do not create a tracker merely because normal
+   scoped work is non-trivial. Use GitHub only as a public mirror unless local
+   repo rules explicitly say otherwise.
 5. Work in a focused branch from the Gitea main branch unless the current repo
    rules or user instructions require a different branch.
 
@@ -73,7 +75,8 @@ At the start of every turn or wakeup:
    - relevant Gitea issue/PR state with command-scoped `tea` flags
    - CI transitions when a failure notification, credible stall, terminal
      horizon, or merge decision makes them relevant
-   - active program-coordinate claims in issues, branches, worktrees, and PRs
+   - active claims in the canonical Program control; inspect branches,
+     worktrees, or PRs only when investigating a concrete collision
 4. Continue the smallest unblocked step through implementation, validation,
    PR, CI, merge, and issue closure.
 5. Give brief progress updates during long work.
@@ -91,34 +94,28 @@ Do not ask "should I continue?" while the goal is actionable. Ask only for a
 decision that materially changes scope, risk, credentials, production impact,
 or an unresolved ambiguity that cannot be discovered locally.
 
-## Coordinate Parallel Work
+## Coordinate Program Work
 
-When a live `ACTIVE` ProgramControl opts into the repository's bounded-parallel
-admission envelope:
+When a live Program is `ACTIVE`:
 
-1. Use the direct owner decision and canonical Gitea issue/comment receipt as
-   the admission record. Confirm that it names the coordinate, claimant
-   branch/worktree/PR, prerequisites, exclusive paths, shared surfaces, gates,
-   forbidden work, and merge order.
-2. Check open issues, branches, worktrees, and PRs before editing. One session
-   claims one coordinate and one PR. Never open a competing PR for a coordinate
-   that another session already owns.
-3. Let disjoint admitted WIs edit, commit, push, review, and run CI
-   concurrently. Do not tell an entire session to stop merely because another
-   coordinate is active; redirect it only when it collides with an existing
-   claim or lacks admission.
-4. Serialize main merges and shared/external mutations. Immediately before
-   each push or merge, reconcile all active claims, the exact current main
-   revision, and the declared merge order. Rebase or otherwise reconcile the
-   next PR and rerun its exact-head gates after an earlier merge.
-5. If new evidence affects only one WI, mark that WI or its overlapping
-   coordinates `UNSATISFIED` and keep independent admitted WIs moving. Use a
-   program-wide `STOPPED_FOR_REPLAN` only when a program-level field named by
-   `AGENTS.md` is materially invalidated.
-
-The envelope does not make workflows, lockfiles, generated output, schemas,
-deployments, publications, releases, credentials, or live state implicitly
-independent and does not grant authority for those actions.
+1. Read its canonical live control and revision. Only mutation claims listed
+   there are claims. Comments, branches, worktrees, and PRs may provide evidence
+   of a collision, but they never admit or authorize work.
+2. If this is the named coordinating session, update the live control only at
+   admission, material transition, merge, or external mutation. Otherwise work
+   only an already dispatched claim and report evidence without changing live
+   state.
+3. Make readiness relative to the next proposed mutation. Reuse accepted issue
+   evidence and inspect only unresolved facts capable of changing that
+   mutation's design, ownership, rollback, verification, or acceptance. Defer
+   later repositories and environments unless the next mutation consumes them.
+4. Bind a claim once. Routine implementation, repair, rebase, push, review, and
+   CI inherit it while admission remains unchanged. Several claims may proceed
+   only when the live control proves independence; shared or external mutations
+   remain serialized unless a narrower boundary is proven and authorized.
+5. A concrete collision freezes only overlapping work. Keep independent
+   dispatchable work moving, and use `STOPPED_FOR_REPLAN` only when a
+   program-level field named by `AGENTS.md` is materially invalidated.
 
 ## Codewire Defaults
 
