@@ -12,6 +12,15 @@ branch pushes, pull requests, and merges. Read-only work never needs a tracker,
 claim, approval receipt, or Program. Filing an issue records evidence; it does
 not authorize implementation.
 
+Carry an authorized landing objective through verification, commit, push, PR,
+exact-head gates, merge, and closure unless the owner explicitly requests a
+checkpoint. A clean worktree, no valid commit yet, or a reverted attempt is not
+a terminal condition while a safe in-scope next action remains. Never commit
+known-bad work or weaken a gate merely to maintain momentum.
+Questions, criticism, and status requests during active work do not pause that
+objective; answer them and continue in the same turn unless the owner says to
+pause, stop, or change scope.
+
 Release tags, manually initiated publication or recovery, production or
 nonstandard live-state mutation, and direct credential access require explicit
 action-scoped authority. A risk tier adds safeguards but never creates
@@ -145,10 +154,15 @@ locally reproducible product, integration, contract, or Kind failures locally
 first. Use CI first only for CI-owned behavior such as hosted timing, cache,
 permissions, or credentials. Bind remote CI once to its exact head and run. A
 transition-aware watcher may surface early failure or terminal completion when
-that feedback matters; it must not create recurring model turns or unchanged-
-state narration. Continue independent authorized work while CI runs. Inspect
-targeted logs after failure, run/job disagreement, empty output, or credible
-stall.
+that feedback matters. Starting it is one model action: once bound, let it wait
+outside the model. Do not create recurring model turns to call `write_stdin`,
+read its terminal session, or query the same healthy run merely to learn that
+nothing changed. Continue independent authorized work while CI runs. Resume on
+watcher output, an external or user wake, the expected terminal horizon, or a
+credible stall. If the host cannot wake the thread automatically, yield with
+the bound run ID and head and check once near that horizon instead of simulating
+notification with repeated reads. Inspect targeted logs only after failure,
+run/job disagreement, empty output, or credible stall.
 
 Verification must use the repository-owned topology and documented invocation
 for the exact tree under test. Never introduce an ad-hoc network relay, proxy,

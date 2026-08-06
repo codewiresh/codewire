@@ -61,6 +61,15 @@ When the watcher is unavailable, retain responsibility with sparse checks near
 the expected terminal horizon. Never use periodic model automation merely to
 narrate unchanged CI state.
 
+Starting that watcher is one model action. Once it yields a terminal session,
+do not use recurring model turns to call `write_stdin`, poll the session, or run
+parallel status queries merely to discover unchanged state. Let the watcher own
+the wait and resume on its output or process exit. If the host cannot wake the
+thread from watcher output, yield with the bound run ID and head; resume only on
+an external or user wake, at the expected terminal horizon, or for a credible
+stall. One read at such a trigger is enough unless it reveals a new actionable
+transition.
+
 If Codex app automations are unavailable, do not claim scheduling was created.
 Instead, give an explicit fallback using Codewire `cw`, cron, systemd, or a
 human reminder to resume Codex with the same goal and heartbeat prompt.
@@ -151,6 +160,17 @@ When a live Program is `ACTIVE`:
 - If work crosses sibling repos, read each repo's local instructions before
   acting there.
 
+## Final-Response Gate
+
+A final response is a terminal handoff, not a progress update. Immediately
+before sending one, reread the objective and live control and check the active
+goal when goal tooling is available. Name which Stop Condition below holds. If
+none holds, do not send a final response: execute the next safe in-scope action.
+A user question, criticism, correction, or status request does not suspend the
+objective unless it explicitly pauses, stops, or changes scope; answer it in
+commentary and continue in the same turn. Never end by promising to resume—take
+the next action first.
+
 ## Stop Conditions
 
 Stop the loop only when one of these is true:
@@ -162,6 +182,11 @@ Stop the loop only when one of these is true:
 - The immediate next useful action requires destructive or high-risk authority,
   all authorized dispatchable work is exhausted, and no prerequisite work can
   proceed. Eventual gated operations do not satisfy this stop condition.
+
+A clean worktree, no valid commit yet, or a reverted attempt is not a stop
+condition. Intermediate requests such as `push` or `open the PR` do not narrow
+an already-authorized landing objective unless the user explicitly requests a
+checkpoint.
 
 When stopping, report the current goal status, branch/PR/issue state, completed
 evidence, and the exact next unblock step.
