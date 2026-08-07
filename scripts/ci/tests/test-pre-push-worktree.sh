@@ -215,7 +215,7 @@ normal_log="$TMP/normal-tools.log"
 normal_output="$(push_branch "$repo" normal-docs "$normal_log")"
 assert_contains normal "$normal_output" '  docs/normal.md'
 assert_contains normal "$normal_output" \
-  'preflight selection: |valid:v3|policy|complete|'
+  'preflight selection: |valid:v3|policy|policy_shell_omittable|complete|'
 assert_contains normal_tools "$(cat "$normal_log")" \
   'repo_checks permanent-raw-surface --self-test'
 assert_contains normal_tools "$(cat "$normal_log")" \
@@ -267,7 +267,7 @@ linked_docs_log="$TMP/linked-docs-tools.log"
 linked_docs_output="$(push_branch "$linked_docs" linked-docs "$linked_docs_log")"
 assert_contains linked_docs "$linked_docs_output" '  docs/linked.md'
 assert_contains linked_docs "$linked_docs_output" \
-  'preflight selection: |valid:v3|policy|complete|'
+  'preflight selection: |valid:v3|policy|policy_shell_omittable|complete|'
 assert_not_contains linked_docs_tools "$(cat "$linked_docs_log")" 'product '
 
 linked_source="$TMP/linked-source"
@@ -281,7 +281,7 @@ source_output="$(push_branch "$linked_source" linked-source "$source_log")"
 assert_contains linked_source "$source_output" \
   '  crates/codewire-cli/src/worktree_fixture.rs'
 assert_contains linked_source "$source_output" \
-  'preflight selection: |valid:v3|policy|rust|rust_pkg_codewire_cli|complete|'
+  'preflight selection: |valid:v3|policy|policy_shell_omittable|rust|rust_pkg_codewire_cli|complete|'
 assert_contains source_tools "$(cat "$source_log")" 'product rust '
 assert_not_contains source_tools "$(cat "$source_log")" 'product go-support '
 
@@ -296,7 +296,7 @@ workflow_output="$(push_branch "$linked_workflow" linked-workflow "$workflow_log
 assert_contains linked_workflow "$workflow_output" \
   '  .gitea/workflows/ci.yaml'
 assert_contains linked_workflow "$workflow_output" \
-  'preflight selection: |valid:v3|policy|runtime_dev_smoke|rust_curated_locks|complete|'
+  'preflight selection: |valid:v3|policy|policy_shell|policy_shell_omittable|runtime_dev_smoke|rust_curated_locks|complete|'
 assert_contains workflow_tools "$(cat "$workflow_log")" \
   'product rust-curated-locks '
 assert_contains workflow_tools "$(cat "$workflow_log")" \
@@ -341,7 +341,7 @@ empty_output="$({
 assert_contains empty "$empty_output" '  (no changed paths)'
 assert_contains empty "$empty_output" 'preflight classification: unchanged'
 assert_contains empty "$empty_output" \
-  'preflight selection: |valid:v3|policy|complete|'
+  'preflight selection: |valid:v3|policy|policy_shell_omittable|complete|'
 assert_not_contains empty "$empty_output" 'diagnostic_'
 assert_not_contains empty_tools "$(cat "$empty_log")" 'integration '
 assert_not_contains empty_tools "$(cat "$empty_log")" 'kind'
@@ -377,7 +377,7 @@ diagnostic_output="$({
 } 2>&1)"
 assert_contains diagnostic "$diagnostic_output" '  docs/diagnostic.md'
 assert_contains diagnostic "$diagnostic_output" \
-  'preflight selection: |valid:v3|policy|complete|'
+  'preflight selection: |valid:v3|policy|policy_shell_omittable|complete|'
 assert_not_contains diagnostic_tools "$(cat "$diagnostic_log")" 'product '
 
 kind_mode_paths="$TMP/kind-mode.paths"
@@ -418,7 +418,7 @@ sdk_runner_output="$({
     PREFLIGHT_CHANGED_FILES="$sdk_runner_paths" "$repo/.githooks/pre-push"
 } 2>&1)"
 assert_contains sdk_runner "$sdk_runner_output" \
-  'preflight selection: |valid:v3|policy|sdk_python|complete|'
+  'preflight selection: |valid:v3|policy|policy_shell|policy_shell_omittable|sdk_python|complete|'
 assert_contains sdk_runner_tools "$(cat "$sdk_runner_log")" 'product sdk-python '
 assert_not_contains sdk_runner_tools "$(cat "$sdk_runner_log")" 'integration '
 assert_not_contains sdk_runner_tools "$(cat "$sdk_runner_log")" 'kind'
@@ -432,7 +432,7 @@ apikey_tooling_output="$({
     PREFLIGHT_CHANGED_FILES="$apikey_tooling_paths" "$repo/.githooks/pre-push"
 } 2>&1)"
 assert_contains apikey_tooling "$apikey_tooling_output" \
-  'preflight selection: |valid:v3|policy|service_apikey_smoke|complete|'
+  'preflight selection: |valid:v3|policy|policy_shell|policy_shell_omittable|service_apikey_smoke|complete|'
 assert_contains apikey_tooling_tools "$(cat "$apikey_tooling_log")" \
   'product service-apikey-smoke '
 assert_not_contains apikey_tooling_tools "$(cat "$apikey_tooling_log")" 'integration '
@@ -449,7 +449,7 @@ confidential_tooling_output="$({
     PREFLIGHT_CHANGED_FILES="$confidential_tooling_paths" "$repo/.githooks/pre-push"
 } 2>&1)"
 assert_contains confidential_tooling "$confidential_tooling_output" \
-  'preflight selection: |valid:v3|policy|runtime_confidential|complete|'
+  'preflight selection: |valid:v3|policy|policy_shell|policy_shell_omittable|runtime_confidential|complete|'
 assert_contains confidential_tooling_tools "$(cat "$confidential_tooling_log")" \
   'product runtime-confidential '
 assert_not_contains confidential_tooling_tools \
@@ -470,7 +470,7 @@ dev_smoke_tooling_output="$({
     "$repo/.githooks/pre-push"
 } 2>&1)"
 assert_contains dev_smoke_tooling "$dev_smoke_tooling_output" \
-  'preflight selection: |valid:v3|policy|runtime_dev_smoke|complete|'
+  'preflight selection: |valid:v3|policy|policy_shell|policy_shell_omittable|runtime_dev_smoke|complete|'
 assert_contains dev_smoke_tooling_tools "$(cat "$dev_smoke_tooling_log")" \
   'product runtime-dev-smoke '
 assert_not_contains dev_smoke_tooling_tools \
@@ -488,7 +488,7 @@ sdk_tooling_output="$({
     PREFLIGHT_CHANGED_FILES="$sdk_tooling_paths" "$repo/.githooks/pre-push"
 } 2>&1)"
 assert_contains sdk_tooling "$sdk_tooling_output" \
-  'preflight selection: |valid:v3|go_consumer_interop|go_support|policy|sdk_go|complete|'
+  'preflight selection: |valid:v3|go_consumer_interop|go_support|policy|policy_shell_omittable|sdk_go|complete|'
 assert_contains sdk_tooling_tools "$(cat "$sdk_tooling_log")" 'product sdk-go '
 assert_not_contains sdk_tooling_tools "$(cat "$sdk_tooling_log")" 'integration '
 assert_not_contains sdk_tooling_tools "$(cat "$sdk_tooling_log")" 'kind'

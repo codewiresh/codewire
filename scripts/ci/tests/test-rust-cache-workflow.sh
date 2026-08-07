@@ -54,8 +54,22 @@ printf '%s\n' \
 selector_output="$(env -u GITHUB_OUTPUT -u GITHUB_EVENT_PATH \
   GITHUB_EVENT_NAME=pull_request GITHUB_REF=refs/pull/1/head \
   "$ROOT/scripts/ci/select/select-verification.sh" "$selector_paths")"
-grep -Fxq 'selection=|valid:v3|policy|complete|' <<<"$selector_output" \
-  || fail 'cache-producer inputs do not select policy-only verification'
+selector_selection="$(sed -n 's/^selection=//p' <<<"$selector_output")"
+[[ "$selector_selection" == '|valid:v3|'*'|complete|' ]] \
+  || fail 'cache-producer selection is malformed'
+IFS='|' read -r -a selector_tokens <<<"$selector_selection"
+for selector_token in "${selector_tokens[@]}"; do
+  case "$selector_token" in
+    ''|valid:v3|complete|policy|policy_shell|policy_shell_omittable) ;;
+    *) fail "cache-producer inputs selected product capability $selector_token" ;;
+  esac
+done
+[[ "$selector_selection" == *'|policy|'* ]] \
+  || fail 'cache-producer inputs omitted the policy domain'
+[[ "$selector_selection" == *'|policy_shell|'* ]] \
+  || fail 'cache-producer shell inputs omitted the ShellCheck policy domain'
+[[ "$selector_selection" == *'|policy_shell_omittable|'* ]] \
+  || fail 'cache-producer inputs omitted authoritative ShellCheck routing'
 
 compatibility="$(printf fixture | sha256sum | cut -d' ' -f1)"
 reuse_key="codewire-rust-deps-v1-generic-host-ci-${compatibility}-0123456789abcdef0123456789abcdef"

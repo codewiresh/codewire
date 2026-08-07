@@ -73,6 +73,13 @@ fi
 }
 
 cd "$ROOT"
+shellcheck_timeout_seconds="${SHELLCHECK_TIMEOUT_SECONDS:-180}"
+if [[ ! "$shellcheck_timeout_seconds" =~ ^[0-9]+$ ]] \
+    || (( 10#$shellcheck_timeout_seconds < 1 )) \
+    || (( 10#$shellcheck_timeout_seconds > 900 )); then
+  printf 'SHELLCHECK_TIMEOUT_SECONDS must be an integer from 1 through 900\n' >&2
+  exit 2
+fi
 shellcheck_bin="$(scripts/ci/setup/setup-shellcheck.sh)"
 mapfile -d '' shell_files < <(
   git ls-files -z -- '*.sh'
@@ -82,10 +89,23 @@ mapfile -d '' shell_files < <(
   exit 1
 }
 
+printf 'ShellCheck analysis: start (scripts=%s timeout_seconds=%s)\n' \
+  "${#shell_files[@]}" "$shellcheck_timeout_seconds"
+shellcheck_started_at=$SECONDS
 set +e
-findings_json="$($shellcheck_bin --severity=warning --format=json1 "${shell_files[@]}")"
+findings_json="$(timeout --foreground --signal=TERM --kill-after=5s \
+  "${shellcheck_timeout_seconds}s" \
+  "$shellcheck_bin" --severity=warning --format=json1 "${shell_files[@]}")"
 shellcheck_status=$?
 set -e
+shellcheck_elapsed_seconds=$((SECONDS - shellcheck_started_at))
+printf 'ShellCheck analysis: finish (status=%s elapsed_seconds=%s)\n' \
+  "$shellcheck_status" "$shellcheck_elapsed_seconds"
+if [[ "$shellcheck_status" -eq 124 || "$shellcheck_status" -eq 137 ]]; then
+  printf 'ShellCheck timed out after %s seconds\n' \
+    "$shellcheck_timeout_seconds" >&2
+  exit "$shellcheck_status"
+fi
 if [[ "$shellcheck_status" -gt 1 ]]; then
   printf 'ShellCheck failed with status %s\n' "$shellcheck_status" >&2
   exit "$shellcheck_status"

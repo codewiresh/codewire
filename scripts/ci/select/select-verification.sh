@@ -161,7 +161,7 @@ select_all_contracts() {
 select_all_product() {
   local include_ios="${1:-false}" family
   for family in \
-      policy rust go_support web sdk_go sdk_ts sdk_python database \
+      policy policy_shell rust go_support web sdk_go sdk_ts sdk_python database \
       service_integration edge_kind release deploy security \
       runtime_confidential runtime_dev_smoke; do
     select_token "$family"
@@ -221,7 +221,11 @@ select_dispatch_request() {
     contracts)
       select_all_contracts
       ;;
-    policy|web|sdk_go|sdk_ts|sdk_python|database|release|deploy|ios)
+    policy)
+      select_token policy
+      select_token policy_shell
+      ;;
+    web|sdk_go|sdk_ts|sdk_python|database|release|deploy|ios)
       select_token "$request"
       ;;
     rust-stack)
@@ -302,6 +306,15 @@ if [ "$event_selected" = false ]; then
     [ -n "$path" ] || continue
     saw_path=true
     recognized=false
+
+    # Shell analysis is its own policy domain. The trusted selector owns this
+    # token, so a candidate selector cannot avoid ShellCheck by changing its
+    # own routing. Deleted shell inputs remain selected by their path suffix.
+    case "$path" in
+      *.sh|.gitea/workflows/ci.yaml)
+        select_token policy_shell
+        ;;
+    esac
 
     # These frozen pre-Rust CLI assets are documentation or retirement inputs,
     # not deployable image, edge, database, or Kind inputs. Keep this before
@@ -387,6 +400,7 @@ if [ "$event_selected" = false ]; then
       scripts/ci/tests/test-cargo-cache-capacity.sh|\
       scripts/ci/tests/test-rust-cache-workflow.sh|\
       scripts/ci/tests/test-rust-cache-receipts.sh|\
+      scripts/ci/tests/test-shellcheck-policy-domain.sh|\
       scripts/ci/tests/fixtures/cargo-cache-df.sh|\
       scripts/ci/verify/integration-postgres.sh|scripts/ci/tests/test-integration-postgres.sh|\
       scripts/ci/verify/resolve-cargo-target-dir.sh|\
@@ -1147,6 +1161,13 @@ if token_selected release; then
 elif token_selected sdk_go; then
   select_token go_support
   select_token go_consumer_interop
+fi
+
+# This marker means absence of policy_shell is an authoritative decision from
+# a selector that knows the shell-policy domain. Older trusted selectors omit
+# it, so candidate runners must keep executing ShellCheck for legacy output.
+if token_selected policy; then
+  select_token policy_shell_omittable
 fi
 
 for token in "${!selected[@]}"; do

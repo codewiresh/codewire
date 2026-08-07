@@ -32,6 +32,10 @@ expected_tokens() {
 
 assert_tokens() {
   local name="$1" expected="$2" output="$3" actual want selection
+  if [[ " $expected " == *' policy '* ]] \
+      && [[ " $expected " != *' policy_shell_omittable '* ]]; then
+    expected="$expected policy_shell_omittable"
+  fi
   if [ "$(wc -l <<<"$output")" -ne 4 ] \
       || [ "$(sed -n '1p' <<<"$output")" != 'selector_version=v3' ] \
       || [[ "$(sed -n '2p' <<<"$output")" != classification=* ]] \
@@ -69,7 +73,13 @@ assert_tokens() {
 run_paths_case() {
   local name="$1" event="$2" ref="$3" opt_in="$4" expected="$5"
   shift 5
-  local paths="$TMP/${name}.paths" output
+  local paths="$TMP/${name}.paths" output path
+  for path in "$@"; do
+    if [[ "$path" == *.sh ]] && [[ " $expected " != *' policy_shell '* ]]; then
+      expected="$expected policy_shell"
+      break
+    fi
+  done
   printf '%s\n' "$@" > "$paths"
   output="$(env -u GITHUB_OUTPUT -u GITHUB_EVENT_PATH \
     GITHUB_EVENT_NAME="$event" GITHUB_REF="$ref" \
@@ -107,7 +117,7 @@ run_paths_case local_compose pull_request refs/pull/11/head false \
 run_paths_case local_compose_kind_opt_in pull_request refs/pull/111/head true \
   'database deploy edge_kind kind policy web' docker-compose.yml
 run_paths_case ci_self pull_request refs/pull/2/head false \
-  'go_consumer_interop go_support policy release runtime_confidential runtime_dev_smoke rust_curated_locks' \
+  'go_consumer_interop go_support policy policy_shell release runtime_confidential runtime_dev_smoke rust_curated_locks' \
   .gitea/workflows/ci.yaml .gitea/workflows/manual-diagnostics.yaml \
   scripts/ci/select/select-verification.sh \
   scripts/ci/select/require-verification-results.sh \
@@ -137,6 +147,9 @@ run_paths_case ci_rewrite pull_request refs/pull/20/head false \
   scripts/ci/tests/test-select-verification.sh
 run_paths_case rust_cache_producer_policy pull_request refs/pull/200/head false \
   "$policy" .gitea/workflows/rust-cache-refresh.yaml
+run_paths_case shellcheck_policy_domain_future pull_request refs/pull/2001/head false \
+  'policy policy_shell' scripts/ci/tests/test-shellcheck-policy-domain.sh
+grep -qF 'scripts/ci/tests/test-shellcheck-policy-domain.sh' "$SELECTOR"
 run_paths_case runtime_plan_ci pull_request refs/pull/201/head false \
   'deploy go_consumer_interop go_support policy release runtime_confidential' \
   scripts/ci/deploy/resolve-deployed-source.sh \
@@ -681,7 +694,7 @@ run_paths_case ws17_wi_c3 pull_request refs/pull/173/head false \
 run_paths_case tag push refs/tags/v1.2.3 false \
   'deploy go_consumer_interop go_support release runtime_confidential' docs/tag-path-is-ignored.md
 
-all_product='contracts contracts_proto database deploy edge_kind go_consumer_interop go_support go_tailnet kind policy release runtime_confidential runtime_dev_smoke rust rust_curated_locks rust_workspace sdk_go sdk_python sdk_ts security security_dev_smoke_auth security_go security_idp_kek security_js service_apikey_smoke service_billing service_connectcore service_coordinator service_idp service_integration service_nats service_orchestration service_temporal transport transport_derp_contract transport_pkg_codewire_coordinator transport_pkg_codewire_daemon transport_pkg_codewire_derp transport_pkg_codewire_gateway transport_pkg_codewire_mesh transport_pkg_codewire_tailnet transport_pkg_codewire_udp_relay web'
+all_product='contracts contracts_proto database deploy edge_kind go_consumer_interop go_support go_tailnet kind policy policy_shell release runtime_confidential runtime_dev_smoke rust rust_curated_locks rust_workspace sdk_go sdk_python sdk_ts security security_dev_smoke_auth security_go security_idp_kek security_js service_apikey_smoke service_billing service_connectcore service_coordinator service_idp service_integration service_nats service_orchestration service_temporal transport transport_derp_contract transport_pkg_codewire_coordinator transport_pkg_codewire_daemon transport_pkg_codewire_derp transport_pkg_codewire_gateway transport_pkg_codewire_mesh transport_pkg_codewire_tailnet transport_pkg_codewire_udp_relay web'
 for rust_cache_path in \
   scripts/ci/cache/prepare-rust-dependency-cache.sh \
   scripts/ci/cache/select-rust-cache-key.sh \
@@ -792,6 +805,10 @@ assert_tokens dispatch_go_support \
 dispatch_output="$(env -u GITHUB_OUTPUT GITHUB_EVENT_NAME=workflow_dispatch \
   VERIFICATION_REQUEST=ios "$SELECTOR")"
 assert_tokens dispatch_ios 'ios' "$dispatch_output"
+dispatch_output="$(env -u GITHUB_OUTPUT GITHUB_EVENT_NAME=workflow_dispatch \
+  VERIFICATION_REQUEST=policy "$SELECTOR")"
+assert_tokens dispatch_policy 'policy policy_shell' "$dispatch_output"
+grep -Fq '|policy_shell_omittable|' <<<"$dispatch_output"
 dispatch_output="$(env -u GITHUB_OUTPUT GITHUB_EVENT_NAME=workflow_dispatch \
   VERIFICATION_REQUEST=all "$SELECTOR")"
 assert_tokens dispatch_all "${all_product} ios" "$dispatch_output"

@@ -105,7 +105,7 @@ has_root_rust_selection() {
   return 1
 }
 
-run_policy() {
+run_shell_policy() {
   local runtime_shell_files=()
   local runtime_shell_file
   if [ -d scripts/runtime ]; then
@@ -116,9 +116,15 @@ run_policy() {
   if [ "${#runtime_shell_files[@]}" -gt 0 ]; then
     bash -n "${runtime_shell_files[@]}"
   fi
+  scripts/ci/verify/check-shell-scripts.sh --self-test
+  scripts/ci/verify/check-shell-scripts.sh
+}
+
+run_policy_core() {
   scripts/ci/tests/test-setup-kubeconfig.sh
   scripts/ci/tests/test-resolve-deployed-source.sh
   scripts/ci/tests/test-select-verification.sh
+  scripts/ci/tests/test-shellcheck-policy-domain.sh
   scripts/ci/tests/test-go-source-ownership.sh
   scripts/ci/tests/test-rust-owned-fixtures.sh
   scripts/ci/tests/test-require-verification-results.sh
@@ -134,8 +140,6 @@ run_policy() {
   scripts/ci/tests/test-workspace-image-verify-workflow.sh
   scripts/ci/tests/test-sdk-local-cli-contract.sh
   scripts/ci/tests/test-integration-postgres.sh
-  scripts/ci/verify/check-shell-scripts.sh --self-test
-  scripts/ci/verify/check-shell-scripts.sh
   python3 scripts/ci/tests/test-repo-checks-modules.py
   python3 scripts/checks/repo_checks.py license-map
   python3 scripts/checks/repo_checks.py permanent-raw-surface --self-test
@@ -143,6 +147,16 @@ run_policy() {
   python3 scripts/checks/repo_checks.py retired-reference-source
   python3 scripts/checks/source/check-native-desktop-ui.py
   python3 scripts/checks/repo_checks.py go-source-classification
+}
+
+run_policy() {
+  # A legacy trusted selector does not know when omission is authoritative, so
+  # it must retain the historical full ShellCheck behavior. Only a trusted
+  # selector that emits policy_shell_omittable may omit the shell domain.
+  if selected policy_shell || ! selected policy_shell_omittable; then
+    run_shell_policy
+  fi
+  run_policy_core
 }
 
 install_contract_toolchain() {
