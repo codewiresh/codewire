@@ -300,6 +300,32 @@ pub async fn handle_environment_start(
     let ns = backend.namespace.clone();
     let client = sandbox_client(ctx, &ns)?;
 
+    if env.isolation_tier == "confidential" {
+        let Some(storage) = ctx.confidential_storage.as_ref() else {
+            let error = anyhow::anyhow!("confidential storage providers are not configured");
+            record_environment_error(&svc, authority, env_id, &format!("{error:#}")).await?;
+            return Err(error);
+        };
+        if let Err(error) = await_reconcile_or_cancel(
+            &activity_ctx,
+            authority.run_external_mutation(START_MUTATION_STATES, storage.ensure_ready(env_id)),
+        )
+        .await
+        {
+            if is_lifecycle_control_loss(&error) {
+                return Err(error);
+            }
+            record_environment_error(
+                &svc,
+                authority,
+                env_id,
+                &format!("key reconciliation: {error:#}"),
+            )
+            .await?;
+            return Err(error);
+        }
+    }
+
     // Scale the sandbox back up to 1 replica.
     if let Err(e) = await_reconcile_or_cancel(
         &activity_ctx,
@@ -583,6 +609,7 @@ pub async fn handle_environment_destroy(
                     env_id,
                     known_sandbox_name,
                     per_environment_template.as_deref(),
+                    env.isolation_tier == "confidential",
                     DELETED_TIMEOUT,
                 ),
             )
@@ -592,6 +619,25 @@ pub async fn handle_environment_destroy(
             return Err(anyhow::anyhow!(
                 "delete environment resources in {namespace}: {error:#}"
             ));
+        }
+    }
+
+    if env.isolation_tier == "confidential" {
+        let Some(storage) = ctx.confidential_storage.as_ref() else {
+            let error = anyhow::anyhow!("confidential storage providers are not configured");
+            record_environment_error(&svc, authority, env_id, &format!("{error:#}")).await?;
+            return Err(error);
+        };
+        if let Err(error) = authority
+            .run_external_mutation(
+                DESTROY_CLEANUP_MUTATION_STATES,
+                storage.delete_after_storage_absent(env_id),
+            )
+            .await
+        {
+            record_environment_error(&svc, authority, env_id, &format!("key deletion: {error:#}"))
+                .await?;
+            return Err(error);
         }
     }
 

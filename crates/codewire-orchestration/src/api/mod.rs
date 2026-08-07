@@ -37,6 +37,7 @@ use axum::routing::get;
 use codewire_server_core::auth::{AuthState, require_account_auth, require_auth};
 use sqlx::PgPool;
 
+use crate::confidential_storage::FeatureFlags;
 use crate::temporal::TemporalTrigger;
 use crate::worker::create::SandboxWorkerCfg;
 use crate::worker::github::GitHubAppConfig;
@@ -78,6 +79,8 @@ pub struct ApiState {
     /// Sandbox/runtime config slice used by internal gateway binding
     /// to publish dynamic transport endpoints for this environment.
     pub sandbox_cfg: SandboxWorkerCfg,
+    /// Disabled-by-default confidential storage product gates.
+    pub confidential_storage_flags: FeatureFlags,
 }
 
 /// The deliberately permanent browser-facing routes.

@@ -1416,6 +1416,7 @@ async fn schema_guard_enumerates_org_preset_and_environment_dependencies() {
     assert_eq!(
         referencing_tables(&pool, "environments").await,
         vec![
+            "confidential_storage_keys:cascade",
             "environment_access:cascade",
             "environment_lifecycle_journal:cascade",
             "environment_logs:cascade",

@@ -12,6 +12,7 @@ use super::ApiState;
 use super::environments::require_environment_access;
 use super::prepare::plain_error;
 use super::terminal::authenticate_socket_request;
+use crate::confidential_storage::require_interactive_access;
 
 const PREVIEW_SERVICE_HEADER: &str = "x-codewire-service";
 const PREVIEW_SERVICE_NAME: &str = "codewire-orchestration";
@@ -23,6 +24,7 @@ struct PreviewTarget {
     access: String,
     created_by: String,
     pod_ip: String,
+    isolation_tier: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -87,7 +89,14 @@ pub async fn preview_proxy_middleware(
         Err(response) => return response,
     };
 
-    if target.access != "public" {
+    if target.isolation_tier == "confidential" && !state.confidential_storage_flags.enabled {
+        return preview_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "confidential persistent storage is disabled",
+        );
+    }
+
+    if target.access != "public" || target.isolation_tier == "confidential" {
         let user = match authenticate_socket_request(&state, &headers, "").await {
             Ok(user) => user,
             Err(response) if response.status() == StatusCode::UNAUTHORIZED => {
@@ -104,6 +113,24 @@ pub async fn preview_proxy_middleware(
                 StatusCode::FORBIDDEN,
                 "forbidden: API key belongs to another organization",
             );
+        }
+
+        if let Err(error) = require_interactive_access(
+            state.confidential_storage_flags,
+            &user,
+            &target.isolation_tier,
+        ) {
+            return match error {
+                codewire_server_core::AppError::Coded { status, .. } => preview_error(
+                    status,
+                    if status == StatusCode::SERVICE_UNAVAILABLE {
+                        "confidential persistent storage is disabled"
+                    } else {
+                        "global administrator user credential required"
+                    },
+                ),
+                _ => preview_error(StatusCode::FORBIDDEN, "forbidden"),
+            };
         }
 
         if target.access == "org_members" {
@@ -219,7 +246,7 @@ async fn resolve_preview_target(
     host_match: &PreviewHostMatch,
 ) -> Result<PreviewTarget, Response> {
     let row = sqlx::query(
-        r#"SELECT ep.port, e.id, ep.access, e.created_by, e.state,
+        r#"SELECT ep.port, e.id, ep.access, e.created_by, e.state, e.isolation_tier,
                   COALESCE(b.pod_ip, '') AS pod_ip
              FROM environment_ports ep
              JOIN environments e ON e.id = ep.environment_id
@@ -276,6 +303,9 @@ async fn resolve_preview_target(
             .try_get("created_by")
             .map_err(|_| preview_error(StatusCode::INTERNAL_SERVER_ERROR, "internal error"))?,
         pod_ip,
+        isolation_tier: row
+            .try_get("isolation_tier")
+            .map_err(|_| preview_error(StatusCode::INTERNAL_SERVER_ERROR, "internal error"))?,
     })
 }
 

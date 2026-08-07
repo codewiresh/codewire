@@ -12,12 +12,12 @@ use super::runtime_policy::{
     workspace_storage_class,
 };
 use super::{
-    DAEMON_AUTH_TOKEN_ENV, DEFAULT_GATEWAY_IMAGE, EXTENSIONS_API_VERSION,
-    GATEWAY_DOCKER_UPSTREAM_SOCK_PATH, HOME_ROOT, ISOL8_DISK_GIB_ANNOTATION_KEY,
-    ISOL8_WORKSPACE_ANNOTATION_KEY, KATA_COCO_INIT_DATA_ANNOTATION_KEY,
-    KATA_HYPERVISOR_KERNEL_PARAMS_ANNOTATION_KEY, SANDBOX_SERVICE_ACCOUNT, TemplateOpts,
-    WORKSPACE_ANNOTATION_KEY, WORKSPACE_DAEMON_LISTEN_ADDR, WORKSPACE_DAEMON_PORT,
-    WORKSPACE_DISK_GIB_ANNOTATION_KEY, WORKSPACE_EPHEMERAL_STORAGE_GI,
+    CONFIDENTIAL_STORAGE_KEY_ID_ANNOTATION, DAEMON_AUTH_TOKEN_ENV, DEFAULT_GATEWAY_IMAGE,
+    EXTENSIONS_API_VERSION, GATEWAY_DOCKER_UPSTREAM_SOCK_PATH, HOME_ROOT,
+    ISOL8_DISK_GIB_ANNOTATION_KEY, ISOL8_WORKSPACE_ANNOTATION_KEY,
+    KATA_COCO_INIT_DATA_ANNOTATION_KEY, KATA_HYPERVISOR_KERNEL_PARAMS_ANNOTATION_KEY,
+    SANDBOX_SERVICE_ACCOUNT, TemplateOpts, WORKSPACE_ANNOTATION_KEY, WORKSPACE_DAEMON_LISTEN_ADDR,
+    WORKSPACE_DAEMON_PORT, WORKSPACE_DISK_GIB_ANNOTATION_KEY, WORKSPACE_EPHEMERAL_STORAGE_GI,
 };
 
 /// Mirrors `sandbox.RenderSandboxTemplate`.
@@ -155,7 +155,13 @@ fn build_template_spec(opts: &TemplateOpts, ws: &mut Value, support_image: &str)
         );
     }
 
-    let labels = workspace_template_labels();
+    let mut labels = workspace_template_labels();
+    if runtime_spec.profile == RUNTIME_PROFILE_CONFIDENTIAL {
+        labels
+            .as_object_mut()
+            .expect("workspace labels object")
+            .insert("codewire.sh/isolation-tier".into(), "confidential".into());
+    }
     let mut spec = Map::new();
     spec.insert(
         "podTemplate".into(),
@@ -173,15 +179,38 @@ fn build_template_spec(opts: &TemplateOpts, ws: &mut Value, support_image: &str)
 
     if opts.disk_gib > 0 {
         let storage_class = workspace_storage_class(opts);
+        let confidential = runtime_spec.profile == RUNTIME_PROFILE_CONFIDENTIAL;
+        let metadata = if confidential {
+            json!({
+                "name": "workspace",
+                "annotations": {
+                    CONFIDENTIAL_STORAGE_KEY_ID_ANNOTATION: opts.environment_id,
+                },
+                "labels": {
+                    "codewire.sh/environment-id": opts.environment_id,
+                },
+            })
+        } else {
+            json!({ "name": "workspace" })
+        };
+        let access_mode = if confidential {
+            "ReadWriteOncePod"
+        } else {
+            "ReadWriteOnce"
+        };
+        let mut claim_spec = json!({
+            "accessModes": [access_mode],
+            "storageClassName": storage_class,
+            "resources": { "requests": { "storage": format!("{}Gi", opts.disk_gib) } },
+        });
+        if confidential {
+            claim_spec["volumeMode"] = "Filesystem".into();
+        }
         spec.insert(
             "volumeClaimTemplates".into(),
             json!([{
-                "metadata": { "name": "workspace" },
-                "spec": {
-                    "accessModes": ["ReadWriteOnce"],
-                    "storageClassName": storage_class,
-                    "resources": { "requests": { "storage": format!("{}Gi", opts.disk_gib) } },
-                },
+                "metadata": metadata,
+                "spec": claim_spec,
             }]),
         );
     }

@@ -79,6 +79,10 @@ pub struct WorkerContext {
     pub github_cfg: github::GitHubAppConfig,
     /// Sandbox/create config slice (env-derived, Go config.Config names).
     pub sandbox_cfg: create::SandboxWorkerCfg,
+    /// Platform-only recovery/KBS lifecycle. Never falls back to tenant
+    /// secrets or PostgreSQL key storage.
+    pub confidential_storage:
+        Option<std::sync::Arc<crate::confidential_storage::ConfidentialStorageManager>>,
     /// Lifecycle trigger: the reconciler SignalWithStarts the
     /// environment workflow (D3 — Temporal is the only trigger path).
     pub temporal_trigger: std::sync::Arc<crate::temporal::TemporalTrigger>,

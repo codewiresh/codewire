@@ -15,6 +15,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use super::ApiState;
 use super::environments::require_environment_access;
+use crate::confidential_storage::require_interactive_access;
 use crate::sandbox::client::SandboxClient;
 use crate::sandbox::exec::WorkspaceExecResult;
 
@@ -66,19 +67,37 @@ pub(crate) async fn resolve_running_sandbox_target_for_role(
 
     // The environments read row carries state + type; resolve via the
     // same query the read surface uses, scoped to the org.
-    let row = sqlx::query("SELECT id, state, type FROM environments WHERE id = $1 AND org_id = $2")
-        .bind(env_id)
-        .bind(org_id)
-        .fetch_optional(&state.pool)
-        .await
-        .ok()
-        .flatten();
+    let row = sqlx::query(
+        "SELECT id, state, type, isolation_tier FROM environments WHERE id = $1 AND org_id = $2",
+    )
+    .bind(env_id)
+    .bind(org_id)
+    .fetch_optional(&state.pool)
+    .await
+    .ok()
+    .flatten();
     let Some(row) = row else {
         return Err((StatusCode::NOT_FOUND, "environment not found"));
     };
     let id: String = row.get("id");
     let st: String = row.get("state");
     let env_type: String = row.get("type");
+    let isolation_tier: String = row.get("isolation_tier");
+    if let Err(error) =
+        require_interactive_access(state.confidential_storage_flags, user, &isolation_tier)
+    {
+        return match error {
+            AppError::Coded { status, .. } => Err((
+                status,
+                if status == StatusCode::SERVICE_UNAVAILABLE {
+                    "confidential persistent storage is disabled"
+                } else {
+                    "global administrator user credential required"
+                },
+            )),
+            _ => Err((StatusCode::FORBIDDEN, "access denied")),
+        };
+    }
     if st != "running" {
         return Err((StatusCode::BAD_REQUEST, "environment must be running"));
     }

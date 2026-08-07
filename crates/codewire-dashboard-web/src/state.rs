@@ -11,6 +11,8 @@ pub(crate) struct AppState {
     pub(crate) billing_origin: http::Uri,
     pub(crate) docs_root: PathBuf,
     pub(crate) inline_docs_io: bool,
+    pub(crate) confidential_storage_enabled: bool,
+    pub(crate) confidential_admin_only: bool,
     pub(crate) http: reqwest::Client,
 }
 
@@ -24,6 +26,8 @@ impl AppState {
             billing_origin: config.billing_origin,
             docs_root: config.docs_root,
             inline_docs_io: config.runtime_mode == RuntimeMode::CurrentThread,
+            confidential_storage_enabled: config.confidential_storage_enabled,
+            confidential_admin_only: config.confidential_admin_only,
             http: reqwest::Client::builder()
                 .timeout(Duration::from_secs(10))
                 .build()

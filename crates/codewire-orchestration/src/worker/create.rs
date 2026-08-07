@@ -265,6 +265,7 @@ pub fn warm_pool_template_opts(cfg: &SandboxWorkerCfg, profile: &WarmPoolProfile
         kata_agent_policy_enabled: cfg.kata_agent_policy_enabled,
         kata_coco_init_data_enabled: cfg.kata_coco_init_data_enabled,
         kata_coco_kbs_url: cfg.kata_coco_kbs_url.clone(),
+        kata_coco_kbs_ca_pem: cfg.kata_coco_kbs_ca_pem.clone(),
         kata_coco_image_registry_auth_uri: cfg.kata_coco_image_registry_auth_uri.clone(),
         kata_coco_test_resource_uri: cfg.kata_coco_test_resource_uri.clone(),
         kata_coco_test_resource_path: cfg.kata_coco_test_resource_path.clone(),
@@ -293,6 +294,7 @@ pub struct SandboxWorkerCfg {
     pub kata_agent_policy_enabled: bool,
     pub kata_coco_init_data_enabled: bool,
     pub kata_coco_kbs_url: String,
+    pub kata_coco_kbs_ca_pem: String,
     pub kata_coco_image_registry_auth_uri: String,
     pub kata_coco_test_resource_uri: String,
     pub kata_coco_test_resource_path: String,
@@ -333,6 +335,20 @@ impl SandboxWorkerCfg {
                 .filter(|v| !v.is_empty())
                 .unwrap_or_else(|| d.to_string())
         };
+        let kata_coco_kbs_url = getenv(
+            "SANDBOX_KATA_COCO_KBS_URL",
+            &getenv("CONFIDENTIAL_STORAGE_KBS_URL", ""),
+        );
+        let kbs_ca_path = getenv("CONFIDENTIAL_STORAGE_KBS_CA_PATH", "");
+        let kata_coco_kbs_ca_pem = if kbs_ca_path.is_empty() {
+            String::new()
+        } else {
+            std::fs::read_to_string(&kbs_ca_path).unwrap_or_else(|error| {
+                panic!(
+                    "failed to read public confidential-storage KBS CA at {kbs_ca_path}: {error}"
+                )
+            })
+        };
         Self {
             session_secret: getenv("SESSION_SECRET", ""),
             sandbox_namespace: getenv("SANDBOX_NAMESPACE", &format!("{env_prefix}-sandboxes")),
@@ -355,7 +371,8 @@ impl SandboxWorkerCfg {
                 == "true",
             kata_coco_init_data_enabled: getenv("SANDBOX_KATA_COCO_INIT_DATA_ENABLED", "false")
                 == "true",
-            kata_coco_kbs_url: getenv("SANDBOX_KATA_COCO_KBS_URL", ""),
+            kata_coco_kbs_url,
+            kata_coco_kbs_ca_pem,
             kata_coco_image_registry_auth_uri: getenv(
                 "SANDBOX_KATA_COCO_IMAGE_REGISTRY_AUTH_URI",
                 "",
@@ -552,6 +569,7 @@ pub fn environment_template_opts(
         kata_agent_policy_enabled: cfg.kata_agent_policy_enabled,
         kata_coco_init_data_enabled: cfg.kata_coco_init_data_enabled,
         kata_coco_kbs_url: cfg.kata_coco_kbs_url.clone(),
+        kata_coco_kbs_ca_pem: cfg.kata_coco_kbs_ca_pem.clone(),
         kata_coco_image_registry_auth_uri: cfg.kata_coco_image_registry_auth_uri.clone(),
         kata_coco_test_resource_uri: cfg.kata_coco_test_resource_uri.clone(),
         kata_coco_test_resource_path: cfg.kata_coco_test_resource_path.clone(),
@@ -892,6 +910,49 @@ async fn run_environment_create(
                 {
                     authority.ensure().await?;
                     tracing::warn!(error = %e, "CAS to creating failed");
+                }
+                if env.isolation_tier == "confidential" {
+                    let Some(storage) = ctx.confidential_storage.as_ref() else {
+                        let error =
+                            anyhow::anyhow!("confidential storage providers are not configured");
+                        emit_create_log(
+                            authority,
+                            "create_claim",
+                            "failed",
+                            &format!("{error:#}"),
+                            duration_meta(started),
+                        )
+                        .await?;
+                        record_error(
+                            &svc,
+                            authority,
+                            env_id,
+                            &format!("key provisioning: {error:#}"),
+                        )
+                        .await?;
+                        return Err(error);
+                    };
+                    if let Err(error) = authority
+                        .run_external_mutation(CREATE_MUTATION_STATES, storage.ensure_ready(env_id))
+                        .await
+                    {
+                        emit_create_log(
+                            authority,
+                            "create_claim",
+                            "failed",
+                            &format!("{error:#}"),
+                            duration_meta(started),
+                        )
+                        .await?;
+                        record_error(
+                            &svc,
+                            authority,
+                            env_id,
+                            &format!("key provisioning: {error:#}"),
+                        )
+                        .await?;
+                        return Err(error);
+                    }
                 }
                 let preset_id = env.preset_id.clone().unwrap_or_default();
                 let (image_ref, template_base) =

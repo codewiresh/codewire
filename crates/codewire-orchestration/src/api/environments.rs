@@ -25,6 +25,7 @@ use sqlx::postgres::PgRow;
 use sqlx::{PgPool, Row};
 
 use super::ApiState;
+use crate::confidential_storage::require_interactive_access;
 
 /// Mirrors `api.Environment` field-for-field (JSON tags included).
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -1050,6 +1051,7 @@ pub(crate) async fn start_environment_core(
     )
     .await?;
     let env = fetch_env_summary(&state.pool, org_id, env_id).await?;
+    require_interactive_access(state.confidential_storage_flags, user, &env.isolation_tier)?;
 
     let dispatch_ambiguous = AtomicBool::new(false);
     run_environment_runtime_mutation(&state.pool, org_id, env_id, async {
@@ -1242,6 +1244,8 @@ pub(crate) async fn cancel_environment_deletion_core(
 ) -> AppResult<StatusResponse> {
     require_org_member(&state.pool, user, org_id).await?;
     require_environment_access(&state.pool, user, env_id, org_id, "owner", "access denied").await?;
+    let env = fetch_env_summary(&state.pool, org_id, env_id).await?;
+    require_interactive_access(state.confidential_storage_flags, user, &env.isolation_tier)?;
 
     run_organization_database_mutation(&state.pool, org_id, async {
         let lifecycle = crate::lifecycle::Service::for_pool(state.pool.clone());

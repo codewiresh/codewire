@@ -46,6 +46,15 @@ spec:
                 name: codewire-config
             - secretRef:
                 name: codewire-secrets
+            # Infra owns these non-secret IDs, URLs, and the public KBS CA.
+            # They remain optional so standard deployments do not depend on
+            # the disabled confidential-storage stack.
+            - configMapRef:
+                name: codewire-confidential-storage-infisical
+                optional: true
+            - configMapRef:
+                name: codewire-confidential-storage-kbs
+                optional: true
           env:
             - name: ORCHESTRATION_PORT
               value: "8084"
@@ -83,6 +92,27 @@ spec:
               port: http
             initialDelaySeconds: 5
             periodSeconds: 5
+          volumeMounts:
+            # Platform-only Trustee administration credential. This volume is
+            # never projected into tenant Secrets or sandbox Pods.
+            - name: confidential-storage-kbs-admin
+              mountPath: /var/run/secrets/codewire-confidential-storage
+              readOnly: true
+            - name: confidential-storage-kbs-config
+              mountPath: /etc/codewire/confidential-storage-kbs
+              readOnly: true
+      volumes:
+        - name: confidential-storage-kbs-admin
+          secret:
+            secretName: codewire-confidential-storage-kbs-admin
+            optional: true
+            items:
+              - key: CONFIDENTIAL_STORAGE_KBS_ADMIN_TOKEN
+                path: kbs-admin-token
+        - name: confidential-storage-kbs-config
+          configMap:
+            name: codewire-confidential-storage-kbs
+            optional: true
 ---
 apiVersion: v1
 kind: ServiceAccount

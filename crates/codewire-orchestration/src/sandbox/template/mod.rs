@@ -76,6 +76,8 @@ pub const KATA_HYPERVISOR_KERNEL_PARAMS_ANNOTATION_KEY: &str =
 pub const DEFAULT_KATA_COCO_TEST_RESOURCE_PATH: &str =
     "/run/confidential-containers/cdh/kbs/codewire/runtime-test-resource";
 pub const DEFAULT_WORKSPACE_STORAGE_CLASS: &str = "example-volumes";
+pub const CONFIDENTIAL_WORKSPACE_STORAGE_CLASS: &str = "longhorn-confidential";
+pub const CONFIDENTIAL_STORAGE_KEY_ID_ANNOTATION: &str = "codewire.sh/confidential-storage-key-id";
 const WORKSPACE_EPHEMERAL_STORAGE_GI: i64 = 8;
 const INTERNAL_DERP_TLS_PORT: i64 = 8443;
 const INTERNAL_DERP_STUN_PORT: i64 = 3478;
@@ -134,6 +136,7 @@ pub struct TemplateOpts {
     pub kata_agent_policy_enabled: bool,
     pub kata_coco_init_data_enabled: bool,
     pub kata_coco_kbs_url: String,
+    pub kata_coco_kbs_ca_pem: String,
     pub kata_coco_image_registry_auth_uri: String,
     pub kata_coco_test_resource_uri: String,
     pub kata_coco_test_resource_path: String,
@@ -191,6 +194,14 @@ impl fmt::Debug for TemplateOpts {
                 &self.kata_coco_init_data_enabled,
             )
             .field("kata_coco_kbs_url", &self.kata_coco_kbs_url)
+            .field(
+                "kata_coco_kbs_ca_pem",
+                &if self.kata_coco_kbs_ca_pem.is_empty() {
+                    "<unset>"
+                } else {
+                    "<configured>"
+                },
+            )
             .field(
                 "kata_coco_image_registry_auth_uri",
                 &self.kata_coco_image_registry_auth_uri,

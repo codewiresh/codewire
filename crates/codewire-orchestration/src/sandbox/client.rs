@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use crc32fast::Hasher as Crc32Hasher;
-use k8s_openapi::api::core::v1::{Namespace, PersistentVolumeClaim, Pod};
+use k8s_openapi::api::core::v1::{Namespace, PersistentVolume, PersistentVolumeClaim, Pod};
 use k8s_openapi::api::storage::v1::StorageClass;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use kube::Client;
@@ -94,6 +94,7 @@ impl EnvironmentResidue {
 }
 
 const DELETION_PROTECTION_FINALIZER: &str = "codewire.sh/deletion-protection";
+const LONGHORN_NAMESPACE: &str = "longhorn-system";
 const DEFAULT_DIRECT_UDP_LB_PORT_START: u16 = 32000;
 const DEFAULT_DIRECT_UDP_LB_PORT_END: u16 = 60999;
 
@@ -598,6 +599,16 @@ impl SandboxClient {
         Api::namespaced(self.client.clone(), &self.namespace)
     }
 
+    fn persistent_volumes(&self) -> Api<PersistentVolume> {
+        Api::all(self.client.clone())
+    }
+
+    fn longhorn_volumes(&self) -> Api<DynamicObject> {
+        let gvk = GroupVersionKind::gvk("longhorn.io", "v1beta2", "Volume");
+        let resource = ApiResource::from_gvk_with_plural(&gvk, "volumes");
+        Api::namespaced_with(self.client.clone(), LONGHORN_NAMESPACE, &resource)
+    }
+
     fn storage_classes(&self) -> Api<StorageClass> {
         Api::all(self.client.clone())
     }
@@ -1096,6 +1107,7 @@ impl SandboxClient {
         env_id: &str,
         known_sandbox_name: &str,
         per_environment_template: Option<&str>,
+        prove_confidential_storage_absent: bool,
         timeout: Duration,
     ) -> anyhow::Result<()> {
         self.delete_gateway_stack(env_id).await?;
@@ -1195,7 +1207,12 @@ impl SandboxClient {
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
             let residue = self
-                .environment_residue(env_id, known_sandbox_name, per_environment_template)
+                .environment_residue(
+                    env_id,
+                    known_sandbox_name,
+                    per_environment_template,
+                    prove_confidential_storage_absent,
+                )
                 .await?;
             if residue.is_empty() {
                 return Ok(());
@@ -1215,6 +1232,7 @@ impl SandboxClient {
         env_id: &str,
         known_sandbox_name: &str,
         per_environment_template: Option<&str>,
+        prove_confidential_storage_absent: bool,
     ) -> anyhow::Result<EnvironmentResidue> {
         let mut resources = Vec::new();
         if self.get_sandbox_claim(env_id).await?.is_some() {
@@ -1280,6 +1298,9 @@ impl SandboxClient {
         {
             resources.push(format!("PersistentVolumeClaim/{pvc}"));
         }
+        if prove_confidential_storage_absent {
+            resources.extend(self.confidential_storage_residue(&sandbox_names).await?);
+        }
 
         for (kind, api, name) in [
             (
@@ -1331,6 +1352,74 @@ impl SandboxClient {
         resources.sort();
         resources.dedup();
         Ok(EnvironmentResidue { resources })
+    }
+
+    /// Prove that Kubernetes and Longhorn have both forgotten the workspace
+    /// volume before orchestration is allowed to delete either key copy. The
+    /// Longhorn KubernetesStatus fields retain the PVC identity while volume
+    /// deletion is in progress, including after the PVC itself disappears.
+    async fn confidential_storage_residue(
+        &self,
+        sandbox_names: &BTreeSet<String>,
+    ) -> anyhow::Result<Vec<String>> {
+        let pvc_names: BTreeSet<String> = sandbox_names
+            .iter()
+            .map(|sandbox_name| format!("workspace-{sandbox_name}"))
+            .collect();
+        let mut resources = Vec::new();
+        let mut volume_handles = BTreeSet::new();
+
+        let persistent_volumes = self
+            .persistent_volumes()
+            .list(&ListParams::default())
+            .await
+            .map_err(|error| anyhow::anyhow!("list PersistentVolumes: {error}"))?;
+        for volume in persistent_volumes.items {
+            let Some(spec) = volume.spec.as_ref() else {
+                continue;
+            };
+            let claim_matches = spec.claim_ref.as_ref().is_some_and(|claim| {
+                claim.namespace.as_deref() == Some(self.namespace.as_str())
+                    && claim
+                        .name
+                        .as_ref()
+                        .is_some_and(|name| pvc_names.contains(name))
+            });
+            if !claim_matches {
+                continue;
+            }
+            if let Some(handle) = spec
+                .csi
+                .as_ref()
+                .map(|source| source.volume_handle.as_str())
+            {
+                volume_handles.insert(handle.to_string());
+            }
+            if let Some(name) = volume.metadata.name {
+                resources.push(format!("PersistentVolume/{name}"));
+            }
+        }
+
+        let longhorn_volumes = self
+            .longhorn_volumes()
+            .list(&ListParams::default())
+            .await
+            .map_err(|error| anyhow::anyhow!("list Longhorn volumes: {error}"))?;
+        for volume in longhorn_volumes.items {
+            let name = volume.metadata.name.unwrap_or_default();
+            let kubernetes_status = volume.data.pointer("/status/kubernetesStatus");
+            let pvc_matches = kubernetes_status.is_some_and(|status| {
+                status.get("namespace").and_then(Value::as_str) == Some(self.namespace.as_str())
+                    && status
+                        .get("pvcName")
+                        .and_then(Value::as_str)
+                        .is_some_and(|pvc_name| pvc_names.contains(pvc_name))
+            });
+            if pvc_matches || volume_handles.contains(&name) {
+                resources.push(format!("LonghornVolume/{name}"));
+            }
+        }
+        Ok(resources)
     }
 
     async fn environment_persistent_volume_claims(

@@ -40,7 +40,12 @@ rg -F 'SANDBOX_KATA_COCO_INIT_DATA_ENABLED: "false"' "$PROFILE" >/dev/null
 rg -F 'SANDBOX_RUNTIME_PROFILE: confidential' "$CONFIDENTIAL_PROFILE" >/dev/null
 rg -F 'SANDBOX_RUNTIME_CLASS: confidential' "$CONFIDENTIAL_PROFILE" >/dev/null
 rg -F 'SANDBOX_DOCKER_MODE: guest-dind' "$CONFIDENTIAL_PROFILE" >/dev/null
+rg -F 'SANDBOX_CONFIDENTIAL_STORAGE_ENABLED: "true"' "$CONFIDENTIAL_PROFILE" >/dev/null
+rg -F 'SANDBOX_CONFIDENTIAL_ADMIN_ONLY: "true"' "$CONFIDENTIAL_PROFILE" >/dev/null
 rg -F 'SANDBOX_KATA_COCO_INIT_DATA_ENABLED: "true"' "$CONFIDENTIAL_PROFILE" >/dev/null
+rg -F 'SANDBOX_WORKSPACE_STORAGE_CLASS: longhorn-confidential' "$CONFIDENTIAL_PROFILE" >/dev/null
+rg -F 'SANDBOX_KATA_COCO_KBS_URL: https://codewire-trustee-kbs.codewire-trustee.svc.cluster.local:8080' \
+  "$CONFIDENTIAL_PROFILE" >/dev/null
 
 rg -F 'confidential-smoke-control.yaml' "$SMOKE_DIR/kustomization.yaml" >/dev/null
 rg -F 'confidential-smoke-control.yaml' "$SMOKE_DIR/kustomization.baseline.yaml" >/dev/null

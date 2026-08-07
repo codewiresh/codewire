@@ -110,6 +110,7 @@ crc32fast = "1"
 shell-words = "1"
 ed25519-dalek = "2"
 rand = "0.8"
+zeroize = { version = "1", features = ["serde"] }
 ssh-key = { version = "0.7.0-rc.10", features = ["ed25519"] }
 
 # Bytes for streaming

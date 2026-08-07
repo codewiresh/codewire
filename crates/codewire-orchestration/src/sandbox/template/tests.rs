@@ -78,20 +78,23 @@ mod tests {
     }
 
     #[test]
-    fn template_opts_debug_redacts_bearer_tokens() {
+    fn template_opts_debug_redacts_bearer_tokens_and_embedded_ca() {
         let rendered = format!(
             "{:?}",
             TemplateOpts {
                 gateway_token: "gateway-secret-value".into(),
                 udp_relay_allocator_token: "relay-secret-value".into(),
+                kata_coco_kbs_ca_pem: "embedded-public-ca".into(),
                 ..Default::default()
             }
         );
 
         assert!(rendered.contains("gateway_token: \"<redacted>\""));
         assert!(rendered.contains("udp_relay_allocator_token: \"<redacted>\""));
+        assert!(rendered.contains("kata_coco_kbs_ca_pem: \"<configured>\""));
         assert!(!rendered.contains("gateway-secret-value"));
         assert!(!rendered.contains("relay-secret-value"));
+        assert!(!rendered.contains("embedded-public-ca"));
     }
 
     #[test]
@@ -795,6 +798,10 @@ mod tests {
         let pod_template = &rendered["spec"]["podTemplate"];
         let annotations = pod_template["metadata"]["annotations"].as_object().unwrap();
         assert!(!annotations.contains_key(KATA_COCO_INIT_DATA_ANNOTATION_KEY));
+        assert!(
+            pod_template["metadata"]["labels"]["codewire.sh/isolation-tier"].is_null(),
+            "ordinary Kata templates must not gain the confidential NetworkPolicy label"
+        );
     }
 
     #[test]
@@ -805,8 +812,12 @@ mod tests {
                 name: "tmpl-confidential".into(),
                 image: "ghcr.io/codewiresh/workspace:golden".into(),
                 runtime_profile: RUNTIME_PROFILE_CONFIDENTIAL.into(),
+                environment_id: "be31063a-8ec8-46d5-aa17-75cda1729370".into(),
                 kata_coco_init_data_enabled: true,
                 kata_coco_kbs_url: "https://kbs.codewire-dev.sh".into(),
+                kata_coco_kbs_ca_pem:
+                    "-----BEGIN CERTIFICATE-----\nCODEWIRE-DEV-CA\n-----END CERTIFICATE-----\n"
+                        .into(),
                 kata_coco_test_resource_uri: "kbs:///default/codewire/runtime-test-resource".into(),
                 ..Default::default()
             },
@@ -827,12 +838,33 @@ mod tests {
             "\"cdh.toml\" = '''".to_string(),
             "default SetPolicyRequest := false".to_string(),
             "url = \"https://kbs.codewire-dev.sh\"".to_string(),
+            "\"codewire_workspace_storage_key_id\" = \"be31063a-8ec8-46d5-aa17-75cda1729370\"".to_string(),
         ] {
             assert!(decoded.contains(&want), "missing {want:?} in {decoded}");
         }
         assert!(
             !decoded.contains("[[credentials]]"),
             "init-data should use post-boot CDH REST resource fetch instead of credential prefetch:\n{decoded}"
+        );
+        let init_data: toml::Value = toml::from_str(&decoded).unwrap();
+        let data = init_data["data"].as_table().unwrap();
+        assert_eq!(
+            data["codewire_workspace_storage_key_id"].as_str(),
+            Some("be31063a-8ec8-46d5-aa17-75cda1729370")
+        );
+        let aa: toml::Value = toml::from_str(data["aa.toml"].as_str().unwrap()).unwrap();
+        assert_eq!(
+            aa["token_configs"]["kbs"]["cert"].as_str(),
+            Some("-----BEGIN CERTIFICATE-----\nCODEWIRE-DEV-CA\n-----END CERTIFICATE-----")
+        );
+        let cdh: toml::Value = toml::from_str(data["cdh.toml"].as_str().unwrap()).unwrap();
+        assert_eq!(
+            cdh["image"]["extra_root_certificates"][0].as_str(),
+            Some("-----BEGIN CERTIFICATE-----\nCODEWIRE-DEV-CA\n-----END CERTIFICATE-----")
+        );
+        assert_eq!(
+            pod_template["metadata"]["labels"]["codewire.sh/isolation-tier"].as_str(),
+            Some("confidential")
         );
         let containers = pod_template["spec"]["containers"].as_array().unwrap();
         let dind = containers
@@ -1265,6 +1297,32 @@ mod tests {
         assert_eq!(
             rendered["spec"]["volumeClaimTemplates"][0]["spec"]["storageClassName"].as_str(),
             Some("local-path")
+        );
+
+        let rendered = render_sandbox_template(
+            "codewire-runtime",
+            &TemplateOpts {
+                name: "tmpl-storage-confidential".into(),
+                environment_id: "be31063a-8ec8-46d5-aa17-75cda1729370".into(),
+                runtime_profile: RUNTIME_PROFILE_CONFIDENTIAL.into(),
+                disk_gib: 20,
+                workspace_storage_class: "must-not-be-used".into(),
+                ..Default::default()
+            },
+        );
+        let claim = &rendered["spec"]["volumeClaimTemplates"][0];
+        assert_eq!(
+            claim["spec"]["storageClassName"].as_str(),
+            Some(CONFIDENTIAL_WORKSPACE_STORAGE_CLASS)
+        );
+        assert_eq!(
+            claim["spec"]["accessModes"][0].as_str(),
+            Some("ReadWriteOncePod")
+        );
+        assert_eq!(claim["spec"]["volumeMode"].as_str(), Some("Filesystem"));
+        assert_eq!(
+            claim["metadata"]["annotations"][CONFIDENTIAL_STORAGE_KEY_ID_ANNOTATION].as_str(),
+            Some("be31063a-8ec8-46d5-aa17-75cda1729370")
         );
     }
 

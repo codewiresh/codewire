@@ -59,21 +59,36 @@ default WriteStreamRequest := true
 pub(super) fn kata_policy_init_data_annotation(opts: &TemplateOpts) -> String {
     gzip_base64(&build_codewire_kata_policy_init_data(
         &opts.kata_coco_kbs_url,
+        &opts.kata_coco_kbs_ca_pem,
         &opts.kata_coco_test_resource_uri,
         &opts.kata_coco_test_resource_path,
+        if opts.runtime_profile_spec().profile == super::RUNTIME_PROFILE_CONFIDENTIAL {
+            &opts.environment_id
+        } else {
+            ""
+        },
     ))
 }
 
 pub(super) fn build_codewire_kata_policy_init_data(
     kbs_url: &str,
+    kbs_ca_pem: &str,
     test_resource_uri: &str,
     test_resource_path: &str,
+    workspace_storage_key_id: &str,
 ) -> String {
     let mut payload = format!(
         "version = \"0.1.0\"\nalgorithm = \"sha256\"\n\n[data]\n\"policy.rego\" = '''\n{CODEWIRE_KATA_AGENT_POLICY_REGO}'''\n"
     );
 
     let kbs_url = kbs_url.trim();
+    let kbs_ca_pem = kbs_ca_pem.trim();
+    let workspace_storage_key_id = workspace_storage_key_id.trim();
+    if !workspace_storage_key_id.is_empty() {
+        payload.push_str("\"codewire_workspace_storage_key_id\" = ");
+        payload.push_str(&toml_string(workspace_storage_key_id));
+        payload.push('\n');
+    }
     if kbs_url.is_empty() {
         return payload;
     }
@@ -82,9 +97,18 @@ pub(super) fn build_codewire_kata_policy_init_data(
 
     payload.push_str("\n\"aa.toml\" = '''\n[token_configs]\n[token_configs.kbs]\nurl = ");
     payload.push_str(&toml_string(kbs_url));
+    if !kbs_ca_pem.is_empty() {
+        payload.push_str("\ncert = ");
+        payload.push_str(&toml_string(kbs_ca_pem));
+    }
     payload.push_str("\n'''\n\n\"cdh.toml\" = '''\nsocket = \"unix:///run/confidential-containers/cdh.sock\"\n\n[kbc]\nname = \"cc_kbc\"\nurl = ");
     payload.push_str(&toml_string(kbs_url));
     payload.push('\n');
+    if !kbs_ca_pem.is_empty() {
+        payload.push_str("\n[image]\nextra_root_certificates = [");
+        payload.push_str(&toml_string(kbs_ca_pem));
+        payload.push_str("]\n");
+    }
     payload.push_str("'''\n");
     payload
 }

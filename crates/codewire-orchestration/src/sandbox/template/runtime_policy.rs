@@ -1,6 +1,9 @@
 //! Pure sandbox runtime-profile and resource policy.
 
-use super::{DEFAULT_DIND_IMAGE, DEFAULT_WORKSPACE_STORAGE_CLASS, TemplateOpts};
+use super::{
+    CONFIDENTIAL_WORKSPACE_STORAGE_CLASS, DEFAULT_DIND_IMAGE, DEFAULT_WORKSPACE_STORAGE_CLASS,
+    TemplateOpts,
+};
 
 pub const RUNTIME_CLASS_NAME: &str = RUNTIME_CLASS_EXTERNAL_ISOL8_XEN;
 pub const RUNTIME_CLASS_RUNC: &str = "runc";
@@ -221,6 +224,9 @@ fn kernel_param_value(raw: &str) -> Option<&str> {
 }
 
 pub(super) fn workspace_storage_class(opts: &TemplateOpts) -> &str {
+    if opts.runtime_profile_spec().profile == RUNTIME_PROFILE_CONFIDENTIAL {
+        return CONFIDENTIAL_WORKSPACE_STORAGE_CLASS;
+    }
     let storage_class = opts.workspace_storage_class.trim();
     if storage_class.is_empty() {
         DEFAULT_WORKSPACE_STORAGE_CLASS

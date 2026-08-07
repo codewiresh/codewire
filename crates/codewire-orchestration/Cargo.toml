@@ -56,6 +56,7 @@ codewire-gateway-proto = { workspace = true }
 codewire-proto = { workspace = true }
 codewire-server-core = { workspace = true }
 anyhow = { workspace = true }
+async-trait = { workspace = true }
 axum = { workspace = true, features = ["ws"] }
 schemars = { workspace = true }
 serde = { workspace = true }
@@ -71,6 +72,7 @@ tokio-stream = { workspace = true }
 tonic = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+thiserror = { workspace = true }
 prometheus = { workspace = true }
 # Sidecar readiness probes speak SSH/SFTP over a pod port-forward, the
 # same path the Go worker's CheckSidecarReady takes.
@@ -97,6 +99,8 @@ crc32fast = { workspace = true }
 # OS entropy for SSH keypair generation (ssh_keys.rs); version-pinned to the
 # ssh-key/rand_core 0.10 tree already in the lock.
 getrandom = "0.3"
+rand = { workspace = true }
+zeroize = { workspace = true }
 tokio-tungstenite = { version = "=0.28.0", default-features = false, features = ["connect", "handshake"], optional = true }
 
 [dev-dependencies]
@@ -105,3 +109,4 @@ codewire-proto = { workspace = true, features = ["client"] }
 connectrpc = { workspace = true, features = ["client"] }
 flate2 = { workspace = true }
 tempfile = { workspace = true }
+toml = { workspace = true }

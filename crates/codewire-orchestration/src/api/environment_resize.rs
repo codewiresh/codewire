@@ -18,9 +18,10 @@ use sqlx::{Row, Transaction};
 use super::ApiState;
 use super::environment_daemon::list_environment_daemon_sessions_core;
 use super::environments::{
-    Environment, get_environment_core, get_org_quota, require_environment_access,
-    require_org_member, trigger_environment,
+    Environment, fetch_env_summary, get_environment_core, get_org_quota,
+    require_environment_access, require_org_member, trigger_environment,
 };
+use crate::confidential_storage::require_interactive_access;
 use crate::resize_metrics::{self, RequestOutcome};
 use crate::sandbox::client::SandboxClient;
 use crate::sandbox::client::WorkspacePodResizeState;
@@ -484,6 +485,13 @@ pub async fn plan_environment_resize_core(
         "only environment owners can plan environment resize",
     )
     .await?;
+    let environment =
+        fetch_env_summary(&state.pool, &params.org_id, &params.environment_id).await?;
+    require_interactive_access(
+        state.confidential_storage_flags,
+        user,
+        &environment.isolation_tier,
+    )?;
     let plan = build_resize_plan(state, user, &params).await?;
     let environment =
         get_environment_core(state, user, &params.org_id, &params.environment_id).await?;
@@ -538,6 +546,13 @@ async fn resize_environment_core_inner(
         "only environment owners can resize environments",
     )
     .await?;
+    let environment =
+        fetch_env_summary(&state.pool, &params.org_id, &params.environment_id).await?;
+    require_interactive_access(
+        state.confidential_storage_flags,
+        user,
+        &environment.isolation_tier,
+    )?;
 
     if let Some(operation) = find_existing_operation(state, &params).await? {
         if operation.desired_resources != params.desired_resources

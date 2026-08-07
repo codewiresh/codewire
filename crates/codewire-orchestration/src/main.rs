@@ -19,6 +19,7 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use axum::middleware;
+use codewire_orchestration::confidential_storage::{ConfidentialStorageManager, FeatureFlags};
 use codewire_orchestration::worker::{self, cloudflare::CloudflareClient};
 use codewire_server_core::{AppBuilder, ServiceConfig};
 use tokio::net::TcpListener;
@@ -129,6 +130,10 @@ async fn main() -> anyhow::Result<()> {
     codewire_server_core::migrate::ensure_schema_logged(&cfg.database_url).await?;
     let pool = codewire_server_core::db::connect(&cfg.database_url).await?;
     codewire_orchestration::resize_metrics::start_active_refresh(pool.clone());
+    let confidential_storage_flags = FeatureFlags::from_env()?;
+    let confidential_storage =
+        ConfidentialStorageManager::from_env(pool.clone(), confidential_storage_flags)?
+            .map(Arc::new);
 
     let loops = env_list("WORKER_LOOPS");
 
@@ -190,6 +195,7 @@ async fn main() -> anyhow::Result<()> {
         secrets: worker::secrets::SecretStore::from_env(pool.clone()),
         github_cfg: worker::github::GitHubAppConfig::from_env(),
         sandbox_cfg,
+        confidential_storage: confidential_storage.clone(),
         temporal_trigger: temporal_trigger.clone(),
     });
 
@@ -237,6 +243,7 @@ async fn main() -> anyhow::Result<()> {
         // issuance (Go: cfg.SessionSecret).
         session_secret: cfg.session_secret.clone(),
         sandbox_cfg: ctx.sandbox_cfg.clone(),
+        confidential_storage_flags,
     };
 
     let connect_auth = codewire_server_core::connect::ConnectAuthLayer::authenticated(auth.clone())

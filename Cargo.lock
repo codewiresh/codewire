@@ -1470,6 +1470,7 @@ name = "codewire-orchestration"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "axum 0.8.9",
  "base64",
  "buffa",
@@ -1490,6 +1491,7 @@ dependencies = [
  "k8s-openapi",
  "kube",
  "prometheus",
+ "rand 0.8.6",
  "reqwest",
  "russh",
  "russh-sftp",
@@ -1505,14 +1507,17 @@ dependencies = [
  "temporalio-macros",
  "temporalio-sdk",
  "temporalio-sdk-core",
+ "thiserror 2.0.18",
  "tokio",
  "tokio-stream",
  "tokio-tungstenite 0.28.0",
+ "toml 1.1.2+spec-1.1.0",
  "tonic 0.14.6",
  "tracing",
  "tracing-subscriber",
  "url",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]
@@ -8449,6 +8454,7 @@ version = "1.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b97154e67e32c85465826e8bcc1c59429aaaf107c1e4a9e53c8d8ccd5eff88d0"
 dependencies = [
+ "serde",
  "zeroize_derive",
 ]
 

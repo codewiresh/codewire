@@ -34,6 +34,8 @@ type HmacSha256 = Hmac<Sha256>;
 #[derive(Debug, Serialize, Deserialize)]
 struct TerminalTicketClaims {
     user_id: String,
+    #[serde(default)]
+    global_admin_user_credential: bool,
     exp: i64,
     nonce: String,
 }
@@ -60,8 +62,12 @@ pub(crate) fn issue_terminal_ticket_core(
     state: &ApiState,
     user: &AuthUser,
 ) -> Result<String, AppError> {
-    issue_ticket(&state.session_secret, &user.user_id)
-        .map_err(|_| AppError::InternalMsg("failed to issue ticket".into()))
+    issue_ticket(
+        &state.session_secret,
+        &user.user_id,
+        user.is_admin && !user.via_api_key,
+    )
+    .map_err(|_| AppError::InternalMsg("failed to issue ticket".into()))
 }
 
 /// Raw terminal WebSocket route. Authenticates manually because the Go
@@ -135,16 +141,16 @@ pub(crate) async fn authenticate_socket_request(
     ticket: &str,
 ) -> Result<AuthUser, Response> {
     if !ticket.is_empty() {
-        let Some(user_id) = redeem_ticket(&state.session_secret, ticket) else {
+        let Some(claims) = redeem_ticket(&state.session_secret, ticket) else {
             return Err(terminal_error(
                 StatusCode::UNAUTHORIZED,
                 r#"{"error":"invalid or expired ticket"}"#,
             ));
         };
         return Ok(AuthUser {
-            user_id,
+            user_id: claims.user_id,
             org_id: None,
-            is_admin: false,
+            is_admin: claims.global_admin_user_credential,
             via_api_key: false,
         });
     }
@@ -397,11 +403,16 @@ fn terminal_error(status: StatusCode, body: &str) -> Response {
     plain_error(status, body)
 }
 
-fn issue_ticket(secret: &str, user_id: &str) -> anyhow::Result<String> {
+fn issue_ticket(
+    secret: &str,
+    user_id: &str,
+    global_admin_user_credential: bool,
+) -> anyhow::Result<String> {
     let mut nonce = [0u8; 16];
     getrandom::fill(&mut nonce)?;
     let claims = TerminalTicketClaims {
         user_id: user_id.to_string(),
+        global_admin_user_credential,
         exp: chrono::Utc::now().timestamp() + TERMINAL_TICKET_TTL_SECS,
         nonce: hex_lower(&nonce),
     };
@@ -411,7 +422,7 @@ fn issue_ticket(secret: &str, user_id: &str) -> anyhow::Result<String> {
     Ok(format!("{}.{}", engine.encode(payload), engine.encode(sig)))
 }
 
-fn redeem_ticket(secret: &str, token: &str) -> Option<String> {
+fn redeem_ticket(secret: &str, token: &str) -> Option<TerminalTicketClaims> {
     let (payload_part, sig_part) = token.split_once('.')?;
     let engine = base64::engine::general_purpose::URL_SAFE_NO_PAD;
     let payload = engine.decode(payload_part).ok()?;
@@ -423,7 +434,7 @@ fn redeem_ticket(secret: &str, token: &str) -> Option<String> {
     if claims.user_id.is_empty() || chrono::Utc::now().timestamp() > claims.exp {
         return None;
     }
-    Some(claims.user_id)
+    Some(claims)
 }
 
 fn sign_terminal_ticket(secret: &str, payload: &[u8]) -> Vec<u8> {
@@ -596,15 +607,11 @@ mod tests {
 
     #[test]
     fn issue_and_redeem_ticket_round_trips() {
-        let ticket = issue_ticket("0123456789abcdef0123456789abcdef", "test-user-123").unwrap();
-        assert_eq!(
-            redeem_ticket("0123456789abcdef0123456789abcdef", &ticket).as_deref(),
-            Some("test-user-123")
-        );
-        assert_eq!(
-            redeem_ticket("0123456789abcdef0123456789abcdef", &ticket).as_deref(),
-            Some("test-user-123")
-        );
+        let ticket =
+            issue_ticket("0123456789abcdef0123456789abcdef", "test-user-123", true).unwrap();
+        let claims = redeem_ticket("0123456789abcdef0123456789abcdef", &ticket).unwrap();
+        assert_eq!(claims.user_id, "test-user-123");
+        assert!(claims.global_admin_user_credential);
     }
 
     #[test]
@@ -612,6 +619,7 @@ mod tests {
         let secret = "0123456789abcdef0123456789abcdef";
         let payload = serde_json::to_vec(&TerminalTicketClaims {
             user_id: "user".to_string(),
+            global_admin_user_credential: false,
             exp: chrono::Utc::now().timestamp() - 1,
             nonce: "expired".to_string(),
         })
@@ -625,7 +633,7 @@ mod tests {
     #[test]
     fn tampered_ticket_is_rejected() {
         let secret = "0123456789abcdef0123456789abcdef";
-        let ticket = issue_ticket(secret, "user").unwrap();
+        let ticket = issue_ticket(secret, "user", false).unwrap();
         let (payload_part, sig_part) = ticket.split_once('.').unwrap();
         let engine = base64::engine::general_purpose::URL_SAFE_NO_PAD;
         let mut payload = engine.decode(payload_part).unwrap();

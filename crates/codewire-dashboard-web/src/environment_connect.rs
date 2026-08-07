@@ -758,6 +758,7 @@ fn environment_row(environment: Environment) -> EnvironmentRow {
         can_start: state == "stopped",
         can_stop: state == "running",
         can_destroy: !matches!(state, "destroying" | "destroyed"),
+        confidential_actions_allowed: true,
         vscode_url: format!(
             "vscode://vscode-remote/ssh-remote+cw-{}/workspace",
             environment.id

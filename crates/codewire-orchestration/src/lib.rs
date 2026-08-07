@@ -7,6 +7,7 @@
 //! consumer plane and the `TENANT_LOCKS` distributed lock are retired.
 
 pub mod api;
+pub mod confidential_storage;
 pub mod connect;
 pub mod lifecycle;
 pub mod resize_metrics;

@@ -1065,7 +1065,7 @@ mod enabled {
                 .ok_or_else(|| anyhow::anyhow!("WI-2 fixture has no workspace Pod"))?;
             let residue = self
                 .sandbox
-                .environment_residue(&env_id, &backend.pod_name, Some(&template_name))
+                .environment_residue(&env_id, &backend.pod_name, Some(&template_name), false)
                 .await?;
             for kind in [
                 "SandboxClaim/",
@@ -1137,7 +1137,7 @@ mod enabled {
             loop {
                 let residue = self
                     .sandbox
-                    .environment_residue(&env_id, &backend.pod_name, Some(&template_name))
+                    .environment_residue(&env_id, &backend.pod_name, Some(&template_name), false)
                     .await?;
                 let marker: Option<chrono::NaiveDateTime> = sqlx::query_scalar(
                     "SELECT external_cleanup_completed_at FROM environments WHERE id = $1",
@@ -1246,7 +1246,7 @@ mod enabled {
             );
             let final_residue = self
                 .sandbox
-                .environment_residue(&env_id, &backend.pod_name, Some(&template_name))
+                .environment_residue(&env_id, &backend.pod_name, Some(&template_name), false)
                 .await?;
             anyhow::ensure!(
                 final_residue.is_empty(),
@@ -1480,7 +1480,7 @@ mod enabled {
             anyhow::ensure!(runtime_state == ("destroyed".into(), "destroyed".into(), true));
             anyhow::ensure!(
                 self.sandbox
-                    .environment_residue(&env_id, &backend.pod_name, Some(&template_name))
+                    .environment_residue(&env_id, &backend.pod_name, Some(&template_name), false)
                     .await?
                     .is_empty(),
                 "failed organization deletion retained runtime residue"
@@ -1625,6 +1625,7 @@ mod enabled {
             secrets: worker::secrets::SecretStore::from_env(pool),
             github_cfg: worker::github::GitHubAppConfig::from_env(),
             sandbox_cfg: worker::create::SandboxWorkerCfg::from_env(),
+            confidential_storage: None,
             temporal_trigger: trigger,
         });
         codewire_orchestration::temporal::run_temporal_worker(

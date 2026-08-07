@@ -57,6 +57,14 @@ rules:
   - apiGroups: [""]
     resources: ["persistentvolumeclaims"]
     verbs: ["get", "list", "watch", "patch", "delete"]
+  # Confidential key deletion is gated on read-only proof that Kubernetes and
+  # Longhorn have both removed the backing volume.
+  - apiGroups: [""]
+    resources: ["persistentvolumes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["longhorn.io"]
+    resources: ["volumes"]
+    verbs: ["get", "list", "watch"]
   # Disk growth is admitted only when the PVC's StorageClass explicitly
   # advertises allowVolumeExpansion.
   - apiGroups: ["storage.k8s.io"]

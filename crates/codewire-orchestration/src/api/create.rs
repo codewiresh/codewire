@@ -32,6 +32,7 @@ use super::environments::{
     ENV_SELECT_COLS, ENV_SELECT_JOINS, Environment, check_quota, check_rate_limit, coded,
     require_org_member, scan_environment, trigger_environment,
 };
+use crate::confidential_storage::require_interactive_access;
 
 // ── Shared body types (environment_types.go) ────────────────────────────
 
@@ -574,6 +575,18 @@ pub(crate) async fn create_environment_core(
     let mut body = input;
 
     require_org_member(pool, user, org_id).await?;
+    let isolation_tier = match body.isolation_tier.trim() {
+        "" | "standard" => "standard",
+        "confidential" => "confidential",
+        _ => {
+            return Err(coded(
+                StatusCode::BAD_REQUEST,
+                "invalid_isolation_tier",
+                "isolation_tier must be standard or confidential",
+            ));
+        }
+    };
+    require_interactive_access(state.confidential_storage_flags, user, isolation_tier)?;
 
     // Rate limit environment creation per user (fail open on errors).
     match check_rate_limit(pool, &format!("env_create:{}", user.user_id), 60, 10).await {
@@ -718,18 +731,6 @@ pub(crate) async fn create_environment_core(
             };
 
             validate_environment_resources(Some(cpu), Some(mem), Some(disk), ttl)?;
-            let isolation_tier = match body.isolation_tier.trim() {
-                "" | "standard" => "standard",
-                "confidential" => "confidential",
-                _ => {
-                    return Err(coded(
-                        StatusCode::BAD_REQUEST,
-                        "invalid_isolation_tier",
-                        "isolation_tier must be standard or confidential",
-                    ));
-                }
-            };
-
             // Check quota before inserting.
             check_quota(pool, org_id, "sandbox", cpu, mem).await?;
 

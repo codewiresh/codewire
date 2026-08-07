@@ -42,6 +42,8 @@ pub struct Config {
     pub(crate) browser_api_origin: String,
     pub(crate) billing_origin: http::Uri,
     pub(crate) docs_root: PathBuf,
+    pub(crate) confidential_storage_enabled: bool,
+    pub(crate) confidential_admin_only: bool,
 }
 
 impl Config {
@@ -76,6 +78,9 @@ impl Config {
         let docs_root = env::var_os("CODEWIRE_DOCS_ROOT")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("apps/docs/zola/public"));
+        let confidential_storage_enabled =
+            parse_bool_env("SANDBOX_CONFIDENTIAL_STORAGE_ENABLED", false)?;
+        let confidential_admin_only = parse_bool_env("SANDBOX_CONFIDENTIAL_ADMIN_ONLY", true)?;
 
         Ok(Self {
             listen_addr,
@@ -86,7 +91,26 @@ impl Config {
             browser_api_origin,
             billing_origin,
             docs_root,
+            confidential_storage_enabled,
+            confidential_admin_only,
         })
+    }
+}
+
+fn parse_bool_env(name: &str, default: bool) -> anyhow::Result<bool> {
+    match env::var(name) {
+        Err(env::VarError::NotPresent) => parse_bool_value(name, None, default),
+        Ok(value) => parse_bool_value(name, Some(&value), default),
+        Err(env::VarError::NotUnicode(_)) => bail!("{name} must be valid UTF-8"),
+    }
+}
+
+fn parse_bool_value(name: &str, value: Option<&str>, default: bool) -> anyhow::Result<bool> {
+    match value {
+        None => Ok(default),
+        Some("true") => Ok(true),
+        Some("false") => Ok(false),
+        Some(value) => bail!("{name} must be true or false, got {value:?}"),
     }
 }
 
@@ -136,5 +160,13 @@ mod tests {
         assert!(parse_origin("origin", "https://example.test/?q=1".into()).is_err());
         assert!(parse_origin("origin", "https://user:pass@example.test".into()).is_err());
         assert!(parse_origin("origin", "file:///tmp/dashboard".into()).is_err());
+    }
+
+    #[test]
+    fn confidential_flags_are_strict() {
+        assert!(!parse_bool_value("flag", None, false).unwrap());
+        assert!(parse_bool_value("flag", Some("true"), false).unwrap());
+        assert!(!parse_bool_value("flag", Some("false"), true).unwrap());
+        assert!(parse_bool_value("flag", Some("yes"), false).is_err());
     }
 }

@@ -19,6 +19,7 @@ use super::environments::{
     EnvironmentPort, coded, compute_preview_url, fetch_env_summary, format_time,
     require_environment_access, require_org_member,
 };
+use crate::confidential_storage::require_interactive_access;
 
 /// Mirrors `reservedPorts` (gateway SSH + readyz).
 fn is_reserved_port(port: i32) -> bool {
@@ -80,6 +81,7 @@ pub(crate) async fn create_port_core(
     require_org_member(pool, user, org_id).await?;
     require_environment_access(pool, user, env_id, org_id, "operator", "access denied").await?;
     let env = fetch_env_summary(pool, org_id, env_id).await?;
+    require_interactive_access(state.confidential_storage_flags, user, &env.isolation_tier)?;
 
     if !(1..=65_535).contains(&body.port) {
         return Err(AppError::BadRequest(
@@ -195,7 +197,8 @@ pub(crate) async fn list_ports_core(
     let pool = &state.pool;
     require_org_member(pool, user, org_id).await?;
     require_environment_access(pool, user, env_id, org_id, "viewer", "access denied").await?;
-    fetch_env_summary(pool, org_id, env_id).await?;
+    let env = fetch_env_summary(pool, org_id, env_id).await?;
+    require_interactive_access(state.confidential_storage_flags, user, &env.isolation_tier)?;
 
     let rows = sqlx::query(
         r#"SELECT id, environment_id, port, label, access, created_at
@@ -258,7 +261,8 @@ pub(crate) async fn delete_port_core(
         "only environment owners can delete ports",
     )
     .await?;
-    fetch_env_summary(pool, org_id, env_id).await?;
+    let env = fetch_env_summary(pool, org_id, env_id).await?;
+    require_interactive_access(state.confidential_storage_flags, user, &env.isolation_tier)?;
 
     let dispatch_ambiguous = AtomicBool::new(false);
     run_environment_runtime_mutation(pool, org_id, env_id, async {

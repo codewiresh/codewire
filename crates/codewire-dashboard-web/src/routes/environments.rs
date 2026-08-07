@@ -267,6 +267,7 @@ impl EnvironmentSubmission {
             ttl: self.ttl.trim().to_owned(),
             isolation_tier: self.isolation_tier.trim().to_owned(),
             confidential_available: false,
+            show_confidential_controls: false,
             confidential_price: String::new(),
             selected_agents: self.agents.clone(),
             secret_project: self.secret_project.trim().to_owned(),
@@ -517,7 +518,16 @@ pub(super) async fn page(
         };
     let token = new_csrf_token();
     let form = default_create_form(token.clone(), query.create);
-    let page = match build_page(&state, cookie, &organization, &query, form).await {
+    let page = match build_page(
+        &state,
+        cookie,
+        &organization,
+        &query,
+        form,
+        dashboard.is_admin,
+    )
+    .await
+    {
         Ok(page) => page,
         Err(error) => return connect_page_error(error, &continuation, &headers),
     };
@@ -1108,7 +1118,16 @@ pub(super) async fn resize_plan(
     let (plan, environment) = response;
     let form = default_create_form(submission.csrf, false);
     let query = EnvironmentsQuery::default();
-    let mut page = match build_page(&state, cookie, &organization, &query, form).await {
+    let mut page = match build_page(
+        &state,
+        cookie,
+        &organization,
+        &query,
+        form,
+        dashboard.is_admin,
+    )
+    .await
+    {
         Ok(page) => page,
         Err(error) => return connect_page_error(error, &environments_path(&slug), &headers),
     };
@@ -1414,19 +1433,31 @@ async fn build_page(
     organization: &OrganizationContext,
     query: &EnvironmentsQuery,
     mut form: EnvironmentCreateFormView,
+    is_admin: bool,
 ) -> Result<EnvironmentsPageView, ConnectError> {
-    let environments =
+    let mut environments =
         filtered_environments(state, cookie.clone(), &organization.id, query).await?;
+    let confidential_actions_allowed =
+        state.confidential_storage_enabled && (!state.confidential_admin_only || is_admin);
+    for environment in &mut environments {
+        if environment.isolation_tier == "confidential" {
+            environment.confidential_actions_allowed = confidential_actions_allowed;
+        }
+    }
     if form.expanded {
         hydrate_options(
             &mut form,
             environment_connect::create_options(state, cookie.clone(), &organization.id).await?,
         );
     }
+    form.show_confidential_controls = confidential_actions_allowed;
+    form.confidential_available &= confidential_actions_allowed;
     let port_panel = if valid_identifier(&query.ports) {
         environments
             .iter()
-            .find(|environment| environment.id == query.ports)
+            .find(|environment| {
+                environment.id == query.ports && environment.confidential_actions_allowed
+            })
             .map(|environment| (environment.id.clone(), environment.name.clone()))
     } else {
         None
@@ -1450,10 +1481,9 @@ async fn build_page(
         None => None,
     };
     let trust_summary = if valid_identifier(&query.trust) {
-        match environments
-            .iter()
-            .find(|environment| environment.id == query.trust)
-        {
+        match environments.iter().find(|environment| {
+            environment.id == query.trust && environment.confidential_actions_allowed
+        }) {
             Some(environment) => Some(
                 environment_connect::environment_trust_summary(
                     state,
@@ -1471,7 +1501,9 @@ async fn build_page(
     };
     let resize_operation = if valid_identifier(&query.resize_environment)
         && valid_identifier(&query.resize_operation)
-    {
+        && environments.iter().any(|environment| {
+            environment.id == query.resize_environment && environment.confidential_actions_allowed
+        }) {
         let (operation, _) = environment_connect::environment_resize_operation(
             state,
             cookie.clone(),
@@ -1536,7 +1568,16 @@ async fn render_action_page(
         create: true,
         ..Default::default()
     };
-    let page = match build_page(state, cookie, &organization, &query, form).await {
+    let page = match build_page(
+        state,
+        cookie,
+        &organization,
+        &query,
+        form,
+        dashboard.is_admin,
+    )
+    .await
+    {
         Ok(page) => page,
         Err(error) => {
             return connect_page_error(error, &environments_path(&organization.slug), headers);
@@ -1632,6 +1673,7 @@ fn default_create_form(token: String, expanded: bool) -> EnvironmentCreateFormVi
         ttl: String::new(),
         isolation_tier: "standard".to_owned(),
         confidential_available: false,
+        show_confidential_controls: false,
         confidential_price: String::new(),
         selected_agents: Vec::new(),
         secret_project: String::new(),
@@ -2129,6 +2171,104 @@ fn environments_path(slug: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_organization() -> OrganizationContext {
+        OrganizationContext {
+            id: "org-test".into(),
+            name: "Test".into(),
+            slug: "test".into(),
+            role: "owner",
+            can_admin: true,
+            environments_url: "/dashboard/orgs/test/environments".into(),
+            presets_url: "/dashboard/orgs/test/presets".into(),
+            secrets_url: "/dashboard/orgs/test/secrets".into(),
+            api_keys_url: "/dashboard/orgs/test/api-keys".into(),
+            members_url: "/dashboard/orgs/test/members".into(),
+            billing_url: "/dashboard/orgs/test/billing".into(),
+        }
+    }
+
+    #[test]
+    fn confidential_controls_are_hidden_by_the_dashboard_gate() {
+        let organization = test_organization();
+        let mut form = default_create_form("csrf".into(), true);
+        form.prepared = true;
+        form.confidential_available = true;
+        form.show_confidential_controls = false;
+        let hidden = EnvironmentCreateFormTemplate {
+            organization: &organization,
+            form: &form,
+        }
+        .render()
+        .unwrap();
+        assert!(!hidden.contains("environment-isolation-tier"));
+
+        form.show_confidential_controls = true;
+        let visible = EnvironmentCreateFormTemplate {
+            organization: &organization,
+            form: &form,
+        }
+        .render()
+        .unwrap();
+        assert!(visible.contains("environment-isolation-tier"));
+    }
+
+    #[test]
+    fn confidential_interactive_actions_hide_without_hiding_stop_or_destroy() {
+        let organization = test_organization();
+        let page = EnvironmentsPageView {
+            environments: vec![crate::view::EnvironmentRow {
+                id: "env-test".into(),
+                name: "Confidential test".into(),
+                state: "running",
+                state_tone: "success",
+                state_symbol: "●",
+                preset_name: String::new(),
+                isolation_tier: "confidential",
+                last_event: String::new(),
+                created: String::new(),
+                cost: String::new(),
+                running_time: String::new(),
+                resources: String::new(),
+                cpu_millicores: 1000,
+                memory_mb: 2048,
+                disk_gb: 10,
+                hourly_rate: String::new(),
+                can_start: false,
+                can_stop: true,
+                can_destroy: true,
+                confidential_actions_allowed: false,
+                vscode_url: "https://vscode.invalid".into(),
+                ports: Vec::new(),
+            }],
+            create_form: default_create_form("csrf".into(), false),
+            port_panel: None,
+            trust_summary: None,
+            resize_confirmation: None,
+            resize_operation: None,
+            search: String::new(),
+            state: "all".into(),
+            message: String::new(),
+            error: String::new(),
+        };
+        let rendered = EnvironmentListTemplate {
+            organization: &organization,
+            page: &page,
+        }
+        .render()
+        .unwrap();
+        assert!(rendered.contains(">Stop</button>"));
+        assert!(rendered.contains("Destroy permanently"));
+        for hidden in [
+            ">Start</button>",
+            ">Resize</summary>",
+            ">Ports</a>",
+            ">Terminal</a>",
+            ">VS Code</a>",
+        ] {
+            assert!(!rendered.contains(hidden), "unexpected action {hidden}");
+        }
+    }
 
     #[test]
     fn repository_urls_reject_credentials_and_unsafe_schemes() {

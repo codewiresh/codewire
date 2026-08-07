@@ -286,6 +286,7 @@ pub(crate) struct EnvironmentRow {
     pub(crate) can_start: bool,
     pub(crate) can_stop: bool,
     pub(crate) can_destroy: bool,
+    pub(crate) confidential_actions_allowed: bool,
     pub(crate) vscode_url: String,
     pub(crate) ports: Vec<EnvironmentPortRow>,
 }
@@ -429,6 +430,7 @@ pub(crate) struct EnvironmentCreateFormView {
     pub(crate) ttl: String,
     pub(crate) isolation_tier: String,
     pub(crate) confidential_available: bool,
+    pub(crate) show_confidential_controls: bool,
     pub(crate) confidential_price: String,
     pub(crate) selected_agents: Vec<String>,
     pub(crate) secret_project: String,
