@@ -79,9 +79,12 @@ fi
 
 grep -Fq 'cargo clean' "$ROOT/scripts/ci/cache/prepare-rust-dependency-cache.sh" \
   || fail 'first-party outputs are not pruned'
-grep -Fq 'clean_profiles=(dev release)' \
+grep -Fq 'clean_profiles=(release)' \
   "$ROOT/scripts/ci/cache/prepare-rust-dependency-cache.sh" \
-  || fail 'desktop release cache does not prune both build profiles'
+  || fail 'desktop release cache does not prune its release profile'
+jq -e '.artifacts.rust_cache_desktop_release.profiles == ["release"]' \
+  "$ROOT/scripts/ci/plan/artifact-graph.json" >/dev/null \
+  || fail 'desktop release cache graph includes a non-release profile'
 grep -Fq '4294967296' "$ROOT/scripts/ci/cache/prepare-rust-dependency-cache.sh" \
   || fail 'cache size ceiling is absent'
 grep -Fq 'cargo zigbuild --locked --profile ci' \
@@ -112,19 +115,7 @@ profile_for_args() {
 case "${1:-}" in
   test)
     profile="$(profile_for_args "$@")"
-    if [[ " $* " = *codewire-desktop/Cargo.toml* ]]; then
-      packages=(
-        codewire-client
-        codewire-desktop
-        codewire-platform-native
-        codewire-proto
-        codewire-tailnet
-        codewire-types
-        codewire-ui
-      )
-    else
-      packages=(codewire-cli-bin)
-    fi
+    packages=(codewire-cli-bin)
     mkdir -p "$CARGO_TARGET_DIR/$profile/deps"
     for package in "${packages[@]}"; do
       mkdir -p "$CARGO_TARGET_DIR/$profile/.fingerprint/$package-123"
@@ -283,6 +274,9 @@ for fixture_flavor in host-debug host-ci kind-ci cw-cross-ci desktop-release; do
     fail "pruning resolved Cargo metadata for $fixture_flavor"
   fi
 done
+if grep -Eq '^test( |$)' "$work/desktop-release.cargo.log"; then
+  fail 'desktop release cache unexpectedly warms the test/debug profile'
+fi
 grep -Fq -- '-p codewire-platform-native' "$work/desktop-release.cargo.log" \
   || fail 'desktop pruning omitted its excluded platform path dependency'
 grep -Fq -- '-p codewire-ui' "$work/desktop-release.cargo.log" \

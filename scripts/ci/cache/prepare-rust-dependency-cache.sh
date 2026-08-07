@@ -61,10 +61,9 @@ case "$flavor" in
     clean_profiles=(ci)
     ;;
   desktop-release)
-    cargo test --locked --manifest-path crates/codewire-desktop/Cargo.toml --no-run
     CARGO_TARGET_DIR="$target_dir" \
       scripts/ci/release/package-codewire-desktop.sh --dry-run 0.0.0-ci
-    clean_profiles=(dev release)
+    clean_profiles=(release)
     ;;
   *)
     die 'flavor must be host-debug, host-ci, kind-ci, cw-cross-ci, or desktop-release'

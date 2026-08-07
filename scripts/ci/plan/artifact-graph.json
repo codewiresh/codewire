@@ -148,7 +148,7 @@
       "manifest": "crates/codewire-desktop/Cargo.toml",
       "packages": ["codewire-desktop"],
       "lockfile": "crates/codewire-desktop/Cargo.lock",
-      "profiles": ["release", "test"],
+      "profiles": ["release"],
       "targets": ["host"],
       "features": ["default"],
       "dependency_kinds": ["normal", "build", "dev"],
