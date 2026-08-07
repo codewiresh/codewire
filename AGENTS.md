@@ -6,9 +6,9 @@ symlink; do not maintain separate instructions there. Detailed commands live in
 
 ## Authority
 
-Codewire uses direct authority mode. Normal repository work may be authorized
+Codewire uses direct authority mode. Normal work may be authorized
 in conversation: read-only inspection, scoped edits, focused checks, commits,
-branch pushes, pull requests, and merges. Read-only work never needs a tracker,
+branch pushes, pull requests, and merges. Read-only work needs no tracker,
 claim, approval receipt, or Program. Filing an issue records evidence; it does
 not authorize implementation.
 
@@ -20,6 +20,14 @@ known-bad work or weaken a gate merely to maintain momentum.
 Questions, criticism, and status requests during active work do not pause that
 objective; answer them and continue in the same turn unless the owner says to
 pause, stop, or change scope.
+
+After failure, preserve non-secret evidence and localize the failing layer
+before attribution. Retry a side effect only when a changed factor predicts a
+discriminating observation, unless canonical policy identifies a transient
+failure. An unknown result freezes only that mutation; continue read-only
+diagnosis and independent authorized work. Keep bounded diagnosis and repair
+under the same claim and admission; do not create an issue, PR, control
+transition, or authority request for each hypothesis.
 
 Release tags, manually initiated publication or recovery, production or
 nonstandard live-state mutation, and direct credential access require explicit
@@ -50,11 +58,11 @@ Do not set, request, infer, enforce, or report goal token or time budgets.
 
 ## Noel Method
 
-Codewire is pinned to the immutable Noel Method v0.8.0 runtime pack:
+Codewire is pinned to the immutable Noel Method v0.8.1 runtime pack:
 
-- Commit: `9c70fcff465efd46c570a002e8b86ce255f8252d`
-- Manifest SHA-256: `895c1cc8f6400270f2caaf26c5440f8d2e2ab3138faf6912bf93c032eefb88dc`
-- Index: `https://raw.githubusercontent.com/noeljackson/method/v0.8.0/dist/pack/INDEX.md`
+- Commit: `1c86e77ccacfa3c29b01e4d14b9f136df9e6f704`
+- Manifest SHA-256: `4a6925fee937b200d3e49c5aceae30edfb97af378bb79fef00df68e54ba8299f`
+- Index: `https://raw.githubusercontent.com/noeljackson/method/v0.8.1/dist/pack/INDEX.md`
 
 Resolve Method links only beneath that published pack. Direct mode is the
 default. Select protocols independently of repository risk:
@@ -86,7 +94,7 @@ ResolvedPermissions, and a resolver are not required in Codewire.
   reverse external effect. Require explicit authority, preconditions,
   acceptance evidence, and rollback.
 
-The highest matching tier applies to the task. A bounded implementation finding
+The highest matching tier applies. A bounded implementation finding
 stays within its change and is repaired once. Replan only when the goal,
 repositories, dependency order, public contracts, external effects, or
 acceptance criteria materially change.
@@ -151,8 +159,9 @@ proves a refreshed head.
 Local verification is the development loop; CI attests the exact pushed tree.
 Run the cheapest gate able to catch the affected failure class. Diagnose
 locally reproducible product, integration, contract, or Kind failures locally
-first. Use CI first only for CI-owned behavior such as hosted timing, cache,
-permissions, or credentials. Bind remote CI once to its exact head and run. A
+first. Follow the failure-convergence ladder in the developer workflow. Use CI
+first only for CI-owned behavior such as hosted timing, cache, permissions, or
+credentials. Bind remote CI once to its exact head and run. A
 transition-aware watcher may surface early failure or terminal completion when
 that feedback matters. Starting it is one model action: once bound, let it wait
 outside the model. Do not create recurring model turns to call `write_stdin`,
