@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 
 
-EMITTER_PATH = Path(__file__).parents[1] / "emit-verification-receipt.py"
+EMITTER_PATH = Path(__file__).parents[2] / "receipts" / "emit-verification-receipt.py"
 SPEC = importlib.util.spec_from_file_location("codewire_ci_receipt_emitter", EMITTER_PATH)
 assert SPEC and SPEC.loader
 emitter = importlib.util.module_from_spec(SPEC)

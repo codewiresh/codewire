@@ -64,8 +64,9 @@ grep -Fq -- "--trusted-policy \"\$GITHUB_SHA\"" <<<"$selection_job" ||
   fail "planner policy is not exact current main"
 grep -Fq 'scripts/ci/plan/apply-deploy-plan.py' <<<"$selection_job" ||
   fail "deploy selection does not apply trusted runtime artifact facts"
-if grep -Fq 'scripts/ci/select/select-deploy-dev.sh' <<<"$selection_job"; then
-  fail "deploy workflow still invokes the legacy deploy classifier"
+if compgen -G "$ROOT/scripts/ci/select/select-deploy-*" >/dev/null \
+  || compgen -G "$ROOT/scripts/ci/select/artifact-*" >/dev/null; then
+  fail "legacy deployment classifier remains in the repository"
 fi
 select_step="$(sed -n '/      - name: Plan and select atomic Dev deployment/,/^  build-gateway-image:/p' \
   <<<"$selection_job")"

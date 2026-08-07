@@ -26,21 +26,13 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Select manual diagnostic
-        id: select
+      - name: Validate manual diagnostic
         env:
-          GITHUB_EVENT_NAME: workflow_dispatch
-          VERIFICATION_REQUEST: ${{ github.event.inputs.diagnostic }}
-        run: scripts/ci/select/select-verification.sh
-
-      - name: Require explicit diagnostic request
-        env:
-          SELECTION: ${{ steps.select.outputs.selection }}
+          DIAGNOSTIC: ${{ github.event.inputs.diagnostic }}
         run: |
           set -euo pipefail
-          case "$SELECTION" in
-            *'|diagnostic_rust_stack|'*|*'|diagnostic_go_tailnet|'*)
-              ;;
+          case "$DIAGNOSTIC" in
+            rust-stack|go-tailnet) ;;
             *)
               echo "::error::manual diagnostics require diagnostic=rust-stack or go-tailnet"
               exit 1
@@ -51,18 +43,18 @@ jobs:
         run: scripts/ci/setup/setup-go.sh 1.26.5
 
       - uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b
-        if: ${{ contains(steps.select.outputs.selection, '|diagnostic_rust_stack|') || contains(steps.select.outputs.selection, '|diagnostic_go_tailnet|') }}
+        if: ${{ github.event.inputs.diagnostic == 'rust-stack' || github.event.inputs.diagnostic == 'go-tailnet' }}
         with:
           toolchain: 1.91.1
 
       - name: Verify Rust stack diagnostic tools
-        if: ${{ contains(steps.select.outputs.selection, '|diagnostic_rust_stack|') }}
+        if: ${{ github.event.inputs.diagnostic == 'rust-stack' }}
         run: |
           set -euo pipefail
           scripts/ci/setup/assert-ci-runner-image.sh
 
       - name: Start Rust stack diagnostic Postgres
-        if: ${{ contains(steps.select.outputs.selection, '|diagnostic_rust_stack|') }}
+        if: ${{ github.event.inputs.diagnostic == 'rust-stack' }}
         run: |
           set -euo pipefail
           container="codewire-rust-stack-${GITHUB_RUN_ID:?}"
@@ -75,7 +67,7 @@ jobs:
           echo "POSTGRES_PORT=${mapping##*:}" >> "$GITHUB_ENV"
 
       - name: Wait for Rust stack diagnostic Postgres
-        if: ${{ contains(steps.select.outputs.selection, '|diagnostic_rust_stack|') }}
+        if: ${{ github.event.inputs.diagnostic == 'rust-stack' }}
         env:
           PGPASSWORD: codewire
         run: |
@@ -92,15 +84,15 @@ jobs:
           exit 1
 
       - name: Run Go Tailnet diagnostic
-        if: ${{ contains(steps.select.outputs.selection, '|diagnostic_go_tailnet|') }}
+        if: ${{ github.event.inputs.diagnostic == 'go-tailnet' }}
         run: scripts/ci/verify/tailnet-parity.sh
 
       - name: Run Rust stack diagnostic
-        if: ${{ contains(steps.select.outputs.selection, '|diagnostic_rust_stack|') }}
+        if: ${{ github.event.inputs.diagnostic == 'rust-stack' }}
         env:
           GOWORK: 'off'
         run: scripts/ci/verify/rust-stack-rehearsal.sh
 
       - name: Stop Rust stack diagnostic Postgres
-        if: ${{ always() && contains(steps.select.outputs.selection, '|diagnostic_rust_stack|') }}
+        if: ${{ always() && github.event.inputs.diagnostic == 'rust-stack' }}
         run: docker rm -f "${POSTGRES_CONTAINER:-missing}" >/dev/null 2>&1 || true

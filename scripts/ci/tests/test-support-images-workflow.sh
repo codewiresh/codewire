@@ -61,7 +61,7 @@ grep -Fq 'name: Remove untrusted registry candidate' <<<"$selection_job" ||
 grep -Fq 'rm -f -- "$RUNNER_TEMP/codewire-published-support-candidate.json"' \
   <<<"$selection_job" || fail 'support selection cleanup does not use the fixed runner-temp path'
 if grep -Fq '"$GITHUB_SHA^"' <<<"$selection_job" \
-  || grep -Eq 'artifact-impact\.py|select-support-images\.sh' <<<"$selection_job"; then
+  || grep -Eq 'select-support-images\.sh' <<<"$selection_job"; then
   fail 'support selection retains HEAD-parent or legacy path classification'
 fi
 if grep -Fq 'secrets.' <<<"$selection_job"; then

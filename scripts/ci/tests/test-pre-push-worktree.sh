@@ -45,6 +45,7 @@ write_stub_tree() {
     "$repo/libs/tailnet" \
     "$repo/scripts/checks" \
     "$repo/scripts/checks/source" \
+    "$repo/scripts/ci/receipts" \
     "$repo/scripts/ci/select" \
     "$repo/scripts/ci/verify" \
     "$repo/scripts/dev"
@@ -54,7 +55,7 @@ write_stub_tree() {
   install -m 755 "$ROOT/scripts/dev/install-hooks.sh" "$repo/scripts/dev/install-hooks.sh"
   install -m 755 "$ROOT/scripts/ci/select/select-verification.sh" \
     "$repo/scripts/ci/select/select-verification.sh"
-cat > "$repo/scripts/ci/select/verify-release-tag-receipt.sh" <<'EOF'
+cat > "$repo/scripts/ci/receipts/verify-release-tag-receipt.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 if [ "${PREFLIGHT_TEST_RECEIPT_FAIL:-0}" = 1 ]; then
@@ -102,7 +103,7 @@ EOF
     "$repo/scripts/ci/verify/run-product-verification.sh" \
     "$repo/scripts/ci/verify/run-integration-verification.sh" \
     "$repo/scripts/ci/verify/kind-e2e.sh" \
-    "$repo/scripts/ci/select/verify-release-tag-receipt.sh" \
+    "$repo/scripts/ci/receipts/verify-release-tag-receipt.sh" \
     "$repo/scripts/checks/repo_checks.py" \
     "$repo/scripts/checks/source/check-native-desktop-ui.py"
 
