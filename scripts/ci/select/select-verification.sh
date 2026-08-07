@@ -354,6 +354,7 @@ if [ "$event_selected" = false ]; then
     case "$path" in
       .gitea/workflows/ci.yaml|.gitea/workflows/manual-diagnostics.yaml|\
       .gitea/workflows/rust-latest-canary.yaml|\
+      .gitea/workflows/rust-cache-refresh.yaml|\
       .gitea/workflows/connect-apikey-smoke.yaml|\
       .gitea/workflows/dev-deployment-smoke-receipt.yaml|\
       .gitea/workflows/prod-readonly-smoke.yaml|\
@@ -364,6 +365,10 @@ if [ "$event_selected" = false ]; then
       scripts/ci/receipts/emit-verification-receipt.py|\
       scripts/ci/receipts/verify-tested-tree-receipt.sh|\
       scripts/ci/receipts/verify-release-tag-receipt.sh|\
+      scripts/ci/receipts/emit-rust-cache-receipt.py|\
+      scripts/ci/receipts/verify-rust-cache-receipt.sh|\
+      scripts/ci/cache/prepare-rust-dependency-cache.sh|\
+      scripts/ci/cache/select-rust-cache-key.sh|\
       scripts/ci/images/resolve-published-support-pair.sh|\
       scripts/ci/plan/*|\
       scripts/ci/tests/test-select-verification.sh|\
@@ -380,6 +385,8 @@ if [ "$event_selected" = false ]; then
       scripts/ci/tests/test-rust-owned-fixtures.sh|\
       scripts/ci/tests/test-rust-toolchain.sh|\
       scripts/ci/tests/test-cargo-cache-capacity.sh|\
+      scripts/ci/tests/test-rust-cache-workflow.sh|\
+      scripts/ci/tests/test-rust-cache-receipts.sh|\
       scripts/ci/tests/fixtures/cargo-cache-df.sh|\
       scripts/ci/verify/integration-postgres.sh|scripts/ci/tests/test-integration-postgres.sh|\
       scripts/ci/verify/resolve-cargo-target-dir.sh|\
