@@ -1125,13 +1125,41 @@ class PlannerFixtureTests(unittest.TestCase):
 
     def test_policy_change_fails_every_artifact_closed(self) -> None:
         self.repo.change("scripts/ci/plan/new-policy-input.txt", "policy change\n")
-        document = self.repo.plan()
+        with mock.patch.object(
+            planner, "cargo_metadata", side_effect=fixture_cargo_metadata
+        ) as metadata:
+            document = planner.plan(
+                self.repo.root, self.repo.base, "HEAD", self.repo.base
+            )
         self.assertTrue(all(value["state"] == "unclassified" for value in document["artifacts"].values()))
+        self.assertEqual(metadata.call_count, 2)
+        for artifact in ("rust_cache_cli", "rust_cache_workspace"):
+            cache = document["artifacts"][artifact]
+            self.assertRegex(cache["baseline_cache_fingerprint"], r"^[0-9a-f]{64}$")
+            self.assertEqual(
+                cache["baseline_cache_fingerprint"], cache["head_cache_fingerprint"]
+            )
 
     def test_legacy_selector_change_fails_every_artifact_closed(self) -> None:
         self.repo.change("scripts/ci/select/select-verification.sh", "#!/bin/sh\nexit 0\n")
         document = self.repo.plan()
         self.assertTrue(all(value["state"] == "unclassified" for value in document["artifacts"].values()))
+        for artifact in ("rust_cache_cli", "rust_cache_workspace"):
+            cache = document["artifacts"][artifact]
+            self.assertEqual(
+                cache["baseline_cache_fingerprint"], cache["head_cache_fingerprint"]
+            )
+
+    def test_policy_change_does_not_hide_a_cache_input_change(self) -> None:
+        self.repo.change("scripts/ci/select/select-verification.sh", "#!/bin/sh\nexit 0\n")
+        self.repo.change("generated/descriptor.bin", "changed descriptor\n")
+        document = self.repo.plan()
+        self.assertTrue(all(value["state"] == "unclassified" for value in document["artifacts"].values()))
+        for artifact in ("rust_cache_cli", "rust_cache_workspace"):
+            cache = document["artifacts"][artifact]
+            self.assertNotEqual(
+                cache["baseline_cache_fingerprint"], cache["head_cache_fingerprint"]
+            )
 
     def test_unrelated_app_change_does_not_package_rust(self) -> None:
         self.repo.change("apps/dashboard/README.md", "billing-only equivalent\n")
@@ -1365,6 +1393,50 @@ class HostileArchiveTests(unittest.TestCase):
             planner.safe_extract_tar(self.archive([(target, b"x"), (link, b"")]), destination)
             planner.validate_exported_tree(destination)
             self.assertEqual((destination / "link").read_text(), "x")
+
+    def test_git_archive_stream_is_drained_before_the_producer_is_reaped(self) -> None:
+        target = tarfile.TarInfo("target")
+        target.size = 1
+        archive = self.archive([(target, b"x")]).getvalue()
+
+        class ChunkedArchiveStream(io.BytesIO):
+            def __init__(self, content: bytes) -> None:
+                super().__init__(content)
+                self.length = len(content)
+                self.drained_before_close = False
+
+            def read(self, size: int = -1) -> bytes:
+                return super().read(512 if size < 0 else min(size, 512))
+
+            def close(self) -> None:
+                self.drained_before_close = self.tell() == self.length
+                super().close()
+
+        class ArchiveProcess:
+            def __init__(self, content: bytes) -> None:
+                self.stdout = ChunkedArchiveStream(content)
+                self.stderr = io.BytesIO()
+                self.returncode: int | None = None
+
+            def communicate(self) -> tuple[bytes, bytes]:
+                remaining = b"".join(iter(lambda: self.stdout.read(8192), b""))
+                stderr = self.stderr.read()
+                self.stdout.close()
+                self.stderr.close()
+                self.returncode = 0 if self.stdout.drained_before_close else -13
+                return remaining, stderr
+
+            def kill(self) -> None:
+                self.returncode = -9
+
+        process = ArchiveProcess(archive)
+        with tempfile.TemporaryDirectory() as temporary:
+            destination = Path(temporary)
+            with mock.patch.object(planner.subprocess, "Popen", return_value=process):
+                planner.export_git_tree(Path("."), "HEAD", destination)
+            self.assertEqual((destination / "target").read_text(), "x")
+
+        self.assertTrue(process.stdout.drained_before_close)
 
 
 if __name__ == "__main__":

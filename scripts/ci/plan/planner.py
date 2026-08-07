@@ -185,15 +185,13 @@ def export_git_tree(repository: Path, commit: str, destination: Path) -> None:
         safe_extract_tar(process.stdout, destination)
     except BaseException:
         process.kill()
-        process.wait()
+        process.communicate()
         raise
-    finally:
-        process.stdout.close()
-    stderr = process.stderr.read() if process.stderr is not None else b""
-    if process.stderr is not None:
-        process.stderr.close()
-    returncode = process.wait()
-    if returncode != 0:
+    # Streaming tar readers may stop after the end-of-archive records while
+    # Git still has record padding to write. Drain both pipes before closing
+    # stdout so the producer cannot receive SIGPIPE on an otherwise valid tree.
+    _, stderr = process.communicate()
+    if process.returncode != 0:
         raise PlannerError(f"git archive failed: {stderr.decode('utf-8', 'replace')[:2000]}")
     validate_exported_tree(destination)
 
@@ -390,6 +388,22 @@ def discover_cargo_universe(tree: Path, artifact_manifest: str, cargo_env: dict[
                 if dependency_manifest not in packages and dependency_manifest not in visited:
                     queue.append(dependency_manifest)
     return CargoUniverse(packages, manifests, {package["_directory_relative"] for package in packages.values()})
+
+
+def cached_cargo_universe(
+    tree: Path,
+    artifact_manifest: str,
+    trusted_toolchain: str | None,
+    cache: dict[str, CargoUniverse] | None,
+) -> CargoUniverse:
+    if cache is not None and artifact_manifest in cache:
+        return cache[artifact_manifest]
+    with tempfile.TemporaryDirectory(prefix="codewire-ci-cargo-") as cargo_temp:
+        cargo_env = isolated_cargo_environment(Path(cargo_temp), trusted_toolchain)
+        universe = discover_cargo_universe(tree, artifact_manifest, cargo_env)
+    if cache is not None:
+        cache[artifact_manifest] = universe
+    return universe
 
 
 def dependency_kind_is_artifact(
@@ -747,10 +761,11 @@ def rust_fingerprint(
     spec: dict[str, Any],
     trusted_toolchain: str | None = None,
     index: TreeIndex | None = None,
+    cargo_universes: dict[str, CargoUniverse] | None = None,
 ) -> RustFingerprint:
-    with tempfile.TemporaryDirectory(prefix="codewire-ci-cargo-") as cargo_temp:
-        cargo_env = isolated_cargo_environment(Path(cargo_temp), trusted_toolchain)
-        universe = discover_cargo_universe(tree, spec["manifest"], cargo_env)
+    universe = cached_cargo_universe(
+        tree, spec["manifest"], trusted_toolchain, cargo_universes
+    )
     closure = cargo_local_closure(tree, universe, spec["package"], spec["manifest"])
     tree_index = index or TreeIndex(tree)
     files: dict[str, dict[str, Any]] = {}
@@ -796,6 +811,7 @@ def rust_cache_fingerprint(
     spec: dict[str, Any],
     trusted_toolchain: str | None = None,
     index: TreeIndex | None = None,
+    cargo_universes: dict[str, CargoUniverse] | None = None,
 ) -> RustFingerprint:
     allowed_fields = {
         "kind",
@@ -843,9 +859,9 @@ def rust_cache_fingerprint(
     ):
         raise PlannerError("rust-cache tool_inputs must contain non-empty string pairs")
 
-    with tempfile.TemporaryDirectory(prefix="codewire-ci-cache-cargo-") as cargo_temp:
-        cargo_env = isolated_cargo_environment(Path(cargo_temp), trusted_toolchain)
-        universe = discover_cargo_universe(tree, spec["manifest"], cargo_env)
+    universe = cached_cargo_universe(
+        tree, spec["manifest"], trusted_toolchain, cargo_universes
+    )
     closure = cargo_cache_closure(tree, universe, spec)
     tree_index = index or TreeIndex(tree)
     compatibility_files: dict[str, dict[str, Any]] = {}
@@ -924,6 +940,7 @@ def artifact_fingerprint(
     tree_index: TreeIndex,
     cache: dict[str, ArtifactFingerprint | RustFingerprint],
     resolving: list[str] | None = None,
+    cargo_universes: dict[str, CargoUniverse] | None = None,
 ) -> ArtifactFingerprint | RustFingerprint:
     if name in cache:
         return cache[name]
@@ -936,11 +953,11 @@ def artifact_fingerprint(
     kind = spec.get("kind")
     if kind == "rust-package":
         result: ArtifactFingerprint | RustFingerprint = rust_fingerprint(
-            tree, spec, trusted_toolchain, tree_index
+            tree, spec, trusted_toolchain, tree_index, cargo_universes
         )
     elif kind == "rust-cache":
         result = rust_cache_fingerprint(
-            tree, spec, trusted_toolchain, tree_index
+            tree, spec, trusted_toolchain, tree_index, cargo_universes
         )
     elif kind == "file-set":
         result = file_set_fingerprint(tree, spec, tree_index)
@@ -962,6 +979,7 @@ def artifact_fingerprint(
                 tree_index,
                 cache,
                 [*path, name],
+                cargo_universes,
             )
             dependency_records.append(
                 {"artifact": dependency, "fingerprint": resolved.fingerprint}
@@ -1469,6 +1487,8 @@ def plan(
                 head_index = TreeIndex(head_tree)
                 baseline_fingerprints: dict[str, ArtifactFingerprint | RustFingerprint] = {}
                 head_fingerprints: dict[str, ArtifactFingerprint | RustFingerprint] = {}
+                baseline_cargo_universes: dict[str, CargoUniverse] = {}
+                head_cargo_universes: dict[str, CargoUniverse] = {}
                 classifying: set[str] = set()
 
                 def classify(name: str) -> dict[str, Any]:
@@ -1477,7 +1497,7 @@ def plan(
                     spec = graph["artifacts"].get(name)
                     if not isinstance(spec, dict):
                         return unclassified_result(f"artifact definition is missing: {name}")
-                    if changed_policy_path:
+                    if changed_policy_path and spec.get("kind") != "rust-cache":
                         result = unclassified_result(
                             f"trusted policy surface changed: {changed_policy_path}"
                         )
@@ -1502,6 +1522,7 @@ def plan(
                             rust_toolchain,
                             baseline_index,
                             baseline_fingerprints,
+                            cargo_universes=baseline_cargo_universes,
                         )
                         after = artifact_fingerprint(
                             name,
@@ -1510,6 +1531,7 @@ def plan(
                             rust_toolchain,
                             head_index,
                             head_fingerprints,
+                            cargo_universes=head_cargo_universes,
                         )
                         cache_fingerprints = (
                             {
@@ -1529,7 +1551,17 @@ def plan(
                                         f"{dependency_result['explanations'][0]}"
                                     )
                                     break
-                        if dependency_failure:
+                        if changed_policy_path:
+                            result = {
+                                "state": "unclassified",
+                                "baseline_fingerprint": before.fingerprint,
+                                "head_fingerprint": after.fingerprint,
+                                **cache_fingerprints,
+                                "explanations": [
+                                    f"trusted policy surface changed: {changed_policy_path}"
+                                ],
+                            }
+                        elif dependency_failure:
                             result = {
                                 "state": "unclassified",
                                 "baseline_fingerprint": before.fingerprint,
