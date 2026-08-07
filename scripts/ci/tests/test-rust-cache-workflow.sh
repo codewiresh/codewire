@@ -79,6 +79,9 @@ fi
 
 grep -Fq 'cargo clean' "$ROOT/scripts/ci/cache/prepare-rust-dependency-cache.sh" \
   || fail 'first-party outputs are not pruned'
+grep -Fq 'clean_profiles=(dev release)' \
+  "$ROOT/scripts/ci/cache/prepare-rust-dependency-cache.sh" \
+  || fail 'desktop release cache does not prune both build profiles'
 grep -Fq '4294967296' "$ROOT/scripts/ci/cache/prepare-rust-dependency-cache.sh" \
   || fail 'cache size ceiling is absent'
 grep -Fq 'cargo zigbuild --locked --profile ci' \
@@ -93,19 +96,33 @@ mkdir -p "$work/bin"
 cat > "$work/bin/cargo" <<'FAKE_CARGO'
 #!/usr/bin/env bash
 set -euo pipefail
+profile_for_args() {
+  local profile=debug argument previous=''
+  for argument in "$@"; do
+    if [ "$previous" = --profile ]; then
+      profile="$argument"
+      break
+    fi
+    previous="$argument"
+  done
+  printf '%s\n' "$profile"
+}
+
 case "${1:-}" in
   test)
-    mkdir -p "$CARGO_TARGET_DIR/debug/.fingerprint/codewire-fixture-123" \
-      "$CARGO_TARGET_DIR/debug/deps"
-    : > "$CARGO_TARGET_DIR/debug/deps/libcodewire_fixture.rlib"
-    : > "$CARGO_TARGET_DIR/debug/deps/libserde_fixture.rlib"
+    profile="$(profile_for_args "$@")"
+    mkdir -p "$CARGO_TARGET_DIR/$profile/.fingerprint/codewire-fixture-123" \
+      "$CARGO_TARGET_DIR/$profile/deps"
+    : > "$CARGO_TARGET_DIR/$profile/deps/libcodewire_fixture.rlib"
+    : > "$CARGO_TARGET_DIR/$profile/deps/libserde_fixture.rlib"
     ;;
   metadata)
     printf '%s\n' '{"packages":[{"name":"codewire-fixture","source":null}]}'
     ;;
   clean)
-    rm -rf "$CARGO_TARGET_DIR/debug/.fingerprint/codewire-fixture-123"
-    rm -f "$CARGO_TARGET_DIR/debug/deps/libcodewire_fixture.rlib"
+    profile="$(profile_for_args "$@")"
+    rm -rf "$CARGO_TARGET_DIR/$profile/.fingerprint/codewire-fixture-123"
+    rm -f "$CARGO_TARGET_DIR/$profile/deps/libcodewire_fixture.rlib"
     ;;
   *)
     printf 'unexpected fake Cargo invocation: %s\n' "$*" >&2
@@ -114,12 +131,19 @@ case "${1:-}" in
 esac
 FAKE_CARGO
 chmod +x "$work/bin/cargo"
-PATH="$work/bin:$PATH" CARGO_TARGET_DIR="$cache_dir" \
-  "$ROOT/scripts/ci/cache/prepare-rust-dependency-cache.sh" host-debug >/dev/null
-test -f "$cache_dir/debug/deps/libserde_fixture.rlib" \
-  || fail 'dependency output was pruned'
-if find "$cache_dir" -name 'libcodewire_*' -print -quit | grep -q .; then
-  fail 'first-party output survived pruning fixture'
-fi
+for fixture_flavor in host-debug host-ci; do
+  case "$fixture_flavor" in
+    host-debug) fixture_profile=debug ;;
+    host-ci) fixture_profile=ci ;;
+  esac
+  fixture_target="$cache_dir/$fixture_flavor"
+  PATH="$work/bin:$PATH" CARGO_TARGET_DIR="$fixture_target" \
+    "$ROOT/scripts/ci/cache/prepare-rust-dependency-cache.sh" "$fixture_flavor" >/dev/null
+  test -f "$fixture_target/$fixture_profile/deps/libserde_fixture.rlib" \
+    || fail "dependency output was pruned for $fixture_flavor"
+  if find "$fixture_target" -name 'libcodewire_*' -print -quit | grep -q .; then
+    fail "first-party output survived pruning fixture for $fixture_flavor"
+  fi
+done
 
 echo 'Rust cache workflow contract: OK'

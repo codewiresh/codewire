@@ -5,6 +5,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 flavor="${1:-}"
 target_dir="${CARGO_TARGET_DIR:-}"
+clean_profiles=()
 
 die() {
   printf 'prepare-rust-dependency-cache: %s\n' "$*" >&2
@@ -26,9 +27,11 @@ rust_host="$(rustc -vV | awk '/^host:/ { print $2 }')"
 case "$flavor" in
   host-debug)
     cargo test --locked --workspace --all-targets --no-run
+    clean_profiles=('')
     ;;
   host-ci)
     cargo test --locked --profile ci --workspace --all-targets --no-run
+    clean_profiles=(ci)
     ;;
   kind-ci)
     cargo build --locked --profile ci -p codewire-orchestration \
@@ -36,6 +39,7 @@ case "$flavor" in
     cargo build --locked --profile ci -p codewire-client \
       --features kind-e2e --examples
     cargo build --locked --profile ci -p codewire-billing
+    clean_profiles=(ci)
     ;;
   cw-cross-ci)
     tool_root="$target_dir/tools"
@@ -51,11 +55,13 @@ case "$flavor" in
       cargo zigbuild --locked --profile ci \
         --package codewire-cli-bin --bin cw --target "$target"
     done
+    clean_profiles=(ci)
     ;;
   desktop-release)
     cargo test --locked --manifest-path crates/codewire-desktop/Cargo.toml --no-run
     CARGO_TARGET_DIR="$target_dir" \
       scripts/ci/release/package-codewire-desktop.sh --dry-run 0.0.0-ci
+    clean_profiles=(dev release)
     ;;
   *)
     die 'flavor must be host-debug, host-ci, kind-ci, cw-cross-ci, or desktop-release'
@@ -76,7 +82,14 @@ clean_args=()
 for package in "${workspace_packages[@]}"; do
   clean_args+=( -p "$package" )
 done
-cargo clean --manifest-path "$manifest" --target-dir "$target_dir" "${clean_args[@]}"
+for clean_profile in "${clean_profiles[@]}"; do
+  profile_args=()
+  if [ -n "$clean_profile" ]; then
+    profile_args+=(--profile "$clean_profile")
+  fi
+  cargo clean --manifest-path "$manifest" --target-dir "$target_dir" \
+    "${profile_args[@]}" "${clean_args[@]}"
+done
 
 if find "$target_dir" -type d -path '*/.fingerprint/codewire-*' -print -quit \
     | grep -q .; then
