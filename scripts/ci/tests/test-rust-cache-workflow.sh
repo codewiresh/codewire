@@ -92,26 +92,11 @@ if grep -Fq 'package-cw-release.sh' \
   fail 'dependency-cache warmup must not select release packaging verification'
 fi
 
-empty_cargo_home="$work/empty-cargo-home"
-mkdir -p \
-  "$empty_cargo_home/root" \
-  "$empty_cargo_home/desktop"
-CARGO_HOME="$empty_cargo_home/root" \
-  cargo metadata --offline --locked --no-deps --format-version 1 \
-    --manifest-path "$ROOT/Cargo.toml" > "$work/root-metadata.json"
-grep -Fq '"name":"codewire-cli-bin"' "$work/root-metadata.json" \
-  || fail 'clean offline metadata omitted the root workspace package set'
-CARGO_HOME="$empty_cargo_home/desktop" \
-  cargo metadata --offline --locked --no-deps --format-version 1 \
-    --manifest-path "$ROOT/crates/codewire-desktop/Cargo.toml" \
-    > "$work/desktop-metadata.json"
-grep -Fq '"name":"codewire-desktop"' "$work/desktop-metadata.json" \
-  || fail 'clean offline metadata omitted the detached desktop package'
-
 mkdir -p "$work/bin"
 cat > "$work/bin/cargo" <<'FAKE_CARGO'
 #!/usr/bin/env bash
 set -euo pipefail
+[ -z "${FAKE_CARGO_LOG:-}" ] || printf '%s\n' "$*" >> "$FAKE_CARGO_LOG"
 profile_for_args() {
   local profile=debug argument previous=''
   for argument in "$@"; do
@@ -128,7 +113,15 @@ case "${1:-}" in
   test)
     profile="$(profile_for_args "$@")"
     if [[ " $* " = *codewire-desktop/Cargo.toml* ]]; then
-      packages=(codewire-desktop codewire-client)
+      packages=(
+        codewire-client
+        codewire-desktop
+        codewire-platform-native
+        codewire-proto
+        codewire-tailnet
+        codewire-types
+        codewire-ui
+      )
     else
       packages=(codewire-cli-bin)
     fi
@@ -145,7 +138,15 @@ case "${1:-}" in
       profile=release
     fi
     if [[ " $* " = *codewire-desktop/Cargo.toml* ]] || [ "$profile" = release ]; then
-      packages=(codewire-desktop codewire-client)
+      packages=(
+        codewire-client
+        codewire-desktop
+        codewire-platform-native
+        codewire-proto
+        codewire-tailnet
+        codewire-types
+        codewire-ui
+      )
     else
       package=''
       previous=''
@@ -220,17 +221,6 @@ FAKE_ZIGBUILD
     : > "$output/deps/libcodewire_cli_bin_fixture.rlib"
     : > "$output/deps/libserde_fixture.rlib"
     ;;
-  metadata)
-    if [[ " $* " != *' --no-deps '* ]]; then
-      echo 'fixture rejects dependency-resolving Cargo metadata' >&2
-      exit 2
-    fi
-    if [[ " $* " = *codewire-desktop/Cargo.toml* ]]; then
-      printf '%s\n' '{"packages":[{"name":"codewire-desktop","source":null}]}'
-    else
-      printf '%s\n' '{"packages":[{"name":"codewire-cli-bin","source":null},{"name":"codewire-client","source":null},{"name":"codewire-orchestration","source":null},{"name":"codewire-billing","source":null}]}'
-    fi
-    ;;
   clean)
     profile="$(profile_for_args "$@")"
     if [ "$profile" = dev ]; then
@@ -269,6 +259,8 @@ FAKE_ZIGBUILD
 esac
 FAKE_CARGO
 chmod +x "$work/bin/cargo"
+empty_cargo_home="$work/empty-cargo-home"
+mkdir -p "$empty_cargo_home"
 for fixture_flavor in host-debug host-ci kind-ci cw-cross-ci desktop-release; do
   case "$fixture_flavor" in
     host-debug) fixture_profile=debug ;;
@@ -278,13 +270,22 @@ for fixture_flavor in host-debug host-ci kind-ci cw-cross-ci desktop-release; do
     desktop-release) fixture_profile=release ;;
   esac
   fixture_target="$cache_dir/$fixture_flavor"
-  PATH="$work/bin:$PATH" CARGO_TARGET_DIR="$fixture_target" \
+  fixture_log="$work/$fixture_flavor.cargo.log"
+  PATH="$work/bin:$PATH" CARGO_HOME="$empty_cargo_home" \
+    FAKE_CARGO_LOG="$fixture_log" CARGO_TARGET_DIR="$fixture_target" \
     "$ROOT/scripts/ci/cache/prepare-rust-dependency-cache.sh" "$fixture_flavor" >/dev/null
   test -f "$fixture_target/$fixture_profile/deps/libserde_fixture.rlib" \
     || fail "dependency output was pruned for $fixture_flavor"
   if find "$fixture_target" -name 'libcodewire_*' -print -quit | grep -q .; then
     fail "first-party output survived pruning fixture for $fixture_flavor"
   fi
+  if grep -Eq '^metadata( |$)' "$fixture_log"; then
+    fail "pruning resolved Cargo metadata for $fixture_flavor"
+  fi
 done
+grep -Fq -- '-p codewire-platform-native' "$work/desktop-release.cargo.log" \
+  || fail 'desktop pruning omitted its excluded platform path dependency'
+grep -Fq -- '-p codewire-ui' "$work/desktop-release.cargo.log" \
+  || fail 'desktop pruning omitted its excluded UI path dependency'
 
 echo 'Rust cache workflow contract: OK'

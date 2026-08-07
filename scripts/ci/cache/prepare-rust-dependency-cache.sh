@@ -72,54 +72,73 @@ case "$flavor" in
 esac
 
 manifest='Cargo.toml'
+lockfile='Cargo.lock'
 if [ "$flavor" = desktop-release ]; then
   manifest='crates/codewire-desktop/Cargo.toml'
+  lockfile='crates/codewire-desktop/Cargo.lock'
 fi
 
 # Full Cargo metadata can require registry packages for target configurations
-# that the selected host build never fetched. First-party pruning only needs
-# package identities, so keep metadata offline and dependency-free. The root
-# workspace covers every shared path dependency; a detached manifest is added
-# separately so its own package is pruned as well.
-metadata_manifests=(Cargo.toml)
-if [ "$manifest" != Cargo.toml ]; then
-  metadata_manifests+=("$manifest")
-fi
+# that the selected host build never fetched, while --no-deps omits excluded
+# local path dependencies from detached workspaces. Cargo.lock already records
+# every resolved local package without a source, so derive the complete pruning
+# set from the selected build's lockfile without consulting a registry.
+first_party_package_lines="$(
+  python3 - "$lockfile" <<'PY'
+import re
+import sys
+import tomllib
+from pathlib import Path
 
-clean_first_party_packages() {
-  local metadata_manifest="$1" metadata_json package clean_target clean_profile
-  local -a manifest_packages clean_args target_args profile_args
-  metadata_json="$(
-    cargo metadata --offline --locked --no-deps --format-version 1 \
-      --manifest-path "$metadata_manifest"
-  )" || die "Cargo metadata failed for $metadata_manifest"
-  mapfile -t manifest_packages < <(
-    jq -er '.packages[] | select(.source == null) | .name' <<< "$metadata_json"
-  )
-  [ "${#manifest_packages[@]}" -gt 0 ] \
-    || die "Cargo metadata found no first-party packages for $metadata_manifest"
-  for package in "${manifest_packages[@]}"; do
-    clean_args+=( -p "$package" )
-  done
+lockfile = Path(sys.argv[1])
+document = tomllib.loads(lockfile.read_text(encoding="utf-8"))
+packages = document.get("package")
+if not isinstance(packages, list):
+    raise SystemExit(f"{lockfile}: package records are missing")
 
-  for clean_target in "${clean_targets[@]}"; do
-    target_args=()
-    if [ -n "$clean_target" ]; then
-      target_args+=(--target "$clean_target")
+names = []
+for package in packages:
+    if not isinstance(package, dict):
+        raise SystemExit(f"{lockfile}: package record is invalid")
+    source = package.get("source")
+    if source is not None and not isinstance(source, str):
+        raise SystemExit(f"{lockfile}: package source is invalid")
+    if source is not None:
+        continue
+    name = package.get("name")
+    if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", name):
+        raise SystemExit(f"{lockfile}: local package name is invalid")
+    names.append(name)
+
+if not names:
+    raise SystemExit(f"{lockfile}: no local packages were found")
+if len(names) != len(set(names)):
+    raise SystemExit(f"{lockfile}: local package names are ambiguous")
+print(*sorted(names), sep="\n")
+PY
+)" || die "first-party package discovery failed for $lockfile"
+mapfile -t first_party_packages <<< "$first_party_package_lines"
+[ "${#first_party_packages[@]}" -gt 0 ] \
+  || die "lockfile found no first-party packages for $manifest"
+
+clean_args=()
+for package in "${first_party_packages[@]}"; do
+  clean_args+=( -p "$package" )
+done
+for clean_target in "${clean_targets[@]}"; do
+  target_args=()
+  if [ -n "$clean_target" ]; then
+    target_args+=(--target "$clean_target")
+  fi
+  for clean_profile in "${clean_profiles[@]}"; do
+    profile_args=()
+    if [ -n "$clean_profile" ]; then
+      profile_args+=(--profile "$clean_profile")
     fi
-    for clean_profile in "${clean_profiles[@]}"; do
-      profile_args=()
-      if [ -n "$clean_profile" ]; then
-        profile_args+=(--profile "$clean_profile")
-      fi
-      cargo clean --manifest-path "$metadata_manifest" --target-dir "$target_dir" \
-        "${target_args[@]}" "${profile_args[@]}" "${clean_args[@]}"
-    done
+    cargo clean --offline --locked --manifest-path "$manifest" \
+      --target-dir "$target_dir" "${target_args[@]}" \
+      "${profile_args[@]}" "${clean_args[@]}"
   done
-}
-
-for metadata_manifest in "${metadata_manifests[@]}"; do
-  clean_first_party_packages "$metadata_manifest"
 done
 
 offending_fingerprint="$(
