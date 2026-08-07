@@ -168,6 +168,12 @@ class FixtureRepository:
                 "scripts/ci/plan/artifact-graph.json",
                 "scripts/ci/plan/planner.py",
             ],
+            "non_artifact_inputs": [
+                ".agents/**",
+                "AGENTS.md",
+                "CLAUDE.md",
+                "docs/**",
+            ],
             "artifacts": {
                 "cw_cli_release_assets": {
                     "kind": "rust-package",
@@ -1048,6 +1054,38 @@ class PlannerFixtureTests(unittest.TestCase):
         self.repo.change("cli/assets/theme.dat", "new asset\n")
         document = self.repo.plan()
         self.assertEqual(self.states(document), ("unclassified", "unaffected"))
+        self.assertEqual(
+            self.workspace_states(document),
+            ("unclassified", "unaffected", "unclassified"),
+        )
+
+    def test_known_non_artifact_changes_leave_artifacts_unaffected(self) -> None:
+        self.repo.change("AGENTS.md", "# Agent policy\n")
+        self.repo.change("CLAUDE.md", "AGENTS.md\n")
+        self.repo.change(".agents/skills/example/SKILL.md", "# Example skill\n")
+        self.repo.change("docs/dev/AGENT-WORKFLOW.md", "# Agent workflow\n")
+        document = self.repo.plan()
+        self.assertFalse(document["degraded_reasons"])
+        self.assertEqual(self.states(document), ("unaffected", "unaffected"))
+        self.assertEqual(
+            self.workspace_states(document),
+            ("unaffected", "unaffected", "unaffected"),
+        )
+        self.assertEqual(
+            self.runtime_states(document),
+            (
+                "unaffected",
+                "unaffected",
+                "unaffected",
+                "unaffected",
+                "unaffected",
+            ),
+        )
+
+    def test_unknown_root_path_still_fails_closed(self) -> None:
+        self.repo.change("unknown-root-input.txt", "unknown\n")
+        document = self.repo.plan()
+        self.assertEqual(self.states(document), ("unclassified", "unclassified"))
         self.assertEqual(
             self.workspace_states(document),
             ("unclassified", "unaffected", "unclassified"),

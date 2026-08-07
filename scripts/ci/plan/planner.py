@@ -1013,11 +1013,35 @@ def path_under(path: str, directory: str) -> bool:
     return path == directory or path.startswith(directory.rstrip("/") + "/")
 
 
+def trusted_non_artifact_inputs(graph: dict[str, Any]) -> list[str]:
+    patterns = graph.get("non_artifact_inputs")
+    if not isinstance(patterns, list) or not patterns:
+        raise PlannerError("trusted artifact graph omits non_artifact_inputs")
+    if not all(isinstance(pattern, str) and pattern for pattern in patterns):
+        raise PlannerError("non_artifact_inputs must contain non-empty strings")
+    if len(patterns) != len(set(patterns)):
+        raise PlannerError("non_artifact_inputs contains a duplicate")
+    for pattern in patterns:
+        if (
+            "\x00" in pattern
+            or "\\" in pattern
+            or pattern.startswith("/")
+            or posixpath.normpath(pattern) != pattern
+            or pattern == ".."
+            or pattern.startswith("../")
+        ):
+            raise PlannerError(
+                f"non_artifact_inputs contains an unsafe pattern: {pattern!r}"
+            )
+    return list(patterns)
+
+
 def has_unknown_reachable_path(
     paths: Iterable[str],
     before: RustFingerprint,
     after: RustFingerprint,
     known_artifact_directories: set[str],
+    non_artifact_inputs: Iterable[str],
 ) -> str | None:
     closure_dirs = before.closure_directories | after.closure_directories
     all_package_dirs = before.all_package_directories | after.all_package_directories
@@ -1037,6 +1061,10 @@ def has_unknown_reachable_path(
         ".github",
     }
     for path in paths:
+        if any(
+            fnmatch.fnmatchcase(path, pattern) for pattern in non_artifact_inputs
+        ):
+            continue
         if path in analyzed or path in known_root_inputs or path.endswith("/Cargo.lock"):
             continue
         matching_closure = [directory for directory in closure_dirs if path_under(path, directory)]
@@ -1397,6 +1425,7 @@ def plan(
             graph = json.loads(graph_path.read_text())
             if graph.get("schema") != "codewire.ci-artifact-graph/v1":
                 raise PlannerError("trusted artifact graph has an unsupported schema")
+            non_artifact_inputs = trusted_non_artifact_inputs(graph)
             policy_digest, graph_digest = policy_hash(policy_tree, graph)
             rust_toolchain = trusted_rust_toolchain(policy_tree)
         except (OSError, json.JSONDecodeError, PlannerError) as exc:
@@ -1522,7 +1551,11 @@ def plan(
                             and isinstance(after, RustFingerprint)
                         ):
                             unknown = has_unknown_reachable_path(
-                                paths, before, after, known_artifact_directories
+                                paths,
+                                before,
+                                after,
+                                known_artifact_directories,
+                                non_artifact_inputs,
                             )
                             if unknown:
                                 result = {

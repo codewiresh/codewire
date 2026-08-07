@@ -20,6 +20,12 @@
     "scripts/ci/select/select-verification.sh",
     "scripts/ci/receipts/verify-tested-tree-receipt.sh"
   ],
+  "non_artifact_inputs": [
+    ".agents/**",
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/**"
+  ],
   "artifacts": {
     "rust_cache_host_debug": {
       "kind": "rust-cache",
