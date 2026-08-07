@@ -40,8 +40,13 @@ repository-owned, and triggered solely by the authorized action. Codewire's
 enumerated merge consequences are ordinary CI, support-image publication,
 standard Dev delivery, and main-branch GitHub mirroring. CI using configured
 credentials that the agent cannot read is not direct credential access.
-Workflow changes, manual reruns, recovery, release tags, production actions,
-new destinations, and direct credential handling remain separate operations.
+An unchanged exact-head rerun of verification-only CI is routine delivery when
+canonical policy classifies the failure as transient; it inherits the landing
+objective and needs no new approval or receipt. Retry once, then diagnose a
+repeat. Workflow changes, recovery, release tags, production actions, new
+destinations, direct credential handling, and workflow reruns capable of
+publication, deployment, release, recovery, or live mutation remain separate
+operations.
 
 Request separate authority just in time: the exact operation must be ready,
 its prerequisites satisfied, and it must be the immediate next useful action
