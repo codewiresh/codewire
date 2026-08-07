@@ -1,0 +1,279 @@
+name: Rust dependency cache refresh
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rust-dependency-cache-main
+  cancel-in-progress: false
+
+env:
+  CARGO_INCREMENTAL: '0'
+  ZIG_VERSION: 0.15.2
+  ZIG_X86_64_LINUX_SHA256: 02aa270f183da276e5b5920b1dac44a63f1a49e55050ebde3aecc9eb82f93239
+
+jobs:
+  plan:
+    name: Plan Rust dependency caches
+    runs-on: ubuntu-latest
+    outputs:
+      head_commit: ${{ steps.plan.outputs.rust_cache_head_commit }}
+      head_tree: ${{ steps.plan.outputs.rust_cache_head_tree }}
+      host_debug_compatibility: ${{ steps.plan.outputs.rust_cache_host_debug_compatibility }}
+      host_ci_compatibility: ${{ steps.plan.outputs.rust_cache_host_ci_compatibility }}
+      kind_ci_compatibility: ${{ steps.plan.outputs.rust_cache_kind_ci_compatibility }}
+      cw_cross_ci_compatibility: ${{ steps.plan.outputs.rust_cache_cw_cross_ci_compatibility }}
+      desktop_release_compatibility: ${{ steps.plan.outputs.rust_cache_desktop_release_compatibility }}
+      previous_receipt: ${{ steps.previous.outputs.rust_cache_receipt }}
+      previous_host_debug_key: ${{ steps.previous.outputs.rust_cache_host_debug_key }}
+      previous_host_debug_compatibility: ${{ steps.previous.outputs.rust_cache_host_debug_compatibility }}
+      previous_host_ci_key: ${{ steps.previous.outputs.rust_cache_host_ci_key }}
+      previous_host_ci_compatibility: ${{ steps.previous.outputs.rust_cache_host_ci_compatibility }}
+      previous_kind_ci_key: ${{ steps.previous.outputs.rust_cache_kind_ci_key }}
+      previous_kind_ci_compatibility: ${{ steps.previous.outputs.rust_cache_kind_ci_compatibility }}
+      previous_cw_cross_ci_key: ${{ steps.previous.outputs.rust_cache_cw_cross_ci_key }}
+      previous_cw_cross_ci_compatibility: ${{ steps.previous.outputs.rust_cache_cw_cross_ci_compatibility }}
+      previous_desktop_release_key: ${{ steps.previous.outputs.rust_cache_desktop_release_key }}
+      previous_desktop_release_compatibility: ${{ steps.previous.outputs.rust_cache_desktop_release_compatibility }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          fetch-depth: 0
+
+      - name: Verify immutable runner contract
+        run: scripts/ci/setup/assert-ci-runner-image.sh
+
+      - uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b
+        with:
+          toolchain: 1.91.1
+
+      - name: Plan exact current compatibility identities
+        id: plan
+        run: |
+          set -euo pipefail
+          plan_file="$(mktemp)"
+          trap 'rm -f "$plan_file"' EXIT
+          python3 scripts/ci/plan/planner.py \
+            --repository . \
+            --target-base "$GITHUB_SHA" \
+            --head "$GITHUB_SHA" \
+            --trusted-policy "$GITHUB_SHA" \
+            --output "$plan_file"
+          python3 scripts/ci/plan/apply-rust-cache-plan.py --plan "$plan_file"
+
+      - name: Resolve previous exact canonical receipt
+        id: previous
+        env:
+          GITEA_TOKEN: ${{ github.token }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          source_sha="$GITHUB_SHA"
+          if [ "$GITHUB_EVENT_NAME" = push ]; then
+            source_sha="${PUSH_BEFORE_SHA:-}"
+          fi
+          CODEWIRE_CACHE_SOURCE_SHA="$source_sha" \
+            scripts/ci/receipts/verify-rust-cache-receipt.sh
+
+  host-debug:
+    name: Refresh Rust cache / host debug
+    runs-on: ubuntu-latest
+    needs: [plan]
+    permissions:
+      contents: read
+      actions: write
+    outputs:
+      key: ${{ steps.key.outputs.key }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - name: Select exact key
+        id: key
+        run: scripts/ci/cache/select-rust-cache-key.sh host-debug generic '${{ needs.plan.outputs.host_debug_compatibility }}' '${{ needs.plan.outputs.previous_host_debug_compatibility }}' '${{ needs.plan.outputs.previous_host_debug_key }}'
+      - uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b
+        if: ${{ steps.key.outputs.refresh == 'true' }}
+        with:
+          toolchain: 1.91.1
+          components: rustfmt,clippy
+      - name: Verify immutable runner contract
+        if: ${{ steps.key.outputs.refresh == 'true' }}
+        run: scripts/ci/setup/assert-ci-runner-image.sh
+      - name: Build dependency cache
+        if: ${{ steps.key.outputs.refresh == 'true' }}
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target/ci-cache/host-debug
+        run: scripts/ci/cache/prepare-rust-dependency-cache.sh host-debug
+      - name: Save immutable exact cache
+        if: ${{ steps.key.outputs.refresh == 'true' }}
+        uses: actions/cache/save@6849a6489940f00c2f30c0fb92c6274307ccb58a
+        with:
+          path: target/ci-cache/host-debug
+          key: ${{ steps.key.outputs.key }}
+
+  host-ci:
+    name: Refresh Rust cache / host CI
+    runs-on: ubuntu-latest
+    needs: [plan]
+    permissions:
+      contents: read
+      actions: write
+    outputs:
+      key: ${{ steps.key.outputs.key }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - name: Select exact key
+        id: key
+        run: scripts/ci/cache/select-rust-cache-key.sh host-ci generic '${{ needs.plan.outputs.host_ci_compatibility }}' '${{ needs.plan.outputs.previous_host_ci_compatibility }}' '${{ needs.plan.outputs.previous_host_ci_key }}'
+      - uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b
+        if: ${{ steps.key.outputs.refresh == 'true' }}
+        with:
+          toolchain: 1.91.1
+      - name: Verify immutable runner contract
+        if: ${{ steps.key.outputs.refresh == 'true' }}
+        run: scripts/ci/setup/assert-ci-runner-image.sh
+      - name: Build dependency cache
+        if: ${{ steps.key.outputs.refresh == 'true' }}
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target/ci-cache/host-ci
+        run: scripts/ci/cache/prepare-rust-dependency-cache.sh host-ci
+      - name: Save immutable exact cache
+        if: ${{ steps.key.outputs.refresh == 'true' }}
+        uses: actions/cache/save@6849a6489940f00c2f30c0fb92c6274307ccb58a
+        with:
+          path: target/ci-cache/host-ci
+          key: ${{ steps.key.outputs.key }}
+
+  kind-ci:
+    name: Refresh Rust cache / Kind CI
+    runs-on: kind-e2e
+    needs: [plan]
+    permissions:
+      contents: read
+      actions: write
+    outputs:
+      key: ${{ steps.key.outputs.key }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - name: Select exact key
+        id: key
+        run: scripts/ci/cache/select-rust-cache-key.sh kind-ci kind '${{ needs.plan.outputs.kind_ci_compatibility }}' '${{ needs.plan.outputs.previous_kind_ci_compatibility }}' '${{ needs.plan.outputs.previous_kind_ci_key }}'
+      - uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b
+        if: ${{ steps.key.outputs.refresh == 'true' }}
+        with:
+          toolchain: 1.91.1
+      - name: Verify immutable runner contract
+        if: ${{ steps.key.outputs.refresh == 'true' }}
+        run: scripts/ci/setup/assert-ci-runner-image.sh
+      - name: Build dependency cache
+        if: ${{ steps.key.outputs.refresh == 'true' }}
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target/ci-cache/kind-ci
+        run: scripts/ci/cache/prepare-rust-dependency-cache.sh kind-ci
+      - name: Save immutable exact cache
+        if: ${{ steps.key.outputs.refresh == 'true' }}
+        uses: actions/cache/save@6849a6489940f00c2f30c0fb92c6274307ccb58a
+        with:
+          path: target/ci-cache/kind-ci
+          key: ${{ steps.key.outputs.key }}
+
+  cw-cross-ci:
+    name: Refresh Rust cache / cw cross-target CI
+    runs-on: ubuntu-latest
+    needs: [plan]
+    permissions:
+      contents: read
+      actions: write
+    outputs:
+      key: ${{ steps.key.outputs.key }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - name: Select exact key
+        id: key
+        run: scripts/ci/cache/select-rust-cache-key.sh cw-cross-ci generic '${{ needs.plan.outputs.cw_cross_ci_compatibility }}' '${{ needs.plan.outputs.previous_cw_cross_ci_compatibility }}' '${{ needs.plan.outputs.previous_cw_cross_ci_key }}'
+      - uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b
+        if: ${{ steps.key.outputs.refresh == 'true' }}
+        with:
+          toolchain: 1.91.1
+          targets: x86_64-unknown-linux-musl,aarch64-unknown-linux-gnu,x86_64-apple-darwin,aarch64-apple-darwin
+      - name: Verify immutable runner contract
+        if: ${{ steps.key.outputs.refresh == 'true' }}
+        run: scripts/ci/setup/assert-ci-runner-image.sh
+      - name: Set up pinned Zig
+        if: ${{ steps.key.outputs.refresh == 'true' }}
+        run: |
+          set -euo pipefail
+          curl -fsSLo zig.tar.xz \
+            "https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${ZIG_VERSION}.tar.xz"
+          echo "${ZIG_X86_64_LINUX_SHA256}  zig.tar.xz" | sha256sum -c -
+          tar -xf zig.tar.xz
+          echo "$PWD/zig-x86_64-linux-${ZIG_VERSION}" >> "$GITHUB_PATH"
+      - name: Build dependency cache
+        if: ${{ steps.key.outputs.refresh == 'true' }}
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target/ci-cache/cw-cross-ci
+        run: scripts/ci/cache/prepare-rust-dependency-cache.sh cw-cross-ci
+      - name: Save immutable exact cache
+        if: ${{ steps.key.outputs.refresh == 'true' }}
+        uses: actions/cache/save@6849a6489940f00c2f30c0fb92c6274307ccb58a
+        with:
+          path: target/ci-cache/cw-cross-ci
+          key: ${{ steps.key.outputs.key }}
+
+  desktop-release:
+    name: Refresh Rust cache / desktop release
+    runs-on: ubuntu-latest
+    needs: [plan]
+    permissions:
+      contents: read
+      actions: write
+    outputs:
+      key: ${{ steps.key.outputs.key }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - name: Select exact key
+        id: key
+        run: scripts/ci/cache/select-rust-cache-key.sh desktop-release generic '${{ needs.plan.outputs.desktop_release_compatibility }}' '${{ needs.plan.outputs.previous_desktop_release_compatibility }}' '${{ needs.plan.outputs.previous_desktop_release_key }}'
+      - uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b
+        if: ${{ steps.key.outputs.refresh == 'true' }}
+        with:
+          toolchain: 1.91.1
+      - name: Verify immutable runner contract
+        if: ${{ steps.key.outputs.refresh == 'true' }}
+        run: scripts/ci/setup/assert-ci-runner-image.sh
+      - name: Build dependency cache
+        if: ${{ steps.key.outputs.refresh == 'true' }}
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target/ci-cache/desktop-release
+        run: scripts/ci/cache/prepare-rust-dependency-cache.sh desktop-release
+      - name: Save immutable exact cache
+        if: ${{ steps.key.outputs.refresh == 'true' }}
+        uses: actions/cache/save@6849a6489940f00c2f30c0fb92c6274307ccb58a
+        with:
+          path: target/ci-cache/desktop-release
+          key: ${{ steps.key.outputs.key }}
+
+  receipt:
+    name: Publish Rust cache receipt
+    runs-on: ubuntu-latest
+    needs: [plan, host-debug, host-ci, kind-ci, cw-cross-ci, desktop-release]
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - name: Emit exact cache receipt
+        env:
+          CODEWIRE_CACHE_HEAD_COMMIT: ${{ needs.plan.outputs.head_commit }}
+          CODEWIRE_CACHE_HEAD_TREE: ${{ needs.plan.outputs.head_tree }}
+          CODEWIRE_RUST_CACHE_HOST_DEBUG_COMPATIBILITY: ${{ needs.plan.outputs.host_debug_compatibility }}
+          CODEWIRE_RUST_CACHE_HOST_DEBUG_KEY: ${{ needs.host-debug.outputs.key }}
+          CODEWIRE_RUST_CACHE_HOST_CI_COMPATIBILITY: ${{ needs.plan.outputs.host_ci_compatibility }}
+          CODEWIRE_RUST_CACHE_HOST_CI_KEY: ${{ needs.host-ci.outputs.key }}
+          CODEWIRE_RUST_CACHE_KIND_CI_COMPATIBILITY: ${{ needs.plan.outputs.kind_ci_compatibility }}
+          CODEWIRE_RUST_CACHE_KIND_CI_KEY: ${{ needs.kind-ci.outputs.key }}
+          CODEWIRE_RUST_CACHE_CW_CROSS_CI_COMPATIBILITY: ${{ needs.plan.outputs.cw_cross_ci_compatibility }}
+          CODEWIRE_RUST_CACHE_CW_CROSS_CI_KEY: ${{ needs.cw-cross-ci.outputs.key }}
+          CODEWIRE_RUST_CACHE_DESKTOP_RELEASE_COMPATIBILITY: ${{ needs.plan.outputs.desktop_release_compatibility }}
+          CODEWIRE_RUST_CACHE_DESKTOP_RELEASE_KEY: ${{ needs.desktop-release.outputs.key }}
+        run: python3 scripts/ci/receipts/emit-rust-cache-receipt.py

@@ -370,6 +370,7 @@ def discover_cargo_universe(tree: Path, artifact_manifest: str, cargo_env: dict[
         if not manifest.is_file():
             raise PlannerError(f"Cargo manifest is missing: {manifest_relative}")
         metadata = cargo_metadata(tree, manifest, cargo_env)
+        manifests[manifest_relative] = metadata
         for package in metadata["packages"]:
             package_manifest = relative_to_tree(package["manifest_path"], tree)
             package_copy = dict(package)
@@ -391,8 +392,13 @@ def discover_cargo_universe(tree: Path, artifact_manifest: str, cargo_env: dict[
     return CargoUniverse(packages, manifests, {package["_directory_relative"] for package in packages.values()})
 
 
-def dependency_kind_is_artifact(dependency: dict[str, Any]) -> bool:
-    return dependency.get("kind") in (None, "normal", "build")
+def dependency_kind_is_artifact(
+    dependency: dict[str, Any], include_dev: bool = False
+) -> bool:
+    kinds = {None, "normal", "build"}
+    if include_dev:
+        kinds.add("dev")
+    return dependency.get("kind") in kinds
 
 
 def resolve_local_dependency(
@@ -406,7 +412,11 @@ def resolve_local_dependency(
 
 
 def cargo_local_closure(
-    tree: Path, universe: CargoUniverse, package_name: str, artifact_manifest: str
+    tree: Path,
+    universe: CargoUniverse,
+    package_name: str,
+    artifact_manifest: str,
+    include_dev: bool = False,
 ) -> list[dict[str, Any]]:
     candidates = [
         package
@@ -430,11 +440,48 @@ def cargo_local_closure(
         if len(closure) > MAX_CARGO_PACKAGES:
             raise PlannerError("Cargo dependency closure exceeds package limit")
         for dependency in package.get("dependencies", []):
-            if not dependency_kind_is_artifact(dependency):
+            if not dependency_kind_is_artifact(dependency, include_dev):
                 continue
             local = resolve_local_dependency(dependency, universe, tree)
             if local is not None:
                 queue.append(local)
+    return [closure[key] for key in sorted(closure)]
+
+
+def cargo_cache_closure(
+    tree: Path, universe: CargoUniverse, spec: dict[str, Any]
+) -> list[dict[str, Any]]:
+    raw_packages = spec.get("packages")
+    package_names: list[str]
+    if raw_packages == "workspace":
+        metadata = universe.manifests.get(spec["manifest"])
+        if not isinstance(metadata, dict):
+            raise PlannerError("rust-cache workspace metadata is unavailable")
+        workspace_members = metadata.get("workspace_members")
+        if not isinstance(workspace_members, list) or not workspace_members:
+            raise PlannerError("rust-cache workspace has no members")
+        member_ids = {str(value) for value in workspace_members}
+        package_names = sorted(
+            str(package["name"])
+            for package in universe.packages.values()
+            if str(package.get("id")) in member_ids
+        )
+    elif isinstance(raw_packages, list) and raw_packages:
+        if not all(isinstance(value, str) and value for value in raw_packages):
+            raise PlannerError("rust-cache package names must be non-empty strings")
+        package_names = list(raw_packages)
+    else:
+        raise PlannerError("rust-cache packages must be 'workspace' or a non-empty list")
+    if len(package_names) != len(set(package_names)):
+        raise PlannerError("rust-cache packages contain a duplicate")
+
+    closure: dict[str, dict[str, Any]] = {}
+    include_dev = "dev" in spec["dependency_kinds"]
+    for package_name in package_names:
+        for package in cargo_local_closure(
+            tree, universe, package_name, spec["manifest"], include_dev
+        ):
+            closure[package["_manifest_relative"]] = package
     return [closure[key] for key in sorted(closure)]
 
 
@@ -454,7 +501,17 @@ def normalized_dependency(dependency: dict[str, Any], tree: Path) -> dict[str, A
     }
 
 
-def normalized_package(package: dict[str, Any], tree: Path) -> dict[str, Any]:
+def normalized_package(
+    package: dict[str, Any], tree: Path, include_dev: bool = False
+) -> dict[str, Any]:
+    def package_relative_path(value: str | None) -> str | None:
+        if not value:
+            return None
+        path = Path(value)
+        if not path.is_absolute():
+            path = Path(package["manifest_path"]).parent / path
+        return relative_to_tree(path, tree)
+
     targets = []
     for target in package.get("targets", []):
         kinds = sorted(target.get("kind") or [])
@@ -473,7 +530,7 @@ def normalized_package(package: dict[str, Any], tree: Path) -> dict[str, Any]:
     dependencies = [
         normalized_dependency(dependency, tree)
         for dependency in package.get("dependencies", [])
-        if dependency_kind_is_artifact(dependency)
+        if dependency_kind_is_artifact(dependency, include_dev)
     ]
     license_file = package.get("license_file")
     readme = package.get("readme")
@@ -485,12 +542,12 @@ def normalized_package(package: dict[str, Any], tree: Path) -> dict[str, Any]:
         "links": package.get("links"),
         "authors": package.get("authors") or [],
         "license": package.get("license"),
-        "license_file": relative_to_tree(license_file, tree) if license_file else None,
+        "license_file": package_relative_path(license_file),
         "description": package.get("description"),
         "homepage": package.get("homepage"),
         "documentation": package.get("documentation"),
         "repository": package.get("repository"),
-        "readme": relative_to_tree(readme, tree) if readme else None,
+        "readme": package_relative_path(readme),
         "keywords": package.get("keywords") or [],
         "categories": package.get("categories") or [],
         "default_run": package.get("default_run"),
@@ -543,7 +600,10 @@ def resolve_lock_reference(reference: str, records: list[dict[str, Any]]) -> dic
 
 
 def reachable_lock_records(
-    tree: Path, lockfile_relative: str, closure: list[dict[str, Any]]
+    tree: Path,
+    lockfile_relative: str,
+    closure: list[dict[str, Any]],
+    include_dev: bool = False,
 ) -> list[dict[str, Any]]:
     lockfile = tree / lockfile_relative
     if not lockfile.is_file():
@@ -571,7 +631,8 @@ def reachable_lock_records(
         external_names = {
             str(dependency["name"])
             for dependency in package.get("dependencies", [])
-            if dependency_kind_is_artifact(dependency) and not dependency.get("path")
+            if dependency_kind_is_artifact(dependency, include_dev)
+            and not dependency.get("path")
         }
         for reference in local_record.get("dependencies", []):
             if parse_lock_reference(str(reference))[0] not in external_names:
@@ -730,6 +791,116 @@ def rust_fingerprint(
     )
 
 
+def rust_cache_fingerprint(
+    tree: Path,
+    spec: dict[str, Any],
+    trusted_toolchain: str | None = None,
+    index: TreeIndex | None = None,
+) -> RustFingerprint:
+    allowed_fields = {
+        "kind",
+        "manifest",
+        "packages",
+        "lockfile",
+        "profiles",
+        "targets",
+        "features",
+        "dependency_kinds",
+        "runner_pool",
+        "warm_mode",
+        "max_bytes",
+        "compatibility_inputs",
+        "tool_inputs",
+    }
+    unexpected = sorted(set(spec) - allowed_fields)
+    if unexpected:
+        raise PlannerError(f"rust-cache has unsupported fields: {unexpected}")
+    for key in ("manifest", "lockfile", "runner_pool", "warm_mode"):
+        if not isinstance(spec.get(key), str) or not spec[key]:
+            raise PlannerError(f"rust-cache {key} must be a non-empty string")
+    max_bytes = spec.get("max_bytes")
+    if not isinstance(max_bytes, int) or isinstance(max_bytes, bool) or max_bytes <= 0:
+        raise PlannerError("rust-cache max_bytes must be a positive integer")
+    for key in ("profiles", "targets", "features", "dependency_kinds"):
+        value = spec.get(key)
+        if not isinstance(value, list) or not value or not all(
+            isinstance(item, str) and item for item in value
+        ):
+            raise PlannerError(f"rust-cache {key} must be a non-empty string list")
+        if len(value) != len(set(value)):
+            raise PlannerError(f"rust-cache {key} contains a duplicate")
+    dependency_kinds = spec["dependency_kinds"]
+    if not set(dependency_kinds) <= {"normal", "build", "dev"}:
+        raise PlannerError("rust-cache dependency_kinds contains an invalid kind")
+    if not {"normal", "build"} <= set(dependency_kinds):
+        raise PlannerError("rust-cache dependency_kinds must include normal and build")
+    tool_inputs = spec.get("tool_inputs")
+    if not isinstance(tool_inputs, dict) or not tool_inputs:
+        raise PlannerError("rust-cache tool_inputs must be a non-empty object")
+    if not all(
+        isinstance(key, str) and key and isinstance(value, str) and value
+        for key, value in tool_inputs.items()
+    ):
+        raise PlannerError("rust-cache tool_inputs must contain non-empty string pairs")
+
+    with tempfile.TemporaryDirectory(prefix="codewire-ci-cache-cargo-") as cargo_temp:
+        cargo_env = isolated_cargo_environment(Path(cargo_temp), trusted_toolchain)
+        universe = discover_cargo_universe(tree, spec["manifest"], cargo_env)
+    closure = cargo_cache_closure(tree, universe, spec)
+    tree_index = index or TreeIndex(tree)
+    compatibility_files: dict[str, dict[str, Any]] = {}
+    raw_inputs = spec.get("compatibility_inputs", [])
+    if not isinstance(raw_inputs, list) or not all(
+        isinstance(value, str) and value for value in raw_inputs
+    ):
+        raise PlannerError("rust-cache compatibility_inputs must be a string list")
+    for pattern in raw_inputs:
+        matches = tree_index.matching(pattern)
+        if not matches:
+            raise PlannerError(
+                f"rust-cache compatibility input matched no files: {pattern}"
+            )
+        for entry in matches:
+            if entry.kind != "file":
+                raise PlannerError(
+                    f"rust-cache compatibility input is not a regular file: {entry.path}"
+                )
+            compatibility_files[entry.path] = indexed_file_record(entry)
+
+    include_dev = "dev" in dependency_kinds
+    document = {
+        "manifest": spec["manifest"],
+        "packages_requested": spec["packages"],
+        "profiles_requested": list(spec["profiles"]),
+        "profiles": selected_profiles(tree, spec["profiles"], spec["manifest"]),
+        "targets": list(spec["targets"]),
+        "features": list(spec["features"]),
+        "dependency_kinds": list(dependency_kinds),
+        "runner_pool": spec["runner_pool"],
+        "warm_mode": spec["warm_mode"],
+        "max_bytes": max_bytes,
+        "tool_inputs": {key: tool_inputs[key] for key in sorted(tool_inputs)},
+        "packages": [
+            normalized_package(package, tree, include_dev) for package in closure
+        ],
+        "lock_records": reachable_lock_records(
+            tree, spec["lockfile"], closure, include_dev
+        ),
+        "compatibility_files": [
+            compatibility_files[key] for key in sorted(compatibility_files)
+        ],
+        "rust_toolchain": trusted_toolchain,
+    }
+    fingerprint = sha256_bytes(canonical_json(document))
+    return RustFingerprint(
+        fingerprint,
+        document,
+        {package["_manifest_relative"] for package in closure},
+        {package["_directory_relative"] for package in closure},
+        universe.package_dirs,
+    )
+
+
 def composite_dependencies(spec: dict[str, Any]) -> list[str]:
     allowed_fields = {"kind", "dependencies", "inputs"}
     unexpected = sorted(set(spec) - allowed_fields)
@@ -765,6 +936,10 @@ def artifact_fingerprint(
     kind = spec.get("kind")
     if kind == "rust-package":
         result: ArtifactFingerprint | RustFingerprint = rust_fingerprint(
+            tree, spec, trusted_toolchain, tree_index
+        )
+    elif kind == "rust-cache":
+        result = rust_cache_fingerprint(
             tree, spec, trusted_toolchain, tree_index
         )
     elif kind == "file-set":
@@ -1259,7 +1434,7 @@ def plan(
                 known_artifact_directories = {
                     posixpath.dirname(candidate.get("manifest", ""))
                     for candidate in graph["artifacts"].values()
-                    if candidate.get("kind") == "rust-package"
+                    if candidate.get("kind") in {"rust-package", "rust-cache"}
                 }
                 baseline_index = TreeIndex(baseline_tree)
                 head_index = TreeIndex(head_tree)
@@ -1307,6 +1482,14 @@ def plan(
                             head_index,
                             head_fingerprints,
                         )
+                        cache_fingerprints = (
+                            {
+                                "baseline_cache_fingerprint": before.fingerprint,
+                                "head_cache_fingerprint": after.fingerprint,
+                            }
+                            if spec.get("kind") == "rust-cache"
+                            else {}
+                        )
                         dependency_failure = None
                         if spec.get("kind") == "composite":
                             for dependency in composite_dependencies(spec):
@@ -1322,6 +1505,7 @@ def plan(
                                 "state": "unclassified",
                                 "baseline_fingerprint": before.fingerprint,
                                 "head_fingerprint": after.fingerprint,
+                                **cache_fingerprints,
                                 "explanations": [dependency_failure],
                             }
                         elif before.fingerprint != after.fingerprint:
@@ -1329,9 +1513,14 @@ def plan(
                                 "state": "affected",
                                 "baseline_fingerprint": before.fingerprint,
                                 "head_fingerprint": after.fingerprint,
+                                **cache_fingerprints,
                                 "explanations": component_changes(before.document, after.document),
                             }
-                        elif isinstance(before, RustFingerprint) and isinstance(after, RustFingerprint):
+                        elif (
+                            spec.get("kind") == "rust-package"
+                            and isinstance(before, RustFingerprint)
+                            and isinstance(after, RustFingerprint)
+                        ):
                             unknown = has_unknown_reachable_path(
                                 paths, before, after, known_artifact_directories
                             )
@@ -1340,6 +1529,7 @@ def plan(
                                     "state": "unclassified",
                                     "baseline_fingerprint": before.fingerprint,
                                     "head_fingerprint": after.fingerprint,
+                                    **cache_fingerprints,
                                     "explanations": [
                                         f"changed path has no trusted ownership rule: {unknown}"
                                     ],
@@ -1349,6 +1539,7 @@ def plan(
                                     "state": "unaffected",
                                     "baseline_fingerprint": before.fingerprint,
                                     "head_fingerprint": after.fingerprint,
+                                    **cache_fingerprints,
                                     "explanations": [
                                         "artifact fingerprint and owned inputs are unchanged"
                                     ],
@@ -1358,6 +1549,7 @@ def plan(
                                 "state": "unaffected",
                                 "baseline_fingerprint": before.fingerprint,
                                 "head_fingerprint": after.fingerprint,
+                                **cache_fingerprints,
                                 "explanations": [
                                     "artifact fingerprint and owned inputs are unchanged"
                                 ],
@@ -1390,12 +1582,18 @@ def plan(
 def cargo_oracle(repository: Path, plan_document: dict[str, Any]) -> None:
     graph = json.loads((repository / "scripts/ci/plan/artifact-graph.json").read_text())
     for artifact, spec in graph["artifacts"].items():
-        if spec.get("kind") != "rust-package":
+        if spec.get("kind") not in {"rust-package", "rust-cache"}:
             continue
         with tempfile.TemporaryDirectory(prefix="codewire-ci-oracle-") as temporary:
             cargo_env = isolated_cargo_environment(Path(temporary))
             universe = discover_cargo_universe(repository, spec["manifest"], cargo_env)
-            closure = cargo_local_closure(repository, universe, spec["package"], spec["manifest"])
+            closure = (
+                cargo_local_closure(
+                    repository, universe, spec["package"], spec["manifest"]
+                )
+                if spec.get("kind") == "rust-package"
+                else cargo_cache_closure(repository, universe, spec)
+            )
         local_names = {package["name"] for package in universe.packages.values()}
         argv = [
             "cargo",
@@ -1403,14 +1601,24 @@ def cargo_oracle(repository: Path, plan_document: dict[str, Any]) -> None:
             "--locked",
             "--offline",
             "--edges",
-            "normal,build",
+            (
+                "normal,build,dev"
+                if spec.get("kind") == "rust-cache"
+                and "dev" in spec["dependency_kinds"]
+                else "normal,build"
+            ),
             "--prefix",
             "none",
             "--format",
             "{p}",
-            "-p",
-            spec["package"],
         ]
+        if spec.get("kind") == "rust-package":
+            argv.extend(["-p", spec["package"]])
+        elif spec["packages"] != "workspace":
+            for package in spec["packages"]:
+                argv.extend(["-p", package])
+        else:
+            argv.append("--workspace")
         if spec["manifest"] != "Cargo.toml":
             argv.extend(["--manifest-path", spec["manifest"]])
         output = _run(argv, cwd=repository, env={**os.environ, "CARGO_NET_OFFLINE": "true"})
@@ -1423,7 +1631,7 @@ def cargo_oracle(repository: Path, plan_document: dict[str, Any]) -> None:
         missing = oracle_names - planner_names
         if missing:
             raise PlannerError(f"{artifact} Cargo oracle found missing local packages: {sorted(missing)}")
-        if spec["package"] not in planner_names:
+        if spec.get("kind") == "rust-package" and spec["package"] not in planner_names:
             raise PlannerError(f"{artifact} planner closure omitted its root package")
         if plan_document["artifacts"][artifact]["state"] == "unclassified":
             explanations = plan_document["artifacts"][artifact]["explanations"]

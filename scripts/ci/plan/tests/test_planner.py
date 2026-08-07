@@ -69,7 +69,12 @@ def fixture_cargo_metadata(tree: Path, manifest: Path, _cargo_env: dict[str, str
         if build_path.is_file():
             targets.append({"name": "build-script-build", "kind": ["custom-build"], "crate_types": ["bin"], "src_path": str(build_path), "edition": package.get("edition"), "required-features": []})
         packages.append({"name": package["name"], "version": package["version"], "edition": package.get("edition"), "authors": package.get("authors", []), "license": package.get("license"), "license_file": package.get("license-file"), "description": package.get("description"), "homepage": package.get("homepage"), "documentation": package.get("documentation"), "repository": package.get("repository"), "readme": package.get("readme"), "keywords": package.get("keywords", []), "categories": package.get("categories", []), "rust_version": package.get("rust-version"), "links": package.get("links"), "default_run": package.get("default-run"), "metadata": package.get("metadata"), "manifest_path": str(package_manifest), "dependencies": dependencies(document, package_manifest), "targets": targets, "features": document.get("features", {})})
-    return {"packages": packages}
+    for package in packages:
+        package["id"] = f"{package['name']} 0.1.0 (path+file://fixture)"
+    return {
+        "packages": packages,
+        "workspace_members": [package["id"] for package in packages],
+    }
 
 
 def run(argv: list[str], cwd: Path) -> str:
@@ -193,6 +198,36 @@ class FixtureRepository:
                     "release_targets": ["host"],
                     "package_inputs": {"core": ["generated/descriptor.bin"]},
                     "explicit_inputs": [],
+                },
+                "rust_cache_cli": {
+                    "kind": "rust-cache",
+                    "manifest": "Cargo.toml",
+                    "packages": ["cli-bin"],
+                    "lockfile": "Cargo.lock",
+                    "profiles": ["release"],
+                    "targets": ["host"],
+                    "features": ["default"],
+                    "dependency_kinds": ["normal", "build"],
+                    "runner_pool": "generic",
+                    "warm_mode": "fixture",
+                    "max_bytes": 4294967296,
+                    "compatibility_inputs": ["generated/descriptor.bin"],
+                    "tool_inputs": {"cache_format": "v1"},
+                },
+                "rust_cache_workspace": {
+                    "kind": "rust-cache",
+                    "manifest": "Cargo.toml",
+                    "packages": "workspace",
+                    "lockfile": "Cargo.lock",
+                    "profiles": ["release"],
+                    "targets": ["host"],
+                    "features": ["default"],
+                    "dependency_kinds": ["normal", "build", "dev"],
+                    "runner_pool": "generic",
+                    "warm_mode": "fixture-workspace",
+                    "max_bytes": 4294967296,
+                    "compatibility_inputs": ["generated/descriptor.bin"],
+                    "tool_inputs": {"cache_format": "v1"},
                 },
                 "dashboard_image": {
                     "kind": "file-set",
@@ -320,9 +355,11 @@ unrelated = { path = "../unrelated" }
 name = "core"
 version = "0.1.0"
 edition = "2021"
+readme = "README.md"
 """,
         )
         self.write("core/src/lib.rs", "pub fn run() {}\n")
+        self.write("core/README.md", "# Fixture core\n")
         self.write(
             "build-helper/Cargo.toml",
             """[package]
@@ -664,6 +701,34 @@ class PlannerFixtureTests(unittest.TestCase):
         self.assertEqual(self.states(first), ("unaffected", "unaffected"))
         self.assertEqual(self.workspace_states(first), ("unaffected", "unaffected", "unaffected"))
         self.assertEqual(self.runtime_states(first), ("unaffected",) * 5)
+
+    def test_rust_cache_identity_reuses_dependencies_but_not_changed_source(self) -> None:
+        baseline = self.repo.plan(self.repo.base)["artifacts"]["rust_cache_cli"]
+        head = self.repo.change(
+            "cli/src/main.rs",
+            "fn main() { println!(\"changed CLI source\"); }\n",
+        )
+        changed = self.repo.plan(head)["artifacts"]["rust_cache_cli"]
+        self.assertEqual(changed["state"], "unaffected")
+        self.assertEqual(changed["head_fingerprint"], baseline["head_fingerprint"])
+
+    def test_rust_cache_identity_changes_with_the_release_profile(self) -> None:
+        baseline = self.repo.plan(self.repo.base)["artifacts"]["rust_cache_cli"]
+        root_manifest = (self.repo.root / "Cargo.toml").read_text()
+        head = self.repo.change(
+            "Cargo.toml",
+            root_manifest.replace("lto = true", "lto = false"),
+        )
+        changed = self.repo.plan(head)["artifacts"]["rust_cache_cli"]
+        self.assertEqual(changed["state"], "affected")
+        self.assertNotEqual(
+            changed["head_cache_fingerprint"], baseline["head_cache_fingerprint"]
+        )
+
+    def test_workspace_rust_cache_closure_contains_every_member(self) -> None:
+        artifact = self.repo.plan(self.repo.base)["artifacts"]["rust_cache_workspace"]
+        self.assertEqual(artifact["state"], "unaffected")
+        self.assertRegex(artifact["head_cache_fingerprint"], r"^[0-9a-f]{64}$")
 
     def test_each_runtime_direct_input_affects_only_its_image(self) -> None:
         cases = (
