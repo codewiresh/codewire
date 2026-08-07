@@ -6,8 +6,7 @@ the dashboard, gateway, DERP, services, and mesh runtime images.
 Verification capabilities are owned only by
 `scripts/ci/select/select-verification.sh`; the planner never adds or removes
 capability tokens. Runtime artifact facts remain independent of PR verification
-selection. Until Dev consumes those facts through its event adapter,
-`scripts/ci/select/select-deploy-dev.sh` is a temporary compatibility path.
+selection and Dev consumes those facts through its event adapter.
 
 Pull requests execute `planner.py` and `artifact-graph.json` from the trusted
 target-base commit. Proposed policy may be tested but cannot reduce work. A

@@ -116,7 +116,6 @@ run_policy() {
   if [ "${#runtime_shell_files[@]}" -gt 0 ]; then
     bash -n "${runtime_shell_files[@]}"
   fi
-  scripts/ci/tests/test-select-deploy-dev.sh
   scripts/ci/tests/test-setup-kubeconfig.sh
   scripts/ci/tests/test-resolve-deployed-source.sh
   scripts/ci/tests/test-select-verification.sh

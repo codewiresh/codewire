@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
-CHECK="$ROOT/scripts/ci/select/verify-release-tag-receipt.sh"
+CHECK="$ROOT/scripts/ci/receipts/verify-release-tag-receipt.sh"
 mkdir -p "$ROOT/.tmp"
 TMP="$(mktemp -d "$ROOT/.tmp/release-tag-receipt.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT

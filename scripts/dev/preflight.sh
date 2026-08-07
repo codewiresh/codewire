@@ -6,7 +6,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SELECTOR="$REPO_ROOT/scripts/ci/select/select-verification.sh"
-RELEASE_TAG_RECEIPT="$REPO_ROOT/scripts/ci/select/verify-release-tag-receipt.sh"
+RELEASE_TAG_RECEIPT="$REPO_ROOT/scripts/ci/receipts/verify-release-tag-receipt.sh"
 PRODUCT_RUNNER="$REPO_ROOT/scripts/ci/verify/run-product-verification.sh"
 INTEGRATION_RUNNER="$REPO_ROOT/scripts/ci/verify/run-integration-verification.sh"
 cd "$REPO_ROOT"
@@ -176,7 +176,7 @@ run_policy_local() {
       scripts/dev/preflight.sh \
       scripts/dev/install-hooks.sh \
       scripts/ci/select/select-verification.sh \
-      scripts/ci/select/verify-release-tag-receipt.sh \
+      scripts/ci/receipts/verify-release-tag-receipt.sh \
       scripts/ci/tests/test-select-verification.sh \
       scripts/ci/tests/test-verify-release-tag-receipt.sh \
       scripts/ci/tests/test-pre-push-worktree.sh \

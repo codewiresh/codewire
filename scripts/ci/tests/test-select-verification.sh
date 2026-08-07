@@ -105,14 +105,15 @@ run_paths_case ci_self pull_request refs/pull/2/head false \
   .gitea/workflows/ci.yaml .gitea/workflows/manual-diagnostics.yaml \
   scripts/ci/select/select-verification.sh \
   scripts/ci/select/require-verification-results.sh \
-  scripts/ci/select/verify-tested-tree-receipt.sh \
-  scripts/ci/select/verify-release-tag-receipt.sh \
+  scripts/ci/receipts/emit-verification-receipt.py \
+  scripts/ci/receipts/verify-tested-tree-receipt.sh \
+  scripts/ci/receipts/verify-release-tag-receipt.sh \
   scripts/ci/tests/test-require-verification-results.sh \
   scripts/ci/tests/test-verify-tested-tree-receipt.sh \
   scripts/ci/tests/test-verify-release-tag-receipt.sh
 run_paths_case ci_rewrite pull_request refs/pull/20/head false \
-  'deploy policy runtime_dev_smoke rust_curated_locks' \
-  .githooks/pre-push scripts/dev/preflight.sh scripts/ci/select/select-deploy-dev.sh \
+  'policy runtime_dev_smoke rust_curated_locks' \
+  .githooks/pre-push scripts/dev/preflight.sh \
   scripts/ci/verify/integration-postgres.sh \
   scripts/ci/verify/resolve-cargo-target-dir.sh \
   scripts/ci/verify/run-product-verification.sh \
@@ -127,15 +128,12 @@ run_paths_case ci_rewrite pull_request refs/pull/20/head false \
   scripts/ci/tests/test-rust-owned-fixtures.sh \
   scripts/ci/tests/test-cargo-cache-capacity.sh \
   scripts/ci/tests/fixtures/cargo-cache-df.sh \
-  scripts/ci/tests/test-select-deploy-dev.sh \
   scripts/ci/tests/test-select-verification.sh
-run_paths_case artifact_impact_ci pull_request refs/pull/201/head false \
+run_paths_case runtime_plan_ci pull_request refs/pull/201/head false \
   'deploy go_consumer_interop go_support policy release runtime_confidential' \
   scripts/ci/deploy/resolve-deployed-source.sh \
-  scripts/ci/select/artifact-impact.py \
-  scripts/ci/select/select-deploy-dev.sh \
+  scripts/ci/plan/apply-deploy-plan.py \
   scripts/ci/images/resolve-published-support-pair.sh \
-  scripts/ci/tests/test-artifact-impact.py \
   scripts/ci/tests/test-resolve-published-support-pair.sh \
   scripts/ci/tests/test-resolve-deployed-source.sh
 run_paths_case repo_checks pull_request refs/pull/21/head false \
@@ -1154,7 +1152,7 @@ for output in selector_version classification selection required_local_mode \
 done
 grep -qF 'name: Verify exact tested-tree receipt' "$selection_block"
 grep -qF 'GITEA_TOKEN: ${{ github.token }}' "$selection_block"
-grep -qF "receipt_checker='.trusted-ci-policy/scripts/ci/select/verify-tested-tree-receipt.sh'" \
+grep -qF "receipt_checker='.trusted-ci-policy/scripts/ci/receipts/verify-tested-tree-receipt.sh'" \
   "$selection_block"
 grep -qF 'ref: ${{ github.event.pull_request.base.sha }}' "$selection_block"
 grep -qF 'path: .trusted-ci-policy' "$selection_block"
@@ -1405,7 +1403,7 @@ standard_toolchain_condition="$(grep -A1 -F \
   "$standard_block")"
 grep -qF "contains(needs.verification-selection.outputs.selection, '|policy|')" \
   <<<"$standard_toolchain_condition" || {
-  echo 'standard: Rust toolchain omits policy artifact-impact fixtures' >&2
+  echo 'standard: Rust toolchain omits policy planner fixtures' >&2
   exit 1
 }
 grep -qF "contains(needs.verification-selection.outputs.selection, '|contracts_proto|')" \
@@ -1497,9 +1495,14 @@ grep -qF 'manual diagnostics moved to the Manual diagnostics workflow' "$WORKFLO
 grep -qF 'name: Manual diagnostics' "$DIAGNOSTICS_WORKFLOW"
 grep -qF '  workflow_dispatch:' "$DIAGNOSTICS_WORKFLOW"
 grep -qF '        description: rust-stack or go-tailnet' "$DIAGNOSTICS_WORKFLOW"
-grep -qF 'scripts/ci/select/select-verification.sh' "$DIAGNOSTICS_WORKFLOW"
 grep -qF 'manual diagnostics require diagnostic=rust-stack or go-tailnet' \
   "$DIAGNOSTICS_WORKFLOW"
+grep -qF "github.event.inputs.diagnostic == 'rust-stack'" "$DIAGNOSTICS_WORKFLOW"
+grep -qF "github.event.inputs.diagnostic == 'go-tailnet'" "$DIAGNOSTICS_WORKFLOW"
+if grep -qF 'select-verification.sh' "$DIAGNOSTICS_WORKFLOW"; then
+  echo 'manual diagnostics must validate its bounded input directly' >&2
+  exit 1
+fi
 grep -qF 'scripts/ci/verify/tailnet-parity.sh' "$DIAGNOSTICS_WORKFLOW"
 grep -qF 'scripts/ci/verify/rust-stack-rehearsal.sh' "$DIAGNOSTICS_WORKFLOW"
 if rg -n 'cr-golden|diagnostic_cr_golden|go_cr_golden|TestGolden.*-update' \
@@ -1555,7 +1558,7 @@ for receipt_input in VERIFICATION_TESTED_TREE_RECEIPT \
   }
 done
 grep -qF 'name: Emit exact-head verification receipt' "$required_block"
-grep -qF 'run: scripts/ci/plan/emit-verification-receipt.py' "$required_block"
+grep -qF 'run: scripts/ci/receipts/emit-verification-receipt.py' "$required_block"
 for receipt_input in CODEWIRE_PR_NUMBER CODEWIRE_BASE_COMMIT \
     CODEWIRE_HEAD_COMMIT CODEWIRE_HEAD_TREE; do
   grep -qF "${receipt_input}:" "$required_block" || {
@@ -1633,8 +1636,8 @@ fi
 bash -n \
   "$SELECTOR" \
   "$ROOT/scripts/ci/select/require-verification-results.sh" \
-  "$ROOT/scripts/ci/select/verify-tested-tree-receipt.sh" \
-  "$ROOT/scripts/ci/select/verify-release-tag-receipt.sh" \
+  "$ROOT/scripts/ci/receipts/verify-tested-tree-receipt.sh" \
+  "$ROOT/scripts/ci/receipts/verify-release-tag-receipt.sh" \
   "$ROOT/scripts/ci/tests/test-require-verification-results.sh" \
   "$ROOT/scripts/ci/tests/test-verify-tested-tree-receipt.sh" \
   "$ROOT/scripts/ci/tests/test-verify-release-tag-receipt.sh" \

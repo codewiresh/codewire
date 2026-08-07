@@ -361,14 +361,13 @@ if [ "$event_selected" = false ]; then
       .githooks/pre-push|Makefile|scripts/dev/install-hooks.sh|\
       scripts/dev/preflight.sh|scripts/ci/select/select-verification.sh|\
       scripts/ci/select/require-verification-results.sh|\
-      scripts/ci/select/verify-tested-tree-receipt.sh|\
-      scripts/ci/select/verify-release-tag-receipt.sh|\
-      scripts/ci/select/artifact-impact.py|\
+      scripts/ci/receipts/emit-verification-receipt.py|\
+      scripts/ci/receipts/verify-tested-tree-receipt.sh|\
+      scripts/ci/receipts/verify-release-tag-receipt.sh|\
       scripts/ci/images/resolve-published-support-pair.sh|\
       scripts/ci/plan/*|\
-      scripts/ci/tests/test-select-verification.sh|scripts/ci/tests/test-select-deploy-dev.sh|\
+      scripts/ci/tests/test-select-verification.sh|\
       scripts/ci/tests/test-setup-kubeconfig.sh|\
-      scripts/ci/tests/test-artifact-impact.py|\
       scripts/ci/tests/test-resolve-published-support-pair.sh|\
       scripts/ci/tests/test-resolve-deployed-source.sh|\
       scripts/ci/tests/test-require-verification-results.sh|\
@@ -390,7 +389,7 @@ if [ "$event_selected" = false ]; then
       scripts/ci/tests/test-sdk-local-cli-contract.sh|\
       scripts/checks/security/audit-rust-only-runtime.sh|\
       scripts/ci/setup/*.sh|scripts/ci/verify/*.sh|\
-      scripts/ci/verify/rust-stack-rehearsal.sh|scripts/ci/select/select-deploy-dev.sh)
+      scripts/ci/verify/rust-stack-rehearsal.sh)
         select_token policy
         recognized=true
         ;;
@@ -990,7 +989,6 @@ if [ "$event_selected" = false ]; then
       scripts/ci/*observer*.tsv|\
       scripts/ci/*promot*.sh|scripts/ci/*promot*.py|\
       scripts/ci/deploy/dispatch-deploy-dev.sh|scripts/ci/deploy/dispatch-deploy-prod.sh|\
-      scripts/ci/select/artifact-impact.py|scripts/ci/select/select-deploy-dev.sh|\
       scripts/ci/tests/test-deploy-*.sh|scripts/ci/tests/test-dispatch-deploy-*.sh)
         select_token deploy
         recognized=true
@@ -1010,7 +1008,6 @@ if [ "$event_selected" = false ]; then
       .gitea/workflows/claude-e2e.yaml|.gitea/workflows/cli-release.yaml|\
       .gitea/workflows/mirror-github.yaml|\
       .gitea/workflows/support-images.yaml|\
-      scripts/ci/select/artifact-impact.py|\
       keys/production-release.asc|\
       .gitea/workflows/observe-*.yaml|\
       scripts/ci/images/build-push-image.sh|scripts/ci/images/compute-image-tags.sh|\
@@ -1042,7 +1039,7 @@ if [ "$event_selected" = false ]; then
       scripts/ci/tests/test-deploy-dev.sh|\
       scripts/ci/tests/test-verify-cw-release-signing-key.sh|\
       scripts/ci/tests/test-verify-release-tag-ref.sh|\
-      scripts/ci/select/verify-release-tag-receipt.sh|\
+      scripts/ci/receipts/verify-release-tag-receipt.sh|\
       scripts/ci/tests/test-verify-release-tag-receipt.sh|\
       scripts/ci/*observe*.sh|scripts/ci/*observe*.py|\
       scripts/ci/*observer*.tsv|\

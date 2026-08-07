@@ -156,9 +156,9 @@ jobs:
           GITEA_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          receipt_checker='scripts/ci/select/verify-tested-tree-receipt.sh'
-          if [ -f .trusted-ci-policy/scripts/ci/select/verify-tested-tree-receipt.sh ]; then
-            receipt_checker='.trusted-ci-policy/scripts/ci/select/verify-tested-tree-receipt.sh'
+          receipt_checker='scripts/ci/receipts/verify-tested-tree-receipt.sh'
+          if [ -f .trusted-ci-policy/scripts/ci/receipts/verify-tested-tree-receipt.sh ]; then
+            receipt_checker='.trusted-ci-policy/scripts/ci/receipts/verify-tested-tree-receipt.sh'
           fi
           "$receipt_checker"
 
@@ -609,4 +609,4 @@ jobs:
           CODEWIRE_BASE_COMMIT: ${{ github.event.pull_request.base.sha }}
           CODEWIRE_HEAD_COMMIT: ${{ needs.verification-selection.outputs.ci_head_commit }}
           CODEWIRE_HEAD_TREE: ${{ needs.verification-selection.outputs.ci_head_tree }}
-        run: scripts/ci/plan/emit-verification-receipt.py
+        run: scripts/ci/receipts/emit-verification-receipt.py

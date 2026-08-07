@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
-CHECK="$ROOT/scripts/ci/select/verify-tested-tree-receipt.sh"
+CHECK="$ROOT/scripts/ci/receipts/verify-tested-tree-receipt.sh"
 mkdir -p "$ROOT/.tmp"
 TMP="$(mktemp -d "$ROOT/.tmp/tested-tree-receipt.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT
