@@ -92,6 +92,22 @@ if grep -Fq 'package-cw-release.sh' \
   fail 'dependency-cache warmup must not select release packaging verification'
 fi
 
+empty_cargo_home="$work/empty-cargo-home"
+mkdir -p \
+  "$empty_cargo_home/root" \
+  "$empty_cargo_home/desktop"
+CARGO_HOME="$empty_cargo_home/root" \
+  cargo metadata --offline --locked --no-deps --format-version 1 \
+    --manifest-path "$ROOT/Cargo.toml" > "$work/root-metadata.json"
+grep -Fq '"name":"codewire-cli-bin"' "$work/root-metadata.json" \
+  || fail 'clean offline metadata omitted the root workspace package set'
+CARGO_HOME="$empty_cargo_home/desktop" \
+  cargo metadata --offline --locked --no-deps --format-version 1 \
+    --manifest-path "$ROOT/crates/codewire-desktop/Cargo.toml" \
+    > "$work/desktop-metadata.json"
+grep -Fq '"name":"codewire-desktop"' "$work/desktop-metadata.json" \
+  || fail 'clean offline metadata omitted the detached desktop package'
+
 mkdir -p "$work/bin"
 cat > "$work/bin/cargo" <<'FAKE_CARGO'
 #!/usr/bin/env bash
@@ -128,14 +144,31 @@ case "${1:-}" in
     if [[ " $* " = *' --release '* ]]; then
       profile=release
     fi
-    mkdir -p "$CARGO_TARGET_DIR/$profile/.fingerprint/codewire-desktop-123" \
-      "$CARGO_TARGET_DIR/$profile/.fingerprint/codewire-client-123" \
-      "$CARGO_TARGET_DIR/$profile/deps"
-    : > "$CARGO_TARGET_DIR/$profile/deps/libcodewire_desktop_fixture.rlib"
-    : > "$CARGO_TARGET_DIR/$profile/deps/libcodewire_client_fixture.rlib"
+    if [[ " $* " = *codewire-desktop/Cargo.toml* ]] || [ "$profile" = release ]; then
+      packages=(codewire-desktop codewire-client)
+    else
+      package=''
+      previous=''
+      for argument in "$@"; do
+        if [ "$previous" = -p ]; then
+          package="$argument"
+          break
+        fi
+        previous="$argument"
+      done
+      [ -n "$package" ] || exit 2
+      packages=("$package")
+    fi
+    mkdir -p "$CARGO_TARGET_DIR/$profile/deps"
+    for package in "${packages[@]}"; do
+      mkdir -p "$CARGO_TARGET_DIR/$profile/.fingerprint/$package-123"
+      : > "$CARGO_TARGET_DIR/$profile/deps/lib${package//-/_}_fixture.rlib"
+    done
     : > "$CARGO_TARGET_DIR/$profile/deps/libserde_fixture.rlib"
-    printf '#!/usr/bin/env sh\nexit 0\n' > "$CARGO_TARGET_DIR/$profile/codewire"
-    chmod +x "$CARGO_TARGET_DIR/$profile/codewire"
+    if [[ " ${packages[*]} " = *' codewire-desktop '* ]]; then
+      printf '#!/usr/bin/env sh\nexit 0\n' > "$CARGO_TARGET_DIR/$profile/codewire"
+      chmod +x "$CARGO_TARGET_DIR/$profile/codewire"
+    fi
     ;;
   install)
     install_root=''
@@ -188,14 +221,14 @@ FAKE_ZIGBUILD
     : > "$output/deps/libserde_fixture.rlib"
     ;;
   metadata)
+    if [[ " $* " != *' --no-deps '* ]]; then
+      echo 'fixture rejects dependency-resolving Cargo metadata' >&2
+      exit 2
+    fi
     if [[ " $* " = *codewire-desktop/Cargo.toml* ]]; then
-      if [[ " $* " = *' --no-deps '* ]]; then
-        printf '%s\n' '{"packages":[{"name":"codewire-desktop","source":null}]}'
-      else
-        printf '%s\n' '{"packages":[{"name":"codewire-desktop","source":null},{"name":"codewire-client","source":null},{"name":"serde","source":"registry+fixture"}]}'
-      fi
+      printf '%s\n' '{"packages":[{"name":"codewire-desktop","source":null}]}'
     else
-      printf '%s\n' '{"packages":[{"name":"codewire-cli-bin","source":null},{"name":"serde","source":"registry+fixture"}]}'
+      printf '%s\n' '{"packages":[{"name":"codewire-cli-bin","source":null},{"name":"codewire-client","source":null},{"name":"codewire-orchestration","source":null},{"name":"codewire-billing","source":null}]}'
     fi
     ;;
   clean)
@@ -236,10 +269,11 @@ FAKE_ZIGBUILD
 esac
 FAKE_CARGO
 chmod +x "$work/bin/cargo"
-for fixture_flavor in host-debug host-ci cw-cross-ci desktop-release; do
+for fixture_flavor in host-debug host-ci kind-ci cw-cross-ci desktop-release; do
   case "$fixture_flavor" in
     host-debug) fixture_profile=debug ;;
     host-ci) fixture_profile=ci ;;
+    kind-ci) fixture_profile=ci ;;
     cw-cross-ci) fixture_profile=x86_64-unknown-linux-musl/ci ;;
     desktop-release) fixture_profile=release ;;
   esac

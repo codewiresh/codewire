@@ -75,29 +75,51 @@ manifest='Cargo.toml'
 if [ "$flavor" = desktop-release ]; then
   manifest='crates/codewire-desktop/Cargo.toml'
 fi
-mapfile -t workspace_packages < <(
-  cargo metadata --offline --locked --format-version 1 \
-    --manifest-path "$manifest" \
-    | jq -er '.packages[] | select(.source == null) | .name'
-)
-[ "${#workspace_packages[@]}" -gt 0 ] || die 'Cargo metadata found no first-party packages'
-clean_args=()
-for package in "${workspace_packages[@]}"; do
-  clean_args+=( -p "$package" )
-done
-for clean_target in "${clean_targets[@]}"; do
-  target_args=()
-  if [ -n "$clean_target" ]; then
-    target_args+=(--target "$clean_target")
-  fi
-  for clean_profile in "${clean_profiles[@]}"; do
-    profile_args=()
-    if [ -n "$clean_profile" ]; then
-      profile_args+=(--profile "$clean_profile")
-    fi
-    cargo clean --manifest-path "$manifest" --target-dir "$target_dir" \
-      "${target_args[@]}" "${profile_args[@]}" "${clean_args[@]}"
+
+# Full Cargo metadata can require registry packages for target configurations
+# that the selected host build never fetched. First-party pruning only needs
+# package identities, so keep metadata offline and dependency-free. The root
+# workspace covers every shared path dependency; a detached manifest is added
+# separately so its own package is pruned as well.
+metadata_manifests=(Cargo.toml)
+if [ "$manifest" != Cargo.toml ]; then
+  metadata_manifests+=("$manifest")
+fi
+
+clean_first_party_packages() {
+  local metadata_manifest="$1" metadata_json package clean_target clean_profile
+  local -a manifest_packages clean_args target_args profile_args
+  metadata_json="$(
+    cargo metadata --offline --locked --no-deps --format-version 1 \
+      --manifest-path "$metadata_manifest"
+  )" || die "Cargo metadata failed for $metadata_manifest"
+  mapfile -t manifest_packages < <(
+    jq -er '.packages[] | select(.source == null) | .name' <<< "$metadata_json"
+  )
+  [ "${#manifest_packages[@]}" -gt 0 ] \
+    || die "Cargo metadata found no first-party packages for $metadata_manifest"
+  for package in "${manifest_packages[@]}"; do
+    clean_args+=( -p "$package" )
   done
+
+  for clean_target in "${clean_targets[@]}"; do
+    target_args=()
+    if [ -n "$clean_target" ]; then
+      target_args+=(--target "$clean_target")
+    fi
+    for clean_profile in "${clean_profiles[@]}"; do
+      profile_args=()
+      if [ -n "$clean_profile" ]; then
+        profile_args+=(--profile "$clean_profile")
+      fi
+      cargo clean --manifest-path "$metadata_manifest" --target-dir "$target_dir" \
+        "${target_args[@]}" "${profile_args[@]}" "${clean_args[@]}"
+    done
+  done
+}
+
+for metadata_manifest in "${metadata_manifests[@]}"; do
+  clean_first_party_packages "$metadata_manifest"
 done
 
 offending_fingerprint="$(
