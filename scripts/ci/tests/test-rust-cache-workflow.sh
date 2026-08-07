@@ -111,18 +111,123 @@ profile_for_args() {
 case "${1:-}" in
   test)
     profile="$(profile_for_args "$@")"
-    mkdir -p "$CARGO_TARGET_DIR/$profile/.fingerprint/codewire-fixture-123" \
-      "$CARGO_TARGET_DIR/$profile/deps"
-    : > "$CARGO_TARGET_DIR/$profile/deps/libcodewire_fixture.rlib"
+    if [[ " $* " = *codewire-desktop/Cargo.toml* ]]; then
+      packages=(codewire-desktop codewire-client)
+    else
+      packages=(codewire-cli-bin)
+    fi
+    mkdir -p "$CARGO_TARGET_DIR/$profile/deps"
+    for package in "${packages[@]}"; do
+      mkdir -p "$CARGO_TARGET_DIR/$profile/.fingerprint/$package-123"
+      : > "$CARGO_TARGET_DIR/$profile/deps/lib${package//-/_}_fixture.rlib"
+    done
     : > "$CARGO_TARGET_DIR/$profile/deps/libserde_fixture.rlib"
     ;;
+  build)
+    profile="$(profile_for_args "$@")"
+    if [[ " $* " = *' --release '* ]]; then
+      profile=release
+    fi
+    mkdir -p "$CARGO_TARGET_DIR/$profile/.fingerprint/codewire-desktop-123" \
+      "$CARGO_TARGET_DIR/$profile/.fingerprint/codewire-client-123" \
+      "$CARGO_TARGET_DIR/$profile/deps"
+    : > "$CARGO_TARGET_DIR/$profile/deps/libcodewire_desktop_fixture.rlib"
+    : > "$CARGO_TARGET_DIR/$profile/deps/libcodewire_client_fixture.rlib"
+    : > "$CARGO_TARGET_DIR/$profile/deps/libserde_fixture.rlib"
+    printf '#!/usr/bin/env sh\nexit 0\n' > "$CARGO_TARGET_DIR/$profile/codewire"
+    chmod +x "$CARGO_TARGET_DIR/$profile/codewire"
+    ;;
+  install)
+    install_root=''
+    previous=''
+    for argument in "$@"; do
+      if [ "$previous" = --root ]; then
+        install_root="$argument"
+        break
+      fi
+      previous="$argument"
+    done
+    [ -n "$install_root" ] || exit 2
+    mkdir -p "$install_root/bin"
+    cat > "$install_root/bin/cargo-zigbuild" <<'FAKE_ZIGBUILD'
+#!/usr/bin/env bash
+set -euo pipefail
+profile=debug
+target=''
+previous=''
+for argument in "$@"; do
+  case "$previous" in
+    --profile) profile="$argument" ;;
+    --target) target="$argument" ;;
+  esac
+  previous="$argument"
+done
+[ -n "$target" ] || exit 2
+output="$CARGO_TARGET_DIR/$target/$profile"
+mkdir -p "$output/.fingerprint/codewire-cli-bin-123" "$output/deps"
+: > "$output/deps/libcodewire_cli_bin.rlib"
+: > "$output/deps/libserde_fixture.rlib"
+FAKE_ZIGBUILD
+    chmod +x "$install_root/bin/cargo-zigbuild"
+    ;;
+  zigbuild)
+    profile="$(profile_for_args "$@")"
+    target=''
+    previous=''
+    for argument in "$@"; do
+      if [ "$previous" = --target ]; then
+        target="$argument"
+        break
+      fi
+      previous="$argument"
+    done
+    [ -n "$target" ] || exit 2
+    output="$CARGO_TARGET_DIR/$target/$profile"
+    mkdir -p "$output/.fingerprint/codewire-cli-bin-123" "$output/deps"
+    : > "$output/deps/libcodewire_cli_bin_fixture.rlib"
+    : > "$output/deps/libserde_fixture.rlib"
+    ;;
   metadata)
-    printf '%s\n' '{"packages":[{"name":"codewire-fixture","source":null}]}'
+    if [[ " $* " = *codewire-desktop/Cargo.toml* ]]; then
+      if [[ " $* " = *' --no-deps '* ]]; then
+        printf '%s\n' '{"packages":[{"name":"codewire-desktop","source":null}]}'
+      else
+        printf '%s\n' '{"packages":[{"name":"codewire-desktop","source":null},{"name":"codewire-client","source":null},{"name":"serde","source":"registry+fixture"}]}'
+      fi
+    else
+      printf '%s\n' '{"packages":[{"name":"codewire-cli-bin","source":null},{"name":"serde","source":"registry+fixture"}]}'
+    fi
     ;;
   clean)
     profile="$(profile_for_args "$@")"
-    rm -rf "$CARGO_TARGET_DIR/$profile/.fingerprint/codewire-fixture-123"
-    rm -f "$CARGO_TARGET_DIR/$profile/deps/libcodewire_fixture.rlib"
+    if [ "$profile" = dev ]; then
+      profile=debug
+    fi
+    target=''
+    previous=''
+    for argument in "$@"; do
+      if [ "$previous" = --target ]; then
+        target="$argument"
+        break
+      fi
+      previous="$argument"
+    done
+    output="$CARGO_TARGET_DIR/${target:+$target/}$profile"
+    packages=()
+    previous=''
+    for argument in "$@"; do
+      if [ "$previous" = -p ]; then
+        packages+=("$argument")
+      fi
+      previous="$argument"
+    done
+    for package in "${packages[@]}"; do
+      rm -rf "$output/.fingerprint/$package-"*
+      rm -f "$output/deps/lib${package//-/_}_"*.rlib
+      if [ "$package" = codewire-desktop ]; then
+        rm -f "$output/codewire"
+      fi
+    done
     ;;
   *)
     printf 'unexpected fake Cargo invocation: %s\n' "$*" >&2
@@ -131,10 +236,12 @@ case "${1:-}" in
 esac
 FAKE_CARGO
 chmod +x "$work/bin/cargo"
-for fixture_flavor in host-debug host-ci; do
+for fixture_flavor in host-debug host-ci cw-cross-ci desktop-release; do
   case "$fixture_flavor" in
     host-debug) fixture_profile=debug ;;
     host-ci) fixture_profile=ci ;;
+    cw-cross-ci) fixture_profile=x86_64-unknown-linux-musl/ci ;;
+    desktop-release) fixture_profile=release ;;
   esac
   fixture_target="$cache_dir/$fixture_flavor"
   PATH="$work/bin:$PATH" CARGO_TARGET_DIR="$fixture_target" \

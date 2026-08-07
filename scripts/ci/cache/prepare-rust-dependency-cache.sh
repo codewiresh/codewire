@@ -6,6 +6,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 flavor="${1:-}"
 target_dir="${CARGO_TARGET_DIR:-}"
 clean_profiles=()
+clean_targets=('')
 
 die() {
   printf 'prepare-rust-dependency-cache: %s\n' "$*" >&2
@@ -47,11 +48,13 @@ case "$flavor" in
       cargo install --locked cargo-zigbuild --version 0.23.0 --root "$tool_root"
     fi
     export PATH="$tool_root/bin:$PATH"
-    for target in \
-        x86_64-unknown-linux-musl \
-        aarch64-unknown-linux-gnu \
-        x86_64-apple-darwin \
-        aarch64-apple-darwin; do
+    clean_targets=(
+      x86_64-unknown-linux-musl
+      aarch64-unknown-linux-gnu
+      x86_64-apple-darwin
+      aarch64-apple-darwin
+    )
+    for target in "${clean_targets[@]}"; do
       cargo zigbuild --locked --profile ci \
         --package codewire-cli-bin --bin cw --target "$target"
     done
@@ -73,7 +76,7 @@ if [ "$flavor" = desktop-release ]; then
   manifest='crates/codewire-desktop/Cargo.toml'
 fi
 mapfile -t workspace_packages < <(
-  cargo metadata --offline --locked --no-deps --format-version 1 \
+  cargo metadata --offline --locked --format-version 1 \
     --manifest-path "$manifest" \
     | jq -er '.packages[] | select(.source == null) | .name'
 )
@@ -82,22 +85,33 @@ clean_args=()
 for package in "${workspace_packages[@]}"; do
   clean_args+=( -p "$package" )
 done
-for clean_profile in "${clean_profiles[@]}"; do
-  profile_args=()
-  if [ -n "$clean_profile" ]; then
-    profile_args+=(--profile "$clean_profile")
+for clean_target in "${clean_targets[@]}"; do
+  target_args=()
+  if [ -n "$clean_target" ]; then
+    target_args+=(--target "$clean_target")
   fi
-  cargo clean --manifest-path "$manifest" --target-dir "$target_dir" \
-    "${profile_args[@]}" "${clean_args[@]}"
+  for clean_profile in "${clean_profiles[@]}"; do
+    profile_args=()
+    if [ -n "$clean_profile" ]; then
+      profile_args+=(--profile "$clean_profile")
+    fi
+    cargo clean --manifest-path "$manifest" --target-dir "$target_dir" \
+      "${target_args[@]}" "${profile_args[@]}" "${clean_args[@]}"
+  done
 done
 
-if find "$target_dir" -type d -path '*/.fingerprint/codewire-*' -print -quit \
-    | grep -q .; then
-  die 'first-party fingerprint remained after Cargo clean'
+offending_fingerprint="$(
+  find "$target_dir" -type d -path '*/.fingerprint/codewire-*' -print -quit
+)"
+if [ -n "$offending_fingerprint" ]; then
+  die "first-party fingerprint remained after Cargo clean: ${offending_fingerprint#"$target_dir"/}"
 fi
-if find "$target_dir" -type f \( -name 'libcodewire_*' -o -name 'codewire_*' \) \
-    -print -quit | grep -q .; then
-  die 'first-party build output remained after Cargo clean'
+offending_output="$(
+  find "$target_dir" -type f \( -name 'libcodewire_*' -o -name 'codewire_*' \) \
+    -print -quit
+)"
+if [ -n "$offending_output" ]; then
+  die "first-party build output remained after Cargo clean: ${offending_output#"$target_dir"/}"
 fi
 
 size_bytes="$(du -sk "$target_dir" | awk '{ print $1 * 1024 }')"
