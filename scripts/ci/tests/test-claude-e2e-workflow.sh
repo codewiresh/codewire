@@ -51,10 +51,9 @@ grep -qF 'uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff' \
   "$WORKFLOW" || fail 'Claude E2E does not use the reviewed Go setup action'
 grep -qF "go-version: '1.26.4'" "$WORKFLOW" ||
   fail 'Claude E2E does not install the repository Go toolchain'
-grep -qF 'libs/sdk-ts/package-lock.json' "$WORKFLOW" ||
-  fail 'Claude E2E cache does not include the TypeScript SDK lockfile'
-grep -qF 'libs/sdk-examples/run-claude/typescript/package-lock.json' "$WORKFLOW" ||
-  fail 'Claude E2E cache does not include the TypeScript example lockfile'
+if grep -Eq '^[[:space:]]+(cache:|cache-dependency-path:)' "$WORKFLOW"; then
+  fail 'Claude E2E still enables the runner Actions cache'
+fi
 grep -qF 'npm --prefix libs/sdk-ts ci --ignore-scripts' "$WORKFLOW" ||
   fail 'Claude E2E does not install the locked TypeScript SDK dependencies'
 grep -qF 'npm --prefix libs/sdk-ts run build' "$WORKFLOW" ||

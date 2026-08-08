@@ -71,12 +71,6 @@ if "$CHECK" \
 fi
 grep -Fq '[cargo-cache] ERROR: unable to read available KiB' "$fixture/malformed.log"
 
-# Rust dependency-cache producer policy is part of the established cache
-# capacity gate. Keeping it here means ordinary producer changes run with the
-# policy family; the selector itself remains protected by trusted-base routing.
-"$ROOT/scripts/ci/tests/test-rust-cache-workflow.sh"
-"$ROOT/scripts/ci/tests/test-rust-cache-receipts.sh"
-
 if "$CHECK" >"$fixture/usage.log" 2>&1; then
   printf 'Cargo cache capacity guard accepted a missing cache path\n' >&2
   exit 1

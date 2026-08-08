@@ -2,20 +2,16 @@
   "schema": "codewire.ci-artifact-graph/v1",
   "policy_files": [
     ".gitea/workflows/deploy-dev.yaml",
-    ".gitea/workflows/rust-cache-refresh.yaml",
     ".gitea/workflows/support-images.yaml",
     "scripts/ci/deploy/resolve-deployed-source.sh",
     "scripts/ci/images/resolve-published-support-pair.sh",
     "scripts/ci/plan/apply-deploy-plan.py",
-    "scripts/ci/plan/apply-rust-cache-plan.py",
     "scripts/ci/plan/apply-support-plan.py",
     "scripts/ci/plan/apply-verification-plan.py",
     "scripts/ci/plan/artifact-graph.json",
     "scripts/ci/receipts/emit-verification-receipt.py",
-    "scripts/ci/receipts/emit-rust-cache-receipt.py",
     "scripts/ci/plan/planner.py",
     "scripts/ci/receipts/verify-release-tag-receipt.sh",
-    "scripts/ci/receipts/verify-rust-cache-receipt.sh",
     "scripts/ci/select/require-verification-results.sh",
     "scripts/ci/select/select-verification.sh",
     "scripts/ci/receipts/verify-tested-tree-receipt.sh"
@@ -27,146 +23,6 @@
     "docs/**"
   ],
   "artifacts": {
-    "rust_cache_host_debug": {
-      "kind": "rust-cache",
-      "manifest": "Cargo.toml",
-      "packages": "workspace",
-      "lockfile": "Cargo.lock",
-      "profiles": ["dev", "test"],
-      "targets": ["host"],
-      "features": ["default"],
-      "dependency_kinds": ["normal", "build", "dev"],
-      "runner_pool": "generic",
-      "warm_mode": "host-debug",
-      "max_bytes": 4294967296,
-      "compatibility_inputs": [
-        "rust-toolchain.toml",
-        "scripts/ci/cache/prepare-rust-dependency-cache.sh",
-        "scripts/ci/setup/assert-ci-runner-image.sh",
-        "crates/codewire-proto/codewire_descriptor.bin",
-        "crates/codewire-admin-proto/codewire_admin_descriptor.bin",
-        "libs/gateway-proto/proto/**"
-      ],
-      "tool_inputs": {
-        "cache_format": "v1",
-        "host_triple": "x86_64-unknown-linux-gnu",
-        "runner_image": "sha256:113c8acf43a12a1c20537668269ce0a749200063c5ca3293336ba36fd8ab009d",
-        "rust_components": "rustfmt,clippy"
-      }
-    },
-    "rust_cache_host_ci": {
-      "kind": "rust-cache",
-      "manifest": "Cargo.toml",
-      "packages": "workspace",
-      "lockfile": "Cargo.lock",
-      "profiles": ["ci"],
-      "targets": ["host"],
-      "features": ["default"],
-      "dependency_kinds": ["normal", "build", "dev"],
-      "runner_pool": "generic",
-      "warm_mode": "host-ci",
-      "max_bytes": 4294967296,
-      "compatibility_inputs": [
-        "rust-toolchain.toml",
-        "scripts/ci/cache/prepare-rust-dependency-cache.sh",
-        "scripts/ci/setup/assert-ci-runner-image.sh",
-        "crates/codewire-proto/codewire_descriptor.bin",
-        "crates/codewire-admin-proto/codewire_admin_descriptor.bin",
-        "libs/gateway-proto/proto/**"
-      ],
-      "tool_inputs": {
-        "cache_format": "v1",
-        "host_triple": "x86_64-unknown-linux-gnu",
-        "runner_image": "sha256:113c8acf43a12a1c20537668269ce0a749200063c5ca3293336ba36fd8ab009d"
-      }
-    },
-    "rust_cache_kind_ci": {
-      "kind": "rust-cache",
-      "manifest": "Cargo.toml",
-      "packages": [
-        "codewire-orchestration",
-        "codewire-client",
-        "codewire-billing"
-      ],
-      "lockfile": "Cargo.lock",
-      "profiles": ["ci"],
-      "targets": ["host"],
-      "features": ["default", "kind-e2e"],
-      "dependency_kinds": ["normal", "build"],
-      "runner_pool": "kind",
-      "warm_mode": "kind-ci",
-      "max_bytes": 4294967296,
-      "compatibility_inputs": [
-        "rust-toolchain.toml",
-        "scripts/ci/cache/prepare-rust-dependency-cache.sh",
-        "scripts/ci/setup/assert-ci-runner-image.sh",
-        "crates/codewire-proto/codewire_descriptor.bin",
-        "crates/codewire-admin-proto/codewire_admin_descriptor.bin",
-        "libs/gateway-proto/proto/**"
-      ],
-      "tool_inputs": {
-        "cache_format": "v1",
-        "host_triple": "x86_64-unknown-linux-gnu",
-        "runner_image": "sha256:113c8acf43a12a1c20537668269ce0a749200063c5ca3293336ba36fd8ab009d"
-      }
-    },
-    "rust_cache_cw_cross_ci": {
-      "kind": "rust-cache",
-      "manifest": "Cargo.toml",
-      "packages": ["codewire-cli-bin"],
-      "lockfile": "Cargo.lock",
-      "profiles": ["ci"],
-      "targets": [
-        "x86_64-unknown-linux-musl",
-        "aarch64-unknown-linux-gnu",
-        "x86_64-apple-darwin",
-        "aarch64-apple-darwin"
-      ],
-      "features": ["default"],
-      "dependency_kinds": ["normal", "build"],
-      "runner_pool": "generic",
-      "warm_mode": "cw-cross-ci",
-      "max_bytes": 4294967296,
-      "compatibility_inputs": [
-        "rust-toolchain.toml",
-        "scripts/ci/cache/prepare-rust-dependency-cache.sh",
-        "scripts/ci/setup/assert-ci-runner-image.sh",
-        "crates/codewire-proto/codewire_descriptor.bin",
-        "libs/gateway-proto/proto/**"
-      ],
-      "tool_inputs": {
-        "cache_format": "v1",
-        "cargo_zigbuild": "0.23.0",
-        "host_triple": "x86_64-unknown-linux-gnu",
-        "runner_image": "sha256:113c8acf43a12a1c20537668269ce0a749200063c5ca3293336ba36fd8ab009d",
-        "zig": "0.15.2",
-        "zig_x86_64_linux_sha256": "02aa270f183da276e5b5920b1dac44a63f1a49e55050ebde3aecc9eb82f93239"
-      }
-    },
-    "rust_cache_desktop_release": {
-      "kind": "rust-cache",
-      "manifest": "crates/codewire-desktop/Cargo.toml",
-      "packages": ["codewire-desktop"],
-      "lockfile": "crates/codewire-desktop/Cargo.lock",
-      "profiles": ["release"],
-      "targets": ["host"],
-      "features": ["default"],
-      "dependency_kinds": ["normal", "build", "dev"],
-      "runner_pool": "generic",
-      "warm_mode": "desktop-release",
-      "max_bytes": 4294967296,
-      "compatibility_inputs": [
-        "rust-toolchain.toml",
-        "scripts/ci/cache/prepare-rust-dependency-cache.sh",
-        "scripts/ci/release/package-codewire-desktop.sh",
-        "scripts/ci/setup/assert-ci-runner-image.sh"
-      ],
-      "tool_inputs": {
-        "cache_format": "v1",
-        "host_triple": "x86_64-unknown-linux-gnu",
-        "runner_image": "sha256:113c8acf43a12a1c20537668269ce0a749200063c5ca3293336ba36fd8ab009d"
-      }
-    },
     "cw_cli_release_assets": {
       "kind": "rust-package",
       "manifest": "Cargo.toml",

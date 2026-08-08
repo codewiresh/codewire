@@ -145,8 +145,15 @@ run_paths_case ci_rewrite pull_request refs/pull/20/head false \
   scripts/ci/tests/test-cargo-cache-capacity.sh \
   scripts/ci/tests/fixtures/cargo-cache-df.sh \
   scripts/ci/tests/test-select-verification.sh
-run_paths_case rust_cache_producer_policy pull_request refs/pull/200/head false \
-  "$policy" .gitea/workflows/rust-cache-refresh.yaml
+run_paths_case retired_cache_surface pull_request refs/pull/200/head false \
+  "$policy" \
+  .gitea/workflows/rust-cache-refresh.yaml \
+  scripts/ci/cache/prepare-rust-dependency-cache.sh \
+  scripts/ci/cache/select-rust-cache-key.sh \
+  scripts/ci/receipts/emit-rust-cache-receipt.py \
+  scripts/ci/receipts/verify-rust-cache-receipt.sh \
+  scripts/ci/tests/test-rust-cache-workflow.sh \
+  scripts/ci/tests/test-rust-cache-receipts.sh
 run_paths_case shellcheck_policy_domain_future pull_request refs/pull/2001/head false \
   'policy policy_shell' scripts/ci/tests/test-shellcheck-policy-domain.sh
 grep -qF 'scripts/ci/tests/test-shellcheck-policy-domain.sh' "$SELECTOR"
@@ -695,16 +702,6 @@ run_paths_case tag push refs/tags/v1.2.3 false \
   'deploy go_consumer_interop go_support release runtime_confidential' docs/tag-path-is-ignored.md
 
 all_product='contracts contracts_proto database deploy edge_kind go_consumer_interop go_support go_tailnet kind policy policy_shell release runtime_confidential runtime_dev_smoke rust rust_curated_locks rust_workspace sdk_go sdk_python sdk_ts security security_dev_smoke_auth security_go security_idp_kek security_js service_apikey_smoke service_billing service_connectcore service_coordinator service_idp service_integration service_nats service_orchestration service_temporal transport transport_derp_contract transport_pkg_codewire_coordinator transport_pkg_codewire_daemon transport_pkg_codewire_derp transport_pkg_codewire_gateway transport_pkg_codewire_mesh transport_pkg_codewire_tailnet transport_pkg_codewire_udp_relay web'
-for rust_cache_path in \
-  scripts/ci/cache/prepare-rust-dependency-cache.sh \
-  scripts/ci/cache/select-rust-cache-key.sh \
-  scripts/ci/receipts/emit-rust-cache-receipt.py \
-  scripts/ci/receipts/verify-rust-cache-receipt.sh \
-  scripts/ci/tests/test-rust-cache-workflow.sh \
-  scripts/ci/tests/test-rust-cache-receipts.sh; do
-  grep -Fq "$rust_cache_path" "$SELECTOR" \
-    || { echo "missing exact Rust cache policy path: $rust_cache_path" >&2; exit 1; }
-done
 if grep -Fq 'scripts/ci/cache/*.sh' "$SELECTOR"; then
   echo 'Rust cache policy must not admit future cache helpers by wildcard' >&2
   exit 1
