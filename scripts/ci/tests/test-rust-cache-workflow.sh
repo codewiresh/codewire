@@ -28,7 +28,9 @@ fi
 [ "$(grep -Fc "uses: actions/cache/save@$CACHE_ACTION" "$WORKFLOW")" -eq 5 ] \
   || fail 'each flavor must use the pinned cache save action exactly once'
 [ "$(grep -Fc "uses: actions/cache/restore@$CACHE_ACTION" "$WORKFLOW")" -eq 10 ] \
-  || fail 'each producer must probe before and after saving its exact key'
+  || fail 'producers and post-producer finalizers must probe each exact key'
+[ "$(grep -Fc '      actions: read' "$WORKFLOW")" -eq 2 ] \
+  || fail 'post-producer finalizers do not own narrow cache read authority'
 [ "$(grep -Fc "uses: actions/cache/restore@$CACHE_ACTION" "$CI_WORKFLOW")" -eq 7 ] \
   || fail 'consumer jobs must restore their exact cache flavors'
 if grep -Eq 'restore-keys:' "$WORKFLOW" "$CI_WORKFLOW"; then
@@ -38,7 +40,25 @@ if grep -Fq "uses: actions/cache/save@$CACHE_ACTION" "$CI_WORKFLOW"; then
   fail 'PR-capable consumer workflow must not save Rust dependency caches'
 fi
 grep -Fq 'lookup-only: true' "$WORKFLOW" \
-  || fail 'producer availability must be proven by exact lookup'
+  || fail 'cache availability must be proven by exact lookup'
+grep -Fq '  generic-availability:' "$WORKFLOW" \
+  || fail 'generic cache availability lacks a post-producer finalizer'
+grep -Fq '  kind-availability:' "$WORKFLOW" \
+  || fail 'Kind cache availability lacks a same-pool finalizer'
+grep -Fq '    needs: [plan, generic-availability, kind-availability]' "$WORKFLOW" \
+  || fail 'receipt does not depend on post-producer availability proof'
+grep -Fq "false|'') printf" "$WORKFLOW" \
+  || fail 'unproven exact cache probes do not fall back cold'
+grep -Fq 'unexpected exact cache probe state for $name' "$WORKFLOW" \
+  || fail 'generic cache proof does not fail closed on an unknown probe state'
+grep -Fq 'unexpected exact cache probe state for kind_ci' "$WORKFLOW" \
+  || fail 'Kind cache proof does not fail closed on an unknown probe state'
+if grep -Fq 'POST_SAVE_CACHE_HIT' "$WORKFLOW"; then
+  fail 'same-job cache visibility is still treated as publication proof'
+fi
+if grep -Fq 'needs.host-debug.outputs.available' "$WORKFLOW"; then
+  fail 'receipt still trusts producer-local availability output'
+fi
 grep -Fq 'rust_cache_cw_cross_ci_available' "$CI_WORKFLOW" \
   || fail 'consumer activation is not receipt-availability bound'
 grep -Fq 'rust_cache_cw_cross_ci_receipt_compatibility' "$CI_WORKFLOW" \
