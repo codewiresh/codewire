@@ -17,9 +17,13 @@ Claude-style `/loop` command.
    - success criteria
    - repo(s), issue(s), branch/PR, and constraints
    - stop conditions
-3. If a goal tool or `/goal` surface is available, set or update the active
-   goal. Keep the goal under 4,000 characters; put long context in a doc or
-   Gitea issue and reference it.
+3. For a Program, the canonical Gitea issue body is the durable objective and
+   live control. Do not create, update, or require a host goal or `/goal`
+   surface for Program work. A paused, stale, missing, or expired host goal is
+   not a Program state, blocker, authority boundary, or reason to return a
+   final response. For non-Program work, a host goal may be used only when the
+   owner explicitly requests host scheduling or persistence; keep it under
+   4,000 characters and put long context in a doc or Gitea issue.
 4. Use a durable Gitea tracker when repository rules require one, Program is
    selected, a real collision risk needs a canonical claim, or closure depends
    on evidence across sessions. Do not create a tracker merely because normal
@@ -36,8 +40,10 @@ create or update thread automations, create one attached to this thread.
 Use this heartbeat prompt:
 
 ```text
-Use $codewire-loop. Inspect the active goal, newest user messages, git state,
-Gitea issues/PRs, relevant CI transitions, and any running Codewire sessions.
+Use $codewire-loop. Inspect the newest user messages, git state, Gitea
+issues/PRs, relevant CI transitions, and any running Codewire sessions. For a
+Program, the live Gitea issue body is the objective; do not treat host-goal
+status as control state.
 Continue the next unblocked step. Do not stop merely because one turn ended.
 Do not wake solely to re-read an unchanged healthy CI run. Report only when the
 goal is complete, genuinely blocked, or a user decision is required. If
@@ -79,8 +85,9 @@ human reminder to resume Codex with the same goal and heartbeat prompt.
 At the start of every turn or wakeup:
 
 1. Re-read the newest user message and let it override older instructions.
-2. Check the active goal and live control's dispatchable work before evaluating
-   the terminal goal. If authorized work is actionable, the Program is not
+2. For a Program, check its live control's dispatchable work before evaluating
+   a terminal handoff. Host-goal status is non-authoritative and must not
+   suspend the Program. If authorized work is actionable, the Program is not
    blocked by a future gate; continue the smallest useful item.
 3. Inspect repo state before edits:
    - `git status --short --branch`
@@ -90,7 +97,10 @@ At the start of every turn or wakeup:
    - active claims in the canonical Program control; inspect branches,
      worktrees, or PRs only when investigating a concrete collision
 4. Continue the smallest unblocked step through implementation, validation,
-   PR, CI, merge, and issue closure.
+   PR, CI, merge, and issue closure. When a bounded diagnostic identifies a
+   repository defect and its source repair remains authorized, retain the
+   claim and proceed directly to one cohesive repair. Do not stop after filing
+   its issue, reverting an invalid attempt, or producing a receipt.
 5. Give brief progress updates during long work.
 
 At a material transition or after canonical main advances, compare the bound
@@ -163,9 +173,10 @@ When a live Program is `ACTIVE`:
 ## Final-Response Gate
 
 A final response is a terminal handoff, not a progress update. Immediately
-before sending one, reread the objective and live control and check the active
-goal when goal tooling is available. Name which Stop Condition below holds. If
-none holds, do not send a final response: execute the next safe in-scope action.
+before sending one, reread the objective and live control. For a Program, the
+live Gitea body is authoritative; never check or report host-goal status as a
+terminal condition. Name which Stop Condition below holds. If none holds, do
+not send a final response: execute the next safe in-scope action.
 A user question, criticism, correction, or status request does not suspend the
 objective unless it explicitly pauses, stops, or changes scope; answer it in
 commentary and continue in the same turn. Never end by promising to resume—take
