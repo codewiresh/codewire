@@ -58,6 +58,26 @@ jobs:
       desktop_package_selected: ${{ steps.select.outputs.desktop_package_selected }}
       workspace_image_state: ${{ steps.select.outputs.workspace_image_state }}
       workspace_image_selected: ${{ steps.select.outputs.workspace_image_selected }}
+      rust_cache_host_debug_compatibility: ${{ steps.rust-cache-plan.outputs.rust_cache_host_debug_compatibility }}
+      rust_cache_host_ci_compatibility: ${{ steps.rust-cache-plan.outputs.rust_cache_host_ci_compatibility }}
+      rust_cache_kind_ci_compatibility: ${{ steps.rust-cache-plan.outputs.rust_cache_kind_ci_compatibility }}
+      rust_cache_cw_cross_ci_compatibility: ${{ steps.rust-cache-plan.outputs.rust_cache_cw_cross_ci_compatibility }}
+      rust_cache_desktop_release_compatibility: ${{ steps.rust-cache-plan.outputs.rust_cache_desktop_release_compatibility }}
+      rust_cache_host_debug_receipt_compatibility: ${{ steps.rust-cache-receipt.outputs.rust_cache_host_debug_compatibility }}
+      rust_cache_host_ci_receipt_compatibility: ${{ steps.rust-cache-receipt.outputs.rust_cache_host_ci_compatibility }}
+      rust_cache_kind_ci_receipt_compatibility: ${{ steps.rust-cache-receipt.outputs.rust_cache_kind_ci_compatibility }}
+      rust_cache_cw_cross_ci_receipt_compatibility: ${{ steps.rust-cache-receipt.outputs.rust_cache_cw_cross_ci_compatibility }}
+      rust_cache_desktop_release_receipt_compatibility: ${{ steps.rust-cache-receipt.outputs.rust_cache_desktop_release_compatibility }}
+      rust_cache_host_debug_key: ${{ steps.rust-cache-receipt.outputs.rust_cache_host_debug_key }}
+      rust_cache_host_ci_key: ${{ steps.rust-cache-receipt.outputs.rust_cache_host_ci_key }}
+      rust_cache_kind_ci_key: ${{ steps.rust-cache-receipt.outputs.rust_cache_kind_ci_key }}
+      rust_cache_cw_cross_ci_key: ${{ steps.rust-cache-receipt.outputs.rust_cache_cw_cross_ci_key }}
+      rust_cache_desktop_release_key: ${{ steps.rust-cache-receipt.outputs.rust_cache_desktop_release_key }}
+      rust_cache_host_debug_available: ${{ steps.rust-cache-receipt.outputs.rust_cache_host_debug_available }}
+      rust_cache_host_ci_available: ${{ steps.rust-cache-receipt.outputs.rust_cache_host_ci_available }}
+      rust_cache_kind_ci_available: ${{ steps.rust-cache-receipt.outputs.rust_cache_kind_ci_available }}
+      rust_cache_cw_cross_ci_available: ${{ steps.rust-cache-receipt.outputs.rust_cache_cw_cross_ci_available }}
+      rust_cache_desktop_release_available: ${{ steps.rust-cache-receipt.outputs.rust_cache_desktop_release_available }}
       tested_tree_receipt: ${{ steps.receipt.outputs.tested_tree_receipt }}
       tested_tree_reason: ${{ steps.receipt.outputs.tested_tree_reason }}
       tested_tree_pr: ${{ steps.receipt.outputs.tested_tree_pr }}
@@ -150,6 +170,55 @@ jobs:
               --head-tree "$(git rev-parse "$GITHUB_SHA^{tree}")"
           fi
 
+      - name: Resolve receipt-bound Rust cache facts
+        id: rust-cache-plan
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          plan_file="$(mktemp)"
+          trap 'rm -f "$plan_file"' EXIT
+          if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
+            planner='.trusted-ci-policy/scripts/ci/plan/planner.py'
+            adapter='.trusted-ci-policy/scripts/ci/plan/apply-rust-cache-plan.py'
+            python3 "$planner" \
+              --repository . \
+              --target-base "$PR_BASE_SHA" \
+              --head "$GITHUB_SHA" \
+              --trusted-policy "$PR_BASE_SHA" \
+              --output "$plan_file"
+            python3 "$adapter" --plan "$plan_file" \
+              --expected-head "$GITHUB_SHA" \
+              --expected-head-tree "$(git rev-parse "$GITHUB_SHA^{tree}")"
+          else
+            # A canonical push is not a trusted-base consumer comparison. Its
+            # following cache refresh publishes the next exact receipt, so
+            # product verification stays cold unless a future explicit path
+            # supplies a trusted comparison baseline.
+            python3 scripts/ci/plan/apply-rust-cache-plan.py --plan "$plan_file" \
+              --expected-head "$GITHUB_SHA" \
+              --expected-head-tree "$(git rev-parse "$GITHUB_SHA^{tree}")"
+          fi
+
+      - name: Resolve exact canonical Rust cache receipt
+        id: rust-cache-receipt
+        env:
+          GITEA_TOKEN: ${{ github.token }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          cache_receipt='scripts/ci/receipts/verify-rust-cache-receipt.sh'
+          source_sha=''
+          if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
+            cache_receipt='.trusted-ci-policy/scripts/ci/receipts/verify-rust-cache-receipt.sh'
+            source_sha="$PR_BASE_SHA"
+          elif [ "$GITHUB_EVENT_NAME" = push ]; then
+            source_sha="${PUSH_BEFORE_SHA:-}"
+          fi
+          CODEWIRE_CACHE_SOURCE_SHA="$source_sha" "$cache_receipt"
+
       - name: Verify exact tested-tree receipt
         id: receipt
         env:
@@ -166,6 +235,8 @@ jobs:
     name: CW release-assets verification
     runs-on: ubuntu-latest
     needs: [verification-selection]
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target/ci-cache/cw-cross-ci
     steps:
       - name: Reuse exact PR-head content verification
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt == 'accepted' }}
@@ -177,6 +248,13 @@ jobs:
 
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && needs.verification-selection.outputs.cw_package_selected == 'true' }}
+
+      - name: Restore receipt-bound CW dependency cache
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && needs.verification-selection.outputs.cw_package_selected == 'true' && needs.verification-selection.outputs.rust_cache_cw_cross_ci_available == 'true' && needs.verification-selection.outputs.rust_cache_cw_cross_ci_compatibility != '' && needs.verification-selection.outputs.rust_cache_cw_cross_ci_receipt_compatibility == needs.verification-selection.outputs.rust_cache_cw_cross_ci_compatibility }}
+        uses: actions/cache/restore@6849a6489940f00c2f30c0fb92c6274307ccb58a
+        with:
+          path: target/ci-cache/cw-cross-ci
+          key: ${{ needs.verification-selection.outputs.rust_cache_cw_cross_ci_key }}
 
       - uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && needs.verification-selection.outputs.cw_package_selected == 'true' }}
@@ -257,6 +335,8 @@ jobs:
     name: Standard verification
     runs-on: ubuntu-latest
     needs: [verification-selection]
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target/ci-cache/host-debug
     steps:
       - name: Reuse exact PR-head content verification
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt == 'accepted' }}
@@ -270,6 +350,13 @@ jobs:
       - name: Set up Go 1.26.5
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|contracts|') || contains(needs.verification-selection.outputs.selection, '|go_support|') || contains(needs.verification-selection.outputs.selection, '|sdk_go|') || contains(needs.verification-selection.outputs.selection, '|security_go|')) }}
         run: scripts/ci/setup/setup-go.sh 1.26.5
+
+      - name: Restore receipt-bound host debug dependency cache
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|contracts_proto|') || contains(needs.verification-selection.outputs.selection, '|go_consumer_interop|') || contains(needs.verification-selection.outputs.selection, '|web|')) && needs.verification-selection.outputs.rust_cache_host_debug_available == 'true' && needs.verification-selection.outputs.rust_cache_host_debug_compatibility != '' && needs.verification-selection.outputs.rust_cache_host_debug_receipt_compatibility == needs.verification-selection.outputs.rust_cache_host_debug_compatibility }}
+        uses: actions/cache/restore@6849a6489940f00c2f30c0fb92c6274307ccb58a
+        with:
+          path: target/ci-cache/host-debug
+          key: ${{ needs.verification-selection.outputs.rust_cache_host_debug_key }}
 
       - uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|policy|') || contains(needs.verification-selection.outputs.selection, '|contracts_proto|') || contains(needs.verification-selection.outputs.selection, '|go_tailnet|') || contains(needs.verification-selection.outputs.selection, '|go_consumer_interop|') || contains(needs.verification-selection.outputs.selection, '|deploy|')) }}
@@ -383,6 +470,8 @@ jobs:
     needs: [verification-selection]
     env:
       CARGO_HOME: ${{ github.workspace }}/target/ci-rust-cargo-home
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target/ci-cache/host-debug
+      CODEWIRE_DESKTOP_CARGO_TARGET_DIR: ${{ github.workspace }}/target/ci-cache/desktop-release
     steps:
       - name: Reuse exact PR-head content verification
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt == 'accepted' }}
@@ -390,6 +479,20 @@ jobs:
 
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+
+      - name: Restore receipt-bound host debug dependency cache
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|rust|') || contains(needs.verification-selection.outputs.selection, '|rust_curated_locks|') || contains(needs.verification-selection.outputs.selection, '|transport|')) && needs.verification-selection.outputs.rust_cache_host_debug_available == 'true' && needs.verification-selection.outputs.rust_cache_host_debug_compatibility != '' && needs.verification-selection.outputs.rust_cache_host_debug_receipt_compatibility == needs.verification-selection.outputs.rust_cache_host_debug_compatibility }}
+        uses: actions/cache/restore@6849a6489940f00c2f30c0fb92c6274307ccb58a
+        with:
+          path: target/ci-cache/host-debug
+          key: ${{ needs.verification-selection.outputs.rust_cache_host_debug_key }}
+
+      - name: Restore receipt-bound desktop dependency cache
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && needs.verification-selection.outputs.desktop_package_selected == 'true' && needs.verification-selection.outputs.rust_cache_desktop_release_available == 'true' && needs.verification-selection.outputs.rust_cache_desktop_release_compatibility != '' && needs.verification-selection.outputs.rust_cache_desktop_release_receipt_compatibility == needs.verification-selection.outputs.rust_cache_desktop_release_compatibility }}
+        uses: actions/cache/restore@6849a6489940f00c2f30c0fb92c6274307ccb58a
+        with:
+          path: target/ci-cache/desktop-release
+          key: ${{ needs.verification-selection.outputs.rust_cache_desktop_release_key }}
 
       - uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|rust|') || contains(needs.verification-selection.outputs.selection, '|rust_curated_locks|') || contains(needs.verification-selection.outputs.selection, '|transport|') || needs.verification-selection.outputs.desktop_package_selected == 'true') }}
@@ -445,6 +548,9 @@ jobs:
     name: Database / service verification
     runs-on: ubuntu-latest
     needs: [verification-selection]
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target/ci-cache/host-debug
+      CODEWIRE_CARGO_CI_TARGET_DIR: ${{ github.workspace }}/target/ci-cache/host-ci
     steps:
       - name: Reuse exact PR-head content verification
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt == 'accepted' }}
@@ -452,6 +558,20 @@ jobs:
 
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+
+      - name: Restore receipt-bound host debug dependency cache
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|database|') || contains(needs.verification-selection.outputs.selection, '|service_integration|')) && needs.verification-selection.outputs.rust_cache_host_debug_available == 'true' && needs.verification-selection.outputs.rust_cache_host_debug_compatibility != '' && needs.verification-selection.outputs.rust_cache_host_debug_receipt_compatibility == needs.verification-selection.outputs.rust_cache_host_debug_compatibility }}
+        uses: actions/cache/restore@6849a6489940f00c2f30c0fb92c6274307ccb58a
+        with:
+          path: target/ci-cache/host-debug
+          key: ${{ needs.verification-selection.outputs.rust_cache_host_debug_key }}
+
+      - name: Restore receipt-bound host CI dependency cache
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|database|') || contains(needs.verification-selection.outputs.selection, '|service_integration|')) && needs.verification-selection.outputs.rust_cache_host_ci_available == 'true' && needs.verification-selection.outputs.rust_cache_host_ci_compatibility != '' && needs.verification-selection.outputs.rust_cache_host_ci_receipt_compatibility == needs.verification-selection.outputs.rust_cache_host_ci_compatibility }}
+        uses: actions/cache/restore@6849a6489940f00c2f30c0fb92c6274307ccb58a
+        with:
+          path: target/ci-cache/host-ci
+          key: ${{ needs.verification-selection.outputs.rust_cache_host_ci_key }}
 
       - uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|database|') || contains(needs.verification-selection.outputs.selection, '|service_integration|')) }}
@@ -517,6 +637,7 @@ jobs:
     env:
       KIND_CLUSTER_NAME: codewire-e2e-ci-${{ github.run_id }}
       CODEWIRE_PLAYWRIGHT_SNAPSHOT_ENV: ubuntu24-cft145
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target/ci-cache/kind-ci
     steps:
       - name: Reuse exact PR-head content verification
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt == 'accepted' }}
@@ -524,6 +645,13 @@ jobs:
 
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+
+      - name: Restore receipt-bound Kind dependency cache
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|kind|') && needs.verification-selection.outputs.rust_cache_kind_ci_available == 'true' && needs.verification-selection.outputs.rust_cache_kind_ci_compatibility != '' && needs.verification-selection.outputs.rust_cache_kind_ci_receipt_compatibility == needs.verification-selection.outputs.rust_cache_kind_ci_compatibility }}
+        uses: actions/cache/restore@6849a6489940f00c2f30c0fb92c6274307ccb58a
+        with:
+          path: target/ci-cache/kind-ci
+          key: ${{ needs.verification-selection.outputs.rust_cache_kind_ci_key }}
 
       - name: Run Edge static verification
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|edge_kind|') }}

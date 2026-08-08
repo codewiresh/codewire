@@ -11,7 +11,7 @@ import sys
 from typing import Mapping
 
 
-RECEIPT_SCHEMA = "codewire.ci-rust-cache-receipt/v1"
+RECEIPT_SCHEMA = "codewire.ci-rust-cache-receipt/v2"
 PREFIX = "CODEWIRE_CI_RUST_CACHE_RECEIPT="
 HEX40_RE = re.compile(r"^[0-9a-f]{40}$")
 HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -73,20 +73,29 @@ def build_receipt(env: Mapping[str, str]) -> dict[str, object]:
         compatibility = require(
             env, f"CODEWIRE_RUST_CACHE_{env_name}_COMPATIBILITY", HEX64_RE
         )
-        key = require(env, f"CODEWIRE_RUST_CACHE_{env_name}_KEY", KEY_RE)
-        expected_prefix = (
-            f"codewire-rust-deps-v1-{runner_pool}-{flavor}-{compatibility}-"
-        )
-        if not key.startswith(expected_prefix):
-            raise ReceiptError(f"cache key for {flavor} does not match its binding")
+        availability = env.get(f"CODEWIRE_RUST_CACHE_{env_name}_AVAILABLE", "")
+        if availability not in {"true", "false"}:
+            raise ReceiptError(f"cache availability for {flavor} is invalid")
+        key = env.get(f"CODEWIRE_RUST_CACHE_{env_name}_KEY", "")
+        if availability == "true":
+            if not KEY_RE.fullmatch(key):
+                raise ReceiptError(f"available cache key for {flavor} is invalid")
+            expected_prefix = (
+                f"codewire-rust-deps-v1-{runner_pool}-{flavor}-{compatibility}-"
+            )
+            if not key.startswith(expected_prefix):
+                raise ReceiptError(f"cache key for {flavor} does not match its binding")
+        elif key:
+            raise ReceiptError(f"unavailable cache key for {flavor} must be empty")
         caches.append(
             {
                 "flavor": flavor,
                 "runner_pool": runner_pool,
                 "compatibility": compatibility,
-                "key": key,
+                "key": key if availability == "true" else None,
                 "path": path,
                 "max_bytes": 4294967296,
+                "available": availability == "true",
             }
         )
 

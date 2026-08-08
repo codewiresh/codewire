@@ -45,6 +45,7 @@ profile="${CW_RELEASE_PROFILE:-release}"
 build_cmd="${CW_RELEASE_BUILD_CMD:-cargo build}"
 dist_dir="${CW_RELEASE_DIST_DIR:-dist/cw-release}"
 require_signature="${CW_RELEASE_REQUIRE_SIGNATURE:-1}"
+target_dir="${CARGO_TARGET_DIR:-target}"
 
 case "$profile" in
   dev)
@@ -75,7 +76,7 @@ for target in $targets; do
     --bin cw \
     --target "$target"
 
-  binary="target/$target/$profile_dir/cw"
+  binary="$target_dir/$target/$profile_dir/cw"
   [ -x "$binary" ] || die "expected built binary at $binary"
   cp "$binary" "$dist_dir/cw-$version-$target"
 done

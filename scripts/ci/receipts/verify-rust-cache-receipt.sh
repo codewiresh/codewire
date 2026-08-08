@@ -10,6 +10,7 @@ reason='unverified'
 cache_run=''
 declare -A cache_keys=()
 declare -A cache_compatibilities=()
+declare -A cache_availability=()
 flavors=(host_debug host_ci kind_ci cw_cross_ci desktop_release)
 
 emit_outputs() {
@@ -21,6 +22,7 @@ rust_cache_run=${cache_run}"
   for flavor in "${flavors[@]}"; do
     rendered+=$'\n'"rust_cache_${flavor}_key=${cache_keys[$flavor]:-}"
     rendered+=$'\n'"rust_cache_${flavor}_compatibility=${cache_compatibilities[$flavor]:-}"
+    rendered+=$'\n'"rust_cache_${flavor}_available=${cache_availability[$flavor]:-}"
   done
   if [ -n "${GITHUB_OUTPUT:-}" ]; then
     printf '%s\n' "$rendered" >> "$GITHUB_OUTPUT"
@@ -147,7 +149,7 @@ jq -e \
   --arg head "$source_sha" \
   --arg tree "$source_tree" '
     select(type == "object")
-    | select(.schema == "codewire.ci-rust-cache-receipt/v1")
+    | select(.schema == "codewire.ci-rust-cache-receipt/v1" or .schema == "codewire.ci-rust-cache-receipt/v2")
     | select(.repository == $repository)
     | select(.event == "push" or .event == "workflow_dispatch")
     | select(.workflow_path == $workflow)
@@ -156,31 +158,67 @@ jq -e \
     | select((keys | sort) == ["caches", "event", "repository", "run", "schema", "source", "workflow_path"])
     | select(.caches | type == "array" and length == 5)
     | select([.caches[].flavor] | sort == ["cw-cross-ci", "desktop-release", "host-ci", "host-debug", "kind-ci"])
-    | select([.caches[].key] | unique | length == 5)
-    | select(.caches | all(.[];
-        (keys | sort) == ["compatibility", "flavor", "key", "max_bytes", "path", "runner_pool"]
-        and (.compatibility | type == "string" and test("^[0-9a-f]{64}$"))
-        and (.key | type == "string" and test("^codewire-rust-deps-v1-(generic|kind)-(host-debug|host-ci|kind-ci|cw-cross-ci|desktop-release)-[0-9a-f]{64}-[0-9a-f]{32}$"))
-        and .max_bytes == 4294967296
-      ))
+    | if .schema == "codewire.ci-rust-cache-receipt/v1" then
+        select([.caches[].key] | unique | length == 5)
+        | select(.caches | all(.[];
+            (keys | sort) == ["compatibility", "flavor", "key", "max_bytes", "path", "runner_pool"]
+            and (.compatibility | type == "string" and test("^[0-9a-f]{64}$"))
+            and (.key | type == "string" and test("^codewire-rust-deps-v1-(generic|kind)-(host-debug|host-ci|kind-ci|cw-cross-ci|desktop-release)-[0-9a-f]{64}-[0-9a-f]{32}$"))
+            and .max_bytes == 4294967296
+          ))
+      else
+        select(
+          ([.caches[] | select(.available == true) | .key] | unique | length)
+          == ([.caches[] | select(.available == true)] | length)
+        )
+        | select(.caches | all(.[];
+            (keys | sort) == ["available", "compatibility", "flavor", "key", "max_bytes", "path", "runner_pool"]
+            and (.available | type == "boolean")
+            and (.compatibility | type == "string" and test("^[0-9a-f]{64}$"))
+            and (
+              if .available then
+                (.key | type == "string" and test("^codewire-rust-deps-v1-(generic|kind)-(host-debug|host-ci|kind-ci|cw-cross-ci|desktop-release)-[0-9a-f]{64}-[0-9a-f]{32}$"))
+              else .key == null
+              end
+            )
+            and .max_bytes == 4294967296
+          ))
+      end
   ' "$receipt_json" >/dev/null || fallback 'cache-receipt-mismatch'
 
 validate_flavor() {
-  local flavor="$1" pool="$2" path="$3" shell_name="$4" row key compatibility
+  local flavor="$1" pool="$2" path="$3" shell_name="$4" row key compatibility availability schema
   row="$(jq -cer --arg flavor "$flavor" '
     [.caches[] | select(.flavor == $flavor)] | select(length == 1) | .[0]
   ' "$receipt_json")" || fallback "cache-${shell_name}-missing"
   jq -e --arg pool "$pool" --arg path "$path" '
     select(.runner_pool == $pool and .path == $path)
   ' <<< "$row" >/dev/null || fallback "cache-${shell_name}-binding-invalid"
-  key="$(jq -er '.key' <<< "$row")" || fallback "cache-${shell_name}-key-invalid"
   compatibility="$(jq -er '.compatibility' <<< "$row")" \
     || fallback "cache-${shell_name}-compatibility-invalid"
-  expected="codewire-rust-deps-v1-${pool}-${flavor}-${compatibility}-"
-  [[ "$key" == "$expected"* ]] \
-    || fallback "cache-${shell_name}-key-binding-invalid"
+  schema="$(jq -er '.schema' "$receipt_json")" || fallback 'cache-schema-invalid'
+  if [ "$schema" = 'codewire.ci-rust-cache-receipt/v1' ]; then
+    # v1 was an identity-only receipt. Preserve it for canonical producer reuse,
+    # but do not let consumers treat it as a proof that an archive exists.
+    availability=''
+    key="$(jq -er '.key' <<< "$row")" || fallback "cache-${shell_name}-key-invalid"
+  else
+    availability="$(jq -er '.available | if type == "boolean" then tostring else error("availability") end' <<< "$row")" \
+      || fallback "cache-${shell_name}-availability-invalid"
+    if [ "$availability" = true ]; then
+      key="$(jq -er '.key' <<< "$row")" || fallback "cache-${shell_name}-key-invalid"
+    else
+      key=''
+    fi
+  fi
+  if [ -n "$key" ]; then
+    expected="codewire-rust-deps-v1-${pool}-${flavor}-${compatibility}-"
+    [[ "$key" == "$expected"* ]] \
+      || fallback "cache-${shell_name}-key-binding-invalid"
+  fi
   cache_keys[$shell_name]="$key"
   cache_compatibilities[$shell_name]="$compatibility"
+  cache_availability[$shell_name]="$availability"
 }
 
 validate_flavor host-debug generic target/ci-cache/host-debug host_debug

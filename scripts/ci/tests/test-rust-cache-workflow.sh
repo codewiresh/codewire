@@ -27,12 +27,22 @@ if sed -n '/^permissions:/,/^[^ ]/p' "$WORKFLOW" | grep -Fq 'actions: write'; th
 fi
 [ "$(grep -Fc "uses: actions/cache/save@$CACHE_ACTION" "$WORKFLOW")" -eq 5 ] \
   || fail 'each flavor must use the pinned cache save action exactly once'
-if grep -Eq 'actions/cache/restore|restore-keys:' "$WORKFLOW"; then
-  fail 'producer must not use mutable or prefix cache restoration'
+[ "$(grep -Fc "uses: actions/cache/restore@$CACHE_ACTION" "$WORKFLOW")" -eq 10 ] \
+  || fail 'each producer must probe before and after saving its exact key'
+[ "$(grep -Fc "uses: actions/cache/restore@$CACHE_ACTION" "$CI_WORKFLOW")" -eq 7 ] \
+  || fail 'consumer jobs must restore their exact cache flavors'
+if grep -Eq 'restore-keys:' "$WORKFLOW" "$CI_WORKFLOW"; then
+  fail 'cache restoration must never use mutable or prefix keys'
 fi
-if grep -Fq 'codewire-rust-deps-v1-' "$CI_WORKFLOW"; then
-  fail 'consumer activation leaked into the producer PR'
+if grep -Fq "uses: actions/cache/save@$CACHE_ACTION" "$CI_WORKFLOW"; then
+  fail 'PR-capable consumer workflow must not save Rust dependency caches'
 fi
+grep -Fq 'lookup-only: true' "$WORKFLOW" \
+  || fail 'producer availability must be proven by exact lookup'
+grep -Fq 'rust_cache_cw_cross_ci_available' "$CI_WORKFLOW" \
+  || fail 'consumer activation is not receipt-availability bound'
+grep -Fq 'rust_cache_cw_cross_ci_receipt_compatibility' "$CI_WORKFLOW" \
+  || fail 'consumer activation is not compatibility bound'
 grep -Fq 'name: Publish Rust cache receipt' "$WORKFLOW" \
   || fail 'workflow omits its provenance receipt'
 grep -Fq 'scripts/ci/plan/planner.py' "$WORKFLOW" \
@@ -225,6 +235,8 @@ FAKE_ZIGBUILD
     mkdir -p "$output/.fingerprint/codewire-cli-bin-123" "$output/deps"
     : > "$output/deps/libcodewire_cli_bin_fixture.rlib"
     : > "$output/deps/libserde_fixture.rlib"
+    printf '#!/usr/bin/env sh\nexit 0\n' > "$output/cw"
+    chmod +x "$output/cw"
     ;;
   clean)
     profile="$(profile_for_args "$@")"
@@ -264,6 +276,16 @@ FAKE_ZIGBUILD
 esac
 FAKE_CARGO
 chmod +x "$work/bin/cargo"
+cat > "$work/bin/rustc" <<'FAKE_RUSTC'
+#!/usr/bin/env bash
+set -euo pipefail
+if [ "${1:-}" = -vV ]; then
+  printf 'host: x86_64-unknown-linux-gnu\n'
+  exit 0
+fi
+exit 2
+FAKE_RUSTC
+chmod +x "$work/bin/rustc"
 empty_cargo_home="$work/empty-cargo-home"
 mkdir -p "$empty_cargo_home"
 for fixture_flavor in host-debug host-ci kind-ci cw-cross-ci desktop-release; do
@@ -295,5 +317,19 @@ grep -Fq -- '-p codewire-platform-native' "$work/desktop-release.cargo.log" \
   || fail 'desktop pruning omitted its excluded platform path dependency'
 grep -Fq -- '-p codewire-ui' "$work/desktop-release.cargo.log" \
   || fail 'desktop pruning omitted its excluded UI path dependency'
+
+private_cw_target="$work/private-cw-target"
+private_cw_dist="$work/private-cw-dist"
+PATH="$work/bin:$PATH" CARGO_TARGET_DIR="$private_cw_target" \
+  CW_RELEASE_PROFILE=ci \
+  CW_RELEASE_BUILD_CMD='cargo zigbuild' \
+  CW_RELEASE_REQUIRE_SIGNATURE=0 \
+  CW_RELEASE_TARGETS='x86_64-unknown-linux-musl' \
+  CW_RELEASE_DIST_DIR="$private_cw_dist" \
+  "$ROOT/scripts/ci/release/package-cw-release.sh" v0.0.0-ci >/dev/null
+test -x "$private_cw_target/x86_64-unknown-linux-musl/ci/cw" \
+  || fail 'CW packaging ignored its private Cargo target directory'
+test -f "$private_cw_dist/cw-v0.0.0-ci-x86_64-unknown-linux-musl" \
+  || fail 'CW packaging did not copy the private-target binary'
 
 echo 'Rust cache workflow contract: OK'

@@ -32,21 +32,36 @@ receipt_line="$(env \
   CODEWIRE_CACHE_HEAD_COMMIT="$head_sha" \
   CODEWIRE_CACHE_HEAD_TREE="$head_tree" \
   CODEWIRE_RUST_CACHE_HOST_DEBUG_COMPATIBILITY="$compatibility" \
+  CODEWIRE_RUST_CACHE_HOST_DEBUG_AVAILABLE=true \
   CODEWIRE_RUST_CACHE_HOST_DEBUG_KEY="$(key generic host-debug)" \
   CODEWIRE_RUST_CACHE_HOST_CI_COMPATIBILITY="$compatibility" \
+  CODEWIRE_RUST_CACHE_HOST_CI_AVAILABLE=true \
   CODEWIRE_RUST_CACHE_HOST_CI_KEY="$(key generic host-ci)" \
   CODEWIRE_RUST_CACHE_KIND_CI_COMPATIBILITY="$compatibility" \
-  CODEWIRE_RUST_CACHE_KIND_CI_KEY="$(key kind kind-ci)" \
+  CODEWIRE_RUST_CACHE_KIND_CI_AVAILABLE=false \
+  CODEWIRE_RUST_CACHE_KIND_CI_KEY='' \
   CODEWIRE_RUST_CACHE_CW_CROSS_CI_COMPATIBILITY="$compatibility" \
+  CODEWIRE_RUST_CACHE_CW_CROSS_CI_AVAILABLE=true \
   CODEWIRE_RUST_CACHE_CW_CROSS_CI_KEY="$(key generic cw-cross-ci)" \
   CODEWIRE_RUST_CACHE_DESKTOP_RELEASE_COMPATIBILITY="$compatibility" \
+  CODEWIRE_RUST_CACHE_DESKTOP_RELEASE_AVAILABLE=true \
   CODEWIRE_RUST_CACHE_DESKTOP_RELEASE_KEY="$(key generic desktop-release)" \
   python3 "$ROOT/scripts/ci/receipts/emit-rust-cache-receipt.py")"
 [[ "$receipt_line" == CODEWIRE_CI_RUST_CACHE_RECEIPT=* ]] \
   || { echo 'emitter omitted receipt' >&2; exit 1; }
 tampered_json="$(printf '%s' "${receipt_line#CODEWIRE_CI_RUST_CACHE_RECEIPT=}" \
-  | base64 --decode | jq -c '.caches[0].max_bytes = 1')"
+  | base64 --decode | jq -c '.caches[0].available = true | .caches[0].key = null')"
 tampered_line="CODEWIRE_CI_RUST_CACHE_RECEIPT=$(printf '%s' "$tampered_json" | base64 -w0)"
+legacy_json="$(printf '%s' "${receipt_line#CODEWIRE_CI_RUST_CACHE_RECEIPT=}" \
+  | base64 --decode \
+  | jq -c '
+      .schema = "codewire.ci-rust-cache-receipt/v1"
+      | .caches |= map(
+          .key = "codewire-rust-deps-v1-\(.runner_pool)-\(.flavor)-\(.compatibility)-0123456789abcdef0123456789abcdef"
+          | del(.available)
+        )
+    ')"
+legacy_line="CODEWIRE_CI_RUST_CACHE_RECEIPT=$(printf '%s' "$legacy_json" | base64 -w0)"
 
 cat > "$TMP/bin/curl" <<'MOCK'
 #!/usr/bin/env bash
@@ -84,6 +99,7 @@ run_verifier() {
   local mode="$1" output="$2"
   local selected_receipt="$receipt_line"
   [ "$mode" != tampered ] || selected_receipt="$tampered_line"
+  [ "$mode" != legacy ] || selected_receipt="$legacy_line"
   [ -x "$TMP/bin/curl" ] || { echo 'fake curl disappeared' >&2; exit 1; }
   (cd "$repo" && env \
     CODEWIRE_CURL_BIN="$TMP/bin/curl" \
@@ -100,6 +116,14 @@ run_verifier() {
 run_verifier valid "$TMP/accepted"
 grep -Fxq 'rust_cache_receipt=accepted' "$TMP/accepted"
 grep -Fxq "rust_cache_host_ci_key=$(key generic host-ci)" "$TMP/accepted"
+grep -Fxq 'rust_cache_host_ci_available=true' "$TMP/accepted"
+grep -Fxq 'rust_cache_kind_ci_available=false' "$TMP/accepted"
+grep -Fxq 'rust_cache_kind_ci_key=' "$TMP/accepted"
+
+run_verifier legacy "$TMP/legacy"
+grep -Fxq 'rust_cache_receipt=accepted' "$TMP/legacy"
+grep -Fxq 'rust_cache_host_ci_available=' "$TMP/legacy"
+grep -Fxq "rust_cache_kind_ci_key=$(key kind kind-ci)" "$TMP/legacy"
 
 run_verifier failed "$TMP/fallback"
 grep -Fxq 'rust_cache_receipt=fallback' "$TMP/fallback"

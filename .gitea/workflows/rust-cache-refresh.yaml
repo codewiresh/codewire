@@ -88,31 +88,62 @@ jobs:
       contents: read
       actions: write
     outputs:
-      key: ${{ steps.key.outputs.key }}
+      key: ${{ steps.availability.outputs.key }}
+      available: ${{ steps.availability.outputs.available }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
       - name: Select exact key
         id: key
         run: scripts/ci/cache/select-rust-cache-key.sh host-debug generic '${{ needs.plan.outputs.host_debug_compatibility }}' '${{ needs.plan.outputs.previous_host_debug_compatibility }}' '${{ needs.plan.outputs.previous_host_debug_key }}'
+      - name: Probe immutable exact cache
+        id: probe
+        uses: actions/cache/restore@6849a6489940f00c2f30c0fb92c6274307ccb58a
+        with:
+          path: target/ci-cache/host-debug
+          key: ${{ steps.key.outputs.key }}
+          lookup-only: true
       - uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b
-        if: ${{ steps.key.outputs.refresh == 'true' }}
+        if: ${{ steps.probe.outputs.cache-hit == '' }}
         with:
           toolchain: 1.91.1
           components: rustfmt,clippy
       - name: Verify immutable runner contract
-        if: ${{ steps.key.outputs.refresh == 'true' }}
+        if: ${{ steps.probe.outputs.cache-hit == '' }}
         run: scripts/ci/setup/assert-ci-runner-image.sh
       - name: Build dependency cache
-        if: ${{ steps.key.outputs.refresh == 'true' }}
+        if: ${{ steps.probe.outputs.cache-hit == '' }}
         env:
           CARGO_TARGET_DIR: ${{ github.workspace }}/target/ci-cache/host-debug
         run: scripts/ci/cache/prepare-rust-dependency-cache.sh host-debug
       - name: Save immutable exact cache
-        if: ${{ steps.key.outputs.refresh == 'true' }}
+        if: ${{ steps.probe.outputs.cache-hit == '' }}
         uses: actions/cache/save@6849a6489940f00c2f30c0fb92c6274307ccb58a
         with:
           path: target/ci-cache/host-debug
           key: ${{ steps.key.outputs.key }}
+      - name: Probe saved immutable exact cache
+        id: post-save
+        if: ${{ steps.probe.outputs.cache-hit == '' }}
+        uses: actions/cache/restore@6849a6489940f00c2f30c0fb92c6274307ccb58a
+        with:
+          path: target/ci-cache/host-debug
+          key: ${{ steps.key.outputs.key }}
+          lookup-only: true
+      - name: Record exact cache availability
+        id: availability
+        env:
+          CACHE_KEY: ${{ steps.key.outputs.key }}
+          CACHE_PROBE_HIT: ${{ steps.probe.outputs.cache-hit }}
+          POST_SAVE_CACHE_HIT: ${{ steps.post-save.outputs.cache-hit }}
+        run: |
+          set -euo pipefail
+          case "$CACHE_PROBE_HIT" in
+            true) printf 'key=%s\navailable=true\n' "$CACHE_KEY" >> "$GITHUB_OUTPUT" ;;
+            false) printf 'key=\navailable=false\n' >> "$GITHUB_OUTPUT" ;;
+            '') [ "$POST_SAVE_CACHE_HIT" = true ] || { echo 'immutable cache save was not proven by an exact lookup' >&2; exit 1; }
+                printf 'key=%s\navailable=true\n' "$CACHE_KEY" >> "$GITHUB_OUTPUT" ;;
+            *) echo "unexpected exact cache probe state" >&2; exit 1 ;;
+          esac
 
   host-ci:
     name: Refresh Rust cache / host CI
@@ -122,30 +153,61 @@ jobs:
       contents: read
       actions: write
     outputs:
-      key: ${{ steps.key.outputs.key }}
+      key: ${{ steps.availability.outputs.key }}
+      available: ${{ steps.availability.outputs.available }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
       - name: Select exact key
         id: key
         run: scripts/ci/cache/select-rust-cache-key.sh host-ci generic '${{ needs.plan.outputs.host_ci_compatibility }}' '${{ needs.plan.outputs.previous_host_ci_compatibility }}' '${{ needs.plan.outputs.previous_host_ci_key }}'
+      - name: Probe immutable exact cache
+        id: probe
+        uses: actions/cache/restore@6849a6489940f00c2f30c0fb92c6274307ccb58a
+        with:
+          path: target/ci-cache/host-ci
+          key: ${{ steps.key.outputs.key }}
+          lookup-only: true
       - uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b
-        if: ${{ steps.key.outputs.refresh == 'true' }}
+        if: ${{ steps.probe.outputs.cache-hit == '' }}
         with:
           toolchain: 1.91.1
       - name: Verify immutable runner contract
-        if: ${{ steps.key.outputs.refresh == 'true' }}
+        if: ${{ steps.probe.outputs.cache-hit == '' }}
         run: scripts/ci/setup/assert-ci-runner-image.sh
       - name: Build dependency cache
-        if: ${{ steps.key.outputs.refresh == 'true' }}
+        if: ${{ steps.probe.outputs.cache-hit == '' }}
         env:
           CARGO_TARGET_DIR: ${{ github.workspace }}/target/ci-cache/host-ci
         run: scripts/ci/cache/prepare-rust-dependency-cache.sh host-ci
       - name: Save immutable exact cache
-        if: ${{ steps.key.outputs.refresh == 'true' }}
+        if: ${{ steps.probe.outputs.cache-hit == '' }}
         uses: actions/cache/save@6849a6489940f00c2f30c0fb92c6274307ccb58a
         with:
           path: target/ci-cache/host-ci
           key: ${{ steps.key.outputs.key }}
+      - name: Probe saved immutable exact cache
+        id: post-save
+        if: ${{ steps.probe.outputs.cache-hit == '' }}
+        uses: actions/cache/restore@6849a6489940f00c2f30c0fb92c6274307ccb58a
+        with:
+          path: target/ci-cache/host-ci
+          key: ${{ steps.key.outputs.key }}
+          lookup-only: true
+      - name: Record exact cache availability
+        id: availability
+        env:
+          CACHE_KEY: ${{ steps.key.outputs.key }}
+          CACHE_PROBE_HIT: ${{ steps.probe.outputs.cache-hit }}
+          POST_SAVE_CACHE_HIT: ${{ steps.post-save.outputs.cache-hit }}
+        run: |
+          set -euo pipefail
+          case "$CACHE_PROBE_HIT" in
+            true) printf 'key=%s\navailable=true\n' "$CACHE_KEY" >> "$GITHUB_OUTPUT" ;;
+            false) printf 'key=\navailable=false\n' >> "$GITHUB_OUTPUT" ;;
+            '') [ "$POST_SAVE_CACHE_HIT" = true ] || { echo 'immutable cache save was not proven by an exact lookup' >&2; exit 1; }
+                printf 'key=%s\navailable=true\n' "$CACHE_KEY" >> "$GITHUB_OUTPUT" ;;
+            *) echo "unexpected exact cache probe state" >&2; exit 1 ;;
+          esac
 
   kind-ci:
     name: Refresh Rust cache / Kind CI
@@ -155,30 +217,61 @@ jobs:
       contents: read
       actions: write
     outputs:
-      key: ${{ steps.key.outputs.key }}
+      key: ${{ steps.availability.outputs.key }}
+      available: ${{ steps.availability.outputs.available }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
       - name: Select exact key
         id: key
         run: scripts/ci/cache/select-rust-cache-key.sh kind-ci kind '${{ needs.plan.outputs.kind_ci_compatibility }}' '${{ needs.plan.outputs.previous_kind_ci_compatibility }}' '${{ needs.plan.outputs.previous_kind_ci_key }}'
+      - name: Probe immutable exact cache
+        id: probe
+        uses: actions/cache/restore@6849a6489940f00c2f30c0fb92c6274307ccb58a
+        with:
+          path: target/ci-cache/kind-ci
+          key: ${{ steps.key.outputs.key }}
+          lookup-only: true
       - uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b
-        if: ${{ steps.key.outputs.refresh == 'true' }}
+        if: ${{ steps.probe.outputs.cache-hit == '' }}
         with:
           toolchain: 1.91.1
       - name: Verify immutable runner contract
-        if: ${{ steps.key.outputs.refresh == 'true' }}
+        if: ${{ steps.probe.outputs.cache-hit == '' }}
         run: scripts/ci/setup/assert-ci-runner-image.sh
       - name: Build dependency cache
-        if: ${{ steps.key.outputs.refresh == 'true' }}
+        if: ${{ steps.probe.outputs.cache-hit == '' }}
         env:
           CARGO_TARGET_DIR: ${{ github.workspace }}/target/ci-cache/kind-ci
         run: scripts/ci/cache/prepare-rust-dependency-cache.sh kind-ci
       - name: Save immutable exact cache
-        if: ${{ steps.key.outputs.refresh == 'true' }}
+        if: ${{ steps.probe.outputs.cache-hit == '' }}
         uses: actions/cache/save@6849a6489940f00c2f30c0fb92c6274307ccb58a
         with:
           path: target/ci-cache/kind-ci
           key: ${{ steps.key.outputs.key }}
+      - name: Probe saved immutable exact cache
+        id: post-save
+        if: ${{ steps.probe.outputs.cache-hit == '' }}
+        uses: actions/cache/restore@6849a6489940f00c2f30c0fb92c6274307ccb58a
+        with:
+          path: target/ci-cache/kind-ci
+          key: ${{ steps.key.outputs.key }}
+          lookup-only: true
+      - name: Record exact cache availability
+        id: availability
+        env:
+          CACHE_KEY: ${{ steps.key.outputs.key }}
+          CACHE_PROBE_HIT: ${{ steps.probe.outputs.cache-hit }}
+          POST_SAVE_CACHE_HIT: ${{ steps.post-save.outputs.cache-hit }}
+        run: |
+          set -euo pipefail
+          case "$CACHE_PROBE_HIT" in
+            true) printf 'key=%s\navailable=true\n' "$CACHE_KEY" >> "$GITHUB_OUTPUT" ;;
+            false) printf 'key=\navailable=false\n' >> "$GITHUB_OUTPUT" ;;
+            '') [ "$POST_SAVE_CACHE_HIT" = true ] || { echo 'immutable cache save was not proven by an exact lookup' >&2; exit 1; }
+                printf 'key=%s\navailable=true\n' "$CACHE_KEY" >> "$GITHUB_OUTPUT" ;;
+            *) echo "unexpected exact cache probe state" >&2; exit 1 ;;
+          esac
 
   cw-cross-ci:
     name: Refresh Rust cache / cw cross-target CI
@@ -188,22 +281,30 @@ jobs:
       contents: read
       actions: write
     outputs:
-      key: ${{ steps.key.outputs.key }}
+      key: ${{ steps.availability.outputs.key }}
+      available: ${{ steps.availability.outputs.available }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
       - name: Select exact key
         id: key
         run: scripts/ci/cache/select-rust-cache-key.sh cw-cross-ci generic '${{ needs.plan.outputs.cw_cross_ci_compatibility }}' '${{ needs.plan.outputs.previous_cw_cross_ci_compatibility }}' '${{ needs.plan.outputs.previous_cw_cross_ci_key }}'
+      - name: Probe immutable exact cache
+        id: probe
+        uses: actions/cache/restore@6849a6489940f00c2f30c0fb92c6274307ccb58a
+        with:
+          path: target/ci-cache/cw-cross-ci
+          key: ${{ steps.key.outputs.key }}
+          lookup-only: true
       - uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b
-        if: ${{ steps.key.outputs.refresh == 'true' }}
+        if: ${{ steps.probe.outputs.cache-hit == '' }}
         with:
           toolchain: 1.91.1
           targets: x86_64-unknown-linux-musl,aarch64-unknown-linux-gnu,x86_64-apple-darwin,aarch64-apple-darwin
       - name: Verify immutable runner contract
-        if: ${{ steps.key.outputs.refresh == 'true' }}
+        if: ${{ steps.probe.outputs.cache-hit == '' }}
         run: scripts/ci/setup/assert-ci-runner-image.sh
       - name: Set up pinned Zig
-        if: ${{ steps.key.outputs.refresh == 'true' }}
+        if: ${{ steps.probe.outputs.cache-hit == '' }}
         run: |
           set -euo pipefail
           curl -fsSLo zig.tar.xz \
@@ -212,16 +313,39 @@ jobs:
           tar -xf zig.tar.xz
           echo "$PWD/zig-x86_64-linux-${ZIG_VERSION}" >> "$GITHUB_PATH"
       - name: Build dependency cache
-        if: ${{ steps.key.outputs.refresh == 'true' }}
+        if: ${{ steps.probe.outputs.cache-hit == '' }}
         env:
           CARGO_TARGET_DIR: ${{ github.workspace }}/target/ci-cache/cw-cross-ci
         run: scripts/ci/cache/prepare-rust-dependency-cache.sh cw-cross-ci
       - name: Save immutable exact cache
-        if: ${{ steps.key.outputs.refresh == 'true' }}
+        if: ${{ steps.probe.outputs.cache-hit == '' }}
         uses: actions/cache/save@6849a6489940f00c2f30c0fb92c6274307ccb58a
         with:
           path: target/ci-cache/cw-cross-ci
           key: ${{ steps.key.outputs.key }}
+      - name: Probe saved immutable exact cache
+        id: post-save
+        if: ${{ steps.probe.outputs.cache-hit == '' }}
+        uses: actions/cache/restore@6849a6489940f00c2f30c0fb92c6274307ccb58a
+        with:
+          path: target/ci-cache/cw-cross-ci
+          key: ${{ steps.key.outputs.key }}
+          lookup-only: true
+      - name: Record exact cache availability
+        id: availability
+        env:
+          CACHE_KEY: ${{ steps.key.outputs.key }}
+          CACHE_PROBE_HIT: ${{ steps.probe.outputs.cache-hit }}
+          POST_SAVE_CACHE_HIT: ${{ steps.post-save.outputs.cache-hit }}
+        run: |
+          set -euo pipefail
+          case "$CACHE_PROBE_HIT" in
+            true) printf 'key=%s\navailable=true\n' "$CACHE_KEY" >> "$GITHUB_OUTPUT" ;;
+            false) printf 'key=\navailable=false\n' >> "$GITHUB_OUTPUT" ;;
+            '') [ "$POST_SAVE_CACHE_HIT" = true ] || { echo 'immutable cache save was not proven by an exact lookup' >&2; exit 1; }
+                printf 'key=%s\navailable=true\n' "$CACHE_KEY" >> "$GITHUB_OUTPUT" ;;
+            *) echo "unexpected exact cache probe state" >&2; exit 1 ;;
+          esac
 
   desktop-release:
     name: Refresh Rust cache / desktop release
@@ -231,30 +355,61 @@ jobs:
       contents: read
       actions: write
     outputs:
-      key: ${{ steps.key.outputs.key }}
+      key: ${{ steps.availability.outputs.key }}
+      available: ${{ steps.availability.outputs.available }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
       - name: Select exact key
         id: key
         run: scripts/ci/cache/select-rust-cache-key.sh desktop-release generic '${{ needs.plan.outputs.desktop_release_compatibility }}' '${{ needs.plan.outputs.previous_desktop_release_compatibility }}' '${{ needs.plan.outputs.previous_desktop_release_key }}'
+      - name: Probe immutable exact cache
+        id: probe
+        uses: actions/cache/restore@6849a6489940f00c2f30c0fb92c6274307ccb58a
+        with:
+          path: target/ci-cache/desktop-release
+          key: ${{ steps.key.outputs.key }}
+          lookup-only: true
       - uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b
-        if: ${{ steps.key.outputs.refresh == 'true' }}
+        if: ${{ steps.probe.outputs.cache-hit == '' }}
         with:
           toolchain: 1.91.1
       - name: Verify immutable runner contract
-        if: ${{ steps.key.outputs.refresh == 'true' }}
+        if: ${{ steps.probe.outputs.cache-hit == '' }}
         run: scripts/ci/setup/assert-ci-runner-image.sh
       - name: Build dependency cache
-        if: ${{ steps.key.outputs.refresh == 'true' }}
+        if: ${{ steps.probe.outputs.cache-hit == '' }}
         env:
           CARGO_TARGET_DIR: ${{ github.workspace }}/target/ci-cache/desktop-release
         run: scripts/ci/cache/prepare-rust-dependency-cache.sh desktop-release
       - name: Save immutable exact cache
-        if: ${{ steps.key.outputs.refresh == 'true' }}
+        if: ${{ steps.probe.outputs.cache-hit == '' }}
         uses: actions/cache/save@6849a6489940f00c2f30c0fb92c6274307ccb58a
         with:
           path: target/ci-cache/desktop-release
           key: ${{ steps.key.outputs.key }}
+      - name: Probe saved immutable exact cache
+        id: post-save
+        if: ${{ steps.probe.outputs.cache-hit == '' }}
+        uses: actions/cache/restore@6849a6489940f00c2f30c0fb92c6274307ccb58a
+        with:
+          path: target/ci-cache/desktop-release
+          key: ${{ steps.key.outputs.key }}
+          lookup-only: true
+      - name: Record exact cache availability
+        id: availability
+        env:
+          CACHE_KEY: ${{ steps.key.outputs.key }}
+          CACHE_PROBE_HIT: ${{ steps.probe.outputs.cache-hit }}
+          POST_SAVE_CACHE_HIT: ${{ steps.post-save.outputs.cache-hit }}
+        run: |
+          set -euo pipefail
+          case "$CACHE_PROBE_HIT" in
+            true) printf 'key=%s\navailable=true\n' "$CACHE_KEY" >> "$GITHUB_OUTPUT" ;;
+            false) printf 'key=\navailable=false\n' >> "$GITHUB_OUTPUT" ;;
+            '') [ "$POST_SAVE_CACHE_HIT" = true ] || { echo 'immutable cache save was not proven by an exact lookup' >&2; exit 1; }
+                printf 'key=%s\navailable=true\n' "$CACHE_KEY" >> "$GITHUB_OUTPUT" ;;
+            *) echo "unexpected exact cache probe state" >&2; exit 1 ;;
+          esac
 
   receipt:
     name: Publish Rust cache receipt
@@ -267,13 +422,18 @@ jobs:
           CODEWIRE_CACHE_HEAD_COMMIT: ${{ needs.plan.outputs.head_commit }}
           CODEWIRE_CACHE_HEAD_TREE: ${{ needs.plan.outputs.head_tree }}
           CODEWIRE_RUST_CACHE_HOST_DEBUG_COMPATIBILITY: ${{ needs.plan.outputs.host_debug_compatibility }}
+          CODEWIRE_RUST_CACHE_HOST_DEBUG_AVAILABLE: ${{ needs.host-debug.outputs.available }}
           CODEWIRE_RUST_CACHE_HOST_DEBUG_KEY: ${{ needs.host-debug.outputs.key }}
           CODEWIRE_RUST_CACHE_HOST_CI_COMPATIBILITY: ${{ needs.plan.outputs.host_ci_compatibility }}
+          CODEWIRE_RUST_CACHE_HOST_CI_AVAILABLE: ${{ needs.host-ci.outputs.available }}
           CODEWIRE_RUST_CACHE_HOST_CI_KEY: ${{ needs.host-ci.outputs.key }}
           CODEWIRE_RUST_CACHE_KIND_CI_COMPATIBILITY: ${{ needs.plan.outputs.kind_ci_compatibility }}
+          CODEWIRE_RUST_CACHE_KIND_CI_AVAILABLE: ${{ needs.kind-ci.outputs.available }}
           CODEWIRE_RUST_CACHE_KIND_CI_KEY: ${{ needs.kind-ci.outputs.key }}
           CODEWIRE_RUST_CACHE_CW_CROSS_CI_COMPATIBILITY: ${{ needs.plan.outputs.cw_cross_ci_compatibility }}
+          CODEWIRE_RUST_CACHE_CW_CROSS_CI_AVAILABLE: ${{ needs.cw-cross-ci.outputs.available }}
           CODEWIRE_RUST_CACHE_CW_CROSS_CI_KEY: ${{ needs.cw-cross-ci.outputs.key }}
           CODEWIRE_RUST_CACHE_DESKTOP_RELEASE_COMPATIBILITY: ${{ needs.plan.outputs.desktop_release_compatibility }}
+          CODEWIRE_RUST_CACHE_DESKTOP_RELEASE_AVAILABLE: ${{ needs.desktop-release.outputs.available }}
           CODEWIRE_RUST_CACHE_DESKTOP_RELEASE_KEY: ${{ needs.desktop-release.outputs.key }}
         run: python3 scripts/ci/receipts/emit-rust-cache-receipt.py

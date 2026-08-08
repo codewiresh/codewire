@@ -10,7 +10,8 @@ CARGO_TARGET_DIR="$(
   "$ROOT/scripts/ci/verify/resolve-cargo-target-dir.sh" "$ROOT"
 )"
 export CARGO_TARGET_DIR
-CARGO_CI_DIR="$CARGO_TARGET_DIR/ci"
+CARGO_CI_TARGET_DIR="${CODEWIRE_CARGO_CI_TARGET_DIR:-$CARGO_TARGET_DIR}"
+CARGO_CI_DIR="$CARGO_CI_TARGET_DIR/ci"
 RUN_DIR="${RUN_DIR:-$ROOT/.tmp/codewire-product-integration-${GITHUB_RUN_ID:-local-$$}}"
 DATABASE_URL_EXPLICIT=false
 DATABASE_URL_RUST_EXPLICIT=false
@@ -48,6 +49,10 @@ log() {
 
 selected() {
   [[ "$SELECTION" == *"|$1|"* ]]
+}
+
+cargo_ci() {
+  CARGO_TARGET_DIR="$CARGO_CI_TARGET_DIR" cargo "$@"
 }
 
 dump_logs() {
@@ -134,7 +139,7 @@ stop_proc() {
 reset_schema() {
   log "resetting Postgres schema"
   BILLING_FIXTURE_LOADED=false
-  cargo build --locked --profile ci -p codewire-server-core --bin codewire-db-migrate
+  cargo_ci build --locked --profile ci -p codewire-server-core --bin codewire-db-migrate
   psql "$DATABASE_URL" -v ON_ERROR_STOP=1 \
     -c 'DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public;'
   DATABASE_URL="$DATABASE_URL_RUST" "$CARGO_CI_DIR/codewire-db-migrate"
@@ -181,7 +186,7 @@ run_database() {
 
   logfile="$RUN_DIR/mesh-authorization-receiver.log"
   DATABASE_URL="$DATABASE_URL_RUST" \
-    cargo test --profile ci -p codewire-orchestration --lib \
+    cargo_ci test --profile ci -p codewire-orchestration --lib \
       connect::mesh_authorization::tests::generated_mesh_authorization_service_enforces_the_canonical_matrix \
       -- --ignored --exact --nocapture | tee "$logfile"
   assert_passed_count "Mesh authorization receiver matrix" "$logfile" 1
@@ -311,11 +316,11 @@ build_selected_services() {
   fi
   log "Cargo target directory: $CARGO_TARGET_DIR"
   if [ "${#packages[@]}" -gt 0 ]; then
-    cargo build --locked --profile ci "${packages[@]}"
+    cargo_ci build --locked --profile ci "${packages[@]}"
   fi
   if selected service_orchestration; then
     selected service_temporal && orchestration_bins+=( --bin temporal-smoke )
-    cargo build --locked --profile ci -p codewire-orchestration \
+    cargo_ci build --locked --profile ci -p codewire-orchestration \
       "${orchestration_bins[@]}" --features kind-e2e
   fi
 }
@@ -346,7 +351,7 @@ run_idp() {
   stop_proc idp
 
   DATABASE_URL="$DATABASE_URL_RUST" \
-    cargo test --profile ci -p codewire-idp --test db_flow -- --nocapture \
+    cargo_ci test --profile ci -p codewire-idp --test db_flow -- --nocapture \
     | tee "$logfile"
   if grep -q 'DATABASE_URL unset' "$logfile"; then
     echo "::error::idp db_flow skipped"
@@ -356,7 +361,7 @@ run_idp() {
 
   logfile="$RUN_DIR/idp-rewrap-cli.log"
   DATABASE_URL="$DATABASE_URL_RUST" \
-    cargo test --profile ci -p codewire-idp --test rewrap_cli -- --nocapture \
+    cargo_ci test --profile ci -p codewire-idp --test rewrap_cli -- --nocapture \
     | tee "$logfile"
   if grep -q 'DATABASE_URL unset' "$logfile"; then
     echo "::error::idp rewrap CLI DB test skipped"
@@ -368,7 +373,7 @@ run_idp() {
 
 run_coordinator() {
   local logfile="$RUN_DIR/coordinator-protocol-auth.log"
-  DATABASE_URL="$DATABASE_URL_RUST" cargo test --profile ci \
+  DATABASE_URL="$DATABASE_URL_RUST" cargo_ci test --profile ci \
     -p codewire-coordinator --lib \
     connect::tests::production_user_credentials_match_for_connect_and_grpc \
     -- --exact --nocapture | tee "$logfile"
@@ -391,7 +396,7 @@ run_coordinator() {
     COORDINATOR_SEEDED=1 \
     COORDINATOR_USER_SESSION_TOKEN=coordinator-contract-session-token \
     COORDINATOR_SESSION_SECRET="$SESSION_SECRET" \
-    cargo test --locked --profile ci -p codewire-coordinator \
+    cargo_ci test --locked --profile ci -p codewire-coordinator \
       --test wire_contract configured_coordinator_wire_contract -- \
       --ignored --exact --nocapture | tee "$RUN_DIR/coordinator-contract.log"
   assert_passed_count \
@@ -432,7 +437,7 @@ run_billing() {
     BILLING_BASE_URL="http://127.0.0.1:${BILLING_PORT}" \
       BILLING_ADMIN_SESSION_TOKEN=contract-admin-session-token \
       BILLING_USER_SESSION_TOKEN=contract-user-session-token BILLING_SEEDED=1 \
-      cargo test --locked --profile ci -p codewire-billing \
+      cargo_ci test --locked --profile ci -p codewire-billing \
         --test wire_contract configured_billing_wire_contract \
         -- --ignored --exact --nocapture | tee "$RUN_DIR/billing-contract.log"
     assert_passed_count \
@@ -607,7 +612,7 @@ start_orchestration() {
 run_orchestration() {
   local logfile="$RUN_DIR/orchestration-activity-fencing.log"
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
-    cargo test --profile ci -p codewire-orchestration --lib \
+    cargo_ci test --profile ci -p codewire-orchestration --lib \
       'worker::' -- --ignored --nocapture | tee "$logfile"
   assert_passed_count "orchestration activity fencing matrix" "$logfile" 2
 
@@ -619,7 +624,7 @@ run_orchestration() {
     ORCHESTRATION_USER_SESSION_TOKEN=apikey-contract-user-session-token \
     ORCHESTRATION_SEEDED=1 ORCHESTRATION_KUBE_MODE=configured \
     ORCHESTRATION_CONTRACT_SCOPE=complete \
-    cargo test --locked --profile ci -p codewire-orchestration \
+    cargo_ci test --locked --profile ci -p codewire-orchestration \
       --test wire_contract --features kind-e2e \
       configured_orchestration_wire_contract -- \
       --ignored --exact --nocapture | tee "$logfile"
@@ -642,7 +647,7 @@ run_orchestration() {
     ORCHESTRATION_USER_SESSION_TOKEN=apikey-contract-user-session-token \
     ORCHESTRATION_SEEDED=1 ORCHESTRATION_KUBE_MODE=unconfigured \
     ORCHESTRATION_CONTRACT_SCOPE=runtime \
-    cargo test --locked --profile ci -p codewire-orchestration \
+    cargo_ci test --locked --profile ci -p codewire-orchestration \
       --test wire_contract --features kind-e2e \
       configured_orchestration_wire_contract -- \
       --ignored --exact --nocapture | tee "$logfile"
@@ -652,7 +657,7 @@ run_orchestration() {
 run_connect_auth_matrix() {
   local logfile="$RUN_DIR/connect-auth.log"
   DATABASE_URL="$DATABASE_URL_RUST" \
-    cargo test --profile ci -p codewire-server-core --test connect_auth \
+    cargo_ci test --profile ci -p codewire-server-core --test connect_auth \
     -- --nocapture \
     | tee "$logfile"
   if grep -q 'DATABASE_URL unset' "$logfile"; then
@@ -724,12 +729,12 @@ run_nats() {
   local logfile
   start_nats
   logfile="$RUN_DIR/coordinator-nats-kv.log"
-  NATS_URL="$NATS_URL" cargo test --profile ci -p codewire-coordinator \
+  NATS_URL="$NATS_URL" cargo_ci test --profile ci -p codewire-coordinator \
     --lib coordination_plane_round_trips_nats_and_kv -- --ignored --nocapture \
     | tee "$logfile"
   assert_passed_count "coordinator NATS/KV smoke" "$logfile" 1
   logfile="$RUN_DIR/coordinator-generated-cross-replica.log"
-  NATS_URL="$NATS_URL" cargo test --profile ci -p codewire-coordinator \
+  NATS_URL="$NATS_URL" cargo_ci test --profile ci -p codewire-coordinator \
     --lib generated_protocol_cross_replica_fanout_round_trips_over_nats \
     -- --ignored --nocapture | tee "$logfile"
   assert_passed_count "coordinator generated cross-replica smoke" "$logfile" 1

@@ -46,4 +46,16 @@ assert_resolver_failure scripts/ci/verify/run-product-verification.sh
 assert_resolver_failure scripts/ci/verify/run-integration-verification.sh
 assert_resolver_failure scripts/ci/verify/rust-stack-rehearsal.sh
 
+integration_runner="$ROOT/scripts/ci/verify/run-integration-verification.sh"
+grep -Fq 'CARGO_CI_TARGET_DIR="${CODEWIRE_CARGO_CI_TARGET_DIR:-$CARGO_TARGET_DIR}"' \
+  "$integration_runner" \
+  || fail 'integration runner does not support an isolated CI-profile target directory'
+grep -Fq 'CARGO_TARGET_DIR="$CARGO_CI_TARGET_DIR" cargo "$@"' \
+  "$integration_runner" \
+  || fail 'integration runner does not route CI-profile commands through its isolated target directory'
+if rg -n '^\s*(?:[A-Z_]+="[^" ]*"\s+)?cargo (?:build|test|check|run).*--profile ci' \
+    "$integration_runner" >/dev/null; then
+  fail 'a CI-profile integration command bypasses the isolated Cargo target directory'
+fi
+
 printf 'Cargo target runner resolver failures: green\n'

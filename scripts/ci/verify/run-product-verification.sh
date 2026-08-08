@@ -82,10 +82,12 @@ run_rust_packages() {
 
 run_detached_desktop() {
   local manifest="crates/codewire-desktop/Cargo.toml"
-  cargo fmt --manifest-path "$manifest" --check
-  cargo check --locked --manifest-path "$manifest"
-  cargo test --locked --manifest-path "$manifest"
-  scripts/ci/release/package-codewire-desktop.sh --dry-run 0.0.0-ci
+  local desktop_target_dir="${CODEWIRE_DESKTOP_CARGO_TARGET_DIR:-$CARGO_TARGET_DIR}"
+  CARGO_TARGET_DIR="$desktop_target_dir" cargo fmt --manifest-path "$manifest" --check
+  CARGO_TARGET_DIR="$desktop_target_dir" cargo check --locked --manifest-path "$manifest"
+  CARGO_TARGET_DIR="$desktop_target_dir" cargo test --locked --manifest-path "$manifest"
+  CARGO_TARGET_DIR="$desktop_target_dir" \
+    scripts/ci/release/package-codewire-desktop.sh --dry-run 0.0.0-ci
 }
 
 has_root_rust_selection() {
