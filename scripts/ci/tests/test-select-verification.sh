@@ -261,6 +261,7 @@ run_paths_case retired_desktop_workflow pull_request refs/pull/405/head false \
   'policy' .gitea/workflows/desktop-package.yaml
 run_paths_case artifact_plan_policy pull_request refs/pull/406/head false \
   'policy' scripts/ci/plan/planner.py scripts/ci/plan/artifact-graph.json
+python3 "$ROOT/scripts/ci/plan/tests/test_decision_corpus.py"
 run_paths_case rust_root pull_request refs/pull/5/head false \
   'policy rust rust_curated_locks rust_workspace' Cargo.lock
 run_paths_case curated_gateway_member_manifest pull_request refs/pull/501/head false \

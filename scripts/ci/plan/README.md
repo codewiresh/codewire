@@ -33,6 +33,24 @@ artifact-job facts used by CI. `emit-verification-receipt.py` binds a successful
 Required-verification job to its exact base, head, and tree. Post-merge reuse
 validates that identity and falls back whenever receipt-control files changed.
 
+## Decision regression corpus
+
+`decision-corpus.json` is a versioned, deterministic snapshot of representative
+trusted-selector decisions. It records only event/path inputs and the selector
+contract they currently produce: classification, capability tokens, and the
+required local mode. It deliberately does not select artifact jobs, describe
+runtime facts, validate receipts, or authorize a reduction in verification.
+
+Run its standard-library-only check directly with:
+
+```sh
+python3 scripts/ci/plan/tests/test_decision_corpus.py
+```
+
+The selector contract test runs the same check. A future decision graph may use
+the corpus as a shadow-mode regression oracle, but trusted-base policy must
+still decide PR work and unknown inputs must continue to fail closed.
+
 Canonical-main Dev deployment uses `--deployed-source-candidate`. The deploy
 workflow resolves an untrusted release document through its existing private
 credential boundary. The candidate binds that retrieval to the exact workflow

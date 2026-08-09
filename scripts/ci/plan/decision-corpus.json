@@ -1,0 +1,125 @@
+{
+  "schema": "codewire.ci-decision-corpus/v1",
+  "cases": [
+    {
+      "id": "policy-only",
+      "event": "pull_request",
+      "ref": "refs/pull/1714/head",
+      "kind_e2e_opt_in": false,
+      "paths": ["docs/dev/AGENT-WORKFLOW.md"],
+      "expected": {
+        "classification": "changed",
+        "selection_tokens": ["policy", "policy_shell_omittable"],
+        "required_local_mode": "default"
+      }
+    },
+    {
+      "id": "billing-only",
+      "event": "pull_request",
+      "ref": "refs/pull/1714/head",
+      "kind_e2e_opt_in": false,
+      "paths": ["crates/codewire-billing/src/connect/billing.rs"],
+      "expected": {
+        "classification": "changed",
+        "selection_tokens": ["policy", "policy_shell_omittable", "rust", "rust_pkg_codewire_billing", "service_billing", "service_integration"],
+        "required_local_mode": "integration"
+      }
+    },
+    {
+      "id": "cli-binary",
+      "event": "pull_request",
+      "ref": "refs/pull/1714/head",
+      "kind_e2e_opt_in": false,
+      "paths": ["crates/codewire-cli/src/commands/info.rs"],
+      "expected": {
+        "classification": "changed",
+        "selection_tokens": ["policy", "policy_shell_omittable", "rust", "rust_pkg_codewire_cli"],
+        "required_local_mode": "default"
+      }
+    },
+    {
+      "id": "reachable-cli-dependency",
+      "event": "pull_request",
+      "ref": "refs/pull/1714/head",
+      "kind_e2e_opt_in": false,
+      "paths": ["crates/codewire-client/src/lib.rs"],
+      "expected": {
+        "classification": "changed",
+        "selection_tokens": ["policy", "policy_shell_omittable", "rust", "rust_pkg_codewire_client"],
+        "required_local_mode": "default"
+      }
+    },
+    {
+      "id": "workspace-lockfile",
+      "event": "pull_request",
+      "ref": "refs/pull/1714/head",
+      "kind_e2e_opt_in": false,
+      "paths": ["Cargo.lock"],
+      "expected": {
+        "classification": "changed",
+        "selection_tokens": ["policy", "policy_shell_omittable", "rust", "rust_curated_locks", "rust_workspace"],
+        "required_local_mode": "default"
+      }
+    },
+    {
+      "id": "proto-consumer",
+      "event": "pull_request",
+      "ref": "refs/pull/1714/head",
+      "kind_e2e_opt_in": false,
+      "paths": ["proto/codewire/v1/environment.proto"],
+      "expected": {
+        "classification": "changed",
+        "selection_tokens": ["contracts", "contracts_proto", "edge_kind", "go_consumer_interop", "go_support", "policy", "policy_shell_omittable", "sdk_go", "sdk_python", "sdk_ts"],
+        "required_local_mode": "default"
+      }
+    },
+    {
+      "id": "generated-proto",
+      "event": "pull_request",
+      "ref": "refs/pull/1714/head",
+      "kind_e2e_opt_in": false,
+      "paths": ["crates/codewire-proto/codewire_descriptor.bin"],
+      "expected": {
+        "classification": "changed",
+        "selection_tokens": ["contracts", "contracts_proto", "policy", "policy_shell_omittable", "rust", "rust_pkg_codewire_proto"],
+        "required_local_mode": "default"
+      }
+    },
+    {
+      "id": "docker-input",
+      "event": "pull_request",
+      "ref": "refs/pull/1714/head",
+      "kind_e2e_opt_in": false,
+      "paths": ["deployments/docker/gateway.Dockerfile"],
+      "expected": {
+        "classification": "changed",
+        "selection_tokens": ["deploy", "edge_kind", "go_consumer_interop", "go_support", "policy", "policy_shell_omittable", "release", "runtime_confidential"],
+        "required_local_mode": "kind"
+      }
+    },
+    {
+      "id": "support-image-input",
+      "event": "pull_request",
+      "ref": "refs/pull/1714/head",
+      "kind_e2e_opt_in": false,
+      "paths": ["images/base/Dockerfile"],
+      "expected": {
+        "classification": "changed",
+        "selection_tokens": ["go_consumer_interop", "go_support", "policy", "policy_shell_omittable", "release", "runtime_confidential"],
+        "required_local_mode": "default"
+      }
+    },
+    {
+      "id": "unknown-path-fails-closed",
+      "event": "pull_request",
+      "ref": "refs/pull/1714/head",
+      "kind_e2e_opt_in": false,
+      "paths": ["unexplained/new-surface.txt"],
+      "expected": {
+        "classification": "unclassified",
+        "selection_tokens": ["contracts", "contracts_proto", "database", "deploy", "edge_kind", "go_consumer_interop", "go_support", "go_tailnet", "kind", "policy", "policy_shell", "policy_shell_omittable", "release", "runtime_confidential", "runtime_dev_smoke", "rust", "rust_curated_locks", "rust_workspace", "sdk_go", "sdk_python", "sdk_ts", "security", "security_dev_smoke_auth", "security_go", "security_idp_kek", "security_js", "service_apikey_smoke", "service_billing", "service_connectcore", "service_coordinator", "service_idp", "service_integration", "service_nats", "service_orchestration", "service_temporal", "transport", "transport_derp_contract", "transport_pkg_codewire_coordinator", "transport_pkg_codewire_daemon", "transport_pkg_codewire_derp", "transport_pkg_codewire_gateway", "transport_pkg_codewire_mesh", "transport_pkg_codewire_tailnet", "transport_pkg_codewire_udp_relay", "web"],
+        "required_local_mode": "full"
+      }
+    }
+  ]
+}
