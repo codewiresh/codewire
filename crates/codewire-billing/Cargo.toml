@@ -55,6 +55,7 @@ temporalio-client = { workspace = true }
 temporalio-macros = { workspace = true }
 temporalio-sdk-core = { workspace = true }
 temporalio-common = { workspace = true }
+temporalio-workflow = { workspace = true }
 url = { workspace = true }
 # Required in scope by the temporalio workflow/activity attribute macros.
 futures = { workspace = true }

@@ -211,7 +211,7 @@ pub async fn run_org_teardown_worker(
     .map_err(|e| anyhow::anyhow!("temporal client: {e}"))?;
 
     let worker_options = WorkerOptions::new(BILLING_TASK_QUEUE.to_string())
-        .register_workflow::<OrgTeardownWorkflow>()
+        .register_workflow::<OrgTeardownWorkflow>()?
         .register_activities(OrgTeardownActivities { pool, stripe })
         .build();
 

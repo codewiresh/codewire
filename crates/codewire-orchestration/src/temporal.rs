@@ -1204,9 +1204,9 @@ pub async fn run_temporal_worker(
     .map_err(|e| anyhow::anyhow!("temporal client: {e}"))?;
 
     let worker_options = WorkerOptions::new(task_queue.to_string())
-        .register_workflow::<EnvironmentWorkflow>()
-        .register_workflow::<PortDnsWorkflow>()
-        .register_workflow::<OrganizationDeletionWorkflow>()
+        .register_workflow::<EnvironmentWorkflow>()?
+        .register_workflow::<PortDnsWorkflow>()?
+        .register_workflow::<OrganizationDeletionWorkflow>()?
         .register_activities(EnvironmentActivities { wctx: wctx.clone() })
         .register_activities(PortDnsActivities { wctx: wctx.clone() })
         .register_activities(OrganizationDeletionActivities { wctx })
