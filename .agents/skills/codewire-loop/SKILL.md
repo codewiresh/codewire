@@ -12,18 +12,12 @@ Claude-style `/loop` command.
 ## Start The Loop
 
 1. Read the nearest `AGENTS.md` and `CLAUDE.md` before changing files.
-2. Convert the user's request into a concrete goal:
-   - objective
-   - success criteria
-   - repo(s), issue(s), branch/PR, and constraints
-   - stop conditions
-3. For a Program, the canonical Gitea issue body is the durable objective and
-   live control. Do not create, update, or require a host goal or `/goal`
-   surface for Program work. A paused, stale, missing, or expired host goal is
-   not a Program state, blocker, authority boundary, or reason to return a
-   final response. For non-Program work, a host goal may be used only when the
-   owner explicitly requests host scheduling or persistence; keep it under
-   4,000 characters and put long context in a doc or Gitea issue.
+2. Identify owning objective, success criteria, repositories, issues or
+   PRs, constraints, and stop conditions.
+3. For Program, its canonical Gitea body is the durable objective and live
+   control; host-goal state may schedule but cannot alter it. For direct work,
+   use a host goal only when explicitly requested; mirror the owning objective,
+   never an incidental subtask. Reference longer canonical context.
 4. Use a durable Gitea tracker when repository rules require one, Program is
    selected, a real collision risk needs a canonical claim, or closure depends
    on evidence across sessions. Do not create a tracker merely because normal
@@ -57,24 +51,14 @@ Default cadence:
 - Active implementation with an actionable next step: every 10 minutes.
 - Slow infra, provisioning, or external dependency work: every 30 minutes.
 
-Healthy CI is a passive exact-head attestation, not heartbeat work. Capture the
-workflow, run ID, and head SHA once. If CI is the only remaining gate, hand it
-to `tea actions runs watch <run-id> --expect-head <sha> --login noel --remote
-gitea --output ndjson`, a transition-only observer that waits outside the model
-and wakes the thread on failure, stall, or success. Keep the goal active until
-that terminal result is handled; reducing token use must never abandon the gate.
-When the watcher is unavailable, retain responsibility with sparse checks near
-the expected terminal horizon. Never use periodic model automation merely to
-narrate unchanged CI state.
-
-Starting that watcher is one model action. Once it yields a terminal session,
-do not use recurring model turns to call `write_stdin`, poll the session, or run
-parallel status queries merely to discover unchanged state. Let the watcher own
-the wait and resume on its output or process exit. If the host cannot wake the
-thread from watcher output, yield with the bound run ID and head; resume only on
-an external or user wake, at the expected terminal horizon, or for a credible
-stall. One read at such a trigger is enough unless it reveals a new actionable
-transition.
+Healthy CI is passive exact-head attestation, not heartbeat work. Bind its
+workflow, run ID, and head once. When it is the only gate, hand it to `tea
+actions runs watch <run-id> --expect-head <sha> --login noel --remote gitea
+--output ndjson`; let that observer wait outside the model and wake only on
+failure, stall, or success. Do not use recurring turns, `write_stdin`, or
+parallel queries for unchanged state. If the host cannot wake the thread,
+yield with the run and head and check once near the terminal horizon or a
+credible stall. Keep the objective active until the result is handled.
 
 If Codex app automations are unavailable, do not claim scheduling was created.
 Instead, give an explicit fallback using Codewire `cw`, cron, systemd, or a
@@ -100,7 +84,9 @@ At the start of every turn or wakeup:
    PR, CI, merge, and issue closure. When a bounded diagnostic identifies a
    repository defect and its source repair remains authorized, retain the
    claim and proceed directly to one cohesive repair. Do not stop after filing
-   its issue, reverting an invalid attempt, or producing a receipt.
+   its issue, reverting an invalid attempt, or producing a receipt. Repair an
+   incidental prerequisite only enough to unblock delivery, then return to the
+   owning objective instead of promoting it to the host goal or a workstream.
 5. Give brief progress updates during long work.
 
 At a material transition or after canonical main advances, compare the bound

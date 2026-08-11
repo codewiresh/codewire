@@ -21,13 +21,13 @@ Questions, criticism, and status requests during active work do not pause that
 objective; answer them and continue in the same turn unless the owner says to
 pause, stop, or change scope.
 
-After failure, preserve non-secret evidence and localize the failing layer
-before attribution. Retry a side effect only when a changed factor predicts a
-discriminating observation, unless canonical policy identifies a transient
-failure. An unknown result freezes only that mutation; continue read-only
-diagnosis and independent authorized work. Keep bounded diagnosis and repair
-under the same claim and admission; do not create an issue, PR, control
-transition, or authority request for each hypothesis.
+After failure, preserve non-secret evidence, localize the layer, and use the
+cheapest discriminator. An unknown result freezes only that mutation. Keep
+diagnosis, minimum incidental unblock, and repair under the owning objective
+and claim, then return to delivery; do not create an issue, PR, control
+transition, authority request, or durable follow-up per hypothesis. Promote
+follow-up only for acceptance, a material safety guard with a consumer, the
+same cost twice with a current consumer, or changed scope.
 
 Release tags, manually initiated publication or recovery, production or
 nonstandard live-state mutation, and direct credential access require explicit
@@ -63,11 +63,11 @@ Do not set, request, infer, enforce, or report goal token or time budgets.
 
 ## Noel Method
 
-Codewire is pinned to the immutable Noel Method v0.8.3 runtime pack:
+Codewire is pinned to the immutable Noel Method v0.8.5 runtime pack:
 
-- Commit: `146733c8a650e0f4e84c65fa1fab80846405acc6`
-- Manifest SHA-256: `6f67fd561a92d056a90bb051f12eafcb8abcc4b95eebfbdbe5f9fe9d280fdaa1`
-- Index: `https://raw.githubusercontent.com/noeljackson/method/v0.8.3/dist/pack/INDEX.md`
+- Commit: `24a4b5ff028c82f6fe22c8f599782d1e7d103768`
+- Manifest SHA-256: `3f1addccd9b5acaa8775c3f12d51166c2c64c75925a7763ae386103b6e79323e`
+- Index: `https://raw.githubusercontent.com/noeljackson/method/v0.8.5/dist/pack/INDEX.md`
 
 Resolve Method links only beneath that published pack. Direct mode is the
 default. Select protocols independently of repository risk:
