@@ -1505,6 +1505,12 @@ done
 
 database_services_block="$TMP/database-services.yaml"
 grep -qF 'name: Start integration Postgres' "$database_services_block"
+grep -qF 'docker inspect --format' "$database_services_block"
+grep -qF -- '--network-alias "$postgres_host"' "$database_services_block"
+if grep -qF -- '-p 127.0.0.1::5432' "$database_services_block"; then
+  echo 'database services publish Postgres onto the DinD sidecar loopback' >&2
+  exit 1
+fi
 grep -qF 'name: Run Database' "$database_services_block"
 grep -qF 'run: scripts/ci/verify/run-integration-verification.sh database' \
   "$database_services_block"

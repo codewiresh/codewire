@@ -466,11 +466,20 @@ jobs:
           container="codewire-integration-${GITHUB_RUN_ID:?}"
           echo "POSTGRES_CONTAINER=$container" >> "$GITHUB_ENV"
           docker rm -f "$container" >/dev/null 2>&1 || true
+          mapfile -t networks < <(
+            docker inspect --format '{{range $name, $_ := .NetworkSettings.Networks}}{{println $name}}{{end}}' \
+              "${HOSTNAME:?}"
+          )
+          if [ "${#networks[@]}" -ne 1 ] || [[ "${networks[0]}" =~ [^A-Za-z0-9_.-] ]]; then
+            echo 'job container must have exactly one bounded Docker network' >&2
+            exit 1
+          fi
+          postgres_host="codewire-integration-postgres"
           docker run -d --name "$container" --pids-limit 2048 \
+            --network "${networks[0]}" --network-alias "$postgres_host" \
             -e POSTGRES_USER=codewire -e POSTGRES_PASSWORD=codewire \
-            -e POSTGRES_DB=codewire -p 127.0.0.1::5432 postgres:17-alpine
-          mapping="$(docker port "$container" 5432/tcp | head -n1)"
-          echo "POSTGRES_PORT=${mapping##*:}" >> "$GITHUB_ENV"
+            -e POSTGRES_DB=codewire postgres:17-alpine
+          echo "POSTGRES_HOST=$postgres_host" >> "$GITHUB_ENV"
 
       - name: Wait for integration Postgres
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|database|') || contains(needs.verification-selection.outputs.selection, '|service_integration|')) }}
@@ -479,9 +488,9 @@ jobs:
         run: |
           set -euo pipefail
           for _ in $(seq 1 60); do
-            if psql -h 127.0.0.1 -p "$POSTGRES_PORT" -U codewire -d codewire -c 'select 1' >/dev/null 2>&1; then
-              echo "DATABASE_URL=postgres://codewire:codewire@127.0.0.1:${POSTGRES_PORT}/codewire?sslmode=disable" >> "$GITHUB_ENV"
-              echo "DATABASE_URL_RUST=postgres://codewire:codewire@127.0.0.1:${POSTGRES_PORT}/codewire" >> "$GITHUB_ENV"
+            if psql -h "$POSTGRES_HOST" -p 5432 -U codewire -d codewire -c 'select 1' >/dev/null 2>&1; then
+              echo "DATABASE_URL=postgres://codewire:codewire@${POSTGRES_HOST}:5432/codewire?sslmode=disable" >> "$GITHUB_ENV"
+              echo "DATABASE_URL_RUST=postgres://codewire:codewire@${POSTGRES_HOST}:5432/codewire" >> "$GITHUB_ENV"
               base=$((62000 + ((${GITHUB_RUN_ID:-0} % 100) * 10)))
               echo "VERIFICATION_PORT_BASE=$base" >> "$GITHUB_ENV"
               exit 0
