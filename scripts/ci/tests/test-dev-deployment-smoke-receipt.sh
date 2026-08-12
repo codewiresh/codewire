@@ -27,7 +27,7 @@ grep -Fq '[[ "$SMOKE_STATUS" == "success" ]]' "$WORKFLOW" ||
   fail "failed deploy smoke does not make the receipt visibly red"
 
 for forbidden in \
-  'actions/checkout@' \
+  'https://forgejo.example.invalid/noel/actions-checkout@' \
   'kubectl' \
   'Infisical' \
   'CODEWIRE_DEV_' \

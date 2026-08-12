@@ -1056,6 +1056,7 @@ if [ "$event_selected" = false ]; then
       scripts/ci/tests/test-claude-e2e-workflow.sh|\
       scripts/ci/tests/test-fetch-infisical-ci-secret.sh|\
       scripts/ci/tests/test-fetch-openbao-nexus-credentials.sh|\
+      scripts/ci/tests/test-forgejo-action-mirrors.sh|\
       scripts/ci/tests/test-nexus-runtime-pull-contract.sh|\
       scripts/ci/tests/test-cw-install-signature.sh|scripts/ci/tests/test-image-bundle.py|\
       scripts/ci/tests/test-mirror-git-tags.sh|scripts/ci/tests/test-publish-cw-release.sh|\

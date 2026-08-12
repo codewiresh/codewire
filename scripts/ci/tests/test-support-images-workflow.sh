@@ -31,14 +31,14 @@ if grep -q '^    paths:' "$WORKFLOW"; then
 fi
 grep -Fq '          fetch-depth: 0' <<<"$selection_job" ||
   fail 'support selection does not receive canonical history for ancestry validation'
-grep -Fq 'actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5' \
+grep -Fq 'https://forgejo.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5' \
   <<<"$selection_job" || fail 'support selection checkout action is not pinned'
-grep -Fq 'uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b' \
+grep -Fq 'uses: https://forgejo.example.invalid/noel/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b' \
   <<<"$selection_job" ||
   fail 'support selection does not install the pinned Rust toolchain for artifact classification'
 grep -Fq '          toolchain: 1.91.1' <<<"$selection_job" ||
   fail 'support selection does not use the repository Rust toolchain'
-toolchain_line="$(grep -n -m1 'uses: dtolnay/rust-toolchain@' \
+toolchain_line="$(grep -n -m1 'uses: https://forgejo.example.invalid/noel/rust-toolchain@' \
   <<<"$selection_job" | cut -d: -f1)"
 classifier_line="$(grep -n -m1 'name: Plan atomic support build from validated baseline' \
   <<<"$selection_job" | cut -d: -f1)"
