@@ -518,6 +518,7 @@ run_release() {
   scripts/ci/tests/test-build-push-image.sh
   scripts/ci/tests/test-claude-e2e-workflow.sh
   scripts/ci/tests/test-fetch-infisical-ci-secret.sh
+  scripts/ci/tests/test-fetch-openbao-nexus-credentials.sh
   scripts/ci/tests/test-verify-release-tag-ref.sh
   scripts/ci/tests/test-verify-release-tag-receipt.sh
   scripts/ci/tests/test-mirror-git-tags.sh

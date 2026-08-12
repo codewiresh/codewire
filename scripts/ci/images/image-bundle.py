@@ -20,11 +20,16 @@ FAMILIES = ("dashboard", "derp", "gateway", "services", "mesh")
 PUBLICATION_FAMILIES = FAMILIES + ("base", "workspace")
 ENVIRONMENTS = ("dev", "prod")
 IMAGE_REPOSITORIES = {
-    family: f"git.example.invalid/codewire/{family}" for family in FAMILIES
+    family: f"nexus-system-cluster.example.invalid/oci-promoted/codewire/{family}"
+    for family in FAMILIES
 }
 PUBLICATION_IMAGE_REPOSITORIES = {
-    family: f"git.example.invalid/codewire/{family}" for family in PUBLICATION_FAMILIES
+    family: f"nexus-system-cluster.example.invalid/oci-promoted/codewire/{family}"
+    for family in PUBLICATION_FAMILIES
 }
+PUBLICATION_REPOSITORY_PREFIX = (
+    "nexus-system-cluster.example.invalid/oci-promoted/codewire"
+)
 SOURCE_SHA = re.compile(r"[0-9a-f]{40}")
 DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
 
@@ -207,8 +212,8 @@ def _candidate_from_metadata(
         raise BundleError(f"unknown image family: {family}")
     if not SOURCE_SHA.fullmatch(source_sha) or source_sha == "0" * 40:
         raise BundleError("candidate source SHA must be an exact Git object ID")
-    if registry != "git.example.invalid":
-        raise BundleError("candidate registry must be exactly git.example.invalid")
+    if registry != PUBLICATION_REPOSITORY_PREFIX:
+        raise BundleError("candidate repository prefix must be exactly the promoted Nexus path")
     try:
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:

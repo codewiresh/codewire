@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-readonly source_pattern='^git\.example\.invalid/codewire/(dashboard|derp|gateway|services|mesh|base|workspace)@sha256:([0-9a-f]{64})$'
+readonly source_pattern='^nexus-system-cluster\.private\.invalid/oci-promoted/codewire/(dashboard|derp|gateway|services|mesh|base|workspace)@sha256:([0-9a-f]{64})$'
 
 usage() {
   echo "Usage: $0 SOURCE_DIGEST_REF GHCR_REPOSITORY TAG [TAG...]" >&2
@@ -22,13 +22,13 @@ if [ "${1:-}" = --support-pair ]; then
   }
   if [[ ! "$base_source_ref" =~ $source_pattern ]] \
       || [ "${BASH_REMATCH[1]:-}" != base ]; then
-    echo "Support base must be an exact git.example.invalid/codewire/base digest reference" >&2
+    echo "Support base must be an exact promoted Nexus base digest reference" >&2
     exit 1
   fi
   base_digest="sha256:${BASH_REMATCH[2]}"
   if [[ ! "$workspace_source_ref" =~ $source_pattern ]] \
       || [ "${BASH_REMATCH[1]:-}" != workspace ]; then
-    echo "Support workspace must be an exact git.example.invalid/codewire/workspace digest reference" >&2
+    echo "Support workspace must be an exact promoted Nexus workspace digest reference" >&2
     exit 1
   fi
   workspace_digest="sha256:${BASH_REMATCH[2]}"
@@ -39,7 +39,7 @@ else
   source_ref="$1"
   target_repository="$2"
   if [[ ! "$source_ref" =~ $source_pattern ]]; then
-    echo "Source must be an exact supported git.example.invalid digest reference" >&2
+    echo "Source must be an exact supported promoted Nexus digest reference" >&2
     exit 1
   fi
   image_name="${BASH_REMATCH[1]}"
@@ -51,10 +51,11 @@ else
 fi
 : "${GHCR_PUBLISH_USERNAME:?GHCR_PUBLISH_USERNAME is required}"
 
+nexus_fetcher="${OPENBAO_NEXUS_CREDENTIAL_FETCHER:-scripts/ci/setup/fetch-openbao-nexus-credentials.sh}"
 secret_fetcher="${INFISICAL_SECRET_FETCHER:-scripts/ci/setup/fetch-infisical-ci-secret.sh}"
 copy_helper="${GHCR_COPY_HELPER:-scripts/ci/images/copy-image-to-ghcr.sh}"
 skopeo_runner="${SKOPEO_RUNNER:-scripts/ci/images/run-skopeo-container.sh}"
-for helper in "$secret_fetcher" "$copy_helper"; do
+for helper in "$nexus_fetcher" "$secret_fetcher" "$copy_helper"; do
   if [ ! -x "$helper" ]; then
     echo "Required GHCR publication helper is missing or not executable" >&2
     exit 1
@@ -77,7 +78,8 @@ fi
 
 umask 077
 work="$(mktemp -d)"
-gitea_token_file="$work/gitea-registry-token"
+nexus_username_file="$work/nexus-username"
+nexus_password_file="$work/nexus-password"
 ghcr_token_file="$work/ghcr-publish-token"
 cleanup() {
   find "$work" -type f -exec shred -u {} + 2>/dev/null || true
@@ -85,11 +87,12 @@ cleanup() {
 }
 trap cleanup EXIT
 
-"$secret_fetcher" GITEA_REGISTRY_TOKEN "$gitea_token_file"
+"$nexus_fetcher" "$nexus_username_file" "$nexus_password_file"
 "$secret_fetcher" GHCR_PUBLISH_TOKEN "$ghcr_token_file"
 
 copy_image() {
-  GITEA_REGISTRY_TOKEN_FILE="$gitea_token_file" \
+  NEXUS_REGISTRY_USERNAME_FILE="$nexus_username_file" \
+  NEXUS_REGISTRY_PASSWORD_FILE="$nexus_password_file" \
   GHCR_PUBLISH_TOKEN_FILE="$ghcr_token_file" \
     "$copy_helper" "$@"
 }
@@ -122,7 +125,7 @@ if [ "$support_pair" = true ]; then
   copy_image "$base_source_ref" "$base_repository" latest
   copy_image "$workspace_source_ref" "$workspace_repository" latest
 
-  for token_file in "$gitea_token_file" "$ghcr_token_file"; do
+  for token_file in "$nexus_username_file" "$nexus_password_file" "$ghcr_token_file"; do
     shred -u "$token_file" 2>/dev/null || rm -f "$token_file"
   done
 
@@ -140,7 +143,7 @@ fi
 
 copy_image "$@"
 
-for token_file in "$gitea_token_file" "$ghcr_token_file"; do
+for token_file in "$nexus_username_file" "$nexus_password_file" "$ghcr_token_file"; do
   shred -u "$token_file" 2>/dev/null || rm -f "$token_file"
 done
 

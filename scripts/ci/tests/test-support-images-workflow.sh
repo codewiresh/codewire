@@ -147,7 +147,7 @@ done
 [[ "$(tail -n 1 "$WORKSPACE_DOCKERFILE")" == 'USER codewire' ]] ||
   fail 'workspace image does not restore the unprivileged runtime user after installing cw'
 
-if grep -Eq '(git\.example\.invalid/codewire|ghcr\.io/codewiresh)/(base|workspace):(latest|main)' \
+if grep -Eq '(nexus-system-cluster\.private\.invalid/oci-promoted/codewire|ghcr\.io/codewiresh)/(base|workspace):(latest|main)' \
     "$WORKFLOW"; then
   fail 'support-image publication contains a moving image tag'
 fi

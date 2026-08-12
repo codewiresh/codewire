@@ -6,8 +6,11 @@ on:
 permissions:
   contents: read
 
+enable-openid-connect: true
+
 env:
-  REGISTRY_HOST: ${{ vars.REGISTRY_HOST }}
+  OPENBAO_ROLE: codewire-source-support-publisher
+  OPENBAO_AUDIENCE: openbao-codewire-source-support-publisher
 
 jobs:
   support-selection:

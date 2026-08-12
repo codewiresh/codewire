@@ -11,9 +11,9 @@ target_repository="$2"
 shift 2
 tags=("$@")
 
-readonly source_pattern='^git\.example\.invalid/codewire/(dashboard|derp|gateway|services|mesh|base|workspace)@sha256:([0-9a-f]{64})$'
+readonly source_pattern='^nexus-system-cluster\.private\.invalid/oci-promoted/codewire/(dashboard|derp|gateway|services|mesh|base|workspace)@sha256:([0-9a-f]{64})$'
 if [[ ! "$source_ref" =~ $source_pattern ]]; then
-  echo "Source must be an exact supported git.example.invalid digest reference" >&2
+  echo "Source must be an exact supported promoted Nexus digest reference" >&2
   exit 1
 fi
 image_name="${BASH_REMATCH[1]}"
@@ -44,14 +44,14 @@ for tag in "${tags[@]}"; do
   seen_tags[$tag]=1
 done
 
-: "${GITEA_REGISTRY_TOKEN_FILE:?GITEA_REGISTRY_TOKEN_FILE is required}"
+: "${NEXUS_REGISTRY_USERNAME_FILE:?NEXUS_REGISTRY_USERNAME_FILE is required}"
+: "${NEXUS_REGISTRY_PASSWORD_FILE:?NEXUS_REGISTRY_PASSWORD_FILE is required}"
 : "${GHCR_PUBLISH_USERNAME:?GHCR_PUBLISH_USERNAME is required}"
 : "${GHCR_PUBLISH_TOKEN_FILE:?GHCR_PUBLISH_TOKEN_FILE is required}"
-gitea_username="${GITEA_REGISTRY_USERNAME:-ci}"
 skopeo_runner="${SKOPEO_RUNNER:-scripts/ci/images/run-skopeo-container.sh}"
 docker_bin="${DOCKER_BIN:-docker}"
 
-for secret_file in "$GITEA_REGISTRY_TOKEN_FILE" "$GHCR_PUBLISH_TOKEN_FILE"; do
+for secret_file in "$NEXUS_REGISTRY_USERNAME_FILE" "$NEXUS_REGISTRY_PASSWORD_FILE" "$GHCR_PUBLISH_TOKEN_FILE"; do
   if [ ! -f "$secret_file" ] || [ ! -s "$secret_file" ]; then
     echo "Registry credential file is missing or empty" >&2
     exit 1
@@ -120,7 +120,13 @@ registry_login() {
   done
 }
 
-registry_login Gitea git.example.invalid "$gitea_username" "$GITEA_REGISTRY_TOKEN_FILE"
+readonly NEXUS_HOST='nexus-system-cluster.example.invalid'
+nexus_username="$(<"$NEXUS_REGISTRY_USERNAME_FILE")"
+[[ -n "$nexus_username" && "$nexus_username" != *$'\n'* ]] || {
+  echo 'Nexus username is malformed' >&2
+  exit 1
+}
+registry_login Nexus "$NEXUS_HOST" "$nexus_username" "$NEXUS_REGISTRY_PASSWORD_FILE"
 registry_login GHCR ghcr.io "$GHCR_PUBLISH_USERNAME" "$GHCR_PUBLISH_TOKEN_FILE"
 
 inspect_digest() {
@@ -132,7 +138,7 @@ inspect_digest() {
 
 source_digest="$(inspect_digest "$source_ref")"
 if [ "$source_digest" != "$expected_digest" ]; then
-  echo "Canonical Gitea manifest digest does not match its immutable reference" >&2
+  echo "Canonical Nexus manifest digest does not match its immutable reference" >&2
   exit 1
 fi
 

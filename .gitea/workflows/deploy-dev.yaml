@@ -7,9 +7,12 @@ on:
 permissions:
   contents: read
 
+enable-openid-connect: true
+
 env:
-  REGISTRY_HOST: ${{ vars.REGISTRY_HOST }}
   ALLOW_NON_MAIN_IMAGE_BUILD: "1"
+  OPENBAO_ROLE: codewire-source-dev-publisher
+  OPENBAO_AUDIENCE: openbao-codewire-source-dev-publisher
 
 jobs:
   deploy-selection:
