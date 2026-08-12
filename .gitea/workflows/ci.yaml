@@ -159,6 +159,7 @@ jobs:
   cw-release-assets:
     name: CW release-assets verification
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     needs: [verification-selection]
     env:
       CARGO_TARGET_DIR: ${{ github.workspace }}/target/ci-cache/cw-cross-ci
@@ -223,6 +224,7 @@ jobs:
   workspace-image:
     name: Workspace image verification
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     needs: [verification-selection]
     steps:
       - name: Reuse exact PR-head content verification
@@ -250,6 +252,7 @@ jobs:
   standard:
     name: Standard verification
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     needs: [verification-selection]
     env:
       CARGO_TARGET_DIR: ${{ github.workspace }}/target/ci-cache/host-debug
@@ -373,6 +376,7 @@ jobs:
   rust-transport:
     name: Rust / transport verification
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     needs: [verification-selection]
     env:
       CARGO_HOME: ${{ github.workspace }}/target/ci-rust-cargo-home
@@ -437,6 +441,7 @@ jobs:
   database-services:
     name: Database / service verification
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     needs: [verification-selection]
     env:
       CARGO_TARGET_DIR: ${{ github.workspace }}/target/ci-cache/host-debug

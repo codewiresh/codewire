@@ -1159,6 +1159,24 @@ database-services|Database / service verification|ubuntu-latest
 edge-kind|Edge / Kind verification|kind-e2e
 EOF
 
+# Compatibility jobs share the disposable DinD runner pool. Keep their task
+# ceiling below the runner pod's independently managed lifetime so queued pods
+# still have enough time to execute a bounded job after assignment.
+for job_id in cw-release-assets workspace-image standard rust-transport database-services; do
+  block="$TMP/${job_id}.yaml"
+  if [ ! -s "$block" ]; then
+    awk -v wanted="$job_id" '
+      $0 == "  " wanted ":" { capture = 1 }
+      capture && $0 ~ /^  [A-Za-z0-9_-]+:$/ && $0 != "  " wanted ":" { exit }
+      capture { print }
+    ' "$WORKFLOW" > "$block"
+  fi
+  grep -qF '    timeout-minutes: 30' "$block" || {
+    echo "${job_id}: compatibility job must retain the 30-minute task ceiling" >&2
+    exit 1
+  }
+done
+
 for job_id in standard rust-transport database-services edge-kind; do
   block="$TMP/${job_id}.yaml"
   grep -qF 'name: Reuse exact PR-head content verification' "$block"
