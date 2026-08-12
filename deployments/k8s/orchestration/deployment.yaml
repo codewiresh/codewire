@@ -27,7 +27,7 @@ spec:
         app.kubernetes.io/component: orchestration
     spec:
       imagePullSecrets:
-        - name: gitea-registry
+        - name: nexus-registry
       serviceAccountName: codewire-orchestration
       containers:
         - name: orchestration

@@ -24,7 +24,7 @@ spec:
         seccompProfile:
           type: RuntimeDefault
       imagePullSecrets:
-        - name: gitea-registry
+        - name: nexus-registry
       containers:
         - name: dashboard
           image: git.example.com/codewire/dashboard:latest

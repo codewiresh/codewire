@@ -979,20 +979,20 @@ ensure_sandbox_namespace() {
     --overwrite >/dev/null
 
   log "waiting for the synchronized registry pull secret in $namespace"
-  kubectl_dev -n "$namespace" wait --for=create secret/gitea-registry --timeout=120s >/dev/null || \
+  kubectl_dev -n "$namespace" wait --for=create secret/nexus-registry --timeout=120s >/dev/null || \
     die "registry pull secret was not synchronized into sandbox namespace $namespace"
-  [[ "$(kubectl_dev -n "$namespace" get secret gitea-registry -o json | jq -r '.type')" == \
+  [[ "$(kubectl_dev -n "$namespace" get secret nexus-registry -o json | jq -r '.type')" == \
     "kubernetes.io/dockerconfigjson" ]] || \
-    die "sandbox namespace $namespace has an invalid gitea-registry Secret type"
+    die "sandbox namespace $namespace has an invalid nexus-registry Secret type"
 
   service_account_json="$(kubectl_dev -n "$namespace" get serviceaccount codewire-sandbox -o json 2>/dev/null || true)"
   if [[ -z "$service_account_json" ]]; then
     kubectl_dev -n "$namespace" create serviceaccount codewire-sandbox >/dev/null
     kubectl_dev -n "$namespace" patch serviceaccount codewire-sandbox --type merge \
-      --patch '{"automountServiceAccountToken":false,"imagePullSecrets":[{"name":"gitea-registry"}]}' >/dev/null
+      --patch '{"automountServiceAccountToken":false,"imagePullSecrets":[{"name":"nexus-registry"}]}' >/dev/null
   elif ! jq -e '
     .automountServiceAccountToken == false
-      and any(.imagePullSecrets[]?; .name == "gitea-registry")
+      and any(.imagePullSecrets[]?; .name == "nexus-registry")
   ' >/dev/null <<<"$service_account_json"; then
     die "existing codewire-sandbox ServiceAccount in $namespace lacks the fail-closed runtime shape"
   fi
