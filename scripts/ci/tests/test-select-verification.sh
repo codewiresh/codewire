@@ -1248,17 +1248,8 @@ test "$deploy_toolchain_line" -lt "$deploy_run_line"
 grep -A2 -F 'name: Verify sealed Rust toolchain' \
   "$standard_block" | grep -qF "contains(needs.verification-selection.outputs.selection, '|deploy|')"
 
-permissions_block="$(awk '
-  $0 == "permissions:" { capture = 1 }
-  capture && $0 != "permissions:" && $0 ~ /^[^[:space:]]/ { exit }
-  capture { print }
-' "$WORKFLOW")"
-expected_permissions="$(printf '%s\n' \
-  'permissions:' \
-  '  contents: read' \
-  '  actions: read')"
-if [ "$permissions_block" != "$expected_permissions" ]; then
-  echo 'product CI permissions must be exactly contents: read and actions: read' >&2
+if grep -qE '^[[:space:]]*permissions:' "$WORKFLOW"; then
+  echo 'product CI must not declare GitHub-only permissions ignored by Forgejo' >&2
   exit 1
 fi
 
