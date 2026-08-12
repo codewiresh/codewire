@@ -23,7 +23,7 @@ spec:
         app.kubernetes.io/component: udp-relay
     spec:
       imagePullSecrets:
-        - name: gitea-registry
+        - name: nexus-registry
       terminationGracePeriodSeconds: 15
       containers:
         - name: udp-relay

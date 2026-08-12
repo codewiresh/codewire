@@ -24,7 +24,7 @@ spec:
         app.kubernetes.io/component: coordinator
     spec:
       imagePullSecrets:
-        - name: gitea-registry
+        - name: nexus-registry
       # Coordinate WebSockets are long-lived; give clients time to reconnect
       # elsewhere before the pod goes away.
       terminationGracePeriodSeconds: 60

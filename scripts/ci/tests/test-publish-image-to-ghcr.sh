@@ -20,14 +20,25 @@ other_digest="sha256:$(printf 'b%.0s' {1..64})"
 base_digest="sha256:$(printf 'd%.0s' {1..64})"
 workspace_digest="sha256:$(printf 'e%.0s' {1..64})"
 source_sha="$(printf 'c%.0s' {1..40})"
-source_ref="git.example.invalid/codewire/gateway@$expected_digest"
+source_ref="nexus-system-cluster.example.invalid/oci-promoted/codewire/gateway@$expected_digest"
 target_repository='ghcr.io/codewiresh/gateway'
-base_source_ref="git.example.invalid/codewire/base@$base_digest"
-workspace_source_ref="git.example.invalid/codewire/workspace@$workspace_digest"
+base_source_ref="nexus-system-cluster.example.invalid/oci-promoted/codewire/base@$base_digest"
+workspace_source_ref="nexus-system-cluster.example.invalid/oci-promoted/codewire/workspace@$workspace_digest"
 base_repository='ghcr.io/codewiresh/base'
 workspace_repository='ghcr.io/codewiresh/workspace'
-gitea_token='gitea-wrapper-test-token'
+nexus_username='nexus-publisher-test'
+nexus_password='nexus-wrapper-test-password'
 ghcr_token='ghcr-wrapper-test-token'
+
+cat >"$work/bin/fetch-nexus" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+[ "${FAKE_NEXUS_FETCH_FAIL:-0}" != 1 ] || exit 1
+printf '%s' "${FAKE_NEXUS_USERNAME:?}" >"$1"
+printf '%s' "${FAKE_NEXUS_PASSWORD:?}" >"$2"
+chmod 0600 "$1" "$2"
+printf '%s\t%s\n' "$1" "$2" >>"${FAKE_NEXUS_FETCH_CALLS:?}"
+EOF
 
 cat >"$work/bin/fetch-secret" <<'EOF'
 #!/usr/bin/env bash
@@ -36,7 +47,6 @@ if [ "${FAKE_FETCH_FAIL_NAME:-}" = "$1" ]; then
   exit 1
 fi
 case "$1" in
-  GITEA_REGISTRY_TOKEN) value="${FAKE_GITEA_TOKEN:?}" ;;
   GHCR_PUBLISH_TOKEN) value="${FAKE_GHCR_TOKEN:?}" ;;
   *) exit 1 ;;
 esac
@@ -50,9 +60,11 @@ cat >"$work/bin/copy-image" <<'EOF'
 set -euo pipefail
 [ "${FAKE_COPY_FAIL:-0}" != 1 ] || exit 1
 [[ "${GHCR_PUBLISH_USERNAME:?}" == codewire-package-publisher ]]
-[[ "$(<"${GITEA_REGISTRY_TOKEN_FILE:?}")" == "${FAKE_GITEA_TOKEN:?}" ]]
+[[ "$(<"${NEXUS_REGISTRY_USERNAME_FILE:?}")" == "${FAKE_NEXUS_USERNAME:?}" ]]
+[[ "$(<"${NEXUS_REGISTRY_PASSWORD_FILE:?}")" == "${FAKE_NEXUS_PASSWORD:?}" ]]
 [[ "$(<"${GHCR_PUBLISH_TOKEN_FILE:?}")" == "${FAKE_GHCR_TOKEN:?}" ]]
-[[ "$(stat -c '%a' "$GITEA_REGISTRY_TOKEN_FILE")" == 600 ]]
+[[ "$(stat -c '%a' "$NEXUS_REGISTRY_USERNAME_FILE")" == 600 ]]
+[[ "$(stat -c '%a' "$NEXUS_REGISTRY_PASSWORD_FILE")" == 600 ]]
 [[ "$(stat -c '%a' "$GHCR_PUBLISH_TOKEN_FILE")" == 600 ]]
 printf '%s\n' "$*" >>"${FAKE_COPY_CALLS:?}"
 call=1
@@ -96,14 +108,17 @@ case "$1" in
   *) exit 1 ;;
 esac
 EOF
-chmod +x "$work/bin/fetch-secret" "$work/bin/copy-image" "$work/bin/skopeo-runner"
+chmod +x "$work/bin/fetch-nexus" "$work/bin/fetch-secret" "$work/bin/copy-image" "$work/bin/skopeo-runner"
 
+export OPENBAO_NEXUS_CREDENTIAL_FETCHER="$work/bin/fetch-nexus"
 export INFISICAL_SECRET_FETCHER="$work/bin/fetch-secret"
 export GHCR_COPY_HELPER="$work/bin/copy-image"
 export SKOPEO_RUNNER="$work/bin/skopeo-runner"
 export GHCR_PUBLISH_USERNAME='codewire-package-publisher'
-export FAKE_GITEA_TOKEN="$gitea_token"
+export FAKE_NEXUS_USERNAME="$nexus_username"
+export FAKE_NEXUS_PASSWORD="$nexus_password"
 export FAKE_GHCR_TOKEN="$ghcr_token"
+export FAKE_NEXUS_FETCH_CALLS="$work/nexus-fetch-calls"
 export FAKE_FETCH_CALLS="$work/fetch-calls"
 export FAKE_COPY_CALLS="$work/copy-calls"
 export FAKE_COPY_COUNTER="$work/copy-counter"
@@ -115,8 +130,8 @@ export GITHUB_OUTPUT="$work/output"
 
 "$PUBLISH_IMAGE" "$source_ref" "$target_repository" "$source_sha"
 
-grep -qxF "GITEA_REGISTRY_TOKEN"$'\t'"$(awk -F '\t' 'NR == 1 { print $2 }' "$FAKE_FETCH_CALLS")" \
-  "$FAKE_FETCH_CALLS" || fail 'Gitea credential was not fetched first'
+[[ "$(wc -l <"$FAKE_NEXUS_FETCH_CALLS")" -eq 1 ]] ||
+  fail 'paired Nexus credential was not fetched exactly once'
 grep -q '^GHCR_PUBLISH_TOKEN'$'\t' "$FAKE_FETCH_CALLS" ||
   fail 'GHCR credential was not fetched'
 grep -qxF "$source_ref $target_repository $source_sha" "$FAKE_COPY_CALLS" ||
@@ -128,7 +143,12 @@ grep -qxF "ghcr_public_ref=$target_repository@$expected_digest" "$GITHUB_OUTPUT"
 while IFS=$'\t' read -r _ token_file; do
   [ ! -e "$token_file" ] || fail 'private credential file survived publication'
 done <"$FAKE_FETCH_CALLS"
-if grep -qF "$gitea_token" "$FAKE_FETCH_CALLS" "$FAKE_COPY_CALLS" \
+while IFS=$'\t' read -r username_file password_file; do
+  [ ! -e "$username_file" ] || fail 'private Nexus username file survived publication'
+  [ ! -e "$password_file" ] || fail 'private Nexus password file survived publication'
+done <"$FAKE_NEXUS_FETCH_CALLS"
+if grep -qF "$nexus_username" "$FAKE_FETCH_CALLS" "$FAKE_COPY_CALLS" \
+  || grep -qF "$nexus_password" "$FAKE_FETCH_CALLS" "$FAKE_COPY_CALLS" \
   || grep -qF "$ghcr_token" "$FAKE_FETCH_CALLS" "$FAKE_COPY_CALLS"; then
   fail 'a registry token reached command arguments'
 fi
@@ -155,7 +175,7 @@ fi
   fail 'credential fetch failure reached the copy helper'
 
 fetch_calls_before="$(wc -l <"$FAKE_FETCH_CALLS")"
-if "$PUBLISH_IMAGE" 'git.example.invalid/codewire/gateway:latest' \
+if "$PUBLISH_IMAGE" 'nexus-system-cluster.example.invalid/oci-promoted/codewire/gateway:latest' \
     "$target_repository" "$source_sha" >"$work/moving-source.out" 2>&1; then
   fail 'moving source reference was accepted'
 fi

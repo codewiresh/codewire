@@ -6,7 +6,7 @@ image:
   digest: ""
 
 imagePullSecrets:
-  - name: gitea-registry
+  - name: nexus-registry
 
 # Infra owns Cluster/dev/codewire-mesh-db and CNPG generates this Secret.
 # Keep it separate from codewire-db because Mesh owns its SQLx history.

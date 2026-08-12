@@ -170,32 +170,32 @@ expect_failure unsigned-annotated-tag \
   "$source_sha" "$unsigned_tag_object" "$source_sha" "$canonical_main_sha"
 
 mapfile -t recovery_tags < <(
-  "$COMPUTE_TAGS" git.example.invalid services "$source_sha" v0.3.359 \
+  "$COMPUTE_TAGS" nexus-system-cluster.example.invalid/oci-promoted/codewire services "$source_sha" v0.3.359 \
     refs/heads/main main
 )
 [[ "${recovery_tags[*]}" == \
-  "git.example.invalid/codewire/services:${source_sha} git.example.invalid/codewire/services:v0.3.359" ]]
+  "nexus-system-cluster.example.invalid/oci-promoted/codewire/services:${source_sha} nexus-system-cluster.example.invalid/oci-promoted/codewire/services:v0.3.359" ]]
 
 mapfile -t push_tags < <(
-  "$COMPUTE_TAGS" git.example.invalid services "$source_sha" v0.3.359 \
+  "$COMPUTE_TAGS" nexus-system-cluster.example.invalid/oci-promoted/codewire services "$source_sha" v0.3.359 \
     refs/tags/v0.3.359 v0.3.359
 )
 [[ "${push_tags[*]}" == \
-  "git.example.invalid/codewire/services:${source_sha} git.example.invalid/codewire/services:v0.3.359" ]]
+  "nexus-system-cluster.example.invalid/oci-promoted/codewire/services:${source_sha} nexus-system-cluster.example.invalid/oci-promoted/codewire/services:v0.3.359" ]]
 
 mapfile -t dev_tags < <(
-  "$COMPUTE_TAGS" git.example.invalid services "$source_sha" '' \
+  "$COMPUTE_TAGS" nexus-system-cluster.example.invalid/oci-promoted/codewire services "$source_sha" '' \
     refs/heads/main main
 )
 [[ "${dev_tags[*]}" == \
-  "git.example.invalid/codewire/services:${source_sha}" ]]
+  "nexus-system-cluster.example.invalid/oci-promoted/codewire/services:${source_sha}" ]]
 
 mapfile -t direct_tag_tags < <(
-  "$COMPUTE_TAGS" git.example.invalid services "$source_sha" '' \
+  "$COMPUTE_TAGS" nexus-system-cluster.example.invalid/oci-promoted/codewire services "$source_sha" '' \
     refs/tags/v0.3.359 v0.3.359
 )
 [[ "${direct_tag_tags[*]}" == \
-  "git.example.invalid/codewire/services:${source_sha} git.example.invalid/codewire/services:v0.3.359" ]]
+  "nexus-system-cluster.example.invalid/oci-promoted/codewire/services:${source_sha} nexus-system-cluster.example.invalid/oci-promoted/codewire/services:v0.3.359" ]]
 
 deploy_workflow="$ROOT/.gitea/workflows/deploy-prod.yaml"
 cli_workflow="$ROOT/.gitea/workflows/cli-release.yaml"
@@ -394,8 +394,15 @@ fi
 grep -Fq 'source_dir="${CODEWIRE_SOURCE_DIR:-.}"' "$image_builder"
 grep -Fq 'DOCKER_CONFIG="$docker_config" docker buildx build --push' "$image_builder"
 grep -Fq -- '--metadata-file "$build_metadata"' "$image_builder"
-grep -Fq '"$secret_fetcher" GITEA_REGISTRY_TOKEN "$registry_token_file"' \
+grep -Fq '"$credential_fetcher" "$registry_username_file" "$registry_password_file"' \
   "$image_builder"
+grep -Fq "readonly REGISTRY_HOST='nexus-system-cluster.example.invalid'" \
+  "$image_builder"
+if grep -Fq 'GITEA_REGISTRY_TOKEN' "$image_builder" \
+  || grep -Fq 'INFISICAL_SECRET_FETCHER' "$image_builder"; then
+  echo 'image builder still obtains its canonical registry credential from Infisical' >&2
+  exit 1
+fi
 grep -Fq 'python3 scripts/ci/images/image-bundle.py candidate' "$image_builder"
 grep -Fq 'git -C "$source_dir" rev-parse HEAD' "$image_builder"
 grep -Fq 'checkout $checked_out_sha does not match selected source $source_sha' "$image_builder"

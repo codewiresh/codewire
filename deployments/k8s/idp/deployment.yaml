@@ -24,7 +24,7 @@ spec:
         app.kubernetes.io/component: idp
     spec:
       imagePullSecrets:
-        - name: gitea-registry
+        - name: nexus-registry
       containers:
         - name: idp
           # The Rust OIDC provider. Runs from the shared codewire/services

@@ -24,7 +24,7 @@ spec:
         app.kubernetes.io/component: billing
     spec:
       imagePullSecrets:
-        - name: gitea-registry
+        - name: nexus-registry
       containers:
         - name: billing
           # Runs from the shared codewire/services image (one image, many

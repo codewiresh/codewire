@@ -190,20 +190,21 @@ work="$(mktemp -d "$ROOT/.tmp/build-push-image.XXXXXX")"
 trap 'rm -rf "$work"' EXIT
 mkdir -p "$work/bin"
 
-registry_token='registry-test-value'
+registry_username='nexus-publisher-test'
+registry_password='registry-test-value'
 digest="sha256:$(printf 'd%.0s' {1..64})"
 second_digest="sha256:$(printf 'f%.0s' {1..64})"
 mismatch_digest="sha256:$(printf 'c%.0s' {1..64})"
 source_sha="$(git -C "$ROOT" rev-parse HEAD)"
 base_digest="sha256:$(printf 'e%.0s' {1..64})"
-base_ref="git.example.invalid/codewire/base@$base_digest"
+base_ref="nexus-system-cluster.example.invalid/oci-promoted/codewire/base@$base_digest"
 
-cat >"$work/bin/fetch-secret" <<'EOF'
+cat >"$work/bin/fetch-nexus" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-[[ "$1" == GITEA_REGISTRY_TOKEN ]]
-printf '%s' "${FAKE_REGISTRY_TOKEN:?}" >"$2"
-chmod 0600 "$2"
+printf '%s' "${FAKE_REGISTRY_USERNAME:?}" >"$1"
+printf '%s' "${FAKE_REGISTRY_PASSWORD:?}" >"$2"
+chmod 0600 "$1" "$2"
 printf '%q %q\n' "$1" "$2" >>"${FAKE_FETCH_CALLS:?}"
 EOF
 
@@ -225,15 +226,16 @@ set_manifest() {
 }
 
 case "${1:-} ${2:-} ${3:-}" in
-  login\ git.example.invalid\ *)
+  login\ nexus-system-cluster.example.invalid\ *)
     credential="$(cat)"
-    [[ "$credential" == "${FAKE_REGISTRY_TOKEN:?}" ]]
+    [[ "$credential" == "${FAKE_REGISTRY_PASSWORD:?}" ]]
+    [[ "$*" == *" -u ${FAKE_REGISTRY_USERNAME:?} "* ]]
     if [ -n "${FAKE_LOGIN_FAILURES:-}" ]; then
       login_state="${FAKE_LOGIN_STATE:?}"
       login_count="$(cat "$login_state")"
       if [ "$login_count" -lt "$FAKE_LOGIN_FAILURES" ]; then
         printf '%s\n' "$((login_count + 1))" >"$login_state"
-        echo 'Error response from daemon: login attempt to git.example.invalid failed with status: 401 Unauthorized' >&2
+        echo 'Error response from daemon: Nexus login failed with status: 401 Unauthorized' >&2
         exit 1
       fi
     fi
@@ -345,16 +347,16 @@ case "${1:-} ${2:-} ${3:-}" in
     ;;
 esac
 EOF
-chmod +x "$work/bin/fetch-secret" "$work/bin/docker"
+chmod +x "$work/bin/fetch-nexus" "$work/bin/docker"
 
 export PATH="$work/bin:$PATH"
-export INFISICAL_SECRET_FETCHER="$work/bin/fetch-secret"
-export FAKE_REGISTRY_TOKEN="$registry_token"
+export OPENBAO_NEXUS_CREDENTIAL_FETCHER="$work/bin/fetch-nexus"
+export FAKE_REGISTRY_USERNAME="$registry_username"
+export FAKE_REGISTRY_PASSWORD="$registry_password"
 export FAKE_FETCH_CALLS="$work/fetch-calls"
 export FAKE_DOCKER_CALLS="$work/docker-calls"
 export FAKE_MANIFESTS="$work/manifests"
 export FAKE_DIGEST="$digest"
-export REGISTRY_HOST='git.example.invalid'
 export GITHUB_SHA="$source_sha"
 export GITHUB_REF='refs/heads/main'
 export GITHUB_REF_NAME='main'
@@ -369,9 +371,9 @@ export GITHUB_OUTPUT="$work/output"
 grep -qxF 'family=gateway' "$GITHUB_OUTPUT" || fail 'candidate family is absent'
 grep -qxF "source_sha=$source_sha" "$GITHUB_OUTPUT" ||
   fail 'candidate source SHA is absent'
-grep -qxF "candidate_ref=git.example.invalid/codewire/gateway@$digest" "$GITHUB_OUTPUT" ||
+grep -qxF "candidate_ref=nexus-system-cluster.example.invalid/oci-promoted/codewire/gateway@$digest" "$GITHUB_OUTPUT" ||
   fail 'candidate digest ref is absent'
-grep -qF -- "--tag git.example.invalid/codewire/gateway:$source_sha" "$FAKE_DOCKER_CALLS" ||
+grep -qF -- "--tag nexus-system-cluster.example.invalid/oci-promoted/codewire/gateway:$source_sha" "$FAKE_DOCKER_CALLS" ||
   fail 'immutable source tag did not reach Buildx'
 grep -qF -- \
   '--label org.opencontainers.image.source=https://github.com/codewiresh/codewire' \
@@ -403,7 +405,7 @@ grep -qF 'Registry login was rejected; retrying authentication' \
 )
 [[ "$(grep -c 'buildx build' "$FAKE_DOCKER_CALLS")" -eq 1 ]] ||
   fail 'existing source-SHA image was rebuilt'
-grep -qxF "candidate_ref=git.example.invalid/codewire/gateway@$digest" "$GITHUB_OUTPUT" ||
+grep -qxF "candidate_ref=nexus-system-cluster.example.invalid/oci-promoted/codewire/gateway@$digest" "$GITHUB_OUTPUT" ||
   fail 'source-SHA rerun did not preserve the original digest'
 
 : >"$GITHUB_OUTPUT"
@@ -429,10 +431,10 @@ create_calls_before="$(grep -c 'buildx imagetools create' "$FAKE_DOCKER_CALLS" |
   CODEWIRE_SOURCE_SHA="$source_sha" \
     "$BUILDER" gateway deployments/docker/gateway.Dockerfile .
 )
-grep -qxF "candidate_ref=git.example.invalid/codewire/gateway@$digest" "$GITHUB_OUTPUT" ||
+grep -qxF "candidate_ref=nexus-system-cluster.example.invalid/oci-promoted/codewire/gateway@$digest" "$GITHUB_OUTPUT" ||
   fail 'release alias did not preserve the source-SHA digest'
 awk -F '\t' \
-  -v reference='git.example.invalid/codewire/gateway:v0.3.999' \
+  -v reference='nexus-system-cluster.example.invalid/oci-promoted/codewire/gateway:v0.3.999' \
   -v digest="$digest" \
   '$1 == reference && $2 == digest { found = 1 } END { exit !found }' \
   "$FAKE_MANIFESTS" ||
@@ -473,7 +475,7 @@ login_calls_before="$(grep -c ' login ' "$FAKE_DOCKER_CALLS" || true)"
 create_calls_before_auth="$(grep -c 'buildx imagetools create' "$FAKE_DOCKER_CALLS" || true)"
 (
   cd "$ROOT"
-  FAKE_INSPECT_AUTH_ONCE_REF='git.example.invalid/codewire/gateway:v0.3.997' \
+  FAKE_INSPECT_AUTH_ONCE_REF='nexus-system-cluster.example.invalid/oci-promoted/codewire/gateway:v0.3.997' \
   FAKE_INSPECT_AUTH_STATE="$work/inspect-auth-state" \
   CODEWIRE_RELEASE_TAG='v0.3.997' \
   CODEWIRE_SOURCE_SHA="$source_sha" \
@@ -491,7 +493,7 @@ login_calls_before="$(grep -c ' login ' "$FAKE_DOCKER_CALLS" || true)"
 create_calls_before_auth="$(grep -c 'buildx imagetools create' "$FAKE_DOCKER_CALLS" || true)"
 (
   cd "$ROOT"
-  FAKE_CREATE_AUTH_ONCE_REF='git.example.invalid/codewire/gateway:v0.3.996' \
+  FAKE_CREATE_AUTH_ONCE_REF='nexus-system-cluster.example.invalid/oci-promoted/codewire/gateway:v0.3.996' \
   FAKE_CREATE_AUTH_STATE="$work/create-auth-state" \
   CODEWIRE_RELEASE_TAG='v0.3.996' \
   CODEWIRE_SOURCE_SHA="$source_sha" \
@@ -505,7 +507,7 @@ grep -qF 'Registry authentication expired while creating' \
   fail 'transient create auth was not retried exactly once'
 
 printf '%s\t%s\n' \
-  'git.example.invalid/codewire/gateway:v0.3.998' "$mismatch_digest" \
+  'nexus-system-cluster.example.invalid/oci-promoted/codewire/gateway:v0.3.998' "$mismatch_digest" \
   >>"$FAKE_MANIFESTS"
 if (
   cd "$ROOT"
@@ -520,7 +522,7 @@ grep -qF 'Refusing to replace immutable image tag' "$work/mismatched-alias.out" 
 [[ "$(grep -c 'buildx build' "$FAKE_DOCKER_CALLS")" -eq 2 ]] ||
   fail 'mismatched release alias triggered a build'
 
-export FAKE_INSPECT_ERROR_REF="git.example.invalid/codewire/mesh:$source_sha"
+export FAKE_INSPECT_ERROR_REF="nexus-system-cluster.example.invalid/oci-promoted/codewire/mesh:$source_sha"
 login_calls_before="$(grep -c ' login ' "$FAKE_DOCKER_CALLS" || true)"
 if (
   cd "$ROOT"
@@ -552,7 +554,7 @@ grep -qF 'REQUIRE_EXISTING_SOURCE_IMAGE must be 0 or 1' \
 
 if (
   cd "$ROOT"
-  CODEWIRE_BASE_IMAGE_REF='git.example.invalid/codewire/base:latest' \
+  CODEWIRE_BASE_IMAGE_REF='nexus-system-cluster.example.invalid/oci-promoted/codewire/base:latest' \
     "$BUILDER" workspace images/workspace/Dockerfile .
 ) >"$work/moving-base.out" 2>&1; then
   fail 'moving workspace base image was accepted'
@@ -570,9 +572,10 @@ fi
 [[ "$(wc -l <"$FAKE_FETCH_CALLS")" -eq "$fetch_calls_before" ]] ||
   fail 'non-workspace base argument reached credential retrieval'
 
-if grep -qF "$registry_token" "$FAKE_DOCKER_CALLS" \
-  || grep -qF "$registry_token" "$FAKE_FETCH_CALLS"; then
-  fail 'registry token reached command arguments'
+if grep -qF "$registry_username" "$FAKE_FETCH_CALLS" \
+  || grep -qF "$registry_password" "$FAKE_DOCKER_CALLS" \
+  || grep -qF "$registry_password" "$FAKE_FETCH_CALLS"; then
+  fail 'a registry credential reached command arguments or fetch logs'
 fi
 
 docker_config="$(sed -nE 's/^DOCKER_CONFIG=([^ ]+) login.*/\1/p' \

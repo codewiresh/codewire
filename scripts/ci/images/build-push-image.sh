@@ -16,8 +16,9 @@ public_source_url='https://github.com/codewiresh/codewire'
 base_image_ref="${CODEWIRE_BASE_IMAGE_REF:-}"
 require_existing_source_image="${REQUIRE_EXISTING_SOURCE_IMAGE:-0}"
 
-: "${REGISTRY_HOST:?REGISTRY_HOST is required}"
 : "${GITHUB_SHA:?GITHUB_SHA is required}"
+readonly REGISTRY_HOST='nexus-system-cluster.example.invalid'
+readonly REGISTRY_REPOSITORY_PREFIX="${REGISTRY_HOST}/oci-promoted/codewire"
 
 case "$require_existing_source_image" in
   0|1) ;;
@@ -32,7 +33,7 @@ if [ -n "$base_image_ref" ]; then
     echo "An exact base image may only be supplied to the workspace build" >&2
     exit 1
   fi
-  if [[ ! "$base_image_ref" =~ ^(git\.example\.invalid/codewire/base|ghcr\.io/codewiresh/base)@sha256:[0-9a-f]{64}$ ]]; then
+  if [[ ! "$base_image_ref" =~ ^(nexus-system-cluster\.private\.invalid/oci-promoted/codewire/base|ghcr\.io/codewiresh/base)@sha256:[0-9a-f]{64}$ ]]; then
     echo "Workspace base image must be an exact supported digest reference" >&2
     exit 1
   fi
@@ -40,7 +41,7 @@ fi
 
 tags_output="$(
   scripts/ci/images/compute-image-tags.sh \
-    "${REGISTRY_HOST:-}" "$image_name" "$source_sha" "$release_tag" \
+    "$REGISTRY_REPOSITORY_PREFIX" "$image_name" "$source_sha" "$release_tag" \
     "${GITHUB_REF:-}" "${GITHUB_REF_NAME:-}"
 )"
 mapfile -t tags <<<"$tags_output"
@@ -48,7 +49,7 @@ mapfile -t tags <<<"$tags_output"
   echo "Refusing image build without computed tags" >&2
   exit 1
 }
-canonical_repository="${REGISTRY_HOST}/codewire/${image_name}"
+canonical_repository="${REGISTRY_REPOSITORY_PREFIX}/${image_name}"
 source_tag="${canonical_repository}:${source_sha}"
 source_tag_computed=0
 for tag in "${tags[@]}"; do
@@ -84,21 +85,22 @@ fi
 
 umask 077
 work="$(mktemp -d)"
-registry_token_file="$work/gitea-registry-token"
+registry_username_file="$work/nexus-username"
+registry_password_file="$work/nexus-password"
 build_metadata="$work/build-metadata.json"
 docker_config="$work/docker-config"
-secret_fetcher="${INFISICAL_SECRET_FETCHER:-scripts/ci/setup/fetch-infisical-ci-secret.sh}"
+credential_fetcher="${OPENBAO_NEXUS_CREDENTIAL_FETCHER:-scripts/ci/setup/fetch-openbao-nexus-credentials.sh}"
 cleanup() {
   find "$work" -type f -exec shred -u {} + 2>/dev/null || true
   rm -rf "$work"
 }
 trap cleanup EXIT
 mkdir -m 0700 "$docker_config"
-if [ ! -x "$secret_fetcher" ]; then
-  echo "Infisical CI secret fetcher is missing or not executable" >&2
+if [ ! -x "$credential_fetcher" ]; then
+  echo "OpenBao Nexus credential fetcher is missing or not executable" >&2
   exit 1
 fi
-"$secret_fetcher" GITEA_REGISTRY_TOKEN "$registry_token_file"
+"$credential_fetcher" "$registry_username_file" "$registry_password_file"
 
 registry_auth_error() {
   grep -Eqi \
@@ -110,8 +112,13 @@ registry_login() {
   local login_error attempt
   for attempt in 1 2 3; do
     login_error="$(mktemp "$work/login-error.XXXXXX")"
+    registry_username="$(<"$registry_username_file")"
+    [[ -n "$registry_username" && "$registry_username" != *$'\n'* ]] || {
+      echo 'Nexus username is malformed' >&2
+      return 1
+    }
     if DOCKER_CONFIG="$docker_config" docker login "${REGISTRY_HOST}" \
-      -u ci --password-stdin <"$registry_token_file" \
+      -u "$registry_username" --password-stdin <"$registry_password_file" \
       >/dev/null 2>"$login_error"; then
       return 0
     fi
@@ -258,4 +265,4 @@ for tag in "${tags[@]}"; do
 done
 
 python3 scripts/ci/images/image-bundle.py candidate \
-  "$image_name" "$source_sha" "$REGISTRY_HOST" "$build_metadata"
+  "$image_name" "$source_sha" "$REGISTRY_REPOSITORY_PREFIX" "$build_metadata"

@@ -19,12 +19,13 @@ expected_digest="sha256:$(printf 'a%.0s' {1..64})"
 other_digest="sha256:$(printf 'b%.0s' {1..64})"
 source_sha="$(printf 'c%.0s' {1..40})"
 release_tag="v1.2.3"
-source_ref="git.example.invalid/codewire/gateway@$expected_digest"
+source_ref="nexus-system-cluster.example.invalid/oci-promoted/codewire/gateway@$expected_digest"
 target_repository="ghcr.io/codewiresh/gateway"
 
-printf 'gitea-test-token' >"$work/gitea-token"
+printf 'nexus-test-password' >"$work/nexus-password"
+printf 'nexus-publisher-test' >"$work/nexus-username"
 printf 'ghcr-test-token' >"$work/ghcr-token"
-chmod 600 "$work/gitea-token" "$work/ghcr-token"
+chmod 600 "$work/nexus-username" "$work/nexus-password" "$work/ghcr-token"
 
 cat >"$work/bin/skopeo-runner" <<'EOF'
 #!/usr/bin/env bash
@@ -42,11 +43,11 @@ case "$command" in
     credential="$(cat)"
     [ -n "$credential" ]
     host="${!#}"
-    if [ "$host" = git.example.invalid ] && [ -n "${FAKE_GITEA_LOGIN_FAILURES:-}" ]; then
-      count="$(cat "${FAKE_GITEA_LOGIN_STATE:?}")"
-      if [ "$count" -lt "$FAKE_GITEA_LOGIN_FAILURES" ]; then
-        printf '%s\n' "$((count + 1))" >"$FAKE_GITEA_LOGIN_STATE"
-        echo 'time="fixture" level=fatal msg="logging into git.example.invalid: invalid username/password"' >&2
+    if [ "$host" = nexus-system-cluster.example.invalid ] && [ -n "${FAKE_NEXUS_LOGIN_FAILURES:-}" ]; then
+      count="$(cat "${FAKE_NEXUS_LOGIN_STATE:?}")"
+      if [ "$count" -lt "$FAKE_NEXUS_LOGIN_FAILURES" ]; then
+        printf '%s\n' "$((count + 1))" >"$FAKE_NEXUS_LOGIN_STATE"
+        echo 'time="fixture" level=fatal msg="logging into nexus-system-cluster.example.invalid: invalid username/password"' >&2
         exit 1
       fi
     fi
@@ -54,7 +55,7 @@ case "$command" in
   inspect)
     ref="${!#}"
     ref="${ref#docker://}"
-    if [[ "$ref" == git.example.invalid/* ]]; then
+    if [[ "$ref" == nexus-system-cluster.example.invalid/* ]]; then
       printf '%s\n' "${FAKE_SOURCE_DIGEST:?}"
       exit 0
     fi
@@ -101,20 +102,21 @@ export FAKE_CALLS="$work/calls"
 export FAKE_DOCKER_CALLS="$work/docker-calls"
 export FAKE_STATE="$work/state"
 export FAKE_SOURCE_DIGEST="$expected_digest"
-export GITEA_REGISTRY_TOKEN_FILE="$work/gitea-token"
+export NEXUS_REGISTRY_USERNAME_FILE="$work/nexus-username"
+export NEXUS_REGISTRY_PASSWORD_FILE="$work/nexus-password"
 export GHCR_PUBLISH_USERNAME="codewire-package-publisher"
 export GHCR_PUBLISH_TOKEN_FILE="$work/ghcr-token"
 export GITHUB_OUTPUT="$work/output"
 
-printf '0\n' >"$work/gitea-login-state"
-FAKE_GITEA_LOGIN_FAILURES=1 \
-FAKE_GITEA_LOGIN_STATE="$work/gitea-login-state" \
+printf '0\n' >"$work/nexus-login-state"
+FAKE_NEXUS_LOGIN_FAILURES=1 \
+FAKE_NEXUS_LOGIN_STATE="$work/nexus-login-state" \
   "$COPY_IMAGE" "$source_ref" "$target_repository" "$source_sha" "$release_tag" \
   >"$work/transient-login.out" 2>&1
-grep -qF 'Gitea registry login was rejected; retrying authentication' \
-  "$work/transient-login.out" || fail 'transient Gitea login was not reported'
-[[ "$(grep -c '^login .*git.example.invalid ' "$FAKE_CALLS")" -eq 2 ]] ||
-  fail 'transient Gitea login was not retried exactly once'
+grep -qF 'Nexus registry login was rejected; retrying authentication' \
+  "$work/transient-login.out" || fail 'transient Nexus login was not reported'
+[[ "$(grep -c '^login .*nexus-system-cluster.example.invalid ' "$FAKE_CALLS")" -eq 2 ]] ||
+  fail 'transient Nexus login was not retried exactly once'
 
 for tag in "$source_sha" "$release_tag"; do
   [[ "$(<"$work/state/$tag")" == "$expected_digest" ]] ||
@@ -128,7 +130,7 @@ grep -qxF "ghcr_ref=$target_repository:$source_sha" "$GITHUB_OUTPUT" ||
   fail "first GHCR ref output is absent"
 grep -qxF "ghcr_digest=$expected_digest" "$GITHUB_OUTPUT" ||
   fail "GHCR digest output is absent"
-if grep -qF 'gitea-test-token' "$FAKE_CALLS" \
+if grep -qF 'nexus-test-password' "$FAKE_CALLS" \
   || grep -qF 'ghcr-test-token' "$FAKE_CALLS"; then
   fail "a registry token reached the command arguments"
 fi
@@ -171,20 +173,20 @@ if "$COPY_IMAGE" "$source_ref" "$target_repository" latest \
   fail "runtime moving destination tag was accepted"
 fi
 
-printf '0\n' >"$work/persistent-gitea-login-state"
-gitea_login_calls_before="$(grep -c '^login .*git.example.invalid ' "$FAKE_CALLS")"
-if FAKE_GITEA_LOGIN_FAILURES=3 \
-  FAKE_GITEA_LOGIN_STATE="$work/persistent-gitea-login-state" \
+printf '0\n' >"$work/persistent-nexus-login-state"
+nexus_login_calls_before="$(grep -c '^login .*nexus-system-cluster.example.invalid ' "$FAKE_CALLS")"
+if FAKE_NEXUS_LOGIN_FAILURES=3 \
+  FAKE_NEXUS_LOGIN_STATE="$work/persistent-nexus-login-state" \
   "$COPY_IMAGE" "$source_ref" "$target_repository" "$source_sha" \
     >"$work/persistent-login.out" 2>&1; then
-  fail 'persistent Gitea login failure was accepted'
+  fail 'persistent Nexus login failure was accepted'
 fi
-grep -qF 'Unable to authenticate to Gitea registry' \
-  "$work/persistent-login.out" || fail 'persistent Gitea login failure was not explicit'
-[[ "$(grep -c '^login .*git.example.invalid ' "$FAKE_CALLS")" -eq $((gitea_login_calls_before + 3)) ]] ||
-  fail 'persistent Gitea login did not stop after three bounded attempts'
+grep -qF 'Unable to authenticate to Nexus registry' \
+  "$work/persistent-login.out" || fail 'persistent Nexus login failure was not explicit'
+[[ "$(grep -c '^login .*nexus-system-cluster.example.invalid ' "$FAKE_CALLS")" -eq $((nexus_login_calls_before + 3)) ]] ||
+  fail 'persistent Nexus login did not stop after three bounded attempts'
 
-support_source_ref="git.example.invalid/codewire/base@$expected_digest"
+support_source_ref="nexus-system-cluster.example.invalid/oci-promoted/codewire/base@$expected_digest"
 support_target_repository='ghcr.io/codewiresh/base'
 printf '%s\n' "$other_digest" >"$work/state/latest"
 copy_calls_before="$(grep -c '^copy ' "$FAKE_CALLS")"
@@ -203,11 +205,11 @@ copy_calls_before="$(grep -c '^copy ' "$FAKE_CALLS")"
 [[ "$(grep -c '^copy ' "$FAKE_CALLS")" -eq "$copy_calls_before" ]] ||
   fail "matching support compatibility aliases were copied again"
 
-"$COPY_IMAGE" "git.example.invalid/codewire/workspace@$expected_digest" \
+"$COPY_IMAGE" "nexus-system-cluster.example.invalid/oci-promoted/codewire/workspace@$expected_digest" \
   'ghcr.io/codewiresh/workspace' latest >/dev/null ||
   fail "workspace compatibility alias was rejected"
 
-if "$COPY_IMAGE" 'git.example.invalid/codewire/gateway:latest' "$target_repository" \
+if "$COPY_IMAGE" 'nexus-system-cluster.example.invalid/oci-promoted/codewire/gateway:latest' "$target_repository" \
     "$source_sha" >"$work/moving-source.out" 2>&1; then
   fail "moving source reference was accepted"
 fi

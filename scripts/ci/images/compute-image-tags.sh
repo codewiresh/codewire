@@ -6,7 +6,7 @@ if [ "$#" -ne 6 ]; then
   exit 2
 fi
 
-registry="$1"
+repository_prefix="$1"
 image="$2"
 source_sha="$3"
 release_tag="$4"
@@ -21,14 +21,14 @@ if [ -n "$release_tag" ] && [[ ! "$release_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]];
   echo "invalid release tag: $release_tag" >&2
   exit 1
 fi
-printf '%s/codewire/%s:%s\n' "$registry" "$image" "$source_sha"
+printf '%s/%s:%s\n' "$repository_prefix" "$image" "$source_sha"
 if [ -n "$release_tag" ]; then
-  printf '%s/codewire/%s:%s\n' "$registry" "$image" "$release_tag"
+  printf '%s/%s:%s\n' "$repository_prefix" "$image" "$release_tag"
   exit 0
 fi
 
 case "$ref" in
   refs/tags/v*)
-    printf '%s/codewire/%s:%s\n' "$registry" "$image" "${ref_name:-${ref#refs/tags/}}"
+    printf '%s/%s:%s\n' "$repository_prefix" "$image" "${ref_name:-${ref#refs/tags/}}"
     ;;
 esac
