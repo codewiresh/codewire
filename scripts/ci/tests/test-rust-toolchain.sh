@@ -15,15 +15,15 @@ while IFS= read -r input; do
   cp "$ROOT/$input" "$fixture/$input"
 done < <("$CHECK" --list-inputs)
 
-sed -i '0,/toolchain: 1.91.1/s//toolchain: stable/' \
+sed -i '0,/name: Verify sealed Rust toolchain/s//name: Set up mutable Rust toolchain/' \
   "$fixture/.gitea/workflows/ci.yaml"
 if "$CHECK" --root "$fixture" >"$fixture/workflow-drift.log" 2>&1; then
   printf 'Rust toolchain guard accepted primary workflow drift\n' >&2
   exit 1
 fi
-grep -Fq '.gitea/workflows/ci.yaml action/toolchain pin drift' \
+grep -Fq '.gitea/workflows/ci.yaml sealed toolchain drift' \
   "$fixture/workflow-drift.log"
-sed -i '0,/toolchain: stable/s//toolchain: 1.91.1/' \
+sed -i '0,/name: Set up mutable Rust toolchain/s//name: Verify sealed Rust toolchain/' \
   "$fixture/.gitea/workflows/ci.yaml"
 
 sed -i '/^      CARGO_HOME: \${{ github\.workspace }}\/target\/ci-rust-cargo-home$/d' \

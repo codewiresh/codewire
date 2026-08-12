@@ -31,7 +31,8 @@ while [[ $# -gt 0 ]]; do
 done
 ROOT="$(cd "$ROOT" && pwd)"
 
-readonly TOOLCHAIN_ACTION='dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b'
+readonly TOOLCHAIN_ACTION='https://forgejo.example.invalid/noel/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b'
+readonly SEALED_TOOLCHAIN_STEP='name: Verify sealed Rust toolchain'
 # These are matched literally against Gitea workflow syntax.
 # shellcheck disable=SC2016
 readonly CI_RUST_CARGO_HOME='${{ github.workspace }}/target/ci-rust-cargo-home'
@@ -137,10 +138,10 @@ done
 for entry in "${PINNED_WORKFLOWS[@]}"; do
   workflow="${entry%:*}"
   expected_count="${entry##*:}"
-  action_count="$(grep -Fc "uses: $TOOLCHAIN_ACTION" "$ROOT/$workflow" || true)"
-  pin_count="$(grep -Ec "^[[:space:]]+toolchain:[[:space:]]+$channel$" "$ROOT/$workflow" || true)"
-  [[ "$action_count" -eq "$expected_count" && "$pin_count" -eq "$expected_count" ]] ||
-    die "$workflow action/toolchain pin drift (actions=$action_count pins=$pin_count expected=$expected_count)"
+  assertion_count="$(grep -Fc "$SEALED_TOOLCHAIN_STEP" "$ROOT/$workflow" || true)"
+  action_count="$(grep -Fc 'rust-toolchain@' "$ROOT/$workflow" || true)"
+  [[ "$assertion_count" -eq "$expected_count" && "$action_count" -eq 0 ]] ||
+    die "$workflow sealed toolchain drift (assertions=$assertion_count actions=$action_count expected=$expected_count)"
 done
 
 rust_transport_block="$(sed -n '/^  rust-transport:/,/^  database-services:/p' \
@@ -183,7 +184,7 @@ done
 [[ "$(grep -Fc -- "--default-toolchain $channel" "$ROOT/$WORKSPACE_DOCKERFILE" || true)" -eq 1 ]] ||
   die "workspace user toolchain differs from $channel"
 
-printf '[rust-toolchain] exact Rust %s baseline: OK (%s crate manifests, %s primary action sites, %s shipped builders)\n' \
+printf '[rust-toolchain] exact Rust %s baseline: OK (%s crate manifests, %s sealed runner assertions, %s shipped builders)\n' \
   "$channel" \
   "$(find "$ROOT/crates" -mindepth 2 -maxdepth 2 -name Cargo.toml | wc -l)" \
   "$(printf '%s\n' "${PINNED_WORKFLOWS[@]}" | awk -F: '{ total += $NF } END { print total + 0 }')" \

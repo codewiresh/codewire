@@ -38,4 +38,27 @@ test -f /usr/include/google/protobuf/duration.proto
 test -f /usr/include/google/protobuf/timestamp.proto
 psql --version
 
+readonly rust_version='1.91.1'
+readonly rust_host='x86_64-unknown-linux-gnu'
+readonly -a rust_targets=(
+  "$rust_host"
+  x86_64-unknown-linux-musl
+  aarch64-unknown-linux-gnu
+  x86_64-apple-darwin
+  aarch64-apple-darwin
+)
+
+[[ "$(rustc --version)" == "rustc $rust_version (ed61e7d7e 2025-11-07)" ]]
+[[ "$(cargo --version)" == "cargo $rust_version (ea2d97820 2025-10-10)" ]]
+[[ "$(rustfmt --version)" == 'rustfmt 1.8.0-stable (ed61e7d7e2 2025-11-07)' ]]
+[[ "$(clippy-driver --version)" == 'clippy 0.1.91 (ed61e7d7e2 2025-11-07)' ]]
+[[ "$(rustup show active-toolchain | awk '{print $1}')" == "$rust_version-$rust_host" ]]
+
+installed_targets="$(rustup target list --installed | LC_ALL=C sort)"
+expected_targets="$(printf '%s\n' "${rust_targets[@]}" | LC_ALL=C sort)"
+[[ "$installed_targets" == "$expected_targets" ]] || {
+  printf '::error::CI runner image Rust target set differs from the sealed contract\n' >&2
+  exit 1
+}
+
 echo 'Codewire CI runner image contract: OK'

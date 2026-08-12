@@ -331,7 +331,7 @@ if assert_release_publication_boundary "$trailing_publication_workflow" >/dev/nu
 fi
 
 signing_preflight_line="$(grep -n 'name: Verify release signing key' <<<"$package_release" | cut -d: -f1)"
-toolchain_line="$(grep -n 'uses: https://forgejo.example.invalid/noel/rust-toolchain@' <<<"$package_release" | head -1 | cut -d: -f1)"
+toolchain_line="$(grep -n 'name: Verify sealed Rust toolchain and release targets' <<<"$package_release" | head -1 | cut -d: -f1)"
 [[ -n "$signing_preflight_line" && -n "$toolchain_line" &&
   "$signing_preflight_line" -lt "$toolchain_line" ]] || {
   echo 'CLI signing preflight must run before cross-target toolchain setup' >&2

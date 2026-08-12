@@ -71,10 +71,9 @@ jobs:
               test "$(git rev-parse HEAD)" = "$(git rev-parse refs/remotes/origin/main)"
           fi
 
-      - uses: https://forgejo.example.invalid/noel/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b
+      - name: Verify sealed Rust toolchain
         if: ${{ inputs.target != 'prod-evidence' }}
-        with:
-          toolchain: 1.91.1
+        run: scripts/ci/setup/assert-ci-runner-image.sh
 
       - name: Install protoc (pinned)
         if: ${{ inputs.target != 'prod-evidence' }}

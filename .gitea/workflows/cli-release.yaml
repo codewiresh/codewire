@@ -114,10 +114,8 @@ jobs:
           CW_RELEASE_GPG_KEY_ID: ${{ secrets.CW_RELEASE_GPG_KEY_ID }}
         run: ../scripts/ci/release/verify-cw-release-signing-key.sh apps/cli/GPG_PUBLIC_KEY.asc
 
-      - uses: https://forgejo.example.invalid/noel/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b
-        with:
-          toolchain: 1.91.1
-          targets: x86_64-unknown-linux-musl,aarch64-unknown-linux-gnu,x86_64-apple-darwin,aarch64-apple-darwin
+      - name: Verify sealed Rust toolchain and release targets
+        run: ../scripts/ci/setup/assert-ci-runner-image.sh
 
       - name: Install protoc (pinned)
         run: |

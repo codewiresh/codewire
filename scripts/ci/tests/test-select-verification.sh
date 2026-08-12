@@ -1207,19 +1207,17 @@ grep -qF "trusted_planner='.trusted-ci-policy/scripts/ci/plan/planner.py'" \
 grep -qF "capability_selector='.trusted-ci-policy/scripts/ci/select/select-verification.sh'" \
   "$selection_block"
 grep -qF 'ref: ${{ github.event.before }}' "$selection_block"
-planner_toolchain_line="$(grep -n -m1 'name: Set up pinned Cargo for trusted artifact planning' \
+planner_toolchain_line="$(grep -n -m1 'name: Verify sealed Rust toolchain for trusted artifact planning' \
   "$selection_block" | cut -d: -f1)"
 planner_select_line="$(grep -n -m1 'name: Select capabilities and artifact facts' \
   "$selection_block" | cut -d: -f1)"
 test -n "$planner_toolchain_line"
 test -n "$planner_select_line"
 test "$planner_toolchain_line" -lt "$planner_select_line"
-grep -qF 'uses: https://forgejo.example.invalid/noel/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b' \
-  "$selection_block"
-grep -A3 -F 'name: Set up pinned Cargo for trusted artifact planning' \
+grep -A2 -F 'name: Verify sealed Rust toolchain for trusted artifact planning' \
   "$selection_block" | grep -qF "if: \${{ github.event_name == 'pull_request' }}"
-grep -A4 -F 'name: Set up pinned Cargo for trusted artifact planning' \
-  "$selection_block" | grep -qF 'toolchain: 1.91.1'
+grep -A2 -F 'name: Verify sealed Rust toolchain for trusted artifact planning' \
+  "$selection_block" | grep -qF 'run: scripts/ci/setup/assert-ci-runner-image.sh'
 grep -qF "jq -e '.degraded_reasons | length > 0'" "$selection_block"
 grep -qF "jq -c '.degraded_reasons'" "$selection_block"
 grep -qF "trusted_adapter='.trusted-ci-policy/scripts/ci/plan/apply-verification-plan.py'" \
@@ -1241,13 +1239,13 @@ python3 "$ROOT/scripts/ci/plan/tests/test_planner.py" \
   PlannerFixtureTests.test_missing_cargo_fails_closed_with_diagnostic
 
 standard_block="$TMP/standard.yaml"
-deploy_toolchain_line="$(grep -n -m1 'https://forgejo.example.invalid/noel/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b' \
+deploy_toolchain_line="$(grep -n -m1 'name: Verify sealed Rust toolchain' \
   "$standard_block" | cut -d: -f1)"
 deploy_run_line="$(grep -n -m1 'name: Run Deploy' "$standard_block" | cut -d: -f1)"
 test -n "$deploy_toolchain_line"
 test -n "$deploy_run_line"
 test "$deploy_toolchain_line" -lt "$deploy_run_line"
-grep -A2 -F 'uses: https://forgejo.example.invalid/noel/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b' \
+grep -A2 -F 'name: Verify sealed Rust toolchain' \
   "$standard_block" | grep -qF "contains(needs.verification-selection.outputs.selection, '|deploy|')"
 
 permissions_block="$(awk '
@@ -1430,21 +1428,21 @@ if grep -qF 'swift-actions/setup-swift@' "$standard_block"; then
   exit 1
 fi
 
-grep -qF '      - uses: https://forgejo.example.invalid/noel/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b' \
+grep -qF '      - name: Verify sealed Rust toolchain' \
   "$standard_block" || {
-  echo 'standard: Rust-backed transitional checks have no pinned Rust toolchain' >&2
+  echo 'standard: Rust-backed transitional checks do not verify the sealed Rust toolchain' >&2
   exit 1
 }
-standard_toolchain_line="$(grep -n -m1 'uses: https://forgejo.example.invalid/noel/rust-toolchain@' \
+standard_toolchain_line="$(grep -n -m1 'name: Verify sealed Rust toolchain' \
   "$standard_block" | cut -d: -f1)"
 contracts_run_line="$(grep -n -m1 'name: Run Contracts' \
   "$standard_block" | cut -d: -f1)"
 if [ "$standard_toolchain_line" -ge "$contracts_run_line" ]; then
-  echo 'standard: Rust toolchain must be installed before contract verification' >&2
+  echo 'standard: Rust toolchain must be verified before contract verification' >&2
   exit 1
 fi
 standard_toolchain_condition="$(grep -A1 -F \
-  'uses: https://forgejo.example.invalid/noel/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b' \
+  'name: Verify sealed Rust toolchain' \
   "$standard_block")"
 grep -qF "contains(needs.verification-selection.outputs.selection, '|policy|')" \
   <<<"$standard_toolchain_condition" || {
@@ -1459,7 +1457,7 @@ grep -qF "contains(needs.verification-selection.outputs.selection, '|contracts_p
 go_support_run_line="$(grep -n -m1 'name: Run Go support' \
   "$standard_block" | cut -d: -f1)"
 if [ "$standard_toolchain_line" -ge "$go_support_run_line" ]; then
-  echo 'go-support: Rust toolchain must be installed before tailnet parity verification' >&2
+  echo 'go-support: Rust toolchain must be verified before tailnet parity verification' >&2
   exit 1
 fi
 grep -qF "contains(needs.verification-selection.outputs.selection, '|go_tailnet|')" \
@@ -1556,7 +1554,7 @@ if rg -n 'cr-golden|diagnostic_cr_golden|go_cr_golden|TestGolden.*-update' \
   echo 'retired Go CR-golden diagnostic remains wired' >&2
   exit 1
 fi
-grep -qF 'https://forgejo.example.invalid/noel/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b' \
+grep -qF 'name: Verify sealed Rust toolchain' \
   "$DIAGNOSTICS_WORKFLOW"
 
 required_block="$TMP/required-verification.yaml"
