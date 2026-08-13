@@ -1538,6 +1538,8 @@ for integration_block in "$database_block" "$services_control_block" "$services_
     exit 1
   fi
   grep -qF -- '--network-alias "$postgres_host"' "$integration_block"
+  grep -qF 'echo "INTEGRATION_DOCKER_NETWORK=${networks[0]}" >> "$GITHUB_ENV"' \
+    "$integration_block"
   if grep -qF -- '-p 127.0.0.1::5432' "$integration_block"; then
     echo 'integration job publishes Postgres onto the DinD sidecar loopback' >&2
     exit 1
@@ -1571,6 +1573,10 @@ grep -qF 'run: scripts/ci/verify/run-integration-verification.sh services-runtim
   "$services_runtime_block"
 
 integration_runner="$ROOT/scripts/ci/verify/run-integration-verification.sh"
+grep -qF -- '--network "$INTEGRATION_DOCKER_NETWORK"' "$integration_runner"
+grep -qF -- '--network-alias "$INTEGRATION_NATS_HOST"' "$integration_runner"
+grep -qF 'NATS_MONITOR_URL="http://${INTEGRATION_NATS_HOST}:8222/healthz"' \
+  "$integration_runner"
 grep -qF 'service_apikey_smoke service_idp service_coordinator service_billing' \
   "$integration_runner"
 grep -qF 'service_connectcore service_temporal)' "$integration_runner"

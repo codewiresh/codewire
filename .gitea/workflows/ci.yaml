@@ -485,6 +485,7 @@ jobs:
             -e POSTGRES_USER=codewire -e POSTGRES_PASSWORD=codewire \
             -e POSTGRES_DB=codewire postgres:17-alpine
           echo "POSTGRES_HOST=$postgres_host" >> "$GITHUB_ENV"
+          echo "INTEGRATION_DOCKER_NETWORK=${networks[0]}" >> "$GITHUB_ENV"
 
       - name: Wait for integration Postgres
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|database|') }}
@@ -560,6 +561,7 @@ jobs:
             -e POSTGRES_USER=codewire -e POSTGRES_PASSWORD=codewire \
             -e POSTGRES_DB=codewire postgres:17-alpine
           echo "POSTGRES_HOST=$postgres_host" >> "$GITHUB_ENV"
+          echo "INTEGRATION_DOCKER_NETWORK=${networks[0]}" >> "$GITHUB_ENV"
 
       - name: Wait for integration Postgres
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|service_integration|') }}
@@ -637,6 +639,7 @@ jobs:
             -e POSTGRES_USER=codewire -e POSTGRES_PASSWORD=codewire \
             -e POSTGRES_DB=codewire postgres:17-alpine
           echo "POSTGRES_HOST=$postgres_host" >> "$GITHUB_ENV"
+          echo "INTEGRATION_DOCKER_NETWORK=${networks[0]}" >> "$GITHUB_ENV"
 
       - name: Wait for integration Postgres
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|service_integration|') }}
