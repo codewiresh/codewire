@@ -1525,12 +1525,34 @@ done
 
 database_services_block="$TMP/database-services.yaml"
 grep -qF 'name: Start integration Postgres' "$database_services_block"
-grep -qF 'docker inspect --format' "$database_services_block"
+grep -qF "docker inspect --format '{{json .NetworkSettings.Networks}}'" \
+  "$database_services_block"
+grep -qF "| jq -er 'keys[]'" "$database_services_block"
+if grep -qF '{{println $name}}' "$database_services_block"; then
+  echo 'database services network discovery can emit a phantom blank network' >&2
+  exit 1
+fi
 grep -qF -- '--network-alias "$postgres_host"' "$database_services_block"
 if grep -qF -- '-p 127.0.0.1::5432' "$database_services_block"; then
   echo 'database services publish Postgres onto the DinD sidecar loopback' >&2
   exit 1
 fi
+
+# Match the workflow's value-blind JSON-key extraction. Docker appends a
+# newline after its Go-template output; JSON parsing must still produce exactly
+# one array element for one bounded network and reject zero or multiple names.
+assert_network_count() {
+  local payload="$1" expected="$2"
+  local -a parsed=()
+  mapfile -t parsed < <(printf '%s\n' "$payload" | jq -er 'keys[]')
+  if [ "${#parsed[@]}" -ne "$expected" ]; then
+    echo "network discovery count mismatch: expected=$expected actual=${#parsed[@]}" >&2
+    exit 1
+  fi
+}
+assert_network_count '{"WORKFLOW-bounded":{}}' 1
+assert_network_count '{}' 0
+assert_network_count '{"bridge":{},"WORKFLOW-bounded":{}}' 2
 grep -qF 'name: Run Database' "$database_services_block"
 grep -qF 'run: scripts/ci/verify/run-integration-verification.sh database' \
   "$database_services_block"

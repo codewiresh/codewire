@@ -472,8 +472,8 @@ jobs:
           echo "POSTGRES_CONTAINER=$container" >> "$GITHUB_ENV"
           docker rm -f "$container" >/dev/null 2>&1 || true
           mapfile -t networks < <(
-            docker inspect --format '{{range $name, $_ := .NetworkSettings.Networks}}{{println $name}}{{end}}' \
-              "${HOSTNAME:?}"
+            docker inspect --format '{{json .NetworkSettings.Networks}}' \
+              "${HOSTNAME:?}" | jq -er 'keys[]'
           )
           if [ "${#networks[@]}" -ne 1 ] || [[ "${networks[0]}" =~ [^A-Za-z0-9_.-] ]]; then
             echo 'job container must have exactly one bounded Docker network' >&2
