@@ -132,7 +132,7 @@ if missing_scope_output="$(
     DATABASE_URL='postgres://synthetic:synthetic@127.0.0.1:60003/synthetic' \
     DATABASE_URL_RUST='postgres://synthetic:synthetic@127.0.0.1:60003/synthetic' \
     VERIFICATION_SELECTION='|valid:v3|service_integration|complete|' \
-    "$ROOT/scripts/ci/verify/run-integration-verification.sh" services 2>&1
+    "$ROOT/scripts/ci/verify/run-integration-verification.sh" services-control 2>&1
 )"; then
   echo "service integration without a service scope was accepted" >&2
   exit 1
