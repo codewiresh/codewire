@@ -11,6 +11,7 @@ RUN rm -f /etc/apt/sources.list && \
     ! grep -RqsE '(deb|security)\.debian\.org' /etc/apt/sources.list /etc/apt/sources.list.d && \
     apt-get install -y --no-install-recommends libprotobuf-dev protobuf-compiler && \
     rm -rf /var/lib/apt/lists/*
+RUN rustup component add --toolchain 1.91.1-x86_64-unknown-linux-gnu rustfmt clippy
 
 # The source tree stays read-only and is never copied into an image layer. Cargo
 # owns normal/build dependency closure; only the resulting cw binary crosses
@@ -103,9 +104,10 @@ RUN npm config set prefix /home/codewire/.npm-global && \
       @earendil-works/pi-coding-agent && \
     npm install -g @anthropic-ai/claude-code
 
-# Reuse the exact toolchain from the digest-pinned Rust build stage. This
-# removes a second mutable installer/network transaction and keeps the
-# interactive user's Cargo and Rustup homes writable for normal development.
+# Reuse the exact toolchain and explicitly selected components from the
+# digest-pinned Rust build stage. This removes a second mutable installer
+# transaction and keeps the interactive user's Cargo and Rustup homes writable
+# for normal development.
 COPY --from=cw-builder --chown=codewire:codewire /usr/local/cargo/ /home/codewire/.cargo/
 COPY --from=cw-builder --chown=codewire:codewire /usr/local/rustup/ /home/codewire/.rustup/
 RUN cargo --version && rustc --version && rustfmt --version && cargo clippy --version

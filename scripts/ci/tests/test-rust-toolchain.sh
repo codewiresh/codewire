@@ -88,4 +88,14 @@ fi
 grep -Fq 'workspace user toolchain must not use the mutable Rustup network installer' \
   "$fixture/workspace-installer.log"
 
+cp "$ROOT/images/workspace/Dockerfile" "$fixture/images/workspace/Dockerfile"
+sed -i '/RUN rustup component add --toolchain 1.91.1-x86_64-unknown-linux-gnu rustfmt clippy/d' \
+  "$fixture/images/workspace/Dockerfile"
+if "$CHECK" --root "$fixture" >"$fixture/workspace-components.log" 2>&1; then
+  printf 'Rust toolchain guard accepted missing workspace components\n' >&2
+  exit 1
+fi
+grep -Fq 'workspace build stage does not select exact 1.91.1 rustfmt and clippy components' \
+  "$fixture/workspace-components.log"
+
 printf 'Rust toolchain drift fixtures: OK\n'
