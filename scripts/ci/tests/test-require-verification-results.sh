@@ -9,7 +9,8 @@ green_results=(
   VERIFICATION_TESTED_TREE_RECEIPT=fallback
   VERIFICATION_STANDARD_RESULT=success
   VERIFICATION_RUST_TRANSPORT_RESULT=success
-  VERIFICATION_DATABASE_SERVICES_RESULT=success
+  VERIFICATION_DATABASE_RESULT=success
+  VERIFICATION_SERVICES_RESULT=success
   VERIFICATION_EDGE_KIND_RESULT=success
   VERIFICATION_CW_RELEASE_ASSETS_RESULT=success
   VERIFICATION_WORKSPACE_IMAGE_RESULT=success
@@ -52,10 +53,15 @@ expect_failure rust_transport_cancel \
   VERIFICATION_SELECTION='|valid:v3|policy|rust|complete|' \
   VERIFICATION_RUST_TRANSPORT_RESULT=cancelled
 
-expect_failure database_services_skip \
-  'database-services capability group concluded skipped' \
+expect_failure database_skip \
+  'database capability group concluded skipped' \
   VERIFICATION_SELECTION='|valid:v3|policy|complete|' \
-  VERIFICATION_DATABASE_SERVICES_RESULT=skipped
+  VERIFICATION_DATABASE_RESULT=skipped
+
+expect_failure services_skip \
+  'services capability group concluded skipped' \
+  VERIFICATION_SELECTION='|valid:v3|policy|complete|' \
+  VERIFICATION_SERVICES_RESULT=skipped
 
 expect_failure edge_kind_missing 'edge-kind capability group concluded missing' \
   VERIFICATION_SELECTION='|valid:v3|policy|complete|' \

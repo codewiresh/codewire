@@ -1029,7 +1029,7 @@ fi
 
 database_go_setup="$TMP/database-go-setup.txt"
 awk '
-  /^  database-services:$/ { group = 1 }
+  /^  database:$/ { group = 1 }
   group && /- name: Set up Go 1\.26\.5$/ { capture = 1 }
   capture { print }
   capture && /run: scripts\/ci\/setup\/setup-go\.sh/ { exit }
@@ -1137,7 +1137,7 @@ fi
 }
 grep -qF 'push baseline is unavailable' "$missing_stderr"
 
-# Workflow contract: four fixed capability groups. Gitea assigns static jobs
+# Workflow contract: five fixed capability groups. Forgejo assigns static jobs
 # before evaluating job-level conditions, so family-level fan-out is forbidden.
 while IFS='|' read -r job_id job_name runner; do
   block="$TMP/${job_id}.yaml"
@@ -1157,14 +1157,15 @@ while IFS='|' read -r job_id job_name runner; do
 done <<'EOF'
 standard|Standard verification|ubuntu-latest
 rust-transport|Rust / transport verification|ubuntu-latest
-database-services|Database / service verification|ubuntu-latest
+database|Database verification|ubuntu-latest
+services|Service integration verification|ubuntu-latest
 edge-kind|Edge / Kind verification|kind-e2e
 EOF
 
 # Compatibility jobs share the disposable DinD runner pool. Keep their task
 # ceiling below the runner pod's independently managed lifetime so queued pods
 # still have enough time to execute a bounded job after assignment.
-for job_id in cw-release-assets workspace-image standard rust-transport database-services; do
+for job_id in cw-release-assets workspace-image standard rust-transport database services; do
   block="$TMP/${job_id}.yaml"
   if [ ! -s "$block" ]; then
     awk -v wanted="$job_id" '
@@ -1179,7 +1180,7 @@ for job_id in cw-release-assets workspace-image standard rust-transport database
   }
 done
 
-for job_id in standard rust-transport database-services edge-kind; do
+for job_id in standard rust-transport database services edge-kind; do
   block="$TMP/${job_id}.yaml"
   grep -qF 'name: Reuse exact PR-head content verification' "$block"
   grep -qF "if: \${{ needs.verification-selection.outputs.tested_tree_receipt == 'accepted' }}" \
@@ -1278,12 +1279,12 @@ top_level_jobs="$(awk '
   in_jobs && /^  [A-Za-z0-9_-]+:$/ { count++ }
   END { print count + 0 }
 ' "$WORKFLOW")"
-if [ "$top_level_jobs" != 8 ]; then
-  echo "product CI defines ${top_level_jobs} jobs; expected selector, two artifact jobs, four groups, and aggregate" >&2
+if [ "$top_level_jobs" != 9 ]; then
+  echo "product CI defines ${top_level_jobs} jobs; expected selector, two artifact jobs, five groups, and aggregate" >&2
   exit 1
 fi
 for legacy_job in policy contracts rust go-support web sdk-go sdk-ts sdk-python \
-    database service-integration transport release deploy security; do
+    service-integration transport release deploy security; do
   if grep -qF "  ${legacy_job}:" "$WORKFLOW"; then
     echo "legacy per-family runner job remains: ${legacy_job}" >&2
     exit 1
@@ -1523,20 +1524,24 @@ for contract in 'Run Rust|rust' 'Run Rust transport|transport'; do
   }
 done
 
-database_services_block="$TMP/database-services.yaml"
-grep -qF 'name: Start integration Postgres' "$database_services_block"
-grep -qF "docker inspect --format '{{json .NetworkSettings.Networks}}'" \
-  "$database_services_block"
-grep -qF "| jq -er 'keys[]'" "$database_services_block"
-if grep -qF '{{println $name}}' "$database_services_block"; then
-  echo 'database services network discovery can emit a phantom blank network' >&2
-  exit 1
-fi
-grep -qF -- '--network-alias "$postgres_host"' "$database_services_block"
-if grep -qF -- '-p 127.0.0.1::5432' "$database_services_block"; then
-  echo 'database services publish Postgres onto the DinD sidecar loopback' >&2
-  exit 1
-fi
+database_block="$TMP/database.yaml"
+services_block="$TMP/services.yaml"
+for integration_block in "$database_block" "$services_block"; do
+  grep -qF 'name: Start integration Postgres' "$integration_block"
+  grep -qF "docker inspect --format '{{json .NetworkSettings.Networks}}'" \
+    "$integration_block"
+  grep -qF "| jq -er 'keys[]'" "$integration_block"
+  if grep -qF '{{println $name}}' "$integration_block"; then
+    echo 'integration network discovery can emit a phantom blank network' >&2
+    exit 1
+  fi
+  grep -qF -- '--network-alias "$postgres_host"' "$integration_block"
+  if grep -qF -- '-p 127.0.0.1::5432' "$integration_block"; then
+    echo 'integration job publishes Postgres onto the DinD sidecar loopback' >&2
+    exit 1
+  fi
+  grep -qF 'name: Stop integration Postgres' "$integration_block"
+done
 
 # Match the workflow's value-blind JSON-key extraction. Docker appends a
 # newline after its Go-template output; JSON parsing must still produce exactly
@@ -1553,13 +1558,12 @@ assert_network_count() {
 assert_network_count '{"WORKFLOW-bounded":{}}' 1
 assert_network_count '{}' 0
 assert_network_count '{"bridge":{},"WORKFLOW-bounded":{}}' 2
-grep -qF 'name: Run Database' "$database_services_block"
+grep -qF 'name: Run Database' "$database_block"
 grep -qF 'run: scripts/ci/verify/run-integration-verification.sh database' \
-  "$database_services_block"
-grep -qF 'name: Run Service integration' "$database_services_block"
+  "$database_block"
+grep -qF 'name: Run Service integration' "$services_block"
 grep -qF 'run: scripts/ci/verify/run-integration-verification.sh services' \
-  "$database_services_block"
-grep -qF 'name: Stop integration Postgres' "$database_services_block"
+  "$services_block"
 
 edge_kind_block="$TMP/edge-kind.yaml"
 grep -qF 'run: scripts/ci/verify/run-product-verification.sh edge' "$edge_kind_block"
@@ -1617,14 +1621,15 @@ grep -qF '    name: Required verification' "$WORKFLOW"
 # shellcheck disable=SC2016 # Match the literal Actions expression.
 grep -qF '    if: ${{ always() }}' "$WORKFLOW"
 grep -qF 'scripts/ci/select/require-verification-results.sh' "$required_block"
-for group in cw-release-assets workspace-image standard rust-transport database-services edge-kind; do
+for group in cw-release-assets workspace-image standard rust-transport database services edge-kind; do
   grep -qF "      - ${group}" "$required_block" || {
     echo "required CI does not wait on ${group}" >&2
     exit 1
   }
 done
 for result in VERIFICATION_CW_RELEASE_ASSETS_RESULT VERIFICATION_STANDARD_RESULT \
-    VERIFICATION_RUST_TRANSPORT_RESULT VERIFICATION_DATABASE_SERVICES_RESULT \
+    VERIFICATION_RUST_TRANSPORT_RESULT VERIFICATION_DATABASE_RESULT \
+    VERIFICATION_SERVICES_RESULT \
     VERIFICATION_EDGE_KIND_RESULT VERIFICATION_WORKSPACE_IMAGE_RESULT; do
   grep -qF "${result}:" "$required_block" || {
     echo "required CI omits ${result}" >&2

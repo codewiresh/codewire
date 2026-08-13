@@ -39,7 +39,7 @@ readonly CI_RUST_CARGO_HOME='${{ github.workspace }}/target/ci-rust-cargo-home'
 # shellcheck disable=SC2016
 readonly CI_CARGO_CAPACITY_CHECK='scripts/ci/setup/assert-cargo-cache-capacity.sh "$CARGO_HOME"'
 readonly -a PINNED_WORKFLOWS=(
-  '.gitea/workflows/ci.yaml:6'
+  '.gitea/workflows/ci.yaml:7'
   '.gitea/workflows/claude-e2e.yaml:1'
   '.gitea/workflows/cli-release.yaml:1'
   '.gitea/workflows/connect-apikey-smoke.yaml:1'
@@ -144,7 +144,7 @@ for entry in "${PINNED_WORKFLOWS[@]}"; do
     die "$workflow sealed toolchain drift (assertions=$assertion_count actions=$action_count expected=$expected_count)"
 done
 
-rust_transport_block="$(sed -n '/^  rust-transport:/,/^  database-services:/p' \
+rust_transport_block="$(sed -n '/^  rust-transport:/,/^  database:/p' \
   "$ROOT/.gitea/workflows/ci.yaml")"
 [[ "$(grep -Fxc "      CARGO_HOME: $CI_RUST_CARGO_HOME" <<<"$rust_transport_block" || true)" -eq 1 ]] ||
   die 'primary Rust CI job must isolate CARGO_HOME on the job workspace'
