@@ -38,6 +38,9 @@ test -f /usr/include/google/protobuf/duration.proto
 test -f /usr/include/google/protobuf/timestamp.proto
 psql --version
 
+readonly helm_version='v3.16.4'
+[[ "$(helm version --template '{{.Version}}')" == "$helm_version" ]]
+
 readonly rust_version='1.91.1'
 readonly rust_host='x86_64-unknown-linux-gnu'
 readonly -a rust_targets=(

@@ -17,13 +17,16 @@ grep -Fq 'download_ci_tool() {' "$VERIFIER" ||
 grep -Fq -- '--retry 5 --retry-all-errors --retry-delay 2 --connect-timeout 20' \
   "$VERIFIER" || fail 'bounded transport retry is absent'
 grep -Fq 'download_ci_tool \' "$VERIFIER" ||
-  fail 'pinned-tool installers bypass the shared downloader'
+  fail 'pinned Kustomize installer bypasses the shared downloader'
 
-for checksum in \
-    'grep "kustomize_${version}_linux_amd64.tar.gz" checksums.txt | sha256sum -c -' \
-    'sha256sum -c helm.sha256'; do
-  grep -Fq "$checksum" "$VERIFIER" ||
-    fail "checksum verification is absent: $checksum"
-done
+checksum='grep "kustomize_${version}_linux_amd64.tar.gz" checksums.txt | sha256sum -c -'
+grep -Fq "$checksum" "$VERIFIER" ||
+  fail "checksum verification is absent: $checksum"
+
+grep -Fq "installed_version=\"\$(helm version --template '{{.Version}}')\"" "$VERIFIER" ||
+  fail 'sealed Helm version assertion is absent'
+if grep -Fq 'https://get.helm.sh/' "$VERIFIER"; then
+  fail 'Helm must come from the immutable runner image, not job-time network'
+fi
 
 printf 'CI tool download contract: OK\n'

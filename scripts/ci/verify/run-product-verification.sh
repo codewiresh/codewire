@@ -564,20 +564,16 @@ install_kustomize() {
 
 install_helm() {
   local version="${HELM_VERSION:-v3.16.4}"
-  mkdir -p "$HOME/.local/bin"
-  (
-    cd /tmp
-    download_ci_tool \
-      "https://get.helm.sh/helm-${version}-linux-amd64.tar.gz" \
-      "helm-${version}-linux-amd64.tar.gz"
-    download_ci_tool \
-      "https://get.helm.sh/helm-${version}-linux-amd64.tar.gz.sha256sum" \
-      helm.sha256
-    sha256sum -c helm.sha256
-    tar -xzf "helm-${version}-linux-amd64.tar.gz"
-    install linux-amd64/helm "$HOME/.local/bin/helm"
-  )
-  export PATH="$HOME/.local/bin:$PATH"
+  local installed_version
+  command -v helm >/dev/null 2>&1 || {
+    echo "::error::CI runner image is missing sealed Helm ${version}" >&2
+    return 1
+  }
+  installed_version="$(helm version --template '{{.Version}}')"
+  if [ "$installed_version" != "$version" ]; then
+    echo "::error::CI runner image Helm version ${installed_version} differs from ${version}" >&2
+    return 1
+  fi
 }
 
 run_deploy() {
