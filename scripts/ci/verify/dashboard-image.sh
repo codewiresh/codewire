@@ -153,16 +153,49 @@ docker run --detach --name "$smoke_container" \
   --read-only --cap-drop ALL --security-opt no-new-privileges:true \
   --env CODEWIRE_DASHBOARD_RUNTIME_MODE=current-thread \
   "$image" >/dev/null
-port="$(docker inspect "$smoke_container" \
-  --format '{{(index (index .NetworkSettings.Ports "5173/tcp") 0).HostPort}}')"
-if [[ ! "$port" =~ ^[0-9]+$ ]]; then
-  echo "dashboard image verification: Docker did not assign a loopback smoke port" >&2
-  exit 1
+
+# A local Docker daemon publishes the smoke port onto this process's loopback.
+# Forgejo compatibility jobs instead talk to a pod-local DinD sidecar over a
+# Unix socket, so the daemon's loopback is a different network namespace. In
+# that case reuse the already-running, digest-pinned job image as a disposable
+# curl client in the dashboard container's network namespace. This neither
+# pulls a probe image nor publishes the dashboard beyond Docker loopback.
+probe_image=""
+self_container="${HOSTNAME:-}"
+if [ -n "$self_container" ] \
+    && docker container inspect "$self_container" >/dev/null 2>&1; then
+  probe_image="$(docker container inspect "$self_container" \
+    --format '{{.Config.Image}}')"
+  if [ -z "$probe_image" ] || ! docker image inspect "$probe_image" >/dev/null 2>&1; then
+    echo "dashboard image verification: current job image is unavailable for the DinD probe" >&2
+    exit 1
+  fi
+  base='http://127.0.0.1:5173'
+else
+  port="$(docker inspect "$smoke_container" \
+    --format '{{(index (index .NetworkSettings.Ports "5173/tcp") 0).HostPort}}')"
+  if [[ ! "$port" =~ ^[0-9]+$ ]]; then
+    echo "dashboard image verification: Docker did not assign a loopback smoke port" >&2
+    exit 1
+  fi
+  base="http://127.0.0.1:${port}"
 fi
-base="http://127.0.0.1:${port}"
+
+dashboard_curl() {
+  if [ -n "$probe_image" ]; then
+    docker run --rm \
+      --network "container:$smoke_container" \
+      --read-only --cap-drop ALL --security-opt no-new-privileges:true \
+      --entrypoint curl \
+      "$probe_image" "$@"
+  else
+    curl "$@"
+  fi
+}
+
 ready=0
 for _ in $(seq 1 80); do
-  if curl -fsS "$base/healthz" >/dev/null 2>&1; then
+  if dashboard_curl -fsS "$base/healthz" >/dev/null 2>&1; then
     ready=1
     break
   fi
@@ -182,28 +215,32 @@ fi
 
 curl_retry=(--silent --show-error --retry 3 --retry-all-errors --retry-delay 1)
 
-curl --fail "${curl_retry[@]}" "$base/" >"$work/home.html"
-curl --fail "${curl_retry[@]}" --dump-header "$work/docs.headers" \
-  "$base/docs" >"$work/docs.html"
+dashboard_curl --fail "${curl_retry[@]}" "$base/" >"$work/home.html"
+dashboard_curl --fail "${curl_retry[@]}" "$base/docs" >"$work/docs.html"
+dashboard_curl --fail "${curl_retry[@]}" --dump-header - --output /dev/null \
+  "$base/docs" >"$work/docs.headers"
 tr -d '\r' <"$work/docs.headers" >"$work/docs.normalized.headers"
 grep -Eiq '^content-type: text/html; charset=utf-8$' "$work/docs.normalized.headers"
 grep -Eiq '^content-security-policy: ' "$work/docs.normalized.headers"
 grep -Fiq '<!doctype html>' "$work/docs.html"
-curl --fail "${curl_retry[@]}" "$base/install.sh" >"$work/install.sh"
+dashboard_curl --fail "${curl_retry[@]}" "$base/install.sh" >"$work/install.sh"
 cmp "$ROOT/apps/cli/install.sh" "$work/install.sh"
-curl --fail "${curl_retry[@]}" "$base/.well-known/apple-app-site-association" \
+dashboard_curl --fail "${curl_retry[@]}" "$base/.well-known/apple-app-site-association" \
   >"$work/apple.json"
 if [ "$(<"$work/apple.json")" != \
     '{"webcredentials":{"apps":["PXQZM3GLP5.sh.codewire.ios"]}}' ]; then
   echo "dashboard image verification: Apple association response drifted" >&2
   exit 1
 fi
-curl --fail "${curl_retry[@]}" "$base/docs/search_index.en.json" | jq -e \
+dashboard_curl --fail "${curl_retry[@]}" "$base/docs/search_index.en.json" | jq -e \
   'type == "array" and length > 0' >/dev/null
 
+redirect_response="$work/docs-slash.response"
+dashboard_curl "${curl_retry[@]}" --output /dev/null --dump-header - \
+  --write-out '\n%{http_code}' "$base/docs/" >"$redirect_response"
+status="$(tail -n 1 "$redirect_response")"
+head -n -1 "$redirect_response" >"$work/docs-slash.headers"
 redirect_headers="$work/docs-slash.headers"
-status="$(curl "${curl_retry[@]}" --output /dev/null \
-  --dump-header "$redirect_headers" --write-out '%{http_code}' "$base/docs/")"
 tr -d '\r' <"$redirect_headers" >"$work/docs-slash.normalized.headers"
 if [ "$status" != 308 ] || ! grep -Eiq '^location: /docs$' \
     "$work/docs-slash.normalized.headers"; then

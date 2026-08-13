@@ -1101,7 +1101,8 @@ if [ "$event_selected" = false ]; then
         select_token release
         recognized=true
         ;;
-      scripts/ci/verify/dashboard-image.sh)
+      scripts/ci/verify/dashboard-image.sh|\
+      scripts/ci/tests/test-dashboard-image-network-probe.sh)
         select_token security
         select_token deploy
         select_token edge_kind

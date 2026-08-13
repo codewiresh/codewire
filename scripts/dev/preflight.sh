@@ -204,6 +204,8 @@ run_policy_local() {
   run_step "native desktop UI guard" \
     python3 scripts/checks/source/check-native-desktop-ui.py
   run_step "Go source classification guard" python3 scripts/checks/repo_checks.py go-source-classification
+  run_step "dashboard image network probe contract" \
+    scripts/ci/tests/test-dashboard-image-network-probe.sh
 }
 
 run_selected_family() {
