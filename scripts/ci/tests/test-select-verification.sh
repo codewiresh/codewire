@@ -157,6 +157,8 @@ run_paths_case retired_cache_surface pull_request refs/pull/200/head false \
 run_paths_case shellcheck_policy_domain_future pull_request refs/pull/2001/head false \
   'policy policy_shell' scripts/ci/tests/test-shellcheck-policy-domain.sh
 grep -qF 'scripts/ci/tests/test-shellcheck-policy-domain.sh' "$SELECTOR"
+run_paths_case ci_tool_download_contract pull_request refs/pull/2002/head false \
+  'deploy policy policy_shell' scripts/ci/tests/test-ci-tool-downloads.sh
 run_paths_case runtime_plan_ci pull_request refs/pull/201/head false \
   'deploy go_consumer_interop go_support policy release runtime_confidential' \
   scripts/ci/deploy/resolve-deployed-source.sh \

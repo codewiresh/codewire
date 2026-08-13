@@ -406,6 +406,7 @@ if [ "$event_selected" = false ]; then
       scripts/ci/verify/resolve-cargo-target-dir.sh|\
       scripts/ci/tests/test-resolve-cargo-target-dir.sh|\
       scripts/ci/tests/test-cargo-target-runner-failures.sh|\
+      scripts/ci/tests/test-ci-tool-downloads.sh|\
       scripts/ci/verify/run-product-verification.sh|\
       scripts/ci/tests/test-sdk-local-cli-contract.sh|\
       scripts/checks/security/audit-rust-only-runtime.sh|\
@@ -1010,6 +1011,7 @@ if [ "$event_selected" = false ]; then
       scripts/ci/*observer*.tsv|\
       scripts/ci/*promot*.sh|scripts/ci/*promot*.py|\
       scripts/ci/deploy/dispatch-deploy-dev.sh|scripts/ci/deploy/dispatch-deploy-prod.sh|\
+      scripts/ci/tests/test-ci-tool-downloads.sh|\
       scripts/ci/tests/test-deploy-*.sh|scripts/ci/tests/test-dispatch-deploy-*.sh)
         select_token deploy
         recognized=true
