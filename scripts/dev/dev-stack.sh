@@ -222,4 +222,4 @@ wait_healthz orchestration "http://localhost:$ORCH_PORT/healthz"
 wait_healthz billing "http://localhost:$BILLING_PORT/healthz"
 
 echo "dev-stack: Rust services healthy. Stack left running (logs in .dev-stack/); 'scripts/dev/dev-stack.sh down' to stop."
-echo "dev-stack: run scripts/ci/verify/run-integration-verification.sh services for selected Rust service proof."
+echo "dev-stack: run scripts/ci/verify/run-integration-verification.sh services-control and services-runtime for selected Rust service proof."

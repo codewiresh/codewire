@@ -328,9 +328,12 @@ if selection_has database; then
     "$INTEGRATION_RUNNER" database
 fi
 if selection_has service_integration; then
-  run_step "service integration verification" env \
+  run_step "service control-plane verification" env \
     VERIFICATION_SELECTION="$VERIFICATION_SELECTION" \
-    "$INTEGRATION_RUNNER" services
+    "$INTEGRATION_RUNNER" services-control
+  run_step "service runtime-plane verification" env \
+    VERIFICATION_SELECTION="$VERIFICATION_SELECTION" \
+    "$INTEGRATION_RUNNER" services-runtime
 fi
 
 run_selected_family transport transport "Rust transport verification"

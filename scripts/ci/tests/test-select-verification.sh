@@ -1576,8 +1576,9 @@ grep -qF 'service_apikey_smoke service_idp service_coordinator service_billing' 
 grep -qF 'service_connectcore service_temporal)' "$integration_runner"
 grep -qF 'service_orchestration service_nats service_temporal)' \
   "$integration_runner"
-if grep -qF 'run-integration-verification.sh services"' "$WORKFLOW"; then
-  echo 'workflow retains the oversized combined service integration mode' >&2
+if rg -n 'run-integration-verification\.sh services([^_-]|$)|"\$INTEGRATION_RUNNER" services([^_-]|$)' \
+    "$WORKFLOW" "$ROOT/scripts/dev"; then
+  echo 'automatic verification retains the oversized combined service integration mode' >&2
   exit 1
 fi
 
