@@ -1,6 +1,6 @@
 module github.com/codewiresh/codewire/tests/contract
 
-go 1.26.5
+go 1.26.6
 
 require tailscale.com v1.96.1
 

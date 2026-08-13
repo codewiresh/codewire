@@ -266,9 +266,9 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Set up Go 1.26.5
+      - name: Set up Go 1.26.6
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|contracts|') || contains(needs.verification-selection.outputs.selection, '|go_support|') || contains(needs.verification-selection.outputs.selection, '|sdk_go|') || contains(needs.verification-selection.outputs.selection, '|security_go|')) }}
-        run: scripts/ci/setup/setup-go.sh 1.26.5
+        run: scripts/ci/setup/setup-go.sh 1.26.6
 
       - name: Verify sealed Rust toolchain
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|policy|') || contains(needs.verification-selection.outputs.selection, '|contracts_proto|') || contains(needs.verification-selection.outputs.selection, '|go_tailnet|') || contains(needs.verification-selection.outputs.selection, '|go_consumer_interop|') || contains(needs.verification-selection.outputs.selection, '|deploy|')) }}
@@ -416,9 +416,9 @@ jobs:
           VERIFICATION_SELECTION: ${{ needs.verification-selection.outputs.selection }}
         run: scripts/ci/verify/run-product-verification.sh rust-curated-locks
 
-      - name: Set up Go 1.26.5 for DERP interop
+      - name: Set up Go 1.26.6 for DERP interop
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|transport_derp_contract|') }}
-        run: scripts/ci/setup/setup-go.sh 1.26.5
+        run: scripts/ci/setup/setup-go.sh 1.26.6
 
       - name: Run Rust
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|rust|') }}
