@@ -10,6 +10,10 @@ Local verification is the development loop. Reproduce and fix product and
 integration failures locally; use the exact-head Gitea run as merge
 attestation after the local gate is green.
 
+The hosted verification flow, runner isolation model, cache boundaries, and
+decision-plan transition are documented in
+[docs/dev/CI-ARCHITECTURE.md](dev/CI-ARCHITECTURE.md).
+
 ## Canonical commands
 
 Run the complete isolated product gate, including the full Playwright suite:
