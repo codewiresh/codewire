@@ -79,7 +79,9 @@ RUN mkdir -p /home/codewire/go /home/codewire/.npm-global && \
     chown -R codewire:codewire /home/codewire/go /home/codewire/.npm-global
 
 USER codewire
-ENV PATH="/home/codewire/.npm-global/bin:/home/codewire/.cargo/bin:/home/codewire/.local/bin:${PATH}"
+ENV CARGO_HOME="/home/codewire/.cargo"
+ENV RUSTUP_HOME="/home/codewire/.rustup"
+ENV PATH="/home/codewire/.npm-global/bin:${CARGO_HOME}/bin:/home/codewire/.local/bin:${PATH}"
 
 RUN go install golang.org/x/tools/gopls@latest && \
     go install github.com/hetznercloud/cli/cmd/hcloud@latest && \
@@ -101,8 +103,12 @@ RUN npm config set prefix /home/codewire/.npm-global && \
       @earendil-works/pi-coding-agent && \
     npm install -g @anthropic-ai/claude-code
 
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-      | sh -s -- -y --default-toolchain 1.91.1 --no-modify-path
+# Reuse the exact toolchain from the digest-pinned Rust build stage. This
+# removes a second mutable installer/network transaction and keeps the
+# interactive user's Cargo and Rustup homes writable for normal development.
+COPY --from=cw-builder --chown=codewire:codewire /usr/local/cargo/ /home/codewire/.cargo/
+COPY --from=cw-builder --chown=codewire:codewire /usr/local/rustup/ /home/codewire/.rustup/
+RUN cargo --version && rustc --version && rustfmt --version && cargo clippy --version
 
 # Keep the source-built CLI after the moving developer tools. A cw-only source
 # change then reuses those expensive layers while the final image still proves

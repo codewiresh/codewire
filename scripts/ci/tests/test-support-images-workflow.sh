@@ -136,12 +136,15 @@ for moving_tool_pattern in \
   'go install golang.org/x/tools/gopls@latest' \
   'pipx install aider-chat' \
   'npm install -g --ignore-scripts' \
-  'https://sh.rustup.rs'; do
+  'COPY --from=cw-builder --chown=codewire:codewire /usr/local/rustup/ /home/codewire/.rustup/'; do
   moving_tool_line="$(grep -n -m1 -F "$moving_tool_pattern" \
     "$WORKSPACE_DOCKERFILE" | cut -d: -f1)"
   [[ -n "$moving_tool_line" && "$moving_tool_line" -lt "$cw_copy_line" ]] ||
     fail "moving tool layer '$moving_tool_pattern' must precede the source-built cw handoff"
 done
+if grep -qF 'https://sh.rustup.rs' "$WORKSPACE_DOCKERFILE"; then
+  fail 'workspace image restores the mutable Rustup network installer'
+fi
 [[ "$(tail -n 1 "$WORKSPACE_DOCKERFILE")" == 'USER codewire' ]] ||
   fail 'workspace image does not restore the unprivileged runtime user after installing cw'
 

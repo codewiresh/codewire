@@ -181,8 +181,13 @@ for dockerfile in "${SHIPPED_RUST_DOCKERFILES[@]}"; do
 done
 [[ "$(grep -Fc "FROM rust:${channel}-slim-bookworm@sha256:" "$ROOT/$WORKSPACE_DOCKERFILE" || true)" -eq 1 ]] ||
   die "workspace build-stage compiler differs from $channel"
-[[ "$(grep -Fc -- "--default-toolchain $channel" "$ROOT/$WORKSPACE_DOCKERFILE" || true)" -eq 1 ]] ||
-  die "workspace user toolchain differs from $channel"
+[[ "$(grep -Fxc 'COPY --from=cw-builder --chown=codewire:codewire /usr/local/cargo/ /home/codewire/.cargo/' "$ROOT/$WORKSPACE_DOCKERFILE" || true)" -eq 1 ]] ||
+  die "workspace user Cargo home does not come from the exact $channel build stage"
+[[ "$(grep -Fxc 'COPY --from=cw-builder --chown=codewire:codewire /usr/local/rustup/ /home/codewire/.rustup/' "$ROOT/$WORKSPACE_DOCKERFILE" || true)" -eq 1 ]] ||
+  die "workspace user Rustup home does not come from the exact $channel build stage"
+if grep -Fq 'https://sh.rustup.rs' "$ROOT/$WORKSPACE_DOCKERFILE"; then
+  die 'workspace user toolchain must not use the mutable Rustup network installer'
+fi
 
 printf '[rust-toolchain] exact Rust %s baseline: OK (%s crate manifests, %s sealed runner assertions, %s shipped builders)\n' \
   "$channel" \

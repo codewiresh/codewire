@@ -70,13 +70,22 @@ grep -Fq 'crates/codewire-desktop/Cargo.toml must declare exact Rust 1.91.1' \
 sed -i '0,/rust-version = "1.91.0"/s//rust-version = "1.91.1"/' \
   "$fixture/crates/codewire-desktop/Cargo.toml"
 
-sed -i '0,/--default-toolchain 1.91.1/s//--default-toolchain stable/' \
+sed -i '0,/\/usr\/local\/rustup\/ \/home\/codewire\/\.rustup\//s//\/usr\/local\/rustup\/ \/home\/codewire\/\.rustup-stable\//' \
   "$fixture/images/workspace/Dockerfile"
 if "$CHECK" --root "$fixture" >"$fixture/workspace-drift.log" 2>&1; then
   printf 'Rust toolchain guard accepted workspace-user drift\n' >&2
   exit 1
 fi
-grep -Fq 'workspace user toolchain differs from 1.91.1' \
+grep -Fq 'workspace user Rustup home does not come from the exact 1.91.1 build stage' \
   "$fixture/workspace-drift.log"
+
+cp "$ROOT/images/workspace/Dockerfile" "$fixture/images/workspace/Dockerfile"
+printf '\nRUN curl -fsSL https://sh.rustup.rs | sh\n' >>"$fixture/images/workspace/Dockerfile"
+if "$CHECK" --root "$fixture" >"$fixture/workspace-installer.log" 2>&1; then
+  printf 'Rust toolchain guard accepted the mutable workspace Rustup installer\n' >&2
+  exit 1
+fi
+grep -Fq 'workspace user toolchain must not use the mutable Rustup network installer' \
+  "$fixture/workspace-installer.log"
 
 printf 'Rust toolchain drift fixtures: OK\n'
