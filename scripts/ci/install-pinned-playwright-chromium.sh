@@ -25,4 +25,11 @@ if [[ ! -x "$chromium" ]]; then
   exit 1
 fi
 
+missing_libraries="$(ldd "$chromium" | awk '/not found/ {print $1}' | LC_ALL=C sort -u)"
+if [[ -n "$missing_libraries" ]]; then
+  printf 'pinned Chromium cannot run with the immutable CI image; missing libraries:\n%s\n' \
+    "$missing_libraries" >&2
+  exit 1
+fi
+
 printf '%s\n' "$chromium"

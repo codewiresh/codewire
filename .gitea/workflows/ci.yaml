@@ -704,7 +704,6 @@ jobs:
         run: |
           set -euo pipefail
           PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 bun install --frozen-lockfile --ignore-scripts
-          ./apps/dashboard/node_modules/.bin/playwright install-deps chromium
           chromium="$(scripts/ci/install-pinned-playwright-chromium.sh)"
           "$chromium" --version
           echo "PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=$chromium" >> "$GITHUB_ENV"
