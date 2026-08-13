@@ -586,6 +586,8 @@ run_paths_case cli_makefile pull_request refs/pull/1521/head false \
   apps/cli/Makefile
 run_paths_case edge_harness pull_request refs/pull/153/head false \
   'edge_kind policy' scripts/ci/verify/kind-e2e.sh
+run_paths_case pinned_browser_installer pull_request refs/pull/1531/head true \
+  'edge_kind kind policy' scripts/ci/install-pinned-playwright-chromium.sh
 run_paths_case mixed_sdk_and_runtime pull_request refs/pull/154/head false \
   'policy rust rust_pkg_codewire_server_core sdk_python service_apikey_smoke service_billing service_connectcore service_coordinator service_idp service_integration service_nats service_orchestration service_temporal' \
   libs/sdk-python/codewire/client.py crates/codewire-server-core/src/lib.rs

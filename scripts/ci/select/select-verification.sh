@@ -968,6 +968,7 @@ if [ "$event_selected" = false ]; then
         recognized=true
         ;;
       Caddyfile|Caddyfile.docker|tests/e2e/kind/*|tests/e2e/*kind*|\
+      scripts/ci/install-pinned-playwright-chromium.sh|\
       scripts/ci/verify/kind-e2e.sh|scripts/ci/verify/kind/*|\
       scripts/dev/kind/install-temporal.sh|scripts/ci/tests/test-install-temporal.sh|\
       deployments/k8s/*ingress*|\
