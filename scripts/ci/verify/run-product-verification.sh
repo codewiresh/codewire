@@ -137,6 +137,7 @@ run_policy_core() {
   scripts/ci/tests/test-rust-toolchain.sh
   scripts/ci/tests/test-cargo-cache-capacity.sh
   scripts/ci/tests/test-admin-proto-boundary.sh
+  scripts/ci/tests/test-ci-tool-downloads.sh
   scripts/ci/tests/test-build-local-image.sh
   scripts/ci/tests/test-workspace-agent-contract.sh
   scripts/ci/tests/test-workspace-image-verify-workflow.sh
@@ -537,13 +538,24 @@ run_release() {
   python3 scripts/checks/repo_checks.py production-source-ownership --self-test
 }
 
+download_ci_tool() {
+  local url="$1" output="$2"
+  curl --fail --silent --show-error --location \
+    --retry 5 --retry-all-errors --retry-delay 2 --connect-timeout 20 \
+    --output "$output" "$url"
+}
+
 install_kustomize() {
   local version="${KUSTOMIZE_VERSION:-v5.4.3}"
   mkdir -p "$HOME/.local/bin"
   (
     cd /tmp
-    curl -fsSLO "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize/${version}/kustomize_${version}_linux_amd64.tar.gz"
-    curl -fsSLO "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize/${version}/checksums.txt"
+    download_ci_tool \
+      "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize/${version}/kustomize_${version}_linux_amd64.tar.gz" \
+      "kustomize_${version}_linux_amd64.tar.gz"
+    download_ci_tool \
+      "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize/${version}/checksums.txt" \
+      checksums.txt
     grep "kustomize_${version}_linux_amd64.tar.gz" checksums.txt | sha256sum -c -
     tar -xzf "kustomize_${version}_linux_amd64.tar.gz" -C "$HOME/.local/bin"
   )
@@ -555,9 +567,12 @@ install_helm() {
   mkdir -p "$HOME/.local/bin"
   (
     cd /tmp
-    curl -fsSLO "https://get.helm.sh/helm-${version}-linux-amd64.tar.gz"
-    curl -fsSL "https://get.helm.sh/helm-${version}-linux-amd64.tar.gz.sha256sum" \
-      -o helm.sha256
+    download_ci_tool \
+      "https://get.helm.sh/helm-${version}-linux-amd64.tar.gz" \
+      "helm-${version}-linux-amd64.tar.gz"
+    download_ci_tool \
+      "https://get.helm.sh/helm-${version}-linux-amd64.tar.gz.sha256sum" \
+      helm.sha256
     sha256sum -c helm.sha256
     tar -xzf "helm-${version}-linux-amd64.tar.gz"
     install linux-amd64/helm "$HOME/.local/bin/helm"
