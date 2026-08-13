@@ -47,6 +47,7 @@ write_stub_tree() {
     "$repo/scripts/checks/source" \
     "$repo/scripts/ci/receipts" \
     "$repo/scripts/ci/select" \
+    "$repo/scripts/ci/tests" \
     "$repo/scripts/ci/verify" \
     "$repo/scripts/dev"
 
@@ -55,6 +56,10 @@ write_stub_tree() {
   install -m 755 "$ROOT/scripts/dev/install-hooks.sh" "$repo/scripts/dev/install-hooks.sh"
   install -m 755 "$ROOT/scripts/ci/select/select-verification.sh" \
     "$repo/scripts/ci/select/select-verification.sh"
+  install -m 755 "$ROOT/scripts/ci/tests/test-dashboard-image-network-probe.sh" \
+    "$repo/scripts/ci/tests/test-dashboard-image-network-probe.sh"
+  install -m 755 "$ROOT/scripts/ci/verify/dashboard-image.sh" \
+    "$repo/scripts/ci/verify/dashboard-image.sh"
 cat > "$repo/scripts/ci/receipts/verify-release-tag-receipt.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -216,6 +221,8 @@ normal_output="$(push_branch "$repo" normal-docs "$normal_log")"
 assert_contains normal "$normal_output" '  docs/normal.md'
 assert_contains normal "$normal_output" \
   'preflight selection: |valid:v3|policy|policy_shell_omittable|complete|'
+assert_contains normal "$normal_output" \
+  'dashboard image network probe contract: OK'
 assert_contains normal_tools "$(cat "$normal_log")" \
   'repo_checks permanent-raw-surface --self-test'
 assert_contains normal_tools "$(cat "$normal_log")" \
