@@ -756,19 +756,37 @@ run_services() {
   return 0
 }
 
+filter_service_selection() {
+  local token filtered='|valid:v3|'
+  for token in "$@"; do
+    selected "$token" && filtered+="${token}|"
+  done
+  printf '%scomplete|\n' "$filtered"
+}
+
 case "$MODE" in
   database)
     integration_postgres_configure
     log "PostgreSQL source=${INTEGRATION_POSTGRES_SOURCE}"
     run_database
     ;;
-  services)
+  services-control)
     integration_postgres_configure
     log "PostgreSQL source=${INTEGRATION_POSTGRES_SOURCE}"
+    SELECTION="$(filter_service_selection \
+      service_apikey_smoke service_idp service_coordinator service_billing \
+      service_connectcore service_temporal)"
+    run_services
+    ;;
+  services-runtime)
+    integration_postgres_configure
+    log "PostgreSQL source=${INTEGRATION_POSTGRES_SOURCE}"
+    SELECTION="$(filter_service_selection \
+      service_orchestration service_nats service_temporal)"
     run_services
     ;;
   *)
-    echo "usage: run-integration-verification.sh database|services" >&2
+    echo "usage: run-integration-verification.sh database|services-control|services-runtime" >&2
     exit 2
     ;;
 esac

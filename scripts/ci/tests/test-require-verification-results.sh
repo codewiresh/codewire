@@ -10,7 +10,8 @@ green_results=(
   VERIFICATION_STANDARD_RESULT=success
   VERIFICATION_RUST_TRANSPORT_RESULT=success
   VERIFICATION_DATABASE_RESULT=success
-  VERIFICATION_SERVICES_RESULT=success
+  VERIFICATION_SERVICES_CONTROL_RESULT=success
+  VERIFICATION_SERVICES_RUNTIME_RESULT=success
   VERIFICATION_EDGE_KIND_RESULT=success
   VERIFICATION_CW_RELEASE_ASSETS_RESULT=success
   VERIFICATION_WORKSPACE_IMAGE_RESULT=success
@@ -58,10 +59,15 @@ expect_failure database_skip \
   VERIFICATION_SELECTION='|valid:v3|policy|complete|' \
   VERIFICATION_DATABASE_RESULT=skipped
 
-expect_failure services_skip \
-  'services capability group concluded skipped' \
+expect_failure services_control_skip \
+  'services-control capability group concluded skipped' \
   VERIFICATION_SELECTION='|valid:v3|policy|complete|' \
-  VERIFICATION_SERVICES_RESULT=skipped
+  VERIFICATION_SERVICES_CONTROL_RESULT=skipped
+
+expect_failure services_runtime_skip \
+  'services-runtime capability group concluded skipped' \
+  VERIFICATION_SELECTION='|valid:v3|policy|complete|' \
+  VERIFICATION_SERVICES_RUNTIME_RESULT=skipped
 
 expect_failure edge_kind_missing 'edge-kind capability group concluded missing' \
   VERIFICATION_SELECTION='|valid:v3|policy|complete|' \

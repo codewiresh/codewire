@@ -28,7 +28,10 @@ require_group_success standard "${VERIFICATION_STANDARD_RESULT:-missing}"
 require_group_success rust-transport \
   "${VERIFICATION_RUST_TRANSPORT_RESULT:-missing}"
 require_group_success database "${VERIFICATION_DATABASE_RESULT:-missing}"
-require_group_success services "${VERIFICATION_SERVICES_RESULT:-missing}"
+require_group_success services-control \
+  "${VERIFICATION_SERVICES_CONTROL_RESULT:-missing}"
+require_group_success services-runtime \
+  "${VERIFICATION_SERVICES_RUNTIME_RESULT:-missing}"
 require_group_success edge-kind "${VERIFICATION_EDGE_KIND_RESULT:-missing}"
 require_group_success cw-release-assets \
   "${VERIFICATION_CW_RELEASE_ASSETS_RESULT:-missing}"
