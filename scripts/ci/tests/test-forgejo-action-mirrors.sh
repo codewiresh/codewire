@@ -37,7 +37,14 @@ for reference in "${references[@]}"; do
 done
 
 for approved in "${expected[@]}"; do
-  printf '%s\n' "${references[@]}" | grep -Fxq "$approved" ||
+  used=false
+  for reference in "${references[@]}"; do
+    if [[ "$reference" == "$approved" ]]; then
+      used=true
+      break
+    fi
+  done
+  [[ "$used" == true ]] ||
     fail "reviewed action pin is unexpectedly unused: $approved"
 done
 
