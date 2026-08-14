@@ -17,15 +17,23 @@
 #
 #   docker build -f deployments/docker/services.Dockerfile -t codewire-services:dev .
 #
-# protobuf-compiler is a build dependency of codewire-orchestration's
-# temporalio-sdk family (prost-wkt-types); idp/billing don't need it but the
-# single builder installs it once.
+# protoc is a build dependency of codewire-orchestration's temporalio-sdk
+# family (prost-wkt-types). It comes from one checksum-pinned upstream archive;
+# the image never consults an operating-system package repository.
 
 ARG RUST_IMAGE=rust:1.91.1-bookworm@sha256:c1e5f19e773b7878c3f7a805dd00a495e747acbdc76fb2337a4ebf0418896b33
 ARG DEBIAN_IMAGE=debian:bookworm-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818
 
+FROM ${RUST_IMAGE} AS protoc
+ADD --checksum=sha256:6930ebf62bd4ea607b98fff052596c6ee564b9835b4ce172c75a3f53ae9d91b7 \
+  https://github.com/protocolbuffers/protobuf/releases/download/v35.1/protoc-35.1-linux-x86_64.zip \
+  /tmp/protoc.zip
+RUN unzip -q /tmp/protoc.zip -d /opt/protoc \
+    && /opt/protoc/bin/protoc --version
+
 FROM ${RUST_IMAGE} AS builder
-RUN apt-get update -qq && apt-get install -y -qq protobuf-compiler && rm -rf /var/lib/apt/lists/*
+COPY --from=protoc /opt/protoc /opt/protoc
+ENV PATH="/opt/protoc/bin:${PATH}"
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates

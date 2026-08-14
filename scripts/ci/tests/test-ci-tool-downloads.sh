@@ -6,6 +6,8 @@ readonly ROOT
 readonly VERIFIER="$ROOT/scripts/ci/verify/run-product-verification.sh"
 readonly WORKFLOW="$ROOT/.gitea/workflows/ci.yaml"
 readonly CHROMIUM_INSTALLER="$ROOT/scripts/ci/install-pinned-playwright-chromium.sh"
+readonly PROTOC_URL='https://github.com/protocolbuffers/protobuf/releases/download/v35.1/protoc-35.1-linux-x86_64.zip'
+readonly PROTOC_CHECKSUM='sha256:6930ebf62bd4ea607b98fff052596c6ee564b9835b4ce172c75a3f53ae9d91b7'
 
 fail() {
   printf 'CI tool download contract: %s\n' "$*" >&2
@@ -36,5 +38,19 @@ if grep -Fq 'playwright install-deps' "$WORKFLOW"; then
 fi
 grep -Fq 'ldd "$chromium"' "$CHROMIUM_INSTALLER" ||
   fail 'pinned Chromium does not fail closed on missing runner-image libraries'
+
+for dockerfile in \
+  deployments/docker/services.Dockerfile \
+  deployments/docker/mesh.Dockerfile \
+  deployments/docker/gateway.Dockerfile \
+  deployments/docker/derp.Dockerfile; do
+  if grep -Eq '\b(apt-get|apt)\b' "$ROOT/$dockerfile"; then
+    fail "$dockerfile must not install operating-system packages at build time"
+  fi
+  grep -Fq "ADD --checksum=$PROTOC_CHECKSUM" "$ROOT/$dockerfile" ||
+    fail "$dockerfile does not checksum-pin protoc"
+  grep -Fq "$PROTOC_URL" "$ROOT/$dockerfile" ||
+    fail "$dockerfile does not use the reviewed protoc origin"
+done
 
 printf 'CI tool download contract: OK\n'
