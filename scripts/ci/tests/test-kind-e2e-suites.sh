@@ -212,7 +212,7 @@ source "$COMMON"
     # shellcheck disable=SC2016 # Match the literal Go-template CLI argument.
     case "$*" in
       'container inspect remote-job') return 0 ;;
-      'inspect --format {{range $name, $_ := .NetworkSettings.Networks}}{{println $name}}{{end}} codewire-e2e-ci-control-plane')
+      "inspect --format {{range \$name, \$_ := .NetworkSettings.Networks}}{{println \$name}}{{end}} ${KIND_CLUSTER_NAME}-control-plane")
         printf 'kind\n'
         ;;
       'network connect kind remote-job') record 'network-connect:kind:remote-job' ;;
@@ -220,20 +220,20 @@ source "$COMMON"
     esac
   }
   kind() {
-    if [ "$*" != 'get kubeconfig --internal --name codewire-e2e-ci' ]; then
+    if [ "$*" != "get kubeconfig --internal --name $KIND_CLUSTER_NAME" ]; then
       fail "unexpected remote Kind invocation: $*"
     fi
-    printf 'apiVersion: v1\ncurrent-context: kind-codewire-e2e-ci\n'
+    printf 'apiVersion: v1\ncurrent-context: kind-%s\n' "$KIND_CLUSTER_NAME"
   }
   start_remote_dind_kind_forwarding() { record "forward:$1"; }
   log() { record "log:$*"; }
   configure_remote_dind_kind_network
-  grep -Fqx 'current-context: kind-codewire-e2e-ci' "$KUBECONFIG" ||
+  grep -Fqx "current-context: kind-${KIND_CLUSTER_NAME}" "$KUBECONFIG" ||
     fail 'remote DinD kubeconfig did not use the internal Kind rendering'
 )
-cat >"$FIXTURE/want-remote-dind" <<'EOF'
+cat >"$FIXTURE/want-remote-dind" <<EOF
 network-connect:kind:remote-job
-forward:codewire-e2e-ci-control-plane
+forward:${KIND_CLUSTER_NAME}-control-plane
 log:remote DinD Kind API and host-port topology configured
 EOF
 cmp -s "$FIXTURE/want-remote-dind" "$CALLS" || {
