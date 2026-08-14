@@ -46,7 +46,21 @@ fi
 if [ -z "${KIND_DIND_IMAGE+x}" ]; then
   KIND_DIND_IMAGE='docker.io/library/docker:29.7.1-dind@sha256:e8faad5a8dc5279dff929afc5449f2791736912fff9f99351d742db2fad01b4c'
 fi
-readonly KIND_WORKSPACE_IMAGE KIND_DIND_IMAGE
+if [ -z "${KIND_INGRESS_CONTROLLER_IMAGE+x}" ]; then
+  KIND_INGRESS_CONTROLLER_IMAGE=''
+fi
+if [ -z "${KIND_INGRESS_CERTGEN_IMAGE+x}" ]; then
+  KIND_INGRESS_CERTGEN_IMAGE=''
+fi
+if [ -z "${APPROVED_KIND_INGRESS_CONTROLLER_IMAGE+x}" ]; then
+  APPROVED_KIND_INGRESS_CONTROLLER_IMAGE='nexus-system-cluster.example.invalid/oci-approved/ingress-nginx/controller@sha256:5c2a1b6c03c4d18ecf14685d21a32bf6763a022f6f8cc07e9578f6cd5eca6180'
+fi
+if [ -z "${APPROVED_KIND_INGRESS_CERTGEN_IMAGE+x}" ]; then
+  APPROVED_KIND_INGRESS_CERTGEN_IMAGE='nexus-system-cluster.example.invalid/oci-approved/ingress-nginx/kube-webhook-certgen@sha256:334191231352856e1ec0c3e50f966edb59ec94a51906453d09f5820789e8b053'
+fi
+readonly KIND_WORKSPACE_IMAGE KIND_DIND_IMAGE \
+  KIND_INGRESS_CONTROLLER_IMAGE KIND_INGRESS_CERTGEN_IMAGE \
+  APPROVED_KIND_INGRESS_CONTROLLER_IMAGE APPROVED_KIND_INGRESS_CERTGEN_IMAGE
 
 log() {
   printf '[kind-e2e] %s\n' "$*"
@@ -608,6 +622,18 @@ configure_remote_dind_kind_network() {
   log "remote DinD Kind API and host-port topology configured"
 }
 
+validate_sealed_kind_ingress_images() {
+  if [ -z "$KIND_INGRESS_CONTROLLER_IMAGE" ] \
+      && [ -z "$KIND_INGRESS_CERTGEN_IMAGE" ]; then
+    return 1
+  fi
+  if [ "$KIND_INGRESS_CONTROLLER_IMAGE" != "$APPROVED_KIND_INGRESS_CONTROLLER_IMAGE" ] \
+      || [ "$KIND_INGRESS_CERTGEN_IMAGE" != "$APPROVED_KIND_INGRESS_CERTGEN_IMAGE" ]; then
+    echo "::error::Kind ingress mirror inputs must match the two approved Nexus platform digests"
+    return 2
+  fi
+}
+
 load_images_into_kind() {
   local image
 
@@ -624,6 +650,60 @@ load_images_into_kind() {
     kind load docker-image --name "$KIND_CLUSTER_NAME" "$image"
     wait_for_kind_api_after_image_load
   done
+
+  if validate_sealed_kind_ingress_images; then
+    # The trusted runner boundary pulls these images from Nexus before any
+    # repository-controlled workflow starts. This process receives neither a
+    # registry credential nor public-registry egress; it can only prove and
+    # side-load the two exact local references into the disposable Kind node.
+    for image in \
+        "$KIND_INGRESS_CONTROLLER_IMAGE" \
+        "$KIND_INGRESS_CERTGEN_IMAGE"; do
+      if ! docker image inspect "$image" >/dev/null 2>&1; then
+        echo "::error::approved Kind ingress image was not preloaded by the runner boundary: ${image}"
+        return 1
+      fi
+      log "loading approved ingress image into kind"
+      kind load docker-image --name "$KIND_CLUSTER_NAME" "$image"
+      wait_for_kind_api_after_image_load
+    done
+  elif [ -n "${KIND_INGRESS_CONTROLLER_IMAGE}${KIND_INGRESS_CERTGEN_IMAGE}" ]; then
+    return 1
+  fi
+}
+
+render_ingress_manifest() {
+  local source="$ROOT/tests/e2e/kind/vendor/ingress-nginx-deploy.yaml"
+  local rendered="$RUN_DIR/ingress-nginx-deploy.yaml"
+
+  if validate_sealed_kind_ingress_images; then
+    python3 - "$source" "$rendered" \
+      "$KIND_INGRESS_CONTROLLER_IMAGE" "$KIND_INGRESS_CERTGEN_IMAGE" <<'PY'
+from pathlib import Path
+import sys
+
+source, rendered, controller, certgen = sys.argv[1:]
+text = Path(source).read_text()
+replacements = {
+    "registry.k8s.io/ingress-nginx/controller:v1.12.1@sha256:d2fbc4ec70d8aa2050dd91a91506e998765e86c96f32cffb56c503c9c34eed5b": controller,
+    "registry.k8s.io/ingress-nginx/kube-webhook-certgen:v1.5.2@sha256:e8825994b7a2c7497375a9b945f386506ca6a3eda80b89b74ef2db743f66a5ea": certgen,
+}
+expected_counts = {next(iter(replacements)): 1, list(replacements)[1]: 2}
+for old, expected_count in expected_counts.items():
+    actual_count = text.count(old)
+    if actual_count != expected_count:
+        raise SystemExit(
+            f"vendored ingress image occurrence mismatch: expected {expected_count}, got {actual_count}"
+        )
+    text = text.replace(old, replacements[old])
+Path(rendered).write_text(text)
+PY
+    printf '%s\n' "$rendered"
+  elif [ -n "${KIND_INGRESS_CONTROLLER_IMAGE}${KIND_INGRESS_CERTGEN_IMAGE}" ]; then
+    return 1
+  else
+    printf '%s\n' "$source"
+  fi
 }
 
 capture_kind_control_plane_state() {
@@ -790,8 +870,10 @@ verify_mesh_legacy_auth_retirement_transition() {
 }
 
 deploy_overlay() {
+  local ingress_manifest
+  ingress_manifest="$(render_ingress_manifest)"
   log "deploying vendored ingress-nginx"
-  kubectl_apply --validate=false -f "$ROOT/tests/e2e/kind/vendor/ingress-nginx-deploy.yaml"
+  kubectl_apply --validate=false -f "$ingress_manifest"
   kubectl wait --namespace ingress-nginx \
     --for=condition=ready pod \
     --selector=app.kubernetes.io/component=controller \

@@ -196,6 +196,45 @@ cmp -s "$FIXTURE/want-image-load-order" "$CALLS" || {
   fail 'Kind image imports are not separated by API recovery gates'
 }
 
+# Forgejo CI names only the two approved Nexus platform manifests. They must
+# already exist in the private DinD store, are side-loaded after product
+# images, and replace every pinned public reference in a disposable render.
+: >"$CALLS"
+env \
+  KIND_INGRESS_CONTROLLER_IMAGE='nexus-system-cluster.example.invalid/oci-approved/ingress-nginx/controller@sha256:5c2a1b6c03c4d18ecf14685d21a32bf6763a022f6f8cc07e9578f6cd5eca6180' \
+  KIND_INGRESS_CERTGEN_IMAGE='nexus-system-cluster.example.invalid/oci-approved/ingress-nginx/kube-webhook-certgen@sha256:334191231352856e1ec0c3e50f966edb59ec94a51906453d09f5820789e8b053' \
+  ROOT="$ROOT" COMMON="$COMMON" CALLS="$CALLS" bash -seu <<'BASH'
+  fail() { printf "[sealed-kind-test] ERROR: %s\n" "$*" >&2; exit 1; }
+  record() { printf "%s\n" "$1" >>"$CALLS"; }
+  # shellcheck source=scripts/ci/verify/kind/common.sh
+  source "$COMMON"
+  docker() {
+    [ "${1:-} ${2:-}" = 'image inspect' ] || fail "unexpected sealed Docker invocation: $*"
+    record "docker:$*"
+  }
+  kind() { record "kind:$*"; }
+  wait_for_kind_api_after_image_load() { record wait-api; }
+  log() { :; }
+  load_images_into_kind
+  rendered="$(render_ingress_manifest)"
+  [ "$(grep -Fc "$KIND_INGRESS_CONTROLLER_IMAGE" "$rendered")" -eq 1 ] ||
+    fail 'sealed ingress render does not contain the exact controller once'
+  [ "$(grep -Fc "$KIND_INGRESS_CERTGEN_IMAGE" "$rendered")" -eq 2 ] ||
+    fail 'sealed ingress render does not contain the exact certgen twice'
+  if grep -Fq 'registry.k8s.io/ingress-nginx/' "$rendered"; then
+    fail 'sealed ingress render retained a public registry image'
+  fi
+BASH
+grep -Fq "docker:image inspect nexus-system-cluster.example.invalid/oci-approved/ingress-nginx/controller@sha256:5c2a1b6c03c4d18ecf14685d21a32bf6763a022f6f8cc07e9578f6cd5eca6180" "$CALLS" ||
+  fail 'sealed controller was not proven in the runner-preloaded Docker store'
+grep -Fq "docker:image inspect nexus-system-cluster.example.invalid/oci-approved/ingress-nginx/kube-webhook-certgen@sha256:334191231352856e1ec0c3e50f966edb59ec94a51906453d09f5820789e8b053" "$CALLS" ||
+  fail 'sealed certgen was not proven in the runner-preloaded Docker store'
+
+grep -Fq 'KIND_INGRESS_CONTROLLER_IMAGE: nexus-system-cluster.example.invalid/oci-approved/ingress-nginx/controller@sha256:5c2a1b6c03c4d18ecf14685d21a32bf6763a022f6f8cc07e9578f6cd5eca6180' \
+  "$ROOT/.gitea/workflows/ci.yaml" || fail 'Forgejo CI does not select the approved ingress controller'
+grep -Fq 'KIND_INGRESS_CERTGEN_IMAGE: nexus-system-cluster.example.invalid/oci-approved/ingress-nginx/kube-webhook-certgen@sha256:334191231352856e1ec0c3e50f966edb59ec94a51906453d09f5820789e8b053' \
+  "$ROOT/.gitea/workflows/ci.yaml" || fail 'Forgejo CI does not select the approved ingress cert generator'
+
 # Restore the production API recovery implementation after the load-order spy.
 # shellcheck source=scripts/ci/verify/kind/common.sh
 source "$COMMON"
