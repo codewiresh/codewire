@@ -29,7 +29,7 @@ elif ! command -v "$curl_bin" >/dev/null 2>&1; then
   fail "curl is required for deploy workflow dispatch"
 fi
 
-readonly dispatch_url='https://git.example.invalid/api/v1/repos/codewire/deploy/actions/workflows/promote-prod.yaml/dispatches'
+readonly dispatch_url='https://forgejo.example.invalid/api/v1/repos/codewire/deploy/actions/workflows/promote-prod.yaml/dispatches'
 umask 077
 work="$(mktemp -d)"
 auth_header="$work/auth-header"
@@ -61,6 +61,6 @@ if ! status="$(
   fail "unable to dispatch the deploy workflow"
 fi
 [[ "$status" == '204' ]] ||
-  fail "Gitea rejected the deploy workflow dispatch (HTTP $status)"
+  fail "Forgejo rejected the deploy workflow dispatch (HTTP $status)"
 
 printf '[dispatch-deploy-prod] accepted signed source tag %s\n' "$SOURCE_TAG"

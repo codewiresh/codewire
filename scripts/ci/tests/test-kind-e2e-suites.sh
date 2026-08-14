@@ -177,6 +177,9 @@ source "$COMMON"
 # Every large image import is separated by an API recovery gate. This keeps a
 # temporarily starved control plane from accumulating four back-to-back imports.
 : >"$CALLS"
+docker() {
+  [ "${1:-} ${2:-}" = 'image inspect' ] || fail "unexpected Docker invocation: $*"
+}
 kind() { record "kind:$*"; }
 wait_for_kind_api_after_image_load() { record wait-api; }
 log() { :; }
@@ -191,6 +194,15 @@ wait-api
 kind:load docker-image --name ${KIND_CLUSTER_NAME} codewire-gateway:e2e
 wait-api
 EOF
+if [ -n "${KIND_INGRESS_CONTROLLER_IMAGE:-}" ] \
+    && [ -n "${KIND_INGRESS_CERTGEN_IMAGE:-}" ]; then
+  cat >>"$FIXTURE/want-image-load-order" <<EOF
+kind:load docker-image --name ${KIND_CLUSTER_NAME} ${KIND_INGRESS_CONTROLLER_IMAGE}
+wait-api
+kind:load docker-image --name ${KIND_CLUSTER_NAME} ${KIND_INGRESS_CERTGEN_IMAGE}
+wait-api
+EOF
+fi
 cmp -s "$FIXTURE/want-image-load-order" "$CALLS" || {
   diff -u "$FIXTURE/want-image-load-order" "$CALLS" >&2 || true
   fail 'Kind image imports are not separated by API recovery gates'

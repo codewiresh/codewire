@@ -92,7 +92,7 @@ if grep -Fq "$TEST_TOKEN" "$success_output" "$work/capture/args" "$candidate"; t
 fi
 grep -Fxq "Authorization: token $TEST_TOKEN" "$work/capture/auth-header" ||
   fail "resolver did not use a private authorization-header file"
-grep -Fxq 'https://git.example.invalid/api/v1/repos/codewire/deploy/contents/environments/dev/release.json?ref=main' \
+grep -Fxq 'https://forgejo.example.invalid/api/v1/repos/codewire/deploy/contents/environments/dev/release.json?ref=main' \
   "$work/capture/args" || fail "resolver used an unexpected private API path"
 
 for case_name in forbidden malformed oversized; do
