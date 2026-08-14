@@ -16,6 +16,7 @@ run_integrated_kind_suite() {
   require_tool kubectl
   require_tool openssl
   require_tool psql
+  require_tool python3
   require_tool ssh-keygen
   require_tool ssh-keyscan
 

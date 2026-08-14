@@ -37,6 +37,9 @@ GATEWAY_PUBLIC_FINGERPRINT=""
 KIND_E2E_COMPATIBILITY_VERSION=1
 KIND_E2E_PREPARED_CONFIGMAP=codewire-kind-e2e-prepared
 RETAINED_KUBECONFIG=""
+REMOTE_DIND_JOB_CONTAINER=""
+REMOTE_DIND_KIND_NETWORK=""
+REMOTE_DIND_FORWARDER_PID=""
 if [ -z "${KIND_WORKSPACE_IMAGE+x}" ]; then
   KIND_WORKSPACE_IMAGE='ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467'
 fi
@@ -87,6 +90,7 @@ cleanup() {
   if [ "$status" -ne 0 ]; then
     dump_cluster_state
   fi
+  stop_remote_dind_kind_forwarding
   if [ "$KEEP_KIND_CLUSTER" != "1" ]; then
     kind delete cluster --name "$KIND_CLUSTER_NAME" >/dev/null 2>&1 || true
   fi
@@ -496,6 +500,110 @@ create_cluster() {
     echo "::error::kind cluster creation failed. This gate needs a runner with a real privileged Docker runtime capable of starting kind node containers; rootless Podman/netavark runners are not sufficient."
     exit 1
   fi
+  configure_remote_dind_kind_network
+}
+
+stop_remote_dind_kind_forwarding() {
+  if [ -n "$REMOTE_DIND_FORWARDER_PID" ]; then
+    kill "$REMOTE_DIND_FORWARDER_PID" >/dev/null 2>&1 || true
+    wait "$REMOTE_DIND_FORWARDER_PID" >/dev/null 2>&1 || true
+    REMOTE_DIND_FORWARDER_PID=""
+  fi
+  if [ -n "$REMOTE_DIND_JOB_CONTAINER" ] && [ -n "$REMOTE_DIND_KIND_NETWORK" ]; then
+    docker network disconnect "$REMOTE_DIND_KIND_NETWORK" \
+      "$REMOTE_DIND_JOB_CONTAINER" >/dev/null 2>&1 || true
+  fi
+  REMOTE_DIND_JOB_CONTAINER=""
+  REMOTE_DIND_KIND_NETWORK=""
+}
+
+start_remote_dind_kind_forwarding() {
+  local node="$1" attempt
+  local forwarder_log="$RUN_DIR/remote-dind-kind-forwarder.log"
+
+  python3 -u "$ROOT/scripts/ci/verify/kind/forward-remote-dind-ports.py" \
+    --target "$node" \
+    --forward 8090:80 \
+    --forward 10443:443 \
+    --forward 7233:30733 \
+    --forward 8084:30084 \
+    --forward 18092:30090 \
+    --forward "${KIND_POSTGRES_HOST_PORT}:30432" \
+    >"$forwarder_log" 2>&1 &
+  REMOTE_DIND_FORWARDER_PID=$!
+
+  for ((attempt = 1; attempt <= 50; attempt++)); do
+    if grep -Fqx 'remote DinD Kind loopback forwarder ready' "$forwarder_log"; then
+      log "remote DinD Kind loopback forwarding ready"
+      return 0
+    fi
+    if ! kill -0 "$REMOTE_DIND_FORWARDER_PID" >/dev/null 2>&1; then
+      echo "::error::remote DinD Kind loopback forwarder exited before readiness"
+      return 1
+    fi
+    sleep 0.1
+  done
+
+  echo "::error::remote DinD Kind loopback forwarder did not become ready"
+  return 1
+}
+
+configure_remote_dind_kind_network() {
+  local self_container="${HOSTNAME:-}"
+  local node="${KIND_CLUSTER_NAME}-control-plane"
+  local kubeconfig_path kubeconfig_tmp
+  local -a node_networks=()
+
+  # A local Docker daemon publishes Kind's mapped ports directly in this
+  # process namespace. Forgejo's hardened workers instead give the job a
+  # socket for a sibling DinD daemon, making that daemon's 127.0.0.1 foreign.
+  # The job hostname is a container in the latter topology and absent in the
+  # former, which lets this adaptation remain a no-op for local preflight.
+  if [ -z "$self_container" ] \
+      || ! docker container inspect "$self_container" >/dev/null 2>&1; then
+    log "local Docker topology detected; retaining Kind host-port kubeconfig"
+    return 0
+  fi
+  if [[ "$self_container" =~ [^A-Za-z0-9_.-] ]]; then
+    echo "::error::remote DinD job container identity is malformed"
+    return 1
+  fi
+
+  mapfile -t node_networks < <(
+    docker inspect --format \
+      '{{range $name, $_ := .NetworkSettings.Networks}}{{println $name}}{{end}}' \
+      "$node" | sed '/^$/d'
+  )
+  if [ "${#node_networks[@]}" -ne 1 ] \
+      || [[ "${node_networks[0]:-}" =~ [^A-Za-z0-9_.-] ]]; then
+    echo "::error::Kind control-plane must have exactly one bounded Docker network"
+    return 1
+  fi
+
+  REMOTE_DIND_JOB_CONTAINER="$self_container"
+  REMOTE_DIND_KIND_NETWORK="${node_networks[0]}"
+  docker network connect "$REMOTE_DIND_KIND_NETWORK" \
+    "$REMOTE_DIND_JOB_CONTAINER"
+
+  kubeconfig_path="${KUBECONFIG:-$HOME/.kube/config}"
+  if [[ "$kubeconfig_path" == *:* ]]; then
+    echo "::error::remote DinD Kind requires one explicit kubeconfig path"
+    return 1
+  fi
+  mkdir -p "$(dirname "$kubeconfig_path")"
+  kubeconfig_tmp="$(mktemp "${kubeconfig_path}.internal.XXXXXX")"
+  chmod 600 "$kubeconfig_tmp"
+  if ! kind get kubeconfig --internal --name "$KIND_CLUSTER_NAME" \
+      >"$kubeconfig_tmp"; then
+    shred -u "$kubeconfig_tmp"
+    echo "::error::failed to render internal Kind kubeconfig for remote DinD"
+    return 1
+  fi
+  install -m 600 "$kubeconfig_tmp" "$kubeconfig_path"
+  shred -u "$kubeconfig_tmp"
+
+  start_remote_dind_kind_forwarding "$node"
+  log "remote DinD Kind API and host-port topology configured"
 }
 
 load_images_into_kind() {

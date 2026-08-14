@@ -37,6 +37,7 @@ protoc --version
 test -f /usr/include/google/protobuf/duration.proto
 test -f /usr/include/google/protobuf/timestamp.proto
 psql --version
+python3 --version
 
 readonly helm_version='v3.16.4'
 [[ "$(helm version --template '{{.Version}}')" == "$helm_version" ]]

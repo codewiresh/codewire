@@ -45,6 +45,8 @@ grep -Fq 'KIND_POSTGRES_HOST_PORT="${KIND_POSTGRES_HOST_PORT:-25432}"' "$COMMON"
   fail 'Kind Postgres host port is not configurable with the accepted default'
 grep -Fq 'sed "s/hostPort: 25432/hostPort: ${KIND_POSTGRES_HOST_PORT}/"' "$COMMON" ||
   fail 'Kind cluster creation does not render the configured Postgres host port'
+grep -Fq 'configure_remote_dind_kind_network' "$COMMON" ||
+  fail 'Kind cluster creation does not adapt the remote DinD network boundary'
 if grep -Fq '127.0.0.1:25432/codewire' "$COMMON"; then
   fail 'Kind smoke callers bypass the configurable Postgres URL'
 fi
@@ -141,6 +143,7 @@ require:kind
 require:kubectl
 require:openssl
 require:psql
+require:python3
 require:ssh-keygen
 require:ssh-keyscan
 reclaim
@@ -196,6 +199,64 @@ cmp -s "$FIXTURE/want-image-load-order" "$CALLS" || {
 # Restore the production API recovery implementation after the load-order spy.
 # shellcheck source=scripts/ci/verify/kind/common.sh
 source "$COMMON"
+
+# A remote DinD job joins the exact Kind network, receives an internal
+# kubeconfig, and starts loopback-only forwarding for the existing host-port
+# contracts. A local Docker caller remains untouched.
+: >"$CALLS"
+(
+  HOSTNAME=remote-job
+  HOME="$FIXTURE/remote-home"
+  KUBECONFIG="$FIXTURE/remote-kubeconfig"
+  docker() {
+    # shellcheck disable=SC2016 # Match the literal Go-template CLI argument.
+    case "$*" in
+      'container inspect remote-job') return 0 ;;
+      'inspect --format {{range $name, $_ := .NetworkSettings.Networks}}{{println $name}}{{end}} codewire-e2e-ci-control-plane')
+        printf 'kind\n'
+        ;;
+      'network connect kind remote-job') record 'network-connect:kind:remote-job' ;;
+      *) fail "unexpected remote Docker invocation: $*" ;;
+    esac
+  }
+  kind() {
+    if [ "$*" != 'get kubeconfig --internal --name codewire-e2e-ci' ]; then
+      fail "unexpected remote Kind invocation: $*"
+    fi
+    printf 'apiVersion: v1\ncurrent-context: kind-codewire-e2e-ci\n'
+  }
+  start_remote_dind_kind_forwarding() { record "forward:$1"; }
+  log() { record "log:$*"; }
+  configure_remote_dind_kind_network
+  grep -Fqx 'current-context: kind-codewire-e2e-ci' "$KUBECONFIG" ||
+    fail 'remote DinD kubeconfig did not use the internal Kind rendering'
+)
+cat >"$FIXTURE/want-remote-dind" <<'EOF'
+network-connect:kind:remote-job
+forward:codewire-e2e-ci-control-plane
+log:remote DinD Kind API and host-port topology configured
+EOF
+cmp -s "$FIXTURE/want-remote-dind" "$CALLS" || {
+  diff -u "$FIXTURE/want-remote-dind" "$CALLS" >&2 || true
+  fail 'remote DinD Kind network adaptation changed'
+}
+
+: >"$CALLS"
+(
+  HOSTNAME=local-host
+  docker() {
+    record "docker:$*"
+    return 1
+  }
+  log() { record "log:$*"; }
+  configure_remote_dind_kind_network
+)
+cat >"$FIXTURE/want-local-docker" <<'EOF'
+docker:container inspect local-host
+log:local Docker topology detected; retaining Kind host-port kubeconfig
+EOF
+cmp -s "$FIXTURE/want-local-docker" "$CALLS" ||
+  fail 'local Docker topology no longer bypasses remote DinD adaptation'
 
 # A transient API refusal after image import is retried, but a control plane
 # that never recovers fails closed at the fixed 60-second boundary.
