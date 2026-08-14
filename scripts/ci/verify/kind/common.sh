@@ -506,6 +506,25 @@ load_images_into_kind() {
   kind load docker-image --name "$KIND_CLUSTER_NAME" codewire-gateway:e2e
 }
 
+wait_for_kind_api_after_image_load() {
+  local context="kind-${KIND_CLUSTER_NAME}" attempt
+
+  log "checking Kind API after image import"
+  for ((attempt = 1; attempt <= 30; attempt++)); do
+    if kubectl --context "$context" --request-timeout=1s \
+        get --raw=/readyz >/dev/null 2>&1; then
+      log "Kind API ready after image import"
+      return 0
+    fi
+    if [ "$attempt" -lt 30 ]; then
+      sleep 1
+    fi
+  done
+
+  echo "::error::Kind API did not become ready within 60 seconds after image import"
+  return 1
+}
+
 mesh_legacy_auth_retirement_transition() {
   log "seeding the exact Mesh SQLx 1-5 legacy-auth retirement fixture"
   local mesh_database_exists

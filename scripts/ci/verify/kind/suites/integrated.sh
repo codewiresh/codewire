@@ -27,9 +27,13 @@ run_integrated_kind_suite() {
   trap cleanup EXIT
 
   ingress_path_drift_check
-  create_cluster
+  # Cold image and smoke-binary compilation must not compete with an idle
+  # nested control plane. Provision Kind only when every host-side build input
+  # is ready, then prove the API settled after importing the large images.
   build_images_and_smokes
+  create_cluster
   load_images_into_kind
+  wait_for_kind_api_after_image_load
   deploy_overlay
   host_key_authorization_smoke
   edge_routing_probes

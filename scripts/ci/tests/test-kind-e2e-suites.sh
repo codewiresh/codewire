@@ -104,8 +104,9 @@ source "$FINAL_FENCING"
 # shellcheck source=scripts/ci/verify/kind/suites/environment-session.sh
 source "$ENVIRONMENT_SESSION"
 
-# The integrated suite retains the exact existing order. Stub every expensive
-# action so this fixture proves dispatch and order without creating a cluster.
+# The integrated suite builds before starting its disposable control plane and
+# proves API readiness after image import. Stub every expensive action so this
+# fixture proves dispatch and order without creating a cluster.
 : >"$CALLS"
 require_tool() { record "require:$1"; }
 reclaim_cancelled_ci_clusters() { record reclaim; }
@@ -115,6 +116,7 @@ ingress_path_drift_check() { record ingress-drift; }
 create_cluster() { record create-cluster; }
 build_images_and_smokes() { record build; }
 load_images_into_kind() { record load; }
+wait_for_kind_api_after_image_load() { record wait-api; }
 deploy_overlay() { record deploy; }
 host_key_authorization_smoke() { record host-key-authz; }
 edge_routing_probes() { record edge; }
@@ -144,9 +146,10 @@ require:ssh-keygen
 require:ssh-keyscan
 reclaim
 ingress-drift
-create-cluster
 build
+create-cluster
 load
+wait-api
 deploy
 host-key-authz
 edge
@@ -169,6 +172,48 @@ cmp -s "$FIXTURE/want-order" "$CALLS" || {
 # Restore shared production functions replaced by the integrated-order spies.
 # shellcheck source=scripts/ci/verify/kind/common.sh
 source "$COMMON"
+
+# A transient API refusal after image import is retried, but a control plane
+# that never recovers fails closed at the fixed 60-second boundary.
+: >"$CALLS"
+(
+  attempts=0
+  kubectl() {
+    attempts=$((attempts + 1))
+    record "probe:${attempts}:$*"
+    [ "$attempts" -ge 3 ]
+  }
+  sleep() { record "sleep:$1"; }
+  log() { record "log:$*"; }
+  wait_for_kind_api_after_image_load
+)
+cat >"$FIXTURE/want-api-recovery" <<EOF
+log:checking Kind API after image import
+probe:1:--context kind-${KIND_CLUSTER_NAME} --request-timeout=1s get --raw=/readyz
+sleep:1
+probe:2:--context kind-${KIND_CLUSTER_NAME} --request-timeout=1s get --raw=/readyz
+sleep:1
+probe:3:--context kind-${KIND_CLUSTER_NAME} --request-timeout=1s get --raw=/readyz
+log:Kind API ready after image import
+EOF
+cmp -s "$FIXTURE/want-api-recovery" "$CALLS" || {
+  diff -u "$FIXTURE/want-api-recovery" "$CALLS" >&2 || true
+  fail 'Kind API recovery did not retain its bounded retry contract'
+}
+
+: >"$CALLS"
+if (
+  kubectl() { record probe; return 1; }
+  sleep() { :; }
+  wait_for_kind_api_after_image_load
+) >"$FIXTURE/api-unavailable.out" 2>&1; then
+  fail 'permanently unavailable Kind API unexpectedly succeeded'
+fi
+[ "$(grep -c '^probe$' "$CALLS")" -eq 30 ] ||
+  fail 'Kind API failure did not exhaust the fixed retry boundary'
+grep -Fq 'did not become ready within 60 seconds after image import' \
+  "$FIXTURE/api-unavailable.out" ||
+  fail 'Kind API failure did not explain the bounded recovery failure'
 
 # A cluster becomes rerunnable only after controller, workspace/file, and
 # ordinary Temporal prerequisites pass, immediately before final fencing.
