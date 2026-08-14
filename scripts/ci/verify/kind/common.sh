@@ -499,28 +499,58 @@ create_cluster() {
 }
 
 load_images_into_kind() {
-  log "loading images into kind"
-  kind load docker-image --name "$KIND_CLUSTER_NAME" codewire-dashboard:e2e
-  kind load docker-image --name "$KIND_CLUSTER_NAME" codewire-services:e2e
-  kind load docker-image --name "$KIND_CLUSTER_NAME" codewire-mesh:e2e
-  kind load docker-image --name "$KIND_CLUSTER_NAME" codewire-gateway:e2e
+  local image
+
+  # Importing several release images back-to-back can make the nested
+  # kube-apiserver temporarily unavailable while containerd commits layers.
+  # Admit one image at a time and require the control plane to recover before
+  # adding the next source of I/O pressure.
+  for image in \
+      codewire-dashboard:e2e \
+      codewire-services:e2e \
+      codewire-mesh:e2e \
+      codewire-gateway:e2e; do
+    log "loading ${image} into kind"
+    kind load docker-image --name "$KIND_CLUSTER_NAME" "$image"
+    wait_for_kind_api_after_image_load
+  done
+}
+
+capture_kind_control_plane_state() {
+  local node="${KIND_CLUSTER_NAME}-control-plane"
+
+  # Keep failure evidence value-blind. Do not dump the node configuration,
+  # environment, Kubernetes objects, or component logs here: those may carry
+  # credentials. These fields distinguish a dead/OOM-killed node container
+  # from a live node whose static control-plane containers are unhealthy.
+  log "capturing value-blind Kind control-plane state"
+  docker inspect --format \
+    'kind-node status={{.State.Status}} running={{.State.Running}} oom_killed={{.State.OOMKilled}} exit_code={{.State.ExitCode}} restart_count={{.RestartCount}} error_present={{if .State.Error}}true{{else}}false{{end}}' \
+    "$node" || true
+  docker stats --no-stream --format \
+    'kind-node name={{.Name}} cpu={{.CPUPerc}} memory={{.MemUsage}} pids={{.PIDs}}' \
+    "$node" || true
+  docker exec "$node" systemctl is-active kubelet || true
+  docker exec "$node" crictl ps -a --name kube-apiserver || true
+  docker exec "$node" crictl ps -a --name etcd || true
 }
 
 wait_for_kind_api_after_image_load() {
   local context="kind-${KIND_CLUSTER_NAME}" attempt
 
   log "checking Kind API after image import"
-  for ((attempt = 1; attempt <= 30; attempt++)); do
+  for ((attempt = 1; attempt <= 60; attempt++)); do
     if kubectl --context "$context" --request-timeout=1s \
         get --raw=/readyz >/dev/null 2>&1; then
       log "Kind API ready after image import"
       return 0
     fi
-    if [ "$attempt" -lt 30 ]; then
+    if [ "$attempt" -lt 60 ]; then
       sleep 1
     fi
   done
 
+  capture_kind_control_plane_state
   echo "::error::Kind API did not become ready within 60 seconds after image import"
   return 1
 }

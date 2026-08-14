@@ -116,7 +116,6 @@ ingress_path_drift_check() { record ingress-drift; }
 create_cluster() { record create-cluster; }
 build_images_and_smokes() { record build; }
 load_images_into_kind() { record load; }
-wait_for_kind_api_after_image_load() { record wait-api; }
 deploy_overlay() { record deploy; }
 host_key_authorization_smoke() { record host-key-authz; }
 edge_routing_probes() { record edge; }
@@ -149,7 +148,6 @@ ingress-drift
 build
 create-cluster
 load
-wait-api
 deploy
 host-key-authz
 edge
@@ -170,6 +168,32 @@ cmp -s "$FIXTURE/want-order" "$CALLS" || {
 }
 
 # Restore shared production functions replaced by the integrated-order spies.
+# shellcheck source=scripts/ci/verify/kind/common.sh
+source "$COMMON"
+
+# Every large image import is separated by an API recovery gate. This keeps a
+# temporarily starved control plane from accumulating four back-to-back imports.
+: >"$CALLS"
+kind() { record "kind:$*"; }
+wait_for_kind_api_after_image_load() { record wait-api; }
+log() { :; }
+load_images_into_kind
+cat >"$FIXTURE/want-image-load-order" <<EOF
+kind:load docker-image --name ${KIND_CLUSTER_NAME} codewire-dashboard:e2e
+wait-api
+kind:load docker-image --name ${KIND_CLUSTER_NAME} codewire-services:e2e
+wait-api
+kind:load docker-image --name ${KIND_CLUSTER_NAME} codewire-mesh:e2e
+wait-api
+kind:load docker-image --name ${KIND_CLUSTER_NAME} codewire-gateway:e2e
+wait-api
+EOF
+cmp -s "$FIXTURE/want-image-load-order" "$CALLS" || {
+  diff -u "$FIXTURE/want-image-load-order" "$CALLS" >&2 || true
+  fail 'Kind image imports are not separated by API recovery gates'
+}
+
+# Restore the production API recovery implementation after the load-order spy.
 # shellcheck source=scripts/ci/verify/kind/common.sh
 source "$COMMON"
 
@@ -205,12 +229,15 @@ cmp -s "$FIXTURE/want-api-recovery" "$CALLS" || {
 if (
   kubectl() { record probe; return 1; }
   sleep() { :; }
+  capture_kind_control_plane_state() { record diagnostic; }
   wait_for_kind_api_after_image_load
 ) >"$FIXTURE/api-unavailable.out" 2>&1; then
   fail 'permanently unavailable Kind API unexpectedly succeeded'
 fi
-[ "$(grep -c '^probe$' "$CALLS")" -eq 30 ] ||
+[ "$(grep -c '^probe$' "$CALLS")" -eq 60 ] ||
   fail 'Kind API failure did not exhaust the fixed retry boundary'
+[ "$(grep -c '^diagnostic$' "$CALLS")" -eq 1 ] ||
+  fail 'Kind API failure did not capture one value-blind diagnostic'
 grep -Fq 'did not become ready within 60 seconds after image import' \
   "$FIXTURE/api-unavailable.out" ||
   fail 'Kind API failure did not explain the bounded recovery failure'
