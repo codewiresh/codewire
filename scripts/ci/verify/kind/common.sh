@@ -80,6 +80,8 @@ dump_cluster_state() {
   kubectl --context "$context" -n "$SANDBOX_NS" describe sandboxclaim,sandbox,sandboxtemplate,sandboxwarmpool || true
   kubectl --context "$context" -n "$SANDBOX_NS" get events --sort-by=.lastTimestamp || true
   kubectl --context "$context" -n "$NS" get events --sort-by=.lastTimestamp || true
+  kubectl --context "$context" -n ingress-nginx describe pods || true
+  kubectl --context "$context" -n ingress-nginx get events --sort-by=.lastTimestamp || true
   kubectl --context "$context" -n ingress-nginx logs deploy/ingress-nginx-controller --tail=80 || true
   kubectl --context "$context" -n agent-sandbox-system logs -l app=agent-sandbox-controller --tail=160 --all-containers || true
 }
