@@ -39,15 +39,15 @@ fi
 selection_job="$(sed -n '/^  deploy-selection:/,/^  build-gateway-image:/p' "$WORKFLOW")"
 grep -Fq '          fetch-depth: 0' <<<"$selection_job" ||
   fail "deploy selection does not receive the complete cumulative history"
-grep -Fq 'uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b' \
+grep -Fq 'name: Verify sealed Rust toolchain' \
   <<<"$selection_job" ||
-  fail "deploy selection does not install the pinned Rust toolchain for artifact classification"
-toolchain_line="$(grep -n -m1 'uses: dtolnay/rust-toolchain@' \
+  fail "deploy selection does not verify the sealed Rust toolchain for artifact classification"
+toolchain_line="$(grep -n -m1 'name: Verify sealed Rust toolchain' \
   <<<"$selection_job" | cut -d: -f1)"
 classifier_line="$(grep -n -m1 'name: Plan and select atomic Dev deployment' \
   <<<"$selection_job" | cut -d: -f1)"
 [[ "$toolchain_line" -lt "$classifier_line" ]] ||
-  fail "deploy selection installs Rust after artifact classification"
+  fail "deploy selection verifies Rust after artifact classification"
 grep -Fq "scripts/ci/deploy/resolve-deployed-source.sh \"\$candidate\" \"\$GITHUB_SHA\"" \
   <<<"$selection_job" || fail "deploy selection does not resolve an exact-head candidate"
 # shellcheck disable=SC2016

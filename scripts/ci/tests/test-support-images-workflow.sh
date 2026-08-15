@@ -31,19 +31,17 @@ if grep -q '^    paths:' "$WORKFLOW"; then
 fi
 grep -Fq '          fetch-depth: 0' <<<"$selection_job" ||
   fail 'support selection does not receive canonical history for ancestry validation'
-grep -Fq 'actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5' \
+grep -Fq 'https://forgejo.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5' \
   <<<"$selection_job" || fail 'support selection checkout action is not pinned'
-grep -Fq 'uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b' \
+grep -Fq 'name: Verify sealed Rust toolchain' \
   <<<"$selection_job" ||
-  fail 'support selection does not install the pinned Rust toolchain for artifact classification'
-grep -Fq '          toolchain: 1.91.1' <<<"$selection_job" ||
-  fail 'support selection does not use the repository Rust toolchain'
-toolchain_line="$(grep -n -m1 'uses: dtolnay/rust-toolchain@' \
+  fail 'support selection does not verify the sealed Rust toolchain for artifact classification'
+toolchain_line="$(grep -n -m1 'name: Verify sealed Rust toolchain' \
   <<<"$selection_job" | cut -d: -f1)"
 classifier_line="$(grep -n -m1 'name: Plan atomic support build from validated baseline' \
   <<<"$selection_job" | cut -d: -f1)"
 [[ "$toolchain_line" -lt "$classifier_line" ]] ||
-  fail 'support selection installs Rust after artifact classification'
+  fail 'support selection verifies Rust after artifact classification'
 grep -Fq 'scripts/ci/images/resolve-published-support-pair.sh "$candidate"' \
   <<<"$selection_job" || fail 'support selection does not resolve published pair metadata'
 grep -Fq 'GHCR_PUBLISH_USERNAME: ${{ vars.GHCR_PUBLISH_USERNAME }}' \
@@ -138,12 +136,15 @@ for moving_tool_pattern in \
   'go install golang.org/x/tools/gopls@latest' \
   'pipx install aider-chat' \
   'npm install -g --ignore-scripts' \
-  'https://sh.rustup.rs'; do
+  'COPY --from=cw-builder --chown=codewire:codewire /usr/local/rustup/ /home/codewire/.rustup/'; do
   moving_tool_line="$(grep -n -m1 -F "$moving_tool_pattern" \
     "$WORKSPACE_DOCKERFILE" | cut -d: -f1)"
   [[ -n "$moving_tool_line" && "$moving_tool_line" -lt "$cw_copy_line" ]] ||
     fail "moving tool layer '$moving_tool_pattern' must precede the source-built cw handoff"
 done
+if grep -qF 'https://sh.rustup.rs' "$WORKSPACE_DOCKERFILE"; then
+  fail 'workspace image restores the mutable Rustup network installer'
+fi
 [[ "$(tail -n 1 "$WORKSPACE_DOCKERFILE")" == 'USER codewire' ]] ||
   fail 'workspace image does not restore the unprivileged runtime user after installing cw'
 

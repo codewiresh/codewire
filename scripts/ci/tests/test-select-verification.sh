@@ -157,6 +157,8 @@ run_paths_case retired_cache_surface pull_request refs/pull/200/head false \
 run_paths_case shellcheck_policy_domain_future pull_request refs/pull/2001/head false \
   'policy policy_shell' scripts/ci/tests/test-shellcheck-policy-domain.sh
 grep -qF 'scripts/ci/tests/test-shellcheck-policy-domain.sh' "$SELECTOR"
+run_paths_case ci_tool_download_contract pull_request refs/pull/2002/head false \
+  'deploy policy policy_shell' scripts/ci/tests/test-ci-tool-downloads.sh
 run_paths_case runtime_plan_ci pull_request refs/pull/201/head false \
   'deploy go_consumer_interop go_support policy release runtime_confidential' \
   scripts/ci/deploy/resolve-deployed-source.sh \
@@ -584,6 +586,8 @@ run_paths_case cli_makefile pull_request refs/pull/1521/head false \
   apps/cli/Makefile
 run_paths_case edge_harness pull_request refs/pull/153/head false \
   'edge_kind policy' scripts/ci/verify/kind-e2e.sh
+run_paths_case pinned_browser_installer pull_request refs/pull/1531/head true \
+  'edge_kind kind policy' scripts/ci/install-pinned-playwright-chromium.sh
 run_paths_case mixed_sdk_and_runtime pull_request refs/pull/154/head false \
   'policy rust rust_pkg_codewire_server_core sdk_python service_apikey_smoke service_billing service_connectcore service_coordinator service_idp service_integration service_nats service_orchestration service_temporal' \
   libs/sdk-python/codewire/client.py crates/codewire-server-core/src/lib.rs
@@ -1027,7 +1031,7 @@ fi
 
 database_go_setup="$TMP/database-go-setup.txt"
 awk '
-  /^  database-services:$/ { group = 1 }
+  /^  database:$/ { group = 1 }
   group && /- name: Set up Go 1\.26\.5$/ { capture = 1 }
   capture { print }
   capture && /run: scripts\/ci\/setup\/setup-go\.sh/ { exit }
@@ -1135,7 +1139,7 @@ fi
 }
 grep -qF 'push baseline is unavailable' "$missing_stderr"
 
-# Workflow contract: four fixed capability groups. Gitea assigns static jobs
+# Workflow contract: six fixed capability groups. Forgejo assigns static jobs
 # before evaluating job-level conditions, so family-level fan-out is forbidden.
 while IFS='|' read -r job_id job_name runner; do
   block="$TMP/${job_id}.yaml"
@@ -1155,11 +1159,31 @@ while IFS='|' read -r job_id job_name runner; do
 done <<'EOF'
 standard|Standard verification|ubuntu-latest
 rust-transport|Rust / transport verification|ubuntu-latest
-database-services|Database / service verification|ubuntu-latest
+database|Database verification|ubuntu-latest
+services-control|Service control-plane verification|ubuntu-latest
+services-runtime|Service runtime-plane verification|ubuntu-latest
 edge-kind|Edge / Kind verification|kind-e2e
 EOF
 
-for job_id in standard rust-transport database-services edge-kind; do
+# Compatibility jobs share the disposable DinD runner pool. Keep their task
+# ceiling below the runner pod's independently managed lifetime so queued pods
+# still have enough time to execute a bounded job after assignment.
+for job_id in cw-release-assets workspace-image standard rust-transport database services-control services-runtime; do
+  block="$TMP/${job_id}.yaml"
+  if [ ! -s "$block" ]; then
+    awk -v wanted="$job_id" '
+      $0 == "  " wanted ":" { capture = 1 }
+      capture && $0 ~ /^  [A-Za-z0-9_-]+:$/ && $0 != "  " wanted ":" { exit }
+      capture { print }
+    ' "$WORKFLOW" > "$block"
+  fi
+  grep -qF '    timeout-minutes: 30' "$block" || {
+    echo "${job_id}: compatibility job must retain the 30-minute task ceiling" >&2
+    exit 1
+  }
+done
+
+for job_id in standard rust-transport database services-control services-runtime edge-kind; do
   block="$TMP/${job_id}.yaml"
   grep -qF 'name: Reuse exact PR-head content verification' "$block"
   grep -qF "if: \${{ needs.verification-selection.outputs.tested_tree_receipt == 'accepted' }}" \
@@ -1207,19 +1231,17 @@ grep -qF "trusted_planner='.trusted-ci-policy/scripts/ci/plan/planner.py'" \
 grep -qF "capability_selector='.trusted-ci-policy/scripts/ci/select/select-verification.sh'" \
   "$selection_block"
 grep -qF 'ref: ${{ github.event.before }}' "$selection_block"
-planner_toolchain_line="$(grep -n -m1 'name: Set up pinned Cargo for trusted artifact planning' \
+planner_toolchain_line="$(grep -n -m1 'name: Verify sealed Rust toolchain for trusted artifact planning' \
   "$selection_block" | cut -d: -f1)"
 planner_select_line="$(grep -n -m1 'name: Select capabilities and artifact facts' \
   "$selection_block" | cut -d: -f1)"
 test -n "$planner_toolchain_line"
 test -n "$planner_select_line"
 test "$planner_toolchain_line" -lt "$planner_select_line"
-grep -qF 'uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b' \
-  "$selection_block"
-grep -A3 -F 'name: Set up pinned Cargo for trusted artifact planning' \
+grep -A2 -F 'name: Verify sealed Rust toolchain for trusted artifact planning' \
   "$selection_block" | grep -qF "if: \${{ github.event_name == 'pull_request' }}"
-grep -A4 -F 'name: Set up pinned Cargo for trusted artifact planning' \
-  "$selection_block" | grep -qF 'toolchain: 1.91.1'
+grep -A2 -F 'name: Verify sealed Rust toolchain for trusted artifact planning' \
+  "$selection_block" | grep -qF 'run: scripts/ci/setup/assert-ci-runner-image.sh'
 grep -qF "jq -e '.degraded_reasons | length > 0'" "$selection_block"
 grep -qF "jq -c '.degraded_reasons'" "$selection_block"
 grep -qF "trusted_adapter='.trusted-ci-policy/scripts/ci/plan/apply-verification-plan.py'" \
@@ -1241,26 +1263,17 @@ python3 "$ROOT/scripts/ci/plan/tests/test_planner.py" \
   PlannerFixtureTests.test_missing_cargo_fails_closed_with_diagnostic
 
 standard_block="$TMP/standard.yaml"
-deploy_toolchain_line="$(grep -n -m1 'dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b' \
+deploy_toolchain_line="$(grep -n -m1 'name: Verify sealed Rust toolchain' \
   "$standard_block" | cut -d: -f1)"
 deploy_run_line="$(grep -n -m1 'name: Run Deploy' "$standard_block" | cut -d: -f1)"
 test -n "$deploy_toolchain_line"
 test -n "$deploy_run_line"
 test "$deploy_toolchain_line" -lt "$deploy_run_line"
-grep -A2 -F 'uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b' \
+grep -A2 -F 'name: Verify sealed Rust toolchain' \
   "$standard_block" | grep -qF "contains(needs.verification-selection.outputs.selection, '|deploy|')"
 
-permissions_block="$(awk '
-  $0 == "permissions:" { capture = 1 }
-  capture && $0 != "permissions:" && $0 ~ /^[^[:space:]]/ { exit }
-  capture { print }
-' "$WORKFLOW")"
-expected_permissions="$(printf '%s\n' \
-  'permissions:' \
-  '  contents: read' \
-  '  actions: read')"
-if [ "$permissions_block" != "$expected_permissions" ]; then
-  echo 'product CI permissions must be exactly contents: read and actions: read' >&2
+if grep -qE '^[[:space:]]*permissions:' "$WORKFLOW"; then
+  echo 'product CI must not declare GitHub-only permissions ignored by Forgejo' >&2
   exit 1
 fi
 
@@ -1269,12 +1282,12 @@ top_level_jobs="$(awk '
   in_jobs && /^  [A-Za-z0-9_-]+:$/ { count++ }
   END { print count + 0 }
 ' "$WORKFLOW")"
-if [ "$top_level_jobs" != 8 ]; then
-  echo "product CI defines ${top_level_jobs} jobs; expected selector, two artifact jobs, four groups, and aggregate" >&2
+if [ "$top_level_jobs" != 10 ]; then
+  echo "product CI defines ${top_level_jobs} jobs; expected selector, two artifact jobs, six groups, and aggregate" >&2
   exit 1
 fi
 for legacy_job in policy contracts rust go-support web sdk-go sdk-ts sdk-python \
-    database service-integration transport release deploy security; do
+    service-integration transport release deploy security; do
   if grep -qF "  ${legacy_job}:" "$WORKFLOW"; then
     echo "legacy per-family runner job remains: ${legacy_job}" >&2
     exit 1
@@ -1356,7 +1369,7 @@ fi
 
 standard_block="$TMP/standard.yaml"
 bun_setup_condition="$(grep -A1 -F \
-  'uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6' \
+  'uses: https://forgejo.example.invalid/noel/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6' \
   "$standard_block")"
 if grep -qF "contains(needs.verification-selection.outputs.selection, '|policy|')" \
     <<<"$bun_setup_condition"; then
@@ -1430,21 +1443,21 @@ if grep -qF 'swift-actions/setup-swift@' "$standard_block"; then
   exit 1
 fi
 
-grep -qF '      - uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b' \
+grep -qF '      - name: Verify sealed Rust toolchain' \
   "$standard_block" || {
-  echo 'standard: Rust-backed transitional checks have no pinned Rust toolchain' >&2
+  echo 'standard: Rust-backed transitional checks do not verify the sealed Rust toolchain' >&2
   exit 1
 }
-standard_toolchain_line="$(grep -n -m1 'uses: dtolnay/rust-toolchain@' \
+standard_toolchain_line="$(grep -n -m1 'name: Verify sealed Rust toolchain' \
   "$standard_block" | cut -d: -f1)"
 contracts_run_line="$(grep -n -m1 'name: Run Contracts' \
   "$standard_block" | cut -d: -f1)"
 if [ "$standard_toolchain_line" -ge "$contracts_run_line" ]; then
-  echo 'standard: Rust toolchain must be installed before contract verification' >&2
+  echo 'standard: Rust toolchain must be verified before contract verification' >&2
   exit 1
 fi
 standard_toolchain_condition="$(grep -A1 -F \
-  'uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b' \
+  'name: Verify sealed Rust toolchain' \
   "$standard_block")"
 grep -qF "contains(needs.verification-selection.outputs.selection, '|policy|')" \
   <<<"$standard_toolchain_condition" || {
@@ -1459,7 +1472,7 @@ grep -qF "contains(needs.verification-selection.outputs.selection, '|contracts_p
 go_support_run_line="$(grep -n -m1 'name: Run Go support' \
   "$standard_block" | cut -d: -f1)"
 if [ "$standard_toolchain_line" -ge "$go_support_run_line" ]; then
-  echo 'go-support: Rust toolchain must be installed before tailnet parity verification' >&2
+  echo 'go-support: Rust toolchain must be verified before tailnet parity verification' >&2
   exit 1
 fi
 grep -qF "contains(needs.verification-selection.outputs.selection, '|go_tailnet|')" \
@@ -1514,15 +1527,68 @@ for contract in 'Run Rust|rust' 'Run Rust transport|transport'; do
   }
 done
 
-database_services_block="$TMP/database-services.yaml"
-grep -qF 'name: Start integration Postgres' "$database_services_block"
-grep -qF 'name: Run Database' "$database_services_block"
+database_block="$TMP/database.yaml"
+services_control_block="$TMP/services-control.yaml"
+services_runtime_block="$TMP/services-runtime.yaml"
+for integration_block in "$database_block" "$services_control_block" "$services_runtime_block"; do
+  grep -qF 'name: Start integration Postgres' "$integration_block"
+  grep -qF "docker inspect --format '{{json .NetworkSettings.Networks}}'" \
+    "$integration_block"
+  grep -qF "| jq -er 'keys[]'" "$integration_block"
+  if grep -qF '{{println $name}}' "$integration_block"; then
+    echo 'integration network discovery can emit a phantom blank network' >&2
+    exit 1
+  fi
+  grep -qF -- '--network-alias "$postgres_host"' "$integration_block"
+  grep -qF 'echo "INTEGRATION_DOCKER_NETWORK=${networks[0]}" >> "$GITHUB_ENV"' \
+    "$integration_block"
+  if grep -qF -- '-p 127.0.0.1::5432' "$integration_block"; then
+    echo 'integration job publishes Postgres onto the DinD sidecar loopback' >&2
+    exit 1
+  fi
+  grep -qF 'name: Stop integration Postgres' "$integration_block"
+done
+
+# Match the workflow's value-blind JSON-key extraction. Docker appends a
+# newline after its Go-template output; JSON parsing must still produce exactly
+# one array element for one bounded network and reject zero or multiple names.
+assert_network_count() {
+  local payload="$1" expected="$2"
+  local -a parsed=()
+  mapfile -t parsed < <(printf '%s\n' "$payload" | jq -er 'keys[]')
+  if [ "${#parsed[@]}" -ne "$expected" ]; then
+    echo "network discovery count mismatch: expected=$expected actual=${#parsed[@]}" >&2
+    exit 1
+  fi
+}
+assert_network_count '{"WORKFLOW-bounded":{}}' 1
+assert_network_count '{}' 0
+assert_network_count '{"bridge":{},"WORKFLOW-bounded":{}}' 2
+grep -qF 'name: Run Database' "$database_block"
 grep -qF 'run: scripts/ci/verify/run-integration-verification.sh database' \
-  "$database_services_block"
-grep -qF 'name: Run Service integration' "$database_services_block"
-grep -qF 'run: scripts/ci/verify/run-integration-verification.sh services' \
-  "$database_services_block"
-grep -qF 'name: Stop integration Postgres' "$database_services_block"
+  "$database_block"
+grep -qF 'name: Run Service integration' "$services_control_block"
+grep -qF 'run: scripts/ci/verify/run-integration-verification.sh services-control' \
+  "$services_control_block"
+grep -qF 'name: Run Service integration' "$services_runtime_block"
+grep -qF 'run: scripts/ci/verify/run-integration-verification.sh services-runtime' \
+  "$services_runtime_block"
+
+integration_runner="$ROOT/scripts/ci/verify/run-integration-verification.sh"
+grep -qF -- '--network "$INTEGRATION_DOCKER_NETWORK"' "$integration_runner"
+grep -qF -- '--network-alias "$INTEGRATION_NATS_HOST"' "$integration_runner"
+grep -qF 'NATS_MONITOR_URL="http://${INTEGRATION_NATS_HOST}:8222/healthz"' \
+  "$integration_runner"
+grep -qF 'service_apikey_smoke service_idp service_coordinator service_billing' \
+  "$integration_runner"
+grep -qF 'service_connectcore service_temporal)' "$integration_runner"
+grep -qF 'service_orchestration service_nats service_temporal)' \
+  "$integration_runner"
+if rg -n 'run-integration-verification\.sh services([^_-]|$)|"\$INTEGRATION_RUNNER" services([^_-]|$)' \
+    "$WORKFLOW" "$ROOT/scripts/dev"; then
+  echo 'automatic verification retains the oversized combined service integration mode' >&2
+  exit 1
+fi
 
 edge_kind_block="$TMP/edge-kind.yaml"
 grep -qF 'run: scripts/ci/verify/run-product-verification.sh edge' "$edge_kind_block"
@@ -1556,7 +1622,7 @@ if rg -n 'cr-golden|diagnostic_cr_golden|go_cr_golden|TestGolden.*-update' \
   echo 'retired Go CR-golden diagnostic remains wired' >&2
   exit 1
 fi
-grep -qF 'dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b' \
+grep -qF 'name: Verify sealed Rust toolchain' \
   "$DIAGNOSTICS_WORKFLOW"
 
 required_block="$TMP/required-verification.yaml"
@@ -1580,14 +1646,15 @@ grep -qF '    name: Required verification' "$WORKFLOW"
 # shellcheck disable=SC2016 # Match the literal Actions expression.
 grep -qF '    if: ${{ always() }}' "$WORKFLOW"
 grep -qF 'scripts/ci/select/require-verification-results.sh' "$required_block"
-for group in cw-release-assets workspace-image standard rust-transport database-services edge-kind; do
+for group in cw-release-assets workspace-image standard rust-transport database services-control services-runtime edge-kind; do
   grep -qF "      - ${group}" "$required_block" || {
     echo "required CI does not wait on ${group}" >&2
     exit 1
   }
 done
 for result in VERIFICATION_CW_RELEASE_ASSETS_RESULT VERIFICATION_STANDARD_RESULT \
-    VERIFICATION_RUST_TRANSPORT_RESULT VERIFICATION_DATABASE_SERVICES_RESULT \
+    VERIFICATION_RUST_TRANSPORT_RESULT VERIFICATION_DATABASE_RESULT \
+    VERIFICATION_SERVICES_CONTROL_RESULT VERIFICATION_SERVICES_RUNTIME_RESULT \
     VERIFICATION_EDGE_KIND_RESULT VERIFICATION_WORKSPACE_IMAGE_RESULT; do
   grep -qF "${result}:" "$required_block" || {
     echo "required CI omits ${result}" >&2

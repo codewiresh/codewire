@@ -36,7 +36,7 @@ jobs:
       PRODUCTION_CONFIRMATION: ${{ inputs.production_confirmation }}
       RELEASE_TAG: ${{ inputs.release_tag }}
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: https://forgejo.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
           fetch-depth: 0
 
@@ -71,10 +71,9 @@ jobs:
               test "$(git rev-parse HEAD)" = "$(git rev-parse refs/remotes/origin/main)"
           fi
 
-      - uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b
+      - name: Verify sealed Rust toolchain
         if: ${{ inputs.target != 'prod-evidence' }}
-        with:
-          toolchain: 1.91.1
+        run: scripts/ci/setup/assert-ci-runner-image.sh
 
       - name: Install protoc (pinned)
         if: ${{ inputs.target != 'prod-evidence' }}

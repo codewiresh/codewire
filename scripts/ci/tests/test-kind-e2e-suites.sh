@@ -45,6 +45,8 @@ grep -Fq 'KIND_POSTGRES_HOST_PORT="${KIND_POSTGRES_HOST_PORT:-25432}"' "$COMMON"
   fail 'Kind Postgres host port is not configurable with the accepted default'
 grep -Fq 'sed "s/hostPort: 25432/hostPort: ${KIND_POSTGRES_HOST_PORT}/"' "$COMMON" ||
   fail 'Kind cluster creation does not render the configured Postgres host port'
+grep -Fq 'configure_remote_dind_kind_network' "$COMMON" ||
+  fail 'Kind cluster creation does not adapt the remote DinD network boundary'
 if grep -Fq '127.0.0.1:25432/codewire' "$COMMON"; then
   fail 'Kind smoke callers bypass the configurable Postgres URL'
 fi
@@ -104,8 +106,9 @@ source "$FINAL_FENCING"
 # shellcheck source=scripts/ci/verify/kind/suites/environment-session.sh
 source "$ENVIRONMENT_SESSION"
 
-# The integrated suite retains the exact existing order. Stub every expensive
-# action so this fixture proves dispatch and order without creating a cluster.
+# The integrated suite builds before starting its disposable control plane and
+# proves API readiness after image import. Stub every expensive action so this
+# fixture proves dispatch and order without creating a cluster.
 : >"$CALLS"
 require_tool() { record "require:$1"; }
 reclaim_cancelled_ci_clusters() { record reclaim; }
@@ -140,12 +143,13 @@ require:kind
 require:kubectl
 require:openssl
 require:psql
+require:python3
 require:ssh-keygen
 require:ssh-keyscan
 reclaim
 ingress-drift
-create-cluster
 build
+create-cluster
 load
 deploy
 host-key-authz
@@ -169,6 +173,244 @@ cmp -s "$FIXTURE/want-order" "$CALLS" || {
 # Restore shared production functions replaced by the integrated-order spies.
 # shellcheck source=scripts/ci/verify/kind/common.sh
 source "$COMMON"
+
+# Every large image import is separated by an API recovery gate. This keeps a
+# temporarily starved control plane from accumulating four back-to-back imports.
+: >"$CALLS"
+docker() {
+  case "${1:-} ${2:-}" in
+    'image inspect'|'image tag') ;;
+    *) fail "unexpected Docker invocation: $*" ;;
+  esac
+}
+kind() { record "kind:$*"; }
+wait_for_kind_api_after_image_load() { record wait-api; }
+log() { :; }
+load_images_into_kind
+cat >"$FIXTURE/want-image-load-order" <<EOF
+kind:load docker-image --name ${KIND_CLUSTER_NAME} codewire-dashboard:e2e
+wait-api
+kind:load docker-image --name ${KIND_CLUSTER_NAME} codewire-services:e2e
+wait-api
+kind:load docker-image --name ${KIND_CLUSTER_NAME} codewire-mesh:e2e
+wait-api
+kind:load docker-image --name ${KIND_CLUSTER_NAME} codewire-gateway:e2e
+wait-api
+EOF
+if [ -n "${KIND_INGRESS_CONTROLLER_IMAGE:-}" ] \
+    && [ -n "${KIND_INGRESS_CERTGEN_IMAGE:-}" ] \
+    && [ -n "${KIND_AGENT_SANDBOX_IMAGE:-}" ]; then
+  cat >>"$FIXTURE/want-image-load-order" <<EOF
+kind:load docker-image --name ${KIND_CLUSTER_NAME} ${KIND_INGRESS_CONTROLLER_LOCAL_IMAGE}
+wait-api
+kind:load docker-image --name ${KIND_CLUSTER_NAME} ${KIND_INGRESS_CERTGEN_LOCAL_IMAGE}
+wait-api
+kind:load docker-image --name ${KIND_CLUSTER_NAME} ${KIND_AGENT_SANDBOX_LOCAL_IMAGE}
+wait-api
+EOF
+fi
+cmp -s "$FIXTURE/want-image-load-order" "$CALLS" || {
+  diff -u "$FIXTURE/want-image-load-order" "$CALLS" >&2 || true
+  fail 'Kind image imports are not separated by API recovery gates'
+}
+
+# Forgejo CI names only the three approved Nexus platform manifests. They must
+# already exist in the private DinD store, are side-loaded after product
+# images, and replace every pinned public reference in a disposable render.
+: >"$CALLS"
+env \
+  KIND_INGRESS_CONTROLLER_IMAGE='nexus-system-cluster.example.invalid/oci-approved/ingress-nginx/controller@sha256:5c2a1b6c03c4d18ecf14685d21a32bf6763a022f6f8cc07e9578f6cd5eca6180' \
+  KIND_INGRESS_CERTGEN_IMAGE='nexus-system-cluster.example.invalid/oci-approved/ingress-nginx/kube-webhook-certgen@sha256:334191231352856e1ec0c3e50f966edb59ec94a51906453d09f5820789e8b053' \
+  KIND_AGENT_SANDBOX_IMAGE='nexus-system-cluster.example.invalid/oci-approved/codewire/agent-sandbox-controller@sha256:6081ae66b4134ebc6b170d965741b8dae09442ec74563b6c1ac999c366dac125' \
+  ROOT="$ROOT" COMMON="$COMMON" CALLS="$CALLS" bash -seu <<'BASH'
+  fail() { printf "[sealed-kind-test] ERROR: %s\n" "$*" >&2; exit 1; }
+  record() { printf "%s\n" "$1" >>"$CALLS"; }
+  # shellcheck source=scripts/ci/verify/kind/common.sh
+  source "$COMMON"
+  docker() {
+    case "${1:-} ${2:-}" in
+      'image inspect'|'image tag') ;;
+      *) fail "unexpected sealed Docker invocation: $*" ;;
+    esac
+    record "docker:$*"
+  }
+  kind() { record "kind:$*"; }
+  wait_for_kind_api_after_image_load() { record wait-api; }
+  log() { :; }
+  load_images_into_kind
+  rendered="$(render_ingress_manifest)"
+  agent_rendered="$(render_agent_sandbox_manifest)"
+  [ "$(grep -Fc "$KIND_INGRESS_CONTROLLER_LOCAL_IMAGE" "$rendered")" -eq 1 ] ||
+    fail 'sealed ingress render does not contain the local controller once'
+  [ "$(grep -Fc "$KIND_INGRESS_CERTGEN_LOCAL_IMAGE" "$rendered")" -eq 2 ] ||
+    fail 'sealed ingress render does not contain the local certgen twice'
+  [ "$(grep -Fc 'imagePullPolicy: Never' "$rendered")" -eq 3 ] ||
+    fail 'sealed ingress render does not prohibit registry pulls'
+  if grep -Fq 'nexus-system-cluster.example.invalid/oci-approved/ingress-nginx/' "$rendered"; then
+    fail 'sealed ingress render retained a private registry reference'
+  fi
+  if grep -Fq 'registry.k8s.io/ingress-nginx/' "$rendered"; then
+    fail 'sealed ingress render retained a public registry image'
+  fi
+  [ "$(grep -Fc "$KIND_AGENT_SANDBOX_LOCAL_IMAGE" "$agent_rendered")" -eq 1 ] ||
+    fail 'sealed agent-sandbox render does not contain the local controller once'
+  [ "$(grep -Fc 'imagePullPolicy: Never' "$agent_rendered")" -eq 1 ] ||
+    fail 'sealed agent-sandbox render does not prohibit registry pulls'
+  if grep -Fq 'nexus-system-cluster.example.invalid/oci-approved/codewire/' "$agent_rendered"; then
+    fail 'sealed agent-sandbox render retained a private registry reference'
+  fi
+  if grep -Fq 'ghcr.io/noeljackson/agent-sandbox-controller' "$agent_rendered"; then
+    fail 'sealed agent-sandbox render retained the public registry image'
+  fi
+BASH
+
+# A partial or substituted sealed-image tuple must fail before any nested
+# cluster action. The public source remains pinned by its multi-arch index,
+# while the approved runner input is the independently verified amd64 child.
+expect_failure partial-platform-images env \
+  KIND_INGRESS_CONTROLLER_IMAGE='nexus-system-cluster.example.invalid/oci-approved/ingress-nginx/controller@sha256:5c2a1b6c03c4d18ecf14685d21a32bf6763a022f6f8cc07e9578f6cd5eca6180' \
+  KIND_INGRESS_CERTGEN_IMAGE='nexus-system-cluster.example.invalid/oci-approved/ingress-nginx/kube-webhook-certgen@sha256:334191231352856e1ec0c3e50f966edb59ec94a51906453d09f5820789e8b053' \
+  KIND_AGENT_SANDBOX_IMAGE='' \
+  bash -seuc 'source "$1"; validate_sealed_kind_platform_images' _ "$COMMON"
+grep -Fq 'Kind platform mirror inputs must match the three approved Nexus digests' \
+  "$FIXTURE/partial-platform-images.out" ||
+  fail 'partial sealed platform tuple did not explain its rejection'
+
+expect_failure substituted-agent-image env \
+  KIND_INGRESS_CONTROLLER_IMAGE='nexus-system-cluster.example.invalid/oci-approved/ingress-nginx/controller@sha256:5c2a1b6c03c4d18ecf14685d21a32bf6763a022f6f8cc07e9578f6cd5eca6180' \
+  KIND_INGRESS_CERTGEN_IMAGE='nexus-system-cluster.example.invalid/oci-approved/ingress-nginx/kube-webhook-certgen@sha256:334191231352856e1ec0c3e50f966edb59ec94a51906453d09f5820789e8b053' \
+  KIND_AGENT_SANDBOX_IMAGE='nexus-system-cluster.example.invalid/oci-approved/codewire/agent-sandbox-controller@sha256:555146af2337dd5d8baf0844d7f5de9a3cd8fc7b032b85756ae244bc2583fb41' \
+  bash -seuc 'source "$1"; validate_sealed_kind_platform_images' _ "$COMMON"
+grep -Fq 'Kind platform mirror inputs must match the three approved Nexus digests' \
+  "$FIXTURE/substituted-agent-image.out" ||
+  fail 'agent-sandbox index substitution did not explain its rejection'
+
+grep -Fq "docker:image inspect nexus-system-cluster.example.invalid/oci-approved/ingress-nginx/controller@sha256:5c2a1b6c03c4d18ecf14685d21a32bf6763a022f6f8cc07e9578f6cd5eca6180" "$CALLS" ||
+  fail 'sealed controller was not proven in the runner-preloaded Docker store'
+grep -Fq "docker:image inspect nexus-system-cluster.example.invalid/oci-approved/ingress-nginx/kube-webhook-certgen@sha256:334191231352856e1ec0c3e50f966edb59ec94a51906453d09f5820789e8b053" "$CALLS" ||
+  fail 'sealed certgen was not proven in the runner-preloaded Docker store'
+grep -Fq "docker:image tag nexus-system-cluster.example.invalid/oci-approved/ingress-nginx/controller@sha256:5c2a1b6c03c4d18ecf14685d21a32bf6763a022f6f8cc07e9578f6cd5eca6180 localhost/codewire-ci/ingress-nginx-controller:verified-5c2a1b6c03c4d18ecf14685d21a32bf6763a022f6f8cc07e9578f6cd5eca6180" "$CALLS" ||
+  fail 'sealed controller was not assigned its disposable Kind reference'
+grep -Fq "docker:image tag nexus-system-cluster.example.invalid/oci-approved/ingress-nginx/kube-webhook-certgen@sha256:334191231352856e1ec0c3e50f966edb59ec94a51906453d09f5820789e8b053 localhost/codewire-ci/ingress-kube-webhook-certgen:verified-334191231352856e1ec0c3e50f966edb59ec94a51906453d09f5820789e8b053" "$CALLS" ||
+  fail 'sealed certgen was not assigned its disposable Kind reference'
+grep -Fq "docker:image inspect nexus-system-cluster.example.invalid/oci-approved/codewire/agent-sandbox-controller@sha256:6081ae66b4134ebc6b170d965741b8dae09442ec74563b6c1ac999c366dac125" "$CALLS" ||
+  fail 'sealed agent-sandbox controller was not proven in the runner-preloaded Docker store'
+grep -Fq "docker:image tag nexus-system-cluster.example.invalid/oci-approved/codewire/agent-sandbox-controller@sha256:6081ae66b4134ebc6b170d965741b8dae09442ec74563b6c1ac999c366dac125 localhost/codewire-ci/agent-sandbox-controller:verified-6081ae66b4134ebc6b170d965741b8dae09442ec74563b6c1ac999c366dac125" "$CALLS" ||
+  fail 'sealed agent-sandbox controller was not assigned its disposable Kind reference'
+
+grep -Fq 'KIND_INGRESS_CONTROLLER_IMAGE: nexus-system-cluster.example.invalid/oci-approved/ingress-nginx/controller@sha256:5c2a1b6c03c4d18ecf14685d21a32bf6763a022f6f8cc07e9578f6cd5eca6180' \
+  "$ROOT/.gitea/workflows/ci.yaml" || fail 'Forgejo CI does not select the approved ingress controller'
+grep -Fq 'KIND_INGRESS_CERTGEN_IMAGE: nexus-system-cluster.example.invalid/oci-approved/ingress-nginx/kube-webhook-certgen@sha256:334191231352856e1ec0c3e50f966edb59ec94a51906453d09f5820789e8b053' \
+  "$ROOT/.gitea/workflows/ci.yaml" || fail 'Forgejo CI does not select the approved ingress cert generator'
+grep -Fq 'KIND_AGENT_SANDBOX_IMAGE: nexus-system-cluster.example.invalid/oci-approved/codewire/agent-sandbox-controller@sha256:6081ae66b4134ebc6b170d965741b8dae09442ec74563b6c1ac999c366dac125' \
+  "$ROOT/.gitea/workflows/ci.yaml" || fail 'Forgejo CI does not select the approved agent-sandbox controller'
+
+# Restore the production API recovery implementation after the load-order spy.
+# shellcheck source=scripts/ci/verify/kind/common.sh
+source "$COMMON"
+
+# A remote DinD job joins the exact Kind network, receives an internal
+# kubeconfig, and starts loopback-only forwarding for the existing host-port
+# contracts. A local Docker caller remains untouched.
+: >"$CALLS"
+(
+  HOSTNAME=remote-job
+  HOME="$FIXTURE/remote-home"
+  KUBECONFIG="$FIXTURE/remote-kubeconfig"
+  docker() {
+    # shellcheck disable=SC2016 # Match the literal Go-template CLI argument.
+    case "$*" in
+      'container inspect remote-job') return 0 ;;
+      "inspect --format {{range \$name, \$_ := .NetworkSettings.Networks}}{{println \$name}}{{end}} ${KIND_CLUSTER_NAME}-control-plane")
+        printf 'kind\n'
+        ;;
+      'network connect kind remote-job') record 'network-connect:kind:remote-job' ;;
+      *) fail "unexpected remote Docker invocation: $*" ;;
+    esac
+  }
+  kind() {
+    if [ "$*" != "get kubeconfig --internal --name $KIND_CLUSTER_NAME" ]; then
+      fail "unexpected remote Kind invocation: $*"
+    fi
+    printf 'apiVersion: v1\ncurrent-context: kind-%s\n' "$KIND_CLUSTER_NAME"
+  }
+  start_remote_dind_kind_forwarding() { record "forward:$1"; }
+  log() { record "log:$*"; }
+  configure_remote_dind_kind_network
+  grep -Fqx "current-context: kind-${KIND_CLUSTER_NAME}" "$KUBECONFIG" ||
+    fail 'remote DinD kubeconfig did not use the internal Kind rendering'
+)
+cat >"$FIXTURE/want-remote-dind" <<EOF
+network-connect:kind:remote-job
+forward:${KIND_CLUSTER_NAME}-control-plane
+log:remote DinD Kind API and host-port topology configured
+EOF
+cmp -s "$FIXTURE/want-remote-dind" "$CALLS" || {
+  diff -u "$FIXTURE/want-remote-dind" "$CALLS" >&2 || true
+  fail 'remote DinD Kind network adaptation changed'
+}
+
+: >"$CALLS"
+(
+  HOSTNAME=local-host
+  docker() {
+    record "docker:$*"
+    return 1
+  }
+  log() { record "log:$*"; }
+  configure_remote_dind_kind_network
+)
+cat >"$FIXTURE/want-local-docker" <<'EOF'
+docker:container inspect local-host
+log:local Docker topology detected; retaining Kind host-port kubeconfig
+EOF
+cmp -s "$FIXTURE/want-local-docker" "$CALLS" ||
+  fail 'local Docker topology no longer bypasses remote DinD adaptation'
+
+# A transient API refusal after image import is retried, but a control plane
+# that never recovers fails closed at the fixed 60-second boundary.
+: >"$CALLS"
+(
+  attempts=0
+  kubectl() {
+    attempts=$((attempts + 1))
+    record "probe:${attempts}:$*"
+    [ "$attempts" -ge 3 ]
+  }
+  sleep() { record "sleep:$1"; }
+  log() { record "log:$*"; }
+  wait_for_kind_api_after_image_load
+)
+cat >"$FIXTURE/want-api-recovery" <<EOF
+log:checking Kind API after image import
+probe:1:--context kind-${KIND_CLUSTER_NAME} --request-timeout=1s get --raw=/readyz
+sleep:1
+probe:2:--context kind-${KIND_CLUSTER_NAME} --request-timeout=1s get --raw=/readyz
+sleep:1
+probe:3:--context kind-${KIND_CLUSTER_NAME} --request-timeout=1s get --raw=/readyz
+log:Kind API ready after image import
+EOF
+cmp -s "$FIXTURE/want-api-recovery" "$CALLS" || {
+  diff -u "$FIXTURE/want-api-recovery" "$CALLS" >&2 || true
+  fail 'Kind API recovery did not retain its bounded retry contract'
+}
+
+: >"$CALLS"
+if (
+  kubectl() { record probe; return 1; }
+  sleep() { :; }
+  capture_kind_control_plane_state() { record diagnostic; }
+  wait_for_kind_api_after_image_load
+) >"$FIXTURE/api-unavailable.out" 2>&1; then
+  fail 'permanently unavailable Kind API unexpectedly succeeded'
+fi
+[ "$(grep -c '^probe$' "$CALLS")" -eq 60 ] ||
+  fail 'Kind API failure did not exhaust the fixed retry boundary'
+[ "$(grep -c '^diagnostic$' "$CALLS")" -eq 1 ] ||
+  fail 'Kind API failure did not capture one value-blind diagnostic'
+grep -Fq 'did not become ready within 60 seconds after image import' \
+  "$FIXTURE/api-unavailable.out" ||
+  fail 'Kind API failure did not explain the bounded recovery failure'
 
 # A cluster becomes rerunnable only after controller, workspace/file, and
 # ordinary Temporal prerequisites pass, immediately before final fencing.

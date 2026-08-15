@@ -12,10 +12,6 @@ on:
         required: false
         default: policy
 
-permissions:
-  contents: read
-  actions: read
-
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -64,7 +60,7 @@ jobs:
       tested_tree_head: ${{ steps.receipt.outputs.tested_tree_head }}
       tested_tree_run: ${{ steps.receipt.outputs.tested_tree_run }}
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: https://forgejo.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
           fetch-depth: 0
 
@@ -73,7 +69,7 @@ jobs:
           scripts/ci/setup/assert-ci-runner-image.sh
           scripts/ci/tests/test-ci-runner-image-contract.sh
 
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: https://forgejo.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         if: ${{ github.event_name == 'pull_request' }}
         with:
           ref: ${{ github.event.pull_request.base.sha }}
@@ -81,7 +77,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: https://forgejo.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         if: ${{ github.event_name == 'push' && github.event.before != '0000000000000000000000000000000000000000' }}
         with:
           ref: ${{ github.event.before }}
@@ -89,11 +85,9 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Set up pinned Cargo for trusted artifact planning
-        uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b
+      - name: Verify sealed Rust toolchain for trusted artifact planning
         if: ${{ github.event_name == 'pull_request' }}
-        with:
-          toolchain: 1.91.1
+        run: scripts/ci/setup/assert-ci-runner-image.sh
 
       - name: Select capabilities and artifact facts
         id: select
@@ -165,6 +159,7 @@ jobs:
   cw-release-assets:
     name: CW release-assets verification
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     needs: [verification-selection]
     env:
       CARGO_TARGET_DIR: ${{ github.workspace }}/target/ci-cache/cw-cross-ci
@@ -177,14 +172,12 @@ jobs:
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && needs.verification-selection.outputs.cw_package_selected != 'true' }}
         run: echo 'CW release assets are unaffected; no checkout or tool installation required'
 
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: https://forgejo.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && needs.verification-selection.outputs.cw_package_selected == 'true' }}
 
-      - uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b
+      - name: Verify sealed Rust toolchain
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && needs.verification-selection.outputs.cw_package_selected == 'true' }}
-        with:
-          toolchain: 1.91.1
-          targets: x86_64-unknown-linux-musl,aarch64-unknown-linux-gnu,x86_64-apple-darwin,aarch64-apple-darwin
+        run: scripts/ci/setup/assert-ci-runner-image.sh
 
       - name: Install pinned protobuf compiler
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && needs.verification-selection.outputs.cw_package_selected == 'true' }}
@@ -231,6 +224,7 @@ jobs:
   workspace-image:
     name: Workspace image verification
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     needs: [verification-selection]
     steps:
       - name: Reuse exact PR-head content verification
@@ -241,7 +235,7 @@ jobs:
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && needs.verification-selection.outputs.workspace_image_selected != 'true' }}
         run: echo 'workspace image is unaffected; no checkout, download, installation, or build required'
 
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: https://forgejo.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && needs.verification-selection.outputs.workspace_image_selected == 'true' }}
 
       - name: Prove isolated Buildx load contract
@@ -258,6 +252,7 @@ jobs:
   standard:
     name: Standard verification
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     needs: [verification-selection]
     env:
       CARGO_TARGET_DIR: ${{ github.workspace }}/target/ci-cache/host-debug
@@ -266,19 +261,18 @@ jobs:
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt == 'accepted' }}
         run: echo 'standard content verification inherited from the exact tested PR-head tree'
 
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: https://forgejo.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
         with:
           fetch-depth: 0
 
-      - name: Set up Go 1.26.5
+      - name: Set up Go 1.26.6
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|contracts|') || contains(needs.verification-selection.outputs.selection, '|go_support|') || contains(needs.verification-selection.outputs.selection, '|sdk_go|') || contains(needs.verification-selection.outputs.selection, '|security_go|')) }}
-        run: scripts/ci/setup/setup-go.sh 1.26.5
+        run: scripts/ci/setup/setup-go.sh 1.26.6
 
-      - uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b
+      - name: Verify sealed Rust toolchain
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|policy|') || contains(needs.verification-selection.outputs.selection, '|contracts_proto|') || contains(needs.verification-selection.outputs.selection, '|go_tailnet|') || contains(needs.verification-selection.outputs.selection, '|go_consumer_interop|') || contains(needs.verification-selection.outputs.selection, '|deploy|')) }}
-        with:
-          toolchain: 1.91.1
+        run: scripts/ci/setup/assert-ci-runner-image.sh
 
       - name: Install pinned protoc for Rust-backed standard checks
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|contracts_proto|') || contains(needs.verification-selection.outputs.selection, '|go_tailnet|') || contains(needs.verification-selection.outputs.selection, '|go_consumer_interop|')) }}
@@ -294,12 +288,12 @@ jobs:
           echo "$HOME/.proto-tools/protoc/bin" >> "$GITHUB_PATH"
           "$HOME/.proto-tools/protoc/bin/protoc" --version
 
-      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+      - uses: https://forgejo.example.invalid/noel/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|contracts|') || contains(needs.verification-selection.outputs.selection, '|web|')) }}
         with:
           bun-version: '1.3.9'
 
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+      - uses: https://forgejo.example.invalid/noel/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|sdk_ts|') }}
         with:
           node-version: '20'
@@ -382,6 +376,7 @@ jobs:
   rust-transport:
     name: Rust / transport verification
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     needs: [verification-selection]
     env:
       CARGO_HOME: ${{ github.workspace }}/target/ci-rust-cargo-home
@@ -392,14 +387,12 @@ jobs:
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt == 'accepted' }}
         run: echo 'Rust and transport content verification inherited from the exact tested PR-head tree'
 
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: https://forgejo.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
 
-      - uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b
+      - name: Verify sealed Rust toolchain
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|rust|') || contains(needs.verification-selection.outputs.selection, '|rust_curated_locks|') || contains(needs.verification-selection.outputs.selection, '|transport|') || needs.verification-selection.outputs.desktop_package_selected == 'true') }}
-        with:
-          toolchain: 1.91.1
-          components: rustfmt, clippy
+        run: scripts/ci/setup/assert-ci-runner-image.sh
 
       - name: Verify Rust protobuf compiler
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|rust|') || contains(needs.verification-selection.outputs.selection, '|transport|')) }}
@@ -423,9 +416,9 @@ jobs:
           VERIFICATION_SELECTION: ${{ needs.verification-selection.outputs.selection }}
         run: scripts/ci/verify/run-product-verification.sh rust-curated-locks
 
-      - name: Set up Go 1.26.5 for DERP interop
+      - name: Set up Go 1.26.6 for DERP interop
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|transport_derp_contract|') }}
-        run: scripts/ci/setup/setup-go.sh 1.26.5
+        run: scripts/ci/setup/setup-go.sh 1.26.6
 
       - name: Run Rust
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|rust|') }}
@@ -445,9 +438,10 @@ jobs:
           VERIFICATION_SELECTION: ${{ needs.verification-selection.outputs.selection }}
         run: scripts/ci/verify/run-product-verification.sh transport
 
-  database-services:
-    name: Database / service verification
+  database:
+    name: Database verification
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     needs: [verification-selection]
     env:
       CARGO_TARGET_DIR: ${{ github.workspace }}/target/ci-cache/host-debug
@@ -455,45 +449,54 @@ jobs:
     steps:
       - name: Reuse exact PR-head content verification
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt == 'accepted' }}
-        run: echo 'database and service content verification inherited from the exact tested PR-head tree'
+        run: echo 'database content verification inherited from the exact tested PR-head tree'
 
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: https://forgejo.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
 
-      - uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b
-        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|database|') || contains(needs.verification-selection.outputs.selection, '|service_integration|')) }}
-        with:
-          toolchain: 1.91.1
+      - name: Verify sealed Rust toolchain
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|database|') }}
+        run: scripts/ci/setup/assert-ci-runner-image.sh
 
       - name: Verify integration tools
-        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|database|') || contains(needs.verification-selection.outputs.selection, '|service_integration|')) }}
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|database|') }}
         run: |
           set -euo pipefail
           scripts/ci/setup/assert-ci-runner-image.sh
 
       - name: Start integration Postgres
-        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|database|') || contains(needs.verification-selection.outputs.selection, '|service_integration|')) }}
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|database|') }}
         run: |
           set -euo pipefail
           container="codewire-integration-${GITHUB_RUN_ID:?}"
           echo "POSTGRES_CONTAINER=$container" >> "$GITHUB_ENV"
           docker rm -f "$container" >/dev/null 2>&1 || true
+          mapfile -t networks < <(
+            docker inspect --format '{{json .NetworkSettings.Networks}}' \
+              "${HOSTNAME:?}" | jq -er 'keys[]'
+          )
+          if [ "${#networks[@]}" -ne 1 ] || [[ "${networks[0]}" =~ [^A-Za-z0-9_.-] ]]; then
+            echo 'job container must have exactly one bounded Docker network' >&2
+            exit 1
+          fi
+          postgres_host="codewire-integration-postgres"
           docker run -d --name "$container" --pids-limit 2048 \
+            --network "${networks[0]}" --network-alias "$postgres_host" \
             -e POSTGRES_USER=codewire -e POSTGRES_PASSWORD=codewire \
-            -e POSTGRES_DB=codewire -p 127.0.0.1::5432 postgres:17-alpine
-          mapping="$(docker port "$container" 5432/tcp | head -n1)"
-          echo "POSTGRES_PORT=${mapping##*:}" >> "$GITHUB_ENV"
+            -e POSTGRES_DB=codewire postgres:17-alpine
+          echo "POSTGRES_HOST=$postgres_host" >> "$GITHUB_ENV"
+          echo "INTEGRATION_DOCKER_NETWORK=${networks[0]}" >> "$GITHUB_ENV"
 
       - name: Wait for integration Postgres
-        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|database|') || contains(needs.verification-selection.outputs.selection, '|service_integration|')) }}
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|database|') }}
         env:
           PGPASSWORD: codewire
         run: |
           set -euo pipefail
           for _ in $(seq 1 60); do
-            if psql -h 127.0.0.1 -p "$POSTGRES_PORT" -U codewire -d codewire -c 'select 1' >/dev/null 2>&1; then
-              echo "DATABASE_URL=postgres://codewire:codewire@127.0.0.1:${POSTGRES_PORT}/codewire?sslmode=disable" >> "$GITHUB_ENV"
-              echo "DATABASE_URL_RUST=postgres://codewire:codewire@127.0.0.1:${POSTGRES_PORT}/codewire" >> "$GITHUB_ENV"
+            if psql -h "$POSTGRES_HOST" -p 5432 -U codewire -d codewire -c 'select 1' >/dev/null 2>&1; then
+              echo "DATABASE_URL=postgres://codewire:codewire@${POSTGRES_HOST}:5432/codewire?sslmode=disable" >> "$GITHUB_ENV"
+              echo "DATABASE_URL_RUST=postgres://codewire:codewire@${POSTGRES_HOST}:5432/codewire" >> "$GITHUB_ENV"
               base=$((62000 + ((${GITHUB_RUN_ID:-0} % 100) * 10)))
               echo "VERIFICATION_PORT_BASE=$base" >> "$GITHUB_ENV"
               exit 0
@@ -507,14 +510,164 @@ jobs:
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|database|') }}
         run: scripts/ci/verify/run-integration-verification.sh database
 
+      - name: Stop integration Postgres
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && always() && contains(needs.verification-selection.outputs.selection, '|database|') }}
+        run: docker rm -f "${POSTGRES_CONTAINER:-missing}" >/dev/null 2>&1 || true
+
+  services-control:
+    name: Service control-plane verification
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: [verification-selection]
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target/ci-cache/host-debug
+      CODEWIRE_CARGO_CI_TARGET_DIR: ${{ github.workspace }}/target/ci-cache/host-ci
+    steps:
+      - name: Reuse exact PR-head content verification
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt == 'accepted' }}
+        run: echo 'service control-plane content verification inherited from the exact tested PR-head tree'
+
+      - uses: https://forgejo.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+
+      - name: Verify sealed Rust toolchain
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|service_integration|') }}
+        run: scripts/ci/setup/assert-ci-runner-image.sh
+
+      - name: Verify integration tools
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|service_integration|') }}
+        run: |
+          set -euo pipefail
+          scripts/ci/setup/assert-ci-runner-image.sh
+
+      - name: Start integration Postgres
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|service_integration|') }}
+        run: |
+          set -euo pipefail
+          container="codewire-integration-${GITHUB_RUN_ID:?}"
+          echo "POSTGRES_CONTAINER=$container" >> "$GITHUB_ENV"
+          docker rm -f "$container" >/dev/null 2>&1 || true
+          mapfile -t networks < <(
+            docker inspect --format '{{json .NetworkSettings.Networks}}' \
+              "${HOSTNAME:?}" | jq -er 'keys[]'
+          )
+          if [ "${#networks[@]}" -ne 1 ] || [[ "${networks[0]}" =~ [^A-Za-z0-9_.-] ]]; then
+            echo 'job container must have exactly one bounded Docker network' >&2
+            exit 1
+          fi
+          postgres_host="codewire-integration-postgres"
+          docker run -d --name "$container" --pids-limit 2048 \
+            --network "${networks[0]}" --network-alias "$postgres_host" \
+            -e POSTGRES_USER=codewire -e POSTGRES_PASSWORD=codewire \
+            -e POSTGRES_DB=codewire postgres:17-alpine
+          echo "POSTGRES_HOST=$postgres_host" >> "$GITHUB_ENV"
+          echo "INTEGRATION_DOCKER_NETWORK=${networks[0]}" >> "$GITHUB_ENV"
+
+      - name: Wait for integration Postgres
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|service_integration|') }}
+        env:
+          PGPASSWORD: codewire
+        run: |
+          set -euo pipefail
+          for _ in $(seq 1 60); do
+            if psql -h "$POSTGRES_HOST" -p 5432 -U codewire -d codewire -c 'select 1' >/dev/null 2>&1; then
+              echo "DATABASE_URL=postgres://codewire:codewire@${POSTGRES_HOST}:5432/codewire?sslmode=disable" >> "$GITHUB_ENV"
+              echo "DATABASE_URL_RUST=postgres://codewire:codewire@${POSTGRES_HOST}:5432/codewire" >> "$GITHUB_ENV"
+              base=$((62000 + ((${GITHUB_RUN_ID:-0} % 100) * 10)))
+              echo "VERIFICATION_PORT_BASE=$base" >> "$GITHUB_ENV"
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs "$POSTGRES_CONTAINER" || true
+          exit 1
+
       - name: Run Service integration
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|service_integration|') }}
         env:
           VERIFICATION_SELECTION: ${{ needs.verification-selection.outputs.selection }}
-        run: scripts/ci/verify/run-integration-verification.sh services
+        run: scripts/ci/verify/run-integration-verification.sh services-control
 
       - name: Stop integration Postgres
-        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && always() && (contains(needs.verification-selection.outputs.selection, '|database|') || contains(needs.verification-selection.outputs.selection, '|service_integration|')) }}
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && always() && contains(needs.verification-selection.outputs.selection, '|service_integration|') }}
+        run: docker rm -f "${POSTGRES_CONTAINER:-missing}" >/dev/null 2>&1 || true
+
+  services-runtime:
+    name: Service runtime-plane verification
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: [verification-selection]
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target/ci-cache/host-debug
+      CODEWIRE_CARGO_CI_TARGET_DIR: ${{ github.workspace }}/target/ci-cache/host-ci
+    steps:
+      - name: Reuse exact PR-head content verification
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt == 'accepted' }}
+        run: echo 'service runtime-plane content verification inherited from the exact tested PR-head tree'
+
+      - uses: https://forgejo.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+
+      - name: Verify sealed Rust toolchain
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|service_integration|') }}
+        run: scripts/ci/setup/assert-ci-runner-image.sh
+
+      - name: Verify integration tools
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|service_integration|') }}
+        run: |
+          set -euo pipefail
+          scripts/ci/setup/assert-ci-runner-image.sh
+
+      - name: Start integration Postgres
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|service_integration|') }}
+        run: |
+          set -euo pipefail
+          container="codewire-integration-${GITHUB_RUN_ID:?}"
+          echo "POSTGRES_CONTAINER=$container" >> "$GITHUB_ENV"
+          docker rm -f "$container" >/dev/null 2>&1 || true
+          mapfile -t networks < <(
+            docker inspect --format '{{json .NetworkSettings.Networks}}' \
+              "${HOSTNAME:?}" | jq -er 'keys[]'
+          )
+          if [ "${#networks[@]}" -ne 1 ] || [[ "${networks[0]}" =~ [^A-Za-z0-9_.-] ]]; then
+            echo 'job container must have exactly one bounded Docker network' >&2
+            exit 1
+          fi
+          postgres_host="codewire-integration-postgres"
+          docker run -d --name "$container" --pids-limit 2048 \
+            --network "${networks[0]}" --network-alias "$postgres_host" \
+            -e POSTGRES_USER=codewire -e POSTGRES_PASSWORD=codewire \
+            -e POSTGRES_DB=codewire postgres:17-alpine
+          echo "POSTGRES_HOST=$postgres_host" >> "$GITHUB_ENV"
+          echo "INTEGRATION_DOCKER_NETWORK=${networks[0]}" >> "$GITHUB_ENV"
+
+      - name: Wait for integration Postgres
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|service_integration|') }}
+        env:
+          PGPASSWORD: codewire
+        run: |
+          set -euo pipefail
+          for _ in $(seq 1 60); do
+            if psql -h "$POSTGRES_HOST" -p 5432 -U codewire -d codewire -c 'select 1' >/dev/null 2>&1; then
+              echo "DATABASE_URL=postgres://codewire:codewire@${POSTGRES_HOST}:5432/codewire?sslmode=disable" >> "$GITHUB_ENV"
+              echo "DATABASE_URL_RUST=postgres://codewire:codewire@${POSTGRES_HOST}:5432/codewire" >> "$GITHUB_ENV"
+              base=$((62000 + ((${GITHUB_RUN_ID:-0} % 100) * 10)))
+              echo "VERIFICATION_PORT_BASE=$base" >> "$GITHUB_ENV"
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs "$POSTGRES_CONTAINER" || true
+          exit 1
+
+      - name: Run Service integration
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|service_integration|') }}
+        env:
+          VERIFICATION_SELECTION: ${{ needs.verification-selection.outputs.selection }}
+        run: scripts/ci/verify/run-integration-verification.sh services-runtime
+
+      - name: Stop integration Postgres
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && always() && contains(needs.verification-selection.outputs.selection, '|service_integration|') }}
         run: docker rm -f "${POSTGRES_CONTAINER:-missing}" >/dev/null 2>&1 || true
 
   edge-kind:
@@ -524,25 +677,27 @@ jobs:
     env:
       KIND_CLUSTER_NAME: codewire-e2e-ci-${{ github.run_id }}
       CODEWIRE_PLAYWRIGHT_SNAPSHOT_ENV: ubuntu24-cft145
+      KIND_INGRESS_CONTROLLER_IMAGE: nexus-system-cluster.example.invalid/oci-approved/ingress-nginx/controller@sha256:5c2a1b6c03c4d18ecf14685d21a32bf6763a022f6f8cc07e9578f6cd5eca6180
+      KIND_INGRESS_CERTGEN_IMAGE: nexus-system-cluster.example.invalid/oci-approved/ingress-nginx/kube-webhook-certgen@sha256:334191231352856e1ec0c3e50f966edb59ec94a51906453d09f5820789e8b053
+      KIND_AGENT_SANDBOX_IMAGE: nexus-system-cluster.example.invalid/oci-approved/codewire/agent-sandbox-controller@sha256:6081ae66b4134ebc6b170d965741b8dae09442ec74563b6c1ac999c366dac125
       CARGO_TARGET_DIR: ${{ github.workspace }}/target/ci-cache/kind-ci
     steps:
       - name: Reuse exact PR-head content verification
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt == 'accepted' }}
         run: echo 'edge and Kind content verification inherited from the exact tested PR-head tree'
 
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: https://forgejo.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
 
       - name: Run Edge static verification
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|edge_kind|') }}
         run: scripts/ci/verify/run-product-verification.sh edge
 
-      - uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b
+      - name: Verify sealed Rust toolchain
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|kind|') }}
-        with:
-          toolchain: 1.91.1
+        run: scripts/ci/setup/assert-ci-runner-image.sh
 
-      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+      - uses: https://forgejo.example.invalid/noel/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|kind|') }}
         with:
           bun-version: '1.3.9'
@@ -552,7 +707,6 @@ jobs:
         run: |
           set -euo pipefail
           PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 bun install --frozen-lockfile --ignore-scripts
-          ./apps/dashboard/node_modules/.bin/playwright install-deps chromium
           chromium="$(scripts/ci/install-pinned-playwright-chromium.sh)"
           "$chromium" --version
           echo "PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=$chromium" >> "$GITHUB_ENV"
@@ -588,10 +742,12 @@ jobs:
       - workspace-image
       - standard
       - rust-transport
-      - database-services
+      - database
+      - services-control
+      - services-runtime
       - edge-kind
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: https://forgejo.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
 
       - name: Require capability groups
         env:
@@ -604,7 +760,9 @@ jobs:
           VERIFICATION_TESTED_TREE_RUN: ${{ needs.verification-selection.outputs.tested_tree_run }}
           VERIFICATION_STANDARD_RESULT: ${{ needs.standard.result }}
           VERIFICATION_RUST_TRANSPORT_RESULT: ${{ needs.rust-transport.result }}
-          VERIFICATION_DATABASE_SERVICES_RESULT: ${{ needs.database-services.result }}
+          VERIFICATION_DATABASE_RESULT: ${{ needs.database.result }}
+          VERIFICATION_SERVICES_CONTROL_RESULT: ${{ needs.services-control.result }}
+          VERIFICATION_SERVICES_RUNTIME_RESULT: ${{ needs.services-runtime.result }}
           VERIFICATION_EDGE_KIND_RESULT: ${{ needs.edge-kind.result }}
           VERIFICATION_CW_RELEASE_ASSETS_RESULT: ${{ needs.cw-release-assets.result }}
           VERIFICATION_WORKSPACE_IMAGE_RESULT: ${{ needs.workspace-image.result }}

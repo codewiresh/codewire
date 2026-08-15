@@ -29,13 +29,12 @@ jobs:
       ci_policy_sha256: ${{ steps.select.outputs.ci_policy_sha256 }}
       baseline_valid: ${{ steps.select.outputs.baseline_valid }}
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: https://forgejo.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
           fetch-depth: 0
 
-      - uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b
-        with:
-          toolchain: 1.91.1
+      - name: Verify sealed Rust toolchain
+        run: scripts/ci/setup/assert-ci-runner-image.sh
 
       - name: Resolve untrusted published support pair
         env:
@@ -77,7 +76,7 @@ jobs:
     needs: [support-selection]
     if: ${{ needs.support-selection.outputs.build_support_images == 'true' }}
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: https://forgejo.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
 
       - name: Build canonical base image
         id: base

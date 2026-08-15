@@ -126,13 +126,28 @@ chmod +x "$TMP/target/ci/codewire-db-migrate"
 FAKE_CARGO_LOG="$TMP/cargo.log"
 export FAKE_CARGO_LOG
 : > "$FAKE_CARGO_LOG"
+if invalid_network_output="$(
+  CARGO_TARGET_DIR="$TMP/target" \
+    RUN_DIR="$TMP/invalid-network" \
+    INTEGRATION_DOCKER_NETWORK='invalid/network' \
+    DATABASE_URL='postgres://synthetic:synthetic@127.0.0.1:60003/synthetic' \
+    DATABASE_URL_RUST='postgres://synthetic:synthetic@127.0.0.1:60003/synthetic' \
+    VERIFICATION_SELECTION='|valid:v3|service_nats|complete|' \
+    "$ROOT/scripts/ci/verify/run-integration-verification.sh" services-runtime 2>&1
+)"; then
+  echo "invalid integration Docker network was accepted" >&2
+  exit 1
+fi
+grep -Fq 'invalid integration Docker network or NATS alias' \
+  <<<"$invalid_network_output"
+
 if missing_scope_output="$(
   CARGO_TARGET_DIR="$TMP/target" \
     RUN_DIR="$TMP/missing-service-scope" \
     DATABASE_URL='postgres://synthetic:synthetic@127.0.0.1:60003/synthetic' \
     DATABASE_URL_RUST='postgres://synthetic:synthetic@127.0.0.1:60003/synthetic' \
     VERIFICATION_SELECTION='|valid:v3|service_integration|complete|' \
-    "$ROOT/scripts/ci/verify/run-integration-verification.sh" services 2>&1
+    "$ROOT/scripts/ci/verify/run-integration-verification.sh" services-control 2>&1
 )"; then
   echo "service integration without a service scope was accepted" >&2
   exit 1

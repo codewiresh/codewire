@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-version="${1:-1.26.5}"
+version="${1:-1.26.6}"
 goos="${GO_OS:-linux}"
 goarch="${GO_ARCH:-amd64}"
 
@@ -11,11 +11,9 @@ if [[ "$goos" != "linux" || "$goarch" != "amd64" ]]; then
 fi
 
 case "$version" in
-  1.26.5)
-    actions_url="https://github.com/actions/go-versions/releases/download/1.26.5-28913679792/go-1.26.5-linux-x64.tar.gz"
-    actions_sha256="ddc5eb7fa8fa1971754de80a666a604a09ce92b8585205c63041366f4a6ea4e2"
-    official_url="https://go.dev/dl/go1.26.5.linux-amd64.tar.gz"
-    official_sha256="5c2c3b16caefa1d968a94c1daca04a7ca301a496d9b086e17ad77bb81393f053"
+  1.26.6)
+    official_url="https://go.dev/dl/go1.26.6.linux-amd64.tar.gz"
+    official_sha256="708effb774be8237570d0add163225abbdfaf4fca28b2611df167beba4feef89"
     ;;
   *)
     echo "unsupported Go version: ${version}" >&2
@@ -60,12 +58,9 @@ if ! valid_goroot; then
   trap cleanup EXIT
 
   archive="${tmpdir}/go.tgz"
-  sha256="$actions_sha256"
-  if ! curl -fsSL --retry 5 --retry-delay 2 "$actions_url" -o "$archive"; then
-    sha256="$official_sha256"
-    curl -fsSL --retry 5 --retry-delay 2 "$official_url" -o "$archive"
-  fi
-  echo "${sha256}  ${archive}" | sha256sum -c -
+  curl --proto '=https' --tlsv1.2 -fsSL --retry 5 --retry-delay 2 \
+    "$official_url" -o "$archive"
+  echo "${official_sha256}  ${archive}" | sha256sum -c -
 
   extract_dir="${tmpdir}/extract"
   mkdir -p "$extract_dir"

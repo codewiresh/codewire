@@ -37,13 +37,47 @@ GATEWAY_PUBLIC_FINGERPRINT=""
 KIND_E2E_COMPATIBILITY_VERSION=1
 KIND_E2E_PREPARED_CONFIGMAP=codewire-kind-e2e-prepared
 RETAINED_KUBECONFIG=""
+REMOTE_DIND_JOB_CONTAINER=""
+REMOTE_DIND_KIND_NETWORK=""
+REMOTE_DIND_FORWARDER_PID=""
 if [ -z "${KIND_WORKSPACE_IMAGE+x}" ]; then
   KIND_WORKSPACE_IMAGE='ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467'
 fi
 if [ -z "${KIND_DIND_IMAGE+x}" ]; then
   KIND_DIND_IMAGE='docker.io/library/docker:29.7.1-dind@sha256:e8faad5a8dc5279dff929afc5449f2791736912fff9f99351d742db2fad01b4c'
 fi
-readonly KIND_WORKSPACE_IMAGE KIND_DIND_IMAGE
+if [ -z "${KIND_INGRESS_CONTROLLER_IMAGE+x}" ]; then
+  KIND_INGRESS_CONTROLLER_IMAGE=''
+fi
+if [ -z "${KIND_INGRESS_CERTGEN_IMAGE+x}" ]; then
+  KIND_INGRESS_CERTGEN_IMAGE=''
+fi
+if [ -z "${KIND_AGENT_SANDBOX_IMAGE+x}" ]; then
+  KIND_AGENT_SANDBOX_IMAGE=''
+fi
+if [ -z "${APPROVED_KIND_INGRESS_CONTROLLER_IMAGE+x}" ]; then
+  APPROVED_KIND_INGRESS_CONTROLLER_IMAGE='nexus-system-cluster.example.invalid/oci-approved/ingress-nginx/controller@sha256:5c2a1b6c03c4d18ecf14685d21a32bf6763a022f6f8cc07e9578f6cd5eca6180'
+fi
+if [ -z "${APPROVED_KIND_INGRESS_CERTGEN_IMAGE+x}" ]; then
+  APPROVED_KIND_INGRESS_CERTGEN_IMAGE='nexus-system-cluster.example.invalid/oci-approved/ingress-nginx/kube-webhook-certgen@sha256:334191231352856e1ec0c3e50f966edb59ec94a51906453d09f5820789e8b053'
+fi
+if [ -z "${APPROVED_KIND_AGENT_SANDBOX_IMAGE+x}" ]; then
+  APPROVED_KIND_AGENT_SANDBOX_IMAGE='nexus-system-cluster.example.invalid/oci-approved/codewire/agent-sandbox-controller@sha256:6081ae66b4134ebc6b170d965741b8dae09442ec74563b6c1ac999c366dac125'
+fi
+if [ -z "${KIND_INGRESS_CONTROLLER_LOCAL_IMAGE+x}" ]; then
+  KIND_INGRESS_CONTROLLER_LOCAL_IMAGE='localhost/codewire-ci/ingress-nginx-controller:verified-5c2a1b6c03c4d18ecf14685d21a32bf6763a022f6f8cc07e9578f6cd5eca6180'
+fi
+if [ -z "${KIND_INGRESS_CERTGEN_LOCAL_IMAGE+x}" ]; then
+  KIND_INGRESS_CERTGEN_LOCAL_IMAGE='localhost/codewire-ci/ingress-kube-webhook-certgen:verified-334191231352856e1ec0c3e50f966edb59ec94a51906453d09f5820789e8b053'
+fi
+if [ -z "${KIND_AGENT_SANDBOX_LOCAL_IMAGE+x}" ]; then
+  KIND_AGENT_SANDBOX_LOCAL_IMAGE='localhost/codewire-ci/agent-sandbox-controller:verified-6081ae66b4134ebc6b170d965741b8dae09442ec74563b6c1ac999c366dac125'
+fi
+readonly KIND_WORKSPACE_IMAGE KIND_DIND_IMAGE \
+  KIND_INGRESS_CONTROLLER_IMAGE KIND_INGRESS_CERTGEN_IMAGE KIND_AGENT_SANDBOX_IMAGE \
+  APPROVED_KIND_INGRESS_CONTROLLER_IMAGE APPROVED_KIND_INGRESS_CERTGEN_IMAGE \
+  APPROVED_KIND_AGENT_SANDBOX_IMAGE KIND_INGRESS_CONTROLLER_LOCAL_IMAGE \
+  KIND_INGRESS_CERTGEN_LOCAL_IMAGE KIND_AGENT_SANDBOX_LOCAL_IMAGE
 
 log() {
   printf '[kind-e2e] %s\n' "$*"
@@ -77,6 +111,8 @@ dump_cluster_state() {
   kubectl --context "$context" -n "$SANDBOX_NS" describe sandboxclaim,sandbox,sandboxtemplate,sandboxwarmpool || true
   kubectl --context "$context" -n "$SANDBOX_NS" get events --sort-by=.lastTimestamp || true
   kubectl --context "$context" -n "$NS" get events --sort-by=.lastTimestamp || true
+  kubectl --context "$context" -n ingress-nginx describe pods || true
+  kubectl --context "$context" -n ingress-nginx get events --sort-by=.lastTimestamp || true
   kubectl --context "$context" -n ingress-nginx logs deploy/ingress-nginx-controller --tail=80 || true
   kubectl --context "$context" -n agent-sandbox-system logs -l app=agent-sandbox-controller --tail=160 --all-containers || true
 }
@@ -87,6 +123,7 @@ cleanup() {
   if [ "$status" -ne 0 ]; then
     dump_cluster_state
   fi
+  stop_remote_dind_kind_forwarding
   if [ "$KEEP_KIND_CLUSTER" != "1" ]; then
     kind delete cluster --name "$KIND_CLUSTER_NAME" >/dev/null 2>&1 || true
   fi
@@ -496,14 +533,279 @@ create_cluster() {
     echo "::error::kind cluster creation failed. This gate needs a runner with a real privileged Docker runtime capable of starting kind node containers; rootless Podman/netavark runners are not sufficient."
     exit 1
   fi
+  configure_remote_dind_kind_network
+}
+
+stop_remote_dind_kind_forwarding() {
+  if [ -n "$REMOTE_DIND_FORWARDER_PID" ]; then
+    kill "$REMOTE_DIND_FORWARDER_PID" >/dev/null 2>&1 || true
+    wait "$REMOTE_DIND_FORWARDER_PID" >/dev/null 2>&1 || true
+    REMOTE_DIND_FORWARDER_PID=""
+  fi
+  if [ -n "$REMOTE_DIND_JOB_CONTAINER" ] && [ -n "$REMOTE_DIND_KIND_NETWORK" ]; then
+    docker network disconnect "$REMOTE_DIND_KIND_NETWORK" \
+      "$REMOTE_DIND_JOB_CONTAINER" >/dev/null 2>&1 || true
+  fi
+  REMOTE_DIND_JOB_CONTAINER=""
+  REMOTE_DIND_KIND_NETWORK=""
+}
+
+start_remote_dind_kind_forwarding() {
+  local node="$1" attempt
+  local forwarder_log="$RUN_DIR/remote-dind-kind-forwarder.log"
+
+  python3 -u "$ROOT/scripts/ci/verify/kind/forward-remote-dind-ports.py" \
+    --target "$node" \
+    --forward 8090:80 \
+    --forward 10443:443 \
+    --forward 7233:30733 \
+    --forward 8084:30084 \
+    --forward 18092:30090 \
+    --forward "${KIND_POSTGRES_HOST_PORT}:30432" \
+    >"$forwarder_log" 2>&1 &
+  REMOTE_DIND_FORWARDER_PID=$!
+
+  for ((attempt = 1; attempt <= 50; attempt++)); do
+    if grep -Fqx 'remote DinD Kind loopback forwarder ready' "$forwarder_log"; then
+      log "remote DinD Kind loopback forwarding ready"
+      return 0
+    fi
+    if ! kill -0 "$REMOTE_DIND_FORWARDER_PID" >/dev/null 2>&1; then
+      echo "::error::remote DinD Kind loopback forwarder exited before readiness"
+      return 1
+    fi
+    sleep 0.1
+  done
+
+  echo "::error::remote DinD Kind loopback forwarder did not become ready"
+  return 1
+}
+
+configure_remote_dind_kind_network() {
+  local self_container="${HOSTNAME:-}"
+  local node="${KIND_CLUSTER_NAME}-control-plane"
+  local kubeconfig_path kubeconfig_tmp
+  local -a node_networks=()
+
+  # A local Docker daemon publishes Kind's mapped ports directly in this
+  # process namespace. Forgejo's hardened workers instead give the job a
+  # socket for a sibling DinD daemon, making that daemon's 127.0.0.1 foreign.
+  # The job hostname is a container in the latter topology and absent in the
+  # former, which lets this adaptation remain a no-op for local preflight.
+  if [ -z "$self_container" ] \
+      || ! docker container inspect "$self_container" >/dev/null 2>&1; then
+    log "local Docker topology detected; retaining Kind host-port kubeconfig"
+    return 0
+  fi
+  if [[ "$self_container" =~ [^A-Za-z0-9_.-] ]]; then
+    echo "::error::remote DinD job container identity is malformed"
+    return 1
+  fi
+
+  mapfile -t node_networks < <(
+    docker inspect --format \
+      '{{range $name, $_ := .NetworkSettings.Networks}}{{println $name}}{{end}}' \
+      "$node" | sed '/^$/d'
+  )
+  if [ "${#node_networks[@]}" -ne 1 ] \
+      || [[ "${node_networks[0]:-}" =~ [^A-Za-z0-9_.-] ]]; then
+    echo "::error::Kind control-plane must have exactly one bounded Docker network"
+    return 1
+  fi
+
+  REMOTE_DIND_JOB_CONTAINER="$self_container"
+  REMOTE_DIND_KIND_NETWORK="${node_networks[0]}"
+  docker network connect "$REMOTE_DIND_KIND_NETWORK" \
+    "$REMOTE_DIND_JOB_CONTAINER"
+
+  kubeconfig_path="${KUBECONFIG:-$HOME/.kube/config}"
+  if [[ "$kubeconfig_path" == *:* ]]; then
+    echo "::error::remote DinD Kind requires one explicit kubeconfig path"
+    return 1
+  fi
+  mkdir -p "$(dirname "$kubeconfig_path")"
+  kubeconfig_tmp="$(mktemp "${kubeconfig_path}.internal.XXXXXX")"
+  chmod 600 "$kubeconfig_tmp"
+  if ! kind get kubeconfig --internal --name "$KIND_CLUSTER_NAME" \
+      >"$kubeconfig_tmp"; then
+    shred -u "$kubeconfig_tmp"
+    echo "::error::failed to render internal Kind kubeconfig for remote DinD"
+    return 1
+  fi
+  install -m 600 "$kubeconfig_tmp" "$kubeconfig_path"
+  shred -u "$kubeconfig_tmp"
+
+  start_remote_dind_kind_forwarding "$node"
+  log "remote DinD Kind API and host-port topology configured"
+}
+
+validate_sealed_kind_platform_images() {
+  if [ -z "$KIND_INGRESS_CONTROLLER_IMAGE" ] \
+      && [ -z "$KIND_INGRESS_CERTGEN_IMAGE" ] \
+      && [ -z "$KIND_AGENT_SANDBOX_IMAGE" ]; then
+    return 1
+  fi
+  if [ "$KIND_INGRESS_CONTROLLER_IMAGE" != "$APPROVED_KIND_INGRESS_CONTROLLER_IMAGE" ] \
+      || [ "$KIND_INGRESS_CERTGEN_IMAGE" != "$APPROVED_KIND_INGRESS_CERTGEN_IMAGE" ] \
+      || [ "$KIND_AGENT_SANDBOX_IMAGE" != "$APPROVED_KIND_AGENT_SANDBOX_IMAGE" ]; then
+    echo "::error::Kind platform mirror inputs must match the three approved Nexus digests"
+    return 2
+  fi
 }
 
 load_images_into_kind() {
-  log "loading images into kind"
-  kind load docker-image --name "$KIND_CLUSTER_NAME" codewire-dashboard:e2e
-  kind load docker-image --name "$KIND_CLUSTER_NAME" codewire-services:e2e
-  kind load docker-image --name "$KIND_CLUSTER_NAME" codewire-mesh:e2e
-  kind load docker-image --name "$KIND_CLUSTER_NAME" codewire-gateway:e2e
+  local image sealed source alias
+
+  # Importing several release images back-to-back can make the nested
+  # kube-apiserver temporarily unavailable while containerd commits layers.
+  # Admit one image at a time and require the control plane to recover before
+  # adding the next source of I/O pressure.
+  for image in \
+      codewire-dashboard:e2e \
+      codewire-services:e2e \
+      codewire-mesh:e2e \
+      codewire-gateway:e2e; do
+    log "loading ${image} into kind"
+    kind load docker-image --name "$KIND_CLUSTER_NAME" "$image"
+    wait_for_kind_api_after_image_load
+  done
+
+  if validate_sealed_kind_platform_images; then
+    # The trusted runner boundary pulls these images from Nexus before any
+    # repository-controlled workflow starts. This process receives neither a
+    # registry credential nor public-registry egress; it can only prove and
+    # side-load the three exact local references into the disposable Kind node.
+    for sealed in \
+        "$KIND_INGRESS_CONTROLLER_IMAGE|$KIND_INGRESS_CONTROLLER_LOCAL_IMAGE" \
+        "$KIND_INGRESS_CERTGEN_IMAGE|$KIND_INGRESS_CERTGEN_LOCAL_IMAGE" \
+        "$KIND_AGENT_SANDBOX_IMAGE|$KIND_AGENT_SANDBOX_LOCAL_IMAGE"; do
+      source="${sealed%%|*}"
+      alias="${sealed#*|}"
+      if ! docker image inspect "$source" >/dev/null 2>&1; then
+        echo "::error::approved Kind platform image was not preloaded by the runner boundary: ${source}"
+        return 1
+      fi
+      # A digest-only Docker image has no RepoTag in the archive consumed by
+      # `kind load docker-image`. Give the content a deterministic disposable
+      # name after proving the exact approved digest, then render only that
+      # side-loaded name with imagePullPolicy Never. No registry credential is
+      # copied into the nested cluster.
+      docker image tag "$source" "$alias"
+      log "loading approved platform image into kind"
+      kind load docker-image --name "$KIND_CLUSTER_NAME" "$alias"
+      wait_for_kind_api_after_image_load
+    done
+  elif [ -n "${KIND_INGRESS_CONTROLLER_IMAGE}${KIND_INGRESS_CERTGEN_IMAGE}${KIND_AGENT_SANDBOX_IMAGE}" ]; then
+    return 1
+  fi
+}
+
+render_ingress_manifest() {
+  local source="$ROOT/tests/e2e/kind/vendor/ingress-nginx-deploy.yaml"
+  local rendered="$RUN_DIR/ingress-nginx-deploy.yaml"
+
+  if validate_sealed_kind_platform_images; then
+    python3 - "$source" "$rendered" \
+      "$KIND_INGRESS_CONTROLLER_LOCAL_IMAGE" "$KIND_INGRESS_CERTGEN_LOCAL_IMAGE" <<'PY'
+from pathlib import Path
+import sys
+
+source, rendered, controller, certgen = sys.argv[1:]
+text = Path(source).read_text()
+replacements = {
+    "registry.k8s.io/ingress-nginx/controller:v1.12.1@sha256:d2fbc4ec70d8aa2050dd91a91506e998765e86c96f32cffb56c503c9c34eed5b": (controller, 1),
+    "registry.k8s.io/ingress-nginx/kube-webhook-certgen:v1.5.2@sha256:e8825994b7a2c7497375a9b945f386506ca6a3eda80b89b74ef2db743f66a5ea": (certgen, 2),
+}
+for old, (new, expected_count) in replacements.items():
+    old_block = f"image: {old}\n        imagePullPolicy: IfNotPresent"
+    actual_count = text.count(old_block)
+    if actual_count != expected_count:
+        raise SystemExit(
+            f"vendored ingress image occurrence mismatch: expected {expected_count}, got {actual_count}"
+        )
+    new_block = f"image: {new}\n        imagePullPolicy: Never"
+    text = text.replace(old_block, new_block)
+Path(rendered).write_text(text)
+PY
+    printf '%s\n' "$rendered"
+  elif [ -n "${KIND_INGRESS_CONTROLLER_IMAGE}${KIND_INGRESS_CERTGEN_IMAGE}${KIND_AGENT_SANDBOX_IMAGE}" ]; then
+    return 1
+  else
+    printf '%s\n' "$source"
+  fi
+}
+
+render_agent_sandbox_manifest() {
+  local source="$ROOT/deployments/k8s/agent-sandbox/base"
+  local rendered="$RUN_DIR/agent-sandbox-deploy.yaml"
+
+  kubectl kustomize "$source" >"$rendered"
+  if validate_sealed_kind_platform_images; then
+    python3 - "$rendered" "$KIND_AGENT_SANDBOX_LOCAL_IMAGE" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+rendered, local_image = sys.argv[1:]
+path = Path(rendered)
+text = path.read_text()
+public_image = "ghcr.io/noeljackson/agent-sandbox-controller@sha256:555146af2337dd5d8baf0844d7f5de9a3cd8fc7b032b85756ae244bc2583fb41"
+pattern = re.compile(rf"(?m)^(?P<indent>[ ]*)image: {re.escape(public_image)}$")
+
+def replace(match: re.Match[str]) -> str:
+    indent = match.group("indent")
+    return f"{indent}image: {local_image}\n{indent}imagePullPolicy: Never"
+
+text, count = pattern.subn(replace, text)
+if count != 1:
+    raise SystemExit(
+        f"agent-sandbox image occurrence mismatch: expected 1, got {count}"
+    )
+path.write_text(text)
+PY
+  elif [ -n "${KIND_INGRESS_CONTROLLER_IMAGE}${KIND_INGRESS_CERTGEN_IMAGE}${KIND_AGENT_SANDBOX_IMAGE}" ]; then
+    return 1
+  fi
+  printf '%s\n' "$rendered"
+}
+
+capture_kind_control_plane_state() {
+  local node="${KIND_CLUSTER_NAME}-control-plane"
+
+  # Keep failure evidence value-blind. Do not dump the node configuration,
+  # environment, Kubernetes objects, or component logs here: those may carry
+  # credentials. These fields distinguish a dead/OOM-killed node container
+  # from a live node whose static control-plane containers are unhealthy.
+  log "capturing value-blind Kind control-plane state"
+  docker inspect --format \
+    'kind-node status={{.State.Status}} running={{.State.Running}} oom_killed={{.State.OOMKilled}} exit_code={{.State.ExitCode}} restart_count={{.RestartCount}} error_present={{if .State.Error}}true{{else}}false{{end}}' \
+    "$node" || true
+  docker stats --no-stream --format \
+    'kind-node name={{.Name}} cpu={{.CPUPerc}} memory={{.MemUsage}} pids={{.PIDs}}' \
+    "$node" || true
+  docker exec "$node" systemctl is-active kubelet || true
+  docker exec "$node" crictl ps -a --name kube-apiserver || true
+  docker exec "$node" crictl ps -a --name etcd || true
+}
+
+wait_for_kind_api_after_image_load() {
+  local context="kind-${KIND_CLUSTER_NAME}" attempt
+
+  log "checking Kind API after image import"
+  for ((attempt = 1; attempt <= 60; attempt++)); do
+    if kubectl --context "$context" --request-timeout=1s \
+        get --raw=/readyz >/dev/null 2>&1; then
+      log "Kind API ready after image import"
+      return 0
+    fi
+    if [ "$attempt" -lt 60 ]; then
+      sleep 1
+    fi
+  done
+
+  capture_kind_control_plane_state
+  echo "::error::Kind API did not become ready within 60 seconds after image import"
+  return 1
 }
 
 mesh_legacy_auth_retirement_transition() {
@@ -631,8 +933,10 @@ verify_mesh_legacy_auth_retirement_transition() {
 }
 
 deploy_overlay() {
+  local ingress_manifest
+  ingress_manifest="$(render_ingress_manifest)"
   log "deploying vendored ingress-nginx"
-  kubectl_apply --validate=false -f "$ROOT/tests/e2e/kind/vendor/ingress-nginx-deploy.yaml"
+  kubectl_apply --validate=false -f "$ingress_manifest"
   kubectl wait --namespace ingress-nginx \
     --for=condition=ready pod \
     --selector=app.kubernetes.io/component=controller \
@@ -2153,7 +2457,7 @@ environment_daemon_proxy_smoke() {
 
 deploy_agent_sandbox() {
   log "deploying agent-sandbox controller and CRDs"
-  kubectl_apply --validate=false -k "$ROOT/deployments/k8s/agent-sandbox/base"
+  kubectl_apply --validate=false -f "$(render_agent_sandbox_manifest)"
   kubectl wait --for=condition=established --timeout=60s \
     crd/sandboxclaims.extensions.agents.x-k8s.io
   kubectl -n agent-sandbox-system rollout status deploy/agent-sandbox-controller --timeout=180s

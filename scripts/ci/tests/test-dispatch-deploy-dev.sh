@@ -64,7 +64,7 @@ jq -e --arg source "$SOURCE_SHA" \
   fail "dispatch body contains anything except main and the source SHA"
 grep -Fxq "Authorization: token $TEST_TOKEN" "$capture_dir/auth-header" ||
   fail "dispatch did not use the private header file"
-grep -Fxq 'https://git.example.invalid/api/v1/repos/codewire/deploy/actions/workflows/promote-dev.yaml/dispatches' \
+grep -Fxq 'https://forgejo.example.invalid/api/v1/repos/codewire/deploy/actions/workflows/promote-dev.yaml/dispatches' \
   "$capture_dir/args" || fail "dispatch endpoint is not the reviewed deploy workflow"
 if grep -Fq "$TEST_TOKEN" "$capture_dir/args"; then
   fail "credential was exposed on the curl command line"

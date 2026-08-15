@@ -406,6 +406,7 @@ if [ "$event_selected" = false ]; then
       scripts/ci/verify/resolve-cargo-target-dir.sh|\
       scripts/ci/tests/test-resolve-cargo-target-dir.sh|\
       scripts/ci/tests/test-cargo-target-runner-failures.sh|\
+      scripts/ci/tests/test-ci-tool-downloads.sh|\
       scripts/ci/verify/run-product-verification.sh|\
       scripts/ci/tests/test-sdk-local-cli-contract.sh|\
       scripts/checks/security/audit-rust-only-runtime.sh|\
@@ -967,6 +968,7 @@ if [ "$event_selected" = false ]; then
         recognized=true
         ;;
       Caddyfile|Caddyfile.docker|tests/e2e/kind/*|tests/e2e/*kind*|\
+      scripts/ci/install-pinned-playwright-chromium.sh|\
       scripts/ci/verify/kind-e2e.sh|scripts/ci/verify/kind/*|\
       scripts/dev/kind/install-temporal.sh|scripts/ci/tests/test-install-temporal.sh|\
       deployments/k8s/*ingress*|\
@@ -1010,6 +1012,7 @@ if [ "$event_selected" = false ]; then
       scripts/ci/*observer*.tsv|\
       scripts/ci/*promot*.sh|scripts/ci/*promot*.py|\
       scripts/ci/deploy/dispatch-deploy-dev.sh|scripts/ci/deploy/dispatch-deploy-prod.sh|\
+      scripts/ci/tests/test-ci-tool-downloads.sh|\
       scripts/ci/tests/test-deploy-*.sh|scripts/ci/tests/test-dispatch-deploy-*.sh)
         select_token deploy
         recognized=true
@@ -1056,6 +1059,7 @@ if [ "$event_selected" = false ]; then
       scripts/ci/tests/test-claude-e2e-workflow.sh|\
       scripts/ci/tests/test-fetch-infisical-ci-secret.sh|\
       scripts/ci/tests/test-fetch-openbao-nexus-credentials.sh|\
+      scripts/ci/tests/test-forgejo-action-mirrors.sh|\
       scripts/ci/tests/test-nexus-runtime-pull-contract.sh|\
       scripts/ci/tests/test-cw-install-signature.sh|scripts/ci/tests/test-image-bundle.py|\
       scripts/ci/tests/test-mirror-git-tags.sh|scripts/ci/tests/test-publish-cw-release.sh|\
@@ -1100,7 +1104,8 @@ if [ "$event_selected" = false ]; then
         select_token release
         recognized=true
         ;;
-      scripts/ci/verify/dashboard-image.sh)
+      scripts/ci/verify/dashboard-image.sh|\
+      scripts/ci/tests/test-dashboard-image-network-probe.sh)
         select_token security
         select_token deploy
         select_token edge_kind

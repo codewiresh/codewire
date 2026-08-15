@@ -59,8 +59,9 @@ guard_count="$(grep -Ec '^        if:' <<<"$workspace_job")"
 if grep -Eiq 'docker push|--push|contents: write|secrets\.' <<<"$workspace_job"; then
   fail 'workspace verification must remain credential-free and non-publishing'
 fi
-grep -qF 'permissions:' "$WORKFLOW" || fail 'workflow does not declare permissions'
-grep -qF 'contents: read' "$WORKFLOW" || fail 'workflow does not use read-only contents permission'
+if grep -qE '^[[:space:]]*permissions:' "$WORKFLOW"; then
+  fail 'workflow declares GitHub-only permissions that Forgejo ignores'
+fi
 grep -qF 'scripts/ci/verify/verify-workspace-image.sh' <<<"$workspace_job" ||
   fail 'workflow does not invoke the image verifier'
 if grep -Eq 'docker (buildx )?build.*--push|docker push' "$VERIFY"; then

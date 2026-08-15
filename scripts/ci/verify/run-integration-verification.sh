@@ -30,7 +30,20 @@ NATS_CLIENT_PORT=$((PORT_BASE + 6))
 NATS_MONITOR_PORT=$((PORT_BASE + 7))
 ORCHESTRATION_KUBE_STUB_PORT=$((PORT_BASE + 8))
 TEMPORAL_HOST_PORT="127.0.0.1:${TEMPORAL_PORT}"
-NATS_URL="nats://127.0.0.1:${NATS_CLIENT_PORT}"
+INTEGRATION_DOCKER_NETWORK="${INTEGRATION_DOCKER_NETWORK:-}"
+INTEGRATION_NATS_HOST="${INTEGRATION_NATS_HOST:-codewire-integration-nats}"
+if [ -n "$INTEGRATION_DOCKER_NETWORK" ]; then
+  if [[ "$INTEGRATION_DOCKER_NETWORK" =~ [^A-Za-z0-9_.-] ]] \
+      || [[ "$INTEGRATION_NATS_HOST" =~ [^A-Za-z0-9_.-] ]]; then
+    echo "::error::invalid integration Docker network or NATS alias" >&2
+    exit 2
+  fi
+  NATS_URL="nats://${INTEGRATION_NATS_HOST}:4222"
+  NATS_MONITOR_URL="http://${INTEGRATION_NATS_HOST}:8222/healthz"
+else
+  NATS_URL="nats://127.0.0.1:${NATS_CLIENT_PORT}"
+  NATS_MONITOR_URL="http://127.0.0.1:${NATS_MONITOR_PORT}/healthz"
+fi
 TEMPORAL_CLI_VERSION="${TEMPORAL_CLI_VERSION:-1.5.0}"
 NATS_CONTAINER="codewire-product-nats-${GITHUB_RUN_ID:-local-$$}"
 IDP_SIGNING_KEK_DIR=""
@@ -272,15 +285,26 @@ start_nats() {
   if [ -f "$RUN_DIR/nats.started" ]; then
     return
   fi
+  local docker_network_args=()
+  if [ -n "$INTEGRATION_DOCKER_NETWORK" ]; then
+    docker_network_args=(
+      --network "$INTEGRATION_DOCKER_NETWORK"
+      --network-alias "$INTEGRATION_NATS_HOST"
+    )
+  else
+    docker_network_args=(
+      -p "127.0.0.1:${NATS_CLIENT_PORT}:4222"
+      -p "127.0.0.1:${NATS_MONITOR_PORT}:8222"
+    )
+  fi
   docker rm -f "$NATS_CONTAINER" >/dev/null 2>&1 || true
   docker run -d --name "$NATS_CONTAINER" --pids-limit 2048 \
-    -p "127.0.0.1:${NATS_CLIENT_PORT}:4222" \
-    -p "127.0.0.1:${NATS_MONITOR_PORT}:8222" \
+    "${docker_network_args[@]}" \
     nats:2.12-alpine -js -m 8222 > "$RUN_DIR/nats.container"
   touch "$RUN_DIR/nats.started"
   local _
   for _ in $(seq 1 30); do
-    if curl -fsS "http://127.0.0.1:${NATS_MONITOR_PORT}/healthz" >/dev/null 2>&1; then
+    if curl -fsS "$NATS_MONITOR_URL" >/dev/null 2>&1; then
       log "NATS ready"
       return
     fi
@@ -756,19 +780,37 @@ run_services() {
   return 0
 }
 
+filter_service_selection() {
+  local token filtered='|valid:v3|'
+  for token in "$@"; do
+    selected "$token" && filtered+="${token}|"
+  done
+  printf '%scomplete|\n' "$filtered"
+}
+
 case "$MODE" in
   database)
     integration_postgres_configure
     log "PostgreSQL source=${INTEGRATION_POSTGRES_SOURCE}"
     run_database
     ;;
-  services)
+  services-control)
     integration_postgres_configure
     log "PostgreSQL source=${INTEGRATION_POSTGRES_SOURCE}"
+    SELECTION="$(filter_service_selection \
+      service_apikey_smoke service_idp service_coordinator service_billing \
+      service_connectcore service_temporal)"
+    run_services
+    ;;
+  services-runtime)
+    integration_postgres_configure
+    log "PostgreSQL source=${INTEGRATION_POSTGRES_SOURCE}"
+    SELECTION="$(filter_service_selection \
+      service_orchestration service_nats service_temporal)"
     run_services
     ;;
   *)
-    echo "usage: run-integration-verification.sh database|services" >&2
+    echo "usage: run-integration-verification.sh database|services-control|services-runtime" >&2
     exit 2
     ;;
 esac

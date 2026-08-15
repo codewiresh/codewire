@@ -31,14 +31,15 @@ while [[ $# -gt 0 ]]; do
 done
 ROOT="$(cd "$ROOT" && pwd)"
 
-readonly TOOLCHAIN_ACTION='dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b'
+readonly TOOLCHAIN_ACTION='https://forgejo.example.invalid/noel/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b'
+readonly SEALED_TOOLCHAIN_STEP='name: Verify sealed Rust toolchain'
 # These are matched literally against Gitea workflow syntax.
 # shellcheck disable=SC2016
 readonly CI_RUST_CARGO_HOME='${{ github.workspace }}/target/ci-rust-cargo-home'
 # shellcheck disable=SC2016
 readonly CI_CARGO_CAPACITY_CHECK='scripts/ci/setup/assert-cargo-cache-capacity.sh "$CARGO_HOME"'
 readonly -a PINNED_WORKFLOWS=(
-  '.gitea/workflows/ci.yaml:6'
+  '.gitea/workflows/ci.yaml:8'
   '.gitea/workflows/claude-e2e.yaml:1'
   '.gitea/workflows/cli-release.yaml:1'
   '.gitea/workflows/connect-apikey-smoke.yaml:1'
@@ -137,13 +138,13 @@ done
 for entry in "${PINNED_WORKFLOWS[@]}"; do
   workflow="${entry%:*}"
   expected_count="${entry##*:}"
-  action_count="$(grep -Fc "uses: $TOOLCHAIN_ACTION" "$ROOT/$workflow" || true)"
-  pin_count="$(grep -Ec "^[[:space:]]+toolchain:[[:space:]]+$channel$" "$ROOT/$workflow" || true)"
-  [[ "$action_count" -eq "$expected_count" && "$pin_count" -eq "$expected_count" ]] ||
-    die "$workflow action/toolchain pin drift (actions=$action_count pins=$pin_count expected=$expected_count)"
+  assertion_count="$(grep -Fc "$SEALED_TOOLCHAIN_STEP" "$ROOT/$workflow" || true)"
+  action_count="$(grep -Fc 'rust-toolchain@' "$ROOT/$workflow" || true)"
+  [[ "$assertion_count" -eq "$expected_count" && "$action_count" -eq 0 ]] ||
+    die "$workflow sealed toolchain drift (assertions=$assertion_count actions=$action_count expected=$expected_count)"
 done
 
-rust_transport_block="$(sed -n '/^  rust-transport:/,/^  database-services:/p' \
+rust_transport_block="$(sed -n '/^  rust-transport:/,/^  database:/p' \
   "$ROOT/.gitea/workflows/ci.yaml")"
 [[ "$(grep -Fxc "      CARGO_HOME: $CI_RUST_CARGO_HOME" <<<"$rust_transport_block" || true)" -eq 1 ]] ||
   die 'primary Rust CI job must isolate CARGO_HOME on the job workspace'
@@ -180,10 +181,17 @@ for dockerfile in "${SHIPPED_RUST_DOCKERFILES[@]}"; do
 done
 [[ "$(grep -Fc "FROM rust:${channel}-slim-bookworm@sha256:" "$ROOT/$WORKSPACE_DOCKERFILE" || true)" -eq 1 ]] ||
   die "workspace build-stage compiler differs from $channel"
-[[ "$(grep -Fc -- "--default-toolchain $channel" "$ROOT/$WORKSPACE_DOCKERFILE" || true)" -eq 1 ]] ||
-  die "workspace user toolchain differs from $channel"
+[[ "$(grep -Fxc "RUN rustup component add --toolchain ${channel}-x86_64-unknown-linux-gnu rustfmt clippy" "$ROOT/$WORKSPACE_DOCKERFILE" || true)" -eq 1 ]] ||
+  die "workspace build stage does not select exact $channel rustfmt and clippy components"
+[[ "$(grep -Fxc 'COPY --from=cw-builder --chown=codewire:codewire /usr/local/cargo/ /home/codewire/.cargo/' "$ROOT/$WORKSPACE_DOCKERFILE" || true)" -eq 1 ]] ||
+  die "workspace user Cargo home does not come from the exact $channel build stage"
+[[ "$(grep -Fxc 'COPY --from=cw-builder --chown=codewire:codewire /usr/local/rustup/ /home/codewire/.rustup/' "$ROOT/$WORKSPACE_DOCKERFILE" || true)" -eq 1 ]] ||
+  die "workspace user Rustup home does not come from the exact $channel build stage"
+if grep -Fq 'https://sh.rustup.rs' "$ROOT/$WORKSPACE_DOCKERFILE"; then
+  die 'workspace user toolchain must not use the mutable Rustup network installer'
+fi
 
-printf '[rust-toolchain] exact Rust %s baseline: OK (%s crate manifests, %s primary action sites, %s shipped builders)\n' \
+printf '[rust-toolchain] exact Rust %s baseline: OK (%s crate manifests, %s sealed runner assertions, %s shipped builders)\n' \
   "$channel" \
   "$(find "$ROOT/crates" -mindepth 2 -maxdepth 2 -name Cargo.toml | wc -l)" \
   "$(printf '%s\n' "${PINNED_WORKFLOWS[@]}" | awk -F: '{ total += $NF } END { print total + 0 }')" \

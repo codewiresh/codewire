@@ -16,6 +16,7 @@ run_integrated_kind_suite() {
   require_tool kubectl
   require_tool openssl
   require_tool psql
+  require_tool python3
   require_tool ssh-keygen
   require_tool ssh-keyscan
 
@@ -27,8 +28,11 @@ run_integrated_kind_suite() {
   trap cleanup EXIT
 
   ingress_path_drift_check
-  create_cluster
+  # Cold image and smoke-binary compilation must not compete with an idle
+  # nested control plane. Provision Kind only when every host-side build input
+  # is ready, then prove the API settles between every large image import.
   build_images_and_smokes
+  create_cluster
   load_images_into_kind
   deploy_overlay
   host_key_authorization_smoke
