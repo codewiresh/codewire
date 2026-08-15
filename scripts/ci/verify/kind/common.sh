@@ -52,11 +52,17 @@ fi
 if [ -z "${KIND_INGRESS_CERTGEN_IMAGE+x}" ]; then
   KIND_INGRESS_CERTGEN_IMAGE=''
 fi
+if [ -z "${KIND_AGENT_SANDBOX_IMAGE+x}" ]; then
+  KIND_AGENT_SANDBOX_IMAGE=''
+fi
 if [ -z "${APPROVED_KIND_INGRESS_CONTROLLER_IMAGE+x}" ]; then
   APPROVED_KIND_INGRESS_CONTROLLER_IMAGE='nexus-system-cluster.example.invalid/oci-approved/ingress-nginx/controller@sha256:5c2a1b6c03c4d18ecf14685d21a32bf6763a022f6f8cc07e9578f6cd5eca6180'
 fi
 if [ -z "${APPROVED_KIND_INGRESS_CERTGEN_IMAGE+x}" ]; then
   APPROVED_KIND_INGRESS_CERTGEN_IMAGE='nexus-system-cluster.example.invalid/oci-approved/ingress-nginx/kube-webhook-certgen@sha256:334191231352856e1ec0c3e50f966edb59ec94a51906453d09f5820789e8b053'
+fi
+if [ -z "${APPROVED_KIND_AGENT_SANDBOX_IMAGE+x}" ]; then
+  APPROVED_KIND_AGENT_SANDBOX_IMAGE='nexus-system-cluster.example.invalid/oci-approved/codewire/agent-sandbox-controller@sha256:6081ae66b4134ebc6b170d965741b8dae09442ec74563b6c1ac999c366dac125'
 fi
 if [ -z "${KIND_INGRESS_CONTROLLER_LOCAL_IMAGE+x}" ]; then
   KIND_INGRESS_CONTROLLER_LOCAL_IMAGE='localhost/codewire-ci/ingress-nginx-controller:verified-5c2a1b6c03c4d18ecf14685d21a32bf6763a022f6f8cc07e9578f6cd5eca6180'
@@ -64,10 +70,14 @@ fi
 if [ -z "${KIND_INGRESS_CERTGEN_LOCAL_IMAGE+x}" ]; then
   KIND_INGRESS_CERTGEN_LOCAL_IMAGE='localhost/codewire-ci/ingress-kube-webhook-certgen:verified-334191231352856e1ec0c3e50f966edb59ec94a51906453d09f5820789e8b053'
 fi
+if [ -z "${KIND_AGENT_SANDBOX_LOCAL_IMAGE+x}" ]; then
+  KIND_AGENT_SANDBOX_LOCAL_IMAGE='localhost/codewire-ci/agent-sandbox-controller:verified-6081ae66b4134ebc6b170d965741b8dae09442ec74563b6c1ac999c366dac125'
+fi
 readonly KIND_WORKSPACE_IMAGE KIND_DIND_IMAGE \
-  KIND_INGRESS_CONTROLLER_IMAGE KIND_INGRESS_CERTGEN_IMAGE \
+  KIND_INGRESS_CONTROLLER_IMAGE KIND_INGRESS_CERTGEN_IMAGE KIND_AGENT_SANDBOX_IMAGE \
   APPROVED_KIND_INGRESS_CONTROLLER_IMAGE APPROVED_KIND_INGRESS_CERTGEN_IMAGE \
-  KIND_INGRESS_CONTROLLER_LOCAL_IMAGE KIND_INGRESS_CERTGEN_LOCAL_IMAGE
+  APPROVED_KIND_AGENT_SANDBOX_IMAGE KIND_INGRESS_CONTROLLER_LOCAL_IMAGE \
+  KIND_INGRESS_CERTGEN_LOCAL_IMAGE KIND_AGENT_SANDBOX_LOCAL_IMAGE
 
 log() {
   printf '[kind-e2e] %s\n' "$*"
@@ -629,14 +639,16 @@ configure_remote_dind_kind_network() {
   log "remote DinD Kind API and host-port topology configured"
 }
 
-validate_sealed_kind_ingress_images() {
+validate_sealed_kind_platform_images() {
   if [ -z "$KIND_INGRESS_CONTROLLER_IMAGE" ] \
-      && [ -z "$KIND_INGRESS_CERTGEN_IMAGE" ]; then
+      && [ -z "$KIND_INGRESS_CERTGEN_IMAGE" ] \
+      && [ -z "$KIND_AGENT_SANDBOX_IMAGE" ]; then
     return 1
   fi
   if [ "$KIND_INGRESS_CONTROLLER_IMAGE" != "$APPROVED_KIND_INGRESS_CONTROLLER_IMAGE" ] \
-      || [ "$KIND_INGRESS_CERTGEN_IMAGE" != "$APPROVED_KIND_INGRESS_CERTGEN_IMAGE" ]; then
-    echo "::error::Kind ingress mirror inputs must match the two approved Nexus platform digests"
+      || [ "$KIND_INGRESS_CERTGEN_IMAGE" != "$APPROVED_KIND_INGRESS_CERTGEN_IMAGE" ] \
+      || [ "$KIND_AGENT_SANDBOX_IMAGE" != "$APPROVED_KIND_AGENT_SANDBOX_IMAGE" ]; then
+    echo "::error::Kind platform mirror inputs must match the three approved Nexus digests"
     return 2
   fi
 }
@@ -658,18 +670,19 @@ load_images_into_kind() {
     wait_for_kind_api_after_image_load
   done
 
-  if validate_sealed_kind_ingress_images; then
+  if validate_sealed_kind_platform_images; then
     # The trusted runner boundary pulls these images from Nexus before any
     # repository-controlled workflow starts. This process receives neither a
     # registry credential nor public-registry egress; it can only prove and
-    # side-load the two exact local references into the disposable Kind node.
+    # side-load the three exact local references into the disposable Kind node.
     for sealed in \
         "$KIND_INGRESS_CONTROLLER_IMAGE|$KIND_INGRESS_CONTROLLER_LOCAL_IMAGE" \
-        "$KIND_INGRESS_CERTGEN_IMAGE|$KIND_INGRESS_CERTGEN_LOCAL_IMAGE"; do
+        "$KIND_INGRESS_CERTGEN_IMAGE|$KIND_INGRESS_CERTGEN_LOCAL_IMAGE" \
+        "$KIND_AGENT_SANDBOX_IMAGE|$KIND_AGENT_SANDBOX_LOCAL_IMAGE"; do
       source="${sealed%%|*}"
       alias="${sealed#*|}"
       if ! docker image inspect "$source" >/dev/null 2>&1; then
-        echo "::error::approved Kind ingress image was not preloaded by the runner boundary: ${source}"
+        echo "::error::approved Kind platform image was not preloaded by the runner boundary: ${source}"
         return 1
       fi
       # A digest-only Docker image has no RepoTag in the archive consumed by
@@ -678,11 +691,11 @@ load_images_into_kind() {
       # side-loaded name with imagePullPolicy Never. No registry credential is
       # copied into the nested cluster.
       docker image tag "$source" "$alias"
-      log "loading approved ingress image into kind"
+      log "loading approved platform image into kind"
       kind load docker-image --name "$KIND_CLUSTER_NAME" "$alias"
       wait_for_kind_api_after_image_load
     done
-  elif [ -n "${KIND_INGRESS_CONTROLLER_IMAGE}${KIND_INGRESS_CERTGEN_IMAGE}" ]; then
+  elif [ -n "${KIND_INGRESS_CONTROLLER_IMAGE}${KIND_INGRESS_CERTGEN_IMAGE}${KIND_AGENT_SANDBOX_IMAGE}" ]; then
     return 1
   fi
 }
@@ -691,7 +704,7 @@ render_ingress_manifest() {
   local source="$ROOT/tests/e2e/kind/vendor/ingress-nginx-deploy.yaml"
   local rendered="$RUN_DIR/ingress-nginx-deploy.yaml"
 
-  if validate_sealed_kind_ingress_images; then
+  if validate_sealed_kind_platform_images; then
     python3 - "$source" "$rendered" \
       "$KIND_INGRESS_CONTROLLER_LOCAL_IMAGE" "$KIND_INGRESS_CERTGEN_LOCAL_IMAGE" <<'PY'
 from pathlib import Path
@@ -715,11 +728,45 @@ for old, (new, expected_count) in replacements.items():
 Path(rendered).write_text(text)
 PY
     printf '%s\n' "$rendered"
-  elif [ -n "${KIND_INGRESS_CONTROLLER_IMAGE}${KIND_INGRESS_CERTGEN_IMAGE}" ]; then
+  elif [ -n "${KIND_INGRESS_CONTROLLER_IMAGE}${KIND_INGRESS_CERTGEN_IMAGE}${KIND_AGENT_SANDBOX_IMAGE}" ]; then
     return 1
   else
     printf '%s\n' "$source"
   fi
+}
+
+render_agent_sandbox_manifest() {
+  local source="$ROOT/deployments/k8s/agent-sandbox/base"
+  local rendered="$RUN_DIR/agent-sandbox-deploy.yaml"
+
+  kubectl kustomize "$source" >"$rendered"
+  if validate_sealed_kind_platform_images; then
+    python3 - "$rendered" "$KIND_AGENT_SANDBOX_LOCAL_IMAGE" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+rendered, local_image = sys.argv[1:]
+path = Path(rendered)
+text = path.read_text()
+public_image = "ghcr.io/noeljackson/agent-sandbox-controller@sha256:555146af2337dd5d8baf0844d7f5de9a3cd8fc7b032b85756ae244bc2583fb41"
+pattern = re.compile(rf"(?m)^(?P<indent>[ ]*)image: {re.escape(public_image)}$")
+
+def replace(match: re.Match[str]) -> str:
+    indent = match.group("indent")
+    return f"{indent}image: {local_image}\n{indent}imagePullPolicy: Never"
+
+text, count = pattern.subn(replace, text)
+if count != 1:
+    raise SystemExit(
+        f"agent-sandbox image occurrence mismatch: expected 1, got {count}"
+    )
+path.write_text(text)
+PY
+  elif [ -n "${KIND_INGRESS_CONTROLLER_IMAGE}${KIND_INGRESS_CERTGEN_IMAGE}${KIND_AGENT_SANDBOX_IMAGE}" ]; then
+    return 1
+  fi
+  printf '%s\n' "$rendered"
 }
 
 capture_kind_control_plane_state() {
@@ -2410,7 +2457,7 @@ environment_daemon_proxy_smoke() {
 
 deploy_agent_sandbox() {
   log "deploying agent-sandbox controller and CRDs"
-  kubectl_apply --validate=false -k "$ROOT/deployments/k8s/agent-sandbox/base"
+  kubectl_apply --validate=false -f "$(render_agent_sandbox_manifest)"
   kubectl wait --for=condition=established --timeout=60s \
     crd/sandboxclaims.extensions.agents.x-k8s.io
   kubectl -n agent-sandbox-system rollout status deploy/agent-sandbox-controller --timeout=180s

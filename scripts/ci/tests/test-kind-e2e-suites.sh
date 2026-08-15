@@ -198,11 +198,14 @@ kind:load docker-image --name ${KIND_CLUSTER_NAME} codewire-gateway:e2e
 wait-api
 EOF
 if [ -n "${KIND_INGRESS_CONTROLLER_IMAGE:-}" ] \
-    && [ -n "${KIND_INGRESS_CERTGEN_IMAGE:-}" ]; then
+    && [ -n "${KIND_INGRESS_CERTGEN_IMAGE:-}" ] \
+    && [ -n "${KIND_AGENT_SANDBOX_IMAGE:-}" ]; then
   cat >>"$FIXTURE/want-image-load-order" <<EOF
 kind:load docker-image --name ${KIND_CLUSTER_NAME} ${KIND_INGRESS_CONTROLLER_LOCAL_IMAGE}
 wait-api
 kind:load docker-image --name ${KIND_CLUSTER_NAME} ${KIND_INGRESS_CERTGEN_LOCAL_IMAGE}
+wait-api
+kind:load docker-image --name ${KIND_CLUSTER_NAME} ${KIND_AGENT_SANDBOX_LOCAL_IMAGE}
 wait-api
 EOF
 fi
@@ -211,13 +214,14 @@ cmp -s "$FIXTURE/want-image-load-order" "$CALLS" || {
   fail 'Kind image imports are not separated by API recovery gates'
 }
 
-# Forgejo CI names only the two approved Nexus platform manifests. They must
+# Forgejo CI names only the three approved Nexus platform manifests. They must
 # already exist in the private DinD store, are side-loaded after product
 # images, and replace every pinned public reference in a disposable render.
 : >"$CALLS"
 env \
   KIND_INGRESS_CONTROLLER_IMAGE='nexus-system-cluster.example.invalid/oci-approved/ingress-nginx/controller@sha256:5c2a1b6c03c4d18ecf14685d21a32bf6763a022f6f8cc07e9578f6cd5eca6180' \
   KIND_INGRESS_CERTGEN_IMAGE='nexus-system-cluster.example.invalid/oci-approved/ingress-nginx/kube-webhook-certgen@sha256:334191231352856e1ec0c3e50f966edb59ec94a51906453d09f5820789e8b053' \
+  KIND_AGENT_SANDBOX_IMAGE='nexus-system-cluster.example.invalid/oci-approved/codewire/agent-sandbox-controller@sha256:6081ae66b4134ebc6b170d965741b8dae09442ec74563b6c1ac999c366dac125' \
   ROOT="$ROOT" COMMON="$COMMON" CALLS="$CALLS" bash -seu <<'BASH'
   fail() { printf "[sealed-kind-test] ERROR: %s\n" "$*" >&2; exit 1; }
   record() { printf "%s\n" "$1" >>"$CALLS"; }
@@ -235,6 +239,7 @@ env \
   log() { :; }
   load_images_into_kind
   rendered="$(render_ingress_manifest)"
+  agent_rendered="$(render_agent_sandbox_manifest)"
   [ "$(grep -Fc "$KIND_INGRESS_CONTROLLER_LOCAL_IMAGE" "$rendered")" -eq 1 ] ||
     fail 'sealed ingress render does not contain the local controller once'
   [ "$(grep -Fc "$KIND_INGRESS_CERTGEN_LOCAL_IMAGE" "$rendered")" -eq 2 ] ||
@@ -247,7 +252,39 @@ env \
   if grep -Fq 'registry.k8s.io/ingress-nginx/' "$rendered"; then
     fail 'sealed ingress render retained a public registry image'
   fi
+  [ "$(grep -Fc "$KIND_AGENT_SANDBOX_LOCAL_IMAGE" "$agent_rendered")" -eq 1 ] ||
+    fail 'sealed agent-sandbox render does not contain the local controller once'
+  [ "$(grep -Fc 'imagePullPolicy: Never' "$agent_rendered")" -eq 1 ] ||
+    fail 'sealed agent-sandbox render does not prohibit registry pulls'
+  if grep -Fq 'nexus-system-cluster.example.invalid/oci-approved/codewire/' "$agent_rendered"; then
+    fail 'sealed agent-sandbox render retained a private registry reference'
+  fi
+  if grep -Fq 'ghcr.io/noeljackson/agent-sandbox-controller' "$agent_rendered"; then
+    fail 'sealed agent-sandbox render retained the public registry image'
+  fi
 BASH
+
+# A partial or substituted sealed-image tuple must fail before any nested
+# cluster action. The public source remains pinned by its multi-arch index,
+# while the approved runner input is the independently verified amd64 child.
+expect_failure partial-platform-images env \
+  KIND_INGRESS_CONTROLLER_IMAGE='nexus-system-cluster.example.invalid/oci-approved/ingress-nginx/controller@sha256:5c2a1b6c03c4d18ecf14685d21a32bf6763a022f6f8cc07e9578f6cd5eca6180' \
+  KIND_INGRESS_CERTGEN_IMAGE='nexus-system-cluster.example.invalid/oci-approved/ingress-nginx/kube-webhook-certgen@sha256:334191231352856e1ec0c3e50f966edb59ec94a51906453d09f5820789e8b053' \
+  KIND_AGENT_SANDBOX_IMAGE='' \
+  bash -seuc 'source "$1"; validate_sealed_kind_platform_images' _ "$COMMON"
+grep -Fq 'Kind platform mirror inputs must match the three approved Nexus digests' \
+  "$FIXTURE/partial-platform-images.out" ||
+  fail 'partial sealed platform tuple did not explain its rejection'
+
+expect_failure substituted-agent-image env \
+  KIND_INGRESS_CONTROLLER_IMAGE='nexus-system-cluster.example.invalid/oci-approved/ingress-nginx/controller@sha256:5c2a1b6c03c4d18ecf14685d21a32bf6763a022f6f8cc07e9578f6cd5eca6180' \
+  KIND_INGRESS_CERTGEN_IMAGE='nexus-system-cluster.example.invalid/oci-approved/ingress-nginx/kube-webhook-certgen@sha256:334191231352856e1ec0c3e50f966edb59ec94a51906453d09f5820789e8b053' \
+  KIND_AGENT_SANDBOX_IMAGE='nexus-system-cluster.example.invalid/oci-approved/codewire/agent-sandbox-controller@sha256:555146af2337dd5d8baf0844d7f5de9a3cd8fc7b032b85756ae244bc2583fb41' \
+  bash -seuc 'source "$1"; validate_sealed_kind_platform_images' _ "$COMMON"
+grep -Fq 'Kind platform mirror inputs must match the three approved Nexus digests' \
+  "$FIXTURE/substituted-agent-image.out" ||
+  fail 'agent-sandbox index substitution did not explain its rejection'
+
 grep -Fq "docker:image inspect nexus-system-cluster.example.invalid/oci-approved/ingress-nginx/controller@sha256:5c2a1b6c03c4d18ecf14685d21a32bf6763a022f6f8cc07e9578f6cd5eca6180" "$CALLS" ||
   fail 'sealed controller was not proven in the runner-preloaded Docker store'
 grep -Fq "docker:image inspect nexus-system-cluster.example.invalid/oci-approved/ingress-nginx/kube-webhook-certgen@sha256:334191231352856e1ec0c3e50f966edb59ec94a51906453d09f5820789e8b053" "$CALLS" ||
@@ -256,11 +293,17 @@ grep -Fq "docker:image tag nexus-system-cluster.example.invalid/oci-approved/ing
   fail 'sealed controller was not assigned its disposable Kind reference'
 grep -Fq "docker:image tag nexus-system-cluster.example.invalid/oci-approved/ingress-nginx/kube-webhook-certgen@sha256:334191231352856e1ec0c3e50f966edb59ec94a51906453d09f5820789e8b053 localhost/codewire-ci/ingress-kube-webhook-certgen:verified-334191231352856e1ec0c3e50f966edb59ec94a51906453d09f5820789e8b053" "$CALLS" ||
   fail 'sealed certgen was not assigned its disposable Kind reference'
+grep -Fq "docker:image inspect nexus-system-cluster.example.invalid/oci-approved/codewire/agent-sandbox-controller@sha256:6081ae66b4134ebc6b170d965741b8dae09442ec74563b6c1ac999c366dac125" "$CALLS" ||
+  fail 'sealed agent-sandbox controller was not proven in the runner-preloaded Docker store'
+grep -Fq "docker:image tag nexus-system-cluster.example.invalid/oci-approved/codewire/agent-sandbox-controller@sha256:6081ae66b4134ebc6b170d965741b8dae09442ec74563b6c1ac999c366dac125 localhost/codewire-ci/agent-sandbox-controller:verified-6081ae66b4134ebc6b170d965741b8dae09442ec74563b6c1ac999c366dac125" "$CALLS" ||
+  fail 'sealed agent-sandbox controller was not assigned its disposable Kind reference'
 
 grep -Fq 'KIND_INGRESS_CONTROLLER_IMAGE: nexus-system-cluster.example.invalid/oci-approved/ingress-nginx/controller@sha256:5c2a1b6c03c4d18ecf14685d21a32bf6763a022f6f8cc07e9578f6cd5eca6180' \
   "$ROOT/.gitea/workflows/ci.yaml" || fail 'Forgejo CI does not select the approved ingress controller'
 grep -Fq 'KIND_INGRESS_CERTGEN_IMAGE: nexus-system-cluster.example.invalid/oci-approved/ingress-nginx/kube-webhook-certgen@sha256:334191231352856e1ec0c3e50f966edb59ec94a51906453d09f5820789e8b053' \
   "$ROOT/.gitea/workflows/ci.yaml" || fail 'Forgejo CI does not select the approved ingress cert generator'
+grep -Fq 'KIND_AGENT_SANDBOX_IMAGE: nexus-system-cluster.example.invalid/oci-approved/codewire/agent-sandbox-controller@sha256:6081ae66b4134ebc6b170d965741b8dae09442ec74563b6c1ac999c366dac125' \
+  "$ROOT/.gitea/workflows/ci.yaml" || fail 'Forgejo CI does not select the approved agent-sandbox controller'
 
 # Restore the production API recovery implementation after the load-order spy.
 # shellcheck source=scripts/ci/verify/kind/common.sh
