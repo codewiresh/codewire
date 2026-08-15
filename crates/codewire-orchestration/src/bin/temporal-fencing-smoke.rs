@@ -215,6 +215,7 @@ mod enabled {
         database_url: String,
         temporal_address: String,
         orchestration_url: String,
+        workspace_image: String,
         pool: PgPool,
         temporal: Client,
         sandbox: SandboxClient,
@@ -230,6 +231,8 @@ mod enabled {
                 .unwrap_or_else(|_| "http://127.0.0.1:7233".to_string());
             let orchestration_url = std::env::var("SMOKE_ORCHESTRATION_URL")
                 .unwrap_or_else(|_| "http://127.0.0.1:8084".to_string());
+            let workspace_image = std::env::var("SMOKE_WORKSPACE_IMAGE")
+                .unwrap_or_else(|_| CANONICAL_WORKSPACE_RUNTIME_IMAGE.to_string());
             let pool = PgPool::connect(&database_url).await?;
             let connection = Connection::connect(
                 ConnectionOptions::new(url::Url::parse(&temporal_address)?).build(),
@@ -250,6 +253,7 @@ mod enabled {
                 database_url,
                 temporal_address,
                 orchestration_url,
+                workspace_image,
                 pool,
                 temporal,
                 sandbox: SandboxClient::new(kube, SANDBOX_NAMESPACE),
@@ -387,9 +391,10 @@ mod enabled {
             sqlx::query(
                 "INSERT INTO sandbox_template_config
                         (preset_id, image_ref, sandbox_template_name, warm_pool_size, persistent_storage)
-                 VALUES ($1, 'ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467', 'wi-f-kind', 0, true)",
+                 VALUES ($1, $2, 'wi-f-kind', 0, true)",
             )
             .bind(&preset_id)
+            .bind(&self.workspace_image)
             .execute(&self.pool)
             .await?;
             sqlx::query(
@@ -1050,7 +1055,7 @@ mod enabled {
             let backend = load_backend_row(&self.pool, &env_id).await?;
             let template_name = environment_per_env_template_name(
                 &SandboxWorkerCfg::default(),
-                CANONICAL_WORKSPACE_RUNTIME_IMAGE,
+                &self.workspace_image,
                 "wi-f-kind",
                 &environment,
                 &env_id,
@@ -1350,7 +1355,7 @@ mod enabled {
             let environment_row = load_environment(&self.pool, &env_id).await?;
             let template_name = environment_per_env_template_name(
                 &SandboxWorkerCfg::default(),
-                CANONICAL_WORKSPACE_RUNTIME_IMAGE,
+                &self.workspace_image,
                 "wi-f-kind",
                 &environment_row,
                 &env_id,

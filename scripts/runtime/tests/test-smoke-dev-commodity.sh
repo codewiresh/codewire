@@ -524,6 +524,102 @@ run_packet_diagnostic_phase_order_case() {
     fail "packet diagnostic phases do not execute gateway readiness before the doctor"
 }
 
+write_admin_oauth_fixture() {
+  local config_dir="$1"
+
+  mkdir -p "$config_dir"
+  chmod 0700 "$config_dir"
+  printf '{}\n' >"$config_dir/config.json"
+  printf '{}\n' >"$config_dir/credentials.json"
+  chmod 0600 "$config_dir/config.json" "$config_dir/credentials.json"
+}
+
+write_admin_oauth_cw_fixture() {
+  local cw_bin="$1"
+
+  printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'set -euo pipefail' \
+    'case "$*" in' \
+    '*" whoami --output json")' \
+    '  printf '\''%s\n'\'' '\''{"id":"admin-id","email":"admin@example.com","email_verified":false,"is_admin":false}'\''' \
+    '  ;;' \
+    '*" org current")' \
+    '  printf '\''%s\n'\'' '\''ID: admin-org'\''' \
+    '  ;;' \
+    '*" env list --output json")' \
+    '  printf '\''%s\n'\'' '\''[]'\''' \
+    '  ;;' \
+    '*) exit 97 ;;' \
+    'esac' >"$cw_bin"
+  chmod +x "$cw_bin"
+}
+
+run_admin_oauth_contract_cases() {
+  local case_dir="$TEST_TMP/admin-oauth"
+  local config_dir="$case_dir/config"
+  local cw_bin="$case_dir/cw"
+  local error="$case_dir/error"
+
+  mkdir -p "$case_dir"
+  write_admin_oauth_fixture "$config_dir"
+  write_admin_oauth_cw_fixture "$cw_bin"
+
+  (
+    # shellcheck disable=SC1090 # Intentional dynamic source fixture.
+    source <(sed '$d' "$SMOKE")
+    export CODEWIRE_SERVER_URL="https://codewire-dev.example"
+    export EXPECTED_CODEWIRE_DEV_SERVER_URL="$CODEWIRE_SERVER_URL"
+    export CODEWIRE_ADMIN_OAUTH_CONFIG_DIR="$config_dir"
+    export EXPECTED_CODEWIRE_ADMIN_EMAIL="admin@example.com"
+    export SMOKE_AUTH_MODE="admin-oidc"
+    export SMOKE_TMP_PARENT="$case_dir/tmp-success"
+    export CW_BIN="$cw_bin"
+    unset CODEWIRE_API_KEY CODEWIRE_DEV_SMOKE_API_KEY
+    prepare_cli
+    [[ "$CW_CONFIG_DIR" == "$config_dir" ]]
+    [[ -z "${CODEWIRE_API_KEY+x}" ]]
+  ) >/dev/null 2>"$error" || {
+    sed 's/[[:cntrl:]]//g' "$error" >&2 || true
+    fail "valid saved admin OIDC contract was rejected"
+  }
+
+  if (
+    # shellcheck disable=SC1090 # Intentional dynamic source fixture.
+    source <(sed '$d' "$SMOKE")
+    export CODEWIRE_SERVER_URL="https://codewire-dev.example"
+    export EXPECTED_CODEWIRE_DEV_SERVER_URL="$CODEWIRE_SERVER_URL"
+    export CODEWIRE_ADMIN_OAUTH_CONFIG_DIR="$config_dir"
+    export SMOKE_AUTH_MODE="admin-oidc"
+    export SMOKE_TMP_PARENT="$case_dir/tmp-api-key"
+    export CW_BIN="$cw_bin"
+    export CODEWIRE_API_KEY="cw_forbidden"
+    prepare_cli
+  ) >/dev/null 2>"$error"; then
+    fail "admin OIDC mode accepted an inherited API key"
+  fi
+  grep -F -- '--admin-oidc refuses inherited API keys' "$error" >/dev/null || \
+    fail "admin OIDC inherited-key refusal was not explicit"
+
+  chmod 0644 "$config_dir/credentials.json"
+  if (
+    # shellcheck disable=SC1090 # Intentional dynamic source fixture.
+    source <(sed '$d' "$SMOKE")
+    export CODEWIRE_SERVER_URL="https://codewire-dev.example"
+    export EXPECTED_CODEWIRE_DEV_SERVER_URL="$CODEWIRE_SERVER_URL"
+    export CODEWIRE_ADMIN_OAUTH_CONFIG_DIR="$config_dir"
+    export SMOKE_AUTH_MODE="admin-oidc"
+    export SMOKE_TMP_PARENT="$case_dir/tmp-mode"
+    export CW_BIN="$cw_bin"
+    unset CODEWIRE_API_KEY CODEWIRE_DEV_SMOKE_API_KEY
+    prepare_cli
+  ) >/dev/null 2>"$error"; then
+    fail "admin OIDC mode accepted a non-private credential file"
+  fi
+  grep -F 'must be mode 0600' "$error" >/dev/null || \
+    fail "admin OIDC file-mode refusal was not explicit"
+}
+
 assert_static_contract
 run_safe_diagnostic_case
 run_safe_client_diagnostic_case
@@ -532,5 +628,6 @@ run_kubernetes_failure_artifact_case
 run_packet_header_summary_case
 run_packet_capture_startup_failure_case
 run_packet_diagnostic_phase_order_case
+run_admin_oauth_contract_cases
 
 printf 'dev commodity smoke safe diagnostic tests: OK\n'

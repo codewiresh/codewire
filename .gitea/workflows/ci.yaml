@@ -527,21 +527,41 @@ jobs:
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt == 'accepted' }}
         run: echo 'service control-plane content verification inherited from the exact tested PR-head tree'
 
-      - uses: https://forgejo.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - name: Resolve service control-plane scope
+        id: service-scope
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+        env:
+          VERIFICATION_SELECTION: ${{ needs.verification-selection.outputs.selection }}
+        run: |
+          set -euo pipefail
+          case "$VERIFICATION_SELECTION" in
+            *'|service_apikey_smoke|'*|*'|service_idp|'*|*'|service_coordinator|'*|*'|service_billing|'*|*'|service_connectcore|'*)
+              echo 'selected=true' >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo 'selected=false' >> "$GITHUB_OUTPUT"
+              ;;
+          esac
+
+      - name: Service control-plane integration not selected
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && steps.service-scope.outputs.selected != 'true' }}
+        run: echo 'service control-plane integration is unaffected'
+
+      - uses: https://forgejo.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && steps.service-scope.outputs.selected == 'true' }}
 
       - name: Verify sealed Rust toolchain
-        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|service_integration|') }}
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && steps.service-scope.outputs.selected == 'true' }}
         run: scripts/ci/setup/assert-ci-runner-image.sh
 
       - name: Verify integration tools
-        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|service_integration|') }}
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && steps.service-scope.outputs.selected == 'true' }}
         run: |
           set -euo pipefail
           scripts/ci/setup/assert-ci-runner-image.sh
 
       - name: Start integration Postgres
-        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|service_integration|') }}
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && steps.service-scope.outputs.selected == 'true' }}
         run: |
           set -euo pipefail
           container="codewire-integration-${GITHUB_RUN_ID:?}"
@@ -564,7 +584,7 @@ jobs:
           echo "INTEGRATION_DOCKER_NETWORK=${networks[0]}" >> "$GITHUB_ENV"
 
       - name: Wait for integration Postgres
-        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|service_integration|') }}
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && steps.service-scope.outputs.selected == 'true' }}
         env:
           PGPASSWORD: codewire
         run: |
@@ -583,13 +603,13 @@ jobs:
           exit 1
 
       - name: Run Service integration
-        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|service_integration|') }}
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && steps.service-scope.outputs.selected == 'true' }}
         env:
           VERIFICATION_SELECTION: ${{ needs.verification-selection.outputs.selection }}
         run: scripts/ci/verify/run-integration-verification.sh services-control
 
       - name: Stop integration Postgres
-        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && always() && contains(needs.verification-selection.outputs.selection, '|service_integration|') }}
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && always() && steps.service-scope.outputs.selected == 'true' }}
         run: docker rm -f "${POSTGRES_CONTAINER:-missing}" >/dev/null 2>&1 || true
 
   services-runtime:
@@ -605,21 +625,41 @@ jobs:
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt == 'accepted' }}
         run: echo 'service runtime-plane content verification inherited from the exact tested PR-head tree'
 
-      - uses: https://forgejo.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - name: Resolve service runtime-plane scope
+        id: service-scope
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+        env:
+          VERIFICATION_SELECTION: ${{ needs.verification-selection.outputs.selection }}
+        run: |
+          set -euo pipefail
+          case "$VERIFICATION_SELECTION" in
+            *'|service_orchestration|'*|*'|service_nats|'*)
+              echo 'selected=true' >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo 'selected=false' >> "$GITHUB_OUTPUT"
+              ;;
+          esac
+
+      - name: Service runtime-plane integration not selected
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && steps.service-scope.outputs.selected != 'true' }}
+        run: echo 'service runtime-plane integration is unaffected'
+
+      - uses: https://forgejo.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && steps.service-scope.outputs.selected == 'true' }}
 
       - name: Verify sealed Rust toolchain
-        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|service_integration|') }}
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && steps.service-scope.outputs.selected == 'true' }}
         run: scripts/ci/setup/assert-ci-runner-image.sh
 
       - name: Verify integration tools
-        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|service_integration|') }}
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && steps.service-scope.outputs.selected == 'true' }}
         run: |
           set -euo pipefail
           scripts/ci/setup/assert-ci-runner-image.sh
 
       - name: Start integration Postgres
-        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|service_integration|') }}
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && steps.service-scope.outputs.selected == 'true' }}
         run: |
           set -euo pipefail
           container="codewire-integration-${GITHUB_RUN_ID:?}"
@@ -642,7 +682,7 @@ jobs:
           echo "INTEGRATION_DOCKER_NETWORK=${networks[0]}" >> "$GITHUB_ENV"
 
       - name: Wait for integration Postgres
-        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|service_integration|') }}
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && steps.service-scope.outputs.selected == 'true' }}
         env:
           PGPASSWORD: codewire
         run: |
@@ -661,13 +701,13 @@ jobs:
           exit 1
 
       - name: Run Service integration
-        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|service_integration|') }}
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && steps.service-scope.outputs.selected == 'true' }}
         env:
           VERIFICATION_SELECTION: ${{ needs.verification-selection.outputs.selection }}
         run: scripts/ci/verify/run-integration-verification.sh services-runtime
 
       - name: Stop integration Postgres
-        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && always() && contains(needs.verification-selection.outputs.selection, '|service_integration|') }}
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && always() && steps.service-scope.outputs.selected == 'true' }}
         run: docker rm -f "${POSTGRES_CONTAINER:-missing}" >/dev/null 2>&1 || true
 
   edge-kind:
@@ -677,9 +717,11 @@ jobs:
     env:
       KIND_CLUSTER_NAME: codewire-e2e-ci-${{ github.run_id }}
       CODEWIRE_PLAYWRIGHT_SNAPSHOT_ENV: ubuntu24-cft145
-      KIND_INGRESS_CONTROLLER_IMAGE: nexus-system-cluster.example.invalid/oci-approved/ingress-nginx/controller@sha256:5c2a1b6c03c4d18ecf14685d21a32bf6763a022f6f8cc07e9578f6cd5eca6180
-      KIND_INGRESS_CERTGEN_IMAGE: nexus-system-cluster.example.invalid/oci-approved/ingress-nginx/kube-webhook-certgen@sha256:334191231352856e1ec0c3e50f966edb59ec94a51906453d09f5820789e8b053
-      KIND_AGENT_SANDBOX_IMAGE: nexus-system-cluster.example.invalid/oci-approved/codewire/agent-sandbox-controller@sha256:6081ae66b4134ebc6b170d965741b8dae09442ec74563b6c1ac999c366dac125
+      KIND_INGRESS_CONTROLLER_IMAGE: nexus.example.invalid/oci-approved/ingress-nginx/controller@sha256:5c2a1b6c03c4d18ecf14685d21a32bf6763a022f6f8cc07e9578f6cd5eca6180
+      KIND_INGRESS_CERTGEN_IMAGE: nexus.example.invalid/oci-approved/ingress-nginx/kube-webhook-certgen@sha256:334191231352856e1ec0c3e50f966edb59ec94a51906453d09f5820789e8b053
+      KIND_AGENT_SANDBOX_IMAGE: nexus.example.invalid/oci-approved/codewire/agent-sandbox-controller@sha256:6081ae66b4134ebc6b170d965741b8dae09442ec74563b6c1ac999c366dac125
+      KIND_WORKSPACE_IMAGE: nexus.example.invalid/oci-approved/codewire/workspace@sha256:cf91240f0706a5b3da81485fbf87d65973b18d4f1067f630bc5fd513b38d1510
+      KIND_DIND_IMAGE: nexus.example.invalid/oci-approved/docker/dind@sha256:66fd272fc375aad4c8fa06351c414e15bffe8cb015c171e1b8a8efe36a72cc1e
       CARGO_TARGET_DIR: ${{ github.workspace }}/target/ci-cache/kind-ci
     steps:
       - name: Reuse exact PR-head content verification

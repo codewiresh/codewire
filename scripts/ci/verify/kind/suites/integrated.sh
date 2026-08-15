@@ -11,6 +11,7 @@ run_integrated_kind_suite() {
   require_tool curl
   require_tool base64
   require_tool docker
+  require_tool flock
   require_tool jq
   require_tool kind
   require_tool kubectl
@@ -20,9 +21,14 @@ run_integrated_kind_suite() {
   require_tool ssh-keygen
   require_tool ssh-keyscan
 
-  # The dedicated CI runner has capacity 1 and gives each replica its own DinD
-  # sidecar. At job startup, every cluster with this exact CI-owned prefix on
-  # the current daemon is therefore stale, including a retry of this run.
+  # CI gives each replica a private DinD sidecar, while local worktrees share
+  # fixed host ports, image tags, and the default cluster name. Serialize the
+  # complete local transaction before reclaiming any CI-owned prior run.
+  acquire_kind_host_lock
+
+  # At job startup, every cluster with this CI-owned run-ID prefix on the
+  # current daemon is stale, including a retry of this run. The unsuffixed
+  # local default is handled narrowly by create_cluster after taking the lock.
   reclaim_cancelled_ci_clusters "$KIND_CONFIG"
 
   trap cleanup EXIT

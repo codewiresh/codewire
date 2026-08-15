@@ -1137,6 +1137,15 @@ mod tests {
         assert_ne!(warm_pool_revision_hash(&opts2), h1);
 
         let mut changed = warm_cfg("isol8");
+        changed.warm_pool_workspace_image = "localhost/codewire-ci/workspace:verified".into();
+        let opts2 = warm_pool_template_opts(&changed, &default_profile());
+        assert_eq!(
+            opts2.image, "localhost/codewire-ci/workspace:verified",
+            "the deployment-selected warm-pool image must reach the rendered template"
+        );
+        assert_ne!(warm_pool_revision_hash(&opts2), h1);
+
+        let mut changed = warm_cfg("isol8");
         changed.dind_image = "docker.io/library/docker:29.7.0-dind@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into();
         let opts2 = warm_pool_template_opts(&changed, &default_profile());
         assert_ne!(warm_pool_revision_hash(&opts2), h1);

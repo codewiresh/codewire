@@ -6,6 +6,9 @@ readonly ROOT
 readonly BUILDER="$ROOT/scripts/ci/images/build-push-image.sh"
 readonly SERVICES_DOCKERFILE="$ROOT/deployments/docker/services.Dockerfile"
 readonly SERVICES_DOCKERIGNORE="$ROOT/deployments/docker/services.Dockerfile.dockerignore"
+readonly DASHBOARD_DOCKERFILE="$ROOT/apps/dashboard/Dockerfile"
+readonly MESH_DOCKERFILE="$ROOT/deployments/docker/mesh.Dockerfile"
+readonly GATEWAY_DOCKERFILE="$ROOT/deployments/docker/gateway.Dockerfile"
 readonly SERVICES_BINARIES=(
   codewire-idp
   codewire-orchestration
@@ -26,9 +29,9 @@ mkdir -p "$ROOT/.tmp"
 verify_services_dockerfile_contract() {
   local mount binary
   local mounts=(
-    'id=codewire-services-cargo-registry,target=/usr/local/cargo/registry,sharing=locked'
-    'id=codewire-services-cargo-git,target=/usr/local/cargo/git,sharing=locked'
-    'id=codewire-services-release-target,target=/src/target,sharing=locked'
+    'id=codewire-root-cargo-registry,target=/usr/local/cargo/registry,sharing=locked'
+    'id=codewire-root-cargo-git,target=/usr/local/cargo/git,sharing=locked'
+    'id=codewire-root-release-target,target=/src/target,sharing=locked'
   )
 
   [[ "$(grep -cF -- '--mount=type=cache' "$SERVICES_DOCKERFILE")" -eq 3 ]] ||
@@ -73,6 +76,34 @@ verify_services_dockerfile_contract() {
       "$SERVICES_DOCKERFILE" ||
       fail "services runtime image is missing ${binary}"
   done
+}
+
+verify_kind_build_cache_contract() {
+  local dockerfile
+  for dockerfile in \
+      "$DASHBOARD_DOCKERFILE" \
+      "$SERVICES_DOCKERFILE" \
+      "$MESH_DOCKERFILE" \
+      "$GATEWAY_DOCKERFILE"; do
+    grep -qF -- '--mount=type=cache,id=codewire-root-cargo-registry,target=/usr/local/cargo/registry,sharing=locked' \
+      "$dockerfile" || fail "$(basename "$dockerfile") omits the job-local Cargo registry cache"
+    grep -qF -- '--mount=type=cache,id=codewire-root-cargo-git,target=/usr/local/cargo/git,sharing=locked' \
+      "$dockerfile" || fail "$(basename "$dockerfile") omits the job-local Cargo git cache"
+  done
+
+  for dockerfile in "$SERVICES_DOCKERFILE" "$MESH_DOCKERFILE" "$GATEWAY_DOCKERFILE"; do
+    grep -qF -- '--mount=type=cache,id=codewire-root-release-target,target=/src/target,sharing=locked' \
+      "$dockerfile" || fail "$(basename "$dockerfile") omits the compatible root-workspace target cache"
+  done
+  grep -qF -- '--mount=type=cache,id=codewire-dashboard-release-target,target=/workspace/target,sharing=locked' \
+    "$DASHBOARD_DOCKERFILE" || fail 'dashboard target cache is not isolated by its workspace path'
+  grep -qF -- '--mount=type=cache,id=codewire-gateway-release-target,target=/src/target,sharing=locked' \
+    "$GATEWAY_DOCKERFILE" || fail 'curated gateway target cache is not isolated from the root lockfile'
+
+  if grep -Eq 'COPY --from=[^ ]+ /[^ ]*/target/' \
+      "$DASHBOARD_DOCKERFILE" "$SERVICES_DOCKERFILE" "$MESH_DOCKERFILE" "$GATEWAY_DOCKERFILE"; then
+    fail 'a runtime stage reads directly from a non-persistent Cargo target cache'
+  fi
 }
 
 run_services_probe_build() {
@@ -175,6 +206,7 @@ run_services_cache_probe() (
 )
 
 verify_services_dockerfile_contract
+verify_kind_build_cache_contract
 case "${1:-}" in
   '') ;;
   services-cache)

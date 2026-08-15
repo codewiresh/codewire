@@ -23,9 +23,9 @@ use russh::keys::ssh_key::{LineEnding, PrivateKey};
 use serde_json::Value;
 
 use super::template::{
-    TemplateOpts, gateway_direct_udp_service_name, gateway_host_key_secret_name,
-    gateway_network_policy_name, gateway_workload_name, render_gateway_deployment,
-    render_gateway_direct_udp_service, render_gateway_host_key_secret,
+    CONFIDENTIAL_WORKSPACE_STORAGE_CLASS, TemplateOpts, gateway_direct_udp_service_name,
+    gateway_host_key_secret_name, gateway_network_policy_name, gateway_workload_name,
+    render_gateway_deployment, render_gateway_direct_udp_service, render_gateway_host_key_secret,
     render_gateway_network_policy, render_gateway_service, render_sandbox_template,
     render_sandbox_warm_pool, render_workspace_daemon_network_policy,
     render_workspace_daemon_service, workspace_daemon_network_policy_name,
@@ -702,6 +702,14 @@ impl SandboxClient {
                 storage.requested_disk_gb,
                 desired_disk_gb
             );
+        }
+        // The confidential direct-volume path cannot expand in place. Reject
+        // here so Kubernetes never persists a larger PVC request before the
+        // downstream CSI/CDH refusal.
+        if desired_disk_gb > storage.requested_disk_gb
+            && storage.storage_class_name == CONFIDENTIAL_WORKSPACE_STORAGE_CLASS
+        {
+            anyhow::bail!("confidential workspace storage expansion is not supported");
         }
         if desired_disk_gb > storage.requested_disk_gb && !storage.expansion_allowed {
             anyhow::bail!(
@@ -2545,6 +2553,45 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn confidential_workspace_storage_growth_is_rejected_before_mutation() {
+        let (client, _) = sandbox_client_with_secret_responses(storage_lookup_responses_for_class(
+            CONFIDENTIAL_WORKSPACE_STORAGE_CLASS,
+            true,
+        ));
+        let unchanged = client
+            .require_workspace_storage_resize("env-test", 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            unchanged.storage_class_name,
+            CONFIDENTIAL_WORKSPACE_STORAGE_CLASS
+        );
+
+        let (client, requests) = sandbox_client_with_secret_responses(
+            storage_lookup_responses_for_class(CONFIDENTIAL_WORKSPACE_STORAGE_CLASS, true),
+        );
+
+        let error = client
+            .require_workspace_storage_resize("env-test", 20)
+            .await
+            .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("confidential workspace storage expansion is not supported")
+        );
+        assert!(
+            requests
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|(method, _)| *method == Method::GET),
+            "confidential resize admission must not mutate Kubernetes objects"
+        );
+    }
+
     #[test]
     fn generated_gateway_host_key_is_openssh_ed25519() {
         let key = generate_gateway_host_key_openssh().unwrap();
@@ -2841,7 +2888,10 @@ mod tests {
 
     type RecordedRequests = Arc<Mutex<Vec<(Method, String)>>>;
 
-    fn storage_lookup_responses(expansion_allowed: bool) -> Vec<(StatusCode, Value)> {
+    fn storage_lookup_responses_for_class(
+        storage_class_name: &str,
+        expansion_allowed: bool,
+    ) -> Vec<(StatusCode, Value)> {
         vec![
             (
                 StatusCode::OK,
@@ -2868,7 +2918,7 @@ mod tests {
                     "kind": "PersistentVolumeClaim",
                     "metadata": {"name": "workspace-workspace-env-test", "namespace": "dev-sandboxes"},
                     "spec": {
-                        "storageClassName": "expandable",
+                        "storageClassName": storage_class_name,
                         "accessModes": ["ReadWriteOnce"],
                         "resources": {"requests": {"storage": "10Gi"}}
                     },
@@ -2880,12 +2930,16 @@ mod tests {
                 json!({
                     "apiVersion": "storage.k8s.io/v1",
                     "kind": "StorageClass",
-                    "metadata": {"name": "expandable"},
+                    "metadata": {"name": storage_class_name},
                     "provisioner": "example.test/provisioner",
                     "allowVolumeExpansion": expansion_allowed
                 }),
             ),
         ]
+    }
+
+    fn storage_lookup_responses(expansion_allowed: bool) -> Vec<(StatusCode, Value)> {
+        storage_lookup_responses_for_class("expandable", expansion_allowed)
     }
 
     fn sandbox_client_with_secret_responses(

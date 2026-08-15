@@ -166,11 +166,14 @@ fn gateway_template_opts(namespace: &str) -> anyhow::Result<TemplateOpts> {
     let local_gateway = std::env::var("CRD_SMOKE_LOCAL_GATEWAY").as_deref() == Ok("1");
     let server_namespace =
         std::env::var("CRD_SMOKE_SERVER_NAMESPACE").unwrap_or_else(|_| namespace.into());
+    let workspace_image = std::env::var("CRD_SMOKE_WORKSPACE_IMAGE").unwrap_or_else(|_| {
+        "ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467".into()
+    });
     let gateway_token =
         resolve_gateway_token(local_gateway, std::env::var("CRD_SMOKE_GATEWAY_TOKEN").ok())?;
     Ok(TemplateOpts {
         name: "tmpl-crd-smoke".into(),
-        image: "ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467".into(),
+        image: workspace_image,
         support_image: if local_gateway {
             "codewire-gateway:e2e".into()
         } else {

@@ -11,6 +11,11 @@ ENVIRONMENT_SESSION="$ROOT/scripts/ci/verify/kind/suites/environment-session.sh"
 mkdir -p "$ROOT/.tmp"
 FIXTURE="$(mktemp -d "$ROOT/.tmp/kind-e2e-suites.XXXXXX")"
 CALLS="$FIXTURE/calls"
+readonly SEALED_CONTROLLER_IMAGE='nexus.example.invalid/oci-approved/ingress-nginx/controller@sha256:5c2a1b6c03c4d18ecf14685d21a32bf6763a022f6f8cc07e9578f6cd5eca6180'
+readonly SEALED_CERTGEN_IMAGE='nexus.example.invalid/oci-approved/ingress-nginx/kube-webhook-certgen@sha256:334191231352856e1ec0c3e50f966edb59ec94a51906453d09f5820789e8b053'
+readonly SEALED_AGENT_IMAGE='nexus.example.invalid/oci-approved/codewire/agent-sandbox-controller@sha256:6081ae66b4134ebc6b170d965741b8dae09442ec74563b6c1ac999c366dac125'
+readonly SEALED_WORKSPACE_IMAGE='nexus.example.invalid/oci-approved/codewire/workspace@sha256:cf91240f0706a5b3da81485fbf87d65973b18d4f1067f630bc5fd513b38d1510'
+readonly SEALED_DIND_IMAGE='nexus.example.invalid/oci-approved/docker/dind@sha256:66fd272fc375aad4c8fa06351c414e15bffe8cb015c171e1b8a8efe36a72cc1e'
 
 cleanup_fixture() {
   rm -rf "$FIXTURE"
@@ -41,6 +46,22 @@ grep -Fq 'CRD_SMOKE_GATEWAY_TOKEN="$daemon_token"' "$COMMON" ||
 grep -Fq 'CRD_SMOKE_GATEWAY_TOKEN is required with CRD_SMOKE_LOCAL_GATEWAY=1' \
   "$ROOT/crates/codewire-orchestration/src/bin/crd-smoke.rs" ||
   fail 'local CRD smoke permits an unrelated literal gateway credential'
+grep -Fq 'std::env::var("CRD_SMOKE_WORKSPACE_IMAGE")' \
+  "$ROOT/crates/codewire-orchestration/src/bin/crd-smoke.rs" ||
+  fail 'CRD smoke cannot consume the sealed workspace alias'
+grep -Fq 'std::env::var("SMOKE_WORKSPACE_IMAGE")' \
+  "$ROOT/crates/codewire-orchestration/src/bin/temporal-fencing-smoke.rs" ||
+  fail 'Temporal fencing smoke cannot consume the sealed workspace alias'
+[[ "$(grep -Fc 'SMOKE_WORKSPACE_IMAGE="$(kind_workspace_runtime_image)"' "$COMMON")" -eq 4 ]] ||
+  fail 'Kind smoke callers do not consistently select the sealed workspace alias'
+grep -Fq 'PLAYWRIGHT_RUNTIME_WORKSPACE_IMAGE="$(kind_workspace_runtime_image)"' "$COMMON" ||
+  fail 'dashboard lifecycle does not select the sealed workspace alias'
+grep -Fq 'process.env.PLAYWRIGHT_RUNTIME_WORKSPACE_IMAGE || workspaceImage' \
+  "$ROOT/apps/dashboard/e2e/ssr-dashboard.environments.ssr.ts" ||
+  fail 'dashboard lifecycle preset cannot consume the sealed workspace alias'
+grep -Fq '(${presetId}, ${workspaceRuntimeImage},' \
+  "$ROOT/apps/dashboard/e2e/ssr-dashboard.environments.ssr.ts" ||
+  fail 'dashboard lifecycle preset ignores its selected runtime workspace image'
 grep -Fq 'KIND_POSTGRES_HOST_PORT="${KIND_POSTGRES_HOST_PORT:-25432}"' "$COMMON" ||
   fail 'Kind Postgres host port is not configurable with the accepted default'
 grep -Fq 'sed "s/hostPort: 25432/hostPort: ${KIND_POSTGRES_HOST_PORT}/"' "$COMMON" ||
@@ -111,6 +132,7 @@ source "$ENVIRONMENT_SESSION"
 # fixture proves dispatch and order without creating a cluster.
 : >"$CALLS"
 require_tool() { record "require:$1"; }
+acquire_kind_host_lock() { record acquire-lock; }
 reclaim_cancelled_ci_clusters() { record reclaim; }
 # shellcheck disable=SC2329 # Invoked indirectly by the integrated EXIT trap.
 cleanup() { :; }
@@ -138,6 +160,7 @@ cat >"$FIXTURE/want-order" <<'EOF'
 require:curl
 require:base64
 require:docker
+require:flock
 require:jq
 require:kind
 require:kubectl
@@ -146,6 +169,7 @@ require:psql
 require:python3
 require:ssh-keygen
 require:ssh-keyscan
+acquire-lock
 reclaim
 ingress-drift
 build
@@ -174,6 +198,50 @@ cmp -s "$FIXTURE/want-order" "$CALLS" || {
 # shellcheck source=scripts/ci/verify/kind/common.sh
 source "$COMMON"
 
+# The integrated transaction lock is host-wide rather than worktree-local and
+# is bounded, so concurrent local suites wait instead of deleting each other.
+: >"$CALLS"
+KIND_HOST_LOCK_FILE="$FIXTURE/kind-host.lock"
+KIND_HOST_LOCK_TIMEOUT_SECONDS=37
+flock() { record "flock:$*"; }
+log() { :; }
+acquire_kind_host_lock
+[ -f "$KIND_HOST_LOCK_FILE" ] || fail 'Kind host lock file was not created'
+grep -Eq '^flock:-w 37 [0-9]+$' "$CALLS" ||
+  fail 'Kind host lock is not acquired with the configured bound'
+
+# Cancelled-run cleanup owns run-ID-suffixed CI clusters, but it must preserve
+# the unsuffixed local default and every unrelated local Kind cluster.
+: >"$CALLS"
+cat >"$FIXTURE/kind-config.yaml" <<'EOF'
+hostPort: 8090
+EOF
+kind() {
+  case "${1:-} ${2:-}" in
+    'get clusters')
+      if grep -q '^kind:delete ' "$CALLS"; then
+        printf '%s\n' agent-sandbox codewire e2e-test
+      else
+        printf '%s\n' codewire-e2e-ci codewire-e2e-ci-873 agent-sandbox codewire e2e-test
+      fi
+      ;;
+    'delete cluster') record "kind:delete ${4:-}" ;;
+    *) fail "unexpected Kind cleanup invocation: $*" ;;
+  esac
+}
+docker() {
+  [ "${1:-}" = ps ] || fail "unexpected Docker cleanup invocation: $*"
+}
+log() { :; }
+reclaim_cancelled_ci_clusters "$FIXTURE/kind-config.yaml"
+cat >"$FIXTURE/want-cancelled-cleanup" <<'EOF'
+kind:delete codewire-e2e-ci-873
+EOF
+cmp -s "$FIXTURE/want-cancelled-cleanup" "$CALLS" || {
+  diff -u "$FIXTURE/want-cancelled-cleanup" "$CALLS" >&2 || true
+  fail 'cancelled-run cleanup did not preserve the exact CI ownership boundary'
+}
+
 # Every large image import is separated by an API recovery gate. This keeps a
 # temporarily starved control plane from accumulating four back-to-back imports.
 : >"$CALLS"
@@ -199,13 +267,19 @@ wait-api
 EOF
 if [ -n "${KIND_INGRESS_CONTROLLER_IMAGE:-}" ] \
     && [ -n "${KIND_INGRESS_CERTGEN_IMAGE:-}" ] \
-    && [ -n "${KIND_AGENT_SANDBOX_IMAGE:-}" ]; then
+    && [ -n "${KIND_AGENT_SANDBOX_IMAGE:-}" ] \
+    && [ -n "${KIND_WORKSPACE_IMAGE:-}" ] \
+    && [ -n "${KIND_DIND_IMAGE:-}" ]; then
   cat >>"$FIXTURE/want-image-load-order" <<EOF
 kind:load docker-image --name ${KIND_CLUSTER_NAME} ${KIND_INGRESS_CONTROLLER_LOCAL_IMAGE}
 wait-api
 kind:load docker-image --name ${KIND_CLUSTER_NAME} ${KIND_INGRESS_CERTGEN_LOCAL_IMAGE}
 wait-api
 kind:load docker-image --name ${KIND_CLUSTER_NAME} ${KIND_AGENT_SANDBOX_LOCAL_IMAGE}
+wait-api
+kind:load docker-image --name ${KIND_CLUSTER_NAME} ${KIND_WORKSPACE_LOCAL_IMAGE}
+wait-api
+kind:load docker-image --name ${KIND_CLUSTER_NAME} ${KIND_DIND_LOCAL_IMAGE}
 wait-api
 EOF
 fi
@@ -214,19 +288,25 @@ cmp -s "$FIXTURE/want-image-load-order" "$CALLS" || {
   fail 'Kind image imports are not separated by API recovery gates'
 }
 
-# Forgejo CI names only the three approved Nexus platform manifests. They must
+# Forgejo CI names only the five approved Nexus manifests. They must
 # already exist in the private DinD store, are side-loaded after product
 # images, and replace every pinned public reference in a disposable render.
 : >"$CALLS"
 env \
-  KIND_INGRESS_CONTROLLER_IMAGE='nexus-system-cluster.example.invalid/oci-approved/ingress-nginx/controller@sha256:5c2a1b6c03c4d18ecf14685d21a32bf6763a022f6f8cc07e9578f6cd5eca6180' \
-  KIND_INGRESS_CERTGEN_IMAGE='nexus-system-cluster.example.invalid/oci-approved/ingress-nginx/kube-webhook-certgen@sha256:334191231352856e1ec0c3e50f966edb59ec94a51906453d09f5820789e8b053' \
-  KIND_AGENT_SANDBOX_IMAGE='nexus-system-cluster.example.invalid/oci-approved/codewire/agent-sandbox-controller@sha256:6081ae66b4134ebc6b170d965741b8dae09442ec74563b6c1ac999c366dac125' \
+  KIND_INGRESS_CONTROLLER_IMAGE="$SEALED_CONTROLLER_IMAGE" \
+  KIND_INGRESS_CERTGEN_IMAGE="$SEALED_CERTGEN_IMAGE" \
+  KIND_AGENT_SANDBOX_IMAGE="$SEALED_AGENT_IMAGE" \
+  KIND_WORKSPACE_IMAGE="$SEALED_WORKSPACE_IMAGE" \
+  KIND_DIND_IMAGE="$SEALED_DIND_IMAGE" \
   ROOT="$ROOT" COMMON="$COMMON" CALLS="$CALLS" bash -seu <<'BASH'
   fail() { printf "[sealed-kind-test] ERROR: %s\n" "$*" >&2; exit 1; }
   record() { printf "%s\n" "$1" >>"$CALLS"; }
   # shellcheck source=scripts/ci/verify/kind/common.sh
   source "$COMMON"
+  [ "$(kind_workspace_runtime_image)" = "$KIND_WORKSPACE_LOCAL_IMAGE" ] ||
+    fail 'sealed workspace input did not resolve to its local alias'
+  [ "$(kind_dind_runtime_image)" = "$KIND_DIND_LOCAL_IMAGE" ] ||
+    fail 'sealed DinD input did not resolve to its local alias'
   docker() {
     case "${1:-} ${2:-}" in
       'image inspect'|'image tag') ;;
@@ -240,13 +320,14 @@ env \
   load_images_into_kind
   rendered="$(render_ingress_manifest)"
   agent_rendered="$(render_agent_sandbox_manifest)"
+  kind_rendered="$(render_kind_overlay_manifest)"
   [ "$(grep -Fc "$KIND_INGRESS_CONTROLLER_LOCAL_IMAGE" "$rendered")" -eq 1 ] ||
     fail 'sealed ingress render does not contain the local controller once'
   [ "$(grep -Fc "$KIND_INGRESS_CERTGEN_LOCAL_IMAGE" "$rendered")" -eq 2 ] ||
     fail 'sealed ingress render does not contain the local certgen twice'
   [ "$(grep -Fc 'imagePullPolicy: Never' "$rendered")" -eq 3 ] ||
     fail 'sealed ingress render does not prohibit registry pulls'
-  if grep -Fq 'nexus-system-cluster.example.invalid/oci-approved/ingress-nginx/' "$rendered"; then
+  if grep -Fq 'nexus.example.invalid/oci-approved/ingress-nginx/' "$rendered"; then
     fail 'sealed ingress render retained a private registry reference'
   fi
   if grep -Fq 'registry.k8s.io/ingress-nginx/' "$rendered"; then
@@ -256,11 +337,124 @@ env \
     fail 'sealed agent-sandbox render does not contain the local controller once'
   [ "$(grep -Fc 'imagePullPolicy: Never' "$agent_rendered")" -eq 1 ] ||
     fail 'sealed agent-sandbox render does not prohibit registry pulls'
-  if grep -Fq 'nexus-system-cluster.example.invalid/oci-approved/codewire/' "$agent_rendered"; then
+  if grep -Fq 'nexus.example.invalid/oci-approved/codewire/' "$agent_rendered"; then
     fail 'sealed agent-sandbox render retained a private registry reference'
   fi
   if grep -Fq 'ghcr.io/noeljackson/agent-sandbox-controller' "$agent_rendered"; then
     fail 'sealed agent-sandbox render retained the public registry image'
+  fi
+  [ "$(grep -Fc "$KIND_DIND_LOCAL_IMAGE" "$kind_rendered")" -eq 1 ] ||
+    fail 'sealed Kind overlay does not contain the local DinD alias once'
+  [ "$(grep -Fc "$KIND_WORKSPACE_LOCAL_IMAGE" "$kind_rendered")" -eq 1 ] ||
+    fail 'sealed Kind overlay does not contain the local warm-pool workspace alias once'
+  if grep -Fq 'docker.io/library/docker:29.7.1-dind' "$kind_rendered"; then
+    fail 'sealed Kind overlay retained the public DinD image'
+  fi
+  if grep -Fq 'ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467' "$kind_rendered"; then
+    fail 'sealed Kind overlay retained the public warm-pool workspace image'
+  fi
+BASH
+
+grep -E '^kind:load docker-image|^wait-api$' "$CALLS" \
+  >"$FIXTURE/sealed-image-load-order"
+cat >"$FIXTURE/want-sealed-image-load-order" <<EOF
+kind:load docker-image --name ${KIND_CLUSTER_NAME} codewire-dashboard:e2e
+wait-api
+kind:load docker-image --name ${KIND_CLUSTER_NAME} codewire-services:e2e
+wait-api
+kind:load docker-image --name ${KIND_CLUSTER_NAME} codewire-mesh:e2e
+wait-api
+kind:load docker-image --name ${KIND_CLUSTER_NAME} codewire-gateway:e2e
+wait-api
+kind:load docker-image --name ${KIND_CLUSTER_NAME} ${KIND_INGRESS_CONTROLLER_LOCAL_IMAGE}
+wait-api
+kind:load docker-image --name ${KIND_CLUSTER_NAME} ${KIND_INGRESS_CERTGEN_LOCAL_IMAGE}
+wait-api
+kind:load docker-image --name ${KIND_CLUSTER_NAME} ${KIND_AGENT_SANDBOX_LOCAL_IMAGE}
+wait-api
+kind:load docker-image --name ${KIND_CLUSTER_NAME} ${KIND_WORKSPACE_LOCAL_IMAGE}
+wait-api
+kind:load docker-image --name ${KIND_CLUSTER_NAME} ${KIND_DIND_LOCAL_IMAGE}
+wait-api
+EOF
+cmp -s "$FIXTURE/want-sealed-image-load-order" "$FIXTURE/sealed-image-load-order" || {
+  diff -u "$FIXTURE/want-sealed-image-load-order" \
+    "$FIXTURE/sealed-image-load-order" >&2 || true
+  fail 'sealed Kind image imports are not separated by API recovery gates'
+}
+
+# Runtime observation accepts only the local aliases in sealed mode, requires
+# the workspace in rendered templates, validates the configured optional DinD
+# input, and rejects pull failures without an unrelated-service allowlist.
+env \
+  KIND_INGRESS_CONTROLLER_IMAGE="$SEALED_CONTROLLER_IMAGE" \
+  KIND_INGRESS_CERTGEN_IMAGE="$SEALED_CERTGEN_IMAGE" \
+  KIND_AGENT_SANDBOX_IMAGE="$SEALED_AGENT_IMAGE" \
+  KIND_WORKSPACE_IMAGE="$SEALED_WORKSPACE_IMAGE" \
+  KIND_DIND_IMAGE="$SEALED_DIND_IMAGE" \
+  ROOT="$ROOT" COMMON="$COMMON" bash -seu <<'BASH'
+  fail() { printf "[sealed-supply-chain-test] ERROR: %s\n" "$*" >&2; exit 1; }
+  # shellcheck source=scripts/ci/verify/kind/common.sh
+  source "$COMMON"
+  service_account_json='{"automountServiceAccountToken":false}'
+  pods_json="$(jq -cn \
+    --arg workspace "$KIND_WORKSPACE_LOCAL_IMAGE" \
+    --arg dind "$KIND_DIND_LOCAL_IMAGE" \
+    '{items:[{spec:{initContainers:[],containers:[{image:$workspace},{image:$dind},{image:"postgres:17-alpine"}]}}]}')"
+  templates_json="$(jq -cn \
+    --arg workspace "$KIND_WORKSPACE_LOCAL_IMAGE" \
+    --arg dind "$KIND_DIND_LOCAL_IMAGE" \
+    '{items:[{spec:{podTemplate:{spec:{containers:[{image:$workspace},{image:$dind}]}}}}]}')"
+  events_json='{"items":[]}'
+  configured_dind="$KIND_DIND_LOCAL_IMAGE"
+  kubectl() {
+    case "$*" in
+      '-n dev-sandboxes get serviceaccount/codewire-sandbox -o json')
+        printf '%s\n' "$service_account_json"
+        ;;
+      '-n codewire-e2e get configmap/codewire-config -o jsonpath={.data.SANDBOX_DIND_IMAGE}')
+        printf '%s' "$configured_dind"
+        ;;
+      'get pods -A -o json') printf '%s\n' "$pods_json" ;;
+      'get sandboxtemplates -A -o json') printf '%s\n' "$templates_json" ;;
+      'get events -A -o json') printf '%s\n' "$events_json" ;;
+      *) fail "unexpected kubectl invocation: $*" ;;
+    esac
+  }
+  log() { :; }
+
+  assert_sandbox_supply_chain
+
+  pods_json="$(jq -cn \
+    --arg dind "$KIND_DIND_LOCAL_IMAGE" \
+    '{items:[{spec:{containers:[{image:"ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467"},{image:$dind}]}}]}')"
+  if assert_sandbox_supply_chain >/dev/null 2>&1; then
+    fail 'sealed runtime accepted a public workspace reference'
+  fi
+
+  pods_json="$(jq -cn \
+    --arg workspace "$KIND_WORKSPACE_LOCAL_IMAGE" \
+    --arg dind "$KIND_DIND_LOCAL_IMAGE" \
+    '{items:[{spec:{containers:[{image:$workspace},{image:$dind}]}}]}')"
+  templates_json="$(jq -cn --arg workspace "$KIND_WORKSPACE_LOCAL_IMAGE" \
+    '{items:[{spec:{image:$workspace}}]}')"
+  assert_sandbox_supply_chain ||
+    fail 'sealed runtime rejected a template where optional DinD is inactive'
+
+  configured_dind='docker.io/library/docker:29.7.1-dind@sha256:e8faad5a8dc5279dff929afc5449f2791736912fff9f99351d742db2fad01b4c'
+  if assert_sandbox_supply_chain >/dev/null 2>&1; then
+    fail 'sealed runtime accepted a substituted configured DinD input'
+  fi
+  configured_dind="$KIND_DIND_LOCAL_IMAGE"
+
+  templates_json="$(jq -cn \
+    --arg workspace "$KIND_WORKSPACE_LOCAL_IMAGE" \
+    --arg dind "$KIND_DIND_LOCAL_IMAGE" \
+    '{items:[{spec:{images:[$workspace,$dind]}}]}')"
+  events_json="$(jq -cn --arg dind "$KIND_DIND_LOCAL_IMAGE" \
+    '{items:[{reason:"ImagePullBackOff",message:("failed to pull " + $dind),metadata:{namespace:"dev-sandboxes"},involvedObject:{name:"workspace"}}]}')"
+  if assert_sandbox_supply_chain >/dev/null 2>&1; then
+    fail 'sealed runtime ignored a DinD pull failure'
   fi
 BASH
 
@@ -268,42 +462,94 @@ BASH
 # cluster action. The public source remains pinned by its multi-arch index,
 # while the approved runner input is the independently verified amd64 child.
 expect_failure partial-platform-images env \
-  KIND_INGRESS_CONTROLLER_IMAGE='nexus-system-cluster.example.invalid/oci-approved/ingress-nginx/controller@sha256:5c2a1b6c03c4d18ecf14685d21a32bf6763a022f6f8cc07e9578f6cd5eca6180' \
-  KIND_INGRESS_CERTGEN_IMAGE='nexus-system-cluster.example.invalid/oci-approved/ingress-nginx/kube-webhook-certgen@sha256:334191231352856e1ec0c3e50f966edb59ec94a51906453d09f5820789e8b053' \
+  KIND_INGRESS_CONTROLLER_IMAGE="$SEALED_CONTROLLER_IMAGE" \
+  KIND_INGRESS_CERTGEN_IMAGE="$SEALED_CERTGEN_IMAGE" \
   KIND_AGENT_SANDBOX_IMAGE='' \
-  bash -seuc 'source "$1"; validate_sealed_kind_platform_images' _ "$COMMON"
-grep -Fq 'Kind platform mirror inputs must match the three approved Nexus digests' \
+  KIND_WORKSPACE_IMAGE="$SEALED_WORKSPACE_IMAGE" \
+  KIND_DIND_IMAGE="$SEALED_DIND_IMAGE" \
+  bash -seuc 'source "$1"; validate_sealed_kind_images' _ "$COMMON"
+grep -Fq 'sealed Kind inputs must match the five approved Nexus digests' \
   "$FIXTURE/partial-platform-images.out" ||
   fail 'partial sealed platform tuple did not explain its rejection'
 
+expect_failure partial-workspace-only env \
+  KIND_INGRESS_CONTROLLER_IMAGE='' \
+  KIND_INGRESS_CERTGEN_IMAGE='' \
+  KIND_AGENT_SANDBOX_IMAGE='' \
+  KIND_WORKSPACE_IMAGE="$SEALED_WORKSPACE_IMAGE" \
+  bash -seuc 'source "$1"; validate_sealed_kind_images' _ "$COMMON"
+grep -Fq 'sealed Kind inputs must match the five approved Nexus digests' \
+  "$FIXTURE/partial-workspace-only.out" ||
+  fail 'workspace-only sealed tuple did not explain its rejection'
+
 expect_failure substituted-agent-image env \
-  KIND_INGRESS_CONTROLLER_IMAGE='nexus-system-cluster.example.invalid/oci-approved/ingress-nginx/controller@sha256:5c2a1b6c03c4d18ecf14685d21a32bf6763a022f6f8cc07e9578f6cd5eca6180' \
-  KIND_INGRESS_CERTGEN_IMAGE='nexus-system-cluster.example.invalid/oci-approved/ingress-nginx/kube-webhook-certgen@sha256:334191231352856e1ec0c3e50f966edb59ec94a51906453d09f5820789e8b053' \
-  KIND_AGENT_SANDBOX_IMAGE='nexus-system-cluster.example.invalid/oci-approved/codewire/agent-sandbox-controller@sha256:555146af2337dd5d8baf0844d7f5de9a3cd8fc7b032b85756ae244bc2583fb41' \
-  bash -seuc 'source "$1"; validate_sealed_kind_platform_images' _ "$COMMON"
-grep -Fq 'Kind platform mirror inputs must match the three approved Nexus digests' \
+  KIND_INGRESS_CONTROLLER_IMAGE="$SEALED_CONTROLLER_IMAGE" \
+  KIND_INGRESS_CERTGEN_IMAGE="$SEALED_CERTGEN_IMAGE" \
+  KIND_AGENT_SANDBOX_IMAGE='nexus.example.invalid/oci-approved/codewire/agent-sandbox-controller@sha256:555146af2337dd5d8baf0844d7f5de9a3cd8fc7b032b85756ae244bc2583fb41' \
+  KIND_WORKSPACE_IMAGE="$SEALED_WORKSPACE_IMAGE" \
+  KIND_DIND_IMAGE="$SEALED_DIND_IMAGE" \
+  bash -seuc 'source "$1"; validate_sealed_kind_images' _ "$COMMON"
+grep -Fq 'sealed Kind inputs must match the five approved Nexus digests' \
   "$FIXTURE/substituted-agent-image.out" ||
   fail 'agent-sandbox index substitution did not explain its rejection'
 
-grep -Fq "docker:image inspect nexus-system-cluster.example.invalid/oci-approved/ingress-nginx/controller@sha256:5c2a1b6c03c4d18ecf14685d21a32bf6763a022f6f8cc07e9578f6cd5eca6180" "$CALLS" ||
-  fail 'sealed controller was not proven in the runner-preloaded Docker store'
-grep -Fq "docker:image inspect nexus-system-cluster.example.invalid/oci-approved/ingress-nginx/kube-webhook-certgen@sha256:334191231352856e1ec0c3e50f966edb59ec94a51906453d09f5820789e8b053" "$CALLS" ||
-  fail 'sealed certgen was not proven in the runner-preloaded Docker store'
-grep -Fq "docker:image tag nexus-system-cluster.example.invalid/oci-approved/ingress-nginx/controller@sha256:5c2a1b6c03c4d18ecf14685d21a32bf6763a022f6f8cc07e9578f6cd5eca6180 localhost/codewire-ci/ingress-nginx-controller:verified-5c2a1b6c03c4d18ecf14685d21a32bf6763a022f6f8cc07e9578f6cd5eca6180" "$CALLS" ||
-  fail 'sealed controller was not assigned its disposable Kind reference'
-grep -Fq "docker:image tag nexus-system-cluster.example.invalid/oci-approved/ingress-nginx/kube-webhook-certgen@sha256:334191231352856e1ec0c3e50f966edb59ec94a51906453d09f5820789e8b053 localhost/codewire-ci/ingress-kube-webhook-certgen:verified-334191231352856e1ec0c3e50f966edb59ec94a51906453d09f5820789e8b053" "$CALLS" ||
-  fail 'sealed certgen was not assigned its disposable Kind reference'
-grep -Fq "docker:image inspect nexus-system-cluster.example.invalid/oci-approved/codewire/agent-sandbox-controller@sha256:6081ae66b4134ebc6b170d965741b8dae09442ec74563b6c1ac999c366dac125" "$CALLS" ||
-  fail 'sealed agent-sandbox controller was not proven in the runner-preloaded Docker store'
-grep -Fq "docker:image tag nexus-system-cluster.example.invalid/oci-approved/codewire/agent-sandbox-controller@sha256:6081ae66b4134ebc6b170d965741b8dae09442ec74563b6c1ac999c366dac125 localhost/codewire-ci/agent-sandbox-controller:verified-6081ae66b4134ebc6b170d965741b8dae09442ec74563b6c1ac999c366dac125" "$CALLS" ||
-  fail 'sealed agent-sandbox controller was not assigned its disposable Kind reference'
+expect_failure substituted-workspace-image env \
+  KIND_INGRESS_CONTROLLER_IMAGE="$SEALED_CONTROLLER_IMAGE" \
+  KIND_INGRESS_CERTGEN_IMAGE="$SEALED_CERTGEN_IMAGE" \
+  KIND_AGENT_SANDBOX_IMAGE="$SEALED_AGENT_IMAGE" \
+  KIND_WORKSPACE_IMAGE='nexus.example.invalid/oci-approved/codewire/workspace@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' \
+  KIND_DIND_IMAGE="$SEALED_DIND_IMAGE" \
+  bash -seuc 'source "$1"; validate_sealed_kind_images' _ "$COMMON"
+grep -Fq 'sealed Kind inputs must match the five approved Nexus digests' \
+  "$FIXTURE/substituted-workspace-image.out" ||
+  fail 'workspace digest substitution did not explain its rejection'
 
-grep -Fq 'KIND_INGRESS_CONTROLLER_IMAGE: nexus-system-cluster.example.invalid/oci-approved/ingress-nginx/controller@sha256:5c2a1b6c03c4d18ecf14685d21a32bf6763a022f6f8cc07e9578f6cd5eca6180' \
+expect_failure substituted-dind-image env \
+  KIND_INGRESS_CONTROLLER_IMAGE="$SEALED_CONTROLLER_IMAGE" \
+  KIND_INGRESS_CERTGEN_IMAGE="$SEALED_CERTGEN_IMAGE" \
+  KIND_AGENT_SANDBOX_IMAGE="$SEALED_AGENT_IMAGE" \
+  KIND_WORKSPACE_IMAGE="$SEALED_WORKSPACE_IMAGE" \
+  KIND_DIND_IMAGE='nexus.example.invalid/oci-approved/docker/dind@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' \
+  bash -seuc 'source "$1"; validate_sealed_kind_images' _ "$COMMON"
+grep -Fq 'sealed Kind inputs must match the five approved Nexus digests' \
+  "$FIXTURE/substituted-dind-image.out" ||
+  fail 'DinD digest substitution did not explain its rejection'
+
+grep -Fq "docker:image inspect $SEALED_CONTROLLER_IMAGE" "$CALLS" ||
+  fail 'sealed controller was not proven in the runner-preloaded Docker store'
+grep -Fq "docker:image inspect $SEALED_CERTGEN_IMAGE" "$CALLS" ||
+  fail 'sealed certgen was not proven in the runner-preloaded Docker store'
+grep -Fq "docker:image tag $SEALED_CONTROLLER_IMAGE localhost/codewire-ci/ingress-nginx-controller:verified-5c2a1b6c03c4d18ecf14685d21a32bf6763a022f6f8cc07e9578f6cd5eca6180" "$CALLS" ||
+  fail 'sealed controller was not assigned its disposable Kind reference'
+grep -Fq "docker:image tag $SEALED_CERTGEN_IMAGE localhost/codewire-ci/ingress-kube-webhook-certgen:verified-334191231352856e1ec0c3e50f966edb59ec94a51906453d09f5820789e8b053" "$CALLS" ||
+  fail 'sealed certgen was not assigned its disposable Kind reference'
+grep -Fq "docker:image inspect $SEALED_AGENT_IMAGE" "$CALLS" ||
+  fail 'sealed agent-sandbox controller was not proven in the runner-preloaded Docker store'
+grep -Fq "docker:image tag $SEALED_AGENT_IMAGE localhost/codewire-ci/agent-sandbox-controller:verified-6081ae66b4134ebc6b170d965741b8dae09442ec74563b6c1ac999c366dac125" "$CALLS" ||
+  fail 'sealed agent-sandbox controller was not assigned its disposable Kind reference'
+grep -Fq "docker:image inspect $SEALED_WORKSPACE_IMAGE" "$CALLS" ||
+  fail 'sealed workspace was not proven in the runner-preloaded Docker store'
+grep -Fq "docker:image tag $SEALED_WORKSPACE_IMAGE localhost/codewire-ci/workspace:verified-cf91240f0706a5b3da81485fbf87d65973b18d4f1067f630bc5fd513b38d1510" "$CALLS" ||
+  fail 'sealed workspace was not assigned its disposable Kind reference'
+grep -Fq "docker:image inspect $SEALED_DIND_IMAGE" "$CALLS" ||
+  fail 'sealed DinD was not proven in the runner-preloaded Docker store'
+grep -Fq "docker:image tag $SEALED_DIND_IMAGE localhost/codewire-ci/docker-dind:verified-66fd272fc375aad4c8fa06351c414e15bffe8cb015c171e1b8a8efe36a72cc1e" "$CALLS" ||
+  fail 'sealed DinD was not assigned its disposable Kind reference'
+
+grep -Fq "KIND_INGRESS_CONTROLLER_IMAGE: $SEALED_CONTROLLER_IMAGE" \
   "$ROOT/.gitea/workflows/ci.yaml" || fail 'Forgejo CI does not select the approved ingress controller'
-grep -Fq 'KIND_INGRESS_CERTGEN_IMAGE: nexus-system-cluster.example.invalid/oci-approved/ingress-nginx/kube-webhook-certgen@sha256:334191231352856e1ec0c3e50f966edb59ec94a51906453d09f5820789e8b053' \
+grep -Fq "KIND_INGRESS_CERTGEN_IMAGE: $SEALED_CERTGEN_IMAGE" \
   "$ROOT/.gitea/workflows/ci.yaml" || fail 'Forgejo CI does not select the approved ingress cert generator'
-grep -Fq 'KIND_AGENT_SANDBOX_IMAGE: nexus-system-cluster.example.invalid/oci-approved/codewire/agent-sandbox-controller@sha256:6081ae66b4134ebc6b170d965741b8dae09442ec74563b6c1ac999c366dac125' \
+grep -Fq "KIND_AGENT_SANDBOX_IMAGE: $SEALED_AGENT_IMAGE" \
   "$ROOT/.gitea/workflows/ci.yaml" || fail 'Forgejo CI does not select the approved agent-sandbox controller'
+grep -Fq "KIND_WORKSPACE_IMAGE: $SEALED_WORKSPACE_IMAGE" \
+  "$ROOT/.gitea/workflows/ci.yaml" || fail 'Forgejo CI does not select the Forgejo-proven workspace image'
+grep -Fq "KIND_DIND_IMAGE: $SEALED_DIND_IMAGE" \
+  "$ROOT/.gitea/workflows/ci.yaml" || fail 'Forgejo CI does not select the approved Docker DinD image'
+if grep -Fq 'nexus-system-cluster.example.invalid/oci-approved/' \
+    "$ROOT/.gitea/workflows/ci.yaml"; then
+  fail 'Forgejo CI still uses the Nexus recovery alias for an approved Kind input'
+fi
 
 # Restore the production API recovery implementation after the load-order spy.
 # shellcheck source=scripts/ci/verify/kind/common.sh

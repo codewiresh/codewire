@@ -1202,6 +1202,97 @@ for job_id in standard rust-transport database services-control services-runtime
   fi
 done
 
+control_block="$TMP/services-control.yaml"
+runtime_block="$TMP/services-runtime.yaml"
+grep -qF 'name: Resolve service control-plane scope' "$control_block"
+grep -qF 'name: Service control-plane integration not selected' "$control_block"
+grep -qF 'name: Resolve service runtime-plane scope' "$runtime_block"
+grep -qF 'name: Service runtime-plane integration not selected' "$runtime_block"
+for block in "$control_block" "$runtime_block"; do
+  grep -qF 'id: service-scope' "$block"
+  grep -qF 'VERIFICATION_SELECTION: ${{ needs.verification-selection.outputs.selection }}' "$block"
+  grep -qF "steps.service-scope.outputs.selected == 'true'" "$block"
+  if grep -qF "contains(needs.verification-selection.outputs.selection, '|service_integration|')" "$block"; then
+    echo "$(basename "$block"): coarse service_integration gating remains" >&2
+    exit 1
+  fi
+done
+for token in service_apikey_smoke service_idp service_coordinator service_billing service_connectcore; do
+  grep -qF "*'|${token}|'*" "$control_block" || {
+    echo "services-control: scope resolver omits ${token}" >&2
+    exit 1
+  }
+  grep -qF "$token" "$ROOT/scripts/dev/preflight.sh" || {
+    echo "preflight: control-plane scope omits ${token}" >&2
+    exit 1
+  }
+done
+for token in service_orchestration service_nats; do
+  grep -qF "*'|${token}|'*" "$runtime_block" || {
+    echo "services-runtime: scope resolver omits ${token}" >&2
+    exit 1
+  }
+  grep -qF "$token" "$ROOT/scripts/dev/preflight.sh" || {
+    echo "preflight: runtime-plane scope omits ${token}" >&2
+    exit 1
+  }
+done
+for token in service_orchestration service_nats; do
+  if grep -qF "*'|${token}|'*" "$control_block"; then
+    echo "services-control: scope resolver includes runtime-only ${token}" >&2
+    exit 1
+  fi
+done
+for token in service_apikey_smoke service_idp service_coordinator service_billing service_connectcore; do
+  if grep -qF "*'|${token}|'*" "$runtime_block"; then
+    echo "services-runtime: scope resolver includes control-only ${token}" >&2
+    exit 1
+  fi
+done
+
+extract_service_scope_script() {
+  local block="$1" script="$2"
+  awk '
+    /name: Resolve service .* scope/ { resolver = 1 }
+    resolver && /^        run: \|$/ { capture = 1; next }
+    capture && /^      - / { exit }
+    capture { sub(/^          /, ""); print }
+  ' "$block" > "$script"
+  [ -s "$script" ] || {
+    echo "$(basename "$block"): scope resolver script is absent" >&2
+    exit 1
+  }
+  bash -n "$script"
+}
+
+run_service_scope_case() {
+  local name="$1" script="$2" selection="$3" expected="$4"
+  local output="$TMP/${name}.scope-output"
+  : > "$output"
+  VERIFICATION_SELECTION="$selection" GITHUB_OUTPUT="$output" bash "$script"
+  grep -Fxq "selected=${expected}" "$output" || {
+    echo "${name}: expected selected=${expected}" >&2
+    exit 1
+  }
+}
+
+control_scope_script="$TMP/services-control-scope.sh"
+runtime_scope_script="$TMP/services-runtime-scope.sh"
+extract_service_scope_script "$control_block" "$control_scope_script"
+extract_service_scope_script "$runtime_block" "$runtime_scope_script"
+run_service_scope_case control_selected "$control_scope_script" \
+  '|valid:v3|service_billing|service_integration|complete|' true
+run_service_scope_case control_rejects_runtime "$control_scope_script" \
+  '|valid:v3|service_integration|service_orchestration|complete|' false
+run_service_scope_case runtime_selected "$runtime_scope_script" \
+  '|valid:v3|service_integration|service_orchestration|complete|' true
+run_service_scope_case runtime_rejects_control "$runtime_scope_script" \
+  '|valid:v3|service_billing|service_integration|complete|' false
+run_service_scope_case both_reject_unscoped "$control_scope_script" \
+  '|valid:v3|service_integration|complete|' false
+run_service_scope_case both_reject_unscoped_runtime "$runtime_scope_script" \
+  '|valid:v3|service_integration|complete|' false
+
 selection_block="$TMP/verification-selection.yaml"
 awk '
   $0 == "  verification-selection:" { capture = 1 }

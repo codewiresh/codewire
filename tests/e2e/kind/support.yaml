@@ -14,6 +14,7 @@ data:
   # issuer while the browser uses the Rust dashboard through local ingress.
   PUBLIC_OIDC_ISSUER_URL: http://127.0.0.1:8090
   PREVIEW_BASE_DOMAIN: codewire-dev.local
+  SANDBOX_DIND_IMAGE: docker.io/library/docker:29.7.1-dind@sha256:e8faad5a8dc5279dff929afc5449f2791736912fff9f99351d742db2fad01b4c
 ---
 apiVersion: v1
 kind: Secret

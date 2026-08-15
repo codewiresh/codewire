@@ -27,6 +27,14 @@ if ! [[ "$KIND_POSTGRES_HOST_PORT" =~ ^[0-9]+$ ]] \
 fi
 KIND_DATABASE_URL="postgres://codewire:codewire@127.0.0.1:${KIND_POSTGRES_HOST_PORT}/codewire"
 KEEP_KIND_CLUSTER="${KEEP_KIND_CLUSTER:-0}"
+KIND_HOST_LOCK_TIMEOUT_SECONDS="${KIND_HOST_LOCK_TIMEOUT_SECONDS:-1200}"
+if ! [[ "$KIND_HOST_LOCK_TIMEOUT_SECONDS" =~ ^[0-9]+$ ]] \
+    || [ "$KIND_HOST_LOCK_TIMEOUT_SECONDS" -lt 1 ]; then
+  echo "::error::KIND_HOST_LOCK_TIMEOUT_SECONDS must be a positive integer"
+  exit 2
+fi
+KIND_HOST_LOCK_FILE="${KIND_HOST_LOCK_FILE:-${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/codewire-kind-e2e-${UID}.lock}"
+KIND_HOST_LOCK_FD=""
 NS=codewire-e2e
 SANDBOX_NS=dev-sandboxes
 AUTHZ_TMPDIR=""
@@ -40,11 +48,17 @@ RETAINED_KUBECONFIG=""
 REMOTE_DIND_JOB_CONTAINER=""
 REMOTE_DIND_KIND_NETWORK=""
 REMOTE_DIND_FORWARDER_PID=""
+if [ -z "${DEFAULT_KIND_WORKSPACE_IMAGE+x}" ]; then
+  DEFAULT_KIND_WORKSPACE_IMAGE='ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467'
+fi
+if [ -z "${DEFAULT_KIND_DIND_IMAGE+x}" ]; then
+  DEFAULT_KIND_DIND_IMAGE='docker.io/library/docker:29.7.1-dind@sha256:e8faad5a8dc5279dff929afc5449f2791736912fff9f99351d742db2fad01b4c'
+fi
 if [ -z "${KIND_WORKSPACE_IMAGE+x}" ]; then
-  KIND_WORKSPACE_IMAGE='ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467'
+  KIND_WORKSPACE_IMAGE="$DEFAULT_KIND_WORKSPACE_IMAGE"
 fi
 if [ -z "${KIND_DIND_IMAGE+x}" ]; then
-  KIND_DIND_IMAGE='docker.io/library/docker:29.7.1-dind@sha256:e8faad5a8dc5279dff929afc5449f2791736912fff9f99351d742db2fad01b4c'
+  KIND_DIND_IMAGE="$DEFAULT_KIND_DIND_IMAGE"
 fi
 if [ -z "${KIND_INGRESS_CONTROLLER_IMAGE+x}" ]; then
   KIND_INGRESS_CONTROLLER_IMAGE=''
@@ -56,13 +70,19 @@ if [ -z "${KIND_AGENT_SANDBOX_IMAGE+x}" ]; then
   KIND_AGENT_SANDBOX_IMAGE=''
 fi
 if [ -z "${APPROVED_KIND_INGRESS_CONTROLLER_IMAGE+x}" ]; then
-  APPROVED_KIND_INGRESS_CONTROLLER_IMAGE='nexus-system-cluster.example.invalid/oci-approved/ingress-nginx/controller@sha256:5c2a1b6c03c4d18ecf14685d21a32bf6763a022f6f8cc07e9578f6cd5eca6180'
+  APPROVED_KIND_INGRESS_CONTROLLER_IMAGE='nexus.example.invalid/oci-approved/ingress-nginx/controller@sha256:5c2a1b6c03c4d18ecf14685d21a32bf6763a022f6f8cc07e9578f6cd5eca6180'
 fi
 if [ -z "${APPROVED_KIND_INGRESS_CERTGEN_IMAGE+x}" ]; then
-  APPROVED_KIND_INGRESS_CERTGEN_IMAGE='nexus-system-cluster.example.invalid/oci-approved/ingress-nginx/kube-webhook-certgen@sha256:334191231352856e1ec0c3e50f966edb59ec94a51906453d09f5820789e8b053'
+  APPROVED_KIND_INGRESS_CERTGEN_IMAGE='nexus.example.invalid/oci-approved/ingress-nginx/kube-webhook-certgen@sha256:334191231352856e1ec0c3e50f966edb59ec94a51906453d09f5820789e8b053'
 fi
 if [ -z "${APPROVED_KIND_AGENT_SANDBOX_IMAGE+x}" ]; then
-  APPROVED_KIND_AGENT_SANDBOX_IMAGE='nexus-system-cluster.example.invalid/oci-approved/codewire/agent-sandbox-controller@sha256:6081ae66b4134ebc6b170d965741b8dae09442ec74563b6c1ac999c366dac125'
+  APPROVED_KIND_AGENT_SANDBOX_IMAGE='nexus.example.invalid/oci-approved/codewire/agent-sandbox-controller@sha256:6081ae66b4134ebc6b170d965741b8dae09442ec74563b6c1ac999c366dac125'
+fi
+if [ -z "${APPROVED_KIND_WORKSPACE_IMAGE+x}" ]; then
+  APPROVED_KIND_WORKSPACE_IMAGE='nexus.example.invalid/oci-approved/codewire/workspace@sha256:cf91240f0706a5b3da81485fbf87d65973b18d4f1067f630bc5fd513b38d1510'
+fi
+if [ -z "${APPROVED_KIND_DIND_IMAGE+x}" ]; then
+  APPROVED_KIND_DIND_IMAGE='nexus.example.invalid/oci-approved/docker/dind@sha256:66fd272fc375aad4c8fa06351c414e15bffe8cb015c171e1b8a8efe36a72cc1e'
 fi
 if [ -z "${KIND_INGRESS_CONTROLLER_LOCAL_IMAGE+x}" ]; then
   KIND_INGRESS_CONTROLLER_LOCAL_IMAGE='localhost/codewire-ci/ingress-nginx-controller:verified-5c2a1b6c03c4d18ecf14685d21a32bf6763a022f6f8cc07e9578f6cd5eca6180'
@@ -73,14 +93,34 @@ fi
 if [ -z "${KIND_AGENT_SANDBOX_LOCAL_IMAGE+x}" ]; then
   KIND_AGENT_SANDBOX_LOCAL_IMAGE='localhost/codewire-ci/agent-sandbox-controller:verified-6081ae66b4134ebc6b170d965741b8dae09442ec74563b6c1ac999c366dac125'
 fi
-readonly KIND_WORKSPACE_IMAGE KIND_DIND_IMAGE \
+if [ -z "${KIND_WORKSPACE_LOCAL_IMAGE+x}" ]; then
+  KIND_WORKSPACE_LOCAL_IMAGE='localhost/codewire-ci/workspace:verified-cf91240f0706a5b3da81485fbf87d65973b18d4f1067f630bc5fd513b38d1510'
+fi
+if [ -z "${KIND_DIND_LOCAL_IMAGE+x}" ]; then
+  KIND_DIND_LOCAL_IMAGE='localhost/codewire-ci/docker-dind:verified-66fd272fc375aad4c8fa06351c414e15bffe8cb015c171e1b8a8efe36a72cc1e'
+fi
+readonly DEFAULT_KIND_WORKSPACE_IMAGE DEFAULT_KIND_DIND_IMAGE \
+  KIND_WORKSPACE_IMAGE KIND_DIND_IMAGE \
   KIND_INGRESS_CONTROLLER_IMAGE KIND_INGRESS_CERTGEN_IMAGE KIND_AGENT_SANDBOX_IMAGE \
   APPROVED_KIND_INGRESS_CONTROLLER_IMAGE APPROVED_KIND_INGRESS_CERTGEN_IMAGE \
-  APPROVED_KIND_AGENT_SANDBOX_IMAGE KIND_INGRESS_CONTROLLER_LOCAL_IMAGE \
-  KIND_INGRESS_CERTGEN_LOCAL_IMAGE KIND_AGENT_SANDBOX_LOCAL_IMAGE
+  APPROVED_KIND_AGENT_SANDBOX_IMAGE APPROVED_KIND_WORKSPACE_IMAGE \
+  APPROVED_KIND_DIND_IMAGE KIND_INGRESS_CONTROLLER_LOCAL_IMAGE \
+  KIND_INGRESS_CERTGEN_LOCAL_IMAGE KIND_AGENT_SANDBOX_LOCAL_IMAGE \
+  KIND_WORKSPACE_LOCAL_IMAGE KIND_DIND_LOCAL_IMAGE
 
 log() {
   printf '[kind-e2e] %s\n' "$*"
+}
+
+acquire_kind_host_lock() {
+  mkdir -p "$(dirname "$KIND_HOST_LOCK_FILE")"
+  exec {KIND_HOST_LOCK_FD}>"$KIND_HOST_LOCK_FILE"
+  log "waiting for exclusive local Kind transaction lock"
+  if ! flock -w "$KIND_HOST_LOCK_TIMEOUT_SECONDS" "$KIND_HOST_LOCK_FD"; then
+    echo "::error::timed out waiting for the local Kind transaction lock"
+    return 1
+  fi
+  log "acquired exclusive local Kind transaction lock"
 }
 
 dump_cluster_state() {
@@ -639,17 +679,41 @@ configure_remote_dind_kind_network() {
   log "remote DinD Kind API and host-port topology configured"
 }
 
-validate_sealed_kind_platform_images() {
+validate_sealed_kind_images() {
   if [ -z "$KIND_INGRESS_CONTROLLER_IMAGE" ] \
       && [ -z "$KIND_INGRESS_CERTGEN_IMAGE" ] \
-      && [ -z "$KIND_AGENT_SANDBOX_IMAGE" ]; then
+      && [ -z "$KIND_AGENT_SANDBOX_IMAGE" ] \
+      && [ "$KIND_WORKSPACE_IMAGE" = "$DEFAULT_KIND_WORKSPACE_IMAGE" ] \
+      && [ "$KIND_DIND_IMAGE" = "$DEFAULT_KIND_DIND_IMAGE" ]; then
     return 1
   fi
   if [ "$KIND_INGRESS_CONTROLLER_IMAGE" != "$APPROVED_KIND_INGRESS_CONTROLLER_IMAGE" ] \
       || [ "$KIND_INGRESS_CERTGEN_IMAGE" != "$APPROVED_KIND_INGRESS_CERTGEN_IMAGE" ] \
-      || [ "$KIND_AGENT_SANDBOX_IMAGE" != "$APPROVED_KIND_AGENT_SANDBOX_IMAGE" ]; then
-    echo "::error::Kind platform mirror inputs must match the three approved Nexus digests"
+      || [ "$KIND_AGENT_SANDBOX_IMAGE" != "$APPROVED_KIND_AGENT_SANDBOX_IMAGE" ] \
+      || [ "$KIND_WORKSPACE_IMAGE" != "$APPROVED_KIND_WORKSPACE_IMAGE" ] \
+      || [ "$KIND_DIND_IMAGE" != "$APPROVED_KIND_DIND_IMAGE" ]; then
+    echo "::error::sealed Kind inputs must match the five approved Nexus digests"
     return 2
+  fi
+}
+
+kind_workspace_runtime_image() {
+  if validate_sealed_kind_images; then
+    printf '%s\n' "$KIND_WORKSPACE_LOCAL_IMAGE"
+  else
+    local status=$?
+    [ "$status" -eq 1 ] || return "$status"
+    printf '%s\n' "$KIND_WORKSPACE_IMAGE"
+  fi
+}
+
+kind_dind_runtime_image() {
+  if validate_sealed_kind_images; then
+    printf '%s\n' "$KIND_DIND_LOCAL_IMAGE"
+  else
+    local status=$?
+    [ "$status" -eq 1 ] || return "$status"
+    printf '%s\n' "$KIND_DIND_IMAGE"
   fi
 }
 
@@ -670,15 +734,17 @@ load_images_into_kind() {
     wait_for_kind_api_after_image_load
   done
 
-  if validate_sealed_kind_platform_images; then
+  if validate_sealed_kind_images; then
     # The trusted runner boundary pulls these images from Nexus before any
     # repository-controlled workflow starts. This process receives neither a
     # registry credential nor public-registry egress; it can only prove and
-    # side-load the three exact local references into the disposable Kind node.
+    # side-load the five exact local references into the disposable Kind node.
     for sealed in \
         "$KIND_INGRESS_CONTROLLER_IMAGE|$KIND_INGRESS_CONTROLLER_LOCAL_IMAGE" \
         "$KIND_INGRESS_CERTGEN_IMAGE|$KIND_INGRESS_CERTGEN_LOCAL_IMAGE" \
-        "$KIND_AGENT_SANDBOX_IMAGE|$KIND_AGENT_SANDBOX_LOCAL_IMAGE"; do
+        "$KIND_AGENT_SANDBOX_IMAGE|$KIND_AGENT_SANDBOX_LOCAL_IMAGE" \
+        "$KIND_WORKSPACE_IMAGE|$KIND_WORKSPACE_LOCAL_IMAGE" \
+        "$KIND_DIND_IMAGE|$KIND_DIND_LOCAL_IMAGE"; do
       source="${sealed%%|*}"
       alias="${sealed#*|}"
       if ! docker image inspect "$source" >/dev/null 2>&1; then
@@ -695,8 +761,9 @@ load_images_into_kind() {
       kind load docker-image --name "$KIND_CLUSTER_NAME" "$alias"
       wait_for_kind_api_after_image_load
     done
-  elif [ -n "${KIND_INGRESS_CONTROLLER_IMAGE}${KIND_INGRESS_CERTGEN_IMAGE}${KIND_AGENT_SANDBOX_IMAGE}" ]; then
-    return 1
+  else
+    local sealed_status=$?
+    [ "$sealed_status" -eq 1 ] || return "$sealed_status"
   fi
 }
 
@@ -704,7 +771,7 @@ render_ingress_manifest() {
   local source="$ROOT/tests/e2e/kind/vendor/ingress-nginx-deploy.yaml"
   local rendered="$RUN_DIR/ingress-nginx-deploy.yaml"
 
-  if validate_sealed_kind_platform_images; then
+  if validate_sealed_kind_images; then
     python3 - "$source" "$rendered" \
       "$KIND_INGRESS_CONTROLLER_LOCAL_IMAGE" "$KIND_INGRESS_CERTGEN_LOCAL_IMAGE" <<'PY'
 from pathlib import Path
@@ -728,9 +795,9 @@ for old, (new, expected_count) in replacements.items():
 Path(rendered).write_text(text)
 PY
     printf '%s\n' "$rendered"
-  elif [ -n "${KIND_INGRESS_CONTROLLER_IMAGE}${KIND_INGRESS_CERTGEN_IMAGE}${KIND_AGENT_SANDBOX_IMAGE}" ]; then
-    return 1
   else
+    local sealed_status=$?
+    [ "$sealed_status" -eq 1 ] || return "$sealed_status"
     printf '%s\n' "$source"
   fi
 }
@@ -740,7 +807,7 @@ render_agent_sandbox_manifest() {
   local rendered="$RUN_DIR/agent-sandbox-deploy.yaml"
 
   kubectl kustomize "$source" >"$rendered"
-  if validate_sealed_kind_platform_images; then
+  if validate_sealed_kind_images; then
     python3 - "$rendered" "$KIND_AGENT_SANDBOX_LOCAL_IMAGE" <<'PY'
 from pathlib import Path
 import re
@@ -763,8 +830,40 @@ if count != 1:
     )
 path.write_text(text)
 PY
-  elif [ -n "${KIND_INGRESS_CONTROLLER_IMAGE}${KIND_INGRESS_CERTGEN_IMAGE}${KIND_AGENT_SANDBOX_IMAGE}" ]; then
-    return 1
+  else
+    local sealed_status=$?
+    [ "$sealed_status" -eq 1 ] || return "$sealed_status"
+  fi
+  printf '%s\n' "$rendered"
+}
+
+render_kind_overlay_manifest() {
+  local source="$ROOT/tests/e2e/kind"
+  local rendered="$RUN_DIR/codewire-kind-overlay.yaml"
+
+  kubectl kustomize "$source" >"$rendered"
+  if validate_sealed_kind_images; then
+    python3 - "$rendered" "$KIND_DIND_LOCAL_IMAGE" "$KIND_WORKSPACE_LOCAL_IMAGE" <<'PY'
+from pathlib import Path
+import sys
+
+rendered, local_dind, local_workspace = sys.argv[1:]
+path = Path(rendered)
+text = path.read_text()
+public_dind = "docker.io/library/docker:29.7.1-dind@sha256:e8faad5a8dc5279dff929afc5449f2791736912fff9f99351d742db2fad01b4c"
+old = f"  SANDBOX_DIND_IMAGE: {public_dind}\n"
+if text.count(old) != 1:
+    raise SystemExit("Kind overlay Dind image occurrence mismatch")
+text = text.replace(old, f"  SANDBOX_DIND_IMAGE: {local_dind}\n")
+public_workspace = "ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467"
+if text.count(public_workspace) != 1:
+    raise SystemExit("Kind overlay warm-pool workspace image occurrence mismatch")
+text = text.replace(public_workspace, local_workspace)
+path.write_text(text)
+PY
+  else
+    local sealed_status=$?
+    [ "$sealed_status" -eq 1 ] || return "$sealed_status"
   fi
   printf '%s\n' "$rendered"
 }
@@ -933,7 +1032,7 @@ verify_mesh_legacy_auth_retirement_transition() {
 }
 
 deploy_overlay() {
-  local ingress_manifest
+  local ingress_manifest kind_overlay
   ingress_manifest="$(render_ingress_manifest)"
   log "deploying vendored ingress-nginx"
   kubectl_apply --validate=false -f "$ingress_manifest"
@@ -953,9 +1052,21 @@ deploy_overlay() {
 
   log "deploying kind e2e overlay"
   kubectl -n "$NS" delete job codewire-db-migrate --ignore-not-found --wait=true
+  if validate_sealed_kind_images; then
+    kind_overlay="$(render_kind_overlay_manifest)"
+  else
+    local sealed_status=$?
+    [ "$sealed_status" -eq 1 ] || return "$sealed_status"
+    kind_overlay=""
+  fi
   local applied=0
   for i in $(seq 1 12); do
-    if kubectl_apply --validate=false -k "$ROOT/tests/e2e/kind"; then
+    if [ -n "$kind_overlay" ]; then
+      if kubectl_apply --validate=false -f "$kind_overlay"; then
+        applied=1
+        break
+      fi
+    elif kubectl_apply --validate=false -k "$ROOT/tests/e2e/kind"; then
       applied=1
       break
     fi
@@ -1053,6 +1164,7 @@ dashboard_browser_e2e() {
   DATABASE_URL="${KIND_DATABASE_URL}?sslmode=disable" \
     SERVER_URL="$KIND_INGRESS_URL" \
     PLAYWRIGHT_BASE_URL="$KIND_INGRESS_URL" \
+    PLAYWRIGHT_RUNTIME_WORKSPACE_IMAGE="$(kind_workspace_runtime_image)" \
     PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH="$chromium" \
     KUBE_CONTEXT="kind-${KIND_CLUSTER_NAME}" \
     PLAYWRIGHT_KUBE_CONTEXT="kind-${KIND_CLUSTER_NAME}" \
@@ -2267,6 +2379,7 @@ SQL
   kubectl -n "$SANDBOX_NS" delete pod exec-smoke --wait=true --timeout=60s >/dev/null
   CRD_SMOKE_NAMESPACE="$SANDBOX_NS" \
     CRD_SMOKE_SERVER_NAMESPACE="$NS" \
+    CRD_SMOKE_WORKSPACE_IMAGE="$(kind_workspace_runtime_image)" \
     CRD_SMOKE_GATEWAY_TOKEN="$daemon_token" \
     CRD_SMOKE_GATEWAY_PHASE=cleanup \
     CRD_SMOKE_LOCAL_GATEWAY=1 \
@@ -2887,6 +3000,7 @@ temporal_fencing_smoke() {
   DATABASE_URL="$KIND_DATABASE_URL" \
     TEMPORAL_ADDRESS="http://127.0.0.1:7233" \
     SMOKE_ORCHESTRATION_URL="http://127.0.0.1:8084" \
+    SMOKE_WORKSPACE_IMAGE="$(kind_workspace_runtime_image)" \
     "$CARGO_CI_DIR/temporal-fencing-smoke"
 }
 
@@ -2899,7 +3013,7 @@ deploy_agent_sandbox_and_smoke() {
 }
 
 assert_sandbox_supply_chain() {
-  local service_account pods templates events
+  local service_account pods templates events workspace_image dind_image configured_dind_image
 
   log "verifying sandbox service-account and runtime-image provenance"
   service_account="$(kubectl -n "$SANDBOX_NS" get serviceaccount/codewire-sandbox -o json)"
@@ -2909,22 +3023,36 @@ assert_sandbox_supply_chain() {
     return 1
   fi
 
+  workspace_image="$(kind_workspace_runtime_image)"
+  dind_image="$(kind_dind_runtime_image)"
+  configured_dind_image="$(kubectl -n "$NS" get configmap/codewire-config \
+    -o jsonpath='{.data.SANDBOX_DIND_IMAGE}')"
+  if [ "$configured_dind_image" != "$dind_image" ]; then
+    echo "::error::Kind orchestration DinD input does not match the accepted runtime image"
+    return 1
+  fi
   pods="$(kubectl get pods -A -o json)"
-  if ! jq -e --arg workspace "$KIND_WORKSPACE_IMAGE" --arg dind "$KIND_DIND_IMAGE" '
+  if ! jq -e --arg workspace "$workspace_image" --arg dind "$dind_image" '
+    def workspace_image:
+      startswith("ghcr.io/codewiresh/workspace:") or
+      startswith("ghcr.io/codewiresh/workspace@") or
+      startswith("nexus.example.invalid/oci-approved/codewire/workspace@") or
+      startswith("localhost/codewire-ci/workspace:");
+    def dind_image:
+      startswith("ghcr.io/codewiresh/" + "dind") or
+      startswith("docker:" + "dind") or
+      startswith("docker.io/library/docker:") or
+      startswith("docker.io/library/docker@") or
+      startswith("nexus.example.invalid/oci-approved/docker/dind@") or
+      startswith("localhost/codewire-ci/docker-dind:");
     [
       .items[]
       | ((.spec.initContainers // []) + (.spec.containers // []))[]
       | .image
     ]
     | all(.[];
-        if startswith("ghcr.io/codewiresh/workspace:") or
-           startswith("ghcr.io/codewiresh/workspace@")
-        then . == $workspace
-        elif startswith("ghcr.io/codewiresh/" + "dind") or
-             startswith("docker:" + "dind") or
-             startswith("docker.io/library/docker:") or
-             startswith("docker.io/library/docker@")
-        then . == $dind
+        if workspace_image then . == $workspace
+        elif dind_image then . == $dind
         else true
         end)
   ' <<<"$pods" >/dev/null; then
@@ -2936,26 +3064,39 @@ assert_sandbox_supply_chain() {
       | select(startswith("ghcr.io/codewiresh/workspace") or
                startswith("ghcr.io/codewiresh/" + "dind") or
                startswith("docker:" + "dind") or
-               startswith("docker.io/library/docker"))
+               startswith("docker.io/library/docker") or
+               startswith("nexus.example.invalid/oci-approved/codewire/workspace@") or
+               startswith("nexus.example.invalid/oci-approved/docker/dind@") or
+               startswith("localhost/codewire-ci/workspace:") or
+               startswith("localhost/codewire-ci/docker-dind:"))
     ' <<<"$pods" | LC_ALL=C sort -u >&2
     return 1
   fi
 
   templates="$(kubectl get sandboxtemplates -A -o json)"
-  if ! jq -e --arg workspace "$KIND_WORKSPACE_IMAGE" --arg dind "$KIND_DIND_IMAGE" '
+  if ! jq -e --arg workspace "$workspace_image" --arg dind "$dind_image" '
     [.. | strings
       | select(startswith("ghcr.io/codewiresh/workspace") or
                startswith("ghcr.io/codewiresh/" + "dind") or
                startswith("docker:" + "dind") or
-               startswith("docker.io/library/docker"))]
-    | all(.[]; . == $workspace or . == $dind)
+               startswith("docker.io/library/docker") or
+               startswith("nexus.example.invalid/oci-approved/codewire/workspace@") or
+               startswith("nexus.example.invalid/oci-approved/docker/dind@") or
+               startswith("localhost/codewire-ci/workspace:") or
+               startswith("localhost/codewire-ci/docker-dind:"))] as $images
+    | ($images | index($workspace) != null)
+      and ($images | all(. == $workspace or . == $dind))
   ' <<<"$templates" >/dev/null; then
     echo "::error::rendered SandboxTemplate contains an unaccepted workspace or DinD image reference"
     jq -r '[.. | strings
       | select(startswith("ghcr.io/codewiresh/workspace") or
                startswith("ghcr.io/codewiresh/" + "dind") or
                startswith("docker:" + "dind") or
-               startswith("docker.io/library/docker"))] | unique[]' \
+               startswith("docker.io/library/docker") or
+               startswith("nexus.example.invalid/oci-approved/codewire/workspace@") or
+               startswith("nexus.example.invalid/oci-approved/docker/dind@") or
+               startswith("localhost/codewire-ci/workspace:") or
+               startswith("localhost/codewire-ci/docker-dind:"))] | unique[]' \
       <<<"$templates" >&2
     return 1
   fi
@@ -2968,7 +3109,7 @@ assert_sandbox_supply_chain() {
           (["ErrImagePull", "Failed", "FailedToRetrieveImagePullSecret", "ImagePullBackOff"]
             | index($event.reason)) != null and
           (($event.message // "")
-            | test("(ghcr\\.io/codewiresh/(workspace|dind)|docker:din[d]|docker\\.io/library/docker)"))
+            | test("(ghcr\\.io/codewiresh/(workspace|din[d])|docker:din[d]|docker\\.io/library/docker|nexus\\.example\\.invalid/oci-approved/(codewire/workspace|docker/dind)|localhost/codewire-ci/(workspace|docker-dind))"))
         )
       | $event
     ] | length == 0
@@ -2976,7 +3117,7 @@ assert_sandbox_supply_chain() {
     echo "::error::Kind recorded a workspace or DinD image-provenance failure"
     jq -r '.items[]
       | select((.message // "")
-          | test("(ghcr\\.io/codewiresh/(workspace|dind)|docker:din[d]|docker\\.io/library/docker)"))
+          | test("(ghcr\\.io/codewiresh/(workspace|din[d])|docker:din[d]|docker\\.io/library/docker|nexus\\.example\\.invalid/oci-approved/(codewire/workspace|docker/dind)|localhost/codewire-ci/(workspace|docker-dind))"))
       | "\(.metadata.namespace // "default")/\(.involvedObject.name): \(.reason)"' \
       <<<"$events" >&2
     return 1
@@ -3056,6 +3197,7 @@ gateway_host_key_restart_smoke() {
   GATEWAY_SMOKE_TMPDIR="$(mktemp -d "${TMPDIR:-/tmp}/codewire-kind-gateway.XXXXXX")"
   CRD_SMOKE_NAMESPACE="$SANDBOX_NS" \
     CRD_SMOKE_SERVER_NAMESPACE="$NS" \
+    CRD_SMOKE_WORKSPACE_IMAGE="$(kind_workspace_runtime_image)" \
     CRD_SMOKE_GATEWAY_TOKEN="$daemon_token" \
     CRD_SMOKE_GATEWAY_PHASE=setup \
     CRD_SMOKE_LOCAL_GATEWAY=1 \
@@ -3155,6 +3297,7 @@ rust_reconciler_ttl_e2e() {
     SMOKE_SANDBOX_NAMESPACE="$SANDBOX_NS" \
     SMOKE_SESSION_TOKEN=contract-admin-session-token \
     SMOKE_ORG_ID=org_contract_1 \
+    SMOKE_WORKSPACE_IMAGE="$(kind_workspace_runtime_image)" \
     "$CARGO_CI_DIR/reconciler-ttl-smoke"
 }
 

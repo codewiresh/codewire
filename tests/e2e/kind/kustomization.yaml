@@ -100,6 +100,12 @@ patches:
                   # in kind → ImagePullBackOff → env never reaches running).
                   - name: SANDBOX_GATEWAY_IMAGE
                     value: codewire-gateway:e2e
+                  # The sealed Kind harness rewrites this exact immutable
+                  # product identity to its verified, side-loaded local alias.
+                  # Production omits the override and retains the canonical
+                  # workspace digest default.
+                  - name: SANDBOX_WARM_POOL_WORKSPACE_IMAGE
+                    value: ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467
                   # Warm-pool reconciler config (#137). A SINGLE small profile so
                   # exactly one pre-warmed pod is provisioned and it fits the one
                   # 2-vCPU runner node alongside postgres/temporal/billing/

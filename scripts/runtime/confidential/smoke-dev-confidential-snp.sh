@@ -30,7 +30,7 @@ COCO_SOURCE_SHA=""
 COCO_SMOKE_MEMORY="${COCO_SMOKE_MEMORY:-16384}"
 COCO_SMOKE_DISK="${COCO_SMOKE_DISK:-50}"
 COCO_SMOKE_TIMEOUT_SECONDS="${COCO_SMOKE_TIMEOUT_SECONDS:-1500}"
-COCO_KBS_URL="${COCO_KBS_URL:-http://codewire-trustee-kbs.codewire-trustee.svc.cluster.local:8080}"
+COCO_KBS_URL="${COCO_KBS_URL:-https://codewire-trustee-kbs.codewire-trustee.svc.cluster.local:8080}"
 COCO_TEST_RESOURCE_URI="${COCO_TEST_RESOURCE_URI:-kbs:///default/codewire/runtime-test-resource}"
 COCO_TEST_RESOURCE_PATH="${COCO_TEST_RESOURCE_PATH:-}"
 COCO_TEST_RESOURCE_CONTENT="${COCO_TEST_RESOURCE_CONTENT:-codewire confidential trustee test resource}"
@@ -451,8 +451,8 @@ run_product_command() {
     EXPECTED_KATA_COCO_TEST_RESOURCE_URI="$COCO_TEST_RESOURCE_URI" \
     EXPECTED_KATA_COCO_TEST_RESOURCE_PATH="$COCO_TEST_RESOURCE_PATH" \
     EXPECTED_KATA_COCO_TEST_RESOURCE_CONTENT="$COCO_TEST_RESOURCE_CONTENT" \
-    "$ROOT/scripts/runtime/dev/with-dev-smoke-auth.sh" \
-      "$ROOT/scripts/runtime/dev/smoke-dev-commodity.sh" "${smoke_args[@]}"
+    "$ROOT/scripts/runtime/dev/smoke-dev-commodity.sh" \
+      --admin-oidc "${smoke_args[@]}"
 }
 
 run_coco_product() {

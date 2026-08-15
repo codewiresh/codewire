@@ -222,7 +222,11 @@ pub fn warm_pool_template_opts(cfg: &SandboxWorkerCfg, profile: &WarmPoolProfile
     );
     TemplateOpts {
         name: profile.template_name.clone(),
-        image: CANONICAL_WORKSPACE_RUNTIME_IMAGE.to_string(),
+        image: if cfg.warm_pool_workspace_image.trim().is_empty() {
+            CANONICAL_WORKSPACE_RUNTIME_IMAGE.to_string()
+        } else {
+            cfg.warm_pool_workspace_image.clone()
+        },
         image_command: vec!["sleep".to_string(), "infinity".to_string()],
         support_image: cfg.gateway_image.clone(),
         dind_image: cfg.dind_image.clone(),
@@ -282,6 +286,7 @@ pub struct SandboxWorkerCfg {
     pub session_secret: String,
     pub sandbox_namespace: String,
     pub gateway_image: String,
+    pub warm_pool_workspace_image: String,
     pub dind_image: String,
     pub runtime_profile: String,
     pub runtime_class: String,
@@ -355,6 +360,10 @@ impl SandboxWorkerCfg {
             gateway_image: getenv(
                 "SANDBOX_GATEWAY_IMAGE",
                 "ghcr.io/codewiresh/gateway@sha256:686a2437f023fe2a4759e87ba93b8d4a71885eefdc5ec7c3486a95f3d6da2836",
+            ),
+            warm_pool_workspace_image: getenv(
+                "SANDBOX_WARM_POOL_WORKSPACE_IMAGE",
+                CANONICAL_WORKSPACE_RUNTIME_IMAGE,
             ),
             dind_image: getenv("SANDBOX_DIND_IMAGE", ""),
             runtime_profile: std::env::var("SANDBOX_RUNTIME_PROFILE").unwrap_or_default(),

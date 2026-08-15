@@ -38,12 +38,19 @@ COPY proto ./proto
 COPY libs/gateway-proto ./libs/gateway-proto
 COPY packages/codewire-design ./packages/codewire-design
 COPY apps/cli/install.sh ./apps/cli/install.sh
-RUN cargo build --locked --release -p codewire-dashboard-web \
+RUN --mount=type=cache,id=codewire-root-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=codewire-root-cargo-git,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,id=codewire-dashboard-release-target,target=/workspace/target,sharing=locked \
+    find Cargo.toml Cargo.lock crates proto libs/gateway-proto packages/codewire-design apps/cli/install.sh \
+      -type f -exec touch {} + && \
+    cargo build --locked --release -p codewire-dashboard-web \
   && mkdir -p /out \
   && cp target/release/codewire-dashboard-web /out/codewire-dashboard-web \
   && cd /out \
   && sha256sum codewire-dashboard-web > dashboard-binary.sha256
-RUN cargo metadata --locked --offline --no-deps --format-version 1 \
+RUN --mount=type=cache,id=codewire-root-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=codewire-root-cargo-git,target=/usr/local/cargo/git,sharing=locked \
+    cargo metadata --locked --offline --no-deps --format-version 1 \
       > /out/rust-workspace-metadata.json \
   && cp Cargo.lock /out/Cargo.lock
 

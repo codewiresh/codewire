@@ -49,9 +49,9 @@ ARG CODEWIRE_CARGO_CACHE_PROBE
 # The target cache outlives this source snapshot while COPY preserves source
 # mtimes. Refresh only workspace inputs so Cargo cannot reuse stale local
 # fingerprints; registry/git dependencies and their compiled output stay hot.
-RUN --mount=type=cache,id=codewire-services-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
-    --mount=type=cache,id=codewire-services-cargo-git,target=/usr/local/cargo/git,sharing=locked \
-    --mount=type=cache,id=codewire-services-release-target,target=/src/target,sharing=locked \
+RUN --mount=type=cache,id=codewire-root-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=codewire-root-cargo-git,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,id=codewire-root-release-target,target=/src/target,sharing=locked \
     find Cargo.toml Cargo.lock crates proto libs/gateway-proto -type f -exec touch {} + && \
     if [ -n "$CODEWIRE_CARGO_CACHE_PROBE" ]; then \
       printf 'codewire-services cargo cache probe: %s\n' "$CODEWIRE_CARGO_CACHE_PROBE"; \

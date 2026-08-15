@@ -19,10 +19,16 @@ WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 COPY proto ./proto
-RUN cargo build --locked --release -p codewire-mesh --bin codewire-mesh
+RUN --mount=type=cache,id=codewire-root-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=codewire-root-cargo-git,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,id=codewire-root-release-target,target=/src/target,sharing=locked \
+    find Cargo.toml Cargo.lock crates proto -type f -exec touch {} + && \
+    cargo build --locked --release -p codewire-mesh --bin codewire-mesh \
+    && mkdir -p /out \
+    && cp target/release/codewire-mesh /out/codewire-mesh
 
 FROM ${DEBIAN_IMAGE}
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
-COPY --from=builder /src/target/release/codewire-mesh /usr/local/bin/codewire-mesh
+COPY --from=builder /out/codewire-mesh /usr/local/bin/codewire-mesh
 EXPOSE 8080
 ENTRYPOINT ["/usr/local/bin/codewire-mesh"]

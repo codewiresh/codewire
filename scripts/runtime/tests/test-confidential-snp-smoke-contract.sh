@@ -10,6 +10,29 @@ COMMODITY_PROFILE="$ROOT/deployments/k8s/overlays/dev/config-runtime-profile-com
 CONFIDENTIAL_PROFILE="$ROOT/deployments/k8s/overlays/dev/config-runtime-profile-confidential-snp.yaml"
 SMOKE_DIR="$ROOT/deployments/k8s/runtime-profiles/confidential-smoke"
 
+if cmp -s "$PROFILE" "$COMMODITY_PROFILE"; then
+  active_profile=commodity
+elif cmp -s "$PROFILE" "$CONFIDENTIAL_PROFILE"; then
+  active_profile=confidential
+else
+  printf 'active runtime profile is not an approved source template\n' >&2
+  exit 1
+fi
+
+if cmp -s "$SMOKE_DIR/kustomization.yaml" "$SMOKE_DIR/kustomization.baseline.yaml"; then
+  active_smoke=commodity
+elif cmp -s "$SMOKE_DIR/kustomization.yaml" "$SMOKE_DIR/kustomization.confidential-snp.yaml"; then
+  active_smoke=confidential
+else
+  printf 'active confidential smoke Kustomization is not an approved source template\n' >&2
+  exit 1
+fi
+
+if [[ "$active_profile" != "$active_smoke" ]]; then
+  printf 'runtime profile and confidential smoke activation must transition together\n' >&2
+  exit 1
+fi
+
 bash -n "$SMOKE"
 bash -n "$RESOLVER"
 [[ ! -e "$WRAPPER" ]] || {
@@ -29,14 +52,17 @@ fi
 rg -F 'SMOKE_KUSTOMIZATION="codewire-deploy-confidential-smoke-dev"' "$SMOKE" >/dev/null
 rg -F 'phase == "confidential-snp"' "$SMOKE" >/dev/null
 rg -F 'restore the commodity source profile' "$SMOKE" >/dev/null
+rg -F -- '--admin-oidc "${smoke_args[@]}"' "$SMOKE" >/dev/null
+if rg -F 'with-dev-smoke-auth.sh' "$SMOKE"; then
+  printf 'admin-only confidential smoke must not use the API-key auth wrapper\n' >&2
+  exit 1
+fi
 rg -F -- '--gateway-image' "$RESOLVER" >/dev/null
 rg -F -- '--source-sha' "$RESOLVER" >/dev/null
 
-rg -F 'SANDBOX_RUNTIME_PROFILE: commodity' "$PROFILE" >/dev/null
 rg -F 'SANDBOX_RUNTIME_PROFILE: commodity' "$COMMODITY_PROFILE" >/dev/null
 rg -F 'SANDBOX_KATA_COCO_INIT_DATA_ENABLED: "false"' "$COMMODITY_PROFILE" >/dev/null
-rg -F 'SANDBOX_RUNTIME_CLASS: commodity' "$PROFILE" >/dev/null
-rg -F 'SANDBOX_KATA_COCO_INIT_DATA_ENABLED: "false"' "$PROFILE" >/dev/null
+rg -F 'SANDBOX_RUNTIME_CLASS: commodity' "$COMMODITY_PROFILE" >/dev/null
 rg -F 'SANDBOX_RUNTIME_PROFILE: confidential' "$CONFIDENTIAL_PROFILE" >/dev/null
 rg -F 'SANDBOX_RUNTIME_CLASS: confidential' "$CONFIDENTIAL_PROFILE" >/dev/null
 rg -F 'SANDBOX_DOCKER_MODE: guest-dind' "$CONFIDENTIAL_PROFILE" >/dev/null
@@ -46,6 +72,13 @@ rg -F 'SANDBOX_KATA_COCO_INIT_DATA_ENABLED: "true"' "$CONFIDENTIAL_PROFILE" >/de
 rg -F 'SANDBOX_WORKSPACE_STORAGE_CLASS: longhorn-confidential' "$CONFIDENTIAL_PROFILE" >/dev/null
 rg -F 'SANDBOX_KATA_COCO_KBS_URL: https://codewire-trustee-kbs.codewire-trustee.svc.cluster.local:8080' \
   "$CONFIDENTIAL_PROFILE" >/dev/null
+rg -F 'COCO_KBS_URL="${COCO_KBS_URL:-https://codewire-trustee-kbs.codewire-trustee.svc.cluster.local:8080}"' \
+  "$SMOKE" >/dev/null
+if rg -F 'http://codewire-trustee-kbs.codewire-trustee.svc.cluster.local:8080' \
+  "$SMOKE" "$CONFIDENTIAL_PROFILE"; then
+  printf 'confidential KBS contract must require TLS\n' >&2
+  exit 1
+fi
 
 rg -F 'confidential-smoke-control.yaml' "$SMOKE_DIR/kustomization.yaml" >/dev/null
 rg -F 'confidential-smoke-control.yaml' "$SMOKE_DIR/kustomization.baseline.yaml" >/dev/null

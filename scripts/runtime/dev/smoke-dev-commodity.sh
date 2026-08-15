@@ -71,11 +71,14 @@ EXPECTED_KATA_COCO_TEST_RESOURCE_URI="${EXPECTED_KATA_COCO_TEST_RESOURCE_URI:-}"
 EXPECTED_KATA_COCO_TEST_RESOURCE_PATH="${EXPECTED_KATA_COCO_TEST_RESOURCE_PATH:-}"
 EXPECTED_KATA_COCO_TEST_RESOURCE_CONTENT="${EXPECTED_KATA_COCO_TEST_RESOURCE_CONTENT:-}"
 EXPECTED_CODEWIRE_SMOKE_USER_EMAIL="${EXPECTED_CODEWIRE_SMOKE_USER_EMAIL:-}"
+EXPECTED_CODEWIRE_ADMIN_EMAIL="${EXPECTED_CODEWIRE_ADMIN_EMAIL:-}"
+CODEWIRE_ADMIN_OAUTH_CONFIG_DIR="${CODEWIRE_ADMIN_OAUTH_CONFIG_DIR:-}"
 readonly CODEWIRE_DEV_SMOKE_ORG_SLUG="codewire-dev-smoke"
 readonly CODEWIRE_DEV_SMOKE_API_KEY_NAME="runtime-dev-commodity-smoke"
 ALLOW_NON_DEV="${ALLOW_NON_DEV:-0}"
 ALLOW_GENERIC_CODEWIRE_API_KEY_FOR_SMOKE="${ALLOW_GENERIC_CODEWIRE_API_KEY_FOR_SMOKE:-0}"
 CW_BIN="${CW_BIN:-}"
+SMOKE_AUTH_MODE="api-key"
 
 ENV_ID=""
 TMPDIR_SMOKE=""
@@ -106,6 +109,8 @@ Options:
   --cw-bin PATH            Use an existing cw binary instead of building one
   --existing-env ID        Reuse an existing environment instead of creating one.
                            The environment is always kept.
+  --admin-oidc             Use the saved native OIDC login for an admin-only
+                           acceptance run. API keys are rejected in this mode.
   --only PHASE             Run only one smoke phase; repeatable. Phases:
                            kube, exec, coco, docker, doctor, ssh,
                            tailnet-ssh, derp-ssh, websocket-ssh,
@@ -126,6 +131,11 @@ Environment:
   CODEWIRE_DEV_SMOKE_API_KEY
                            Required by default; copied to CODEWIRE_API_KEY for cw
   CODEWIRE_API_KEY         Accepted only with ALLOW_GENERIC_CODEWIRE_API_KEY_FOR_SMOKE=1
+  CODEWIRE_ADMIN_OAUTH_CONFIG_DIR
+                           Native cw login directory for --admin-oidc.
+                           Defaults to ~/.config/cw.
+  EXPECTED_CODEWIRE_ADMIN_EMAIL
+                           Optional exact email assertion for --admin-oidc.
   KUBECONFIG               Optional; defaults to ~/src/infra/kubeconfig-oidc.yaml when present
   KUBE_CONTEXT             Optional; if unset, prefers codewire-dev, then default, then current-context
   SANDBOX_NAMESPACE        Required sandbox namespace when Kubernetes checks run
@@ -332,6 +342,10 @@ while (($# > 0)); do
       [[ $# -ge 2 ]] || die "--existing-env requires a value"
       SMOKE_EXISTING_ENV_ID="$2"
       shift 2
+      ;;
+    --admin-oidc)
+      SMOKE_AUTH_MODE="admin-oidc"
+      shift
       ;;
     --only)
       [[ $# -ge 2 ]] || die "--only requires a phase"
@@ -738,22 +752,40 @@ prepare_cli() {
     die "EXPECTED_CODEWIRE_DEV_SERVER_URL is required"
   [[ "$CODEWIRE_SERVER_URL" == "$EXPECTED_CODEWIRE_DEV_SERVER_URL" || "$ALLOW_NON_DEV" == "1" ]] || \
     die "refusing to run against $CODEWIRE_SERVER_URL without ALLOW_NON_DEV=1"
-  if [[ -n "${CODEWIRE_DEV_SMOKE_API_KEY:-}" ]]; then
-    export CODEWIRE_API_KEY="$CODEWIRE_DEV_SMOKE_API_KEY"
-  elif [[ "$ALLOW_GENERIC_CODEWIRE_API_KEY_FOR_SMOKE" == "1" && -n "${CODEWIRE_API_KEY:-}" ]]; then
-    :
-  else
-    die "CODEWIRE_DEV_SMOKE_API_KEY is required; for local runs use scripts/runtime/dev/with-dev-smoke-auth.sh; set ALLOW_GENERIC_CODEWIRE_API_KEY_FOR_SMOKE=1 only for manual debugging"
-  fi
-
   require_cmd awk
   require_cmd sed
   require_cmd timeout
 
   mkdir -p "$SMOKE_TMP_PARENT"
   TMPDIR_SMOKE="$(mktemp -d "$SMOKE_TMP_PARENT/codewire-runtime-smoke.XXXXXX")"
-  export CW_CONFIG_DIR="$TMPDIR_SMOKE/cw-config"
-  mkdir -p "$CW_CONFIG_DIR"
+  chmod 0700 "$TMPDIR_SMOKE"
+
+  case "$SMOKE_AUTH_MODE" in
+    api-key)
+      if [[ -n "${CODEWIRE_DEV_SMOKE_API_KEY:-}" ]]; then
+        export CODEWIRE_API_KEY="$CODEWIRE_DEV_SMOKE_API_KEY"
+      elif [[ "$ALLOW_GENERIC_CODEWIRE_API_KEY_FOR_SMOKE" == "1" && -n "${CODEWIRE_API_KEY:-}" ]]; then
+        :
+      else
+        die "CODEWIRE_DEV_SMOKE_API_KEY is required; for local runs use scripts/runtime/dev/with-dev-smoke-auth.sh; set ALLOW_GENERIC_CODEWIRE_API_KEY_FOR_SMOKE=1 only for manual debugging"
+      fi
+      export CW_CONFIG_DIR="$TMPDIR_SMOKE/cw-config"
+      mkdir -p "$CW_CONFIG_DIR"
+      ;;
+    admin-oidc)
+      [[ -z "${CODEWIRE_DEV_SMOKE_API_KEY:-}" && -z "${CODEWIRE_API_KEY:-}" ]] || \
+        die "--admin-oidc refuses inherited API keys"
+      [[ "$ALLOW_GENERIC_CODEWIRE_API_KEY_FOR_SMOKE" == "0" ]] || \
+        die "--admin-oidc refuses ALLOW_GENERIC_CODEWIRE_API_KEY_FOR_SMOKE"
+      if [[ -z "$CODEWIRE_ADMIN_OAUTH_CONFIG_DIR" ]]; then
+        [[ -n "${HOME:-}" ]] || die "--admin-oidc requires HOME or CODEWIRE_ADMIN_OAUTH_CONFIG_DIR"
+        CODEWIRE_ADMIN_OAUTH_CONFIG_DIR="$HOME/.config/cw"
+      fi
+      validate_admin_oauth_config "$CODEWIRE_ADMIN_OAUTH_CONFIG_DIR"
+      export CW_CONFIG_DIR="$CODEWIRE_ADMIN_OAUTH_CONFIG_DIR"
+      ;;
+    *) die "unsupported smoke auth mode: $SMOKE_AUTH_MODE" ;;
+  esac
 
   if [[ -z "$CW_BIN" ]]; then
     require_cmd cargo
@@ -769,7 +801,30 @@ prepare_cli() {
   assert_smoke_principal
 }
 
+validate_admin_oauth_config() {
+  local config_dir="$1"
+  local path mode
+
+  require_cmd stat
+  [[ -d "$config_dir" && ! -L "$config_dir" ]] || \
+    die "--admin-oidc config directory is missing or not a real directory"
+  mode="$(stat -c '%a' "$config_dir")"
+  [[ "$mode" == "700" ]] || die "--admin-oidc config directory must be mode 0700"
+
+  for path in "$config_dir/config.json" "$config_dir/credentials.json"; do
+    [[ -f "$path" && ! -L "$path" ]] || \
+      die "--admin-oidc requires regular config.json and credentials.json files"
+    mode="$(stat -c '%a' "$path")"
+    [[ "$mode" == "600" ]] || \
+      die "--admin-oidc config.json and credentials.json must be mode 0600"
+  done
+}
+
 assert_smoke_principal() {
+  if [[ "$SMOKE_AUTH_MODE" == "admin-oidc" ]]; then
+    assert_admin_oauth_principal
+    return
+  fi
   [[ -n "$EXPECTED_CODEWIRE_SMOKE_USER_EMAIL" ]] || return 0
   require_cmd jq
 
@@ -836,6 +891,44 @@ assert_smoke_principal() {
       ' "$keys_out"; then
     die "authenticated API key does not match the dedicated dev smoke fixture"
   fi
+}
+
+assert_admin_oauth_principal() {
+  require_cmd jq
+
+  local whoami_out="$TMPDIR_SMOKE/admin-whoami.json"
+  local whoami_err="$TMPDIR_SMOKE/admin-whoami.err"
+  if ! cw whoami --output json >"$whoami_out" 2>"$whoami_err"; then
+    sed 's/[[:cntrl:]]//g' "$whoami_err" >&2 || true
+    die "saved admin OIDC login is not usable for the selected server"
+  fi
+  jq -e '
+      type == "object"
+      and ((.id | type) == "string" and (.id | length) > 0)
+      and ((.email | type) == "string" and (.email | length) > 0)
+    ' "$whoami_out" >/dev/null || \
+    die "saved admin OIDC login did not return an account identity"
+  if [[ -n "$EXPECTED_CODEWIRE_ADMIN_EMAIL" ]]; then
+    jq -e --arg email "$EXPECTED_CODEWIRE_ADMIN_EMAIL" '.email == $email' \
+      "$whoami_out" >/dev/null || \
+      die "saved admin OIDC login does not match EXPECTED_CODEWIRE_ADMIN_EMAIL"
+  fi
+
+  local current_org_out="$TMPDIR_SMOKE/admin-current-organization.out"
+  local current_org_err="$TMPDIR_SMOKE/admin-current-organization.err"
+  if ! cw org current >"$current_org_out" 2>"$current_org_err"; then
+    sed 's/[[:cntrl:]]//g' "$current_org_err" >&2 || true
+    die "saved admin OIDC login has no usable current organization"
+  fi
+
+  local environments_out="$TMPDIR_SMOKE/admin-environments.json"
+  local environments_err="$TMPDIR_SMOKE/admin-environments.err"
+  if ! cw env list --output json >"$environments_out" 2>"$environments_err"; then
+    sed 's/[[:cntrl:]]//g' "$environments_err" >&2 || true
+    die "saved admin OIDC login cannot list environments for its current organization"
+  fi
+  jq -e 'type == "array"' "$environments_out" >/dev/null || \
+    die "admin environment list did not return a JSON array"
 }
 
 create_environment() {

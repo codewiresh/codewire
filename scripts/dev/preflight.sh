@@ -168,6 +168,16 @@ selection_has() {
   [[ "$VERIFICATION_SELECTION" == *"|$1|"* ]]
 }
 
+selection_has_any() {
+  local token
+  for token in "$@"; do
+    if selection_has "$token"; then
+      return 0
+    fi
+  done
+  return 1
+}
+
 run_policy_local() {
   local syntax_files=()
   local candidate
@@ -328,12 +338,22 @@ if selection_has database; then
     "$INTEGRATION_RUNNER" database
 fi
 if selection_has service_integration; then
-  run_step "service control-plane verification" env \
-    VERIFICATION_SELECTION="$VERIFICATION_SELECTION" \
-    "$INTEGRATION_RUNNER" services-control
-  run_step "service runtime-plane verification" env \
-    VERIFICATION_SELECTION="$VERIFICATION_SELECTION" \
-    "$INTEGRATION_RUNNER" services-runtime
+  integration_lane_selected=false
+  if selection_has_any service_apikey_smoke service_idp service_coordinator \
+      service_billing service_connectcore; then
+    integration_lane_selected=true
+    run_step "service control-plane verification" env \
+      VERIFICATION_SELECTION="$VERIFICATION_SELECTION" \
+      "$INTEGRATION_RUNNER" services-control
+  fi
+  if selection_has_any service_orchestration service_nats; then
+    integration_lane_selected=true
+    run_step "service runtime-plane verification" env \
+      VERIFICATION_SELECTION="$VERIFICATION_SELECTION" \
+      "$INTEGRATION_RUNNER" services-runtime
+  fi
+  [[ "$integration_lane_selected" == true ]] || \
+    fail "service integration selected without a service scope"
 fi
 
 run_selected_family transport transport "Rust transport verification"

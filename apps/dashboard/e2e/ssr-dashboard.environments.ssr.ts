@@ -24,6 +24,10 @@ const aiRepositoryUrl = "https://github.com/noeljackson/stocks";
 // Immutable workspace image accepted by the Connect-RPC C2 runtime evidence.
 // This browser proof must never turn a floating registry tag into a test input.
 const workspaceImage = "ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467";
+// Sealed Kind runs side-load the Forgejo-proven workspace under a disposable
+// local alias. Only the test-owned preset may use that alias; browser assertions
+// above the product's canonical workspace choice continue to use workspaceImage.
+const workspaceRuntimeImage = process.env.PLAYWRIGHT_RUNTIME_WORKSPACE_IMAGE || workspaceImage;
 
 let ownerId = "";
 let orgId = "";
@@ -138,7 +142,7 @@ async function seedPinnedPreset() {
     INSERT INTO sandbox_template_config
       (preset_id, image_ref, sandbox_template_name, warm_pool_size, persistent_storage)
     VALUES
-      (${presetId}, ${workspaceImage}, ${`ssr-environment-${runId}`}, 0, false)
+      (${presetId}, ${workspaceRuntimeImage}, ${`ssr-environment-${runId}`}, 0, false)
   `;
   await sql`
     INSERT INTO repo_configs (id, org_id, repo_url, preset_id, setup_config, created_by)
