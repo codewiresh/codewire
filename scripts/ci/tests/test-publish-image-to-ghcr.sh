@@ -40,19 +40,14 @@ chmod 0600 "$1" "$2"
 printf '%s\t%s\n' "$1" "$2" >>"${FAKE_NEXUS_FETCH_CALLS:?}"
 EOF
 
-cat >"$work/bin/fetch-secret" <<'EOF'
+cat >"$work/bin/fetch-ghcr" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-if [ "${FAKE_FETCH_FAIL_NAME:-}" = "$1" ]; then
-  exit 1
-fi
-case "$1" in
-  GHCR_PUBLISH_TOKEN) value="${FAKE_GHCR_TOKEN:?}" ;;
-  *) exit 1 ;;
-esac
-printf '%s' "$value" >"$2"
-chmod 0600 "$2"
-printf '%s\t%s\n' "$1" "$2" >>"${FAKE_FETCH_CALLS:?}"
+[ "${FAKE_GHCR_FETCH_FAIL:-0}" != 1 ] || exit 1
+printf '%s' "${FAKE_GHCR_USERNAME:?}" >"$1"
+printf '%s' "${FAKE_GHCR_TOKEN:?}" >"$2"
+chmod 0600 "$1" "$2"
+printf '%s\t%s\n' "$1" "$2" >>"${FAKE_GHCR_FETCH_CALLS:?}"
 EOF
 
 cat >"$work/bin/copy-image" <<'EOF'
@@ -108,18 +103,18 @@ case "$1" in
   *) exit 1 ;;
 esac
 EOF
-chmod +x "$work/bin/fetch-nexus" "$work/bin/fetch-secret" "$work/bin/copy-image" "$work/bin/skopeo-runner"
+chmod +x "$work/bin/fetch-nexus" "$work/bin/fetch-ghcr" "$work/bin/copy-image" "$work/bin/skopeo-runner"
 
 export OPENBAO_NEXUS_CREDENTIAL_FETCHER="$work/bin/fetch-nexus"
-export INFISICAL_SECRET_FETCHER="$work/bin/fetch-secret"
+export OPENBAO_GHCR_CREDENTIAL_FETCHER="$work/bin/fetch-ghcr"
 export GHCR_COPY_HELPER="$work/bin/copy-image"
 export SKOPEO_RUNNER="$work/bin/skopeo-runner"
-export GHCR_PUBLISH_USERNAME='codewire-package-publisher'
 export FAKE_NEXUS_USERNAME="$nexus_username"
 export FAKE_NEXUS_PASSWORD="$nexus_password"
+export FAKE_GHCR_USERNAME='codewire-package-publisher'
 export FAKE_GHCR_TOKEN="$ghcr_token"
 export FAKE_NEXUS_FETCH_CALLS="$work/nexus-fetch-calls"
-export FAKE_FETCH_CALLS="$work/fetch-calls"
+export FAKE_GHCR_FETCH_CALLS="$work/ghcr-fetch-calls"
 export FAKE_COPY_CALLS="$work/copy-calls"
 export FAKE_COPY_COUNTER="$work/copy-counter"
 export FAKE_SKOPEO_CALLS="$work/skopeo-calls"
@@ -132,24 +127,25 @@ export GITHUB_OUTPUT="$work/output"
 
 [[ "$(wc -l <"$FAKE_NEXUS_FETCH_CALLS")" -eq 1 ]] ||
   fail 'paired Nexus credential was not fetched exactly once'
-grep -q '^GHCR_PUBLISH_TOKEN'$'\t' "$FAKE_FETCH_CALLS" ||
-  fail 'GHCR credential was not fetched'
+[[ "$(wc -l <"$FAKE_GHCR_FETCH_CALLS")" -eq 1 ]] ||
+  fail 'paired GHCR credential was not fetched exactly once'
 grep -qxF "$source_ref $target_repository $source_sha" "$FAKE_COPY_CALLS" ||
   fail 'exact copy arguments changed'
 grep -qxF "inspect --no-creds --format {{.Digest}} docker://$target_repository@$expected_digest" \
   "$FAKE_SKOPEO_CALLS" || fail 'anonymous digest verification is absent'
 grep -qxF "ghcr_public_ref=$target_repository@$expected_digest" "$GITHUB_OUTPUT" ||
   fail 'public digest output is absent'
-while IFS=$'\t' read -r _ token_file; do
+while IFS=$'\t' read -r username_file token_file; do
+  [ ! -e "$username_file" ] || fail 'private GHCR username file survived publication'
   [ ! -e "$token_file" ] || fail 'private credential file survived publication'
-done <"$FAKE_FETCH_CALLS"
+done <"$FAKE_GHCR_FETCH_CALLS"
 while IFS=$'\t' read -r username_file password_file; do
   [ ! -e "$username_file" ] || fail 'private Nexus username file survived publication'
   [ ! -e "$password_file" ] || fail 'private Nexus password file survived publication'
 done <"$FAKE_NEXUS_FETCH_CALLS"
-if grep -qF "$nexus_username" "$FAKE_FETCH_CALLS" "$FAKE_COPY_CALLS" \
-  || grep -qF "$nexus_password" "$FAKE_FETCH_CALLS" "$FAKE_COPY_CALLS" \
-  || grep -qF "$ghcr_token" "$FAKE_FETCH_CALLS" "$FAKE_COPY_CALLS"; then
+if grep -qF "$nexus_username" "$FAKE_GHCR_FETCH_CALLS" "$FAKE_COPY_CALLS" \
+  || grep -qF "$nexus_password" "$FAKE_GHCR_FETCH_CALLS" "$FAKE_COPY_CALLS" \
+  || grep -qF "$ghcr_token" "$FAKE_GHCR_FETCH_CALLS" "$FAKE_COPY_CALLS"; then
   fail 'a registry token reached command arguments'
 fi
 
@@ -167,29 +163,29 @@ fi
   fail 'copy failure reached anonymous verification'
 
 copy_calls_before="$(wc -l <"$FAKE_COPY_CALLS")"
-if FAKE_FETCH_FAIL_NAME=GHCR_PUBLISH_TOKEN "$PUBLISH_IMAGE" "$source_ref" \
+if FAKE_GHCR_FETCH_FAIL=1 "$PUBLISH_IMAGE" "$source_ref" \
     "$target_repository" "$source_sha" >"$work/fetch-failure.out" 2>&1; then
   fail 'credential fetch failure was accepted'
 fi
 [[ "$(wc -l <"$FAKE_COPY_CALLS")" -eq "$copy_calls_before" ]] ||
   fail 'credential fetch failure reached the copy helper'
 
-fetch_calls_before="$(wc -l <"$FAKE_FETCH_CALLS")"
+fetch_calls_before="$(wc -l <"$FAKE_GHCR_FETCH_CALLS")"
 if "$PUBLISH_IMAGE" 'nexus-system-cluster.example.invalid/oci-promoted/codewire/gateway:latest' \
     "$target_repository" "$source_sha" >"$work/moving-source.out" 2>&1; then
   fail 'moving source reference was accepted'
 fi
-[[ "$(wc -l <"$FAKE_FETCH_CALLS")" -eq "$fetch_calls_before" ]] ||
+[[ "$(wc -l <"$FAKE_GHCR_FETCH_CALLS")" -eq "$fetch_calls_before" ]] ||
   fail 'invalid source reference reached credential retrieval'
 
 if "$PUBLISH_IMAGE" "$source_ref" 'ghcr.io/codewiresh/services' \
     "$source_sha" >"$work/family-mismatch.out" 2>&1; then
   fail 'source and destination family mismatch was accepted'
 fi
-[[ "$(wc -l <"$FAKE_FETCH_CALLS")" -eq "$fetch_calls_before" ]] ||
+[[ "$(wc -l <"$FAKE_GHCR_FETCH_CALLS")" -eq "$fetch_calls_before" ]] ||
   fail 'family mismatch reached credential retrieval'
 
-: >"$FAKE_FETCH_CALLS"
+: >"$FAKE_GHCR_FETCH_CALLS"
 : >"$FAKE_COPY_CALLS"
 : >"$FAKE_COPY_COUNTER"
 : >"$FAKE_SKOPEO_CALLS"
@@ -219,7 +215,7 @@ grep -qxF "workspace_ghcr_public_ref=$workspace_repository@$workspace_digest" \
   "$GITHUB_OUTPUT" || fail 'support workspace immutable receipt is absent'
 
 for unavailable_repository in "$base_repository" "$workspace_repository"; do
-  : >"$FAKE_FETCH_CALLS"
+  : >"$FAKE_GHCR_FETCH_CALLS"
   : >"$FAKE_COPY_CALLS"
   : >"$FAKE_COPY_COUNTER"
   : >"$FAKE_SKOPEO_CALLS"
@@ -229,13 +225,13 @@ for unavailable_repository in "$base_repository" "$workspace_repository"; do
         >"$work/preflight-failure.out" 2>&1; then
     fail "unreadable support package was accepted: $unavailable_repository"
   fi
-  [[ ! -s "$FAKE_FETCH_CALLS" ]] ||
+  [[ ! -s "$FAKE_GHCR_FETCH_CALLS" ]] ||
     fail "unreadable support package reached credential retrieval: $unavailable_repository"
   [[ ! -s "$FAKE_COPY_CALLS" ]] ||
     fail "unreadable support package caused GHCR mutation: $unavailable_repository"
 done
 
-: >"$FAKE_FETCH_CALLS"
+: >"$FAKE_GHCR_FETCH_CALLS"
 : >"$FAKE_COPY_CALLS"
 : >"$FAKE_COPY_COUNTER"
 : >"$FAKE_SKOPEO_CALLS"

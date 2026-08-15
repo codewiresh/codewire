@@ -49,13 +49,12 @@ else
     exit 1
   fi
 fi
-: "${GHCR_PUBLISH_USERNAME:?GHCR_PUBLISH_USERNAME is required}"
 
 nexus_fetcher="${OPENBAO_NEXUS_CREDENTIAL_FETCHER:-scripts/ci/setup/fetch-openbao-nexus-credentials.sh}"
-secret_fetcher="${INFISICAL_SECRET_FETCHER:-scripts/ci/setup/fetch-infisical-ci-secret.sh}"
+ghcr_fetcher="${OPENBAO_GHCR_CREDENTIAL_FETCHER:-scripts/ci/setup/fetch-openbao-ghcr-credentials.sh}"
 copy_helper="${GHCR_COPY_HELPER:-scripts/ci/images/copy-image-to-ghcr.sh}"
 skopeo_runner="${SKOPEO_RUNNER:-scripts/ci/images/run-skopeo-container.sh}"
-for helper in "$nexus_fetcher" "$secret_fetcher" "$copy_helper"; do
+for helper in "$nexus_fetcher" "$ghcr_fetcher" "$copy_helper"; do
   if [ ! -x "$helper" ]; then
     echo "Required GHCR publication helper is missing or not executable" >&2
     exit 1
@@ -80,6 +79,7 @@ umask 077
 work="$(mktemp -d)"
 nexus_username_file="$work/nexus-username"
 nexus_password_file="$work/nexus-password"
+ghcr_username_file="$work/ghcr-publish-username"
 ghcr_token_file="$work/ghcr-publish-token"
 cleanup() {
   find "$work" -type f -exec shred -u {} + 2>/dev/null || true
@@ -88,11 +88,12 @@ cleanup() {
 trap cleanup EXIT
 
 "$nexus_fetcher" "$nexus_username_file" "$nexus_password_file"
-"$secret_fetcher" GHCR_PUBLISH_TOKEN "$ghcr_token_file"
+"$ghcr_fetcher" "$ghcr_username_file" "$ghcr_token_file"
 
 copy_image() {
   NEXUS_REGISTRY_USERNAME_FILE="$nexus_username_file" \
   NEXUS_REGISTRY_PASSWORD_FILE="$nexus_password_file" \
+  GHCR_PUBLISH_USERNAME="$(<"$ghcr_username_file")" \
   GHCR_PUBLISH_TOKEN_FILE="$ghcr_token_file" \
     "$copy_helper" "$@"
 }
@@ -125,7 +126,8 @@ if [ "$support_pair" = true ]; then
   copy_image "$base_source_ref" "$base_repository" latest
   copy_image "$workspace_source_ref" "$workspace_repository" latest
 
-  for token_file in "$nexus_username_file" "$nexus_password_file" "$ghcr_token_file"; do
+  for token_file in "$nexus_username_file" "$nexus_password_file" \
+      "$ghcr_username_file" "$ghcr_token_file"; do
     shred -u "$token_file" 2>/dev/null || rm -f "$token_file"
   done
 
@@ -143,7 +145,8 @@ fi
 
 copy_image "$@"
 
-for token_file in "$nexus_username_file" "$nexus_password_file" "$ghcr_token_file"; do
+for token_file in "$nexus_username_file" "$nexus_password_file" \
+    "$ghcr_username_file" "$ghcr_token_file"; do
   shred -u "$token_file" 2>/dev/null || rm -f "$token_file"
 done
 

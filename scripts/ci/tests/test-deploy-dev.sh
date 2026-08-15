@@ -92,9 +92,13 @@ done
 publish_job="$(sed -n '/^  publish-runtime-images:/,/^  dispatch-deploy-dev:/p' "$WORKFLOW")"
 grep -Fq "if: \${{ needs.deploy-selection.outputs.deploy_dev == 'true' }}" \
   <<<"$publish_job" || fail "all-unaffected selection does not skip runtime publication"
-# shellcheck disable=SC2016
-grep -Fq 'GHCR_PUBLISH_USERNAME: ${{ vars.GHCR_PUBLISH_USERNAME }}' \
-  <<<"$publish_job" || fail "runtime publisher identity is not repository configuration"
+grep -Fq 'OPENBAO_GHCR_ROLE: codewire-source-dev-ghcr-publisher' \
+  "$WORKFLOW" || fail "runtime publisher lacks its exact OpenBao GHCR role"
+grep -Fq 'OPENBAO_GHCR_AUDIENCE: openbao-codewire-source-dev-ghcr-publisher' \
+  "$WORKFLOW" || fail "runtime publisher lacks its exact OpenBao GHCR audience"
+if grep -Fq 'GHCR_PUBLISH_USERNAME:' "$WORKFLOW"; then
+  fail "runtime publisher retains a split Forgejo GHCR username"
+fi
 [[ "$(grep -Fc 'scripts/ci/images/publish-image-to-ghcr.sh' <<<"$publish_job")" -eq 5 ]] ||
   fail "runtime publisher does not copy exactly five image families"
 if grep -Fq 'outputs.source_sha' <<<"$publish_job"; then

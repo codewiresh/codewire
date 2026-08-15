@@ -20,6 +20,8 @@ enable-openid-connect: true
 env:
   OPENBAO_ROLE: codewire-source-prod-publisher
   OPENBAO_AUDIENCE: openbao-codewire-source-prod-publisher
+  OPENBAO_GHCR_ROLE: codewire-source-prod-ghcr-publisher
+  OPENBAO_GHCR_AUDIENCE: openbao-codewire-source-prod-ghcr-publisher
 
 jobs:
   release-selection:
@@ -241,7 +243,6 @@ jobs:
         env:
           RELEASE_TAG: ${{ needs.release-selection.outputs.release_tag }}
           SOURCE_SHA: ${{ needs.release-selection.outputs.source_sha }}
-          GHCR_PUBLISH_USERNAME: ${{ vars.GHCR_PUBLISH_USERNAME }}
         run: |
           set -euo pipefail
           scripts/ci/images/publish-image-to-ghcr.sh \
@@ -278,7 +279,6 @@ jobs:
         env:
           RELEASE_TAG: ${{ needs.release-selection.outputs.release_tag }}
           SOURCE_SHA: ${{ needs.release-selection.outputs.source_sha }}
-          GHCR_PUBLISH_USERNAME: ${{ vars.GHCR_PUBLISH_USERNAME }}
         run: |
           set -euo pipefail
           bundle="${RUNNER_TEMP:?}/codewire-prod-image-bundle.json"

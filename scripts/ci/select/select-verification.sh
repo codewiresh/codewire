@@ -1038,6 +1038,7 @@ if [ "$event_selected" = false ]; then
       scripts/ci/images/copy-image-to-ghcr.sh|\
       scripts/ci/deploy/dispatch-deploy-dev.sh|scripts/ci/deploy/dispatch-deploy-prod.sh|\
       scripts/ci/setup/fetch-infisical-ci-secret.sh|\
+      scripts/ci/setup/fetch-openbao-ghcr-credentials.sh|\
       scripts/ci/setup/fetch-openbao-nexus-credentials.sh|\
       scripts/ci/images/publish-image-to-ghcr.sh|\
       scripts/ci/images/resolve-published-support-pair.sh|\
@@ -1058,6 +1059,7 @@ if [ "$event_selected" = false ]; then
       scripts/ci/tests/test-build-push-image.sh|\
       scripts/ci/tests/test-claude-e2e-workflow.sh|\
       scripts/ci/tests/test-fetch-infisical-ci-secret.sh|\
+      scripts/ci/tests/test-fetch-openbao-ghcr-credentials.sh|\
       scripts/ci/tests/test-fetch-openbao-nexus-credentials.sh|\
       scripts/ci/tests/test-forgejo-action-mirrors.sh|\
       scripts/ci/tests/test-nexus-runtime-pull-contract.sh|\
