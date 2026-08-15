@@ -58,9 +58,16 @@ fi
 if [ -z "${APPROVED_KIND_INGRESS_CERTGEN_IMAGE+x}" ]; then
   APPROVED_KIND_INGRESS_CERTGEN_IMAGE='nexus-system-cluster.example.invalid/oci-approved/ingress-nginx/kube-webhook-certgen@sha256:334191231352856e1ec0c3e50f966edb59ec94a51906453d09f5820789e8b053'
 fi
+if [ -z "${KIND_INGRESS_CONTROLLER_LOCAL_IMAGE+x}" ]; then
+  KIND_INGRESS_CONTROLLER_LOCAL_IMAGE='localhost/codewire-ci/ingress-nginx-controller:verified-5c2a1b6c03c4d18ecf14685d21a32bf6763a022f6f8cc07e9578f6cd5eca6180'
+fi
+if [ -z "${KIND_INGRESS_CERTGEN_LOCAL_IMAGE+x}" ]; then
+  KIND_INGRESS_CERTGEN_LOCAL_IMAGE='localhost/codewire-ci/ingress-kube-webhook-certgen:verified-334191231352856e1ec0c3e50f966edb59ec94a51906453d09f5820789e8b053'
+fi
 readonly KIND_WORKSPACE_IMAGE KIND_DIND_IMAGE \
   KIND_INGRESS_CONTROLLER_IMAGE KIND_INGRESS_CERTGEN_IMAGE \
-  APPROVED_KIND_INGRESS_CONTROLLER_IMAGE APPROVED_KIND_INGRESS_CERTGEN_IMAGE
+  APPROVED_KIND_INGRESS_CONTROLLER_IMAGE APPROVED_KIND_INGRESS_CERTGEN_IMAGE \
+  KIND_INGRESS_CONTROLLER_LOCAL_IMAGE KIND_INGRESS_CERTGEN_LOCAL_IMAGE
 
 log() {
   printf '[kind-e2e] %s\n' "$*"
@@ -635,7 +642,7 @@ validate_sealed_kind_ingress_images() {
 }
 
 load_images_into_kind() {
-  local image
+  local image sealed source alias
 
   # Importing several release images back-to-back can make the nested
   # kube-apiserver temporarily unavailable while containerd commits layers.
@@ -656,15 +663,23 @@ load_images_into_kind() {
     # repository-controlled workflow starts. This process receives neither a
     # registry credential nor public-registry egress; it can only prove and
     # side-load the two exact local references into the disposable Kind node.
-    for image in \
-        "$KIND_INGRESS_CONTROLLER_IMAGE" \
-        "$KIND_INGRESS_CERTGEN_IMAGE"; do
-      if ! docker image inspect "$image" >/dev/null 2>&1; then
-        echo "::error::approved Kind ingress image was not preloaded by the runner boundary: ${image}"
+    for sealed in \
+        "$KIND_INGRESS_CONTROLLER_IMAGE|$KIND_INGRESS_CONTROLLER_LOCAL_IMAGE" \
+        "$KIND_INGRESS_CERTGEN_IMAGE|$KIND_INGRESS_CERTGEN_LOCAL_IMAGE"; do
+      source="${sealed%%|*}"
+      alias="${sealed#*|}"
+      if ! docker image inspect "$source" >/dev/null 2>&1; then
+        echo "::error::approved Kind ingress image was not preloaded by the runner boundary: ${source}"
         return 1
       fi
+      # A digest-only Docker image has no RepoTag in the archive consumed by
+      # `kind load docker-image`. Give the content a deterministic disposable
+      # name after proving the exact approved digest, then render only that
+      # side-loaded name with imagePullPolicy Never. No registry credential is
+      # copied into the nested cluster.
+      docker image tag "$source" "$alias"
       log "loading approved ingress image into kind"
-      kind load docker-image --name "$KIND_CLUSTER_NAME" "$image"
+      kind load docker-image --name "$KIND_CLUSTER_NAME" "$alias"
       wait_for_kind_api_after_image_load
     done
   elif [ -n "${KIND_INGRESS_CONTROLLER_IMAGE}${KIND_INGRESS_CERTGEN_IMAGE}" ]; then
@@ -678,24 +693,25 @@ render_ingress_manifest() {
 
   if validate_sealed_kind_ingress_images; then
     python3 - "$source" "$rendered" \
-      "$KIND_INGRESS_CONTROLLER_IMAGE" "$KIND_INGRESS_CERTGEN_IMAGE" <<'PY'
+      "$KIND_INGRESS_CONTROLLER_LOCAL_IMAGE" "$KIND_INGRESS_CERTGEN_LOCAL_IMAGE" <<'PY'
 from pathlib import Path
 import sys
 
 source, rendered, controller, certgen = sys.argv[1:]
 text = Path(source).read_text()
 replacements = {
-    "registry.k8s.io/ingress-nginx/controller:v1.12.1@sha256:d2fbc4ec70d8aa2050dd91a91506e998765e86c96f32cffb56c503c9c34eed5b": controller,
-    "registry.k8s.io/ingress-nginx/kube-webhook-certgen:v1.5.2@sha256:e8825994b7a2c7497375a9b945f386506ca6a3eda80b89b74ef2db743f66a5ea": certgen,
+    "registry.k8s.io/ingress-nginx/controller:v1.12.1@sha256:d2fbc4ec70d8aa2050dd91a91506e998765e86c96f32cffb56c503c9c34eed5b": (controller, 1),
+    "registry.k8s.io/ingress-nginx/kube-webhook-certgen:v1.5.2@sha256:e8825994b7a2c7497375a9b945f386506ca6a3eda80b89b74ef2db743f66a5ea": (certgen, 2),
 }
-expected_counts = {next(iter(replacements)): 1, list(replacements)[1]: 2}
-for old, expected_count in expected_counts.items():
-    actual_count = text.count(old)
+for old, (new, expected_count) in replacements.items():
+    old_block = f"image: {old}\n        imagePullPolicy: IfNotPresent"
+    actual_count = text.count(old_block)
     if actual_count != expected_count:
         raise SystemExit(
             f"vendored ingress image occurrence mismatch: expected {expected_count}, got {actual_count}"
         )
-    text = text.replace(old, replacements[old])
+    new_block = f"image: {new}\n        imagePullPolicy: Never"
+    text = text.replace(old_block, new_block)
 Path(rendered).write_text(text)
 PY
     printf '%s\n' "$rendered"

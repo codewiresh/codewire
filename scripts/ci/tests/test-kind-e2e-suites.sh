@@ -178,7 +178,10 @@ source "$COMMON"
 # temporarily starved control plane from accumulating four back-to-back imports.
 : >"$CALLS"
 docker() {
-  [ "${1:-} ${2:-}" = 'image inspect' ] || fail "unexpected Docker invocation: $*"
+  case "${1:-} ${2:-}" in
+    'image inspect'|'image tag') ;;
+    *) fail "unexpected Docker invocation: $*" ;;
+  esac
 }
 kind() { record "kind:$*"; }
 wait_for_kind_api_after_image_load() { record wait-api; }
@@ -197,9 +200,9 @@ EOF
 if [ -n "${KIND_INGRESS_CONTROLLER_IMAGE:-}" ] \
     && [ -n "${KIND_INGRESS_CERTGEN_IMAGE:-}" ]; then
   cat >>"$FIXTURE/want-image-load-order" <<EOF
-kind:load docker-image --name ${KIND_CLUSTER_NAME} ${KIND_INGRESS_CONTROLLER_IMAGE}
+kind:load docker-image --name ${KIND_CLUSTER_NAME} ${KIND_INGRESS_CONTROLLER_LOCAL_IMAGE}
 wait-api
-kind:load docker-image --name ${KIND_CLUSTER_NAME} ${KIND_INGRESS_CERTGEN_IMAGE}
+kind:load docker-image --name ${KIND_CLUSTER_NAME} ${KIND_INGRESS_CERTGEN_LOCAL_IMAGE}
 wait-api
 EOF
 fi
@@ -221,7 +224,10 @@ env \
   # shellcheck source=scripts/ci/verify/kind/common.sh
   source "$COMMON"
   docker() {
-    [ "${1:-} ${2:-}" = 'image inspect' ] || fail "unexpected sealed Docker invocation: $*"
+    case "${1:-} ${2:-}" in
+      'image inspect'|'image tag') ;;
+      *) fail "unexpected sealed Docker invocation: $*" ;;
+    esac
     record "docker:$*"
   }
   kind() { record "kind:$*"; }
@@ -229,10 +235,15 @@ env \
   log() { :; }
   load_images_into_kind
   rendered="$(render_ingress_manifest)"
-  [ "$(grep -Fc "$KIND_INGRESS_CONTROLLER_IMAGE" "$rendered")" -eq 1 ] ||
-    fail 'sealed ingress render does not contain the exact controller once'
-  [ "$(grep -Fc "$KIND_INGRESS_CERTGEN_IMAGE" "$rendered")" -eq 2 ] ||
-    fail 'sealed ingress render does not contain the exact certgen twice'
+  [ "$(grep -Fc "$KIND_INGRESS_CONTROLLER_LOCAL_IMAGE" "$rendered")" -eq 1 ] ||
+    fail 'sealed ingress render does not contain the local controller once'
+  [ "$(grep -Fc "$KIND_INGRESS_CERTGEN_LOCAL_IMAGE" "$rendered")" -eq 2 ] ||
+    fail 'sealed ingress render does not contain the local certgen twice'
+  [ "$(grep -Fc 'imagePullPolicy: Never' "$rendered")" -eq 3 ] ||
+    fail 'sealed ingress render does not prohibit registry pulls'
+  if grep -Fq 'nexus-system-cluster.example.invalid/oci-approved/ingress-nginx/' "$rendered"; then
+    fail 'sealed ingress render retained a private registry reference'
+  fi
   if grep -Fq 'registry.k8s.io/ingress-nginx/' "$rendered"; then
     fail 'sealed ingress render retained a public registry image'
   fi
@@ -241,6 +252,10 @@ grep -Fq "docker:image inspect nexus-system-cluster.example.invalid/oci-approved
   fail 'sealed controller was not proven in the runner-preloaded Docker store'
 grep -Fq "docker:image inspect nexus-system-cluster.example.invalid/oci-approved/ingress-nginx/kube-webhook-certgen@sha256:334191231352856e1ec0c3e50f966edb59ec94a51906453d09f5820789e8b053" "$CALLS" ||
   fail 'sealed certgen was not proven in the runner-preloaded Docker store'
+grep -Fq "docker:image tag nexus-system-cluster.example.invalid/oci-approved/ingress-nginx/controller@sha256:5c2a1b6c03c4d18ecf14685d21a32bf6763a022f6f8cc07e9578f6cd5eca6180 localhost/codewire-ci/ingress-nginx-controller:verified-5c2a1b6c03c4d18ecf14685d21a32bf6763a022f6f8cc07e9578f6cd5eca6180" "$CALLS" ||
+  fail 'sealed controller was not assigned its disposable Kind reference'
+grep -Fq "docker:image tag nexus-system-cluster.example.invalid/oci-approved/ingress-nginx/kube-webhook-certgen@sha256:334191231352856e1ec0c3e50f966edb59ec94a51906453d09f5820789e8b053 localhost/codewire-ci/ingress-kube-webhook-certgen:verified-334191231352856e1ec0c3e50f966edb59ec94a51906453d09f5820789e8b053" "$CALLS" ||
+  fail 'sealed certgen was not assigned its disposable Kind reference'
 
 grep -Fq 'KIND_INGRESS_CONTROLLER_IMAGE: nexus-system-cluster.example.invalid/oci-approved/ingress-nginx/controller@sha256:5c2a1b6c03c4d18ecf14685d21a32bf6763a022f6f8cc07e9578f6cd5eca6180' \
   "$ROOT/.gitea/workflows/ci.yaml" || fail 'Forgejo CI does not select the approved ingress controller'
