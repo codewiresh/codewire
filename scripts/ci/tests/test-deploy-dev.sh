@@ -50,10 +50,9 @@ classifier_line="$(grep -n -m1 'name: Plan and select atomic Dev deployment' \
   fail "deploy selection verifies Rust after artifact classification"
 grep -Fq "scripts/ci/deploy/resolve-deployed-source.sh \"\$candidate\" \"\$GITHUB_SHA\"" \
   <<<"$selection_job" || fail "deploy selection does not resolve an exact-head candidate"
-# shellcheck disable=SC2016
-[[ "$(grep -Fc 'CODEWIRE_DEPLOY_PROMOTION_TOKEN: ${{ secrets.CODEWIRE_DEPLOY_PROMOTION_TOKEN }}' \
-  <<<"$selection_job")" -eq 1 ]] ||
-  fail "baseline resolver credential has an unexpected consumer count"
+if grep -Fq 'CODEWIRE_DEPLOY_PROMOTION_TOKEN' <<<"$selection_job"; then
+  fail "baseline resolver retains the retired static deploy credential"
+fi
 grep -Fq -- "--deployed-source-candidate \"\$RUNNER_TEMP/codewire-deployed-source-candidate.json\"" \
   <<<"$selection_job" || fail "planner is not bound to the resolved candidate"
 grep -Fq -- "--target-base \"\$GITHUB_SHA\"" <<<"$selection_job" ||
@@ -147,13 +146,19 @@ grep -Fq "needs.publish-runtime-images.result == 'success'" <<<"$dispatch_job" |
   fail "deploy dispatch does not require successful exact GHCR publication"
 grep -Fq "github.ref == 'refs/heads/main'" <<<"$dispatch_job" ||
   fail "deploy dispatch is not restricted to canonical main"
-# shellcheck disable=SC2016
-[[ "$(grep -Fc 'CODEWIRE_DEPLOY_PROMOTION_TOKEN: ${{ secrets.CODEWIRE_DEPLOY_PROMOTION_TOKEN }}' \
-  <<<"$dispatch_job")" -eq 1 ]] ||
-  fail "deploy dispatch credential has an unexpected consumer count"
-[[ "$(grep -Fc 'CODEWIRE_DEPLOY_PROMOTION_TOKEN: ${{ secrets.CODEWIRE_DEPLOY_PROMOTION_TOKEN }}' \
-  "$WORKFLOW")" -eq 2 ]] ||
-  fail "deploy credential must be isolated to baseline read and SHA-only dispatch"
+if grep -Fq 'CODEWIRE_DEPLOY_PROMOTION_TOKEN' "$WORKFLOW"; then
+  fail "Dev delivery retains the retired static deploy credential"
+fi
+for dev_dispatch_source in \
+  "$ROOT/scripts/ci/deploy/dispatch-deploy-dev.sh" \
+  "$ROOT/scripts/ci/deploy/resolve-deployed-source.sh" \
+  "$ROOT/scripts/ci/setup/fetch-forgejo-deploy-dev-token.sh"; do
+  if grep -Fq 'CODEWIRE_DEPLOY_PROMOTION_TOKEN' "$dev_dispatch_source"; then
+    fail "Dev dispatch source retains the retired static deploy credential"
+  fi
+done
+grep -Fq 'enable-openid-connect: true' "$WORKFLOW" ||
+  fail "Dev delivery cannot request its short-lived Authorized Integration JWT"
 # shellcheck disable=SC2016
 grep -Fq 'scripts/ci/deploy/dispatch-deploy-dev.sh "${GITHUB_SHA:?}"' <<<"$dispatch_job" ||
   fail "deploy dispatch sends anything other than the workflow source SHA"

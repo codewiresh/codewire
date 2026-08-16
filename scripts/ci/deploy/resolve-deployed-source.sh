@@ -58,13 +58,6 @@ fail_safe() {
   exit 0
 }
 
-deploy_token="${CODEWIRE_DEPLOY_PROMOTION_TOKEN:-}"
-unset CODEWIRE_DEPLOY_PROMOTION_TOKEN
-[[ "$deploy_token" =~ ^[A-Za-z0-9._~-]{20,512}$ ]] || {
-  deploy_token=''
-  fail_safe token_unavailable
-}
-
 curl_bin="${CURL_BIN:-curl}"
 if [[ "$curl_bin" == */* ]]; then
   [[ -x "$curl_bin" ]] || fail_safe curl_unavailable
@@ -74,16 +67,25 @@ fi
 
 work="$(mktemp -d)"
 auth_header="$work/auth-header"
+token_file="$work/token"
 response_body="$work/response.json"
 cleanup() {
-  deploy_token=''
   find "$work" -type f -exec shred -u {} + 2>/dev/null || true
   rm -rf "$work"
 }
 trap cleanup EXIT
 
-printf 'Authorization: token %s\n' "$deploy_token" >"$auth_header"
-deploy_token=''
+if ! "$(dirname "$0")/../setup/fetch-forgejo-deploy-dev-token.sh" "$token_file"; then
+  unset ACTIONS_ID_TOKEN_REQUEST_TOKEN
+  fail_safe oidc_unavailable
+fi
+unset ACTIONS_ID_TOKEN_REQUEST_TOKEN
+{
+  printf 'Authorization: Bearer '
+  tr -d '\n' <"$token_file"
+  printf '\n'
+} >"$auth_header"
+shred -u "$token_file"
 
 if ! status="$(
   "$curl_bin" --silent --show-error \

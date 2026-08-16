@@ -1011,6 +1011,7 @@ if [ "$event_selected" = false ]; then
       scripts/ci/deploy/*.sh|scripts/ci/*observe*.sh|scripts/ci/*observe*.py|\
       scripts/ci/*observer*.tsv|\
       scripts/ci/*promot*.sh|scripts/ci/*promot*.py|\
+      scripts/ci/setup/fetch-forgejo-deploy-dev-token.sh|\
       scripts/ci/deploy/dispatch-deploy-dev.sh|scripts/ci/deploy/dispatch-deploy-prod.sh|\
       scripts/ci/tests/test-ci-tool-downloads.sh|\
       scripts/ci/tests/test-deploy-*.sh|scripts/ci/tests/test-dispatch-deploy-*.sh)
@@ -1038,6 +1039,7 @@ if [ "$event_selected" = false ]; then
       scripts/ci/images/copy-image-to-ghcr.sh|\
       scripts/ci/deploy/dispatch-deploy-dev.sh|scripts/ci/deploy/dispatch-deploy-prod.sh|\
       scripts/ci/setup/fetch-infisical-ci-secret.sh|\
+      scripts/ci/setup/fetch-forgejo-deploy-dev-token.sh|\
       scripts/ci/setup/fetch-openbao-ghcr-credentials.sh|\
       scripts/ci/setup/fetch-openbao-nexus-credentials.sh|\
       scripts/ci/images/publish-image-to-ghcr.sh|\
@@ -1059,6 +1061,7 @@ if [ "$event_selected" = false ]; then
       scripts/ci/tests/test-build-push-image.sh|\
       scripts/ci/tests/test-claude-e2e-workflow.sh|\
       scripts/ci/tests/test-fetch-infisical-ci-secret.sh|\
+      scripts/ci/tests/test-fetch-forgejo-deploy-dev-token.sh|\
       scripts/ci/tests/test-fetch-openbao-ghcr-credentials.sh|\
       scripts/ci/tests/test-fetch-openbao-nexus-credentials.sh|\
       scripts/ci/tests/test-forgejo-action-mirrors.sh|\
@@ -1079,6 +1082,15 @@ if [ "$event_selected" = false ]; then
       apps/cli/aur/PKGBUILD|apps/cli/nfpm.yaml|\
       apps/cli/scripts/update-homebrew-formula.sh|install.sh)
         select_token release
+        recognized=true
+        ;;
+    esac
+
+    case "$path" in
+      scripts/ci/setup/fetch-forgejo-deploy-dev-token.sh|\
+      scripts/ci/tests/test-fetch-forgejo-deploy-dev-token.sh)
+        select_token deploy
+        select_token security
         recognized=true
         ;;
     esac

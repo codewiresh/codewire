@@ -15,14 +15,6 @@ readonly SOURCE_SHA="$1"
   && "$SOURCE_SHA" != "0000000000000000000000000000000000000000" ]] ||
   fail "source SHA must be one exact non-zero lowercase object ID"
 
-: "${CODEWIRE_DEPLOY_PROMOTION_TOKEN:?CODEWIRE_DEPLOY_PROMOTION_TOKEN is required}"
-deploy_token="$CODEWIRE_DEPLOY_PROMOTION_TOKEN"
-unset CODEWIRE_DEPLOY_PROMOTION_TOKEN
-[[ "$deploy_token" =~ ^[A-Za-z0-9._~-]{20,512}$ ]] || {
-  deploy_token=''
-  fail "deploy dispatch token is malformed"
-}
-
 curl_bin="${CURL_BIN:-curl}"
 if [[ "$curl_bin" == */* ]]; then
   [[ -x "$curl_bin" ]] || fail "curl is required for deploy workflow dispatch"
@@ -34,17 +26,24 @@ readonly dispatch_url='https://forgejo.example.invalid/api/v1/repos/codewire/dep
 umask 077
 work="$(mktemp -d)"
 auth_header="$work/auth-header"
+token_file="$work/token"
 request_body="$work/request.json"
 response_body="$work/response.json"
 cleanup() {
-  deploy_token=''
   find "$work" -type f -exec shred -u {} + 2>/dev/null || true
   rm -rf "$work"
 }
 trap cleanup EXIT
 
-printf 'Authorization: token %s\n' "$deploy_token" >"$auth_header"
-deploy_token=''
+"$(dirname "$0")/../setup/fetch-forgejo-deploy-dev-token.sh" "$token_file" ||
+  fail 'unable to obtain the Dev deploy integration token'
+unset ACTIONS_ID_TOKEN_REQUEST_TOKEN
+{
+  printf 'Authorization: Bearer '
+  tr -d '\n' <"$token_file"
+  printf '\n'
+} >"$auth_header"
+shred -u "$token_file"
 printf '{"ref":"main","inputs":{"source_sha":"%s"}}\n' \
   "$SOURCE_SHA" >"$request_body"
 

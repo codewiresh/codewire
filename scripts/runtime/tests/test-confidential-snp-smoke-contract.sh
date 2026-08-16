@@ -51,6 +51,11 @@ fi
 
 rg -F 'SMOKE_KUSTOMIZATION="codewire-deploy-confidential-smoke-dev"' "$SMOKE" >/dev/null
 rg -F 'phase == "confidential-snp"' "$SMOKE" >/dev/null
+rg -F 'nexus\.example\.invalid/oci-approved/codewire/gateway@sha256:' "$SMOKE" >/dev/null
+if rg -F 'git\.example\.invalid/codewire/gateway@sha256:' "$SMOKE" "$RESOLVER"; then
+  printf 'confidential smoke accepts the retired Gitea gateway authority\n' >&2
+  exit 1
+fi
 rg -F 'restore the commodity source profile' "$SMOKE" >/dev/null
 rg -F -- '--admin-oidc "${smoke_args[@]}"' "$SMOKE" >/dev/null
 if rg -F 'with-dev-smoke-auth.sh' "$SMOKE"; then

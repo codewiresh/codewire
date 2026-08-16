@@ -5,7 +5,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 readonly ROOT
 readonly DISPATCH="$ROOT/scripts/ci/deploy/dispatch-deploy-dev.sh"
 readonly SOURCE_SHA='1111111111111111111111111111111111111111'
-readonly TEST_TOKEN='test-only-dispatch-token-1234567890'
+readonly TEST_REQUEST_TOKEN='test-only-oidc-request-token'
+readonly TEST_JWT='synthetic.header.signature'
 
 fail() {
   printf '[test-dispatch-deploy-dev] ERROR: %s\n' "$*" >&2
@@ -14,74 +15,71 @@ fail() {
 
 install -d "$HOME/.cache"
 work="$(mktemp -d "$HOME/.cache/codewire-dispatch-test.XXXXXX")"
-cleanup() {
-  rm -rf "$work"
-}
-trap cleanup EXIT
+trap 'rm -rf "$work"' EXIT
+mkdir -p "$work/bin" "$work/capture" "$work/runner"
 
-mkdir -p "$work/bin"
-mock_curl="$work/bin/curl"
-capture_dir="$work/capture"
-mkdir -p "$capture_dir"
-cat >"$mock_curl" <<'MOCK'
+cat >"$work/bin/curl" <<'MOCK'
 #!/usr/bin/env bash
 set -euo pipefail
-[[ -z "${CODEWIRE_DEPLOY_PROMOTION_TOKEN+x}" ]] || exit 91
-printf '%s\n' "$@" >"$MOCK_CAPTURE_DIR/args"
+[[ -z "${ACTIONS_ID_TOKEN_REQUEST_TOKEN+x}" ]] || exit 91
+output=''
+url=''
 previous=''
 for argument in "$@"; do
   case "$previous" in
-    --data-binary)
-      cp "${argument#@}" "$MOCK_CAPTURE_DIR/request.json"
-      ;;
+    --output) output="$argument" ;;
+    --data-binary) cp "${argument#@}" "$MOCK_CAPTURE_DIR/request.json" ;;
     --header)
-      if [[ "$argument" == @* ]]; then
-        cp "${argument#@}" "$MOCK_CAPTURE_DIR/auth-header"
-      fi
+      [[ "$argument" == @* ]] && cp "${argument#@}" "$MOCK_CAPTURE_DIR/auth-header"
       ;;
   esac
   previous="$argument"
+  [[ "$argument" == https://* ]] && url="$argument"
 done
-printf '%s' "${MOCK_HTTP_STATUS:-204}"
+case "$url" in
+  https://forgejo.example.invalid/api/actions/oidc*audience=*)
+    jq -n --arg value "${MOCK_JWT:?}" '{value:$value}' >"$output"
+    ;;
+  https://forgejo.example.invalid/api/v1/repos/codewire/deploy/actions/workflows/promote-dev.yaml/dispatches)
+    printf '%s' "${MOCK_HTTP_STATUS:-204}"
+    ;;
+  *) exit 92 ;;
+esac
 MOCK
-chmod +x "$mock_curl"
+chmod +x "$work/bin/curl"
+
+export ACTIONS_ID_TOKEN_REQUEST_URL='https://forgejo.example.invalid/api/actions/oidc?job=synthetic'
+export ACTIONS_ID_TOKEN_REQUEST_TOKEN="$TEST_REQUEST_TOKEN"
+export CURL_BIN="$work/bin/curl"
+export MOCK_CAPTURE_DIR="$work/capture"
+export MOCK_JWT="$TEST_JWT"
+export RUNNER_TEMP="$work/runner"
 
 output="$work/success.out"
-if ! env CODEWIRE_DEPLOY_PROMOTION_TOKEN="$TEST_TOKEN" \
-  CURL_BIN="$mock_curl" MOCK_CAPTURE_DIR="$capture_dir" \
-  "$DISPATCH" "$SOURCE_SHA" >"$output" 2>&1; then
-  sed 's/test-only-dispatch-token-[A-Za-z0-9._~-]*/<redacted>/' "$output" >&2
-  fail "valid dispatch was rejected"
-fi
+"$DISPATCH" "$SOURCE_SHA" >"$output" 2>&1 || fail 'valid dispatch was rejected'
 grep -Fq "accepted canonical source $SOURCE_SHA" "$output" ||
-  fail "successful dispatch did not identify the accepted source"
-if grep -Fq "$TEST_TOKEN" "$output"; then
-  fail "successful dispatch printed the credential"
+  fail 'successful dispatch did not identify the accepted source'
+if grep -Fq "$TEST_REQUEST_TOKEN" "$output"; then
+  fail 'successful dispatch printed the OIDC request token'
 fi
 jq -e --arg source "$SOURCE_SHA" \
   '. == {ref: "main", inputs: {source_sha: $source}}' \
-  "$capture_dir/request.json" >/dev/null ||
-  fail "dispatch body contains anything except main and the source SHA"
-grep -Fxq "Authorization: token $TEST_TOKEN" "$capture_dir/auth-header" ||
-  fail "dispatch did not use the private header file"
-grep -Fxq 'https://forgejo.example.invalid/api/v1/repos/codewire/deploy/actions/workflows/promote-dev.yaml/dispatches' \
-  "$capture_dir/args" || fail "dispatch endpoint is not the reviewed deploy workflow"
-if grep -Fq "$TEST_TOKEN" "$capture_dir/args"; then
-  fail "credential was exposed on the curl command line"
-fi
+  "$work/capture/request.json" >/dev/null ||
+  fail 'dispatch body contains anything except main and the source SHA'
+grep -Fxq "Authorization: Bearer $TEST_JWT" "$work/capture/auth-header" ||
+  fail 'dispatch did not use the short-lived Bearer JWT'
 
 failure_output="$work/failure.out"
-if env CODEWIRE_DEPLOY_PROMOTION_TOKEN="$TEST_TOKEN" \
-  CURL_BIN="$mock_curl" \
-  MOCK_CAPTURE_DIR="$capture_dir" MOCK_HTTP_STATUS=403 \
-  "$DISPATCH" "$SOURCE_SHA" >"$failure_output" 2>&1; then
-  fail "HTTP rejection was accepted"
+export MOCK_HTTP_STATUS=403
+if "$DISPATCH" "$SOURCE_SHA" >"$failure_output" 2>&1; then
+  fail 'HTTP rejection was accepted'
 fi
 grep -Fq 'HTTP 403' "$failure_output" ||
-  fail "HTTP rejection did not report its non-secret status"
-if grep -Fq "$TEST_TOKEN" "$failure_output"; then
-  fail "HTTP rejection printed the credential"
+  fail 'HTTP rejection did not report its non-secret status'
+if grep -Fq "$TEST_JWT" "$failure_output"; then
+  fail 'HTTP rejection printed the JWT'
 fi
+unset MOCK_HTTP_STATUS
 
 marker="$work/invoked"
 cat >"$work/curl-never" <<MOCK
@@ -90,16 +88,10 @@ touch '$marker'
 exit 99
 MOCK
 chmod +x "$work/curl-never"
-if env CODEWIRE_DEPLOY_PROMOTION_TOKEN="$TEST_TOKEN" CURL_BIN="$work/curl-never" \
-  "$DISPATCH" uppercase-sha >"$work/invalid-source.out" 2>&1; then
-  fail "malformed source SHA was accepted"
+if CURL_BIN="$work/curl-never" "$DISPATCH" uppercase-sha \
+    >"$work/invalid-source.out" 2>&1; then
+  fail 'malformed source SHA was accepted'
 fi
-[[ ! -e "$marker" ]] || fail "malformed source reached curl"
+[[ ! -e "$marker" ]] || fail 'malformed source reached curl'
 
-if env CODEWIRE_DEPLOY_PROMOTION_TOKEN='short token' CURL_BIN="$work/curl-never" \
-  "$DISPATCH" "$SOURCE_SHA" >"$work/invalid-token.out" 2>&1; then
-  fail "malformed token was accepted"
-fi
-[[ ! -e "$marker" ]] || fail "malformed token reached curl"
-
-printf '[test-dispatch-deploy-dev] SHA-only workflow dispatch contract passed\n'
+printf '[test-dispatch-deploy-dev] OIDC SHA-only workflow dispatch contract passed\n'

@@ -231,6 +231,10 @@ run_paths_case sha_dispatch pull_request refs/pull/301/head false \
   scripts/ci/tests/test-dispatch-deploy-dev.sh \
   scripts/ci/deploy/dispatch-deploy-prod.sh \
   scripts/ci/tests/test-dispatch-deploy-prod.sh
+run_paths_case dev_deploy_oidc pull_request refs/pull/3011/head false \
+  'deploy go_consumer_interop go_support policy release runtime_confidential security' \
+  scripts/ci/setup/fetch-forgejo-deploy-dev-token.sh \
+  scripts/ci/tests/test-fetch-forgejo-deploy-dev-token.sh
 run_paths_case production_source_ownership pull_request refs/pull/31/head false \
   'deploy go_consumer_interop go_support policy release runtime_confidential security security_idp_kek' \
   deployments/k8s/overlays/production/config-images.yaml

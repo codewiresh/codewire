@@ -44,8 +44,6 @@ jobs:
         run: scripts/ci/setup/assert-ci-runner-image.sh
 
       - name: Resolve untrusted deployed Dev source
-        env:
-          CODEWIRE_DEPLOY_PROMOTION_TOKEN: ${{ secrets.CODEWIRE_DEPLOY_PROMOTION_TOKEN }}
         run: |
           set -euo pipefail
           candidate="$RUNNER_TEMP/codewire-deployed-source-candidate.json"
@@ -217,6 +215,4 @@ jobs:
           [[ "$canonical_main_sha" == "$GITHUB_SHA" ]]
 
       - name: Dispatch only the canonical source SHA
-        env:
-          CODEWIRE_DEPLOY_PROMOTION_TOKEN: ${{ secrets.CODEWIRE_DEPLOY_PROMOTION_TOKEN }}
         run: scripts/ci/deploy/dispatch-deploy-dev.sh "${GITHUB_SHA:?}"
