@@ -16,6 +16,7 @@ token_file="$2"
 : "${OPENBAO_GHCR_AUDIENCE:?OpenBao GHCR audience is required}"
 
 readonly OPENBAO_ADDR='https://openbao.example.invalid'
+readonly -a CURL_BOUNDS=(--connect-timeout 10 --max-time 30)
 case "${OPENBAO_GHCR_ROLE}|${OPENBAO_GHCR_AUDIENCE}" in
   codewire-source-dev-ghcr-publisher\|openbao-codewire-source-dev-ghcr-publisher | \
   codewire-source-support-ghcr-publisher\|openbao-codewire-source-support-ghcr-publisher | \
@@ -48,6 +49,7 @@ trap cleanup EXIT
 } >"$work/forgejo.curl"
 chmod 0600 "$work/forgejo.curl"
 curl --config "$work/forgejo.curl" \
+  "${CURL_BOUNDS[@]}" \
   --output "$work/forgejo-response.json" \
   "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${OPENBAO_GHCR_AUDIENCE}"
 jq -er '.value | strings | select(length > 0)' \
@@ -57,6 +59,7 @@ chmod 0600 "$work/forgejo.jwt"
 jq -n --arg role "$OPENBAO_GHCR_ROLE" --rawfile jwt "$work/forgejo.jwt" \
   '{role:$role, jwt:($jwt | rtrimstr("\n"))}' >"$work/openbao-login.json"
 curl --silent --show-error --fail \
+  "${CURL_BOUNDS[@]}" \
   --header 'Content-Type: application/json' \
   --data-binary @"$work/openbao-login.json" \
   --output "$work/openbao-response.json" \
@@ -72,6 +75,7 @@ chmod 0600 "$work/openbao.token"
 } >"$work/openbao.curl"
 chmod 0600 "$work/openbao.curl"
 curl --config "$work/openbao.curl" \
+  "${CURL_BOUNDS[@]}" \
   --output "$work/ghcr.json" \
   "$OPENBAO_ADDR/v1/platform/data/ci/codewire/ghcr-publisher"
 
