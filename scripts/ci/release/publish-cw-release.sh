@@ -18,10 +18,7 @@ Optional:
   CW_RELEASE_SOURCE_SHA
   CW_RELEASE_TAG_OBJECT_SHA
   GITHUB_MIRROR_REPOSITORY (default: codewiresh/codewire)
-  GH_MIRROR_TOKEN
-  MIRROR_GITHUB_APP_ID
-  MIRROR_GITHUB_INSTALLATION_ID
-  MIRROR_GITHUB_PRIVATE_KEY
+  GH_MIRROR_TOKEN_FILE (private GitHub App installation-token file)
   CW_REQUIRE_GITHUB_MIRROR=1 (require GitHub mirror publication)
 EOF
 }
@@ -87,14 +84,10 @@ api_status() {
 github_status() {
   local method="$1"
   local url="$2"
-  local token="$3"
-  local out="$4"
-  shift 4
-  curl -sS -o "$out" -w '%{http_code}' \
+  local out="$3"
+  shift 3
+  curl --config "$github_auth_config" -sS -o "$out" -w '%{http_code}' \
     -X "$method" \
-    -H "Authorization: Bearer $token" \
-    -H "Accept: application/vnd.github+json" \
-    -H "X-GitHub-Api-Version: 2022-11-28" \
     "$@" \
     "$url"
 }
@@ -106,82 +99,72 @@ validate_mirror_identity() {
     || die "CW_RELEASE_TAG_OBJECT_SHA is required for GitHub mirror publication"
 }
 
-mint_github_installation_token() {
-  local jwt token_json mirror_token
+github_auth_work=''
+github_auth_config=''
+github_git_config=''
 
-  jwt="$(
-    node <<'NODE'
-const crypto = require("crypto");
-
-function b64url(input) {
-  return Buffer.from(input)
-    .toString("base64")
-    .replace(/\+/g, "-")
-    .replace(/\//g, "_")
-    .replace(/=+$/g, "");
+cleanup_github_auth() {
+  if [ -n "$github_auth_work" ] && [ -d "$github_auth_work" ]; then
+    find "$github_auth_work" -type f -exec shred -u {} + 2>/dev/null || true
+    rmdir "$github_auth_work" 2>/dev/null || true
+  fi
 }
-
-const now = Math.floor(Date.now() / 1000);
-const header = b64url(JSON.stringify({ alg: "RS256", typ: "JWT" }));
-const payload = b64url(JSON.stringify({
-  iat: now - 60,
-  exp: now + 540,
-  iss: process.env.MIRROR_GITHUB_APP_ID,
-}));
-const unsigned = `${header}.${payload}`;
-const key = process.env.MIRROR_GITHUB_PRIVATE_KEY.replace(/\\n/g, "\n");
-const signature = crypto.createSign("RSA-SHA256").update(unsigned).sign(key);
-
-console.log(`${unsigned}.${b64url(signature)}`);
-NODE
-  )"
-
-  token_json="$(
-    curl -fsS -X POST \
-      -H "Accept: application/vnd.github+json" \
-      -H "Authorization: Bearer ${jwt}" \
-      -H "X-GitHub-Api-Version: 2022-11-28" \
-      "https://api.github.com/app/installations/${MIRROR_GITHUB_INSTALLATION_ID}/access_tokens"
-  )"
-  mirror_token="$(printf '%s' "$token_json" | node -e 'const fs = require("fs"); const body = JSON.parse(fs.readFileSync(0, "utf8")); if (!body.token) process.exit(1); process.stdout.write(body.token);')"
-  [ -n "$mirror_token" ] || die "GitHub App installation-token response was empty"
-  echo "::add-mask::${mirror_token}"
-  GH_MIRROR_TOKEN="$mirror_token"
-  export GH_MIRROR_TOKEN
-}
+trap cleanup_github_auth EXIT
 
 configure_github_mirror() {
-  local app_input_count=0 name
-  for name in \
-    MIRROR_GITHUB_APP_ID \
-    MIRROR_GITHUB_INSTALLATION_ID \
-    MIRROR_GITHUB_PRIVATE_KEY; do
-    if [ -n "${!name:-}" ]; then
-      app_input_count=$((app_input_count + 1))
+  if [ -z "${GH_MIRROR_TOKEN_FILE:-}" ]; then
+    if [ "${CW_REQUIRE_GITHUB_MIRROR:-}" = "1" ]; then
+      die "GitHub mirror publication requires GH_MIRROR_TOKEN_FILE"
     fi
-  done
-
-  if [ "$app_input_count" -ne 0 ] && [ "$app_input_count" -ne 3 ]; then
-    die "MIRROR_GITHUB_APP_ID, MIRROR_GITHUB_INSTALLATION_ID, and MIRROR_GITHUB_PRIVATE_KEY must be provided together"
+    return 1
   fi
 
-  if [ -n "${GH_MIRROR_TOKEN:-}" ]; then
-    validate_mirror_identity
-    return 0
-  fi
+  [ -f "$GH_MIRROR_TOKEN_FILE" ] && [ ! -L "$GH_MIRROR_TOKEN_FILE" ] \
+    && [ -s "$GH_MIRROR_TOKEN_FILE" ] \
+    || die "GH_MIRROR_TOKEN_FILE must be one nonempty regular file"
+  case "$(stat -c '%a' -- "$GH_MIRROR_TOKEN_FILE")" in
+    400|600) ;;
+    *) die "GH_MIRROR_TOKEN_FILE must have mode 0400 or 0600" ;;
+  esac
 
-  if [ "$app_input_count" -eq 3 ]; then
-    validate_mirror_identity
-    echo "publish-cw-release: minting GitHub App installation token"
-    mint_github_installation_token
-    return 0
-  fi
+  local mirror_token
+  mirror_token="$(tr -d '\n' <"$GH_MIRROR_TOKEN_FILE")"
+  [[ "$mirror_token" =~ ^[A-Za-z0-9_-]+$ ]] \
+    || die "GH_MIRROR_TOKEN_FILE contains a malformed token"
+  [ "$(wc -l <"$GH_MIRROR_TOKEN_FILE")" -le 1 ] \
+    || die "GH_MIRROR_TOKEN_FILE must contain one token"
 
-  if [ "${CW_REQUIRE_GITHUB_MIRROR:-}" = "1" ]; then
-    die "GitHub mirror publication requires GH_MIRROR_TOKEN or complete GitHub App inputs"
-  fi
+  validate_mirror_identity
+  umask 077
+  github_auth_work="$(mktemp -d "${RUNNER_TEMP:-/tmp}/codewire-github-release.XXXXXX")"
+  github_auth_config="$github_auth_work/curl.conf"
+  github_git_config="$github_auth_work/gitconfig"
+  {
+    printf 'header = "Authorization: Bearer %s"\n' "$mirror_token"
+    printf 'header = "Accept: application/vnd.github+json"\n'
+    printf 'header = "X-GitHub-Api-Version: 2022-11-28"\n'
+  } >"$github_auth_config"
+  {
+    printf '[http "https://github.com/"]\n'
+    printf '\textraHeader = Authorization: Basic '
+    { printf 'x-access-token:'; printf '%s' "$mirror_token"; } | base64 -w0
+    printf '\n'
+  } >"$github_git_config"
+  chmod 0600 "$github_auth_config" "$github_git_config"
+  unset mirror_token
+  return 0
+}
 
-  return 1
+mirror_github_tag() {
+  local tag="$1"
+  local repo="${GITHUB_MIRROR_REPOSITORY:-codewiresh/codewire}"
+  local mirror_bin="${MIRROR_CANONICAL_TAG_BIN:-$(dirname "$0")/mirror-canonical-release-tag.sh}"
+  [ "$repo" = 'codewiresh/codewire' ] \
+    || die "GitHub mirror repository must be codewiresh/codewire"
+  [ -x "$mirror_bin" ] || die "canonical tag mirror helper is unavailable"
+  GIT_CONFIG_GLOBAL="$github_git_config" GIT_CONFIG_NOSYSTEM=1 \
+    "$mirror_bin" \
+      origin "https://github.com/codewiresh/codewire.git" "refs/tags/$tag"
 }
 
 ensure_gitea_release() {
@@ -249,16 +232,15 @@ PY
 wait_for_github_tag() {
   local repo="$1"
   local tag="$2"
-  local token="$3"
-  local expected_object="$4"
-  local expected_target="$5"
+  local expected_object="$3"
+  local expected_target="$4"
   local tmp
   tmp="$(mktemp -d)"
   local ref_json="$tmp/ref.json"
   local tag_json="$tmp/tag.json"
   local status ref_type ref_object target_type target_sha
   for _ in $(seq 1 30); do
-    status="$(github_status GET "https://api.github.com/repos/$repo/git/ref/tags/$tag" "$token" "$ref_json")"
+    status="$(github_status GET "https://api.github.com/repos/$repo/git/ref/tags/$tag" "$ref_json")"
     if [ "$status" = "200" ]; then
       ref_type="$(json_field "$ref_json" object.type)"
       ref_object="$(json_field "$ref_json" object.sha)"
@@ -267,7 +249,7 @@ wait_for_github_tag() {
       [ "$ref_object" = "$expected_object" ] \
         || die "GitHub mirror ref refs/tags/$tag does not match canonical tag object $expected_object"
 
-      status="$(github_status GET "https://api.github.com/repos/$repo/git/tags/$ref_object" "$token" "$tag_json")"
+      status="$(github_status GET "https://api.github.com/repos/$repo/git/tags/$ref_object" "$tag_json")"
       [ "$status" = "200" ] \
         || die "lookup GitHub annotated tag object failed with HTTP $status: $(cat "$tag_json")"
       target_type="$(json_field "$tag_json" object.type)"
@@ -296,15 +278,15 @@ ensure_github_release() {
   local release_json="$tmp/github-release.json"
   local status
 
-  wait_for_github_tag "$repo" "$tag" "$GH_MIRROR_TOKEN" "$tag_object" "$target"
+  wait_for_github_tag "$repo" "$tag" "$tag_object" "$target"
 
-  status="$(github_status GET "https://api.github.com/repos/$repo/releases/tags/$tag" "$GH_MIRROR_TOKEN" "$release_json")"
+  status="$(github_status GET "https://api.github.com/repos/$repo/releases/tags/$tag" "$release_json")"
   case "$status" in
     200)
       ;;
     404)
       json_body "$tag" "$target" "$body" > "$tmp/create.json"
-      status="$(github_status POST "https://api.github.com/repos/$repo/releases" "$GH_MIRROR_TOKEN" "$release_json" \
+      status="$(github_status POST "https://api.github.com/repos/$repo/releases" "$release_json" \
         -H "Content-Type: application/json" \
         --data-binary "@$tmp/create.json")"
       [ "$status" = "201" ] || die "create GitHub release failed with HTTP $status: $(cat "$release_json")"
@@ -317,7 +299,7 @@ ensure_github_release() {
   local release_id
   release_id="$(json_field "$release_json" id)"
   local assets_json="$tmp/github-assets.json"
-  status="$(github_status GET "https://api.github.com/repos/$repo/releases/$release_id/assets" "$GH_MIRROR_TOKEN" "$assets_json")"
+  status="$(github_status GET "https://api.github.com/repos/$repo/releases/$release_id/assets" "$assets_json")"
   [ "$status" = "200" ] || die "list GitHub assets failed with HTTP $status: $(cat "$assets_json")"
 
   for path in "$asset_dir"/*; do
@@ -337,10 +319,10 @@ for asset in assets:
 PY
 )"
     if [ -n "$existing" ]; then
-      status="$(github_status DELETE "https://api.github.com/repos/$repo/releases/assets/$existing" "$GH_MIRROR_TOKEN" "$tmp/delete.json")"
+      status="$(github_status DELETE "https://api.github.com/repos/$repo/releases/assets/$existing" "$tmp/delete.json")"
       [ "$status" = "204" ] || die "delete GitHub asset $name failed with HTTP $status: $(cat "$tmp/delete.json")"
     fi
-    status="$(github_status POST "https://uploads.github.com/repos/$repo/releases/$release_id/assets?name=$name" "$GH_MIRROR_TOKEN" "$tmp/upload.json" \
+    status="$(github_status POST "https://uploads.github.com/repos/$repo/releases/$release_id/assets?name=$name" "$tmp/upload.json" \
       -H "Content-Type: application/octet-stream" \
       --data-binary "@$path")"
     [ "$status" = "201" ] || die "upload GitHub asset $name failed with HTTP $status: $(cat "$tmp/upload.json")"
@@ -371,6 +353,8 @@ echo "publish-cw-release: publishing Gitea release"
 ensure_gitea_release "$tag" "$asset_dir"
 echo "publish-cw-release: Gitea release published"
 if [ "$github_mirror_enabled" -eq 1 ]; then
+  echo "publish-cw-release: mirroring canonical GitHub tag"
+  mirror_github_tag "$tag"
   echo "publish-cw-release: publishing GitHub release"
   ensure_github_release "$tag" "$asset_dir"
   echo "publish-cw-release: GitHub release published"

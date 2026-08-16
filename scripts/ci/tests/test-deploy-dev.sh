@@ -140,6 +140,10 @@ done
 dispatch_job="$(sed -n '/^  dispatch-deploy-dev:/,$p' "$WORKFLOW")"
 grep -Fq '  dispatch-deploy-dev:' <<<"$dispatch_job" ||
   fail "SHA-only deploy dispatch job is missing"
+grep -Fq '    runs-on: untrusted-validation' <<<"$dispatch_job" ||
+  fail "deploy terminal wait does not use the live non-privileged validation profile"
+grep -Fq '    timeout-minutes: 125' <<<"$dispatch_job" ||
+  fail "deploy terminal wait lacks a bounded downstream horizon"
 grep -Fq '      - publish-runtime-images' <<<"$dispatch_job" ||
   fail "deploy dispatch can run before exact GHCR publication"
 grep -Fq "needs.publish-runtime-images.result == 'success'" <<<"$dispatch_job" ||
@@ -162,6 +166,10 @@ grep -Fq 'enable-openid-connect: true' "$WORKFLOW" ||
 # shellcheck disable=SC2016
 grep -Fq 'scripts/ci/deploy/dispatch-deploy-dev.sh "${GITHUB_SHA:?}"' <<<"$dispatch_job" ||
   fail "deploy dispatch sends anything other than the workflow source SHA"
+grep -Fq 'return_run_info:true' "$ROOT/scripts/ci/deploy/dispatch-deploy-dev.sh" ||
+  fail "Dev dispatch does not request its exact Forgejo run ID"
+grep -Fq 'wait-for-deploy-run.sh' "$ROOT/scripts/ci/deploy/dispatch-deploy-dev.sh" ||
+  fail "Dev dispatch does not wait for exact downstream terminal status"
 if grep -Eq 'candidate_ref|image_digest|deploy_commit|promotion-receipt' \
   <<<"$dispatch_job"; then
   fail "source-to-deploy dispatch carries deployment state beyond the source SHA"

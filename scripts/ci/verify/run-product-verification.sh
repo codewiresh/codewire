@@ -520,12 +520,14 @@ run_release() {
   scripts/ci/tests/test-claude-e2e-workflow.sh
   scripts/ci/tests/test-fetch-infisical-ci-secret.sh
   scripts/ci/tests/test-fetch-openbao-ghcr-credentials.sh
+  scripts/ci/tests/test-fetch-openbao-github-mirror-credentials.sh
   scripts/ci/tests/test-fetch-openbao-nexus-credentials.sh
   scripts/ci/tests/test-forgejo-action-mirrors.sh
   scripts/ci/tests/test-nexus-runtime-pull-contract.sh
   scripts/ci/tests/test-verify-release-tag-ref.sh
   scripts/ci/tests/test-verify-release-tag-receipt.sh
   scripts/ci/tests/test-mirror-git-tags.sh
+  scripts/ci/tests/test-mint-github-app-token.sh
   scripts/ci/tests/test-copy-image-to-ghcr.sh
   scripts/ci/tests/test-dispatch-deploy-dev.sh
   scripts/ci/tests/test-dispatch-deploy-prod.sh

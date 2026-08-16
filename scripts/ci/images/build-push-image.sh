@@ -20,6 +20,7 @@ sccache_mode="${CODEWIRE_SCCACHE_MODE:-disabled}"
 : "${GITHUB_SHA:?GITHUB_SHA is required}"
 readonly REGISTRY_HOST='nexus-system-cluster.example.invalid'
 readonly REGISTRY_REPOSITORY_PREFIX="${REGISTRY_HOST}/oci-promoted/codewire"
+readonly BUILDKIT_IMAGE='docker.io/moby/buildkit:v0.29.0@sha256:0039c1d47e8748b5afea56f4e85f14febaf34452bd99d9552d2daa82262b5cc5'
 
 case "$require_existing_source_image" in
   0|1) ;;
@@ -137,7 +138,12 @@ build_metadata="$work/build-metadata.json"
 bake_metadata="$work/bake-metadata.json"
 docker_config="$work/docker-config"
 credential_fetcher="${OPENBAO_NEXUS_CREDENTIAL_FETCHER:-scripts/ci/setup/fetch-openbao-nexus-credentials.sh}"
+buildx_builder=''
 cleanup() {
+  if [ -n "$buildx_builder" ]; then
+    DOCKER_CONFIG="$docker_config" docker buildx rm --force "$buildx_builder" \
+      >/dev/null 2>&1 || true
+  fi
   find "$work" -type f -exec shred -u {} + 2>/dev/null || true
   rm -rf "$work"
 }
@@ -180,6 +186,16 @@ registry_login() {
 }
 
 registry_login
+
+create_buildx_builder() {
+  [ -z "$buildx_builder" ] || return 0
+  buildx_builder="codewire-publish-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-0}-${image_name}-${BASHPID}"
+  DOCKER_CONFIG="$docker_config" docker buildx create \
+    --name "$buildx_builder" \
+    --driver docker-container \
+    --driver-opt "image=$BUILDKIT_IMAGE" \
+    --bootstrap >/dev/null
+}
 
 inspect_manifest_digest() {
   local reference="$1"
@@ -314,6 +330,7 @@ else
     echo "Required immutable source image is missing: $source_tag" >&2
     exit 1
   fi
+  create_buildx_builder
   if [ -n "$product_bake_target" ]; then
     bake_file="$context/docker-bake.hcl"
     [ -f "$bake_file" ] || {
@@ -343,7 +360,7 @@ else
       CODEWIRE_IMAGE_SOURCE_URL="$public_source_url" \
       CODEWIRE_RUST_PROFILE=release \
       CODEWIRE_SCCACHE_MODE="$sccache_mode" \
-      docker buildx bake "${bake_args[@]}" \
+      docker buildx bake --builder "$buildx_builder" "${bake_args[@]}" \
         "$product_bake_target"
     jq -e --arg target "$product_bake_target" '
       .[$target]["containerimage.digest"] as $digest
@@ -354,7 +371,7 @@ else
       exit 1
     }
   else
-    DOCKER_CONFIG="$docker_config" docker buildx build --push \
+    DOCKER_CONFIG="$docker_config" docker buildx build --builder "$buildx_builder" --push \
       --provenance=mode=min \
       --metadata-file "$build_metadata" "${build_args[@]}" \
       -f "$dockerfile" --tag "$source_tag" "${label_args[@]}" "$context"

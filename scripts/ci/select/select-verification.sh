@@ -1013,6 +1013,7 @@ if [ "$event_selected" = false ]; then
       scripts/ci/*observer*.tsv|\
       scripts/ci/*promot*.sh|scripts/ci/*promot*.py|\
       scripts/ci/setup/fetch-forgejo-deploy-dev-token.sh|\
+      scripts/ci/setup/fetch-forgejo-deploy-prod-token.sh|\
       scripts/ci/deploy/dispatch-deploy-dev.sh|scripts/ci/deploy/dispatch-deploy-prod.sh|\
       scripts/ci/tests/test-ci-tool-downloads.sh|\
       scripts/ci/tests/test-deploy-*.sh|scripts/ci/tests/test-dispatch-deploy-*.sh)
@@ -1041,7 +1042,9 @@ if [ "$event_selected" = false ]; then
       scripts/ci/deploy/dispatch-deploy-dev.sh|scripts/ci/deploy/dispatch-deploy-prod.sh|\
       scripts/ci/setup/fetch-infisical-ci-secret.sh|\
       scripts/ci/setup/fetch-forgejo-deploy-dev-token.sh|\
+      scripts/ci/setup/fetch-forgejo-deploy-prod-token.sh|\
       scripts/ci/setup/fetch-openbao-ghcr-credentials.sh|\
+      scripts/ci/setup/fetch-openbao-github-mirror-credentials.sh|\
       scripts/ci/setup/fetch-openbao-nexus-credentials.sh|\
       scripts/ci/images/publish-image-to-ghcr.sh|\
       scripts/ci/images/resolve-published-support-pair.sh|\
@@ -1050,6 +1053,8 @@ if [ "$event_selected" = false ]; then
       scripts/ci/release/mirror-git-tags.sh|\
       scripts/ci/*promot*.sh|scripts/ci/*promot*.py|\
       scripts/ci/release/check-cw-darwin-sdkless.sh|\
+      scripts/ci/release/mint-github-app-token.sh|\
+      scripts/ci/release/mirror-github.sh|\
       scripts/ci/release/package-cw-release.sh|scripts/ci/release/publish-cw-release.sh|\
       scripts/ci/tests/test-copy-image-to-ghcr.sh|\
       scripts/ci/tests/test-dispatch-deploy-dev.sh|scripts/ci/tests/test-dispatch-deploy-prod.sh|\
@@ -1064,11 +1069,13 @@ if [ "$event_selected" = false ]; then
       scripts/ci/tests/test-fetch-infisical-ci-secret.sh|\
       scripts/ci/tests/test-fetch-forgejo-deploy-dev-token.sh|\
       scripts/ci/tests/test-fetch-openbao-ghcr-credentials.sh|\
+      scripts/ci/tests/test-fetch-openbao-github-mirror-credentials.sh|\
       scripts/ci/tests/test-fetch-openbao-nexus-credentials.sh|\
       scripts/ci/tests/test-forgejo-action-mirrors.sh|\
       scripts/ci/tests/test-nexus-runtime-pull-contract.sh|\
       scripts/ci/tests/test-cw-install-signature.sh|scripts/ci/tests/test-image-bundle.py|\
       scripts/ci/tests/test-mirror-git-tags.sh|scripts/ci/tests/test-publish-cw-release.sh|\
+      scripts/ci/tests/test-mint-github-app-token.sh|\
       scripts/ci/tests/test-deploy-prod-workflow.sh|\
       scripts/ci/tests/test-deploy-dev.sh|\
       scripts/ci/tests/test-verify-cw-release-signing-key.sh|\
@@ -1089,7 +1096,13 @@ if [ "$event_selected" = false ]; then
 
     case "$path" in
       scripts/ci/setup/fetch-forgejo-deploy-dev-token.sh|\
-      scripts/ci/tests/test-fetch-forgejo-deploy-dev-token.sh)
+      scripts/ci/tests/test-fetch-forgejo-deploy-dev-token.sh|\
+      scripts/ci/setup/fetch-forgejo-deploy-prod-token.sh|\
+      scripts/ci/setup/fetch-openbao-github-mirror-credentials.sh|\
+      scripts/ci/release/mint-github-app-token.sh|\
+      scripts/ci/release/mirror-github.sh|\
+      scripts/ci/tests/test-fetch-openbao-github-mirror-credentials.sh|\
+      scripts/ci/tests/test-mint-github-app-token.sh)
         select_token deploy
         select_token security
         recognized=true

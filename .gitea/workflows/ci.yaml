@@ -40,7 +40,7 @@ env:
 jobs:
   verification-selection:
     name: Verification selection
-    runs-on: ubuntu-latest
+    runs-on: untrusted-validation
     outputs:
       selector_version: ${{ steps.select.outputs.selector_version }}
       classification: ${{ steps.select.outputs.classification }}

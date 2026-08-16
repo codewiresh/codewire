@@ -1,8 +1,6 @@
 name: Release cw CLI
 
 on:
-  push:
-    tags: ['v*']
   workflow_dispatch:
     inputs:
       release_tag:
@@ -13,10 +11,14 @@ on:
 permissions:
   contents: read
 
+enable-openid-connect: true
+
 env:
   ZIG_VERSION: 0.15.2
   ZIG_X86_64_LINUX_SHA256: 02aa270f183da276e5b5920b1dac44a63f1a49e55050ebde3aecc9eb82f93239
   CARGO_ZIGBUILD_VERSION: 0.23.0
+  OPENBAO_GITHUB_ROLE: codewire-source-cli-github-mirror
+  OPENBAO_GITHUB_AUDIENCE: openbao-codewire-source-cli-github-mirror
 
 jobs:
   release-selection:
@@ -115,7 +117,7 @@ jobs:
         run: ../scripts/ci/release/verify-cw-release-signing-key.sh apps/cli/GPG_PUBLIC_KEY.asc
 
       - name: Verify sealed Rust toolchain and release targets
-        run: ../scripts/ci/setup/assert-ci-runner-image.sh
+        run: scripts/ci/setup/assert-ci-runner-image.sh
 
       - name: Install protoc (pinned)
         run: |
@@ -147,15 +149,29 @@ jobs:
           CW_RELEASE_GPG_PASSPHRASE: ${{ secrets.CW_RELEASE_GPG_PASSPHRASE }}
           CW_RELEASE_GPG_KEY_ID: ${{ secrets.CW_RELEASE_GPG_KEY_ID }}
           GITEA_TOKEN: ${{ github.token }}
-          MIRROR_GITHUB_APP_ID: ${{ secrets.MIRROR_GITHUB_APP_ID }}
-          MIRROR_GITHUB_INSTALLATION_ID: ${{ secrets.MIRROR_GITHUB_INSTALLATION_ID }}
-          MIRROR_GITHUB_PRIVATE_KEY: ${{ secrets.MIRROR_GITHUB_PRIVATE_KEY }}
           CW_REQUIRE_GITHUB_MIRROR: '1'
           RELEASE_TAG: ${{ needs.release-selection.outputs.release_tag }}
           CW_RELEASE_SOURCE_SHA: ${{ needs.release-selection.outputs.source_sha }}
           CW_RELEASE_TAG_OBJECT_SHA: ${{ needs.release-selection.outputs.tag_object_sha }}
         run: |
           set -euo pipefail
+          umask 077
+          github_work="$(mktemp -d "${RUNNER_TEMP:?}/codewire-cli-github.XXXXXX")"
+          cleanup_github() {
+            find "$github_work" -type f -exec shred -u {} + 2>/dev/null || true
+            rm -rf "$github_work"
+          }
+          trap cleanup_github EXIT
+          ../scripts/ci/setup/fetch-openbao-github-mirror-credentials.sh \
+            "$github_work/app-id" \
+            "$github_work/installation-id" \
+            "$github_work/private-key"
+          ../scripts/ci/release/mint-github-app-token.sh \
+            "$github_work/app-id" \
+            "$github_work/installation-id" \
+            "$github_work/private-key" \
+            "$github_work/token"
+          export GH_MIRROR_TOKEN_FILE="$github_work/token"
           ../scripts/ci/release/check-cw-darwin-sdkless.sh
           CW_RELEASE_BUILD_CMD='cargo zigbuild' \
             CW_RELEASE_TARGETS='x86_64-unknown-linux-musl aarch64-unknown-linux-gnu x86_64-apple-darwin aarch64-apple-darwin' \

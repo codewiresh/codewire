@@ -314,7 +314,8 @@ jobs:
 
   dispatch-deploy-prod:
     name: Dispatch Signed Tag to Deploy
-    runs-on: ubuntu-latest
+    runs-on: untrusted-validation
+    timeout-minutes: 125
     needs:
       - release-selection
       - publish-runtime-images
@@ -325,5 +326,4 @@ jobs:
       - name: Dispatch only the canonical signed release tag
         env:
           RELEASE_TAG: ${{ needs.release-selection.outputs.release_tag }}
-          CODEWIRE_DEPLOY_PROMOTION_TOKEN: ${{ secrets.CODEWIRE_DEPLOY_PROMOTION_TOKEN }}
         run: scripts/ci/deploy/dispatch-deploy-prod.sh "$RELEASE_TAG"

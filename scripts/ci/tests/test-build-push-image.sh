@@ -310,6 +310,14 @@ case "${1:-} ${2:-} ${3:-}" in
     fi
     set_manifest "$destination" "${source##*@}"
     ;;
+  buildx\ create\ *)
+    [[ "$*" == *' --driver docker-container '* ]]
+    [[ "$*" == *' --driver-opt image=docker.io/moby/buildkit:v0.29.0@sha256:0039c1d47e8748b5afea56f4e85f14febaf34452bd99d9552d2daa82262b5cc5 '* ]]
+    [[ "$*" == *' --bootstrap'* ]]
+    ;;
+  buildx\ rm\ *)
+    [[ "$*" == *' --force '* ]]
+    ;;
   buildx\ bake\ *)
     metadata=''
     target=''
@@ -317,6 +325,9 @@ case "${1:-} ${2:-} ${3:-}" in
     shift 2
     while [ "$#" -gt 0 ]; do
       case "$1" in
+        --builder)
+          shift 2
+          ;;
         --metadata-file)
           metadata="$2"
           shift 2
@@ -366,6 +377,9 @@ case "${1:-} ${2:-} ${3:-}" in
     shift 2
     while [ "$#" -gt 0 ]; do
       case "$1" in
+        --builder)
+          shift 2
+          ;;
         --metadata-file)
           metadata="$2"
           shift 2
@@ -454,6 +468,14 @@ grep -qF -- 'CODEWIRE_RUST_PROFILE=release' "$FAKE_DOCKER_CALLS" ||
   fail 'protected publication did not force the release profile'
 grep -qF -- '--provenance mode=min' "$FAKE_DOCKER_CALLS" ||
   fail 'protected product build omitted minimal BuildKit SLSA provenance'
+grep -qF -- 'buildx create --name codewire-publish-' "$FAKE_DOCKER_CALLS" ||
+  fail 'protected publication did not create an isolated BuildKit builder'
+grep -qF -- '--driver docker-container' "$FAKE_DOCKER_CALLS" ||
+  fail 'protected publication retained the attestation-incompatible Docker driver'
+grep -qF -- 'image=docker.io/moby/buildkit:v0.29.0@sha256:0039c1d47e8748b5afea56f4e85f14febaf34452bd99d9552d2daa82262b5cc5' \
+  "$FAKE_DOCKER_CALLS" || fail 'protected publication does not pin its BuildKit daemon image'
+grep -qF -- 'buildx rm --force codewire-publish-' "$FAKE_DOCKER_CALLS" ||
+  fail 'protected publication did not remove its isolated BuildKit builder'
 [[ "$(build_invocation_count)" -eq 1 ]] ||
   fail 'image was not built exactly once'
 
