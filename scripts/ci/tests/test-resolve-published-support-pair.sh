@@ -5,7 +5,6 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 readonly ROOT
 readonly RESOLVER="$ROOT/scripts/ci/images/resolve-published-support-pair.sh"
 readonly SOURCE_SHA='1111111111111111111111111111111111111111'
-readonly TEST_TOKEN='test-only-support-registry-token'
 
 fail() {
   printf '[test-resolve-published-support-pair] ERROR: %s\n' "$*" >&2
@@ -20,41 +19,14 @@ cleanup() {
 trap cleanup EXIT
 mkdir -p "$work/bin" "$work/capture"
 
-cat >"$work/bin/fetch-secret" <<'MOCK'
-#!/usr/bin/env bash
-set -euo pipefail
-[[ "$1" == GHCR_PUBLISH_TOKEN ]]
-[[ -z "${FAIL_FETCH:-}" ]] || exit 1
-printf '%s' "$FAKE_TOKEN" >"$2"
-chmod 600 "$2"
-printf '%s\n' "$2" >"$MOCK_CAPTURE_DIR/fetch-target"
-MOCK
-chmod +x "$work/bin/fetch-secret"
-
-cat >"$work/bin/docker" <<'MOCK'
-#!/usr/bin/env bash
-set -euo pipefail
-printf '%s\n' "$*" >>"$MOCK_CAPTURE_DIR/docker-calls"
-case "$1 $2" in
-  'volume create') printf '%s\n' support-baseline-auth ;;
-  'volume rm') ;;
-  *) exit 2 ;;
-esac
-MOCK
-chmod +x "$work/bin/docker"
-
 cat >"$work/bin/skopeo" <<'MOCK'
 #!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "$*" >>"$MOCK_CAPTURE_DIR/skopeo-calls"
 case "$1" in
-  login)
-    token="$(cat)"
-    [[ "$token" == "$FAKE_TOKEN" ]]
-    [[ -z "${FAIL_LOGIN:-}" ]] || exit 1
-    ;;
   inspect)
-    [[ -n "${SKOPEO_AUTH_VOLUME:-}" || -n "${ANONYMOUS_SUCCESS:-}" ]] || exit 1
+    [[ "$*" == *'inspect --no-creds --override-os linux --override-arch amd64 docker://'* ]]
+    [[ -z "${SKOPEO_AUTH_VOLUME:-}" ]]
     ref="${*: -1}"
     case "$ref" in
       *'/base:latest') image=base; digest="sha256:$(printf '1%.0s' {1..64})" ;;
@@ -78,12 +50,8 @@ run_resolver() {
   local output="$1"
   shift
   env \
-    GHCR_PUBLISH_USERNAME=codewire-package-publisher \
-    INFISICAL_SECRET_FETCHER="$work/bin/fetch-secret" \
     SKOPEO_RUNNER="$work/bin/skopeo" \
-    DOCKER_BIN="$work/bin/docker" \
     MOCK_CAPTURE_DIR="$work/capture" \
-    FAKE_TOKEN="$TEST_TOKEN" \
     SOURCE_SHA="$SOURCE_SHA" \
     "$@" \
     "$RESOLVER" "$output"
@@ -106,21 +74,9 @@ if ! jq -e --arg source "$SOURCE_SHA" '
   jq . "$success" >&2
   fail 'matching registry response was not preserved'
 fi
-if grep -Fq "$TEST_TOKEN" "$success" "$work/capture/skopeo-calls"; then
-  fail 'resolver exposed the registry token'
+if grep -Eq 'login|authfile|username|password' "$work/capture/skopeo-calls"; then
+  fail 'public support resolution attempted authenticated registry access'
 fi
-token_target="$(cat "$work/capture/fetch-target")"
-[[ ! -e "$token_target" ]] || fail 'resolver retained the registry token file'
-grep -Fxq 'volume rm support-baseline-auth' "$work/capture/docker-calls" ||
-  fail 'resolver did not remove the Skopeo auth volume'
-
-rm -f "$work/capture/fetch-target"
-anonymous="$work/anonymous.json"
-run_resolver "$anonymous" ANONYMOUS_SUCCESS=1 FAIL_FETCH=1
-jq -e '.retrieval == {valid: true, reasons: []}' "$anonymous" >/dev/null ||
-  fail 'anonymous public registry response was rejected'
-[[ ! -e "$work/capture/fetch-target" ]] ||
-  fail 'anonymous registry success still retrieved a credential'
 
 lookup_failure="$work/lookup-failure.json"
 run_resolver "$lookup_failure" FAIL_IMAGE=workspace
@@ -132,9 +88,4 @@ run_resolver "$malformed" MALFORMED_IMAGE=base
 jq -e '.retrieval == {valid: false, reasons: ["base_registry_response_malformed"]}' \
   "$malformed" >/dev/null || fail 'malformed registry response did not fail closed'
 
-fetch_failure="$work/fetch-failure.json"
-run_resolver "$fetch_failure" FAIL_FETCH=1
-jq -e '.retrieval == {valid: false, reasons: ["credential_unavailable"]}' \
-  "$fetch_failure" >/dev/null || fail 'missing registry credential did not fail closed'
-
-printf '[test-resolve-published-support-pair] matching, partial, malformed, and credential cases passed\n'
+printf '[test-resolve-published-support-pair] anonymous matching, partial, and malformed cases passed\n'

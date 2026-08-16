@@ -12,6 +12,14 @@ fail() {
 
 bash -n "$0"
 
+grep -Fq 'OPENBAO_GHCR_ROLE: codewire-source-prod-ghcr-publisher' \
+  "$WORKFLOW" || fail "production publisher lacks its exact OpenBao GHCR role"
+grep -Fq 'OPENBAO_GHCR_AUDIENCE: openbao-codewire-source-prod-ghcr-publisher' \
+  "$WORKFLOW" || fail "production publisher lacks its exact OpenBao GHCR audience"
+if grep -Fq 'GHCR_PUBLISH_USERNAME:' "$WORKFLOW"; then
+  fail "production publisher retains a split Forgejo GHCR username"
+fi
+
 publish_job="$(sed -n '/^  publish-runtime-images:/,/^  dispatch-deploy-prod:/p' "$WORKFLOW")"
 [[ "$(grep -Fc 'scripts/ci/images/image-bundle.py create' <<<"$publish_job")" -eq 1 ]] ||
   fail "production must validate exactly one complete runtime candidate set"

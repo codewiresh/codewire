@@ -44,8 +44,9 @@ classifier_line="$(grep -n -m1 'name: Plan atomic support build from validated b
   fail 'support selection verifies Rust after artifact classification'
 grep -Fq 'scripts/ci/images/resolve-published-support-pair.sh "$candidate"' \
   <<<"$selection_job" || fail 'support selection does not resolve published pair metadata'
-grep -Fq 'GHCR_PUBLISH_USERNAME: ${{ vars.GHCR_PUBLISH_USERNAME }}' \
-  <<<"$selection_job" || fail 'support baseline resolver omits configured registry identity'
+if grep -Fq 'GHCR_PUBLISH_USERNAME:' <<<"$selection_job"; then
+  fail 'support baseline resolver receives a credential despite anonymous registry access'
+fi
 grep -Fq -- '--baseline-candidate "$RUNNER_TEMP/codewire-published-support-candidate.json"' \
   <<<"$selection_job" || fail 'planner does not consume the untrusted registry candidate'
 grep -Fq -- '--target-base "$GITHUB_SHA"' <<<"$selection_job" ||
@@ -63,7 +64,7 @@ if grep -Fq '"$GITHUB_SHA^"' <<<"$selection_job" \
   fail 'support selection retains HEAD-parent or legacy path classification'
 fi
 if grep -Fq 'secrets.' <<<"$selection_job"; then
-  fail 'support selection bypasses the existing Infisical credential handoff'
+  fail 'support selection receives a credential despite anonymous registry access'
 fi
 for output in build_support_images reason matched_categories base_image_state \
   workspace_image_state baseline_sha head_sha head_tree ci_plan_sha256 \
@@ -86,9 +87,13 @@ grep -qF 'scripts/ci/images/build-push-image.sh workspace images/workspace/Docke
 publish_job="$(sed -n '/^  publish-support-images:/,$p' "$WORKFLOW")"
 grep -qF 'needs: [support-selection]' <<<"$publish_job" ||
   fail 'support publisher is not bound to selection'
-# shellcheck disable=SC2016
-grep -Fq 'GHCR_PUBLISH_USERNAME: ${{ vars.GHCR_PUBLISH_USERNAME }}' \
-  <<<"$publish_job" || fail 'support publisher identity is not repository configuration'
+grep -Fq 'OPENBAO_GHCR_ROLE: codewire-source-support-ghcr-publisher' \
+  "$WORKFLOW" || fail 'support publisher lacks its exact OpenBao GHCR role'
+grep -Fq 'OPENBAO_GHCR_AUDIENCE: openbao-codewire-source-support-ghcr-publisher' \
+  "$WORKFLOW" || fail 'support publisher lacks its exact OpenBao GHCR audience'
+if grep -Fq 'GHCR_PUBLISH_USERNAME:' "$WORKFLOW"; then
+  fail 'support workflow retains a split Forgejo GHCR username'
+fi
 [[ "$(grep -Fc 'scripts/ci/images/publish-image-to-ghcr.sh' <<<"$publish_job")" -eq 1 ]] ||
   fail 'support publisher does not use one pair publication boundary'
 grep -Fq -- '--support-pair' <<<"$publish_job" ||
@@ -108,7 +113,7 @@ grep -Fq '"${{ steps.base.outputs.candidate_ref }}"' <<<"$publish_job" ||
 grep -Fq '"${{ steps.workspace.outputs.candidate_ref }}"' <<<"$publish_job" ||
   fail 'support publisher omits the immutable workspace candidate'
 if grep -Fq 'secrets.' <<<"$publish_job"; then
-  fail 'support publisher bypasses the Infisical credential handoff'
+  fail 'support publisher bypasses the OpenBao OIDC credential handoff'
 fi
 grep -qF -- '-p codewire-cli-bin --bin cw' "$WORKSPACE_DOCKERFILE" ||
   fail 'workspace builds cw from the wrong Rust package'

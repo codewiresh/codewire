@@ -13,6 +13,8 @@ env:
   ALLOW_NON_MAIN_IMAGE_BUILD: "1"
   OPENBAO_ROLE: codewire-source-dev-publisher
   OPENBAO_AUDIENCE: openbao-codewire-source-dev-publisher
+  OPENBAO_GHCR_ROLE: codewire-source-dev-ghcr-publisher
+  OPENBAO_GHCR_AUDIENCE: openbao-codewire-source-dev-ghcr-publisher
 
 jobs:
   deploy-selection:
@@ -160,8 +162,6 @@ jobs:
       - uses: https://forgejo.example.invalid/noel/actions-checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
 
       - name: Copy the complete runtime set without rebuilding
-        env:
-          GHCR_PUBLISH_USERNAME: ${{ vars.GHCR_PUBLISH_USERNAME }}
         run: |
           set -euo pipefail
           bundle="${RUNNER_TEMP:?}/codewire-dev-image-bundle.json"
