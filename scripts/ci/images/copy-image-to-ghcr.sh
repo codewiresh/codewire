@@ -109,6 +109,11 @@ registry_login() {
       >/dev/null 2>"$login_error"; then
       return 0
     fi
+    if grep -Fq '[skopeo-runtime] class=runtime-unavailable' "$login_error"; then
+      echo 'Skopeo runtime became unavailable during registry operation' >&2
+      sed -n '1,20p' "$login_error" >&2
+      return 1
+    fi
     if registry_auth_error "$login_error" && [ "$attempt" -lt 3 ]; then
       printf '%s registry login was rejected; retrying authentication (attempt %s/3)\n' \
         "$label" "$((attempt + 1))" >&2

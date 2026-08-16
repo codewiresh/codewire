@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 readonly ROOT
 readonly RUNNER="$ROOT/scripts/ci/images/run-skopeo-container.sh"
-readonly IMAGE='quay.io/skopeo/stable@sha256:8b23fe434af822adf71bc7c8674a8dfab379771aa1400fb81ff655a5cecfca87'
+readonly IMAGE='nexus.example.invalid/oci-approved/skopeo/stable@sha256:8b23fe434af822adf71bc7c8674a8dfab379771aa1400fb81ff655a5cecfca87'
 
 fail() {
   printf '[test-run-skopeo-container] ERROR: %s\n' "$*" >&2
@@ -18,6 +18,14 @@ mkdir -p "$work/bin"
 cat >"$work/bin/docker" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
+if [ "${1:-}" = image ] && [ "${2:-}" = inspect ]; then
+  printf '%s\n' "$*" >>"${FAKE_DOCKER_CHECKS:?}"
+  if [ "${FAKE_IMAGE_MISSING:-0}" = 1 ]; then
+    exit 1
+  fi
+  printf 'sha256:fixture\n'
+  exit 0
+fi
 attempt=1
 if [ -f "${FAKE_DOCKER_ATTEMPTS:?}" ]; then
   attempt="$(($(cat "$FAKE_DOCKER_ATTEMPTS") + 1))"
@@ -40,15 +48,21 @@ chmod +x "$work/bin/docker"
 export DOCKER_BIN="$work/bin/docker"
 export FAKE_DOCKER_ARGS="$work/docker-args"
 export FAKE_DOCKER_ATTEMPTS="$work/docker-attempts"
+export FAKE_DOCKER_CHECKS="$work/docker-checks"
 export FAKE_STDIN_PREFIX="$work/stdin"
 TEST_REF="docker://git.example.invalid/codewire/gateway@sha256:$(printf 'a%.0s' {1..64})"
 readonly TEST_REF
+"$RUNNER" --check >"$work/check.out"
+grep -qxF 'SKOPEO_RUNTIME_READY' "$work/check.out" ||
+  fail 'Skopeo runtime check did not emit its fixed success marker'
+grep -qxF "image inspect --format {{.Id}} $IMAGE" "$FAKE_DOCKER_CHECKS" ||
+  fail 'Skopeo runtime check did not inspect the exact approved digest'
 SKOPEO_AUTH_VOLUME=codewire-auth-fixture \
   "$RUNNER" inspect --authfile /auth/auth.json \
   "$TEST_REF" </dev/null
 
 for required in \
-  'run' '--rm' '-i' '--env' 'GOMAXPROCS=2' '--pids-limit=256' '--cap-drop=ALL' \
+  'run' '--rm' '-i' '--pull=never' '--env' 'GOMAXPROCS=2' '--pids-limit=256' '--cap-drop=ALL' \
   '--security-opt=no-new-privileges' '--network=bridge' \
   'type=volume,src=codewire-auth-fixture,dst=/auth' \
   "$IMAGE" 'inspect' '--authfile' '/auth/auth.json'; do
@@ -60,6 +74,8 @@ if grep -qi token "$FAKE_DOCKER_ARGS"; then
 fi
 [[ "$(cat "$FAKE_DOCKER_ATTEMPTS")" == 1 ]] ||
   fail 'successful Skopeo startup was repeated'
+[[ "$(wc -l <"$FAKE_DOCKER_CHECKS")" -eq 2 ]] ||
+  fail 'Skopeo runtime was not checked before direct use'
 
 rm -f "$FAKE_DOCKER_ATTEMPTS"
 if SKOPEO_AUTH_VOLUME='invalid/volume' "$RUNNER" inspect example \
@@ -117,5 +133,14 @@ if SKOPEO_STARTUP_RETRY_DELAY_SECONDS=invalid \
 fi
 [[ ! -e "$FAKE_DOCKER_ATTEMPTS" ]] ||
   fail 'invalid startup retry delay reached Docker'
+
+rm -f "$FAKE_DOCKER_ATTEMPTS"
+if FAKE_IMAGE_MISSING=1 "$RUNNER" --check >"$work/missing-image.out" 2>&1; then
+  fail 'missing approved Skopeo image was accepted'
+fi
+grep -qxF '[skopeo-runtime] class=runtime-unavailable detail=approved-image-missing' \
+  "$work/missing-image.out" || fail 'missing runtime did not emit its fixed class'
+[[ ! -e "$FAKE_DOCKER_ATTEMPTS" ]] ||
+  fail 'missing approved Skopeo image reached docker run'
 
 printf '[test-run-skopeo-container] exact container runtime contract passed\n'

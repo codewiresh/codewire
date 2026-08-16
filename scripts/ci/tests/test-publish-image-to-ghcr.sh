@@ -79,6 +79,14 @@ set -euo pipefail
 printf '%s\n' "$*" >>"${FAKE_SKOPEO_CALLS:?}"
 [ "${FAKE_ANON_FAIL:-0}" != 1 ] || exit 1
 case "$1" in
+  --check)
+    [[ "$#" -eq 1 ]]
+    if [ "${FAKE_RUNTIME_UNAVAILABLE:-0}" = 1 ]; then
+      echo '[skopeo-runtime] class=runtime-unavailable detail=approved-image-missing' >&2
+      exit 1
+    fi
+    echo 'SKOPEO_RUNTIME_READY'
+    ;;
   list-tags)
     [[ "$#" -eq 3 && "$2" == --no-creds && "$3" == docker://* ]]
     repository="${3#docker://}"
@@ -125,6 +133,8 @@ export GITHUB_OUTPUT="$work/output"
 
 "$PUBLISH_IMAGE" "$source_ref" "$target_repository" "$source_sha"
 
+grep -qxF -- '--check' "$FAKE_SKOPEO_CALLS" ||
+  fail 'pinned Skopeo runtime was not checked before publication'
 [[ "$(wc -l <"$FAKE_NEXUS_FETCH_CALLS")" -eq 1 ]] ||
   fail 'paired Nexus credential was not fetched exactly once'
 [[ "$(wc -l <"$FAKE_GHCR_FETCH_CALLS")" -eq 1 ]] ||
@@ -159,8 +169,8 @@ if FAKE_COPY_FAIL=1 "$PUBLISH_IMAGE" "$source_ref" "$target_repository" \
     "$source_sha" >"$work/copy-failure.out" 2>&1; then
   fail 'copy failure was accepted'
 fi
-[[ "$(wc -l <"$FAKE_SKOPEO_CALLS")" -eq "$skopeo_calls_before" ]] ||
-  fail 'copy failure reached anonymous verification'
+[[ "$(wc -l <"$FAKE_SKOPEO_CALLS")" -eq $((skopeo_calls_before + 1)) ]] ||
+  fail 'copy failure did more than the required runtime preflight'
 
 copy_calls_before="$(wc -l <"$FAKE_COPY_CALLS")"
 if FAKE_GHCR_FETCH_FAIL=1 "$PUBLISH_IMAGE" "$source_ref" \
@@ -205,9 +215,11 @@ mapfile -t pair_copy_calls <"$FAKE_COPY_CALLS"
 [[ "${pair_copy_calls[3]}" == "$workspace_source_ref $workspace_repository latest" ]] ||
   fail 'support workspace latest alias ordering changed'
 mapfile -t pair_skopeo_calls <"$FAKE_SKOPEO_CALLS"
-[[ "${pair_skopeo_calls[0]}" == "list-tags --no-creds docker://$base_repository" ]] ||
+[[ "${pair_skopeo_calls[0]}" == '--check' ]] ||
+  fail 'support publisher omitted the Skopeo runtime preflight'
+[[ "${pair_skopeo_calls[1]}" == "list-tags --no-creds docker://$base_repository" ]] ||
   fail 'support base public preflight is not first'
-[[ "${pair_skopeo_calls[1]}" == "list-tags --no-creds docker://$workspace_repository" ]] ||
+[[ "${pair_skopeo_calls[2]}" == "list-tags --no-creds docker://$workspace_repository" ]] ||
   fail 'support workspace public preflight is not before credential retrieval'
 grep -qxF "base_ghcr_public_ref=$base_repository@$base_digest" "$GITHUB_OUTPUT" ||
   fail 'support base immutable receipt is absent'
@@ -247,5 +259,20 @@ mapfile -t failed_pair_copy_calls <"$FAKE_COPY_CALLS"
 if grep -qE ' latest$' "$FAKE_COPY_CALLS"; then
   fail 'an unverified immutable pair reached compatibility alias mutation'
 fi
+
+: >"$FAKE_NEXUS_FETCH_CALLS"
+: >"$FAKE_GHCR_FETCH_CALLS"
+: >"$FAKE_COPY_CALLS"
+: >"$FAKE_SKOPEO_CALLS"
+if FAKE_RUNTIME_UNAVAILABLE=1 "$PUBLISH_IMAGE" "$source_ref" \
+    "$target_repository" "$source_sha" >"$work/runtime-unavailable.out" 2>&1; then
+  fail 'missing approved Skopeo runtime was accepted'
+fi
+grep -Fq 'Pinned Skopeo runtime is unavailable' "$work/runtime-unavailable.out" ||
+  fail 'missing Skopeo runtime was not classified before registry activity'
+[[ ! -s "$FAKE_NEXUS_FETCH_CALLS" && ! -s "$FAKE_GHCR_FETCH_CALLS" ]] ||
+  fail 'missing Skopeo runtime reached credential retrieval'
+[[ ! -s "$FAKE_COPY_CALLS" ]] ||
+  fail 'missing Skopeo runtime reached image mutation'
 
 echo 'publish-image-to-ghcr tests passed'

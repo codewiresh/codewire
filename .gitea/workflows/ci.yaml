@@ -224,7 +224,11 @@ jobs:
   workspace-image:
     name: Workspace image verification
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # A selected workspace verification performs two credential-free cold
+    # image builds. Keep its ceiling below the compatibility runner's
+    # independently enforced 60-minute task budget while allowing the admitted
+    # cold path to exceed 45 minutes.
+    timeout-minutes: 55
     needs: [verification-selection]
     steps:
       - name: Reuse exact PR-head content verification

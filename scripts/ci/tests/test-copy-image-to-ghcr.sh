@@ -38,6 +38,10 @@ printf '\n' >>"$FAKE_CALLS"
 
 command="$1"
 shift
+if [ "${FAKE_RUNTIME_FAILURE:-0}" = 1 ]; then
+  echo '[skopeo-runtime] class=runtime-unavailable detail=approved-image-missing' >&2
+  exit 1
+fi
 case "$command" in
   login)
     credential="$(cat)"
@@ -185,6 +189,19 @@ grep -qF 'Unable to authenticate to Nexus registry' \
   "$work/persistent-login.out" || fail 'persistent Nexus login failure was not explicit'
 [[ "$(grep -c '^login .*nexus-system-cluster.example.invalid ' "$FAKE_CALLS")" -eq $((nexus_login_calls_before + 3)) ]] ||
   fail 'persistent Nexus login did not stop after three bounded attempts'
+
+runtime_calls_before="$(wc -l <"$FAKE_CALLS")"
+if FAKE_RUNTIME_FAILURE=1 "$COPY_IMAGE" "$source_ref" "$target_repository" \
+    "$source_sha" >"$work/runtime-unavailable.out" 2>&1; then
+  fail 'missing Skopeo runtime was accepted during registry login'
+fi
+grep -qF 'Skopeo runtime became unavailable during registry operation' \
+  "$work/runtime-unavailable.out" || fail 'runtime failure was mislabeled as registry authentication'
+if grep -qF 'Unable to authenticate to Nexus registry' "$work/runtime-unavailable.out"; then
+  fail 'runtime failure retained the misleading Nexus authentication label'
+fi
+[[ "$(wc -l <"$FAKE_CALLS")" -eq $((runtime_calls_before + 1)) ]] ||
+  fail 'runtime failure was retried as registry authentication'
 
 support_source_ref="nexus-system-cluster.example.invalid/oci-promoted/codewire/base@$expected_digest"
 support_target_repository='ghcr.io/codewiresh/base'

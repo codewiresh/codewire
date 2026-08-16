@@ -1165,10 +1165,11 @@ services-runtime|Service runtime-plane verification|ubuntu-latest
 edge-kind|Edge / Kind verification|kind-e2e
 EOF
 
-# Compatibility jobs share the disposable DinD runner pool. Keep their task
-# ceiling below the runner pod's independently managed lifetime so queued pods
-# still have enough time to execute a bounded job after assignment.
-for job_id in cw-release-assets workspace-image standard rust-transport database services-control services-runtime; do
+# Compatibility jobs share the disposable DinD runner pool. Keep ordinary task
+# ceilings at 30 minutes. The selected workspace path performs two cold image
+# builds, so it has a bounded 55-minute exception beneath the runner's
+# independently managed 60-minute task lifetime.
+for job_id in cw-release-assets standard rust-transport database services-control services-runtime; do
   block="$TMP/${job_id}.yaml"
   if [ ! -s "$block" ]; then
     awk -v wanted="$job_id" '
@@ -1182,6 +1183,17 @@ for job_id in cw-release-assets workspace-image standard rust-transport database
     exit 1
   }
 done
+
+workspace_block="$TMP/workspace-image.yaml"
+awk '
+  $0 == "  workspace-image:" { capture = 1 }
+  capture && $0 ~ /^  [A-Za-z0-9_-]+:$/ && $0 != "  workspace-image:" { exit }
+  capture { print }
+' "$WORKFLOW" > "$workspace_block"
+grep -qF '    timeout-minutes: 55' "$workspace_block" || {
+  echo 'workspace-image: cold-build ceiling must remain below the 60-minute runner lifetime' >&2
+  exit 1
+}
 
 for job_id in standard rust-transport database services-control services-runtime edge-kind; do
   block="$TMP/${job_id}.yaml"

@@ -64,6 +64,10 @@ if [ ! -x "$skopeo_runner" ]; then
   echo "Pinned Skopeo container runner is required for GHCR verification" >&2
   exit 1
 fi
+if ! "$skopeo_runner" --check; then
+  echo "Pinned Skopeo runtime is unavailable" >&2
+  exit 1
+fi
 
 if [ "$support_pair" = true ]; then
   for public_repository in "$base_repository" "$workspace_repository"; do

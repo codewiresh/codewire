@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Official quay.io/skopeo/stable linux/amd64 image, Skopeo 1.22.2.
-readonly SKOPEO_IMAGE='quay.io/skopeo/stable@sha256:8b23fe434af822adf71bc7c8674a8dfab379771aa1400fb81ff655a5cecfca87'
+# Official quay.io/skopeo/stable linux/amd64 image, Skopeo 1.22.2, copied
+# byte-for-byte through the reviewed Nexus promotion boundary. Disposable
+# runners must preload this exact internal reference before registration.
+readonly SKOPEO_IMAGE='nexus.example.invalid/oci-approved/skopeo/stable@sha256:8b23fe434af822adf71bc7c8674a8dfab379771aa1400fb81ff655a5cecfca87'
 docker_bin="${DOCKER_BIN:-docker}"
 
 [[ $# -gt 0 ]] || {
-  echo 'Usage: run-skopeo-container.sh SKOPEO_ARGUMENT...' >&2
+  echo 'Usage: run-skopeo-container.sh [--check | SKOPEO_ARGUMENT...]' >&2
   exit 2
 }
 if [[ "$docker_bin" == */* ]]; then
@@ -19,10 +21,34 @@ elif ! command -v "$docker_bin" >/dev/null 2>&1; then
   exit 1
 fi
 
+runtime_available() {
+  "$docker_bin" image inspect --format '{{.Id}}' "$SKOPEO_IMAGE" \
+    >/dev/null 2>&1
+}
+
+if [ "$1" = --check ]; then
+  [ "$#" -eq 1 ] || {
+    echo 'Skopeo runtime check does not accept additional arguments' >&2
+    exit 2
+  }
+  if ! runtime_available; then
+    echo '[skopeo-runtime] class=runtime-unavailable detail=approved-image-missing' >&2
+    exit 1
+  fi
+  echo 'SKOPEO_RUNTIME_READY'
+  exit 0
+fi
+
+if ! runtime_available; then
+  echo '[skopeo-runtime] class=runtime-unavailable detail=approved-image-missing' >&2
+  exit 1
+fi
+
 docker_args=(
   run
   --rm
   -i
+  --pull=never
   --env GOMAXPROCS=2
   # Podman's Docker API can otherwise assign an unusable default PID cgroup to
   # nested containers. Keep enough headroom for Skopeo's Go runtime while

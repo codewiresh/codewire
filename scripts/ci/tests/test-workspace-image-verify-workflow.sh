@@ -29,6 +29,8 @@ grep -qF '    name: Workspace image verification' <<<"$workspace_job" ||
   fail 'workspace job has misleading publication wording'
 grep -qF '    runs-on: ubuntu-latest' <<<"$workspace_job" ||
   fail 'workspace job is not assigned to a generic runner'
+grep -qF '    timeout-minutes: 55' <<<"$workspace_job" ||
+  fail 'workspace cold-build ceiling does not preserve the runner cleanup margin'
 grep -qF '    needs: [verification-selection]' <<<"$workspace_job" ||
   fail 'workspace job does not consume the canonical verification plan'
 if grep -qE '^    if:' <<<"$workspace_job"; then
