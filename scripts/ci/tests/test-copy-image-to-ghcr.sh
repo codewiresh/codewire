@@ -55,6 +55,14 @@ case "$command" in
         exit 1
       fi
     fi
+    if [ "$host" = ghcr.io ] && [ -n "${FAKE_GHCR_CONNECT_FAILURES:-}" ]; then
+      count="$(cat "${FAKE_GHCR_CONNECT_STATE:?}")"
+      if [ "$count" -lt "$FAKE_GHCR_CONNECT_FAILURES" ]; then
+        printf '%s\n' "$((count + 1))" >"$FAKE_GHCR_CONNECT_STATE"
+        echo 'time="fixture" level=fatal msg="authenticating creds for ghcr.io: pinging container registry ghcr.io: Get https://ghcr.io/v2/: dial tcp 140.82.121.33:443: i/o timeout"' >&2
+        exit 1
+      fi
+    fi
     ;;
   inspect)
     ref="${!#}"
@@ -142,6 +150,19 @@ fi
   fail "publication did not create exactly one private auth volume"
 [[ "$(grep -c '^volume rm fake-auth-volume$' "$FAKE_DOCKER_CALLS")" -eq 1 ]] ||
   fail "publication did not delete its private auth volume"
+
+printf '0\n' >"$work/ghcr-connect-state"
+ghcr_login_calls_before="$(grep -c '^login .*ghcr.io ' "$FAKE_CALLS")"
+if FAKE_GHCR_CONNECT_FAILURES=1 \
+  FAKE_GHCR_CONNECT_STATE="$work/ghcr-connect-state" \
+  "$COPY_IMAGE" "$source_ref" "$target_repository" "$source_sha" \
+    >"$work/exhausted-connect.out" 2>&1; then
+  fail 'exhausted GHCR connectivity failure was accepted'
+fi
+grep -qF 'Unable to reach GHCR registry after bounded retries' \
+  "$work/exhausted-connect.out" || fail 'exhausted GHCR connectivity was mislabeled'
+[[ "$(grep -c '^login .*ghcr.io ' "$FAKE_CALLS")" -eq $((ghcr_login_calls_before + 1)) ]] ||
+  fail 'the copy helper retried an exhausted Skopeo network operation'
 
 "$COPY_IMAGE" "$source_ref" "$target_repository" "$source_sha" "$release_tag" >/dev/null
 [[ "$(grep -c '^copy ' "$FAKE_CALLS")" -eq 2 ]] ||

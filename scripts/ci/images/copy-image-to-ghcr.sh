@@ -98,6 +98,12 @@ registry_auth_error() {
     "$1"
 }
 
+registry_connectivity_error() {
+  grep -Eqi \
+    '(\[skopeo-network\] class=transient-exhausted|dial (tcp|udp)[^[:cntrl:]]*(i/o timeout|connection refused|network is unreachable)|tls handshake timeout|connection reset by peer|connection timed out|context deadline exceeded|temporary failure in name resolution|no such host|unexpected eof)' \
+    "$1"
+}
+
 registry_login() {
   local label="$1" host="$2" username="$3" credential_file="$4"
   local login_error attempt
@@ -111,6 +117,11 @@ registry_login() {
     fi
     if grep -Fq '[skopeo-runtime] class=runtime-unavailable' "$login_error"; then
       echo 'Skopeo runtime became unavailable during registry operation' >&2
+      sed -n '1,20p' "$login_error" >&2
+      return 1
+    fi
+    if registry_connectivity_error "$login_error"; then
+      printf 'Unable to reach %s registry after bounded retries\n' "$label" >&2
       sed -n '1,20p' "$login_error" >&2
       return 1
     fi

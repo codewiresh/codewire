@@ -37,6 +37,10 @@ if [ "${FAKE_NONRETRYABLE_FAILURE:-0}" = 1 ]; then
   echo 'registry authorization failed' >&2
   exit 9
 fi
+if [ "$attempt" -le "${FAKE_NETWORK_FAILURES:-0}" ]; then
+  echo 'time="fixture" level=fatal msg="Error listing repository tags: pinging container registry ghcr.io: Get https://ghcr.io/v2/: dial tcp 140.82.121.33:443: i/o timeout"' >&2
+  exit 7
+fi
 if [ "$attempt" -le "${FAKE_TRANSIENT_FAILURES:-0}" ]; then
   echo 'runtime/cgo: pthread_create failed: Resource temporarily unavailable' >&2
   exit 2
@@ -108,6 +112,38 @@ if grep -Fq "$retry_secret" "$retry_output"; then
 fi
 
 rm -f "$FAKE_DOCKER_ATTEMPTS"
+network_retry_output="$work/network-retry.out"
+network_retry_secret='network-retry-stdin-secret'
+if ! printf '%s' "$network_retry_secret" | \
+  FAKE_NETWORK_FAILURES=2 SKOPEO_NETWORK_RETRY_DELAY_SECONDS=0 \
+    "$RUNNER" list-tags --no-creds docker://ghcr.io/codewiresh/base \
+      >"$network_retry_output" 2>&1; then
+  fail 'bounded transient registry recovery failed'
+fi
+[[ "$(cat "$FAKE_DOCKER_ATTEMPTS")" == 3 ]] ||
+  fail 'transient registry operation did not use three bounded attempts'
+[[ "$(grep -Fc '[skopeo-network] transient registry connectivity' "$network_retry_output")" == 2 ]] ||
+  fail 'transient registry retries were not reported with fixed markers'
+[[ "$(grep -Fc 'dial tcp 140.82.121.33:443: i/o timeout' "$network_retry_output")" == 2 ]] ||
+  fail 'transient registry retries suppressed their structural error evidence'
+if grep -Fq "$network_retry_secret" "$network_retry_output"; then
+  fail 'private stdin reached transient registry output'
+fi
+
+rm -f "$FAKE_DOCKER_ATTEMPTS"
+if FAKE_NETWORK_FAILURES=3 SKOPEO_NETWORK_RETRY_DELAY_SECONDS=0 \
+  "$RUNNER" login ghcr.io >"$work/network-exhausted.out" 2>&1; then
+  fail 'exhausted registry retries were accepted'
+fi
+[[ "$(cat "$FAKE_DOCKER_ATTEMPTS")" == 3 ]] ||
+  fail 'registry recovery exceeded three bounded attempts'
+grep -qxF '[skopeo-network] class=transient-exhausted' \
+  <(grep -F '[skopeo-network] class=transient-exhausted' "$work/network-exhausted.out") ||
+  fail 'exhausted registry connectivity lacks its fixed marker'
+grep -Fq 'dial tcp 140.82.121.33:443: i/o timeout' "$work/network-exhausted.out" ||
+  fail 'exhausted registry connectivity suppressed the terminal error'
+
+rm -f "$FAKE_DOCKER_ATTEMPTS"
 if printf 'private' | FAKE_NONRETRYABLE_FAILURE=1 \
   SKOPEO_STARTUP_RETRY_DELAY_SECONDS=0 \
   "$RUNNER" inspect example >"$work/nonretryable.out" 2>&1; then
@@ -133,6 +169,14 @@ if SKOPEO_STARTUP_RETRY_DELAY_SECONDS=invalid \
 fi
 [[ ! -e "$FAKE_DOCKER_ATTEMPTS" ]] ||
   fail 'invalid startup retry delay reached Docker'
+
+rm -f "$FAKE_DOCKER_ATTEMPTS"
+if SKOPEO_NETWORK_RETRY_DELAY_SECONDS=invalid \
+  "$RUNNER" inspect example >"$work/invalid-network-delay.out" 2>&1; then
+  fail 'invalid network retry delay was accepted'
+fi
+[[ ! -e "$FAKE_DOCKER_ATTEMPTS" ]] ||
+  fail 'invalid network retry delay reached Docker'
 
 rm -f "$FAKE_DOCKER_ATTEMPTS"
 if FAKE_IMAGE_MISSING=1 "$RUNNER" --check >"$work/missing-image.out" 2>&1; then

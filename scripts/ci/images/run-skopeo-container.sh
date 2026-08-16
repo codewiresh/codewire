@@ -74,6 +74,11 @@ retry_delay="${SKOPEO_STARTUP_RETRY_DELAY_SECONDS:-10}"
   echo 'Skopeo startup retry delay must be a non-negative integer' >&2
   exit 1
 }
+network_retry_delay="${SKOPEO_NETWORK_RETRY_DELAY_SECONDS:-5}"
+[[ "$network_retry_delay" =~ ^[0-9]+$ ]] || {
+  echo 'Skopeo network retry delay must be a non-negative integer' >&2
+  exit 1
+}
 
 umask 077
 work="$(mktemp -d)"
@@ -109,6 +114,20 @@ for attempt in 1 2 3; do
       "$((attempt + 1))" >&2
     sleep "$((retry_delay * attempt))"
     continue
+  fi
+
+  if grep -Eqi \
+      '(dial (tcp|udp)[^[:cntrl:]]*(i/o timeout|connection refused|network is unreachable)|tls handshake timeout|connection reset by peer|connection timed out|context deadline exceeded|temporary failure in name resolution|no such host|unexpected eof)' \
+      "$stderr_file"; then
+    if [ "$attempt" -lt 3 ]; then
+      printf '[skopeo-network] transient registry connectivity; retrying operation (%d/3)\n' \
+        "$((attempt + 1))" >&2
+      cat "$stdout_file"
+      cat "$stderr_file" >&2
+      sleep "$((network_retry_delay * attempt))"
+      continue
+    fi
+    echo '[skopeo-network] class=transient-exhausted' >&2
   fi
 
   cat "$stdout_file"
