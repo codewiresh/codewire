@@ -4,11 +4,17 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 readonly ROOT
 readonly BUILDER="$ROOT/scripts/ci/images/build-push-image.sh"
+readonly KIND_BUILDER="$ROOT/scripts/ci/images/build-kind-images.sh"
+readonly RUST_BUILD_WRAPPER="$ROOT/scripts/ci/images/run-rust-build.sh"
+readonly RUST_BASE_DOCKERFILE="$ROOT/deployments/docker/rust-base.Dockerfile"
+readonly BAKE_FILE="$ROOT/docker-bake.hcl"
+readonly COMPOSE_FILE="$ROOT/docker-compose.yml"
 readonly SERVICES_DOCKERFILE="$ROOT/deployments/docker/services.Dockerfile"
 readonly SERVICES_DOCKERIGNORE="$ROOT/deployments/docker/services.Dockerfile.dockerignore"
 readonly DASHBOARD_DOCKERFILE="$ROOT/apps/dashboard/Dockerfile"
 readonly MESH_DOCKERFILE="$ROOT/deployments/docker/mesh.Dockerfile"
 readonly GATEWAY_DOCKERFILE="$ROOT/deployments/docker/gateway.Dockerfile"
+readonly DERP_DOCKERFILE="$ROOT/deployments/docker/derp.Dockerfile"
 readonly SERVICES_BINARIES=(
   codewire-idp
   codewire-orchestration
@@ -24,14 +30,18 @@ fail() {
   exit 1
 }
 
+build_invocation_count() {
+  grep -Ec ' buildx (bake|build) ' "$FAKE_DOCKER_CALLS" || true
+}
+
 mkdir -p "$ROOT/.tmp"
 
 verify_services_dockerfile_contract() {
   local mount binary
   local mounts=(
-    'id=codewire-root-cargo-registry,target=/usr/local/cargo/registry,sharing=locked'
-    'id=codewire-root-cargo-git,target=/usr/local/cargo/git,sharing=locked'
-    'id=codewire-root-release-target,target=/src/target,sharing=locked'
+    'id=codewire-services-cargo-registry,target=/usr/local/cargo/registry,sharing=locked'
+    'id=codewire-services-cargo-git,target=/usr/local/cargo/git,sharing=locked'
+    'id=codewire-sccache-v2,target=/var/cache/sccache,sharing=shared'
   )
 
   [[ "$(grep -cF -- '--mount=type=cache' "$SERVICES_DOCKERFILE")" -eq 3 ]] ||
@@ -40,8 +50,6 @@ verify_services_dockerfile_contract() {
     grep -qF -- "--mount=type=cache,${mount}" "$SERVICES_DOCKERFILE" ||
       fail "services image is missing cache mount ${mount}"
   done
-  grep -qF 'ARG CODEWIRE_CARGO_CACHE_PROBE' "$SERVICES_DOCKERFILE" ||
-    fail 'services image is missing its explicit cache-probe invalidator'
   grep -qF 'COPY libs/gateway-proto ./libs/gateway-proto' "$SERVICES_DOCKERFILE" ||
     fail 'services image does not receive the environment daemon protocol schema'
   grep -qF '!libs/gateway-proto/**' "$SERVICES_DOCKERIGNORE" ||
@@ -49,17 +57,13 @@ verify_services_dockerfile_contract() {
   grep -qF 'find Cargo.toml Cargo.lock crates proto libs/gateway-proto -type f -exec touch {} +' \
     "$SERVICES_DOCKERFILE" ||
     fail 'services image does not revalidate copied workspace inputs'
-  grep -qF 'cargo build "$@" --locked --release' "$SERVICES_DOCKERFILE" ||
-    fail 'services image does not build the locked release graph'
-  if grep -qF 'COPY --from=builder /src/target/' "$SERVICES_DOCKERFILE"; then
-    fail 'services runtime stage reads from the non-persistent Cargo target mount'
-  fi
-  grep -qF 'ARG RUST_IMAGE=rust:1.91.1-bookworm@sha256:c1e5f19e773b7878c3f7a805dd00a495e747acbdc76fb2337a4ebf0418896b33' \
-    "$SERVICES_DOCKERFILE" || fail 'services Rust builder pin changed'
+  # shellcheck disable=SC2016
+  grep -qF 'codewire-rust-build cargo build --locked --profile "$CODEWIRE_RUST_PROFILE"' "$SERVICES_DOCKERFILE" ||
+    fail 'services image does not build the selected locked profile'
+  grep -qF 'FROM codewire-rust-base AS builder' "$SERVICES_DOCKERFILE" ||
+    fail 'services does not consume the shared Rust build base'
   grep -qF 'ARG DEBIAN_IMAGE=debian:bookworm-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818' \
     "$SERVICES_DOCKERFILE" || fail 'services runtime base changed'
-  grep -qF "FROM \${RUST_IMAGE} AS builder" "$SERVICES_DOCKERFILE" ||
-    fail 'services builder does not consume the reviewed Rust image'
   grep -qF "FROM \${DEBIAN_IMAGE}" "$SERVICES_DOCKERFILE" ||
     fail 'services runtime does not consume the reviewed Debian image'
   grep -qF 'USER 65532:65532' "$SERVICES_DOCKERFILE" ||
@@ -68,7 +72,7 @@ verify_services_dockerfile_contract() {
   for binary in "${SERVICES_BINARIES[@]}"; do
     [[ "$(grep -cF -- "--bin ${binary}" "$SERVICES_DOCKERFILE")" -eq 1 ]] ||
       fail "services build does not request ${binary} exactly once"
-    [[ "$(grep -cF "target/release/${binary}" "$SERVICES_DOCKERFILE")" -eq 1 ]] ||
+    [[ "$(grep -cF "target/\$CODEWIRE_RUST_PROFILE/${binary}" "$SERVICES_DOCKERFILE")" -eq 1 ]] ||
       fail "services build does not copy ${binary} out of Cargo target exactly once"
     [[ "$(grep -cF "/out/${binary}" "$SERVICES_DOCKERFILE")" -eq 2 ]] ||
       fail "services image does not move ${binary} through the non-cache output exactly once"
@@ -79,144 +83,92 @@ verify_services_dockerfile_contract() {
 }
 
 verify_kind_build_cache_contract() {
-  local dockerfile
+  local dockerfile count
   for dockerfile in \
       "$DASHBOARD_DOCKERFILE" \
       "$SERVICES_DOCKERFILE" \
       "$MESH_DOCKERFILE" \
-      "$GATEWAY_DOCKERFILE"; do
-    grep -qF -- '--mount=type=cache,id=codewire-root-cargo-registry,target=/usr/local/cargo/registry,sharing=locked' \
-      "$dockerfile" || fail "$(basename "$dockerfile") omits the job-local Cargo registry cache"
-    grep -qF -- '--mount=type=cache,id=codewire-root-cargo-git,target=/usr/local/cargo/git,sharing=locked' \
-      "$dockerfile" || fail "$(basename "$dockerfile") omits the job-local Cargo git cache"
+      "$GATEWAY_DOCKERFILE" \
+      "$DERP_DOCKERFILE"; do
+    grep -qF 'FROM codewire-rust-base AS ' "$dockerfile" ||
+      fail "$(basename "$dockerfile") omits the shared Rust build base"
+    grep -qF -- 'id=codewire-sccache-v2,target=/var/cache/sccache,sharing=shared' \
+      "$dockerfile" || fail "$(basename "$dockerfile") omits the shared compiler cache"
+    grep -Eq -- 'id=codewire-[a-z-]+-cargo-registry,target=/usr/local/cargo/registry,sharing=locked' \
+      "$dockerfile" || fail "$(basename "$dockerfile") omits its isolated Cargo registry cache"
+    if grep -Eq -- 'target=/usr/local/cargo/(registry|git),sharing=shared' "$dockerfile"; then
+      fail "$(basename "$dockerfile") unsafely shares a writable Cargo download cache across parallel targets"
+    fi
+    grep -qF -- '--mount=type=secret,id=aws_iam_credentials_url' "$dockerfile" ||
+      fail "$(basename "$dockerfile") omits the temporary R2 credential mount"
+    grep -qF 'ARG CODEWIRE_SCCACHE_MODE=disabled' "$dockerfile" ||
+      fail "$(basename "$dockerfile") does not fail closed to disabled remote caching"
+    # shellcheck disable=SC2016
+    grep -qF 'codewire-rust-build cargo build --locked --profile "$CODEWIRE_RUST_PROFILE"' "$dockerfile" ||
+      fail "$(basename "$dockerfile") bypasses the canonical compiler-cache wrapper"
+    if grep -Eq 'cargo[ -]chef|recipe\.json|target=/[^ ]*/target' "$dockerfile"; then
+      fail "$(basename "$dockerfile") retains cargo-chef or a coarse target-tree cache"
+    fi
   done
 
-  for dockerfile in "$SERVICES_DOCKERFILE" "$MESH_DOCKERFILE" "$GATEWAY_DOCKERFILE"; do
-    grep -qF -- '--mount=type=cache,id=codewire-root-release-target,target=/src/target,sharing=locked' \
-      "$dockerfile" || fail "$(basename "$dockerfile") omits the compatible root-workspace target cache"
+  [[ "$(grep -cF 'codewire-rust-base = "target:rust-base"' "$BAKE_FILE")" -eq 1 ]] ||
+    fail 'Bake does not build the shared Rust base once as a linked target'
+  for target in dashboard-ci services-ci mesh-ci gateway-ci; do
+    grep -qF "\"$target\"" "$BAKE_FILE" || fail "Bake omits Kind target $target"
   done
-  grep -qF -- '--mount=type=cache,id=codewire-dashboard-release-target,target=/workspace/target,sharing=locked' \
-    "$DASHBOARD_DOCKERFILE" || fail 'dashboard target cache is not isolated by its workspace path'
-  grep -qF -- '--mount=type=cache,id=codewire-gateway-release-target,target=/src/target,sharing=locked' \
-    "$GATEWAY_DOCKERFILE" || fail 'curated gateway target cache is not isolated from the root lockfile'
-
-  if grep -Eq 'COPY --from=[^ ]+ /[^ ]*/target/' \
-      "$DASHBOARD_DOCKERFILE" "$SERVICES_DOCKERFILE" "$MESH_DOCKERFILE" "$GATEWAY_DOCKERFILE"; then
-    fail 'a runtime stage reads directly from a non-persistent Cargo target cache'
-  fi
+  grep -qF 'default = "disabled"' "$BAKE_FILE" ||
+    fail 'Bake remote compiler cache does not default disabled'
+  grep -qF 'sccache-v0.17.0-x86_64-unknown-linux-musl.tar.gz' "$RUST_BASE_DOCKERFILE" ||
+    fail 'shared build base omits the reviewed sccache binary'
+  grep -qF 'CODEWIRE_SCCACHE_MODE:-local' "$KIND_BUILDER" ||
+    fail 'Kind does not enable its job-local compiler cache'
+  [[ "$(grep -cF 'buildx bake' "$KIND_BUILDER")" -eq 1 ]] ||
+    fail 'Kind must issue exactly one canonical Bake build'
+  grep -qF 'untrusted/codewire/' "$KIND_BUILDER" ||
+    fail 'Kind does not constrain its remote cache trust-domain prefix'
+  grep -qF 'protected/codewire/' "$BUILDER" ||
+    fail 'published image builds do not constrain their compiler-cache prefix'
+  grep -qF 'AWS_IAM_CREDENTIALS_URL' "$RUST_BUILD_WRAPPER" ||
+    fail 'sccache does not consume short-lived AWS-compatible credentials'
+  grep -qF 'export CARGO_INCREMENTAL=0' "$RUST_BUILD_WRAPPER" ||
+    fail 'sccache wrapper does not disable incompatible incremental compilation'
+  grep -qF 'export SCCACHE_DIRECT=false' "$RUST_BUILD_WRAPPER" ||
+    fail 'sccache wrapper permits unsafe direct-mode reuse across isolated executors'
+  grep -qF 'codewire-rust-base: service:rust-base' "$COMPOSE_FILE" ||
+    fail 'Compose does not supply the dashboard shared Rust build context'
+  grep -A6 '^  rust-base:$' "$COMPOSE_FILE" | grep -qF 'replicas: 0' ||
+    fail 'Compose may start the build-only Rust base as a runtime service'
+  grep -qF 'export SCCACHE_SERVER_UDS=' "$RUST_BUILD_WRAPPER" ||
+    fail 'sccache daemon is not isolated to one BuildKit executor'
+  grep -qF 'dev.codewire.promotable"    = "false"' "$BAKE_FILE" ||
+    fail 'Kind images are not marked non-promotable'
+  # shellcheck disable=SC2016
+  count="$(grep -cF 'cargo build --locked --profile "$CODEWIRE_RUST_PROFILE"' "$GATEWAY_DOCKERFILE")"
+  [[ "$count" -eq 2 ]] || fail 'gateway must preserve its two distinct profile-selected builds'
 }
-
-run_services_probe_build() {
-  local probe_value="$1"
-  local log_file="$2"
-  local image_tag="$3"
-  local context="$4"
-  local build_status
-
-  printf '[test-build-push-image] building services cache probe %s\n' "$probe_value"
-  set +e
-  (
-    cd "$context"
-    docker buildx build --load --progress=plain \
-      --build-arg "CODEWIRE_CARGO_CACHE_PROBE=${probe_value}" \
-      -f deployments/docker/services.Dockerfile \
-      -t "$image_tag" .
-  ) 2>&1 | tee "$log_file" | grep --line-buffered -E \
-    "codewire-services cargo cache probe|Dirty codewire-proto|Compiling codewire-proto|Fresh tokio|Finished \`release\` profile|(^|[[:space:]])(ERROR|error:)"
-  build_status="${PIPESTATUS[0]}"
-  set -e
-
-  if [[ "$build_status" -ne 0 ]]; then
-    tail -n 120 "$log_file" >&2
-    fail "services cache probe ${probe_value} build failed"
-  fi
-}
-
-run_services_cache_probe() (
-  command -v docker >/dev/null 2>&1 || fail 'docker is required for services-cache'
-  docker buildx version >/dev/null 2>&1 ||
-    fail 'Docker Buildx is required for services-cache'
-
-  local probe_work seed_context verify_context first_log second_log
-  local first_tag second_tag seed_input verify_input binary
-  probe_work="$(mktemp -d "$ROOT/.tmp/services-cache-probe.XXXXXX")"
-  seed_context="$probe_work/seed-context"
-  verify_context="$probe_work/verify-context"
-  first_log="$probe_work/seed.log"
-  second_log="$probe_work/verify.log"
-  first_tag="codewire-services:cache-probe-seed-$$"
-  second_tag="codewire-services:cache-probe-verify-$$"
-
-  # shellcheck disable=SC2329 # Invoked indirectly by the EXIT trap.
-  cleanup_services_cache_probe() {
-    docker image rm -f "$first_tag" "$second_tag" >/dev/null 2>&1 || true
-    rm -rf "$probe_work"
-  }
-  trap cleanup_services_cache_probe EXIT
-
-  mkdir -p "$seed_context" "$verify_context"
-  (
-    cd "$ROOT"
-    git ls-files --cached -z |
-      tar --null --files-from=- --create --file=-
-  ) | tar --extract --file=- --directory="$seed_context"
-
-  seed_input="$seed_context/crates/codewire-proto/build.rs"
-  verify_input="$verify_context/crates/codewire-proto/build.rs"
-  touch "$seed_input"
-  cp -a "$seed_context/." "$verify_context/"
-  printf '\n// services cache old-mtime workspace-input probe\n' >>"$verify_input"
-  touch -t 200001010000 "$verify_input"
-  [[ "$verify_input" -ot "$seed_input" ]] ||
-    fail 'services cache probe did not create an older changed workspace input'
-
-  run_services_probe_build "seed-$$" "$first_log" "$first_tag" "$seed_context"
-  run_services_probe_build "verify-$$" "$second_log" "$second_tag" "$verify_context"
-
-  grep -Fq 'codewire-services cargo cache probe: verify' "$second_log" ||
-    fail 'second services build reused its instruction layer instead of rerunning Cargo'
-  grep -Fq 'Dirty codewire-proto v' "$second_log" ||
-    fail 'second services build accepted a changed old-mtime workspace crate as fresh'
-  grep -Fq 'Compiling codewire-proto v' "$second_log" ||
-    fail 'second services build did not rebuild the changed workspace crate'
-  grep -Eq 'Fresh tokio v[0-9]' "$second_log" ||
-    fail 'second services build did not prove reuse of a Cargo dependency artifact'
-
-  for binary in "${SERVICES_BINARIES[@]}"; do
-    docker run --rm --entrypoint /bin/sh "$first_tag" \
-      -c "test -x /${binary}" || fail "seed image is missing ${binary}"
-    docker run --rm --entrypoint /bin/sh "$second_tag" \
-      -c "test -x /${binary}" || fail "verify image is missing ${binary}"
-  done
-  [[ "$(docker image inspect --format '{{.Config.User}}' "$first_tag")" = '65532:65532' ]] ||
-    fail 'seed services image runtime user changed'
-  [[ "$(docker image inspect --format '{{.Config.User}}' "$second_tag")" = '65532:65532' ]] ||
-    fail 'verify services image runtime user changed'
-
-  docker run --rm --entrypoint /bin/sh "$first_tag" \
-    -c 'sha256sum /codewire-idp /codewire-orchestration /sidecar-smoke /codewire-billing /codewire-coordinator /codewire-db-migrate /codewire-udp-relay' \
-    >"$probe_work/seed.sha256"
-  docker run --rm --entrypoint /bin/sh "$second_tag" \
-    -c 'sha256sum /codewire-idp /codewire-orchestration /sidecar-smoke /codewire-billing /codewire-coordinator /codewire-db-migrate /codewire-udp-relay' \
-    >"$probe_work/verify.sha256"
-  cmp -s "$probe_work/seed.sha256" "$probe_work/verify.sha256" ||
-    fail 'cache-probe invalidation changed services binary bytes'
-
-  printf '[test-build-push-image] services Cargo cache reuse and image contents passed\n'
-)
 
 verify_services_dockerfile_contract
 verify_kind_build_cache_contract
-case "${1:-}" in
-  '') ;;
-  services-cache)
-    run_services_cache_probe
-    exit 0
-    ;;
-  *)
-    fail "unknown test mode: $1"
-    ;;
-esac
+[[ "$#" -eq 0 ]] || fail "unknown test mode: $1"
+
+if ! CODEWIRE_SCCACHE_MODE=disabled CODEWIRE_RUST_PROFILE=ci \
+  "$RUST_BUILD_WRAPPER" true >"$ROOT/.tmp/rust-build-wrapper.out"; then
+  fail 'disabled sccache mode did not execute the requested command'
+fi
+grep -qF 'CODEWIRE_CI_PHASE name=rust-compile-link mode=disabled' \
+  "$ROOT/.tmp/rust-build-wrapper.out" ||
+  fail 'Rust build wrapper omitted its structured phase result'
+if CODEWIRE_SCCACHE_MODE=disabled CODEWIRE_RUST_PROFILE=debug \
+  "$RUST_BUILD_WRAPPER" true >"$ROOT/.tmp/rust-build-wrapper-invalid.out" 2>&1; then
+  fail 'Rust build wrapper accepted an undeclared build profile'
+fi
+if CODEWIRE_SCCACHE_MODE=r2 CODEWIRE_RUST_PROFILE=ci \
+  SCCACHE_BUCKET=test SCCACHE_ENDPOINT=test.invalid \
+  CODEWIRE_SCCACHE_PREFIX=untrusted/codewire/test \
+  AWS_IAM_CREDENTIALS_URL=http://credentials.invalid \
+  "$RUST_BUILD_WRAPPER" true >"$ROOT/.tmp/rust-build-wrapper-http.out" 2>&1; then
+  fail 'Rust build wrapper accepted a plaintext credential endpoint'
+fi
 
 work="$(mktemp -d "$ROOT/.tmp/build-push-image.XXXXXX")"
 trap 'rm -rf "$work"' EXIT
@@ -244,6 +196,9 @@ cat >"$work/bin/docker" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 printf 'DOCKER_CONFIG=%q ' "${DOCKER_CONFIG:-}" >>"${FAKE_DOCKER_CALLS:?}"
+printf 'CODEWIRE_IMAGE_SOURCE_SHA=%q CODEWIRE_RUST_PROFILE=%q CODEWIRE_SCCACHE_MODE=%q ' \
+  "${CODEWIRE_IMAGE_SOURCE_SHA:-}" "${CODEWIRE_RUST_PROFILE:-}" "${CODEWIRE_SCCACHE_MODE:-}" \
+  >>"$FAKE_DOCKER_CALLS"
 printf '%q ' "$@" >>"$FAKE_DOCKER_CALLS"
 printf '\n' >>"$FAKE_DOCKER_CALLS"
 
@@ -341,6 +296,56 @@ case "${1:-} ${2:-} ${3:-}" in
     fi
     set_manifest "$destination" "${source##*@}"
     ;;
+  buildx\ bake\ *)
+    metadata=''
+    target=''
+    tag=''
+    shift 2
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --metadata-file)
+          metadata="$2"
+          shift 2
+          ;;
+        --set)
+          case "$2" in
+            *.tags=*) tag="${2#*=}" ;;
+          esac
+          shift 2
+          ;;
+        --file|--provenance)
+          shift 2
+          ;;
+        --push)
+          shift
+          ;;
+        *)
+          target="$1"
+          shift
+          ;;
+      esac
+    done
+    [[ -n "$metadata" && -n "$target" ]]
+    if [ "$target" = kind ]; then
+      jq -n '{
+        "dashboard-ci": {},
+        "services-ci": {},
+        "mesh-ci": {},
+        "gateway-ci": {}
+      }' >"$metadata"
+      exit 0
+    fi
+    [[ -n "$tag" ]]
+    jq -n --arg target "$target" --arg digest "${FAKE_DIGEST:?}" \
+      '{($target): {"containerimage.digest": $digest}}' >"$metadata"
+    set_manifest "$tag" "$FAKE_DIGEST"
+    ;;
+  image\ inspect\ *)
+    case "$*" in
+      *dev.codewire.build.profile*) printf 'ci\n' ;;
+      *dev.codewire.promotable*) printf 'false\n' ;;
+    esac
+    ;;
   buildx\ build\ *)
     metadata=''
     tags=()
@@ -358,7 +363,7 @@ case "${1:-} ${2:-} ${3:-}" in
         --build-arg|--label|-f)
           shift 2
           ;;
-        --push)
+        --push|--provenance=*)
           shift
           ;;
         *)
@@ -405,16 +410,15 @@ grep -qxF "source_sha=$source_sha" "$GITHUB_OUTPUT" ||
   fail 'candidate source SHA is absent'
 grep -qxF "candidate_ref=nexus-system-cluster.example.invalid/oci-promoted/codewire/gateway@$digest" "$GITHUB_OUTPUT" ||
   fail 'candidate digest ref is absent'
-grep -qF -- "--tag nexus-system-cluster.example.invalid/oci-promoted/codewire/gateway:$source_sha" "$FAKE_DOCKER_CALLS" ||
-  fail 'immutable source tag did not reach Buildx'
-grep -qF -- \
-  '--label org.opencontainers.image.source=https://github.com/codewiresh/codewire' \
-  "$FAKE_DOCKER_CALLS" || fail 'public source label did not reach Buildx'
-grep -qF -- "--label org.opencontainers.image.revision=$source_sha" \
-  "$FAKE_DOCKER_CALLS" || fail 'exact revision label did not reach Buildx'
-grep -qF -- '--label org.opencontainers.image.title=codewire-gateway' \
-  "$FAKE_DOCKER_CALLS" || fail 'image-family title label did not reach Buildx'
-[[ "$(grep -c 'buildx build' "$FAKE_DOCKER_CALLS")" -eq 1 ]] ||
+grep -qF -- "gateway.tags=nexus-system-cluster.example.invalid/oci-promoted/codewire/gateway:$source_sha" "$FAKE_DOCKER_CALLS" ||
+  fail 'immutable source tag did not reach canonical Bake target'
+grep -qF -- "CODEWIRE_IMAGE_SOURCE_SHA=$source_sha" "$FAKE_DOCKER_CALLS" ||
+  fail 'exact source revision did not reach canonical Bake'
+grep -qF -- 'CODEWIRE_RUST_PROFILE=release' "$FAKE_DOCKER_CALLS" ||
+  fail 'protected publication did not force the release profile'
+grep -qF -- '--provenance mode=min' "$FAKE_DOCKER_CALLS" ||
+  fail 'protected product build omitted minimal BuildKit SLSA provenance'
+[[ "$(build_invocation_count)" -eq 1 ]] ||
   fail 'image was not built exactly once'
 
 printf '0\n' >"$work/login-state"
@@ -435,7 +439,7 @@ grep -qF 'Registry login was rejected; retrying authentication' \
   FAKE_DIGEST="$second_digest" \
     "$BUILDER" gateway deployments/docker/gateway.Dockerfile .
 )
-[[ "$(grep -c 'buildx build' "$FAKE_DOCKER_CALLS")" -eq 1 ]] ||
+[[ "$(build_invocation_count)" -eq 1 ]] ||
   fail 'existing source-SHA image was rebuilt'
 grep -qxF "candidate_ref=nexus-system-cluster.example.invalid/oci-promoted/codewire/gateway@$digest" "$GITHUB_OUTPUT" ||
   fail 'source-SHA rerun did not preserve the original digest'
@@ -451,7 +455,7 @@ grep -qxF 'family=workspace' "$GITHUB_OUTPUT" ||
   fail 'workspace candidate family is absent'
 grep -qF -- "--build-arg BASE_IMAGE_REF=$base_ref" "$FAKE_DOCKER_CALLS" ||
   fail 'exact base digest did not reach the workspace build'
-[[ "$(grep -c 'buildx build' "$FAKE_DOCKER_CALLS")" -eq 2 ]] ||
+[[ "$(build_invocation_count)" -eq 2 ]] ||
   fail 'workspace image was not built exactly once'
 
 : >"$GITHUB_OUTPUT"
@@ -471,12 +475,12 @@ awk -F '\t' \
   '$1 == reference && $2 == digest { found = 1 } END { exit !found }' \
   "$FAKE_MANIFESTS" ||
   fail 'release alias was not created from the source digest'
-[[ "$(grep -c 'buildx build' "$FAKE_DOCKER_CALLS")" -eq 2 ]] ||
+[[ "$(build_invocation_count)" -eq 2 ]] ||
   fail 'release alias rebuilt an existing source image'
 [[ "$(grep -c 'buildx imagetools create' "$FAKE_DOCKER_CALLS")" -eq $((create_calls_before + 1)) ]] ||
   fail 'release alias was not created exactly once'
 
-build_calls_before="$(grep -c 'buildx build' "$FAKE_DOCKER_CALLS")"
+build_calls_before="$(build_invocation_count)"
 if (
   cd "$ROOT"
   REQUIRE_EXISTING_SOURCE_IMAGE=1 \
@@ -489,7 +493,7 @@ fi
 grep -qF 'Required immutable source image is missing' \
   "$work/required-source-missing.out" ||
   fail 'missing required immutable source image did not fail explicitly'
-[[ "$(grep -c 'buildx build' "$FAKE_DOCKER_CALLS")" -eq "$build_calls_before" ]] ||
+[[ "$(build_invocation_count)" -eq "$build_calls_before" ]] ||
   fail 'missing required immutable source image reached a build'
 
 : >"$GITHUB_OUTPUT"
@@ -551,7 +555,7 @@ if (
 fi
 grep -qF 'Refusing to replace immutable image tag' "$work/mismatched-alias.out" ||
   fail 'mismatched release alias did not fail with the immutable-tag guard'
-[[ "$(grep -c 'buildx build' "$FAKE_DOCKER_CALLS")" -eq 2 ]] ||
+[[ "$(build_invocation_count)" -eq 2 ]] ||
   fail 'mismatched release alias triggered a build'
 
 export FAKE_INSPECT_ERROR_REF="nexus-system-cluster.example.invalid/oci-promoted/codewire/mesh:$source_sha"
@@ -565,7 +569,7 @@ fi
 unset FAKE_INSPECT_ERROR_REF
 grep -qF 'Unable to determine whether immutable image tag exists' \
   "$work/inspect-error.out" || fail 'registry inspection error was not reported'
-[[ "$(grep -c 'buildx build' "$FAKE_DOCKER_CALLS")" -eq 2 ]] ||
+[[ "$(build_invocation_count)" -eq 2 ]] ||
   fail 'registry inspection error reached a build'
 [[ "$(grep -c ' login ' "$FAKE_DOCKER_CALLS")" -eq $((login_calls_before + 3)) ]] ||
   fail 'persistent registry auth did not stop after two bounded re-logins'
@@ -610,9 +614,23 @@ if grep -qF "$registry_username" "$FAKE_FETCH_CALLS" \
   fail 'a registry credential reached command arguments or fetch logs'
 fi
 
-docker_config="$(sed -nE 's/^DOCKER_CONFIG=([^ ]+) login.*/\1/p' \
+docker_config="$(sed -nE 's/^DOCKER_CONFIG=([^ ]+).* login.*/\1/p' \
   "$FAKE_DOCKER_CALLS" | head -1)"
 [[ -n "$docker_config" && ! -e "$docker_config" ]] ||
   fail 'private Docker credential directory survived the build'
+
+kind_builds_before="$(grep -Ec ' buildx bake .* kind $' "$FAKE_DOCKER_CALLS" || true)"
+(
+  cd "$ROOT"
+  CODEWIRE_DOCKER_BIN="$work/bin/docker" \
+  CODEWIRE_BAKE_METADATA_FILE="$work/kind-metadata.json" \
+    "$KIND_BUILDER"
+) >"$work/kind-build.out"
+[[ "$(grep -Ec ' buildx bake .* kind $' "$FAKE_DOCKER_CALLS" || true)" -eq \
+  $((kind_builds_before + 1)) ]] || fail 'Kind did not issue exactly one Bake graph build'
+[[ "$(grep -c ' image inspect ' "$FAKE_DOCKER_CALLS" || true)" -eq 12 ]] ||
+  fail 'Kind did not verify existence and trust labels for all four loaded images'
+grep -qF 'CODEWIRE_CI_PHASE name=product-image-build' "$work/kind-build.out" ||
+  fail 'Kind image builder omitted its structured phase result'
 
 echo 'build-push immutable source image tests passed'

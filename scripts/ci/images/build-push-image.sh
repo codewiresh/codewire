@@ -15,6 +15,7 @@ source_dir="${CODEWIRE_SOURCE_DIR:-.}"
 public_source_url='https://github.com/codewiresh/codewire'
 base_image_ref="${CODEWIRE_BASE_IMAGE_REF:-}"
 require_existing_source_image="${REQUIRE_EXISTING_SOURCE_IMAGE:-0}"
+sccache_mode="${CODEWIRE_SCCACHE_MODE:-disabled}"
 
 : "${GITHUB_SHA:?GITHUB_SHA is required}"
 readonly REGISTRY_HOST='nexus-system-cluster.example.invalid'
@@ -25,6 +26,27 @@ case "$require_existing_source_image" in
   *)
     echo "REQUIRE_EXISTING_SOURCE_IMAGE must be 0 or 1" >&2
     exit 1
+    ;;
+esac
+
+case "$sccache_mode" in
+  disabled|local) ;;
+  r2)
+    : "${SCCACHE_BUCKET:?SCCACHE_BUCKET is required in r2 mode}"
+    : "${SCCACHE_ENDPOINT:?SCCACHE_ENDPOINT is required in r2 mode}"
+    : "${CODEWIRE_SCCACHE_PREFIX:?CODEWIRE_SCCACHE_PREFIX is required in r2 mode}"
+    : "${AWS_IAM_CREDENTIALS_URL:?AWS_IAM_CREDENTIALS_URL is required in r2 mode}"
+    case "$CODEWIRE_SCCACHE_PREFIX" in
+      protected/codewire/*) ;;
+      *)
+        echo 'Published-image sccache prefix must remain below protected/codewire/' >&2
+        exit 2
+        ;;
+    esac
+    ;;
+  *)
+    printf 'Invalid CODEWIRE_SCCACHE_MODE: %s\n' "$sccache_mode" >&2
+    exit 2
     ;;
 esac
 
@@ -88,6 +110,7 @@ work="$(mktemp -d)"
 registry_username_file="$work/nexus-username"
 registry_password_file="$work/nexus-password"
 build_metadata="$work/build-metadata.json"
+bake_metadata="$work/bake-metadata.json"
 docker_config="$work/docker-config"
 credential_fetcher="${OPENBAO_NEXUS_CREDENTIAL_FETCHER:-scripts/ci/setup/fetch-openbao-nexus-credentials.sh}"
 cleanup() {
@@ -231,11 +254,28 @@ label_args=(
   "--label" "org.opencontainers.image.source=$public_source_url"
   "--label" "org.opencontainers.image.revision=$source_sha"
   "--label" "org.opencontainers.image.title=codewire-$image_name"
+  "--label" "dev.codewire.build.profile=release"
+  "--label" "dev.codewire.promotable=true"
 )
 build_args=()
 if [ -n "$base_image_ref" ]; then
   build_args+=("--build-arg" "BASE_IMAGE_REF=$base_image_ref")
 fi
+
+product_bake_target=''
+dockerfile_from_context="$dockerfile"
+if [ "$context" != . ]; then
+  case "$dockerfile" in
+    "$context"/*) dockerfile_from_context="${dockerfile#"$context"/}" ;;
+  esac
+fi
+case "$image_name:$dockerfile_from_context" in
+  dashboard:apps/dashboard/Dockerfile) product_bake_target=dashboard ;;
+  derp:deployments/docker/derp.Dockerfile) product_bake_target=derp ;;
+  gateway:deployments/docker/gateway.Dockerfile) product_bake_target=gateway ;;
+  mesh:deployments/docker/mesh.Dockerfile) product_bake_target=mesh ;;
+  services:deployments/docker/services.Dockerfile) product_bake_target=services ;;
+esac
 
 if source_digest="$(inspect_manifest_digest "$source_tag")"; then
   jq -n --arg digest "$source_digest" \
@@ -250,9 +290,51 @@ else
     echo "Required immutable source image is missing: $source_tag" >&2
     exit 1
   fi
-  DOCKER_CONFIG="$docker_config" docker buildx build --push \
-    --metadata-file "$build_metadata" "${build_args[@]}" \
-    -f "$dockerfile" --tag "$source_tag" "${label_args[@]}" "$context"
+  if [ -n "$product_bake_target" ]; then
+    bake_file="$context/docker-bake.hcl"
+    [ -f "$bake_file" ] || {
+      echo "Canonical product Bake definition is missing: $bake_file" >&2
+      exit 1
+    }
+    [ "${#build_args[@]}" -eq 0 ] || {
+      echo "Product Bake target does not accept ad-hoc build arguments" >&2
+      exit 1
+    }
+    bake_args=(
+      --push
+      --provenance mode=min
+      --file "$bake_file"
+      --metadata-file "$bake_metadata"
+      --set "rust-base.context=$context"
+      --set "$product_bake_target.context=$context"
+      --set "$product_bake_target.tags=$source_tag"
+    )
+    if [ "$sccache_mode" = r2 ]; then
+      bake_args+=(
+        --set "$product_bake_target.secret=id=aws_iam_credentials_url,env=AWS_IAM_CREDENTIALS_URL"
+      )
+    fi
+    DOCKER_CONFIG="$docker_config" \
+      CODEWIRE_IMAGE_SOURCE_SHA="$source_sha" \
+      CODEWIRE_IMAGE_SOURCE_URL="$public_source_url" \
+      CODEWIRE_RUST_PROFILE=release \
+      CODEWIRE_SCCACHE_MODE="$sccache_mode" \
+      docker buildx bake "${bake_args[@]}" \
+        "$product_bake_target"
+    jq -e --arg target "$product_bake_target" '
+      .[$target]["containerimage.digest"] as $digest
+      | select($digest | type == "string" and test("^sha256:[0-9a-f]{64}$"))
+      | {"containerimage.digest": $digest}
+    ' "$bake_metadata" > "$build_metadata" || {
+      echo "Bake metadata is missing an immutable image digest" >&2
+      exit 1
+    }
+  else
+    DOCKER_CONFIG="$docker_config" docker buildx build --push \
+      --provenance=mode=min \
+      --metadata-file "$build_metadata" "${build_args[@]}" \
+      -f "$dockerfile" --tag "$source_tag" "${label_args[@]}" "$context"
+  fi
   if ! source_digest="$(jq -er '."containerimage.digest" | select(type == "string")' "$build_metadata")" \
     || [[ ! "$source_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
     echo "Buildx metadata is missing an immutable image digest" >&2

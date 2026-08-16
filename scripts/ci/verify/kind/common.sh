@@ -524,29 +524,21 @@ ingress_path_drift_check() {
 }
 
 build_images_and_smokes() {
-  log "building production-equivalent Rust dashboard image"
-  docker buildx build --load -f "$ROOT/apps/dashboard/Dockerfile" -t codewire-dashboard:e2e "$ROOT"
-  docker image inspect codewire-dashboard:e2e >/dev/null
-
-  log "building Rust services image"
-  docker buildx build --load -f "$ROOT/deployments/docker/services.Dockerfile" -t codewire-services:e2e "$ROOT"
-  docker image inspect codewire-services:e2e >/dev/null
-
-  log "building Rust Mesh image"
-  docker buildx build --load -f "$ROOT/deployments/docker/mesh.Dockerfile" -t codewire-mesh:e2e "$ROOT"
-  docker image inspect codewire-mesh:e2e >/dev/null
-
-  log "building Rust gateway image"
-  docker buildx build --load -f "$ROOT/deployments/docker/gateway.Dockerfile" -t codewire-gateway:e2e "$ROOT"
-  docker image inspect codewire-gateway:e2e >/dev/null
+  log "building exact candidate product images once through the CI Bake profile"
+  CODEWIRE_BAKE_METADATA_FILE="$RUN_DIR/kind-image-build-metadata.json" \
+    "$ROOT/scripts/ci/images/build-kind-images.sh"
 
   log "building Rust kind smoke binaries"
+  local smoke_started_at
+  smoke_started_at="$(date +%s)"
   (
     cd "$ROOT"
     cargo build --profile ci -p codewire-orchestration --bin crd-smoke --bin environment-setup-smoke --bin exec-smoke --bin exec-stream-smoke --bin file-service-smoke --bin prepare-stream-smoke --bin log-stream-smoke --bin temporal-smoke --bin temporal-fencing-smoke --bin reconciler-ttl-smoke --bin sidecar-smoke --features kind-e2e
     cargo build --profile ci -p codewire-client --example platform-run-smoke --example environment-session-smoke
     cargo build --profile ci -p codewire-client --example coordinator-ingress-smoke --features kind-e2e
   )
+  printf 'CODEWIRE_CI_PHASE name=kind-smoke-binary-build seconds=%s\n' \
+    "$(( $(date +%s) - smoke_started_at ))"
 }
 
 create_cluster() {

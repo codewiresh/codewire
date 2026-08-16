@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1.20
 ARG RUST_IMAGE=rust:1.91.1-bookworm@sha256:c1e5f19e773b7878c3f7a805dd00a495e747acbdc76fb2337a4ebf0418896b33
 ARG DEBIAN_IMAGE=debian:bookworm-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818
 ARG RUNTIME_IMAGE=gcr.io/distroless/cc-debian12:nonroot@sha256:fccdbb0a547c14e23fcf4ce8ad62ca5d43b4faae8d22cd292f490fef9946c96e
@@ -30,7 +31,7 @@ RUN tar -xzf /tmp/zola.tar.gz -C /tmp zola LICENSE \
 
 FROM zola-${TARGETARCH} AS zola
 
-FROM ${RUST_IMAGE} AS builder
+FROM codewire-rust-base AS builder
 WORKDIR /workspace
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
@@ -38,18 +39,24 @@ COPY proto ./proto
 COPY libs/gateway-proto ./libs/gateway-proto
 COPY packages/codewire-design ./packages/codewire-design
 COPY apps/cli/install.sh ./apps/cli/install.sh
-RUN --mount=type=cache,id=codewire-root-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
-    --mount=type=cache,id=codewire-root-cargo-git,target=/usr/local/cargo/git,sharing=locked \
-    --mount=type=cache,id=codewire-dashboard-release-target,target=/workspace/target,sharing=locked \
+ARG CODEWIRE_SCCACHE_MODE=disabled
+ARG SCCACHE_BUCKET
+ARG SCCACHE_ENDPOINT
+ARG CODEWIRE_SCCACHE_PREFIX
+ARG CODEWIRE_RUST_PROFILE=release
+RUN --mount=type=cache,id=codewire-dashboard-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=codewire-dashboard-cargo-git,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,id=codewire-sccache-v2,target=/var/cache/sccache,sharing=shared \
+    --mount=type=secret,id=aws_iam_credentials_url \
     find Cargo.toml Cargo.lock crates proto libs/gateway-proto packages/codewire-design apps/cli/install.sh \
       -type f -exec touch {} + && \
-    cargo build --locked --release -p codewire-dashboard-web \
+    codewire-rust-build cargo build --locked --profile "$CODEWIRE_RUST_PROFILE" -p codewire-dashboard-web \
   && mkdir -p /out \
-  && cp target/release/codewire-dashboard-web /out/codewire-dashboard-web \
+  && cp "target/$CODEWIRE_RUST_PROFILE/codewire-dashboard-web" /out/codewire-dashboard-web \
   && cd /out \
   && sha256sum codewire-dashboard-web > dashboard-binary.sha256
-RUN --mount=type=cache,id=codewire-root-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
-    --mount=type=cache,id=codewire-root-cargo-git,target=/usr/local/cargo/git,sharing=locked \
+RUN --mount=type=cache,id=codewire-dashboard-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=codewire-dashboard-cargo-git,target=/usr/local/cargo/git,sharing=locked \
     cargo metadata --locked --offline --no-deps --format-version 1 \
       > /out/rust-workspace-metadata.json \
   && cp Cargo.lock /out/Cargo.lock

@@ -18,6 +18,7 @@ readonly rust_build_image="rust:${rust_channel}-bookworm@sha256:${rust_build_dig
 readonly debian_runtime_image='debian:bookworm-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818'
 readonly dashboard_runtime='gcr.io/distroless/cc-debian12:nonroot@sha256:fccdbb0a547c14e23fcf4ce8ad62ca5d43b4faae8d22cd292f490fef9946c96e'
 readonly dashboard_dockerfile='apps/dashboard/Dockerfile'
+readonly rust_base_dockerfile='deployments/docker/rust-base.Dockerfile'
 readonly -a runtime_dockerfiles=(
   "$dashboard_dockerfile"
   'deployments/docker/gateway.Dockerfile'
@@ -78,6 +79,16 @@ if ! grep -Fq 'request.image = CANONICAL_WORKSPACE_IMAGE.to_string();' \
   fail=1
 fi
 
+if ! grep -Fxq "ARG RUST_IMAGE=$rust_build_image" "$rust_base_dockerfile"; then
+  echo "runtime image audit: reviewed Rust foundation is missing from $rust_base_dockerfile" >&2
+  fail=1
+fi
+if ! grep -Fq 'ADD --checksum=sha256:67c4a96dd237c1f518f6b36083f270f9976d516f1e57fce891755ea782e50006' \
+    "$rust_base_dockerfile"; then
+  echo "runtime image audit: reviewed sccache checksum is missing from $rust_base_dockerfile" >&2
+  fail=1
+fi
+
 for dockerfile in "${runtime_dockerfiles[@]}"; do
   while IFS= read -r declaration; do
     [[ -z "$declaration" ]] && continue
@@ -88,8 +99,8 @@ for dockerfile in "${runtime_dockerfiles[@]}"; do
     fi
   done < <(sed -nE '/^ARG [A-Z_]+_IMAGE=/p' "$dockerfile")
 
-  if ! grep -Fxq "ARG RUST_IMAGE=$rust_build_image" "$dockerfile"; then
-    echo "runtime image audit: reviewed Rust foundation is missing from $dockerfile" >&2
+  if ! grep -Fq 'FROM codewire-rust-base AS ' "$dockerfile"; then
+    echo "runtime image audit: shared reviewed Rust foundation is missing from $dockerfile" >&2
     fail=1
   fi
   if ! grep -Fxq "ARG DEBIAN_IMAGE=$debian_runtime_image" "$dockerfile"; then
@@ -113,9 +124,9 @@ if ! grep -Fq 'cargo metadata --locked --offline --no-deps --format-version 1' \
 fi
 # The Make expression must be matched literally.
 # shellcheck disable=SC2016
-if ! grep -Fq 'docker buildx build --pull --load --tag "$(DASHBOARD_VERIFY_IMAGE)" -f apps/dashboard/Dockerfile .' \
+if ! grep -Fq "docker buildx bake --file docker-bake.hcl --pull --load --set 'dashboard.tags=\$(DASHBOARD_VERIFY_IMAGE)' dashboard" \
     Makefile; then
-  echo "runtime image audit: dashboard verification must load the exact Buildx result before inspection" >&2
+  echo "runtime image audit: dashboard verification must load the canonical Bake result before inspection" >&2
   fail=1
 fi
 for inventory in \
