@@ -99,8 +99,8 @@ verify_kind_build_cache_contract() {
     if grep -Eq -- 'target=/usr/local/cargo/(registry|git),sharing=shared' "$dockerfile"; then
       fail "$(basename "$dockerfile") unsafely shares a writable Cargo download cache across parallel targets"
     fi
-    grep -qF -- '--mount=type=secret,id=aws_iam_credentials_url' "$dockerfile" ||
-      fail "$(basename "$dockerfile") omits the temporary R2 credential mount"
+    grep -qF -- '--mount=type=secret,id=aws_shared_credentials' "$dockerfile" ||
+      fail "$(basename "$dockerfile") omits the private R2 credential mount"
     grep -qF 'ARG CODEWIRE_SCCACHE_MODE=disabled' "$dockerfile" ||
       fail "$(basename "$dockerfile") does not fail closed to disabled remote caching"
     # shellcheck disable=SC2016
@@ -128,8 +128,14 @@ verify_kind_build_cache_contract() {
     fail 'Kind does not constrain its remote cache trust-domain prefix'
   grep -qF 'protected/codewire/' "$BUILDER" ||
     fail 'published image builds do not constrain their compiler-cache prefix'
-  grep -qF 'AWS_IAM_CREDENTIALS_URL' "$RUST_BUILD_WRAPPER" ||
-    fail 'sccache does not consume short-lived AWS-compatible credentials'
+  grep -qF 'AWS_SHARED_CREDENTIALS_FILE' "$RUST_BUILD_WRAPPER" ||
+    fail 'sccache does not consume its private AWS shared-credentials file'
+  if grep -Eq 'AWS_IAM_CREDENTIALS_URL|aws_iam_credentials_url' \
+      "$RUST_BUILD_WRAPPER" "$KIND_BUILDER" "$BUILDER" \
+      "$DASHBOARD_DOCKERFILE" "$SERVICES_DOCKERFILE" \
+      "$MESH_DOCKERFILE" "$GATEWAY_DOCKERFILE" "$DERP_DOCKERFILE"; then
+    fail 'the unsupported credential-URL contract remains in an R2 build path'
+  fi
   grep -qF 'export CARGO_INCREMENTAL=0' "$RUST_BUILD_WRAPPER" ||
     fail 'sccache wrapper does not disable incompatible incremental compilation'
   grep -qF 'export SCCACHE_DIRECT=false' "$RUST_BUILD_WRAPPER" ||
@@ -163,16 +169,24 @@ if CODEWIRE_SCCACHE_MODE=disabled CODEWIRE_RUST_PROFILE=debug \
   fail 'Rust build wrapper accepted an undeclared build profile'
 fi
 if CODEWIRE_SCCACHE_MODE=r2 CODEWIRE_RUST_PROFILE=ci \
-  SCCACHE_BUCKET=test SCCACHE_ENDPOINT=test.invalid \
+  SCCACHE_BUCKET=test SCCACHE_ENDPOINT=https://test.invalid \
   CODEWIRE_SCCACHE_PREFIX=untrusted/codewire/test \
-  AWS_IAM_CREDENTIALS_URL=http://credentials.invalid \
-  "$RUST_BUILD_WRAPPER" true >"$ROOT/.tmp/rust-build-wrapper-http.out" 2>&1; then
-  fail 'Rust build wrapper accepted a plaintext credential endpoint'
+  AWS_SHARED_CREDENTIALS_FILE=relative/credentials \
+  "$RUST_BUILD_WRAPPER" true >"$ROOT/.tmp/rust-build-wrapper-relative-credentials.out" 2>&1; then
+  fail 'Rust build wrapper accepted a relative shared-credentials path'
 fi
 
 work="$(mktemp -d "$ROOT/.tmp/build-push-image.XXXXXX")"
 trap 'rm -rf "$work"' EXIT
 mkdir -p "$work/bin"
+
+r2_credentials_file="$work/aws-shared-credentials"
+cat >"$r2_credentials_file" <<'EOF'
+[default]
+aws_access_key_id = untrusted-access-key
+aws_secret_access_key = untrusted-secret-key
+EOF
+chmod 0600 "$r2_credentials_file"
 
 registry_username='nexus-publisher-test'
 registry_password='registry-test-value'
@@ -384,7 +398,15 @@ case "${1:-} ${2:-} ${3:-}" in
     ;;
 esac
 EOF
-chmod +x "$work/bin/fetch-nexus" "$work/bin/docker"
+cat >"$work/bin/sccache" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'AWS_SHARED_CREDENTIALS_FILE=%s AWS_PROFILE=%s AWS_EC2_METADATA_DISABLED=%s AWS_ACCESS_KEY_ID=%s command=%s\n' \
+  "${AWS_SHARED_CREDENTIALS_FILE:-}" "${AWS_PROFILE:-}" \
+  "${AWS_EC2_METADATA_DISABLED:-}" "${AWS_ACCESS_KEY_ID:-}" "$*" \
+  >>"${FAKE_SCCACHE_CALLS:?}"
+EOF
+chmod +x "$work/bin/fetch-nexus" "$work/bin/docker" "$work/bin/sccache"
 
 export PATH="$work/bin:$PATH"
 export OPENBAO_NEXUS_CREDENTIAL_FETCHER="$work/bin/fetch-nexus"
@@ -392,6 +414,7 @@ export FAKE_REGISTRY_USERNAME="$registry_username"
 export FAKE_REGISTRY_PASSWORD="$registry_password"
 export FAKE_FETCH_CALLS="$work/fetch-calls"
 export FAKE_DOCKER_CALLS="$work/docker-calls"
+export FAKE_SCCACHE_CALLS="$work/sccache-calls"
 export FAKE_MANIFESTS="$work/manifests"
 export FAKE_DIGEST="$digest"
 export GITHUB_SHA="$source_sha"
@@ -399,6 +422,19 @@ export GITHUB_REF='refs/heads/main'
 export GITHUB_REF_NAME='main'
 export GITHUB_OUTPUT="$work/output"
 : >"$FAKE_MANIFESTS"
+
+CODEWIRE_SCCACHE_MODE=r2 CODEWIRE_RUST_PROFILE=ci \
+  SCCACHE_BUCKET=codewire-ci \
+  SCCACHE_ENDPOINT=https://account.r2.cloudflarestorage.com \
+  CODEWIRE_SCCACHE_PREFIX=untrusted/codewire/test \
+  AWS_SHARED_CREDENTIALS_FILE="$r2_credentials_file" \
+  AWS_ACCESS_KEY_ID=ambient-static-credential \
+  "$RUST_BUILD_WRAPPER" true >"$work/rust-build-wrapper-r2.out"
+grep -qF "AWS_SHARED_CREDENTIALS_FILE=$r2_credentials_file" "$FAKE_SCCACHE_CALLS" ||
+  fail 'Rust build wrapper did not expose the private credential file to pinned sccache'
+grep -qF 'AWS_PROFILE=default AWS_EC2_METADATA_DISABLED=true AWS_ACCESS_KEY_ID=' \
+  "$FAKE_SCCACHE_CALLS" ||
+  fail 'Rust build wrapper retained an ambient credential or metadata fallback'
 
 (
   cd "$ROOT"
@@ -618,6 +654,41 @@ docker_config="$(sed -nE 's/^DOCKER_CONFIG=([^ ]+).* login.*/\1/p' \
   "$FAKE_DOCKER_CALLS" | head -1)"
 [[ -n "$docker_config" && ! -e "$docker_config" ]] ||
   fail 'private Docker credential directory survived the build'
+
+: >"$FAKE_DOCKER_CALLS"
+(
+  cd "$ROOT"
+  CODEWIRE_DOCKER_BIN="$work/bin/docker" \
+  CODEWIRE_BAKE_METADATA_FILE="$work/kind-r2-metadata.json" \
+  CODEWIRE_SCCACHE_MODE=r2 \
+  CODEWIRE_SCCACHE_CREDENTIALS_FILE="$r2_credentials_file" \
+  SCCACHE_BUCKET=codewire-ci \
+  SCCACHE_ENDPOINT=https://account.r2.cloudflarestorage.com \
+  CODEWIRE_SCCACHE_PREFIX=untrusted/codewire/test \
+    "$KIND_BUILDER"
+)
+[[ "$(grep -oF 'secret=id=aws_shared_credentials\,src=' "$FAKE_DOCKER_CALLS" | wc -l)" -eq 4 ]] ||
+  fail 'Kind did not bind the private credential file to all four Bake targets'
+grep -qF "src=$r2_credentials_file" "$FAKE_DOCKER_CALLS" ||
+  fail 'Kind did not pass the exact private credential file path to Bake'
+
+: >"$FAKE_DOCKER_CALLS"
+(
+  cd "$ROOT"
+  CODEWIRE_SCCACHE_MODE=r2 \
+  CODEWIRE_SCCACHE_CREDENTIALS_FILE="$r2_credentials_file" \
+  SCCACHE_BUCKET=codewire-ci \
+  SCCACHE_ENDPOINT=https://account.r2.cloudflarestorage.com \
+  CODEWIRE_SCCACHE_PREFIX=protected/codewire/test \
+    "$BUILDER" derp deployments/docker/derp.Dockerfile .
+)
+grep -qF 'secret=id=aws_shared_credentials\,src=' "$FAKE_DOCKER_CALLS" ||
+  fail 'protected publication did not bind the private credential file to Bake'
+grep -qF "src=$r2_credentials_file" "$FAKE_DOCKER_CALLS" ||
+  fail 'protected publication did not pass the exact private credential file path to Bake'
+if grep -qE 'untrusted-(access-key|secret-key)' "$FAKE_DOCKER_CALLS"; then
+  fail 'R2 credential material reached Docker command arguments'
+fi
 
 kind_builds_before="$(grep -Ec ' buildx bake .* kind $' "$FAKE_DOCKER_CALLS" || true)"
 (

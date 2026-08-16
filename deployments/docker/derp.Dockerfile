@@ -22,7 +22,7 @@ ARG CODEWIRE_RUST_PROFILE=release
 RUN --mount=type=cache,id=codewire-derp-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=codewire-derp-cargo-git,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=codewire-sccache-v2,target=/var/cache/sccache,sharing=shared \
-    --mount=type=secret,id=aws_iam_credentials_url \
+    --mount=type=secret,id=aws_shared_credentials \
     find Cargo.toml Cargo.lock crates proto -type f -exec touch {} + \
     && codewire-rust-build cargo build --locked --profile "$CODEWIRE_RUST_PROFILE" -p codewire-derp --bin codewire-derp \
     && mkdir -p /out \

@@ -35,7 +35,31 @@ case "$sccache_mode" in
     : "${SCCACHE_BUCKET:?SCCACHE_BUCKET is required in r2 mode}"
     : "${SCCACHE_ENDPOINT:?SCCACHE_ENDPOINT is required in r2 mode}"
     : "${CODEWIRE_SCCACHE_PREFIX:?CODEWIRE_SCCACHE_PREFIX is required in r2 mode}"
-    : "${AWS_IAM_CREDENTIALS_URL:?AWS_IAM_CREDENTIALS_URL is required in r2 mode}"
+    credentials_file="${CODEWIRE_SCCACHE_CREDENTIALS_FILE:?CODEWIRE_SCCACHE_CREDENTIALS_FILE is required in r2 mode}"
+    case "$credentials_file" in
+      /*) ;;
+      *)
+        echo 'Published-image sccache credentials file must be an absolute path' >&2
+        exit 2
+        ;;
+    esac
+    [ -f "$credentials_file" ] && [ -r "$credentials_file" ] && [ -s "$credentials_file" ] || {
+      echo 'Published-image sccache credentials file must be a readable nonempty regular file' >&2
+      exit 2
+    }
+    case "$(stat -c '%a' -- "$credentials_file")" in
+      400|600) ;;
+      *)
+        echo 'Published-image sccache credentials file must have mode 0400 or 0600' >&2
+        exit 2
+        ;;
+    esac
+    case "$credentials_file" in
+      *','*|*$'\n'*)
+        echo 'Published-image sccache credentials file path contains an unsupported character' >&2
+        exit 2
+        ;;
+    esac
     case "$CODEWIRE_SCCACHE_PREFIX" in
       protected/codewire/*) ;;
       *)
@@ -311,7 +335,7 @@ else
     )
     if [ "$sccache_mode" = r2 ]; then
       bake_args+=(
-        --set "$product_bake_target.secret=id=aws_iam_credentials_url,env=AWS_IAM_CREDENTIALS_URL"
+        --set "$product_bake_target.secret=id=aws_shared_credentials,src=$credentials_file"
       )
     fi
     DOCKER_CONFIG="$docker_config" \

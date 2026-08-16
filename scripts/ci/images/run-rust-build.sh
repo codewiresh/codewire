@@ -21,19 +21,33 @@ case "$mode" in
     : "${SCCACHE_BUCKET:?SCCACHE_BUCKET is required in r2 mode}"
     : "${SCCACHE_ENDPOINT:?SCCACHE_ENDPOINT is required in r2 mode}"
     : "${CODEWIRE_SCCACHE_PREFIX:?CODEWIRE_SCCACHE_PREFIX is required in r2 mode}"
-    if [ -z "${AWS_IAM_CREDENTIALS_URL:-}" ] && \
-      [ -s /run/secrets/aws_iam_credentials_url ]; then
-      AWS_IAM_CREDENTIALS_URL="$(</run/secrets/aws_iam_credentials_url)"
-      export AWS_IAM_CREDENTIALS_URL
-    fi
-    : "${AWS_IAM_CREDENTIALS_URL:?AWS_IAM_CREDENTIALS_URL or its BuildKit secret is required in r2 mode}"
-    case "$AWS_IAM_CREDENTIALS_URL" in
+    case "$SCCACHE_ENDPOINT" in
       https://*) ;;
       *)
-        printf 'codewire-rust-build: AWS_IAM_CREDENTIALS_URL must use HTTPS\n' >&2
+        printf 'codewire-rust-build: SCCACHE_ENDPOINT must use HTTPS\n' >&2
         exit 2
         ;;
     esac
+    credentials_file="${AWS_SHARED_CREDENTIALS_FILE:-/run/secrets/aws_shared_credentials}"
+    case "$credentials_file" in
+      /*) ;;
+      *)
+        printf 'codewire-rust-build: AWS_SHARED_CREDENTIALS_FILE must be absolute\n' >&2
+        exit 2
+        ;;
+    esac
+    [ -f "$credentials_file" ] && [ -r "$credentials_file" ] && [ -s "$credentials_file" ] || {
+      printf 'codewire-rust-build: private AWS shared credentials are required in r2 mode\n' >&2
+      exit 2
+    }
+    # Pinned sccache/OpenDAL reads the standard AWS shared-credentials file;
+    # it does not implement the ECS-style credential-URL provider.
+    # Do not let ambient static credentials or metadata become a fallback.
+    unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
+    unset AWS_WEB_IDENTITY_TOKEN_FILE AWS_ROLE_ARN
+    export AWS_SHARED_CREDENTIALS_FILE="$credentials_file"
+    export AWS_PROFILE=default
+    export AWS_EC2_METADATA_DISABLED=true
     export RUSTC_WRAPPER=/usr/local/bin/sccache
     export SCCACHE_REGION=auto
     export SCCACHE_S3_USE_SSL=true
