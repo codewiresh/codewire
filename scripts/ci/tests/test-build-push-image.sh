@@ -100,7 +100,7 @@ verify_kind_build_cache_contract() {
       fail "$(basename "$dockerfile") unsafely shares a writable Cargo download cache across parallel targets"
     fi
     grep -qF -- '--mount=type=secret,id=aws_shared_credentials' "$dockerfile" ||
-      fail "$(basename "$dockerfile") omits the temporary R2 credential mount"
+      fail "$(basename "$dockerfile") omits the private R2 credential mount"
     grep -qF 'ARG CODEWIRE_SCCACHE_MODE=disabled' "$dockerfile" ||
       fail "$(basename "$dockerfile") does not fail closed to disabled remote caching"
     # shellcheck disable=SC2016
@@ -129,7 +129,7 @@ verify_kind_build_cache_contract() {
   grep -qF 'protected/codewire/' "$BUILDER" ||
     fail 'published image builds do not constrain their compiler-cache prefix'
   grep -qF 'AWS_SHARED_CREDENTIALS_FILE' "$RUST_BUILD_WRAPPER" ||
-    fail 'sccache does not consume its short-lived AWS shared-credentials file'
+    fail 'sccache does not consume its private AWS shared-credentials file'
   if grep -Eq 'AWS_IAM_CREDENTIALS_URL|aws_iam_credentials_url' \
       "$RUST_BUILD_WRAPPER" "$KIND_BUILDER" "$BUILDER" \
       "$DASHBOARD_DOCKERFILE" "$SERVICES_DOCKERFILE" \
@@ -183,9 +183,8 @@ mkdir -p "$work/bin"
 r2_credentials_file="$work/aws-shared-credentials"
 cat >"$r2_credentials_file" <<'EOF'
 [default]
-aws_access_key_id = temporary-access-key
-aws_secret_access_key = temporary-secret-key
-aws_session_token = temporary-session-token
+aws_access_key_id = untrusted-access-key
+aws_secret_access_key = untrusted-secret-key
 EOF
 chmod 0600 "$r2_credentials_file"
 
@@ -669,9 +668,9 @@ docker_config="$(sed -nE 's/^DOCKER_CONFIG=([^ ]+).* login.*/\1/p' \
     "$KIND_BUILDER"
 )
 [[ "$(grep -oF 'secret=id=aws_shared_credentials\,src=' "$FAKE_DOCKER_CALLS" | wc -l)" -eq 4 ]] ||
-  fail 'Kind did not bind the private temporary credential file to all four Bake targets'
+  fail 'Kind did not bind the private credential file to all four Bake targets'
 grep -qF "src=$r2_credentials_file" "$FAKE_DOCKER_CALLS" ||
-  fail 'Kind did not pass the exact temporary credential file path to Bake'
+  fail 'Kind did not pass the exact private credential file path to Bake'
 
 : >"$FAKE_DOCKER_CALLS"
 (
@@ -684,11 +683,11 @@ grep -qF "src=$r2_credentials_file" "$FAKE_DOCKER_CALLS" ||
     "$BUILDER" derp deployments/docker/derp.Dockerfile .
 )
 grep -qF 'secret=id=aws_shared_credentials\,src=' "$FAKE_DOCKER_CALLS" ||
-  fail 'protected publication did not bind the private temporary credential file to Bake'
+  fail 'protected publication did not bind the private credential file to Bake'
 grep -qF "src=$r2_credentials_file" "$FAKE_DOCKER_CALLS" ||
-  fail 'protected publication did not pass the exact temporary credential file path to Bake'
-if grep -qE 'temporary-(access-key|secret-key|session-token)' "$FAKE_DOCKER_CALLS"; then
-  fail 'temporary R2 credential material reached Docker command arguments'
+  fail 'protected publication did not pass the exact private credential file path to Bake'
+if grep -qE 'untrusted-(access-key|secret-key)' "$FAKE_DOCKER_CALLS"; then
+  fail 'R2 credential material reached Docker command arguments'
 fi
 
 kind_builds_before="$(grep -Ec ' buildx bake .* kind $' "$FAKE_DOCKER_CALLS" || true)"
