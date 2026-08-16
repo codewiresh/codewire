@@ -15,25 +15,17 @@
 # Built+pushed as codewire/services by .gitea/workflows/ci.yaml. Build from
 # the repo root:
 #
-#   docker build -f deployments/docker/services.Dockerfile -t codewire-services:dev .
+#   docker buildx bake --file docker-bake.hcl --pull --load \
+#     --set 'services.tags=codewire-services:dev' services
 #
 # protoc is a build dependency of codewire-orchestration's temporalio-sdk
 # family (prost-wkt-types). It comes from one checksum-pinned upstream archive;
 # the image never consults an operating-system package repository.
 
-ARG RUST_IMAGE=rust:1.91.1-bookworm@sha256:c1e5f19e773b7878c3f7a805dd00a495e747acbdc76fb2337a4ebf0418896b33
+# syntax=docker/dockerfile:1.20
 ARG DEBIAN_IMAGE=debian:bookworm-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818
 
-FROM ${RUST_IMAGE} AS protoc
-ADD --checksum=sha256:6930ebf62bd4ea607b98fff052596c6ee564b9835b4ce172c75a3f53ae9d91b7 \
-  https://github.com/protocolbuffers/protobuf/releases/download/v35.1/protoc-35.1-linux-x86_64.zip \
-  /tmp/protoc.zip
-RUN unzip -q /tmp/protoc.zip -d /opt/protoc \
-    && /opt/protoc/bin/protoc --version
-
-FROM ${RUST_IMAGE} AS builder
-COPY --from=protoc /opt/protoc /opt/protoc
-ENV PATH="/opt/protoc/bin:${PATH}"
+FROM codewire-rust-base AS builder
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
@@ -45,21 +37,17 @@ COPY proto ./proto
 # private daemon protocol through codewire-gateway-proto. Its build script
 # compiles this separate internal schema at build time.
 COPY libs/gateway-proto ./libs/gateway-proto
-ARG CODEWIRE_CARGO_CACHE_PROBE
-# The target cache outlives this source snapshot while COPY preserves source
-# mtimes. Refresh only workspace inputs so Cargo cannot reuse stale local
-# fingerprints; registry/git dependencies and their compiled output stay hot.
-RUN --mount=type=cache,id=codewire-root-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
-    --mount=type=cache,id=codewire-root-cargo-git,target=/usr/local/cargo/git,sharing=locked \
-    --mount=type=cache,id=codewire-root-release-target,target=/src/target,sharing=locked \
+ARG CODEWIRE_SCCACHE_MODE=disabled
+ARG SCCACHE_BUCKET
+ARG SCCACHE_ENDPOINT
+ARG CODEWIRE_SCCACHE_PREFIX
+ARG CODEWIRE_RUST_PROFILE=release
+RUN --mount=type=cache,id=codewire-services-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=codewire-services-cargo-git,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,id=codewire-sccache-v2,target=/var/cache/sccache,sharing=shared \
+    --mount=type=secret,id=aws_iam_credentials_url \
     find Cargo.toml Cargo.lock crates proto libs/gateway-proto -type f -exec touch {} + && \
-    if [ -n "$CODEWIRE_CARGO_CACHE_PROBE" ]; then \
-      printf 'codewire-services cargo cache probe: %s\n' "$CODEWIRE_CARGO_CACHE_PROBE"; \
-      set -- --verbose; \
-    else \
-      set --; \
-    fi; \
-    cargo build "$@" --locked --release \
+    codewire-rust-build cargo build --locked --profile "$CODEWIRE_RUST_PROFILE" \
       --bin codewire-idp \
       --bin codewire-orchestration \
       --bin sidecar-smoke \
@@ -68,13 +56,13 @@ RUN --mount=type=cache,id=codewire-root-cargo-registry,target=/usr/local/cargo/r
       --bin codewire-db-migrate \
       --bin codewire-udp-relay && \
     mkdir -p /out && \
-    cp target/release/codewire-idp /out/codewire-idp && \
-    cp target/release/codewire-orchestration /out/codewire-orchestration && \
-    cp target/release/sidecar-smoke /out/sidecar-smoke && \
-    cp target/release/codewire-billing /out/codewire-billing && \
-    cp target/release/codewire-coordinator /out/codewire-coordinator && \
-    cp target/release/codewire-db-migrate /out/codewire-db-migrate && \
-    cp target/release/codewire-udp-relay /out/codewire-udp-relay
+    cp "target/$CODEWIRE_RUST_PROFILE/codewire-idp" /out/codewire-idp && \
+    cp "target/$CODEWIRE_RUST_PROFILE/codewire-orchestration" /out/codewire-orchestration && \
+    cp "target/$CODEWIRE_RUST_PROFILE/sidecar-smoke" /out/sidecar-smoke && \
+    cp "target/$CODEWIRE_RUST_PROFILE/codewire-billing" /out/codewire-billing && \
+    cp "target/$CODEWIRE_RUST_PROFILE/codewire-coordinator" /out/codewire-coordinator && \
+    cp "target/$CODEWIRE_RUST_PROFILE/codewire-db-migrate" /out/codewire-db-migrate && \
+    cp "target/$CODEWIRE_RUST_PROFILE/codewire-udp-relay" /out/codewire-udp-relay
 
 FROM ${DEBIAN_IMAGE}
 COPY --from=builder /out/codewire-idp /codewire-idp

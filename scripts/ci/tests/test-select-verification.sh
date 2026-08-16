@@ -159,6 +159,14 @@ run_paths_case shellcheck_policy_domain_future pull_request refs/pull/2001/head 
 grep -qF 'scripts/ci/tests/test-shellcheck-policy-domain.sh' "$SELECTOR"
 run_paths_case ci_tool_download_contract pull_request refs/pull/2002/head false \
   'deploy policy policy_shell' scripts/ci/tests/test-ci-tool-downloads.sh
+run_paths_case product_image_build_graph pull_request refs/pull/2003/head false \
+  'deploy edge_kind go_consumer_interop go_support policy release runtime_confidential' \
+  docker-bake.hcl scripts/ci/images/build-kind-images.sh \
+  scripts/ci/images/run-rust-build.sh
+run_paths_case product_image_build_graph_kind pull_request refs/pull/2004/head true \
+  'deploy edge_kind go_consumer_interop go_support kind policy release runtime_confidential' \
+  docker-bake.hcl scripts/ci/images/build-kind-images.sh \
+  scripts/ci/images/run-rust-build.sh
 run_paths_case runtime_plan_ci pull_request refs/pull/201/head false \
   'deploy go_consumer_interop go_support policy release runtime_confidential' \
   scripts/ci/deploy/resolve-deployed-source.sh \

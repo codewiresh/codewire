@@ -1,4 +1,14 @@
 services:
+  # Build-only source for the dashboard's named Rust toolchain context. Zero
+  # replicas keep it out of `docker compose up` while Compose can still build
+  # `web` without bypassing the canonical shared build base.
+  rust-base:
+    build:
+      context: .
+      dockerfile: deployments/docker/rust-base.Dockerfile
+    deploy:
+      replicas: 0
+
   # PostgreSQL database
   postgres:
     image: postgres:17-alpine
@@ -22,6 +32,8 @@ services:
     build:
       context: .
       dockerfile: apps/dashboard/Dockerfile
+      additional_contexts:
+        codewire-rust-base: service:rust-base
     container_name: codewire-web
     ports:
       - "5173:5173"

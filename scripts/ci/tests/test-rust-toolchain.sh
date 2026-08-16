@@ -49,15 +49,15 @@ grep -Fq 'primary Rust CI job must verify Cargo cache capacity before Cargo veri
 cp "$ROOT/.gitea/workflows/ci.yaml" "$fixture/.gitea/workflows/ci.yaml"
 
 sed -i '0,/rust:1.91.1-bookworm/s//rust:1.91-bookworm/' \
-  "$fixture/deployments/docker/services.Dockerfile"
+  "$fixture/deployments/docker/rust-base.Dockerfile"
 if "$CHECK" --root "$fixture" >"$fixture/builder-drift.log" 2>&1; then
   printf 'Rust toolchain guard accepted shipped-builder drift\n' >&2
   exit 1
 fi
-grep -Fq 'deployments/docker/services.Dockerfile does not declare exactly one rust:1.91.1-bookworm@sha256:c1e5f19e773b7878c3f7a805dd00a495e747acbdc76fb2337a4ebf0418896b33 builder input' \
+grep -Fq 'deployments/docker/rust-base.Dockerfile does not declare exactly one reviewed rust:1.91.1-bookworm@sha256:c1e5f19e773b7878c3f7a805dd00a495e747acbdc76fb2337a4ebf0418896b33 input' \
   "$fixture/builder-drift.log"
 sed -i '0,/rust:1.91-bookworm/s//rust:1.91.1-bookworm/' \
-  "$fixture/deployments/docker/services.Dockerfile"
+  "$fixture/deployments/docker/rust-base.Dockerfile"
 
 sed -i '0,/rust-version = "1.91.1"/s//rust-version = "1.91.0"/' \
   "$fixture/crates/codewire-desktop/Cargo.toml"

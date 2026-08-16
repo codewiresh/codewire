@@ -31,7 +31,8 @@ official Zola archives, no package installation, and a non-root distroless
 runtime:
 
 ```bash
-docker build -f apps/dashboard/Dockerfile -t codewire-dashboard:local .
+docker buildx bake --file docker-bake.hcl --pull --load \
+  --set 'dashboard.tags=codewire-dashboard:local' dashboard
 docker run --rm -p 5173:5173 \
   -e CODEWIRE_PUBLIC_ORIGIN=http://127.0.0.1:5173 \
   codewire-dashboard:local

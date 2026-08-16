@@ -55,6 +55,9 @@ readonly -a SHIPPED_RUST_DOCKERFILES=(
   'deployments/docker/mesh.Dockerfile'
   'deployments/docker/services.Dockerfile'
 )
+readonly RUST_BUILD_BASE_DOCKERFILE='deployments/docker/rust-base.Dockerfile'
+readonly RUST_BUILD_WRAPPER='scripts/ci/images/run-rust-build.sh'
+readonly BAKE_FILE='docker-bake.hcl'
 readonly WORKSPACE_DOCKERFILE='images/workspace/Dockerfile'
 readonly -a CURATED_MANIFESTS=(
   'deployments/docker/derp.Cargo.toml'
@@ -87,7 +90,8 @@ list_inputs() {
   for entry in "${PINNED_WORKFLOWS[@]}"; do
     printf '%s\n' "${entry%:*}"
   done
-  printf '%s\n' "$CANARY_WORKFLOW" "$WORKSPACE_DOCKERFILE"
+  printf '%s\n' "$CANARY_WORKFLOW" "$WORKSPACE_DOCKERFILE" \
+    "$RUST_BUILD_BASE_DOCKERFILE" "$RUST_BUILD_WRAPPER" "$BAKE_FILE"
   printf '%s\n' "${SHIPPED_RUST_DOCKERFILES[@]}" "${CURATED_MANIFESTS[@]}"
   find "$ROOT/crates" -mindepth 2 -maxdepth 2 -name Cargo.toml -printf '%P\n' \
     | sed 's#^#crates/#'
@@ -170,14 +174,28 @@ while IFS= read -r workflow; do
 done < <(grep -Rl --include='*.yaml' --include='*.yml' \
   -E 'toolchain:[[:space:]]+stable' "$ROOT/.gitea/workflows" || true)
 
-rust_image="rust:${channel}-bookworm@sha256:c1e5f19e773b7878c3f7a805dd00a495e747acbdc76fb2337a4ebf0418896b33"
+rust_build_image="rust:${channel}-bookworm@sha256:c1e5f19e773b7878c3f7a805dd00a495e747acbdc76fb2337a4ebf0418896b33"
+[[ "$(grep -Fxc "ARG RUST_IMAGE=$rust_build_image" "$ROOT/$RUST_BUILD_BASE_DOCKERFILE" || true)" -eq 1 ]] ||
+  die "$RUST_BUILD_BASE_DOCKERFILE does not declare exactly one reviewed $rust_build_image input"
+grep -Fq "test \"\$(rustc --version)\" = 'rustc ${channel} " \
+  "$ROOT/$RUST_BUILD_BASE_DOCKERFILE" ||
+  die "$RUST_BUILD_BASE_DOCKERFILE does not verify exact Rust $channel"
+grep -Fq 'ADD --checksum=sha256:67c4a96dd237c1f518f6b36083f270f9976d516f1e57fce891755ea782e50006' \
+  "$ROOT/$RUST_BUILD_BASE_DOCKERFILE" ||
+  die "$RUST_BUILD_BASE_DOCKERFILE does not checksum-pin reviewed sccache 0.17.0"
+grep -Fq "test \"\$(sccache --version)\" = 'sccache 0.17.0'" \
+  "$ROOT/$RUST_BUILD_BASE_DOCKERFILE" ||
+  die "$RUST_BUILD_BASE_DOCKERFILE does not verify reviewed sccache 0.17.0"
+grep -Fq 'export CARGO_INCREMENTAL=0' "$ROOT/$RUST_BUILD_WRAPPER" ||
+  die "$RUST_BUILD_WRAPPER must disable incremental compilation for sccache"
+grep -Fq 'default = "disabled"' "$ROOT/$BAKE_FILE" ||
+  die "$BAKE_FILE must default remote compiler caching to disabled"
 for dockerfile in "${SHIPPED_RUST_DOCKERFILES[@]}"; do
-  [[ "$(grep -Fxc "ARG RUST_IMAGE=$rust_image" "$ROOT/$dockerfile" || true)" -eq 1 ]] ||
-    die "$dockerfile does not declare exactly one $rust_image builder input"
-  # The Dockerfile variable reference is intentionally matched literally.
-  # shellcheck disable=SC2016
-  [[ "$(grep -Fc 'FROM ${RUST_IMAGE}' "$ROOT/$dockerfile" || true)" -ge 1 ]] ||
-    die "$dockerfile does not consume its reviewed Rust image"
+  [[ "$(grep -Ec '^FROM codewire-rust-base AS (builder|rust-builder|cw-builder)$' "$ROOT/$dockerfile" || true)" -ge 1 ]] ||
+    die "$dockerfile does not build from the shared reviewed Rust build base"
+  if grep -Eq 'cargo[ -]chef|recipe\.json' "$ROOT/$dockerfile"; then
+    die "$dockerfile must not add cargo-chef ahead of the measured sccache experiment"
+  fi
 done
 [[ "$(grep -Fc "FROM rust:${channel}-slim-bookworm@sha256:" "$ROOT/$WORKSPACE_DOCKERFILE" || true)" -eq 1 ]] ||
   die "workspace build-stage compiler differs from $channel"
@@ -195,4 +213,4 @@ printf '[rust-toolchain] exact Rust %s baseline: OK (%s crate manifests, %s seal
   "$channel" \
   "$(find "$ROOT/crates" -mindepth 2 -maxdepth 2 -name Cargo.toml | wc -l)" \
   "$(printf '%s\n' "${PINNED_WORKFLOWS[@]}" | awk -F: '{ total += $NF } END { print total + 0 }')" \
-  "$((${#SHIPPED_RUST_DOCKERFILES[@]} + 1))"
+  "$((${#SHIPPED_RUST_DOCKERFILES[@]} + 2))"

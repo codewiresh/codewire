@@ -118,7 +118,7 @@ scan-supply-chain:
 
 DASHBOARD_VERIFY_IMAGE ?= codewire-dashboard:verification
 verify-dashboard-image:
-	docker buildx build --pull --load --tag "$(DASHBOARD_VERIFY_IMAGE)" -f apps/dashboard/Dockerfile .
+	docker buildx bake --file docker-bake.hcl --pull --load --set 'dashboard.tags=$(DASHBOARD_VERIFY_IMAGE)' dashboard
 	scripts/ci/verify/dashboard-image.sh "$(DASHBOARD_VERIFY_IMAGE)"
 
 # Start core development services
@@ -279,7 +279,7 @@ cli-install-system:
 # Build the Rust gateway image for kind/local runtime smoke.
 build-gateway:
 	@echo "Building gateway image via deployments/docker/gateway.Dockerfile..."
-	docker build -t $(REGISTRY)/codewire/gateway:local -f deployments/docker/gateway.Dockerfile .
+	docker buildx bake --file docker-bake.hcl --pull --load --set 'gateway.tags=$(REGISTRY)/codewire/gateway:local' gateway
 
 # Deploy the local Rust runtime into kind.
 deploy-local: local-runtime build-dashboard-local
@@ -357,7 +357,7 @@ down:
 
 # Build the production-equivalent Rust/Zola image for local Kind.
 build-dashboard-local:
-	docker build -t codewire-dashboard:local -f apps/dashboard/Dockerfile .
+	docker buildx bake --file docker-bake.hcl --pull --load --set 'dashboard.tags=codewire-dashboard:local' dashboard
 
 # Build the pinned sandbox controller image for local kind only. A sibling
 # checkout may be used as an object source, but HEAD is never used implicitly.
@@ -384,10 +384,10 @@ build-sandbox-controller:
 
 # Build DERP image for local kind
 build-derp-local:
-	docker build -t codewire-derp:local -f deployments/docker/derp.Dockerfile .
+	docker buildx bake --file docker-bake.hcl --pull --load --set 'derp.tags=codewire-derp:local' derp
 
 build-services-local:
-	docker build -t codewire-services:local -f deployments/docker/services.Dockerfile .
+	docker buildx bake --file docker-bake.hcl --pull --load --set 'services.tags=codewire-services:local' services
 
 rollout-local-runtime:
 	$(KUBECTL) -n default rollout restart deployment codewire-coordinator codewire-idp codewire-billing codewire-orchestration codewire-derp

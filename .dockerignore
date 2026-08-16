@@ -11,6 +11,10 @@ deployments
 !deployments/docker/
 !deployments/docker/**
 scripts
+!scripts/
+!scripts/ci/
+!scripts/ci/images/
+!scripts/ci/images/run-rust-build.sh
 Makefile
 .env*
 apps/web/node_modules
