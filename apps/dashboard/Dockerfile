@@ -47,7 +47,7 @@ ARG CODEWIRE_RUST_PROFILE=release
 RUN --mount=type=cache,id=codewire-dashboard-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=codewire-dashboard-cargo-git,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=codewire-sccache-v2,target=/var/cache/sccache,sharing=shared \
-    --mount=type=secret,id=aws_iam_credentials_url \
+    --mount=type=secret,id=aws_shared_credentials \
     find Cargo.toml Cargo.lock crates proto libs/gateway-proto packages/codewire-design apps/cli/install.sh \
       -type f -exec touch {} + && \
     codewire-rust-build cargo build --locked --profile "$CODEWIRE_RUST_PROFILE" -p codewire-dashboard-web \
