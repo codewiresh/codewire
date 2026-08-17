@@ -13,8 +13,8 @@ env:
   ALLOW_NON_MAIN_IMAGE_BUILD: "1"
   OPENBAO_ROLE: codewire-source-dev-publisher
   OPENBAO_AUDIENCE: openbao-codewire-source-dev-publisher
-  OPENBAO_GHCR_ROLE: codewire-source-dev-ghcr-publisher
-  OPENBAO_GHCR_AUDIENCE: openbao-codewire-source-dev-ghcr-publisher
+  OPENBAO_GHCR_ROLE: codewire-source-dev-publisher
+  OPENBAO_GHCR_AUDIENCE: openbao-codewire-source-dev-publisher
 
 jobs:
   deploy-selection:
@@ -36,7 +36,7 @@ jobs:
       ci_policy_sha256: ${{ steps.select.outputs.ci_policy_sha256 }}
       baseline_valid: ${{ steps.select.outputs.baseline_valid }}
     steps:
-      - uses: https://forgejo.example.invalid/noel/actions-checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+      - uses: https://git.example.invalid/noel/actions-checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with:
           fetch-depth: 0
 
@@ -83,7 +83,7 @@ jobs:
     outputs:
       candidate_ref: ${{ steps.build.outputs.candidate_ref }}
     steps:
-      - uses: https://forgejo.example.invalid/noel/actions-checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+      - uses: https://git.example.invalid/noel/actions-checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
 
       - name: Build and push gateway image
         id: build
@@ -97,7 +97,7 @@ jobs:
     outputs:
       candidate_ref: ${{ steps.build.outputs.candidate_ref }}
     steps:
-      - uses: https://forgejo.example.invalid/noel/actions-checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+      - uses: https://git.example.invalid/noel/actions-checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
 
       - name: Build and push dashboard image
         id: build
@@ -111,7 +111,7 @@ jobs:
     outputs:
       candidate_ref: ${{ steps.build.outputs.candidate_ref }}
     steps:
-      - uses: https://forgejo.example.invalid/noel/actions-checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+      - uses: https://git.example.invalid/noel/actions-checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
 
       - name: Build and push DERP image
         id: build
@@ -125,7 +125,7 @@ jobs:
     outputs:
       candidate_ref: ${{ steps.build.outputs.candidate_ref }}
     steps:
-      - uses: https://forgejo.example.invalid/noel/actions-checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+      - uses: https://git.example.invalid/noel/actions-checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
 
       - name: Build and push services image
         id: build
@@ -139,7 +139,7 @@ jobs:
     outputs:
       candidate_ref: ${{ steps.build.outputs.candidate_ref }}
     steps:
-      - uses: https://forgejo.example.invalid/noel/actions-checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+      - uses: https://git.example.invalid/noel/actions-checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
 
       - name: Build and push hosted Mesh image
         id: build
@@ -157,7 +157,7 @@ jobs:
       - build-mesh-image
     if: ${{ needs.deploy-selection.outputs.deploy_dev == 'true' }}
     steps:
-      - uses: https://forgejo.example.invalid/noel/actions-checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+      - uses: https://git.example.invalid/noel/actions-checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
 
       - name: Copy the complete runtime set without rebuilding
         run: |
@@ -195,13 +195,13 @@ jobs:
   dispatch-deploy-dev:
     name: Dispatch exact source to deploy
     runs-on: untrusted-validation
-    timeout-minutes: 125
+    timeout-minutes: 15
     needs:
       - deploy-selection
       - publish-runtime-images
     if: ${{ needs.deploy-selection.outputs.deploy_dev == 'true' && github.ref == 'refs/heads/main' && needs.publish-runtime-images.result == 'success' }}
     steps:
-      - uses: https://forgejo.example.invalid/noel/actions-checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+      - uses: https://git.example.invalid/noel/actions-checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with:
           fetch-depth: 1
 

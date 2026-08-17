@@ -20,8 +20,8 @@ enable-openid-connect: true
 env:
   OPENBAO_ROLE: codewire-source-prod-publisher
   OPENBAO_AUDIENCE: openbao-codewire-source-prod-publisher
-  OPENBAO_GHCR_ROLE: codewire-source-prod-ghcr-publisher
-  OPENBAO_GHCR_AUDIENCE: openbao-codewire-source-prod-ghcr-publisher
+  OPENBAO_GHCR_ROLE: codewire-source-prod-publisher
+  OPENBAO_GHCR_AUDIENCE: openbao-codewire-source-prod-publisher
 
 jobs:
   release-selection:
@@ -31,7 +31,7 @@ jobs:
       release_tag: ${{ steps.select.outputs.release_tag }}
       source_sha: ${{ steps.select.outputs.source_sha }}
     steps:
-      - uses: https://forgejo.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
           fetch-depth: 0
 
@@ -47,7 +47,7 @@ jobs:
 
       # Recovery control stays on protected main. Release source is checked
       # out separately from the exact tag and is the only source built below.
-      - uses: https://forgejo.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         if: github.event_name == 'workflow_dispatch'
         with:
           ref: refs/tags/${{ inputs.release_tag }}
@@ -98,9 +98,9 @@ jobs:
       source_sha: ${{ steps.build.outputs.source_sha }}
       candidate_ref: ${{ steps.build.outputs.candidate_ref }}
     steps:
-      - uses: https://forgejo.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
 
-      - uses: https://forgejo.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
           ref: refs/tags/${{ needs.release-selection.outputs.release_tag }}
           path: .release-source
@@ -122,9 +122,9 @@ jobs:
       source_sha: ${{ steps.build.outputs.source_sha }}
       candidate_ref: ${{ steps.build.outputs.candidate_ref }}
     steps:
-      - uses: https://forgejo.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
 
-      - uses: https://forgejo.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
           ref: refs/tags/${{ needs.release-selection.outputs.release_tag }}
           path: .release-source
@@ -146,9 +146,9 @@ jobs:
       source_sha: ${{ steps.build.outputs.source_sha }}
       candidate_ref: ${{ steps.build.outputs.candidate_ref }}
     steps:
-      - uses: https://forgejo.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
 
-      - uses: https://forgejo.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
           ref: refs/tags/${{ needs.release-selection.outputs.release_tag }}
           path: .release-source
@@ -170,9 +170,9 @@ jobs:
       source_sha: ${{ steps.build.outputs.source_sha }}
       candidate_ref: ${{ steps.build.outputs.candidate_ref }}
     steps:
-      - uses: https://forgejo.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
 
-      - uses: https://forgejo.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
           ref: refs/tags/${{ needs.release-selection.outputs.release_tag }}
           path: .release-source
@@ -194,9 +194,9 @@ jobs:
       source_sha: ${{ steps.build.outputs.source_sha }}
       candidate_ref: ${{ steps.build.outputs.candidate_ref }}
     steps:
-      - uses: https://forgejo.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
 
-      - uses: https://forgejo.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
           ref: refs/tags/${{ needs.release-selection.outputs.release_tag }}
           path: .release-source
@@ -215,9 +215,9 @@ jobs:
     runs-on: ubuntu-latest
     needs: [release-selection]
     steps:
-      - uses: https://forgejo.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
 
-      - uses: https://forgejo.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
           ref: refs/tags/${{ needs.release-selection.outputs.release_tag }}
           path: .release-source
@@ -265,11 +265,11 @@ jobs:
       - build-mesh-image
       - build-dashboard-image
     steps:
-      - uses: https://forgejo.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
           fetch-depth: 0
 
-      - uses: https://forgejo.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
           ref: refs/tags/${{ needs.release-selection.outputs.release_tag }}
           path: .release-source
@@ -315,13 +315,13 @@ jobs:
   dispatch-deploy-prod:
     name: Dispatch Signed Tag to Deploy
     runs-on: untrusted-validation
-    timeout-minutes: 125
+    timeout-minutes: 15
     needs:
       - release-selection
       - publish-runtime-images
       - publish-support-release-images
     steps:
-      - uses: https://forgejo.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
 
       - name: Dispatch only the canonical signed release tag
         env:

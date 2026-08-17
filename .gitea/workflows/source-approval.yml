@@ -1,0 +1,106 @@
+name: Supply-chain source approval
+
+# The pull-request workflow comes from protected base, not from the candidate.
+# Candidate files are scanned as data only; no repository script, hook,
+# dependency installer, build system, Dockerfile, or binary is executed.
+on:
+  # zizmor: ignore[dangerous-triggers] The protected-base workflow executes only sealed scanners over candidate data.
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+  push:
+    branches: [main]
+
+jobs:
+  source-approval: # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; the disposable runner and network policy enforce no write.
+    name: Supply-chain source approval
+    runs-on: untrusted-validation
+    timeout-minutes: 15
+    steps:
+      - name: Select exact source and trusted policy base
+        id: selection
+        shell: bash
+        env:
+          EVENT_NAME: ${{ forgejo.event_name }}
+          EVENT_PATH: ${{ forgejo.event_path }}
+          EVENT_SHA: ${{ forgejo.sha }}
+        run: |
+          set -euo pipefail
+          case "$EVENT_NAME" in
+            pull_request_target)
+              head_sha="$(jq -er '.pull_request.head.sha | strings | select(test("^[0-9a-f]{40}$"))' "$EVENT_PATH")"
+              base_sha="$(jq -er '.pull_request.base.sha | strings | select(test("^[0-9a-f]{40}$"))' "$EVENT_PATH")"
+              ;;
+            push)
+              head_sha="$EVENT_SHA"
+              base_sha="$EVENT_SHA"
+              ;;
+            *)
+              echo 'unsupported source-approval event' >&2
+              exit 64
+              ;;
+          esac
+          [[ "$head_sha" =~ ^[0-9a-f]{40}$ && "$base_sha" =~ ^[0-9a-f]{40}$ ]]
+          {
+            echo "head_sha=$head_sha"
+            echo "base_sha=$base_sha"
+          } >> "$FORGEJO_OUTPUT"
+
+      - name: Check out protected policy base
+        uses: https://git.example.invalid/noel/actions-checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ steps.selection.outputs.base_sha }}
+          path: .source-approval-base
+          fetch-depth: 1
+          persist-credentials: false
+          submodules: false
+          lfs: false
+          clean: true
+
+      - name: Check out exact candidate source as data
+        uses: https://git.example.invalid/noel/actions-checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ steps.selection.outputs.head_sha }}
+          path: candidate
+          fetch-depth: 1
+          persist-credentials: false
+          submodules: false
+          lfs: false
+          clean: true
+
+      - name: Run sealed source approval
+        shell: bash
+        working-directory: candidate
+        env:
+          BASE_SHA: ${{ steps.selection.outputs.base_sha }}
+          EVENT_NAME: ${{ forgejo.event_name }}
+          EXPECTED_SUPPLYCHAIN: 4e29a1552ca2d135c5dcd16904c3ea8cbaafac6d
+          HEAD_SHA: ${{ steps.selection.outputs.head_sha }}
+        run: |
+          set -euo pipefail
+          export GIT_CONFIG_NOSYSTEM=1
+          export GIT_CONFIG_COUNT=1
+          export GIT_CONFIG_KEY_0=core.hooksPath
+          export GIT_CONFIG_VALUE_0=/dev/null
+          export GIT_OPTIONAL_LOCKS=0
+
+          [[ "$(git rev-parse --verify HEAD^{commit})" == "$HEAD_SHA" ]]
+          [[ "$(git -C "$GITHUB_WORKSPACE/.source-approval-base" rev-parse --verify HEAD^{commit})" == "$BASE_SHA" ]]
+          [[ "$(supplychain version)" == "supplychain $EXPECTED_SUPPLYCHAIN" ]]
+
+          policy_args=()
+          if [[ "$EVENT_NAME" == pull_request_target ]]; then
+            base_policy="$GITHUB_WORKSPACE/.source-approval-base/.supplychain/source-policy.json"
+            if [[ -e "$base_policy" || -L "$base_policy" ]]; then
+              [[ -f "$base_policy" && ! -L "$base_policy" ]] || {
+                echo 'protected-base source policy is not a regular file' >&2
+                exit 65
+              }
+              policy_path=.trusted-base-source-policy.json
+              rm -f -- "$policy_path"
+              install -m 0444 -- "$base_policy" "$policy_path"
+              git add -f -- "$policy_path"
+              policy_args+=("--source-policy=$policy_path")
+            fi
+          fi
+
+          supplychain --osv-offline ci --policy=strict "${policy_args[@]}" .

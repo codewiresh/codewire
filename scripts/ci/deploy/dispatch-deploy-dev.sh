@@ -22,7 +22,7 @@ elif ! command -v "$curl_bin" >/dev/null 2>&1; then
   fail "curl is required for deploy workflow dispatch"
 fi
 
-readonly dispatch_url='https://forgejo.example.invalid/api/v1/repos/codewire/deploy/actions/workflows/promote-dev.yaml/dispatches'
+readonly dispatch_url='https://git.example.invalid/api/v1/repos/codewire/deploy/actions/workflows/promote-dev.yaml/dispatches'
 umask 077
 work="$(mktemp -d)"
 auth_header="$work/auth-header"
@@ -66,8 +66,7 @@ run_id="$(jq -er '.id | numbers | select(. > 0)' "$response_body")" ||
 run_number="$(jq -er '.run_number | numbers | select(. > 0)' "$response_body")" ||
   fail 'Forgejo dispatch response omitted the repository run number'
 
+# Do not poll here: the deploy run needs independently bounded runner capacity.
+# Its terminal smoke dispatches the exact source/deploy/run receipt back to Codewire.
 printf '[dispatch-deploy-dev] accepted canonical source %s as deploy run %s / #%s\n' \
   "$SOURCE_SHA" "$run_id" "$run_number"
-"$(dirname "$0")/wait-for-deploy-run.sh" \
-  "$run_id" promote-dev.yaml \
-  "$(dirname "$0")/../setup/fetch-forgejo-deploy-dev-token.sh"

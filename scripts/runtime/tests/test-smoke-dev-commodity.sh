@@ -41,6 +41,10 @@ assert_static_contract() {
     grep -Fq "$required=\"\${$required:-}\"" "$WRAPPER" ||
       fail "CI wrapper gives $required a committed topology default"
   done
+  grep -Fq 'SMOKE_SKIP_KUBE="${SMOKE_SKIP_KUBE:-0}"' "$WRAPPER" ||
+    fail "CI wrapper does not expose the application-only boundary"
+  grep -Fq 'if [[ "$SMOKE_SKIP_KUBE" != "1" ]]; then' "$WRAPPER" ||
+    fail "CI wrapper does not guard Kubernetes setup"
   candidate_run_smoke="$(awk '/^run_smoke\(\)/,/^}/' "$CANDIDATE")"
   grep -Fq 'EXPECTED_RUNTIME_NODE_MIN_EPHEMERAL_GIB:-400' "$CANDIDATE" ||
     fail "candidate smoke no longer accepts nominal 500 GB runtime nodes"
@@ -85,6 +89,53 @@ assert_static_contract() {
     | rg -F 'capture_container_log' >/dev/null; then
     fail "tailnet doctor failure diagnostics must not capture full container logs"
   fi
+}
+
+run_application_only_boundary_case() {
+  local fake_bin="$TEST_TMP/application-only-bin"
+  local kubectl_log="$TEST_TMP/application-only-kubectl.log"
+  local output="$TEST_TMP/application-only-help.out"
+
+  mkdir -p "$fake_bin"
+  cat >"$fake_bin/kubectl" <<'EOF'
+#!/usr/bin/env bash
+printf 'unexpected kubectl invocation\n' >>"${APPLICATION_ONLY_KUBECTL_LOG:?}"
+exit 99
+EOF
+  chmod 0755 "$fake_bin/kubectl"
+
+  APPLICATION_ONLY_KUBECTL_LOG="$kubectl_log" \
+    PATH="$fake_bin:$PATH" \
+    SMOKE_SKIP_KUBE=1 \
+    CODEWIRE_SERVER_URL=https://dev.example.invalid \
+    EXPECTED_CODEWIRE_DEV_SERVER_URL=https://dev.example.invalid \
+    EXPECTED_TAILNET_PEER_RELAY_ENDPOINT=192.0.2.10:41641 \
+    EXPECTED_UDP_RELAY_BIND_ADDRS=0.0.0.0:41641 \
+    EXPECTED_UDP_RELAY_ALLOCATOR_URL=https://allocator.example.invalid \
+    EXPECTED_TAILNET_DIRECT_UDP_LB_IP=192.0.2.11 \
+    EXPECTED_TAILNET_DIRECT_UDP_TRANSPORT_ZONE=test-zone \
+    EXPECTED_RUNTIME_TRANSPORT_REGION=test-region \
+    "$WRAPPER" --help >"$output"
+
+  [[ ! -e "$kubectl_log" ]] ||
+    fail "application-only wrapper invoked kubectl"
+  grep -Fq 'Usage:' "$output" ||
+    fail "application-only wrapper did not reach the source-owned smoke"
+
+  (
+    # shellcheck disable=SC1090 # Intentional dynamic source fixture.
+    source <(sed '$d' "$SMOKE")
+    # shellcheck disable=SC2034 # Values are consumed by the sourced smoke fixture.
+    declare SMOKE_SKIP_KUBE=1 SMOKE_SKIP_SSH=0 SMOKE_DERP_FALLBACK=0 \
+      SMOKE_PEER_RELAY_MATRIX=0 SMOKE_SSH_CONNECT_TIMEOUT=1
+    run_tailnet_doctor() { :; }
+    require_cmd() { :; }
+    run_ssh_transport_smoke() { :; }
+    run_gateway_host_key_restart_smoke() {
+      fail "application-only smoke attempted a Kubernetes rollout"
+    }
+    run_ssh_smoke
+  )
 }
 
 run_safe_diagnostic_case() {
@@ -621,6 +672,7 @@ run_admin_oauth_contract_cases() {
 }
 
 assert_static_contract
+run_application_only_boundary_case
 run_safe_diagnostic_case
 run_safe_client_diagnostic_case
 run_environment_artifact_case

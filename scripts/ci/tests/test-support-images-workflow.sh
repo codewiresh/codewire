@@ -31,7 +31,7 @@ if grep -q '^    paths:' "$WORKFLOW"; then
 fi
 grep -Fq '          fetch-depth: 0' <<<"$selection_job" ||
   fail 'support selection does not receive canonical history for ancestry validation'
-grep -Fq 'https://forgejo.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5' \
+grep -Fq 'https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5' \
   <<<"$selection_job" || fail 'support selection checkout action is not pinned'
 grep -Fq 'name: Verify sealed Rust toolchain' \
   <<<"$selection_job" ||
@@ -87,9 +87,9 @@ grep -qF 'scripts/ci/images/build-push-image.sh workspace images/workspace/Docke
 publish_job="$(sed -n '/^  publish-support-images:/,$p' "$WORKFLOW")"
 grep -qF 'needs: [support-selection]' <<<"$publish_job" ||
   fail 'support publisher is not bound to selection'
-grep -Fq 'OPENBAO_GHCR_ROLE: codewire-source-support-ghcr-publisher' \
+grep -Fq 'OPENBAO_GHCR_ROLE: codewire-source-support-publisher' \
   "$WORKFLOW" || fail 'support publisher lacks its exact OpenBao GHCR role'
-grep -Fq 'OPENBAO_GHCR_AUDIENCE: openbao-codewire-source-support-ghcr-publisher' \
+grep -Fq 'OPENBAO_GHCR_AUDIENCE: openbao-codewire-source-support-publisher' \
   "$WORKFLOW" || fail 'support publisher lacks its exact OpenBao GHCR audience'
 if grep -Fq 'GHCR_PUBLISH_USERNAME:' "$WORKFLOW"; then
   fail 'support workflow retains a split Forgejo GHCR username'

@@ -12,7 +12,7 @@
 //! assertions. `CRD_SMOKE_LOCAL_GATEWAY=1` selects the side-loaded gateway
 //! image and the diagnostic runc RuntimeClass for that disposable cluster.
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, time::Duration};
 
 use codewire_orchestration::sandbox::ClaimOpts;
 use codewire_orchestration::sandbox::client::SandboxClient;
@@ -60,7 +60,7 @@ async fn main() -> anyhow::Result<()> {
         ..Default::default()
     };
 
-    let (name, uid) = client.create_sandbox_claim(&namespace, &opts).await?;
+    let (name, uid) = create_sandbox_claim(&client, &namespace, &opts).await?;
     anyhow::ensure!(!uid.is_empty(), "created claim has no uid");
     println!("created {name} uid={uid}");
 
@@ -114,7 +114,7 @@ async fn main() -> anyhow::Result<()> {
     println!("round-trip verified");
 
     // Idempotent create: AlreadyExists must be reused, not an error.
-    let (name2, uid2) = client.create_sandbox_claim(&namespace, &opts).await?;
+    let (name2, uid2) = create_sandbox_claim(&client, &namespace, &opts).await?;
     anyhow::ensure!(
         name2 == name && uid2 == uid,
         "re-create did not reuse the claim"
@@ -160,6 +160,37 @@ async fn main() -> anyhow::Result<()> {
     secret_cleanup_result?;
     println!("gateway companion object round-trip verified — CRD smoke passed");
     Ok(())
+}
+
+async fn create_sandbox_claim(
+    client: &SandboxClient,
+    namespace: &str,
+    opts: &ClaimOpts,
+) -> anyhow::Result<(String, String)> {
+    const ATTEMPTS: usize = 3;
+
+    for attempt in 1..=ATTEMPTS {
+        match client.create_sandbox_claim(namespace, opts).await {
+            Ok(created) => return Ok(created),
+            Err(error) => {
+                let message = format!("{error:#}");
+                if attempt == ATTEMPTS || !is_transient_apiserver_shutdown(&message) {
+                    return Err(error);
+                }
+                eprintln!(
+                    "transient Kind API shutdown while creating SandboxClaim; retrying ({attempt}/{ATTEMPTS})"
+                );
+                tokio::time::sleep(Duration::from_secs(attempt as u64)).await;
+            }
+        }
+    }
+
+    unreachable!("bounded SandboxClaim create loop always returns")
+}
+
+fn is_transient_apiserver_shutdown(message: &str) -> bool {
+    message.contains("apiserver is shutting down")
+        && (message.contains("ServiceUnavailable") || message.contains("503"))
 }
 
 fn gateway_template_opts(namespace: &str) -> anyhow::Result<TemplateOpts> {
@@ -463,7 +494,20 @@ fn value_contains(value: &Value, needle: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_gateway_token;
+    use super::{is_transient_apiserver_shutdown, resolve_gateway_token};
+
+    #[test]
+    fn classifies_only_the_observed_transient_shutdown() {
+        assert!(is_transient_apiserver_shutdown(
+            "ApiError: apiserver is shutting down: ServiceUnavailable (code: 503)"
+        ));
+        assert!(!is_transient_apiserver_shutdown(
+            "ApiError: admission denied: Forbidden (code: 403)"
+        ));
+        assert!(!is_transient_apiserver_shutdown(
+            "ApiError: service unavailable for an unknown reason (code: 503)"
+        ));
+    }
 
     #[test]
     fn local_gateway_requires_and_preserves_the_shared_daemon_credential() {

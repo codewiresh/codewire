@@ -29,7 +29,7 @@ jobs:
       source_sha: ${{ steps.select.outputs.source_sha }}
       tag_object_sha: ${{ steps.select.outputs.tag_object_sha }}
     steps:
-      - uses: https://forgejo.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
           fetch-depth: 0
 
@@ -43,7 +43,7 @@ jobs:
           [ "$GITHUB_REF_NAME" = 'main' ]
           [[ "$RECOVERY_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
 
-      - uses: https://forgejo.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         if: github.event_name == 'workflow_dispatch'
         with:
           ref: refs/tags/${{ inputs.release_tag }}
@@ -94,9 +94,9 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: https://forgejo.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
 
-      - uses: https://forgejo.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
           ref: refs/tags/${{ needs.release-selection.outputs.release_tag }}
           path: .release-source
