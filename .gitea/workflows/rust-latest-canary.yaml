@@ -20,7 +20,7 @@ jobs:
     timeout-minutes: 45
     continue-on-error: true
     steps:
-      - uses: https://forgejo.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
 
       - name: Install moving stable in job-local storage
         run: |

@@ -37,7 +37,7 @@ while [[ $# -gt 0 ]]; do
 done
 [[ -n "$output" && -n "$url" ]]
 case "$url" in
-  https://forgejo.example.invalid/*audience=openbao-codewire-source-dev-publisher)
+  https://git.example.invalid/*audience=openbao-codewire-source-dev-publisher)
     jq -n --arg value "${FAKE_FORGEJO_JWT:?}" '{value:$value}' >"$output"
     ;;
   https://openbao.example.invalid/v1/auth/forgejo-jwt/login)
@@ -59,7 +59,7 @@ export FAKE_FORGEJO_JWT="$forgejo_jwt"
 export FAKE_OPENBAO_TOKEN="$openbao_token"
 export FAKE_GHCR_USERNAME="$ghcr_username"
 export FAKE_GHCR_TOKEN="$ghcr_token"
-export ACTIONS_ID_TOKEN_REQUEST_URL='https://forgejo.example.invalid/api/actions/oidc?job=synthetic'
+export ACTIONS_ID_TOKEN_REQUEST_URL='https://git.example.invalid/api/actions/oidc?job=synthetic'
 export ACTIONS_ID_TOKEN_REQUEST_TOKEN='synthetic-request-token'
 export OPENBAO_GHCR_ROLE='codewire-source-dev-publisher'
 export OPENBAO_GHCR_AUDIENCE='openbao-codewire-source-dev-publisher'

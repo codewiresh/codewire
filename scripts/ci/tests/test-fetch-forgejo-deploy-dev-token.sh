@@ -39,7 +39,7 @@ jq -n --arg value "${MOCK_JWT:?}" '{value:$value}' >"$output"
 MOCK
 chmod +x "$work/bin/curl"
 
-export ACTIONS_ID_TOKEN_REQUEST_URL='https://forgejo.example.invalid/api/actions/oidc?job=synthetic'
+export ACTIONS_ID_TOKEN_REQUEST_URL='https://git.example.invalid/api/actions/oidc?job=synthetic'
 export ACTIONS_ID_TOKEN_REQUEST_TOKEN="$TEST_REQUEST_TOKEN"
 export CURL_BIN="$work/bin/curl"
 export MOCK_CAPTURE_DIR="$work"

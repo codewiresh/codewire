@@ -37,12 +37,12 @@ for argument in "$@"; do
   [[ "$argument" == https://* ]] && url="$argument"
 done
 case "$url" in
-  https://forgejo.example.invalid/api/actions/oidc*audience=*)
+  https://git.example.invalid/api/actions/oidc*audience=*)
     [[ -z "${ACTIONS_ID_TOKEN_REQUEST_TOKEN+x}" ]] || exit 91
     printf '%s\n' "$url" >"$MOCK_CAPTURE_DIR/oidc-url"
     jq -n --arg value "${MOCK_JWT:?}" '{value:$value}' >"$output"
     ;;
-  https://forgejo.example.invalid/api/v1/repos/codewire/deploy/actions/workflows/promote-prod.yaml/dispatches)
+  https://git.example.invalid/api/v1/repos/codewire/deploy/actions/workflows/promote-prod.yaml/dispatches)
     jq -n '{id:704,run_number:20,jobs:["prepare"]}' >"$output"
     printf '%s' "${MOCK_DISPATCH_HTTP_STATUS:-201}"
     ;;
@@ -51,7 +51,7 @@ esac
 MOCK
 chmod +x "$work/bin/curl"
 
-export ACTIONS_ID_TOKEN_REQUEST_URL='https://forgejo.example.invalid/api/actions/oidc?job=synthetic'
+export ACTIONS_ID_TOKEN_REQUEST_URL='https://git.example.invalid/api/actions/oidc?job=synthetic'
 export ACTIONS_ID_TOKEN_REQUEST_TOKEN="$TEST_REQUEST_TOKEN"
 export CURL_BIN="$work/bin/curl"
 export MOCK_CAPTURE_DIR="$work/capture"

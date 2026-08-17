@@ -11,7 +11,7 @@ jobs:
     name: Production Read-only Smoke
     runs-on: ubuntu-latest
     steps:
-      - uses: https://forgejo.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
 
       - name: Configure production kube context
         run: |

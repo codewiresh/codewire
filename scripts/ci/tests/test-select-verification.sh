@@ -1512,7 +1512,7 @@ fi
 
 standard_block="$TMP/standard.yaml"
 bun_setup_condition="$(grep -A1 -F \
-  'uses: https://forgejo.example.invalid/noel/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6' \
+  'uses: https://git.example.invalid/noel/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6' \
   "$standard_block")"
 if grep -qF "contains(needs.verification-selection.outputs.selection, '|policy|')" \
     <<<"$bun_setup_condition"; then

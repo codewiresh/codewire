@@ -47,7 +47,7 @@ grep -qF 'protobuf/releases/download/v35.1/protoc-35.1-linux-x86_64.zip' \
   "$WORKFLOW" || fail 'Claude E2E does not install the reviewed protoc release'
 grep -qF '6930ebf62bd4ea607b98fff052596c6ee564b9835b4ce172c75a3f53ae9d91b7  /tmp/protoc.zip' \
   "$WORKFLOW" || fail 'Claude E2E does not verify the protoc archive checksum'
-grep -qF 'uses: https://forgejo.example.invalid/noel/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff' \
+grep -qF 'uses: https://git.example.invalid/noel/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff' \
   "$WORKFLOW" || fail 'Claude E2E does not use the reviewed Go setup action'
 grep -qF "go-version: '1.26.4'" "$WORKFLOW" ||
   fail 'Claude E2E does not install the repository Go toolchain'
@@ -61,7 +61,7 @@ grep -qF 'npm --prefix libs/sdk-ts run build' "$WORKFLOW" ||
 grep -qF 'npm --prefix libs/sdk-examples/run-claude/typescript ci --ignore-scripts' \
   "$WORKFLOW" || fail 'Claude E2E does not install the locked TypeScript example dependencies'
 
-checkout_line="$(grep -n 'uses: https://forgejo.example.invalid/noel/actions-checkout@' "$WORKFLOW" | cut -d: -f1)"
+checkout_line="$(grep -n 'uses: https://git.example.invalid/noel/actions-checkout@' "$WORKFLOW" | cut -d: -f1)"
 export_line="$(grep -n 'export-infisical-secrets.sh ANTHROPIC_API_KEY' "$WORKFLOW" | cut -d: -f1)"
 protoc_line="$(grep -n 'name: Install protoc (pinned)' "$WORKFLOW" | cut -d: -f1)"
 go_line="$(grep -n 'name: Set up Go' "$WORKFLOW" | cut -d: -f1)"

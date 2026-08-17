@@ -31,7 +31,7 @@ if grep -q '^    paths:' "$WORKFLOW"; then
 fi
 grep -Fq '          fetch-depth: 0' <<<"$selection_job" ||
   fail 'support selection does not receive canonical history for ancestry validation'
-grep -Fq 'https://forgejo.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5' \
+grep -Fq 'https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5' \
   <<<"$selection_job" || fail 'support selection checkout action is not pinned'
 grep -Fq 'name: Verify sealed Rust toolchain' \
   <<<"$selection_job" ||

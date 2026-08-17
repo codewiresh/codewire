@@ -35,10 +35,10 @@ while [[ $# -gt 0 ]]; do
 done
 [[ -n "$output" && -n "$url" ]]
 case "$url" in
-  https://forgejo.example.invalid/*audience=openbao-codewire-source-ci-sccache-r2-pr)
+  https://git.example.invalid/*audience=openbao-codewire-source-ci-sccache-r2-pr)
     jq -n --arg value "${FAKE_FORGEJO_JWT:?}" '{value:$value}' >"$output"
     ;;
-  https://forgejo.example.invalid/*audience=openbao-codewire-source-ci-sccache-r2-main)
+  https://git.example.invalid/*audience=openbao-codewire-source-ci-sccache-r2-main)
     jq -n --arg value "${FAKE_FORGEJO_JWT:?}" '{value:$value}' >"$output"
     ;;
   https://openbao.example.invalid/v1/auth/forgejo-jwt/login)
@@ -64,7 +64,7 @@ export FAKE_FORGEJO_JWT='synthetic-forgejo-jwt'
 export FAKE_OPENBAO_TOKEN='synthetic-openbao-token'
 export FAKE_ACCESS_KEY_ID='syntheticaccesskey123456'
 export FAKE_SECRET_ACCESS_KEY='syntheticsecretaccesskey1234567890abcdef'
-export ACTIONS_ID_TOKEN_REQUEST_URL='https://forgejo.example.invalid/api/actions/oidc?job=synthetic'
+export ACTIONS_ID_TOKEN_REQUEST_URL='https://git.example.invalid/api/actions/oidc?job=synthetic'
 export ACTIONS_ID_TOKEN_REQUEST_TOKEN='synthetic-request-token'
 export GITHUB_EVENT_NAME=pull_request
 export GITHUB_REF=refs/pull/1748/head

@@ -66,7 +66,7 @@ jobs:
       tested_tree_head: ${{ steps.receipt.outputs.tested_tree_head }}
       tested_tree_run: ${{ steps.receipt.outputs.tested_tree_run }}
     steps:
-      - uses: https://forgejo.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
           fetch-depth: 0
 
@@ -75,7 +75,7 @@ jobs:
           scripts/ci/setup/assert-ci-runner-image.sh
           scripts/ci/tests/test-ci-runner-image-contract.sh
 
-      - uses: https://forgejo.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         if: ${{ github.event_name == 'pull_request' }}
         with:
           ref: ${{ github.event.pull_request.base.sha }}
@@ -83,7 +83,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - uses: https://forgejo.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         if: ${{ github.event_name == 'push' && github.event.before != '0000000000000000000000000000000000000000' }}
         with:
           ref: ${{ github.event.before }}
@@ -178,7 +178,7 @@ jobs:
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && needs.verification-selection.outputs.cw_package_selected != 'true' }}
         run: echo 'CW release assets are unaffected; no checkout or tool installation required'
 
-      - uses: https://forgejo.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && needs.verification-selection.outputs.cw_package_selected == 'true' }}
 
       - name: Verify sealed Rust toolchain
@@ -245,7 +245,7 @@ jobs:
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && needs.verification-selection.outputs.workspace_image_selected != 'true' }}
         run: echo 'workspace image is unaffected; no checkout, download, installation, or build required'
 
-      - uses: https://forgejo.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && needs.verification-selection.outputs.workspace_image_selected == 'true' }}
 
       - name: Prove isolated Buildx load contract
@@ -271,7 +271,7 @@ jobs:
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt == 'accepted' }}
         run: echo 'standard content verification inherited from the exact tested PR-head tree'
 
-      - uses: https://forgejo.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
         with:
           fetch-depth: 0
@@ -298,12 +298,12 @@ jobs:
           echo "$HOME/.proto-tools/protoc/bin" >> "$GITHUB_PATH"
           "$HOME/.proto-tools/protoc/bin/protoc" --version
 
-      - uses: https://forgejo.example.invalid/noel/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+      - uses: https://git.example.invalid/noel/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|contracts|') || contains(needs.verification-selection.outputs.selection, '|web|')) }}
         with:
           bun-version: '1.3.9'
 
-      - uses: https://forgejo.example.invalid/noel/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+      - uses: https://git.example.invalid/noel/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|sdk_ts|') }}
         with:
           node-version: '20'
@@ -397,7 +397,7 @@ jobs:
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt == 'accepted' }}
         run: echo 'Rust and transport content verification inherited from the exact tested PR-head tree'
 
-      - uses: https://forgejo.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
 
       - name: Verify sealed Rust toolchain
@@ -461,7 +461,7 @@ jobs:
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt == 'accepted' }}
         run: echo 'database content verification inherited from the exact tested PR-head tree'
 
-      - uses: https://forgejo.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
 
       - name: Verify sealed Rust toolchain
@@ -557,7 +557,7 @@ jobs:
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && steps.service-scope.outputs.selected != 'true' }}
         run: echo 'service control-plane integration is unaffected'
 
-      - uses: https://forgejo.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && steps.service-scope.outputs.selected == 'true' }}
 
       - name: Verify sealed Rust toolchain
@@ -655,7 +655,7 @@ jobs:
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && steps.service-scope.outputs.selected != 'true' }}
         run: echo 'service runtime-plane integration is unaffected'
 
-      - uses: https://forgejo.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && steps.service-scope.outputs.selected == 'true' }}
 
       - name: Verify sealed Rust toolchain
@@ -741,7 +741,7 @@ jobs:
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt == 'accepted' }}
         run: echo 'edge and Kind content verification inherited from the exact tested PR-head tree'
 
-      - uses: https://forgejo.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
 
       - name: Run Edge static verification
@@ -752,7 +752,7 @@ jobs:
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|kind|') }}
         run: scripts/ci/setup/assert-ci-runner-image.sh
 
-      - uses: https://forgejo.example.invalid/noel/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+      - uses: https://git.example.invalid/noel/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|kind|') }}
         with:
           bun-version: '1.3.9'
@@ -841,7 +841,7 @@ jobs:
       - services-runtime
       - edge-kind
     steps:
-      - uses: https://forgejo.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
 
       - name: Require capability groups
         env:
