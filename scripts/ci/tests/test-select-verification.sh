@@ -229,6 +229,12 @@ run_paths_case protected_delivery_credentials pull_request refs/pull/31/head fal
   scripts/ci/release/mirror-github.sh \
   scripts/ci/tests/test-fetch-openbao-github-mirror-credentials.sh \
   scripts/ci/tests/test-mint-github-app-token.sh
+run_paths_case sccache_r2_consumer pull_request refs/pull/1749/head false \
+  'edge_kind policy security' \
+  scripts/ci/setup/fetch-openbao-sccache-r2-credentials.sh
+run_paths_case sccache_r2_consumer_fixture pull_request refs/pull/1750/head false \
+  'edge_kind policy security' \
+  scripts/ci/tests/test-fetch-openbao-sccache-r2-credentials.sh
 run_paths_case dev_deploy_contract pull_request refs/pull/30/head false \
   'deploy go_consumer_interop go_support policy release runtime_confidential' scripts/ci/tests/test-deploy-dev.sh
 run_paths_case dev_smoke_receipt pull_request refs/pull/302/head false \
@@ -1179,17 +1185,17 @@ while IFS='|' read -r job_id job_name runner; do
     exit 1
   fi
 done <<'EOF'
-standard|Standard verification|ubuntu-latest
-rust-transport|Rust / transport verification|ubuntu-latest
-database|Database verification|ubuntu-latest
-services-control|Service control-plane verification|ubuntu-latest
-services-runtime|Service runtime-plane verification|ubuntu-latest
-edge-kind|Edge / Kind verification|kind-e2e
+standard|Standard verification|ci-heavy
+rust-transport|Rust / transport verification|ci-heavy
+database|Database verification|ci-heavy
+services-control|Service control-plane verification|ci-heavy
+services-runtime|Service runtime-plane verification|ci-heavy
+edge-kind|Edge / Kind verification|ci-heavy
 EOF
 
-# Compatibility jobs share the disposable DinD runner pool. Keep ordinary task
-# ceilings at 30 minutes. The selected workspace path performs two cold image
-# builds, so it has a bounded 55-minute exception beneath the runner's
+# Heavy jobs share the queue-driven disposable DinD runner pool. Keep ordinary
+# task ceilings at 30 minutes. The selected workspace path performs two cold
+# image builds, so it has a bounded 55-minute exception beneath the runner's
 # independently managed 60-minute task lifetime.
 for job_id in cw-release-assets standard rust-transport database services-control services-runtime; do
   block="$TMP/${job_id}.yaml"
@@ -1201,7 +1207,7 @@ for job_id in cw-release-assets standard rust-transport database services-contro
     ' "$WORKFLOW" > "$block"
   fi
   grep -qF '    timeout-minutes: 30' "$block" || {
-    echo "${job_id}: compatibility job must retain the 30-minute task ceiling" >&2
+    echo "${job_id}: heavy job must retain the 30-minute task ceiling" >&2
     exit 1
   }
 done
@@ -1337,6 +1343,14 @@ grep -qF '    runs-on: untrusted-validation' "$selection_block" || {
   echo 'verification selection does not use the live non-privileged validation profile' >&2
   exit 1
 }
+if grep -Eq '^    runs-on: (ubuntu-latest|kind-e2e)$' "$WORKFLOW"; then
+  echo 'Codewire CI still depends on a legacy compatibility label' >&2
+  exit 1
+fi
+[[ "$(grep -Fc '    runs-on: ci-heavy' "$WORKFLOW")" -eq 8 ]] || {
+  echo 'Codewire CI heavy capability groups are not explicit' >&2
+  exit 1
+}
 for output in selector_version classification selection required_local_mode \
     ci_head_commit ci_head_tree \
     cw_package_state cw_package_selected desktop_package_state \
@@ -1431,7 +1445,7 @@ awk '
 ' "$WORKFLOW" > "$cw_block"
 grep -qF '  cw-release-assets:' "$cw_block"
 grep -qF '    name: CW release-assets verification' "$cw_block"
-grep -qF '    runs-on: ubuntu-latest' "$cw_block"
+grep -qF '    runs-on: ci-heavy' "$cw_block"
 grep -qF 'name: CW release assets not selected' "$cw_block"
 grep -qF "needs.verification-selection.outputs.cw_package_selected != 'true'" \
   "$cw_block"
@@ -1467,7 +1481,7 @@ awk '
 ' "$WORKFLOW" > "$workspace_block"
 grep -qF '  workspace-image:' "$workspace_block"
 grep -qF '    name: Workspace image verification' "$workspace_block"
-grep -qF '    runs-on: ubuntu-latest' "$workspace_block"
+grep -qF '    runs-on: ci-heavy' "$workspace_block"
 grep -qF '    needs: [verification-selection]' "$workspace_block"
 grep -qF 'name: Workspace image not selected' "$workspace_block"
 grep -qF 'no checkout, download, installation, or build required' "$workspace_block"
@@ -1772,6 +1786,10 @@ if rg -ni 'migration[ _-](static|integration)' "$WORKFLOW"; then
 fi
 grep -qF '  required-verification:' "$WORKFLOW"
 grep -qF '    name: Required verification' "$WORKFLOW"
+grep -qF '    runs-on: untrusted-validation' "$required_block" || {
+  echo 'required coordination consumes the heavy compatibility pool' >&2
+  exit 1
+}
 # shellcheck disable=SC2016 # Match the literal Actions expression.
 grep -qF '    if: ${{ always() }}' "$WORKFLOW"
 grep -qF 'scripts/ci/select/require-verification-results.sh' "$required_block"

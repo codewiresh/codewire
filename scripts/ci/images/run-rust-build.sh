@@ -14,6 +14,17 @@ esac
 case "$mode" in
   disabled) ;;
   local)
+    # The workflow exports the reviewed R2 endpoint and bucket before it knows
+    # whether short-lived identity is available. sccache auto-enables S3 when
+    # those variables survive a fallback. Make local mode a closed disk-only
+    # boundary even when the caller has remote cache configuration in scope.
+    unset SCCACHE_BUCKET SCCACHE_ENDPOINT SCCACHE_REGION SCCACHE_S3_USE_SSL
+    unset SCCACHE_S3_KEY_PREFIX SCCACHE_MULTILEVEL_CHAIN
+    unset SCCACHE_MULTILEVEL_WRITE_ERROR_POLICY SCCACHE_IGNORE_SERVER_IO_ERROR
+    unset AWS_SHARED_CREDENTIALS_FILE AWS_PROFILE
+    unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
+    unset AWS_WEB_IDENTITY_TOKEN_FILE AWS_ROLE_ARN
+    export AWS_EC2_METADATA_DISABLED=true
     export RUSTC_WRAPPER=/usr/local/bin/sccache
     export SCCACHE_DIR="${SCCACHE_DIR:-/var/cache/sccache}"
     ;;
@@ -49,9 +60,15 @@ case "$mode" in
     export AWS_PROFILE=default
     export AWS_EC2_METADATA_DISABLED=true
     export RUSTC_WRAPPER=/usr/local/bin/sccache
+    export SCCACHE_DIR="${SCCACHE_DIR:-/var/cache/sccache}"
     export SCCACHE_REGION=auto
     export SCCACHE_S3_USE_SSL=true
     export SCCACHE_S3_KEY_PREFIX="$CODEWIRE_SCCACHE_PREFIX"
+    # Keep the executor-local BuildKit cache as L0 and R2 as best-effort L1.
+    # A cache outage must degrade to local compilation, never fail verification.
+    export SCCACHE_MULTILEVEL_CHAIN=disk,s3
+    export SCCACHE_MULTILEVEL_WRITE_ERROR_POLICY=ignore
+    export SCCACHE_IGNORE_SERVER_IO_ERROR=1
     ;;
   *)
     printf 'codewire-rust-build: invalid CODEWIRE_SCCACHE_MODE: %s\n' "$mode" >&2
