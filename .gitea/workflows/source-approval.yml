@@ -11,13 +11,10 @@ on:
     branches: [main]
 
 jobs:
-  source-approval:
+  source-approval: # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; the disposable runner and network policy enforce no write.
     name: Supply-chain source approval
     runs-on: untrusted-validation
     timeout-minutes: 15
-    # Forgejo ignores this GitHub-compatible key. The disposable runner and
-    # network policy are the effective no-secret/no-write boundary.
-    permissions: {}
     steps:
       - name: Select exact source and trusted policy base
         id: selection
