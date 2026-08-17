@@ -87,9 +87,9 @@ grep -qF 'scripts/ci/images/build-push-image.sh workspace images/workspace/Docke
 publish_job="$(sed -n '/^  publish-support-images:/,$p' "$WORKFLOW")"
 grep -qF 'needs: [support-selection]' <<<"$publish_job" ||
   fail 'support publisher is not bound to selection'
-grep -Fq 'OPENBAO_GHCR_ROLE: codewire-source-support-ghcr-publisher' \
+grep -Fq 'OPENBAO_GHCR_ROLE: codewire-source-support-publisher' \
   "$WORKFLOW" || fail 'support publisher lacks its exact OpenBao GHCR role'
-grep -Fq 'OPENBAO_GHCR_AUDIENCE: openbao-codewire-source-support-ghcr-publisher' \
+grep -Fq 'OPENBAO_GHCR_AUDIENCE: openbao-codewire-source-support-publisher' \
   "$WORKFLOW" || fail 'support publisher lacks its exact OpenBao GHCR audience'
 if grep -Fq 'GHCR_PUBLISH_USERNAME:' "$WORKFLOW"; then
   fail 'support workflow retains a split Forgejo GHCR username'

@@ -20,8 +20,8 @@ enable-openid-connect: true
 env:
   OPENBAO_ROLE: codewire-source-prod-publisher
   OPENBAO_AUDIENCE: openbao-codewire-source-prod-publisher
-  OPENBAO_GHCR_ROLE: codewire-source-prod-ghcr-publisher
-  OPENBAO_GHCR_AUDIENCE: openbao-codewire-source-prod-ghcr-publisher
+  OPENBAO_GHCR_ROLE: codewire-source-prod-publisher
+  OPENBAO_GHCR_AUDIENCE: openbao-codewire-source-prod-publisher
 
 jobs:
   release-selection:

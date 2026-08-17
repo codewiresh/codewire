@@ -18,9 +18,9 @@ token_file="$2"
 readonly OPENBAO_ADDR='https://openbao.example.invalid'
 readonly -a CURL_BOUNDS=(--connect-timeout 10 --max-time 30)
 case "${OPENBAO_GHCR_ROLE}|${OPENBAO_GHCR_AUDIENCE}" in
-  codewire-source-dev-ghcr-publisher\|openbao-codewire-source-dev-ghcr-publisher | \
-  codewire-source-support-ghcr-publisher\|openbao-codewire-source-support-ghcr-publisher | \
-  codewire-source-prod-ghcr-publisher\|openbao-codewire-source-prod-ghcr-publisher) ;;
+  codewire-source-dev-publisher\|openbao-codewire-source-dev-publisher | \
+  codewire-source-support-publisher\|openbao-codewire-source-support-publisher | \
+  codewire-source-prod-publisher\|openbao-codewire-source-prod-publisher) ;;
   *)
     echo 'OpenBao role and audience are not an approved GHCR publisher pair' >&2
     exit 1

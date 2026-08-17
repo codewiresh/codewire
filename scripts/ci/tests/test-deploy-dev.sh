@@ -91,9 +91,9 @@ done
 publish_job="$(sed -n '/^  publish-runtime-images:/,/^  dispatch-deploy-dev:/p' "$WORKFLOW")"
 grep -Fq "if: \${{ needs.deploy-selection.outputs.deploy_dev == 'true' }}" \
   <<<"$publish_job" || fail "all-unaffected selection does not skip runtime publication"
-grep -Fq 'OPENBAO_GHCR_ROLE: codewire-source-dev-ghcr-publisher' \
+grep -Fq 'OPENBAO_GHCR_ROLE: codewire-source-dev-publisher' \
   "$WORKFLOW" || fail "runtime publisher lacks its exact OpenBao GHCR role"
-grep -Fq 'OPENBAO_GHCR_AUDIENCE: openbao-codewire-source-dev-ghcr-publisher' \
+grep -Fq 'OPENBAO_GHCR_AUDIENCE: openbao-codewire-source-dev-publisher' \
   "$WORKFLOW" || fail "runtime publisher lacks its exact OpenBao GHCR audience"
 if grep -Fq 'GHCR_PUBLISH_USERNAME:' "$WORKFLOW"; then
   fail "runtime publisher retains a split Forgejo GHCR username"

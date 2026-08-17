@@ -12,9 +12,9 @@ fail() {
 
 bash -n "$0"
 
-grep -Fq 'OPENBAO_GHCR_ROLE: codewire-source-prod-ghcr-publisher' \
+grep -Fq 'OPENBAO_GHCR_ROLE: codewire-source-prod-publisher' \
   "$WORKFLOW" || fail "production publisher lacks its exact OpenBao GHCR role"
-grep -Fq 'OPENBAO_GHCR_AUDIENCE: openbao-codewire-source-prod-ghcr-publisher' \
+grep -Fq 'OPENBAO_GHCR_AUDIENCE: openbao-codewire-source-prod-publisher' \
   "$WORKFLOW" || fail "production publisher lacks its exact OpenBao GHCR audience"
 if grep -Fq 'GHCR_PUBLISH_USERNAME:' "$WORKFLOW"; then
   fail "production publisher retains a split Forgejo GHCR username"

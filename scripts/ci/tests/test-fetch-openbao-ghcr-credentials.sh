@@ -37,7 +37,7 @@ while [[ $# -gt 0 ]]; do
 done
 [[ -n "$output" && -n "$url" ]]
 case "$url" in
-  https://forgejo.example.invalid/*audience=openbao-codewire-source-dev-ghcr-publisher)
+  https://forgejo.example.invalid/*audience=openbao-codewire-source-dev-publisher)
     jq -n --arg value "${FAKE_FORGEJO_JWT:?}" '{value:$value}' >"$output"
     ;;
   https://openbao.example.invalid/v1/auth/forgejo-jwt/login)
@@ -61,8 +61,8 @@ export FAKE_GHCR_USERNAME="$ghcr_username"
 export FAKE_GHCR_TOKEN="$ghcr_token"
 export ACTIONS_ID_TOKEN_REQUEST_URL='https://forgejo.example.invalid/api/actions/oidc?job=synthetic'
 export ACTIONS_ID_TOKEN_REQUEST_TOKEN='synthetic-request-token'
-export OPENBAO_GHCR_ROLE='codewire-source-dev-ghcr-publisher'
-export OPENBAO_GHCR_AUDIENCE='openbao-codewire-source-dev-ghcr-publisher'
+export OPENBAO_GHCR_ROLE='codewire-source-dev-publisher'
+export OPENBAO_GHCR_AUDIENCE='openbao-codewire-source-dev-publisher'
 export RUNNER_TEMP="$work/runner"
 mkdir -p "$RUNNER_TEMP"
 
@@ -94,6 +94,17 @@ fi
   fail 'unapproved role reached an external request'
 [[ ! -e "$work/output/rejected-username" && ! -e "$work/output/rejected-token" ]] ||
   fail 'unapproved role created credential outputs'
+
+if OPENBAO_GHCR_ROLE='codewire-source-dev-ghcr-publisher' \
+    OPENBAO_GHCR_AUDIENCE='openbao-codewire-source-dev-ghcr-publisher' \
+    "$FETCHER" "$work/output/retired-username" "$work/output/retired-token" \
+    >"$work/retired.out" 2>&1; then
+  fail 'retired same-workflow role was accepted'
+fi
+[[ "$(wc -l <"$FAKE_CURL_CALLS")" -eq "$calls_before" ]] ||
+  fail 'retired role reached an external request'
+[[ ! -e "$work/output/retired-username" && ! -e "$work/output/retired-token" ]] ||
+  fail 'retired role created credential outputs'
 
 printf 'do-not-overwrite' >"$work/output/existing"
 chmod 0600 "$work/output/existing"
