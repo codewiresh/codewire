@@ -65,8 +65,7 @@ run_id="$(jq -er '.id | numbers | select(. > 0)' "$response_body")" ||
 run_number="$(jq -er '.run_number | numbers | select(. > 0)' "$response_body")" ||
   fail 'Forgejo dispatch response omitted the repository run number'
 
+# Do not hold a protected source runner while the independently authorized
+# deploy workflow executes. Release acceptance verifies this exact run later.
 printf '[dispatch-deploy-prod] accepted signed source tag %s as deploy run %s / #%s\n' \
   "$SOURCE_TAG" "$run_id" "$run_number"
-"$(dirname "$0")/wait-for-deploy-run.sh" \
-  "$run_id" promote-prod.yaml \
-  "$(dirname "$0")/../setup/fetch-forgejo-deploy-prod-token.sh"

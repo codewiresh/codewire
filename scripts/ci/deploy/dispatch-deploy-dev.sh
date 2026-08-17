@@ -66,8 +66,7 @@ run_id="$(jq -er '.id | numbers | select(. > 0)' "$response_body")" ||
 run_number="$(jq -er '.run_number | numbers | select(. > 0)' "$response_body")" ||
   fail 'Forgejo dispatch response omitted the repository run number'
 
+# Do not poll here: the deploy run needs independently bounded runner capacity.
+# Its terminal smoke dispatches the exact source/deploy/run receipt back to Codewire.
 printf '[dispatch-deploy-dev] accepted canonical source %s as deploy run %s / #%s\n' \
   "$SOURCE_SHA" "$run_id" "$run_number"
-"$(dirname "$0")/wait-for-deploy-run.sh" \
-  "$run_id" promote-dev.yaml \
-  "$(dirname "$0")/../setup/fetch-forgejo-deploy-dev-token.sh"

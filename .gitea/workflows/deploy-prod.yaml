@@ -315,7 +315,7 @@ jobs:
   dispatch-deploy-prod:
     name: Dispatch Signed Tag to Deploy
     runs-on: untrusted-validation
-    timeout-minutes: 125
+    timeout-minutes: 15
     needs:
       - release-selection
       - publish-runtime-images

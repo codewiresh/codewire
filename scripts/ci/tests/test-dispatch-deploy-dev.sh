@@ -43,32 +43,6 @@ case "$url" in
     jq -n '{id:703,run_number:19,jobs:["promote","reconcile","smoke"]}' >"$output"
     printf '%s' "${MOCK_DISPATCH_HTTP_STATUS:-201}"
     ;;
-  https://forgejo.example.invalid/api/v1/repos/codewire/deploy/actions/runs/703)
-    count_file="$MOCK_CAPTURE_DIR/poll-count"
-    count=0
-    [[ ! -f "$count_file" ]] || count="$(<"$count_file")"
-    count=$((count + 1))
-    printf '%s\n' "$count" >"$count_file"
-    run_status="${MOCK_RUN_STATUS:-success}"
-    if [[ "$run_status" == sequence && "$count" -eq 1 ]]; then
-      run_status=running
-    elif [[ "$run_status" == sequence ]]; then
-      run_status=success
-    fi
-    jq -n --arg status "$run_status" '{
-      id:703,
-      repository:{full_name:"codewire/deploy"},
-      workflow_id:"promote-dev.yaml",
-      prettyref:"main",
-      commit_sha:"2222222222222222222222222222222222222222",
-      event:"",
-      trigger_event:"workflow_dispatch",
-      trigger_user:{login:"noel"},
-      html_url:"https://forgejo.example.invalid/codewire/deploy/actions/runs/19",
-      status:$status
-    }' >"$output"
-    printf '200'
-    ;;
   *) exit 92 ;;
 esac
 MOCK
@@ -80,16 +54,10 @@ export CURL_BIN="$work/bin/curl"
 export MOCK_CAPTURE_DIR="$work/capture"
 export MOCK_JWT="$TEST_JWT"
 export RUNNER_TEMP="$work/runner"
-export DEPLOY_RUN_POLL_SECONDS=0
-export DEPLOY_RUN_TIMEOUT_SECONDS=10
-export MOCK_RUN_STATUS=sequence
-
 output="$work/success.out"
 "$DISPATCH" "$SOURCE_SHA" >"$output" 2>&1 || fail 'valid dispatch was rejected'
-grep -Fq "accepted canonical source $SOURCE_SHA" "$output" ||
-  fail 'successful dispatch did not identify the accepted source'
-grep -Fq 'exact deploy run 703 succeeded' "$output" ||
-  fail 'successful dispatch did not wait for the exact downstream run'
+grep -Fq "accepted canonical source $SOURCE_SHA as deploy run 703 / #19" "$output" ||
+  fail 'successful dispatch did not identify the exact accepted downstream run'
 if grep -Fq "$TEST_REQUEST_TOKEN" "$output"; then
   fail 'successful dispatch printed the OIDC request token'
 fi
@@ -99,9 +67,6 @@ jq -e --arg source "$SOURCE_SHA" \
   fail 'dispatch body omits exact run-info return or carries extra inputs'
 grep -Fxq "Authorization: Bearer $TEST_JWT" "$work/capture/auth-header" ||
   fail 'dispatch did not use the short-lived Bearer JWT'
-[[ "$(<"$work/capture/poll-count")" == 2 ]] ||
-  fail 'dispatch did not observe the running-to-success transition'
-
 failure_output="$work/failure.out"
 export MOCK_DISPATCH_HTTP_STATUS=403
 if "$DISPATCH" "$SOURCE_SHA" >"$failure_output" 2>&1; then
@@ -113,16 +78,6 @@ if grep -Fq "$TEST_JWT" "$failure_output"; then
   fail 'HTTP rejection printed the JWT'
 fi
 unset MOCK_DISPATCH_HTTP_STATUS
-
-rm -f "$work/capture/poll-count"
-export MOCK_RUN_STATUS=failure
-if "$DISPATCH" "$SOURCE_SHA" >"$work/downstream-failure.out" 2>&1; then
-  fail 'failed downstream deploy run was accepted'
-fi
-grep -Fq 'exact deploy run 703 finished with status failure' \
-  "$work/downstream-failure.out" ||
-  fail 'downstream failure did not identify the exact failed run'
-unset MOCK_RUN_STATUS
 
 marker="$work/invoked"
 cat >"$work/curl-never" <<MOCK

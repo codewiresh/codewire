@@ -90,9 +90,13 @@ grep -Fq '      - publish-support-release-images' <<<"$dispatch_job" ||
 grep -Fq 'run: scripts/ci/deploy/dispatch-deploy-prod.sh "$RELEASE_TAG"' <<<"$dispatch_job" ||
   fail "production dispatch sends more than the signed source tag"
 grep -Fq '    runs-on: untrusted-validation' <<<"$dispatch_job" ||
-  fail "production terminal wait does not use the live non-privileged validation profile"
-grep -Fq '    timeout-minutes: 125' <<<"$dispatch_job" ||
-  fail "production terminal wait cannot cover the downstream run deadline"
+  fail "production dispatch does not use the live non-privileged validation profile"
+grep -Fq '    timeout-minutes: 15' <<<"$dispatch_job" ||
+  fail "production dispatch can outlive the validation runner deadline"
+if grep -Fq 'wait-for-deploy-run.sh' \
+  "$ROOT/scripts/ci/deploy/dispatch-deploy-prod.sh"; then
+  fail "production dispatch holds a source runner while the downstream run needs capacity"
+fi
 if grep -Fq 'CODEWIRE_DEPLOY_PROMOTION_TOKEN' "$WORKFLOW"; then
   fail "production dispatch retains the static deploy token"
 fi

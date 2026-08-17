@@ -195,7 +195,7 @@ jobs:
   dispatch-deploy-dev:
     name: Dispatch exact source to deploy
     runs-on: untrusted-validation
-    timeout-minutes: 125
+    timeout-minutes: 15
     needs:
       - deploy-selection
       - publish-runtime-images
