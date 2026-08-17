@@ -21,6 +21,15 @@ cat >"$fixture/bin/docker" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "$*" >>"$DOCKER_LOG"
+if [ "${1:-} ${2:-} ${3:-}" = 'image inspect --format' ]; then
+  case "${4:-}" in
+    *dev.codewire.build.profile*) printf '%s\n' release ;;
+    *dev.codewire.promotable*) printf '%s\n' true ;;
+    *org.opencontainers.image.revision*) printf '%s\n' 0123456789abcdef0123456789abcdef01234567 ;;
+    '{{.Id}}') printf '%s\n' sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ;;
+    *) exit 64 ;;
+  esac
+fi
 SH
 chmod 0755 "$fixture/bin/docker"
 
@@ -75,6 +84,12 @@ grep -Fq 'moby/buildkit:v0.29.0@sha256:0039c1d47e8748b5afea56f4e85f14febaf34452b
   "$docker_log" || fail "wrapper did not pin BuildKit"
 grep -Fq "buildx rm --force $builder" "$docker_log" ||
   fail "wrapper did not destroy its BuildKit daemon"
+[[ "$(grep -Ec '^pull nexus-system-cluster\.private\.invalid/oci-promoted/codewire/' "$docker_log")" -eq 5 ]] ||
+  fail "wrapper did not pull all five protected candidates by digest"
+for family in dashboard derp gateway mesh services; do
+  grep -Eq "^image tag .*codewire/${family}@sha256:[0-9a-f]{64} codewire-${family}:e2e$" \
+    "$docker_log" || fail "wrapper did not materialize the exact $family candidate locally"
+done
 
 if (
   cd "$fixture"

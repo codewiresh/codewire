@@ -78,7 +78,7 @@ jobs:
         run: rm -f -- "$RUNNER_TEMP/codewire-deployed-source-candidate.json"
 
   build-publish-runtime-images:
-    name: Build and publish exact runtime image set
+    name: Build, verify, and publish exact runtime image set
     runs-on: protected-delivery
     timeout-minutes: 110
     needs: [deploy-selection]
@@ -91,6 +91,12 @@ jobs:
         env:
           CODEWIRE_SCCACHE_MODE: local
         run: scripts/ci/images/build-push-runtime-images.sh
+
+      - name: Test the exact protected release images in disposable Kind
+        env:
+          CODEWIRE_KIND_EXPECTED_SOURCE_SHA: ${{ github.sha }}
+          CODEWIRE_KIND_PRODUCT_IMAGE_MODE: prebuilt-release
+        run: scripts/ci/verify/kind-e2e.sh
 
       - name: Copy the complete runtime set without rebuilding
         run: |

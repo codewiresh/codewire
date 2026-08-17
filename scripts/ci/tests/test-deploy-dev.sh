@@ -102,6 +102,12 @@ grep -Fq '        run: scripts/ci/images/build-push-runtime-images.sh' <<<"$buil
   fail "runtime set does not use the bounded shared-builder entrypoint"
 grep -Fq '          CODEWIRE_SCCACHE_MODE: local' <<<"$build_job" ||
   fail "protected runtime build does not keep compiler objects job-local"
+grep -Fq '          CODEWIRE_KIND_PRODUCT_IMAGE_MODE: prebuilt-release' <<<"$build_job" ||
+  fail "protected runtime set is not tested without rebuilding CI images"
+grep -Fq '          CODEWIRE_KIND_EXPECTED_SOURCE_SHA: ${{ github.sha }}' <<<"$build_job" ||
+  fail "protected Kind verification is not bound to the workflow source"
+grep -Fq '        run: scripts/ci/verify/kind-e2e.sh' <<<"$build_job" ||
+  fail "protected runtime set does not run the exact-image Kind gate"
 for family in dashboard derp gateway services mesh; do
   # shellcheck disable=SC2016
   [[ "$(grep -Fc "\${{ steps.build.outputs.${family}_candidate_ref }}" <<<"$build_job")" -eq 2 ]] ||
@@ -140,7 +146,10 @@ fi
 [[ "$(grep -Fc '"$GITHUB_SHA"' <<<"$publish_job")" -eq 11 ]] ||
   fail "bundle validation and five exact copies do not share one workflow source SHA"
 validation_line="$(grep -n 'scripts/ci/images/image-bundle.py create' <<<"$publish_job" | cut -d: -f1)"
+kind_line="$(grep -n 'scripts/ci/verify/kind-e2e.sh' <<<"$publish_job" | cut -d: -f1)"
 first_copy_line="$(grep -n 'scripts/ci/images/publish-image-to-ghcr.sh' <<<"$publish_job" | head -1 | cut -d: -f1)"
+[[ -n "$kind_line" && -n "$validation_line" && "$kind_line" -lt "$validation_line" ]] ||
+  fail "exact protected Kind verification does not precede publication"
 [[ -n "$validation_line" && -n "$first_copy_line" && "$validation_line" -lt "$first_copy_line" ]] ||
   fail "complete runtime bundle validation does not precede GHCR copies"
 [[ "$(grep -Fc '            --candidate ' <<<"$publish_job")" -eq 5 ]] ||

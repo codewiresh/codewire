@@ -524,9 +524,21 @@ ingress_path_drift_check() {
 }
 
 build_images_and_smokes() {
-  log "building exact candidate product images once through the CI Bake profile"
-  CODEWIRE_BAKE_METADATA_FILE="$RUN_DIR/kind-image-build-metadata.json" \
-    "$ROOT/scripts/ci/images/build-kind-images.sh"
+  case "${CODEWIRE_KIND_PRODUCT_IMAGE_MODE:-build-ci}" in
+    build-ci)
+      log "building exact candidate product images once through the CI Bake profile"
+      CODEWIRE_BAKE_METADATA_FILE="$RUN_DIR/kind-image-build-metadata.json" \
+        "$ROOT/scripts/ci/images/build-kind-images.sh"
+      ;;
+    prebuilt-release)
+      log "using exact prebuilt protected release images without rebuilding"
+      assert_prebuilt_release_product_images
+      ;;
+    *)
+      echo "::error::CODEWIRE_KIND_PRODUCT_IMAGE_MODE must be build-ci or prebuilt-release"
+      return 2
+      ;;
+  esac
 
   log "building Rust kind smoke binaries"
   local smoke_started_at
@@ -539,6 +551,31 @@ build_images_and_smokes() {
   )
   printf 'CODEWIRE_CI_PHASE name=kind-smoke-binary-build seconds=%s\n' \
     "$(( $(date +%s) - smoke_started_at ))"
+}
+
+assert_prebuilt_release_product_images() {
+  local expected_sha="${CODEWIRE_KIND_EXPECTED_SOURCE_SHA:-}"
+  local image image_ref profile promotable revision
+
+  if ! [[ "$expected_sha" =~ ^[0-9a-f]{40}$ ]]; then
+    echo "::error::prebuilt release images require one exact expected source SHA"
+    return 2
+  fi
+  for image in dashboard services mesh gateway; do
+    image_ref="codewire-${image}:e2e"
+    docker image inspect "$image_ref" >/dev/null || {
+      echo "::error::prebuilt release image is missing: ${image_ref}"
+      return 1
+    }
+    profile="$(docker image inspect --format '{{ index .Config.Labels "dev.codewire.build.profile" }}' "$image_ref")"
+    promotable="$(docker image inspect --format '{{ index .Config.Labels "dev.codewire.promotable" }}' "$image_ref")"
+    revision="$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$image_ref")"
+    if [ "$profile" != release ] || [ "$promotable" != true ] \
+        || [ "$revision" != "$expected_sha" ]; then
+      echo "::error::prebuilt release image identity mismatch: ${image_ref}"
+      return 1
+    fi
+  done
 }
 
 create_cluster() {

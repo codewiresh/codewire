@@ -46,7 +46,7 @@ DOCKER_CONFIG="$docker_config" docker buildx create \
 build_one() {
   local image_name="$1"
   local dockerfile="$2"
-  local output candidate_ref
+  local output candidate_ref local_ref candidate_id local_id profile promotable revision
 
   output="$work/$image_name.output"
   GITHUB_OUTPUT="$output" \
@@ -58,6 +58,25 @@ build_one() {
   candidate_ref="$(sed -n 's/^candidate_ref=//p' "$output")"
   if [[ ! "$candidate_ref" =~ ^nexus-system-cluster\.private\.invalid/oci-promoted/codewire/${image_name}@sha256:[0-9a-f]{64}$ ]]; then
     echo "Runtime build returned an invalid $image_name candidate reference" >&2
+    exit 1
+  fi
+
+  # Nexus is the protected candidate boundary. Pull the immutable manifest
+  # back by digest and give its selected local platform image the disposable
+  # names consumed by Kind. GHCR publication and deploy dispatch occur only
+  # after the complete exact-image suite passes in the same job.
+  local_ref="codewire-${image_name}:e2e"
+  DOCKER_CONFIG="$docker_config" docker pull "$candidate_ref" >/dev/null
+  docker image tag "$candidate_ref" "$local_ref"
+  candidate_id="$(docker image inspect --format '{{.Id}}' "$candidate_ref")"
+  local_id="$(docker image inspect --format '{{.Id}}' "$local_ref")"
+  profile="$(docker image inspect --format '{{ index .Config.Labels "dev.codewire.build.profile" }}' "$local_ref")"
+  promotable="$(docker image inspect --format '{{ index .Config.Labels "dev.codewire.promotable" }}' "$local_ref")"
+  revision="$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$local_ref")"
+  if [ -z "$candidate_id" ] || [ "$candidate_id" != "$local_id" ] \
+      || [ "$profile" != release ] || [ "$promotable" != true ] \
+      || [ "$revision" != "$GITHUB_SHA" ]; then
+    echo "Runtime candidate $image_name did not preserve its exact release identity locally" >&2
     exit 1
   fi
   printf '%s_candidate_ref=%s\n' "$image_name" "$candidate_ref" >>"$GITHUB_OUTPUT"
@@ -72,4 +91,4 @@ build_one dashboard apps/dashboard/Dockerfile
 build_one gateway deployments/docker/gateway.Dockerfile
 build_one derp deployments/docker/derp.Dockerfile
 
-echo 'Built the exact five-image runtime set with one bounded transient BuildKit daemon'
+echo 'Built and locally materialized the exact five-image runtime candidate set with one bounded transient BuildKit daemon'
