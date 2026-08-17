@@ -5,24 +5,45 @@ on:
     - cron: '17 5 * * 1'
   workflow_dispatch:
 
-permissions:
-  contents: read
-
 concurrency:
   group: rust-latest-canary
   cancel-in-progress: true
 
+env:
+  RUSTUP_VERSION: 1.29.0
+  RUSTUP_INIT_SHA256: 4acc9acc76d5079515b46346a485974457b5a79893cfb01112423c89aeb5aa10
+
 jobs:
   latest-stable:
     name: Non-authoritative latest-stable check
-    runs-on: ubuntu-latest
+    runs-on: ci-heavy
+    timeout-minutes: 45
     continue-on-error: true
     steps:
       - uses: https://forgejo.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
 
-      - uses: https://forgejo.example.invalid/noel/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b
-        with:
-          toolchain: stable
+      - name: Install moving stable in job-local storage
+        run: |
+          set -euo pipefail
+          canary_root="$RUNNER_TEMP/codewire-rust-latest"
+          rm -rf -- "$canary_root"
+          install -d -m 0700 "$canary_root/bin" "$canary_root/cargo" "$canary_root/rustup"
+          rustup_init="$canary_root/bin/rustup-init"
+          curl --fail --silent --show-error --location \
+            --connect-timeout 10 --max-time 120 \
+            --proto '=https' --tlsv1.2 \
+            --output "$rustup_init" \
+            "https://static.rust-lang.org/rustup/archive/${RUSTUP_VERSION}/x86_64-unknown-linux-gnu/rustup-init"
+          printf '%s  %s\n' "$RUSTUP_INIT_SHA256" "$rustup_init" | sha256sum --check --strict
+          chmod 0700 "$rustup_init"
+          CARGO_HOME="$canary_root/cargo" \
+            RUSTUP_HOME="$canary_root/rustup" \
+            "$rustup_init" -y --profile minimal --default-toolchain stable --no-modify-path
+          {
+            echo "CARGO_HOME=$canary_root/cargo"
+            echo "RUSTUP_HOME=$canary_root/rustup"
+          } >> "$GITHUB_ENV"
+          echo "$canary_root/cargo/bin" >> "$GITHUB_PATH"
 
       - name: Install pinned protoc
         run: |
@@ -39,4 +60,9 @@ jobs:
         run: |
           set -euo pipefail
           export CARGO_TARGET_DIR="$(scripts/ci/verify/resolve-cargo-target-dir.sh)"
+          rustc +stable --version
           cargo +stable check --locked --workspace --all-targets
+
+      - name: Remove moving toolchain
+        if: ${{ always() }}
+        run: rm -rf -- "$RUNNER_TEMP/codewire-rust-latest"

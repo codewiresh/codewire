@@ -36,6 +36,28 @@ grep -Fq 'primary Rust CI job must isolate CARGO_HOME on the job workspace' \
   "$fixture/cargo-home-drift.log"
 cp "$ROOT/.gitea/workflows/ci.yaml" "$fixture/.gitea/workflows/ci.yaml"
 
+sed -i 's/4acc9acc76d5079515b46346a485974457b5a79893cfb01112423c89aeb5aa10/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/' \
+  "$fixture/.gitea/workflows/rust-latest-canary.yaml"
+if "$CHECK" --root "$fixture" >"$fixture/canary-rustup-digest.log" 2>&1; then
+  printf 'Rust toolchain guard accepted canary rustup digest drift\n' >&2
+  exit 1
+fi
+grep -Fq 'latest-stable canary rustup digest drift' \
+  "$fixture/canary-rustup-digest.log"
+cp "$ROOT/.gitea/workflows/rust-latest-canary.yaml" \
+  "$fixture/.gitea/workflows/rust-latest-canary.yaml"
+
+sed -i 's/--default-toolchain stable/--default-toolchain 1.91.1/' \
+  "$fixture/.gitea/workflows/rust-latest-canary.yaml"
+if "$CHECK" --root "$fixture" >"$fixture/canary-moving-stable.log" 2>&1; then
+  printf 'Rust toolchain guard accepted a pinned canary toolchain\n' >&2
+  exit 1
+fi
+grep -Fq 'latest-stable canary must be the single moving toolchain consumer' \
+  "$fixture/canary-moving-stable.log"
+cp "$ROOT/.gitea/workflows/rust-latest-canary.yaml" \
+  "$fixture/.gitea/workflows/rust-latest-canary.yaml"
+
 # Match the workflow shell variable literally.
 # shellcheck disable=SC2016
 sed -i '/run: scripts\/ci\/setup\/assert-cargo-cache-capacity\.sh "$CARGO_HOME"/d' \
