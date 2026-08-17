@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 readonly ROOT
 readonly WORKFLOW="$ROOT/.gitea/workflows/deploy-dev.yaml"
+readonly RUNTIME_BUILDER="$ROOT/scripts/ci/images/build-push-runtime-images.sh"
 readonly LEGACY_GITHUB_GATEWAY_WORKFLOW="$ROOT/.github/workflows/build-gateway-image.yml"
 readonly DEV_KUSTOMIZATION="$ROOT/deployments/k8s/overlays/dev/kustomization.yaml"
 readonly DEV_CONFIG_IMAGES="$ROOT/deployments/k8s/overlays/dev/config-images.yaml"
@@ -36,7 +37,11 @@ if grep -Eq 'CODEWIRE_(GHCR_PUBLISH|DEPLOY_SHA_DISPATCH)_ENABLED' "$WORKFLOW"; t
   fail "dev publication or dispatch retains a rollout flag"
 fi
 
-selection_job="$(sed -n '/^  deploy-selection:/,/^  build-gateway-image:/p' "$WORKFLOW")"
+selection_job="$(sed -n '/^  deploy-selection:/,/^  build-runtime-images:/p' "$WORKFLOW")"
+grep -Fq '    runs-on: trusted-plan' <<<"$selection_job" ||
+  fail "deploy selection does not use the non-Docker trusted planning profile"
+grep -Fq '    timeout-minutes: 15' <<<"$selection_job" ||
+  fail "deploy selection lacks a bounded trusted-plan deadline"
 grep -Fq '          fetch-depth: 0' <<<"$selection_job" ||
   fail "deploy selection does not receive the complete cumulative history"
 grep -Fq 'name: Verify sealed Rust toolchain' \
@@ -67,7 +72,7 @@ if compgen -G "$ROOT/scripts/ci/select/select-deploy-*" >/dev/null \
   || compgen -G "$ROOT/scripts/ci/select/artifact-*" >/dev/null; then
   fail "legacy deployment classifier remains in the repository"
 fi
-select_step="$(sed -n '/      - name: Plan and select atomic Dev deployment/,/^  build-gateway-image:/p' \
+select_step="$(sed -n '/      - name: Plan and select atomic Dev deployment/,/^  build-runtime-images:/p' \
   <<<"$selection_job")"
 if grep -Fq 'secrets.' <<<"$select_step"; then
   fail "artifact classifier receives the private deploy credential"
@@ -85,10 +90,45 @@ for output in deploy_dev reason matched_categories \
 done
 
 [[ "$(grep -Fc "if: \${{ needs.deploy-selection.outputs.deploy_dev == 'true' }}" \
-  "$WORKFLOW")" -eq 6 ]] ||
-  fail "all-unaffected selection does not skip all five builds and runtime publication"
+  "$WORKFLOW")" -eq 2 ]] ||
+  fail "all-unaffected selection does not skip the runtime build and publication"
+
+build_job="$(sed -n '/^  build-runtime-images:/,/^  publish-runtime-images:/p' "$WORKFLOW")"
+grep -Fq '    runs-on: protected-delivery' <<<"$build_job" ||
+  fail "runtime set does not build on the protected delivery profile"
+grep -Fq '    timeout-minutes: 110' <<<"$build_job" ||
+  fail "runtime set exceeds the protected runner lifetime"
+grep -Fq '        run: scripts/ci/images/build-push-runtime-images.sh' <<<"$build_job" ||
+  fail "runtime set does not use the bounded shared-builder entrypoint"
+grep -Fq '          CODEWIRE_SCCACHE_MODE: local' <<<"$build_job" ||
+  fail "protected runtime build does not keep compiler objects job-local"
+for family in dashboard derp gateway services mesh; do
+  # shellcheck disable=SC2016
+  grep -Fq "${family}_candidate_ref: \${{ steps.build.outputs.${family}_candidate_ref }}" \
+    <<<"$build_job" || fail "runtime build does not expose exact $family candidate"
+done
+if grep -Eq '^  build-(gateway-image|dashboard-image|derp|services-image|mesh-image):' "$WORKFLOW"; then
+  fail "runtime products still allocate independent protected workers"
+fi
+
+bash -n "$RUNTIME_BUILDER"
+[[ -x "$RUNTIME_BUILDER" ]] || fail "runtime image-set builder is not executable"
+[[ "$(grep -Ec '^build_one (dashboard|derp|gateway|mesh|services) ' "$RUNTIME_BUILDER")" -eq 5 ]] ||
+  fail "runtime image-set builder does not build exactly five separate product targets"
+grep -Fq "'  max-parallelism = 2'" "$RUNTIME_BUILDER" ||
+  fail "runtime image-set builder lacks the CPX42 memory bound"
+grep -Fq 'CODEWIRE_EXTERNAL_BUILDX_BUILDER="$builder"' "$RUNTIME_BUILDER" ||
+  fail "runtime image-set builder does not share its transient BuildKit daemon"
+grep -Fq 'Protected runtime builds may use only job-local or disabled sccache' \
+  "$RUNTIME_BUILDER" || fail "protected runtime build does not reject shared R2 cache"
 
 publish_job="$(sed -n '/^  publish-runtime-images:/,/^  dispatch-deploy-dev:/p' "$WORKFLOW")"
+grep -Fq '    runs-on: protected-delivery' <<<"$publish_job" ||
+  fail "runtime publisher does not use the protected delivery profile"
+grep -Fq '    timeout-minutes: 30' <<<"$publish_job" ||
+  fail "runtime publisher lacks a bounded deadline"
+grep -Fq '      - build-runtime-images' <<<"$publish_job" ||
+  fail "runtime publisher does not require the complete exact build set"
 grep -Fq "if: \${{ needs.deploy-selection.outputs.deploy_dev == 'true' }}" \
   <<<"$publish_job" || fail "all-unaffected selection does not skip runtime publication"
 grep -Fq 'OPENBAO_GHCR_ROLE: codewire-source-dev-publisher' \

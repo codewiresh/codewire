@@ -19,7 +19,8 @@ env:
 jobs:
   deploy-selection:
     name: Deploy selection
-    runs-on: ubuntu-latest
+    runs-on: trusted-plan
+    timeout-minutes: 15
     outputs:
       deploy_dev: ${{ steps.select.outputs.deploy_dev }}
       reason: ${{ steps.select.outputs.reason }}
@@ -76,86 +77,34 @@ jobs:
         if: ${{ always() }}
         run: rm -f -- "$RUNNER_TEMP/codewire-deployed-source-candidate.json"
 
-  build-gateway-image:
-    name: Build Gateway Image
-    runs-on: ubuntu-latest
+  build-runtime-images:
+    name: Build exact runtime image set
+    runs-on: protected-delivery
+    timeout-minutes: 110
     needs: [deploy-selection]
     if: ${{ needs.deploy-selection.outputs.deploy_dev == 'true' }}
     outputs:
-      candidate_ref: ${{ steps.build.outputs.candidate_ref }}
+      dashboard_candidate_ref: ${{ steps.build.outputs.dashboard_candidate_ref }}
+      derp_candidate_ref: ${{ steps.build.outputs.derp_candidate_ref }}
+      gateway_candidate_ref: ${{ steps.build.outputs.gateway_candidate_ref }}
+      services_candidate_ref: ${{ steps.build.outputs.services_candidate_ref }}
+      mesh_candidate_ref: ${{ steps.build.outputs.mesh_candidate_ref }}
     steps:
       - uses: https://git.example.invalid/noel/actions-checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
 
-      - name: Build and push gateway image
+      - name: Build and push the exact runtime image set
         id: build
-        run: scripts/ci/images/build-push-image.sh gateway deployments/docker/gateway.Dockerfile .
-
-  build-dashboard-image:
-    name: Build Dashboard Image
-    runs-on: ubuntu-latest
-    needs: [deploy-selection]
-    if: ${{ needs.deploy-selection.outputs.deploy_dev == 'true' }}
-    outputs:
-      candidate_ref: ${{ steps.build.outputs.candidate_ref }}
-    steps:
-      - uses: https://git.example.invalid/noel/actions-checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
-
-      - name: Build and push dashboard image
-        id: build
-        run: scripts/ci/images/build-push-image.sh dashboard apps/dashboard/Dockerfile .
-
-  build-derp:
-    name: Build DERP Relay Image
-    runs-on: ubuntu-latest
-    needs: [deploy-selection]
-    if: ${{ needs.deploy-selection.outputs.deploy_dev == 'true' }}
-    outputs:
-      candidate_ref: ${{ steps.build.outputs.candidate_ref }}
-    steps:
-      - uses: https://git.example.invalid/noel/actions-checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
-
-      - name: Build and push DERP image
-        id: build
-        run: scripts/ci/images/build-push-image.sh derp deployments/docker/derp.Dockerfile .
-
-  build-services-image:
-    name: Build Rust Services Image
-    runs-on: ubuntu-latest
-    needs: [deploy-selection]
-    if: ${{ needs.deploy-selection.outputs.deploy_dev == 'true' }}
-    outputs:
-      candidate_ref: ${{ steps.build.outputs.candidate_ref }}
-    steps:
-      - uses: https://git.example.invalid/noel/actions-checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
-
-      - name: Build and push services image
-        id: build
-        run: scripts/ci/images/build-push-image.sh services deployments/docker/services.Dockerfile .
-
-  build-mesh-image:
-    name: Build Hosted Mesh Image
-    runs-on: ubuntu-latest
-    needs: [deploy-selection]
-    if: ${{ needs.deploy-selection.outputs.deploy_dev == 'true' }}
-    outputs:
-      candidate_ref: ${{ steps.build.outputs.candidate_ref }}
-    steps:
-      - uses: https://git.example.invalid/noel/actions-checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
-
-      - name: Build and push hosted Mesh image
-        id: build
-        run: scripts/ci/images/build-push-image.sh mesh deployments/docker/mesh.Dockerfile .
+        env:
+          CODEWIRE_SCCACHE_MODE: local
+        run: scripts/ci/images/build-push-runtime-images.sh
 
   publish-runtime-images:
     name: Publish exact runtime manifests to GHCR
-    runs-on: ubuntu-latest
+    runs-on: protected-delivery
+    timeout-minutes: 30
     needs:
       - deploy-selection
-      - build-gateway-image
-      - build-dashboard-image
-      - build-derp
-      - build-services-image
-      - build-mesh-image
+      - build-runtime-images
     if: ${{ needs.deploy-selection.outputs.deploy_dev == 'true' }}
     steps:
       - uses: https://git.example.invalid/noel/actions-checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
@@ -167,29 +116,29 @@ jobs:
           scripts/ci/images/image-bundle.py create \
             --source-sha "$GITHUB_SHA" \
             --output "$bundle" \
-            --candidate dashboard "$GITHUB_SHA" "${{ needs.build-dashboard-image.outputs.candidate_ref }}" \
-            --candidate derp "$GITHUB_SHA" "${{ needs.build-derp.outputs.candidate_ref }}" \
-            --candidate gateway "$GITHUB_SHA" "${{ needs.build-gateway-image.outputs.candidate_ref }}" \
-            --candidate services "$GITHUB_SHA" "${{ needs.build-services-image.outputs.candidate_ref }}" \
-            --candidate mesh "$GITHUB_SHA" "${{ needs.build-mesh-image.outputs.candidate_ref }}"
+            --candidate dashboard "$GITHUB_SHA" "${{ needs.build-runtime-images.outputs.dashboard_candidate_ref }}" \
+            --candidate derp "$GITHUB_SHA" "${{ needs.build-runtime-images.outputs.derp_candidate_ref }}" \
+            --candidate gateway "$GITHUB_SHA" "${{ needs.build-runtime-images.outputs.gateway_candidate_ref }}" \
+            --candidate services "$GITHUB_SHA" "${{ needs.build-runtime-images.outputs.services_candidate_ref }}" \
+            --candidate mesh "$GITHUB_SHA" "${{ needs.build-runtime-images.outputs.mesh_candidate_ref }}"
           scripts/ci/images/publish-image-to-ghcr.sh \
-            "${{ needs.build-dashboard-image.outputs.candidate_ref }}" \
+            "${{ needs.build-runtime-images.outputs.dashboard_candidate_ref }}" \
             ghcr.io/codewiresh/dashboard \
             "$GITHUB_SHA"
           scripts/ci/images/publish-image-to-ghcr.sh \
-            "${{ needs.build-derp.outputs.candidate_ref }}" \
+            "${{ needs.build-runtime-images.outputs.derp_candidate_ref }}" \
             ghcr.io/codewiresh/derp \
             "$GITHUB_SHA"
           scripts/ci/images/publish-image-to-ghcr.sh \
-            "${{ needs.build-gateway-image.outputs.candidate_ref }}" \
+            "${{ needs.build-runtime-images.outputs.gateway_candidate_ref }}" \
             ghcr.io/codewiresh/gateway \
             "$GITHUB_SHA"
           scripts/ci/images/publish-image-to-ghcr.sh \
-            "${{ needs.build-services-image.outputs.candidate_ref }}" \
+            "${{ needs.build-runtime-images.outputs.services_candidate_ref }}" \
             ghcr.io/codewiresh/services \
             "$GITHUB_SHA"
           scripts/ci/images/publish-image-to-ghcr.sh \
-            "${{ needs.build-mesh-image.outputs.candidate_ref }}" \
+            "${{ needs.build-runtime-images.outputs.mesh_candidate_ref }}" \
             ghcr.io/codewiresh/mesh \
             "$GITHUB_SHA"
 

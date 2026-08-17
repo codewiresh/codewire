@@ -136,11 +136,12 @@ registry_username_file="$work/nexus-username"
 registry_password_file="$work/nexus-password"
 build_metadata="$work/build-metadata.json"
 bake_metadata="$work/bake-metadata.json"
-docker_config="$work/docker-config"
+docker_config="${CODEWIRE_EXTERNAL_DOCKER_CONFIG:-$work/docker-config}"
 credential_fetcher="${OPENBAO_NEXUS_CREDENTIAL_FETCHER:-scripts/ci/setup/fetch-openbao-nexus-credentials.sh}"
 buildx_builder=''
+buildx_builder_owned=0
 cleanup() {
-  if [ -n "$buildx_builder" ]; then
+  if [ "$buildx_builder_owned" = 1 ] && [ -n "$buildx_builder" ]; then
     DOCKER_CONFIG="$docker_config" docker buildx rm --force "$buildx_builder" \
       >/dev/null 2>&1 || true
   fi
@@ -148,7 +149,21 @@ cleanup() {
   rm -rf "$work"
 }
 trap cleanup EXIT
-mkdir -m 0700 "$docker_config"
+case "$docker_config" in
+  /*) ;;
+  *)
+    echo 'Docker configuration directory must be an absolute path' >&2
+    exit 2
+    ;;
+esac
+if [ -d "$docker_config" ]; then
+  [ "$(stat -c '%a' -- "$docker_config")" = 700 ] || {
+    echo 'Docker configuration directory must have mode 0700' >&2
+    exit 2
+  }
+else
+  mkdir -m 0700 "$docker_config"
+fi
 if [ ! -x "$credential_fetcher" ]; then
   echo "OpenBao Nexus credential fetcher is missing or not executable" >&2
   exit 1
@@ -189,12 +204,23 @@ registry_login
 
 create_buildx_builder() {
   [ -z "$buildx_builder" ] || return 0
+  if [ -n "${CODEWIRE_EXTERNAL_BUILDX_BUILDER:-}" ]; then
+    if [[ ! "$CODEWIRE_EXTERNAL_BUILDX_BUILDER" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$ ]]; then
+      echo 'External Buildx builder name is malformed' >&2
+      exit 2
+    fi
+    buildx_builder="$CODEWIRE_EXTERNAL_BUILDX_BUILDER"
+    DOCKER_CONFIG="$docker_config" docker buildx inspect "$buildx_builder" \
+      --bootstrap >/dev/null
+    return
+  fi
   buildx_builder="codewire-publish-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-0}-${image_name}-${BASHPID}"
   DOCKER_CONFIG="$docker_config" docker buildx create \
     --name "$buildx_builder" \
     --driver docker-container \
     --driver-opt "image=$BUILDKIT_IMAGE" \
     --bootstrap >/dev/null
+  buildx_builder_owned=1
 }
 
 inspect_manifest_digest() {

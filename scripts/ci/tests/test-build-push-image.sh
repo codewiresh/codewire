@@ -30,6 +30,15 @@ fail() {
   exit 1
 }
 
+grep -Fq 'CODEWIRE_EXTERNAL_BUILDX_BUILDER' "$BUILDER" ||
+  fail 'published-image builder cannot join the job-scoped BuildKit daemon'
+grep -Fq 'CODEWIRE_EXTERNAL_DOCKER_CONFIG' "$BUILDER" ||
+  fail 'published-image builder cannot share private job-scoped registry auth'
+grep -Fq 'buildx_builder_owned=0' "$BUILDER" ||
+  fail 'published-image builder does not distinguish caller-owned BuildKit state'
+grep -Fq 'docker buildx inspect "$buildx_builder"' "$BUILDER" ||
+  fail 'published-image builder does not validate an external BuildKit daemon'
+
 build_invocation_count() {
   grep -Ec ' buildx (bake|build) ' "$FAKE_DOCKER_CALLS" || true
 }
