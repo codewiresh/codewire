@@ -117,6 +117,7 @@ bash -n "$RUNTIME_BUILDER"
   fail "runtime image-set builder does not build exactly five separate product targets"
 grep -Fq "'  max-parallelism = 2'" "$RUNTIME_BUILDER" ||
   fail "runtime image-set builder lacks the CPX42 memory bound"
+# shellcheck disable=SC2016 # Match the literal runtime-builder assignment.
 grep -Fq 'CODEWIRE_EXTERNAL_BUILDX_BUILDER="$builder"' "$RUNTIME_BUILDER" ||
   fail "runtime image-set builder does not share its transient BuildKit daemon"
 grep -Fq 'Protected runtime builds may use only job-local or disabled sccache' \
