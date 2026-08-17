@@ -15,6 +15,7 @@ env:
 
 jobs:
   latest-stable:
+    # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this untrusted canary has no protected credential.
     name: Non-authoritative latest-stable check
     runs-on: ci-heavy
     timeout-minutes: 45

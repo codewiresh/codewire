@@ -47,6 +47,14 @@
     },
     {
       "kind": "osv",
+      "advisory_id": "RUSTSEC-2026-0256",
+      "package": "circular-buffer",
+      "reason": "The pinned GPUI desktop dependency requires circular-buffer 1.x; its profiler uses push_back, not the affected truncate, clear, or extend methods",
+      "owner": "noel",
+      "expires": "2026-09-30"
+    },
+    {
+      "kind": "osv",
       "advisory_id": "RUSTSEC-2024-0429",
       "package": "glib",
       "reason": "The current Wry Linux desktop stack still requires GTK and GLib 0.18",
