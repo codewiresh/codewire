@@ -988,6 +988,19 @@ if [ "$event_selected" = false ]; then
         select_token edge_kind
         recognized=true
         ;;
+      scripts/ci/setup/fetch-openbao-sccache-r2-credentials.sh)
+        select_token edge_kind
+        select_token policy
+        select_token security
+        kind_relevant=true
+        recognized=true
+        ;;
+      scripts/ci/tests/test-fetch-openbao-sccache-r2-credentials.sh)
+        select_token edge_kind
+        select_token policy
+        select_token security
+        recognized=true
+        ;;
       Dockerfile|docker-bake.hcl|apps/*/Dockerfile*|deployments/docker/*|\
       scripts/ci/images/build-kind-images.sh|scripts/ci/images/run-rust-build.sh)
         select_token edge_kind

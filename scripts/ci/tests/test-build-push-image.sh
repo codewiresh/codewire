@@ -140,6 +140,12 @@ verify_kind_build_cache_contract() {
     fail 'sccache wrapper does not disable incompatible incremental compilation'
   grep -qF 'export SCCACHE_DIRECT=false' "$RUST_BUILD_WRAPPER" ||
     fail 'sccache wrapper permits unsafe direct-mode reuse across isolated executors'
+  grep -qF 'export SCCACHE_MULTILEVEL_CHAIN=disk,s3' "$RUST_BUILD_WRAPPER" ||
+    fail 'R2 mode does not retain the job-local cache as its first level'
+  grep -qF 'export SCCACHE_MULTILEVEL_WRITE_ERROR_POLICY=ignore' "$RUST_BUILD_WRAPPER" ||
+    fail 'R2 write failure can stop a correctness-valid build'
+  grep -qF 'export SCCACHE_IGNORE_SERVER_IO_ERROR=1' "$RUST_BUILD_WRAPPER" ||
+    fail 'R2 communication failure cannot fall back to the local compiler'
   grep -qF 'codewire-rust-base: service:rust-base' "$COMPOSE_FILE" ||
     fail 'Compose does not supply the dashboard shared Rust build context'
   grep -A6 '^  rust-base:$' "$COMPOSE_FILE" | grep -qF 'replicas: 0' ||
@@ -415,9 +421,12 @@ EOF
 cat >"$work/bin/sccache" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-printf 'AWS_SHARED_CREDENTIALS_FILE=%s AWS_PROFILE=%s AWS_EC2_METADATA_DISABLED=%s AWS_ACCESS_KEY_ID=%s command=%s\n' \
+printf 'AWS_SHARED_CREDENTIALS_FILE=%s AWS_PROFILE=%s AWS_EC2_METADATA_DISABLED=%s AWS_ACCESS_KEY_ID=%s SCCACHE_DIR=%s MULTILEVEL=%s WRITE_POLICY=%s IGNORE_IO=%s command=%s\n' \
   "${AWS_SHARED_CREDENTIALS_FILE:-}" "${AWS_PROFILE:-}" \
-  "${AWS_EC2_METADATA_DISABLED:-}" "${AWS_ACCESS_KEY_ID:-}" "$*" \
+  "${AWS_EC2_METADATA_DISABLED:-}" "${AWS_ACCESS_KEY_ID:-}" \
+  "${SCCACHE_DIR:-}" \
+  "${SCCACHE_MULTILEVEL_CHAIN:-}" "${SCCACHE_MULTILEVEL_WRITE_ERROR_POLICY:-}" \
+  "${SCCACHE_IGNORE_SERVER_IO_ERROR:-}" "$*" \
   >>"${FAKE_SCCACHE_CALLS:?}"
 EOF
 chmod +x "$work/bin/fetch-nexus" "$work/bin/docker" "$work/bin/sccache"
@@ -449,6 +458,10 @@ grep -qF "AWS_SHARED_CREDENTIALS_FILE=$r2_credentials_file" "$FAKE_SCCACHE_CALLS
 grep -qF 'AWS_PROFILE=default AWS_EC2_METADATA_DISABLED=true AWS_ACCESS_KEY_ID=' \
   "$FAKE_SCCACHE_CALLS" ||
   fail 'Rust build wrapper retained an ambient credential or metadata fallback'
+grep -qF 'MULTILEVEL=disk,s3 WRITE_POLICY=ignore IGNORE_IO=1' "$FAKE_SCCACHE_CALLS" ||
+  fail 'Rust build wrapper did not activate cold-safe multilevel R2 behavior'
+grep -qF 'SCCACHE_DIR=/var/cache/sccache MULTILEVEL=disk,s3' "$FAKE_SCCACHE_CALLS" ||
+  fail 'Rust build wrapper did not bind the disk cache level to its BuildKit cache mount'
 
 (
   cd "$ROOT"

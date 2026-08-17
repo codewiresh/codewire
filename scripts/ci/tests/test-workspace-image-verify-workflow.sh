@@ -27,8 +27,8 @@ workspace_job="$(awk '
 grep -qF '  workspace-image:' <<<"$workspace_job" || fail 'workspace-image job is missing'
 grep -qF '    name: Workspace image verification' <<<"$workspace_job" ||
   fail 'workspace job has misleading publication wording'
-grep -qF '    runs-on: ubuntu-latest' <<<"$workspace_job" ||
-  fail 'workspace job is not assigned to a generic runner'
+grep -qF '    runs-on: ci-heavy' <<<"$workspace_job" ||
+  fail 'Docker-backed workspace verification is not assigned to the heavy capability profile'
 grep -qF '    timeout-minutes: 55' <<<"$workspace_job" ||
   fail 'workspace cold-build ceiling does not preserve the runner cleanup margin'
 grep -qF '    needs: [verification-selection]' <<<"$workspace_job" ||

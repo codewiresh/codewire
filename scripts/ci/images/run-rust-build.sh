@@ -49,9 +49,15 @@ case "$mode" in
     export AWS_PROFILE=default
     export AWS_EC2_METADATA_DISABLED=true
     export RUSTC_WRAPPER=/usr/local/bin/sccache
+    export SCCACHE_DIR="${SCCACHE_DIR:-/var/cache/sccache}"
     export SCCACHE_REGION=auto
     export SCCACHE_S3_USE_SSL=true
     export SCCACHE_S3_KEY_PREFIX="$CODEWIRE_SCCACHE_PREFIX"
+    # Keep the executor-local BuildKit cache as L0 and R2 as best-effort L1.
+    # A cache outage must degrade to local compilation, never fail verification.
+    export SCCACHE_MULTILEVEL_CHAIN=disk,s3
+    export SCCACHE_MULTILEVEL_WRITE_ERROR_POLICY=ignore
+    export SCCACHE_IGNORE_SERVER_IO_ERROR=1
     ;;
   *)
     printf 'codewire-rust-build: invalid CODEWIRE_SCCACHE_MODE: %s\n' "$mode" >&2
