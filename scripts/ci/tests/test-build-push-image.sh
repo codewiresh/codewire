@@ -36,6 +36,7 @@ grep -Fq 'CODEWIRE_EXTERNAL_DOCKER_CONFIG' "$BUILDER" ||
   fail 'published-image builder cannot share private job-scoped registry auth'
 grep -Fq 'buildx_builder_owned=0' "$BUILDER" ||
   fail 'published-image builder does not distinguish caller-owned BuildKit state'
+# shellcheck disable=SC2016 # This assertion intentionally matches literal shell source.
 grep -Fq 'docker buildx inspect "$buildx_builder"' "$BUILDER" ||
   fail 'published-image builder does not validate an external BuildKit daemon'
 
