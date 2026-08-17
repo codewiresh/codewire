@@ -1002,7 +1002,8 @@ if [ "$event_selected" = false ]; then
         recognized=true
         ;;
       Dockerfile|docker-bake.hcl|apps/*/Dockerfile*|deployments/docker/*|\
-      scripts/ci/images/build-kind-images.sh|scripts/ci/images/run-rust-build.sh)
+      scripts/ci/images/build-kind-images.sh|scripts/ci/images/run-rust-build.sh|\
+      scripts/ci/tests/test-run-rust-build.sh)
         select_token edge_kind
         select_token release
         select_token deploy
@@ -1078,6 +1079,7 @@ if [ "$event_selected" = false ]; then
       scripts/ci/tests/test-workspace-image-verify-workflow.sh|\
       scripts/ci/tests/test-base-image-source.sh|\
       scripts/ci/tests/test-build-push-image.sh|\
+      scripts/ci/tests/test-run-rust-build.sh|\
       scripts/ci/tests/test-claude-e2e-workflow.sh|\
       scripts/ci/tests/test-fetch-infisical-ci-secret.sh|\
       scripts/ci/tests/test-fetch-forgejo-deploy-dev-token.sh|\
