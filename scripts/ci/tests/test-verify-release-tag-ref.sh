@@ -248,7 +248,12 @@ grep -Fq '      - publish-support-release-images' "$deploy_workflow"
 grep -Fq '  dispatch-deploy-prod:' "$deploy_workflow"
 # shellcheck disable=SC2016
 grep -Fq 'run: scripts/ci/deploy/dispatch-deploy-prod.sh "$RELEASE_TAG"' "$deploy_workflow"
-[[ "$(grep -Fc '          CODEWIRE_DEPLOY_PROMOTION_TOKEN:' "$deploy_workflow")" -eq 1 ]]
+if grep -Fq 'CODEWIRE_DEPLOY_PROMOTION_TOKEN' "$deploy_workflow"; then
+  echo 'production dispatch retains the static deploy credential' >&2
+  exit 1
+fi
+grep -Fq '    runs-on: untrusted-validation' \
+  <(sed -n '/^  dispatch-deploy-prod:/,$p' "$deploy_workflow")
 if grep -Eq 'CODEWIRE_DEPLOY_PROMOTION_USERNAME|promote-image-bundle|promote \.release-source|promotion-receipt|observe-production:|deploy-prod-observer\.sh|gitea-(upload|download)-artifact|kubectl|helm' \
   "$deploy_workflow"; then
   echo 'production workflow still contains direct deploy writes, receipt transport, or observation' >&2
@@ -256,6 +261,13 @@ if grep -Eq 'CODEWIRE_DEPLOY_PROMOTION_USERNAME|promote-image-bundle|promote \.r
 fi
 
 grep -Fq '  workflow_dispatch:' "$cli_workflow"
+if grep -Fq "    tags: ['v*']" "$cli_workflow"; then
+  echo 'CLI publication still grants release behavior to tag-owned workflow code' >&2
+  exit 1
+fi
+grep -Fq 'enable-openid-connect: true' "$cli_workflow"
+grep -Fq '  OPENBAO_GITHUB_ROLE: codewire-source-cli-github-mirror' "$cli_workflow"
+grep -Fq '  OPENBAO_GITHUB_AUDIENCE: openbao-codewire-source-cli-github-mirror' "$cli_workflow"
 grep -Fq '  release-selection:' "$cli_workflow"
 grep -Fq '  package-release:' "$cli_workflow"
 grep -Fq '    needs: [release-selection]' "$cli_workflow"
@@ -265,6 +277,7 @@ grep -Fq '+refs/heads/main:refs/remotes/origin/main' "$cli_workflow"
 grep -Fq '          ref: refs/tags/${{ needs.release-selection.outputs.release_tag }}' "$cli_workflow"
 grep -Fq '        working-directory: .release-source' "$cli_workflow"
 grep -Fq '../scripts/ci/release/verify-cw-release-signing-key.sh apps/cli/GPG_PUBLIC_KEY.asc' "$cli_workflow"
+grep -Fq '        run: scripts/ci/setup/assert-ci-runner-image.sh' "$cli_workflow"
 grep -Fq '../scripts/ci/release/package-cw-release.sh "$RELEASE_TAG"' "$cli_workflow"
 grep -Fq '../scripts/ci/release/publish-cw-release.sh "$RELEASE_TAG" dist/cw-release' "$cli_workflow"
 grep -Fq 'CW_RELEASE_TAG_OBJECT_SHA: ${{ needs.release-selection.outputs.tag_object_sha }}' "$cli_workflow"
@@ -286,9 +299,13 @@ assert_release_publication_boundary() {
   grep -Fq '          ../scripts/ci/release/package-cw-release.sh "$RELEASE_TAG"' <<<"$package_step" || return 1
   grep -Fq '          gpg --verify dist/cw-release/SHA256SUMS.asc dist/cw-release/SHA256SUMS' <<<"$package_step" || return 1
   grep -Fq '          GITEA_TOKEN: ${{ github.token }}' <<<"$package_step" || return 1
-  grep -Fq '          MIRROR_GITHUB_APP_ID: ${{ secrets.MIRROR_GITHUB_APP_ID }}' <<<"$package_step" || return 1
-  grep -Fq '          MIRROR_GITHUB_INSTALLATION_ID: ${{ secrets.MIRROR_GITHUB_INSTALLATION_ID }}' <<<"$package_step" || return 1
-  grep -Fq '          MIRROR_GITHUB_PRIVATE_KEY: ${{ secrets.MIRROR_GITHUB_PRIVATE_KEY }}' <<<"$package_step" || return 1
+  grep -Fq '../scripts/ci/setup/fetch-openbao-github-mirror-credentials.sh' <<<"$package_step" || return 1
+  grep -Fq '../scripts/ci/release/mint-github-app-token.sh' <<<"$package_step" || return 1
+  grep -Fq '          export GH_MIRROR_TOKEN_FILE="$github_work/token"' <<<"$package_step" || return 1
+  if grep -Eq 'MIRROR_GITHUB_(APP_ID|INSTALLATION_ID|PRIVATE_KEY).*secrets\.' <<<"$package_step"; then
+    echo 'CLI release still reads the retired Forgejo GitHub App secret tuple' >&2
+    return 1
+  fi
   grep -Fq "          CW_REQUIRE_GITHUB_MIRROR: '1'" <<<"$package_step" || return 1
   grep -Fq '          CW_RELEASE_SOURCE_SHA: ${{ needs.release-selection.outputs.source_sha }}' <<<"$package_step" || return 1
   grep -Fq '          CW_RELEASE_TAG_OBJECT_SHA: ${{ needs.release-selection.outputs.tag_object_sha }}' <<<"$package_step" || return 1
@@ -392,7 +409,8 @@ if grep -Fq 'date +%s' "$image_builder"; then
   exit 1
 fi
 grep -Fq 'source_dir="${CODEWIRE_SOURCE_DIR:-.}"' "$image_builder"
-grep -Fq 'DOCKER_CONFIG="$docker_config" docker buildx build --push' "$image_builder"
+grep -Fq 'DOCKER_CONFIG="$docker_config" docker buildx build --builder "$buildx_builder" --push' \
+  "$image_builder"
 grep -Fq -- '--metadata-file "$build_metadata"' "$image_builder"
 grep -Fq '"$credential_fetcher" "$registry_username_file" "$registry_password_file"' \
   "$image_builder"

@@ -4,23 +4,48 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 PUBLISH_SOURCE="$ROOT/scripts/ci/release/publish-cw-release.sh"
-TMP="$(mktemp -d)"
+mkdir -p "$ROOT/.tmp"
+TMP="$(mktemp -d "$ROOT/.tmp/publish-cw-release.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT
 
 expected_object='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
 expected_target='bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
 mkdir "$TMP/assets" "$TMP/bin"
 printf 'fixture release asset\n' >"$TMP/assets/cw-v9.9.9-x86_64-unknown-linux-musl"
-openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$TMP/mirror-app-key.pem" \
-  >/dev/null 2>&1
+printf 'fixture-github\n' >"$TMP/github-token"
+chmod 0600 "$TMP/github-token"
+
+cat >"$TMP/bin/mirror-canonical-tag" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "$#" -eq 3 ]]
+[[ "$1" == origin ]]
+[[ "$2" == https://github.com/codewiresh/codewire.git ]]
+[[ "$3" == refs/tags/v9.9.9 ]]
+[[ "${GIT_CONFIG_NOSYSTEM:-}" == 1 ]]
+[[ -f "${GIT_CONFIG_GLOBAL:?}" ]]
+[[ "$(stat -c '%a' "$GIT_CONFIG_GLOBAL")" == 600 ]]
+grep -Fq '[http "https://github.com/"]' "$GIT_CONFIG_GLOBAL"
+grep -Fq 'extraHeader = Authorization: Basic ' "$GIT_CONFIG_GLOBAL"
+printf '%s\n' "$*" >"${FIXTURE_MIRROR_LOG:?}"
+SH
+chmod +x "$TMP/bin/mirror-canonical-tag"
 
 cat >"$TMP/bin/curl" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
 output=''
 url=''
+[ -z "${FIXTURE_CURL_ARG_LOG:-}" ] || printf '%q ' "$@" >>"$FIXTURE_CURL_ARG_LOG"
+[ -z "${FIXTURE_CURL_ARG_LOG:-}" ] || printf '\n' >>"$FIXTURE_CURL_ARG_LOG"
 while [ "$#" -gt 0 ]; do
   case "$1" in
+    --config)
+      [ -f "$2" ]
+      [ "$(stat -c '%a' -- "$2")" = 600 ]
+      grep -Fq 'header = "Authorization: Bearer fixture-github"' "$2"
+      shift 2
+      ;;
     -o)
       output="$2"
       shift 2
@@ -44,9 +69,6 @@ done
 [ -z "${FIXTURE_CURL_LOG:-}" ] || printf '%s\n' "$url" >>"$FIXTURE_CURL_LOG"
 status=200
 case "$url" in
-  https://api.github.com/app/installations/123/access_tokens)
-    body='{"token":"fixture-github"}'
-    ;;
   */api/v1/repos/codewire/codewire/releases/tags/*)
     body='{"id":1}'
     ;;
@@ -98,20 +120,9 @@ run_publish() {
     GITEA_TOKEN=fixture-gitea \
     GITHUB_SERVER_URL=https://git.example.invalid \
     GITHUB_REPOSITORY=codewire/codewire \
-    GH_MIRROR_TOKEN=fixture-github \
-    CW_RELEASE_SOURCE_SHA="$expected_target" \
-    CW_RELEASE_TAG_OBJECT_SHA="$expected_object" \
-    bash "$PUBLISH" v9.9.9 "$TMP/assets"
-}
-
-run_publish_with_installation_token() {
-  FIXTURE_CURL="$TMP/bin/curl" \
-    GITEA_TOKEN=fixture-gitea \
-    GITHUB_SERVER_URL=https://git.example.invalid \
-    GITHUB_REPOSITORY=codewire/codewire \
-    MIRROR_GITHUB_APP_ID=fixture-app \
-    MIRROR_GITHUB_INSTALLATION_ID=123 \
-    MIRROR_GITHUB_PRIVATE_KEY="$(<"$TMP/mirror-app-key.pem")" \
+    GH_MIRROR_TOKEN_FILE="$TMP/github-token" \
+    MIRROR_CANONICAL_TAG_BIN="$TMP/bin/mirror-canonical-tag" \
+    FIXTURE_MIRROR_LOG="$TMP/mirror.log" \
     CW_REQUIRE_GITHUB_MIRROR=1 \
     CW_RELEASE_SOURCE_SHA="$expected_target" \
     CW_RELEASE_TAG_OBJECT_SHA="$expected_object" \
@@ -143,61 +154,80 @@ expect_failure() {
 }
 
 direct_log="$TMP/direct-curl.log"
+arg_log="$TMP/curl-args.log"
 direct_output="$(
   FIXTURE_REF_TYPE=tag \
   FIXTURE_REF_SHA="$expected_object" \
   FIXTURE_TARGET_TYPE=commit \
   FIXTURE_TARGET_SHA="$expected_target" \
   FIXTURE_CURL_LOG="$direct_log" \
+  FIXTURE_CURL_ARG_LOG="$arg_log" \
     run_publish
 )"
 grep -Fq 'publish-cw-release: Gitea release published' <<<"$direct_output"
+grep -Fq 'publish-cw-release: mirroring canonical GitHub tag' <<<"$direct_output"
 grep -Fq 'publish-cw-release: GitHub release published' <<<"$direct_output"
+grep -Fxq 'origin https://github.com/codewiresh/codewire.git refs/tags/v9.9.9' \
+  "$TMP/mirror.log"
 grep -Fq 'https://git.example.invalid/api/v1/repos/codewire/codewire/releases/tags/v9.9.9' "$direct_log"
 grep -Fq 'https://api.github.com/repos/codewiresh/codewire/releases/tags/v9.9.9' "$direct_log"
+if grep -Fq 'fixture-github' "$arg_log"; then
+  echo 'publish release test failed: GitHub token reached curl arguments' >&2
+  exit 1
+fi
 
-installation_log="$TMP/installation-curl.log"
-installation_output="$(
-  FIXTURE_REF_TYPE=tag \
-  FIXTURE_REF_SHA="$expected_object" \
-  FIXTURE_TARGET_TYPE=commit \
-  FIXTURE_TARGET_SHA="$expected_target" \
-  FIXTURE_CURL_LOG="$installation_log" \
-    run_publish_with_installation_token
-)"
-grep -Fq 'publish-cw-release: minting GitHub App installation token' <<<"$installation_output"
-grep -Fq 'publish-cw-release: Gitea release published' <<<"$installation_output"
-grep -Fq 'publish-cw-release: GitHub release published' <<<"$installation_output"
-grep -Fq 'https://api.github.com/app/installations/123/access_tokens' "$installation_log"
-grep -Fq 'https://git.example.invalid/api/v1/repos/codewire/codewire/releases/tags/v9.9.9' "$installation_log"
-grep -Fq 'https://api.github.com/repos/codewiresh/codewire/releases/tags/v9.9.9' "$installation_log"
-
-if missing_output="$(
+chmod 0644 "$TMP/github-token"
+if mode_output="$(
   FIXTURE_CURL="$TMP/bin/curl" \
     GITEA_TOKEN=fixture-gitea \
     GITHUB_SERVER_URL=https://git.example.invalid \
     GITHUB_REPOSITORY=codewire/codewire \
-    MIRROR_GITHUB_APP_ID=fixture-app \
+    GH_MIRROR_TOKEN_FILE="$TMP/github-token" \
+    MIRROR_CANONICAL_TAG_BIN="$TMP/bin/mirror-canonical-tag" \
+    FIXTURE_MIRROR_LOG="$TMP/mirror.log" \
+    CW_REQUIRE_GITHUB_MIRROR=1 \
+    CW_RELEASE_SOURCE_SHA="$expected_target" \
+    CW_RELEASE_TAG_OBJECT_SHA="$expected_object" \
     bash "$PUBLISH" v9.9.9 "$TMP/assets" 2>&1
 )"; then
-  echo 'publish release test failed: incomplete GitHub App inputs unexpectedly passed' >&2
+  echo 'publish release test failed: insecure token file mode unexpectedly passed' >&2
   exit 1
 fi
-grep -Fq 'MIRROR_GITHUB_APP_ID, MIRROR_GITHUB_INSTALLATION_ID, and MIRROR_GITHUB_PRIVATE_KEY must be provided together' \
-  <<<"$missing_output"
+grep -Fq 'GH_MIRROR_TOKEN_FILE must have mode 0400 or 0600' <<<"$mode_output"
+chmod 0600 "$TMP/github-token"
+
+ln -s "$TMP/github-token" "$TMP/github-token-link"
+if symlink_output="$(
+  FIXTURE_CURL="$TMP/bin/curl" \
+    GITEA_TOKEN=fixture-gitea \
+    GITHUB_SERVER_URL=https://git.example.invalid \
+    GITHUB_REPOSITORY=codewire/codewire \
+    GH_MIRROR_TOKEN_FILE="$TMP/github-token-link" \
+    MIRROR_CANONICAL_TAG_BIN="$TMP/bin/mirror-canonical-tag" \
+    FIXTURE_MIRROR_LOG="$TMP/mirror.log" \
+    CW_REQUIRE_GITHUB_MIRROR=1 \
+    CW_RELEASE_SOURCE_SHA="$expected_target" \
+    CW_RELEASE_TAG_OBJECT_SHA="$expected_object" \
+    bash "$PUBLISH" v9.9.9 "$TMP/assets" 2>&1
+)"; then
+  echo 'publish release test failed: symlink token file unexpectedly passed' >&2
+  exit 1
+fi
+grep -Fq 'GH_MIRROR_TOKEN_FILE must be one nonempty regular file' <<<"$symlink_output"
 
 if required_output="$(
   FIXTURE_CURL="$TMP/bin/curl" \
     GITEA_TOKEN=fixture-gitea \
     GITHUB_SERVER_URL=https://git.example.invalid \
     GITHUB_REPOSITORY=codewire/codewire \
+    GH_MIRROR_TOKEN=ignored-legacy-input \
     CW_REQUIRE_GITHUB_MIRROR=1 \
     bash "$PUBLISH" v9.9.9 "$TMP/assets" 2>&1
 )"; then
   echo 'publish release test failed: required GitHub mirror unexpectedly passed' >&2
   exit 1
 fi
-grep -Fq 'GitHub mirror publication requires GH_MIRROR_TOKEN or complete GitHub App inputs' \
+grep -Fq 'GitHub mirror publication requires GH_MIRROR_TOKEN_FILE' \
   <<<"$required_output"
 
 expect_failure flattened-tag 'is not an annotated tag object' \

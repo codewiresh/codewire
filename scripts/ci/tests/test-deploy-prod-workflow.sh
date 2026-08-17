@@ -89,8 +89,16 @@ grep -Fq '      - publish-support-release-images' <<<"$dispatch_job" ||
 # shellcheck disable=SC2016
 grep -Fq 'run: scripts/ci/deploy/dispatch-deploy-prod.sh "$RELEASE_TAG"' <<<"$dispatch_job" ||
   fail "production dispatch sends more than the signed source tag"
-[[ "$(grep -Fc '          CODEWIRE_DEPLOY_PROMOTION_TOKEN:' "$WORKFLOW")" -eq 1 ]] ||
-  fail "production dispatch credential has an unexpected consumer count"
+grep -Fq '    runs-on: untrusted-validation' <<<"$dispatch_job" ||
+  fail "production terminal wait does not use the live non-privileged validation profile"
+grep -Fq '    timeout-minutes: 125' <<<"$dispatch_job" ||
+  fail "production terminal wait cannot cover the downstream run deadline"
+if grep -Fq 'CODEWIRE_DEPLOY_PROMOTION_TOKEN' "$WORKFLOW"; then
+  fail "production dispatch retains the static deploy token"
+fi
+grep -Fq 'fetch-forgejo-deploy-prod-token.sh' \
+  "$ROOT/scripts/ci/deploy/dispatch-deploy-prod.sh" ||
+  fail "production dispatch cannot request its short-lived Authorized Integration JWT"
 
 if grep -Eq 'promote-image-bundle|promotion-receipt|gitea-(upload|download)-artifact|CODEWIRE_DEPLOY_PROMOTION_USERNAME|observe-production:|deploy-prod-observer\.sh|setup-kubeconfig|kubectl|helm' "$WORKFLOW"; then
   fail "source production workflow retains desired-state writes, receipts, or cluster observation"

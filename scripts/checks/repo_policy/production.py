@@ -61,6 +61,10 @@ def load_production_source_files(root: Path) -> dict[str, Any]:
         "deploy_script": read("scripts/ci/deploy/deploy-prod.sh"),
         "ci_workflow": read(".gitea/workflows/ci.yaml"),
         "production_workflow": read(".gitea/workflows/deploy-prod.yaml"),
+        "production_dispatch": read("scripts/ci/deploy/dispatch-deploy-prod.sh"),
+        "production_oidc_fetcher": read(
+            "scripts/ci/setup/fetch-forgejo-deploy-prod-token.sh"
+        ),
         "production_files": production_files,
         "retired_control_paths_present": [
             path for path in retired_control_paths if (root / path).exists()
@@ -145,12 +149,13 @@ def validate_production_source(files: dict[str, Any]) -> str:
         "image-bundle.py create",
         "publish-image-to-ghcr.sh",
         "dispatch-deploy-prod.sh",
-        "CODEWIRE_DEPLOY_PROMOTION_TOKEN",
+        "enable-openid-connect: true",
     ]:
         if required not in files["production_workflow"]:
             raise RuntimeError(f"source production workflow lost required boundary: {required}")
     for retired in [
         "aggregate-image-promotion:",
+        "CODEWIRE_DEPLOY_PROMOTION_TOKEN",
         "CODEWIRE_DEPLOY_PROMOTION_USERNAME",
         "promote-image-bundle.sh",
         "promotion-receipt",
@@ -161,6 +166,19 @@ def validate_production_source(files: dict[str, Any]) -> str:
             raise RuntimeError(f"source production workflow retains retired control plane: {retired}")
     if "scripts/ci/deploy/deploy-prod.sh" in files["production_workflow"]:
         raise RuntimeError("production workflow reintroduced the retired direct deploy script")
+    if "fetch-forgejo-deploy-prod-token.sh" not in files["production_dispatch"]:
+        raise RuntimeError("production dispatch lost its short-lived Forgejo credential fetcher")
+    for required in [
+        "u:36:743b0975-b91c-4323-be37-a55707687c78",
+        "ACTIONS_ID_TOKEN_REQUEST_URL",
+        "ACTIONS_ID_TOKEN_REQUEST_TOKEN",
+    ]:
+        if required not in files["production_oidc_fetcher"]:
+            raise RuntimeError(
+                f"production OIDC fetcher lost required identity binding: {required}"
+            )
+    if "CODEWIRE_DEPLOY_PROMOTION_TOKEN" in files["production_dispatch"]:
+        raise RuntimeError("production dispatch retained the static deploy token")
 
     return next(iter(unique_tags))
 
@@ -202,3 +220,13 @@ def production_source_self_test(files: dict[str, Any]) -> None:
     fixture = dict(files)
     fixture["retired_temporal_preflight_present"] = True
     expect_rejected("retired Temporal preflight workflow", fixture, "retired manual production Temporal preflight workflow")
+
+    fixture = dict(files)
+    fixture["production_workflow"] = (
+        files["production_workflow"] + "\nCODEWIRE_DEPLOY_PROMOTION_TOKEN: retired\n"
+    )
+    expect_rejected(
+        "static production deploy token",
+        fixture,
+        "source production workflow retains retired control plane",
+    )

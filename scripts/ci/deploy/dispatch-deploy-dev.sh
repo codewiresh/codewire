@@ -37,7 +37,6 @@ trap cleanup EXIT
 
 "$(dirname "$0")/../setup/fetch-forgejo-deploy-dev-token.sh" "$token_file" ||
   fail 'unable to obtain the Dev deploy integration token'
-unset ACTIONS_ID_TOKEN_REQUEST_TOKEN
 {
   printf 'Authorization: Bearer '
   tr -d '\n' <"$token_file"
@@ -45,7 +44,7 @@ unset ACTIONS_ID_TOKEN_REQUEST_TOKEN
 } >"$auth_header"
 shred -u "$token_file"
 printf '{"ref":"main","inputs":{"source_sha":"%s"}}\n' \
-  "$SOURCE_SHA" >"$request_body"
+  "$SOURCE_SHA" | jq '. + {return_run_info:true}' >"$request_body"
 
 if ! status="$(
   "$curl_bin" --silent --show-error \
@@ -60,7 +59,15 @@ if ! status="$(
 )"; then
   fail "unable to dispatch the deploy workflow"
 fi
-[[ "$status" == '204' ]] ||
+[[ "$status" == '201' ]] ||
   fail "Forgejo rejected the deploy workflow dispatch (HTTP $status)"
+run_id="$(jq -er '.id | numbers | select(. > 0)' "$response_body")" ||
+  fail 'Forgejo dispatch response omitted the exact run ID'
+run_number="$(jq -er '.run_number | numbers | select(. > 0)' "$response_body")" ||
+  fail 'Forgejo dispatch response omitted the repository run number'
 
-printf '[dispatch-deploy-dev] accepted canonical source %s\n' "$SOURCE_SHA"
+printf '[dispatch-deploy-dev] accepted canonical source %s as deploy run %s / #%s\n' \
+  "$SOURCE_SHA" "$run_id" "$run_number"
+"$(dirname "$0")/wait-for-deploy-run.sh" \
+  "$run_id" promote-dev.yaml \
+  "$(dirname "$0")/../setup/fetch-forgejo-deploy-dev-token.sh"

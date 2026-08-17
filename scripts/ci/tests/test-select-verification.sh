@@ -221,6 +221,14 @@ run_paths_case release pull_request refs/pull/3/head false \
   scripts/ci/release/verify-cw-release-signing-key.sh \
   scripts/ci/release/verify-release-tag-ref.sh \
   install.sh
+run_paths_case protected_delivery_credentials pull_request refs/pull/31/head false \
+  'deploy go_consumer_interop go_support policy release runtime_confidential security' \
+  scripts/ci/setup/fetch-forgejo-deploy-prod-token.sh \
+  scripts/ci/setup/fetch-openbao-github-mirror-credentials.sh \
+  scripts/ci/release/mint-github-app-token.sh \
+  scripts/ci/release/mirror-github.sh \
+  scripts/ci/tests/test-fetch-openbao-github-mirror-credentials.sh \
+  scripts/ci/tests/test-mint-github-app-token.sh
 run_paths_case dev_deploy_contract pull_request refs/pull/30/head false \
   'deploy go_consumer_interop go_support policy release runtime_confidential' scripts/ci/tests/test-deploy-dev.sh
 run_paths_case dev_smoke_receipt pull_request refs/pull/302/head false \
@@ -583,12 +591,14 @@ run_paths_case buildx_two_file_replay pull_request refs/pull/1520/head false \
   exit 1
 }
 if grep -qF '  pull_request:' "$CLI_RELEASE_WORKFLOW" \
-    || grep -qF '  package-dry-run:' "$CLI_RELEASE_WORKFLOW"; then
-  echo 'CLI release workflow still exposes PR packaging' >&2
+    || grep -qF '  package-dry-run:' "$CLI_RELEASE_WORKFLOW" \
+    || grep -qF "    tags: ['v*']" "$CLI_RELEASE_WORKFLOW"; then
+  echo 'CLI release workflow still exposes candidate- or tag-owned execution' >&2
   exit 1
 fi
-grep -qF "    tags: ['v*']" "$CLI_RELEASE_WORKFLOW"
 grep -qF '  workflow_dispatch:' "$CLI_RELEASE_WORKFLOW"
+grep -qF '      release_tag:' "$CLI_RELEASE_WORKFLOW"
+grep -qF "[ \"\$GITHUB_REF\" = 'refs/heads/main' ]" "$CLI_RELEASE_WORKFLOW"
 [ ! -e "$ROOT/.gitea/workflows/workspace-image-verify.yaml" ] || {
   echo 'standalone workspace image workflow still exists' >&2
   exit 1
@@ -1323,6 +1333,10 @@ awk '
   capture && $0 ~ /^  [A-Za-z0-9_-]+:$/ && $0 != "  verification-selection:" { exit }
   capture { print }
 ' "$WORKFLOW" > "$selection_block"
+grep -qF '    runs-on: untrusted-validation' "$selection_block" || {
+  echo 'verification selection does not use the live non-privileged validation profile' >&2
+  exit 1
+}
 for output in selector_version classification selection required_local_mode \
     ci_head_commit ci_head_tree \
     cw_package_state cw_package_selected desktop_package_state \

@@ -14,14 +14,6 @@ readonly SOURCE_TAG="$1"
 [[ "$SOURCE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] ||
   fail "source tag must be one exact stable SemVer tag"
 
-: "${CODEWIRE_DEPLOY_PROMOTION_TOKEN:?CODEWIRE_DEPLOY_PROMOTION_TOKEN is required}"
-deploy_token="$CODEWIRE_DEPLOY_PROMOTION_TOKEN"
-unset CODEWIRE_DEPLOY_PROMOTION_TOKEN
-[[ "$deploy_token" =~ ^[A-Za-z0-9._~-]{20,512}$ ]] || {
-  deploy_token=''
-  fail "deploy dispatch token is malformed"
-}
-
 curl_bin="${CURL_BIN:-curl}"
 if [[ "$curl_bin" == */* ]]; then
   [[ -x "$curl_bin" ]] || fail "curl is required for deploy workflow dispatch"
@@ -33,19 +25,25 @@ readonly dispatch_url='https://forgejo.example.invalid/api/v1/repos/codewire/dep
 umask 077
 work="$(mktemp -d)"
 auth_header="$work/auth-header"
+token_file="$work/token"
 request_body="$work/request.json"
 response_body="$work/response.json"
 cleanup() {
-  deploy_token=''
   find "$work" -type f -exec shred -u {} + 2>/dev/null || true
   rm -rf "$work"
 }
 trap cleanup EXIT
 
-printf 'Authorization: token %s\n' "$deploy_token" >"$auth_header"
-deploy_token=''
+"$(dirname "$0")/../setup/fetch-forgejo-deploy-prod-token.sh" "$token_file" ||
+  fail 'unable to obtain the production deploy integration token'
+{
+  printf 'Authorization: Bearer '
+  tr -d '\n' <"$token_file"
+  printf '\n'
+} >"$auth_header"
+shred -u "$token_file"
 printf '{"ref":"main","inputs":{"source_tag":"%s"}}\n' \
-  "$SOURCE_TAG" >"$request_body"
+  "$SOURCE_TAG" | jq '. + {return_run_info:true}' >"$request_body"
 
 if ! status="$(
   "$curl_bin" --silent --show-error \
@@ -60,7 +58,15 @@ if ! status="$(
 )"; then
   fail "unable to dispatch the deploy workflow"
 fi
-[[ "$status" == '204' ]] ||
+[[ "$status" == '201' ]] ||
   fail "Forgejo rejected the deploy workflow dispatch (HTTP $status)"
+run_id="$(jq -er '.id | numbers | select(. > 0)' "$response_body")" ||
+  fail 'Forgejo dispatch response omitted the exact run ID'
+run_number="$(jq -er '.run_number | numbers | select(. > 0)' "$response_body")" ||
+  fail 'Forgejo dispatch response omitted the repository run number'
 
-printf '[dispatch-deploy-prod] accepted signed source tag %s\n' "$SOURCE_TAG"
+printf '[dispatch-deploy-prod] accepted signed source tag %s as deploy run %s / #%s\n' \
+  "$SOURCE_TAG" "$run_id" "$run_number"
+"$(dirname "$0")/wait-for-deploy-run.sh" \
+  "$run_id" promote-prod.yaml \
+  "$(dirname "$0")/../setup/fetch-forgejo-deploy-prod-token.sh"
