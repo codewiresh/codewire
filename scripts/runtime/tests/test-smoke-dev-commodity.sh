@@ -123,12 +123,11 @@ EOF
     fail "application-only wrapper did not reach the source-owned smoke"
 
   (
+    # shellcheck disable=SC1090 # Intentional dynamic source fixture.
     source <(sed '$d' "$SMOKE")
-    SMOKE_SKIP_KUBE=1
-    SMOKE_SKIP_SSH=0
-    SMOKE_DERP_FALLBACK=0
-    SMOKE_PEER_RELAY_MATRIX=0
-    SMOKE_SSH_CONNECT_TIMEOUT=1
+    # shellcheck disable=SC2034 # Values are consumed by the sourced smoke fixture.
+    declare SMOKE_SKIP_KUBE=1 SMOKE_SKIP_SSH=0 SMOKE_DERP_FALLBACK=0 \
+      SMOKE_PEER_RELAY_MATRIX=0 SMOKE_SSH_CONNECT_TIMEOUT=1
     run_tailnet_doctor() { :; }
     require_cmd() { :; }
     run_ssh_transport_smoke() { :; }
