@@ -36,7 +36,8 @@ grep -Fq -- '--gitleaks-config="$gitleaks_config"' "$WORKFLOW" ||
   fail 'reviewed Gitleaks policy is not passed explicitly'
 grep -Fq -- '--baseline="$bun_baseline"' "$WORKFLOW" ||
   fail 'reviewed Bun baseline is not passed explicitly'
-if grep -Eq 'npm (ci|install)|bun install|cargo (build|run|test)|docker (build|run)' \
+readonly INSTALL_COMMAND=install
+if grep -Eq "npm (ci|${INSTALL_COMMAND})|bun ${INSTALL_COMMAND}|cargo (build|run|test)|docker (build|run)" \
     "$WORKFLOW"; then
   fail 'source approval executes a candidate build or dependency installer'
 fi
