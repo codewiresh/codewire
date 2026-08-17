@@ -37,7 +37,7 @@ if grep -Eq 'CODEWIRE_(GHCR_PUBLISH|DEPLOY_SHA_DISPATCH)_ENABLED' "$WORKFLOW"; t
   fail "dev publication or dispatch retains a rollout flag"
 fi
 
-selection_job="$(sed -n '/^  deploy-selection:/,/^  build-runtime-images:/p' "$WORKFLOW")"
+selection_job="$(sed -n '/^  deploy-selection:/,/^  build-publish-runtime-images:/p' "$WORKFLOW")"
 grep -Fq '    runs-on: trusted-plan' <<<"$selection_job" ||
   fail "deploy selection does not use the non-Docker trusted planning profile"
 grep -Fq '    timeout-minutes: 15' <<<"$selection_job" ||
@@ -72,7 +72,7 @@ if compgen -G "$ROOT/scripts/ci/select/select-deploy-*" >/dev/null \
   || compgen -G "$ROOT/scripts/ci/select/artifact-*" >/dev/null; then
   fail "legacy deployment classifier remains in the repository"
 fi
-select_step="$(sed -n '/      - name: Plan and select atomic Dev deployment/,/^  build-runtime-images:/p' \
+select_step="$(sed -n '/      - name: Plan and select atomic Dev deployment/,/^  build-publish-runtime-images:/p' \
   <<<"$selection_job")"
 if grep -Fq 'secrets.' <<<"$select_step"; then
   fail "artifact classifier receives the private deploy credential"
@@ -90,12 +90,12 @@ for output in deploy_dev reason matched_categories \
 done
 
 [[ "$(grep -Fc "if: \${{ needs.deploy-selection.outputs.deploy_dev == 'true' }}" \
-  "$WORKFLOW")" -eq 2 ]] ||
-  fail "all-unaffected selection does not skip the runtime build and publication"
+  "$WORKFLOW")" -eq 1 ]] ||
+  fail "all-unaffected selection does not skip the combined runtime build/publication"
 
-build_job="$(sed -n '/^  build-runtime-images:/,/^  publish-runtime-images:/p' "$WORKFLOW")"
+build_job="$(sed -n '/^  build-publish-runtime-images:/,/^  dispatch-deploy-dev:/p' "$WORKFLOW")"
 grep -Fq '    runs-on: protected-delivery' <<<"$build_job" ||
-  fail "runtime set does not build on the protected delivery profile"
+  fail "runtime set does not build and publish on the protected delivery profile"
 grep -Fq '    timeout-minutes: 110' <<<"$build_job" ||
   fail "runtime set exceeds the protected runner lifetime"
 grep -Fq '        run: scripts/ci/images/build-push-runtime-images.sh' <<<"$build_job" ||
@@ -104,10 +104,10 @@ grep -Fq '          CODEWIRE_SCCACHE_MODE: local' <<<"$build_job" ||
   fail "protected runtime build does not keep compiler objects job-local"
 for family in dashboard derp gateway services mesh; do
   # shellcheck disable=SC2016
-  grep -Fq "${family}_candidate_ref: \${{ steps.build.outputs.${family}_candidate_ref }}" \
-    <<<"$build_job" || fail "runtime build does not expose exact $family candidate"
+  [[ "$(grep -Fc "\${{ steps.build.outputs.${family}_candidate_ref }}" <<<"$build_job")" -eq 2 ]] ||
+    fail "runtime build and publisher do not share the exact $family candidate"
 done
-if grep -Eq '^  build-(gateway-image|dashboard-image|derp|services-image|mesh-image):' "$WORKFLOW"; then
+if grep -Eq '^  (build-(gateway-image|dashboard-image|derp|services-image|mesh-image)|publish-runtime-images):' "$WORKFLOW"; then
   fail "runtime products still allocate independent protected workers"
 fi
 
@@ -123,15 +123,7 @@ grep -Fq 'CODEWIRE_EXTERNAL_BUILDX_BUILDER="$builder"' "$RUNTIME_BUILDER" ||
 grep -Fq 'Protected runtime builds may use only job-local or disabled sccache' \
   "$RUNTIME_BUILDER" || fail "protected runtime build does not reject shared R2 cache"
 
-publish_job="$(sed -n '/^  publish-runtime-images:/,/^  dispatch-deploy-dev:/p' "$WORKFLOW")"
-grep -Fq '    runs-on: protected-delivery' <<<"$publish_job" ||
-  fail "runtime publisher does not use the protected delivery profile"
-grep -Fq '    timeout-minutes: 30' <<<"$publish_job" ||
-  fail "runtime publisher lacks a bounded deadline"
-grep -Fq '      - build-runtime-images' <<<"$publish_job" ||
-  fail "runtime publisher does not require the complete exact build set"
-grep -Fq "if: \${{ needs.deploy-selection.outputs.deploy_dev == 'true' }}" \
-  <<<"$publish_job" || fail "all-unaffected selection does not skip runtime publication"
+publish_job="$build_job"
 grep -Fq 'OPENBAO_GHCR_ROLE: codewire-source-dev-publisher' \
   "$WORKFLOW" || fail "runtime publisher lacks its exact OpenBao GHCR role"
 grep -Fq 'OPENBAO_GHCR_AUDIENCE: openbao-codewire-source-dev-publisher' \
@@ -185,9 +177,9 @@ grep -Fq '    runs-on: untrusted-validation' <<<"$dispatch_job" ||
   fail "deploy dispatch does not use the live non-privileged validation profile"
 grep -Fq '    timeout-minutes: 15' <<<"$dispatch_job" ||
   fail "deploy dispatch can outlive the validation runner deadline"
-grep -Fq '      - publish-runtime-images' <<<"$dispatch_job" ||
+grep -Fq '      - build-publish-runtime-images' <<<"$dispatch_job" ||
   fail "deploy dispatch can run before exact GHCR publication"
-grep -Fq "needs.publish-runtime-images.result == 'success'" <<<"$dispatch_job" ||
+grep -Fq "needs.build-publish-runtime-images.result == 'success'" <<<"$dispatch_job" ||
   fail "deploy dispatch does not require successful exact GHCR publication"
 grep -Fq "github.ref == 'refs/heads/main'" <<<"$dispatch_job" ||
   fail "deploy dispatch is not restricted to canonical main"
