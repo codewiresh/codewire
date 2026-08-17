@@ -124,6 +124,12 @@ verify_kind_build_cache_contract() {
     fail 'Kind does not enable its job-local compiler cache'
   [[ "$(grep -cF 'buildx bake' "$KIND_BUILDER")" -eq 1 ]] ||
     fail 'Kind must issue exactly one canonical Bake build'
+  grep -qF '$target.secrets+=id=aws_shared_credentials,src=$credentials_file' \
+    "$KIND_BUILDER" ||
+    fail 'Kind does not append its new secret through supported Bake override syntax'
+  grep -qF '$product_bake_target.secrets+=id=aws_shared_credentials,src=$credentials_file' \
+    "$BUILDER" ||
+    fail 'protected image builds do not append their new secret through supported Bake override syntax'
   grep -qF 'untrusted/codewire/' "$KIND_BUILDER" ||
     fail 'Kind does not constrain its remote cache trust-domain prefix'
   grep -qF 'protected/codewire/' "$BUILDER" ||
@@ -702,8 +708,8 @@ docker_config="$(sed -nE 's/^DOCKER_CONFIG=([^ ]+).* login.*/\1/p' \
   CODEWIRE_SCCACHE_PREFIX=untrusted/codewire/test \
     "$KIND_BUILDER"
 )
-[[ "$(grep -oF 'secret=id=aws_shared_credentials\,src=' "$FAKE_DOCKER_CALLS" | wc -l)" -eq 4 ]] ||
-  fail 'Kind did not bind the private credential file to all four Bake targets'
+[[ "$(grep -oF 'secrets+=id=aws_shared_credentials\,src=' "$FAKE_DOCKER_CALLS" | wc -l)" -eq 4 ]] ||
+  fail 'Kind did not bind and append the private credential file to all four Bake targets'
 grep -qF "src=$r2_credentials_file" "$FAKE_DOCKER_CALLS" ||
   fail 'Kind did not pass the exact private credential file path to Bake'
 
@@ -717,8 +723,8 @@ grep -qF "src=$r2_credentials_file" "$FAKE_DOCKER_CALLS" ||
   CODEWIRE_SCCACHE_PREFIX=protected/codewire/test \
     "$BUILDER" derp deployments/docker/derp.Dockerfile .
 )
-grep -qF 'secret=id=aws_shared_credentials\,src=' "$FAKE_DOCKER_CALLS" ||
-  fail 'protected publication did not bind the private credential file to Bake'
+grep -qF 'secrets+=id=aws_shared_credentials\,src=' "$FAKE_DOCKER_CALLS" ||
+  fail 'protected publication did not bind and append the Bake secret with supported syntax'
 grep -qF "src=$r2_credentials_file" "$FAKE_DOCKER_CALLS" ||
   fail 'protected publication did not pass the exact private credential file path to Bake'
 if grep -qE 'untrusted-(access-key|secret-key)' "$FAKE_DOCKER_CALLS"; then
