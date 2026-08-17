@@ -2531,8 +2531,12 @@ run_tailnet_doctor() {
     die "local peer-relay packet evidence is incomplete; correlate the external exact-tuple observers"
   log "tailnet doctor probe passed; evidence in $stdout"
   assert_tailnet_doctor_endpoint_evidence "$stdout"
-  discover_runtime_objects
-  assert_gateway_tailnet_log_evidence
+  if [[ "$SMOKE_SKIP_KUBE" != "1" ]]; then
+    discover_runtime_objects
+    assert_gateway_tailnet_log_evidence
+  else
+    log "application-only smoke accepted client-observed tailnet evidence"
+  fi
 }
 
 capture_tailnet_client_failure_diagnostics() {
@@ -2620,6 +2624,11 @@ capture_tailnet_doctor_failure_diagnostics() {
   local kubectl_error="$TMPDIR_SMOKE/gateway-tailnet-allocator-doctor-failure.err"
   local -a pipeline_status
 
+  [[ "$SMOKE_SKIP_KUBE" != "1" ]] || {
+    log "Kubernetes allocator diagnostics disabled for application-only smoke"
+    return 0
+  }
+
   if [[ -z "$GATEWAY_POD_NAME" ]] && ! gateway_pod_exists; then
     log "tailnet doctor failure allocator diagnostics unavailable: gateway pod not found"
     return 0
@@ -2698,13 +2707,17 @@ assert_tailnet_doctor_direct_udp_evidence() {
         (.direct.final_path.transport == "direct_udp" and .direct.final_path.ready == true and ((.direct.final_path.endpoint // "") | contains($ip)))
       )
       and (
-        (
-          [
-            .direct.derp_map.regions[]?.nodes[]?
-            | select(.stun_only == true and .host_name == $stun_host and .stun_port == $stun_port)
-          ] | length
-        ) >= 1
-        or ((.direct.derp_map.stun_nodes // 0) >= 1)
+        if $stun_host == "" then
+          (
+            ([.direct.derp_map.regions[]?.nodes[]? | select(.stun_only == true)] | length) >= 1
+            or ((.direct.derp_map.stun_nodes // 0) >= 1)
+          )
+        else
+          (
+            ([.direct.derp_map.regions[]?.nodes[]? | select(.stun_only == true and .host_name == $stun_host and .stun_port == $stun_port)] | length) >= 1
+            or ((.direct.derp_map.stun_nodes // 0) >= 1)
+          )
+        end
       )
     ' "$doctor_json" >/dev/null || \
     die "tailnet doctor did not prove direct_udp via Cilium LoadBalancer IP $EXPECTED_TAILNET_DIRECT_UDP_LB_IP with STUN $EXPECTED_GATEWAY_STUN_HOST:$EXPECTED_GATEWAY_STUN_PORT"
@@ -2745,13 +2758,17 @@ assert_tailnet_doctor_peer_relay_evidence() {
         ((.direct.final_path.transport == "udp_relay" or .direct.final_path.transport == "peer_relay") and ((.direct.final_path.peer_relay // .direct.final_path.endpoint // "") | contains($endpoint)))
       )
       and (
-        (
-          [
-            .direct.derp_map.regions[]?.nodes[]?
-            | select(.stun_only == true and .host_name == $stun_host and .stun_port == $stun_port)
-          ] | length
-        ) >= 1
-        or ((.direct.derp_map.stun_nodes // 0) >= 1)
+        if $stun_host == "" then
+          (
+            ([.direct.derp_map.regions[]?.nodes[]? | select(.stun_only == true)] | length) >= 1
+            or ((.direct.derp_map.stun_nodes // 0) >= 1)
+          )
+        else
+          (
+            ([.direct.derp_map.regions[]?.nodes[]? | select(.stun_only == true and .host_name == $stun_host and .stun_port == $stun_port)] | length) >= 1
+            or ((.direct.derp_map.stun_nodes // 0) >= 1)
+          )
+        end
       )
     ' "$doctor_json" >/dev/null || \
     die "tailnet doctor did not prove peer_relay via shared endpoint $EXPECTED_TAILNET_PEER_RELAY_ENDPOINT with STUN $EXPECTED_GATEWAY_STUN_HOST:$EXPECTED_GATEWAY_STUN_PORT"
@@ -3073,6 +3090,7 @@ collect_failure_diagnostics() {
   local dir pods_json pod container containers claim_json warm_pool_name template_name
 
   [[ "$SMOKE_COLLECT_FAILURE_DIAGNOSTICS" == "1" ]] || return 0
+  [[ "$SMOKE_SKIP_KUBE" != "1" ]] || return 0
   [[ "$SMOKE_FAILURE_DIAGNOSTICS_CAPTURED" != "1" ]] || return 0
   [[ -n "$ENV_ID" && -n "$TMPDIR_SMOKE" && -d "$TMPDIR_SMOKE" ]] || return 0
   command -v kubectl >/dev/null 2>&1 || return 0
@@ -3153,6 +3171,11 @@ capture_container_log() {
 capture_ssh_failure_evidence() {
   local label="$1"
   local logs
+
+  [[ "$SMOKE_SKIP_KUBE" != "1" ]] || {
+    log "Kubernetes SSH-failure diagnostics disabled for application-only smoke"
+    return 0
+  }
 
   logs="$TMPDIR_SMOKE/gateway-tailnet-${label}-after-fail.log"
   if capture_container_log "$GATEWAY_POD_NAME" codewire-gateway "$logs"; then
@@ -3385,7 +3408,11 @@ run_ssh_smoke() {
     run_ssh_transport_smoke tailnet tailnet-peer-relay peer_relay
     EXPECTED_TAILNET_PATH_TRANSPORT="$initial_expected_transport"
   fi
-  run_gateway_host_key_restart_smoke
+  if [[ "$SMOKE_SKIP_KUBE" != "1" ]]; then
+    run_gateway_host_key_restart_smoke
+  else
+    log "skipping Kubernetes-owned gateway restart assertion"
+  fi
 }
 
 run_selected_phase() {
