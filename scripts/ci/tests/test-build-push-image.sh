@@ -232,8 +232,9 @@ cat >"$work/bin/docker" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 printf 'DOCKER_CONFIG=%q ' "${DOCKER_CONFIG:-}" >>"${FAKE_DOCKER_CALLS:?}"
-printf 'CODEWIRE_IMAGE_SOURCE_SHA=%q CODEWIRE_RUST_PROFILE=%q CODEWIRE_SCCACHE_MODE=%q ' \
+printf 'CODEWIRE_IMAGE_SOURCE_SHA=%q CODEWIRE_RUST_PROFILE=%q CODEWIRE_SCCACHE_MODE=%q BUILDX_GIT_CHECK_DIRTY=%q GIT_CONFIG_VALUE_0=%q ' \
   "${CODEWIRE_IMAGE_SOURCE_SHA:-}" "${CODEWIRE_RUST_PROFILE:-}" "${CODEWIRE_SCCACHE_MODE:-}" \
+  "${BUILDX_GIT_CHECK_DIRTY:-}" "${GIT_CONFIG_VALUE_0:-}" \
   >>"$FAKE_DOCKER_CALLS"
 printf '%q ' "$@" >>"$FAKE_DOCKER_CALLS"
 printf '\n' >>"$FAKE_DOCKER_CALLS"
@@ -268,9 +269,11 @@ case "${1:-} ${2:-} ${3:-}" in
   'buildx imagetools inspect')
     shift 3
     reference=''
+    format=''
     while [ "$#" -gt 0 ]; do
       case "$1" in
         --format)
+          format="$2"
           shift 2
           ;;
         *)
@@ -292,6 +295,24 @@ case "${1:-} ${2:-} ${3:-}" in
     if [ "$reference" = "${FAKE_INSPECT_ERROR_REF:-}" ]; then
       echo 'ERROR: registry authorization failed' >&2
       exit 1
+    fi
+    if [ "$format" = '{{json .Provenance.SLSA}}' ]; then
+      jq -n \
+        --arg builder "${FAKE_PROVENANCE_BUILDER_ID:?}" \
+        --arg revision "${FAKE_SOURCE_SHA:?}" \
+        --arg source 'https://git.example.invalid/codewire/codewire.git' '
+          {
+            buildDefinition: {
+              buildType: "https://github.com/moby/buildkit/blob/master/docs/attestations/slsa-definitions.md",
+              internalParameters: {builderPlatform: "linux/amd64"}
+            },
+            runDetails: {
+              builder: {id: $builder},
+              metadata: {buildkit_metadata: {vcs: {revision: $revision, source: $source}}}
+            }
+          }
+        '
+      exit 0
     fi
     digest="$(
       awk -F '\t' -v reference="$reference" \
@@ -456,6 +477,8 @@ export FAKE_DOCKER_CALLS="$work/docker-calls"
 export FAKE_SCCACHE_CALLS="$work/sccache-calls"
 export FAKE_MANIFESTS="$work/manifests"
 export FAKE_DIGEST="$digest"
+export FAKE_PROVENANCE_BUILDER_ID='https://git.example.invalid/infra/ci/builders/protected-delivery/v1'
+export FAKE_SOURCE_SHA="$source_sha"
 export GITHUB_SHA="$source_sha"
 export GITHUB_REF='refs/heads/main'
 export GITHUB_REF_NAME='main'
@@ -495,18 +518,48 @@ grep -qF -- "CODEWIRE_IMAGE_SOURCE_SHA=$source_sha" "$FAKE_DOCKER_CALLS" ||
   fail 'exact source revision did not reach canonical Bake'
 grep -qF -- 'CODEWIRE_RUST_PROFILE=release' "$FAKE_DOCKER_CALLS" ||
   fail 'protected publication did not force the release profile'
-grep -qF -- '--provenance mode=min' "$FAKE_DOCKER_CALLS" ||
-  fail 'protected product build omitted minimal BuildKit SLSA provenance'
+grep -qF -- 'builder-id=https://git.example.invalid/infra/ci/builders/protected-delivery/v1' "$FAKE_DOCKER_CALLS" ||
+  fail 'protected product build omitted its explicit minimal BuildKit SLSA provenance identity'
 grep -qF -- 'buildx create --name codewire-publish-' "$FAKE_DOCKER_CALLS" ||
   fail 'protected publication did not create an isolated BuildKit builder'
 grep -qF -- '--driver docker-container' "$FAKE_DOCKER_CALLS" ||
   fail 'protected publication retained the attestation-incompatible Docker driver'
+grep -qF -- '--driver-opt provenance-add-gha=false' "$FAKE_DOCKER_CALLS" ||
+  fail 'protected publication may leak the Forgejo event payload into public provenance'
+grep -qF -- 'BUILDX_GIT_CHECK_DIRTY=1 GIT_CONFIG_VALUE_0=https://git.example.invalid/codewire/codewire.git' \
+  "$FAKE_DOCKER_CALLS" || fail 'protected provenance does not bind the exact clean canonical source'
+grep -qF -- 'Provenance.SLSA' \
+  "$FAKE_DOCKER_CALLS" || fail 'protected publication did not verify its emitted SLSA predicate'
 grep -qF -- 'image=docker.io/moby/buildkit:v0.29.0@sha256:0039c1d47e8748b5afea56f4e85f14febaf34452bd99d9552d2daa82262b5cc5' \
   "$FAKE_DOCKER_CALLS" || fail 'protected publication does not pin its BuildKit daemon image'
 grep -qF -- 'buildx rm --force codewire-publish-' "$FAKE_DOCKER_CALLS" ||
   fail 'protected publication did not remove its isolated BuildKit builder'
 [[ "$(build_invocation_count)" -eq 1 ]] ||
   fail 'image was not built exactly once'
+
+if (
+  cd "$ROOT"
+  CODEWIRE_PROVENANCE_BUILDER_ID=https://attacker.invalid/builder \
+    "$BUILDER" gateway deployments/docker/gateway.Dockerfile .
+) >"$work/unrecognized-builder.out" 2>"$work/unrecognized-builder.err"; then
+  fail 'protected image build accepted an unrecognized builder identity'
+fi
+grep -qF 'unrecognized provenance builder identity' \
+  "$work/unrecognized-builder.err" ||
+  fail 'unrecognized provenance builder rejection was not attributable'
+
+if (
+  cd "$ROOT"
+  FAKE_PROVENANCE_BUILDER_ID=https://attacker.invalid/builder \
+    "$BUILDER" gateway deployments/docker/gateway.Dockerfile .
+) >"$work/invalid-provenance.out" 2>"$work/invalid-provenance.err"; then
+  fail 'protected image build accepted provenance from a different builder'
+fi
+grep -qF 'Protected image provenance is invalid' \
+  "$work/invalid-provenance.err" ||
+  fail 'invalid emitted provenance rejection was not attributable'
+[[ "$(build_invocation_count)" -eq 1 ]] ||
+  fail 'provenance rejection rebuilt an immutable source image'
 
 printf '0\n' >"$work/login-state"
 login_calls_before="$(grep -c ' login ' "$FAKE_DOCKER_CALLS" || true)"

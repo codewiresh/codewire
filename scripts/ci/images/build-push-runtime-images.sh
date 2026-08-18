@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 readonly ROOT
 readonly BUILDKIT_IMAGE='docker.io/moby/buildkit:v0.29.0@sha256:0039c1d47e8748b5afea56f4e85f14febaf34452bd99d9552d2daa82262b5cc5'
+readonly PROVENANCE_BUILDER_ID='https://git.example.invalid/infra/ci/builders/protected-delivery/v1'
 
 : "${GITHUB_SHA:?GITHUB_SHA is required}"
 : "${GITHUB_OUTPUT:?GITHUB_OUTPUT is required}"
@@ -40,6 +41,7 @@ DOCKER_CONFIG="$docker_config" docker buildx create \
   --name "$builder" \
   --driver docker-container \
   --driver-opt "image=$BUILDKIT_IMAGE" \
+  --driver-opt provenance-add-gha=false \
   --buildkitd-config "$buildkit_config" \
   --bootstrap >/dev/null
 
@@ -52,6 +54,7 @@ build_one() {
   GITHUB_OUTPUT="$output" \
     CODEWIRE_EXTERNAL_BUILDX_BUILDER="$builder" \
     CODEWIRE_EXTERNAL_DOCKER_CONFIG="$docker_config" \
+    CODEWIRE_PROVENANCE_BUILDER_ID="$PROVENANCE_BUILDER_ID" \
     CODEWIRE_SCCACHE_MODE="${CODEWIRE_SCCACHE_MODE:-local}" \
     scripts/ci/images/build-push-image.sh "$image_name" "$dockerfile" .
 

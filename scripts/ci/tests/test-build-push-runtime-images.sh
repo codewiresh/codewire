@@ -37,9 +37,10 @@ cat >"$fixture/scripts/ci/images/build-push-image.sh" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
 name="$1"
-printf '%s|%s|%s|%s\n' \
+printf '%s|%s|%s|%s|%s\n' \
   "$name" "$CODEWIRE_EXTERNAL_BUILDX_BUILDER" \
-  "$CODEWIRE_EXTERNAL_DOCKER_CONFIG" "$CODEWIRE_SCCACHE_MODE" >>"$BUILD_LOG"
+  "$CODEWIRE_EXTERNAL_DOCKER_CONFIG" "$CODEWIRE_SCCACHE_MODE" \
+  "$CODEWIRE_PROVENANCE_BUILDER_ID" >>"$BUILD_LOG"
 printf 'candidate_ref=nexus-system-cluster.example.invalid/oci-promoted/codewire/%s@sha256:%064d\n' \
   "$name" 0 >>"$GITHUB_OUTPUT"
 SH
@@ -78,8 +79,13 @@ builder="$(cut -d'|' -f2 "$build_log" | sort -u)"
   fail "product builds did not share one private Docker configuration"
 [[ "$(cut -d'|' -f4 "$build_log" | sort -u)" = local ]] ||
   fail "protected wrapper did not keep sccache job-local"
+[[ "$(cut -d'|' -f5 "$build_log" | sort -u)" = \
+  'https://git.example.invalid/infra/ci/builders/protected-delivery/v1' ]] ||
+  fail "protected wrapper did not bind the stable protected builder identity"
 grep -Fq "buildx create --name $builder --driver docker-container" "$docker_log" ||
   fail "wrapper did not create the shared docker-container builder"
+grep -Fq 'provenance-add-gha=false' "$docker_log" ||
+  fail "wrapper may leak the Forgejo event payload into public provenance"
 grep -Fq 'moby/buildkit:v0.29.0@sha256:0039c1d47e8748b5afea56f4e85f14febaf34452bd99d9552d2daa82262b5cc5' \
   "$docker_log" || fail "wrapper did not pin BuildKit"
 grep -Fq "buildx rm --force $builder" "$docker_log" ||
