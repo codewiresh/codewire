@@ -7,6 +7,7 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SELECTOR="$REPO_ROOT/scripts/ci/select/select-verification.sh"
 RELEASE_TAG_RECEIPT="$REPO_ROOT/scripts/ci/receipts/verify-release-tag-receipt.sh"
+LOCAL_PREPUSH_RECEIPT="$REPO_ROOT/scripts/ci/receipts/local-prepush-receipt.py"
 PRODUCT_RUNNER="$REPO_ROOT/scripts/ci/verify/run-product-verification.sh"
 INTEGRATION_RUNNER="$REPO_ROOT/scripts/ci/verify/run-integration-verification.sh"
 cd "$REPO_ROOT"
@@ -14,28 +15,53 @@ cd "$REPO_ROOT"
 usage() {
   cat <<'EOF'
 usage: scripts/dev/preflight.sh [--default|--integration|--kind|--full|--explain]
+       scripts/dev/preflight.sh --for-push --emit-receipt
 
 default runs lightweight selected checks. Integration and Kind are explicit
 environment escalations. --full runs the complete local-safe verification
 universe; it never publishes, deploys, releases, or mutates live state.
+
+--for-push derives the required mode, runs it before Git opens transport, and
+--emit-receipt stores an eight-hour exact-tree receipt for the pre-push hook.
 EOF
 }
 
 PREFLIGHT_MODE="${CODEWIRE_PREFLIGHT_MODE:-default}"
-if [ "$#" -gt 1 ]; then
+PREFLIGHT_FOR_PUSH=false
+PREFLIGHT_EMIT_RECEIPT=false
+explicit_mode=false
+for argument in "$@"; do
+  case "$argument" in
+    --default) PREFLIGHT_MODE=default; explicit_mode=true ;;
+    --integration) PREFLIGHT_MODE=integration; explicit_mode=true ;;
+    --kind) PREFLIGHT_MODE=kind; explicit_mode=true ;;
+    --full) PREFLIGHT_MODE=full; explicit_mode=true ;;
+    --explain) PREFLIGHT_MODE=explain; explicit_mode=true ;;
+    --for-push) PREFLIGHT_FOR_PUSH=true ;;
+    --emit-receipt) PREFLIGHT_EMIT_RECEIPT=true ;;
+    --help|-h) usage; exit 0 ;;
+    *) usage >&2; exit 2 ;;
+  esac
+done
+if [ "$PREFLIGHT_FOR_PUSH" = true ]; then
+  if [ "$PREFLIGHT_EMIT_RECEIPT" != true ] || [ "$explicit_mode" = true ] \
+      || [ "${CODEWIRE_PREFLIGHT_MODE:-default}" != default ]; then
+    usage >&2
+    exit 2
+  fi
+  for diagnostic_input in PREFLIGHT_CHANGED_FILES PREFLIGHT_FORCE_UNKNOWN \
+      PREFLIGHT_HEAD_SHA PREFLIGHT_BASE_SHA PREFLIGHT_KIND_OPT_IN \
+      PREFLIGHT_RELEASE_TAG_REF; do
+    if [ -n "${!diagnostic_input:-}" ]; then
+      printf 'preflight: --for-push rejects diagnostic input %s\n' \
+        "$diagnostic_input" >&2
+      exit 2
+    fi
+  done
+elif [ "$PREFLIGHT_EMIT_RECEIPT" = true ] || [ "$#" -gt 1 ]; then
   usage >&2
   exit 2
 fi
-case "${1:-}" in
-  '') ;;
-  --default) PREFLIGHT_MODE=default ;;
-  --integration) PREFLIGHT_MODE=integration ;;
-  --kind) PREFLIGHT_MODE=kind ;;
-  --full) PREFLIGHT_MODE=full ;;
-  --explain) PREFLIGHT_MODE=explain ;;
-  --help|-h) usage; exit 0 ;;
-  *) usage >&2; exit 2 ;;
-esac
 case "$PREFLIGHT_MODE" in
   default|integration|kind|full|explain) ;;
   *)
@@ -57,6 +83,13 @@ fail() {
   printf 'preflight: %s FAILED\n' "$*" >&2
   exit 1
 }
+
+if [ "$PREFLIGHT_FOR_PUSH" = true ]; then
+  if ! receipt_precondition="$($LOCAL_PREPUSH_RECEIPT check-clean 2>&1)"; then
+    printf '%s\n' "$receipt_precondition" >&2
+    fail "local receipt precondition"
+  fi
+fi
 
 run_step() {
   local label="$1"
@@ -243,6 +276,9 @@ release_tag_run='
     printf 'preflight: OK\n'
     exit 0
   fi
+  if [ "${PREFLIGHT_RECEIPT_ONLY:-false}" = true ]; then
+    fail "exact-main release receipt is unavailable"
+  fi
   printf 'preflight: release receipt unavailable; running full fail-closed verification\n'
   printf '__unknown__\n' > "$PREFLIGHT_CHANGED_PATHS"
   PREFLIGHT_MODE=full
@@ -256,7 +292,8 @@ else
 fi
 
 selector_kind_opt_in=false
-if [ "$PREFLIGHT_MODE" = kind ] || [ "$PREFLIGHT_MODE" = full ]; then
+if [ "$PREFLIGHT_FOR_PUSH" = true ] || [ "$PREFLIGHT_MODE" = kind ] \
+    || [ "$PREFLIGHT_MODE" = full ]; then
   selector_kind_opt_in=true
 fi
 selector_output="$(
@@ -280,6 +317,11 @@ fi
 printf 'preflight classification: %s\n' "$PREFLIGHT_CLASSIFICATION"
 printf 'preflight required local mode: %s\n' "$PREFLIGHT_REQUIRED_MODE"
 printf 'preflight selection: %s\n' "$VERIFICATION_SELECTION"
+
+if [ "$PREFLIGHT_FOR_PUSH" = true ]; then
+  PREFLIGHT_MODE="$PREFLIGHT_REQUIRED_MODE"
+  printf 'preflight push mode: %s\n' "$PREFLIGHT_MODE"
+fi
 
 if [ "$PREFLIGHT_MODE" = explain ]; then
   printf 'preflight: explanation complete; no checks executed\n'
@@ -366,3 +408,10 @@ run_selected_family deploy deploy "deploy verification"
 run_selected_family security security "security verification"
 
 printf 'preflight: OK\n'
+if [ "$PREFLIGHT_EMIT_RECEIPT" = true ]; then
+  run_step "atomic local pre-push receipt" \
+    "$LOCAL_PREPUSH_RECEIPT" emit \
+      --verified-base "$PREFLIGHT_EFFECTIVE_BASE_SHA" \
+      --verified-mode "$PREFLIGHT_MODE" \
+      --verified-selection "$VERIFICATION_SELECTION"
+fi

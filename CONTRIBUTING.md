@@ -50,7 +50,7 @@ paths. Run the same selector locally before pushing:
 bun run preflight
 ```
 
-Install a `pre-push` hook so this runs automatically — pushes fail fast if the local tree wouldn't pass CI:
+Install the `pre-push` hook so pushes require an exact-tree local receipt:
 
 ```bash
 bun run hooks:install
@@ -61,10 +61,19 @@ repository's common Git directory and sets that stable directory as
 `core.hooksPath`. The dispatcher survives deletion of the worktree that ran
 the installer and resolves `scripts/dev/preflight.sh` from the worktree that
 invoked `git push`. Re-run `bun run hooks:install` after pulling a dispatcher
-change. If the default mode reports incomplete verification, retry the push
-with the exact `CODEWIRE_PREFLIGHT_MODE=integration|kind|full` command it
-prints. Push one ref at a time. Bypass with `git push --no-verify` only when
-the equivalent required verification has already been run deliberately.
+change. Before pushing, run the complete selected gate outside Git transport:
+
+```bash
+scripts/dev/preflight.sh --for-push --emit-receipt
+```
+
+That command derives the required default, integration, Kind, or full mode and
+stores an eight-hour receipt outside the worktree under the common Git
+directory. The hook validates the exact commit, tree, canonical base, selected
+checks, verification controls, toolchain, worktree, expiry, and clean state; it
+does not rerun the long gate while Forgejo is waiting for a push. An interrupted
+or rejected transport keeps a still-valid receipt for the unchanged retry.
+Push one ref at a time.
 
 `PREFLIGHT_CHANGED_FILES` is an explicit diagnostic/CI interface for
 reproducing path selection. Set it to a file containing one repository-relative

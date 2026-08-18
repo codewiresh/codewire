@@ -53,6 +53,8 @@ write_stub_tree() {
 
   install -m 755 "$ROOT/.githooks/pre-push" "$repo/.githooks/pre-push"
   install -m 755 "$ROOT/scripts/dev/preflight.sh" "$repo/scripts/dev/preflight.sh"
+  install -m 755 "$ROOT/scripts/ci/receipts/local-prepush-receipt.py" \
+    "$repo/scripts/ci/receipts/local-prepush-receipt.py"
   install -m 755 "$ROOT/scripts/dev/install-hooks.sh" "$repo/scripts/dev/install-hooks.sh"
   install -m 755 "$ROOT/scripts/ci/select/select-verification.sh" \
     "$repo/scripts/ci/select/select-verification.sh"
@@ -119,11 +121,21 @@ EOF
 }
 
 push_branch() {
-  local repo="$1" branch="$2" tool_log="$3"
+  local repo="$1" branch="$2" tool_log="$3" preflight_output push_output before after
   (
     cd "$repo"
-    PATH="$TMP/bin:$PATH" PREFLIGHT_TEST_TOOL_LOG="$tool_log" \
-      git push -q origin "HEAD:refs/heads/$branch" 2>&1
+    preflight_output="$(
+      PATH="$TMP/bin:$PATH" PREFLIGHT_TEST_TOOL_LOG="$tool_log" \
+        scripts/dev/preflight.sh --for-push --emit-receipt 2>&1
+    )"
+    before="$(wc -l < "$tool_log")"
+    push_output="$(
+      PATH="$TMP/bin:$PATH" PREFLIGHT_TEST_TOOL_LOG="$tool_log" \
+        git push -q origin "HEAD:refs/heads/$branch" 2>&1
+    )"
+    after="$(wc -l < "$tool_log")"
+    [ "$before" = "$after" ] || fail 'actual push reran verification tools'
+    printf '%s\n%s\n' "$preflight_output" "$push_output"
   )
 }
 
@@ -146,7 +158,7 @@ write_stub_tree "$repo"
 printf 'base\n' > "$repo/docs/base.md"
 commit_all "$repo" 'test: seed checkout fixture'
 git -C "$repo" remote add origin "$remote"
-git -C "$repo" push --no-verify -q -u origin main
+git -C "$repo" push -q -u origin main
 
 installer_worktree="$TMP/hook-installer"
 git -C "$repo" worktree add -q -b hook-installer "$installer_worktree" main
@@ -217,6 +229,16 @@ git -C "$repo" switch -q -c normal-docs main
 printf 'normal docs\n' > "$repo/docs/normal.md"
 commit_all "$repo" 'docs: normal checkout fixture'
 normal_log="$TMP/normal-tools.log"
+if missing_output="$(
+  cd "$repo"
+  PATH="$TMP/bin:$PATH" PREFLIGHT_TEST_TOOL_LOG="$normal_log" \
+    git push -q origin HEAD:refs/heads/normal-docs 2>&1
+)"; then
+  fail 'push without an exact-tree receipt unexpectedly succeeded'
+fi
+assert_contains missing_receipt "$missing_output" \
+  'pre-push: no valid receipt (missing). Run exactly: scripts/dev/preflight.sh --for-push --emit-receipt'
+[ ! -s "$normal_log" ] || fail 'missing receipt ran verification tools'
 normal_output="$(push_branch "$repo" normal-docs "$normal_log")"
 assert_contains normal "$normal_output" '  docs/normal.md'
 assert_contains normal "$normal_output" \
@@ -230,6 +252,41 @@ assert_contains normal_tools "$(cat "$normal_log")" \
 assert_contains normal_tools "$(cat "$normal_log")" 'native_desktop_ui'
 assert_not_contains normal_tools "$(cat "$normal_log")" 'product '
 assert_not_contains normal_tools "$(cat "$normal_log")" 'integration '
+git -C "$repo" switch -q main
+
+git -C "$repo" switch -q -c rejected-transport main
+printf 'rejected transport\n' > "$repo/docs/rejected-transport.md"
+commit_all "$repo" 'test: rejected transport receipt fixture'
+rejected_log="$TMP/rejected-transport-tools.log"
+rejected_preflight="$({
+  cd "$repo"
+  PATH="$TMP/bin:$PATH" PREFLIGHT_TEST_TOOL_LOG="$rejected_log" \
+    scripts/dev/preflight.sh --for-push --emit-receipt
+} 2>&1)"
+rejected_receipt="$(sed -n 's/^receipt_path=//p' <<<"$rejected_preflight")"
+[ -f "$rejected_receipt" ] || fail 'rejected-transport receipt was not emitted'
+cat > "$remote/hooks/pre-receive" <<'EOF'
+#!/usr/bin/env bash
+printf 'fixture rejects transport after local receipt validation\n' >&2
+exit 1
+EOF
+chmod 0755 "$remote/hooks/pre-receive"
+rejected_lines="$(wc -l < "$rejected_log")"
+if rejected_output="$({
+  cd "$repo"
+  PATH="$TMP/bin:$PATH" PREFLIGHT_TEST_TOOL_LOG="$rejected_log" \
+    git push -q origin HEAD:refs/heads/rejected-transport
+} 2>&1)"; then
+  fail 'fixture remote unexpectedly accepted rejected transport'
+fi
+assert_contains rejected_transport "$rejected_output" \
+  'pre-push: exact-tree local receipt accepted'
+assert_contains rejected_transport "$rejected_output" \
+  'fixture rejects transport after local receipt validation'
+[ "$rejected_lines" = "$(wc -l < "$rejected_log")" ] || \
+  fail 'rejected transport reran verification tools'
+[ -f "$rejected_receipt" ] || fail 'rejected transport deleted a valid receipt'
+rm "$remote/hooks/pre-receive"
 git -C "$repo" switch -q main
 
 git -C "$repo" tag -a -m 'release fixture' v1.2.3 main
@@ -317,39 +374,47 @@ printf 'database fixture\n' > \
   "$linked_database/crates/codewire-server-core/tests/org_deletion_lifecycle.rs"
 commit_all "$linked_database" 'test: linked database fixture'
 database_log="$TMP/database-tools.log"
-if database_output="$(push_branch \
-    "$linked_database" linked-database "$database_log")"; then
+if database_output="$({
+  cd "$linked_database"
+  PATH="$TMP/bin:$PATH" PREFLIGHT_TEST_TOOL_LOG="$database_log" \
+    scripts/dev/preflight.sh --default
+} 2>&1)"; then
   fail 'default preflight accepted a change requiring integration mode'
 fi
 assert_contains linked_database "$database_output" \
   'preflight required local mode: integration'
 assert_contains linked_database "$database_output" \
-  'retry with CODEWIRE_PREFLIGHT_MODE=integration git push'
+  'retry with scripts/dev/preflight.sh --integration'
 [ ! -s "$database_log" ] || \
   fail 'incomplete default mode ran checks before requesting escalation'
-database_output="$({
-  cd "$linked_database"
-  PATH="$TMP/bin:$PATH" PREFLIGHT_TEST_TOOL_LOG="$database_log" \
-    CODEWIRE_PREFLIGHT_MODE=integration \
-    git push -q origin HEAD:refs/heads/linked-database 2>&1
-})"
+database_output="$(push_branch \
+  "$linked_database" linked-database "$database_log")"
 assert_contains linked_database_retry "$database_output" \
   'preflight required local mode: integration'
+assert_contains linked_database_retry "$database_output" \
+  'preflight push mode: integration'
 assert_contains database_tools "$(cat "$database_log")" 'integration database '
 assert_not_contains database_tools "$(cat "$database_log")" 'kind'
 
-# A clean direct invocation is truthful and lightweight.
+# A clean standalone verification emits the receipt; direct hook invocation
+# then validates it without rerunning tools.
 empty_log="$TMP/empty-tools.log"
-empty_output="$({
+empty_preflight="$({
   cd "$repo"
   PATH="$TMP/bin:$PATH" PREFLIGHT_TEST_TOOL_LOG="$empty_log" \
-    "$repo/.githooks/pre-push"
+    "$repo/scripts/dev/preflight.sh" --for-push --emit-receipt
 } 2>&1)"
-assert_contains empty "$empty_output" '  (no changed paths)'
-assert_contains empty "$empty_output" 'preflight classification: unchanged'
-assert_contains empty "$empty_output" \
+assert_contains empty "$empty_preflight" '  (no changed paths)'
+assert_contains empty "$empty_preflight" 'preflight classification: unchanged'
+assert_contains empty "$empty_preflight" \
   'preflight selection: |valid:v3|policy|policy_shell_omittable|complete|'
-assert_not_contains empty "$empty_output" 'diagnostic_'
+empty_lines="$(wc -l < "$empty_log")"
+empty_output="$({ cd "$repo" && "$dispatcher"; } 2>&1)"
+assert_contains empty_hook "$empty_output" \
+  'pre-push: exact-tree local receipt accepted for HEAD'
+[ "$empty_lines" = "$(wc -l < "$empty_log")" ] || \
+  fail 'receipt-only hook invocation reran tools'
+assert_not_contains empty "$empty_preflight" 'diagnostic_'
 assert_not_contains empty_tools "$(cat "$empty_log")" 'integration '
 assert_not_contains empty_tools "$(cat "$empty_log")" 'kind'
 
@@ -366,7 +431,7 @@ unknown_log="$TMP/unknown-tools.log"
 if unknown_output="$({
   cd "$unknown_repo"
   PATH="$TMP/bin:$PATH" PREFLIGHT_TEST_TOOL_LOG="$unknown_log" \
-    "$unknown_repo/.githooks/pre-push"
+    "$unknown_repo/scripts/dev/preflight.sh" --for-push --emit-receipt
 } 2>&1)"; then
   fail 'preflight accepted a repository without a canonical baseline'
 fi
@@ -380,7 +445,7 @@ diagnostic_log="$TMP/diagnostic-tools.log"
 diagnostic_output="$({
   cd "$repo"
   PATH="$TMP/bin:$PATH" PREFLIGHT_TEST_TOOL_LOG="$diagnostic_log" \
-    PREFLIGHT_CHANGED_FILES="$diagnostic_paths" "$dispatcher"
+    PREFLIGHT_CHANGED_FILES="$diagnostic_paths" "$repo/scripts/dev/preflight.sh"
 } 2>&1)"
 assert_contains diagnostic "$diagnostic_output" '  docs/diagnostic.md'
 assert_contains diagnostic "$diagnostic_output" \
@@ -394,7 +459,7 @@ kind_mode_output="$({
   cd "$repo"
   PATH="$TMP/bin:$PATH" PREFLIGHT_TEST_TOOL_LOG="$kind_mode_log" \
     PREFLIGHT_CHANGED_FILES="$kind_mode_paths" CODEWIRE_PREFLIGHT_MODE=kind \
-    "$dispatcher"
+    "$repo/scripts/dev/preflight.sh"
 } 2>&1)"
 assert_contains kind_mode "$kind_mode_output" \
   'preflight required local mode: kind'
@@ -408,7 +473,7 @@ full_mode_output="$({
   cd "$repo"
   PATH="$TMP/bin:$PATH" PREFLIGHT_TEST_TOOL_LOG="$full_mode_log" \
     PREFLIGHT_CHANGED_FILES="$full_mode_paths" CODEWIRE_PREFLIGHT_MODE=full \
-    "$dispatcher"
+    "$repo/scripts/dev/preflight.sh"
 } 2>&1)"
 assert_contains full_mode "$full_mode_output" 'preflight full selection: |valid:v3|'
 assert_contains full_mode_tools "$(cat "$full_mode_log")" 'integration database '
@@ -422,7 +487,7 @@ sdk_runner_log="$TMP/sdk-runner-tools.log"
 sdk_runner_output="$({
   cd "$repo"
   PATH="$TMP/bin:$PATH" PREFLIGHT_TEST_TOOL_LOG="$sdk_runner_log" \
-    PREFLIGHT_CHANGED_FILES="$sdk_runner_paths" "$repo/.githooks/pre-push"
+    PREFLIGHT_CHANGED_FILES="$sdk_runner_paths" "$repo/scripts/dev/preflight.sh"
 } 2>&1)"
 assert_contains sdk_runner "$sdk_runner_output" \
   'preflight selection: |valid:v3|policy|policy_shell|policy_shell_omittable|sdk_python|complete|'
@@ -436,7 +501,7 @@ apikey_tooling_log="$TMP/apikey-tooling.log"
 apikey_tooling_output="$({
   cd "$repo"
   PATH="$TMP/bin:$PATH" PREFLIGHT_TEST_TOOL_LOG="$apikey_tooling_log" \
-    PREFLIGHT_CHANGED_FILES="$apikey_tooling_paths" "$repo/.githooks/pre-push"
+    PREFLIGHT_CHANGED_FILES="$apikey_tooling_paths" "$repo/scripts/dev/preflight.sh"
 } 2>&1)"
 assert_contains apikey_tooling "$apikey_tooling_output" \
   'preflight selection: |valid:v3|policy|policy_shell|policy_shell_omittable|service_apikey_smoke|complete|'
@@ -453,7 +518,7 @@ confidential_tooling_log="$TMP/confidential-tooling.log"
 confidential_tooling_output="$({
   cd "$repo"
   PATH="$TMP/bin:$PATH" PREFLIGHT_TEST_TOOL_LOG="$confidential_tooling_log" \
-    PREFLIGHT_CHANGED_FILES="$confidential_tooling_paths" "$repo/.githooks/pre-push"
+    PREFLIGHT_CHANGED_FILES="$confidential_tooling_paths" "$repo/scripts/dev/preflight.sh"
 } 2>&1)"
 assert_contains confidential_tooling "$confidential_tooling_output" \
   'preflight selection: |valid:v3|policy|policy_shell|policy_shell_omittable|runtime_confidential|complete|'
@@ -474,7 +539,7 @@ dev_smoke_tooling_output="$({
   cd "$repo"
   PATH="$TMP/bin:$PATH" PREFLIGHT_TEST_TOOL_LOG="$dev_smoke_tooling_log" \
     PREFLIGHT_CHANGED_FILES="$dev_smoke_tooling_paths" \
-    "$repo/.githooks/pre-push"
+    "$repo/scripts/dev/preflight.sh"
 } 2>&1)"
 assert_contains dev_smoke_tooling "$dev_smoke_tooling_output" \
   'preflight selection: |valid:v3|policy|policy_shell|policy_shell_omittable|runtime_dev_smoke|complete|'
@@ -492,7 +557,7 @@ sdk_tooling_log="$TMP/sdk-tooling-tools.log"
 sdk_tooling_output="$({
   cd "$repo"
   PATH="$TMP/bin:$PATH" PREFLIGHT_TEST_TOOL_LOG="$sdk_tooling_log" \
-    PREFLIGHT_CHANGED_FILES="$sdk_tooling_paths" "$repo/.githooks/pre-push"
+    PREFLIGHT_CHANGED_FILES="$sdk_tooling_paths" "$repo/scripts/dev/preflight.sh"
 } 2>&1)"
 assert_contains sdk_tooling "$sdk_tooling_output" \
   'preflight selection: |valid:v3|go_consumer_interop|go_support|policy|policy_shell_omittable|sdk_go|complete|'

@@ -375,6 +375,7 @@ if [ "$event_selected" = false ]; then
       .githooks/pre-push|Makefile|scripts/dev/install-hooks.sh|\
       scripts/dev/preflight.sh|scripts/ci/select/select-verification.sh|\
       scripts/ci/select/require-verification-results.sh|\
+      scripts/ci/receipts/local-prepush-receipt.py|\
       scripts/ci/receipts/emit-verification-receipt.py|\
       scripts/ci/receipts/verify-tested-tree-receipt.sh|\
       scripts/ci/receipts/verify-release-tag-receipt.sh|\
@@ -391,6 +392,7 @@ if [ "$event_selected" = false ]; then
       scripts/ci/tests/test-require-verification-results.sh|\
       scripts/ci/tests/test-verify-tested-tree-receipt.sh|\
       scripts/ci/tests/test-verify-release-tag-receipt.sh|\
+      scripts/ci/tests/test-local-prepush-receipt.sh|\
       scripts/ci/tests/test-pre-push-worktree.sh|\
       scripts/ci/tests/test-go-source-ownership.sh|\
       scripts/ci/tests/test-dev-deployment-smoke-receipt.sh|\
