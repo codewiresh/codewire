@@ -121,15 +121,19 @@ run_paths_case ci_self pull_request refs/pull/2/head false \
   .gitea/workflows/ci.yaml .gitea/workflows/manual-diagnostics.yaml \
   scripts/ci/select/select-verification.sh \
   scripts/ci/select/require-verification-results.sh \
+  scripts/ci/receipts/local-prepush-receipt.py \
   scripts/ci/receipts/emit-verification-receipt.py \
   scripts/ci/receipts/verify-tested-tree-receipt.sh \
   scripts/ci/receipts/verify-release-tag-receipt.sh \
   scripts/ci/tests/test-require-verification-results.sh \
   scripts/ci/tests/test-verify-tested-tree-receipt.sh \
-  scripts/ci/tests/test-verify-release-tag-receipt.sh
+  scripts/ci/tests/test-verify-release-tag-receipt.sh \
+  scripts/ci/tests/test-local-prepush-receipt.sh
 run_paths_case ci_rewrite pull_request refs/pull/20/head false \
   'policy runtime_dev_smoke rust_curated_locks' \
   .githooks/pre-push scripts/dev/preflight.sh \
+  scripts/ci/receipts/local-prepush-receipt.py \
+  scripts/ci/tests/test-local-prepush-receipt.sh \
   scripts/ci/verify/integration-postgres.sh \
   scripts/ci/verify/resolve-cargo-target-dir.sh \
   scripts/ci/verify/run-product-verification.sh \
@@ -1900,6 +1904,7 @@ bash -n \
   "$ROOT/scripts/ci/tests/test-require-verification-results.sh" \
   "$ROOT/scripts/ci/tests/test-verify-tested-tree-receipt.sh" \
   "$ROOT/scripts/ci/tests/test-verify-release-tag-receipt.sh" \
+  "$ROOT/scripts/ci/tests/test-local-prepush-receipt.sh" \
   "$ROOT/scripts/ci/verify/run-product-verification.sh" \
   "$ROOT/scripts/ci/tests/test-sdk-local-cli-contract.sh" \
   "$ROOT/scripts/ci/verify/integration-postgres.sh" \
@@ -1910,6 +1915,7 @@ bash -n \
   "$ROOT/scripts/dev/preflight.sh" \
   "$ROOT/.githooks/pre-push"
 
+"$ROOT/scripts/ci/tests/test-local-prepush-receipt.sh"
 "$ROOT/scripts/ci/tests/test-pre-push-worktree.sh"
 
 echo 'select-verification fixtures: OK'

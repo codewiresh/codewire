@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
-# Pre-push dispatcher: resolve the pushing worktree and invoke its preflight.
+# Pre-push dispatcher: resolve the pushing worktree and validate its receipt.
 # Install via `bun run hooks:install` (copies this dispatcher into the common
 # Git directory so deleting the installing worktree cannot break every hook).
-# Bypass for a one-off (NOT recommended): `git push --no-verify`.
 
 set -euo pipefail
 
@@ -13,9 +12,16 @@ if ! INVOKING_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" ||
 fi
 
 PREFLIGHT="$INVOKING_ROOT/scripts/dev/preflight.sh"
+LOCAL_RECEIPT="$INVOKING_ROOT/scripts/ci/receipts/local-prepush-receipt.py"
 if [ ! -x "$PREFLIGHT" ]; then
   echo "pre-push: invoking worktree has no executable scripts/dev/preflight.sh" >&2
   exit 1
+fi
+if [ ! -x "$LOCAL_RECEIPT" ]; then
+  # The dispatcher is shared by every linked worktree. During the one-commit
+  # migration window, an older worktree may not contain the receipt verifier;
+  # retain its fail-closed full preflight instead of breaking that worktree.
+  exec "$PREFLIGHT"
 fi
 
 preflight_mode="${CODEWIRE_PREFLIGHT_MODE:-default}"
@@ -57,6 +63,8 @@ elif [ "$push_count" -eq 1 ]; then
     export PREFLIGHT_RELEASE_TAG_REF="$local_ref"
     export PREFLIGHT_RELEASE_TAG_OBJECT_SHA="$head_sha"
     export PREFLIGHT_PUSH_REMOTE_NAME="${1:-}"
+    export PREFLIGHT_RECEIPT_ONLY=true
+    exec "$PREFLIGHT"
   fi
   # Feature branches are always compared with canonical main so the local
   # selection matches pull-request CI. A direct main push compares the exact
@@ -66,4 +74,22 @@ elif [ "$push_count" -eq 1 ]; then
   fi
 fi
 
-exec "$PREFLIGHT"
+receipt_args=(verify --head "${head_sha:-HEAD}")
+if [ -n "${PREFLIGHT_BASE_SHA:-}" ]; then
+  receipt_args+=(--base "$PREFLIGHT_BASE_SHA")
+fi
+if [ -n "${1:-}" ]; then
+  receipt_args+=(--remote-name "$1")
+fi
+
+if ! receipt_output="$($LOCAL_RECEIPT "${receipt_args[@]}" 2>&1)"; then
+  receipt_reason="$(sed -n 's/^reason=//p' <<<"$receipt_output" | tail -n 1)"
+  if [[ ! "$receipt_reason" =~ ^[a-z0-9-]+$ ]]; then
+    receipt_reason=checker-failed
+  fi
+  printf 'pre-push: no valid receipt (%s). Run exactly: scripts/dev/preflight.sh --for-push --emit-receipt\n' \
+    "$receipt_reason" >&2
+  exit 1
+fi
+
+printf 'pre-push: exact-tree local receipt accepted for %s\n' "${head_sha:-HEAD}"
