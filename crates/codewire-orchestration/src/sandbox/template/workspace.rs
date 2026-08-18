@@ -12,12 +12,13 @@ use super::runtime_policy::{
     workspace_storage_class,
 };
 use super::{
-    CONFIDENTIAL_STORAGE_KEY_ID_ANNOTATION, DAEMON_AUTH_TOKEN_ENV, DEFAULT_GATEWAY_IMAGE,
-    EXTENSIONS_API_VERSION, GATEWAY_DOCKER_UPSTREAM_SOCK_PATH, HOME_ROOT,
-    ISOL8_DISK_GIB_ANNOTATION_KEY, ISOL8_WORKSPACE_ANNOTATION_KEY,
-    KATA_COCO_INIT_DATA_ANNOTATION_KEY, KATA_HYPERVISOR_KERNEL_PARAMS_ANNOTATION_KEY,
-    SANDBOX_SERVICE_ACCOUNT, TemplateOpts, WORKSPACE_ANNOTATION_KEY, WORKSPACE_DAEMON_LISTEN_ADDR,
-    WORKSPACE_DAEMON_PORT, WORKSPACE_DISK_GIB_ANNOTATION_KEY, WORKSPACE_EPHEMERAL_STORAGE_GI,
+    DAEMON_AUTH_TOKEN_ENV, DEFAULT_GATEWAY_IMAGE, EXTENSIONS_API_VERSION,
+    GATEWAY_DOCKER_UPSTREAM_SOCK_PATH, HOME_ROOT, ISOL8_DISK_GIB_ANNOTATION_KEY,
+    ISOL8_WORKSPACE_ANNOTATION_KEY, KATA_COCO_INIT_DATA_ANNOTATION_KEY,
+    KATA_CONFIDENTIAL_STORAGE_KEY_URI_ANNOTATION, KATA_CONFIDENTIAL_STORAGE_VOLUME_ID_ANNOTATION,
+    KATA_HYPERVISOR_KERNEL_PARAMS_ANNOTATION_KEY, SANDBOX_SERVICE_ACCOUNT, TemplateOpts,
+    WORKSPACE_ANNOTATION_KEY, WORKSPACE_DAEMON_LISTEN_ADDR, WORKSPACE_DAEMON_PORT,
+    WORKSPACE_DISK_GIB_ANNOTATION_KEY, WORKSPACE_EPHEMERAL_STORAGE_GI,
 };
 
 /// Mirrors `sandbox.RenderSandboxTemplate`.
@@ -181,10 +182,12 @@ fn build_template_spec(opts: &TemplateOpts, ws: &mut Value, support_image: &str)
         let storage_class = workspace_storage_class(opts);
         let confidential = runtime_spec.profile == RUNTIME_PROFILE_CONFIDENTIAL;
         let metadata = if confidential {
+            let key_uri = crate::confidential_storage::kbs_uri(&opts.environment_id);
             json!({
                 "name": "workspace",
                 "annotations": {
-                    CONFIDENTIAL_STORAGE_KEY_ID_ANNOTATION: opts.environment_id,
+                    KATA_CONFIDENTIAL_STORAGE_VOLUME_ID_ANNOTATION: opts.environment_id,
+                    KATA_CONFIDENTIAL_STORAGE_KEY_URI_ANNOTATION: key_uri,
                 },
                 "labels": {
                     "codewire.sh/environment-id": opts.environment_id,

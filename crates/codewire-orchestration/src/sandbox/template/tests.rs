@@ -852,6 +852,17 @@ mod tests {
             data["codewire_workspace_storage_key_id"].as_str(),
             Some("be31063a-8ec8-46d5-aa17-75cda1729370")
         );
+        let storage_registry: serde_json::Value =
+            serde_json::from_str(data["confidential_storage"].as_str().unwrap()).unwrap();
+        assert_eq!(storage_registry["version"].as_u64(), Some(1));
+        assert_eq!(
+            storage_registry["volumes"][0],
+            serde_json::json!({
+                "profile": "luks2-integrity-ext4",
+                "volumeId": "be31063a-8ec8-46d5-aa17-75cda1729370",
+                "keyUri": "kbs:///default/codewire-workspace-luks/be31063a-8ec8-46d5-aa17-75cda1729370",
+            })
+        );
         let aa: toml::Value = toml::from_str(data["aa.toml"].as_str().unwrap()).unwrap();
         assert_eq!(
             aa["token_configs"]["kbs"]["cert"].as_str(),
@@ -1321,8 +1332,17 @@ mod tests {
         );
         assert_eq!(claim["spec"]["volumeMode"].as_str(), Some("Filesystem"));
         assert_eq!(
-            claim["metadata"]["annotations"][CONFIDENTIAL_STORAGE_KEY_ID_ANNOTATION].as_str(),
+            claim["metadata"]["annotations"]
+                [KATA_CONFIDENTIAL_STORAGE_VOLUME_ID_ANNOTATION]
+                .as_str(),
             Some("be31063a-8ec8-46d5-aa17-75cda1729370")
+        );
+        assert_eq!(
+            claim["metadata"]["annotations"][KATA_CONFIDENTIAL_STORAGE_KEY_URI_ANNOTATION]
+                .as_str(),
+            Some(
+                "kbs:///default/codewire-workspace-luks/be31063a-8ec8-46d5-aa17-75cda1729370"
+            )
         );
     }
 
