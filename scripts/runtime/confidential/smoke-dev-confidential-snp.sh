@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+umask 077
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 
@@ -152,8 +153,10 @@ if [[ -z "$EVIDENCE_DIR" ]]; then
   mkdir -p "$ROOT/.tmp"
   EVIDENCE_DIR="$(mktemp -d "$ROOT/.tmp/codewire-confidential-snp.XXXXXX")"
 else
+  [[ ! -L "$EVIDENCE_DIR" ]] || die "evidence directory must not be a symlink"
   mkdir -p "$EVIDENCE_DIR"
 fi
+chmod 700 "$EVIDENCE_DIR"
 
 kubectl_dev() {
   if [[ -n "$KUBE_CONTEXT" ]]; then

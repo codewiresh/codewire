@@ -53,6 +53,8 @@ rg -F 'SMOKE_KUSTOMIZATION="codewire-deploy-confidential-smoke-dev"' "$SMOKE" >/
 rg -F 'COMMODITY_JOB_SELECTOR="app.kubernetes.io/name=codewire-commodity-runtime-smoke"' "$SMOKE" >/dev/null
 rg -F 'CONFIDENTIAL_JOB_SELECTOR="app.kubernetes.io/name=codewire-confidential-runtime-smoke"' "$SMOKE" >/dev/null
 rg -F 'ATTESTATION_JOB_SELECTOR="app.kubernetes.io/name=codewire-confidential-snp-attestation"' "$SMOKE" >/dev/null
+rg -F 'umask 077' "$SMOKE" >/dev/null
+rg -F 'chmod 700 "$EVIDENCE_DIR"' "$SMOKE" >/dev/null
 rg -F 'expected exactly one $label Job matching $selector' "$SMOKE" >/dev/null
 rg -F 'phase == "confidential-snp"' "$SMOKE" >/dev/null
 rg -F 'nexus\.example\.invalid/oci-approved/codewire/gateway@sha256:' "$SMOKE" >/dev/null
