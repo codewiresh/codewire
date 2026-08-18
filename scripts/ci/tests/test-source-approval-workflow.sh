@@ -25,6 +25,10 @@ for input in \
   '.supplychain/source-policy.json' \
   '.gitleaks.toml' \
   '.supplychain/bun-baseline.json'; do
+  [[ -f "$ROOT/$input" && ! -L "$ROOT/$input" ]] ||
+    fail "canonical source-approval input is not a regular file: $input"
+  git -C "$ROOT" ls-files --error-unmatch "$input" >/dev/null ||
+    fail "canonical source-approval input is not tracked: $input"
   grep -Fq "\$GITHUB_WORKSPACE/.source-approval-base/$input" "$WORKFLOW" ||
     fail "protected base does not own $input"
 done
