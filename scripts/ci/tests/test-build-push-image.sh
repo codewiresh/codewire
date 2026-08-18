@@ -132,6 +132,10 @@ verify_kind_build_cache_contract() {
     fail 'shared build base omits the reviewed sccache binary'
   grep -qF 'CODEWIRE_SCCACHE_MODE:-local' "$KIND_BUILDER" ||
     fail 'Kind does not enable its job-local compiler cache'
+  grep -qF "'  max-parallelism = 2'" "$KIND_BUILDER" ||
+    fail 'Kind image builder lacks the CPX42 memory bound'
+  grep -qF 'moby/buildkit:v0.29.0@sha256:0039c1d47e8748b5afea56f4e85f14febaf34452bd99d9552d2daa82262b5cc5' \
+    "$KIND_BUILDER" || fail 'Kind image builder does not pin BuildKit'
   [[ "$(grep -cF 'buildx bake' "$KIND_BUILDER")" -eq 1 ]] ||
     fail 'Kind must issue exactly one canonical Bake build'
   grep -qF '$target.secrets+=id=aws_shared_credentials,src=$credentials_file' \
@@ -803,6 +807,14 @@ kind_builds_before="$(grep -Ec ' buildx bake .* kind $' "$FAKE_DOCKER_CALLS" || 
 ) >"$work/kind-build.out"
 [[ "$(grep -Ec ' buildx bake .* kind $' "$FAKE_DOCKER_CALLS" || true)" -eq \
   $((kind_builds_before + 1)) ]] || fail 'Kind did not issue exactly one Bake graph build'
+grep -Eq ' buildx create --name codewire-kind-.* --driver docker-container .* --buildkitd-config .* --bootstrap ' \
+  "$FAKE_DOCKER_CALLS" || fail 'Kind did not create its bounded transient BuildKit daemon'
+grep -qF -- '--driver-opt image=docker.io/moby/buildkit:v0.29.0@sha256:0039c1d47e8748b5afea56f4e85f14febaf34452bd99d9552d2daa82262b5cc5' \
+  "$FAKE_DOCKER_CALLS" || fail 'Kind did not use the pinned BuildKit daemon image'
+grep -Eq ' buildx bake --builder codewire-kind-.* kind $' "$FAKE_DOCKER_CALLS" ||
+  fail 'Kind Bake did not use its bounded transient builder'
+grep -Eq ' buildx rm --force codewire-kind-' "$FAKE_DOCKER_CALLS" ||
+  fail 'Kind did not destroy its transient BuildKit daemon'
 [[ "$(grep -c ' image inspect ' "$FAKE_DOCKER_CALLS" || true)" -eq 12 ]] ||
   fail 'Kind did not verify existence and trust labels for all four loaded images'
 grep -qF 'CODEWIRE_CI_PHASE name=product-image-build' "$work/kind-build.out" ||
