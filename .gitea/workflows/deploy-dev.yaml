@@ -1,3 +1,4 @@
+# zizmor: ignore[excessive-permissions] Forgejo ignores permissions; runner profiles, job-scoped OIDC, and server-side integrations enforce capabilities.
 name: Deploy Dev
 
 on:
@@ -6,6 +7,7 @@ on:
 
 jobs:
   deploy-selection:
+    # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this trusted planner has no write-capable integration or OIDC.
     name: Deploy selection
     runs-on: trusted-plan
     timeout-minutes: 15
@@ -66,6 +68,7 @@ jobs:
         run: rm -f -- "$RUNNER_TEMP/codewire-deployed-source-candidate.json"
 
   build-publish-runtime-images:
+    # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this protected job receives only its job-scoped OIDC and allowlisted server-side capabilities.
     name: Build, verify, and publish exact runtime image set
     runs-on: protected-delivery
     enable-openid-connect: true
