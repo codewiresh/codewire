@@ -20,12 +20,19 @@ concurrency:
 jobs:
   mirror:
     name: Mirror main and signed tags to GitHub
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
+    runs-on: protected-delivery
+    timeout-minutes: 15
     steps:
       - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
           fetch-depth: 0
+
+      - name: Bootstrap the create-only OpenBao GitHub App tuple
+        env:
+          MIRROR_GITHUB_APP_ID: ${{ secrets.MIRROR_GITHUB_APP_ID }}
+          MIRROR_GITHUB_INSTALLATION_ID: ${{ secrets.MIRROR_GITHUB_INSTALLATION_ID }}
+          MIRROR_GITHUB_PRIVATE_KEY: ${{ secrets.MIRROR_GITHUB_PRIVATE_KEY }}
+        run: scripts/ci/setup/bootstrap-openbao-github-mirror-credentials.sh
 
       - name: Mirror with an OpenBao-backed GitHub App token
         run: scripts/ci/release/mirror-github.sh "${GITHUB_REF:?}"
