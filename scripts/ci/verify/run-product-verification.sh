@@ -524,6 +524,7 @@ run_release() {
   scripts/ci/tests/test-fetch-infisical-ci-secret.sh
   scripts/ci/tests/test-fetch-openbao-ghcr-credentials.sh
   scripts/ci/tests/test-fetch-openbao-github-mirror-credentials.sh
+  scripts/ci/tests/test-bootstrap-openbao-github-mirror-credentials.sh
   scripts/ci/tests/test-fetch-openbao-nexus-credentials.sh
   scripts/ci/tests/test-forgejo-action-mirrors.sh
   scripts/ci/tests/test-nexus-runtime-pull-contract.sh
