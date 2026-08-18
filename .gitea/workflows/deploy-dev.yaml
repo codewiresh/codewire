@@ -131,6 +131,12 @@ jobs:
             ghcr.io/codewiresh/mesh \
             "$GITHUB_SHA"
 
+      - name: Sign the tested exact runtime set
+        run: |
+          scripts/ci/images/sign-runtime-image-set.sh \
+            "${RUNNER_TEMP:?}/codewire-dev-image-bundle.json" \
+            scripts/ci/trust/codewire-runtime-signing.pub
+
   dispatch-deploy-dev:
     name: Dispatch exact source to deploy
     runs-on: untrusted-validation

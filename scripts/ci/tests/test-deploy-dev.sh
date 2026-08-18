@@ -5,6 +5,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 readonly ROOT
 readonly WORKFLOW="$ROOT/.gitea/workflows/deploy-dev.yaml"
 readonly RUNTIME_BUILDER="$ROOT/scripts/ci/images/build-push-runtime-images.sh"
+readonly RUNTIME_SIGNER="$ROOT/scripts/ci/images/sign-runtime-image-set.sh"
+readonly RUNTIME_PUBLIC_KEY="$ROOT/scripts/ci/trust/codewire-runtime-signing.pub"
 readonly LEGACY_GITHUB_GATEWAY_WORKFLOW="$ROOT/.github/workflows/build-gateway-image.yml"
 readonly DEV_KUSTOMIZATION="$ROOT/deployments/k8s/overlays/dev/kustomization.yaml"
 readonly DEV_CONFIG_IMAGES="$ROOT/deployments/k8s/overlays/dev/config-images.yaml"
@@ -104,6 +106,7 @@ grep -Fq '          CODEWIRE_SCCACHE_MODE: local' <<<"$build_job" ||
   fail "protected runtime build does not keep compiler objects job-local"
 grep -Fq '          CODEWIRE_KIND_PRODUCT_IMAGE_MODE: prebuilt-release' <<<"$build_job" ||
   fail "protected runtime set is not tested without rebuilding CI images"
+# shellcheck disable=SC2016
 grep -Fq '          CODEWIRE_KIND_EXPECTED_SOURCE_SHA: ${{ github.sha }}' <<<"$build_job" ||
   fail "protected Kind verification is not bound to the workflow source"
 grep -Fq '        run: scripts/ci/verify/kind-e2e.sh' <<<"$build_job" ||
@@ -148,12 +151,28 @@ fi
 validation_line="$(grep -n 'scripts/ci/images/image-bundle.py create' <<<"$publish_job" | cut -d: -f1)"
 kind_line="$(grep -n 'scripts/ci/verify/kind-e2e.sh' <<<"$publish_job" | cut -d: -f1)"
 first_copy_line="$(grep -n 'scripts/ci/images/publish-image-to-ghcr.sh' <<<"$publish_job" | head -1 | cut -d: -f1)"
+last_copy_line="$(grep -n 'scripts/ci/images/publish-image-to-ghcr.sh' <<<"$publish_job" | tail -1 | cut -d: -f1)"
+signer_line="$(grep -n 'scripts/ci/images/sign-runtime-image-set.sh' <<<"$publish_job" | cut -d: -f1)"
 [[ -n "$kind_line" && -n "$validation_line" && "$kind_line" -lt "$validation_line" ]] ||
   fail "exact protected Kind verification does not precede publication"
 [[ -n "$validation_line" && -n "$first_copy_line" && "$validation_line" -lt "$first_copy_line" ]] ||
   fail "complete runtime bundle validation does not precede GHCR copies"
+[[ -n "$last_copy_line" && -n "$signer_line" && "$last_copy_line" -lt "$signer_line" ]] ||
+  fail "runtime signing does not follow every GHCR copy"
 [[ "$(grep -Fc '            --candidate ' <<<"$publish_job")" -eq 5 ]] ||
   fail "runtime validation does not contain exactly five image candidates"
+# shellcheck disable=SC2016
+grep -Fq '"${RUNNER_TEMP:?}/codewire-dev-image-bundle.json"' <<<"$publish_job" ||
+  fail "runtime signer does not consume the exact validated image bundle"
+grep -Fq 'scripts/ci/trust/codewire-runtime-signing.pub' <<<"$publish_job" ||
+  fail "runtime signer does not use the tracked public trust root"
+bash -n "$RUNTIME_SIGNER"
+[[ -x "$RUNTIME_SIGNER" ]] || fail "runtime signer is not executable"
+openssl pkey -pubin -in "$RUNTIME_PUBLIC_KEY" -pubcheck -noout >/dev/null 2>&1 ||
+  fail "tracked runtime signing public key is invalid"
+[[ "$(openssl pkey -pubin -in "$RUNTIME_PUBLIC_KEY" -outform DER | sha256sum | cut -d' ' -f1)" == \
+  64d7ac8c85493f8b600047ab27c48cb2bed516c94c25d5a532dafc3bf611bcff ]] ||
+  fail "tracked runtime signing public key changed unexpectedly"
 if grep -Fq 'promote-image-bundle.sh' <<<"$publish_job"; then
   fail "source workflow retains the retired deploy-writing promotion wrapper"
 fi

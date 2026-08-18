@@ -1021,6 +1021,19 @@ if [ "$event_selected" = false ]; then
     esac
 
     case "$path" in
+      scripts/ci/images/cosign-private-signing-config.json|\
+      scripts/ci/images/sign-runtime-image-set.sh|\
+      scripts/ci/tests/test-sign-runtime-image-set.sh|\
+      scripts/ci/trust/codewire-runtime-signing.pub)
+        select_token deploy
+        select_token policy
+        select_token release
+        select_token security
+        recognized=true
+        ;;
+    esac
+
+    case "$path" in
       deployments/*|apps/cli/charts/*|.gitea/workflows/deploy-*.yaml|\
       apps/cli/k8s/*|\
       .gitea/workflows/observe-*.yaml|\

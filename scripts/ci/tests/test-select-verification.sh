@@ -171,6 +171,12 @@ run_paths_case product_image_build_graph_kind pull_request refs/pull/2004/head t
   'deploy edge_kind go_consumer_interop go_support kind policy release runtime_confidential' \
   docker-bake.hcl scripts/ci/images/build-kind-images.sh \
   scripts/ci/images/run-rust-build.sh
+run_paths_case protected_runtime_signing pull_request refs/pull/2005/head false \
+  'deploy go_consumer_interop go_support policy policy_shell release runtime_confidential security' \
+  scripts/ci/images/cosign-private-signing-config.json \
+  scripts/ci/images/sign-runtime-image-set.sh \
+  scripts/ci/tests/test-sign-runtime-image-set.sh \
+  scripts/ci/trust/codewire-runtime-signing.pub
 run_paths_case runtime_plan_ci pull_request refs/pull/201/head false \
   'deploy go_consumer_interop go_support policy release runtime_confidential' \
   scripts/ci/deploy/resolve-deployed-source.sh \

@@ -21,6 +21,7 @@ sccache_mode="${CODEWIRE_SCCACHE_MODE:-disabled}"
 readonly REGISTRY_HOST='nexus-system-cluster.example.invalid'
 readonly REGISTRY_REPOSITORY_PREFIX="${REGISTRY_HOST}/oci-promoted/codewire"
 readonly BUILDKIT_IMAGE='docker.io/moby/buildkit:v0.29.0@sha256:0039c1d47e8748b5afea56f4e85f14febaf34452bd99d9552d2daa82262b5cc5'
+readonly SBOM_GENERATOR_IMAGE='nexus-system-cluster.example.invalid/oci-approved/docker/buildkit-syft-scanner@sha256:13864237fb990943433f89d698590aad1de38d4a7e13d38e7b12f2488c1952e7'
 readonly PROVENANCE_SOURCE_URL='https://git.example.invalid/codewire/codewire.git'
 readonly EXPECTED_PROVENANCE_BUILDER_ID='https://git.example.invalid/infra/ci/builders/protected-delivery/v1'
 
@@ -367,6 +368,39 @@ verify_build_provenance() {
   done
 }
 
+verify_build_sbom() {
+  local reference="${canonical_repository}@${source_digest}"
+  local sbom_output sbom_error attempt
+  for attempt in 1 2 3; do
+    sbom_output="$(mktemp "$work/sbom-output.XXXXXX")"
+    sbom_error="$(mktemp "$work/sbom-error.XXXXXX")"
+    if DOCKER_CONFIG="$docker_config" docker buildx imagetools inspect \
+      --format '{{json .SBOM.SPDX}}' "$reference" \
+      >"$sbom_output" 2>"$sbom_error"; then
+      if jq -e '
+        .spdxVersion == "SPDX-2.3"
+        and (.documentNamespace | type == "string" and length > 0)
+        and (.packages | type == "array" and length > 0)
+      ' "$sbom_output" >/dev/null; then
+        return 0
+      fi
+      echo "Protected image SBOM is invalid for $reference" >&2
+      return 1
+    fi
+    if registry_auth_error "$sbom_error" && [ "$attempt" -lt 3 ]; then
+      echo "Registry authentication expired while verifying SBOM for $reference; re-authenticating (attempt $((attempt + 1))/3)" >&2
+      if ! registry_login; then
+        echo "Unable to refresh registry authentication for $reference" >&2
+        return 1
+      fi
+      continue
+    fi
+    echo "Unable to inspect protected image SBOM for $reference" >&2
+    sed -n '1,20p' "$sbom_error" >&2
+    return 1
+  done
+}
+
 label_args=(
   "--label" "org.opencontainers.image.source=$public_source_url"
   "--label" "org.opencontainers.image.revision=$source_sha"
@@ -421,6 +455,7 @@ else
     bake_args=(
       --push
       --provenance "$provenance"
+      --sbom="generator=$SBOM_GENERATOR_IMAGE"
       --file "$bake_file"
       --metadata-file "$bake_metadata"
       --set "rust-base.context=$context"
@@ -459,6 +494,7 @@ else
       GIT_CONFIG_VALUE_0="$PROVENANCE_SOURCE_URL" \
       docker buildx build --builder "$buildx_builder" --push \
       --provenance="$provenance" \
+      --sbom="generator=$SBOM_GENERATOR_IMAGE" \
       --metadata-file "$build_metadata" "${build_args[@]}" \
       -f "$dockerfile" --tag "$source_tag" "${label_args[@]}" "$context"
   fi
@@ -470,6 +506,7 @@ else
 fi
 
 verify_build_provenance
+verify_build_sbom
 
 for tag in "${tags[@]}"; do
   ensure_immutable_tag "$tag" "$source_digest"

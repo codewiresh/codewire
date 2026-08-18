@@ -318,6 +318,18 @@ case "${1:-} ${2:-} ${3:-}" in
         '
       exit 0
     fi
+    if [ "$format" = '{{json .SBOM.SPDX}}' ]; then
+      if [ "${FAKE_SBOM_INVALID:-0}" = 1 ]; then
+        jq -n '{spdxVersion: "SPDX-2.3", packages: []}'
+      else
+        jq -n '{
+          spdxVersion: "SPDX-2.3",
+          documentNamespace: "https://codewire.example/sbom/test",
+          packages: [{name: "codewire-test"}]
+        }'
+      fi
+      exit 0
+    fi
     digest="$(
       awk -F '\t' -v reference="$reference" \
         '$1 == reference { value = $2 } END { print value }' \
@@ -388,7 +400,7 @@ case "${1:-} ${2:-} ${3:-}" in
         --file|--provenance)
           shift 2
           ;;
-        --push)
+        --push|--sbom=generator=*)
           shift
           ;;
         *)
@@ -438,7 +450,7 @@ case "${1:-} ${2:-} ${3:-}" in
         --build-arg|--label|-f)
           shift 2
           ;;
-        --push|--provenance=*)
+        --push|--provenance=*|--sbom=generator=*)
           shift
           ;;
         *)
@@ -534,6 +546,11 @@ grep -qF -- 'BUILDX_GIT_CHECK_DIRTY=1 GIT_CONFIG_VALUE_0=https://git.example.inv
   "$FAKE_DOCKER_CALLS" || fail 'protected provenance does not bind the exact clean canonical source'
 grep -qF -- 'Provenance.SLSA' \
   "$FAKE_DOCKER_CALLS" || fail 'protected publication did not verify its emitted SLSA predicate'
+grep -qF -- '--sbom=generator=nexus-system-cluster.example.invalid/oci-approved/docker/buildkit-syft-scanner@sha256:13864237fb990943433f89d698590aad1de38d4a7e13d38e7b12f2488c1952e7' \
+  "$FAKE_DOCKER_CALLS" ||
+  fail 'protected publication did not request an SBOM from the approved exact generator'
+grep -qF -- 'SBOM.SPDX' "$FAKE_DOCKER_CALLS" ||
+  fail 'protected publication did not verify its emitted SPDX SBOM'
 grep -qF -- 'image=docker.io/moby/buildkit:v0.29.0@sha256:0039c1d47e8748b5afea56f4e85f14febaf34452bd99d9552d2daa82262b5cc5' \
   "$FAKE_DOCKER_CALLS" || fail 'protected publication does not pin its BuildKit daemon image'
 grep -qF -- 'buildx rm --force codewire-publish-' "$FAKE_DOCKER_CALLS" ||
@@ -564,6 +581,19 @@ grep -qF 'Protected image provenance is invalid' \
   fail 'invalid emitted provenance rejection was not attributable'
 [[ "$(build_invocation_count)" -eq 1 ]] ||
   fail 'provenance rejection rebuilt an immutable source image'
+
+if (
+  cd "$ROOT"
+  FAKE_SBOM_INVALID=1 \
+    "$BUILDER" gateway deployments/docker/gateway.Dockerfile .
+) >"$work/invalid-sbom.out" 2>"$work/invalid-sbom.err"; then
+  fail 'protected image build accepted an invalid SPDX SBOM'
+fi
+grep -qF 'Protected image SBOM is invalid' \
+  "$work/invalid-sbom.err" ||
+  fail 'invalid emitted SBOM rejection was not attributable'
+[[ "$(build_invocation_count)" -eq 1 ]] ||
+  fail 'SBOM rejection rebuilt an immutable source image'
 
 printf '0\n' >"$work/login-state"
 login_calls_before="$(grep -c ' login ' "$FAKE_DOCKER_CALLS" || true)"
