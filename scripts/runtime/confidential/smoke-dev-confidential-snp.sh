@@ -35,9 +35,9 @@ COCO_TEST_RESOURCE_URI="${COCO_TEST_RESOURCE_URI:-kbs:///default/codewire/runtim
 COCO_TEST_RESOURCE_PATH="${COCO_TEST_RESOURCE_PATH:-}"
 COCO_TEST_RESOURCE_CONTENT="${COCO_TEST_RESOURCE_CONTENT:-codewire confidential trustee test resource}"
 
-COMMODITY_JOB="codewire-commodity-runtime-smoke"
-CONFIDENTIAL_JOB="codewire-confidential-runtime-smoke"
-ATTESTATION_JOB="codewire-confidential-snp-attestation"
+COMMODITY_JOB_SELECTOR="app.kubernetes.io/name=codewire-commodity-runtime-smoke"
+CONFIDENTIAL_JOB_SELECTOR="app.kubernetes.io/name=codewire-confidential-runtime-smoke"
+ATTESTATION_JOB_SELECTOR="app.kubernetes.io/name=codewire-confidential-snp-attestation"
 SMOKE_CONTROL_CONFIGMAP="codewire-confidential-snp-smoke-control"
 WORKLOAD_KUSTOMIZATION="codewire-deploy-workloads-dev"
 SMOKE_KUSTOMIZATION="codewire-deploy-confidential-smoke-dev"
@@ -378,24 +378,42 @@ record_job() {
     die "Job/$job did not log runtimeClass=$expected_runtime"
 }
 
+resolve_job_name() {
+  local label="$1"
+  local selector="$2"
+  local jobs_json="$EVIDENCE_DIR/$label-jobs.json"
+  local count
+
+  kubectl_dev -n "$PROBE_NAMESPACE" get jobs -l "$selector" -o json >"$jobs_json"
+  count="$(jq '.items | length' "$jobs_json")"
+  [[ "$count" == "1" ]] || \
+    die "expected exactly one $label Job matching $selector, found $count"
+  jq -r '.items[0].metadata.name' "$jobs_json"
+}
+
 run_raw_jobs() {
+  local commodity_job confidential_job
+
   [[ "$RUN_RAW_JOBS" == "1" ]] || {
     log "skipping Flux-owned raw runtime Jobs"
     return 0
   }
-  record_job "$COMMODITY_JOB" commodity ""
-  record_job "$CONFIDENTIAL_JOB" confidential "$NODE"
+  commodity_job="$(resolve_job_name commodity "$COMMODITY_JOB_SELECTOR")"
+  confidential_job="$(resolve_job_name confidential "$CONFIDENTIAL_JOB_SELECTOR")"
+  record_job "$commodity_job" commodity ""
+  record_job "$confidential_job" confidential "$NODE"
 }
 
 run_guest_attestation() {
-  local logs report_b64 report_data_b64 report_display report_bin report_data_bin
+  local job logs report_b64 report_data_b64 report_display report_bin report_data_bin
 
   [[ "$RUN_GUEST_ATTESTATION" == "1" ]] || {
     log "skipping Flux-owned in-guest SNP attestation Job"
     return 0
   }
-  record_job "$ATTESTATION_JOB" confidential "$NODE"
-  logs="$EVIDENCE_DIR/$ATTESTATION_JOB.log"
+  job="$(resolve_job_name attestation "$ATTESTATION_JOB_SELECTOR")"
+  record_job "$job" confidential "$NODE"
+  logs="$EVIDENCE_DIR/$job.log"
   report_b64="$EVIDENCE_DIR/guest-snp-attestation-report.b64"
   report_data_b64="$EVIDENCE_DIR/guest-snp-attestation-report-data.b64"
   report_display="$EVIDENCE_DIR/guest-snp-attestation-report-display.txt"

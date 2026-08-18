@@ -50,6 +50,10 @@ if rg -q 'with-dev-confidential-coco-config|COCO_CLEANUP_RECEIPT|kind: Lease|app
 fi
 
 rg -F 'SMOKE_KUSTOMIZATION="codewire-deploy-confidential-smoke-dev"' "$SMOKE" >/dev/null
+rg -F 'COMMODITY_JOB_SELECTOR="app.kubernetes.io/name=codewire-commodity-runtime-smoke"' "$SMOKE" >/dev/null
+rg -F 'CONFIDENTIAL_JOB_SELECTOR="app.kubernetes.io/name=codewire-confidential-runtime-smoke"' "$SMOKE" >/dev/null
+rg -F 'ATTESTATION_JOB_SELECTOR="app.kubernetes.io/name=codewire-confidential-snp-attestation"' "$SMOKE" >/dev/null
+rg -F 'expected exactly one $label Job matching $selector' "$SMOKE" >/dev/null
 rg -F 'phase == "confidential-snp"' "$SMOKE" >/dev/null
 rg -F 'nexus\.example\.invalid/oci-approved/codewire/gateway@sha256:' "$SMOKE" >/dev/null
 if rg -F 'git\.example\.invalid/codewire/gateway@sha256:' "$SMOKE" "$RESOLVER"; then
@@ -104,6 +108,9 @@ done
 rg -F 'node.codewire.sh/confidential-snp: "true"' "$SMOKE_DIR/confidential-smoke-job.yaml" >/dev/null
 rg -F 'node.codewire.sh/confidential-snp: "true"' "$SMOKE_DIR/confidential-attestation-job.yaml" >/dev/null
 rg -F 'privileged: true' "$SMOKE_DIR/confidential-attestation-job.yaml" >/dev/null
+rg -F 'name: codewire-commodity-runtime-smoke-v51' "$SMOKE_DIR/commodity-smoke-job.yaml" >/dev/null
+rg -F 'name: codewire-confidential-runtime-smoke-v51' "$SMOKE_DIR/confidential-smoke-job.yaml" >/dev/null
+rg -F 'name: codewire-confidential-snp-attestation-v51' "$SMOKE_DIR/confidential-attestation-job.yaml" >/dev/null
 
 command -v kustomize >/dev/null 2>&1 || {
   printf 'kustomize is required for the confidential smoke contract\n' >&2
