@@ -88,6 +88,19 @@ pub(super) fn build_codewire_kata_policy_init_data(
         payload.push_str("\"codewire_workspace_storage_key_id\" = ");
         payload.push_str(&toml_string(workspace_storage_key_id));
         payload.push('\n');
+
+        let key_uri = crate::confidential_storage::kbs_uri(workspace_storage_key_id);
+        let registry = serde_json::json!({
+            "version": 1,
+            "volumes": [{
+                "profile": "luks2-integrity-ext4",
+                "volumeId": workspace_storage_key_id,
+                "keyUri": key_uri,
+            }],
+        });
+        payload.push_str("\"confidential_storage\" = ");
+        payload.push_str(&toml_string(&registry.to_string()));
+        payload.push('\n');
     }
     if kbs_url.is_empty() {
         return payload;
