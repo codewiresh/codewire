@@ -141,6 +141,7 @@ run_policy_core() {
   scripts/ci/tests/test-build-local-image.sh
   scripts/ci/tests/test-workspace-agent-contract.sh
   scripts/ci/tests/test-workspace-image-verify-workflow.sh
+  scripts/ci/tests/test-source-approval-workflow.sh
   scripts/ci/tests/test-fetch-openbao-sccache-r2-credentials.sh
   scripts/ci/tests/test-sdk-local-cli-contract.sh
   scripts/ci/tests/test-integration-postgres.sh

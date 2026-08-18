@@ -352,7 +352,7 @@ else
     )
     if [ "$sccache_mode" = r2 ]; then
       bake_args+=(
-        --set "$product_bake_target.secret=id=aws_shared_credentials,src=$credentials_file"
+        --set "$product_bake_target.secrets+=id=aws_shared_credentials,src=$credentials_file"
       )
     fi
     DOCKER_CONFIG="$docker_config" \

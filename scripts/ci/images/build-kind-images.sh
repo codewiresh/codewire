@@ -71,7 +71,7 @@ bake_args=(
 if [ "$sccache_mode" = r2 ]; then
   for target in dashboard-ci services-ci mesh-ci gateway-ci; do
     bake_args+=(
-      --set "$target.secret=id=aws_shared_credentials,src=$credentials_file"
+      --set "$target.secrets+=id=aws_shared_credentials,src=$credentials_file"
     )
   done
 fi

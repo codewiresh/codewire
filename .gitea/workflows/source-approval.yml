@@ -87,20 +87,51 @@ jobs:
           [[ "$(git -C "$GITHUB_WORKSPACE/.source-approval-base" rev-parse --verify HEAD^{commit})" == "$BASE_SHA" ]]
           [[ "$(supplychain version)" == "supplychain $EXPECTED_SUPPLYCHAIN" ]]
 
-          policy_args=()
+          source_policy=.supplychain/source-policy.json
+          gitleaks_config=.gitleaks.toml
+          bun_baseline=.supplychain/bun-baseline.json
           if [[ "$EVENT_NAME" == pull_request_target ]]; then
-            base_policy="$GITHUB_WORKSPACE/.source-approval-base/.supplychain/source-policy.json"
-            if [[ -e "$base_policy" || -L "$base_policy" ]]; then
-              [[ -f "$base_policy" && ! -L "$base_policy" ]] || {
-                echo 'protected-base source policy is not a regular file' >&2
+            install_trusted_input() {
+              local source="$1"
+              local destination="$2"
+              local description="$3"
+              [[ -f "$source" && ! -L "$source" ]] || {
+                echo "protected-base $description is not a regular file" >&2
                 exit 65
               }
-              policy_path=.trusted-base-source-policy.json
-              rm -f -- "$policy_path"
-              install -m 0444 -- "$base_policy" "$policy_path"
-              git add -f -- "$policy_path"
-              policy_args+=("--source-policy=$policy_path")
-            fi
+              rm -f -- "$destination"
+              install -m 0444 -- "$source" "$destination"
+              git add -f -- "$destination"
+            }
+
+            source_policy=.trusted-base-source-policy.json
+            gitleaks_config=.trusted-base-gitleaks.toml
+            bun_baseline=.trusted-base-bun-baseline.json
+            install_trusted_input \
+              "$GITHUB_WORKSPACE/.source-approval-base/.supplychain/source-policy.json" \
+              "$source_policy" \
+              'source policy'
+            install_trusted_input \
+              "$GITHUB_WORKSPACE/.source-approval-base/.gitleaks.toml" \
+              "$gitleaks_config" \
+              'Gitleaks policy'
+            install_trusted_input \
+              "$GITHUB_WORKSPACE/.source-approval-base/.supplychain/bun-baseline.json" \
+              "$bun_baseline" \
+              'Bun review baseline'
+          else
+            for input in "$source_policy" "$gitleaks_config" "$bun_baseline"; do
+              [[ -f "$input" && ! -L "$input" ]] || {
+                echo "canonical source-approval input is not a regular file: $input" >&2
+                exit 65
+              }
+            done
           fi
 
-          supplychain --osv-offline ci --policy=strict "${policy_args[@]}" .
+          supplychain \
+            --source-policy="$source_policy" \
+            ci \
+            --policy=strict \
+            --gitleaks-config="$gitleaks_config" \
+            --baseline="$bun_baseline" \
+            .
