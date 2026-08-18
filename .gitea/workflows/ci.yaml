@@ -1,8 +1,6 @@
 # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; runner profiles and server-side integrations enforce capabilities.
 name: CI
 
-enable-openid-connect: true
-
 on:
   push:
     branches: [main]
@@ -733,6 +731,7 @@ jobs:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this untrusted job has no protected credential.
     name: Edge / Kind verification
     runs-on: ci-heavy
+    enable-openid-connect: true
     needs: [verification-selection]
     env:
       KIND_CLUSTER_NAME: codewire-e2e-ci-${{ github.run_id }}

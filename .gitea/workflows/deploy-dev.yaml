@@ -4,18 +4,6 @@ on:
   push:
     branches: [main]
 
-permissions:
-  contents: read
-
-enable-openid-connect: true
-
-env:
-  ALLOW_NON_MAIN_IMAGE_BUILD: "1"
-  OPENBAO_ROLE: codewire-source-dev-publisher
-  OPENBAO_AUDIENCE: openbao-codewire-source-dev-publisher
-  OPENBAO_GHCR_ROLE: codewire-source-dev-publisher
-  OPENBAO_GHCR_AUDIENCE: openbao-codewire-source-dev-publisher
-
 jobs:
   deploy-selection:
     name: Deploy selection
@@ -80,9 +68,15 @@ jobs:
   build-publish-runtime-images:
     name: Build, verify, and publish exact runtime image set
     runs-on: protected-delivery
+    enable-openid-connect: true
     timeout-minutes: 110
     needs: [deploy-selection]
     if: ${{ needs.deploy-selection.outputs.deploy_dev == 'true' }}
+    env:
+      OPENBAO_ROLE: codewire-source-dev-publisher
+      OPENBAO_AUDIENCE: openbao-codewire-source-dev-publisher
+      OPENBAO_GHCR_ROLE: codewire-source-dev-publisher
+      OPENBAO_GHCR_AUDIENCE: openbao-codewire-source-dev-publisher
     steps:
       - uses: https://git.example.invalid/noel/actions-checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
 
@@ -136,19 +130,6 @@ jobs:
           scripts/ci/images/sign-runtime-image-set.sh \
             "${RUNNER_TEMP:?}/codewire-dev-image-bundle.json" \
             scripts/ci/trust/codewire-runtime-signing.pub
-
-  dispatch-deploy-dev:
-    name: Dispatch exact source to deploy
-    runs-on: untrusted-validation
-    timeout-minutes: 15
-    needs:
-      - deploy-selection
-      - build-publish-runtime-images
-    if: ${{ needs.deploy-selection.outputs.deploy_dev == 'true' && github.ref == 'refs/heads/main' && needs.build-publish-runtime-images.result == 'success' }}
-    steps:
-      - uses: https://git.example.invalid/noel/actions-checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
-        with:
-          fetch-depth: 1
 
       - name: Require the exact current canonical main commit
         run: |

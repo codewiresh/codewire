@@ -121,8 +121,14 @@ fi
 [[ -z "$(find "$RUNNER_TEMP" -mindepth 1 -print -quit)" ]] ||
   fail 'failed R2 read left temporary identity material'
 
-grep -Fq 'enable-openid-connect: true' "$WORKFLOW" ||
-  fail 'CI does not request Forgejo OIDC'
+if grep -q '^enable-openid-connect:' "$WORKFLOW"; then
+  fail 'CI exposes Forgejo OIDC to every verification job'
+fi
+[[ "$(grep -Fc '    enable-openid-connect: true' "$WORKFLOW")" -eq 1 ]] ||
+  fail 'CI OIDC is not confined to one capability job'
+edge_job="$(sed -n '/^  edge-kind:/,/^  required-verification:/p' "$WORKFLOW")"
+grep -Fq '    enable-openid-connect: true' <<<"$edge_job" ||
+  fail 'the cache-consuming Kind job cannot request Forgejo OIDC'
 grep -Fq "scripts/ci/setup/fetch-openbao-sccache-r2-credentials.sh \"\$credentials_file\"" \
   "$WORKFLOW" || fail 'Kind does not obtain the private cache credential'
 grep -Fq 'CODEWIRE_CI_CACHE state=cache-unavailable fallback=local' "$WORKFLOW" ||

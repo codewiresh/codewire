@@ -26,6 +26,9 @@ fi
 if grep -q '^concurrency:$' "$WORKFLOW"; then
   fail "dev image publication must not rely on unsupported Gitea concurrency"
 fi
+if grep -qE '^permissions:|^enable-openid-connect:' "$WORKFLOW"; then
+  fail "Dev delivery retains ignored permissions or workflow-wide OIDC"
+fi
 if grep -q "github.event_name == 'workflow_dispatch'" "$WORKFLOW"; then
   fail "dev job selection still includes a manual-dispatch bypass"
 fi
@@ -95,9 +98,13 @@ done
   "$WORKFLOW")" -eq 1 ]] ||
   fail "all-unaffected selection does not skip the combined runtime build/publication"
 
-build_job="$(sed -n '/^  build-publish-runtime-images:/,/^  dispatch-deploy-dev:/p' "$WORKFLOW")"
+build_job="$(sed -n '/^  build-publish-runtime-images:/,$p' "$WORKFLOW")"
 grep -Fq '    runs-on: protected-delivery' <<<"$build_job" ||
   fail "runtime set does not build and publish on the protected delivery profile"
+[[ "$(grep -Fc '    enable-openid-connect: true' "$WORKFLOW")" -eq 1 ]] ||
+  fail "Dev delivery OIDC is not confined to one job"
+grep -Fq '    enable-openid-connect: true' <<<"$build_job" ||
+  fail "protected runtime transaction cannot mint just-in-time identities"
 grep -Fq '    timeout-minutes: 110' <<<"$build_job" ||
   fail "runtime set exceeds the protected runner lifetime"
 grep -Fq '        run: scripts/ci/images/build-push-runtime-images.sh' <<<"$build_job" ||
@@ -134,9 +141,9 @@ grep -Fq 'Protected runtime builds may use only job-local or disabled sccache' \
 
 publish_job="$build_job"
 grep -Fq 'OPENBAO_GHCR_ROLE: codewire-source-dev-publisher' \
-  "$WORKFLOW" || fail "runtime publisher lacks its exact OpenBao GHCR role"
+  <<<"$build_job" || fail "runtime publisher lacks its exact OpenBao GHCR role"
 grep -Fq 'OPENBAO_GHCR_AUDIENCE: openbao-codewire-source-dev-publisher' \
-  "$WORKFLOW" || fail "runtime publisher lacks its exact OpenBao GHCR audience"
+  <<<"$build_job" || fail "runtime publisher lacks its exact OpenBao GHCR audience"
 if grep -Fq 'GHCR_PUBLISH_USERNAME:' "$WORKFLOW"; then
   fail "runtime publisher retains a split Forgejo GHCR username"
 fi
@@ -146,19 +153,24 @@ if grep -Fq 'outputs.source_sha' <<<"$publish_job"; then
   fail "runtime publisher duplicates the immutable workflow source through job outputs"
 fi
 # shellcheck disable=SC2016
-[[ "$(grep -Fc '"$GITHUB_SHA"' <<<"$publish_job")" -eq 11 ]] ||
+[[ "$(grep -Fc '"$GITHUB_SHA"' <<<"$publish_job")" -eq 12 ]] ||
   fail "bundle validation and five exact copies do not share one workflow source SHA"
 validation_line="$(grep -n 'scripts/ci/images/image-bundle.py create' <<<"$publish_job" | cut -d: -f1)"
 kind_line="$(grep -n 'scripts/ci/verify/kind-e2e.sh' <<<"$publish_job" | cut -d: -f1)"
 first_copy_line="$(grep -n 'scripts/ci/images/publish-image-to-ghcr.sh' <<<"$publish_job" | head -1 | cut -d: -f1)"
 last_copy_line="$(grep -n 'scripts/ci/images/publish-image-to-ghcr.sh' <<<"$publish_job" | tail -1 | cut -d: -f1)"
 signer_line="$(grep -n 'scripts/ci/images/sign-runtime-image-set.sh' <<<"$publish_job" | cut -d: -f1)"
+canonical_line="$(grep -n 'canonical_main_sha=' <<<"$publish_job" | cut -d: -f1)"
+dispatch_line="$(grep -n 'scripts/ci/deploy/dispatch-deploy-dev.sh' <<<"$publish_job" | cut -d: -f1)"
 [[ -n "$kind_line" && -n "$validation_line" && "$kind_line" -lt "$validation_line" ]] ||
   fail "exact protected Kind verification does not precede publication"
 [[ -n "$validation_line" && -n "$first_copy_line" && "$validation_line" -lt "$first_copy_line" ]] ||
   fail "complete runtime bundle validation does not precede GHCR copies"
 [[ -n "$last_copy_line" && -n "$signer_line" && "$last_copy_line" -lt "$signer_line" ]] ||
   fail "runtime signing does not follow every GHCR copy"
+[[ -n "$signer_line" && -n "$canonical_line" && -n "$dispatch_line" \
+  && "$signer_line" -lt "$canonical_line" && "$canonical_line" -lt "$dispatch_line" ]] ||
+  fail "deploy dispatch is not the final operation after signing and canonical-head verification"
 [[ "$(grep -Fc '            --candidate ' <<<"$publish_job")" -eq 5 ]] ||
   fail "runtime validation does not contain exactly five image candidates"
 # shellcheck disable=SC2016
@@ -198,19 +210,9 @@ for retired_dev_control in \
   fi
 done
 
-dispatch_job="$(sed -n '/^  dispatch-deploy-dev:/,$p' "$WORKFLOW")"
-grep -Fq '  dispatch-deploy-dev:' <<<"$dispatch_job" ||
-  fail "SHA-only deploy dispatch job is missing"
-grep -Fq '    runs-on: untrusted-validation' <<<"$dispatch_job" ||
-  fail "deploy dispatch does not use the live non-privileged validation profile"
-grep -Fq '    timeout-minutes: 15' <<<"$dispatch_job" ||
-  fail "deploy dispatch can outlive the validation runner deadline"
-grep -Fq '      - build-publish-runtime-images' <<<"$dispatch_job" ||
-  fail "deploy dispatch can run before exact GHCR publication"
-grep -Fq "needs.build-publish-runtime-images.result == 'success'" <<<"$dispatch_job" ||
-  fail "deploy dispatch does not require successful exact GHCR publication"
-grep -Fq "github.ref == 'refs/heads/main'" <<<"$dispatch_job" ||
-  fail "deploy dispatch is not restricted to canonical main"
+if grep -Fq '  dispatch-deploy-dev:' "$WORKFLOW"; then
+  fail "deploy dispatch retains a second credential-bearing runner job"
+fi
 if grep -Fq 'CODEWIRE_DEPLOY_PROMOTION_TOKEN' "$WORKFLOW"; then
   fail "Dev delivery retains the retired static deploy credential"
 fi
@@ -222,10 +224,8 @@ for dev_dispatch_source in \
     fail "Dev dispatch source retains the retired static deploy credential"
   fi
 done
-grep -Fq 'enable-openid-connect: true' "$WORKFLOW" ||
-  fail "Dev delivery cannot request its short-lived Authorized Integration JWT"
 # shellcheck disable=SC2016
-grep -Fq 'scripts/ci/deploy/dispatch-deploy-dev.sh "${GITHUB_SHA:?}"' <<<"$dispatch_job" ||
+grep -Fq 'scripts/ci/deploy/dispatch-deploy-dev.sh "${GITHUB_SHA:?}"' <<<"$build_job" ||
   fail "deploy dispatch sends anything other than the workflow source SHA"
 grep -Fq 'return_run_info:true' "$ROOT/scripts/ci/deploy/dispatch-deploy-dev.sh" ||
   fail "Dev dispatch does not request its exact Forgejo run ID"
@@ -235,7 +235,7 @@ fi
 [[ ! -e "$ROOT/scripts/ci/deploy/wait-for-deploy-run.sh" ]] ||
   fail "retired source-runner deploy poller remains"
 if grep -Eq 'candidate_ref|image_digest|deploy_commit|promotion-receipt' \
-  <<<"$dispatch_job"; then
+  "$ROOT/scripts/ci/deploy/dispatch-deploy-dev.sh"; then
   fail "source-to-deploy dispatch carries deployment state beyond the source SHA"
 fi
 # shellcheck disable=SC2016
