@@ -1541,6 +1541,18 @@ for token in contracts web; do
   }
 done
 
+web_run_line="$(grep -n -m1 'name: Run Web' "$standard_block" | cut -d: -f1)"
+web_run_block="$(sed -n "${web_run_line},$((web_run_line + 6))p" "$standard_block")"
+grep -qF 'VERIFICATION_SELECTION: ${{ needs.verification-selection.outputs.selection }}' \
+  <<<"$web_run_block" || {
+  echo 'standard: Web cannot defer duplicate image verification to selected Kind' >&2
+  exit 1
+}
+grep -qF 'if selected kind; then' "$ROOT/scripts/ci/verify/run-product-verification.sh" || {
+  echo 'standard: Web does not preserve standalone dashboard image verification' >&2
+  exit 1
+}
+
 for contract in \
     'Run Policy|policy' \
     'Run Contracts|contracts' \

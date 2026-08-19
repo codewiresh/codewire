@@ -277,8 +277,12 @@ run_web() {
   scripts/ci/tests/test-dashboard-browser-gate.sh
   scripts/checks/security/audit-js-supply-chain.sh
   scripts/checks/security/audit-runtime-images.sh
-  make verify-dashboard-image \
-    DASHBOARD_VERIFY_IMAGE="codewire-dashboard:verification-${GITHUB_RUN_ID:-local}"
+  if selected kind; then
+    echo 'dashboard image verification deferred to the exact-image Kind transaction'
+  else
+    make verify-dashboard-image \
+      DASHBOARD_VERIFY_IMAGE="codewire-dashboard:verification-${GITHUB_RUN_ID:-local}"
+  fi
 }
 
 run_ios_config() {

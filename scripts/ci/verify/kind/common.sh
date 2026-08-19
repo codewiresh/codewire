@@ -540,6 +540,9 @@ build_images_and_smokes() {
       ;;
   esac
 
+  log "verifying the exact dashboard candidate runtime contract"
+  "$ROOT/scripts/ci/verify/dashboard-image.sh" "codewire-dashboard:e2e"
+
   log "building Rust kind smoke binaries"
   local smoke_started_at
   smoke_started_at="$(date +%s)"

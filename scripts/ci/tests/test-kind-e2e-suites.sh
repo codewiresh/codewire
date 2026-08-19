@@ -68,6 +68,8 @@ grep -Fq 'sed "s/hostPort: 25432/hostPort: ${KIND_POSTGRES_HOST_PORT}/"' "$COMMO
   fail 'Kind cluster creation does not render the configured Postgres host port'
 grep -Fq 'configure_remote_dind_kind_network' "$COMMON" ||
   fail 'Kind cluster creation does not adapt the remote DinD network boundary'
+[[ "$(grep -Fc '"$ROOT/scripts/ci/verify/dashboard-image.sh" "codewire-dashboard:e2e"' "$COMMON")" -eq 1 ]] ||
+  fail 'Kind does not verify the exact dashboard image it already built'
 if grep -Fq '127.0.0.1:25432/codewire' "$COMMON"; then
   fail 'Kind smoke callers bypass the configurable Postgres URL'
 fi
