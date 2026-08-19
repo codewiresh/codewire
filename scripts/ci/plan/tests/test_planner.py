@@ -175,6 +175,10 @@ class FixtureRepository:
                 "docs/**",
             ],
             "artifacts": {
+                "dev_release_tree": {
+                    "kind": "file-set",
+                    "inputs": ["deployments/k8s/**"],
+                },
                 "cw_cli_release_assets": {
                     "kind": "rust-package",
                     "manifest": "Cargo.toml",
@@ -316,6 +320,10 @@ class FixtureRepository:
         self.write("scripts/ci/plan/artifact-graph.json", json.dumps(graph, sort_keys=True, indent=2) + "\n")
 
     def _write_workspace(self) -> None:
+        self.write(
+            "deployments/k8s/base/runtime-profile.yaml",
+            "apiVersion: v1\nkind: ConfigMap\n",
+        )
         self.write(
             "Cargo.toml",
             """[workspace]
@@ -676,6 +684,9 @@ class PlannerFixtureTests(unittest.TestCase):
             )
         )
 
+    def dev_release_state(self, document: dict) -> str:
+        return document["artifacts"]["dev_release_tree"]["state"]
+
     def test_fixture_metadata_matches_real_cargo_for_each_artifact_root(self) -> None:
         for manifest in ("Cargo.toml", "desktop/Cargo.toml"):
             with self.subTest(manifest=manifest):
@@ -707,6 +718,16 @@ class PlannerFixtureTests(unittest.TestCase):
         self.assertEqual(self.states(first), ("unaffected", "unaffected"))
         self.assertEqual(self.workspace_states(first), ("unaffected", "unaffected", "unaffected"))
         self.assertEqual(self.runtime_states(first), ("unaffected",) * 5)
+        self.assertEqual(self.dev_release_state(first), "unaffected")
+
+    def test_kubernetes_deployment_input_affects_dev_release_only(self) -> None:
+        self.repo.change(
+            "deployments/k8s/runtime-profiles/confidential-smoke/job.yaml",
+            "apiVersion: batch/v1\nkind: Job\n",
+        )
+        document = self.repo.plan()
+        self.assertEqual(self.dev_release_state(document), "affected")
+        self.assertEqual(self.runtime_states(document), ("unaffected",) * 5)
 
     def test_rust_cache_identity_reuses_dependencies_but_not_changed_source(self) -> None:
         baseline = self.repo.plan(self.repo.base)["artifacts"]["rust_cache_cli"]
@@ -809,6 +830,18 @@ class PlannerFixtureTests(unittest.TestCase):
         self.assertTrue(document["baseline"]["validation"]["valid"])
         self.assertEqual(document["baseline"]["mode"], "deployed_source")
         self.assertEqual(document["baseline"]["baseline_commit"], self.repo.base)
+        self.assertEqual(self.runtime_states(document), ("unaffected",) * 5)
+        self.assertEqual(self.dev_release_state(document), "unaffected")
+
+    def test_dev_release_change_is_visible_from_deployed_source(self) -> None:
+        head = self.repo.change(
+            "deployments/k8s/runtime-profiles/confidential-smoke/job.yaml",
+            "apiVersion: batch/v1\nkind: Job\n",
+        )
+        candidate = self.repo.deployed_source_candidate(self.repo.base, head)
+        document = self.repo.deployed_source_plan(candidate, head)
+        self.assertTrue(document["baseline"]["validation"]["valid"])
+        self.assertEqual(self.dev_release_state(document), "affected")
         self.assertEqual(self.runtime_states(document), ("unaffected",) * 5)
 
     def test_each_runtime_positive_is_visible_from_deployed_source(self) -> None:

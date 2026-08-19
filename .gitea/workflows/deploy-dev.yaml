@@ -35,6 +35,7 @@ jobs:
       ci_plan_sha256: ${{ steps.select.outputs.ci_plan_sha256 }}
       ci_policy_sha256: ${{ steps.select.outputs.ci_policy_sha256 }}
       baseline_valid: ${{ steps.select.outputs.baseline_valid }}
+      dev_release_tree_state: ${{ steps.select.outputs.dev_release_tree_state }}
     steps:
       - uses: https://git.example.invalid/noel/actions-checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with:
