@@ -1,3 +1,4 @@
+# zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this workflow is a credential-free receipt validator.
 name: Dev deployment smoke receipt
 
 on:
@@ -23,13 +24,11 @@ on:
           - success
           - failure
 
-permissions:
-  contents: read
-
 jobs:
   receipt:
+    # zizmor: ignore[excessive-permissions] This validation job has no OIDC, checkout, network access, or write-capable integration.
     name: Record deploy-owned dev smoke result
-    runs-on: ubuntu-latest
+    runs-on: untrusted-validation
     steps:
       - name: Validate immutable receipt
         env:

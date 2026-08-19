@@ -11,6 +11,11 @@ fail() {
 }
 
 [[ -f "$WORKFLOW" ]] || fail "receipt workflow is missing"
+if grep -qE '^permissions:' "$WORKFLOW"; then
+  fail "receipt workflow relies on ignored GitHub permissions syntax"
+fi
+grep -Fq '    runs-on: untrusted-validation' "$WORKFLOW" ||
+  fail "receipt does not use the credential-free validation profile"
 grep -Fq '  workflow_dispatch:' "$WORKFLOW" ||
   fail "receipt is not an explicit deploy callback"
 for input in source_sha deploy_commit deploy_run_id smoke_status; do

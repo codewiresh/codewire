@@ -540,14 +540,19 @@ build_images_and_smokes() {
       ;;
   esac
 
+  log "verifying the exact dashboard candidate runtime contract"
+  "$ROOT/scripts/ci/verify/dashboard-image.sh" "codewire-dashboard:e2e"
+
   log "building Rust kind smoke binaries"
   local smoke_started_at
   smoke_started_at="$(date +%s)"
   (
     cd "$ROOT"
-    cargo build --profile ci -p codewire-orchestration --bin crd-smoke --bin environment-setup-smoke --bin exec-smoke --bin exec-stream-smoke --bin file-service-smoke --bin prepare-stream-smoke --bin log-stream-smoke --bin temporal-smoke --bin temporal-fencing-smoke --bin reconciler-ttl-smoke --bin sidecar-smoke --features kind-e2e
-    cargo build --profile ci -p codewire-client --example platform-run-smoke --example environment-session-smoke
-    cargo build --profile ci -p codewire-client --example coordinator-ingress-smoke --features kind-e2e
+    "$ROOT/scripts/ci/verify/run-host-rust-build.sh" bash -ceu '
+      cargo build --profile ci -p codewire-orchestration --bin crd-smoke --bin environment-setup-smoke --bin exec-smoke --bin exec-stream-smoke --bin file-service-smoke --bin prepare-stream-smoke --bin log-stream-smoke --bin temporal-smoke --bin temporal-fencing-smoke --bin reconciler-ttl-smoke --bin sidecar-smoke --features kind-e2e
+      cargo build --profile ci -p codewire-client --example platform-run-smoke --example environment-session-smoke
+      cargo build --profile ci -p codewire-client --example coordinator-ingress-smoke --features kind-e2e
+    '
   )
   printf 'CODEWIRE_CI_PHASE name=kind-smoke-binary-build seconds=%s\n' \
     "$(( $(date +%s) - smoke_started_at ))"
@@ -3305,7 +3310,7 @@ billing_contract_through_ingress() {
       BILLING_USER_SESSION_TOKEN=contract-user-session-token \
       BILLING_SEEDED=1 \
       BILLING_SKIP_HEALTH=1 \
-      cargo test --locked --profile ci -p codewire-billing \
+      "$ROOT/scripts/ci/verify/run-host-rust-build.sh" cargo test --locked --profile ci -p codewire-billing \
         --test wire_contract configured_billing_wire_contract \
         -- --ignored --exact --nocapture | tee "$RUN_DIR/billing-contract.log"
     local passed_count

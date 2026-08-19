@@ -1061,7 +1061,7 @@ if [ "$event_selected" = false ]; then
 
     case "$path" in
       images/*|\
-      .gitea/workflows/claude-e2e.yaml|.gitea/workflows/cli-release.yaml|\
+      .gitea/workflows/cli-release.yaml|\
       .gitea/workflows/mirror-github.yaml|\
       .gitea/workflows/support-images.yaml|\
       keys/production-release.asc|\
@@ -1097,7 +1097,6 @@ if [ "$event_selected" = false ]; then
       scripts/ci/tests/test-build-push-image.sh|\
       scripts/ci/tests/test-build-push-runtime-images.sh|\
       scripts/ci/tests/test-run-rust-build.sh|\
-      scripts/ci/tests/test-claude-e2e-workflow.sh|\
       scripts/ci/tests/test-fetch-infisical-ci-secret.sh|\
       scripts/ci/tests/test-fetch-forgejo-deploy-dev-token.sh|\
       scripts/ci/tests/test-fetch-openbao-ghcr-credentials.sh|\
