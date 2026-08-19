@@ -160,7 +160,12 @@ docker_config="${CODEWIRE_EXTERNAL_DOCKER_CONFIG:-$work/docker-config}"
 credential_fetcher="${OPENBAO_NEXUS_CREDENTIAL_FETCHER:-scripts/ci/setup/fetch-openbao-nexus-credentials.sh}"
 buildx_builder=''
 buildx_builder_owned=0
+source_remote_url=''
+source_remote_changed=0
 cleanup() {
+  if [ "$source_remote_changed" = 1 ] && [ -n "$source_remote_url" ]; then
+    git -C "$source_dir" remote set-url origin "$source_remote_url" >/dev/null 2>&1 || true
+  fi
   if [ "$buildx_builder_owned" = 1 ] && [ -n "$buildx_builder" ]; then
     DOCKER_CONFIG="$docker_config" docker buildx rm --force "$buildx_builder" \
       >/dev/null 2>&1 || true
@@ -169,6 +174,37 @@ cleanup() {
   rm -rf "$work"
 }
 trap cleanup EXIT
+
+require_clean_canonical_source() {
+  local source_status
+  git -C "$source_dir" diff --quiet || {
+    echo 'Protected image build requires a clean source worktree' >&2
+    exit 1
+  }
+  git -C "$source_dir" diff --cached --quiet || {
+    echo 'Protected image build requires a clean source index' >&2
+    exit 1
+  }
+  source_status="$(git -C "$source_dir" status --porcelain --untracked-files=all)"
+  [ -z "$source_status" ] || {
+    echo 'Protected image build requires no untracked source files' >&2
+    exit 1
+  }
+  source_remote_url="$(git -C "$source_dir" remote get-url origin)" || {
+    echo 'Protected image build requires an origin remote' >&2
+    exit 1
+  }
+  [ -n "$source_remote_url" ] || {
+    echo 'Protected image build received an empty origin remote' >&2
+    exit 1
+  }
+  if [ "$source_remote_url" != "$PROVENANCE_SOURCE_URL" ]; then
+    git -C "$source_dir" remote set-url origin "$PROVENANCE_SOURCE_URL"
+    source_remote_changed=1
+  fi
+}
+
+require_clean_canonical_source
 case "$docker_config" in
   /*) ;;
   *)
@@ -501,10 +537,6 @@ else
       CODEWIRE_IMAGE_SOURCE_URL="$public_source_url" \
       CODEWIRE_RUST_PROFILE=release \
       CODEWIRE_SCCACHE_MODE="$sccache_mode" \
-      BUILDX_GIT_CHECK_DIRTY=1 \
-      GIT_CONFIG_COUNT=1 \
-      GIT_CONFIG_KEY_0=remote.origin.url \
-      GIT_CONFIG_VALUE_0="$PROVENANCE_SOURCE_URL" \
       docker buildx bake --builder "$buildx_builder" "${bake_args[@]}" \
         "$product_bake_target"
     jq -e --arg target "$product_bake_target" '
@@ -517,10 +549,6 @@ else
     }
   else
     DOCKER_CONFIG="$docker_config" \
-      BUILDX_GIT_CHECK_DIRTY=1 \
-      GIT_CONFIG_COUNT=1 \
-      GIT_CONFIG_KEY_0=remote.origin.url \
-      GIT_CONFIG_VALUE_0="$PROVENANCE_SOURCE_URL" \
       docker buildx build --builder "$buildx_builder" --push \
       --provenance="$provenance" \
       --sbom="generator=$SBOM_GENERATOR_IMAGE" \
