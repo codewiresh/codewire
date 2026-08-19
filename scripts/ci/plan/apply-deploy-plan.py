@@ -22,6 +22,8 @@ RUNTIME_ARTIFACTS = (
     "services_image",
     "mesh_image",
 )
+DEV_RELEASE_ARTIFACT = "dev_release_tree"
+DEPLOY_ARTIFACTS = (DEV_RELEASE_ARTIFACT, *RUNTIME_ARTIFACTS)
 HEX40_RE = re.compile(r"^[0-9a-f]{40}$")
 HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
 STATE_VALUES = {"affected", "unaffected", "unclassified"}
@@ -88,28 +90,34 @@ def trusted_outputs(path: Path, expected_head: str, expected_head_tree: str) -> 
     if require_string(trusted, "commit", HEX40_RE) != expected_head:
         raise AdapterError("deploy plan policy is not the exact canonical head")
 
-    states = {name: artifact_state(plan, name) for name in RUNTIME_ARTIFACTS}
+    states = {name: artifact_state(plan, name) for name in DEPLOY_ARTIFACTS}
     validation = baseline.get("validation")
     if not isinstance(validation, dict):
         raise AdapterError("plan baseline validation is malformed")
     valid = validation.get("valid") is True and validation.get("reasons") == []
     if not valid and any(state != "unclassified" for state in states.values()):
-        raise AdapterError("invalid baseline did not fail every runtime artifact closed")
+        raise AdapterError("invalid baseline did not fail every deploy artifact closed")
 
-    selected = any(state != "unaffected" for state in states.values())
+    runtime_selected = any(
+        states[name] != "unaffected" for name in RUNTIME_ARTIFACTS
+    )
+    release_state = states[DEV_RELEASE_ARTIFACT]
+    selected = runtime_selected or release_state != "unaffected"
     if not valid:
         reason = "baseline_invalid"
     elif "unclassified" in states.values():
         reason = "artifact_unclassified"
-    elif selected:
+    elif runtime_selected:
         reason = "artifact_affected"
+    elif release_state == "affected":
+        reason = "dev_release_affected"
     else:
         reason = "artifacts_unaffected"
 
     outputs = {
         "deploy_dev": str(selected).lower(),
         "reason": reason,
-        "matched_categories": ",".join(f"{name}:{states[name]}" for name in RUNTIME_ARTIFACTS),
+        "matched_categories": ",".join(f"{name}:{states[name]}" for name in DEPLOY_ARTIFACTS),
         "baseline_sha": require_string(baseline, "baseline_commit", HEX40_RE),
         "head_sha": head,
         "head_tree": head_tree,
@@ -124,11 +132,11 @@ def trusted_outputs(path: Path, expected_head: str, expected_head_tree: str) -> 
 def fail_closed_outputs(head: str, head_tree: str) -> dict[str, str]:
     if not HEX40_RE.fullmatch(head) or not HEX40_RE.fullmatch(head_tree):
         raise AdapterError("fail-closed head or tree is invalid")
-    states = {name: "unclassified" for name in RUNTIME_ARTIFACTS}
+    states = {name: "unclassified" for name in DEPLOY_ARTIFACTS}
     outputs = {
         "deploy_dev": "true",
         "reason": "plan_invalid",
-        "matched_categories": ",".join(f"{name}:unclassified" for name in RUNTIME_ARTIFACTS),
+        "matched_categories": ",".join(f"{name}:unclassified" for name in DEPLOY_ARTIFACTS),
         "baseline_sha": head,
         "head_sha": head,
         "head_tree": head_tree,

@@ -13,6 +13,7 @@ HEAD = "a" * 40
 TREE = "b" * 40
 BASE = "c" * 40
 ARTIFACTS = (
+    "dev_release_tree",
     "dashboard_image",
     "gateway_image",
     "derp_image",
@@ -91,15 +92,22 @@ class DeployPlanAdapterTests(unittest.TestCase):
             completed.stderr,
         )
 
-    def test_five_unaffected_artifacts_skip_deployment(self) -> None:
+    def test_unaffected_release_and_runtime_artifacts_skip_deployment(self) -> None:
         outputs, _ = self.apply(plan_document())
         self.assertEqual(outputs["deploy_dev"], "false")
         self.assertEqual(outputs["reason"], "artifacts_unaffected")
         self.assertEqual(outputs["baseline_sha"], BASE)
         self.assertEqual(outputs["baseline_valid"], "true")
 
+    def test_dev_release_tree_change_selects_atomic_deployment(self) -> None:
+        outputs, _ = self.apply(plan_document({"dev_release_tree": "affected"}))
+        self.assertEqual(outputs["deploy_dev"], "true")
+        self.assertEqual(outputs["reason"], "dev_release_affected")
+        self.assertEqual(outputs["dev_release_tree_state"], "affected")
+        self.assertIn("dev_release_tree:affected", outputs["matched_categories"])
+
     def test_each_affected_artifact_selects_atomic_runtime_set(self) -> None:
-        for artifact in ARTIFACTS:
+        for artifact in ARTIFACTS[1:]:
             with self.subTest(artifact=artifact):
                 outputs, _ = self.apply(plan_document({artifact: "affected"}))
                 self.assertEqual(outputs["deploy_dev"], "true")

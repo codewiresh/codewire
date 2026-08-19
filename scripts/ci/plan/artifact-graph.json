@@ -23,6 +23,12 @@
     "docs/**"
   ],
   "artifacts": {
+    "dev_release_tree": {
+      "kind": "file-set",
+      "inputs": [
+        "deployments/k8s/**"
+      ]
+    },
     "cw_cli_release_assets": {
       "kind": "rust-package",
       "manifest": "Cargo.toml",
