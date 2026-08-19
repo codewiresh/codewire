@@ -103,9 +103,9 @@ creation forwards whichever is set into the container automatically:
   token, billed against your subscription. Picked up automatically from
   `~/.claude/.credentials.json`.
 
-For CI specifically, prefer `ANTHROPIC_API_KEY` — see
-`.gitea/workflows/claude-e2e.yaml`. The job runs `claude --model haiku`
-to keep per-run cost minimal.
+For the local parity smoke, prefer `ANTHROPIC_API_KEY`. It can run
+`claude --model haiku` to keep per-run cost minimal. Codewire deliberately
+does not run this paid, credential-bearing smoke in hosted CI.
 
 ### CLI changes this depends on
 

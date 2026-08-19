@@ -195,7 +195,6 @@ run_paths_case repo_policy_fixture pull_request refs/pull/23/head false \
   scripts/ci/tests/test-repo-checks-modules.py
 run_paths_case release pull_request refs/pull/3/head false \
   'go_consumer_interop go_support policy release runtime_confidential' \
-  .gitea/workflows/claude-e2e.yaml \
   .gitea/workflows/cli-release.yaml \
   .gitea/workflows/mirror-github.yaml \
   apps/cli/GPG_PUBLIC_KEY.asc \
@@ -222,7 +221,6 @@ run_paths_case release pull_request refs/pull/3/head false \
   scripts/ci/tests/test-support-images-workflow.sh \
   scripts/ci/tests/test-workspace-image-verify-workflow.sh \
   scripts/ci/tests/test-build-push-image.sh \
-  scripts/ci/tests/test-claude-e2e-workflow.sh \
   scripts/ci/tests/test-fetch-infisical-ci-secret.sh \
   scripts/ci/tests/test-mirror-git-tags.sh \
   scripts/ci/tests/test-publish-cw-release.sh \
