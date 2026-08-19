@@ -1,7 +1,7 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: codewire-confidential-runtime-smoke-v51
+  name: codewire-confidential-runtime-smoke-v53
   namespace: codewire-runtime-probes
   labels:
     app.kubernetes.io/name: codewire-confidential-runtime-smoke
