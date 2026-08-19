@@ -231,7 +231,7 @@ jobs:
 
   workspace-image:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this untrusted job has no protected credential.
-    name: Workspace image verification
+    name: Container contract verification
     runs-on: ci-heavy
     # A selected workspace verification performs two credential-free cold
     # image builds. Keep its ceiling below the compatibility runner's
@@ -242,14 +242,31 @@ jobs:
     steps:
       - name: Reuse exact PR-head content verification
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt == 'accepted' }}
-        run: echo 'workspace image verification inherited from the exact tested PR-head tree'
+        run: echo 'container contract verification inherited from the exact tested PR-head tree'
 
-      - name: Workspace image not selected
-        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && needs.verification-selection.outputs.workspace_image_selected != 'true' }}
-        run: echo 'workspace image is unaffected; no checkout, download, installation, or build required'
+      - name: Resolve container contract scope
+        id: container-scope
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+        env:
+          VERIFICATION_SELECTION: ${{ needs.verification-selection.outputs.selection }}
+          WORKSPACE_IMAGE_SELECTED: ${{ needs.verification-selection.outputs.workspace_image_selected }}
+        run: |
+          set -euo pipefail
+          if [ "$WORKSPACE_IMAGE_SELECTED" = true ] \
+              || [[ "$VERIFICATION_SELECTION" == *'|ios|'* ]] \
+              || { [[ "$VERIFICATION_SELECTION" == *'|web|'* ]] \
+                && [[ "$VERIFICATION_SELECTION" != *'|kind|'* ]]; }; then
+            echo 'selected=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'selected=false' >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Container contracts not selected
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && steps.container-scope.outputs.selected != 'true' }}
+        run: echo 'container artifacts are unaffected; no checkout, download, installation, or build required'
 
       - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
-        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && needs.verification-selection.outputs.workspace_image_selected == 'true' }}
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && steps.container-scope.outputs.selected == 'true' }}
 
       - name: Prove isolated Buildx load contract
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && needs.verification-selection.outputs.workspace_image_selected == 'true' }}
@@ -262,13 +279,28 @@ jobs:
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && needs.verification-selection.outputs.workspace_image_selected == 'true' }}
         run: scripts/ci/verify/verify-workspace-image.sh
 
+      - name: Build and inspect the standalone dashboard image
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|web|') && !contains(needs.verification-selection.outputs.selection, '|kind|') }}
+        run: scripts/ci/verify/run-product-verification.sh dashboard-image
+
+      - name: Run iOS package tests in the pinned Swift image
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|ios|') }}
+        run: |
+          scripts/ci/verify/run-product-verification.sh ios-config
+          docker build --file - apps/ios <<'DOCKERFILE'
+          FROM swift@sha256:0ff707a48519cf1473616c759e019bcff21cfbafa3d2687bf8fd41a2757adc9a
+          WORKDIR /workspace
+          COPY . .
+          RUN swift test --scratch-path /tmp/codewire-ios-build
+          DOCKERFILE
+
   policy:
     # Policy and repository contracts are non-Docker checks over sealed tools.
     # Keep them off privileged heavy capacity and run them in parallel with the
     # product-specific Standard family.
     name: Policy verification
     runs-on: ci-light
-    timeout-minutes: 15
+    timeout-minutes: 13
     needs: [verification-selection]
     steps:
       - name: Reuse exact PR-head content verification
@@ -309,11 +341,11 @@ jobs:
           fetch-depth: 0
 
       - name: Set up Go 1.26.6
-        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|contracts|') || contains(needs.verification-selection.outputs.selection, '|go_support|') || contains(needs.verification-selection.outputs.selection, '|sdk_go|') || contains(needs.verification-selection.outputs.selection, '|security_go|')) }}
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|contracts|') || contains(needs.verification-selection.outputs.selection, '|go_support|') || contains(needs.verification-selection.outputs.selection, '|sdk_go|')) }}
         run: scripts/ci/setup/setup-go.sh 1.26.6
 
       - name: Verify sealed Rust toolchain
-        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|contracts_proto|') || contains(needs.verification-selection.outputs.selection, '|go_tailnet|') || contains(needs.verification-selection.outputs.selection, '|go_consumer_interop|') || contains(needs.verification-selection.outputs.selection, '|deploy|')) }}
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|contracts_proto|') || contains(needs.verification-selection.outputs.selection, '|go_tailnet|') || contains(needs.verification-selection.outputs.selection, '|go_consumer_interop|')) }}
         run: scripts/ci/setup/assert-ci-runner-image.sh
 
       - name: Install pinned protoc for Rust-backed standard checks
@@ -358,18 +390,8 @@ jobs:
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|web|') }}
         env:
           VERIFICATION_SELECTION: ${{ needs.verification-selection.outputs.selection }}
+          CODEWIRE_DASHBOARD_IMAGE_DEFERRED: "true"
         run: scripts/ci/verify/run-product-verification.sh web
-
-      - name: Run iOS package tests
-        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|ios|') }}
-        run: |
-          scripts/ci/verify/run-product-verification.sh ios-config
-          docker build --file - apps/ios <<'DOCKERFILE'
-          FROM swift@sha256:0ff707a48519cf1473616c759e019bcff21cfbafa3d2687bf8fd41a2757adc9a
-          WORKDIR /workspace
-          COPY . .
-          RUN swift test --scratch-path /tmp/codewire-ios-build
-          DOCKERFILE
 
       - name: Run SDK Go
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|sdk_go|') }}
@@ -382,6 +404,33 @@ jobs:
       - name: Run SDK Python
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|sdk_python|') }}
         run: scripts/ci/verify/run-product-verification.sh sdk-python
+
+  tooling:
+    # Give repository tooling and delivery-contract checks an independent
+    # general-heavy slot so an all-selected policy change does not serialize
+    # them behind language and SDK verification. These checks still need the
+    # dependency egress and compute budget intentionally absent from ci-light.
+    name: Tooling / delivery contract verification
+    runs-on: ci-heavy
+    timeout-minutes: 30
+    needs: [verification-selection]
+    steps:
+      - name: Reuse exact PR-head content verification
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt == 'accepted' }}
+        run: echo 'tooling content verification inherited from the exact tested PR-head tree'
+
+      - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go 1.26.6 for security checks
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|security_go|') }}
+        run: scripts/ci/setup/setup-go.sh 1.26.6
+
+      - name: Verify sealed delivery-contract tools
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|deploy|') || contains(needs.verification-selection.outputs.selection, '|release|') || contains(needs.verification-selection.outputs.selection, '|security|')) }}
+        run: scripts/ci/setup/assert-ci-runner-image.sh
 
       - name: Run API key smoke tooling
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|service_apikey_smoke|') }}
@@ -871,6 +920,7 @@ jobs:
       - workspace-image
       - policy
       - standard
+      - tooling
       - rust-transport
       - database
       - services-control
@@ -890,6 +940,7 @@ jobs:
           VERIFICATION_TESTED_TREE_RUN: ${{ needs.verification-selection.outputs.tested_tree_run }}
           VERIFICATION_POLICY_RESULT: ${{ needs.policy.result }}
           VERIFICATION_STANDARD_RESULT: ${{ needs.standard.result }}
+          VERIFICATION_TOOLING_RESULT: ${{ needs.tooling.result }}
           VERIFICATION_RUST_TRANSPORT_RESULT: ${{ needs.rust-transport.result }}
           VERIFICATION_DATABASE_RESULT: ${{ needs.database.result }}
           VERIFICATION_SERVICES_CONTROL_RESULT: ${{ needs.services-control.result }}

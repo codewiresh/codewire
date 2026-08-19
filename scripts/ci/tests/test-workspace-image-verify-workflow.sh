@@ -25,8 +25,8 @@ workspace_job="$(awk '
   capture { print }
 ' "$WORKFLOW")"
 grep -qF '  workspace-image:' <<<"$workspace_job" || fail 'workspace-image job is missing'
-grep -qF '    name: Workspace image verification' <<<"$workspace_job" ||
-  fail 'workspace job has misleading publication wording'
+grep -qF '    name: Container contract verification' <<<"$workspace_job" ||
+  fail 'workspace job is not named for its complete non-publishing scope'
 grep -qF '    runs-on: ci-heavy' <<<"$workspace_job" ||
   fail 'Docker-backed workspace verification is not assigned to the heavy capability profile'
 grep -qF '    timeout-minutes: 55' <<<"$workspace_job" ||
@@ -36,12 +36,18 @@ grep -qF '    needs: [verification-selection]' <<<"$workspace_job" ||
 if grep -qE '^    if:' <<<"$workspace_job"; then
   fail 'workspace job must remain a static required runner task'
 fi
-grep -qF 'name: Workspace image not selected' <<<"$workspace_job" ||
-  fail 'workspace job has no explicit unaffected path'
+grep -qF 'name: Container contracts not selected' <<<"$workspace_job" ||
+  fail 'container job has no explicit unaffected path'
 grep -qF 'no checkout, download, installation, or build required' <<<"$workspace_job" ||
   fail 'workspace no-op does not prove its cheap behavior'
-grep -qF "workspace_image_selected != 'true'" <<<"$workspace_job" ||
-  fail 'workspace no-op does not use canonical planner selection'
+grep -qF 'name: Resolve container contract scope' <<<"$workspace_job" ||
+  fail 'container job does not resolve its workspace, dashboard, and iOS scope'
+grep -qF 'WORKSPACE_IMAGE_SELECTED: ${{ needs.verification-selection.outputs.workspace_image_selected }}' \
+  <<<"$workspace_job" || fail 'container scope omits canonical workspace-image selection'
+grep -qF "steps.container-scope.outputs.selected != 'true'" <<<"$workspace_job" ||
+  fail 'container no-op does not use its resolved scope'
+grep -qF "steps.container-scope.outputs.selected == 'true'" <<<"$workspace_job" ||
+  fail 'container checkout does not use its resolved scope'
 grep -qF "workspace_image_selected == 'true'" <<<"$workspace_job" ||
   fail 'workspace positive path does not use canonical planner selection'
 grep -qF "trusted_adapter='.trusted-ci-policy/scripts/ci/plan/apply-verification-plan.py'" \

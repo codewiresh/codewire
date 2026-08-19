@@ -9,6 +9,7 @@ green_results=(
   VERIFICATION_TESTED_TREE_RECEIPT=fallback
   VERIFICATION_POLICY_RESULT=success
   VERIFICATION_STANDARD_RESULT=success
+  VERIFICATION_TOOLING_RESULT=success
   VERIFICATION_RUST_TRANSPORT_RESULT=success
   VERIFICATION_DATABASE_RESULT=success
   VERIFICATION_SERVICES_CONTROL_RESULT=success
@@ -53,6 +54,10 @@ expect_failure standard_failure 'standard capability group concluded failure' \
 expect_failure policy_failure 'policy capability group concluded failure' \
   VERIFICATION_SELECTION='|valid:v3|policy|complete|' \
   VERIFICATION_POLICY_RESULT=failure
+
+expect_failure tooling_failure 'tooling capability group concluded failure' \
+  VERIFICATION_SELECTION='|valid:v3|policy|complete|' \
+  VERIFICATION_TOOLING_RESULT=failure
 
 expect_failure rust_transport_cancel \
   'rust-transport capability group concluded cancelled' \

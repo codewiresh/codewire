@@ -1177,8 +1177,9 @@ fi
 }
 grep -qF 'push baseline is unavailable' "$missing_stderr"
 
-# Workflow contract: seven fixed capability groups. Forgejo assigns static jobs
-# before evaluating job-level conditions, so family-level fan-out is forbidden.
+# Workflow contract: eight bounded capability groups. Forgejo assigns static
+# jobs before evaluating job-level conditions, so each group must remain a
+# fixed runner task rather than dynamic family-level fan-out.
 while IFS='|' read -r job_id job_name runner; do
   block="$TMP/${job_id}.yaml"
   awk -v wanted="$job_id" '
@@ -1197,6 +1198,7 @@ while IFS='|' read -r job_id job_name runner; do
 done <<'EOF'
 policy|Policy verification|ci-light
 standard|Standard verification|ci-heavy
+tooling|Tooling / delivery contract verification|ci-heavy
 rust-transport|Rust / transport verification|ci-heavy
 database|Database verification|ci-heavy
 services-control|Service control-plane verification|ci-heavy
@@ -1208,7 +1210,7 @@ EOF
 # task ceilings at 30 minutes. The selected workspace path performs two cold
 # image builds, so it has a bounded 55-minute exception beneath the runner's
 # independently managed 60-minute task lifetime.
-for job_id in cw-release-assets standard rust-transport database services-control services-runtime; do
+for job_id in cw-release-assets standard tooling rust-transport database services-control services-runtime; do
   block="$TMP/${job_id}.yaml"
   if [ ! -s "$block" ]; then
     awk -v wanted="$job_id" '
@@ -1235,7 +1237,7 @@ grep -qF '    timeout-minutes: 55' "$workspace_block" || {
 }
 
 policy_block="$TMP/policy.yaml"
-grep -qF '    timeout-minutes: 15' "$policy_block"
+grep -qF '    timeout-minutes: 13' "$policy_block"
 grep -qF 'name: Verify sealed policy tools' "$policy_block"
 grep -qF 'name: Run Policy' "$policy_block"
 grep -A1 -F 'name: Run Policy' "$policy_block" \
@@ -1245,7 +1247,12 @@ if grep -Eq 'run:.*docker|setup-bun|setup-go|curl |wget ' "$policy_block"; then
   exit 1
 fi
 
-for job_id in policy standard rust-transport database services-control services-runtime edge-kind; do
+grep -qF '    timeout-minutes: 13' "$TMP/policy.yaml" || {
+  echo 'policy: light job must finish below the 14-minute runner lifetime' >&2
+  exit 1
+}
+
+for job_id in policy standard tooling rust-transport database services-control services-runtime edge-kind; do
   block="$TMP/${job_id}.yaml"
   grep -qF 'name: Reuse exact PR-head content verification' "$block"
   grep -qF "if: \${{ needs.verification-selection.outputs.tested_tree_receipt == 'accepted' }}" \
@@ -1369,7 +1376,7 @@ if grep -Eq '^    runs-on: (ubuntu-latest|kind-e2e)$' "$WORKFLOW"; then
   echo 'Codewire CI still depends on a legacy compatibility label' >&2
   exit 1
 fi
-[[ "$(grep -Fc '    runs-on: ci-heavy' "$WORKFLOW")" -eq 7 ]] || {
+[[ "$(grep -Fc '    runs-on: ci-heavy' "$WORKFLOW")" -eq 8 ]] || {
   echo 'Codewire CI heavy capability groups are not explicit' >&2
   exit 1
 }
@@ -1435,15 +1442,15 @@ python3 "$ROOT/scripts/ci/plan/tests/test_planner.py" \
   PlannerFixtureTests.test_go_sdk_only_change_emits_unselected_cw_and_desktop_outputs \
   PlannerFixtureTests.test_missing_cargo_fails_closed_with_diagnostic
 
-standard_block="$TMP/standard.yaml"
-deploy_toolchain_line="$(grep -n -m1 'name: Verify sealed Rust toolchain' \
-  "$standard_block" | cut -d: -f1)"
-deploy_run_line="$(grep -n -m1 'name: Run Deploy' "$standard_block" | cut -d: -f1)"
+tooling_block="$TMP/tooling.yaml"
+deploy_toolchain_line="$(grep -n -m1 'name: Verify sealed delivery-contract tools' \
+  "$tooling_block" | cut -d: -f1)"
+deploy_run_line="$(grep -n -m1 'name: Run Deploy' "$tooling_block" | cut -d: -f1)"
 test -n "$deploy_toolchain_line"
 test -n "$deploy_run_line"
 test "$deploy_toolchain_line" -lt "$deploy_run_line"
-grep -A2 -F 'name: Verify sealed Rust toolchain' \
-  "$standard_block" | grep -qF "contains(needs.verification-selection.outputs.selection, '|deploy|')"
+grep -A2 -F 'name: Verify sealed delivery-contract tools' \
+  "$tooling_block" | grep -qF "contains(needs.verification-selection.outputs.selection, '|deploy|')"
 
 if grep -qE '^[[:space:]]*permissions:' "$WORKFLOW"; then
   echo 'product CI must not declare GitHub-only permissions ignored by Forgejo' >&2
@@ -1455,8 +1462,8 @@ top_level_jobs="$(awk '
   in_jobs && /^  [A-Za-z0-9_-]+:$/ { count++ }
   END { print count + 0 }
 ' "$WORKFLOW")"
-if [ "$top_level_jobs" != 11 ]; then
-  echo "product CI defines ${top_level_jobs} jobs; expected selector, two artifact jobs, seven groups, and aggregate" >&2
+if [ "$top_level_jobs" != 12 ]; then
+  echo "product CI defines ${top_level_jobs} jobs; expected selector, two artifact jobs, eight groups, and aggregate" >&2
   exit 1
 fi
 for legacy_job in contracts rust go-support web sdk-go sdk-ts sdk-python \
@@ -1510,13 +1517,16 @@ awk '
   capture { print }
 ' "$WORKFLOW" > "$workspace_block"
 grep -qF '  workspace-image:' "$workspace_block"
-grep -qF '    name: Workspace image verification' "$workspace_block"
+grep -qF '    name: Container contract verification' "$workspace_block"
 grep -qF '    runs-on: ci-heavy' "$workspace_block"
 grep -qF '    needs: [verification-selection]' "$workspace_block"
-grep -qF 'name: Workspace image not selected' "$workspace_block"
+grep -qF 'name: Container contracts not selected' "$workspace_block"
 grep -qF 'no checkout, download, installation, or build required' "$workspace_block"
-grep -qF "needs.verification-selection.outputs.workspace_image_selected != 'true'" \
+grep -qF 'name: Resolve container contract scope' "$workspace_block"
+grep -qF 'WORKSPACE_IMAGE_SELECTED: ${{ needs.verification-selection.outputs.workspace_image_selected }}' \
   "$workspace_block"
+grep -qF "steps.container-scope.outputs.selected != 'true'" "$workspace_block"
+grep -qF "steps.container-scope.outputs.selected == 'true'" "$workspace_block"
 grep -qF "needs.verification-selection.outputs.workspace_image_selected == 'true'" \
   "$workspace_block"
 for command in \
@@ -1561,27 +1571,44 @@ web_run_line="$(grep -n -m1 'name: Run Web' "$standard_block" | cut -d: -f1)"
 web_run_block="$(sed -n "${web_run_line},$((web_run_line + 6))p" "$standard_block")"
 grep -qF 'VERIFICATION_SELECTION: ${{ needs.verification-selection.outputs.selection }}' \
   <<<"$web_run_block" || {
-  echo 'standard: Web cannot defer duplicate image verification to selected Kind' >&2
+  echo 'standard: Web does not receive its exact selection' >&2
   exit 1
 }
-grep -qF 'if selected kind; then' "$ROOT/scripts/ci/verify/run-product-verification.sh" || {
-  echo 'standard: Web does not preserve standalone dashboard image verification' >&2
+grep -qF 'CODEWIRE_DASHBOARD_IMAGE_DEFERRED:-false' \
+  "$ROOT/scripts/ci/verify/run-product-verification.sh" || {
+  echo 'standard: Web cannot defer image work to the container transaction' >&2
   exit 1
 }
+grep -qF '    run_dashboard_image' \
+  "$ROOT/scripts/ci/verify/run-product-verification.sh" || {
+  echo 'local Web verification lost its standalone image gate' >&2
+  exit 1
+}
+grep -qF 'name: Build and inspect the standalone dashboard image' \
+  "$workspace_block" || {
+  echo 'container contracts: standalone Web changes omit dashboard image verification' >&2
+  exit 1
+}
+dashboard_step="$(grep -A2 -F 'name: Build and inspect the standalone dashboard image' \
+  "$workspace_block")"
+for token in web kind; do
+  grep -qF "contains(needs.verification-selection.outputs.selection, '|${token}|')" \
+    <<<"$dashboard_step" || {
+    echo "container contracts: dashboard selection guard omits ${token}" >&2
+    exit 1
+  }
+done
+grep -qF 'run-product-verification.sh dashboard-image' <<<"$dashboard_step"
+grep -A4 -F 'name: Run Web' "$WORKFLOW" \
+  | grep -qF 'CODEWIRE_DASHBOARD_IMAGE_DEFERRED: "true"'
 
 for contract in \
     'Run Contracts|contracts' \
     'Run Go support|go_support' \
     'Run Web|web' \
-    'Run iOS package tests|ios' \
     'Run SDK Go|sdk_go' \
     'Run SDK TypeScript|sdk_ts' \
-    'Run SDK Python|sdk_python' \
-    'Run API key smoke tooling|service_apikey_smoke' \
-    'Run Confidential runtime tooling|runtime_confidential' \
-    'Run Release provenance|release' \
-    'Run Deploy|deploy' \
-    'Run Security|security'; do
+    'Run SDK Python|sdk_python'; do
   step_name="${contract%%|*}"
   token="${contract##*|}"
   step_condition="$(grep -A1 -F -- "- name: ${step_name}" "$standard_block")"
@@ -1592,38 +1619,56 @@ for contract in \
   }
 done
 
+tooling_block="$TMP/tooling.yaml"
+for contract in \
+    'Run API key smoke tooling|service_apikey_smoke' \
+    'Run Confidential runtime tooling|runtime_confidential' \
+    'Run Dev smoke tooling|runtime_dev_smoke' \
+    'Run Release provenance|release' \
+    'Run Deploy|deploy' \
+    'Run Security|security'; do
+  step_name="${contract%%|*}"
+  token="${contract##*|}"
+  step_condition="$(grep -A1 -F -- "- name: ${step_name}" "$tooling_block")"
+  grep -qF "contains(needs.verification-selection.outputs.selection, '|${token}|')" \
+    <<<"$step_condition" || {
+    echo "tooling: ${step_name} is not isolated to ${token}" >&2
+    exit 1
+  }
+done
+
 ios_run_line="$(grep -n -m1 'name: Run iOS package tests' \
-  "$standard_block" | cut -d: -f1)"
-ios_run_block="$(sed -n "${ios_run_line},$((ios_run_line + 10))p" "$standard_block")"
+  "$workspace_block" | cut -d: -f1)"
+ios_run_block="$(sed -n "${ios_run_line},$((ios_run_line + 10))p" "$workspace_block")"
 grep -qF "contains(needs.verification-selection.outputs.selection, '|ios|')" \
   <<<"$ios_run_block" || {
-  echo 'standard: iOS verification is not isolated to the iOS selection' >&2
+  echo 'container contracts: iOS verification is not isolated to the iOS selection' >&2
   exit 1
 }
 grep -qF 'scripts/ci/verify/run-product-verification.sh ios-config' \
   <<<"$ios_run_block" || {
-  echo 'standard: iOS callback configuration is not verified before package tests' >&2
+  echo 'container contracts: iOS callback configuration is not verified before package tests' >&2
   exit 1
 }
 grep -qF "docker build --file - apps/ios <<'DOCKERFILE'" <<<"$ios_run_block" || {
-  echo 'standard: iOS package tests do not stream their package context to Docker' >&2
+  echo 'container contracts: iOS package tests do not stream their package context to Docker' >&2
   exit 1
 }
 grep -qF 'swift@sha256:0ff707a48519cf1473616c759e019bcff21cfbafa3d2687bf8fd41a2757adc9a' \
   <<<"$ios_run_block" || {
-  echo 'standard: iOS package tests do not use the pinned Swift image' >&2
+  echo 'container contracts: iOS package tests do not use the pinned Swift image' >&2
   exit 1
 }
 grep -qF 'RUN swift test --scratch-path /tmp/codewire-ios-build' <<<"$ios_run_block" || {
-  echo 'standard: iOS package tests must build outside the checkout' >&2
+  echo 'container contracts: iOS package tests must build outside the checkout' >&2
   exit 1
 }
 if grep -qF -- '--mount "type=bind' <<<"$ios_run_block"; then
-  echo 'standard: iOS package tests must not assume the nested runner host path' >&2
+  echo 'container contracts: iOS package tests must not assume the nested runner host path' >&2
   exit 1
 fi
-if grep -qF 'swift-actions/setup-swift@' "$standard_block"; then
-  echo 'standard: iOS verification must not depend on an external Swift keyserver' >&2
+if grep -qF 'swift-actions/setup-swift@' "$workspace_block"; then
+  echo 'container contracts: iOS verification must not depend on an external Swift keyserver' >&2
   exit 1
 fi
 
