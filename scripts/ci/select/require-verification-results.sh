@@ -24,6 +24,7 @@ require_group_success() {
   fi
 }
 
+require_group_success policy "${VERIFICATION_POLICY_RESULT:-missing}"
 require_group_success standard "${VERIFICATION_STANDARD_RESULT:-missing}"
 require_group_success rust-transport \
   "${VERIFICATION_RUST_TRANSPORT_RESULT:-missing}"

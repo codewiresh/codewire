@@ -7,6 +7,7 @@ CHECK="$ROOT/scripts/ci/select/require-verification-results.sh"
 green_results=(
   VERIFICATION_SELECTION_RESULT=success
   VERIFICATION_TESTED_TREE_RECEIPT=fallback
+  VERIFICATION_POLICY_RESULT=success
   VERIFICATION_STANDARD_RESULT=success
   VERIFICATION_RUST_TRANSPORT_RESULT=success
   VERIFICATION_DATABASE_RESULT=success
@@ -48,6 +49,10 @@ env "${green_results[@]}" \
 expect_failure standard_failure 'standard capability group concluded failure' \
   VERIFICATION_SELECTION='|valid:v3|policy|rust|complete|' \
   VERIFICATION_STANDARD_RESULT=failure
+
+expect_failure policy_failure 'policy capability group concluded failure' \
+  VERIFICATION_SELECTION='|valid:v3|policy|complete|' \
+  VERIFICATION_POLICY_RESULT=failure
 
 expect_failure rust_transport_cancel \
   'rust-transport capability group concluded cancelled' \

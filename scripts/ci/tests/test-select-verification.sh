@@ -1177,7 +1177,7 @@ fi
 }
 grep -qF 'push baseline is unavailable' "$missing_stderr"
 
-# Workflow contract: six fixed capability groups. Forgejo assigns static jobs
+# Workflow contract: seven fixed capability groups. Forgejo assigns static jobs
 # before evaluating job-level conditions, so family-level fan-out is forbidden.
 while IFS='|' read -r job_id job_name runner; do
   block="$TMP/${job_id}.yaml"
@@ -1195,6 +1195,7 @@ while IFS='|' read -r job_id job_name runner; do
     exit 1
   fi
 done <<'EOF'
+policy|Policy verification|ci-light
 standard|Standard verification|ci-heavy
 rust-transport|Rust / transport verification|ci-heavy
 database|Database verification|ci-heavy
@@ -1233,7 +1234,18 @@ grep -qF '    timeout-minutes: 55' "$workspace_block" || {
   exit 1
 }
 
-for job_id in standard rust-transport database services-control services-runtime edge-kind; do
+policy_block="$TMP/policy.yaml"
+grep -qF '    timeout-minutes: 15' "$policy_block"
+grep -qF 'name: Verify sealed policy tools' "$policy_block"
+grep -qF 'name: Run Policy' "$policy_block"
+grep -A1 -F 'name: Run Policy' "$policy_block" \
+  | grep -qF "contains(needs.verification-selection.outputs.selection, '|policy|')"
+if grep -Eq 'run:.*docker|setup-bun|setup-go|curl |wget ' "$policy_block"; then
+  echo 'policy: restricted light job gained a Docker or network-tool setup dependency' >&2
+  exit 1
+fi
+
+for job_id in policy standard rust-transport database services-control services-runtime edge-kind; do
   block="$TMP/${job_id}.yaml"
   grep -qF 'name: Reuse exact PR-head content verification' "$block"
   grep -qF "if: \${{ needs.verification-selection.outputs.tested_tree_receipt == 'accepted' }}" \
@@ -1365,6 +1377,10 @@ fi
   echo 'Codewire CI Kind capability does not own one dedicated lane' >&2
   exit 1
 }
+[[ "$(grep -Fc '    runs-on: ci-light' "$WORKFLOW")" -eq 1 ]] || {
+  echo 'Codewire CI policy capability does not use the restricted light pool' >&2
+  exit 1
+}
 for output in selector_version classification selection required_local_mode \
     ci_head_commit ci_head_tree \
     cw_package_state cw_package_selected desktop_package_state \
@@ -1439,11 +1455,11 @@ top_level_jobs="$(awk '
   in_jobs && /^  [A-Za-z0-9_-]+:$/ { count++ }
   END { print count + 0 }
 ' "$WORKFLOW")"
-if [ "$top_level_jobs" != 10 ]; then
-  echo "product CI defines ${top_level_jobs} jobs; expected selector, two artifact jobs, six groups, and aggregate" >&2
+if [ "$top_level_jobs" != 11 ]; then
+  echo "product CI defines ${top_level_jobs} jobs; expected selector, two artifact jobs, seven groups, and aggregate" >&2
   exit 1
 fi
-for legacy_job in policy contracts rust go-support web sdk-go sdk-ts sdk-python \
+for legacy_job in contracts rust go-support web sdk-go sdk-ts sdk-python \
     service-integration transport release deploy security; do
   if grep -qF "  ${legacy_job}:" "$WORKFLOW"; then
     echo "legacy per-family runner job remains: ${legacy_job}" >&2
@@ -1554,7 +1570,6 @@ grep -qF 'if selected kind; then' "$ROOT/scripts/ci/verify/run-product-verificat
 }
 
 for contract in \
-    'Run Policy|policy' \
     'Run Contracts|contracts' \
     'Run Go support|go_support' \
     'Run Web|web' \
@@ -1625,14 +1640,17 @@ if [ "$standard_toolchain_line" -ge "$contracts_run_line" ]; then
   echo 'standard: Rust toolchain must be verified before contract verification' >&2
   exit 1
 fi
+policy_toolchain_condition="$(grep -A1 -F \
+  'name: Verify sealed policy tools' \
+  "$policy_block")"
+grep -qF "contains(needs.verification-selection.outputs.selection, '|policy|')" \
+  <<<"$policy_toolchain_condition" || {
+  echo 'policy: sealed tool check omits policy planner fixtures' >&2
+  exit 1
+}
 standard_toolchain_condition="$(grep -A1 -F \
   'name: Verify sealed Rust toolchain' \
   "$standard_block")"
-grep -qF "contains(needs.verification-selection.outputs.selection, '|policy|')" \
-  <<<"$standard_toolchain_condition" || {
-  echo 'standard: Rust toolchain omits policy planner fixtures' >&2
-  exit 1
-}
 grep -qF "contains(needs.verification-selection.outputs.selection, '|contracts_proto|')" \
   <<<"$standard_toolchain_condition" || {
   echo 'standard: Rust toolchain omits Proto/Connect mode' >&2

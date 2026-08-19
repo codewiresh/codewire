@@ -262,6 +262,34 @@ jobs:
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && needs.verification-selection.outputs.workspace_image_selected == 'true' }}
         run: scripts/ci/verify/verify-workspace-image.sh
 
+  policy:
+    # Policy and repository contracts are non-Docker checks over sealed tools.
+    # Keep them off privileged heavy capacity and run them in parallel with the
+    # product-specific Standard family.
+    name: Policy verification
+    runs-on: ci-light
+    timeout-minutes: 15
+    needs: [verification-selection]
+    steps:
+      - name: Reuse exact PR-head content verification
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt == 'accepted' }}
+        run: echo 'policy content verification inherited from the exact tested PR-head tree'
+
+      - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+        with:
+          fetch-depth: 0
+
+      - name: Verify sealed policy tools
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|policy|') }}
+        run: scripts/ci/setup/assert-ci-runner-image.sh
+
+      - name: Run Policy
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|policy|') }}
+        env:
+          VERIFICATION_SELECTION: ${{ needs.verification-selection.outputs.selection }}
+        run: scripts/ci/verify/run-product-verification.sh policy
+
   standard:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this untrusted job has no protected credential.
     name: Standard verification
@@ -285,7 +313,7 @@ jobs:
         run: scripts/ci/setup/setup-go.sh 1.26.6
 
       - name: Verify sealed Rust toolchain
-        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|policy|') || contains(needs.verification-selection.outputs.selection, '|contracts_proto|') || contains(needs.verification-selection.outputs.selection, '|go_tailnet|') || contains(needs.verification-selection.outputs.selection, '|go_consumer_interop|') || contains(needs.verification-selection.outputs.selection, '|deploy|')) }}
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|contracts_proto|') || contains(needs.verification-selection.outputs.selection, '|go_tailnet|') || contains(needs.verification-selection.outputs.selection, '|go_consumer_interop|') || contains(needs.verification-selection.outputs.selection, '|deploy|')) }}
         run: scripts/ci/setup/assert-ci-runner-image.sh
 
       - name: Install pinned protoc for Rust-backed standard checks
@@ -311,12 +339,6 @@ jobs:
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|sdk_ts|') }}
         with:
           node-version: '20'
-
-      - name: Run Policy
-        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|policy|') }}
-        env:
-          VERIFICATION_SELECTION: ${{ needs.verification-selection.outputs.selection }}
-        run: scripts/ci/verify/run-product-verification.sh policy
 
       - name: Run Contracts
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|contracts|') }}
@@ -847,6 +869,7 @@ jobs:
       - verification-selection
       - cw-release-assets
       - workspace-image
+      - policy
       - standard
       - rust-transport
       - database
@@ -865,6 +888,7 @@ jobs:
           VERIFICATION_TESTED_TREE_PR: ${{ needs.verification-selection.outputs.tested_tree_pr }}
           VERIFICATION_TESTED_TREE_HEAD: ${{ needs.verification-selection.outputs.tested_tree_head }}
           VERIFICATION_TESTED_TREE_RUN: ${{ needs.verification-selection.outputs.tested_tree_run }}
+          VERIFICATION_POLICY_RESULT: ${{ needs.policy.result }}
           VERIFICATION_STANDARD_RESULT: ${{ needs.standard.result }}
           VERIFICATION_RUST_TRANSPORT_RESULT: ${{ needs.rust-transport.result }}
           VERIFICATION_DATABASE_RESULT: ${{ needs.database.result }}
