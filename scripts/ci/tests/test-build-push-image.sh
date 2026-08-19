@@ -203,7 +203,6 @@ if CODEWIRE_SCCACHE_MODE=r2 CODEWIRE_RUST_PROFILE=ci \
 fi
 
 work="$(mktemp -d "$ROOT/.tmp/build-push-image.XXXXXX")"
-trap 'rm -rf "$work"' EXIT
 mkdir -p "$work/bin"
 
 r2_credentials_file="$work/aws-shared-credentials"
@@ -222,6 +221,14 @@ digest="sha256:$(printf 'd%.0s' {1..64})"
 second_digest="sha256:$(printf 'f%.0s' {1..64})"
 mismatch_digest="sha256:$(printf 'c%.0s' {1..64})"
 source_sha="$(git -C "$ROOT" rev-parse HEAD)"
+source_remote_before="$(git -C "$ROOT" remote get-url origin)"
+source_worktree="$work/clean-source"
+git -C "$ROOT" worktree add --detach "$source_worktree" "$source_sha" >/dev/null
+cleanup() {
+  git -C "$ROOT" worktree remove --force "$source_worktree" >/dev/null 2>&1 || true
+  rm -rf "$work"
+}
+trap cleanup EXIT
 base_digest="sha256:$(printf 'e%.0s' {1..64})"
 base_ref="nexus-system-cluster.example.invalid/oci-promoted/codewire/base@$base_digest"
 
@@ -246,9 +253,9 @@ cat >"$work/bin/docker" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 printf 'DOCKER_CONFIG=%q ' "${DOCKER_CONFIG:-}" >>"${FAKE_DOCKER_CALLS:?}"
-printf 'CODEWIRE_IMAGE_SOURCE_SHA=%q CODEWIRE_RUST_PROFILE=%q CODEWIRE_SCCACHE_MODE=%q BUILDX_GIT_CHECK_DIRTY=%q GIT_CONFIG_VALUE_0=%q ' \
+printf 'CODEWIRE_IMAGE_SOURCE_SHA=%q CODEWIRE_RUST_PROFILE=%q CODEWIRE_SCCACHE_MODE=%q GIT_REMOTE=%q ' \
   "${CODEWIRE_IMAGE_SOURCE_SHA:-}" "${CODEWIRE_RUST_PROFILE:-}" "${CODEWIRE_SCCACHE_MODE:-}" \
-  "${BUILDX_GIT_CHECK_DIRTY:-}" "${GIT_CONFIG_VALUE_0:-}" \
+  "$(git -C "${CODEWIRE_SOURCE_DIR:-.}" remote get-url origin)" \
   >>"$FAKE_DOCKER_CALLS"
 printf '%q ' "$@" >>"$FAKE_DOCKER_CALLS"
 printf '\n' >>"$FAKE_DOCKER_CALLS"
@@ -527,6 +534,7 @@ export FAKE_MANIFESTS="$work/manifests"
 export FAKE_DIGEST="$digest"
 export FAKE_PROVENANCE_BUILDER_ID='https://git.example.invalid/infra/ci/builders/protected-delivery/v1'
 export FAKE_SOURCE_SHA="$source_sha"
+export CODEWIRE_SOURCE_DIR="$source_worktree"
 export GITHUB_SHA="$source_sha"
 export GITHUB_REF='refs/heads/main'
 export GITHUB_REF_NAME='main'
@@ -576,8 +584,8 @@ grep -qF -- '--driver docker-container' "$FAKE_DOCKER_CALLS" ||
   fail 'protected publication retained the attestation-incompatible Docker driver'
 grep -qF -- '--driver-opt provenance-add-gha=false' "$FAKE_DOCKER_CALLS" ||
   fail 'protected publication may leak the Forgejo event payload into public provenance'
-grep -qF -- 'BUILDX_GIT_CHECK_DIRTY=1 GIT_CONFIG_VALUE_0=https://git.example.invalid/codewire/codewire.git' \
-  "$FAKE_DOCKER_CALLS" || fail 'protected provenance does not bind the exact clean canonical source'
+grep -qF -- 'GIT_REMOTE=https://git.example.invalid/codewire/codewire.git' \
+  "$FAKE_DOCKER_CALLS" || fail 'protected provenance does not build from the canonical source remote'
 grep -qF -- 'Provenance.SLSA' \
   "$FAKE_DOCKER_CALLS" || fail 'protected publication did not verify its emitted SLSA predicate'
 grep -qF -- '--sbom=generator=nexus.example.invalid/oci-approved/docker/buildkit-syft-scanner@sha256:13864237fb990943433f89d698590aad1de38d4a7e13d38e7b12f2488c1952e7' \
@@ -595,6 +603,8 @@ grep -qF -- 'buildx rm --force codewire-publish-' "$FAKE_DOCKER_CALLS" ||
   fail 'protected publication did not remove its isolated BuildKit builder'
 [[ "$(build_invocation_count)" -eq 1 ]] ||
   fail 'image was not built exactly once'
+[[ "$(git -C "$ROOT" remote get-url origin)" == "$source_remote_before" ]] ||
+  fail 'protected image publication did not restore the checkout origin remote'
 
 if ! (
   cd "$ROOT"
@@ -900,5 +910,18 @@ grep -Eq ' buildx rm --force codewire-kind-' "$FAKE_DOCKER_CALLS" ||
   fail 'Kind did not verify existence and trust labels for all four loaded images'
 grep -qF 'CODEWIRE_CI_PHASE name=product-image-build' "$work/kind-build.out" ||
   fail 'Kind image builder omitted its structured phase result'
+
+printf 'untrusted build input\n' >"$source_worktree/forbidden-untracked-input"
+fetch_calls_before="$(wc -l <"$FAKE_FETCH_CALLS")"
+if (
+  cd "$ROOT"
+  "$BUILDER" gateway deployments/docker/gateway.Dockerfile .
+) >"$work/dirty-source.out" 2>&1; then
+  fail 'protected image build accepted an untracked source input'
+fi
+grep -qF 'Protected image build requires no untracked source files' \
+  "$work/dirty-source.out" || fail 'dirty source rejection was not attributable'
+[[ "$(wc -l <"$FAKE_FETCH_CALLS")" -eq "$fetch_calls_before" ]] ||
+  fail 'dirty source rejection reached credential retrieval'
 
 echo 'build-push immutable source image tests passed'
