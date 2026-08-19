@@ -36,9 +36,10 @@ env:
 
 # Gitea assigns static jobs to runners before evaluating job-level conditions.
 # Keep the selector's family precision, but execute it through fixed capability
-# groups instead of creating one runner task per family. Heavy groups all use
-# the same bounded ci-heavy pool: Kind is a selected capability, not a separate
-# fleet. Step conditions keep unselected commands dormant.
+# groups instead of creating one runner task per family. Ordinary Docker groups
+# use bounded ci-heavy capacity. Kind uses a separately scheduled lane with the
+# same disposable privileged-untrusted worker shape, so ordinary work cannot
+# consume its warm slot. Step conditions keep unselected commands dormant.
 # A canonical squash whose tree exactly matches a fully green PR head runs only
 # each group's receipt sentinel. Receipt-control changes always take the full
 # path, and every rejected receipt falls back to the ordinary selected suite.
@@ -730,7 +731,7 @@ jobs:
   edge-kind:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this untrusted job has no protected credential.
     name: Edge / Kind verification
-    runs-on: ci-heavy
+    runs-on: ci-kind
     enable-openid-connect: true
     needs: [verification-selection]
     env:

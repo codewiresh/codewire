@@ -1200,7 +1200,7 @@ rust-transport|Rust / transport verification|ci-heavy
 database|Database verification|ci-heavy
 services-control|Service control-plane verification|ci-heavy
 services-runtime|Service runtime-plane verification|ci-heavy
-edge-kind|Edge / Kind verification|ci-heavy
+edge-kind|Edge / Kind verification|ci-kind
 EOF
 
 # Heavy jobs share the queue-driven disposable DinD runner pool. Keep ordinary
@@ -1357,8 +1357,12 @@ if grep -Eq '^    runs-on: (ubuntu-latest|kind-e2e)$' "$WORKFLOW"; then
   echo 'Codewire CI still depends on a legacy compatibility label' >&2
   exit 1
 fi
-[[ "$(grep -Fc '    runs-on: ci-heavy' "$WORKFLOW")" -eq 8 ]] || {
+[[ "$(grep -Fc '    runs-on: ci-heavy' "$WORKFLOW")" -eq 7 ]] || {
   echo 'Codewire CI heavy capability groups are not explicit' >&2
+  exit 1
+}
+[[ "$(grep -Fc '    runs-on: ci-kind' "$WORKFLOW")" -eq 1 ]] || {
+  echo 'Codewire CI Kind capability does not own one dedicated lane' >&2
   exit 1
 }
 for output in selector_version classification selection required_local_mode \
