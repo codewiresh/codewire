@@ -110,9 +110,9 @@ done
 rg -F 'node.codewire.sh/confidential-snp: "true"' "$SMOKE_DIR/confidential-smoke-job.yaml" >/dev/null
 rg -F 'node.codewire.sh/confidential-snp: "true"' "$SMOKE_DIR/confidential-attestation-job.yaml" >/dev/null
 rg -F 'privileged: true' "$SMOKE_DIR/confidential-attestation-job.yaml" >/dev/null
-rg -F 'name: codewire-commodity-runtime-smoke-v51' "$SMOKE_DIR/commodity-smoke-job.yaml" >/dev/null
-rg -F 'name: codewire-confidential-runtime-smoke-v51' "$SMOKE_DIR/confidential-smoke-job.yaml" >/dev/null
-rg -F 'name: codewire-confidential-snp-attestation-v51' "$SMOKE_DIR/confidential-attestation-job.yaml" >/dev/null
+rg -F 'name: codewire-commodity-runtime-smoke-v53' "$SMOKE_DIR/commodity-smoke-job.yaml" >/dev/null
+rg -F 'name: codewire-confidential-runtime-smoke-v53' "$SMOKE_DIR/confidential-smoke-job.yaml" >/dev/null
+rg -F 'name: codewire-confidential-snp-attestation-v53' "$SMOKE_DIR/confidential-attestation-job.yaml" >/dev/null
 
 command -v kustomize >/dev/null 2>&1 || {
   printf 'kustomize is required for the confidential smoke contract\n' >&2
