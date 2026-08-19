@@ -222,7 +222,6 @@ audit_sources() {
   local packaging_files=(
     apps/cli/Dockerfile
     images/workspace/Dockerfile
-    .gitea/workflows/claude-e2e.yaml
     .github/workflows/build-test.yml
     scripts/runtime/dev/smoke-dev-commodity.sh
     scripts/runtime/dev/measure-dev-commodity-overhead.sh

@@ -4,6 +4,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+readonly BUILDKIT_IMAGE='docker.io/moby/buildkit:v0.29.0@sha256:0039c1d47e8748b5afea56f4e85f14febaf34452bd99d9552d2daa82262b5cc5'
 docker_bin="${CODEWIRE_DOCKER_BIN:-docker}"
 metadata_file="${CODEWIRE_BAKE_METADATA_FILE:-$ROOT/.tmp/kind-image-build-metadata.json}"
 progress="${CODEWIRE_BUILDX_PROGRESS:-plain}"
@@ -60,8 +61,44 @@ case "$metadata_file" in
 esac
 mkdir -p "$(dirname "$metadata_file")"
 
+# Bake may compile four large Rust graphs concurrently. Keep one transient
+# BuildKit daemon for cross-target layer/object reuse, but bound its solver so
+# nested build containers cannot exhaust the dedicated CPX42 worker.
+umask 077
+mkdir -p "${RUNNER_TEMP:-$ROOT/.tmp}"
+work="$(mktemp -d "${RUNNER_TEMP:-$ROOT/.tmp}/codewire-kind-images.XXXXXX")"
+buildkit_config="$work/buildkitd.toml"
+builder="codewire-kind-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-0}-${BASHPID}"
+
+cleanup() {
+  local status=$? cleanup_status=0
+  trap - EXIT INT TERM
+  "$docker_bin" buildx rm --force "$builder" >/dev/null 2>&1 || cleanup_status=$?
+  rm -rf "$work"
+  if [ "$status" -eq 0 ] && [ "$cleanup_status" -ne 0 ]; then
+    echo "Kind image build: failed to remove transient builder $builder" >&2
+    status="$cleanup_status"
+  fi
+  exit "$status"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+printf '%s\n' \
+  '[worker.oci]' \
+  '  max-parallelism = 2' >"$buildkit_config"
+
+"$docker_bin" buildx create \
+  --name "$builder" \
+  --driver docker-container \
+  --driver-opt "image=$BUILDKIT_IMAGE" \
+  --buildkitd-config "$buildkit_config" \
+  --bootstrap >/dev/null
+
 started_at="$(date +%s)"
 bake_args=(
+  --builder "$builder"
   --file "$ROOT/docker-bake.hcl"
   --metadata-file "$metadata_file"
   --progress "$progress"

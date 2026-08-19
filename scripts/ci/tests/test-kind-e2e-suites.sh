@@ -68,6 +68,8 @@ grep -Fq 'sed "s/hostPort: 25432/hostPort: ${KIND_POSTGRES_HOST_PORT}/"' "$COMMO
   fail 'Kind cluster creation does not render the configured Postgres host port'
 grep -Fq 'configure_remote_dind_kind_network' "$COMMON" ||
   fail 'Kind cluster creation does not adapt the remote DinD network boundary'
+[[ "$(grep -Fc '"$ROOT/scripts/ci/verify/dashboard-image.sh" "codewire-dashboard:e2e"' "$COMMON")" -eq 1 ]] ||
+  fail 'Kind does not verify the exact dashboard image it already built'
 if grep -Fq '127.0.0.1:25432/codewire' "$COMMON"; then
   fail 'Kind smoke callers bypass the configurable Postgres URL'
 fi
@@ -75,6 +77,32 @@ fi
 # Sourcing the dispatcher defines every suite without executing one.
 # shellcheck source=scripts/ci/verify/kind-e2e.sh
 source "$SCRIPT"
+
+# Protected delivery may supply exact locally materialized release candidates.
+# The suite accepts them only when every product alias carries the same exact
+# source identity and release/promotable labels; ordinary PR Kind still builds
+# the non-promotable CI profile itself.
+docker() {
+  if [ "${1:-} ${2:-} ${3:-}" = 'image inspect --format' ]; then
+    case "${4:-}" in
+      *dev.codewire.build.profile*) printf '%s\n' release ;;
+      *dev.codewire.promotable*) printf '%s\n' true ;;
+      *org.opencontainers.image.revision*) printf '%s\n' 0123456789abcdef0123456789abcdef01234567 ;;
+      *) fail "unexpected protected image assertion: $*" ;;
+    esac
+    return
+  fi
+  [ "${1:-} ${2:-}" = 'image inspect' ] || fail "unexpected protected image command: $*"
+}
+CODEWIRE_KIND_EXPECTED_SOURCE_SHA=0123456789abcdef0123456789abcdef01234567
+assert_prebuilt_release_product_images
+CODEWIRE_KIND_EXPECTED_SOURCE_SHA=not-a-sha
+expect_failure malformed-prebuilt-source assert_prebuilt_release_product_images
+grep -Fq 'prebuilt release images require one exact expected source SHA' \
+  "$FIXTURE/malformed-prebuilt-source.out" ||
+  fail 'prebuilt release image mode accepted a malformed source identity'
+unset -f docker
+unset CODEWIRE_KIND_EXPECTED_SOURCE_SHA
 
 missing_tool=codewire-deliberately-missing-kind-tool
 if (require_tool "$missing_tool") >"$FIXTURE/missing-tool.out" 2>&1; then

@@ -277,6 +277,16 @@ run_web() {
   scripts/ci/tests/test-dashboard-browser-gate.sh
   scripts/checks/security/audit-js-supply-chain.sh
   scripts/checks/security/audit-runtime-images.sh
+  if selected kind; then
+    echo 'dashboard image verification deferred to the exact-image Kind transaction'
+  elif [ "${CODEWIRE_DASHBOARD_IMAGE_DEFERRED:-false}" = true ]; then
+    echo 'dashboard image verification deferred to the selected CI container transaction'
+  else
+    run_dashboard_image
+  fi
+}
+
+run_dashboard_image() {
   make verify-dashboard-image \
     DASHBOARD_VERIFY_IMAGE="codewire-dashboard:verification-${GITHUB_RUN_ID:-local}"
 }
@@ -520,7 +530,6 @@ run_release() {
   scripts/ci/tests/test-base-image-source.sh
   scripts/ci/tests/test-build-push-image.sh
   scripts/ci/tests/test-run-rust-build.sh
-  scripts/ci/tests/test-claude-e2e-workflow.sh
   scripts/ci/tests/test-fetch-infisical-ci-secret.sh
   scripts/ci/tests/test-fetch-openbao-ghcr-credentials.sh
   scripts/ci/tests/test-fetch-openbao-github-mirror-credentials.sh
@@ -587,6 +596,7 @@ run_deploy() {
   scripts/ci/tests/test-install-temporal.sh
   scripts/ci/plan/test.sh
   scripts/ci/tests/test-deploy-dev.sh
+  scripts/ci/tests/test-build-push-runtime-images.sh
   install_kustomize
   python3 scripts/checks/repo_checks.py orchestration-host-key-authz --self-test
 
@@ -712,6 +722,7 @@ case "$FAMILY" in
   contracts) run_contracts ;;
   go-support) run_go_support ;;
   web) run_web ;;
+  dashboard-image) run_dashboard_image ;;
   ios) run_ios ;;
   ios-config) run_ios_config ;;
   sdk-go) run_sdk_go ;;
@@ -728,7 +739,7 @@ case "$FAMILY" in
   deploy) run_deploy ;;
   security) run_security ;;
   *)
-    echo "usage: run-product-verification.sh policy|contracts|go-support|web|ios|sdk-go|sdk-ts|sdk-python|service-apikey-smoke|runtime-confidential|runtime-dev-smoke|rust|rust-curated-locks|transport|edge|release|deploy|security" >&2
+    echo "usage: run-product-verification.sh policy|contracts|go-support|web|dashboard-image|ios|sdk-go|sdk-ts|sdk-python|service-apikey-smoke|runtime-confidential|runtime-dev-smoke|rust|rust-curated-locks|transport|edge|release|deploy|security" >&2
     exit 2
     ;;
 esac

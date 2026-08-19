@@ -1,25 +1,16 @@
+# zizmor: ignore[excessive-permissions] Forgejo ignores permissions; runner profiles, job-scoped OIDC, and server-side integrations enforce capabilities.
 name: Deploy Dev
 
 on:
   push:
     branches: [main]
 
-permissions:
-  contents: read
-
-enable-openid-connect: true
-
-env:
-  ALLOW_NON_MAIN_IMAGE_BUILD: "1"
-  OPENBAO_ROLE: codewire-source-dev-publisher
-  OPENBAO_AUDIENCE: openbao-codewire-source-dev-publisher
-  OPENBAO_GHCR_ROLE: codewire-source-dev-publisher
-  OPENBAO_GHCR_AUDIENCE: openbao-codewire-source-dev-publisher
-
 jobs:
   deploy-selection:
+    # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this trusted planner has no write-capable integration or OIDC.
     name: Deploy selection
-    runs-on: ubuntu-latest
+    runs-on: trusted-plan
+    timeout-minutes: 15
     outputs:
       deploy_dev: ${{ steps.select.outputs.deploy_dev }}
       reason: ${{ steps.select.outputs.reason }}
@@ -76,89 +67,33 @@ jobs:
         if: ${{ always() }}
         run: rm -f -- "$RUNNER_TEMP/codewire-deployed-source-candidate.json"
 
-  build-gateway-image:
-    name: Build Gateway Image
-    runs-on: ubuntu-latest
+  build-publish-runtime-images:
+    # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this protected job receives only its job-scoped OIDC and allowlisted server-side capabilities.
+    name: Build, verify, and publish exact runtime image set
+    runs-on: protected-delivery
+    enable-openid-connect: true
+    timeout-minutes: 110
     needs: [deploy-selection]
     if: ${{ needs.deploy-selection.outputs.deploy_dev == 'true' }}
-    outputs:
-      candidate_ref: ${{ steps.build.outputs.candidate_ref }}
+    env:
+      OPENBAO_ROLE: codewire-source-dev-publisher
+      OPENBAO_AUDIENCE: openbao-codewire-source-dev-publisher
+      OPENBAO_GHCR_ROLE: codewire-source-dev-publisher
+      OPENBAO_GHCR_AUDIENCE: openbao-codewire-source-dev-publisher
     steps:
       - uses: https://git.example.invalid/noel/actions-checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
 
-      - name: Build and push gateway image
+      - name: Build and push the exact runtime image set
         id: build
-        run: scripts/ci/images/build-push-image.sh gateway deployments/docker/gateway.Dockerfile .
+        env:
+          CODEWIRE_SCCACHE_MODE: local
+        run: scripts/ci/images/build-push-runtime-images.sh
 
-  build-dashboard-image:
-    name: Build Dashboard Image
-    runs-on: ubuntu-latest
-    needs: [deploy-selection]
-    if: ${{ needs.deploy-selection.outputs.deploy_dev == 'true' }}
-    outputs:
-      candidate_ref: ${{ steps.build.outputs.candidate_ref }}
-    steps:
-      - uses: https://git.example.invalid/noel/actions-checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
-
-      - name: Build and push dashboard image
-        id: build
-        run: scripts/ci/images/build-push-image.sh dashboard apps/dashboard/Dockerfile .
-
-  build-derp:
-    name: Build DERP Relay Image
-    runs-on: ubuntu-latest
-    needs: [deploy-selection]
-    if: ${{ needs.deploy-selection.outputs.deploy_dev == 'true' }}
-    outputs:
-      candidate_ref: ${{ steps.build.outputs.candidate_ref }}
-    steps:
-      - uses: https://git.example.invalid/noel/actions-checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
-
-      - name: Build and push DERP image
-        id: build
-        run: scripts/ci/images/build-push-image.sh derp deployments/docker/derp.Dockerfile .
-
-  build-services-image:
-    name: Build Rust Services Image
-    runs-on: ubuntu-latest
-    needs: [deploy-selection]
-    if: ${{ needs.deploy-selection.outputs.deploy_dev == 'true' }}
-    outputs:
-      candidate_ref: ${{ steps.build.outputs.candidate_ref }}
-    steps:
-      - uses: https://git.example.invalid/noel/actions-checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
-
-      - name: Build and push services image
-        id: build
-        run: scripts/ci/images/build-push-image.sh services deployments/docker/services.Dockerfile .
-
-  build-mesh-image:
-    name: Build Hosted Mesh Image
-    runs-on: ubuntu-latest
-    needs: [deploy-selection]
-    if: ${{ needs.deploy-selection.outputs.deploy_dev == 'true' }}
-    outputs:
-      candidate_ref: ${{ steps.build.outputs.candidate_ref }}
-    steps:
-      - uses: https://git.example.invalid/noel/actions-checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
-
-      - name: Build and push hosted Mesh image
-        id: build
-        run: scripts/ci/images/build-push-image.sh mesh deployments/docker/mesh.Dockerfile .
-
-  publish-runtime-images:
-    name: Publish exact runtime manifests to GHCR
-    runs-on: ubuntu-latest
-    needs:
-      - deploy-selection
-      - build-gateway-image
-      - build-dashboard-image
-      - build-derp
-      - build-services-image
-      - build-mesh-image
-    if: ${{ needs.deploy-selection.outputs.deploy_dev == 'true' }}
-    steps:
-      - uses: https://git.example.invalid/noel/actions-checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+      - name: Test the exact protected release images in disposable Kind
+        env:
+          CODEWIRE_KIND_EXPECTED_SOURCE_SHA: ${{ github.sha }}
+          CODEWIRE_KIND_PRODUCT_IMAGE_MODE: prebuilt-release
+        run: scripts/ci/verify/kind-e2e.sh
 
       - name: Copy the complete runtime set without rebuilding
         run: |
@@ -167,44 +102,37 @@ jobs:
           scripts/ci/images/image-bundle.py create \
             --source-sha "$GITHUB_SHA" \
             --output "$bundle" \
-            --candidate dashboard "$GITHUB_SHA" "${{ needs.build-dashboard-image.outputs.candidate_ref }}" \
-            --candidate derp "$GITHUB_SHA" "${{ needs.build-derp.outputs.candidate_ref }}" \
-            --candidate gateway "$GITHUB_SHA" "${{ needs.build-gateway-image.outputs.candidate_ref }}" \
-            --candidate services "$GITHUB_SHA" "${{ needs.build-services-image.outputs.candidate_ref }}" \
-            --candidate mesh "$GITHUB_SHA" "${{ needs.build-mesh-image.outputs.candidate_ref }}"
+            --candidate dashboard "$GITHUB_SHA" "${{ steps.build.outputs.dashboard_candidate_ref }}" \
+            --candidate derp "$GITHUB_SHA" "${{ steps.build.outputs.derp_candidate_ref }}" \
+            --candidate gateway "$GITHUB_SHA" "${{ steps.build.outputs.gateway_candidate_ref }}" \
+            --candidate services "$GITHUB_SHA" "${{ steps.build.outputs.services_candidate_ref }}" \
+            --candidate mesh "$GITHUB_SHA" "${{ steps.build.outputs.mesh_candidate_ref }}"
           scripts/ci/images/publish-image-to-ghcr.sh \
-            "${{ needs.build-dashboard-image.outputs.candidate_ref }}" \
+            "${{ steps.build.outputs.dashboard_candidate_ref }}" \
             ghcr.io/codewiresh/dashboard \
             "$GITHUB_SHA"
           scripts/ci/images/publish-image-to-ghcr.sh \
-            "${{ needs.build-derp.outputs.candidate_ref }}" \
+            "${{ steps.build.outputs.derp_candidate_ref }}" \
             ghcr.io/codewiresh/derp \
             "$GITHUB_SHA"
           scripts/ci/images/publish-image-to-ghcr.sh \
-            "${{ needs.build-gateway-image.outputs.candidate_ref }}" \
+            "${{ steps.build.outputs.gateway_candidate_ref }}" \
             ghcr.io/codewiresh/gateway \
             "$GITHUB_SHA"
           scripts/ci/images/publish-image-to-ghcr.sh \
-            "${{ needs.build-services-image.outputs.candidate_ref }}" \
+            "${{ steps.build.outputs.services_candidate_ref }}" \
             ghcr.io/codewiresh/services \
             "$GITHUB_SHA"
           scripts/ci/images/publish-image-to-ghcr.sh \
-            "${{ needs.build-mesh-image.outputs.candidate_ref }}" \
+            "${{ steps.build.outputs.mesh_candidate_ref }}" \
             ghcr.io/codewiresh/mesh \
             "$GITHUB_SHA"
 
-  dispatch-deploy-dev:
-    name: Dispatch exact source to deploy
-    runs-on: untrusted-validation
-    timeout-minutes: 15
-    needs:
-      - deploy-selection
-      - publish-runtime-images
-    if: ${{ needs.deploy-selection.outputs.deploy_dev == 'true' && github.ref == 'refs/heads/main' && needs.publish-runtime-images.result == 'success' }}
-    steps:
-      - uses: https://git.example.invalid/noel/actions-checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
-        with:
-          fetch-depth: 1
+      - name: Sign the tested exact runtime set
+        run: |
+          scripts/ci/images/sign-runtime-image-set.sh \
+            "${RUNNER_TEMP:?}/codewire-dev-image-bundle.json" \
+            scripts/ci/trust/codewire-runtime-signing.pub
 
       - name: Require the exact current canonical main commit
         run: |

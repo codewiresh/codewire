@@ -35,6 +35,16 @@ for workflow in "${WORKFLOWS[@]}"; do
   grep -Fq 'scripts/ci/setup/assert-ci-runner-image.sh' "$workflow"
 done
 
+grep -Fq '    runs-on: ci-heavy' \
+  "$ROOT/.gitea/workflows/manual-diagnostics.yaml" || {
+  echo 'manual Docker/Postgres diagnostics must use the explicit heavy profile' >&2
+  exit 1
+}
+if grep -qE '^permissions:' "$ROOT/.gitea/workflows/manual-diagnostics.yaml"; then
+  echo 'manual diagnostics rely on ignored GitHub permissions syntax' >&2
+  exit 1
+fi
+
 grep -Fq 'scripts/ci/tests/test-ci-runner-image-contract.sh' \
   "$ROOT/.gitea/workflows/ci.yaml"
 

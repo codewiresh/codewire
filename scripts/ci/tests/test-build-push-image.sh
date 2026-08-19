@@ -30,6 +30,16 @@ fail() {
   exit 1
 }
 
+grep -Fq 'CODEWIRE_EXTERNAL_BUILDX_BUILDER' "$BUILDER" ||
+  fail 'published-image builder cannot join the job-scoped BuildKit daemon'
+grep -Fq 'CODEWIRE_EXTERNAL_DOCKER_CONFIG' "$BUILDER" ||
+  fail 'published-image builder cannot share private job-scoped registry auth'
+grep -Fq 'buildx_builder_owned=0' "$BUILDER" ||
+  fail 'published-image builder does not distinguish caller-owned BuildKit state'
+# shellcheck disable=SC2016 # This assertion intentionally matches literal shell source.
+grep -Fq 'docker buildx inspect "$buildx_builder"' "$BUILDER" ||
+  fail 'published-image builder does not validate an external BuildKit daemon'
+
 build_invocation_count() {
   grep -Ec ' buildx (bake|build) ' "$FAKE_DOCKER_CALLS" || true
 }
@@ -122,6 +132,10 @@ verify_kind_build_cache_contract() {
     fail 'shared build base omits the reviewed sccache binary'
   grep -qF 'CODEWIRE_SCCACHE_MODE:-local' "$KIND_BUILDER" ||
     fail 'Kind does not enable its job-local compiler cache'
+  grep -qF "'  max-parallelism = 2'" "$KIND_BUILDER" ||
+    fail 'Kind image builder lacks the CPX42 memory bound'
+  grep -qF 'moby/buildkit:v0.29.0@sha256:0039c1d47e8748b5afea56f4e85f14febaf34452bd99d9552d2daa82262b5cc5' \
+    "$KIND_BUILDER" || fail 'Kind image builder does not pin BuildKit'
   [[ "$(grep -cF 'buildx bake' "$KIND_BUILDER")" -eq 1 ]] ||
     fail 'Kind must issue exactly one canonical Bake build'
   grep -qF '$target.secrets+=id=aws_shared_credentials,src=$credentials_file' \
@@ -222,8 +236,9 @@ cat >"$work/bin/docker" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 printf 'DOCKER_CONFIG=%q ' "${DOCKER_CONFIG:-}" >>"${FAKE_DOCKER_CALLS:?}"
-printf 'CODEWIRE_IMAGE_SOURCE_SHA=%q CODEWIRE_RUST_PROFILE=%q CODEWIRE_SCCACHE_MODE=%q ' \
+printf 'CODEWIRE_IMAGE_SOURCE_SHA=%q CODEWIRE_RUST_PROFILE=%q CODEWIRE_SCCACHE_MODE=%q BUILDX_GIT_CHECK_DIRTY=%q GIT_CONFIG_VALUE_0=%q ' \
   "${CODEWIRE_IMAGE_SOURCE_SHA:-}" "${CODEWIRE_RUST_PROFILE:-}" "${CODEWIRE_SCCACHE_MODE:-}" \
+  "${BUILDX_GIT_CHECK_DIRTY:-}" "${GIT_CONFIG_VALUE_0:-}" \
   >>"$FAKE_DOCKER_CALLS"
 printf '%q ' "$@" >>"$FAKE_DOCKER_CALLS"
 printf '\n' >>"$FAKE_DOCKER_CALLS"
@@ -258,9 +273,11 @@ case "${1:-} ${2:-} ${3:-}" in
   'buildx imagetools inspect')
     shift 3
     reference=''
+    format=''
     while [ "$#" -gt 0 ]; do
       case "$1" in
         --format)
+          format="$2"
           shift 2
           ;;
         *)
@@ -282,6 +299,36 @@ case "${1:-} ${2:-} ${3:-}" in
     if [ "$reference" = "${FAKE_INSPECT_ERROR_REF:-}" ]; then
       echo 'ERROR: registry authorization failed' >&2
       exit 1
+    fi
+    if [ "$format" = '{{json .Provenance.SLSA}}' ]; then
+      jq -n \
+        --arg builder "${FAKE_PROVENANCE_BUILDER_ID:?}" \
+        --arg revision "${FAKE_SOURCE_SHA:?}" \
+        --arg source 'https://git.example.invalid/codewire/codewire.git' '
+          {
+            buildDefinition: {
+              buildType: "https://github.com/moby/buildkit/blob/master/docs/attestations/slsa-definitions.md",
+              internalParameters: {builderPlatform: "linux/amd64"}
+            },
+            runDetails: {
+              builder: {id: $builder},
+              metadata: {buildkit_metadata: {vcs: {revision: $revision, source: $source}}}
+            }
+          }
+        '
+      exit 0
+    fi
+    if [ "$format" = '{{json .SBOM.SPDX}}' ]; then
+      if [ "${FAKE_SBOM_INVALID:-0}" = 1 ]; then
+        jq -n '{spdxVersion: "SPDX-2.3", packages: []}'
+      else
+        jq -n '{
+          spdxVersion: "SPDX-2.3",
+          documentNamespace: "https://codewire.example/sbom/test",
+          packages: [{name: "codewire-test"}]
+        }'
+      fi
+      exit 0
     fi
     digest="$(
       awk -F '\t' -v reference="$reference" \
@@ -353,7 +400,7 @@ case "${1:-} ${2:-} ${3:-}" in
         --file|--provenance)
           shift 2
           ;;
-        --push)
+        --push|--sbom=generator=*)
           shift
           ;;
         *)
@@ -403,7 +450,7 @@ case "${1:-} ${2:-} ${3:-}" in
         --build-arg|--label|-f)
           shift 2
           ;;
-        --push|--provenance=*)
+        --push|--provenance=*|--sbom=generator=*)
           shift
           ;;
         *)
@@ -446,6 +493,8 @@ export FAKE_DOCKER_CALLS="$work/docker-calls"
 export FAKE_SCCACHE_CALLS="$work/sccache-calls"
 export FAKE_MANIFESTS="$work/manifests"
 export FAKE_DIGEST="$digest"
+export FAKE_PROVENANCE_BUILDER_ID='https://git.example.invalid/infra/ci/builders/protected-delivery/v1'
+export FAKE_SOURCE_SHA="$source_sha"
 export GITHUB_SHA="$source_sha"
 export GITHUB_REF='refs/heads/main'
 export GITHUB_REF_NAME='main'
@@ -485,18 +534,66 @@ grep -qF -- "CODEWIRE_IMAGE_SOURCE_SHA=$source_sha" "$FAKE_DOCKER_CALLS" ||
   fail 'exact source revision did not reach canonical Bake'
 grep -qF -- 'CODEWIRE_RUST_PROFILE=release' "$FAKE_DOCKER_CALLS" ||
   fail 'protected publication did not force the release profile'
-grep -qF -- '--provenance mode=min' "$FAKE_DOCKER_CALLS" ||
-  fail 'protected product build omitted minimal BuildKit SLSA provenance'
+grep -qF -- 'builder-id=https://git.example.invalid/infra/ci/builders/protected-delivery/v1' "$FAKE_DOCKER_CALLS" ||
+  fail 'protected product build omitted its explicit minimal BuildKit SLSA provenance identity'
 grep -qF -- 'buildx create --name codewire-publish-' "$FAKE_DOCKER_CALLS" ||
   fail 'protected publication did not create an isolated BuildKit builder'
 grep -qF -- '--driver docker-container' "$FAKE_DOCKER_CALLS" ||
   fail 'protected publication retained the attestation-incompatible Docker driver'
+grep -qF -- '--driver-opt provenance-add-gha=false' "$FAKE_DOCKER_CALLS" ||
+  fail 'protected publication may leak the Forgejo event payload into public provenance'
+grep -qF -- 'BUILDX_GIT_CHECK_DIRTY=1 GIT_CONFIG_VALUE_0=https://git.example.invalid/codewire/codewire.git' \
+  "$FAKE_DOCKER_CALLS" || fail 'protected provenance does not bind the exact clean canonical source'
+grep -qF -- 'Provenance.SLSA' \
+  "$FAKE_DOCKER_CALLS" || fail 'protected publication did not verify its emitted SLSA predicate'
+grep -qF -- '--sbom=generator=nexus-system-cluster.example.invalid/oci-approved/docker/buildkit-syft-scanner@sha256:13864237fb990943433f89d698590aad1de38d4a7e13d38e7b12f2488c1952e7' \
+  "$FAKE_DOCKER_CALLS" ||
+  fail 'protected publication did not request an SBOM from the approved exact generator'
+grep -qF -- 'SBOM.SPDX' "$FAKE_DOCKER_CALLS" ||
+  fail 'protected publication did not verify its emitted SPDX SBOM'
 grep -qF -- 'image=docker.io/moby/buildkit:v0.29.0@sha256:0039c1d47e8748b5afea56f4e85f14febaf34452bd99d9552d2daa82262b5cc5' \
   "$FAKE_DOCKER_CALLS" || fail 'protected publication does not pin its BuildKit daemon image'
 grep -qF -- 'buildx rm --force codewire-publish-' "$FAKE_DOCKER_CALLS" ||
   fail 'protected publication did not remove its isolated BuildKit builder'
 [[ "$(build_invocation_count)" -eq 1 ]] ||
   fail 'image was not built exactly once'
+
+if (
+  cd "$ROOT"
+  CODEWIRE_PROVENANCE_BUILDER_ID=https://attacker.invalid/builder \
+    "$BUILDER" gateway deployments/docker/gateway.Dockerfile .
+) >"$work/unrecognized-builder.out" 2>"$work/unrecognized-builder.err"; then
+  fail 'protected image build accepted an unrecognized builder identity'
+fi
+grep -qF 'unrecognized provenance builder identity' \
+  "$work/unrecognized-builder.err" ||
+  fail 'unrecognized provenance builder rejection was not attributable'
+
+if (
+  cd "$ROOT"
+  FAKE_PROVENANCE_BUILDER_ID=https://attacker.invalid/builder \
+    "$BUILDER" gateway deployments/docker/gateway.Dockerfile .
+) >"$work/invalid-provenance.out" 2>"$work/invalid-provenance.err"; then
+  fail 'protected image build accepted provenance from a different builder'
+fi
+grep -qF 'Protected image provenance is invalid' \
+  "$work/invalid-provenance.err" ||
+  fail 'invalid emitted provenance rejection was not attributable'
+[[ "$(build_invocation_count)" -eq 1 ]] ||
+  fail 'provenance rejection rebuilt an immutable source image'
+
+if (
+  cd "$ROOT"
+  FAKE_SBOM_INVALID=1 \
+    "$BUILDER" gateway deployments/docker/gateway.Dockerfile .
+) >"$work/invalid-sbom.out" 2>"$work/invalid-sbom.err"; then
+  fail 'protected image build accepted an invalid SPDX SBOM'
+fi
+grep -qF 'Protected image SBOM is invalid' \
+  "$work/invalid-sbom.err" ||
+  fail 'invalid emitted SBOM rejection was not attributable'
+[[ "$(build_invocation_count)" -eq 1 ]] ||
+  fail 'SBOM rejection rebuilt an immutable source image'
 
 printf '0\n' >"$work/login-state"
 login_calls_before="$(grep -c ' login ' "$FAKE_DOCKER_CALLS" || true)"
@@ -740,6 +837,14 @@ kind_builds_before="$(grep -Ec ' buildx bake .* kind $' "$FAKE_DOCKER_CALLS" || 
 ) >"$work/kind-build.out"
 [[ "$(grep -Ec ' buildx bake .* kind $' "$FAKE_DOCKER_CALLS" || true)" -eq \
   $((kind_builds_before + 1)) ]] || fail 'Kind did not issue exactly one Bake graph build'
+grep -Eq ' buildx create --name codewire-kind-.* --driver docker-container .* --buildkitd-config .* --bootstrap ' \
+  "$FAKE_DOCKER_CALLS" || fail 'Kind did not create its bounded transient BuildKit daemon'
+grep -qF -- '--driver-opt image=docker.io/moby/buildkit:v0.29.0@sha256:0039c1d47e8748b5afea56f4e85f14febaf34452bd99d9552d2daa82262b5cc5' \
+  "$FAKE_DOCKER_CALLS" || fail 'Kind did not use the pinned BuildKit daemon image'
+grep -Eq ' buildx bake --builder codewire-kind-.* kind $' "$FAKE_DOCKER_CALLS" ||
+  fail 'Kind Bake did not use its bounded transient builder'
+grep -Eq ' buildx rm --force codewire-kind-' "$FAKE_DOCKER_CALLS" ||
+  fail 'Kind did not destroy its transient BuildKit daemon'
 [[ "$(grep -c ' image inspect ' "$FAKE_DOCKER_CALLS" || true)" -eq 12 ]] ||
   fail 'Kind did not verify existence and trust labels for all four loaded images'
 grep -qF 'CODEWIRE_CI_PHASE name=product-image-build' "$work/kind-build.out" ||

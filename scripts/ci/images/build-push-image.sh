@@ -21,6 +21,17 @@ sccache_mode="${CODEWIRE_SCCACHE_MODE:-disabled}"
 readonly REGISTRY_HOST='nexus-system-cluster.example.invalid'
 readonly REGISTRY_REPOSITORY_PREFIX="${REGISTRY_HOST}/oci-promoted/codewire"
 readonly BUILDKIT_IMAGE='docker.io/moby/buildkit:v0.29.0@sha256:0039c1d47e8748b5afea56f4e85f14febaf34452bd99d9552d2daa82262b5cc5'
+readonly SBOM_GENERATOR_IMAGE='nexus-system-cluster.example.invalid/oci-approved/docker/buildkit-syft-scanner@sha256:13864237fb990943433f89d698590aad1de38d4a7e13d38e7b12f2488c1952e7'
+readonly PROVENANCE_SOURCE_URL='https://git.example.invalid/codewire/codewire.git'
+readonly EXPECTED_PROVENANCE_BUILDER_ID='https://git.example.invalid/infra/ci/builders/protected-delivery/v1'
+
+provenance_builder_id="${CODEWIRE_PROVENANCE_BUILDER_ID:-$EXPECTED_PROVENANCE_BUILDER_ID}"
+if [ "$provenance_builder_id" != "$EXPECTED_PROVENANCE_BUILDER_ID" ]; then
+  echo 'Protected image build received an unrecognized provenance builder identity' >&2
+  exit 2
+fi
+readonly provenance_builder_id
+readonly provenance="mode=min,builder-id=${provenance_builder_id}"
 
 case "$require_existing_source_image" in
   0|1) ;;
@@ -136,11 +147,12 @@ registry_username_file="$work/nexus-username"
 registry_password_file="$work/nexus-password"
 build_metadata="$work/build-metadata.json"
 bake_metadata="$work/bake-metadata.json"
-docker_config="$work/docker-config"
+docker_config="${CODEWIRE_EXTERNAL_DOCKER_CONFIG:-$work/docker-config}"
 credential_fetcher="${OPENBAO_NEXUS_CREDENTIAL_FETCHER:-scripts/ci/setup/fetch-openbao-nexus-credentials.sh}"
 buildx_builder=''
+buildx_builder_owned=0
 cleanup() {
-  if [ -n "$buildx_builder" ]; then
+  if [ "$buildx_builder_owned" = 1 ] && [ -n "$buildx_builder" ]; then
     DOCKER_CONFIG="$docker_config" docker buildx rm --force "$buildx_builder" \
       >/dev/null 2>&1 || true
   fi
@@ -148,7 +160,21 @@ cleanup() {
   rm -rf "$work"
 }
 trap cleanup EXIT
-mkdir -m 0700 "$docker_config"
+case "$docker_config" in
+  /*) ;;
+  *)
+    echo 'Docker configuration directory must be an absolute path' >&2
+    exit 2
+    ;;
+esac
+if [ -d "$docker_config" ]; then
+  [ "$(stat -c '%a' -- "$docker_config")" = 700 ] || {
+    echo 'Docker configuration directory must have mode 0700' >&2
+    exit 2
+  }
+else
+  mkdir -m 0700 "$docker_config"
+fi
 if [ ! -x "$credential_fetcher" ]; then
   echo "OpenBao Nexus credential fetcher is missing or not executable" >&2
   exit 1
@@ -189,12 +215,24 @@ registry_login
 
 create_buildx_builder() {
   [ -z "$buildx_builder" ] || return 0
+  if [ -n "${CODEWIRE_EXTERNAL_BUILDX_BUILDER:-}" ]; then
+    if [[ ! "$CODEWIRE_EXTERNAL_BUILDX_BUILDER" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$ ]]; then
+      echo 'External Buildx builder name is malformed' >&2
+      exit 2
+    fi
+    buildx_builder="$CODEWIRE_EXTERNAL_BUILDX_BUILDER"
+    DOCKER_CONFIG="$docker_config" docker buildx inspect "$buildx_builder" \
+      --bootstrap >/dev/null
+    return
+  fi
   buildx_builder="codewire-publish-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-0}-${image_name}-${BASHPID}"
   DOCKER_CONFIG="$docker_config" docker buildx create \
     --name "$buildx_builder" \
     --driver docker-container \
     --driver-opt "image=$BUILDKIT_IMAGE" \
+    --driver-opt provenance-add-gha=false \
     --bootstrap >/dev/null
+  buildx_builder_owned=1
 }
 
 inspect_manifest_digest() {
@@ -290,6 +328,79 @@ ensure_immutable_tag() {
   fi
 }
 
+verify_build_provenance() {
+  local reference="${canonical_repository}@${source_digest}"
+  local provenance_output provenance_error attempt
+  for attempt in 1 2 3; do
+    provenance_output="$(mktemp "$work/provenance-output.XXXXXX")"
+    provenance_error="$(mktemp "$work/provenance-error.XXXXXX")"
+    if DOCKER_CONFIG="$docker_config" docker buildx imagetools inspect \
+      --format '{{json .Provenance.SLSA}}' "$reference" \
+      >"$provenance_output" 2>"$provenance_error"; then
+      if jq -e \
+        --arg builder "$provenance_builder_id" \
+        --arg revision "$source_sha" \
+        --arg source "$PROVENANCE_SOURCE_URL" '
+          .buildDefinition.buildType
+            == "https://github.com/moby/buildkit/blob/master/docs/attestations/slsa-definitions.md"
+          and .runDetails.builder.id == $builder
+          and .runDetails.metadata.buildkit_metadata.vcs.revision == $revision
+          and .runDetails.metadata.buildkit_metadata.vcs.source == $source
+          and ([((.buildDefinition.internalParameters // {}) | keys[])
+            | select(startswith("github_"))] | length == 0)
+        ' "$provenance_output" >/dev/null; then
+        return 0
+      fi
+      echo "Protected image provenance is invalid for $reference" >&2
+      return 1
+    fi
+    if registry_auth_error "$provenance_error" && [ "$attempt" -lt 3 ]; then
+      echo "Registry authentication expired while verifying provenance for $reference; re-authenticating (attempt $((attempt + 1))/3)" >&2
+      if ! registry_login; then
+        echo "Unable to refresh registry authentication for $reference" >&2
+        return 1
+      fi
+      continue
+    fi
+    echo "Unable to inspect protected image provenance for $reference" >&2
+    sed -n '1,20p' "$provenance_error" >&2
+    return 1
+  done
+}
+
+verify_build_sbom() {
+  local reference="${canonical_repository}@${source_digest}"
+  local sbom_output sbom_error attempt
+  for attempt in 1 2 3; do
+    sbom_output="$(mktemp "$work/sbom-output.XXXXXX")"
+    sbom_error="$(mktemp "$work/sbom-error.XXXXXX")"
+    if DOCKER_CONFIG="$docker_config" docker buildx imagetools inspect \
+      --format '{{json .SBOM.SPDX}}' "$reference" \
+      >"$sbom_output" 2>"$sbom_error"; then
+      if jq -e '
+        .spdxVersion == "SPDX-2.3"
+        and (.documentNamespace | type == "string" and length > 0)
+        and (.packages | type == "array" and length > 0)
+      ' "$sbom_output" >/dev/null; then
+        return 0
+      fi
+      echo "Protected image SBOM is invalid for $reference" >&2
+      return 1
+    fi
+    if registry_auth_error "$sbom_error" && [ "$attempt" -lt 3 ]; then
+      echo "Registry authentication expired while verifying SBOM for $reference; re-authenticating (attempt $((attempt + 1))/3)" >&2
+      if ! registry_login; then
+        echo "Unable to refresh registry authentication for $reference" >&2
+        return 1
+      fi
+      continue
+    fi
+    echo "Unable to inspect protected image SBOM for $reference" >&2
+    sed -n '1,20p' "$sbom_error" >&2
+    return 1
+  done
+}
+
 label_args=(
   "--label" "org.opencontainers.image.source=$public_source_url"
   "--label" "org.opencontainers.image.revision=$source_sha"
@@ -343,7 +454,8 @@ else
     }
     bake_args=(
       --push
-      --provenance mode=min
+      --provenance "$provenance"
+      --sbom="generator=$SBOM_GENERATOR_IMAGE"
       --file "$bake_file"
       --metadata-file "$bake_metadata"
       --set "rust-base.context=$context"
@@ -360,6 +472,10 @@ else
       CODEWIRE_IMAGE_SOURCE_URL="$public_source_url" \
       CODEWIRE_RUST_PROFILE=release \
       CODEWIRE_SCCACHE_MODE="$sccache_mode" \
+      BUILDX_GIT_CHECK_DIRTY=1 \
+      GIT_CONFIG_COUNT=1 \
+      GIT_CONFIG_KEY_0=remote.origin.url \
+      GIT_CONFIG_VALUE_0="$PROVENANCE_SOURCE_URL" \
       docker buildx bake --builder "$buildx_builder" "${bake_args[@]}" \
         "$product_bake_target"
     jq -e --arg target "$product_bake_target" '
@@ -371,8 +487,14 @@ else
       exit 1
     }
   else
-    DOCKER_CONFIG="$docker_config" docker buildx build --builder "$buildx_builder" --push \
-      --provenance=mode=min \
+    DOCKER_CONFIG="$docker_config" \
+      BUILDX_GIT_CHECK_DIRTY=1 \
+      GIT_CONFIG_COUNT=1 \
+      GIT_CONFIG_KEY_0=remote.origin.url \
+      GIT_CONFIG_VALUE_0="$PROVENANCE_SOURCE_URL" \
+      docker buildx build --builder "$buildx_builder" --push \
+      --provenance="$provenance" \
+      --sbom="generator=$SBOM_GENERATOR_IMAGE" \
       --metadata-file "$build_metadata" "${build_args[@]}" \
       -f "$dockerfile" --tag "$source_tag" "${label_args[@]}" "$context"
   fi
@@ -382,6 +504,9 @@ else
     exit 1
   fi
 fi
+
+verify_build_provenance
+verify_build_sbom
 
 for tag in "${tags[@]}"; do
   ensure_immutable_tag "$tag" "$source_digest"

@@ -1004,8 +1004,8 @@ if [ "$event_selected" = false ]; then
         recognized=true
         ;;
       Dockerfile|docker-bake.hcl|apps/*/Dockerfile*|deployments/docker/*|\
-      scripts/ci/images/build-kind-images.sh|scripts/ci/images/run-rust-build.sh|\
-      scripts/ci/tests/test-run-rust-build.sh)
+      scripts/ci/images/build-kind-images.sh|scripts/ci/images/build-push-runtime-images.sh|\
+      scripts/ci/images/run-rust-build.sh|scripts/ci/tests/test-run-rust-build.sh)
         select_token edge_kind
         select_token release
         select_token deploy
@@ -1016,6 +1016,19 @@ if [ "$event_selected" = false ]; then
             ;;
         esac
         kind_relevant=true
+        recognized=true
+        ;;
+    esac
+
+    case "$path" in
+      scripts/ci/images/cosign-private-signing-config.json|\
+      scripts/ci/images/sign-runtime-image-set.sh|\
+      scripts/ci/tests/test-sign-runtime-image-set.sh|\
+      scripts/ci/trust/codewire-runtime-signing.pub)
+        select_token deploy
+        select_token policy
+        select_token release
+        select_token security
         recognized=true
         ;;
     esac
@@ -1048,12 +1061,13 @@ if [ "$event_selected" = false ]; then
 
     case "$path" in
       images/*|\
-      .gitea/workflows/claude-e2e.yaml|.gitea/workflows/cli-release.yaml|\
+      .gitea/workflows/cli-release.yaml|\
       .gitea/workflows/mirror-github.yaml|\
       .gitea/workflows/support-images.yaml|\
       keys/production-release.asc|\
       .gitea/workflows/observe-*.yaml|\
-      scripts/ci/images/build-push-image.sh|scripts/ci/images/compute-image-tags.sh|\
+      scripts/ci/images/build-push-image.sh|scripts/ci/images/build-push-runtime-images.sh|\
+      scripts/ci/images/compute-image-tags.sh|\
       scripts/ci/images/copy-image-to-ghcr.sh|\
       scripts/ci/deploy/dispatch-deploy-dev.sh|scripts/ci/deploy/dispatch-deploy-prod.sh|\
       scripts/ci/setup/fetch-infisical-ci-secret.sh|\
@@ -1081,8 +1095,8 @@ if [ "$event_selected" = false ]; then
       scripts/ci/tests/test-workspace-image-verify-workflow.sh|\
       scripts/ci/tests/test-base-image-source.sh|\
       scripts/ci/tests/test-build-push-image.sh|\
+      scripts/ci/tests/test-build-push-runtime-images.sh|\
       scripts/ci/tests/test-run-rust-build.sh|\
-      scripts/ci/tests/test-claude-e2e-workflow.sh|\
       scripts/ci/tests/test-fetch-infisical-ci-secret.sh|\
       scripts/ci/tests/test-fetch-forgejo-deploy-dev-token.sh|\
       scripts/ci/tests/test-fetch-openbao-ghcr-credentials.sh|\

@@ -409,8 +409,10 @@ if grep -Fq 'date +%s' "$image_builder"; then
   exit 1
 fi
 grep -Fq 'source_dir="${CODEWIRE_SOURCE_DIR:-.}"' "$image_builder"
-grep -Fq 'DOCKER_CONFIG="$docker_config" docker buildx build --builder "$buildx_builder" --push' \
+grep -Fq '    DOCKER_CONFIG="$docker_config"' "$image_builder"
+grep -Fq '      docker buildx build --builder "$buildx_builder" --push' \
   "$image_builder"
+grep -Fq -- '--provenance="$provenance"' "$image_builder"
 grep -Fq -- '--metadata-file "$build_metadata"' "$image_builder"
 grep -Fq '"$credential_fetcher" "$registry_username_file" "$registry_password_file"' \
   "$image_builder"
