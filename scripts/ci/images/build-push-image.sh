@@ -20,8 +20,12 @@ sccache_mode="${CODEWIRE_SCCACHE_MODE:-disabled}"
 : "${GITHUB_SHA:?GITHUB_SHA is required}"
 readonly REGISTRY_HOST='nexus-system-cluster.example.invalid'
 readonly REGISTRY_REPOSITORY_PREFIX="${REGISTRY_HOST}/oci-promoted/codewire"
+readonly APPROVED_REGISTRY_HOST='nexus.example.invalid'
 readonly BUILDKIT_IMAGE='docker.io/moby/buildkit:v0.29.0@sha256:0039c1d47e8748b5afea56f4e85f14febaf34452bd99d9552d2daa82262b5cc5'
-readonly SBOM_GENERATOR_IMAGE='nexus-system-cluster.example.invalid/oci-approved/docker/buildkit-syft-scanner@sha256:13864237fb990943433f89d698590aad1de38d4a7e13d38e7b12f2488c1952e7'
+# Docker keys credentials by registry hostname. The protected publisher keeps
+# its write-only promoted-repository login, while this canonical hostname uses
+# the separate read-only approved-input identity for the pinned SBOM tool.
+readonly SBOM_GENERATOR_IMAGE='nexus.example.invalid/oci-approved/docker/buildkit-syft-scanner@sha256:13864237fb990943433f89d698590aad1de38d4a7e13d38e7b12f2488c1952e7'
 readonly PROVENANCE_SOURCE_URL='https://git.example.invalid/codewire/codewire.git'
 readonly EXPECTED_PROVENANCE_BUILDER_ID='https://git.example.invalid/infra/ci/builders/protected-delivery/v1'
 
@@ -145,6 +149,8 @@ umask 077
 work="$(mktemp -d)"
 registry_username_file="$work/nexus-username"
 registry_password_file="$work/nexus-password"
+approved_registry_username_file="$work/nexus-approved-username"
+approved_registry_password_file="$work/nexus-approved-password"
 build_metadata="$work/build-metadata.json"
 bake_metadata="$work/bake-metadata.json"
 docker_config="${CODEWIRE_EXTERNAL_DOCKER_CONFIG:-$work/docker-config}"
@@ -180,6 +186,8 @@ if [ ! -x "$credential_fetcher" ]; then
   exit 1
 fi
 "$credential_fetcher" "$registry_username_file" "$registry_password_file"
+"$credential_fetcher" --approved \
+  "$approved_registry_username_file" "$approved_registry_password_file"
 
 registry_auth_error() {
   grep -Eqi \
@@ -187,17 +195,18 @@ registry_auth_error() {
     "$1"
 }
 
-registry_login() {
-  local login_error attempt
+registry_login_host() {
+  local registry_host="$1" username_file="$2" password_file="$3"
+  local login_error attempt registry_username
   for attempt in 1 2 3; do
     login_error="$(mktemp "$work/login-error.XXXXXX")"
-    registry_username="$(<"$registry_username_file")"
+    registry_username="$(<"$username_file")"
     [[ -n "$registry_username" && "$registry_username" != *$'\n'* ]] || {
       echo 'Nexus username is malformed' >&2
       return 1
     }
-    if DOCKER_CONFIG="$docker_config" docker login "${REGISTRY_HOST}" \
-      -u "$registry_username" --password-stdin <"$registry_password_file" \
+    if DOCKER_CONFIG="$docker_config" docker login "$registry_host" \
+      -u "$registry_username" --password-stdin <"$password_file" \
       >/dev/null 2>"$login_error"; then
       return 0
     fi
@@ -205,13 +214,23 @@ registry_login() {
       echo "Registry login was rejected; retrying authentication (attempt $((attempt + 1))/3)" >&2
       continue
     fi
-    echo "Unable to authenticate to registry ${REGISTRY_HOST}" >&2
+    echo "Unable to authenticate to registry $registry_host" >&2
     sed -n '1,20p' "$login_error" >&2
     return 1
   done
 }
 
+registry_login() {
+  registry_login_host "$REGISTRY_HOST" "$registry_username_file" "$registry_password_file"
+}
+
+approved_registry_login() {
+  registry_login_host "$APPROVED_REGISTRY_HOST" \
+    "$approved_registry_username_file" "$approved_registry_password_file"
+}
+
 registry_login
+approved_registry_login
 
 create_buildx_builder() {
   [ -z "$buildx_builder" ] || return 0

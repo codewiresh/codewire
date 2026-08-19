@@ -19,6 +19,8 @@ forgejo_jwt='synthetic-forgejo-jwt'
 openbao_token='synthetic-openbao-token'
 nexus_username='synthetic-nexus-publisher'
 nexus_password='synthetic-nexus-password'
+approved_username='synthetic-nexus-approved-reader'
+approved_password='synthetic-nexus-approved-password'
 
 cat >"$work/bin/curl" <<'EOF'
 #!/usr/bin/env bash
@@ -58,6 +60,11 @@ case "$url" in
       --arg password "${FAKE_NEXUS_PASSWORD:?}" \
       '{data:{data:{username:$username,password:$password}}}' >"$output"
     ;;
+  https://openbao.example.invalid/v1/platform/data/nexus/ci-pull)
+    jq -n --arg username "${FAKE_APPROVED_USERNAME:?}" \
+      --arg password "${FAKE_APPROVED_PASSWORD:?}" \
+      '{data:{data:{username:$username,password:$password}}}' >"$output"
+    ;;
   *) exit 1 ;;
 esac
 EOF
@@ -69,6 +76,8 @@ export FAKE_FORGEJO_JWT="$forgejo_jwt"
 export FAKE_OPENBAO_TOKEN="$openbao_token"
 export FAKE_NEXUS_USERNAME="$nexus_username"
 export FAKE_NEXUS_PASSWORD="$nexus_password"
+export FAKE_APPROVED_USERNAME="$approved_username"
+export FAKE_APPROVED_PASSWORD="$approved_password"
 export ACTIONS_ID_TOKEN_REQUEST_URL='https://git.example.invalid/api/actions/oidc?job=synthetic'
 export ACTIONS_ID_TOKEN_REQUEST_TOKEN='synthetic-request-token'
 export OPENBAO_ROLE='codewire-source-dev-publisher'
@@ -83,10 +92,21 @@ password_file="$work/output/password"
 [[ "$(<"$password_file")" == "$nexus_password" ]] || fail 'Nexus password differs'
 [[ "$(stat -c '%a' "$username_file")" == 600 ]] || fail 'username mode is not 0600'
 [[ "$(stat -c '%a' "$password_file")" == 600 ]] || fail 'password mode is not 0600'
+approved_username_file="$work/output/approved-username"
+approved_password_file="$work/output/approved-password"
+"$FETCHER" --approved "$approved_username_file" "$approved_password_file" >/dev/null
+[[ "$(<"$approved_username_file")" == "$approved_username" ]] ||
+  fail 'approved Nexus username differs'
+[[ "$(<"$approved_password_file")" == "$approved_password" ]] ||
+  fail 'approved Nexus password differs'
+[[ "$(stat -c '%a' "$approved_username_file")" == 600 ]] ||
+  fail 'approved username mode is not 0600'
+[[ "$(stat -c '%a' "$approved_password_file")" == 600 ]] ||
+  fail 'approved password mode is not 0600'
 [[ -z "$(find "$RUNNER_TEMP" -mindepth 1 -print -quit)" ]] ||
   fail 'temporary OIDC or OpenBao material survived cleanup'
 for secret in "$ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$forgejo_jwt" "$openbao_token" \
-  "$nexus_username" "$nexus_password"; do
+  "$nexus_username" "$nexus_password" "$approved_username" "$approved_password"; do
   if grep -qF "$secret" "$FAKE_CURL_CALLS"; then
     fail 'credential material reached curl arguments'
   fi
