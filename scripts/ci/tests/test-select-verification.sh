@@ -1194,7 +1194,7 @@ while IFS='|' read -r job_id job_name runner; do
     exit 1
   fi
 done <<'EOF'
-policy|Policy verification|ci-light
+policy|Policy verification|ci-heavy
 standard|Standard verification|ci-heavy
 tooling|Tooling / delivery contract verification|ci-heavy
 rust-transport|Rust / transport verification|ci-heavy
@@ -1241,12 +1241,12 @@ grep -qF 'name: Run Policy' "$policy_block"
 grep -A1 -F 'name: Run Policy' "$policy_block" \
   | grep -qF "contains(needs.verification-selection.outputs.selection, '|policy|')"
 if grep -Eq 'run:.*docker|setup-bun|setup-go|curl |wget ' "$policy_block"; then
-  echo 'policy: restricted light job gained a Docker or network-tool setup dependency' >&2
+  echo 'policy: sealed policy job gained a Docker or network-tool setup dependency' >&2
   exit 1
 fi
 
 grep -qF '    timeout-minutes: 13' "$TMP/policy.yaml" || {
-  echo 'policy: light job must finish below the 14-minute runner lifetime' >&2
+  echo 'policy: heavy job lost its measured bounded task ceiling' >&2
   exit 1
 }
 
@@ -1374,7 +1374,7 @@ if grep -Eq '^    runs-on: (ubuntu-latest|kind-e2e)$' "$WORKFLOW"; then
   echo 'Codewire CI still depends on a legacy compatibility label' >&2
   exit 1
 fi
-[[ "$(grep -Fc '    runs-on: ci-heavy' "$WORKFLOW")" -eq 8 ]] || {
+[[ "$(grep -Fc '    runs-on: ci-heavy' "$WORKFLOW")" -eq 9 ]] || {
   echo 'Codewire CI heavy capability groups are not explicit' >&2
   exit 1
 }
@@ -1382,8 +1382,8 @@ fi
   echo 'Codewire CI Kind capability does not own one dedicated lane' >&2
   exit 1
 }
-[[ "$(grep -Fc '    runs-on: ci-light' "$WORKFLOW")" -eq 1 ]] || {
-  echo 'Codewire CI policy capability does not use the restricted light pool' >&2
+[[ "$(grep -Fc '    runs-on: ci-light' "$WORKFLOW")" -eq 0 ]] || {
+  echo 'Codewire CI assigned a measured-heavy capability to the light pool' >&2
   exit 1
 }
 for output in selector_version classification selection required_local_mode \

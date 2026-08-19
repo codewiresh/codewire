@@ -296,11 +296,11 @@ jobs:
 
   policy:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this untrusted job has no protected credential.
-    # Policy and repository contracts are non-Docker checks over sealed tools.
-    # Keep them off privileged heavy capacity and run them in parallel with the
-    # product-specific Standard family.
+    # Policy and repository contracts are non-Docker checks over sealed tools,
+    # but the full ShellCheck pass is a measured heavy workload on hosted CI.
+    # Keep it on bounded heavy capacity and parallel with the Standard family.
     name: Policy verification
-    runs-on: ci-light
+    runs-on: ci-heavy
     timeout-minutes: 13
     needs: [verification-selection]
     steps:
