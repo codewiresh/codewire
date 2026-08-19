@@ -3,8 +3,14 @@
 # write the paired Nexus credential directly to private files.
 set -euo pipefail
 
+credential_kind=publisher
+if [[ "${1:-}" == --approved ]]; then
+  credential_kind=approved
+  shift
+fi
+
 [[ $# -eq 2 ]] || {
-  echo 'Usage: fetch-openbao-nexus-credentials.sh USERNAME_FILE PASSWORD_FILE' >&2
+  echo 'Usage: fetch-openbao-nexus-credentials.sh [--approved] USERNAME_FILE PASSWORD_FILE' >&2
   exit 2
 }
 
@@ -22,6 +28,21 @@ case "${OPENBAO_ROLE}|${OPENBAO_AUDIENCE}" in
   codewire-source-prod-publisher\|openbao-codewire-source-prod-publisher) ;;
   *)
     echo 'OpenBao role and audience are not an approved source publisher pair' >&2
+    exit 1
+    ;;
+esac
+
+case "$credential_kind" in
+  publisher)
+    credential_path='platform/data/nexus/oci-promoter'
+    credential_label='publisher'
+    ;;
+  approved)
+    credential_path='platform/data/nexus/ci-pull'
+    credential_label='approved pull'
+    ;;
+  *)
+    echo 'Nexus credential kind is not recognized' >&2
     exit 1
     ;;
 esac
@@ -73,7 +94,7 @@ chmod 0600 "$work/openbao.token"
 chmod 0600 "$work/openbao.curl"
 curl --config "$work/openbao.curl" \
   --output "$work/nexus.json" \
-  "$OPENBAO_ADDR/v1/platform/data/nexus/oci-promoter"
+  "$OPENBAO_ADDR/v1/$credential_path"
 
 jq -er '.data.data.username | strings | select(length > 0)' \
   "$work/nexus.json" >"$work/username"
@@ -82,4 +103,4 @@ jq -er '.data.data.password | strings | select(length > 0)' \
 chmod 0600 "$work/username" "$work/password"
 mv -f "$work/username" "$username_file"
 mv -f "$work/password" "$password_file"
-printf 'Fetched the paired Nexus publisher credential into private files\n'
+printf 'Fetched the paired Nexus %s credential into private files\n' "$credential_label"
