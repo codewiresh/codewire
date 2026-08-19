@@ -295,6 +295,7 @@ jobs:
           DOCKERFILE
 
   policy:
+    # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this untrusted job has no protected credential.
     # Policy and repository contracts are non-Docker checks over sealed tools.
     # Keep them off privileged heavy capacity and run them in parallel with the
     # product-specific Standard family.
@@ -406,6 +407,7 @@ jobs:
         run: scripts/ci/verify/run-product-verification.sh sdk-python
 
   tooling:
+    # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this untrusted job has no protected credential.
     # Give repository tooling and delivery-contract checks an independent
     # general-heavy slot so an all-selected policy change does not serialize
     # them behind language and SDK verification. These checks still need the
