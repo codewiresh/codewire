@@ -21,9 +21,7 @@ expected=(
   'https://git.example.invalid/noel/actions-checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0'
   'https://git.example.invalid/noel/actions-checkout@11bd71901bbe5b1630ceea73d27597364c9af683'
   'https://git.example.invalid/noel/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6'
-  'https://git.example.invalid/noel/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff'
   'https://git.example.invalid/noel/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020'
-  'https://git.example.invalid/noel/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065'
 )
 
 for reference in "${references[@]}"; do
