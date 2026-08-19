@@ -326,7 +326,8 @@ case "${1:-} ${2:-} ${3:-}" in
       jq -n \
         --arg builder "${FAKE_PROVENANCE_BUILDER_ID:?}" \
         --arg revision "${FAKE_SOURCE_SHA:?}" \
-        --arg source 'https://git.example.invalid/codewire/codewire.git' '
+        --arg source 'https://git.example.invalid/codewire/codewire.git' \
+        --argjson envelope "${FAKE_PROVENANCE_ENVELOPE:-false}" '
           {
             buildDefinition: {
               buildType: "https://github.com/moby/buildkit/blob/master/docs/attestations/slsa-definitions.md",
@@ -337,6 +338,13 @@ case "${1:-} ${2:-} ${3:-}" in
               metadata: {buildkit_metadata: {vcs: {revision: $revision, source: $source}}}
             }
           }
+          | if $envelope then {
+              _type: "https://in-toto.io/Statement/v1",
+              predicateType: "https://slsa.dev/provenance/v1",
+              predicate: .
+            }
+            else .
+            end
         '
       exit 0
     fi
@@ -560,6 +568,8 @@ grep -qF -- 'CODEWIRE_RUST_PROFILE=release' "$FAKE_DOCKER_CALLS" ||
   fail 'protected publication did not force the release profile'
 grep -qF -- 'builder-id=https://git.example.invalid/infra/ci/builders/protected-delivery/v1' "$FAKE_DOCKER_CALLS" ||
   fail 'protected product build omitted its explicit minimal BuildKit SLSA provenance identity'
+grep -qF -- 'version=v1' "$FAKE_DOCKER_CALLS" ||
+  fail 'protected product build did not request the verified SLSA v1 predicate'
 grep -qF -- 'buildx create --name codewire-publish-' "$FAKE_DOCKER_CALLS" ||
   fail 'protected publication did not create an isolated BuildKit builder'
 grep -qF -- '--driver docker-container' "$FAKE_DOCKER_CALLS" ||
@@ -585,6 +595,16 @@ grep -qF -- 'buildx rm --force codewire-publish-' "$FAKE_DOCKER_CALLS" ||
   fail 'protected publication did not remove its isolated BuildKit builder'
 [[ "$(build_invocation_count)" -eq 1 ]] ||
   fail 'image was not built exactly once'
+
+if ! (
+  cd "$ROOT"
+  FAKE_PROVENANCE_ENVELOPE=true \
+    "$BUILDER" gateway deployments/docker/gateway.Dockerfile .
+); then
+  fail 'protected image build rejected the valid SLSA v1 statement envelope'
+fi
+[[ "$(build_invocation_count)" -eq 1 ]] ||
+  fail 'SLSA statement-envelope verification rebuilt an immutable source image'
 
 if (
   cd "$ROOT"

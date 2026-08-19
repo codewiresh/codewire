@@ -35,7 +35,10 @@ if [ "$provenance_builder_id" != "$EXPECTED_PROVENANCE_BUILDER_ID" ]; then
   exit 2
 fi
 readonly provenance_builder_id
-readonly provenance="mode=min,builder-id=${provenance_builder_id}"
+# BuildKit defaults to the legacy SLSA v0.2 predicate. Protected verification
+# binds v1's runDetails fields, so request that version explicitly instead of
+# silently accepting a weaker, differently shaped predicate.
+readonly provenance="mode=min,version=v1,builder-id=${provenance_builder_id}"
 
 case "$require_existing_source_image" in
   0|1) ;;
@@ -360,12 +363,19 @@ verify_build_provenance() {
         --arg builder "$provenance_builder_id" \
         --arg revision "$source_sha" \
         --arg source "$PROVENANCE_SOURCE_URL" '
-          .buildDefinition.buildType
+          (.predicate // .) as $predicate
+          | (if has("predicate") then
+               ._type == "https://in-toto.io/Statement/v1"
+               and .predicateType == "https://slsa.dev/provenance/v1"
+             else true
+             end)
+          and ($predicate | type == "object")
+          and $predicate.buildDefinition.buildType
             == "https://github.com/moby/buildkit/blob/master/docs/attestations/slsa-definitions.md"
-          and .runDetails.builder.id == $builder
-          and .runDetails.metadata.buildkit_metadata.vcs.revision == $revision
-          and .runDetails.metadata.buildkit_metadata.vcs.source == $source
-          and ([((.buildDefinition.internalParameters // {}) | keys[])
+          and $predicate.runDetails.builder.id == $builder
+          and $predicate.runDetails.metadata.buildkit_metadata.vcs.revision == $revision
+          and $predicate.runDetails.metadata.buildkit_metadata.vcs.source == $source
+          and ([($predicate.buildDefinition.internalParameters // {}) | keys[]
             | select(startswith("github_"))] | length == 0)
         ' "$provenance_output" >/dev/null; then
         return 0
