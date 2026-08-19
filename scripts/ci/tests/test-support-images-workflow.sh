@@ -13,6 +13,9 @@ fail() {
 }
 
 [[ -f "$WORKFLOW" ]] || fail 'Gitea support-image workflow is missing'
+if grep -qE '^permissions:' "$WORKFLOW"; then
+  fail 'support workflow relies on ignored GitHub permissions syntax'
+fi
 if [[ -e "$LEGACY_GITHUB_WORKFLOW" || -L "$LEGACY_GITHUB_WORKFLOW" ]]; then
   fail 'legacy GitHub workspace-image builder must remain retired'
 fi

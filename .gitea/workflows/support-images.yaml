@@ -1,13 +1,12 @@
+# zizmor: ignore[excessive-permissions] Forgejo ignores permissions; job profile and job-scoped OIDC enforce support-image capabilities.
 name: Build support images
 
 on:
   push:
     branches: [main]
-permissions:
-  contents: read
-
 jobs:
   support-selection:
+    # zizmor: ignore[excessive-permissions] This credential-free selection has no OIDC or write-capable integration.
     name: Support image selection
     runs-on: ci-heavy
     outputs:
@@ -63,6 +62,7 @@ jobs:
         run: rm -f -- "$RUNNER_TEMP/codewire-published-support-candidate.json"
 
   publish-support-images:
+    # zizmor: ignore[excessive-permissions] This exact protected job alone receives the scoped publisher identity.
     name: Build and publish exact support images
     runs-on: protected-delivery
     enable-openid-connect: true

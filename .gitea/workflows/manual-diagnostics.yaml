@@ -1,3 +1,4 @@
+# zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this credential-free manual diagnostic uses an untrusted heavy runner.
 name: Manual diagnostics
 
 on:
@@ -6,9 +7,6 @@ on:
       diagnostic:
         description: rust-stack or go-tailnet
         required: true
-
-permissions:
-  contents: read
 
 concurrency:
   group: manual-diagnostics-${{ github.ref }}-${{ github.event.inputs.diagnostic }}
@@ -19,6 +17,7 @@ env:
 
 jobs:
   diagnostics:
+    # zizmor: ignore[excessive-permissions] This job has no OIDC or write-capable integration.
     name: Manual diagnostics
     runs-on: ci-heavy
     steps:
