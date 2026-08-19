@@ -29,7 +29,7 @@ permissions:
 jobs:
   receipt:
     name: Record deploy-owned dev smoke result
-    runs-on: ubuntu-latest
+    runs-on: untrusted-validation
     steps:
       - name: Validate immutable receipt
         env:

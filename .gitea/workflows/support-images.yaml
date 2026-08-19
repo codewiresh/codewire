@@ -6,18 +6,10 @@ on:
 permissions:
   contents: read
 
-enable-openid-connect: true
-
-env:
-  OPENBAO_ROLE: codewire-source-support-publisher
-  OPENBAO_AUDIENCE: openbao-codewire-source-support-publisher
-  OPENBAO_GHCR_ROLE: codewire-source-support-publisher
-  OPENBAO_GHCR_AUDIENCE: openbao-codewire-source-support-publisher
-
 jobs:
   support-selection:
     name: Support image selection
-    runs-on: ubuntu-latest
+    runs-on: ci-heavy
     outputs:
       build_support_images: ${{ steps.select.outputs.build_support_images }}
       reason: ${{ steps.select.outputs.reason }}
@@ -72,9 +64,15 @@ jobs:
 
   publish-support-images:
     name: Build and publish exact support images
-    runs-on: ubuntu-latest
+    runs-on: protected-delivery
+    enable-openid-connect: true
     needs: [support-selection]
     if: ${{ needs.support-selection.outputs.build_support_images == 'true' }}
+    env:
+      OPENBAO_ROLE: codewire-source-support-publisher
+      OPENBAO_AUDIENCE: openbao-codewire-source-support-publisher
+      OPENBAO_GHCR_ROLE: codewire-source-support-publisher
+      OPENBAO_GHCR_AUDIENCE: openbao-codewire-source-support-publisher
     steps:
       - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
 

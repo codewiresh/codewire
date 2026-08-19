@@ -26,6 +26,11 @@ if grep -Fq 'CODEWIRE_GHCR_PUBLISH_ENABLED' "$WORKFLOW"; then
   fail 'support GHCR publication retains its rollout flag'
 fi
 selection_job="$(sed -n '/^  support-selection:/,/^  publish-support-images:/p' "$WORKFLOW")"
+grep -Fq '    runs-on: ci-heavy' <<<"$selection_job" ||
+  fail 'support selection does not use the credential-free Docker profile'
+if grep -Fq 'enable-openid-connect: true' <<<"$selection_job"; then
+  fail 'support selection can request publisher OIDC'
+fi
 if grep -q '^    paths:' "$WORKFLOW"; then
   fail 'support publication still duplicates artifact impact in workflow paths'
 fi
@@ -85,12 +90,18 @@ grep -qF 'CODEWIRE_BASE_IMAGE_REF: ${{ steps.base.outputs.candidate_ref }}' \
 grep -qF 'scripts/ci/images/build-push-image.sh workspace images/workspace/Dockerfile .' \
   "$WORKFLOW" || fail 'workspace is not built by the canonical Gitea helper'
 publish_job="$(sed -n '/^  publish-support-images:/,$p' "$WORKFLOW")"
+grep -Fq '    runs-on: protected-delivery' <<<"$publish_job" ||
+  fail 'support publisher does not use the protected delivery profile'
+grep -Fq '    enable-openid-connect: true' <<<"$publish_job" ||
+  fail 'support publisher lacks job-scoped OIDC'
+[[ "$(grep -Fc 'enable-openid-connect: true' "$WORKFLOW")" -eq 1 ]] ||
+  fail 'support workflow exposes OIDC outside the one publisher job'
 grep -qF 'needs: [support-selection]' <<<"$publish_job" ||
   fail 'support publisher is not bound to selection'
 grep -Fq 'OPENBAO_GHCR_ROLE: codewire-source-support-publisher' \
   "$WORKFLOW" || fail 'support publisher lacks its exact OpenBao GHCR role'
 grep -Fq 'OPENBAO_GHCR_AUDIENCE: openbao-codewire-source-support-publisher' \
-  "$WORKFLOW" || fail 'support publisher lacks its exact OpenBao GHCR audience'
+  <<<"$publish_job" || fail 'support publisher lacks its exact OpenBao GHCR audience'
 if grep -Fq 'GHCR_PUBLISH_USERNAME:' "$WORKFLOW"; then
   fail 'support workflow retains a split Forgejo GHCR username'
 fi
