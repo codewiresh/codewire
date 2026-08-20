@@ -245,6 +245,13 @@ run_paths_case sccache_r2_consumer pull_request refs/pull/1749/head false \
 run_paths_case sccache_r2_consumer_fixture pull_request refs/pull/1750/head false \
   'edge_kind policy security' \
   scripts/ci/tests/test-fetch-openbao-sccache-r2-credentials.sh
+run_paths_case sccache_host_selector pull_request refs/pull/1751/head false \
+  'policy rust rust_workspace security' \
+  scripts/ci/setup/select-untrusted-rust-cache.sh \
+  scripts/ci/setup/finish-untrusted-rust-cache.sh
+run_paths_case sccache_host_selector_fixture pull_request refs/pull/1752/head false \
+  'policy security' \
+  scripts/ci/tests/test-select-untrusted-rust-cache.sh
 run_paths_case dev_deploy_contract pull_request refs/pull/30/head false \
   'deploy go_consumer_interop go_support policy release runtime_confidential' scripts/ci/tests/test-deploy-dev.sh
 run_paths_case dev_smoke_receipt pull_request refs/pull/302/head false \

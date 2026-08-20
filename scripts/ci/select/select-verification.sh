@@ -999,6 +999,19 @@ if [ "$event_selected" = false ]; then
         kind_relevant=true
         recognized=true
         ;;
+      scripts/ci/setup/select-untrusted-rust-cache.sh|\
+      scripts/ci/setup/finish-untrusted-rust-cache.sh)
+        select_token policy
+        select_token rust
+        select_token rust_workspace
+        select_token security
+        recognized=true
+        ;;
+      scripts/ci/tests/test-select-untrusted-rust-cache.sh)
+        select_token policy
+        select_token security
+        recognized=true
+        ;;
       scripts/ci/tests/test-fetch-openbao-sccache-r2-credentials.sh)
         select_token edge_kind
         select_token policy
