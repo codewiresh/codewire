@@ -16,8 +16,10 @@ work="$(mktemp -d "$ROOT/.tmp/sign-runtime-image-set.XXXXXX")"
 trap 'rm -rf "$work"' EXIT
 mkdir -p "$work/bin" "$work/tmp"
 docker_log="$work/docker.log"
+cosign_log="$work/cosign.log"
 signature_state="$work/signatures"
 : >"$docker_log"
+: >"$cosign_log"
 : >"$signature_state"
 
 cat >"$work/bin/curl" <<'SH'
@@ -48,6 +50,54 @@ esac
 SH
 chmod 0755 "$work/bin/curl"
 
+cat >"$work/fake-cosign" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%q ' "$@" >>"${COSIGN_LOG:?}"
+printf '\n' >>"$COSIGN_LOG"
+command="${1:-}"
+reference="${!#:-}"
+case "$command" in
+  version)
+    printf '%s\n' 'cosign synthetic'
+    ;;
+  sign)
+    [[ "${BAO_ADDR:-}" == https://openbao.example.invalid ]]
+    [[ "${BAO_TOKEN:-}" == synthetic-openbao-token ]]
+    [[ -f "${DOCKER_CONFIG:?}/config.json" ]]
+    [[ " $* " == *' --key openbao://codewire-runtime '* ]]
+    signing_config=''
+    args=("$@")
+    for ((index = 0; index < ${#args[@]}; index += 1)); do
+      if [[ "${args[$index]}" == --signing-config ]]; then
+        signing_config="${args[$((index + 1))]}"
+      fi
+    done
+    [[ -f "$signing_config" && ! -L "$signing_config" ]]
+    [[ " $* " == *' --new-bundle-format=true '* ]]
+    [[ " $* " != *' --registry-referrers-mode'* ]]
+    grep -Fxq "$reference" "$SIGNATURE_STATE" || printf '%s\n' "$reference" >>"$SIGNATURE_STATE"
+    ;;
+  verify)
+    [[ -z "${BAO_ADDR:-}" && -z "${BAO_TOKEN:-}" ]]
+    [[ -f "${DOCKER_CONFIG:?}/config.json" ]]
+    public_key=''
+    args=("$@")
+    for ((index = 0; index < ${#args[@]}; index += 1)); do
+      if [[ "${args[$index]}" == --key ]]; then
+        public_key="${args[$((index + 1))]}"
+      fi
+    done
+    [[ -f "$public_key" && ! -L "$public_key" ]]
+    [[ " $* " == *' --insecure-ignore-tlog '* ]]
+    [[ " $* " == *' --new-bundle-format=true '* ]]
+    grep -Fxq "$reference" "$SIGNATURE_STATE"
+    ;;
+  *) exit 64 ;;
+esac
+SH
+chmod 0755 "$work/fake-cosign"
+
 cat >"$work/bin/docker" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -58,11 +108,28 @@ case "${1:-} ${2:-} ${3:-}" in
   login\ *)
     credential="$(cat)"
     [[ "$credential" == synthetic-nexus-password || "$credential" == synthetic-ghcr-token ]]
+    mkdir -p "${DOCKER_CONFIG:?}"
+    printf '%s\n' '{}' >"$DOCKER_CONFIG/config.json"
     ;;
   'image inspect --format')
     [[ "${FAKE_COSIGN_MISSING:-0}" != 1 ]] || exit 1
     [[ "${5:-}" == *sigstore/cosign/cosign@sha256:* ]]
     printf '%s\n' sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+    ;;
+  create\ *)
+    [[ " $* " == *' --pull=never '* ]]
+    [[ "${3:-}" == */sigstore/cosign/cosign@sha256:* ]]
+    [[ "${!#}" == version ]]
+    printf '%s\n' cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+    ;;
+  cp\ *)
+    [[ "${2:-}" == cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc:/ko-app/cosign ]]
+    [[ -n "${3:-}" ]]
+    cp "${FAKE_COSIGN_BINARY:?}" "$3"
+    ;;
+  rm\ *)
+    [[ "${2:-}" == -f ]]
+    [[ "${3:-}" == cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc ]]
     ;;
   'buildx imagetools inspect')
     format=''
@@ -105,44 +172,6 @@ case "${1:-} ${2:-} ${3:-}" in
       exit 64
     fi
     ;;
-  run\ *)
-    args=("$@")
-    [[ " $* " == *' --pull=never '* ]]
-    [[ " $* " == *' --cap-drop=ALL '* ]]
-    [[ " $* " == *' --security-opt=no-new-privileges '* ]]
-    [[ " $* " == *' --pids-limit=256 '* ]]
-    [[ " $* " == *' --network=bridge '* ]]
-    image_index=-1
-    for ((index = 0; index < ${#args[@]}; index += 1)); do
-      if [[ "${args[$index]}" == *sigstore/cosign/cosign@sha256:* ]]; then
-        image_index="$index"
-        break
-      fi
-    done
-    [[ "$image_index" -ge 0 ]]
-    command="${args[$((image_index + 1))]}"
-    reference="${args[$((${#args[@]} - 1))]}"
-    case "$command" in
-      sign)
-        [[ "${BAO_ADDR:-}" == https://openbao.example.invalid ]]
-        [[ "${BAO_TOKEN:-}" == synthetic-openbao-token ]]
-        [[ " $* " == *' --key openbao://codewire-runtime '* ]]
-        [[ " $* " == *' --signing-config /trust/signing-config.json '* ]]
-        [[ " $* " != *' --use-signing-config'* ]]
-        [[ " $* " == *' --new-bundle-format=true '* ]]
-        [[ " $* " != *' --registry-referrers-mode'* ]]
-        grep -Fxq "$reference" "$SIGNATURE_STATE" || printf '%s\n' "$reference" >>"$SIGNATURE_STATE"
-        ;;
-      verify)
-        [[ -z "${BAO_TOKEN:-}" ]]
-        [[ " $* " == *' --key /trust/codewire-runtime-signing.pub '* ]]
-        [[ " $* " == *' --insecure-ignore-tlog '* ]]
-        [[ " $* " == *' --new-bundle-format=true '* ]]
-        grep -Fxq "$reference" "$SIGNATURE_STATE"
-        ;;
-      *) exit 64 ;;
-    esac
-    ;;
   *) printf 'unexpected docker command: %s\n' "$*" >&2; exit 1 ;;
 esac
 SH
@@ -165,6 +194,8 @@ python3 "$ROOT/scripts/ci/images/image-bundle.py" create \
   --candidate mesh "$source_sha" "nexus-system-cluster.example.invalid/oci-promoted/codewire/mesh@$digest"
 
 export DOCKER_LOG="$docker_log"
+export COSIGN_LOG="$cosign_log"
+export FAKE_COSIGN_BINARY="$work/fake-cosign"
 export SIGNATURE_STATE="$signature_state"
 export GITHUB_SHA="$source_sha"
 export GITHUB_REF=refs/heads/main
@@ -178,14 +209,23 @@ run_signer() {
 
 if ! run_signer >"$work/first.out" 2>"$work/first.err"; then
   sed -n '1,80p' "$work/first.err" >&2
+  sed -n '1,80p' "$docker_log" >&2
+  sed -n '1,80p' "$cosign_log" >&2
   fail 'valid protected runtime signing fixture failed'
 fi
 [[ "$(wc -l <"$signature_state" | tr -d ' ')" -eq 10 ]] ||
   fail 'signer did not create exactly ten registry-specific signatures'
 [[ "$(sort -u "$signature_state" | wc -l | tr -d ' ')" -eq 10 ]] ||
   fail 'signer signed a registry reference more than once'
-[[ "$(grep -c "run .*${COSIGN_IMAGE} sign " "$docker_log")" -eq 10 ]] ||
+[[ "$(grep -c '^sign ' "$cosign_log")" -eq 10 ]] ||
   fail 'signer did not invoke Cosign exactly once per registry reference'
+[[ "$(grep -c "create .*--pull=never .*${COSIGN_IMAGE} version" "$docker_log")" -eq 1 ]] ||
+  fail 'signer did not extract the exact preloaded Cosign image without pulling'
+grep -Fq 'cp cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc:/ko-app/cosign ' \
+  "$docker_log" || fail 'signer did not extract the canonical Cosign binary path'
+if grep -q '^run ' "$docker_log"; then
+  fail 'signer retained a cross-DinD bind-mount execution path'
+fi
 [[ "$(grep -c "buildx imagetools inspect .*Provenance.SLSA" "$docker_log")" -eq 10 ]] ||
   fail 'signer did not verify provenance in both registries'
 [[ "$(grep -c "buildx imagetools inspect .*SBOM.SPDX" "$docker_log")" -eq 10 ]] ||
@@ -193,13 +233,13 @@ fi
 grep -Fq 'Verified and signed the exact five-image runtime set in Nexus and GHCR' \
   "$work/first.out" || fail 'signer omitted its complete-set result'
 if rg -n 'synthetic-(request|forgejo|openbao|nexus-password|ghcr-token)' \
-  "$work/first.out" "$work/first.err" "$docker_log"; then
+  "$work/first.out" "$work/first.err" "$docker_log" "$cosign_log"; then
   fail 'signer exposed short-lived identity or registry credential material'
 fi
 
-sign_calls_before="$(grep -c "run .*${COSIGN_IMAGE} sign " "$docker_log")"
+sign_calls_before="$(grep -c '^sign ' "$cosign_log")"
 run_signer >"$work/second.out" 2>"$work/second.err"
-[[ "$(grep -c "run .*${COSIGN_IMAGE} sign " "$docker_log")" -eq "$sign_calls_before" ]] ||
+[[ "$(grep -c '^sign ' "$cosign_log")" -eq "$sign_calls_before" ]] ||
   fail 'idempotent signer duplicated an accepted signature'
 [[ "$(grep -Fc 'Runtime signature already accepted:' "$work/second.out")" -eq 10 ]] ||
   fail 'idempotent signer did not report all accepted signatures'
