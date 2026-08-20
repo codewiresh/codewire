@@ -17,32 +17,55 @@ if [[ "$selection" != '|valid:v3|'* ]] || [[ "$selection" != *'|complete|' ]]; t
   fail "verification selection is invalid or incomplete"
 fi
 
-require_group_success() {
-  local group="$1" result="$2"
-  if [ "$result" != success ]; then
-    fail "$group capability group concluded ${result:-missing}"
-  fi
+require_group_result() {
+  local group="$1" expected="$2" result="$3"
+  case "$expected" in
+    true)
+      [ "$result" = success ] \
+        || fail "$group selected capability group concluded ${result:-missing}"
+      ;;
+    false)
+      [ "$result" = skipped ] \
+        || fail "$group unselected capability group concluded ${result:-missing}"
+      ;;
+    *) fail "$group capability expectation is ${expected:-missing}" ;;
+  esac
 }
 
-require_group_success policy "${VERIFICATION_POLICY_RESULT:-missing}"
-require_group_success standard "${VERIFICATION_STANDARD_RESULT:-missing}"
-require_group_success tooling "${VERIFICATION_TOOLING_RESULT:-missing}"
-require_group_success rust-transport \
+require_group_result policy \
+  "${VERIFICATION_POLICY_EXPECTED:-missing}" \
+  "${VERIFICATION_POLICY_RESULT:-missing}"
+require_group_result standard \
+  "${VERIFICATION_STANDARD_EXPECTED:-missing}" \
+  "${VERIFICATION_STANDARD_RESULT:-missing}"
+require_group_result tooling \
+  "${VERIFICATION_TOOLING_EXPECTED:-missing}" \
+  "${VERIFICATION_TOOLING_RESULT:-missing}"
+require_group_result rust-transport \
+  "${VERIFICATION_RUST_TRANSPORT_EXPECTED:-missing}" \
   "${VERIFICATION_RUST_TRANSPORT_RESULT:-missing}"
-require_group_success database "${VERIFICATION_DATABASE_RESULT:-missing}"
-require_group_success services-control \
+require_group_result database \
+  "${VERIFICATION_DATABASE_EXPECTED:-missing}" \
+  "${VERIFICATION_DATABASE_RESULT:-missing}"
+require_group_result services-control \
+  "${VERIFICATION_SERVICES_CONTROL_EXPECTED:-missing}" \
   "${VERIFICATION_SERVICES_CONTROL_RESULT:-missing}"
-require_group_success services-runtime \
+require_group_result services-runtime \
+  "${VERIFICATION_SERVICES_RUNTIME_EXPECTED:-missing}" \
   "${VERIFICATION_SERVICES_RUNTIME_RESULT:-missing}"
-require_group_success edge-kind "${VERIFICATION_EDGE_KIND_RESULT:-missing}"
-require_group_success cw-release-assets \
+require_group_result edge-kind \
+  "${VERIFICATION_EDGE_KIND_EXPECTED:-missing}" \
+  "${VERIFICATION_EDGE_KIND_RESULT:-missing}"
+require_group_result cw-release-assets \
+  "${VERIFICATION_CW_RELEASE_ASSETS_EXPECTED:-missing}" \
   "${VERIFICATION_CW_RELEASE_ASSETS_RESULT:-missing}"
-require_group_success workspace-image \
+require_group_result workspace-image \
+  "${VERIFICATION_WORKSPACE_IMAGE_EXPECTED:-missing}" \
   "${VERIFICATION_WORKSPACE_IMAGE_RESULT:-missing}"
 
 case "$tested_tree_receipt" in
   fallback)
-    echo 'required verification: selector and all capability groups succeeded'
+    echo 'required verification: every selected capability group succeeded'
     ;;
   accepted)
     [[ "${VERIFICATION_TESTED_TREE_PR:-}" =~ ^[1-9][0-9]*$ ]] \

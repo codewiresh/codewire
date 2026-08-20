@@ -121,12 +121,14 @@ run_paths_case ci_self pull_request refs/pull/2/head false \
   .gitea/workflows/ci.yaml .gitea/workflows/manual-diagnostics.yaml \
   .gitea/workflows/source-approval.yml \
   scripts/ci/select/select-verification.sh \
+  scripts/ci/select/emit-verification-matrices.sh \
   scripts/ci/select/require-verification-results.sh \
   scripts/ci/receipts/local-prepush-receipt.py \
   scripts/ci/receipts/emit-verification-receipt.py \
   scripts/ci/receipts/verify-tested-tree-receipt.sh \
   scripts/ci/receipts/verify-release-tag-receipt.sh \
   scripts/ci/tests/test-require-verification-results.sh \
+  scripts/ci/tests/test-emit-verification-matrices.sh \
   scripts/ci/tests/test-verify-tested-tree-receipt.sh \
   scripts/ci/tests/test-verify-release-tag-receipt.sh \
   scripts/ci/tests/test-local-prepush-receipt.sh \
@@ -1184,10 +1186,10 @@ fi
 }
 grep -qF 'push baseline is unavailable' "$missing_stderr"
 
-# Workflow contract: eight bounded capability groups. Forgejo assigns static
-# jobs before evaluating job-level conditions, so each group must remain a
-# fixed runner task rather than dynamic family-level fan-out.
-while IFS='|' read -r job_id job_name runner; do
+# Workflow contract: ten bounded capability groups use trusted empty/one-cell
+# matrices. Forgejo therefore creates no runner task for an omitted group and
+# exactly one fixed-profile task for a selected group.
+while IFS='|' read -r job_id job_name runner matrix_name; do
   block="$TMP/${job_id}.yaml"
   awk -v wanted="$job_id" '
     $0 == "  " wanted ":" { capture = 1 }
@@ -1197,21 +1199,46 @@ while IFS='|' read -r job_id job_name runner; do
   grep -qF "  ${job_id}:" "$block"
   grep -qF "    name: ${job_name}" "$block"
   grep -qF "    runs-on: ${runner}" "$block"
-  if grep -qF '      - name: Skip ' "$block" \
-    || grep -qE '^    if:.*verification-selection' "$block"; then
-    echo "${job_id}: capability group must be a fixed runner task" >&2
+  grep -qF '    strategy:' "$block"
+  grep -qF '      matrix:' "$block"
+  grep -qF \
+    "selected: \${{ fromJSON(needs.verification-selection.outputs.${matrix_name}_matrix) }}" \
+    "$block"
+  if grep -qE '^    if:.*verification-selection' "$block"; then
+    echo "${job_id}: capability matrix gained a redundant job condition" >&2
     exit 1
   fi
 done <<'EOF'
-policy|Policy verification|ci-heavy
-standard|Standard verification|ci-heavy
-tooling|Tooling / delivery contract verification|ci-heavy
-rust-transport|Rust / transport verification|ci-heavy
-database|Database verification|ci-heavy
-services-control|Service control-plane verification|ci-heavy
-services-runtime|Service runtime-plane verification|ci-heavy
-edge-kind|Edge / Kind verification|ci-heavy
+cw-release-assets|CW release-assets verification|ci-heavy|cw_release_assets
+workspace-image|Container contract verification|ci-heavy|workspace_image
+policy|Policy verification|ci-heavy|policy
+standard|Standard verification|ci-heavy|standard
+tooling|Tooling / delivery contract verification|ci-heavy|tooling
+rust-transport|Rust / transport verification|ci-heavy|rust_transport
+database|Database verification|ci-heavy|database
+services-control|Service control-plane verification|ci-heavy|services_control
+services-runtime|Service runtime-plane verification|ci-heavy|services_runtime
+edge-kind|Edge / Kind verification|ci-heavy|edge_kind
 EOF
+
+selection_block="$TMP/verification-selection.yaml"
+awk '
+  $0 == "  verification-selection:" { capture = 1 }
+  capture && $0 ~ /^  [A-Za-z0-9_-]+:$/ && $0 != "  verification-selection:" { exit }
+  capture { print }
+' "$WORKFLOW" > "$selection_block"
+grep -qF 'name: Emit trusted capability dispatch matrices' "$selection_block"
+grep -qF "trusted_matrix_selector='.trusted-ci-policy/scripts/ci/select/emit-verification-matrices.sh'" \
+  "$selection_block"
+grep -qF 'run every group so candidate code cannot omit required work' \
+  "$selection_block"
+for matrix_name in policy standard tooling rust_transport database \
+    services_control services_runtime edge_kind cw_release_assets workspace_image; do
+  grep -qF "${matrix_name}_matrix: \${{ steps.dispatch.outputs.${matrix_name}_matrix }}" \
+    "$selection_block"
+  grep -qF "${matrix_name}_expected: \${{ steps.dispatch.outputs.${matrix_name}_expected }}" \
+    "$selection_block"
+done
 
 # Heavy jobs share the queue-driven disposable DinD runner pool. Keep ordinary
 # task ceilings at 30 minutes. The selected workspace path performs two cold
@@ -1911,6 +1938,16 @@ for result in VERIFICATION_CW_RELEASE_ASSETS_RESULT VERIFICATION_STANDARD_RESULT
     exit 1
   }
 done
+for expected in VERIFICATION_POLICY_EXPECTED VERIFICATION_STANDARD_EXPECTED \
+    VERIFICATION_TOOLING_EXPECTED VERIFICATION_RUST_TRANSPORT_EXPECTED \
+    VERIFICATION_DATABASE_EXPECTED VERIFICATION_SERVICES_CONTROL_EXPECTED \
+    VERIFICATION_SERVICES_RUNTIME_EXPECTED VERIFICATION_EDGE_KIND_EXPECTED \
+    VERIFICATION_CW_RELEASE_ASSETS_EXPECTED VERIFICATION_WORKSPACE_IMAGE_EXPECTED; do
+  grep -qF "${expected}:" "$required_block" || {
+    echo "required CI omits ${expected}" >&2
+    exit 1
+  }
+done
 for receipt_input in VERIFICATION_TESTED_TREE_RECEIPT \
     VERIFICATION_TESTED_TREE_REASON VERIFICATION_TESTED_TREE_PR \
     VERIFICATION_TESTED_TREE_HEAD VERIFICATION_TESTED_TREE_RUN; do
@@ -1997,10 +2034,12 @@ fi
 
 bash -n \
   "$SELECTOR" \
+  "$ROOT/scripts/ci/select/emit-verification-matrices.sh" \
   "$ROOT/scripts/ci/select/require-verification-results.sh" \
   "$ROOT/scripts/ci/receipts/verify-tested-tree-receipt.sh" \
   "$ROOT/scripts/ci/receipts/verify-release-tag-receipt.sh" \
   "$ROOT/scripts/ci/tests/test-require-verification-results.sh" \
+  "$ROOT/scripts/ci/tests/test-emit-verification-matrices.sh" \
   "$ROOT/scripts/ci/tests/test-verify-tested-tree-receipt.sh" \
   "$ROOT/scripts/ci/tests/test-verify-release-tag-receipt.sh" \
   "$ROOT/scripts/ci/tests/test-local-prepush-receipt.sh" \
@@ -2016,5 +2055,6 @@ bash -n \
 
 "$ROOT/scripts/ci/tests/test-local-prepush-receipt.sh"
 "$ROOT/scripts/ci/tests/test-pre-push-worktree.sh"
+"$ROOT/scripts/ci/tests/test-emit-verification-matrices.sh"
 
 echo 'select-verification fixtures: OK'
