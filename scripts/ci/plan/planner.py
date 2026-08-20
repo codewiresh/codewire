@@ -1109,7 +1109,9 @@ def has_unknown_reachable_path(
     return None
 
 
-def policy_changed(paths: Iterable[str]) -> str | None:
+def policy_changed(
+    paths: Iterable[str], non_artifact_inputs: Iterable[str]
+) -> str | None:
     sensitive_prefixes = (
         "scripts/ci/plan/",
         ".gitea/workflows/",
@@ -1122,6 +1124,11 @@ def policy_changed(paths: Iterable[str]) -> str | None:
         "scripts/ci/receipts/verify-tested-tree-receipt.sh",
     }
     for path in paths:
+        if any(
+            fnmatch.fnmatchcase(path, pattern)
+            for pattern in non_artifact_inputs
+        ):
+            continue
         if path in sensitive_files or path.startswith(sensitive_prefixes):
             return path
     return None
@@ -1469,7 +1476,7 @@ def plan(
                 artifacts[name] = unclassified_result(reason)
         else:
             paths = changed_paths(repository, baseline["baseline_commit"], head)
-            changed_policy_path = policy_changed(paths)
+            changed_policy_path = policy_changed(paths, non_artifact_inputs)
             try:
                 export_git_tree(repository, baseline["baseline_commit"], baseline_tree)
                 export_git_tree(repository, head, head_tree)

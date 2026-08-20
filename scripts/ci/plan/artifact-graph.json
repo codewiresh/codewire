@@ -18,6 +18,7 @@
   ],
   "non_artifact_inputs": [
     ".agents/**",
+    ".gitea/workflows/mirror-github.yaml",
     "AGENTS.md",
     "CLAUDE.md",
     "docs/**"

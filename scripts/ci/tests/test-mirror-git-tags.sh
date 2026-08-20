@@ -181,26 +181,13 @@ grep -Fq 'enable-openid-connect: true' "$MIRROR_WORKFLOW"
 grep -Fq 'OPENBAO_GITHUB_ROLE: codewire-source-github-mirror' "$MIRROR_WORKFLOW"
 grep -Fq 'OPENBAO_GITHUB_AUDIENCE: openbao-codewire-source-github-mirror' "$MIRROR_WORKFLOW"
 grep -Fq '    runs-on: ci-protected' "$MIRROR_WORKFLOW"
-grep -Fq 'run: scripts/ci/setup/bootstrap-openbao-github-mirror-credentials.sh' "$MIRROR_WORKFLOW"
 grep -Fq 'run: scripts/ci/release/mirror-github.sh "${GITHUB_REF:?}"' "$MIRROR_WORKFLOW"
 if grep -Eq "tags:|workflow_dispatch:" "$MIRROR_WORKFLOW"; then
   echo 'mirror workflow has a trigger outside its protected-main OpenBao role' >&2
   exit 1
 fi
-bootstrap_step="$(sed -n \
-  '/name: Bootstrap the create-only OpenBao GitHub App tuple/,/name: Mirror with an OpenBao-backed GitHub App token/p' \
-  "$MIRROR_WORKFLOW")"
-mirror_step="$(sed -n \
-  '/name: Mirror with an OpenBao-backed GitHub App token/,$p' \
-  "$MIRROR_WORKFLOW")"
-for name in MIRROR_GITHUB_APP_ID MIRROR_GITHUB_INSTALLATION_ID MIRROR_GITHUB_PRIVATE_KEY; do
-  [[ "$(grep -Fc "          ${name}: \${{ secrets.${name} }}" <<<"$bootstrap_step")" -eq 1 ]] || {
-    echo "temporary create-only migration does not bind exact Forgejo secret $name" >&2
-    exit 1
-  }
-done
-if grep -Eq 'MIRROR_GITHUB_(APP_ID|INSTALLATION_ID|PRIVATE_KEY)|secrets\.|x-access-token:' \
-    <<<"$mirror_step"; then
+if grep -Eq 'MIRROR_GITHUB_(APP_ID|INSTALLATION_ID|PRIVATE_KEY)|secrets\.|x-access-token:|bootstrap-openbao-github-mirror-credentials' \
+    "$MIRROR_WORKFLOW"; then
   echo 'actual mirror step exposes a reusable GitHub credential surface' >&2
   exit 1
 fi

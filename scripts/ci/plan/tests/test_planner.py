@@ -170,6 +170,7 @@ class FixtureRepository:
             ],
             "non_artifact_inputs": [
                 ".agents/**",
+                ".gitea/workflows/mirror-github.yaml",
                 "AGENTS.md",
                 "CLAUDE.md",
                 "docs/**",
@@ -1172,6 +1173,19 @@ class PlannerFixtureTests(unittest.TestCase):
             self.assertEqual(
                 cache["baseline_cache_fingerprint"], cache["head_cache_fingerprint"]
             )
+
+    def test_non_artifact_workflow_change_does_not_select_builds(self) -> None:
+        self.repo.change(
+            ".gitea/workflows/mirror-github.yaml",
+            "name: Mirror GitHub\n",
+        )
+        document = self.repo.plan()
+        self.assertTrue(
+            all(
+                value["state"] == "unaffected"
+                for value in document["artifacts"].values()
+            )
+        )
 
     def test_legacy_selector_change_fails_every_artifact_closed(self) -> None:
         self.repo.change("scripts/ci/select/select-verification.sh", "#!/bin/sh\nexit 0\n")

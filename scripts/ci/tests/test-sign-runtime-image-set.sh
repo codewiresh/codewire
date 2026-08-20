@@ -128,7 +128,7 @@ case "${1:-} ${2:-} ${3:-}" in
         [[ "${BAO_TOKEN:-}" == synthetic-openbao-token ]]
         [[ " $* " == *' --key openbao://codewire-runtime '* ]]
         [[ " $* " == *' --signing-config /trust/signing-config.json '* ]]
-        [[ " $* " == *' --use-signing-config=true '* ]]
+        [[ " $* " != *' --use-signing-config '* ]]
         [[ " $* " == *' --new-bundle-format=false '* ]]
         [[ " $* " == *' --registry-referrers-mode=legacy '* ]]
         grep -Fxq "$reference" "$SIGNATURE_STATE" || printf '%s\n' "$reference" >>"$SIGNATURE_STATE"
