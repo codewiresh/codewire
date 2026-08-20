@@ -11,6 +11,7 @@ SMOKE_TTL="${SMOKE_TTL:-2h}"
 SMOKE_CPU="${SMOKE_CPU:-2000}"
 SMOKE_MEMORY="${SMOKE_MEMORY:-4096}"
 SMOKE_DISK="${SMOKE_DISK:-10}"
+SMOKE_ISOLATION_TIER="${SMOKE_ISOLATION_TIER:-standard}"
 SMOKE_TIMEOUT_SECONDS="${SMOKE_TIMEOUT_SECONDS:-900}"
 SMOKE_KEEP_ENV="${SMOKE_KEEP_ENV:-0}"
 SMOKE_SKIP_KUBE="${SMOKE_SKIP_KUBE:-0}"
@@ -146,6 +147,9 @@ Environment:
                            suitable for CI artifact upload. Full pod logs and
                            credentials are never copied there.
   SMOKE_CW_BUILD_TIMEOUT   Defaults to 600s when CW_BIN is not provided
+  SMOKE_ISOLATION_TIER    Product isolation tier requested at environment
+                           creation. Defaults to standard; the confidential
+                           wrapper sets confidential explicitly.
   SMOKE_TAILNET_DEBUG      Defaults to 0; when set to 1, captures
                            CW_DEBUG_TAILNET output for tailnet SSH.
                            Path assertions are made by cw doctor tailnet.
@@ -934,6 +938,11 @@ assert_admin_oauth_principal() {
 create_environment() {
   local create_out="$TMPDIR_SMOKE/create.out"
 
+  case "$SMOKE_ISOLATION_TIER" in
+    standard|confidential) ;;
+    *) die "SMOKE_ISOLATION_TIER must be standard or confidential" ;;
+  esac
+
   log "creating environment $SMOKE_NAME on $CODEWIRE_SERVER_URL"
   if ! cw env create \
       --image "$SMOKE_IMAGE" \
@@ -941,6 +950,7 @@ create_environment() {
       --cpu "$SMOKE_CPU" \
       --memory "$SMOKE_MEMORY" \
       --disk "$SMOKE_DISK" \
+      --isolation "$SMOKE_ISOLATION_TIER" \
       --ttl "$SMOKE_TTL" \
       --no-org-secrets \
       --no-user-secrets \
