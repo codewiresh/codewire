@@ -174,6 +174,10 @@ class FixtureRepository:
                 "AGENTS.md",
                 "CLAUDE.md",
                 "docs/**",
+                "scripts/ci/images/cosign-private-signing-config.json",
+                "scripts/ci/images/sign-runtime-image-set.sh",
+                "scripts/ci/tests/test-sign-runtime-image-set.sh",
+                "scripts/ci/trust/codewire-runtime-signing.pub",
             ],
             "artifacts": {
                 "dev_release_tree": {
@@ -1114,6 +1118,36 @@ class PlannerFixtureTests(unittest.TestCase):
                 "unaffected",
                 "unaffected",
             ),
+        )
+
+    def test_runtime_signing_changes_do_not_select_product_builds(self) -> None:
+        self.repo.write(
+            "scripts/ci/images/cosign-private-signing-config.json",
+            '{"privateInfrastructure": true}\n',
+        )
+        self.repo.write(
+            "scripts/ci/images/sign-runtime-image-set.sh",
+            "#!/usr/bin/env bash\nset -euo pipefail\n",
+            0o755,
+        )
+        self.repo.write(
+            "scripts/ci/tests/test-sign-runtime-image-set.sh",
+            "#!/usr/bin/env bash\nset -euo pipefail\n",
+            0o755,
+        )
+        self.repo.write(
+            "scripts/ci/trust/codewire-runtime-signing.pub",
+            "fixture public key\n",
+        )
+        self.repo.commit("runtime signing change")
+
+        document = self.repo.plan()
+        self.assertFalse(document["degraded_reasons"])
+        self.assertTrue(
+            all(
+                artifact["state"] == "unaffected"
+                for artifact in document["artifacts"].values()
+            )
         )
 
     def test_unknown_root_path_still_fails_closed(self) -> None:
