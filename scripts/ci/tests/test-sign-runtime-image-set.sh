@@ -77,7 +77,12 @@ case "$command" in
       fi
     done
     [[ -f "$signing_config" && ! -L "$signing_config" ]]
-    [[ " $* " == *' --tlog-upload=false '* ]]
+    jq -e '
+      .mediaType == "application/vnd.dev.sigstore.signingconfig.v0.2+json"
+      and .rekorTlogConfig == {}
+      and .tsaConfig == {}
+    ' "$signing_config" >/dev/null
+    [[ " $* " != *' --tlog-upload'* ]]
     [[ " $* " == *' --new-bundle-format=true '* ]]
     [[ " $* " != *' --registry-referrers-mode'* ]]
     grep -Fxq "$reference" "$SIGNATURE_STATE" || printf '%s\n' "$reference" >>"$SIGNATURE_STATE"
