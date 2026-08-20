@@ -51,8 +51,13 @@ bundle="$work/image-bundle.json"
 public_key="$work/codewire-runtime-signing.pub"
 signing_config="$work/signing-config.json"
 openbao_token="$work/openbao.token"
+cosign_binary="$work/cosign"
+cosign_container=''
 
 cleanup() {
+  if [[ -n "$cosign_container" ]]; then
+    docker rm -f "$cosign_container" >/dev/null 2>&1 || true
+  fi
   find "$work" -type f -exec shred -u {} + 2>/dev/null || true
   rm -rf "$work"
 }
@@ -137,6 +142,20 @@ docker image inspect --format '{{.Id}}' "$COSIGN_IMAGE" >/dev/null 2>&1 || {
   echo 'Approved Cosign image was not preloaded by protected infrastructure' >&2
   exit 1
 }
+cosign_container="$(docker create --pull=never "$COSIGN_IMAGE" version)"
+[[ "$cosign_container" =~ ^[a-f0-9]{12,64}$ ]] || {
+  echo 'Approved Cosign extraction container has an invalid identity' >&2
+  exit 1
+}
+docker cp "$cosign_container:/ko-app/cosign" "$cosign_binary"
+docker rm -f "$cosign_container" >/dev/null
+cosign_container=''
+[[ -f "$cosign_binary" && ! -L "$cosign_binary" && -s "$cosign_binary" ]] || {
+  echo 'Approved Cosign binary could not be extracted from the preloaded image' >&2
+  exit 1
+}
+chmod 0500 "$cosign_binary"
+"$cosign_binary" version >/dev/null
 
 verify_native_attestations() {
   local family="$1" reference="$2" provenance_output sbom_output
@@ -174,32 +193,24 @@ verify_native_attestations() {
 run_cosign() {
   local with_openbao="$1"
   shift
-  local -a docker_args=(
-    run --rm --pull=never
-    --user "$(id -u):$(id -g)"
-    --cap-drop=ALL
-    --security-opt=no-new-privileges
-    --pids-limit=256
-    --network=bridge
-    --env GOMAXPROCS=2
-    --env DOCKER_CONFIG=/auth
-    --volume "$docker_config:/auth:ro"
-    --volume "$public_key:/trust/codewire-runtime-signing.pub:ro"
-    --volume "$signing_config:/trust/signing-config.json:ro"
-  )
   if [[ "$with_openbao" == true ]]; then
-    docker_args+=(--env BAO_ADDR --env BAO_TOKEN)
-    BAO_ADDR="$OPENBAO_ADDR" BAO_TOKEN="$(<"$openbao_token")" \
-      docker "${docker_args[@]}" "$COSIGN_IMAGE" "$@"
+    BAO_ADDR="$OPENBAO_ADDR" \
+      BAO_TOKEN="$(<"$openbao_token")" \
+      DOCKER_CONFIG="$docker_config" \
+      GOMAXPROCS=2 \
+      "$cosign_binary" "$@"
   else
-    docker "${docker_args[@]}" "$COSIGN_IMAGE" "$@"
+    env -u BAO_ADDR -u BAO_TOKEN \
+      DOCKER_CONFIG="$docker_config" \
+      GOMAXPROCS=2 \
+      "$cosign_binary" "$@"
   fi
 }
 
 verify_signature() {
   local family="$1" reference="$2"
   run_cosign false verify \
-    --key /trust/codewire-runtime-signing.pub \
+    --key "$public_key" \
     --insecure-ignore-tlog \
     --new-bundle-format=true \
     --annotations "dev.codewire.image-family=$family" \
@@ -215,7 +226,7 @@ sign_reference() {
   fi
   run_cosign true sign --yes \
     --key "$OPENBAO_KEY" \
-    --signing-config /trust/signing-config.json \
+    --signing-config "$signing_config" \
     --new-bundle-format=true \
     --annotations "dev.codewire.image-family=$family" \
     --annotations "dev.codewire.source-sha=$GITHUB_SHA" \

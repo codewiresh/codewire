@@ -21,7 +21,11 @@
     ".gitea/workflows/mirror-github.yaml",
     "AGENTS.md",
     "CLAUDE.md",
-    "docs/**"
+    "docs/**",
+    "scripts/ci/images/cosign-private-signing-config.json",
+    "scripts/ci/images/sign-runtime-image-set.sh",
+    "scripts/ci/tests/test-sign-runtime-image-set.sh",
+    "scripts/ci/trust/codewire-runtime-signing.pub"
   ],
   "artifacts": {
     "dev_release_tree": {

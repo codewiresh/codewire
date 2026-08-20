@@ -174,6 +174,10 @@ class FixtureRepository:
                 "AGENTS.md",
                 "CLAUDE.md",
                 "docs/**",
+                "scripts/ci/images/cosign-private-signing-config.json",
+                "scripts/ci/images/sign-runtime-image-set.sh",
+                "scripts/ci/tests/test-sign-runtime-image-set.sh",
+                "scripts/ci/trust/codewire-runtime-signing.pub",
             ],
             "artifacts": {
                 "dev_release_tree": {
@@ -1116,6 +1120,36 @@ class PlannerFixtureTests(unittest.TestCase):
             ),
         )
 
+    def test_runtime_signing_changes_do_not_select_product_builds(self) -> None:
+        self.repo.write(
+            "scripts/ci/images/cosign-private-signing-config.json",
+            '{"privateInfrastructure": true}\n',
+        )
+        self.repo.write(
+            "scripts/ci/images/sign-runtime-image-set.sh",
+            "#!/usr/bin/env bash\nset -euo pipefail\n",
+            0o755,
+        )
+        self.repo.write(
+            "scripts/ci/tests/test-sign-runtime-image-set.sh",
+            "#!/usr/bin/env bash\nset -euo pipefail\n",
+            0o755,
+        )
+        self.repo.write(
+            "scripts/ci/trust/codewire-runtime-signing.pub",
+            "fixture public key\n",
+        )
+        self.repo.commit("runtime signing change")
+
+        document = self.repo.plan()
+        self.assertFalse(document["degraded_reasons"])
+        self.assertTrue(
+            all(
+                artifact["state"] == "unaffected"
+                for artifact in document["artifacts"].values()
+            )
+        )
+
     def test_unknown_root_path_still_fails_closed(self) -> None:
         self.repo.change("unknown-root-input.txt", "unknown\n")
         document = self.repo.plan()
@@ -1173,6 +1207,51 @@ class PlannerFixtureTests(unittest.TestCase):
             self.assertEqual(
                 cache["baseline_cache_fingerprint"], cache["head_cache_fingerprint"]
             )
+
+    def test_exact_main_policy_change_uses_artifact_fingerprints(self) -> None:
+        head = self.repo.change(
+            "scripts/ci/plan/new-policy-input.txt",
+            "protected main policy change\n",
+        )
+
+        deployed_candidate = self.repo.deployed_source_candidate(self.repo.base, head)
+        deployed_document = self.repo.deployed_source_plan(deployed_candidate, head)
+        self.assertTrue(deployed_document["baseline"]["validation"]["valid"])
+        self.assertTrue(
+            all(
+                artifact["state"] == "unaffected"
+                for artifact in deployed_document["artifacts"].values()
+            )
+        )
+
+        support_candidate = self.repo.support_candidate(self.repo.base)
+        support_document = self.repo.support_plan(support_candidate, head)
+        self.assertTrue(support_document["baseline"]["validation"]["valid"])
+        self.assertTrue(
+            all(
+                artifact["state"] == "unaffected"
+                for artifact in support_document["artifacts"].values()
+            )
+        )
+
+        mixed_head = self.repo.change(
+            "apps/dashboard/runtime-inventory.json",
+            '{"changed": true}\n',
+        )
+        mixed_candidate = self.repo.deployed_source_candidate(
+            self.repo.base,
+            mixed_head,
+        )
+        mixed_document = self.repo.deployed_source_plan(
+            mixed_candidate,
+            mixed_head,
+        )
+        self.assertTrue(
+            all(
+                artifact["state"] == "unclassified"
+                for artifact in mixed_document["artifacts"].values()
+            )
+        )
 
     def test_non_artifact_workflow_change_does_not_select_builds(self) -> None:
         self.repo.change(
