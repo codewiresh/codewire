@@ -167,6 +167,7 @@ jobs:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this untrusted job has no protected credential.
     name: CW release-assets verification
     runs-on: ci-heavy
+    enable-openid-connect: true
     timeout-minutes: 30
     needs: [verification-selection]
     env:
@@ -186,6 +187,12 @@ jobs:
       - name: Verify sealed Rust toolchain
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && needs.verification-selection.outputs.cw_package_selected == 'true' }}
         run: scripts/ci/setup/assert-ci-runner-image.sh
+
+      - name: Select best-effort shared Rust cache
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && needs.verification-selection.outputs.cw_package_selected == 'true' }}
+        env:
+          CODEWIRE_SCCACHE_REQUEST: ${{ github.event.inputs.rust_cache }}
+        run: scripts/ci/setup/select-untrusted-rust-cache.sh "$RUNNER_TEMP/codewire-sccache-r2.aws"
 
       - name: Install pinned protobuf compiler
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && needs.verification-selection.outputs.cw_package_selected == 'true' }}
@@ -228,6 +235,10 @@ jobs:
           "dist/cw-release/cw-v0.0.0-ci-x86_64-unknown-linux-musl" --version | grep -F 'v0.0.0-ci'
           [ "$(wc -l < dist/cw-release/SHA256SUMS)" -eq 4 ]
           (cd dist/cw-release && sha256sum --check --ignore-missing SHA256SUMS)
+
+      - name: Report and clean Rust cache
+        if: ${{ always() && needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && needs.verification-selection.outputs.cw_package_selected == 'true' }}
+        run: scripts/ci/setup/finish-untrusted-rust-cache.sh "$RUNNER_TEMP/codewire-sccache-r2.aws"
 
   workspace-image:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this untrusted job has no protected credential.
@@ -327,6 +338,7 @@ jobs:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this untrusted job has no protected credential.
     name: Standard verification
     runs-on: ci-heavy
+    enable-openid-connect: true
     timeout-minutes: 30
     needs: [verification-selection]
     env:
@@ -348,6 +360,12 @@ jobs:
       - name: Verify sealed Rust toolchain
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|contracts_proto|') || contains(needs.verification-selection.outputs.selection, '|go_tailnet|') || contains(needs.verification-selection.outputs.selection, '|go_consumer_interop|')) }}
         run: scripts/ci/setup/assert-ci-runner-image.sh
+
+      - name: Select best-effort shared Rust cache
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|contracts_proto|') || contains(needs.verification-selection.outputs.selection, '|go_tailnet|') || contains(needs.verification-selection.outputs.selection, '|go_consumer_interop|') || contains(needs.verification-selection.outputs.selection, '|web|')) }}
+        env:
+          CODEWIRE_SCCACHE_REQUEST: ${{ github.event.inputs.rust_cache }}
+        run: scripts/ci/setup/select-untrusted-rust-cache.sh "$RUNNER_TEMP/codewire-sccache-r2.aws"
 
       - name: Install pinned protoc for Rust-backed standard checks
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|contracts_proto|') || contains(needs.verification-selection.outputs.selection, '|go_tailnet|') || contains(needs.verification-selection.outputs.selection, '|go_consumer_interop|')) }}
@@ -405,6 +423,10 @@ jobs:
       - name: Run SDK Python
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|sdk_python|') }}
         run: scripts/ci/verify/run-product-verification.sh sdk-python
+
+      - name: Report and clean Rust cache
+        if: ${{ always() && needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|contracts_proto|') || contains(needs.verification-selection.outputs.selection, '|go_tailnet|') || contains(needs.verification-selection.outputs.selection, '|go_consumer_interop|') || contains(needs.verification-selection.outputs.selection, '|web|')) }}
+        run: scripts/ci/setup/finish-untrusted-rust-cache.sh "$RUNNER_TEMP/codewire-sccache-r2.aws"
 
   tooling:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this untrusted job has no protected credential.
@@ -466,7 +488,8 @@ jobs:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this untrusted job has no protected credential.
     name: Rust / transport verification
     runs-on: ci-heavy
-    timeout-minutes: 30
+    enable-openid-connect: true
+    timeout-minutes: 55
     needs: [verification-selection]
     env:
       CARGO_HOME: ${{ github.workspace }}/target/ci-rust-cargo-home
@@ -483,6 +506,12 @@ jobs:
       - name: Verify sealed Rust toolchain
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|rust|') || contains(needs.verification-selection.outputs.selection, '|rust_curated_locks|') || contains(needs.verification-selection.outputs.selection, '|transport|') || needs.verification-selection.outputs.desktop_package_selected == 'true') }}
         run: scripts/ci/setup/assert-ci-runner-image.sh
+
+      - name: Select best-effort shared Rust cache
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|rust|') || contains(needs.verification-selection.outputs.selection, '|transport|') || needs.verification-selection.outputs.desktop_package_selected == 'true') }}
+        env:
+          CODEWIRE_SCCACHE_REQUEST: ${{ github.event.inputs.rust_cache }}
+        run: scripts/ci/setup/select-untrusted-rust-cache.sh "$RUNNER_TEMP/codewire-sccache-r2.aws"
 
       - name: Verify Rust protobuf compiler
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|rust|') || contains(needs.verification-selection.outputs.selection, '|transport|')) }}
@@ -528,10 +557,15 @@ jobs:
           VERIFICATION_SELECTION: ${{ needs.verification-selection.outputs.selection }}
         run: scripts/ci/verify/run-product-verification.sh transport
 
+      - name: Report and clean Rust cache
+        if: ${{ always() && needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|rust|') || contains(needs.verification-selection.outputs.selection, '|transport|') || needs.verification-selection.outputs.desktop_package_selected == 'true') }}
+        run: scripts/ci/setup/finish-untrusted-rust-cache.sh "$RUNNER_TEMP/codewire-sccache-r2.aws"
+
   database:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this untrusted job has no protected credential.
     name: Database verification
     runs-on: ci-heavy
+    enable-openid-connect: true
     timeout-minutes: 30
     needs: [verification-selection]
     env:
@@ -548,6 +582,12 @@ jobs:
       - name: Verify sealed Rust toolchain
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|database|') }}
         run: scripts/ci/setup/assert-ci-runner-image.sh
+
+      - name: Select best-effort shared Rust cache
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|database|') }}
+        env:
+          CODEWIRE_SCCACHE_REQUEST: ${{ github.event.inputs.rust_cache }}
+        run: scripts/ci/setup/select-untrusted-rust-cache.sh "$RUNNER_TEMP/codewire-sccache-r2.aws"
 
       - name: Verify integration tools
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|database|') }}
@@ -605,10 +645,15 @@ jobs:
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && always() && contains(needs.verification-selection.outputs.selection, '|database|') }}
         run: docker rm -f "${POSTGRES_CONTAINER:-missing}" >/dev/null 2>&1 || true
 
+      - name: Report and clean Rust cache
+        if: ${{ always() && needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|database|') }}
+        run: scripts/ci/setup/finish-untrusted-rust-cache.sh "$RUNNER_TEMP/codewire-sccache-r2.aws"
+
   services-control:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this untrusted job has no protected credential.
     name: Service control-plane verification
     runs-on: ci-heavy
+    enable-openid-connect: true
     timeout-minutes: 30
     needs: [verification-selection]
     env:
@@ -645,6 +690,12 @@ jobs:
       - name: Verify sealed Rust toolchain
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && steps.service-scope.outputs.selected == 'true' }}
         run: scripts/ci/setup/assert-ci-runner-image.sh
+
+      - name: Select best-effort shared Rust cache
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && steps.service-scope.outputs.selected == 'true' }}
+        env:
+          CODEWIRE_SCCACHE_REQUEST: ${{ github.event.inputs.rust_cache }}
+        run: scripts/ci/setup/select-untrusted-rust-cache.sh "$RUNNER_TEMP/codewire-sccache-r2.aws"
 
       - name: Verify integration tools
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && steps.service-scope.outputs.selected == 'true' }}
@@ -704,10 +755,15 @@ jobs:
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && always() && steps.service-scope.outputs.selected == 'true' }}
         run: docker rm -f "${POSTGRES_CONTAINER:-missing}" >/dev/null 2>&1 || true
 
+      - name: Report and clean Rust cache
+        if: ${{ always() && needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && steps.service-scope.outputs.selected == 'true' }}
+        run: scripts/ci/setup/finish-untrusted-rust-cache.sh "$RUNNER_TEMP/codewire-sccache-r2.aws"
+
   services-runtime:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this untrusted job has no protected credential.
     name: Service runtime-plane verification
     runs-on: ci-heavy
+    enable-openid-connect: true
     timeout-minutes: 30
     needs: [verification-selection]
     env:
@@ -744,6 +800,12 @@ jobs:
       - name: Verify sealed Rust toolchain
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && steps.service-scope.outputs.selected == 'true' }}
         run: scripts/ci/setup/assert-ci-runner-image.sh
+
+      - name: Select best-effort shared Rust cache
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && steps.service-scope.outputs.selected == 'true' }}
+        env:
+          CODEWIRE_SCCACHE_REQUEST: ${{ github.event.inputs.rust_cache }}
+        run: scripts/ci/setup/select-untrusted-rust-cache.sh "$RUNNER_TEMP/codewire-sccache-r2.aws"
 
       - name: Verify integration tools
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && steps.service-scope.outputs.selected == 'true' }}
@@ -803,6 +865,10 @@ jobs:
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && always() && steps.service-scope.outputs.selected == 'true' }}
         run: docker rm -f "${POSTGRES_CONTAINER:-missing}" >/dev/null 2>&1 || true
 
+      - name: Report and clean Rust cache
+        if: ${{ always() && needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && steps.service-scope.outputs.selected == 'true' }}
+        run: scripts/ci/setup/finish-untrusted-rust-cache.sh "$RUNNER_TEMP/codewire-sccache-r2.aws"
+
   edge-kind:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this untrusted job has no protected credential.
     name: Edge / Kind verification
@@ -818,9 +884,6 @@ jobs:
       KIND_WORKSPACE_IMAGE: nexus.example.invalid/oci-approved/codewire/workspace@sha256:cf91240f0706a5b3da81485fbf87d65973b18d4f1067f630bc5fd513b38d1510
       KIND_DIND_IMAGE: nexus.example.invalid/oci-approved/docker/dind@sha256:66fd272fc375aad4c8fa06351c414e15bffe8cb015c171e1b8a8efe36a72cc1e
       CARGO_TARGET_DIR: ${{ github.workspace }}/target/ci-cache/kind-ci
-      SCCACHE_BUCKET: example-ci-cache-untrusted
-      SCCACHE_ENDPOINT: https://00000000000000000000000000000000.r2.cloudflarestorage.com
-      CODEWIRE_SCCACHE_PREFIX: untrusted/codewire/v1
     steps:
       - name: Reuse exact PR-head content verification
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt == 'accepted' }}
@@ -871,45 +934,16 @@ jobs:
       - name: Select best-effort shared Rust cache
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|kind|') }}
         env:
-          CACHE_REQUEST: ${{ github.event.inputs.rust_cache }}
-        run: |
-          set -euo pipefail
-          credentials_file="$RUNNER_TEMP/codewire-sccache-r2.aws"
-          case "${CACHE_REQUEST:-auto}" in
-            disabled|local)
-              echo "CODEWIRE_SCCACHE_MODE=${CACHE_REQUEST}" >> "$GITHUB_ENV"
-              echo "CODEWIRE_CI_CACHE state=explicit mode=${CACHE_REQUEST}"
-              ;;
-            auto)
-              if scripts/ci/setup/fetch-openbao-sccache-r2-credentials.sh "$credentials_file"; then
-                {
-                  echo 'CODEWIRE_SCCACHE_MODE=r2'
-                  echo "CODEWIRE_SCCACHE_CREDENTIALS_FILE=$credentials_file"
-                } >> "$GITHUB_ENV"
-                echo 'CODEWIRE_CI_CACHE state=remote-selected backend=r2 trust=untrusted'
-              else
-                echo '::warning::R2 sccache identity is unavailable; continuing with the job-local cache'
-                echo 'CODEWIRE_SCCACHE_MODE=local' >> "$GITHUB_ENV"
-                echo 'CODEWIRE_CI_CACHE state=cache-unavailable fallback=local'
-              fi
-              ;;
-            *)
-              echo "::error::unsupported Rust cache mode: ${CACHE_REQUEST}"
-              exit 2
-              ;;
-          esac
+          CODEWIRE_SCCACHE_REQUEST: ${{ github.event.inputs.rust_cache }}
+        run: scripts/ci/setup/select-untrusted-rust-cache.sh "$RUNNER_TEMP/codewire-sccache-r2.aws"
 
       - name: Run Kind
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|kind|') }}
         run: scripts/ci/verify/kind-e2e.sh
 
-      - name: Remove private Rust cache credential
+      - name: Report and clean Rust cache
         if: ${{ always() && needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|kind|') }}
-        run: |
-          credentials_file="$RUNNER_TEMP/codewire-sccache-r2.aws"
-          if [ -f "$credentials_file" ] && [ ! -L "$credentials_file" ]; then
-            shred -u "$credentials_file"
-          fi
+        run: scripts/ci/setup/finish-untrusted-rust-cache.sh "$RUNNER_TEMP/codewire-sccache-r2.aws"
 
   required-verification:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this aggregator receives no write-capable integration.

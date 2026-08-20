@@ -4,6 +4,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 readonly ROOT
 readonly FETCHER="$ROOT/scripts/ci/setup/fetch-openbao-sccache-r2-credentials.sh"
+readonly SELECTOR="$ROOT/scripts/ci/setup/select-untrusted-rust-cache.sh"
+readonly FINISHER="$ROOT/scripts/ci/setup/finish-untrusted-rust-cache.sh"
 readonly WORKFLOW="$ROOT/.gitea/workflows/ci.yaml"
 
 fail() {
@@ -124,18 +126,39 @@ fi
 if grep -q '^enable-openid-connect:' "$WORKFLOW"; then
   fail 'CI exposes Forgejo OIDC to every verification job'
 fi
-[[ "$(grep -Fc '    enable-openid-connect: true' "$WORKFLOW")" -eq 1 ]] ||
-  fail 'CI OIDC is not confined to one capability job'
-edge_job="$(sed -n '/^  edge-kind:/,/^  required-verification:/p' "$WORKFLOW")"
-grep -Fq '    enable-openid-connect: true' <<<"$edge_job" ||
-  fail 'the cache-consuming Kind job cannot request Forgejo OIDC'
-grep -Fq "scripts/ci/setup/fetch-openbao-sccache-r2-credentials.sh \"\$credentials_file\"" \
-  "$WORKFLOW" || fail 'Kind does not obtain the private cache credential'
-grep -Fq 'CODEWIRE_CI_CACHE state=cache-unavailable fallback=local' "$WORKFLOW" ||
-  fail 'Kind does not report its cold-safe identity fallback'
-grep -Fq "shred -u \"\$credentials_file\"" "$WORKFLOW" ||
-  fail 'Kind does not remove the private cache credential'
-grep -Fq 'CODEWIRE_SCCACHE_PREFIX: untrusted/codewire/v1' "$WORKFLOW" ||
-  fail 'Kind remote cache is outside the explicit untrusted prefix'
+cache_jobs=(
+  cw-release-assets
+  standard
+  rust-transport
+  database
+  services-control
+  services-runtime
+  edge-kind
+)
+[[ "$(grep -Fc '    enable-openid-connect: true' "$WORKFLOW")" -eq "${#cache_jobs[@]}" ]] ||
+  fail 'CI OIDC is not confined to the seven cache-consuming jobs'
+for index in "${!cache_jobs[@]}"; do
+  job="${cache_jobs[$index]}"
+  if (( index + 1 < ${#cache_jobs[@]} )); then
+    next_job="${cache_jobs[$((index + 1))]}"
+    job_block="$(sed -n "/^  ${job}:/,/^  ${next_job}:/p" "$WORKFLOW")"
+  else
+    job_block="$(sed -n '/^  edge-kind:/,/^  required-verification:/p' "$WORKFLOW")"
+  fi
+  grep -Fq '    enable-openid-connect: true' <<<"$job_block" ||
+    fail "$job cannot request its untrusted cache identity"
+  grep -Fq "scripts/ci/setup/select-untrusted-rust-cache.sh \"\$RUNNER_TEMP/codewire-sccache-r2.aws\"" \
+    <<<"$job_block" || fail "$job does not select the shared cache"
+  grep -Fq "scripts/ci/setup/finish-untrusted-rust-cache.sh \"\$RUNNER_TEMP/codewire-sccache-r2.aws\"" \
+    <<<"$job_block" || fail "$job does not clean the cache credential"
+done
 
-printf '[test-fetch-openbao-sccache-r2-credentials] exact-claim private-file contract passed\n'
+grep -Fq "readonly fetcher=\"\${OPENBAO_SCCACHE_FETCHER:-\$ROOT/scripts/ci/setup/fetch-openbao-sccache-r2-credentials.sh}\"" \
+  "$SELECTOR" || fail 'cache selector does not use the reviewed OpenBao exchange'
+grep -Fq "shred -u -- \"\$credentials_file\"" "$FINISHER" ||
+  fail 'cache finisher does not remove its private credential'
+if grep -Eq '^      (SCCACHE_BUCKET|SCCACHE_ENDPOINT|CODEWIRE_SCCACHE_PREFIX):' "$WORKFLOW"; then
+  fail 'workflow exposes remote cache configuration outside selected cache steps'
+fi
+
+printf '[test-fetch-openbao-sccache-r2-credentials] exact-claim seven-job private-file contract passed\n'

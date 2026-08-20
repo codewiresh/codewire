@@ -245,6 +245,13 @@ run_paths_case sccache_r2_consumer pull_request refs/pull/1749/head false \
 run_paths_case sccache_r2_consumer_fixture pull_request refs/pull/1750/head false \
   'edge_kind policy security' \
   scripts/ci/tests/test-fetch-openbao-sccache-r2-credentials.sh
+run_paths_case sccache_host_selector pull_request refs/pull/1751/head false \
+  'policy rust rust_workspace security' \
+  scripts/ci/setup/select-untrusted-rust-cache.sh \
+  scripts/ci/setup/finish-untrusted-rust-cache.sh
+run_paths_case sccache_host_selector_fixture pull_request refs/pull/1752/head false \
+  'policy security' \
+  scripts/ci/tests/test-select-untrusted-rust-cache.sh
 run_paths_case dev_deploy_contract pull_request refs/pull/30/head false \
   'deploy go_consumer_interop go_support policy release runtime_confidential' scripts/ci/tests/test-deploy-dev.sh
 run_paths_case dev_smoke_receipt pull_request refs/pull/302/head false \
@@ -1208,9 +1215,10 @@ EOF
 
 # Heavy jobs share the queue-driven disposable DinD runner pool. Keep ordinary
 # task ceilings at 30 minutes. The selected workspace path performs two cold
-# image builds, so it has a bounded 55-minute exception beneath the runner's
-# independently managed 60-minute task lifetime.
-for job_id in cw-release-assets standard tooling rust-transport database services-control services-runtime; do
+# image builds, while Rust/transport may seed the complete workspace and
+# desktop compiler cache. Those two jobs have bounded 55-minute exceptions
+# beneath the runner's independently managed 60-minute task lifetime.
+for job_id in cw-release-assets standard tooling database services-control services-runtime; do
   block="$TMP/${job_id}.yaml"
   if [ ! -s "$block" ]; then
     awk -v wanted="$job_id" '
@@ -1224,6 +1232,12 @@ for job_id in cw-release-assets standard tooling rust-transport database service
     exit 1
   }
 done
+
+rust_transport_block="$TMP/rust-transport.yaml"
+grep -qF '    timeout-minutes: 55' "$rust_transport_block" || {
+  echo 'rust-transport: cold-cache ceiling must remain below the 60-minute runner lifetime' >&2
+  exit 1
+}
 
 workspace_block="$TMP/workspace-image.yaml"
 awk '
