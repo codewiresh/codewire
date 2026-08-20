@@ -26,7 +26,7 @@ env:
 jobs:
   release-selection:
     name: Verify canonical release tag
-    runs-on: ubuntu-latest
+    runs-on: ci-lite
     outputs:
       release_tag: ${{ steps.select.outputs.release_tag }}
       source_sha: ${{ steps.select.outputs.source_sha }}
@@ -92,7 +92,7 @@ jobs:
 
   build-gateway-image:
     name: Alias Existing Gateway Image
-    runs-on: ubuntu-latest
+    runs-on: ci-protected
     needs: [release-selection]
     outputs:
       source_sha: ${{ steps.build.outputs.source_sha }}
@@ -116,7 +116,7 @@ jobs:
 
   build-derp:
     name: Alias Existing DERP Relay Image
-    runs-on: ubuntu-latest
+    runs-on: ci-protected
     needs: [release-selection]
     outputs:
       source_sha: ${{ steps.build.outputs.source_sha }}
@@ -140,7 +140,7 @@ jobs:
 
   build-services-image:
     name: Alias Existing Rust Services Image
-    runs-on: ubuntu-latest
+    runs-on: ci-protected
     needs: [release-selection]
     outputs:
       source_sha: ${{ steps.build.outputs.source_sha }}
@@ -164,7 +164,7 @@ jobs:
 
   build-mesh-image:
     name: Alias Existing Hosted Mesh Image
-    runs-on: ubuntu-latest
+    runs-on: ci-protected
     needs: [release-selection]
     outputs:
       source_sha: ${{ steps.build.outputs.source_sha }}
@@ -188,7 +188,7 @@ jobs:
 
   build-dashboard-image:
     name: Alias Existing Dashboard Image
-    runs-on: ubuntu-latest
+    runs-on: ci-protected
     needs: [release-selection]
     outputs:
       source_sha: ${{ steps.build.outputs.source_sha }}
@@ -212,7 +212,7 @@ jobs:
 
   publish-support-release-images:
     name: Build and Publish Exact Support Release Images
-    runs-on: ubuntu-latest
+    runs-on: ci-protected
     needs: [release-selection]
     steps:
       - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
@@ -256,7 +256,7 @@ jobs:
 
   publish-runtime-images:
     name: Validate and Publish Exact Runtime Bundle
-    runs-on: ubuntu-latest
+    runs-on: ci-protected
     needs:
       - release-selection
       - build-gateway-image
@@ -314,7 +314,7 @@ jobs:
 
   dispatch-deploy-prod:
     name: Dispatch Signed Tag to Deploy
-    runs-on: untrusted-validation
+    runs-on: ci-protected
     timeout-minutes: 15
     needs:
       - release-selection

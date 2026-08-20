@@ -8,7 +8,7 @@ jobs:
   support-selection:
     # zizmor: ignore[excessive-permissions] This credential-free selection has no OIDC or write-capable integration.
     name: Support image selection
-    runs-on: ci-heavy
+    runs-on: ci-lite
     outputs:
       build_support_images: ${{ steps.select.outputs.build_support_images }}
       reason: ${{ steps.select.outputs.reason }}
@@ -64,7 +64,7 @@ jobs:
   publish-support-images:
     # zizmor: ignore[excessive-permissions] This exact protected job alone receives the scoped publisher identity.
     name: Build and publish exact support images
-    runs-on: protected-delivery
+    runs-on: ci-protected
     enable-openid-connect: true
     needs: [support-selection]
     if: ${{ needs.support-selection.outputs.build_support_images == 'true' }}

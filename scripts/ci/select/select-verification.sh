@@ -369,6 +369,7 @@ if [ "$event_selected" = false ]; then
       .gitea/workflows/rust-latest-canary.yaml|\
       .gitea/workflows/rust-cache-refresh.yaml|\
       .gitea/workflows/connect-apikey-smoke.yaml|\
+      .gitea/workflows/source-approval.yml|\
       .gitea/workflows/dev-deployment-smoke-receipt.yaml|\
       .gitea/workflows/prod-readonly-smoke.yaml|\
       .gitea/workflows/runtime-dev-commodity-smoke.yaml|\
@@ -386,6 +387,7 @@ if [ "$event_selected" = false ]; then
       scripts/ci/images/resolve-published-support-pair.sh|\
       scripts/ci/plan/*|\
       scripts/ci/tests/test-select-verification.sh|\
+      scripts/ci/tests/test-source-approval-workflow.sh|\
       scripts/ci/tests/test-setup-kubeconfig.sh|\
       scripts/ci/tests/test-resolve-published-support-pair.sh|\
       scripts/ci/tests/test-resolve-deployed-source.sh|\

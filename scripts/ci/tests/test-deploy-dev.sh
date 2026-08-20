@@ -43,10 +43,10 @@ if grep -Eq 'CODEWIRE_(GHCR_PUBLISH|DEPLOY_SHA_DISPATCH)_ENABLED' "$WORKFLOW"; t
 fi
 
 selection_job="$(sed -n '/^  deploy-selection:/,/^  build-publish-runtime-images:/p' "$WORKFLOW")"
-grep -Fq '    runs-on: trusted-plan' <<<"$selection_job" ||
-  fail "deploy selection does not use the non-Docker trusted planning profile"
+grep -Fq '    runs-on: ci-lite' <<<"$selection_job" ||
+  fail "deploy selection does not use the non-privileged CI tier"
 grep -Fq '    timeout-minutes: 15' <<<"$selection_job" ||
-  fail "deploy selection lacks a bounded trusted-plan deadline"
+  fail "deploy selection lacks a bounded ci-lite deadline"
 grep -Fq '          fetch-depth: 0' <<<"$selection_job" ||
   fail "deploy selection does not receive the complete cumulative history"
 grep -Fq 'name: Verify sealed Rust toolchain' \
@@ -99,8 +99,8 @@ done
   fail "all-unaffected selection does not skip the combined runtime build/publication"
 
 build_job="$(sed -n '/^  build-publish-runtime-images:/,$p' "$WORKFLOW")"
-grep -Fq '    runs-on: protected-delivery' <<<"$build_job" ||
-  fail "runtime set does not build and publish on the protected delivery profile"
+grep -Fq '    runs-on: ci-protected' <<<"$build_job" ||
+  fail "runtime set does not build and publish on the protected CI tier"
 [[ "$(grep -Fc '    enable-openid-connect: true' "$WORKFLOW")" -eq 1 ]] ||
   fail "Dev delivery OIDC is not confined to one job"
 grep -Fq '    enable-openid-connect: true' <<<"$build_job" ||

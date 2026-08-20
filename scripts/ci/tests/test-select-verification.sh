@@ -119,6 +119,7 @@ run_paths_case local_compose_kind_opt_in pull_request refs/pull/111/head true \
 run_paths_case ci_self pull_request refs/pull/2/head false \
   'go_consumer_interop go_support policy policy_shell release runtime_confidential runtime_dev_smoke rust_curated_locks' \
   .gitea/workflows/ci.yaml .gitea/workflows/manual-diagnostics.yaml \
+  .gitea/workflows/source-approval.yml \
   scripts/ci/select/select-verification.sh \
   scripts/ci/select/require-verification-results.sh \
   scripts/ci/receipts/local-prepush-receipt.py \
@@ -128,7 +129,8 @@ run_paths_case ci_self pull_request refs/pull/2/head false \
   scripts/ci/tests/test-require-verification-results.sh \
   scripts/ci/tests/test-verify-tested-tree-receipt.sh \
   scripts/ci/tests/test-verify-release-tag-receipt.sh \
-  scripts/ci/tests/test-local-prepush-receipt.sh
+  scripts/ci/tests/test-local-prepush-receipt.sh \
+  scripts/ci/tests/test-source-approval-workflow.sh
 run_paths_case ci_rewrite pull_request refs/pull/20/head false \
   'policy runtime_dev_smoke rust_curated_locks' \
   .githooks/pre-push scripts/dev/preflight.sh \
@@ -1201,7 +1203,7 @@ rust-transport|Rust / transport verification|ci-heavy
 database|Database verification|ci-heavy
 services-control|Service control-plane verification|ci-heavy
 services-runtime|Service runtime-plane verification|ci-heavy
-edge-kind|Edge / Kind verification|ci-kind
+edge-kind|Edge / Kind verification|ci-heavy
 EOF
 
 # Heavy jobs share the queue-driven disposable DinD runner pool. Keep ordinary
@@ -1366,20 +1368,20 @@ awk '
   capture && $0 ~ /^  [A-Za-z0-9_-]+:$/ && $0 != "  verification-selection:" { exit }
   capture { print }
 ' "$WORKFLOW" > "$selection_block"
-grep -qF '    runs-on: untrusted-validation' "$selection_block" || {
+grep -qF '    runs-on: ci-lite' "$selection_block" || {
   echo 'verification selection does not use the live non-privileged validation profile' >&2
   exit 1
 }
-if grep -Eq '^    runs-on: (ubuntu-latest|kind-e2e)$' "$WORKFLOW"; then
+if grep -Eq '^    runs-on: (ubuntu-latest|untrusted-validation|ci-kind|kind-e2e|trusted-plan|protected-delivery|protected-dev-observer)$' "$WORKFLOW"; then
   echo 'Codewire CI still depends on a legacy compatibility label' >&2
   exit 1
 fi
-[[ "$(grep -Fc '    runs-on: ci-heavy' "$WORKFLOW")" -eq 9 ]] || {
+[[ "$(grep -Fc '    runs-on: ci-heavy' "$WORKFLOW")" -eq 10 ]] || {
   echo 'Codewire CI heavy capability groups are not explicit' >&2
   exit 1
 }
-[[ "$(grep -Fc '    runs-on: ci-kind' "$WORKFLOW")" -eq 1 ]] || {
-  echo 'Codewire CI Kind capability does not own one dedicated lane' >&2
+[[ "$(grep -Fc '    runs-on: ci-lite' "$WORKFLOW")" -eq 2 ]] || {
+  echo 'Codewire CI has not assigned selection and aggregation to ci-lite' >&2
   exit 1
 }
 [[ "$(grep -Fc '    runs-on: ci-light' "$WORKFLOW")" -eq 0 ]] || {
@@ -1873,7 +1875,7 @@ if rg -ni 'migration[ _-](static|integration)' "$WORKFLOW"; then
 fi
 grep -qF '  required-verification:' "$WORKFLOW"
 grep -qF '    name: Required verification' "$WORKFLOW"
-grep -qF '    runs-on: untrusted-validation' "$required_block" || {
+grep -qF '    runs-on: ci-lite' "$required_block" || {
   echo 'required coordination consumes the heavy compatibility pool' >&2
   exit 1
 }

@@ -11,7 +11,7 @@ fail() {
 }
 
 [[ -f "$WORKFLOW" ]] || fail 'source-approval workflow is missing'
-grep -Fq 'runs-on: untrusted-validation' "$WORKFLOW" ||
+grep -Fq 'runs-on: ci-lite' "$WORKFLOW" ||
   fail 'source approval does not use the credential-free validation profile'
 grep -Fq 'EXPECTED_SUPPLYCHAIN: 4e29a1552ca2d135c5dcd16904c3ea8cbaafac6d' \
   "$WORKFLOW" || fail 'sealed Supplychain revision changed without review'

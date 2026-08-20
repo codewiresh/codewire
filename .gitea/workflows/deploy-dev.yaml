@@ -9,7 +9,7 @@ jobs:
   deploy-selection:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this trusted planner has no write-capable integration or OIDC.
     name: Deploy selection
-    runs-on: trusted-plan
+    runs-on: ci-lite
     timeout-minutes: 15
     outputs:
       deploy_dev: ${{ steps.select.outputs.deploy_dev }}
@@ -70,7 +70,7 @@ jobs:
   build-publish-runtime-images:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this protected job receives only its job-scoped OIDC and allowlisted server-side capabilities.
     name: Build and publish exact runtime image set
-    runs-on: protected-delivery
+    runs-on: ci-protected
     enable-openid-connect: true
     timeout-minutes: 110
     needs: [deploy-selection]

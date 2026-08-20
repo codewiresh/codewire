@@ -180,7 +180,7 @@ grep -F 'canonical tag is not annotated' "$TMP/lightweight.out"
 grep -Fq 'enable-openid-connect: true' "$MIRROR_WORKFLOW"
 grep -Fq 'OPENBAO_GITHUB_ROLE: codewire-source-github-mirror' "$MIRROR_WORKFLOW"
 grep -Fq 'OPENBAO_GITHUB_AUDIENCE: openbao-codewire-source-github-mirror' "$MIRROR_WORKFLOW"
-grep -Fq '    runs-on: protected-delivery' "$MIRROR_WORKFLOW"
+grep -Fq '    runs-on: ci-protected' "$MIRROR_WORKFLOW"
 grep -Fq 'run: scripts/ci/setup/bootstrap-openbao-github-mirror-credentials.sh' "$MIRROR_WORKFLOW"
 grep -Fq 'run: scripts/ci/release/mirror-github.sh "${GITHUB_REF:?}"' "$MIRROR_WORKFLOW"
 if grep -Eq "tags:|workflow_dispatch:" "$MIRROR_WORKFLOW"; then

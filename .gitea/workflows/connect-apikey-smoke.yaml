@@ -30,7 +30,7 @@ concurrency:
 jobs:
   smoke:
     name: Connect ApiKey lifecycle (${{ inputs.target }})
-    runs-on: ubuntu-latest
+    runs-on: ci-protected
     env:
       SMOKE_TARGET: ${{ inputs.target }}
       PRODUCTION_CONFIRMATION: ${{ inputs.production_confirmation }}
