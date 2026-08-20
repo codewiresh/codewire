@@ -416,8 +416,8 @@ case "${1:-} ${2:-} ${3:-}" in
     ;;
   buildx\ bake\ *)
     metadata=''
-    target=''
-    tag=''
+    targets=()
+    declare -A tags_by_target=()
     shift 2
     while [ "$#" -gt 0 ]; do
       case "$1" in
@@ -430,24 +430,27 @@ case "${1:-} ${2:-} ${3:-}" in
           ;;
         --set)
           case "$2" in
-            *.tags=*) tag="${2#*=}" ;;
+            *.tags=*)
+              setting_target="${2%%.tags=*}"
+              tags_by_target["$setting_target"]="${2#*=}"
+              ;;
           esac
           shift 2
           ;;
-        --file|--provenance)
+        --file|--provenance|--progress)
           shift 2
           ;;
-        --push|--sbom=generator=*)
+        --push|--pull|--load|--sbom=generator=*)
           shift
           ;;
         *)
-          target="$1"
+          targets+=("$1")
           shift
           ;;
       esac
     done
-    [[ -n "$metadata" && -n "$target" ]]
-    if [ "$target" = kind ]; then
+    [[ -n "$metadata" && "${#targets[@]}" -gt 0 ]]
+    if [ "${#targets[@]}" -eq 1 ] && [ "${targets[0]}" = kind ]; then
       jq -n '{
         "dashboard-ci": {},
         "services-ci": {},
@@ -456,10 +459,18 @@ case "${1:-} ${2:-} ${3:-}" in
       }' >"$metadata"
       exit 0
     fi
-    [[ -n "$tag" ]]
-    jq -n --arg target "$target" --arg digest "${FAKE_DIGEST:?}" \
-      '{($target): {"containerimage.digest": $digest}}' >"$metadata"
-    set_manifest "$tag" "$FAKE_DIGEST"
+    if [ "${#targets[@]}" -eq 1 ] && [ "${targets[0]}" = default ]; then
+      targets=(dashboard services mesh gateway derp)
+    fi
+    printf '{}\n' >"$metadata"
+    for target in "${targets[@]}"; do
+      [[ -n "${tags_by_target[$target]:-}" ]]
+      jq --arg target "$target" --arg digest "${FAKE_DIGEST:?}" \
+        '. + {($target): {"containerimage.digest": $digest}}' \
+        "$metadata" >"$metadata.tmp"
+      mv "$metadata.tmp" "$metadata"
+      set_manifest "${tags_by_target[$target]}" "$FAKE_DIGEST"
+    done
     ;;
   image\ inspect\ *)
     case "$*" in
@@ -888,6 +899,87 @@ grep -qF "src=$r2_credentials_file" "$FAKE_DOCKER_CALLS" ||
 if grep -qE 'untrusted-(access-key|secret-key)' "$FAKE_DOCKER_CALLS"; then
   fail 'R2 credential material reached Docker command arguments'
 fi
+
+for family in dashboard services mesh gateway derp; do
+  awk -F '\t' \
+    -v reference="nexus-system-cluster.example.invalid/oci-promoted/codewire/${family}:$source_sha" \
+    '$1 != reference' "$FAKE_MANIFESTS" >"$FAKE_MANIFESTS.tmp"
+  mv "$FAKE_MANIFESTS.tmp" "$FAKE_MANIFESTS"
+done
+runtime_builds_before="$(build_invocation_count)"
+: >"$GITHUB_OUTPUT"
+(
+  cd "$ROOT"
+  CODEWIRE_BUILD_RUNTIME_SET=1 \
+  CODEWIRE_SCCACHE_MODE=r2 \
+  CODEWIRE_SCCACHE_CREDENTIALS_FILE="$r2_credentials_file" \
+  SCCACHE_BUCKET=codewire-ci \
+  SCCACHE_ENDPOINT=https://account.r2.cloudflarestorage.com \
+  CODEWIRE_SCCACHE_PREFIX=protected/codewire/test \
+    "$BUILDER" services deployments/docker/services.Dockerfile .
+)
+[[ "$(build_invocation_count)" -eq $((runtime_builds_before + 1)) ]] ||
+  fail 'protected runtime set did not issue exactly one additional Bake build'
+grep -Eq ' buildx bake .* default $' "$FAKE_DOCKER_CALLS" ||
+  fail 'protected runtime set did not execute the canonical five-target Bake group'
+runtime_set_call="$(grep -E ' buildx bake .* default $' "$FAKE_DOCKER_CALLS" | tail -1)"
+[[ "$(grep -oF 'secrets+=id=aws_shared_credentials\,src=' <<<"$runtime_set_call" | wc -l)" -eq 5 ]] ||
+  fail 'protected runtime Bake did not bind the private cache credential to all five targets'
+for family in dashboard services mesh gateway derp; do
+  grep -qF -- "${family}.tags=nexus-system-cluster.example.invalid/oci-promoted/codewire/${family}:$source_sha" \
+    "$FAKE_DOCKER_CALLS" || fail "protected runtime Bake omitted exact $family source tag"
+  awk -F '\t' \
+    -v reference="nexus-system-cluster.example.invalid/oci-promoted/codewire/${family}:$source_sha" \
+    -v digest="$digest" \
+    '$1 == reference && $2 == digest { found = 1 } END { exit !found }' \
+    "$FAKE_MANIFESTS" || fail "protected runtime Bake omitted the $family manifest"
+done
+grep -qxF "candidate_ref=nexus-system-cluster.example.invalid/oci-promoted/codewire/services@$digest" \
+  "$GITHUB_OUTPUT" || fail 'protected runtime Bake did not preserve the anchor candidate digest'
+
+awk -F '\t' \
+  -v reference="nexus-system-cluster.example.invalid/oci-promoted/codewire/mesh:$source_sha" \
+  '$1 != reference' "$FAKE_MANIFESTS" >"$FAKE_MANIFESTS.tmp"
+mv "$FAKE_MANIFESTS.tmp" "$FAKE_MANIFESTS"
+partial_runtime_builds_before="$(build_invocation_count)"
+if (
+  cd "$ROOT"
+  CODEWIRE_BUILD_RUNTIME_SET=1 \
+  REQUIRE_EXISTING_SOURCE_IMAGE=1 \
+    "$BUILDER" services deployments/docker/services.Dockerfile .
+) >"$work/required-runtime-set-missing.out" 2>&1; then
+  fail 'missing required immutable runtime-set image was accepted'
+fi
+grep -qF 'Required immutable runtime-set source images are missing: mesh' \
+  "$work/required-runtime-set-missing.out" ||
+  fail 'missing required runtime-set image did not fail explicitly'
+[[ "$(build_invocation_count)" -eq "$partial_runtime_builds_before" ]] ||
+  fail 'missing required runtime-set image reached a build'
+(
+  cd "$ROOT"
+  CODEWIRE_BUILD_RUNTIME_SET=1 \
+    "$BUILDER" services deployments/docker/services.Dockerfile .
+)
+[[ "$(build_invocation_count)" -eq $((partial_runtime_builds_before + 1)) ]] ||
+  fail 'partial protected runtime retry did not issue exactly one Bake build'
+partial_runtime_call="$(grep -E ' buildx bake ' "$FAKE_DOCKER_CALLS" | tail -1)"
+[[ "$partial_runtime_call" == *' mesh ' ]] ||
+  fail 'partial protected runtime retry did not rebuild only the missing target'
+[[ "$partial_runtime_call" != *'services.tags='* ]] ||
+  fail 'partial protected runtime retry attempted to overwrite an existing immutable target'
+
+fetch_calls_before="$(wc -l <"$FAKE_FETCH_CALLS")"
+if (
+  cd "$ROOT"
+  CODEWIRE_BUILD_RUNTIME_SET=2 \
+    "$BUILDER" services deployments/docker/services.Dockerfile .
+) >"$work/invalid-runtime-set.out" 2>&1; then
+  fail 'invalid protected runtime-set selector was accepted'
+fi
+grep -qF 'CODEWIRE_BUILD_RUNTIME_SET must be 0 or 1' \
+  "$work/invalid-runtime-set.out" || fail 'invalid runtime-set rejection was not attributable'
+[[ "$(wc -l <"$FAKE_FETCH_CALLS")" -eq "$fetch_calls_before" ]] ||
+  fail 'invalid runtime-set selector reached credential retrieval'
 
 kind_builds_before="$(grep -Ec ' buildx bake .* kind $' "$FAKE_DOCKER_CALLS" || true)"
 (
