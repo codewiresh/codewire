@@ -1060,6 +1060,7 @@ def has_unknown_reachable_path(
     after: RustFingerprint,
     known_artifact_directories: set[str],
     non_artifact_inputs: Iterable[str],
+    exact_head_policy_paths: set[str],
 ) -> str | None:
     closure_dirs = before.closure_directories | after.closure_directories
     all_package_dirs = before.all_package_directories | after.all_package_directories
@@ -1079,6 +1080,8 @@ def has_unknown_reachable_path(
         ".github",
     }
     for path in paths:
+        if path in exact_head_policy_paths:
+            continue
         if any(
             fnmatch.fnmatchcase(path, pattern) for pattern in non_artifact_inputs
         ):
@@ -1476,7 +1479,41 @@ def plan(
                 artifacts[name] = unclassified_result(reason)
         else:
             paths = changed_paths(repository, baseline["baseline_commit"], head)
-            changed_policy_path = policy_changed(paths, non_artifact_inputs)
+            observed_policy_change = policy_changed(paths, non_artifact_inputs)
+            # A PR candidate must never use its proposed policy to reduce its
+            # own checks, so policy changes remain fail-closed there. Protected
+            # support and Dev planning execute the exact canonical head policy
+            # against a validated ancestor baseline; in that mode the reviewed
+            # head policy is authoritative and artifact fingerprints determine
+            # whether publication is actually required.
+            exact_head_policy = (
+                baseline.get("mode")
+                in {"published_support_pair", "deployed_source"}
+                and trusted_policy == head
+                and target_base == head
+            )
+            exact_head_policy_paths = (
+                {
+                    path
+                    for path in paths
+                    if policy_changed([path], non_artifact_inputs) is not None
+                }
+                if exact_head_policy
+                else set()
+            )
+            exact_head_policy_only = exact_head_policy and all(
+                path in exact_head_policy_paths
+                or any(
+                    fnmatch.fnmatchcase(path, pattern)
+                    for pattern in non_artifact_inputs
+                )
+                for path in paths
+            )
+            changed_policy_path = (
+                None if exact_head_policy_only else observed_policy_change
+            )
+            if not exact_head_policy_only:
+                exact_head_policy_paths = set()
             try:
                 export_git_tree(repository, baseline["baseline_commit"], baseline_tree)
                 export_git_tree(repository, head, head_tree)
@@ -1595,6 +1632,7 @@ def plan(
                                 after,
                                 known_artifact_directories,
                                 non_artifact_inputs,
+                                exact_head_policy_paths,
                             )
                             if unknown:
                                 result = {
