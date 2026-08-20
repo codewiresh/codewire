@@ -5,11 +5,13 @@ ARG BASE_IMAGE_REF
 
 FROM rust:1.91.1-slim-bookworm@sha256:8514999d4786ef12efe89239e86b3d0a021b94b9d35108c8efe6c79ca7dc1a65 AS cw-builder
 COPY images/workspace/debian.sources /etc/apt/sources.list.d/debian.sources
+COPY images/base/apt-transport.conf /etc/apt/apt.conf.d/80-codewire-transport
+COPY --chmod=0755 images/base/apt-get-with-retry /usr/local/sbin/apt-get-with-retry
 RUN rm -f /etc/apt/sources.list && \
-    apt-get update && \
+    apt-get-with-retry update && \
     grep -RqsF 'snapshot.debian.org/archive/debian/20251208T000000Z/' /etc/apt/sources.list.d && \
     ! grep -RqsE '(deb|security)\.debian\.org' /etc/apt/sources.list /etc/apt/sources.list.d && \
-    apt-get install -y --no-install-recommends libprotobuf-dev protobuf-compiler && \
+    apt-get-with-retry install -y --no-install-recommends libprotobuf-dev protobuf-compiler && \
     rm -rf /var/lib/apt/lists/*
 RUN rustup component add --toolchain 1.91.1-x86_64-unknown-linux-gnu rustfmt clippy
 
@@ -68,12 +70,12 @@ RUN npm install -g --ignore-scripts npm@latest pnpm yarn && \
     ln -s bun /usr/local/bin/bunx && \
     rm -rf /root/.bun
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN apt-get-with-retry update && apt-get-with-retry install -y --no-install-recommends \
       file gdb pipx pkg-config protobuf-compiler python3-full python3-venv strace && \
     rm -rf /var/lib/apt/lists/*
 
 RUN curl --proto '=https' --tlsv1.2 -1sLf https://artifacts-cli.infisical.com/setup.deb.sh | bash && \
-    apt-get install -y --no-install-recommends infisical && \
+    apt-get-with-retry install -y --no-install-recommends infisical && \
     rm -rf /var/lib/apt/lists/*
 
 RUN mkdir -p /home/codewire/go /home/codewire/.npm-global && \
