@@ -10,14 +10,16 @@ ENV SHELL=/bin/bash
 # only while apt still verifies the signed InRelease and package hashes. Every
 # later transaction uses normal TLS verification.
 COPY ubuntu.sources /etc/apt/sources.list.d/ubuntu.sources
+COPY apt-transport.conf /etc/apt/apt.conf.d/80-codewire-transport
+COPY --chmod=0755 apt-get-with-retry /usr/local/sbin/apt-get-with-retry
 RUN rm -f /etc/apt/sources.list && \
-    apt-get -o Acquire::https::Verify-Peer=false update && \
-    apt-get -o Acquire::https::Verify-Peer=false install -y --no-install-recommends ca-certificates && \
+    apt-get-with-retry -o Acquire::https::Verify-Peer=false update && \
+    apt-get-with-retry -o Acquire::https::Verify-Peer=false install -y --no-install-recommends ca-certificates && \
     rm -rf /var/lib/apt/lists/* && \
-    apt-get update && \
+    apt-get-with-retry update && \
     grep -RqsF 'snapshot.ubuntu.com/ubuntu/20260803T000000Z/' /etc/apt/sources.list.d && \
     ! grep -RqsE '(archive|security|ports)\.ubuntu\.com' /etc/apt/sources.list /etc/apt/sources.list.d && \
-    apt-get install -y --no-install-recommends \
+    apt-get-with-retry install -y --no-install-recommends \
       bash build-essential ca-certificates curl file git htop iproute2 iptables jq locales man \
       openssh-server postgresql-client python3 python3-pip sudo tmux unzip vim wget rsync && \
     rm -rf /var/lib/apt/lists/*

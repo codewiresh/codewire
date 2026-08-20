@@ -528,6 +528,7 @@ run_edge() {
 
 run_release() {
   scripts/ci/tests/test-base-image-source.sh
+  scripts/ci/tests/test-apt-get-with-retry.sh
   scripts/ci/tests/test-build-push-image.sh
   scripts/ci/tests/test-run-rust-build.sh
   scripts/ci/tests/test-fetch-infisical-ci-secret.sh

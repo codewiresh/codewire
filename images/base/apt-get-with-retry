@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+readonly attempts=4
+readonly delay_seconds=30
+
+status=1
+for ((attempt = 1; attempt <= attempts; attempt++)); do
+  if apt-get "$@"; then
+    exit 0
+  else
+    status=$?
+  fi
+  if [ "$attempt" -ge "$attempts" ]; then
+    break
+  fi
+  printf 'APT transaction failed; retrying the exact command (%d/%d) after %d seconds\n' \
+    "$((attempt + 1))" "$attempts" "$delay_seconds" >&2
+  sleep "$delay_seconds"
+done
+
+exit "$status"
