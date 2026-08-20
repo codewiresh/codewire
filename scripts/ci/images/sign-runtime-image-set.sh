@@ -201,6 +201,7 @@ verify_signature() {
   run_cosign false verify \
     --key /trust/codewire-runtime-signing.pub \
     --insecure-ignore-tlog \
+    --new-bundle-format=true \
     --annotations "dev.codewire.image-family=$family" \
     --annotations "dev.codewire.source-sha=$GITHUB_SHA" \
     "$reference"
@@ -216,7 +217,6 @@ sign_reference() {
     --key "$OPENBAO_KEY" \
     --signing-config /trust/signing-config.json \
     --new-bundle-format=true \
-    --registry-referrers-mode=legacy \
     --annotations "dev.codewire.image-family=$family" \
     --annotations "dev.codewire.source-sha=$GITHUB_SHA" \
     "$reference" >/dev/null
