@@ -77,6 +77,7 @@ case "$command" in
       fi
     done
     [[ -f "$signing_config" && ! -L "$signing_config" ]]
+    [[ " $* " == *' --tlog-upload=false '* ]]
     [[ " $* " == *' --new-bundle-format=true '* ]]
     [[ " $* " != *' --registry-referrers-mode'* ]]
     grep -Fxq "$reference" "$SIGNATURE_STATE" || printf '%s\n' "$reference" >>"$SIGNATURE_STATE"

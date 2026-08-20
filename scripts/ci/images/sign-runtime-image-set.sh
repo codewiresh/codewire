@@ -236,6 +236,7 @@ sign_reference() {
   run_cosign true sign --yes \
     --key "$OPENBAO_KEY" \
     --signing-config "$signing_config" \
+    --tlog-upload=false \
     --new-bundle-format=true \
     --annotations "dev.codewire.image-family=$family" \
     --annotations "dev.codewire.source-sha=$GITHUB_SHA" \
