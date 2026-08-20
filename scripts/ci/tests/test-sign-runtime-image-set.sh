@@ -129,7 +129,7 @@ case "${1:-} ${2:-} ${3:-}" in
         [[ " $* " == *' --key openbao://codewire-runtime '* ]]
         [[ " $* " == *' --signing-config /trust/signing-config.json '* ]]
         [[ " $* " != *' --use-signing-config '* ]]
-        [[ " $* " == *' --new-bundle-format=false '* ]]
+        [[ " $* " == *' --new-bundle-format=true '* ]]
         [[ " $* " == *' --registry-referrers-mode=legacy '* ]]
         grep -Fxq "$reference" "$SIGNATURE_STATE" || printf '%s\n' "$reference" >>"$SIGNATURE_STATE"
         ;;

@@ -215,7 +215,7 @@ sign_reference() {
   run_cosign true sign --yes \
     --key "$OPENBAO_KEY" \
     --signing-config /trust/signing-config.json \
-    --new-bundle-format=false \
+    --new-bundle-format=true \
     --registry-referrers-mode=legacy \
     --annotations "dev.codewire.image-family=$family" \
     --annotations "dev.codewire.source-sha=$GITHUB_SHA" \
