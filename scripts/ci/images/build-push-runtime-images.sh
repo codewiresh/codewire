@@ -5,6 +5,9 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 readonly ROOT
 readonly BUILDKIT_IMAGE='docker.io/moby/buildkit:v0.29.0@sha256:0039c1d47e8748b5afea56f4e85f14febaf34452bd99d9552d2daa82262b5cc5'
 readonly PROVENANCE_BUILDER_ID='https://git.example.invalid/infra/ci/builders/protected-delivery/v1'
+readonly NEXUS_REGISTRY_HOST='nexus-system-cluster.example.invalid'
+readonly NEXUS_BACKUP_RETRY_ATTEMPTS=16
+readonly NEXUS_BACKUP_RETRY_DELAY_SECONDS=60
 
 : "${GITHUB_SHA:?GITHUB_SHA is required}"
 : "${GITHUB_OUTPUT:?GITHUB_OUTPUT is required}"
@@ -45,18 +48,62 @@ DOCKER_CONFIG="$docker_config" docker buildx create \
   --buildkitd-config "$buildkit_config" \
   --bootstrap >/dev/null
 
+is_nexus_backup_unavailable() {
+  local log_file="$1"
+
+  grep -Fq "https://${NEXUS_REGISTRY_HOST}/v2/" "$log_file" \
+    && grep -Fq '503 Service Temporarily Unavailable' "$log_file"
+}
+
+run_protected_build() {
+  local image_name="$1"
+  local dockerfile="$2"
+  local output="$3"
+  local attempt build_log build_status tee_status
+  local -a pipeline_status
+
+  for (( attempt = 1; attempt <= NEXUS_BACKUP_RETRY_ATTEMPTS; attempt++ )); do
+    build_log="$work/$image_name.build-attempt.log"
+    : >"$output"
+    : >"$build_log"
+
+    set +e
+    GITHUB_OUTPUT="$output" \
+      CODEWIRE_EXTERNAL_BUILDX_BUILDER="$builder" \
+      CODEWIRE_EXTERNAL_DOCKER_CONFIG="$docker_config" \
+      CODEWIRE_PROVENANCE_BUILDER_ID="$PROVENANCE_BUILDER_ID" \
+      CODEWIRE_SCCACHE_MODE="${CODEWIRE_SCCACHE_MODE:-local}" \
+      scripts/ci/images/build-push-image.sh "$image_name" "$dockerfile" . \
+        2>&1 | tee "$build_log"
+    pipeline_status=("${PIPESTATUS[@]}")
+    build_status="${pipeline_status[0]}"
+    tee_status="${pipeline_status[1]}"
+    set -e
+
+    if [ "$build_status" -eq 0 ] && [ "$tee_status" -eq 0 ]; then
+      return 0
+    fi
+    if [ "$tee_status" -ne 0 ]; then
+      return "$tee_status"
+    fi
+    if [ "$attempt" -ge "$NEXUS_BACKUP_RETRY_ATTEMPTS" ] \
+        || ! is_nexus_backup_unavailable "$build_log"; then
+      return "$build_status"
+    fi
+
+    printf 'Nexus is temporarily unavailable during protected publication; retrying the exact %s build (%d/%d)\n' \
+      "$image_name" "$((attempt + 1))" "$NEXUS_BACKUP_RETRY_ATTEMPTS" >&2
+    sleep "$NEXUS_BACKUP_RETRY_DELAY_SECONDS"
+  done
+}
+
 build_one() {
   local image_name="$1"
   local dockerfile="$2"
   local output candidate_ref local_ref candidate_id local_id profile promotable revision
 
   output="$work/$image_name.output"
-  GITHUB_OUTPUT="$output" \
-    CODEWIRE_EXTERNAL_BUILDX_BUILDER="$builder" \
-    CODEWIRE_EXTERNAL_DOCKER_CONFIG="$docker_config" \
-    CODEWIRE_PROVENANCE_BUILDER_ID="$PROVENANCE_BUILDER_ID" \
-    CODEWIRE_SCCACHE_MODE="${CODEWIRE_SCCACHE_MODE:-local}" \
-    scripts/ci/images/build-push-image.sh "$image_name" "$dockerfile" .
+  run_protected_build "$image_name" "$dockerfile" "$output"
 
   candidate_ref="$(sed -n 's/^candidate_ref=//p' "$output")"
   if [[ ! "$candidate_ref" =~ ^nexus-system-cluster\.private\.invalid/oci-promoted/codewire/${image_name}@sha256:[0-9a-f]{64}$ ]]; then

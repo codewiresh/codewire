@@ -33,10 +33,32 @@ fi
 SH
 chmod 0755 "$fixture/bin/docker"
 
+cat >"$fixture/bin/sleep" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >>"$SLEEP_LOG"
+SH
+chmod 0755 "$fixture/bin/sleep"
+
 cat >"$fixture/scripts/ci/images/build-push-image.sh" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
 name="$1"
+if [ "${FAKE_TRANSIENT_REGISTRY_IMAGE:-}" = "$name" ]; then
+  state="${FAKE_TRANSIENT_REGISTRY_STATE:?}"
+  failures="${FAKE_TRANSIENT_REGISTRY_FAILURES:-1}"
+  count="$(cat "$state")"
+  if [ "$count" -lt "$failures" ]; then
+    printf '%s\n' "$((count + 1))" >"$state"
+    printf 'unexpected status from HEAD request to https://nexus-system-cluster.example.invalid/v2/oci-promoted/codewire/%s/blobs/sha256:test: 503 Service Temporarily Unavailable\n' \
+      "$name" >&2
+    exit 1
+  fi
+fi
+if [ "${FAKE_FATAL_IMAGE:-}" = "$name" ]; then
+  printf 'non-retryable protected build failure\n' >&2
+  exit 1
+fi
 printf '%s|%s|%s|%s|%s\n' \
   "$name" "$CODEWIRE_EXTERNAL_BUILDX_BUILDER" \
   "$CODEWIRE_EXTERNAL_DOCKER_CONFIG" "$CODEWIRE_SCCACHE_MODE" \
@@ -49,12 +71,15 @@ chmod 0755 "$fixture/scripts/ci/images/build-push-image.sh"
 output="$work/output"
 docker_log="$work/docker.log"
 build_log="$work/build.log"
+sleep_log="$work/sleep.log"
+: >"$sleep_log"
 (
   cd "$fixture"
   PATH="$fixture/bin:$PATH" \
     RUNNER_TEMP="$fixture/tmp" \
     DOCKER_LOG="$docker_log" \
     BUILD_LOG="$build_log" \
+    SLEEP_LOG="$sleep_log" \
     GITHUB_SHA=0123456789abcdef0123456789abcdef01234567 \
     GITHUB_RUN_ID=42 \
     GITHUB_RUN_ATTEMPT=3 \
@@ -71,6 +96,91 @@ for family in dashboard derp gateway mesh services; do
   grep -Eq "^${family}_candidate_ref=.*${family}@sha256:[0-9a-f]{64}$" "$output" ||
     fail "wrapper omitted exact $family output"
 done
+
+transient_output="$work/transient-output"
+transient_docker_log="$work/transient-docker.log"
+transient_build_log="$work/transient-build.log"
+transient_sleep_log="$work/transient-sleep.log"
+transient_state="$work/transient-state"
+printf '0\n' >"$transient_state"
+: >"$transient_sleep_log"
+(
+  cd "$fixture"
+  PATH="$fixture/bin:$PATH" \
+    RUNNER_TEMP="$fixture/tmp" \
+    DOCKER_LOG="$transient_docker_log" \
+    BUILD_LOG="$transient_build_log" \
+    SLEEP_LOG="$transient_sleep_log" \
+    FAKE_TRANSIENT_REGISTRY_IMAGE=mesh \
+    FAKE_TRANSIENT_REGISTRY_FAILURES=2 \
+    FAKE_TRANSIENT_REGISTRY_STATE="$transient_state" \
+    GITHUB_SHA=0123456789abcdef0123456789abcdef01234567 \
+    GITHUB_RUN_ID=43 \
+    GITHUB_RUN_ATTEMPT=1 \
+    GITHUB_OUTPUT="$transient_output" \
+    CODEWIRE_SCCACHE_MODE=local \
+    scripts/ci/images/build-push-runtime-images.sh
+)
+[[ "$(wc -l <"$transient_output" | tr -d ' ')" -eq 5 ]] ||
+  fail "transient Nexus recovery did not emit the exact five-image set"
+[[ "$(wc -l <"$transient_build_log" | tr -d ' ')" -eq 5 ]] ||
+  fail "transient Nexus recovery rebuilt a successful image"
+[[ "$(cat "$transient_state")" -eq 2 ]] ||
+  fail "transient Nexus recovery did not observe both injected failures"
+[[ "$(grep -c '^60$' "$transient_sleep_log")" -eq 2 ]] ||
+  fail "transient Nexus recovery did not use the fixed retry delay"
+
+fatal_state="$work/fatal-state"
+printf '0\n' >"$fatal_state"
+if (
+  cd "$fixture"
+  PATH="$fixture/bin:$PATH" \
+    RUNNER_TEMP="$fixture/tmp" \
+    DOCKER_LOG="$work/fatal-docker.log" \
+    BUILD_LOG="$work/fatal-build.log" \
+    SLEEP_LOG="$work/fatal-sleep.log" \
+    FAKE_FATAL_IMAGE=mesh \
+    GITHUB_SHA=0123456789abcdef0123456789abcdef01234567 \
+    GITHUB_RUN_ID=44 \
+    GITHUB_RUN_ATTEMPT=1 \
+    GITHUB_OUTPUT="$work/fatal-output" \
+    CODEWIRE_SCCACHE_MODE=local \
+    scripts/ci/images/build-push-runtime-images.sh
+) >"$work/fatal.stdout" 2>"$work/fatal.stderr"; then
+  fail "non-retryable protected build failure was accepted"
+fi
+[[ ! -s "$work/fatal-sleep.log" ]] ||
+  fail "non-retryable protected build failure entered the Nexus retry loop"
+grep -Fq 'non-retryable protected build failure' "$work/fatal.stdout" ||
+  fail "non-retryable protected build failure was not observable"
+
+exhausted_state="$work/exhausted-state"
+exhausted_sleep_log="$work/exhausted-sleep.log"
+printf '0\n' >"$exhausted_state"
+: >"$exhausted_sleep_log"
+if (
+  cd "$fixture"
+  PATH="$fixture/bin:$PATH" \
+    RUNNER_TEMP="$fixture/tmp" \
+    DOCKER_LOG="$work/exhausted-docker.log" \
+    BUILD_LOG="$work/exhausted-build.log" \
+    SLEEP_LOG="$exhausted_sleep_log" \
+    FAKE_TRANSIENT_REGISTRY_IMAGE=mesh \
+    FAKE_TRANSIENT_REGISTRY_FAILURES=16 \
+    FAKE_TRANSIENT_REGISTRY_STATE="$exhausted_state" \
+    GITHUB_SHA=0123456789abcdef0123456789abcdef01234567 \
+    GITHUB_RUN_ID=45 \
+    GITHUB_RUN_ATTEMPT=1 \
+    GITHUB_OUTPUT="$work/exhausted-output" \
+    CODEWIRE_SCCACHE_MODE=local \
+    scripts/ci/images/build-push-runtime-images.sh
+) >"$work/exhausted.stdout" 2>"$work/exhausted.stderr"; then
+  fail "exhausted Nexus outage was accepted"
+fi
+[[ "$(cat "$exhausted_state")" -eq 16 ]] ||
+  fail "Nexus retry boundary did not stop after 16 failed attempts"
+[[ "$(grep -c '^60$' "$exhausted_sleep_log")" -eq 15 ]] ||
+  fail "Nexus retry boundary did not use exactly 15 bounded waits"
 
 builder="$(cut -d'|' -f2 "$build_log" | sort -u)"
 [[ "$builder" =~ ^codewire-runtime-42-3-[0-9]+$ ]] ||
@@ -103,6 +213,7 @@ if (
     RUNNER_TEMP="$fixture/tmp" \
     DOCKER_LOG="$docker_log" \
     BUILD_LOG="$build_log" \
+    SLEEP_LOG="$sleep_log" \
     GITHUB_SHA=0123456789abcdef0123456789abcdef01234567 \
     GITHUB_OUTPUT="$work/rejected-output" \
     CODEWIRE_SCCACHE_MODE=r2 \
