@@ -89,8 +89,8 @@ grep -Fq '      - publish-support-release-images' <<<"$dispatch_job" ||
 # shellcheck disable=SC2016
 grep -Fq 'run: scripts/ci/deploy/dispatch-deploy-prod.sh "$RELEASE_TAG"' <<<"$dispatch_job" ||
   fail "production dispatch sends more than the signed source tag"
-grep -Fq '    runs-on: untrusted-validation' <<<"$dispatch_job" ||
-  fail "production dispatch does not use the live non-privileged validation profile"
+grep -Fq '    runs-on: ci-protected' <<<"$dispatch_job" ||
+  fail "production dispatch does not use the protected CI tier"
 grep -Fq '    timeout-minutes: 15' <<<"$dispatch_job" ||
   fail "production dispatch can outlive the validation runner deadline"
 if grep -Fq 'wait-for-deploy-run.sh' \

@@ -14,7 +14,7 @@ fail() {
 if grep -qE '^permissions:' "$WORKFLOW"; then
   fail "receipt workflow relies on ignored GitHub permissions syntax"
 fi
-grep -Fq '    runs-on: untrusted-validation' "$WORKFLOW" ||
+grep -Fq '    runs-on: ci-lite' "$WORKFLOW" ||
   fail "receipt does not use the credential-free validation profile"
 grep -Fq '  workflow_dispatch:' "$WORKFLOW" ||
   fail "receipt is not an explicit deploy callback"

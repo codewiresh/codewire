@@ -20,7 +20,7 @@ concurrency:
 jobs:
   mirror:
     name: Mirror main and signed tags to GitHub
-    runs-on: protected-delivery
+    runs-on: ci-protected
     timeout-minutes: 15
     steps:
       - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5

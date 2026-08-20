@@ -13,7 +13,7 @@ on:
 jobs:
   source-approval: # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; the disposable runner and network policy enforce no write.
     name: Supply-chain source approval
-    runs-on: untrusted-validation
+    runs-on: ci-lite
     timeout-minutes: 15
     steps:
       - name: Select exact source and trusted policy base

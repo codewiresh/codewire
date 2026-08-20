@@ -9,7 +9,7 @@ permissions:
 jobs:
   prod-readonly-smoke:
     name: Production Read-only Smoke
-    runs-on: ubuntu-latest
+    runs-on: ci-protected
     steps:
       - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
 

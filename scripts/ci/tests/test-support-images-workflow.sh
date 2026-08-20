@@ -29,8 +29,8 @@ if grep -Fq 'CODEWIRE_GHCR_PUBLISH_ENABLED' "$WORKFLOW"; then
   fail 'support GHCR publication retains its rollout flag'
 fi
 selection_job="$(sed -n '/^  support-selection:/,/^  publish-support-images:/p' "$WORKFLOW")"
-grep -Fq '    runs-on: ci-heavy' <<<"$selection_job" ||
-  fail 'support selection does not use the credential-free Docker profile'
+grep -Fq '    runs-on: ci-lite' <<<"$selection_job" ||
+  fail 'support selection does not use the ci-lite profile'
 if grep -Fq 'enable-openid-connect: true' <<<"$selection_job"; then
   fail 'support selection can request publisher OIDC'
 fi
@@ -93,8 +93,8 @@ grep -qF 'CODEWIRE_BASE_IMAGE_REF: ${{ steps.base.outputs.candidate_ref }}' \
 grep -qF 'scripts/ci/images/build-push-image.sh workspace images/workspace/Dockerfile .' \
   "$WORKFLOW" || fail 'workspace is not built by the canonical Gitea helper'
 publish_job="$(sed -n '/^  publish-support-images:/,$p' "$WORKFLOW")"
-grep -Fq '    runs-on: protected-delivery' <<<"$publish_job" ||
-  fail 'support publisher does not use the protected delivery profile'
+grep -Fq '    runs-on: ci-protected' <<<"$publish_job" ||
+  fail 'support publisher does not use the protected CI tier'
 grep -Fq '    enable-openid-connect: true' <<<"$publish_job" ||
   fail 'support publisher lacks job-scoped OIDC'
 [[ "$(grep -Fc 'enable-openid-connect: true' "$WORKFLOW")" -eq 1 ]] ||

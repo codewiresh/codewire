@@ -23,7 +23,7 @@ env:
 jobs:
   release-selection:
     name: Verify canonical CLI release tag
-    runs-on: ubuntu-latest
+    runs-on: ci-lite
     outputs:
       release_tag: ${{ steps.select.outputs.release_tag }}
       source_sha: ${{ steps.select.outputs.source_sha }}
@@ -90,7 +90,7 @@ jobs:
   package-release:
     name: Package and publish signed Rust cw release
     needs: [release-selection]
-    runs-on: ubuntu-latest
+    runs-on: ci-protected
     permissions:
       contents: write
     steps:

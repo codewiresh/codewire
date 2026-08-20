@@ -47,7 +47,7 @@ jobs:
   verification-selection:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job receives no write-capable integration.
     name: Verification selection
-    runs-on: untrusted-validation
+    runs-on: ci-lite
     outputs:
       selector_version: ${{ steps.select.outputs.selector_version }}
       classification: ${{ steps.select.outputs.classification }}
@@ -806,7 +806,7 @@ jobs:
   edge-kind:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this untrusted job has no protected credential.
     name: Edge / Kind verification
-    runs-on: ci-kind
+    runs-on: ci-heavy
     enable-openid-connect: true
     needs: [verification-selection]
     env:
@@ -914,7 +914,7 @@ jobs:
   required-verification:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this aggregator receives no write-capable integration.
     name: Required verification
-    runs-on: untrusted-validation
+    runs-on: ci-lite
     if: ${{ always() }}
     needs:
       - verification-selection

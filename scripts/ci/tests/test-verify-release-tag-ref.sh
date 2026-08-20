@@ -252,7 +252,7 @@ if grep -Fq 'CODEWIRE_DEPLOY_PROMOTION_TOKEN' "$deploy_workflow"; then
   echo 'production dispatch retains the static deploy credential' >&2
   exit 1
 fi
-grep -Fq '    runs-on: untrusted-validation' \
+grep -Fq '    runs-on: ci-protected' \
   <(sed -n '/^  dispatch-deploy-prod:/,$p' "$deploy_workflow")
 if grep -Eq 'CODEWIRE_DEPLOY_PROMOTION_USERNAME|promote-image-bundle|promote \.release-source|promotion-receipt|observe-production:|deploy-prod-observer\.sh|gitea-(upload|download)-artifact|kubectl|helm' \
   "$deploy_workflow"; then
