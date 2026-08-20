@@ -489,7 +489,7 @@ jobs:
     name: Rust / transport verification
     runs-on: ci-heavy
     enable-openid-connect: true
-    timeout-minutes: 30
+    timeout-minutes: 55
     needs: [verification-selection]
     env:
       CARGO_HOME: ${{ github.workspace }}/target/ci-rust-cargo-home

@@ -1215,9 +1215,10 @@ EOF
 
 # Heavy jobs share the queue-driven disposable DinD runner pool. Keep ordinary
 # task ceilings at 30 minutes. The selected workspace path performs two cold
-# image builds, so it has a bounded 55-minute exception beneath the runner's
-# independently managed 60-minute task lifetime.
-for job_id in cw-release-assets standard tooling rust-transport database services-control services-runtime; do
+# image builds, while Rust/transport may seed the complete workspace and
+# desktop compiler cache. Those two jobs have bounded 55-minute exceptions
+# beneath the runner's independently managed 60-minute task lifetime.
+for job_id in cw-release-assets standard tooling database services-control services-runtime; do
   block="$TMP/${job_id}.yaml"
   if [ ! -s "$block" ]; then
     awk -v wanted="$job_id" '
@@ -1231,6 +1232,12 @@ for job_id in cw-release-assets standard tooling rust-transport database service
     exit 1
   }
 done
+
+rust_transport_block="$TMP/rust-transport.yaml"
+grep -qF '    timeout-minutes: 55' "$rust_transport_block" || {
+  echo 'rust-transport: cold-cache ceiling must remain below the 60-minute runner lifetime' >&2
+  exit 1
+}
 
 workspace_block="$TMP/workspace-image.yaml"
 awk '
