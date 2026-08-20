@@ -16,6 +16,7 @@ public_source_url='https://github.com/codewiresh/codewire'
 base_image_ref="${CODEWIRE_BASE_IMAGE_REF:-}"
 require_existing_source_image="${REQUIRE_EXISTING_SOURCE_IMAGE:-0}"
 sccache_mode="${CODEWIRE_SCCACHE_MODE:-disabled}"
+build_runtime_set="${CODEWIRE_BUILD_RUNTIME_SET:-0}"
 
 : "${GITHUB_SHA:?GITHUB_SHA is required}"
 readonly REGISTRY_HOST='nexus-system-cluster.example.invalid'
@@ -89,6 +90,14 @@ case "$sccache_mode" in
     ;;
   *)
     printf 'Invalid CODEWIRE_SCCACHE_MODE: %s\n' "$sccache_mode" >&2
+    exit 2
+    ;;
+esac
+
+case "$build_runtime_set" in
+  0|1) ;;
+  *)
+    echo 'CODEWIRE_BUILD_RUNTIME_SET must be 0 or 1' >&2
     exit 2
     ;;
 esac
@@ -492,6 +501,89 @@ case "$image_name:$dockerfile_from_context" in
   mesh:deployments/docker/mesh.Dockerfile) product_bake_target=mesh ;;
   services:deployments/docker/services.Dockerfile) product_bake_target=services ;;
 esac
+if [ "$build_runtime_set" = 1 ] && [ "$product_bake_target" != services ]; then
+  echo 'The protected runtime-set Bake transaction must be anchored by services' >&2
+  exit 2
+fi
+
+# Build every missing release target in one Bake transaction. Inspect exact
+# source tags first so a retry never overwrites an immutable target that was
+# already published by a partially successful attempt.
+if [ "$build_runtime_set" = 1 ]; then
+  missing_runtime_targets=()
+  for runtime_target in dashboard services mesh gateway derp; do
+    runtime_source_tag="${REGISTRY_REPOSITORY_PREFIX}/${runtime_target}:${source_sha}"
+    if inspect_manifest_digest "$runtime_source_tag" >/dev/null; then
+      continue
+    else
+      inspect_status=$?
+    fi
+    if [ "$inspect_status" -ne 3 ]; then
+      exit "$inspect_status"
+    fi
+    missing_runtime_targets+=("$runtime_target")
+  done
+
+  if [ "${#missing_runtime_targets[@]}" -gt 0 ]; then
+    if [ "$require_existing_source_image" = 1 ]; then
+      printf 'Required immutable runtime-set source images are missing: %s\n' \
+        "${missing_runtime_targets[*]}" >&2
+      exit 1
+    fi
+    bake_file="$context/docker-bake.hcl"
+    [ -f "$bake_file" ] || {
+      echo "Canonical product Bake definition is missing: $bake_file" >&2
+      exit 1
+    }
+    create_buildx_builder
+    bake_args=(
+      --push
+      --provenance "$provenance"
+      --sbom="generator=$SBOM_GENERATOR_IMAGE"
+      --file "$bake_file"
+      --metadata-file "$bake_metadata"
+      --set "rust-base.context=$context"
+    )
+    for runtime_target in "${missing_runtime_targets[@]}"; do
+      bake_args+=(
+        --set "$runtime_target.context=$context"
+        --set "$runtime_target.tags=${REGISTRY_REPOSITORY_PREFIX}/${runtime_target}:${source_sha}"
+      )
+      if [ "$sccache_mode" = r2 ]; then
+        bake_args+=(
+          --set "$runtime_target.secrets+=id=aws_shared_credentials,src=$credentials_file"
+        )
+      fi
+    done
+    bake_targets=("${missing_runtime_targets[@]}")
+    if [ "${#missing_runtime_targets[@]}" -eq 5 ]; then
+      bake_targets=(default)
+    fi
+    DOCKER_CONFIG="$docker_config" \
+      CODEWIRE_IMAGE_SOURCE_SHA="$source_sha" \
+      CODEWIRE_IMAGE_SOURCE_URL="$public_source_url" \
+      CODEWIRE_RUST_PROFILE=release \
+      CODEWIRE_SCCACHE_MODE="$sccache_mode" \
+      docker buildx bake --builder "$buildx_builder" "${bake_args[@]}" \
+        "${bake_targets[@]}"
+
+    for runtime_target in "${missing_runtime_targets[@]}"; do
+      if ! runtime_digest="$(jq -er --arg target "$runtime_target" '
+        .[$target]["containerimage.digest"]
+        | select(type == "string" and test("^sha256:[0-9a-f]{64}$"))
+      ' "$bake_metadata")"; then
+        echo "Bake metadata is missing the immutable $runtime_target image digest" >&2
+        exit 1
+      fi
+      runtime_source_tag="${REGISTRY_REPOSITORY_PREFIX}/${runtime_target}:${source_sha}"
+      if ! published_runtime_digest="$(inspect_manifest_digest "$runtime_source_tag")" \
+          || [ "$published_runtime_digest" != "$runtime_digest" ]; then
+        echo "Published $runtime_target source tag does not match its Bake digest" >&2
+        exit 1
+      fi
+    done
+  fi
+fi
 
 if source_digest="$(inspect_manifest_digest "$source_tag")"; then
   jq -n --arg digest "$source_digest" \
@@ -524,6 +616,8 @@ else
       --file "$bake_file"
       --metadata-file "$bake_metadata"
       --set "rust-base.context=$context"
+    )
+    bake_args+=(
       --set "$product_bake_target.context=$context"
       --set "$product_bake_target.tags=$source_tag"
     )

@@ -59,6 +59,7 @@ run_protected_build() {
   local image_name="$1"
   local dockerfile="$2"
   local output="$3"
+  local build_runtime_set="$4"
   local attempt build_log build_status tee_status
   local -a pipeline_status
 
@@ -73,6 +74,7 @@ run_protected_build() {
       CODEWIRE_EXTERNAL_DOCKER_CONFIG="$docker_config" \
       CODEWIRE_PROVENANCE_BUILDER_ID="$PROVENANCE_BUILDER_ID" \
       CODEWIRE_SCCACHE_MODE="${CODEWIRE_SCCACHE_MODE:-local}" \
+      CODEWIRE_BUILD_RUNTIME_SET="$build_runtime_set" \
       scripts/ci/images/build-push-image.sh "$image_name" "$dockerfile" . \
         2>&1 | tee "$build_log"
     pipeline_status=("${PIPESTATUS[@]}")
@@ -100,10 +102,11 @@ run_protected_build() {
 build_one() {
   local image_name="$1"
   local dockerfile="$2"
+  local build_runtime_set="${3:-0}"
   local output candidate_ref local_ref candidate_id local_id profile promotable revision
 
   output="$work/$image_name.output"
-  run_protected_build "$image_name" "$dockerfile" "$output"
+  run_protected_build "$image_name" "$dockerfile" "$output" "$build_runtime_set"
 
   candidate_ref="$(sed -n 's/^candidate_ref=//p' "$output")"
   if [[ ! "$candidate_ref" =~ ^nexus-system-cluster\.private\.invalid/oci-promoted/codewire/${image_name}@sha256:[0-9a-f]{64}$ ]]; then
@@ -132,13 +135,16 @@ build_one() {
   printf '%s_candidate_ref=%s\n' "$image_name" "$candidate_ref" >>"$GITHUB_OUTPUT"
 }
 
-# One protected job and one transient BuildKit daemon share only job-local
-# content and compiler objects. Product targets remain separate so Cargo
-# feature unification and the gateway lockfile cannot change shipped binaries.
-build_one services deployments/docker/services.Dockerfile
+# One five-target Bake graph lets BuildKit schedule at most two independent
+# product builds concurrently while deduplicating their shared rust-base target.
+# Product targets remain separate so Cargo feature unification and the gateway
+# lockfile cannot change shipped binaries. The remaining helper calls find the
+# exact source tags from that transaction and perform the existing per-image
+# provenance, SBOM, immutable-tag, and bundle checks without rebuilding.
+build_one services deployments/docker/services.Dockerfile 1
 build_one mesh deployments/docker/mesh.Dockerfile
 build_one dashboard apps/dashboard/Dockerfile
 build_one gateway deployments/docker/gateway.Dockerfile
 build_one derp deployments/docker/derp.Dockerfile
 
-echo 'Built and locally materialized the exact five-image runtime candidate set with one bounded transient BuildKit daemon'
+echo 'Built the exact five-image runtime candidate set in one bounded Bake graph and materialized every candidate locally'

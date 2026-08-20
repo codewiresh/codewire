@@ -59,10 +59,10 @@ if [ "${FAKE_FATAL_IMAGE:-}" = "$name" ]; then
   printf 'non-retryable protected build failure\n' >&2
   exit 1
 fi
-printf '%s|%s|%s|%s|%s\n' \
+printf '%s|%s|%s|%s|%s|%s\n' \
   "$name" "$CODEWIRE_EXTERNAL_BUILDX_BUILDER" \
   "$CODEWIRE_EXTERNAL_DOCKER_CONFIG" "$CODEWIRE_SCCACHE_MODE" \
-  "$CODEWIRE_PROVENANCE_BUILDER_ID" >>"$BUILD_LOG"
+  "$CODEWIRE_PROVENANCE_BUILDER_ID" "${CODEWIRE_BUILD_RUNTIME_SET:-0}" >>"$BUILD_LOG"
 printf 'candidate_ref=nexus-system-cluster.example.invalid/oci-promoted/codewire/%s@sha256:%064d\n' \
   "$name" 0 >>"$GITHUB_OUTPUT"
 SH
@@ -91,7 +91,7 @@ sleep_log="$work/sleep.log"
 [[ "$(wc -l <"$output" | tr -d ' ')" -eq 5 ]] ||
   fail "wrapper did not emit exactly five runtime outputs"
 [[ "$(wc -l <"$build_log" | tr -d ' ')" -eq 5 ]] ||
-  fail "wrapper did not invoke exactly five separate product builds"
+  fail "wrapper did not verify exactly five product images"
 for family in dashboard derp gateway mesh services; do
   grep -Eq "^${family}_candidate_ref=.*${family}@sha256:[0-9a-f]{64}$" "$output" ||
     fail "wrapper omitted exact $family output"
@@ -192,6 +192,10 @@ builder="$(cut -d'|' -f2 "$build_log" | sort -u)"
 [[ "$(cut -d'|' -f5 "$build_log" | sort -u)" = \
   'https://git.example.invalid/infra/ci/builders/protected-delivery/v1' ]] ||
   fail "protected wrapper did not bind the stable protected builder identity"
+[[ "$(awk -F'|' '$1 == "services" { print $6 }' "$build_log")" = 1 ]] ||
+  fail "services did not anchor the five-target protected Bake transaction"
+[[ "$(awk -F'|' '$1 != "services" { print $6 }' "$build_log" | sort -u)" = 0 ]] ||
+  fail "post-build product verification attempted another runtime-set Bake"
 grep -Fq "buildx create --name $builder --driver docker-container" "$docker_log" ||
   fail "wrapper did not create the shared docker-container builder"
 grep -Fq 'provenance-add-gha=false' "$docker_log" ||
