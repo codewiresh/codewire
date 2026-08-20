@@ -86,36 +86,40 @@ jq -e --arg sha "$GITHUB_SHA" '.source.sha == $sha' "$bundle" >/dev/null || {
   exit 1
 }
 
-{
-  printf 'header = "Authorization: bearer '
-  printf '%s' "$ACTIONS_ID_TOKEN_REQUEST_TOKEN"
-  printf '"\nsilent\nshow-error\nfail\n'
-} >"$work/forgejo.curl"
-chmod 0600 "$work/forgejo.curl"
-curl --config "$work/forgejo.curl" "${CURL_BOUNDS[@]}" \
-  --output "$work/forgejo-response.json" \
-  "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${OPENBAO_AUDIENCE}"
-jq -er '.value | strings | select(length > 0)' \
-  "$work/forgejo-response.json" >"$work/forgejo.jwt"
-chmod 0600 "$work/forgejo.jwt"
+refresh_openbao_token() {
+  {
+    printf 'header = "Authorization: bearer '
+    printf '%s' "$ACTIONS_ID_TOKEN_REQUEST_TOKEN"
+    printf '"\nsilent\nshow-error\nfail\n'
+  } >"$work/forgejo.curl"
+  chmod 0600 "$work/forgejo.curl"
+  curl --config "$work/forgejo.curl" "${CURL_BOUNDS[@]}" \
+    --output "$work/forgejo-response.json" \
+    "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${OPENBAO_AUDIENCE}"
+  jq -er '.value | strings | select(length > 0)' \
+    "$work/forgejo-response.json" >"$work/forgejo.jwt"
+  chmod 0600 "$work/forgejo.jwt"
 
-jq -n --arg role "$OPENBAO_ROLE" --rawfile jwt "$work/forgejo.jwt" \
-  '{role:$role, jwt:($jwt | rtrimstr("\n"))}' >"$work/openbao-login.json"
-curl --silent --show-error --fail "${CURL_BOUNDS[@]}" \
-  --header 'Content-Type: application/json' \
-  --data-binary @"$work/openbao-login.json" \
-  --output "$work/openbao-response.json" \
-  "$OPENBAO_ADDR/v1/auth/forgejo-jwt/login"
-jq -er '.auth.client_token | strings | select(length > 0)' \
-  "$work/openbao-response.json" >"$openbao_token"
-chmod 0600 "$openbao_token"
+  jq -n --arg role "$OPENBAO_ROLE" --rawfile jwt "$work/forgejo.jwt" \
+    '{role:$role, jwt:($jwt | rtrimstr("\n"))}' >"$work/openbao-login.json"
+  curl --silent --show-error --fail "${CURL_BOUNDS[@]}" \
+    --header 'Content-Type: application/json' \
+    --data-binary @"$work/openbao-login.json" \
+    --output "$work/openbao-response.json" \
+    "$OPENBAO_ADDR/v1/auth/forgejo-jwt/login"
+  jq -er '.auth.client_token | strings | select(length > 0)' \
+    "$work/openbao-response.json" >"$openbao_token"
+  chmod 0600 "$openbao_token"
 
-{
-  printf 'header = "X-Vault-Token: '
-  tr -d '\n' <"$openbao_token"
-  printf '"\nsilent\nshow-error\nfail\n'
-} >"$work/openbao.curl"
-chmod 0600 "$work/openbao.curl"
+  {
+    printf 'header = "X-Vault-Token: '
+    tr -d '\n' <"$openbao_token"
+    printf '"\nsilent\nshow-error\nfail\n'
+  } >"$work/openbao.curl"
+  chmod 0600 "$work/openbao.curl"
+}
+
+refresh_openbao_token
 curl --config "$work/openbao.curl" "${CURL_BOUNDS[@]}" \
   --output "$work/nexus.json" \
   "$OPENBAO_ADDR/v1/platform/data/nexus/oci-promoter"
@@ -224,9 +228,15 @@ sign_reference() {
     printf 'Runtime signature already accepted: family=%s ref=%s\n' "$family" "$reference"
     return
   fi
+  # The publisher role deliberately issues short-lived tokens. A complete
+  # runtime set contains ten registry references, and Cosign trust discovery
+  # can consume a material part of that lease. Bind a fresh job OIDC exchange
+  # to each required signature instead of sharing one token across the set.
+  refresh_openbao_token
   run_cosign true sign --yes \
     --key "$OPENBAO_KEY" \
     --signing-config "$signing_config" \
+    --tlog-upload=false \
     --new-bundle-format=true \
     --annotations "dev.codewire.image-family=$family" \
     --annotations "dev.codewire.source-sha=$GITHUB_SHA" \

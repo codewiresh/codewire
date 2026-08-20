@@ -17,9 +17,11 @@ trap 'rm -rf "$work"' EXIT
 mkdir -p "$work/bin" "$work/tmp"
 docker_log="$work/docker.log"
 cosign_log="$work/cosign.log"
+curl_log="$work/curl.log"
 signature_state="$work/signatures"
 : >"$docker_log"
 : >"$cosign_log"
+: >"$curl_log"
 : >"$signature_state"
 
 cat >"$work/bin/curl" <<'SH'
@@ -34,6 +36,7 @@ for ((index = 0; index < ${#args[@]}; index += 1)); do
 done
 [[ -n "$output" ]]
 url="${args[$((${#args[@]} - 1))]}"
+printf '%s\n' "$url" >>"${CURL_LOG:?}"
 case "$url" in
   *'/id_token?'*) printf '%s\n' '{"value":"synthetic-forgejo-jwt"}' >"$output" ;;
   */v1/auth/forgejo-jwt/login)
@@ -74,6 +77,7 @@ case "$command" in
       fi
     done
     [[ -f "$signing_config" && ! -L "$signing_config" ]]
+    [[ " $* " == *' --tlog-upload=false '* ]]
     [[ " $* " == *' --new-bundle-format=true '* ]]
     [[ " $* " != *' --registry-referrers-mode'* ]]
     grep -Fxq "$reference" "$SIGNATURE_STATE" || printf '%s\n' "$reference" >>"$SIGNATURE_STATE"
@@ -195,6 +199,7 @@ python3 "$ROOT/scripts/ci/images/image-bundle.py" create \
 
 export DOCKER_LOG="$docker_log"
 export COSIGN_LOG="$cosign_log"
+export CURL_LOG="$curl_log"
 export FAKE_COSIGN_BINARY="$work/fake-cosign"
 export SIGNATURE_STATE="$signature_state"
 export GITHUB_SHA="$source_sha"
@@ -219,6 +224,14 @@ fi
   fail 'signer signed a registry reference more than once'
 [[ "$(grep -c '^sign ' "$cosign_log")" -eq 10 ]] ||
   fail 'signer did not invoke Cosign exactly once per registry reference'
+[[ "$(grep -c '/id_token?' "$curl_log")" -eq 11 ]] ||
+  fail 'signer did not mint one initial and one per-signature Forgejo identity'
+[[ "$(grep -c '/v1/auth/forgejo-jwt/login$' "$curl_log")" -eq 11 ]] ||
+  fail 'signer reused one short-lived OpenBao token across registry signatures'
+[[ "$(grep -c '/v1/platform/data/nexus/oci-promoter$' "$curl_log")" -eq 1 ]] ||
+  fail 'signer fetched Nexus credentials more than once'
+[[ "$(grep -c '/v1/platform/data/ci/codewire/ghcr-publisher$' "$curl_log")" -eq 1 ]] ||
+  fail 'signer fetched GHCR credentials more than once'
 [[ "$(grep -c "create .*--pull=never .*${COSIGN_IMAGE} version" "$docker_log")" -eq 1 ]] ||
   fail 'signer did not extract the exact preloaded Cosign image without pulling'
 grep -Fq 'cp cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc:/ko-app/cosign ' \
@@ -238,9 +251,15 @@ if rg -n 'synthetic-(request|forgejo|openbao|nexus-password|ghcr-token)' \
 fi
 
 sign_calls_before="$(grep -c '^sign ' "$cosign_log")"
+oidc_calls_before="$(grep -c '/id_token?' "$curl_log")"
+login_calls_before="$(grep -c '/v1/auth/forgejo-jwt/login$' "$curl_log")"
 run_signer >"$work/second.out" 2>"$work/second.err"
 [[ "$(grep -c '^sign ' "$cosign_log")" -eq "$sign_calls_before" ]] ||
   fail 'idempotent signer duplicated an accepted signature'
+[[ "$(grep -c '/id_token?' "$curl_log")" -eq $((oidc_calls_before + 1)) ]] ||
+  fail 'idempotent signer minted identities for already accepted signatures'
+[[ "$(grep -c '/v1/auth/forgejo-jwt/login$' "$curl_log")" -eq $((login_calls_before + 1)) ]] ||
+  fail 'idempotent signer refreshed OpenBao for already accepted signatures'
 [[ "$(grep -Fc 'Runtime signature already accepted:' "$work/second.out")" -eq 10 ]] ||
   fail 'idempotent signer did not report all accepted signatures'
 
