@@ -50,6 +50,13 @@ if rg -q 'with-dev-confidential-coco-config|COCO_CLEANUP_RECEIPT|kind: Lease|app
 fi
 
 rg -F 'SMOKE_KUSTOMIZATION="codewire-deploy-confidential-smoke-dev"' "$SMOKE" >/dev/null
+rg -F 'KUBE_CONTEXT="${KUBE_CONTEXT:-dev-cluster}"' "$SMOKE" >/dev/null
+rg -F 'NODE="${CONFIDENTIAL_SNP_NODE:-cw-dev-prod-node-1}"' "$SMOKE" >/dev/null
+rg -F './scripts/talos-external-worker verify' "$SMOKE" >/dev/null
+if rg -q 'check-node1|node1-codewire-dev|node1\.codewire-dev\.sh|ssh_host\(' "$SMOKE"; then
+  printf 'confidential smoke still contains the retired Ubuntu/SSH host gate\n' >&2
+  exit 1
+fi
 rg -F 'COMMODITY_JOB_SELECTOR="app.kubernetes.io/name=codewire-commodity-runtime-smoke"' "$SMOKE" >/dev/null
 rg -F 'CONFIDENTIAL_JOB_SELECTOR="app.kubernetes.io/name=codewire-confidential-runtime-smoke"' "$SMOKE" >/dev/null
 rg -F 'ATTESTATION_JOB_SELECTOR="app.kubernetes.io/name=codewire-confidential-snp-attestation"' "$SMOKE" >/dev/null
@@ -64,6 +71,7 @@ if rg -F 'git\.example\.invalid/codewire/gateway@sha256:' "$SMOKE" "$RESOLVER"; 
 fi
 rg -F 'restore the commodity source profile' "$SMOKE" >/dev/null
 rg -F -- '--admin-oidc "${smoke_args[@]}"' "$SMOKE" >/dev/null
+rg -F 'SMOKE_ISOLATION_TIER=confidential' "$SMOKE" >/dev/null
 if rg -F 'with-dev-smoke-auth.sh' "$SMOKE"; then
   printf 'admin-only confidential smoke must not use the API-key auth wrapper\n' >&2
   exit 1
@@ -110,9 +118,9 @@ done
 rg -F 'node.codewire.sh/confidential-snp: "true"' "$SMOKE_DIR/confidential-smoke-job.yaml" >/dev/null
 rg -F 'node.codewire.sh/confidential-snp: "true"' "$SMOKE_DIR/confidential-attestation-job.yaml" >/dev/null
 rg -F 'privileged: true' "$SMOKE_DIR/confidential-attestation-job.yaml" >/dev/null
-rg -F 'name: codewire-commodity-runtime-smoke-v55' "$SMOKE_DIR/commodity-smoke-job.yaml" >/dev/null
-rg -F 'name: codewire-confidential-runtime-smoke-v55' "$SMOKE_DIR/confidential-smoke-job.yaml" >/dev/null
-rg -F 'name: codewire-confidential-snp-attestation-v55' "$SMOKE_DIR/confidential-attestation-job.yaml" >/dev/null
+rg -F 'name: codewire-commodity-runtime-smoke-v56' "$SMOKE_DIR/commodity-smoke-job.yaml" >/dev/null
+rg -F 'name: codewire-confidential-runtime-smoke-v56' "$SMOKE_DIR/confidential-smoke-job.yaml" >/dev/null
+rg -F 'name: codewire-confidential-snp-attestation-v56' "$SMOKE_DIR/confidential-attestation-job.yaml" >/dev/null
 
 command -v kustomize >/dev/null 2>&1 || {
   printf 'kustomize is required for the confidential smoke contract\n' >&2

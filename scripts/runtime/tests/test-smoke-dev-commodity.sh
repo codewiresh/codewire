@@ -214,6 +214,33 @@ run_docker_socket_contract_cases() {
     assert_docker_socket_contract "$disabled"
   ) || fail "Docker-disabled socket contract was rejected"
 }
+
+run_explicit_isolation_tier_case() {
+  local case_dir="$TEST_TMP/isolation-tier"
+  local args_file="$case_dir/cw-args"
+
+  mkdir -p "$case_dir"
+  (
+    # shellcheck disable=SC1090 # Intentional dynamic source fixture.
+    source <(sed '$d' "$SMOKE")
+    # shellcheck disable=SC2034 # Values are consumed by the sourced smoke fixture.
+    declare TMPDIR_SMOKE="$case_dir" SMOKE_NAME="isolation-contract" \
+      SMOKE_IMAGE="workspace" SMOKE_CPU="2000" SMOKE_MEMORY="4096" \
+      SMOKE_DISK="10" SMOKE_TTL="2h" SMOKE_ISOLATION_TIER="confidential" \
+      SMOKE_KEEP_ENV=1
+    cw() {
+      printf '%s\n' "$@" >"$args_file"
+      printf 'ID: 11111111-1111-4111-8111-111111111111\n'
+    }
+    create_environment
+  ) >/dev/null 2>&1 || fail "explicit confidential isolation tier was rejected"
+
+  awk '
+    previous == "--isolation" && $0 == "confidential" { found = 1 }
+    { previous = $0 }
+    END { exit found ? 0 : 1 }
+  ' "$args_file" || fail "environment create did not request confidential isolation explicitly"
+}
 run_safe_diagnostic_case() {
   local output="$TEST_TMP/output"
   local error="$TEST_TMP/error"
@@ -750,6 +777,7 @@ run_admin_oauth_contract_cases() {
 assert_static_contract
 run_application_only_boundary_case
 run_docker_socket_contract_cases
+run_explicit_isolation_tier_case
 run_safe_diagnostic_case
 run_safe_client_diagnostic_case
 run_environment_artifact_case
