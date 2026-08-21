@@ -1110,100 +1110,43 @@ mod tests {
         parse_canonical_full_warm_pool_profiles("").unwrap()[0].clone()
     }
 
-    // Stable Rust warm-pool revision goldens include the coordinator service
-    // origin so endpoint changes cannot reuse warm pods rendered for another
-    // target.
+    // Stable Rust warm-pool revision goldens pin the exact rendered Sandbox
+    // blueprint so renderer changes cannot silently reuse old warm pods.
     #[test]
     fn warm_pool_revision_hash_matches_checked_in_goldens() {
         let isol8 = warm_pool_template_opts(&warm_cfg("isol8"), &default_profile());
-        assert_eq!(warm_pool_revision_hash(&isol8), "09442930");
+        assert_eq!(warm_pool_revision_hash(&isol8), "e649a89d");
 
         let plain = warm_pool_template_opts(&warm_cfg(""), &default_profile());
-        assert_eq!(warm_pool_revision_hash(&plain), "1d272f19");
+        assert_eq!(warm_pool_revision_hash(&plain), "58c1eeb8");
     }
 
     #[test]
-    fn warm_pool_revision_hash_is_8_chars_and_sensitive() {
+    fn warm_pool_revision_hash_tracks_material_blueprint_inputs() {
         let opts = warm_pool_template_opts(&warm_cfg("isol8"), &default_profile());
         let h1 = warm_pool_revision_hash(&opts);
         assert_eq!(h1.len(), 8);
         assert!(h1.chars().all(|c| c.is_ascii_hexdigit()));
 
-        // Mirrors TestWarmPoolRevisionHashChanges: a material change
-        // (gateway image) produces a different hash.
-        let mut changed = warm_cfg("isol8");
-        changed.gateway_image = "gateway:v2".into();
-        let opts2 = warm_pool_template_opts(&changed, &default_profile());
-        assert_ne!(warm_pool_revision_hash(&opts2), h1);
+        let mut material = opts.clone();
+        material.support_image = "gateway:v2".into();
+        assert_ne!(warm_pool_revision_hash(&material), h1);
 
-        let mut changed = warm_cfg("isol8");
-        changed.warm_pool_workspace_image = "localhost/codewire-ci/workspace:verified".into();
-        let opts2 = warm_pool_template_opts(&changed, &default_profile());
+        let mut material = opts.clone();
+        material.image = "localhost/codewire-ci/workspace:verified".into();
+        assert_ne!(warm_pool_revision_hash(&material), h1);
+
+        let mut material = opts.clone();
+        material.cpu_millicores += 1000;
+        assert_ne!(warm_pool_revision_hash(&material), h1);
+
+        let mut unused = opts;
+        unused.dind_image = "docker.io/library/docker:unused".into();
         assert_eq!(
-            opts2.image, "localhost/codewire-ci/workspace:verified",
-            "the deployment-selected warm-pool image must reach the rendered template"
+            warm_pool_revision_hash(&unused),
+            h1,
+            "an input omitted from this runtime's rendered blueprint must not rotate its pool"
         );
-        assert_ne!(warm_pool_revision_hash(&opts2), h1);
-
-        let mut changed = warm_cfg("isol8");
-        changed.dind_image = "docker.io/library/docker:29.7.0-dind@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into();
-        let opts2 = warm_pool_template_opts(&changed, &default_profile());
-        assert_ne!(warm_pool_revision_hash(&opts2), h1);
-
-        let mut changed = warm_cfg("isol8");
-        changed.coordinator_url =
-            "http://codewire-coordinator.default.svc.cluster.local:8090".into();
-        let opts2 = warm_pool_template_opts(&changed, &default_profile());
-        assert_ne!(warm_pool_revision_hash(&opts2), h1);
-
-        let mut changed = warm_cfg("isol8");
-        changed.kata_agent_policy_enabled = true;
-        let opts2 = warm_pool_template_opts(&changed, &default_profile());
-        assert_ne!(warm_pool_revision_hash(&opts2), h1);
-
-        let mut changed = warm_cfg("isol8");
-        changed.kata_coco_init_data_enabled = true;
-        let opts2 = warm_pool_template_opts(&changed, &default_profile());
-        assert_ne!(warm_pool_revision_hash(&opts2), h1);
-
-        let mut changed = warm_cfg("isol8");
-        changed.kata_coco_kbs_url = "https://kbs.codewire-dev.sh".into();
-        let opts2 = warm_pool_template_opts(&changed, &default_profile());
-        assert_ne!(warm_pool_revision_hash(&opts2), h1);
-
-        let mut changed = warm_cfg("isol8");
-        changed.kata_coco_image_registry_auth_uri = "kbs:///default/containers/auth".into();
-        let opts2 = warm_pool_template_opts(&changed, &default_profile());
-        assert_ne!(warm_pool_revision_hash(&opts2), h1);
-
-        let mut changed = warm_cfg("isol8");
-        changed.kata_coco_test_resource_uri =
-            "kbs:///default/codewire/runtime-test-resource".into();
-        let opts2 = warm_pool_template_opts(&changed, &default_profile());
-        assert_ne!(warm_pool_revision_hash(&opts2), h1);
-
-        let mut changed = warm_cfg("isol8");
-        changed.kata_coco_test_resource_path =
-            "/run/confidential-containers/cdh/kbs/codewire/runtime-test-resource".into();
-        let opts2 = warm_pool_template_opts(&changed, &default_profile());
-        assert_ne!(warm_pool_revision_hash(&opts2), h1);
-
-        let mut changed = warm_cfg("isol8");
-        changed.udp_relay_allocator_url =
-            "http://codewire-udp-relay.dev.svc.cluster.local:8095/internal/udp-relay/allocations"
-                .into();
-        let opts2 = warm_pool_template_opts(&changed, &default_profile());
-        assert_ne!(warm_pool_revision_hash(&opts2), h1);
-
-        let mut changed = warm_cfg("isol8");
-        changed.udp_relay_allocator_token = "relay-token".into();
-        let opts2 = warm_pool_template_opts(&changed, &default_profile());
-        assert_ne!(warm_pool_revision_hash(&opts2), h1);
-
-        let mut changed = warm_cfg("isol8");
-        changed.udp_relay_bind_addrs = "codewire-udp-relay.dev.svc.cluster.local:41641".into();
-        let opts2 = warm_pool_template_opts(&changed, &default_profile());
-        assert_ne!(warm_pool_revision_hash(&opts2), h1);
     }
 
     fn probe(
