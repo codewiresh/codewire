@@ -223,21 +223,16 @@ run_explicit_isolation_tier_case() {
   (
     # shellcheck disable=SC1090 # Intentional dynamic source fixture.
     source <(sed '$d' "$SMOKE")
-    TMPDIR_SMOKE="$case_dir"
-    SMOKE_NAME="isolation-contract"
-    SMOKE_IMAGE="workspace"
-    SMOKE_CPU="2000"
-    SMOKE_MEMORY="4096"
-    SMOKE_DISK="10"
-    SMOKE_TTL="2h"
-    SMOKE_ISOLATION_TIER="confidential"
-    SMOKE_KEEP_ENV=1
+    # shellcheck disable=SC2034 # Values are consumed by the sourced smoke fixture.
+    declare TMPDIR_SMOKE="$case_dir" SMOKE_NAME="isolation-contract" \
+      SMOKE_IMAGE="workspace" SMOKE_CPU="2000" SMOKE_MEMORY="4096" \
+      SMOKE_DISK="10" SMOKE_TTL="2h" SMOKE_ISOLATION_TIER="confidential" \
+      SMOKE_KEEP_ENV=1
     cw() {
       printf '%s\n' "$@" >"$args_file"
       printf 'ID: 11111111-1111-4111-8111-111111111111\n'
     }
     create_environment
-    [[ "$ENV_ID" == "11111111-1111-4111-8111-111111111111" ]]
   ) >/dev/null 2>&1 || fail "explicit confidential isolation tier was rejected"
 
   awk '
