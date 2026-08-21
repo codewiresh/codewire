@@ -50,6 +50,13 @@ if rg -q 'with-dev-confidential-coco-config|COCO_CLEANUP_RECEIPT|kind: Lease|app
 fi
 
 rg -F 'SMOKE_KUSTOMIZATION="codewire-deploy-confidential-smoke-dev"' "$SMOKE" >/dev/null
+rg -F 'KUBE_CONTEXT="${KUBE_CONTEXT:-dev-cluster}"' "$SMOKE" >/dev/null
+rg -F 'NODE="${CONFIDENTIAL_SNP_NODE:-cw-dev-prod-node-1}"' "$SMOKE" >/dev/null
+rg -F './scripts/talos-external-worker verify' "$SMOKE" >/dev/null
+if rg -q 'check-node1|node1-codewire-dev|node1\.codewire-dev\.sh|ssh_host\(' "$SMOKE"; then
+  printf 'confidential smoke still contains the retired Ubuntu/SSH host gate\n' >&2
+  exit 1
+fi
 rg -F 'COMMODITY_JOB_SELECTOR="app.kubernetes.io/name=codewire-commodity-runtime-smoke"' "$SMOKE" >/dev/null
 rg -F 'CONFIDENTIAL_JOB_SELECTOR="app.kubernetes.io/name=codewire-confidential-runtime-smoke"' "$SMOKE" >/dev/null
 rg -F 'ATTESTATION_JOB_SELECTOR="app.kubernetes.io/name=codewire-confidential-snp-attestation"' "$SMOKE" >/dev/null

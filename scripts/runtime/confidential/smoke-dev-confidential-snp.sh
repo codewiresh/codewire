@@ -4,14 +4,11 @@ umask 077
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 
-KUBE_CONTEXT="${KUBE_CONTEXT:-codewire-dev}"
-NODE="${CONFIDENTIAL_SNP_NODE:-node1-codewire-dev}"
+KUBE_CONTEXT="${KUBE_CONTEXT:-dev-cluster}"
+NODE="${CONFIDENTIAL_SNP_NODE:-cw-dev-prod-node-1}"
 INFRA_ROOT="${INFRA_ROOT:-$HOME/src/infra}"
-HOST_GATE_WORKFLOW="${HOST_GATE_WORKFLOW:-check-node1}"
-SSH_HOST="${CONFIDENTIAL_SNP_SSH_HOST:-node1.codewire-dev.sh}"
-SSH_USER="${CONFIDENTIAL_SNP_SSH_USER:-codewire}"
-SSH_IDENTITY="${CONFIDENTIAL_SNP_SSH_IDENTITY:-$HOME/.ssh/codewire-bare-metal.pub}"
-SSH_IDENTITY_AGENT="${CONFIDENTIAL_SNP_SSH_IDENTITY_AGENT:-$HOME/.1password/agent.sock}"
+HOST_GATE_STACK="${CONFIDENTIAL_SNP_HOST_GATE_STACK:-dev-cluster}"
+HOST_GATE_MIN_EPHEMERAL_GIB="${CONFIDENTIAL_SNP_HOST_GATE_MIN_EPHEMERAL_GIB:-1500}"
 PROBE_NAMESPACE="${CONFIDENTIAL_SNP_PROBE_NAMESPACE:-codewire-runtime-probes}"
 CODEWIRE_SERVER_NAMESPACE="${CODEWIRE_SERVER_NAMESPACE:-dev}"
 WAIT_TIMEOUT="${CONFIDENTIAL_SNP_WAIT_TIMEOUT:-300s}"
@@ -49,10 +46,11 @@ Usage:
   scripts/runtime/confidential/smoke-dev-confidential-snp.sh [options]
 
 Reads the Flux-promoted confidential SNP smoke activation on Codewire dev. It
-never applies, patches, deletes, or suspends Kubernetes or Flux resources.
+never mutates Codewire or Flux desired state. The Infra-owned Talos verifier
+may create and remove its documented short-lived runtime probe pods.
 
 Options:
-  --skip-host-gate         Skip the read-only Infra host SNP gate
+  --skip-host-gate         Reuse an already accepted Infra Talos host gate
   --skip-raw-jobs          Skip Flux-owned commodity/confidential Job checks
   --skip-guest-attestation Skip the Flux-owned in-guest SNP Job check
   --skip-coco              Skip the Codewire product CoCo smoke
@@ -166,15 +164,6 @@ kubectl_dev() {
   fi
 }
 
-ssh_host() {
-  ssh \
-    -o IdentityAgent="$SSH_IDENTITY_AGENT" \
-    -o IdentitiesOnly=yes \
-    -o NumberOfPasswordPrompts=0 \
-    -i "$SSH_IDENTITY" \
-    "$SSH_USER@$SSH_HOST" "$@"
-}
-
 assert_jq() {
   local description="$1"
   local file last
@@ -204,22 +193,19 @@ run_host_gate() {
     log "skipping host SNP gate"
     return 0
   }
-  [[ -x "$INFRA_ROOT/scripts/atmos-run" ]] || \
-    die "missing infra atmos wrapper at $INFRA_ROOT/scripts/atmos-run"
+  [[ -x "$INFRA_ROOT/scripts/talos-external-worker" ]] || \
+    die "missing Infra Talos external-worker wrapper at $INFRA_ROOT/scripts/talos-external-worker"
+  [[ "$HOST_GATE_STACK" == "dev-cluster" ]] || \
+    die "confidential SNP host gate must use dev-cluster"
+  [[ "$HOST_GATE_MIN_EPHEMERAL_GIB" =~ ^[0-9]+$ ]] || \
+    die "confidential SNP host-gate ephemeral threshold must be an integer"
 
-  log "running Infra host runtime gate $HOST_GATE_WORKFLOW for $NODE"
+  log "running Infra Talos external-worker gate for $NODE"
   (
     cd "$INFRA_ROOT"
-    ./scripts/atmos-run workflow "$HOST_GATE_WORKFLOW" -f runtime-node
+    ./scripts/talos-external-worker verify \
+      "$HOST_GATE_STACK" "$NODE" "$HOST_GATE_MIN_EPHEMERAL_GIB"
   ) 2>&1 | tee "$EVIDENCE_DIR/host-runtime-gate.log"
-
-  log "collecting read-only host SEV-SNP evidence"
-  ssh_host "sudo sh -c 'printf \"sev=\"; cat /sys/module/kvm_amd/parameters/sev; printf \"sev_es=\"; cat /sys/module/kvm_amd/parameters/sev_es; printf \"sev_snp=\"; cat /sys/module/kvm_amd/parameters/sev_snp; dmesg | grep -E \"SEV-SNP|SNP|RMP\" | tail -n 80 || true'" \
-    >"$EVIDENCE_DIR/host-snp-evidence.log"
-  rg -q '^sev_snp=Y$' "$EVIDENCE_DIR/host-snp-evidence.log" || \
-    die "host SNP evidence does not show sev_snp=Y"
-  rg -q 'SEV-SNP.*enabled|kvm_amd: SEV-SNP' "$EVIDENCE_DIR/host-snp-evidence.log" || \
-    die "host SNP evidence does not show SEV-SNP enabled in dmesg"
 }
 
 check_runtime_contract() {
