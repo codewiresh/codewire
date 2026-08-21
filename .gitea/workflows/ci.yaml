@@ -37,7 +37,7 @@ env:
 # Forgejo assigns static jobs before their step conditions can make them cheap.
 # The trusted selector therefore emits an empty or one-cell matrix for each
 # bounded capability group. Unselected groups create no runner task; selected
-# groups retain their fixed ci-heavy profile and timeout. Candidate policy
+# groups retain their fixed capability profile and timeout. Candidate policy
 # cannot reduce work because PR matrices come from the exact trusted base.
 # A canonical squash whose tree exactly matches a fully green PR head emits
 # empty matrices. Receipt-control changes always take the full path, and every
@@ -362,11 +362,11 @@ jobs:
 
   policy:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this untrusted job has no protected credential.
-    # Policy and repository contracts are non-Docker checks over sealed tools,
-    # but the full ShellCheck pass is a measured heavy workload on hosted CI.
-    # Keep it on bounded heavy capacity and parallel with the Standard family.
+    # Policy and repository contracts are non-Docker checks over sealed tools.
+    # Keep them on elastic non-privileged capacity so a docs-only change cannot
+    # reserve a privileged ci-heavy worker merely to enforce baseline policy.
     name: Policy verification
-    runs-on: ci-heavy
+    runs-on: ci-lite
     timeout-minutes: 13
     needs: [verification-selection]
     strategy:

@@ -1211,7 +1211,7 @@ while IFS='|' read -r job_id job_name runner matrix_name; do
 done <<'EOF'
 cw-release-assets|CW release-assets verification|ci-heavy|cw_release_assets
 workspace-image|Container contract verification|ci-heavy|workspace_image
-policy|Policy verification|ci-heavy|policy
+policy|Policy verification|ci-lite|policy
 standard|Standard verification|ci-heavy|standard
 tooling|Tooling / delivery contract verification|ci-heavy|tooling
 rust-transport|Rust / transport verification|ci-heavy|rust_transport
@@ -1417,16 +1417,16 @@ if grep -Eq '^    runs-on: (ubuntu-latest|untrusted-validation|ci-kind|kind-e2e|
   echo 'Codewire CI still depends on a legacy compatibility label' >&2
   exit 1
 fi
-[[ "$(grep -Fc '    runs-on: ci-heavy' "$WORKFLOW")" -eq 10 ]] || {
+[[ "$(grep -Fc '    runs-on: ci-heavy' "$WORKFLOW")" -eq 9 ]] || {
   echo 'Codewire CI heavy capability groups are not explicit' >&2
   exit 1
 }
-[[ "$(grep -Fc '    runs-on: ci-lite' "$WORKFLOW")" -eq 2 ]] || {
-  echo 'Codewire CI has not assigned selection and aggregation to ci-lite' >&2
+[[ "$(grep -Fc '    runs-on: ci-lite' "$WORKFLOW")" -eq 3 ]] || {
+  echo 'Codewire CI has not assigned selection, policy, and aggregation to ci-lite' >&2
   exit 1
 }
 [[ "$(grep -Fc '    runs-on: ci-light' "$WORKFLOW")" -eq 0 ]] || {
-  echo 'Codewire CI assigned a measured-heavy capability to the light pool' >&2
+  echo 'Codewire CI still uses the retired ci-light label' >&2
   exit 1
 }
 for output in selector_version classification selection required_local_mode \

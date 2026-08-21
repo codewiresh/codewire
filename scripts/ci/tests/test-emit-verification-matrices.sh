@@ -30,8 +30,9 @@ assert_output() {
   fi
 }
 
-docs_output="$(emit '|valid:v3|complete|' fallback false false false)"
-for group in policy standard tooling rust_transport database services_control \
+docs_output="$(emit '|valid:v3|policy|policy_shell_omittable|complete|' fallback false false false)"
+assert_output "$docs_output" policy true
+for group in standard tooling rust_transport database services_control \
     services_runtime edge_kind cw_release_assets workspace_image; do
   assert_output "$docs_output" "$group" false
 done
