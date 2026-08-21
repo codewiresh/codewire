@@ -1,7 +1,7 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: codewire-commodity-runtime-smoke-v56
+  name: codewire-commodity-runtime-smoke-v57
   namespace: codewire-runtime-probes
   labels:
     app.kubernetes.io/name: codewire-commodity-runtime-smoke
@@ -18,7 +18,20 @@ spec:
     spec:
       automountServiceAccountToken: false
       runtimeClassName: commodity
+      nodeSelector:
+        kubernetes.io/hostname: dev-node-1
       restartPolicy: Never
+      volumes:
+        - name: workspace
+          ephemeral:
+            volumeClaimTemplate:
+              spec:
+                accessModes:
+                  - ReadWriteOnce
+                storageClassName: longhorn
+                resources:
+                  requests:
+                    storage: 1Gi
       containers:
         - name: smoke
           image: registry.k8s.io/e2e-test-images/busybox@sha256:caec39cad3b12c26600baf6e67ba811ac15d28a9288d0ccdfffb4b318992c3bb
@@ -39,3 +52,10 @@ spec:
               echo "runtimeClass=commodity"
               uname -a
               test -r /proc/cpuinfo
+              marker="longhorn-workspace-ok"
+              printf '%s\n' "$marker" > /workspace/marker
+              test "$(cat /workspace/marker)" = "$marker"
+              printf '%s\n' "$marker"
+          volumeMounts:
+            - name: workspace
+              mountPath: /workspace

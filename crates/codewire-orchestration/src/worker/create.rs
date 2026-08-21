@@ -1693,6 +1693,110 @@ mod tests {
     }
 
     #[test]
+    fn confidential_tier_coexists_with_commodity_process_default() {
+        let cfg = SandboxWorkerCfg {
+            runtime_profile: crate::sandbox::template::RUNTIME_PROFILE_COMMODITY.into(),
+            runtime_class: crate::sandbox::template::RUNTIME_CLASS_COMMODITY.into(),
+            docker_mode: crate::sandbox::template::DOCKER_MODE_PROFILE_DEFAULT.into(),
+            workspace_storage_class: "longhorn".into(),
+            kata_agent_policy_enabled: true,
+            kata_coco_init_data_enabled: true,
+            kata_coco_kbs_url: "https://kbs.codewire-dev.sh".into(),
+            kata_coco_test_resource_uri: "kbs:///default/codewire/runtime-test-resource".into(),
+            ..Default::default()
+        };
+        let standard = EnvironmentRow {
+            id: "env-coexist".into(),
+            org_id: "org-1".into(),
+            preset_id: None,
+            env_type: "sandbox".into(),
+            state: "pending".into(),
+            desired_state: "started".into(),
+            isolation_tier: "standard".into(),
+            external_cleanup_completed_at: None,
+            cpu_millicores: 1000,
+            memory_mb: 2048,
+            disk_gb: 10,
+            auth_token: None,
+            ttl_seconds: None,
+            setup_config: None,
+            secret_project_id: None,
+        };
+
+        let standard_opts = environment_template_opts(
+            &cfg,
+            "ghcr.io/codewiresh/workspace:golden",
+            "workspace",
+            &standard,
+            "env-coexist",
+            "tok",
+        );
+        assert_eq!(
+            standard_opts.runtime_profile,
+            crate::sandbox::template::RUNTIME_PROFILE_COMMODITY
+        );
+        assert_eq!(
+            standard_opts.runtime_class_name,
+            crate::sandbox::template::RUNTIME_CLASS_COMMODITY
+        );
+        assert_eq!(
+            standard_opts.docker_mode,
+            crate::sandbox::template::DOCKER_MODE_GUEST_DIND
+        );
+        let standard_rendered =
+            crate::sandbox::template::render_sandbox_template("codewire-runtime", &standard_opts);
+        assert_eq!(
+            standard_rendered["spec"]["volumeClaimTemplates"][0]["spec"]["storageClassName"]
+                .as_str(),
+            Some("longhorn")
+        );
+        assert!(
+            standard_rendered["spec"]["podTemplate"]["metadata"]["annotations"]
+                .get(crate::sandbox::template::KATA_HYPERVISOR_KERNEL_PARAMS_ANNOTATION_KEY)
+                .is_none(),
+            "commodity environments must not inherit CoCo KBS kernel parameters"
+        );
+
+        let mut confidential = standard.clone();
+        confidential.isolation_tier = "confidential".into();
+        let confidential_opts = environment_template_opts(
+            &cfg,
+            "ghcr.io/codewiresh/workspace:golden",
+            "workspace",
+            &confidential,
+            "env-coexist",
+            "tok",
+        );
+        assert_eq!(
+            confidential_opts.runtime_profile,
+            crate::sandbox::template::RUNTIME_PROFILE_CONFIDENTIAL
+        );
+        assert_eq!(
+            confidential_opts.runtime_class_name,
+            crate::sandbox::template::RUNTIME_CLASS_CONFIDENTIAL
+        );
+        assert_eq!(
+            confidential_opts.docker_mode,
+            crate::sandbox::template::DOCKER_MODE_GUEST_DIND
+        );
+        let confidential_rendered = crate::sandbox::template::render_sandbox_template(
+            "codewire-runtime",
+            &confidential_opts,
+        );
+        assert_eq!(
+            confidential_rendered["spec"]["volumeClaimTemplates"][0]["spec"]["storageClassName"]
+                .as_str(),
+            Some(crate::sandbox::template::CONFIDENTIAL_WORKSPACE_STORAGE_CLASS)
+        );
+        assert!(
+            confidential_rendered["spec"]["podTemplate"]["metadata"]["annotations"]
+                .get(crate::sandbox::template::KATA_HYPERVISOR_KERNEL_PARAMS_ANNOTATION_KEY)
+                .is_some(),
+            "confidential environments must receive CoCo KBS kernel parameters"
+        );
+    }
+
+    #[test]
     fn template_opts_enable_direct_udp_lb_for_managed_profiles() {
         let env = EnvironmentRow {
             id: "env-1".into(),
