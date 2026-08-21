@@ -70,115 +70,17 @@ pub fn warm_pool_name(template_name: &str, opts: &TemplateOpts) -> String {
     ))
 }
 
-/// Mirrors `sandbox.WarmPoolRevisionHash`.
+/// Derive the warm-pool revision from the exact blueprint copied into a
+/// Sandbox. Hashing the rendered contract instead of a hand-maintained input
+/// list ensures renderer-only changes rotate existing warm-pool members.
 pub fn warm_pool_revision_hash(opts: &TemplateOpts) -> String {
-    let mut buf = String::new();
-    buf.push_str(&format!("Image={}\n", opts.image));
-    buf.push_str(&format!(
-        "ImageCommand=[{}]\n",
-        opts.image_command.join(" ")
-    ));
-    buf.push_str(&format!("SupportImage={}\n", opts.support_image));
-    let configured_dind_image = opts.dind_image.trim();
-    let effective_dind_image = if configured_dind_image.is_empty() {
-        template::DEFAULT_DIND_IMAGE
-    } else {
-        configured_dind_image
-    };
-    buf.push_str(&format!("DindImage={effective_dind_image}\n"));
-    buf.push_str(&format!("RuntimeProfile={}\n", opts.runtime_profile));
-    buf.push_str(&format!("RuntimeClassName={}\n", opts.runtime_class_name));
-    buf.push_str(&format!("DockerMode={}\n", opts.docker_mode));
-    buf.push_str(&format!(
-        "SidecarResourceMode={}\n",
-        opts.sidecar_resource_mode
-    ));
+    sandbox_blueprint_revision_hash(&template::render_sandbox_blueprint(opts))
+}
 
-    let mut selector = opts.node_selector.clone();
-    selector.sort_by(|a, b| a.0.cmp(&b.0));
-    for (k, v) in &selector {
-        buf.push_str(&format!("NodeSelector.{k}={v}\n"));
-    }
-
-    for (i, t) in opts.tolerations.iter().enumerate() {
-        buf.push_str(&format!(
-            "Tolerations[{i}]={}:{}:{}:{}\n",
-            t.key, t.operator, t.value, t.effect
-        ));
-    }
-
-    buf.push_str(&format!("APIBaseURL={}\n", opts.api_base_url));
-    if !opts.coordinator_url.is_empty() {
-        buf.push_str(&format!("CoordinatorURL={}\n", opts.coordinator_url));
-    }
-    buf.push_str(&format!("ServerNamespace={}\n", opts.server_namespace));
-    buf.push_str(&format!("DERPHost={}\n", opts.derp_host));
-    buf.push_str(&format!("DERPPort={}\n", opts.derp_port));
-    buf.push_str(&format!("STUNHost={}\n", opts.stun_host));
-    buf.push_str(&format!("STUNServers={}\n", opts.stun_servers));
-    if !opts.udp_relay_allocator_url.is_empty() {
-        buf.push_str(&format!(
-            "UDPRelayAllocatorURL={}\n",
-            opts.udp_relay_allocator_url
-        ));
-    }
-    if !opts.udp_relay_allocator_token.is_empty() {
-        buf.push_str(&format!(
-            "UDPRelayAllocatorToken={}\n",
-            opts.udp_relay_allocator_token
-        ));
-    }
-    if !opts.udp_relay_bind_addrs.is_empty() {
-        buf.push_str(&format!(
-            "UDPRelayBindAddrs={}\n",
-            opts.udp_relay_bind_addrs
-        ));
-    }
-    buf.push_str(&format!("CPUMillicores={}\n", opts.cpu_millicores));
-    buf.push_str(&format!("MemoryMiB={}\n", opts.memory_mib));
-    buf.push_str(&format!("DiskGiB={}\n", opts.disk_gib));
-    if !opts.workspace_storage_class.is_empty() {
-        buf.push_str(&format!(
-            "WorkspaceStorageClass={}\n",
-            opts.workspace_storage_class
-        ));
-    }
-    buf.push_str(&format!(
-        "NetworkPolicyManagement={}\n",
-        opts.network_policy_management
-    ));
-    buf.push_str(&format!("DinDEnabled={}\n", opts.dind_enabled));
-    buf.push_str(&format!(
-        "KataAgentPolicyEnabled={}\n",
-        opts.kata_agent_policy_enabled
-    ));
-    buf.push_str(&format!(
-        "KataCoCoInitDataEnabled={}\n",
-        opts.kata_coco_init_data_enabled
-    ));
-    if !opts.kata_coco_kbs_url.is_empty() {
-        buf.push_str(&format!("KataCoCoKBSURL={}\n", opts.kata_coco_kbs_url));
-    }
-    if !opts.kata_coco_image_registry_auth_uri.is_empty() {
-        buf.push_str(&format!(
-            "KataCoCoImageRegistryAuthURI={}\n",
-            opts.kata_coco_image_registry_auth_uri
-        ));
-    }
-    if !opts.kata_coco_test_resource_uri.is_empty() {
-        buf.push_str(&format!(
-            "KataCoCoTestResourceURI={}\n",
-            opts.kata_coco_test_resource_uri
-        ));
-    }
-    if !opts.kata_coco_test_resource_path.is_empty() {
-        buf.push_str(&format!(
-            "KataCoCoTestResourcePath={}\n",
-            opts.kata_coco_test_resource_path
-        ));
-    }
-
-    let digest = Sha256::digest(buf.as_bytes());
+fn sandbox_blueprint_revision_hash(blueprint: &Value) -> String {
+    let encoded = serde_json::to_vec(blueprint)
+        .expect("the in-memory Sandbox blueprint must be JSON serializable");
+    let digest = Sha256::digest(encoded);
     let mut hex = String::with_capacity(8);
     for b in digest.iter().take(4) {
         hex.push_str(&format!("{b:02x}"));
@@ -393,6 +295,38 @@ mod tests {
         assert_eq!(
             got["spec"]["additionalPodMetadata"]["labels"][LABEL_ENV_ID].as_str(),
             Some("env-1")
+        );
+    }
+
+    #[test]
+    fn warm_pool_revision_tracks_rendered_socket_topology() {
+        let opts = TemplateOpts {
+            name: "workspace".into(),
+            image: "workspace:exact".into(),
+            support_image: "gateway:exact".into(),
+            dind_enabled: true,
+            docker_mode: template::DOCKER_MODE_LOCAL_DIND_DIRECT.into(),
+            ..Default::default()
+        };
+        let current_blueprint = template::render_sandbox_blueprint(&opts);
+        assert_eq!(
+            warm_pool_revision_hash(&opts),
+            sandbox_blueprint_revision_hash(&current_blueprint)
+        );
+
+        let mut legacy_blueprint = current_blueprint;
+        let docker_socket = legacy_blueprint["podTemplate"]["spec"]["volumes"]
+            .as_array_mut()
+            .expect("volumes")
+            .iter_mut()
+            .find(|volume| volume["name"] == "docker-sock")
+            .expect("docker-sock volume");
+        docker_socket["emptyDir"] = json!({});
+
+        assert_ne!(
+            warm_pool_revision_hash(&opts),
+            sandbox_blueprint_revision_hash(&legacy_blueprint),
+            "disk-backed and guest-memory socket blueprints must not share a warm pool"
         );
     }
 }

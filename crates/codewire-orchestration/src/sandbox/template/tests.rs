@@ -355,6 +355,32 @@ mod tests {
                     && mount["mountPath"].as_str() == Some("/var/run/docker"))
         );
         let volumes = pod_template["spec"]["volumes"].as_array().unwrap();
+        let docker_socket = volumes
+            .iter()
+            .find(|volume| volume["name"].as_str() == Some("docker-sock"))
+            .expect("Docker-enabled workspace must declare docker-sock");
+        assert_eq!(
+            docker_socket["emptyDir"],
+            json!({ "medium": "Memory" }),
+            "Kata cross-container Unix sockets must use guest tmpfs"
+        );
+        assert_eq!(
+            workspace["readinessProbe"],
+            json!({
+                "exec": {
+                    "command": [
+                        "sh",
+                        "-ec",
+                        "docker version --format '{{.Server.Version}}' >/dev/null",
+                    ],
+                },
+                "periodSeconds": 2,
+                "timeoutSeconds": 2,
+                "failureThreshold": 3,
+                "successThreshold": 1,
+            }),
+            "workspace readiness must prove the cross-container Docker socket"
+        );
         assert!(
             volumes
                 .iter()
@@ -431,6 +457,48 @@ mod tests {
                 }),
             "split gateway must not advertise Docker proxy env vars unless a future proxy mode is explicitly enabled"
         );
+    }
+
+    #[test]
+    fn confidential_template_uses_guest_memory_for_docker_socket() {
+        let rendered = render_sandbox_template(
+            "codewire-runtime",
+            &TemplateOpts {
+                name: "tmpl-confidential-docker-socket".into(),
+                image: "ghcr.io/codewiresh/workspace:golden".into(),
+                runtime_profile: RUNTIME_PROFILE_CONFIDENTIAL.into(),
+                environment_id: "8ce0bf4b-bdeb-4fde-95cf-97e27b44c90d".into(),
+                disk_gib: 40,
+                ..Default::default()
+            },
+        );
+
+        let pod_spec = &rendered["spec"]["podTemplate"]["spec"];
+        let docker_socket = pod_spec["volumes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|volume| volume["name"].as_str() == Some("docker-sock"))
+            .expect("confidential Docker profile must declare docker-sock");
+        assert_eq!(docker_socket["emptyDir"], json!({ "medium": "Memory" }));
+
+        let containers = pod_spec["containers"].as_array().unwrap();
+        let workspace = containers
+            .iter()
+            .find(|container| container["name"].as_str() == Some("workspace"))
+            .unwrap();
+        assert_eq!(
+            workspace["readinessProbe"]["exec"]["command"][2].as_str(),
+            Some("docker version --format '{{.Server.Version}}' >/dev/null")
+        );
+        let dind = containers
+            .iter()
+            .find(|container| container["name"].as_str() == Some("dind"))
+            .unwrap();
+        assert!(dind["env"].as_array().unwrap().iter().any(|env| {
+            env["name"].as_str() == Some("CODEWIRE_DOCKER_DATA_ROOT")
+                && env["value"].as_str() == Some("/workspace/.codewire/docker-root")
+        }));
     }
 
     #[test]

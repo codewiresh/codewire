@@ -138,6 +138,82 @@ EOF
   )
 }
 
+run_docker_socket_contract_cases() {
+  local case_dir="$TEST_TMP/docker-socket-contract"
+  local accepted="$case_dir/accepted.json"
+  local disk_backed="$case_dir/disk-backed.json"
+  local missing_probe="$case_dir/missing-probe.json"
+  local disabled="$case_dir/disabled.json"
+
+  mkdir -p "$case_dir"
+  jq -n '{
+    spec: {
+      volumes: [
+        {name: "workspace", emptyDir: {}},
+        {name: "docker-sock", emptyDir: {medium: "Memory"}}
+      ],
+      containers: [
+        {
+          name: "workspace",
+          volumeMounts: [{name: "docker-sock", mountPath: "/var/run/docker"}],
+          readinessProbe: {
+            exec: {command: ["sh", "-ec", "docker version --format '\''{{.Server.Version}}'\'' >/dev/null"]},
+            periodSeconds: 2,
+            timeoutSeconds: 2,
+            failureThreshold: 3,
+            successThreshold: 1
+          }
+        },
+        {
+          name: "dind",
+          volumeMounts: [{name: "docker-sock", mountPath: "/var/run/docker"}]
+        }
+      ]
+    }
+  }' >"$accepted"
+  jq '(.spec.volumes[] | select(.name == "docker-sock") | .emptyDir) = {}' \
+    "$accepted" >"$disk_backed"
+  jq 'del(.spec.containers[] | select(.name == "workspace") | .readinessProbe)' \
+    "$accepted" >"$missing_probe"
+  jq -n '{
+    spec: {
+      volumes: [{name: "workspace", emptyDir: {}}],
+      containers: [{name: "workspace", volumeMounts: []}]
+    }
+  }' >"$disabled"
+
+  (
+    # shellcheck disable=SC1090 # Intentional dynamic source fixture.
+    source <(sed '$d' "$SMOKE")
+    export EXPECTED_DOCKER_MODE=guest-dind
+    assert_docker_socket_contract "$accepted"
+  ) || fail "guest-memory Docker socket contract was rejected"
+
+  if (
+    # shellcheck disable=SC1090 # Intentional dynamic source fixture.
+    source <(sed '$d' "$SMOKE")
+    export EXPECTED_DOCKER_MODE=guest-dind
+    assert_docker_socket_contract "$disk_backed"
+  ) >/dev/null 2>&1; then
+    fail "disk-backed Docker socket contract was accepted"
+  fi
+
+  if (
+    # shellcheck disable=SC1090 # Intentional dynamic source fixture.
+    source <(sed '$d' "$SMOKE")
+    export EXPECTED_DOCKER_MODE=guest-dind
+    assert_docker_socket_contract "$missing_probe"
+  ) >/dev/null 2>&1; then
+    fail "Docker socket contract without a workspace connection probe was accepted"
+  fi
+
+  (
+    # shellcheck disable=SC1090 # Intentional dynamic source fixture.
+    source <(sed '$d' "$SMOKE")
+    export EXPECTED_DOCKER_MODE=none
+    assert_docker_socket_contract "$disabled"
+  ) || fail "Docker-disabled socket contract was rejected"
+}
 run_safe_diagnostic_case() {
   local output="$TEST_TMP/output"
   local error="$TEST_TMP/error"
@@ -673,6 +749,7 @@ run_admin_oauth_contract_cases() {
 
 assert_static_contract
 run_application_only_boundary_case
+run_docker_socket_contract_cases
 run_safe_diagnostic_case
 run_safe_client_diagnostic_case
 run_environment_artifact_case

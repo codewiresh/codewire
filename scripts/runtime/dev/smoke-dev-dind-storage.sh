@@ -537,7 +537,10 @@ cat >>"$MANIFEST" <<YAML
       persistentVolumeClaim:
         claimName: ${NAME}-workspace
     - name: docker-sock
-      emptyDir: {}
+      # Match Kata's cross-container UDS contract even though this focused
+      # probe currently drives dockerd from one container.
+      emptyDir:
+        medium: Memory
     - name: probe
       configMap:
         name: ${NAME}
