@@ -33,8 +33,11 @@ grep -qF '    timeout-minutes: 55' <<<"$workspace_job" ||
   fail 'workspace cold-build ceiling does not preserve the runner cleanup margin'
 grep -qF '    needs: [verification-selection]' <<<"$workspace_job" ||
   fail 'workspace job does not consume the canonical verification plan'
-if grep -qE '^    if:' <<<"$workspace_job"; then
-  fail 'workspace job must remain a static required runner task'
+grep -qF "    if: \${{ needs.verification-selection.outputs.workspace_image_expected == 'true' }}" \
+  <<<"$workspace_job" ||
+  fail 'workspace job does not use the trusted server-side dispatch decision'
+if grep -qF '    strategy:' <<<"$workspace_job"; then
+  fail 'workspace job retains empty-matrix dispatch'
 fi
 grep -qF 'name: Container contracts not selected' <<<"$workspace_job" ||
   fail 'container job has no explicit unaffected path'

@@ -23,10 +23,9 @@ emit() {
 assert_output() {
   local output="$1" group="$2" expected="$3"
   grep -Fxq "${group}_expected=${expected}" <<<"$output"
-  if [ "$expected" = true ]; then
-    grep -Fxq "${group}_matrix=[\"selected\"]" <<<"$output"
-  else
-    grep -Fxq "${group}_matrix=[]" <<<"$output"
+  if grep -Eq "^${group}_matrix=" <<<"$output"; then
+    echo "${group}: empty-matrix transport must not be emitted" >&2
+    exit 1
   fi
 }
 
@@ -91,4 +90,4 @@ if VERIFICATION_SELECTION='|valid:v3|complete|' \
   exit 1
 fi
 
-echo '[test-emit-verification-matrices] trusted empty/selected matrix contract passed'
+echo '[test-emit-verification-matrices] trusted capability expectation contract passed'

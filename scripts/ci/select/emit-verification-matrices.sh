@@ -121,9 +121,4 @@ for group in \
     services_runtime edge_kind cw_release_assets workspace_image; do
   value="${expected[$group]}"
   printf '%s_expected=%s\n' "$group" "$value"
-  if [ "$value" = true ]; then
-    printf '%s_matrix=["selected"]\n' "$group"
-  else
-    printf '%s_matrix=[]\n' "$group"
-  fi
 done >> "${GITHUB_OUTPUT:-/dev/stdout}"
