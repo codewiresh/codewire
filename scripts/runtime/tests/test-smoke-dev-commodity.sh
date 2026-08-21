@@ -183,30 +183,34 @@ run_docker_socket_contract_cases() {
   }' >"$disabled"
 
   (
+    # shellcheck disable=SC1090 # Intentional dynamic source fixture.
     source <(sed '$d' "$SMOKE")
-    EXPECTED_DOCKER_MODE=guest-dind
+    export EXPECTED_DOCKER_MODE=guest-dind
     assert_docker_socket_contract "$accepted"
   ) || fail "guest-memory Docker socket contract was rejected"
 
   if (
+    # shellcheck disable=SC1090 # Intentional dynamic source fixture.
     source <(sed '$d' "$SMOKE")
-    EXPECTED_DOCKER_MODE=guest-dind
+    export EXPECTED_DOCKER_MODE=guest-dind
     assert_docker_socket_contract "$disk_backed"
   ) >/dev/null 2>&1; then
     fail "disk-backed Docker socket contract was accepted"
   fi
 
   if (
+    # shellcheck disable=SC1090 # Intentional dynamic source fixture.
     source <(sed '$d' "$SMOKE")
-    EXPECTED_DOCKER_MODE=guest-dind
+    export EXPECTED_DOCKER_MODE=guest-dind
     assert_docker_socket_contract "$missing_probe"
   ) >/dev/null 2>&1; then
     fail "Docker socket contract without a workspace connection probe was accepted"
   fi
 
   (
+    # shellcheck disable=SC1090 # Intentional dynamic source fixture.
     source <(sed '$d' "$SMOKE")
-    EXPECTED_DOCKER_MODE=none
+    export EXPECTED_DOCKER_MODE=none
     assert_docker_socket_contract "$disabled"
   ) || fail "Docker-disabled socket contract was rejected"
 }
