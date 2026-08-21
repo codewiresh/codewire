@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Reuse exact PR-head content verification only for an identical squash tree.
+# Reuse exact PR-head verification only when canonical main has the same tree.
 set -euo pipefail
 
 tmp="$(mktemp -d)"
@@ -56,8 +56,19 @@ checkout_sha="$(git rev-parse --verify 'HEAD^{commit}' 2>/dev/null)" \
 [ "$checkout_sha" = "$canonical_sha" ] || fallback 'checkout-sha-mismatch'
 
 read -r -a commit_line <<< "$(git rev-list --parents -n 1 "$canonical_sha")"
-[ "${#commit_line[@]}" -eq 2 ] || fallback 'canonical-commit-not-single-parent'
-parent_sha="${commit_line[1]}"
+merge_head_parent=''
+case "${#commit_line[@]}" in
+  2)
+    parent_sha="${commit_line[1]}"
+    ;;
+  3)
+    parent_sha="${commit_line[1]}"
+    merge_head_parent="${commit_line[2]}"
+    ;;
+  *)
+    fallback 'canonical-commit-parent-shape-unsupported'
+    ;;
+esac
 
 changed_paths="$tmp/changed-paths"
 git diff --name-only "$parent_sha" "$canonical_sha" > "$changed_paths" \
@@ -127,6 +138,10 @@ if ! tested_head="$(jq -er '.head.sha' "$pull_json")"; then
   fallback 'tested-head-unavailable'
 fi
 [[ "$tested_head" =~ ^[0-9a-f]{40}$ ]] || fallback 'invalid-tested-head'
+if [ -n "$merge_head_parent" ]; then
+  [ "$merge_head_parent" = "$tested_head" ] \
+    || fallback 'canonical-merge-head-mismatch'
+fi
 
 remote="${VERIFICATION_REMOTE:-origin}"
 git remote get-url "$remote" >/dev/null 2>&1 || fallback 'verification-remote-unavailable'
