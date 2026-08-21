@@ -60,6 +60,12 @@ fi
 if [ -z "${KIND_DIND_IMAGE+x}" ]; then
   KIND_DIND_IMAGE="$DEFAULT_KIND_DIND_IMAGE"
 fi
+if [ -z "${KIND_POSTGRES_IMAGE+x}" ]; then
+  KIND_POSTGRES_IMAGE='docker.io/library/postgres:17-alpine@sha256:7456ef82e5f5bc43d997f4781bbd7c0d6389bff397564649a356e206ba473aee'
+fi
+if [ -z "${KIND_TEMPORAL_IMAGE+x}" ]; then
+  KIND_TEMPORAL_IMAGE='docker.io/temporalio/auto-setup:1.29.0@sha256:6605395ec22aa6a1993bb0bfd35002b011603e21d11c4a71ee646038c59e8909'
+fi
 if [ -z "${KIND_INGRESS_CONTROLLER_IMAGE+x}" ]; then
   KIND_INGRESS_CONTROLLER_IMAGE=''
 fi
@@ -99,14 +105,21 @@ fi
 if [ -z "${KIND_DIND_LOCAL_IMAGE+x}" ]; then
   KIND_DIND_LOCAL_IMAGE='localhost/codewire-ci/docker-dind:verified-66fd272fc375aad4c8fa06351c414e15bffe8cb015c171e1b8a8efe36a72cc1e'
 fi
+if [ -z "${KIND_POSTGRES_LOCAL_IMAGE+x}" ]; then
+  KIND_POSTGRES_LOCAL_IMAGE='localhost/codewire-ci/postgres:verified-7456ef82e5f5bc43d997f4781bbd7c0d6389bff397564649a356e206ba473aee'
+fi
+if [ -z "${KIND_TEMPORAL_LOCAL_IMAGE+x}" ]; then
+  KIND_TEMPORAL_LOCAL_IMAGE='localhost/codewire-ci/temporal:verified-6605395ec22aa6a1993bb0bfd35002b011603e21d11c4a71ee646038c59e8909'
+fi
 readonly DEFAULT_KIND_WORKSPACE_IMAGE DEFAULT_KIND_DIND_IMAGE \
-  KIND_WORKSPACE_IMAGE KIND_DIND_IMAGE \
+  KIND_WORKSPACE_IMAGE KIND_DIND_IMAGE KIND_POSTGRES_IMAGE KIND_TEMPORAL_IMAGE \
   KIND_INGRESS_CONTROLLER_IMAGE KIND_INGRESS_CERTGEN_IMAGE KIND_AGENT_SANDBOX_IMAGE \
   APPROVED_KIND_INGRESS_CONTROLLER_IMAGE APPROVED_KIND_INGRESS_CERTGEN_IMAGE \
   APPROVED_KIND_AGENT_SANDBOX_IMAGE APPROVED_KIND_WORKSPACE_IMAGE \
   APPROVED_KIND_DIND_IMAGE KIND_INGRESS_CONTROLLER_LOCAL_IMAGE \
   KIND_INGRESS_CERTGEN_LOCAL_IMAGE KIND_AGENT_SANDBOX_LOCAL_IMAGE \
-  KIND_WORKSPACE_LOCAL_IMAGE KIND_DIND_LOCAL_IMAGE
+  KIND_WORKSPACE_LOCAL_IMAGE KIND_DIND_LOCAL_IMAGE KIND_POSTGRES_LOCAL_IMAGE \
+  KIND_TEMPORAL_LOCAL_IMAGE
 
 log() {
   printf '[kind-e2e] %s\n' "$*"
@@ -543,6 +556,8 @@ build_images_and_smokes() {
   log "verifying the exact dashboard candidate runtime contract"
   "$ROOT/scripts/ci/verify/dashboard-image.sh" "codewire-dashboard:e2e"
 
+  prepare_kind_support_images
+
   log "building Rust kind smoke binaries"
   local smoke_started_at
   smoke_started_at="$(date +%s)"
@@ -751,6 +766,32 @@ kind_dind_runtime_image() {
   fi
 }
 
+prepare_kind_support_images() {
+  local source alias
+
+  # Resolve the two cluster-local service dependencies before creating Kind.
+  # Pulling by an exact linux/amd64 manifest digest makes upstream mutation a
+  # hard failure. Side-loading local aliases keeps registry availability and
+  # credentials out of the nested cluster's rollout path.
+  for source in "$KIND_POSTGRES_IMAGE" "$KIND_TEMPORAL_IMAGE"; do
+    if ! [[ "$source" =~ @sha256:[0-9a-f]{64}$ ]]; then
+      echo "::error::Kind support image is not digest-pinned: ${source}"
+      return 2
+    fi
+    if ! docker image inspect "$source" >/dev/null 2>&1; then
+      log "pulling exact Kind support image ${source}"
+      docker pull "$source"
+    fi
+  done
+  for source in \
+      "$KIND_POSTGRES_IMAGE|$KIND_POSTGRES_LOCAL_IMAGE" \
+      "$KIND_TEMPORAL_IMAGE|$KIND_TEMPORAL_LOCAL_IMAGE"; do
+    alias="${source#*|}"
+    source="${source%%|*}"
+    docker image tag "$source" "$alias"
+  done
+}
+
 load_images_into_kind() {
   local image sealed source alias
 
@@ -762,7 +803,9 @@ load_images_into_kind() {
       codewire-dashboard:e2e \
       codewire-services:e2e \
       codewire-mesh:e2e \
-      codewire-gateway:e2e; do
+      codewire-gateway:e2e \
+      "$KIND_POSTGRES_LOCAL_IMAGE" \
+      "$KIND_TEMPORAL_LOCAL_IMAGE"; do
     log "loading ${image} into kind"
     kind load docker-image --name "$KIND_CLUSTER_NAME" "$image"
     wait_for_kind_api_after_image_load
@@ -876,6 +919,33 @@ render_kind_overlay_manifest() {
   local rendered="$RUN_DIR/codewire-kind-overlay.yaml"
 
   kubectl kustomize "$source" >"$rendered"
+  python3 - "$rendered" "$KIND_POSTGRES_LOCAL_IMAGE" "$KIND_TEMPORAL_LOCAL_IMAGE" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+rendered, postgres, temporal = sys.argv[1:]
+path = Path(rendered)
+text = path.read_text()
+replacements = {
+    "postgres:17-alpine": (postgres, 2),
+    "temporalio/auto-setup:1.29.0": (temporal, 1),
+}
+for public, (local, expected) in replacements.items():
+    pattern = re.compile(rf"(?m)^(?P<indent>[ ]*)image: {re.escape(public)}$")
+    text, count = pattern.subn(
+        lambda match: (
+            f'{match.group("indent")}image: {local}\n'
+            f'{match.group("indent")}imagePullPolicy: Never'
+        ),
+        text,
+    )
+    if count != expected:
+        raise SystemExit(
+            f"Kind support image occurrence mismatch for {public}: expected {expected}, got {count}"
+        )
+path.write_text(text)
+PY
   if validate_sealed_kind_images; then
     python3 - "$rendered" "$KIND_DIND_LOCAL_IMAGE" "$KIND_WORKSPACE_LOCAL_IMAGE" <<'PY'
 from pathlib import Path
@@ -1086,13 +1156,7 @@ deploy_overlay() {
 
   log "deploying kind e2e overlay"
   kubectl -n "$NS" delete job codewire-db-migrate --ignore-not-found --wait=true
-  if validate_sealed_kind_images; then
-    kind_overlay="$(render_kind_overlay_manifest)"
-  else
-    local sealed_status=$?
-    [ "$sealed_status" -eq 1 ] || return "$sealed_status"
-    kind_overlay=""
-  fi
+  kind_overlay="$(render_kind_overlay_manifest)"
   local applied=0
   for i in $(seq 1 12); do
     if [ -n "$kind_overlay" ]; then
@@ -1100,15 +1164,12 @@ deploy_overlay() {
         applied=1
         break
       fi
-    elif kubectl_apply --validate=false -k "$ROOT/tests/e2e/kind"; then
-      applied=1
-      break
     fi
     echo "kubectl apply failed; retry ${i}/12 in 5s"
     sleep 5
   done
   if [ "$applied" != "1" ]; then
-    echo "::error::kubectl apply -k tests/e2e/kind did not succeed"
+    echo "::error::rendered Kind overlay did not apply"
     exit 1
   fi
   assert_kind_idp_topology

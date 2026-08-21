@@ -34,15 +34,14 @@ env:
   ZIG_X86_64_LINUX_SHA256: 02aa270f183da276e5b5920b1dac44a63f1a49e55050ebde3aecc9eb82f93239
   CARGO_ZIGBUILD_VERSION: 0.23.0
 
-# Gitea assigns static jobs to runners before evaluating job-level conditions.
-# Keep the selector's family precision, but execute it through fixed capability
-# groups instead of creating one runner task per family. Ordinary Docker groups
-# use bounded ci-heavy capacity. Kind uses a separately scheduled lane with the
-# same disposable privileged-untrusted worker shape, so ordinary work cannot
-# consume its warm slot. Step conditions keep unselected commands dormant.
-# A canonical squash whose tree exactly matches a fully green PR head runs only
-# each group's receipt sentinel. Receipt-control changes always take the full
-# path, and every rejected receipt falls back to the ordinary selected suite.
+# Forgejo assigns static jobs before their step conditions can make them cheap.
+# The trusted selector therefore emits an empty or one-cell matrix for each
+# bounded capability group. Unselected groups create no runner task; selected
+# groups retain their fixed capability profile and timeout. Candidate policy
+# cannot reduce work because PR matrices come from the exact trusted base.
+# A canonical squash whose tree exactly matches a fully green PR head emits
+# empty matrices. Receipt-control changes always take the full path, and every
+# rejected receipt falls back to the ordinary selected suite.
 jobs:
   verification-selection:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job receives no write-capable integration.
@@ -66,6 +65,26 @@ jobs:
       tested_tree_pr: ${{ steps.receipt.outputs.tested_tree_pr }}
       tested_tree_head: ${{ steps.receipt.outputs.tested_tree_head }}
       tested_tree_run: ${{ steps.receipt.outputs.tested_tree_run }}
+      policy_matrix: ${{ steps.dispatch.outputs.policy_matrix }}
+      policy_expected: ${{ steps.dispatch.outputs.policy_expected }}
+      standard_matrix: ${{ steps.dispatch.outputs.standard_matrix }}
+      standard_expected: ${{ steps.dispatch.outputs.standard_expected }}
+      tooling_matrix: ${{ steps.dispatch.outputs.tooling_matrix }}
+      tooling_expected: ${{ steps.dispatch.outputs.tooling_expected }}
+      rust_transport_matrix: ${{ steps.dispatch.outputs.rust_transport_matrix }}
+      rust_transport_expected: ${{ steps.dispatch.outputs.rust_transport_expected }}
+      database_matrix: ${{ steps.dispatch.outputs.database_matrix }}
+      database_expected: ${{ steps.dispatch.outputs.database_expected }}
+      services_control_matrix: ${{ steps.dispatch.outputs.services_control_matrix }}
+      services_control_expected: ${{ steps.dispatch.outputs.services_control_expected }}
+      services_runtime_matrix: ${{ steps.dispatch.outputs.services_runtime_matrix }}
+      services_runtime_expected: ${{ steps.dispatch.outputs.services_runtime_expected }}
+      edge_kind_matrix: ${{ steps.dispatch.outputs.edge_kind_matrix }}
+      edge_kind_expected: ${{ steps.dispatch.outputs.edge_kind_expected }}
+      cw_release_assets_matrix: ${{ steps.dispatch.outputs.cw_release_assets_matrix }}
+      cw_release_assets_expected: ${{ steps.dispatch.outputs.cw_release_assets_expected }}
+      workspace_image_matrix: ${{ steps.dispatch.outputs.workspace_image_matrix }}
+      workspace_image_expected: ${{ steps.dispatch.outputs.workspace_image_expected }}
     steps:
       - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
@@ -163,6 +182,36 @@ jobs:
           fi
           "$receipt_checker"
 
+      - name: Emit trusted capability dispatch matrices
+        id: dispatch
+        env:
+          VERIFICATION_SELECTION: ${{ steps.select.outputs.selection }}
+          VERIFICATION_TESTED_TREE_RECEIPT: ${{ steps.receipt.outputs.tested_tree_receipt }}
+          CW_PACKAGE_SELECTED: ${{ steps.select.outputs.cw_package_selected }}
+          DESKTOP_PACKAGE_SELECTED: ${{ steps.select.outputs.desktop_package_selected }}
+          WORKSPACE_IMAGE_SELECTED: ${{ steps.select.outputs.workspace_image_selected }}
+        run: |
+          set -euo pipefail
+          matrix_selector='scripts/ci/select/emit-verification-matrices.sh'
+          if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
+            trusted_matrix_selector='.trusted-ci-policy/scripts/ci/select/emit-verification-matrices.sh'
+            if [ -x "$trusted_matrix_selector" ]; then
+              matrix_selector="$trusted_matrix_selector"
+            else
+              # Conservative bootstrap for a base predating dynamic dispatch:
+              # run every group so candidate code cannot omit required work.
+              for group in \
+                  policy standard tooling rust_transport database \
+                  services_control services_runtime edge_kind \
+                  cw_release_assets workspace_image; do
+                echo "${group}_expected=true" >> "$GITHUB_OUTPUT"
+                echo "${group}_matrix=[\"selected\"]" >> "$GITHUB_OUTPUT"
+              done
+              exit 0
+            fi
+          fi
+          "$matrix_selector"
+
   cw-release-assets:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this untrusted job has no protected credential.
     name: CW release-assets verification
@@ -170,6 +219,9 @@ jobs:
     enable-openid-connect: true
     timeout-minutes: 30
     needs: [verification-selection]
+    strategy:
+      matrix:
+        selected: ${{ fromJSON(needs.verification-selection.outputs.cw_release_assets_matrix) }}
     env:
       CARGO_TARGET_DIR: ${{ github.workspace }}/target/ci-cache/cw-cross-ci
     steps:
@@ -250,6 +302,9 @@ jobs:
     # cold path to exceed 45 minutes.
     timeout-minutes: 55
     needs: [verification-selection]
+    strategy:
+      matrix:
+        selected: ${{ fromJSON(needs.verification-selection.outputs.workspace_image_matrix) }}
     steps:
       - name: Reuse exact PR-head content verification
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt == 'accepted' }}
@@ -307,13 +362,17 @@ jobs:
 
   policy:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this untrusted job has no protected credential.
-    # Policy and repository contracts are non-Docker checks over sealed tools,
-    # but the full ShellCheck pass is a measured heavy workload on hosted CI.
-    # Keep it on bounded heavy capacity and parallel with the Standard family.
+    # Baseline repository contracts are non-Docker checks over sealed tools.
+    # Keep their fast core on elastic non-privileged capacity; the measured
+    # full ShellCheck phase joins the existing heavy tooling group only when
+    # trusted selection requests it.
     name: Policy verification
-    runs-on: ci-heavy
+    runs-on: ci-lite
     timeout-minutes: 13
     needs: [verification-selection]
+    strategy:
+      matrix:
+        selected: ${{ fromJSON(needs.verification-selection.outputs.policy_matrix) }}
     steps:
       - name: Reuse exact PR-head content verification
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt == 'accepted' }}
@@ -330,9 +389,7 @@ jobs:
 
       - name: Run Policy
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|policy|') }}
-        env:
-          VERIFICATION_SELECTION: ${{ needs.verification-selection.outputs.selection }}
-        run: scripts/ci/verify/run-product-verification.sh policy
+        run: scripts/ci/verify/run-product-verification.sh policy-core
 
   standard:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this untrusted job has no protected credential.
@@ -341,6 +398,9 @@ jobs:
     enable-openid-connect: true
     timeout-minutes: 30
     needs: [verification-selection]
+    strategy:
+      matrix:
+        selected: ${{ fromJSON(needs.verification-selection.outputs.standard_matrix) }}
     env:
       CARGO_TARGET_DIR: ${{ github.workspace }}/target/ci-cache/host-debug
     steps:
@@ -433,11 +493,14 @@ jobs:
     # Give repository tooling and delivery-contract checks an independent
     # general-heavy slot so an all-selected policy change does not serialize
     # them behind language and SDK verification. These checks still need the
-    # dependency egress and compute budget intentionally absent from ci-light.
+    # dependency egress and compute budget intentionally absent from ci-lite.
     name: Tooling / delivery contract verification
     runs-on: ci-heavy
     timeout-minutes: 30
     needs: [verification-selection]
+    strategy:
+      matrix:
+        selected: ${{ fromJSON(needs.verification-selection.outputs.tooling_matrix) }}
     steps:
       - name: Reuse exact PR-head content verification
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt == 'accepted' }}
@@ -455,6 +518,10 @@ jobs:
       - name: Verify sealed delivery-contract tools
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|deploy|') || contains(needs.verification-selection.outputs.selection, '|release|') || contains(needs.verification-selection.outputs.selection, '|security|')) }}
         run: scripts/ci/setup/assert-ci-runner-image.sh
+
+      - name: Run Shell policy
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|policy_shell|') || (contains(needs.verification-selection.outputs.selection, '|policy|') && !contains(needs.verification-selection.outputs.selection, '|policy_shell_omittable|'))) }}
+        run: scripts/ci/verify/run-product-verification.sh policy-shell
 
       - name: Run API key smoke tooling
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|service_apikey_smoke|') }}
@@ -491,6 +558,9 @@ jobs:
     enable-openid-connect: true
     timeout-minutes: 55
     needs: [verification-selection]
+    strategy:
+      matrix:
+        selected: ${{ fromJSON(needs.verification-selection.outputs.rust_transport_matrix) }}
     env:
       CARGO_HOME: ${{ github.workspace }}/target/ci-rust-cargo-home
       CARGO_TARGET_DIR: ${{ github.workspace }}/target/ci-cache/host-debug
@@ -568,6 +638,9 @@ jobs:
     enable-openid-connect: true
     timeout-minutes: 30
     needs: [verification-selection]
+    strategy:
+      matrix:
+        selected: ${{ fromJSON(needs.verification-selection.outputs.database_matrix) }}
     env:
       CARGO_TARGET_DIR: ${{ github.workspace }}/target/ci-cache/host-debug
       CODEWIRE_CARGO_CI_TARGET_DIR: ${{ github.workspace }}/target/ci-cache/host-ci
@@ -656,6 +729,9 @@ jobs:
     enable-openid-connect: true
     timeout-minutes: 30
     needs: [verification-selection]
+    strategy:
+      matrix:
+        selected: ${{ fromJSON(needs.verification-selection.outputs.services_control_matrix) }}
     env:
       CARGO_TARGET_DIR: ${{ github.workspace }}/target/ci-cache/host-debug
       CODEWIRE_CARGO_CI_TARGET_DIR: ${{ github.workspace }}/target/ci-cache/host-ci
@@ -672,7 +748,7 @@ jobs:
         run: |
           set -euo pipefail
           case "$VERIFICATION_SELECTION" in
-            *'|service_apikey_smoke|'*|*'|service_idp|'*|*'|service_coordinator|'*|*'|service_billing|'*|*'|service_connectcore|'*)
+            *'|service_apikey_smoke|'*|*'|service_idp|'*|*'|service_coordinator|'*|*'|service_billing|'*|*'|service_connectcore|'*|*'|service_temporal|'*)
               echo 'selected=true' >> "$GITHUB_OUTPUT"
               ;;
             *)
@@ -766,6 +842,9 @@ jobs:
     enable-openid-connect: true
     timeout-minutes: 30
     needs: [verification-selection]
+    strategy:
+      matrix:
+        selected: ${{ fromJSON(needs.verification-selection.outputs.services_runtime_matrix) }}
     env:
       CARGO_TARGET_DIR: ${{ github.workspace }}/target/ci-cache/host-debug
       CODEWIRE_CARGO_CI_TARGET_DIR: ${{ github.workspace }}/target/ci-cache/host-ci
@@ -782,7 +861,7 @@ jobs:
         run: |
           set -euo pipefail
           case "$VERIFICATION_SELECTION" in
-            *'|service_orchestration|'*|*'|service_nats|'*)
+            *'|service_orchestration|'*|*'|service_nats|'*|*'|service_temporal|'*)
               echo 'selected=true' >> "$GITHUB_OUTPUT"
               ;;
             *)
@@ -874,7 +953,14 @@ jobs:
     name: Edge / Kind verification
     runs-on: ci-heavy
     enable-openid-connect: true
+    # The complete disposable-cluster gate stays below the heavy worker's
+    # independently enforced 60-minute lifetime while retaining enough time
+    # for value-blind cluster diagnostics and cleanup on a cold failure.
+    timeout-minutes: 55
     needs: [verification-selection]
+    strategy:
+      matrix:
+        selected: ${{ fromJSON(needs.verification-selection.outputs.edge_kind_matrix) }}
     env:
       KIND_CLUSTER_NAME: codewire-e2e-ci-${{ github.run_id }}
       CODEWIRE_PLAYWRIGHT_SNAPSHOT_ENV: ubuntu24-cft145
@@ -974,15 +1060,25 @@ jobs:
           VERIFICATION_TESTED_TREE_PR: ${{ needs.verification-selection.outputs.tested_tree_pr }}
           VERIFICATION_TESTED_TREE_HEAD: ${{ needs.verification-selection.outputs.tested_tree_head }}
           VERIFICATION_TESTED_TREE_RUN: ${{ needs.verification-selection.outputs.tested_tree_run }}
+          VERIFICATION_POLICY_EXPECTED: ${{ needs.verification-selection.outputs.policy_expected }}
           VERIFICATION_POLICY_RESULT: ${{ needs.policy.result }}
+          VERIFICATION_STANDARD_EXPECTED: ${{ needs.verification-selection.outputs.standard_expected }}
           VERIFICATION_STANDARD_RESULT: ${{ needs.standard.result }}
+          VERIFICATION_TOOLING_EXPECTED: ${{ needs.verification-selection.outputs.tooling_expected }}
           VERIFICATION_TOOLING_RESULT: ${{ needs.tooling.result }}
+          VERIFICATION_RUST_TRANSPORT_EXPECTED: ${{ needs.verification-selection.outputs.rust_transport_expected }}
           VERIFICATION_RUST_TRANSPORT_RESULT: ${{ needs.rust-transport.result }}
+          VERIFICATION_DATABASE_EXPECTED: ${{ needs.verification-selection.outputs.database_expected }}
           VERIFICATION_DATABASE_RESULT: ${{ needs.database.result }}
+          VERIFICATION_SERVICES_CONTROL_EXPECTED: ${{ needs.verification-selection.outputs.services_control_expected }}
           VERIFICATION_SERVICES_CONTROL_RESULT: ${{ needs.services-control.result }}
+          VERIFICATION_SERVICES_RUNTIME_EXPECTED: ${{ needs.verification-selection.outputs.services_runtime_expected }}
           VERIFICATION_SERVICES_RUNTIME_RESULT: ${{ needs.services-runtime.result }}
+          VERIFICATION_EDGE_KIND_EXPECTED: ${{ needs.verification-selection.outputs.edge_kind_expected }}
           VERIFICATION_EDGE_KIND_RESULT: ${{ needs.edge-kind.result }}
+          VERIFICATION_CW_RELEASE_ASSETS_EXPECTED: ${{ needs.verification-selection.outputs.cw_release_assets_expected }}
           VERIFICATION_CW_RELEASE_ASSETS_RESULT: ${{ needs.cw-release-assets.result }}
+          VERIFICATION_WORKSPACE_IMAGE_EXPECTED: ${{ needs.verification-selection.outputs.workspace_image_expected }}
           VERIFICATION_WORKSPACE_IMAGE_RESULT: ${{ needs.workspace-image.result }}
         run: scripts/ci/select/require-verification-results.sh
 

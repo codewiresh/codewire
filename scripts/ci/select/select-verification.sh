@@ -375,6 +375,7 @@ if [ "$event_selected" = false ]; then
       .gitea/workflows/runtime-dev-commodity-smoke.yaml|\
       .githooks/pre-push|Makefile|scripts/dev/install-hooks.sh|\
       scripts/dev/preflight.sh|scripts/ci/select/select-verification.sh|\
+      scripts/ci/select/emit-verification-matrices.sh|\
       scripts/ci/select/require-verification-results.sh|\
       scripts/ci/receipts/local-prepush-receipt.py|\
       scripts/ci/receipts/emit-verification-receipt.py|\
@@ -392,6 +393,7 @@ if [ "$event_selected" = false ]; then
       scripts/ci/tests/test-resolve-published-support-pair.sh|\
       scripts/ci/tests/test-resolve-deployed-source.sh|\
       scripts/ci/tests/test-require-verification-results.sh|\
+      scripts/ci/tests/test-emit-verification-matrices.sh|\
       scripts/ci/tests/test-verify-tested-tree-receipt.sh|\
       scripts/ci/tests/test-verify-release-tag-receipt.sh|\
       scripts/ci/tests/test-local-prepush-receipt.sh|\

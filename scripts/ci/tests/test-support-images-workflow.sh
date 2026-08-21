@@ -205,8 +205,9 @@ grep -qF 'snapshot.ubuntu.com/ubuntu/20260803T000000Z/' "$ROOT/images/base/ubunt
 grep -qF 'snapshot.debian.org/archive/debian/20251208T000000Z/' \
   "$ROOT/images/workspace/debian.sources" ||
   fail 'workspace builder apt inputs are not bound to the reviewed Debian snapshot'
-for agent_package in @openai/codex @anthropic-ai/claude-code @google/gemini-cli \
-  @moonshot-ai/kimi-code @earendil-works/pi-coding-agent; do
+for agent_package in @openai/codex@0.149.0 @anthropic-ai/claude-code@2.1.238 \
+  @google/gemini-cli@0.56.0 @moonshot-ai/kimi-code@0.38.0 \
+  @earendil-works/pi-coding-agent@0.84.2; do
   grep -qF "$agent_package" "$WORKSPACE_DOCKERFILE" ||
     fail "workspace omits moving agent package $agent_package"
   if grep -Fq "${agent_package}@" "$WORKSPACE_DOCKERFILE"; then
