@@ -23,6 +23,16 @@ use super::{
 
 /// Mirrors `sandbox.RenderSandboxTemplate`.
 pub fn render_sandbox_template(namespace: &str, opts: &TemplateOpts) -> Value {
+    json!({
+        "apiVersion": EXTENSIONS_API_VERSION,
+        "kind": "SandboxTemplate",
+        "metadata": { "name": opts.name, "namespace": namespace },
+        "spec": render_sandbox_blueprint(opts),
+    })
+}
+
+/// Render the exact SandboxBlueprint copied into warm-pool members.
+pub(super) fn render_sandbox_blueprint(opts: &TemplateOpts) -> Value {
     let support_image = if opts.support_image.is_empty() {
         DEFAULT_GATEWAY_IMAGE
     } else {
@@ -85,12 +95,7 @@ pub fn render_sandbox_template(namespace: &str, opts: &TemplateOpts) -> Value {
         ],
     });
 
-    json!({
-        "apiVersion": EXTENSIONS_API_VERSION,
-        "kind": "SandboxTemplate",
-        "metadata": { "name": opts.name, "namespace": namespace },
-        "spec": build_template_spec(opts, &mut ws_container, support_image),
-    })
+    build_template_spec(opts, &mut ws_container, support_image)
 }
 
 pub(super) fn custom_workspace_supervisor_command(

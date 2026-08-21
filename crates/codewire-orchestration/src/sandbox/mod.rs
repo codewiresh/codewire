@@ -74,8 +74,7 @@ pub fn warm_pool_name(template_name: &str, opts: &TemplateOpts) -> String {
 /// Sandbox. Hashing the rendered contract instead of a hand-maintained input
 /// list ensures renderer-only changes rotate existing warm-pool members.
 pub fn warm_pool_revision_hash(opts: &TemplateOpts) -> String {
-    let rendered = template::render_sandbox_template("warm-pool-revision", opts);
-    sandbox_blueprint_revision_hash(&rendered["spec"])
+    sandbox_blueprint_revision_hash(&template::render_sandbox_blueprint(opts))
 }
 
 fn sandbox_blueprint_revision_hash(blueprint: &Value) -> String {
@@ -309,8 +308,7 @@ mod tests {
             docker_mode: template::DOCKER_MODE_LOCAL_DIND_DIRECT.into(),
             ..Default::default()
         };
-        let rendered = template::render_sandbox_template("ignored", &opts);
-        let current_blueprint = rendered["spec"].clone();
+        let current_blueprint = template::render_sandbox_blueprint(&opts);
         assert_eq!(
             warm_pool_revision_hash(&opts),
             sandbox_blueprint_revision_hash(&current_blueprint)

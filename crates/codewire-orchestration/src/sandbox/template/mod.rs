@@ -45,6 +45,10 @@ pub use runtime_policy::{
 use workspace::custom_workspace_supervisor_command;
 pub use workspace::{render_sandbox_template, render_workspace_daemon_service};
 
+pub(super) fn render_sandbox_blueprint(opts: &TemplateOpts) -> Value {
+    workspace::render_sandbox_blueprint(opts)
+}
+
 // Constants mirrored from internal/sandbox/types.go and internal/shim.
 pub const DEFAULT_GATEWAY_IMAGE: &str = "ghcr.io/codewiresh/gateway@sha256:686a2437f023fe2a4759e87ba93b8d4a71885eefdc5ec7c3486a95f3d6da2836";
 pub const DEFAULT_DIND_IMAGE: &str = "docker.io/library/docker:29.7.1-dind@sha256:e8faad5a8dc5279dff929afc5449f2791736912fff9f99351d742db2fad01b4c";
