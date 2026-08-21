@@ -6,6 +6,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 
 KUBE_CONTEXT="${KUBE_CONTEXT:-dev-cluster}"
 NODE="${CONFIDENTIAL_SNP_NODE:-cw-dev-prod-node-1}"
+COMMODITY_NODE="${CONFIDENTIAL_COMMODITY_NODE:-dev-node-1}"
 INFRA_ROOT="${INFRA_ROOT:-$HOME/src/infra}"
 HOST_GATE_STACK="${CONFIDENTIAL_SNP_HOST_GATE_STACK:-dev-cluster}"
 HOST_GATE_MIN_EPHEMERAL_GIB="${CONFIDENTIAL_SNP_HOST_GATE_MIN_EPHEMERAL_GIB:-1500}"
@@ -305,12 +306,18 @@ resolve_active_release() {
   [[ -n "$COCO_GATEWAY_IMAGE" && -n "$COCO_WORKSPACE_IMAGE" && -n "$COCO_DIND_IMAGE" ]] || \
     die "CoCo support resolver returned incomplete active release data"
 
-  assert_jq "active runtime profile is not confidential" \
-    '.data.SANDBOX_RUNTIME_PROFILE == "confidential"' "$EVIDENCE_DIR/active-runtime-config.json"
-  assert_jq "active runtime class is not confidential" \
-    '.data.SANDBOX_RUNTIME_CLASS == "confidential"' "$EVIDENCE_DIR/active-runtime-config.json"
-  assert_jq "active Docker mode is not guest-dind" \
-    '.data.SANDBOX_DOCKER_MODE == "guest-dind"' "$EVIDENCE_DIR/active-runtime-config.json"
+  assert_jq "active default runtime profile is not commodity" \
+    '.data.SANDBOX_RUNTIME_PROFILE == "commodity"' "$EVIDENCE_DIR/active-runtime-config.json"
+  assert_jq "active default runtime class is not commodity" \
+    '.data.SANDBOX_RUNTIME_CLASS == "commodity"' "$EVIDENCE_DIR/active-runtime-config.json"
+  assert_jq "active Docker mode is not profile-default" \
+    '.data.SANDBOX_DOCKER_MODE == "profile-default"' "$EVIDENCE_DIR/active-runtime-config.json"
+  assert_jq "active default workspace storage class is not ordinary Longhorn" \
+    '.data.SANDBOX_WORKSPACE_STORAGE_CLASS == "longhorn"' "$EVIDENCE_DIR/active-runtime-config.json"
+  assert_jq "confidential creation is not enabled" \
+    '.data.SANDBOX_CONFIDENTIAL_STORAGE_ENABLED == "true"' "$EVIDENCE_DIR/active-runtime-config.json"
+  assert_jq "confidential creation is not admin-only" \
+    '.data.SANDBOX_CONFIDENTIAL_ADMIN_ONLY == "true"' "$EVIDENCE_DIR/active-runtime-config.json"
   assert_jq "active CoCo init-data is not enabled" \
     '.data.SANDBOX_KATA_COCO_INIT_DATA_ENABLED == "true"' "$EVIDENCE_DIR/active-runtime-config.json"
   assert_jq "active KBS URL differs from the confidential smoke contract" \
@@ -338,6 +345,7 @@ record_job() {
   local job="$1"
   local expected_runtime="$2"
   local expected_node="$3"
+  local expected_storage_class="${4:-}"
   local job_json pods_json pod_name logs
 
   log "checking Flux-owned Job/$job"
@@ -362,6 +370,16 @@ record_job() {
     assert_jq "Job/$job did not schedule on $expected_node" \
       --arg pod "$pod_name" --arg node "$expected_node" \
       ".items[] | select(.metadata.name == \$pod) | .spec.nodeName == \$node" "$pods_json"
+  fi
+  if [[ -n "$expected_storage_class" ]]; then
+    assert_jq "Job/$job does not mount an ephemeral $expected_storage_class workspace" \
+      --arg storage_class "$expected_storage_class" \
+      'any(.spec.template.spec.volumes[]?;
+        .name == "workspace" and
+        .ephemeral.volumeClaimTemplate.spec.storageClassName == $storage_class)' \
+      "$job_json"
+    rg -q "${expected_storage_class}-workspace-ok" "$logs" || \
+      die "Job/$job did not prove its $expected_storage_class workspace mount"
   fi
   rg -q "runtimeClass=$expected_runtime" "$logs" || \
     die "Job/$job did not log runtimeClass=$expected_runtime"
@@ -389,7 +407,7 @@ run_raw_jobs() {
   }
   commodity_job="$(resolve_job_name commodity "$COMMODITY_JOB_SELECTOR")"
   confidential_job="$(resolve_job_name confidential "$CONFIDENTIAL_JOB_SELECTOR")"
-  record_job "$commodity_job" commodity ""
+  record_job "$commodity_job" commodity "$COMMODITY_NODE" longhorn
   record_job "$confidential_job" confidential "$NODE"
 }
 

@@ -52,12 +52,14 @@ fi
 rg -F 'SMOKE_KUSTOMIZATION="codewire-deploy-confidential-smoke-dev"' "$SMOKE" >/dev/null
 rg -F 'KUBE_CONTEXT="${KUBE_CONTEXT:-dev-cluster}"' "$SMOKE" >/dev/null
 rg -F 'NODE="${CONFIDENTIAL_SNP_NODE:-cw-dev-prod-node-1}"' "$SMOKE" >/dev/null
+rg -F 'COMMODITY_NODE="${CONFIDENTIAL_COMMODITY_NODE:-dev-node-1}"' "$SMOKE" >/dev/null
 rg -F './scripts/talos-external-worker verify' "$SMOKE" >/dev/null
 if rg -q 'check-node1|node1-codewire-dev|node1\.codewire-dev\.sh|ssh_host\(' "$SMOKE"; then
-  printf 'confidential smoke still contains the retired Ubuntu/SSH host gate\n' >&2
+  printf 'confidential smoke contains a nonexistent Ubuntu/SSH host gate\n' >&2
   exit 1
 fi
 rg -F 'COMMODITY_JOB_SELECTOR="app.kubernetes.io/name=codewire-commodity-runtime-smoke"' "$SMOKE" >/dev/null
+rg -F 'record_job "$commodity_job" commodity "$COMMODITY_NODE" longhorn' "$SMOKE" >/dev/null
 rg -F 'CONFIDENTIAL_JOB_SELECTOR="app.kubernetes.io/name=codewire-confidential-runtime-smoke"' "$SMOKE" >/dev/null
 rg -F 'ATTESTATION_JOB_SELECTOR="app.kubernetes.io/name=codewire-confidential-snp-attestation"' "$SMOKE" >/dev/null
 rg -F 'umask 077' "$SMOKE" >/dev/null
@@ -82,13 +84,14 @@ rg -F -- '--source-sha' "$RESOLVER" >/dev/null
 rg -F 'SANDBOX_RUNTIME_PROFILE: commodity' "$COMMODITY_PROFILE" >/dev/null
 rg -F 'SANDBOX_KATA_COCO_INIT_DATA_ENABLED: "false"' "$COMMODITY_PROFILE" >/dev/null
 rg -F 'SANDBOX_RUNTIME_CLASS: commodity' "$COMMODITY_PROFILE" >/dev/null
-rg -F 'SANDBOX_RUNTIME_PROFILE: confidential' "$CONFIDENTIAL_PROFILE" >/dev/null
-rg -F 'SANDBOX_RUNTIME_CLASS: confidential' "$CONFIDENTIAL_PROFILE" >/dev/null
-rg -F 'SANDBOX_DOCKER_MODE: guest-dind' "$CONFIDENTIAL_PROFILE" >/dev/null
+rg -F 'SANDBOX_RUNTIME_PROFILE: commodity' "$CONFIDENTIAL_PROFILE" >/dev/null
+rg -F 'SANDBOX_RUNTIME_CLASS: commodity' "$CONFIDENTIAL_PROFILE" >/dev/null
+rg -F 'SANDBOX_DOCKER_MODE: profile-default' "$CONFIDENTIAL_PROFILE" >/dev/null
 rg -F 'SANDBOX_CONFIDENTIAL_STORAGE_ENABLED: "true"' "$CONFIDENTIAL_PROFILE" >/dev/null
 rg -F 'SANDBOX_CONFIDENTIAL_ADMIN_ONLY: "true"' "$CONFIDENTIAL_PROFILE" >/dev/null
 rg -F 'SANDBOX_KATA_COCO_INIT_DATA_ENABLED: "true"' "$CONFIDENTIAL_PROFILE" >/dev/null
-rg -F 'SANDBOX_WORKSPACE_STORAGE_CLASS: longhorn-confidential' "$CONFIDENTIAL_PROFILE" >/dev/null
+rg -F 'SANDBOX_WORKSPACE_STORAGE_CLASS: longhorn' "$COMMODITY_PROFILE" >/dev/null
+rg -F 'SANDBOX_WORKSPACE_STORAGE_CLASS: longhorn' "$CONFIDENTIAL_PROFILE" >/dev/null
 rg -F 'SANDBOX_KATA_COCO_KBS_URL: https://codewire-trustee-kbs.codewire-trustee.svc.cluster.local:8080' \
   "$CONFIDENTIAL_PROFILE" >/dev/null
 rg -F 'COCO_KBS_URL="${COCO_KBS_URL:-https://codewire-trustee-kbs.codewire-trustee.svc.cluster.local:8080}"' \
@@ -117,10 +120,13 @@ done
 
 rg -F 'node.codewire.sh/confidential-snp: "true"' "$SMOKE_DIR/confidential-smoke-job.yaml" >/dev/null
 rg -F 'node.codewire.sh/confidential-snp: "true"' "$SMOKE_DIR/confidential-attestation-job.yaml" >/dev/null
+rg -F 'kubernetes.io/hostname: dev-node-1' "$SMOKE_DIR/commodity-smoke-job.yaml" >/dev/null
+rg -F 'storageClassName: longhorn' "$SMOKE_DIR/commodity-smoke-job.yaml" >/dev/null
+rg -F 'longhorn-workspace-ok' "$SMOKE_DIR/commodity-smoke-job.yaml" >/dev/null
 rg -F 'privileged: true' "$SMOKE_DIR/confidential-attestation-job.yaml" >/dev/null
-rg -F 'name: codewire-commodity-runtime-smoke-v56' "$SMOKE_DIR/commodity-smoke-job.yaml" >/dev/null
-rg -F 'name: codewire-confidential-runtime-smoke-v56' "$SMOKE_DIR/confidential-smoke-job.yaml" >/dev/null
-rg -F 'name: codewire-confidential-snp-attestation-v56' "$SMOKE_DIR/confidential-attestation-job.yaml" >/dev/null
+rg -F 'name: codewire-commodity-runtime-smoke-v57' "$SMOKE_DIR/commodity-smoke-job.yaml" >/dev/null
+rg -F 'name: codewire-confidential-runtime-smoke-v57' "$SMOKE_DIR/confidential-smoke-job.yaml" >/dev/null
+rg -F 'name: codewire-confidential-snp-attestation-v57' "$SMOKE_DIR/confidential-attestation-job.yaml" >/dev/null
 
 command -v kustomize >/dev/null 2>&1 || {
   printf 'kustomize is required for the confidential smoke contract\n' >&2
