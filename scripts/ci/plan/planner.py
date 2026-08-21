@@ -1117,6 +1117,7 @@ def policy_changed(
 ) -> str | None:
     sensitive_prefixes = (
         "scripts/ci/plan/",
+        "scripts/ci/select/",
         ".gitea/workflows/",
         "scripts/ci/receipts/",
         "scripts/ci/receipt/",
@@ -1124,6 +1125,9 @@ def policy_changed(
     sensitive_files = {
         "scripts/ci/select/require-verification-results.sh",
         "scripts/ci/select/select-verification.sh",
+        "scripts/ci/tests/test-emit-verification-matrices.sh",
+        "scripts/ci/tests/test-require-verification-results.sh",
+        "scripts/ci/tests/test-select-verification.sh",
         "scripts/ci/receipts/verify-tested-tree-receipt.sh",
     }
     for path in paths:

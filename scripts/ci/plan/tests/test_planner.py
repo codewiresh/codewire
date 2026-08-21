@@ -1266,6 +1266,44 @@ class PlannerFixtureTests(unittest.TestCase):
             )
         )
 
+    def test_exact_main_dispatch_controls_do_not_select_builds(self) -> None:
+        self.repo.write(".gitea/workflows/ci.yaml", "name: CI\n")
+        self.repo.write(
+            "scripts/ci/select/emit-verification-matrices.sh",
+            "#!/usr/bin/env bash\nset -euo pipefail\n",
+            0o755,
+        )
+        self.repo.write(
+            "scripts/ci/select/require-verification-results.sh",
+            "#!/usr/bin/env bash\nset -euo pipefail\n",
+            0o755,
+        )
+        self.repo.write(
+            "scripts/ci/select/select-verification.sh",
+            "#!/usr/bin/env bash\nset -euo pipefail\n",
+            0o755,
+        )
+        for name in (
+            "test-emit-verification-matrices.sh",
+            "test-require-verification-results.sh",
+            "test-select-verification.sh",
+        ):
+            self.repo.write(
+                f"scripts/ci/tests/{name}",
+                "#!/usr/bin/env bash\nset -euo pipefail\n",
+                0o755,
+            )
+        head = self.repo.commit("reviewed dispatch-only controls")
+        candidate = self.repo.deployed_source_candidate(self.repo.base, head)
+        document = self.repo.deployed_source_plan(candidate, head)
+        self.assertFalse(document["degraded_reasons"])
+        self.assertTrue(
+            all(
+                value["state"] == "unaffected"
+                for value in document["artifacts"].values()
+            )
+        )
+
     def test_legacy_selector_change_fails_every_artifact_closed(self) -> None:
         self.repo.change("scripts/ci/select/select-verification.sh", "#!/bin/sh\nexit 0\n")
         document = self.repo.plan()

@@ -1402,6 +1402,10 @@ run_service_scope_case both_reject_unscoped "$control_scope_script" \
   '|valid:v3|service_integration|complete|' false
 run_service_scope_case both_reject_unscoped_runtime "$runtime_scope_script" \
   '|valid:v3|service_integration|complete|' false
+run_service_scope_case temporal_selects_control "$control_scope_script" \
+  '|valid:v3|service_integration|service_temporal|complete|' true
+run_service_scope_case temporal_selects_runtime "$runtime_scope_script" \
+  '|valid:v3|service_integration|service_temporal|complete|' true
 
 selection_block="$TMP/verification-selection.yaml"
 awk '
