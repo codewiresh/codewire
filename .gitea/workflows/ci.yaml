@@ -65,25 +65,15 @@ jobs:
       tested_tree_pr: ${{ steps.receipt.outputs.tested_tree_pr }}
       tested_tree_head: ${{ steps.receipt.outputs.tested_tree_head }}
       tested_tree_run: ${{ steps.receipt.outputs.tested_tree_run }}
-      policy_matrix: ${{ steps.dispatch.outputs.policy_matrix }}
       policy_expected: ${{ steps.dispatch.outputs.policy_expected }}
-      standard_matrix: ${{ steps.dispatch.outputs.standard_matrix }}
       standard_expected: ${{ steps.dispatch.outputs.standard_expected }}
-      tooling_matrix: ${{ steps.dispatch.outputs.tooling_matrix }}
       tooling_expected: ${{ steps.dispatch.outputs.tooling_expected }}
-      rust_transport_matrix: ${{ steps.dispatch.outputs.rust_transport_matrix }}
       rust_transport_expected: ${{ steps.dispatch.outputs.rust_transport_expected }}
-      database_matrix: ${{ steps.dispatch.outputs.database_matrix }}
       database_expected: ${{ steps.dispatch.outputs.database_expected }}
-      services_control_matrix: ${{ steps.dispatch.outputs.services_control_matrix }}
       services_control_expected: ${{ steps.dispatch.outputs.services_control_expected }}
-      services_runtime_matrix: ${{ steps.dispatch.outputs.services_runtime_matrix }}
       services_runtime_expected: ${{ steps.dispatch.outputs.services_runtime_expected }}
-      edge_kind_matrix: ${{ steps.dispatch.outputs.edge_kind_matrix }}
       edge_kind_expected: ${{ steps.dispatch.outputs.edge_kind_expected }}
-      cw_release_assets_matrix: ${{ steps.dispatch.outputs.cw_release_assets_matrix }}
       cw_release_assets_expected: ${{ steps.dispatch.outputs.cw_release_assets_expected }}
-      workspace_image_matrix: ${{ steps.dispatch.outputs.workspace_image_matrix }}
       workspace_image_expected: ${{ steps.dispatch.outputs.workspace_image_expected }}
     steps:
       - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
@@ -182,7 +172,7 @@ jobs:
           fi
           "$receipt_checker"
 
-      - name: Emit trusted capability dispatch matrices
+      - name: Emit trusted capability dispatch decisions
         id: dispatch
         env:
           VERIFICATION_SELECTION: ${{ steps.select.outputs.selection }}
@@ -192,11 +182,11 @@ jobs:
           WORKSPACE_IMAGE_SELECTED: ${{ steps.select.outputs.workspace_image_selected }}
         run: |
           set -euo pipefail
-          matrix_selector='scripts/ci/select/emit-verification-matrices.sh'
+          dispatch_selector='scripts/ci/select/emit-verification-matrices.sh'
           if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
-            trusted_matrix_selector='.trusted-ci-policy/scripts/ci/select/emit-verification-matrices.sh'
-            if [ -x "$trusted_matrix_selector" ]; then
-              matrix_selector="$trusted_matrix_selector"
+            trusted_dispatch_selector='.trusted-ci-policy/scripts/ci/select/emit-verification-matrices.sh'
+            if [ -x "$trusted_dispatch_selector" ]; then
+              dispatch_selector="$trusted_dispatch_selector"
             else
               # Conservative bootstrap for a base predating dynamic dispatch:
               # run every group so candidate code cannot omit required work.
@@ -205,12 +195,11 @@ jobs:
                   services_control services_runtime edge_kind \
                   cw_release_assets workspace_image; do
                 echo "${group}_expected=true" >> "$GITHUB_OUTPUT"
-                echo "${group}_matrix=[\"selected\"]" >> "$GITHUB_OUTPUT"
               done
               exit 0
             fi
           fi
-          "$matrix_selector"
+          "$dispatch_selector"
 
   cw-release-assets:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this untrusted job has no protected credential.
@@ -219,9 +208,7 @@ jobs:
     enable-openid-connect: true
     timeout-minutes: 30
     needs: [verification-selection]
-    strategy:
-      matrix:
-        selected: ${{ fromJSON(needs.verification-selection.outputs.cw_release_assets_matrix) }}
+    if: ${{ needs.verification-selection.outputs.cw_release_assets_expected == 'true' }}
     env:
       CARGO_TARGET_DIR: ${{ github.workspace }}/target/ci-cache/cw-cross-ci
     steps:
@@ -302,9 +289,7 @@ jobs:
     # cold path to exceed 45 minutes.
     timeout-minutes: 55
     needs: [verification-selection]
-    strategy:
-      matrix:
-        selected: ${{ fromJSON(needs.verification-selection.outputs.workspace_image_matrix) }}
+    if: ${{ needs.verification-selection.outputs.workspace_image_expected == 'true' }}
     steps:
       - name: Reuse exact PR-head content verification
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt == 'accepted' }}
@@ -370,9 +355,7 @@ jobs:
     runs-on: ci-lite
     timeout-minutes: 13
     needs: [verification-selection]
-    strategy:
-      matrix:
-        selected: ${{ fromJSON(needs.verification-selection.outputs.policy_matrix) }}
+    if: ${{ needs.verification-selection.outputs.policy_expected == 'true' }}
     steps:
       - name: Reuse exact PR-head content verification
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt == 'accepted' }}
@@ -398,9 +381,7 @@ jobs:
     enable-openid-connect: true
     timeout-minutes: 30
     needs: [verification-selection]
-    strategy:
-      matrix:
-        selected: ${{ fromJSON(needs.verification-selection.outputs.standard_matrix) }}
+    if: ${{ needs.verification-selection.outputs.standard_expected == 'true' }}
     env:
       CARGO_TARGET_DIR: ${{ github.workspace }}/target/ci-cache/host-debug
     steps:
@@ -498,9 +479,7 @@ jobs:
     runs-on: ci-heavy
     timeout-minutes: 30
     needs: [verification-selection]
-    strategy:
-      matrix:
-        selected: ${{ fromJSON(needs.verification-selection.outputs.tooling_matrix) }}
+    if: ${{ needs.verification-selection.outputs.tooling_expected == 'true' }}
     steps:
       - name: Reuse exact PR-head content verification
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt == 'accepted' }}
@@ -558,9 +537,7 @@ jobs:
     enable-openid-connect: true
     timeout-minutes: 55
     needs: [verification-selection]
-    strategy:
-      matrix:
-        selected: ${{ fromJSON(needs.verification-selection.outputs.rust_transport_matrix) }}
+    if: ${{ needs.verification-selection.outputs.rust_transport_expected == 'true' }}
     env:
       CARGO_HOME: ${{ github.workspace }}/target/ci-rust-cargo-home
       CARGO_TARGET_DIR: ${{ github.workspace }}/target/ci-cache/host-debug
@@ -638,9 +615,7 @@ jobs:
     enable-openid-connect: true
     timeout-minutes: 30
     needs: [verification-selection]
-    strategy:
-      matrix:
-        selected: ${{ fromJSON(needs.verification-selection.outputs.database_matrix) }}
+    if: ${{ needs.verification-selection.outputs.database_expected == 'true' }}
     env:
       CARGO_TARGET_DIR: ${{ github.workspace }}/target/ci-cache/host-debug
       CODEWIRE_CARGO_CI_TARGET_DIR: ${{ github.workspace }}/target/ci-cache/host-ci
@@ -729,9 +704,7 @@ jobs:
     enable-openid-connect: true
     timeout-minutes: 30
     needs: [verification-selection]
-    strategy:
-      matrix:
-        selected: ${{ fromJSON(needs.verification-selection.outputs.services_control_matrix) }}
+    if: ${{ needs.verification-selection.outputs.services_control_expected == 'true' }}
     env:
       CARGO_TARGET_DIR: ${{ github.workspace }}/target/ci-cache/host-debug
       CODEWIRE_CARGO_CI_TARGET_DIR: ${{ github.workspace }}/target/ci-cache/host-ci
@@ -842,9 +815,7 @@ jobs:
     enable-openid-connect: true
     timeout-minutes: 30
     needs: [verification-selection]
-    strategy:
-      matrix:
-        selected: ${{ fromJSON(needs.verification-selection.outputs.services_runtime_matrix) }}
+    if: ${{ needs.verification-selection.outputs.services_runtime_expected == 'true' }}
     env:
       CARGO_TARGET_DIR: ${{ github.workspace }}/target/ci-cache/host-debug
       CODEWIRE_CARGO_CI_TARGET_DIR: ${{ github.workspace }}/target/ci-cache/host-ci
@@ -958,9 +929,7 @@ jobs:
     # for value-blind cluster diagnostics and cleanup on a cold failure.
     timeout-minutes: 55
     needs: [verification-selection]
-    strategy:
-      matrix:
-        selected: ${{ fromJSON(needs.verification-selection.outputs.edge_kind_matrix) }}
+    if: ${{ needs.verification-selection.outputs.edge_kind_expected == 'true' }}
     env:
       KIND_CLUSTER_NAME: codewire-e2e-ci-${{ github.run_id }}
       CODEWIRE_PLAYWRIGHT_SNAPSHOT_ENV: ubuntu24-cft145

@@ -1186,10 +1186,10 @@ fi
 }
 grep -qF 'push baseline is unavailable' "$missing_stderr"
 
-# Workflow contract: ten bounded capability groups use trusted empty/one-cell
-# matrices. Forgejo therefore creates no runner task for an omitted group and
-# exactly one fixed-profile task for a selected group.
-while IFS='|' read -r job_id job_name runner matrix_name; do
+# Workflow contract: ten bounded capability groups use trusted server-side job
+# conditions. Forgejo therefore gives an omitted group a terminal skipped result
+# without assigning its fixed-profile runner.
+while IFS='|' read -r job_id job_name runner expectation_name; do
   block="$TMP/${job_id}.yaml"
   awk -v wanted="$job_id" '
     $0 == "  " wanted ":" { capture = 1 }
@@ -1199,13 +1199,11 @@ while IFS='|' read -r job_id job_name runner matrix_name; do
   grep -qF "  ${job_id}:" "$block"
   grep -qF "    name: ${job_name}" "$block"
   grep -qF "    runs-on: ${runner}" "$block"
-  grep -qF '    strategy:' "$block"
-  grep -qF '      matrix:' "$block"
   grep -qF \
-    "selected: \${{ fromJSON(needs.verification-selection.outputs.${matrix_name}_matrix) }}" \
+    "    if: \${{ needs.verification-selection.outputs.${expectation_name}_expected == 'true' }}" \
     "$block"
-  if grep -qE '^    if:.*verification-selection' "$block"; then
-    echo "${job_id}: capability matrix gained a redundant job condition" >&2
+  if grep -qF '    strategy:' "$block"; then
+    echo "${job_id}: capability dispatch retained an empty-matrix dependency" >&2
     exit 1
   fi
 done <<'EOF'
@@ -1243,17 +1241,19 @@ awk '
   capture && $0 ~ /^  [A-Za-z0-9_-]+:$/ && $0 != "  verification-selection:" { exit }
   capture { print }
 ' "$WORKFLOW" > "$selection_block"
-grep -qF 'name: Emit trusted capability dispatch matrices' "$selection_block"
-grep -qF "trusted_matrix_selector='.trusted-ci-policy/scripts/ci/select/emit-verification-matrices.sh'" \
+grep -qF 'name: Emit trusted capability dispatch decisions' "$selection_block"
+grep -qF "trusted_dispatch_selector='.trusted-ci-policy/scripts/ci/select/emit-verification-matrices.sh'" \
   "$selection_block"
 grep -qF 'run every group so candidate code cannot omit required work' \
   "$selection_block"
-for matrix_name in policy standard tooling rust_transport database \
+for expectation_name in policy standard tooling rust_transport database \
     services_control services_runtime edge_kind cw_release_assets workspace_image; do
-  grep -qF "${matrix_name}_matrix: \${{ steps.dispatch.outputs.${matrix_name}_matrix }}" \
+  grep -qF "${expectation_name}_expected: \${{ steps.dispatch.outputs.${expectation_name}_expected }}" \
     "$selection_block"
-  grep -qF "${matrix_name}_expected: \${{ steps.dispatch.outputs.${matrix_name}_expected }}" \
-    "$selection_block"
+  if grep -qF "${expectation_name}_matrix:" "$selection_block"; then
+    echo "${expectation_name}: selection output retained empty-matrix transport" >&2
+    exit 1
+  fi
 done
 
 # Heavy jobs share the queue-driven disposable DinD runner pool. Keep ordinary
