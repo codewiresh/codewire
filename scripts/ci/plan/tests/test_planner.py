@@ -1287,12 +1287,18 @@ class PlannerFixtureTests(unittest.TestCase):
             "test-emit-verification-matrices.sh",
             "test-require-verification-results.sh",
             "test-select-verification.sh",
+            "test-shellcheck-policy-domain.sh",
         ):
             self.repo.write(
                 f"scripts/ci/tests/{name}",
                 "#!/usr/bin/env bash\nset -euo pipefail\n",
                 0o755,
             )
+        self.repo.write(
+            "scripts/ci/verify/run-product-verification.sh",
+            "#!/usr/bin/env bash\nset -euo pipefail\n",
+            0o755,
+        )
         head = self.repo.commit("reviewed dispatch-only controls")
         candidate = self.repo.deployed_source_candidate(self.repo.base, head)
         document = self.repo.deployed_source_plan(candidate, head)

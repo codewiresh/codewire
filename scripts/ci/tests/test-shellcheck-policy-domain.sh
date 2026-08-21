@@ -21,6 +21,10 @@ awk '
 ' "$RUNNER" > "$policy_dispatch"
 grep -Fq 'selected policy_shell || ! selected policy_shell_omittable' \
   "$policy_dispatch" || fail 'policy runner omits the legacy-safe routing guard'
+grep -Fq 'policy-core) run_policy_core' "$RUNNER" \
+  || fail 'hosted policy core has no independent entrypoint'
+grep -Fq 'policy-shell) run_shell_policy' "$RUNNER" \
+  || fail 'hosted ShellCheck has no independent heavy entrypoint'
 
 run_dispatch_fixture() {
   local selection="$1"

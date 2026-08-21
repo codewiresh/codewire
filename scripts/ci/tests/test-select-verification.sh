@@ -1221,6 +1221,22 @@ services-runtime|Service runtime-plane verification|ci-heavy|services_runtime
 edge-kind|Edge / Kind verification|ci-heavy|edge_kind
 EOF
 
+policy_block="$TMP/policy.yaml"
+tooling_block="$TMP/tooling.yaml"
+grep -Fq 'run-product-verification.sh policy-core' "$policy_block" || {
+  echo 'ci-lite policy job does not own only the fast policy core' >&2
+  exit 1
+}
+grep -Fq 'run-product-verification.sh policy-shell' "$tooling_block" || {
+  echo 'ci-heavy tooling job does not own selected ShellCheck' >&2
+  exit 1
+}
+grep -Fq "contains(needs.verification-selection.outputs.selection, '|policy_shell|')" \
+  "$tooling_block" || {
+  echo 'ci-heavy ShellCheck lacks trusted policy_shell dispatch' >&2
+  exit 1
+}
+
 selection_block="$TMP/verification-selection.yaml"
 awk '
   $0 == "  verification-selection:" { capture = 1 }

@@ -37,6 +37,14 @@ for group in standard tooling rust_transport database services_control \
   assert_output "$docs_output" "$group" false
 done
 
+shell_output="$(emit '|valid:v3|policy|policy_shell|policy_shell_omittable|complete|' fallback false false false)"
+assert_output "$shell_output" policy true
+assert_output "$shell_output" tooling true
+
+legacy_policy_output="$(emit '|valid:v3|policy|complete|' fallback false false false)"
+assert_output "$legacy_policy_output" policy true
+assert_output "$legacy_policy_output" tooling true
+
 receipt_output="$(emit '|valid:v3|policy|rust|kind|complete|' accepted true true true)"
 for group in policy standard tooling rust_transport database services_control \
     services_runtime edge_kind cw_release_assets workspace_image; do

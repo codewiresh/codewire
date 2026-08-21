@@ -362,9 +362,10 @@ jobs:
 
   policy:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this untrusted job has no protected credential.
-    # Policy and repository contracts are non-Docker checks over sealed tools.
-    # Keep them on elastic non-privileged capacity so a docs-only change cannot
-    # reserve a privileged ci-heavy worker merely to enforce baseline policy.
+    # Baseline repository contracts are non-Docker checks over sealed tools.
+    # Keep their fast core on elastic non-privileged capacity; the measured
+    # full ShellCheck phase joins the existing heavy tooling group only when
+    # trusted selection requests it.
     name: Policy verification
     runs-on: ci-lite
     timeout-minutes: 13
@@ -388,9 +389,7 @@ jobs:
 
       - name: Run Policy
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|policy|') }}
-        env:
-          VERIFICATION_SELECTION: ${{ needs.verification-selection.outputs.selection }}
-        run: scripts/ci/verify/run-product-verification.sh policy
+        run: scripts/ci/verify/run-product-verification.sh policy-core
 
   standard:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this untrusted job has no protected credential.
@@ -494,7 +493,7 @@ jobs:
     # Give repository tooling and delivery-contract checks an independent
     # general-heavy slot so an all-selected policy change does not serialize
     # them behind language and SDK verification. These checks still need the
-    # dependency egress and compute budget intentionally absent from ci-light.
+    # dependency egress and compute budget intentionally absent from ci-lite.
     name: Tooling / delivery contract verification
     runs-on: ci-heavy
     timeout-minutes: 30
@@ -519,6 +518,10 @@ jobs:
       - name: Verify sealed delivery-contract tools
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|deploy|') || contains(needs.verification-selection.outputs.selection, '|release|') || contains(needs.verification-selection.outputs.selection, '|security|')) }}
         run: scripts/ci/setup/assert-ci-runner-image.sh
+
+      - name: Run Shell policy
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|policy_shell|') || (contains(needs.verification-selection.outputs.selection, '|policy|') && !contains(needs.verification-selection.outputs.selection, '|policy_shell_omittable|'))) }}
+        run: scripts/ci/verify/run-product-verification.sh policy-shell
 
       - name: Run API key smoke tooling
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|service_apikey_smoke|') }}

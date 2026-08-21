@@ -720,6 +720,8 @@ run_security() {
 
 case "$FAMILY" in
   policy) run_policy ;;
+  policy-core) run_policy_core ;;
+  policy-shell) run_shell_policy ;;
   contracts) run_contracts ;;
   go-support) run_go_support ;;
   web) run_web ;;
@@ -740,7 +742,7 @@ case "$FAMILY" in
   deploy) run_deploy ;;
   security) run_security ;;
   *)
-    echo "usage: run-product-verification.sh policy|contracts|go-support|web|dashboard-image|ios|sdk-go|sdk-ts|sdk-python|service-apikey-smoke|runtime-confidential|runtime-dev-smoke|rust|rust-curated-locks|transport|edge|release|deploy|security" >&2
+    echo "usage: run-product-verification.sh policy|policy-core|policy-shell|contracts|go-support|web|dashboard-image|ios|sdk-go|sdk-ts|sdk-python|service-apikey-smoke|runtime-confidential|runtime-dev-smoke|rust|rust-curated-locks|transport|edge|release|deploy|security" >&2
     exit 2
     ;;
 esac

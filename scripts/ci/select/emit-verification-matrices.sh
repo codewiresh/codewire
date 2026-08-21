@@ -60,8 +60,11 @@ if [ "$tested_tree_receipt" = fallback ]; then
     && expected[standard]=true
   selected_any \
     deploy release runtime_confidential runtime_dev_smoke security security_go \
-    service_apikey_smoke \
+    service_apikey_smoke policy_shell \
     && expected[tooling]=true
+  if selected policy && ! selected policy_shell_omittable; then
+    expected[tooling]=true
+  fi
   if selected_any rust rust_curated_locks transport transport_derp_contract \
       || [ "$desktop_package_selected" = true ]; then
     expected[rust_transport]=true
