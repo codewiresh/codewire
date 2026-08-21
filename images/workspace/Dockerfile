@@ -92,19 +92,19 @@ RUN go install golang.org/x/tools/gopls@latest && \
     pipx install uv && \
     pipx install aider-chat
 
-# Coding agents are deliberately current rather than version-pinned. They are
-# installed into the interactive user prefix, remain scan-visible, and can be
-# updated without sudo. Lifecycle scripts stay disabled except for Claude's
-# official package, whose native binary is installed by its required
-# postinstall hook.
+# Seed coding agents from the exact versions accepted by the workspace image
+# contract. Interactive users can still update them without sudo, but a later
+# registry publication cannot silently change or break this image build.
+# Lifecycle scripts stay disabled except for Claude's official package, whose
+# native binary is installed by its required postinstall hook.
 RUN npm config set prefix /home/codewire/.npm-global && \
     npm config set allow-scripts=@anthropic-ai/claude-code --location=user && \
     npm install -g --ignore-scripts \
-      @openai/codex \
-      @google/gemini-cli \
-      @moonshot-ai/kimi-code \
-      @earendil-works/pi-coding-agent && \
-    npm install -g @anthropic-ai/claude-code
+      @openai/codex@0.149.0 \
+      @google/gemini-cli@0.56.0 \
+      @moonshot-ai/kimi-code@0.38.0 \
+      @earendil-works/pi-coding-agent@0.84.2 && \
+    npm install -g @anthropic-ai/claude-code@2.1.238
 
 # Reuse the exact toolchain and explicitly selected components from the
 # digest-pinned Rust build stage. This removes a second mutable installer
