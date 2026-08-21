@@ -1116,6 +1116,46 @@ assert_pod_coco_kernel_params() {
   fi
 }
 
+assert_docker_socket_contract() {
+  local pod_json="$1"
+  local volume_count medium workspace_mount_count dind_mount_count readiness_command
+
+  volume_count="$(jq '[.spec.volumes[]? | select(.name == "docker-sock")] | length' "$pod_json")"
+  workspace_mount_count="$(jq '[.spec.containers[]? | select(.name == "workspace") | .volumeMounts[]? | select(.name == "docker-sock" and .mountPath == "/var/run/docker")] | length' "$pod_json")"
+  dind_mount_count="$(jq '[.spec.containers[]? | select(.name == "dind") | .volumeMounts[]? | select(.name == "docker-sock" and .mountPath == "/var/run/docker")] | length' "$pod_json")"
+  readiness_command="$(jq -r '[.spec.containers[]? | select(.name == "workspace") | .readinessProbe.exec.command[2] // empty][0] // empty' "$pod_json")"
+
+  if [[ "$EXPECTED_DOCKER_MODE" == "none" ]]; then
+    [[ "$volume_count" == "0" ]] || \
+      die "Docker-disabled workspace declares $volume_count docker-sock volume(s), want 0"
+    [[ "$workspace_mount_count" == "0" && "$dind_mount_count" == "0" ]] || \
+      die "Docker-disabled workspace still mounts docker-sock"
+    [[ -z "$readiness_command" ]] || \
+      die "Docker-disabled workspace still declares a Docker readiness probe"
+    return
+  fi
+
+  [[ "$volume_count" == "1" ]] || \
+    die "Docker-enabled workspace declares $volume_count docker-sock volume(s), want 1"
+  medium="$(jq -r '[.spec.volumes[]? | select(.name == "docker-sock") | .emptyDir.medium // empty][0] // empty' "$pod_json")"
+  [[ "$medium" == "Memory" ]] || \
+    die "docker-sock emptyDir medium=${medium:-<default>}, want Memory for Kata cross-container Unix sockets"
+  [[ "$workspace_mount_count" == "1" && "$dind_mount_count" == "1" ]] || \
+    die "docker-sock mount counts workspace=$workspace_mount_count dind=$dind_mount_count, want 1/1"
+  [[ "$readiness_command" == "docker version --format '{{.Server.Version}}' >/dev/null" ]] || \
+    die "workspace Docker readiness probe does not prove the cross-container daemon connection"
+  jq -e '
+    .spec.containers[]
+    | select(.name == "workspace")
+    | .readinessProbe
+    | .periodSeconds == 2
+      and .timeoutSeconds == 2
+      and .failureThreshold == 3
+      and .successThreshold == 1
+  ' "$pod_json" >/dev/null || \
+    die "workspace Docker readiness probe timing contract drifted"
+}
+
 assert_pod_shape() {
   local pod_json="$TMPDIR_SMOKE/pod.json"
   local gateway_pod_json="$TMPDIR_SMOKE/gateway-pod.json"
@@ -1173,6 +1213,7 @@ assert_pod_shape() {
       die "unsupported EXPECTED_DOCKER_MODE=$EXPECTED_DOCKER_MODE"
       ;;
   esac
+  assert_docker_socket_contract "$pod_json"
   [[ "$gateway_containers" == "codewire-gateway" ]] || \
     die "gateway pod containers=$gateway_containers, want codewire-gateway"
   jq -e '.items[]?.spec.template.spec.containers[]? | select(.name=="codewire-gateway")' "$gateway_deploy_json" >/dev/null || \

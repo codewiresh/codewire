@@ -279,7 +279,14 @@ fn build_pod_spec(opts: &TemplateOpts, ws: &mut Value, support_image: &str) -> V
     if runtime_spec.docker_mode == DOCKER_MODE_LOCAL_DIND_DIRECT
         || runtime_spec.docker_mode == DOCKER_MODE_GUEST_DIND
     {
-        volumes.push(json!({ "name": "docker-sock", "emptyDir": {} }));
+        // Kata can only share a live Unix socket between pod containers when
+        // the emptyDir is guest memory. A disk-backed emptyDir is projected
+        // through the shared filesystem or a block device, which preserves a
+        // pathname but not the listening socket endpoint.
+        volumes.push(json!({
+            "name": "docker-sock",
+            "emptyDir": { "medium": "Memory" },
+        }));
     }
 
     if runtime_spec.docker_mode == DOCKER_MODE_LOCAL_DIND_DIRECT {
@@ -291,6 +298,7 @@ fn build_pod_spec(opts: &TemplateOpts, ws: &mut Value, support_image: &str) -> V
             .as_array_mut()
             .expect("ws mounts array")
             .push(json!({ "name": "docker-sock", "mountPath": "/var/run/docker" }));
+        ws["readinessProbe"] = docker_socket_readiness_probe();
 
         containers.push(ws.clone());
         containers.push(dind_container(opts, &runtime_spec, false));
@@ -303,6 +311,7 @@ fn build_pod_spec(opts: &TemplateOpts, ws: &mut Value, support_image: &str) -> V
             .as_array_mut()
             .expect("ws mounts array")
             .push(json!({ "name": "docker-sock", "mountPath": "/var/run/docker" }));
+        ws["readinessProbe"] = docker_socket_readiness_probe();
 
         containers.push(ws.clone());
         containers.push(dind_container(opts, &runtime_spec, true));
@@ -317,6 +326,22 @@ fn build_pod_spec(opts: &TemplateOpts, ws: &mut Value, support_image: &str) -> V
     spec.insert("containers".into(), Value::Array(containers));
     spec.insert("volumes".into(), Value::Array(volumes));
     Value::Object(spec)
+}
+
+fn docker_socket_readiness_probe() -> Value {
+    json!({
+        "exec": {
+            "command": [
+                "sh",
+                "-ec",
+                "docker version --format '{{.Server.Version}}' >/dev/null",
+            ],
+        },
+        "periodSeconds": 2,
+        "timeoutSeconds": 2,
+        "failureThreshold": 3,
+        "successThreshold": 1,
+    })
 }
 
 fn daemon_init_container(support_image: &str) -> Value {
