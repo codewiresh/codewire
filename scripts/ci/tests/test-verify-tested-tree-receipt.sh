@@ -28,9 +28,15 @@ tested_head="$(git -C "$repo" rev-parse HEAD)"
 tested_tree="$(git -C "$repo" rev-parse 'HEAD^{tree}')"
 
 good_merge="$(printf 'squash\n' | git -C "$repo" commit-tree "$tested_tree" -p "$base_sha")"
+good_merge_commit="$(printf 'merge\n' | git -C "$repo" commit-tree "$tested_tree" \
+  -p "$base_sha" -p "$tested_head")"
 tree_mismatch_merge="$(printf 'wrong tree\n' | git -C "$repo" commit-tree "$base_tree" -p "$base_sha")"
 unrelated_parent="$(printf 'unrelated\n' | git -C "$repo" commit-tree "$base_tree")"
 wrong_parent_merge="$(printf 'wrong parent\n' | git -C "$repo" commit-tree "$tested_tree" -p "$unrelated_parent")"
+wrong_merge_head="$(printf 'wrong merge head\n' | git -C "$repo" commit-tree "$tested_tree" \
+  -p "$base_sha" -p "$unrelated_parent")"
+too_many_parents="$(printf 'too many parents\n' | git -C "$repo" commit-tree "$tested_tree" \
+  -p "$base_sha" -p "$tested_head" -p "$unrelated_parent")"
 direct_commit="$(printf 'direct main\n' | git -C "$repo" commit-tree "$tested_tree" -p "$base_sha")"
 
 git -C "$repo" checkout -q --detach "$base_sha"
@@ -212,8 +218,11 @@ run_case() {
 }
 
 run_case accepted accepted "$good_merge" 42 "$tested_head" success
+run_case accepted_merge accepted "$good_merge_commit" 42 "$tested_head" success
 run_case tree_mismatch fallback "$tree_mismatch_merge" 42 "$tested_head" success
 run_case wrong_parent fallback "$wrong_parent_merge" 42 "$tested_head" success
+run_case wrong_merge_head fallback "$wrong_merge_head" 42 "$tested_head" success
+run_case too_many_parents fallback "$too_many_parents" 42 "$tested_head" success
 run_case missing_pr fallback "$direct_commit" 42 "$tested_head" missing_pr
 run_case api_unavailable fallback "$good_merge" 42 "$tested_head" api_unavailable
 run_case malformed fallback "$good_merge" 42 "$tested_head" malformed
