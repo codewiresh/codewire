@@ -953,6 +953,10 @@ jobs:
     name: Edge / Kind verification
     runs-on: ci-heavy
     enable-openid-connect: true
+    # The complete disposable-cluster gate stays below the heavy worker's
+    # independently enforced 60-minute lifetime while retaining enough time
+    # for value-blind cluster diagnostics and cleanup on a cold failure.
+    timeout-minutes: 55
     needs: [verification-selection]
     strategy:
       matrix:

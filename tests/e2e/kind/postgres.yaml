@@ -16,8 +16,8 @@ spec:
     spec:
       containers:
         - name: postgres
-          # Same tag-pinned image docker-compose.yml and the CI service
-          # container use.
+          # Readable Kustomize input. The Kind gate resolves and side-loads
+          # its reviewed linux/amd64 digest before cluster creation.
           image: postgres:17-alpine
           env:
             - name: POSTGRES_USER

@@ -1282,6 +1282,12 @@ grep -qF '    timeout-minutes: 55' "$rust_transport_block" || {
   exit 1
 }
 
+edge_kind_block="$TMP/edge-kind.yaml"
+grep -qF '    timeout-minutes: 55' "$edge_kind_block" || {
+  echo 'edge-kind: diagnostic ceiling must remain below the 60-minute runner lifetime' >&2
+  exit 1
+}
+
 workspace_block="$TMP/workspace-image.yaml"
 awk '
   $0 == "  workspace-image:" { capture = 1 }

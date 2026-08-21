@@ -5,9 +5,10 @@
 # orchestration's Temporal worker → temporal-frontend → activities
 # against the cluster database.
 #
-# Tag-pinned like the other kind support images (postgres:17-alpine);
-# 1.29.0 matches the server bundled with the CLI v1.5.0 used in the
-# integration job.
+# The checked-in tag is a readable Kustomize input. The Kind gate resolves the
+# reviewed linux/amd64 digest before cluster creation, side-loads a local
+# alias, and renders imagePullPolicy Never. Version 1.29.0 matches the server
+# bundled with the CLI v1.5.0 used in the integration job.
 apiVersion: apps/v1
 kind: Deployment
 metadata:

@@ -64,6 +64,10 @@ grep -Fq '(${presetId}, ${workspaceRuntimeImage},' \
   fail 'dashboard lifecycle preset ignores its selected runtime workspace image'
 grep -Fq 'KIND_POSTGRES_HOST_PORT="${KIND_POSTGRES_HOST_PORT:-25432}"' "$COMMON" ||
   fail 'Kind Postgres host port is not configurable with the accepted default'
+grep -Fq "KIND_POSTGRES_IMAGE='docker.io/library/postgres:17-alpine@sha256:7456ef82e5f5bc43d997f4781bbd7c0d6389bff397564649a356e206ba473aee'" "$COMMON" ||
+  fail 'Kind Postgres support input is not bound to the reviewed linux/amd64 manifest'
+grep -Fq "KIND_TEMPORAL_IMAGE='docker.io/temporalio/auto-setup:1.29.0@sha256:6605395ec22aa6a1993bb0bfd35002b011603e21d11c4a71ee646038c59e8909'" "$COMMON" ||
+  fail 'Kind Temporal support input is not bound to the reviewed linux/amd64 manifest'
 grep -Fq 'sed "s/hostPort: 25432/hostPort: ${KIND_POSTGRES_HOST_PORT}/"' "$COMMON" ||
   fail 'Kind cluster creation does not render the configured Postgres host port'
 grep -Fq 'configure_remote_dind_kind_network' "$COMMON" ||
@@ -270,6 +274,30 @@ cmp -s "$FIXTURE/want-cancelled-cleanup" "$CALLS" || {
   fail 'cancelled-run cleanup did not preserve the exact CI ownership boundary'
 }
 
+# Support services are pulled before cluster creation by immutable digest and
+# receive disposable local aliases. A missing upstream digest fails before any
+# Kubernetes object can wait on a registry pull.
+: >"$CALLS"
+docker() {
+  case "${1:-} ${2:-}" in
+    'image inspect') return 1 ;;
+    'pull '*|'image tag') record "docker:$*" ;;
+    *) fail "unexpected support-image Docker invocation: $*" ;;
+  esac
+}
+log() { :; }
+prepare_kind_support_images
+cat >"$FIXTURE/want-support-images" <<EOF
+docker:pull ${KIND_POSTGRES_IMAGE}
+docker:pull ${KIND_TEMPORAL_IMAGE}
+docker:image tag ${KIND_POSTGRES_IMAGE} ${KIND_POSTGRES_LOCAL_IMAGE}
+docker:image tag ${KIND_TEMPORAL_IMAGE} ${KIND_TEMPORAL_LOCAL_IMAGE}
+EOF
+cmp -s "$FIXTURE/want-support-images" "$CALLS" || {
+  diff -u "$FIXTURE/want-support-images" "$CALLS" >&2 || true
+  fail 'Kind support images are not resolved and aliased by exact digest'
+}
+
 # Every large image import is separated by an API recovery gate. This keeps a
 # temporarily starved control plane from accumulating four back-to-back imports.
 : >"$CALLS"
@@ -291,6 +319,10 @@ wait-api
 kind:load docker-image --name ${KIND_CLUSTER_NAME} codewire-mesh:e2e
 wait-api
 kind:load docker-image --name ${KIND_CLUSTER_NAME} codewire-gateway:e2e
+wait-api
+kind:load docker-image --name ${KIND_CLUSTER_NAME} ${KIND_POSTGRES_LOCAL_IMAGE}
+wait-api
+kind:load docker-image --name ${KIND_CLUSTER_NAME} ${KIND_TEMPORAL_LOCAL_IMAGE}
 wait-api
 EOF
 if [ -n "${KIND_INGRESS_CONTROLLER_IMAGE:-}" ] \
@@ -316,9 +348,9 @@ cmp -s "$FIXTURE/want-image-load-order" "$CALLS" || {
   fail 'Kind image imports are not separated by API recovery gates'
 }
 
-# Forgejo CI names only the five approved Nexus manifests. They must
-# already exist in the private DinD store, are side-loaded after product
-# images, and replace every pinned public reference in a disposable render.
+# Forgejo CI names only the five approved Nexus platform manifests. They must
+# already exist in the private DinD store. The two digest-pinned public
+# service dependencies are also side-loaded before the rendered deployment.
 : >"$CALLS"
 env \
   KIND_INGRESS_CONTROLLER_IMAGE="$SEALED_CONTROLLER_IMAGE" \
@@ -375,6 +407,17 @@ env \
     fail 'sealed Kind overlay does not contain the local DinD alias once'
   [ "$(grep -Fc "$KIND_WORKSPACE_LOCAL_IMAGE" "$kind_rendered")" -eq 1 ] ||
     fail 'sealed Kind overlay does not contain the local warm-pool workspace alias once'
+  [ "$(grep -Fc "$KIND_POSTGRES_LOCAL_IMAGE" "$kind_rendered")" -eq 2 ] ||
+    fail 'sealed Kind overlay does not contain the local Postgres alias twice'
+  [ "$(grep -Fc "$KIND_TEMPORAL_LOCAL_IMAGE" "$kind_rendered")" -eq 1 ] ||
+    fail 'sealed Kind overlay does not contain the local Temporal alias once'
+  [ "$(grep -A1 -F "image: $KIND_POSTGRES_LOCAL_IMAGE" "$kind_rendered" | grep -Fc 'imagePullPolicy: Never')" -eq 2 ] ||
+    fail 'sealed Kind overlay permits a Postgres registry pull'
+  [ "$(grep -A1 -F "image: $KIND_TEMPORAL_LOCAL_IMAGE" "$kind_rendered" | grep -Fc 'imagePullPolicy: Never')" -eq 1 ] ||
+    fail 'sealed Kind overlay permits a Temporal registry pull'
+  if grep -Eq 'image: (postgres:17-alpine|temporalio/auto-setup:1.29.0)' "$kind_rendered"; then
+    fail 'sealed Kind overlay retained a mutable support-image reference'
+  fi
   if grep -Fq 'docker.io/library/docker:29.7.1-dind' "$kind_rendered"; then
     fail 'sealed Kind overlay retained the public DinD image'
   fi
@@ -393,6 +436,10 @@ wait-api
 kind:load docker-image --name ${KIND_CLUSTER_NAME} codewire-mesh:e2e
 wait-api
 kind:load docker-image --name ${KIND_CLUSTER_NAME} codewire-gateway:e2e
+wait-api
+kind:load docker-image --name ${KIND_CLUSTER_NAME} ${KIND_POSTGRES_LOCAL_IMAGE}
+wait-api
+kind:load docker-image --name ${KIND_CLUSTER_NAME} ${KIND_TEMPORAL_LOCAL_IMAGE}
 wait-api
 kind:load docker-image --name ${KIND_CLUSTER_NAME} ${KIND_INGRESS_CONTROLLER_LOCAL_IMAGE}
 wait-api
