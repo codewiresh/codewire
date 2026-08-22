@@ -6,9 +6,9 @@ on:
     branches: [main]
 jobs:
   support-selection:
-    # zizmor: ignore[excessive-permissions] This credential-free selection has no OIDC or write-capable integration.
+    # zizmor: ignore[excessive-permissions] This credential-free selection uses protected Docker only for the preloaded, pinned Skopeo runtime.
     name: Support image selection
-    runs-on: ci-lite
+    runs-on: ci-protected
     outputs:
       build_support_images: ${{ steps.select.outputs.build_support_images }}
       reason: ${{ steps.select.outputs.reason }}

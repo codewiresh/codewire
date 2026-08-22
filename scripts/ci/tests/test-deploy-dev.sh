@@ -45,6 +45,11 @@ fi
 selection_job="$(sed -n '/^  deploy-selection:/,/^  build-publish-runtime-images:/p' "$WORKFLOW")"
 grep -Fq '    runs-on: ci-lite' <<<"$selection_job" ||
   fail "deploy selection does not use the non-privileged CI tier"
+grep -Fq '    enable-openid-connect: true' <<<"$selection_job" ||
+  fail "deploy selection cannot request its read-only baseline identity"
+if grep -Eq 'OPENBAO_(ROLE|AUDIENCE)|secrets\.' <<<"$selection_job"; then
+  fail "deploy selection receives a publisher or static credential"
+fi
 grep -Fq '    timeout-minutes: 15' <<<"$selection_job" ||
   fail "deploy selection lacks a bounded ci-lite deadline"
 grep -Fq '          fetch-depth: 0' <<<"$selection_job" ||
@@ -101,8 +106,8 @@ done
 build_job="$(sed -n '/^  build-publish-runtime-images:/,$p' "$WORKFLOW")"
 grep -Fq '    runs-on: ci-protected' <<<"$build_job" ||
   fail "runtime set does not build and publish on the protected CI tier"
-[[ "$(grep -Fc '    enable-openid-connect: true' "$WORKFLOW")" -eq 1 ]] ||
-  fail "Dev delivery OIDC is not confined to one job"
+[[ "$(grep -Fc '    enable-openid-connect: true' "$WORKFLOW")" -eq 2 ]] ||
+  fail "Dev workflow does not confine OIDC to selection and publication"
 grep -Fq '    enable-openid-connect: true' <<<"$build_job" ||
   fail "protected runtime transaction cannot mint just-in-time identities"
 grep -Fq '    timeout-minutes: 110' <<<"$build_job" ||
