@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 SMOKE="$ROOT/scripts/runtime/confidential/smoke-dev-confidential-snp.sh"
+RUNTIME_CONFIGMAP_SELECTOR="$ROOT/scripts/runtime/confidential/select-required-runtime-configmap.jq"
 RESOLVER="$ROOT/scripts/runtime/confidential/resolve-coco-support-lock.sh"
 WRAPPER="$ROOT/scripts/runtime/confidential/with-dev-confidential-coco-config.sh"
 PROFILE="$ROOT/deployments/k8s/overlays/dev/config-runtime-profile.yaml"
@@ -65,6 +66,7 @@ rg -F 'ATTESTATION_JOB_SELECTOR="app.kubernetes.io/name=codewire-confidential-sn
 rg -F 'umask 077' "$SMOKE" >/dev/null
 rg -F 'chmod 700 "$EVIDENCE_DIR"' "$SMOKE" >/dev/null
 rg -F 'expected exactly one $label Job matching $selector' "$SMOKE" >/dev/null
+rg -F 'jq -er -f "$RUNTIME_CONFIGMAP_SELECTOR" "$deployment_json"' "$SMOKE" >/dev/null
 rg -F 'phase == "confidential-snp"' "$SMOKE" >/dev/null
 rg -F 'nexus\.example\.invalid/oci-approved/codewire/gateway@sha256:' "$SMOKE" >/dev/null
 if rg -F 'git\.example\.invalid/codewire/gateway@sha256:' "$SMOKE" "$RESOLVER"; then
@@ -124,9 +126,52 @@ rg -F 'kubernetes.io/hostname: dev-node-1' "$SMOKE_DIR/commodity-smoke-job.yaml"
 rg -F 'storageClassName: longhorn' "$SMOKE_DIR/commodity-smoke-job.yaml" >/dev/null
 rg -F 'longhorn-workspace-ok' "$SMOKE_DIR/commodity-smoke-job.yaml" >/dev/null
 rg -F 'privileged: true' "$SMOKE_DIR/confidential-attestation-job.yaml" >/dev/null
-rg -F 'name: codewire-commodity-runtime-smoke-v58' "$SMOKE_DIR/commodity-smoke-job.yaml" >/dev/null
-rg -F 'name: codewire-confidential-runtime-smoke-v58' "$SMOKE_DIR/confidential-smoke-job.yaml" >/dev/null
-rg -F 'name: codewire-confidential-snp-attestation-v58' "$SMOKE_DIR/confidential-attestation-job.yaml" >/dev/null
+rg -F 'name: codewire-commodity-runtime-smoke-v59' "$SMOKE_DIR/commodity-smoke-job.yaml" >/dev/null
+rg -F 'name: codewire-confidential-runtime-smoke-v59' "$SMOKE_DIR/confidential-smoke-job.yaml" >/dev/null
+rg -F 'name: codewire-confidential-snp-attestation-v59' "$SMOKE_DIR/confidential-attestation-job.yaml" >/dev/null
+
+runtime_configmap="$({
+  jq -n '{
+    spec: {template: {spec: {containers: [{envFrom: [
+      {configMapRef: {name: "codewire-config-25gbmh4k4h"}},
+      {secretRef: {name: "codewire-secrets"}},
+      {configMapRef: {name: "codewire-confidential-storage-infisical", optional: true}},
+      {configMapRef: {name: "codewire-confidential-storage-kbs", optional: true}}
+    ]}]}}}
+  }'
+} | jq -er -f "$RUNTIME_CONFIGMAP_SELECTOR")"
+[[ "$runtime_configmap" == "codewire-config-25gbmh4k4h" ]] || {
+  printf 'runtime ConfigMap selector rejected approved optional references\n' >&2
+  exit 1
+}
+
+if jq -n '{
+  spec: {template: {spec: {containers: [{envFrom: [
+    {configMapRef: {name: "codewire-config-25gbmh4k4h"}},
+    {configMapRef: {name: "codewire-config-2bcdfghkmt"}}
+  ]}]}}}
+}' | jq -er -f "$RUNTIME_CONFIGMAP_SELECTOR" >/dev/null 2>&1; then
+  printf 'runtime ConfigMap selector accepted two required references\n' >&2
+  exit 1
+fi
+
+if jq -n '{
+  spec: {template: {spec: {containers: [{envFrom: [
+    {configMapRef: {name: "codewire-config-25gbmh4k4h", optional: true}}
+  ]}]}}}
+}' | jq -er -f "$RUNTIME_CONFIGMAP_SELECTOR" >/dev/null 2>&1; then
+  printf 'runtime ConfigMap selector accepted an optional-only reference\n' >&2
+  exit 1
+fi
+
+if jq -n '{
+  spec: {template: {spec: {containers: [{envFrom: [
+    {configMapRef: {name: "codewire-config-not-generated"}}
+  ]}]}}}
+}' | jq -er -f "$RUNTIME_CONFIGMAP_SELECTOR" >/dev/null 2>&1; then
+  printf 'runtime ConfigMap selector accepted a non-generated name\n' >&2
+  exit 1
+fi
 
 command -v kustomize >/dev/null 2>&1 || {
   printf 'kustomize is required for the confidential smoke contract\n' >&2
