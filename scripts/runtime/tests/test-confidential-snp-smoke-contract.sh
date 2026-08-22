@@ -126,9 +126,9 @@ rg -F 'kubernetes.io/hostname: dev-node-1' "$SMOKE_DIR/commodity-smoke-job.yaml"
 rg -F 'storageClassName: longhorn' "$SMOKE_DIR/commodity-smoke-job.yaml" >/dev/null
 rg -F 'longhorn-workspace-ok' "$SMOKE_DIR/commodity-smoke-job.yaml" >/dev/null
 rg -F 'privileged: true' "$SMOKE_DIR/confidential-attestation-job.yaml" >/dev/null
-rg -F 'name: codewire-commodity-runtime-smoke-v61' "$SMOKE_DIR/commodity-smoke-job.yaml" >/dev/null
-rg -F 'name: codewire-confidential-runtime-smoke-v61' "$SMOKE_DIR/confidential-smoke-job.yaml" >/dev/null
-rg -F 'name: codewire-confidential-snp-attestation-v61' "$SMOKE_DIR/confidential-attestation-job.yaml" >/dev/null
+rg -F 'name: codewire-commodity-runtime-smoke-v62' "$SMOKE_DIR/commodity-smoke-job.yaml" >/dev/null
+rg -F 'name: codewire-confidential-runtime-smoke-v62' "$SMOKE_DIR/confidential-smoke-job.yaml" >/dev/null
+rg -F 'name: codewire-confidential-snp-attestation-v62' "$SMOKE_DIR/confidential-attestation-job.yaml" >/dev/null
 
 runtime_configmap="$({
   jq -n '{
