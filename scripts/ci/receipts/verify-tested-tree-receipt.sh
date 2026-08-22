@@ -165,7 +165,9 @@ tested_tree="$(git rev-parse "${tested_head}^{tree}")" \
 [ "$canonical_tree" = "$tested_tree" ] || fallback 'tested-tree-mismatch'
 
 runs_json="$tmp/runs.json"
-api_get "/actions/runs?event=pull_request&head_sha=${tested_head}&page=1&limit=100" \
+# Forgejo stores force-updated PR runs as pull_request_sync even though the API
+# response normalizes them to pull_request, so bind here by head and workflow.
+api_get "/actions/runs?head_sha=${tested_head}&workflow_id=ci.yaml&page=1&limit=100" \
   "$runs_json" || fallback 'tested-runs-unavailable'
 
 if ! jq -e '
