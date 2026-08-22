@@ -207,9 +207,20 @@ api_get "/actions/runs/${tested_run}/jobs?page=1&limit=100" "$jobs_json" \
   || fallback 'tested-run-jobs-unavailable'
 
 if ! required_job="$(jq -cer --arg head "$tested_head" --argjson run "$tested_run" '
-    select(.total_count | type == "number" and . >= 0 and . <= 100)
+    def bounded_jobs:
+      if type == "array" then
+        select(length <= 100)
+      elif type == "object"
+          and (.jobs | type == "array")
+          and (.total_count | type == "number" and . >= 0 and . <= 100)
+          and (.total_count == (.jobs | length)) then
+        .jobs
+      else
+        empty
+      end;
+    bounded_jobs
     | [
-        .jobs[]
+        .[]
         | select(
             .name == "Required verification"
             and (.head_sha // $head) == $head
