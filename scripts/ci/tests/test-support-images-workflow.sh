@@ -6,6 +6,7 @@ readonly ROOT
 readonly WORKFLOW="$ROOT/.gitea/workflows/support-images.yaml"
 readonly LEGACY_GITHUB_WORKFLOW="$ROOT/.github/workflows/build-workspace-image.yml"
 readonly WORKSPACE_DOCKERFILE="$ROOT/images/workspace/Dockerfile"
+readonly CONFIDENTIAL_PROBE_DOCKERFILE="$ROOT/images/confidential-probe/Dockerfile"
 
 fail() {
   printf '[test-support-images-workflow] ERROR: %s\n' "$*" >&2
@@ -74,15 +75,14 @@ fi
 if grep -Fq 'secrets.' <<<"$selection_job"; then
   fail 'support selection receives a credential despite anonymous registry access'
 fi
-for output in build_support_images reason matched_categories base_image_state \
-  workspace_image_state baseline_sha head_sha head_tree ci_plan_sha256 \
+for output in build_support_images build_confidential_probe_image reason matched_categories base_image_state \
+  workspace_image_state confidential_probe_image_state baseline_sha head_sha head_tree ci_plan_sha256 \
   ci_policy_sha256 baseline_valid; do
   grep -Fq "      ${output}: \${{ steps.select.outputs.${output} }}" <<<"$selection_job" ||
     fail "support selection omits ${output} planner output"
 done
-[[ "$(grep -Fc "if: \${{ needs.support-selection.outputs.build_support_images == 'true' }}" \
-  "$WORKFLOW")" -eq 1 ]] ||
-  fail 'the atomic support build/publication job is not gated by one selection'
+grep -Fq "if: \${{ needs.support-selection.outputs.build_support_images == 'true' || needs.support-selection.outputs.build_confidential_probe_image == 'true' }}" \
+  "$WORKFLOW" || fail 'support publication job is not gated by the two independent selections'
 grep -qF 'needs: [support-selection]' "$WORKFLOW" ||
   fail 'support build does not wait for support selection'
 grep -qF 'scripts/ci/images/build-push-image.sh base images/base/Dockerfile images/base' \
@@ -92,6 +92,8 @@ grep -qF 'CODEWIRE_BASE_IMAGE_REF: ${{ steps.base.outputs.candidate_ref }}' \
   "$WORKFLOW" || fail 'workspace does not consume the same-job exact base candidate'
 grep -qF 'scripts/ci/images/build-push-image.sh workspace images/workspace/Dockerfile .' \
   "$WORKFLOW" || fail 'workspace is not built by the canonical Gitea helper'
+grep -qF 'scripts/ci/images/build-push-image.sh confidential-probe images/confidential-probe/Dockerfile images/confidential-probe' \
+  "$WORKFLOW" || fail 'confidential probe is not built by the canonical Gitea helper'
 publish_job="$(sed -n '/^  publish-support-images:/,$p' "$WORKFLOW")"
 grep -Fq '    runs-on: ci-protected' <<<"$publish_job" ||
   fail 'support publisher does not use the protected CI tier'
@@ -108,18 +110,23 @@ grep -Fq 'OPENBAO_GHCR_AUDIENCE: openbao-codewire-source-support-publisher' \
 if grep -Fq 'GHCR_PUBLISH_USERNAME:' "$WORKFLOW"; then
   fail 'support workflow retains a split Forgejo GHCR username'
 fi
-[[ "$(grep -Fc 'scripts/ci/images/publish-image-to-ghcr.sh' <<<"$publish_job")" -eq 1 ]] ||
-  fail 'support publisher does not use one pair publication boundary'
+[[ "$(grep -Fc 'scripts/ci/images/publish-image-to-ghcr.sh' <<<"$publish_job")" -eq 2 ]] ||
+  fail 'support publisher does not expose exactly the pair and confidential-probe publication boundaries'
 grep -Fq -- '--support-pair' <<<"$publish_job" ||
   fail 'support publisher does not require pair preflight and ordering'
 # shellcheck disable=SC2016
 [[ "$(grep -Fc 'steps.' <<<"$publish_job" | tr -d '[:space:]')" -gt 0 ]] ||
   fail 'support publisher does not consume same-job step outputs'
-[[ "$(grep -Fc 'outputs.source_sha }}" == "$GITHUB_SHA"' <<<"$publish_job")" -eq 2 ]] ||
-  fail 'support publisher does not verify both exact build sources'
+[[ "$(grep -Fc 'outputs.source_sha }}" == "$GITHUB_SHA"' <<<"$publish_job")" -eq 3 ]] ||
+  fail 'support publisher does not verify all exact build sources'
 if grep -Fq 'needs.build-' <<<"$publish_job"; then
   fail 'support publisher still crosses a runner job-output boundary'
 fi
+# shellcheck disable=SC2016
+grep -Fq '"${{ steps.confidential_probe.outputs.candidate_ref }}"' <<<"$publish_job" ||
+  fail 'support publisher omits the immutable confidential-probe candidate'
+grep -Fq 'ghcr.io/codewiresh/confidential-probe' <<<"$publish_job" ||
+  fail 'support publisher omits the public confidential-probe repository'
 # shellcheck disable=SC2016
 grep -Fq '"${{ steps.base.outputs.candidate_ref }}"' <<<"$publish_job" ||
   fail 'support publisher omits the immutable base candidate'
@@ -166,6 +173,15 @@ if grep -qF 'https://sh.rustup.rs' "$WORKSPACE_DOCKERFILE"; then
 fi
 [[ "$(tail -n 1 "$WORKSPACE_DOCKERFILE")" == 'USER codewire' ]] ||
   fail 'workspace image does not restore the unprivileged runtime user after installing cw'
+
+grep -Eq '^FROM registry\.k8s\.io/e2e-test-images/busybox@sha256:[0-9a-f]{64}$' \
+  "$CONFIDENTIAL_PROBE_DOCKERFILE" || fail 'confidential probe base is not digest-pinned'
+grep -Eq '^ADD --checksum=sha256:[0-9a-f]{64} \\' \
+  "$CONFIDENTIAL_PROBE_DOCKERFILE" || fail 'confidential probe snpguest input is not checksum-pinned'
+grep -Fq 'https://github.com/virtee/snpguest/releases/download/v0.10.0/snpguest' \
+  "$CONFIDENTIAL_PROBE_DOCKERFILE" || fail 'confidential probe does not use the accepted snpguest release'
+[[ "$(tail -n 1 "$CONFIDENTIAL_PROBE_DOCKERFILE")" == 'USER 65532:65532' ]] ||
+  fail 'confidential probe does not restore its unprivileged runtime user'
 
 if grep -Eq '(nexus-system-cluster\.private\.invalid/oci-promoted/codewire|ghcr\.io/codewiresh)/(base|workspace):(latest|main)' \
     "$WORKFLOW"; then

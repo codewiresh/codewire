@@ -142,14 +142,19 @@ grep -qxF "ghcr_ref=$target_repository:$source_sha" "$GITHUB_OUTPUT" ||
   fail "first GHCR ref output is absent"
 grep -qxF "ghcr_digest=$expected_digest" "$GITHUB_OUTPUT" ||
   fail "GHCR digest output is absent"
+
+"$COPY_IMAGE" \
+  "nexus-system-cluster.example.invalid/oci-promoted/codewire/confidential-probe@$expected_digest" \
+  'ghcr.io/codewiresh/confidential-probe' "$source_sha" >/dev/null ||
+  fail 'confidential-probe publication family is absent'
 if grep -qF 'nexus-test-password' "$FAKE_CALLS" \
   || grep -qF 'ghcr-test-token' "$FAKE_CALLS"; then
   fail "a registry token reached the command arguments"
 fi
-[[ "$(grep -c '^volume create$' "$FAKE_DOCKER_CALLS")" -eq 1 ]] ||
-  fail "publication did not create exactly one private auth volume"
-[[ "$(grep -c '^volume rm fake-auth-volume$' "$FAKE_DOCKER_CALLS")" -eq 1 ]] ||
-  fail "publication did not delete its private auth volume"
+[[ "$(grep -c '^volume create$' "$FAKE_DOCKER_CALLS")" -eq 2 ]] ||
+  fail "each publication did not create one private auth volume"
+[[ "$(grep -c '^volume rm fake-auth-volume$' "$FAKE_DOCKER_CALLS")" -eq 2 ]] ||
+  fail "each publication did not delete its private auth volume"
 
 printf '0\n' >"$work/ghcr-connect-state"
 ghcr_login_calls_before="$(grep -c '^login .*ghcr.io ' "$FAKE_CALLS")"
