@@ -22,6 +22,7 @@ COCO_EXPECT_REFUSAL="${COCO_EXPECT_REFUSAL:-0}"
 COCO_EXPECT_FAILURE_PATTERN="${COCO_EXPECT_FAILURE_PATTERN:-CoCo test resource assertion failed|guest CDH REST|reference.*value|policy.*den|forbid|unauthor|deny}"
 EVIDENCE_DIR="${EVIDENCE_DIR:-}"
 COCO_SUPPORT_LOCK="${COCO_SUPPORT_LOCK:-$ROOT/deployments/k8s/runtime-profiles/confidential/coco-support-images.lock.json}"
+RUNTIME_CONFIGMAP_SELECTOR="$ROOT/scripts/runtime/confidential/select-required-runtime-configmap.jq"
 COCO_GATEWAY_IMAGE=""
 COCO_WORKSPACE_IMAGE=""
 COCO_DIND_IMAGE=""
@@ -249,8 +250,7 @@ check_runtime_contract() {
 }
 
 resolve_active_release() {
-  local workloads_json smoke_json configmap image line key value
-  local configmaps=()
+  local workloads_json smoke_json deployment_json configmap image line key value
 
   log "checking exact Flux activation and active runtime configuration"
   workloads_json="$EVIDENCE_DIR/$WORKLOAD_KUSTOMIZATION.json"
@@ -276,13 +276,11 @@ resolve_active_release() {
     '.data.phase == "confidential-snp"' \
     "$EVIDENCE_DIR/$SMOKE_CONTROL_CONFIGMAP.json"
 
-  mapfile -t configmaps < <(
-    kubectl_dev -n "$CODEWIRE_SERVER_NAMESPACE" get deployment codewire-orchestration -o json | \
-      jq -r '.spec.template.spec.containers[] | .envFrom[]? | .configMapRef.name? // empty' | sort -u
-  )
-  [[ "${#configmaps[@]}" -eq 1 ]] || \
-    die "expected exactly one active dev runtime ConfigMap"
-  configmap="${configmaps[0]}"
+  deployment_json="$EVIDENCE_DIR/codewire-orchestration-deployment.json"
+  kubectl_dev -n "$CODEWIRE_SERVER_NAMESPACE" get deployment codewire-orchestration -o json \
+    >"$deployment_json"
+  configmap="$(jq -er -f "$RUNTIME_CONFIGMAP_SELECTOR" "$deployment_json")" || \
+    die "orchestration does not reference exactly one required generated runtime ConfigMap"
   kubectl_dev -n "$CODEWIRE_SERVER_NAMESPACE" get configmap "$configmap" -o json \
     >"$EVIDENCE_DIR/active-runtime-config.json"
   image="$(jq -r '.data.SANDBOX_GATEWAY_IMAGE // empty' "$EVIDENCE_DIR/active-runtime-config.json")"
