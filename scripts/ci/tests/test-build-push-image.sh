@@ -36,6 +36,10 @@ grep -Fq 'CODEWIRE_EXTERNAL_DOCKER_CONFIG' "$BUILDER" ||
   fail 'published-image builder cannot share private job-scoped registry auth'
 grep -Fq 'buildx_builder_owned=0' "$BUILDER" ||
   fail 'published-image builder does not distinguish caller-owned BuildKit state'
+grep -Fq 'NEXUS_BACKUP_RETRY_ATTEMPTS=16' "$BUILDER" ||
+  fail 'published-image builder lacks the bounded Nexus publication retry'
+grep -Fq '503 Service Temporarily Unavailable' "$BUILDER" ||
+  fail 'published-image retry is not restricted to the observed Nexus outage'
 # shellcheck disable=SC2016 # This assertion intentionally matches literal shell source.
 grep -Fq 'docker buildx inspect "$buildx_builder"' "$BUILDER" ||
   fail 'published-image builder does not validate an external BuildKit daemon'
@@ -415,6 +419,19 @@ case "${1:-} ${2:-} ${3:-}" in
     [[ "$*" == *' --force '* ]]
     ;;
   buildx\ bake\ *)
+    if [ -n "${FAKE_BUILD_NEXUS_FAILURES:-}" ]; then
+      build_state="${FAKE_BUILD_STATE:?}"
+      build_count="$(cat "$build_state")"
+      if [ "$build_count" -lt "$FAKE_BUILD_NEXUS_FAILURES" ]; then
+        printf '%s\n' "$((build_count + 1))" >"$build_state"
+        echo 'unexpected status from HEAD request to https://nexus-system-cluster.example.invalid/v2/oci-promoted/codewire/test/blobs/sha256:test: 503 Service Temporarily Unavailable' >&2
+        exit 1
+      fi
+    fi
+    if [ "${FAKE_BUILD_FATAL:-0}" = 1 ]; then
+      echo 'non-retryable BuildKit failure' >&2
+      exit 1
+    fi
     metadata=''
     targets=()
     declare -A tags_by_target=()
@@ -479,6 +496,19 @@ case "${1:-} ${2:-} ${3:-}" in
     esac
     ;;
   buildx\ build\ *)
+    if [ -n "${FAKE_BUILD_NEXUS_FAILURES:-}" ]; then
+      build_state="${FAKE_BUILD_STATE:?}"
+      build_count="$(cat "$build_state")"
+      if [ "$build_count" -lt "$FAKE_BUILD_NEXUS_FAILURES" ]; then
+        printf '%s\n' "$((build_count + 1))" >"$build_state"
+        echo 'unexpected status from HEAD request to https://nexus-system-cluster.example.invalid/v2/oci-promoted/codewire/test/blobs/sha256:test: 503 Service Temporarily Unavailable' >&2
+        exit 1
+      fi
+    fi
+    if [ "${FAKE_BUILD_FATAL:-0}" = 1 ]; then
+      echo 'non-retryable BuildKit failure' >&2
+      exit 1
+    fi
     metadata=''
     tags=()
     shift 2
@@ -530,7 +560,13 @@ printf 'AWS_SHARED_CREDENTIALS_FILE=%s AWS_PROFILE=%s AWS_EC2_METADATA_DISABLED=
   "${SCCACHE_IGNORE_SERVER_IO_ERROR:-}" "$*" \
   >>"${FAKE_SCCACHE_CALLS:?}"
 EOF
-chmod +x "$work/bin/fetch-nexus" "$work/bin/docker" "$work/bin/sccache"
+cat >"$work/bin/sleep" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >>"${FAKE_SLEEP_CALLS:?}"
+EOF
+chmod +x "$work/bin/fetch-nexus" "$work/bin/docker" "$work/bin/sccache" \
+  "$work/bin/sleep"
 
 export PATH="$work/bin:$PATH"
 export OPENBAO_NEXUS_CREDENTIAL_FETCHER="$work/bin/fetch-nexus"
@@ -541,6 +577,7 @@ export FAKE_APPROVED_REGISTRY_PASSWORD="$approved_registry_password"
 export FAKE_FETCH_CALLS="$work/fetch-calls"
 export FAKE_DOCKER_CALLS="$work/docker-calls"
 export FAKE_SCCACHE_CALLS="$work/sccache-calls"
+export FAKE_SLEEP_CALLS="$work/sleep-calls"
 export FAKE_MANIFESTS="$work/manifests"
 export FAKE_DIGEST="$digest"
 export FAKE_PROVENANCE_BUILDER_ID='https://git.example.invalid/infra/ci/builders/protected-delivery/v1'
@@ -1002,6 +1039,46 @@ grep -Eq ' buildx rm --force codewire-kind-' "$FAKE_DOCKER_CALLS" ||
   fail 'Kind did not verify existence and trust labels for all four loaded images'
 grep -qF 'CODEWIRE_CI_PHASE name=product-image-build' "$work/kind-build.out" ||
   fail 'Kind image builder omitted its structured phase result'
+
+base_source_tag="nexus-system-cluster.example.invalid/oci-promoted/codewire/base:$source_sha"
+awk -F '\t' -v reference="$base_source_tag" \
+  '$1 != reference' "$FAKE_MANIFESTS" >"$FAKE_MANIFESTS.tmp"
+mv "$FAKE_MANIFESTS.tmp" "$FAKE_MANIFESTS"
+printf '0\n' >"$work/build-state"
+: >"$FAKE_SLEEP_CALLS"
+retry_builds_before="$(build_invocation_count)"
+(
+  cd "$ROOT"
+  FAKE_BUILD_NEXUS_FAILURES=2 \
+    FAKE_BUILD_STATE="$work/build-state" \
+    "$BUILDER" base images/base/Dockerfile images/base
+) >"$work/nexus-retry.out" 2>&1
+[[ "$(cat "$work/build-state")" -eq 2 ]] ||
+  fail 'published-image build did not consume both simulated Nexus failures'
+[[ "$(build_invocation_count)" -eq $((retry_builds_before + 3)) ]] ||
+  fail 'published-image build did not retry twice and then succeed'
+[[ "$(grep -cxF '60' "$FAKE_SLEEP_CALLS")" -eq 2 ]] ||
+  fail 'published-image build did not use the bounded Nexus retry delay'
+grep -qF 'retrying the exact base build (2/16)' "$work/nexus-retry.out" ||
+  fail 'published-image Nexus retry was not attributable'
+
+awk -F '\t' -v reference="$base_source_tag" \
+  '$1 != reference' "$FAKE_MANIFESTS" >"$FAKE_MANIFESTS.tmp"
+mv "$FAKE_MANIFESTS.tmp" "$FAKE_MANIFESTS"
+: >"$FAKE_SLEEP_CALLS"
+fatal_builds_before="$(build_invocation_count)"
+if (
+  cd "$ROOT"
+  FAKE_BUILD_FATAL=1 "$BUILDER" base images/base/Dockerfile images/base
+) >"$work/non-retryable-build.out" 2>&1; then
+  fail 'non-Nexus BuildKit failure was retried to success'
+fi
+[[ "$(build_invocation_count)" -eq $((fatal_builds_before + 1)) ]] ||
+  fail 'non-Nexus BuildKit failure did not stop after one attempt'
+[[ ! -s "$FAKE_SLEEP_CALLS" ]] ||
+  fail 'non-Nexus BuildKit failure entered the retry delay'
+grep -qF 'non-retryable BuildKit failure' "$work/non-retryable-build.out" ||
+  fail 'non-Nexus BuildKit failure was not preserved'
 
 printf 'untrusted build input\n' >"$source_worktree/forbidden-untracked-input"
 fetch_calls_before="$(wc -l <"$FAKE_FETCH_CALLS")"

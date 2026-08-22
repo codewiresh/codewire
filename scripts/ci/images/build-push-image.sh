@@ -21,6 +21,8 @@ build_runtime_set="${CODEWIRE_BUILD_RUNTIME_SET:-0}"
 : "${GITHUB_SHA:?GITHUB_SHA is required}"
 readonly REGISTRY_HOST='nexus-system-cluster.example.invalid'
 readonly REGISTRY_REPOSITORY_PREFIX="${REGISTRY_HOST}/oci-promoted/codewire"
+readonly NEXUS_BACKUP_RETRY_ATTEMPTS=16
+readonly NEXUS_BACKUP_RETRY_DELAY_SECONDS=60
 readonly APPROVED_REGISTRY_HOST='nexus.example.invalid'
 readonly BUILDKIT_IMAGE='docker.io/moby/buildkit:v0.29.0@sha256:0039c1d47e8748b5afea56f4e85f14febaf34452bd99d9552d2daa82262b5cc5'
 # Docker keys credentials by registry hostname. The protected publisher keeps
@@ -302,6 +304,55 @@ create_buildx_builder() {
   buildx_builder_owned=1
 }
 
+is_nexus_backup_unavailable() {
+  local log_file="$1"
+
+  grep -Fq "https://${REGISTRY_HOST}/v2/" "$log_file" \
+    && grep -Fq '503 Service Temporarily Unavailable' "$log_file"
+}
+
+run_buildx_with_nexus_retry() {
+  local attempt attempts build_log build_status tee_status
+  local -a pipeline_status
+
+  attempts="$NEXUS_BACKUP_RETRY_ATTEMPTS"
+  # The runtime-set caller already owns an outer retry around this helper so it
+  # can re-inspect every immutable source tag between attempts. Keep this layer
+  # single-shot when the caller supplies the persistent BuildKit daemon.
+  if [ -n "${CODEWIRE_EXTERNAL_BUILDX_BUILDER:-}" ]; then
+    attempts=1
+  fi
+
+  for (( attempt = 1; attempt <= attempts; attempt++ )); do
+    build_log="$work/buildx-attempt.log"
+    : >"$build_metadata"
+    : >"$bake_metadata"
+    : >"$build_log"
+
+    set +e
+    "$@" 2>&1 | tee "$build_log"
+    pipeline_status=("${PIPESTATUS[@]}")
+    build_status="${pipeline_status[0]}"
+    tee_status="${pipeline_status[1]}"
+    set -e
+
+    if [ "$build_status" -eq 0 ] && [ "$tee_status" -eq 0 ]; then
+      return 0
+    fi
+    if [ "$tee_status" -ne 0 ]; then
+      return "$tee_status"
+    fi
+    if [ "$attempt" -ge "$attempts" ] \
+        || ! is_nexus_backup_unavailable "$build_log"; then
+      return "$build_status"
+    fi
+
+    printf 'Nexus is temporarily unavailable during protected publication; retrying the exact %s build (%d/%d)\n' \
+      "$image_name" "$((attempt + 1))" "$attempts" >&2
+    sleep "$NEXUS_BACKUP_RETRY_DELAY_SECONDS"
+  done
+}
+
 inspect_manifest_digest() {
   local reference="$1"
   local inspect_output inspect_error digest attempt
@@ -559,7 +610,8 @@ if [ "$build_runtime_set" = 1 ]; then
     if [ "${#missing_runtime_targets[@]}" -eq 5 ]; then
       bake_targets=(default)
     fi
-    DOCKER_CONFIG="$docker_config" \
+    run_buildx_with_nexus_retry env \
+      DOCKER_CONFIG="$docker_config" \
       CODEWIRE_IMAGE_SOURCE_SHA="$source_sha" \
       CODEWIRE_IMAGE_SOURCE_URL="$public_source_url" \
       CODEWIRE_RUST_PROFILE=release \
@@ -626,7 +678,8 @@ else
         --set "$product_bake_target.secrets+=id=aws_shared_credentials,src=$credentials_file"
       )
     fi
-    DOCKER_CONFIG="$docker_config" \
+    run_buildx_with_nexus_retry env \
+      DOCKER_CONFIG="$docker_config" \
       CODEWIRE_IMAGE_SOURCE_SHA="$source_sha" \
       CODEWIRE_IMAGE_SOURCE_URL="$public_source_url" \
       CODEWIRE_RUST_PROFILE=release \
@@ -642,7 +695,7 @@ else
       exit 1
     }
   else
-    DOCKER_CONFIG="$docker_config" \
+    run_buildx_with_nexus_retry env DOCKER_CONFIG="$docker_config" \
       docker buildx build --builder "$buildx_builder" --push \
       --provenance="$provenance" \
       --sbom="generator=$SBOM_GENERATOR_IMAGE" \
