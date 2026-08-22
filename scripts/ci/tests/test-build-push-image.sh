@@ -38,7 +38,7 @@ grep -Fq 'buildx_builder_owned=0' "$BUILDER" ||
   fail 'published-image builder does not distinguish caller-owned BuildKit state'
 grep -Fq 'NEXUS_BACKUP_RETRY_ATTEMPTS=16' "$BUILDER" ||
   fail 'published-image builder lacks the bounded Nexus publication retry'
-grep -Fq '503 Service Temporarily Unavailable' "$BUILDER" ||
+grep -Fq '503 Service (Temporarily )?Unavailable' "$BUILDER" ||
   fail 'published-image retry is not restricted to the observed Nexus outage'
 # shellcheck disable=SC2016 # This assertion intentionally matches literal shell source.
 grep -Fq 'docker buildx inspect "$buildx_builder"' "$BUILDER" ||
@@ -297,6 +297,16 @@ case "${1:-} ${2:-} ${3:-}" in
       if [ "$login_count" -lt "$FAKE_LOGIN_FAILURES" ]; then
         printf '%s\n' "$((login_count + 1))" >"$login_state"
         echo 'Error response from daemon: Nexus login failed with status: 401 Unauthorized' >&2
+        exit 1
+      fi
+    fi
+    if [ "$registry_host" = nexus-system-cluster.example.invalid ] \
+        && [ -n "${FAKE_LOGIN_NEXUS_FAILURES:-}" ]; then
+      login_state="${FAKE_LOGIN_NEXUS_STATE:?}"
+      login_count="$(cat "$login_state")"
+      if [ "$login_count" -lt "$FAKE_LOGIN_NEXUS_FAILURES" ]; then
+        printf '%s\n' "$((login_count + 1))" >"$login_state"
+        echo "Error response from daemon: login attempt to https://${registry_host}/v2/ failed with status: 503 Service Unavailable" >&2
         exit 1
       fi
     fi
@@ -712,6 +722,25 @@ grep -qF 'Registry login was rejected; retrying authentication' \
   "$work/transient-login.out" || fail 'transient initial registry login was not reported'
 [[ "$(grep -c ' login ' "$FAKE_DOCKER_CALLS")" -eq $((login_calls_before + 3)) ]] ||
   fail 'transient initial registry login was not retried exactly once'
+
+printf '0\n' >"$work/login-nexus-state"
+: >"$FAKE_SLEEP_CALLS"
+login_calls_before="$(grep -c ' login ' "$FAKE_DOCKER_CALLS" || true)"
+(
+  cd "$ROOT"
+  FAKE_LOGIN_NEXUS_FAILURES=2 \
+  FAKE_LOGIN_NEXUS_STATE="$work/login-nexus-state" \
+    "$BUILDER" gateway deployments/docker/gateway.Dockerfile .
+) >"$work/transient-nexus-login.out" 2>&1
+[[ "$(cat "$work/login-nexus-state")" -eq 2 ]] ||
+  fail 'transient Nexus login did not consume both simulated failures'
+[[ "$(grep -c ' login ' "$FAKE_DOCKER_CALLS")" -eq $((login_calls_before + 4)) ]] ||
+  fail 'transient Nexus login did not retry twice before the approved login'
+[[ "$(grep -cxF '60' "$FAKE_SLEEP_CALLS")" -eq 2 ]] ||
+  fail 'transient Nexus login did not use the bounded retry delay'
+grep -qF 'retrying nexus-system-cluster.example.invalid (2/16)' \
+  "$work/transient-nexus-login.out" ||
+  fail 'transient Nexus login retry was not attributable'
 
 : >"$GITHUB_OUTPUT"
 (

@@ -245,10 +245,26 @@ registry_auth_error() {
     "$1"
 }
 
+registry_service_unavailable() {
+  local log_file="$1" registry_host="$2"
+
+  grep -Fq "https://${registry_host}/v2/" "$log_file" \
+    && grep -Eq '503 Service (Temporarily )?Unavailable' "$log_file"
+}
+
 registry_login_host() {
   local registry_host="$1" username_file="$2" password_file="$3"
-  local login_error attempt registry_username
-  for attempt in 1 2 3; do
+  local login_error registry_username
+  local auth_attempt=1 unavailable_attempt=1 unavailable_attempts
+
+  unavailable_attempts="$NEXUS_BACKUP_RETRY_ATTEMPTS"
+  # The external-builder caller owns the whole-operation retry and re-inspects
+  # immutable source tags between attempts. Do not multiply that boundary.
+  if [ -n "${CODEWIRE_EXTERNAL_BUILDX_BUILDER:-}" ]; then
+    unavailable_attempts=1
+  fi
+
+  while :; do
     login_error="$(mktemp "$work/login-error.XXXXXX")"
     registry_username="$(<"$username_file")"
     [[ -n "$registry_username" && "$registry_username" != *$'\n'* ]] || {
@@ -260,8 +276,17 @@ registry_login_host() {
       >/dev/null 2>"$login_error"; then
       return 0
     fi
-    if registry_auth_error "$login_error" && [ "$attempt" -lt 3 ]; then
-      echo "Registry login was rejected; retrying authentication (attempt $((attempt + 1))/3)" >&2
+    if registry_auth_error "$login_error" && [ "$auth_attempt" -lt 3 ]; then
+      auth_attempt=$((auth_attempt + 1))
+      echo "Registry login was rejected; retrying authentication (attempt ${auth_attempt}/3)" >&2
+      continue
+    fi
+    if registry_service_unavailable "$login_error" "$registry_host" \
+        && [ "$unavailable_attempt" -lt "$unavailable_attempts" ]; then
+      unavailable_attempt=$((unavailable_attempt + 1))
+      printf 'Nexus is temporarily unavailable during registry login; retrying %s (%d/%d)\n' \
+        "$registry_host" "$unavailable_attempt" "$unavailable_attempts" >&2
+      sleep "$NEXUS_BACKUP_RETRY_DELAY_SECONDS"
       continue
     fi
     echo "Unable to authenticate to registry $registry_host" >&2
@@ -307,8 +332,7 @@ create_buildx_builder() {
 is_nexus_backup_unavailable() {
   local log_file="$1"
 
-  grep -Fq "https://${REGISTRY_HOST}/v2/" "$log_file" \
-    && grep -Fq '503 Service Temporarily Unavailable' "$log_file"
+  registry_service_unavailable "$log_file" "$REGISTRY_HOST"
 }
 
 run_buildx_with_nexus_retry() {
