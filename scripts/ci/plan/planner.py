@@ -1129,6 +1129,7 @@ def policy_changed(
         "scripts/ci/tests/test-require-verification-results.sh",
         "scripts/ci/tests/test-select-verification.sh",
         "scripts/ci/tests/test-shellcheck-policy-domain.sh",
+        "scripts/ci/tests/test-verify-tested-tree-receipt.sh",
         "scripts/ci/verify/run-product-verification.sh",
         "scripts/ci/receipts/verify-tested-tree-receipt.sh",
     }

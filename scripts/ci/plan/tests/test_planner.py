@@ -1283,11 +1283,17 @@ class PlannerFixtureTests(unittest.TestCase):
             "#!/usr/bin/env bash\nset -euo pipefail\n",
             0o755,
         )
+        self.repo.write(
+            "scripts/ci/receipts/verify-tested-tree-receipt.sh",
+            "#!/usr/bin/env bash\nset -euo pipefail\n",
+            0o755,
+        )
         for name in (
             "test-emit-verification-matrices.sh",
             "test-require-verification-results.sh",
             "test-select-verification.sh",
             "test-shellcheck-policy-domain.sh",
+            "test-verify-tested-tree-receipt.sh",
         ):
             self.repo.write(
                 f"scripts/ci/tests/{name}",
