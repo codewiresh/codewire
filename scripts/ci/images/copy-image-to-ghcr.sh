@@ -11,7 +11,7 @@ target_repository="$2"
 shift 2
 tags=("$@")
 
-readonly source_pattern='^nexus-system-cluster\.private\.invalid/oci-promoted/codewire/(dashboard|derp|gateway|services|mesh|base|workspace)@sha256:([0-9a-f]{64})$'
+readonly source_pattern='^nexus-system-cluster\.private\.invalid/oci-promoted/codewire/(dashboard|derp|gateway|services|mesh|base|workspace|confidential-probe)@sha256:([0-9a-f]{64})$'
 if [[ ! "$source_ref" =~ $source_pattern ]]; then
   echo "Source must be an exact supported promoted Nexus digest reference" >&2
   exit 1

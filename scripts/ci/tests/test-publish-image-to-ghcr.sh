@@ -145,6 +145,14 @@ grep -qxF "inspect --no-creds --format {{.Digest}} docker://$target_repository@$
   "$FAKE_SKOPEO_CALLS" || fail 'anonymous digest verification is absent'
 grep -qxF "ghcr_public_ref=$target_repository@$expected_digest" "$GITHUB_OUTPUT" ||
   fail 'public digest output is absent'
+
+probe_source_ref="nexus-system-cluster.example.invalid/oci-promoted/codewire/confidential-probe@$expected_digest"
+probe_repository='ghcr.io/codewiresh/confidential-probe'
+"$PUBLISH_IMAGE" "$probe_source_ref" "$probe_repository" "$source_sha"
+grep -qxF "$probe_source_ref $probe_repository $source_sha" "$FAKE_COPY_CALLS" ||
+  fail 'confidential-probe publication family is absent'
+grep -qxF "ghcr_public_ref=$probe_repository@$expected_digest" "$GITHUB_OUTPUT" ||
+  fail 'confidential-probe public digest output is absent'
 while IFS=$'\t' read -r username_file token_file; do
   [ ! -e "$username_file" ] || fail 'private GHCR username file survived publication'
   [ ! -e "$token_file" ] || fail 'private credential file survived publication'

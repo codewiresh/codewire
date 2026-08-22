@@ -176,6 +176,29 @@ class ImageBundleTests(unittest.TestCase):
                 ),
             )
 
+    def test_buildx_metadata_emits_confidential_probe_candidate(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            metadata = Path(directory) / "metadata.json"
+            digest = "sha256:" + "f" * 64
+            metadata.write_text(
+                json.dumps({"containerimage.digest": digest}),
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                image_bundle._candidate_from_metadata(
+                    "confidential-probe",
+                    SOURCE_SHA,
+                    "nexus-system-cluster.example.invalid/oci-promoted/codewire",
+                    metadata,
+                ),
+                (
+                    "confidential-probe",
+                    SOURCE_SHA,
+                    "nexus-system-cluster.example.invalid/oci-promoted/codewire/confidential-probe@"
+                    + digest,
+                ),
+            )
+
     def test_support_images_do_not_expand_runtime_bundle(self) -> None:
         values = candidates()
         values[-1] = [

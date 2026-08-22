@@ -17,6 +17,7 @@ BASE = "c" * 40
 def plan_document(
     base_state: str = "unaffected",
     workspace_state: str = "unaffected",
+    confidential_probe_state: str = "unaffected",
     *,
     baseline_valid: bool = True,
 ) -> dict:
@@ -43,6 +44,7 @@ def plan_document(
         "artifacts": {
             "base_image": {"state": base_state},
             "workspace_image": {"state": workspace_state},
+            "confidential_probe_image": {"state": confidential_probe_state},
         },
         "degraded_reasons": [],
     }
@@ -74,7 +76,7 @@ class SupportPlanAdapterTests(unittest.TestCase):
             completed.stderr,
         )
 
-    def test_two_unaffected_artifacts_skip_atomic_publication(self) -> None:
+    def test_unaffected_artifacts_skip_publication(self) -> None:
         outputs, _ = self.apply(plan_document())
         self.assertEqual(outputs["build_support_images"], "false")
         self.assertEqual(outputs["reason"], "artifacts_unaffected")
@@ -86,14 +88,26 @@ class SupportPlanAdapterTests(unittest.TestCase):
         self.assertEqual(outputs["reason"], "artifact_affected")
         self.assertEqual(outputs["workspace_image_state"], "unaffected")
 
+    def test_confidential_probe_is_selected_independently(self) -> None:
+        outputs, _ = self.apply(plan_document(confidential_probe_state="affected"))
+        self.assertEqual(outputs["build_support_images"], "false")
+        self.assertEqual(outputs["build_confidential_probe_image"], "true")
+        self.assertEqual(outputs["confidential_probe_image_state"], "affected")
+        self.assertEqual(outputs["reason"], "artifact_affected")
+
     def test_unclassified_artifact_selects_atomic_pair(self) -> None:
         outputs, _ = self.apply(plan_document(workspace_state="unclassified"))
         self.assertEqual(outputs["build_support_images"], "true")
         self.assertEqual(outputs["reason"], "artifact_unclassified")
 
-    def test_invalid_baseline_requires_both_artifacts_unclassified(self) -> None:
+    def test_invalid_baseline_requires_all_artifacts_unclassified(self) -> None:
         outputs, _ = self.apply(
-            plan_document("unclassified", "unclassified", baseline_valid=False)
+            plan_document(
+                "unclassified",
+                "unclassified",
+                "unclassified",
+                baseline_valid=False,
+            )
         )
         self.assertEqual(outputs["build_support_images"], "true")
         self.assertEqual(outputs["reason"], "baseline_invalid")

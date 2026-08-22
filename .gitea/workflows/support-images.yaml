@@ -11,10 +11,12 @@ jobs:
     runs-on: ci-protected
     outputs:
       build_support_images: ${{ steps.select.outputs.build_support_images }}
+      build_confidential_probe_image: ${{ steps.select.outputs.build_confidential_probe_image }}
       reason: ${{ steps.select.outputs.reason }}
       matched_categories: ${{ steps.select.outputs.matched_categories }}
       base_image_state: ${{ steps.select.outputs.base_image_state }}
       workspace_image_state: ${{ steps.select.outputs.workspace_image_state }}
+      confidential_probe_image_state: ${{ steps.select.outputs.confidential_probe_image_state }}
       baseline_sha: ${{ steps.select.outputs.baseline_sha }}
       head_sha: ${{ steps.select.outputs.head_sha }}
       head_tree: ${{ steps.select.outputs.head_tree }}
@@ -67,7 +69,7 @@ jobs:
     runs-on: ci-protected
     enable-openid-connect: true
     needs: [support-selection]
-    if: ${{ needs.support-selection.outputs.build_support_images == 'true' }}
+    if: ${{ needs.support-selection.outputs.build_support_images == 'true' || needs.support-selection.outputs.build_confidential_probe_image == 'true' }}
     env:
       OPENBAO_ROLE: codewire-source-support-publisher
       OPENBAO_AUDIENCE: openbao-codewire-source-support-publisher
@@ -78,15 +80,18 @@ jobs:
 
       - name: Build canonical base image
         id: base
+        if: ${{ needs.support-selection.outputs.build_support_images == 'true' }}
         run: scripts/ci/images/build-push-image.sh base images/base/Dockerfile images/base
 
       - name: Build workspace from exact canonical base
         id: workspace
+        if: ${{ needs.support-selection.outputs.build_support_images == 'true' }}
         env:
           CODEWIRE_BASE_IMAGE_REF: ${{ steps.base.outputs.candidate_ref }}
         run: scripts/ci/images/build-push-image.sh workspace images/workspace/Dockerfile .
 
       - name: Publish verified public support pair without rebuilding
+        if: ${{ needs.support-selection.outputs.build_support_images == 'true' }}
         run: |
           set -euo pipefail
           [[ "${{ steps.base.outputs.source_sha }}" == "$GITHUB_SHA" ]]
@@ -95,4 +100,19 @@ jobs:
             --support-pair \
             "${{ steps.base.outputs.candidate_ref }}" \
             "${{ steps.workspace.outputs.candidate_ref }}" \
+            "$GITHUB_SHA"
+
+      - name: Build confidential bootstrap probe image
+        id: confidential_probe
+        if: ${{ needs.support-selection.outputs.build_confidential_probe_image == 'true' }}
+        run: scripts/ci/images/build-push-image.sh confidential-probe images/confidential-probe/Dockerfile images/confidential-probe
+
+      - name: Publish confidential bootstrap probe without rebuilding
+        if: ${{ needs.support-selection.outputs.build_confidential_probe_image == 'true' }}
+        run: |
+          set -euo pipefail
+          [[ "${{ steps.confidential_probe.outputs.source_sha }}" == "$GITHUB_SHA" ]]
+          scripts/ci/images/publish-image-to-ghcr.sh \
+            "${{ steps.confidential_probe.outputs.candidate_ref }}" \
+            ghcr.io/codewiresh/confidential-probe \
             "$GITHUB_SHA"

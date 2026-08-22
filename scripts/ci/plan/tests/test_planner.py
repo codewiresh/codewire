@@ -315,6 +315,10 @@ class FixtureRepository:
                     "kind": "file-set",
                     "inputs": ["images/base/**"],
                 },
+                "confidential_probe_image": {
+                    "kind": "file-set",
+                    "inputs": ["images/confidential-probe/**"],
+                },
                 "workspace_image": {
                     "kind": "composite",
                     "dependencies": ["base_image", "workspace_cw_binary"],
@@ -544,6 +548,7 @@ dependencies = ["core"]
             self.write(f"deployments/docker/{family}.Cargo.lock", "version = 4\n")
         self.write("images/base/Dockerfile", "FROM fixture-base@sha256:base\n")
         self.write("images/base/entrypoint.sh", "#!/bin/sh\nexec \"$@\"\n", 0o755)
+        self.write("images/confidential-probe/Dockerfile", "FROM fixture-probe@sha256:probe\n")
         self.write("images/workspace/Dockerfile", "FROM ${BASE_IMAGE_REF}\n")
 
     def commit(self, message: str) -> str:
@@ -1176,6 +1181,15 @@ class PlannerFixtureTests(unittest.TestCase):
             self.workspace_states(self.repo.plan()),
             ("unaffected", "unaffected", "affected"),
         )
+
+    def test_confidential_probe_change_affects_only_probe_image(self) -> None:
+        self.repo.change(
+            "images/confidential-probe/Dockerfile",
+            "FROM scratch\n",
+        )
+        artifacts = self.repo.plan()["artifacts"]
+        self.assertEqual(artifacts["confidential_probe_image"]["state"], "affected")
+        self.assertEqual(self.workspace_states(self.repo.plan()), ("unaffected",) * 3)
 
     def test_unrelated_lock_record_does_not_affect_workspace_binary(self) -> None:
         lockfile = (self.repo.root / "Cargo.lock").read_text()

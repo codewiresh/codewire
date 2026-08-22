@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-readonly source_pattern='^nexus-system-cluster\.private\.invalid/oci-promoted/codewire/(dashboard|derp|gateway|services|mesh|base|workspace)@sha256:([0-9a-f]{64})$'
+readonly source_pattern='^nexus-system-cluster\.private\.invalid/oci-promoted/codewire/(dashboard|derp|gateway|services|mesh|base|workspace|confidential-probe)@sha256:([0-9a-f]{64})$'
 
 usage() {
   echo "Usage: $0 SOURCE_DIGEST_REF GHCR_REPOSITORY TAG [TAG...]" >&2

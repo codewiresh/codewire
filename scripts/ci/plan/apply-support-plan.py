@@ -74,29 +74,39 @@ def trusted_outputs(path: Path, expected_head: str, expected_head_tree: str) -> 
 
     base_state = artifact_state(plan, "base_image")
     workspace_state = artifact_state(plan, "workspace_image")
+    confidential_probe_state = artifact_state(plan, "confidential_probe_image")
     validation = baseline.get("validation")
     if not isinstance(validation, dict):
         raise AdapterError("plan baseline validation is malformed")
     valid = validation.get("valid") is True and validation.get("reasons") == []
-    if not valid and (base_state != "unclassified" or workspace_state != "unclassified"):
-        raise AdapterError("invalid baseline did not fail both support artifacts closed")
+    if not valid and any(
+        state != "unclassified"
+        for state in (base_state, workspace_state, confidential_probe_state)
+    ):
+        raise AdapterError("invalid baseline did not fail every support artifact closed")
 
     selected = base_state != "unaffected" or workspace_state != "unaffected"
+    confidential_probe_selected = confidential_probe_state != "unaffected"
     if not valid:
         reason = "baseline_invalid"
-    elif "unclassified" in (base_state, workspace_state):
+    elif "unclassified" in (base_state, workspace_state, confidential_probe_state):
         reason = "artifact_unclassified"
-    elif selected:
+    elif selected or confidential_probe_selected:
         reason = "artifact_affected"
     else:
         reason = "artifacts_unaffected"
 
     return {
         "build_support_images": str(selected).lower(),
+        "build_confidential_probe_image": str(confidential_probe_selected).lower(),
         "reason": reason,
-        "matched_categories": f"base_image:{base_state},workspace_image:{workspace_state}",
+        "matched_categories": (
+            f"base_image:{base_state},workspace_image:{workspace_state},"
+            f"confidential_probe_image:{confidential_probe_state}"
+        ),
         "base_image_state": base_state,
         "workspace_image_state": workspace_state,
+        "confidential_probe_image_state": confidential_probe_state,
         "baseline_sha": require_string(baseline, "baseline_commit", HEX40_RE),
         "head_sha": head,
         "head_tree": head_tree,
@@ -111,10 +121,15 @@ def fail_closed_outputs(head: str, head_tree: str) -> dict[str, str]:
         raise AdapterError("fail-closed head or tree is invalid")
     return {
         "build_support_images": "true",
+        "build_confidential_probe_image": "true",
         "reason": "plan_invalid",
-        "matched_categories": "base_image:unclassified,workspace_image:unclassified",
+        "matched_categories": (
+            "base_image:unclassified,workspace_image:unclassified,"
+            "confidential_probe_image:unclassified"
+        ),
         "base_image_state": "unclassified",
         "workspace_image_state": "unclassified",
+        "confidential_probe_image_state": "unclassified",
         "baseline_sha": head,
         "head_sha": head,
         "head_tree": head_tree,

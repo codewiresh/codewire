@@ -167,6 +167,10 @@
       "kind": "file-set",
       "inputs": ["images/base/**"]
     },
+    "confidential_probe_image": {
+      "kind": "file-set",
+      "inputs": ["images/confidential-probe/**"]
+    },
     "workspace_image": {
       "kind": "composite",
       "dependencies": ["base_image", "workspace_cw_binary"],

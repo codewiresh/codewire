@@ -17,7 +17,7 @@ API_VERSION = "deploy.codewire.sh/v1alpha1"
 KIND = "ImageBundle"
 SOURCE_REPOSITORY = "codewire/codewire"
 FAMILIES = ("dashboard", "derp", "gateway", "services", "mesh")
-PUBLICATION_FAMILIES = FAMILIES + ("base", "workspace")
+PUBLICATION_FAMILIES = FAMILIES + ("base", "workspace", "confidential-probe")
 ENVIRONMENTS = ("dev", "prod")
 IMAGE_REPOSITORIES = {
     family: f"nexus-system-cluster.example.invalid/oci-promoted/codewire/{family}"
