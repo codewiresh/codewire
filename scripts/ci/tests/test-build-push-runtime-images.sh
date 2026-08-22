@@ -50,8 +50,12 @@ if [ "${FAKE_TRANSIENT_REGISTRY_IMAGE:-}" = "$name" ]; then
   count="$(cat "$state")"
   if [ "$count" -lt "$failures" ]; then
     printf '%s\n' "$((count + 1))" >"$state"
-    printf 'unexpected status from HEAD request to https://nexus-system-cluster.example.invalid/v2/oci-promoted/codewire/%s/blobs/sha256:test: 503 Service Temporarily Unavailable\n' \
-      "$name" >&2
+    if [ "$count" -eq 0 ]; then
+      printf 'unexpected status from HEAD request to https://nexus-system-cluster.example.invalid/v2/oci-promoted/codewire/%s/blobs/sha256:test: 503 Service Temporarily Unavailable\n' \
+        "$name" >&2
+    else
+      printf 'login attempt to https://nexus.example.invalid/v2/ failed with status: 503 Service Unavailable\n' >&2
+    fi
     exit 1
   fi
 fi
