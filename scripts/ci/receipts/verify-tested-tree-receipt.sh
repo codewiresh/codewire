@@ -175,14 +175,26 @@ if ! jq -e '
 fi
 
 workflow_path="ci.yaml@refs/pull/${pr_number}/head"
-if ! tested_run="$(jq -er --arg head "$tested_head" --arg path "$workflow_path" '
+native_ref="#${pr_number}"
+if ! tested_run="$(jq -er \
+  --arg head "$tested_head" \
+  --arg path "$workflow_path" \
+  --arg native_ref "$native_ref" '
     [
       .workflow_runs[]
-      | select(.head_sha == $head and .event == "pull_request" and .path == $path)
+      | select((.head_sha // .commit_sha) == $head)
+      | select((.event // .trigger_event) == "pull_request")
+      | select(
+          .path == $path
+          or (.workflow_id == "ci.yaml" and .prettyref == $native_ref)
+        )
+      | select(
+          (.status == "completed" and .conclusion == "success")
+          or (.status == "success" and (.conclusion // "success") == "success")
+        )
     ]
     | sort_by(.id)
     | last
-    | select(.status == "completed" and .conclusion == "success")
     | .id
     | select(type == "number" and . > 0)
     | tostring
@@ -190,36 +202,37 @@ if ! tested_run="$(jq -er --arg head "$tested_head" --arg path "$workflow_path" 
   fallback 'exact-head-run-not-successful'
 fi
 
-run_attempt="$(jq -er --arg head "$tested_head" --arg path "$workflow_path" \
-  --argjson id "$tested_run" '
-    .workflow_runs[]
-    | select(.id == $id and .head_sha == $head and .path == $path)
-    | .run_attempt
-    | select(type == "number" and . > 0)
-  ' "$runs_json")" || fallback 'tested-run-attempt-unavailable'
-
 jobs_json="$tmp/jobs.json"
 api_get "/actions/runs/${tested_run}/jobs?page=1&limit=100" "$jobs_json" \
   || fallback 'tested-run-jobs-unavailable'
 
-if ! required_job_id="$(jq -er --arg head "$tested_head" --argjson attempt "$run_attempt" '
+if ! required_job="$(jq -cer --arg head "$tested_head" --argjson run "$tested_run" '
     select(.total_count | type == "number" and . >= 0 and . <= 100)
     | [
         .jobs[]
         | select(
             .name == "Required verification"
-            and .head_sha == $head
-            and .run_attempt == $attempt
+            and (.head_sha // $head) == $head
+            and (.run_id // $run) == $run
+            and (
+              (.status == "completed" and .conclusion == "success")
+              or (.status == "success" and (.conclusion // "success") == "success")
+            )
           )
       ]
     | select(length == 1)
     | .[0]
-    | select(.status == "completed" and .conclusion == "success")
-    | .id
-    | select(type == "number" and . > 0)
+    | {
+        id: (.id | select(type == "number" and . > 0)),
+        attempt: ((.run_attempt // .attempt) | select(type == "number" and . > 0))
+      }
   ' "$jobs_json")"; then
   fallback 'required-verification-not-successful'
 fi
+required_job_id="$(jq -er '.id' <<<"$required_job")" \
+  || fallback 'required-verification-job-invalid'
+run_attempt="$(jq -er '.attempt' <<<"$required_job")" \
+  || fallback 'tested-run-attempt-unavailable'
 [[ "$required_job_id" =~ ^[1-9][0-9]*$ ]] \
   || fallback 'required-verification-job-invalid'
 

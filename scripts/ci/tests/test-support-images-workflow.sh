@@ -29,8 +29,8 @@ if grep -Fq 'CODEWIRE_GHCR_PUBLISH_ENABLED' "$WORKFLOW"; then
   fail 'support GHCR publication retains its rollout flag'
 fi
 selection_job="$(sed -n '/^  support-selection:/,/^  publish-support-images:/p' "$WORKFLOW")"
-grep -Fq '    runs-on: ci-lite' <<<"$selection_job" ||
-  fail 'support selection does not use the ci-lite profile'
+grep -Fq '    runs-on: ci-protected' <<<"$selection_job" ||
+  fail 'support selection does not receive the pinned Skopeo capability'
 if grep -Fq 'enable-openid-connect: true' <<<"$selection_job"; then
   fail 'support selection can request publisher OIDC'
 fi

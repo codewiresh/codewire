@@ -7,9 +7,10 @@ on:
 
 jobs:
   deploy-selection:
-    # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this trusted planner has no write-capable integration or OIDC.
+    # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this trusted planner receives only the read-only Deploy baseline integration.
     name: Deploy selection
     runs-on: ci-lite
+    enable-openid-connect: true
     timeout-minutes: 15
     outputs:
       deploy_dev: ${{ steps.select.outputs.deploy_dev }}

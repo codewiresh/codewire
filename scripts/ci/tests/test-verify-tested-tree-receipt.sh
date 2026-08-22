@@ -118,6 +118,9 @@ case "$url" in
       run_failed)
         body="{\"workflow_runs\":[{\"id\":501,\"path\":\"ci.yaml@refs/pull/${FIXTURE_PR_NUMBER}/head\",\"event\":\"pull_request\",\"run_attempt\":1,\"head_sha\":\"${FIXTURE_HEAD_SHA}\",\"status\":\"completed\",\"conclusion\":\"failure\"}],\"total_count\":1}"
         ;;
+      native_success)
+        body="{\"workflow_runs\":[{\"id\":501,\"workflow_id\":\"ci.yaml\",\"event\":\"pull_request\",\"commit_sha\":\"${FIXTURE_HEAD_SHA}\",\"prettyref\":\"#${FIXTURE_PR_NUMBER}\",\"status\":\"success\"}],\"total_count\":1}"
+        ;;
       *)
         body="{\"workflow_runs\":[{\"id\":501,\"path\":\"ci.yaml@refs/pull/${FIXTURE_PR_NUMBER}/head\",\"event\":\"pull_request\",\"run_attempt\":1,\"head_sha\":\"${FIXTURE_HEAD_SHA}\",\"status\":\"completed\",\"conclusion\":\"success\"}],\"total_count\":1}"
         ;;
@@ -131,7 +134,11 @@ case "$url" in
       required_failed) conclusion=failure ;;
       required_skipped) conclusion=skipped ;;
     esac
-    body="{\"jobs\":[{\"id\":601,\"name\":\"${name}\",\"run_attempt\":1,\"head_sha\":\"${FIXTURE_HEAD_SHA}\",\"status\":\"completed\",\"conclusion\":\"${conclusion}\"}],\"total_count\":1}"
+    if [ "$mode" = native_success ]; then
+      body="{\"jobs\":[{\"id\":601,\"run_id\":501,\"name\":\"${name}\",\"attempt\":1,\"status\":\"success\"}],\"total_count\":1}"
+    else
+      body="{\"jobs\":[{\"id\":601,\"name\":\"${name}\",\"run_attempt\":1,\"head_sha\":\"${FIXTURE_HEAD_SHA}\",\"status\":\"completed\",\"conclusion\":\"${conclusion}\"}],\"total_count\":1}"
+    fi
     ;;
   */actions/jobs/601/logs)
     case "$mode" in
@@ -219,6 +226,7 @@ run_case() {
 
 run_case accepted accepted "$good_merge" 42 "$tested_head" success
 run_case accepted_merge accepted "$good_merge_commit" 42 "$tested_head" success
+run_case accepted_native accepted "$good_merge_commit" 42 "$tested_head" native_success
 run_case tree_mismatch fallback "$tree_mismatch_merge" 42 "$tested_head" success
 run_case wrong_parent fallback "$wrong_parent_merge" 42 "$tested_head" success
 run_case wrong_merge_head fallback "$wrong_merge_head" 42 "$tested_head" success
