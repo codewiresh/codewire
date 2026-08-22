@@ -108,6 +108,13 @@ case "$url" in
     esac
     ;;
   */actions/runs\?*)
+    case "$url" in
+      *"head_sha=${FIXTURE_HEAD_SHA}"*'workflow_id=ci.yaml'*) ;;
+      *)
+        echo "actions run lookup is not bound to the exact head and workflow: $url" >&2
+        exit 2
+        ;;
+    esac
     case "$mode" in
       missing_run)
         body='{"workflow_runs":[],"total_count":0}'
@@ -120,6 +127,16 @@ case "$url" in
         ;;
       native_success)
         body="{\"workflow_runs\":[{\"id\":501,\"workflow_id\":\"ci.yaml\",\"event\":\"pull_request\",\"commit_sha\":\"${FIXTURE_HEAD_SHA}\",\"prettyref\":\"#${FIXTURE_PR_NUMBER}\",\"status\":\"success\"}],\"total_count\":1}"
+        ;;
+      synchronized_pr_success)
+        case "$url" in
+          *'event=pull_request'*)
+            body='{"workflow_runs":[],"total_count":0}'
+            ;;
+          *)
+            body="{\"workflow_runs\":[{\"id\":501,\"workflow_id\":\"ci.yaml\",\"event\":\"pull_request\",\"commit_sha\":\"${FIXTURE_HEAD_SHA}\",\"prettyref\":\"#${FIXTURE_PR_NUMBER}\",\"status\":\"success\"}],\"total_count\":1}"
+            ;;
+        esac
         ;;
       *)
         body="{\"workflow_runs\":[{\"id\":501,\"path\":\"ci.yaml@refs/pull/${FIXTURE_PR_NUMBER}/head\",\"event\":\"pull_request\",\"run_attempt\":1,\"head_sha\":\"${FIXTURE_HEAD_SHA}\",\"status\":\"completed\",\"conclusion\":\"success\"}],\"total_count\":1}"
@@ -233,6 +250,7 @@ run_case() {
 run_case accepted accepted "$good_merge" 42 "$tested_head" success
 run_case accepted_merge accepted "$good_merge_commit" 42 "$tested_head" success
 run_case accepted_native accepted "$good_merge_commit" 42 "$tested_head" native_success
+run_case accepted_synchronized_pr accepted "$good_merge_commit" 42 "$tested_head" synchronized_pr_success
 run_case native_jobs_unbounded fallback "$good_merge_commit" 42 "$tested_head" native_jobs_unbounded
 run_case tree_mismatch fallback "$tree_mismatch_merge" 42 "$tested_head" success
 run_case wrong_parent fallback "$wrong_parent_merge" 42 "$tested_head" success
