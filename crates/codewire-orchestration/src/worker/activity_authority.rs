@@ -310,6 +310,37 @@ impl ActivityAuthority {
         Ok(())
     }
 
+    /// Lock lifecycle intent while allowing a separate provider connection to
+    /// insert rows that reference this immutable environment identifier.
+    ///
+    /// PostgreSQL foreign-key validation takes `KEY SHARE` on the parent row.
+    /// `FOR NO KEY UPDATE` still conflicts with every lifecycle intent update
+    /// while avoiding a self-deadlock when external-provider bookkeeping uses
+    /// another pooled connection under this guard.
+    async fn lock_external_mutation_transaction_for_states(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        states: &[&str],
+    ) -> anyhow::Result<()> {
+        let current: Option<(String, String, i64)> = sqlx::query_as(
+            "SELECT desired_state, state, environment_operation_generation
+               FROM environments WHERE id = $1 FOR NO KEY UPDATE",
+        )
+        .bind(&self.environment_id)
+        .fetch_optional(&mut **tx)
+        .await?;
+        let Some((desired_state, state, generation)) = current else {
+            return Err(AuthorityLost.into());
+        };
+        if desired_state != self.desired_state
+            || self.operation_generation != generation
+            || !states.contains(&state.as_str())
+        {
+            return Err(AuthorityLost.into());
+        }
+        Ok(())
+    }
+
     /// Execute one durable mutation under the environment authority lock.
     pub async fn execute<'q>(
         &self,
@@ -359,7 +390,8 @@ impl ActivityAuthority {
             sqlx::query("SET LOCAL idle_in_transaction_session_timeout = '35s'")
                 .execute(&mut *tx)
                 .await?;
-            self.lock_transaction_for_states(&mut tx, states).await?;
+            self.lock_external_mutation_transaction_for_states(&mut tx, states)
+                .await?;
             Ok(ExternalMutationGuard { tx })
         })
         .await
@@ -456,7 +488,7 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires TEST_DATABASE_URL"]
-    async fn generation_claim_is_retry_idempotent_and_old_runs_cannot_reclaim() {
+    async fn generation_claim_and_external_mutation_locking_are_fenced() {
         let database_url =
             std::env::var("TEST_DATABASE_URL").expect("ignored DB test requires TEST_DATABASE_URL");
         let pool = PgPool::connect(&database_url).await.unwrap();
@@ -587,9 +619,51 @@ mod tests {
         .unwrap();
         assert_eq!(stale_log_count, 0);
 
-        ActivityAuthority::capture(&pool, &environment_id, replacement)
+        let current_authority = ActivityAuthority::capture(&pool, &environment_id, replacement)
             .await
             .expect("current generation retains authority");
+
+        let guard = current_authority
+            .begin_external_mutation(&["running"])
+            .await
+            .unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            sqlx::query(
+                "INSERT INTO confidential_storage_keys
+                        (environment_id, kbs_uri, infisical_path, version, state)
+                 VALUES ($1, $2, $3, 1, 'provisioning')",
+            )
+            .bind(&environment_id)
+            .bind(format!(
+                "kbs:///default/codewire-workspace-luks/{environment_id}"
+            ))
+            .bind(format!("/confidential-storage/{environment_id}"))
+            .execute(&pool),
+        )
+        .await
+        .expect("child foreign-key insert blocked behind its own authority guard")
+        .unwrap();
+
+        let mut competing = pool.begin().await.unwrap();
+        sqlx::query("SET LOCAL lock_timeout = '100ms'")
+            .execute(&mut *competing)
+            .await
+            .unwrap();
+        let error = sqlx::query("UPDATE environments SET desired_state = 'stopped' WHERE id = $1")
+            .bind(&environment_id)
+            .execute(&mut *competing)
+            .await
+            .unwrap_err();
+        match error {
+            sqlx::Error::Database(database) => {
+                assert_eq!(database.code().as_deref(), Some("55P03"));
+            }
+            other => panic!("expected PostgreSQL lock timeout, got {other}"),
+        }
+        competing.rollback().await.unwrap();
+        guard.commit().await.unwrap();
+
         let stale = ActivityAuthority::capture(&pool, &environment_id, old)
             .await
             .unwrap_err();
