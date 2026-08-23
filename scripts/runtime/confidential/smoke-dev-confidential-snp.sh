@@ -5,6 +5,8 @@ umask 077
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 KUBECTL_BIN="${KUBECTL_BIN:-kubectl}"
 
+CODEWIRE_SERVER_URL="${CODEWIRE_SERVER_URL:-https://codewire-dev.sh}"
+EXPECTED_CODEWIRE_DEV_SERVER_URL="${EXPECTED_CODEWIRE_DEV_SERVER_URL:-https://codewire-dev.sh}"
 KUBE_CONTEXT="${KUBE_CONTEXT:-dev-cluster}"
 NODE="${CONFIDENTIAL_SNP_NODE:-cw-dev-prod-node-1}"
 COMMODITY_NODE="${CONFIDENTIAL_COMMODITY_NODE:-dev-node-1}"
@@ -469,12 +471,15 @@ run_product_command() {
   if [[ "$COCO_FULL_PRODUCT" == "1" ]]; then
     [[ -z "${SMOKE_IMAGE:-}" || "$SMOKE_IMAGE" == "$COCO_WORKSPACE_IMAGE" ]] || \
       die "full-product CoCo proof requires the workspace image derived from the active source SHA"
-    smoke_args=(--image "$COCO_WORKSPACE_IMAGE")
+    # smoke-dev-commodity.sh consumes the image through SMOKE_IMAGE; it has no
+    # --image option.
   else
     smoke_args=(--skip-docker --skip-ssh --only kube --only exec --only coco)
   fi
 
-  SMOKE_NAME="${SMOKE_NAME:-confidential-snp-$(date -u +%Y%m%d%H%M%S)}" \
+  CODEWIRE_SERVER_URL="$CODEWIRE_SERVER_URL" \
+    EXPECTED_CODEWIRE_DEV_SERVER_URL="$EXPECTED_CODEWIRE_DEV_SERVER_URL" \
+    SMOKE_NAME="${SMOKE_NAME:-confidential-snp-$(date -u +%Y%m%d%H%M%S)}" \
     SMOKE_IMAGE="${SMOKE_IMAGE:-$COCO_WORKSPACE_IMAGE}" \
     SMOKE_MEMORY="${SMOKE_MEMORY:-$COCO_SMOKE_MEMORY}" \
     SMOKE_DISK="${SMOKE_DISK:-$COCO_SMOKE_DISK}" \
