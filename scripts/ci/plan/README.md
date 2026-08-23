@@ -28,10 +28,12 @@ matching immutable pair whose revision is an ancestor of the exact head.
 `apply-support-plan.py` preserves pair atomicity: if either artifact is not
 proven unaffected, both are selected.
 
-The workspace image also depends on the confidential-workspace acceptance
-contract. Changes to its Dev activation manifests or runtime smoke tooling
-therefore publish an exact-source workspace image even when the `cw` binary is
-unchanged. File-set and composite inputs are explicit ownership rules, so they
+The workspace image also depends on the complete Dev release selection: the
+release tree, all five runtime images, and the confidential-workspace
+acceptance contract. Every source selected for Dev therefore publishes an
+exact-source workspace image even when the `cw` binary is unchanged. A source
+that does not select Dev and does not affect the support pair remains
+skippable. File-set and composite inputs are explicit ownership rules, so they
 do not make unrelated Rust artifacts unclassified.
 
 `apply-verification-plan.py` validates the plan and emits only the three
