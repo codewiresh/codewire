@@ -46,9 +46,10 @@ spec:
                 name: codewire-config
             - secretRef:
                 name: codewire-secrets
-            # Infra owns these non-secret IDs, URLs, and the public KBS CA.
+            # Infra owns these non-secret IDs, URLs, and runtime settings.
             # They remain optional so standard deployments do not depend on
-            # the disabled confidential-storage stack.
+            # the disabled confidential-storage stack. The public KBS CA has
+            # a separate trust-manager-owned ConfigMap mounted below.
             - configMapRef:
                 name: codewire-confidential-storage-infisical
                 optional: true
@@ -98,7 +99,7 @@ spec:
             - name: confidential-storage-kbs-admin
               mountPath: /var/run/secrets/codewire-confidential-storage
               readOnly: true
-            - name: confidential-storage-kbs-config
+            - name: confidential-storage-kbs-ca
               mountPath: /etc/codewire/confidential-storage-kbs
               readOnly: true
       volumes:
@@ -109,9 +110,9 @@ spec:
             items:
               - key: CONFIDENTIAL_STORAGE_KBS_ADMIN_TOKEN
                 path: kbs-admin-token
-        - name: confidential-storage-kbs-config
+        - name: confidential-storage-kbs-ca
           configMap:
-            name: codewire-confidential-storage-kbs
+            name: codewire-trustee-kbs-ca
             optional: true
 ---
 apiVersion: v1

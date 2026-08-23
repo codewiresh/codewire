@@ -1059,6 +1059,7 @@ def has_unknown_reachable_path(
     before: RustFingerprint,
     after: RustFingerprint,
     known_artifact_directories: set[str],
+    known_non_rust_artifact_inputs: Iterable[str],
     non_artifact_inputs: Iterable[str],
     exact_head_policy_paths: set[str],
 ) -> str | None:
@@ -1084,6 +1085,11 @@ def has_unknown_reachable_path(
             continue
         if any(
             fnmatch.fnmatchcase(path, pattern) for pattern in non_artifact_inputs
+        ):
+            continue
+        if any(
+            fnmatch.fnmatchcase(path, pattern)
+            for pattern in known_non_rust_artifact_inputs
         ):
             continue
         if path in analyzed or path in known_root_inputs or path.endswith("/Cargo.lock"):
@@ -1534,6 +1540,15 @@ def plan(
                     for candidate in graph["artifacts"].values()
                     if candidate.get("kind") in {"rust-package", "rust-cache"}
                 }
+                known_non_rust_artifact_inputs = {
+                    pattern
+                    for candidate in graph["artifacts"].values()
+                    if candidate.get("kind") in {"file-set", "composite"}
+                    for pattern in normalized_input_patterns(
+                        candidate,
+                        candidate.get("kind", "artifact"),
+                    )
+                }
                 baseline_index = TreeIndex(baseline_tree)
                 head_index = TreeIndex(head_tree)
                 baseline_fingerprints: dict[str, ArtifactFingerprint | RustFingerprint] = {}
@@ -1638,6 +1653,7 @@ def plan(
                                 before,
                                 after,
                                 known_artifact_directories,
+                                known_non_rust_artifact_inputs,
                                 non_artifact_inputs,
                                 exact_head_policy_paths,
                             )

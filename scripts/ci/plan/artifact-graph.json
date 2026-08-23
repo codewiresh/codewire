@@ -171,9 +171,25 @@
       "kind": "file-set",
       "inputs": ["images/confidential-probe/**"]
     },
+    "confidential_workspace_acceptance_contract": {
+      "kind": "file-set",
+      "inputs": [
+        "deployments/k8s/orchestration/deployment.yaml",
+        "deployments/k8s/overlays/dev/config-runtime-profile.yaml",
+        "deployments/k8s/overlays/dev/config-runtime-profile-commodity.yaml",
+        "deployments/k8s/overlays/dev/config-runtime-profile-confidential-snp.yaml",
+        "deployments/k8s/runtime-profiles/confidential/**",
+        "deployments/k8s/runtime-profiles/confidential-smoke/**",
+        "scripts/runtime/confidential/**"
+      ]
+    },
     "workspace_image": {
       "kind": "composite",
-      "dependencies": ["base_image", "workspace_cw_binary"],
+      "dependencies": [
+        "base_image",
+        "workspace_cw_binary",
+        "confidential_workspace_acceptance_contract"
+      ],
       "inputs": ["images/workspace/**"]
     }
   }
