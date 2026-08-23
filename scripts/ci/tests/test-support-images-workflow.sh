@@ -81,10 +81,12 @@ for output in build_support_images build_confidential_probe_image reason matched
   grep -Fq "      ${output}: \${{ steps.select.outputs.${output} }}" <<<"$selection_job" ||
     fail "support selection omits ${output} planner output"
 done
-grep -Fq "if: \${{ needs.support-selection.outputs.build_support_images == 'true' || needs.support-selection.outputs.build_confidential_probe_image == 'true' }}" \
-  "$WORKFLOW" || fail 'support publication job is not gated by the two independent selections'
-grep -qF 'needs: [support-selection]' "$WORKFLOW" ||
-  fail 'support build does not wait for support selection'
+grep -Fq "if: \${{ needs.support-selection.outputs.build_support_images == 'true' }}" \
+  "$WORKFLOW" || fail 'support-pair publication is not independently selected'
+grep -Fq "if: \${{ needs.support-selection.outputs.build_confidential_probe_image == 'true' }}" \
+  "$WORKFLOW" || fail 'confidential-probe publication is not independently selected'
+[[ "$(grep -Fc 'needs: [support-selection]' "$WORKFLOW")" -eq 2 ]] ||
+  fail 'independent publisher jobs do not both wait for support selection'
 grep -qF 'scripts/ci/images/build-push-image.sh base images/base/Dockerfile images/base' \
   "$WORKFLOW" || fail 'base is not built by the canonical Gitea helper'
 # shellcheck disable=SC2016
@@ -94,47 +96,60 @@ grep -qF 'scripts/ci/images/build-push-image.sh workspace images/workspace/Docke
   "$WORKFLOW" || fail 'workspace is not built by the canonical Gitea helper'
 grep -qF 'scripts/ci/images/build-push-image.sh confidential-probe images/confidential-probe/Dockerfile images/confidential-probe' \
   "$WORKFLOW" || fail 'confidential probe is not built by the canonical Gitea helper'
-publish_job="$(sed -n '/^  publish-support-images:/,$p' "$WORKFLOW")"
+publish_job="$(sed -n '/^  publish-support-images:/,/^  publish-confidential-probe:/p' "$WORKFLOW")"
+probe_job="$(sed -n '/^  publish-confidential-probe:/,$p' "$WORKFLOW")"
 grep -Fq '    runs-on: ci-protected' <<<"$publish_job" ||
-  fail 'support publisher does not use the protected CI tier'
+  fail 'support-pair publisher does not use the protected CI tier'
+grep -Fq '    runs-on: ci-protected' <<<"$probe_job" ||
+  fail 'confidential-probe publisher does not use the protected CI tier'
 grep -Fq '    enable-openid-connect: true' <<<"$publish_job" ||
-  fail 'support publisher lacks job-scoped OIDC'
-[[ "$(grep -Fc 'enable-openid-connect: true' "$WORKFLOW")" -eq 1 ]] ||
-  fail 'support workflow exposes OIDC outside the one publisher job'
+  fail 'support-pair publisher lacks job-scoped OIDC'
+grep -Fq '    enable-openid-connect: true' <<<"$probe_job" ||
+  fail 'confidential-probe publisher lacks job-scoped OIDC'
+[[ "$(grep -Fc 'enable-openid-connect: true' "$WORKFLOW")" -eq 2 ]] ||
+  fail 'support workflow exposes OIDC outside the two publisher jobs'
 grep -qF 'needs: [support-selection]' <<<"$publish_job" ||
-  fail 'support publisher is not bound to selection'
-grep -Fq 'OPENBAO_GHCR_ROLE: codewire-source-support-publisher' \
-  "$WORKFLOW" || fail 'support publisher lacks its exact OpenBao GHCR role'
+  fail 'support-pair publisher is not bound to selection'
+grep -qF 'needs: [support-selection]' <<<"$probe_job" ||
+  fail 'confidential-probe publisher is not bound to selection'
+[[ "$(grep -Fc 'OPENBAO_GHCR_ROLE: codewire-source-support-publisher' "$WORKFLOW")" -eq 2 ]] ||
+  fail 'publisher jobs lack their exact OpenBao GHCR role'
 grep -Fq 'OPENBAO_GHCR_AUDIENCE: openbao-codewire-source-support-publisher' \
-  <<<"$publish_job" || fail 'support publisher lacks its exact OpenBao GHCR audience'
+  <<<"$publish_job" || fail 'support-pair publisher lacks its exact OpenBao GHCR audience'
+grep -Fq 'OPENBAO_GHCR_AUDIENCE: openbao-codewire-source-support-publisher' \
+  <<<"$probe_job" || fail 'confidential-probe publisher lacks its exact OpenBao GHCR audience'
 if grep -Fq 'GHCR_PUBLISH_USERNAME:' "$WORKFLOW"; then
   fail 'support workflow retains a split Forgejo GHCR username'
 fi
-[[ "$(grep -Fc 'scripts/ci/images/publish-image-to-ghcr.sh' <<<"$publish_job")" -eq 2 ]] ||
-  fail 'support publisher does not expose exactly the pair and confidential-probe publication boundaries'
+[[ "$(grep -Fc 'scripts/ci/images/publish-image-to-ghcr.sh' <<<"$publish_job")" -eq 1 ]] ||
+  fail 'support-pair publisher does not expose exactly one publication boundary'
+[[ "$(grep -Fc 'scripts/ci/images/publish-image-to-ghcr.sh' <<<"$probe_job")" -eq 1 ]] ||
+  fail 'confidential-probe publisher does not expose exactly one publication boundary'
 grep -Fq -- '--support-pair' <<<"$publish_job" ||
   fail 'support publisher does not require pair preflight and ordering'
 # shellcheck disable=SC2016
 [[ "$(grep -Fc 'steps.' <<<"$publish_job" | tr -d '[:space:]')" -gt 0 ]] ||
   fail 'support publisher does not consume same-job step outputs'
-[[ "$(grep -Fc 'outputs.source_sha }}" == "$GITHUB_SHA"' <<<"$publish_job")" -eq 3 ]] ||
-  fail 'support publisher does not verify all exact build sources'
-if grep -Fq 'needs.build-' <<<"$publish_job"; then
-  fail 'support publisher still crosses a runner job-output boundary'
+[[ "$(grep -Fc 'outputs.source_sha }}" == "$GITHUB_SHA"' <<<"$publish_job")" -eq 2 ]] ||
+  fail 'support-pair publisher does not verify both exact build sources'
+[[ "$(grep -Fc 'outputs.source_sha }}" == "$GITHUB_SHA"' <<<"$probe_job")" -eq 1 ]] ||
+  fail 'confidential-probe publisher does not verify its exact build source'
+if grep -Fq 'needs.build-' <<<"$publish_job$probe_job"; then
+  fail 'publisher still crosses a runner job-output boundary'
 fi
 # shellcheck disable=SC2016
-grep -Fq '"${{ steps.confidential_probe.outputs.candidate_ref }}"' <<<"$publish_job" ||
-  fail 'support publisher omits the immutable confidential-probe candidate'
-grep -Fq 'ghcr.io/codewiresh/confidential-probe' <<<"$publish_job" ||
-  fail 'support publisher omits the public confidential-probe repository'
+grep -Fq '"${{ steps.confidential_probe.outputs.candidate_ref }}"' <<<"$probe_job" ||
+  fail 'confidential-probe publisher omits the immutable candidate'
+grep -Fq 'ghcr.io/codewiresh/confidential-probe' <<<"$probe_job" ||
+  fail 'confidential-probe publisher omits the public repository'
 # shellcheck disable=SC2016
 grep -Fq '"${{ steps.base.outputs.candidate_ref }}"' <<<"$publish_job" ||
   fail 'support publisher omits the immutable base candidate'
 # shellcheck disable=SC2016
 grep -Fq '"${{ steps.workspace.outputs.candidate_ref }}"' <<<"$publish_job" ||
   fail 'support publisher omits the immutable workspace candidate'
-if grep -Fq 'secrets.' <<<"$publish_job"; then
-  fail 'support publisher bypasses the OpenBao OIDC credential handoff'
+if grep -Fq 'secrets.' <<<"$publish_job$probe_job"; then
+  fail 'publisher bypasses the OpenBao OIDC credential handoff'
 fi
 grep -qF -- '-p codewire-cli-bin --bin cw' "$WORKSPACE_DOCKERFILE" ||
   fail 'workspace builds cw from the wrong Rust package'
