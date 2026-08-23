@@ -55,18 +55,6 @@ patches:
     target:
       kind: Deployment
       name: codewire-orchestration
-  # Remove Infisical-secret resources from the local overlay so kind can run
-  # without external Infisical auth/bootstrap.
-  - patch: |-
-      $patch: delete
-      apiVersion: secrets.infisical.com/v1alpha1
-      kind: InfisicalSecret
-      metadata:
-        name: unused
-    target:
-      group: secrets.infisical.com
-      version: v1alpha1
-      kind: InfisicalSecret
   # Remove base ingress resources; local kind uses a hostless ingress shape
   # that matches current 127.0.0.1:8080 / 127.0.0.1:8443 workflows.
   - patch: |-

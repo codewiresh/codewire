@@ -615,6 +615,17 @@ run_deploy() {
     kustomize build "$overlay" >/dev/null
   done
 
+  local runtime_overlay runtime_manifest
+  for runtime_overlay in \
+      deployments/k8s/overlays/dev deployments/k8s/overlays/production; do
+    runtime_manifest="$(kustomize build "$runtime_overlay")"
+    if grep -Eq '^(apiVersion: secrets\.infisical\.com/|kind: InfisicalSecret)$' \
+        <<<"$runtime_manifest"; then
+      echo "::error::retired application Infisical projection rendered from ${runtime_overlay}" >&2
+      return 1
+    fi
+  done
+
   local dashboard_manifest dashboard_source
   for dashboard_source in \
       deployments/k8s/dashboard/deployment.yaml \

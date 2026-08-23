@@ -56,16 +56,6 @@ patches:
       name: codewire-orchestration
   - patch: |-
       $patch: delete
-      apiVersion: secrets.infisical.com/v1alpha1
-      kind: InfisicalSecret
-      metadata:
-        name: unused
-    target:
-      group: secrets.infisical.com
-      version: v1alpha1
-      kind: InfisicalSecret
-  - patch: |-
-      $patch: delete
       apiVersion: networking.k8s.io/v1
       kind: Ingress
       metadata:
