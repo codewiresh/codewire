@@ -28,6 +28,12 @@ matching immutable pair whose revision is an ancestor of the exact head.
 `apply-support-plan.py` preserves pair atomicity: if either artifact is not
 proven unaffected, both are selected.
 
+The workspace image also depends on the confidential-workspace acceptance
+contract. Changes to its Dev activation manifests or runtime smoke tooling
+therefore publish an exact-source workspace image even when the `cw` binary is
+unchanged. File-set and composite inputs are explicit ownership rules, so they
+do not make unrelated Rust artifacts unclassified.
+
 `apply-verification-plan.py` validates the plan and emits only the three
 artifact-job facts used by CI. `emit-verification-receipt.py` binds a successful
 Required-verification job to its exact base, head, and tree. Post-merge reuse

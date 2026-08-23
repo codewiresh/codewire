@@ -3,6 +3,7 @@ set -euo pipefail
 umask 077
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+KUBECTL_BIN="${KUBECTL_BIN:-kubectl}"
 
 KUBE_CONTEXT="${KUBE_CONTEXT:-dev-cluster}"
 NODE="${CONFIDENTIAL_SNP_NODE:-cw-dev-prod-node-1}"
@@ -130,7 +131,11 @@ while [[ "$#" -gt 0 ]]; do
 done
 
 require_cmd() {
-  command -v "$1" >/dev/null 2>&1 || die "missing required command: $1"
+  if [[ "$1" == */* ]]; then
+    [[ -x "$1" ]] || die "missing required command: $1"
+  else
+    command -v "$1" >/dev/null 2>&1 || die "missing required command: $1"
+  fi
 }
 
 require_bool01() {
@@ -146,11 +151,13 @@ done
   die "--expect-refusal requires the Codewire product smoke"
 
 require_cmd jq
-require_cmd kubectl
+require_cmd "$KUBECTL_BIN"
 require_cmd rg
-require_cmd skopeo
 require_cmd base64
 require_cmd sha256sum
+if [[ "$RUN_COCO_PRODUCT" == "1" ]]; then
+  require_cmd skopeo
+fi
 
 if [[ -z "${KUBECONFIG:-}" && -f "$HOME/src/infra/kubeconfig-oidc.yaml" ]]; then
   export KUBECONFIG="$HOME/src/infra/kubeconfig-oidc.yaml"
@@ -167,9 +174,9 @@ chmod 700 "$EVIDENCE_DIR"
 
 kubectl_dev() {
   if [[ -n "$KUBE_CONTEXT" ]]; then
-    kubectl --context "$KUBE_CONTEXT" "$@"
+    "$KUBECTL_BIN" --context "$KUBE_CONTEXT" "$@"
   else
-    kubectl "$@"
+    "$KUBECTL_BIN" "$@"
   fi
 }
 
@@ -280,6 +287,11 @@ resolve_active_release() {
   assert_jq "Flux confidential-smoke control is not active" \
     '.data.phase == "confidential-snp"' \
     "$EVIDENCE_DIR/$SMOKE_CONTROL_CONFIGMAP.json"
+
+  if [[ "$RUN_COCO_PRODUCT" != "1" ]]; then
+    log "skipping product release image resolution"
+    return 0
+  fi
 
   deployment_json="$EVIDENCE_DIR/codewire-orchestration-deployment.json"
   kubectl_dev -n "$CODEWIRE_SERVER_NAMESPACE" get deployment codewire-orchestration -o json \

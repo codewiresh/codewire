@@ -11,6 +11,7 @@ PROFILE="$ROOT/deployments/k8s/overlays/dev/config-runtime-profile.yaml"
 COMMODITY_PROFILE="$ROOT/deployments/k8s/overlays/dev/config-runtime-profile-commodity.yaml"
 CONFIDENTIAL_PROFILE="$ROOT/deployments/k8s/overlays/dev/config-runtime-profile-confidential-snp.yaml"
 SMOKE_DIR="$ROOT/deployments/k8s/runtime-profiles/confidential-smoke"
+ORCHESTRATION_DEPLOYMENT="$ROOT/deployments/k8s/orchestration/deployment.yaml"
 
 if cmp -s "$PROFILE" "$COMMODITY_PROFILE"; then
   active_profile=commodity
@@ -71,6 +72,9 @@ rg -F 'chmod 700 "$EVIDENCE_DIR"' "$SMOKE" >/dev/null
 rg -F 'expected exactly one $label Job matching $selector' "$SMOKE" >/dev/null
 rg -F 'jq -er -f "$RUNTIME_CONFIGMAP_SELECTOR" "$deployment_json"' "$SMOKE" >/dev/null
 rg -F 'phase == "confidential-snp"' "$SMOKE" >/dev/null
+rg -F 'if [[ "$RUN_COCO_PRODUCT" != "1" ]]; then' "$SMOKE" >/dev/null
+rg -F 'log "skipping product release image resolution"' "$SMOKE" >/dev/null
+rg -F 'if [[ "$RUN_COCO_PRODUCT" == "1" ]]; then' "$SMOKE" >/dev/null
 rg -F 'nexus\.example\.invalid/oci-approved/codewire/gateway@sha256:' "$SMOKE" >/dev/null
 if rg -F 'git\.example\.invalid/codewire/gateway@sha256:' "$SMOKE" "$RESOLVER"; then
   printf 'confidential smoke accepts the retired Gitea gateway authority\n' >&2
@@ -217,6 +221,15 @@ runtime_configmap="$({
   exit 1
 }
 
+[[ "$(yq -er '.spec.template.spec.volumes[] | select(.name == "confidential-storage-kbs-ca") | .configMap.name' "$ORCHESTRATION_DEPLOYMENT")" == "codewire-trustee-kbs-ca" ]] || {
+  printf 'orchestration does not mount the dedicated trust-manager KBS CA ConfigMap\n' >&2
+  exit 1
+}
+[[ "$(yq -er '.spec.template.spec.containers[] | select(.name == "orchestration") | .volumeMounts[] | select(.name == "confidential-storage-kbs-ca") | .mountPath' "$ORCHESTRATION_DEPLOYMENT")" == "/etc/codewire/confidential-storage-kbs" ]] || {
+  printf 'orchestration KBS CA mount path changed\n' >&2
+  exit 1
+}
+
 if jq -n '{
   spec: {template: {spec: {containers: [{envFrom: [
     {configMapRef: {name: "codewire-config-25gbmh4k4h"}},
@@ -270,6 +283,81 @@ mapfile -t rendered_probe_images < <(
   exit 1
 }
 rm -rf "$activation_dir"
+trap - EXIT
+
+mkdir -p "$ROOT/.tmp"
+bootstrap_dir="$(mktemp -d "$ROOT/.tmp/codewire-confidential-bootstrap-contract.XXXXXX")"
+trap 'rm -rf "$bootstrap_dir"' EXIT
+mkdir -p "$bootstrap_dir/bin" "$bootstrap_dir/evidence"
+cat >"$bootstrap_dir/bin/kubectl" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" == "--context" ]]; then
+  shift 2
+fi
+case "$*" in
+  'get runtimeclass commodity confidential -o json')
+    jq -n '{items: [
+      {metadata: {name: "commodity"}, handler: "kata-clh"},
+      {metadata: {name: "confidential"}, handler: "kata-qemu-snp", scheduling: {nodeSelector: {"node.codewire.sh/confidential-snp": "true"}}}
+    ]}'
+    ;;
+  'get runtimeclass commodity confidential -o yaml')
+    printf '%s\n' 'items: []'
+    ;;
+  'get node cw-dev-prod-node-1 -o json')
+    jq -n '{metadata: {labels: {
+      "katacontainers.io/kata-runtime": "true",
+      "node.codewire.sh/runtime-candidate": "true",
+      "node.codewire.sh/confidential-snp": "true"
+    }}, status: {conditions: [{type: "Ready", status: "True"}]}}'
+    ;;
+  'get namespace codewire-runtime-probes -o json')
+    jq -n '{metadata: {labels: {"pod-security.kubernetes.io/enforce": "privileged"}}}'
+    ;;
+  '-n flux-system get kustomization codewire-deploy-workloads-dev -o json'|\
+  '-n flux-system get kustomization codewire-deploy-confidential-smoke-dev -o json')
+    name="${5}"
+    jq -n --arg name "$name" --arg source 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' '{
+      metadata: {name: $name, generation: 4, annotations: {"deploy.codewire.sh/source-sha": $source}},
+      status: {
+        observedGeneration: 4,
+        lastAppliedRevision: ("main@sha1:" + $source),
+        conditions: [{type: "Ready", status: "True", observedGeneration: 4}]
+      }
+    }'
+    ;;
+  '-n codewire-runtime-probes get configmap codewire-confidential-snp-smoke-control -o json')
+    jq -n '{data: {phase: "confidential-snp"}}'
+    ;;
+  *)
+    printf 'unexpected mock kubectl arguments: %s\n' "$*" >&2
+    exit 70
+    ;;
+esac
+EOF
+cat >"$bootstrap_dir/bin/skopeo" <<EOF
+#!/usr/bin/env bash
+touch '$bootstrap_dir/skopeo-was-called'
+exit 88
+EOF
+chmod +x "$bootstrap_dir/bin/kubectl" "$bootstrap_dir/bin/skopeo"
+PATH="$bootstrap_dir/bin:$PATH" \
+  KUBECTL_BIN="$bootstrap_dir/bin/kubectl" \
+  KUBE_CONTEXT=mock \
+  EVIDENCE_DIR="$bootstrap_dir/evidence" \
+  "$SMOKE" --skip-host-gate --skip-raw-jobs --skip-guest-attestation --skip-coco \
+  >"$bootstrap_dir/stdout" 2>"$bootstrap_dir/stderr" || {
+    sed -n '1,120p' "$bootstrap_dir/stderr" >&2
+    printf 'bootstrap-only smoke fixture failed\n' >&2
+    exit 1
+  }
+[[ ! -e "$bootstrap_dir/skopeo-was-called" ]] || {
+  printf 'bootstrap-only smoke unexpectedly resolved product images\n' >&2
+  exit 1
+}
+rg -F 'skipping product release image resolution' "$bootstrap_dir/stderr" >/dev/null
+rm -rf "$bootstrap_dir"
 trap - EXIT
 
 printf 'Confidential SNP GitOps smoke contract tests passed\n'

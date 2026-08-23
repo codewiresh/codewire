@@ -319,9 +319,25 @@ class FixtureRepository:
                     "kind": "file-set",
                     "inputs": ["images/confidential-probe/**"],
                 },
+                "confidential_workspace_acceptance_contract": {
+                    "kind": "file-set",
+                    "inputs": [
+                        "deployments/k8s/orchestration/deployment.yaml",
+                        "deployments/k8s/overlays/dev/config-runtime-profile.yaml",
+                        "deployments/k8s/overlays/dev/config-runtime-profile-commodity.yaml",
+                        "deployments/k8s/overlays/dev/config-runtime-profile-confidential-snp.yaml",
+                        "deployments/k8s/runtime-profiles/confidential/**",
+                        "deployments/k8s/runtime-profiles/confidential-smoke/**",
+                        "scripts/runtime/confidential/**",
+                    ],
+                },
                 "workspace_image": {
                     "kind": "composite",
-                    "dependencies": ["base_image", "workspace_cw_binary"],
+                    "dependencies": [
+                        "base_image",
+                        "workspace_cw_binary",
+                        "confidential_workspace_acceptance_contract",
+                    ],
                     "inputs": ["images/workspace/**"],
                 },
             },
@@ -332,6 +348,32 @@ class FixtureRepository:
         self.write(
             "deployments/k8s/base/runtime-profile.yaml",
             "apiVersion: v1\nkind: ConfigMap\n",
+        )
+        self.write(
+            "deployments/k8s/orchestration/deployment.yaml",
+            "apiVersion: apps/v1\nkind: Deployment\n",
+        )
+        for profile in (
+            "config-runtime-profile.yaml",
+            "config-runtime-profile-commodity.yaml",
+            "config-runtime-profile-confidential-snp.yaml",
+        ):
+            self.write(
+                f"deployments/k8s/overlays/dev/{profile}",
+                "apiVersion: v1\nkind: ConfigMap\n",
+            )
+        self.write(
+            "deployments/k8s/runtime-profiles/confidential/coco-support-images.lock.json",
+            "{}\n",
+        )
+        self.write(
+            "deployments/k8s/runtime-profiles/confidential-smoke/kustomization.yaml",
+            "apiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\n",
+        )
+        self.write(
+            "scripts/runtime/confidential/smoke-dev-confidential-snp.sh",
+            "#!/usr/bin/env bash\nset -euo pipefail\n",
+            0o755,
         )
         self.write(
             "Cargo.toml",
@@ -730,14 +772,47 @@ class PlannerFixtureTests(unittest.TestCase):
         self.assertEqual(self.runtime_states(first), ("unaffected",) * 5)
         self.assertEqual(self.dev_release_state(first), "unaffected")
 
-    def test_kubernetes_deployment_input_affects_dev_release_only(self) -> None:
+    def test_confidential_deployment_input_selects_exact_workspace_release(self) -> None:
         self.repo.change(
             "deployments/k8s/runtime-profiles/confidential-smoke/job.yaml",
             "apiVersion: batch/v1\nkind: Job\n",
         )
         document = self.repo.plan()
         self.assertEqual(self.dev_release_state(document), "affected")
+        self.assertEqual(
+            document["artifacts"]["confidential_workspace_acceptance_contract"]["state"],
+            "affected",
+        )
+        self.assertEqual(
+            self.workspace_states(document),
+            ("unaffected", "unaffected", "affected"),
+        )
         self.assertEqual(self.runtime_states(document), ("unaffected",) * 5)
+
+    def test_unrelated_kubernetes_input_affects_dev_release_only(self) -> None:
+        self.repo.change(
+            "deployments/k8s/base/runtime-profile.yaml",
+            "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: changed\n",
+        )
+        document = self.repo.plan()
+        self.assertEqual(self.dev_release_state(document), "affected")
+        self.assertEqual(self.workspace_states(document), ("unaffected",) * 3)
+
+    def test_confidential_smoke_script_selects_exact_workspace_release(self) -> None:
+        self.repo.change(
+            "scripts/runtime/confidential/smoke-dev-confidential-snp.sh",
+            "#!/usr/bin/env bash\nset -euo pipefail\nprintf smoke\\n\n",
+        )
+        document = self.repo.plan()
+        self.assertEqual(
+            document["artifacts"]["confidential_workspace_acceptance_contract"]["state"],
+            "affected",
+        )
+        self.assertEqual(
+            self.workspace_states(document),
+            ("unaffected", "unaffected", "affected"),
+        )
+        self.assertEqual(self.states(document), ("unaffected", "unaffected"))
 
     def test_rust_cache_identity_reuses_dependencies_but_not_changed_source(self) -> None:
         baseline = self.repo.plan(self.repo.base)["artifacts"]["rust_cache_cli"]
