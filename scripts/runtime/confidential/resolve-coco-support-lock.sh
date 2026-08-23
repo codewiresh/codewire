@@ -74,9 +74,17 @@ workspace_tag="ghcr.io/codewiresh/workspace:$SOURCE_SHA"
 inspect_image() {
   local name="$1"
   local image="$2"
+  local inspect_image="$image"
   local inspect_json
 
-  if ! inspect_json="$(skopeo inspect --no-creds --no-tags "docker://$image")"; then
+  # The lock keeps the human-readable version tag alongside the immutable
+  # digest. Skopeo's docker transport rejects tag-plus-digest references, so
+  # remove only the tag for the remote digest lookup.
+  if [[ "$image" =~ ^(.+):([^/@]+)@(sha256:[0-9a-f]{64})$ ]]; then
+    inspect_image="${BASH_REMATCH[1]}@${BASH_REMATCH[3]}"
+  fi
+
+  if ! inspect_json="$(skopeo inspect --no-creds --no-tags "docker://$inspect_image")"; then
     die "$name image is not anonymously resolvable: $image"
   fi
   printf '%s' "$inspect_json"
