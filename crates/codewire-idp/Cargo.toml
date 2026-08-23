@@ -37,7 +37,7 @@ bcrypt = "0.15"
 # m=65536,t=3,p=2, PHC `$argon2id$v=19$…` strings, RawStd base64). The
 # crate is wire-compatible with the Go output (verified by round-trip).
 argon2 = "0.5"
-aes-gcm = "0.10.3"
+aes-gcm = { workspace = true }
 totp-rs = { version = "5.7.2", features = ["gen_secret", "otpauth"] }
 urlencoding = "2.1.3"
 

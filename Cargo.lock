@@ -1470,6 +1470,7 @@ dependencies = [
 name = "codewire-orchestration"
 version = "0.1.0"
 dependencies = [
+ "aes-gcm 0.10.3",
  "anyhow",
  "async-trait",
  "axum 0.8.9",

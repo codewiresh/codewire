@@ -51,7 +51,7 @@ mod tests {
     use super::*;
 
     const ACCEPTED_APPLICATION_SCHEMA_FINGERPRINT: &str =
-        "7902eb3c90b660ec32859d5752d0f89a80973762c800579a1862e9fd93100964";
+        "7efec7387c7f419ac77ada50f0658202f60dbe50040d3d9f8aab231eb9ac7093";
     const RETIRE_MESH_OIDC_CLIENT_VERSION: i64 = 5;
 
     async fn startup(database_url: String) -> anyhow::Result<()> {
@@ -116,6 +116,7 @@ mod tests {
                 fingerprint == ACCEPTED_APPLICATION_SCHEMA_FINGERPRINT,
                 "application schema fingerprint changed: {fingerprint}"
             );
+            assert_tenant_secret_envelope_schema(&pool).await?;
             pool.close().await;
 
             ensure_schema(&test_db.url).await?;
@@ -134,6 +135,120 @@ mod tests {
         .await;
         let cleanup = test_db.drop().await;
         result.and(cleanup)
+    }
+
+    async fn assert_tenant_secret_envelope_schema(pool: &PgPool) -> anyhow::Result<()> {
+        let authority: (String, i64) = sqlx::query_as(
+            "SELECT state, generation FROM tenant_secret_control WHERE singleton = true",
+        )
+        .fetch_one(pool)
+        .await?;
+        anyhow::ensure!(authority == ("infisical".into(), 0));
+
+        sqlx::query(
+            "INSERT INTO tenant_secret_deks \
+             (dek_id, scope, scope_id, provider, key_name, key_version, wrapped_dek, wrapped_nonce) \
+             VALUES ('dek-org-1', 'org', 'org_1', 'keyring', 'tenant-dek', 1, \
+                     repeat('A', 64), decode(repeat('00', 12), 'hex'))",
+        )
+        .execute(pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO tenant_secrets \
+             (path, key, dek_id, scope, scope_id, ciphertext, nonce) \
+             VALUES ('/projects/org_1/project_1', 'API_TOKEN', 'dek-org-1', 'org', 'org_1', \
+                     decode(repeat('11', 16), 'hex'), decode(repeat('22', 12), 'hex'))",
+        )
+        .execute(pool)
+        .await?;
+
+        let crossed_scope = sqlx::query(
+            "INSERT INTO tenant_secrets \
+             (path, key, dek_id, scope, scope_id, ciphertext, nonce) \
+             VALUES ('/users/user_1', 'API_TOKEN', 'dek-org-1', 'org', 'org_1', \
+                     decode(repeat('11', 16), 'hex'), decode(repeat('22', 12), 'hex'))",
+        )
+        .execute(pool)
+        .await;
+        anyhow::ensure!(crossed_scope.is_err(), "cross-scope path was accepted");
+
+        let mismatched_version = sqlx::query(
+            "INSERT INTO tenant_secret_deks \
+             (dek_id, scope, scope_id, provider, key_name, key_version, wrapped_dek) \
+             VALUES ('dek-user-2', 'user', 'user_2', 'openbao-transit', 'tenant-dek', 2, \
+                     'vault:v3:generated')",
+        )
+        .execute(pool)
+        .await;
+        anyhow::ensure!(
+            mismatched_version.is_err(),
+            "mismatched OpenBao key version was accepted"
+        );
+
+        let premature_dek_delete =
+            sqlx::query("DELETE FROM tenant_secret_deks WHERE dek_id = 'dek-org-1'")
+                .execute(pool)
+                .await;
+        anyhow::ensure!(
+            premature_dek_delete.is_err(),
+            "DEK deletion with live tenant secrets was accepted"
+        );
+
+        sqlx::query(
+            "INSERT INTO tenant_secret_kek_canary \
+             (provider, key_name, key_version, wrapped_dek, wrapped_nonce, plaintext_sha256) \
+             VALUES ('keyring', 'tenant-dek', 1, repeat('A', 64), \
+                     decode(repeat('33', 12), 'hex'), decode(repeat('44', 32), 'hex'))",
+        )
+        .execute(pool)
+        .await?;
+        let authority_free_transit_canary = sqlx::query(
+            "UPDATE tenant_secret_kek_canary \
+             SET provider = 'openbao-transit', wrapped_dek = 'vault:v1:generated', \
+                 wrapped_nonce = NULL \
+             WHERE singleton = true",
+        )
+        .execute(pool)
+        .await;
+        anyhow::ensure!(
+            authority_free_transit_canary.is_err(),
+            "OpenBao canary without an expected authority was accepted"
+        );
+
+        let unfenced_transition = sqlx::query(
+            "UPDATE tenant_secret_control SET state = 'importing' WHERE singleton = true",
+        )
+        .execute(pool)
+        .await;
+        anyhow::ensure!(
+            unfenced_transition.is_err(),
+            "import transition without source evidence was accepted"
+        );
+        sqlx::query(
+            "UPDATE tenant_secret_control \
+             SET state = 'postgres-readonly', generation = 1, source_revision = 'test-revision', \
+                 transition_started_at = now() \
+             WHERE singleton = true",
+        )
+        .execute(pool)
+        .await?;
+        let unverified_cutover = sqlx::query(
+            "UPDATE tenant_secret_control SET state = 'postgres' WHERE singleton = true",
+        )
+        .execute(pool)
+        .await;
+        anyhow::ensure!(
+            unverified_cutover.is_err(),
+            "unverified Postgres cutover was accepted"
+        );
+
+        sqlx::query("DELETE FROM tenant_secrets WHERE dek_id = 'dek-org-1'")
+            .execute(pool)
+            .await?;
+        sqlx::query("DELETE FROM tenant_secret_deks WHERE dek_id = 'dek-org-1'")
+            .execute(pool)
+            .await?;
+        Ok(())
     }
 
     #[tokio::test]

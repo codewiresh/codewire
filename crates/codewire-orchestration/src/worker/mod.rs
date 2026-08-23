@@ -27,11 +27,14 @@ pub mod lifecycle;
 pub mod loops;
 pub mod organization_deletion;
 pub mod port_dns;
+pub mod postgres_secrets;
 pub mod resize;
 pub mod scripts;
+pub mod secret_envelope;
 pub mod secrets;
 pub mod setup;
 pub mod setup_lease;
+pub mod tenant_secret_operator;
 pub mod tenant_secret_teardown;
 
 use serde::{Deserialize, Serialize};
@@ -73,8 +76,8 @@ pub struct WorkerContext {
     /// Ambient kube client; None mirrors a nil sandbox backend in Go
     /// (health checks pass, workspace execs fail).
     pub kube: Option<kube::Client>,
-    /// Tenant secret store (Infisical or the local postgres store).
-    pub secrets: secrets::SecretStore,
+    /// Tenant secret store shared by the API and every worker activity.
+    pub secrets: std::sync::Arc<secrets::SecretStore>,
     /// GitHub App credentials for user-token refresh.
     pub github_cfg: github::GitHubAppConfig,
     /// Sandbox/create config slice (env-derived, Go config.Config names).

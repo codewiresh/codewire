@@ -38,7 +38,7 @@
   "required_server_fragments": {
     "crates/codewire-orchestration/src/main.rs": [
       "AppBuilder::new(\"codewire-orchestration\")",
-      ".with_health_and_db(pool.clone())",
+      ".with_health_and_db_probe(pool.clone(), move || {",
       ".with_routes(codewire_orchestration::api::router(api_state.clone(), auth))"
     ],
     "crates/codewire-billing/src/main.rs": [

@@ -101,6 +101,7 @@ tiny_http = "0.12"
 open = "5"
 
 # Crypto
+aes-gcm = "=0.10.3"
 sha2 = "0.10"
 hmac = "0.12"
 subtle = "=2.6.1"

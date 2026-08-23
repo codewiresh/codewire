@@ -12,7 +12,7 @@ use tower_http::cors::{Any, CorsLayer};
 use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
 use tower_http::trace::TraceLayer;
 
-use crate::health::{HealthState, router as health_router};
+use crate::health::{HealthState, ReadinessProbe, router as health_router};
 use crate::metrics::router as metrics_router;
 
 /// Fluent builder for the per-service `axum::Router`.
@@ -44,7 +44,24 @@ impl AppBuilder {
     /// Adds health routes that probe the given database pool in
     /// `/readyz`.
     pub fn with_health_and_db(mut self, pool: sqlx::PgPool) -> Self {
-        self.health = Some(HealthState { pool: Some(pool) });
+        self.health = Some(HealthState {
+            pool: Some(pool),
+            readiness_probe: None,
+        });
+        self
+    }
+
+    /// Adds health routes whose readiness requires both Postgres and one
+    /// caller-owned asynchronous dependency probe.
+    pub fn with_health_and_db_probe<F, Fut>(mut self, pool: sqlx::PgPool, probe: F) -> Self
+    where
+        F: Fn() -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = bool> + Send + 'static,
+    {
+        self.health = Some(HealthState {
+            pool: Some(pool),
+            readiness_probe: Some(ReadinessProbe::new(probe)),
+        });
         self
     }
 

@@ -1627,7 +1627,7 @@ mod enabled {
             cloudflare: None,
             preview_base_domain: String::new(),
             kube: Some(kube::Client::try_default().await?),
-            secrets: worker::secrets::SecretStore::from_env(pool),
+            secrets: Arc::new(worker::secrets::SecretStore::from_env(pool)?),
             github_cfg: worker::github::GitHubAppConfig::from_env(),
             sandbox_cfg: worker::create::SandboxWorkerCfg::from_env(),
             confidential_storage: None,

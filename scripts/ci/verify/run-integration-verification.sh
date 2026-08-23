@@ -327,7 +327,11 @@ probe_connect_surface() {
 
 build_selected_services() {
   local packages=()
-  local orchestration_bins=( --bin codewire-orchestration --bin log-stream-smoke )
+  local orchestration_bins=(
+    --bin codewire-orchestration
+    --bin tenant-secret-operator
+    --bin log-stream-smoke
+  )
   selected service_idp && packages+=( -p codewire-idp )
   selected service_coordinator && packages+=( -p codewire-coordinator )
   selected service_billing && packages+=( -p codewire-billing )
@@ -638,7 +642,7 @@ run_orchestration() {
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
     cargo_ci test --profile ci -p codewire-orchestration --lib \
       'worker::' -- --ignored --nocapture | tee "$logfile"
-  assert_passed_count "orchestration activity fencing matrix" "$logfile" 2
+  assert_passed_count "orchestration activity fencing matrix" "$logfile" 4
 
   start_orchestration
   logfile="$RUN_DIR/orchestration-contract.log"

@@ -187,12 +187,13 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
+    let secrets = Arc::new(worker::secrets::SecretStore::from_env(pool.clone())?);
     let ctx = Arc::new(worker::WorkerContext {
         pool: pool.clone(),
         cloudflare: CloudflareClient::from_env(),
         preview_base_domain: std::env::var("PREVIEW_BASE_DOMAIN").unwrap_or_default(),
         kube,
-        secrets: worker::secrets::SecretStore::from_env(pool.clone()),
+        secrets: secrets.clone(),
         github_cfg: worker::github::GitHubAppConfig::from_env(),
         sandbox_cfg,
         confidential_storage: confidential_storage.clone(),
@@ -234,7 +235,7 @@ async fn main() -> anyhow::Result<()> {
         temporal_trigger,
         anthropic_api_key: std::env::var("ANTHROPIC_API_KEY").unwrap_or_default(),
         github_cfg: worker::github::GitHubAppConfig::from_env(),
-        secrets: Arc::new(worker::secrets::SecretStore::from_env(pool.clone())),
+        secrets: secrets.clone(),
         auth: auth.clone(),
         // Ambient kube client for the exec proxy; unavailable mirrors
         // Go's nil sandbox client (the route then 503s).
@@ -277,8 +278,20 @@ async fn main() -> anyhow::Result<()> {
         )
         .into_router();
 
+    let readiness_secrets = secrets;
     let app = AppBuilder::new("codewire-orchestration")
-        .with_health_and_db(pool.clone())
+        .with_health_and_db_probe(pool.clone(), move || {
+            let readiness_secrets = readiness_secrets.clone();
+            async move {
+                match readiness_secrets.verify_readiness().await {
+                    Ok(()) => true,
+                    Err(error) => {
+                        tracing::warn!(%error, "tenant secret dependency is not ready");
+                        false
+                    }
+                }
+            }
+        })
         .with_unary_connect_routes_auth(
             codewire_orchestration::connect::api_keys::router(pool.clone()),
             connect_auth.clone(),

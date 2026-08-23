@@ -6,10 +6,11 @@
 //! provider namespace absent.
 
 use std::collections::BTreeMap;
+use std::fmt;
 use std::time::{Duration, Instant};
 
 use serde::Deserialize;
-use sqlx::PgPool;
+use sqlx::{PgPool, Postgres, Transaction};
 use tokio::sync::Mutex;
 
 const SA_TOKEN_PATH: &str = "/var/run/secrets/kubernetes.io/serviceaccount/token";
@@ -17,7 +18,7 @@ const SA_TOKEN_PATH: &str = "/var/run/secrets/kubernetes.io/serviceaccount/token
 /// Mirrors `worker.InfisicalSecret`. `created_at`/`updated_at` are surfaced by
 /// the secrets-list endpoint (RFC3339 strings; empty when the backend omits
 /// them); the env-setup flow only reads `key`/`value`.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Clone, Default, Deserialize)]
 pub struct InfisicalSecret {
     #[serde(rename = "secretKey")]
     pub key: String,
@@ -29,20 +30,60 @@ pub struct InfisicalSecret {
     pub updated_at: String,
 }
 
+impl fmt::Debug for InfisicalSecret {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("InfisicalSecret")
+            .field("key", &"[redacted]")
+            .field("value", &"[redacted]")
+            .field("created_at", &self.created_at)
+            .field("updated_at", &self.updated_at)
+            .finish()
+    }
+}
+
 pub enum SecretStore {
     Infisical(InfisicalClient),
     Local(LocalSecretStore),
+    Postgres(super::postgres_secrets::PostgresSecretStore),
 }
 
 impl SecretStore {
+    pub async fn verify_readiness(&self) -> anyhow::Result<()> {
+        match self {
+            Self::Postgres(store) => store.verify_canary().await,
+            Self::Infisical(_) | Self::Local(_) => Ok(()),
+        }
+    }
+
     /// Mirrors the retired Go composition-root selection: Infisical when
     /// `INFISICAL_TENANT_ENABLED=true`, else the postgres-backed store.
-    pub fn from_env(pool: PgPool) -> Self {
-        if std::env::var("INFISICAL_TENANT_ENABLED").as_deref() == Ok("true") {
-            SecretStore::Infisical(InfisicalClient::from_env())
-        } else {
-            tracing::info!("using local postgres-backed secret store");
-            SecretStore::Local(LocalSecretStore { pool })
+    pub fn from_env(pool: PgPool) -> anyhow::Result<Self> {
+        let configured = match std::env::var("TENANT_SECRET_STORE") {
+            Ok(value) => Some(value),
+            Err(std::env::VarError::NotPresent) => None,
+            Err(std::env::VarError::NotUnicode(_)) => {
+                anyhow::bail!("tenant-secret-store failure_class=invalid-store-configuration")
+            }
+        };
+        match configured.as_deref() {
+            Some("postgres") => {
+                tracing::info!("using encrypted postgres tenant secret store");
+                Ok(Self::Postgres(
+                    super::postgres_secrets::PostgresSecretStore::from_env(pool)?,
+                ))
+            }
+            Some("infisical") => Ok(Self::Infisical(InfisicalClient::from_env(pool))),
+            Some("local") => Ok(Self::Local(LocalSecretStore { pool })),
+            Some(_) => {
+                anyhow::bail!("tenant-secret-store failure_class=unknown-store-configuration")
+            }
+            None if std::env::var("INFISICAL_TENANT_ENABLED").as_deref() == Ok("true") => {
+                Ok(Self::Infisical(InfisicalClient::from_env(pool)))
+            }
+            None => {
+                tracing::info!("using local postgres-backed secret store");
+                Ok(Self::Local(LocalSecretStore { pool }))
+            }
         }
     }
 
@@ -54,6 +95,7 @@ impl SecretStore {
         match self {
             SecretStore::Infisical(c) => c.get_secrets_raw_at_path(secret_path).await,
             SecretStore::Local(l) => l.get_secrets_raw_at_path(secret_path).await,
+            SecretStore::Postgres(p) => p.get_secrets_raw_at_path(secret_path).await,
         }
     }
 
@@ -73,6 +115,7 @@ impl SecretStore {
             // Folders are implicit from the path in the local store (mirrors
             // `LocalSecretStore.CreateFolderAtPath`, which is a no-op).
             SecretStore::Local(_) => Ok(()),
+            SecretStore::Postgres(_) => Ok(()),
         }
     }
 
@@ -86,6 +129,7 @@ impl SecretStore {
         match self {
             SecretStore::Infisical(c) => c.set_secret_at_path(secret_path, key, value).await,
             SecretStore::Local(l) => l.set_secret_at_path(secret_path, key, value).await,
+            SecretStore::Postgres(p) => p.set_secret_at_path(secret_path, key, value).await,
         }
     }
 
@@ -94,6 +138,7 @@ impl SecretStore {
         match self {
             SecretStore::Infisical(c) => c.delete_secret_at_path(secret_path, key).await,
             SecretStore::Local(l) => l.delete_secret_at_path(secret_path, key).await,
+            SecretStore::Postgres(p) => p.delete_secret_at_path(secret_path, key).await,
         }
     }
 
@@ -110,6 +155,9 @@ impl SecretStore {
                 c.rename_secret_at_path(secret_path, old_key, new_key).await
             }
             SecretStore::Local(l) => l.rename_secret_at_path(secret_path, old_key, new_key).await,
+            SecretStore::Postgres(p) => {
+                p.rename_secret_at_path(secret_path, old_key, new_key).await
+            }
         }
     }
 
@@ -118,6 +166,7 @@ impl SecretStore {
         match self {
             SecretStore::Infisical(c) => c.list_folders_at_path(parent_path).await,
             SecretStore::Local(l) => l.list_folders_at_path(parent_path).await,
+            SecretStore::Postgres(p) => p.list_folders_at_path(parent_path).await,
         }
     }
 
@@ -209,7 +258,7 @@ impl LocalSecretStore {
         .fetch_one(&mut *tx)
         .await?;
         if !exists_old {
-            anyhow::bail!("secret {old_key:?} not found");
+            anyhow::bail!("secret not found");
         }
         let exists_new: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM local_secrets WHERE path = $1 AND key = $2)",
@@ -219,7 +268,7 @@ impl LocalSecretStore {
         .fetch_one(&mut *tx)
         .await?;
         if exists_new {
-            anyhow::bail!("secret {new_key:?} already exists");
+            anyhow::bail!("secret already exists");
         }
         sqlx::query(
             "INSERT INTO local_secrets (path, key, value, created_at, updated_at) \
@@ -298,6 +347,8 @@ pub struct InfisicalClient {
     k8s_identity_id: String,
     http: reqwest::Client,
     token: Mutex<Option<(String, Instant)>>,
+    control_pool: Option<PgPool>,
+    operator_read: bool,
 }
 
 #[derive(Deserialize)]
@@ -326,7 +377,15 @@ struct FoldersResponse {
 }
 
 impl InfisicalClient {
-    pub fn from_env() -> Self {
+    pub fn from_env(pool: PgPool) -> Self {
+        Self::from_env_with_mode(pool, false)
+    }
+
+    pub fn from_env_for_import(pool: PgPool) -> Self {
+        Self::from_env_with_mode(pool, true)
+    }
+
+    fn from_env_with_mode(pool: PgPool, operator_read: bool) -> Self {
         Self {
             host_api: std::env::var("INFISICAL_TENANT_HOST").unwrap_or_else(|_| {
                 "http://infisical-backend.codewire-infisical.svc.cluster.local:8080".to_string()
@@ -341,6 +400,8 @@ impl InfisicalClient {
                 .build()
                 .expect("reqwest client"),
             token: Mutex::new(None),
+            control_pool: Some(pool),
+            operator_read,
         }
     }
 
@@ -360,7 +421,65 @@ impl InfisicalClient {
                 "test-token".into(),
                 Instant::now() + Duration::from_secs(300),
             ))),
+            control_pool: None,
+            operator_read: false,
         }
+    }
+
+    async fn control_state(&self) -> anyhow::Result<Option<String>> {
+        let Some(pool) = &self.control_pool else {
+            return Ok(None);
+        };
+        let state =
+            sqlx::query_scalar("SELECT state FROM tenant_secret_control WHERE singleton = true")
+                .fetch_one(pool)
+                .await
+                .map_err(|_| {
+                    anyhow::anyhow!("tenant-secret-source failure_class=authority-query-failed")
+                })?;
+        Ok(Some(state))
+    }
+
+    async fn require_source_read(&self) -> anyhow::Result<()> {
+        let Some(state) = self.control_state().await? else {
+            return Ok(());
+        };
+        if self.operator_read || matches!(state.as_str(), "infisical" | "importing") {
+            return Ok(());
+        }
+        anyhow::bail!("tenant-secret-source failure_class=read-authority-unavailable")
+    }
+
+    async fn begin_source_write_fence(
+        &self,
+    ) -> anyhow::Result<Option<Transaction<'static, Postgres>>> {
+        let Some(pool) = &self.control_pool else {
+            return Ok(None);
+        };
+        let mut tx = pool.begin().await.map_err(|_| {
+            anyhow::anyhow!("tenant-secret-source failure_class=authority-lock-failed")
+        })?;
+        let state: String = sqlx::query_scalar(
+            "SELECT state FROM tenant_secret_control WHERE singleton = true FOR SHARE",
+        )
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|_| anyhow::anyhow!("tenant-secret-source failure_class=authority-lock-failed"))?;
+        if state != "infisical" {
+            anyhow::bail!("tenant-secret-source failure_class=write-authority-unavailable")
+        }
+        Ok(Some(tx))
+    }
+
+    async fn commit_source_write_fence(
+        fence: Option<Transaction<'static, Postgres>>,
+    ) -> anyhow::Result<()> {
+        if let Some(tx) = fence {
+            tx.commit().await.map_err(|_| {
+                anyhow::anyhow!("tenant-secret-source failure_class=authority-release-failed")
+            })?;
+        }
+        Ok(())
     }
 
     fn api_url(&self, suffix: &[&str]) -> anyhow::Result<url::Url> {
@@ -421,6 +540,14 @@ impl InfisicalClient {
         &self,
         secret_path: &str,
     ) -> anyhow::Result<Vec<InfisicalSecret>> {
+        self.require_source_read().await?;
+        self.get_secrets_raw_at_path_unfenced(secret_path).await
+    }
+
+    async fn get_secrets_raw_at_path_unfenced(
+        &self,
+        secret_path: &str,
+    ) -> anyhow::Result<Vec<InfisicalSecret>> {
         let token = self
             .authenticate()
             .await
@@ -456,6 +583,17 @@ impl InfisicalClient {
     /// (not 409) with "already exists" when the folder is present — both are
     /// treated as success.
     pub async fn create_folder_at_path(&self, parent_path: &str, name: &str) -> anyhow::Result<()> {
+        let fence = self.begin_source_write_fence().await?;
+        self.create_folder_at_path_unfenced(parent_path, name)
+            .await?;
+        Self::commit_source_write_fence(fence).await
+    }
+
+    async fn create_folder_at_path_unfenced(
+        &self,
+        parent_path: &str,
+        name: &str,
+    ) -> anyhow::Result<()> {
         let token = self
             .authenticate()
             .await
@@ -488,6 +626,18 @@ impl InfisicalClient {
     /// Mirrors `InfisicalClient.SetSecretAtPath`: POST to create, and on a
     /// 400/409 conflict, PATCH to update.
     pub async fn set_secret_at_path(
+        &self,
+        secret_path: &str,
+        key: &str,
+        value: &str,
+    ) -> anyhow::Result<()> {
+        let fence = self.begin_source_write_fence().await?;
+        self.set_secret_at_path_unfenced(secret_path, key, value)
+            .await?;
+        Self::commit_source_write_fence(fence).await
+    }
+
+    async fn set_secret_at_path_unfenced(
         &self,
         secret_path: &str,
         key: &str,
@@ -542,6 +692,17 @@ impl InfisicalClient {
 
     /// Mirrors `InfisicalClient.DeleteSecretAtPath`: 404 (already gone) is OK.
     pub async fn delete_secret_at_path(&self, secret_path: &str, key: &str) -> anyhow::Result<()> {
+        let fence = self.begin_source_write_fence().await?;
+        self.delete_secret_at_path_unfenced(secret_path, key)
+            .await?;
+        Self::commit_source_write_fence(fence).await
+    }
+
+    async fn delete_secret_at_path_unfenced(
+        &self,
+        secret_path: &str,
+        key: &str,
+    ) -> anyhow::Result<()> {
         let token = self
             .authenticate()
             .await
@@ -569,6 +730,7 @@ impl InfisicalClient {
     }
 
     pub async fn list_folders_at_path(&self, parent_path: &str) -> anyhow::Result<Vec<String>> {
+        self.require_source_read().await?;
         let token = self
             .authenticate()
             .await
@@ -605,6 +767,17 @@ impl InfisicalClient {
     }
 
     pub async fn delete_folder_at_path(&self, parent_path: &str, name: &str) -> anyhow::Result<()> {
+        let fence = self.begin_source_write_fence().await?;
+        self.delete_folder_at_path_unfenced(parent_path, name)
+            .await?;
+        Self::commit_source_write_fence(fence).await
+    }
+
+    async fn delete_folder_at_path_unfenced(
+        &self,
+        parent_path: &str,
+        name: &str,
+    ) -> anyhow::Result<()> {
         let token = self
             .authenticate()
             .await
@@ -642,26 +815,28 @@ impl InfisicalClient {
         old_key: &str,
         new_key: &str,
     ) -> anyhow::Result<()> {
+        let fence = self.begin_source_write_fence().await?;
         let secrets = self
-            .get_secrets_raw_at_path(secret_path)
+            .get_secrets_raw_at_path_unfenced(secret_path)
             .await
             .map_err(|e| anyhow::anyhow!("get secrets: {e}"))?;
         let mut value: Option<String> = None;
         for s in &secrets {
             if s.key == new_key {
-                anyhow::bail!("secret {new_key:?} already exists");
+                anyhow::bail!("secret already exists");
             }
             if s.key == old_key {
                 value = Some(s.value.clone());
             }
         }
         let Some(value) = value else {
-            anyhow::bail!("secret {old_key:?} not found");
+            anyhow::bail!("secret not found");
         };
-        self.set_secret_at_path(secret_path, new_key, &value)
+        self.set_secret_at_path_unfenced(secret_path, new_key, &value)
             .await?;
-        self.delete_secret_at_path(secret_path, old_key).await?;
-        Ok(())
+        self.delete_secret_at_path_unfenced(secret_path, old_key)
+            .await?;
+        Self::commit_source_write_fence(fence).await
     }
 }
 
@@ -766,6 +941,8 @@ mod tests {
             k8s_identity_id: String::new(),
             http: reqwest::Client::new(),
             token: Mutex::new(None),
+            control_pool: None,
+            operator_read: false,
         };
 
         assert_eq!(

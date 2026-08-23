@@ -18,6 +18,7 @@ readonly DERP_DOCKERFILE="$ROOT/deployments/docker/derp.Dockerfile"
 readonly SERVICES_BINARIES=(
   codewire-idp
   codewire-orchestration
+  tenant-secret-operator
   sidecar-smoke
   codewire-billing
   codewire-coordinator
