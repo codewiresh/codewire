@@ -53,6 +53,8 @@ if rg -q 'with-dev-confidential-coco-config|COCO_CLEANUP_RECEIPT|kind: Lease|app
 fi
 
 rg -F 'SMOKE_KUSTOMIZATION="codewire-deploy-confidential-smoke-dev"' "$SMOKE" >/dev/null
+rg -F 'CODEWIRE_SERVER_URL="${CODEWIRE_SERVER_URL:-https://codewire-dev.sh}"' "$SMOKE" >/dev/null
+rg -F 'EXPECTED_CODEWIRE_DEV_SERVER_URL="${EXPECTED_CODEWIRE_DEV_SERVER_URL:-https://codewire-dev.sh}"' "$SMOKE" >/dev/null
 rg -F 'KUBE_CONTEXT="${KUBE_CONTEXT:-dev-cluster}"' "$SMOKE" >/dev/null
 rg -F 'NODE="${CONFIDENTIAL_SNP_NODE:-cw-dev-prod-node-1}"' "$SMOKE" >/dev/null
 rg -F 'COMMODITY_NODE="${CONFIDENTIAL_COMMODITY_NODE:-dev-node-1}"' "$SMOKE" >/dev/null
@@ -82,6 +84,13 @@ if rg -F 'git\.example\.invalid/codewire/gateway@sha256:' "$SMOKE" "$RESOLVER"; 
 fi
 rg -F 'restore the commodity source profile' "$SMOKE" >/dev/null
 rg -F -- '--admin-oidc "${smoke_args[@]}"' "$SMOKE" >/dev/null
+rg -F 'CODEWIRE_SERVER_URL="$CODEWIRE_SERVER_URL"' "$SMOKE" >/dev/null
+rg -F 'EXPECTED_CODEWIRE_DEV_SERVER_URL="$EXPECTED_CODEWIRE_DEV_SERVER_URL"' "$SMOKE" >/dev/null
+rg -F 'SMOKE_IMAGE="${SMOKE_IMAGE:-$COCO_WORKSPACE_IMAGE}"' "$SMOKE" >/dev/null
+if rg -F 'smoke_args=(--image ' "$SMOKE"; then
+  printf 'confidential smoke passes an unsupported image CLI option\n' >&2
+  exit 1
+fi
 rg -F 'SMOKE_ISOLATION_TIER=confidential' "$SMOKE" >/dev/null
 if rg -F 'with-dev-smoke-auth.sh' "$SMOKE"; then
   printf 'admin-only confidential smoke must not use the API-key auth wrapper\n' >&2
