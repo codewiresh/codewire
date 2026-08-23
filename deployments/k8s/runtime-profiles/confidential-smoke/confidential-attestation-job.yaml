@@ -1,7 +1,7 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: codewire-confidential-snp-attestation-v62
+  name: codewire-confidential-snp-attestation-v63
   namespace: codewire-runtime-probes
   labels:
     app.kubernetes.io/name: codewire-confidential-snp-attestation
@@ -23,17 +23,12 @@ spec:
       restartPolicy: Never
       containers:
         - name: attest
-          image: docker.io/curlimages/curl@sha256:5a91ea0c9c3ee27b4abe657b68cf6bf0676afa13b236b3bda34283cb3924d4f6
+          image: ghcr.io/codewiresh/confidential-probe
           imagePullPolicy: IfNotPresent
           securityContext:
             privileged: true
             runAsUser: 0
             runAsGroup: 0
-          env:
-            - name: SNP_GUEST_TOOL_URL
-              value: https://github.com/virtee/snpguest/releases/download/v0.10.0/snpguest
-            - name: SNP_GUEST_TOOL_SHA256
-              value: 70e700465e3523e67dd5104583dc36cd11eef630c6f04c5b9ccafd6ba2e76ca0
           command:
             - sh
             - -lc
@@ -49,15 +44,12 @@ spec:
               fi
               test -e /dev/sev-guest
               ls -l /dev/sev-guest
-              curl -fsSL "$SNP_GUEST_TOOL_URL" -o /tmp/snpguest
-              printf '%s  /tmp/snpguest\n' "$SNP_GUEST_TOOL_SHA256" | sha256sum -c -
-              chmod 0755 /tmp/snpguest
-              /tmp/snpguest report /tmp/attestation-report.bin /tmp/report-data.bin --random
+              /usr/local/bin/snpguest report /tmp/attestation-report.bin /tmp/report-data.bin --random
               test -s /tmp/attestation-report.bin
               test -s /tmp/report-data.bin
               wc -c /tmp/attestation-report.bin /tmp/report-data.bin
               sha256sum /tmp/attestation-report.bin /tmp/report-data.bin
-              /tmp/snpguest display report /tmp/attestation-report.bin
+              /usr/local/bin/snpguest display report /tmp/attestation-report.bin
               printf 'attestation_report_base64_begin\n'
               base64 /tmp/attestation-report.bin
               printf '\nattestation_report_base64_end\n'

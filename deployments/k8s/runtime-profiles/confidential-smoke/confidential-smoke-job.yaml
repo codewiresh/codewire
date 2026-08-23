@@ -1,7 +1,7 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: codewire-confidential-runtime-smoke-v62
+  name: codewire-confidential-runtime-smoke-v63
   namespace: codewire-runtime-probes
   labels:
     app.kubernetes.io/name: codewire-confidential-runtime-smoke
@@ -23,7 +23,7 @@ spec:
       restartPolicy: Never
       containers:
         - name: smoke
-          image: registry.k8s.io/e2e-test-images/busybox@sha256:caec39cad3b12c26600baf6e67ba811ac15d28a9288d0ccdfffb4b318992c3bb
+          image: ghcr.io/codewiresh/confidential-probe
           imagePullPolicy: IfNotPresent
           securityContext:
             allowPrivilegeEscalation: false

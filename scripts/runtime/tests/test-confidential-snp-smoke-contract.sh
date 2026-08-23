@@ -61,6 +61,8 @@ if rg -q 'check-node1|node1-codewire-dev|node1\.codewire-dev\.sh|ssh_host\(' "$S
 fi
 rg -F 'COMMODITY_JOB_SELECTOR="app.kubernetes.io/name=codewire-commodity-runtime-smoke"' "$SMOKE" >/dev/null
 rg -F 'record_job "$commodity_job" commodity "$COMMODITY_NODE" longhorn' "$SMOKE" >/dev/null
+rg -F 'RUN_COMMODITY_JOB="${RUN_COMMODITY_JOB:-0}"' "$SMOKE" >/dev/null
+rg -F -- '--include-commodity-job' "$SMOKE" >/dev/null
 rg -F 'CONFIDENTIAL_JOB_SELECTOR="app.kubernetes.io/name=codewire-confidential-runtime-smoke"' "$SMOKE" >/dev/null
 rg -F 'ATTESTATION_JOB_SELECTOR="app.kubernetes.io/name=codewire-confidential-snp-attestation"' "$SMOKE" >/dev/null
 rg -F 'umask 077' "$SMOKE" >/dev/null
@@ -106,7 +108,10 @@ fi
 
 rg -F 'confidential-smoke-control.yaml' "$SMOKE_DIR/kustomization.yaml" >/dev/null
 rg -F 'confidential-smoke-control.yaml' "$SMOKE_DIR/kustomization.baseline.yaml" >/dev/null
-rg -F 'commodity-smoke-job.yaml' "$SMOKE_DIR/kustomization.confidential-snp.yaml" >/dev/null
+if rg -F 'commodity-smoke-job.yaml' "$SMOKE_DIR/kustomization.confidential-snp.yaml"; then
+  printf 'Example Metal confidential activation still dispatches the later Helsinki commodity Job\n' >&2
+  exit 1
+fi
 rg -F 'confidential-smoke-job.yaml' "$SMOKE_DIR/kustomization.confidential-snp.yaml" >/dev/null
 rg -F 'confidential-attestation-job.yaml' "$SMOKE_DIR/kustomization.confidential-snp.yaml" >/dev/null
 
@@ -127,8 +132,43 @@ rg -F 'storageClassName: longhorn' "$SMOKE_DIR/commodity-smoke-job.yaml" >/dev/n
 rg -F 'longhorn-workspace-ok' "$SMOKE_DIR/commodity-smoke-job.yaml" >/dev/null
 rg -F 'privileged: true' "$SMOKE_DIR/confidential-attestation-job.yaml" >/dev/null
 rg -F 'name: codewire-commodity-runtime-smoke-v62' "$SMOKE_DIR/commodity-smoke-job.yaml" >/dev/null
-rg -F 'name: codewire-confidential-runtime-smoke-v62' "$SMOKE_DIR/confidential-smoke-job.yaml" >/dev/null
-rg -F 'name: codewire-confidential-snp-attestation-v62' "$SMOKE_DIR/confidential-attestation-job.yaml" >/dev/null
+rg -F 'name: codewire-confidential-runtime-smoke-v63' "$SMOKE_DIR/confidential-smoke-job.yaml" >/dev/null || {
+  printf 'confidential runtime probe generation is not v63\n' >&2
+  exit 1
+}
+rg -F 'name: codewire-confidential-snp-attestation-v63' "$SMOKE_DIR/confidential-attestation-job.yaml" >/dev/null || {
+  printf 'confidential attestation probe generation is not v63\n' >&2
+  exit 1
+}
+
+runtime_probe_image="$(awk '$1 == "image:" { print $2 }' "$SMOKE_DIR/confidential-smoke-job.yaml")"
+attestation_probe_image="$(awk '$1 == "image:" { print $2 }' "$SMOKE_DIR/confidential-attestation-job.yaml")"
+[[ "$runtime_probe_image" == 'ghcr.io/codewiresh/confidential-probe' ]] || {
+  printf 'confidential runtime Job does not select the shared probe image input\n' >&2
+  exit 1
+}
+[[ "$attestation_probe_image" == "$runtime_probe_image" ]] || {
+  printf 'confidential runtime and attestation probes do not use one exact image\n' >&2
+  exit 1
+}
+if rg -q 'curl|SNP_GUEST_TOOL_(URL|SHA256)|/tmp/snpguest' \
+  "$SMOKE_DIR/confidential-smoke-job.yaml" "$SMOKE_DIR/confidential-attestation-job.yaml"; then
+  printf 'confidential probe still downloads its attestation binary at runtime\n' >&2
+  exit 1
+fi
+rg -F '/usr/local/bin/snpguest report' "$SMOKE_DIR/confidential-attestation-job.yaml" >/dev/null
+rg -F '/usr/local/bin/snpguest display report' "$SMOKE_DIR/confidential-attestation-job.yaml" >/dev/null
+
+probe_digest_count="$(rg -c '^    digest: sha256:[0-9a-f]{64}$' "$SMOKE_DIR/kustomization.confidential-snp.yaml" || true)"
+[[ "$probe_digest_count" == "1" ]] || {
+  printf 'confidential activation must declare one immutable probe digest\n' >&2
+  exit 1
+}
+probe_digest="$(awk '$1 == "digest:" { print $2 }' "$SMOKE_DIR/kustomization.confidential-snp.yaml")"
+[[ "$probe_digest" != 'sha256:0000000000000000000000000000000000000000000000000000000000000000' ]] || {
+  printf 'confidential activation still contains the local digest sentinel\n' >&2
+  exit 1
+}
 
 runtime_configmap="$({
   jq -n '{
@@ -179,5 +219,25 @@ command -v kustomize >/dev/null 2>&1 || {
 }
 kustomize build "$SMOKE_DIR" >/dev/null
 kustomize build "$ROOT/deployments/k8s/overlays/dev" >/dev/null
+
+activation_dir="$(mktemp -d)"
+trap 'rm -rf "$activation_dir"' EXIT
+cp "$SMOKE_DIR"/*.yaml "$activation_dir/"
+cp "$SMOKE_DIR/kustomization.confidential-snp.yaml" "$activation_dir/kustomization.yaml"
+kustomize build "$activation_dir" >"$activation_dir/rendered.yaml"
+mapfile -t rendered_probe_images < <(
+  awk '$1 == "image:" && $2 ~ /^ghcr\.io\/codewiresh\/confidential-probe@sha256:/ { print $2 }' \
+    "$activation_dir/rendered.yaml"
+)
+[[ "${#rendered_probe_images[@]}" == "2" ]] || {
+  printf 'confidential activation did not render exactly two pinned probe images\n' >&2
+  exit 1
+}
+[[ "${rendered_probe_images[0]}" == "${rendered_probe_images[1]}" ]] || {
+  printf 'confidential activation rendered different runtime and attestation probes\n' >&2
+  exit 1
+}
+rm -rf "$activation_dir"
+trap - EXIT
 
 printf 'Confidential SNP GitOps smoke contract tests passed\n'
