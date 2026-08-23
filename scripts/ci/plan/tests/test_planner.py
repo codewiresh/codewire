@@ -337,6 +337,12 @@ class FixtureRepository:
                         "base_image",
                         "workspace_cw_binary",
                         "confidential_workspace_acceptance_contract",
+                        "dev_release_tree",
+                        "dashboard_image",
+                        "gateway_image",
+                        "derp_image",
+                        "services_image",
+                        "mesh_image",
                     ],
                     "inputs": ["images/workspace/**"],
                 },
@@ -789,14 +795,17 @@ class PlannerFixtureTests(unittest.TestCase):
         )
         self.assertEqual(self.runtime_states(document), ("unaffected",) * 5)
 
-    def test_unrelated_kubernetes_input_affects_dev_release_only(self) -> None:
+    def test_any_dev_release_input_selects_exact_workspace_release(self) -> None:
         self.repo.change(
             "deployments/k8s/base/runtime-profile.yaml",
             "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: changed\n",
         )
         document = self.repo.plan()
         self.assertEqual(self.dev_release_state(document), "affected")
-        self.assertEqual(self.workspace_states(document), ("unaffected",) * 3)
+        self.assertEqual(
+            self.workspace_states(document),
+            ("unaffected", "unaffected", "affected"),
+        )
 
     def test_confidential_smoke_script_selects_exact_workspace_release(self) -> None:
         self.repo.change(
@@ -862,7 +871,12 @@ class PlannerFixtureTests(unittest.TestCase):
                 repository.change(path, content)
                 expected = ["unaffected"] * 5
                 expected[affected_index] = "affected"
-                self.assertEqual(self.runtime_states(repository.plan()), tuple(expected))
+                document = repository.plan()
+                self.assertEqual(self.runtime_states(document), tuple(expected))
+                self.assertEqual(
+                    self.workspace_states(document),
+                    ("unaffected", "unaffected", "affected"),
+                )
 
     def test_runtime_artifact_fact_does_not_change_capability_ownership(self) -> None:
         path = "deployments/docker/gateway.Dockerfile"
@@ -1266,7 +1280,7 @@ class PlannerFixtureTests(unittest.TestCase):
         self.assertEqual(artifacts["confidential_probe_image"]["state"], "affected")
         self.assertEqual(self.workspace_states(self.repo.plan()), ("unaffected",) * 3)
 
-    def test_unrelated_lock_record_does_not_affect_workspace_binary(self) -> None:
+    def test_unrelated_lock_record_selects_workspace_for_runtime_release(self) -> None:
         lockfile = (self.repo.root / "Cargo.lock").read_text()
         self.repo.change(
             "Cargo.lock",
@@ -1277,7 +1291,7 @@ class PlannerFixtureTests(unittest.TestCase):
         )
         self.assertEqual(
             self.workspace_states(self.repo.plan()),
-            ("unaffected", "unaffected", "unaffected"),
+            ("unaffected", "unaffected", "affected"),
         )
 
     def test_policy_change_fails_every_artifact_closed(self) -> None:

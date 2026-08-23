@@ -188,7 +188,13 @@
       "dependencies": [
         "base_image",
         "workspace_cw_binary",
-        "confidential_workspace_acceptance_contract"
+        "confidential_workspace_acceptance_contract",
+        "dev_release_tree",
+        "dashboard_image",
+        "gateway_image",
+        "derp_image",
+        "services_image",
+        "mesh_image"
       ],
       "inputs": ["images/workspace/**"]
     }
