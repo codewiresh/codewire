@@ -39,6 +39,7 @@ pub mod error;
 pub mod health;
 pub mod http;
 pub mod internal_hmac;
+pub mod kek;
 pub mod metrics;
 pub mod migrate;
 pub mod nats;
