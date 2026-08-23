@@ -27,7 +27,7 @@ SMOKE_EXEC_TIMEOUT="${SMOKE_EXEC_TIMEOUT:-900}"
 SMOKE_SSH_TIMEOUT="${SMOKE_SSH_TIMEOUT:-90}"
 SMOKE_SSH_CONNECT_TIMEOUT="${SMOKE_SSH_CONNECT_TIMEOUT:-60}"
 SMOKE_SSH_LOG_LEVEL="${SMOKE_SSH_LOG_LEVEL:-ERROR}"
-SMOKE_TAILNET_DOCTOR_TIMEOUT="${SMOKE_TAILNET_DOCTOR_TIMEOUT:-$SMOKE_SSH_TIMEOUT}"
+SMOKE_TAILNET_DOCTOR_TIMEOUT="${SMOKE_TAILNET_DOCTOR_TIMEOUT:-180}"
 SMOKE_DOCKER_STRESS="${SMOKE_DOCKER_STRESS:-0}"
 SMOKE_DOCKER_STRESS_ITERATIONS="${SMOKE_DOCKER_STRESS_ITERATIONS:-3}"
 SMOKE_DOCKER_POSTGRES_ROWS="${SMOKE_DOCKER_POSTGRES_ROWS:-0}"
@@ -175,8 +175,8 @@ Environment:
                            CW_TAILNET_DIAL_TIMEOUT for the final tailnet TCP
                            stream dial after path setup.
   SMOKE_TAILNET_DOCTOR_TIMEOUT
-                           Defaults to SMOKE_SSH_TIMEOUT; outer timeout for
-                           cw doctor tailnet.
+                           Defaults to 180s; outer timeout for the concurrent
+                           direct and forced-DERP cw doctor probes.
   SMOKE_SSH_CONNECT_TIMEOUT
                            Defaults to 60; OpenSSH ConnectTimeout in seconds.
                            Increase when SMOKE_TAILNET_DIRECT_WAIT is longer.
@@ -2564,6 +2564,11 @@ run_tailnet_doctor() {
   if [[ "$SMOKE_PACKET_CAPTURE_UNAVAILABLE" == "1" ]]; then
     packet_rc=1
   fi
+  if [[ "$doctor_rc" == "124" ]]; then
+    record_tailnet_doctor_timeout "$evidence_name" "$expect" "$stdout"
+    capture_tailnet_doctor_failure_diagnostics
+    die "tailnet doctor exceeded its outer timeout; structural receipt recorded"
+  fi
   if [[ "$doctor_rc" != "0" ]]; then
     sed 's/[[:cntrl:]]//g' "$stderr" >&2 || true
     if ! capture_tailnet_client_failure_diagnostics "$stdout"; then
@@ -2588,6 +2593,40 @@ run_tailnet_doctor() {
   else
     log "application-only smoke accepted client-observed tailnet evidence"
   fi
+}
+
+record_tailnet_doctor_timeout() {
+  local evidence_name="$1"
+  local expect="$2"
+  local doctor_json="$3"
+  local receipt="$TMPDIR_SMOKE/${evidence_name}-timeout.json"
+  local forced_derp=false
+
+  [[ "$SMOKE_DERP_FALLBACK" != "1" ]] || forced_derp=true
+  jq -n \
+    --arg expect "$expect" \
+    --arg direct_wait "$SMOKE_TAILNET_DIRECT_WAIT" \
+    --arg peer_timeout "$SMOKE_TAILNET_PEER_TIMEOUT" \
+    --arg outer_timeout "$SMOKE_TAILNET_DOCTOR_TIMEOUT" \
+    --argjson forced_derp "$forced_derp" \
+    --argjson report_present "$([[ -s "$doctor_json" ]] && printf true || printf false)" \
+    '{
+      schema: "codewire.tailnet-doctor-timeout/v1",
+      status: "outer_timeout",
+      exitCode: 124,
+      expectedTransport: $expect,
+      directWait: $direct_wait,
+      peerTimeout: $peer_timeout,
+      outerTimeout: $outer_timeout,
+      forcedDerp: $forced_derp,
+      reportPresent: $report_present
+    }' >"$receipt"
+  if [[ -n "$SMOKE_ARTIFACT_DIR" ]]; then
+    mkdir -p "$SMOKE_ARTIFACT_DIR"
+    cp "$receipt" "$SMOKE_ARTIFACT_DIR/$(basename "$receipt")"
+  fi
+  jq -c . "$receipt" >&2
+  log "tailnet doctor outer-timeout receipt captured in $receipt"
 }
 
 capture_tailnet_client_failure_diagnostics() {

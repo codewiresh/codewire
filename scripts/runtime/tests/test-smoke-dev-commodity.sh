@@ -43,6 +43,8 @@ assert_static_contract() {
   done
   grep -Fq 'SMOKE_SKIP_KUBE="${SMOKE_SKIP_KUBE:-0}"' "$WRAPPER" ||
     fail "CI wrapper does not expose the application-only boundary"
+  grep -Fq 'SMOKE_TAILNET_DOCTOR_TIMEOUT="${SMOKE_TAILNET_DOCTOR_TIMEOUT:-180}"' "$WRAPPER" ||
+    fail "CI wrapper outer doctor budget is smaller than the concurrent probe horizon"
   grep -Fq 'if [[ "$SMOKE_SKIP_KUBE" != "1" ]]; then' "$WRAPPER" ||
     fail "CI wrapper does not guard Kubernetes setup"
   candidate_run_smoke="$(awk '/^run_smoke\(\)/,/^}/' "$CANDIDATE")"
@@ -89,6 +91,56 @@ assert_static_contract() {
     | rg -F 'capture_container_log' >/dev/null; then
     fail "tailnet doctor failure diagnostics must not capture full container logs"
   fi
+}
+
+run_doctor_outer_timeout_receipt_case() {
+  local case_dir="$TEST_TMP/doctor-outer-timeout"
+  local artifact_dir="$case_dir/artifact"
+  local receipt="$case_dir/tailnet-doctor-timeout.json"
+  local artifact_receipt="$artifact_dir/tailnet-doctor-timeout.json"
+  local error="$case_dir/error"
+
+  mkdir -p "$case_dir"
+  if (
+    # shellcheck disable=SC1090 # Intentional dynamic source fixture.
+    source <(sed '$d' "$SMOKE")
+    TMPDIR_SMOKE="$case_dir"
+    SMOKE_ARTIFACT_DIR="$artifact_dir"
+    SMOKE_DERP_FALLBACK=1
+    SMOKE_TAILNET_DIRECT_WAIT=20s
+    SMOKE_TAILNET_PEER_TIMEOUT=30s
+    SMOKE_TAILNET_DOCTOR_TIMEOUT=180
+    SMOKE_PACKET_CAPTURE_UNAVAILABLE=0
+    EXPECTED_TAILNET_PATH_TRANSPORT=direct_udp
+    CODEWIRE_SERVER_URL=https://codewire-dev.example.invalid
+    ENV_ID=test-environment
+    CW_BIN=/does/not/run
+    start_peer_relay_packet_diagnostics() { :; }
+    stop_peer_relay_packet_diagnostics() { :; }
+    capture_tailnet_doctor_failure_diagnostics() { :; }
+    timeout() { return 124; }
+    run_tailnet_doctor
+  ) >/dev/null 2>"$error"; then
+    fail "outer doctor timeout unexpectedly succeeded"
+  fi
+
+  [[ -s "$receipt" && -s "$artifact_receipt" ]] ||
+    fail "outer doctor timeout did not preserve both structural receipts"
+  cmp "$receipt" "$artifact_receipt" >/dev/null ||
+    fail "staged outer doctor timeout receipt diverged"
+  jq -e '
+    .schema == "codewire.tailnet-doctor-timeout/v1"
+    and .status == "outer_timeout"
+    and .exitCode == 124
+    and .expectedTransport == "direct_udp"
+    and .directWait == "20s"
+    and .peerTimeout == "30s"
+    and .outerTimeout == "180"
+    and .forcedDerp == true
+    and .reportPresent == false
+  ' "$receipt" >/dev/null || fail "outer doctor timeout receipt is incomplete"
+  grep -Fq 'tailnet doctor exceeded its outer timeout' "$error" ||
+    fail "outer doctor timeout failure was not classified"
 }
 
 run_application_only_boundary_case() {
@@ -780,6 +832,7 @@ run_docker_socket_contract_cases
 run_explicit_isolation_tier_case
 run_safe_diagnostic_case
 run_safe_client_diagnostic_case
+run_doctor_outer_timeout_receipt_case
 run_environment_artifact_case
 run_kubernetes_failure_artifact_case
 run_packet_header_summary_case
