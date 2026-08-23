@@ -1597,7 +1597,7 @@ pub(crate) async fn handle_doctor_tailnet_command(
     let environment_id =
         resolve_environment_id(&environment_client, &org_id, &args.environment).await?;
 
-    let direct = tailnet_ssh::diagnose_environment_tailnet(
+    let direct_probe = tailnet_ssh::diagnose_environment_tailnet(
         &client,
         &org_id,
         &environment_id,
@@ -1607,26 +1607,27 @@ pub(crate) async fn handle_doctor_tailnet_command(
             force_derp: false,
             expected_transport: direct_expected,
         },
-    )
-    .await;
+    );
 
-    let forced_derp = if args.skip_forced_derp {
-        None
+    let (direct, forced_derp) = if args.skip_forced_derp {
+        (direct_probe.await, None)
     } else {
-        Some(
-            tailnet_ssh::diagnose_environment_tailnet(
-                &client,
-                &org_id,
-                &environment_id,
-                tailnet_ssh::TailnetDiagnosticOptions {
-                    peer_timeout,
-                    direct_wait: Duration::ZERO,
-                    force_derp: true,
-                    expected_transport: tailnet_ssh::ExpectedTransport::Any,
-                },
-            )
-            .await,
-        )
+        let forced_derp_probe = tailnet_ssh::diagnose_environment_tailnet(
+            &client,
+            &org_id,
+            &environment_id,
+            tailnet_ssh::TailnetDiagnosticOptions {
+                peer_timeout,
+                direct_wait: Duration::ZERO,
+                force_derp: true,
+                expected_transport: tailnet_ssh::ExpectedTransport::Any,
+            },
+        );
+        // These are independent read-only sessions with distinct ephemeral
+        // identities. Running them together keeps the command horizon to one
+        // probe instead of adding two complete peer/session wait budgets.
+        let (direct, forced_derp) = tokio::join!(direct_probe, forced_derp_probe);
+        (direct, Some(forced_derp))
     };
 
     let report = TailnetDoctorReport {
