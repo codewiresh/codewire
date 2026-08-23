@@ -71,10 +71,9 @@ if [ "$tested_tree_receipt" = fallback ]; then
   fi
   selected database && expected[database]=true
   selected_any \
-    service_apikey_smoke service_idp service_coordinator service_billing \
-    service_connectcore service_temporal \
+    service_idp service_coordinator service_billing service_connectcore \
     && expected[services_control]=true
-  selected_any service_orchestration service_nats service_temporal \
+  selected_any service_orchestration service_nats \
     && expected[services_runtime]=true
   selected_any edge_kind kind && expected[edge_kind]=true
   [ "$cw_package_selected" = true ] && expected[cw_release_assets]=true

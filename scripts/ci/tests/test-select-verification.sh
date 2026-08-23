@@ -1349,7 +1349,7 @@ for block in "$control_block" "$runtime_block"; do
     exit 1
   fi
 done
-for token in service_apikey_smoke service_idp service_coordinator service_billing service_connectcore; do
+for token in service_idp service_coordinator service_billing service_connectcore; do
   grep -qF "*'|${token}|'*" "$control_block" || {
     echo "services-control: scope resolver omits ${token}" >&2
     exit 1
@@ -1375,7 +1375,7 @@ for token in service_orchestration service_nats; do
     exit 1
   fi
 done
-for token in service_apikey_smoke service_idp service_coordinator service_billing service_connectcore; do
+for token in service_idp service_coordinator service_billing service_connectcore; do
   if grep -qF "*'|${token}|'*" "$runtime_block"; then
     echo "services-runtime: scope resolver includes control-only ${token}" >&2
     exit 1
@@ -1424,10 +1424,16 @@ run_service_scope_case both_reject_unscoped "$control_scope_script" \
   '|valid:v3|service_integration|complete|' false
 run_service_scope_case both_reject_unscoped_runtime "$runtime_scope_script" \
   '|valid:v3|service_integration|complete|' false
-run_service_scope_case temporal_selects_control "$control_scope_script" \
-  '|valid:v3|service_integration|service_temporal|complete|' true
-run_service_scope_case temporal_selects_runtime "$runtime_scope_script" \
-  '|valid:v3|service_integration|service_temporal|complete|' true
+run_service_scope_case temporal_modifier_rejects_control "$control_scope_script" \
+  '|valid:v3|service_integration|service_temporal|complete|' false
+run_service_scope_case temporal_modifier_rejects_runtime "$runtime_scope_script" \
+  '|valid:v3|service_integration|service_temporal|complete|' false
+run_service_scope_case apikey_tooling_rejects_control "$control_scope_script" \
+  '|valid:v3|service_apikey_smoke|complete|' false
+run_service_scope_case billing_temporal_selects_control "$control_scope_script" \
+  '|valid:v3|service_billing|service_integration|service_temporal|complete|' true
+run_service_scope_case orchestration_temporal_selects_runtime "$runtime_scope_script" \
+  '|valid:v3|service_integration|service_orchestration|service_temporal|complete|' true
 
 selection_block="$TMP/verification-selection.yaml"
 awk '
