@@ -721,7 +721,7 @@ jobs:
         run: |
           set -euo pipefail
           case "$VERIFICATION_SELECTION" in
-            *'|service_apikey_smoke|'*|*'|service_idp|'*|*'|service_coordinator|'*|*'|service_billing|'*|*'|service_connectcore|'*|*'|service_temporal|'*)
+            *'|service_idp|'*|*'|service_coordinator|'*|*'|service_billing|'*|*'|service_connectcore|'*)
               echo 'selected=true' >> "$GITHUB_OUTPUT"
               ;;
             *)
@@ -832,7 +832,7 @@ jobs:
         run: |
           set -euo pipefail
           case "$VERIFICATION_SELECTION" in
-            *'|service_orchestration|'*|*'|service_nats|'*|*'|service_temporal|'*)
+            *'|service_orchestration|'*|*'|service_nats|'*)
               echo 'selected=true' >> "$GITHUB_OUTPUT"
               ;;
             *)

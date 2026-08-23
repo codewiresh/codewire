@@ -381,8 +381,8 @@ if selection_has database; then
 fi
 if selection_has service_integration; then
   integration_lane_selected=false
-  if selection_has_any service_apikey_smoke service_idp service_coordinator \
-      service_billing service_connectcore; then
+  if selection_has_any service_idp service_coordinator service_billing \
+      service_connectcore; then
     integration_lane_selected=true
     run_step "service control-plane verification" env \
       VERIFICATION_SELECTION="$VERIFICATION_SELECTION" \

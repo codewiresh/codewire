@@ -70,8 +70,21 @@ assert_output "$kind_web_output" workspace_image false
 assert_output "$kind_web_output" edge_kind true
 
 temporal_output="$(emit '|valid:v3|service_integration|service_temporal|complete|' fallback false false false)"
-assert_output "$temporal_output" services_control true
-assert_output "$temporal_output" services_runtime true
+assert_output "$temporal_output" services_control false
+assert_output "$temporal_output" services_runtime false
+
+billing_temporal_output="$(emit '|valid:v3|service_billing|service_integration|service_temporal|complete|' fallback false false false)"
+assert_output "$billing_temporal_output" services_control true
+assert_output "$billing_temporal_output" services_runtime false
+
+orchestration_temporal_output="$(emit '|valid:v3|service_integration|service_orchestration|service_temporal|complete|' fallback false false false)"
+assert_output "$orchestration_temporal_output" services_control false
+assert_output "$orchestration_temporal_output" services_runtime true
+
+apikey_output="$(emit '|valid:v3|service_apikey_smoke|complete|' fallback false false false)"
+assert_output "$apikey_output" tooling true
+assert_output "$apikey_output" services_control false
+assert_output "$apikey_output" services_runtime false
 
 unknown_output="$(emit '|valid:v3|future_capability|complete|' fallback false false false)"
 for group in policy standard tooling rust_transport database services_control \
