@@ -174,8 +174,13 @@ fi
 [[ "$(tail -n 1 "$WORKSPACE_DOCKERFILE")" == 'USER codewire' ]] ||
   fail 'workspace image does not restore the unprivileged runtime user after installing cw'
 
-grep -Eq '^FROM registry\.k8s\.io/e2e-test-images/busybox@sha256:[0-9a-f]{64}$' \
-  "$CONFIDENTIAL_PROBE_DOCKERFILE" || fail 'confidential probe base is not digest-pinned'
+grep -qF 'FROM nexus.example.invalid/oci-approved/e2e-test-images/busybox@sha256:caec39cad3b12c26600baf6e67ba811ac15d28a9288d0ccdfffb4b318992c3bb' \
+  "$CONFIDENTIAL_PROBE_DOCKERFILE" || fail 'confidential probe does not use the approved exact Nexus base'
+[[ "$(grep -c '^FROM ' "$CONFIDENTIAL_PROBE_DOCKERFILE")" -eq 1 ]] ||
+  fail 'confidential probe must have exactly one approved base'
+if grep -qF 'registry.k8s.io/' "$CONFIDENTIAL_PROBE_DOCKERFILE"; then
+  fail 'confidential probe bypasses the approved Nexus base'
+fi
 grep -Eq '^ADD --checksum=sha256:[0-9a-f]{64} \\' \
   "$CONFIDENTIAL_PROBE_DOCKERFILE" || fail 'confidential probe snpguest input is not checksum-pinned'
 grep -Fq 'https://github.com/virtee/snpguest/releases/download/v0.10.0/snpguest' \
