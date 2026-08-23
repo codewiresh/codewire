@@ -6,7 +6,6 @@ namespace: prod
 resources:
   - namespace.yaml
   - runtime-class-runc.yaml
-  - infisical-secret.yaml
   - ingress.yaml
 
 configMapGenerator:
