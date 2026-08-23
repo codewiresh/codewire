@@ -107,8 +107,11 @@ run_doctor_outer_timeout_receipt_case() {
     TMPDIR_SMOKE="$case_dir"
     SMOKE_ARTIFACT_DIR="$artifact_dir"
     SMOKE_DERP_FALLBACK=1
+    # shellcheck disable=SC2034 # Values are consumed by the sourced smoke fixture.
     SMOKE_TAILNET_DIRECT_WAIT=20s
+    # shellcheck disable=SC2034 # Values are consumed by the sourced smoke fixture.
     SMOKE_TAILNET_PEER_TIMEOUT=30s
+    # shellcheck disable=SC2034 # Values are consumed by the sourced smoke fixture.
     SMOKE_TAILNET_DOCTOR_TIMEOUT=180
     SMOKE_PACKET_CAPTURE_UNAVAILABLE=0
     EXPECTED_TAILNET_PATH_TRANSPORT=direct_udp
