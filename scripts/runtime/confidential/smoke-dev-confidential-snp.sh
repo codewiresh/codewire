@@ -24,6 +24,7 @@ COCO_EXPECT_FAILURE_PATTERN="${COCO_EXPECT_FAILURE_PATTERN:-CoCo test resource a
 EVIDENCE_DIR="${EVIDENCE_DIR:-}"
 COCO_SUPPORT_LOCK="${COCO_SUPPORT_LOCK:-$ROOT/deployments/k8s/runtime-profiles/confidential/coco-support-images.lock.json}"
 RUNTIME_CONFIGMAP_SELECTOR="$ROOT/scripts/runtime/confidential/select-required-runtime-configmap.jq"
+READY_CURRENT_SELECTOR="$ROOT/scripts/runtime/confidential/select-ready-current.jq"
 COCO_GATEWAY_IMAGE=""
 COCO_WORKSPACE_IMAGE=""
 COCO_DIND_IMAGE=""
@@ -190,10 +191,8 @@ assert_ready_current() {
   local description="$1"
   local file="$2"
 
-  assert_jq "$description is not Ready at its observed generation" '
-    .metadata.generation == .status.observedGeneration and
-    any(.status.conditions[]?; .type == "Ready" and .status == "True" and .observedGeneration == .metadata.generation)
-  ' "$file"
+  assert_jq "$description is not Ready at its observed generation" \
+    -f "$READY_CURRENT_SELECTOR" "$file"
 }
 
 run_host_gate() {

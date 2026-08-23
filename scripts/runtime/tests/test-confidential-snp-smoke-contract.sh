@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 SMOKE="$ROOT/scripts/runtime/confidential/smoke-dev-confidential-snp.sh"
 RUNTIME_CONFIGMAP_SELECTOR="$ROOT/scripts/runtime/confidential/select-required-runtime-configmap.jq"
+READY_CURRENT_SELECTOR="$ROOT/scripts/runtime/confidential/select-ready-current.jq"
 RESOLVER="$ROOT/scripts/runtime/confidential/resolve-coco-support-lock.sh"
 WRAPPER="$ROOT/scripts/runtime/confidential/with-dev-confidential-coco-config.sh"
 PROFILE="$ROOT/deployments/k8s/overlays/dev/config-runtime-profile.yaml"
@@ -84,6 +85,37 @@ if rg -F 'with-dev-smoke-auth.sh' "$SMOKE"; then
 fi
 rg -F -- '--gateway-image' "$RESOLVER" >/dev/null
 rg -F -- '--source-sha' "$RESOLVER" >/dev/null
+
+jq -n '{
+  metadata: {generation: 7},
+  status: {
+    observedGeneration: 7,
+    conditions: [{type: "Ready", status: "True", observedGeneration: 7}]
+  }
+}' | jq -e -f "$READY_CURRENT_SELECTOR" >/dev/null || {
+  printf 'current Ready condition was rejected\n' >&2
+  exit 1
+}
+if jq -n '{
+  metadata: {generation: 7},
+  status: {
+    observedGeneration: 7,
+    conditions: [{type: "Ready", status: "True", observedGeneration: 6}]
+  }
+}' | jq -e -f "$READY_CURRENT_SELECTOR" >/dev/null; then
+  printf 'stale Ready condition was accepted\n' >&2
+  exit 1
+fi
+if jq -n '{
+  metadata: {generation: 7},
+  status: {
+    observedGeneration: 6,
+    conditions: [{type: "Ready", status: "True", observedGeneration: 7}]
+  }
+}' | jq -e -f "$READY_CURRENT_SELECTOR" >/dev/null; then
+  printf 'stale object observation was accepted\n' >&2
+  exit 1
+fi
 
 rg -F 'SANDBOX_RUNTIME_PROFILE: commodity' "$COMMODITY_PROFILE" >/dev/null
 rg -F 'SANDBOX_KATA_COCO_INIT_DATA_ENABLED: "false"' "$COMMODITY_PROFILE" >/dev/null
