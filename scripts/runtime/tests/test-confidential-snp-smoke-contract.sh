@@ -155,7 +155,7 @@ rg -F 'EXPECTED_KATA_COCO_IMAGE_REGISTRY_AUTH_URI="$COCO_IMAGE_REGISTRY_AUTH_URI
 [[ "$(yq -er '.overhead.podFixed.cpu' "$RUNTIME_PROFILE_DIR/runtime-class-commodity.yaml")" == "250m" ]]
 [[ "$(yq -er '.overhead.podFixed.memory' "$RUNTIME_PROFILE_DIR/runtime-class-commodity.yaml")" == "130Mi" ]]
 [[ "$(yq -er '.overhead.podFixed.cpu' "$RUNTIME_PROFILE_DIR/runtime-class-confidential.yaml")" == "1" ]]
-[[ "$(yq -er '.overhead.podFixed.memory' "$RUNTIME_PROFILE_DIR/runtime-class-confidential.yaml")" == "2Gi" ]]
+[[ "$(yq -er '.overhead.podFixed.memory' "$RUNTIME_PROFILE_DIR/runtime-class-confidential.yaml")" == "3968Mi" ]]
 rg -F 'COCO_KBS_URL="${COCO_KBS_URL:-https://codewire-trustee-kbs.codewire-trustee.svc.cluster.local:8080}"' \
   "$SMOKE" >/dev/null
 if rg -F 'http://codewire-trustee-kbs.codewire-trustee.svc.cluster.local:8080' \
@@ -325,9 +325,13 @@ case "$*" in
         {metadata: {name: "confidential"}, handler: "kata-qemu-snp", scheduling: {nodeSelector: {"node.codewire.sh/confidential-snp": "true"}}}
       ]}'
     else
-      jq -n '{items: [
+      confidential_memory=3968Mi
+      if [[ "${RUNTIMECLASS_OVERHEAD_FIXTURE:-valid}" == "legacy-confidential" ]]; then
+        confidential_memory=2Gi
+      fi
+      jq -n --arg confidential_memory "$confidential_memory" '{items: [
         {metadata: {name: "commodity"}, handler: "kata-clh", overhead: {podFixed: {cpu: "250m", memory: "130Mi"}}},
-        {metadata: {name: "confidential"}, handler: "kata-qemu-snp", overhead: {podFixed: {cpu: "1", memory: "2Gi"}}, scheduling: {nodeSelector: {"node.codewire.sh/confidential-snp": "true"}}}
+        {metadata: {name: "confidential"}, handler: "kata-qemu-snp", overhead: {podFixed: {cpu: "1", memory: $confidential_memory}}, scheduling: {nodeSelector: {"node.codewire.sh/confidential-snp": "true"}}}
       ]}'
     fi
     ;;
@@ -400,6 +404,21 @@ if PATH="$bootstrap_dir/bin:$PATH" \
 fi
 rg -F 'RuntimeClass/commodity pod overhead is not the kata-clh contract' \
   "$bootstrap_dir/missing-overhead.stderr" >/dev/null
+
+mkdir -p "$bootstrap_dir/legacy-confidential-overhead-evidence"
+if PATH="$bootstrap_dir/bin:$PATH" \
+  KUBECTL_BIN="$bootstrap_dir/bin/kubectl" \
+  KUBE_CONTEXT=mock \
+  EVIDENCE_DIR="$bootstrap_dir/legacy-confidential-overhead-evidence" \
+  RUNTIMECLASS_OVERHEAD_FIXTURE=legacy-confidential \
+  "$SMOKE" --skip-host-gate --skip-raw-jobs --skip-guest-attestation --skip-coco \
+  >"$bootstrap_dir/legacy-confidential-overhead.stdout" \
+  2>"$bootstrap_dir/legacy-confidential-overhead.stderr"; then
+  printf 'bootstrap-only smoke accepted the legacy confidential RuntimeClass overhead\n' >&2
+  exit 1
+fi
+rg -F 'RuntimeClass/confidential pod overhead is not the kata-qemu-snp contract' \
+  "$bootstrap_dir/legacy-confidential-overhead.stderr" >/dev/null
 rm -rf "$bootstrap_dir"
 trap - EXIT
 
