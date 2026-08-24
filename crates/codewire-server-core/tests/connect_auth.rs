@@ -593,6 +593,62 @@ async fn authenticated_native_grpc_opt_in_preserves_connect_auth_and_errors() {
     }
 }
 
+#[tokio::test]
+async fn locked_api_key_usage_row_does_not_block_authentication() {
+    let Ok(url) = std::env::var("DATABASE_URL") else {
+        eprintln!("DATABASE_URL unset — skipping locked API-key usage test");
+        return;
+    };
+    let pool = PgPoolOptions::new()
+        .max_connections(5)
+        .connect(&url)
+        .await
+        .expect("connect");
+    let namespace = "locked-api-key-touch";
+    let seeded = seed(&pool, namespace).await;
+    let key_id = format!("ak_cwi2_{namespace}");
+
+    let mut locker = pool.begin().await.expect("begin API-key row lock");
+    let locked: String = sqlx::query_scalar("SELECT id FROM api_keys WHERE id = $1 FOR UPDATE")
+        .bind(&key_id)
+        .fetch_one(&mut *locker)
+        .await
+        .expect("lock API-key row");
+    assert_eq!(locked, key_id);
+
+    let addr = start_app(ConnectAuthLayer::authenticated(AuthState {
+        pool: pool.clone(),
+    }))
+    .await;
+    let started = std::time::Instant::now();
+    let response = post_ping(
+        &reqwest::Client::new(),
+        &ping_url(addr, "Ping"),
+        r#"{"message":"row-lock"}"#,
+        None,
+        Some(&seeded.api_key),
+    )
+    .await;
+    let elapsed = started.elapsed();
+    assert_eq!(response.status(), 200);
+    assert!(
+        elapsed < std::time::Duration::from_secs(2),
+        "best-effort usage touch blocked API-key authentication for {elapsed:?}"
+    );
+
+    // Keep the row locked beyond the background write budget. Authentication
+    // remains successful even though this usage sample cannot be recorded.
+    tokio::time::sleep(std::time::Duration::from_millis(350)).await;
+    locker.rollback().await.expect("release API-key row lock");
+    let last_used: Option<chrono::NaiveDateTime> =
+        sqlx::query_scalar("SELECT last_used_at FROM api_keys WHERE id = $1")
+            .bind(&key_id)
+            .fetch_one(&pool)
+            .await
+            .expect("read API-key usage timestamp");
+    assert!(last_used.is_none());
+}
+
 /// D5 environment-token mount: only an active environment's bearer token
 /// resolves, and handlers receive its environment plus owning-user identity
 /// without gaining product-user authority.

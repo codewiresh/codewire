@@ -39,7 +39,9 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use chrono::{NaiveDateTime, Utc};
-use codewire_server_core::auth::{api_key_prefix, hash_api_key, hash_session_token};
+use codewire_server_core::auth::{
+    api_key_prefix, hash_api_key, hash_session_token, touch_api_key_last_used_best_effort,
+};
 use codewire_server_core::{AppError, ValidatedJson};
 use rand::RngCore;
 use schemars::JsonSchema;
@@ -993,10 +995,7 @@ async fn get_session(State(state): State<SessionAuthState>, headers: HeaderMap) 
             return Json(serde_json::Value::Null).into_response();
         };
 
-        let _ = sqlx::query("UPDATE api_keys SET last_used_at = NOW() WHERE id = $1")
-            .bind(&row.key_id)
-            .execute(&state.pool)
-            .await;
+        touch_api_key_last_used_best_effort(&state.pool, &row.key_id);
 
         let user = UserAuthRow {
             id: row.id,

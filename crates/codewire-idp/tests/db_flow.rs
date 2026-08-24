@@ -1976,12 +1976,18 @@ async fn get_session_accepts_codewire_api_key_against_postgres() {
     assert_eq!(body["session"]["id"], "");
     assert_eq!(body["session"]["token"], "");
 
-    let last_used: Option<chrono::NaiveDateTime> =
-        sqlx::query_scalar("SELECT last_used_at FROM api_keys WHERE id=$1")
+    let mut last_used: Option<chrono::NaiveDateTime> = None;
+    for _ in 0..50 {
+        last_used = sqlx::query_scalar("SELECT last_used_at FROM api_keys WHERE id=$1")
             .bind(key_id)
             .fetch_one(&pool)
             .await
             .unwrap();
+        if last_used.is_some() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
     assert!(
         last_used.is_some(),
         "api-key get-session should bump last_used_at"

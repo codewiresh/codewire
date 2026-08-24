@@ -33,6 +33,7 @@ use axum::response::Response;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
+use std::time::Duration;
 
 use crate::error::AppError;
 
@@ -47,6 +48,11 @@ pub const PRODUCT_API_SCOPE: &str = "codewire.api";
 /// Sliding-expiry window applied on every session-cookie validation.
 /// Sliding browser-session duration.
 pub const SESSION_DURATION: chrono::Duration = chrono::Duration::hours(8);
+
+/// Best-effort usage bookkeeping must never extend credential resolution.
+/// A short background bound also prevents a locked key row from accumulating
+/// detached database work.
+const API_KEY_LAST_USED_TOUCH_TIMEOUT: Duration = Duration::from_millis(250);
 
 /// Identity attached to a request once auth succeeds.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -629,12 +635,7 @@ async fn authenticate_api_key(pool: &PgPool, full_token: &str) -> Result<Authent
 
     let row = row.ok_or(AppError::Unauthorized)?;
 
-    // last_used_at bump is fire-and-forget in Go; same here — a failure
-    // must not fail the request.
-    let _ = sqlx::query(r#"UPDATE api_keys SET last_used_at = NOW() WHERE id = $1"#)
-        .bind(&row.id)
-        .execute(pool)
-        .await;
+    touch_api_key_last_used_best_effort(pool, &row.id);
 
     Ok(Authentication {
         user: AuthUser {
@@ -650,6 +651,29 @@ async fn authenticate_api_key(pool: &PgPool, full_token: &str) -> Result<Authent
             scopes: row.scopes,
         },
     })
+}
+
+/// Schedule approximate API-key usage bookkeeping outside authentication.
+///
+/// Authorization is decided by the preceding indexed read. `last_used_at` is
+/// operational metadata, so a row lock, pool stall, or write failure must not
+/// reject an otherwise valid credential. Coalescing keeps normal request
+/// volume from producing one row update per RPC; the timeout bounds detached
+/// work when the row or database is unavailable.
+pub fn touch_api_key_last_used_best_effort(pool: &PgPool, key_id: &str) {
+    let pool = pool.clone();
+    let key_id = key_id.to_owned();
+    std::mem::drop(tokio::spawn(async move {
+        let update = sqlx::query(
+            r#"UPDATE api_keys
+                  SET last_used_at = NOW()
+                WHERE id = $1
+                  AND (last_used_at IS NULL OR last_used_at < NOW() - interval '1 minute')"#,
+        )
+        .bind(key_id)
+        .execute(&pool);
+        let _ = tokio::time::timeout(API_KEY_LAST_USED_TOUCH_TIMEOUT, update).await;
+    }));
 }
 
 /// Validates an opaque OIDC access token (auth-policy flavor 2) by direct

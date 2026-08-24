@@ -692,7 +692,7 @@ run_connect_auth_matrix() {
     echo "::error::Connect auth matrix skipped"
     return 1
   fi
-  assert_passed_count "Connect auth matrix" "$logfile" 5
+  assert_passed_count "Connect auth matrix" "$logfile" 6
 }
 
 run_billing_temporal() {
