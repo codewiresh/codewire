@@ -7,8 +7,7 @@ readonly BUILDKIT_IMAGE='docker.io/moby/buildkit:v0.29.0@sha256:0039c1d47e8748b5
 readonly PROVENANCE_BUILDER_ID='https://git.example.invalid/infra/ci/builders/protected-delivery/v1'
 readonly NEXUS_REGISTRY_HOST='nexus-system-cluster.example.invalid'
 readonly NEXUS_APPROVED_REGISTRY_HOST='nexus.example.invalid'
-readonly NEXUS_BACKUP_RETRY_ATTEMPTS=16
-readonly NEXUS_BACKUP_RETRY_DELAY_SECONDS=60
+source "$ROOT/scripts/ci/images/nexus-publication-retry-contract.sh"
 
 : "${GITHUB_SHA:?GITHUB_SHA is required}"
 : "${GITHUB_OUTPUT:?GITHUB_OUTPUT is required}"

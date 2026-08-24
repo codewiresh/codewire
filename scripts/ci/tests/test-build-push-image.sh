@@ -4,6 +4,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 readonly ROOT
 readonly BUILDER="$ROOT/scripts/ci/images/build-push-image.sh"
+readonly RUNTIME_BUILDER="$ROOT/scripts/ci/images/build-push-runtime-images.sh"
+readonly NEXUS_RETRY_CONTRACT="$ROOT/scripts/ci/images/nexus-publication-retry-contract.sh"
 readonly KIND_BUILDER="$ROOT/scripts/ci/images/build-kind-images.sh"
 readonly RUST_BUILD_WRAPPER="$ROOT/scripts/ci/images/run-rust-build.sh"
 readonly RUST_BASE_DOCKERFILE="$ROOT/deployments/docker/rust-base.Dockerfile"
@@ -37,8 +39,18 @@ grep -Fq 'CODEWIRE_EXTERNAL_DOCKER_CONFIG' "$BUILDER" ||
   fail 'published-image builder cannot share private job-scoped registry auth'
 grep -Fq 'buildx_builder_owned=0' "$BUILDER" ||
   fail 'published-image builder does not distinguish caller-owned BuildKit state'
-grep -Fq 'NEXUS_BACKUP_RETRY_ATTEMPTS=16' "$BUILDER" ||
-  fail 'published-image builder lacks the bounded Nexus publication retry'
+for protected_builder in "$BUILDER" "$RUNTIME_BUILDER"; do
+  # shellcheck disable=SC2016 # Match the literal sourced contract path.
+  grep -Fq 'source "$ROOT/scripts/ci/images/nexus-publication-retry-contract.sh"' \
+    "$protected_builder" || fail "$(basename "$protected_builder") bypasses the shared Nexus retry contract"
+  if grep -Eq '^readonly NEXUS_BACKUP_RETRY_(ATTEMPTS|DELAY_SECONDS)=' "$protected_builder"; then
+    fail "$(basename "$protected_builder") duplicates the shared Nexus retry contract"
+  fi
+done
+grep -Fq 'NEXUS_BACKUP_RETRY_ATTEMPTS=61' "$NEXUS_RETRY_CONTRACT" ||
+  fail 'shared Nexus retry contract lacks sixty bounded maintenance waits'
+grep -Fq 'NEXUS_BACKUP_RETRY_DELAY_SECONDS=60' "$NEXUS_RETRY_CONTRACT" ||
+  fail 'shared Nexus retry contract changed its fixed one-minute delay'
 grep -Fq '503 Service (Temporarily )?Unavailable' "$BUILDER" ||
   fail 'published-image retry is not restricted to the observed Nexus outage'
 # shellcheck disable=SC2016 # This assertion intentionally matches literal shell source.
@@ -739,7 +751,7 @@ login_calls_before="$(grep -c ' login ' "$FAKE_DOCKER_CALLS" || true)"
   fail 'transient Nexus login did not retry twice before the approved login'
 [[ "$(grep -cxF '60' "$FAKE_SLEEP_CALLS")" -eq 2 ]] ||
   fail 'transient Nexus login did not use the bounded retry delay'
-grep -qF 'retrying nexus-system-cluster.example.invalid (2/16)' \
+grep -qF 'retrying nexus-system-cluster.example.invalid (2/61)' \
   "$work/transient-nexus-login.out" ||
   fail 'transient Nexus login retry was not attributable'
 
@@ -1089,7 +1101,7 @@ retry_builds_before="$(build_invocation_count)"
   fail 'published-image build did not retry twice and then succeed'
 [[ "$(grep -cxF '60' "$FAKE_SLEEP_CALLS")" -eq 2 ]] ||
   fail 'published-image build did not use the bounded Nexus retry delay'
-grep -qF 'retrying the exact base build (2/16)' "$work/nexus-retry.out" ||
+grep -qF 'retrying the exact base build (2/61)' "$work/nexus-retry.out" ||
   fail 'published-image Nexus retry was not attributable'
 
 awk -F '\t' -v reference="$base_source_tag" \

@@ -16,6 +16,8 @@ fixture="$work/fixture"
 mkdir -p "$fixture/scripts/ci/images" "$fixture/bin" "$fixture/tmp"
 cp "$ROOT/scripts/ci/images/build-push-runtime-images.sh" \
   "$fixture/scripts/ci/images/build-push-runtime-images.sh"
+cp "$ROOT/scripts/ci/images/nexus-publication-retry-contract.sh" \
+  "$fixture/scripts/ci/images/nexus-publication-retry-contract.sh"
 
 cat >"$fixture/bin/docker" <<'SH'
 #!/usr/bin/env bash
@@ -158,6 +160,35 @@ fi
 grep -Fq 'non-retryable protected build failure' "$work/fatal.stdout" ||
   fail "non-retryable protected build failure was not observable"
 
+maintenance_output="$work/maintenance-output"
+maintenance_state="$work/maintenance-state"
+maintenance_sleep_log="$work/maintenance-sleep.log"
+printf '0\n' >"$maintenance_state"
+: >"$maintenance_sleep_log"
+(
+  cd "$fixture"
+  PATH="$fixture/bin:$PATH" \
+    RUNNER_TEMP="$fixture/tmp" \
+    DOCKER_LOG="$work/maintenance-docker.log" \
+    BUILD_LOG="$work/maintenance-build.log" \
+    SLEEP_LOG="$maintenance_sleep_log" \
+    FAKE_TRANSIENT_REGISTRY_IMAGE=mesh \
+    FAKE_TRANSIENT_REGISTRY_FAILURES=60 \
+    FAKE_TRANSIENT_REGISTRY_STATE="$maintenance_state" \
+    GITHUB_SHA=0123456789abcdef0123456789abcdef01234567 \
+    GITHUB_RUN_ID=46 \
+    GITHUB_RUN_ATTEMPT=1 \
+    GITHUB_OUTPUT="$maintenance_output" \
+    CODEWIRE_SCCACHE_MODE=local \
+    scripts/ci/images/build-push-runtime-images.sh
+)
+[[ "$(cat "$maintenance_state")" -eq 60 ]] ||
+  fail "Nexus maintenance recovery did not reach its final admitted retry"
+[[ "$(grep -c '^60$' "$maintenance_sleep_log")" -eq 60 ]] ||
+  fail "Nexus maintenance recovery did not use sixty bounded waits"
+[[ "$(wc -l <"$maintenance_output" | tr -d ' ')" -eq 5 ]] ||
+  fail "Nexus maintenance recovery did not emit the exact five-image set"
+
 exhausted_state="$work/exhausted-state"
 exhausted_sleep_log="$work/exhausted-sleep.log"
 printf '0\n' >"$exhausted_state"
@@ -170,7 +201,7 @@ if (
     BUILD_LOG="$work/exhausted-build.log" \
     SLEEP_LOG="$exhausted_sleep_log" \
     FAKE_TRANSIENT_REGISTRY_IMAGE=mesh \
-    FAKE_TRANSIENT_REGISTRY_FAILURES=16 \
+    FAKE_TRANSIENT_REGISTRY_FAILURES=61 \
     FAKE_TRANSIENT_REGISTRY_STATE="$exhausted_state" \
     GITHUB_SHA=0123456789abcdef0123456789abcdef01234567 \
     GITHUB_RUN_ID=45 \
@@ -181,10 +212,10 @@ if (
 ) >"$work/exhausted.stdout" 2>"$work/exhausted.stderr"; then
   fail "exhausted Nexus outage was accepted"
 fi
-[[ "$(cat "$exhausted_state")" -eq 16 ]] ||
-  fail "Nexus retry boundary did not stop after 16 failed attempts"
-[[ "$(grep -c '^60$' "$exhausted_sleep_log")" -eq 15 ]] ||
-  fail "Nexus retry boundary did not use exactly 15 bounded waits"
+[[ "$(cat "$exhausted_state")" -eq 61 ]] ||
+  fail "Nexus retry boundary did not stop after 61 failed attempts"
+[[ "$(grep -c '^60$' "$exhausted_sleep_log")" -eq 60 ]] ||
+  fail "Nexus retry boundary did not use exactly 60 bounded waits"
 
 builder="$(cut -d'|' -f2 "$build_log" | sort -u)"
 [[ "$builder" =~ ^codewire-runtime-42-3-[0-9]+$ ]] ||
