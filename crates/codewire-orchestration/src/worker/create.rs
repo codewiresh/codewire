@@ -757,7 +757,16 @@ pub async fn update_backend_pod_info(
 // ── Handler (port of runEnvironmentCreate) ─────────────────────────────
 
 const CREATE_READY_TIMEOUT: Duration = Duration::from_secs(600); // SANDBOX_CREATE_READY_TIMEOUT_SECS default
+const CONFIDENTIAL_CREATE_READY_TIMEOUT: Duration = Duration::from_secs(1800);
 const CREATE_MUTATION_STATES: &[&str] = &["pending", "creating", "starting"];
+
+pub(super) fn ready_timeout_for_isolation(isolation_tier: &str) -> Duration {
+    if isolation_tier == "confidential" {
+        CONFIDENTIAL_CREATE_READY_TIMEOUT
+    } else {
+        CREATE_READY_TIMEOUT
+    }
+}
 
 /// Mirrors `RunEnvironmentCreateWithoutSetupPublish` — the create
 /// activity never publishes the setup job: the Temporal workflow chains
@@ -863,7 +872,10 @@ async fn run_environment_create(
                 if let Err(e) = authority
                     .run_while_authoritative_for_states(
                         CREATE_MUTATION_STATES,
-                        client.wait_for_ready(env_id, CREATE_READY_TIMEOUT),
+                        client.wait_for_ready(
+                            env_id,
+                            ready_timeout_for_isolation(&env.isolation_tier),
+                        ),
                     )
                     .await
                 {
@@ -1467,6 +1479,18 @@ mod tests {
         assert!(!create_command_cancelled("pending", "started"));
         assert!(!create_command_cancelled("creating", "started"));
         assert!(!create_command_cancelled("running", "started"));
+    }
+
+    #[test]
+    fn confidential_create_waits_outside_the_nested_runtime_deadlines() {
+        assert_eq!(
+            ready_timeout_for_isolation("standard"),
+            Duration::from_secs(600)
+        );
+        assert_eq!(
+            ready_timeout_for_isolation("confidential"),
+            Duration::from_secs(1800)
+        );
     }
 
     #[test]
