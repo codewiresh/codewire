@@ -57,6 +57,7 @@ rg -F 'SMOKE_KUSTOMIZATION="codewire-deploy-confidential-smoke-dev"' "$SMOKE" >/
 rg -F 'CODEWIRE_SERVER_URL="${CODEWIRE_SERVER_URL:-https://codewire-dev.sh}"' "$SMOKE" >/dev/null
 rg -F 'EXPECTED_CODEWIRE_DEV_SERVER_URL="${EXPECTED_CODEWIRE_DEV_SERVER_URL:-https://codewire-dev.sh}"' "$SMOKE" >/dev/null
 rg -F 'KUBE_CONTEXT="${KUBE_CONTEXT:-dev-cluster}"' "$SMOKE" >/dev/null
+rg -F 'SANDBOX_NAMESPACE="${SANDBOX_NAMESPACE:-dev-sandboxes}"' "$SMOKE" >/dev/null
 rg -F 'NODE="${CONFIDENTIAL_SNP_NODE:-cw-dev-prod-node-1}"' "$SMOKE" >/dev/null
 rg -F 'COMMODITY_NODE="${CONFIDENTIAL_COMMODITY_NODE:-dev-node-1}"' "$SMOKE" >/dev/null
 rg -F './scripts/talos-external-worker verify' "$SMOKE" >/dev/null
@@ -144,6 +145,13 @@ rg -F 'SANDBOX_WORKSPACE_STORAGE_CLASS: longhorn' "$COMMODITY_PROFILE" >/dev/nul
 rg -F 'SANDBOX_WORKSPACE_STORAGE_CLASS: longhorn' "$CONFIDENTIAL_PROFILE" >/dev/null
 rg -F 'SANDBOX_KATA_COCO_KBS_URL: https://codewire-trustee-kbs.codewire-trustee.svc.cluster.local:8080' \
   "$CONFIDENTIAL_PROFILE" >/dev/null
+rg -F 'SANDBOX_KATA_COCO_IMAGE_REGISTRY_AUTH_URI: kbs:///default/containers/auth' \
+  "$CONFIDENTIAL_PROFILE" >/dev/null
+rg -F 'SANDBOX_KATA_COCO_IMAGE_REGISTRY_AUTH_URI: ""' "$COMMODITY_PROFILE" >/dev/null
+rg -F 'COCO_IMAGE_REGISTRY_AUTH_URI="${COCO_IMAGE_REGISTRY_AUTH_URI:-kbs:///default/containers/auth}"' \
+  "$SMOKE" >/dev/null
+rg -F 'SANDBOX_NAMESPACE="$SANDBOX_NAMESPACE"' "$SMOKE" >/dev/null
+rg -F 'EXPECTED_KATA_COCO_IMAGE_REGISTRY_AUTH_URI="$COCO_IMAGE_REGISTRY_AUTH_URI"' "$SMOKE" >/dev/null
 [[ "$(yq -er '.overhead.podFixed.cpu' "$RUNTIME_PROFILE_DIR/runtime-class-commodity.yaml")" == "250m" ]]
 [[ "$(yq -er '.overhead.podFixed.memory' "$RUNTIME_PROFILE_DIR/runtime-class-commodity.yaml")" == "130Mi" ]]
 [[ "$(yq -er '.overhead.podFixed.cpu' "$RUNTIME_PROFILE_DIR/runtime-class-confidential.yaml")" == "1" ]]
