@@ -58,11 +58,13 @@ fn kata_coco_kbs_egress_rule(kbs_url: &str) -> Option<Value> {
     }
 
     let port = parsed.port_or_known_default()? as i64;
+    // A Service DNS name does not identify its backing Pod labels. Select the
+    // dedicated KBS namespace and exact port; the destination's own ingress
+    // policy remains responsible for admitting only confidential callers.
     Some(json!({
         "to": [
             {
                 "namespaceSelector": { "matchLabels": { "kubernetes.io/metadata.name": parts[1] } },
-                "podSelector": { "matchLabels": { "app.kubernetes.io/name": parts[0] } },
             },
         ],
         "ports": [

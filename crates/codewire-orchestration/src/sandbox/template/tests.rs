@@ -402,6 +402,12 @@ mod tests {
             },
         );
         let spec = &gateway["spec"]["template"]["spec"];
+        assert!(
+            gateway["spec"]["template"]["metadata"]["labels"]
+                ["codewire.sh/isolation-tier"]
+                .is_null(),
+            "commodity gateways must not gain the confidential Trustee ingress label"
+        );
         assert_eq!(
             spec["runtimeClassName"].as_str(),
             Some(RUNTIME_CLASS_COMMODITY)
@@ -997,6 +1003,12 @@ mod tests {
 
         let gateway = render_gateway_deployment("codewire-runtime", &opts);
         assert_eq!(
+            gateway["spec"]["template"]["metadata"]["labels"]
+                ["codewire.sh/isolation-tier"]
+                .as_str(),
+            Some("confidential")
+        );
+        assert_eq!(
             gateway["spec"]["template"]["metadata"]["annotations"]
                 [KATA_HYPERVISOR_KERNEL_PARAMS_ANNOTATION_KEY]
                 .as_str(),
@@ -1011,8 +1023,7 @@ mod tests {
                     target["namespaceSelector"]["matchLabels"]["kubernetes.io/metadata.name"]
                         .as_str()
                         == Some("codewire-trustee")
-                        && target["podSelector"]["matchLabels"]["app.kubernetes.io/name"].as_str()
-                            == Some("codewire-trustee-kbs")
+                        && target["podSelector"].is_null()
                 })
             })
         });
@@ -1337,8 +1348,7 @@ mod tests {
                     target["namespaceSelector"]["matchLabels"]["kubernetes.io/metadata.name"]
                         .as_str()
                         == Some("codewire-trustee")
-                        && target["podSelector"]["matchLabels"]["app.kubernetes.io/name"].as_str()
-                            == Some("codewire-trustee-kbs")
+                        && target["podSelector"].is_null()
                 })
             })
         });

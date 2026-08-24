@@ -2,7 +2,7 @@
 
 use serde_json::{Value, json};
 
-use super::{TemplateOpts, WORKSPACE_DAEMON_PORT};
+use super::{RUNTIME_PROFILE_CONFIDENTIAL, TemplateOpts, WORKSPACE_DAEMON_PORT};
 
 pub fn gateway_workload_name(env_id: &str) -> String {
     dns_name("cw-gateway", env_id)
@@ -91,5 +91,8 @@ pub(super) fn gateway_labels(opts: &TemplateOpts) -> Value {
     object.insert("app.kubernetes.io/name".into(), "codewire-gateway".into());
     object.insert("app.kubernetes.io/component".into(), "gateway".into());
     object.insert("app.kubernetes.io/managed-by".into(), "codewire".into());
+    if opts.runtime_profile_spec().profile == RUNTIME_PROFILE_CONFIDENTIAL {
+        object.insert("codewire.sh/isolation-tier".into(), "confidential".into());
+    }
     labels
 }
