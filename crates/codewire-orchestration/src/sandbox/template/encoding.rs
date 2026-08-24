@@ -116,13 +116,14 @@ pub(super) fn build_codewire_kata_policy_init_data(
     }
     payload.push_str("\n'''\n\n\"cdh.toml\" = '''\nsocket = \"unix:///run/confidential-containers/cdh.sock\"\n\n[kbc]\nname = \"cc_kbc\"\nurl = ");
     payload.push_str(&toml_string(kbs_url));
-    payload.push('\n');
     if !kbs_ca_pem.is_empty() {
-        payload.push_str("\n[image]\nextra_root_certificates = [");
+        payload.push_str("\nkbs_cert = ");
         payload.push_str(&toml_string(kbs_ca_pem));
-        payload.push_str("]\n");
     }
-    payload.push_str("'''\n");
+    // Keep the image table absent. guest-components uses
+    // ImageConfig::from_kernel_cmdline() only when [image] is omitted; adding a
+    // partial table here would silently discard agent.image_registry_auth.
+    payload.push_str("\n'''\n");
     payload
 }
 

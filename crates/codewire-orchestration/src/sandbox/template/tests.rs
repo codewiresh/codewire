@@ -944,8 +944,12 @@ mod tests {
         );
         let cdh: toml::Value = toml::from_str(data["cdh.toml"].as_str().unwrap()).unwrap();
         assert_eq!(
-            cdh["image"]["extra_root_certificates"][0].as_str(),
+            cdh["kbc"]["kbs_cert"].as_str(),
             Some("-----BEGIN CERTIFICATE-----\nCODEWIRE-DEV-CA\n-----END CERTIFICATE-----")
+        );
+        assert!(
+            cdh.get("image").is_none(),
+            "a partial image table would suppress agent.image_registry_auth"
         );
         assert_eq!(
             pod_template["metadata"]["labels"]["codewire.sh/isolation-tier"].as_str(),
@@ -984,7 +988,7 @@ mod tests {
             kata_coco_kbs_url:
                 "http://codewire-trustee-kbs.codewire-trustee.svc.cluster.local:8080".into(),
             kata_coco_image_registry_auth_uri: "kbs:///default/containers/auth".into(),
-            environment_id: "env-confidential-auth".into(),
+            environment_id: "be31063a-8ec8-46d5-aa17-75cda1729370".into(),
             server_namespace: "dev".into(),
             ..Default::default()
         };
@@ -1008,9 +1012,28 @@ mod tests {
                 .as_str(),
             Some("confidential")
         );
+        let gateway_annotations = gateway["spec"]["template"]["metadata"]["annotations"]
+            .as_object()
+            .unwrap();
         assert_eq!(
-            gateway["spec"]["template"]["metadata"]["annotations"]
-                [KATA_HYPERVISOR_KERNEL_PARAMS_ANNOTATION_KEY]
+            gateway_annotations
+                .get(KATA_COCO_INIT_DATA_ANNOTATION_KEY)
+                .and_then(Value::as_str),
+            annotations
+                .get(KATA_COCO_INIT_DATA_ANNOTATION_KEY)
+                .and_then(Value::as_str),
+            "workspace and gateway must carry identical measured CoCo init-data"
+        );
+        let gateway_init_data = decode_gzip_base64(
+            gateway_annotations[KATA_COCO_INIT_DATA_ANNOTATION_KEY]
+                .as_str()
+                .unwrap(),
+        );
+        assert!(gateway_init_data.contains(
+            "\"codewire_workspace_storage_key_id\" = \"be31063a-8ec8-46d5-aa17-75cda1729370\""
+        ));
+        assert_eq!(
+            gateway_annotations[KATA_HYPERVISOR_KERNEL_PARAMS_ANNOTATION_KEY]
                 .as_str(),
             Some(want_kernel_params)
         );
@@ -1028,6 +1051,29 @@ mod tests {
             })
         });
         assert!(kbs_rule.is_some(), "gateway KBS egress rule missing");
+    }
+
+    #[test]
+    fn confidential_gateway_omits_coco_annotations_when_init_data_is_disabled() {
+        let gateway = render_gateway_deployment(
+            "codewire-runtime",
+            &TemplateOpts {
+                name: "tmpl-confidential-no-coco".into(),
+                support_image: "nexus.example.invalid/gateway@sha256:golden".into(),
+                runtime_profile: RUNTIME_PROFILE_CONFIDENTIAL.into(),
+                environment_id: "be31063a-8ec8-46d5-aa17-75cda1729370".into(),
+                kata_coco_kbs_url:
+                    "https://codewire-trustee-kbs.codewire-trustee.svc.cluster.local:8080".into(),
+                kata_coco_image_registry_auth_uri: "kbs:///default/containers/auth".into(),
+                ..Default::default()
+            },
+        );
+
+        assert!(
+            gateway["spec"]["template"]["metadata"]
+                .get("annotations")
+                .is_none()
+        );
     }
 
     #[test]

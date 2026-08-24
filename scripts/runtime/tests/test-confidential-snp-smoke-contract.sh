@@ -403,4 +403,6 @@ rg -F 'RuntimeClass/commodity pod overhead is not the kata-clh contract' \
 rm -rf "$bootstrap_dir"
 trap - EXIT
 
+"$ROOT/scripts/runtime/confidential/tests/test-smoke-dev-private-image-pull.sh"
+
 printf 'Confidential SNP GitOps smoke contract tests passed\n'

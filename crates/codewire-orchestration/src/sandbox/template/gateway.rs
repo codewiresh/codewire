@@ -2,11 +2,12 @@
 
 use serde_json::{Map, Value, json};
 
+use super::encoding::kata_policy_init_data_annotation;
 use super::naming::{
     gateway_direct_udp_service_name, gateway_host_key_secret_name, gateway_labels,
     gateway_selector, gateway_service_name, gateway_workload_name, workspace_daemon_service_addr,
 };
-use super::runtime_policy::kata_coco_kernel_params_annotation;
+use super::runtime_policy::{kata_coco_kernel_params_annotation, uses_kata_policy_init_data};
 use super::{
     DAEMON_AUTH_TOKEN_ENV, DEFAULT_GATEWAY_IMAGE, DEFAULT_GATEWAY_READYZ_PORT,
     DEFAULT_GATEWAY_SSH_PORT, GATEWAY_BINDING_URL_ENV, GATEWAY_HOST_KEY_PATH,
@@ -14,7 +15,7 @@ use super::{
     GATEWAY_TAILNET_DIRECT_UDP_ADVERTISE_ENDPOINTS_ENV, GATEWAY_TAILNET_UDP_LISTEN_ADDR,
     GATEWAY_TAILNET_UDP_LISTEN_ADDR_ENV, GATEWAY_TAILNET_UDP_PORT,
     GATEWAY_UDP_RELAY_ALLOCATOR_TOKEN_ENV, GATEWAY_UDP_RELAY_ALLOCATOR_URL_ENV,
-    GATEWAY_UDP_RELAY_BIND_ADDRS_ENV, INTERNAL_DERP_TLS_PORT,
+    GATEWAY_UDP_RELAY_BIND_ADDRS_ENV, INTERNAL_DERP_TLS_PORT, KATA_COCO_INIT_DATA_ANNOTATION_KEY,
     KATA_HYPERVISOR_KERNEL_PARAMS_ANNOTATION_KEY, SANDBOX_SERVICE_ACCOUNT, TemplateOpts,
 };
 
@@ -369,6 +370,12 @@ pub fn render_gateway_deployment(namespace: &str, opts: &TemplateOpts) -> Value 
     }
 
     let mut pod_annotations = Map::new();
+    if uses_kata_policy_init_data(opts, &runtime_spec) {
+        pod_annotations.insert(
+            KATA_COCO_INIT_DATA_ANNOTATION_KEY.into(),
+            kata_policy_init_data_annotation(opts).into(),
+        );
+    }
     if let Some(kernel_params) = kata_coco_kernel_params_annotation(opts, &runtime_spec) {
         pod_annotations.insert(
             KATA_HYPERVISOR_KERNEL_PARAMS_ANNOTATION_KEY.into(),
