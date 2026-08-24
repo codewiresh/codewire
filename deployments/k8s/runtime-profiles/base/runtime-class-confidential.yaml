@@ -8,6 +8,12 @@ metadata:
     codewire.sh/runtime-tier: confidential
     codewire.sh/runtime-handler: kata-qemu-snp
 handler: kata-qemu-snp
+# Match Kata's qemu-snp-runtime-rs RuntimeClass accounting. This budget covers
+# the SNP VM plus host runtime processes and is separate from workload limits.
+overhead:
+  podFixed:
+    cpu: "1"
+    memory: 2Gi
 scheduling:
   nodeSelector:
     katacontainers.io/kata-runtime: "true"

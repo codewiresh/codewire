@@ -8,6 +8,12 @@ metadata:
     codewire.sh/runtime-tier: commodity
     codewire.sh/runtime-handler: kata-clh
 handler: kata-clh
+# Match Kata's clh-runtime-rs RuntimeClass accounting. Without PodOverhead,
+# kubelet constrains the VM/runtime processes to the workload-only cgroup limit.
+overhead:
+  podFixed:
+    cpu: 250m
+    memory: 130Mi
 scheduling:
   nodeSelector:
     katacontainers.io/kata-runtime: "true"
