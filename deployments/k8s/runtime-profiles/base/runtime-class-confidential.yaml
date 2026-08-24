@@ -8,12 +8,14 @@ metadata:
     codewire.sh/runtime-tier: confidential
     codewire.sh/runtime-handler: kata-qemu-snp
 handler: kata-qemu-snp
-# Match Kata's qemu-snp-runtime-rs RuntimeClass accounting. This budget covers
-# the SNP VM plus host runtime processes and is separate from workload limits.
+# Kata runtime-rs sizes the guest as workload memory plus 2048 MiB of guest
+# overhead. Preserve upstream qemu-snp's 1920 MiB host-side margin (its 2048
+# MiB RuntimeClass budget minus the upstream 128 MiB guest overhead), because
+# QEMU runs inside the pod cgroup: 2048 + (2048 - 128) = 3968 MiB.
 overhead:
   podFixed:
     cpu: "1"
-    memory: 2Gi
+    memory: 3968Mi
 scheduling:
   nodeSelector:
     katacontainers.io/kata-runtime: "true"
