@@ -34,6 +34,8 @@ use super::environments::{
 };
 use crate::confidential_storage::require_interactive_access;
 
+const CONFIDENTIAL_PERSISTENT_VOLUME_MAX_GIB: i32 = 50;
+
 // ── Shared body types (environment_types.go) ────────────────────────────
 
 /// Mirrors `api.RepoEntry`.
@@ -200,6 +202,17 @@ fn validate_environment_resources(
         if value.is_some_and(|value| value <= 0) {
             return Err(coded(StatusCode::BAD_REQUEST, "invalid_resources", detail));
         }
+    }
+    Ok(())
+}
+
+fn validate_confidential_storage_size(isolation_tier: &str, disk_gb: i32) -> AppResult<()> {
+    if isolation_tier == "confidential" && disk_gb > CONFIDENTIAL_PERSISTENT_VOLUME_MAX_GIB {
+        return Err(coded(
+            StatusCode::BAD_REQUEST,
+            "confidential_disk_limit_exceeded",
+            "confidential persistent volumes currently support at most 50 GiB",
+        ));
     }
     Ok(())
 }
@@ -731,6 +744,7 @@ pub(crate) async fn create_environment_core(
             };
 
             validate_environment_resources(Some(cpu), Some(mem), Some(disk), ttl)?;
+            validate_confidential_storage_size(isolation_tier, disk)?;
             // Check quota before inserting.
             check_quota(pool, org_id, "sandbox", cpu, mem).await?;
 
@@ -1061,6 +1075,20 @@ mod tests {
         };
         normalize_create_environment_body(&mut body);
         assert_eq!(body.isolation_tier, "confidential");
+    }
+
+    #[test]
+    fn confidential_persistent_volume_size_is_bounded_by_the_runtime_contract() {
+        validate_confidential_storage_size("standard", 51).unwrap();
+        validate_confidential_storage_size("confidential", 50).unwrap();
+        let error = validate_confidential_storage_size("confidential", 51).unwrap_err();
+        assert!(matches!(
+            error,
+            AppError::Coded {
+                code: "confidential_disk_limit_exceeded",
+                ..
+            }
+        ));
     }
 
     #[tokio::test]

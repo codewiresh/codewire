@@ -14,6 +14,7 @@ use temporalio_sdk::activities::ActivityContext;
 use super::activity_authority::{ActivityAuthority, is_authority_lost};
 use super::create::{
     SandboxWorkerCfg, environment_per_env_template_name, environment_template_opts,
+    ready_timeout_for_isolation,
 };
 use super::env_data::{load_backend_row, load_environment};
 use super::env_log::emit_authoritative_environment_log_for_states;
@@ -27,7 +28,6 @@ use super::{JobPayload, WorkerContext};
 use crate::lifecycle::{Action, PgLifecycleStore, Service, Snapshot};
 use crate::sandbox::client::SandboxClient;
 
-const READY_TIMEOUT: Duration = Duration::from_secs(600); // ClientBackend readyTimeout default
 const DELETED_TIMEOUT: Duration = Duration::from_secs(120);
 const POD_IP_POLL_TIMEOUT: Duration = Duration::from_secs(300); // start: 5-minute pod IP poll
 const START_MUTATION_STATES: &[&str] = &["starting"];
@@ -326,6 +326,51 @@ pub async fn handle_environment_start(
         }
     }
 
+    let ready_timeout = ready_timeout_for_isolation(&env.isolation_tier);
+    if env.state == "error" {
+        let stale = match client.workspace_pod_replacement_candidate(env_id).await {
+            Ok(stale) => stale,
+            Err(error) => {
+                record_environment_error(
+                    &svc,
+                    authority,
+                    env_id,
+                    &format!("inspect workspace Pod before retry: {error:#}"),
+                )
+                .await?;
+                return Err(error);
+            }
+        };
+        if let Some(stale) = stale {
+            tracing::info!(
+                environment_id = env_id,
+                pod = %stale.name,
+                "environment.start: replacing terminal workspace Pod"
+            );
+            if let Err(error) = await_reconcile_or_cancel(
+                &activity_ctx,
+                authority.run_external_mutation(
+                    START_MUTATION_STATES,
+                    client.restart_workspace_pod(env_id, Some(&stale.name), ready_timeout),
+                ),
+            )
+            .await
+            {
+                if is_lifecycle_control_loss(&error) {
+                    return Err(error);
+                }
+                record_environment_error(
+                    &svc,
+                    authority,
+                    env_id,
+                    &format!("replace terminal workspace Pod: {error:#}"),
+                )
+                .await?;
+                return Err(error);
+            }
+        }
+    }
+
     // Scale the sandbox back up to 1 replica.
     if let Err(e) = await_reconcile_or_cancel(
         &activity_ctx,
@@ -345,7 +390,7 @@ pub async fn handle_environment_start(
         &activity_ctx,
         authority.run_while_authoritative_for_states(
             START_MUTATION_STATES,
-            client.wait_for_ready(env_id, READY_TIMEOUT),
+            client.wait_for_ready(env_id, ready_timeout),
         ),
     )
     .await

@@ -370,6 +370,46 @@ impl SandboxClient {
             .collect())
     }
 
+    /// Return the exact terminal Pod incarnation that an explicit product
+    /// retry must replace. A healthy or still-progressing Pod is never a
+    /// replacement candidate.
+    pub async fn workspace_pod_replacement_candidate(
+        &self,
+        env_id: &str,
+    ) -> anyhow::Result<Option<WorkspacePodIdentity>> {
+        let selector = workspace_pod_selector(env_id);
+        let mut pods = self
+            .pods()
+            .list(&ListParams::default().labels(&selector))
+            .await
+            .map_err(|error| anyhow::anyhow!("list workspace Pods before retry: {error}"))?
+            .items;
+        if pods.is_empty() {
+            return Ok(None);
+        }
+        if pods.len() != 1 {
+            anyhow::bail!(
+                "refusing product retry with {} workspace Pods for environment {env_id}",
+                pods.len()
+            );
+        }
+        let pod = pods.pop().expect("one workspace Pod remains");
+        if !pod_requires_product_replacement(&pod) {
+            return Ok(None);
+        }
+        let name = pod
+            .metadata
+            .name
+            .filter(|name| !name.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("terminal workspace Pod has no name"))?;
+        let uid = pod
+            .metadata
+            .uid
+            .filter(|uid| !uid.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("terminal workspace Pod {name} has no UID"))?;
+        Ok(Some(WorkspacePodIdentity { name, uid }))
+    }
+
     /// Restart only the workspace Pod and wait for the owning Sandbox
     /// controller to replace it. The Sandbox, claim, PVCs, and environment
     /// identity are preserved.
@@ -1999,12 +2039,33 @@ impl SandboxClient {
 }
 
 /// Mirrors `terminalWaitingReasons`.
-const TERMINAL_WAITING_REASONS: [&str; 4] = [
+const TERMINAL_WAITING_REASONS: [&str; 6] = [
     "ImagePullBackOff",
     "ErrImagePull",
     "InvalidImageName",
     "CreateContainerConfigError",
+    "CreateContainerError",
+    "RunContainerError",
 ];
+
+fn pod_requires_product_replacement(pod: &Pod) -> bool {
+    if pod
+        .status
+        .as_ref()
+        .and_then(|status| status.phase.as_deref())
+        .is_some_and(|phase| matches!(phase, "Failed" | "Succeeded"))
+    {
+        return true;
+    }
+
+    pod.status
+        .as_ref()
+        .and_then(|status| status.container_statuses.as_deref())
+        .into_iter()
+        .flatten()
+        .filter_map(|status| status.state.as_ref()?.waiting.as_ref()?.reason.as_deref())
+        .any(|reason| TERMINAL_WAITING_REASONS.contains(&reason))
+}
 
 /// Mirrors `isClaimReady`: (ready, reason).
 pub fn claim_ready_status(claim: &DynamicObject) -> (bool, String) {
@@ -2326,6 +2387,46 @@ mod tests {
             workspace_pod_selector("env-test"),
             "codewire.sh/environment-id=env-test,codewire.sh/type=workspace"
         );
+    }
+
+    #[test]
+    fn product_retry_replaces_only_terminal_workspace_pods() {
+        let cases = [
+            ("Running", None, false),
+            ("Pending", Some("ContainerCreating"), false),
+            ("Pending", Some("CreateContainerError"), true),
+            ("Pending", Some("RunContainerError"), true),
+            ("Failed", None, true),
+            ("Succeeded", None, true),
+        ];
+
+        for (phase, waiting_reason, expected) in cases {
+            let mut status = json!({"phase": phase});
+            if let Some(reason) = waiting_reason {
+                status["containerStatuses"] = json!([{
+                    "name": "workspace",
+                    "image": "workspace:test",
+                    "imageID": "",
+                    "ready": false,
+                    "restartCount": 0,
+                    "state": {"waiting": {"reason": reason}}
+                }]);
+            }
+            let pod: Pod = serde_json::from_value(json!({
+                "apiVersion": "v1",
+                "kind": "Pod",
+                "metadata": {"name": "workspace", "uid": "uid-1"},
+                "spec": {"containers": [{"name": "workspace", "image": "workspace:test"}]},
+                "status": status
+            }))
+            .unwrap();
+
+            assert_eq!(
+                pod_requires_product_replacement(&pod),
+                expected,
+                "phase={phase} waiting_reason={waiting_reason:?}"
+            );
+        }
     }
 
     #[test]
