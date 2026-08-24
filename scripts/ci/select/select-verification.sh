@@ -1091,6 +1091,7 @@ if [ "$event_selected" = false ]; then
       scripts/ci/setup/fetch-infisical-ci-secret.sh|\
       scripts/ci/setup/fetch-forgejo-deploy-dev-token.sh|\
       scripts/ci/setup/fetch-forgejo-deploy-prod-token.sh|\
+      scripts/ci/setup/curl-transport-retry.sh|\
       scripts/ci/setup/fetch-openbao-ghcr-credentials.sh|\
       scripts/ci/setup/fetch-openbao-github-mirror-credentials.sh|\
       scripts/ci/setup/fetch-openbao-nexus-credentials.sh|\

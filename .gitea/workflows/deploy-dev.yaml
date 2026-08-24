@@ -102,26 +102,11 @@ jobs:
             --candidate gateway "$GITHUB_SHA" "${{ steps.build.outputs.gateway_candidate_ref }}" \
             --candidate services "$GITHUB_SHA" "${{ steps.build.outputs.services_candidate_ref }}" \
             --candidate mesh "$GITHUB_SHA" "${{ steps.build.outputs.mesh_candidate_ref }}"
+          # The bundle publisher keeps one fetched registry credential set across
+          # all five immutable copies. Per-image credential reacquisition made
+          # one atomic release depend on ten redundant OIDC/OpenBao exchanges.
           scripts/ci/images/publish-image-to-ghcr.sh \
-            "${{ steps.build.outputs.dashboard_candidate_ref }}" \
-            ghcr.io/codewiresh/dashboard \
-            "$GITHUB_SHA"
-          scripts/ci/images/publish-image-to-ghcr.sh \
-            "${{ steps.build.outputs.derp_candidate_ref }}" \
-            ghcr.io/codewiresh/derp \
-            "$GITHUB_SHA"
-          scripts/ci/images/publish-image-to-ghcr.sh \
-            "${{ steps.build.outputs.gateway_candidate_ref }}" \
-            ghcr.io/codewiresh/gateway \
-            "$GITHUB_SHA"
-          scripts/ci/images/publish-image-to-ghcr.sh \
-            "${{ steps.build.outputs.services_candidate_ref }}" \
-            ghcr.io/codewiresh/services \
-            "$GITHUB_SHA"
-          scripts/ci/images/publish-image-to-ghcr.sh \
-            "${{ steps.build.outputs.mesh_candidate_ref }}" \
-            ghcr.io/codewiresh/mesh \
-            "$GITHUB_SHA"
+            --runtime-bundle "$bundle"
 
       - name: Sign the exact runtime set
         run: |

@@ -3,6 +3,10 @@
 # write the paired GHCR publisher credential directly to private files.
 set -euo pipefail
 
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+readonly ROOT
+source "$ROOT/scripts/ci/setup/curl-transport-retry.sh"
+
 [[ $# -eq 2 ]] || {
   echo 'Usage: fetch-openbao-ghcr-credentials.sh USERNAME_FILE TOKEN_FILE' >&2
   exit 2
@@ -48,7 +52,7 @@ trap cleanup EXIT
   printf '"\nsilent\nshow-error\nfail\n'
 } >"$work/forgejo.curl"
 chmod 0600 "$work/forgejo.curl"
-curl --config "$work/forgejo.curl" \
+curl_with_transport_retry --config "$work/forgejo.curl" \
   "${CURL_BOUNDS[@]}" \
   --output "$work/forgejo-response.json" \
   "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${OPENBAO_GHCR_AUDIENCE}"
@@ -58,7 +62,7 @@ chmod 0600 "$work/forgejo.jwt"
 
 jq -n --arg role "$OPENBAO_GHCR_ROLE" --rawfile jwt "$work/forgejo.jwt" \
   '{role:$role, jwt:($jwt | rtrimstr("\n"))}' >"$work/openbao-login.json"
-curl --silent --show-error --fail \
+curl_with_transport_retry --silent --show-error --fail \
   "${CURL_BOUNDS[@]}" \
   --header 'Content-Type: application/json' \
   --data-binary @"$work/openbao-login.json" \
@@ -74,7 +78,7 @@ chmod 0600 "$work/openbao.token"
   printf '"\nsilent\nshow-error\nfail\n'
 } >"$work/openbao.curl"
 chmod 0600 "$work/openbao.curl"
-curl --config "$work/openbao.curl" \
+curl_with_transport_retry --config "$work/openbao.curl" \
   "${CURL_BOUNDS[@]}" \
   --output "$work/ghcr.json" \
   "$OPENBAO_ADDR/v1/platform/data/ci/codewire/ghcr-publisher"

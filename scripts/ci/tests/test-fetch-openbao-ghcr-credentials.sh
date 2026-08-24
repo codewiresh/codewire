@@ -119,4 +119,43 @@ fi
 [[ "$(wc -l <"$FAKE_CURL_CALLS")" -eq "$calls_before" ]] ||
   fail 'pre-existing output reached an external request'
 
+source "$ROOT/scripts/ci/setup/curl-transport-retry.sh"
+transport_attempts=0
+transport_sleeps=0
+curl() {
+  transport_attempts="$((transport_attempts + 1))"
+  [[ "$transport_attempts" -gt 1 ]] || return 6
+}
+sleep() {
+  [[ "$1" == 2 ]]
+  transport_sleeps="$((transport_sleeps + 1))"
+}
+curl_with_transport_retry synthetic-request
+[[ "$transport_attempts" -eq 2 && "$transport_sleeps" -eq 1 ]] ||
+  fail 'transient curl transport failure did not recover once with one delay'
+
+transport_attempts=0
+transport_sleeps=0
+curl() {
+  transport_attempts="$((transport_attempts + 1))"
+  return 22
+}
+if curl_with_transport_retry synthetic-request; then
+  fail 'HTTP failure was accepted by the transport retry contract'
+fi
+[[ "$transport_attempts" -eq 1 && "$transport_sleeps" -eq 0 ]] ||
+  fail 'HTTP failure was retried instead of failing immediately'
+
+transport_attempts=0
+transport_sleeps=0
+curl() {
+  transport_attempts="$((transport_attempts + 1))"
+  return 6
+}
+if curl_with_transport_retry synthetic-request; then
+  fail 'exhausted DNS failure was accepted'
+fi
+[[ "$transport_attempts" -eq 5 && "$transport_sleeps" -eq 4 ]] ||
+  fail 'DNS retry exhaustion did not use the exact bounded contract'
+
 echo 'fetch-openbao-ghcr-credentials tests passed'

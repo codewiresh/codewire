@@ -121,8 +121,8 @@ if grep -Fq 'scripts/ci/verify/kind-e2e.sh' <<<"$build_job"; then
 fi
 for family in dashboard derp gateway services mesh; do
   # shellcheck disable=SC2016
-  [[ "$(grep -Fc "\${{ steps.build.outputs.${family}_candidate_ref }}" <<<"$build_job")" -eq 2 ]] ||
-    fail "runtime build and publisher do not share the exact $family candidate"
+  [[ "$(grep -Fc "\${{ steps.build.outputs.${family}_candidate_ref }}" <<<"$build_job")" -eq 1 ]] ||
+    fail "runtime bundle construction does not consume the exact $family candidate once"
 done
 if grep -Eq '^  (build-(gateway-image|dashboard-image|derp|services-image|mesh-image)|publish-runtime-images):' "$WORKFLOW"; then
   fail "runtime products still allocate independent protected workers"
@@ -148,14 +148,14 @@ grep -Fq 'OPENBAO_GHCR_AUDIENCE: openbao-codewire-source-dev-publisher' \
 if grep -Fq 'GHCR_PUBLISH_USERNAME:' "$WORKFLOW"; then
   fail "runtime publisher retains a split Forgejo GHCR username"
 fi
-[[ "$(grep -Fc 'scripts/ci/images/publish-image-to-ghcr.sh' <<<"$publish_job")" -eq 5 ]] ||
-  fail "runtime publisher does not copy exactly five image families"
+[[ "$(grep -Fc 'scripts/ci/images/publish-image-to-ghcr.sh' <<<"$publish_job")" -eq 1 ]] ||
+  fail "runtime publisher does not use one bundle-scoped publication transaction"
+# shellcheck disable=SC2016
+grep -Fq -- '--runtime-bundle "$bundle"' <<<"$publish_job" ||
+  fail "runtime publisher does not consume the validated bundle"
 if grep -Fq 'outputs.source_sha' <<<"$publish_job"; then
   fail "runtime publisher duplicates the immutable workflow source through job outputs"
 fi
-# shellcheck disable=SC2016
-[[ "$(grep -Fc '"$GITHUB_SHA"' <<<"$publish_job")" -eq 12 ]] ||
-  fail "bundle validation and five exact copies do not share one workflow source SHA"
 validation_line="$(grep -n 'scripts/ci/images/image-bundle.py create' <<<"$publish_job" | cut -d: -f1)"
 first_copy_line="$(grep -n 'scripts/ci/images/publish-image-to-ghcr.sh' <<<"$publish_job" | head -1 | cut -d: -f1)"
 last_copy_line="$(grep -n 'scripts/ci/images/publish-image-to-ghcr.sh' <<<"$publish_job" | tail -1 | cut -d: -f1)"
@@ -187,8 +187,8 @@ if grep -Fq 'promote-image-bundle.sh' <<<"$publish_job"; then
   fail "source workflow retains the retired deploy-writing promotion wrapper"
 fi
 for family in dashboard derp gateway services mesh; do
-  grep -Fq "ghcr.io/codewiresh/$family" <<<"$publish_job" ||
-    fail "runtime publisher omits $family"
+  grep -Fq -- "--candidate $family \"\$GITHUB_SHA\"" <<<"$publish_job" ||
+    fail "runtime bundle omits $family"
 done
 if grep -Fq 'secrets.' <<<"$publish_job"; then
   fail "runtime publisher bypasses the Infisical credential handoff"

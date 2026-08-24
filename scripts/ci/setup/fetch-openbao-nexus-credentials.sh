@@ -3,6 +3,10 @@
 # write the paired Nexus credential directly to private files.
 set -euo pipefail
 
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+readonly ROOT
+source "$ROOT/scripts/ci/setup/curl-transport-retry.sh"
+
 credential_kind=publisher
 if [[ "${1:-}" == --approved ]]; then
   credential_kind=approved
@@ -22,6 +26,7 @@ password_file="$2"
 : "${OPENBAO_AUDIENCE:?OpenBao audience is required}"
 
 readonly OPENBAO_ADDR='https://openbao.example.invalid'
+readonly -a CURL_BOUNDS=(--connect-timeout 10 --max-time 30)
 case "${OPENBAO_ROLE}|${OPENBAO_AUDIENCE}" in
   codewire-source-dev-publisher\|openbao-codewire-source-dev-publisher | \
   codewire-source-support-publisher\|openbao-codewire-source-support-publisher | \
@@ -68,7 +73,8 @@ trap cleanup EXIT
   printf '"\nsilent\nshow-error\nfail\n'
 } >"$work/forgejo.curl"
 chmod 0600 "$work/forgejo.curl"
-curl --config "$work/forgejo.curl" \
+curl_with_transport_retry --config "$work/forgejo.curl" \
+  "${CURL_BOUNDS[@]}" \
   --output "$work/forgejo-response.json" \
   "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${OPENBAO_AUDIENCE}"
 jq -er '.value | strings | select(length > 0)' \
@@ -77,7 +83,8 @@ chmod 0600 "$work/forgejo.jwt"
 
 jq -n --arg role "$OPENBAO_ROLE" --rawfile jwt "$work/forgejo.jwt" \
   '{role:$role, jwt:($jwt | rtrimstr("\n"))}' >"$work/openbao-login.json"
-curl --silent --show-error --fail \
+curl_with_transport_retry --silent --show-error --fail \
+  "${CURL_BOUNDS[@]}" \
   --header 'Content-Type: application/json' \
   --data-binary @"$work/openbao-login.json" \
   --output "$work/openbao-response.json" \
@@ -92,7 +99,8 @@ chmod 0600 "$work/openbao.token"
   printf '"\nsilent\nshow-error\nfail\n'
 } >"$work/openbao.curl"
 chmod 0600 "$work/openbao.curl"
-curl --config "$work/openbao.curl" \
+curl_with_transport_retry --config "$work/openbao.curl" \
+  "${CURL_BOUNDS[@]}" \
   --output "$work/nexus.json" \
   "$OPENBAO_ADDR/v1/$credential_path"
 

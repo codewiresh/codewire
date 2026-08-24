@@ -238,6 +238,7 @@ run_paths_case release pull_request refs/pull/3/head false \
   install.sh
 run_paths_case protected_delivery_credentials pull_request refs/pull/31/head false \
   'deploy go_consumer_interop go_support policy release runtime_confidential security' \
+  scripts/ci/setup/curl-transport-retry.sh \
   scripts/ci/setup/fetch-forgejo-deploy-prod-token.sh \
   scripts/ci/setup/fetch-openbao-github-mirror-credentials.sh \
   scripts/ci/release/mint-github-app-token.sh \

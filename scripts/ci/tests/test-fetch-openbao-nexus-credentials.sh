@@ -35,7 +35,7 @@ while [[ $# -gt 0 ]]; do
       output="$2"
       shift 2
       ;;
-    --config|--header|--data-binary)
+    --config|--header|--data-binary|--connect-timeout|--max-time)
       shift 2
       ;;
     --silent|--show-error|--fail)
@@ -111,6 +111,8 @@ for secret in "$ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$forgejo_jwt" "$openbao_token" 
     fail 'credential material reached curl arguments'
   fi
 done
+[[ "$(grep -Fc -- '--connect-timeout 10 --max-time 30' "$FAKE_CURL_CALLS")" -eq 6 ]] ||
+  fail 'Nexus OIDC or OpenBao request lacks the reviewed network deadline'
 
 calls_before="$(wc -l <"$FAKE_CURL_CALLS")"
 if OPENBAO_ROLE='unapproved-role' "$FETCHER" \

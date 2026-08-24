@@ -167,6 +167,70 @@ if grep -qF "$nexus_username" "$FAKE_GHCR_FETCH_CALLS" "$FAKE_COPY_CALLS" \
   fail 'a registry token reached command arguments'
 fi
 
+runtime_bundle="$work/runtime-bundle.json"
+python3 "$ROOT/scripts/ci/images/image-bundle.py" create \
+  --source-sha "$source_sha" \
+  --output "$runtime_bundle" \
+  --candidate dashboard "$source_sha" "nexus-system-cluster.example.invalid/oci-promoted/codewire/dashboard@$expected_digest" \
+  --candidate derp "$source_sha" "nexus-system-cluster.example.invalid/oci-promoted/codewire/derp@$expected_digest" \
+  --candidate gateway "$source_sha" "nexus-system-cluster.example.invalid/oci-promoted/codewire/gateway@$expected_digest" \
+  --candidate services "$source_sha" "nexus-system-cluster.example.invalid/oci-promoted/codewire/services@$expected_digest" \
+  --candidate mesh "$source_sha" "nexus-system-cluster.example.invalid/oci-promoted/codewire/mesh@$expected_digest"
+: >"$FAKE_NEXUS_FETCH_CALLS"
+: >"$FAKE_GHCR_FETCH_CALLS"
+: >"$FAKE_COPY_CALLS"
+: >"$FAKE_COPY_COUNTER"
+: >"$FAKE_SKOPEO_CALLS"
+: >"$GITHUB_OUTPUT"
+"$PUBLISH_IMAGE" --runtime-bundle "$runtime_bundle"
+[[ "$(wc -l <"$FAKE_NEXUS_FETCH_CALLS")" -eq 1 ]] ||
+  fail 'runtime bundle fetched the paired Nexus credential more than once'
+[[ "$(wc -l <"$FAKE_GHCR_FETCH_CALLS")" -eq 1 ]] ||
+  fail 'runtime bundle fetched the paired GHCR credential more than once'
+mapfile -t runtime_copy_calls <"$FAKE_COPY_CALLS"
+[[ "${#runtime_copy_calls[@]}" -eq 5 ]] ||
+  fail 'runtime bundle did not perform exactly five immutable copy operations'
+for index in "${!runtime_copy_calls[@]}"; do
+  family=(dashboard derp gateway services mesh)
+  expected_source="nexus-system-cluster.example.invalid/oci-promoted/codewire/${family[$index]}@$expected_digest"
+  expected_target="ghcr.io/codewiresh/${family[$index]}"
+  [[ "${runtime_copy_calls[$index]}" == "$expected_source $expected_target $source_sha" ]] ||
+    fail "runtime bundle copy order or source identity changed at ${family[$index]}"
+  grep -qxF "${family[$index]}_ghcr_public_ref=$expected_target@$expected_digest" \
+    "$GITHUB_OUTPUT" || fail "runtime bundle omitted ${family[$index]} output"
+done
+
+: >"$FAKE_NEXUS_FETCH_CALLS"
+: >"$FAKE_GHCR_FETCH_CALLS"
+: >"$FAKE_COPY_CALLS"
+: >"$FAKE_COPY_COUNTER"
+: >"$FAKE_SKOPEO_CALLS"
+if FAKE_COPY_FAIL_AT=5 "$PUBLISH_IMAGE" --runtime-bundle "$runtime_bundle" \
+    >"$work/runtime-copy-failure.out" 2>&1; then
+  fail 'partial runtime bundle copy was accepted'
+fi
+[[ "$(wc -l <"$FAKE_COPY_CALLS")" -eq 5 ]] ||
+  fail 'runtime bundle did not stop at the selected fifth-copy failure'
+while IFS=$'\t' read -r username_file token_file; do
+  [[ ! -e "$username_file" && ! -e "$token_file" ]] ||
+    fail 'runtime bundle failure retained a private GHCR credential file'
+done <"$FAKE_GHCR_FETCH_CALLS"
+while IFS=$'\t' read -r username_file password_file; do
+  [[ ! -e "$username_file" && ! -e "$password_file" ]] ||
+    fail 'runtime bundle failure retained a private Nexus credential file'
+done <"$FAKE_NEXUS_FETCH_CALLS"
+
+bad_runtime_bundle="$work/bad-runtime-bundle.json"
+cp "$runtime_bundle" "$bad_runtime_bundle"
+jq '.images |= .[0:4]' "$runtime_bundle" >"$bad_runtime_bundle"
+runtime_fetches_before="$(wc -l <"$FAKE_GHCR_FETCH_CALLS")"
+if "$PUBLISH_IMAGE" --runtime-bundle "$bad_runtime_bundle" \
+    >"$work/bad-runtime-bundle.out" 2>&1; then
+  fail 'incomplete runtime bundle was accepted'
+fi
+[[ "$(wc -l <"$FAKE_GHCR_FETCH_CALLS")" -eq "$runtime_fetches_before" ]] ||
+  fail 'invalid runtime bundle reached credential retrieval'
+
 if FAKE_ANON_DIGEST="$other_digest" "$PUBLISH_IMAGE" "$source_ref" \
     "$target_repository" "$source_sha" >"$work/mismatch.out" 2>&1; then
   fail 'anonymous digest mismatch was accepted'

@@ -1,16 +1,51 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+readonly ROOT
 readonly source_pattern='^nexus-system-cluster\.private\.invalid/oci-promoted/codewire/(dashboard|derp|gateway|services|mesh|base|workspace|confidential-probe)@sha256:([0-9a-f]{64})$'
 
 usage() {
   echo "Usage: $0 SOURCE_DIGEST_REF GHCR_REPOSITORY TAG [TAG...]" >&2
   echo "       $0 --support-pair BASE_DIGEST_REF WORKSPACE_DIGEST_REF SOURCE_SHA" >&2
+  echo "       $0 --runtime-bundle IMAGE_BUNDLE" >&2
   exit 2
 }
 
 support_pair=false
-if [ "${1:-}" = --support-pair ]; then
+runtime_bundle=false
+runtime_entries=()
+if [ "${1:-}" = --runtime-bundle ]; then
+  [ "$#" -eq 2 ] || usage
+  runtime_bundle=true
+  bundle_file="$2"
+  bundle_tool="$ROOT/scripts/ci/images/image-bundle.py"
+  [[ -x "$bundle_tool" && -f "$bundle_file" && ! -L "$bundle_file" ]] || {
+    echo 'Runtime bundle must be a regular nonsymlink file and the validator must be executable' >&2
+    exit 1
+  }
+  "$bundle_tool" validate "$bundle_file"
+  runtime_source_sha="$(jq -er '.source.sha' "$bundle_file")"
+  runtime_entries_text="$(
+    jq -er '.images[] | [.family, .ref] | @tsv' "$bundle_file"
+  )"
+  mapfile -t runtime_entries <<<"$runtime_entries_text"
+  [[ "${#runtime_entries[@]}" -eq 5 ]] || {
+    echo 'Runtime bundle must contain exactly five validated image entries' >&2
+    exit 1
+  }
+  for entry in "${runtime_entries[@]}"; do
+    IFS=$'\t' read -r runtime_family runtime_source_ref runtime_extra <<<"$entry"
+    if [[ -n "$runtime_extra" || ! "$runtime_source_ref" =~ $source_pattern ]]; then
+      echo 'Runtime bundle entry does not preserve its validated image family' >&2
+      exit 1
+    fi
+    if [[ "${BASH_REMATCH[1]}" != "$runtime_family" ]]; then
+      echo 'Runtime bundle entry does not preserve its validated image family' >&2
+      exit 1
+    fi
+  done
+elif [ "${1:-}" = --support-pair ]; then
   [ "$#" -eq 4 ] || usage
   support_pair=true
   base_source_ref="$2"
@@ -117,6 +152,37 @@ verify_anonymous_digest() {
   fi
   printf 'Anonymous GHCR digest accepted: %s\n' "$public_ref"
 }
+
+if [ "$runtime_bundle" = true ]; then
+  runtime_public_refs=()
+  runtime_digests=()
+  runtime_families=()
+  for entry in "${runtime_entries[@]}"; do
+    IFS=$'\t' read -r runtime_family runtime_source_ref <<<"$entry"
+    runtime_repository="ghcr.io/codewiresh/$runtime_family"
+    runtime_digest="${runtime_source_ref##*@}"
+    copy_image "$runtime_source_ref" "$runtime_repository" "$runtime_source_sha"
+    runtime_families+=("$runtime_family")
+    runtime_public_refs+=("$runtime_repository@$runtime_digest")
+    runtime_digests+=("$runtime_digest")
+  done
+
+  for token_file in "$nexus_username_file" "$nexus_password_file" \
+      "$ghcr_username_file" "$ghcr_token_file"; do
+    shred -u "$token_file" 2>/dev/null || rm -f "$token_file"
+  done
+
+  for index in "${!runtime_public_refs[@]}"; do
+    verify_anonymous_digest \
+      "${runtime_public_refs[$index]}" "${runtime_digests[$index]}"
+    if [ -n "${GITHUB_OUTPUT:-}" ]; then
+      printf '%s_ghcr_public_ref=%s\n' \
+        "${runtime_families[$index]}" "${runtime_public_refs[$index]}" \
+        >>"$GITHUB_OUTPUT"
+    fi
+  done
+  exit 0
+fi
 
 if [ "$support_pair" = true ]; then
   base_public_ref="$base_repository@$base_digest"
