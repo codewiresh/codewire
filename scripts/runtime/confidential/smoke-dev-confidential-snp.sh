@@ -240,8 +240,14 @@ check_runtime_contract() {
   assert_jq "RuntimeClass/commodity handler is not kata-clh" \
     '.items[] | select(.metadata.name == "commodity") | .handler == "kata-clh"' \
     "$runtimeclasses_json"
+  assert_jq "RuntimeClass/commodity pod overhead is not the kata-clh contract" \
+    '.items[] | select(.metadata.name == "commodity") | .overhead.podFixed == {"cpu":"250m","memory":"130Mi"}' \
+    "$runtimeclasses_json"
   assert_jq "RuntimeClass/confidential handler is not kata-qemu-snp" \
     '.items[] | select(.metadata.name == "confidential") | .handler == "kata-qemu-snp"' \
+    "$runtimeclasses_json"
+  assert_jq "RuntimeClass/confidential pod overhead is not the kata-qemu-snp contract" \
+    '.items[] | select(.metadata.name == "confidential") | .overhead.podFixed == {"cpu":"1","memory":"2Gi"}' \
     "$runtimeclasses_json"
   assert_jq "RuntimeClass/confidential does not require confidential-snp label" \
     '.items[] | select(.metadata.name == "confidential") | .scheduling.nodeSelector["node.codewire.sh/confidential-snp"] == "true"' \

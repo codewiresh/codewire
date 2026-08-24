@@ -19,6 +19,12 @@ defense-in-depth runtime classes used by the Codewire Guard umbrella:
   path and schedules only onto nodes labelled
   `node.codewire.sh/confidential-snp=true`.
 
+Each RuntimeClass also carries the matching Kata runtime-rs `podFixed`
+accounting. Kubernetes adds this VM/runtime overhead to workload requests and
+limits before scheduling and cgroup enforcement. Keep these values aligned
+with the corresponding upstream Kata shim defaults; omitting them can make a
+small workload fail before VM startup even when the node has ample memory.
+
 Do not add a confidential node selector by node name. Infra owns the host SNP
 gate and publishes the scheduling capability label.
 
