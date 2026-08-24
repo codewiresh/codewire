@@ -10,6 +10,7 @@ SANDBOX_NAMESPACE="${SANDBOX_NAMESPACE:-dev-sandboxes}"
 NODE="${CONFIDENTIAL_SNP_NODE:-cw-dev-prod-node-1}"
 WAIT_SECONDS="${PRIVATE_PULL_WAIT_SECONDS:-180}"
 KEEP_PROBE="${PRIVATE_PULL_KEEP_PROBE:-0}"
+ENCRYPTED_EMPTYDIR="${PRIVATE_PULL_ENCRYPTED_EMPTYDIR:-0}"
 PROBE_UUID="${PRIVATE_PULL_PROBE_UUID:-}"
 EVIDENCE_DIR="${EVIDENCE_DIR:-}"
 
@@ -27,6 +28,7 @@ Options:
   --node NAME          Confidential SNP node (default: cw-dev-prod-node-1)
   --wait-seconds N     Terminal wait horizon (default: 180)
   --keep-probe         Keep the Pod and CiliumNetworkPolicy for inspection
+  --encrypted-emptydir Exercise an init-to-main shared encrypted emptyDir
   --evidence-dir DIR   Store private evidence in DIR
   -h, --help           Show this help
 
@@ -66,6 +68,10 @@ while [[ "$#" -gt 0 ]]; do
       KEEP_PROBE=1
       shift
       ;;
+    --encrypted-emptydir)
+      ENCRYPTED_EMPTYDIR=1
+      shift
+      ;;
     --evidence-dir)
       [[ "$#" -ge 2 ]] || die "--evidence-dir requires a value"
       EVIDENCE_DIR="$2"
@@ -92,6 +98,8 @@ for command in "$KUBECTL_BIN" jq awk gzip base64; do
 done
 [[ "$WAIT_SECONDS" =~ ^[1-9][0-9]*$ ]] || die "--wait-seconds must be a positive integer"
 [[ "$KEEP_PROBE" == "0" || "$KEEP_PROBE" == "1" ]] || die "PRIVATE_PULL_KEEP_PROBE must be 0 or 1"
+[[ "$ENCRYPTED_EMPTYDIR" == "0" || "$ENCRYPTED_EMPTYDIR" == "1" ]] || \
+  die "PRIVATE_PULL_ENCRYPTED_EMPTYDIR must be 0 or 1"
 [[ "$NODE" =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ ]] || die "invalid node name"
 
 if [[ -z "$EVIDENCE_DIR" ]]; then
@@ -212,7 +220,27 @@ init_data="$({
   printf '\n"cdh.toml" = %s\nsocket = "unix:///run/confidential-containers/cdh.sock"\n\n[kbc]\nname = "cc_kbc"\nurl = %s\nkbs_cert = %s\n%s\n' \
     "$triple_quote" "$kbs_url_toml" "$kbs_ca_toml" "$triple_quote"
 } | gzip -n -c | base64 -w0)"
-kernel_params="agent.image_registry_auth=$registry_auth_uri agent.guest_components_rest_api=resource agent.aa_kbc_params=cc_kbc::$kbs_url"
+kernel_params="agent.image_registry_auth=$registry_auth_uri agent.guest_components_rest_api=resource agent.aa_kbc_params=cc_kbc::$kbs_url agent.log_vport=1025"
+emptydir_volume_yaml=""
+emptydir_mount_yaml=""
+emptydir_security_yaml=""
+emptydir_init_yaml=""
+if [[ "$ENCRYPTED_EMPTYDIR" == "1" ]]; then
+  emptydir_volume_yaml=$'  volumes:\n    - name: secure-scratch\n      emptyDir: {}\n'
+  emptydir_mount_yaml=$'      volumeMounts:\n        - name: secure-scratch\n          mountPath: /tmp/codewire-secure-mount-probe\n'
+  emptydir_security_yaml=$'    runAsUser: 1000\n    runAsGroup: 1000\n    fsGroup: 1000\n'
+  emptydir_init_yaml="$(printf '%s\n' \
+    '  initContainers:' \
+    '    - name: secure-scratch-init' \
+    "      image: $gateway_image" \
+    '      imagePullPolicy: Always' \
+    '      command: ["/usr/local/bin/cw"]' \
+    '      args: ["--version"]' \
+    '      volumeMounts:' \
+    '        - name: secure-scratch' \
+    '          mountPath: /tmp/codewire-secure-mount-probe')"
+  emptydir_init_yaml+=$'\n'
+fi
 
 cat >"$manifest" <<YAML
 apiVersion: cilium.io/v2
@@ -275,7 +303,7 @@ spec:
   securityContext:
     seccompProfile:
       type: RuntimeDefault
-  nodeSelector:
+${emptydir_security_yaml}  nodeSelector:
     kubernetes.io/hostname: $NODE
     node.codewire.sh/confidential-snp: "true"
   tolerations:
@@ -283,7 +311,7 @@ spec:
       operator: Equal
       value: "true"
       effect: NoSchedule
-  containers:
+${emptydir_volume_yaml}${emptydir_init_yaml}  containers:
     - name: version
       image: $gateway_image
       imagePullPolicy: Always
@@ -297,7 +325,7 @@ spec:
         runAsGroup: 65532
         capabilities:
           drop: ["ALL"]
-      resources:
+${emptydir_mount_yaml}      resources:
         requests:
           cpu: 100m
           memory: 128Mi
@@ -338,7 +366,7 @@ on_exit() {
 trap on_exit EXIT
 
 log "evidence=$EVIDENCE_DIR"
-log "stage=apply exact_private_image=true"
+log "stage=apply exact_private_image=true encrypted_emptydir=$ENCRYPTED_EMPTYDIR"
 kubectl_dev apply -f "$manifest" >/dev/null
 
 deadline=$((SECONDS + WAIT_SECONDS))
@@ -358,13 +386,21 @@ while (( SECONDS < deadline )); do
   esac
 
   terminal_wait="$(jq -r '
-    [.status.containerStatuses[]?.state.waiting.reason]
-    | map(select(. == "ErrImagePull" or . == "ImagePullBackOff" or . == "CreateContainerError" or . == "RunContainerError" or . == "InvalidImageName"))
-    | first // ""
+    [.status.initContainerStatuses[]?, .status.containerStatuses[]?]
+    | map(select(
+        .state.waiting.reason == "ErrImagePull"
+        or .state.waiting.reason == "ImagePullBackOff"
+        or .state.waiting.reason == "CreateContainerError"
+        or .state.waiting.reason == "RunContainerError"
+        or .state.waiting.reason == "InvalidImageName"
+      ))
+    | first
+    | if . == null then "" else [.name, .state.waiting.reason] | @tsv end
   ' <<<"$pod_json" 2>/dev/null || true)"
   if [[ -n "$terminal_wait" ]]; then
+    IFS=$'\t' read -r terminal_container terminal_reason <<<"$terminal_wait"
     collect_evidence
-    die "probe reached terminal container state $terminal_wait; full events are in $event_evidence"
+    die "probe reached terminal container state container=$terminal_container reason=$terminal_reason; full events are in $event_evidence"
   fi
   sleep 2
 done

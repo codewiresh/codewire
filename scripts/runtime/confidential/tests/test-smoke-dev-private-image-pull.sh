@@ -40,8 +40,10 @@ case "$*" in
     cp "${*: -1}" "$FAKE_KUBECTL_CAPTURE/probe.yaml"
     ;;
   '-n dev-sandboxes get pod codewire-private-pull-be31063a -o json')
-    if [[ "${FAKE_POD_MODE:-success}" == "failure" ]]; then
-      jq -cn '{status:{phase:"Pending",containerStatuses:[{state:{waiting:{reason:"CreateContainerError"}}}]}}'
+    if [[ "${FAKE_POD_MODE:-success}" == "init_failure" ]]; then
+      jq -cn '{status:{phase:"Pending",initContainerStatuses:[{name:"secure-scratch-init",state:{waiting:{reason:"CreateContainerError"}}}],containerStatuses:[{name:"version",state:{waiting:{reason:"PodInitializing"}}}]}}'
+    elif [[ "${FAKE_POD_MODE:-success}" == "failure" ]]; then
+      jq -cn '{status:{phase:"Pending",containerStatuses:[{name:"version",state:{waiting:{reason:"CreateContainerError"}}}]}}'
     else
       jq -cn '{status:{phase:"Succeeded",containerStatuses:[{state:{terminated:{exitCode:0}}}]}}'
     fi
@@ -72,7 +74,7 @@ KUBECTL_BIN="$TMP/kubectl" \
 KUBE_CONTEXT='' \
 PRIVATE_PULL_PROBE_UUID='be31063a-8ec8-46d5-aa17-75cda1729370' \
 EVIDENCE_DIR="$success_evidence" \
-  "$SCRIPT" --wait-seconds 5
+  "$SCRIPT" --wait-seconds 5 --encrypted-emptydir
 
 manifest="$FAKE_KUBECTL_CAPTURE/probe.yaml"
 [[ "$(yq -r 'select(.kind == "CiliumNetworkPolicy") | .metadata.name' "$manifest")" == \
@@ -84,6 +86,17 @@ manifest="$FAKE_KUBECTL_CAPTURE/probe.yaml"
   'RuntimeDefault' ]]
 [[ "$(yq -r 'select(.kind == "Pod") | .metadata.labels."codewire.sh/isolation-tier"' "$manifest")" == \
   'confidential' ]]
+[[ "$(yq -r 'select(.kind == "Pod") | .metadata.annotations."io.katacontainers.config.hypervisor.kernel_params"' "$manifest")" == \
+  *'agent.log_vport=1025'* ]]
+[[ "$(yq -r 'select(.kind == "Pod") | .spec.volumes[] | select(.name == "secure-scratch") | .emptyDir' "$manifest")" == \
+  '{}' ]]
+[[ "$(yq -r 'select(.kind == "Pod") | .spec.securityContext.fsGroup' "$manifest")" == '1000' ]]
+[[ "$(yq -r 'select(.kind == "Pod") | .spec.initContainers[0].name' "$manifest")" == \
+  'secure-scratch-init' ]]
+[[ "$(yq -r 'select(.kind == "Pod") | .spec.initContainers[0].volumeMounts[0].name' "$manifest")" == \
+  'secure-scratch' ]]
+[[ "$(yq -r 'select(.kind == "Pod") | .spec.containers[0].volumeMounts[] | select(.name == "secure-scratch") | .mountPath' "$manifest")" == \
+  '/tmp/codewire-secure-mount-probe' ]]
 [[ "$(yq -r 'select(.kind == "Pod") | .spec.containers[0].image' "$manifest")" == \
   'nexus.example.invalid/oci-approved/codewire/gateway@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' ]]
 rg -F 'matchName: nexus.example.invalid' "$manifest" >/dev/null
@@ -135,7 +148,20 @@ if FAKE_POD_MODE=failure \
   printf '%s\n' 'terminal guest pull failure unexpectedly passed' >&2
   exit 1
 fi
-rg -F 'terminal container state CreateContainerError' "$TMP/failure.err" >/dev/null
+rg -F 'terminal container state container=version reason=CreateContainerError' "$TMP/failure.err" >/dev/null
 rg -F 'guest image pull failed: Not authorized' "$failure_evidence/events.json" >/dev/null
+
+init_failure_evidence="$TMP/init-failure"
+if FAKE_POD_MODE=init_failure \
+  KUBECTL_BIN="$TMP/kubectl" \
+  KUBE_CONTEXT='' \
+  PRIVATE_PULL_PROBE_UUID='be31063a-8ec8-46d5-aa17-75cda1729370' \
+  EVIDENCE_DIR="$init_failure_evidence" \
+    "$SCRIPT" --wait-seconds 5 --encrypted-emptydir >"$TMP/init-failure.out" 2>"$TMP/init-failure.err"; then
+  printf '%s\n' 'terminal init-container failure unexpectedly passed' >&2
+  exit 1
+fi
+rg -F 'terminal container state container=secure-scratch-init reason=CreateContainerError' \
+  "$TMP/init-failure.err" >/dev/null
 
 printf '%s\n' 'test-smoke-dev-private-image-pull: PASS'
