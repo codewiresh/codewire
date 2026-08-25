@@ -1784,6 +1784,8 @@ run_kube_assertions() {
     log "skipping Kubernetes assertions"
     return
   }
+  [[ -n "$CODEWIRE_SERVER_NAMESPACE" ]] || \
+    die "CODEWIRE_SERVER_NAMESPACE is required for Kubernetes assertions"
   maybe_default_kubeconfig
   require_cmd kubectl
   require_cmd jq

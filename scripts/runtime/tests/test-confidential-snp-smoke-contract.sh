@@ -88,6 +88,12 @@ rg -F 'restore the commodity source profile' "$SMOKE" >/dev/null
 rg -F -- '--admin-oidc "${smoke_args[@]}"' "$SMOKE" >/dev/null
 rg -F 'CODEWIRE_SERVER_URL="$CODEWIRE_SERVER_URL"' "$SMOKE" >/dev/null
 rg -F 'EXPECTED_CODEWIRE_DEV_SERVER_URL="$EXPECTED_CODEWIRE_DEV_SERVER_URL"' "$SMOKE" >/dev/null
+rg -F 'CODEWIRE_SERVER_NAMESPACE="$CODEWIRE_SERVER_NAMESPACE"' "$SMOKE" >/dev/null
+rg -F 'KUBE_CONTEXT="$KUBE_CONTEXT"' "$SMOKE" >/dev/null
+rg -F 'EXPECTED_GATEWAY_STUN_HOST="$COCO_GATEWAY_STUN_HOST"' "$SMOKE" >/dev/null
+rg -F 'EXPECTED_GATEWAY_STUN_PORT="$COCO_GATEWAY_STUN_PORT"' "$SMOKE" >/dev/null
+rg -F 'EXPECTED_TAILNET_DIRECT_UDP_LB_IP="$COCO_DIRECT_UDP_LB_IP"' "$SMOKE" >/dev/null
+rg -F 'EXPECTED_TAILNET_DIRECT_UDP_TRANSPORT_ZONE="$COCO_DIRECT_UDP_TRANSPORT_ZONE"' "$SMOKE" >/dev/null
 rg -F 'SMOKE_IMAGE="${SMOKE_IMAGE:-$COCO_WORKSPACE_IMAGE}"' "$SMOKE" >/dev/null
 if rg -F 'smoke_args=(--image ' "$SMOKE"; then
   printf 'confidential smoke passes an unsupported image CLI option\n' >&2
@@ -100,6 +106,50 @@ if rg -F 'with-dev-smoke-auth.sh' "$SMOKE"; then
 fi
 rg -F -- '--gateway-image' "$RESOLVER" >/dev/null
 rg -F -- '--source-sha' "$RESOLVER" >/dev/null
+
+forward_dir="$(mktemp -d "$ROOT/.tmp/confidential-smoke-forwarding.XXXXXX")"
+mkdir -p "$forward_dir/root/scripts/runtime/dev"
+cat >"$forward_dir/root/scripts/runtime/dev/smoke-dev-commodity.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+{
+  printf 'server_namespace=%s\n' "${CODEWIRE_SERVER_NAMESPACE:-}"
+  printf 'kube_context=%s\n' "${KUBE_CONTEXT:-}"
+  printf 'stun_host=%s\n' "${EXPECTED_GATEWAY_STUN_HOST:-}"
+  printf 'stun_port=%s\n' "${EXPECTED_GATEWAY_STUN_PORT:-}"
+  printf 'direct_udp_ip=%s\n' "${EXPECTED_TAILNET_DIRECT_UDP_LB_IP:-}"
+  printf 'transport_zone=%s\n' "${EXPECTED_TAILNET_DIRECT_UDP_TRANSPORT_ZONE:-}"
+} >"${FORWARD_CAPTURE:?}"
+EOF
+chmod 0755 "$forward_dir/root/scripts/runtime/dev/smoke-dev-commodity.sh"
+mkdir -p "$forward_dir/evidence"
+(
+  EVIDENCE_DIR="$forward_dir/evidence"
+  # shellcheck disable=SC1090
+  source <(sed '$d' "$SMOKE")
+  ROOT="$forward_dir/root"
+  CODEWIRE_SERVER_NAMESPACE=contract-server
+  SANDBOX_NAMESPACE=contract-sandboxes
+  KUBE_CONTEXT=contract-context
+  COCO_GATEWAY_IMAGE=nexus.example.invalid/gateway@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  COCO_WORKSPACE_IMAGE=example.invalid/workspace@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  COCO_DIND_IMAGE=example.invalid/dind@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+  COCO_GATEWAY_STUN_HOST=stun.example.invalid
+  COCO_GATEWAY_STUN_PORT=3478
+  COCO_DIRECT_UDP_LB_IP=192.0.2.20
+  COCO_DIRECT_UDP_TRANSPORT_ZONE=contract-zone
+  FORWARD_CAPTURE="$forward_dir/capture" run_product_command
+)
+cat >"$forward_dir/expected" <<'EOF'
+server_namespace=contract-server
+kube_context=contract-context
+stun_host=stun.example.invalid
+stun_port=3478
+direct_udp_ip=192.0.2.20
+transport_zone=contract-zone
+EOF
+cmp "$forward_dir/expected" "$forward_dir/capture"
+rm -rf "$forward_dir"
 
 jq -n '{
   metadata: {generation: 7},

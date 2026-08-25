@@ -33,6 +33,10 @@ COCO_GATEWAY_IMAGE=""
 COCO_WORKSPACE_IMAGE=""
 COCO_DIND_IMAGE=""
 COCO_SOURCE_SHA=""
+COCO_GATEWAY_STUN_HOST=""
+COCO_GATEWAY_STUN_PORT=""
+COCO_DIRECT_UDP_LB_IP=""
+COCO_DIRECT_UDP_TRANSPORT_ZONE=""
 COCO_SMOKE_MEMORY="${COCO_SMOKE_MEMORY:-16384}"
 COCO_SMOKE_DISK="${COCO_SMOKE_DISK:-50}"
 COCO_SMOKE_TIMEOUT_SECONDS="${COCO_SMOKE_TIMEOUT_SECONDS:-1800}"
@@ -272,7 +276,7 @@ check_runtime_contract() {
 }
 
 resolve_active_release() {
-  local workloads_json smoke_json deployment_json configmap image line key value
+  local workloads_json smoke_json deployment_json configmap image line key value transport_zones
 
   log "checking exact Flux activation and active runtime configuration"
   workloads_json="$EVIDENCE_DIR/$WORKLOAD_KUSTOMIZATION.json"
@@ -354,6 +358,28 @@ resolve_active_release() {
   assert_jq "active dind image differs from the committed support lock" \
     --arg dind "$COCO_DIND_IMAGE" ".data.SANDBOX_DIND_IMAGE == \$dind" \
     "$EVIDENCE_DIR/active-runtime-config.json"
+
+  COCO_GATEWAY_STUN_HOST="$(jq -r '.data.STUN_HOST // empty' "$EVIDENCE_DIR/active-runtime-config.json")"
+  COCO_GATEWAY_STUN_PORT="$(jq -r '.data.STUN_PORT // empty' "$EVIDENCE_DIR/active-runtime-config.json")"
+  COCO_DIRECT_UDP_LB_IP="$(jq -r '.data.CODEWIRE_DIRECT_UDP_LB_IP // empty' "$EVIDENCE_DIR/active-runtime-config.json")"
+  COCO_DIRECT_UDP_TRANSPORT_ZONE="$(jq -r '.data.CODEWIRE_DIRECT_UDP_TRANSPORT_ZONE // empty' "$EVIDENCE_DIR/active-runtime-config.json")"
+  transport_zones="$(jq -r '.data.CODEWIRE_RUNTIME_TRANSPORT_ZONES_JSON // empty' "$EVIDENCE_DIR/active-runtime-config.json")"
+  [[ -n "$COCO_GATEWAY_STUN_HOST" ]] || die "active STUN_HOST is empty"
+  [[ "$COCO_GATEWAY_STUN_PORT" == "3478" ]] || \
+    die "active STUN_PORT=$COCO_GATEWAY_STUN_PORT, want 3478"
+  [[ -n "$COCO_DIRECT_UDP_LB_IP" ]] || die "active CODEWIRE_DIRECT_UDP_LB_IP is empty"
+  [[ -n "$COCO_DIRECT_UDP_TRANSPORT_ZONE" ]] || \
+    die "active CODEWIRE_DIRECT_UDP_TRANSPORT_ZONE is empty"
+  jq -e \
+    --arg zone "$COCO_DIRECT_UDP_TRANSPORT_ZONE" \
+    --arg ip "$COCO_DIRECT_UDP_LB_IP" \
+    --arg stun "$COCO_GATEWAY_STUN_HOST:$COCO_GATEWAY_STUN_PORT" \
+    '.version == 1 and any(.zones[]?;
+      .name == $zone
+      and .direct_udp.vip == $ip
+      and ((.stun.endpoints // []) | index($stun)))' \
+    <<<"$transport_zones" >/dev/null || \
+    die "active transport-zone registry does not match its STUN and direct-UDP inputs"
 
   cp "$COCO_SUPPORT_LOCK" "$EVIDENCE_DIR/coco-support-images.lock.json"
   jq -n \
@@ -487,7 +513,9 @@ run_product_command() {
 
   CODEWIRE_SERVER_URL="$CODEWIRE_SERVER_URL" \
     EXPECTED_CODEWIRE_DEV_SERVER_URL="$EXPECTED_CODEWIRE_DEV_SERVER_URL" \
+    CODEWIRE_SERVER_NAMESPACE="$CODEWIRE_SERVER_NAMESPACE" \
     SANDBOX_NAMESPACE="$SANDBOX_NAMESPACE" \
+    KUBE_CONTEXT="$KUBE_CONTEXT" \
     SMOKE_NAME="${SMOKE_NAME:-confidential-snp-$(date -u +%Y%m%d%H%M%S)}" \
     SMOKE_IMAGE="${SMOKE_IMAGE:-$COCO_WORKSPACE_IMAGE}" \
     SMOKE_MEMORY="${SMOKE_MEMORY:-$COCO_SMOKE_MEMORY}" \
@@ -498,6 +526,10 @@ run_product_command() {
     SMOKE_TAILNET_DEBUG="${SMOKE_TAILNET_DEBUG:-1}" \
     REQUIRE_TAILNET_PATH_PROBE="${REQUIRE_TAILNET_PATH_PROBE:-1}" \
     EXPECTED_TAILNET_PATH_TRANSPORT="${EXPECTED_TAILNET_PATH_TRANSPORT:-direct_udp}" \
+    EXPECTED_GATEWAY_STUN_HOST="$COCO_GATEWAY_STUN_HOST" \
+    EXPECTED_GATEWAY_STUN_PORT="$COCO_GATEWAY_STUN_PORT" \
+    EXPECTED_TAILNET_DIRECT_UDP_LB_IP="$COCO_DIRECT_UDP_LB_IP" \
+    EXPECTED_TAILNET_DIRECT_UDP_TRANSPORT_ZONE="$COCO_DIRECT_UDP_TRANSPORT_ZONE" \
     EXPECTED_RUNTIME_CLASS=confidential \
     EXPECTED_GATEWAY_IMAGE="$COCO_GATEWAY_IMAGE" \
     EXPECTED_DOCKER_MODE=guest-dind \
