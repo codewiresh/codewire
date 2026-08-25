@@ -22,6 +22,7 @@ pub const DOCKER_MODE_GUEST_DIND: &str = "guest-dind";
 pub const DOCKER_MODE_EXTERNAL_ISOL8_PROXY: &str = "external-isol8-proxy";
 pub const SIDECAR_RESOURCE_MODE_EXPLICIT: &str = "explicit";
 pub const SIDECAR_RESOURCE_MODE_RUNTIME_ENVELOPE: &str = "runtime-envelope";
+pub const KATA_COCO_IMAGE_RESOURCE_TIMEOUT_SECS: u32 = 300;
 
 #[derive(Debug, Clone, Default)]
 pub struct Toleration {
@@ -209,6 +210,9 @@ pub(super) fn kata_coco_kernel_params_annotation(
         let auth_uri = kernel_param_value(auth_uri)?;
         params.push(format!("agent.image_registry_auth={auth_uri}"));
     }
+    params.push(format!(
+        "agent.image_resource_timeout_secs={KATA_COCO_IMAGE_RESOURCE_TIMEOUT_SECS}"
+    ));
     params.push("agent.guest_components_rest_api=resource".to_string());
     params.push(format!("agent.aa_kbc_params=cc_kbc::{kbs_url}"));
     Some(params.join(" "))

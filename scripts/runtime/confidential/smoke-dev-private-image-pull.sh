@@ -13,6 +13,7 @@ KEEP_PROBE="${PRIVATE_PULL_KEEP_PROBE:-0}"
 ENCRYPTED_EMPTYDIR="${PRIVATE_PULL_ENCRYPTED_EMPTYDIR:-0}"
 PROBE_UUID="${PRIVATE_PULL_PROBE_UUID:-}"
 EVIDENCE_DIR="${EVIDENCE_DIR:-}"
+readonly IMAGE_RESOURCE_TIMEOUT_SECS=300
 
 usage() {
   cat <<'USAGE'
@@ -220,7 +221,7 @@ init_data="$({
   printf '\n"cdh.toml" = %s\nsocket = "unix:///run/confidential-containers/cdh.sock"\n\n[kbc]\nname = "cc_kbc"\nurl = %s\nkbs_cert = %s\n%s\n' \
     "$triple_quote" "$kbs_url_toml" "$kbs_ca_toml" "$triple_quote"
 } | gzip -n -c | base64 -w0)"
-kernel_params="agent.image_registry_auth=$registry_auth_uri agent.guest_components_rest_api=resource agent.aa_kbc_params=cc_kbc::$kbs_url agent.log_vport=1025"
+kernel_params="agent.image_registry_auth=$registry_auth_uri agent.image_resource_timeout_secs=$IMAGE_RESOURCE_TIMEOUT_SECS agent.guest_components_rest_api=resource agent.aa_kbc_params=cc_kbc::$kbs_url agent.log_vport=1025"
 emptydir_volume_yaml=""
 emptydir_mount_yaml=""
 emptydir_security_yaml=""

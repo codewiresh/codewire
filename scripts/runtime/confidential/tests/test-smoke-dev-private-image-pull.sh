@@ -87,6 +87,8 @@ manifest="$FAKE_KUBECTL_CAPTURE/probe.yaml"
 [[ "$(yq -r 'select(.kind == "Pod") | .metadata.labels."codewire.sh/isolation-tier"' "$manifest")" == \
   'confidential' ]]
 [[ "$(yq -r 'select(.kind == "Pod") | .metadata.annotations."io.katacontainers.config.hypervisor.kernel_params"' "$manifest")" == \
+  *'agent.image_resource_timeout_secs=300'* ]]
+[[ "$(yq -r 'select(.kind == "Pod") | .metadata.annotations."io.katacontainers.config.hypervisor.kernel_params"' "$manifest")" == \
   *'agent.log_vport=1025'* ]]
 [[ "$(yq -r 'select(.kind == "Pod") | .spec.volumes[] | select(.name == "secure-scratch") | .emptyDir' "$manifest")" == \
   '{}' ]]
