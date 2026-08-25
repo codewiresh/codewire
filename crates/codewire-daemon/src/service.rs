@@ -15,6 +15,8 @@ use tonic::{Request, Response, Status, Streaming};
 use crate::durable_session::{SessionEngine, status_from_session_error};
 use crate::{Config, files, session};
 
+const ATTACH_SESSION_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
+
 #[derive(Clone, Debug)]
 pub struct DaemonServiceImpl {
     config: Config,
@@ -398,6 +400,11 @@ async fn run_attach_session(
     let session_id = attach.session_id;
     let mut cursor = attach.output_offset;
     let mut last_status = None;
+    let mut heartbeat = tokio::time::interval_at(
+        tokio::time::Instant::now() + ATTACH_SESSION_HEARTBEAT_INTERVAL,
+        ATTACH_SESSION_HEARTBEAT_INTERVAL,
+    );
+    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     loop {
         let output = match engine
@@ -449,6 +456,7 @@ async fn run_attach_session(
                 return;
             }
             last_status = Some(status);
+            heartbeat.reset();
         }
         if !is_attached_session_live(record.state) {
             return;
@@ -539,6 +547,21 @@ async fn run_attach_session(
                     },
                     Ok(None) | Err(_) => return,
                 }
+            }
+            _ = heartbeat.tick() => {
+                let status = session_status(&record, None);
+                if tx
+                    .send(Ok(v1::SessionAttachMessage {
+                        payload: Some(v1::session_attach_message::Payload::Status(
+                            status.clone(),
+                        )),
+                    }))
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+                last_status = Some(status);
             }
             () = tokio::time::sleep(Duration::from_millis(10)) => {}
         }

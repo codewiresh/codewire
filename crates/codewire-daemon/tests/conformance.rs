@@ -614,6 +614,57 @@ async fn attach_forwards_input_and_resumes_after_detach_or_transport_loss() {
 }
 
 #[tokio::test]
+async fn silent_attachment_emits_periodic_status_heartbeat() {
+    let harness = DaemonHarness::spawn().await;
+    let mut client = harness.client().await;
+    let session_id = client
+        .launch_session(v1::LaunchSessionRequest {
+            command: vec!["sh".into(), "-c".into(), "exec sleep 30".into()],
+            ..Default::default()
+        })
+        .await
+        .expect("launch silent session")
+        .into_inner()
+        .session
+        .expect("silent session")
+        .session_id;
+
+    let (request_tx, request_rx) = mpsc::channel(4);
+    request_tx
+        .send(attach_message(&session_id, 0))
+        .await
+        .expect("send attach start");
+    let mut attached = client
+        .attach_session(ReceiverStream::new(request_rx))
+        .await
+        .expect("attach to silent session")
+        .into_inner();
+    let initial = next_attach_status(&mut attached).await;
+    let heartbeat = tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let message = attached
+                .message()
+                .await
+                .expect("heartbeat response")
+                .expect("heartbeat response message");
+            if let Some(v1::session_attach_message::Payload::Status(status)) = message.payload
+                && status == initial
+            {
+                return status;
+            }
+        }
+    })
+    .await
+    .expect("silent attachment heartbeat arrived");
+
+    assert_eq!(heartbeat.state, v1::SessionLifecycleState::Running as i32);
+    client
+        .stop_session(v1::StopSessionRequest { session_id })
+        .await
+        .expect("stop silent session");
+}
+
+#[tokio::test]
 async fn pty_resize_is_applied_before_status_and_detach_preserves_session() {
     let harness = DaemonHarness::spawn().await;
     let mut client = harness.client().await;

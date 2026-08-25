@@ -582,6 +582,33 @@ pub(crate) enum AttachExit {
     Restart,
     Terminal,
     StreamEnded { output_offset: u64 },
+    StreamInterrupted { output_offset: u64 },
+}
+
+const ATTACH_RECONNECT_LIMIT: u8 = 3;
+pub(crate) const ATTACH_RECONNECT_BASE_DELAY: Duration = Duration::from_millis(250);
+
+#[derive(Default)]
+pub(crate) struct AttachmentReconnectBudget {
+    last_output_offset: u64,
+    consecutive_interruptions: u8,
+}
+
+impl AttachmentReconnectBudget {
+    pub(crate) fn retry_delay(&mut self, output_offset: u64) -> anyhow::Result<Duration> {
+        if output_offset > self.last_output_offset {
+            self.consecutive_interruptions = 0;
+        }
+        self.last_output_offset = output_offset;
+        self.consecutive_interruptions = self.consecutive_interruptions.saturating_add(1);
+        if self.consecutive_interruptions > ATTACH_RECONNECT_LIMIT {
+            anyhow::bail!(
+                "environment session attachment was interrupted {} times without output progress",
+                ATTACH_RECONNECT_LIMIT
+            );
+        }
+        Ok(ATTACH_RECONNECT_BASE_DELAY * u32::from(self.consecutive_interruptions))
+    }
 }
 
 #[derive(Default)]
@@ -640,6 +667,7 @@ async fn attach_environment_session(
     mut session: EnvironmentSessionView,
 ) -> anyhow::Result<Option<EnvironmentSessionView>> {
     let mut output_offset = 0;
+    let mut reconnect_budget = AttachmentReconnectBudget::default();
     loop {
         let exit = match &target {
             EnvironmentSessionTarget::Local { instance, .. } => {
@@ -680,6 +708,18 @@ async fn attach_environment_session(
                 }
                 session = refreshed;
                 output_offset = next_offset;
+            }
+            AttachExit::StreamInterrupted {
+                output_offset: next_offset,
+            } => {
+                let refreshed = target.get(&session.session_id).await?;
+                if session_is_terminal(&refreshed) {
+                    return Ok(Some(refreshed));
+                }
+                let delay = reconnect_budget.retry_delay(next_offset)?;
+                session = refreshed;
+                output_offset = next_offset;
+                tokio::time::sleep(delay).await;
             }
             AttachExit::Restart => {
                 let current = target.get(&session.session_id).await?;
@@ -823,12 +863,19 @@ async fn attach_platform_environment_session(
         }
         tokio::select! {
             event = attachment.next_output(), if output_open => {
-                let Some(event) = event.map_err(display_client_error)? else {
-                    if terminal && interactive {
-                        output_open = false;
-                        continue;
+                let event = match event {
+                    Ok(Some(event)) => event,
+                    Ok(None) => {
+                        if terminal && interactive {
+                            output_open = false;
+                            continue;
+                        }
+                        return Ok(AttachExit::StreamEnded { output_offset });
                     }
-                    return Ok(AttachExit::StreamEnded { output_offset });
+                    Err(error) if error.is_retryable_transport_interruption() => {
+                        return Ok(AttachExit::StreamInterrupted { output_offset });
+                    }
+                    Err(error) => return Err(display_client_error(error)),
                 };
                 match event.event {
                     Some(codewire_client::attach_session_response::Event::Output(output)) => {
@@ -1150,6 +1197,7 @@ async fn follow_session_output(
     mut output_offset: u64,
     raw_output: bool,
 ) -> anyhow::Result<()> {
+    let mut reconnect_budget = AttachmentReconnectBudget::default();
     loop {
         let exit = match target {
             EnvironmentSessionTarget::Local { instance, .. } => {
@@ -1192,6 +1240,17 @@ async fn follow_session_output(
                     return Ok(());
                 }
                 output_offset = next_offset;
+            }
+            AttachExit::StreamInterrupted {
+                output_offset: next_offset,
+            } => {
+                let refreshed = target.get(&session.session_id).await?;
+                if session_is_terminal(&refreshed) {
+                    return Ok(());
+                }
+                let delay = reconnect_budget.retry_delay(next_offset)?;
+                output_offset = next_offset;
+                tokio::time::sleep(delay).await;
             }
             _ => unreachable!("non-interactive attachment produced navigation"),
         }
