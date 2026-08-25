@@ -347,13 +347,24 @@ pub async fn handle_environment_start(
                 pod = %stale.name,
                 "environment.start: replacing terminal workspace Pod"
             );
-            if let Err(error) = await_reconcile_or_cancel(
-                &activity_ctx,
-                authority.run_external_mutation(
-                    START_MUTATION_STATES,
-                    client.restart_workspace_pod(env_id, Some(&stale.name), ready_timeout),
-                ),
-            )
+            if let Err(error) = await_reconcile_or_cancel(&activity_ctx, async {
+                authority
+                    .run_external_mutation(
+                        START_MUTATION_STATES,
+                        client.delete_workspace_pod_if_uid(&stale.name, &stale.uid),
+                    )
+                    .await?;
+                authority
+                    .run_while_authoritative_for_states(
+                        START_MUTATION_STATES,
+                        client.wait_for_replacement_workspace_pod(
+                            &stale.name,
+                            &stale.uid,
+                            ready_timeout,
+                        ),
+                    )
+                    .await
+            })
             .await
             {
                 if is_lifecycle_control_loss(&error) {
