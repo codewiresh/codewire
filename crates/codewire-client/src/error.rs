@@ -5,6 +5,8 @@ use base64::Engine as _;
 use codewire_proto::google::rpc::{BadRequest, ErrorInfo as GoogleErrorInfo, RetryInfo};
 use connectrpc::{ConnectError, ErrorCode, ErrorDetail};
 
+const RESPONSE_BODY_INTERRUPTION_PREFIX: &str = "error reading response body:";
+
 /// One field-level validation failure from `google.rpc.BadRequest`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ValidationError {
@@ -65,6 +67,7 @@ pub struct ClientError {
     error_info: Option<Box<ErrorInfo>>,
     retry_delay: Option<Duration>,
     request_id: Option<String>,
+    retryable_transport_interruption: bool,
 }
 
 impl ClientError {
@@ -78,6 +81,7 @@ impl ClientError {
             error_info: None,
             retry_delay: None,
             request_id: None,
+            retryable_transport_interruption: code == ErrorCode::Unavailable,
         }
     }
 
@@ -115,10 +119,23 @@ impl ClientError {
     pub fn retry_delay(&self) -> Option<Duration> {
         self.retry_delay
     }
+
+    /// Whether a long-lived stream may be resumed without changing the
+    /// application operation. This normalizes transport-specific failures at
+    /// the shared client boundary so callers never inspect display text.
+    pub fn is_retryable_transport_interruption(&self) -> bool {
+        self.retryable_transport_interruption
+    }
 }
 
 impl From<ConnectError> for ClientError {
     fn from(error: ConnectError) -> Self {
+        let retryable_transport_interruption = error.code == ErrorCode::Unavailable
+            || (error.code == ErrorCode::Internal
+                && error
+                    .message
+                    .as_deref()
+                    .is_some_and(|message| message.starts_with(RESPONSE_BODY_INTERRUPTION_PREFIX)));
         let mut validation_errors = Vec::new();
         let mut error_info = None;
         let mut retry_delay = None;
@@ -182,6 +199,7 @@ impl From<ConnectError> for ClientError {
             error_info,
             retry_delay,
             request_id,
+            retryable_transport_interruption,
         }
     }
 }
@@ -221,5 +239,22 @@ mod tests {
         assert_eq!(decoded.code(), ErrorCode::InvalidArgument);
         assert_eq!(decoded.message(), "invalid request");
         assert!(decoded.validation_errors().is_empty());
+    }
+
+    #[test]
+    fn only_transport_interruptions_are_retryable() {
+        let body = ClientError::from(ConnectError::internal(
+            "error reading response body: request or response body error",
+        ));
+        assert!(body.is_retryable_transport_interruption());
+
+        let unavailable = ClientError::new(ErrorCode::Unavailable, "connection reset");
+        assert!(unavailable.is_retryable_transport_interruption());
+
+        let server = ClientError::from(ConnectError::internal("session engine failed"));
+        assert!(!server.is_retryable_transport_interruption());
+
+        let denied = ClientError::new(ErrorCode::PermissionDenied, "denied");
+        assert!(!denied.is_retryable_transport_interruption());
     }
 }

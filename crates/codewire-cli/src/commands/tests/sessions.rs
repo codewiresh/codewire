@@ -29,6 +29,29 @@
         }
     }
 
+    #[test]
+    fn attachment_reconnect_budget_is_bounded_and_resets_on_output_progress() {
+        let mut budget = AttachmentReconnectBudget::default();
+        assert_eq!(
+            budget.retry_delay(0).unwrap(),
+            ATTACH_RECONNECT_BASE_DELAY
+        );
+        assert_eq!(
+            budget.retry_delay(0).unwrap(),
+            ATTACH_RECONNECT_BASE_DELAY * 2
+        );
+        assert_eq!(
+            budget.retry_delay(0).unwrap(),
+            ATTACH_RECONNECT_BASE_DELAY * 3
+        );
+        assert!(budget.retry_delay(0).is_err());
+
+        assert_eq!(
+            budget.retry_delay(1).unwrap(),
+            ATTACH_RECONNECT_BASE_DELAY
+        );
+    }
+
     #[tokio::test]
     async fn local_session_client_waits_for_managed_daemon_readiness() {
         let reservation = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
