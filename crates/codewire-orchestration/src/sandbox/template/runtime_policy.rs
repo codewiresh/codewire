@@ -23,6 +23,7 @@ pub const DOCKER_MODE_EXTERNAL_ISOL8_PROXY: &str = "external-isol8-proxy";
 pub const SIDECAR_RESOURCE_MODE_EXPLICIT: &str = "explicit";
 pub const SIDECAR_RESOURCE_MODE_RUNTIME_ENVELOPE: &str = "runtime-envelope";
 pub const KATA_COCO_IMAGE_RESOURCE_TIMEOUT_SECS: u32 = 300;
+const KATA_AGENT_LOG_VPORT: u16 = 1025;
 
 #[derive(Debug, Clone, Default)]
 pub struct Toleration {
@@ -215,6 +216,10 @@ pub(super) fn kata_coco_kernel_params_annotation(
     ));
     params.push("agent.guest_components_rest_api=resource".to_string());
     params.push(format!("agent.aa_kbc_params=cc_kbc::{kbs_url}"));
+    // runtime-rs already forwards the guest agent's bounded INFO+ log stream
+    // from this vsock port. Without the guest listener, CDH failures collapse
+    // to a generic ttRPC status before they reach the node's CRI log.
+    params.push(format!("agent.log_vport={KATA_AGENT_LOG_VPORT}"));
     Some(params.join(" "))
 }
 

@@ -1120,6 +1120,8 @@ assert_pod_coco_kernel_params() {
   fi
   [[ "$kernel_params" == *"agent.guest_components_rest_api=resource"* ]] || \
     die "$label missing CoCo guest_components_rest_api=resource kernel param"
+  [[ "$kernel_params" == *"agent.log_vport=1025"* ]] || \
+    die "$label missing CoCo agent.log_vport=1025 kernel param"
   if [[ -n "$EXPECTED_KATA_COCO_KBS_URL" ]]; then
     [[ "$kernel_params" == *"agent.aa_kbc_params=cc_kbc::$EXPECTED_KATA_COCO_KBS_URL"* ]] || \
       die "$label missing CoCo aa_kbc_params kernel param for $EXPECTED_KATA_COCO_KBS_URL"
@@ -1693,6 +1695,8 @@ assert_sandbox_template_kata_init_data() {
     fi
     [[ "$kernel_params" == *"agent.guest_components_rest_api=resource"* ]] || \
       die "SandboxTemplate $template_name missing CoCo guest_components_rest_api=resource kernel param"
+    [[ "$kernel_params" == *"agent.log_vport=1025"* ]] || \
+      die "SandboxTemplate $template_name missing CoCo agent.log_vport=1025 kernel param"
     if [[ -n "$EXPECTED_KATA_COCO_KBS_URL" ]]; then
       [[ "$kernel_params" == *"agent.aa_kbc_params=cc_kbc::$EXPECTED_KATA_COCO_KBS_URL"* ]] || \
         die "SandboxTemplate $template_name missing CoCo aa_kbc_params kernel param for $EXPECTED_KATA_COCO_KBS_URL"
