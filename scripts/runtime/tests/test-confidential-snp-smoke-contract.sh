@@ -125,6 +125,9 @@ chmod 0755 "$forward_dir/root/scripts/runtime/dev/smoke-dev-commodity.sh"
 mkdir -p "$forward_dir/evidence"
 (
   export EVIDENCE_DIR="$forward_dir/evidence"
+  # This fixture imports functions only; product resolution has its own fake
+  # Skopeo fixture below and must not depend on a host-installed binary.
+  export RUN_COCO_PRODUCT=0
   # shellcheck disable=SC1090
   source <(sed '$d' "$SMOKE")
   ROOT="$forward_dir/root"

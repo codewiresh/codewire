@@ -28,7 +28,10 @@ case "$*" in
     jq -cn '{spec:{template:{spec:{containers:[{name:"orchestration",envFrom:[{secretRef:{name:"codewire-secrets"}},{configMapRef:{name:"codewire-config-live"}}]}]}}}}'
     ;;
   '-n dev get configmap codewire-config-live -o json')
-    jq -cn '{data:{SANDBOX_GATEWAY_IMAGE:"nexus.example.invalid/oci-approved/codewire/gateway@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",SANDBOX_KATA_COCO_KBS_URL:"https://codewire-trustee-kbs.codewire-trustee.svc.cluster.local:8080",SANDBOX_KATA_COCO_IMAGE_REGISTRY_AUTH_URI:"kbs:///default/containers/auth",SANDBOX_KATA_COCO_INIT_DATA_ENABLED:"true"}}'
+    jq -cn '{data:{SANDBOX_GATEWAY_IMAGE:"nexus.example.invalid/oci-approved/codewire/gateway@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",SANDBOX_DIND_IMAGE:"docker.io/library/docker:29.7.1-dind@sha256:e8faad5a8dc5279dff929afc5449f2791736912fff9f99351d742db2fad01b4c",SANDBOX_KATA_COCO_KBS_URL:"https://codewire-trustee-kbs.codewire-trustee.svc.cluster.local:8080",SANDBOX_KATA_COCO_IMAGE_REGISTRY_AUTH_URI:"kbs:///default/containers/auth",SANDBOX_KATA_COCO_TEST_RESOURCE_URI:"kbs:///default/codewire/runtime-test-resource",SANDBOX_KATA_COCO_INIT_DATA_ENABLED:"true"}}'
+    ;;
+  '-n flux-system get kustomization codewire-deploy-workloads-dev -o json')
+    jq -cn '{metadata:{annotations:{"deploy.codewire.sh/source-sha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}},status:{lastAppliedRevision:"main@sha1:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}'
     ;;
   '-n dev get configmap codewire-trustee-kbs-ca -o json')
     jq -cn '{data:{"ca.crt":"-----BEGIN CERTIFICATE-----\nPUBLIC-TEST-CA\n-----END CERTIFICATE-----\n"}}'
@@ -42,6 +45,8 @@ case "$*" in
   '-n dev-sandboxes get pod codewire-private-pull-be31063a -o json')
     if [[ "${FAKE_POD_MODE:-success}" == "init_failure" ]]; then
       jq -cn '{status:{phase:"Pending",initContainerStatuses:[{name:"secure-scratch-init",state:{waiting:{reason:"CreateContainerError"}}}],containerStatuses:[{name:"version",state:{waiting:{reason:"PodInitializing"}}}]}}'
+    elif [[ "${FAKE_POD_MODE:-success}" == "resource_failure" ]]; then
+      jq -cn '{status:{phase:"Failed",containerStatuses:[{name:"version",state:{terminated:{exitCode:22}}}]}}'
     elif [[ "${FAKE_POD_MODE:-success}" == "failure" ]]; then
       jq -cn '{status:{phase:"Pending",containerStatuses:[{name:"version",state:{waiting:{reason:"CreateContainerError"}}}]}}'
     else
@@ -53,6 +58,12 @@ case "$*" in
     ;;
   '-n dev-sandboxes logs codewire-private-pull-be31063a -c version')
     printf 'cw 0.8.1\n'
+    if [[ "${FAKE_LOG_MODE:-success}" == "resource_failure" ]]; then
+      printf 'cdh_http_status=500\n'
+    else
+      printf 'cdh_http_status=200\n'
+      printf 'cdh_test_resource=passed\n'
+    fi
     ;;
   '-n dev-sandboxes delete pod codewire-private-pull-be31063a --ignore-not-found --wait=false'|\
   '-n dev-sandboxes delete ciliumnetworkpolicy codewire-private-pull-be31063a --ignore-not-found')
@@ -65,6 +76,28 @@ esac
 FAKE
 chmod 755 "$TMP/kubectl"
 
+cat >"$TMP/skopeo" <<'FAKE'
+#!/usr/bin/env bash
+set -euo pipefail
+case "${*: -1}" in
+  docker://ghcr.io/codewiresh/gateway@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa)
+    jq -cn '{Digest:"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",Labels:{"org.opencontainers.image.revision":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}'
+    ;;
+  docker://ghcr.io/codewiresh/workspace:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb)
+    jq -cn '{Digest:"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",Labels:{"org.opencontainers.image.revision":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}'
+    ;;
+  docker://docker.io/library/docker@sha256:e8faad5a8dc5279dff929afc5449f2791736912fff9f99351d742db2fad01b4c)
+    jq -cn '{Digest:"sha256:e8faad5a8dc5279dff929afc5449f2791736912fff9f99351d742db2fad01b4c",Labels:{}}'
+    ;;
+  *)
+    printf 'unexpected skopeo arguments: %s\n' "$*" >&2
+    exit 64
+    ;;
+esac
+FAKE
+chmod 755 "$TMP/skopeo"
+export PATH="$TMP:$PATH"
+
 export FAKE_KUBECTL_CALLS="$TMP/kubectl.calls"
 export FAKE_KUBECTL_CAPTURE="$TMP/capture"
 mkdir -p "$FAKE_KUBECTL_CAPTURE"
@@ -74,7 +107,7 @@ KUBECTL_BIN="$TMP/kubectl" \
 KUBE_CONTEXT='' \
 PRIVATE_PULL_PROBE_UUID='be31063a-8ec8-46d5-aa17-75cda1729370' \
 EVIDENCE_DIR="$success_evidence" \
-  "$SCRIPT" --wait-seconds 5 --encrypted-emptydir
+  "$SCRIPT" --wait-seconds 301 --encrypted-emptydir
 
 manifest="$FAKE_KUBECTL_CAPTURE/probe.yaml"
 [[ "$(yq -r 'select(.kind == "CiliumNetworkPolicy") | .metadata.name' "$manifest")" == \
@@ -140,13 +173,88 @@ if rg -F 'get configmap null' "$FAKE_KUBECTL_CALLS"; then
   exit 1
 fi
 
+workspace_evidence="$TMP/workspace"
+KUBECTL_BIN="$TMP/kubectl" \
+KUBE_CONTEXT='' \
+PRIVATE_PULL_PROBE_UUID='be31063a-8ec8-46d5-aa17-75cda1729370' \
+EVIDENCE_DIR="$workspace_evidence" \
+  "$SCRIPT" --wait-seconds 301 --image-role workspace
+[[ "$(yq -r 'select(.kind == "Pod") | .spec.containers[0].image' "$manifest")" == \
+  'ghcr.io/codewiresh/workspace@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc' ]]
+[[ "$(yq -r 'select(.kind == "Pod") | .spec.containers[0].securityContext.runAsUser' "$manifest")" == '1000' ]]
+[[ "$(yq -r 'select(.kind == "Pod") | .spec.containers[0].resources.limits.memory' "$manifest")" == '20480Mi' ]]
+
+product_evidence="$TMP/product"
+KUBECTL_BIN="$TMP/kubectl" \
+KUBE_CONTEXT='' \
+PRIVATE_PULL_PROBE_UUID='be31063a-8ec8-46d5-aa17-75cda1729370' \
+EVIDENCE_DIR="$product_evidence" \
+  "$SCRIPT" --wait-seconds 301 --image-role product --assert-test-resource
+[[ "$(yq -r 'select(.kind == "Pod") | .spec.initContainers[0].image' "$manifest")" == \
+  'nexus.example.invalid/oci-approved/codewire/gateway@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' ]]
+[[ "$(yq -r 'select(.kind == "Pod") | .spec.containers[0].image' "$manifest")" == \
+  'ghcr.io/codewiresh/workspace@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc' ]]
+[[ "$(yq -r 'select(.kind == "Pod") | .spec.containers[0].resources.limits.memory' "$manifest")" == '16384Mi' ]]
+[[ "$(yq -r 'select(.kind == "Pod") | .spec.containers[1].name' "$manifest")" == 'dind' ]]
+[[ "$(yq -r 'select(.kind == "Pod") | .spec.containers[1].resources.limits.memory' "$manifest")" == '4Gi' ]]
+rg -qF 'http://127.0.0.1:8006/cdh/resource/' "$manifest"
+rg -qF 'curl --max-time 310' "$manifest"
+rg -qF 'cdh_http_status=%s' "$manifest"
+product_script="$(yq -r 'select(.kind == "Pod") | .spec.containers[0].args[1]' "$manifest")"
+rg -qF 'response="$(curl ' <<<"$product_script"
+if rg -qF '/tmp/cdh-resource.out' <<<"$product_script"; then
+  printf '%s\n' 'resource probe writes through the read-only workspace root filesystem' >&2
+  exit 1
+fi
+product_policy_json="$(yq -o=json 'select(.kind == "CiliumNetworkPolicy")' "$manifest")"
+jq -e '[.spec.egress[] | select(.toFQDNs[0].matchName == "nexus.example.invalid")] | length == 1' \
+  <<<"$product_policy_json" >/dev/null
+workspace_policy_json="$(yq -o=json 'select(.kind == "CiliumNetworkPolicy")' "$manifest")"
+jq -e '
+  any(.spec.egress[]?.toCIDRSet[]?;
+    .cidr == "0.0.0.0/0" and (.except | index("10.0.0.0/8")))
+' <<<"$workspace_policy_json" >/dev/null
+
+resource_failure_evidence="$TMP/resource-failure"
+if FAKE_POD_MODE=resource_failure \
+  FAKE_LOG_MODE=resource_failure \
+  KUBECTL_BIN="$TMP/kubectl" \
+  KUBE_CONTEXT='' \
+  PRIVATE_PULL_PROBE_UUID='be31063a-8ec8-46d5-aa17-75cda1729370' \
+  EVIDENCE_DIR="$resource_failure_evidence" \
+    "$SCRIPT" --wait-seconds 301 --image-role workspace --assert-test-resource \
+      >"$TMP/resource-failure.out" 2>"$TMP/resource-failure.err"; then
+  printf '%s\n' 'failed CDH resource request unexpectedly passed' >&2
+  exit 1
+fi
+rg -F 'stage=resource image_role=workspace http_status=500' "$TMP/resource-failure.err" >/dev/null
+rg -F 'cdh_http_status=500' "$resource_failure_evidence/container.log" >/dev/null
+
+dind_evidence="$TMP/dind"
+KUBECTL_BIN="$TMP/kubectl" \
+KUBE_CONTEXT='' \
+PRIVATE_PULL_PROBE_UUID='be31063a-8ec8-46d5-aa17-75cda1729370' \
+EVIDENCE_DIR="$dind_evidence" \
+  "$SCRIPT" --wait-seconds 301 --image-role dind
+[[ "$(yq -r 'select(.kind == "Pod") | .spec.containers[0].image' "$manifest")" == \
+  'docker.io/library/docker:29.7.1-dind@sha256:e8faad5a8dc5279dff929afc5449f2791736912fff9f99351d742db2fad01b4c' ]]
+[[ "$(yq -r 'select(.kind == "Pod") | .spec.containers[0].securityContext.privileged' "$manifest")" == 'true' ]]
+[[ "$(yq -r 'select(.kind == "Pod") | .spec.containers[0].name' "$manifest")" == 'dind' ]]
+[[ "$(yq -r 'select(.kind == "Pod") | .metadata.annotations."codewire.sh/workspace"' "$manifest")" == 'true' ]]
+[[ "$(yq -r 'select(.kind == "Pod") | .metadata.labels."agents.x-k8s.io/sandbox-name-hash"' "$manifest")" == \
+  'codewire-private-pull-be31063a' ]]
+[[ "$(yq -r 'select(.kind == "Pod") | .spec.containers[0].securityContext.runAsUser' "$manifest")" == '0' ]]
+[[ "$(yq -r 'select(.kind == "Pod") | .spec.containers[0].securityContext.allowPrivilegeEscalation' "$manifest")" == 'true' ]]
+[[ "$(yq -r 'select(.kind == "Pod") | .spec.containers[0].securityContext.readOnlyRootFilesystem' "$manifest")" == 'false' ]]
+[[ "$(yq -r 'select(.kind == "Pod") | .spec.containers[0].resources.limits.memory' "$manifest")" == '20480Mi' ]]
+
 failure_evidence="$TMP/failure"
 if FAKE_POD_MODE=failure \
   KUBECTL_BIN="$TMP/kubectl" \
   KUBE_CONTEXT='' \
   PRIVATE_PULL_PROBE_UUID='be31063a-8ec8-46d5-aa17-75cda1729370' \
   EVIDENCE_DIR="$failure_evidence" \
-    "$SCRIPT" --wait-seconds 5 >"$TMP/failure.out" 2>"$TMP/failure.err"; then
+    "$SCRIPT" --wait-seconds 301 >"$TMP/failure.out" 2>"$TMP/failure.err"; then
   printf '%s\n' 'terminal guest pull failure unexpectedly passed' >&2
   exit 1
 fi
@@ -159,7 +267,7 @@ if FAKE_POD_MODE=init_failure \
   KUBE_CONTEXT='' \
   PRIVATE_PULL_PROBE_UUID='be31063a-8ec8-46d5-aa17-75cda1729370' \
   EVIDENCE_DIR="$init_failure_evidence" \
-    "$SCRIPT" --wait-seconds 5 --encrypted-emptydir >"$TMP/init-failure.out" 2>"$TMP/init-failure.err"; then
+    "$SCRIPT" --wait-seconds 301 --encrypted-emptydir >"$TMP/init-failure.out" 2>"$TMP/init-failure.err"; then
   printf '%s\n' 'terminal init-container failure unexpectedly passed' >&2
   exit 1
 fi
