@@ -14,7 +14,7 @@ use temporalio_sdk::activities::ActivityContext;
 use super::activity_authority::{ActivityAuthority, is_authority_lost};
 use super::create::{
     SandboxWorkerCfg, environment_per_env_template_name, environment_template_opts,
-    ready_timeout_for_isolation,
+    ready_timeout_for_isolation, reconcile_confidential_runtime_before_replacement,
 };
 use super::env_data::{load_backend_row, load_environment};
 use super::env_log::emit_authoritative_environment_log_for_states;
@@ -348,6 +348,16 @@ pub async fn handle_environment_start(
                 "environment.start: replacing terminal workspace Pod"
             );
             if let Err(error) = await_reconcile_or_cancel(&activity_ctx, async {
+                reconcile_confidential_runtime_before_replacement(
+                    ctx,
+                    &env,
+                    env_id,
+                    authority,
+                    START_MUTATION_STATES,
+                    &client,
+                    &stale,
+                )
+                .await?;
                 authority
                     .run_external_mutation(
                         START_MUTATION_STATES,
