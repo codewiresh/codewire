@@ -93,6 +93,10 @@ fn create_command_cancelled(state: &str, desired_state: &str) -> bool {
     desired_state == "destroyed" || matches!(state, "destroying" | "destroyed")
 }
 
+fn create_retry_recovery_required(state: &str) -> bool {
+    state == "pending"
+}
+
 // ── Warm pool profiles (port of sandbox/warm_pools.go) ─────────────────
 
 pub const DEFAULT_FULL_CPU_MILLICORES: i32 = 1000;
@@ -869,6 +873,33 @@ async fn run_environment_create(
                         return Err(e);
                     }
                 };
+                if create_retry_recovery_required(&env.state)
+                    && let Err(e) = replace_terminal_workspace_pod(
+                        authority,
+                        env_id,
+                        &env.isolation_tier,
+                        &client,
+                    )
+                    .await
+                {
+                    emit_authoritative_environment_log_for_states(
+                        authority,
+                        CREATE_MUTATION_STATES,
+                        "wait_for_ready",
+                        "failed",
+                        &format!("{e:#}"),
+                        duration_meta(started),
+                    )
+                    .await?;
+                    record_error(
+                        &svc,
+                        authority,
+                        env_id,
+                        &format!("replace terminal workspace Pod: {e:#}"),
+                    )
+                    .await?;
+                    return Err(e);
+                }
                 if let Err(e) = authority
                     .run_while_authoritative_for_states(
                         CREATE_MUTATION_STATES,
@@ -1313,6 +1344,61 @@ fn require_client(ctx: &WorkerContext, namespace: &str) -> anyhow::Result<Sandbo
     Ok(SandboxClient::new(kube.clone(), namespace))
 }
 
+async fn replace_terminal_workspace_pod(
+    authority: &ActivityAuthority,
+    env_id: &str,
+    isolation_tier: &str,
+    client: &SandboxClient,
+) -> anyhow::Result<()> {
+    let Some(stale) = client.workspace_pod_replacement_candidate(env_id).await? else {
+        return Ok(());
+    };
+    let started = std::time::Instant::now();
+    emit_create_log(authority, "replace_terminal_pod", "started", "", None).await?;
+    let result = async {
+        tracing::info!(
+            env = env_id,
+            pod = %stale.name,
+            "replacing terminal workspace Pod before waiting for claim readiness"
+        );
+        authority
+            .run_external_mutation(
+                CREATE_MUTATION_STATES,
+                client.restart_workspace_pod_if_uid(
+                    &stale.name,
+                    &stale.uid,
+                    ready_timeout_for_isolation(isolation_tier),
+                ),
+            )
+            .await
+    }
+    .await;
+
+    match result {
+        Ok(_) => {
+            emit_create_log(
+                authority,
+                "replace_terminal_pod",
+                "completed",
+                "",
+                duration_meta(started),
+            )
+            .await
+        }
+        Err(error) => {
+            emit_create_log(
+                authority,
+                "replace_terminal_pod",
+                "failed",
+                &format!("{error:#}"),
+                duration_meta(started),
+            )
+            .await?;
+            Err(error)
+        }
+    }
+}
+
 async fn ensure_gateway_stack_for_environment(
     ctx: &WorkerContext,
     cfg: &SandboxWorkerCfg,
@@ -1479,6 +1565,14 @@ mod tests {
         assert!(!create_command_cancelled("pending", "started"));
         assert!(!create_command_cancelled("creating", "started"));
         assert!(!create_command_cancelled("running", "started"));
+    }
+
+    #[test]
+    fn terminal_pod_recovery_is_scoped_to_explicit_pending_retries() {
+        assert!(create_retry_recovery_required("pending"));
+        assert!(!create_retry_recovery_required("creating"));
+        assert!(!create_retry_recovery_required("starting"));
+        assert!(!create_retry_recovery_required("running"));
     }
 
     #[test]
