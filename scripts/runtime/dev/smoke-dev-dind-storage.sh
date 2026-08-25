@@ -460,7 +460,7 @@ YAML
 
 if [[ "$COCO_ANNOTATIONS" == "1" ]]; then
   COCO_INIT_DATA="$(build_coco_init_data)"
-  COCO_KERNEL_PARAMS="agent.guest_components_rest_api=resource agent.aa_kbc_params=cc_kbc::${COCO_KBS_URL}"
+  COCO_KERNEL_PARAMS="agent.guest_components_rest_api=resource agent.aa_kbc_params=cc_kbc::${COCO_KBS_URL} agent.log_vport=1025"
   cat >>"$MANIFEST" <<YAML
   annotations:
     io.katacontainers.config.hypervisor.cc_init_data: ${COCO_INIT_DATA}

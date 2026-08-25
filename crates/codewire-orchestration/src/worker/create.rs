@@ -1364,7 +1364,13 @@ async fn replace_terminal_workspace_pod(
         authority
             .run_external_mutation(
                 CREATE_MUTATION_STATES,
-                client.restart_workspace_pod_if_uid(
+                client.delete_workspace_pod_if_uid(&stale.name, &stale.uid),
+            )
+            .await?;
+        authority
+            .run_while_authoritative_for_states(
+                CREATE_MUTATION_STATES,
+                client.wait_for_replacement_workspace_pod(
                     &stale.name,
                     &stale.uid,
                     ready_timeout_for_isolation(isolation_tier),

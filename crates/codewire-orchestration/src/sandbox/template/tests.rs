@@ -992,7 +992,7 @@ mod tests {
             server_namespace: "dev".into(),
             ..Default::default()
         };
-        let want_kernel_params = "agent.image_registry_auth=kbs:///default/containers/auth agent.image_resource_timeout_secs=300 agent.guest_components_rest_api=resource agent.aa_kbc_params=cc_kbc::http://codewire-trustee-kbs.codewire-trustee.svc.cluster.local:8080";
+        let want_kernel_params = "agent.image_registry_auth=kbs:///default/containers/auth agent.image_resource_timeout_secs=300 agent.guest_components_rest_api=resource agent.aa_kbc_params=cc_kbc::http://codewire-trustee-kbs.codewire-trustee.svc.cluster.local:8080 agent.log_vport=1025";
 
         let rendered = render_sandbox_template("codewire-runtime", &opts);
         let annotations = rendered["spec"]["podTemplate"]["metadata"]["annotations"]
@@ -1087,7 +1087,7 @@ mod tests {
                 "http://codewire-trustee-kbs.codewire-trustee.svc.cluster.local:8080".into(),
             ..Default::default()
         };
-        let want_kernel_params = "agent.image_resource_timeout_secs=300 agent.guest_components_rest_api=resource agent.aa_kbc_params=cc_kbc::http://codewire-trustee-kbs.codewire-trustee.svc.cluster.local:8080";
+        let want_kernel_params = "agent.image_resource_timeout_secs=300 agent.guest_components_rest_api=resource agent.aa_kbc_params=cc_kbc::http://codewire-trustee-kbs.codewire-trustee.svc.cluster.local:8080 agent.log_vport=1025";
 
         let rendered = render_sandbox_template("codewire-runtime", &opts);
         let annotations = rendered["spec"]["podTemplate"]["metadata"]["annotations"]

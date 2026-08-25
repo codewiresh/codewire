@@ -605,7 +605,7 @@ pub async fn repair_environment_daemon_core(
             .await?;
 
     let replacement = match sandbox
-        .restart_workspace_pod(
+        .delete_and_wait_for_replacement_workspace_pod(
             &target.environment_id,
             Some(&target.pod_name),
             DAEMON_REPAIR_TIMEOUT,

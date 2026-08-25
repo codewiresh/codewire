@@ -411,10 +411,13 @@ impl SandboxClient {
         Ok(Some(WorkspacePodIdentity { name, uid }))
     }
 
-    /// Restart only the workspace Pod and wait for the owning Sandbox
-    /// controller to replace it. The Sandbox, claim, PVCs, and environment
-    /// identity are preserved.
-    pub async fn restart_workspace_pod(
+    /// Delete one observed workspace Pod and wait for its ready replacement.
+    ///
+    /// This is a long-lived orchestration operation. Callers must not wrap it
+    /// in the worker's short external-mutation guard; worker paths instead
+    /// guard `delete_workspace_pod_if_uid` and then observe
+    /// `wait_for_replacement_workspace_pod` separately.
+    pub async fn delete_and_wait_for_replacement_workspace_pod(
         &self,
         env_id: &str,
         known_pod_name: Option<&str>,
@@ -429,27 +432,14 @@ impl SandboxClient {
             .await?
             .ok_or_else(|| anyhow::anyhow!("workspace Pod {pod_name} not found"))?;
 
-        self.restart_workspace_pod_if_uid(&pod_name, &old.uid, timeout)
-            .await
-    }
-
-    /// Restart the exact previously observed workspace Pod incarnation. The
-    /// UID is carried from observation through the Kubernetes delete
-    /// precondition so a concurrent replacement cannot be deleted.
-    pub async fn restart_workspace_pod_if_uid(
-        &self,
-        pod_name: &str,
-        previous_uid: &str,
-        timeout: Duration,
-    ) -> anyhow::Result<WorkspacePodIdentity> {
-        self.delete_workspace_pod_if_uid(pod_name, previous_uid)
+        self.delete_workspace_pod_if_uid(&pod_name, &old.uid)
             .await?;
-        self.wait_for_replacement_workspace_pod(pod_name, previous_uid, timeout)
+        self.wait_for_replacement_workspace_pod(&pod_name, &old.uid, timeout)
             .await
     }
 
     /// Delete the old workspace incarnation only when it still has the
-    /// checkpointed UID. A retried resize must never delete the replacement.
+    /// checkpointed UID. A retried operation must never delete the replacement.
     pub async fn delete_workspace_pod_if_uid(
         &self,
         pod_name: &str,
@@ -3020,7 +3010,11 @@ mod tests {
         ]);
 
         let replacement = client
-            .restart_workspace_pod("env-test", Some("workspace-old"), Duration::from_secs(1))
+            .delete_and_wait_for_replacement_workspace_pod(
+                "env-test",
+                Some("workspace-old"),
+                Duration::from_secs(1),
+            )
             .await
             .unwrap();
 
