@@ -16,6 +16,7 @@ use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use kube::Client;
 use kube::api::{
     Api, ApiResource, DeleteParams, DynamicObject, ListParams, Patch, PatchParams, PostParams,
+    Preconditions,
 };
 use kube::core::GroupVersionKind;
 use russh::keys::ssh_key::private::Ed25519Keypair;
@@ -428,9 +429,22 @@ impl SandboxClient {
             .await?
             .ok_or_else(|| anyhow::anyhow!("workspace Pod {pod_name} not found"))?;
 
-        self.delete_workspace_pod_if_uid(&pod_name, &old.uid)
+        self.restart_workspace_pod_if_uid(&pod_name, &old.uid, timeout)
+            .await
+    }
+
+    /// Restart the exact previously observed workspace Pod incarnation. The
+    /// UID is carried from observation through the Kubernetes delete
+    /// precondition so a concurrent replacement cannot be deleted.
+    pub async fn restart_workspace_pod_if_uid(
+        &self,
+        pod_name: &str,
+        previous_uid: &str,
+        timeout: Duration,
+    ) -> anyhow::Result<WorkspacePodIdentity> {
+        self.delete_workspace_pod_if_uid(pod_name, previous_uid)
             .await?;
-        self.wait_for_replacement_workspace_pod(&pod_name, &old.uid, timeout)
+        self.wait_for_replacement_workspace_pod(pod_name, previous_uid, timeout)
             .await
     }
 
@@ -454,13 +468,14 @@ impl SandboxClient {
             return Ok(());
         }
 
-        match self
-            .pods()
-            .delete(&current.name, &DeleteParams::default())
-            .await
-        {
+        let delete_params = delete_params_for_observed_uid(previous_uid);
+        match self.pods().delete(&current.name, &delete_params).await {
             Ok(_) => {}
             Err(kube::Error::Api(error)) if error.code == 404 => {}
+            // A replacement won the race after the observation above. The
+            // UID precondition prevented deleting it; the caller can now
+            // observe that replacement normally.
+            Err(kube::Error::Api(error)) if error.code == 409 => {}
             Err(error) => {
                 return Err(anyhow::anyhow!(
                     "restart workspace Pod {}: {error}",
@@ -1702,6 +1717,16 @@ impl SandboxClient {
             }
         }
         None
+    }
+}
+
+fn delete_params_for_observed_uid(uid: &str) -> DeleteParams {
+    DeleteParams {
+        preconditions: Some(Preconditions {
+            uid: Some(uid.to_string()),
+            ..Default::default()
+        }),
+        ..Default::default()
     }
 }
 
@@ -2966,6 +2991,15 @@ mod tests {
                 Method::GET,
                 "/api/v1/namespaces/dev-sandboxes/pods/workspace-old".to_string(),
             )]
+        );
+    }
+
+    #[test]
+    fn terminal_recovery_delete_is_bound_to_the_observed_pod_uid() {
+        let delete = serde_json::to_value(delete_params_for_observed_uid("uid-old")).unwrap();
+        assert_eq!(
+            delete.pointer("/preconditions/uid"),
+            Some(&json!("uid-old"))
         );
     }
 
