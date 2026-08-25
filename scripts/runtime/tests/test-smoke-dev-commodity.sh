@@ -198,9 +198,10 @@ run_missing_server_namespace_case() {
   local stderr="$TEST_TMP/missing-server-namespace.err"
 
   if (
+    # shellcheck disable=SC1090 # Intentional dynamic source fixture.
     source <(sed '$d' "$SMOKE")
-    SMOKE_SKIP_KUBE=0
-    CODEWIRE_SERVER_NAMESPACE=""
+    export SMOKE_SKIP_KUBE=0
+    export CODEWIRE_SERVER_NAMESPACE=""
     run_kube_assertions
   ) >"$stdout" 2>"$stderr"; then
     fail "Kubernetes assertions accepted an empty Codewire server namespace"

@@ -124,20 +124,20 @@ EOF
 chmod 0755 "$forward_dir/root/scripts/runtime/dev/smoke-dev-commodity.sh"
 mkdir -p "$forward_dir/evidence"
 (
-  EVIDENCE_DIR="$forward_dir/evidence"
+  export EVIDENCE_DIR="$forward_dir/evidence"
   # shellcheck disable=SC1090
   source <(sed '$d' "$SMOKE")
   ROOT="$forward_dir/root"
-  CODEWIRE_SERVER_NAMESPACE=contract-server
-  SANDBOX_NAMESPACE=contract-sandboxes
-  KUBE_CONTEXT=contract-context
-  COCO_GATEWAY_IMAGE=nexus.example.invalid/gateway@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-  COCO_WORKSPACE_IMAGE=example.invalid/workspace@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
-  COCO_DIND_IMAGE=example.invalid/dind@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
-  COCO_GATEWAY_STUN_HOST=stun.example.invalid
-  COCO_GATEWAY_STUN_PORT=3478
-  COCO_DIRECT_UDP_LB_IP=192.0.2.20
-  COCO_DIRECT_UDP_TRANSPORT_ZONE=contract-zone
+  export CODEWIRE_SERVER_NAMESPACE=contract-server
+  export SANDBOX_NAMESPACE=contract-sandboxes
+  export KUBE_CONTEXT=contract-context
+  export COCO_GATEWAY_IMAGE=nexus.example.invalid/gateway@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  export COCO_WORKSPACE_IMAGE=example.invalid/workspace@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  export COCO_DIND_IMAGE=example.invalid/dind@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+  export COCO_GATEWAY_STUN_HOST=stun.example.invalid
+  export COCO_GATEWAY_STUN_PORT=3478
+  export COCO_DIRECT_UDP_LB_IP=192.0.2.20
+  export COCO_DIRECT_UDP_TRANSPORT_ZONE=contract-zone
   FORWARD_CAPTURE="$forward_dir/capture" run_product_command
 )
 cat >"$forward_dir/expected" <<'EOF'
