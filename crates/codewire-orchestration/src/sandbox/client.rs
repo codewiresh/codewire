@@ -1703,20 +1703,11 @@ impl SandboxClient {
             Ok(p) => p,
             Err(_) => return None, // pod not scheduled yet
         };
-        let statuses = pod.status.as_ref()?.container_statuses.as_ref()?;
-        for cs in statuses {
-            if let Some(waiting) = cs.state.as_ref().and_then(|s| s.waiting.as_ref()) {
-                let reason = waiting.reason.as_deref().unwrap_or_default();
-                if TERMINAL_WAITING_REASONS.contains(&reason) {
-                    let msg = waiting.message.as_deref().unwrap_or_default();
-                    return Some(anyhow::anyhow!(
-                        "pod {}: {reason}: {msg}",
-                        pod.metadata.name.as_deref().unwrap_or(&sandbox_name)
-                    ));
-                }
-            }
-        }
-        None
+        let (reason, message) = terminal_pod_failure_reason(&pod)?;
+        Some(anyhow::anyhow!(
+            "pod {}: {reason}: {message}",
+            pod.metadata.name.as_deref().unwrap_or(&sandbox_name)
+        ))
     }
 }
 
@@ -2074,22 +2065,46 @@ const TERMINAL_WAITING_REASONS: [&str; 6] = [
 ];
 
 fn pod_requires_product_replacement(pod: &Pod) -> bool {
-    if pod
-        .status
-        .as_ref()
-        .and_then(|status| status.phase.as_deref())
-        .is_some_and(|phase| matches!(phase, "Failed" | "Succeeded"))
+    terminal_pod_failure_reason(pod).is_some()
+}
+
+/// Classify the complete Pod start boundary. Kubernetes reports image and
+/// runtime failures on both init and regular containers, while a completed
+/// Pod can carry only a terminal phase. All three observations must release
+/// the bounded product wait so the owning lifecycle can retry the exact Pod
+/// incarnation instead of waiting for the confidential timeout.
+fn terminal_pod_failure_reason(pod: &Pod) -> Option<(String, String)> {
+    let status = pod.status.as_ref()?;
+    if let Some(phase) = status
+        .phase
+        .as_deref()
+        .filter(|phase| matches!(*phase, "Failed" | "Succeeded"))
     {
-        return true;
+        let reason = status
+            .reason
+            .clone()
+            .filter(|reason| !reason.trim().is_empty())
+            .unwrap_or_else(|| format!("Pod{phase}"));
+        let message = status.message.clone().unwrap_or_default();
+        return Some((reason, message));
     }
 
-    pod.status
-        .as_ref()
-        .and_then(|status| status.container_statuses.as_deref())
+    status
+        .init_container_statuses
+        .as_deref()
         .into_iter()
         .flatten()
-        .filter_map(|status| status.state.as_ref()?.waiting.as_ref()?.reason.as_deref())
-        .any(|reason| TERMINAL_WAITING_REASONS.contains(&reason))
+        .chain(status.container_statuses.as_deref().into_iter().flatten())
+        .filter_map(|container| container.state.as_ref()?.waiting.as_ref())
+        .find_map(|waiting| {
+            let reason = waiting.reason.as_deref().unwrap_or_default();
+            TERMINAL_WAITING_REASONS.contains(&reason).then(|| {
+                (
+                    reason.to_string(),
+                    waiting.message.clone().unwrap_or_default(),
+                )
+            })
+        })
 }
 
 /// Mirrors `isClaimReady`: (ready, reason).
@@ -2452,6 +2467,80 @@ mod tests {
                 "phase={phase} waiting_reason={waiting_reason:?}"
             );
         }
+    }
+
+    #[test]
+    fn terminal_wait_observes_init_containers_and_terminal_phase() {
+        let init_failure: Pod = serde_json::from_value(json!({
+            "apiVersion": "v1",
+            "kind": "Pod",
+            "metadata": {"name": "workspace", "uid": "uid-1"},
+            "spec": {
+                "initContainers": [{"name": "init", "image": "init:test"}],
+                "containers": [{"name": "workspace", "image": "workspace:test"}]
+            },
+            "status": {
+                "phase": "Pending",
+                "initContainerStatuses": [{
+                    "name": "init",
+                    "image": "init:test",
+                    "imageID": "",
+                    "ready": false,
+                    "restartCount": 0,
+                    "state": {"waiting": {
+                        "reason": "RunContainerError",
+                        "message": "runtime rejected init container"
+                    }}
+                }]
+            }
+        }))
+        .unwrap();
+        assert_eq!(
+            terminal_pod_failure_reason(&init_failure),
+            Some((
+                "RunContainerError".into(),
+                "runtime rejected init container".into()
+            ))
+        );
+        assert!(pod_requires_product_replacement(&init_failure));
+
+        let progressing_init: Pod = serde_json::from_value(json!({
+            "apiVersion": "v1",
+            "kind": "Pod",
+            "metadata": {"name": "workspace", "uid": "uid-2"},
+            "spec": {
+                "initContainers": [{"name": "init", "image": "init:test"}],
+                "containers": [{"name": "workspace", "image": "workspace:test"}]
+            },
+            "status": {
+                "phase": "Pending",
+                "initContainerStatuses": [{
+                    "name": "init",
+                    "image": "init:test",
+                    "imageID": "",
+                    "ready": false,
+                    "restartCount": 0,
+                    "state": {"waiting": {"reason": "PodInitializing"}}
+                }]
+            }
+        }))
+        .unwrap();
+        assert_eq!(terminal_pod_failure_reason(&progressing_init), None);
+        assert!(!pod_requires_product_replacement(&progressing_init));
+
+        let failed_phase: Pod = serde_json::from_value(json!({
+            "apiVersion": "v1",
+            "kind": "Pod",
+            "metadata": {"name": "workspace", "uid": "uid-3"},
+            "spec": {"containers": [{"name": "workspace", "image": "workspace:test"}]},
+            "status": {"phase": "Failed", "reason": "StartError", "message": "start failed"}
+        }))
+        .unwrap();
+        assert_eq!(
+            terminal_pod_failure_reason(&failed_phase),
+            Some(("StartError".into(), "start failed".into()))
+        );
+        assert!(pod_requires_product_replacement(&failed_phase));
     }
 
     #[test]
