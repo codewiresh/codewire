@@ -24,9 +24,10 @@ use russh::keys::ssh_key::{LineEnding, PrivateKey};
 use serde_json::Value;
 
 use super::template::{
-    CONFIDENTIAL_WORKSPACE_STORAGE_CLASS, TemplateOpts, gateway_direct_udp_service_name,
-    gateway_host_key_secret_name, gateway_network_policy_name, gateway_workload_name,
-    render_gateway_deployment, render_gateway_direct_udp_service, render_gateway_host_key_secret,
+    CONFIDENTIAL_WORKSPACE_STORAGE_CLASS, KATA_HYPERVISOR_KERNEL_PARAMS_ANNOTATION_KEY,
+    TemplateOpts, gateway_direct_udp_service_name, gateway_host_key_secret_name,
+    gateway_network_policy_name, gateway_workload_name, render_gateway_deployment,
+    render_gateway_direct_udp_service, render_gateway_host_key_secret,
     render_gateway_network_policy, render_gateway_service, render_sandbox_template,
     render_sandbox_warm_pool, render_workspace_daemon_network_policy,
     render_workspace_daemon_service, workspace_daemon_network_policy_name,
@@ -519,6 +520,123 @@ impl SandboxClient {
             }
             if tokio::time::Instant::now() >= deadline {
                 anyhow::bail!("timeout waiting for replacement workspace Pod {pod_name}");
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    }
+
+    /// Reconcile the current confidential kernel parameters into the private
+    /// template and the already-adopted Sandbox before replacing a terminal
+    /// Pod. Updating the SandboxTemplate alone is insufficient because the
+    /// default warm-pool strategy does not rewrite an adopted Sandbox.
+    pub async fn reconcile_per_environment_runtime_kernel_params(
+        &self,
+        env_id: &str,
+        expected_pod_name: &str,
+        opts: &TemplateOpts,
+    ) -> anyhow::Result<String> {
+        if opts.environment_id != env_id {
+            anyhow::bail!("runtime template environment does not match retry environment");
+        }
+        if !opts.name.ends_with(&format!("-{env_id}")) {
+            anyhow::bail!("refusing to update a shared runtime template before Pod replacement");
+        }
+
+        let claim = self
+            .get_sandbox_claim(env_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("SandboxClaim {} not found", claim_name(env_id)))?;
+        let sandbox_name = claim
+            .data
+            .pointer("/status/sandbox/name")
+            .and_then(Value::as_str)
+            .filter(|name| !name.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("SandboxClaim has no adopted Sandbox"))?;
+        if sandbox_name != expected_pod_name {
+            anyhow::bail!("workspace Pod does not match the adopted Sandbox");
+        }
+        let warm_pool_name = claim
+            .data
+            .pointer("/spec/warmPoolRef/name")
+            .and_then(Value::as_str)
+            .filter(|name| !name.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("SandboxClaim has no warm-pool reference"))?;
+        let warm_pool = self
+            .warm_pools()
+            .get(warm_pool_name)
+            .await
+            .map_err(|error| anyhow::anyhow!("get SandboxWarmPool {warm_pool_name}: {error}"))?;
+        let template_name = warm_pool
+            .data
+            .pointer("/spec/sandboxTemplateRef/name")
+            .and_then(Value::as_str)
+            .filter(|name| !name.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("SandboxWarmPool has no template reference"))?;
+        if template_name != opts.name {
+            anyhow::bail!("refusing to update a runtime template not owned by this environment");
+        }
+
+        let sandboxes = self.sandboxes();
+        sandboxes
+            .get(sandbox_name)
+            .await
+            .map_err(|error| anyhow::anyhow!("get Sandbox {sandbox_name}: {error}"))?;
+        let kernel_params = rendered_kernel_params(&self.namespace, opts)?;
+        self.ensure_sandbox_template(opts).await?;
+        sandboxes
+            .patch(
+                sandbox_name,
+                &PatchParams::default(),
+                &Patch::Merge(&sandbox_kernel_params_patch(&kernel_params)),
+            )
+            .await
+            .map_err(|error| {
+                anyhow::anyhow!("patch Sandbox {sandbox_name} runtime parameters: {error}")
+            })?;
+        Ok(kernel_params)
+    }
+
+    /// Wait for agent-sandbox to propagate the desired runtime annotation to
+    /// the exact terminal Pod incarnation. This is the observable barrier
+    /// proving a subsequently recreated Pod will use the updated Sandbox.
+    pub async fn wait_for_workspace_pod_annotation(
+        &self,
+        pod_name: &str,
+        expected_uid: &str,
+        annotation_key: &str,
+        expected_value: &str,
+        timeout: Duration,
+    ) -> anyhow::Result<()> {
+        if pod_name.trim().is_empty() || expected_uid.trim().is_empty() {
+            anyhow::bail!("workspace Pod name and UID are required");
+        }
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let pod = match self.pods().get(pod_name).await {
+                Ok(pod) => pod,
+                Err(kube::Error::Api(error)) if error.code == 404 => {
+                    anyhow::bail!("workspace Pod disappeared before runtime metadata propagated")
+                }
+                Err(error) => {
+                    return Err(anyhow::anyhow!(
+                        "get workspace Pod {pod_name} during runtime reconciliation: {error}"
+                    ));
+                }
+            };
+            if pod.metadata.uid.as_deref() != Some(expected_uid) {
+                anyhow::bail!("workspace Pod changed before runtime metadata propagated");
+            }
+            if pod
+                .metadata
+                .annotations
+                .as_ref()
+                .and_then(|annotations| annotations.get(annotation_key))
+                .is_some_and(|value| value == expected_value)
+            {
+                return Ok(());
+            }
+            if tokio::time::Instant::now() >= deadline {
+                anyhow::bail!("timeout waiting for workspace Pod runtime metadata propagation");
             }
             tokio::time::sleep(Duration::from_millis(250)).await;
         }
@@ -2400,6 +2518,34 @@ fn set_workspace_volume_request(data: &mut Value, storage: &str) -> anyhow::Resu
     Ok(())
 }
 
+fn rendered_kernel_params(namespace: &str, opts: &TemplateOpts) -> anyhow::Result<String> {
+    render_sandbox_template(namespace, opts)
+        .pointer("/spec/podTemplate/metadata/annotations")
+        .and_then(Value::as_object)
+        .and_then(|annotations| annotations.get(KATA_HYPERVISOR_KERNEL_PARAMS_ANNOTATION_KEY))
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| anyhow::anyhow!("rendered runtime has no confidential kernel parameters"))
+}
+
+fn sandbox_kernel_params_patch(kernel_params: &str) -> Value {
+    let mut annotations = serde_json::Map::new();
+    annotations.insert(
+        KATA_HYPERVISOR_KERNEL_PARAMS_ANNOTATION_KEY.to_string(),
+        Value::String(kernel_params.to_string()),
+    );
+    serde_json::json!({
+        "spec": {
+            "podTemplate": {
+                "metadata": {
+                    "annotations": annotations,
+                },
+            },
+        },
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3084,6 +3230,278 @@ mod tests {
             delete.pointer("/preconditions/uid"),
             Some(&json!("uid-old"))
         );
+    }
+
+    fn confidential_runtime_opts() -> TemplateOpts {
+        TemplateOpts {
+            name: "workspace-env-test".into(),
+            environment_id: "env-test".into(),
+            runtime_profile: crate::sandbox::template::RUNTIME_PROFILE_CONFIDENTIAL.into(),
+            kata_coco_init_data_enabled: true,
+            kata_coco_kbs_url: "https://kbs.example.test".into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn sandbox_runtime_patch_changes_only_the_kernel_params_annotation() {
+        let patch = sandbox_kernel_params_patch("agent.log_vport=1025");
+        assert_eq!(
+            patch
+                .pointer("/spec/podTemplate/metadata/annotations")
+                .and_then(Value::as_object)
+                .and_then(|annotations| {
+                    annotations.get(KATA_HYPERVISOR_KERNEL_PARAMS_ANNOTATION_KEY)
+                }),
+            Some(&json!("agent.log_vport=1025"))
+        );
+        assert_eq!(
+            patch
+                .pointer("/spec/podTemplate/metadata/annotations")
+                .and_then(Value::as_object)
+                .map(serde_json::Map::len),
+            Some(1)
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_recovery_refreshes_the_adopted_sandbox_before_uid_delete() {
+        let opts = confidential_runtime_opts();
+        let expected_kernel_params = rendered_kernel_params("dev-sandboxes", &opts).unwrap();
+        assert!(expected_kernel_params.contains("agent.log_vport=1025"));
+
+        let (client, requests) = sandbox_client_with_secret_responses(vec![
+            (
+                StatusCode::OK,
+                json!({
+                    "apiVersion": "extensions.agents.x-k8s.io/v1beta1",
+                    "kind": "SandboxClaim",
+                    "metadata": {"name": "sandbox-env-test", "namespace": "dev-sandboxes"},
+                    "spec": {"warmPoolRef": {"name": "shadow-pool-workspace-env-test"}},
+                    "status": {"sandbox": {"name": "workspace-old"}}
+                }),
+            ),
+            (
+                StatusCode::OK,
+                json!({
+                    "apiVersion": "extensions.agents.x-k8s.io/v1beta1",
+                    "kind": "SandboxWarmPool",
+                    "metadata": {"name": "shadow-pool-workspace-env-test", "namespace": "dev-sandboxes"},
+                    "spec": {"sandboxTemplateRef": {"name": "workspace-env-test"}}
+                }),
+            ),
+            (
+                StatusCode::OK,
+                json!({
+                    "apiVersion": "agents.x-k8s.io/v1beta1",
+                    "kind": "Sandbox",
+                    "metadata": {"name": "workspace-old", "namespace": "dev-sandboxes"},
+                    "spec": {"podTemplate": {"metadata": {"annotations": {}}}}
+                }),
+            ),
+            (
+                StatusCode::OK,
+                json!({
+                    "apiVersion": "extensions.agents.x-k8s.io/v1beta1",
+                    "kind": "SandboxTemplate",
+                    "metadata": {
+                        "name": "workspace-env-test",
+                        "namespace": "dev-sandboxes",
+                        "resourceVersion": "1"
+                    },
+                    "spec": {}
+                }),
+            ),
+            (
+                StatusCode::OK,
+                json!({
+                    "apiVersion": "extensions.agents.x-k8s.io/v1beta1",
+                    "kind": "SandboxTemplate",
+                    "metadata": {"name": "workspace-env-test", "namespace": "dev-sandboxes"},
+                    "spec": {}
+                }),
+            ),
+            (
+                StatusCode::OK,
+                json!({
+                    "apiVersion": "agents.x-k8s.io/v1beta1",
+                    "kind": "Sandbox",
+                    "metadata": {"name": "workspace-old", "namespace": "dev-sandboxes"},
+                    "spec": {"podTemplate": {"metadata": {"annotations": {}}}}
+                }),
+            ),
+            (
+                StatusCode::OK,
+                json!({
+                    "apiVersion": "v1",
+                    "kind": "Pod",
+                    "metadata": {
+                        "name": "workspace-old",
+                        "namespace": "dev-sandboxes",
+                        "uid": "uid-old",
+                        "annotations": {
+                            KATA_HYPERVISOR_KERNEL_PARAMS_ANNOTATION_KEY: expected_kernel_params,
+                        }
+                    }
+                }),
+            ),
+            (
+                StatusCode::OK,
+                json!({
+                    "apiVersion": "v1",
+                    "kind": "Pod",
+                    "metadata": {
+                        "name": "workspace-old",
+                        "namespace": "dev-sandboxes",
+                        "uid": "uid-old"
+                    }
+                }),
+            ),
+            (
+                StatusCode::OK,
+                json!({
+                    "apiVersion": "v1",
+                    "kind": "Status",
+                    "status": "Success",
+                    "code": 200
+                }),
+            ),
+            (
+                StatusCode::OK,
+                json!({
+                    "apiVersion": "v1",
+                    "kind": "Pod",
+                    "metadata": {
+                        "name": "workspace-old",
+                        "namespace": "dev-sandboxes",
+                        "uid": "uid-new"
+                    },
+                    "status": {
+                        "phase": "Running",
+                        "containerStatuses": [{
+                            "image": "workspace:test",
+                            "imageID": "workspace@test",
+                            "name": "workspace",
+                            "ready": true,
+                            "restartCount": 0,
+                            "started": true,
+                            "state": {"running": {"startedAt": "2026-07-25T00:00:00Z"}}
+                        }]
+                    }
+                }),
+            ),
+        ]);
+
+        let kernel_params = client
+            .reconcile_per_environment_runtime_kernel_params("env-test", "workspace-old", &opts)
+            .await
+            .unwrap();
+        client
+            .wait_for_workspace_pod_annotation(
+                "workspace-old",
+                "uid-old",
+                KATA_HYPERVISOR_KERNEL_PARAMS_ANNOTATION_KEY,
+                &kernel_params,
+                Duration::from_secs(1),
+            )
+            .await
+            .unwrap();
+        client
+            .delete_workspace_pod_if_uid("workspace-old", "uid-old")
+            .await
+            .unwrap();
+        client
+            .wait_for_replacement_workspace_pod("workspace-old", "uid-old", Duration::from_secs(1))
+            .await
+            .unwrap();
+
+        let requests = requests.lock().unwrap();
+        let patch_index = requests
+            .iter()
+            .position(|(method, path)| {
+                *method == Method::PATCH && path.ends_with("/sandboxes/workspace-old")
+            })
+            .unwrap();
+        let delete_index = requests
+            .iter()
+            .position(|(method, path)| {
+                *method == Method::DELETE && path.ends_with("/pods/workspace-old")
+            })
+            .unwrap();
+        assert!(patch_index < delete_index);
+        assert_eq!(requests[patch_index + 1].0, Method::GET);
+        assert!(requests[patch_index + 1].1.ends_with("/pods/workspace-old"));
+    }
+
+    #[tokio::test]
+    async fn terminal_recovery_refuses_a_shared_template_without_mutation() {
+        let opts = confidential_runtime_opts();
+        let (client, requests) = sandbox_client_with_secret_responses(vec![
+            (
+                StatusCode::OK,
+                json!({
+                    "apiVersion": "extensions.agents.x-k8s.io/v1beta1",
+                    "kind": "SandboxClaim",
+                    "metadata": {"name": "sandbox-env-test", "namespace": "dev-sandboxes"},
+                    "spec": {"warmPoolRef": {"name": "shared-pool"}},
+                    "status": {"sandbox": {"name": "workspace-old"}}
+                }),
+            ),
+            (
+                StatusCode::OK,
+                json!({
+                    "apiVersion": "extensions.agents.x-k8s.io/v1beta1",
+                    "kind": "SandboxWarmPool",
+                    "metadata": {"name": "shared-pool", "namespace": "dev-sandboxes"},
+                    "spec": {"sandboxTemplateRef": {"name": "workspace-shared"}}
+                }),
+            ),
+        ]);
+
+        let error = client
+            .reconcile_per_environment_runtime_kernel_params("env-test", "workspace-old", &opts)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("not owned by this environment"));
+        assert!(
+            requests
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|(method, _)| *method == Method::GET)
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_metadata_barrier_refuses_a_changed_pod_uid() {
+        let (client, requests) = sandbox_client_with_secret_responses(vec![(
+            StatusCode::OK,
+            json!({
+                "apiVersion": "v1",
+                "kind": "Pod",
+                "metadata": {
+                    "name": "workspace-old",
+                    "namespace": "dev-sandboxes",
+                    "uid": "uid-new",
+                    "annotations": {
+                        KATA_HYPERVISOR_KERNEL_PARAMS_ANNOTATION_KEY: "agent.log_vport=1025"
+                    }
+                }
+            }),
+        )]);
+
+        let error = client
+            .wait_for_workspace_pod_annotation(
+                "workspace-old",
+                "uid-old",
+                KATA_HYPERVISOR_KERNEL_PARAMS_ANNOTATION_KEY,
+                "agent.log_vport=1025",
+                Duration::from_secs(1),
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("workspace Pod changed"));
+        assert_eq!(requests.lock().unwrap().len(), 1);
     }
 
     fn gateway_host_key_opts() -> TemplateOpts {

@@ -13,10 +13,11 @@ use super::env_log::emit_authoritative_environment_log_for_states;
 use super::gatewayauth::{SCOPE_COORDINATE, issue_token};
 use super::{JobPayload, WorkerContext};
 use crate::lifecycle::{PgLifecycleStore, Service};
-use crate::sandbox::client::{ProbeResult, SandboxClient};
+use crate::sandbox::client::{ProbeResult, SandboxClient, WorkspacePodIdentity};
 use crate::sandbox::template::{
-    DOCKER_MODE_LOCAL_DIND_DIRECT, RUNTIME_PROFILE_CONFIDENTIAL, TemplateOpts, default_tolerations,
-    runtime_profile_spec, validate_managed_runtime_profile,
+    DOCKER_MODE_LOCAL_DIND_DIRECT, KATA_HYPERVISOR_KERNEL_PARAMS_ANNOTATION_KEY,
+    RUNTIME_PROFILE_CONFIDENTIAL, TemplateOpts, default_tolerations, runtime_profile_spec,
+    validate_managed_runtime_profile,
 };
 use crate::sandbox::{
     CANONICAL_WORKSPACE_RUNTIME_IMAGE, ClaimOpts, claim_name, environment_pod_selector,
@@ -762,6 +763,7 @@ pub async fn update_backend_pod_info(
 
 const CREATE_READY_TIMEOUT: Duration = Duration::from_secs(600); // SANDBOX_CREATE_READY_TIMEOUT_SECS default
 const CONFIDENTIAL_CREATE_READY_TIMEOUT: Duration = Duration::from_secs(1800);
+const RUNTIME_METADATA_PROPAGATION_TIMEOUT: Duration = Duration::from_secs(30);
 const CREATE_MUTATION_STATES: &[&str] = &["pending", "creating", "starting"];
 
 pub(super) fn ready_timeout_for_isolation(isolation_tier: &str) -> Duration {
@@ -770,6 +772,66 @@ pub(super) fn ready_timeout_for_isolation(isolation_tier: &str) -> Duration {
     } else {
         CREATE_READY_TIMEOUT
     }
+}
+
+pub(super) async fn reconcile_confidential_runtime_before_replacement(
+    ctx: &WorkerContext,
+    env: &EnvironmentRow,
+    env_id: &str,
+    authority: &ActivityAuthority,
+    authoritative_states: &[&str],
+    client: &SandboxClient,
+    stale: &WorkspacePodIdentity,
+) -> anyhow::Result<()> {
+    if env.isolation_tier != "confidential" {
+        return Ok(());
+    }
+
+    let preset_id = env
+        .preset_id
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("confidential environment has no preset id"))?;
+    let (image_ref, template_base) = load_sandbox_template_config(&ctx.pool, preset_id).await?;
+    let cfg = &ctx.sandbox_cfg;
+    let expected_template =
+        environment_per_env_template_name(cfg, &image_ref, &template_base, env, env_id)
+            .ok_or_else(|| {
+                anyhow::anyhow!("confidential environment has no private runtime template")
+            })?;
+    let gateway_token = issue_token(&cfg.session_secret, env_id, SCOPE_COORDINATE)?;
+    let template_opts =
+        environment_template_opts(cfg, &image_ref, &template_base, env, env_id, &gateway_token);
+    if template_opts.name != expected_template {
+        anyhow::bail!("confidential runtime template identity is inconsistent");
+    }
+    validate_managed_runtime_profile(
+        &template_opts.runtime_profile_spec(),
+        cfg.allow_diagnostic_runtime,
+    )
+    .map_err(|error| anyhow::anyhow!("runtime profile: {error}"))?;
+
+    let kernel_params = authority
+        .run_external_mutation(
+            authoritative_states,
+            client.reconcile_per_environment_runtime_kernel_params(
+                env_id,
+                &stale.name,
+                &template_opts,
+            ),
+        )
+        .await?;
+    authority
+        .run_while_authoritative_for_states(
+            authoritative_states,
+            client.wait_for_workspace_pod_annotation(
+                &stale.name,
+                &stale.uid,
+                KATA_HYPERVISOR_KERNEL_PARAMS_ANNOTATION_KEY,
+                &kernel_params,
+                RUNTIME_METADATA_PROPAGATION_TIMEOUT,
+            ),
+        )
+        .await
 }
 
 /// Mirrors `RunEnvironmentCreateWithoutSetupPublish` — the create
@@ -875,6 +937,8 @@ async fn run_environment_create(
                 };
                 if create_retry_recovery_required(&env.state)
                     && let Err(e) = replace_terminal_workspace_pod(
+                        ctx,
+                        &env,
                         authority,
                         env_id,
                         &env.isolation_tier,
@@ -1345,6 +1409,8 @@ fn require_client(ctx: &WorkerContext, namespace: &str) -> anyhow::Result<Sandbo
 }
 
 async fn replace_terminal_workspace_pod(
+    ctx: &WorkerContext,
+    env: &EnvironmentRow,
     authority: &ActivityAuthority,
     env_id: &str,
     isolation_tier: &str,
@@ -1361,6 +1427,16 @@ async fn replace_terminal_workspace_pod(
             pod = %stale.name,
             "replacing terminal workspace Pod before waiting for claim readiness"
         );
+        reconcile_confidential_runtime_before_replacement(
+            ctx,
+            env,
+            env_id,
+            authority,
+            CREATE_MUTATION_STATES,
+            client,
+            &stale,
+        )
+        .await?;
         authority
             .run_external_mutation(
                 CREATE_MUTATION_STATES,
