@@ -2259,6 +2259,36 @@ SCRIPT
 )"
 }
 
+validate_confidential_preview_response() {
+  local status="$1"
+  local headers="$2"
+  local body="$3"
+  local token="$4"
+  local service location
+
+  [[ "$status" == "302" ]] || return 1
+  [[ -f "$headers" && -f "$body" ]] || return 1
+  service="$(awk '
+    tolower($0) ~ /^x-codewire-service:[[:space:]]*/ {
+      value = $0
+      sub(/^[^:]*:[[:space:]]*/, "", value)
+      sub(/\r$/, "", value)
+    }
+    END { print value }
+  ' "$headers")"
+  [[ "$service" == "codewire-orchestration" ]] || return 1
+  location="$(awk '
+    tolower($0) ~ /^location:[[:space:]]*/ {
+      value = $0
+      sub(/^[^:]*:[[:space:]]*/, "", value)
+      sub(/\r$/, "", value)
+    }
+    END { print value }
+  ' "$headers")"
+  [[ "$location" == */sign-in\?redirect_uri=* ]] || return 1
+  ! grep -Fq "$token" "$body"
+}
+
 run_app_preview_smoke() {
   require_cmd curl
   require_cmd jq
@@ -2270,7 +2300,8 @@ run_app_preview_smoke() {
 
   local token start_script stop_script port_json port_err rm_json rm_err
   local preview_url preview_host_port preview_host preview_path preview_body preview_err
-  local preview_ok cleanup_body cleanup_status
+  local preview_headers preview_status preview_ok preview_failure
+  local cleanup_body cleanup_status port_cleanup_ok cleanup_failure
 
   token="codewire-preview-${ENV_ID//-/}-$(date -u +%s)"
   start_script="$(cat <<SCRIPT
@@ -2421,42 +2452,59 @@ SCRIPT
 
   preview_body="$TMPDIR_SMOKE/app-preview-response.txt"
   preview_err="$TMPDIR_SMOKE/app-preview-response.err"
+  preview_headers="$TMPDIR_SMOKE/app-preview-response.headers"
   preview_ok=0
+  preview_failure=""
   log "fetching preview URL $preview_url"
-  for _ in $(seq 1 60); do
-    if curl --ipv4 -fsS --connect-timeout 5 --max-time 15 \
-        "$preview_url" >"$preview_body" 2>"$preview_err"; then
-      if grep -Fxq "$token" "$preview_body"; then
-        preview_ok=1
-        break
-      fi
+  if [[ "$SMOKE_ISOLATION_TIER" == "confidential" ]]; then
+    preview_status="$(curl --ipv4 -sS --connect-timeout 5 --max-time 15 \
+      --dump-header "$preview_headers" \
+      --output "$preview_body" \
+      --write-out '%{http_code}' \
+      "$preview_url" 2>"$preview_err" || true)"
+    if validate_confidential_preview_response \
+        "$preview_status" "$preview_headers" "$preview_body" "$token"; then
+      preview_ok=1
+    else
+      preview_failure="confidential preview did not enforce the sign-in boundary without exposing app content"
     fi
-    sleep 2
-  done
-  if [[ "$preview_ok" != "1" ]]; then
-    sed 's/[[:cntrl:]]//g' "$preview_err" >&2 || true
-    [[ -s "$preview_body" ]] && sed 's/[[:cntrl:]]//g' "$preview_body" >&2 || true
-    die "preview URL did not return the app preview token"
+  else
+    for _ in $(seq 1 60); do
+      if curl --ipv4 -fsS --connect-timeout 5 --max-time 15 \
+          "$preview_url" >"$preview_body" 2>"$preview_err"; then
+        if grep -Fxq "$token" "$preview_body"; then
+          preview_ok=1
+          break
+        fi
+      fi
+      sleep 2
+    done
+    if [[ "$preview_ok" != "1" ]]; then
+      preview_failure="public preview URL did not return the app preview token"
+    fi
   fi
 
   rm_json="$TMPDIR_SMOKE/app-preview-port-delete.json"
   rm_err="$TMPDIR_SMOKE/app-preview-port-delete.err"
+  port_cleanup_ok=1
+  cleanup_failure=""
   log "removing preview port label=$SMOKE_APP_PREVIEW_LABEL"
   if ! cw env port rm "$SMOKE_APP_PREVIEW_LABEL" \
       --env "$ENV_ID" \
       --output json >"$rm_json" 2>"$rm_err"; then
-    sed 's/[[:cntrl:]]//g' "$rm_err" >&2 || true
-    die "cw env port rm failed"
+    port_cleanup_ok=0
+    cleanup_failure="cw env port rm failed"
   fi
 
   cleanup_body="$TMPDIR_SMOKE/app-preview-after-delete.txt"
   cleanup_status=0
-  if curl --ipv4 -fsS --connect-timeout 5 --max-time 15 \
+  if [[ "$port_cleanup_ok" == "1" ]] && \
+      curl --ipv4 -fsS --connect-timeout 5 --max-time 15 \
       "$preview_url" >"$cleanup_body" 2>/dev/null; then
     cleanup_status=1
   fi
   if [[ "$cleanup_status" == "1" ]] && grep -Fq "$token" "$cleanup_body"; then
-    die "preview URL still served the deleted app preview port"
+    cleanup_failure="preview URL still served the deleted app preview port"
   fi
 
   stop_script='set -eu
@@ -2471,7 +2519,13 @@ if [ -f "$pidfile" ]; then
 fi
 printf "app-preview-service-cleaned\n"'
   run_cw_session_script "$stop_script" >/dev/null 2>&1 || true
-  log "app preview smoke passed for $preview_url"
+  [[ -z "$cleanup_failure" ]] || die "$cleanup_failure"
+  [[ -z "$preview_failure" ]] || die "$preview_failure"
+  if [[ "$SMOKE_ISOLATION_TIER" == "confidential" ]]; then
+    log "confidential app preview sign-in boundary passed"
+  else
+    log "public app preview smoke passed"
+  fi
 }
 
 assert_tailnet_path_probe() {

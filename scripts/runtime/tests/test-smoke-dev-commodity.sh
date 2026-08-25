@@ -316,6 +316,44 @@ run_explicit_isolation_tier_case() {
     END { exit found ? 0 : 1 }
   ' "$args_file" || fail "environment create did not request confidential isolation explicitly"
 }
+
+run_confidential_preview_response_cases() {
+  local case_dir="$TEST_TMP/confidential-preview-response"
+  local headers="$case_dir/headers"
+  local body="$case_dir/body"
+  local token="codewire-preview-private-marker"
+
+  mkdir -p "$case_dir"
+  printf '%s\r\n' \
+    'HTTP/2 302' \
+    'location: https://codewire-dev.example/sign-in?redirect_uri=%2F' \
+    'x-codewire-service: codewire-orchestration' >"$headers"
+  printf '%s\n' '<a href="/sign-in">Found</a>.' >"$body"
+
+  (
+    # shellcheck disable=SC1090 # Intentional dynamic source fixture.
+    source <(sed '$d' "$SMOKE")
+    validate_confidential_preview_response 302 "$headers" "$body" "$token"
+  ) || fail "valid confidential preview sign-in boundary was rejected"
+
+  printf '%s\n' "$token" >"$body"
+  if (
+    # shellcheck disable=SC1090 # Intentional dynamic source fixture.
+    source <(sed '$d' "$SMOKE")
+    validate_confidential_preview_response 302 "$headers" "$body" "$token"
+  ); then
+    fail "confidential preview accepted an unauthenticated app-content leak"
+  fi
+
+  printf '%s\n' '<a href="/sign-in">Found</a>.' >"$body"
+  if (
+    # shellcheck disable=SC1090 # Intentional dynamic source fixture.
+    source <(sed '$d' "$SMOKE")
+    validate_confidential_preview_response 200 "$headers" "$body" "$token"
+  ); then
+    fail "confidential preview accepted a non-redirect response"
+  fi
+}
 run_safe_diagnostic_case() {
   local output="$TEST_TMP/output"
   local error="$TEST_TMP/error"
@@ -854,6 +892,7 @@ run_application_only_boundary_case
 run_missing_server_namespace_case
 run_docker_socket_contract_cases
 run_explicit_isolation_tier_case
+run_confidential_preview_response_cases
 run_safe_diagnostic_case
 run_safe_client_diagnostic_case
 run_doctor_outer_timeout_receipt_case
