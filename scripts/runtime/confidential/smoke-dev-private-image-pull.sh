@@ -8,9 +8,11 @@ KUBE_CONTEXT="${KUBE_CONTEXT:-dev-cluster}"
 SERVER_NAMESPACE="${CODEWIRE_SERVER_NAMESPACE:-dev}"
 SANDBOX_NAMESPACE="${SANDBOX_NAMESPACE:-dev-sandboxes}"
 NODE="${CONFIDENTIAL_SNP_NODE:-cw-dev-prod-node-1}"
-WAIT_SECONDS="${PRIVATE_PULL_WAIT_SECONDS:-180}"
+WAIT_SECONDS="${PRIVATE_PULL_WAIT_SECONDS:-360}"
 KEEP_PROBE="${PRIVATE_PULL_KEEP_PROBE:-0}"
 ENCRYPTED_EMPTYDIR="${PRIVATE_PULL_ENCRYPTED_EMPTYDIR:-0}"
+IMAGE_ROLE="${PRIVATE_PULL_IMAGE_ROLE:-gateway}"
+ASSERT_TEST_RESOURCE="${PRIVATE_PULL_ASSERT_TEST_RESOURCE:-0}"
 PROBE_UUID="${PRIVATE_PULL_PROBE_UUID:-}"
 EVIDENCE_DIR="${EVIDENCE_DIR:-}"
 readonly IMAGE_RESOURCE_TIMEOUT_SECS=300
@@ -20,23 +22,28 @@ usage() {
 Usage:
   scripts/runtime/confidential/smoke-dev-private-image-pull.sh [options]
 
-Runs one short-lived confidential Pod that pulls the exact private gateway
-image promoted into Dev. The probe exercises Kata guest CDH, Trustee
-attestation, and KBS registry authorization without creating a Codewire
-environment, PVC, or support image.
+Runs one short-lived confidential Pod that pulls an exact image from the active
+Dev release. The probe exercises Kata guest CDH, Trustee attestation, and KBS
+registry authorization without creating a Codewire environment or PVC.
 
 Options:
   --node NAME          Confidential SNP node (default: cw-dev-prod-node-1)
-  --wait-seconds N     Terminal wait horizon (default: 180)
+  --image-role ROLE    Exact active image: gateway, workspace, dind, or the
+                       combined product image/cache shape
+                       (default: gateway)
+  --assert-test-resource
+                       Fetch the active non-secret runtime test resource through
+                       the guest-local CDH REST API (workspace/product only)
+  --wait-seconds N     Terminal wait horizon (default: 360)
   --keep-probe         Keep the Pod and CiliumNetworkPolicy for inspection
   --encrypted-emptydir Exercise an init-to-main shared encrypted emptyDir
   --evidence-dir DIR   Store private evidence in DIR
   -h, --help           Show this help
 
 Run this script only through the Infra Kubernetes access wrapper. It reads
-ConfigMaps but no Secrets. Its temporary Cilium policy permits only exact
-cluster DNS, the promoted Nexus hostname on TCP 443, and Trustee KBS on its
-exact namespace/port.
+ConfigMaps but no Secrets. Its temporary Cilium policy permits only cluster
+DNS, Trustee KBS on its exact namespace/port, and TCP 443 to either the exact
+private Nexus hostname or the public-address space used by product workspaces.
 USAGE
 }
 
@@ -64,6 +71,15 @@ while [[ "$#" -gt 0 ]]; do
       [[ "$#" -ge 2 ]] || die "--wait-seconds requires a value"
       WAIT_SECONDS="$2"
       shift 2
+      ;;
+    --image-role)
+      [[ "$#" -ge 2 ]] || die "--image-role requires a value"
+      IMAGE_ROLE="$2"
+      shift 2
+      ;;
+    --assert-test-resource)
+      ASSERT_TEST_RESOURCE=1
+      shift
       ;;
     --keep-probe)
       KEEP_PROBE=1
@@ -98,6 +114,17 @@ for command in "$KUBECTL_BIN" jq awk gzip base64; do
   require_cmd "$command"
 done
 [[ "$WAIT_SECONDS" =~ ^[1-9][0-9]*$ ]] || die "--wait-seconds must be a positive integer"
+(( WAIT_SECONDS > IMAGE_RESOURCE_TIMEOUT_SECS )) || \
+  die "--wait-seconds must exceed the ${IMAGE_RESOURCE_TIMEOUT_SECS}s guest image-resource timeout"
+[[ "$IMAGE_ROLE" == "gateway" || "$IMAGE_ROLE" == "workspace" || \
+   "$IMAGE_ROLE" == "dind" || "$IMAGE_ROLE" == "product" ]] || \
+  die "--image-role must be gateway, workspace, dind, or product"
+[[ "$ASSERT_TEST_RESOURCE" == "0" || "$ASSERT_TEST_RESOURCE" == "1" ]] || \
+  die "PRIVATE_PULL_ASSERT_TEST_RESOURCE must be 0 or 1"
+if [[ "$ASSERT_TEST_RESOURCE" == "1" ]]; then
+  [[ "$IMAGE_ROLE" == "workspace" || "$IMAGE_ROLE" == "product" ]] || \
+    die "--assert-test-resource requires --image-role workspace or product"
+fi
 [[ "$KEEP_PROBE" == "0" || "$KEEP_PROBE" == "1" ]] || die "PRIVATE_PULL_KEEP_PROBE must be 0 or 1"
 [[ "$ENCRYPTED_EMPTYDIR" == "0" || "$ENCRYPTED_EMPTYDIR" == "1" ]] || \
   die "PRIVATE_PULL_ENCRYPTED_EMPTYDIR must be 0 or 1"
@@ -155,17 +182,120 @@ done
 [[ -n "$active_configmap" ]] || die "active orchestration runtime ConfigMap was not found"
 
 gateway_image="$(jq -er '.data.SANDBOX_GATEWAY_IMAGE' "$configmap_json")"
+dind_image="$(jq -er '.data.SANDBOX_DIND_IMAGE' "$configmap_json")"
 kbs_url="$(jq -er '.data.SANDBOX_KATA_COCO_KBS_URL' "$configmap_json")"
 registry_auth_uri="$(jq -er '.data.SANDBOX_KATA_COCO_IMAGE_REGISTRY_AUTH_URI' "$configmap_json")"
 coco_enabled="$(jq -er '.data.SANDBOX_KATA_COCO_INIT_DATA_ENABLED' "$configmap_json")"
+test_resource_uri="$(jq -er '.data.SANDBOX_KATA_COCO_TEST_RESOURCE_URI' "$configmap_json")"
 
 [[ "$gateway_image" =~ ^nexus\.example\.invalid/oci-approved/codewire/gateway@sha256:[a-f0-9]{64}$ ]] || \
   die "promoted gateway image is not an exact approved Nexus digest"
+[[ "$dind_image" =~ ^docker\.io/library/docker:[0-9]+\.[0-9]+\.[0-9]+-dind@sha256:[a-f0-9]{64}$ ]] || \
+  die "active dind image is not an exact official Docker digest"
 [[ "$kbs_url" == "https://codewire-trustee-kbs.codewire-trustee.svc.cluster.local:8080" ]] || \
   die "unexpected Trustee KBS URL"
 [[ "$registry_auth_uri" == "kbs:///default/containers/auth" ]] || \
   die "unexpected KBS registry-auth resource URI"
 [[ "$coco_enabled" == "true" ]] || die "Dev CoCo init-data is not enabled"
+[[ "$test_resource_uri" == "kbs:///default/codewire/runtime-test-resource" ]] || \
+  die "unexpected CoCo test-resource URI"
+
+probe_image="$gateway_image"
+probe_container_name=version
+probe_command='/usr/local/bin/cw'
+probe_args_yaml='["--version"]'
+probe_uid=65532
+probe_gid=65532
+probe_privileged=false
+probe_run_as_non_root=true
+probe_allow_privilege_escalation=false
+probe_read_only_root_filesystem=true
+probe_memory_request=128Mi
+probe_memory_limit=512Mi
+public_registry_egress=0
+managed_workspace_identity=0
+product_dind_yaml=""
+if [[ "$IMAGE_ROLE" == "workspace" || "$IMAGE_ROLE" == "product" ]]; then
+  require_cmd skopeo
+  workloads_json="$EVIDENCE_DIR/codewire-deploy-workloads-dev.json"
+  kubectl_dev -n flux-system get kustomization codewire-deploy-workloads-dev -o json >"$workloads_json"
+  source_sha="$(jq -er '.metadata.annotations["deploy.codewire.sh/source-sha"]' "$workloads_json")"
+  [[ "$source_sha" =~ ^[0-9a-f]{40}$ ]] || die "active workload has no exact source SHA"
+  [[ "$(jq -r '.status.lastAppliedRevision // empty' "$workloads_json")" == "main@sha1:$source_sha" ]] || \
+    die "active workload revision does not match its source annotation"
+  resolved_dind_image=""
+  while IFS= read -r release_line; do
+    release_key="${release_line%%=*}"
+    release_value="${release_line#*=}"
+    case "$release_key" in
+      workspace_image) probe_image="$release_value" ;;
+      dind_image) resolved_dind_image="$release_value" ;;
+    esac
+  done < <("$ROOT/scripts/runtime/confidential/resolve-coco-support-lock.sh" \
+    --gateway-image "$gateway_image" \
+    --source-sha "$source_sha")
+  [[ "$probe_image" =~ ^ghcr\.io/codewiresh/workspace@sha256:[a-f0-9]{64}$ ]] || \
+    die "support lock did not resolve an exact workspace image"
+  [[ "$resolved_dind_image" == "$dind_image" ]] || \
+    die "active dind image differs from the support lock"
+  probe_command='/bin/sh'
+  probe_args_yaml='["-c", "printf workspace-image-ok\\n"]'
+  probe_uid=1000
+  probe_gid=1000
+  # Match the real confidential workspace plus DinD aggregate limit. Kata
+  # sizes the encrypted guest /run from the VM memory envelope; a tiny probe
+  # would turn a valid large image into an artificial ENOSPC failure.
+  probe_memory_request=20480Mi
+  probe_memory_limit=20480Mi
+  public_registry_egress=1
+  if [[ "$IMAGE_ROLE" == "product" ]]; then
+    ENCRYPTED_EMPTYDIR=1
+    probe_memory_request=16384Mi
+    probe_memory_limit=16384Mi
+    managed_workspace_identity=1
+  fi
+elif [[ "$IMAGE_ROLE" == "dind" ]]; then
+  probe_image="$dind_image"
+  probe_container_name=dind
+  probe_command='/usr/local/bin/docker'
+  probe_uid=0
+  probe_gid=0
+  probe_privileged=true
+  probe_run_as_non_root=false
+  probe_allow_privilege_escalation=true
+  probe_read_only_root_filesystem=false
+  probe_memory_request=20480Mi
+  probe_memory_limit=20480Mi
+  managed_workspace_identity=1
+  public_registry_egress=1
+fi
+
+if [[ "$ASSERT_TEST_RESOURCE" == "1" ]]; then
+  test_resource_path="${test_resource_uri#kbs:///}"
+  test_resource_script="$(cat <<SCRIPT
+set -eu
+path='$test_resource_path'
+expected='codewire confidential trustee test resource'
+if ! response="\$(curl --max-time $((IMAGE_RESOURCE_TIMEOUT_SECS + 10)) -sS -w '\\n%{http_code}' "http://127.0.0.1:8006/cdh/resource/\$path")"; then
+  printf 'cdh_http_status=transport_error\\n'
+  exit 23
+fi
+newline='
+'
+case "\$response" in
+  *"\$newline"*) ;;
+  *) printf 'cdh_http_status=malformed\\n'; exit 1 ;;
+esac
+status="\${response##*"\$newline"}"
+actual="\${response%"\$newline\$status"}"
+printf 'cdh_http_status=%s\n' "\$status"
+[ "\$status" = 200 ] || exit 22
+[ "\$actual" = "\$expected" ] || { printf 'cdh_test_resource=content_mismatch\n'; exit 1; }
+printf 'cdh_test_resource=passed\n'
+SCRIPT
+)"
+  probe_args_yaml="$(jq -cn --arg script "$test_resource_script" '["-c", $script]')"
+fi
 
 kubectl_dev -n "$SANDBOX_NAMESPACE" get serviceaccount codewire-sandbox -o json >"$service_account_json"
 jq -e 'any(.imagePullSecrets[]?; .name == "nexus-registry")' "$service_account_json" >/dev/null || \
@@ -184,6 +314,44 @@ fi
   die "probe UUID is not canonical"
 probe_suffix="${PROBE_UUID%%-*}"
 name="codewire-private-pull-$probe_suffix"
+managed_workspace_label_yaml=""
+workspace_annotation_yaml=""
+if [[ "$managed_workspace_identity" == "1" ]]; then
+  managed_workspace_label_yaml="    agents.x-k8s.io/sandbox-name-hash: $name"
+  workspace_annotation_yaml='    codewire.sh/workspace: "true"'
+fi
+if [[ "$IMAGE_ROLE" == "product" ]]; then
+  product_dind_yaml="$(printf '%s\n' \
+    '    - name: dind' \
+    "      image: $dind_image" \
+    '      imagePullPolicy: Always' \
+    '      command: ["/usr/local/bin/docker"]' \
+    '      args: ["--version"]' \
+    '      securityContext:' \
+    '        privileged: true' \
+    '        runAsUser: 0' \
+    '        runAsGroup: 0' \
+    '      volumeMounts:' \
+    '        - name: secure-scratch' \
+    '          mountPath: /workspace' \
+    '      resources:' \
+    '        requests:' \
+    '          cpu: 500m' \
+    '          memory: 1Gi' \
+    '        limits:' \
+    '          cpu: "2"' \
+    '          memory: 4Gi')"
+fi
+
+registry_egress_yaml=$'    - toFQDNs:\n        - matchName: nexus.example.invalid\n      toPorts:\n        - ports:\n            - port: "443"\n              protocol: TCP\n'
+dns_rules_yaml=$'          rules:\n            dns:\n              - matchName: nexus.example.invalid\n              - matchName: codewire-trustee-kbs.codewire-trustee.svc.cluster.local\n'
+if [[ "$public_registry_egress" == "1" ]]; then
+  dns_rules_yaml=""
+  registry_egress_yaml=$'    - toCIDRSet:\n        - cidr: 0.0.0.0/0\n          except:\n            - 10.0.0.0/8\n            - 100.64.0.0/10\n            - 127.0.0.0/8\n            - 169.254.0.0/16\n            - 172.16.0.0/12\n            - 192.168.0.0/16\n        - cidr: ::/0\n          except:\n            - fc00::/7\n      toPorts:\n        - ports:\n            - port: "443"\n              protocol: TCP\n'
+fi
+if [[ "$IMAGE_ROLE" == "product" ]]; then
+  registry_egress_yaml+=$'    - toFQDNs:\n        - matchName: nexus.example.invalid\n      toPorts:\n        - ports:\n            - port: "443"\n              protocol: TCP\n'
+fi
 
 policy_source="$ROOT/crates/codewire-orchestration/src/sandbox/template/encoding.rs"
 policy_rego="$(awk '
@@ -264,17 +432,8 @@ spec:
               protocol: UDP
             - port: "53"
               protocol: TCP
-          rules:
-            dns:
-              - matchName: nexus.example.invalid
-              - matchName: codewire-trustee-kbs.codewire-trustee.svc.cluster.local
-    - toFQDNs:
-        - matchName: nexus.example.invalid
-      toPorts:
-        - ports:
-            - port: "443"
-              protocol: TCP
-    - toServices:
+${dns_rules_yaml}
+${registry_egress_yaml}    - toServices:
         - k8sService:
             serviceName: codewire-trustee-kbs
             namespace: codewire-trustee
@@ -292,9 +451,11 @@ metadata:
     codewire.sh/probe: private-image-pull
     codewire.sh/probe-id: $name
     codewire.sh/isolation-tier: confidential
+${managed_workspace_label_yaml}
   annotations:
     io.katacontainers.config.hypervisor.cc_init_data: $init_data
     io.katacontainers.config.hypervisor.kernel_params: "$kernel_params"
+${workspace_annotation_yaml}
 spec:
   automountServiceAccountToken: false
   serviceAccountName: codewire-sandbox
@@ -313,26 +474,28 @@ ${emptydir_security_yaml}  nodeSelector:
       value: "true"
       effect: NoSchedule
 ${emptydir_volume_yaml}${emptydir_init_yaml}  containers:
-    - name: version
-      image: $gateway_image
+    - name: $probe_container_name
+      image: $probe_image
       imagePullPolicy: Always
-      command: ["/usr/local/bin/cw"]
-      args: ["--version"]
+      command: ["$probe_command"]
+      args: $probe_args_yaml
       securityContext:
-        allowPrivilegeEscalation: false
-        readOnlyRootFilesystem: true
-        runAsNonRoot: true
-        runAsUser: 65532
-        runAsGroup: 65532
+        allowPrivilegeEscalation: $probe_allow_privilege_escalation
+        readOnlyRootFilesystem: $probe_read_only_root_filesystem
+        privileged: $probe_privileged
+        runAsNonRoot: $probe_run_as_non_root
+        runAsUser: $probe_uid
+        runAsGroup: $probe_gid
         capabilities:
           drop: ["ALL"]
 ${emptydir_mount_yaml}      resources:
         requests:
           cpu: 100m
-          memory: 128Mi
+          memory: $probe_memory_request
         limits:
           cpu: 500m
-          memory: 512Mi
+          memory: $probe_memory_limit
+${product_dind_yaml}
 YAML
 chmod 600 "$manifest"
 
@@ -340,7 +503,7 @@ collect_evidence() {
   kubectl_dev -n "$SANDBOX_NAMESPACE" get pod "$name" -o json >"$pod_evidence" 2>/dev/null || true
   kubectl_dev -n "$SANDBOX_NAMESPACE" get events \
     --field-selector "involvedObject.name=$name" -o json >"$event_evidence" 2>/dev/null || true
-  kubectl_dev -n "$SANDBOX_NAMESPACE" logs "$name" -c version >"$container_log" 2>/dev/null || true
+  kubectl_dev -n "$SANDBOX_NAMESPACE" logs "$name" -c "$probe_container_name" >"$container_log" 2>/dev/null || true
 }
 
 # Invoked by the EXIT trap through on_exit.
@@ -367,24 +530,48 @@ on_exit() {
 trap on_exit EXIT
 
 log "evidence=$EVIDENCE_DIR"
-log "stage=apply exact_private_image=true encrypted_emptydir=$ENCRYPTED_EMPTYDIR"
+log "stage=apply image_role=$IMAGE_ROLE exact_image=true encrypted_emptydir=$ENCRYPTED_EMPTYDIR test_resource=$ASSERT_TEST_RESOURCE"
 kubectl_dev apply -f "$manifest" >/dev/null
 
 deadline=$((SECONDS + WAIT_SECONDS))
+resource_deadline_started=0
 while (( SECONDS < deadline )); do
   pod_json="$(kubectl_dev -n "$SANDBOX_NAMESPACE" get pod "$name" -o json 2>/dev/null || true)"
   phase="$(jq -r '.status.phase // ""' <<<"$pod_json" 2>/dev/null || true)"
   case "$phase" in
     Succeeded)
       collect_evidence
-      log "stage=complete private_image_guest_pull=passed"
+      if [[ "$ASSERT_TEST_RESOURCE" == "1" ]] && \
+         ! grep -qx 'cdh_test_resource=passed' "$container_log"; then
+        die "probe completed without the required CDH test-resource receipt"
+      fi
+      log "stage=complete image_role=$IMAGE_ROLE guest_pull=passed"
       exit 0
       ;;
     Failed)
       collect_evidence
+      if [[ "$ASSERT_TEST_RESOURCE" == "1" ]]; then
+        resource_status="$(sed -n 's/^cdh_http_status=\([0-9][0-9][0-9]\)$/\1/p' "$container_log" | tail -n 1)"
+        [[ -z "$resource_status" ]] || log "stage=resource image_role=$IMAGE_ROLE http_status=$resource_status"
+      fi
       die "probe Pod failed; full events are in $event_evidence"
       ;;
   esac
+
+  if [[ "$ASSERT_TEST_RESOURCE" == "1" && "$resource_deadline_started" == "0" ]]; then
+    resource_state="$(jq -r --arg name "$probe_container_name" '
+      .status.containerStatuses[]?
+      | select(.name == $name)
+      | if .state.running != null then "running"
+        elif .state.terminated != null then "terminated"
+        else "" end
+    ' <<<"$pod_json" 2>/dev/null || true)"
+    if [[ "$resource_state" == "running" || "$resource_state" == "terminated" ]]; then
+      resource_deadline_started=1
+      deadline=$((SECONDS + IMAGE_RESOURCE_TIMEOUT_SECS + 20))
+      log "stage=resource image_role=$IMAGE_ROLE request_deadline_seconds=$IMAGE_RESOURCE_TIMEOUT_SECS"
+    fi
+  fi
 
   terminal_wait="$(jq -r '
     [.status.initContainerStatuses[]?, .status.containerStatuses[]?]

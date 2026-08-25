@@ -193,6 +193,26 @@ EOF
   )
 }
 
+run_missing_server_namespace_case() {
+  local stdout="$TEST_TMP/missing-server-namespace.out"
+  local stderr="$TEST_TMP/missing-server-namespace.err"
+
+  if (
+    # shellcheck disable=SC1090 # Intentional dynamic source fixture.
+    source <(sed '$d' "$SMOKE")
+    export SMOKE_SKIP_KUBE=0
+    export CODEWIRE_SERVER_NAMESPACE=""
+    run_kube_assertions
+  ) >"$stdout" 2>"$stderr"; then
+    fail "Kubernetes assertions accepted an empty Codewire server namespace"
+  fi
+
+  grep -Fq 'CODEWIRE_SERVER_NAMESPACE is required for Kubernetes assertions' "$stderr" ||
+    fail "empty Codewire server namespace did not fail at the namespace boundary"
+  [[ ! -s "$stdout" ]] ||
+    fail "empty Codewire server namespace emitted unexpected standard output"
+}
+
 run_docker_socket_contract_cases() {
   local case_dir="$TEST_TMP/docker-socket-contract"
   local accepted="$case_dir/accepted.json"
@@ -831,6 +851,7 @@ run_admin_oauth_contract_cases() {
 
 assert_static_contract
 run_application_only_boundary_case
+run_missing_server_namespace_case
 run_docker_socket_contract_cases
 run_explicit_isolation_tier_case
 run_safe_diagnostic_case
