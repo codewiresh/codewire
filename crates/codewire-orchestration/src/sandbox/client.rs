@@ -525,11 +525,11 @@ impl SandboxClient {
         }
     }
 
-    /// Reconcile the current confidential kernel parameters into the private
+    /// Reconcile the current confidential runtime fields into the private
     /// template and the already-adopted Sandbox before replacing a terminal
     /// Pod. Updating the SandboxTemplate alone is insufficient because the
     /// default warm-pool strategy does not rewrite an adopted Sandbox.
-    pub async fn reconcile_per_environment_runtime_kernel_params(
+    pub async fn reconcile_per_environment_runtime(
         &self,
         env_id: &str,
         expected_pod_name: &str,
@@ -581,13 +581,14 @@ impl SandboxClient {
             .get(sandbox_name)
             .await
             .map_err(|error| anyhow::anyhow!("get Sandbox {sandbox_name}: {error}"))?;
-        let kernel_params = rendered_kernel_params(&self.namespace, opts)?;
+        let (kernel_params, runtime_patch) =
+            rendered_runtime_recovery_patch(&self.namespace, opts)?;
         self.ensure_sandbox_template(opts).await?;
         sandboxes
             .patch(
                 sandbox_name,
                 &PatchParams::default(),
-                &Patch::Merge(&sandbox_kernel_params_patch(&kernel_params)),
+                &Patch::Merge(&runtime_patch),
             )
             .await
             .map_err(|error| {
@@ -2518,32 +2519,45 @@ fn set_workspace_volume_request(data: &mut Value, storage: &str) -> anyhow::Resu
     Ok(())
 }
 
-fn rendered_kernel_params(namespace: &str, opts: &TemplateOpts) -> anyhow::Result<String> {
-    render_sandbox_template(namespace, opts)
+fn rendered_runtime_recovery_patch(
+    namespace: &str,
+    opts: &TemplateOpts,
+) -> anyhow::Result<(String, Value)> {
+    let rendered = render_sandbox_template(namespace, opts);
+    let kernel_params = rendered
         .pointer("/spec/podTemplate/metadata/annotations")
         .and_then(Value::as_object)
         .and_then(|annotations| annotations.get(KATA_HYPERVISOR_KERNEL_PARAMS_ANNOTATION_KEY))
         .and_then(Value::as_str)
         .filter(|value| !value.is_empty())
         .map(str::to_string)
-        .ok_or_else(|| anyhow::anyhow!("rendered runtime has no confidential kernel parameters"))
-}
+        .ok_or_else(|| anyhow::anyhow!("rendered runtime has no confidential kernel parameters"))?;
+    let fs_group_change_policy = rendered
+        .pointer("/spec/podTemplate/spec/securityContext/fsGroupChangePolicy")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("rendered runtime has no fsGroup change policy"))?;
 
-fn sandbox_kernel_params_patch(kernel_params: &str) -> Value {
     let mut annotations = serde_json::Map::new();
     annotations.insert(
         KATA_HYPERVISOR_KERNEL_PARAMS_ANNOTATION_KEY.to_string(),
-        Value::String(kernel_params.to_string()),
+        Value::String(kernel_params.clone()),
     );
-    serde_json::json!({
+    let patch = serde_json::json!({
         "spec": {
             "podTemplate": {
                 "metadata": {
                     "annotations": annotations,
                 },
+                "spec": {
+                    "securityContext": {
+                        "fsGroupChangePolicy": fs_group_change_policy,
+                    },
+                },
             },
         },
-    })
+    });
+    Ok((kernel_params, patch))
 }
 
 #[cfg(test)]
@@ -3244,8 +3258,9 @@ mod tests {
     }
 
     #[test]
-    fn sandbox_runtime_patch_changes_only_the_kernel_params_annotation() {
-        let patch = sandbox_kernel_params_patch("agent.log_vport=1025");
+    fn sandbox_runtime_patch_changes_only_recovery_fields() {
+        let (kernel_params, patch) =
+            rendered_runtime_recovery_patch("dev-sandboxes", &confidential_runtime_opts()).unwrap();
         assert_eq!(
             patch
                 .pointer("/spec/podTemplate/metadata/annotations")
@@ -3253,11 +3268,22 @@ mod tests {
                 .and_then(|annotations| {
                     annotations.get(KATA_HYPERVISOR_KERNEL_PARAMS_ANNOTATION_KEY)
                 }),
-            Some(&json!("agent.log_vport=1025"))
+            Some(&json!(kernel_params))
         );
         assert_eq!(
             patch
                 .pointer("/spec/podTemplate/metadata/annotations")
+                .and_then(Value::as_object)
+                .map(serde_json::Map::len),
+            Some(1)
+        );
+        assert_eq!(
+            patch.pointer("/spec/podTemplate/spec/securityContext/fsGroupChangePolicy"),
+            Some(&json!("OnRootMismatch"))
+        );
+        assert_eq!(
+            patch
+                .pointer("/spec/podTemplate/spec/securityContext")
                 .and_then(Value::as_object)
                 .map(serde_json::Map::len),
             Some(1)
@@ -3267,7 +3293,8 @@ mod tests {
     #[tokio::test]
     async fn terminal_recovery_refreshes_the_adopted_sandbox_before_uid_delete() {
         let opts = confidential_runtime_opts();
-        let expected_kernel_params = rendered_kernel_params("dev-sandboxes", &opts).unwrap();
+        let (expected_kernel_params, _) =
+            rendered_runtime_recovery_patch("dev-sandboxes", &opts).unwrap();
         assert!(expected_kernel_params.contains("agent.log_vport=1025"));
 
         let (client, requests) = sandbox_client_with_secret_responses(vec![
@@ -3393,7 +3420,7 @@ mod tests {
         ]);
 
         let kernel_params = client
-            .reconcile_per_environment_runtime_kernel_params("env-test", "workspace-old", &opts)
+            .reconcile_per_environment_runtime("env-test", "workspace-old", &opts)
             .await
             .unwrap();
         client
@@ -3459,7 +3486,7 @@ mod tests {
         ]);
 
         let error = client
-            .reconcile_per_environment_runtime_kernel_params("env-test", "workspace-old", &opts)
+            .reconcile_per_environment_runtime("env-test", "workspace-old", &opts)
             .await
             .unwrap_err();
         assert!(error.to_string().contains("not owned by this environment"));

@@ -813,11 +813,7 @@ pub(super) async fn reconcile_confidential_runtime_before_replacement(
     let kernel_params = authority
         .run_external_mutation(
             authoritative_states,
-            client.reconcile_per_environment_runtime_kernel_params(
-                env_id,
-                &stale.name,
-                &template_opts,
-            ),
+            client.reconcile_per_environment_runtime(env_id, &stale.name, &template_opts),
         )
         .await?;
     authority

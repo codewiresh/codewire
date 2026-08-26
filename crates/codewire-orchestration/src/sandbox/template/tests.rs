@@ -138,6 +138,17 @@ mod tests {
     }
 
     #[test]
+    fn workspace_avoids_reapplying_recursive_volume_ownership() {
+        let template = render_sandbox_template("dev-sandboxes", &commodity_opts());
+        assert_eq!(
+            template.pointer(
+                "/spec/podTemplate/spec/securityContext/fsGroupChangePolicy"
+            ),
+            Some(&json!("OnRootMismatch"))
+        );
+    }
+
+    #[test]
     fn runtime_profile_spec_resolves_guard_profiles() {
         assert_eq!(
             runtime_profile_spec("", RUNTIME_CLASS_RUNC, DOCKER_MODE_PROFILE_DEFAULT, false),

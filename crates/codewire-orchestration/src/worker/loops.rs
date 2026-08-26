@@ -1115,10 +1115,10 @@ mod tests {
     #[test]
     fn warm_pool_revision_hash_matches_checked_in_goldens() {
         let isol8 = warm_pool_template_opts(&warm_cfg("isol8"), &default_profile());
-        assert_eq!(warm_pool_revision_hash(&isol8), "e649a89d");
+        assert_eq!(warm_pool_revision_hash(&isol8), "1651238f");
 
         let plain = warm_pool_template_opts(&warm_cfg(""), &default_profile());
-        assert_eq!(warm_pool_revision_hash(&plain), "58c1eeb8");
+        assert_eq!(warm_pool_revision_hash(&plain), "5c281c85");
     }
 
     #[test]
