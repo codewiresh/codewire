@@ -333,27 +333,40 @@ log 'disabling older keys only after publication and API proof'
 {
   printf "\\set candidate_hash '%s'\n" "$CANDIDATE_HASH"
   printf "\\set smoke_email '%s'\n" "$SMOKE_EMAIL"
-  printf "\\set org_slug '%s'\n" "$SMOKE_ORG_SLUG"
   cat <<'SQL'
 BEGIN;
 WITH smoke_user AS (
   SELECT id FROM users WHERE email = :'smoke_email'
-), smoke_org AS (
-  SELECT id FROM organizations WHERE slug = :'org_slug'
 ), candidate_key AS (
   SELECT api_keys.id, api_keys.created_at
   FROM api_keys, smoke_user
   WHERE api_keys.user_id = smoke_user.id
     AND api_keys.key_hash = :'candidate_hash'
     AND api_keys.disabled_at IS NULL
-), disabled AS (
-  UPDATE api_keys SET disabled_at = NOW()
-  FROM smoke_user, candidate_key
-  WHERE api_keys.user_id = smoke_user.id
-    AND api_keys.key_hash <> :'candidate_hash'
-    AND api_keys.created_at < candidate_key.created_at
-    AND api_keys.disabled_at IS NULL
-  RETURNING api_keys.id
+)
+UPDATE api_keys SET disabled_at = NOW()
+FROM smoke_user, candidate_key
+WHERE api_keys.user_id = smoke_user.id
+  AND api_keys.key_hash <> :'candidate_hash'
+  AND api_keys.created_at < candidate_key.created_at
+  AND api_keys.disabled_at IS NULL;
+COMMIT;
+SQL
+} | run_psql >/dev/null
+
+# A sibling SELECT in a data-modifying CTE sees the statement's pre-update
+# snapshot. Verify in a fresh statement after COMMIT so this receipt observes
+# the keys that were actually revoked.
+{
+  printf "\\set candidate_hash '%s'\n" "$CANDIDATE_HASH"
+  printf "\\set smoke_email '%s'\n" "$SMOKE_EMAIL"
+  printf "\\set org_slug '%s'\n" "$SMOKE_ORG_SLUG"
+  cat <<'SQL'
+-- final database state assertion
+WITH smoke_user AS (
+  SELECT id FROM users WHERE email = :'smoke_email'
+), smoke_org AS (
+  SELECT id FROM organizations WHERE slug = :'org_slug'
 )
 SELECT
   (SELECT COUNT(*) FROM api_keys, smoke_user, smoke_org
@@ -364,11 +377,10 @@ SELECT
   (SELECT COUNT(*) FROM org_members, smoke_user, smoke_org
     WHERE org_members.user_id = smoke_user.id AND org_members.org_id = smoke_org.id
       AND org_members.role = 'owner');
-COMMIT;
 SQL
 } | run_psql >"$DB_RESULT"
 [[ "$(<"$DB_RESULT")" == '1|1|1' ]] ||
-  die 'database finalization did not produce the exact one-key/one-owner state'
+  die 'post-commit database verification did not observe the exact one-key/one-owner state'
 
 read_openbao_document "$CURRENT_DOCUMENT"
 jq -e --slurpfile candidate "$CANDIDATE_PAYLOAD" \

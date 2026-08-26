@@ -49,7 +49,13 @@ elif grep -F 'COALESCE(disabled_at, NOW())' <<<"$sql" >/dev/null; then
 elif grep -F 'api_keys.key_hash <>' <<<"$sql" >/dev/null; then
   printf 'db-finalize\n' >>"$MOCK_STATE/events"
   printf '1' >"$MOCK_STATE/active-keys"
-  printf '1|1|1\n'
+elif grep -F 'final database state assertion' <<<"$sql" >/dev/null; then
+  printf 'db-verify\n' >>"$MOCK_STATE/events"
+  if [[ "$MOCK_MODE" == finalize_verify_failure ]]; then
+    printf '1|2|1\n'
+  else
+    printf '1|%s|1\n' "$(<"$MOCK_STATE/active-keys")"
+  fi
 else
   exit 92
 fi
@@ -184,7 +190,7 @@ run_case() {
   fi
 }
 
-success_events=$'bao-get\ndb-stage\nbao-put\nbao-get\nprobe\nbao-get\ndb-finalize\nbao-get'
+success_events=$'bao-get\ndb-stage\nbao-put\nbao-get\nprobe\nbao-get\ndb-finalize\ndb-verify\nbao-get'
 run_case success success "$success_events"
 run_case interrupted success "$success_events"
 run_case cas_failure failure $'bao-get\ndb-stage\nbao-put\ndb-rollback' \
@@ -195,6 +201,9 @@ run_case probe_failure failure \
 run_case concurrent_publish failure \
   $'bao-get\ndb-stage\nbao-put\nbao-get\nprobe\nbao-get' \
   'canonical OpenBao document changed concurrently; active keys were retained'
+run_case finalize_verify_failure failure \
+  $'bao-get\ndb-stage\nbao-put\nbao-get\nprobe\nbao-get\ndb-finalize\ndb-verify' \
+  'post-commit database verification did not observe the exact one-key/one-owner state'
 run_case read_failure failure 'bao-get' 'unable to read the canonical Dev smoke document'
 run_case permission failure 'bao-get' 'OpenBao OIDC session is stale or lacks the exact Dev smoke path'
 run_case malformed failure 'bao-get' 'unexpected shape'
@@ -207,6 +216,11 @@ jq -e --arg key "$CONCURRENT_KEY" '.data.data.apiKey == $key' \
   fail 'concurrent publication was overwritten'
 [[ "$(<"$TEST_TMP/concurrent_publish/state/active-keys")" == 2 ]] ||
   fail 'concurrent publication caused an active key to be disabled'
+jq -e --arg key "$CANDIDATE_KEY" '.data.data.apiKey == $key' \
+  "$TEST_TMP/finalize_verify_failure/state/openbao.json" >/dev/null ||
+  fail 'post-commit verification failure changed the API-proven canonical document'
+[[ "$(<"$TEST_TMP/finalize_verify_failure/state/active-keys")" == 1 ]] ||
+  fail 'post-commit verification failure rolled back committed key revocation'
 probe_line="$(grep -n '^probe$' "$TEST_TMP/success/state/events" | cut -d: -f1)"
 finalize_line="$(grep -n '^db-finalize$' "$TEST_TMP/success/state/events" | cut -d: -f1)"
 [[ "$probe_line" -lt "$finalize_line" ]] ||
@@ -216,6 +230,8 @@ grep -F 'api_keys.key_hash <>' "$TEST_TMP/success/state/psql.sql" >/dev/null ||
 grep -F 'api_keys.created_at < candidate_key.created_at' \
   "$TEST_TMP/success/state/psql.sql" >/dev/null ||
   fail 'finalization can disable keys created by a concurrent rotation'
+grep -F 'final database state assertion' "$TEST_TMP/success/state/psql.sql" >/dev/null ||
+  fail 'final database state is not verified in a separate statement'
 if grep -Eqi 'infisical|skip-infisical' "$PROVISIONER"; then
   fail 'provisioner still contains a legacy Infisical path'
 fi
