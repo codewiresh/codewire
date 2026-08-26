@@ -428,6 +428,7 @@ mod tests {
             show_checklist: false,
             new_organization_url: "/organizations/new/".into(),
             settings_url: "/settings/".into(),
+            global_context_query: String::new(),
             github_connect_url: String::new(),
             has_selected_organization: false,
             selected_organization_name: String::new(),

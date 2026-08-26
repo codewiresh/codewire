@@ -1,33 +1,60 @@
-.cw-settings-page { max-width: 44rem; }
-.cw-settings-page > .cw-alert { margin-bottom: var(--space-4); }
-.cw-alert--success { border-color: rgba(34, 197, 94, 0.25); background: rgba(34, 197, 94, 0.1); color: var(--success); }
-.cw-settings-card + .cw-settings-card { margin-top: var(--space-4); }
-.cw-settings-card .cw-card-title { display: flex; align-items: center; gap: var(--space-2); }
-.cw-settings-card form + p, .cw-settings-card p + form { margin-top: var(--space-3); }
-.cw-settings-muted { color: var(--fg-tertiary); font-size: .875rem; }
-.cw-mono { font-family: var(--font-mono); }
-.cw-credential-list { overflow: hidden; border: 1px solid var(--border); border-radius: var(--radius-md); }
-.cw-credential-row { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); padding: var(--space-3); }
-.cw-credential-row + .cw-credential-row { border-top: 1px solid var(--border); }
-.cw-credential-row strong, .cw-credential-row span { display: block; }
-.cw-credential-row span { color: var(--fg-tertiary); font-size: .75rem; }
-.cw-settings-details-panel summary { width: fit-content; list-style: none; }
-.cw-settings-details-panel summary::-webkit-details-marker { display: none; }
-.cw-settings-form { margin-top: var(--space-4); }
-.cw-public-key { display: block; overflow-wrap: anywhere; padding: var(--space-3); border-radius: var(--radius-md); background: var(--bg-surface-hover); font: .75rem/1.6 var(--font-mono); white-space: pre-wrap; user-select: all; }
-.cw-settings-account-links { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-4); }
-.cw-settings-account-links > a { color: var(--accent); }
-.cw-settings-account-links form { margin-left: auto; }
-.cw-settings-standalone { min-height: 100vh; }
-.cw-settings-topbar { display: flex; min-height: 4rem; align-items: center; justify-content: space-between; padding: 0 var(--space-6); border-bottom: 1px solid var(--border-subtle); }
-.cw-settings-standalone-main { width: min(100% - 2rem, 42rem); margin: 0 auto; padding: var(--space-8) 0; }
-.cw-settings-tabs { display: flex; gap: var(--space-4); margin-bottom: var(--space-8); color: var(--fg-secondary); }
-.cw-settings-details { display: grid; gap: var(--space-3); margin: 0; }
-.cw-settings-details div { display: grid; grid-template-columns: 8rem 1fr; gap: var(--space-4); }
-.cw-settings-details dt { color: var(--fg-secondary); }.cw-settings-details dd { margin: 0; }
+[data-dashboard-app] .cw-settings-page { max-width: none; padding: 0; }
+[data-dashboard-app] .cw-settings-layout { display: grid; grid-template-columns: 13.5rem minmax(0, 1fr); min-height: calc(100vh - 3.25rem); margin-inline: -1.25rem; }
+[data-dashboard-app] .cw-settings-subnav { padding: 1.35rem .75rem; border-right: 1px solid #1e1e1e; background: #0b0b0b; }
+[data-dashboard-app] .cw-settings-subnav-heading { display: grid; gap: .2rem; padding: 0 .55rem 1rem; }
+[data-dashboard-app] .cw-settings-subnav-heading strong { font-size: .9rem; font-weight: 600; }
+[data-dashboard-app] .cw-settings-subnav-heading span { overflow: hidden; color: #606060; font: .62rem var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }
+[data-dashboard-app] .cw-settings-subnav nav { display: grid; gap: .08rem; }
+[data-dashboard-app] .cw-settings-subnav a { padding: .48rem .6rem; border-radius: 999px; color: #888; font-size: .75rem; }
+[data-dashboard-app] .cw-settings-subnav a:hover,
+[data-dashboard-app] .cw-settings-subnav a[aria-current="page"] { background: #191919; color: #ededed; }
+[data-dashboard-app] .cw-settings-content { width: min(100%, 52rem); min-width: 0; padding: 1.5rem 1.25rem 3rem; }
+[data-dashboard-app] .cw-settings-content > .cw-alert { margin-bottom: 1rem; }
+[data-dashboard-app] .cw-settings-content .cw-page-title { font: 500 .78rem/1 var(--font-mono); letter-spacing: .12em; text-transform: uppercase; }
+[data-dashboard-app] .cw-settings-card { overflow: visible; }
+[data-dashboard-app] .cw-settings-card + .cw-settings-card { margin-top: .8rem; }
+[data-dashboard-app] .cw-settings-card .cw-card-header { padding: 1rem 1.1rem .75rem; border-bottom: 1px solid #1d1d1d; }
+[data-dashboard-app] .cw-settings-card .cw-card-title { display: flex; align-items: center; gap: .5rem; font-size: .78rem; }
+[data-dashboard-app] .cw-settings-card .cw-card-description { margin-top: .25rem; color: #6e6e6e; font-size: .7rem; line-height: 1.5; }
+[data-dashboard-app] .cw-settings-card .cw-card-content { padding: 1rem 1.1rem; }
+[data-dashboard-app] .cw-settings-card form + p,
+[data-dashboard-app] .cw-settings-card p + form { margin-top: .75rem; }
+[data-dashboard-app] .cw-settings-muted { margin: 0; color: #777; font-size: .75rem; line-height: 1.6; }
+[data-dashboard-app] .cw-mono { font-family: var(--font-mono); }
+[data-dashboard-app] .cw-credential-list { overflow: hidden; border: 1px solid #222; border-radius: .5rem; background: #0b0b0b; }
+[data-dashboard-app] .cw-credential-row { display: flex; align-items: center; justify-content: space-between; gap: .75rem; padding: .75rem .85rem; }
+[data-dashboard-app] .cw-credential-row + .cw-credential-row { border-top: 1px solid #1d1d1d; }
+[data-dashboard-app] .cw-credential-row strong,
+[data-dashboard-app] .cw-credential-row span { display: block; }
+[data-dashboard-app] .cw-credential-row strong { font: 500 .72rem var(--font-mono); }
+[data-dashboard-app] .cw-credential-row span { margin-top: .15rem; color: #666; font: .65rem var(--font-mono); }
+[data-dashboard-app] .cw-settings-details-panel summary { width: fit-content; list-style: none; }
+[data-dashboard-app] .cw-settings-details-panel summary::-webkit-details-marker { display: none; }
+[data-dashboard-app] .cw-settings-form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .75rem; margin-top: 1rem; padding: 1rem; border: 1px solid #222; border-radius: .5rem; background: #0b0b0b; }
+[data-dashboard-app] .cw-settings-form > .cw-button { align-self: end; justify-self: start; }
+[data-dashboard-app] .cw-public-key { display: block; overflow-wrap: anywhere; padding: .8rem; border: 1px solid #222; border-radius: .5rem; background: #080808; color: #aaa; font: .67rem/1.6 var(--font-mono); white-space: pre-wrap; user-select: all; }
+[data-dashboard-app] .cw-settings-account-links { display: flex; flex-wrap: wrap; align-items: center; gap: .85rem; }
+[data-dashboard-app] .cw-settings-account-links > a { color: #3aa7c2; font-size: .72rem; }
+[data-dashboard-app] .cw-settings-account-links form { margin-left: auto; }
+[data-dashboard-app] .cw-settings-details { display: grid; gap: .75rem; margin: 0; }
+[data-dashboard-app] .cw-settings-details div { display: grid; grid-template-columns: 8rem 1fr; gap: 1rem; }
+[data-dashboard-app] .cw-settings-details dt { color: #777; }
+[data-dashboard-app] .cw-settings-details dd { margin: 0; }
 
-@media (max-width: 40rem) {
-  .cw-settings-account-links { align-items: stretch; flex-direction: column; }
-  .cw-settings-account-links form { width: 100%; margin-left: 0; }
-  .cw-settings-account-links form .cw-button { width: 100%; }
+@media (max-width: 63.9375rem) {
+  [data-dashboard-app] .cw-settings-layout { min-height: calc(100vh - 3.5rem); }
+}
+
+@media (max-width: 48rem) {
+  [data-dashboard-app] .cw-settings-layout { grid-template-columns: 1fr; margin-inline: -.8rem; }
+  [data-dashboard-app] .cw-settings-subnav { padding: .7rem .8rem; border-right: 0; border-bottom: 1px solid #1e1e1e; }
+  [data-dashboard-app] .cw-settings-subnav-heading { padding: 0 0 .55rem; }
+  [data-dashboard-app] .cw-settings-subnav nav { display: flex; max-width: 100%; gap: .25rem; overflow-x: auto; }
+  [data-dashboard-app] .cw-settings-subnav a { flex: none; }
+  [data-dashboard-app] .cw-settings-content { padding: 1rem .8rem 2rem; }
+  [data-dashboard-app] .cw-settings-form { grid-template-columns: 1fr; }
+  [data-dashboard-app] .cw-credential-row { align-items: flex-start; }
+  [data-dashboard-app] .cw-settings-account-links { align-items: stretch; flex-direction: column; }
+  [data-dashboard-app] .cw-settings-account-links form { width: 100%; margin-left: 0; }
+  [data-dashboard-app] .cw-settings-account-links form .cw-button { width: 100%; }
 }

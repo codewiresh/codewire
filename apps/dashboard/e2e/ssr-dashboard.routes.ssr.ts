@@ -103,7 +103,7 @@ test.describe("server-rendered public, auth, and account routes", () => {
     test.skip(!!isMobile, "desktop settings contract");
     const response = await page.goto("/settings/");
     expect(response?.status()).toBe(200);
-    await expect(page.getByRole("heading", { name: "Settings", exact: true })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Account", exact: true }).first()).toBeVisible();
     await expect(page.getByRole("heading", { name: "GitHub", exact: true })).toBeVisible();
     await expect(page.getByRole("heading", { name: "Git authentication" })).toBeVisible();
     await expect(page.getByRole("heading", { name: "Git identity" })).toBeVisible();
@@ -149,13 +149,44 @@ test.describe("server-rendered public, auth, and account routes", () => {
   test("account placeholders preserve the current authenticated product behavior", async ({ page, isMobile }) => {
     test.skip(!!isMobile, "desktop account contract");
     for (const [route, heading] of [
-      ["/settings/", "Settings"],
+      ["/settings/", "Account"],
       ["/settings/security/", "Security settings"],
       ["/settings/sessions/", "Active sessions"],
     ] as const) {
       const response = await page.goto(route);
       expect(response?.status()).toBe(200);
-      await expect(page.getByRole("heading", { name: heading, exact: true })).toBeVisible();
+      await expect(page.getByRole("heading", { name: heading, exact: true }).first()).toBeVisible();
+    }
+  });
+
+  test("global routes preserve only an accessible organization context", async ({ page, isMobile }) => {
+    test.skip(!!isMobile, "desktop global-context contract");
+
+    for (const route of ["/settings/", "/settings/security/", "/settings/sessions/"]) {
+      const response = await page.goto(`${route}?org=${cleanRoutesOrgSlug}`);
+      expect(response?.status()).toBe(200);
+      await expect(page.locator(".cw-sidebar-slot .cw-org-switcher-label")).toHaveText(
+        "Clean Routes Organization",
+      );
+      await expect(page.locator(".cw-sidebar-slot").getByRole("link", { name: "Settings" }))
+        .toHaveAttribute("href", `/settings/?org=${cleanRoutesOrgSlug}`);
+    }
+
+    const adminRedirect = await page.request.get(`/admin/?org=${cleanRoutesOrgSlug}`, {
+      maxRedirects: 0,
+    });
+    expect(adminRedirect.status()).toBe(303);
+    expect(adminRedirect.headers().location).toBe(`/dashboard/?org=${cleanRoutesOrgSlug}`);
+
+    for (const route of [
+      "/settings/?org=not-a-member",
+      "/settings/security/?org=not-a-member",
+      "/settings/sessions/?org=not-a-member",
+      "/admin/?org=not-a-member",
+      "/admin/billing/?org=not-a-member",
+      "/admin/audit/?org=not-a-member",
+    ]) {
+      expect((await page.request.get(route)).status()).toBe(404);
     }
   });
 

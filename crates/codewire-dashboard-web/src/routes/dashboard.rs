@@ -104,6 +104,7 @@ pub(super) async fn dashboard_view(
         show_checklist,
         new_organization_url: NEW_ORGANIZATION_PATH.to_owned(),
         settings_url: "/settings/".to_owned(),
+        global_context_query: String::new(),
         github_connect_url: github_connect_url(state),
         has_selected_organization: false,
         selected_organization_name: String::new(),
@@ -155,6 +156,7 @@ pub(super) async fn dashboard_shell_view_from_identity(
         show_checklist: false,
         new_organization_url: NEW_ORGANIZATION_PATH.to_owned(),
         settings_url: "/settings/".to_owned(),
+        global_context_query: String::new(),
         github_connect_url: github_connect_url(state),
         has_selected_organization: false,
         selected_organization_name: String::new(),
@@ -171,6 +173,33 @@ pub(super) async fn dashboard_shell_view_from_identity(
         provisioned_memory_mb: 0,
         provisioned_disk_gb: 0,
     })
+}
+
+/// Apply an optional organization selection to a global authenticated page.
+///
+/// The selection is resolved exclusively from the caller's accessible
+/// organizations. Unknown and inaccessible slugs intentionally share the same
+/// not-found response.
+pub(super) async fn select_shell_organization(
+    state: &AppState,
+    cookie: axum::http::HeaderValue,
+    view: &mut DashboardView,
+    selected_slug: &str,
+) -> Result<(), WebError> {
+    if selected_slug.is_empty() {
+        return Ok(());
+    }
+    let row = view
+        .organizations
+        .iter()
+        .find(|organization| organization.slug == selected_slug)
+        .ok_or(WebError::NotFound)?;
+    let organization = crate::view::OrganizationContext::from_row(row);
+    let rail =
+        crate::environment_connect::environments(state, cookie, &organization.id, false).await;
+    let rail_available = rail.is_ok();
+    view.select_organization(&organization, rail.unwrap_or_default(), rail_available);
+    Ok(())
 }
 
 fn github_connect_url(state: &AppState) -> String {

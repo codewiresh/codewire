@@ -62,3 +62,34 @@
   .cw-filter-form .cw-field:nth-child(n), .cw-setting-row .cw-input { width: 100%; }
   .cw-catalog-form, .cw-plan-form, .cw-price-form { grid-template-columns: 1fr; }
 }
+
+[data-dashboard-app] .cw-billing-stack,
+[data-dashboard-app] .cw-admin-stack { gap: .8rem; }
+[data-dashboard-app] .cw-admin-stack > .cw-page-title,
+[data-dashboard-app] .cw-admin-heading .cw-page-title { font: 500 .78rem/1 var(--font-mono); letter-spacing: .12em; text-transform: uppercase; }
+[data-dashboard-app] :is(.cw-billing-stack, .cw-admin-stack) .cw-card-body { padding: 1rem; }
+[data-dashboard-app] :is(.cw-billing-stack, .cw-admin-stack) .cw-card-header { padding: .9rem 1rem; border-bottom-color: #1d1d1d; }
+[data-dashboard-app] :is(.cw-billing-stack, .cw-admin-stack) .cw-card-header h2,
+[data-dashboard-app] :is(.cw-billing-stack, .cw-admin-stack) .cw-card-title { font-size: .78rem; }
+[data-dashboard-app] :is(.cw-billing-stack, .cw-admin-stack) .cw-card-header > div > p,
+[data-dashboard-app] :is(.cw-billing-stack, .cw-admin-stack) .cw-muted { color: #6e6e6e; font-size: .7rem; }
+[data-dashboard-app] :is(.cw-billing-stack, .cw-admin-stack) .cw-stat-grid { gap: .75rem; }
+[data-dashboard-app] :is(.cw-billing-stack, .cw-admin-stack) .cw-stat { padding: .8rem; border-color: #222; border-radius: .45rem; background: #0b0b0b; }
+[data-dashboard-app] :is(.cw-billing-stack, .cw-admin-stack) .cw-stat > span { color: #666; font: .6rem var(--font-mono); letter-spacing: .06em; text-transform: uppercase; }
+[data-dashboard-app] :is(.cw-billing-stack, .cw-admin-stack) .cw-stat > strong { font: 500 1rem var(--font-mono); }
+[data-dashboard-app] .cw-admin-stack .cw-admin-stat { padding: 1rem; }
+[data-dashboard-app] .cw-admin-stack .cw-admin-stat > span,
+[data-dashboard-app] .cw-admin-stack .cw-admin-stat > p { color: #6e6e6e; font: .63rem var(--font-mono); }
+[data-dashboard-app] .cw-admin-stack .cw-admin-stat > strong { font: 500 1.35rem var(--font-mono); }
+[data-dashboard-app] .cw-admin-stack .cw-filter-form { padding: .8rem; border: 1px solid #222; border-radius: .5rem; background: #0d0d0d; }
+[data-dashboard-app] .cw-admin-stack :is(.cw-catalog-form, .cw-plan-form, .cw-price-form, .cw-preview) { border-color: #222; border-radius: .5rem; background: #0b0b0b; }
+[data-dashboard-app] .cw-admin-stack .cw-catalog-editor > summary { border-radius: 999px; }
+[data-dashboard-app] :is(.cw-billing-stack, .cw-admin-stack) .cw-table-wrap { max-width: 100%; border-radius: .45rem; }
+
+@media (max-width: 48rem) {
+  [data-dashboard-app] .cw-admin-stack,
+  [data-dashboard-app] .cw-billing-stack { min-width: 0; }
+  [data-dashboard-app] .cw-admin-heading > .cw-badge { align-self: flex-start; }
+  [data-dashboard-app] :is(.cw-billing-stack, .cw-admin-stack) .cw-table-wrap { overflow-x: auto; }
+  [data-dashboard-app] .cw-admin-stack .cw-audit-table { min-width: 44rem; }
+}

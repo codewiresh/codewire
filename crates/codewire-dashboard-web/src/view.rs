@@ -187,12 +187,10 @@ pub(crate) struct SettingsPageView {
 
 #[derive(Debug)]
 pub(crate) struct SettingsPlaceholderView {
+    pub(crate) section: &'static str,
     pub(crate) title: &'static str,
     pub(crate) heading: &'static str,
     pub(crate) description: &'static str,
-    pub(crate) user_name: String,
-    pub(crate) email: String,
-    pub(crate) show_profile: bool,
 }
 
 #[derive(Debug)]
@@ -206,6 +204,7 @@ pub(crate) struct DashboardView {
     pub(crate) show_checklist: bool,
     pub(crate) new_organization_url: String,
     pub(crate) settings_url: String,
+    pub(crate) global_context_query: String,
     pub(crate) github_connect_url: String,
     pub(crate) has_selected_organization: bool,
     pub(crate) selected_organization_name: String,
@@ -234,6 +233,8 @@ impl DashboardView {
         self.selected_organization_name = organization.name.clone();
         self.selected_organization_slug = organization.slug.clone();
         self.selected_organization_url = organization.environments_url.clone();
+        self.global_context_query = format!("?org={}", organization.slug);
+        self.settings_url = format!("/settings/{}", self.global_context_query);
         self.sandbox_total = sandboxes.len();
         self.sandbox_running = sandboxes
             .iter()
