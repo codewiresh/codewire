@@ -93,7 +93,7 @@ Secret handling:
   REGISTRY_PASSWORD_FILE. Password values are passed to docker login on stdin.
   For local Codewire API auth, wrap this script with
   scripts/runtime/dev/with-dev-smoke-auth.sh so the dedicated dev smoke API key and
-  expected smoke-user email are loaded from Infisical without printing values.
+  expected smoke-user email are loaded from canonical OpenBao without printing values.
 
 Environment:
   DOCKER_BUILD_NO_CACHE=1    Build candidate images with docker buildx
