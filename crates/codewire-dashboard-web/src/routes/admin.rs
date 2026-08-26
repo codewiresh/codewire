@@ -24,9 +24,9 @@ use crate::{
     view::DashboardView,
 };
 
-const ADMIN_PATH: &str = "/admin";
-const AUDIT_PATH: &str = "/admin/audit";
-const BILLING_PATH: &str = "/admin/billing";
+const ADMIN_PATH: &str = "/admin/";
+const AUDIT_PATH: &str = "/admin/audit/";
+const BILLING_PATH: &str = "/admin/billing/";
 
 #[derive(Debug, Default, Deserialize)]
 pub(super) struct AdminQuery {
@@ -465,7 +465,7 @@ async fn admin_context(
     enforce_two_factor(&identity)
         .map_err(|error| admin_route_error(error, continuation, headers))?;
     if !identity.is_admin {
-        return Err(redirect("/dashboard".to_owned(), headers));
+        return Err(redirect("/dashboard/".to_owned(), headers));
     }
     let cookie = canonical_cookie(headers).map_err(|()| login_redirect(continuation, headers))?;
     let dashboard = dashboard_shell_view_from_identity(state, &identity, cookie.clone())
@@ -696,7 +696,7 @@ mod tests {
         assert_eq!(query.offset, 0);
         assert_eq!(
             audit_url(50, "user sign-in", "warn"),
-            "/admin/audit?action=user+sign-in&severity=warn&offset=50"
+            "/admin/audit/?action=user+sign-in&severity=warn&offset=50"
         );
         assert!(
             normalize_audit_query(AuditQuery {

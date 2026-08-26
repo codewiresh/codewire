@@ -932,6 +932,11 @@ pub(crate) async fn create_organization_core(
     if slug.is_empty() {
         return Err(AppError::BadRequest("slug is required".into()));
     }
+    if !codewire_server_core::organization_slug::valid_organization_slug(slug) {
+        return Err(AppError::BadRequest(
+            "slug is reserved or does not match the canonical route-safe format".into(),
+        ));
+    }
 
     let org_id = uuid::Uuid::new_v4().simple().to_string();
     let member_id = uuid::Uuid::new_v4().simple().to_string();

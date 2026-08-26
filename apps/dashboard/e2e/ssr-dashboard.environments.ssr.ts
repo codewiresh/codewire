@@ -173,18 +173,18 @@ async function connectSyntheticUnavailableGitHub() {
 }
 
 async function openPreparedImageForm(page: Page) {
-  await page.goto(`/dashboard/orgs/${slug}/environments?create=true`);
+  await page.goto(`/${slug}/?create=true`);
   await page.locator(".cw-choice-tabs label", { hasText: "From Image" }).click();
   await page.getByLabel("Preset", { exact: true }).selectOption(presetId);
   const stream = page.waitForResponse((response) => (
-    response.url().endsWith(`/dashboard/orgs/${slug}/environments/_events/prepare`)
+    response.url().endsWith(`/${slug}/_events/sandboxes/prepare`)
       && response.request().method() === "POST"
   ));
   await page.getByRole("button", { name: "Use preset" }).click();
   const response = await stream;
   expect(response.status()).toBe(200);
   expect(response.headers()["content-type"]).toContain("text/event-stream");
-  await expect(page.getByRole("heading", { name: "Environment configuration" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Sandbox configuration" })).toBeVisible();
   await page.getByText("Advanced", { exact: true }).click();
 }
 
@@ -209,7 +209,7 @@ test.describe.serial("server-rendered environments", () => {
     await connectSyntheticUnavailableGitHub();
 
     try {
-      const response = await page.goto(`/dashboard/orgs/${slug}/environments?create=true`);
+      const response = await page.goto(`/${slug}/?create=true`);
       expect(response?.status()).toBe(200);
       await expect(page.getByText("GitHub connected as @e2e-unavailable", { exact: true })).toBeVisible();
       await expect(page.getByText(
@@ -237,14 +237,16 @@ test.describe.serial("server-rendered environments", () => {
       ].includes(pathname)) staleAssetRequests.push(pathname);
     });
 
-    await page.goto(`/dashboard/orgs/${slug}/environments?create=true`);
-    await expect(page.getByRole("heading", { name: orgName })).toBeVisible();
+    await page.goto(`/${slug}/?create=true`);
+    await expect(page.getByRole("heading", { name: "Sandboxes", exact: true })).toBeVisible();
     await expect(page.locator('script[src="/assets/codewire/environments-v2.js"]')).toHaveCount(1);
     await expect(page.locator('link[href="/assets/codewire/routes/environments-v2.css"]')).toHaveCount(1);
     await expect(page.locator('use[href^="/assets/codewire/icons-v2.svg#"]').first()).toHaveCount(1);
-    await expect(page.getByRole("link", { name: "Environments", exact: true })).toHaveAttribute(
-      "aria-current",
-      "page",
+    await expect(
+      page.locator(".cw-sidebar-slot").getByRole("link", { name: "Sandboxes", exact: true }),
+    ).toHaveAttribute(
+      "href",
+      `/${slug}/`,
     );
     await expect(page.getByLabel("Preset", { exact: true }).locator(`option[value="${presetId}"]`)).toContainText(
       presetName,
@@ -258,15 +260,15 @@ test.describe.serial("server-rendered environments", () => {
     test.skip(!!isMobile, "desktop environment-create parity matrix");
     await page.setViewportSize({ width: 1066, height: 1103 });
 
-    await page.goto(`/dashboard/orgs/${slug}/environments?create=true`);
+    await page.goto(`/${slug}/?create=true`);
     await page.locator(".cw-choice-tabs label", { hasText: "From Image" }).click();
     const universalRequest = page.waitForRequest((request) => (
-      request.url().endsWith(`/dashboard/orgs/${slug}/environments/_events/prepare`)
+      request.url().endsWith(`/${slug}/_events/sandboxes/prepare`)
       && request.method() === "POST"
     ));
-    await page.getByRole("button", { name: /Universal environment image/ }).click();
+    await page.getByRole("button", { name: /Universal Sandbox image/ }).click();
     expect((await universalRequest).postData()).toContain(`image=${encodeURIComponent(workspaceImage)}`);
-    await expect(page.getByRole("heading", { name: "Environment configuration" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Sandbox configuration" })).toBeVisible();
     await expect(page.getByText("Selected image", { exact: true })).toBeVisible();
     const createCard = page.locator("#environment-create-card");
     const dimensions = await createCard.evaluate((element) => ({
@@ -281,28 +283,28 @@ test.describe.serial("server-rendered environments", () => {
     const newProjectInput = page.getByLabel("New project", { exact: true });
     await expect(projectSelect).toHaveCSS("min-height", "40px");
     await expect(newProjectInput).toHaveCSS("min-height", "40px");
-    await expect(projectSelect).toHaveCSS("background-color", "rgb(8, 9, 10)");
+    await expect(projectSelect).toHaveCSS("background-color", "rgb(17, 17, 17)");
     await expect(page).toHaveScreenshot("environments-prepared-image-desktop.png", { fullPage: true });
     await page.getByText("Advanced", { exact: true }).click();
     await expect(page.getByLabel("Image", { exact: true })).toHaveValue(workspaceImage);
 
-    await page.goto(`/dashboard/orgs/${slug}/environments?create=true`);
+    await page.goto(`/${slug}/?create=true`);
     await page.locator(".cw-choice-tabs label", { hasText: "From Image" }).click();
     await page.getByLabel("Custom image", { exact: true }).fill(
       "registry.example.test/team/workspace:v1",
     );
     await page.getByRole("button", { name: "Use image", exact: true }).click();
-    await expect(page.getByRole("heading", { name: "Environment configuration" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Sandbox configuration" })).toBeVisible();
     await page.getByText("Advanced", { exact: true }).click();
     await expect(page.getByLabel("Image", { exact: true })).toHaveValue(
       "registry.example.test/team/workspace:v1",
     );
 
-    await page.goto(`/dashboard/orgs/${slug}/environments?create=true`);
+    await page.goto(`/${slug}/?create=true`);
     await page.locator(".cw-choice-tabs label", { hasText: "From Image" }).click();
     await page.getByLabel("Preset", { exact: true }).selectOption(presetId);
     await page.getByRole("button", { name: "Use preset" }).click();
-    await expect(page.getByRole("heading", { name: "Environment configuration" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Sandbox configuration" })).toBeVisible();
     await expect(page.locator('input[name="agent"][value="codex"]')).toBeChecked();
     await expect(page.getByLabel("Application port")).toHaveValue("3000");
     await expect(page.getByLabel("Port label")).toHaveValue("web");
@@ -311,7 +313,7 @@ test.describe.serial("server-rendered environments", () => {
     await expect(page.getByLabel("Project", { exact: true })).toHaveValue(seededSecretProjectName);
     await expect(page.getByRole("link", { name: "Manage" })).toHaveAttribute(
       "href",
-      new RegExp(`/dashboard/orgs/${slug}/secrets/${seededSecretProjectId}$`),
+      new RegExp(`/${slug}/secrets/${seededSecretProjectId}/$`),
     );
     await page.getByText("Advanced", { exact: true }).click();
     await expect(page.getByLabel("Install Command")).toHaveValue(
@@ -327,7 +329,7 @@ test.describe.serial("server-rendered environments", () => {
 
     const inlineProjectName = `inline-${runId}`;
     const inlineProjectResponse = page.waitForResponse((response) => (
-      response.url().endsWith(`/dashboard/orgs/${slug}/environments/_actions/secret-projects/create`)
+      response.url().endsWith(`/${slug}/_actions/sandboxes/secret-projects/create`)
       && response.request().method() === "POST"
     ));
     await page.getByLabel("New project", { exact: true }).fill(inlineProjectName);
@@ -339,15 +341,15 @@ test.describe.serial("server-rendered environments", () => {
     `;
     await expect(page.getByRole("link", { name: "Manage" })).toHaveAttribute(
       "href",
-      new RegExp(`/dashboard/orgs/${slug}/secrets/${inlineProject.id}$`),
+      new RegExp(`/${slug}/secrets/${inlineProject.id}/$`),
     );
 
-    await page.goto(`/dashboard/orgs/${slug}/environments?create=true`);
+    await page.goto(`/${slug}/?create=true`);
     await page.getByLabel("Repository URL").fill(repositoryUrl);
     await page.getByRole("button", { name: "Add another repository" }).click();
     await page.getByLabel("Repository URL").nth(1).fill("https://example.test/codewire/secondary");
     const repositoryRequest = page.waitForRequest((request) => (
-      request.url().endsWith(`/dashboard/orgs/${slug}/environments/_events/prepare`)
+      request.url().endsWith(`/${slug}/_events/sandboxes/prepare`)
       && request.method() === "POST"
     ));
     await page.getByRole("button", { name: "Analyze", exact: true }).click();
@@ -358,7 +360,7 @@ test.describe.serial("server-rendered environments", () => {
     );
     expect(repositoryBody).not.toContain("image=");
     expect(repositoryBody).not.toContain("preset_id=");
-    await expect(page.getByRole("heading", { name: "Environment configuration" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Sandbox configuration" })).toBeVisible();
     await expect(page.locator(".cw-selected-source:visible")).toHaveCount(2);
   });
 
@@ -370,15 +372,15 @@ test.describe.serial("server-rendered environments", () => {
     );
     test.setTimeout(150_000);
 
-    await page.goto(`/dashboard/orgs/${slug}/environments?create=true`);
+    await page.goto(`/${slug}/?create=true`);
     await page.getByLabel("Repository URL").fill(aiRepositoryUrl);
     const stream = page.waitForResponse((response) => (
-      response.url().endsWith(`/dashboard/orgs/${slug}/environments/_events/prepare`)
+      response.url().endsWith(`/${slug}/_events/sandboxes/prepare`)
       && response.request().method() === "POST"
     ));
     await page.getByRole("button", { name: "Analyze", exact: true }).click();
     expect((await stream).status()).toBe(200);
-    const configuration = page.getByRole("heading", { name: "Environment configuration" });
+    const configuration = page.getByRole("heading", { name: "Sandbox configuration" });
     const streamError = page.locator('[data-environment-stream-status][data-state="error"]');
     const streamMessage = page.locator("[data-environment-stream-message]");
     const outcome = await Promise.race([
@@ -397,12 +399,12 @@ test.describe.serial("server-rendered environments", () => {
     const disallowedBrowserCalls = watchDisallowedBrowserCalls(page);
     const streamRequests: string[] = [];
     page.on("request", (request) => {
-      if (new URL(request.url()).pathname.endsWith("/_events/prepare")) {
+      if (new URL(request.url()).pathname.endsWith("/_events/sandboxes/prepare")) {
         streamRequests.push(request.url());
       }
     });
 
-    await page.goto(`/dashboard/orgs/${slug}/environments?create=true`);
+    await page.goto(`/${slug}/?create=true`);
     await page.getByLabel("Repository URL").fill(repositoryUrl);
     // The saved repo configuration resolves to the pinned preset, keeping
     // this proof deterministic without cloning from a third party.
@@ -414,14 +416,14 @@ test.describe.serial("server-rendered environments", () => {
     );
 
     const secondStream = page.waitForResponse((response) => (
-      response.url().endsWith(`/dashboard/orgs/${slug}/environments/_events/prepare`)
+      response.url().endsWith(`/${slug}/_events/sandboxes/prepare`)
         && response.request().method() === "POST"
     ));
     await page.getByRole("button", { name: "Analyze", exact: true }).click();
     const secondResponse = await secondStream;
     expect(secondResponse.status()).toBe(200);
     expect(secondResponse.headers()["content-type"]).toContain("text/event-stream");
-    await expect(page.getByRole("heading", { name: "Environment configuration" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Sandbox configuration" })).toBeVisible();
     expect(streamRequests).toHaveLength(2);
     expect(disallowedBrowserCalls).toEqual([]);
   });
@@ -434,10 +436,10 @@ test.describe.serial("server-rendered environments", () => {
       storageState: authState,
     });
     const page = await context.newPage();
-    await page.goto(`/dashboard/orgs/${slug}/environments?create=true`);
+    await page.goto(`/${slug}/?create=true`);
     const csrf = await page.locator('input[name="_csrf"]').inputValue();
     const response = await context.request.post(
-      `/dashboard/orgs/${slug}/environments/_actions/prepare`,
+      `/${slug}/_actions/sandboxes/prepare`,
       {
         form: {
           _csrf: csrf,
@@ -458,7 +460,7 @@ test.describe.serial("server-rendered environments", () => {
     expect(response.headers()["content-type"]).toContain("text/html");
     const body = await response.text();
     expect(body).toContain("<!doctype html>");
-    expect(body).toContain("Environment configuration");
+    expect(body).toContain("Sandbox configuration");
     expect(body).toMatch(/name="cpu"[^>]*>[\s\S]*?<option value="1000" selected/);
     expect(body).toMatch(/name="memory"[^>]*>[\s\S]*?<option value="2048" selected/);
     expect(body).toMatch(/name="disk"[^>]+value="10"/);
@@ -468,19 +470,23 @@ test.describe.serial("server-rendered environments", () => {
 
   test("keeps environment create and inventory usable on mobile", async ({ page, isMobile }) => {
     test.skip(!isMobile, "mobile responsive and visual contract");
-    await page.goto(`/dashboard/orgs/${slug}/environments?create=true`);
-    await expect(page.getByRole("heading", { name: "Create Environment" })).toBeVisible();
+    await page.goto(`/${slug}/?create=true`);
+    await expect(page.getByRole("heading", { name: "Create Sandbox" })).toBeVisible();
     const analyze = page.getByRole("button", { name: "Analyze", exact: true });
     await analyze.scrollIntoViewIfNeeded();
     await expect(analyze).toBeInViewport();
+    await page.getByRole("button", { name: "Toggle sidebar" }).click();
     await expect(
-      page.getByLabel("Organization navigation").getByRole("link", { name: "Presets" }),
+      page.locator(".cw-mobile-drawer").getByRole("link", { name: "Presets" }),
     ).toBeVisible();
+    await page.locator(".cw-mobile-drawer").getByRole("button", {
+      name: "Collapse navigation",
+    }).click();
     await page.evaluate(() => window.scrollTo(0, 0));
     await expect(page).toHaveScreenshot("environments-create-mobile.png", { fullPage: true });
     await page.locator(".cw-choice-tabs label", { hasText: "From Image" }).click();
-    await page.getByRole("button", { name: /Universal environment image/ }).click();
-    await expect(page.getByRole("heading", { name: "Environment configuration" })).toBeVisible();
+    await page.getByRole("button", { name: /Universal Sandbox image/ }).click();
+    await expect(page.getByRole("heading", { name: "Sandbox configuration" })).toBeVisible();
     const mobileCard = page.locator("#environment-create-card");
     const dimensions = await mobileCard.evaluate((element) => ({
       clientWidth: element.clientWidth,
@@ -517,11 +523,11 @@ test.describe.serial("server-rendered environments", () => {
     await expect(page.getByLabel("Memory", { exact: true })).toHaveValue("2048");
     await expect(page.getByLabel("Disk (GB)")).toHaveValue("10");
     await page.getByLabel("Name").fill(environmentName);
-    await page.getByRole("button", { name: "Create Environment" }).click();
+    await page.getByRole("button", { name: "Create Sandbox" }).click();
     await expect(page).toHaveURL(
-      `${ssrUrl}/dashboard/orgs/${slug}/environments?message=environment-created`,
+      `${ssrUrl}/${slug}/?message=environment-created`,
     );
-    await expect(page.getByRole("status")).toContainText("Environment creation started");
+    await expect(page.getByRole("status")).toContainText("Sandbox creation started");
 
     const [created] = await sql`
       SELECT id, cpu_millicores, memory_mb, disk_gb, ttl_seconds,
@@ -551,13 +557,12 @@ test.describe.serial("server-rendered environments", () => {
     await expect(page.locator(".cw-environment-usage")).toContainText("1 vCPU / 2 GiB");
     await expect(page.locator(".cw-environment-usage")).toContainText("/h");
 
-    const terminalLink = row.getByRole("link", { name: "Terminal" });
+    const terminalLink = row.getByRole("link", { name: "Terminal", exact: true });
     await terminalLink.click();
-    const drawer = page.locator("[data-terminal-drawer]");
-    const drawerRoot = drawer.locator("[data-terminal-root]");
-    await expect(drawer).toBeVisible();
-    await expect(drawer.locator(".xterm")).toBeVisible({ timeout: 15_000 });
-    await expect(drawer.locator("[data-terminal-status]")).toBeHidden({ timeout: 15_000 });
+    await expect(page).toHaveURL(`${ssrUrl}/${slug}/${environmentId}/`);
+    const terminalRoot = page.locator(".cw-terminal-page [data-terminal-root]");
+    await expect(terminalRoot.locator(".xterm")).toBeVisible({ timeout: 15_000 });
+    await expect(terminalRoot.locator("[data-terminal-status]")).toBeHidden({ timeout: 15_000 });
     const initialResizeCount = await page.evaluate(() => (
       ((window as Window & { __terminalFrames?: number[][] }).__terminalFrames || [])
         .filter((frame) => frame[0] === 0x01 && frame.length === 5).length
@@ -572,31 +577,26 @@ test.describe.serial("server-rendered environments", () => {
     // The idle interval is the behavior under test, not a fixture delay: the
     // same attached browser socket must still carry the later command.
     await page.evaluate(() => new Promise((resolve) => window.setTimeout(resolve, 35_000)));
-    await drawer.locator(".xterm").click();
+    await terminalRoot.locator(".xterm").click();
     await page.keyboard.type("printf '__SSR_TERM_IDLE__%d__\\n' $RANDOM");
     await page.keyboard.press("Enter");
-    await expect(drawer.locator(".xterm-rows")).toContainText(/__SSR_TERM_IDLE__\d+__/);
+    await expect(terminalRoot.locator(".xterm-rows")).toContainText(/__SSR_TERM_IDLE__\d+__/);
     const sentInput = await page.evaluate(() => (
       ((window as Window & { __terminalFrames?: number[][] }).__terminalFrames || [])
         .some((frame) => frame[0] === 0x00 && frame.length > 1)
     ));
     expect(sentInput).toBe(true);
     await page.setViewportSize({ width: 1440, height: 900 });
-    await expect(drawer).toHaveScreenshot("terminal-drawer-desktop.png", {
-      mask: [drawer.locator(".xterm-rows")],
+    await expect(page.locator(".cw-sandbox-terminal")).toHaveScreenshot("terminal-drawer-desktop.png", {
+      mask: [terminalRoot.locator(".xterm-rows")],
+      maskColor: "#080808",
     });
-    await drawer.getByRole("button", { name: "Close terminal" }).click();
-    await expect(drawer).toBeHidden();
-    await expect(drawerRoot).toHaveAttribute("data-terminal-settled", "true");
-    await expectTerminalLeaseDrained();
-
-    await page.goto(`/terminal/${orgId}/${environmentId}`);
-    await expect(page).toHaveURL(`${ssrUrl}/terminal/${orgId}/${environmentId}`);
-    await expect(page.getByText(environmentName, { exact: true })).toBeVisible();
+    await expect(page.getByRole("heading", { name: environmentName, exact: true })).toBeVisible();
     await expect(page.locator(".cw-terminal-page .xterm")).toBeVisible({ timeout: 15_000 });
     await page.setViewportSize({ width: 390, height: 844 });
     await expect(page).toHaveScreenshot("terminal-full-mobile.png", {
       mask: [page.locator(".xterm-rows")],
+      maskColor: "#080808",
     });
     await page.setViewportSize({ width: 1440, height: 900 });
     await page.getByRole("button", { name: "Disconnect" }).click();
@@ -611,13 +611,13 @@ test.describe.serial("server-rendered environments", () => {
     const noJavaScriptPage = await noJavaScriptContext.newPage();
     const noJavaScriptRequests: string[] = [];
     noJavaScriptPage.on("request", (request) => noJavaScriptRequests.push(request.url()));
-    await noJavaScriptPage.goto(`/terminal/${orgId}/${environmentId}`);
+    await noJavaScriptPage.goto(`/${slug}/${environmentId}/`);
     await expect(noJavaScriptPage.getByRole("heading", { name: "Use the CLI terminal" })).toBeVisible();
     expect(await noJavaScriptPage.locator("code").textContent()).toBe(`cw shell ${environmentId}`);
     expect(noJavaScriptRequests.every((url) => new URL(url).origin === ssrUrl)).toBe(true);
     await noJavaScriptContext.close();
 
-    await page.goto(`/dashboard/orgs/${slug}/environments`);
+    await page.goto(`/${slug}/`);
     const ticket = await issueTerminalTicket(page);
     await closeTicketBeforeAttachment(page, ticket);
     await expectTerminalLeaseDrained();
@@ -651,7 +651,7 @@ test.describe.serial("server-rendered environments", () => {
     await row.locator("summary", { hasText: "Destroy" }).click();
     await row.getByRole("button", { name: "Destroy permanently" }).click();
     await waitForEnvironmentState(environmentId, ["destroyed"], 120_000);
-    await page.goto(`/dashboard/orgs/${slug}/environments?state=destroyed`);
+    await page.goto(`/${slug}/?state=destroyed`);
     row = page.locator("tr", { hasText: environmentName }).first();
     await expect(row.locator(".cw-status")).toContainText("destroyed");
     expect(disallowedBrowserCalls).toEqual([]);

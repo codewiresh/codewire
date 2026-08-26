@@ -6,12 +6,11 @@ use axum::{
 use url::Url;
 
 use crate::{
-    auth::{authenticated_identity, enforce_two_factor},
     environment_connect,
     error::WebError,
-    response::{error_page, login_redirect, render_page_with_connect_origin, two_factor_redirect},
-    routes::organization_governance::connect_page_error,
-    security::canonical_cookie,
+    response::{error_page, render_page_with_connect_origin},
+    routes::organization_governance::{connect_page_error, get_context},
+    security::{csrf_cookie, new_csrf_token, with_csrf_cookie},
     state::AppState,
     templates::TerminalTemplate,
     view::TerminalPageView,
@@ -19,27 +18,24 @@ use crate::{
 
 pub(super) async fn page(
     State(state): State<AppState>,
-    Path((org_id, environment_id)): Path<(String, String)>,
+    Path((slug, environment_id)): Path<(String, String)>,
     headers: HeaderMap,
 ) -> Response {
-    let continuation = terminal_path(&org_id, &environment_id);
-    let identity = match authenticated_identity(&state, &headers).await {
-        Ok(identity) => identity,
-        Err(WebError::Unauthorized) => return login_redirect(&continuation, &headers),
-        Err(error) => return error_page(error),
-    };
-    if let Err(error) = enforce_two_factor(&identity) {
-        return match error {
-            WebError::TwoFactorRequired => two_factor_redirect(&continuation, &headers),
-            error => error_page(error),
-        };
+    let continuation = terminal_path(&slug, &environment_id);
+    if !codewire_server_core::organization_slug::valid_organization_slug(&slug)
+        || !canonical_environment_id(&environment_id)
+    {
+        return error_page(WebError::NotFound);
     }
-    let cookie = match canonical_cookie(&headers) {
-        Ok(cookie) => cookie,
-        Err(()) => return login_redirect(&continuation, &headers),
-    };
+    let (dashboard, organization, cookie) =
+        match get_context(&state, &headers, &slug, &continuation).await {
+            Ok(context) => context,
+            Err(response) => return response,
+        };
     let environment =
-        match environment_connect::environment(&state, cookie, &org_id, &environment_id).await {
+        match environment_connect::environment(&state, cookie, &organization.id, &environment_id)
+            .await
+        {
             Ok(environment) => environment,
             Err(error) => return connect_page_error(error, &continuation, &headers),
         };
@@ -51,12 +47,27 @@ pub(super) async fn page(
             }
         };
     let view = TerminalPageView {
-        organization_id: org_id,
+        organization_id: organization.id.clone(),
         environment,
         websocket_origin,
-        environments_url: "/dashboard".to_owned(),
     };
-    render_page_with_connect_origin(TerminalTemplate { page: &view }, &view.websocket_origin)
+    let token = new_csrf_token();
+    with_csrf_cookie(
+        render_page_with_connect_origin(
+            TerminalTemplate {
+                view: &dashboard,
+                organization: &organization,
+                page: &view,
+                csrf_token: &token,
+            },
+            &view.websocket_origin,
+        ),
+        csrf_cookie(&state.public_origin, &token),
+    )
+}
+
+pub(super) fn canonical_environment_id(value: &str) -> bool {
+    uuid::Uuid::parse_str(value).is_ok_and(|parsed| parsed.to_string() == value)
 }
 
 pub(crate) fn browser_websocket_origin(public_origin: &str, api_origin: &str) -> Option<String> {
@@ -74,11 +85,11 @@ pub(crate) fn browser_websocket_origin(public_origin: &str, api_origin: &str) ->
     Some(api.as_str().trim_end_matches('/').to_owned())
 }
 
-fn terminal_path(org_id: &str, environment_id: &str) -> String {
+fn terminal_path(slug: &str, environment_id: &str) -> String {
     let mut url = Url::parse("https://codewire.invalid").expect("static base URL");
     url.path_segments_mut()
         .expect("base URL can have path segments")
-        .extend(["terminal", org_id, environment_id]);
+        .extend([slug, environment_id, ""]);
     url.path().to_owned()
 }
 
@@ -104,10 +115,24 @@ mod tests {
     }
 
     #[test]
-    fn terminal_continuation_encodes_path_segments() {
+    fn sandbox_continuation_encodes_path_segments() {
         assert_eq!(
             terminal_path("org/unsafe", "env?unsafe"),
-            "/terminal/org%2Funsafe/env%3Funsafe"
+            "/org%2Funsafe/env%3Funsafe/"
         );
+    }
+
+    #[test]
+    fn detail_route_requires_a_full_lowercase_uuid() {
+        assert!(canonical_environment_id(
+            "5d1db799-4300-4ab3-b957-efb980760542"
+        ));
+        assert!(!canonical_environment_id(
+            "5D1DB799-4300-4AB3-B957-EFB980760542"
+        ));
+        assert!(!canonical_environment_id(
+            "5d1db79943004ab3b957efb980760542"
+        ));
+        assert!(!canonical_environment_id("environment-id"));
     }
 }

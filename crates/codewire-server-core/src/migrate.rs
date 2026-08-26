@@ -51,8 +51,9 @@ mod tests {
     use super::*;
 
     const ACCEPTED_APPLICATION_SCHEMA_FINGERPRINT: &str =
-        "7efec7387c7f419ac77ada50f0658202f60dbe50040d3d9f8aab231eb9ac7093";
+        "3e01e1718ed0c2b19a4a36505026bc6801a0b66a9779d7c66864b3354bd797b1";
     const RETIRE_MESH_OIDC_CLIENT_VERSION: i64 = 5;
+    const ORGANIZATION_ROUTE_SLUGS_VERSION: i64 = 11;
 
     async fn startup(database_url: String) -> anyhow::Result<()> {
         ensure_schema(&database_url).await
@@ -117,6 +118,7 @@ mod tests {
                 "application schema fingerprint changed: {fingerprint}"
             );
             assert_tenant_secret_envelope_schema(&pool).await?;
+            assert_organization_route_slug_schema(&pool).await?;
             pool.close().await;
 
             ensure_schema(&test_db.url).await?;
@@ -249,6 +251,94 @@ mod tests {
             .execute(pool)
             .await?;
         Ok(())
+    }
+
+    async fn assert_organization_route_slug_schema(pool: &PgPool) -> anyhow::Result<()> {
+        sqlx::query(
+            "INSERT INTO organizations (id, name, slug, created_by) \
+             VALUES ('org-route-safe', 'Route Safe', 'route-safe', 'retained-user')",
+        )
+        .execute(pool)
+        .await?;
+
+        for (id, slug) in [
+            ("org-route-reserved", "admin"),
+            ("org-route-uppercase", "Route-Unsafe"),
+            ("org-route-double-hyphen", "route--unsafe"),
+        ] {
+            let rejected = sqlx::query(
+                "INSERT INTO organizations (id, name, slug, created_by) VALUES ($1, $1, $2, 'retained-user')",
+            )
+            .bind(id)
+            .bind(slug)
+            .execute(pool)
+            .await;
+            anyhow::ensure!(rejected.is_err(), "organization slug {slug:?} was accepted");
+        }
+
+        sqlx::query("DELETE FROM organizations WHERE id = 'org-route-safe'")
+            .execute(pool)
+            .await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "requires TEST_DATABASE_URL"]
+    async fn organization_route_slug_migration_rejects_conflicting_existing_data_atomically()
+    -> anyhow::Result<()> {
+        let admin_url = std::env::var("TEST_DATABASE_URL")
+            .context("TEST_DATABASE_URL is required for migration tests")?;
+        let test_db = TestDatabase::create(&admin_url).await?;
+        let result = async {
+            apply_migrations_before(&test_db.url, ORGANIZATION_ROUTE_SLUGS_VERSION).await?;
+            let pool = PgPoolOptions::new()
+                .max_connections(1)
+                .connect(&test_db.url)
+                .await?;
+            sqlx::query("INSERT INTO users (id, email) VALUES ('route-user', 'route@example.test')")
+                .execute(&pool)
+                .await?;
+            sqlx::query(
+                "INSERT INTO organizations (id, name, slug, created_by) \
+                 VALUES ('org-route-conflict', 'Conflict', 'admin', 'route-user')",
+            )
+            .execute(&pool)
+            .await?;
+            pool.close().await;
+
+            let error = ensure_schema(&test_db.url)
+                .await
+                .expect_err("reserved existing slug must fail migration preflight");
+            anyhow::ensure!(
+                format!("{error:#}")
+                    .contains("organization slug data conflicts with canonical dashboard routes")
+            );
+
+            let pool = PgPoolOptions::new()
+                .max_connections(1)
+                .connect(&test_db.url)
+                .await?;
+            let slug: String = sqlx::query_scalar(
+                "SELECT slug FROM organizations WHERE id = 'org-route-conflict'",
+            )
+            .fetch_one(&pool)
+            .await?;
+            anyhow::ensure!(slug == "admin", "conflicting row changed during failed migration");
+            let constraint_count: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM pg_constraint WHERE conname = 'organizations_route_slug_check'",
+            )
+            .fetch_one(&pool)
+            .await?;
+            anyhow::ensure!(
+                constraint_count == 0,
+                "failed migration left the route-slug constraint behind"
+            );
+            pool.close().await;
+            anyhow::Ok(())
+        }
+        .await;
+        let cleanup = test_db.drop().await;
+        result.and(cleanup)
     }
 
     #[tokio::test]

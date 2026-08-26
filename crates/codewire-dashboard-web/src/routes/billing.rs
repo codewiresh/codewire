@@ -125,7 +125,7 @@ async fn billing_session(
 }
 
 fn billing_path(slug: &str) -> String {
-    format!("/dashboard/orgs/{slug}/billing")
+    format!("/{slug}/billing/")
 }
 
 fn billing_message(value: &str) -> &'static str {

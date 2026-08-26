@@ -300,10 +300,10 @@ test.describe.serial("server-rendered identity flows", () => {
     ));
     expect(session).toMatchObject({ httpOnly: true, sameSite: "Lax", path: "/" });
 
-    await page.goto("/dashboard/settings");
+    await page.goto("/settings/");
     const signOut = await submitAndCapture(
       page,
-      "/dashboard/settings/_actions/sign-out",
+      "/settings/_actions/sign-out",
       /sign out/i,
     );
     expect(signOut.status()).toBe(303);

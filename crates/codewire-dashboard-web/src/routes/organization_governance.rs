@@ -41,14 +41,6 @@ pub(super) struct OrganizationQuery {
     error: String,
 }
 
-pub(super) async fn organization_root(
-    State(_state): State<AppState>,
-    Path(slug): Path<String>,
-    headers: HeaderMap,
-) -> Response {
-    redirect(format!("/dashboard/orgs/{slug}/environments"), &headers)
-}
-
 pub(super) async fn members_page(
     State(state): State<AppState>,
     Path(slug): Path<String>,
@@ -523,7 +515,7 @@ pub(super) async fn get_context(
     slug: &str,
     continuation: &str,
 ) -> Result<(DashboardView, OrganizationContext, HeaderValue), Response> {
-    let dashboard = dashboard_shell_view(state, headers)
+    let mut dashboard = dashboard_shell_view(state, headers)
         .await
         .map_err(|error| route_error(error, continuation, headers))?;
     let row = dashboard
@@ -533,6 +525,11 @@ pub(super) async fn get_context(
         .ok_or_else(|| error_page(WebError::NotFound))?;
     let organization = OrganizationContext::from_row(row);
     let cookie = canonical_cookie(headers).map_err(|()| login_redirect(continuation, headers))?;
+    let rail =
+        crate::environment_connect::environments(state, cookie.clone(), &organization.id, false)
+            .await;
+    let rail_available = rail.is_ok();
+    dashboard.select_organization(&organization, rail.unwrap_or_default(), rail_available);
     Ok((dashboard, organization, cookie))
 }
 
@@ -780,11 +777,11 @@ pub(super) fn valid_identifier(value: &str) -> bool {
 }
 
 fn members_path(slug: &str) -> String {
-    format!("/dashboard/orgs/{slug}/members")
+    format!("/{slug}/members/")
 }
 
 fn api_keys_path(slug: &str) -> String {
-    format!("/dashboard/orgs/{slug}/api-keys")
+    format!("/{slug}/api-keys/")
 }
 
 fn members_message(value: &str) -> &'static str {

@@ -17,7 +17,7 @@ test.describe("server-rendered organization creation", () => {
     test.skip(!!isMobile, "desktop visual contract");
     const browserRequests: string[] = [];
     page.on("request", (request) => browserRequests.push(request.url()));
-    const response = await page.goto("/dashboard/orgs/new");
+    const response = await page.goto("/organizations/new/");
     expect(response?.status()).toBe(200);
     await expect(page.getByRole("heading", { name: "Create Organization" })).toBeVisible();
     await page.getByLabel("Organization Name").fill("A Useful Team");
@@ -29,21 +29,22 @@ test.describe("server-rendered organization creation", () => {
   test("creates an organization through HTMX and returns to the dashboard", async ({ page, isMobile }) => {
     test.skip(!!isMobile, "covered by the desktop interaction contract");
     const slug = `${slugPrefix}-htmx`;
-    await page.goto("/dashboard/orgs/new");
+    await page.goto("/organizations/new/");
     await page.getByLabel("Organization Name").fill("SSR HTMX Organization");
     await page.getByLabel("Slug").fill(slug);
 
     const post = page.waitForResponse((response) => (
-      response.url().endsWith("/dashboard/_actions/organizations")
+      response.url().endsWith("/organizations/_actions/create")
       && response.request().method() === "POST"
     ));
     await page.getByRole("button", { name: "Create Organization" }).click();
     const response = await post;
     expect(response.status()).toBe(200);
-    expect(response.headers()["hx-redirect"]).toBe("/dashboard");
+    expect(response.headers()["hx-redirect"]).toBe("/dashboard/");
 
-    await expect(page).toHaveURL(`${ssrUrl}/dashboard`);
-    const organization = page.locator(".cw-org-card", { hasText: "SSR HTMX Organization" });
+    await expect(page).toHaveURL(`${ssrUrl}/dashboard/`);
+    await page.locator(".cw-sidebar-slot .cw-org-switcher > summary").click();
+    const organization = page.locator(".cw-sidebar-slot .cw-org-menu a", { hasText: "SSR HTMX Organization" });
     await expect(organization).toBeVisible();
     await expect(organization).toContainText("Owner");
   });
@@ -65,7 +66,7 @@ test.describe("server-rendered organization creation", () => {
       cookie.name === "codewire_csrf" && cookie.path === "/dashboard"
     ))).toBe(true);
 
-    await page.goto("/dashboard/orgs/new");
+    await page.goto("/organizations/new/");
     expect((await page.context().cookies()).filter((cookie) => (
       cookie.name === "codewire_csrf"
     ))).toHaveLength(0);
@@ -73,22 +74,22 @@ test.describe("server-rendered organization creation", () => {
     await page.getByLabel("Slug").fill(slug);
 
     const post = page.waitForResponse((response) => (
-      response.url().endsWith("/dashboard/_actions/organizations")
+      response.url().endsWith("/organizations/_actions/create")
       && response.request().method() === "POST"
     ));
     await page.getByRole("button", { name: "Create Organization" }).click();
     const response = await post;
     expect(response.status()).toBe(200);
-    expect(response.headers()["hx-redirect"]).toBe("/dashboard");
-    await expect(page).toHaveURL(`${ssrUrl}/dashboard`);
-    await expect(page.locator(".cw-org-card", {
+    expect(response.headers()["hx-redirect"]).toBe("/dashboard/");
+    await expect(page).toHaveURL(`${ssrUrl}/dashboard/`);
+    await expect(page.locator(".cw-sidebar-slot .cw-org-menu a", {
       hasText: "SSR Legacy Cookie Organization",
     })).toContainText("Owner");
   });
 
   test("returns an HTMX validation fragment and preserves submitted values", async ({ page, isMobile }) => {
     test.skip(!!isMobile, "covered by the desktop interaction contract");
-    await page.goto("/dashboard/orgs/new");
+    await page.goto("/organizations/new/");
     await page.getByLabel("Organization Name").fill("Preserved Organization");
     await page.getByLabel("Slug").evaluate((input) => {
       input.removeAttribute("minlength");
@@ -97,7 +98,7 @@ test.describe("server-rendered organization creation", () => {
     await page.getByLabel("Slug").fill("ab");
 
     const post = page.waitForResponse((response) => (
-      response.url().endsWith("/dashboard/_actions/organizations")
+      response.url().endsWith("/organizations/_actions/create")
       && response.request().method() === "POST"
     ));
     await page.getByRole("button", { name: "Create Organization" }).click();
@@ -111,9 +112,9 @@ test.describe("server-rendered organization creation", () => {
 
   test("returns a complete validation page to a normal form post", async ({ page, isMobile }) => {
     test.skip(!!isMobile, "covered by the desktop no-JavaScript contract");
-    await page.goto("/dashboard/orgs/new");
+    await page.goto("/organizations/new/");
     const csrf = await page.locator('input[name="_csrf"]').inputValue();
-    const response = await page.request.post("/dashboard/_actions/organizations", {
+    const response = await page.request.post("/organizations/_actions/create", {
       form: {
         name: "Normal Validation Organization",
         slug: "ab",
@@ -131,17 +132,17 @@ test.describe("server-rendered organization creation", () => {
   test("maps a duplicate organization slug to the slug field", async ({ page, isMobile }) => {
     test.skip(!!isMobile, "covered by the desktop interaction contract");
     const slug = `${slugPrefix}-duplicate`;
-    await page.goto("/dashboard/orgs/new");
+    await page.goto("/organizations/new/");
     await page.getByLabel("Organization Name").fill("First Organization");
     await page.getByLabel("Slug").fill(slug);
     await page.getByRole("button", { name: "Create Organization" }).click();
-    await expect(page).toHaveURL(`${ssrUrl}/dashboard`);
+    await expect(page).toHaveURL(`${ssrUrl}/dashboard/`);
 
-    await page.goto("/dashboard/orgs/new");
+    await page.goto("/organizations/new/");
     await page.getByLabel("Organization Name").fill("Duplicate Organization");
     await page.getByLabel("Slug").fill(slug);
     const post = page.waitForResponse((response) => (
-      response.url().endsWith("/dashboard/_actions/organizations")
+      response.url().endsWith("/organizations/_actions/create")
       && response.request().method() === "POST"
     ));
     await page.getByRole("button", { name: "Create Organization" }).click();
@@ -160,26 +161,26 @@ test.describe("server-rendered organization creation", () => {
       storageState: authState,
     });
     const page = await context.newPage();
-    await page.goto("/dashboard/orgs/new");
+    await page.goto("/organizations/new/");
     await page.getByLabel("Organization Name").fill("SSR No JavaScript Organization");
     await page.getByLabel("Slug").fill(slug);
     const post = page.waitForResponse((response) => (
-      response.url().endsWith("/dashboard/_actions/organizations")
+      response.url().endsWith("/organizations/_actions/create")
       && response.request().method() === "POST"
     ));
     await page.getByLabel("Slug").press("Enter");
     const response = await post;
     expect(response.status()).toBe(303);
-    expect(response.headers().location).toBe("/dashboard");
-    await expect(page).toHaveURL(`${ssrUrl}/dashboard`);
-    await expect(page.locator(".cw-org-card", { hasText: "SSR No JavaScript Organization" })).toContainText("Owner");
+    expect(response.headers().location).toBe("/dashboard/");
+    await expect(page).toHaveURL(`${ssrUrl}/dashboard/`);
+    await expect(page.locator(".cw-sidebar-slot .cw-org-menu a", { hasText: "SSR No JavaScript Organization" })).toContainText("Owner");
     await context.close();
   });
 
   test("rejects a form post without the double-submit token", async ({ page, isMobile }) => {
     test.skip(!!isMobile, "covered by the desktop security contract");
-    await page.goto("/dashboard/orgs/new");
-    const response = await page.request.post("/dashboard/_actions/organizations", {
+    await page.goto("/organizations/new/");
+    const response = await page.request.post("/organizations/_actions/create", {
       form: {
         name: "Missing Token",
         slug: `${slugPrefix}-missing-token`,
@@ -193,7 +194,7 @@ test.describe("server-rendered organization creation", () => {
 
   test("mobile organization form matches the responsive shell", async ({ page, isMobile }) => {
     test.skip(!isMobile, "mobile visual contract");
-    await page.goto("/dashboard/orgs/new");
+    await page.goto("/organizations/new/");
     await expect(page.getByRole("heading", { name: "Create Organization" })).toBeVisible();
     await expect(page).toHaveScreenshot("organization-form-mobile.png", { fullPage: true });
   });

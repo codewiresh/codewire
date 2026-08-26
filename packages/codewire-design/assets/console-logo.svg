@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 96 24" fill="none">
+  <g stroke="#1f96b4" stroke-width="2" stroke-linecap="round">
+    <path d="M1 6h5l10 12h5"/>
+    <path d="M1 18h5L16 6h5"/>
+  </g>
+  <text x="29" y="17" fill="#ededed" font-family="IBM Plex Mono, ui-monospace, monospace" font-size="14" font-weight="500">codewire</text>
+</svg>

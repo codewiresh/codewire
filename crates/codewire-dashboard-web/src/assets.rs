@@ -5,6 +5,7 @@ use std::{
 
 use axum::{
     Router,
+    body::Body,
     http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
     routing::{MethodRouter, get},
@@ -34,7 +35,14 @@ pub(crate) const XTERM_SCRIPT_PATH: &str = "/assets/codewire/xterm-6.0.0.js";
 pub(crate) const XTERM_FIT_SCRIPT_PATH: &str = "/assets/codewire/addon-fit-0.11.0.js";
 pub(crate) const XTERM_WEB_LINKS_SCRIPT_PATH: &str = "/assets/codewire/addon-web-links-0.12.0.js";
 pub(crate) const LOGO_PATH: &str = "/assets/codewire/logo-v1.svg";
+pub(crate) const CONSOLE_LOGO_PATH: &str = "/assets/codewire/console-logo-v1.svg";
 pub(crate) const ICONS_PATH: &str = "/assets/codewire/icons-v2.svg";
+pub(crate) const IBM_PLEX_MONO_REGULAR_PATH: &str =
+    "/assets/codewire/fonts/ibm-plex-mono-regular-2.5.0.woff2";
+pub(crate) const IBM_PLEX_MONO_MEDIUM_PATH: &str =
+    "/assets/codewire/fonts/ibm-plex-mono-medium-2.5.0.woff2";
+pub(crate) const IBM_PLEX_MONO_SEMIBOLD_PATH: &str =
+    "/assets/codewire/fonts/ibm-plex-mono-semibold-2.5.0.woff2";
 
 const HTMX: &str = include_str!("../assets/htmx-2.0.10.min.js");
 const STYLES: &str = concat!(
@@ -67,7 +75,15 @@ const XTERM_SCRIPT: &str = include_str!("../assets/xterm/xterm-6.0.0.js");
 const XTERM_FIT_SCRIPT: &str = include_str!("../assets/xterm/addon-fit-0.11.0.js");
 const XTERM_WEB_LINKS_SCRIPT: &str = include_str!("../assets/xterm/addon-web-links-0.12.0.js");
 const LOGO: &str = include_str!("../../../packages/codewire-design/assets/logo.svg");
+const CONSOLE_LOGO: &str =
+    include_str!("../../../packages/codewire-design/assets/console-logo.svg");
 const ICONS: &str = include_str!("../../../packages/codewire-design/assets/icons.svg");
+const IBM_PLEX_MONO_REGULAR: &[u8] =
+    include_bytes!("../assets/fonts/IBMPlexMono-Regular-2.5.0.woff2");
+const IBM_PLEX_MONO_MEDIUM: &[u8] =
+    include_bytes!("../assets/fonts/IBMPlexMono-Medium-2.5.0.woff2");
+const IBM_PLEX_MONO_SEMIBOLD: &[u8] =
+    include_bytes!("../assets/fonts/IBMPlexMono-SemiBold-2.5.0.woff2");
 
 pub(crate) fn router() -> Router<AppState> {
     Router::new()
@@ -155,19 +171,41 @@ pub(crate) fn router() -> Router<AppState> {
             ),
         )
         .route(LOGO_PATH, static_asset("image/svg+xml", LOGO))
+        .route(
+            CONSOLE_LOGO_PATH,
+            static_asset("image/svg+xml", CONSOLE_LOGO),
+        )
         .route(ICONS_PATH, static_asset("image/svg+xml", ICONS))
+        .route(
+            IBM_PLEX_MONO_REGULAR_PATH,
+            static_binary_asset("font/woff2", IBM_PLEX_MONO_REGULAR),
+        )
+        .route(
+            IBM_PLEX_MONO_MEDIUM_PATH,
+            static_binary_asset("font/woff2", IBM_PLEX_MONO_MEDIUM),
+        )
+        .route(
+            IBM_PLEX_MONO_SEMIBOLD_PATH,
+            static_binary_asset("font/woff2", IBM_PLEX_MONO_SEMIBOLD),
+        )
 }
 
 fn static_asset(content_type: &'static str, body: &'static str) -> MethodRouter<AppState> {
     get(move |headers: HeaderMap| async move { static_response(&headers, content_type, body) })
 }
 
-fn content_etag(body: &str) -> String {
+fn static_binary_asset(content_type: &'static str, body: &'static [u8]) -> MethodRouter<AppState> {
+    get(
+        move |headers: HeaderMap| async move { static_binary_response(&headers, content_type, body) },
+    )
+}
+
+fn content_etag(body: &[u8]) -> String {
     // This is a cache validator, not a security digest. Including the length
     // and a deterministic content hash makes an embedded asset change its
     // validator automatically without another build dependency or manifest.
     let mut hasher = DefaultHasher::new();
-    body.as_bytes().hash(&mut hasher);
+    body.hash(&mut hasher);
     format!("\"{:x}-{:016x}\"", body.len(), hasher.finish())
 }
 
@@ -175,6 +213,14 @@ fn static_response(
     headers: &HeaderMap,
     content_type: &'static str,
     body: &'static str,
+) -> Response {
+    static_binary_response(headers, content_type, body.as_bytes())
+}
+
+fn static_binary_response(
+    headers: &HeaderMap,
+    content_type: &'static str,
+    body: &'static [u8],
 ) -> Response {
     let etag = content_etag(body);
     let not_modified = headers
@@ -188,7 +234,7 @@ fn static_response(
     let mut response = if not_modified {
         StatusCode::NOT_MODIFIED.into_response()
     } else {
-        (StatusCode::OK, body).into_response()
+        Response::new(Body::from(body))
     };
     let response_headers = response.headers_mut();
     response_headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));

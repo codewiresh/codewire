@@ -39,6 +39,7 @@ use crate::{
     templates::{
         EnvironmentCreateFormTemplate, EnvironmentListTemplate, EnvironmentResizeOperationTemplate,
         OrganizationEnvironmentsContentTemplate, OrganizationEnvironmentsTemplate,
+        SandboxRailTemplate,
     },
     view::{
         EnvironmentAppPortFormRow, EnvironmentCreateFormView, EnvironmentDetectionView,
@@ -421,7 +422,7 @@ impl EnvironmentSubmission {
             "confidential" if form.confidential_available => IsolationTier::Confidential,
             "confidential" => {
                 form.form_error =
-                    "Confidential environments are not available for this organization.".to_owned();
+                    "Confidential Sandboxes are not available for this organization.".to_owned();
                 IsolationTier::Unspecified
             }
             _ => {
@@ -544,8 +545,6 @@ pub(super) async fn page(
                 view: &dashboard,
                 organization: &organization,
                 page: &page,
-                active_tab: "environments",
-                terminal_websocket_origin: &websocket_origin,
             },
             &websocket_origin,
         ),
@@ -589,6 +588,19 @@ pub(super) async fn list_fragment(
             page: &page,
         },
     )
+}
+
+pub(super) async fn rail_fragment(
+    State(state): State<AppState>,
+    Path(slug): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let continuation = environments_path(&slug);
+    let (dashboard, _, _) = match get_context(&state, &headers, &slug, &continuation).await {
+        Ok(context) => context,
+        Err(response) => return response,
+    };
+    render_template(StatusCode::OK, SandboxRailTemplate { view: &dashboard })
 }
 
 pub(super) async fn prepare(
@@ -868,8 +880,7 @@ pub(super) async fn create(
             environment_connect::set_user_secrets(&state, cookie.clone(), secret_values).await
     {
         form.form_error =
-            "The selected agent credential could not be saved. No environment was created."
-                .to_owned();
+            "The selected agent credential could not be saved. No Sandbox was created.".to_owned();
         if error.code == ErrorCode::Unauthenticated {
             return login_redirect(&environments_path(&slug), &headers);
         }
@@ -1605,8 +1616,6 @@ async fn render_action_page(
                 view: &dashboard,
                 organization: &organization,
                 page: &page,
-                active_tab: "environments",
-                terminal_websocket_origin: &websocket_origin,
             },
             &websocket_origin,
         )
@@ -1643,8 +1652,6 @@ fn render_environments_page(
                 view: &dashboard,
                 organization: &organization,
                 page: &page,
-                active_tab: "environments",
-                terminal_websocket_origin: &websocket_origin,
             },
             &websocket_origin,
         )
@@ -1819,11 +1826,11 @@ fn prepare_error_message(error: &ConnectError) -> &'static str {
         _ => {}
     }
     match error.code {
-        ErrorCode::InvalidArgument => "The repository or environment options are invalid.",
+        ErrorCode::InvalidArgument => "The repository or Sandbox options are invalid.",
         ErrorCode::FailedPrecondition => {
             "Repository analysis is not available for this configuration."
         }
-        ErrorCode::PermissionDenied => "You do not have permission to prepare this environment.",
+        ErrorCode::PermissionDenied => "You do not have permission to prepare this Sandbox.",
         ErrorCode::DeadlineExceeded => "Repository preparation took too long and was cancelled.",
         _ => "Repository preparation is temporarily unavailable.",
     }
@@ -2058,10 +2065,10 @@ fn mutation_error(error: &ConnectError) -> &'static str {
 
 fn page_message(value: &str) -> &'static str {
     match value {
-        "environment-created" => "Environment creation started.",
-        "environment-started" => "Environment start requested.",
-        "environment-stopping" => "Environment stop requested.",
-        "environment-destroying" => "Environment destruction requested.",
+        "environment-created" => "Sandbox creation started.",
+        "environment-started" => "Sandbox start requested.",
+        "environment-stopping" => "Sandbox stop requested.",
+        "environment-destroying" => "Sandbox destruction requested.",
         "port-created" => "Port created.",
         "port-deleted" => "Port deleted.",
         _ => "",
@@ -2129,10 +2136,10 @@ fn resize_operation_redirect(
 
 fn page_error(value: &str) -> &'static str {
     match value {
-        "invalid" => "The environment request was invalid for its current state.",
-        "not-authorized" => "You do not have permission to change that environment.",
-        "not-found" => "The environment no longer exists.",
-        "unavailable" => "The environment service is temporarily unavailable.",
+        "invalid" => "The Sandbox request was invalid for its current state.",
+        "not-authorized" => "You do not have permission to change that Sandbox.",
+        "not-found" => "The Sandbox no longer exists.",
+        "unavailable" => "The Sandbox service is temporarily unavailable.",
         _ => "",
     }
 }
@@ -2165,7 +2172,7 @@ fn ports_redirect(
 }
 
 fn environments_path(slug: &str) -> String {
-    format!("/dashboard/orgs/{slug}/environments")
+    format!("/{slug}/")
 }
 
 #[cfg(test)]
@@ -2179,12 +2186,13 @@ mod tests {
             slug: "test".into(),
             role: "owner",
             can_admin: true,
-            environments_url: "/dashboard/orgs/test/environments".into(),
-            presets_url: "/dashboard/orgs/test/presets".into(),
-            secrets_url: "/dashboard/orgs/test/secrets".into(),
-            api_keys_url: "/dashboard/orgs/test/api-keys".into(),
-            members_url: "/dashboard/orgs/test/members".into(),
-            billing_url: "/dashboard/orgs/test/billing".into(),
+            environments_url: "/test/".into(),
+            snapshots_url: "/test/snapshots/".into(),
+            presets_url: "/test/presets/".into(),
+            secrets_url: "/test/secrets/".into(),
+            api_keys_url: "/test/api-keys/".into(),
+            members_url: "/test/members/".into(),
+            billing_url: "/test/billing/".into(),
         }
     }
 
@@ -2449,12 +2457,13 @@ mod tests {
             slug: "organization".to_owned(),
             role: "owner",
             can_admin: true,
-            environments_url: "/dashboard/orgs/organization/environments".to_owned(),
-            presets_url: "/dashboard/orgs/organization/presets".to_owned(),
-            secrets_url: "/dashboard/orgs/organization/secrets".to_owned(),
-            api_keys_url: "/dashboard/orgs/organization/api-keys".to_owned(),
-            members_url: "/dashboard/orgs/organization/members".to_owned(),
-            billing_url: "/dashboard/orgs/organization/billing".to_owned(),
+            environments_url: "/organization/".to_owned(),
+            snapshots_url: "/organization/snapshots/".to_owned(),
+            presets_url: "/organization/presets/".to_owned(),
+            secrets_url: "/organization/secrets/".to_owned(),
+            api_keys_url: "/organization/api-keys/".to_owned(),
+            members_url: "/organization/members/".to_owned(),
+            billing_url: "/organization/billing/".to_owned(),
         };
 
         let html = EnvironmentCreateFormTemplate {
@@ -2487,7 +2496,8 @@ mod tests {
             slug: "organization".to_owned(),
             role: "owner",
             can_admin: true,
-            environments_url: "/dashboard/orgs/organization/environments".to_owned(),
+            environments_url: "/organization/".to_owned(),
+            snapshots_url: "/organization/snapshots/".to_owned(),
             presets_url: String::new(),
             secrets_url: String::new(),
             api_keys_url: String::new(),
@@ -2564,6 +2574,7 @@ mod tests {
             role: "owner",
             can_admin: true,
             environments_url: String::new(),
+            snapshots_url: String::new(),
             presets_url: String::new(),
             secrets_url: String::new(),
             api_keys_url: String::new(),
@@ -2586,7 +2597,9 @@ mod tests {
         }
         .render()
         .expect("active resize operation template");
-        assert!(active_html.contains("_fragments/resize?resize_environment=environment-id"));
+        assert!(
+            active_html.contains("_fragments/sandbox-resize?resize_environment=environment-id")
+        );
         assert!(active_html.contains("every 2s"));
 
         let completed = crate::view::EnvironmentResizeOperationView {
@@ -2616,12 +2629,13 @@ mod tests {
             slug: "organization".to_owned(),
             role: "owner",
             can_admin: true,
-            environments_url: "/dashboard/orgs/organization/environments".to_owned(),
-            presets_url: "/dashboard/orgs/organization/presets".to_owned(),
-            secrets_url: "/dashboard/orgs/organization/secrets".to_owned(),
-            api_keys_url: "/dashboard/orgs/organization/api-keys".to_owned(),
-            members_url: "/dashboard/orgs/organization/members".to_owned(),
-            billing_url: "/dashboard/orgs/organization/billing".to_owned(),
+            environments_url: "/organization/".to_owned(),
+            snapshots_url: "/organization/snapshots/".to_owned(),
+            presets_url: "/organization/presets/".to_owned(),
+            secrets_url: "/organization/secrets/".to_owned(),
+            api_keys_url: "/organization/api-keys/".to_owned(),
+            members_url: "/organization/members/".to_owned(),
+            billing_url: "/organization/billing/".to_owned(),
         };
 
         let html = EnvironmentCreateFormTemplate {
@@ -2643,7 +2657,7 @@ mod tests {
     fn feedback_and_stream_text_are_bounded() {
         assert_eq!(
             page_message("environment-created"),
-            "Environment creation started."
+            "Sandbox creation started."
         );
         assert_eq!(page_message("<script>"), "");
         assert_eq!(safe_event_text("line\nother|field"), "lineotherfield");

@@ -245,7 +245,7 @@ mod tests {
         headers.remove(header::ORIGIN);
         headers.insert(
             header::REFERER,
-            HeaderValue::from_static("https://dashboard.example.test/dashboard/orgs/new"),
+            HeaderValue::from_static("https://dashboard.example.test/organizations/new/"),
         );
         assert!(request_has_same_origin(
             &headers,

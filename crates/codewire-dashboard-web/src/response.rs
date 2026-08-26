@@ -129,7 +129,7 @@ pub(crate) fn auth_url(path: &str, continuation: &str) -> String {
     let query = url::form_urlencoded::Serializer::new(String::new())
         .append_pair(
             "return_to",
-            safe_auth_continuation(continuation).unwrap_or("/dashboard"),
+            safe_auth_continuation(continuation).unwrap_or("/dashboard/"),
         )
         .finish();
     format!("{path}?{query}")

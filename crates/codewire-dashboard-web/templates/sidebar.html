@@ -1,60 +1,83 @@
-<nav class="cw-sidebar" aria-label="Main navigation">
-  <div class="cw-sidebar-header">
-    <a class="cw-brand" href="/dashboard">
-      <img src="/assets/codewire/logo-v1.svg" alt="">
-      <span>Codewire</span>
+<nav class="cw-sidebar cw-console-sidebar" aria-label="Main navigation">
+  <div class="cw-console-brand-row">
+    <a class="cw-brand cw-console-brand" href="/dashboard/">
+      <img src="/assets/codewire/console-logo-v1.svg" alt="">
+      <span>codewire</span>
     </a>
-    <p class="cw-user-name">{{ view.user_name }}</p>
+    <button class="cw-icon-button" type="button" data-sidebar-close aria-label="Collapse navigation">‹</button>
   </div>
-  <div class="cw-sidebar-content">
-    <section class="cw-sidebar-section">
-      <h2 class="cw-section-label">Environments</h2>
-      {% if view.has_organizations %}
-      <div class="cw-nav-group">
+
+  <div class="cw-console-org-switcher">
+    <details class="cw-org-switcher">
+      <summary>
+        <span class="cw-org-initial" aria-hidden="true">◇</span>
+        <span class="cw-org-switcher-label">{% if view.has_selected_organization %}{{ view.selected_organization_name }}{% else %}Choose organization{% endif %}</span>
+        <span aria-hidden="true">⌄</span>
+      </summary>
+      <div class="cw-org-menu">
+        <p>Organizations</p>
         {% for organization in view.organizations %}
-        <a class="cw-nav-link" href="{{ organization.url }}">
-          <svg class="cw-nav-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-chevron-right"/></svg>
-          <span>{{ organization.name }}</span>
-        </a>
+        <a href="/dashboard/?org={{ organization.slug }}" data-search-item data-search-text="{{ organization.name }} {{ organization.slug }}">{{ organization.name }}<span>{{ organization.role }}</span></a>
         {% endfor %}
+        <a href="{{ view.new_organization_url }}">＋ New Organization</a>
       </div>
-      {% else %}
-      <p class="cw-sidebar-empty">No organizations</p>
-      {% endif %}
-      <div class="cw-sidebar-new">
-        <a class="cw-nav-link cw-nav-link--quiet" href="{{ view.new_organization_url }}">
-          <svg class="cw-nav-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-plus"/></svg>
-          New Organization
-        </a>
+    </details>
+    <button class="cw-search-trigger" type="button" data-quick-search-open><span>Quick search</span><kbd>/</kbd></button>
+  </div>
+
+  {% if view.has_selected_organization %}
+  <div class="cw-console-create">
+    <a class="cw-button cw-button--accent cw-button--pill" href="{{ view.selected_organization_url }}?create=true">＋ Create Sandbox</a>
+  </div>
+  <div class="cw-console-rail-heading">
+    <a href="{{ view.selected_organization_url }}">View all Sandboxes →</a>
+    <span>{{ view.sandbox_total }}</span>
+  </div>
+  <div class="cw-console-rail" hx-get="/{{ view.selected_organization_slug }}/_fragments/sandbox-rail" hx-trigger="every 10s" hx-swap="innerHTML">
+    {% include "sandbox-rail.html" %}
+  </div>
+  <div class="cw-console-nav">
+    <a class="cw-nav-link" href="{{ view.selected_organization_url }}">Sandboxes</a>
+    <a class="cw-nav-link" href="/{{ view.selected_organization_slug }}/snapshots/">Snapshots <span class="cw-nav-soon">Soon</span></a>
+    <a class="cw-nav-link" href="/{{ view.selected_organization_slug }}/presets/">Presets</a>
+    <a class="cw-nav-link" href="/{{ view.selected_organization_slug }}/secrets/">Secrets</a>
+    <a class="cw-nav-link" href="/{{ view.selected_organization_slug }}/api-keys/">API keys</a>
+    <a class="cw-nav-link" href="/{{ view.selected_organization_slug }}/members/">Members</a>
+    <a class="cw-nav-link" href="/{{ view.selected_organization_slug }}/billing/">Billing</a>
+  </div>
+  {% else %}
+  <div class="cw-console-empty-org"><p>Create an organization to start a Sandbox.</p><a href="{{ view.new_organization_url }}">New organization</a></div>
+  {% endif %}
+
+  {% if view.is_admin %}
+  <div class="cw-console-nav cw-console-nav--admin">
+    <p class="cw-section-label">Admin</p>
+    <a class="cw-nav-link" href="/admin/">Overview</a>
+    <a class="cw-nav-link" href="/admin/billing/">Billing catalog</a>
+    <a class="cw-nav-link" href="/admin/audit/">Audit log</a>
+  </div>
+  {% endif %}
+
+  <div class="cw-console-footer">
+    <a class="cw-nav-link" href="{{ view.settings_url }}{% if view.has_selected_organization %}?org={{ view.selected_organization_slug }}{% endif %}">Settings</a>
+    <a class="cw-nav-link" href="/docs">Docs</a>
+    <span class="cw-console-user">{{ view.user_name }}</span>
+  </div>
+
+  <dialog class="cw-command" data-quick-search>
+    <form method="dialog" class="cw-command-shell">
+      <div class="cw-command-input-row"><span aria-hidden="true">⌕</span><input data-quick-search-input aria-label="Search Codewire" autocomplete="off" placeholder="Search navigation, organizations, and Sandboxes"><button value="cancel" aria-label="Close search">Esc</button></div>
+      <div class="cw-command-results" data-quick-search-results>
+        <a href="/dashboard/" data-search-item data-search-text="dashboard overview home">Dashboard</a>
+        {% for organization in view.organizations %}<a href="/dashboard/?org={{ organization.slug }}" data-search-item data-search-text="organization {{ organization.name }} {{ organization.slug }}">Organization · {{ organization.name }}</a>{% endfor %}
+        {% if view.has_selected_organization %}
+        <a href="{{ view.selected_organization_url }}" data-search-item data-search-text="sandboxes environments all">All Sandboxes</a>
+        <a href="/{{ view.selected_organization_slug }}/snapshots/" data-search-item data-search-text="snapshots storage">Snapshots</a>
+        {% for sandbox in view.sandboxes %}<a href="/{{ view.selected_organization_slug }}/{{ sandbox.id }}/" data-search-item data-search-text="sandbox {{ sandbox.name }} {{ sandbox.id }} {{ sandbox.state }}">Sandbox · {{ sandbox.name }}</a>{% endfor %}
+        {% endif %}
+        <a href="{{ view.settings_url }}" data-search-item data-search-text="settings account security sessions">Settings</a>
       </div>
-    </section>
-    {% if view.is_admin %}
-    <div class="cw-divider"></div>
-    <section class="cw-sidebar-section">
-      <h2 class="cw-section-label">Admin</h2>
-      <a class="cw-nav-link" href="{{ view.admin_url }}">
-        <svg class="cw-nav-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-grid"/></svg>
-        Overview
-      </a>
-      <a class="cw-nav-link" href="/admin/billing">
-        <svg class="cw-nav-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-building"/></svg>
-        Billing Catalog
-      </a>
-      <a class="cw-nav-link" href="/admin/audit">
-        <svg class="cw-nav-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-key"/></svg>
-        Audit Log
-      </a>
-    </section>
-    {% endif %}
-  </div>
-  <div class="cw-sidebar-footer">
-    <a class="cw-nav-link" href="{{ view.settings_url }}">
-      <svg class="cw-nav-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-settings"/></svg>
-      Settings
-    </a>
-    <a class="cw-nav-link" href="/docs">
-      <svg class="cw-nav-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-book"/></svg>
-      Docs
-    </a>
-  </div>
+      <p class="cw-command-empty" data-quick-search-empty hidden>No matching destination.</p>
+    </form>
+  </dialog>
 </nav>

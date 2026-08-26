@@ -28,7 +28,7 @@ use crate::{
     },
 };
 
-const SETTINGS_PATH: &str = "/dashboard/settings";
+const SETTINGS_PATH: &str = "/settings/";
 
 #[derive(Debug, Default, Deserialize)]
 pub(super) struct SettingsQuery {
@@ -199,22 +199,6 @@ pub(super) async fn regenerate_ssh_action(
     }
 }
 
-pub(super) async fn account(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    placeholder(
-        &state,
-        &headers,
-        SettingsPlaceholderView {
-            title: "Account settings",
-            heading: "Account settings",
-            description: "Review the profile attached to your Codewire account.",
-            user_name: String::new(),
-            email: String::new(),
-            show_profile: true,
-        },
-    )
-    .await
-}
-
 pub(super) async fn security(State(state): State<AppState>, headers: HeaderMap) -> Response {
     placeholder(
         &state,
@@ -312,10 +296,8 @@ fn github_connect_url(state: &AppState) -> String {
         state.browser_api_origin
     ))
     .expect("validated API origin");
-    url.query_pairs_mut().append_pair(
-        "return_url",
-        &format!("{}/dashboard/settings", state.public_origin),
-    );
+    url.query_pairs_mut()
+        .append_pair("return_url", &format!("{}/settings/", state.public_origin));
     url.into()
 }
 
@@ -361,10 +343,23 @@ mod tests {
             github_connected: false,
             github_available: false,
             show_checklist: false,
-            new_organization_url: "/dashboard/orgs/new".into(),
+            new_organization_url: "/organizations/new/".into(),
             settings_url: SETTINGS_PATH.into(),
-            admin_url: "/admin".into(),
             github_connect_url: String::new(),
+            has_selected_organization: false,
+            selected_organization_name: String::new(),
+            selected_organization_slug: String::new(),
+            selected_organization_url: String::new(),
+            sandboxes: Vec::new(),
+            recent_sandboxes: Vec::new(),
+            sandbox_rail_available: false,
+            sandbox_total: 0,
+            sandbox_running: 0,
+            sandbox_stopped: 0,
+            sandbox_attention: 0,
+            provisioned_cpu_millicores: 0,
+            provisioned_memory_mb: 0,
+            provisioned_disk_gb: 0,
         }
     }
 
@@ -417,21 +412,21 @@ mod tests {
             .expect("render degraded settings");
 
             assert!(body.contains(notice), "{name}");
-            assert!(body.contains("/settings/account"), "{name}");
+            assert!(body.contains("/settings/"), "{name}");
             assert!(
-                body.contains("/dashboard/settings/_actions/credentials/create"),
+                body.contains("/settings/_actions/credentials/create"),
                 "{name}"
             );
             assert!(!body.contains("upstream-sensitive-detail"), "{name}");
             if name == "identity" {
-                assert!(!body.contains("/dashboard/settings/_actions/git-identity"));
+                assert!(!body.contains("/settings/_actions/git-identity"));
             }
             if name == "ssh" {
-                assert!(!body.contains("/dashboard/settings/_actions/ssh/ensure"));
-                assert!(!body.contains("/dashboard/settings/_actions/ssh/regenerate"));
+                assert!(!body.contains("/settings/_actions/ssh/ensure"));
+                assert!(!body.contains("/settings/_actions/ssh/regenerate"));
             }
             if name == "github" {
-                assert!(!body.contains("/dashboard/settings/_actions/github/disconnect"));
+                assert!(!body.contains("/settings/_actions/github/disconnect"));
                 assert!(!body.contains("/github/connect"));
             }
         }

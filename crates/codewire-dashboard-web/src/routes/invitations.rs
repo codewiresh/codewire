@@ -109,7 +109,7 @@ pub(super) async fn accept(
             title: "Welcome to the team",
             description: "The invitation has been accepted and the organization is now available.",
             primary_label: "Go to dashboard",
-            primary_url: "/dashboard",
+            primary_url: "/dashboard/",
         }),
         Err(error) if error.code == ErrorCode::Unauthenticated => {
             redirect(auth_continuation("/login", &continuation), &headers)

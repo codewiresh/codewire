@@ -206,8 +206,63 @@ pub(crate) struct DashboardView {
     pub(crate) show_checklist: bool,
     pub(crate) new_organization_url: String,
     pub(crate) settings_url: String,
-    pub(crate) admin_url: String,
     pub(crate) github_connect_url: String,
+    pub(crate) has_selected_organization: bool,
+    pub(crate) selected_organization_name: String,
+    pub(crate) selected_organization_slug: String,
+    pub(crate) selected_organization_url: String,
+    pub(crate) sandboxes: Vec<EnvironmentRow>,
+    pub(crate) recent_sandboxes: Vec<EnvironmentRow>,
+    pub(crate) sandbox_rail_available: bool,
+    pub(crate) sandbox_total: usize,
+    pub(crate) sandbox_running: usize,
+    pub(crate) sandbox_stopped: usize,
+    pub(crate) sandbox_attention: usize,
+    pub(crate) provisioned_cpu_millicores: i64,
+    pub(crate) provisioned_memory_mb: i64,
+    pub(crate) provisioned_disk_gb: i64,
+}
+
+impl DashboardView {
+    pub(crate) fn select_organization(
+        &mut self,
+        organization: &OrganizationContext,
+        sandboxes: Vec<EnvironmentRow>,
+        rail_available: bool,
+    ) {
+        self.has_selected_organization = true;
+        self.selected_organization_name = organization.name.clone();
+        self.selected_organization_slug = organization.slug.clone();
+        self.selected_organization_url = organization.environments_url.clone();
+        self.sandbox_total = sandboxes.len();
+        self.sandbox_running = sandboxes
+            .iter()
+            .filter(|sandbox| sandbox.state == "running")
+            .count();
+        self.sandbox_stopped = sandboxes
+            .iter()
+            .filter(|sandbox| sandbox.state == "stopped")
+            .count();
+        self.sandbox_attention = sandboxes
+            .iter()
+            .filter(|sandbox| sandbox.state == "error")
+            .count();
+        self.provisioned_cpu_millicores = sandboxes
+            .iter()
+            .map(|sandbox| i64::from(sandbox.cpu_millicores))
+            .sum();
+        self.provisioned_memory_mb = sandboxes
+            .iter()
+            .map(|sandbox| i64::from(sandbox.memory_mb))
+            .sum();
+        self.provisioned_disk_gb = sandboxes
+            .iter()
+            .map(|sandbox| i64::from(sandbox.disk_gb))
+            .sum();
+        self.recent_sandboxes = sandboxes.iter().take(5).cloned().collect();
+        self.sandboxes = sandboxes;
+        self.sandbox_rail_available = rail_available;
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -229,6 +284,7 @@ pub(crate) struct OrganizationContext {
     pub(crate) role: &'static str,
     pub(crate) can_admin: bool,
     pub(crate) environments_url: String,
+    pub(crate) snapshots_url: String,
     pub(crate) presets_url: String,
     pub(crate) secrets_url: String,
     pub(crate) api_keys_url: String,
@@ -238,19 +294,20 @@ pub(crate) struct OrganizationContext {
 
 impl OrganizationContext {
     pub(crate) fn from_row(row: &OrganizationRow) -> Self {
-        let local_base = format!("/dashboard/orgs/{}", row.slug);
+        let local_base = format!("/{}", row.slug);
         Self {
             id: row.id.clone(),
             name: row.name.clone(),
             slug: row.slug.clone(),
             role: row.role,
             can_admin: row.can_admin,
-            environments_url: format!("{local_base}/environments"),
-            presets_url: format!("{local_base}/presets"),
-            secrets_url: format!("{local_base}/secrets"),
-            api_keys_url: format!("{local_base}/api-keys"),
-            members_url: format!("{local_base}/members"),
-            billing_url: format!("{local_base}/billing"),
+            environments_url: format!("{local_base}/"),
+            snapshots_url: format!("{local_base}/snapshots/"),
+            presets_url: format!("{local_base}/presets/"),
+            secrets_url: format!("{local_base}/secrets/"),
+            api_keys_url: format!("{local_base}/api-keys/"),
+            members_url: format!("{local_base}/members/"),
+            billing_url: format!("{local_base}/billing/"),
         }
     }
 }
@@ -326,7 +383,6 @@ pub(crate) struct TerminalPageView {
     pub(crate) organization_id: String,
     pub(crate) environment: EnvironmentRow,
     pub(crate) websocket_origin: String,
-    pub(crate) environments_url: String,
 }
 
 #[derive(Clone, Debug)]
@@ -589,7 +645,7 @@ pub(crate) const ASSIGNMENTS: [AssignmentView; 7] = [
     },
     AssignmentView {
         value: "environments_admin",
-        label: "Environments Admin",
+        label: "Sandboxes Admin",
         tone: "success",
     },
     AssignmentView {
@@ -1008,17 +1064,14 @@ pub(crate) fn validate_organization_form(form: &mut OrganizationFormView) {
     if form.slug.len() < 3 || form.slug.len() > 48 {
         form.slug_error = "Slug must be between 3 and 48 characters".to_owned();
     } else if !valid_organization_slug(&form.slug) {
-        form.slug_error = "Slug must contain only lowercase letters, numbers, and hyphens (no leading/trailing hyphens)".to_owned();
+        form.slug_error =
+            "Slug is reserved or must contain only lowercase letters, numbers, and single hyphens"
+                .to_owned();
     }
 }
 
 pub(crate) fn valid_organization_slug(slug: &str) -> bool {
-    slug.split('-').all(|part| {
-        !part.is_empty()
-            && part
-                .bytes()
-                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
-    })
+    codewire_server_core::organization_slug::valid_organization_slug(slug)
 }
 
 pub(crate) fn apply_organization_error(form: &mut OrganizationFormView, error: &ConnectError) {

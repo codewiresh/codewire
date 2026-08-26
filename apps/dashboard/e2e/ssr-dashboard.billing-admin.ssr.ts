@@ -29,7 +29,9 @@ async function loginAsAdmin(page: Page) {
 async function followAdminNavigation(page: Page, isMobile: boolean | undefined, name: string) {
   if (isMobile) {
     await page.getByRole("button", { name: "Toggle sidebar" }).click();
-    await page.locator(".cw-mobile-drawer").getByRole("link", { name }).click();
+    const link = page.locator(".cw-mobile-drawer").getByRole("link", { name });
+    await expect(link).toBeVisible();
+    await link.evaluate((element: HTMLAnchorElement) => element.click());
   } else {
     await page.getByRole("link", { name }).click();
   }
@@ -50,15 +52,18 @@ test.describe.serial("server-rendered billing and administration", () => {
     const browserRequests: string[] = [];
     page.on("request", (request) => browserRequests.push(request.url()));
 
-    const response = await page.goto(`/dashboard/orgs/${slug}/billing`);
+    const response = await page.goto(`/${slug}/billing/`);
     expect(response?.status()).toBe(200);
     await expect(page.getByRole("heading", { name: "SSR Billing" })).toBeVisible();
-    await expect(page.getByRole("link", { name: "Billing", exact: true })).toHaveAttribute(
+    await expect(page.getByLabel("Organization navigation").getByRole("link", {
+      name: "Billing",
+      exact: true,
+    })).toHaveAttribute(
       "aria-current",
       "page",
     );
     await expect(page.getByRole("heading", { name: "Plan" })).toBeVisible();
-    await expect(page.getByRole("heading", { name: "Environment Usage" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Sandbox Usage" })).toBeVisible();
     await expect(page.getByRole("heading", { name: "Invoices" })).toBeVisible();
     expect(browserRequests.every((url) => url.startsWith(`${ssrUrl}/`))).toBe(true);
     expect(browserRequests.some((url) => new URL(url).pathname.includes("BillingService"))).toBe(false);
@@ -70,8 +75,8 @@ test.describe.serial("server-rendered billing and administration", () => {
   });
 
   test("redirects a non-admin before rendering privileged pages", async ({ page }) => {
-    await page.goto("/admin");
-    await expect(page).toHaveURL(`${ssrUrl}/dashboard`);
+    await page.goto("/admin/");
+    await expect(page).toHaveURL(`${ssrUrl}/dashboard/`);
   });
 
   test("renders the admin overview, audit log, and catalog from server-side Connect clients", async ({
@@ -82,9 +87,9 @@ test.describe.serial("server-rendered billing and administration", () => {
     page.on("request", (request) => browserRequests.push(request.url()));
     await loginAsAdmin(page);
 
-    await page.goto("/admin");
+    await page.goto("/admin/");
     await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
-    await expect(page.getByText("Total Environments")).toBeVisible();
+    await expect(page.getByText("Total Sandboxes")).toBeVisible();
     await expect(page).toHaveScreenshot(
       isMobile ? "admin-overview-mobile.png" : "admin-overview-desktop.png",
       {

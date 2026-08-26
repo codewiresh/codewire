@@ -1,4 +1,9 @@
-use axum::{extract::State, http::HeaderMap, response::Response};
+use axum::{
+    extract::{Query, State},
+    http::HeaderMap,
+    response::Response,
+};
+use serde::Deserialize;
 use url::Url;
 
 use crate::{
@@ -14,17 +19,54 @@ use crate::{
     view::DashboardView,
 };
 
-pub(super) async fn dashboard(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    match dashboard_view(&state, &headers).await {
-        Ok(view) => render_page(DashboardTemplate {
-            organizations: &view.organizations,
-            has_organizations: view.has_organizations,
-            view: &view,
-        }),
+#[derive(Debug, Default, Deserialize)]
+pub(super) struct DashboardQuery {
+    #[serde(default)]
+    org: String,
+}
+
+pub(super) async fn dashboard(
+    State(state): State<AppState>,
+    Query(query): Query<DashboardQuery>,
+    headers: HeaderMap,
+) -> Response {
+    match dashboard_overview_view(&state, &headers, &query.org).await {
+        Ok(view) => render_page(DashboardTemplate { view: &view }),
         Err(WebError::Unauthorized) => login_redirect(DASHBOARD_PATH, &headers),
         Err(WebError::TwoFactorRequired) => two_factor_redirect(DASHBOARD_PATH, &headers),
         Err(error) => error_page(error),
     }
+}
+
+async fn dashboard_overview_view(
+    state: &AppState,
+    headers: &HeaderMap,
+    selected_slug: &str,
+) -> Result<DashboardView, WebError> {
+    let mut view = dashboard_view(state, headers).await?;
+    let selected = if selected_slug.is_empty() {
+        view.organizations.first()
+    } else {
+        view.organizations
+            .iter()
+            .find(|organization| organization.slug == selected_slug)
+    };
+    let Some(selected) = selected else {
+        if selected_slug.is_empty() {
+            view.show_checklist = true;
+            return Ok(view);
+        }
+        return Err(WebError::NotFound);
+    };
+    let organization = crate::view::OrganizationContext::from_row(selected);
+    let cookie = canonical_cookie(headers).map_err(|()| WebError::Unauthorized)?;
+    let sandboxes =
+        crate::environment_connect::environments(state, cookie, &organization.id, false)
+            .await
+            .map_err(WebError::Connect)?;
+    view.show_checklist = sandboxes.is_empty();
+    view.select_organization(&organization, sandboxes, true);
+    Ok(view)
 }
 
 pub(super) async fn dashboard_view(
@@ -50,7 +92,7 @@ pub(super) async fn dashboard_view(
             DependencyResult::Unavailable => (false, false),
         };
     let has_organizations = !organizations.is_empty();
-    let show_checklist = !has_organizations || !github_connected;
+    let show_checklist = !has_organizations;
 
     Ok(DashboardView {
         user_name: identity.display_name().to_owned(),
@@ -61,9 +103,22 @@ pub(super) async fn dashboard_view(
         github_available,
         show_checklist,
         new_organization_url: NEW_ORGANIZATION_PATH.to_owned(),
-        settings_url: "/dashboard/settings".to_owned(),
-        admin_url: "/admin".to_owned(),
+        settings_url: "/settings/".to_owned(),
         github_connect_url: github_connect_url(state),
+        has_selected_organization: false,
+        selected_organization_name: String::new(),
+        selected_organization_slug: String::new(),
+        selected_organization_url: String::new(),
+        sandboxes: Vec::new(),
+        recent_sandboxes: Vec::new(),
+        sandbox_rail_available: false,
+        sandbox_total: 0,
+        sandbox_running: 0,
+        sandbox_stopped: 0,
+        sandbox_attention: 0,
+        provisioned_cpu_millicores: 0,
+        provisioned_memory_mb: 0,
+        provisioned_disk_gb: 0,
     })
 }
 
@@ -99,9 +154,22 @@ pub(super) async fn dashboard_shell_view_from_identity(
         github_available: false,
         show_checklist: false,
         new_organization_url: NEW_ORGANIZATION_PATH.to_owned(),
-        settings_url: "/dashboard/settings".to_owned(),
-        admin_url: "/admin".to_owned(),
+        settings_url: "/settings/".to_owned(),
         github_connect_url: github_connect_url(state),
+        has_selected_organization: false,
+        selected_organization_name: String::new(),
+        selected_organization_slug: String::new(),
+        selected_organization_url: String::new(),
+        sandboxes: Vec::new(),
+        recent_sandboxes: Vec::new(),
+        sandbox_rail_available: false,
+        sandbox_total: 0,
+        sandbox_running: 0,
+        sandbox_stopped: 0,
+        sandbox_attention: 0,
+        provisioned_cpu_millicores: 0,
+        provisioned_memory_mb: 0,
+        provisioned_disk_gb: 0,
     })
 }
 
@@ -112,6 +180,6 @@ fn github_connect_url(state: &AppState) -> String {
     ))
     .expect("validated API origin");
     url.query_pairs_mut()
-        .append_pair("return_url", &format!("{}/dashboard", state.public_origin));
+        .append_pair("return_url", &format!("{}/dashboard/", state.public_origin));
     url.into()
 }

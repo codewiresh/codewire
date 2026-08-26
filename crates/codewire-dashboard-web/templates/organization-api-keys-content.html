@@ -28,8 +28,8 @@
           <form
             class="cw-org-form"
             method="post"
-            action="/dashboard/orgs/{{ organization.slug }}/api-keys/_actions/create"
-            hx-post="/dashboard/orgs/{{ organization.slug }}/api-keys/_actions/create"
+            action="/{{ organization.slug }}/api-keys/_actions/create"
+            hx-post="/{{ organization.slug }}/api-keys/_actions/create"
             hx-target="#organization-content"
             hx-swap="outerHTML"
           >
@@ -83,7 +83,7 @@
           <td>
             <div class="cw-row-actions">
               {% if !key.expired %}
-              <form method="post" action="/dashboard/orgs/{{ organization.slug }}/api-keys/_actions/toggle" hx-post="/dashboard/orgs/{{ organization.slug }}/api-keys/_actions/toggle">
+              <form method="post" action="/{{ organization.slug }}/api-keys/_actions/toggle" hx-post="/{{ organization.slug }}/api-keys/_actions/toggle">
                 <input type="hidden" name="_csrf" value="{{ page.csrf_token }}">
                 <input type="hidden" name="key_id" value="{{ key.id }}">
                 <input type="hidden" name="disabled" value="{% if key.disabled %}false{% else %}true{% endif %}">
@@ -97,7 +97,7 @@
                 <summary class="cw-button cw-button--outline cw-button--small cw-danger-button" aria-label="Delete API key">Delete</summary>
                 <div class="cw-delete-panel">
                   <p>Permanently revoke <strong>{{ key.name }}</strong>? Integrations using it will stop immediately.</p>
-                  <form method="post" action="/dashboard/orgs/{{ organization.slug }}/api-keys/_actions/delete" hx-post="/dashboard/orgs/{{ organization.slug }}/api-keys/_actions/delete">
+                  <form method="post" action="/{{ organization.slug }}/api-keys/_actions/delete" hx-post="/{{ organization.slug }}/api-keys/_actions/delete">
                     <input type="hidden" name="_csrf" value="{{ page.csrf_token }}">
                     <input type="hidden" name="key_id" value="{{ key.id }}">
                     <button class="cw-button cw-button--small" type="submit">Delete permanently</button>

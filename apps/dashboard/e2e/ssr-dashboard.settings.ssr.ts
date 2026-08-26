@@ -23,22 +23,22 @@ test.describe.serial("server-rendered settings mutations", () => {
     test.skip(!!isMobile, "desktop settings mutation contract");
     const browserServiceCalls = watchBrowserServiceCalls(page);
 
-    await page.goto("/dashboard/settings");
+    await page.goto("/settings/");
     await page.getByText("Add credential", { exact: true }).click();
-    const form = page.locator('form[action="/dashboard/settings/_actions/credentials/create"]');
+    const form = page.locator('form[action="/settings/_actions/credentials/create"]');
     await form.getByLabel("Name", { exact: true }).fill(credentialName);
     await form.getByLabel("Host", { exact: true }).fill(credentialHost);
     await form.getByLabel("Username (optional)").fill("e2e-user");
     await form.getByLabel("Token or password").fill(credentialValue);
     await form.getByRole("button", { name: "Save credential" }).click();
 
-    await expect(page).toHaveURL(/\/dashboard\/settings\?message=credential-created$/);
+    await expect(page).toHaveURL(/\/settings\/\?message=credential-created$/);
     await expect(page.getByRole("status")).toContainText("Git credential saved");
     expect(await page.content()).not.toContain(credentialValue);
     const row = page.locator(".cw-credential-row", { hasText: credentialName });
     await expect(row).toContainText(credentialHost);
     await row.getByRole("button", { name: "Delete" }).click();
-    await expect(page).toHaveURL(/\/dashboard\/settings\?message=credential-deleted$/);
+    await expect(page).toHaveURL(/\/settings\/\?message=credential-deleted$/);
     await expect(page.getByRole("status")).toContainText("Git credential deleted");
     await expect(page.locator(".cw-credential-row", { hasText: credentialName })).toHaveCount(0);
     expect(browserServiceCalls).toEqual([]);
@@ -48,8 +48,8 @@ test.describe.serial("server-rendered settings mutations", () => {
     test.skip(!!isMobile, "desktop settings mutation contract");
     const browserServiceCalls = watchBrowserServiceCalls(page);
 
-    await page.goto("/dashboard/settings");
-    const form = page.locator('form[action="/dashboard/settings/_actions/git-identity"]');
+    await page.goto("/settings/");
+    const form = page.locator('form[action="/settings/_actions/git-identity"]');
     const name = form.getByLabel("Name", { exact: true });
     const email = form.getByLabel("Email", { exact: true });
     const originalName = await name.inputValue();
@@ -60,8 +60,8 @@ test.describe.serial("server-rendered settings mutations", () => {
     await expect(page.getByRole("status")).toContainText("Git identity saved");
     await expect(page.getByLabel("Name", { exact: true }).last()).toHaveValue("SSR Git Identity");
 
-    await page.locator('form[action="/dashboard/settings/_actions/git-identity"]').getByLabel("Name", { exact: true }).fill(originalName);
-    await page.locator('form[action="/dashboard/settings/_actions/git-identity"]').getByLabel("Email", { exact: true }).fill(originalEmail);
+    await page.locator('form[action="/settings/_actions/git-identity"]').getByLabel("Name", { exact: true }).fill(originalName);
+    await page.locator('form[action="/settings/_actions/git-identity"]').getByLabel("Email", { exact: true }).fill(originalEmail);
     await page.getByRole("button", { name: "Save identity" }).click();
     await expect(page.getByRole("status")).toContainText("Git identity saved");
     expect(browserServiceCalls).toEqual([]);
@@ -71,7 +71,7 @@ test.describe.serial("server-rendered settings mutations", () => {
     test.skip(!!isMobile, "desktop settings mutation contract");
     const browserServiceCalls = watchBrowserServiceCalls(page);
 
-    await page.goto("/dashboard/settings");
+    await page.goto("/settings/");
     const create = page.getByRole("button", { name: "Create SSH key" });
     if (await create.isVisible()) {
       await create.click();

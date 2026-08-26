@@ -87,6 +87,7 @@ COPY crates/codewire-dashboard-web/assets/LICENSE-HTMX ./usr/share/licenses/htmx
 COPY crates/codewire-dashboard-web/assets/xterm/LICENSE-xterm-6.0.0 ./usr/share/licenses/xterm/LICENSE
 COPY crates/codewire-dashboard-web/assets/xterm/LICENSE-addon-fit-0.11.0 ./usr/share/licenses/xterm-addon-fit/LICENSE
 COPY crates/codewire-dashboard-web/assets/xterm/LICENSE-addon-web-links-0.12.0 ./usr/share/licenses/xterm-addon-web-links/LICENSE
+COPY crates/codewire-dashboard-web/assets/fonts/LICENSE-IBMPlexMono-2.5.0 ./usr/share/licenses/ibm-plex-mono/LICENSE
 RUN find . -type f ! -path './usr/share/codewire/runtime-files.sha256' -print0 \
   | sort -z \
   | xargs -0 sha256sum > ./usr/share/codewire/runtime-files.sha256
