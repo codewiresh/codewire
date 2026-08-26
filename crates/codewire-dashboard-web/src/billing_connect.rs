@@ -426,10 +426,23 @@ mod tests {
             github_connected: false,
             github_available: false,
             show_checklist: false,
-            new_organization_url: "/dashboard/orgs/new".into(),
-            settings_url: "/dashboard/settings".into(),
-            admin_url: "/admin".into(),
+            new_organization_url: "/organizations/new/".into(),
+            settings_url: "/settings/".into(),
             github_connect_url: String::new(),
+            has_selected_organization: false,
+            selected_organization_name: String::new(),
+            selected_organization_slug: String::new(),
+            selected_organization_url: String::new(),
+            sandboxes: Vec::new(),
+            recent_sandboxes: Vec::new(),
+            sandbox_rail_available: false,
+            sandbox_total: 0,
+            sandbox_running: 0,
+            sandbox_stopped: 0,
+            sandbox_attention: 0,
+            provisioned_cpu_millicores: 0,
+            provisioned_memory_mb: 0,
+            provisioned_disk_gb: 0,
         }
     }
 
@@ -464,7 +477,7 @@ mod tests {
             role: "Owner",
             can_admin: true,
             billing_plan: "paid".into(),
-            url: "/dashboard/orgs/test/environments".into(),
+            url: "/test/".into(),
         });
         let outages: [BillingOutage; 3] = [
             (
@@ -507,10 +520,7 @@ mod tests {
 
             assert!(body.contains(notice), "{name}");
             assert!(body.contains("Team"), "{name}");
-            assert!(
-                body.contains("/dashboard/orgs/test/billing/_actions/setup"),
-                "{name}"
-            );
+            assert!(body.contains("/test/billing/_actions/setup"), "{name}");
             assert!(!body.contains("upstream-sensitive-detail"), "{name}");
         }
     }

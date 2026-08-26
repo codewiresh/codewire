@@ -622,6 +622,7 @@ mod tests {
 
     async fn seed_fixture(pool: &PgPool) -> Fixture {
         let suffix = format!("{:x}", uuid::Uuid::new_v4());
+        let slug_suffix = suffix.split('-').next().expect("UUID has a first segment");
         let user_id = format!("mesh-auth-user-{suffix}");
         let org_id = format!("mesh-auth-org-{suffix}");
         let other_org_id = format!("mesh-auth-other-org-{suffix}");
@@ -643,7 +644,7 @@ mod tests {
             )
             .bind(org)
             .bind(format!("{org} name"))
-            .bind(format!("{slug}-{suffix}"))
+            .bind(format!("{slug}-{slug_suffix}"))
             .bind(&user_id)
             .execute(pool)
             .await

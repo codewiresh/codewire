@@ -1,12 +1,27 @@
 import { expect, test } from "@playwright/test";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { getUserId } from "./helpers/db";
+import { cleanupTestOrg, ensureTestOrg } from "./helpers/org";
+import { USERS } from "./helpers/seed";
 
 const dashboardDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const authState = path.join(dashboardDir, "playwright/.auth/user.json");
 const ssrUrl = (process.env.PLAYWRIGHT_BASE_URL || "http://127.0.0.1:5173").replace(/\/$/, "");
+const cleanRoutesOrgSlug = "e2e-clean-routes";
 
 test.describe("server-rendered public, auth, and account routes", () => {
+  test.beforeAll(async ({}, testInfo) => {
+    if (testInfo.project.use.isMobile) return;
+    const ownerId = await getUserId(USERS.master.email);
+    if (!ownerId) throw new Error(`Missing clean-routes fixture owner ${USERS.master.email}`);
+    await ensureTestOrg("Clean Routes Organization", cleanRoutesOrgSlug, ownerId);
+  });
+
+  test.afterAll(async ({}, testInfo) => {
+    if (!testInfo.project.use.isMobile) await cleanupTestOrg(cleanRoutesOrgSlug);
+  });
+
   test("homepage and sign-in stay on the Rust origin", async ({ page, isMobile }) => {
     test.skip(!!isMobile, "desktop route and supply-chain contract");
     const requests: string[] = [];
@@ -86,23 +101,57 @@ test.describe("server-rendered public, auth, and account routes", () => {
 
   test("settings render the current typed integrations and no-JS forms", async ({ page, isMobile }) => {
     test.skip(!!isMobile, "desktop settings contract");
-    const response = await page.goto("/dashboard/settings");
+    const response = await page.goto("/settings/");
     expect(response?.status()).toBe(200);
     await expect(page.getByRole("heading", { name: "Settings", exact: true })).toBeVisible();
     await expect(page.getByRole("heading", { name: "GitHub", exact: true })).toBeVisible();
     await expect(page.getByRole("heading", { name: "Git authentication" })).toBeVisible();
     await expect(page.getByRole("heading", { name: "Git identity" })).toBeVisible();
     await expect(page.getByRole("heading", { name: "SSH key" })).toBeVisible();
-    await expect(page.locator('form[action="/dashboard/settings/_actions/sign-out"]')).toHaveCount(1);
+    await expect(page.locator('form[action="/settings/_actions/sign-out"]')).toHaveCount(1);
     await expect(page.locator('input[name="_csrf"]')).not.toHaveCount(0);
+  });
+
+  test("clean console routes redirect canonically and legacy paths stay retired", async ({ page, isMobile }) => {
+    test.skip(!!isMobile, "desktop clean-route contract");
+    await page.goto("/dashboard/");
+    const snapshotsHref = await page
+      .locator(".cw-sidebar-slot")
+      .getByRole("link", { name: /Snapshots/ })
+      .getAttribute("href");
+    expect(snapshotsHref).toMatch(/^\/[a-z0-9-]+\/snapshots\/$/);
+    const organizationRoot = snapshotsHref!.replace(/snapshots\/$/, "");
+
+    for (const canonical of ["/dashboard/", snapshotsHref!]) {
+      const response = await page.request.get(canonical.slice(0, -1), { maxRedirects: 0 });
+      expect(response.status()).toBe(308);
+      expect(response.headers().location).toBe(canonical);
+    }
+
+    for (const legacy of [
+      "/dashboard/settings",
+      "/dashboard/orgs/legacy/environments",
+      "/terminal/legacy/environment",
+      "/favicon.ico",
+    ]) {
+      expect((await page.request.get(legacy)).status()).toBe(404);
+    }
+    expect((await page.request.get(`${organizationRoot}not-a-uuid/`)).status()).toBe(404);
+    expect((await page.request.get("/dashboard/?org=not-a-member")).status()).toBe(404);
+
+    const snapshots = await page.goto(snapshotsHref!);
+    expect(snapshots?.status()).toBe(200);
+    await expect(page.getByRole("heading", { name: "Snapshots", exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Create Snapshot" })).toBeDisabled();
+    await expect(page.getByText("No snapshots yet", { exact: true })).toBeVisible();
   });
 
   test("account placeholders preserve the current authenticated product behavior", async ({ page, isMobile }) => {
     test.skip(!!isMobile, "desktop account contract");
     for (const [route, heading] of [
-      ["/settings/account", "Account settings"],
-      ["/settings/security", "Security settings"],
-      ["/settings/sessions", "Active sessions"],
+      ["/settings/", "Settings"],
+      ["/settings/security/", "Security settings"],
+      ["/settings/sessions/", "Active sessions"],
     ] as const) {
       const response = await page.goto(route);
       expect(response?.status()).toBe(200);

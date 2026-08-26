@@ -8,9 +8,9 @@
     <link rel="stylesheet" href="/assets/codewire/routes/settings-v1.css">
   </head>
   <body class="cw-body cw-settings-standalone" data-route="settings-placeholder">
-    <header class="cw-settings-topbar"><a class="cw-brand" href="/dashboard"><img src="/assets/codewire/logo-v1.svg" alt=""><span>Codewire</span></a><a href="/dashboard/settings">Dashboard settings</a></header>
+    <header class="cw-settings-topbar"><a class="cw-brand" href="/dashboard/"><img src="/assets/codewire/console-logo-v1.svg" alt=""><span>Codewire</span></a><a href="/settings/">Dashboard settings</a></header>
     <main class="cw-settings-standalone-main">
-      <nav class="cw-settings-tabs" aria-label="Account settings"><a href="/settings/account">Account</a><a href="/settings/security">Security</a><a href="/settings/sessions">Sessions</a></nav>
+      <nav class="cw-settings-tabs" aria-label="Account settings"><a href="/settings/">Account</a><a href="/settings/security/">Security</a><a href="/settings/sessions/">Sessions</a></nav>
       <header class="cw-page-header"><div><h1 class="cw-page-title">{{ view.heading }}</h1><p class="cw-page-description">{{ view.description }}</p></div></header>
       <section class="cw-card"><div class="cw-card-header"><h2 class="cw-card-title">{% if view.show_profile %}Profile{% else %}Current status{% endif %}</h2></div><div class="cw-card-content">
         {% if view.show_profile %}<dl class="cw-settings-details"><div><dt>Name</dt><dd>{{ view.user_name }}</dd></div><div><dt>Email</dt><dd>{{ view.email }}</dd></div></dl>{% else %}<p class="cw-settings-muted">This page is intentionally preserving the current product behavior. Its identity mutation contract is not yet available from the canonical Rust IdP.</p>{% endif %}

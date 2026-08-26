@@ -814,7 +814,7 @@ fn clean_auth_request_id(value: &str) -> String {
 
 fn safe_target(value: &str) -> String {
     safe_auth_continuation(value)
-        .unwrap_or("/dashboard")
+        .unwrap_or("/dashboard/")
         .to_owned()
 }
 
@@ -822,7 +822,7 @@ fn auth_url_for_target(path: &str, target: &str) -> String {
     let query = url::form_urlencoded::Serializer::new(String::new())
         .append_pair(
             "return_to",
-            safe_auth_continuation(target).unwrap_or("/dashboard"),
+            safe_auth_continuation(target).unwrap_or("/dashboard/"),
         )
         .finish();
     format!("{path}?{query}")
@@ -860,7 +860,7 @@ fn auth_path_from_view(path: &str, view: &AuthFormView) -> String {
 }
 
 fn setup_continuation(query: &AuthQuery) -> &str {
-    safe_auth_continuation(&query.return_to).unwrap_or("/dashboard")
+    safe_auth_continuation(&query.return_to).unwrap_or("/dashboard/")
 }
 
 #[cfg(test)]

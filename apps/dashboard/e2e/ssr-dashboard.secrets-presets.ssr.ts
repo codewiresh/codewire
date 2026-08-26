@@ -59,12 +59,12 @@ async function setSecret(
   value: string,
   useHtmx = true,
 ) {
-  const pathname = `/dashboard/orgs/${slug}/secrets/${bucket}`;
+  const pathname = `/${slug}/secrets/${bucket}`;
   const csrf = await csrfFor(page, pathname);
   const headers: Record<string, string> = { Origin: ssrUrl };
   if (useHtmx) {
     headers["HX-Request"] = "true";
-    headers["HX-Current-URL"] = `${ssrUrl}${pathname}`;
+    headers["HX-Current-URL"] = `${ssrUrl}${pathname}/`;
   }
   const response = await page.request.post(`${pathname}/_actions/set`, {
     form: { _csrf: csrf, key, value },
@@ -72,15 +72,15 @@ async function setSecret(
   });
   expect(response.status()).toBe(200);
   if (useHtmx) {
-    expect(response.headers()["hx-redirect"]).toBe(`${pathname}?message=secret-saved`);
+    expect(response.headers()["hx-redirect"]).toBe(`${pathname}/?message=secret-saved`);
   } else {
-    expect(response.url()).toBe(`${ssrUrl}${pathname}?message=secret-saved`);
+    expect(response.url()).toBe(`${ssrUrl}${pathname}/?message=secret-saved`);
   }
   await responseBodyExcludesSecret(response, value);
 }
 
 async function renameAndDeleteSecret(page: Page, bucket: string, key: string, renamedKey: string) {
-  await page.goto(`/dashboard/orgs/${slug}/secrets/${bucket}`);
+  await page.goto(`/${slug}/secrets/${bucket}`);
   let row = page.locator(".cw-list-row", { hasText: key });
   await row.getByText("Rename", { exact: true }).click();
   await row.getByLabel("New key").fill(renamedKey);
@@ -126,9 +126,12 @@ test.describe.serial("server-rendered secrets and presets", () => {
     const browserRequests: string[] = [];
     page.on("request", (request) => browserRequests.push(new URL(request.url()).pathname));
 
-    await page.goto(`/dashboard/orgs/${slug}/secrets`);
+    await page.goto(`/${slug}/secrets/`);
     await expect(page.getByRole("heading", { name: orgName })).toBeVisible();
-    await expect(page.getByRole("link", { name: "Secrets", exact: true })).toHaveAttribute(
+    await expect(page.getByLabel("Organization navigation").getByRole("link", {
+      name: "Secrets",
+      exact: true,
+    })).toHaveAttribute(
       "aria-current",
       "page",
     );
@@ -147,7 +150,7 @@ test.describe.serial("server-rendered secrets and presets", () => {
     await setSecret(page, projectId, projectKey, projectInitialValue);
     const projectReplacementValue = secretValue("project-replacement");
     await setSecret(page, projectId, projectKey, projectReplacementValue);
-    await page.goto(`/dashboard/orgs/${slug}/secrets/${projectId}`);
+    await page.goto(`/${slug}/secrets/${projectId}/`);
     await expect(
       page.locator(".cw-secret-metadata").getByText(projectKey, { exact: true }),
     ).toBeVisible();
@@ -166,11 +169,11 @@ test.describe.serial("server-rendered secrets and presets", () => {
 
     const userValue = secretValue("user");
     await setSecret(page, "user", userKey, userValue);
-    await page.goto(`/dashboard/orgs/${slug}/secrets/user`);
+    await page.goto(`/${slug}/secrets/user/`);
     await expect(page.locator("body")).not.toContainText(artifactSecretMarker);
     await renameAndDeleteSecret(page, "user", userKey, userRenamedKey);
 
-    await page.goto(`/dashboard/orgs/${slug}/secrets`);
+    await page.goto(`/${slug}/secrets/`);
     const projectRow = page.locator(".cw-list-row", { hasText: projectName });
     await projectRow.getByText("Delete", { exact: true }).click();
     await projectRow
@@ -193,8 +196,11 @@ test.describe.serial("server-rendered secrets and presets", () => {
     const browserRequests: string[] = [];
     page.on("request", (request) => browserRequests.push(new URL(request.url()).pathname));
 
-    await page.goto(`/dashboard/orgs/${slug}/presets`);
-    await expect(page.getByRole("link", { name: "Presets", exact: true })).toHaveAttribute(
+    await page.goto(`/${slug}/presets/`);
+    await expect(page.getByLabel("Organization navigation").getByRole("link", {
+      name: "Presets",
+      exact: true,
+    })).toHaveAttribute(
       "aria-current",
       "page",
     );
@@ -227,7 +233,7 @@ test.describe.serial("server-rendered secrets and presets", () => {
     await preset
       .getByRole("button", { name: `Delete preset ${updatedPresetName} permanently` })
       .click();
-    await expect(page.getByRole("alert")).toContainText("still used by an active environment");
+    await expect(page.getByRole("alert")).toContainText("still used by an active Sandbox");
     await expect(page.locator(".cw-preset-card", { hasText: updatedPresetName })).toBeVisible();
 
     await sql`DELETE FROM environments WHERE id = ${activeEnvironmentId}`;
@@ -254,9 +260,9 @@ test.describe.serial("server-rendered secrets and presets", () => {
     const page = await context.newPage();
     const key = `${secretPrefix}_NO_JS`;
     const value = secretValue("no-js");
-    const pathname = `/dashboard/orgs/${slug}/secrets/user`;
+    const pathname = `/${slug}/secrets/user/`;
     const csrf = await csrfFor(page, pathname);
-    const response = await context.request.post(`${pathname}/_actions/set`, {
+    const response = await context.request.post(`${pathname}_actions/set`, {
       form: { _csrf: csrf, key, value },
       headers: { Origin: ssrUrl },
     });
@@ -273,7 +279,7 @@ test.describe.serial("server-rendered secrets and presets", () => {
 
   test("secret and preset navigation stays usable on mobile", async ({ page, isMobile }) => {
     test.skip(!isMobile, "mobile responsive contract");
-    await page.goto(`/dashboard/orgs/${slug}/secrets`);
+    await page.goto(`/${slug}/secrets/`);
     await expect(page.getByRole("heading", { name: orgName })).toBeVisible();
     await expect(page.getByText("New Project", { exact: true })).toBeInViewport();
     await expect(page.getByRole("link", { name: "Presets", exact: true })).toBeVisible();

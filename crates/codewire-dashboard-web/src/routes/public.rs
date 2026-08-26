@@ -37,7 +37,7 @@ pub(super) async fn verify_email(
             title: "Email verified",
             description: "Your email address is verified. You can continue to Codewire.",
             primary_label: "Continue to dashboard",
-            primary_url: "/dashboard",
+            primary_url: "/dashboard/",
         }),
         Ok(_) => invalid_verification(),
         Err(_) => render_template(

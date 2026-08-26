@@ -67,7 +67,7 @@
     const option = picker.selectedOptions[0];
     const projectId = option?.dataset.projectId;
     manage.hidden = !projectId;
-    if (projectId) manage.href = `${manage.href.replace(/\/secrets(?:\/[^/?#]+)?$/, "/secrets")}/${encodeURIComponent(projectId)}`;
+    if (projectId) manage.href = `${manage.href.replace(/\/secrets\/(?:[^/?#]+\/)?$/, "/secrets/")}${encodeURIComponent(projectId)}/`;
   };
 
   const nextIndex = (container, selector, minimum = 0) => {

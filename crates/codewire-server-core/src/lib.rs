@@ -46,6 +46,7 @@ pub mod nats;
 pub mod obs;
 pub mod org;
 pub mod org_deletion;
+pub mod organization_slug;
 pub mod rest_sunset;
 pub mod validation;
 

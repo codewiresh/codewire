@@ -357,6 +357,10 @@ fn create_organization_validation(
     let field = match (&error, name_missing, slug_missing) {
         (AppError::BadRequest(_), true, _) => Some(("/name", "name is required")),
         (AppError::BadRequest(_), false, true) => Some(("/slug", "slug is required")),
+        (AppError::BadRequest(_), false, false) => Some((
+            "/slug",
+            "slug is reserved or does not match the canonical route-safe format",
+        )),
         _ => None,
     };
     match field {

@@ -531,12 +531,12 @@ async fn bucket_page(
     let (title, description, can_manage) = match bucket {
         "organization" => (
             "Organization Secrets".to_owned(),
-            "Shared credentials available to this organization's environments.",
+            "Shared credentials available to this organization's Sandboxes.",
             organization.can_admin,
         ),
         "user" => (
             "User Secrets".to_owned(),
-            "Your personal credentials, available to environments when selected.",
+            "Your personal credentials, available to Sandboxes when selected.",
             true,
         ),
         project_id => {
@@ -551,7 +551,7 @@ async fn bucket_page(
             };
             (
                 project.name,
-                "Credentials grouped for one reusable environment configuration.",
+                "Credentials grouped for one reusable Sandbox configuration.",
                 organization.can_admin,
             )
         }
@@ -852,15 +852,15 @@ fn mutation_error_code(error: &ConnectError) -> &'static str {
 }
 
 fn secrets_path(slug: &str) -> String {
-    format!("/dashboard/orgs/{slug}/secrets")
+    format!("/{slug}/secrets/")
 }
 
 fn secret_bucket_path(slug: &str, bucket: &str) -> String {
-    format!("/dashboard/orgs/{slug}/secrets/{bucket}")
+    format!("/{slug}/secrets/{bucket}/")
 }
 
 fn presets_path(slug: &str) -> String {
-    format!("/dashboard/orgs/{slug}/presets")
+    format!("/{slug}/presets/")
 }
 
 fn secrets_message(value: &str) -> &'static str {
@@ -898,7 +898,7 @@ fn presets_error(value: &str) -> &'static str {
         "not-authorized" => "You do not have permission to change presets.",
         "invalid" => "The requested preset change was invalid.",
         "not-found" => "The preset no longer exists.",
-        "preset-in-use" => "This preset is still used by an active environment.",
+        "preset-in-use" => "This preset is still used by an active Sandbox.",
         "conflict" => "A preset with that slug already exists.",
         "unavailable" => "The preset service is temporarily unavailable.",
         _ => "",
@@ -971,6 +971,7 @@ mod tests {
             role: "Owner",
             can_admin: true,
             environments_url: "/environments".into(),
+            snapshots_url: "/snapshots".into(),
             presets_url: "/presets".into(),
             secrets_url: "/secrets".into(),
             api_keys_url: "/api-keys".into(),

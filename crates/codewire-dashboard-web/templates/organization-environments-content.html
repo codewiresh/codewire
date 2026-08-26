@@ -3,10 +3,10 @@
   {% if !page.error.is_empty() %}<div class="cw-alert cw-alert--error" role="alert">{{ page.error }}</div>{% endif %}
 
   <div class="cw-environment-toolbar">
-    <form id="environment-filters" class="cw-environment-filters" method="get" action="/dashboard/orgs/{{ organization.slug }}/environments">
-      <label class="cw-sr-only" for="environment-search">Search environments</label>
-      <input class="cw-input" id="environment-search" name="search" value="{{ page.search }}" maxlength="128" placeholder="Search…">
-      <label class="cw-sr-only" for="environment-state">Environment state</label>
+    <form id="environment-filters" class="cw-environment-filters" method="get" action="{{ organization.environments_url }}">
+      <label class="cw-sr-only" for="environment-search">Search Sandboxes</label>
+      <input class="cw-input" id="environment-search" name="search" value="{{ page.search }}" maxlength="128" placeholder="Search by name or ID">
+      <label class="cw-sr-only" for="environment-state">Sandbox state</label>
       <select class="cw-select" id="environment-state" name="state">
         <option value="all"{% if page.state_selected("all") %} selected{% endif %}>All states</option>
         <option value="running"{% if page.state_selected("running") %} selected{% endif %}>Running</option>
@@ -18,50 +18,49 @@
         <option value="error"{% if page.state_selected("error") %} selected{% endif %}>Error</option>
         <option value="destroyed"{% if page.state_selected("destroyed") %} selected{% endif %}>Destroyed</option>
       </select>
-      <button class="cw-button cw-button--outline cw-button--small" type="submit">Filter</button>
+      <button class="cw-button cw-button--outline cw-button--small cw-button--pill" type="submit">Filter</button>
     </form>
-    <div class="cw-row-actions">
-      <a class="cw-button cw-button--outline cw-button--small" href="{{ organization.presets_url }}"><svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-settings"/></svg>Presets</a>
-      <a class="cw-button cw-button--small" href="/dashboard/orgs/{{ organization.slug }}/environments?create=true"><svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-plus"/></svg>Create</a>
-    </div>
+    <a class="cw-button cw-button--outline cw-button--small cw-button--pill" href="{{ organization.presets_url }}">Presets</a>
   </div>
 
   {% if page.create_form.expanded %}{% let form = page.create_form %}{% include "environment-create-form.html" %}{% endif %}
 
-  <div id="environment-list" hx-get="/dashboard/orgs/{{ organization.slug }}/environments/_fragments/list" hx-trigger="every 5s" hx-include="#environment-filters" hx-swap="innerHTML">
+  <div id="environment-list" hx-get="/{{ organization.slug }}/_fragments/sandboxes" hx-trigger="every 5s" hx-include="#environment-filters" hx-swap="innerHTML">
     {% include "environment-list.html" %}
   </div>
 
   {% match page.resize_confirmation %}{% when Some with (resize) %}
-  <section class="cw-card" aria-labelledby="resize-confirmation-title"><div class="cw-card-header"><div><h2 id="resize-confirmation-title" class="cw-card-title">Confirm resize · {{ resize.environment_name }}</h2><p class="cw-card-description">{{ resize.previous_resources }} → {{ resize.desired_resources }}</p></div><a class="cw-button cw-button--outline cw-button--small" href="/dashboard/orgs/{{ organization.slug }}/environments">Cancel</a></div><div class="cw-card-content"><p><strong>Planned application:</strong> {{ resize.execution_mode }}.</p>{% if !resize.reason.is_empty() %}<p>{{ resize.reason }}</p>{% endif %}{% if !resize.warnings.is_empty() %}<div class="cw-alert cw-alert--warning" role="status">{% for warning in resize.warnings %}{{ warning }}{% if !loop.last %}; {% endif %}{% endfor %}</div>{% endif %}{% if resize.requires_restart %}<div class="cw-alert cw-alert--warning" role="status">This change requires a workspace restart. Codewire preserves the PVC and workspace data; it does not delete or recreate storage.</div>{% endif %}{% if resize.active_sessions_will_be_terminated %}<div class="cw-alert cw-alert--warning" role="status">{{ resize.active_session_count }} active session(s) are connected. Continuing will terminate them only when you explicitly force this restart.</div>{% endif %}<form method="post" action="/dashboard/orgs/{{ organization.slug }}/environments/_actions/resize/apply" hx-post="/dashboard/orgs/{{ organization.slug }}/environments/_actions/resize/apply"><input type="hidden" name="_csrf" value="{{ page.create_form.csrf_token }}"><input type="hidden" name="environment_id" value="{{ resize.environment_id }}"><input type="hidden" name="request_id" value="{{ resize.request_id }}"><input type="hidden" name="cpu_millicores" value="{{ resize.cpu_millicores }}"><input type="hidden" name="memory_mb" value="{{ resize.memory_mb }}"><input type="hidden" name="disk_gb" value="{{ resize.disk_gb }}">{% if resize.requires_restart %}<label class="cw-checkbox"><input type="checkbox" name="allow_restart" value="true" required> I understand this resize replaces the workspace Pod and may briefly interrupt it.</label>{% endif %}{% if resize.active_sessions_will_be_terminated %}<label class="cw-checkbox"><input type="checkbox" name="force" value="true" required> I understand active sessions will be terminated.</label>{% endif %}<button class="cw-button" type="submit">Apply resize</button></form></div></section>
-  {% when None %}{% endmatch %}
-
-  {% match page.resize_operation %}{% when Some with (operation) %}{% include "environment-resize-operation.html" %}{% when None %}{% endmatch %}
-
-  {% match page.port_panel %}{% when Some with (panel) %}
-  <section class="cw-card cw-port-panel" aria-labelledby="port-panel-title">
-    <div class="cw-card-header cw-port-panel-header"><div><h2 id="port-panel-title" class="cw-card-title">Ports · {{ panel.environment_name }}</h2><p class="cw-card-description">Expose a port with creator, organization, or public access.</p></div><a class="cw-button cw-button--outline cw-button--small" href="/dashboard/orgs/{{ organization.slug }}/environments">Close</a></div>
+  <section class="cw-card cw-detail-panel" aria-labelledby="resize-confirmation-title">
+    <div class="cw-card-header"><div><h2 id="resize-confirmation-title" class="cw-card-title">Confirm resize · {{ resize.environment_name }}</h2><p class="cw-card-description">{{ resize.previous_resources }} → {{ resize.desired_resources }}</p></div><a class="cw-button cw-button--outline cw-button--small" href="{{ organization.environments_url }}">Cancel</a></div>
     <div class="cw-card-content">
-      {% if !panel.form_error.is_empty() %}<div class="cw-alert cw-alert--error" role="alert">{{ panel.form_error }}</div>{% endif %}
-      {% if panel.ports.is_empty() %}<p class="cw-empty-copy">No ports registered.</p>{% else %}
-      <div class="cw-port-list">
-        {% for port in panel.ports %}<div class="cw-port-row"><div><strong>{{ port.label }}</strong><small>{{ port.port }} · {{ port.access }}</small></div>{% if port.has_preview %}<a href="{{ port.preview_url }}" target="_blank" rel="noopener noreferrer">Open preview</a>{% endif %}<form method="post" action="/dashboard/orgs/{{ organization.slug }}/environments/_actions/ports/delete"><input type="hidden" name="_csrf" value="{{ page.create_form.csrf_token }}"><input type="hidden" name="environment_id" value="{{ panel.environment_id }}"><input type="hidden" name="port_id" value="{{ port.id }}"><button class="cw-button cw-button--outline cw-button--small cw-danger-button" type="submit">Delete</button></form></div>{% endfor %}
-      </div>{% endif %}
-      <form class="cw-port-form" method="post" action="/dashboard/orgs/{{ organization.slug }}/environments/_actions/ports/create">
-        <input type="hidden" name="_csrf" value="{{ page.create_form.csrf_token }}"><input type="hidden" name="environment_id" value="{{ panel.environment_id }}">
-        <div class="cw-field"><label class="cw-label" for="managed-port">Port</label><input class="cw-input" id="managed-port" name="port" type="number" min="1" max="65535" value="{{ panel.port }}" placeholder="3000" required></div>
-        <div class="cw-field"><label class="cw-label" for="managed-label">Label</label><input class="cw-input" id="managed-label" name="label" value="{{ panel.label }}" pattern="[a-z0-9][a-z0-9-]{0,20}[a-z0-9]" placeholder="web" required></div>
-        <div class="cw-field"><label class="cw-label" for="managed-access">Access</label><select class="cw-select" id="managed-access" name="access"><option value="creator"{% if panel.access_selected("creator") %} selected{% endif %}>Creator</option><option value="org_members"{% if panel.access_selected("org_members") %} selected{% endif %}>Organization</option><option value="public"{% if panel.access_selected("public") %} selected{% endif %}>Public</option></select></div>
-        <button class="cw-button cw-button--small" type="submit">Add port</button>
+      <p><strong>Planned application:</strong> {{ resize.execution_mode }}.</p>
+      {% if !resize.reason.is_empty() %}<p>{{ resize.reason }}</p>{% endif %}
+      {% if !resize.warnings.is_empty() %}<div class="cw-alert cw-alert--warning" role="status">{% for warning in resize.warnings %}{{ warning }}{% if !loop.last %}; {% endif %}{% endfor %}</div>{% endif %}
+      {% if resize.requires_restart %}<div class="cw-alert cw-alert--warning" role="status">This change replaces the workspace Pod. It does not delete or recreate storage.</div>{% endif %}
+      <form method="post" action="/{{ organization.slug }}/_actions/sandboxes/resize/apply">
+        <input type="hidden" name="_csrf" value="{{ page.create_form.csrf_token }}"><input type="hidden" name="environment_id" value="{{ resize.environment_id }}"><input type="hidden" name="request_id" value="{{ resize.request_id }}"><input type="hidden" name="cpu_millicores" value="{{ resize.cpu_millicores }}"><input type="hidden" name="memory_mb" value="{{ resize.memory_mb }}"><input type="hidden" name="disk_gb" value="{{ resize.disk_gb }}">
+        {% if resize.requires_restart %}<label class="cw-checkbox"><input type="checkbox" name="allow_restart" value="true" required> I understand this may briefly interrupt the Sandbox.</label>{% endif %}
+        {% if resize.active_sessions_will_be_terminated %}<label class="cw-checkbox"><input type="checkbox" name="force" value="true" required> I understand {{ resize.active_session_count }} active session(s) will be terminated.</label>{% endif %}
+        <button class="cw-button" type="submit">Apply resize</button>
       </form>
     </div>
   </section>
   {% when None %}{% endmatch %}
 
-  {% match page.trust_summary %}{% when Some with (trust) %}
-  <section class="cw-card" aria-labelledby="trust-summary-title">
-    <div class="cw-card-header"><div><h2 id="trust-summary-title" class="cw-card-title">Trust · {{ trust.environment_name }}</h2><p class="cw-card-description">Product-level attestation summary for this confidential environment.</p></div><a class="cw-button cw-button--outline cw-button--small" href="/dashboard/orgs/{{ organization.slug }}/environments">Close</a></div>
-    <div class="cw-card-content"><p><strong>Trust level:</strong> {{ trust.trust_level }}</p><p><strong>Production verified:</strong> {% if trust.production_verified %}yes{% else %}no{% endif %}</p><p><strong>Attestation:</strong> {{ trust.attestation_status }}{% if !trust.tee.is_empty() %} ({{ trust.tee }}){% endif %}</p>{% if !trust.warnings.is_empty() %}<div class="cw-alert cw-alert--warning" role="status">{% for warning in trust.warnings %}{{ warning }}{% if !loop.last %}; {% endif %}{% endfor %}</div>{% endif %}</div>
+  {% match page.resize_operation %}{% when Some with (operation) %}{% include "environment-resize-operation.html" %}{% when None %}{% endmatch %}
+
+  {% match page.port_panel %}{% when Some with (panel) %}
+  <section class="cw-card cw-port-panel cw-detail-panel" aria-labelledby="port-panel-title">
+    <div class="cw-card-header"><div><h2 id="port-panel-title" class="cw-card-title">Ports · {{ panel.environment_name }}</h2><p class="cw-card-description">Expose a port to yourself, the organization, or the public.</p></div><a class="cw-button cw-button--outline cw-button--small" href="{{ organization.environments_url }}">Close</a></div>
+    <div class="cw-card-content">
+      {% if !panel.form_error.is_empty() %}<div class="cw-alert cw-alert--error" role="alert">{{ panel.form_error }}</div>{% endif %}
+      <div class="cw-port-list">{% for port in panel.ports %}<div class="cw-port-row"><div><strong>{{ port.label }}</strong><small>{{ port.port }} · {{ port.access }}</small></div>{% if port.has_preview %}<a href="{{ port.preview_url }}" target="_blank" rel="noopener noreferrer">Open preview</a>{% endif %}<form method="post" action="/{{ organization.slug }}/_actions/sandboxes/ports/delete"><input type="hidden" name="_csrf" value="{{ page.create_form.csrf_token }}"><input type="hidden" name="environment_id" value="{{ panel.environment_id }}"><input type="hidden" name="port_id" value="{{ port.id }}"><button class="cw-button cw-button--outline cw-button--small cw-danger-button" type="submit">Delete</button></form></div>{% endfor %}</div>
+      <form class="cw-port-form" method="post" action="/{{ organization.slug }}/_actions/sandboxes/ports/create"><input type="hidden" name="_csrf" value="{{ page.create_form.csrf_token }}"><input type="hidden" name="environment_id" value="{{ panel.environment_id }}"><div class="cw-field"><label class="cw-label" for="managed-port">Port</label><input class="cw-input" id="managed-port" name="port" type="number" min="1" max="65535" value="{{ panel.port }}" required></div><div class="cw-field"><label class="cw-label" for="managed-label">Label</label><input class="cw-input" id="managed-label" name="label" value="{{ panel.label }}" pattern="[a-z0-9][a-z0-9-]{0,20}[a-z0-9]" required></div><div class="cw-field"><label class="cw-label" for="managed-access">Access</label><select class="cw-select" id="managed-access" name="access"><option value="creator"{% if panel.access_selected("creator") %} selected{% endif %}>Creator</option><option value="org_members"{% if panel.access_selected("org_members") %} selected{% endif %}>Organization</option><option value="public"{% if panel.access_selected("public") %} selected{% endif %}>Public</option></select></div><button class="cw-button cw-button--small" type="submit">Add port</button></form>
+    </div>
   </section>
+  {% when None %}{% endmatch %}
+
+  {% match page.trust_summary %}{% when Some with (trust) %}
+  <section class="cw-card cw-detail-panel"><div class="cw-card-header"><div><h2 class="cw-card-title">Trust · {{ trust.environment_name }}</h2><p class="cw-card-description">Product-level attestation summary.</p></div><a class="cw-button cw-button--outline cw-button--small" href="{{ organization.environments_url }}">Close</a></div><div class="cw-card-content"><p><strong>Trust level:</strong> {{ trust.trust_level }}</p><p><strong>Production verified:</strong> {% if trust.production_verified %}yes{% else %}no{% endif %}</p><p><strong>Attestation:</strong> {{ trust.attestation_status }}{% if !trust.tee.is_empty() %} ({{ trust.tee }}){% endif %}</p>{% if !trust.warnings.is_empty() %}<div class="cw-alert cw-alert--warning" role="status">{% for warning in trust.warnings %}{{ warning }}{% if !loop.last %}; {% endif %}{% endfor %}</div>{% endif %}</div></section>
   {% when None %}{% endmatch %}
 </section>

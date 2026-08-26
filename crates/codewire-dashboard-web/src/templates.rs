@@ -99,8 +99,6 @@ pub(crate) struct SettingsPlaceholderTemplate<'a> {
 #[template(path = "dashboard.html")]
 pub(crate) struct DashboardTemplate<'a> {
     pub(crate) view: &'a DashboardView,
-    pub(crate) organizations: &'a [OrganizationRow],
-    pub(crate) has_organizations: bool,
 }
 
 #[derive(Template)]
@@ -220,8 +218,6 @@ pub(crate) struct OrganizationEnvironmentsTemplate<'a> {
     pub(crate) view: &'a DashboardView,
     pub(crate) organization: &'a OrganizationContext,
     pub(crate) page: &'a EnvironmentsPageView,
-    pub(crate) active_tab: &'static str,
-    pub(crate) terminal_websocket_origin: &'a str,
 }
 
 #[derive(Template)]
@@ -229,6 +225,13 @@ pub(crate) struct OrganizationEnvironmentsTemplate<'a> {
 pub(crate) struct OrganizationEnvironmentsContentTemplate<'a> {
     pub(crate) organization: &'a OrganizationContext,
     pub(crate) page: &'a EnvironmentsPageView,
+}
+
+#[derive(Template)]
+#[template(path = "snapshots.html")]
+pub(crate) struct SnapshotsTemplate<'a> {
+    pub(crate) view: &'a DashboardView,
+    pub(crate) organization: &'a OrganizationContext,
 }
 
 #[derive(Template)]
@@ -246,6 +249,12 @@ pub(crate) struct EnvironmentListTemplate<'a> {
 }
 
 #[derive(Template)]
+#[template(path = "sandbox-rail.html")]
+pub(crate) struct SandboxRailTemplate<'a> {
+    pub(crate) view: &'a DashboardView,
+}
+
+#[derive(Template)]
 #[template(path = "environment-resize-operation.html")]
 pub(crate) struct EnvironmentResizeOperationTemplate<'a> {
     pub(crate) organization: &'a crate::view::OrganizationContext,
@@ -255,7 +264,10 @@ pub(crate) struct EnvironmentResizeOperationTemplate<'a> {
 #[derive(Template)]
 #[template(path = "terminal.html")]
 pub(crate) struct TerminalTemplate<'a> {
+    pub(crate) view: &'a DashboardView,
+    pub(crate) organization: &'a OrganizationContext,
     pub(crate) page: &'a TerminalPageView,
+    pub(crate) csrf_token: &'a str,
 }
 
 #[derive(Template)]

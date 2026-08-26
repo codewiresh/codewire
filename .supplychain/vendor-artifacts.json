@@ -81,6 +81,42 @@
       "integrity": "sha512-4Smom3RPyVp7ZMYOYDoC/9eGJJJqYhnPLGGqJ6wOBfB8VxPViJNSKdgRYb8NpaM6YSelEKbA2SStD7lGyqaobw==",
       "size": 1103,
       "sha384": "sha384-bniI+JB8zL1vreD+pp5VYLLlWl+gTajqJCwFtGaiRTCQtOTp2hUVXpkd9iv3ZMHp"
+    },
+    {
+      "package": "@ibm/plex-mono",
+      "version": "2.5.0",
+      "member": "fonts/complete/woff2/IBMPlexMono-Regular.woff2",
+      "path": "crates/codewire-dashboard-web/assets/fonts/IBMPlexMono-Regular-2.5.0.woff2",
+      "integrity": "sha512-STBJIPxPomOYPmBMO7z5TKPJUotAF9u3gAUumTqVgwgrAO+K4FRNh0MlhsoJjKhJKsMbBJR10/bk4inkj/wc1w==",
+      "size": 49248,
+      "sha384": "sha384-JSE7HMglLOeVIv8nHMFZLGJRsHQApoawdQqnJUQ2bQ73ayLAXKQOlyVlhYikwzYZ"
+    },
+    {
+      "package": "@ibm/plex-mono",
+      "version": "2.5.0",
+      "member": "fonts/complete/woff2/IBMPlexMono-Medium.woff2",
+      "path": "crates/codewire-dashboard-web/assets/fonts/IBMPlexMono-Medium-2.5.0.woff2",
+      "integrity": "sha512-STBJIPxPomOYPmBMO7z5TKPJUotAF9u3gAUumTqVgwgrAO+K4FRNh0MlhsoJjKhJKsMbBJR10/bk4inkj/wc1w==",
+      "size": 50400,
+      "sha384": "sha384-tylDsdgKnnChsCkLwFBV+SXV2SRHQIfUwfrudWNH+EDQs+bIUTLTdSELFa9+Q//W"
+    },
+    {
+      "package": "@ibm/plex-mono",
+      "version": "2.5.0",
+      "member": "fonts/complete/woff2/IBMPlexMono-SemiBold.woff2",
+      "path": "crates/codewire-dashboard-web/assets/fonts/IBMPlexMono-SemiBold-2.5.0.woff2",
+      "integrity": "sha512-STBJIPxPomOYPmBMO7z5TKPJUotAF9u3gAUumTqVgwgrAO+K4FRNh0MlhsoJjKhJKsMbBJR10/bk4inkj/wc1w==",
+      "size": 50600,
+      "sha384": "sha384-Pr0QoHYIEEtq2oAdw1cVpnS1O0lq13IiRuTjJqWxCaV2kugfds6EIW2b7+AXcOZ1"
+    },
+    {
+      "package": "@ibm/plex-mono",
+      "version": "2.5.0",
+      "member": "LICENSE.txt",
+      "path": "crates/codewire-dashboard-web/assets/fonts/LICENSE-IBMPlexMono-2.5.0",
+      "integrity": "sha512-STBJIPxPomOYPmBMO7z5TKPJUotAF9u3gAUumTqVgwgrAO+K4FRNh0MlhsoJjKhJKsMbBJR10/bk4inkj/wc1w==",
+      "size": 4456,
+      "sha384": "sha384-nJMRAEm3/jyDfD3kNrW7WQuX4T8Rgt62WYm/Dnse/hVOIYHZma62B6vzS5rnudJu"
     }
   ]
 }

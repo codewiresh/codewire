@@ -63,10 +63,23 @@ fn admin_audit_template_escapes_sensitive_upstream_fields() {
         github_connected: false,
         github_available: false,
         show_checklist: false,
-        new_organization_url: "/dashboard/orgs/new".into(),
-        settings_url: "/dashboard/settings".into(),
-        admin_url: "/admin".into(),
+        new_organization_url: "/organizations/new/".into(),
+        settings_url: "/settings/".into(),
         github_connect_url: String::new(),
+        has_selected_organization: false,
+        selected_organization_name: String::new(),
+        selected_organization_slug: String::new(),
+        selected_organization_url: String::new(),
+        sandboxes: Vec::new(),
+        recent_sandboxes: Vec::new(),
+        sandbox_rail_available: false,
+        sandbox_total: 0,
+        sandbox_running: 0,
+        sandbox_stopped: 0,
+        sandbox_attention: 0,
+        provisioned_cpu_millicores: 0,
+        provisioned_memory_mb: 0,
+        provisioned_disk_gb: 0,
     };
     let logs = vec![AuditLogRow {
         occurred: "Just now".into(),
@@ -108,7 +121,7 @@ fn organization_template_escapes_upstream_data() {
         role: "Owner",
         can_admin: true,
         billing_plan: "trial".into(),
-        url: "/dashboard/orgs/safe/environments".into(),
+        url: "/safe/".into(),
     }];
     let body = OrganizationListTemplate {
         organizations: &organizations,
@@ -146,7 +159,16 @@ fn organization_form_validation_matches_the_public_contract() {
     for slug in ["acme", "acme-2", "a2b", "123"] {
         assert!(valid_organization_slug(slug), "expected {slug} to be valid");
     }
-    for slug in ["Acme", "-acme", "acme-", "acme--corp", "acme_corp", ""] {
+    for slug in [
+        "Acme",
+        "-acme",
+        "acme-",
+        "acme--corp",
+        "acme_corp",
+        "admin",
+        "settings",
+        "",
+    ] {
         assert!(
             !valid_organization_slug(slug),
             "expected {slug:?} to be invalid"
@@ -228,7 +250,7 @@ fn transport_forwards_only_the_canonical_session_cookie() {
 fn auth_continuations_remain_application_relative() {
     for safe in [
         "/dashboard",
-        "/dashboard/orgs/new",
+        "/organizations/new/",
         "/device?user_code=ABCD-1234#approval",
     ] {
         assert_eq!(safe_auth_continuation(safe), Some(safe));
@@ -248,17 +270,17 @@ fn auth_continuations_remain_application_relative() {
 fn auth_redirects_preserve_the_originating_rust_route() {
     let mut headers = HeaderMap::new();
     headers.insert(HTMX_REQUEST, HeaderValue::from_static("true"));
-    let response = login_redirect("/dashboard/orgs/new", &headers);
+    let response = login_redirect("/organizations/new/", &headers);
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
         response.headers().get("hx-redirect").unwrap(),
-        "/login?return_to=%2Fdashboard%2Forgs%2Fnew"
+        "/login?return_to=%2Forganizations%2Fnew%2F"
     );
 
-    let response = two_factor_redirect("/dashboard/orgs/new", &HeaderMap::new());
+    let response = two_factor_redirect("/organizations/new/", &HeaderMap::new());
     assert_eq!(response.status(), StatusCode::SEE_OTHER);
     assert_eq!(
         response.headers().get(header::LOCATION).unwrap(),
-        "/setup-2fa?return_to=%2Fdashboard%2Forgs%2Fnew"
+        "/setup-2fa?return_to=%2Forganizations%2Fnew%2F"
     );
 }

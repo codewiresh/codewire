@@ -4,41 +4,59 @@ import {
   createAuthenticatedSession,
   deleteSession,
   disableTwoFactor,
+  getUserId,
 } from "./helpers/db";
+import { cleanupTestOrg, ensureTestOrg } from "./helpers/org";
 import { USERS } from "./helpers/seed";
 
 const ssrUrl = (process.env.PLAYWRIGHT_BASE_URL || "http://127.0.0.1:5173").replace(/\/$/, "");
+const dashboardOrgSlug = "e2e-dashboard-read";
 
 test.describe("server-rendered dashboard", () => {
-  test("renders the shared shell and refreshes its organization fragment", async ({ page, isMobile }) => {
+  test.beforeAll(async ({}, testInfo) => {
+    if (testInfo.project.use.isMobile) return;
+    const ownerId = await getUserId(USERS.master.email);
+    if (!ownerId) throw new Error(`Missing dashboard fixture owner ${USERS.master.email}`);
+    await ensureTestOrg("Dashboard Read Organization", dashboardOrgSlug, ownerId);
+  });
+
+  test.afterAll(async ({}, testInfo) => {
+    if (!testInfo.project.use.isMobile) await cleanupTestOrg(dashboardOrgSlug);
+  });
+
+  test("renders the shared console shell and operational overview", async ({ page, isMobile }) => {
     test.skip(!!isMobile, "desktop visual contract");
     const browserRequests: string[] = [];
     page.on("request", (request) => browserRequests.push(request.url()));
 
-    const response = await page.goto("/dashboard");
+    const response = await page.goto("/dashboard/");
     expect(response?.status()).toBe(200);
     await expect(page.getByRole("heading", { name: "Dashboard", exact: true })).toBeVisible();
     await expect(page.getByRole("navigation", { name: "Main navigation" }).first()).toBeVisible();
-    await expect(page.getByRole("link", { name: "New Organization" }).first()).toHaveAttribute(
+    await expect(page.locator('.cw-org-menu a[href="/organizations/new/"]').first()).toHaveAttribute(
       "href",
-      "/dashboard/orgs/new",
+      "/organizations/new/",
     );
 
     const style = await page.request.get("/assets/codewire/design-v1.css");
     expect(style.status()).toBe(200);
     expect(await style.text()).toContain("--bg-primary: #08090a");
 
-    const fragment = page.waitForResponse((candidate) => (
-      candidate.url().endsWith("/dashboard/_fragments/organizations")
-      && candidate.request().method() === "GET"
-    ));
-    await page.evaluate(() => {
-      document.body.dispatchEvent(new CustomEvent("dashboard:refresh", { bubbles: true }));
-    });
-    const fragmentResponse = await fragment;
-    expect(fragmentResponse.status()).toBe(200);
-    expect(fragmentResponse.request().headers()["hx-request"]).toBe("true");
-    await expect(page.locator("#organization-list")).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Recently created" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Resources" })).toBeVisible();
+    await expect(page.getByRole("link", { name: /Snapshots/ }).first()).toHaveAttribute(
+      "href",
+      /\/snapshots\/$/,
+    );
+    await page.keyboard.press("/");
+    await expect(page.locator(".cw-sidebar-slot [data-quick-search]")).toBeVisible();
+    await page.locator(".cw-sidebar-slot [data-quick-search-input]").fill("settings");
+    await expect(
+      page.locator(".cw-sidebar-slot [data-quick-search-results]").getByRole("link", {
+        name: "Settings",
+      }),
+    ).toBeVisible();
+    await page.keyboard.press("Escape");
 
     expect(browserRequests.every((url) => url.startsWith(`${ssrUrl}/`))).toBe(true);
     await expect(page).toHaveScreenshot("dashboard-desktop.png", { fullPage: true });
@@ -49,9 +67,9 @@ test.describe("server-rendered dashboard", () => {
     const context = await browser.newContext();
     await context.clearCookies();
     const page = await context.newPage();
-    await page.goto(`${ssrUrl}/dashboard`);
+    await page.goto(`${ssrUrl}/dashboard/`);
     await expect(page).toHaveURL(
-      `${ssrUrl}/login?return_to=%2Fdashboard`,
+      `${ssrUrl}/login?return_to=%2Fdashboard%2F`,
     );
     await context.close();
   });
@@ -69,8 +87,8 @@ test.describe("server-rendered dashboard", () => {
         httpOnly: true,
         sameSite: "Lax",
       }]);
-      await page.goto("/dashboard");
-      await expect(page).toHaveURL(/\/dashboard$/);
+      await page.goto("/dashboard/");
+      await expect(page).toHaveURL(/\/dashboard\/$/);
       await expect(page).toHaveScreenshot("dashboard-mobile.png", { fullPage: true });
       await page.getByRole("button", { name: "Toggle sidebar" }).click();
       await expect(page.locator("[data-dashboard-app]")).toHaveAttribute("data-mobile-open", "true");

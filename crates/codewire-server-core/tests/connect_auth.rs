@@ -201,7 +201,7 @@ async fn seed(pool: &PgPool, ns: &str) -> Seeded {
     sqlx::query("INSERT INTO organizations (id, name, slug, created_by) VALUES ($1, $2, $3, $4)")
         .bind(&org_id)
         .bind(format!("Connect WI2 {ns}"))
-        .bind(&org_id)
+        .bind(format!("cwi2-{ns}"))
         .bind(&user_id)
         .execute(pool)
         .await

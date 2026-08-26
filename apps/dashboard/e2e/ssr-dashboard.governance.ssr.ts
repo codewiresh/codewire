@@ -40,11 +40,13 @@ test.describe.serial("server-rendered organization governance", () => {
     const browserRequests: string[] = [];
     page.on("request", (request) => browserRequests.push(new URL(request.url()).pathname));
 
-    const response = await page.goto(`/dashboard/orgs/${slug}/members`);
+    const response = await page.goto(`/${slug}/members/`);
     expect(response?.status()).toBe(200);
     await expect(page.getByRole("heading", { name: "SSR Governance" })).toBeVisible();
     await expect(page.getByText("Members (2)")).toBeVisible();
-    await expect(page.getByRole("link", { name: "Members" })).toHaveAttribute("aria-current", "page");
+    await expect(
+      page.getByLabel("Organization navigation").getByRole("link", { name: "Members" }),
+    ).toHaveAttribute("aria-current", "page");
 
     const member = page.locator(".cw-list-row", { hasText: USERS.member.email });
     await member.getByLabel("Role").selectOption("admin");
@@ -85,17 +87,17 @@ test.describe.serial("server-rendered organization governance", () => {
   test("creates, reveals once, disables, and deletes an API key without artifact capture", async ({ page, isMobile }) => {
     test.skip(!!isMobile, "desktop secret lifecycle contract");
     const keyName = "SSR Connect API Key";
-    await page.goto(`/dashboard/orgs/${slug}/api-keys`);
+    await page.goto(`/${slug}/api-keys/`);
     await expect(page.getByText("No API keys yet. Create one for programmatic access.")).toBeVisible();
     const csrf = await page.locator('input[name="_csrf"]').first().inputValue();
     const createResponse = await page.request.post(
-      `/dashboard/orgs/${slug}/api-keys/_actions/create`,
+      `/${slug}/api-keys/_actions/create`,
       {
         form: { _csrf: csrf, name: keyName, expiration: "never" },
         headers: {
           Origin: ssrUrl,
           "HX-Request": "true",
-          "HX-Current-URL": `${ssrUrl}/dashboard/orgs/${slug}/api-keys`,
+          "HX-Current-URL": `${ssrUrl}/${slug}/api-keys/`,
         },
       },
     );
@@ -106,7 +108,7 @@ test.describe.serial("server-rendered organization governance", () => {
     fragment = "";
     expect(hasValidShape).toBe(true);
     expect(isFragment).toBe(true);
-    await page.goto(`/dashboard/orgs/${slug}/api-keys`);
+    await page.goto(`/${slug}/api-keys/`);
     await expect(page.locator('[data-secret-kind="api-key"]')).toHaveCount(0);
 
     let keyRow = page.getByRole("row").filter({ hasText: keyName });
@@ -129,7 +131,7 @@ test.describe.serial("server-rendered organization governance", () => {
     await disableTwoFactor(USERS.outsider.email);
 
     try {
-      await page.goto(`/dashboard/orgs/${slug}/members`);
+      await page.goto(`/${slug}/members/`);
       await page.getByText("Invite Member", { exact: true }).first().click();
       await page.getByLabel("Email").fill(USERS.outsider.email);
       await page.getByRole("button", { name: "Send Invite" }).click();
@@ -163,7 +165,10 @@ test.describe.serial("server-rendered organization governance", () => {
       await page.getByRole("button", { name: "Accept invitation" }).click();
       await expect(page.getByRole("heading", { name: "Welcome to the team" })).toBeVisible();
       await page.getByRole("link", { name: "Go to dashboard" }).click();
-      await expect(page.getByRole("link", { name: "SSR Governance", exact: true })).toBeVisible();
+      await page.locator(".cw-sidebar-slot .cw-org-switcher summary").click();
+      await expect(
+        page.locator(`.cw-sidebar-slot .cw-org-menu a[href="/dashboard/?org=${slug}"]`),
+      ).toBeVisible();
     } finally {
       await disableTwoFactor(USERS.outsider.email);
     }
@@ -177,9 +182,9 @@ test.describe.serial("server-rendered organization governance", () => {
       storageState: authState,
     });
     const page = await context.newPage();
-    await page.goto(`/dashboard/orgs/${slug}/api-keys`);
+    await page.goto(`/${slug}/api-keys/`);
     const csrf = await page.locator('input[name="_csrf"]').first().inputValue();
-    const actionUrl = `/dashboard/orgs/${slug}/api-keys/_actions/create`;
+    const actionUrl = `/${slug}/api-keys/_actions/create`;
     const actionResponse = await context.request.post(actionUrl, {
       form: { _csrf: csrf, name: "No JavaScript Key", expiration: "never" },
       headers: { Origin: ssrUrl },
@@ -197,7 +202,7 @@ test.describe.serial("server-rendered organization governance", () => {
 
   test("organization tabs and actions remain usable on mobile", async ({ page, isMobile }) => {
     test.skip(!isMobile, "mobile responsive contract");
-    await page.goto(`/dashboard/orgs/${slug}/api-keys`);
+    await page.goto(`/${slug}/api-keys/`);
     await expect(page.getByRole("heading", { name: "SSR Governance" })).toBeVisible();
     await expect(page.getByRole("navigation", { name: "Organization navigation" })).toBeVisible();
     await expect(page.getByText("Create Key", { exact: true })).toBeInViewport();

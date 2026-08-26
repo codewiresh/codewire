@@ -667,8 +667,13 @@ pub fn touch_api_key_last_used_best_effort(pool: &PgPool, key_id: &str) {
         let update = sqlx::query(
             r#"UPDATE api_keys
                   SET last_used_at = NOW()
-                WHERE id = $1
-                  AND (last_used_at IS NULL OR last_used_at < NOW() - interval '1 minute')"#,
+                WHERE id = (
+                    SELECT id
+                      FROM api_keys
+                     WHERE id = $1
+                       AND (last_used_at IS NULL OR last_used_at < NOW() - interval '1 minute')
+                       FOR UPDATE SKIP LOCKED
+                )"#,
         )
         .bind(key_id)
         .execute(&pool);

@@ -19,7 +19,7 @@
         <div class="cw-card-content">
           {% if view.approved %}
           <div class="cw-alert cw-alert--success" role="status">Device approved. You can return to the CLI.</div>
-          <a class="cw-button cw-auth-submit" href="/dashboard">Go to dashboard</a>
+          <a class="cw-button cw-auth-submit" href="/dashboard/">Go to dashboard</a>
           {% else %}
           {% if !view.error.is_empty() %}<div class="cw-alert cw-alert--error" role="alert">{{ view.error }}</div>{% endif %}
           <form class="cw-form" method="post" action="/device/_actions/approve">

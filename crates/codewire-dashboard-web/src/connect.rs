@@ -63,7 +63,7 @@ pub(crate) async fn organizations(
                         .iter()
                         .any(|assignment| assignment == "super_admin"),
                 billing_plan: membership.billing_plan,
-                url: format!("/dashboard/orgs/{}/environments", organization.slug),
+                url: format!("/{}/", organization.slug),
             })
         })
         .collect())

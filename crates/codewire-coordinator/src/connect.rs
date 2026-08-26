@@ -506,7 +506,7 @@ mod tests {
             )
             .bind(org_id)
             .bind(format!("Coordinator protocol {suffix} {ns}"))
-            .bind(format!("coord-protocol-{suffix}-{ns}"))
+            .bind(format!("coord-{suffix}-{ns}"))
             .bind(&user_id)
             .execute(pool)
             .await
