@@ -33,6 +33,8 @@ const SETTINGS_PATH: &str = "/settings/";
 #[derive(Debug, Default, Deserialize)]
 pub(super) struct SettingsQuery {
     #[serde(default)]
+    org: String,
+    #[serde(default)]
     message: String,
     #[serde(default)]
     error: String,
@@ -43,20 +45,33 @@ pub(super) async fn settings(
     headers: HeaderMap,
     Query(query): Query<SettingsQuery>,
 ) -> Response {
-    let dashboard = match super::dashboard::dashboard_shell_view(&state, &headers).await {
+    let continuation = global_settings_path(SETTINGS_PATH, &query.org);
+    let mut dashboard = match super::dashboard::dashboard_shell_view(&state, &headers).await {
         Ok(view) => view,
-        Err(WebError::Unauthorized) => return login_redirect(SETTINGS_PATH, &headers),
-        Err(WebError::TwoFactorRequired) => return two_factor_redirect(SETTINGS_PATH, &headers),
+        Err(WebError::Unauthorized) => return login_redirect(&continuation, &headers),
+        Err(WebError::TwoFactorRequired) => {
+            return two_factor_redirect(&continuation, &headers);
+        }
         Err(error) => return error_page(error),
     };
     let cookie = match canonical_cookie(&headers) {
         Ok(cookie) => cookie,
-        Err(()) => return login_redirect(SETTINGS_PATH, &headers),
+        Err(()) => return login_redirect(&continuation, &headers),
     };
+    if let Err(error) = super::dashboard::select_shell_organization(
+        &state,
+        cookie.clone(),
+        &mut dashboard,
+        &query.org,
+    )
+    .await
+    {
+        return error_page(error);
+    }
     let data = match settings_data(&state, cookie).await {
         Ok(data) => data,
         Err(WebError::Connect(error)) if error.code == ErrorCode::Unauthenticated => {
-            return login_redirect(SETTINGS_PATH, &headers);
+            return login_redirect(&continuation, &headers);
         }
         Err(error) => return error_page(error),
     };
@@ -64,7 +79,7 @@ pub(super) async fn settings(
     let settings = SettingsPageView {
         data,
         csrf_token: csrf.clone(),
-        github_connect_url: github_connect_url(&state),
+        github_connect_url: github_connect_url(&state, &query.org),
         message: approved_message(&query.message).to_owned(),
         error: approved_error(&query.error).to_owned(),
     };
@@ -79,25 +94,27 @@ pub(super) async fn settings(
 
 pub(super) async fn disconnect_github_action(
     State(state): State<AppState>,
+    Query(query): Query<SettingsQuery>,
     headers: HeaderMap,
     Form(form): Form<CsrfSubmission>,
 ) -> Response {
-    let cookie = match mutation_cookie(&state, &headers, &form.csrf).await {
+    let cookie = match mutation_cookie(&state, &headers, &form.csrf, &query.org).await {
         Ok(cookie) => cookie,
         Err(response) => return response,
     };
     match disconnect_github(&state, cookie).await {
-        Ok(()) => settings_redirect("github-disconnected", false, &headers),
-        Err(error) => connect_mutation_error(error.code, &headers),
+        Ok(()) => settings_redirect("github-disconnected", false, &query.org, &headers),
+        Err(error) => connect_mutation_error(error.code, &query.org, &headers),
     }
 }
 
 pub(super) async fn create_credential_action(
     State(state): State<AppState>,
+    Query(query): Query<SettingsQuery>,
     headers: HeaderMap,
     Form(form): Form<GitCredentialSubmission>,
 ) -> Response {
-    let cookie = match mutation_cookie(&state, &headers, &form.csrf).await {
+    let cookie = match mutation_cookie(&state, &headers, &form.csrf, &query.org).await {
         Ok(cookie) => cookie,
         Err(response) => return response,
     };
@@ -109,7 +126,7 @@ pub(super) async fn create_credential_action(
         || name.len() > 128
         || host.len() > 253
     {
-        return settings_redirect("credential-invalid", true, &headers);
+        return settings_redirect("credential-invalid", true, &query.org, &headers);
     }
     match create_git_credential(
         &state,
@@ -121,40 +138,42 @@ pub(super) async fn create_credential_action(
     )
     .await
     {
-        Ok(()) => settings_redirect("credential-created", false, &headers),
-        Err(error) => connect_mutation_error(error.code, &headers),
+        Ok(()) => settings_redirect("credential-created", false, &query.org, &headers),
+        Err(error) => connect_mutation_error(error.code, &query.org, &headers),
     }
 }
 
 pub(super) async fn delete_credential_action(
     State(state): State<AppState>,
+    Query(query): Query<SettingsQuery>,
     headers: HeaderMap,
     Form(form): Form<CredentialIdSubmission>,
 ) -> Response {
-    let cookie = match mutation_cookie(&state, &headers, &form.csrf).await {
+    let cookie = match mutation_cookie(&state, &headers, &form.csrf, &query.org).await {
         Ok(cookie) => cookie,
         Err(response) => return response,
     };
     if form.credential_id.is_empty() || form.credential_id.len() > 256 {
-        return settings_redirect("credential-invalid", true, &headers);
+        return settings_redirect("credential-invalid", true, &query.org, &headers);
     }
     match delete_git_credential(&state, cookie, form.credential_id).await {
-        Ok(()) => settings_redirect("credential-deleted", false, &headers),
-        Err(error) => connect_mutation_error(error.code, &headers),
+        Ok(()) => settings_redirect("credential-deleted", false, &query.org, &headers),
+        Err(error) => connect_mutation_error(error.code, &query.org, &headers),
     }
 }
 
 pub(super) async fn update_identity_action(
     State(state): State<AppState>,
+    Query(query): Query<SettingsQuery>,
     headers: HeaderMap,
     Form(form): Form<GitIdentitySubmission>,
 ) -> Response {
-    let cookie = match mutation_cookie(&state, &headers, &form.csrf).await {
+    let cookie = match mutation_cookie(&state, &headers, &form.csrf, &query.org).await {
         Ok(cookie) => cookie,
         Err(response) => return response,
     };
     if form.git_name.len() > 256 || form.git_email.len() > 320 {
-        return settings_redirect("identity-invalid", true, &headers);
+        return settings_redirect("identity-invalid", true, &query.org, &headers);
     }
     match update_git_identity(
         &state,
@@ -164,68 +183,78 @@ pub(super) async fn update_identity_action(
     )
     .await
     {
-        Ok(()) => settings_redirect("identity-saved", false, &headers),
-        Err(error) => connect_mutation_error(error.code, &headers),
+        Ok(()) => settings_redirect("identity-saved", false, &query.org, &headers),
+        Err(error) => connect_mutation_error(error.code, &query.org, &headers),
     }
 }
 
 pub(super) async fn ensure_ssh_action(
     State(state): State<AppState>,
+    Query(query): Query<SettingsQuery>,
     headers: HeaderMap,
     Form(form): Form<CsrfSubmission>,
 ) -> Response {
-    let cookie = match mutation_cookie(&state, &headers, &form.csrf).await {
+    let cookie = match mutation_cookie(&state, &headers, &form.csrf, &query.org).await {
         Ok(cookie) => cookie,
         Err(response) => return response,
     };
     match ensure_ssh_key(&state, cookie).await {
-        Ok(()) => settings_redirect("ssh-created", false, &headers),
-        Err(error) => connect_mutation_error(error.code, &headers),
+        Ok(()) => settings_redirect("ssh-created", false, &query.org, &headers),
+        Err(error) => connect_mutation_error(error.code, &query.org, &headers),
     }
 }
 
 pub(super) async fn regenerate_ssh_action(
     State(state): State<AppState>,
+    Query(query): Query<SettingsQuery>,
     headers: HeaderMap,
     Form(form): Form<CsrfSubmission>,
 ) -> Response {
-    let cookie = match mutation_cookie(&state, &headers, &form.csrf).await {
+    let cookie = match mutation_cookie(&state, &headers, &form.csrf, &query.org).await {
         Ok(cookie) => cookie,
         Err(response) => return response,
     };
     match regenerate_ssh_key(&state, cookie).await {
-        Ok(()) => settings_redirect("ssh-regenerated", false, &headers),
-        Err(error) => connect_mutation_error(error.code, &headers),
+        Ok(()) => settings_redirect("ssh-regenerated", false, &query.org, &headers),
+        Err(error) => connect_mutation_error(error.code, &query.org, &headers),
     }
 }
 
-pub(super) async fn security(State(state): State<AppState>, headers: HeaderMap) -> Response {
+pub(super) async fn security(
+    State(state): State<AppState>,
+    Query(query): Query<SettingsQuery>,
+    headers: HeaderMap,
+) -> Response {
     placeholder(
         &state,
         &headers,
+        "/settings/security/",
+        &query.org,
         SettingsPlaceholderView {
+            section: "security",
             title: "Security settings",
             heading: "Security settings",
             description: "Two-factor authentication and password controls.",
-            user_name: String::new(),
-            email: String::new(),
-            show_profile: false,
         },
     )
     .await
 }
 
-pub(super) async fn sessions(State(state): State<AppState>, headers: HeaderMap) -> Response {
+pub(super) async fn sessions(
+    State(state): State<AppState>,
+    Query(query): Query<SettingsQuery>,
+    headers: HeaderMap,
+) -> Response {
     placeholder(
         &state,
         &headers,
+        "/settings/sessions/",
+        &query.org,
         SettingsPlaceholderView {
+            section: "sessions",
             title: "Active sessions",
             heading: "Active sessions",
             description: "Review sessions attached to your account.",
-            user_name: String::new(),
-            email: String::new(),
-            show_profile: false,
         },
     )
     .await
@@ -234,70 +263,119 @@ pub(super) async fn sessions(State(state): State<AppState>, headers: HeaderMap) 
 async fn placeholder(
     state: &AppState,
     headers: &HeaderMap,
-    mut view: SettingsPlaceholderView,
+    path: &str,
+    selected_slug: &str,
+    view: SettingsPlaceholderView,
 ) -> Response {
-    let identity = match authenticated_identity(state, headers).await {
-        Ok(identity) => identity,
-        Err(WebError::Unauthorized) => return login_redirect(SETTINGS_PATH, headers),
+    let continuation = global_settings_path(path, selected_slug);
+    let mut dashboard = match super::dashboard::dashboard_shell_view(state, headers).await {
+        Ok(dashboard) => dashboard,
+        Err(WebError::Unauthorized) => return login_redirect(&continuation, headers),
+        Err(WebError::TwoFactorRequired) => return two_factor_redirect(&continuation, headers),
         Err(error) => return error_page(error),
     };
-    if enforce_two_factor(&identity).is_err() {
-        return two_factor_redirect(SETTINGS_PATH, headers);
+    let cookie = match canonical_cookie(headers) {
+        Ok(cookie) => cookie,
+        Err(()) => return login_redirect(&continuation, headers),
+    };
+    if let Err(error) =
+        super::dashboard::select_shell_organization(state, cookie, &mut dashboard, selected_slug)
+            .await
+    {
+        return error_page(error);
     }
-    view.user_name = identity.display_name().to_owned();
-    view.email = identity.email().to_owned();
-    render_page(SettingsPlaceholderTemplate { view: &view })
+    render_page(SettingsPlaceholderTemplate {
+        view: &dashboard,
+        page: &view,
+    })
 }
 
 async fn mutation_cookie(
     state: &AppState,
     headers: &HeaderMap,
     csrf: &str,
+    selected_slug: &str,
 ) -> Result<axum::http::HeaderValue, Response> {
+    let continuation = global_settings_path(SETTINGS_PATH, selected_slug);
     let identity = authenticated_identity(state, headers)
         .await
         .map_err(|error| match error {
-            WebError::Unauthorized => login_redirect(SETTINGS_PATH, headers),
+            WebError::Unauthorized => login_redirect(&continuation, headers),
             error => error_page(error),
         })?;
     if enforce_two_factor(&identity).is_err() {
-        return Err(two_factor_redirect(SETTINGS_PATH, headers));
+        return Err(two_factor_redirect(&continuation, headers));
     }
     if !request_has_same_origin(headers, &state.public_origin) || !valid_csrf_token(headers, csrf) {
         return Err(error_page(WebError::CsrfRejected));
     }
-    canonical_cookie(headers).map_err(|()| login_redirect(SETTINGS_PATH, headers))
+    let cookie = canonical_cookie(headers).map_err(|()| login_redirect(&continuation, headers))?;
+    if !selected_slug.is_empty() {
+        let mut dashboard =
+            super::dashboard::dashboard_shell_view_from_identity(state, &identity, cookie.clone())
+                .await
+                .map_err(|error| match error {
+                    WebError::Unauthorized => login_redirect(&continuation, headers),
+                    WebError::TwoFactorRequired => two_factor_redirect(&continuation, headers),
+                    error => error_page(error),
+                })?;
+        super::dashboard::select_shell_organization(
+            state,
+            cookie.clone(),
+            &mut dashboard,
+            selected_slug,
+        )
+        .await
+        .map_err(error_page)?;
+    }
+    Ok(cookie)
 }
 
-fn connect_mutation_error(code: ErrorCode, headers: &HeaderMap) -> Response {
+fn connect_mutation_error(code: ErrorCode, selected_slug: &str, headers: &HeaderMap) -> Response {
     if code == ErrorCode::Unauthenticated {
-        login_redirect(SETTINGS_PATH, headers)
+        login_redirect(&global_settings_path(SETTINGS_PATH, selected_slug), headers)
     } else {
-        settings_redirect("request-failed", true, headers)
+        settings_redirect("request-failed", true, selected_slug, headers)
     }
 }
 
-fn settings_redirect(code: &str, error: bool, headers: &HeaderMap) -> Response {
-    let key = if error { "error" } else { "message" };
-    redirect(
-        format!(
-            "{SETTINGS_PATH}?{}",
-            url::form_urlencoded::Serializer::new(String::new())
-                .append_pair(key, code)
-                .finish()
-        ),
-        headers,
-    )
+fn global_settings_path(path: &str, selected_slug: &str) -> String {
+    if selected_slug.is_empty() {
+        path.to_owned()
+    } else {
+        let mut query = url::form_urlencoded::Serializer::new(String::new());
+        query.append_pair("org", selected_slug);
+        format!("{path}?{}", query.finish())
+    }
 }
 
-fn github_connect_url(state: &AppState) -> String {
+fn settings_redirect(
+    code: &str,
+    error: bool,
+    selected_slug: &str,
+    headers: &HeaderMap,
+) -> Response {
+    let key = if error { "error" } else { "message" };
+    let mut query = url::form_urlencoded::Serializer::new(String::new());
+    if !selected_slug.is_empty() {
+        query.append_pair("org", selected_slug);
+    }
+    query.append_pair(key, code);
+    redirect(format!("{SETTINGS_PATH}?{}", query.finish()), headers)
+}
+
+fn github_connect_url(state: &AppState, selected_slug: &str) -> String {
     let mut url = Url::parse(&format!(
         "{}/api/v1/github/oauth/authorize",
         state.browser_api_origin
     ))
     .expect("validated API origin");
-    url.query_pairs_mut()
-        .append_pair("return_url", &format!("{}/settings/", state.public_origin));
+    let return_url = if selected_slug.is_empty() {
+        format!("{}/settings/", state.public_origin)
+    } else {
+        format!("{}/settings/?org={selected_slug}", state.public_origin)
+    };
+    url.query_pairs_mut().append_pair("return_url", &return_url);
     url.into()
 }
 
@@ -345,6 +423,7 @@ mod tests {
             show_checklist: false,
             new_organization_url: "/organizations/new/".into(),
             settings_url: SETTINGS_PATH.into(),
+            global_context_query: String::new(),
             github_connect_url: String::new(),
             has_selected_organization: false,
             selected_organization_name: String::new(),
@@ -430,5 +509,13 @@ mod tests {
                 assert!(!body.contains("/github/connect"));
             }
         }
+    }
+
+    #[test]
+    fn global_settings_context_is_query_encoded() {
+        assert_eq!(
+            global_settings_path(SETTINGS_PATH, "selected org&mode=other"),
+            "/settings/?org=selected+org%26mode%3Dother"
+        );
     }
 }

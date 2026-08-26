@@ -284,7 +284,7 @@ test.describe.serial("server-rendered secrets and presets", () => {
     await expect(page.getByText("New Project", { exact: true })).toBeInViewport();
     await expect(page.getByRole("link", { name: "Presets", exact: true })).toBeVisible();
     await page.getByRole("link", { name: "Presets", exact: true }).click();
-    await expect(page.getByRole("heading", { name: "Presets" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Presets" }).first()).toBeVisible();
     await expect(page.locator("body")).not.toContainText(artifactSecretMarker);
   });
 });

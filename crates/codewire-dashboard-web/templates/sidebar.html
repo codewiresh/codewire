@@ -52,14 +52,14 @@
   {% if view.is_admin %}
   <div class="cw-console-nav cw-console-nav--admin">
     <p class="cw-section-label">Admin</p>
-    <a class="cw-nav-link" href="/admin/">Overview</a>
-    <a class="cw-nav-link" href="/admin/billing/">Billing catalog</a>
-    <a class="cw-nav-link" href="/admin/audit/">Audit log</a>
+    <a class="cw-nav-link" href="/admin/{{ view.global_context_query }}">Overview</a>
+    <a class="cw-nav-link" href="/admin/billing/{{ view.global_context_query }}">Billing catalog</a>
+    <a class="cw-nav-link" href="/admin/audit/{{ view.global_context_query }}">Audit log</a>
   </div>
   {% endif %}
 
   <div class="cw-console-footer">
-    <a class="cw-nav-link" href="{{ view.settings_url }}{% if view.has_selected_organization %}?org={{ view.selected_organization_slug }}{% endif %}">Settings</a>
+    <a class="cw-nav-link" href="{{ view.settings_url }}">Settings</a>
     <a class="cw-nav-link" href="/docs">Docs</a>
     <span class="cw-console-user">{{ view.user_name }}</span>
   </div>

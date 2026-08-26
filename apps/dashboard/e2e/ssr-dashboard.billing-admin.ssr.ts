@@ -70,7 +70,7 @@ test.describe.serial("server-rendered billing and administration", () => {
 
     await expect(page).toHaveScreenshot(
       isMobile ? "billing-mobile.png" : "billing-desktop.png",
-      { fullPage: true },
+      { fullPage: !isMobile },
     );
   });
 

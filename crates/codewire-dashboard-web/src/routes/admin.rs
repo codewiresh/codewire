@@ -13,7 +13,8 @@ use crate::{
     error::WebError,
     response::{error_page, login_redirect, redirect, render_page, two_factor_redirect},
     routes::{
-        dashboard::dashboard_shell_view_from_identity, organization_governance::valid_identifier,
+        dashboard::{dashboard_shell_view_from_identity, select_shell_organization},
+        organization_governance::valid_identifier,
     },
     security::{
         canonical_cookie, csrf_cookie, new_csrf_token, request_has_same_origin, valid_csrf_token,
@@ -31,6 +32,8 @@ const BILLING_PATH: &str = "/admin/billing/";
 #[derive(Debug, Default, Deserialize)]
 pub(super) struct AdminQuery {
     #[serde(default)]
+    org: String,
+    #[serde(default)]
     message: String,
     #[serde(default)]
     error: String,
@@ -38,6 +41,8 @@ pub(super) struct AdminQuery {
 
 #[derive(Debug, Default, Deserialize)]
 pub(super) struct AuditQuery {
+    #[serde(default)]
+    org: String,
     #[serde(default)]
     action: String,
     #[serde(default)]
@@ -120,8 +125,14 @@ pub(super) struct MigrationSubmission {
     proration_behavior: String,
 }
 
-pub(super) async fn overview(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    let (dashboard, cookie) = match admin_context(&state, &headers, ADMIN_PATH).await {
+pub(super) async fn overview(
+    State(state): State<AppState>,
+    Query(query): Query<AdminQuery>,
+    headers: HeaderMap,
+) -> Response {
+    let continuation = global_path(ADMIN_PATH, &query.org);
+    let (dashboard, cookie) = match admin_context(&state, &headers, &continuation, &query.org).await
+    {
         Ok(context) => context,
         Err(response) => return response,
     };
@@ -130,7 +141,7 @@ pub(super) async fn overview(State(state): State<AppState>, headers: HeaderMap) 
             view: &dashboard,
             stats: &stats,
         }),
-        Err(error) => admin_connect_error(error, ADMIN_PATH, &headers),
+        Err(error) => admin_connect_error(error, &continuation, &headers),
     }
 }
 
@@ -139,7 +150,9 @@ pub(super) async fn audit(
     Query(query): Query<AuditQuery>,
     headers: HeaderMap,
 ) -> Response {
-    let (dashboard, cookie) = match admin_context(&state, &headers, AUDIT_PATH).await {
+    let continuation = global_path(AUDIT_PATH, &query.org);
+    let (dashboard, cookie) = match admin_context(&state, &headers, &continuation, &query.org).await
+    {
         Ok(context) => context,
         Err(response) => return response,
     };
@@ -154,7 +167,7 @@ pub(super) async fn audit(
     .await
     {
         Ok(logs) => logs,
-        Err(error) => return admin_connect_error(error, AUDIT_PATH, &headers),
+        Err(error) => return admin_connect_error(error, &continuation, &headers),
     };
     let has_previous = query.offset > 0;
     let has_next = logs.len() == 50;
@@ -162,11 +175,13 @@ pub(super) async fn audit(
         query.offset.saturating_sub(50),
         &query.action,
         &query.severity,
+        &query.org,
     );
     let next_url = audit_url(
         query.offset.saturating_add(50),
         &query.action,
         &query.severity,
+        &query.org,
     );
     render_page(AdminAuditTemplate {
         view: &dashboard,
@@ -187,7 +202,9 @@ pub(super) async fn billing(
     Query(query): Query<AdminQuery>,
     headers: HeaderMap,
 ) -> Response {
-    let (dashboard, cookie) = match admin_context(&state, &headers, BILLING_PATH).await {
+    let continuation = global_path(BILLING_PATH, &query.org);
+    let (dashboard, cookie) = match admin_context(&state, &headers, &continuation, &query.org).await
+    {
         Ok(context) => context,
         Err(response) => return response,
     };
@@ -202,7 +219,7 @@ pub(super) async fn billing(
     .await
     {
         Ok(catalog) => catalog,
-        Err(error) => return admin_connect_error(error, BILLING_PATH, &headers),
+        Err(error) => return admin_connect_error(error, &continuation, &headers),
     };
     with_csrf_cookie(
         render_page(AdminBillingTemplate {
@@ -215,55 +232,60 @@ pub(super) async fn billing(
 
 pub(super) async fn create_plan(
     State(state): State<AppState>,
+    Query(query): Query<AdminQuery>,
     headers: HeaderMap,
     Form(submission): Form<PlanSubmission>,
 ) -> Response {
-    let cookie = match admin_action_context(&state, &headers, &submission.csrf).await {
+    let cookie = match admin_action_context(&state, &headers, &submission.csrf, &query.org).await {
         Ok(cookie) => cookie,
         Err(response) => return response,
     };
     let Some(mutation) = plan_mutation(submission) else {
-        return admin_redirect(&state, "", "invalid", &headers);
+        return admin_redirect(&state, "", "invalid", &query.org, &headers);
     };
     mutation_response(
         &state,
         admin_connect::create_plan(&state, cookie, mutation).await,
         "plan-created",
+        &query.org,
         &headers,
     )
 }
 
 pub(super) async fn update_plan(
     State(state): State<AppState>,
+    Query(query): Query<AdminQuery>,
     headers: HeaderMap,
     Form(submission): Form<PlanSubmission>,
 ) -> Response {
-    let cookie = match admin_action_context(&state, &headers, &submission.csrf).await {
+    let cookie = match admin_action_context(&state, &headers, &submission.csrf, &query.org).await {
         Ok(cookie) => cookie,
         Err(response) => return response,
     };
     let Some(mutation) = plan_mutation(submission) else {
-        return admin_redirect(&state, "", "invalid", &headers);
+        return admin_redirect(&state, "", "invalid", &query.org, &headers);
     };
     mutation_response(
         &state,
         admin_connect::update_plan(&state, cookie, mutation).await,
         "plan-saved",
+        &query.org,
         &headers,
     )
 }
 
 pub(super) async fn archive_plan(
     State(state): State<AppState>,
+    Query(query): Query<AdminQuery>,
     headers: HeaderMap,
     Form(submission): Form<ArchivePlanSubmission>,
 ) -> Response {
-    let cookie = match admin_action_context(&state, &headers, &submission.csrf).await {
+    let cookie = match admin_action_context(&state, &headers, &submission.csrf, &query.org).await {
         Ok(cookie) => cookie,
         Err(response) => return response,
     };
     if !valid_identifier(&submission.resource_type) || !valid_identifier(&submission.plan_key) {
-        return admin_redirect(&state, "", "invalid", &headers);
+        return admin_redirect(&state, "", "invalid", &query.org, &headers);
     }
     mutation_response(
         &state,
@@ -276,32 +298,36 @@ pub(super) async fn archive_plan(
         )
         .await,
         "plan-archived",
+        &query.org,
         &headers,
     )
 }
 
 pub(super) async fn create_price(
     State(state): State<AppState>,
+    Query(query): Query<AdminQuery>,
     headers: HeaderMap,
     Form(submission): Form<PriceSubmission>,
 ) -> Response {
-    price_action(&state, &headers, submission, true).await
+    price_action(&state, &headers, submission, true, &query.org).await
 }
 
 pub(super) async fn update_price(
     State(state): State<AppState>,
+    Query(query): Query<AdminQuery>,
     headers: HeaderMap,
     Form(submission): Form<PriceSubmission>,
 ) -> Response {
-    price_action(&state, &headers, submission, false).await
+    price_action(&state, &headers, submission, false, &query.org).await
 }
 
 pub(super) async fn archive_price(
     State(state): State<AppState>,
+    Query(query): Query<AdminQuery>,
     headers: HeaderMap,
     Form(submission): Form<ArchivePriceSubmission>,
 ) -> Response {
-    let cookie = match admin_action_context(&state, &headers, &submission.csrf).await {
+    let cookie = match admin_action_context(&state, &headers, &submission.csrf, &query.org).await {
         Ok(cookie) => cookie,
         Err(response) => return response,
     };
@@ -313,49 +339,53 @@ pub(super) async fn archive_price(
         stripe_price_id: String::new(),
     };
     if !valid_price(&price, false) {
-        return admin_redirect(&state, "", "invalid", &headers);
+        return admin_redirect(&state, "", "invalid", &query.org, &headers);
     }
     mutation_response(
         &state,
         admin_connect::set_price_archived(&state, cookie, price, submission.archived).await,
         "price-archived",
+        &query.org,
         &headers,
     )
 }
 
 pub(super) async fn update_setting(
     State(state): State<AppState>,
+    Query(query): Query<AdminQuery>,
     headers: HeaderMap,
     Form(submission): Form<SettingSubmission>,
 ) -> Response {
-    let cookie = match admin_action_context(&state, &headers, &submission.csrf).await {
+    let cookie = match admin_action_context(&state, &headers, &submission.csrf, &query.org).await {
         Ok(cookie) => cookie,
         Err(response) => return response,
     };
     if !valid_identifier(&submission.setting_key) {
-        return admin_redirect(&state, "", "invalid", &headers);
+        return admin_redirect(&state, "", "invalid", &query.org, &headers);
     }
     mutation_response(
         &state,
         admin_connect::update_setting(&state, cookie, submission.setting_key, submission.int_value)
             .await,
         "setting-saved",
+        &query.org,
         &headers,
     )
 }
 
 pub(super) async fn preview_migration(
     State(state): State<AppState>,
+    Query(query): Query<AdminQuery>,
     headers: HeaderMap,
     Form(submission): Form<MigrationSubmission>,
 ) -> Response {
     let (dashboard, cookie) =
-        match admin_action_page_context(&state, &headers, &submission.csrf).await {
+        match admin_action_page_context(&state, &headers, &submission.csrf, &query.org).await {
             Ok(context) => context,
             Err(response) => return response,
         };
     if !valid_migration(&submission) {
-        return admin_redirect(&state, "", "invalid", &headers);
+        return admin_redirect(&state, "", "invalid", &query.org, &headers);
     }
     let mut catalog = match admin_connect::catalog(
         &state,
@@ -367,7 +397,9 @@ pub(super) async fn preview_migration(
     .await
     {
         Ok(catalog) => catalog,
-        Err(error) => return admin_connect_error(error, BILLING_PATH, &headers),
+        Err(error) => {
+            return admin_connect_error(error, &global_path(BILLING_PATH, &query.org), &headers);
+        }
     };
     catalog.preview = match admin_connect::preview_migration(
         &state,
@@ -379,7 +411,9 @@ pub(super) async fn preview_migration(
     .await
     {
         Ok(preview) => preview,
-        Err(error) => return admin_connect_error(error, BILLING_PATH, &headers),
+        Err(error) => {
+            return admin_connect_error(error, &global_path(BILLING_PATH, &query.org), &headers);
+        }
     };
     catalog.message = "Migration preview updated.".to_owned();
     render_page(AdminBillingTemplate {
@@ -390,15 +424,16 @@ pub(super) async fn preview_migration(
 
 pub(super) async fn run_migration(
     State(state): State<AppState>,
+    Query(query): Query<AdminQuery>,
     headers: HeaderMap,
     Form(submission): Form<MigrationSubmission>,
 ) -> Response {
-    let cookie = match admin_action_context(&state, &headers, &submission.csrf).await {
+    let cookie = match admin_action_context(&state, &headers, &submission.csrf, &query.org).await {
         Ok(cookie) => cookie,
         Err(response) => return response,
     };
     if !valid_migration(&submission) {
-        return admin_redirect(&state, "", "invalid", &headers);
+        return admin_redirect(&state, "", "invalid", &query.org, &headers);
     }
     mutation_response(
         &state,
@@ -413,6 +448,7 @@ pub(super) async fn run_migration(
         .await
         .map(|_| ()),
         "migration-ran",
+        &query.org,
         &headers,
     )
 }
@@ -422,8 +458,9 @@ async fn price_action(
     headers: &HeaderMap,
     submission: PriceSubmission,
     create: bool,
+    selected_slug: &str,
 ) -> Response {
-    let cookie = match admin_action_context(state, headers, &submission.csrf).await {
+    let cookie = match admin_action_context(state, headers, &submission.csrf, selected_slug).await {
         Ok(cookie) => cookie,
         Err(response) => return response,
     };
@@ -435,7 +472,7 @@ async fn price_action(
         stripe_price_id: submission.stripe_price_id,
     };
     if !valid_price(&price, true) {
-        return admin_redirect(state, "", "invalid", headers);
+        return admin_redirect(state, "", "invalid", selected_slug, headers);
     }
     let result = if create {
         admin_connect::create_price(state, cookie, price).await
@@ -450,6 +487,7 @@ async fn price_action(
         } else {
             "price-saved"
         },
+        selected_slug,
         headers,
     )
 }
@@ -458,19 +496,23 @@ async fn admin_context(
     state: &AppState,
     headers: &HeaderMap,
     continuation: &str,
+    selected_slug: &str,
 ) -> Result<(DashboardView, HeaderValue), Response> {
     let identity = authenticated_identity(state, headers)
         .await
         .map_err(|error| admin_route_error(error, continuation, headers))?;
     enforce_two_factor(&identity)
         .map_err(|error| admin_route_error(error, continuation, headers))?;
-    if !identity.is_admin {
-        return Err(redirect("/dashboard/".to_owned(), headers));
-    }
     let cookie = canonical_cookie(headers).map_err(|()| login_redirect(continuation, headers))?;
-    let dashboard = dashboard_shell_view_from_identity(state, &identity, cookie.clone())
+    let mut dashboard = dashboard_shell_view_from_identity(state, &identity, cookie.clone())
         .await
         .map_err(|error| admin_route_error(error, continuation, headers))?;
+    select_shell_organization(state, cookie.clone(), &mut dashboard, selected_slug)
+        .await
+        .map_err(|error| admin_route_error(error, continuation, headers))?;
+    if !identity.is_admin {
+        return Err(redirect(global_path("/dashboard/", selected_slug), headers));
+    }
     Ok((dashboard, cookie))
 }
 
@@ -478,8 +520,9 @@ async fn admin_action_context(
     state: &AppState,
     headers: &HeaderMap,
     csrf: &str,
+    selected_slug: &str,
 ) -> Result<HeaderValue, Response> {
-    admin_action_page_context(state, headers, csrf)
+    admin_action_page_context(state, headers, csrf, selected_slug)
         .await
         .map(|(_, cookie)| cookie)
 }
@@ -488,11 +531,13 @@ async fn admin_action_page_context(
     state: &AppState,
     headers: &HeaderMap,
     csrf: &str,
+    selected_slug: &str,
 ) -> Result<(DashboardView, HeaderValue), Response> {
     if !request_has_same_origin(headers, &state.public_origin) || !valid_csrf_token(headers, csrf) {
         return Err(error_page(WebError::CsrfRejected));
     }
-    admin_context(state, headers, BILLING_PATH).await
+    let continuation = global_path(BILLING_PATH, selected_slug);
+    admin_context(state, headers, &continuation, selected_slug).await
 }
 
 fn plan_mutation(submission: PlanSubmission) -> Option<PlanMutation> {
@@ -575,8 +620,11 @@ fn normalize_audit_query(mut query: AuditQuery) -> AuditQuery {
     query
 }
 
-fn audit_url(offset: i32, action: &str, severity: &str) -> String {
+fn audit_url(offset: i32, action: &str, severity: &str, selected_slug: &str) -> String {
     let mut query = url::form_urlencoded::Serializer::new(String::new());
+    if !selected_slug.is_empty() {
+        query.append_pair("org", selected_slug);
+    }
     if !action.is_empty() {
         query.append_pair("action", action);
     }
@@ -594,30 +642,54 @@ fn audit_url(offset: i32, action: &str, severity: &str) -> String {
     }
 }
 
+fn global_path(path: &str, selected_slug: &str) -> String {
+    if selected_slug.is_empty() {
+        path.to_owned()
+    } else {
+        let mut query = url::form_urlencoded::Serializer::new(String::new());
+        query.append_pair("org", selected_slug);
+        format!("{path}?{}", query.finish())
+    }
+}
+
 fn mutation_response(
     state: &AppState,
     result: Result<(), ConnectError>,
     message: &str,
+    selected_slug: &str,
     headers: &HeaderMap,
 ) -> Response {
     match result {
-        Ok(()) => admin_redirect(state, message, "", headers),
+        Ok(()) => admin_redirect(state, message, "", selected_slug, headers),
         Err(error) if error.code == ErrorCode::Unauthenticated => {
-            login_redirect(BILLING_PATH, headers)
+            login_redirect(&global_path(BILLING_PATH, selected_slug), headers)
         }
-        Err(error) => admin_redirect(state, "", mutation_error(&error), headers),
+        Err(error) => admin_redirect(state, "", mutation_error(&error), selected_slug, headers),
     }
 }
 
-fn admin_redirect(state: &AppState, message: &str, error: &str, headers: &HeaderMap) -> Response {
-    let mut target = BILLING_PATH.to_owned();
-    if !message.is_empty() {
-        target.push_str("?message=");
-        target.push_str(message);
-    } else if !error.is_empty() {
-        target.push_str("?error=");
-        target.push_str(error);
+fn admin_redirect(
+    state: &AppState,
+    message: &str,
+    error: &str,
+    selected_slug: &str,
+    headers: &HeaderMap,
+) -> Response {
+    let mut query = url::form_urlencoded::Serializer::new(String::new());
+    if !selected_slug.is_empty() {
+        query.append_pair("org", selected_slug);
     }
+    if !message.is_empty() {
+        query.append_pair("message", message);
+    } else if !error.is_empty() {
+        query.append_pair("error", error);
+    }
+    let query = query.finish();
+    let target = if query.is_empty() {
+        BILLING_PATH.to_owned()
+    } else {
+        format!("{BILLING_PATH}?{query}")
+    };
     let token = new_csrf_token();
     with_csrf_cookie(
         redirect(target, headers),
@@ -688,6 +760,7 @@ mod tests {
     #[test]
     fn audit_filters_and_pagination_are_bounded_and_encoded() {
         let query = normalize_audit_query(AuditQuery {
+            org: "selected-org".into(),
             action: " user.signin ".into(),
             severity: "warn".into(),
             offset: -1,
@@ -695,17 +768,22 @@ mod tests {
         assert_eq!(query.action, "user.signin");
         assert_eq!(query.offset, 0);
         assert_eq!(
-            audit_url(50, "user sign-in", "warn"),
-            "/admin/audit/?action=user+sign-in&severity=warn&offset=50"
+            audit_url(50, "user sign-in", "warn", "selected-org"),
+            "/admin/audit/?org=selected-org&action=user+sign-in&severity=warn&offset=50"
         );
         assert!(
             normalize_audit_query(AuditQuery {
+                org: String::new(),
                 action: "x\ny".into(),
                 severity: "fatal".into(),
                 offset: i32::MAX
             })
             .action
             .is_empty()
+        );
+        assert_eq!(
+            global_path(ADMIN_PATH, "selected org&mode=other"),
+            "/admin/?org=selected+org%26mode%3Dother"
         );
     }
 

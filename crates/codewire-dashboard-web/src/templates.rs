@@ -92,7 +92,8 @@ pub(crate) struct SettingsTemplate<'a> {
 #[derive(Template)]
 #[template(path = "settings-placeholder.html")]
 pub(crate) struct SettingsPlaceholderTemplate<'a> {
-    pub(crate) view: &'a SettingsPlaceholderView,
+    pub(crate) view: &'a DashboardView,
+    pub(crate) page: &'a SettingsPlaceholderView,
 }
 
 #[derive(Template)]
