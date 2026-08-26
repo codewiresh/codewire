@@ -244,7 +244,12 @@ fn build_pod_spec(opts: &TemplateOpts, ws: &mut Value, support_image: &str) -> V
     spec.insert("serviceAccountName".into(), SANDBOX_SERVICE_ACCOUNT.into());
     spec.insert(
         "securityContext".into(),
-        json!({ "runAsUser": 1000, "runAsGroup": 1000, "fsGroup": 1000 }),
+        json!({
+            "runAsUser": 1000,
+            "runAsGroup": 1000,
+            "fsGroup": 1000,
+            "fsGroupChangePolicy": "OnRootMismatch",
+        }),
     );
     spec.insert("dnsPolicy".into(), "ClusterFirst".into());
 
