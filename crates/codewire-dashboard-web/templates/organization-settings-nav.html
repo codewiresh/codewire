@@ -1,8 +1,13 @@
 <div class="cw-context-nav-heading">
-  <h1>{{ organization.name }}</h1>
+  <h1>Settings</h1>
   <span>{{ organization.slug }} · {{ organization.role }}</span>
 </div>
 <nav class="cw-context-nav-links" aria-label="Organization navigation">
+  <p class="cw-context-nav-label">Personal</p>
+  <a href="/settings/{{ view.global_context_query }}">Account</a>
+  <a href="/settings/security/{{ view.global_context_query }}">Security</a>
+  <a href="/settings/sessions/{{ view.global_context_query }}">Sessions</a>
+  <p class="cw-context-nav-label">Organization</p>
   <a href="{{ organization.environments_url }}">Sandboxes</a>
   <a href="{{ organization.snapshots_url }}">Snapshots <small>Soon</small></a>
   <a href="{{ organization.presets_url }}"{% if active_tab == "presets" %} aria-current="page"{% endif %}>Presets</a>
@@ -10,4 +15,10 @@
   <a href="{{ organization.api_keys_url }}"{% if active_tab == "api-keys" %} aria-current="page"{% endif %}>API Keys</a>
   <a href="{{ organization.members_url }}"{% if active_tab == "members" %} aria-current="page"{% endif %}>Members</a>
   <a href="{{ organization.billing_url }}"{% if active_tab == "billing" %} aria-current="page"{% endif %}>Billing</a>
+  {% if view.is_admin %}
+  <p class="cw-context-nav-label">Admin</p>
+  <a href="/admin/{{ view.global_context_query }}">Overview</a>
+  <a href="/admin/billing/{{ view.global_context_query }}">Billing catalog</a>
+  <a href="/admin/audit/{{ view.global_context_query }}">Audit log</a>
+  {% endif %}
 </nav>

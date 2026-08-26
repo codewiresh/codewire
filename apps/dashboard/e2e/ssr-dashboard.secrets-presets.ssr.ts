@@ -127,7 +127,7 @@ test.describe.serial("server-rendered secrets and presets", () => {
     page.on("request", (request) => browserRequests.push(new URL(request.url()).pathname));
 
     await page.goto(`/${slug}/secrets/`);
-    await expect(page.getByRole("heading", { name: orgName })).toBeVisible();
+    await expect(page.locator(".cw-sidebar-slot .cw-org-switcher-label")).toHaveText(orgName);
     await expect(page.getByLabel("Organization navigation").getByRole("link", {
       name: "Secrets",
       exact: true,
@@ -280,10 +280,11 @@ test.describe.serial("server-rendered secrets and presets", () => {
   test("secret and preset navigation stays usable on mobile", async ({ page, isMobile }) => {
     test.skip(!isMobile, "mobile responsive contract");
     await page.goto(`/${slug}/secrets/`);
-    await expect(page.getByRole("heading", { name: orgName })).toBeVisible();
+    await expect(page.locator(".cw-sidebar-slot .cw-org-switcher-label")).toHaveText(orgName);
     await expect(page.getByText("New Project", { exact: true })).toBeInViewport();
-    await expect(page.getByRole("link", { name: "Presets", exact: true })).toBeVisible();
-    await page.getByRole("link", { name: "Presets", exact: true }).click();
+    const presetsLink = page.getByRole("link", { name: "Presets", exact: true });
+    await expect(presetsLink).toBeVisible();
+    await presetsLink.click();
     await expect(page.getByRole("heading", { name: "Presets" }).first()).toBeVisible();
     await expect(page.locator("body")).not.toContainText(artifactSecretMarker);
   });

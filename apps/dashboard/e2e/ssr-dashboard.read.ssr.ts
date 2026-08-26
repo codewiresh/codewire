@@ -38,13 +38,34 @@ test.describe("server-rendered dashboard", () => {
       "/organizations/new/",
     );
 
-    const style = await page.request.get("/assets/codewire/design-v1.css");
+    const style = await page.request.get("/assets/codewire/routes/dashboard-v1.css");
     expect(style.status()).toBe(200);
-    expect(await style.text()).toContain("--bg-primary: #08090a");
+    expect(await style.text()).toContain("--bg-primary: #0a0a0a");
+
+    const shellGeometry = await page.evaluate(() => {
+      const sidebar = document.querySelector(".cw-sidebar-slot")?.getBoundingClientRect();
+      const header = document.querySelector(".cw-console-header")?.getBoundingClientRect();
+      const heading = document.querySelector(".cw-page-title");
+      const headingStyle = heading ? getComputedStyle(heading) : null;
+      return {
+        sidebarWidth: sidebar?.width,
+        headerHeight: header?.height,
+        headingFont: headingStyle?.fontFamily,
+        headingSize: headingStyle?.fontSize,
+        headingLineHeight: headingStyle?.lineHeight,
+        headingLetterSpacing: headingStyle?.letterSpacing,
+      };
+    });
+    expect(shellGeometry.sidebarWidth).toBe(260);
+    expect(shellGeometry.headerHeight).toBe(52);
+    expect(shellGeometry.headingFont).toContain("IBM Plex Mono");
+    expect(shellGeometry.headingSize).toBe("12px");
+    expect(shellGeometry.headingLineHeight).toBe("16px");
+    expect(shellGeometry.headingLetterSpacing).toBe("1.56px");
 
     await expect(page.getByRole("heading", { name: "Recently created" })).toBeVisible();
     await expect(page.getByRole("heading", { name: "Resources" })).toBeVisible();
-    await expect(page.getByRole("link", { name: /Snapshots/ }).first()).toHaveAttribute(
+    await expect(page.locator('[data-quick-search-results] a[data-search-text*="snapshots"]').first()).toHaveAttribute(
       "href",
       /\/snapshots\/$/,
     );

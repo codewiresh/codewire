@@ -113,6 +113,7 @@
     current.replaceWith(imported);
     if (window.htmx) window.htmx.process(imported);
     initializeForm(imported.querySelector("[data-environment-prepare]"));
+    document.dispatchEvent(new CustomEvent("codewire:drawer-replaced"));
   };
 
   const decodeHtml = (encoded) => {

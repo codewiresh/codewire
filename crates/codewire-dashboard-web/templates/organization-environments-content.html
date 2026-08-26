@@ -5,25 +5,13 @@
   <div class="cw-environment-toolbar">
     <form id="environment-filters" class="cw-environment-filters" method="get" action="{{ organization.environments_url }}">
       <label class="cw-sr-only" for="environment-search">Search Sandboxes</label>
-      <input class="cw-input" id="environment-search" name="search" value="{{ page.search }}" maxlength="128" placeholder="Search by name or ID">
-      <label class="cw-sr-only" for="environment-state">Sandbox state</label>
-      <select class="cw-select" id="environment-state" name="state">
-        <option value="all"{% if page.state_selected("all") %} selected{% endif %}>All states</option>
-        <option value="running"{% if page.state_selected("running") %} selected{% endif %}>Running</option>
-        <option value="stopped"{% if page.state_selected("stopped") %} selected{% endif %}>Stopped</option>
-        <option value="pending"{% if page.state_selected("pending") %} selected{% endif %}>Pending</option>
-        <option value="creating"{% if page.state_selected("creating") %} selected{% endif %}>Creating</option>
-        <option value="starting"{% if page.state_selected("starting") %} selected{% endif %}>Starting</option>
-        <option value="stopping"{% if page.state_selected("stopping") %} selected{% endif %}>Stopping</option>
-        <option value="error"{% if page.state_selected("error") %} selected{% endif %}>Error</option>
-        <option value="destroyed"{% if page.state_selected("destroyed") %} selected{% endif %}>Destroyed</option>
-      </select>
-      <button class="cw-button cw-button--outline cw-button--small cw-button--pill" type="submit">Filter</button>
+      <input class="cw-input" id="environment-search" name="search" value="{{ page.search }}" maxlength="128" placeholder="Search by name">
+      <details class="cw-filter-menu"><summary class="cw-button cw-button--outline cw-button--small cw-button--pill"><span aria-hidden="true">≡</span> Filter</summary><div class="cw-filter-menu-panel"><label class="cw-label" for="environment-state">State</label><select class="cw-select" id="environment-state" name="state"><option value="all"{% if page.state_selected("all") %} selected{% endif %}>All states</option><option value="running"{% if page.state_selected("running") %} selected{% endif %}>Running</option><option value="stopped"{% if page.state_selected("stopped") %} selected{% endif %}>Stopped</option><option value="pending"{% if page.state_selected("pending") %} selected{% endif %}>Pending</option><option value="creating"{% if page.state_selected("creating") %} selected{% endif %}>Creating</option><option value="starting"{% if page.state_selected("starting") %} selected{% endif %}>Starting</option><option value="stopping"{% if page.state_selected("stopping") %} selected{% endif %}>Stopping</option><option value="error"{% if page.state_selected("error") %} selected{% endif %}>Error</option><option value="destroyed"{% if page.state_selected("destroyed") %} selected{% endif %}>Destroyed</option></select><button class="cw-button cw-button--small cw-button--pill" type="submit">Apply filter</button></div></details>
     </form>
-    <a class="cw-button cw-button--outline cw-button--small cw-button--pill" href="{{ organization.presets_url }}">Presets</a>
+    <a class="cw-button cw-button--primary cw-button--pill" href="{{ organization.environments_url }}?create=true" data-drawer-trigger>＋ Create Sandbox</a>
   </div>
 
-  {% if page.create_form.expanded %}{% let form = page.create_form %}{% include "environment-create-form.html" %}{% endif %}
+  {% if page.create_form.expanded %}<div class="cw-drawer-layer" data-drawer data-close-url="{{ organization.environments_url }}"><a class="cw-drawer-backdrop" href="{{ organization.environments_url }}" data-drawer-close aria-label="Close Create Sandbox"></a>{% let form = page.create_form %}{% include "environment-create-form.html" %}</div>{% endif %}
 
   <div id="environment-list" hx-get="/{{ organization.slug }}/_fragments/sandboxes" hx-trigger="every 5s" hx-include="#environment-filters" hx-swap="innerHTML">
     {% include "environment-list.html" %}

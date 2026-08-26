@@ -115,12 +115,12 @@ test.describe("server-rendered public, auth, and account routes", () => {
   test("clean console routes redirect canonically and legacy paths stay retired", async ({ page, isMobile }) => {
     test.skip(!!isMobile, "desktop clean-route contract");
     await page.goto("/dashboard/");
-    const snapshotsHref = await page
+    const organizationRoot = await page
       .locator(".cw-sidebar-slot")
-      .getByRole("link", { name: /Snapshots/ })
+      .getByRole("link", { name: "View all Sandboxes" })
       .getAttribute("href");
-    expect(snapshotsHref).toMatch(/^\/[a-z0-9-]+\/snapshots\/$/);
-    const organizationRoot = snapshotsHref!.replace(/snapshots\/$/, "");
+    expect(organizationRoot).toMatch(/^\/[a-z0-9-]+\/$/);
+    const snapshotsHref = `${organizationRoot}snapshots/`;
 
     for (const canonical of ["/dashboard/", snapshotsHref!]) {
       const response = await page.request.get(canonical.slice(0, -1), { maxRedirects: 0 });

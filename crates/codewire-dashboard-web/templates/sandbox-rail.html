@@ -8,7 +8,7 @@
   <a class="cw-rail-row" href="/{{ view.selected_organization_slug }}/{{ sandbox.id }}/" data-search-item data-search-text="{{ sandbox.name }} {{ sandbox.id }} {{ sandbox.state }}">
     <span class="cw-rail-dot" data-tone="{{ sandbox.state_tone }}" aria-hidden="true"></span>
     <span class="cw-rail-name">{{ sandbox.name }}</span>
-    <span class="cw-rail-state">{{ sandbox.state }}</span>
+    <span class="cw-rail-state" aria-label="Region unavailable">—</span>
   </a>
   {% endfor %}
 </div>

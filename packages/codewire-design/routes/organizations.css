@@ -65,7 +65,7 @@
 /* Rounded organization-management shell used by presets, secrets, keys,
    members, and billing. Sandbox inventory keeps its purpose-built table shell. */
 [data-dashboard-app] .cw-org-management-page { max-width: none; padding: 0; }
-[data-dashboard-app] .cw-org-management-layout { display: grid; grid-template-columns: 13.5rem minmax(0, 1fr); min-height: calc(100vh - 3.25rem); margin-inline: -1.25rem; }
+[data-dashboard-app] .cw-org-management-layout { display: grid; grid-template-columns: 14rem minmax(0, 1fr); min-height: calc(100vh - 3.25rem); margin-inline: -1.25rem; }
 [data-dashboard-app] .cw-context-nav { padding: 1.35rem .75rem; border-right: 1px solid #1e1e1e; background: #0b0b0b; }
 [data-dashboard-app] .cw-context-nav-heading { display: grid; gap: .2rem; padding: 0 .55rem 1rem; }
 [data-dashboard-app] .cw-context-nav-heading h1 { overflow: hidden; margin: 0; color: #ededed; font-size: .9rem; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
@@ -75,6 +75,10 @@
 [data-dashboard-app] .cw-context-nav-links a:hover,
 [data-dashboard-app] .cw-context-nav-links a[aria-current="page"] { background: #191919; color: #ededed; }
 [data-dashboard-app] .cw-context-nav-links small { color: #565656; font: .52rem var(--font-mono); letter-spacing: .06em; text-transform: uppercase; }
+[data-dashboard-app] .cw-context-nav-label,
+[data-dashboard-app] .cw-settings-subnav .cw-context-nav-label { margin: 14px 6px 5px; color: #5c5c5c; font: 500 10px/14px var(--font-mono); letter-spacing: .09em; text-transform: uppercase; }
+[data-dashboard-app] .cw-context-nav-label:first-child,
+[data-dashboard-app] .cw-settings-subnav .cw-context-nav-label:first-child { margin-top: 0; }
 [data-dashboard-app] .cw-context-main { min-width: 0; padding: 1.5rem 1.25rem 3rem; }
 [data-dashboard-app] .cw-context-page-header { margin-bottom: 1.25rem; }
 [data-dashboard-app] .cw-context-page-header h2 { margin: 0; font: 500 .78rem/1 var(--font-mono); letter-spacing: .12em; text-transform: uppercase; }
@@ -97,15 +101,47 @@
 [data-dashboard-app] .cw-org-management-layout .cw-key,
 [data-dashboard-app] .cw-org-management-layout .cw-key-secret { border-radius: .45rem; background: #080808; }
 
+[data-dashboard-app] .cw-org-management-layout .cw-org-details[open]::before {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  background: rgba(0,0,0,.55);
+  content: "";
+}
+[data-dashboard-app] .cw-org-management-layout .cw-org-details[open] > .cw-card {
+  position: fixed;
+  z-index: 81;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 540px;
+  max-width: 94vw;
+  overflow-y: auto;
+  border: 0;
+  border-left: 1px solid #262626;
+  border-radius: 0;
+  background: #0d0d0d;
+  box-shadow: -18px 0 48px rgba(0,0,0,.32);
+  animation: cw-drawer-in 160ms ease;
+}
+[data-dashboard-app] .cw-org-management-layout .cw-org-details[open] > .cw-card > .cw-card-header {
+  position: sticky;
+  z-index: 2;
+  top: 0;
+  padding: 20px 22px 15px;
+  background: #0d0d0d;
+}
+[data-dashboard-app] .cw-org-management-layout .cw-org-details[open] > .cw-card > .cw-card-content { padding: 18px 22px 24px; }
+
 @media (max-width: 63.9375rem) {
   [data-dashboard-app] .cw-org-management-layout { min-height: calc(100vh - 3.5rem); }
 }
 
 @media (max-width: 48rem) {
   [data-dashboard-app] .cw-org-management-layout { grid-template-columns: 1fr; margin-inline: -.8rem; }
-  [data-dashboard-app] .cw-context-nav { padding: .7rem .8rem; border-right: 0; border-bottom: 1px solid #1e1e1e; }
+  [data-dashboard-app] .cw-context-nav { width: 100%; min-width: 0; overflow: hidden; padding: .7rem .8rem; border-right: 0; border-bottom: 1px solid #1e1e1e; }
   [data-dashboard-app] .cw-context-nav-heading { padding: 0 0 .55rem; }
-  [data-dashboard-app] .cw-context-nav-links { display: flex; max-width: 100%; gap: .25rem; overflow-x: auto; }
+  [data-dashboard-app] .cw-context-nav-links { display: flex; width: 100%; min-width: 0; gap: .25rem; overflow-x: auto; overflow-y: hidden; }
   [data-dashboard-app] .cw-context-nav-links a { flex: none; }
   [data-dashboard-app] .cw-context-main { padding: 1rem .8rem 2rem; }
   [data-dashboard-app] .cw-org-management-layout .cw-org-toolbar { align-items: stretch; }

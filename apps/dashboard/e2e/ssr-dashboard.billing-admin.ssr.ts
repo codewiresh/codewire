@@ -54,7 +54,7 @@ test.describe.serial("server-rendered billing and administration", () => {
 
     const response = await page.goto(`/${slug}/billing/`);
     expect(response?.status()).toBe(200);
-    await expect(page.getByRole("heading", { name: "SSR Billing" })).toBeVisible();
+    await expect(page.locator(".cw-org-switcher-label").first()).toHaveText("SSR Billing");
     await expect(page.getByLabel("Organization navigation").getByRole("link", {
       name: "Billing",
       exact: true,

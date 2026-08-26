@@ -64,8 +64,7 @@ test.describe.serial("rounded management interface", () => {
     ] as const) {
       const response = await page.goto(`/${slug}/${path}/`);
       expect(response?.status()).toBe(200);
-      await expect(page.getByRole("heading", { name: "Management Visual", exact: true }))
-        .toBeVisible();
+      await expect(page.locator(".cw-org-switcher-label").first()).toHaveText("Management Visual");
       await expect(page.getByRole("heading", { name: heading, exact: true }).first()).toBeVisible();
       await expectNoPageOverflow(page);
       await expect(page).toHaveScreenshot(

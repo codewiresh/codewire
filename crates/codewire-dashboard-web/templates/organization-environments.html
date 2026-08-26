@@ -20,9 +20,9 @@
       <button class="cw-mobile-overlay" type="button" data-sidebar-close aria-label="Close sidebar"></button>
       <aside class="cw-mobile-drawer">{% include "sidebar.html" %}</aside>
       <main class="cw-main">
-        <header class="cw-console-header"><span>{{ organization.slug }}</span><span>/</span><strong>sandboxes</strong><a href="/docs">Support</a></header>
+        <header class="cw-console-header"><div class="cw-console-breadcrumb"><span>{{ organization.slug }}</span><span>/</span><strong>sandboxes</strong></div>{% include "console-account.html" %}</header>
         <div class="cw-main-inner"><div class="cw-page cw-page--wide">
-          <header class="cw-page-header"><div><p class="cw-eyebrow">Compute</p><h1 class="cw-page-title">Sandboxes</h1><p class="cw-page-description">Isolated, persistent workspaces for agents and developers.</p></div><a class="cw-button cw-button--pill" href="{{ organization.environments_url }}?create=true">＋ Create Sandbox</a></header>
+          <header class="cw-page-header cw-sandbox-list-header"><div class="cw-list-title"><h1 class="cw-page-title">Sandboxes</h1><span class="cw-quota-stub" aria-label="Sandbox quota unavailable">— / —</span><span class="cw-info-stub" title="Quota information is unavailable" aria-hidden="true">ⓘ</span></div></header>
           {% include "organization-environments-content.html" %}
         </div></div>
       </main>

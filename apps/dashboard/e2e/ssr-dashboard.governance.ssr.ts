@@ -42,7 +42,9 @@ test.describe.serial("server-rendered organization governance", () => {
 
     const response = await page.goto(`/${slug}/members/`);
     expect(response?.status()).toBe(200);
-    await expect(page.getByRole("heading", { name: "SSR Governance" })).toBeVisible();
+    await expect(page.locator(".cw-sidebar-slot .cw-org-switcher-label")).toHaveText(
+      "SSR Governance",
+    );
     await expect(page.getByText("Members (2)")).toBeVisible();
     await expect(
       page.getByLabel("Organization navigation").getByRole("link", { name: "Members" }),
@@ -203,7 +205,9 @@ test.describe.serial("server-rendered organization governance", () => {
   test("organization tabs and actions remain usable on mobile", async ({ page, isMobile }) => {
     test.skip(!isMobile, "mobile responsive contract");
     await page.goto(`/${slug}/api-keys/`);
-    await expect(page.getByRole("heading", { name: "SSR Governance" })).toBeVisible();
+    await expect(page.locator(".cw-sidebar-slot .cw-org-switcher-label")).toHaveText(
+      "SSR Governance",
+    );
     await expect(page.getByRole("navigation", { name: "Organization navigation" })).toBeVisible();
     await expect(page.getByText("Create Key", { exact: true })).toBeInViewport();
   });

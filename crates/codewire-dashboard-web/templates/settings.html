@@ -18,11 +18,11 @@
       </header>
       <button class="cw-mobile-overlay" type="button" data-sidebar-close aria-label="Close sidebar"></button>
       <aside class="cw-mobile-drawer">{% include "sidebar.html" %}</aside>
-      <main class="cw-main"><div class="cw-main-inner"><div class="cw-page cw-settings-page">
+      <main class="cw-main">{% include "console-header.html" %}<div class="cw-main-inner"><div class="cw-page cw-settings-page">
         <div class="cw-settings-layout">
           <aside class="cw-settings-subnav">
             <div class="cw-settings-subnav-heading"><strong>Settings</strong><span>{{ view.user_name }}</span></div>
-            <nav aria-label="Account settings"><a href="/settings/{{ view.global_context_query }}" aria-current="page">Account</a><a href="/settings/security/{{ view.global_context_query }}">Security</a><a href="/settings/sessions/{{ view.global_context_query }}">Sessions</a></nav>
+            <nav aria-label="Account settings"><p class="cw-context-nav-label">Personal</p><a href="/settings/{{ view.global_context_query }}" aria-current="page">Account</a><a href="/settings/security/{{ view.global_context_query }}">Security</a><a href="/settings/sessions/{{ view.global_context_query }}">Sessions</a>{% if view.has_selected_organization %}<p class="cw-context-nav-label">Organization</p><a href="{{ view.selected_organization_url }}">Sandboxes</a><a href="/{{ view.selected_organization_slug }}/snapshots/">Snapshots <small>Soon</small></a><a href="/{{ view.selected_organization_slug }}/presets/">Presets</a><a href="/{{ view.selected_organization_slug }}/secrets/">Secrets</a><a href="/{{ view.selected_organization_slug }}/api-keys/">API Keys</a><a href="/{{ view.selected_organization_slug }}/members/">Members</a><a href="/{{ view.selected_organization_slug }}/billing/">Billing</a>{% endif %}{% if view.is_admin %}<p class="cw-context-nav-label">Admin</p><a href="/admin/{{ view.global_context_query }}">Overview</a><a href="/admin/billing/{{ view.global_context_query }}">Billing catalog</a><a href="/admin/audit/{{ view.global_context_query }}">Audit log</a>{% endif %}</nav>
           </aside>
           <div class="cw-settings-content">
         <header class="cw-page-header"><div><p class="cw-eyebrow">Personal</p><h1 class="cw-page-title">Account</h1><p class="cw-page-description">Manage your account integrations and Sandbox identity.</p></div></header>
@@ -91,7 +91,7 @@
           </div>
         </section>
 
-        <section class="cw-card cw-settings-card" aria-labelledby="account-title">
+        <section id="sign-out" class="cw-card cw-settings-card" aria-labelledby="account-title">
           <div class="cw-card-header"><h2 id="account-title" class="cw-card-title">Account</h2><p class="cw-card-description">Review the account, security, and session pages currently supported by the identity service.</p></div>
           <div class="cw-card-content cw-settings-account-links"><a href="/settings/{{ view.global_context_query }}">Account details</a><a href="/settings/security/{{ view.global_context_query }}">Security</a><a href="/settings/sessions/{{ view.global_context_query }}">Active sessions</a><form method="post" action="/settings/_actions/sign-out{{ view.global_context_query }}"><input type="hidden" name="_csrf" value="{{ settings.csrf_token }}"><button class="cw-button cw-button--outline" type="submit">Sign out</button></form></div>
         </section>

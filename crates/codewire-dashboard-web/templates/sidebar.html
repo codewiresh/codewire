@@ -10,7 +10,7 @@
   <div class="cw-console-org-switcher">
     <details class="cw-org-switcher">
       <summary>
-        <span class="cw-org-initial" aria-hidden="true">◇</span>
+        <span class="cw-org-initial" aria-hidden="true">P</span>
         <span class="cw-org-switcher-label">{% if view.has_selected_organization %}{{ view.selected_organization_name }}{% else %}Choose organization{% endif %}</span>
         <span aria-hidden="true">⌄</span>
       </summary>
@@ -22,46 +22,40 @@
         <a href="{{ view.new_organization_url }}">＋ New Organization</a>
       </div>
     </details>
-    <button class="cw-search-trigger" type="button" data-quick-search-open><span>Quick search</span><kbd>/</kbd></button>
   </div>
 
   {% if view.has_selected_organization %}
   <div class="cw-console-create">
-    <a class="cw-button cw-button--accent cw-button--pill" href="{{ view.selected_organization_url }}?create=true">＋ Create Sandbox</a>
+    <a class="cw-button cw-button--accent cw-button--pill" href="{{ view.selected_organization_url }}?create=true" data-drawer-trigger>＋ Create Sandbox</a>
   </div>
   <div class="cw-console-rail-heading">
     <a href="{{ view.selected_organization_url }}">View all Sandboxes →</a>
-    <span>{{ view.sandbox_total }}</span>
+    <span class="cw-rail-tools" aria-label="Sandbox rail controls">
+      <button type="button" disabled title="Rail filtering is coming soon" aria-label="Filter Sandbox rail"><svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-grid"/></svg></button>
+      <button type="button" disabled title="Rail sorting is coming soon" aria-label="Sort Sandbox rail">↕</button>
+    </span>
   </div>
   <div class="cw-console-rail" hx-get="/{{ view.selected_organization_slug }}/_fragments/sandbox-rail" hx-trigger="every 10s" hx-swap="innerHTML">
     {% include "sandbox-rail.html" %}
-  </div>
-  <div class="cw-console-nav">
-    <a class="cw-nav-link" href="{{ view.selected_organization_url }}">Sandboxes</a>
-    <a class="cw-nav-link" href="/{{ view.selected_organization_slug }}/snapshots/">Snapshots <span class="cw-nav-soon">Soon</span></a>
-    <a class="cw-nav-link" href="/{{ view.selected_organization_slug }}/presets/">Presets</a>
-    <a class="cw-nav-link" href="/{{ view.selected_organization_slug }}/secrets/">Secrets</a>
-    <a class="cw-nav-link" href="/{{ view.selected_organization_slug }}/api-keys/">API keys</a>
-    <a class="cw-nav-link" href="/{{ view.selected_organization_slug }}/members/">Members</a>
-    <a class="cw-nav-link" href="/{{ view.selected_organization_slug }}/billing/">Billing</a>
   </div>
   {% else %}
   <div class="cw-console-empty-org"><p>Create an organization to start a Sandbox.</p><a href="{{ view.new_organization_url }}">New organization</a></div>
   {% endif %}
 
   {% if view.is_admin %}
-  <div class="cw-console-nav cw-console-nav--admin">
-    <p class="cw-section-label">Admin</p>
+  <div class="cw-console-admin">
+    <p>Admin</p>
     <a class="cw-nav-link" href="/admin/{{ view.global_context_query }}">Overview</a>
-    <a class="cw-nav-link" href="/admin/billing/{{ view.global_context_query }}">Billing catalog</a>
-    <a class="cw-nav-link" href="/admin/audit/{{ view.global_context_query }}">Audit log</a>
+    <a class="cw-nav-link" href="/admin/audit/{{ view.global_context_query }}">Audit Log</a>
+    <a class="cw-nav-link" href="/admin/billing/{{ view.global_context_query }}">Billing Catalog</a>
   </div>
   {% endif %}
 
+  <div class="cw-console-get-started"><a class="cw-nav-link" href="/dashboard/#get-started">Get Started</a></div>
   <div class="cw-console-footer">
-    <a class="cw-nav-link" href="{{ view.settings_url }}">Settings</a>
-    <a class="cw-nav-link" href="/docs">Docs</a>
-    <span class="cw-console-user">{{ view.user_name }}</span>
+    <a class="cw-nav-link" href="{{ view.settings_url }}"><svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-settings"/></svg>Settings</a>
+    <a class="cw-nav-link" href="/docs"><svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-book"/></svg>Docs</a>
+    <a class="cw-nav-link" href="{{ view.settings_url }}#sign-out"><svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-chevron-right"/></svg>Sign Out</a>
   </div>
 
   <dialog class="cw-command" data-quick-search>

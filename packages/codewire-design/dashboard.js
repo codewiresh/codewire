@@ -1,4 +1,5 @@
 const app = document.querySelector("[data-dashboard-app]");
+const drawer = document.querySelector("[data-drawer]");
 
 const nameToSlug = (name) => name
   .toLowerCase()
@@ -50,6 +51,22 @@ if (app) {
 
   document.addEventListener("click", (event) => {
     const target = event.target instanceof Element ? event.target : null;
+    document.querySelectorAll(".cw-org-details[open]").forEach((details) => {
+      const panel = details.querySelector(":scope > .cw-card");
+      const summary = details.querySelector(":scope > summary");
+      if (target && !panel?.contains(target) && !summary?.contains(target)) details.removeAttribute("open");
+    });
+    if (target?.closest("[data-drawer-close]") && drawer) {
+      event.preventDefault();
+      const closeUrl = drawer.getAttribute("data-close-url") || window.location.pathname;
+      const referrer = document.referrer ? new URL(document.referrer) : null;
+      const openedFromList = referrer?.origin === window.location.origin
+        && referrer.pathname === window.location.pathname
+        && !referrer.searchParams.has("create");
+      if (openedFromList && window.history.length > 1) window.history.back();
+      else window.location.assign(closeUrl);
+      return;
+    }
     if (target?.closest("[data-sidebar-toggle]")) {
       const open = app.getAttribute("data-mobile-open") === "true";
       app.setAttribute("data-mobile-open", String(!open));
@@ -72,7 +89,16 @@ if (app) {
       openQuickSearch();
       return;
     }
-    if (event.key === "Escape") closeSidebar();
+    if (event.key === "Escape" && drawer) {
+      event.preventDefault();
+      drawer.querySelector("[data-drawer-close]")?.click();
+      return;
+    }
+    if (event.key === "Escape") {
+      const openDetails = document.querySelector(".cw-org-details[open]");
+      if (openDetails) openDetails.removeAttribute("open");
+      closeSidebar();
+    }
   });
 
   document.addEventListener("input", (event) => {
@@ -92,4 +118,34 @@ if (app) {
     const empty = dialog.querySelector("[data-quick-search-empty]");
     if (empty instanceof HTMLElement) empty.hidden = visible !== 0;
   });
+
+  if (drawer) {
+    document.body.setAttribute("data-drawer-open", "true");
+    const focusPanel = () => {
+      const panel = drawer.querySelector("[data-drawer-panel]");
+      const target = panel?.querySelector("#environment-name")
+        || panel?.querySelector("input:not([type='hidden']):not(:disabled), select:not(:disabled), textarea:not(:disabled), button:not(:disabled), a[href]");
+      if (target instanceof HTMLElement) target.focus({ preventScroll: true });
+      else if (panel instanceof HTMLElement) panel.focus({ preventScroll: true });
+    };
+    window.requestAnimationFrame(focusPanel);
+    document.addEventListener("codewire:drawer-replaced", focusPanel);
+    document.addEventListener("keydown", (event) => {
+      if (event.key !== "Tab") return;
+      const currentPanel = drawer.querySelector("[data-drawer-panel]");
+      if (!currentPanel) return;
+      const focusable = Array.from(currentPanel.querySelectorAll("a[href], button:not(:disabled), input:not([type='hidden']):not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex='-1'])"))
+        .filter((element) => element instanceof HTMLElement && element.offsetParent !== null);
+      if (focusable.length === 0) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    });
+  }
 }

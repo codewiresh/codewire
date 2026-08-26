@@ -747,9 +747,10 @@ fn environment_row(environment: Environment) -> EnvironmentRow {
         cost: format!("${:.2}", running_seconds * per_second),
         running_time: duration_label(environment.total_running_seconds),
         resources: format!(
-            "{} vCPU / {} GiB",
+            "{} vCPU · {} GiB · {} GiB",
             compact_decimal(cpu_vcpu),
-            compact_decimal(memory_gib)
+            compact_decimal(memory_gib),
+            environment.disk_gb,
         ),
         cpu_millicores: environment.cpu_millicores,
         memory_mb: environment.memory_mb,

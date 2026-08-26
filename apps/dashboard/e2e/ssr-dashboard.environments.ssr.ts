@@ -1,4 +1,4 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Locator, type Page } from "@playwright/test";
 import postgres from "postgres";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -53,6 +53,12 @@ function watchDisallowedBrowserCalls(page: Page) {
     }
   });
   return calls;
+}
+
+async function openRowActions(row: Locator) {
+  const trigger = row.locator('summary[aria-label^="Actions for "]');
+  await expect(trigger).toBeVisible();
+  await trigger.click();
 }
 
 async function issueTerminalTicket(page: Page): Promise<string> {
@@ -243,7 +249,7 @@ test.describe.serial("server-rendered environments", () => {
     await expect(page.locator('link[href="/assets/codewire/routes/environments-v2.css"]')).toHaveCount(1);
     await expect(page.locator('use[href^="/assets/codewire/icons-v2.svg#"]').first()).toHaveCount(1);
     await expect(
-      page.locator(".cw-sidebar-slot").getByRole("link", { name: "Sandboxes", exact: true }),
+      page.locator(".cw-sidebar-slot").getByRole("link", { name: /View all Sandboxes/ }),
     ).toHaveAttribute(
       "href",
       `/${slug}/`,
@@ -251,9 +257,26 @@ test.describe.serial("server-rendered environments", () => {
     await expect(page.getByLabel("Preset", { exact: true }).locator(`option[value="${presetId}"]`)).toContainText(
       presetName,
     );
+    const drawer = page.locator("#environment-create-card");
+    await expect(drawer).toHaveAttribute("role", "dialog");
+    await expect(drawer).toHaveAttribute("aria-modal", "true");
+    await expect(drawer).toHaveCSS("transform", "none");
+    await expect(page.locator("#environment-snapshot")).toBeDisabled();
+    await expect(page.locator('#environment-snapshot[name]')).toHaveCount(0);
+    const drawerGeometry = await drawer.evaluate((element) => {
+      const box = element.getBoundingClientRect();
+      return { width: box.width, height: box.height, right: box.right, viewportWidth: innerWidth, viewportHeight: innerHeight };
+    });
+    expect(drawerGeometry.width).toBeCloseTo(540, 3);
+    expect(drawerGeometry.height).toBe(drawerGeometry.viewportHeight);
+    expect(drawerGeometry.right).toBe(drawerGeometry.viewportWidth);
+    await expect(page.locator("#environment-name")).toBeFocused();
     expect(disallowedBrowserCalls).toEqual([]);
     expect(staleAssetRequests).toEqual([]);
-    await expect(page).toHaveScreenshot("environments-create-desktop.png", { fullPage: true });
+    await expect(page).toHaveScreenshot("environments-create-desktop.png");
+    await page.keyboard.press("Escape");
+    await expect(page).toHaveURL(new RegExp(`/${slug}/$`));
+    await expect(page.locator("[data-drawer]")).toHaveCount(0);
   });
 
   test("preserves the React image, repository, preset, secret, and advanced form contract", async ({ page, isMobile }) => {
@@ -270,22 +293,19 @@ test.describe.serial("server-rendered environments", () => {
     expect((await universalRequest).postData()).toContain(`image=${encodeURIComponent(workspaceImage)}`);
     await expect(page.getByRole("heading", { name: "Sandbox configuration" })).toBeVisible();
     await expect(page.getByText("Selected image", { exact: true })).toBeVisible();
+    await page.getByText("Advanced", { exact: true }).click();
     const createCard = page.locator("#environment-create-card");
     const dimensions = await createCard.evaluate((element) => ({
       clientWidth: element.clientWidth,
-      parentWidth: element.parentElement?.clientWidth || 0,
       scrollWidth: element.scrollWidth,
     }));
-    expect(dimensions.clientWidth).toBeGreaterThan(0);
-    expect(Math.abs(dimensions.parentWidth - dimensions.clientWidth)).toBeLessThanOrEqual(2);
+    expect(dimensions.clientWidth).toBe(539);
     expect(dimensions.scrollWidth - dimensions.clientWidth).toBeLessThanOrEqual(1);
     const projectSelect = page.getByLabel("Project", { exact: true });
     const newProjectInput = page.getByLabel("New project", { exact: true });
-    await expect(projectSelect).toHaveCSS("min-height", "40px");
-    await expect(newProjectInput).toHaveCSS("min-height", "40px");
-    await expect(projectSelect).toHaveCSS("background-color", "rgb(17, 17, 17)");
-    await expect(page).toHaveScreenshot("environments-prepared-image-desktop.png", { fullPage: true });
-    await page.getByText("Advanced", { exact: true }).click();
+    await expect(projectSelect).toHaveCSS("min-height", "36px");
+    await expect(newProjectInput).toHaveCSS("min-height", "36px");
+    await expect(page).toHaveScreenshot("environments-prepared-image-desktop.png");
     await expect(page.getByLabel("Image", { exact: true })).toHaveValue(workspaceImage);
 
     await page.goto(`/${slug}/?create=true`);
@@ -305,6 +325,7 @@ test.describe.serial("server-rendered environments", () => {
     await page.getByLabel("Preset", { exact: true }).selectOption(presetId);
     await page.getByRole("button", { name: "Use preset" }).click();
     await expect(page.getByRole("heading", { name: "Sandbox configuration" })).toBeVisible();
+    await page.getByText("Advanced", { exact: true }).click();
     await expect(page.locator('input[name="agent"][value="codex"]')).toBeChecked();
     await expect(page.getByLabel("Application port")).toHaveValue("3000");
     await expect(page.getByLabel("Port label")).toHaveValue("web");
@@ -315,7 +336,6 @@ test.describe.serial("server-rendered environments", () => {
       "href",
       new RegExp(`/${slug}/secrets/${seededSecretProjectId}/$`),
     );
-    await page.getByText("Advanced", { exact: true }).click();
     await expect(page.getByLabel("Install Command")).toHaveValue(
       "printf 'prepared-by-preset\\n'",
     );
@@ -324,7 +344,7 @@ test.describe.serial("server-rendered environments", () => {
     );
     await expect(page.getByLabel("CPU", { exact: true })).toHaveValue("1000");
     await expect(page.getByLabel("Memory", { exact: true })).toHaveValue("2048");
-    await expect(page.getByLabel("Disk (GB)")).toHaveValue("10");
+    await expect(page.getByLabel("Disk", { exact: true })).toHaveValue("10");
     await expect(page.getByLabel("TTL")).toHaveValue("3600s");
 
     const inlineProjectName = `inline-${runId}`;
@@ -475,18 +495,13 @@ test.describe.serial("server-rendered environments", () => {
     const analyze = page.getByRole("button", { name: "Analyze", exact: true });
     await analyze.scrollIntoViewIfNeeded();
     await expect(analyze).toBeInViewport();
-    await page.getByRole("button", { name: "Toggle sidebar" }).click();
-    await expect(
-      page.locator(".cw-mobile-drawer").getByRole("link", { name: "Presets" }),
-    ).toBeVisible();
-    await page.locator(".cw-mobile-drawer").getByRole("button", {
-      name: "Collapse navigation",
-    }).click();
-    await page.evaluate(() => window.scrollTo(0, 0));
-    await expect(page).toHaveScreenshot("environments-create-mobile.png", { fullPage: true });
+    await page.locator(".cw-drawer-body").evaluate((element) => { element.scrollTop = 0; });
+    expect(await page.locator("#environment-create-card").evaluate((element) => element.getBoundingClientRect().top)).toBe(0);
+    await expect(page).toHaveScreenshot("environments-create-mobile.png");
     await page.locator(".cw-choice-tabs label", { hasText: "From Image" }).click();
     await page.getByRole("button", { name: /Universal Sandbox image/ }).click();
     await expect(page.getByRole("heading", { name: "Sandbox configuration" })).toBeVisible();
+    await page.getByText("Advanced", { exact: true }).click();
     const mobileCard = page.locator("#environment-create-card");
     const dimensions = await mobileCard.evaluate((element) => ({
       clientWidth: element.clientWidth,
@@ -494,8 +509,8 @@ test.describe.serial("server-rendered environments", () => {
     }));
     expect(dimensions.clientWidth).toBeGreaterThan(0);
     expect(dimensions.scrollWidth - dimensions.clientWidth).toBeLessThanOrEqual(1);
-    await expect(page.getByLabel("Project", { exact: true })).toHaveCSS("min-height", "40px");
-    await expect(page).toHaveScreenshot("environments-prepared-image-mobile.png", { fullPage: true });
+    await expect(page.getByLabel("Project", { exact: true })).toHaveCSS("min-height", "36px");
+    await expect(page).toHaveScreenshot("environments-prepared-image-mobile.png");
   });
 
   test("creates, runs, exposes a port, stops, starts, and destroys through real Kind", async ({ page, isMobile }) => {
@@ -521,7 +536,7 @@ test.describe.serial("server-rendered environments", () => {
     await openPreparedImageForm(page);
     await expect(page.getByLabel("CPU", { exact: true })).toHaveValue("1000");
     await expect(page.getByLabel("Memory", { exact: true })).toHaveValue("2048");
-    await expect(page.getByLabel("Disk (GB)")).toHaveValue("10");
+    await expect(page.getByLabel("Disk", { exact: true })).toHaveValue("10");
     await page.getByLabel("Name").fill(environmentName);
     await page.getByRole("button", { name: "Create Sandbox" }).click();
     await expect(page).toHaveURL(
@@ -553,9 +568,9 @@ test.describe.serial("server-rendered environments", () => {
     await page.reload();
     let row = page.locator("tr", { hasText: environmentName }).first();
     await expect(row.locator(".cw-status")).toContainText("running");
-    await expect(page.locator(".cw-environment-usage")).toContainText("usage");
-    await expect(page.locator(".cw-environment-usage")).toContainText("1 vCPU / 2 GiB");
-    await expect(page.locator(".cw-environment-usage")).toContainText("/h");
+    await expect(row.getByText("1 vCPU · 2 GiB · 10 GiB", { exact: true })).toBeVisible();
+    await openRowActions(row);
+    await expect(row.locator(".cw-row-menu-meta")).toContainText("usage");
 
     const terminalLink = row.getByRole("link", { name: "Terminal", exact: true });
     await terminalLink.click();
@@ -623,6 +638,7 @@ test.describe.serial("server-rendered environments", () => {
     await expectTerminalLeaseDrained();
     expect(disallowedBrowserCalls).toEqual([]);
 
+    await openRowActions(row);
     await row.getByRole("link", { name: "Ports" }).click();
     const portPanel = page.locator(".cw-port-panel");
     await portPanel.getByRole("spinbutton", { name: "Port" }).fill("8080");
@@ -636,18 +652,21 @@ test.describe.serial("server-rendered environments", () => {
     await expect(page.locator(".cw-port-row", { hasText: "web" })).toHaveCount(0);
 
     row = page.locator("tr", { hasText: environmentName }).first();
+    await openRowActions(row);
     await row.getByRole("button", { name: "Stop" }).click();
     await waitForEnvironmentState(environmentId, ["stopped"], 120_000);
     await page.reload();
     row = page.locator("tr", { hasText: environmentName }).first();
     await expect(row.locator(".cw-status")).toContainText("stopped");
 
+    await openRowActions(row);
     await row.getByRole("button", { name: "Start" }).click();
     await waitForEnvironmentState(environmentId, ["running"], 300_000);
     await page.reload();
     row = page.locator("tr", { hasText: environmentName }).first();
     await expect(row.locator(".cw-status")).toContainText("running");
 
+    await openRowActions(row);
     await row.locator("summary", { hasText: "Destroy" }).click();
     await row.getByRole("button", { name: "Destroy permanently" }).click();
     await waitForEnvironmentState(environmentId, ["destroyed"], 120_000);
