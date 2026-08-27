@@ -49,17 +49,32 @@ integration_postgres_configure() {
   fi
 
   local image="${INTEGRATION_POSTGRES_IMAGE:-postgres:17-alpine}"
+  local requested_port="${INTEGRATION_POSTGRES_HOST_PORT:-}"
+  local publish="127.0.0.1::5432"
   local port=""
+  if [ -n "$requested_port" ]; then
+    if ! [[ "$requested_port" =~ ^[0-9]+$ ]] \
+        || [ "$requested_port" -lt 1024 ] \
+        || [ "$requested_port" -gt 65535 ]; then
+      echo "::error::INTEGRATION_POSTGRES_HOST_PORT must be an unprivileged TCP port" >&2
+      return 1
+    fi
+    publish="127.0.0.1:${requested_port}:5432"
+  fi
   docker run -d --rm --name "$INTEGRATION_POSTGRES_CONTAINER" \
     -e POSTGRES_USER=codewire \
     -e POSTGRES_PASSWORD=codewire \
     -e POSTGRES_DB=codewire \
-    -p 127.0.0.1::5432 "$image" >/dev/null
+    -p "$publish" "$image" >/dev/null
   INTEGRATION_POSTGRES_MANAGED=true
 
   port="$(docker port "$INTEGRATION_POSTGRES_CONTAINER" 5432/tcp | sed 's/.*://')"
   if ! [[ "$port" =~ ^[0-9]+$ ]]; then
     echo "::error::unable to resolve disposable PostgreSQL loopback port" >&2
+    return 1
+  fi
+  if [ -n "$requested_port" ] && [ "$port" != "$requested_port" ]; then
+    echo "::error::disposable PostgreSQL did not bind the requested loopback port" >&2
     return 1
   fi
 
