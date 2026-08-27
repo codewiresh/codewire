@@ -87,6 +87,22 @@ run_paths_case() {
   assert_tokens "$name" "$expected" "$output"
 }
 
+run_present_paths_case() {
+  local name="$1" event="$2" ref="$3" opt_in="$4" expected="$5"
+  shift 5
+  local fixture_root="$TMP/${name}.repo" paths="$TMP/${name}.paths" output path
+  mkdir -p "$fixture_root"
+  for path in "$@"; do
+    mkdir -p "$fixture_root/$(dirname "$path")"
+    : > "$fixture_root/$path"
+  done
+  printf '%s\n' "$@" > "$paths"
+  output="$(cd "$fixture_root" && env -u GITHUB_OUTPUT -u GITHUB_EVENT_PATH \
+    GITHUB_EVENT_NAME="$event" GITHUB_REF="$ref" \
+    KIND_E2E_OPT_IN="$opt_in" "$SELECTOR" "$paths")"
+  assert_tokens "$name" "$expected" "$output"
+}
+
 assert_contract_field() {
   local name="$1" output="$2" field="$3" expected="$4" actual
   actual="$(sed -n "s/^${field}=//p" <<<"$output")"
@@ -768,6 +784,10 @@ run_paths_case tag push refs/tags/v1.2.3 false \
   'deploy go_consumer_interop go_support release runtime_confidential' docs/tag-path-is-ignored.md
 
 all_product='contracts contracts_proto database deploy edge_kind go_consumer_interop go_support go_tailnet kind policy policy_shell release runtime_confidential runtime_dev_smoke rust rust_curated_locks rust_workspace sdk_go sdk_python sdk_ts security security_dev_smoke_auth security_go security_idp_kek security_js service_apikey_smoke service_billing service_connectcore service_coordinator service_idp service_integration service_nats service_orchestration service_temporal transport transport_derp_contract transport_pkg_codewire_coordinator transport_pkg_codewire_daemon transport_pkg_codewire_derp transport_pkg_codewire_gateway transport_pkg_codewire_mesh transport_pkg_codewire_tailnet transport_pkg_codewire_udp_relay web'
+run_present_paths_case dashboard_watch pull_request refs/pull/2002/head false \
+  "$policy" scripts/dev/dashboard-watch.py
+run_present_paths_case dashboard_watch_unlisted pull_request refs/pull/2003/head false \
+  "$all_product" scripts/dev/unlisted-dashboard-helper.py
 if grep -Fq 'scripts/ci/cache/*.sh' "$SELECTOR"; then
   echo 'Rust cache policy must not admit future cache helpers by wildcard' >&2
   exit 1
