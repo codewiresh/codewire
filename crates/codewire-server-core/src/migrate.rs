@@ -51,9 +51,10 @@ mod tests {
     use super::*;
 
     const ACCEPTED_APPLICATION_SCHEMA_FINGERPRINT: &str =
-        "3e01e1718ed0c2b19a4a36505026bc6801a0b66a9779d7c66864b3354bd797b1";
+        "481b5c5ca31c57e0defa0a915a905e908e408b3616a50cb58d509f3a281f8012";
     const RETIRE_MESH_OIDC_CLIENT_VERSION: i64 = 5;
     const ORGANIZATION_ROUTE_SLUGS_VERSION: i64 = 11;
+    const OPENBAO_SECRET_AUTHORITY_EXPANSION_VERSION: i64 = 12;
 
     async fn startup(database_url: String) -> anyhow::Result<()> {
         ensure_schema(&database_url).await
@@ -119,6 +120,8 @@ mod tests {
             );
             assert_tenant_secret_envelope_schema(&pool).await?;
             assert_organization_route_slug_schema(&pool).await?;
+            assert_openbao_secret_authority_expansion(&pool).await?;
+            assert_confidential_storage_manifest_schema(&pool).await?;
             pool.close().await;
 
             ensure_schema(&test_db.url).await?;
@@ -139,13 +142,154 @@ mod tests {
         result.and(cleanup)
     }
 
+    #[tokio::test]
+    #[ignore = "requires TEST_DATABASE_URL"]
+    async fn openbao_expansion_preserves_the_previous_source_shape() -> anyhow::Result<()> {
+        const ENVIRONMENT_ID: &str = "be31063a-8ec8-46d5-aa17-75cda1729370";
+        let admin_url = std::env::var("TEST_DATABASE_URL")
+            .context("TEST_DATABASE_URL is required for migration tests")?;
+        let test_db = TestDatabase::create(&admin_url).await?;
+        let result = async {
+            apply_migrations_before(&test_db.url, OPENBAO_SECRET_AUTHORITY_EXPANSION_VERSION)
+                .await?;
+
+            let pool = PgPoolOptions::new()
+                .max_connections(1)
+                .connect(&test_db.url)
+                .await?;
+            sqlx::query(
+                "INSERT INTO users (id, email) \
+                 VALUES ('retained-user', 'retained-user@example.test')",
+            )
+            .execute(&pool)
+            .await?;
+            sqlx::query(
+                "INSERT INTO organizations (id, name, slug, created_by) \
+                 VALUES ('org-openbao-expand', 'OpenBao Expand', \
+                         'openbao-expand', 'retained-user')",
+            )
+            .execute(&pool)
+            .await?;
+            sqlx::query(
+                "INSERT INTO environment_presets (id, org_id, name, slug) \
+                 VALUES ('preset-openbao-expand', 'org-openbao-expand', \
+                         'OpenBao Expand', 'openbao-expand')",
+            )
+            .execute(&pool)
+            .await?;
+            sqlx::query(
+                "INSERT INTO environments (id, org_id, created_by, type, preset_id) \
+                 VALUES ($1, 'org-openbao-expand', 'retained-user', 'sandbox', \
+                         'preset-openbao-expand')",
+            )
+            .bind(ENVIRONMENT_ID)
+            .execute(&pool)
+            .await?;
+            sqlx::query(
+                "INSERT INTO confidential_storage_keys \
+                 (environment_id, kbs_uri, infisical_path) VALUES ($1, $2, $3)",
+            )
+            .bind(ENVIRONMENT_ID)
+            .bind(format!(
+                "kbs:///default/codewire-workspace-luks/{ENVIRONMENT_ID}"
+            ))
+            .bind(format!("/confidential-storage/{ENVIRONMENT_ID}"))
+            .execute(&pool)
+            .await?;
+            pool.close().await;
+
+            ensure_schema(&test_db.url).await?;
+
+            let pool = PgPoolOptions::new()
+                .max_connections(1)
+                .connect(&test_db.url)
+                .await?;
+            let paths: (String, String) = sqlx::query_as(
+                "SELECT infisical_path, openbao_path FROM confidential_storage_keys \
+                 WHERE environment_id = $1",
+            )
+            .bind(ENVIRONMENT_ID)
+            .fetch_one(&pool)
+            .await?;
+            anyhow::ensure!(
+                paths
+                    == (
+                        format!("/confidential-storage/{ENVIRONMENT_ID}"),
+                        format!("confidential-storage/{ENVIRONMENT_ID}"),
+                    ),
+                "authority expansion changed the previous path or derived the wrong OpenBao path"
+            );
+
+            // The preceding source can also create a row after the expansion
+            // migration has landed. Its INSERT omits openbao_path; the schema
+            // compatibility trigger must derive that value without weakening
+            // the canonical-path constraint.
+            sqlx::query("DELETE FROM confidential_storage_keys WHERE environment_id = $1")
+                .bind(ENVIRONMENT_ID)
+                .execute(&pool)
+                .await?;
+            sqlx::query(
+                "INSERT INTO confidential_storage_keys \
+                 (environment_id, kbs_uri, infisical_path) VALUES ($1, $2, $3)",
+            )
+            .bind(ENVIRONMENT_ID)
+            .bind(format!(
+                "kbs:///default/codewire-workspace-luks/{ENVIRONMENT_ID}"
+            ))
+            .bind(format!("/confidential-storage/{ENVIRONMENT_ID}"))
+            .execute(&pool)
+            .await?;
+            let inserted_openbao_path: String = sqlx::query_scalar(
+                "SELECT openbao_path FROM confidential_storage_keys WHERE environment_id = $1",
+            )
+            .bind(ENVIRONMENT_ID)
+            .fetch_one(&pool)
+            .await?;
+            anyhow::ensure!(
+                inserted_openbao_path == format!("confidential-storage/{ENVIRONMENT_ID}"),
+                "previous-source insert did not derive the canonical OpenBao path"
+            );
+
+            let authority: String = sqlx::query_scalar(
+                "SELECT state FROM tenant_secret_control WHERE singleton = true",
+            )
+            .fetch_one(&pool)
+            .await?;
+            anyhow::ensure!(authority == "local", "local authority was not activated");
+
+            // These are the previous source's relevant write shapes. They
+            // remain valid through the rollout window even though the new
+            // source no longer selects that provider.
+            sqlx::query(
+                "UPDATE confidential_storage_keys SET state = 'error', updated_at = now() \
+                 WHERE environment_id = $1",
+            )
+            .bind(ENVIRONMENT_ID)
+            .execute(&pool)
+            .await?;
+            sqlx::query(
+                "UPDATE tenant_secret_control SET state = 'infisical' WHERE singleton = true",
+            )
+            .execute(&pool)
+            .await?;
+            sqlx::query("UPDATE tenant_secret_control SET state = 'local' WHERE singleton = true")
+                .execute(&pool)
+                .await?;
+            pool.close().await;
+            anyhow::Ok(())
+        }
+        .await;
+        let cleanup = test_db.drop().await;
+        result.and(cleanup)
+    }
+
     async fn assert_tenant_secret_envelope_schema(pool: &PgPool) -> anyhow::Result<()> {
         let authority: (String, i64) = sqlx::query_as(
             "SELECT state, generation FROM tenant_secret_control WHERE singleton = true",
         )
         .fetch_one(pool)
         .await?;
-        anyhow::ensure!(authority == ("infisical".into(), 0));
+        anyhow::ensure!(authority == ("local".into(), 0));
 
         sqlx::query(
             "INSERT INTO tenant_secret_deks \
@@ -248,6 +392,191 @@ mod tests {
             .execute(pool)
             .await?;
         sqlx::query("DELETE FROM tenant_secret_deks WHERE dek_id = 'dek-org-1'")
+            .execute(pool)
+            .await?;
+        Ok(())
+    }
+
+    async fn assert_openbao_secret_authority_expansion(pool: &PgPool) -> anyhow::Result<()> {
+        let openbao_column: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM information_schema.columns \
+             WHERE table_schema = 'public' AND table_name = 'confidential_storage_keys' \
+               AND column_name = 'openbao_path' AND data_type = 'text' \
+               AND is_nullable = 'NO')",
+        )
+        .fetch_one(pool)
+        .await?;
+        anyhow::ensure!(openbao_column, "required OpenBao recovery path is absent");
+
+        let rollback_column: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM information_schema.columns \
+             WHERE table_schema = 'public' AND table_name = 'confidential_storage_keys' \
+               AND column_name = 'infisical_path' AND data_type = 'text' \
+               AND is_nullable = 'NO')",
+        )
+        .fetch_one(pool)
+        .await?;
+        anyhow::ensure!(
+            rollback_column,
+            "previous-source recovery metadata was removed during expansion"
+        );
+
+        // Both source generations can represent their inactive authority
+        // during the rollout window. Restore the canonical local state before
+        // returning so subsequent assertions exercise the forward source.
+        sqlx::query(
+            "UPDATE tenant_secret_control SET state = 'infisical', \
+             source_revision = NULL, transition_started_at = NULL, verified_at = NULL \
+             WHERE singleton = true",
+        )
+        .execute(pool)
+        .await?;
+        sqlx::query("UPDATE tenant_secret_control SET state = 'local' WHERE singleton = true")
+            .execute(pool)
+            .await?;
+        Ok(())
+    }
+
+    async fn assert_confidential_storage_manifest_schema(pool: &PgPool) -> anyhow::Result<()> {
+        const ENVIRONMENT_ID: &str = "be31063a-8ec8-46d5-aa17-75cda1729370";
+        sqlx::query(
+            "INSERT INTO organizations (id, name, slug, created_by) \
+             VALUES ('org-confidential-storage', 'Confidential Storage', \
+                     'confidential-storage', 'retained-user')",
+        )
+        .execute(pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO environment_presets (id, org_id, name, slug) \
+             VALUES ('preset-confidential-storage', 'org-confidential-storage', \
+                     'Confidential Storage', 'confidential-storage')",
+        )
+        .execute(pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO environments (id, org_id, created_by, type, preset_id) \
+             VALUES ($1, 'org-confidential-storage', 'retained-user', 'sandbox', \
+                     'preset-confidential-storage')",
+        )
+        .bind(ENVIRONMENT_ID)
+        .execute(pool)
+        .await?;
+
+        // The previous source can still create and update its original row
+        // shape. The manifest-aware source fills the complete new tuple later.
+        sqlx::query(
+            "INSERT INTO confidential_storage_keys \
+             (environment_id, kbs_uri, infisical_path, openbao_path) \
+             VALUES ($1, $2, $3, $4)",
+        )
+        .bind(ENVIRONMENT_ID)
+        .bind(format!(
+            "kbs:///default/codewire-workspace-luks/{ENVIRONMENT_ID}"
+        ))
+        .bind(format!("/confidential-storage/{ENVIRONMENT_ID}"))
+        .bind(format!("confidential-storage/{ENVIRONMENT_ID}"))
+        .execute(pool)
+        .await?;
+
+        let partial_tuple = sqlx::query(
+            "UPDATE confidential_storage_keys \
+             SET manifest_uri = $2 WHERE environment_id = $1",
+        )
+        .bind(ENVIRONMENT_ID)
+        .bind(format!(
+            "kbs:///default/codewire-storage-manifests/{ENVIRONMENT_ID}-v1"
+        ))
+        .execute(pool)
+        .await;
+        anyhow::ensure!(
+            partial_tuple.is_err(),
+            "partial confidential storage manifest tuple was accepted"
+        );
+
+        sqlx::query(
+            "UPDATE confidential_storage_keys SET \
+                 manifest_uri = $2, volume_id = $1, volume_version = $3, \
+                 manifest_schema_version = 1, device_size_bytes = 21474836480, \
+                 luks_uuid = 'f617a73e-b03d-4b58-b1ae-354c72276ea0', \
+                 protection_profile = 'luks2-integrity-rw', \
+                 backing_claim_name = 'workspace' \
+             WHERE environment_id = $1",
+        )
+        .bind(ENVIRONMENT_ID)
+        .bind(format!(
+            "kbs:///default/codewire-storage-manifests/{ENVIRONMENT_ID}-v1"
+        ))
+        .bind(format!("{ENVIRONMENT_ID}-v1"))
+        .execute(pool)
+        .await?;
+
+        sqlx::query(
+            "UPDATE confidential_storage_keys \
+             SET manifest_sha256_fingerprint = $2 WHERE environment_id = $1",
+        )
+        .bind(ENVIRONMENT_ID)
+        .bind("9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08")
+        .execute(pool)
+        .await?;
+
+        for (column, statement) in [
+            (
+                "volume_version",
+                "UPDATE confidential_storage_keys SET volume_version = 'mutable-alias' \
+                 WHERE environment_id = $1",
+            ),
+            (
+                "protection_profile",
+                "UPDATE confidential_storage_keys \
+                 SET protection_profile = 'host-selected-profile' WHERE environment_id = $1",
+            ),
+            (
+                "device_size_bytes",
+                "UPDATE confidential_storage_keys SET device_size_bytes = 21474836481 \
+                 WHERE environment_id = $1",
+            ),
+            (
+                "aligned_device_size_bytes",
+                "UPDATE confidential_storage_keys SET device_size_bytes = 42949672960 \
+                 WHERE environment_id = $1",
+            ),
+            (
+                "luks_uuid",
+                "UPDATE confidential_storage_keys \
+                 SET luks_uuid = '00112233-4455-6677-8899-aabbccddeeff' \
+                 WHERE environment_id = $1",
+            ),
+            (
+                "manifest_sha256_fingerprint",
+                "UPDATE confidential_storage_keys \
+                 SET manifest_sha256_fingerprint = 'not-a-sha256' WHERE environment_id = $1",
+            ),
+            (
+                "valid_manifest_sha256_fingerprint",
+                "UPDATE confidential_storage_keys \
+                 SET manifest_sha256_fingerprint = \
+                     '60303ae22b9988617223d5f367ee8e6c13a85f16f27f80a93b868276a58c286d' \
+                 WHERE environment_id = $1",
+            ),
+        ] {
+            let rejected = sqlx::query(statement)
+                .bind(ENVIRONMENT_ID)
+                .execute(pool)
+                .await;
+            anyhow::ensure!(
+                rejected.is_err(),
+                "invalid confidential storage {column} was accepted"
+            );
+        }
+
+        sqlx::query("DELETE FROM environments WHERE id = $1")
+            .bind(ENVIRONMENT_ID)
+            .execute(pool)
+            .await?;
+        sqlx::query("DELETE FROM environment_presets WHERE id = 'preset-confidential-storage'")
+            .execute(pool)
+            .await?;
+        sqlx::query("DELETE FROM organizations WHERE id = 'org-confidential-storage'")
             .execute(pool)
             .await?;
         Ok(())
