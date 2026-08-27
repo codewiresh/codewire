@@ -27,11 +27,14 @@ use zeroize::Zeroizing;
 use codewire_server_core::auth::AuthUser;
 use codewire_server_core::{AppError, AppResult};
 
+use crate::openbao_workload_identity::{
+    KubernetesOpenBaoWorkloadIdentity, OpenBaoWorkloadIdentity,
+};
+
 pub(crate) const KEY_BYTES: usize = 32;
 #[cfg(test)]
 pub(crate) const KEY_NAME: &str = "LUKS_KEY_V1";
 const KEY_VERSION: i32 = 1;
-const OPENBAO_TOKEN_PATH: &str = "/var/run/secrets/codewire-confidential-openbao/token";
 const OPENBAO_AUTH_MOUNT: &str = "kubernetes-codewire";
 const KBS_RESOURCE_PREFIX: &str = "default/codewire-workspace-luks";
 const OPENBAO_PARENT_PATH: &str = "confidential-storage";
@@ -196,7 +199,11 @@ impl ConfidentialStorageManager {
     /// workspaces first while keeping stop/destroy reconciliation available.
     /// There is no local or tenant-secret fallback: partial platform
     /// configuration is fatal.
-    pub fn from_env(pool: PgPool, flags: FeatureFlags) -> anyhow::Result<Option<Self>> {
+    pub fn from_env(
+        pool: PgPool,
+        flags: FeatureFlags,
+        kube: Option<kube::Client>,
+    ) -> anyhow::Result<Option<Self>> {
         let provider_env = [
             "CONFIDENTIAL_STORAGE_BAO_ADDR",
             "CONFIDENTIAL_STORAGE_BAO_ROLE",
@@ -212,9 +219,12 @@ impl ConfidentialStorageManager {
         if !flags.enabled && !any_provider_configured {
             return Ok(None);
         }
+        let kube = kube.ok_or_else(|| {
+            anyhow::anyhow!("confidential-storage OpenBao requires a Kubernetes client")
+        })?;
         Ok(Some(Self::from_parts(
             Arc::new(PgMetadataStore { pool: pool.clone() }),
-            Arc::new(OpenBaoKvRecoveryKeyStore::from_env()?),
+            Arc::new(OpenBaoKvRecoveryKeyStore::from_env(kube)?),
             Arc::new(TrusteeKbsClient::from_env()?),
         )))
     }
@@ -476,13 +486,13 @@ struct OpenBaoKvConfig {
     address: Url,
     auth_mount: String,
     role: String,
-    token_path: PathBuf,
     kv_mount: String,
     expected_cluster_id: String,
 }
 
 pub struct OpenBaoKvRecoveryKeyStore {
     config: OpenBaoKvConfig,
+    identity: Arc<dyn OpenBaoWorkloadIdentity>,
     http: reqwest::Client,
     token: Mutex<Option<CachedToken>>,
 }
@@ -544,7 +554,7 @@ struct OpenBaoKvWriteData<'a> {
 }
 
 impl OpenBaoKvRecoveryKeyStore {
-    pub(crate) fn from_env() -> anyhow::Result<Self> {
+    pub(crate) fn from_env(kube: kube::Client) -> anyhow::Result<Self> {
         let address = required_env("CONFIDENTIAL_STORAGE_BAO_ADDR")?;
         let address = parse_openbao_origin("CONFIDENTIAL_STORAGE_BAO_ADDR", &address)?;
         let auth_mount = std::env::var("CONFIDENTIAL_STORAGE_BAO_AUTH_MOUNT")
@@ -560,33 +570,35 @@ impl OpenBaoKvRecoveryKeyStore {
             anyhow::bail!("invalid confidential storage OpenBao configuration");
         }
         let https_only = address.scheme() == "https";
+        let identity = Arc::new(KubernetesOpenBaoWorkloadIdentity::from_env(
+            kube,
+            "CONFIDENTIAL_STORAGE_BAO_AUDIENCE",
+        )?);
         Ok(Self {
             config: OpenBaoKvConfig {
                 address,
                 auth_mount,
                 role,
-                token_path: std::env::var_os("CONFIDENTIAL_STORAGE_BAO_SA_TOKEN_PATH")
-                    .map(PathBuf::from)
-                    .unwrap_or_else(|| PathBuf::from(OPENBAO_TOKEN_PATH)),
                 kv_mount,
                 expected_cluster_id,
             },
+            identity,
             http: restricted_http_client(Duration::from_secs(30), https_only, None)?,
             token: Mutex::new(None),
         })
     }
 
     #[cfg(test)]
-    fn for_test(address: Url, token_path: PathBuf, expected_cluster_id: &str) -> Self {
+    fn for_test(address: Url, expected_cluster_id: &str) -> Self {
         Self {
             config: OpenBaoKvConfig {
                 address,
                 auth_mount: OPENBAO_AUTH_MOUNT.to_owned(),
                 role: "codewire-orchestration".to_owned(),
-                token_path,
                 kv_mount: "codewire-confidential-dev".to_owned(),
                 expected_cluster_id: expected_cluster_id.to_owned(),
             },
+            identity: crate::openbao_workload_identity::static_workload_identity("projected-jwt"),
             http: reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
                 .timeout(Duration::from_secs(5))
@@ -641,16 +653,20 @@ impl OpenBaoKvRecoveryKeyStore {
         {
             return Ok(Zeroizing::new(token.value.to_string()));
         }
-        let jwt = Zeroizing::new(
-            std::fs::read_to_string(&self.config.token_path)
-                .map_err(|_| ProviderError::new("OpenBao workload authentication", None))?,
-        );
+        let jwt = self.identity.token().await.map_err(|error| {
+            tracing::warn!(
+                failure_class = error.failure_class(),
+                error = %error,
+                "confidential-storage OpenBao workload identity request failed"
+            );
+            ProviderError::new("OpenBao workload identity request", None)
+        })?;
         let response = self
             .http
             .post(self.endpoint(&["v1", "auth", &self.config.auth_mount, "login"])?)
             .json(&OpenBaoAuthRequest {
                 role: &self.config.role,
-                jwt: jwt.trim(),
+                jwt: jwt.as_str(),
             })
             .send()
             .await
@@ -1458,11 +1474,8 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move { axum::serve(listener, app).await });
-        let token_file = tempfile::NamedTempFile::new().unwrap();
-        std::fs::write(token_file.path(), "projected-jwt\n").unwrap();
         let client = OpenBaoKvRecoveryKeyStore::for_test(
             Url::parse(&format!("http://{address}")).unwrap(),
-            token_file.path().to_path_buf(),
             "cluster-test",
         );
         let key = Zeroizing::new(vec![0x5a; KEY_BYTES]);

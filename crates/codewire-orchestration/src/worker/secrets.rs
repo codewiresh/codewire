@@ -63,7 +63,12 @@ impl SecretStore {
         self.0.verify_canary().await
     }
 
+    #[cfg(feature = "kind-e2e")]
     pub fn from_env(pool: PgPool) -> anyhow::Result<Self> {
+        Self::from_env_with_kube(pool, None)
+    }
+
+    pub fn from_env_with_kube(pool: PgPool, kube: Option<kube::Client>) -> anyhow::Result<Self> {
         #[cfg(feature = "kind-e2e")]
         if std::env::var("CODEWIRE_KIND_TENANT_SECRET_TEST_PROVIDER").as_deref() == Ok("true") {
             tracing::warn!("using the Kind-only tenant-secret KEK test provider");
@@ -73,8 +78,11 @@ impl SecretStore {
             )));
         }
         tracing::info!("using OpenBao-wrapped encrypted PostgreSQL tenant-secret store");
+        let kube = kube.ok_or_else(|| {
+            anyhow::anyhow!("OpenBao tenant-secret storage requires a Kubernetes client")
+        })?;
         Ok(Self(
-            super::postgres_secrets::PostgresSecretStore::from_env(pool)?,
+            super::postgres_secrets::PostgresSecretStore::from_env(pool, kube)?,
         ))
     }
 

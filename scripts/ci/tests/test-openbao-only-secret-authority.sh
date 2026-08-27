@@ -83,6 +83,12 @@ if rg -n --glob '!migrate.rs' \
   printf 'retired tenant-secret runtime choice remains active\n' >&2
   exit 1
 fi
+if rg -n \
+  'TENANT_SECRET_BAO_SA_TOKEN_PATH|CONFIDENTIAL_STORAGE_BAO_SA_TOKEN_PATH|/var/run/secrets/codewire-(tenant-bao|confidential-openbao)' \
+  crates deployments docs/SECRETS.md; then
+  printf 'obsolete file-backed OpenBao workload identity remains active\n' >&2
+  exit 1
+fi
 
 # The synthetic KEK is a deliberate, two-part Kind contract: only the
 # non-promotable image is compiled with it, and every repository-owned Kind
@@ -101,9 +107,9 @@ if rg -n 'CODEWIRE_KIND_TENANT_SECRET_TEST_PROVIDER' \
   exit 1
 fi
 
-# Decide from the rendered workload rather than source fragments. Dev must
-# receive two independent exact-audience projected identities while the
-# reusable/Production render remains inert.
+# Decide from the rendered workload rather than source fragments. Dev uses a
+# Pod-bound TokenRequest identity with two exact audiences per OpenBao client;
+# the reusable/Production render remains unconfigured.
 render_root="$(mktemp -d)"
 trap 'rm -rf -- "$render_root"' EXIT
 kubectl kustomize deployments/k8s/overlays/dev >"$render_root/dev.yaml"
@@ -115,6 +121,12 @@ yq ea -o=json -I=0 \
   'select(.kind == "Deployment" and .metadata.name == "codewire-orchestration")' \
   "$render_root/dev.yaml" >"$render_root/dev-orchestration.json"
 yq ea -o=json -I=0 \
+  'select(.kind == "Role" and .metadata.name == "codewire-orchestration-tokenrequest")' \
+  "$render_root/dev.yaml" >"$render_root/dev-tokenrequest-role.json"
+yq ea -o=json -I=0 \
+  'select(.kind == "RoleBinding" and .metadata.name == "codewire-orchestration-tokenrequest")' \
+  "$render_root/dev.yaml" >"$render_root/dev-tokenrequest-binding.json"
+yq ea -o=json -I=0 \
   'select(.kind == "Deployment" and .metadata.name == "codewire-orchestration")' \
   "$render_root/production.yaml" >"$render_root/production-orchestration.json"
 yq ea -o=json -I=0 \
@@ -123,8 +135,11 @@ yq ea -o=json -I=0 \
 
 jq -e '
   .BAO_ADDR == "https://openbao.example.invalid" and
+  .OPENBAO_KUBERNETES_API_AUDIENCE == "https://10.60.0.100:6443" and
   .TENANT_SECRET_BAO_AUTH_MOUNT == "dev-cluster-k8s" and
   .TENANT_SECRET_BAO_ROLE == "codewire-tenant-dev-cluster" and
+  .TENANT_SECRET_BAO_AUDIENCE == "openbao-codewire-tenant-dev-cluster" and
+  .CONFIDENTIAL_STORAGE_BAO_AUDIENCE == "openbao-codewire-confidential-storage-dev-cluster" and
   .TENANT_SECRET_BAO_TRANSIT_MOUNT == "codewire-tenant-dev" and
   .TENANT_SECRET_BAO_TRANSIT_KEY == "tenant-dek" and
   .TENANT_SECRET_BAO_EXPECTED_CLUSTER_ID == "00000000-0000-0000-0000-000000000000"
@@ -140,40 +155,51 @@ jq -e '
     "runAsNonRoot": true,
     "runAsUser": 65532
   } and
-  named($pod.containers[0].volumeMounts; "tenant-secret-openbao-token") == [{
-    "mountPath": "/var/run/secrets/codewire-tenant-bao",
-    "name": "tenant-secret-openbao-token",
-    "readOnly": true
-  }] and
-  named($pod.containers[0].volumeMounts; "confidential-storage-openbao-token") == [{
-    "mountPath": "/var/run/secrets/codewire-confidential-openbao",
-    "name": "confidential-storage-openbao-token",
-    "readOnly": true
-  }] and
-  named($pod.volumes; "tenant-secret-openbao-token")[0].projected == {
-    "defaultMode": 288,
-    "sources": [{"serviceAccountToken": {
-      "audience": "openbao-codewire-tenant-dev-cluster",
-      "expirationSeconds": 600,
-      "path": "token"
-    }}]
-  } and
-  named($pod.volumes; "confidential-storage-openbao-token")[0].projected == {
-    "defaultMode": 288,
-    "sources": [{"serviceAccountToken": {
-      "audience": "openbao-codewire-confidential-storage-dev-cluster",
-      "expirationSeconds": 600,
-      "path": "token"
-    }}]
-  }
+  $pod.serviceAccountName == "codewire-orchestration" and
+  $pod.automountServiceAccountToken != false and
+  named($pod.containers[0].env; "POD_NAMESPACE")[0].valueFrom.fieldRef.fieldPath == "metadata.namespace" and
+  named($pod.containers[0].env; "POD_NAME")[0].valueFrom.fieldRef.fieldPath == "metadata.name" and
+  named($pod.containers[0].env; "POD_UID")[0].valueFrom.fieldRef.fieldPath == "metadata.uid" and
+  named($pod.containers[0].env; "POD_SERVICE_ACCOUNT_NAME")[0].valueFrom.fieldRef.fieldPath == "spec.serviceAccountName" and
+  named($pod.containers[0].volumeMounts; "tenant-secret-openbao-token") == [] and
+  named($pod.containers[0].volumeMounts; "confidential-storage-openbao-token") == [] and
+  named($pod.volumes; "tenant-secret-openbao-token") == [] and
+  named($pod.volumes; "confidential-storage-openbao-token") == []
 ' "$render_root/dev-orchestration.json" >/dev/null
 
 jq -e '
+  .metadata.namespace == "dev" and
+  .rules == [{
+    "apiGroups": [""],
+    "resourceNames": ["codewire-orchestration"],
+    "resources": ["serviceaccounts/token"],
+    "verbs": ["create"]
+  }]
+' "$render_root/dev-tokenrequest-role.json" >/dev/null
+
+jq -e '
+  .metadata.namespace == "dev" and
+  .roleRef == {
+    "apiGroup": "rbac.authorization.k8s.io",
+    "kind": "Role",
+    "name": "codewire-orchestration-tokenrequest"
+  } and
+  .subjects == [{
+    "kind": "ServiceAccount",
+    "name": "codewire-orchestration",
+    "namespace": "dev"
+  }]
+' "$render_root/dev-tokenrequest-binding.json" >/dev/null
+
+jq -e '
   .BAO_ADDR == "" and
+  .OPENBAO_KUBERNETES_API_AUDIENCE == "" and
   .TENANT_SECRET_BAO_ROLE == "" and
+  .TENANT_SECRET_BAO_AUDIENCE == "" and
   .TENANT_SECRET_BAO_EXPECTED_CLUSTER_ID == "" and
   .CONFIDENTIAL_STORAGE_BAO_ADDR == "" and
   .CONFIDENTIAL_STORAGE_BAO_ROLE == "" and
+  .CONFIDENTIAL_STORAGE_BAO_AUDIENCE == "" and
   .CONFIDENTIAL_STORAGE_BAO_EXPECTED_CLUSTER_ID == ""
 ' "$render_root/production-config.json" >/dev/null
 
