@@ -62,6 +62,9 @@ Forgejo `origin` is canonical; GitHub is a mirror. Branch from current
 `origin/main`, and reconcile main, PR head, ownership, and required evidence
 immediately before merge.
 
+Use the installed `fj` CLI for Forgejo issues, PRs, Actions, and merges. The
+legacy `tea` CLI is not part of the supported agent workflow.
+
 Use the smallest check that can catch the affected failure class. Local checks
 are the development loop. Hosted CI is required only when a hosted-only claim
 (such as scheduling, credentials, permissions, cache, or timing) lacks
@@ -83,6 +86,39 @@ tunnel, port-forward, route, hosts entry, firewall rule, or fixture rewrite to
 make a gate pass. Do not bypass a selected gate. Verification-policy changes
 must prove old and new behavior with focused fixtures and cannot waive their own
 chosen proof.
+
+## HTML and frontend
+
+- Use native semantic HTML throughout the product and editable design fixtures.
+  Landmarks, headings, sections, navigation, lists, tables, forms, labels,
+  links, and buttons must describe their actual purpose. Use a `div` or `span`
+  only when no native element conveys meaning and the element is strictly for
+  layout or text styling.
+- Links navigate; buttons perform actions. Navigation collections and repeated
+  rows use lists with list items. Every section has a real heading or an
+  accessible name, every form control has a label, and table headers declare
+  their scope. Prefer native semantics over recreating them with ARIA.
+- A container owns its outside gutter. Repeated controls own one shared inside
+  padding through a reusable row primitive. Align related content with that
+  common inset instead of per-element margins, negative offsets, transparent
+  border compensation, or independent wrappers.
+- Keep production templates and editable `packages/codewire-design` fixtures on
+  the same tokens, components, and route CSS. A fidelity change is incomplete
+  when only the fixture or only the production template changes.
+- “UI iteration checkpoint” is an explicit checkpoint: edit locally and run
+  only focused syntax, type, accessibility, or rendered-fixture checks. Do not
+  commit, push, open a PR, run CI, rebuild product images, or recreate Kind
+  until the owner says “land it.”
+- During active iteration use `make dashboard-watch` or
+  `make dashboard-watch-kind`. Run `scripts/dev/preflight.sh --explain` before
+  the final landing gate. If an obviously UI-only change is unclassified or
+  selects integration, Kind, or full verification solely because classification
+  is missing, repair the classifier or split the unrelated change before
+  proceeding.
+- Stop the Kind-backed dashboard watcher before Kind verification so its exit
+  handler releases repository-managed forwards. Reuse existing visual coverage
+  and add only the smallest behavioral or accessibility assertion that protects
+  a real regression.
 
 ## Repository invariants
 

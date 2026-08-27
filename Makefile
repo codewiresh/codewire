@@ -1,4 +1,4 @@
-.PHONY: help up up-billing down dev dev-down db-init web dashboard-ssr-dev e2e e2e-kind kind-billing-listen kind-forwards-start kind-forwards-stop kind-forwards-status kind-forwards-cleanup kind-clean-runtime test-ui test-ui-dashboard-ssr test-ui-kind test-ui-kind-billing test-billing-smoke-kind seed-test-user seed-e2e-users build build-web clean wasm build-gateway build-dashboard-local build-sandbox-controller build-derp-local build-services-local rollout-local-runtime local-runtime deploy-local deploy-local-static prune-local-legacy-runtime kind-cluster kind-ingress kind-label-local-nodes kind-sandbox-namespace ios ios-test ios-clean proto-tools proto-lint proto-generate proto-drift-check
+.PHONY: help up up-billing down dev dev-down db-init web dashboard-ssr-dev dashboard-watch dashboard-watch-kind e2e e2e-kind kind-billing-listen kind-forwards-start kind-forwards-stop kind-forwards-status kind-forwards-cleanup kind-clean-runtime test-ui test-ui-dashboard-ssr test-ui-kind test-ui-kind-billing test-billing-smoke-kind seed-test-user seed-e2e-users build build-web clean wasm build-gateway build-dashboard-local build-sandbox-controller build-derp-local build-services-local rollout-local-runtime local-runtime deploy-local deploy-local-static prune-local-legacy-runtime kind-cluster kind-ingress kind-label-local-nodes kind-sandbox-namespace ios ios-test ios-clean proto-tools proto-lint proto-generate proto-drift-check
 .PHONY: cli-build cli-smoke cli-install cli-install-user cli-install-system scan-supply-chain verify-dashboard-image sync-local-secrets
 
 # Default target
@@ -15,6 +15,8 @@ help:
 	@echo "Development:"
 	@echo "  make web          - Run the Rust web server on 5173"
 	@echo "  make dashboard-ssr-dev - Alias for make web"
+	@echo "  make dashboard-watch - Rebuild/restart only the local dashboard on frontend changes"
+	@echo "  make dashboard-watch-kind - Watch the dashboard against the existing Kind stack"
 	@echo "  make wasm         - Build WASM package for the dashboard"
 	@echo ""
 	@echo "Testing:"
@@ -76,6 +78,7 @@ export DATABASE_URL ?= postgres://codewire:codewire@localhost:54320/codewire?ssl
 export RUST_LOG ?= codewire_server=debug,tower_http=debug
 export DRY_RUN ?= true
 export KUBE_CONTEXT ?= kind-codewire
+DASHBOARD_PORT ?= 5173
 KUBECTL ?= kubectl --context $(KUBE_CONTEXT)
 AGENT_SANDBOX_REPO ?= https://github.com/noeljackson/agent-sandbox.git
 AGENT_SANDBOX_SHA ?= $(shell awk '/AGENT_SANDBOX_SHA:/ {print $$2; exit}' .gitea/workflows/ci.yaml)
@@ -146,6 +149,34 @@ web:
 	cargo run --locked -p codewire-dashboard-web
 
 dashboard-ssr-dev: web
+
+dashboard-watch:
+	CODEWIRE_DASHBOARD_LISTEN_ADDR="$${CODEWIRE_DASHBOARD_LISTEN_ADDR:-127.0.0.1:$(DASHBOARD_PORT)}" \
+	CODEWIRE_PUBLIC_ORIGIN="$${CODEWIRE_PUBLIC_ORIGIN:-http://127.0.0.1:$(DASHBOARD_PORT)}" \
+	CODEWIRE_API_ORIGIN="$${CODEWIRE_API_ORIGIN:-http://127.0.0.1:8080}" \
+	CODEWIRE_IDENTITY_ORIGIN="$${CODEWIRE_IDENTITY_ORIGIN:-http://127.0.0.1:8080}" \
+	CODEWIRE_BILLING_ORIGIN="$${CODEWIRE_BILLING_ORIGIN:-http://127.0.0.1:8081}" \
+	CODEWIRE_BROWSER_API_ORIGIN="$${CODEWIRE_BROWSER_API_ORIGIN:-http://127.0.0.1:8080}" \
+	python3 scripts/dev/dashboard-watch.py
+
+dashboard-watch-kind:
+	@set -eu; \
+	cleanup() { \
+		scripts/dev/kind/kind-forwards.sh stop postgres; \
+	}; \
+	trap cleanup EXIT; \
+	trap 'exit 129' HUP; \
+	trap 'exit 130' INT; \
+	trap 'exit 143' TERM; \
+	scripts/dev/kind/kind-forwards.sh start postgres; \
+	set -a; eval "$$(scripts/dev/kind/kind-forwards.sh env postgres)"; set +a; \
+	CODEWIRE_DASHBOARD_LISTEN_ADDR="$${CODEWIRE_DASHBOARD_LISTEN_ADDR:-127.0.0.1:$(DASHBOARD_PORT)}" \
+	CODEWIRE_PUBLIC_ORIGIN="$${CODEWIRE_PUBLIC_ORIGIN:-http://127.0.0.1:$(DASHBOARD_PORT)}" \
+	CODEWIRE_API_ORIGIN="$${CODEWIRE_API_ORIGIN:-http://127.0.0.1:8080}" \
+	CODEWIRE_IDENTITY_ORIGIN="$${CODEWIRE_IDENTITY_ORIGIN:-http://127.0.0.1:8080}" \
+	CODEWIRE_BILLING_ORIGIN="$${CODEWIRE_BILLING_ORIGIN:-http://127.0.0.1:8081}" \
+	CODEWIRE_BROWSER_API_ORIGIN="$${CODEWIRE_BROWSER_API_ORIGIN:-http://127.0.0.1:8080}" \
+	python3 scripts/dev/dashboard-watch.py
 
 # Build WASM package
 wasm:
