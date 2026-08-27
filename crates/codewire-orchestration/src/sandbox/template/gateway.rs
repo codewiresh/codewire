@@ -373,7 +373,7 @@ pub fn render_gateway_deployment(namespace: &str, opts: &TemplateOpts) -> Value 
     if uses_kata_policy_init_data(opts, &runtime_spec) {
         pod_annotations.insert(
             KATA_COCO_INIT_DATA_ANNOTATION_KEY.into(),
-            kata_policy_init_data_annotation(opts).into(),
+            kata_policy_init_data_annotation(opts, false).into(),
         );
     }
     if let Some(kernel_params) = kata_coco_kernel_params_annotation(opts, &runtime_spec) {

@@ -1951,6 +1951,7 @@ impl SandboxClient {
     /// Mirrors `ensureSandboxTemplateDynamic`: create when absent,
     /// otherwise update (3 retries on resource-version conflicts).
     pub async fn ensure_sandbox_template(&self, opts: &TemplateOpts) -> anyhow::Result<()> {
+        opts.validate_confidential_storage_manifest()?;
         let name = &opts.name;
         let templates = self.templates();
         let rendered = render_sandbox_template(&self.namespace, opts);
@@ -2523,6 +2524,7 @@ fn rendered_runtime_recovery_patch(
     namespace: &str,
     opts: &TemplateOpts,
 ) -> anyhow::Result<(String, Value)> {
+    opts.validate_confidential_storage_manifest()?;
     let rendered = render_sandbox_template(namespace, opts);
     let kernel_params = rendered
         .pointer("/spec/podTemplate/metadata/annotations")

@@ -534,6 +534,7 @@ pub fn environment_template_opts(
         docker_mode: runtime_spec.docker_mode.clone(),
         sidecar_resource_mode: runtime_spec.sidecar_resource_mode.clone(),
         environment_id: env_id.to_string(),
+        confidential_storage_manifest_uri: String::new(),
         gateway_token: gateway_token.to_string(),
         api_base_url: cfg.api_base_url.clone(),
         coordinator_url: cfg.coordinator_url.clone(),
@@ -777,7 +778,7 @@ pub(super) fn ready_timeout_for_isolation(isolation_tier: &str) -> Duration {
 pub(super) async fn reconcile_confidential_runtime_before_replacement(
     ctx: &WorkerContext,
     env: &EnvironmentRow,
-    env_id: &str,
+    confidential_storage_manifest_uri: &str,
     authority: &ActivityAuthority,
     authoritative_states: &[&str],
     client: &SandboxClient,
@@ -786,6 +787,7 @@ pub(super) async fn reconcile_confidential_runtime_before_replacement(
     if env.isolation_tier != "confidential" {
         return Ok(());
     }
+    let env_id = env.id.as_str();
 
     let preset_id = env
         .preset_id
@@ -799,8 +801,9 @@ pub(super) async fn reconcile_confidential_runtime_before_replacement(
                 anyhow::anyhow!("confidential environment has no private runtime template")
             })?;
     let gateway_token = issue_token(&cfg.session_secret, env_id, SCOPE_COORDINATE)?;
-    let template_opts =
+    let mut template_opts =
         environment_template_opts(cfg, &image_ref, &template_base, env, env_id, &gateway_token);
+    template_opts.confidential_storage_manifest_uri = confidential_storage_manifest_uri.to_owned();
     if template_opts.name != expected_template {
         anyhow::bail!("confidential runtime template identity is inconsistent");
     }
@@ -1023,6 +1026,7 @@ async fn run_environment_create(
                     authority.ensure().await?;
                     tracing::warn!(error = %e, "CAS to creating failed");
                 }
+                let mut confidential_storage_manifest_uri = None;
                 if env.isolation_tier == "confidential" {
                     let Some(storage) = ctx.confidential_storage.as_ref() else {
                         let error =
@@ -1044,26 +1048,32 @@ async fn run_environment_create(
                         .await?;
                         return Err(error);
                     };
-                    if let Err(error) = authority
-                        .run_external_mutation(CREATE_MUTATION_STATES, storage.ensure_ready(env_id))
+                    match authority
+                        .run_external_mutation(
+                            CREATE_MUTATION_STATES,
+                            storage.ensure_ready(env_id, env.disk_gb),
+                        )
                         .await
                     {
-                        emit_create_log(
-                            authority,
-                            "create_claim",
-                            "failed",
-                            &format!("{error:#}"),
-                            duration_meta(started),
-                        )
-                        .await?;
-                        record_error(
-                            &svc,
-                            authority,
-                            env_id,
-                            &format!("key provisioning: {error:#}"),
-                        )
-                        .await?;
-                        return Err(error);
+                        Ok(uri) => confidential_storage_manifest_uri = Some(uri),
+                        Err(error) => {
+                            emit_create_log(
+                                authority,
+                                "create_claim",
+                                "failed",
+                                &format!("{error:#}"),
+                                duration_meta(started),
+                            )
+                            .await?;
+                            record_error(
+                                &svc,
+                                authority,
+                                env_id,
+                                &format!("key provisioning: {error:#}"),
+                            )
+                            .await?;
+                            return Err(error);
+                        }
                     }
                 }
                 let preset_id = env.preset_id.clone().unwrap_or_default();
@@ -1106,7 +1116,7 @@ async fn run_environment_create(
                         return Err(e);
                     }
                 };
-                let template_opts = environment_template_opts(
+                let mut template_opts = environment_template_opts(
                     cfg,
                     &image_ref,
                     &template_base,
@@ -1114,6 +1124,8 @@ async fn run_environment_create(
                     env_id,
                     &gateway_token,
                 );
+                template_opts.confidential_storage_manifest_uri =
+                    confidential_storage_manifest_uri.unwrap_or_default();
                 let runtime_spec = template_opts.runtime_profile_spec();
                 if let Err(e) =
                     validate_managed_runtime_profile(&runtime_spec, cfg.allow_diagnostic_runtime)
@@ -1415,6 +1427,20 @@ async fn replace_terminal_workspace_pod(
     let Some(stale) = client.workspace_pod_replacement_candidate(env_id).await? else {
         return Ok(());
     };
+    let confidential_storage_manifest_uri = if env.isolation_tier == "confidential" {
+        let storage = ctx
+            .confidential_storage
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("confidential storage providers are not configured"))?;
+        authority
+            .run_external_mutation(
+                CREATE_MUTATION_STATES,
+                storage.ensure_ready(env_id, env.disk_gb),
+            )
+            .await?
+    } else {
+        String::new()
+    };
     let started = std::time::Instant::now();
     emit_create_log(authority, "replace_terminal_pod", "started", "", None).await?;
     let result = async {
@@ -1426,7 +1452,7 @@ async fn replace_terminal_workspace_pod(
         reconcile_confidential_runtime_before_replacement(
             ctx,
             env,
-            env_id,
+            &confidential_storage_manifest_uri,
             authority,
             CREATE_MUTATION_STATES,
             client,

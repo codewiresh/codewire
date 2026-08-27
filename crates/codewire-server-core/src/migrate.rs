@@ -51,7 +51,7 @@ mod tests {
     use super::*;
 
     const ACCEPTED_APPLICATION_SCHEMA_FINGERPRINT: &str =
-        "39cfb8f995781eb82eeef1aa902923eebdb6bfa6eef66b64213cd0d880e7bc4d";
+        "28770e4ec7b79a5f0bb8883f7d7e6b374c6e74cbed731177ebce88e9a17c86ab";
     const RETIRE_MESH_OIDC_CLIENT_VERSION: i64 = 5;
     const ORGANIZATION_ROUTE_SLUGS_VERSION: i64 = 11;
     const OPENBAO_NATIVE_SECRETS_VERSION: i64 = 13;
@@ -462,12 +462,9 @@ mod tests {
 
         let partial_tuple = sqlx::query(
             "UPDATE confidential_storage_keys \
-             SET manifest_uri = $2 WHERE environment_id = $1",
+             SET volume_id = $1 WHERE environment_id = $1",
         )
         .bind(ENVIRONMENT_ID)
-        .bind(format!(
-            "kbs:///default/codewire-storage-manifests/{ENVIRONMENT_ID}-v1"
-        ))
         .execute(pool)
         .await;
         anyhow::ensure!(
@@ -477,27 +474,46 @@ mod tests {
 
         sqlx::query(
             "UPDATE confidential_storage_keys SET \
-                 manifest_uri = $2, volume_id = $1, volume_version = $3, \
-                 manifest_schema_version = 1, device_size_bytes = 21474836480, \
+                 volume_id = $1, volume_version = $2, \
+                 manifest_schema_version = 2, device_size_bytes = 21474836480, \
                  luks_uuid = 'f617a73e-b03d-4b58-b1ae-354c72276ea0', \
                  protection_profile = 'luks2-integrity-rw', \
                  backing_claim_name = 'workspace' \
              WHERE environment_id = $1",
         )
         .bind(ENVIRONMENT_ID)
-        .bind(format!(
-            "kbs:///default/codewire-storage-manifests/{ENVIRONMENT_ID}-v1"
-        ))
-        .bind(format!("{ENVIRONMENT_ID}-v1"))
+        .bind(format!("{ENVIRONMENT_ID}-v2"))
         .execute(pool)
         .await?;
 
-        sqlx::query(
+        let partial_content = sqlx::query(
             "UPDATE confidential_storage_keys \
              SET manifest_sha256_fingerprint = $2 WHERE environment_id = $1",
         )
         .bind(ENVIRONMENT_ID)
         .bind("9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08")
+        .execute(pool)
+        .await;
+        anyhow::ensure!(
+            partial_content.is_err(),
+            "partial confidential storage content binding was accepted"
+        );
+
+        const KEY_FINGERPRINT: &str =
+            "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08";
+        const MANIFEST_FINGERPRINT: &str =
+            "60303ae22b9988617223d5f367ee8e6c13a85f16f27f80a93b868276a58c286d";
+        sqlx::query(
+            "UPDATE confidential_storage_keys SET \
+                 sha256_fingerprint = $2, \
+                 manifest_sha256_fingerprint = $3, \
+                 manifest_uri = \
+                   'kbs:///default/codewire-storage-manifests/sha256-' || $3 \
+             WHERE environment_id = $1",
+        )
+        .bind(ENVIRONMENT_ID)
+        .bind(KEY_FINGERPRINT)
+        .bind(MANIFEST_FINGERPRINT)
         .execute(pool)
         .await?;
 
@@ -537,7 +553,21 @@ mod tests {
                 "valid_manifest_sha256_fingerprint",
                 "UPDATE confidential_storage_keys \
                  SET manifest_sha256_fingerprint = \
-                     '60303ae22b9988617223d5f367ee8e6c13a85f16f27f80a93b868276a58c286d' \
+                     'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' \
+                 WHERE environment_id = $1",
+            ),
+            (
+                "key_fingerprint",
+                "UPDATE confidential_storage_keys \
+                 SET sha256_fingerprint = \
+                     'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' \
+                 WHERE environment_id = $1",
+            ),
+            (
+                "manifest_uri",
+                "UPDATE confidential_storage_keys \
+                 SET manifest_uri = \
+                     'kbs:///default/codewire-storage-manifests/sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' \
                  WHERE environment_id = $1",
             ),
         ] {
