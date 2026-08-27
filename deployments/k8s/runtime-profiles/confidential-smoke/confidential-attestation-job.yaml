@@ -1,7 +1,7 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: codewire-confidential-snp-attestation-v63
+  name: codewire-confidential-snp-attestation-v64
   namespace: codewire-runtime-probes
   labels:
     app.kubernetes.io/name: codewire-confidential-snp-attestation

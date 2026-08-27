@@ -1,7 +1,7 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: codewire-commodity-runtime-smoke-v62
+  name: codewire-commodity-runtime-smoke-v64
   namespace: codewire-runtime-probes
   labels:
     app.kubernetes.io/name: codewire-commodity-runtime-smoke
@@ -19,7 +19,7 @@ spec:
       automountServiceAccountToken: false
       runtimeClassName: commodity
       nodeSelector:
-        kubernetes.io/hostname: dev-node-1
+        kubernetes.io/hostname: cw-dev-prod-node-1
       restartPolicy: Never
       volumes:
         - name: workspace

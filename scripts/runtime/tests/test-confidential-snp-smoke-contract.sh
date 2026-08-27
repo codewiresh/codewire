@@ -72,16 +72,13 @@ rg -F 'EXPECTED_CODEWIRE_DEV_SERVER_URL="${EXPECTED_CODEWIRE_DEV_SERVER_URL:-htt
 rg -F 'KUBE_CONTEXT="${KUBE_CONTEXT:-dev-cluster}"' "$SMOKE" >/dev/null
 rg -F 'SANDBOX_NAMESPACE="${SANDBOX_NAMESPACE:-dev-sandboxes}"' "$SMOKE" >/dev/null
 rg -F 'NODE="${CONFIDENTIAL_SNP_NODE:-cw-dev-prod-node-1}"' "$SMOKE" >/dev/null
-rg -F 'COMMODITY_NODE="${CONFIDENTIAL_COMMODITY_NODE:-dev-node-1}"' "$SMOKE" >/dev/null
 rg -F './scripts/talos-external-worker verify' "$SMOKE" >/dev/null
 if rg -q 'check-node1|node1-codewire-dev|node1\.codewire-dev\.sh|ssh_host\(' "$SMOKE"; then
   printf 'confidential smoke contains a nonexistent Ubuntu/SSH host gate\n' >&2
   exit 1
 fi
 rg -F 'COMMODITY_JOB_SELECTOR="app.kubernetes.io/name=codewire-commodity-runtime-smoke"' "$SMOKE" >/dev/null
-rg -F 'record_job "$commodity_job" commodity "$COMMODITY_NODE" longhorn' "$SMOKE" >/dev/null
-rg -F 'RUN_COMMODITY_JOB="${RUN_COMMODITY_JOB:-0}"' "$SMOKE" >/dev/null
-rg -F -- '--include-commodity-job' "$SMOKE" >/dev/null
+rg -F 'record_job "$commodity_job" commodity "$NODE" longhorn' "$SMOKE" >/dev/null
 rg -F 'CONFIDENTIAL_JOB_SELECTOR="app.kubernetes.io/name=codewire-confidential-runtime-smoke"' "$SMOKE" >/dev/null
 rg -F 'ATTESTATION_JOB_SELECTOR="app.kubernetes.io/name=codewire-confidential-snp-attestation"' "$SMOKE" >/dev/null
 rg -F 'umask 077' "$SMOKE" >/dev/null
@@ -242,10 +239,7 @@ fi
 
 rg -F 'confidential-smoke-control.yaml' "$SMOKE_DIR/kustomization.yaml" >/dev/null
 rg -F 'confidential-smoke-control.yaml' "$SMOKE_DIR/kustomization.baseline.yaml" >/dev/null
-if rg -F 'commodity-smoke-job.yaml' "$SMOKE_DIR/kustomization.confidential-snp.yaml"; then
-  printf 'Example Metal confidential activation still dispatches the later Helsinki commodity Job\n' >&2
-  exit 1
-fi
+rg -F 'commodity-smoke-job.yaml' "$SMOKE_DIR/kustomization.confidential-snp.yaml" >/dev/null
 rg -F 'confidential-smoke-job.yaml' "$SMOKE_DIR/kustomization.confidential-snp.yaml" >/dev/null
 rg -F 'confidential-attestation-job.yaml' "$SMOKE_DIR/kustomization.confidential-snp.yaml" >/dev/null
 
@@ -261,17 +255,17 @@ done
 
 rg -F 'node.codewire.sh/confidential-snp: "true"' "$SMOKE_DIR/confidential-smoke-job.yaml" >/dev/null
 rg -F 'node.codewire.sh/confidential-snp: "true"' "$SMOKE_DIR/confidential-attestation-job.yaml" >/dev/null
-rg -F 'kubernetes.io/hostname: dev-node-1' "$SMOKE_DIR/commodity-smoke-job.yaml" >/dev/null
+rg -F 'kubernetes.io/hostname: cw-dev-prod-node-1' "$SMOKE_DIR/commodity-smoke-job.yaml" >/dev/null
 rg -F 'storageClassName: longhorn' "$SMOKE_DIR/commodity-smoke-job.yaml" >/dev/null
 rg -F 'longhorn-workspace-ok' "$SMOKE_DIR/commodity-smoke-job.yaml" >/dev/null
 rg -F 'privileged: true' "$SMOKE_DIR/confidential-attestation-job.yaml" >/dev/null
-rg -F 'name: codewire-commodity-runtime-smoke-v62' "$SMOKE_DIR/commodity-smoke-job.yaml" >/dev/null
-rg -F 'name: codewire-confidential-runtime-smoke-v63' "$SMOKE_DIR/confidential-smoke-job.yaml" >/dev/null || {
-  printf 'confidential runtime probe generation is not v63\n' >&2
+rg -F 'name: codewire-commodity-runtime-smoke-v64' "$SMOKE_DIR/commodity-smoke-job.yaml" >/dev/null
+rg -F 'name: codewire-confidential-runtime-smoke-v64' "$SMOKE_DIR/confidential-smoke-job.yaml" >/dev/null || {
+  printf 'confidential runtime probe generation is not v64\n' >&2
   exit 1
 }
-rg -F 'name: codewire-confidential-snp-attestation-v63' "$SMOKE_DIR/confidential-attestation-job.yaml" >/dev/null || {
-  printf 'confidential attestation probe generation is not v63\n' >&2
+rg -F 'name: codewire-confidential-snp-attestation-v64' "$SMOKE_DIR/confidential-attestation-job.yaml" >/dev/null || {
+  printf 'confidential attestation probe generation is not v64\n' >&2
   exit 1
 }
 
