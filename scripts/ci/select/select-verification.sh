@@ -374,6 +374,7 @@ if [ "$event_selected" = false ]; then
       .gitea/workflows/prod-readonly-smoke.yaml|\
       .gitea/workflows/runtime-dev-commodity-smoke.yaml|\
       .githooks/pre-push|Makefile|scripts/dev/install-hooks.sh|\
+      scripts/dev/dashboard-watch.py|\
       scripts/dev/preflight.sh|scripts/ci/select/select-verification.sh|\
       scripts/ci/select/emit-verification-matrices.sh|\
       scripts/ci/select/require-verification-results.sh|\
