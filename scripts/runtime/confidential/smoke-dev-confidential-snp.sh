@@ -9,7 +9,6 @@ CODEWIRE_SERVER_URL="${CODEWIRE_SERVER_URL:-https://codewire-dev.sh}"
 EXPECTED_CODEWIRE_DEV_SERVER_URL="${EXPECTED_CODEWIRE_DEV_SERVER_URL:-https://codewire-dev.sh}"
 KUBE_CONTEXT="${KUBE_CONTEXT:-dev-cluster}"
 NODE="${CONFIDENTIAL_SNP_NODE:-cw-dev-prod-node-1}"
-COMMODITY_NODE="${CONFIDENTIAL_COMMODITY_NODE:-dev-node-1}"
 INFRA_ROOT="${INFRA_ROOT:-$HOME/src/infra}"
 HOST_GATE_STACK="${CONFIDENTIAL_SNP_HOST_GATE_STACK:-dev-cluster}"
 HOST_GATE_MIN_EPHEMERAL_GIB="${CONFIDENTIAL_SNP_HOST_GATE_MIN_EPHEMERAL_GIB:-1500}"
@@ -19,7 +18,6 @@ SANDBOX_NAMESPACE="${SANDBOX_NAMESPACE:-dev-sandboxes}"
 WAIT_TIMEOUT="${CONFIDENTIAL_SNP_WAIT_TIMEOUT:-300s}"
 RUN_HOST_GATE="${RUN_HOST_GATE:-1}"
 RUN_RAW_JOBS="${RUN_RAW_JOBS:-1}"
-RUN_COMMODITY_JOB="${RUN_COMMODITY_JOB:-0}"
 RUN_GUEST_ATTESTATION="${RUN_GUEST_ATTESTATION:-1}"
 RUN_COCO_PRODUCT="${RUN_COCO_PRODUCT:-1}"
 COCO_FULL_PRODUCT="${COCO_FULL_PRODUCT:-0}"
@@ -67,7 +65,6 @@ may create and remove its documented short-lived runtime probe pods.
 Options:
   --skip-host-gate         Reuse an already accepted Infra Talos host gate
   --skip-raw-jobs          Skip Flux-owned commodity/confidential Job checks
-  --include-commodity-job  Include the later Helsinki commodity Job check
   --skip-guest-attestation Skip the Flux-owned in-guest SNP Job check
   --skip-coco              Skip the Codewire product CoCo smoke
   --full-product           Run the complete Codewire product smoke
@@ -107,10 +104,6 @@ while [[ "$#" -gt 0 ]]; do
       ;;
     --skip-raw-jobs)
       RUN_RAW_JOBS=0
-      shift
-      ;;
-    --include-commodity-job)
-      RUN_COMMODITY_JOB=1
       shift
       ;;
     --skip-guest-attestation)
@@ -165,7 +158,7 @@ require_bool01() {
   [[ "$value" == "0" || "$value" == "1" ]] || die "$name must be 0 or 1, got $value"
 }
 
-for setting in RUN_HOST_GATE RUN_RAW_JOBS RUN_COMMODITY_JOB RUN_GUEST_ATTESTATION RUN_COCO_PRODUCT COCO_FULL_PRODUCT COCO_KEEP_PRODUCT COCO_EXPECT_REFUSAL; do
+for setting in RUN_HOST_GATE RUN_RAW_JOBS RUN_GUEST_ATTESTATION RUN_COCO_PRODUCT COCO_FULL_PRODUCT COCO_KEEP_PRODUCT COCO_EXPECT_REFUSAL; do
   require_bool01 "$setting" "${!setting}"
 done
 [[ "$COCO_EXPECT_REFUSAL" == "0" || "$RUN_COCO_PRODUCT" == "1" ]] || \
@@ -477,12 +470,8 @@ run_raw_jobs() {
     log "skipping Flux-owned raw runtime Jobs"
     return 0
   }
-  if [[ "$RUN_COMMODITY_JOB" == "1" ]]; then
-    commodity_job="$(resolve_job_name commodity "$COMMODITY_JOB_SELECTOR")"
-    record_job "$commodity_job" commodity "$COMMODITY_NODE" longhorn
-  else
-    log "skipping later Helsinki commodity Job"
-  fi
+  commodity_job="$(resolve_job_name commodity "$COMMODITY_JOB_SELECTOR")"
+  record_job "$commodity_job" commodity "$NODE" longhorn
   confidential_job="$(resolve_job_name confidential "$CONFIDENTIAL_JOB_SELECTOR")"
   record_job "$confidential_job" confidential "$NODE"
 }
