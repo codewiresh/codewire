@@ -208,6 +208,10 @@ qrcode = { version = "=0.14.1", default-features = false, features = ["svg"] }
 # Testing
 tempfile = "3"
 wiremock = "=0.6.5"
+# Match the policy engine revision embedded by the pinned Kata runtime. Agent
+# policy is an executable security boundary, so syntax-only assertions are
+# insufficient.
+regorus = { git = "https://github.com/microsoft/regorus", rev = "898643129e3652efd43e596f978d99f85e770235", default-features = false, features = ["arc", "regex", "std"] }
 
 # Embedded web browser
 wry = "0.54"

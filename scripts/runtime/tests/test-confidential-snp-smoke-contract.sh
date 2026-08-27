@@ -44,6 +44,19 @@ bash -n "$RESOLVER"
   exit 1
 }
 
+validation_dir="$(mktemp -d "$ROOT/.tmp/confidential-smoke-validation.XXXXXX")"
+if "$SMOKE" --existing-env not-a-uuid >"$validation_dir/uuid.out" 2>"$validation_dir/uuid.err"; then
+  printf 'confidential smoke accepted a malformed retained environment ID\n' >&2
+  exit 1
+fi
+rg -F -- '--existing-env requires a lowercase UUID' "$validation_dir/uuid.err" >/dev/null
+if "$SMOKE" --skip-coco --keep-product >"$validation_dir/keep.out" 2>"$validation_dir/keep.err"; then
+  printf 'confidential smoke accepted retention without a product smoke\n' >&2
+  exit 1
+fi
+rg -F -- '--keep-product requires the Codewire product smoke' "$validation_dir/keep.err" >/dev/null
+rm -rf "$validation_dir"
+
 if rg -n '^[[:space:]]*(kubectl|kubectl_dev)([[:space:]]+[^[:space:]]+)*[[:space:]]+(apply|create|delete|edit|patch|replace|scale)\b' "$SMOKE"; then
   printf 'confidential smoke must not mutate Kubernetes or Flux state\n' >&2
   exit 1
@@ -95,6 +108,9 @@ rg -F 'EXPECTED_GATEWAY_STUN_PORT="$COCO_GATEWAY_STUN_PORT"' "$SMOKE" >/dev/null
 rg -F 'EXPECTED_TAILNET_DIRECT_UDP_LB_IP="$COCO_DIRECT_UDP_LB_IP"' "$SMOKE" >/dev/null
 rg -F 'EXPECTED_TAILNET_DIRECT_UDP_TRANSPORT_ZONE="$COCO_DIRECT_UDP_TRANSPORT_ZONE"' "$SMOKE" >/dev/null
 rg -F 'SMOKE_IMAGE="${SMOKE_IMAGE:-$COCO_WORKSPACE_IMAGE}"' "$SMOKE" >/dev/null
+rg -F 'SMOKE_ARTIFACT_DIR="$EVIDENCE_DIR/product"' "$SMOKE" >/dev/null
+rg -F 'smoke_args+=(--existing-env "$COCO_EXISTING_ENV_ID")' "$SMOKE" >/dev/null
+rg -F 'smoke_args+=(--keep)' "$SMOKE" >/dev/null
 if rg -F 'smoke_args=(--image ' "$SMOKE"; then
   printf 'confidential smoke passes an unsupported image CLI option\n' >&2
   exit 1
@@ -119,6 +135,8 @@ set -euo pipefail
   printf 'stun_port=%s\n' "${EXPECTED_GATEWAY_STUN_PORT:-}"
   printf 'direct_udp_ip=%s\n' "${EXPECTED_TAILNET_DIRECT_UDP_LB_IP:-}"
   printf 'transport_zone=%s\n' "${EXPECTED_TAILNET_DIRECT_UDP_TRANSPORT_ZONE:-}"
+  printf 'artifact_dir=%s\n' "$(basename "${SMOKE_ARTIFACT_DIR:-}")"
+  printf 'args=%s\n' "$*"
 } >"${FORWARD_CAPTURE:?}"
 EOF
 chmod 0755 "$forward_dir/root/scripts/runtime/dev/smoke-dev-commodity.sh"
@@ -141,6 +159,9 @@ mkdir -p "$forward_dir/evidence"
   export COCO_GATEWAY_STUN_PORT=3478
   export COCO_DIRECT_UDP_LB_IP=192.0.2.20
   export COCO_DIRECT_UDP_TRANSPORT_ZONE=contract-zone
+  export COCO_FULL_PRODUCT=1
+  export COCO_KEEP_PRODUCT=1
+  export COCO_EXISTING_ENV_ID=11111111-2222-4333-8444-555555555555
   FORWARD_CAPTURE="$forward_dir/capture" run_product_command
 )
 cat >"$forward_dir/expected" <<'EOF'
@@ -150,6 +171,8 @@ stun_host=stun.example.invalid
 stun_port=3478
 direct_udp_ip=192.0.2.20
 transport_zone=contract-zone
+artifact_dir=product
+args=--admin-oidc --existing-env 11111111-2222-4333-8444-555555555555 --keep
 EOF
 cmp "$forward_dir/expected" "$forward_dir/capture"
 rm -rf "$forward_dir"

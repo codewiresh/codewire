@@ -374,16 +374,10 @@ toml_quote() {
 
 kbs_url_toml="$(printf '%s' "$kbs_url" | toml_quote)"
 kbs_ca_toml="$(printf '%s' "$kbs_ca" | toml_quote)"
-uuid_toml="$(printf '%s' "$PROBE_UUID" | toml_quote)"
-storage_registry="$(jq -cn --arg id "$PROBE_UUID" --arg uri "kbs:///default/codewire-workspace-luks/$PROBE_UUID" \
-  '{version:1,volumes:[{profile:"luks2-integrity-ext4",volumeId:$id,keyUri:$uri}]}')"
-storage_registry_toml="$(printf '%s' "$storage_registry" | toml_quote)"
 triple_quote="'''"
 init_data="$({
   printf 'version = "0.1.0"\nalgorithm = "sha256"\n\n[data]\n'
   printf '"policy.rego" = %s\n%s\n%s\n' "$triple_quote" "$policy_rego" "$triple_quote"
-  printf '"codewire_workspace_storage_key_id" = %s\n' "$uuid_toml"
-  printf '"confidential_storage" = %s\n' "$storage_registry_toml"
   printf '\n"aa.toml" = %s\n[token_configs]\n[token_configs.kbs]\nurl = %s\ncert = %s\n%s\n' \
     "$triple_quote" "$kbs_url_toml" "$kbs_ca_toml" "$triple_quote"
   printf '\n"cdh.toml" = %s\nsocket = "unix:///run/confidential-containers/cdh.sock"\n\n[kbc]\nname = "cc_kbc"\nurl = %s\nkbs_cert = %s\n%s\n' \

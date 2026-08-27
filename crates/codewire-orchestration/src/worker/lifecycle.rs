@@ -300,31 +300,39 @@ pub async fn handle_environment_start(
     let ns = backend.namespace.clone();
     let client = sandbox_client(ctx, &ns)?;
 
-    if env.isolation_tier == "confidential" {
+    let confidential_storage_manifest_uri = if env.isolation_tier == "confidential" {
         let Some(storage) = ctx.confidential_storage.as_ref() else {
             let error = anyhow::anyhow!("confidential storage providers are not configured");
             record_environment_error(&svc, authority, env_id, &format!("{error:#}")).await?;
             return Err(error);
         };
-        if let Err(error) = await_reconcile_or_cancel(
+        match await_reconcile_or_cancel(
             &activity_ctx,
-            authority.run_external_mutation(START_MUTATION_STATES, storage.ensure_ready(env_id)),
+            authority.run_external_mutation(
+                START_MUTATION_STATES,
+                storage.ensure_ready(env_id, env.disk_gb),
+            ),
         )
         .await
         {
-            if is_lifecycle_control_loss(&error) {
+            Ok(manifest_uri) => Some(manifest_uri),
+            Err(error) => {
+                if is_lifecycle_control_loss(&error) {
+                    return Err(error);
+                }
+                record_environment_error(
+                    &svc,
+                    authority,
+                    env_id,
+                    &format!("key reconciliation: {error:#}"),
+                )
+                .await?;
                 return Err(error);
             }
-            record_environment_error(
-                &svc,
-                authority,
-                env_id,
-                &format!("key reconciliation: {error:#}"),
-            )
-            .await?;
-            return Err(error);
         }
-    }
+    } else {
+        None
+    };
 
     let ready_timeout = ready_timeout_for_isolation(&env.isolation_tier);
     if env.state == "error" {
@@ -351,7 +359,9 @@ pub async fn handle_environment_start(
                 reconcile_confidential_runtime_before_replacement(
                     ctx,
                     &env,
-                    env_id,
+                    confidential_storage_manifest_uri
+                        .as_deref()
+                        .unwrap_or_default(),
                     authority,
                     START_MUTATION_STATES,
                     &client,

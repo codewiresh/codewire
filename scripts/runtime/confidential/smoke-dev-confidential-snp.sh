@@ -23,6 +23,8 @@ RUN_COMMODITY_JOB="${RUN_COMMODITY_JOB:-0}"
 RUN_GUEST_ATTESTATION="${RUN_GUEST_ATTESTATION:-1}"
 RUN_COCO_PRODUCT="${RUN_COCO_PRODUCT:-1}"
 COCO_FULL_PRODUCT="${COCO_FULL_PRODUCT:-0}"
+COCO_KEEP_PRODUCT="${COCO_KEEP_PRODUCT:-0}"
+COCO_EXISTING_ENV_ID="${COCO_EXISTING_ENV_ID:-}"
 COCO_EXPECT_REFUSAL="${COCO_EXPECT_REFUSAL:-0}"
 COCO_EXPECT_FAILURE_PATTERN="${COCO_EXPECT_FAILURE_PATTERN:-CoCo test resource assertion failed|guest CDH REST|reference.*value|policy.*den|forbid|unauthor|deny}"
 EVIDENCE_DIR="${EVIDENCE_DIR:-}"
@@ -69,6 +71,8 @@ Options:
   --skip-guest-attestation Skip the Flux-owned in-guest SNP Job check
   --skip-coco              Skip the Codewire product CoCo smoke
   --full-product           Run the complete Codewire product smoke
+  --keep-product           Retain the product environment and record its ID
+  --existing-env ID        Reuse and retain one existing product environment
   --expect-refusal         Require the product smoke to fail with the configured
                            CoCo/KBS refusal pattern
   --evidence-dir DIR       Store evidence in DIR instead of repo .tmp
@@ -121,6 +125,15 @@ while [[ "$#" -gt 0 ]]; do
       COCO_FULL_PRODUCT=1
       shift
       ;;
+    --keep-product)
+      COCO_KEEP_PRODUCT=1
+      shift
+      ;;
+    --existing-env)
+      [[ "$#" -ge 2 ]] || die "--existing-env requires a value"
+      COCO_EXISTING_ENV_ID="$2"
+      shift 2
+      ;;
     --expect-refusal)
       COCO_EXPECT_REFUSAL=1
       shift
@@ -152,11 +165,19 @@ require_bool01() {
   [[ "$value" == "0" || "$value" == "1" ]] || die "$name must be 0 or 1, got $value"
 }
 
-for setting in RUN_HOST_GATE RUN_RAW_JOBS RUN_COMMODITY_JOB RUN_GUEST_ATTESTATION RUN_COCO_PRODUCT COCO_FULL_PRODUCT COCO_EXPECT_REFUSAL; do
+for setting in RUN_HOST_GATE RUN_RAW_JOBS RUN_COMMODITY_JOB RUN_GUEST_ATTESTATION RUN_COCO_PRODUCT COCO_FULL_PRODUCT COCO_KEEP_PRODUCT COCO_EXPECT_REFUSAL; do
   require_bool01 "$setting" "${!setting}"
 done
 [[ "$COCO_EXPECT_REFUSAL" == "0" || "$RUN_COCO_PRODUCT" == "1" ]] || \
   die "--expect-refusal requires the Codewire product smoke"
+[[ "$COCO_KEEP_PRODUCT" == "0" || "$RUN_COCO_PRODUCT" == "1" ]] || \
+  die "--keep-product requires the Codewire product smoke"
+[[ -z "$COCO_EXISTING_ENV_ID" || "$RUN_COCO_PRODUCT" == "1" ]] || \
+  die "--existing-env requires the Codewire product smoke"
+if [[ -n "$COCO_EXISTING_ENV_ID" \
+  && ! "$COCO_EXISTING_ENV_ID" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]; then
+  die "--existing-env requires a lowercase UUID"
+fi
 
 require_cmd jq
 require_cmd "$KUBECTL_BIN"
@@ -510,6 +531,12 @@ run_product_command() {
   else
     smoke_args=(--skip-docker --skip-ssh --only kube --only exec --only coco)
   fi
+  if [[ -n "$COCO_EXISTING_ENV_ID" ]]; then
+    smoke_args+=(--existing-env "$COCO_EXISTING_ENV_ID")
+  fi
+  if [[ "$COCO_KEEP_PRODUCT" == "1" ]]; then
+    smoke_args+=(--keep)
+  fi
 
   CODEWIRE_SERVER_URL="$CODEWIRE_SERVER_URL" \
     EXPECTED_CODEWIRE_DEV_SERVER_URL="$EXPECTED_CODEWIRE_DEV_SERVER_URL" \
@@ -521,6 +548,7 @@ run_product_command() {
     SMOKE_MEMORY="${SMOKE_MEMORY:-$COCO_SMOKE_MEMORY}" \
     SMOKE_DISK="${SMOKE_DISK:-$COCO_SMOKE_DISK}" \
     SMOKE_TIMEOUT_SECONDS="${SMOKE_TIMEOUT_SECONDS:-$COCO_SMOKE_TIMEOUT_SECONDS}" \
+    SMOKE_ARTIFACT_DIR="$EVIDENCE_DIR/product" \
     SMOKE_ISOLATION_TIER=confidential \
     SMOKE_APP_PREVIEW="${SMOKE_APP_PREVIEW:-1}" \
     SMOKE_TAILNET_DEBUG="${SMOKE_TAILNET_DEBUG:-1}" \

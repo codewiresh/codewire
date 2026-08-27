@@ -81,10 +81,9 @@ pub const DEFAULT_KATA_COCO_TEST_RESOURCE_PATH: &str =
     "/run/confidential-containers/cdh/kbs/codewire/runtime-test-resource";
 pub const DEFAULT_WORKSPACE_STORAGE_CLASS: &str = "example-volumes";
 pub const CONFIDENTIAL_WORKSPACE_STORAGE_CLASS: &str = "longhorn-confidential";
-pub const KATA_CONFIDENTIAL_STORAGE_VOLUME_ID_ANNOTATION: &str =
-    "io.katacontainers.storage/confidential-volume-id";
-pub const KATA_CONFIDENTIAL_STORAGE_KEY_URI_ANNOTATION: &str =
-    "io.katacontainers.storage/confidential-key-uri";
+pub const KATA_CONFIDENTIAL_STORAGE_MANIFEST_URI_ANNOTATION: &str =
+    "io.katacontainers.storage/confidential-manifest-uri";
+pub const KATA_CONFIDENTIAL_VOLUME_ANNOTATION: &str = "io.katacontainers.volume.confidential";
 const WORKSPACE_EPHEMERAL_STORAGE_GI: i64 = 8;
 const INTERNAL_DERP_TLS_PORT: i64 = 8443;
 const INTERNAL_DERP_STUN_PORT: i64 = 3478;
@@ -113,6 +112,7 @@ pub struct TemplateOpts {
     pub node_selector: Vec<(String, String)>,
     pub tolerations: Vec<Toleration>,
     pub environment_id: String,
+    pub confidential_storage_manifest_uri: String,
     pub gateway_token: String,
     pub api_base_url: String,
     pub coordinator_url: String,
@@ -165,6 +165,10 @@ impl fmt::Debug for TemplateOpts {
             .field("node_selector", &self.node_selector)
             .field("tolerations", &self.tolerations)
             .field("environment_id", &self.environment_id)
+            .field(
+                "confidential_storage_manifest_uri",
+                &self.confidential_storage_manifest_uri,
+            )
             .field("gateway_token", &"<redacted>")
             .field("api_base_url", &self.api_base_url)
             .field("coordinator_url", &self.coordinator_url)
@@ -238,6 +242,25 @@ impl TemplateOpts {
             spec.sidecar_resource_mode = self.sidecar_resource_mode.clone();
         }
         spec
+    }
+
+    pub fn validate_confidential_storage_manifest(&self) -> anyhow::Result<()> {
+        let needs_manifest = self.runtime_profile_spec().profile == RUNTIME_PROFILE_CONFIDENTIAL
+            && self.disk_gib > 0;
+        if needs_manifest {
+            anyhow::ensure!(
+                crate::confidential_storage::validate_manifest_uri(
+                    &self.confidential_storage_manifest_uri
+                ),
+                "confidential runtime requires a canonical content-addressed storage manifest URI"
+            );
+        } else {
+            anyhow::ensure!(
+                self.confidential_storage_manifest_uri.is_empty(),
+                "non-confidential runtime must not carry a confidential storage manifest URI"
+            );
+        }
+        Ok(())
     }
 }
 

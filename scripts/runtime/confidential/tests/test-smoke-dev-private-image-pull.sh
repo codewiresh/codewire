@@ -155,7 +155,10 @@ fi
 encoded="$(yq -r 'select(.kind == "Pod") | .metadata.annotations."io.katacontainers.config.hypervisor.cc_init_data"' "$manifest")"
 decoded="$(printf '%s' "$encoded" | base64 -d | gzip -dc)"
 rg -F 'package agent_policy' <<<"$decoded" >/dev/null
-rg -F '"codewire_workspace_storage_key_id" = "be31063a-8ec8-46d5-aa17-75cda1729370"' <<<"$decoded" >/dev/null
+if rg -q 'codewire_workspace_storage_key_id|"confidential_storage"' <<<"$decoded"; then
+  printf '%s\n' 'private pull probe emitted the retired confidential-storage registry' >&2
+  exit 1
+fi
 cdh_config="$(yq -p=toml -r '.data."cdh.toml"' <<<"$decoded")"
 [[ "$(yq -p=toml -r '.kbc.kbs_cert' <<<"$cdh_config")" == \
   $'-----BEGIN CERTIFICATE-----\nPUBLIC-TEST-CA\n-----END CERTIFICATE-----' ]]

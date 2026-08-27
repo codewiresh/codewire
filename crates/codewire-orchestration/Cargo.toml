@@ -110,5 +110,6 @@ codewire-daemon = { workspace = true }
 codewire-proto = { workspace = true, features = ["client"] }
 connectrpc = { workspace = true, features = ["client"] }
 flate2 = { workspace = true }
+regorus = { workspace = true }
 tempfile = { workspace = true }
 toml = { workspace = true }

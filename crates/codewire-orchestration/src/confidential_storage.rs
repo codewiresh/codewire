@@ -37,8 +37,12 @@ pub(crate) const KEY_NAME: &str = "LUKS_KEY_V1";
 const KEY_VERSION: i32 = 1;
 const OPENBAO_AUTH_MOUNT: &str = "kubernetes-codewire";
 const KBS_RESOURCE_PREFIX: &str = "default/codewire-workspace-luks";
+const KBS_MANIFEST_RESOURCE_PREFIX: &str = "default/codewire-storage-manifests";
 const OPENBAO_PARENT_PATH: &str = "confidential-storage";
 const MAX_PROVIDER_RESPONSE_BYTES: usize = 64 * 1024;
+const MANIFEST_SCHEMA_VERSION: i32 = 2;
+const PROTECTION_PROFILE: &str = "luks2-integrity-rw";
+const BACKING_CLAIM_NAME: &str = "workspace";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FeatureFlags {
@@ -102,6 +106,35 @@ pub struct Metadata {
     pub sha256_fingerprint: Option<String>,
     pub state: String,
     pub last_redacted_error: Option<String>,
+    pub manifest_uri: Option<String>,
+    pub volume_id: String,
+    pub volume_version: String,
+    pub device_size_bytes: u64,
+    pub luks_uuid: String,
+    pub protection_profile: String,
+    pub backing_claim_name: String,
+    pub manifest_sha256_fingerprint: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StorageManifest<'a> {
+    schema_version: i32,
+    volume_id: &'a str,
+    volume_version: &'a str,
+    device_size_bytes: u64,
+    access: &'static str,
+    protection: StorageProtection<'a>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StorageProtection<'a> {
+    #[serde(rename = "type")]
+    protection_type: &'a str,
+    key_uri: &'a str,
+    key_sha256: &'a str,
+    luks_uuid: &'a str,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -148,17 +181,34 @@ pub trait RecoveryKeyStore: Send + Sync {
 
 #[async_trait]
 pub trait KbsAdmin: Send + Sync {
-    async fn set_resource(&self, environment_id: &str, key: &[u8]) -> Result<(), ProviderError>;
-    async fn delete_resource(&self, environment_id: &str) -> Result<(), ProviderError>;
+    async fn set_key_resource(&self, environment_id: &str, key: &[u8])
+    -> Result<(), ProviderError>;
+    async fn set_manifest_resource(
+        &self,
+        manifest_uri: &str,
+        manifest: &[u8],
+    ) -> Result<(), ProviderError>;
+    async fn delete_manifest_resource(&self, manifest_uri: &str) -> Result<(), ProviderError>;
+    async fn delete_key_resource(&self, environment_id: &str) -> Result<(), ProviderError>;
 }
 
 #[async_trait]
 pub trait MetadataStore: Send + Sync {
-    async fn begin(&self, environment_id: &str) -> anyhow::Result<Metadata>;
-    async fn set_fingerprint(&self, environment_id: &str, fingerprint: &str) -> anyhow::Result<()>;
+    async fn begin_core(
+        &self,
+        environment_id: &str,
+        device_size_bytes: u64,
+    ) -> anyhow::Result<Metadata>;
+    async fn bind_content(
+        &self,
+        environment_id: &str,
+        key_fingerprint: &str,
+        manifest_uri: &str,
+        manifest_fingerprint: &str,
+    ) -> anyhow::Result<Metadata>;
     async fn mark_ready(&self, environment_id: &str) -> anyhow::Result<()>;
     async fn mark_error(&self, environment_id: &str, error: &str) -> anyhow::Result<()>;
-    async fn mark_deleting(&self, environment_id: &str) -> anyhow::Result<()>;
+    async fn mark_deleting(&self, environment_id: &str) -> anyhow::Result<Option<String>>;
     async fn mark_deleted(&self, environment_id: &str) -> anyhow::Result<()>;
 }
 
@@ -232,9 +282,17 @@ impl ConfidentialStorageManager {
     /// Reconcile the recovery copy and KBS resource. This runs before a
     /// SandboxClaim is created and before a stopped confidential sandbox is
     /// scaled back up. Repeated calls always recover the existing key.
-    pub async fn ensure_ready(&self, environment_id: &str) -> anyhow::Result<()> {
+    pub async fn ensure_ready(
+        &self,
+        environment_id: &str,
+        disk_gib: i32,
+    ) -> anyhow::Result<String> {
         validate_environment_id(environment_id)?;
-        let existing = self.metadata.begin(environment_id).await?;
+        let device_size_bytes = device_size_bytes(disk_gib)?;
+        let existing = self
+            .metadata
+            .begin_core(environment_id, device_size_bytes)
+            .await?;
         if existing.state == "deleting" || existing.state == "deleted" {
             anyhow::bail!("confidential storage key is being deleted");
         }
@@ -272,16 +330,53 @@ impl ConfidentialStorageManager {
             self.record_provider_error(environment_id, &error).await;
             return Err(error.into());
         }
-        self.metadata
-            .set_fingerprint(environment_id, &fingerprint)
+        let manifest = StorageManifest {
+            schema_version: MANIFEST_SCHEMA_VERSION,
+            volume_id: &existing.volume_id,
+            volume_version: &existing.volume_version,
+            device_size_bytes: existing.device_size_bytes,
+            access: "readWrite",
+            protection: StorageProtection {
+                protection_type: &existing.protection_profile,
+                key_uri: &existing.kbs_uri,
+                key_sha256: &fingerprint,
+                luks_uuid: &existing.luks_uuid,
+            },
+        };
+        let manifest = serde_json::to_vec(&manifest)?;
+        let manifest_fingerprint = hex_sha256(&manifest);
+        let manifest_uri = manifest_uri(&manifest_fingerprint)?;
+        let bound = self
+            .metadata
+            .bind_content(
+                environment_id,
+                &fingerprint,
+                &manifest_uri,
+                &manifest_fingerprint,
+            )
             .await?;
+        anyhow::ensure!(
+            bound.manifest_uri.as_deref() == Some(manifest_uri.as_str())
+                && bound.sha256_fingerprint.as_deref() == Some(fingerprint.as_str())
+                && bound.manifest_sha256_fingerprint.as_deref()
+                    == Some(manifest_fingerprint.as_str()),
+            "confidential storage content binding changed"
+        );
 
-        if let Err(error) = self.kbs.set_resource(environment_id, &key).await {
+        if let Err(error) = self.kbs.set_key_resource(environment_id, &key).await {
+            self.record_provider_error(environment_id, &error).await;
+            return Err(error.into());
+        }
+        if let Err(error) = self
+            .kbs
+            .set_manifest_resource(&manifest_uri, &manifest)
+            .await
+        {
             self.record_provider_error(environment_id, &error).await;
             return Err(error.into());
         }
         self.metadata.mark_ready(environment_id).await?;
-        Ok(())
+        Ok(manifest_uri)
     }
 
     /// Delete both key copies after the caller has proved that Sandbox, PVC,
@@ -289,8 +384,14 @@ impl ConfidentialStorageManager {
     /// is idempotent, so Temporal retries resume safely.
     pub async fn delete_after_storage_absent(&self, environment_id: &str) -> anyhow::Result<()> {
         validate_environment_id(environment_id)?;
-        self.metadata.mark_deleting(environment_id).await?;
-        if let Err(error) = self.kbs.delete_resource(environment_id).await {
+        let manifest_uri = self.metadata.mark_deleting(environment_id).await?;
+        if let Some(manifest_uri) = manifest_uri
+            && let Err(error) = self.kbs.delete_manifest_resource(&manifest_uri).await
+        {
+            self.record_provider_error(environment_id, &error).await;
+            return Err(error.into());
+        }
+        if let Err(error) = self.kbs.delete_key_resource(environment_id).await {
             self.record_provider_error(environment_id, &error).await;
             return Err(error.into());
         }
@@ -331,6 +432,31 @@ pub fn kbs_uri(environment_id: &str) -> String {
     format!("kbs:///{KBS_RESOURCE_PREFIX}/{environment_id}")
 }
 
+pub fn manifest_volume_version(environment_id: &str) -> String {
+    format!("{environment_id}-v{MANIFEST_SCHEMA_VERSION}")
+}
+
+pub fn manifest_uri(manifest_fingerprint: &str) -> anyhow::Result<String> {
+    if manifest_fingerprint.len() != 64
+        || !manifest_fingerprint
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+    {
+        anyhow::bail!("confidential storage manifest fingerprint is invalid");
+    }
+    Ok(format!(
+        "kbs:///{KBS_MANIFEST_RESOURCE_PREFIX}/sha256-{manifest_fingerprint}"
+    ))
+}
+
+pub fn validate_manifest_uri(value: &str) -> bool {
+    let prefix = format!("kbs:///{KBS_MANIFEST_RESOURCE_PREFIX}/sha256-");
+    value
+        .strip_prefix(&prefix)
+        .and_then(|fingerprint| manifest_uri(fingerprint).ok())
+        .is_some_and(|canonical| canonical == value)
+}
+
 pub fn openbao_path(environment_id: &str) -> String {
     format!("{OPENBAO_PARENT_PATH}/{environment_id}")
 }
@@ -342,17 +468,39 @@ pub(crate) fn hex_sha256(value: &[u8]) -> String {
         .collect()
 }
 
+fn device_size_bytes(disk_gib: i32) -> anyhow::Result<u64> {
+    let disk_gib = u64::try_from(disk_gib)
+        .map_err(|_| anyhow::anyhow!("confidential storage size must be positive"))?;
+    if disk_gib == 0 {
+        anyhow::bail!("confidential storage size must be positive");
+    }
+    disk_gib
+        .checked_mul(1024 * 1024 * 1024)
+        .ok_or_else(|| anyhow::anyhow!("confidential storage size overflows bytes"))
+}
+
 struct PgMetadataStore {
     pool: PgPool,
 }
 
 #[async_trait]
 impl MetadataStore for PgMetadataStore {
-    async fn begin(&self, environment_id: &str) -> anyhow::Result<Metadata> {
+    async fn begin_core(
+        &self,
+        environment_id: &str,
+        device_size_bytes: u64,
+    ) -> anyhow::Result<Metadata> {
+        let device_size_bytes = i64::try_from(device_size_bytes)
+            .map_err(|_| anyhow::anyhow!("confidential storage size exceeds PostgreSQL bigint"))?;
+        let volume_version = manifest_volume_version(environment_id);
+        let luks_uuid = Uuid::new_v4().to_string();
         let row = sqlx::query(
             r#"INSERT INTO confidential_storage_keys
-                   (environment_id, kbs_uri, openbao_path, version, state, updated_at)
-               VALUES ($1, $2, $3, $4, 'provisioning', NOW())
+                   (environment_id, kbs_uri, openbao_path, version, state, updated_at,
+                    volume_id, volume_version, manifest_schema_version,
+                    device_size_bytes, luks_uuid, protection_profile, backing_claim_name)
+               VALUES ($1, $2, $3, $4, 'provisioning', NOW(),
+                       $1, $5, $6, $7, $8, $9, $10)
                ON CONFLICT (environment_id) DO UPDATE SET
                    openbao_path = COALESCE(
                        confidential_storage_keys.openbao_path,
@@ -368,43 +516,79 @@ impl MetadataStore for PgMetadataStore {
                            THEN confidential_storage_keys.last_redacted_error
                        ELSE NULL
                    END,
+                   volume_id = COALESCE(confidential_storage_keys.volume_id, EXCLUDED.volume_id),
+                   volume_version = COALESCE(confidential_storage_keys.volume_version, EXCLUDED.volume_version),
+                   manifest_schema_version = COALESCE(confidential_storage_keys.manifest_schema_version, EXCLUDED.manifest_schema_version),
+                   device_size_bytes = COALESCE(confidential_storage_keys.device_size_bytes, EXCLUDED.device_size_bytes),
+                   luks_uuid = COALESCE(confidential_storage_keys.luks_uuid, EXCLUDED.luks_uuid),
+                   protection_profile = COALESCE(confidential_storage_keys.protection_profile, EXCLUDED.protection_profile),
+                   backing_claim_name = COALESCE(confidential_storage_keys.backing_claim_name, EXCLUDED.backing_claim_name),
                    updated_at = NOW()
+               WHERE (confidential_storage_keys.volume_id IS NULL OR confidential_storage_keys.volume_id = EXCLUDED.volume_id)
+                 AND (confidential_storage_keys.volume_version IS NULL OR confidential_storage_keys.volume_version = EXCLUDED.volume_version)
+                 AND (confidential_storage_keys.manifest_schema_version IS NULL OR confidential_storage_keys.manifest_schema_version = EXCLUDED.manifest_schema_version)
+                 AND (confidential_storage_keys.device_size_bytes IS NULL OR confidential_storage_keys.device_size_bytes = EXCLUDED.device_size_bytes)
+                 AND (confidential_storage_keys.protection_profile IS NULL OR confidential_storage_keys.protection_profile = EXCLUDED.protection_profile)
+                 AND (confidential_storage_keys.backing_claim_name IS NULL OR confidential_storage_keys.backing_claim_name = EXCLUDED.backing_claim_name)
                RETURNING environment_id, kbs_uri, openbao_path, version,
-                         sha256_fingerprint, state, last_redacted_error"#,
+                         sha256_fingerprint, state, last_redacted_error,
+                         manifest_uri, volume_id, volume_version, device_size_bytes,
+                         luks_uuid, protection_profile, backing_claim_name,
+                         manifest_sha256_fingerprint"#,
         )
         .bind(environment_id)
         .bind(kbs_uri(environment_id))
         .bind(openbao_path(environment_id))
         .bind(KEY_VERSION)
-        .fetch_one(&self.pool)
-        .await?;
-        Ok(Metadata {
-            environment_id: row.try_get("environment_id")?,
-            kbs_uri: row.try_get("kbs_uri")?,
-            openbao_path: row.try_get("openbao_path")?,
-            version: row.try_get("version")?,
-            sha256_fingerprint: row.try_get("sha256_fingerprint")?,
-            state: row.try_get("state")?,
-            last_redacted_error: row.try_get("last_redacted_error")?,
-        })
+        .bind(volume_version)
+        .bind(MANIFEST_SCHEMA_VERSION)
+        .bind(device_size_bytes)
+        .bind(luks_uuid)
+        .bind(PROTECTION_PROFILE)
+        .bind(BACKING_CLAIM_NAME)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "confidential storage manifest identity, size, or lifecycle contract changed"
+            )
+        })?;
+        metadata_from_row(&row)
     }
 
-    async fn set_fingerprint(&self, environment_id: &str, fingerprint: &str) -> anyhow::Result<()> {
-        let result = sqlx::query(
+    async fn bind_content(
+        &self,
+        environment_id: &str,
+        key_fingerprint: &str,
+        manifest_uri: &str,
+        manifest_fingerprint: &str,
+    ) -> anyhow::Result<Metadata> {
+        let row = sqlx::query(
             r#"UPDATE confidential_storage_keys
-               SET sha256_fingerprint = COALESCE(sha256_fingerprint, $2), updated_at = NOW()
+               SET sha256_fingerprint = COALESCE(sha256_fingerprint, $2),
+                   manifest_uri = COALESCE(manifest_uri, $3),
+                   manifest_sha256_fingerprint = COALESCE(manifest_sha256_fingerprint, $4),
+                   updated_at = NOW()
                WHERE environment_id = $1
                  AND (sha256_fingerprint IS NULL OR sha256_fingerprint = $2)
-                 AND state NOT IN ('deleting', 'deleted')"#,
+                 AND (manifest_uri IS NULL OR manifest_uri = $3)
+                 AND (manifest_sha256_fingerprint IS NULL OR manifest_sha256_fingerprint = $4)
+                 AND volume_id IS NOT NULL
+                 AND state NOT IN ('deleting', 'deleted')
+               RETURNING environment_id, kbs_uri, openbao_path, version,
+                         sha256_fingerprint, state, last_redacted_error,
+                         manifest_uri, volume_id, volume_version, device_size_bytes,
+                         luks_uuid, protection_profile, backing_claim_name,
+                         manifest_sha256_fingerprint"#,
         )
         .bind(environment_id)
-        .bind(fingerprint)
-        .execute(&self.pool)
-        .await?;
-        if result.rows_affected() != 1 {
-            anyhow::bail!("confidential storage fingerprint or lifecycle state changed");
-        }
-        Ok(())
+        .bind(key_fingerprint)
+        .bind(manifest_uri)
+        .bind(manifest_fingerprint)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("confidential storage content binding changed"))?;
+        metadata_from_row(&row)
     }
 
     async fn mark_ready(&self, environment_id: &str) -> anyhow::Result<()> {
@@ -416,8 +600,8 @@ impl MetadataStore for PgMetadataStore {
         update_metadata_state(&self.pool, environment_id, "error", Some(&redacted)).await
     }
 
-    async fn mark_deleting(&self, environment_id: &str) -> anyhow::Result<()> {
-        let result = sqlx::query(
+    async fn mark_deleting(&self, environment_id: &str) -> anyhow::Result<Option<String>> {
+        let row = sqlx::query(
             r#"INSERT INTO confidential_storage_keys
                    (environment_id, kbs_uri, openbao_path, version,
                     state, deleting_at, updated_at)
@@ -430,23 +614,43 @@ impl MetadataStore for PgMetadataStore {
                    state = CASE WHEN confidential_storage_keys.state = 'deleted'
                                 THEN 'deleted' ELSE 'deleting' END,
                    deleting_at = COALESCE(confidential_storage_keys.deleting_at, NOW()),
-                   updated_at = NOW(), last_redacted_error = NULL"#,
+                   updated_at = NOW(), last_redacted_error = NULL
+               RETURNING manifest_uri"#,
         )
         .bind(environment_id)
         .bind(kbs_uri(environment_id))
         .bind(openbao_path(environment_id))
         .bind(KEY_VERSION)
-        .execute(&self.pool)
+        .fetch_one(&self.pool)
         .await?;
-        if result.rows_affected() != 1 {
-            anyhow::bail!("confidential storage deletion metadata was not updated");
-        }
-        Ok(())
+        row.try_get("manifest_uri").map_err(Into::into)
     }
 
     async fn mark_deleted(&self, environment_id: &str) -> anyhow::Result<()> {
         update_metadata_state(&self.pool, environment_id, "deleted", None).await
     }
+}
+
+fn metadata_from_row(row: &sqlx::postgres::PgRow) -> anyhow::Result<Metadata> {
+    let device_size_bytes: i64 = row.try_get("device_size_bytes")?;
+    Ok(Metadata {
+        environment_id: row.try_get("environment_id")?,
+        kbs_uri: row.try_get("kbs_uri")?,
+        openbao_path: row.try_get("openbao_path")?,
+        version: row.try_get("version")?,
+        sha256_fingerprint: row.try_get("sha256_fingerprint")?,
+        state: row.try_get("state")?,
+        last_redacted_error: row.try_get("last_redacted_error")?,
+        manifest_uri: row.try_get("manifest_uri")?,
+        volume_id: row.try_get("volume_id")?,
+        volume_version: row.try_get("volume_version")?,
+        device_size_bytes: u64::try_from(device_size_bytes)
+            .map_err(|_| anyhow::anyhow!("stored confidential storage size is invalid"))?,
+        luks_uuid: row.try_get("luks_uuid")?,
+        protection_profile: row.try_get("protection_profile")?,
+        backing_claim_name: row.try_get("backing_claim_name")?,
+        manifest_sha256_fingerprint: row.try_get("manifest_sha256_fingerprint")?,
+    })
 }
 
 async fn update_metadata_state(
@@ -897,23 +1101,45 @@ impl TrusteeKbsClient {
         }
     }
 
-    fn resource_url(&self, environment_id: &str) -> Result<Url, ProviderError> {
-        validate_environment_id(environment_id)
-            .map_err(|_| ProviderError::new("KBS resource path validation", None))?;
+    fn resource_url(&self, collection: &'static str, tag: &str) -> Result<Url, ProviderError> {
+        if tag.is_empty()
+            || tag.len() > 253
+            || !tag
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+        {
+            return Err(ProviderError::new("KBS resource path validation", None));
+        }
         let mut url = self.base_url.clone();
         let mut path = url
             .path_segments_mut()
             .map_err(|_| ProviderError::new("KBS URL construction", None))?;
-        path.pop_if_empty().extend([
-            "kbs",
-            "v0",
-            "resource",
-            "default",
-            "codewire-workspace-luks",
-            environment_id,
-        ]);
+        path.pop_if_empty()
+            .extend(["kbs", "v0", "resource", "default", collection, tag]);
         drop(path);
         Ok(url)
+    }
+
+    fn key_resource_url(&self, environment_id: &str) -> Result<Url, ProviderError> {
+        validate_environment_id(environment_id)
+            .map_err(|_| ProviderError::new("KBS resource path validation", None))?;
+        self.resource_url("codewire-workspace-luks", environment_id)
+    }
+
+    fn manifest_resource_url(&self, uri: &str) -> Result<Url, ProviderError> {
+        let prefix = format!("kbs:///{KBS_MANIFEST_RESOURCE_PREFIX}/sha256-");
+        let fingerprint = uri
+            .strip_prefix(&prefix)
+            .ok_or_else(|| ProviderError::new("KBS manifest path validation", None))?;
+        let canonical = manifest_uri(fingerprint)
+            .map_err(|_| ProviderError::new("KBS manifest path validation", None))?;
+        if canonical != uri {
+            return Err(ProviderError::new("KBS manifest path validation", None));
+        }
+        self.resource_url(
+            "codewire-storage-manifests",
+            &format!("sha256-{fingerprint}"),
+        )
     }
 
     fn token(&self) -> Result<Zeroizing<String>, ProviderError> {
@@ -931,14 +1157,18 @@ impl TrusteeKbsClient {
 
 #[async_trait]
 impl KbsAdmin for TrusteeKbsClient {
-    async fn set_resource(&self, environment_id: &str, key: &[u8]) -> Result<(), ProviderError> {
+    async fn set_key_resource(
+        &self,
+        environment_id: &str,
+        key: &[u8],
+    ) -> Result<(), ProviderError> {
         if key.len() != KEY_BYTES {
             return Err(ProviderError::new("KBS key validation", None));
         }
         let token = self.token()?;
         let response = self
             .http
-            .post(self.resource_url(environment_id)?)
+            .post(self.key_resource_url(environment_id)?)
             .bearer_auth(token.as_str())
             .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
             .body(key.to_vec())
@@ -955,11 +1185,63 @@ impl KbsAdmin for TrusteeKbsClient {
         }
     }
 
-    async fn delete_resource(&self, environment_id: &str) -> Result<(), ProviderError> {
+    async fn set_manifest_resource(
+        &self,
+        manifest_uri: &str,
+        manifest: &[u8],
+    ) -> Result<(), ProviderError> {
+        if manifest.is_empty() || manifest.len() > 64 * 1024 {
+            return Err(ProviderError::new("KBS manifest validation", None));
+        }
+        let expected_uri = crate::confidential_storage::manifest_uri(&hex_sha256(manifest))
+            .map_err(|_| ProviderError::new("KBS manifest validation", None))?;
+        if expected_uri != manifest_uri {
+            return Err(ProviderError::new("KBS manifest validation", None));
+        }
         let token = self.token()?;
         let response = self
             .http
-            .delete(self.resource_url(environment_id)?)
+            .post(self.manifest_resource_url(manifest_uri)?)
+            .bearer_auth(token.as_str())
+            .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
+            .body(manifest.to_vec())
+            .send()
+            .await
+            .map_err(|_| ProviderError::new("KBS manifest provision", None))?;
+        if response.status().is_success() {
+            Ok(())
+        } else {
+            Err(ProviderError::new(
+                "KBS manifest provision",
+                Some(response.status()),
+            ))
+        }
+    }
+
+    async fn delete_manifest_resource(&self, manifest_uri: &str) -> Result<(), ProviderError> {
+        let token = self.token()?;
+        let response = self
+            .http
+            .delete(self.manifest_resource_url(manifest_uri)?)
+            .bearer_auth(token.as_str())
+            .send()
+            .await
+            .map_err(|_| ProviderError::new("KBS manifest delete", None))?;
+        if response.status().is_success() || response.status() == reqwest::StatusCode::NOT_FOUND {
+            Ok(())
+        } else {
+            Err(ProviderError::new(
+                "KBS manifest delete",
+                Some(response.status()),
+            ))
+        }
+    }
+
+    async fn delete_key_resource(&self, environment_id: &str) -> Result<(), ProviderError> {
+        let token = self.token()?;
+        let response = self
+            .http
+            .delete(self.key_resource_url(environment_id)?)
             .bearer_auth(token.as_str())
             .send()
             .await
@@ -1096,17 +1378,21 @@ mod tests {
         }
     }
 
-    #[derive(Default)]
     struct MemoryMetadata {
         values: Mutex<BTreeMap<String, Metadata>>,
-        events: Mutex<Vec<&'static str>>,
+        events: Arc<Mutex<Vec<&'static str>>>,
     }
 
     #[async_trait]
     impl MetadataStore for MemoryMetadata {
-        async fn begin(&self, environment_id: &str) -> anyhow::Result<Metadata> {
-            self.events.lock().await.push("metadata.begin");
+        async fn begin_core(
+            &self,
+            environment_id: &str,
+            device_size_bytes: u64,
+        ) -> anyhow::Result<Metadata> {
+            self.events.lock().await.push("metadata.core");
             let mut values = self.values.lock().await;
+            let volume_version = manifest_volume_version(environment_id);
             let value = values
                 .entry(environment_id.into())
                 .or_insert_with(|| Metadata {
@@ -1117,7 +1403,18 @@ mod tests {
                     sha256_fingerprint: None,
                     state: "provisioning".into(),
                     last_redacted_error: None,
+                    manifest_uri: None,
+                    volume_id: environment_id.into(),
+                    volume_version,
+                    device_size_bytes,
+                    luks_uuid: "f617a73e-b03d-4b58-b1ae-354c72276ea0".into(),
+                    protection_profile: PROTECTION_PROFILE.into(),
+                    backing_claim_name: BACKING_CLAIM_NAME.into(),
+                    manifest_sha256_fingerprint: None,
                 });
+            if value.device_size_bytes != device_size_bytes {
+                anyhow::bail!("confidential storage size changed");
+            }
             if !matches!(value.state.as_str(), "deleting" | "deleted") {
                 value.state = "provisioning".into();
                 value.last_redacted_error = None;
@@ -1125,19 +1422,35 @@ mod tests {
             Ok(value.clone())
         }
 
-        async fn set_fingerprint(&self, id: &str, fingerprint: &str) -> anyhow::Result<()> {
-            self.events.lock().await.push("metadata.fingerprint");
+        async fn bind_content(
+            &self,
+            id: &str,
+            key_fingerprint: &str,
+            manifest_uri: &str,
+            manifest_fingerprint: &str,
+        ) -> anyhow::Result<Metadata> {
+            self.events.lock().await.push("metadata.bind");
             let mut values = self.values.lock().await;
             let value = values.get_mut(id).unwrap();
             if value
                 .sha256_fingerprint
                 .as_deref()
-                .is_some_and(|old| old != fingerprint)
+                .is_some_and(|old| old != key_fingerprint)
+                || value
+                    .manifest_uri
+                    .as_deref()
+                    .is_some_and(|old| old != manifest_uri)
+                || value
+                    .manifest_sha256_fingerprint
+                    .as_deref()
+                    .is_some_and(|old| old != manifest_fingerprint)
             {
-                anyhow::bail!("fingerprint mismatch");
+                anyhow::bail!("content binding mismatch");
             }
-            value.sha256_fingerprint = Some(fingerprint.into());
-            Ok(())
+            value.sha256_fingerprint = Some(key_fingerprint.into());
+            value.manifest_uri = Some(manifest_uri.into());
+            value.manifest_sha256_fingerprint = Some(manifest_fingerprint.into());
+            Ok(value.clone())
         }
 
         async fn mark_ready(&self, id: &str) -> anyhow::Result<()> {
@@ -1155,22 +1468,28 @@ mod tests {
             Ok(())
         }
 
-        async fn mark_deleting(&self, id: &str) -> anyhow::Result<()> {
+        async fn mark_deleting(&self, id: &str) -> anyhow::Result<Option<String>> {
             self.events.lock().await.push("metadata.deleting");
             let mut values = self.values.lock().await;
-            values
-                .entry(id.into())
-                .or_insert_with(|| Metadata {
-                    environment_id: id.into(),
-                    kbs_uri: kbs_uri(id),
-                    openbao_path: openbao_path(id),
-                    version: 1,
-                    sha256_fingerprint: None,
-                    state: "deleting".into(),
-                    last_redacted_error: None,
-                })
-                .state = "deleting".into();
-            Ok(())
+            let value = values.entry(id.into()).or_insert_with(|| Metadata {
+                environment_id: id.into(),
+                kbs_uri: kbs_uri(id),
+                openbao_path: openbao_path(id),
+                version: 1,
+                sha256_fingerprint: None,
+                state: "deleting".into(),
+                last_redacted_error: None,
+                manifest_uri: None,
+                volume_id: id.into(),
+                volume_version: manifest_volume_version(id),
+                device_size_bytes: 20 * 1024 * 1024 * 1024,
+                luks_uuid: "f617a73e-b03d-4b58-b1ae-354c72276ea0".into(),
+                protection_profile: PROTECTION_PROFILE.into(),
+                backing_claim_name: BACKING_CLAIM_NAME.into(),
+                manifest_sha256_fingerprint: None,
+            });
+            value.state = "deleting".into();
+            Ok(value.manifest_uri.clone())
         }
 
         async fn mark_deleted(&self, id: &str) -> anyhow::Result<()> {
@@ -1218,14 +1537,15 @@ mod tests {
 
     struct MemoryKbs {
         values: Mutex<Vec<Zeroizing<Vec<u8>>>>,
+        manifests: Mutex<Vec<(String, Vec<u8>)>>,
         fail: bool,
         events: Arc<Mutex<Vec<&'static str>>>,
     }
 
     #[async_trait]
     impl KbsAdmin for MemoryKbs {
-        async fn set_resource(&self, _: &str, key: &[u8]) -> Result<(), ProviderError> {
-            self.events.lock().await.push("kbs.set");
+        async fn set_key_resource(&self, _: &str, key: &[u8]) -> Result<(), ProviderError> {
+            self.events.lock().await.push("kbs.key-set");
             if self.fail {
                 return Err(ProviderError::new("KBS resource provision", None));
             }
@@ -1233,65 +1553,140 @@ mod tests {
             Ok(())
         }
 
-        async fn delete_resource(&self, _: &str) -> Result<(), ProviderError> {
-            self.events.lock().await.push("kbs.delete");
+        async fn set_manifest_resource(
+            &self,
+            uri: &str,
+            manifest: &[u8],
+        ) -> Result<(), ProviderError> {
+            self.events.lock().await.push("kbs.manifest-set");
+            self.manifests
+                .lock()
+                .await
+                .push((uri.into(), manifest.to_vec()));
+            Ok(())
+        }
+
+        async fn delete_manifest_resource(&self, _: &str) -> Result<(), ProviderError> {
+            self.events.lock().await.push("kbs.manifest-delete");
+            self.manifests.lock().await.clear();
+            Ok(())
+        }
+
+        async fn delete_key_resource(&self, _: &str) -> Result<(), ProviderError> {
+            self.events.lock().await.push("kbs.key-delete");
             self.values.lock().await.clear();
             Ok(())
         }
     }
 
-    fn manager(
-        fail_kbs: bool,
-    ) -> (
-        ConfidentialStorageManager,
-        Arc<MemoryMetadata>,
-        Arc<Mutex<Vec<&'static str>>>,
-    ) {
+    struct MemoryHarness {
+        manager: ConfidentialStorageManager,
+        metadata: Arc<MemoryMetadata>,
+        kbs: Arc<MemoryKbs>,
+        events: Arc<Mutex<Vec<&'static str>>>,
+    }
+
+    fn manager(fail_kbs: bool) -> MemoryHarness {
         let events = Arc::new(Mutex::new(Vec::new()));
-        let metadata = Arc::new(MemoryMetadata::default());
+        let metadata = Arc::new(MemoryMetadata {
+            values: Mutex::new(BTreeMap::new()),
+            events: events.clone(),
+        });
         let recovery = Arc::new(MemoryRecovery {
             key: Mutex::new(None),
             events: events.clone(),
         });
         let kbs = Arc::new(MemoryKbs {
             values: Mutex::new(Vec::new()),
+            manifests: Mutex::new(Vec::new()),
             fail: fail_kbs,
             events: events.clone(),
         });
-        (
-            ConfidentialStorageManager::new(metadata.clone(), recovery, kbs),
+        MemoryHarness {
+            manager: ConfidentialStorageManager::new(metadata.clone(), recovery, kbs.clone()),
             metadata,
+            kbs,
             events,
-        )
+        }
     }
 
     #[tokio::test]
     async fn create_retries_reuse_one_key_and_reconcile_kbs() {
-        let (manager, metadata, events) = manager(false);
-        manager.ensure_ready(ENVIRONMENT_ID).await.unwrap();
+        let MemoryHarness {
+            manager,
+            metadata,
+            kbs,
+            events,
+        } = manager(false);
+        manager.ensure_ready(ENVIRONMENT_ID, 20).await.unwrap();
         let first = metadata.values.lock().await[ENVIRONMENT_ID]
             .sha256_fingerprint
             .clone();
-        manager.ensure_ready(ENVIRONMENT_ID).await.unwrap();
+        manager.ensure_ready(ENVIRONMENT_ID, 20).await.unwrap();
         let second = metadata.values.lock().await[ENVIRONMENT_ID]
             .sha256_fingerprint
             .clone();
         assert_eq!(first, second);
         assert_eq!(metadata.values.lock().await[ENVIRONMENT_ID].state, "ready");
+        let manifests = kbs.manifests.lock().await;
+        assert_eq!(manifests.len(), 2);
+        assert_eq!(manifests[0], manifests[1], "retry changed the manifest");
+        let (uri, manifest_bytes) = &manifests[0];
+        assert_eq!(
+            uri,
+            &manifest_uri(&hex_sha256(manifest_bytes)).unwrap(),
+            "manifest resource is not content addressed"
+        );
+        let manifest: serde_json::Value = serde_json::from_slice(manifest_bytes).unwrap();
+        let key_fingerprint = hex_sha256(&[0x5a; KEY_BYTES]);
+        assert_eq!(
+            manifest,
+            serde_json::json!({
+                "schemaVersion": 2,
+                "volumeId": ENVIRONMENT_ID,
+                "volumeVersion": "be31063a-8ec8-46d5-aa17-75cda1729370-v2",
+                "deviceSizeBytes": 20_u64 * 1024 * 1024 * 1024,
+                "access": "readWrite",
+                "protection": {
+                    "type": "luks2-integrity-rw",
+                    "keyUri": "kbs:///default/codewire-workspace-luks/be31063a-8ec8-46d5-aa17-75cda1729370",
+                    "keySha256": key_fingerprint,
+                    "luksUuid": "f617a73e-b03d-4b58-b1ae-354c72276ea0",
+                },
+            })
+        );
+        assert!(
+            !String::from_utf8_lossy(manifest_bytes).contains("WlpaWlpa"),
+            "manifest must not contain the encoded recovery key"
+        );
+        drop(manifests);
         assert_eq!(
             events.lock().await.as_slice(),
             [
+                "metadata.core",
                 "openbao.get-or-create",
-                "kbs.set",
+                "metadata.bind",
+                "kbs.key-set",
+                "kbs.manifest-set",
+                "metadata.ready",
+                "metadata.core",
                 "openbao.read",
-                "kbs.set",
+                "metadata.bind",
+                "kbs.key-set",
+                "kbs.manifest-set",
+                "metadata.ready",
             ]
         );
     }
 
     #[tokio::test]
     async fn existing_fingerprint_never_recreates_a_missing_recovery_key() {
-        let (manager, metadata, events) = manager(false);
+        let MemoryHarness {
+            manager,
+            metadata,
+            events,
+            ..
+        } = manager(false);
         metadata.values.lock().await.insert(
             ENVIRONMENT_ID.into(),
             Metadata {
@@ -1302,22 +1697,94 @@ mod tests {
                 sha256_fingerprint: Some(hex_sha256(&[0x5a; KEY_BYTES])),
                 state: "ready".into(),
                 last_redacted_error: None,
+                manifest_uri: None,
+                volume_id: ENVIRONMENT_ID.into(),
+                volume_version: manifest_volume_version(ENVIRONMENT_ID),
+                device_size_bytes: 20 * 1024 * 1024 * 1024,
+                luks_uuid: "f617a73e-b03d-4b58-b1ae-354c72276ea0".into(),
+                protection_profile: PROTECTION_PROFILE.into(),
+                backing_claim_name: BACKING_CLAIM_NAME.into(),
+                manifest_sha256_fingerprint: None,
             },
         );
 
-        let error = manager.ensure_ready(ENVIRONMENT_ID).await.unwrap_err();
+        let error = manager.ensure_ready(ENVIRONMENT_ID, 20).await.unwrap_err();
         assert_eq!(
             error.to_string(),
             "confidential storage recovery key missing failed"
         );
-        assert_eq!(events.lock().await.as_slice(), ["openbao.read"]);
+        assert_eq!(
+            events.lock().await.as_slice(),
+            ["metadata.core", "openbao.read", "metadata.error"]
+        );
         assert_eq!(metadata.values.lock().await[ENVIRONMENT_ID].state, "error");
     }
 
     #[tokio::test]
+    async fn size_change_is_rejected_before_any_provider_mutation() {
+        let MemoryHarness {
+            manager,
+            metadata,
+            kbs,
+            events,
+        } = manager(false);
+        manager.ensure_ready(ENVIRONMENT_ID, 20).await.unwrap();
+        events.lock().await.clear();
+        let key_publications = kbs.values.lock().await.len();
+        let manifest_publications = kbs.manifests.lock().await.len();
+
+        let error = manager.ensure_ready(ENVIRONMENT_ID, 40).await.unwrap_err();
+
+        assert_eq!(error.to_string(), "confidential storage size changed");
+        assert_eq!(events.lock().await.as_slice(), ["metadata.core"]);
+        assert_eq!(kbs.values.lock().await.len(), key_publications);
+        assert_eq!(kbs.manifests.lock().await.len(), manifest_publications);
+        assert_eq!(
+            metadata.values.lock().await[ENVIRONMENT_ID].device_size_bytes,
+            20 * 1024 * 1024 * 1024
+        );
+    }
+
+    #[tokio::test]
+    async fn stored_content_substitution_is_rejected_before_kbs_mutation() {
+        let MemoryHarness {
+            manager,
+            metadata,
+            kbs,
+            events,
+        } = manager(false);
+        manager.ensure_ready(ENVIRONMENT_ID, 20).await.unwrap();
+        events.lock().await.clear();
+        let key_publications = kbs.values.lock().await.len();
+        let manifest_publications = kbs.manifests.lock().await.len();
+        metadata
+            .values
+            .lock()
+            .await
+            .get_mut(ENVIRONMENT_ID)
+            .expect("confidential storage metadata")
+            .manifest_uri = Some(
+            "kbs:///default/codewire-storage-manifests/sha256-ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+                .into(),
+        );
+
+        let error = manager.ensure_ready(ENVIRONMENT_ID, 20).await.unwrap_err();
+
+        assert_eq!(error.to_string(), "content binding mismatch");
+        assert_eq!(
+            events.lock().await.as_slice(),
+            ["metadata.core", "openbao.read", "metadata.bind"]
+        );
+        assert_eq!(kbs.values.lock().await.len(), key_publications);
+        assert_eq!(kbs.manifests.lock().await.len(), manifest_publications);
+    }
+
+    #[tokio::test]
     async fn kbs_failure_is_redacted_and_never_marks_ready() {
-        let (manager, metadata, _) = manager(true);
-        let error = manager.ensure_ready(ENVIRONMENT_ID).await.unwrap_err();
+        let MemoryHarness {
+            manager, metadata, ..
+        } = manager(true);
+        let error = manager.ensure_ready(ENVIRONMENT_ID, 20).await.unwrap_err();
         assert_eq!(
             error.to_string(),
             "confidential storage KBS resource provision failed"
@@ -1332,8 +1799,13 @@ mod tests {
 
     #[tokio::test]
     async fn deletion_order_keeps_recovery_until_kbs_is_gone() {
-        let (manager, metadata, events) = manager(false);
-        manager.ensure_ready(ENVIRONMENT_ID).await.unwrap();
+        let MemoryHarness {
+            manager,
+            metadata,
+            events,
+            ..
+        } = manager(false);
+        manager.ensure_ready(ENVIRONMENT_ID, 20).await.unwrap();
         events.lock().await.clear();
         manager
             .delete_after_storage_absent(ENVIRONMENT_ID)
@@ -1341,7 +1813,13 @@ mod tests {
             .unwrap();
         assert_eq!(
             events.lock().await.as_slice(),
-            ["kbs.delete", "openbao.delete"]
+            [
+                "metadata.deleting",
+                "kbs.manifest-delete",
+                "kbs.key-delete",
+                "openbao.delete",
+                "metadata.deleted",
+            ]
         );
         assert_eq!(
             metadata.values.lock().await[ENVIRONMENT_ID].state,
@@ -1362,6 +1840,18 @@ mod tests {
             kbs_uri(ENVIRONMENT_ID),
             "kbs:///default/codewire-workspace-luks/be31063a-8ec8-46d5-aa17-75cda1729370"
         );
+        assert_eq!(
+            manifest_volume_version(ENVIRONMENT_ID),
+            "be31063a-8ec8-46d5-aa17-75cda1729370-v2"
+        );
+        assert_eq!(
+            manifest_uri("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+                .unwrap(),
+            "kbs:///default/codewire-storage-manifests/sha256-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        );
+        assert!(manifest_uri("not-a-digest").is_err());
+        assert_eq!(device_size_bytes(20).unwrap(), 20 * 1024 * 1024 * 1024);
+        assert!(device_size_bytes(0).is_err());
     }
 
     #[test]
@@ -1548,14 +2038,20 @@ mod tests {
                     .and_then(|value| value.to_str().ok())
                     .unwrap_or_default()
                     .to_string();
-                let body = to_bytes(request.into_body(), KEY_BYTES + 1)
+                let content_type = request
+                    .headers()
+                    .get(reqwest::header::CONTENT_TYPE)
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or_default()
+                    .to_string();
+                let body = to_bytes(request.into_body(), 64 * 1024 + 1)
                     .await
                     .unwrap()
                     .to_vec();
                 captured
                     .lock()
                     .unwrap()
-                    .push((method, path, authorization, body));
+                    .push((method, path, authorization, content_type, body));
                 StatusCode::OK
             }
         });
@@ -1569,23 +2065,57 @@ mod tests {
             token_file.path().to_path_buf(),
         );
         let key = Zeroizing::new(vec![0x5a; KEY_BYTES]);
+        let manifest = br#"{"schemaVersion":2}"#;
+        let manifest_uri = manifest_uri(&hex_sha256(manifest)).unwrap();
 
-        client.set_resource(ENVIRONMENT_ID, &key).await.unwrap();
-        client.delete_resource(ENVIRONMENT_ID).await.unwrap();
+        let mismatch = client
+            .set_manifest_resource(&manifest_uri, br#"{"schemaVersion":3}"#)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            mismatch.to_string(),
+            "confidential storage KBS manifest validation failed"
+        );
+
+        client.set_key_resource(ENVIRONMENT_ID, &key).await.unwrap();
+        client
+            .set_manifest_resource(&manifest_uri, manifest)
+            .await
+            .unwrap();
+        client
+            .delete_manifest_resource(&manifest_uri)
+            .await
+            .unwrap();
+        client.delete_key_resource(ENVIRONMENT_ID).await.unwrap();
         server.abort();
 
         let requests = requests.lock().unwrap();
-        assert_eq!(requests.len(), 2);
-        for (_, path, authorization, _) in requests.iter() {
-            assert_eq!(
-                path,
-                "/kbs/v0/resource/default/codewire-workspace-luks/be31063a-8ec8-46d5-aa17-75cda1729370"
-            );
+        assert_eq!(requests.len(), 4);
+        for (_, _, authorization, _, _) in requests.iter() {
             assert_eq!(authorization, "Bearer admin-token");
         }
         assert_eq!(requests[0].0, reqwest::Method::POST);
-        assert_eq!(requests[0].3, *key);
-        assert_eq!(requests[1].0, reqwest::Method::DELETE);
-        assert!(requests[1].3.is_empty());
+        assert_eq!(
+            requests[0].1,
+            "/kbs/v0/resource/default/codewire-workspace-luks/be31063a-8ec8-46d5-aa17-75cda1729370"
+        );
+        assert_eq!(requests[0].3, "application/octet-stream");
+        assert_eq!(requests[0].4, *key);
+        assert_eq!(requests[1].0, reqwest::Method::POST);
+        assert_eq!(
+            requests[1].1,
+            format!(
+                "/kbs/v0/resource/default/codewire-storage-manifests/sha256-{}",
+                hex_sha256(manifest)
+            )
+        );
+        assert_eq!(requests[1].3, "application/octet-stream");
+        assert_eq!(requests[1].4, manifest);
+        assert_eq!(requests[2].0, reqwest::Method::DELETE);
+        assert_eq!(requests[2].1, requests[1].1);
+        assert!(requests[2].4.is_empty());
+        assert_eq!(requests[3].0, reqwest::Method::DELETE);
+        assert_eq!(requests[3].1, requests[0].1);
+        assert!(requests[3].4.is_empty());
     }
 }

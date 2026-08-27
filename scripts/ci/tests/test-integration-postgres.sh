@@ -12,7 +12,7 @@ set -euo pipefail
 printf '%s\n' "$*" >> "$FAKE_DOCKER_LOG"
 case "$1" in
   run) printf '%s\n' fake-container-id ;;
-  port) printf '%s\n' 127.0.0.1:45678 ;;
+  port) printf '127.0.0.1:%s\n' "${FAKE_DOCKER_PORT:-45678}" ;;
   exec|rm) ;;
   *) printf 'unexpected fake docker command: %s\n' "$1" >&2; exit 1 ;;
 esac
@@ -38,9 +38,11 @@ reset_case() {
   DATABASE_URL_RUST_EXPLICIT=false
   GITHUB_ACTIONS=false
   GITHUB_RUN_ID="fixture-$$"
+  INTEGRATION_POSTGRES_HOST_PORT=""
+  FAKE_DOCKER_PORT=45678
   FAKE_DOCKER_LOG="$TMP/docker.log"
   FAKE_PSQL_LOG="$TMP/psql.log"
-  export FAKE_DOCKER_LOG FAKE_PSQL_LOG
+  export FAKE_DOCKER_LOG FAKE_PSQL_LOG FAKE_DOCKER_PORT
   : > "$FAKE_DOCKER_LOG"
   : > "$FAKE_PSQL_LOG"
   integration_postgres_init
@@ -56,6 +58,26 @@ grep -q '127.0.0.1:45678/codewire?sslmode=disable.*SELECT 1' "$FAKE_PSQL_LOG"
 integration_postgres_cleanup
 grep -q "^rm -f $INTEGRATION_POSTGRES_CONTAINER$" "$FAKE_DOCKER_LOG"
 [ "$INTEGRATION_POSTGRES_MANAGED" = false ]
+
+reset_case
+INTEGRATION_POSTGRES_HOST_PORT=55432
+FAKE_DOCKER_PORT=55432
+integration_postgres_configure
+[ "$INTEGRATION_POSTGRES_SOURCE" = managed ]
+[ "$DATABASE_URL" = "postgres://codewire:codewire@127.0.0.1:55432/codewire?sslmode=disable" ]
+[ "$DATABASE_URL_RUST" = "postgres://codewire:codewire@127.0.0.1:55432/codewire" ]
+grep -q '^run .*127.0.0.1:55432:5432 postgres:17-alpine$' "$FAKE_DOCKER_LOG"
+integration_postgres_cleanup
+
+for invalid_port in invalid 1023 65536; do
+  reset_case
+  INTEGRATION_POSTGRES_HOST_PORT="$invalid_port"
+  if integration_postgres_configure >/dev/null 2>&1; then
+    echo "invalid fixed PostgreSQL port was accepted: $invalid_port" >&2
+    exit 1
+  fi
+  [ ! -s "$FAKE_DOCKER_LOG" ]
+done
 
 reset_case
 GITHUB_ACTIONS=true

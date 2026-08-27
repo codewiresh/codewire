@@ -1,9 +1,10 @@
 //! Deterministic encoding helpers for Kata policy init-data.
 
+use super::TemplateOpts;
+use super::runtime_policy::{DOCKER_MODE_GUEST_DIND, dind_image};
 use base64::Engine;
 use crc32fast::Hasher as Crc32Hasher;
-
-use super::TemplateOpts;
+use sha2::{Digest, Sha256};
 
 const CODEWIRE_KATA_AGENT_POLICY_REGO: &str = r#"package agent_policy
 
@@ -15,7 +16,6 @@ default AddSwapPathRequest := true
 default AddSwapRequest := true
 default CloseStdinRequest := true
 default CopyFileRequest := true
-default CreateContainerRequest := true
 default CreateSandboxRequest := true
 default DestroySandboxRequest := true
 default ExecProcessRequest := true
@@ -56,57 +56,40 @@ default WaitProcessRequest := true
 default WriteStreamRequest := true
 "#;
 
-pub(super) fn kata_policy_init_data_annotation(opts: &TemplateOpts) -> String {
+pub(super) fn kata_policy_init_data_annotation(
+    opts: &TemplateOpts,
+    authorize_workspace_storage: bool,
+) -> String {
     gzip_base64(&build_codewire_kata_policy_init_data(
-        &opts.kata_coco_kbs_url,
-        &opts.kata_coco_kbs_ca_pem,
-        &opts.kata_coco_test_resource_uri,
-        &opts.kata_coco_test_resource_path,
-        if opts.runtime_profile_spec().profile == super::RUNTIME_PROFILE_CONFIDENTIAL {
-            &opts.environment_id
-        } else {
-            ""
-        },
+        opts,
+        authorize_workspace_storage,
     ))
 }
 
 pub(super) fn build_codewire_kata_policy_init_data(
-    kbs_url: &str,
-    kbs_ca_pem: &str,
-    test_resource_uri: &str,
-    test_resource_path: &str,
-    workspace_storage_key_id: &str,
+    opts: &TemplateOpts,
+    authorize_workspace_storage: bool,
 ) -> String {
+    let policy = build_codewire_kata_policy(opts, authorize_workspace_storage);
     let mut payload = format!(
-        "version = \"0.1.0\"\nalgorithm = \"sha256\"\n\n[data]\n\"policy.rego\" = '''\n{CODEWIRE_KATA_AGENT_POLICY_REGO}'''\n"
+        "version = \"0.1.0\"\nalgorithm = \"sha256\"\n\n[data]\n\"policy.rego\" = '''\n{policy}'''\n"
     );
 
-    let kbs_url = kbs_url.trim();
-    let kbs_ca_pem = kbs_ca_pem.trim();
-    let workspace_storage_key_id = workspace_storage_key_id.trim();
-    if !workspace_storage_key_id.is_empty() {
+    if authorize_workspace_storage
+        && opts.runtime_profile_spec().profile == super::RUNTIME_PROFILE_CONFIDENTIAL
+        && opts.disk_gib > 0
+        && valid_protected_workspace_contract(opts)
+    {
         payload.push_str("\"codewire_workspace_storage_key_id\" = ");
-        payload.push_str(&toml_string(workspace_storage_key_id));
-        payload.push('\n');
-
-        let key_uri = crate::confidential_storage::kbs_uri(workspace_storage_key_id);
-        let registry = serde_json::json!({
-            "version": 1,
-            "volumes": [{
-                "profile": "luks2-integrity-ext4",
-                "volumeId": workspace_storage_key_id,
-                "keyUri": key_uri,
-            }],
-        });
-        payload.push_str("\"confidential_storage\" = ");
-        payload.push_str(&toml_string(&registry.to_string()));
+        payload.push_str(&toml_string(&opts.environment_id));
         payload.push('\n');
     }
+
+    let kbs_url = opts.kata_coco_kbs_url.trim();
+    let kbs_ca_pem = opts.kata_coco_kbs_ca_pem.trim();
     if kbs_url.is_empty() {
         return payload;
     }
-    let _ = test_resource_uri;
-    let _ = test_resource_path;
 
     payload.push_str("\n\"aa.toml\" = '''\n[token_configs]\n[token_configs.kbs]\nurl = ");
     payload.push_str(&toml_string(kbs_url));
@@ -125,6 +108,148 @@ pub(super) fn build_codewire_kata_policy_init_data(
     // partial table here would silently discard agent.image_registry_auth.
     payload.push_str("\n'''\n");
     payload
+}
+
+fn build_codewire_kata_policy(opts: &TemplateOpts, authorize_workspace_storage: bool) -> String {
+    let mut policy = CODEWIRE_KATA_AGENT_POLICY_REGO.to_string();
+    if !authorize_workspace_storage
+        || opts.runtime_profile_spec().profile != super::RUNTIME_PROFILE_CONFIDENTIAL
+        || opts.disk_gib <= 0
+    {
+        policy.push_str("default CreateContainerRequest := true\n");
+        return policy;
+    }
+    if !valid_protected_workspace_contract(opts) {
+        policy.push_str("default CreateContainerRequest := false\n");
+        return policy;
+    }
+
+    let manifest_uri = &opts.confidential_storage_manifest_uri;
+    let mount_name = format!("confidential-{}", hex_sha256(manifest_uri.as_bytes()));
+    let mount_point = format!("/run/kata-containers/shared/containers/passthrough/{mount_name}");
+    let mut containers = serde_json::Map::new();
+    containers.insert(
+        "workspace".into(),
+        serde_json::json!({
+            "image": opts.image,
+            "mount_destinations": ["/home/codewire", "/workspace"],
+        }),
+    );
+    if opts.runtime_profile_spec().docker_mode == DOCKER_MODE_GUEST_DIND {
+        containers.insert(
+            "dind".into(),
+            serde_json::json!({
+                "image": dind_image(opts),
+                "mount_destinations": ["/workspace"],
+            }),
+        );
+    }
+    let contract = serde_json::json!({
+        "manifest_uri": manifest_uri,
+        "requested_access": 2,
+        "storage_fstype": "confidential-storage",
+        "mount_point": mount_point,
+        "mount_type": "bind",
+        "mount_options": ["rbind", "rprivate", "rw"],
+        "fs_group": {
+            "group_id": 1000,
+            "group_change_policy": 1,
+        },
+        "containers": containers,
+    });
+    let contract = serde_json::to_string_pretty(&contract).expect("serialize policy contract");
+    policy.push_str(CODEWIRE_KATA_CONFIDENTIAL_STORAGE_POLICY_REGO);
+    policy.push_str("\ncodewire_confidential_storage := ");
+    policy.push_str(&contract);
+    policy.push('\n');
+    policy
+}
+
+fn valid_protected_workspace_contract(opts: &TemplateOpts) -> bool {
+    crate::confidential_storage::validate_manifest_uri(&opts.confidential_storage_manifest_uri)
+        && crate::confidential_storage::validate_environment_id(&opts.environment_id).is_ok()
+}
+
+const CODEWIRE_KATA_CONFIDENTIAL_STORAGE_POLICY_REGO: &str = r#"
+default CreateContainerRequest := false
+
+# Containers without a protected workspace mount keep the established
+# Codewire lifecycle policy. A plaintext or missing-storage downgrade at one
+# of the protected destinations is denied.
+CreateContainerRequest := true if {
+    confidential_candidates := [storage | some storage in input.storages; codewire_is_confidential_storage_candidate(storage)]
+    count(confidential_candidates) == 0
+    protected_mounts := [mount | some mount in input.OCI.Mounts; codewire_is_protected_destination(mount.destination)]
+    count(protected_mounts) == 0
+}
+
+CreateContainerRequest := true if {
+    name := input.OCI.Annotations["io.kubernetes.cri.container-name"]
+    expected := codewire_confidential_storage.containers[name]
+    input.OCI.Annotations["io.kubernetes.cri.image-name"] == expected.image
+
+    confidential_candidates := [storage | some storage in input.storages; codewire_is_confidential_storage_candidate(storage)]
+    count(confidential_candidates) == 1
+    storage := confidential_candidates[0]
+    codewire_confidential_storage_matches(storage)
+
+    protected_mounts := [mount | some mount in input.OCI.Mounts; codewire_is_protected_destination(mount.destination)]
+    count(protected_mounts) == count(expected.mount_destinations)
+    every destination in expected.mount_destinations {
+        some mount in protected_mounts
+        mount.destination == destination
+        codewire_confidential_mount_matches(storage, mount)
+    }
+    every mount in protected_mounts {
+        mount.destination in expected.mount_destinations
+        codewire_confidential_mount_matches(storage, mount)
+    }
+}
+
+codewire_is_protected_destination(destination) if {
+    destination in {"/home/codewire", "/workspace"}
+}
+
+codewire_is_confidential_storage_candidate(storage) if {
+    storage.fstype == "confidential-storage"
+}
+codewire_is_confidential_storage_candidate(storage) if {
+    storage.confidential_storage != null
+}
+
+codewire_confidential_storage_matches(storage) if {
+    storage.driver_options == []
+    storage.fstype == codewire_confidential_storage.storage_fstype
+    storage.fs_group == codewire_confidential_storage.fs_group
+    storage.mount_point == codewire_confidential_storage.mount_point
+    storage.options == []
+    storage.shared == false
+    codewire_confidential_device_transport(storage)
+    storage.confidential_storage.manifest_uri == codewire_confidential_storage.manifest_uri
+    storage.confidential_storage.requested_access == codewire_confidential_storage.requested_access
+}
+
+codewire_confidential_device_transport(storage) if {
+    storage.driver == "blk"
+    regex.match("^[0-9a-f]{2}(/[0-9a-f]{2})?$", storage.source)
+}
+codewire_confidential_device_transport(storage) if {
+    storage.driver == "scsi"
+    regex.match("^[0-9]+:[0-9]+$", storage.source)
+}
+
+codewire_confidential_mount_matches(storage, mount) if {
+    mount.source == storage.mount_point
+    mount.type_ == codewire_confidential_storage.mount_type
+    mount.options == codewire_confidential_storage.mount_options
+}
+"#;
+
+fn hex_sha256(value: &[u8]) -> String {
+    Sha256::digest(value)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 pub(super) fn toml_string(s: &str) -> String {

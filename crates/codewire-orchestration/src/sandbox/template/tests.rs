@@ -6,6 +6,8 @@ mod tests {
     use base64::Engine;
     use flate2::read::GzDecoder;
     use serde_json::Value;
+    use sha2::{Digest, Sha256};
+    const CONTENT_ADDRESSED_MANIFEST_URI: &str = "kbs:///default/codewire-storage-manifests/sha256-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
     fn decode_gzip_base64(encoded: &str) -> String {
         let raw = base64::engine::general_purpose::STANDARD
@@ -15,6 +17,71 @@ mod tests {
         let mut decoded = String::new();
         decoder.read_to_string(&mut decoded).unwrap();
         decoded
+    }
+
+    fn kata_policy_allows(policy: &str, input: &Value) -> bool {
+        let mut engine = regorus::Engine::new();
+        engine.set_strict_builtin_errors(false);
+        engine
+            .add_policy("codewire.rego".to_string(), policy.to_string())
+            .expect("Kata regorus must parse the rendered policy");
+        engine
+            .set_input_json(&input.to_string())
+            .expect("policy input must be valid JSON");
+        let result = engine
+            .eval_query(
+                "data.agent_policy.CreateContainerRequest".to_string(),
+                false,
+            )
+            .expect("Kata regorus must evaluate the rendered policy");
+        assert_eq!(result.result.len(), 1, "unexpected policy result: {result:?}");
+        assert_eq!(
+            result.result[0].expressions.len(),
+            1,
+            "unexpected policy expression result: {result:?}"
+        );
+        result.result[0].expressions[0].value == regorus::Value::Bool(true)
+    }
+
+    fn confidential_create_input(container: &str, image: &str, destinations: &[&str]) -> Value {
+        let digest = Sha256::digest(CONTENT_ADDRESSED_MANIFEST_URI.as_bytes())
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let mount_point = format!(
+            "/run/kata-containers/shared/containers/passthrough/confidential-{digest}"
+        );
+        serde_json::json!({
+            "OCI": {
+                "Annotations": {
+                    "io.kubernetes.cri.container-name": container,
+                    "io.kubernetes.cri.image-name": image,
+                },
+                "Mounts": destinations.iter().map(|destination| serde_json::json!({
+                    "destination": destination,
+                    "source": mount_point,
+                    "type_": "bind",
+                    "options": ["rbind", "rprivate", "rw"],
+                })).collect::<Vec<_>>(),
+            },
+            "storages": [{
+                "driver": "blk",
+                "driver_options": [],
+                "fstype": "confidential-storage",
+                "fs_group": {
+                    "group_id": 1000,
+                    "group_change_policy": 1,
+                },
+                "mount_point": mount_point,
+                "options": [],
+                "shared": false,
+                "source": "00/00",
+                "confidential_storage": {
+                    "manifest_uri": CONTENT_ADDRESSED_MANIFEST_URI,
+                    "requested_access": 2,
+                },
+            }],
+        })
     }
 
     fn load_golden(name: &str) -> Value {
@@ -898,6 +965,8 @@ mod tests {
                 image: "ghcr.io/codewiresh/workspace:golden".into(),
                 runtime_profile: RUNTIME_PROFILE_CONFIDENTIAL.into(),
                 environment_id: "be31063a-8ec8-46d5-aa17-75cda1729370".into(),
+                confidential_storage_manifest_uri: CONTENT_ADDRESSED_MANIFEST_URI.into(),
+                disk_gib: 20,
                 kata_coco_init_data_enabled: true,
                 kata_coco_kbs_url: "https://kbs.codewire-dev.sh".into(),
                 kata_coco_kbs_ca_pem:
@@ -922,8 +991,10 @@ mod tests {
             "[token_configs.kbs]".to_string(),
             "\"cdh.toml\" = '''".to_string(),
             "default SetPolicyRequest := false".to_string(),
+            "default CreateContainerRequest := false".to_string(),
             "url = \"https://kbs.codewire-dev.sh\"".to_string(),
-            "\"codewire_workspace_storage_key_id\" = \"be31063a-8ec8-46d5-aa17-75cda1729370\"".to_string(),
+            CONTENT_ADDRESSED_MANIFEST_URI.to_string(),
+            "\"group_change_policy\": 1".to_string(),
         ] {
             assert!(decoded.contains(&want), "missing {want:?} in {decoded}");
         }
@@ -935,17 +1006,81 @@ mod tests {
         let data = init_data["data"].as_table().unwrap();
         assert_eq!(
             data["codewire_workspace_storage_key_id"].as_str(),
-            Some("be31063a-8ec8-46d5-aa17-75cda1729370")
+            Some("be31063a-8ec8-46d5-aa17-75cda1729370"),
+            "Trustee key release must remain bound to the measured environment ID"
         );
-        let storage_registry: serde_json::Value =
-            serde_json::from_str(data["confidential_storage"].as_str().unwrap()).unwrap();
-        assert_eq!(storage_registry["version"].as_u64(), Some(1));
+        assert!(
+            !data.contains_key("confidential_storage"),
+            "the retired parallel storage registry must remain absent"
+        );
+        let policy = data["policy.rego"].as_str().unwrap();
+        let workspace = confidential_create_input(
+            "workspace",
+            "ghcr.io/codewiresh/workspace:golden",
+            &["/home/codewire", "/workspace"],
+        );
+        assert!(kata_policy_allows(policy, &workspace));
+        let dind_image = pod_template["spec"]["containers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|container| container["name"].as_str() == Some("dind"))
+            .and_then(|container| container["image"].as_str())
+            .unwrap();
+        assert!(kata_policy_allows(
+            policy,
+            &confidential_create_input("dind", dind_image, &["/workspace"])
+        ));
+
+        let mut manifest_substitution = workspace.clone();
+        manifest_substitution["storages"][0]["confidential_storage"]["manifest_uri"] =
+            "kbs:///default/codewire-storage-manifests/sha256-ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff".into();
+        assert!(!kata_policy_allows(policy, &manifest_substitution));
+        let mut access_downgrade = workspace.clone();
+        access_downgrade["storages"][0]["confidential_storage"]["requested_access"] = 1.into();
+        assert!(!kata_policy_allows(policy, &access_downgrade));
+        let mut image_substitution = workspace.clone();
+        image_substitution["OCI"]["Annotations"]["io.kubernetes.cri.image-name"] =
+            "ghcr.io/codewiresh/workspace:substituted".into();
+        assert!(!kata_policy_allows(policy, &image_substitution));
+        let mut missing_storage = workspace.clone();
+        missing_storage["storages"] = serde_json::json!([]);
+        assert!(!kata_policy_allows(policy, &missing_storage));
+        let mut mount_option_substitution = workspace.clone();
+        mount_option_substitution["OCI"]["Mounts"][0]["options"] =
+            serde_json::json!(["rbind", "rw"]);
+        assert!(!kata_policy_allows(policy, &mount_option_substitution));
+        let mut fs_group_substitution = workspace.clone();
+        fs_group_substitution["storages"][0]["fs_group"]["group_id"] = 0.into();
+        assert!(!kata_policy_allows(policy, &fs_group_substitution));
+        let mut mount_point_substitution = workspace.clone();
+        mount_point_substitution["storages"][0]["mount_point"] =
+            "/run/kata-containers/shared/containers/passthrough/confidential-ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff".into();
+        mount_point_substitution["OCI"]["Mounts"][0]["source"] =
+            mount_point_substitution["storages"][0]["mount_point"].clone();
+        mount_point_substitution["OCI"]["Mounts"][1]["source"] =
+            mount_point_substitution["storages"][0]["mount_point"].clone();
+        assert!(!kata_policy_allows(policy, &mount_point_substitution));
+        let mut extra_storage = workspace.clone();
+        extra_storage["storages"]
+            .as_array_mut()
+            .unwrap()
+            .push(workspace["storages"][0].clone());
+        assert!(!kata_policy_allows(policy, &extra_storage));
+
+        let declaration: serde_json::Value = serde_json::from_str(
+            annotations[KATA_CONFIDENTIAL_VOLUME_ANNOTATION]
+                .as_str()
+                .unwrap(),
+        )
+        .unwrap();
         assert_eq!(
-            storage_registry["volumes"][0],
+            declaration,
             serde_json::json!({
-                "profile": "luks2-integrity-ext4",
-                "volumeId": "be31063a-8ec8-46d5-aa17-75cda1729370",
-                "keyUri": "kbs:///default/codewire-workspace-luks/be31063a-8ec8-46d5-aa17-75cda1729370",
+                "workspace": {
+                    "manifestUri": CONTENT_ADDRESSED_MANIFEST_URI,
+                    "access": "readWrite",
+                }
             })
         );
         let aa: toml::Value = toml::from_str(data["aa.toml"].as_str().unwrap()).unwrap();
@@ -989,6 +1124,52 @@ mod tests {
     }
 
     #[test]
+    fn confidential_template_requires_content_addressed_manifest_before_mutation() {
+        let mut opts = TemplateOpts {
+            runtime_profile: RUNTIME_PROFILE_CONFIDENTIAL.into(),
+            disk_gib: 20,
+            ..Default::default()
+        };
+        assert!(opts.validate_confidential_storage_manifest().is_err());
+        opts.confidential_storage_manifest_uri = CONTENT_ADDRESSED_MANIFEST_URI.into();
+        assert!(opts.validate_confidential_storage_manifest().is_ok());
+        opts.confidential_storage_manifest_uri =
+            "kbs:///default/codewire-storage-manifests/latest".into();
+        assert!(opts.validate_confidential_storage_manifest().is_err());
+    }
+
+    #[test]
+    fn measured_key_release_claim_requires_the_exact_protected_contract() {
+        let mut opts = TemplateOpts {
+            runtime_profile: RUNTIME_PROFILE_CONFIDENTIAL.into(),
+            environment_id: "be31063a-8ec8-46d5-aa17-75cda1729370".into(),
+            confidential_storage_manifest_uri: CONTENT_ADDRESSED_MANIFEST_URI.into(),
+            disk_gib: 20,
+            ..Default::default()
+        };
+        let data = |opts: &TemplateOpts| {
+            let init_data = encoding::build_codewire_kata_policy_init_data(opts, true);
+            toml::from_str::<toml::Value>(&init_data).unwrap()["data"]
+                .as_table()
+                .unwrap()
+                .clone()
+        };
+
+        assert_eq!(
+            data(&opts)["codewire_workspace_storage_key_id"].as_str(),
+            Some("be31063a-8ec8-46d5-aa17-75cda1729370")
+        );
+
+        opts.confidential_storage_manifest_uri =
+            "kbs:///default/codewire-storage-manifests/latest".into();
+        assert!(!data(&opts).contains_key("codewire_workspace_storage_key_id"));
+
+        opts.confidential_storage_manifest_uri = CONTENT_ADDRESSED_MANIFEST_URI.into();
+        opts.environment_id = "BE31063A-8EC8-46D5-AA17-75CDA1729370".into();
+        assert!(!data(&opts).contains_key("codewire_workspace_storage_key_id"));
+    }
+
+    #[test]
     fn confidential_template_and_gateway_carry_coco_resource_kernel_params() {
         let opts = TemplateOpts {
             name: "tmpl-confidential-auth".into(),
@@ -1000,6 +1181,8 @@ mod tests {
                 "http://codewire-trustee-kbs.codewire-trustee.svc.cluster.local:8080".into(),
             kata_coco_image_registry_auth_uri: "kbs:///default/containers/auth".into(),
             environment_id: "be31063a-8ec8-46d5-aa17-75cda1729370".into(),
+            confidential_storage_manifest_uri: CONTENT_ADDRESSED_MANIFEST_URI.into(),
+            disk_gib: 20,
             server_namespace: "dev".into(),
             ..Default::default()
         };
@@ -1026,23 +1209,36 @@ mod tests {
         let gateway_annotations = gateway["spec"]["template"]["metadata"]["annotations"]
             .as_object()
             .unwrap();
-        assert_eq!(
+        assert_ne!(
             gateway_annotations
                 .get(KATA_COCO_INIT_DATA_ANNOTATION_KEY)
                 .and_then(Value::as_str),
             annotations
                 .get(KATA_COCO_INIT_DATA_ANNOTATION_KEY)
                 .and_then(Value::as_str),
-            "workspace and gateway must carry identical measured CoCo init-data"
+            "only the workspace policy authorizes the persistent volume"
+        );
+        let gateway_init_data = decode_gzip_base64(
+            gateway_annotations
+                .get(KATA_COCO_INIT_DATA_ANNOTATION_KEY)
+                .and_then(Value::as_str)
+                .unwrap(),
+        );
+        let gateway_init_data: toml::Value = toml::from_str(&gateway_init_data).unwrap();
+        assert!(
+            !gateway_init_data["data"]
+                .as_table()
+                .unwrap()
+                .contains_key("codewire_workspace_storage_key_id"),
+            "the gateway must not receive workspace key-release authority"
         );
         let gateway_init_data = decode_gzip_base64(
             gateway_annotations[KATA_COCO_INIT_DATA_ANNOTATION_KEY]
                 .as_str()
                 .unwrap(),
         );
-        assert!(gateway_init_data.contains(
-            "\"codewire_workspace_storage_key_id\" = \"be31063a-8ec8-46d5-aa17-75cda1729370\""
-        ));
+        assert!(gateway_init_data.contains("default CreateContainerRequest := true"));
+        assert!(!gateway_init_data.contains("codewire_confidential_storage :="));
         assert_eq!(
             gateway_annotations[KATA_HYPERVISOR_KERNEL_PARAMS_ANNOTATION_KEY]
                 .as_str(),
@@ -1450,6 +1646,7 @@ mod tests {
             &TemplateOpts {
                 name: "tmpl-storage-confidential".into(),
                 environment_id: "be31063a-8ec8-46d5-aa17-75cda1729370".into(),
+                confidential_storage_manifest_uri: CONTENT_ADDRESSED_MANIFEST_URI.into(),
                 runtime_profile: RUNTIME_PROFILE_CONFIDENTIAL.into(),
                 disk_gib: 20,
                 workspace_storage_class: "must-not-be-used".into(),
@@ -1468,17 +1665,11 @@ mod tests {
         assert_eq!(claim["spec"]["volumeMode"].as_str(), Some("Filesystem"));
         assert_eq!(
             claim["metadata"]["annotations"]
-                [KATA_CONFIDENTIAL_STORAGE_VOLUME_ID_ANNOTATION]
+                [KATA_CONFIDENTIAL_STORAGE_MANIFEST_URI_ANNOTATION]
                 .as_str(),
-            Some("be31063a-8ec8-46d5-aa17-75cda1729370")
+            Some(CONTENT_ADDRESSED_MANIFEST_URI)
         );
-        assert_eq!(
-            claim["metadata"]["annotations"][KATA_CONFIDENTIAL_STORAGE_KEY_URI_ANNOTATION]
-                .as_str(),
-            Some(
-                "kbs:///default/codewire-workspace-luks/be31063a-8ec8-46d5-aa17-75cda1729370"
-            )
-        );
+        assert_eq!(claim["metadata"]["annotations"].as_object().unwrap().len(), 1);
     }
 
     #[test]
