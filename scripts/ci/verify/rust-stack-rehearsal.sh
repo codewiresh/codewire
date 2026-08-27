@@ -173,8 +173,8 @@ run_migration_matrix() {
       | tee "$logfile"
   local passed_count
   passed_count="$(sed -nE 's/.*test result: ok\. ([0-9]+) passed.*/\1/p' "$logfile" | tail -n 1)"
-  if [[ "$passed_count" != "7" ]]; then
-    echo "::error::server-core migration matrix did not report its 7 passing tests"
+  if [[ "$passed_count" != "9" ]]; then
+    echo "::error::server-core migration matrix did not report its 9 passing tests"
     return 1
   fi
 }

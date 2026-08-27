@@ -15,9 +15,8 @@ ALTER TABLE public.confidential_storage_keys
     );
 
 -- The immediately preceding application source does not know about
--- openbao_path, while the next source deliberately no longer names the
--- retired column. Keep both INSERT shapes valid during the rollout window
--- while ensuring every new row has both canonical compatibility values.
+-- openbao_path. Keep its INSERT shape valid during the rollout window while
+-- ensuring every new row has the canonical OpenBao recovery path.
 CREATE FUNCTION public.populate_confidential_storage_openbao_path()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -25,10 +24,6 @@ AS $$
 BEGIN
     IF NEW.openbao_path IS NULL THEN
         NEW.openbao_path := 'confidential-storage/' || NEW.environment_id;
-    END IF;
-
-    IF NEW.infisical_path IS NULL THEN
-        NEW.infisical_path := '/confidential-storage/' || NEW.environment_id;
     END IF;
 
     RETURN NEW;
