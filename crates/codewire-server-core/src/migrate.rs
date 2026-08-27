@@ -250,6 +250,35 @@ mod tests {
                 "previous-source insert did not derive the canonical OpenBao path"
             );
 
+            // The next source names only the OpenBao path. During the same
+            // rollout window, the compatibility trigger must preserve the
+            // retired non-null column without returning it to active source.
+            sqlx::query("DELETE FROM confidential_storage_keys WHERE environment_id = $1")
+                .bind(ENVIRONMENT_ID)
+                .execute(&pool)
+                .await?;
+            sqlx::query(
+                "INSERT INTO confidential_storage_keys \
+                 (environment_id, kbs_uri, openbao_path) VALUES ($1, $2, $3)",
+            )
+            .bind(ENVIRONMENT_ID)
+            .bind(format!(
+                "kbs:///default/codewire-workspace-luks/{ENVIRONMENT_ID}"
+            ))
+            .bind(format!("confidential-storage/{ENVIRONMENT_ID}"))
+            .execute(&pool)
+            .await?;
+            let inserted_rollback_path: String = sqlx::query_scalar(
+                "SELECT infisical_path FROM confidential_storage_keys WHERE environment_id = $1",
+            )
+            .bind(ENVIRONMENT_ID)
+            .fetch_one(&pool)
+            .await?;
+            anyhow::ensure!(
+                inserted_rollback_path == format!("/confidential-storage/{ENVIRONMENT_ID}"),
+                "next-source insert did not derive the rollback-compatible path"
+            );
+
             let authority: String = sqlx::query_scalar(
                 "SELECT state FROM tenant_secret_control WHERE singleton = true",
             )

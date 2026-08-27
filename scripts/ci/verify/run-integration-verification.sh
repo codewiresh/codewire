@@ -223,7 +223,32 @@ run_database() {
     echo "::error::organization tenant secret teardown matrix skipped"
     return 1
   fi
-  assert_passed_count "organization tenant secret teardown matrix" "$logfile" 4
+  assert_passed_count "organization tenant secret teardown matrix" "$logfile" 2
+
+  logfile="$RUN_DIR/local-tenant-secret-authority.log"
+  DATABASE_URL="$DATABASE_URL_RUST" \
+    cargo test -p codewire-orchestration --lib \
+      'worker::secrets::tests::db_local_mutations_require_local_authority' \
+      -- --exact --nocapture | tee "$logfile"
+  if grep -q 'DATABASE_URL unset' "$logfile"; then
+    echo "::error::local tenant secret authority matrix skipped"
+    return 1
+  fi
+  assert_passed_count "local tenant secret authority matrix" "$logfile" 1
+
+  logfile="$RUN_DIR/encrypted-tenant-secret-store.log"
+  TEST_DATABASE_URL="$DATABASE_URL_RUST" \
+    cargo test -p codewire-orchestration --lib \
+      'worker::postgres_secrets::tests::encrypted_store_fences_mutations_reencrypts_renames_and_deletes_final_dek' \
+      -- --ignored --exact --nocapture | tee "$logfile"
+  assert_passed_count "encrypted tenant secret store matrix" "$logfile" 1
+
+  logfile="$RUN_DIR/tenant-secret-control-transition.log"
+  TEST_DATABASE_URL="$DATABASE_URL_RUST" \
+    cargo test -p codewire-orchestration --lib \
+      'worker::tenant_secret_operator::tests::control_transition_is_forward_only_and_requires_verification' \
+      -- --ignored --exact --nocapture | tee "$logfile"
+  assert_passed_count "tenant secret control transition matrix" "$logfile" 1
 
   logfile="$RUN_DIR/mesh-migration-ledger.log"
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \

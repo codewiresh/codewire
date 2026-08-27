@@ -30,7 +30,7 @@ set -euo pipefail
 [[ "${CODEWIRE_SERVER_URL:-}" == "https://codewire-dev.sh" ]] || exit 62
 [[ "${CODEWIRE_API_KEY:-}" == "cw_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" ]] || exit 63
 [[ -n "${CW_CONFIG_DIR:-}" && -d "$CW_CONFIG_DIR" ]] || exit 64
-[[ -z "${INFISICAL_TOKEN+x}" && -z "${KUBECONFIG+x}" && -z "${KUBE_CONTEXT+x}" ]] || exit 65
+[[ -z "${BAO_TOKEN+x}" && -z "${KUBECONFIG+x}" && -z "${KUBE_CONTEXT+x}" ]] || exit 65
 STATE="$(cd "$(dirname "$0")/../state" && pwd)"
 printf '%s\n' "$CW_CONFIG_DIR" >"$STATE/cw-config-dir"
 case "${FAKE_ORGS:-one}" in
@@ -53,7 +53,7 @@ set -euo pipefail
 [[ "${CODEWIRE_SERVER_URL:-}" == "https://codewire-dev.sh" ]] || exit 74
 [[ -z "${CODEWIRE_DEV_SMOKE_API_KEY+x}" ]] || exit 75
 [[ -z "${EXPECTED_CODEWIRE_SMOKE_USER_EMAIL+x}" ]] || exit 76
-[[ -z "${INFISICAL_TOKEN+x}" && -z "${KUBECONFIG+x}" && -z "${KUBE_CONTEXT+x}" ]] || exit 77
+[[ -z "${BAO_TOKEN+x}" && -z "${KUBECONFIG+x}" && -z "${KUBE_CONTEXT+x}" ]] || exit 77
 STATE="$(cd "$(dirname "$0")/../state" && pwd)"
 env | sort >"$STATE/child-env"
 printf 'fixed child invoked\n'
@@ -71,7 +71,7 @@ run_case() {
     CW_BIN=cw \
     CODEWIRE_DEV_SMOKE_API_KEY="cw_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" \
     EXPECTED_CODEWIRE_SMOKE_USER_EMAIL="smoke@example.test" \
-    INFISICAL_TOKEN="must-not-reach-child" \
+    BAO_TOKEN="must-not-reach-child" \
     KUBECONFIG="must-not-reach-child" \
     KUBE_CONTEXT="must-not-reach-child" \
     "$@" "$RUNNER" >"$TEST_TMP/$name.out" 2>"$TEST_TMP/$name.err"
@@ -86,7 +86,7 @@ run_case success 0 env FAKE_ORGS=one
 [[ ! -e "$(<"$STATE/cw-config-dir")" ]] || fail "success did not remove the private cw config"
 grep -Fxq 'CODEWIRE_ORG_ID=org_test_123' "$STATE/child-env" || fail "child org ID drifted"
 grep -Fxq 'CODEWIRE_SERVER_URL=https://codewire-dev.sh' "$STATE/child-env" || fail "child target drifted"
-! grep -qE '^(CODEWIRE_DEV_SMOKE_API_KEY|EXPECTED_CODEWIRE_SMOKE_USER_EMAIL|INFISICAL_|KUBECONFIG=|KUBE_CONTEXT=)' "$STATE/child-env" || \
+! grep -qE '^(CODEWIRE_DEV_SMOKE_API_KEY|EXPECTED_CODEWIRE_SMOKE_USER_EMAIL|BAO_|KUBECONFIG=|KUBE_CONTEXT=)' "$STATE/child-env" || \
   fail "child received a platform credential"
 
 run_case rejected-target 1 env CODEWIRE_SERVER_URL=https://codewire.sh

@@ -51,16 +51,43 @@ scripts/dev/kind/test-dashboard-kind.sh \
   --grep 'creates, runs, exposes a port'
 ```
 
-The gate uses a trusted system Chromium. Set
-`PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH` when it is not available as `chromium`,
-`google-chrome`, or `google-chrome-stable`. Do not add a browser download to
-the test path. Install the frozen JavaScript dependencies without lifecycle
-scripts:
+The gate requires the repository-pinned Chromium version that matches
+Playwright. CI provisions it before the test. For a local run, provision it
+once through the checksum-verifying setup helper, then pass the returned path:
+
+```bash
+pinned_chromium="$(scripts/ci/install-pinned-playwright-chromium.sh)"
+PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH="$pinned_chromium" make e2e-kind
+```
+
+Visual baselines are renderer-specific. An ordinary local run uses the
+automatic `linux` snapshot suffix. The `ubuntu24-cft145` suffix is reserved for
+the pinned Ubuntu 24.04 CI renderer; the browser preflight verifies its OS,
+Fontconfig/FreeType packages, Fontconfig configuration, and font inventory
+before Playwright starts. Generate or update that baseline only inside the
+runner-equivalent image. Never copy a locally rendered image into the Ubuntu
+baseline merely because the pixels look similar.
+
+The Playwright browser itself is DNS-isolated to `localhost` and
+`127.0.0.1`. Provision browser binaries and other immutable inputs before the
+suite starts; a browser test must not fetch public dependencies or generate
+background Internet traffic.
+
+Do not add a browser download to the test path. Install the frozen JavaScript
+dependencies without lifecycle scripts:
 
 ```bash
 PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 \
   bun install --frozen-lockfile --ignore-scripts
 ```
+
+The integrated Kind gate requires at least 1 GiB from a short writable temp
+root before building or importing images. If `TMPDIR` is unset and `/tmp` is
+too full, it selects `XDG_RUNTIME_DIR` or `/dev/shm`; an explicitly configured
+`TMPDIR` fails closed instead of being replaced. The browser then uses
+`/dev/shm` when it has at least 1 GiB free. These preflights keep a saturated
+host `/tmp` from surfacing as misleading image-import, renderer, or network
+failures.
 
 ## Test projects
 

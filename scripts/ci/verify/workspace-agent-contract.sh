@@ -84,7 +84,6 @@ check_version poetry poetry --version
 check_version uv uv --version
 check_version cargo cargo --version
 check_version rustc rustc --version
-check_version infisical infisical --version
 check_version psql psql --version
 check_version protoc protoc --version
 

@@ -21,7 +21,7 @@ use super::secret_envelope::{
     OpenBaoTransitConfig, OpenBaoTransitProvider, SecretCoordinates, TenantSecretScope, WrappedDek,
     decrypt_secret, encrypt_secret, load_keyring_provider, verify_dek_fingerprint,
 };
-use super::secrets::{InfisicalSecret, is_valid_secret_key};
+use super::secrets::{StoredSecret, is_valid_secret_key};
 
 const MAX_CACHED_DEKS: usize = 4096;
 const CANARY_LOCK_KEY: i64 = 0x4357_5453_4341_4e31;
@@ -205,6 +205,18 @@ impl PostgresSecretStore {
         Ok(())
     }
 
+    pub async fn verify_active_authority(&self) -> anyhow::Result<()> {
+        let state: String =
+            sqlx::query_scalar("SELECT state FROM tenant_secret_control WHERE singleton = true")
+                .fetch_one(&self.pool)
+                .await
+                .map_err(|_| store_error("authority-query-failed"))?;
+        if state != "postgres" {
+            return Err(store_error("write-authority-unavailable"));
+        }
+        Ok(())
+    }
+
     async fn lock_write_authority(
         tx: &mut Transaction<'_, Postgres>,
         expected: &'static str,
@@ -363,14 +375,14 @@ impl PostgresSecretStore {
     pub async fn get_secrets_raw_at_path(
         &self,
         secret_path: &str,
-    ) -> anyhow::Result<Vec<InfisicalSecret>> {
+    ) -> anyhow::Result<Vec<StoredSecret>> {
         self.get_secrets_at_path(secret_path, true).await
     }
 
     pub async fn get_imported_secrets_at_path(
         &self,
         secret_path: &str,
-    ) -> anyhow::Result<Vec<InfisicalSecret>> {
+    ) -> anyhow::Result<Vec<StoredSecret>> {
         self.get_secrets_at_path(secret_path, false).await
     }
 
@@ -378,7 +390,7 @@ impl PostgresSecretStore {
         &self,
         secret_path: &str,
         require_authority: bool,
-    ) -> anyhow::Result<Vec<InfisicalSecret>> {
+    ) -> anyhow::Result<Vec<StoredSecret>> {
         if require_authority {
             self.require_read_authority().await?;
         }
@@ -412,7 +424,7 @@ impl PostgresSecretStore {
                     decrypt_secret(&dek, &coordinates, &envelope).map_err(envelope_error)?;
                 let value = String::from_utf8(plaintext.to_vec())
                     .map_err(|_| store_error("secret-plaintext-invalid"))?;
-                Ok(InfisicalSecret {
+                Ok(StoredSecret {
                     key: row.key,
                     value,
                     created_at: row.created_at.to_rfc3339_opts(SecondsFormat::Secs, true),
@@ -1065,6 +1077,7 @@ mod tests {
         assert!(store.initialize_canary().await?);
         assert!(!store.initialize_canary().await?);
         store.verify_canary().await?;
+        store.verify_active_authority().await?;
 
         let canary = "tenant-secret-value-must-never-render";
         store
@@ -1093,6 +1106,12 @@ mod tests {
         )
         .execute(&pool)
         .await?;
+        let readiness = store.verify_active_authority().await.unwrap_err();
+        assert!(
+            readiness
+                .to_string()
+                .contains("failure_class=write-authority-unavailable")
+        );
         let listed = store.get_secrets_raw_at_path(&project_path).await?;
         assert!(listed.len() == 1 && listed[0].value == canary);
         let fenced = store
@@ -1157,7 +1176,7 @@ mod tests {
             .await?;
         sqlx::query(
             "UPDATE tenant_secret_control \
-             SET state = 'infisical', source_revision = NULL, transition_started_at = NULL, \
+             SET state = 'local', source_revision = NULL, transition_started_at = NULL, \
                  verified_at = NULL, updated_at = now() WHERE singleton = true",
         )
         .execute(&pool)

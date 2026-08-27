@@ -90,7 +90,7 @@ pub(super) async fn log_audit(
 }
 
 pub(super) fn to_metadata(
-    secrets: Vec<crate::worker::secrets::InfisicalSecret>,
+    secrets: Vec<crate::worker::secrets::StoredSecret>,
 ) -> Vec<SecretMetadata> {
     secrets
         .into_iter()

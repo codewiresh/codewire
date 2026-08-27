@@ -418,9 +418,8 @@ grep -Fq '"$credential_fetcher" "$registry_username_file" "$registry_password_fi
   "$image_builder"
 grep -Fq "readonly REGISTRY_HOST='nexus-system-cluster.example.invalid'" \
   "$image_builder"
-if grep -Fq 'GITEA_REGISTRY_TOKEN' "$image_builder" \
-  || grep -Fq 'INFISICAL_SECRET_FETCHER' "$image_builder"; then
-  echo 'image builder still obtains its canonical registry credential from Infisical' >&2
+if grep -Fq 'GITEA_REGISTRY_TOKEN' "$image_builder"; then
+  echo 'image builder still accepts a direct registry token' >&2
   exit 1
 fi
 grep -Fq 'python3 scripts/ci/images/image-bundle.py candidate' "$image_builder"

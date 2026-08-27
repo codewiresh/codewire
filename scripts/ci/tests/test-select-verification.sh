@@ -165,6 +165,13 @@ run_paths_case retired_cache_surface pull_request refs/pull/200/head false \
 run_paths_case shellcheck_policy_domain_future pull_request refs/pull/2001/head false \
   'policy policy_shell' scripts/ci/tests/test-shellcheck-policy-domain.sh
 grep -qF 'scripts/ci/tests/test-shellcheck-policy-domain.sh' "$SELECTOR"
+run_paths_case openbao_secret_authority_policy pull_request refs/pull/20011/head false \
+  'policy policy_shell' scripts/ci/tests/test-openbao-only-secret-authority.sh \
+  scripts/ci/tests/test-sync-local-secrets.sh
+run_paths_case local_secret_sync_policy pull_request refs/pull/20012/head false \
+  'policy policy_shell' scripts/dev/kind/sync-local-secrets.sh
+run_paths_case root_secret_authority_inputs pull_request refs/pull/20013/head false \
+  'policy' .env.example secret-authority.example.json
 run_paths_case ci_tool_download_contract pull_request refs/pull/2002/head false \
   'deploy policy policy_shell' scripts/ci/tests/test-ci-tool-downloads.sh
 run_paths_case product_image_build_graph pull_request refs/pull/2003/head false \
@@ -214,7 +221,6 @@ run_paths_case release pull_request refs/pull/3/head false \
   scripts/ci/release/mirror-git-tags.sh \
   scripts/ci/tests/test-base-image-source.sh \
   scripts/ci/images/copy-image-to-ghcr.sh \
-  scripts/ci/setup/fetch-infisical-ci-secret.sh \
   scripts/ci/images/publish-image-to-ghcr.sh \
   scripts/ci/images/resolve-published-support-pair.sh \
   scripts/ci/images/run-skopeo-container.sh \
@@ -228,7 +234,6 @@ run_paths_case release pull_request refs/pull/3/head false \
   scripts/ci/tests/test-support-images-workflow.sh \
   scripts/ci/tests/test-workspace-image-verify-workflow.sh \
   scripts/ci/tests/test-build-push-image.sh \
-  scripts/ci/tests/test-fetch-infisical-ci-secret.sh \
   scripts/ci/tests/test-mirror-git-tags.sh \
   scripts/ci/tests/test-publish-cw-release.sh \
   scripts/ci/tests/test-verify-cw-release-signing-key.sh \
@@ -637,6 +642,10 @@ run_paths_case cli_makefile pull_request refs/pull/1521/head false \
   apps/cli/Makefile
 run_paths_case edge_harness pull_request refs/pull/153/head false \
   'edge_kind policy' scripts/ci/verify/kind-e2e.sh
+run_paths_case edge_host_runtime pull_request refs/pull/1529/head true \
+  'edge_kind kind policy' scripts/ci/verify/kind-host-runtime.sh
+run_paths_case edge_browser_runtime pull_request refs/pull/1530/head true \
+  'edge_kind kind policy' scripts/ci/verify/playwright-browser-runtime.sh
 run_paths_case pinned_browser_installer pull_request refs/pull/1531/head true \
   'edge_kind kind policy' scripts/ci/install-pinned-playwright-chromium.sh
 run_paths_case mixed_sdk_and_runtime pull_request refs/pull/154/head false \

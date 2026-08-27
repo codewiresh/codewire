@@ -64,7 +64,7 @@ pub struct ApiState {
     pub anthropic_api_key: String,
     /// GitHub App credentials for forge-token resolution.
     pub github_cfg: GitHubAppConfig,
-    /// Tenant secret store (Infisical or local) for forge tokens.
+    /// Tenant secret store for forge tokens.
     pub secrets: Arc<SecretStore>,
     /// Session/bearer authenticator for the retained browser terminal and SSH
     /// transports. Control-plane procedures use their Connect auth layers.

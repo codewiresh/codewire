@@ -1,9 +1,9 @@
 //! Value-blind operator workflow for tenant-secret import and KEK maintenance.
 //!
 //! The import transition takes the exclusive side of the same durable control
-//! row lock held by product writes. Once it reaches `importing`, Infisical is
-//! mutation-fenced and can be copied into encrypted Postgres without a dual-
-//! write window. Activation remains a separate explicit operation.
+//! row lock held by product writes. Once it reaches `importing`, the plaintext
+//! local source is mutation-fenced and can be copied into encrypted Postgres
+//! without a dual-write window. Activation remains a separate operation.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -15,7 +15,7 @@ use zeroize::Zeroizing;
 
 use super::postgres_secrets::{PostgresSecretStore, RewrapSummary, ValidationSummary};
 use super::secret_envelope::DekContext;
-use super::secrets::{InfisicalClient, InfisicalSecret};
+use super::secrets::{LocalSecretStore, StoredSecret};
 
 const SOURCE_REVISION_ENV: &str = "TENANT_SECRET_IMPORT_SOURCE_REVISION";
 
@@ -26,7 +26,7 @@ fn operator_error(class: &'static str) -> anyhow::Error {
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum TenantSecretOperatorCommand {
     InitCanary,
-    ImportInfisical,
+    ImportLocal,
     Validate,
     ActivatePostgres,
     Rewrap,
@@ -36,7 +36,7 @@ impl TenantSecretOperatorCommand {
     pub fn parse(value: &str) -> anyhow::Result<Self> {
         match value {
             "init-canary" => Ok(Self::InitCanary),
-            "import-infisical" => Ok(Self::ImportInfisical),
+            "import-local" => Ok(Self::ImportLocal),
             "validate" => Ok(Self::Validate),
             "activate-postgres" => Ok(Self::ActivatePostgres),
             "rewrap" => Ok(Self::Rewrap),
@@ -47,7 +47,7 @@ impl TenantSecretOperatorCommand {
     fn name(self) -> &'static str {
         match self {
             Self::InitCanary => "init-canary",
-            Self::ImportInfisical => "import-infisical",
+            Self::ImportLocal => "import-local",
             Self::Validate => "validate",
             Self::ActivatePostgres => "activate-postgres",
             Self::Rewrap => "rewrap",
@@ -85,18 +85,18 @@ struct ControlRow {
 #[async_trait]
 trait TenantSecretImportSource: Send + Sync {
     async fn list_folders(&self, parent_path: &str) -> anyhow::Result<Vec<String>>;
-    async fn read_path(&self, secret_path: &str) -> anyhow::Result<Vec<InfisicalSecret>>;
+    async fn read_path(&self, secret_path: &str) -> anyhow::Result<Vec<StoredSecret>>;
 }
 
 #[async_trait]
-impl TenantSecretImportSource for InfisicalClient {
+impl TenantSecretImportSource for LocalSecretStore {
     async fn list_folders(&self, parent_path: &str) -> anyhow::Result<Vec<String>> {
         self.list_folders_at_path(parent_path)
             .await
             .map_err(|_| operator_error("source-enumeration-failed"))
     }
 
-    async fn read_path(&self, secret_path: &str) -> anyhow::Result<Vec<InfisicalSecret>> {
+    async fn read_path(&self, secret_path: &str) -> anyhow::Result<Vec<StoredSecret>> {
         self.get_secrets_raw_at_path(secret_path)
             .await
             .map_err(|_| operator_error("source-read-failed"))
@@ -116,11 +116,11 @@ pub async fn run_tenant_secret_operator(
             summary.canary_created = destination.initialize_canary().await?;
             destination.verify_canary().await?;
         }
-        TenantSecretOperatorCommand::ImportInfisical => {
+        TenantSecretOperatorCommand::ImportLocal => {
             let revision = source_revision_from_env()?;
             destination.verify_canary().await?;
             begin_import(&pool, &revision).await?;
-            let source = InfisicalClient::from_env_for_import(pool.clone());
+            let source = LocalSecretStore { pool: pool.clone() };
             let copied = reconcile_import(&source, &destination).await?;
             finish_import(&pool, &revision).await?;
             summary.paths = copied.paths;
@@ -129,7 +129,7 @@ pub async fn run_tenant_secret_operator(
         TenantSecretOperatorCommand::Validate => {
             let revision = source_revision_from_env()?;
             require_control(&pool, "postgres-readonly", Some(&revision), false).await?;
-            let source = InfisicalClient::from_env_for_import(pool.clone());
+            let source = LocalSecretStore { pool: pool.clone() };
             let compared = compare_source_and_destination(&source, &destination).await?;
             let validated = destination.validate_all().await?;
             if compared.secrets != validated.secrets {
@@ -184,7 +184,7 @@ async fn begin_import(pool: &PgPool, revision: &str) -> anyhow::Result<()> {
     .await
     .map_err(|_| operator_error("control-lock-failed"))?;
     match row.state.as_str() {
-        "infisical" => {
+        "local" => {
             sqlx::query(
                 "UPDATE tenant_secret_control SET state = 'importing', \
                         generation = generation + 1, source_revision = $1, \
@@ -480,7 +480,7 @@ fn valid_path_segment(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
 }
 
-fn secret_values(secrets: Vec<InfisicalSecret>) -> anyhow::Result<SecretValues> {
+fn secret_values(secrets: Vec<StoredSecret>) -> anyhow::Result<SecretValues> {
     let mut values = BTreeMap::new();
     for secret in secrets {
         if values
@@ -531,7 +531,7 @@ mod tests {
             Ok(self.folders.get(parent_path).cloned().unwrap_or_default())
         }
 
-        async fn read_path(&self, _secret_path: &str) -> anyhow::Result<Vec<InfisicalSecret>> {
+        async fn read_path(&self, _secret_path: &str) -> anyhow::Result<Vec<StoredSecret>> {
             Ok(Vec::new())
         }
     }
@@ -570,19 +570,19 @@ mod tests {
 
     #[test]
     fn equality_is_exact_and_debug_output_is_value_blind() {
-        let values = secret_values(vec![InfisicalSecret {
+        let values = secret_values(vec![StoredSecret {
             key: "PRIVATE_KEY".into(),
             value: "tenant-secret-value-must-never-render".into(),
             ..Default::default()
         }])
         .unwrap();
-        let same = secret_values(vec![InfisicalSecret {
+        let same = secret_values(vec![StoredSecret {
             key: "PRIVATE_KEY".into(),
             value: "tenant-secret-value-must-never-render".into(),
             ..Default::default()
         }])
         .unwrap();
-        let different = secret_values(vec![InfisicalSecret {
+        let different = secret_values(vec![StoredSecret {
             key: "PRIVATE_KEY".into(),
             value: "different-private-value".into(),
             ..Default::default()
@@ -616,7 +616,7 @@ mod tests {
             .fetch_one(&mut *isolation)
             .await?;
         sqlx::query(
-            "UPDATE tenant_secret_control SET state = 'infisical', source_revision = NULL, \
+            "UPDATE tenant_secret_control SET state = 'local', source_revision = NULL, \
                     transition_started_at = NULL, verified_at = NULL, updated_at = now() \
              WHERE singleton = true",
         )
@@ -639,7 +639,7 @@ mod tests {
         assert_eq!(row.state, "postgres");
 
         sqlx::query(
-            "UPDATE tenant_secret_control SET state = 'infisical', source_revision = NULL, \
+            "UPDATE tenant_secret_control SET state = 'local', source_revision = NULL, \
                     transition_started_at = NULL, verified_at = NULL, updated_at = now() \
              WHERE singleton = true",
         )

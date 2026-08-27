@@ -74,10 +74,6 @@ RUN apt-get-with-retry update && apt-get-with-retry install -y --no-install-reco
       file gdb pipx pkg-config protobuf-compiler python3-full python3-venv strace && \
     rm -rf /var/lib/apt/lists/*
 
-RUN curl --proto '=https' --tlsv1.2 -1sLf https://artifacts-cli.infisical.com/setup.deb.sh | bash && \
-    apt-get-with-retry install -y --no-install-recommends infisical && \
-    rm -rf /var/lib/apt/lists/*
-
 RUN mkdir -p /home/codewire/go /home/codewire/.npm-global && \
     chown -R codewire:codewire /home/codewire/go /home/codewire/.npm-global
 

@@ -116,7 +116,7 @@ for agent in codex claude gemini kimi pi aider; do
   grep -qF "$agent" "$AGENT_CONTRACT" || fail "verification omits $agent"
 done
 for tool in cw docker dockerd docker-compose gh git go gopls hcloud node npm bun pnpm yarn \
-  python3 pipx poetry uv cargo rustc infisical psql protoc; do
+  python3 pipx poetry uv cargo rustc psql protoc; do
   grep -qF "$tool" "$AGENT_CONTRACT" || fail "verification omits $tool"
 done
 grep -qF 'dynamic_bun_runner="bun""x"' "$AGENT_CONTRACT" ||

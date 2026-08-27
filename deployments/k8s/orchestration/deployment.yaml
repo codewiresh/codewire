@@ -51,7 +51,7 @@ spec:
             # the disabled confidential-storage stack. The public KBS CA has
             # a separate trust-manager-owned ConfigMap mounted below.
             - configMapRef:
-                name: codewire-confidential-storage-infisical
+                name: codewire-confidential-storage-openbao
                 optional: true
             - configMapRef:
                 name: codewire-confidential-storage-kbs

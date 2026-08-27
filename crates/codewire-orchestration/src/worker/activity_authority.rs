@@ -631,14 +631,14 @@ mod tests {
             Duration::from_secs(2),
             sqlx::query(
                 "INSERT INTO confidential_storage_keys
-                        (environment_id, kbs_uri, infisical_path, version, state)
+                        (environment_id, kbs_uri, openbao_path, version, state)
                  VALUES ($1, $2, $3, 1, 'provisioning')",
             )
             .bind(&environment_id)
             .bind(format!(
                 "kbs:///default/codewire-workspace-luks/{environment_id}"
             ))
-            .bind(format!("/confidential-storage/{environment_id}"))
+            .bind(format!("confidential-storage/{environment_id}"))
             .execute(&pool),
         )
         .await

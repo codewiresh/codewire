@@ -1,9 +1,0 @@
-{
-  "_comment": "Copy to infisical.json and edit for your Infisical instance.",
-  "$schema": "https://infisical.com/schema/infisical.json",
-  "workspaceId": "00000000-0000-0000-0000-000000000000",
-  "defaultEnvironment": "dev",
-  "api": {
-    "url": "https://infisical.example.com/api"
-  }
-}

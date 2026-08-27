@@ -232,8 +232,4 @@ grep -F 'api_keys.created_at < candidate_key.created_at' \
   fail 'finalization can disable keys created by a concurrent rotation'
 grep -F 'final database state assertion' "$TEST_TMP/success/state/psql.sql" >/dev/null ||
   fail 'final database state is not verified in a separate statement'
-if grep -Eqi 'infisical|skip-infisical' "$PROVISIONER"; then
-  fail 'provisioner still contains a legacy Infisical path'
-fi
-
 printf 'dev smoke OpenBao rotation tests: OK\n'

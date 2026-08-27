@@ -1,185 +1,120 @@
 #!/usr/bin/env bash
+# Load one fixed API-key smoke identity from OpenBao and exec one child without
+# leaking the OpenBao session or an on-disk key.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
-PLATFORM_INFISICAL_DOMAIN="https://infisical.example.invalid"
-PLATFORM_INFISICAL_PROJECT_ID="00000000-0000-0000-0000-000000000000"
-PLATFORM_INFISICAL_PATH="/"
+readonly OPENBAO_ADDR="https://openbao.example.invalid"
 
 TARGET=""
-TMPDIR_AUTH=""
+OPENBAO_PATH=""
+AUTH_TMPDIR=""
 
 usage() {
   cat <<'USAGE'
 Usage:
   scripts/runtime/apikey/with-apikey-smoke-auth.sh --target dev|prod|prod-evidence-secondary [--] [command args...]
 
-Loads exactly one target-scoped ApiKey smoke bootstrap key from the canonical
-platform Infisical project, removes Infisical credentials, and execs the
-command in the same short-lived process environment. With no command, runs
-the ApiKey lifecycle smoke for the selected target.
+Loads one target-scoped API key from its canonical OpenBao document, removes
+the OpenBao environment, and execs the command. With no command, runs the API
+key lifecycle smoke for the selected target.
 
-Supports either local Infisical CLI authentication or the Gitea runner's
-INFISICAL_API_URL / INFISICAL_IDENTITY_ID / INFISICAL_SA_TOKEN_PATH OIDC
-environment. It never writes the raw key to GITHUB_ENV or stdout.
+Establish the normal human OIDC session first:
+
+  BAO_ADDR=https://openbao.example.invalid \
+    bao login -method=oidc -path=oidc -no-print role=human
 USAGE
 }
 
-log() {
-  printf '[apikey-smoke-auth] %s\n' "$*" >&2
-}
+log() { printf '[apikey-smoke-auth] %s\n' "$*" >&2; }
+die() { printf '[apikey-smoke-auth] ERROR: %s\n' "$*" >&2; exit 1; }
 
-die() {
-  printf '[apikey-smoke-auth] ERROR: %s\n' "$*" >&2
-  exit 1
+secure_remove() {
+  [[ "$#" -gt 0 ]] || return 0
+  if command -v shred >/dev/null 2>&1; then
+    shred -u -- "$@" 2>/dev/null && return 0
+  fi
+  rm -f -- "$@" 2>/dev/null
 }
 
 cleanup() {
-  if [[ -n "$TMPDIR_AUTH" && -d "$TMPDIR_AUTH" ]]; then
-    rm -rf "$TMPDIR_AUTH"
+  local status=0
+  if [[ -n "$AUTH_TMPDIR" && -d "$AUTH_TMPDIR" ]]; then
+    while IFS= read -r -d '' file; do secure_remove "$file" || status=1; done \
+      < <(find "$AUTH_TMPDIR" -type f -print0)
+    rmdir "$AUTH_TMPDIR" 2>/dev/null || status=1
+    [[ ! -e "$AUTH_TMPDIR" ]] || status=1
   fi
+  AUTH_TMPDIR=""
+  return "$status"
 }
-trap cleanup EXIT
-trap 'exit 130' HUP INT TERM
 
-case "$-" in
-  *x*) die "shell tracing is enabled; rerun without set -x" ;;
-esac
+unset_openbao_environment() {
+  local name
+  local -a names=( "${!BAO_@}" )
+  for name in "${names[@]}"; do
+    unset "$name" 2>/dev/null || die 'cannot remove inherited OpenBao environment'
+  done
+}
+
+trap 'cleanup || true' EXIT
+trap 'exit 130' HUP INT TERM
+case "$-" in *x*) die 'shell tracing is enabled; rerun without set -x' ;; esac
 
 while (($# > 0)); do
   case "$1" in
-    --target)
-      [[ $# -ge 2 ]] || die "--target requires dev, prod, or prod-evidence-secondary"
-      TARGET="$2"
-      shift 2
-      ;;
-    --)
-      shift
-      break
-      ;;
-    -h|--help)
-      usage
-      exit 0
-      ;;
-    *)
-      break
-      ;;
+    --target) [[ $# -ge 2 ]] || die '--target requires a value'; TARGET="$2"; shift 2 ;;
+    --) shift; break ;;
+    -h|--help) usage; exit 0 ;;
+    *) break ;;
   esac
 done
 
 case "$TARGET" in
-  dev)
-    INFISICAL_ENVIRONMENT="dev"
-    INFISICAL_SECRET_NAME="CODEWIRE_APIKEY_DEV_SMOKE_BOOTSTRAP_KEY"
-    ;;
-  prod)
-    INFISICAL_ENVIRONMENT="prod"
-    INFISICAL_SECRET_NAME="CODEWIRE_APIKEY_PROD_SMOKE_BOOTSTRAP_KEY"
-    ;;
-  prod-evidence-secondary)
-    INFISICAL_ENVIRONMENT="prod"
-    INFISICAL_SECRET_NAME="CODEWIRE_APIKEY_PROD_EVIDENCE_SECONDARY_BOOTSTRAP_KEY"
-    ;;
-  *)
-    die "--target must be dev, prod, or prod-evidence-secondary"
-    ;;
+  dev) OPENBAO_PATH='apps/codewire/dev/apikey-smoke' ;;
+  prod) OPENBAO_PATH='apps/codewire/prod/apikey-smoke' ;;
+  prod-evidence-secondary) OPENBAO_PATH='apps/codewire/prod/apikey-evidence-secondary' ;;
+  *) die '--target must be dev, prod, or prod-evidence-secondary' ;;
 esac
 
 if (($# == 0)); then
   set -- "$ROOT/scripts/runtime/apikey/smoke-apikey-lifecycle.sh" --target "$TARGET"
 fi
 
-umask 077
-TMPDIR_AUTH="$(mktemp -d "${TMPDIR:-/tmp}/codewire-apikey-smoke-auth.XXXXXX")"
-chmod 0700 "$TMPDIR_AUTH"
-KEY_FILE="$TMPDIR_AUTH/bootstrap-key"
-touch "$KEY_FILE"
-chmod 0600 "$KEY_FILE"
-
-oidc_fields=0
-for name in INFISICAL_API_URL INFISICAL_IDENTITY_ID INFISICAL_SA_TOKEN_PATH; do
-  [[ -n "${!name:-}" ]] && oidc_fields=$((oidc_fields + 1))
+for command in bao find jq mktemp rm rmdir; do
+  command -v "$command" >/dev/null 2>&1 || die "missing required command: $command"
 done
+[[ "${BAO_ADDR:-$OPENBAO_ADDR}" == "$OPENBAO_ADDR" ]] ||
+  die 'BAO_ADDR must be the canonical OpenBao Tailnet endpoint'
+unset CODEWIRE_API_KEY 2>/dev/null || die 'cannot remove inherited API key'
+ulimit -c 0 || die 'cannot disable core dumps'
 
-if [[ "$oidc_fields" == "3" ]]; then
-  for command in curl jq; do
-    command -v "$command" >/dev/null 2>&1 || die "missing required command: $command"
-  done
-  [[ -f "$INFISICAL_SA_TOKEN_PATH" ]] || \
-    die "INFISICAL_SA_TOKEN_PATH does not point to a file"
+umask 077
+AUTH_TMPDIR="$(mktemp -d "${TMPDIR:-/tmp}/codewire-apikey-smoke-auth.XXXXXX")"
+chmod 0700 "$AUTH_TMPDIR"
+DOCUMENT="$AUTH_TMPDIR/openbao.json"
+ERROR_FILE="$AUTH_TMPDIR/openbao.stderr"
+KEY_FILE="$AUTH_TMPDIR/api-key"
+for file in "$DOCUMENT" "$ERROR_FILE" "$KEY_FILE"; do : >"$file"; chmod 0600 "$file"; done
 
-  auth_payload="$TMPDIR_AUTH/auth-payload.json"
-  auth_response="$TMPDIR_AUTH/auth-response.json"
-  jq -n \
-    --arg identityId "$INFISICAL_IDENTITY_ID" \
-    --rawfile jwt "$INFISICAL_SA_TOKEN_PATH" \
-    '{identityId: $identityId, jwt: ($jwt | rtrimstr("\n"))}' \
-    >"$auth_payload"
-  auth_status="$(
-    curl -sS -o "$auth_response" -w '%{http_code}' \
-      -X POST "${INFISICAL_API_URL%/}/v1/auth/oidc-auth/login" \
-      -H 'Content-Type: application/json' \
-      --data-binary "@$auth_payload"
-  )"
-  [[ "$auth_status" =~ ^2 ]] || die "Infisical OIDC authentication failed (HTTP $auth_status)"
-  access_token="$(jq -er '.accessToken // empty' "$auth_response")" || \
-    die "Infisical OIDC authentication returned no access token"
-
-  urlencode() {
-    jq -rn --arg value "$1" '$value|@uri'
-  }
-  project_q="$(urlencode "$PLATFORM_INFISICAL_PROJECT_ID")"
-  environment_q="$(urlencode "$INFISICAL_ENVIRONMENT")"
-  path_q="$(urlencode "$PLATFORM_INFISICAL_PATH")"
-  secret_q="$(urlencode "$INFISICAL_SECRET_NAME")"
-  secret_response="$TMPDIR_AUTH/secret-response.json"
-  curl_config="$TMPDIR_AUTH/secret-fetch.curl"
-  : >"$curl_config"
-  chmod 0600 "$curl_config"
-  {
-    printf 'url = "%s/v3/secrets/raw/%s?workspaceId=%s&environment=%s&secretPath=%s"\n' \
-      "${INFISICAL_API_URL%/}" "$secret_q" "$project_q" "$environment_q" "$path_q"
-    printf 'header = "Authorization: Bearer %s"\n' "$access_token"
-    printf 'output = "%s"\n' "$secret_response"
-    printf 'silent\nshow-error\n'
-  } >"$curl_config"
-  secret_status="$(curl --config "$curl_config" --write-out '%{http_code}')"
-  [[ "$secret_status" =~ ^2 ]] || \
-    die "failed to fetch target=$TARGET ApiKey smoke secret (HTTP $secret_status)"
-  jq -er '.secret.secretValue // empty' "$secret_response" >"$KEY_FILE" || \
-    die "target=$TARGET ApiKey smoke secret was missing"
-  unset access_token
-elif [[ "$oidc_fields" == "0" ]]; then
-  command -v infisical >/dev/null 2>&1 || die "missing required command: infisical"
-  if ! infisical secrets get "$INFISICAL_SECRET_NAME" \
-    --env "$INFISICAL_ENVIRONMENT" \
-    --path "$PLATFORM_INFISICAL_PATH" \
-    --domain "$PLATFORM_INFISICAL_DOMAIN" \
-    --projectId "$PLATFORM_INFISICAL_PROJECT_ID" \
-    --plain \
-    --silent \
-    --log-level error \
-    >"$KEY_FILE" 2>"$TMPDIR_AUTH/infisical.err"; then
-    die "failed to fetch target=$TARGET ApiKey smoke secret; output suppressed"
+if ! BAO_ADDR="$OPENBAO_ADDR" bao kv get -format=json "$OPENBAO_PATH" \
+  >"$DOCUMENT" 2>"$ERROR_FILE"; then
+  if grep -Eqi 'permission denied|status code: 403|code 403' "$ERROR_FILE"; then
+    die "OpenBao OIDC session is stale or lacks target=$TARGET"
   fi
-else
-  die "Gitea Infisical OIDC environment is incomplete"
+  die "failed to fetch target=$TARGET API-key document; output suppressed"
 fi
+jq -e '
+  (.data.metadata.version | type == "number" and . > 0) and
+  (.data.data | type == "object" and keys == ["apiKey"]) and
+  (.data.data.apiKey | type == "string" and test("^cw_[0-9a-f]{64}$"))
+' "$DOCUMENT" >/dev/null || die "target=$TARGET API-key document has an unexpected shape"
+jq -er '.data.data.apiKey' "$DOCUMENT" >"$KEY_FILE"
+IFS= read -r CODEWIRE_API_KEY <"$KEY_FILE"
 
-if ! awk 'BEGIN { ok=0 } /^cw_[0-9a-f]{64}$/ { ok++ } END { exit ok == 1 ? 0 : 1 }' "$KEY_FILE"; then
-  die "target=$TARGET ApiKey smoke secret has an unexpected shape"
-fi
-
-CODEWIRE_API_KEY="$(awk 'NR == 1 { print; exit }' "$KEY_FILE")"
-export CODEWIRE_API_KEY
-unset INFISICAL_TOKEN INFISICAL_ACCESS_TOKEN INFISICAL_IDENTITY_ID INFISICAL_SA_TOKEN_PATH
-unset access_token
-
-# The raw key now lives only in the child process environment. Remove every
-# on-disk copy before exec; an exec does not run the EXIT trap.
-cleanup
-TMPDIR_AUTH=""
+cleanup || die 'failed to remove temporary API-key material'
 trap - EXIT HUP INT TERM
-
-log "loaded target=$TARGET bootstrap key into a same-process environment"
+unset_openbao_environment
+export CODEWIRE_API_KEY
+log "loaded target=$TARGET API key from canonical OpenBao"
 exec "$@"

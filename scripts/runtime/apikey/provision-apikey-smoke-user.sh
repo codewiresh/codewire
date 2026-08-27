@@ -1,9 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PLATFORM_INFISICAL_DOMAIN="https://infisical.example.invalid"
-PLATFORM_INFISICAL_PROJECT_ID="00000000-0000-0000-0000-000000000000"
-PLATFORM_INFISICAL_PATH="/"
+readonly OPENBAO_ADDR="https://openbao.example.invalid"
 
 TARGET=""
 ALLOW_PROD_MUTATION=0
@@ -15,8 +13,8 @@ Usage:
   scripts/runtime/apikey/provision-apikey-smoke-user.sh --target dev|prod|prod-evidence-secondary [--allow-prod-mutation]
 
 Creates or repairs the fixed ApiKeyService lifecycle-smoke identity, rotates
-its bootstrap API key, and stores only the raw replacement key in the
-canonical platform Infisical project.
+its bootstrap API key, and stores only the raw replacement key in its
+canonical OpenBao document.
 
 Production targets require both the exact target and --allow-prod-mutation.
 
@@ -36,12 +34,26 @@ die() {
   exit 1
 }
 
-cleanup() {
-  if [[ -n "$TMPDIR_PROVISION" && -d "$TMPDIR_PROVISION" ]]; then
-    rm -rf "$TMPDIR_PROVISION"
+secure_remove() {
+  [[ "$#" -gt 0 ]] || return 0
+  if command -v shred >/dev/null 2>&1; then
+    shred -u -- "$@" 2>/dev/null && return 0
   fi
+  rm -f -- "$@" 2>/dev/null
 }
-trap cleanup EXIT
+
+cleanup() {
+  local status=0
+  if [[ -n "$TMPDIR_PROVISION" && -d "$TMPDIR_PROVISION" ]]; then
+    while IFS= read -r -d '' file; do secure_remove "$file" || status=1; done \
+      < <(find "$TMPDIR_PROVISION" -type f -print0)
+    rmdir "$TMPDIR_PROVISION" 2>/dev/null || status=1
+    [[ ! -e "$TMPDIR_PROVISION" ]] || status=1
+  fi
+  TMPDIR_PROVISION=""
+  return "$status"
+}
+trap 'cleanup || true' EXIT
 trap 'exit 130' HUP INT TERM
 
 case "$-" in
@@ -82,8 +94,7 @@ case "$TARGET" in
     FIXTURE_ORG_NAME="Codewire ApiKey Dev Smoke"
     FIXTURE_MEMBER_ID="apikey-smoke-dev-owner"
     FIXTURE_KEY_NAME="connect-apikey-smoke-dev-bootstrap"
-    INFISICAL_ENVIRONMENT="dev"
-    INFISICAL_SECRET_NAME="CODEWIRE_APIKEY_DEV_SMOKE_BOOTSTRAP_KEY"
+    OPENBAO_PATH="apps/codewire/dev/apikey-smoke"
     ;;
   prod)
     [[ "$ALLOW_PROD_MUTATION" == "1" ]] || \
@@ -99,8 +110,7 @@ case "$TARGET" in
     FIXTURE_ORG_NAME="Codewire ApiKey Prod Smoke"
     FIXTURE_MEMBER_ID="apikey-smoke-prod-owner"
     FIXTURE_KEY_NAME="connect-apikey-smoke-prod-bootstrap"
-    INFISICAL_ENVIRONMENT="prod"
-    INFISICAL_SECRET_NAME="CODEWIRE_APIKEY_PROD_SMOKE_BOOTSTRAP_KEY"
+    OPENBAO_PATH="apps/codewire/prod/apikey-smoke"
     ;;
   prod-evidence-secondary)
     [[ "$ALLOW_PROD_MUTATION" == "1" ]] || \
@@ -116,22 +126,36 @@ case "$TARGET" in
     FIXTURE_ORG_NAME="Codewire ApiKey Prod Evidence Secondary"
     FIXTURE_MEMBER_ID="apikey-evidence-prod-secondary-owner"
     FIXTURE_KEY_NAME="connect-apikey-evidence-prod-secondary-bootstrap"
-    INFISICAL_ENVIRONMENT="prod"
-    INFISICAL_SECRET_NAME="CODEWIRE_APIKEY_PROD_EVIDENCE_SECONDARY_BOOTSTRAP_KEY"
+    OPENBAO_PATH="apps/codewire/prod/apikey-evidence-secondary"
     ;;
   *)
     die "--target must be dev, prod, or prod-evidence-secondary"
     ;;
 esac
 
-for command in kubectl infisical awk; do
+for command in awk bao find jq kubectl mktemp rm rmdir sha256sum; do
   command -v "$command" >/dev/null 2>&1 || die "missing required command: $command"
 done
 [[ -f "$KUBECONFIG_FIXED" ]] || die "fixed kubeconfig is missing for target=$TARGET"
+[[ "${BAO_ADDR:-$OPENBAO_ADDR}" == "$OPENBAO_ADDR" ]] ||
+  die 'BAO_ADDR must be the canonical OpenBao Tailnet endpoint'
+ulimit -c 0 || die 'cannot disable core dumps'
+
+# OpenBao credentials belong only to the one OpenBao command below. Prevent a
+# human session token or client certificate from reaching kubectl, psql, or a
+# database container through the process environment.
+declare -a OPENBAO_ENV_UNSETS=()
+for name in "${!BAO_@}"; do
+  OPENBAO_ENV_UNSETS+=( -u "$name" )
+done
+
+run_without_openbao() {
+  env "${OPENBAO_ENV_UNSETS[@]}" "$@"
+}
 
 export KUBECONFIG="$KUBECONFIG_FIXED"
 POSTGRES_POD="$(
-  kubectl --context "$KUBE_CONTEXT" -n "$KUBE_NAMESPACE" \
+  run_without_openbao kubectl --context "$KUBE_CONTEXT" -n "$KUBE_NAMESPACE" \
     get cluster.postgresql.cnpg.io codewire-db \
     -o jsonpath='{.status.currentPrimary}'
 )"
@@ -141,11 +165,13 @@ POSTGRES_POD="$(
 TMPDIR_PROVISION="$(mktemp -d "${TMPDIR:-/tmp}/codewire-apikey-smoke-provision.XXXXXX")"
 chmod 0700 "$TMPDIR_PROVISION"
 KEY_FILE="$TMPDIR_PROVISION/bootstrap-key"
-INFISICAL_FILE="$TMPDIR_PROVISION/infisical.env"
+OPENBAO_FILE="$TMPDIR_PROVISION/openbao.json"
+OPENBAO_STDOUT="$TMPDIR_PROVISION/openbao.stdout"
+OPENBAO_STDERR="$TMPDIR_PROVISION/openbao.stderr"
 META_FILE="$TMPDIR_PROVISION/metadata"
 
 run_psql() {
-  kubectl --context "$KUBE_CONTEXT" -n "$KUBE_NAMESPACE" \
+  run_without_openbao kubectl --context "$KUBE_CONTEXT" -n "$KUBE_NAMESPACE" \
     exec -i "$POSTGRES_POD" -c postgres -- \
     psql -X -qAt -v ON_ERROR_STOP=1 -U postgres -d codewire "$@"
 }
@@ -229,11 +255,6 @@ DELETE FROM org_members WHERE user_id = :'user_id' OR org_id = :'org_id';
 INSERT INTO org_members (id, org_id, user_id, role, created_at, updated_at)
 VALUES (:'member_id', :'org_id', :'user_id', 'owner', NOW(), NOW());
 
-UPDATE api_keys
-SET disabled_at = NOW()
-WHERE (user_id = :'user_id' OR org_id = :'org_id')
-  AND disabled_at IS NULL;
-
 WITH raw_key AS (
   SELECT 'cw_' || encode(public.gen_random_bytes(32), 'hex') AS value
 ), inserted AS (
@@ -293,22 +314,38 @@ IFS='|' read -r actual_user_id actual_email is_admin actual_org_id actual_slug \
 [[ "$org_member_count" == "1" ]] || die "fixture organization must have exactly one member"
 [[ "$owner_count" == "1" ]] || die "fixture user must own its fixed organization"
 [[ "$assignment_count" == "0" ]] || die "fixture user must have no member assignments"
-[[ "$org_active_key_count" == "1" ]] || die "fixture organization must have exactly one active API key"
+[[ "$org_active_key_count" =~ ^[1-9][0-9]*$ ]] || die "fixture organization must have an active API key"
 [[ "$key_prefix" =~ ^[0-9a-f]{8}$ ]] || die "active bootstrap key prefix is malformed"
 
 umask 077
-printf '%s=%s\n' "$INFISICAL_SECRET_NAME" "$(<"$KEY_FILE")" >"$INFISICAL_FILE"
-if ! infisical secrets set \
-  --env "$INFISICAL_ENVIRONMENT" \
-  --path "$PLATFORM_INFISICAL_PATH" \
-  --domain "$PLATFORM_INFISICAL_DOMAIN" \
-  --projectId "$PLATFORM_INFISICAL_PROJECT_ID" \
-  --file "$INFISICAL_FILE" \
-  --log-level error \
-  --silent \
-  >"$TMPDIR_PROVISION/infisical.out" 2>"$TMPDIR_PROVISION/infisical.err"; then
-  die "failed to store target=$TARGET bootstrap key in platform Infisical; output suppressed"
+jq -n --rawfile apiKey "$KEY_FILE" '{apiKey: ($apiKey | rtrimstr("\n"))}' >"$OPENBAO_FILE"
+:>"$OPENBAO_STDOUT"
+:>"$OPENBAO_STDERR"
+chmod 0600 "$OPENBAO_FILE" "$OPENBAO_STDOUT" "$OPENBAO_STDERR"
+if ! BAO_ADDR="$OPENBAO_ADDR" bao kv put "$OPENBAO_PATH" "@$OPENBAO_FILE" \
+  >"$OPENBAO_STDOUT" 2>"$OPENBAO_STDERR"; then
+  die "failed to store target=$TARGET bootstrap key in OpenBao; output suppressed; prior keys remain active"
 fi
+
+candidate_hash="$(tr -d '\n' <"$KEY_FILE" | sha256sum | awk '{print $1}')"
+[[ "$candidate_hash" =~ ^[0-9a-f]{64}$ ]] || die 'candidate key fingerprint is malformed'
+run_psql --set "user_id=$FIXTURE_USER_ID" --set "org_id=$FIXTURE_ORG_ID" \
+  --set "candidate_hash=$candidate_hash" <<'SQL' >/dev/null
+UPDATE api_keys
+SET disabled_at = NOW()
+WHERE (user_id = :'user_id' OR org_id = :'org_id')
+  AND key_hash <> :'candidate_hash'
+  AND disabled_at IS NULL;
+SQL
+
+active_key_count="$(run_psql --set "user_id=$FIXTURE_USER_ID" --set "org_id=$FIXTURE_ORG_ID" \
+  --set "candidate_hash=$candidate_hash" <<'SQL'
+SELECT COUNT(*) FROM api_keys
+WHERE user_id = :'user_id' AND org_id = :'org_id'
+  AND key_hash = :'candidate_hash' AND disabled_at IS NULL;
+SQL
+)"
+[[ "$active_key_count" == '1' ]] || die 'candidate key was not the sole accepted replacement'
 
 log "fixture user: $FIXTURE_USER_EMAIL"
 log "fixture org: $FIXTURE_ORG_SLUG"

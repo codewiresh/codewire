@@ -8,6 +8,16 @@ CANDIDATE="$ROOT/scripts/runtime/dev/smoke-dev-candidate.sh"
 mkdir -p "$ROOT/.tmp"
 TEST_TMP="$(mktemp -d "$ROOT/.tmp/codewire-dev-commodity-smoke-tests.XXXXXX")"
 chmod 0700 "$TEST_TMP"
+NO_LIVE_BIN="$TEST_TMP/no-live-bin"
+NO_LIVE_LOG="$TEST_TMP/no-live-command.log"
+mkdir -p "$NO_LIVE_BIN"
+cat >"$NO_LIVE_BIN/kubectl" <<'EOF'
+#!/usr/bin/env bash
+printf 'kubectl %s\n' "$*" >>"${NO_LIVE_LOG:?}"
+exit 98
+EOF
+chmod 0755 "$NO_LIVE_BIN/kubectl"
+export NO_LIVE_LOG PATH="$NO_LIVE_BIN:$PATH"
 
 readonly SENSITIVE_SENTINEL="doctor-failure-sensitive-sentinel"
 
@@ -47,6 +57,8 @@ assert_static_contract() {
     fail "CI wrapper outer doctor budget is smaller than the concurrent probe horizon"
   grep -Fq 'if [[ "$SMOKE_SKIP_KUBE" != "1" ]]; then' "$WRAPPER" ||
     fail "CI wrapper does not guard Kubernetes setup"
+  grep -Fq 'if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then trap cleanup EXIT;' "$SMOKE" ||
+    fail "source smoke installs live cleanup traps outside its executable entrypoint"
   candidate_run_smoke="$(awk '/^run_smoke\(\)/,/^}/' "$CANDIDATE")"
   grep -Fq 'EXPECTED_RUNTIME_NODE_MIN_EPHEMERAL_GIB:-400' "$CANDIDATE" ||
     fail "candidate smoke no longer accepts nominal 500 GB runtime nodes"
@@ -902,5 +914,10 @@ run_packet_header_summary_case
 run_packet_capture_startup_failure_case
 run_packet_diagnostic_phase_order_case
 run_admin_oauth_contract_cases
+
+[[ ! -e "$NO_LIVE_LOG" ]] || {
+  sed -n '1,20p' "$NO_LIVE_LOG" >&2
+  fail "hermetic smoke fixtures invoked a live Kubernetes command"
+}
 
 printf 'dev commodity smoke safe diagnostic tests: OK\n'

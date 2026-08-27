@@ -2,6 +2,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+# shellcheck source=scripts/ci/verify/playwright-browser-runtime.sh
+source "$ROOT/scripts/ci/verify/playwright-browser-runtime.sh"
 KIND_CLUSTER_NAME="${KIND_CLUSTER_NAME:-codewire}"
 KUBE_CONTEXT="${KUBE_CONTEXT:-kind-${KIND_CLUSTER_NAME}}"
 export KUBE_CONTEXT
@@ -43,6 +45,7 @@ if [ -z "$chromium" ] || [ ! -x "$chromium" ]; then
   echo "set PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH to a trusted system Chromium" >&2
   exit 1
 fi
+prepare_playwright_browser_runtime "$chromium" "$ROOT"
 
 curl -fsS "$PLAYWRIGHT_BASE_URL/login" >/dev/null
 cd "$ROOT"
@@ -50,6 +53,7 @@ DATABASE_URL="$DATABASE_URL" \
   SERVER_URL="$SERVER_URL" \
   PLAYWRIGHT_BASE_URL="$PLAYWRIGHT_BASE_URL" \
   PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH="$chromium" \
+  CODEWIRE_PLAYWRIGHT_USE_DEV_SHM="$CODEWIRE_PLAYWRIGHT_USE_DEV_SHM" \
   PLAYWRIGHT_KUBE_CONTEXT="$KUBE_CONTEXT" \
   PLAYWRIGHT_SANDBOX_NAMESPACE="${PLAYWRIGHT_SANDBOX_NAMESPACE:-dev-sandboxes}" \
   "$PLAYWRIGHT" test --config apps/dashboard/playwright.config.ts "$@"

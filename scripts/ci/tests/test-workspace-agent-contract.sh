@@ -43,7 +43,7 @@ for agent in codex claude gemini kimi pi aider; do
   ln -s agent "$work/bin/$agent"
 done
 for tool in cw daemon codewire-daemon docker dockerd docker-compose gh git go gopls hcloud \
-  node bun bun""x pnpm yarn python3 pipx poetry uv cargo rustc infisical psql protoc; do
+  node bun bun""x pnpm yarn python3 pipx poetry uv cargo rustc psql protoc; do
   ln -s agent "$work/bin/$tool"
 done
 

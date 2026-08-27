@@ -286,7 +286,7 @@ runtime_configmap="$({
     spec: {template: {spec: {containers: [{envFrom: [
       {configMapRef: {name: "codewire-config-25gbmh4k4h"}},
       {secretRef: {name: "codewire-secrets"}},
-      {configMapRef: {name: "codewire-confidential-storage-infisical", optional: true}},
+      {configMapRef: {name: "codewire-confidential-storage-openbao", optional: true}},
       {configMapRef: {name: "codewire-confidential-storage-kbs", optional: true}}
     ]}]}}}
   }'

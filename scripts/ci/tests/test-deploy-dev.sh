@@ -191,7 +191,7 @@ for family in dashboard derp gateway services mesh; do
     fail "runtime bundle omits $family"
 done
 if grep -Fq 'secrets.' <<<"$publish_job"; then
-  fail "runtime publisher bypasses the Infisical credential handoff"
+  fail "runtime publisher bypasses the reviewed credential handoff"
 fi
 for retired_dev_control in \
   '^  aggregate-image-promotion:' \

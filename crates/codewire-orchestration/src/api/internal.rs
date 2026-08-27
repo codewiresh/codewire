@@ -336,7 +336,7 @@ pub async fn issue_git_credentials_core(
         get_github_username_for_user(&state.pool, user_id).await
     } else {
         let mut username = resolve_git_credential_username(&state.pool, user_id, &host).await;
-        // Fall back to legacy Infisical GITEA_USERNAME.
+        // Fall back to the tenant-scoped GITEA_USERNAME value.
         if username.is_empty()
             && let Ok(secrets) = state
                 .secrets

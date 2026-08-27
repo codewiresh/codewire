@@ -12,9 +12,11 @@ const identityOrigin = process.env.CODEWIRE_IDENTITY_ORIGIN || apiOrigin;
 const billingOrigin = process.env.CODEWIRE_BILLING_ORIGIN || "http://127.0.0.1:8081";
 const browserApiOrigin = process.env.CODEWIRE_BROWSER_API_ORIGIN || apiOrigin;
 const chromiumExecutable = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH;
+const useDevShm = process.env.CODEWIRE_PLAYWRIGHT_USE_DEV_SHM === "1";
 const snapshotEnvironment = process.env.CODEWIRE_PLAYWRIGHT_SNAPSHOT_ENV || "{platform}";
 const authState = path.join(dashboardDir, "playwright/.auth/user.json");
 const skipSharedSetup = process.env.PLAYWRIGHT_SKIP_SHARED_SETUP === "1";
+const localOnlyResolverRule = "--host-resolver-rules=MAP * ^NOTFOUND, EXCLUDE localhost, EXCLUDE 127.0.0.1";
 
 export default defineConfig({
   testDir: repoRoot,
@@ -29,9 +31,11 @@ export default defineConfig({
     toHaveScreenshot: { maxDiffPixelRatio: 0.015 },
   },
   use: {
-    launchOptions: chromiumExecutable
-      ? { executablePath: chromiumExecutable }
-      : undefined,
+    launchOptions: {
+      args: [localOnlyResolverRule],
+      executablePath: chromiumExecutable,
+      ignoreDefaultArgs: useDevShm ? ["--disable-dev-shm-usage"] : undefined,
+    },
   },
   projects: [
     {

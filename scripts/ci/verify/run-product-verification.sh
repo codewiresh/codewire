@@ -141,6 +141,8 @@ run_policy_core() {
   scripts/ci/tests/test-build-local-image.sh
   scripts/ci/tests/test-workspace-agent-contract.sh
   scripts/ci/tests/test-workspace-image-verify-workflow.sh
+  scripts/ci/tests/test-openbao-only-secret-authority.sh
+  scripts/ci/tests/test-sync-local-secrets.sh
   scripts/ci/tests/test-source-approval-workflow.sh
   scripts/ci/tests/test-fetch-openbao-sccache-r2-credentials.sh
   scripts/ci/tests/test-select-untrusted-rust-cache.sh
@@ -532,7 +534,6 @@ run_release() {
   scripts/ci/tests/test-apt-get-with-retry.sh
   scripts/ci/tests/test-build-push-image.sh
   scripts/ci/tests/test-run-rust-build.sh
-  scripts/ci/tests/test-fetch-infisical-ci-secret.sh
   scripts/ci/tests/test-fetch-openbao-ghcr-credentials.sh
   scripts/ci/tests/test-fetch-openbao-github-mirror-credentials.sh
   scripts/ci/tests/test-fetch-openbao-nexus-credentials.sh
@@ -613,17 +614,6 @@ run_deploy() {
       deployments/k8s/overlays/dev deployments/k8s/overlays/production \
       tests/e2e/kind; do
     kustomize build "$overlay" >/dev/null
-  done
-
-  local runtime_overlay runtime_manifest
-  for runtime_overlay in \
-      deployments/k8s/overlays/dev deployments/k8s/overlays/production; do
-    runtime_manifest="$(kustomize build "$runtime_overlay")"
-    if grep -Eq '^(apiVersion: secrets\.infisical\.com/|kind: InfisicalSecret)$' \
-        <<<"$runtime_manifest"; then
-      echo "::error::retired application Infisical projection rendered from ${runtime_overlay}" >&2
-      return 1
-    fi
   done
 
   local dashboard_manifest dashboard_source

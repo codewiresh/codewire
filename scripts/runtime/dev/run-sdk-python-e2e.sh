@@ -39,11 +39,11 @@ cleanup() {
   RUN_DIR=""
 }
 
-unset_infisical_environment() {
+unset_openbao_environment() {
   local name
-  local -a names=( "${!INFISICAL_@}" )
+  local -a names=( "${!BAO_@}" )
   for name in "${names[@]}"; do
-    unset "$name" 2>/dev/null || die "cannot remove inherited Infisical environment"
+    unset "$name" 2>/dev/null || die "cannot remove inherited OpenBao environment"
   done
 }
 
@@ -67,9 +67,9 @@ for required_command in jq make mktemp "$CW_BIN"; do
     die "missing required command: $required_command"
 done
 
-# The parent wrapper has already removed Infisical material. Clear it again so
+# The parent wrapper has already removed OpenBao material. Clear it again so
 # neither the org lookup nor the fixed e2e child can inherit a platform token.
-unset_infisical_environment
+unset_openbao_environment
 unset KUBECONFIG KUBE_CONTEXT 2>/dev/null || \
   die "cannot remove inherited Kubernetes configuration"
 ulimit -c 0 || die "cannot disable core dumps"

@@ -72,7 +72,6 @@
     "crates/codewire-mesh/src/auth.rs",
     "apps/cli/charts/codewire-mesh/templates/secret.yaml",
     "deployments/k8s/flux/production/mesh-oidc-bootstrap-job.yaml",
-    "deployments/k8s/mesh-production/infisical-mesh-oidc.yaml",
     "deployments/k8s/mesh-production/values-oidc.yaml"
   ],
   "forbidden_edge_fragments": {

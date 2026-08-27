@@ -127,10 +127,15 @@ LAST_STDOUT=""
 LAST_STDERR=""
 SUCCEEDED=0
 
+declare -a OPENBAO_ENV_UNSETS=()
+for name in "${!BAO_@}"; do
+  OPENBAO_ENV_UNSETS+=( -u "$name" )
+done
+
 cw_isolated() {
   (
     cd "$SMOKE_HOME"
-    env \
+    env "${OPENBAO_ENV_UNSETS[@]}" \
       -u ANTHROPIC_API_KEY \
       -u CLAUDE_CODE_OAUTH_TOKEN \
       -u CODEWIRE_API_KEY \
@@ -141,7 +146,6 @@ cw_isolated() {
       -u CODEWIRE_SERVER_URL \
       -u GH_TOKEN \
       -u GITHUB_TOKEN \
-      -u INFISICAL_TOKEN \
       -u KUBECONFIG \
       -u SSH_AUTH_SOCK \
       HOME="$SMOKE_HOME" \

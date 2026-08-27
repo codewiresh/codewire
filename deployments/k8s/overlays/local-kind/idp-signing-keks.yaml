@@ -1,5 +1,5 @@
 # Synthetic local-kind material only. Dev and production receive this Secret
-# from their dedicated InfisicalStaticSecret; neither live value belongs here.
+# from their dedicated OpenBao-backed ExternalSecret; neither live value belongs here.
 apiVersion: v1
 kind: Secret
 metadata:

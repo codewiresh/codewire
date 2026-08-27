@@ -336,7 +336,7 @@ mod enabled {
                 .env("TEMPORAL_ADDRESS", &self.temporal_address)
                 .env("TEMPORAL_TASK_QUEUE", queue)
                 .env("CODEWIRE_KIND_FENCING_EVIDENCE_FILE", evidence)
-                .env("INFISICAL_TENANT_ENABLED", "false")
+                .env("TENANT_SECRET_STORE", "local")
                 .env("ENVIRONMENT", "local")
                 .env("SESSION_SECRET", "kind-e2e-not-a-real-secret")
                 .env("SANDBOX_NAMESPACE", SANDBOX_NAMESPACE)

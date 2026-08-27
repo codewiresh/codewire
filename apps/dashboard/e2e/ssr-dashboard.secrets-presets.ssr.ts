@@ -80,16 +80,23 @@ async function setSecret(
 }
 
 async function renameAndDeleteSecret(page: Page, bucket: string, key: string, renamedKey: string) {
+  const bucketPath = `/${slug}/secrets/${bucket}/`;
   await page.goto(`/${slug}/secrets/${bucket}`);
   let row = page.locator(".cw-list-row", { hasText: key });
   await row.getByText("Rename", { exact: true }).click();
   await row.getByLabel("New key").fill(renamedKey);
-  await row.getByRole("button", { name: "Rename key" }).click();
+  await Promise.all([
+    page.waitForURL(`${ssrUrl}${bucketPath}?message=secret-renamed`),
+    row.getByRole("button", { name: "Rename key" }).click(),
+  ]);
   await expect(page.getByRole("status")).toContainText("Secret key renamed");
 
   row = page.locator(".cw-list-row", { hasText: renamedKey });
   await row.getByText("Delete", { exact: true }).click();
-  await row.getByRole("button", { name: `Delete secret ${renamedKey} permanently` }).click();
+  await Promise.all([
+    page.waitForURL(`${ssrUrl}${bucketPath}?message=secret-deleted`),
+    row.getByRole("button", { name: `Delete secret ${renamedKey} permanently` }).click(),
+  ]);
   await expect(page.getByRole("status")).toContainText("Secret deleted");
   await expect(page.locator(".cw-list-row", { hasText: renamedKey })).toHaveCount(0);
 }

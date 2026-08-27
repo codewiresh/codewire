@@ -106,8 +106,8 @@ run_case() {
 
 grep -F 'readonly OPENBAO_ADDR="https://openbao.example.invalid"' "$WRAPPER" >/dev/null
 grep -F 'readonly OPENBAO_PATH="apps/codewire/dev/ci-smoke"' "$WRAPPER" >/dev/null
-if grep -Eqi 'infisical|secret-tool|platform_project' "$WRAPPER"; then
-  fail 'auth wrapper still contains a legacy credential source'
+if grep -Eqi 'secret-tool|platform_project' "$WRAPPER"; then
+  fail 'auth wrapper still contains an unreviewed credential source'
 fi
 
 run_case success success

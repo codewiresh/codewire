@@ -34,7 +34,6 @@ grep -Fq '[[ "$SMOKE_STATUS" == "success" ]]' "$WORKFLOW" ||
 for forbidden in \
   'https://git.example.invalid/noel/actions-checkout@' \
   'kubectl' \
-  'Infisical' \
   'CODEWIRE_DEV_' \
   'secrets.' \
   'vars.' \

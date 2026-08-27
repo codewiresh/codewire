@@ -33,192 +33,105 @@ assert_secret_absent() {
   done
 }
 
-make_fake_infisical() {
+make_fake_bao() {
   local bin_dir="$1"
   mkdir -p "$bin_dir"
-  cat >"$bin_dir/infisical" <<'FAKE'
+  cat >"$bin_dir/bao" <<'FAKE'
 #!/usr/bin/env bash
 set -euo pipefail
-printf '%q ' "$@" >>"$FAKE_INFISICAL_LOG"
-printf '\n' >>"$FAKE_INFISICAL_LOG"
-if [[ "${1:-}" == "secrets" && "${2:-}" == "get" ]]; then
-  case "${3:-}" in
-    CODEWIRE_APIKEY_DEV_SMOKE_BOOTSTRAP_KEY) printf '%s\n' "$FAKE_DEV_BOOTSTRAP" ;;
-    CODEWIRE_APIKEY_PROD_SMOKE_BOOTSTRAP_KEY) printf '%s\n' "$FAKE_PROD_BOOTSTRAP" ;;
-    CODEWIRE_APIKEY_PROD_EVIDENCE_SECONDARY_BOOTSTRAP_KEY) printf '%s\n' "$FAKE_EVIDENCE_BOOTSTRAP" ;;
+printf '%q ' "$@" >>"$FAKE_BAO_LOG"
+printf '\n' >>"$FAKE_BAO_LOG"
+if [[ "${1:-} ${2:-}" == "kv get" ]]; then
+  case "${4:-}" in
+    apps/codewire/dev/apikey-smoke) value="$FAKE_DEV_BOOTSTRAP" ;;
+    apps/codewire/prod/apikey-smoke) value="$FAKE_PROD_BOOTSTRAP" ;;
+    apps/codewire/prod/apikey-evidence-secondary) value="$FAKE_EVIDENCE_BOOTSTRAP" ;;
     *) exit 40 ;;
   esac
+  jq -cn --arg value "$value" \
+    '{data:{metadata:{version:1},data:{apiKey:$value}}}'
   exit 0
 fi
-if [[ "${1:-}" == "secrets" && "${2:-}" == "set" ]]; then
-  while (($# > 0)); do
-    if [[ "$1" == "--file" ]]; then
-      cp "$2" "$FAKE_INFISICAL_CAPTURE"
-      exit 0
-    fi
-    shift
-  done
+if [[ "${1:-} ${2:-}" == "kv put" && "${4:-}" == @* ]]; then
+  cp "${4#@}" "$FAKE_BAO_CAPTURE"
+  exit 0
 fi
 exit 41
 FAKE
-  chmod +x "$bin_dir/infisical"
-}
-
-make_fake_oidc_curl() {
-  local path="$1"
-  cat >"$path" <<'FAKE'
-#!/usr/bin/env bash
-set -euo pipefail
-printf '%q ' "$@" >>"$FAKE_CURL_LOG"
-printf '\n' >>"$FAKE_CURL_LOG"
-
-if [[ "$*" == *'/v1/auth/oidc-auth/login'* ]]; then
-  output=""
-  payload=""
-  while (($# > 0)); do
-    if [[ "$1" == "-o" ]]; then
-      output="$2"
-      shift 2
-      continue
-    fi
-    if [[ "$1" == "--data-binary" ]]; then
-      payload="${2#@}"
-      shift 2
-      continue
-    fi
-    shift
-  done
-  [[ -n "$output" && -n "$payload" ]]
-  [[ "$(stat -c '%a' "$(dirname "$output")")" == "700" ]]
-  [[ "$(stat -c '%a' "$payload")" == "600" ]]
-  printf '{"accessToken":"fake-access-token"}\n' >"$output"
-  [[ "$(stat -c '%a' "$output")" == "600" ]]
-  printf '200'
-  exit 0
-fi
-
-if [[ "${1:-}" == "--config" ]]; then
-  config="$2"
-  [[ -f "$config" ]]
-  [[ "$(stat -c '%a' "$config")" == "600" ]]
-  output="$(awk -F'"' '$1 ~ /^output = / { print $2; exit }' "$config")"
-  [[ -n "$output" ]]
-  printf '{"secret":{"secretValue":"%s"}}\n' "$FAKE_DEV_BOOTSTRAP" >"$output"
-  [[ "$(stat -c '%a' "$output")" == "600" ]]
-  printf '200'
-  exit 0
-fi
-
-exit 42
-FAKE
-  chmod +x "$path"
+  chmod +x "$bin_dir/bao"
 }
 
 test_secret_wrapper() {
   local case_dir="$TEST_TMP/wrapper"
   local bin_dir="$case_dir/bin"
   mkdir -p "$case_dir"
-  make_fake_infisical "$bin_dir"
+  make_fake_bao "$bin_dir"
   cat >"$case_dir/child" <<'CHILD'
 #!/usr/bin/env bash
 set -euo pipefail
 [[ "$CODEWIRE_API_KEY" =~ ^cw_[0-9a-f]{64}$ ]]
-[[ -z "${INFISICAL_TOKEN+x}" ]]
-[[ -z "${INFISICAL_ACCESS_TOKEN+x}" ]]
+[[ -z "${BAO_TOKEN+x}" ]]
+[[ -z "${BAO_ADDR+x}" ]]
 printf 'child-safe\n'
 CHILD
   chmod +x "$case_dir/child"
 
-  : >"$case_dir/infisical.log"
+  : >"$case_dir/openbao.log"
   if ! PATH="$bin_dir:$PATH" \
-    FAKE_INFISICAL_LOG="$case_dir/infisical.log" \
+    FAKE_BAO_LOG="$case_dir/openbao.log" \
     FAKE_DEV_BOOTSTRAP="$DEV_BOOTSTRAP" \
     FAKE_PROD_BOOTSTRAP="$PROD_BOOTSTRAP" \
     FAKE_EVIDENCE_BOOTSTRAP="$EVIDENCE_BOOTSTRAP" \
-    INFISICAL_TOKEN="test-platform-token" \
-    INFISICAL_API_URL='' \
-    INFISICAL_IDENTITY_ID='' \
-    INFISICAL_SA_TOKEN_PATH='' \
+    BAO_TOKEN="test-platform-token" \
     "$ROOT/scripts/runtime/apikey/with-apikey-smoke-auth.sh" \
       --target dev -- "$case_dir/child" \
       >"$case_dir/dev.out" 2>"$case_dir/dev.err"; then
     sed 's/^/[wrapper-dev] /' "$case_dir/dev.err" >&2
-    sed 's/^/[wrapper-dev-infisical] /' "$case_dir/infisical.log" >&2
+    sed 's/^/[wrapper-dev-openbao] /' "$case_dir/openbao.log" >&2
     fail "dev secret wrapper failed"
   fi
   grep -Fx 'child-safe' "$case_dir/dev.out" >/dev/null
-  grep -F 'CODEWIRE_APIKEY_DEV_SMOKE_BOOTSTRAP_KEY' "$case_dir/infisical.log" >/dev/null
+  grep -F 'apps/codewire/dev/apikey-smoke' "$case_dir/openbao.log" >/dev/null
   assert_secret_absent "$case_dir/dev.out"
   assert_secret_absent "$case_dir/dev.err"
-  assert_secret_absent "$case_dir/infisical.log"
+  assert_secret_absent "$case_dir/openbao.log"
 
-  : >"$case_dir/infisical.log"
+  : >"$case_dir/openbao.log"
   if ! PATH="$bin_dir:$PATH" \
-    FAKE_INFISICAL_LOG="$case_dir/infisical.log" \
+    FAKE_BAO_LOG="$case_dir/openbao.log" \
     FAKE_DEV_BOOTSTRAP="$DEV_BOOTSTRAP" \
     FAKE_PROD_BOOTSTRAP="$PROD_BOOTSTRAP" \
     FAKE_EVIDENCE_BOOTSTRAP="$EVIDENCE_BOOTSTRAP" \
-    INFISICAL_API_URL='' \
-    INFISICAL_IDENTITY_ID='' \
-    INFISICAL_SA_TOKEN_PATH='' \
     "$ROOT/scripts/runtime/apikey/with-apikey-smoke-auth.sh" \
       --target prod -- "$case_dir/child" \
       >"$case_dir/prod.out" 2>"$case_dir/prod.err"; then
     sed 's/^/[wrapper-prod] /' "$case_dir/prod.err" >&2
-    sed 's/^/[wrapper-prod-infisical] /' "$case_dir/infisical.log" >&2
+    sed 's/^/[wrapper-prod-openbao] /' "$case_dir/openbao.log" >&2
     fail "prod secret wrapper failed"
   fi
-  grep -F 'CODEWIRE_APIKEY_PROD_SMOKE_BOOTSTRAP_KEY' "$case_dir/infisical.log" >/dev/null
+  grep -F 'apps/codewire/prod/apikey-smoke' "$case_dir/openbao.log" >/dev/null
   assert_secret_absent "$case_dir/prod.out"
   assert_secret_absent "$case_dir/prod.err"
-  assert_secret_absent "$case_dir/infisical.log"
+  assert_secret_absent "$case_dir/openbao.log"
 
-  : >"$case_dir/infisical.log"
+  : >"$case_dir/openbao.log"
   if ! PATH="$bin_dir:$PATH" \
-    FAKE_INFISICAL_LOG="$case_dir/infisical.log" \
+    FAKE_BAO_LOG="$case_dir/openbao.log" \
     FAKE_DEV_BOOTSTRAP="$DEV_BOOTSTRAP" \
     FAKE_PROD_BOOTSTRAP="$PROD_BOOTSTRAP" \
     FAKE_EVIDENCE_BOOTSTRAP="$EVIDENCE_BOOTSTRAP" \
-    INFISICAL_API_URL='' \
-    INFISICAL_IDENTITY_ID='' \
-    INFISICAL_SA_TOKEN_PATH='' \
     "$ROOT/scripts/runtime/apikey/with-apikey-smoke-auth.sh" \
       --target prod-evidence-secondary -- "$case_dir/child" \
       >"$case_dir/evidence.out" 2>"$case_dir/evidence.err"; then
     sed 's/^/[wrapper-evidence] /' "$case_dir/evidence.err" >&2
-    sed 's/^/[wrapper-evidence-infisical] /' "$case_dir/infisical.log" >&2
+    sed 's/^/[wrapper-evidence-openbao] /' "$case_dir/openbao.log" >&2
     fail "secondary production evidence secret wrapper failed"
   fi
-  grep -F 'CODEWIRE_APIKEY_PROD_EVIDENCE_SECONDARY_BOOTSTRAP_KEY' \
-    "$case_dir/infisical.log" >/dev/null
+  grep -F 'apps/codewire/prod/apikey-evidence-secondary' \
+    "$case_dir/openbao.log" >/dev/null
   assert_secret_absent "$case_dir/evidence.out"
   assert_secret_absent "$case_dir/evidence.err"
-  assert_secret_absent "$case_dir/infisical.log"
-
-  local oidc_dir="$TEST_TMP/wrapper-oidc"
-  local oidc_bin="$oidc_dir/bin"
-  mkdir -p "$oidc_bin"
-  make_fake_oidc_curl "$oidc_bin/curl"
-  printf 'fake-runner-jwt\n' >"$oidc_dir/runner.jwt"
-  : >"$oidc_dir/curl.log"
-  if ! PATH="$oidc_bin:$PATH" \
-    FAKE_CURL_LOG="$oidc_dir/curl.log" \
-    FAKE_DEV_BOOTSTRAP="$DEV_BOOTSTRAP" \
-    INFISICAL_API_URL="https://infisical.test/api" \
-    INFISICAL_IDENTITY_ID="fake-identity" \
-    INFISICAL_SA_TOKEN_PATH="$oidc_dir/runner.jwt" \
-    "$ROOT/scripts/runtime/apikey/with-apikey-smoke-auth.sh" \
-      --target dev -- "$case_dir/child" \
-      >"$oidc_dir/out" 2>"$oidc_dir/err"; then
-    sed 's/^/[wrapper-oidc] /' "$oidc_dir/err" >&2
-    fail "OIDC secret wrapper failed"
-  fi
-  grep -Fx 'child-safe' "$oidc_dir/out" >/dev/null
-  grep -F '/v1/auth/oidc-auth/login' "$oidc_dir/curl.log" >/dev/null
-  grep -F -- '--config' "$oidc_dir/curl.log" >/dev/null
-  assert_secret_absent "$oidc_dir/out"
-  assert_secret_absent "$oidc_dir/err"
-  assert_secret_absent "$oidc_dir/curl.log"
+  assert_secret_absent "$case_dir/openbao.log"
 }
 
 make_fake_cw() {
@@ -358,6 +271,7 @@ make_fake_kubectl() {
   cat >"$path" <<'FAKE'
 #!/usr/bin/env bash
 set -euo pipefail
+[[ -z "${BAO_TOKEN+x}" && -z "${BAO_ADDR+x}" ]] || exit 69
 printf '%q ' "$@" >>"$FAKE_KUBECTL_LOG"
 printf '\n' >>"$FAKE_KUBECTL_LOG"
 if [[ "$*" == *'get cluster.postgresql.cnpg.io codewire-db'* ]]; then
@@ -375,7 +289,7 @@ case "$count" in
     printf '0\n'
     ;;
   2)
-    [[ "$input" == *"WHERE (user_id = :'user_id' OR org_id = :'org_id')"* ]]
+    [[ "$input" == *"WITH raw_key AS"* ]]
     printf '%s\n' "$FAKE_ROTATED_KEY"
     ;;
   3)
@@ -387,6 +301,13 @@ case "$count" in
     else
       printf '627a3c7cad1f50a7b44c00de1e054df9|connect-apikey-smoke-prod@codewire.sh|f|3289cbf3e0ca05c5ef2ac7cb696d5318|connect-apikey-smoke-prod|1|1|1|0|1|dddddddd\n'
     fi
+    ;;
+  4)
+    [[ "$input" == *"key_hash <> :'candidate_hash'"* ]]
+    ;;
+  5)
+    [[ "$input" == *"key_hash = :'candidate_hash'"* ]]
+    printf '1\n'
     ;;
   *) exit 71 ;;
 esac
@@ -400,29 +321,30 @@ run_provision_case() {
   local case_dir="$TEST_TMP/provision-$target"
   local bin_dir="$case_dir/bin"
   local fake_home="$case_dir/home"
-  mkdir -p "$bin_dir" "$fake_home/src/infra"
+  local provision_tmp="$case_dir/tmp"
+  mkdir -p "$bin_dir" "$fake_home/src/infra" "$provision_tmp"
   touch "$fake_home/src/infra/kubeconfig-dev-cluster.yaml"
   touch "$fake_home/src/infra/kubeconfig-prod-cluster.yaml"
   make_fake_kubectl "$bin_dir/kubectl"
-  make_fake_infisical "$bin_dir"
+  make_fake_bao "$bin_dir"
   : >"$case_dir/kubectl.log"
-  : >"$case_dir/infisical.log"
+  : >"$case_dir/openbao.log"
   local rotated="cw_dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
   local -a args=(--target "$target")
-  local expected_secret expected_context
+  local expected_path expected_context
   case "$target" in
     dev)
-      expected_secret="CODEWIRE_APIKEY_DEV_SMOKE_BOOTSTRAP_KEY"
+      expected_path="apps/codewire/dev/apikey-smoke"
       expected_context="admin@dev-cluster"
       ;;
     prod)
       args+=(--allow-prod-mutation)
-      expected_secret="CODEWIRE_APIKEY_PROD_SMOKE_BOOTSTRAP_KEY"
+      expected_path="apps/codewire/prod/apikey-smoke"
       expected_context="admin@prod-cluster"
       ;;
     prod-evidence-secondary)
       args+=(--allow-prod-mutation)
-      expected_secret="CODEWIRE_APIKEY_PROD_EVIDENCE_SECONDARY_BOOTSTRAP_KEY"
+      expected_path="apps/codewire/prod/apikey-evidence-secondary"
       expected_context="admin@prod-cluster"
       ;;
     *) fail "unsupported provision test target: $target" ;;
@@ -430,11 +352,14 @@ run_provision_case() {
 
   PATH="$bin_dir:$PATH" \
     HOME="$fake_home" \
+    TMPDIR="$provision_tmp" \
+    BAO_ADDR="https://openbao.example.invalid" \
+    BAO_TOKEN="must-not-reach-kubectl" \
     FAKE_KUBECTL_LOG="$case_dir/kubectl.log" \
     FAKE_PSQL_COUNT="$case_dir/psql-count" \
     FAKE_ROTATED_KEY="$rotated" \
-    FAKE_INFISICAL_LOG="$case_dir/infisical.log" \
-    FAKE_INFISICAL_CAPTURE="$case_dir/infisical.env" \
+    FAKE_BAO_LOG="$case_dir/openbao.log" \
+    FAKE_BAO_CAPTURE="$case_dir/openbao.json" \
     FAKE_DEV_BOOTSTRAP="$DEV_BOOTSTRAP" \
     FAKE_PROD_BOOTSTRAP="$PROD_BOOTSTRAP" \
     FAKE_EVIDENCE_BOOTSTRAP="$EVIDENCE_BOOTSTRAP" \
@@ -443,11 +368,16 @@ run_provision_case() {
 
   assert_secret_absent "$case_dir/out"
   assert_secret_absent "$case_dir/err"
-  if grep -F "$rotated" "$case_dir/kubectl.log" "$case_dir/infisical.log" >/dev/null; then
+  if grep -F "$rotated" "$case_dir/kubectl.log" "$case_dir/openbao.log" >/dev/null; then
     fail "rotated key appeared in a command argument log"
   fi
-  grep -F "$expected_secret=" "$case_dir/infisical.env" >/dev/null
+  [[ "$(jq -r '.apiKey' "$case_dir/openbao.json")" == "$rotated" ]] ||
+    fail 'OpenBao document did not receive the replacement key'
+  grep -F "$expected_path" "$case_dir/openbao.log" >/dev/null
   grep -F "$expected_context" "$case_dir/kubectl.log" >/dev/null
+  if find "$provision_tmp" -mindepth 1 -print -quit | grep -q .; then
+    fail 'provisioner retained temporary credential material'
+  fi
 }
 
 test_provisioner() {
@@ -479,9 +409,9 @@ test_g4_evidence_runner() {
   local case_dir="$TEST_TMP/g4-evidence"
   local bin_dir="$case_dir/bin"
   mkdir -p "$case_dir/state"
-  make_fake_infisical "$bin_dir"
+  make_fake_bao "$bin_dir"
   make_fake_cw "$case_dir/cw"
-  : >"$case_dir/infisical.log"
+  : >"$case_dir/openbao.log"
   : >"$case_dir/state/operations"
 
   if ! PATH="$bin_dir:$PATH" \
@@ -492,10 +422,7 @@ test_g4_evidence_runner() {
     FAKE_DEV_BOOTSTRAP="$DEV_BOOTSTRAP" \
     FAKE_PROD_BOOTSTRAP="$PROD_BOOTSTRAP" \
     FAKE_EVIDENCE_BOOTSTRAP="$EVIDENCE_BOOTSTRAP" \
-    FAKE_INFISICAL_LOG="$case_dir/infisical.log" \
-    INFISICAL_API_URL='' \
-    INFISICAL_IDENTITY_ID='' \
-    INFISICAL_SA_TOKEN_PATH='' \
+    FAKE_BAO_LOG="$case_dir/openbao.log" \
     "$ROOT/scripts/runtime/apikey/run-apikey-g4-evidence.sh" \
       --release-tag v0.3.360 \
       --confirm 'RUN APIKEY PROD EVIDENCE' \
@@ -508,15 +435,15 @@ test_g4_evidence_runner() {
     fail "G4 evidence runner did not execute exactly 50 ApiKeyService CLI operations"
   [[ "$(grep -c '^whoami$' "$case_dir/state/operations")" == "10" ]] || \
     fail "G4 evidence runner did not execute exactly ten identity checks"
-  [[ "$(grep -c 'CODEWIRE_APIKEY_PROD_SMOKE_BOOTSTRAP_KEY' "$case_dir/infisical.log")" == "5" ]] || \
+  [[ "$(grep -c 'apps/codewire/prod/apikey-smoke' "$case_dir/openbao.log")" == "5" ]] || \
     fail "G4 evidence runner did not load the primary fixture exactly five times"
-  [[ "$(grep -c 'CODEWIRE_APIKEY_PROD_EVIDENCE_SECONDARY_BOOTSTRAP_KEY' "$case_dir/infisical.log")" == "5" ]] || \
+  [[ "$(grep -c 'apps/codewire/prod/apikey-evidence-secondary' "$case_dir/openbao.log")" == "5" ]] || \
     fail "G4 evidence runner did not load the secondary fixture exactly five times"
   grep -F 'principals=2 cycles_each=5' "$case_dir/err" >/dev/null
   grep -F 'expected_rpc_minimum=50' "$case_dir/err" >/dev/null
   assert_secret_absent "$case_dir/out"
   assert_secret_absent "$case_dir/err"
-  assert_secret_absent "$case_dir/infisical.log"
+  assert_secret_absent "$case_dir/openbao.log"
 
   set +e
   PATH="$bin_dir:$PATH" \

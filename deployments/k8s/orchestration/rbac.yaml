@@ -27,7 +27,7 @@ metadata:
     app.kubernetes.io/name: codewire
     app.kubernetes.io/component: orchestration
 rules:
-  # Infisical Kubernetes Auth validates the presented workload JWT through the
+  # OpenBao Kubernetes Auth validates the presented workload JWT through the
   # cluster TokenReview API as this ServiceAccount. It needs only TokenReview
   # creation; SubjectAccessReview and broader auth-delegator access are not
   # required.

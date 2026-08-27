@@ -407,6 +407,8 @@ if [ "$event_selected" = false ]; then
       scripts/ci/tests/test-rust-cache-workflow.sh|\
       scripts/ci/tests/test-rust-cache-receipts.sh|\
       scripts/ci/tests/test-shellcheck-policy-domain.sh|\
+      scripts/ci/tests/test-openbao-only-secret-authority.sh|\
+      scripts/ci/tests/test-sync-local-secrets.sh|\
       scripts/ci/tests/fixtures/cargo-cache-df.sh|\
       scripts/ci/verify/integration-postgres.sh|scripts/ci/tests/test-integration-postgres.sh|\
       scripts/ci/verify/resolve-cargo-target-dir.sh|\
@@ -478,8 +480,13 @@ if [ "$event_selected" = false ]; then
         ;;
     esac
 
+    if [[ "$path" != */* && "$path" == *.example.json ]]; then
+      select_token policy
+      recognized=true
+    fi
+
     case "$path" in
-      .gitattributes|.gitignore|.dockerignore|turbo.json)
+      .gitattributes|.gitignore|.dockerignore|.env.example|turbo.json)
         select_token policy
         recognized=true
         ;;
@@ -882,6 +889,12 @@ if [ "$event_selected" = false ]; then
         select_services
         recognized=true
         ;;
+      scripts/dev/kind/sync-local-secrets.sh)
+        # The local credential bridge has a hermetic policy fixture and does
+        # not provision or exercise a Kind cluster.
+        select_token policy
+        recognized=true
+        ;;
       scripts/dev/kind/*)
         select_token edge_kind
         kind_relevant=true
@@ -975,6 +988,8 @@ if [ "$event_selected" = false ]; then
         ;;
       Caddyfile|Caddyfile.docker|tests/e2e/kind/*|tests/e2e/*kind*|\
       scripts/ci/install-pinned-playwright-chromium.sh|\
+      scripts/ci/verify/kind-host-runtime.sh|\
+      scripts/ci/verify/playwright-browser-runtime.sh|\
       scripts/ci/verify/kind-e2e.sh|scripts/ci/verify/kind/*|\
       scripts/dev/kind/install-temporal.sh|scripts/ci/tests/test-install-temporal.sh|\
       deployments/k8s/*ingress*|\
@@ -1088,7 +1103,6 @@ if [ "$event_selected" = false ]; then
       scripts/ci/images/compute-image-tags.sh|\
       scripts/ci/images/copy-image-to-ghcr.sh|\
       scripts/ci/deploy/dispatch-deploy-dev.sh|scripts/ci/deploy/dispatch-deploy-prod.sh|\
-      scripts/ci/setup/fetch-infisical-ci-secret.sh|\
       scripts/ci/setup/fetch-forgejo-deploy-dev-token.sh|\
       scripts/ci/setup/fetch-forgejo-deploy-prod-token.sh|\
       scripts/ci/setup/curl-transport-retry.sh|\
@@ -1116,7 +1130,6 @@ if [ "$event_selected" = false ]; then
       scripts/ci/tests/test-build-push-image.sh|\
       scripts/ci/tests/test-build-push-runtime-images.sh|\
       scripts/ci/tests/test-run-rust-build.sh|\
-      scripts/ci/tests/test-fetch-infisical-ci-secret.sh|\
       scripts/ci/tests/test-fetch-forgejo-deploy-dev-token.sh|\
       scripts/ci/tests/test-fetch-openbao-ghcr-credentials.sh|\
       scripts/ci/tests/test-fetch-openbao-github-mirror-credentials.sh|\

@@ -5,6 +5,10 @@ set -euo pipefail
 
 export KIND_E2E_COMMON_LOADED=1
 ROOT="${ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+# shellcheck source=scripts/ci/verify/playwright-browser-runtime.sh
+source "$ROOT/scripts/ci/verify/playwright-browser-runtime.sh"
+# shellcheck source=scripts/ci/verify/kind-host-runtime.sh
+source "$ROOT/scripts/ci/verify/kind-host-runtime.sh"
 CARGO_TARGET_DIR="$(
   "$ROOT/scripts/ci/verify/resolve-cargo-target-dir.sh" "$ROOT"
 )"
@@ -1253,6 +1257,8 @@ dashboard_browser_e2e() {
     return 1
   fi
 
+  prepare_playwright_browser_runtime "$chromium" "$ROOT" || return $?
+
   log "running full Rust dashboard Playwright suite through Kind ingress"
   require_get_code /healthz 204 "dashboard health"
   require_get_code /login 200 "dashboard login page"
@@ -1261,6 +1267,7 @@ dashboard_browser_e2e() {
     PLAYWRIGHT_BASE_URL="$KIND_INGRESS_URL" \
     PLAYWRIGHT_RUNTIME_WORKSPACE_IMAGE="$(kind_workspace_runtime_image)" \
     PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH="$chromium" \
+    CODEWIRE_PLAYWRIGHT_USE_DEV_SHM="$CODEWIRE_PLAYWRIGHT_USE_DEV_SHM" \
     KUBE_CONTEXT="kind-${KIND_CLUSTER_NAME}" \
     PLAYWRIGHT_KUBE_CONTEXT="kind-${KIND_CLUSTER_NAME}" \
     PLAYWRIGHT_SANDBOX_NAMESPACE="$SANDBOX_NS" \

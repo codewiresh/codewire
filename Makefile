@@ -85,7 +85,6 @@ export TEST_USER_EMAIL ?= test@codewire.sh
 export TEST_USER_PASSWORD ?= testpassword123
 export TEST_USER_NAME ?= Test User
 REGISTRY ?= git.example.com
-INFISICAL_HOST ?= infisical.example.com
 BUF ?= $(shell command -v buf 2>/dev/null || echo "$(HOME)/go/bin/buf")
 GO_BIN ?= $(shell go env GOPATH)/bin
 SUPPLYCHAIN ?= supplychain
@@ -327,19 +326,6 @@ up: build-gateway build-dashboard-local build-sandbox-controller build-derp-loca
 	@$(MAKE) sync-local-secrets
 	@$(MAKE) prune-local-legacy-runtime
 	$(KUBECTL) apply -k deployments/k8s/agent-sandbox/overlays/local-kind/
-	helm upgrade --install infisical-operator secrets-operator \
-		--kube-context $(KUBE_CONTEXT) \
-		--namespace infisical-system --create-namespace --wait \
-		--repo https://dl.cloudsmith.io/public/infisical/helm-charts/helm/charts/
-	@if [ -n "$$INFISICAL_CLIENT_ID" ] && [ -n "$$INFISICAL_CLIENT_SECRET" ]; then \
-		$(KUBECTL) create secret generic infisical-universal-auth \
-			--namespace default \
-			--from-literal=clientId=$$INFISICAL_CLIENT_ID \
-			--from-literal=clientSecret=$$INFISICAL_CLIENT_SECRET \
-			--dry-run=client -o yaml | $(KUBECTL) apply -f -; \
-	else \
-		echo "WARNING: INFISICAL_CLIENT_ID/SECRET not set — skipping auth secret (run via 'bun run up' to inject)"; \
-	fi
 	@$(KUBECTL) -n default rollout status deployment postgres --timeout=60s
 	./scripts/dev/kind/install-temporal.sh local-kind
 	@$(MAKE) kind-clean-runtime

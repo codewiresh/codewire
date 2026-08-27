@@ -24,8 +24,6 @@ target/
 .env
 .env.local
 .env.*.local
-.infisical.json
-infisical.json
 
 # IDE
 .idea/

@@ -434,10 +434,6 @@ handle_signal() {
   esac
 }
 
-trap cleanup EXIT
-trap 'handle_signal INT' INT
-trap 'handle_signal TERM' TERM
-
 split_peer_relay_endpoint() {
   local endpoint="$1"
   local relay_ip relay_port octet
@@ -3659,4 +3655,4 @@ main() {
   log "runtime smoke passed for $ENV_ID"
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then trap cleanup EXIT; trap 'handle_signal INT' INT; trap 'handle_signal TERM' TERM; main "$@"; fi

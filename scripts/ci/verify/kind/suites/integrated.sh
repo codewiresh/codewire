@@ -21,6 +21,11 @@ run_integrated_kind_suite() {
   require_tool ssh-keygen
   require_tool ssh-keyscan
 
+  # kind serializes each image through the host temp filesystem before
+  # importing it. Reject or replace a saturated default before compiling or
+  # creating a cluster, rather than misreporting the later bootstrap fallout.
+  prepare_kind_temp_runtime
+
   # CI gives each replica a private DinD sidecar, while local worktrees share
   # fixed host ports, image tags, and the default cluster name. Serialize the
   # complete local transaction before reclaiming any CI-owned prior run.
