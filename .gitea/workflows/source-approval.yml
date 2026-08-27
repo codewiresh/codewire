@@ -73,7 +73,7 @@ jobs:
         env:
           BASE_SHA: ${{ steps.selection.outputs.base_sha }}
           EVENT_NAME: ${{ forgejo.event_name }}
-          EXPECTED_SUPPLYCHAIN: 4e29a1552ca2d135c5dcd16904c3ea8cbaafac6d
+          EXPECTED_SUPPLYCHAIN: ee0abebcd79661e59b02a22688d929dffa4b9506
           HEAD_SHA: ${{ steps.selection.outputs.head_sha }}
         run: |
           set -euo pipefail
