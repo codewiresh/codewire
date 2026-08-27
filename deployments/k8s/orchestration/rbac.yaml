@@ -112,3 +112,38 @@ subjects:
   - kind: ServiceAccount
     name: codewire-orchestration
     namespace: prod
+---
+# TokenRequest is namespaced and limited to this workload's own ServiceAccount.
+# The default in-cluster identity may mint only a short-lived replacement for
+# itself; application code binds every request to the current Pod name and UID
+# and fixes the two accepted audiences.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: codewire-orchestration-tokenrequest
+  namespace: prod
+  labels:
+    app.kubernetes.io/name: codewire
+    app.kubernetes.io/component: orchestration
+rules:
+  - apiGroups: [""]
+    resources: ["serviceaccounts/token"]
+    resourceNames: ["codewire-orchestration"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: codewire-orchestration-tokenrequest
+  namespace: prod
+  labels:
+    app.kubernetes.io/name: codewire
+    app.kubernetes.io/component: orchestration
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: codewire-orchestration-tokenrequest
+subjects:
+  - kind: ServiceAccount
+    name: codewire-orchestration
+    namespace: prod

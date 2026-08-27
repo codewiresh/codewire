@@ -131,9 +131,6 @@ async fn main() -> anyhow::Result<()> {
     let pool = codewire_server_core::db::connect(&cfg.database_url).await?;
     codewire_orchestration::resize_metrics::start_active_refresh(pool.clone());
     let confidential_storage_flags = FeatureFlags::from_env()?;
-    let confidential_storage =
-        ConfidentialStorageManager::from_env(pool.clone(), confidential_storage_flags)?
-            .map(Arc::new);
 
     let loops = env_list("WORKER_LOOPS");
 
@@ -173,6 +170,12 @@ async fn main() -> anyhow::Result<()> {
             None
         }
     };
+    let confidential_storage = ConfidentialStorageManager::from_env(
+        pool.clone(),
+        confidential_storage_flags,
+        kube.clone(),
+    )?
+    .map(Arc::new);
 
     let sandbox_cfg = worker::create::SandboxWorkerCfg::from_env();
     let synced_zones = codewire_orchestration::runtime_transport::sync_catalog_json(
@@ -187,12 +190,15 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
-    let secrets = Arc::new(worker::secrets::SecretStore::from_env(pool.clone())?);
+    let secrets = Arc::new(worker::secrets::SecretStore::from_env_with_kube(
+        pool.clone(),
+        kube.clone(),
+    )?);
     let ctx = Arc::new(worker::WorkerContext {
         pool: pool.clone(),
         cloudflare: CloudflareClient::from_env(),
         preview_base_domain: std::env::var("PREVIEW_BASE_DOMAIN").unwrap_or_default(),
-        kube,
+        kube: kube.clone(),
         secrets: secrets.clone(),
         github_cfg: worker::github::GitHubAppConfig::from_env(),
         sandbox_cfg,
@@ -239,7 +245,7 @@ async fn main() -> anyhow::Result<()> {
         auth: auth.clone(),
         // Ambient kube client for the exec proxy; unavailable mirrors
         // Go's nil sandbox client (the route then 503s).
-        kube: kube::Client::try_default().await.ok(),
+        kube,
         // Shared session secret for the internal gateway-binding token
         // issuance (Go: cfg.SessionSecret).
         session_secret: cfg.session_secret.clone(),

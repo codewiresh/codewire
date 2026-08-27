@@ -6,7 +6,7 @@
 //! separate "active version" query.
 
 use std::fmt;
-use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use aes_gcm::aead::{Aead, Payload};
@@ -22,6 +22,8 @@ use tokio::sync::Mutex;
 use url::Url;
 use zeroize::Zeroizing;
 
+use crate::openbao_workload_identity::OpenBaoWorkloadIdentity;
+
 pub const SECRET_FORMAT_V1: i16 = 1;
 pub const WRAPPED_DEK_FORMAT_V1: i16 = 1;
 pub const DEK_BYTES: usize = 32;
@@ -29,7 +31,6 @@ const NONCE_BYTES: usize = 12;
 const TAG_BYTES: usize = 16;
 const SECRET_AAD_DOMAIN_V1: &[u8] = b"codewire/tenant-secret/v1\0";
 const DEK_CONTEXT_DOMAIN_V1: &[u8] = b"codewire/tenant-dek-context/v1\0";
-const DEFAULT_TOKEN_PATH: &str = "/var/run/secrets/codewire-tenant-bao/token";
 const DEFAULT_AUTH_MOUNT: &str = "kubernetes-codewire";
 const DEFAULT_TRANSIT_MOUNT: &str = "transit";
 const DEFAULT_TRANSIT_KEY: &str = "tenant-dek";
@@ -456,7 +457,6 @@ pub struct OpenBaoTransitConfig {
     address: Url,
     auth_mount: String,
     role: String,
-    token_path: PathBuf,
     transit_mount: String,
     key_name: String,
     expected_cluster_id: String,
@@ -481,9 +481,6 @@ impl OpenBaoTransitConfig {
             std::env::var("TENANT_SECRET_BAO_AUTH_MOUNT")
                 .unwrap_or_else(|_| DEFAULT_AUTH_MOUNT.to_owned()),
             required("TENANT_SECRET_BAO_ROLE")?,
-            std::env::var_os("TENANT_SECRET_BAO_SA_TOKEN_PATH")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| PathBuf::from(DEFAULT_TOKEN_PATH)),
             std::env::var("TENANT_SECRET_BAO_TRANSIT_MOUNT")
                 .unwrap_or_else(|_| DEFAULT_TRANSIT_MOUNT.to_owned()),
             std::env::var("TENANT_SECRET_BAO_TRANSIT_KEY")
@@ -496,7 +493,6 @@ impl OpenBaoTransitConfig {
         mut address: Url,
         auth_mount: String,
         role: String,
-        token_path: PathBuf,
         transit_mount: String,
         key_name: String,
         expected_cluster_id: String,
@@ -536,7 +532,6 @@ impl OpenBaoTransitConfig {
             address,
             auth_mount,
             role,
-            token_path,
             transit_mount,
             key_name,
             expected_cluster_id,
@@ -575,6 +570,7 @@ struct CachedBaoToken {
 
 pub struct OpenBaoTransitProvider {
     config: OpenBaoTransitConfig,
+    identity: Arc<dyn OpenBaoWorkloadIdentity>,
     http: reqwest::Client,
     token: Mutex<Option<CachedBaoToken>>,
 }
@@ -635,7 +631,10 @@ struct BaoHealthResponse {
 }
 
 impl OpenBaoTransitProvider {
-    pub fn new(config: OpenBaoTransitConfig) -> Result<Self, SecretEnvelopeError> {
+    pub(crate) fn new(
+        config: OpenBaoTransitConfig,
+        identity: Arc<dyn OpenBaoWorkloadIdentity>,
+    ) -> Result<Self, SecretEnvelopeError> {
         let https_only = config.address.scheme() == "https";
         let http = reqwest::Client::builder()
             .https_only(https_only)
@@ -650,6 +649,7 @@ impl OpenBaoTransitProvider {
             })?;
         Ok(Self {
             config,
+            identity,
             http,
             token: Mutex::new(None),
         })
@@ -676,23 +676,26 @@ impl OpenBaoTransitProvider {
         {
             return Ok(Zeroizing::new(token.value.to_string()));
         }
-        let jwt = Zeroizing::new(
-            tokio::fs::read_to_string(&self.config.token_path)
-                .await
-                .map_err(|_| {
-                    SecretEnvelopeError::configuration(
-                        "openbao-service-account-token-unreadable",
-                        provider,
-                    )
-                })?,
-        );
+        let jwt = self.identity.token().await.map_err(|error| {
+            tracing::warn!(
+                failure_class = error.failure_class(),
+                error = %error,
+                "OpenBao workload identity request failed"
+            );
+            SecretEnvelopeError::provider(
+                "openbao-workload-identity-unavailable",
+                provider,
+                None,
+                None,
+            )
+        })?;
         let url = self.endpoint(&["v1", "auth", &self.config.auth_mount, "login"])?;
         let response = self
             .http
             .post(url)
             .json(&BaoAuthRequest {
                 role: &self.config.role,
-                jwt: jwt.trim(),
+                jwt: jwt.as_str(),
             })
             .send()
             .await
@@ -977,7 +980,6 @@ pub fn verify_dek_fingerprint(
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -1209,20 +1211,20 @@ mod tests {
     #[tokio::test]
     async fn openbao_provider_uses_atomic_response_versions_and_expected_authority() {
         let (address, state, server) = fake_bao().await;
-        let token_path =
-            std::env::temp_dir().join(format!("codewire-tenant-bao-token-{}", std::process::id()));
-        fs::write(&token_path, "projected-jwt\n").unwrap();
         let config = OpenBaoTransitConfig::new(
             address,
             "kubernetes".into(),
             "tenant-role".into(),
-            token_path.clone(),
             "transit".into(),
             "tenant-dek".into(),
             "cluster-test-1".into(),
         )
         .unwrap();
-        let provider = OpenBaoTransitProvider::new(config).unwrap();
+        let provider = OpenBaoTransitProvider::new(
+            config,
+            crate::openbao_workload_identity::static_workload_identity("projected-jwt"),
+        )
+        .unwrap();
         let original_context = context("/users/user_1");
         let other_context = context("/users/user_2");
 
@@ -1262,7 +1264,6 @@ mod tests {
         };
         assert_eq!(oversized.failure_class(), "openbao-datakey-failed");
 
-        fs::remove_file(token_path).unwrap();
         server.abort();
     }
 
