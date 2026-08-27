@@ -13,6 +13,8 @@ use sqlx::{PgPool, Postgres, Transaction};
 use tokio::sync::Mutex;
 use zeroize::Zeroizing;
 
+use crate::openbao_workload_identity::KubernetesOpenBaoWorkloadIdentity;
+
 use super::secret_envelope::{
     DEK_BYTES, DekContext, EncryptedTenantSecret, GeneratedDek, KekProvider, KekProviderKind,
     OpenBaoTransitConfig, OpenBaoTransitProvider, SecretCoordinates, WrappedDek, decrypt_secret,
@@ -142,10 +144,17 @@ impl PostgresSecretStore {
         }
     }
 
-    pub fn from_env(pool: PgPool) -> anyhow::Result<Self> {
+    pub fn from_env(pool: PgPool, kube: kube::Client) -> anyhow::Result<Self> {
+        let identity = Arc::new(KubernetesOpenBaoWorkloadIdentity::from_env(
+            kube,
+            "TENANT_SECRET_BAO_AUDIENCE",
+        )?);
         let provider: Arc<dyn KekProvider> = Arc::new(
-            OpenBaoTransitProvider::new(OpenBaoTransitConfig::from_env().map_err(envelope_error)?)
-                .map_err(envelope_error)?,
+            OpenBaoTransitProvider::new(
+                OpenBaoTransitConfig::from_env().map_err(envelope_error)?,
+                identity,
+            )
+            .map_err(envelope_error)?,
         );
         Ok(Self::new(pool, provider))
     }

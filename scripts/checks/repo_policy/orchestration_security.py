@@ -12,6 +12,7 @@ from .kubernetes import (
 def check_orchestration_host_key_authz(args: argparse.Namespace) -> int:
     name = "codewire-orchestration-gateway-host-key"
     orchestration = "codewire-orchestration"
+    token_request_name = "codewire-orchestration-tokenrequest"
     forbidden_secret_verbs = ["get", "list", "watch", "update", "patch"]
     targets = [
         {"path": "deployments/k8s/orchestration", "role_namespace": "prod-sandboxes", "subject_namespace": "prod"},
@@ -83,6 +84,57 @@ def check_orchestration_host_key_authz(args: argparse.Namespace) -> int:
                 f"{target['subject_namespace']}/{orchestration}"
             )
 
+    def assert_token_request_authz(resources: list[str], target: dict[str, str], label: str, output: list[str]) -> None:
+        role = exactly_one(resources, "Role", token_request_name, label, output)
+        binding = exactly_one(resources, "RoleBinding", token_request_name, label, output)
+        if role:
+            if metadata_field(role, "namespace") != target["subject_namespace"]:
+                output.append(f"{label}: TokenRequest Role must live with orchestration")
+            expected_rules = compact(
+                f"""
+                rules:
+                - apiGroups:
+                  - ""
+                  resourceNames:
+                  - {orchestration}
+                  resources:
+                  - serviceaccounts/token
+                  verbs:
+                  - create
+                """
+            )
+            if compact(top_level_block(role, "rules")) != expected_rules:
+                output.append(
+                    f"{label}: TokenRequest Role must grant only create on "
+                    f"ServiceAccount/{orchestration}'s token subresource"
+                )
+        if binding:
+            if metadata_field(binding, "namespace") != target["subject_namespace"]:
+                output.append(f"{label}: TokenRequest RoleBinding must live with orchestration")
+            expected_role_ref = compact(
+                f"""
+                roleRef:
+                  apiGroup: rbac.authorization.k8s.io
+                  kind: Role
+                  name: {token_request_name}
+                """
+            )
+            if compact(top_level_block(binding, "roleRef")) != expected_role_ref:
+                output.append(f"{label}: TokenRequest RoleBinding must reference Role/{token_request_name}")
+            expected_subjects = compact(
+                f"""
+                subjects:
+                - kind: ServiceAccount
+                  name: {orchestration}
+                  namespace: {target['subject_namespace']}
+                """
+            )
+            if compact(top_level_block(binding, "subjects")) != expected_subjects:
+                output.append(
+                    f"{label}: TokenRequest RoleBinding must select "
+                    f"{target['subject_namespace']}/{orchestration}"
+                )
+
     def assert_bound_surface(resources: list[str], target: dict[str, str], label: str, output: list[str]) -> None:
         bindings = [
             resource
@@ -100,6 +152,7 @@ def check_orchestration_host_key_authz(args: argparse.Namespace) -> int:
             [
                 f"ClusterRoleBinding/<cluster>/{orchestration}",
                 f"RoleBinding/{target['role_namespace']}/{name}",
+                f"RoleBinding/{target['subject_namespace']}/{token_request_name}",
             ]
         )
         if actual != expected:
@@ -155,6 +208,7 @@ def check_orchestration_host_key_authz(args: argparse.Namespace) -> int:
         assert_cluster_role(resources, label, output)
         assert_role(resources, target, label, output)
         assert_role_binding(resources, target, label, output)
+        assert_token_request_authz(resources, target, label, output)
         assert_bound_surface(resources, target, label, output)
         assert_admission(resources, label, output)
         return output
@@ -204,6 +258,26 @@ def check_orchestration_host_key_authz(args: argparse.Namespace) -> int:
             lambda resources: [
                 resource.replace("  - delete", "  - delete\n  - get")
                 if top_level_field(resource, "kind") == "Role" and metadata_field(resource, "name") == name
+                else resource
+                for resource in resources
+            ],
+        )
+        expect_rejected(
+            "broad TokenRequest grant",
+            lambda resources: [
+                resource.replace("  - serviceaccounts/token", "  - serviceaccounts")
+                if top_level_field(resource, "kind") == "Role"
+                and metadata_field(resource, "name") == token_request_name
+                else resource
+                for resource in resources
+            ],
+        )
+        expect_rejected(
+            "unbound TokenRequest resource",
+            lambda resources: [
+                re.sub(r"  resourceNames:\n  - codewire-orchestration\n", "", resource)
+                if top_level_field(resource, "kind") == "Role"
+                and metadata_field(resource, "name") == token_request_name
                 else resource
                 for resource in resources
             ],
