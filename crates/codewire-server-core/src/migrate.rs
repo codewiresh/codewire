@@ -54,6 +54,8 @@ mod tests {
         "39cfb8f995781eb82eeef1aa902923eebdb6bfa6eef66b64213cd0d880e7bc4d";
     const RETIRE_MESH_OIDC_CLIENT_VERSION: i64 = 5;
     const ORGANIZATION_ROUTE_SLUGS_VERSION: i64 = 11;
+    const OPENBAO_SECRET_AUTHORITY_VERSION: i64 = 12;
+    const APPLIED_OPENBAO_SECRET_AUTHORITY_CHECKSUM: &str = "cbd3494fde9235aaf507236bd18440f2d0c87fe6c42f9b1ce3af78f327b044aa968149229acd1bf064b6d4e67c54ed40";
     const OPENBAO_NATIVE_SECRETS_VERSION: i64 = 13;
 
     async fn startup(database_url: String) -> anyhow::Result<()> {
@@ -144,6 +146,48 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires TEST_DATABASE_URL"]
+    async fn deployed_openbao_expansion_ledger_advances_to_current_history() -> anyhow::Result<()> {
+        let admin_url = std::env::var("TEST_DATABASE_URL")
+            .context("TEST_DATABASE_URL is required for migration tests")?;
+        let test_db = TestDatabase::create(&admin_url).await?;
+        let result = async {
+            apply_migrations_before(&test_db.url, OPENBAO_NATIVE_SECRETS_VERSION).await?;
+
+            let pool = PgPoolOptions::new()
+                .max_connections(1)
+                .connect(&test_db.url)
+                .await?;
+            let checksum: String = sqlx::query_scalar(
+                "SELECT encode(checksum, 'hex') FROM _sqlx_migrations WHERE version = $1",
+            )
+            .bind(OPENBAO_SECRET_AUTHORITY_VERSION)
+            .fetch_one(&pool)
+            .await?;
+            anyhow::ensure!(
+                checksum == APPLIED_OPENBAO_SECRET_AUTHORITY_CHECKSUM,
+                "migration 12 no longer matches the deployed SQLx ledger"
+            );
+            pool.close().await;
+
+            ensure_schema(&test_db.url).await?;
+            let pool = PgPoolOptions::new()
+                .max_connections(1)
+                .connect(&test_db.url)
+                .await?;
+            anyhow::ensure!(
+                applied_migrations(&pool).await?.len() == MIGRATOR.iter().count(),
+                "deployed migration 12 ledger did not advance to current history"
+            );
+            pool.close().await;
+            anyhow::Ok(())
+        }
+        .await;
+        let cleanup = test_db.drop().await;
+        result.and(cleanup)
+    }
+
+    #[tokio::test]
+    #[ignore = "requires TEST_DATABASE_URL"]
     async fn openbao_finalization_rejects_retained_plaintext_atomically() -> anyhow::Result<()> {
         let admin_url = std::env::var("TEST_DATABASE_URL")
             .context("TEST_DATABASE_URL is required for migration tests")?;
@@ -205,7 +249,7 @@ mod tests {
             .context("TEST_DATABASE_URL is required for migration tests")?;
         let test_db = TestDatabase::create(&admin_url).await?;
         let result = async {
-            apply_migrations_before(&test_db.url, OPENBAO_NATIVE_SECRETS_VERSION).await?;
+            apply_migrations_before(&test_db.url, OPENBAO_SECRET_AUTHORITY_VERSION).await?;
 
             let pool = PgPoolOptions::new()
                 .max_connections(1)
@@ -240,14 +284,19 @@ mod tests {
             .execute(&pool)
             .await?;
             let kbs_uri = format!("kbs:///default/codewire-workspace-luks/{ENVIRONMENT_ID}");
+            let historical_path = format!("/confidential-storage/{ENVIRONMENT_ID}");
             let openbao_path = format!("confidential-storage/{ENVIRONMENT_ID}");
+            // Migration 9's table has twelve columns. Seed that exact historical
+            // row shape positionally, then let migrations 12 and 13 expand and
+            // finalize it through the standard SQLx path.
             sqlx::query(
                 "INSERT INTO confidential_storage_keys \
-                 (environment_id, kbs_uri, openbao_path) VALUES ($1, $2, $3)",
+                 VALUES ($1, $2, $3, DEFAULT, NULL, DEFAULT, NULL, \
+                         DEFAULT, DEFAULT, NULL, NULL, NULL)",
             )
             .bind(ENVIRONMENT_ID)
             .bind(&kbs_uri)
-            .bind(&openbao_path)
+            .bind(&historical_path)
             .execute(&pool)
             .await?;
             pool.close().await;

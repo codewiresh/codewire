@@ -48,9 +48,15 @@ done < <(git ls-files -co --exclude-standard -z)
 [[ "$(LC_ALL=C rg -i -c -- "$PATTERN" \
   crates/codewire-server-core/migrations/0010_tenant_secret_envelopes.sql)" == 5 ]]
 [[ "$(LC_ALL=C rg -i -c -- "$PATTERN" \
-  crates/codewire-server-core/migrations/0012_expand_openbao_secret_authority.sql)" == 4 ]]
+  crates/codewire-server-core/migrations/0012_expand_openbao_secret_authority.sql)" == 2 ]]
 [[ "$(LC_ALL=C rg -i -c -- "$PATTERN" \
   crates/codewire-server-core/migrations/0013_finalize_openbao_native_secrets.sql)" == 1 ]]
+
+# Migration 12 is already applied in Dev. Bind its exact SQLx checksum so a
+# compatibility edit cannot silently rewrite the immutable ledger contract.
+readonly MIGRATION_12=crates/codewire-server-core/migrations/0012_expand_openbao_secret_authority.sql
+readonly MIGRATION_12_SHA384=cbd3494fde9235aaf507236bd18440f2d0c87fe6c42f9b1ce3af78f327b044aa968149229acd1bf064b6d4e67c54ed40
+[[ "$(sha384sum "$MIGRATION_12" | awk '{print $1}')" == "$MIGRATION_12_SHA384" ]]
 
 # The final pre-GA migration removes every runtime fallback only after a
 # zero-row preflight. Historical applied migrations remain immutable.

@@ -166,7 +166,7 @@ run_database() {
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
     cargo test -p codewire-server-core --lib migrate:: -- --ignored --nocapture \
       | tee "$logfile"
-  assert_passed_count "server-core migration matrix" "$logfile" 8
+  assert_passed_count "server-core migration matrix" "$logfile" 9
 
   logfile="$RUN_DIR/session-hash-only.log"
   DATABASE_URL="$DATABASE_URL_RUST" \
