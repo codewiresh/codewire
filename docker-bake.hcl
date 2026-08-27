@@ -84,6 +84,9 @@ target "services" {
   labels = {
     "org.opencontainers.image.title" = "codewire-services"
   }
+  args = {
+    CODEWIRE_ORCHESTRATION_FEATURES = ""
+  }
 }
 
 target "mesh" {
@@ -127,7 +130,8 @@ target "dashboard-ci" {
 target "services-ci" {
   inherits = ["services"]
   args = {
-    CODEWIRE_RUST_PROFILE = "ci"
+    CODEWIRE_RUST_PROFILE           = "ci"
+    CODEWIRE_ORCHESTRATION_FEATURES = "kind-e2e"
   }
   labels = {
     "dev.codewire.build.profile" = "ci"

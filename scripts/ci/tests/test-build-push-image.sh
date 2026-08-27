@@ -20,7 +20,6 @@ readonly DERP_DOCKERFILE="$ROOT/deployments/docker/derp.Dockerfile"
 readonly SERVICES_BINARIES=(
   codewire-idp
   codewire-orchestration
-  tenant-secret-operator
   sidecar-smoke
   codewire-billing
   codewire-coordinator
@@ -95,6 +94,12 @@ verify_services_dockerfile_contract() {
     fail 'services runtime does not consume the reviewed Debian image'
   grep -qF 'USER 65532:65532' "$SERVICES_DOCKERFILE" ||
     fail 'services runtime user changed'
+  grep -qF 'ARG CODEWIRE_ORCHESTRATION_FEATURES=' "$SERVICES_DOCKERFILE" ||
+    fail 'services image lacks the isolated orchestration feature input'
+  grep -qF 'CODEWIRE_ORCHESTRATION_FEATURES = ""' "$ROOT/docker-bake.hcl" ||
+    fail 'promotable services image can enable test-only orchestration features'
+  grep -qF 'CODEWIRE_ORCHESTRATION_FEATURES = "kind-e2e"' "$ROOT/docker-bake.hcl" ||
+    fail 'non-promotable Kind services image lacks its test-only feature'
 
   for binary in "${SERVICES_BINARIES[@]}"; do
     [[ "$(grep -cF -- "--bin ${binary}" "$SERVICES_DOCKERFILE")" -eq 1 ]] ||

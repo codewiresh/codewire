@@ -80,8 +80,6 @@ pub async fn teardown_organization_tenant_secrets(
             "tenant secret project re-enumeration is not empty".into(),
         ));
     }
-    delete_path(store, &project_parent).await?;
-
     let database_project_ids: BTreeSet<String> = sqlx::query_scalar::<_, String>(
         "SELECT id FROM secret_projects WHERE org_id = $1 ORDER BY id",
     )
@@ -213,7 +211,7 @@ mod tests {
     use uuid::Uuid;
 
     use crate::api::secret_projects::delete_secret_project_storage;
-    use crate::worker::secrets::LocalSecretStore;
+    use crate::worker::secret_envelope::TestKekProvider;
 
     use super::*;
 
@@ -298,17 +296,25 @@ mod tests {
     async fn cleanup(pool: &PgPool, fixture: &Fixture) {
         let project_path = format!("/projects/{}/{}", fixture.org_id, fixture.project_id);
         let _ = sqlx::query(
-            r#"DELETE FROM local_secrets
+            r#"DELETE FROM tenant_secrets
                WHERE path = $1 OR left(path, char_length($2) + 1) = $2 || '/'"#,
         )
         .bind(&project_path)
         .bind(format!("/projects/{}", fixture.org_id))
         .execute(pool)
         .await;
-        let _ = sqlx::query("DELETE FROM local_secrets WHERE path = $1")
+        let _ = sqlx::query("DELETE FROM tenant_secrets WHERE path = $1")
             .bind(format!("/org-secrets/{}", fixture.org_id))
             .execute(pool)
             .await;
+        let _ = sqlx::query(
+            "DELETE FROM tenant_secret_deks WHERE scope_id = $1 \
+             AND NOT EXISTS (SELECT 1 FROM tenant_secrets \
+                             WHERE tenant_secrets.dek_id = tenant_secret_deks.dek_id)",
+        )
+        .bind(&fixture.org_id)
+        .execute(pool)
+        .await;
         let _ = sqlx::query("DELETE FROM secret_projects WHERE org_id = $1")
             .bind(&fixture.org_id)
             .execute(pool)
@@ -358,11 +364,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn db_partial_local_delete_retains_project_discovery_row() {
+    async fn db_failed_encrypted_delete_retains_project_discovery_row() {
         let Some(pool) = pool().await else { return };
         let fixture = seed(&pool).await;
         let path = format!("/projects/{}/{}", fixture.org_id, fixture.project_id);
-        let store = SecretStore::Local(LocalSecretStore { pool: pool.clone() });
+        let store = SecretStore::new_for_test(pool.clone(), Arc::new(TestKekProvider));
         store
             .set_secret_at_path(&path, "A_FIRST", "first-value")
             .await
@@ -373,17 +379,17 @@ mod tests {
             .unwrap();
 
         let suffix = Uuid::new_v4().simple().to_string();
-        let function = format!("reject_local_secret_delete_{suffix}");
-        let trigger = format!("reject_local_secret_delete_trigger_{suffix}");
+        let function = format!("reject_tenant_secret_delete_{suffix}");
+        let trigger = format!("reject_tenant_secret_delete_trigger_{suffix}");
         let trigger_sql = format!(
             r#"CREATE FUNCTION {function}() RETURNS trigger LANGUAGE plpgsql AS $$
                BEGIN
                  IF OLD.path = '{path}' AND OLD.key = 'Z_FAIL' THEN
-                   RAISE EXCEPTION 'injected local secret deletion failure';
+                   RAISE EXCEPTION 'injected tenant secret deletion failure';
                  END IF;
                  RETURN OLD;
                END $$;
-               CREATE TRIGGER {trigger} BEFORE DELETE ON local_secrets
+               CREATE TRIGGER {trigger} BEFORE DELETE ON tenant_secrets
                FOR EACH ROW EXECUTE FUNCTION {function}();"#
         );
         sqlx::raw_sql(&trigger_sql).execute(&pool).await.unwrap();
@@ -404,11 +410,11 @@ mod tests {
         assert_eq!(
             remaining.len(),
             2,
-            "a failed local path delete must roll back atomically"
+            "a failed encrypted path delete must roll back atomically"
         );
 
         let drop_sql =
-            format!("DROP TRIGGER {trigger} ON local_secrets; DROP FUNCTION {function}();");
+            format!("DROP TRIGGER {trigger} ON tenant_secrets; DROP FUNCTION {function}();");
         sqlx::raw_sql(&drop_sql).execute(&pool).await.unwrap();
         cleanup(&pool, &fixture).await;
     }
@@ -418,7 +424,10 @@ mod tests {
         let Some(pool) = pool().await else { return };
         let fixture = seed(&pool).await;
         let path = format!("/projects/{}/{}", fixture.org_id, fixture.project_id);
-        let store = Arc::new(SecretStore::Local(LocalSecretStore { pool: pool.clone() }));
+        let store = Arc::new(SecretStore::new_for_test(
+            pool.clone(),
+            Arc::new(TestKekProvider),
+        ));
         let (admitted_tx, admitted_rx) = oneshot::channel();
         let (continue_tx, continue_rx) = oneshot::channel();
         let task_pool = pool.clone();

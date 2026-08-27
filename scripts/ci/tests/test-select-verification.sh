@@ -167,6 +167,7 @@ run_paths_case shellcheck_policy_domain_future pull_request refs/pull/2001/head 
 grep -qF 'scripts/ci/tests/test-shellcheck-policy-domain.sh' "$SELECTOR"
 run_paths_case openbao_secret_authority_policy pull_request refs/pull/20011/head false \
   'policy policy_shell' scripts/ci/tests/test-openbao-only-secret-authority.sh \
+  scripts/ci/tests/test-preflight-openbao-native-secrets.sh \
   scripts/ci/tests/test-sync-local-secrets.sh
 run_paths_case local_secret_sync_policy pull_request refs/pull/20012/head false \
   'policy policy_shell' scripts/dev/kind/sync-local-secrets.sh

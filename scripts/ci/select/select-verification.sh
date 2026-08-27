@@ -408,6 +408,7 @@ if [ "$event_selected" = false ]; then
       scripts/ci/tests/test-rust-cache-receipts.sh|\
       scripts/ci/tests/test-shellcheck-policy-domain.sh|\
       scripts/ci/tests/test-openbao-only-secret-authority.sh|\
+      scripts/ci/tests/test-preflight-openbao-native-secrets.sh|\
       scripts/ci/tests/test-sync-local-secrets.sh|\
       scripts/ci/tests/fixtures/cargo-cache-df.sh|\
       scripts/ci/verify/integration-postgres.sh|scripts/ci/tests/test-integration-postgres.sh|\

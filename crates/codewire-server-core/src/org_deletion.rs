@@ -1221,12 +1221,24 @@ pub async fn finalize_organization_deletion_database(
 
     let project_parent = format!("/projects/{organization_id}");
     sqlx::query(
-        r#"DELETE FROM local_secrets
+        r#"DELETE FROM tenant_secrets
            WHERE path = $1
               OR left(path, char_length($2) + 1) = $2 || '/'"#,
     )
     .bind(format!("/org-secrets/{organization_id}"))
     .bind(&project_parent)
+    .execute(&mut *tx)
+    .await
+    .map_err(AppError::from)?;
+    sqlx::query(
+        r#"DELETE FROM tenant_secret_deks
+           WHERE scope = 'org' AND scope_id = $1
+             AND NOT EXISTS (
+                 SELECT 1 FROM tenant_secrets
+                 WHERE tenant_secrets.dek_id = tenant_secret_deks.dek_id
+             )"#,
+    )
+    .bind(organization_id)
     .execute(&mut *tx)
     .await
     .map_err(AppError::from)?;

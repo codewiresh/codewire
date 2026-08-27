@@ -13,7 +13,7 @@ readonly -a ALLOWED=(
   crates/codewire-server-core/migrations/0009_confidential_storage_keys.sql
   crates/codewire-server-core/migrations/0010_tenant_secret_envelopes.sql
   crates/codewire-server-core/migrations/0012_expand_openbao_secret_authority.sql
-  crates/codewire-server-core/src/migrate.rs
+  crates/codewire-server-core/migrations/0013_finalize_openbao_native_secrets.sql
 )
 
 is_allowed() {
@@ -50,22 +50,48 @@ done < <(git ls-files -co --exclude-standard -z)
 [[ "$(LC_ALL=C rg -i -c -- "$PATTERN" \
   crates/codewire-server-core/migrations/0012_expand_openbao_secret_authority.sql)" == 4 ]]
 [[ "$(LC_ALL=C rg -i -c -- "$PATTERN" \
-  crates/codewire-server-core/src/migrate.rs)" == 8 ]]
+  crates/codewire-server-core/migrations/0013_finalize_openbao_native_secrets.sql)" == 1 ]]
 
-# The consuming source is OpenBao-only, but the additive rollout deliberately
-# retains the previous column and control state until live acceptance closes
-# the rollback window. A later cleanup migration owns their removal.
-grep -Fq 'ADD COLUMN openbao_path text;' \
-  crates/codewire-server-core/migrations/0012_expand_openbao_secret_authority.sql
-grep -Fq 'CREATE TRIGGER confidential_storage_openbao_path_compat' \
-  crates/codewire-server-core/migrations/0012_expand_openbao_secret_authority.sql
-grep -Fq "state IN ('infisical', 'local', 'importing', 'postgres-readonly', 'postgres')" \
-  crates/codewire-server-core/migrations/0012_expand_openbao_secret_authority.sql
-grep -Fq "column_name = 'infisical_path' AND data_type = 'text'" \
-  crates/codewire-server-core/src/migrate.rs
-if rg -n --fixed-strings -- 'DROP COLUMN infisical_path' \
-  crates/codewire-server-core/migrations; then
-  printf 'rollback-compatible column was removed before live acceptance\n' >&2
+# The final pre-GA migration removes every runtime fallback only after a
+# zero-row preflight. Historical applied migrations remain immutable.
+readonly FINALIZATION=crates/codewire-server-core/migrations/0013_finalize_openbao_native_secrets.sql
+for required in \
+  'requires local_secrets=0' \
+  'requires tenant_secrets=0' \
+  'requires tenant_secret_deks=0' \
+  'DROP TABLE public.local_secrets' \
+  'DROP TABLE public.tenant_secret_control' \
+  'DROP COLUMN infisical_path' \
+  "provider = 'openbao-transit'"; do
+  grep -Fq "$required" "$FINALIZATION"
+done
+
+if rg -n \
+  'TENANT_SECRET_(STORE|KEK_PROVIDER|KEYRING)|LocalSecretStore|tenant-secret-operator|tenant_secret_control|local_secrets|KekProviderKind::Keyring' \
+  crates/codewire-orchestration/src deployments docs/SECRETS.md; then
+  printf 'retired tenant-secret runtime choice remains active\n' >&2
+  exit 1
+fi
+if rg -n --glob '!migrate.rs' \
+  'tenant_secret_control|local_secrets' crates/codewire-server-core/src; then
+  printf 'retired tenant-secret runtime choice remains active\n' >&2
+  exit 1
+fi
+
+# The synthetic KEK is a deliberate, two-part Kind contract: only the
+# non-promotable image is compiled with it, and every repository-owned Kind
+# topology opts into it explicitly. Production images and manifests must not.
+grep -Fq 'CODEWIRE_ORCHESTRATION_FEATURES = "kind-e2e"' docker-bake.hcl
+grep -Fq 'CODEWIRE_KIND_TENANT_SECRET_TEST_PROVIDER: "true"' \
+  deployments/k8s/overlays/local-kind/configmap-patch.yaml
+grep -Fq 'CODEWIRE_KIND_TENANT_SECRET_TEST_PROVIDER: "true"' \
+  deployments/k8s/overlays/local-kind-static/configmap-patch.yaml
+grep -Fq 'CODEWIRE_KIND_TENANT_SECRET_TEST_PROVIDER: "true"' \
+  tests/e2e/kind/support.yaml
+if rg -n 'CODEWIRE_KIND_TENANT_SECRET_TEST_PROVIDER' \
+  deployments/k8s/base deployments/k8s/overlays/dev deployments/k8s/overlays/production \
+  deployments/docker/services.Dockerfile; then
+  printf 'Kind-only tenant-secret provider leaked into a promotable surface\n' >&2
   exit 1
 fi
 

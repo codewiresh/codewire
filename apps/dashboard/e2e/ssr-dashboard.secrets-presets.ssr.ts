@@ -113,16 +113,32 @@ test.describe.serial("server-rendered secrets and presets", () => {
   test.afterAll(async () => {
     if (orgId) {
       await sql`
-        DELETE FROM local_secrets
+        DELETE FROM tenant_secrets
         WHERE path = ${`/org-secrets/${orgId}`}
            OR path LIKE ${`/projects/${orgId}/%`}
+      `;
+      await sql`
+        DELETE FROM tenant_secret_deks
+        WHERE scope = 'org' AND scope_id = ${orgId}
+          AND NOT EXISTS (
+            SELECT 1 FROM tenant_secrets
+            WHERE tenant_secrets.dek_id = tenant_secret_deks.dek_id
+          )
       `;
     }
     if (ownerId) {
       await sql`
-        DELETE FROM local_secrets
+        DELETE FROM tenant_secrets
         WHERE path = ${`/users/${ownerId}`}
           AND key LIKE ${`${secretPrefix}%`}
+      `;
+      await sql`
+        DELETE FROM tenant_secret_deks
+        WHERE scope = 'user' AND scope_id = ${ownerId}
+          AND NOT EXISTS (
+            SELECT 1 FROM tenant_secrets
+            WHERE tenant_secrets.dek_id = tenant_secret_deks.dek_id
+          )
       `;
     }
     await cleanupTestOrg(slug);

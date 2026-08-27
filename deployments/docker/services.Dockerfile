@@ -9,7 +9,6 @@
 #   deployments/k8s/billing        → command: ["/codewire-billing"]
 #   deployments/k8s/coordinator    → command: ["/codewire-coordinator"]
 #   schema bootstrap               → command: ["/codewire-db-migrate"]
-#   tenant-secret operations       → command: ["/tenant-secret-operator"]
 #   runtime UDP peer relay         → command: ["/codewire-udp-relay"]
 #   diagnostics                    → command: ["/sidecar-smoke"]
 #
@@ -43,6 +42,7 @@ ARG SCCACHE_BUCKET
 ARG SCCACHE_ENDPOINT
 ARG CODEWIRE_SCCACHE_PREFIX
 ARG CODEWIRE_RUST_PROFILE=release
+ARG CODEWIRE_ORCHESTRATION_FEATURES=
 RUN --mount=type=cache,id=codewire-services-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=codewire-services-cargo-git,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=codewire-sccache-v2,target=/var/cache/sccache,sharing=shared \
@@ -50,17 +50,20 @@ RUN --mount=type=cache,id=codewire-services-cargo-registry,target=/usr/local/car
     find Cargo.toml Cargo.lock crates proto libs/gateway-proto -type f -exec touch {} + && \
     codewire-rust-build cargo build --locked --profile "$CODEWIRE_RUST_PROFILE" \
       --bin codewire-idp \
-      --bin codewire-orchestration \
-      --bin tenant-secret-operator \
       --bin sidecar-smoke \
       --bin codewire-billing \
       --bin codewire-coordinator \
       --bin codewire-db-migrate \
       --bin codewire-udp-relay && \
+    set -- && \
+    if [ -n "$CODEWIRE_ORCHESTRATION_FEATURES" ]; then \
+      set -- --features "$CODEWIRE_ORCHESTRATION_FEATURES"; \
+    fi && \
+    codewire-rust-build cargo build --locked --profile "$CODEWIRE_RUST_PROFILE" \
+      -p codewire-orchestration --bin codewire-orchestration "$@" && \
     mkdir -p /out && \
     cp "target/$CODEWIRE_RUST_PROFILE/codewire-idp" /out/codewire-idp && \
     cp "target/$CODEWIRE_RUST_PROFILE/codewire-orchestration" /out/codewire-orchestration && \
-    cp "target/$CODEWIRE_RUST_PROFILE/tenant-secret-operator" /out/tenant-secret-operator && \
     cp "target/$CODEWIRE_RUST_PROFILE/sidecar-smoke" /out/sidecar-smoke && \
     cp "target/$CODEWIRE_RUST_PROFILE/codewire-billing" /out/codewire-billing && \
     cp "target/$CODEWIRE_RUST_PROFILE/codewire-coordinator" /out/codewire-coordinator && \
@@ -70,7 +73,6 @@ RUN --mount=type=cache,id=codewire-services-cargo-registry,target=/usr/local/car
 FROM ${DEBIAN_IMAGE}
 COPY --from=builder /out/codewire-idp /codewire-idp
 COPY --from=builder /out/codewire-orchestration /codewire-orchestration
-COPY --from=builder /out/tenant-secret-operator /tenant-secret-operator
 COPY --from=builder /out/sidecar-smoke /sidecar-smoke
 COPY --from=builder /out/codewire-billing /codewire-billing
 COPY --from=builder /out/codewire-coordinator /codewire-coordinator

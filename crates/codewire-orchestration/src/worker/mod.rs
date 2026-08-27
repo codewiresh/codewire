@@ -34,7 +34,6 @@ pub mod secret_envelope;
 pub mod secrets;
 pub mod setup;
 pub mod setup_lease;
-pub mod tenant_secret_operator;
 pub mod tenant_secret_teardown;
 
 use serde::{Deserialize, Serialize};

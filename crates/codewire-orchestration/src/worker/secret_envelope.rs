@@ -1,13 +1,12 @@
 //! Authenticated envelopes and KEK providers for tenant secrets.
 //!
 //! Secret values are encrypted locally under one 256-bit DEK per tenant
-//! scope. A [`KekProvider`] wraps that DEK either with the retained local
-//! keyring (tests and local development) or with OpenBao Transit (deployed
-//! environments). Provider responses carry the observed key version beside
-//! the wrapped DEK, so callers never race a separate "active version" query.
+//! scope. OpenBao Transit wraps each DEK. Provider responses carry the
+//! observed key version beside the wrapped DEK, so callers never race a
+//! separate "active version" query.
 
 use std::fmt;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use aes_gcm::aead::{Aead, Payload};
@@ -15,7 +14,6 @@ use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
 use async_trait::async_trait;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
-use codewire_server_core::kek::KekKeyring;
 use futures_util::StreamExt;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
@@ -31,7 +29,6 @@ const NONCE_BYTES: usize = 12;
 const TAG_BYTES: usize = 16;
 const SECRET_AAD_DOMAIN_V1: &[u8] = b"codewire/tenant-secret/v1\0";
 const DEK_CONTEXT_DOMAIN_V1: &[u8] = b"codewire/tenant-dek-context/v1\0";
-const KEYRING_WRAP_AAD_DOMAIN_V1: &[u8] = b"codewire/tenant-dek-keyring-wrap/v1\0";
 const DEFAULT_TOKEN_PATH: &str = "/var/run/secrets/codewire-tenant-bao/token";
 const DEFAULT_AUTH_MOUNT: &str = "kubernetes-codewire";
 const DEFAULT_TRANSIT_MOUNT: &str = "transit";
@@ -60,7 +57,7 @@ impl SecretEnvelopeError {
         }
     }
 
-    fn provider(
+    pub(crate) fn provider(
         class: &'static str,
         provider: KekProviderKind,
         key_version: Option<u32>,
@@ -307,21 +304,18 @@ fn length_prefixed(domain: &[u8], values: &[&[u8]]) -> Vec<u8> {
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum KekProviderKind {
-    Keyring,
     OpenBaoTransit,
 }
 
 impl KekProviderKind {
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Keyring => "keyring",
             Self::OpenBaoTransit => "openbao-transit",
         }
     }
 
     pub fn from_persisted(value: &str) -> Option<Self> {
         match value {
-            "keyring" => Some(Self::Keyring),
             "openbao-transit" => Some(Self::OpenBaoTransit),
             _ => None,
         }
@@ -382,181 +376,72 @@ pub trait KekProvider: Send + Sync {
     async fn authority_id(&self) -> Result<Option<String>, SecretEnvelopeError>;
 }
 
-#[derive(Clone)]
-pub struct KeyringKekProvider {
-    keyring: KekKeyring,
-}
+/// In-memory provider used only by tests which need the encrypted PostgreSQL
+/// store without a live OpenBao service. It persists the same OpenBao-shaped
+/// envelope fields so schema tests exercise the production contract.
+#[cfg(any(test, feature = "kind-e2e"))]
+pub(crate) struct TestKekProvider;
 
-impl KeyringKekProvider {
-    pub fn new(keyring: KekKeyring) -> Self {
-        Self { keyring }
-    }
-
-    fn wrap(
-        &self,
-        context: &DekContext,
-        plaintext: &[u8; DEK_BYTES],
-    ) -> Result<WrappedDek, SecretEnvelopeError> {
-        let provider = KekProviderKind::Keyring;
-        let version = parse_keyring_id(self.keyring.active_id()).ok_or_else(|| {
-            SecretEnvelopeError::configuration("invalid-active-keyring-version", provider)
-        })?;
-        let key = self.keyring.key(self.keyring.active_id()).ok_or_else(|| {
-            SecretEnvelopeError::provider(
-                "active-keyring-key-missing",
-                provider,
-                Some(version),
-                Some(WRAPPED_DEK_FORMAT_V1),
-            )
-        })?;
-        let cipher = Aes256Gcm::new_from_slice(key).map_err(|_| {
-            SecretEnvelopeError::provider(
-                "invalid-keyring-key-length",
-                provider,
-                Some(version),
-                Some(WRAPPED_DEK_FORMAT_V1),
-            )
-        })?;
-        let mut nonce = [0_u8; NONCE_BYTES];
-        rand::rngs::OsRng.fill_bytes(&mut nonce);
-        let aad = keyring_wrap_aad(context, version);
-        let ciphertext = cipher
-            .encrypt(
-                Nonce::from_slice(&nonce),
-                Payload {
-                    msg: plaintext,
-                    aad: &aad,
-                },
-            )
-            .map_err(|_| {
-                SecretEnvelopeError::provider(
-                    "keyring-wrap-failed",
-                    provider,
-                    Some(version),
-                    Some(WRAPPED_DEK_FORMAT_V1),
-                )
-            })?;
-        Ok(WrappedDek {
-            provider,
-            key_name: DEFAULT_TRANSIT_KEY.to_owned(),
-            key_version: version,
-            ciphertext,
-            nonce: Some(nonce.to_vec()),
-            format: WRAPPED_DEK_FORMAT_V1,
-        })
-    }
-
-    fn validate<'a>(
-        &self,
-        wrapped: &'a WrappedDek,
-    ) -> Result<(&'a [u8], [u8; NONCE_BYTES]), SecretEnvelopeError> {
-        let error = |class| {
-            SecretEnvelopeError::provider(
-                class,
-                KekProviderKind::Keyring,
-                Some(wrapped.key_version),
-                Some(wrapped.format),
-            )
-        };
-        if wrapped.provider != KekProviderKind::Keyring
-            || wrapped.key_name != DEFAULT_TRANSIT_KEY
-            || wrapped.format != WRAPPED_DEK_FORMAT_V1
-            || wrapped.key_version == 0
-            || wrapped.ciphertext.len() != DEK_BYTES + TAG_BYTES
-        {
-            return Err(error("invalid-keyring-envelope"));
-        }
-        let nonce: [u8; NONCE_BYTES] = wrapped
-            .nonce
-            .as_deref()
-            .ok_or_else(|| error("invalid-keyring-envelope"))?
-            .try_into()
-            .map_err(|_| error("invalid-keyring-envelope"))?;
-        Ok((&wrapped.ciphertext, nonce))
-    }
-}
-
+#[cfg(any(test, feature = "kind-e2e"))]
 #[async_trait]
-impl KekProvider for KeyringKekProvider {
+impl KekProvider for TestKekProvider {
     fn kind(&self) -> KekProviderKind {
-        KekProviderKind::Keyring
+        KekProviderKind::OpenBaoTransit
     }
 
-    async fn generate(&self, context: &DekContext) -> Result<GeneratedDek, SecretEnvelopeError> {
+    async fn generate(&self, _context: &DekContext) -> Result<GeneratedDek, SecretEnvelopeError> {
         let mut plaintext = Zeroizing::new([0_u8; DEK_BYTES]);
         rand::rngs::OsRng.fill_bytes(&mut *plaintext);
-        let wrapped = self.wrap(context, &plaintext)?;
-        Ok(GeneratedDek { plaintext, wrapped })
+        let ciphertext = format!("vault:v1:{}", STANDARD.encode(*plaintext)).into_bytes();
+        Ok(GeneratedDek {
+            plaintext,
+            wrapped: WrappedDek {
+                provider: KekProviderKind::OpenBaoTransit,
+                key_name: DEFAULT_TRANSIT_KEY.into(),
+                key_version: 1,
+                ciphertext,
+                nonce: None,
+                format: WRAPPED_DEK_FORMAT_V1,
+            },
+        })
     }
 
     async fn unwrap(
         &self,
-        context: &DekContext,
+        _context: &DekContext,
         wrapped: &WrappedDek,
     ) -> Result<Zeroizing<[u8; DEK_BYTES]>, SecretEnvelopeError> {
-        let (ciphertext, nonce) = self.validate(wrapped)?;
-        let error = |class| {
+        let error = || {
             SecretEnvelopeError::provider(
-                class,
-                KekProviderKind::Keyring,
+                "test-provider-envelope-invalid",
+                KekProviderKind::OpenBaoTransit,
                 Some(wrapped.key_version),
                 Some(wrapped.format),
             )
         };
-        let key_id = format!("v{}", wrapped.key_version);
-        let key = self
-            .keyring
-            .key(&key_id)
-            .ok_or_else(|| error("unknown-keyring-version"))?;
-        let cipher =
-            Aes256Gcm::new_from_slice(key).map_err(|_| error("invalid-keyring-key-length"))?;
-        let aad = keyring_wrap_aad(context, wrapped.key_version);
-        let plaintext = Zeroizing::new(
-            cipher
-                .decrypt(
-                    Nonce::from_slice(&nonce),
-                    Payload {
-                        msg: ciphertext,
-                        aad: &aad,
-                    },
-                )
-                .map_err(|_| error("keyring-authentication-failed"))?,
-        );
-        let dek: [u8; DEK_BYTES] = plaintext
-            .as_slice()
-            .try_into()
-            .map_err(|_| error("invalid-unwrapped-dek-length"))?;
+        let encoded = std::str::from_utf8(&wrapped.ciphertext)
+            .ok()
+            .and_then(|value| value.strip_prefix("vault:v1:"))
+            .ok_or_else(error)?;
+        let decoded = STANDARD.decode(encoded).map_err(|_| error())?;
+        let dek = decoded.as_slice().try_into().map_err(|_| error())?;
         Ok(Zeroizing::new(dek))
     }
 
     async fn rewrap(
         &self,
-        context: &DekContext,
+        _context: &DekContext,
         wrapped: &WrappedDek,
     ) -> Result<WrappedDek, SecretEnvelopeError> {
-        let active_version = parse_keyring_id(self.keyring.active_id()).ok_or_else(|| {
-            SecretEnvelopeError::configuration(
-                "invalid-active-keyring-version",
-                KekProviderKind::Keyring,
-            )
-        })?;
-        let plaintext = self.unwrap(context, wrapped).await?;
-        if wrapped.provider == KekProviderKind::Keyring
-            && wrapped.key_name == DEFAULT_TRANSIT_KEY
-            && wrapped.key_version == active_version
-            && wrapped.format == WRAPPED_DEK_FORMAT_V1
-        {
-            return Ok(wrapped.clone());
-        }
-        self.wrap(context, &plaintext)
+        Ok(wrapped.clone())
     }
 
     async fn authority_id(&self) -> Result<Option<String>, SecretEnvelopeError> {
-        Ok(None)
+        Ok(Some("test-openbao".into()))
     }
 }
 
-fn parse_keyring_id(value: &str) -> Option<u32> {
+fn parse_version(value: &str) -> Option<u32> {
     let version = value.strip_prefix('v')?;
     if !matches!(version.as_bytes().first(), Some(b'1'..=b'9'))
         || !version.as_bytes()[1..].iter().all(u8::is_ascii_digit)
@@ -564,20 +449,6 @@ fn parse_keyring_id(value: &str) -> Option<u32> {
         return None;
     }
     version.parse().ok()
-}
-
-fn keyring_wrap_aad(context: &DekContext, version: u32) -> Vec<u8> {
-    let version = version.to_be_bytes();
-    length_prefixed(
-        KEYRING_WRAP_AAD_DOMAIN_V1,
-        &[
-            KekProviderKind::Keyring.as_str().as_bytes(),
-            DEFAULT_TRANSIT_KEY.as_bytes(),
-            &version,
-            context.scope.as_str().as_bytes(),
-            context.scope_id.as_bytes(),
-        ],
-    )
 }
 
 #[derive(Clone)]
@@ -1076,7 +947,7 @@ fn parse_transit_version(ciphertext: &str) -> Option<u32> {
     if fields.next()? != "vault" {
         return None;
     }
-    let version = parse_keyring_id(fields.next()?)?;
+    let version = parse_version(fields.next()?)?;
     if fields.next()?.is_empty() {
         return None;
     }
@@ -1104,21 +975,11 @@ pub fn verify_dek_fingerprint(
     Ok(())
 }
 
-pub fn load_keyring_provider(
-    directory: &Path,
-    active_id: &str,
-) -> Result<KeyringKekProvider, SecretEnvelopeError> {
-    let keyring = KekKeyring::load(directory, active_id).map_err(|_| {
-        SecretEnvelopeError::configuration("tenant-keyring-load-failed", KekProviderKind::Keyring)
-    })?;
-    Ok(KeyringKekProvider::new(keyring))
-}
-
 #[cfg(test)]
 mod tests {
     use std::fs;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     use axum::Router;
     use axum::extract::{Json, State};
@@ -1130,27 +991,6 @@ mod tests {
 
     fn context(path: &str) -> DekContext {
         DekContext::from_secret_path(path).unwrap()
-    }
-
-    fn keyring_dir() -> PathBuf {
-        static SEQUENCE: AtomicU64 = AtomicU64::new(0);
-        let directory = std::env::temp_dir().join(format!(
-            "codewire-tenant-kek-{}-{}",
-            std::process::id(),
-            SEQUENCE.fetch_add(1, Ordering::Relaxed)
-        ));
-        fs::create_dir(&directory).unwrap();
-        fs::write(
-            directory.join("v1"),
-            "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
-        )
-        .unwrap();
-        fs::write(
-            directory.join("v2"),
-            "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
-        )
-        .unwrap();
-        directory
     }
 
     #[test]
@@ -1235,47 +1075,6 @@ mod tests {
                 .to_string()
                 .contains("failure_class=invalid-secret-ciphertext-length")
         );
-    }
-
-    #[tokio::test]
-    async fn keyring_provider_round_trips_context_and_rewraps_to_observed_active_version() {
-        let directory = keyring_dir();
-        let v1 = load_keyring_provider(&directory, "v1").unwrap();
-        let v2 = load_keyring_provider(&directory, "v2").unwrap();
-        let original_context = context("/org-secrets/org_1");
-        let other_context = context("/org-secrets/org_2");
-
-        let generated = v1.generate(&original_context).await.unwrap();
-        assert_eq!(generated.wrapped.key_version, 1);
-        assert_eq!(
-            v1.unwrap(&original_context, &generated.wrapped)
-                .await
-                .unwrap()
-                .as_ref(),
-            generated.plaintext.as_ref()
-        );
-        assert!(v1.unwrap(&other_context, &generated.wrapped).await.is_err());
-
-        let rewrapped = v2
-            .rewrap(&original_context, &generated.wrapped)
-            .await
-            .unwrap();
-        assert_eq!(rewrapped.key_version, 2);
-        assert_eq!(
-            v2.unwrap(&original_context, &rewrapped)
-                .await
-                .unwrap()
-                .as_ref(),
-            generated.plaintext.as_ref()
-        );
-        assert_eq!(
-            v2.rewrap(&original_context, &rewrapped).await.unwrap(),
-            rewrapped
-        );
-        let mut tampered = rewrapped;
-        tampered.ciphertext[0] ^= 1;
-        assert!(v2.rewrap(&original_context, &tampered).await.is_err());
-        fs::remove_dir_all(directory).unwrap();
     }
 
     #[derive(Default)]

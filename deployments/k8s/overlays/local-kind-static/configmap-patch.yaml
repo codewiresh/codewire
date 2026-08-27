@@ -26,7 +26,7 @@ data:
   CODEWIRE_API_URL: "http://codewire-orchestration.default.svc.cluster.local:8084"
   CODEWIRE_COORDINATOR_URL: "http://codewire-coordinator.default.svc.cluster.local:8090"
   NAMESPACE_PREFIX: "local-tenant"
-  TENANT_SECRET_STORE: "local"
+  CODEWIRE_KIND_TENANT_SECRET_TEST_PROVIDER: "true"
   SANDBOX_REGISTRY_HOST: "git.example.com"
   SANDBOX_NAMESPACE: "dev-sandboxes"
   BILLING_CONTROLLER_ENABLED: "true"

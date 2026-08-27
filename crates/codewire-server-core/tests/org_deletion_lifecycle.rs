@@ -1255,16 +1255,33 @@ async fn configured_finalizer_is_dependency_ordered_idempotent_and_value_blind()
     .execute(&pool)
     .await
     .unwrap();
+    sqlx::query(
+        "INSERT INTO tenant_secret_deks \
+         (dek_id, scope, scope_id, provider, key_name, key_version, wrapped_dek) \
+         VALUES ($1, 'org', $2, 'openbao-transit', 'tenant-dek', 1, \
+                 'vault:v1:generated')",
+    )
+    .bind(format!("dek-orgdel-{suffix}"))
+    .bind(&fixture.org_id)
+    .execute(&pool)
+    .await
+    .unwrap();
     for path in [
         format!("/org-secrets/{}", fixture.org_id),
         format!("/projects/{}/{}", fixture.org_id, project_id),
     ] {
-        sqlx::query("INSERT INTO local_secrets (path, key, value) VALUES ($1, 'CANARY', $2)")
-            .bind(path)
-            .bind(format!("never-log-{suffix}"))
-            .execute(&pool)
-            .await
-            .unwrap();
+        sqlx::query(
+            "INSERT INTO tenant_secrets \
+             (path, key, dek_id, scope, scope_id, ciphertext, nonce) \
+             VALUES ($1, 'CANARY', $2, 'org', $3, \
+                     decode(repeat('11', 16), 'hex'), decode(repeat('22', 12), 'hex'))",
+        )
+        .bind(path)
+        .bind(format!("dek-orgdel-{suffix}"))
+        .bind(&fixture.org_id)
+        .execute(&pool)
+        .await
+        .unwrap();
     }
 
     let requester_id = fixture.alternate_owner.user_id.clone();
@@ -1324,7 +1341,7 @@ async fn configured_finalizer_is_dependency_ordered_idempotent_and_value_blind()
         assert_eq!(count, 0, "{table} retained organization rows");
     }
     let secret_count: i64 = sqlx::query_scalar(
-        r#"SELECT COUNT(*) FROM local_secrets
+        r#"SELECT COUNT(*) FROM tenant_secrets
            WHERE path = $1 OR left(path, char_length($2) + 1) = $2 || '/'"#,
     )
     .bind(format!("/org-secrets/{}", fixture.org_id))

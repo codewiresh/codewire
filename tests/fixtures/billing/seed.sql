@@ -42,13 +42,6 @@ VALUES (
     '2026-01-01 00:00:00'
 );
 
--- Seeded local_secrets so the secrets-list endpoints are deterministic. Fixed
--- created_at/updated_at so the listed metadata matches verbatim.
-INSERT INTO local_secrets (path, key, value, created_at, updated_at)
-VALUES
-    ('/org-secrets/org_contract_1', 'DB_PASSWORD',    'seed-org-secret',  '2026-01-01 00:00:00', '2026-01-02 03:04:05'),
-    ('/users/usr_contract_user',    'OPENAI_API_KEY', 'seed-user-secret', '2026-01-03 00:00:00', '2026-01-04 05:06:07');
-
 INSERT INTO billing_catalog_plans (
     resource_type, plan_key, display_name, price_cents,
     included_devs, max_concurrent_ws, max_team_members,
@@ -148,18 +141,10 @@ INSERT INTO org_invitations (id, org_id, email, role, invited_by, token, status,
 VALUES ('inv_contract_1', 'org_contract_1', 'invitee@codewire.test', 'member', 'usr_contract_admin',
         'invtoken_contract_1', 'pending', '2027-01-01 00:00:00', '2026-01-20 00:00:00', ARRAY['viewer']);
 
--- A seeded secret project (org_id FK → organizations, so it follows the org
--- insert) with two project-scoped local_secrets. Makes the secret-projects
--- list (secret_count enrichment) and the per-project secrets list
--- deterministic. Fixed created_at so the listed project metadata matches
--- verbatim.
+-- A seeded empty secret project (org_id FK → organizations). Encrypted values
+-- are created through the API so fixtures never duplicate envelope logic.
 INSERT INTO secret_projects (id, org_id, name, created_at)
 VALUES ('secproj_contract_1', 'org_contract_1', 'contract-project', '2026-01-05 00:00:00');
-
-INSERT INTO local_secrets (path, key, value, created_at, updated_at)
-VALUES
-    ('/projects/org_contract_1/secproj_contract_1', 'STRIPE_KEY',  'seed-proj-secret-1', '2026-01-06 00:00:00', '2026-01-07 01:02:03'),
-    ('/projects/org_contract_1/secproj_contract_1', 'SENTRY_DSN',  'seed-proj-secret-2', '2026-01-08 00:00:00', '2026-01-09 04:05:06');
 
 -- One invoice fully populated (billing periods set — the case the Go
 -- handler silently dropped), one with the nullable columns NULL.

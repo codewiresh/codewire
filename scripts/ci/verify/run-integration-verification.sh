@@ -166,7 +166,7 @@ run_database() {
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
     cargo test -p codewire-server-core --lib migrate:: -- --ignored --nocapture \
       | tee "$logfile"
-  assert_passed_count "server-core migration matrix" "$logfile" 7
+  assert_passed_count "server-core migration matrix" "$logfile" 8
 
   logfile="$RUN_DIR/session-hash-only.log"
   DATABASE_URL="$DATABASE_URL_RUST" \
@@ -225,30 +225,12 @@ run_database() {
   fi
   assert_passed_count "organization tenant secret teardown matrix" "$logfile" 2
 
-  logfile="$RUN_DIR/local-tenant-secret-authority.log"
-  DATABASE_URL="$DATABASE_URL_RUST" \
-    cargo test -p codewire-orchestration --lib \
-      'worker::secrets::tests::db_local_mutations_require_local_authority' \
-      -- --exact --nocapture | tee "$logfile"
-  if grep -q 'DATABASE_URL unset' "$logfile"; then
-    echo "::error::local tenant secret authority matrix skipped"
-    return 1
-  fi
-  assert_passed_count "local tenant secret authority matrix" "$logfile" 1
-
   logfile="$RUN_DIR/encrypted-tenant-secret-store.log"
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
     cargo test -p codewire-orchestration --lib \
-      'worker::postgres_secrets::tests::encrypted_store_fences_mutations_reencrypts_renames_and_deletes_final_dek' \
+      'worker::postgres_secrets::tests::encrypted_store_reencrypts_renames_and_deletes_final_dek' \
       -- --ignored --exact --nocapture | tee "$logfile"
   assert_passed_count "encrypted tenant secret store matrix" "$logfile" 1
-
-  logfile="$RUN_DIR/tenant-secret-control-transition.log"
-  TEST_DATABASE_URL="$DATABASE_URL_RUST" \
-    cargo test -p codewire-orchestration --lib \
-      'worker::tenant_secret_operator::tests::control_transition_is_forward_only_and_requires_verification' \
-      -- --ignored --exact --nocapture | tee "$logfile"
-  assert_passed_count "tenant secret control transition matrix" "$logfile" 1
 
   logfile="$RUN_DIR/mesh-migration-ledger.log"
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
@@ -354,7 +336,6 @@ build_selected_services() {
   local packages=()
   local orchestration_bins=(
     --bin codewire-orchestration
-    --bin tenant-secret-operator
     --bin log-stream-smoke
   )
   selected service_idp && packages+=( -p codewire-idp )
@@ -647,6 +628,7 @@ start_orchestration_process() {
     KUBECONFIG="$kubeconfig" \
     KUBERNETES_SERVICE_HOST= KUBERNETES_SERVICE_PORT= \
     DATABASE_URL="$DATABASE_URL_RUST" SESSION_SECRET="$SESSION_SECRET" \
+    CODEWIRE_KIND_TENANT_SECRET_TEST_PROVIDER=true \
     ORCHESTRATION_PORT="$ORCHESTRATION_PORT" \
     ANTHROPIC_API_KEY="$anthropic_api_key" \
     TEMPORAL_HOST_PORT="$TEMPORAL_HOST_PORT" WORKER_CONSUMERS= WORKER_LOOPS= \
@@ -666,8 +648,10 @@ run_orchestration() {
   local logfile="$RUN_DIR/orchestration-activity-fencing.log"
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
     cargo_ci test --profile ci -p codewire-orchestration --lib \
-      'worker::' -- --ignored --nocapture | tee "$logfile"
-  assert_passed_count "orchestration activity fencing matrix" "$logfile" 4
+      'worker::' -- --ignored \
+      --skip 'worker::postgres_secrets::tests::encrypted_store_reencrypts_renames_and_deletes_final_dek' \
+      --nocapture | tee "$logfile"
+  assert_passed_count "orchestration activity fencing matrix" "$logfile" 2
 
   start_orchestration
   logfile="$RUN_DIR/orchestration-contract.log"

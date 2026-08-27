@@ -82,13 +82,20 @@ WHERE id IN (
 DELETE FROM user_github_tokens
 WHERE user_id IN ('usr_apikey_contract_admin', 'usr_apikey_contract_user');
 
--- AccountService must keep the existing `/users/{user_id}` secret-store
--- path. local_secrets has no user foreign key, so reset it explicitly.
-DELETE FROM local_secrets
+-- Tenant-secret envelopes have no user foreign key, so reset them explicitly.
+DELETE FROM tenant_secrets
 WHERE path IN (
     '/users/usr_apikey_contract_admin',
     '/users/usr_apikey_contract_user'
 );
+
+DELETE FROM tenant_secret_deks
+WHERE scope = 'user'
+  AND scope_id IN ('usr_apikey_contract_admin', 'usr_apikey_contract_user')
+  AND NOT EXISTS (
+      SELECT 1 FROM tenant_secrets
+      WHERE tenant_secrets.dek_id = tenant_secret_deks.dek_id
+  );
 
 DELETE FROM org_members
 WHERE id IN (

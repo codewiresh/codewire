@@ -336,7 +336,7 @@ mod enabled {
                 .env("TEMPORAL_ADDRESS", &self.temporal_address)
                 .env("TEMPORAL_TASK_QUEUE", queue)
                 .env("CODEWIRE_KIND_FENCING_EVIDENCE_FILE", evidence)
-                .env("TENANT_SECRET_STORE", "local")
+                .env("CODEWIRE_KIND_TENANT_SECRET_TEST_PROVIDER", "true")
                 .env("ENVIRONMENT", "local")
                 .env("SESSION_SECRET", "kind-e2e-not-a-real-secret")
                 .env("SANDBOX_NAMESPACE", SANDBOX_NAMESPACE)
@@ -1340,12 +1340,10 @@ mod enabled {
                 })),
             )
             .await?;
-            sqlx::query(
-                "INSERT INTO local_secrets (path, key, value) VALUES ($1, 'CANARY', 'never-log')",
-            )
-            .bind(format!("/org-secrets/{org_id}"))
-            .execute(&self.pool)
-            .await?;
+            let tenant_secrets = worker::secrets::SecretStore::for_kind_e2e(self.pool.clone());
+            tenant_secrets
+                .set_secret_at_path(&format!("/org-secrets/{org_id}"), "CANARY", "never-log")
+                .await?;
 
             let worker = self.spawn_worker(&queue, &evidence, None, None)?;
             let environment = self.start_create(&env_id, &queue).await?;
@@ -1366,7 +1364,7 @@ mod enabled {
             // real runtime and billing phases have completed. No secret value
             // is included in the injected database error.
             sqlx::query(
-                "DROP TRIGGER IF EXISTS codewire_kind_org_delete_secret_failure ON local_secrets",
+                "DROP TRIGGER IF EXISTS codewire_kind_org_delete_secret_failure ON tenant_secrets",
             )
             .execute(&self.pool)
             .await?;
@@ -1385,7 +1383,7 @@ mod enabled {
             .await?;
             sqlx::query(
                 r#"CREATE TRIGGER codewire_kind_org_delete_secret_failure
-                   BEFORE DELETE ON local_secrets FOR EACH ROW
+                   BEFORE DELETE ON tenant_secrets FOR EACH ROW
                    EXECUTE FUNCTION codewire_kind_org_delete_secret_failure()"#,
             )
             .execute(&self.pool)
@@ -1501,7 +1499,7 @@ mod enabled {
                 "failed organization deletion reopened its write fence"
             );
 
-            sqlx::query("DROP TRIGGER codewire_kind_org_delete_secret_failure ON local_secrets")
+            sqlx::query("DROP TRIGGER codewire_kind_org_delete_secret_failure ON tenant_secrets")
                 .execute(&self.pool)
                 .await?;
             sqlx::query("DROP FUNCTION codewire_kind_org_delete_secret_failure()")
@@ -1561,7 +1559,7 @@ mod enabled {
                     .fetch_one(&self.pool)
                     .await?;
             let secret_count: i64 = sqlx::query_scalar(
-                r#"SELECT COUNT(*) FROM local_secrets
+                r#"SELECT COUNT(*) FROM tenant_secrets
                    WHERE path = $1 OR left(path, char_length($2) + 1) = $2 || '/'"#,
             )
             .bind(format!("/org-secrets/{org_id}"))

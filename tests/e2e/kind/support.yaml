@@ -8,6 +8,11 @@ metadata:
   name: codewire-config
 data:
   DATABASE_URL: postgres://codewire:codewire@postgres:5432/codewire?sslmode=disable
+  # This disposable overlay runs the non-promotable services-ci image, which
+  # is the only image compiled with the synthetic tenant-secret KEK provider.
+  # Keep the runtime opt-in here as well as the developer Kind overlays: the
+  # full repository harness renders tests/e2e/kind directly.
+  CODEWIRE_KIND_TENANT_SECRET_TEST_PROVIDER: "true"
 # Browser proofs use the production-equivalent Rust dashboard through Kind.
   FRONTEND_URL: http://127.0.0.1:8090
   # Kind ingress maps HTTP to host port 8090. The IdP advertises this public
