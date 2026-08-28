@@ -174,6 +174,20 @@ fn valid_protected_workspace_contract(opts: &TemplateOpts) -> bool {
 const CODEWIRE_KATA_CONFIDENTIAL_STORAGE_POLICY_REGO: &str = r#"
 default CreateContainerRequest := false
 
+# containerd's CRI sandbox request is the one intentional exception to the
+# named-container contract. Kata's canonical request marks it with both
+# sandbox types but does not include io.kubernetes.cri.container-name. Keep
+# the exception unable to carry or mount the protected workspace.
+CreateContainerRequest := true if {
+    input.OCI.Annotations["io.kubernetes.cri.container-type"] == "sandbox"
+    input.OCI.Annotations["io.katacontainers.pkg.oci.container_type"] == "pod_sandbox"
+    is_null(object.get(input.OCI.Annotations, "io.kubernetes.cri.container-name", null))
+    confidential_candidates := [storage | some storage in input.storages; codewire_is_confidential_storage_candidate(storage)]
+    count(confidential_candidates) == 0
+    protected_mounts := [mount | some mount in input.OCI.Mounts; codewire_is_protected_destination(mount.destination)]
+    count(protected_mounts) == 0
+}
+
 # Containers without a protected workspace mount keep the established
 # Codewire lifecycle policy. A plaintext or missing-storage downgrade at one
 # of the protected destinations is denied.

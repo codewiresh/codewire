@@ -86,6 +86,36 @@ mod tests {
         })
     }
 
+    fn kata_cri_sandbox_create_input() -> Value {
+        serde_json::json!({
+            "OCI": {
+                "Annotations": {
+                    "io.katacontainers.pkg.oci.container_type": "pod_sandbox",
+                    "io.kubernetes.cri.container-type": "sandbox",
+                    "io.kubernetes.cri.podsandbox.image-name": "registry.k8s.io/pause:3.10",
+                },
+                "Linux": { "Devices": [] },
+                "Mounts": [{
+                    "destination": "/proc",
+                    "source": "proc",
+                    "type_": "proc",
+                    "options": ["nosuid", "noexec", "nodev"],
+                }],
+            },
+            "devices": [],
+            "storages": [{
+                "driver": "image_guest_pull",
+                "driver_options": [],
+                "fstype": "overlay",
+                "fs_group": null,
+                "mount_point": "/run/kata-containers/sandbox/rootfs",
+                "options": [],
+                "shared": false,
+                "source": "pause",
+            }],
+        })
+    }
+
     fn load_golden(name: &str) -> Value {
         let path = format!(
             "{}/tests/fixtures/sandbox/{name}",
@@ -1037,6 +1067,30 @@ mod tests {
             policy,
             &confidential_create_input("dind", dind_image, &["/workspace"])
         ));
+        let cri_sandbox = kata_cri_sandbox_create_input();
+        assert!(
+            kata_policy_allows(policy, &cri_sandbox),
+            "Kata's CRI sandbox request has no container-name and must be authorized before init containers"
+        );
+        let mut sandbox_with_confidential_storage = cri_sandbox.clone();
+        sandbox_with_confidential_storage["storages"] = workspace["storages"].clone();
+        assert!(
+            !kata_policy_allows(policy, &sandbox_with_confidential_storage),
+            "the CRI sandbox must not activate confidential storage"
+        );
+        let mut sandbox_with_protected_mount = cri_sandbox.clone();
+        sandbox_with_protected_mount["OCI"]["Mounts"] = workspace["OCI"]["Mounts"].clone();
+        assert!(
+            !kata_policy_allows(policy, &sandbox_with_protected_mount),
+            "the CRI sandbox must not receive a protected workspace mount"
+        );
+        let mut unnamed_non_sandbox = cri_sandbox.clone();
+        unnamed_non_sandbox["OCI"]["Annotations"]["io.kubernetes.cri.container-type"] =
+            "container".into();
+        assert!(
+            !kata_policy_allows(policy, &unnamed_non_sandbox),
+            "only the canonical CRI sandbox shape may omit container-name"
+        );
         let mut auxiliary = workspace.clone();
         auxiliary["OCI"]["Annotations"]["io.kubernetes.cri.container-name"] =
             "codewire-daemon-init".into();
