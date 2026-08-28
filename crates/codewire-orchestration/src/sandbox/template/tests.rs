@@ -57,6 +57,7 @@ mod tests {
                     "io.kubernetes.cri.container-name": container,
                     "io.kubernetes.cri.image-name": image,
                 },
+                "Linux": { "Devices": [] },
                 "Mounts": destinations.iter().map(|destination| serde_json::json!({
                     "destination": destination,
                     "source": mount_point,
@@ -64,6 +65,7 @@ mod tests {
                     "options": ["rbind", "rprivate", "rw"],
                 })).collect::<Vec<_>>(),
             },
+            "devices": [],
             "storages": [{
                 "driver": "blk",
                 "driver_options": [],
@@ -1035,6 +1037,15 @@ mod tests {
             policy,
             &confidential_create_input("dind", dind_image, &["/workspace"])
         ));
+        let mut auxiliary = workspace.clone();
+        auxiliary["OCI"]["Annotations"]["io.kubernetes.cri.container-name"] =
+            "codewire-daemon-init".into();
+        auxiliary["OCI"]["Mounts"] = serde_json::json!([]);
+        auxiliary["storages"] = serde_json::json!([]);
+        assert!(
+            kata_policy_allows(policy, &auxiliary),
+            "containers outside the measured volume declaration remain usable"
+        );
 
         let mut manifest_substitution = workspace.clone();
         manifest_substitution["storages"][0]["confidential_storage"]["manifest_uri"] =
@@ -1050,6 +1061,12 @@ mod tests {
         let mut missing_storage = workspace.clone();
         missing_storage["storages"] = serde_json::json!([]);
         assert!(!kata_policy_allows(policy, &missing_storage));
+        let mut missing_contract = missing_storage.clone();
+        missing_contract["OCI"]["Mounts"] = serde_json::json!([]);
+        assert!(
+            !kata_policy_allows(policy, &missing_contract),
+            "a protected container must not start without its measured storage contract"
+        );
         let mut mount_option_substitution = workspace.clone();
         mount_option_substitution["OCI"]["Mounts"][0]["options"] =
             serde_json::json!(["rbind", "rw"]);
@@ -1071,6 +1088,16 @@ mod tests {
             .unwrap()
             .push(workspace["storages"][0].clone());
         assert!(!kata_policy_allows(policy, &extra_storage));
+        let mut raw_agent_device = workspace.clone();
+        raw_agent_device["devices"] = serde_json::json!([{
+            "container_path": KATA_CONFIDENTIAL_WORKSPACE_DEVICE_PATH,
+        }]);
+        assert!(!kata_policy_allows(policy, &raw_agent_device));
+        let mut raw_oci_device = workspace.clone();
+        raw_oci_device["OCI"]["Linux"]["Devices"] = serde_json::json!([{
+            "Path": KATA_CONFIDENTIAL_WORKSPACE_DEVICE_PATH,
+        }]);
+        assert!(!kata_policy_allows(policy, &raw_oci_device));
 
         let declaration: serde_json::Value = serde_json::from_str(
             annotations[KATA_CONFIDENTIAL_VOLUME_ANNOTATION]
@@ -1082,11 +1109,47 @@ mod tests {
             declaration,
             serde_json::json!({
                 "workspace": {
+                    "devicePath": KATA_CONFIDENTIAL_WORKSPACE_DEVICE_PATH,
                     "manifestUri": CONTENT_ADDRESSED_MANIFEST_URI,
                     "access": "readWrite",
+                    "fsGroup": 1000,
+                    "fsGroupChangePolicy": "OnRootMismatch",
+                    "mounts": {
+                        "workspace": ["/home/codewire", "/workspace"],
+                        "dind": ["/workspace"],
+                    },
                 }
             })
         );
+        for (container_name, destinations) in [
+            ("workspace", vec!["/home/codewire", "/workspace"]),
+            ("dind", vec!["/workspace"]),
+        ] {
+            let container = pod_template["spec"]["containers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|container| container["name"].as_str() == Some(container_name))
+                .unwrap();
+            assert_eq!(
+                container["volumeDevices"],
+                serde_json::json!([{
+                    "name": "workspace",
+                    "devicePath": KATA_CONFIDENTIAL_WORKSPACE_DEVICE_PATH,
+                }])
+            );
+            assert!(
+                container["volumeMounts"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|mount| mount["name"].as_str() != Some("workspace"))
+            );
+            assert_eq!(
+                declaration["workspace"]["mounts"][container_name],
+                serde_json::json!(destinations)
+            );
+        }
         let aa: toml::Value = toml::from_str(data["aa.toml"].as_str().unwrap()).unwrap();
         assert_eq!(
             aa["token_configs"]["kbs"]["cert"].as_str(),
@@ -1635,6 +1698,17 @@ mod tests {
             rendered["spec"]["volumeClaimTemplates"][0]["spec"]["storageClassName"].as_str(),
             Some(DEFAULT_WORKSPACE_STORAGE_CLASS)
         );
+        assert!(
+            rendered["spec"]["volumeClaimTemplates"][0]["spec"]["volumeMode"].is_null(),
+            "ordinary claims retain Kubernetes' default Filesystem mode"
+        );
+        let ordinary_workspace = &rendered["spec"]["podTemplate"]["spec"]["containers"][0];
+        assert!(ordinary_workspace["volumeDevices"].is_null());
+        assert!(ordinary_workspace["volumeMounts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|mount| mount["name"].as_str() == Some("workspace")));
 
         let rendered = render_sandbox_template(
             "codewire-runtime",
@@ -1671,14 +1745,8 @@ mod tests {
             claim["spec"]["accessModes"][0].as_str(),
             Some("ReadWriteOncePod")
         );
-        assert_eq!(claim["spec"]["volumeMode"].as_str(), Some("Filesystem"));
-        assert_eq!(
-            claim["metadata"]["annotations"]
-                [KATA_CONFIDENTIAL_STORAGE_MANIFEST_URI_ANNOTATION]
-                .as_str(),
-            Some(CONTENT_ADDRESSED_MANIFEST_URI)
-        );
-        assert_eq!(claim["metadata"]["annotations"].as_object().unwrap().len(), 1);
+        assert_eq!(claim["spec"]["volumeMode"].as_str(), Some("Block"));
+        assert!(claim["metadata"]["annotations"].is_null());
     }
 
     #[test]

@@ -15,7 +15,7 @@ use super::{
     DAEMON_AUTH_TOKEN_ENV, DEFAULT_GATEWAY_IMAGE, EXTENSIONS_API_VERSION,
     GATEWAY_DOCKER_UPSTREAM_SOCK_PATH, HOME_ROOT, ISOL8_DISK_GIB_ANNOTATION_KEY,
     ISOL8_WORKSPACE_ANNOTATION_KEY, KATA_COCO_INIT_DATA_ANNOTATION_KEY,
-    KATA_CONFIDENTIAL_STORAGE_MANIFEST_URI_ANNOTATION, KATA_CONFIDENTIAL_VOLUME_ANNOTATION,
+    KATA_CONFIDENTIAL_VOLUME_ANNOTATION, KATA_CONFIDENTIAL_WORKSPACE_DEVICE_PATH,
     KATA_HYPERVISOR_KERNEL_PARAMS_ANNOTATION_KEY, SANDBOX_SERVICE_ACCOUNT, TemplateOpts,
     WORKSPACE_ANNOTATION_KEY, WORKSPACE_DAEMON_LISTEN_ADDR, WORKSPACE_DAEMON_PORT,
     WORKSPACE_DISK_GIB_ANNOTATION_KEY, WORKSPACE_EPHEMERAL_STORAGE_GI,
@@ -166,12 +166,24 @@ fn build_template_spec(opts: &TemplateOpts, ws: &mut Value, support_image: &str)
             &opts.confidential_storage_manifest_uri,
         )
     {
+        let mut mounts = Map::new();
+        mounts.insert("workspace".into(), json!(["/home/codewire", "/workspace"]));
+        if matches!(
+            runtime_spec.docker_mode.as_str(),
+            DOCKER_MODE_LOCAL_DIND_DIRECT | DOCKER_MODE_GUEST_DIND
+        ) {
+            mounts.insert("dind".into(), json!(["/workspace"]));
+        }
         annotations.insert(
             KATA_CONFIDENTIAL_VOLUME_ANNOTATION.into(),
             serde_json::json!({
                 "workspace": {
+                    "devicePath": KATA_CONFIDENTIAL_WORKSPACE_DEVICE_PATH,
                     "manifestUri": opts.confidential_storage_manifest_uri,
                     "access": "readWrite",
+                    "fsGroup": 1000,
+                    "fsGroupChangePolicy": "OnRootMismatch",
+                    "mounts": mounts,
                 }
             })
             .to_string()
@@ -207,10 +219,6 @@ fn build_template_spec(opts: &TemplateOpts, ws: &mut Value, support_image: &str)
         let metadata = if confidential {
             json!({
                 "name": "workspace",
-                "annotations": {
-                    KATA_CONFIDENTIAL_STORAGE_MANIFEST_URI_ANNOTATION:
-                        opts.confidential_storage_manifest_uri,
-                },
                 "labels": {
                     "codewire.sh/environment-id": opts.environment_id,
                 },
@@ -229,7 +237,7 @@ fn build_template_spec(opts: &TemplateOpts, ws: &mut Value, support_image: &str)
             "resources": { "requests": { "storage": format!("{}Gi", opts.disk_gib) } },
         });
         if confidential {
-            claim_spec["volumeMode"] = "Filesystem".into();
+            claim_spec["volumeMode"] = "Block".into();
         }
         spec.insert(
             "volumeClaimTemplates".into(),
@@ -248,6 +256,14 @@ fn build_template_spec(opts: &TemplateOpts, ws: &mut Value, support_image: &str)
 
 fn build_pod_spec(opts: &TemplateOpts, ws: &mut Value, support_image: &str) -> Value {
     let runtime_spec = opts.runtime_profile_spec();
+    let confidential_block = runtime_spec.profile == RUNTIME_PROFILE_CONFIDENTIAL
+        && opts.disk_gib > 0
+        && crate::confidential_storage::validate_manifest_uri(
+            &opts.confidential_storage_manifest_uri,
+        );
+    if confidential_block {
+        configure_confidential_workspace_device(ws);
+    }
     let mut volumes = vec![
         json!({ "name": "codewire-bin", "emptyDir": {} }),
         json!({ "name": "codewire-run", "emptyDir": {} }),
@@ -328,7 +344,11 @@ fn build_pod_spec(opts: &TemplateOpts, ws: &mut Value, support_image: &str) -> V
         ws["readinessProbe"] = docker_socket_readiness_probe();
 
         containers.push(ws.clone());
-        containers.push(dind_container(opts, &runtime_spec, false));
+        let mut dind = dind_container(opts, &runtime_spec, false);
+        if confidential_block {
+            configure_confidential_workspace_device(&mut dind);
+        }
+        containers.push(dind);
     } else if runtime_spec.docker_mode == DOCKER_MODE_GUEST_DIND {
         ws["env"]
             .as_array_mut()
@@ -341,7 +361,11 @@ fn build_pod_spec(opts: &TemplateOpts, ws: &mut Value, support_image: &str) -> V
         ws["readinessProbe"] = docker_socket_readiness_probe();
 
         containers.push(ws.clone());
-        containers.push(dind_container(opts, &runtime_spec, true));
+        let mut dind = dind_container(opts, &runtime_spec, true);
+        if confidential_block {
+            configure_confidential_workspace_device(&mut dind);
+        }
+        containers.push(dind);
     } else {
         containers.push(ws.clone());
     }
@@ -353,6 +377,17 @@ fn build_pod_spec(opts: &TemplateOpts, ws: &mut Value, support_image: &str) -> V
     spec.insert("containers".into(), Value::Array(containers));
     spec.insert("volumes".into(), Value::Array(volumes));
     Value::Object(spec)
+}
+
+fn configure_confidential_workspace_device(container: &mut Value) {
+    container["volumeMounts"]
+        .as_array_mut()
+        .expect("container volumeMounts array")
+        .retain(|mount| mount["name"].as_str() != Some("workspace"));
+    container["volumeDevices"] = json!([{
+        "name": "workspace",
+        "devicePath": KATA_CONFIDENTIAL_WORKSPACE_DEVICE_PATH,
+    }]);
 }
 
 fn docker_socket_readiness_probe() -> Value {

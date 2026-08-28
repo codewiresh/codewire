@@ -145,6 +145,7 @@ fn build_codewire_kata_policy(opts: &TemplateOpts, authorize_workspace_storage: 
         );
     }
     let contract = serde_json::json!({
+        "device_path": super::KATA_CONFIDENTIAL_WORKSPACE_DEVICE_PATH,
         "manifest_uri": manifest_uri,
         "requested_access": 2,
         "storage_fstype": "confidential-storage",
@@ -177,6 +178,8 @@ default CreateContainerRequest := false
 # Codewire lifecycle policy. A plaintext or missing-storage downgrade at one
 # of the protected destinations is denied.
 CreateContainerRequest := true if {
+    name := input.OCI.Annotations["io.kubernetes.cri.container-name"]
+    is_null(object.get(codewire_confidential_storage.containers, name, null))
     confidential_candidates := [storage | some storage in input.storages; codewire_is_confidential_storage_candidate(storage)]
     count(confidential_candidates) == 0
     protected_mounts := [mount | some mount in input.OCI.Mounts; codewire_is_protected_destination(mount.destination)]
@@ -204,6 +207,11 @@ CreateContainerRequest := true if {
         mount.destination in expected.mount_destinations
         codewire_confidential_mount_matches(storage, mount)
     }
+
+    raw_agent_devices := [device | some device in input.devices; device.container_path == codewire_confidential_storage.device_path]
+    count(raw_agent_devices) == 0
+    raw_oci_devices := [device | some device in input.OCI.Linux.Devices; device.Path == codewire_confidential_storage.device_path]
+    count(raw_oci_devices) == 0
 }
 
 codewire_is_protected_destination(destination) if {

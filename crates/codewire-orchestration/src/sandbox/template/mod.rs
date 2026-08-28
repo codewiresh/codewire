@@ -81,9 +81,8 @@ pub const DEFAULT_KATA_COCO_TEST_RESOURCE_PATH: &str =
     "/run/confidential-containers/cdh/kbs/codewire/runtime-test-resource";
 pub const DEFAULT_WORKSPACE_STORAGE_CLASS: &str = "example-volumes";
 pub const CONFIDENTIAL_WORKSPACE_STORAGE_CLASS: &str = "longhorn-confidential";
-pub const KATA_CONFIDENTIAL_STORAGE_MANIFEST_URI_ANNOTATION: &str =
-    "io.katacontainers.storage/confidential-manifest-uri";
 pub const KATA_CONFIDENTIAL_VOLUME_ANNOTATION: &str = "io.katacontainers.volume.confidential";
+pub const KATA_CONFIDENTIAL_WORKSPACE_DEVICE_PATH: &str = "/dev/codewire-workspace";
 const WORKSPACE_EPHEMERAL_STORAGE_GI: i64 = 8;
 const INTERNAL_DERP_TLS_PORT: i64 = 8443;
 const INTERNAL_DERP_STUN_PORT: i64 = 3478;
