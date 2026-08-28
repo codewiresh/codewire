@@ -1,20 +1,58 @@
-use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
 use codewire_daemon::service::DaemonRuntimeState;
 use codewire_daemon::{Config, server};
+use codewire_gateway_proto::DAEMON_AUTH_TOKEN_HEADER;
 use codewire_gateway_proto::daemon::v1;
 use codewire_gateway_proto::daemon::v1::daemon_service_client::DaemonServiceClient;
 use tempfile::TempDir;
 use tokio::net::TcpListener;
+#[cfg(unix)]
+use tokio::net::UnixListener;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
-use tonic::transport::Channel;
+#[cfg(not(unix))]
+use tokio_stream::wrappers::TcpListenerStream;
+#[cfg(unix)]
+use tokio_stream::wrappers::UnixListenerStream;
+use tonic::metadata::{Ascii, MetadataValue};
+use tonic::service::Interceptor;
+use tonic::service::interceptor::InterceptedService;
+use tonic::transport::{Channel, Endpoint};
+use tonic::{Request, Status};
+
+const DEFAULT_TEST_AUTH_TOKEN: &str = "daemon-conformance-token";
+
+#[derive(Clone)]
+pub struct HarnessAuthInterceptor {
+    auth_token: MetadataValue<Ascii>,
+}
+
+impl Interceptor for HarnessAuthInterceptor {
+    fn call(&mut self, mut request: Request<()>) -> Result<Request<()>, Status> {
+        request
+            .metadata_mut()
+            .insert(DAEMON_AUTH_TOKEN_HEADER, self.auth_token.clone());
+        Ok(request)
+    }
+}
+
+pub type HarnessClient = DaemonServiceClient<InterceptedService<Channel, HarnessAuthInterceptor>>;
+
+#[derive(Clone, Copy)]
+enum HarnessTransport {
+    Injected,
+    LegacyTcp,
+}
 
 pub struct DaemonHarness {
     _temp: Option<TempDir>,
+    _transport_temp: Option<TempDir>,
+    workspace_root: PathBuf,
     home_root: PathBuf,
-    addr: SocketAddr,
+    endpoint: String,
+    unix_socket: Option<PathBuf>,
+    auth_token: MetadataValue<Ascii>,
     shutdown: Option<oneshot::Sender<()>>,
     server: Option<JoinHandle<()>>,
 }
@@ -28,14 +66,49 @@ pub struct PersistedOutputFrame {
 
 impl DaemonHarness {
     pub async fn spawn() -> Self {
-        Self::spawn_with_runtime_state(DaemonRuntimeState::ready()).await
+        Self::spawn_owned(
+            DaemonRuntimeState::ready(),
+            DEFAULT_TEST_AUTH_TOKEN.into(),
+            HarnessTransport::Injected,
+        )
+        .await
+    }
+
+    pub async fn spawn_tcp() -> Self {
+        Self::spawn_owned(
+            DaemonRuntimeState::ready(),
+            DEFAULT_TEST_AUTH_TOKEN.into(),
+            HarnessTransport::LegacyTcp,
+        )
+        .await
     }
 
     pub async fn spawn_with_runtime_state(runtime_state: DaemonRuntimeState) -> Self {
+        Self::spawn_owned(
+            runtime_state,
+            DEFAULT_TEST_AUTH_TOKEN.into(),
+            HarnessTransport::LegacyTcp,
+        )
+        .await
+    }
+
+    async fn spawn_owned(
+        runtime_state: DaemonRuntimeState,
+        auth_token: String,
+        transport: HarnessTransport,
+    ) -> Self {
         let temp = tempfile::tempdir().expect("daemon harness tempdir");
         let workspace_root = temp.path().join("workspace");
         let home_root = temp.path().join("home");
-        Self::spawn_inner(Some(temp), workspace_root, home_root, runtime_state, None).await
+        Self::spawn_inner(
+            Some(temp),
+            workspace_root,
+            home_root,
+            runtime_state,
+            auth_token,
+            transport,
+        )
+        .await
     }
 
     pub async fn spawn_with_auth_token(auth_token: impl Into<String>) -> Self {
@@ -47,7 +120,8 @@ impl DaemonHarness {
             workspace_root,
             home_root,
             DaemonRuntimeState::ready(),
-            Some(auth_token.into()),
+            auth_token.into(),
+            HarnessTransport::Injected,
         )
         .await
     }
@@ -58,7 +132,8 @@ impl DaemonHarness {
             workspace_root,
             home_root,
             DaemonRuntimeState::ready(),
-            None,
+            DEFAULT_TEST_AUTH_TOKEN.into(),
+            HarnessTransport::Injected,
         )
         .await
     }
@@ -68,51 +143,162 @@ impl DaemonHarness {
         workspace_root: PathBuf,
         home_root: PathBuf,
         runtime_state: DaemonRuntimeState,
-        auth_token: Option<String>,
+        auth_token: String,
+        transport: HarnessTransport,
     ) -> Self {
         std::fs::create_dir_all(&workspace_root).expect("create workspace");
         std::fs::create_dir_all(&home_root).expect("create home");
 
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind daemon harness");
-        let addr = listener.local_addr().expect("daemon harness address");
-        let config = Config {
-            listen_addr: addr.to_string(),
-            workspace_root,
-            home_root: home_root.clone(),
-            auth_token,
+        #[cfg(unix)]
+        let (transport_temp, endpoint, unix_socket, shutdown_tx, server) = match transport {
+            HarnessTransport::Injected => {
+                assert_eq!(runtime_state, DaemonRuntimeState::ready());
+                let transport_temp = tempfile::tempdir().expect("daemon transport tempdir");
+                let socket_path = transport_temp.path().join("daemon.sock");
+                let listener = UnixListener::bind(&socket_path).expect("bind daemon Unix listener");
+                let endpoint = format!("unix:{}", socket_path.display());
+                let config = Config {
+                    listen_addr: endpoint.clone(),
+                    workspace_root: workspace_root.clone(),
+                    home_root: home_root.clone(),
+                    auth_token: Some(auth_token.clone()),
+                };
+                let (shutdown_tx, shutdown_rx) = oneshot::channel();
+                let server = tokio::spawn(async move {
+                    server::serve_grpc_with_incoming(
+                        config,
+                        UnixListenerStream::new(listener),
+                        async {
+                            let _ = shutdown_rx.await;
+                        },
+                    )
+                    .await
+                    .expect("serve daemon injected transport harness");
+                });
+                (
+                    Some(transport_temp),
+                    endpoint,
+                    Some(socket_path),
+                    shutdown_tx,
+                    server,
+                )
+            }
+            HarnessTransport::LegacyTcp => {
+                let listener = TcpListener::bind("127.0.0.1:0")
+                    .await
+                    .expect("bind daemon TCP harness");
+                let addr = listener.local_addr().expect("daemon harness address");
+                let endpoint = format!("http://{addr}");
+                let config = Config {
+                    listen_addr: addr.to_string(),
+                    workspace_root: workspace_root.clone(),
+                    home_root: home_root.clone(),
+                    auth_token: Some(auth_token.clone()),
+                };
+                let (shutdown_tx, shutdown_rx) = oneshot::channel();
+                let server = tokio::spawn(async move {
+                    axum::serve(
+                        listener,
+                        server::router_with_runtime_state(config, runtime_state),
+                    )
+                    .with_graceful_shutdown(async {
+                        let _ = shutdown_rx.await;
+                    })
+                    .await
+                    .expect("serve daemon TCP harness");
+                });
+                (None, endpoint, None, shutdown_tx, server)
+            }
         };
-        let (shutdown_tx, shutdown_rx) = oneshot::channel();
-        let server = tokio::spawn(async move {
-            axum::serve(
-                listener,
-                server::router_with_runtime_state(config, runtime_state),
-            )
-            .with_graceful_shutdown(async {
-                let _ = shutdown_rx.await;
-            })
-            .await
-            .expect("serve daemon harness");
-        });
+
+        #[cfg(not(unix))]
+        let (transport_temp, endpoint, unix_socket, shutdown_tx, server) = {
+            let listener = TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind daemon harness");
+            let addr = listener.local_addr().expect("daemon harness address");
+            let endpoint = format!("http://{addr}");
+            let config = Config {
+                listen_addr: addr.to_string(),
+                workspace_root: workspace_root.clone(),
+                home_root: home_root.clone(),
+                auth_token: Some(auth_token.clone()),
+            };
+            let (shutdown_tx, shutdown_rx) = oneshot::channel();
+            let server = match transport {
+                HarnessTransport::Injected => tokio::spawn(async move {
+                    server::serve_grpc_with_incoming(
+                        config,
+                        TcpListenerStream::new(listener),
+                        async {
+                            let _ = shutdown_rx.await;
+                        },
+                    )
+                    .await
+                    .expect("serve daemon injected transport harness");
+                }),
+                HarnessTransport::LegacyTcp => tokio::spawn(async move {
+                    axum::serve(
+                        listener,
+                        server::router_with_runtime_state(config, runtime_state),
+                    )
+                    .with_graceful_shutdown(async {
+                        let _ = shutdown_rx.await;
+                    })
+                    .await
+                    .expect("serve daemon TCP harness");
+                }),
+            };
+            (None, endpoint, None, shutdown_tx, server)
+        };
+
+        let mut auth_metadata = MetadataValue::try_from(auth_token).expect("valid test auth token");
+        auth_metadata.set_sensitive(true);
 
         Self {
             _temp: temp,
+            _transport_temp: transport_temp,
+            workspace_root,
             home_root,
-            addr,
+            endpoint,
+            unix_socket,
+            auth_token: auth_metadata,
             shutdown: Some(shutdown_tx),
             server: Some(server),
         }
     }
 
-    pub async fn client(&self) -> DaemonServiceClient<Channel> {
-        DaemonServiceClient::connect(format!("http://{}", self.addr))
+    pub async fn client(&self) -> HarnessClient {
+        DaemonServiceClient::with_interceptor(
+            self.channel().await,
+            HarnessAuthInterceptor {
+                auth_token: self.auth_token.clone(),
+            },
+        )
+    }
+
+    pub async fn unauthenticated_client(&self) -> DaemonServiceClient<Channel> {
+        DaemonServiceClient::new(self.channel().await)
+    }
+
+    pub async fn channel(&self) -> Channel {
+        Endpoint::from_shared(self.endpoint.clone())
+            .expect("valid daemon harness endpoint")
+            .connect()
             .await
             .expect("connect daemon harness")
     }
 
     pub fn endpoint(&self) -> String {
-        format!("http://{}", self.addr)
+        self.endpoint.clone()
+    }
+
+    pub fn workspace_root(&self) -> &Path {
+        &self.workspace_root
+    }
+
+    pub fn unix_socket(&self) -> Option<&Path> {
+        self.unix_socket.as_deref()
     }
 
     pub async fn shutdown(mut self) {
