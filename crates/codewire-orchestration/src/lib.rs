@@ -11,6 +11,7 @@ pub mod confidential_storage;
 pub mod connect;
 pub mod lifecycle;
 pub(crate) mod openbao_workload_identity;
+pub(crate) mod repository_mount;
 pub mod resize_metrics;
 pub mod runtime_transport;
 pub mod sandbox;

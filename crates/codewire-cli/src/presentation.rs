@@ -276,6 +276,8 @@ pub struct RepoEntry {
     pub url: String,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub branch: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub mount_path: String,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -414,6 +416,7 @@ mod tests {
             repos: vec![RepoEntry {
                 url: "https://github.com/codewiresh/codewire".to_string(),
                 branch: "main".to_string(),
+                mount_path: "/workspace/codewire".to_string(),
             }],
             env_vars: BTreeMap::from([("FOO".to_string(), "bar".to_string())]),
             agents: vec![SetupAgent {
@@ -427,6 +430,7 @@ mod tests {
         assert_eq!(value["name"], "builder");
         assert_eq!(value["cpu_millicores"], 2000);
         assert_eq!(value["repos"][0]["branch"], "main");
+        assert_eq!(value["repos"][0]["mount_path"], "/workspace/codewire");
         assert_eq!(value["env_vars"]["FOO"], "bar");
         assert_eq!(value["agents"][0]["type"], "codex");
     }

@@ -1,7 +1,7 @@
 (() => {
   let activeController = null;
 
-  const activeMode = (form) => form.querySelector('input[name="mode"]:checked')?.value || "repo";
+  const activeMode = () => "image";
 
   const setDisabled = (root, disabled) => {
     root?.querySelectorAll("input, select, textarea, button").forEach((control) => {
@@ -27,19 +27,44 @@
   const syncRepositorySource = (form) => {
     const github = form.querySelector("[data-github-repository-picker]");
     const manual = form.querySelector("[data-manual-repositories]");
-    if (!github || !manual || activeMode(form) !== "repo") return;
+    if (!manual) return;
     setDisabled(github, github.hidden);
     setDisabled(manual, manual.hidden);
+    syncAnalyzeButton(form);
   };
 
   const syncRepositorySelection = (form) => {
-    const selected = form.querySelectorAll('[data-repository-option] input[type="checkbox"]:checked').length;
-    const submit = form.querySelector("[data-selected-repository-submit]");
-    if (submit instanceof HTMLButtonElement) {
-      submit.disabled = selected === 0;
-      submit.textContent = selected === 0
-        ? "Continue with selected repositories"
-        : `Continue with ${selected} ${selected === 1 ? "repository" : "repositories"}`;
+    let selected = 0;
+    form.querySelectorAll("[data-repository-option]").forEach((option) => {
+      const checkbox = option.querySelector('input[type="checkbox"]');
+      const index = option.getAttribute("data-repository-index");
+      const mount = form.querySelector(`[data-repository-mount-option="${index}"]`);
+      const checked = checkbox instanceof HTMLInputElement && checkbox.checked;
+      if (checked) selected += 1;
+      if (mount instanceof HTMLElement) {
+        mount.hidden = !checked;
+        mount.querySelectorAll("input").forEach((input) => { input.disabled = !checked; });
+      }
+    });
+    const mountPoints = form.querySelector("[data-selected-mounts]");
+    if (mountPoints instanceof HTMLElement) mountPoints.hidden = selected === 0;
+    syncAnalyzeButton(form);
+  };
+
+  const syncAnalyzeButton = (form) => {
+    const button = form.querySelector("[data-environment-prepare-submit]");
+    const help = form.querySelector("[data-environment-prepare-help]");
+    if (!(button instanceof HTMLButtonElement)) return;
+    const hasRepository = Array.from(form.querySelectorAll('[name^="repo_url_"]')).some((input) => (
+      input instanceof HTMLInputElement
+      && !input.disabled
+      && (input.type === "checkbox" ? input.checked : input.value.trim() !== "")
+    ));
+    button.disabled = !hasRepository;
+    if (help) {
+      help.textContent = hasRepository
+        ? "Reads the selected repositories and fills in install and startup steps."
+        : "Select a repository above to generate these steps.";
     }
   };
 
@@ -165,17 +190,22 @@
     }
   };
 
-  const freshCreateUrl = () => `${window.location.pathname}?create=true`;
-
   document.addEventListener("input", (event) => {
     if (!(event.target instanceof Element)) return;
     const form = event.target.closest("[data-environment-prepare]");
     if (!(form instanceof HTMLFormElement)) return;
     if (event.target.matches("[data-repository-search]") && event.target instanceof HTMLInputElement) {
       const query = event.target.value.trim().toLocaleLowerCase();
+      let visible = 0;
       form.querySelectorAll("[data-repository-option]").forEach((option) => {
-        option.hidden = query !== "" && !(option.getAttribute("data-search-text") || "").toLocaleLowerCase().includes(query);
+        const matches = query === "" || (option.getAttribute("data-search-text") || "").toLocaleLowerCase().includes(query);
+        option.hidden = !matches;
+        if (matches) visible += 1;
       });
+      const empty = form.querySelector("[data-repository-no-match]");
+      if (empty instanceof HTMLElement) empty.hidden = visible !== 0;
+    } else if (event.target.matches('[name^="repo_url_"]')) {
+      syncAnalyzeButton(form);
     } else if (event.target.matches("[data-advanced-image]")) {
       const preset = form.querySelector("[data-prepared-preset-id]");
       if (preset instanceof HTMLInputElement) preset.value = "";
@@ -186,13 +216,7 @@
     if (!(event.target instanceof Element)) return;
     const form = event.target.closest("[data-environment-prepare]");
     if (!(form instanceof HTMLFormElement)) return;
-    if (event.target.matches('input[name="mode"]')) {
-      if (form.querySelector('[name="prepared"]')) {
-        window.location.assign(freshCreateUrl());
-        return;
-      }
-      modePanels(form);
-    } else if (event.target.matches('[data-repository-option] input[type="checkbox"]')) {
+    if (event.target.matches('[data-repository-option] input[type="checkbox"]')) {
       syncRepositorySelection(form);
     } else if (event.target.matches("[data-preset-picker]")) {
       syncPresetSelection(form);
@@ -203,6 +227,17 @@
     }
   });
 
+  document.addEventListener("focusout", (event) => {
+    if (!(event.target instanceof HTMLInputElement) || !event.target.matches("[data-ttl-input]")) return;
+    const value = event.target.value.trim().toLocaleLowerCase();
+    if (value === "" || value === "0" || value === "∞" || value === "infinity") {
+      event.target.value = "infinity";
+      return;
+    }
+    const duration = value.match(/^(\d+)\s*([smhd])$/);
+    if (duration) event.target.value = `${duration[1]}${duration[2]}`;
+  });
+
   document.addEventListener("click", async (event) => {
     if (!(event.target instanceof Element)) return;
     const form = event.target.closest("[data-environment-prepare]");
@@ -211,21 +246,28 @@
       appendTemplateRow(form, "[data-repository-template]", "[data-repository-rows]", "[data-repository-row]", 100);
     } else if (event.target.closest("[data-remove-repository]")) {
       const rows = form.querySelectorAll("[data-repository-row]");
-      if (rows.length > 1) event.target.closest("[data-repository-row]")?.remove();
+      if (rows.length > 1) {
+        event.target.closest("[data-repository-row]")?.remove();
+        syncAnalyzeButton(form);
+      }
     } else if (event.target.closest("[data-add-app-port]")) {
       appendTemplateRow(form, "[data-app-port-template]", "[data-app-port-rows]", "[data-app-port-row]");
     } else if (event.target.closest("[data-remove-app-port]")) {
       event.target.closest("[data-app-port-row]")?.remove();
     } else if (event.target.closest("[data-show-manual-repositories]")) {
-      const github = form.querySelector("[data-github-repository-picker]");
       const manual = form.querySelector("[data-manual-repositories]");
-      if (github && manual) { github.hidden = true; manual.hidden = false; syncRepositorySource(form); }
+      if (manual) { manual.hidden = false; syncRepositorySource(form); }
     } else if (event.target.closest("[data-show-github-repositories]")) {
-      const github = form.querySelector("[data-github-repository-picker]");
       const manual = form.querySelector("[data-manual-repositories]");
-      if (github && manual) { github.hidden = false; manual.hidden = true; syncRepositorySource(form); }
-    } else if (event.target.closest("[data-reset-environment-source]")) {
-      window.location.assign(freshCreateUrl());
+      if (manual) { manual.hidden = true; syncRepositorySource(form); }
+    } else if (event.target.closest("[data-unselect-repository]")) {
+      const index = event.target.closest("[data-unselect-repository]").getAttribute("data-unselect-repository");
+      const checkbox = form.querySelector(`[data-repository-index="${index}"] input[type="checkbox"]`);
+      if (checkbox instanceof HTMLInputElement) checkbox.checked = false;
+      syncRepositorySelection(form);
+    } else if (event.target.closest("[data-reset-workspace-image]")) {
+      const image = form.querySelector('[name="image"]');
+      if (image instanceof HTMLInputElement) image.value = "ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467";
     } else if (event.target.closest("[data-environment-cancel]")) {
       activeController?.abort();
     } else if (event.target.closest("[data-create-secret-project]")) {
@@ -275,7 +317,7 @@
       status.hidden = false;
       status.dataset.state = "running";
     }
-    if (message) message.textContent = activeMode(form) === "repo" ? "Analyzing repositories…" : "Preparing image…";
+    if (message) message.textContent = "Analyzing repositories…";
     if (progress) progress.replaceChildren();
     try {
       const body = new URLSearchParams();

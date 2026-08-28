@@ -290,10 +290,14 @@ function fromProtoAppPorts(
 
 function fromProtoRepos(
   value: ProtoRepoEntry[],
-): Array<{ branch?: string; url: string }> | undefined {
+): Array<{ branch?: string; mount_path?: string; url: string }> | undefined {
   return value.length === 0
     ? undefined
-    : value.map((repo) => ({ branch: optionalString(repo.branch), url: repo.url }));
+    : value.map((repo) => ({
+        branch: optionalString(repo.branch),
+        mount_path: optionalString(repo.mountPath),
+        url: repo.url,
+      }));
 }
 
 function fromProtoSetupConfig(
@@ -331,9 +335,12 @@ function toProtoAppPorts(
   }));
 }
 
-function toProtoRepos(value: Array<{ branch?: string; url?: string }> | undefined) {
+function toProtoRepos(
+  value: Array<{ branch?: string; mount_path?: string; url?: string }> | undefined,
+) {
   return (value ?? []).map((repo) => ({
     branch: repo.branch ?? "",
+    mountPath: repo.mount_path ?? "",
     url: repo.url ?? "",
   }));
 }

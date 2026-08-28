@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Codewire Sandbox inventory fixture</title>
+  <link rel="stylesheet" href="../../styles.css">
+  <link rel="stylesheet" href="../../components.css">
+  <link rel="stylesheet" href="../../routes/dashboard.css">
+  <link rel="stylesheet" href="../../routes/environments.css">
+  <style>
+    .fixture-sidebar { position: fixed; inset: 0 auto 0 0; display: flex; width: 260px; flex-direction: column; border-right: 1px solid #1e1e1e; background: #0b0b0b; }
+    .fixture-brand { height: 52px; padding: 16px 20px; border-bottom: 1px solid #1e1e1e; font: 600 14px/20px var(--font-mono); }
+    .fixture-main { margin-left: 260px; }
+    .fixture-head { height: 52px; padding: 17px 20px; border-bottom: 1px solid #1e1e1e; color: #6e6e6e; font: 12px/16px var(--font-mono); }
+    .fixture-head ol { display: flex; gap: 10px; margin: 0; padding: 0; list-style: none; }
+    .fixture-head li + li::before { margin-right: 10px; content: "/"; }
+    .fixture-content { padding: 22px 20px; }
+  </style>
+</head>
+<body class="cw-body" data-dashboard-app data-route="sandboxes">
+  <aside class="fixture-sidebar cw-console-sidebar">
+    <nav class="cw-sidebar" aria-label="Main navigation">
+      <header class="fixture-brand"><a href="index.html">⌁ codewire</a></header>
+      <div class="cw-console-org-switcher">
+        <details class="cw-org-switcher">
+          <summary><span class="cw-org-initial" aria-hidden="true">P</span><span class="cw-org-switcher-label">Personal</span><svg class="cw-icon cw-org-chevron" aria-hidden="true"><use href="../../assets/icons.svg#icon-chevron-down"/></svg></summary>
+          <section class="cw-org-menu"><h2>Organizations</h2><ul><li><a href="#personal">Personal <span>owner</span></a></li><li><a href="#new-organization">＋ New Organization</a></li></ul></section>
+        </details>
+      </div>
+      <section class="cw-console-sandboxes" aria-label="Sandboxes">
+        <a class="cw-console-create cw-button cw-button--accent cw-button--pill" href="create-sandbox.html"><svg class="cw-icon" aria-hidden="true"><use href="../../assets/icons.svg#icon-plus"/></svg>Create Sandbox</a>
+        <header class="cw-console-rail-heading">
+          <h2><a href="#sandbox-inventory">View all sandboxes <span aria-hidden="true">→</span></a></h2>
+          <menu class="cw-rail-tools" aria-label="Sandbox list controls">
+            <li><button type="button" disabled aria-label="Filter Sandbox list"><svg class="cw-icon" aria-hidden="true"><use href="../../assets/icons.svg#icon-filter"/></svg></button></li>
+            <li><button type="button" disabled aria-label="Sort Sandbox list"><svg class="cw-icon" aria-hidden="true"><use href="../../assets/icons.svg#icon-sort"/></svg></button></li>
+          </menu>
+        </header>
+        <div class="cw-console-rail">
+          <ul class="cw-rail-list">
+            <li><a class="cw-rail-row" href="#quiet-mesa"><span class="cw-rail-dot" data-tone="success" aria-hidden="true"></span><span class="cw-rail-name">quiet-mesa</span><span class="cw-rail-state">eu</span></a></li>
+            <li><a class="cw-rail-row" href="#amber-loop"><span class="cw-rail-dot" data-tone="success" aria-hidden="true"></span><span class="cw-rail-name">amber-loop</span><span class="cw-rail-state">eu</span></a></li>
+            <li><a class="cw-rail-row" href="#dry-harbor"><span class="cw-rail-dot" aria-hidden="true"></span><span class="cw-rail-name">dry-harbor</span><span class="cw-rail-state">us</span></a></li>
+          </ul>
+        </div>
+      </section>
+      <ul class="cw-console-get-started">
+        <li><a class="cw-nav-link" href="#get-started">Get Started</a></li>
+      </ul>
+      <ul class="cw-console-footer">
+        <li><a class="cw-nav-link" href="#settings"><svg class="cw-icon" aria-hidden="true"><use href="../../assets/icons.svg#icon-settings"/></svg>Settings</a></li>
+        <li><a class="cw-nav-link" href="#docs"><svg class="cw-icon" aria-hidden="true"><use href="../../assets/icons.svg#icon-book"/></svg>Docs</a></li>
+        <li><a class="cw-nav-link" href="#sign-out"><svg class="cw-icon" aria-hidden="true"><use href="../../assets/icons.svg#icon-chevron-right"/></svg>Sign Out</a></li>
+      </ul>
+    </nav>
+  </aside>
+  <main class="fixture-main">
+    <header class="fixture-head"><nav aria-label="Breadcrumb"><ol><li><a href="index.html">noel</a></li><li><span aria-current="page">sandboxes</span></li></ol></nav></header>
+    <section class="fixture-content" id="sandbox-inventory" aria-labelledby="sandbox-inventory-title">
+      <header class="cw-list-title"><h1 class="cw-page-title" id="sandbox-inventory-title">Sandboxes</h1><span class="cw-quota-stub">4 / 50</span></header>
+      <form class="cw-environment-toolbar" role="search"><label class="cw-sr-only" for="sandbox-search">Search sandboxes</label><input class="cw-input" id="sandbox-search" type="search" placeholder="Search by name"><button class="cw-button cw-button--outline cw-button--small cw-button--pill" type="button"><svg class="cw-icon" aria-hidden="true"><use href="../../assets/icons.svg#icon-filter"/></svg>Filter</button><a class="cw-button cw-button--pill" href="create-sandbox.html"><svg class="cw-icon" aria-hidden="true"><use href="../../assets/icons.svg#icon-plus"/></svg>Create Sandbox</a></form>
+      <div class="cw-table-shell cw-sandbox-table-shell">
+        <table class="cw-table cw-sandbox-table">
+          <thead><tr><th scope="col">Name</th><th scope="col">State</th><th scope="col">Snapshot</th><th scope="col">Region</th><th scope="col">Resources</th><th scope="col">Last event</th><th scope="col">Created</th><th scope="col"><span class="cw-sr-only">Actions</span></th></tr></thead>
+          <tbody><tr id="quiet-mesa"><td><strong class="cw-environment-name">quiet-mesa</strong></td><td><span class="cw-status" data-tone="success">Running</span></td><td class="cw-mono">codewire/base:1.4</td><td class="cw-mono">eu</td><td>4 vCPU · 8 GiB · 10 GiB</td><td>started 2 min ago</td><td>12 Aug 2026</td><td><button class="cw-icon-button" type="button" aria-label="Actions for quiet-mesa">•••</button></td></tr><tr id="dry-harbor"><td><strong class="cw-environment-name">dry-harbor</strong></td><td><span class="cw-status">Stopped</span></td><td class="cw-mono">codewire/python:3.13</td><td class="cw-mono">us</td><td>1 vCPU · 2 GiB · 3 GiB</td><td>stopped 3 h ago</td><td>09 Aug 2026</td><td><button class="cw-icon-button" type="button" aria-label="Actions for dry-harbor">•••</button></td></tr></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+</body>
+</html>

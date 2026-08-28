@@ -15,6 +15,9 @@ message ScaffoldPlaceholder {
 message RepoEntry {
   string url = 1;
   string branch = 2;
+  // Optional normalized checkout directory strictly below /workspace.
+  // When omitted, the checkout directory remains /workspace/{repo_name}.
+  string mount_path = 3;
 }
 
 // AppPort requests one application port during setup. Access is an extensible

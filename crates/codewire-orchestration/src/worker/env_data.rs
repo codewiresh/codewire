@@ -25,6 +25,8 @@ pub struct RepoEntry {
     pub url: String,
     #[serde(default)]
     pub branch: String,
+    #[serde(default)]
+    pub mount_path: String,
 }
 
 /// Mirrors `worker.setupAgent`.
@@ -77,6 +79,7 @@ impl SetupConfig {
             return vec![RepoEntry {
                 url: self.repo_url.clone(),
                 branch: self.branch.clone(),
+                mount_path: String::new(),
             }];
         }
         Vec::new()
@@ -199,21 +202,6 @@ pub async fn load_backend_row(pool: &PgPool, env_id: &str) -> anyhow::Result<Bac
     })
 }
 
-/// Mirrors `worker.repoNameFromURL` (the url.Parse-based variant in
-/// environment_data.go): trim a `.git` suffix, then take the last path
-/// segment.
-pub fn repo_name_from_url(repo_url: &str) -> String {
-    let trimmed = repo_url.strip_suffix(".git").unwrap_or(repo_url);
-    // Go uses url.Parse + path.Base; for the URLs that reach this code
-    // (clone targets) the last path segment is the same thing. Strip an
-    // optional query/fragment the way url.Parse would exclude it.
-    let no_frag = trimmed.split(['?', '#']).next().unwrap_or(trimmed);
-    match no_frag.rsplit('/').next() {
-        Some(seg) if !seg.is_empty() => seg.to_string(),
-        _ => no_frag.to_string(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -264,16 +252,5 @@ mod tests {
         assert_eq!(sc.configured_agents()[0].agent_type, "codex");
         assert!(sc.has_configured_agent("codex"));
         assert!(!sc.has_configured_agent("aider"));
-    }
-
-    #[test]
-    fn repo_name_from_url_mirrors_go() {
-        assert_eq!(
-            repo_name_from_url("https://github.com/org/repo.git"),
-            "repo"
-        );
-        assert_eq!(repo_name_from_url("https://github.com/org/repo"), "repo");
-        assert_eq!(repo_name_from_url("git@host:org/repo.git"), "repo");
-        assert_eq!(repo_name_from_url("repo"), "repo");
     }
 }

@@ -213,7 +213,10 @@ pub(crate) struct InitArgs {
     disk: Option<i32>,
     #[arg(long, value_parser = ["standard", "confidential"], help = "Product isolation tier")]
     isolation: Option<String>,
-    #[arg(long = "repo", help = "Git repo URL (repeatable, url@branch syntax)")]
+    #[arg(
+        long = "repo",
+        help = "Git repo (repeatable, URL[@branch][::/workspace/path])"
+    )]
     repo_flags: Vec<String>,
     #[arg(long, help = "Branch to checkout")]
     branch: Option<String>,
@@ -451,7 +454,7 @@ pub(crate) enum LocalFilesCommand {
 pub(crate) enum EnvCommand {
     #[command(
         about = "Create a new environment",
-        long_about = "Create a new environment from direct CLI flags.\n\nMultiple repos can be specified as positional args or with --repo flags.\nUse url@branch syntax to specify a branch per repo."
+        long_about = "Create a new environment from direct CLI flags.\n\nMultiple repos can be specified as positional args or with --repo flags.\nUse URL[@branch][::/workspace/path] to set a branch and optional checkout path per repo."
     )]
     Create(Box<EnvCreateArgs>),
     #[command(about = "List environments")]
@@ -552,7 +555,10 @@ pub(crate) struct EnvCreateArgs {
     disk: Option<i32>,
     #[arg(long, value_parser = ["standard", "confidential"], help = "Product isolation tier")]
     isolation: Option<String>,
-    #[arg(long = "repo", help = "Git repo URL (repeatable, url@branch syntax)")]
+    #[arg(
+        long = "repo",
+        help = "Git repo (repeatable, URL[@branch][::/workspace/path])"
+    )]
     repo_flags: Vec<String>,
     #[arg(long, help = "Branch to checkout")]
     branch: Option<String>,

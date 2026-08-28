@@ -19,7 +19,7 @@ use temporalio_sdk::activities::ActivityContext;
 use super::activity_authority::{ActivityAuthority, is_authority_lost};
 use super::agents::agent_definition;
 use super::env_data::{
-    BackendRow, EnvironmentRow, SetupConfig, load_backend_row, load_environment, repo_name_from_url,
+    BackendRow, EnvironmentRow, SetupConfig, load_backend_row, load_environment,
 };
 #[cfg(feature = "kind-e2e")]
 use super::fencing_evidence::{FencingEvidence as SetupFencingEvidence, emit};
@@ -33,6 +33,7 @@ use super::setup_lease::{
     PhaseAcquire, PhasePreparation, SetupActivityIdentity, SetupLeaseRecord, SetupPhaseAuthority,
 };
 use super::{JobPayload, WorkerContext};
+use crate::repository_mount::{effective_repository_mount, validate_repository_mounts};
 use crate::sandbox::client::{SandboxClient, WorkspacePodIdentity};
 use crate::sandbox::sidecar::DEFAULT_GATEWAY_SSH_PORT;
 
@@ -124,6 +125,7 @@ fn setup_command_cancelled(state: &str, desired_state: &str) -> bool {
 pub struct Repo {
     pub url: String,
     pub branch: String,
+    pub mount_path: String,
 }
 
 /// Mirrors `environmentsetup.Inputs`.
@@ -231,11 +233,17 @@ pub trait SetupOps {
 }
 
 /// Mirrors `environmentsetup.workDirForRepos`.
-pub fn work_dir_for_repos(repos: &[Repo]) -> String {
+pub fn work_dir_for_repos(repos: &[Repo]) -> anyhow::Result<String> {
+    validate_repository_mounts(
+        repos
+            .iter()
+            .map(|repo| (repo.url.as_str(), repo.mount_path.as_str())),
+    )?;
     match repos.len() {
-        0 => String::new(),
-        1 => format!("/workspace/{}", repo_name_from_url(&repos[0].url)),
-        _ => "/workspace".to_string(),
+        0 => Ok(String::new()),
+        1 => effective_repository_mount(&repos[0].url, &repos[0].mount_path)
+            .map_err(anyhow::Error::from),
+        _ => Ok("/workspace".to_string()),
     }
 }
 
@@ -310,7 +318,7 @@ impl<S: SetupStore, O: SetupOps> Runner<S, O> {
             return self.complete(input).await;
         }
 
-        let work_dir = work_dir_for_repos(&input.repos);
+        let work_dir = work_dir_for_repos(&input.repos)?;
 
         if input.setup_phase <= 2 && !input.repos.is_empty() {
             let phase = input.setup_phase;
@@ -601,6 +609,7 @@ pub fn to_setup_inputs(env: &EnvironmentRow, backend: &BackendRow) -> Inputs {
         input.repos.push(Repo {
             url: repo.url,
             branch: repo.branch,
+            mount_path: repo.mount_path,
         });
     }
     for agent in sc.configured_agents() {
@@ -1388,10 +1397,11 @@ impl WorkerSetupOps<'_> {
     async fn bootstrap_agent_auth(&self, namespace: &str) -> anyhow::Result<()> {
         if let Some(sc) = &self.env.setup_config {
             if should_bootstrap_claude(sc) {
-                let mut work_dir = "/workspace".to_string();
-                if !sc.repo_url.is_empty() {
-                    work_dir = format!("/workspace/{}", repo_name_from_url(&sc.repo_url));
-                }
+                let repos = sc.normalized_repos();
+                let work_dir = match repos.as_slice() {
+                    [repo] => effective_repository_mount(&repo.url, &repo.mount_path)?,
+                    _ => "/workspace".to_string(),
+                };
                 let script = build_claude_bootstrap_script(&work_dir);
                 let cmd = vec!["sh".to_string(), "-c".to_string(), script];
                 if let Err(e) = self
@@ -1669,6 +1679,12 @@ impl SetupOps for WorkerSetupOps<'_> {
         self.phase_authority
             .ensure_active(self.active_phase)
             .await?;
+        validate_repository_mounts(
+            input
+                .repos
+                .iter()
+                .map(|repo| (repo.url.as_str(), repo.mount_path.as_str())),
+        )?;
         // Observe every launched sibling before returning an error. Dropping a
         // sibling future could otherwise detach an unobserved workspace exec.
         *self.recovery_lock.lock().await = false;
@@ -1683,8 +1699,7 @@ impl SetupOps for WorkerSetupOps<'_> {
             let env_id = input.environment_id.clone();
             async move {
                 this.phase_authority.ensure_active(this.active_phase).await?;
-                let repo_name = repo_name_from_url(&repo.url);
-                let dir = format!("/workspace/{repo_name}");
+                let dir = effective_repository_mount(&repo.url, &repo.mount_path)?;
                 let rm: Vec<String> = vec!["rm".into(), "-rf".into(), dir.clone()];
                 if let Err(error) = this
                     .workspace_exec(&namespace, &env_id, &rm, "", &BTreeMap::new())
@@ -2249,6 +2264,7 @@ mod tests {
             repos: vec![Repo {
                 url: "https://x/y/app.git".into(),
                 branch: "".into(),
+                mount_path: String::new(),
             }],
             install_command: "npm ci".into(),
             startup_script: "npm start".into(),
@@ -2564,25 +2580,39 @@ mod tests {
 
     #[test]
     fn work_dir_for_repos_mirrors_go() {
-        assert_eq!(work_dir_for_repos(&[]), "");
+        assert_eq!(work_dir_for_repos(&[]).unwrap(), "");
         assert_eq!(
             work_dir_for_repos(&[Repo {
                 url: "https://g/x/app.git".into(),
-                branch: String::new()
-            }]),
+                branch: String::new(),
+                mount_path: "/workspace/services/app".into(),
+            }])
+            .unwrap(),
+            "/workspace/services/app"
+        );
+        assert_eq!(
+            work_dir_for_repos(&[Repo {
+                url: "https://g/x/app.git".into(),
+                branch: String::new(),
+                mount_path: String::new(),
+            }])
+            .unwrap(),
             "/workspace/app"
         );
         assert_eq!(
             work_dir_for_repos(&[
                 Repo {
                     url: "https://g/x/a.git".into(),
-                    branch: String::new()
+                    branch: String::new(),
+                    mount_path: String::new(),
                 },
                 Repo {
                     url: "https://g/x/b.git".into(),
-                    branch: String::new()
+                    branch: String::new(),
+                    mount_path: String::new(),
                 },
-            ]),
+            ])
+            .unwrap(),
             "/workspace"
         );
     }

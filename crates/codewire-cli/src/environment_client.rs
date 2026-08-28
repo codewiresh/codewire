@@ -757,6 +757,7 @@ fn proto_create_environment_request(
             .map(|repo| rpc::RepoEntry {
                 url: repo.url.clone(),
                 branch: repo.branch.clone(),
+                mount_path: repo.mount_path.clone(),
                 ..Default::default()
             })
             .collect(),
@@ -866,6 +867,7 @@ fn legacy_create_environment_request(
             .map(|repo| RepoEntry {
                 url: repo.url,
                 branch: repo.branch,
+                mount_path: repo.mount_path,
             })
             .collect(),
         image: value.image,

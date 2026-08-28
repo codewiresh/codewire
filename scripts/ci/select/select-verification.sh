@@ -714,7 +714,7 @@ if [ "$event_selected" = false ]; then
         kind_relevant=true
         recognized=true
         ;;
-      apps/dashboard/*|apps/docs/*)
+      apps/dashboard/*|apps/docs/*|scripts/dev/design-system-server.py)
         select_token web
         recognized=true
         ;;

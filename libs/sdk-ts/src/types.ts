@@ -20,11 +20,13 @@ interface AppPort {
 
 interface RepoEntryInput {
   branch?: string;
+  mount_path?: string;
   url?: string;
 }
 
 interface RepoEntry {
   branch?: string;
+  mount_path?: string;
   url: string;
 }
 

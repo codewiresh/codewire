@@ -2035,10 +2035,11 @@ pub(crate) fn collect_env_create_repos(
 ) -> anyhow::Result<(String, String, Vec<RepoEntry>)> {
     let mut repos = Vec::new();
     for spec in repo_urls.iter().chain(repo_flags.iter()) {
-        let (url, repo_branch) = parse_env_create_repo_spec(spec)?;
+        let (url, repo_branch, mount_path) = parse_env_create_repo_spec(spec)?;
         repos.push(RepoEntry {
             url,
             branch: repo_branch,
+            mount_path,
         });
     }
 
@@ -2054,17 +2055,23 @@ pub(crate) fn collect_env_create_repos(
     Ok((repo_url, branch, repos))
 }
 
-pub(crate) fn parse_env_create_repo_spec(spec: &str) -> anyhow::Result<(String, String)> {
+pub(crate) fn parse_env_create_repo_spec(spec: &str) -> anyhow::Result<(String, String, String)> {
     let spec = trimmed_required(spec, "repo URL")?;
-    let Some(idx) = spec.rfind('@') else {
-        return Ok((spec.to_string(), String::new()));
+    let (repo_spec, mount_path) = match spec.rsplit_once("::") {
+        Some((repo_spec, mount_path)) if mount_path.starts_with('/') => {
+            (repo_spec, mount_path.to_string())
+        }
+        _ => (spec, String::new()),
     };
-    let (url, branch_with_at) = spec.split_at(idx);
+    let Some(idx) = repo_spec.rfind('@') else {
+        return Ok((repo_spec.to_string(), String::new(), mount_path));
+    };
+    let (url, branch_with_at) = repo_spec.split_at(idx);
     if !url.contains('/') {
-        return Ok((spec.to_string(), String::new()));
+        return Ok((repo_spec.to_string(), String::new(), mount_path));
     }
     let branch = &branch_with_at[1..];
-    Ok((url.to_string(), branch.to_string()))
+    Ok((url.to_string(), branch.to_string(), mount_path))
 }
 
 pub(crate) fn format_env_create_text(environment: &Environment) -> String {

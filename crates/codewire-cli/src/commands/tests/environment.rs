@@ -1020,13 +1020,15 @@
             parse_env_create_repo_spec("https://github.com/codewiresh/codewire@main").unwrap(),
             (
                 "https://github.com/codewiresh/codewire".to_string(),
-                "main".to_string()
+                "main".to_string(),
+                String::new()
             )
         );
         assert_eq!(
             parse_env_create_repo_spec("git@github.com:codewiresh/codewire").unwrap(),
             (
                 "git@github.com:codewiresh/codewire".to_string(),
+                String::new(),
                 String::new()
             )
         );
@@ -1034,7 +1036,19 @@
             parse_env_create_repo_spec("git@github.com:codewiresh/codewire@dev").unwrap(),
             (
                 "git@github.com:codewiresh/codewire".to_string(),
-                "dev".to_string()
+                "dev".to_string(),
+                String::new()
+            )
+        );
+        assert_eq!(
+            parse_env_create_repo_spec(
+                "https://github.com/codewiresh/codewire@dev::/workspace/platform"
+            )
+            .unwrap(),
+            (
+                "https://github.com/codewiresh/codewire".to_string(),
+                "dev".to_string(),
+                "/workspace/platform".to_string()
             )
         );
 
@@ -1051,6 +1065,7 @@
         assert_eq!(branch, "");
         assert_eq!(repos[0].branch, "main");
         assert_eq!(repos[1].branch, "v1");
+        assert!(repos.iter().all(|repo| repo.mount_path.is_empty()));
     }
 
     #[test]

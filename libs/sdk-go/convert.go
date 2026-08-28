@@ -344,7 +344,9 @@ func fromProtoRepoEntries(repos []*codewirev1.RepoEntry) *[]RepoEntry {
 	}
 	converted := make([]RepoEntry, 0, len(repos))
 	for _, repo := range repos {
-		converted = append(converted, RepoEntry{Url: repo.GetUrl(), Branch: stringPointer(repo.GetBranch())})
+		converted = append(converted, RepoEntry{
+			Url: repo.GetUrl(), Branch: stringPointer(repo.GetBranch()), MountPath: stringPointer(repo.GetMountPath()),
+		})
 	}
 	return &converted
 }
@@ -472,7 +474,7 @@ func toProtoRepoEntries(repos *[]RepoEntry) []*codewirev1.RepoEntry {
 	converted := make([]*codewirev1.RepoEntry, 0, len(*repos))
 	for _, repo := range *repos {
 		converted = append(converted, &codewirev1.RepoEntry{
-			Url: repo.Url, Branch: valueOrEmpty(repo.Branch),
+			Url: repo.Url, Branch: valueOrEmpty(repo.Branch), MountPath: valueOrEmpty(repo.MountPath),
 		})
 	}
 	return converted
@@ -968,7 +970,7 @@ func ensureSetupConfigConverterCoverage() error {
 	if err := ensureDescriptorCoverage("app port", messages.ByName("AppPort"), map[protoreflect.FieldNumber]protoreflect.Name{1: "port", 2: "label", 3: "access"}); err != nil {
 		return err
 	}
-	return ensureDescriptorCoverage("repo entry", messages.ByName("RepoEntry"), map[protoreflect.FieldNumber]protoreflect.Name{1: "url", 2: "branch"})
+	return ensureDescriptorCoverage("repo entry", messages.ByName("RepoEntry"), map[protoreflect.FieldNumber]protoreflect.Name{1: "url", 2: "branch", 3: "mount_path"})
 }
 
 func ensureEnvironmentConverterCoverage() error {

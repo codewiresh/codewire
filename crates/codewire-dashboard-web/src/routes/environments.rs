@@ -51,6 +51,7 @@ use crate::{
 const MAX_REPOSITORIES: usize = 108;
 const MAX_APP_PORTS: usize = 16;
 const MAX_FIELD: usize = 16_384;
+const DEFAULT_TTL: &str = "infinity";
 
 #[derive(Debug, Default, Deserialize)]
 pub(super) struct EnvironmentsQuery {
@@ -60,8 +61,6 @@ pub(super) struct EnvironmentsQuery {
     state: String,
     #[serde(default)]
     destroyed: bool,
-    #[serde(default)]
-    create: bool,
     #[serde(default)]
     ports: String,
     #[serde(default)]
@@ -142,7 +141,7 @@ struct EnvironmentSubmission {
     disk: String,
     ttl: String,
     isolation_tier: String,
-    repositories: Vec<(String, String)>,
+    repositories: Vec<(String, String, String)>,
     agents: Vec<String>,
     secret_project: String,
     include_org_secrets: bool,
@@ -168,7 +167,7 @@ struct InlineSecretProjectResponse {
 impl EnvironmentSubmission {
     fn parse(bytes: &[u8]) -> Result<Self, ()> {
         let mut values = HashMap::<String, String>::new();
-        let mut repositories = BTreeMap::<usize, (String, String)>::new();
+        let mut repositories = BTreeMap::<usize, (String, String, String)>::new();
         let mut app_ports = BTreeMap::<usize, (String, String, String)>::new();
         let mut agents = Vec::new();
         let mut agent_secrets = HashMap::<String, String>::new();
@@ -194,6 +193,11 @@ impl EnvironmentSubmission {
                     return Err(());
                 }
                 repositories.entry(index).or_default().1 = value;
+            } else if let Some(index) = indexed_key(&key, "repo_mount_") {
+                if index >= MAX_REPOSITORIES {
+                    return Err(());
+                }
+                repositories.entry(index).or_default().2 = value;
             } else if let Some(index) = indexed_key(&key, "app_port_") {
                 if index >= MAX_APP_PORTS {
                     return Err(());
@@ -322,7 +326,7 @@ impl EnvironmentSubmission {
             self.disk = preset.default_disk_gb.to_string();
         }
         if !self.prepared
-            && self.ttl.trim().is_empty()
+            && ttl_uses_default(&self.ttl)
             && let Some(ttl) = preset.default_ttl_seconds
         {
             self.ttl = format!("{ttl}s");
@@ -353,12 +357,12 @@ impl EnvironmentSubmission {
     }
 
     fn normalize_source(&mut self) {
-        if self.mode == "image" {
-            self.repositories.clear();
-        } else {
-            self.mode = "repo".to_owned();
-            self.preset_id.clear();
-            self.image.clear();
+        // Image and repository configuration are complementary: the image
+        // defines the workspace runtime while repositories define what is
+        // mounted into it. Keep accepting the legacy mode field, but never
+        // discard either half of a submitted configuration.
+        if !matches!(self.mode.as_str(), "image" | "repo") {
+            self.mode = "image".to_owned();
         }
     }
 
@@ -367,37 +371,33 @@ impl EnvironmentSubmission {
         org_id: &str,
         form: &mut EnvironmentCreateFormView,
     ) -> Option<CreateEnvironmentRequest> {
-        let mode = if self.mode == "image" {
-            "image"
-        } else {
-            "repo"
-        };
         let repositories: Vec<RepoEntry> = self
             .repositories
             .iter()
-            .filter_map(|(url, branch)| {
+            .filter_map(|(url, branch, mount_path)| {
                 let url = url.trim();
                 (!url.is_empty()).then(|| RepoEntry {
                     url: url.to_owned(),
                     branch: branch.trim().to_owned(),
+                    mount_path: workspace_mount_path(mount_path),
                     ..Default::default()
                 })
             })
             .collect();
 
-        if mode == "repo" {
-            if repositories.is_empty() {
-                form.repo_error = "Choose or enter at least one repository.".to_owned();
-            } else if repositories
-                .iter()
-                .any(|repository| !valid_repository_url(&repository.url))
-            {
-                form.repo_error =
-                    "Repository URLs must be clean HTTP(S) URLs without embedded credentials."
-                        .to_owned();
-            }
-        } else if self.image.trim().is_empty() && self.preset_id.trim().is_empty() {
-            form.image_error = "Choose a preset or enter an image.".to_owned();
+        if repositories
+            .iter()
+            .any(|repository| !valid_repository_url(&repository.url))
+        {
+            form.repo_error =
+                "Repository URLs must be clean HTTP(S) URLs without embedded credentials."
+                    .to_owned();
+        }
+        if repositories.is_empty()
+            && self.image.trim().is_empty()
+            && self.preset_id.trim().is_empty()
+        {
+            form.image_error = "Enter a workspace image or choose a repository.".to_owned();
         }
 
         if self.name.len() > 128 || self.name.bytes().any(|byte| byte.is_ascii_control()) {
@@ -465,26 +465,18 @@ impl EnvironmentSubmission {
             memory_mb: memory,
             disk_gb: disk,
             ttl_seconds: ttl,
-            repo_url: if mode == "repo" {
-                primary.url.clone()
-            } else {
-                String::new()
-            },
-            branch: if mode == "repo" {
-                primary.branch.clone()
-            } else {
-                String::new()
-            },
-            repos: if repositories.len() > 1 {
+            repo_url: primary.url.clone(),
+            branch: primary.branch.clone(),
+            repos: if repositories.len() > 1
+                || repositories
+                    .iter()
+                    .any(|repository| !repository.mount_path.is_empty())
+            {
                 repositories
             } else {
                 Vec::new()
             },
-            image: if mode == "image" || !self.image.trim().is_empty() {
-                self.image.trim().to_owned()
-            } else {
-                String::new()
-            },
+            image: self.image.trim().to_owned(),
             install_command: self.install_command.clone(),
             startup_script: self.startup_script.clone(),
             agents,
@@ -511,14 +503,37 @@ pub(super) async fn page(
     Query(query): Query<EnvironmentsQuery>,
     headers: HeaderMap,
 ) -> Response {
-    let continuation = environments_path(&slug);
+    render_page(state, slug, query, headers, false).await
+}
+
+pub(super) async fn new_page(
+    State(state): State<AppState>,
+    Path(slug): Path<String>,
+    Query(query): Query<EnvironmentsQuery>,
+    headers: HeaderMap,
+) -> Response {
+    render_page(state, slug, query, headers, true).await
+}
+
+async fn render_page(
+    state: AppState,
+    slug: String,
+    query: EnvironmentsQuery,
+    headers: HeaderMap,
+    create_open: bool,
+) -> Response {
+    let continuation = if create_open {
+        format!("/{slug}/new/")
+    } else {
+        environments_path(&slug)
+    };
     let (dashboard, organization, cookie) =
         match get_context(&state, &headers, &slug, &continuation).await {
             Ok(context) => context,
             Err(response) => return response,
         };
     let token = new_csrf_token();
-    let form = default_create_form(token.clone(), query.create);
+    let form = default_create_form(token.clone(), create_open);
     let page = match build_page(
         &state,
         cookie,
@@ -631,6 +646,7 @@ pub(super) async fn prepare(
             Err(error) => return connect_page_error(error, &environments_path(&slug), &headers),
         };
     submission.normalize_source();
+    let preset_was_selected = !submission.preset_id.trim().is_empty();
     submission.apply_selected_preset_defaults(&options);
     let mut form = submission.form_view(submission.csrf.clone());
     hydrate_options(&mut form, options);
@@ -646,12 +662,16 @@ pub(super) async fn prepare(
         )
         .await;
     };
+    let analyze_repositories = submission
+        .repositories
+        .iter()
+        .any(|(url, _, _)| !url.trim().is_empty());
     let mut events = match environment_connect::prepare_events(
         &state,
         cookie.clone(),
         organization.id.clone(),
         draft,
-        submission.mode != "image",
+        analyze_repositories,
     )
     .await
     {
@@ -674,6 +694,9 @@ pub(super) async fn prepare(
         match event {
             Ok(EnvironmentPrepareEvent::Complete { draft, detection }) => {
                 apply_prepared_draft(&mut form, *draft, *detection);
+                if !preset_was_selected {
+                    apply_automatically_resolved_preset_defaults(&mut form);
+                }
                 return render_action_page(
                     &state,
                     &headers,
@@ -742,6 +765,7 @@ pub(super) async fn prepare_events(
             Err(error) => return connect_page_error(error, &environments_path(&slug), &headers),
         };
     submission.normalize_source();
+    let preset_was_selected = !submission.preset_id.trim().is_empty();
     submission.apply_selected_preset_defaults(&options);
     let mut form = submission.form_view(submission.csrf.clone());
     hydrate_options(&mut form, options);
@@ -754,12 +778,16 @@ pub(super) async fn prepare_events(
             },
         );
     };
+    let analyze_repositories = submission
+        .repositories
+        .iter()
+        .any(|(url, _, _)| !url.trim().is_empty());
     let mut upstream = match environment_connect::prepare_events(
         &state,
         cookie,
         organization.id.clone(),
         draft,
-        submission.mode != "image",
+        analyze_repositories,
     )
     .await
     {
@@ -806,6 +834,9 @@ pub(super) async fn prepare_events(
                 }
                 Ok(EnvironmentPrepareEvent::Complete { draft, detection }) => {
                     apply_prepared_draft(&mut form, *draft, *detection);
+                    if !preset_was_selected {
+                        apply_automatically_resolved_preset_defaults(&mut form);
+                    }
                     let html = EnvironmentCreateFormTemplate {
                         organization: &organization,
                         form: &form,
@@ -1455,12 +1486,10 @@ async fn build_page(
             environment.confidential_actions_allowed = confidential_actions_allowed;
         }
     }
-    if form.expanded {
-        hydrate_options(
-            &mut form,
-            environment_connect::create_options(state, cookie.clone(), &organization.id).await?,
-        );
-    }
+    hydrate_options(
+        &mut form,
+        environment_connect::create_options(state, cookie.clone(), &organization.id).await?,
+    );
     form.show_confidential_controls = confidential_actions_allowed;
     form.confidential_available &= confidential_actions_allowed;
     let port_panel = if valid_identifier(&query.ports) {
@@ -1575,10 +1604,7 @@ async fn render_action_page(
     form: EnvironmentCreateFormView,
     status: StatusCode,
 ) -> Response {
-    let query = EnvironmentsQuery {
-        create: true,
-        ..Default::default()
-    };
+    let query = EnvironmentsQuery::default();
     let page = match build_page(
         state,
         cookie,
@@ -1663,21 +1689,22 @@ fn default_create_form(token: String, expanded: bool) -> EnvironmentCreateFormVi
         csrf_token: token,
         expanded,
         prepared: false,
-        mode: "repo".to_owned(),
+        mode: "image".to_owned(),
         name: String::new(),
         preset_id: String::new(),
-        image: String::new(),
+        image: "ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467".to_owned(),
         repositories: vec![EnvironmentRepositoryFormRow {
             index: 100,
             url: String::new(),
             branch: String::new(),
+            mount_path: String::new(),
         }],
         install_command: String::new(),
         startup_script: String::new(),
         cpu: "1000".to_owned(),
         memory: "2048".to_owned(),
         disk: "10".to_owned(),
-        ttl: String::new(),
+        ttl: DEFAULT_TTL.to_owned(),
         isolation_tier: "standard".to_owned(),
         confidential_available: false,
         show_confidential_controls: false,
@@ -1745,7 +1772,7 @@ fn apply_prepared_draft(
     form.ttl = draft
         .ttl_seconds
         .map(|value| format!("{value}s"))
-        .unwrap_or_default();
+        .unwrap_or_else(|| DEFAULT_TTL.to_owned());
     form.isolation_tier = match draft.isolation_tier.as_known() {
         Some(IsolationTier::Confidential) => "confidential".to_owned(),
         _ => "standard".to_owned(),
@@ -1766,17 +1793,54 @@ fn apply_prepared_draft(
         })
         .collect();
     let repositories = if draft.repos.is_empty() {
-        vec![(draft.repo_url, draft.branch)]
+        vec![(draft.repo_url, draft.branch, String::new())]
     } else {
         draft
             .repos
             .into_iter()
-            .map(|repo| (repo.url, repo.branch))
+            .map(|repo| (repo.url, repo.branch, repo.mount_path))
             .collect()
     };
     form.repositories = repository_rows(&repositories);
     form.detection = environment_connect::detection_view(detection);
     form.form_error.clear();
+}
+
+fn apply_automatically_resolved_preset_defaults(form: &mut EnvironmentCreateFormView) {
+    let Some(preset) = form
+        .presets
+        .iter()
+        .find(|preset| preset.id == form.preset_id)
+        .cloned()
+    else {
+        return;
+    };
+
+    if form.image.trim().is_empty() {
+        form.image = preset.image;
+    }
+    if form.install_command.is_empty() {
+        form.install_command = preset.default_install_command;
+    }
+    if form.startup_script.is_empty() {
+        form.startup_script = preset.default_startup_script;
+    }
+    if ttl_uses_default(&form.ttl)
+        && let Some(ttl) = preset.default_ttl_seconds
+    {
+        form.ttl = format!("{ttl}s");
+    }
+    if form.selected_agents.is_empty() {
+        form.selected_agents = preset.default_agents;
+    }
+    if form.app_ports.is_empty() {
+        form.app_ports = preset.default_app_ports;
+    }
+    if form.secret_project.trim().is_empty() {
+        form.secret_project = preset.secret_project;
+    }
+    form.include_org_secrets = preset.default_include_org_secrets;
+    form.include_user_secrets = preset.default_include_user_secrets;
 }
 
 fn apply_create_error(form: &mut EnvironmentCreateFormView, error: &ConnectError) {
@@ -1893,20 +1957,23 @@ fn take(values: &mut HashMap<String, String>, key: &str) -> String {
     values.remove(key).unwrap_or_default()
 }
 
-fn repository_rows(values: &[(String, String)]) -> Vec<EnvironmentRepositoryFormRow> {
+fn repository_rows(values: &[(String, String, String)]) -> Vec<EnvironmentRepositoryFormRow> {
     let values = if values.is_empty() {
-        vec![(String::new(), String::new())]
+        vec![(String::new(), String::new(), String::new())]
     } else {
         values.to_vec()
     };
     values
         .into_iter()
         .enumerate()
-        .map(|(index, (url, branch))| EnvironmentRepositoryFormRow {
-            index: index + 100,
-            url,
-            branch,
-        })
+        .map(
+            |(index, (url, branch, mount_path))| EnvironmentRepositoryFormRow {
+                index: index + 100,
+                url,
+                branch,
+                mount_path,
+            },
+        )
         .collect()
 }
 
@@ -1937,6 +2004,18 @@ fn valid_repository_url(value: &str) -> bool {
     })
 }
 
+fn workspace_mount_path(value: &str) -> String {
+    let value = value.trim();
+    if value.is_empty() || value == "/workspace" || value == "/workspace/" {
+        return String::new();
+    }
+    let suffix = value
+        .strip_prefix("/workspace/")
+        .unwrap_or(value)
+        .trim_start_matches('/');
+    format!("/workspace/{suffix}")
+}
+
 fn parse_bounded_i32(
     value: &str,
     minimum: i32,
@@ -1958,7 +2037,7 @@ fn parse_bounded_i32(
 
 fn parse_ttl(value: &str, error: &mut String) -> Option<i32> {
     let value = value.trim();
-    if value.is_empty() {
+    if ttl_uses_default(value) {
         return None;
     }
     let (digits, multiplier) = match value.as_bytes().last() {
@@ -1975,10 +2054,15 @@ fn parse_ttl(value: &str, error: &mut String) -> Option<i32> {
     {
         Some(seconds) if (60..=31_536_000).contains(&seconds) => Some(seconds as i32),
         _ => {
-            *error = "TTL must be 60 seconds to 365 days, such as 8h or 7d.".to_owned();
+            *error = "TTL must be infinity or 60 seconds to 365 days, such as 8h or 7d.".to_owned();
             None
         }
     }
+}
+
+fn ttl_uses_default(value: &str) -> bool {
+    let value = value.trim();
+    value.is_empty() || value == "0" || value.eq_ignore_ascii_case(DEFAULT_TTL) || value == "∞"
 }
 
 fn allowlisted_agents(values: &[String]) -> Vec<SetupAgent> {
@@ -2387,13 +2471,56 @@ mod tests {
     }
 
     #[test]
-    fn selected_source_mode_discards_stale_values_from_the_other_mode() {
+    fn automatically_resolved_presets_fill_the_prepared_form_without_replacing_its_image() {
+        let mut form = default_create_form("token".to_owned(), true);
+        form.prepared = true;
+        form.preset_id = "preset-id".to_owned();
+        form.presets = vec![crate::view::EnvironmentPresetOption {
+            id: "preset-id".to_owned(),
+            name: "Preset".to_owned(),
+            description: String::new(),
+            image: "example.test/preset@sha256:abc".to_owned(),
+            default_cpu_millicores: 1_000,
+            default_memory_mb: 2_048,
+            default_disk_gb: 10,
+            default_ttl_seconds: Some(3_600),
+            default_install_command: "install-dependencies".to_owned(),
+            default_startup_script: "start-services".to_owned(),
+            default_agents: vec!["codex".to_owned()],
+            default_app_ports: vec![EnvironmentAppPortFormRow {
+                index: 0,
+                port: "3000".to_owned(),
+                label: "web".to_owned(),
+                access: "creator".to_owned(),
+            }],
+            default_include_org_secrets: false,
+            default_include_user_secrets: true,
+            secret_project: "development".to_owned(),
+            official: false,
+        }];
+
+        let submitted_image = form.image.clone();
+        apply_automatically_resolved_preset_defaults(&mut form);
+
+        assert_eq!(form.image, submitted_image);
+        assert_eq!(form.install_command, "install-dependencies");
+        assert_eq!(form.startup_script, "start-services");
+        assert_eq!(form.ttl, "3600s");
+        assert_eq!(form.selected_agents, vec!["codex"]);
+        assert_eq!(form.app_ports[0].port, "3000");
+        assert_eq!(form.secret_project, "development");
+        assert!(!form.include_org_secrets);
+        assert!(form.include_user_secrets);
+    }
+
+    #[test]
+    fn workspace_image_and_repositories_survive_legacy_source_modes() {
         let mut image = EnvironmentSubmission::parse(
             b"mode=image&image=ghcr.io%2Fcodewiresh%2Fworkspace%40sha256%3A03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467&repo_url_0=https%3A%2F%2Fstale.invalid%2Frepo",
         )
         .expect("image submission");
         image.normalize_source();
-        assert!(image.repositories.is_empty());
+        assert_eq!(image.repositories.len(), 1);
         assert_eq!(
             image.image,
             "ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467"
@@ -2405,8 +2532,8 @@ mod tests {
         .expect("repository submission");
         repository.normalize_source();
         assert_eq!(repository.repositories.len(), 1);
-        assert!(repository.preset_id.is_empty());
-        assert!(repository.image.is_empty());
+        assert_eq!(repository.preset_id, "stale");
+        assert_eq!(repository.image, "stale.invalid/image");
     }
 
     #[test]
@@ -2414,6 +2541,24 @@ mod tests {
         let mut error = String::new();
         assert_eq!(parse_ttl("30", &mut error), Some(1_800));
         assert!(error.is_empty());
+        assert_eq!(parse_ttl("infinity", &mut error), None);
+        assert_eq!(parse_ttl("∞", &mut error), None);
+        assert_eq!(parse_ttl("0", &mut error), None);
+        assert!(error.is_empty());
+    }
+
+    #[test]
+    fn repository_mount_inputs_are_scoped_under_workspace() {
+        assert_eq!(workspace_mount_path("codewire"), "/workspace/codewire");
+        assert_eq!(
+            workspace_mount_path("services/api"),
+            "/workspace/services/api"
+        );
+        assert_eq!(
+            workspace_mount_path("/workspace/legacy"),
+            "/workspace/legacy"
+        );
+        assert_eq!(workspace_mount_path(""), "");
     }
 
     #[test]
@@ -2476,6 +2621,30 @@ mod tests {
         assert!(html.contains("unsafe repository"));
         assert!(html.contains("unsafe preset"));
         assert!(!html.contains("<b>unsafe"));
+        assert!(html.contains("icons-v2.svg#icon-github"));
+        assert!(html.contains("data-repository-virtual-list"));
+        assert!(html.contains("data-repository-virtual-row"));
+        assert!(html.contains("data-selected-mounts hidden"));
+        assert!(html.contains("data-repository-mount-option=\"0\" hidden"));
+
+        form.repositories = vec![EnvironmentRepositoryFormRow {
+            index: 0,
+            url: "https://example.test/repository".to_owned(),
+            branch: "main".to_owned(),
+            mount_path: "/workspace/repository".to_owned(),
+        }];
+        let selected_html = EnvironmentCreateFormTemplate {
+            organization: &organization,
+            form: &form,
+        }
+        .render()
+        .expect("environment form with selected GitHub repository");
+        assert!(selected_html.contains("data-selected-mounts>"));
+        assert!(selected_html.contains("data-repository-mount-option=\"0\"><span"));
+        assert!(!selected_html.contains("data-repository-mount-option=\"0\" hidden"));
+        assert!(selected_html.contains(">/workspace/</span><input"));
+        assert!(selected_html.contains("value=\"repository\" placeholder=\"repo\""));
+        assert!(!selected_html.contains("value=\"/workspace/repository\""));
 
         form.prepared = true;
         let prepared_html = EnvironmentCreateFormTemplate {

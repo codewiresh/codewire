@@ -123,7 +123,7 @@ weakening of the required local hardware gate.
   only focused syntax, type, accessibility, or rendered-fixture checks. Do not
   commit, push, open a PR, run CI, rebuild product images, or recreate Kind
   until the owner says “land it.”
-- During active iteration use `make dashboard-watch` or
+- During active iteration use `make design-system`, `make dashboard-watch`, or
   `make dashboard-watch-kind`. Run `scripts/dev/preflight.sh --explain` before
   the final landing gate. If an obviously UI-only change is unclassified or
   selects integration, Kind, or full verification solely because classification

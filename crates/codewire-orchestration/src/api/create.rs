@@ -33,6 +33,7 @@ use super::environments::{
     require_org_member, scan_environment, trigger_environment,
 };
 use crate::confidential_storage::require_interactive_access;
+use crate::repository_mount::validate_repository_mounts;
 
 const CONFIDENTIAL_PERSISTENT_VOLUME_MAX_GIB: i32 = 50;
 
@@ -45,6 +46,8 @@ pub struct RepoEntry {
     pub url: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub branch: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub mount_path: String,
 }
 
 /// Mirrors `api.AppPort`.
@@ -183,8 +186,25 @@ pub fn normalize_create_environment_body(body: &mut CreateEnvironmentBody) {
         body.repos = vec![RepoEntry {
             url: body.repo_url.clone(),
             branch: body.branch.clone(),
+            mount_path: String::new(),
         }];
     }
+}
+
+fn validate_environment_repository_mounts(repos: &[RepoEntry]) -> AppResult<()> {
+    validate_repository_mounts(
+        repos
+            .iter()
+            .map(|repo| (repo.url.as_str(), repo.mount_path.as_str())),
+    )
+    .map(|_| ())
+    .map_err(|error| {
+        super::environments::coded_owned(
+            StatusCode::BAD_REQUEST,
+            "invalid_repo_mount_path",
+            error.to_string(),
+        )
+    })
 }
 
 fn validate_environment_resources(
@@ -615,6 +635,7 @@ pub(crate) async fn create_environment_core(
     }
 
     normalize_create_environment_body(&mut body);
+    validate_environment_repository_mounts(&body.repos)?;
     // Reject explicit bad values before preset lookup or auto-creation can
     // write preset state. The effective values are checked again after
     // preset resolution so invalid stored defaults cannot reach quota or the
@@ -1053,10 +1074,12 @@ mod tests {
                 RepoEntry {
                     url: "https://github.com/x/y".into(),
                     branch: "dev".into(),
+                    mount_path: "/workspace/api".into(),
                 },
                 RepoEntry {
                     url: "https://github.com/x/z".into(),
                     branch: String::new(),
+                    mount_path: "/workspace/web".into(),
                 },
             ],
             ..Default::default()
@@ -1065,6 +1088,40 @@ mod tests {
         assert_eq!(b.repo_url, "https://github.com/x/y");
         assert_eq!(b.branch, "dev");
         assert_eq!(b.repos.len(), 2);
+        validate_environment_repository_mounts(&b.repos).unwrap();
+    }
+
+    #[test]
+    fn repository_mounts_are_safe_and_non_overlapping() {
+        let invalid = [
+            vec![RepoEntry {
+                url: "https://github.com/x/y".into(),
+                mount_path: "/workspace/../outside".into(),
+                ..Default::default()
+            }],
+            vec![
+                RepoEntry {
+                    url: "https://github.com/x/y".into(),
+                    mount_path: "/workspace/app".into(),
+                    ..Default::default()
+                },
+                RepoEntry {
+                    url: "https://github.com/x/z".into(),
+                    mount_path: "/workspace/app/docs".into(),
+                    ..Default::default()
+                },
+            ],
+        ];
+        for repos in invalid {
+            let error = validate_environment_repository_mounts(&repos).unwrap_err();
+            assert!(matches!(
+                error,
+                AppError::Coded {
+                    code: "invalid_repo_mount_path",
+                    ..
+                }
+            ));
+        }
     }
 
     #[test]
@@ -1299,6 +1356,7 @@ mod tests {
             repos: vec![RepoEntry {
                 url: "https://github.com/a/b".into(),
                 branch: String::new(),
+                mount_path: String::new(),
             }],
             install_command: "npm install".into(),
             ..Default::default()

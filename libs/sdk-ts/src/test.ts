@@ -595,8 +595,14 @@ async function runTests() {
   const createEnvironment = toProtoCreateEnvironmentRequest("org_test", {
     preset_slug: "python",
     isolation_tier: "confidential",
+    repos: [{
+      branch: "main",
+      mount_path: "/workspace/platform",
+      url: "https://git.example.test/org/platform",
+    }],
   });
   assert(createEnvironment.isolationTier === IsolationTier.CONFIDENTIAL, "create environment preserves confidential isolation");
+  assert(createEnvironment.repos[0]?.mountPath === "/workspace/platform", "create environment preserves repository mount paths");
   let rejectedUnknownIsolation = false;
   try {
     toProtoCreateEnvironmentRequest("org_test", {
@@ -657,13 +663,18 @@ async function runTests() {
       installAgents: true,
       installCommand: "go install",
       repoUrl: "https://git.example.test/org/repo",
-      repos: [{ branch: "main", url: "https://git.example.test/org/repo" }],
+      repos: [{
+        branch: "main",
+        mountPath: "/workspace/repo",
+        url: "https://git.example.test/org/repo",
+      }],
       startupScript: "go test ./...",
     },
   }));
   assert(convertedPreset.default_cpu_millicores === 4000, "preset numbers keep SDK values");
   assert(convertedPreset.default_setup_config?.app_ports?.[0]?.access === "public", "preset nested ports preserve values");
   assert(convertedPreset.default_setup_config?.agent_env?.MODE === "test", "preset nested maps preserve values");
+  assert(convertedPreset.default_setup_config?.repos?.[0]?.mount_path === "/workspace/repo", "preset repository mount paths are retained");
   assert(convertedPreset.secret_project_id === "sp_1", "preset optional IDs are retained");
 
   const convertedSecretMetadata = fromProtoSecretMetadata(create(SecretMetadataSchema, {
@@ -1052,7 +1063,7 @@ async function runTests() {
     server.close();
   }
 
-  const expectedAssertions = 98;
+  const expectedAssertions = 100;
   if (passed !== expectedAssertions) {
     failed++;
     console.error(

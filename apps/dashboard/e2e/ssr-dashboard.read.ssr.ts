@@ -33,6 +33,11 @@ test.describe("server-rendered dashboard", () => {
     expect(response?.status()).toBe(200);
     await expect(page.getByRole("heading", { name: "Dashboard", exact: true })).toBeVisible();
     await expect(page.getByRole("navigation", { name: "Main navigation" }).first()).toBeVisible();
+    const sandboxNavigation = page.locator(".cw-sidebar-slot").getByRole("region", {
+      name: "Sandboxes",
+    });
+    await expect(sandboxNavigation.getByRole("link", { name: "Create Sandbox" })).toBeVisible();
+    await expect(sandboxNavigation.getByRole("link", { name: "View all sandboxes" })).toBeVisible();
     await expect(page.locator('.cw-org-menu a[href="/organizations/new/"]').first()).toHaveAttribute(
       "href",
       "/organizations/new/",

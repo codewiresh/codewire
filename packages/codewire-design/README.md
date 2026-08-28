@@ -1,8 +1,8 @@
 # Codewire design system
 
 This directory is the framework-neutral, source-owned visual contract for the
-server-rendered web application. It is compiled into the Rust binary and has no
-package manifest, dependencies, build step, remote font, or browser download.
+server-rendered web application. Production CSS, JavaScript, vectors, and fonts
+are compiled into the Rust binary without a package build or browser download.
 
 ## Layers
 
@@ -19,6 +19,21 @@ package manifest, dependencies, build step, remote font, or browser download.
 - `dashboard.js`, route scripts, and HTMX are narrowly scoped progressive-
   enhancement adapters. No-JavaScript forms and links remain the functional
   baseline.
+- `reference/source/` preserves the editable HTML authoring handoff. These
+  files are visual source material, not production templates. Their local
+  `runtime.js` accepts authoring-host React, ReactDOM, and optional Babel only
+  through explicit same-origin `window.__resources` entries; it never falls
+  back to a package CDN.
+- `reference/fixtures/` exercises production CSS and components without a
+  running backend. Use these pages for token, component, and state review
+  before translating a change into the Askama templates.
+
+Run `make design-system`, then open
+`http://127.0.0.1:4174/reference/fixtures/`. The static server binds only to
+loopback, maps the production IBM Plex Mono asset URLs to their checked-in font
+files, and does not modify generated or production assets. Open files beneath
+`reference/source/` in the design authoring host when editing the original
+handoff; use the fixtures for the repository-owned, fully offline preview.
 
 ## Conventions
 

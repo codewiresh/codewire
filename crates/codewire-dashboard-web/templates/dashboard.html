@@ -21,7 +21,7 @@
         <div class="cw-main-inner"><div class="cw-page cw-page--wide">
           <header class="cw-page-header">
             <div><p class="cw-eyebrow">Account home</p><h1 class="cw-page-title">Dashboard</h1><p class="cw-page-description">{% if view.has_selected_organization %}Operational overview for {{ view.selected_organization_name }}.{% else %}Create an organization to start building.{% endif %}</p></div>
-            {% if view.has_selected_organization %}<a class="cw-button cw-button--pill" href="{{ view.selected_organization_url }}?create=true">＋ Create Sandbox</a>{% else %}<a class="cw-button cw-button--pill" href="{{ view.new_organization_url }}">New Organization</a>{% endif %}
+            {% if view.has_selected_organization %}<a class="cw-button cw-button--pill" href="{{ view.selected_organization_url }}new/">＋ Create Sandbox</a>{% else %}<a class="cw-button cw-button--pill" href="{{ view.new_organization_url }}">New Organization</a>{% endif %}
           </header>
 
           {% if view.has_selected_organization %}
@@ -35,7 +35,7 @@
             <div class="cw-console-panel">
               <div class="cw-console-panel-header"><div><p class="cw-eyebrow">Inventory</p><h2>Recently created</h2></div><a href="{{ view.selected_organization_url }}">All Sandboxes →</a></div>
               {% if view.recent_sandboxes.is_empty() %}
-              <div class="cw-state"><strong>No Sandboxes yet</strong><p>Create one from a repository or an image.</p><a class="cw-button cw-button--pill" href="{{ view.selected_organization_url }}?create=true">Create Sandbox</a></div>
+              <div class="cw-state"><strong>No Sandboxes yet</strong><p>Create one from a repository or an image.</p><a class="cw-button cw-button--pill" href="{{ view.selected_organization_url }}new/">Create Sandbox</a></div>
               {% else %}
               <div class="cw-recent-list">
                 {% for sandbox in view.recent_sandboxes %}<a href="/{{ view.selected_organization_slug }}/{{ sandbox.id }}/"><span class="cw-rail-dot" data-tone="{{ sandbox.state_tone }}" aria-hidden="true"></span><strong>{{ sandbox.name }}</strong><span>{{ sandbox.resources }}</span><span>{{ sandbox.created }}</span><span>{{ sandbox.state }}</span></a>{% endfor %}
@@ -51,7 +51,7 @@
           {% if view.show_checklist %}
           <section id="get-started" class="cw-console-panel cw-onboarding" aria-labelledby="setup-title">
             <div class="cw-console-panel-header"><div><p class="cw-eyebrow">First run</p><h2 id="setup-title">Get started</h2></div></div>
-            <ol><li data-complete="{{ view.has_organizations }}"><span>1</span><div><strong>Create an organization</strong><p>Choose the stable URL namespace for your team.</p></div></li><li data-complete="{{ view.github_connected }}"><span>2</span><div><strong>Connect GitHub <small>Optional</small></strong><p>Use private repositories in the Sandbox creator.</p>{% if view.github_available && !view.github_connected %}<a href="{{ view.github_connect_url }}">Connect GitHub</a>{% endif %}</div></li><li><span>3</span><div><strong>Create a Sandbox</strong><p>Launch an isolated workspace from a repository or image.</p><a href="{{ view.selected_organization_url }}?create=true">Create Sandbox</a></div></li></ol>
+            <ol><li data-complete="{{ view.has_organizations }}"><span>1</span><div><strong>Create an organization</strong><p>Choose the stable URL namespace for your team.</p></div></li><li data-complete="{{ view.github_connected }}"><span>2</span><div><strong>Connect GitHub <small>Optional</small></strong><p>Use private repositories in the Sandbox creator.</p>{% if view.github_available && !view.github_connected %}<a href="{{ view.github_connect_url }}">Connect GitHub</a>{% endif %}</div></li><li><span>3</span><div><strong>Create a Sandbox</strong><p>Launch an isolated workspace from a repository or image.</p><a href="{{ view.selected_organization_url }}new/">Create Sandbox</a></div></li></ol>
           </section>
           {% endif %}
           {% else %}

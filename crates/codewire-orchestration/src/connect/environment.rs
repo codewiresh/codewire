@@ -656,6 +656,7 @@ fn create_body(request: proto::CreateEnvironmentRequest) -> CreateEnvironmentBod
             .map(|repo| RepoEntry {
                 url: repo.url,
                 branch: repo.branch,
+                mount_path: repo.mount_path,
             })
             .collect(),
         image: request.image,
@@ -871,6 +872,7 @@ fn proto_create_request(
             .map(|repo| proto::RepoEntry {
                 url: repo.url,
                 branch: repo.branch,
+                mount_path: repo.mount_path,
                 ..Default::default()
             })
             .collect(),
@@ -1613,6 +1615,7 @@ mod tests {
                     repos: vec![RepoEntry {
                         url: repo.into(),
                         branch: String::new(),
+                        mount_path: String::new(),
                     }],
                     ..Default::default()
                 },

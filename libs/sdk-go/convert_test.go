@@ -74,7 +74,7 @@ func TestUpdateAPIKeyDisabledPreservesPresence(t *testing.T) {
 func TestFromProtoPresetGolden(t *testing.T) {
 	setup := &codewirev1.SetupConfig{
 		RepoUrl: "https://example.test/repo", Branch: "main",
-		Repos:          []*codewirev1.RepoEntry{{Url: "https://example.test/extra", Branch: "dev"}},
+		Repos:          []*codewirev1.RepoEntry{{Url: "https://example.test/extra", Branch: "dev", MountPath: "/workspace/extra"}},
 		InstallCommand: "bun install", StartupScript: "bun run dev",
 		EnvVars: map[string]string{"A": "1"}, Agents: []*codewirev1.SetupAgent{{Type: "codex"}},
 		InstallAgents: testBoolPointer(true), Agent: "codex", AgentEnv: map[string]string{"B": "2"},
@@ -101,7 +101,7 @@ func TestFromProtoPresetGolden(t *testing.T) {
 		CreatedAt: "2026-02-03T04:05:06Z",
 		DefaultSetupConfig: &SetupConfig{
 			RepoUrl: testStringPointer("https://example.test/repo"), Branch: testStringPointer("main"),
-			Repos:          testRepoEntriesPointer([]RepoEntry{{Url: "https://example.test/extra", Branch: testStringPointer("dev")}}),
+			Repos:          testRepoEntriesPointer([]RepoEntry{{Url: "https://example.test/extra", Branch: testStringPointer("dev"), MountPath: testStringPointer("/workspace/extra")}}),
 			InstallCommand: testStringPointer("bun install"), StartupScript: testStringPointer("bun run dev"),
 			EnvVars: testStringMapPointer(map[string]string{"A": "1"}), Agents: testSetupAgentsPointer([]SetupAgent{{Type: "codex"}}),
 			InstallAgents: testBoolPointer(true), Agent: testStringPointer("codex"), AgentEnv: testStringMapPointer(map[string]string{"B": "2"}),
@@ -271,7 +271,8 @@ func TestCreateEnvironmentRequestPreservesOwnedNestedValues(t *testing.T) {
 	emptyMap := map[string]string{}
 	agents := []SetupAgent{{Type: "codex"}}
 	ports := []AppPort{{Port: 3000, Label: "web", Access: &empty}}
-	repos := []RepoEntry{{Url: "https://example.test/repo", Branch: &empty}}
+	mountPath := "/workspace/repo"
+	repos := []RepoEntry{{Url: "https://example.test/repo", Branch: &empty, MountPath: &mountPath}}
 	request, err := createEnvironmentRequest("org_1", CreateEnvironmentBody{
 		Agent: &empty, AgentEnv: &emptyMap, Agents: &agents, AppPorts: &ports, Branch: &empty,
 		CpuMillicores: &zero, DiskGb: &zero, EnvVars: &emptyMap, Image: &empty, IncludeOrgSecrets: &falseValue,
@@ -291,7 +292,7 @@ func TestCreateEnvironmentRequestPreservesOwnedNestedValues(t *testing.T) {
 	if request.GetIsolationTier() != codewirev1.IsolationTier_ISOLATION_TIER_CONFIDENTIAL {
 		t.Errorf("request changed isolation tier: %#v", request)
 	}
-	if request.GetAgents()[0].GetType() != "codex" || request.GetAppPorts()[0].GetPort() != 3000 || request.GetAppPorts()[0].GetLabel() != "web" || request.GetAppPorts()[0].GetAccess() != "" || request.GetRepos()[0].GetUrl() != "https://example.test/repo" || request.GetRepos()[0].GetBranch() != "" {
+	if request.GetAgents()[0].GetType() != "codex" || request.GetAppPorts()[0].GetPort() != 3000 || request.GetAppPorts()[0].GetLabel() != "web" || request.GetAppPorts()[0].GetAccess() != "" || request.GetRepos()[0].GetUrl() != "https://example.test/repo" || request.GetRepos()[0].GetBranch() != "" || request.GetRepos()[0].GetMountPath() != mountPath {
 		t.Errorf("request changed nested values: %#v", request)
 	}
 	if overflow := int64(math.MaxInt32) + 1; func() bool {

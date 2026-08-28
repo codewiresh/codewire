@@ -350,7 +350,13 @@ class TransportTestCase(unittest.TestCase):
                 default_setup_config=SetupConfig(
                     repo_url="https://example.test/repository",
                     branch="main",
-                    repos=[RepoEntry(url="https://example.test/a", branch="branch")],
+                    repos=[
+                        RepoEntry(
+                            url="https://example.test/a",
+                            branch="branch",
+                            mount_path="/workspace/a",
+                        )
+                    ],
                     install_command="pip install",
                     startup_script="python app.py",
                     env_vars={"PYTHONUNBUFFERED": "1"},
@@ -372,7 +378,13 @@ class TransportTestCase(unittest.TestCase):
         self.assertEqual(preset_value["branch"], "main")
         self.assertEqual(
             preset_value["repos"],
-            [{"url": "https://example.test/a", "branch": "branch"}],
+            [
+                {
+                    "url": "https://example.test/a",
+                    "branch": "branch",
+                    "mount_path": "/workspace/a",
+                }
+            ],
         )
         self.assertEqual(preset_value["install_command"], "pip install")
         self.assertEqual(preset_value["startup_script"], "python app.py")

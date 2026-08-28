@@ -3,13 +3,15 @@
 {% else if view.sandboxes.is_empty() %}
 <p class="cw-rail-status">No Sandboxes yet.</p>
 {% else %}
-<div class="cw-rail-list">
+<ul class="cw-rail-list">
   {% for sandbox in view.sandboxes %}
-  <a class="cw-rail-row" href="/{{ view.selected_organization_slug }}/{{ sandbox.id }}/" data-search-item data-search-text="{{ sandbox.name }} {{ sandbox.id }} {{ sandbox.state }}">
-    <span class="cw-rail-dot" data-tone="{{ sandbox.state_tone }}" aria-hidden="true"></span>
-    <span class="cw-rail-name">{{ sandbox.name }}</span>
-    <span class="cw-rail-state" aria-label="Region unavailable">—</span>
-  </a>
+  <li>
+    <a class="cw-rail-row" href="/{{ view.selected_organization_slug }}/{{ sandbox.id }}/" data-search-item data-search-text="{{ sandbox.name }} {{ sandbox.id }} {{ sandbox.state }}">
+      <span class="cw-rail-dot" data-tone="{{ sandbox.state_tone }}" aria-hidden="true"></span>
+      <span class="cw-rail-name">{{ sandbox.name }}</span>
+      <span class="cw-rail-state" aria-label="Region unavailable">—</span>
+    </a>
+  </li>
   {% endfor %}
-</div>
+</ul>
 {% endif %}

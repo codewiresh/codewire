@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./runtime.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<style>
+  @font-face { font-family: 'IBM Plex Mono'; src: url('/assets/codewire/fonts/ibm-plex-mono-regular-2.5.0.woff2') format('woff2'); font-weight: 400; font-style: normal; font-display: swap; }
+  @font-face { font-family: 'IBM Plex Mono'; src: url('/assets/codewire/fonts/ibm-plex-mono-medium-2.5.0.woff2') format('woff2'); font-weight: 500; font-style: normal; font-display: swap; }
+  body { margin: 0; background: #0a0a0a; }
+  a { color: #1f96b4; } a:hover { color: #57bcd4; }
+</style>
+</helmet>
+<div style="min-height: 100vh; background: #0a0a0a; color: #ededed; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif; padding: 56px 64px 96px">
+  <div style="max-width: 1240px">
+    <div style="display: flex; align-items: baseline; gap: 16px; border-bottom: 1px solid #262626; padding-bottom: 14px; margin-bottom: 0">
+      <h1 style="margin: 0; font-size: 15px; font-weight: 500; letter-spacing: 0.16em; text-transform: uppercase; color: #fff; font-family: 'JetBrains Mono', monospace">Terminal fonts</h1>
+      <span style="font-size: 12px; color: #6e6e6e">the same console block at 12.5px / 1.65 — as it renders in the sandbox detail pane</span>
+    </div>
+
+    <div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1px; background: #1c1c1c; border: 1px solid #1c1c1c; border-top: none">
+
+      <div style="background: #0c0c0c; padding: 26px 28px 24px; display: flex; flex-direction: column; gap: 16px">
+        <div style="display: flex; align-items: baseline; gap: 10px">
+          <span style="font-size: 12px; color: #ededed; font-weight: 600">JetBrains Mono</span>
+          <span style="font-size: 11px; color: #1f96b4">current</span>
+          <span style="font-size: 11px; color: #6e6e6e; margin-left: auto">tall x-height, wide</span>
+        </div>
+        <div style="font-family: 'JetBrains Mono', monospace; font-size: 12.5px; line-height: 1.65; display: flex; flex-direction: column; overflow: hidden; white-space: nowrap"><div style="color: #6e6e6e">$ codewire attach quiet-mesa</div><div style="color: #6e6e6e">Connected to sandbox shell (eu-west-1).</div><div style="color: #ededed">agent@quiet-mesa:~$ python run_agent.py</div><div style="color: #b9b9b9">[14:02:11] eval 0/128 · lat 41ms</div><div style="color: #b9b9b9">[14:02:19] GET /v1/sandboxes → 200</div><div style="color: #d4674f">[14:02:24] ERROR oom_killed</div><div style="color: #ededed">agent@quiet-mesa:~$ █</div></div>
+      </div>
+
+      <div style="background: #0c0c0c; padding: 26px 28px 24px; display: flex; flex-direction: column; gap: 16px">
+        <div style="display: flex; align-items: baseline; gap: 10px">
+          <span style="font-size: 12px; color: #ededed; font-weight: 600">IBM Plex Mono</span>
+          <span style="font-size: 11px; color: #6e6e6e; margin-left: auto">warmer, humanist</span>
+        </div>
+        <div style="font-family: 'IBM Plex Mono', monospace; font-size: 12.5px; line-height: 1.65; display: flex; flex-direction: column; overflow: hidden; white-space: nowrap"><div style="color: #6e6e6e">$ codewire attach quiet-mesa</div><div style="color: #6e6e6e">Connected to sandbox shell (eu-west-1).</div><div style="color: #ededed">agent@quiet-mesa:~$ python run_agent.py</div><div style="color: #b9b9b9">[14:02:11] eval 0/128 · lat 41ms</div><div style="color: #b9b9b9">[14:02:19] GET /v1/sandboxes → 200</div><div style="color: #d4674f">[14:02:24] ERROR oom_killed</div><div style="color: #ededed">agent@quiet-mesa:~$ █</div></div>
+      </div>
+
+      <div style="background: #0c0c0c; padding: 26px 28px 24px; display: flex; flex-direction: column; gap: 16px">
+        <div style="display: flex; align-items: baseline; gap: 10px">
+          <span style="font-size: 12px; color: #ededed; font-weight: 600">Roboto Mono</span>
+          <span style="font-size: 11px; color: #6e6e6e; margin-left: auto">neutral, narrow</span>
+        </div>
+        <div style="font-family: 'Roboto Mono', monospace; font-size: 12.5px; line-height: 1.65; display: flex; flex-direction: column; overflow: hidden; white-space: nowrap"><div style="color: #6e6e6e">$ codewire attach quiet-mesa</div><div style="color: #6e6e6e">Connected to sandbox shell (eu-west-1).</div><div style="color: #ededed">agent@quiet-mesa:~$ python run_agent.py</div><div style="color: #b9b9b9">[14:02:11] eval 0/128 · lat 41ms</div><div style="color: #b9b9b9">[14:02:19] GET /v1/sandboxes → 200</div><div style="color: #d4674f">[14:02:24] ERROR oom_killed</div><div style="color: #ededed">agent@quiet-mesa:~$ █</div></div>
+      </div>
+
+      <div style="background: #0c0c0c; padding: 26px 28px 24px; display: flex; flex-direction: column; gap: 16px">
+        <div style="display: flex; align-items: baseline; gap: 10px">
+          <span style="font-size: 12px; color: #ededed; font-weight: 600">Source Code Pro</span>
+          <span style="font-size: 11px; color: #6e6e6e; margin-left: auto">conservative, even</span>
+        </div>
+        <div style="font-family: 'Source Code Pro', monospace; font-size: 12.5px; line-height: 1.65; display: flex; flex-direction: column; overflow: hidden; white-space: nowrap"><div style="color: #6e6e6e">$ codewire attach quiet-mesa</div><div style="color: #6e6e6e">Connected to sandbox shell (eu-west-1).</div><div style="color: #ededed">agent@quiet-mesa:~$ python run_agent.py</div><div style="color: #b9b9b9">[14:02:11] eval 0/128 · lat 41ms</div><div style="color: #b9b9b9">[14:02:19] GET /v1/sandboxes → 200</div><div style="color: #d4674f">[14:02:24] ERROR oom_killed</div><div style="color: #ededed">agent@quiet-mesa:~$ █</div></div>
+      </div>
+
+      <div style="background: #0c0c0c; padding: 26px 28px 24px; display: flex; flex-direction: column; gap: 16px">
+        <div style="display: flex; align-items: baseline; gap: 10px">
+          <span style="font-size: 12px; color: #ededed; font-weight: 600">Fira Code</span>
+          <span style="font-size: 11px; color: #6e6e6e; margin-left: auto">ligatures on operators</span>
+        </div>
+        <div style="font-family: 'Fira Code', monospace; font-size: 12.5px; line-height: 1.65; display: flex; flex-direction: column; overflow: hidden; white-space: nowrap"><div style="color: #6e6e6e">$ codewire attach quiet-mesa</div><div style="color: #6e6e6e">Connected to sandbox shell (eu-west-1).</div><div style="color: #ededed">agent@quiet-mesa:~$ python run_agent.py</div><div style="color: #b9b9b9">[14:02:11] eval 0/128 · lat 41ms</div><div style="color: #b9b9b9">[14:02:19] GET /v1/sandboxes → 200</div><div style="color: #d4674f">[14:02:24] ERROR oom_killed</div><div style="color: #ededed">agent@quiet-mesa:~$ █</div></div>
+      </div>
+
+      <div style="background: #0c0c0c; padding: 26px 28px 24px; display: flex; flex-direction: column; gap: 16px">
+        <div style="display: flex; align-items: baseline; gap: 10px">
+          <span style="font-size: 12px; color: #ededed; font-weight: 600">DM Mono</span>
+          <span style="font-size: 11px; color: #6e6e6e; margin-left: auto">light, low contrast</span>
+        </div>
+        <div style="font-family: 'DM Mono', monospace; font-size: 12.5px; line-height: 1.65; display: flex; flex-direction: column; overflow: hidden; white-space: nowrap"><div style="color: #6e6e6e">$ codewire attach quiet-mesa</div><div style="color: #6e6e6e">Connected to sandbox shell (eu-west-1).</div><div style="color: #ededed">agent@quiet-mesa:~$ python run_agent.py</div><div style="color: #b9b9b9">[14:02:11] eval 0/128 · lat 41ms</div><div style="color: #b9b9b9">[14:02:19] GET /v1/sandboxes → 200</div><div style="color: #d4674f">[14:02:24] ERROR oom_killed</div><div style="color: #ededed">agent@quiet-mesa:~$ █</div></div>
+      </div>
+
+      <div style="background: #0c0c0c; padding: 26px 28px 24px; display: flex; flex-direction: column; gap: 16px">
+        <div style="display: flex; align-items: baseline; gap: 10px">
+          <span style="font-size: 12px; color: #ededed; font-weight: 600">Space Mono</span>
+          <span style="font-size: 11px; color: #6e6e6e; margin-left: auto">high personality</span>
+        </div>
+        <div style="font-family: 'Space Mono', monospace; font-size: 12.5px; line-height: 1.65; display: flex; flex-direction: column; overflow: hidden; white-space: nowrap"><div style="color: #6e6e6e">$ codewire attach quiet-mesa</div><div style="color: #6e6e6e">Connected to sandbox shell (eu-west-1).</div><div style="color: #ededed">agent@quiet-mesa:~$ python run_agent.py</div><div style="color: #b9b9b9">[14:02:11] eval 0/128 · lat 41ms</div><div style="color: #b9b9b9">[14:02:19] GET /v1/sandboxes → 200</div><div style="color: #d4674f">[14:02:24] ERROR oom_killed</div><div style="color: #ededed">agent@quiet-mesa:~$ █</div></div>
+      </div>
+
+      <div style="background: #0c0c0c; padding: 26px 28px 24px; display: flex; flex-direction: column; gap: 16px">
+        <div style="display: flex; align-items: baseline; gap: 10px">
+          <span style="font-size: 12px; color: #ededed; font-weight: 600">SF Mono / Menlo</span>
+          <span style="font-size: 11px; color: #6e6e6e; margin-left: auto">no webfont, system</span>
+        </div>
+        <div style="font-family: ui-monospace, 'SF Mono', Menlo, Monaco, monospace; font-size: 12.5px; line-height: 1.65; display: flex; flex-direction: column; overflow: hidden; white-space: nowrap"><div style="color: #6e6e6e">$ codewire attach quiet-mesa</div><div style="color: #6e6e6e">Connected to sandbox shell (eu-west-1).</div><div style="color: #ededed">agent@quiet-mesa:~$ python run_agent.py</div><div style="color: #b9b9b9">[14:02:11] eval 0/128 · lat 41ms</div><div style="color: #b9b9b9">[14:02:19] GET /v1/sandboxes → 200</div><div style="color: #d4674f">[14:02:24] ERROR oom_killed</div><div style="color: #ededed">agent@quiet-mesa:~$ █</div></div>
+      </div>
+
+    </div>
+
+    <div style="display: flex; gap: 1px; background: #1c1c1c; border: 1px solid #1c1c1c; border-top: none; flex-wrap: wrap">
+      <div style="background: #0c0c0c; padding: 24px 28px; flex: 1; min-width: 260px; display: flex; flex-direction: column; gap: 12px">
+        <span style="font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; color: #6e6e6e">Character test</span>
+        <div style="font-family: 'JetBrains Mono', monospace; font-size: 15px; line-height: 1.8; color: #ededed">0O o Il1| ;:, {}[]() &lt;&gt;/\ ~-_ 8B 5S rn</div>
+      </div>
+      <div style="background: #0c0c0c; padding: 24px 28px; flex: 1; min-width: 260px; display: flex; flex-direction: column; gap: 12px">
+        <span style="font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; color: #6e6e6e">Same in IBM Plex Mono</span>
+        <div style="font-family: 'IBM Plex Mono', monospace; font-size: 15px; line-height: 1.8; color: #ededed">0O o Il1| ;:, {}[]() &lt;&gt;/\ ~-_ 8B 5S rn</div>
+      </div>
+    </div>
+
+    <p style="font-size: 12px; line-height: 1.7; color: #8a8a8a; max-width: 720px; margin: 22px 0 0">JetBrains Mono has the tallest x-height, which is why the current console reads well at 12.5px, but it is also the widest — long log lines wrap sooner. IBM Plex Mono is the closest alternative with a narrower advance. Tell me which one and I will set it across the console, the code blocks, and the sidebar wordmark.</p>
+  </div>
+</div>
+</x-dc>
+</body>
+</html>

@@ -1,6 +1,6 @@
 {% if page.environments.is_empty() %}
 <div class="cw-table-shell cw-sandbox-table-shell">
-  <table class="cw-table cw-sandbox-table"><thead><tr><th>Name</th><th>State</th><th>Snapshot</th><th>Region</th><th>Resources</th><th>Last event</th><th>Created</th><th><span class="cw-sr-only">Actions</span></th></tr></thead><tbody><tr><td colspan="8"><div class="cw-state"><strong>No Sandboxes found</strong><p>Start an isolated workspace from a repository or image.</p><a class="cw-button cw-button--pill" href="{{ organization.environments_url }}?create=true" data-drawer-trigger>Create Sandbox</a></div></td></tr></tbody></table>
+  <table class="cw-table cw-sandbox-table"><thead><tr><th>Name</th><th>State</th><th>Snapshot</th><th>Region</th><th>Resources</th><th>Last event</th><th>Created</th><th><span class="cw-sr-only">Actions</span></th></tr></thead><tbody><tr><td colspan="8"><div class="cw-state"><strong>No Sandboxes found</strong><p>Start an isolated workspace from a repository or image.</p><a class="cw-button cw-button--pill" href="{{ organization.environments_url }}new/" data-drawer-trigger>Create Sandbox</a></div></td></tr></tbody></table>
 </div>
 {% else %}
 <div class="cw-table-shell cw-sandbox-table-shell">

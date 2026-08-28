@@ -16,8 +16,9 @@ type AppPort struct {
 
 // RepoEntry configures an additional repository checked out during setup.
 type RepoEntry struct {
-	Branch *string `json:"branch,omitempty"`
-	Url    string  `json:"url"`
+	Branch    *string `json:"branch,omitempty"`
+	MountPath *string `json:"mount_path,omitempty"`
+	Url       string  `json:"url"`
 }
 
 // SetupConfig describes the setup configuration embedded in a preset.

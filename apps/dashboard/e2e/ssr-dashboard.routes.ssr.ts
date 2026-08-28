@@ -117,7 +117,7 @@ test.describe("server-rendered public, auth, and account routes", () => {
     await page.goto("/dashboard/");
     const organizationRoot = await page
       .locator(".cw-sidebar-slot")
-      .getByRole("link", { name: "View all Sandboxes" })
+      .getByRole("link", { name: "View all sandboxes" })
       .getAttribute("href");
     expect(organizationRoot).toMatch(/^\/[a-z0-9-]+\/$/);
     const snapshotsHref = `${organizationRoot}snapshots/`;

@@ -309,6 +309,7 @@ fn proto_repo_entry(entry: RepoEntry) -> ProtoRepoEntry {
     ProtoRepoEntry {
         url: entry.url,
         branch: entry.branch,
+        mount_path: entry.mount_path,
         ..Default::default()
     }
 }

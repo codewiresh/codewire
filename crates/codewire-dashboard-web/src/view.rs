@@ -427,6 +427,13 @@ pub(crate) struct EnvironmentRepositoryFormRow {
     pub(crate) index: usize,
     pub(crate) url: String,
     pub(crate) branch: String,
+    pub(crate) mount_path: String,
+}
+
+impl EnvironmentRepositoryFormRow {
+    pub(crate) fn mount_suffix(&self) -> &str {
+        workspace_mount_suffix(&self.mount_path)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -513,14 +520,6 @@ pub(crate) struct EnvironmentCreateFormView {
 }
 
 impl EnvironmentCreateFormView {
-    pub(crate) fn mode_selected(&self, value: &str) -> bool {
-        self.mode == value
-    }
-
-    pub(crate) fn preset_selected(&self, value: &str) -> bool {
-        self.preset_id == value
-    }
-
     pub(crate) fn isolation_selected(&self, value: &str) -> bool {
         self.isolation_tier == value
     }
@@ -529,6 +528,25 @@ impl EnvironmentCreateFormView {
         self.repositories
             .iter()
             .any(|repository| repository.url == value)
+    }
+
+    pub(crate) fn has_repository(&self) -> bool {
+        self.repositories
+            .iter()
+            .any(|repository| !repository.url.trim().is_empty())
+    }
+
+    pub(crate) fn has_selected_github_repository(&self) -> bool {
+        self.github_repositories
+            .iter()
+            .any(|repository| self.repository_selected(&repository.url))
+    }
+
+    pub(crate) fn repository_mount_suffix(&self, value: &str) -> &str {
+        self.repositories
+            .iter()
+            .find(|repository| repository.url == value)
+            .map_or("", |repository| repository.mount_suffix())
     }
 
     pub(crate) fn secret_project_selected(&self, value: &str) -> bool {
@@ -548,6 +566,17 @@ impl EnvironmentCreateFormView {
             || !self.disk_error.is_empty()
             || !self.ttl_error.is_empty()
             || !self.form_error.is_empty()
+    }
+}
+
+fn workspace_mount_suffix(value: &str) -> &str {
+    if value == "/workspace" {
+        ""
+    } else {
+        value
+            .strip_prefix("/workspace/")
+            .or_else(|| value.strip_prefix('/'))
+            .unwrap_or(value)
     }
 }
 

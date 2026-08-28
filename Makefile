@@ -1,4 +1,4 @@
-.PHONY: help up up-billing down dev dev-down db-init web dashboard-ssr-dev dashboard-watch dashboard-watch-kind e2e e2e-kind kind-billing-listen kind-forwards-start kind-forwards-stop kind-forwards-status kind-forwards-cleanup kind-clean-runtime test-ui test-ui-dashboard-ssr test-ui-kind test-ui-kind-billing test-billing-smoke-kind seed-test-user seed-e2e-users build build-web clean wasm build-gateway build-dashboard-local build-sandbox-controller build-derp-local build-services-local rollout-local-runtime local-runtime deploy-local deploy-local-static prune-local-legacy-runtime kind-cluster kind-ingress kind-label-local-nodes kind-sandbox-namespace ios ios-test ios-clean proto-tools proto-lint proto-generate proto-drift-check
+.PHONY: help up up-billing down dev dev-down db-init web dashboard-ssr-dev dashboard-watch dashboard-watch-kind design-system e2e e2e-kind kind-billing-listen kind-forwards-start kind-forwards-stop kind-forwards-status kind-forwards-cleanup kind-clean-runtime test-ui test-ui-dashboard-ssr test-ui-kind test-ui-kind-billing test-billing-smoke-kind seed-test-user seed-e2e-users build build-web clean wasm build-gateway build-dashboard-local build-sandbox-controller build-derp-local build-services-local rollout-local-runtime local-runtime deploy-local deploy-local-static prune-local-legacy-runtime kind-cluster kind-ingress kind-label-local-nodes kind-sandbox-namespace ios ios-test ios-clean proto-tools proto-lint proto-generate proto-drift-check
 .PHONY: cli-build cli-smoke cli-install cli-install-user cli-install-system scan-supply-chain verify-dashboard-image sync-local-secrets
 
 # Default target
@@ -17,6 +17,7 @@ help:
 	@echo "  make dashboard-ssr-dev - Alias for make web"
 	@echo "  make dashboard-watch - Rebuild/restart only the local dashboard on frontend changes"
 	@echo "  make dashboard-watch-kind - Watch the dashboard against the existing Kind stack"
+	@echo "  make design-system - Preview editable design sources and production fixtures"
 	@echo "  make wasm         - Build WASM package for the dashboard"
 	@echo ""
 	@echo "Testing:"
@@ -177,6 +178,9 @@ dashboard-watch-kind:
 	CODEWIRE_BILLING_ORIGIN="$${CODEWIRE_BILLING_ORIGIN:-http://127.0.0.1:8081}" \
 	CODEWIRE_BROWSER_API_ORIGIN="$${CODEWIRE_BROWSER_API_ORIGIN:-http://127.0.0.1:8080}" \
 	python3 scripts/dev/dashboard-watch.py
+
+design-system:
+	python3 scripts/dev/design-system-server.py
 
 # Build WASM package
 wasm:

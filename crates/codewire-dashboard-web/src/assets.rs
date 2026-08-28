@@ -289,4 +289,12 @@ mod tests {
         assert_eq!(changed.status(), StatusCode::OK);
         assert_ne!(changed.headers()[header::ETAG], etag);
     }
+
+    #[test]
+    fn repository_picker_preserves_its_bounded_viewport_contract() {
+        assert!(ENVIRONMENTS_STYLES.contains("height: 186px"));
+        assert!(ENVIRONMENTS_STYLES.contains("content-visibility: auto"));
+        assert!(ENVIRONMENTS_STYLES.contains(".cw-mount-row[hidden] { display: none; }"));
+        assert!(ENVIRONMENTS_STYLES.contains(".cw-workspace-mount"));
+    }
 }

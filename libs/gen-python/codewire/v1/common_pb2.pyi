@@ -13,12 +13,14 @@ class ScaffoldPlaceholder(_message.Message):
     def __init__(self, note: _Optional[str] = ...) -> None: ...
 
 class RepoEntry(_message.Message):
-    __slots__ = ("url", "branch")
+    __slots__ = ("url", "branch", "mount_path")
     URL_FIELD_NUMBER: _ClassVar[int]
     BRANCH_FIELD_NUMBER: _ClassVar[int]
+    MOUNT_PATH_FIELD_NUMBER: _ClassVar[int]
     url: str
     branch: str
-    def __init__(self, url: _Optional[str] = ..., branch: _Optional[str] = ...) -> None: ...
+    mount_path: str
+    def __init__(self, url: _Optional[str] = ..., branch: _Optional[str] = ..., mount_path: _Optional[str] = ...) -> None: ...
 
 class AppPort(_message.Message):
     __slots__ = ("port", "label", "access")

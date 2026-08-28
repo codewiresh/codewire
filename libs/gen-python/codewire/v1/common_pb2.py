@@ -24,7 +24,7 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x18\x63odewire/v1/common.proto\x12\x0b\x63odewire.v1\"-\n\x13ScaffoldPlaceholder\x12\x12\n\x04note\x18\x01 \x01(\tR\x04note:\x02\x18\x01\"5\n\tRepoEntry\x12\x10\n\x03url\x18\x01 \x01(\tR\x03url\x12\x16\n\x06\x62ranch\x18\x02 \x01(\tR\x06\x62ranch\"K\n\x07\x41ppPort\x12\x12\n\x04port\x18\x01 \x01(\x05R\x04port\x12\x14\n\x05label\x18\x02 \x01(\tR\x05label\x12\x16\n\x06\x61\x63\x63\x65ss\x18\x03 \x01(\tR\x06\x61\x63\x63\x65ss\" \n\nSetupAgent\x12\x12\n\x04type\x18\x01 \x01(\tR\x04type\"\x94\x06\n\x0bSetupConfig\x12\x19\n\x08repo_url\x18\x01 \x01(\tR\x07repoUrl\x12\x16\n\x06\x62ranch\x18\x02 \x01(\tR\x06\x62ranch\x12,\n\x05repos\x18\x03 \x03(\x0b\x32\x16.codewire.v1.RepoEntryR\x05repos\x12\'\n\x0finstall_command\x18\x04 \x01(\tR\x0einstallCommand\x12%\n\x0estartup_script\x18\x05 \x01(\tR\rstartupScript\x12@\n\x08\x65nv_vars\x18\x06 \x03(\x0b\x32%.codewire.v1.SetupConfig.EnvVarsEntryR\x07\x65nvVars\x12/\n\x06\x61gents\x18\x07 \x03(\x0b\x32\x17.codewire.v1.SetupAgentR\x06\x61gents\x12*\n\x0einstall_agents\x18\x08 \x01(\x08H\x00R\rinstallAgents\x88\x01\x01\x12\x14\n\x05\x61gent\x18\t \x01(\tR\x05\x61gent\x12\x43\n\tagent_env\x18\n \x03(\x0b\x32&.codewire.v1.SetupConfig.AgentEnvEntryR\x08\x61gentEnv\x12\x31\n\tapp_ports\x18\x0b \x03(\x0b\x32\x14.codewire.v1.AppPortR\x08\x61ppPorts\x12\x33\n\x13include_org_secrets\x18\x0c \x01(\x08H\x01R\x11includeOrgSecrets\x88\x01\x01\x12\x35\n\x14include_user_secrets\x18\r \x01(\x08H\x02R\x12includeUserSecrets\x88\x01\x01\x1a:\n\x0c\x45nvVarsEntry\x12\x10\n\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n\x05value\x18\x02 \x01(\tR\x05value:\x02\x38\x01\x1a;\n\rAgentEnvEntry\x12\x10\n\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n\x05value\x18\x02 \x01(\tR\x05value:\x02\x38\x01\x42\x11\n\x0f_install_agentsB\x16\n\x14_include_org_secretsB\x17\n\x15_include_user_secretsB\xae\x01\n\x0f\x63om.codewire.v1B\x0b\x43ommonProtoP\x01ZAgithub.com/codewiresh/codewire/libs/gen-go/codewire/v1;codewirev1\xa2\x02\x03\x43XX\xaa\x02\x0b\x43odewire.V1\xca\x02\x0b\x43odewire\\V1\xe2\x02\x17\x43odewire\\V1\\GPBMetadata\xea\x02\x0c\x43odewire::V1b\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x18\x63odewire/v1/common.proto\x12\x0b\x63odewire.v1\"-\n\x13ScaffoldPlaceholder\x12\x12\n\x04note\x18\x01 \x01(\tR\x04note:\x02\x18\x01\"T\n\tRepoEntry\x12\x10\n\x03url\x18\x01 \x01(\tR\x03url\x12\x16\n\x06\x62ranch\x18\x02 \x01(\tR\x06\x62ranch\x12\x1d\n\nmount_path\x18\x03 \x01(\tR\tmountPath\"K\n\x07\x41ppPort\x12\x12\n\x04port\x18\x01 \x01(\x05R\x04port\x12\x14\n\x05label\x18\x02 \x01(\tR\x05label\x12\x16\n\x06\x61\x63\x63\x65ss\x18\x03 \x01(\tR\x06\x61\x63\x63\x65ss\" \n\nSetupAgent\x12\x12\n\x04type\x18\x01 \x01(\tR\x04type\"\x94\x06\n\x0bSetupConfig\x12\x19\n\x08repo_url\x18\x01 \x01(\tR\x07repoUrl\x12\x16\n\x06\x62ranch\x18\x02 \x01(\tR\x06\x62ranch\x12,\n\x05repos\x18\x03 \x03(\x0b\x32\x16.codewire.v1.RepoEntryR\x05repos\x12\'\n\x0finstall_command\x18\x04 \x01(\tR\x0einstallCommand\x12%\n\x0estartup_script\x18\x05 \x01(\tR\rstartupScript\x12@\n\x08\x65nv_vars\x18\x06 \x03(\x0b\x32%.codewire.v1.SetupConfig.EnvVarsEntryR\x07\x65nvVars\x12/\n\x06\x61gents\x18\x07 \x03(\x0b\x32\x17.codewire.v1.SetupAgentR\x06\x61gents\x12*\n\x0einstall_agents\x18\x08 \x01(\x08H\x00R\rinstallAgents\x88\x01\x01\x12\x14\n\x05\x61gent\x18\t \x01(\tR\x05\x61gent\x12\x43\n\tagent_env\x18\n \x03(\x0b\x32&.codewire.v1.SetupConfig.AgentEnvEntryR\x08\x61gentEnv\x12\x31\n\tapp_ports\x18\x0b \x03(\x0b\x32\x14.codewire.v1.AppPortR\x08\x61ppPorts\x12\x33\n\x13include_org_secrets\x18\x0c \x01(\x08H\x01R\x11includeOrgSecrets\x88\x01\x01\x12\x35\n\x14include_user_secrets\x18\r \x01(\x08H\x02R\x12includeUserSecrets\x88\x01\x01\x1a:\n\x0c\x45nvVarsEntry\x12\x10\n\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n\x05value\x18\x02 \x01(\tR\x05value:\x02\x38\x01\x1a;\n\rAgentEnvEntry\x12\x10\n\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n\x05value\x18\x02 \x01(\tR\x05value:\x02\x38\x01\x42\x11\n\x0f_install_agentsB\x16\n\x14_include_org_secretsB\x17\n\x15_include_user_secretsB\xae\x01\n\x0f\x63om.codewire.v1B\x0b\x43ommonProtoP\x01ZAgithub.com/codewiresh/codewire/libs/gen-go/codewire/v1;codewirev1\xa2\x02\x03\x43XX\xaa\x02\x0b\x43odewire.V1\xca\x02\x0b\x43odewire\\V1\xe2\x02\x17\x43odewire\\V1\\GPBMetadata\xea\x02\x0c\x43odewire::V1b\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -41,15 +41,15 @@ if not _descriptor._USE_C_DESCRIPTORS:
   _globals['_SCAFFOLDPLACEHOLDER']._serialized_start=41
   _globals['_SCAFFOLDPLACEHOLDER']._serialized_end=86
   _globals['_REPOENTRY']._serialized_start=88
-  _globals['_REPOENTRY']._serialized_end=141
-  _globals['_APPPORT']._serialized_start=143
-  _globals['_APPPORT']._serialized_end=218
-  _globals['_SETUPAGENT']._serialized_start=220
-  _globals['_SETUPAGENT']._serialized_end=252
-  _globals['_SETUPCONFIG']._serialized_start=255
-  _globals['_SETUPCONFIG']._serialized_end=1043
-  _globals['_SETUPCONFIG_ENVVARSENTRY']._serialized_start=856
-  _globals['_SETUPCONFIG_ENVVARSENTRY']._serialized_end=914
-  _globals['_SETUPCONFIG_AGENTENVENTRY']._serialized_start=916
-  _globals['_SETUPCONFIG_AGENTENVENTRY']._serialized_end=975
+  _globals['_REPOENTRY']._serialized_end=172
+  _globals['_APPPORT']._serialized_start=174
+  _globals['_APPPORT']._serialized_end=249
+  _globals['_SETUPAGENT']._serialized_start=251
+  _globals['_SETUPAGENT']._serialized_end=283
+  _globals['_SETUPCONFIG']._serialized_start=286
+  _globals['_SETUPCONFIG']._serialized_end=1074
+  _globals['_SETUPCONFIG_ENVVARSENTRY']._serialized_start=887
+  _globals['_SETUPCONFIG_ENVVARSENTRY']._serialized_end=945
+  _globals['_SETUPCONFIG_AGENTENVENTRY']._serialized_start=947
+  _globals['_SETUPCONFIG_AGENTENVENTRY']._serialized_end=1006
 # @@protoc_insertion_point(module_scope)

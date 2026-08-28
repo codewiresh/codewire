@@ -221,6 +221,8 @@ pub(crate) fn router() -> Router<AppState> {
             "/{slug}/_fragments/sandbox-rail",
             get(environments::rail_fragment),
         )
+        .route("/{slug}/new", get(organization_slash_redirect))
+        .route("/{slug}/new/", get(environments::new_page))
         .route(
             "/{slug}/_actions/sandboxes/prepare",
             post(environments::prepare),

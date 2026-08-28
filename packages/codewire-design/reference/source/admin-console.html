@@ -1,0 +1,1685 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./runtime.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<style>
+  @font-face { font-family: 'IBM Plex Mono'; src: url('/assets/codewire/fonts/ibm-plex-mono-regular-2.5.0.woff2') format('woff2'); font-weight: 400; font-style: normal; font-display: swap; }
+  @font-face { font-family: 'IBM Plex Mono'; src: url('/assets/codewire/fonts/ibm-plex-mono-medium-2.5.0.woff2') format('woff2'); font-weight: 500; font-style: normal; font-display: swap; }
+  @font-face { font-family: 'IBM Plex Mono'; src: url('/assets/codewire/fonts/ibm-plex-mono-semibold-2.5.0.woff2') format('woff2'); font-weight: 600; font-style: normal; font-display: swap; }
+  html, body { margin: 0; padding: 0; background: #0a0a0a; }
+  * { box-sizing: border-box; }
+  a { color: #e6e6e6; text-decoration: none; }
+  a:hover { color: #fff; }
+  input, button, select { font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', system-ui, sans-serif; }
+  input::placeholder { color: #6b6b6b; }
+  button:focus-visible, input:focus-visible { outline: 1px solid #1f96b4; outline-offset: 1px; }
+  ::-webkit-scrollbar { width: 10px; height: 10px }
+  ::-webkit-scrollbar-thumb { background: #2a2a2a; border-radius: 999px }
+  @keyframes spin { to { transform: rotate(360deg) } }
+  @keyframes slidein { from { transform: translateX(28px); opacity: 0 } to { transform: none; opacity: 1 } }
+</style>
+</helmet>
+
+<div style="display: flex; width: 100%; min-width: 0; height: 100vh; font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', system-ui, sans-serif; color: #ededed; background: #0a0a0a; overflow: hidden; font-size: 14px">
+
+  <aside style="{{ asideStyle }}">
+    <div style="height: 52px; flex: none; padding: 0 16px; border-bottom: 1px solid #1e1e1e; display: flex; align-items: center">
+      <div style="display: flex; align-items: flex-end; gap: 8px; width: 100%; font-size: 15px">
+        <button onClick="{{ toggleSidebar }}" style="margin-left: auto; order: 3; width: 24px; height: 24px; display: flex; align-items: center; justify-content: center; background: none; border: none; border-radius: 999px; color: #6e6e6e; cursor: pointer; flex: none" style-hover="background: #1c1c1c; color: #ededed" title="Collapse sidebar">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"></rect><path d="M9 3v18"></path></svg>
+        </button>
+        <svg viewBox="0 5 24 14" fill="none" stroke="#1f96b4" stroke-width="2.1" stroke-linecap="round" style="width: 0.891em; height: 0.520em; margin-bottom: 0.125em; flex: none"><path d="M2 6h5l10 12h5"></path><path d="M2 18h5L17 6h5"></path></svg>
+        <span style="font-weight: 500; font-size: 1em; line-height: 1; letter-spacing: -0.005em; font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace">codewire</span>
+      </div>
+    </div>
+
+    <div style="padding: 12px 12px 10px; position: relative">
+      <button onClick="{{ toggleOrg }}" style="width: 100%; display: flex; align-items: center; gap: 9px; padding: 8px 10px; background: #131313; border: 1px solid #262626; border-radius: 999px; cursor: pointer; text-align: left; color: #ededed" style-hover="background: #1a1a1a">
+        <span style="width: 18px; height: 18px; border-radius: 4px; background: #2a2a2a; color: #cfcfcf; font-size: 10px; font-weight: 600; display: flex; align-items: center; justify-content: center">{{ orgInitial }}</span>
+        <span style="flex: 1; font-size: 13px; font-weight: 500">{{ orgLabel }}</span>
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#7a7a7a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex: none"><path d="m7 15 5 5 5-5"></path><path d="m7 9 5-5 5 5"></path></svg>
+      </button>
+      <sc-if value="{{ orgOpen }}" hint-placeholder-val="{{ false }}">
+        <div style="position: absolute; left: 12px; right: 12px; top: 52px; z-index: 40; background: #141414; border: 1px solid #2a2a2a; border-radius: 8px; box-shadow: 0 12px 32px rgba(0,0,0,.6); overflow: hidden">
+          <div style="padding: 8px 12px 6px; font-size: 10px; letter-spacing: 0.09em; text-transform: uppercase; color: #6e6e6e; font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace">Organizations</div>
+          <sc-for list="{{ orgRows }}" as="row" hint-placeholder-count="2">
+            <button onClick="{{ row.onClick }}" style="{{ row.style }}" style-hover="background: #1e1e1e">
+              <span>{{ row.label }}</span>
+              <span style="font-size: 11px; color: #6e6e6e; font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace">{{ row.count }}</span>
+            </button>
+          </sc-for>
+          <button onClick="{{ newOrg }}" style="width: 100%; display: flex; gap: 8px; padding: 9px 12px; background: none; border: none; border-top: 1px solid #242424; font-size: 13px; color: #b9b9b9; cursor: pointer; text-align: left" style-hover="background: #1e1e1e">＋ New Organization</button>
+        </div>
+      </sc-if>
+    </div>
+
+    <div style="display: flex; flex: 1; min-height: 0; flex-direction: column; padding: 0 6px 12px">
+      <div style="display: flex; flex-direction: column; gap: 5px; padding: 0 0 10px 6px">
+        <button onClick="{{ createSandbox }}" style="width: 100%; display: flex; align-items: center; gap: 8px; padding: 10px 12px; background: #1f96b4; color: #02131a; border: none; border-radius: 999px; font-size: 13px; font-weight: 600; cursor: pointer; line-height: 1" style-hover="background: #2eaccb">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" style="flex: none"><path d="M12 5v14"></path><path d="M5 12h14"></path></svg>
+          <span>Create Sandbox</span>
+        </button>
+      </div>
+
+      <div style="padding: 2px 6px 8px; display: flex; align-items: center; gap: 8px; position: relative">
+        <button onClick="{{ allSandboxes }}" style="{{ allSandboxesStyle }}" style-hover="color: #ededed">View all sandboxes →</button>
+        <button onClick="{{ toggleRailFilter }}" style="{{ railFilterStyle }}" style-hover="background: #1f1f1f; color: #ededed" title="Filter">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"></path><path d="M7 12h10"></path><path d="M10 18h4"></path></svg>
+        </button>
+        <button onClick="{{ toggleRailSort }}" style="{{ railSortStyle }}" style-hover="background: #1f1f1f; color: #ededed" title="Sort">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="m3 16 4 4 4-4"></path><path d="M7 20V4"></path><path d="M21 8h-8"></path><path d="M18 13h-5"></path></svg>
+        </button>
+        <sc-if value="{{ railMenuOpen }}" hint-placeholder-val="{{ false }}">
+          <div onClick="{{ closeRailMenu }}" style="position: fixed; inset: 0; z-index: 42"></div>
+          <div style="position: absolute; right: 6px; top: 34px; z-index: 43; width: 188px; background: #141414; border: 1px solid #2a2a2a; border-radius: 8px; box-shadow: 0 14px 36px rgba(0,0,0,.65); overflow: hidden; padding: 4px 0">
+            <div style="padding: 7px 12px 5px; font-size: 10px; letter-spacing: 0.09em; text-transform: uppercase; color: #6e6e6e; font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace">{{ railMenuLabel }}</div>
+            <sc-for list="{{ railMenuOptions }}" as="opt" hint-placeholder-count="4">
+              <button onClick="{{ opt.onClick }}" style="{{ opt.style }}" style-hover="background: #1e1e1e">
+                <span style="{{ opt.dotStyle }}"></span>
+                <span style="flex: 1">{{ opt.label }}</span>
+                <sc-if value="{{ opt.on }}" hint-placeholder-val="{{ false }}">
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#1f96b4" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" style="flex: none"><path d="m5 12 5 5L20 7"></path></svg>
+                </sc-if>
+              </button>
+            </sc-for>
+          </div>
+        </sc-if>
+      </div>
+
+      <div onScroll="{{ onRailScroll }}" style="flex: 1; min-height: 0; overflow-y: auto">
+        <div style="display: flex; flex-direction: column; gap: 1px">
+          <sc-for list="{{ sidebarSandboxes }}" as="row" hint-placeholder-count="8">
+            <button onClick="{{ row.onClick }}" style="{{ row.style }}" style-hover="background: #191919">
+              <span style="{{ row.dotStyle }}"></span>
+              <span style="flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px">{{ row.name }}</span>
+              <span style="font-size: 10px; color: #5c5c5c; font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace">{{ row.region }}</span>
+            </button>
+          </sc-for>
+        </div>
+        <sc-if value="{{ railHasMore }}" hint-placeholder-val="{{ false }}">
+          <div style="padding: 12px 0 6px; display: flex; align-items: center; gap: 8px; font-size: 11px; color: #5c5c5c; font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace">
+            <span style="width: 9px; height: 9px; border-radius: 50%; border: 1.5px solid #2f2f2f; border-top-color: #1f96b4; animation: spin .7s linear infinite; flex: none"></span>
+            <span>{{ railMoreLabel }}</span>
+          </div>
+        </sc-if>
+        <sc-if value="{{ railEmpty }}" hint-placeholder-val="{{ false }}">
+          <div style="padding: 22px 0; font-size: 12px; color: #6e6e6e">No sandboxes match that filter.</div>
+        </sc-if>
+      </div>
+    </div>
+
+    <div style="border-top: 1px solid #1e1e1e; padding: 8px 12px; display: flex; flex-direction: column; gap: 1px">
+      <sc-for list="{{ navRows }}" as="row" hint-placeholder-count="1">
+        <button onClick="{{ row.onClick }}" style="{{ row.style }}" style-hover="background: #191919">{{ row.label }}</button>
+      </sc-for>
+    </div>
+
+    <div style="border-top: 1px solid #1e1e1e; padding: 8px 12px; display: flex; flex-direction: column; gap: 1px">
+      <button onClick="{{ goSettings }}" style="{{ footSettingsStyle }}" style-hover="background: #191919">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="flex: none"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6 1.65 1.65 0 0 0 10 3.09V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9c.14.61.66 1.06 1.29 1.06H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+        <span>Settings</span>
+      </button>
+      <a href="#docs" style="display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: 999px; font-size: 13px; color: #9a9a9a" style-hover="background: #191919; color: #ededed">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="flex: none"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"></path><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"></path></svg>
+        <span>Docs</span>
+      </a>
+      <button onClick="{{ signOut }}" style="display: flex; align-items: center; gap: 10px; padding: 8px 10px; background: none; border: none; border-radius: 999px; font-size: 13px; color: #9a9a9a; cursor: pointer; text-align: left" style-hover="background: #191919; color: #ededed">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="flex: none"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path><path d="m16 17 5-5-5-5"></path><path d="M21 12H9"></path></svg>
+        <span>Sign Out</span>
+      </button>
+    </div>
+  </aside>
+
+  <main style="flex: 1 1 0%; width: 100%; display: flex; flex-direction: column; min-height: 0; min-width: 0; background: #0a0a0a">
+    <header style="height: 52px; flex: none; border-bottom: 1px solid #1e1e1e; display: flex; align-items: center; justify-content: space-between; padding: 0 20px; position: relative">
+      <div style="display: flex; align-items: center; gap: 12px; font-size: 12px; color: #6e6e6e; font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace">
+        <sc-if value="{{ sidebarClosed }}" hint-placeholder-val="{{ false }}">
+          <button onClick="{{ toggleSidebar }}" style="width: 26px; height: 26px; display: flex; align-items: center; justify-content: center; background: #131313; border: 1px solid #262626; border-radius: 999px; color: #9a9a9a; cursor: pointer; flex: none" style-hover="background: #1a1a1a; color: #ededed" title="Open sidebar">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"></rect><path d="M9 3v18"></path></svg>
+          </button>
+        </sc-if>
+        <span>{{ orgSlug }}</span><span>/</span><span style="color: #d8d8d8">{{ crumb }}</span>
+      </div>
+      <div style="display: flex; align-items: center; gap: 18px">
+        <a href="#support" style="font-size: 12px; color: #9a9a9a">Support</a>
+        <button onClick="{{ toggleUser }}" style="display: flex; align-items: center; gap: 8px; padding: 6px 10px; background: #131313; border: 1px solid #262626; border-radius: 999px; font-size: 12px; font-weight: 500; cursor: pointer; color: #ededed" style-hover="background: #1a1a1a">Noel Jackson <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#6e6e6e" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex: none"><path d="m7 15 5 5 5-5"></path><path d="m7 9 5-5 5 5"></path></svg></button>
+      </div>
+      <sc-if value="{{ userOpen }}" hint-placeholder-val="{{ false }}">
+        <div style="position: absolute; right: 24px; top: 48px; z-index: 40; width: 236px; background: #141414; border: 1px solid #2a2a2a; border-radius: 8px; box-shadow: 0 12px 32px rgba(0,0,0,.6); overflow: hidden">
+          <div style="padding: 11px 12px; border-bottom: 1px solid #242424">
+            <div style="font-size: 13px; font-weight: 600">Example Owner</div>
+            <div style="font-size: 11px; color: #6e6e6e; font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace">owner@example.com</div>
+          </div>
+          <sc-for list="{{ userMenu }}" as="row" hint-placeholder-count="4">
+            <button onClick="{{ row.onClick }}" style="width: 100%; padding: 9px 12px; background: none; border: none; text-align: left; font-size: 13px; cursor: pointer; color: #dcdcdc" style-hover="background: #1e1e1e">{{ row.label }}</button>
+          </sc-for>
+        </div>
+      </sc-if>
+    </header>
+
+    <div style="flex: 1; width: 100%; min-width: 0; min-height: 0; display: flex; overflow: hidden">
+    <sc-if value="{{ inSettings }}" hint-placeholder-val="{{ false }}">
+      <nav style="width: 224px; flex: none; border-right: 1px solid #1e1e1e; background: #0b0b0b; overflow-y: auto; padding: 22px 12px 20px">
+        <div style="padding: 0 8px 14px">
+          <div style="font-size: 15px; font-weight: 600; letter-spacing: -0.01em">Settings</div>
+          <div style="font-size: 11px; color: #6e6e6e; margin-top: 3px; font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace">{{ orgSlug }}</div>
+        </div>
+        <div style="display: flex; flex-direction: column; gap: 1px">
+          <sc-for list="{{ settingsNav }}" as="row" hint-placeholder-count="5">
+            <button onClick="{{ row.onClick }}" style="{{ row.style }}" style-hover="background: #191919">{{ row.label }}</button>
+          </sc-for>
+        </div>
+      </nav>
+    </sc-if>
+    <div style="{{ contentStyle }}">
+
+      <sc-if value="{{ isList }}" hint-placeholder-val="{{ true }}">
+        <div style="padding: 22px 20px 32px">
+          <div>
+            <div style="display: flex; align-items: center; gap: 12px">
+              <h1 style="margin: 0; font-size: 12px; font-weight: 500; letter-spacing: 0.13em; text-transform: uppercase; color: #f2f2f2; font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace">{{ pageTitle }}</h1>
+              <div style="display: flex; align-items: center; gap: 6px; flex: none">
+                <span style="font-size: 12px; color: #8a8a8a; font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace">{{ quotaLabel }}</span>
+                <div style="position: relative; display: flex">
+                  <button onClick="{{ toggleQuota }}" style="{{ quotaBtnStyle }}" style-hover="color: #ededed" title="Plan limit">
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><path d="M12 16v-4"></path><path d="M12 8h.01"></path></svg>
+                  </button>
+                  <sc-if value="{{ quotaOpen }}" hint-placeholder-val="{{ false }}">
+                    <div onClick="{{ closeQuota }}" style="position: fixed; inset: 0; z-index: 46"></div>
+                    <div style="position: absolute; left: -8px; top: 26px; z-index: 47; width: 268px; background: #141414; border: 1px solid #2a2a2a; border-radius: 8px; box-shadow: 0 14px 36px rgba(0,0,0,.65); padding: 14px 15px 13px">
+                      <div style="font-size: 12.5px; font-weight: 500; color: #f2f2f2">{{ quotaTitle }}</div>
+                      <p style="margin: 7px 0 0; font-size: 12px; color: #8a8a8a; line-height: 1.6">{{ quotaBody }}</p>
+                      <div style="height: 3px; background: #1e1e1e; border-radius: 2px; margin: 12px 0 11px; overflow: hidden">
+                        <div style="{{ quotaBarStyle }}"></div>
+                      </div>
+                      <button onClick="{{ upgradePlan }}" style="width: 100%; padding: 8px 12px; background: #1f96b4; color: #02131a; border: none; border-radius: 999px; font-size: 12.5px; font-weight: 600; cursor: pointer" style-hover="background: #2eaccb">Upgrade plan</button>
+                    </div>
+                  </sc-if>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div style="display: flex; align-items: center; gap: 10px; padding: 22px 0 14px">
+            <input value="{{ query }}" onChange="{{ onQuery }}" placeholder="Search by name" style="width: 320px; padding: 8px 12px; background: #131313; border: 1px solid #262626; border-radius: 8px; font-size: 13px; color: #ededed">
+            <button onClick="{{ primaryAction }}" style="order: 9; margin-left: auto; display: flex; align-items: center; gap: 7px; padding: 9px 14px; background: #f2f2f2; color: #0d0d0d; border: none; border-radius: 999px; font-size: 13px; font-weight: 600; cursor: pointer; flex: none" style-hover="background: #fff">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" style="flex: none"><path d="M12 5v14"></path><path d="M5 12h14"></path></svg>
+              <span>{{ primaryLabel }}</span>
+            </button>
+            <sc-if value="{{ showFilter }}" hint-placeholder-val="{{ true }}">
+              <div style="position: relative">
+                <button onClick="{{ toggleFilter }}" style="{{ filterBtnStyle }}" style-hover="background: #1a1a1a">
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" style="flex: none"><path d="M3 6h18"></path><path d="M7 12h10"></path><path d="M10 18h4"></path></svg>
+                  <span>Filter</span>
+                  <sc-if value="{{ filterCount }}" hint-placeholder-val="{{ false }}">
+                    <span style="min-width: 17px; height: 17px; padding: 0 5px; border-radius: 9px; background: #1f96b4; color: #02131a; font-size: 10.5px; font-weight: 600; display: flex; align-items: center; justify-content: center">{{ filterCount }}</span>
+                  </sc-if>
+                </button>
+                <sc-if value="{{ filterOpen }}" hint-placeholder-val="{{ false }}">
+                  <div onClick="{{ closeFilter }}" style="position: fixed; inset: 0; z-index: 44"></div>
+                  <div style="position: absolute; left: 0; top: 40px; z-index: 45; width: 216px; background: #141414; border: 1px solid #2a2a2a; border-radius: 8px; box-shadow: 0 14px 36px rgba(0,0,0,.65); overflow: hidden; padding: 4px 0">
+                    <sc-for list="{{ filterGroups }}" as="g" hint-placeholder-count="2">
+                      <div style="{{ g.style }}">
+                        <div style="padding: 7px 12px 5px; font-size: 10px; letter-spacing: 0.09em; text-transform: uppercase; color: #6e6e6e; font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace">{{ g.label }}</div>
+                        <sc-for list="{{ g.options }}" as="opt" hint-placeholder-count="4">
+                          <button onClick="{{ opt.onClick }}" style="{{ opt.style }}" style-hover="background: #1e1e1e">
+                            <span style="{{ opt.dotStyle }}"></span>
+                            <span style="flex: 1">{{ opt.label }}</span>
+                            <sc-if value="{{ opt.on }}" hint-placeholder-val="{{ false }}">
+                              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#1f96b4" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" style="flex: none"><path d="m5 12 5 5L20 7"></path></svg>
+                            </sc-if>
+                          </button>
+                        </sc-for>
+                      </div>
+                    </sc-for>
+                    <button onClick="{{ clearFilters }}" style="width: 100%; padding: 9px 12px; margin-top: 4px; background: none; border: none; border-top: 1px solid #242424; text-align: left; font-size: 12.5px; color: #9a9a9a; cursor: pointer" style-hover="background: #1e1e1e; color: #ededed">Clear filters</button>
+                  </div>
+                </sc-if>
+              </div>
+            </sc-if>
+          </div>
+
+          <div style="border: 1px solid #1e1e1e; border-radius: 8px; overflow-x: auto; background: #0d0d0d">
+            <table style="{{ tableStyle }}">
+              <thead>
+                <tr style="background: #131313">
+                  <sc-for list="{{ columns }}" as="col" hint-placeholder-count="5">
+                    <th style="{{ col.style }}"><sc-if value="{{ col.label }}" hint-placeholder-val="{{ true }}">{{ col.label }}</sc-if></th>
+                  </sc-for>
+                </tr>
+              </thead>
+              <tbody>
+                <sc-for list="{{ rows }}" as="row" hint-placeholder-count="4">
+                  <tr onClick="{{ row.onClick }}" style="{{ row.style }}" style-hover="background: #141414">
+                    <sc-for list="{{ row.cells }}" as="cell" hint-placeholder-count="5">
+                      <td style="{{ cell.style }}">
+                        <sc-if value="{{ cell.isTag }}" hint-placeholder-val="{{ false }}">
+                          <span style="{{ cell.tagStyle }}">{{ cell.text }}</span>
+                        </sc-if>
+                        <sc-if value="{{ cell.isPlain }}" hint-placeholder-val="{{ true }}">{{ cell.text }}</sc-if>
+                      </td>
+                    </sc-for>
+                    <td style="padding: 6px 14px 6px 8px; border-top: 1px solid #1a1a1a; text-align: right; position: sticky; right: 0; background: #0d0d0d; border-left: 1px solid #1a1a1a">
+                      <button onClick="{{ row.onMenu }}" style="{{ row.menuBtnStyle }}" style-hover="background: #1f1f1f; color: #ededed">···</button>
+                    </td>
+                  </tr>
+                </sc-for>
+              </tbody>
+            </table>
+            <sc-if value="{{ noRows }}" hint-placeholder-val="{{ false }}">
+              <div style="padding: 56px; text-align: center; font-size: 13px; color: #6e6e6e">Nothing matches that search.</div>
+            </sc-if>
+          </div>
+          <div style="display: flex; justify-content: space-between; align-items: center; padding: 12px 2px; font-size: 11px; color: #6e6e6e; font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace">
+            <span>{{ rowCountLabel }}</span>
+            <span>25 per page</span>
+          </div>
+        </div>
+      </sc-if>
+
+      <sc-if value="{{ isDetail }}" hint-placeholder-val="{{ false }}">
+        <div style="height: 100%; width: 100%; min-width: 0; display: flex; flex-direction: column; min-height: 0">
+
+          <div style="flex: none; padding: 13px 20px 10px; display: flex; align-items: center; gap: 14px; flex-wrap: wrap">
+            <h1 style="margin: 0; font-size: 17px; font-weight: 500; letter-spacing: -0.005em; font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace; flex: none">{{ detailName }}</h1>
+            <div style="flex: 1"></div>
+            <div style="display: flex; gap: 7px">
+              <button onClick="{{ toggleState }}" style="padding: 7px 12px; background: #131313; border: 1px solid #262626; border-radius: 999px; font-size: 12.5px; color: #ededed; cursor: pointer; flex: none" style-hover="background: #1a1a1a">{{ toggleLabel }}</button>
+              <button onClick="{{ snapshotSandbox }}" style="{{ snapshotBtnStyle }}" style-hover="background: #1a1a1a">Snapshot</button>
+              <button onClick="{{ openResize }}" style="padding: 7px 12px; background: #131313; border: 1px solid #262626; border-radius: 999px; font-size: 12.5px; color: #ededed; cursor: pointer; flex: none" style-hover="background: #1a1a1a">Resize</button>
+              <button onClick="{{ openSbSettings }}" style="display: flex; align-items: center; gap: 6px; padding: 7px 12px; background: #131313; border: 1px solid #262626; border-radius: 999px; font-size: 12.5px; color: #ededed; cursor: pointer; flex: none" style-hover="background: #1a1a1a">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="flex: none"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6 1.65 1.65 0 0 0 10 3.09V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9c.14.61.66 1.06 1.29 1.06H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+                <span>Settings</span>
+              </button>
+              <button onClick="{{ deleteSandbox }}" style="padding: 7px 12px; background: #131313; border: 1px solid #3a2321; border-radius: 999px; font-size: 12.5px; color: #e8705f; cursor: pointer; flex: none" style-hover="background: #1f1413">Delete</button>
+            </div>
+          </div>
+
+          <div style="flex: none; padding: 0 20px 12px; border-bottom: 1px solid #1e1e1e; display: flex; align-items: center; gap: 10px 20px; flex-wrap: wrap">
+            <sc-for list="{{ detailMeta }}" as="item" hint-placeholder-count="4">
+              <div style="display: flex; align-items: baseline; gap: 7px; min-width: 0">
+                <span style="font-size: 9.5px; letter-spacing: 0.09em; text-transform: uppercase; color: #5c5c5c; font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace; flex: none">{{ item.label }}</span>
+                <span style="{{ item.valueStyle }}">{{ item.value }}</span>
+              </div>
+            </sc-for>
+          </div>
+
+          <div style="flex: 1; min-height: 0; overflow-y: auto; background: #060606; padding: 16px 20px; font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; line-height: 1.75; color: #cfcfcf">
+            <sc-for list="{{ terminal }}" as="line" hint-placeholder-count="5">
+              <div style="{{ line.style }}">{{ line.text }}</div>
+            </sc-for>
+            <div style="display: flex; gap: 8px; align-items: center; margin-top: 4px">
+              <span style="color: #1f96b4">{{ shellPrompt }}</span>
+              <input onKeyDown="{{ onCommand }}" placeholder="run a command" style="flex: 1; background: none; border: none; color: #f0f0f0; font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; outline: none">
+            </div>
+          </div>
+
+          <div style="flex: none; border-top: 1px solid #1e1e1e; background: #0c0c0c; padding: 7px 20px; display: flex; align-items: center; gap: 10px 18px; flex-wrap: wrap; font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10.5px">
+            <div style="display: flex; align-items: center; gap: 7px; flex: none">
+              <span style="{{ detailStateDot }}"></span>
+              <span style="color: #ededed; letter-spacing: 0.04em">{{ detailStateUpper }}</span>
+            </div>
+            <span style="{{ linkStatusStyle }}">{{ linkStatus }}</span>
+            <div style="flex: 1"></div>
+            <div style="display: flex; align-items: center; gap: 16px; flex: none">
+              <sc-for list="{{ detailUsage }}" as="u" hint-placeholder-count="3">
+                <div style="display: flex; align-items: center; gap: 8px">
+                  <span style="letter-spacing: 0.09em; color: #5c5c5c">{{ u.short }}</span>
+                  <div style="width: 46px; height: 2px; background: #1e1e1e; border-radius: 2px; overflow: hidden">
+                    <div style="{{ u.barStyle }}"></div>
+                  </div>
+                  <span style="color: #b9b9b9">{{ u.value }}</span>
+                </div>
+              </sc-for>
+            </div>
+          </div>
+        </div>
+      </sc-if>
+
+      <sc-if value="{{ isLimits }}" hint-placeholder-val="{{ false }}">
+        <div style="padding: 22px 20px 32px">
+          <div style="display: flex; align-items: center; gap: 10px">
+            <h1 style="margin: 0; font-size: 12px; font-weight: 500; letter-spacing: 0.13em; text-transform: uppercase; color: #f2f2f2; font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace">Current Usage</h1>
+            <span style="border: 1px solid #2a2a2a; border-radius: 999px; padding: 2px 8px; font-size: 10px; letter-spacing: 0.09em; color: #b9b9b9; font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace">TIER 1</span>
+          </div>
+          <p style="margin: 8px 0 0; font-size: 13px; color: #7a7a7a; max-width: 620px; line-height: 1.6">Limits keep infrastructure fair and stable across all organizations. Usage is measured per region.</p>
+
+          <div style="margin-top: 22px; border: 1px solid #1e1e1e; border-radius: 8px; background: #0d0d0d">
+            <div style="padding: 18px 22px; border-bottom: 1px solid #1e1e1e; display: flex; align-items: center; gap: 10px">
+              <span style="font-size: 13px; font-weight: 600">Resources</span>
+              <span style="width: 6px; height: 6px; border-radius: 50%; background: #3fb950"></span>
+              <span style="font-size: 12px; color: #7a7a7a">Live</span>
+              <span style="flex: 1"></span>
+              <span style="font-size: 12px; color: #7a7a7a">Region: <span style="font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace; color: #ededed">eu</span></span>
+            </div>
+            <div style="padding: 22px; display: grid; grid-template-columns: repeat(3, 1fr); gap: 28px">
+              <sc-for list="{{ orgUsage }}" as="u" hint-placeholder-count="3">
+                <div>
+                  <div style="display: flex; justify-content: space-between; align-items: baseline">
+                    <span style="font-size: 12px; color: #8a8a8a">{{ u.label }}</span>
+                    <span style="font-size: 12px; color: #ededed; font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace">{{ u.value }}</span>
+                  </div>
+                  <div style="height: 4px; background: #1e1e1e; border-radius: 3px; margin-top: 9px; overflow: hidden">
+                    <div style="{{ u.barStyle }}"></div>
+                  </div>
+                </div>
+              </sc-for>
+            </div>
+          </div>
+
+          <h2 style="font-size: 15px; font-weight: 600; margin: 30px 0 12px">Per-sandbox ceilings by tier</h2>
+          <div style="border: 1px solid #1e1e1e; border-radius: 8px; overflow-x: auto; background: #0d0d0d">
+            <table style="width: 100%; min-width: 720px; border-collapse: collapse">
+              <thead>
+                <tr style="background: #131313">
+                  <sc-for list="{{ tierCols }}" as="col" hint-placeholder-count="5">
+                    <th style="{{ col.style }}"><sc-if value="{{ col.label }}" hint-placeholder-val="{{ true }}">{{ col.label }}</sc-if></th>
+                  </sc-for>
+                </tr>
+              </thead>
+              <tbody>
+                <sc-for list="{{ tierRows }}" as="row" hint-placeholder-count="4">
+                  <tr style="border-top: 1px solid #1a1a1a">
+                    <td style="{{ row.tierStyle }}">{{ row.tier }}</td>
+                    <td style="{{ row.cellStyle }}">{{ row.cpu }}</td>
+                    <td style="{{ row.cellStyle }}">{{ row.mem }}</td>
+                    <td style="{{ row.cellStyle }}">{{ row.disk }}</td>
+                    <td style="{{ row.cellStyle }}">{{ row.req }}</td>
+                  </tr>
+                </sc-for>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </sc-if>
+
+      <sc-if value="{{ isWallet }}" hint-placeholder-val="{{ false }}">
+        <div style="padding: 22px 20px 32px">
+          <h1 style="margin: 0; font-size: 12px; font-weight: 500; letter-spacing: 0.13em; text-transform: uppercase; color: #f2f2f2; font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace">Spending</h1>
+          <div style="margin-top: 22px; display: grid; grid-template-columns: repeat(3, 1fr); border: 1px solid #1e1e1e; border-radius: 8px; background: #0d0d0d">
+            <sc-for list="{{ walletStats }}" as="s" hint-placeholder-count="3">
+              <div style="{{ s.style }}">
+                <div style="font-size: 10px; letter-spacing: 0.11em; text-transform: uppercase; color: #6e6e6e; font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace">{{ s.label }}</div>
+                <div style="margin-top: 8px; font-size: 22px; font-weight: 600">{{ s.value }}</div>
+              </div>
+            </sc-for>
+          </div>
+          <div style="display: flex; gap: 8px; margin-top: 16px">
+            <button onClick="{{ topUp }}" style="padding: 9px 14px; background: #f2f2f2; color: #0d0d0d; border: none; border-radius: 999px; font-size: 13px; font-weight: 600; cursor: pointer">Top up</button>
+            <button style="padding: 9px 14px; background: #131313; border: 1px solid #262626; border-radius: 999px; font-size: 13px; color: #ededed; cursor: pointer" style-hover="background: #1a1a1a">Download invoices</button>
+          </div>
+          <h2 style="font-size: 15px; font-weight: 600; margin: 30px 0 12px">Recent transactions</h2>
+          <div style="border: 1px solid #1e1e1e; border-radius: 8px; overflow: hidden; background: #0d0d0d">
+            <sc-for list="{{ txns }}" as="t" hint-placeholder-count="3">
+              <div style="{{ t.style }}">
+                <span style="font-size: 12px; color: #7a7a7a; font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace; width: 110px">{{ t.date }}</span>
+                <span style="flex: 1; font-size: 13px">{{ t.item }}</span>
+                <span style="{{ t.amountStyle }}">{{ t.amount }}</span>
+              </div>
+            </sc-for>
+          </div>
+        </div>
+      </sc-if>
+
+      <sc-if value="{{ isGetStarted }}" hint-placeholder-val="{{ false }}">
+        <div style="padding: 22px 20px 40px">
+          <h1 style="margin: 0; font-size: 12px; font-weight: 500; letter-spacing: 0.13em; text-transform: uppercase; color: #f2f2f2; font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace">Get Started</h1>
+          <p style="margin: 6px 0 0; font-size: 13px; color: #7a7a7a">Install the SDK and get your first sandbox running.</p>
+          <sc-for list="{{ steps }}" as="step" hint-placeholder-count="3">
+            <div style="display: grid; grid-template-columns: 28px 1fr; gap: 14px; padding: 26px 0; border-bottom: 1px solid #1a1a1a">
+              <span style="width: 24px; height: 24px; border-radius: 50%; border: 1px solid #2a2a2a; color: #b9b9b9; font-size: 12px; display: flex; align-items: center; justify-content: center; font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace">{{ step.n }}</span>
+              <div>
+                <h2 style="margin: 2px 0 0; font-size: 16px; font-weight: 600">{{ step.title }}</h2>
+                <p style="margin: 7px 0 0; font-size: 13px; color: #8a8a8a; line-height: 1.65">{{ step.body }}</p>
+                <pre style="margin: 14px 0 0; background: #060606; border: 1px solid #1e1e1e; border-radius: 8px; color: #cfcfcf; padding: 13px 15px; font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; overflow-x: auto">{{ step.code }}</pre>
+              </div>
+            </div>
+          </sc-for>
+        </div>
+      </sc-if>
+
+      <sc-if value="{{ isSettings }}" hint-placeholder-val="{{ false }}">
+        <div style="padding: 22px 20px 40px">
+          <h1 style="margin: 0; font-size: 12px; font-weight: 500; letter-spacing: 0.13em; text-transform: uppercase; color: #f2f2f2; font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace">General</h1>
+          <p style="margin: 5px 0 0; font-size: 13px; color: #7a7a7a">Defaults applied to every new sandbox in this organization.</p>
+          <div style="display: flex; flex-direction: column; gap: 18px; padding-top: 24px">
+            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 18px">
+            <div>
+              <label style="display: block; font-size: 12px; color: #b9b9b9; margin-bottom: 6px">Organization name</label>
+              <input defaultValue="{{ orgLabel }}" style="width: 100%; padding: 9px 12px; background: #131313; border: 1px solid #262626; border-radius: 8px; font-size: 13px; color: #ededed">
+            </div>
+            <div>
+              <label style="display: block; font-size: 12px; color: #b9b9b9; margin-bottom: 6px">Default region</label>
+              <input defaultValue="eu-central" style="width: 100%; padding: 9px 12px; background: #131313; border: 1px solid #262626; border-radius: 8px; font-size: 13px; color: #ededed; font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace">
+            </div>
+            <div>
+              <label style="display: block; font-size: 12px; color: #b9b9b9; margin-bottom: 6px">Default snapshot</label>
+              <input defaultValue="codewire/base:1.4" style="width: 100%; padding: 9px 12px; background: #131313; border: 1px solid #262626; border-radius: 8px; font-size: 13px; color: #ededed; font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace">
+            </div>
+            </div>
+            <div style="height: 1px; background: #1e1e1e; margin: 6px 0"></div>
+            <div>
+              <div style="font-size: 13px; font-weight: 600">Delete organization</div>
+              <p style="font-size: 12px; color: #7a7a7a; margin: 6px 0 12px; line-height: 1.6">Removes all sandboxes, secrets and keys. This cannot be undone.</p>
+              <button style="padding: 9px 13px; background: #1a1211; border: 1px solid #3a2321; border-radius: 999px; color: #e8705f; font-size: 13px; font-weight: 600; cursor: pointer" style-hover="background: #241615">Delete organization</button>
+            </div>
+          </div>
+        </div>
+      </sc-if>
+    </div>
+    </div>
+  </main>
+
+  <sc-if value="{{ drawerOpen }}" hint-placeholder-val="{{ false }}">
+    <div onClick="{{ closeDrawer }}" style="position: fixed; inset: 0; background: rgba(0,0,0,.55); z-index: 60"></div>
+  </sc-if>
+  <sc-if value="{{ drawerOpen }}" hint-placeholder-val="{{ false }}">
+    <div style="position: fixed; top: 0; right: 0; bottom: 0; width: 470px; background: #0d0d0d; border-left: 1px solid #262626; z-index: 61; display: flex; flex-direction: column; animation: slidein 170ms ease-out">
+      <div style="padding: 22px 24px; border-bottom: 1px solid #1e1e1e; display: flex; align-items: flex-start; justify-content: space-between">
+        <div>
+          <h2 style="margin: 0; font-size: 19px; font-weight: 600; letter-spacing: -0.01em">{{ drawerTitle }}</h2>
+          <p style="margin: 6px 0 0; font-size: 12px; color: #7a7a7a">{{ drawerSub }}</p>
+        </div>
+        <button onClick="{{ closeDrawer }}" style="background: none; border: none; font-size: 16px; cursor: pointer; color: #7a7a7a; padding: 0 0 0 12px">✕</button>
+      </div>
+      <div style="flex: 1; overflow-y: auto; padding: 22px 24px; display: flex; flex-direction: column; gap: 18px">
+        <sc-for list="{{ drawerFields }}" as="f" hint-placeholder-count="3">
+          <div>
+            <label style="display: block; font-size: 12px; color: #b9b9b9; margin-bottom: 6px">{{ f.label }}</label>
+            <input value="{{ f.value }}" onChange="{{ f.onChange }}" placeholder="{{ f.placeholder }}" style="{{ f.inputStyle }}" style-focus="border-color: #2b9fe8">
+            <p style="margin: 6px 0 0; font-size: 11px; color: #6e6e6e; line-height: 1.5">{{ f.hint }}</p>
+          </div>
+        </sc-for>
+      </div>
+      <div style="padding: 18px 24px; border-top: 1px solid #1e1e1e; display: flex; gap: 10px">
+        <button onClick="{{ submitDrawer }}" style="padding: 9px 15px; background: #f2f2f2; color: #0d0d0d; border: none; border-radius: 999px; font-size: 13px; font-weight: 600; cursor: pointer" style-hover="background: #fff">{{ drawerCta }}</button>
+        <button onClick="{{ closeDrawer }}" style="padding: 9px 15px; background: #131313; border: 1px solid #262626; border-radius: 999px; font-size: 13px; color: #ededed; cursor: pointer" style-hover="background: #1a1a1a">Cancel</button>
+      </div>
+    </div>
+  </sc-if>
+
+  <sc-if value="{{ rowMenuOpen }}" hint-placeholder-val="{{ false }}">
+    <div onClick="{{ closeRowMenu }}" style="position: fixed; inset: 0; z-index: 70"></div>
+    <div style="{{ rowMenuStyle }}">
+      <sc-for list="{{ rowMenuItems }}" as="item" hint-placeholder-count="2">
+        <button onClick="{{ item.onClick }}" style="{{ item.style }}" style-hover="background: #1e1e1e">{{ item.label }}</button>
+      </sc-for>
+    </div>
+  </sc-if>
+
+  <sc-if value="{{ sbSettingsOpen }}" hint-placeholder-val="{{ false }}">
+    <div onClick="{{ closeSbSettings }}" style="position: fixed; inset: 0; background: rgba(0,0,0,.5); z-index: 64"></div>
+    <div style="position: fixed; top: 0; right: 0; bottom: 0; width: 440px; max-width: 92vw; background: #0d0d0d; border-left: 1px solid #262626; z-index: 65; display: flex; flex-direction: column; animation: slidein .16s ease">
+      <div style="flex: none; padding: 20px 22px 16px; border-bottom: 1px solid #1e1e1e; display: flex; align-items: flex-start; justify-content: space-between">
+        <div>
+          <div style="font-size: 10px; letter-spacing: 0.11em; text-transform: uppercase; color: #6e6e6e; font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace">Sandbox settings</div>
+          <h2 style="margin: 6px 0 0; font-size: 17px; font-weight: 500; letter-spacing: -0.01em; font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace">{{ detailName }}</h2>
+        </div>
+        <button onClick="{{ closeSbSettings }}" style="background: none; border: none; font-size: 15px; cursor: pointer; color: #7a7a7a; padding: 0 0 0 12px">✕</button>
+      </div>
+      <div style="flex: 1; min-height: 0; overflow-y: auto; padding: 20px 22px 24px; display: flex; flex-direction: column; gap: 18px">
+        <div>
+          <label style="display: block; font-size: 12px; color: #b9b9b9; margin-bottom: 7px">Auto-stop after idle</label>
+          <div style="position: relative">
+            <select value="{{ sbIdle }}" onChange="{{ onSbIdle }}" style="width: 100%; appearance: none; padding: 10px 34px 10px 12px; background: #111; border: 1px solid #262626; border-radius: 8px; font-size: 13px; color: #ededed; cursor: pointer">
+              <sc-for list="{{ idleOptions }}" as="o" hint-placeholder-count="4">
+                <option value="{{ o.value }}">{{ o.label }}</option>
+              </sc-for>
+            </select>
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#6e6e6e" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="position: absolute; right: 12px; top: 50%; margin-top: -6px; pointer-events: none"><path d="m6 9 6 6 6-6"></path></svg>
+          </div>
+        </div>
+        <div>
+          <label style="display: block; font-size: 12px; color: #b9b9b9; margin-bottom: 7px">Snapshot</label>
+          <input value="{{ sbSnapshot }}" onChange="{{ onSbSnapshot }}" style="width: 100%; padding: 9px 12px; background: #111; border: 1px solid #262626; border-radius: 8px; font-size: 13px; color: #ededed; font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace">
+        </div>
+        <div>
+          <label style="display: block; font-size: 12px; color: #b9b9b9; margin-bottom: 7px">Startup script</label>
+          <textarea value="{{ sbStartup }}" onChange="{{ onSbStartup }}" rows="4" placeholder="Runs on every start…" style="width: 100%; padding: 10px 12px; background: #111; border: 1px solid #262626; border-radius: 8px; font-size: 13px; color: #ededed; font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace; resize: vertical; line-height: 1.6"></textarea>
+        </div>
+        <div>
+          <label style="display: block; font-size: 12px; color: #b9b9b9; margin-bottom: 7px">Labels</label>
+          <input value="{{ sbLabels }}" onChange="{{ onSbLabels }}" placeholder="team=agents, tier=1" style="width: 100%; padding: 9px 12px; background: #111; border: 1px solid #262626; border-radius: 8px; font-size: 13px; color: #ededed; font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace">
+        </div>
+        <div style="height: 1px; background: #1e1e1e"></div>
+        <div style="display: flex; flex-direction: column; gap: 12px">
+          <sc-for list="{{ sbToggles }}" as="t" hint-placeholder-count="2">
+            <button onClick="{{ t.onClick }}" style="display: flex; align-items: flex-start; gap: 10px; background: none; border: none; padding: 0; cursor: pointer; text-align: left">
+              <span style="{{ t.boxStyle }}">
+                <sc-if value="{{ t.on }}" hint-placeholder-val="{{ false }}">
+                  <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#02131a" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12 5 5L20 7"></path></svg>
+                </sc-if>
+              </span>
+              <span>
+                <span style="display: block; font-size: 13px; color: #ededed">{{ t.label }}</span>
+                <span style="display: block; font-size: 11.5px; color: #6e6e6e; margin-top: 2px; line-height: 1.5">{{ t.hint }}</span>
+              </span>
+            </button>
+          </sc-for>
+        </div>
+      </div>
+      <div style="flex: none; padding: 16px 22px 18px; border-top: 1px solid #1e1e1e; display: flex; gap: 10px">
+        <button onClick="{{ saveSettings }}" style="padding: 10px 15px; background: #1f96b4; color: #02131a; border: none; border-radius: 999px; font-size: 13px; font-weight: 600; cursor: pointer" style-hover="background: #2eaccb">Save changes</button>
+        <button onClick="{{ closeSbSettings }}" style="padding: 10px 15px; background: #131313; border: 1px solid #262626; border-radius: 999px; font-size: 13px; color: #ededed; cursor: pointer" style-hover="background: #1a1a1a">Cancel</button>
+      </div>
+    </div>
+  </sc-if>
+
+  <sc-if value="{{ createOpen }}" hint-placeholder-val="{{ false }}">
+    <div onClick="{{ closeCreate }}" style="position: fixed; inset: 0; background: rgba(0,0,0,.55); z-index: 80"></div>
+    <div style="position: fixed; top: 0; right: 0; bottom: 0; width: 540px; max-width: 94vw; background: #0d0d0d; border-left: 1px solid #262626; z-index: 81; display: flex; flex-direction: column; animation: slidein .16s ease">
+
+      <div style="flex: none; padding: 20px 22px 15px; border-bottom: 1px solid #1e1e1e">
+        <div style="display: flex; align-items: flex-start; justify-content: space-between">
+          <h2 style="margin: 0; font-size: 17px; font-weight: 600; letter-spacing: -0.01em">Create Sandbox</h2>
+          <button onClick="{{ closeCreate }}" style="background: none; border: none; font-size: 15px; cursor: pointer; color: #7a7a7a; padding: 0 0 0 12px">✕</button>
+        </div>
+        <div style="display: flex; align-items: center; gap: 6px; margin-top: 8px; font-size: 12px; color: #8a8a8a">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" style="flex: none"><path d="M15 22v-4a4.8 4.8 0 0 0-1-3.5c3.3-.4 6.8-1.6 6.8-7A5.4 5.4 0 0 0 19.4 4 5 5 0 0 0 19.3.5S18.2.1 15 1.9a13.4 13.4 0 0 0-7 0C4.8.1 3.7.5 3.7.5A5 5 0 0 0 3.6 4a5.4 5.4 0 0 0-1.4 3.7c0 5.3 3.5 6.5 6.8 6.9A4.8 4.8 0 0 0 8 18v4M8 19c-3 .9-3-1.5-4-2"></path></svg>
+          <span>GitHub connected as <span style="color: #cfcfcf; font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace">@noeljackson</span></span>
+        </div>
+      </div>
+
+      <div style="flex: 1; min-height: 0; overflow-y: auto; padding: 18px 22px 24px; display: flex; flex-direction: column; gap: 18px">
+
+        <div>
+          <label style="display: block; font-size: 12px; color: #b9b9b9; margin-bottom: 7px">Name</label>
+          <input value="{{ cName }}" onChange="{{ onCName }}" placeholder="Sandbox name" style="width: 100%; padding: 9px 12px; background: #0d0d0d; border: 1px solid #262626; border-radius: 8px; font-size: 13px; color: #ededed; font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace">
+        </div>
+
+        <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px">
+          <div>
+            <label style="display: block; font-size: 12px; color: #b9b9b9; margin-bottom: 7px">CPU</label>
+            <div style="position: relative">
+              <select value="{{ cCpu }}" onChange="{{ onCCpu }}" style="width: 100%; appearance: none; padding: 10px 30px 10px 11px; background: #0d0d0d; border: 1px solid #262626; border-radius: 8px; font-size: 13px; color: #ededed; cursor: pointer">
+                <sc-for list="{{ cpuOptions }}" as="o" hint-placeholder-count="4">
+                  <option value="{{ o.value }}">{{ o.label }}</option>
+                </sc-for>
+              </select>
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#6e6e6e" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="position: absolute; right: 10px; top: 50%; margin-top: -6px; pointer-events: none"><path d="m6 9 6 6 6-6"></path></svg>
+            </div>
+          </div>
+          <div>
+            <label style="display: block; font-size: 12px; color: #b9b9b9; margin-bottom: 7px">Memory</label>
+            <div style="position: relative">
+              <select value="{{ cMem }}" onChange="{{ onCMem }}" style="width: 100%; appearance: none; padding: 10px 30px 10px 11px; background: #0d0d0d; border: 1px solid #262626; border-radius: 8px; font-size: 13px; color: #ededed; cursor: pointer">
+                <sc-for list="{{ memOptions }}" as="o" hint-placeholder-count="4">
+                  <option value="{{ o.value }}">{{ o.label }}</option>
+                </sc-for>
+              </select>
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#6e6e6e" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="position: absolute; right: 10px; top: 50%; margin-top: -6px; pointer-events: none"><path d="m6 9 6 6 6-6"></path></svg>
+            </div>
+          </div>
+          <div>
+            <label style="display: block; font-size: 12px; color: #b9b9b9; margin-bottom: 7px">Disk</label>
+            <div style="position: relative">
+              <select value="{{ cDisk }}" onChange="{{ onCDisk }}" style="width: 100%; appearance: none; padding: 10px 30px 10px 11px; background: #0d0d0d; border: 1px solid #262626; border-radius: 8px; font-size: 13px; color: #ededed; cursor: pointer">
+                <sc-for list="{{ diskOptions }}" as="o" hint-placeholder-count="4">
+                  <option value="{{ o.value }}">{{ o.label }}</option>
+                </sc-for>
+              </select>
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#6e6e6e" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="position: absolute; right: 10px; top: 50%; margin-top: -6px; pointer-events: none"><path d="m6 9 6 6 6-6"></path></svg>
+            </div>
+          </div>
+          <div>
+            <label style="display: block; font-size: 12px; color: #b9b9b9; margin-bottom: 7px">TTL</label>
+            <input value="{{ cTtl }}" onChange="{{ onCTtl }}" onBlur="{{ onCTtlBlur }}" placeholder="infinity" title="Use 0 for infinity, or enter a duration such as 30m, 1h, or 7d." style="width: 100%; padding: 9px 12px; background: #0d0d0d; border: 1px solid #262626; border-radius: 8px; font-size: 13px; color: #ededed; font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace">
+          </div>
+        </div>
+        <div>
+          <label style="display: block; font-size: 12px; color: #b9b9b9; margin-bottom: 7px">Snapshot</label>
+          <div style="position: relative">
+            <select value="{{ cSnapshot }}" onChange="{{ onCSnapshot }}" style="width: 100%; appearance: none; padding: 10px 30px 10px 11px; background: #0d0d0d; border: 1px solid #262626; border-radius: 8px; font-size: 13px; color: #ededed; cursor: pointer; font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace">
+              <sc-for list="{{ snapshotOptions }}" as="o" hint-placeholder-count="3">
+                <option value="{{ o.value }}">{{ o.label }}</option>
+              </sc-for>
+            </select>
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#6e6e6e" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="position: absolute; right: 10px; top: 50%; margin-top: -6px; pointer-events: none"><path d="m6 9 6 6 6-6"></path></svg>
+          </div>
+          <div style="display: flex; align-items: center; gap: 8px; margin-top: 8px">
+            <div style="flex: 1; height: 2px; background: #1e1e1e; border-radius: 2px; overflow: hidden">
+              <div style="{{ snapBarStyle }}"></div>
+            </div>
+            <span style="font-size: 10.5px; color: #6e6e6e; font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace; flex: none">{{ snapStorage }}</span>
+          </div>
+          <p style="margin: 7px 0 0; font-size: 11.5px; color: #6e6e6e; line-height: 1.5">{{ snapHint }}</p>
+        </div>
+
+        <div>
+          <label style="display: block; font-size: 12px; color: #b9b9b9; margin-bottom: 7px">Workspace image</label>
+          <div style="{{ imageRowStyle }}">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#8a8a8a" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" style="flex: none"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path><path d="m3.3 7 8.7 5 8.7-5"></path><path d="M12 22V12"></path></svg>
+            <input value="{{ cImage }}" onChange="{{ onCImage }}" placeholder="ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467" style="flex: 1; min-width: 0; background: none; border: none; outline: none; font-size: 12.5px; color: #ededed; font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace">
+            <button onClick="{{ resetImage }}" style="background: none; border: none; color: #6e6e6e; font-size: 12px; cursor: pointer; padding: 2px 4px; flex: none" style-hover="color: #ededed">Reset</button>
+          </div>
+          <p style="margin: 7px 0 0; font-size: 11.5px; color: #6e6e6e; line-height: 1.5">{{ imageHint }}</p>
+        </div>
+
+        <div>
+          <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 7px">
+            <label style="font-size: 12px; color: #b9b9b9">Repositories</label>
+            <div style="display: flex; gap: 12px">
+              <button onClick="{{ addRepoUrl }}" style="background: none; border: none; font-size: 11.5px; color: #9a9a9a; cursor: pointer; padding: 0" style-hover="color: #ededed">＋ Add URL</button>
+              <button onClick="{{ connectGithub }}" style="background: none; border: none; font-size: 11.5px; color: #9a9a9a; cursor: pointer; padding: 0" style-hover="color: #ededed">Connect GitHub</button>
+            </div>
+          </div>
+          <div style="border: 1px solid #232323; border-radius: 8px; background: #111; overflow: hidden">
+            <input value="{{ cRepoQuery }}" onChange="{{ onCRepoQuery }}" placeholder="Search repositories" style="width: 100%; display: block; padding: 10px 12px; background: none; border: none; border-bottom: 1px solid #232323; outline: none; font-size: 12.5px; color: #ededed">
+            <div style="height: 186px; min-height: 186px; max-height: 186px; overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; contain: layout paint style">
+              <sc-for list="{{ repoRows }}" as="r" hint-placeholder-count="6">
+                <button onClick="{{ r.onClick }}" style="{{ r.style }}" style-hover="background: #191919">
+                  <span style="{{ r.boxStyle }}">
+                    <sc-if value="{{ r.on }}" hint-placeholder-val="{{ false }}">
+                      <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#02131a" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12 5 5L20 7"></path></svg>
+                    </sc-if>
+                  </span>
+                  <span style="flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12.5px; font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace">{{ r.full }}</span>
+                  <span style="font-size: 10.5px; color: #6e6e6e; font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace; flex: none">{{ r.branch }}</span>
+                  <sc-if value="{{ r.private }}" hint-placeholder-val="{{ false }}">
+                    <span style="font-size: 9.5px; letter-spacing: 0.07em; text-transform: uppercase; color: #7a7a7a; border: 1px solid #2f2f2f; border-radius: 4px; padding: 1px 5px; flex: none; font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace">private</span>
+                  </sc-if>
+                </button>
+              </sc-for>
+              <sc-if value="{{ noRepoMatches }}" hint-placeholder-val="{{ false }}">
+                <div style="padding: 20px 14px; font-size: 12px; color: #6e6e6e">No repositories match that search.</div>
+              </sc-if>
+            </div>
+          </div>
+
+          <sc-if value="{{ hasRepos }}" hint-placeholder-val="{{ false }}">
+            <div style="margin-top: 10px; display: flex; flex-direction: column; gap: 8px">
+              <div style="font-size: 10px; letter-spacing: 0.09em; text-transform: uppercase; color: #6e6e6e; font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace">Mount points</div>
+              <sc-for list="{{ selectedRepos }}" as="r" hint-placeholder-count="1">
+                <div style="display: flex; align-items: center; gap: 9px">
+                  <span style="flex: 0 0 176px; font-size: 12px; color: #cfcfcf; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace">{{ r.full }}</span>
+                  <span style="font-size: 12px; color: #5c5c5c; flex: none">→</span>
+                  <label style="display: flex; flex: 1; min-width: 0; align-items: center; overflow: hidden; background: #0d0d0d; border: 1px solid #262626; border-radius: 8px"><span style="padding-left: 10px; color: #686868; font-size: 12px; font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace">/workspace/</span><input value="{{ r.mount }}" onChange="{{ r.onMount }}" placeholder="repo" style="flex: 1; min-width: 0; padding: 7px 10px 7px 0; background: transparent; border: 0; outline: 0; font-size: 12px; color: #ededed; font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace"></label>
+                  <button onClick="{{ r.onRemove }}" style="background: none; border: none; color: #6e6e6e; font-size: 12px; cursor: pointer; padding: 2px 4px; flex: none" style-hover="color: #e8705f">✕</button>
+                </div>
+              </sc-for>
+            </div>
+          </sc-if>
+        </div>
+
+        <div style="border: 1px solid #232323; border-radius: 8px; background: #111; padding: 13px 16px">
+          <div style="display: flex; align-items: center; justify-content: space-between">
+            <span style="font-size: 13px; font-weight: 500">Ports</span>
+            <button onClick="{{ addPort }}" style="background: none; border: none; font-size: 12px; color: #9a9a9a; cursor: pointer; padding: 0" style-hover="color: #ededed">＋ Add</button>
+          </div>
+          <sc-if value="{{ noPorts }}" hint-placeholder-val="{{ true }}">
+            <div style="font-size: 12px; color: #6e6e6e; margin-top: 8px">No ports configured</div>
+          </sc-if>
+          <sc-if value="{{ hasPorts }}" hint-placeholder-val="{{ false }}">
+            <div style="display: grid; grid-template-columns: 1fr 1fr 22px; gap: 8px; margin-top: 12px; align-items: baseline">
+              <span style="font-size: 10px; letter-spacing: 0.09em; text-transform: uppercase; color: #6e6e6e; font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace">Container</span>
+              <span style="font-size: 10px; letter-spacing: 0.09em; text-transform: uppercase; color: #6e6e6e; font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace">Exposed</span>
+              <span></span>
+              <sc-for list="{{ cPorts }}" as="p" hint-placeholder-count="0">
+                <input value="{{ p.from }}" onChange="{{ p.onFrom }}" placeholder="3000" style="width: 100%; padding: 7px 10px; background: #0d0d0d; border: 1px solid #262626; border-radius: 8px; font-size: 12px; color: #ededed; font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace">
+                <input value="{{ p.to }}" onChange="{{ p.onTo }}" placeholder="3000" style="width: 100%; padding: 7px 10px; background: #0d0d0d; border: 1px solid #262626; border-radius: 8px; font-size: 12px; color: #ededed; font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace">
+                <button onClick="{{ p.onRemove }}" style="background: none; border: none; color: #6e6e6e; cursor: pointer; font-size: 12px; padding: 0; justify-self: center" style-hover="color: #e8705f">✕</button>
+              </sc-for>
+            </div>
+          </sc-if>
+        </div>
+
+        <div style="border: 1px solid #232323; border-radius: 8px; background: #111; padding: 14px 16px 16px">
+          <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 13px">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#8a8a8a" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" style="flex: none"><path d="M2 18v3h3l8-8-3-3z"></path><circle cx="16.5" cy="7.5" r="4.5"></circle><path d="m14 10 2 2"></path></svg>
+            <span style="font-size: 13px; font-weight: 500">Secrets</span>
+          </div>
+          <div style="display: flex; flex-direction: column; gap: 11px">
+            <sc-for list="{{ secretChecks }}" as="c" hint-placeholder-count="2">
+              <button onClick="{{ c.onClick }}" style="display: flex; align-items: flex-start; gap: 9px; background: none; border: none; padding: 0; cursor: pointer; text-align: left">
+                <span style="{{ c.boxStyle }}">
+                  <sc-if value="{{ c.on }}" hint-placeholder-val="{{ false }}">
+                    <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#02131a" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12 5 5L20 7"></path></svg>
+                  </sc-if>
+                </span>
+                <span>
+                  <span style="display: block; font-size: 13px; color: #ededed">{{ c.label }}</span>
+                  <span style="display: block; font-size: 11.5px; color: #6e6e6e; margin-top: 2px; line-height: 1.5">{{ c.hint }}</span>
+                </span>
+              </button>
+            </sc-for>
+          </div>
+          <div style="margin-top: 15px">
+            <label style="display: block; font-size: 12px; color: #b9b9b9; margin-bottom: 7px">Project secrets</label>
+            <div style="position: relative">
+              <select value="{{ cSecretProject }}" onChange="{{ onCSecretProject }}" style="width: 100%; appearance: none; padding: 10px 34px 10px 12px; background: #0d0d0d; border: 1px solid #262626; border-radius: 8px; font-size: 13px; color: #ededed; cursor: pointer">
+                <sc-for list="{{ secretProjects }}" as="o" hint-placeholder-count="3">
+                  <option value="{{ o.value }}">{{ o.label }}</option>
+                </sc-for>
+              </select>
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#6e6e6e" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="position: absolute; right: 12px; top: 50%; margin-top: -6px; pointer-events: none"><path d="m6 9 6 6 6-6"></path></svg>
+            </div>
+            <p style="margin: 7px 0 0; font-size: 11.5px; color: #6e6e6e; line-height: 1.5">Injects every secret in the selected project.</p>
+          </div>
+        </div>
+
+        <div style="border: 1px solid #232323; border-radius: 8px; background: #111; padding: 14px 16px 16px">
+          <div style="display: flex; align-items: center; gap: 8px">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#8a8a8a" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" style="flex: none"><rect x="2" y="7" width="20" height="14" rx="2"></rect><path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"></path></svg>
+            <span style="font-size: 13px; font-weight: 500">Agents</span>
+          </div>
+          <p style="margin: 8px 0 0; font-size: 12px; color: #7a7a7a; line-height: 1.55">Pick the tools this sandbox should have.</p>
+          <div style="display: flex; flex-wrap: wrap; gap: 8px; margin: 13px 0 15px">
+            <sc-for list="{{ agentChips }}" as="a" hint-placeholder-count="4">
+              <button onClick="{{ a.onClick }}" style="{{ a.style }}" style-hover="background: #1f1f1f">{{ a.label }}</button>
+            </sc-for>
+          </div>
+          <div style="display: flex; flex-direction: column; gap: 11px">
+            <sc-for list="{{ installChecks }}" as="c" hint-placeholder-count="1">
+              <button onClick="{{ c.onClick }}" style="display: flex; align-items: flex-start; gap: 9px; background: none; border: none; padding: 0; cursor: pointer; text-align: left">
+                <span style="{{ c.boxStyle }}">
+                  <sc-if value="{{ c.on }}" hint-placeholder-val="{{ false }}">
+                    <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#02131a" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12 5 5L20 7"></path></svg>
+                  </sc-if>
+                </span>
+                <span>
+                  <span style="display: block; font-size: 13px; color: #ededed">{{ c.label }}</span>
+                  <span style="display: block; font-size: 11.5px; color: #6e6e6e; margin-top: 2px; line-height: 1.5">{{ c.hint }}</span>
+                </span>
+              </button>
+            </sc-for>
+          </div>
+        </div>
+
+        <div style="border: 1px solid #232323; border-radius: 8px; background: #111; padding: 14px 16px 16px">
+          <button onClick="{{ generateFromRepo }}" style="{{ generateStyle }}" style-hover="background: #183039; color: #7ad3e8">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="flex: none"><path d="M12 3v3"></path><path d="M12 18v3"></path><path d="M5.6 5.6l2.1 2.1"></path><path d="M16.3 16.3l2.1 2.1"></path><path d="M3 12h3"></path><path d="M18 12h3"></path><path d="M5.6 18.4l2.1-2.1"></path><path d="M16.3 7.7l2.1-2.1"></path></svg>
+            <span>Analyze and generate from repo</span>
+          </button>
+          <p style="margin: 9px 0 15px; font-size: 11.5px; color: #6e6e6e; line-height: 1.5">{{ generateHint }}</p>
+          <div style="display: flex; flex-direction: column; gap: 14px">
+            <div>
+              <label style="display: block; font-size: 12px; color: #b9b9b9; margin-bottom: 7px">Install Command</label>
+              <input value="{{ cInstall }}" onChange="{{ onCInstall }}" placeholder="e.g. bun install" style="width: 100%; padding: 9px 12px; background: #0d0d0d; border: 1px solid #262626; border-radius: 8px; font-size: 13px; color: #ededed; font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace">
+            </div>
+            <div>
+              <label style="display: block; font-size: 12px; color: #b9b9b9; margin-bottom: 7px">Startup Script</label>
+              <textarea value="{{ cStartup }}" onChange="{{ onCStartup }}" placeholder="Post-install commands…" rows="4" style="width: 100%; padding: 9px 12px; background: #0d0d0d; border: 1px solid #262626; border-radius: 8px; font-size: 13px; color: #ededed; font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace; resize: vertical; line-height: 1.6"></textarea>
+            </div>
+          </div>
+        </div>
+
+      </div>
+
+      <div style="flex: none; padding: 14px 22px 18px; border-top: 1px solid #1e1e1e; background: #0d0d0d">
+        <button onClick="{{ submitCreate }}" style="width: 100%; padding: 12px; background: #1f96b4; color: #02131a; border: none; border-radius: 999px; font-size: 13.5px; font-weight: 600; cursor: pointer" style-hover="background: #2eaccb">Create Sandbox</button>
+      </div>
+    </div>
+  </sc-if>
+
+  <sc-if value="{{ confirmOpen }}" hint-placeholder-val="{{ false }}">
+    <div onClick="{{ closeConfirm }}" style="position: fixed; inset: 0; background: rgba(0,0,0,.62); z-index: 75"></div>
+    <div style="position: fixed; z-index: 76; top: 50%; left: 50%; transform: translate(-50%, -50%); width: 400px; background: #101010; border: 1px solid #2a2a2a; border-radius: 10px; box-shadow: 0 24px 64px rgba(0,0,0,.7); padding: 22px 24px 20px">
+      <div style="font-size: 15px; font-weight: 600; color: #f2f2f2">{{ confirmTitle }}</div>
+      <p style="margin: 8px 0 0; font-size: 13px; color: #8a8a8a; line-height: 1.6">{{ confirmBody }}</p>
+      <div style="display: flex; justify-content: flex-end; gap: 8px; margin-top: 22px">
+        <button onClick="{{ closeConfirm }}" style="padding: 9px 14px; background: #161616; border: 1px solid #2a2a2a; border-radius: 999px; font-size: 13px; color: #dcdcdc; cursor: pointer" style-hover="background: #1e1e1e">Cancel</button>
+        <button onClick="{{ confirmAction }}" style="padding: 9px 14px; background: #b8402e; border: none; border-radius: 999px; font-size: 13px; font-weight: 600; color: #fff; cursor: pointer" style-hover="background: #c94b38">{{ confirmCta }}</button>
+      </div>
+    </div>
+  </sc-if>
+
+  <sc-if value="{{ toast }}" hint-placeholder-val="{{ false }}">
+    <div style="position: fixed; left: 24px; bottom: 24px; z-index: 80; background: #f2f2f2; color: #0d0d0d; padding: 11px 15px; border-radius: 999px; font-size: 13px; font-weight: 600; box-shadow: 0 12px 32px rgba(0,0,0,.5)">{{ toast }}</div>
+  </sc-if>
+</div>
+
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;$preview&quot;:{&quot;width&quot;:1440,&quot;height&quot;:900}}">
+const MONO = "'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace";
+const SB_WORDS = ['eval', 'trace', 'harness', 'crawler', 'indexer', 'planner', 'reviewer', 'sandbox', 'bench', 'replay', 'shard', 'probe'];
+const SB_STATES = ['Running', 'Running', 'Running', 'Stopped', 'Starting', 'Error'];
+
+function seedExtra(prefix, n, startIdx) {
+  const out = [];
+  for (let i = 0; i < n; i++) {
+    const w = SB_WORDS[i % SB_WORDS.length];
+    const num = String(startIdx + i).padStart(2, '0');
+    const state = SB_STATES[i % SB_STATES.length];
+    out.push({
+      id: prefix + '_g' + i, name: w + '-' + num, state,
+      region: i % 3 === 0 ? 'eu' : 'us',
+      cpu: [2, 4, 8, 16][i % 4], mem: [4, 16, 32, 64][i % 4], disk: [10, 40, 80, 200][i % 4],
+      snapshot: i % 2 ? 'aperture/eval:2.0' : 'codewire/base:1.4',
+      lastEvent: state === 'Running' ? 'exec ' + (i + 2) + ' min ago' : state === 'Error' ? 'crashed ' + (i + 1) + ' h ago' : 'stopped ' + (i + 1) + ' d ago',
+      created: (2 + (i % 12)) + ' Aug 2026'
+    });
+  }
+  return out;
+}
+
+const SEED = {
+  personal: {
+    label: 'Personal', slug: 'noel',
+    sandboxes: [
+      { id: 's1', name: 'quiet-mesa', state: 'Running', region: 'eu', cpu: 4, mem: 8, disk: 10, snapshot: 'codewire/base:1.4', lastEvent: 'started 2 min ago', created: '12 Aug 2026' },
+      { id: 's2', name: 'amber-loop', state: 'Running', region: 'eu', cpu: 2, mem: 4, disk: 8, snapshot: 'codewire/base:1.4', lastEvent: 'exec 14 min ago', created: '11 Aug 2026' },
+      { id: 's3', name: 'dry-harbor', state: 'Stopped', region: 'us', cpu: 1, mem: 2, disk: 3, snapshot: 'codewire/python:3.12', lastEvent: 'stopped 3 h ago', created: '09 Aug 2026' },
+      { id: 's4', name: 'plain-signal', state: 'Error', region: 'us', cpu: 4, mem: 8, disk: 10, snapshot: 'codewire/node:22', lastEvent: 'oom killed 1 d ago', created: '04 Aug 2026' }
+    ],
+    snapshotQuota: 50,
+    snapshots: [
+      { id: 'snap1', name: 'quiet-mesa-baseline', from: 'quiet-mesa', size: 4.2, created: '11 Aug 2026' },
+      { id: 'snap2', name: 'node22-deps-warm', from: 'brisk-loop', size: 6.1, created: '07 Aug 2026' }
+    ],
+    secrets: [
+      { name: 'ANTHROPIC_API_KEY', description: 'Agent model access', hosts: 'api.anthropic.com', created: '02 Aug 2026' },
+      { name: 'GITHUB_TOKEN', description: 'Repo checkout', hosts: 'github.com', created: '28 Jul 2026' }
+    ],
+    keys: [
+      { name: 'local-cli', key: 'cw_live_9f2c…41ab', perms: 'sandboxes:write', used: '2 min ago', expires: 'never' },
+      { name: 'ci-runner', key: 'cw_live_be71…0c93', perms: 'sandboxes:read', used: '6 h ago', expires: '19 Jan 2027' }
+    ],
+    members: [{ name: 'Example Owner', email: 'owner@example.com', role: 'Owner', status: 'Active' }],
+    logs: [
+      { time: '20:34:29', actor: 'noel', action: 'sandbox.start', target: 'quiet-mesa' },
+      { time: '20:20:04', actor: 'ci-runner', action: 'sandbox.exec', target: 'amber-loop' },
+      { time: '17:41:55', actor: 'noel', action: 'sandbox.stop', target: 'dry-harbor' },
+      { time: '09:12:38', actor: 'noel', action: 'secret.create', target: 'ANTHROPIC_API_KEY' }
+    ],
+    txns: [
+      { date: '12 Aug 2026', item: 'Compute — eu', amount: '−$14.20' },
+      { date: '01 Aug 2026', item: 'Top up', amount: '+$100.00' },
+      { date: '31 Jul 2026', item: 'Storage — us', amount: '−$3.85' }
+    ],
+    balance: '$81.95', spend: '$18.05', tier: 'Tier 1'
+  },
+  aperture: {
+    label: 'Aperture Labs', slug: 'aperture-labs',
+    sandboxes: [
+      { id: 'a1', name: 'eval-runner-01', state: 'Running', region: 'us', cpu: 16, mem: 64, disk: 200, snapshot: 'aperture/eval:2.0', lastEvent: 'exec 12 s ago', created: '13 Aug 2026' },
+      { id: 'a2', name: 'eval-runner-02', state: 'Running', region: 'us', cpu: 16, mem: 64, disk: 200, snapshot: 'aperture/eval:2.0', lastEvent: 'exec 40 s ago', created: '13 Aug 2026' },
+      { id: 'a3', name: 'scratch-win', state: 'Stopped', region: 'eu', cpu: 4, mem: 16, disk: 60, snapshot: 'windows-server-2022', lastEvent: 'stopped 2 d ago', created: '30 Jul 2026' }
+    ].concat(seedExtra('a', 34, 3)),
+    snapshotQuota: 200,
+    snapshots: [
+      { id: 'snap3', name: 'eval-suite-2.0', from: 'eval-runner-01', size: 18.4, created: '14 Aug 2026' },
+      { id: 'snap4', name: 'trace-index-warm', from: 'indexer-04', size: 31.7, created: '09 Aug 2026' },
+      { id: 'snap5', name: 'win-toolchain', from: 'scratch-win', size: 42.0, created: '30 Jul 2026' }
+    ],
+    secrets: [
+      { name: 'OPENAI_API_KEY', description: 'Baseline comparisons', hosts: '*.openai.com', created: '05 Aug 2026' },
+      { name: 'S3_WRITE', description: 'Eval artifact upload', hosts: 's3.eu-central-1.amazonaws.com', created: '05 Aug 2026' },
+      { name: 'SLACK_WEBHOOK', description: 'Run notifications', hosts: 'hooks.slack.com', created: '22 Jul 2026' }
+    ],
+    keys: [{ name: 'eval-harness', key: 'cw_live_31d0…77fe', perms: 'sandboxes:write, secrets:read', used: '12 s ago', expires: '05 Feb 2027' }],
+    members: [
+      { name: 'Mira Halden', email: 'mira@aperture.dev', role: 'Owner', status: 'Active' },
+      { name: 'Example Owner', email: 'owner@example.com', role: 'Admin', status: 'Active' },
+      { name: 'Ivo Brandt', email: 'ivo@aperture.dev', role: 'Member', status: 'Invited' }
+    ],
+    logs: [
+      { time: '20:41:12', actor: 'eval-harness', action: 'sandbox.exec', target: 'eval-runner-02' },
+      { time: '20:40:32', actor: 'eval-harness', action: 'sandbox.create', target: 'eval-runner-02' },
+      { time: '18:02:19', actor: 'mira', action: 'member.invite', target: 'ivo@aperture.dev' }
+    ],
+    txns: [
+      { date: '13 Aug 2026', item: 'Compute — us', amount: '−$212.40' },
+      { date: '10 Aug 2026', item: 'Top up', amount: '+$500.00' }
+    ],
+    balance: '$1,204.60', spend: '$295.40', tier: 'Tier 3'
+  }
+};
+
+const NAV = [
+  { id: 'started', label: 'Get Started' }
+];
+
+const SETTINGS_NAV = [
+  { id: 'settings', label: 'General' },
+  { id: 'secrets', label: 'Secrets' },
+  { id: 'keys', label: 'API Keys' },
+  { id: 'members', label: 'Members' },
+  { id: 'limits', label: 'Limits / Usage' },
+  { id: 'wallet', label: 'Spending' },
+  { id: 'logs', label: 'Audit Logs' }
+];
+
+const SETTINGS_PAGES = SETTINGS_NAV.map(x => x.id);
+
+const REPOS = [
+  { full: 'noeljackson/codewire', branch: 'main', private: true },
+  { full: 'noeljackson/codewire-cli', branch: 'main', private: true },
+  { full: 'noeljackson/agent-harness', branch: 'develop', private: true },
+  { full: 'aperture/eval-suite', branch: 'main', private: true },
+  { full: 'aperture/trace-viewer', branch: 'main', private: false },
+  { full: 'aperture/infra', branch: 'main', private: true },
+  { full: 'noeljackson/dotfiles', branch: 'main', private: false },
+  { full: 'noeljackson/scratch', branch: 'main', private: false }
+];
+
+const AGENTS = ['Claude Code', 'OpenAI Codex', 'Gemini CLI', 'Aider'];
+
+const STATE_COLORS = {
+  Running: ['#0f2417', '#3fb950'],
+  Stopped: ['#1a1a1a', '#8a8a8a'],
+  Error: ['#26100e', '#e8705f'],
+  Starting: ['#0f1c26', '#46b0ea'],
+  Active: ['#0f2417', '#3fb950'],
+  Invited: ['#0f1c26', '#46b0ea']
+};
+
+class Component extends DCLogic {
+  state = {
+    data: JSON.parse(JSON.stringify(SEED)),
+    org: 'personal',
+    page: 'sandboxes',
+    sandboxId: null,
+    sbSettings: null,
+    orgOpen: false,
+    userOpen: false,
+    query: '',
+    drawer: null,
+    form: {},
+    toast: '',
+    term: {},
+    create: null,
+    stateFilter: 'All',
+    regionFilter: 'All',
+    railFilter: 'All',
+    railSort: 'Recently created',
+    sidebarOpen: true,
+    railMenu: null,
+    railVisible: 14,
+    filterOpen: false,
+    quotaOpen: false,
+    rowMenu: null,
+    confirm: null
+  };
+
+  openCreate() {
+    this.setState({ orgOpen: false, userOpen: false, create: {
+      image: 'ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467',
+      snapshot: '', repos: [], repoQuery: '',
+      ports: [], agents: ['Claude Code'],
+      userSecrets: true, orgSecrets: true, installTools: false,
+      secretProject: '',
+      name: '', install: '', startup: '', cpu: '1', mem: '2', disk: '10', ttl: 'infinity'
+    } });
+  }
+
+  railList() {
+    const o = this.org, s = this.state;
+    let list = o.sandboxes.filter(x => s.railFilter === 'All' || x.state === s.railFilter);
+    const sort = s.railSort;
+    if (sort === 'Name') list = list.slice().sort((a, b) => a.name.localeCompare(b.name));
+    else if (sort === 'State') list = list.slice().sort((a, b) => a.state.localeCompare(b.state) || a.name.localeCompare(b.name));
+    else if (sort === 'Region') list = list.slice().sort((a, b) => a.region.localeCompare(b.region) || a.name.localeCompare(b.name));
+    return list;
+  }
+
+  onRailScroll(e) {
+    const el = e.currentTarget;
+    if (el.scrollTop + el.clientHeight < el.scrollHeight - 80) return;
+    if (this.state.railVisible >= this.railList().length) return;
+    if (this._loadingRail) return;
+    this._loadingRail = true;
+    setTimeout(() => {
+      this._loadingRail = false;
+      this.setState(st => ({ railVisible: st.railVisible + 14 }));
+    }, 260);
+  }
+
+  setSbSettings(patch) { this.setState(s => ({ sbSettings: Object.assign({}, s.sbSettings, patch) })); }
+
+  createCheck(c, x) {
+    return {
+      label: x.label, hint: x.hint, on: !!c[x.key],
+      onClick: () => this.setCreate({ [x.key]: !c[x.key] }),
+      boxStyle: 'width: 15px; height: 15px; flex: none; margin-top: 2px; border-radius: 3px; display: flex; align-items: center; justify-content: center; background: ' + (c[x.key] ? '#1f96b4' : '#0d0d0d') + '; border: 1px solid ' + (c[x.key] ? '#1f96b4' : '#3a3a3a')
+    };
+  }
+
+  setCreate(patch) { this.setState(s => ({ create: Object.assign({}, s.create, patch) })); }
+
+  submitCreate() {
+    const c = this.state.create;
+    if (!c) return;
+    const name = (c.name || '').trim() || (c.repos.length ? c.repos[0].full.split('/').pop() : 'sandbox-' + Math.random().toString(36).slice(2, 6));
+    this.mutate(o => o.sandboxes.unshift({
+      id: 'sb_' + Math.random().toString(36).slice(2, 8), name,
+      state: 'Starting', snapshot: (c.snapshot ? (this.org.snapshots.find(x => x.id === c.snapshot) || {}).name : '') || (c.image || '').trim() || 'codewire/base:1.4',
+      region: 'eu', cpu: parseInt(c.cpu, 10) || 1, mem: parseInt(c.mem, 10) || 2,
+      disk: parseInt(c.disk, 10) || 10, lastEvent: 'creating…', created: '14 Aug 2026'
+    }));
+    this.setState({ create: null, page: 'sandboxes', sandboxId: null });
+    this.flash('Sandbox ' + name + ' created');
+    setTimeout(() => this.mutate(o => {
+      const x = o.sandboxes.find(y => y.name === name);
+      if (x) { x.state = 'Running'; x.lastEvent = 'started just now'; }
+    }), 1800);
+  }
+
+  createSnapshot(sb) {
+    const o = this.org;
+    const size = Math.round(sb.disk * 0.42 * 10) / 10;
+    const used = (o.snapshots || []).reduce((t, x) => t + x.size, 0);
+    if (used + size > o.snapshotQuota) {
+      this.setState({ rowMenu: null });
+      this.flash('Snapshot storage full — ' + used.toFixed(1) + '/' + o.snapshotQuota + ' GB used');
+      return;
+    }
+    const d = new Date();
+    const p = n => String(n).padStart(2, '0');
+    const stamp = p(d.getMonth() + 1) + p(d.getDate());
+    const taken = new Set((o.snapshots || []).map(x => x.name));
+    let name = sb.name + '-' + stamp, n = 2;
+    while (taken.has(name)) name = sb.name + '-' + stamp + '-' + n++;
+    this.mutate(org => org.snapshots.unshift({
+      id: 'snap_' + Math.random().toString(36).slice(2, 7), name, from: sb.name,
+      size, created: '22 Aug 2026'
+    }));
+    this.setState({ rowMenu: null });
+    this.flash('Snapshot ' + name + ' captured');
+  }
+
+  askConfirm(cfg) { this.setState({ rowMenu: null, confirm: cfg }); }
+
+  openRowMenu(e, items) {
+    e.stopPropagation();
+    const r = e.currentTarget.getBoundingClientRect();
+    const h = items.length * 33 + 8;
+    this.setState({ rowMenu: {
+      top: Math.max(12, Math.min(r.bottom + 6, window.innerHeight - h - 12)),
+      right: Math.min(Math.max(12, window.innerWidth - r.right), window.innerWidth - 188),
+      items
+    } });
+  }
+
+  toggleSandbox(id) {
+    this.mutate(org => {
+      const x = org.sandboxes.find(y => y.id === id);
+      if (x) { x.state = x.state === 'Running' ? 'Stopped' : 'Running'; x.lastEvent = (x.state === 'Running' ? 'started' : 'stopped') + ' just now'; }
+    });
+    this.setState({ rowMenu: null });
+  }
+
+  get org() { return this.state.data[this.state.org]; }
+  get sandbox() { return this.org.sandboxes.find(s => s.id === this.state.sandboxId) || null; }
+
+  flash(msg) {
+    clearTimeout(this._t);
+    this.setState({ toast: msg });
+    this._t = setTimeout(() => this.setState({ toast: '' }), 2200);
+  }
+
+  go(page) { this.setState({ page, sandboxId: null, query: '', orgOpen: false, userOpen: false }); }
+  openDrawer(kind, form) { this.setState({ drawer: kind, form: form || {}, orgOpen: false }); }
+  setField(k, v) { this.setState(s => ({ form: Object.assign({}, s.form, { [k]: v }) })); }
+
+  mutate(fn) {
+    const data = JSON.parse(JSON.stringify(this.state.data));
+    fn(data[this.state.org], data);
+    this.setState({ data });
+  }
+
+  submit() {
+    const f = this.state.form, kind = this.state.drawer;
+    if (kind === 'sandbox') {
+      const name = (f.name || '').trim() || 'new-sandbox';
+      const id = 'n' + Date.now();
+      this.mutate(o => o.sandboxes.unshift({
+        id, name, state: 'Starting', region: (f.region || 'eu').trim(),
+        cpu: parseInt(f.cpu, 10) || 2, mem: parseInt(f.mem, 10) || 4, disk: 10,
+        snapshot: (f.snapshot || 'codewire/base:1.4').trim(),
+        lastEvent: 'creating…', created: '13 Aug 2026'
+      }));
+      this.setState({ drawer: null, page: 'sandboxes' });
+      this.flash('Sandbox ' + name + ' created');
+      setTimeout(() => this.mutate(o => {
+        const s = o.sandboxes.find(x => x.id === id);
+        if (s) { s.state = 'Running'; s.lastEvent = 'started just now'; }
+      }), 1400);
+      return;
+    }
+    if (kind === 'secret') {
+      const name = (f.name || '').trim() || 'NEW_SECRET';
+      this.mutate(o => o.secrets.unshift({ name, description: (f.description || '').trim() || '—', hosts: (f.hosts || '').trim() || '—', created: '13 Aug 2026' }));
+      this.setState({ drawer: null, page: 'secrets' });
+      this.flash('Secret ' + name + ' created');
+      return;
+    }
+    if (kind === 'key') {
+      const name = (f.name || '').trim() || 'new-key';
+      this.mutate(o => o.keys.unshift({ name, key: 'cw_live_' + Math.random().toString(16).slice(2, 6) + '…' + Math.random().toString(16).slice(2, 6), perms: (f.perms || 'sandboxes:write').trim(), used: 'never', expires: (f.expires || 'never').trim() }));
+      this.setState({ drawer: null, page: 'keys' });
+      this.flash('API key ' + name + ' created');
+      return;
+    }
+    if (kind === 'member') {
+      const email = (f.email || '').trim() || 'someone@example.com';
+      this.mutate(o => o.members.push({ name: email.split('@')[0], email, role: (f.role || 'Member').trim(), status: 'Invited' }));
+      this.setState({ drawer: null, page: 'members' });
+      this.flash('Invitation sent to ' + email);
+      return;
+    }
+    if (kind === 'org') {
+      const label = (f.name || '').trim() || 'New Org';
+      const slug = label.toLowerCase().replace(/[^a-z0-9]+/g, '-');
+      const data = JSON.parse(JSON.stringify(this.state.data));
+      data[slug] = { label, slug, sandboxes: [], secrets: [], keys: [], members: [{ name: 'Example Owner', email: 'owner@example.com', role: 'Owner', status: 'Active' }], logs: [], txns: [], balance: '$0.00', spend: '$0.00', tier: 'Tier 1' };
+      this.setState({ data, org: slug, drawer: null, page: 'sandboxes', sandboxId: null });
+      this.flash('Organization ' + label + ' created');
+      return;
+    }
+    if (kind === 'resize') {
+      const id = this.state.sandboxId;
+      this.mutate(o => {
+        const s = o.sandboxes.find(x => x.id === id);
+        if (s) { s.cpu = parseInt(f.cpu, 10) || s.cpu; s.mem = parseInt(f.mem, 10) || s.mem; s.disk = parseInt(f.disk, 10) || s.disk; s.lastEvent = 'resized just now'; }
+      });
+      this.setState({ drawer: null });
+      this.flash('Sandbox resized');
+    }
+  }
+
+  tag(text) {
+    const c = STATE_COLORS[text] || STATE_COLORS.Stopped;
+    return { text, isTag: true, isPlain: false, style: 'padding: 11px 14px; border-top: 1px solid #1a1a1a', tagStyle: 'display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 500; background: ' + c[0] + '; color: ' + c[1] };
+  }
+  cell(text, opts) {
+    const o = opts || {};
+    return {
+      text, isTag: false, isPlain: true,
+      style: 'padding: 11px 14px; border-top: 1px solid #1a1a1a; font-size: 13px; color: ' + (o.dim ? '#8a8a8a' : '#ededed') + '; font-family: ' + (o.mono ? MONO : 'inherit') + '; white-space: nowrap; overflow: hidden; text-overflow: ellipsis' + (o.right ? '; text-align: right' : ''),
+      tagStyle: ''
+    };
+  }
+  th(label, width, right) {
+    const sticky = !label && right ? '; position: sticky; right: 0; background: #131313; border-left: 1px solid #1a1a1a' : '';
+    return { label, style: 'text-align: ' + (right ? 'right' : 'left') + '; padding: 9px 14px; font-size: 10px; letter-spacing: 0.09em; text-transform: uppercase; color: #6e6e6e; font-family: ' + MONO + '; font-weight: 400' + (width ? '; width: ' + width : '') + sticky };
+  }
+
+  listConfig() {
+    const q = this.state.query.toLowerCase();
+    const o = this.org;
+    const p = this.state.page;
+    if (p === 'sandboxes') return {
+      minWidth: 880, quota: 50, title: 'Sandboxes', total: o.sandboxes.length, sub: this.state.stateFilter === 'All' ? o.sandboxes.length + ' sandboxes in this organization' : o.sandboxes.filter(x => x.state === this.state.stateFilter).length + ' of ' + o.sandboxes.length + ' sandboxes are ' + this.state.stateFilter.toLowerCase(), cta: 'Create Sandbox', action: () => this.openCreate(),
+      columns: [this.th('Name'), this.th('State', '110px'), this.th('Snapshot'), this.th('Region', '90px'), this.th('Resources', '170px'), this.th('Last event'), this.th('Created', '120px'), this.th('', '56px', true)],
+      items: o.sandboxes.filter(s => s.name.toLowerCase().includes(q) && (this.state.stateFilter === 'All' || s.state === this.state.stateFilter) && (this.state.regionFilter === 'All' || s.region === this.state.regionFilter)),
+      row: s => ({
+        onClick: () => this.setState({ page: 'detail', sandboxId: s.id }),
+        menu: [
+          { label: s.state === 'Running' ? 'Stop sandbox' : 'Start sandbox', onClick: () => this.toggleSandbox(s.id) },
+          { label: 'Create snapshot', onClick: () => s.state === 'Running' ? this.createSnapshot(s) : this.flash('Sandbox must be running to snapshot') },
+          { label: 'Resize', onClick: () => { this.setState({ sandboxId: s.id, rowMenu: null }); this.openDrawer('resize', { cpu: String(s.cpu), mem: String(s.mem), disk: String(s.disk) }); } },
+          { label: 'Delete', danger: true, onClick: () => this.askConfirm({
+            title: 'Delete ' + s.name + '?',
+            body: 'The sandbox and its filesystem are destroyed immediately. This cannot be undone.',
+            cta: 'Delete sandbox',
+            run: () => { this.mutate(org => { org.sandboxes = org.sandboxes.filter(y => y.id !== s.id); }); this.flash('Sandbox ' + s.name + ' deleted'); }
+          }) }
+        ],
+        cells: [this.cell(s.name, { mono: true }), this.tag(s.state), this.cell(s.snapshot, { mono: true, dim: true }), this.cell(s.region, { mono: true }), this.cell(s.cpu + ' vCPU · ' + s.mem + ' GiB · ' + s.disk + ' GiB', { dim: true }), this.cell(s.lastEvent, { dim: true }), this.cell(s.created, { dim: true })]
+      })
+    };
+    if (p === 'secrets') return {
+      minWidth: 820, quota: 100, title: 'Secrets', total: o.secrets.length, sub: o.secrets.length + '/10000 secrets used', cta: 'Create Secret', action: () => this.openDrawer('secret', {}),
+      columns: [this.th('Name'), this.th('Description'), this.th('Allowed hosts'), this.th('Created', '130px'), this.th('', '56px', true)],
+      items: o.secrets.filter(s => s.name.toLowerCase().includes(q)),
+      row: s => ({ onClick: null, menu: [
+        { label: 'Copy name', onClick: () => { this.setState({ rowMenu: null }); this.flash(s.name + ' copied'); } },
+        { label: 'Delete', danger: true, onClick: () => this.askConfirm({
+          title: 'Delete ' + s.name + '?',
+          body: 'Sandboxes that read this secret at runtime will fail on their next start.',
+          cta: 'Delete secret',
+          run: () => { this.mutate(org => { org.secrets = org.secrets.filter(y => y.name !== s.name); }); this.flash('Secret deleted'); }
+        }) }
+      ], cells: [this.cell(s.name, { mono: true }), this.cell(s.description, { dim: true }), this.cell(s.hosts, { mono: true, dim: true }), this.cell(s.created, { dim: true })] })
+    };
+    if (p === 'keys') return {
+      minWidth: 900, quota: 25, title: 'API Keys', total: o.keys.length, sub: 'Keys authenticate requests made through the Codewire SDK or CLI', cta: 'Create API Key', action: () => this.openDrawer('key', { perms: 'sandboxes:write', expires: 'never' }),
+      columns: [this.th('Name'), this.th('Key'), this.th('Permissions'), this.th('Last used', '130px'), this.th('Expires', '130px'), this.th('', '56px', true)],
+      items: o.keys.filter(k => k.name.toLowerCase().includes(q)),
+      row: k => ({ onClick: null, menu: [
+        { label: 'Copy key', onClick: () => { this.setState({ rowMenu: null }); this.flash('Key copied to clipboard'); } },
+        { label: 'Revoke', danger: true, onClick: () => this.askConfirm({
+          title: 'Revoke ' + k.name + '?',
+          body: 'Any SDK or CLI using this key stops authenticating right away.',
+          cta: 'Revoke key',
+          run: () => { this.mutate(org => { org.keys = org.keys.filter(y => y.name !== k.name); }); this.flash('Key revoked'); }
+        }) }
+      ], cells: [this.cell(k.name, { mono: true }), this.cell(k.key, { mono: true, dim: true }), this.cell(k.perms, { mono: true, dim: true }), this.cell(k.used, { dim: true }), this.cell(k.expires, { dim: true })] })
+    };
+    if (p === 'members') return {
+      minWidth: 640, quota: 10, title: 'Members', total: o.members.length, sub: o.members.length + ' members', cta: 'Invite Member', action: () => this.openDrawer('member', { role: 'Member' }),
+      columns: [this.th('Name'), this.th('Email'), this.th('Role', '130px'), this.th('Status', '120px'), this.th('', '56px', true)],
+      items: o.members.filter(m => m.name.toLowerCase().includes(q)),
+      row: m => ({ onClick: null, menu: m.role === 'Owner' ? [] : [
+        { label: 'Change role', onClick: () => { this.setState({ rowMenu: null }); this.flash('Role editing not wired up yet'); } },
+        { label: 'Remove from org', danger: true, onClick: () => this.askConfirm({
+          title: 'Remove ' + m.name + '?',
+          body: 'They lose access to every sandbox, secret and key in this organization.',
+          cta: 'Remove member',
+          run: () => { this.mutate(org => { org.members = org.members.filter(y => y.email !== m.email); }); this.flash('Member removed'); }
+        }) }
+      ], cells: [this.cell(m.name), this.cell(m.email, { mono: true, dim: true }), this.cell(m.role, { dim: true }), this.tag(m.status)] })
+    };
+    return {
+      minWidth: 700, title: 'Audit Logs', total: o.logs.length, sub: 'Every action taken in this organization', cta: 'Export', action: () => this.flash('Export queued'),
+      columns: [this.th('Time', '120px'), this.th('Actor', '180px'), this.th('Action', '220px'), this.th('Target'), this.th('', '56px', true)],
+      items: o.logs.filter(l => (l.action + l.target).toLowerCase().includes(q)),
+      row: l => ({ onClick: null, cells: [this.cell(l.time, { mono: true, dim: true }), this.cell(l.actor, { mono: true }), this.cell(l.action, { mono: true }), this.cell(l.target, { mono: true, dim: true })] })
+    };
+  }
+
+  drawerConfig() {
+    const f = this.state.form;
+    const input = 'width: 100%; padding: 9px 12px; background: #131313; border: 1px solid #262626; border-radius: 999px; font-size: 13px; color: #ededed';
+    const mk = (id, label, placeholder, hint, mono) => ({
+      label, placeholder, hint, value: f[id] || '',
+      inputStyle: input + (mono ? '; font-family: ' + MONO : ''),
+      onChange: e => this.setField(id, e.target.value)
+    });
+    switch (this.state.drawer) {
+      case 'sandbox': return { title: 'Create Sandbox', sub: 'A fresh isolated environment for your agent to run in.', cta: 'Create Sandbox', fields: [mk('name', 'Name', 'quiet-mesa', 'Lowercase letters, numbers and dashes.', true), mk('snapshot', 'Snapshot', 'codewire/base:1.4', 'Image the sandbox boots from.', true), mk('region', 'Region', 'eu', 'eu or us.', true), mk('cpu', 'Compute (vCPU)', '2', 'Up to 4 on Tier 1.'), mk('mem', 'Memory (GiB)', '4', 'Up to 8 on Tier 1.')] };
+      case 'secret': return { title: 'Create New Secret', sub: 'Secrets are injected into sandboxes at runtime.', cta: 'Create Secret', fields: [mk('name', 'Name', 'MY_SECRET', 'Uppercase with underscores.', true), mk('value', 'Value', 'Secret value', 'Stored encrypted; never shown again.', true), mk('description', 'Description', 'Optional description', 'Optional description for this secret.'), mk('hosts', 'Allowed Hosts', 'api.anthropic.com, *.openai.com', 'Comma-separated list of hosts this secret may be sent to.', true)] };
+      case 'key': return { title: 'Create API Key', sub: 'Authenticate the SDK or CLI as this organization.', cta: 'Create API Key', fields: [mk('name', 'Name', 'local-cli', 'For your own reference.', true), mk('perms', 'Permissions', 'sandboxes:write', 'Comma-separated scopes.', true), mk('expires', 'Expires', 'never', 'A date, or never.')] };
+      case 'member': return { title: 'Invite Member', sub: 'They will get an email invitation.', cta: 'Send invite', fields: [mk('email', 'Email', 'someone@company.com', '', true), mk('role', 'Role', 'Member', 'Owner, Admin or Member.')] };
+      case 'org': return { title: 'New Organization', sub: 'Separate sandboxes, secrets, keys and billing.', cta: 'Create Organization', fields: [mk('name', 'Name', 'Aperture Labs', 'Shown in the organization switcher.')] };
+      case 'resize': return { title: 'Resize Sandbox', sub: 'Applied on next start.', cta: 'Apply', fields: [mk('cpu', 'Compute (vCPU)', '4', ''), mk('mem', 'Memory (GiB)', '8', ''), mk('disk', 'Storage (GiB)', '10', '')] };
+      default: return null;
+    }
+  }
+
+  bar(pct, color) {
+    return 'width: ' + Math.min(100, pct) + '%; height: 100%; background: ' + (color || '#1f96b4');
+  }
+
+  renderVals() {
+    const s = this.state, o = this.org, p = s.page, c = s.create, sbs = s.sbSettings;
+    const railList = this.railList();
+    const snapUsed = (o.snapshots || []).reduce((t, x) => t + x.size, 0);
+    const isList = ['sandboxes', 'secrets', 'keys', 'members', 'logs'].includes(p);
+    const cfg = isList ? this.listConfig() : null;
+    const sb = this.sandbox;
+    const drawer = this.drawerConfig();
+    const term = s.term[s.sandboxId] || [
+      { text: 'codewire attach ' + (sb ? sb.name : ''), dim: true },
+      { text: 'Connected to sandbox system shell (' + (sb ? sb.region : '') + ').', dim: true },
+      { text: 'agent@' + (sb ? sb.name : '') + ':~$ python run_agent.py' },
+      { text: '[12:04:11] tool_call read_file(src/main.py)', dim: true },
+      { text: '[12:04:12] tool_call write_file(src/main.py)', dim: true },
+      { text: '[12:04:19] done — 2 files changed', dim: true }
+    ];
+    const totalCpu = o.sandboxes.reduce((a, x) => a + (x.state === 'Running' ? x.cpu : 0), 0);
+    const totalMem = o.sandboxes.reduce((a, x) => a + (x.state === 'Running' ? x.mem : 0), 0);
+    const totalDisk = o.sandboxes.reduce((a, x) => a + x.disk, 0);
+
+    const navBtn = (active) => 'width: 100%; text-align: left; padding: 7px 10px; border-radius: 999px; border: none; cursor: pointer; font-size: 13px; background: ' + (active ? '#1c1c1c' : 'transparent') + '; color: ' + (active ? '#fff' : '#a8a8a8');
+
+    return {
+      orgLabel: o.label,
+      orgSlug: o.slug,
+      orgInitial: o.label.charAt(0).toUpperCase(),
+      orgOpen: s.orgOpen,
+      userOpen: s.userOpen,
+      toggleOrg: () => this.setState({ orgOpen: !s.orgOpen, userOpen: false }),
+      toggleUser: () => this.setState({ userOpen: !s.userOpen, orgOpen: false }),
+      newOrg: () => this.openDrawer('org', {}),
+      orgRows: Object.keys(s.data).map(k => ({
+        label: s.data[k].label,
+        count: s.data[k].sandboxes.length + ' sb',
+        onClick: () => this.setState({ org: k, orgOpen: false, page: 'sandboxes', sandboxId: null, query: '' }),
+        style: 'width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 9px 12px; background: ' + (k === s.org ? '#1c1c1c' : 'none') + '; border: none; cursor: pointer; text-align: left; font-size: 13px; color: ' + (k === s.org ? '#fff' : '#dcdcdc')
+      })),
+      userMenu: [
+        { label: 'Account Settings', onClick: () => this.go('settings') },
+        { label: 'Invitations', onClick: () => this.flash('No pending invitations') },
+        { label: 'Onboarding', onClick: () => this.go('started') },
+        { label: 'Sign out', onClick: () => this.flash('Signed out') }
+      ],
+      sandboxCount: o.sandboxes.length,
+      sidebarSandboxes: railList.slice(0, s.railVisible).map(x => ({
+        name: x.name, region: x.region,
+        onClick: () => this.setState({ page: 'detail', sandboxId: x.id, orgOpen: false }),
+        style: 'position: relative; width: 100%; display: flex; align-items: center; gap: 9px; padding: 7px 6px; border-radius: 999px; border: none; cursor: pointer; text-align: left; background: ' + (s.sandboxId === x.id ? '#1c1c1c' : 'none') + '; color: ' + (s.sandboxId === x.id ? '#f2f2f2' : '#b9b9b9'),
+        dotStyle: 'position: absolute; left: 0; top: 50%; width: 5px; height: 5px; border-radius: 50%; transform: translateY(-50%); background: ' + (STATE_COLORS[x.state] || STATE_COLORS.Stopped)[1]
+      })),
+      railHasMore: railList.length > s.railVisible,
+      railMoreLabel: 'loading ' + Math.min(14, railList.length - s.railVisible) + ' more of ' + (railList.length - s.railVisible),
+      railEmpty: railList.length === 0,
+      onRailScroll: e => this.onRailScroll(e),
+      railMenuOpen: !!s.railMenu,
+      closeRailMenu: () => this.setState({ railMenu: null }),
+      toggleRailFilter: () => this.setState({ railMenu: s.railMenu === 'filter' ? null : 'filter' }),
+      toggleRailSort: () => this.setState({ railMenu: s.railMenu === 'sort' ? null : 'sort' }),
+      railFilterStyle: 'width: 24px; height: 22px; display: flex; align-items: center; justify-content: center; border-radius: 999px; cursor: pointer; background: ' + (s.railMenu === 'filter' ? '#1f1f1f' : 'none') + '; border: 1px solid ' + (s.railFilter !== 'All' ? '#2b5766' : 'transparent') + '; color: ' + (s.railFilter !== 'All' ? '#1f96b4' : '#6e6e6e'),
+      railSortStyle: 'width: 24px; height: 22px; display: flex; align-items: center; justify-content: center; border-radius: 999px; cursor: pointer; background: ' + (s.railMenu === 'sort' ? '#1f1f1f' : 'none') + '; border: 1px solid transparent; color: ' + (s.railSort !== 'Recently created' ? '#1f96b4' : '#6e6e6e'),
+      railMenuLabel: s.railMenu === 'sort' ? 'Sort by' : 'Filter state',
+      railMenuOptions: (s.railMenu === 'sort'
+        ? ['Recently created', 'Name', 'State', 'Region'].map(x => ({ v: x, key: 'railSort', dot: false }))
+        : ['All', 'Running', 'Stopped', 'Starting', 'Error'].map(x => ({ v: x, key: 'railFilter', dot: true }))
+      ).map(opt => ({
+        label: opt.v, on: s[opt.key] === opt.v,
+        onClick: () => this.setState({ [opt.key]: opt.v, railMenu: null, railVisible: 14 }),
+        style: 'width: 100%; display: flex; align-items: center; gap: 9px; padding: 8px 12px; background: ' + (s[opt.key] === opt.v ? '#1c1c1c' : 'none') + '; border: none; text-align: left; font-size: 12.5px; cursor: pointer; color: ' + (s[opt.key] === opt.v ? '#f2f2f2' : '#cfcfcf'),
+        dotStyle: opt.dot && opt.v !== 'All'
+          ? 'width: 6px; height: 6px; border-radius: 50%; flex: none; background: ' + (STATE_COLORS[opt.v] || STATE_COLORS.Stopped)[1]
+          : 'display: none'
+      })),
+      createSandbox: () => this.openCreate(),
+      createOpen: !!c,
+      closeCreate: () => this.setState({ create: null }),
+      submitCreate: () => this.submitCreate(),
+      cRepoQuery: c ? c.repoQuery : '',
+      onCRepoQuery: e => this.setCreate({ repoQuery: e.target.value }),
+      repoRows: c ? REPOS.filter(r => r.full.toLowerCase().includes((c.repoQuery || '').toLowerCase())).map(r => {
+        const on = c.repos.some(x => x.full === r.full);
+        return {
+          full: r.full, branch: r.branch, private: r.private, on,
+          onClick: () => this.setCreate({ repos: on
+            ? c.repos.filter(x => x.full !== r.full)
+            : c.repos.concat([{ full: r.full, mount: r.full.split('/').pop() }]) }),
+          style: 'width: 100%; display: flex; align-items: center; gap: 10px; padding: 8px 12px; background: ' + (on ? '#181818' : 'none') + '; border: none; border-bottom: 1px solid #1a1a1a; text-align: left; cursor: pointer; color: #ededed; content-visibility: auto; contain-intrinsic-block-size: 35px',
+          boxStyle: 'width: 14px; height: 14px; flex: none; border-radius: 3px; display: flex; align-items: center; justify-content: center; background: ' + (on ? '#1f96b4' : '#0d0d0d') + '; border: 1px solid ' + (on ? '#1f96b4' : '#3a3a3a')
+        };
+      }) : [],
+      noRepoMatches: !!c && REPOS.filter(r => r.full.toLowerCase().includes((c.repoQuery || '').toLowerCase())).length === 0,
+      hasRepos: !!c && c.repos.length > 0,
+      selectedRepos: c ? c.repos.map((r, i) => ({
+        full: r.full, mount: r.mount,
+        onMount: e => this.setCreate({ repos: c.repos.map((x, j) => j === i ? Object.assign({}, x, { mount: e.target.value }) : x) }),
+        onRemove: () => this.setCreate({ repos: c.repos.filter((_, j) => j !== i) })
+      })) : [],
+      addRepoUrl: () => this.flash('Paste a git URL (prototype)'),
+      connectGithub: () => this.flash('GitHub already connected as @noeljackson'),
+      cSnapshot: c ? c.snapshot : '',
+      onCSnapshot: e => {
+        const v = e.target.value;
+        if (v === '__new') { this.setState({ create: null }); this.flash('Create a snapshot from a running sandbox'); return; }
+        this.setCreate({ snapshot: v });
+      },
+      snapshotOptions: [{ value: '', label: 'None — boot from image' }]
+        .concat(o.snapshots.map(x => ({ value: x.id, label: x.name + ' · ' + x.size.toFixed(1) + ' GB · from ' + x.from })))
+        .concat([{ value: '__new', label: 'Create new…' }]),
+      snapStorage: snapUsed.toFixed(1) + ' / ' + o.snapshotQuota + ' GB',
+      snapBarStyle: this.bar(snapUsed / o.snapshotQuota * 100, snapUsed / o.snapshotQuota > 0.85 ? '#e8705f' : '#1f96b4'),
+      snapHint: c && c.snapshot
+        ? 'Boots from this snapshot. Filesystem and installed dependencies are restored as captured.'
+        : o.snapshots.length + ' snapshot' + (o.snapshots.length === 1 ? '' : 's') + ' stored. Snapshots are captured from any running sandbox and reused here.',
+      imageRowStyle: 'border: 1px solid #232323; border-radius: 8px; background: #111; padding: 12px 14px; display: flex; align-items: center; gap: 12px; opacity: ' + (c && c.snapshot ? '.45' : '1') + '; pointer-events: ' + (c && c.snapshot ? 'none' : 'auto'),
+      imageHint: c && c.snapshot ? 'Inherited from the selected snapshot.' : 'Agent-ready image the sandbox boots from.',
+      cImage: c ? c.image : '', onCImage: e => this.setCreate({ image: e.target.value }),
+      resetImage: () => this.setCreate({ image: '' }),
+      noPorts: !!c && c.ports.length === 0,
+      hasPorts: !!c && c.ports.length > 0,
+      cPorts: c ? c.ports.map((port, i) => ({
+        from: port.from, to: port.to,
+        onFrom: e => this.setCreate({ ports: c.ports.map((x, j) => j === i ? Object.assign({}, x, { from: e.target.value }) : x) }),
+        onTo: e => this.setCreate({ ports: c.ports.map((x, j) => j === i ? Object.assign({}, x, { to: e.target.value }) : x) }),
+        onRemove: () => this.setCreate({ ports: c.ports.filter((_, j) => j !== i) })
+      })) : [],
+      addPort: () => { if (!c) return; const n = String(3000 + c.ports.length * 10); this.setCreate({ ports: c.ports.concat([{ from: n, to: n }]) }); },
+      agentChips: c ? AGENTS.map(a => {
+        const on = c.agents.includes(a);
+        return {
+          label: a,
+          onClick: () => this.setCreate({ agents: on ? c.agents.filter(x => x !== a) : c.agents.concat([a]) }),
+          style: 'padding: 8px 13px; border-radius: 999px; font-size: 13px; cursor: pointer; background: ' + (on ? '#0b2028' : '#161616') + '; border: 1px solid ' + (on ? '#1d5566' : '#2a2a2a') + '; color: ' + (on ? '#7ad3e8' : '#b9b9b9')
+        };
+      }) : [],
+      secretChecks: c ? [
+        { key: 'userSecrets', label: 'Include user secrets', hint: 'Injects saved agent credentials and other personal secrets.' },
+        { key: 'orgSecrets', label: 'Include org secrets', hint: 'Secrets shared across this organization.' }
+      ].map(x => this.createCheck(c, x)) : [],
+      installChecks: c ? [
+        { key: 'installTools', label: 'Install selected agent tools during setup', hint: 'Advanced fallback for custom images. Slower and less reliable than agent-ready images.' }
+      ].map(x => this.createCheck(c, x)) : [],
+      cSecretProject: c ? c.secretProject : '',
+      onCSecretProject: e => this.setCreate({ secretProject: e.target.value }),
+      secretProjects: [
+        { value: '', label: 'Select a secret project…' },
+        { value: 'agents', label: 'agents' },
+        { value: 'production', label: 'production' },
+        { value: 'scratch', label: 'scratch' }
+      ],
+      cName: c ? c.name : '', onCName: e => this.setCreate({ name: e.target.value }),
+      generateStyle: 'width: 100%; display: flex; align-items: center; justify-content: center; gap: 8px; padding: 10px 12px; border-radius: 999px; font-size: 12.5px; font-weight: 500; cursor: ' + (c && c.repos.length ? 'pointer' : 'not-allowed') + '; background: ' + (c && c.repos.length ? '#122630' : '#131313') + '; border: 1px solid ' + (c && c.repos.length ? '#2b5766' : '#262626') + '; color: ' + (c && c.repos.length ? '#54c2dd' : '#6e6e6e'),
+      generateHint: c && c.repos.length ? 'Reads the selected repositories and fills in install and startup steps.' : 'Select a repository above to generate these steps.',
+      generateFromRepo: () => {
+        if (!c || !c.repos.length) { this.flash('Select a repository first'); return; }
+        const first = c.repos[0];
+        this.setCreate({ install: 'bun install', startup: 'cd /workspace/' + first.mount + ' && bun run dev' });
+        this.flash('Generated setup from ' + first.full);
+      },
+      cInstall: c ? c.install : '', onCInstall: e => this.setCreate({ install: e.target.value }),
+      cStartup: c ? c.startup : '', onCStartup: e => this.setCreate({ startup: e.target.value }),
+      cCpu: c ? c.cpu : '1', onCCpu: e => this.setCreate({ cpu: e.target.value }),
+      cMem: c ? c.mem : '2', onCMem: e => this.setCreate({ mem: e.target.value }),
+      cDisk: c ? c.disk : '10', onCDisk: e => this.setCreate({ disk: e.target.value }),
+      cTtl: c ? c.ttl : '', onCTtl: e => this.setCreate({ ttl: e.target.value }), onCTtlBlur: e => {
+        const value = e.target.value.trim().toLowerCase();
+        const match = value.match(/^(\d+)\s*([smhd])$/);
+        this.setCreate({ ttl: value === '' || value === '0' || value === '∞' || value === 'infinity' ? 'infinity' : (match ? match[1] + match[2] : value) });
+      },
+      cpuOptions: [1, 2, 4, 8].map(n => ({ value: String(n), label: n + (n === 1 ? ' Core' : ' Cores') })),
+      memOptions: [2, 4, 8, 16, 32, 64].map(n => ({ value: String(n), label: n + ' GB' })),
+      diskOptions: [10, 20, 40, 80, 200].map(n => ({ value: String(n), label: n + ' GB' })),
+      sidebarClosed: !s.sidebarOpen,
+      toggleSidebar: () => this.setState({ sidebarOpen: !s.sidebarOpen, orgOpen: false, railMenu: null }),
+      asideStyle: 'flex: none; border-right: 1px solid #1e1e1e; flex-direction: column; min-height: 0; background: #0a0a0a; overflow: hidden; transition: width .18s ease; width: ' + (s.sidebarOpen ? '260px' : '0px') + '; display: ' + (s.sidebarOpen ? 'flex' : 'none'),
+      quotaLabel: cfg && cfg.total != null ? cfg.total + ' / ' + (cfg.quota != null ? cfg.quota : '∞') : '',
+      quotaOpen: s.quotaOpen,
+      toggleQuota: () => this.setState({ quotaOpen: !s.quotaOpen }),
+      closeQuota: () => this.setState({ quotaOpen: false }),
+      quotaBtnStyle: 'display: flex; align-items: center; background: none; border: none; padding: 0; cursor: pointer; color: ' + (s.quotaOpen ? '#ededed' : '#5c5c5c'),
+      quotaTitle: cfg && cfg.quota != null ? (cfg.quota - cfg.total) + ' of ' + cfg.quota + ' remaining' : '',
+      quotaBody: cfg && cfg.quota != null ? 'The Team plan allows ' + cfg.quota + ' ' + (cfg.title || '').toLowerCase() + ' per organization. Upgrade for a higher limit.' : '',
+      quotaBarStyle: cfg && cfg.quota != null ? this.bar(cfg.total / cfg.quota * 100, cfg.total / cfg.quota > 0.85 ? '#e8705f' : '#1f96b4') : '',
+      upgradePlan: () => { this.setState({ quotaOpen: false }); this.go('wallet'); },
+      contentStyle: 'flex: 1 1 0%; width: 100%; min-width: 0; min-height: 0; ' + (p === 'detail' ? 'display: flex; flex-direction: column; overflow: hidden' : 'overflow-y: auto'),
+      inSettings: SETTINGS_PAGES.includes(p),
+      settingsNav: SETTINGS_NAV.map(n => ({
+        label: n.label, onClick: () => this.go(n.id), style: navBtn(p === n.id)
+      })),
+      goSettings: () => this.go('settings'),
+      footSettingsStyle: 'display: flex; align-items: center; gap: 10px; padding: 8px 10px; background: ' + (SETTINGS_PAGES.includes(p) ? '#1c1c1c' : 'none') + '; border: none; border-radius: 999px; font-size: 13px; cursor: pointer; text-align: left; color: ' + (SETTINGS_PAGES.includes(p) ? '#f2f2f2' : '#9a9a9a'),
+      signOut: () => this.flash('Signed out (prototype)'),
+      allSandboxes: () => this.go('sandboxes'),
+      allSandboxesStyle: 'flex: 1; padding: 0; background: none; border: none; text-align: left; font-size: 11px; cursor: pointer; color: ' + (p === 'sandboxes' ? '#ededed' : '#8a8a8a'),
+      navRows: NAV.map(n => ({
+        label: n.label, onClick: () => this.go(n.id),
+        style: navBtn(p === n.id)
+      })),
+      crumb: p === 'detail' && sb ? 'sandboxes / ' + sb.name : (cfg ? cfg.title.toLowerCase() : p),
+
+      isList, isDetail: p === 'detail' && !!sb, isLimits: p === 'limits', isWallet: p === 'wallet', isGetStarted: p === 'started', isSettings: p === 'settings',
+      pageTitle: cfg ? cfg.title : '', pageSub: cfg ? cfg.sub : '', primaryLabel: cfg ? cfg.cta : '', primaryAction: cfg ? cfg.action : null,
+      columns: cfg ? cfg.columns : [],
+      tableStyle: 'width: 100%; border-collapse: collapse; table-layout: fixed; min-width: ' + (cfg && cfg.minWidth ? cfg.minWidth : 640) + 'px',
+      rows: cfg ? cfg.items.map(it => {
+        const r = cfg.row(it);
+        const menu = r.menu || [];
+        return {
+          cells: r.cells, onClick: r.onClick, style: 'border: none; ' + (r.onClick ? 'cursor: pointer' : ''),
+          menuBtnStyle: 'width: 28px; height: 26px; border-radius: 999px; border: none; background: none; cursor: pointer; font-size: 15px; line-height: 1; letter-spacing: 0.06em; color: ' + (menu.length ? '#6e6e6e' : 'transparent') + (menu.length ? '' : '; pointer-events: none'),
+          onMenu: e => menu.length && this.openRowMenu(e, menu)
+        };
+      }) : [],
+      showFilter: p === 'sandboxes',
+      filterOpen: s.filterOpen,
+      toggleFilter: () => this.setState({ filterOpen: !s.filterOpen }),
+      closeFilter: () => this.setState({ filterOpen: false }),
+      clearFilters: () => this.setState({ stateFilter: 'All', regionFilter: 'All', filterOpen: false }),
+      filterCount: (s.stateFilter !== 'All' ? 1 : 0) + (s.regionFilter !== 'All' ? 1 : 0),
+      filterBtnStyle: 'display: flex; align-items: center; gap: 7px; padding: 8px 13px; border-radius: 999px; font-size: 13px; cursor: pointer; background: ' + (s.filterOpen ? '#1f1f1f' : '#131313') + '; border: 1px solid ' + (s.stateFilter !== 'All' || s.regionFilter !== 'All' ? '#2b5766' : '#262626') + '; color: ' + (s.filterOpen ? '#f2f2f2' : '#cfcfcf'),
+      filterGroups: [
+        { key: 'stateFilter', label: 'State', options: ['All', 'Running', 'Stopped', 'Starting', 'Error'], dots: true },
+        { key: 'regionFilter', label: 'Region', options: ['All', 'eu', 'us'], dots: false }
+      ].map((g, gi) => ({
+        style: gi ? 'border-top: 1px solid #242424; padding-top: 2px' : '',
+        label: g.label,
+        options: g.options.map(opt => ({
+          label: opt, on: s[g.key] === opt,
+          onClick: () => this.setState({ [g.key]: opt }),
+          style: 'width: 100%; display: flex; align-items: center; gap: 9px; padding: 8px 12px; background: ' + (s[g.key] === opt ? '#1c1c1c' : 'none') + '; border: none; text-align: left; font-size: 13px; cursor: pointer; color: ' + (s[g.key] === opt ? '#f2f2f2' : '#cfcfcf'),
+          dotStyle: g.dots && opt !== 'All'
+            ? 'width: 6px; height: 6px; border-radius: 50%; flex: none; background: ' + (STATE_COLORS[opt] || STATE_COLORS.Stopped)[1]
+            : 'display: none'
+        }))
+      })),
+      rowMenuOpen: !!s.rowMenu,
+      closeRowMenu: () => this.setState({ rowMenu: null }),
+      rowMenuStyle: s.rowMenu ? 'position: fixed; z-index: 71; top: ' + s.rowMenu.top + 'px; right: ' + s.rowMenu.right + 'px; min-width: 176px; background: #141414; border: 1px solid #2a2a2a; border-radius: 8px; box-shadow: 0 12px 32px rgba(0,0,0,.6); overflow: hidden; padding: 4px 0' : 'display: none',
+      rowMenuItems: s.rowMenu ? s.rowMenu.items.map(i => ({
+        label: i.label, onClick: i.onClick,
+        style: 'width: 100%; padding: 8px 12px; background: none; border: none; text-align: left; font-size: 13px; cursor: pointer; color: ' + (i.danger ? '#e8705f' : '#dcdcdc')
+      })) : [],
+      confirmOpen: !!s.confirm,
+      confirmTitle: s.confirm ? s.confirm.title : '',
+      confirmBody: s.confirm ? s.confirm.body : '',
+      confirmCta: s.confirm ? s.confirm.cta : '',
+      closeConfirm: () => this.setState({ confirm: null }),
+      confirmAction: () => { const c = s.confirm; this.setState({ confirm: null }); if (c) c.run(); },
+      noRows: !!cfg && cfg.items.length === 0,
+      rowCountLabel: cfg ? cfg.items.length + ' of ' + (cfg.total != null ? cfg.total : cfg.items.length) + ' shown' : '',
+      query: s.query,
+      onQuery: e => this.setState({ query: e.target.value }),
+
+      detailName: sb ? sb.name : '',
+      detailSnapshot: sb ? sb.snapshot : '',
+      toggleLabel: sb && sb.state === 'Running' ? 'Stop' : 'Start',
+      toggleState: () => {
+        const id = s.sandboxId;
+        this.mutate(org => {
+          const x = org.sandboxes.find(y => y.id === id);
+          if (x) { x.state = x.state === 'Running' ? 'Stopped' : 'Running'; x.lastEvent = (x.state === 'Running' ? 'started' : 'stopped') + ' just now'; }
+        });
+      },
+      openResize: () => sb && this.openDrawer('resize', { cpu: String(sb.cpu), mem: String(sb.mem), disk: String(sb.disk) }),
+      snapshotBtnStyle: 'padding: 7px 12px; background: #131313; border: 1px solid #262626; border-radius: 999px; font-size: 12.5px; cursor: ' + (sb && sb.state === 'Running' ? 'pointer' : 'not-allowed') + '; flex: none; color: ' + (sb && sb.state === 'Running' ? '#ededed' : '#5c5c5c'),
+      snapshotSandbox: () => {
+        if (!sb || sb.state !== 'Running') { this.flash('Sandbox must be running to snapshot'); return; }
+        this.createSnapshot(sb);
+      },
+      deleteSandbox: () => {
+        const id = s.sandboxId, name = sb ? sb.name : '';
+        this.askConfirm({
+          title: 'Delete ' + name + '?',
+          body: 'The sandbox and its filesystem are destroyed immediately. This cannot be undone.',
+          cta: 'Delete sandbox',
+          run: () => {
+            this.mutate(org => { org.sandboxes = org.sandboxes.filter(y => y.id !== id); });
+            this.setState({ page: 'sandboxes', sandboxId: null });
+            this.flash('Deleted ' + name);
+          }
+        });
+      },
+      saveSettings: () => { this.setState({ sbSettings: null }); this.flash('Sandbox settings saved'); },
+      detailState: sb ? sb.state : '',
+      detailStateUpper: sb ? sb.state.toUpperCase() : '',
+      linkStatus: sb ? (sb.state === 'Running' ? 'connected' : 'disconnected') : '',
+      linkStatusStyle: 'flex: none; letter-spacing: 0.04em; color: ' + (sb && sb.state === 'Running' ? '#54c2dd' : '#7a7a7a'),
+      detailStateDot: 'width: 7px; height: 7px; border-radius: 50%; flex: none; background: ' + (sb ? (STATE_COLORS[sb.state] || STATE_COLORS.Stopped)[1] : '#8a8a8a'),
+      detailMeta: sb ? [
+        { label: 'Region', value: sb.region, mono: true },
+        { label: 'Snapshot', value: sb.snapshot, mono: true },
+        { label: 'Last event', value: sb.lastEvent, mono: false },
+        { label: 'Created', value: sb.created, mono: false }
+      ].map(m => ({
+        label: m.label, value: m.value,
+        valueStyle: 'font-size: 12.5px; color: #ededed; overflow: hidden; text-overflow: ellipsis; white-space: nowrap' + (m.mono ? '; font-family: ' + MONO : '')
+      })) : [],
+      detailRegion: sb ? sb.region : '',
+      sbSettingsOpen: !!sbs,
+      openSbSettings: () => sb && this.setState({ sbSettings: {
+        idle: '30 minutes', snapshot: sb.snapshot, startup: '', labels: 'team=agents, tier=1',
+        persistDisk: true, autoSnapshot: false
+      } }),
+      closeSbSettings: () => this.setState({ sbSettings: null }),
+      sbIdle: sbs ? sbs.idle : '', onSbIdle: e => this.setSbSettings({ idle: e.target.value }),
+      sbSnapshot: sbs ? sbs.snapshot : '', onSbSnapshot: e => this.setSbSettings({ snapshot: e.target.value }),
+      sbStartup: sbs ? sbs.startup : '', onSbStartup: e => this.setSbSettings({ startup: e.target.value }),
+      sbLabels: sbs ? sbs.labels : '', onSbLabels: e => this.setSbSettings({ labels: e.target.value }),
+      idleOptions: ['Never', '15 minutes', '30 minutes', '1 hour', '4 hours'].map(x => ({ value: x, label: x })),
+      sbToggles: sbs ? [
+        { key: 'persistDisk', label: 'Persist disk between stops', hint: 'Keeps the filesystem when the sandbox is stopped.' },
+        { key: 'autoSnapshot', label: 'Snapshot on stop', hint: 'Writes a new image each time the sandbox stops.' }
+      ].map(t => ({
+        label: t.label, hint: t.hint, on: !!sbs[t.key],
+        onClick: () => this.setSbSettings({ [t.key]: !sbs[t.key] }),
+        boxStyle: 'width: 15px; height: 15px; flex: none; margin-top: 2px; border-radius: 3px; display: flex; align-items: center; justify-content: center; background: ' + (sbs[t.key] ? '#1f96b4' : '#0d0d0d') + '; border: 1px solid ' + (sbs[t.key] ? '#1f96b4' : '#3a3a3a')
+      })) : [],
+      shellPrompt: sb ? 'agent@' + sb.name + ':~$' : '$',
+      terminal: term.map(l => ({ text: l.text, style: 'color: ' + (l.dim ? '#7f7f7f' : '#e6e6e6') + '; white-space: pre-wrap' })),
+      onCommand: e => {
+        if (e.key !== 'Enter') return;
+        const cmd = e.target.value.trim();
+        e.target.value = '';
+        if (!cmd) return;
+        const id = s.sandboxId;
+        const out = cmd === 'clear' ? []
+          : term.concat([{ text: (sb ? 'agent@' + sb.name + ':~$ ' : '$ ') + cmd }]).concat(
+            cmd === 'ls' ? [{ text: 'run_agent.py  requirements.txt  src/  logs/', dim: true }]
+            : cmd === 'whoami' ? [{ text: 'agent', dim: true }]
+            : cmd.startsWith('cat') ? [{ text: 'cat: ' + cmd.slice(4) + ': No such file or directory', dim: true }]
+            : [{ text: 'sh: ' + cmd.split(' ')[0] + ': command not found', dim: true }]
+          );
+        this.setState(st => ({ term: Object.assign({}, st.term, { [id]: out }) }));
+      },
+      detailUsage: sb ? [
+        { label: 'Compute', short: 'CPU', value: sb.cpu + '/4', barStyle: this.bar(sb.cpu / 4 * 100) },
+        { label: 'Memory', short: 'MEM', value: sb.mem + '/8 GiB', barStyle: this.bar(sb.mem / 8 * 100) },
+        { label: 'Storage', short: 'DISK', value: sb.disk + '/30 GiB', barStyle: this.bar(sb.disk / 30 * 100) }
+      ] : [],
+
+      orgUsage: [
+        { label: 'Compute', value: totalCpu + ' / 10 vCPU', barStyle: this.bar(totalCpu / 10 * 100) },
+        { label: 'Memory', value: totalMem + ' / 10 GiB', barStyle: this.bar(totalMem / 10 * 100, totalMem > 10 ? '#e8705f' : '#1f96b4') },
+        { label: 'Storage', value: totalDisk + ' / 30 GiB', barStyle: this.bar(totalDisk / 30 * 100) }
+      ],
+      tierCols: [this.th('Tier', '140px'), this.th('Compute (vCPU)', null, true), this.th('Memory (GiB)', null, true), this.th('Storage (GiB)', null, true), this.th('Requests/min', null, true)],
+      tierRows: [
+        { tier: '1 (current)', cpu: '10', mem: '10', disk: '30', req: '10,000', current: true },
+        { tier: '2', cpu: '100', mem: '200', disk: '300', req: '20,000' },
+        { tier: '3', cpu: '250', mem: '500', disk: '2000', req: '40,000' },
+        { tier: 'Enterprise', cpu: 'Custom', mem: 'Custom', disk: 'Custom', req: 'Custom' }
+      ].map(r => ({
+        tier: r.tier, cpu: r.cpu, mem: r.mem, disk: r.disk, req: r.req,
+        tierStyle: 'padding: 11px 14px; font-size: 13px; color: ' + (r.current ? '#fff' : '#ededed'),
+        cellStyle: 'padding: 11px 14px; font-size: 13px; text-align: right; font-family: ' + MONO + '; color: #a8a8a8'
+      })),
+
+      walletStats: [
+        { label: 'Balance', value: o.balance }, { label: 'Spend this month', value: o.spend }, { label: 'Plan', value: o.tier }
+      ].map((x, i) => ({ label: x.label, value: x.value, style: 'padding: 18px 20px; border-right: ' + (i === 2 ? 'none' : '1px solid #1a1a1a') })),
+      topUp: () => this.flash('Top up flow — not wired in this prototype'),
+      txns: o.txns.map((t, i) => ({
+        date: t.date, item: t.item, amount: t.amount,
+        style: 'display: flex; align-items: center; gap: 16px; padding: 13px 18px' + (i ? '; border-top: 1px solid #1a1a1a' : ''),
+        amountStyle: 'font-size: 13px; font-family: ' + MONO + '; color: ' + (t.amount.startsWith('+') ? '#3fb950' : '#c9c9c9')
+      })),
+
+      steps: [
+        { n: '1', title: 'Install the SDK', body: 'Run this in your terminal to install the Codewire SDK.', code: 'pip install codewire' },
+        { n: '2', title: 'Create an API key', body: 'Keys carry scopes. A sandboxes:write key is enough to create and run sandboxes.', code: 'codewire keys create local-cli --scope sandboxes:write' },
+        { n: '3', title: 'Run code in a sandbox', body: 'Create a sandbox and execute a snippet inside it.', code: 'from codewire import Codewire\n\ncw = Codewire(api_key="cw_live_…")\nsb = cw.create(snapshot="codewire/base:1.4")\nprint(sb.exec(\'echo "hello from the sandbox"\'))' }
+      ],
+
+      drawerOpen: !!drawer,
+      drawerTitle: drawer ? drawer.title : '',
+      drawerSub: drawer ? drawer.sub : '',
+      drawerCta: drawer ? drawer.cta : '',
+      drawerFields: drawer ? drawer.fields : [],
+      closeDrawer: () => this.setState({ drawer: null }),
+      submitDrawer: () => this.submit(),
+      toast: s.toast
+    };
+  }
+}
+
+</script>
+</body>
+</html>
