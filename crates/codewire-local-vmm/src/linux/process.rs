@@ -170,7 +170,7 @@ impl LiveProcess {
         let raw_pid =
             i32::try_from(identity.pid).map_err(|_| RecoveryError::InvalidPid(identity.pid))?;
         let pid = Pid::from_raw(raw_pid).ok_or(RecoveryError::InvalidPid(identity.pid))?;
-        let pidfd = pidfd_open(pid, PidfdFlags::empty()).map_err(RecoveryError::Pidfd)?;
+        let pidfd = pidfd_open(pid, PidfdFlags::empty()).map_err(classify_pidfd_open_error)?;
         validate_pidfd_target(&pidfd, identity.pid)?;
         if ProcessIdentity::capture(identity.pid)? != identity {
             return Err(RecoveryError::IdentityMismatch);
@@ -180,6 +180,14 @@ impl LiveProcess {
             return Err(RecoveryError::ProcessExited);
         }
         Ok(process)
+    }
+}
+
+fn classify_pidfd_open_error(error: rustix::io::Errno) -> RecoveryError {
+    if error == rustix::io::Errno::SRCH {
+        RecoveryError::ProcessExited
+    } else {
+        RecoveryError::Pidfd(error)
     }
 }
 
@@ -303,6 +311,18 @@ mod tests {
         assert!(matches!(
             LiveProcess::recover(&identity),
             Err(RecoveryError::IdentityMismatch)
+        ));
+    }
+
+    #[test]
+    fn pidfd_open_normalizes_only_a_disappeared_process() {
+        assert!(matches!(
+            classify_pidfd_open_error(rustix::io::Errno::SRCH),
+            RecoveryError::ProcessExited
+        ));
+        assert!(matches!(
+            classify_pidfd_open_error(rustix::io::Errno::PERM),
+            RecoveryError::Pidfd(rustix::io::Errno::PERM)
         ));
     }
 
