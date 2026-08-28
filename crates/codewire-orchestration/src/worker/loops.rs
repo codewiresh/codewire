@@ -35,6 +35,7 @@ const SANDBOX_TRANSITIONAL_LIVENESS_GRACE: Duration = Duration::from_secs(60);
 const RECOVERY_ACTIVITY_WINDOW_SECS: i32 = 300; // environmentRecoveryActivityWindow
 const PENDING_CREATE_RECOVERY_SECS: i32 = 60;
 const DESTROY_WITHOUT_BACKEND_RECOVERY_SECS: i32 = 60;
+const INCOMPLETE_EXTERNAL_CLEANUP_STATES: [&str; 3] = ["destroying", "destroyed", "error"];
 
 /// Mirrors `RecoveryJournalKinds`.
 const RECOVERY_JOURNAL_KINDS: [&str; 4] =
@@ -328,17 +329,24 @@ async fn recover_pending_creates(ctx: &WorkerContext) {
 
 /// Retry every destroy whose external absence proof is still missing. This
 /// includes historical `destroyed` rows: state alone is not provider absence
-/// evidence, so the canonical Temporal workflow re-enumerates retained
-/// backend/session namespaces before writing the marker.
+/// evidence. Provider failures record `error` without clearing destroyed
+/// intent, so those rows must also return to the canonical Temporal workflow,
+/// which re-enumerates retained backend/session namespaces before writing the
+/// marker.
 async fn reconcile_incomplete_external_cleanup(ctx: &WorkerContext) {
+    let states: Vec<String> = INCOMPLETE_EXTERNAL_CLEANUP_STATES
+        .iter()
+        .map(|state| (*state).to_string())
+        .collect();
     let ids: Vec<(String,)> = match sqlx::query_as(
         r#"SELECT e.id
              FROM environments e
-            WHERE e.state IN ('destroying', 'destroyed')
+            WHERE e.state = ANY($1)
               AND e.desired_state = 'destroyed'
               AND e.external_cleanup_completed_at IS NULL
-              AND e.state_changed_at < NOW() - ($1 * INTERVAL '1 second')"#,
+              AND e.state_changed_at < NOW() - ($2 * INTERVAL '1 second')"#,
     )
+    .bind(&states)
     .bind(DESTROY_WITHOUT_BACKEND_RECOVERY_SECS)
     .fetch_all(&ctx.pool)
     .await
@@ -1044,6 +1052,14 @@ async fn mark_sandbox_env_error(ctx: &WorkerContext, row: &LivenessRow, reason: 
 mod tests {
     use super::super::create::{SandboxWorkerCfg, WarmPoolProfile};
     use super::*;
+
+    #[test]
+    fn incomplete_external_cleanup_recovery_includes_errored_destroy_intent() {
+        assert_eq!(
+            INCOMPLETE_EXTERNAL_CLEANUP_STATES,
+            ["destroying", "destroyed", "error"]
+        );
+    }
 
     #[test]
     fn warm_pool_gc_prefix_matches_pool_names() {
