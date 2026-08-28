@@ -481,6 +481,10 @@ mod tests {
         );
         let spec = &gateway["spec"]["template"]["spec"];
         assert!(
+            gateway["spec"]["progressDeadlineSeconds"].is_null(),
+            "commodity gateways must retain the Kubernetes progress deadline"
+        );
+        assert!(
             gateway["spec"]["template"]["metadata"]["labels"]
                 ["codewire.sh/isolation-tier"]
                 .is_null(),
@@ -1200,6 +1204,11 @@ mod tests {
         );
 
         let gateway = render_gateway_deployment("codewire-runtime", &opts);
+        assert_eq!(
+            gateway["spec"]["progressDeadlineSeconds"],
+            json!(900),
+            "confidential guest image pulls need the measured cold-start budget"
+        );
         assert_eq!(
             gateway["spec"]["template"]["metadata"]["labels"]
                 ["codewire.sh/isolation-tier"]
