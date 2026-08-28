@@ -1,0 +1,31 @@
+[package]
+name = "codewire-local-vmm"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license = "AGPL-3.0-only"
+authors.workspace = true
+description = "Codewire-owned host runtime for isolated local microVM environments"
+
+[dependencies]
+thiserror = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+codewire-daemon = { workspace = true }
+codewire-vmm-guest-probe = { workspace = true }
+hyper-util = { workspace = true }
+libc = "0.2"
+rand = { workspace = true }
+rustix = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+tokio = { workspace = true }
+tonic = { workspace = true }
+tower = { workspace = true }
+uuid = { workspace = true }
+zeroize = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio-stream = { workspace = true }

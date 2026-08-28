@@ -1,0 +1,1329 @@
+use std::fmt;
+use std::fs;
+use std::io;
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use std::time::Duration;
+
+use codewire_daemon::client::SessionClient;
+use codewire_vmm_guest_probe::Seed;
+use rand::{RngCore, rngs::OsRng};
+use rustix::process::Signal;
+use sha2::{Digest, Sha256};
+use uuid::Uuid;
+use zeroize::Zeroizing;
+
+use crate::artifact::{AdmittedArtifacts, ArtifactError, ArtifactLock};
+use crate::ch_api::{ChApiClient, ChApiError};
+use crate::cloud_hypervisor::{CloudHypervisorConfig, CloudHypervisorConfigError, CommandSpec};
+use crate::hybrid_vsock::{HybridVsockError, HybridVsockTarget};
+
+use super::path::{PathError, PrivateRoot, set_socket_private};
+use super::preflight::{PreflightError, PreflightReport, preflight};
+use super::process::{LiveProcess, RecoveryError, signal_unreaped_child};
+use super::state::{
+    MINIMUM_STATE_DISK_BYTES, PERSISTED_STATE_SCHEMA_VERSION, PersistedVmState, StateDiskIdentity,
+    StateError, VmLock, VmPaths, VmPhase, publish_seed,
+};
+
+const START_TIMEOUT: Duration = Duration::from_secs(10);
+const GRACEFUL_STOP_TIMEOUT: Duration = Duration::from_secs(5);
+const SIGNAL_STOP_TIMEOUT: Duration = Duration::from_secs(2);
+
+#[derive(Debug, Clone)]
+pub struct RunnerConfig {
+    pub state_root: PathBuf,
+    pub artifact_root: PathBuf,
+    pub artifact_lock: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+pub struct CreateVmRequest {
+    pub vm_id: Uuid,
+    pub generation: u64,
+    pub vsock_cid: u32,
+    pub daemon_vsock_port: u32,
+    pub state_disk_bytes: u64,
+    pub vcpus: u8,
+    pub memory_mib: u32,
+}
+
+pub struct CloudHypervisorRunner {
+    state_root: PrivateRoot,
+    artifacts: AdmittedArtifacts,
+}
+
+impl fmt::Debug for CloudHypervisorRunner {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CloudHypervisorRunner")
+            .field("state_root", &self.state_root.path())
+            .field("artifacts", &self.artifacts)
+            .finish()
+    }
+}
+
+impl CloudHypervisorRunner {
+    pub async fn new(config: RunnerConfig) -> Result<Self, RunnerError> {
+        if config.artifact_lock.parent().is_none()
+            || config.artifact_lock.parent() != config.artifact_root.parent()
+        {
+            return Err(RunnerError::InvalidArtifactStagingLayout);
+        }
+        let state_root = match PrivateRoot::open(&config.state_root) {
+            Ok(root) => root,
+            Err(PathError::Io { source, .. }) if source.kind() == io::ErrorKind::NotFound => {
+                PrivateRoot::create(&config.state_root)?
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let artifact_lock = ArtifactLock::read(&config.artifact_lock)?;
+        let artifacts = artifact_lock.admit(&config.artifact_root).await?;
+        Ok(Self {
+            state_root,
+            artifacts,
+        })
+    }
+
+    pub fn preflight(&self) -> Result<PreflightReport, RunnerError> {
+        preflight().map_err(RunnerError::from)
+    }
+
+    pub async fn prepare(&self, request: CreateVmRequest) -> Result<PreparedVm, RunnerError> {
+        preflight()?;
+        validate_request(&request)?;
+        let paths = VmPaths::create(&self.state_root, request.vm_id)?;
+        let lock = paths.lock()?;
+        let persisted = read_stopped_persisted_state(&paths, request.vm_id)?;
+        let state_disk = admit_state_disk(&paths, &request, persisted.as_ref())?;
+        paths.clear_stale_runtime_endpoints()?;
+
+        let token = Zeroizing::new(generate_auth_token());
+        let seed = Seed::new(
+            request.vm_id,
+            request.generation,
+            request.daemon_vsock_port,
+            token.to_string(),
+        )?;
+        publish_seed(&paths.seed_disk, &seed.encode())?;
+        paths.prepare_diagnostics()?;
+
+        let config = CloudHypervisorConfig::new(
+            &self.artifacts,
+            paths.state_disk.clone(),
+            paths.seed_disk.clone(),
+            paths.api_socket.clone(),
+            paths.event_monitor.clone(),
+            paths.vsock_socket.clone(),
+            paths.serial_log.clone(),
+            paths.vmm_log.clone(),
+            request.vsock_cid,
+            request.vcpus,
+            request.memory_mib,
+        )?;
+        let command = config.command()?;
+        Ok(PreparedVm {
+            request,
+            paths,
+            state_disk,
+            token,
+            command,
+            lock,
+        })
+    }
+
+    pub async fn start(&self, prepared: PreparedVm) -> Result<RunningVm, RunnerError> {
+        preflight()?;
+        self.artifacts.revalidate()?;
+        prepared.state_disk.revalidate(&prepared.paths.state_disk)?;
+        validate_seed_file(&prepared.paths.seed_disk)?;
+        // Arm cancellation cleanup in the same synchronous span as spawn. An
+        // aborted start future must never drop the VM lock while leaving a VMM
+        // alive, including before a pidfd identity has been admitted.
+        let mut startup = StartupOwnership::new(spawn_cloud_hypervisor(
+            &prepared.command,
+            &prepared.paths.vm_dir,
+        )?);
+        let pid = startup.child_mut().id().ok_or(RunnerError::Spawn)?;
+        let process = match LiveProcess::capture_child(pid, prepared.command.program()) {
+            Ok(process) => process,
+            Err(error) => {
+                startup.terminate_unadmitted(pid).await?;
+                return Err(error.into());
+            }
+        };
+        startup.admit(process);
+
+        // Persist the process identity before waiting on any guest-created
+        // endpoint. If the supervisor itself crashes during startup, recovery
+        // can still prove which process owns this VM and terminate the orphan.
+        let starting_state = PersistedVmState {
+            schema_version: PERSISTED_STATE_SCHEMA_VERSION,
+            vm_id: prepared.request.vm_id,
+            generation: prepared.request.generation,
+            vsock_cid: prepared.request.vsock_cid,
+            daemon_vsock_port: prepared.request.daemon_vsock_port,
+            phase: VmPhase::Starting,
+            process: startup.process().identity().clone(),
+            state_disk: prepared.state_disk.clone(),
+            api_socket: None,
+            vsock_socket: None,
+        };
+        if let Err(error) = starting_state.write_atomic(&prepared.paths.state_file) {
+            startup.terminate_admitted().await?;
+            return Err(error.into());
+        }
+
+        let finalized = async {
+            let (api, hybrid) = wait_for_endpoints(
+                &prepared.paths,
+                startup.process(),
+                prepared.request.daemon_vsock_port,
+            )
+            .await?;
+            api.ping().await?;
+            prepared.paths.validate_diagnostics()?;
+            let persisted = PersistedVmState {
+                schema_version: PERSISTED_STATE_SCHEMA_VERSION,
+                vm_id: prepared.request.vm_id,
+                generation: prepared.request.generation,
+                vsock_cid: prepared.request.vsock_cid,
+                daemon_vsock_port: prepared.request.daemon_vsock_port,
+                phase: VmPhase::Running,
+                process: startup.process().identity().clone(),
+                state_disk: prepared.state_disk.clone(),
+                api_socket: Some(set_socket_private(&prepared.paths.api_socket)?),
+                vsock_socket: Some(set_socket_private(&prepared.paths.vsock_socket)?),
+            };
+            persisted.write_atomic(&prepared.paths.state_file)?;
+            Ok::<_, RunnerError>((api, hybrid))
+        }
+        .await;
+        let (api, hybrid) = match finalized {
+            Ok(value) => value,
+            Err(error) => {
+                startup.terminate_admitted().await?;
+                return Err(error);
+            }
+        };
+        let (child, process) = startup.disarm();
+
+        Ok(RunningVm {
+            request: prepared.request,
+            paths: prepared.paths,
+            state_disk: prepared.state_disk,
+            token: prepared.token,
+            child,
+            process,
+            api,
+            hybrid,
+            _lock: prepared.lock,
+        })
+    }
+
+    pub fn recover(&self, vm_id: Uuid) -> Result<RecoveredVm, RunnerError> {
+        let paths = VmPaths::create(&self.state_root, vm_id)?;
+        let lock = paths.lock()?;
+        let state = PersistedVmState::read(&paths.state_file)?;
+        if state.vm_id != vm_id {
+            return Err(RunnerError::PersistedIdentityMismatch);
+        }
+        state.state_disk.revalidate(&paths.state_disk)?;
+        if let Some(identity) = &state.api_socket {
+            identity.revalidate(&paths.api_socket)?;
+        }
+        if let Some(identity) = &state.vsock_socket {
+            identity.revalidate(&paths.vsock_socket)?;
+        }
+        let process = LiveProcess::recover(&state.process)?;
+        let api = state
+            .api_socket
+            .as_ref()
+            .map(|_| ChApiClient::new(&paths.api_socket))
+            .transpose()?;
+        Ok(RecoveredVm {
+            paths,
+            state,
+            process,
+            api,
+            _lock: lock,
+        })
+    }
+
+    /// Terminate the exact process recorded for a VM before best-effort test or
+    /// supervisor cleanup. Unlike normal recovery, this path deliberately does
+    /// not trust guest-mutable disk contents or require control sockets to
+    /// remain present. The host-written state and exact process birth identity
+    /// are still mandatory, and the per-VM lock prevents racing a live owner.
+    pub async fn terminate_tracked_for_cleanup(&self, vm_id: Uuid) -> Result<(), RunnerError> {
+        let paths = VmPaths::create(&self.state_root, vm_id)?;
+        let _lock = paths.lock()?;
+        let state = match PersistedVmState::read(&paths.state_file) {
+            Ok(state) => state,
+            Err(error) if error.is_not_found() => return Ok(()),
+            Err(error) => return Err(error.into()),
+        };
+        if state.vm_id != vm_id {
+            return Err(RunnerError::PersistedIdentityMismatch);
+        }
+        let process = match LiveProcess::recover(&state.process) {
+            Ok(process) => process,
+            Err(RecoveryError::ReadProcess(error)) if error.kind() == io::ErrorKind::NotFound => {
+                return Ok(());
+            }
+            Err(RecoveryError::ProcessExited | RecoveryError::IdentityMismatch) => return Ok(()),
+            Err(error) => return Err(error.into()),
+        };
+        terminate_exact_process(&process, None).await
+    }
+
+    pub fn delete_stopped(&self, vm_id: Uuid) -> Result<(), RunnerError> {
+        let paths = VmPaths::create(&self.state_root, vm_id)?;
+        let _lock = paths.lock()?;
+        match PersistedVmState::read(&paths.state_file) {
+            Ok(state) => {
+                if state.vm_id != vm_id {
+                    return Err(RunnerError::PersistedIdentityMismatch);
+                }
+                match LiveProcess::recover(&state.process) {
+                    Ok(_) => return Err(RunnerError::VmStillRunning),
+                    Err(RecoveryError::ReadProcess(error))
+                        if error.kind() == io::ErrorKind::NotFound => {}
+                    Err(RecoveryError::ProcessExited | RecoveryError::IdentityMismatch) => {}
+                    Err(error) => return Err(error.into()),
+                }
+            }
+            Err(error) if error.is_not_found() => {}
+            Err(error) => return Err(error.into()),
+        }
+        let expected = self.state_root.path().join("vms").join(vm_id.to_string());
+        if paths.vm_dir != expected {
+            return Err(RunnerError::PersistedIdentityMismatch);
+        }
+        fs::remove_dir_all(&paths.vm_dir).map_err(|source| RunnerError::Io {
+            path: paths.vm_dir,
+            source,
+        })?;
+        Ok(())
+    }
+}
+
+/// Owns the just-spawned VMM until every fallible/cancellable startup step has
+/// completed. `Drop` cannot wait, but it always sends an exact-child kill; the
+/// Tokio process driver reaps a dropped child asynchronously. Synchronous error
+/// paths additionally use the bounded cleanup helpers below before returning.
+struct StartupOwnership {
+    child: Option<tokio::process::Child>,
+    process: Option<LiveProcess>,
+}
+
+impl StartupOwnership {
+    fn new(child: tokio::process::Child) -> Self {
+        Self {
+            child: Some(child),
+            process: None,
+        }
+    }
+
+    fn child_mut(&mut self) -> &mut tokio::process::Child {
+        self.child
+            .as_mut()
+            .expect("armed startup ownership always contains its child")
+    }
+
+    fn admit(&mut self, process: LiveProcess) {
+        debug_assert!(self.process.is_none());
+        self.process = Some(process);
+    }
+
+    fn process(&self) -> &LiveProcess {
+        self.process
+            .as_ref()
+            .expect("admitted startup ownership always contains its process")
+    }
+
+    async fn terminate_unadmitted(&mut self, pid: u32) -> Result<(), RunnerError> {
+        terminate_unadmitted_child(pid, self.child_mut()).await
+    }
+
+    async fn terminate_admitted(&mut self) -> Result<(), RunnerError> {
+        let Self { child, process } = self;
+        terminate_failed_launch(
+            process
+                .as_ref()
+                .expect("admitted startup ownership always contains its process"),
+            child
+                .as_mut()
+                .expect("armed startup ownership always contains its child"),
+        )
+        .await
+    }
+
+    fn disarm(mut self) -> (tokio::process::Child, LiveProcess) {
+        let child = self
+            .child
+            .take()
+            .expect("armed startup ownership always contains its child");
+        let process = self
+            .process
+            .take()
+            .expect("admitted startup ownership always contains its process");
+        (child, process)
+    }
+}
+
+impl Drop for StartupOwnership {
+    fn drop(&mut self) {
+        if let Some(process) = &self.process {
+            let _ = process.signal(Signal::KILL);
+        }
+        if let Some(child) = self.child.as_mut() {
+            // Before pidfd admission the unreaped Child pins this exact PID;
+            // after admission this is a safe fallback for an exit/signal race.
+            let _ = child.start_kill();
+        }
+    }
+}
+
+pub struct PreparedVm {
+    request: CreateVmRequest,
+    paths: VmPaths,
+    state_disk: StateDiskIdentity,
+    token: Zeroizing<String>,
+    command: CommandSpec,
+    lock: VmLock,
+}
+
+impl fmt::Debug for PreparedVm {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PreparedVm")
+            .field("request", &self.request)
+            .field("paths", &self.paths)
+            .field("state_disk", &self.state_disk)
+            .field("token", &"[REDACTED]")
+            .field("command", &self.command)
+            .finish_non_exhaustive()
+    }
+}
+
+impl PreparedVm {
+    pub fn vm_id(&self) -> Uuid {
+        self.request.vm_id
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.request.generation
+    }
+
+    pub fn paths(&self) -> &VmPaths {
+        &self.paths
+    }
+
+    pub fn state_disk_identity(&self) -> &StateDiskIdentity {
+        &self.state_disk
+    }
+
+    pub fn auth_token_fingerprint(&self) -> String {
+        token_fingerprint(&self.token)
+    }
+}
+
+pub struct RunningVm {
+    request: CreateVmRequest,
+    paths: VmPaths,
+    state_disk: StateDiskIdentity,
+    token: Zeroizing<String>,
+    child: tokio::process::Child,
+    process: LiveProcess,
+    api: ChApiClient,
+    hybrid: HybridVsockTarget,
+    _lock: VmLock,
+}
+
+impl fmt::Debug for RunningVm {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RunningVm")
+            .field("request", &self.request)
+            .field("paths", &self.paths)
+            .field("state_disk", &self.state_disk)
+            .field("process", &self.process)
+            .field("token", &"[REDACTED]")
+            .finish_non_exhaustive()
+    }
+}
+
+impl RunningVm {
+    pub fn vm_id(&self) -> Uuid {
+        self.request.vm_id
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.request.generation
+    }
+
+    pub fn paths(&self) -> &VmPaths {
+        &self.paths
+    }
+
+    pub fn process_identity(&self) -> &super::process::ProcessIdentity {
+        self.process.identity()
+    }
+
+    pub fn state_disk_identity(&self) -> &StateDiskIdentity {
+        &self.state_disk
+    }
+
+    pub fn api(&self) -> &ChApiClient {
+        &self.api
+    }
+
+    pub fn auth_token_fingerprint(&self) -> String {
+        token_fingerprint(&self.token)
+    }
+
+    pub async fn daemon_client(&self) -> Result<SessionClient, RunnerError> {
+        self.hybrid
+            .connect_daemon(self.token.as_str())
+            .await
+            .map_err(RunnerError::from)
+    }
+
+    pub async fn connect_daemon_with_token(
+        &self,
+        token: &str,
+    ) -> Result<SessionClient, RunnerError> {
+        self.hybrid
+            .connect_daemon(token)
+            .await
+            .map_err(RunnerError::from)
+    }
+
+    pub async fn wait_for_exit(&mut self, timeout: Duration) -> Result<ExitClass, RunnerError> {
+        match tokio::time::timeout(timeout, self.child.wait()).await {
+            Ok(Ok(status)) if status.success() => Ok(ExitClass::GuestShutdown),
+            Ok(Ok(status)) => Ok(ExitClass::VmmFailure(status.code())),
+            Ok(Err(_)) => Err(RunnerError::Wait),
+            Err(_) => Ok(ExitClass::StillRunning),
+        }
+    }
+
+    pub async fn stop(&mut self) -> Result<ExitClass, RunnerError> {
+        let _ = self.api.shutdown().await;
+        if self.process.wait_exited(GRACEFUL_STOP_TIMEOUT).await? {
+            return self.wait_reaped().await;
+        }
+        if signal_or_observe_exit(&self.process, Signal::TERM)?
+            || self.process.wait_exited(SIGNAL_STOP_TIMEOUT).await?
+        {
+            return self.wait_reaped().await;
+        }
+        kill_and_reap(&self.process, &mut self.child).await
+    }
+
+    pub async fn force_kill_for_test(&mut self) -> Result<ExitClass, RunnerError> {
+        kill_and_reap(&self.process, &mut self.child).await
+    }
+
+    async fn wait_reaped(&mut self) -> Result<ExitClass, RunnerError> {
+        wait_reaped_child(&mut self.child).await
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExitClass {
+    StillRunning,
+    GuestShutdown,
+    VmmFailure(Option<i32>),
+}
+
+async fn kill_and_reap(
+    process: &LiveProcess,
+    child: &mut tokio::process::Child,
+) -> Result<ExitClass, RunnerError> {
+    if !signal_or_observe_exit(process, Signal::KILL)?
+        && !process.wait_exited(SIGNAL_STOP_TIMEOUT).await?
+    {
+        return Err(RunnerError::KillTimeout);
+    }
+    wait_reaped_child(child).await
+}
+
+async fn wait_reaped_child(child: &mut tokio::process::Child) -> Result<ExitClass, RunnerError> {
+    let status = tokio::time::timeout(SIGNAL_STOP_TIMEOUT, child.wait())
+        .await
+        .map_err(|_| RunnerError::KillTimeout)?
+        .map_err(|_| RunnerError::Wait)?;
+    if status.success() {
+        Ok(ExitClass::GuestShutdown)
+    } else {
+        Ok(ExitClass::VmmFailure(status.code()))
+    }
+}
+
+pub struct RecoveredVm {
+    paths: VmPaths,
+    state: PersistedVmState,
+    process: LiveProcess,
+    api: Option<ChApiClient>,
+    _lock: VmLock,
+}
+
+impl fmt::Debug for RecoveredVm {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RecoveredVm")
+            .field("paths", &self.paths)
+            .field("state", &self.state)
+            .field("process", &self.process)
+            .finish_non_exhaustive()
+    }
+}
+
+impl RecoveredVm {
+    pub fn state(&self) -> &PersistedVmState {
+        &self.state
+    }
+
+    pub fn paths(&self) -> &VmPaths {
+        &self.paths
+    }
+
+    /// A supervisor restart cannot recover the per-boot daemon token. An
+    /// orphan is therefore terminated and booted with a fresh generation.
+    pub async fn terminate_orphan(&self) -> Result<(), RunnerError> {
+        terminate_exact_process(&self.process, self.api.as_ref()).await
+    }
+}
+
+async fn terminate_exact_process(
+    process: &LiveProcess,
+    api: Option<&ChApiClient>,
+) -> Result<(), RunnerError> {
+    let graceful_timeout = if api.is_some() {
+        GRACEFUL_STOP_TIMEOUT
+    } else {
+        Duration::from_millis(250)
+    };
+    if let Some(api) = api {
+        let _ = api.shutdown().await;
+    }
+    if process.wait_exited(graceful_timeout).await? {
+        return Ok(());
+    }
+    if signal_or_observe_exit(process, Signal::TERM)?
+        || process.wait_exited(SIGNAL_STOP_TIMEOUT).await?
+    {
+        return Ok(());
+    }
+    if signal_or_observe_exit(process, Signal::KILL)? {
+        return Ok(());
+    }
+    if !process.wait_exited(SIGNAL_STOP_TIMEOUT).await? {
+        return Err(RunnerError::KillTimeout);
+    }
+    Ok(())
+}
+
+fn signal_or_observe_exit(process: &LiveProcess, signal: Signal) -> Result<bool, RunnerError> {
+    match process.signal(signal) {
+        Ok(()) => Ok(false),
+        Err(RecoveryError::Pidfd(error)) if error == rustix::io::Errno::SRCH => Ok(true),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn validate_request(request: &CreateVmRequest) -> Result<(), RunnerError> {
+    if request.vm_id.is_nil()
+        || request.generation == 0
+        || request.vsock_cid < 3
+        || request.vsock_cid == u32::MAX
+        || request.daemon_vsock_port == 0
+        || request.daemon_vsock_port == u32::MAX
+        || request.state_disk_bytes < MINIMUM_STATE_DISK_BYTES
+        || !request.state_disk_bytes.is_multiple_of(1024 * 1024)
+        || request.vcpus == 0
+        || request.vcpus > 32
+        || !(128..=65_536).contains(&request.memory_mib)
+    {
+        return Err(RunnerError::InvalidRequest);
+    }
+    Ok(())
+}
+
+fn read_stopped_persisted_state(
+    paths: &VmPaths,
+    expected_vm_id: Uuid,
+) -> Result<Option<PersistedVmState>, RunnerError> {
+    let state = match PersistedVmState::read(&paths.state_file) {
+        Ok(state) => state,
+        Err(error) if error.is_not_found() => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    if state.vm_id != expected_vm_id {
+        return Err(RunnerError::PersistedIdentityMismatch);
+    }
+    match LiveProcess::recover(&state.process) {
+        Ok(_) => Err(RunnerError::VmStillRunning),
+        Err(RecoveryError::ReadProcess(error)) if error.kind() == io::ErrorKind::NotFound => {
+            Ok(Some(state))
+        }
+        Err(RecoveryError::ProcessExited | RecoveryError::IdentityMismatch) => Ok(Some(state)),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn admit_state_disk(
+    paths: &VmPaths,
+    request: &CreateVmRequest,
+    persisted: Option<&PersistedVmState>,
+) -> Result<StateDiskIdentity, RunnerError> {
+    if !paths.state_disk.exists() {
+        return Err(RunnerError::MissingPreformattedStateDisk);
+    }
+    let state_disk = if let Some(state) = persisted {
+        if request.generation <= state.generation {
+            return Err(RunnerError::GenerationNotAdvanced {
+                previous: state.generation,
+                requested: request.generation,
+            });
+        }
+        state.state_disk.revalidate(&paths.state_disk)?;
+        state.state_disk.clone()
+    } else {
+        StateDiskIdentity::capture(&paths.state_disk)?
+    };
+    if state_disk.file.size != request.state_disk_bytes {
+        return Err(RunnerError::StateDiskSizeMismatch {
+            current: state_disk.file.size,
+            requested: request.state_disk_bytes,
+        });
+    }
+    Ok(state_disk)
+}
+
+fn generate_auth_token() -> String {
+    let mut bytes = [0_u8; 32];
+    OsRng.fill_bytes(&mut bytes);
+    let mut token = String::with_capacity(64);
+    for byte in bytes {
+        use std::fmt::Write as _;
+        let _ = write!(&mut token, "{byte:02x}");
+    }
+    token
+}
+
+fn token_fingerprint(token: &str) -> String {
+    format!("{:x}", Sha256::digest(token.as_bytes()))
+}
+
+fn validate_seed_file(path: &Path) -> Result<(), RunnerError> {
+    let parent = PrivateRoot::open(path.parent().ok_or(RunnerError::InvalidRequest)?)?;
+    let name = path
+        .file_name()
+        .map(Path::new)
+        .ok_or(RunnerError::InvalidRequest)?;
+    parent.open_regular(name, false, Some(4096), false, Some(0o400))?;
+    Ok(())
+}
+
+fn cloud_hypervisor_process(
+    command: &CommandSpec,
+    working_directory: &Path,
+) -> Result<tokio::process::Command, RunnerError> {
+    // Re-admit the cwd itself immediately before constructing the child. CH
+    // must never inherit the supervisor's repository or arbitrary launch cwd,
+    // which would also risk broadening its native Landlock file set.
+    PrivateRoot::open(working_directory)?;
+    // A real supervisor-process death must never strand an untracked VMM in
+    // the spawn-to-state-write window. VM persistence is disk persistence for
+    // this spike; a restarted supervisor reconciles and boots a new generation.
+    // The child-side parent check closes the race where the parent dies before
+    // PR_SET_PDEATHSIG is installed.
+    // SAFETY: getpid has no preconditions and cannot fail on Linux.
+    let expected_parent_pid = unsafe { libc::getpid() };
+    let mut process = tokio::process::Command::new(command.program());
+    process
+        .args(command.arguments())
+        .env_clear()
+        .current_dir(working_directory)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    // SAFETY: prctl, getppid, close_range through syscall, and umask are direct
+    // libc operations with no Rust-managed state in the fork-to-exec interval.
+    // The returned static OS errors do not run arbitrary code. close_range
+    // applies CLOEXEC to every non-stdio descriptor so an eventual supervisor
+    // cannot accidentally grant an already-open host capability to the VMM.
+    // umask ensures every CH-created socket/log is private even when the
+    // supervisor inherited a permissive shell umask.
+    unsafe {
+        process.pre_exec(move || {
+            if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            if libc::getppid() != expected_parent_pid {
+                return Err(io::Error::from_raw_os_error(libc::ECHILD));
+            }
+            if libc::syscall(
+                libc::SYS_close_range,
+                3_u32,
+                u32::MAX,
+                libc::CLOSE_RANGE_CLOEXEC,
+            ) != 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            libc::umask(0o077);
+            Ok(())
+        });
+    }
+    Ok(process)
+}
+
+fn spawn_cloud_hypervisor(
+    command: &CommandSpec,
+    working_directory: &Path,
+) -> Result<tokio::process::Child, RunnerError> {
+    cloud_hypervisor_process(command, working_directory)?
+        .spawn()
+        .map_err(|_| RunnerError::Spawn)
+}
+
+async fn terminate_failed_launch(
+    process: &LiveProcess,
+    child: &mut tokio::process::Child,
+) -> Result<(), RunnerError> {
+    if child.try_wait().map_err(|_| RunnerError::Wait)?.is_some() {
+        return Ok(());
+    }
+    if process.signal(Signal::KILL).is_err() {
+        // The unreaped Child still pins this exact PID, so Tokio's child-handle
+        // signal is a safe fallback if the pidfd operation itself fails.
+        child.start_kill().map_err(|_| RunnerError::Wait)?;
+    }
+    tokio::time::timeout(SIGNAL_STOP_TIMEOUT, child.wait())
+        .await
+        .map_err(|_| RunnerError::KillTimeout)?
+        .map_err(|_| RunnerError::Wait)?;
+    if !process.is_exited()? {
+        return Err(RunnerError::KillTimeout);
+    }
+    Ok(())
+}
+
+async fn terminate_unadmitted_child(
+    pid: u32,
+    child: &mut tokio::process::Child,
+) -> Result<(), RunnerError> {
+    if child.try_wait().map_err(|_| RunnerError::Wait)?.is_some() {
+        return Ok(());
+    }
+    if signal_unreaped_child(pid, Signal::KILL).is_err() {
+        // A Child that has not been waited cannot relinquish its numeric PID,
+        // so this fallback cannot target a replacement process.
+        child.start_kill().map_err(|_| RunnerError::Wait)?;
+    }
+    tokio::time::timeout(SIGNAL_STOP_TIMEOUT, child.wait())
+        .await
+        .map_err(|_| RunnerError::KillTimeout)?
+        .map_err(|_| RunnerError::Wait)?;
+    Ok(())
+}
+
+async fn wait_for_endpoints(
+    paths: &VmPaths,
+    process: &LiveProcess,
+    daemon_vsock_port: u32,
+) -> Result<(ChApiClient, HybridVsockTarget), RunnerError> {
+    wait_for_endpoints_with_timeout(paths, process, daemon_vsock_port, START_TIMEOUT).await
+}
+
+async fn wait_for_endpoints_with_timeout(
+    paths: &VmPaths,
+    process: &LiveProcess,
+    daemon_vsock_port: u32,
+    timeout: Duration,
+) -> Result<(ChApiClient, HybridVsockTarget), RunnerError> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        if process.is_exited()? {
+            return Err(RunnerError::ExitedDuringStart);
+        }
+        if paths.api_socket.exists() && paths.vsock_socket.exists() {
+            set_socket_private(&paths.api_socket)?;
+            set_socket_private(&paths.vsock_socket)?;
+            let api = ChApiClient::new(&paths.api_socket)?;
+            let hybrid = HybridVsockTarget::new(paths.vsock_socket.clone(), daemon_vsock_port)?;
+            return Ok((api, hybrid));
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(RunnerError::StartTimeout);
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum RunnerError {
+    #[error("invalid VM create request")]
+    InvalidRequest,
+    #[error(
+        "artifact lock and artifact directory must be siblings beneath one canonical private parent"
+    )]
+    InvalidArtifactStagingLayout,
+    #[error(transparent)]
+    Artifact(#[from] ArtifactError),
+    #[error(transparent)]
+    Path(#[from] PathError),
+    #[error(transparent)]
+    State(#[from] StateError),
+    #[error(transparent)]
+    Preflight(#[from] PreflightError),
+    #[error(transparent)]
+    Recovery(#[from] RecoveryError),
+    #[error(transparent)]
+    Config(#[from] CloudHypervisorConfigError),
+    #[error(transparent)]
+    Api(#[from] ChApiError),
+    #[error(transparent)]
+    HybridVsock(#[from] HybridVsockError),
+    #[error("guest seed is invalid")]
+    Seed(#[from] codewire_vmm_guest_probe::SeedError),
+    #[error("the preformatted ext4 state disk is absent; production prepare never formats disks")]
+    MissingPreformattedStateDisk,
+    #[error(
+        "existing state disk size differs from the requested immutable boot size ({current} != {requested}); resize is a separate stopped operation"
+    )]
+    StateDiskSizeMismatch { current: u64, requested: u64 },
+    #[error(
+        "VM generation must advance beyond persisted generation {previous} (requested {requested})"
+    )]
+    GenerationNotAdvanced { previous: u64, requested: u64 },
+    #[error("Cloud Hypervisor process spawn failed")]
+    Spawn,
+    #[error("Cloud Hypervisor exited during startup")]
+    ExitedDuringStart,
+    #[error("Cloud Hypervisor startup timed out")]
+    StartTimeout,
+    #[error("wait for Cloud Hypervisor failed")]
+    Wait,
+    #[error("Cloud Hypervisor did not exit after pidfd SIGKILL")]
+    KillTimeout,
+    #[error("VM is still running")]
+    VmStillRunning,
+    #[error("persisted VM identity does not match its directory")]
+    PersistedIdentityMismatch,
+    #[error("filesystem operation failed for {path}: {source}")]
+    Io { path: PathBuf, source: io::Error },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Seek, SeekFrom, Write};
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    use std::os::unix::net::UnixListener;
+
+    use crate::artifact::AdmittedArtifact;
+    use crate::linux::path::{FileIdentity, current_uid};
+    use crate::linux::process::ProcessIdentity;
+
+    fn test_runner() -> (tempfile::TempDir, CloudHypervisorRunner) {
+        let parent = tempfile::tempdir().unwrap();
+        let state_path = parent.path().join("state");
+        fs::create_dir(&state_path).unwrap();
+        fs::set_permissions(&state_path, fs::Permissions::from_mode(0o700)).unwrap();
+        let artifact = AdmittedArtifact::for_test("/nonexistent/test-artifact");
+        let runner = CloudHypervisorRunner {
+            state_root: PrivateRoot::open(&state_path).unwrap(),
+            artifacts: AdmittedArtifacts {
+                cloud_hypervisor: artifact.clone(),
+                kernel: artifact.clone(),
+                initramfs: artifact,
+            },
+        };
+        (parent, runner)
+    }
+
+    fn persisted_starting_state(vm_id: Uuid, process: &LiveProcess) -> PersistedVmState {
+        PersistedVmState {
+            schema_version: PERSISTED_STATE_SCHEMA_VERSION,
+            vm_id,
+            generation: 1,
+            vsock_cid: 7,
+            daemon_vsock_port: 7_777,
+            phase: VmPhase::Starting,
+            process: process.identity().clone(),
+            state_disk: StateDiskIdentity {
+                file: FileIdentity {
+                    device: 1,
+                    inode: 2,
+                    size: MINIMUM_STATE_DISK_BYTES,
+                    uid: current_uid(),
+                    mode: 0o100600,
+                    links: 1,
+                },
+                filesystem_uuid: Uuid::new_v4(),
+            },
+            api_socket: None,
+            vsock_socket: None,
+        }
+    }
+
+    fn write_test_ext4(path: &Path, filesystem_uuid: Uuid) {
+        let mut disk = fs::OpenOptions::new()
+            .create_new(true)
+            .read(true)
+            .write(true)
+            .mode(0o600)
+            .open(path)
+            .unwrap();
+        disk.set_len(MINIMUM_STATE_DISK_BYTES).unwrap();
+        let mut superblock = [0_u8; 1024];
+        superblock[0x38..0x3a].copy_from_slice(&[0x53, 0xef]);
+        superblock[0x68..0x78].copy_from_slice(filesystem_uuid.as_bytes());
+        disk.seek(SeekFrom::Start(1024)).unwrap();
+        disk.write_all(&superblock).unwrap();
+        disk.sync_all().unwrap();
+    }
+
+    fn request(vcpus: u8, memory_mib: u32) -> CreateVmRequest {
+        CreateVmRequest {
+            vm_id: Uuid::new_v4(),
+            generation: 1,
+            vsock_cid: 7,
+            daemon_vsock_port: 7_777,
+            state_disk_bytes: MINIMUM_STATE_DISK_BYTES,
+            vcpus,
+            memory_mib,
+        }
+    }
+
+    async fn wait_for_exec(pid: u32, executable: &Path) {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if fs::read_link(format!("/proc/{pid}/exe")).ok().as_deref() == Some(executable) {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("child did not reach its expected executable");
+    }
+
+    async fn spawn_admitted_sleep(duration: &str) -> (tokio::process::Child, LiveProcess) {
+        let executable = std::fs::canonicalize("/usr/bin/sleep").unwrap();
+        let child = tokio::process::Command::new(&executable)
+            .arg(duration)
+            .env_clear()
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let pid = child.id().unwrap();
+        wait_for_exec(pid, &executable).await;
+        let process = LiveProcess::capture_child(pid, &executable).unwrap();
+        (child, process)
+    }
+
+    #[test]
+    fn create_request_enforces_resource_bounds() {
+        assert!(validate_request(&request(2, 16_384)).is_ok());
+        assert!(matches!(
+            validate_request(&request(0, 16_384)),
+            Err(RunnerError::InvalidRequest)
+        ));
+        assert!(matches!(
+            validate_request(&request(33, 16_384)),
+            Err(RunnerError::InvalidRequest)
+        ));
+        assert!(matches!(
+            validate_request(&request(2, 127)),
+            Err(RunnerError::InvalidRequest)
+        ));
+        assert!(matches!(
+            validate_request(&request(2, 65_537)),
+            Err(RunnerError::InvalidRequest)
+        ));
+    }
+
+    #[test]
+    fn generated_tokens_fit_the_guest_codec_and_debug_is_redacted() {
+        let token = Zeroizing::new(generate_auth_token());
+        let seed = Seed::new(Uuid::new_v4(), 1, 7777, token.to_string()).unwrap();
+        assert_eq!(seed.auth_token(), token.as_str());
+        assert_eq!(token_fingerprint(&token).len(), 64);
+        assert!(!format!("{seed:?}").contains(token.as_str()));
+    }
+
+    #[test]
+    fn later_generation_is_bound_to_the_persisted_state_disk_identity() {
+        let (_parent, runner) = test_runner();
+        let vm_id = Uuid::new_v4();
+        let paths = VmPaths::create(&runner.state_root, vm_id).unwrap();
+        write_test_ext4(&paths.state_disk, Uuid::new_v4());
+        let admitted = StateDiskIdentity::capture(&paths.state_disk).unwrap();
+        let persisted = PersistedVmState {
+            schema_version: PERSISTED_STATE_SCHEMA_VERSION,
+            vm_id,
+            generation: 1,
+            vsock_cid: 7,
+            daemon_vsock_port: 7_777,
+            phase: VmPhase::Starting,
+            process: ProcessIdentity::capture(std::process::id()).unwrap(),
+            state_disk: admitted.clone(),
+            api_socket: None,
+            vsock_socket: None,
+        };
+        let mut next = request(2, 16_384);
+        next.vm_id = vm_id;
+        next.generation = 2;
+        assert_eq!(
+            admit_state_disk(&paths, &next, Some(&persisted)).unwrap(),
+            admitted
+        );
+
+        next.generation = 1;
+        assert!(matches!(
+            admit_state_disk(&paths, &next, Some(&persisted)),
+            Err(RunnerError::GenerationNotAdvanced {
+                previous: 1,
+                requested: 1
+            })
+        ));
+
+        let mut disk = fs::OpenOptions::new()
+            .write(true)
+            .open(&paths.state_disk)
+            .unwrap();
+        disk.seek(SeekFrom::Start(1024 + 0x68)).unwrap();
+        disk.write_all(Uuid::new_v4().as_bytes()).unwrap();
+        disk.sync_all().unwrap();
+        next.generation = 2;
+        assert!(matches!(
+            admit_state_disk(&paths, &next, Some(&persisted)),
+            Err(RunnerError::State(StateError::StateDiskIdentityChanged(path)))
+                if path == paths.state_disk
+        ));
+    }
+
+    #[tokio::test]
+    async fn failed_launch_cleanup_uses_pidfd_and_reaps_child() {
+        let (mut child, process) = spawn_admitted_sleep("30").await;
+        terminate_failed_launch(&process, &mut child).await.unwrap();
+        assert!(child.try_wait().unwrap().is_some());
+        assert!(process.is_exited().unwrap());
+    }
+
+    #[tokio::test]
+    async fn aborting_start_after_durable_starting_state_kills_the_exact_child() {
+        let (_parent, runner) = test_runner();
+        let vm_id = Uuid::new_v4();
+        let paths = VmPaths::create(&runner.state_root, vm_id).unwrap();
+        let state_file = paths.state_file.clone();
+        let executable = std::fs::canonicalize("/usr/bin/sleep").unwrap();
+        let (persisted_tx, persisted_rx) = tokio::sync::oneshot::channel();
+
+        let start_task = tokio::spawn(async move {
+            let child = tokio::process::Command::new(&executable)
+                .arg("30")
+                .env_clear()
+                .spawn()
+                .unwrap();
+            let mut startup = StartupOwnership::new(child);
+            let pid = startup.child_mut().id().unwrap();
+            // Avoid making the fixture depend on whether the scheduler lets
+            // the child reach exec before Command::spawn returns.
+            wait_for_exec(pid, &executable).await;
+            let process = LiveProcess::capture_child(pid, &executable).unwrap();
+            let identity = process.identity().clone();
+            startup.admit(process);
+            persisted_starting_state(vm_id, startup.process())
+                .write_atomic(&state_file)
+                .unwrap();
+            persisted_tx.send(identity).unwrap();
+            std::future::pending::<()>().await;
+            startup.disarm()
+        });
+
+        let identity = persisted_rx.await.unwrap();
+        let persisted = PersistedVmState::read(&paths.state_file).unwrap();
+        assert_eq!(persisted.phase, VmPhase::Starting);
+        assert_eq!(persisted.process, identity);
+        start_task.abort();
+        assert!(start_task.await.unwrap_err().is_cancelled());
+
+        tokio::time::timeout(SIGNAL_STOP_TIMEOUT, async {
+            loop {
+                match LiveProcess::recover(&identity) {
+                    Ok(process) if !process.is_exited().unwrap() => {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                    Ok(_) => break,
+                    Err(
+                        RecoveryError::ReadProcess(_)
+                        | RecoveryError::ProcessExited
+                        | RecoveryError::IdentityMismatch,
+                    ) => break,
+                    Err(error) => panic!("unexpected cancellation cleanup error: {error}"),
+                }
+            }
+        })
+        .await
+        .expect("aborted startup left its exact child alive");
+    }
+
+    #[tokio::test]
+    async fn forced_running_kill_is_pidfd_bounded_and_reaped() {
+        let (mut child, process) = spawn_admitted_sleep("30").await;
+        assert!(matches!(
+            kill_and_reap(&process, &mut child).await.unwrap(),
+            ExitClass::VmmFailure(_)
+        ));
+        assert!(child.try_wait().unwrap().is_some());
+        assert!(process.is_exited().unwrap());
+    }
+
+    #[tokio::test]
+    async fn endpoint_early_exit_is_reaped_and_stopped_delete_removes_the_full_vm_tree() {
+        let (_parent, runner) = test_runner();
+        let vm_id = Uuid::new_v4();
+        let paths = VmPaths::create(&runner.state_root, vm_id).unwrap();
+        let lock = paths.lock().unwrap();
+        let (mut child, process) = spawn_admitted_sleep("0.25").await;
+        persisted_starting_state(vm_id, &process)
+            .write_atomic(&paths.state_file)
+            .unwrap();
+
+        let result =
+            wait_for_endpoints_with_timeout(&paths, &process, 7_777, Duration::from_secs(2)).await;
+        assert!(matches!(result, Err(RunnerError::ExitedDuringStart)));
+        terminate_failed_launch(&process, &mut child).await.unwrap();
+        assert!(child.try_wait().unwrap().is_some());
+        assert!(process.is_exited().unwrap());
+
+        // Model stale VMM-created control endpoints and arbitrary nested state
+        // that remain after the failed child has been reaped.
+        let api_socket = UnixListener::bind(&paths.api_socket).unwrap();
+        let vsock_socket = UnixListener::bind(&paths.vsock_socket).unwrap();
+        fs::write(paths.diagnostics_dir.join("nested-state"), b"stale").unwrap();
+        drop((api_socket, vsock_socket));
+        drop(lock);
+
+        runner.delete_stopped(vm_id).unwrap();
+        assert!(!paths.vm_dir.exists());
+        assert!(!paths.api_socket.exists());
+        assert!(!paths.vsock_socket.exists());
+        assert!(
+            fs::read_dir(runner.state_root.path().join("vms"))
+                .unwrap()
+                .next()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn stopped_delete_rejects_state_copied_from_another_vm() {
+        let (_parent, runner) = test_runner();
+        let vm_id = Uuid::new_v4();
+        let paths = VmPaths::create(&runner.state_root, vm_id).unwrap();
+        let process = LiveProcess::recover(
+            &super::super::process::ProcessIdentity::capture(std::process::id()).unwrap(),
+        )
+        .unwrap();
+        persisted_starting_state(Uuid::new_v4(), &process)
+            .write_atomic(&paths.state_file)
+            .unwrap();
+
+        assert!(matches!(
+            runner.delete_stopped(vm_id),
+            Err(RunnerError::PersistedIdentityMismatch)
+        ));
+        assert!(paths.vm_dir.exists());
+        assert!(paths.state_file.exists());
+    }
+
+    #[tokio::test]
+    async fn endpoint_readiness_wait_has_a_bounded_deadline() {
+        let (_parent, runner) = test_runner();
+        let paths = VmPaths::create(&runner.state_root, Uuid::new_v4()).unwrap();
+        let identity = super::super::process::ProcessIdentity::capture(std::process::id()).unwrap();
+        let process = LiveProcess::recover(&identity).unwrap();
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            wait_for_endpoints_with_timeout(&paths, &process, 7_777, Duration::from_millis(30)),
+        )
+        .await
+        .expect("endpoint waiter exceeded its outer test bound");
+        assert!(matches!(result, Err(RunnerError::StartTimeout)));
+    }
+
+    #[test]
+    fn child_never_inherits_the_supervisor_working_directory() {
+        let private = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(
+            private.path(),
+            <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o700),
+        )
+        .unwrap();
+        let command = CommandSpec::for_test("/usr/bin/true".into());
+        let process = cloud_hypervisor_process(&command, private.path()).unwrap();
+        assert_eq!(process.as_std().get_current_dir(), Some(private.path()));
+    }
+
+    #[tokio::test]
+    async fn child_exec_closes_an_explicitly_inheritable_host_descriptor() {
+        let private = tempfile::tempdir().unwrap();
+        fs::set_permissions(private.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let sentinel_path = private.path().join("host-capability-sentinel");
+        let sentinel = fs::OpenOptions::new()
+            .create_new(true)
+            .read(true)
+            .write(true)
+            .mode(0o600)
+            .open(&sentinel_path)
+            .unwrap();
+        let descriptor = sentinel.as_raw_fd();
+        // SAFETY: descriptor is owned by sentinel for this test. Clearing
+        // FD_CLOEXEC deliberately models an unsafe descriptor inherited by a
+        // future long-lived supervisor.
+        let flags = unsafe { libc::fcntl(descriptor, libc::F_GETFD) };
+        assert!(flags >= 0);
+        // SAFETY: F_SETFD accepts the retrieved descriptor flags.
+        assert_eq!(
+            unsafe { libc::fcntl(descriptor, libc::F_SETFD, flags & !libc::FD_CLOEXEC) },
+            0
+        );
+
+        let command = CommandSpec::for_test_with_arguments(
+            fs::canonicalize("/bin/sh").unwrap(),
+            [
+                "-c",
+                r#"for descriptor in /proc/self/fd/*; do
+  if [ "$(readlink "$descriptor" 2>/dev/null)" = "$1" ]; then
+    exit 97
+  fi
+done
+exit 0"#,
+                "cw-inherited-fd-check",
+                sentinel_path.to_str().unwrap(),
+            ]
+            .into_iter()
+            .map(Into::into)
+            .collect(),
+        );
+        let mut child = cloud_hypervisor_process(&command, private.path())
+            .unwrap()
+            .spawn()
+            .unwrap();
+        let status = tokio::time::timeout(SIGNAL_STOP_TIMEOUT, child.wait())
+            .await
+            .expect("descriptor sentinel child exceeded its bound")
+            .unwrap();
+        assert!(status.success());
+    }
+}

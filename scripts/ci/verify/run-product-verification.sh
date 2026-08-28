@@ -477,6 +477,13 @@ run_derp_contract() {
 
 run_transport() {
   run_rust_packages transport_pkg_
+  if selected transport_pkg_codewire_local_vmm; then
+    cargo check --locked -p codewire-local-vmm -p codewire-vmm-guest-probe \
+      --target aarch64-apple-darwin
+  fi
+  if selected transport_pkg_codewire_vmm_guest_probe; then
+    scripts/ci/verify/build-local-vmm-initramfs.sh --verify
+  fi
   if selected transport_derp_contract; then
     run_derp_contract
   fi

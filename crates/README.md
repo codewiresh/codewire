@@ -19,6 +19,7 @@ A `(bin)` marker means the crate produces a service/app binary.
 | `codewire-billing`      | Billing service (bin): catalog, plans, Stripe webhooks.                          | AGPL-3.0-only |
 | `codewire-coordinator`  | Generated Connect coordinate service (bin): peer/session fan-out.                 | AGPL-3.0-only |
 | `codewire-mesh`         | Hosted Codewire Mesh node/network control plane (bin).                            | AGPL-3.0-only |
+| `codewire-local-vmm`    | Host-owned Linux Cloud Hypervisor lifecycle and guest-control smoke (bin).         | AGPL-3.0-only |
 
 ### Networking & tunnel
 
@@ -38,6 +39,7 @@ A `(bin)` marker means the crate produces a service/app binary.
 | `codewire-client`       | Shared ergonomic Rust client over generated Connect-RPC stubs. | AGPL-3.0-only   |
 | `codewire-proto`        | Generated Connect-RPC contract types for the control-plane API. | AGPL-3.0-only   |
 | `codewire-gateway-proto`| Generated protobuf types for the gateway/daemon boundary.      | AGPL-3.0-only   |
+| `codewire-vmm-guest-probe` | Static guest init and daemon probe (bin) for the local microVM boundary. | AGPL-3.0-only |
 
 ### Auth library
 

@@ -57,7 +57,31 @@
       "paths": ["Cargo.lock"],
       "expected": {
         "classification": "changed",
-        "selection_tokens": ["policy", "policy_shell_omittable", "rust", "rust_curated_locks", "rust_workspace"],
+        "selection_tokens": ["policy", "policy_shell_omittable", "rust", "rust_curated_locks", "rust_workspace", "transport", "transport_pkg_codewire_local_vmm", "transport_pkg_codewire_vmm_guest_probe"],
+        "required_local_mode": "default"
+      }
+    },
+    {
+      "id": "workspace-manifest",
+      "event": "pull_request",
+      "ref": "refs/pull/1714/head",
+      "kind_e2e_opt_in": false,
+      "paths": ["Cargo.toml"],
+      "expected": {
+        "classification": "changed",
+        "selection_tokens": ["policy", "policy_shell_omittable", "rust", "rust_curated_locks", "rust_workspace", "transport", "transport_pkg_codewire_local_vmm", "transport_pkg_codewire_vmm_guest_probe"],
+        "required_local_mode": "default"
+      }
+    },
+    {
+      "id": "workspace-toolchain",
+      "event": "pull_request",
+      "ref": "refs/pull/1714/head",
+      "kind_e2e_opt_in": false,
+      "paths": ["rust-toolchain.toml"],
+      "expected": {
+        "classification": "changed",
+        "selection_tokens": ["policy", "policy_shell_omittable", "rust", "rust_curated_locks", "rust_workspace", "transport", "transport_pkg_codewire_local_vmm", "transport_pkg_codewire_vmm_guest_probe"],
         "required_local_mode": "default"
       }
     },
@@ -117,7 +141,7 @@
       "paths": ["unexplained/new-surface.txt"],
       "expected": {
         "classification": "unclassified",
-        "selection_tokens": ["contracts", "contracts_proto", "database", "deploy", "edge_kind", "go_consumer_interop", "go_support", "go_tailnet", "kind", "policy", "policy_shell", "policy_shell_omittable", "release", "runtime_confidential", "runtime_dev_smoke", "rust", "rust_curated_locks", "rust_workspace", "sdk_go", "sdk_python", "sdk_ts", "security", "security_dev_smoke_auth", "security_go", "security_idp_kek", "security_js", "service_apikey_smoke", "service_billing", "service_connectcore", "service_coordinator", "service_idp", "service_integration", "service_nats", "service_orchestration", "service_temporal", "transport", "transport_derp_contract", "transport_pkg_codewire_coordinator", "transport_pkg_codewire_daemon", "transport_pkg_codewire_derp", "transport_pkg_codewire_gateway", "transport_pkg_codewire_mesh", "transport_pkg_codewire_tailnet", "transport_pkg_codewire_udp_relay", "web"],
+        "selection_tokens": ["contracts", "contracts_proto", "database", "deploy", "edge_kind", "go_consumer_interop", "go_support", "go_tailnet", "kind", "policy", "policy_shell", "policy_shell_omittable", "release", "runtime_confidential", "runtime_dev_smoke", "rust", "rust_curated_locks", "rust_workspace", "sdk_go", "sdk_python", "sdk_ts", "security", "security_dev_smoke_auth", "security_go", "security_idp_kek", "security_js", "service_apikey_smoke", "service_billing", "service_connectcore", "service_coordinator", "service_idp", "service_integration", "service_nats", "service_orchestration", "service_temporal", "transport", "transport_derp_contract", "transport_pkg_codewire_coordinator", "transport_pkg_codewire_daemon", "transport_pkg_codewire_derp", "transport_pkg_codewire_gateway", "transport_pkg_codewire_local_vmm", "transport_pkg_codewire_mesh", "transport_pkg_codewire_tailnet", "transport_pkg_codewire_udp_relay", "transport_pkg_codewire_vmm_guest_probe", "web"],
         "required_local_mode": "full"
       }
     }

@@ -1,0 +1,29 @@
+//! Host-side runtime for Codewire-owned local microVMs.
+//!
+//! The first engine is intentionally Linux- and Cloud-Hypervisor-specific. The
+//! crate does not expose a generic VMM trait: macOS will have a separate native
+//! implementation behind the same higher-level supervisor, not a lowest-common-
+//! denominator VMM abstraction.
+
+#[cfg(target_os = "linux")]
+pub mod artifact;
+#[cfg(target_os = "linux")]
+pub mod ch_api;
+#[cfg(target_os = "linux")]
+pub mod cloud_hypervisor;
+#[cfg(target_os = "linux")]
+pub mod hybrid_vsock;
+
+#[cfg(target_os = "linux")]
+pub mod linux;
+
+#[cfg(target_os = "linux")]
+pub use linux::{
+    CloudHypervisorRunner, CreateVmRequest, ExitClass, LiveProcess, PreparedVm, ProcessIdentity,
+    RecoveredVm, RecoveryError, RunnerConfig, RunnerError, RunningVm, StateDiskIdentity, VmPaths,
+};
+
+#[cfg(not(target_os = "linux"))]
+mod unsupported;
+#[cfg(not(target_os = "linux"))]
+pub use unsupported::{CloudHypervisorRunner, RunnerConfig, RunnerError};

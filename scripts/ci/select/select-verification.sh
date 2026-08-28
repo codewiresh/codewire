@@ -147,8 +147,9 @@ select_all_transport() {
   select_token transport
   select_token transport_derp_contract
   for package in \
-      codewire_tailnet codewire_gateway codewire_daemon codewire_mesh \
-      codewire_derp codewire_udp_relay codewire_coordinator; do
+      codewire_tailnet codewire_gateway codewire_daemon codewire_local_vmm \
+      codewire_mesh codewire_derp codewire_udp_relay codewire_coordinator \
+      codewire_vmm_guest_probe; do
     select_token "transport_pkg_${package}"
   done
 }
@@ -511,6 +512,13 @@ if [ "$event_selected" = false ]; then
         select_token rust
         select_token rust_workspace
         select_token rust_curated_locks
+        # Workspace graph, resolution, and toolchain changes can alter both
+        # the host VMM and the statically packaged guest probe. Keep their
+        # cross-target and reproducible-initramfs checks attached to every
+        # root Rust build input.
+        select_token transport
+        select_token transport_pkg_codewire_local_vmm
+        select_token transport_pkg_codewire_vmm_guest_probe
         recognized=true
         ;;
       go.mod|go.sum|go.work|go.work.sum)
@@ -639,6 +647,8 @@ if [ "$event_selected" = false ]; then
         select_token transport
         select_token transport_pkg_codewire_daemon
         select_token transport_pkg_codewire_gateway
+        select_token transport_pkg_codewire_local_vmm
+        select_token transport_pkg_codewire_vmm_guest_probe
         recognized=true
         ;;
       libs/tailnet/*|scripts/ci/verify/tailnet-parity.sh)
@@ -741,8 +751,9 @@ if [ "$event_selected" = false ]; then
           select_token rust
           select_token rust_pkg_codewire_desktop
           ;;
-        codewire-tailnet|codewire-gateway|codewire-daemon|codewire-mesh|\
-        codewire-derp|codewire-udp-relay|codewire-coordinator)
+        codewire-tailnet|codewire-gateway|codewire-daemon|codewire-local-vmm|\
+        codewire-mesh|codewire-derp|codewire-udp-relay|codewire-coordinator|\
+        codewire-vmm-guest-probe)
           select_token transport
           select_token "transport_pkg_${crate_token}"
           ;;
@@ -760,7 +771,8 @@ if [ "$event_selected" = false ]; then
       if [ "$path" = "crates/$crate/Cargo.toml" ]; then
         case "$crate" in
           codewire-daemon|codewire-gateway|codewire-gateway-proto|\
-          codewire-proto|codewire-tailnet|codewire-derp)
+          codewire-local-vmm|codewire-proto|codewire-tailnet|codewire-derp|\
+          codewire-vmm-guest-probe)
             select_token rust_curated_locks
             ;;
         esac
@@ -769,6 +781,18 @@ if [ "$event_selected" = false ]; then
     fi
 
     case "$path" in
+      crates/codewire-daemon/*|crates/codewire-gateway-proto/*)
+        # The local VMM host and guest link the private daemon contract
+        # directly; changes must verify those reverse dependencies too.
+        select_token transport
+        select_token transport_pkg_codewire_local_vmm
+        select_token transport_pkg_codewire_vmm_guest_probe
+        ;;
+      crates/codewire-vmm-guest-probe/*)
+        # The host runner consumes the guest seed/newc contract directly.
+        select_token transport
+        select_token transport_pkg_codewire_local_vmm
+        ;;
       crates/codewire-idp/*)
         select_token service_integration
         select_token service_idp
@@ -807,6 +831,13 @@ if [ "$event_selected" = false ]; then
     esac
 
     case "$path" in
+      scripts/ci/verify/build-local-vmm-initramfs.sh|\
+      scripts/ci/verify/smoke-local-vmm-cloud-hypervisor.sh)
+        select_token transport
+        select_token transport_pkg_codewire_local_vmm
+        select_token transport_pkg_codewire_vmm_guest_probe
+        recognized=true
+        ;;
       crates/*/migrations/*)
         select_token database
         recognized=true

@@ -336,10 +336,29 @@ run_paths_case artifact_plan_policy pull_request refs/pull/406/head false \
   'policy' scripts/ci/plan/planner.py scripts/ci/plan/artifact-graph.json
 python3 "$ROOT/scripts/ci/plan/tests/test_decision_corpus.py"
 run_paths_case rust_root pull_request refs/pull/5/head false \
-  'policy rust rust_curated_locks rust_workspace' Cargo.lock
+  'policy rust rust_curated_locks rust_workspace transport transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
+  Cargo.lock
+run_paths_case rust_root_manifest pull_request refs/pull/50/head false \
+  'policy rust rust_curated_locks rust_workspace transport transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
+  Cargo.toml
+run_paths_case rust_root_toolchain pull_request refs/pull/500/head false \
+  'policy rust rust_curated_locks rust_workspace transport transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
+  rust-toolchain.toml
 run_paths_case curated_gateway_member_manifest pull_request refs/pull/501/head false \
-  'policy rust_curated_locks transport transport_pkg_codewire_daemon' \
+  'policy rust_curated_locks transport transport_pkg_codewire_daemon transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
   crates/codewire-daemon/Cargo.toml
+run_paths_case local_vmm_host_source pull_request refs/pull/5011/head false \
+  'policy transport transport_pkg_codewire_local_vmm' \
+  crates/codewire-local-vmm/src/lib.rs
+run_paths_case local_vmm_guest_source pull_request refs/pull/5012/head false \
+  'policy transport transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
+  crates/codewire-vmm-guest-probe/src/lib.rs
+run_paths_case local_vmm_initramfs_builder pull_request refs/pull/5013/head false \
+  'policy transport transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
+  scripts/ci/verify/build-local-vmm-initramfs.sh
+run_paths_case local_vmm_kvm_smoke pull_request refs/pull/5014/head false \
+  'policy transport transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
+  scripts/ci/verify/smoke-local-vmm-cloud-hypervisor.sh
 run_paths_case curated_derp_member_manifest pull_request refs/pull/502/head false \
   'policy rust_curated_locks transport transport_derp_contract transport_pkg_codewire_derp' \
   crates/codewire-derp/Cargo.toml
@@ -367,7 +386,7 @@ run_paths_case retired_go_harness_deletion pull_request refs/pull/6010/head fals
   'policy' autoagent/agent.py libs/gatewayauth/token.go \
   libs/gateway-proto/gen/daemon/v1/daemon.pb.go
 run_paths_case gateway_proto_source pull_request refs/pull/6011/head false \
-  'policy rust rust_pkg_codewire_gateway_proto transport transport_pkg_codewire_daemon transport_pkg_codewire_gateway' \
+  'policy rust rust_pkg_codewire_gateway_proto transport transport_pkg_codewire_daemon transport_pkg_codewire_gateway transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
   libs/gateway-proto/proto/daemon/v1/daemon.proto
 run_paths_case self_contained_go_workspace pull_request refs/pull/6012/head false \
   'go_consumer_interop go_support go_tailnet policy sdk_go security security_go' \
@@ -783,7 +802,7 @@ run_paths_case ws17_wi_c3 pull_request refs/pull/173/head false \
 run_paths_case tag push refs/tags/v1.2.3 false \
   'deploy go_consumer_interop go_support release runtime_confidential' docs/tag-path-is-ignored.md
 
-all_product='contracts contracts_proto database deploy edge_kind go_consumer_interop go_support go_tailnet kind policy policy_shell release runtime_confidential runtime_dev_smoke rust rust_curated_locks rust_workspace sdk_go sdk_python sdk_ts security security_dev_smoke_auth security_go security_idp_kek security_js service_apikey_smoke service_billing service_connectcore service_coordinator service_idp service_integration service_nats service_orchestration service_temporal transport transport_derp_contract transport_pkg_codewire_coordinator transport_pkg_codewire_daemon transport_pkg_codewire_derp transport_pkg_codewire_gateway transport_pkg_codewire_mesh transport_pkg_codewire_tailnet transport_pkg_codewire_udp_relay web'
+all_product='contracts contracts_proto database deploy edge_kind go_consumer_interop go_support go_tailnet kind policy policy_shell release runtime_confidential runtime_dev_smoke rust rust_curated_locks rust_workspace sdk_go sdk_python sdk_ts security security_dev_smoke_auth security_go security_idp_kek security_js service_apikey_smoke service_billing service_connectcore service_coordinator service_idp service_integration service_nats service_orchestration service_temporal transport transport_derp_contract transport_pkg_codewire_coordinator transport_pkg_codewire_daemon transport_pkg_codewire_derp transport_pkg_codewire_gateway transport_pkg_codewire_local_vmm transport_pkg_codewire_mesh transport_pkg_codewire_tailnet transport_pkg_codewire_udp_relay transport_pkg_codewire_vmm_guest_probe web'
 run_present_paths_case dashboard_watch pull_request refs/pull/2002/head false \
   "$policy" scripts/dev/dashboard-watch.py
 run_present_paths_case dashboard_watch_unlisted pull_request refs/pull/2003/head false \
@@ -875,7 +894,7 @@ assert_tokens dispatch_rust \
 dispatch_output="$(env -u GITHUB_OUTPUT GITHUB_EVENT_NAME=workflow_dispatch \
   VERIFICATION_REQUEST=transport "$SELECTOR")"
 assert_tokens dispatch_transport \
-  'transport transport_derp_contract transport_pkg_codewire_coordinator transport_pkg_codewire_daemon transport_pkg_codewire_derp transport_pkg_codewire_gateway transport_pkg_codewire_mesh transport_pkg_codewire_tailnet transport_pkg_codewire_udp_relay' \
+  'transport transport_derp_contract transport_pkg_codewire_coordinator transport_pkg_codewire_daemon transport_pkg_codewire_derp transport_pkg_codewire_gateway transport_pkg_codewire_local_vmm transport_pkg_codewire_mesh transport_pkg_codewire_tailnet transport_pkg_codewire_udp_relay transport_pkg_codewire_vmm_guest_probe' \
   "$dispatch_output"
 dispatch_output="$(env -u GITHUB_OUTPUT GITHUB_EVENT_NAME=workflow_dispatch \
   VERIFICATION_REQUEST=contracts "$SELECTOR")"
@@ -1145,6 +1164,16 @@ grep -qF -- \
 grep -qF 'DERP_WEBSOCKET=1' "$derp_runner"
 grep -qF "if grep -Eq -- '--- SKIP'" "$derp_runner"
 grep -qF "|| ! grep -Eq -- '^[[:space:]]*--- PASS:'" "$derp_runner"
+grep -qF 'if selected transport_pkg_codewire_vmm_guest_probe; then' \
+  "$ROOT/scripts/ci/verify/run-product-verification.sh"
+grep -qF 'if selected transport_pkg_codewire_local_vmm; then' \
+  "$ROOT/scripts/ci/verify/run-product-verification.sh"
+grep -qF 'cargo check --locked -p codewire-local-vmm -p codewire-vmm-guest-probe \' \
+  "$ROOT/scripts/ci/verify/run-product-verification.sh"
+grep -qF -- '--target aarch64-apple-darwin' \
+  "$ROOT/scripts/ci/verify/run-product-verification.sh"
+grep -qF 'scripts/ci/verify/build-local-vmm-initramfs.sh --verify' \
+  "$ROOT/scripts/ci/verify/run-product-verification.sh"
 
 dispatch_output="$(env -u GITHUB_OUTPUT GITHUB_EVENT_NAME=workflow_dispatch \
   VERIFICATION_REQUEST=service_integration "$SELECTOR")"

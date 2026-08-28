@@ -72,6 +72,7 @@ def check_license_map(_args: argparse.Namespace) -> int:
         "crates/codewire-gateway-proto/Cargo.toml": "AGPL-3.0-only",
         "crates/codewire-gateway/Cargo.toml": "AGPL-3.0-only",
         "crates/codewire-idp/Cargo.toml": "AGPL-3.0-only",
+        "crates/codewire-local-vmm/Cargo.toml": "AGPL-3.0-only",
         "crates/codewire-mesh/Cargo.toml": "AGPL-3.0-only",
         "crates/codewire-oidc/Cargo.toml": "MIT OR Apache-2.0",
         "crates/codewire-orchestration/Cargo.toml": "AGPL-3.0-only",
@@ -82,6 +83,7 @@ def check_license_map(_args: argparse.Namespace) -> int:
         "crates/codewire-types/Cargo.toml": "MIT",
         "crates/codewire-udp-relay/Cargo.toml": "AGPL-3.0-only",
         "crates/codewire-ui/Cargo.toml": "MIT",
+        "crates/codewire-vmm-guest-probe/Cargo.toml": "AGPL-3.0-only",
     }
     actual_cargo_manifests = {
         path.relative_to(ROOT).as_posix()

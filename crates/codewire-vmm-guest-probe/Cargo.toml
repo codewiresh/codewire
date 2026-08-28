@@ -1,0 +1,33 @@
+[package]
+name = "codewire-vmm-guest-probe"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license = "AGPL-3.0-only"
+description = "Minimal Codewire microVM guest init and authenticated daemon probe."
+
+[lib]
+name = "codewire_vmm_guest_probe"
+path = "src/lib.rs"
+
+[[bin]]
+name = "codewire-vmm-guest-probe"
+path = "src/main.rs"
+
+[dependencies]
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+zeroize = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+anyhow = { workspace = true }
+codewire-daemon = { workspace = true }
+libc = "0.2"
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+tokio-vsock = { workspace = true, features = ["tonic014"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }
