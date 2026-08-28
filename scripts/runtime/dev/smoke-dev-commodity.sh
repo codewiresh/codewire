@@ -979,6 +979,36 @@ record_environment_artifact() {
     }' >"$SMOKE_ARTIFACT_DIR/environment.json"
 }
 
+fail_if_gateway_crashloop() {
+  local environment_state="$1"
+  local pods_json="$TMPDIR_SMOKE/gateway-startup-pods.json"
+  local kubectl_err="$TMPDIR_SMOKE/gateway-startup-pods.err"
+  local crashloop
+
+  [[ "$SMOKE_SKIP_KUBE" != "1" ]] || return 0
+  if ! kubectl_dev -n "$SANDBOX_NAMESPACE" get pod \
+      -l "codewire.sh/environment-id=${ENV_ID},codewire.sh/type=gateway" \
+      -o json >"$pods_json" 2>"$kubectl_err"; then
+    return 0
+  fi
+  crashloop="$(jq -r '
+      [
+        .items[]?
+        | .status.containerStatuses[]?
+        | select(.name == "codewire-gateway")
+        | select(.state.waiting.reason == "CrashLoopBackOff")
+        | ["CrashLoopBackOff", (.restartCount // 0)]
+      ][0] // empty
+      | if type == "array" then @tsv else empty end
+    ' "$pods_json")"
+  [[ -n "$crashloop" ]] || return 0
+
+  local reason restart_count
+  IFS=$'\t' read -r reason restart_count <<<"$crashloop"
+  collect_failure_diagnostics "gateway-crashloop" || true
+  die "gateway entered $reason while environment state=$environment_state (restart_count=$restart_count)"
+}
+
 env_is_running() {
   local info_out="$TMPDIR_SMOKE/env-info.out"
   if ! cw env info "$ENV_ID" >"$info_out" 2>&1; then
@@ -991,6 +1021,9 @@ env_is_running() {
     sed 's/[[:cntrl:]]//g' "$info_out" >&2 || true
     collect_failure_diagnostics "environment-error" || true
     die "environment entered error state"
+  fi
+  if [[ "$state" != "running" ]]; then
+    fail_if_gateway_crashloop "${state:-unknown}"
   fi
   [[ "$state" == "running" ]]
 }
@@ -1171,7 +1204,8 @@ assert_pod_shape() {
   local runtime_class gateway_runtime_class node gateway_node node_label gateway_node_label
   local gateway_image gateway_status_image gateway_image_id containers gateway_containers
   local gateway_secret_names gateway_secret_count gateway_secret_resource gateway_secret_data_size
-  local gateway_host_key_env
+  local gateway_host_key_env gateway_daemon_timeout gateway_startup_failure_threshold
+  local gateway_progress_deadline gateway_restart_count
 
   kubectl_dev -n "$SANDBOX_NAMESPACE" get pod "$POD_NAME" -o json >"$pod_json"
   kubectl_dev -n "$SANDBOX_NAMESPACE" get pod "$GATEWAY_POD_NAME" -o json >"$gateway_pod_json"
@@ -1201,6 +1235,10 @@ assert_pod_shape() {
   containers="$(jq -r '[.spec.containers[].name] | sort | join(",")' "$pod_json")"
   gateway_containers="$(jq -r '[.spec.containers[].name] | sort | join(",")' "$gateway_pod_json")"
   gateway_host_key_env="$(jq -r '.spec.containers[] | select(.name=="codewire-gateway") | .env[]? | select(.name=="CODEWIRE_SSH_HOST_KEY_PATH") | .value // ""' "$gateway_pod_json")"
+  gateway_daemon_timeout="$(jq -r '.spec.containers[] | select(.name=="codewire-gateway") | .env[]? | select(.name=="CODEWIRE_DAEMON_CONNECT_TIMEOUT_SECONDS") | .value // ""' "$gateway_pod_json")"
+  gateway_startup_failure_threshold="$(jq -r '.spec.containers[] | select(.name=="codewire-gateway") | .startupProbe.failureThreshold // 0' "$gateway_pod_json")"
+  gateway_progress_deadline="$(jq -r '.items[0].spec.progressDeadlineSeconds // 0' "$gateway_deploy_json")"
+  gateway_restart_count="$(jq -r '.status.containerStatuses[]? | select(.name=="codewire-gateway") | .restartCount // 0' "$gateway_pod_json")"
   assert_pod_coco_kernel_params "$pod_json" "workspace pod"
   assert_pod_coco_kernel_params "$gateway_pod_json" "gateway pod"
 
@@ -1232,6 +1270,21 @@ assert_pod_shape() {
     die "gateway host key Secret is missing host_ed25519 data"
   [[ "$gateway_host_key_env" == "/codewire/gateway/ssh/host_ed25519" ]] || \
     die "gateway CODEWIRE_SSH_HOST_KEY_PATH=$gateway_host_key_env, want /codewire/gateway/ssh/host_ed25519"
+  if [[ "$EXPECTED_RUNTIME_CLASS" == "confidential" ]]; then
+    [[ "$gateway_daemon_timeout" == "1500" ]] || \
+      die "confidential gateway daemon-connect timeout=$gateway_daemon_timeout, want 1500"
+    [[ "$gateway_startup_failure_threshold" == "780" ]] || \
+      die "confidential gateway startup failureThreshold=$gateway_startup_failure_threshold, want 780"
+    [[ "$gateway_progress_deadline" == "1800" ]] || \
+      die "confidential gateway progressDeadlineSeconds=$gateway_progress_deadline, want 1800"
+    [[ "$gateway_restart_count" == "0" ]] || \
+      die "confidential gateway restarted $gateway_restart_count time(s) during bounded startup"
+  else
+    [[ -z "$gateway_daemon_timeout" ]] || \
+      die "non-confidential gateway overrides daemon-connect timeout=$gateway_daemon_timeout"
+    [[ "$gateway_startup_failure_threshold" == "45" ]] || \
+      die "non-confidential gateway startup failureThreshold=$gateway_startup_failure_threshold, want 45"
+  fi
   jq -e '
     .items[0].spec.template.spec
     | (

@@ -20,7 +20,12 @@ mod workspace;
 #[cfg(test)]
 use encoding::gzip_base64;
 #[cfg(test)]
-use gateway::build_sidecar_env;
+use gateway::{
+    COMMODITY_GATEWAY_STARTUP_FAILURE_THRESHOLD,
+    CONFIDENTIAL_GATEWAY_DAEMON_CONNECT_TIMEOUT_SECONDS,
+    CONFIDENTIAL_GATEWAY_PROGRESS_DEADLINE_SECONDS, CONFIDENTIAL_GATEWAY_STARTUP_FAILURE_THRESHOLD,
+    build_sidecar_env,
+};
 pub use gateway::{
     render_gateway_deployment, render_gateway_direct_udp_service, render_gateway_host_key_secret,
     render_gateway_service,
@@ -66,6 +71,8 @@ pub const GATEWAY_DOCKER_PROXY_SOCK_PATH: &str = "/codewire/run/docker.sock";
 pub const GATEWAY_DOCKER_UPSTREAM_SOCK_ENV: &str = "CODEWIRE_DOCKER_UPSTREAM_SOCK";
 pub const GATEWAY_DOCKER_UPSTREAM_SOCK_PATH: &str = "/var/run/docker/docker.sock";
 pub const DAEMON_AUTH_TOKEN_ENV: &str = "CODEWIRE_DAEMON_AUTH_TOKEN";
+pub const GATEWAY_DAEMON_CONNECT_TIMEOUT_SECONDS_ENV: &str =
+    "CODEWIRE_DAEMON_CONNECT_TIMEOUT_SECONDS";
 pub const GATEWAY_BINDING_URL_ENV: &str = "CODEWIRE_BINDING_URL";
 pub const GATEWAY_TAILNET_UDP_LISTEN_ADDR_ENV: &str = "CODEWIRE_TAILNET_UDP_LISTEN_ADDR";
 pub const GATEWAY_TAILNET_DIRECT_UDP_ADVERTISE_ENDPOINTS_ENV: &str =

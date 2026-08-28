@@ -103,6 +103,55 @@ assert_static_contract() {
     | rg -F 'capture_container_log' >/dev/null; then
     fail "tailnet doctor failure diagnostics must not capture full container logs"
   fi
+  awk '/^env_is_running\(\)/,/^}/' "$SMOKE" \
+    | rg -F 'fail_if_gateway_crashloop' >/dev/null || \
+    fail "environment wait no longer classifies gateway CrashLoopBackOff"
+}
+
+run_gateway_crashloop_fail_fast_case() {
+  local case_dir="$TEST_TMP/gateway-crashloop"
+  local error="$case_dir/error"
+
+  mkdir -p "$case_dir"
+  if (
+    # shellcheck disable=SC1090 # Intentional dynamic source fixture.
+    source <(sed '$d' "$SMOKE")
+    TMPDIR_SMOKE="$case_dir"
+    SMOKE_SKIP_KUBE=0
+    SMOKE_COLLECT_FAILURE_DIAGNOSTICS=1
+    ENV_ID="test-environment-id"
+    SANDBOX_NAMESPACE="test-sandboxes"
+    cw() {
+      printf '%s\n' 'State: provisioning'
+    }
+    kubectl_dev() {
+      jq -n --arg sentinel "$SENSITIVE_SENTINEL" '{
+        items: [{
+          metadata: {name: "gateway-test", annotations: {unsafe: $sentinel}},
+          status: {
+            containerStatuses: [{
+              name: "codewire-gateway",
+              restartCount: 3,
+              state: {waiting: {reason: "CrashLoopBackOff", message: $sentinel}}
+            }]
+          }
+        }]
+      }'
+    }
+    collect_failure_diagnostics() {
+      [[ "$1" == "gateway-crashloop" ]]
+    }
+    env_is_running
+  ) >/dev/null 2>"$error"; then
+    fail "environment wait accepted a gateway CrashLoopBackOff"
+  fi
+
+  grep -Fq \
+    'gateway entered CrashLoopBackOff while environment state=provisioning (restart_count=3)' \
+    "$error" || fail "gateway CrashLoopBackOff was not classified immediately"
+  if grep -Fq "$SENSITIVE_SENTINEL" "$error"; then
+    fail "gateway CrashLoopBackOff classifier emitted an unfiltered status message"
+  fi
 }
 
 run_doctor_outer_timeout_receipt_case() {
@@ -900,6 +949,7 @@ run_admin_oauth_contract_cases() {
 }
 
 assert_static_contract
+run_gateway_crashloop_fail_fast_case
 run_application_only_boundary_case
 run_missing_server_namespace_case
 run_docker_socket_contract_cases

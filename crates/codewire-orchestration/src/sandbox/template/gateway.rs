@@ -12,8 +12,8 @@ use super::runtime_policy::{
 };
 use super::{
     DAEMON_AUTH_TOKEN_ENV, DEFAULT_GATEWAY_IMAGE, DEFAULT_GATEWAY_READYZ_PORT,
-    DEFAULT_GATEWAY_SSH_PORT, GATEWAY_BINDING_URL_ENV, GATEWAY_HOST_KEY_PATH,
-    GATEWAY_HOST_KEY_SECRET_KEY, GATEWAY_HOST_KEY_SECRET_MOUNT_PATH,
+    DEFAULT_GATEWAY_SSH_PORT, GATEWAY_BINDING_URL_ENV, GATEWAY_DAEMON_CONNECT_TIMEOUT_SECONDS_ENV,
+    GATEWAY_HOST_KEY_PATH, GATEWAY_HOST_KEY_SECRET_KEY, GATEWAY_HOST_KEY_SECRET_MOUNT_PATH,
     GATEWAY_TAILNET_DIRECT_UDP_ADVERTISE_ENDPOINTS_ENV, GATEWAY_TAILNET_UDP_LISTEN_ADDR,
     GATEWAY_TAILNET_UDP_LISTEN_ADDR_ENV, GATEWAY_TAILNET_UDP_PORT,
     GATEWAY_UDP_RELAY_ALLOCATOR_TOKEN_ENV, GATEWAY_UDP_RELAY_ALLOCATOR_URL_ENV,
@@ -21,7 +21,20 @@ use super::{
     KATA_HYPERVISOR_KERNEL_PARAMS_ANNOTATION_KEY, SANDBOX_SERVICE_ACCOUNT, TemplateOpts,
 };
 
-const CONFIDENTIAL_GATEWAY_PROGRESS_DEADLINE_SECONDS: i64 = 900;
+const GATEWAY_STARTUP_PROBE_PERIOD_SECONDS: i64 = 2;
+pub(super) const COMMODITY_GATEWAY_STARTUP_FAILURE_THRESHOLD: i64 = 45;
+// Guest storage setup is bounded by the kubelet's 25-minute StartContainer
+// horizon. Give the gateway the same daemon-connect budget, then leave one
+// minute for it to become probe-ready and five minutes for the Deployment to
+// report a terminal rollout failure.
+pub(super) const CONFIDENTIAL_GATEWAY_DAEMON_CONNECT_TIMEOUT_SECONDS: i64 = 1_500;
+const CONFIDENTIAL_GATEWAY_STARTUP_MARGIN_SECONDS: i64 = 60;
+pub(super) const CONFIDENTIAL_GATEWAY_STARTUP_FAILURE_THRESHOLD: i64 =
+    (CONFIDENTIAL_GATEWAY_DAEMON_CONNECT_TIMEOUT_SECONDS
+        + CONFIDENTIAL_GATEWAY_STARTUP_MARGIN_SECONDS)
+        / GATEWAY_STARTUP_PROBE_PERIOD_SECONDS;
+pub(super) const CONFIDENTIAL_GATEWAY_PROGRESS_DEADLINE_SECONDS: i64 =
+    CONFIDENTIAL_GATEWAY_DAEMON_CONNECT_TIMEOUT_SECONDS + 300;
 
 pub(super) fn tailnet_udp_listener_enabled(opts: &TemplateOpts) -> bool {
     direct_udp_ingress_enabled(opts)
@@ -48,14 +61,19 @@ pub(super) fn gateway_direct_udp_endpoint(opts: &TemplateOpts) -> Option<String>
 fn gateway_http_probe(failure_threshold: i64) -> Value {
     json!({
         "httpGet": { "path": "/readyz", "port": DEFAULT_GATEWAY_READYZ_PORT },
-        "periodSeconds": 2,
+        "periodSeconds": GATEWAY_STARTUP_PROBE_PERIOD_SECONDS,
         "timeoutSeconds": 2,
         "failureThreshold": failure_threshold,
     })
 }
 
-fn apply_sidecar_probes(gateway: &mut Value) {
-    gateway["startupProbe"] = gateway_http_probe(45);
+fn apply_sidecar_probes(gateway: &mut Value, confidential: bool) {
+    let failure_threshold = if confidential {
+        CONFIDENTIAL_GATEWAY_STARTUP_FAILURE_THRESHOLD
+    } else {
+        COMMODITY_GATEWAY_STARTUP_FAILURE_THRESHOLD
+    };
+    gateway["startupProbe"] = gateway_http_probe(failure_threshold);
     gateway["readinessProbe"] = gateway_http_probe(3);
 }
 
@@ -66,6 +84,12 @@ pub(super) fn build_sidecar_env(opts: &TemplateOpts) -> Vec<Value> {
     })];
     if !opts.gateway_token.is_empty() {
         env.push(json!({ "name": DAEMON_AUTH_TOKEN_ENV, "value": opts.gateway_token }));
+    }
+    if opts.runtime_profile_spec().profile == RUNTIME_PROFILE_CONFIDENTIAL {
+        env.push(json!({
+            "name": GATEWAY_DAEMON_CONNECT_TIMEOUT_SECONDS_ENV,
+            "value": CONFIDENTIAL_GATEWAY_DAEMON_CONNECT_TIMEOUT_SECONDS.to_string(),
+        }));
     }
     if !opts.environment_id.is_empty() {
         env.push(json!({ "name": "CODEWIRE_ENVIRONMENT_ID", "value": opts.environment_id }));
@@ -307,7 +331,10 @@ pub fn render_gateway_deployment(namespace: &str, opts: &TemplateOpts) -> Value 
             "limits": { "cpu": "500m", "memory": "256Mi" },
         },
     });
-    apply_sidecar_probes(&mut gateway_container);
+    apply_sidecar_probes(
+        &mut gateway_container,
+        runtime_spec.profile == RUNTIME_PROFILE_CONFIDENTIAL,
+    );
 
     let mut pod_spec = Map::new();
     pod_spec.insert("serviceAccountName".into(), SANDBOX_SERVICE_ACCOUNT.into());
@@ -410,9 +437,10 @@ pub fn render_gateway_deployment(namespace: &str, opts: &TemplateOpts) -> Value 
         },
     });
     if runtime_spec.profile == RUNTIME_PROFILE_CONFIDENTIAL {
-        // A shared-fs-none guest cannot reuse the host image store. Keep the
-        // rollout progressing while the attested guest pulls the private
-        // gateway image; the ordinary gateway retains Kubernetes' default.
+        // A shared-fs-none guest cannot reuse the host image store and its
+        // encrypted workspace is initialized before the daemon can listen.
+        // Keep all gateway startup clocks aligned; the ordinary gateway
+        // retains its short process/probe behavior and Kubernetes' default.
         deployment["spec"]["progressDeadlineSeconds"] =
             CONFIDENTIAL_GATEWAY_PROGRESS_DEADLINE_SECONDS.into();
     }

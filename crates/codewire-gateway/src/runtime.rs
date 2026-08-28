@@ -8,13 +8,13 @@ use tokio::io::copy_bidirectional;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::watch;
 use tokio::task::JoinSet;
-use tokio::time::{Duration, Instant, sleep};
+use tokio::time::{Duration, Instant, sleep, timeout};
 
 use crate::binding::{
     BindingPollConfig, BindingPollResult, poll_binding_once, poll_binding_until_ready,
 };
 use crate::config::{DockerProxyConfig, GatewayConfig};
-use crate::daemon::DaemonSessionClient;
+use crate::daemon::{DaemonClientError, DaemonSessionClient};
 use crate::docker_proxy::{DockerProxySettings, serve_docker_socket_proxy};
 use crate::host_key;
 use crate::readiness::{ReadinessState, router as readiness_router};
@@ -23,7 +23,6 @@ use crate::sftp::DaemonSftpRunner;
 use crate::ssh::{DaemonBackedSshRunner, GatewaySshHandler, gateway_server_config};
 use crate::tailnet;
 
-const DAEMON_CONNECT_TIMEOUT: Duration = Duration::from_secs(60);
 const DAEMON_CONNECT_RETRY_INTERVAL: Duration = Duration::from_millis(250);
 
 pub async fn run_gateway(config: GatewayConfig) -> Result<()> {
@@ -58,8 +57,12 @@ where
         let _ = shutdown_tx.send(true);
     });
 
-    let daemon_client =
-        connect_daemon_with_retry(&config.shim_addr, config.daemon_auth_token.clone()).await?;
+    let daemon_client = connect_daemon_with_retry(
+        &config.shim_addr,
+        config.daemon_auth_token.clone(),
+        config.daemon_connect_timeout,
+    )
+    .await?;
     let host_key = host_key::load_or_create(&config.host_key_path)
         .with_context(|| format!("load host key {}", config.host_key_path))?;
 
@@ -382,23 +385,44 @@ async fn serve_tailnet_tcp_proxy_listener(
 async fn connect_daemon_with_retry(
     shim_addr: &str,
     auth_token: Option<String>,
+    connect_timeout: Duration,
 ) -> Result<DaemonSessionClient> {
-    let deadline = Instant::now() + DAEMON_CONNECT_TIMEOUT;
+    let deadline = Instant::now() + connect_timeout;
     let mut attempts = 0u32;
 
     loop {
-        match DaemonSessionClient::connect_shim_with_auth(shim_addr, auth_token.clone()).await {
-            Ok(client) => {
-                if attempts > 0 {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(anyhow::anyhow!(
+                "connect daemon shim {shim_addr} within {} seconds after {attempts} attempts",
+                connect_timeout.as_secs()
+            ));
+        }
+        attempts += 1;
+        match timeout(
+            remaining,
+            DaemonSessionClient::connect_shim_with_auth(shim_addr, auth_token.clone()),
+        )
+        .await
+        {
+            Ok(Ok(client)) => {
+                if attempts > 1 {
                     tracing::info!(shim_addr, attempts, "connected to daemon shim after retry");
                 }
                 return Ok(client);
             }
-            Err(err) => {
-                attempts += 1;
+            Ok(Err(err)) => {
+                if matches!(&err, DaemonClientError::InvalidEndpoint { .. }) {
+                    return Err(err).with_context(|| {
+                        format!("connect daemon shim {shim_addr}: invalid endpoint")
+                    });
+                }
                 if Instant::now() >= deadline {
                     return Err(err).with_context(|| {
-                        format!("connect daemon shim {shim_addr} after {attempts} attempts")
+                        format!(
+                            "connect daemon shim {shim_addr} within {} seconds after {attempts} attempts",
+                            connect_timeout.as_secs()
+                        )
                     });
                 }
                 if attempts == 1 || attempts.is_multiple_of(20) {
@@ -409,7 +433,18 @@ async fn connect_daemon_with_retry(
                         "daemon shim unavailable; retrying"
                     );
                 }
-                sleep(DAEMON_CONNECT_RETRY_INTERVAL).await;
+                let retry_delay = deadline
+                    .saturating_duration_since(Instant::now())
+                    .min(DAEMON_CONNECT_RETRY_INTERVAL);
+                if !retry_delay.is_zero() {
+                    sleep(retry_delay).await;
+                }
+            }
+            Err(_) => {
+                return Err(anyhow::anyhow!(
+                    "connect daemon shim {shim_addr} within {} seconds after {attempts} attempts",
+                    connect_timeout.as_secs()
+                ));
             }
         }
     }
@@ -541,6 +576,7 @@ mod tests {
             .join("sidecar_host_ed25519");
         let config = GatewayConfig {
             shim_addr: daemon_addr.to_string(),
+            daemon_connect_timeout: Duration::from_secs(60),
             ssh_listen_addr: ssh_addr.clone(),
             readyz_listen_addr: readyz_addr.clone(),
             host_key_path: host_key_path.display().to_string(),
@@ -603,6 +639,7 @@ mod tests {
             .join("sidecar_host_ed25519");
         let config = GatewayConfig {
             shim_addr: daemon_addr,
+            daemon_connect_timeout: Duration::from_secs(1),
             ssh_listen_addr: ssh_addr.clone(),
             readyz_listen_addr: readyz_addr.clone(),
             host_key_path: host_key_path.display().to_string(),
@@ -642,6 +679,43 @@ mod tests {
             .expect("gateway runtime shutdown")
             .expect("gateway runtime task")
             .expect("gateway runtime result");
+    }
+
+    #[tokio::test]
+    async fn daemon_connect_timeout_is_enforced() {
+        let daemon_addr = reserve_local_addr().await;
+        let result = timeout(
+            Duration::from_secs(3),
+            connect_daemon_with_retry(&daemon_addr, None, Duration::from_secs(1)),
+        )
+        .await
+        .expect("daemon connection exceeded its configured timeout");
+        let err = match result {
+            Ok(_) => panic!("unreachable daemon unexpectedly connected"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string().contains("within 1 seconds"),
+            "unexpected timeout error: {err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_daemon_endpoint_fails_without_retrying() {
+        let result = timeout(
+            Duration::from_secs(3),
+            connect_daemon_with_retry("http://[", None, Duration::from_secs(60)),
+        )
+        .await
+        .expect("invalid daemon endpoint entered the retry loop");
+        let err = match result {
+            Ok(_) => panic!("invalid daemon endpoint unexpectedly connected"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string().contains("invalid endpoint"),
+            "unexpected invalid-endpoint error: {err:#}"
+        );
     }
 
     async fn wait_for_tcp(addr: &str) {

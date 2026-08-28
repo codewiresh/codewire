@@ -290,6 +290,7 @@ mod tests {
     fn gateway_config(api_url: Option<&str>, binding_url: Option<&str>) -> GatewayConfig {
         GatewayConfig {
             shim_addr: "127.0.0.1:7777".into(),
+            daemon_connect_timeout: std::time::Duration::from_secs(60),
             ssh_listen_addr: "127.0.0.1:2222".into(),
             readyz_listen_addr: "127.0.0.1:2223".into(),
             host_key_path: "/tmp/key".into(),
