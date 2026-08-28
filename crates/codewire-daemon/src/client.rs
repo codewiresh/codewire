@@ -15,7 +15,7 @@ use codewire_gateway_proto::{
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::metadata::MetadataValue;
-use tonic::transport::Channel;
+use tonic::transport::{Channel, Endpoint};
 use tonic::{Request, Streaming};
 
 #[derive(Debug, thiserror::Error)]
@@ -57,6 +57,23 @@ pub struct SessionAttachmentInput {
 }
 
 impl SessionClient {
+    /// Build a daemon client over a caller-provided transport channel.
+    ///
+    /// The channel may use TCP, a Unix socket, AF_VSOCK, or another tonic
+    /// connector. Transport establishment and its host-side authorization are
+    /// deliberately owned by the caller; daemon RPC authentication still uses
+    /// the supplied token.
+    pub fn from_channel(
+        channel: Channel,
+        daemon_token: impl AsRef<str>,
+    ) -> Result<Self, SessionClientError> {
+        let auth_token = Self::parse_auth_token(daemon_token)?;
+        Ok(Self {
+            inner: v1::daemon_service_client::DaemonServiceClient::new(channel),
+            auth_token,
+        })
+    }
+
     pub async fn connect(
         endpoint: impl AsRef<str>,
         daemon_token: impl AsRef<str>,
@@ -66,18 +83,26 @@ impl SessionClient {
         if daemon_token.is_empty() {
             return Err(SessionClientError::InvalidCredential);
         }
-        let channel = Channel::from_shared(endpoint.to_string())
+        let channel = Endpoint::from_shared(endpoint.to_string())
             .map_err(|_| SessionClientError::InvalidEndpoint)?
             .connect_timeout(Duration::from_secs(3))
             .connect()
             .await
             .map_err(|_| SessionClientError::Connect)?;
-        let auth_token = MetadataValue::try_from(daemon_token)
+        Self::from_channel(channel, daemon_token)
+    }
+
+    fn parse_auth_token(
+        daemon_token: impl AsRef<str>,
+    ) -> Result<MetadataValue<tonic::metadata::Ascii>, SessionClientError> {
+        let daemon_token = daemon_token.as_ref().trim();
+        if daemon_token.is_empty() {
+            return Err(SessionClientError::InvalidCredential);
+        }
+        let mut auth_token = MetadataValue::try_from(daemon_token)
             .map_err(|_| SessionClientError::InvalidCredential)?;
-        Ok(Self {
-            inner: v1::daemon_service_client::DaemonServiceClient::new(channel),
-            auth_token,
-        })
+        auth_token.set_sensitive(true);
+        Ok(auth_token)
     }
 
     pub async fn require_ready(&self) -> Result<(), SessionClientError> {

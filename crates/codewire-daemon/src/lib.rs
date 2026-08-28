@@ -11,7 +11,7 @@ pub use config::{
     Config, DEFAULT_HOME_ROOT, DEFAULT_LISTEN_ADDR, DEFAULT_WORKSPACE_ROOT, HOME_ROOT_ENV,
     SHIM_ADDR_ENV, WORKSPACE_ROOT_ENV,
 };
-pub use server::run;
+pub use server::{run, serve_grpc_with_incoming};
 
 use std::time::Duration;
 

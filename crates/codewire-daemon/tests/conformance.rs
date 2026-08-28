@@ -2,10 +2,10 @@ mod support;
 
 use std::time::Duration;
 
+use codewire_daemon::Config;
 use codewire_daemon::client::{SessionClient, SessionClientError};
 use codewire_daemon::service::DaemonRuntimeState;
 use codewire_gateway_proto::daemon::v1;
-use codewire_gateway_proto::daemon::v1::daemon_service_client::DaemonServiceClient;
 use codewire_gateway_proto::{
     DAEMON_CAPABILITIES, DAEMON_CAPABILITY_ATTACH, DAEMON_CAPABILITY_EXEC,
     DAEMON_CAPABILITY_SESSIONS, DAEMON_PROTOCOL_VERSION,
@@ -13,16 +13,14 @@ use codewire_gateway_proto::{
 use tokio::sync::mpsc;
 use tokio_stream::iter;
 use tokio_stream::wrappers::ReceiverStream;
-use tonic::transport::Channel;
 
-use support::DaemonHarness;
+use support::{DaemonHarness, HarnessClient};
 
 #[tokio::test]
 async fn generated_session_client_authenticates_and_requires_ready_daemon() {
     let harness = DaemonHarness::spawn_with_auth_token("daemon-test-token").await;
-    let client = SessionClient::connect(harness.endpoint(), "daemon-test-token")
-        .await
-        .expect("connect generated session client");
+    let client = SessionClient::from_channel(harness.channel().await, "daemon-test-token")
+        .expect("construct generated session client from injected channel");
     client.require_ready().await.expect("ready daemon");
     let capabilities = client
         .get_capabilities(&[DAEMON_CAPABILITY_SESSIONS, DAEMON_CAPABILITY_ATTACH])
@@ -85,6 +83,361 @@ async fn generated_session_client_authenticates_and_requires_ready_daemon() {
             .to_string()
             .contains("not a local daemon endpoint")
     );
+    harness.shutdown().await;
+}
+
+#[tokio::test]
+async fn injected_transport_rejects_unauthenticated_side_effects() {
+    let harness = DaemonHarness::spawn_with_auth_token("daemon-test-token").await;
+    let marker = harness.workspace_root().join("unauthorized-marker");
+    let working_dir = harness.workspace_root().to_string_lossy().into_owned();
+    let command = vec![
+        "sh".into(),
+        "-c".into(),
+        "printf forbidden > unauthorized-marker".into(),
+    ];
+    let mut client = harness.unauthenticated_client().await;
+
+    let error = client
+        .launch_session(v1::LaunchSessionRequest {
+            command: command.clone(),
+            working_dir: working_dir.clone(),
+            ..Default::default()
+        })
+        .await
+        .expect_err("missing token rejects durable session launch");
+    assert_eq!(error.code(), tonic::Code::Unauthenticated);
+
+    let error = client
+        .exec_session(iter([v1::ExecMessage {
+            payload: Some(v1::exec_message::Payload::Start(v1::ExecStartRequest {
+                command: command.clone(),
+                working_dir,
+                ..Default::default()
+            })),
+        }]))
+        .await
+        .expect_err("missing token rejects streaming exec");
+    assert_eq!(error.code(), tonic::Code::Unauthenticated);
+
+    let error = client
+        .open_file(v1::OpenFileRequest {
+            path: "unauthorized-marker".into(),
+            options: Some(v1::FileOpenOptions {
+                write: true,
+                create: true,
+                ..Default::default()
+            }),
+            perm: 0o600,
+        })
+        .await
+        .expect_err("missing token rejects file creation");
+    assert_eq!(error.code(), tonic::Code::Unauthenticated);
+
+    let wrong = SessionClient::from_channel(harness.channel().await, "wrong-daemon-token")
+        .expect("construct wrong-token client");
+    let error = wrong
+        .launch(v1::LaunchSessionRequest {
+            command,
+            ..Default::default()
+        })
+        .await
+        .expect_err("wrong token rejects durable session launch");
+    assert!(
+        matches!(&error, SessionClientError::Status(status) if status.code() == tonic::Code::Unauthenticated)
+    );
+    assert!(!error.to_string().contains("wrong-daemon-token"));
+
+    tokio::task::yield_now().await;
+    assert!(!marker.exists(), "unauthorized request created a file");
+    harness.shutdown().await;
+}
+
+#[tokio::test]
+async fn injected_transport_requires_an_auth_token_at_startup() {
+    let temp = tempfile::tempdir().expect("daemon startup tempdir");
+    let workspace_root = temp.path().join("workspace");
+    let home_root = temp.path().join("home");
+    std::fs::create_dir_all(&workspace_root).expect("create workspace root");
+    std::fs::create_dir_all(&home_root).expect("create home root");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind injected listener");
+    let address = listener.local_addr().expect("injected listener address");
+    let error = codewire_daemon::serve_grpc_with_incoming(
+        Config {
+            listen_addr: address.to_string(),
+            workspace_root,
+            home_root,
+            auth_token: None,
+        },
+        tokio_stream::wrappers::TcpListenerStream::new(listener),
+        std::future::pending(),
+    )
+    .await
+    .expect_err("missing injected daemon token fails startup");
+    assert_eq!(
+        error.to_string(),
+        "workspace daemon gRPC transport requires an auth token"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn injected_transport_does_not_mount_http_diagnostics() {
+    let harness = DaemonHarness::spawn().await;
+    let mut grpc = harness.client().await;
+    grpc.get_health(v1::GetHealthRequest {})
+        .await
+        .expect("injected gRPC endpoint is ready");
+
+    let raw_client = reqwest::Client::builder()
+        .http2_prior_knowledge()
+        .no_proxy()
+        .unix_socket(
+            harness
+                .unix_socket()
+                .expect("Unix harness exposes its socket"),
+        )
+        .build()
+        .expect("build Unix HTTP client");
+    for path in ["/health", "/exec-check"] {
+        let response = raw_client
+            .get(format!("http://localhost{path}"))
+            .send()
+            .await
+            .unwrap_or_else(|error| panic!("raw HTTP/2 request reaches {path}: {error}"));
+        let status = response.status();
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        let body = response
+            .text()
+            .await
+            .unwrap_or_else(|error| panic!("read {path} response: {error}"));
+        assert!(
+            !status.is_success() || !content_type.starts_with("application/json"),
+            "injected transport mounted auxiliary route {path}"
+        );
+        assert!(!body.contains("\"status\":\"ok\""), "health route ran");
+        assert!(!body.contains("\"exec_ok\""), "exec diagnostic ran");
+        assert!(!body.contains("\"shell\""), "exec diagnostic ran");
+    }
+    drop(raw_client);
+    drop(grpc);
+    harness.shutdown().await;
+}
+
+#[tokio::test]
+async fn legacy_tcp_transport_preserves_typed_lifecycle_and_files() {
+    let harness = DaemonHarness::spawn_tcp().await;
+    let mut client = harness.client().await;
+    let health = client
+        .get_health(v1::GetHealthRequest {})
+        .await
+        .expect("legacy TCP daemon health")
+        .into_inner();
+    assert_eq!(health.state, v1::DaemonState::Ready as i32);
+
+    let session_id = client
+        .launch_session(v1::LaunchSessionRequest {
+            command: vec!["sh".into(), "-c".into(), "printf legacy-tcp".into()],
+            ..Default::default()
+        })
+        .await
+        .expect("legacy TCP launch")
+        .into_inner()
+        .session
+        .expect("legacy TCP session")
+        .session_id;
+    let exited = wait_for_session_state(
+        &mut client,
+        &session_id,
+        &[v1::SessionLifecycleState::Exited],
+    )
+    .await;
+    assert_eq!(exited.exit_code, Some(0));
+    assert_eq!(exited.output_end_offset, 10);
+
+    client
+        .open_file(v1::OpenFileRequest {
+            path: "legacy-tcp.txt".into(),
+            options: Some(v1::FileOpenOptions {
+                write: true,
+                create: true,
+                truncate: true,
+                ..Default::default()
+            }),
+            perm: 0o600,
+        })
+        .await
+        .expect("legacy TCP file create");
+    let write = client
+        .write(v1::WriteRequest {
+            path: "legacy-tcp.txt".into(),
+            offset: 0,
+            data: b"legacy".to_vec(),
+        })
+        .await
+        .expect("legacy TCP file write")
+        .into_inner();
+    assert_eq!(write.bytes_written, 6);
+    drop(client);
+    harness.shutdown().await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn injected_exec_half_close_delivers_output_and_exit() {
+    let harness = DaemonHarness::spawn().await;
+    let mut client = harness.client().await;
+    let (input, rx) = mpsc::channel(4);
+    input
+        .send(v1::ExecMessage {
+            payload: Some(v1::exec_message::Payload::Start(v1::ExecStartRequest {
+                command: vec!["sh".into(), "-c".into(), "cat".into()],
+                ..Default::default()
+            })),
+        })
+        .await
+        .expect("send exec start");
+    input
+        .send(v1::ExecMessage {
+            payload: Some(v1::exec_message::Payload::Stdin(b"half-close".to_vec())),
+        })
+        .await
+        .expect("send exec input");
+    input
+        .send(v1::ExecMessage {
+            payload: Some(v1::exec_message::Payload::CloseStdin(())),
+        })
+        .await
+        .expect("half-close exec stdin");
+    drop(input);
+
+    let mut output = client
+        .exec_session(ReceiverStream::new(rx))
+        .await
+        .expect("start half-close exec")
+        .into_inner();
+    let (stdout, exit) = tokio::time::timeout(Duration::from_secs(5), async {
+        let mut stdout = Vec::new();
+        let mut exit = None;
+        while let Some(message) = output.message().await.expect("exec output") {
+            match message.payload {
+                Some(v1::exec_message::Payload::Stdout(data)) => stdout.extend(data),
+                Some(v1::exec_message::Payload::Exit(status)) => {
+                    exit = Some(status.code);
+                    break;
+                }
+                Some(v1::exec_message::Payload::Error(error)) => panic!("exec error: {error}"),
+                _ => {}
+            }
+        }
+        (stdout, exit)
+    })
+    .await
+    .expect("half-closed exec completed");
+    assert_eq!(stdout, b"half-close");
+    assert_eq!(exit, Some(0));
+    drop(client);
+    harness.shutdown().await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn injected_slow_reader_and_active_stream_shutdown_are_bounded() {
+    let harness = DaemonHarness::spawn().await;
+    let pid_file = harness.workspace_root().join("blocked.pid");
+    let working_dir = harness.workspace_root().to_string_lossy().into_owned();
+    let mut client = harness.client().await;
+    let (input, rx) = mpsc::channel(4);
+    input
+        .send(v1::ExecMessage {
+            payload: Some(v1::exec_message::Payload::Start(v1::ExecStartRequest {
+                command: vec![
+                    "sh".into(),
+                    "-c".into(),
+                    "echo $$ > blocked.pid; exec yes blocked".into(),
+                ],
+                working_dir,
+                ..Default::default()
+            })),
+        })
+        .await
+        .expect("send blocked exec start");
+    let mut output = client
+        .exec_session(ReceiverStream::new(rx))
+        .await
+        .expect("start blocked exec")
+        .into_inner();
+    let pid = wait_for_pid(&pid_file).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    tokio::time::timeout(Duration::from_secs(6), harness.shutdown())
+        .await
+        .expect("active injected stream shutdown is bounded");
+    wait_for_process_exit(pid).await;
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            match output.message().await {
+                Ok(Some(_)) => continue,
+                Ok(None) | Err(_) => return,
+            }
+        }
+    })
+    .await
+    .expect("forced transport close terminates the response stream");
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        client.get_health(v1::GetHealthRequest {}),
+    )
+    .await
+    .expect("closed transport rejects new RPC promptly")
+    .expect_err("closed transport rejects new RPC");
+    drop(output);
+    drop(input);
+    drop(client);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn injected_pty_transport_loss_terminates_remote_process() {
+    let harness = DaemonHarness::spawn().await;
+    let pid_file = harness.workspace_root().join("pty.pid");
+    let working_dir = harness.workspace_root().to_string_lossy().into_owned();
+    let mut client = harness.client().await;
+    let (input, rx) = mpsc::channel(4);
+    input
+        .send(v1::PtyMessage {
+            payload: Some(v1::pty_message::Payload::Start(v1::PtyStartRequest {
+                command: vec![
+                    "sh".into(),
+                    "-c".into(),
+                    "echo $$ > pty.pid; exec sleep 300".into(),
+                ],
+                working_dir,
+                term: "xterm-256color".into(),
+                width: 80,
+                height: 24,
+                ..Default::default()
+            })),
+        })
+        .await
+        .expect("send PTY start");
+    let output = client
+        .pty_session(ReceiverStream::new(rx))
+        .await
+        .expect("start PTY")
+        .into_inner();
+    let pid = wait_for_pid(&pid_file).await;
+    drop(input);
+    drop(output);
+    drop(client);
+    wait_for_process_exit(pid).await;
     harness.shutdown().await;
 }
 
@@ -209,7 +562,7 @@ async fn health_conformance_distinguishes_starting_ready_and_unhealthy() {
 }
 
 #[tokio::test]
-async fn real_listener_preserves_exec_and_file_contracts() {
+async fn injected_transport_preserves_exec_and_file_contracts() {
     let harness = DaemonHarness::spawn().await;
     let mut client = harness.client().await;
 
@@ -752,7 +1105,7 @@ async fn pty_resize_is_applied_before_status_and_detach_preserves_session() {
 }
 
 #[tokio::test]
-async fn real_listener_file_operations_enforce_offsets_and_workspace_boundaries() {
+async fn injected_transport_file_operations_enforce_offsets_and_workspace_boundaries() {
     let harness = DaemonHarness::spawn().await;
     let mut client = harness.client().await;
 
@@ -964,7 +1317,7 @@ async fn daemon_restart_marks_unrecoverable_live_session_interrupted() {
 }
 
 async fn wait_for_session_state(
-    client: &mut DaemonServiceClient<Channel>,
+    client: &mut HarnessClient,
     session_id: &str,
     states: &[v1::SessionLifecycleState],
 ) -> v1::SessionRecord {
@@ -984,7 +1337,7 @@ async fn wait_for_session_state(
 }
 
 async fn wait_for_output(
-    client: &mut DaemonServiceClient<Channel>,
+    client: &mut HarnessClient,
     session_id: &str,
     minimum_offset: u64,
 ) -> v1::SessionRecord {
@@ -1001,10 +1354,7 @@ async fn wait_for_output(
     .expect("session persisted expected output")
 }
 
-async fn get_session(
-    client: &mut DaemonServiceClient<Channel>,
-    session_id: &str,
-) -> v1::SessionRecord {
+async fn get_session(client: &mut HarnessClient, session_id: &str) -> v1::SessionRecord {
     client
         .get_session(v1::GetSessionRequest {
             session_id: session_id.into(),
@@ -1035,6 +1385,44 @@ fn detach_message(session_id: &str) -> v1::SessionAttachMessage {
             },
         )),
     }
+}
+
+#[cfg(unix)]
+async fn wait_for_pid(path: &std::path::Path) -> u32 {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Ok(raw) = std::fs::read_to_string(path)
+                && let Ok(pid) = raw.trim().parse()
+            {
+                return pid;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("process pid was not written to {}", path.display()))
+}
+
+#[cfg(unix)]
+async fn wait_for_process_exit(pid: u32) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let running = tokio::process::Command::new("kill")
+                .args(["-0", &pid.to_string()])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .await
+                .expect("inspect remote process")
+                .success();
+            if !running {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("remote process {pid} survived transport loss"));
 }
 
 async fn next_attach_status(
