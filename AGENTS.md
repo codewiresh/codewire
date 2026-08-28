@@ -78,6 +78,15 @@ Kind suite only because classification is missing, repair the classifier and
 its fixtures; do not use an expensive unrelated suite as the classifier. An
 unknown result blocks the affected mutation, not unrelated work.
 
+After the repository owner explicitly accepts locally observed frontend
+behavior and asks to land it, do not rebuild integration, Kind, or product
+images locally solely to create a push receipt. For a clean, current,
+single-feature-branch update, use `CODEWIRE_PREFLIGHT_MODE=ci git push ...` to
+defer the selected exact-tree qualification to required Forgejo CI. This mode
+is unavailable for `main`, tags, deletions, multi-ref pushes, Tier 3 effects, or
+work whose acceptance depends on local-only hardware. It is not a waiver: bind
+the pushed head once and do not merge until its required exact-head CI succeeds.
+
 Bind a hosted run once and use a transition watcher; never spend turns polling
 unchanged CI. Inspect component logs after failure before proposing a mechanism.
 
