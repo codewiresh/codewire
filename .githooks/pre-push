@@ -26,9 +26,9 @@ fi
 
 preflight_mode="${CODEWIRE_PREFLIGHT_MODE:-default}"
 case "$preflight_mode" in
-  default|integration|kind|full) ;;
+  default|integration|kind|full|ci) ;;
   *)
-    echo "pre-push: CODEWIRE_PREFLIGHT_MODE must be default, integration, kind, or full" >&2
+    echo "pre-push: CODEWIRE_PREFLIGHT_MODE must be default, integration, kind, full, or ci" >&2
     exit 2
     ;;
 esac
@@ -55,6 +55,10 @@ if [ "$push_count" -gt 1 ]; then
   exit 1
 elif [ "$push_count" -eq 1 ]; then
   if [[ "$head_sha" =~ ^0+$ ]]; then
+    if [ "$preflight_mode" = ci ]; then
+      echo "pre-push: CI-owned verification does not authorize ref deletion" >&2
+      exit 1
+    fi
     exit 0
   fi
   export PREFLIGHT_HEAD_SHA="$head_sha"
@@ -72,6 +76,38 @@ elif [ "$push_count" -eq 1 ]; then
   if [ "$remote_ref" = refs/heads/main ] && [[ ! "$base_sha" =~ ^0+$ ]]; then
     export PREFLIGHT_BASE_SHA="$base_sha"
   fi
+fi
+
+if [ "$preflight_mode" = ci ]; then
+  if [ "$push_count" -ne 1 ] \
+      || [[ ! "$remote_ref" =~ ^refs/heads/ ]] \
+      || [ "$remote_ref" = refs/heads/main ]; then
+    echo "pre-push: CI-owned verification is limited to one non-main feature-branch update" >&2
+    exit 1
+  fi
+
+  if ! clean_output="$($LOCAL_RECEIPT check-clean 2>&1)"; then
+    printf '%s\n' "$clean_output" >&2
+    echo "pre-push: CI-owned verification requires a clean worktree" >&2
+    exit 1
+  fi
+
+  remote_name="${1:-origin}"
+  canonical_ref="refs/remotes/$remote_name/main"
+  if ! canonical_base="$(git rev-parse --verify "$canonical_ref^{commit}" 2>/dev/null)"; then
+    printf 'pre-push: CI-owned verification cannot resolve canonical base %s\n' \
+      "$canonical_ref" >&2
+    exit 1
+  fi
+  if ! git merge-base --is-ancestor "$canonical_base" "$head_sha"; then
+    printf 'pre-push: CI-owned verification requires head %s to contain canonical base %s\n' \
+      "$head_sha" "$canonical_base" >&2
+    exit 1
+  fi
+
+  printf 'pre-push: deferring exact-tree verification to required Forgejo CI head=%s base=%s\n' \
+    "$head_sha" "$canonical_base"
+  exit 0
 fi
 
 receipt_args=(verify --head "${head_sha:-HEAD}")

@@ -194,7 +194,7 @@ if invalid_mode_output="$({
   fail 'pre-push accepted explain mode without verification'
 fi
 assert_contains invalid_mode "$invalid_mode_output" \
-  'CODEWIRE_PREFLIGHT_MODE must be default, integration, kind, or full'
+  'CODEWIRE_PREFLIGHT_MODE must be default, integration, kind, full, or ci'
 [ ! -s "$invalid_mode_log" ] || fail 'invalid mode ran verification tools'
 
 multi_ref_log="$TMP/multi-ref-tools.log"
@@ -252,6 +252,51 @@ assert_contains normal_tools "$(cat "$normal_log")" \
 assert_contains normal_tools "$(cat "$normal_log")" 'native_desktop_ui'
 assert_not_contains normal_tools "$(cat "$normal_log")" 'product '
 assert_not_contains normal_tools "$(cat "$normal_log")" 'integration '
+git -C "$repo" switch -q main
+
+git -C "$repo" switch -q -c ci-owned main
+printf 'CI-owned verification\n' > "$repo/docs/ci-owned.md"
+commit_all "$repo" 'docs: CI-owned verification fixture'
+ci_owned_head="$(git -C "$repo" rev-parse HEAD)"
+ci_owned_base="$(git -C "$repo" rev-parse refs/remotes/origin/main)"
+ci_owned_log="$TMP/ci-owned-tools.log"
+ci_owned_output="$({
+  cd "$repo"
+  PATH="$TMP/bin:$PATH" PREFLIGHT_TEST_TOOL_LOG="$ci_owned_log" \
+    CODEWIRE_PREFLIGHT_MODE=ci \
+    git push -q origin HEAD:refs/heads/ci-owned
+} 2>&1)"
+assert_contains ci_owned "$ci_owned_output" \
+  "pre-push: deferring exact-tree verification to required Forgejo CI head=$ci_owned_head base=$ci_owned_base"
+[ ! -s "$ci_owned_log" ] || fail 'CI-owned feature push ran local verification tools'
+
+if ci_main_output="$({
+  printf '%s\n' \
+    "refs/heads/ci-owned $ci_owned_head refs/heads/main $ci_owned_base" |
+    {
+      cd "$repo"
+      PATH="$TMP/bin:$PATH" PREFLIGHT_TEST_TOOL_LOG="$ci_owned_log" \
+        CODEWIRE_PREFLIGHT_MODE=ci "$dispatcher" origin
+    }
+} 2>&1)"; then
+  fail 'CI-owned verification accepted a main-branch update'
+fi
+assert_contains ci_main "$ci_main_output" \
+  'CI-owned verification is limited to one non-main feature-branch update'
+
+if ci_delete_output="$({
+  printf '%s\n' \
+    "(delete) $zero_sha refs/heads/ci-owned $ci_owned_head" |
+    {
+      cd "$repo"
+      PATH="$TMP/bin:$PATH" PREFLIGHT_TEST_TOOL_LOG="$ci_owned_log" \
+        CODEWIRE_PREFLIGHT_MODE=ci "$dispatcher" origin
+    }
+} 2>&1)"; then
+  fail 'CI-owned verification accepted a ref deletion'
+fi
+assert_contains ci_delete "$ci_delete_output" \
+  'CI-owned verification does not authorize ref deletion'
 git -C "$repo" switch -q main
 
 git -C "$repo" switch -q -c rejected-transport main
