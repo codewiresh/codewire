@@ -87,6 +87,11 @@ make a gate pass. Do not bypass a selected gate. Verification-policy changes
 must prove old and new behavior with focused fixtures and cannot waive their own
 chosen proof.
 
+When the repository owner explicitly commands an OpenSnitch rule for checked-in
+local VM verification, the agent must add the narrowest rule that permits it and
+record the rule's identity and scope. This permits no broader firewall access or
+weakening of the required local hardware gate.
+
 ## HTML and frontend
 
 - Use native semantic HTML throughout the product and editable design fixtures.
