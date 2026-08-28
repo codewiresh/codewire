@@ -1894,6 +1894,46 @@ for contract in 'Run Rust|rust' 'Run Rust transport|transport'; do
     exit 1
   }
 done
+rust_transport_protoc_line="$(grep -n -m1 \
+  'name: Install pinned protoc for guest initramfs reproduction' \
+  "$rust_transport_block" | cut -d: -f1)"
+rust_transport_run_line="$(grep -n -m1 'name: Run Rust transport' \
+  "$rust_transport_block" | cut -d: -f1)"
+if [ -z "$rust_transport_protoc_line" ] \
+    || [ "$rust_transport_protoc_line" -ge "$rust_transport_run_line" ]; then
+  echo 'rust-transport: pinned protoc must be installed before transport verification' >&2
+  exit 1
+fi
+rust_transport_protoc_condition="$(grep -A1 -F \
+  'name: Install pinned protoc for guest initramfs reproduction' \
+  "$rust_transport_block")"
+grep -qF \
+  "contains(needs.verification-selection.outputs.selection, '|transport_pkg_codewire_vmm_guest_probe|')" \
+  <<<"$rust_transport_protoc_condition" || {
+  echo 'rust-transport: pinned protoc is not isolated to guest-probe reproduction' >&2
+  exit 1
+}
+grep -qF 'protobuf/releases/download/v35.1/protoc-35.1-linux-x86_64.zip' \
+  "$rust_transport_block" || {
+  echo 'rust-transport: protoc archive is not pinned to the reviewed release' >&2
+  exit 1
+}
+grep -qF \
+  '6930ebf62bd4ea607b98fff052596c6ee564b9835b4ce172c75a3f53ae9d91b7  /tmp/protoc.zip' \
+  "$rust_transport_block" || {
+  echo 'rust-transport: protoc archive checksum is not verified' >&2
+  exit 1
+}
+grep -qF 'echo "$HOME/.proto-tools/protoc/bin" >> "$GITHUB_PATH"' \
+  "$rust_transport_block" || {
+  echo 'rust-transport: pinned protoc is not exported to later steps' >&2
+  exit 1
+}
+grep -qF '"$HOME/.proto-tools/protoc/bin/protoc" --version' \
+  "$rust_transport_block" || {
+  echo 'rust-transport: pinned protoc is not verified through its exact path' >&2
+  exit 1
+}
 
 database_block="$TMP/database.yaml"
 services_control_block="$TMP/services-control.yaml"
