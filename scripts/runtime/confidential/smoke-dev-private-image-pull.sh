@@ -367,6 +367,10 @@ policy_rego="$(awk '
 ' "$policy_source")" || die "could not extract the canonical Kata agent policy"
 [[ "$policy_rego" == package\ agent_policy* ]] || die "canonical Kata agent policy has an unexpected header"
 [[ "$policy_rego" != *"'''"* ]] || die "canonical Kata agent policy cannot be TOML-embedded"
+# The shared Rust constant is only the policy preamble. Production appends a
+# CreateContainerRequest rule for the selected storage contract. This probe has
+# no confidential direct volume, so mirror production's no-storage branch.
+policy_rego+=$'\ndefault CreateContainerRequest := true\n'
 
 toml_quote() {
   jq -Rs .
@@ -564,6 +568,27 @@ while (( SECONDS < deadline )); do
       resource_deadline_started=1
       deadline=$((SECONDS + IMAGE_RESOURCE_TIMEOUT_SECS + 20))
       log "stage=resource image_role=$IMAGE_ROLE request_deadline_seconds=$IMAGE_RESOURCE_TIMEOUT_SECS"
+    fi
+  fi
+
+  sandbox_ready="$(jq -r '
+    [.status.conditions[]? | select(.type == "PodReadyToStartContainers") | .status]
+    | first // ""
+  ' <<<"$pod_json" 2>/dev/null || true)"
+  if [[ "$sandbox_ready" == "False" ]]; then
+    sandbox_events="$(kubectl_dev -n "$SANDBOX_NAMESPACE" get events \
+      --field-selector "involvedObject.name=$name" -o json 2>/dev/null || true)"
+    sandbox_policy_failure="$(jq -r '
+      any(.items[]?;
+        .reason == "FailedCreatePodSandBox"
+        and ((.message // "") | contains(
+          "CreateContainerRequest: internal error policy check: unexpected eval_query result len"
+        ))
+      )
+    ' <<<"$sandbox_events" 2>/dev/null || true)"
+    if [[ "$sandbox_policy_failure" == "true" ]]; then
+      collect_evidence
+      die "probe reached terminal sandbox state reason=AgentPolicyEvaluation; full events are in $event_evidence"
     fi
   fi
 

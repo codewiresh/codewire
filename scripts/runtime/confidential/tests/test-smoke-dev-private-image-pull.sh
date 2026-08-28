@@ -43,7 +43,9 @@ case "$*" in
     cp "${*: -1}" "$FAKE_KUBECTL_CAPTURE/probe.yaml"
     ;;
   '-n dev-sandboxes get pod codewire-private-pull-be31063a -o json')
-    if [[ "${FAKE_POD_MODE:-success}" == "init_failure" ]]; then
+    if [[ "${FAKE_POD_MODE:-success}" == "sandbox_policy_failure" ]]; then
+      jq -cn '{status:{phase:"Pending",conditions:[{type:"PodReadyToStartContainers",status:"False"}],initContainerStatuses:[{name:"secure-scratch-init",state:{waiting:{reason:"PodInitializing"}}}],containerStatuses:[{name:"version",state:{waiting:{reason:"PodInitializing"}}}]}}'
+    elif [[ "${FAKE_POD_MODE:-success}" == "init_failure" ]]; then
       jq -cn '{status:{phase:"Pending",initContainerStatuses:[{name:"secure-scratch-init",state:{waiting:{reason:"CreateContainerError"}}}],containerStatuses:[{name:"version",state:{waiting:{reason:"PodInitializing"}}}]}}'
     elif [[ "${FAKE_POD_MODE:-success}" == "resource_failure" ]]; then
       jq -cn '{status:{phase:"Failed",containerStatuses:[{name:"version",state:{terminated:{exitCode:22}}}]}}'
@@ -54,7 +56,11 @@ case "$*" in
     fi
     ;;
   '-n dev-sandboxes get events --field-selector involvedObject.name=codewire-private-pull-be31063a -o json')
-    jq -cn '{items:[{type:"Warning",reason:"Failed",message:"guest image pull failed: Not authorized"}]}'
+    if [[ "${FAKE_POD_MODE:-success}" == "sandbox_policy_failure" ]]; then
+      jq -cn '{items:[{type:"Warning",reason:"FailedCreatePodSandBox",message:"agent create container: CreateContainerRequest: internal error policy check: unexpected eval_query result len QueryResults { result: [] }"}]}'
+    else
+      jq -cn '{items:[{type:"Warning",reason:"Failed",message:"guest image pull failed: Not authorized"}]}'
+    fi
     ;;
   '-n dev-sandboxes logs codewire-private-pull-be31063a -c version')
     printf 'cw 0.8.1\n'
@@ -155,6 +161,7 @@ fi
 encoded="$(yq -r 'select(.kind == "Pod") | .metadata.annotations."io.katacontainers.config.hypervisor.cc_init_data"' "$manifest")"
 decoded="$(printf '%s' "$encoded" | base64 -d | gzip -dc)"
 rg -F 'package agent_policy' <<<"$decoded" >/dev/null
+[[ "$(rg -c '^default CreateContainerRequest := true$' <<<"$decoded")" == '1' ]]
 if rg -q 'codewire_workspace_storage_key_id|"confidential_storage"' <<<"$decoded"; then
   printf '%s\n' 'private pull probe emitted the retired confidential-storage registry' >&2
   exit 1
@@ -276,5 +283,21 @@ if FAKE_POD_MODE=init_failure \
 fi
 rg -F 'terminal container state container=secure-scratch-init reason=CreateContainerError' \
   "$TMP/init-failure.err" >/dev/null
+
+sandbox_policy_failure_evidence="$TMP/sandbox-policy-failure"
+if FAKE_POD_MODE=sandbox_policy_failure \
+  KUBECTL_BIN="$TMP/kubectl" \
+  KUBE_CONTEXT='' \
+  PRIVATE_PULL_PROBE_UUID='be31063a-8ec8-46d5-aa17-75cda1729370' \
+  EVIDENCE_DIR="$sandbox_policy_failure_evidence" \
+    "$SCRIPT" --wait-seconds 301 --encrypted-emptydir \
+      >"$TMP/sandbox-policy-failure.out" 2>"$TMP/sandbox-policy-failure.err"; then
+  printf '%s\n' 'terminal Agent policy sandbox failure unexpectedly passed' >&2
+  exit 1
+fi
+rg -F 'terminal sandbox state reason=AgentPolicyEvaluation' \
+  "$TMP/sandbox-policy-failure.err" >/dev/null
+rg -F 'unexpected eval_query result len' \
+  "$sandbox_policy_failure_evidence/events.json" >/dev/null
 
 printf '%s\n' 'test-smoke-dev-private-image-pull: PASS'
