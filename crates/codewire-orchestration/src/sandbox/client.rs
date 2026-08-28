@@ -867,9 +867,9 @@ impl SandboxClient {
                 desired_disk_gb
             );
         }
-        // The confidential direct-volume path cannot expand in place. Reject
-        // here so Kubernetes never persists a larger PVC request before the
-        // downstream CSI/CDH refusal.
+        // The guest-encrypted confidential raw-block profile cannot expand in
+        // place. Reject here so Kubernetes never persists a larger PVC request
+        // before the downstream CSI/CDH refusal.
         if desired_disk_gb > storage.requested_disk_gb
             && storage.storage_class_name == CONFIDENTIAL_WORKSPACE_STORAGE_CLASS
         {

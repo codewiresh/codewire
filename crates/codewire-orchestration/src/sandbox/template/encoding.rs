@@ -222,6 +222,16 @@ CreateContainerRequest := true if {
         codewire_confidential_mount_matches(storage, mount)
     }
 
+    # The activated filesystem may appear only at the measured destinations.
+    # An extra bind from the same source is a policy violation even when its
+    # destination is not one of Codewire's conventional workspace paths.
+    storage_backed_mounts := [mount | some mount in input.OCI.Mounts; mount.source == storage.mount_point]
+    count(storage_backed_mounts) == count(expected.mount_destinations)
+    every mount in storage_backed_mounts {
+        mount.destination in expected.mount_destinations
+        codewire_confidential_mount_matches(storage, mount)
+    }
+
     raw_agent_devices := [device | some device in input.devices; device.container_path == codewire_confidential_storage.device_path]
     count(raw_agent_devices) == 0
     raw_oci_devices := [device | some device in input.OCI.Linux.Devices; device.Path == codewire_confidential_storage.device_path]

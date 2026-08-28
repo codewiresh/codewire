@@ -116,6 +116,38 @@ mod tests {
         })
     }
 
+    fn confidential_policy_conformance_fixture() -> Value {
+        serde_json::from_str(include_str!(
+            "../../../tests/fixtures/confidential-storage-policy-v1.json"
+        ))
+        .expect("shared confidential-storage policy fixture must be valid JSON")
+    }
+
+    fn apply_conformance_patches(request: &mut Value, patches: &Value) {
+        for patch in patches.as_array().expect("patches must be an array") {
+            let path = patch["path"].as_str().expect("patch path must be a string");
+            if let Some(copy_from) = patch.get("copy_from").and_then(Value::as_str) {
+                let value = request
+                    .pointer(copy_from)
+                    .unwrap_or_else(|| panic!("copy source {copy_from:?} must exist"))
+                    .clone();
+                let parent_path = path
+                    .strip_suffix("/-")
+                    .unwrap_or_else(|| panic!("copy destination {path:?} must append to an array"));
+                request
+                    .pointer_mut(parent_path)
+                    .and_then(Value::as_array_mut)
+                    .unwrap_or_else(|| panic!("copy destination parent {parent_path:?} must exist"))
+                    .push(value);
+            } else {
+                *request
+                    .pointer_mut(path)
+                    .unwrap_or_else(|| panic!("replacement path {path:?} must exist")) =
+                    patch["value"].clone();
+            }
+        }
+    }
+
     fn load_golden(name: &str) -> Value {
         let path = format!(
             "{}/tests/fixtures/sandbox/{name}",
@@ -1256,6 +1288,69 @@ mod tests {
             env["name"].as_str() == Some("CODEWIRE_DOCKER_MOUNT_MODE")
                 && env["value"].as_str() == Some("none")
         }));
+    }
+
+    #[test]
+    fn confidential_policy_matches_shared_kata_contract_corpus() {
+        let fixture = confidential_policy_conformance_fixture();
+        assert_eq!(fixture["schema_version"], 1);
+        let manifest_uri = fixture["declaration"]["workspace"]["manifestUri"]
+            .as_str()
+            .unwrap();
+        let image = fixture["workload_request"]["OCI"]["Annotations"]
+            ["io.kubernetes.cri.image-name"]
+            .as_str()
+            .unwrap();
+        let rendered = render_sandbox_template(
+            "codewire-runtime",
+            &TemplateOpts {
+                name: "tmpl-confidential-policy-conformance".into(),
+                image: image.into(),
+                runtime_profile: RUNTIME_PROFILE_CONFIDENTIAL.into(),
+                docker_mode: DOCKER_MODE_NONE.into(),
+                environment_id: "be31063a-8ec8-46d5-aa17-75cda1729370".into(),
+                confidential_storage_manifest_uri: manifest_uri.into(),
+                disk_gib: 20,
+                kata_coco_init_data_enabled: true,
+                ..Default::default()
+            },
+        );
+        let annotations = rendered["spec"]["podTemplate"]["metadata"]["annotations"]
+            .as_object()
+            .unwrap();
+        let declaration: Value = serde_json::from_str(
+            annotations[KATA_CONFIDENTIAL_VOLUME_ANNOTATION]
+                .as_str()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            declaration, fixture["declaration"],
+            "Codewire's typed renderer must emit the shared Kata declaration"
+        );
+
+        let init_data = decode_gzip_base64(
+            annotations[KATA_COCO_INIT_DATA_ANNOTATION_KEY]
+                .as_str()
+                .unwrap(),
+        );
+        let init_data: toml::Value = toml::from_str(&init_data).unwrap();
+        let policy = init_data["data"]["policy.rego"].as_str().unwrap();
+
+        for case in fixture["cases"].as_array().unwrap() {
+            let mut request = match case["base"].as_str().unwrap() {
+                "workload" => fixture["workload_request"].clone(),
+                "sandbox" => fixture["sandbox_request"].clone(),
+                base => panic!("unknown conformance base {base:?}"),
+            };
+            apply_conformance_patches(&mut request, &case["patches"]);
+            assert_eq!(
+                kata_policy_allows(policy, &request),
+                case["allowed"].as_bool().unwrap(),
+                "shared confidential-storage policy case {:?}",
+                case["name"].as_str().unwrap()
+            );
+        }
     }
 
     #[test]

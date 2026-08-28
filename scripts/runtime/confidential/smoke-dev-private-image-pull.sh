@@ -369,7 +369,8 @@ policy_rego="$(awk '
 [[ "$policy_rego" != *"'''"* ]] || die "canonical Kata agent policy cannot be TOML-embedded"
 # The shared Rust constant is only the policy preamble. Production appends a
 # CreateContainerRequest rule for the selected storage contract. This probe has
-# no confidential direct volume, so mirror production's no-storage branch.
+# no confidential workspace block volume, so mirror production's no-storage
+# branch.
 policy_rego+=$'\ndefault CreateContainerRequest := true\n'
 
 toml_quote() {
