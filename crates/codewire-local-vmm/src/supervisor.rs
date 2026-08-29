@@ -443,27 +443,73 @@ impl EnvironmentRecord {
         }
     }
 
-    fn promote_staging_workspace_generation(&mut self) -> Option<WorkspaceGenerationRecord> {
-        let staging = self.staging_workspace_generation.take()?;
+    fn promote_staging_workspace_generation(
+        &mut self,
+    ) -> Result<Option<WorkspaceGenerationRecord>, SupervisorError> {
+        let Some(staging) = self.staging_workspace_generation.as_ref() else {
+            return Ok(None);
+        };
+        let current_project_json = self
+            .project_spec_json
+            .as_deref()
+            .ok_or(SupervisorError::InvalidState)?;
+        let current_project_sha256 = self
+            .project_spec_sha256
+            .as_deref()
+            .ok_or(SupervisorError::InvalidState)?;
+        let mut next_rollback = self.active_workspace_generation.clone();
+        if let Some(active) = next_rollback.as_mut() {
+            active.ensure_embedded_project(current_project_json, current_project_sha256)?;
+        }
+        let next_project_json = staging
+            .project_spec_json(current_project_json, current_project_sha256)?
+            .to_vec();
+        let next_project_sha256 = staging.project_sha256.clone();
+
         let displaced = self.rollback_workspace_generation.take();
-        self.rollback_workspace_generation = self.active_workspace_generation.replace(staging);
-        displaced
+        self.rollback_workspace_generation = next_rollback;
+        self.active_workspace_generation = self.staging_workspace_generation.take();
+        self.project_spec_json = Some(next_project_json);
+        self.project_spec_sha256 = Some(next_project_sha256);
+        Ok(displaced)
     }
 
     fn validate(&self, key: &str) -> Result<(), SupervisorError> {
-        let workspace_generations = [
-            self.active_workspace_generation.as_ref(),
-            self.staging_workspace_generation.as_ref(),
-            self.rollback_workspace_generation.as_ref(),
-        ];
-        let invalid_workspace_generation = match self.project_spec_sha256.as_deref() {
-            Some(project_sha256) => workspace_generations
-                .iter()
-                .flatten()
-                .any(|generation| generation.validate_for_project(project_sha256).is_err()),
-            None => workspace_generations
-                .iter()
-                .any(|generation| generation.is_some()),
+        let invalid_workspace_generation = match (
+            self.project_spec_json.as_deref(),
+            self.project_spec_sha256.as_deref(),
+        ) {
+            (Some(project_json), Some(project_sha256)) => {
+                self.active_workspace_generation
+                    .as_ref()
+                    .is_some_and(|generation| {
+                        generation
+                            .validate_for_project_intent(project_json, project_sha256)
+                            .is_err()
+                    })
+                    || self
+                        .staging_workspace_generation
+                        .as_ref()
+                        .is_some_and(|generation| {
+                            if self.active_workspace_generation.is_some() {
+                                generation.validate().is_err()
+                            } else {
+                                generation
+                                    .validate_for_project_intent(project_json, project_sha256)
+                                    .is_err()
+                            }
+                        })
+                    || self
+                        .rollback_workspace_generation
+                        .as_ref()
+                        .is_some_and(|generation| generation.validate().is_err())
+            }
+            (None, None) => {
+                self.active_workspace_generation.is_some()
+                    || self.staging_workspace_generation.is_some()
+                    || self.rollback_workspace_generation.is_some()
+            }
+            _ => true,
         };
         let active_root = self
             .active_workspace_generation
@@ -755,6 +801,7 @@ impl SupervisorCore {
             .resolve_anonymous(&reference)
             .await?;
         let generation = WorkspaceGenerationRecord::new(
+            &project_json,
             project_sha256.to_owned(),
             image,
             DEFAULT_OCI_ROOT_DISK_BYTES,
@@ -903,7 +950,7 @@ impl SupervisorCore {
                         .environments
                         .get_mut(&request.name)
                         .ok_or_else(|| SupervisorError::NotFound(request.name.clone()))?;
-                    let _displaced = environment.promote_staging_workspace_generation();
+                    let _displaced = environment.promote_staging_workspace_generation()?;
                     environment.generation = 1;
                     environment.state = StoredEnvironmentState::Running;
                     operation = self.checkpoint_state_operation(&operation, next_state)?;
@@ -1601,7 +1648,7 @@ impl SupervisorCore {
                         .environments
                         .get_mut(name)
                         .ok_or_else(|| SupervisorError::NotFound(name.to_owned()))?;
-                    let _displaced = environment.promote_staging_workspace_generation();
+                    let _displaced = environment.promote_staging_workspace_generation()?;
                     environment.generation = target_generation;
                     environment.state = StoredEnvironmentState::Running;
                     operation = self.checkpoint_state_operation(&operation, next_state)?;
@@ -1812,7 +1859,7 @@ impl SupervisorCore {
                         .get_mut(name)
                         .ok_or_else(|| SupervisorError::NotFound(name.to_owned()))?;
                     if was_running {
-                        let _displaced = environment.promote_staging_workspace_generation();
+                        let _displaced = environment.promote_staging_workspace_generation()?;
                         if environment.state != StoredEnvironmentState::Running {
                             environment.generation = environment
                                 .generation
@@ -2618,11 +2665,20 @@ fn prepare_workspace_boot(
     let artifact_generation = artifact_generation_for_boot(environment, staging)?;
     let (root_generation, root_disk_bytes, setup_root_generation) = match workspace {
         Some(generation) => {
-            let project_sha256 = environment
-                .project_spec_sha256
-                .as_deref()
-                .ok_or(SupervisorError::InvalidState)?;
-            generation.validate_for_project(project_sha256)?;
+            if staging {
+                generation.validate()?;
+            } else {
+                generation.validate_for_project_intent(
+                    environment
+                        .project_spec_json
+                        .as_deref()
+                        .ok_or(SupervisorError::InvalidState)?,
+                    environment
+                        .project_spec_sha256
+                        .as_deref()
+                        .ok_or(SupervisorError::InvalidState)?,
+                )?;
+            }
             (
                 oci_storage_generation(
                     &generation.root_generation,
@@ -2652,14 +2708,16 @@ fn prepare_workspace_boot(
     )?;
     let setup = match workspace {
         Some(generation) if staging || root.created => {
-            let project_json = environment
+            let legacy_project_json = environment
                 .project_spec_json
                 .as_deref()
                 .ok_or(SupervisorError::InvalidState)?;
-            let project_sha256 = environment
+            let legacy_project_sha256 = environment
                 .project_spec_sha256
                 .as_deref()
                 .ok_or(SupervisorError::InvalidState)?;
+            let project_json =
+                generation.project_spec_json(legacy_project_json, legacy_project_sha256)?;
             let engine = PrivateRoot::open(engine_state_root)?;
             let content = ContentStore::create(&engine)?;
             Some(ensure_setup_pack(
@@ -2668,7 +2726,7 @@ fn prepare_workspace_boot(
                 &content,
                 SetupPackRequest {
                     project_json,
-                    project_sha256,
+                    project_sha256: &generation.project_sha256,
                     storage_generation: &root_generation,
                     root_generation: &generation.root_generation,
                     image: &generation.image,
@@ -2780,11 +2838,7 @@ fn referenced_content_blobs(
             environment.rollback_workspace_generation.as_ref(),
         ];
         for generation in generations.into_iter().flatten() {
-            let project_sha256 = environment
-                .project_spec_sha256
-                .as_deref()
-                .ok_or(SupervisorError::InvalidState)?;
-            generation.validate_for_project(project_sha256)?;
+            generation.validate()?;
             retain_content_descriptor(&mut retained, &generation.image.source)?;
             retain_content_descriptor(&mut retained, &generation.image.manifest)?;
             retain_content_descriptor(&mut retained, &generation.image.config)?;
@@ -3209,7 +3263,7 @@ mod tests {
 
     fn project_intent(vcpus: u32, memory_mib: u32, disk_gib: u64) -> (Vec<u8>, String) {
         let spec = codewire_project::ProjectSpec {
-            image: "ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467".to_owned(),
+            image: "registry.example/codewire/workspace:latest".to_owned(),
             resources: codewire_project::ResourceSpec {
                 cpu_millicores: Some(vcpus * 1_000),
                 memory_mib: Some(u64::from(memory_mib)),
@@ -3226,19 +3280,23 @@ mod tests {
         Sha256Digest::parse(&format!("sha256:{:x}", Sha256::digest(seed))).unwrap()
     }
 
-    fn test_workspace_generation(project_sha256: &str, seed: &[u8]) -> WorkspaceGenerationRecord {
+    fn test_workspace_generation(
+        project_spec_json: &[u8],
+        project_sha256: &str,
+        seed: &[u8],
+    ) -> WorkspaceGenerationRecord {
+        let project: codewire_project::ProjectSpec =
+            serde_json::from_slice(project_spec_json).unwrap();
         let manifest = ResolvedDescriptor {
             media_type: "application/vnd.oci.image.manifest.v1+json".to_owned(),
             digest: test_digest(&[seed, b"-manifest"].concat()),
             size: 128,
         };
         WorkspaceGenerationRecord::new(
+            project_spec_json,
             project_sha256.to_owned(),
             ResolvedImage {
-                source_reference: format!(
-                    "registry.example/codewire/workspace@{}",
-                    manifest.digest.as_str()
-                ),
+                source_reference: project.image,
                 architecture: OciArchitecture::native().unwrap(),
                 source: manifest.clone(),
                 manifest,
@@ -3280,16 +3338,18 @@ mod tests {
     #[test]
     fn readiness_promotion_rotates_only_durable_workspace_generations() {
         let mut environment = project_environment();
+        let project_spec_json = environment.project_spec_json.as_deref().unwrap();
         let project_sha256 = environment.project_spec_sha256.as_deref().unwrap();
-        let active = test_workspace_generation(project_sha256, b"active");
-        let staging = test_workspace_generation(project_sha256, b"staging");
-        let old_rollback = test_workspace_generation(project_sha256, b"old-rollback");
+        let active = test_workspace_generation(project_spec_json, project_sha256, b"active");
+        let staging = test_workspace_generation(project_spec_json, project_sha256, b"staging");
+        let old_rollback =
+            test_workspace_generation(project_spec_json, project_sha256, b"old-rollback");
         environment.active_workspace_generation = Some(active.clone());
         environment.staging_workspace_generation = Some(staging.clone());
         environment.rollback_workspace_generation = Some(old_rollback.clone());
         environment.validate("dev").unwrap();
 
-        let displaced = environment.promote_staging_workspace_generation();
+        let displaced = environment.promote_staging_workspace_generation().unwrap();
 
         assert_eq!(environment.active_workspace_generation, Some(staging));
         assert_eq!(environment.rollback_workspace_generation, Some(active));
@@ -3299,12 +3359,57 @@ mod tests {
     }
 
     #[test]
+    fn changed_project_promotion_keeps_the_legacy_active_generation_rebuildable() {
+        let mut environment = project_environment();
+        let old_project_json = environment.project_spec_json.clone().unwrap();
+        let old_project_sha256 = environment.project_spec_sha256.clone().unwrap();
+        let mut active =
+            test_workspace_generation(&old_project_json, &old_project_sha256, b"active");
+        active.schema_version = 1;
+        active.project_spec_json = None;
+        let mut next_project: codewire_project::ProjectSpec =
+            serde_json::from_slice(&old_project_json).unwrap();
+        next_project.image = "registry.example/codewire/workspace:next".to_owned();
+        let next_project_json = next_project.canonical_json().unwrap();
+        let next_project_sha256 = format!("{:x}", Sha256::digest(&next_project_json));
+        let staging =
+            test_workspace_generation(&next_project_json, &next_project_sha256, b"staging");
+        environment.active_workspace_generation = Some(active.clone());
+        environment.staging_workspace_generation = Some(staging.clone());
+        environment.validate("dev").unwrap();
+
+        assert!(
+            environment
+                .promote_staging_workspace_generation()
+                .unwrap()
+                .is_none()
+        );
+
+        assert_eq!(environment.project_spec_json, Some(next_project_json));
+        assert_eq!(
+            environment.project_spec_sha256.as_deref(),
+            Some(next_project_sha256.as_str())
+        );
+        assert_eq!(environment.active_workspace_generation, Some(staging));
+        let rollback = environment.rollback_workspace_generation.as_ref().unwrap();
+        assert_eq!(rollback.root_generation, active.root_generation);
+        assert_eq!(
+            rollback.project_spec_json.as_deref().unwrap().as_bytes(),
+            old_project_json
+        );
+        rollback.validate().unwrap();
+        environment.validate("dev").unwrap();
+    }
+
+    #[test]
     fn durable_workspace_records_are_the_only_retained_storage_generations() {
         let mut environment = project_environment();
+        let project_spec_json = environment.project_spec_json.as_deref().unwrap();
         let project_sha256 = environment.project_spec_sha256.as_deref().unwrap();
-        let active = test_workspace_generation(project_sha256, b"active");
-        let staging = test_workspace_generation(project_sha256, b"staging");
-        let old_rollback = test_workspace_generation(project_sha256, b"old-rollback");
+        let active = test_workspace_generation(project_spec_json, project_sha256, b"active");
+        let staging = test_workspace_generation(project_spec_json, project_sha256, b"staging");
+        let old_rollback =
+            test_workspace_generation(project_spec_json, project_sha256, b"old-rollback");
         let artifact = environment
             .active_artifact_generation
             .as_deref()
@@ -3330,7 +3435,7 @@ mod tests {
         }
 
         assert_eq!(
-            environment.promote_staging_workspace_generation(),
+            environment.promote_staging_workspace_generation().unwrap(),
             Some(old_rollback.clone())
         );
         let after = referenced_root_storage_generations(&environment).unwrap();
@@ -3351,14 +3456,18 @@ mod tests {
     fn shared_content_reachability_rejects_conflicting_descriptor_sizes() {
         let mut first = project_environment();
         first.active_workspace_generation = Some(test_workspace_generation(
+            first.project_spec_json.as_deref().unwrap(),
             first.project_spec_sha256.as_deref().unwrap(),
             b"first",
         ));
         let mut second = project_environment();
         second.id = Uuid::new_v4();
         second.name = "second".to_owned();
-        let mut second_generation =
-            test_workspace_generation(second.project_spec_sha256.as_deref().unwrap(), b"second");
+        let mut second_generation = test_workspace_generation(
+            second.project_spec_json.as_deref().unwrap(),
+            second.project_spec_sha256.as_deref().unwrap(),
+            b"second",
+        );
         second_generation.image.config.digest = first
             .active_workspace_generation
             .as_ref()
@@ -3387,6 +3496,7 @@ mod tests {
         fs::set_permissions(engine.path(), fs::Permissions::from_mode(0o700)).unwrap();
         let mut environment = project_environment();
         let generation = test_workspace_generation(
+            environment.project_spec_json.as_deref().unwrap(),
             environment.project_spec_sha256.as_deref().unwrap(),
             b"offline-active",
         );
@@ -3421,6 +3531,7 @@ mod tests {
         fs::set_permissions(engine.path(), fs::Permissions::from_mode(0o700)).unwrap();
         let mut environment = project_environment();
         environment.staging_workspace_generation = Some(test_workspace_generation(
+            environment.project_spec_json.as_deref().unwrap(),
             environment.project_spec_sha256.as_deref().unwrap(),
             b"missing-content",
         ));
@@ -3670,6 +3781,7 @@ mod tests {
         let (store, _) = SupervisorStore::open(&root).unwrap();
         let mut environment = project_environment();
         let active = test_workspace_generation(
+            environment.project_spec_json.as_deref().unwrap(),
             environment.project_spec_sha256.as_deref().unwrap(),
             b"active",
         );

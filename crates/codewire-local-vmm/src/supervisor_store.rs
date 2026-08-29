@@ -1575,7 +1575,7 @@ mod tests {
 
     fn project_intent() -> (Vec<u8>, String) {
         let spec = codewire_project::ProjectSpec {
-            image: "ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467".to_owned(),
+            image: "registry.example/codewire/workspace:latest".to_owned(),
             resources: codewire_project::ResourceSpec {
                 cpu_millicores: Some(2_000),
                 memory_mib: Some(16 * 1024),
@@ -1601,10 +1601,7 @@ mod tests {
             size: 512,
         };
         let image = ResolvedImage {
-            source_reference: format!(
-                "registry.example/codewire/workspace@{}",
-                manifest_digest.as_str()
-            ),
+            source_reference: "registry.example/codewire/workspace:latest".to_owned(),
             architecture,
             source: manifest.clone(),
             manifest,
@@ -1636,6 +1633,7 @@ mod tests {
             schema_version: 1,
             root_generation,
             project_sha256: project_sha256.to_owned(),
+            project_spec_json: None,
             image,
             root_disk_bytes: crate::linux::state::MINIMUM_ROOT_DISK_BYTES,
         }

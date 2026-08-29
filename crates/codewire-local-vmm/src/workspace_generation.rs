@@ -4,14 +4,16 @@
 //! verified descriptors needed to replay from the owner-private CAS, together
 //! with the project and root-disk policy that define the guest generation.
 
+use codewire_project::{MAX_PROJECT_DOCUMENT_BYTES, ProjectSpec};
 use codewire_vmm_guest_probe::{SetupArchitecture, Sha256Value, oci_root_generation};
 use serde::{Deserialize, Serialize};
 
 use crate::generation::valid_root_disk_bytes;
 use crate::oci::{OciArchitecture, ResolvedImage};
 
-const WORKSPACE_GENERATION_SCHEMA_VERSION: u32 = 1;
-const MAXIMUM_WORKSPACE_GENERATION_BYTES: usize = 256 * 1024;
+const LEGACY_WORKSPACE_GENERATION_SCHEMA_VERSION: u32 = 1;
+const WORKSPACE_GENERATION_SCHEMA_VERSION: u32 = 2;
+const MAXIMUM_WORKSPACE_GENERATION_BYTES: usize = 512 * 1024;
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -19,6 +21,8 @@ pub(crate) struct WorkspaceGenerationRecord {
     pub(crate) schema_version: u32,
     pub(crate) root_generation: String,
     pub(crate) project_sha256: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) project_spec_json: Option<String>,
     pub(crate) image: ResolvedImage,
     pub(crate) root_disk_bytes: u64,
 }
@@ -41,29 +45,44 @@ impl std::fmt::Debug for WorkspaceGenerationRecord {
 
 impl WorkspaceGenerationRecord {
     pub(crate) fn new(
+        project_spec_json: &[u8],
         project_sha256: String,
         image: ResolvedImage,
         root_disk_bytes: u64,
     ) -> Result<Self, WorkspaceGenerationError> {
+        let project = validate_project_spec(project_spec_json, &project_sha256)?;
+        if project.image != image.source_reference {
+            return Err(WorkspaceGenerationError);
+        }
         let root_generation = calculated_root_generation(&project_sha256, &image)?;
         let record = Self {
             schema_version: WORKSPACE_GENERATION_SCHEMA_VERSION,
             root_generation,
             project_sha256,
+            project_spec_json: Some(
+                std::str::from_utf8(project_spec_json)
+                    .map_err(|_| WorkspaceGenerationError)?
+                    .to_owned(),
+            ),
             image,
             root_disk_bytes,
         };
-        record.validate_for_project(&record.project_sha256)?;
+        record.validate()?;
         Ok(record)
     }
 
-    pub(crate) fn validate_for_project(
-        &self,
-        expected_project_sha256: &str,
-    ) -> Result<(), WorkspaceGenerationError> {
-        if self.schema_version != WORKSPACE_GENERATION_SCHEMA_VERSION
-            || self.project_sha256 != expected_project_sha256
-            || !valid_root_disk_bytes(self.root_disk_bytes)
+    pub(crate) fn validate(&self) -> Result<(), WorkspaceGenerationError> {
+        match (self.schema_version, self.project_spec_json.as_deref()) {
+            (LEGACY_WORKSPACE_GENERATION_SCHEMA_VERSION, None) => {}
+            (WORKSPACE_GENERATION_SCHEMA_VERSION, Some(project_json)) => {
+                let project = validate_project_spec(project_json.as_bytes(), &self.project_sha256)?;
+                if project.image != self.image.source_reference {
+                    return Err(WorkspaceGenerationError);
+                }
+            }
+            _ => return Err(WorkspaceGenerationError),
+        }
+        if !valid_root_disk_bytes(self.root_disk_bytes)
             || self.image.architecture
                 != OciArchitecture::native().map_err(|_| WorkspaceGenerationError)?
         {
@@ -78,8 +97,71 @@ impl WorkspaceGenerationRecord {
         Ok(())
     }
 
+    pub(crate) fn validate_for_project(
+        &self,
+        expected_project_sha256: &str,
+    ) -> Result<(), WorkspaceGenerationError> {
+        self.validate()?;
+        if self.project_sha256 != expected_project_sha256 {
+            return Err(WorkspaceGenerationError);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn validate_for_project_intent(
+        &self,
+        project_spec_json: &[u8],
+        project_sha256: &str,
+    ) -> Result<(), WorkspaceGenerationError> {
+        self.validate_for_project(project_sha256)?;
+        let project = validate_project_spec(project_spec_json, project_sha256)?;
+        if project.image != self.image.source_reference
+            || self
+                .project_spec_json
+                .as_deref()
+                .is_some_and(|embedded| embedded.as_bytes() != project_spec_json)
+        {
+            return Err(WorkspaceGenerationError);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn project_spec_json<'a>(
+        &'a self,
+        legacy_project_spec_json: &'a [u8],
+        legacy_project_sha256: &str,
+    ) -> Result<&'a [u8], WorkspaceGenerationError> {
+        match self.project_spec_json.as_deref() {
+            Some(project_json) => {
+                self.validate()?;
+                Ok(project_json.as_bytes())
+            }
+            None => {
+                self.validate_for_project_intent(legacy_project_spec_json, legacy_project_sha256)?;
+                Ok(legacy_project_spec_json)
+            }
+        }
+    }
+
+    pub(crate) fn ensure_embedded_project(
+        &mut self,
+        project_spec_json: &[u8],
+        project_sha256: &str,
+    ) -> Result<(), WorkspaceGenerationError> {
+        self.validate_for_project_intent(project_spec_json, project_sha256)?;
+        if self.project_spec_json.is_none() {
+            self.schema_version = WORKSPACE_GENERATION_SCHEMA_VERSION;
+            self.project_spec_json = Some(
+                std::str::from_utf8(project_spec_json)
+                    .map_err(|_| WorkspaceGenerationError)?
+                    .to_owned(),
+            );
+        }
+        self.validate()
+    }
+
     pub(crate) fn encode_canonical(&self) -> Result<Vec<u8>, WorkspaceGenerationError> {
-        self.validate_for_project(&self.project_sha256)?;
+        self.validate()?;
         encode_bounded(self)
     }
 
@@ -88,12 +170,30 @@ impl WorkspaceGenerationRecord {
             return Err(WorkspaceGenerationError);
         }
         let record: Self = serde_json::from_slice(bytes).map_err(|_| WorkspaceGenerationError)?;
-        record.validate_for_project(&record.project_sha256)?;
+        record.validate()?;
         if encode_bounded(&record)? != bytes {
             return Err(WorkspaceGenerationError);
         }
         Ok(record)
     }
+}
+
+fn validate_project_spec(
+    bytes: &[u8],
+    expected_sha256: &str,
+) -> Result<ProjectSpec, WorkspaceGenerationError> {
+    if bytes.is_empty() || bytes.len() > MAX_PROJECT_DOCUMENT_BYTES {
+        return Err(WorkspaceGenerationError);
+    }
+    let project: ProjectSpec =
+        serde_json::from_slice(bytes).map_err(|_| WorkspaceGenerationError)?;
+    let canonical = project
+        .canonical_json()
+        .map_err(|_| WorkspaceGenerationError)?;
+    if canonical != bytes || Sha256Value::calculate(bytes).to_string() != expected_sha256 {
+        return Err(WorkspaceGenerationError);
+    }
+    Ok(project)
 }
 
 fn calculated_root_generation(
@@ -163,12 +263,18 @@ mod tests {
                 diff_id: digest(b"uncompressed layer"),
             }],
         };
-        let project_sha256 = format!("{:x}", Sha256::digest(b"project"));
+        let project = ProjectSpec {
+            image: image.source_reference.clone(),
+            ..Default::default()
+        };
+        let project_spec_json = project.canonical_json().unwrap();
+        let project_sha256 = format!("{:x}", Sha256::digest(&project_spec_json));
         let root_generation = calculated_root_generation(&project_sha256, &image).unwrap();
         WorkspaceGenerationRecord {
             schema_version: WORKSPACE_GENERATION_SCHEMA_VERSION,
             root_generation,
             project_sha256,
+            project_spec_json: Some(String::from_utf8(project_spec_json).unwrap()),
             image,
             root_disk_bytes: crate::linux::state::MINIMUM_ROOT_DISK_BYTES,
         }
@@ -194,6 +300,7 @@ mod tests {
     fn constructor_derives_and_validates_the_exact_generation() {
         let expected = record();
         let constructed = WorkspaceGenerationRecord::new(
+            expected.project_spec_json.as_deref().unwrap().as_bytes(),
             expected.project_sha256.clone(),
             expected.image.clone(),
             expected.root_disk_bytes,
@@ -201,6 +308,34 @@ mod tests {
         .unwrap();
 
         assert_eq!(constructed, expected);
+    }
+
+    #[test]
+    fn legacy_record_round_trips_exactly_and_upgrades_without_changing_identity() {
+        let current = record();
+        let project_json = current
+            .project_spec_json
+            .as_deref()
+            .unwrap()
+            .as_bytes()
+            .to_vec();
+        let project_sha256 = current.project_sha256.clone();
+        let mut legacy = current.clone();
+        legacy.schema_version = LEGACY_WORKSPACE_GENERATION_SCHEMA_VERSION;
+        legacy.project_spec_json = None;
+        let encoded = legacy.encode_canonical().unwrap();
+        assert_eq!(
+            WorkspaceGenerationRecord::decode_canonical(&encoded).unwrap(),
+            legacy
+        );
+
+        legacy
+            .ensure_embedded_project(&project_json, &project_sha256)
+            .unwrap();
+
+        assert_eq!(legacy.schema_version, WORKSPACE_GENERATION_SCHEMA_VERSION);
+        assert_eq!(legacy.root_generation, current.root_generation);
+        assert_eq!(legacy.project_spec_json, current.project_spec_json);
     }
 
     #[test]
