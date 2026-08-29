@@ -964,6 +964,7 @@ impl SupervisorCore {
     ) -> Result<SupervisorState, SupervisorError> {
         self.collect_unreferenced_workspace_roots(name)?;
         self.collect_unreferenced_oci_content()?;
+        self.collect_unreferenced_runtime_artifacts()?;
         let (project_json, project_sha256, artifact_generation) = {
             let environment = self.environment(name)?;
             if environment.project_spec_json.is_none()
@@ -1042,6 +1043,7 @@ impl SupervisorCore {
         };
         self.collect_unreferenced_workspace_roots(name)?;
         self.collect_unreferenced_oci_content()?;
+        self.collect_unreferenced_runtime_artifacts()?;
         {
             let environment = self.environment(name)?;
             let active_artifact = environment
@@ -1145,6 +1147,17 @@ impl SupervisorCore {
         let engine = PrivateRoot::open(&self.config.engine_root())?;
         let content = ContentStore::create(&engine)?;
         let _collected = content.collect_unreferenced(&retained)?;
+        Ok(())
+    }
+
+    fn collect_unreferenced_runtime_artifacts(&self) -> Result<(), SupervisorError> {
+        let retained = referenced_artifact_generations(&self.state)?;
+        let engine = PrivateRoot::open(&self.config.engine_root())?;
+        let artifacts =
+            RuntimeArtifactStore::create(&engine).map_err(|_| SupervisorError::ArtifactStore)?;
+        let _collected = artifacts
+            .collect_unreferenced(&retained)
+            .map_err(|_| SupervisorError::ArtifactStore)?;
         Ok(())
     }
 
@@ -2653,7 +2666,8 @@ impl SupervisorCore {
                         cleanup_trashed_vm(&engine_root, environment_id, operation.operation_id)
                             .is_err();
                     let content_pending = self.collect_unreferenced_oci_content().is_err();
-                    if trash_pending || content_pending {
+                    let artifact_pending = self.collect_unreferenced_runtime_artifacts().is_err();
+                    if trash_pending || content_pending || artifact_pending {
                         // Deletion is already durable. Any object that cannot
                         // pass the exact allowlist remains quarantined for
                         // orphan inventory; it is never recursively removed or
@@ -2673,6 +2687,7 @@ impl SupervisorCore {
         // preserves an honest cleanup_pending result if the supervisor died
         // after applying CleanupTrash but before completing the operation.
         cleanup_pending |= self.collect_unreferenced_oci_content().is_err();
+        cleanup_pending |= self.collect_unreferenced_runtime_artifacts().is_err();
         Ok((operation, cleanup_pending))
     }
 
@@ -3596,6 +3611,41 @@ fn referenced_content_blobs(
     Ok(retained)
 }
 
+fn referenced_artifact_generations(
+    state: &SupervisorState,
+) -> Result<BTreeSet<String>, SupervisorError> {
+    state.validate()?;
+    let mut retained = BTreeSet::new();
+    for environment in state.environments.values() {
+        let active = environment
+            .active_artifact_generation
+            .as_deref()
+            .ok_or(SupervisorError::InvalidState)?;
+        retain_artifact_generation(&mut retained, active)?;
+        if let Some(staging) = environment.staging_artifact_generation.as_deref() {
+            retain_artifact_generation(&mut retained, staging)?;
+        }
+        if let Some(rollback) = environment.rollback_workspace_generation.as_ref() {
+            retain_artifact_generation(&mut retained, rollback.artifact_generation(active)?)?;
+        }
+        if let Some(runner) = environment.runner.as_ref() {
+            retain_artifact_generation(&mut retained, &runner.artifact_generation)?;
+        }
+    }
+    Ok(retained)
+}
+
+fn retain_artifact_generation(
+    retained: &mut BTreeSet<String>,
+    generation: &str,
+) -> Result<(), SupervisorError> {
+    if !valid_sha256(generation) {
+        return Err(SupervisorError::InvalidState);
+    }
+    retained.insert(generation.to_owned());
+    Ok(())
+}
+
 fn retain_content_descriptor(
     retained: &mut BTreeMap<Sha256Digest, u64>,
     descriptor: &ResolvedDescriptor,
@@ -4208,6 +4258,10 @@ impl From<WorkspaceGenerationError> for SupervisorError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::artifact::{
+        ARTIFACT_LOCK_SCHEMA_VERSION, ArtifactArchitecture, ArtifactLock, ArtifactSpec,
+        CLOUD_HYPERVISOR_RELEASE, ExecutableArtifactSpec,
+    };
     use crate::oci::{OciArchitecture, ResolvedDescriptor, ResolvedImage, Sha256Digest};
 
     fn project_intent(vcpus: u32, memory_mib: u32, disk_gib: u64) -> (Vec<u8>, String) {
@@ -4227,6 +4281,59 @@ mod tests {
 
     fn test_digest(seed: &[u8]) -> Sha256Digest {
         Sha256Digest::parse(&format!("sha256:{:x}", Sha256::digest(seed))).unwrap()
+    }
+
+    fn install_test_artifact_generation(
+        engine: &PrivateRoot,
+        kernel_bytes: &[u8],
+    ) -> (String, String) {
+        fn spec(path: &str, bytes: &[u8]) -> ArtifactSpec {
+            ArtifactSpec {
+                path: path.into(),
+                size: bytes.len() as u64,
+                sha256: format!("{:x}", Sha256::digest(bytes)),
+                architecture: ArtifactArchitecture::host().unwrap(),
+            }
+        }
+
+        let cloud_hypervisor = spec("bin/cloud-hypervisor", b"cloud-hypervisor");
+        let kernel = spec("boot/kernel", kernel_bytes);
+        let initramfs = spec("boot/initramfs", b"initramfs");
+        let lock = ArtifactLock {
+            schema_version: ARTIFACT_LOCK_SCHEMA_VERSION,
+            cloud_hypervisor: ExecutableArtifactSpec {
+                artifact: cloud_hypervisor.clone(),
+                version: CLOUD_HYPERVISOR_RELEASE.to_owned(),
+            },
+            kernel: kernel.clone(),
+            initramfs: initramfs.clone(),
+        };
+        RuntimeArtifactStore::create(engine).unwrap();
+        let blobs = engine.path().join("runtime-artifacts/blobs");
+        for (prefix, artifact, bytes, permissions) in [
+            (
+                "x",
+                &cloud_hypervisor,
+                b"cloud-hypervisor".as_slice(),
+                0o500,
+            ),
+            ("r", &kernel, kernel_bytes, 0o400),
+            ("r", &initramfs, b"initramfs".as_slice(), 0o400),
+        ] {
+            let path = blobs.join(format!("{prefix}-{}", artifact.sha256));
+            if !path.exists() {
+                fs::write(&path, bytes).unwrap();
+                fs::set_permissions(&path, fs::Permissions::from_mode(permissions)).unwrap();
+            }
+        }
+        let generation = lock.generation().unwrap();
+        let manifest = engine
+            .path()
+            .join("runtime-artifacts/generations")
+            .join(format!("{generation}.json"));
+        fs::write(&manifest, lock.canonical_json().unwrap()).unwrap();
+        fs::set_permissions(&manifest, fs::Permissions::from_mode(0o400)).unwrap();
+        (generation, kernel.sha256)
     }
 
     fn test_workspace_generation(
@@ -5114,6 +5221,70 @@ mod tests {
     }
 
     #[test]
+    fn artifact_retention_includes_active_staging_rollback_and_runner() {
+        let mut environment = project_environment();
+        let project_json = environment.project_spec_json.clone().unwrap();
+        let project_sha256 = environment.project_spec_sha256.clone().unwrap();
+        let active = "b".repeat(64);
+        let staging = "c".repeat(64);
+        let rollback = "d".repeat(64);
+        let runner = "e".repeat(64);
+        environment.active_workspace_generation = Some(test_workspace_generation_with_artifact(
+            &project_json,
+            &project_sha256,
+            &active,
+            b"active",
+        ));
+        environment.staging_artifact_generation = Some(staging.clone());
+        environment.staging_workspace_generation = Some(test_workspace_generation_with_artifact(
+            &project_json,
+            &project_sha256,
+            &staging,
+            b"staging",
+        ));
+        environment.rollback_workspace_generation = Some(test_workspace_generation_with_artifact(
+            &project_json,
+            &project_sha256,
+            &rollback,
+            b"rollback",
+        ));
+        environment.runner = Some(RunnerRecord {
+            process: ProcessIdentity {
+                pid: 42,
+                boot_id: "boot".to_owned(),
+                start_time_ticks: 7,
+                executable: PathBuf::from("/proc/self/exe"),
+                executable_file: crate::linux::path::FileIdentity {
+                    device: 1,
+                    inode: 2,
+                    size: 3,
+                    uid: 4,
+                    mode: 0o100500,
+                    links: 1,
+                },
+                executable_sha256: "f".repeat(64),
+            },
+            socket: SocketIdentity {
+                device: 1,
+                inode: 2,
+                uid: 4,
+                mode: 0o140600,
+            },
+            artifact_generation: runner.clone(),
+        });
+        let state = SupervisorState {
+            schema_version: SUPERVISOR_STATE_SCHEMA,
+            current: Some("dev".to_owned()),
+            environments: [("dev".to_owned(), environment)].into(),
+        };
+
+        assert_eq!(
+            referenced_artifact_generations(&state).unwrap(),
+            BTreeSet::from([active, staging, rollback, runner])
+        );
+    }
+
+    #[test]
     fn shared_content_reachability_rejects_conflicting_descriptor_sizes() {
         let mut first = project_environment();
         first.active_workspace_generation = Some(test_workspace_generation(
@@ -5440,10 +5611,17 @@ mod tests {
         root.ensure_dir(Path::new("runners"), 0o700).unwrap();
         let lock = SupervisorLock::acquire(&root).unwrap();
         let (store, _) = SupervisorStore::open(&root).unwrap();
+        let engine = PrivateRoot::open(&root_path.join("engine")).unwrap();
+        let (active_artifact, active_kernel) =
+            install_test_artifact_generation(&engine, b"current-kernel");
+        let (stale_artifact, stale_kernel) =
+            install_test_artifact_generation(&engine, b"stale-kernel");
         let mut environment = project_environment();
-        let active = test_workspace_generation(
+        environment.active_artifact_generation = Some(active_artifact.clone());
+        let active = test_workspace_generation_with_artifact(
             environment.project_spec_json.as_deref().unwrap(),
             environment.project_spec_sha256.as_deref().unwrap(),
+            &active_artifact,
             b"active",
         );
         let active_storage = oci_storage_generation(
@@ -5454,7 +5632,6 @@ mod tests {
         .unwrap();
         let stale_storage = "f".repeat(64);
         environment.active_workspace_generation = Some(active);
-        let engine = PrivateRoot::open(&root_path.join("engine")).unwrap();
         let paths = VmPaths::create(&engine, environment.id).unwrap();
         for storage in [&active_storage, &stale_storage] {
             let generation =
@@ -5512,6 +5689,20 @@ mod tests {
             assert!(blobs.join(digest.hex()).is_file());
         }
         assert!(!blobs.join(stale_content.hex()).exists());
+        let artifact_manifests = engine.path().join("runtime-artifacts/generations");
+        let artifact_blobs = engine.path().join("runtime-artifacts/blobs");
+        assert!(
+            artifact_manifests
+                .join(format!("{active_artifact}.json"))
+                .is_file()
+        );
+        assert!(artifact_blobs.join(format!("r-{active_kernel}")).is_file());
+        assert!(
+            !artifact_manifests
+                .join(format!("{stale_artifact}.json"))
+                .exists()
+        );
+        assert!(!artifact_blobs.join(format!("r-{stale_kernel}")).exists());
     }
 
     #[test]

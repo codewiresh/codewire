@@ -5,6 +5,7 @@
 //! leave only unreferenced blobs or bounded ingest files; it can never expose a
 //! partially committed runtime generation.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
@@ -23,6 +24,7 @@ const MAXIMUM_STORE_OBJECTS: usize = 4096;
 
 #[derive(Debug)]
 pub(crate) struct RuntimeArtifactStore {
+    store: PrivateRoot,
     blobs: PrivateRoot,
     generations: PrivateRoot,
 }
@@ -34,6 +36,7 @@ impl RuntimeArtifactStore {
         let blobs_path = store.ensure_dir(Path::new(BLOBS_DIRECTORY), 0o700)?;
         let generations_path = store.ensure_dir(Path::new(GENERATIONS_DIRECTORY), 0o700)?;
         Ok(Self {
+            store,
             blobs: PrivateRoot::open(&blobs_path)?,
             generations: PrivateRoot::open(&generations_path)?,
         })
@@ -83,6 +86,106 @@ impl RuntimeArtifactStore {
     ) -> Result<AdmittedArtifacts, RuntimeArtifactStoreError> {
         let lock = self.read_generation(generation)?;
         self.admit_cached(&lock).await
+    }
+
+    /// Removes only generation manifests absent from the complete durable
+    /// supervisor reachability set, then removes blobs no retained manifest
+    /// references. The supervisor singleton serializes this with admission and
+    /// runner replacement. Every namespace object and every retained blob is
+    /// admitted before the first unlink, so an unsafe object leaves the store
+    /// unchanged for diagnosis.
+    pub(crate) fn collect_unreferenced(
+        &self,
+        retained: &BTreeSet<String>,
+    ) -> Result<RuntimeArtifactCollection, RuntimeArtifactStoreError> {
+        for generation in retained {
+            validate_generation(generation)?;
+        }
+        self.validate_store_namespace()?;
+        let generation_objects = inventory_generations(&self.generations)?;
+        let blob_objects = inventory_blobs(&self.blobs)?;
+
+        let mut manifests = BTreeMap::new();
+        for object in generation_objects.iter().filter(|object| !object.temporary) {
+            let generation = object
+                .generation
+                .as_deref()
+                .ok_or_else(|| RuntimeArtifactStoreError::UnexpectedObject(object.path.clone()))?;
+            let lock = self.read_generation(generation)?;
+            if manifests.insert(generation.to_owned(), lock).is_some() {
+                return Err(RuntimeArtifactStoreError::GenerationCollision(
+                    generation.to_owned(),
+                ));
+            }
+        }
+
+        let mut retained_blobs = BTreeMap::new();
+        for generation in retained {
+            let lock = manifests
+                .get(generation)
+                .ok_or_else(|| RuntimeArtifactStoreError::MissingGeneration(generation.clone()))?;
+            retain_blob(&mut retained_blobs, &lock.cloud_hypervisor.artifact, true)?;
+            retain_blob(&mut retained_blobs, &lock.kernel, false)?;
+            retain_blob(&mut retained_blobs, &lock.initramfs, false)?;
+        }
+        for blob in retained_blobs.values() {
+            self.verify_blob(&blob.spec, blob.executable)?;
+        }
+
+        let mut removed_generations = Vec::new();
+        let mut removed_blobs = Vec::new();
+        let mut removed_temporary_objects = 0_usize;
+        let mut reclaimed_bytes = 0_u64;
+
+        // Manifests are the generation commit points. Remove unreachable
+        // manifests first so a crash can leave only harmless extra blobs,
+        // never a committed generation whose blob was already collected.
+        for object in generation_objects.into_iter().filter(|object| {
+            object.temporary
+                || object
+                    .generation
+                    .as_ref()
+                    .is_some_and(|generation| !retained.contains(generation))
+        }) {
+            if !self
+                .generations
+                .remove_private_regular(Path::new(&object.name), object.permissions)?
+            {
+                return Err(RuntimeArtifactStoreError::UnexpectedObject(object.path));
+            }
+            reclaimed_bytes = reclaimed_bytes.saturating_add(object.size);
+            if let Some(generation) = object.generation {
+                removed_generations.push(generation);
+            } else {
+                removed_temporary_objects += 1;
+            }
+        }
+
+        for object in blob_objects
+            .into_iter()
+            .filter(|object| object.temporary || !retained_blobs.contains_key(&object.name))
+        {
+            if !self
+                .blobs
+                .remove_private_regular(Path::new(&object.name), object.permissions)?
+            {
+                return Err(RuntimeArtifactStoreError::UnexpectedObject(object.path));
+            }
+            reclaimed_bytes = reclaimed_bytes.saturating_add(object.size);
+            if object.temporary {
+                removed_temporary_objects += 1;
+            } else {
+                removed_blobs.push(object.name);
+            }
+        }
+        removed_generations.sort();
+        removed_blobs.sort();
+        Ok(RuntimeArtifactCollection {
+            removed_generations,
+            removed_blobs,
+            removed_temporary_objects,
+            reclaimed_bytes,
+        })
     }
 
     async fn admit_cached(
@@ -280,18 +383,92 @@ impl RuntimeArtifactStore {
     }
 
     fn cleanup_stale_ingest(&self) -> Result<(), RuntimeArtifactStoreError> {
+        self.validate_store_namespace()?;
         let blob_ingest = inventory_blobs(&self.blobs)?;
         let generation_ingest = inventory_generations(&self.generations)?;
-        for (name, permissions) in blob_ingest {
+        for object in blob_ingest.into_iter().filter(|object| object.temporary) {
             self.blobs
-                .remove_private_regular(Path::new(&name), permissions)?;
+                .remove_private_regular(Path::new(&object.name), object.permissions)?;
         }
-        for name in generation_ingest {
+        for object in generation_ingest
+            .into_iter()
+            .filter(|object| object.temporary)
+        {
             self.generations
-                .remove_private_regular(Path::new(&name), 0o400)?;
+                .remove_private_regular(Path::new(&object.name), object.permissions)?;
         }
         Ok(())
     }
+
+    fn validate_store_namespace(&self) -> Result<(), RuntimeArtifactStoreError> {
+        let mut expected =
+            BTreeSet::from([BLOBS_DIRECTORY.to_owned(), GENERATIONS_DIRECTORY.to_owned()]);
+        for entry in
+            fs::read_dir(self.store.path()).map_err(|source| RuntimeArtifactStoreError::Io {
+                path: self.store.path().to_owned(),
+                source,
+            })?
+        {
+            let entry = entry.map_err(|source| RuntimeArtifactStoreError::Io {
+                path: self.store.path().to_owned(),
+                source,
+            })?;
+            let path = entry.path();
+            let name = entry
+                .file_name()
+                .into_string()
+                .map_err(|_| RuntimeArtifactStoreError::UnexpectedObject(path.clone()))?;
+            if !expected.remove(&name) {
+                return Err(RuntimeArtifactStoreError::UnexpectedObject(path));
+            }
+        }
+        if !expected.is_empty() {
+            return Err(RuntimeArtifactStoreError::UnexpectedObject(
+                self.store.path().to_owned(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RuntimeArtifactCollection {
+    pub(crate) removed_generations: Vec<String>,
+    pub(crate) removed_blobs: Vec<String>,
+    pub(crate) removed_temporary_objects: usize,
+    pub(crate) reclaimed_bytes: u64,
+}
+
+#[derive(Debug, Clone)]
+struct RetainedBlob {
+    spec: ArtifactSpec,
+    executable: bool,
+}
+
+fn retain_blob(
+    retained: &mut BTreeMap<String, RetainedBlob>,
+    spec: &ArtifactSpec,
+    executable: bool,
+) -> Result<(), RuntimeArtifactStoreError> {
+    let name = blob_name(spec, executable);
+    if let Some(existing) = retained.get(&name) {
+        if existing.spec.size != spec.size
+            || existing.spec.sha256 != spec.sha256
+            || existing.spec.architecture != spec.architecture
+            || existing.executable != executable
+        {
+            return Err(RuntimeArtifactStoreError::BlobReferenceCollision(name));
+        }
+        return Ok(());
+    }
+    retained.insert(
+        name,
+        RetainedBlob {
+            spec: spec.clone(),
+            executable,
+        },
+    );
+    Ok(())
 }
 
 fn copy_exact_blob(
@@ -345,8 +522,18 @@ fn copy_exact_blob(
         })
 }
 
-fn inventory_blobs(root: &PrivateRoot) -> Result<Vec<(String, u32)>, RuntimeArtifactStoreError> {
-    let mut ingest = Vec::new();
+#[derive(Debug)]
+struct StoreObject {
+    name: String,
+    path: PathBuf,
+    size: u64,
+    permissions: u32,
+    temporary: bool,
+    generation: Option<String>,
+}
+
+fn inventory_blobs(root: &PrivateRoot) -> Result<Vec<StoreObject>, RuntimeArtifactStoreError> {
+    let mut objects = Vec::new();
     let mut count = 0_usize;
     for entry in fs::read_dir(root.path()).map_err(|source| RuntimeArtifactStoreError::Io {
         path: root.path().to_owned(),
@@ -376,16 +563,29 @@ fn inventory_blobs(root: &PrivateRoot) -> Result<Vec<(String, u32)>, RuntimeArti
         } else {
             return Err(RuntimeArtifactStoreError::UnexpectedObject(path));
         };
-        root.open_regular(Path::new(&name), false, None, false, Some(permissions))?;
-        if temporary {
-            ingest.push((name, permissions));
-        }
+        let opened = root.open_regular(
+            Path::new(&name),
+            false,
+            None,
+            executable_from_blob_name(&name),
+            Some(permissions),
+        )?;
+        objects.push(StoreObject {
+            name,
+            path,
+            size: opened.identity().size,
+            permissions,
+            temporary,
+            generation: None,
+        });
     }
-    Ok(ingest)
+    Ok(objects)
 }
 
-fn inventory_generations(root: &PrivateRoot) -> Result<Vec<String>, RuntimeArtifactStoreError> {
-    let mut ingest = Vec::new();
+fn inventory_generations(
+    root: &PrivateRoot,
+) -> Result<Vec<StoreObject>, RuntimeArtifactStoreError> {
+    let mut objects = Vec::new();
     let mut count = 0_usize;
     for entry in fs::read_dir(root.path()).map_err(|source| RuntimeArtifactStoreError::Io {
         path: root.path().to_owned(),
@@ -404,10 +604,11 @@ fn inventory_generations(root: &PrivateRoot) -> Result<Vec<String>, RuntimeArtif
             .file_name()
             .into_string()
             .map_err(|_| RuntimeArtifactStoreError::UnexpectedObject(path.clone()))?;
-        let temporary = if valid_generation_manifest_name(&name) {
-            false
+        let (generation, temporary) = if let Some(generation) = generation_from_manifest_name(&name)
+        {
+            (Some(generation.to_owned()), false)
         } else if valid_ingest_name(&name, ".ingest-") {
-            true
+            (None, true)
         } else {
             return Err(RuntimeArtifactStoreError::UnexpectedObject(path));
         };
@@ -417,11 +618,16 @@ fn inventory_generations(root: &PrivateRoot) -> Result<Vec<String>, RuntimeArtif
         {
             return Err(RuntimeArtifactStoreError::UnexpectedObject(path));
         }
-        if temporary {
-            ingest.push(name);
-        }
+        objects.push(StoreObject {
+            name,
+            path,
+            size: opened.identity().size,
+            permissions: 0o400,
+            temporary,
+            generation,
+        });
     }
-    Ok(ingest)
+    Ok(objects)
 }
 
 fn blob_name(spec: &ArtifactSpec, executable: bool) -> String {
@@ -452,8 +658,13 @@ fn valid_blob_name(name: &str, prefix: char) -> bool {
         .is_some_and(valid_digest)
 }
 
-fn valid_generation_manifest_name(name: &str) -> bool {
-    name.strip_suffix(".json").is_some_and(valid_digest)
+fn generation_from_manifest_name(name: &str) -> Option<&str> {
+    name.strip_suffix(".json")
+        .filter(|value| valid_digest(value))
+}
+
+fn executable_from_blob_name(name: &str) -> bool {
+    valid_blob_name(name, 'x') || valid_ingest_name(name, ".ingest-x-")
 }
 
 fn valid_ingest_name(name: &str, prefix: &str) -> bool {
@@ -479,6 +690,10 @@ pub(crate) enum RuntimeArtifactStoreError {
     },
     #[error("runtime artifact generation hash collision: {0}")]
     GenerationCollision(String),
+    #[error("retained runtime artifact generation is missing: {0}")]
+    MissingGeneration(String),
+    #[error("runtime artifact blob has conflicting retained metadata: {0}")]
+    BlobReferenceCollision(String),
     #[error("runtime artifact blob differs from its admitted source: {0}")]
     BlobMismatch(PathBuf),
     #[error("runtime artifact store contains an unexpected object: {0}")]
@@ -539,6 +754,12 @@ mod tests {
         }
     }
 
+    fn lock_with_kernel(kernel: &[u8]) -> ArtifactLock {
+        let mut lock = lock();
+        lock.kernel = spec("boot/kernel", kernel);
+        lock
+    }
+
     fn admitted(path: &Path, bytes: &[u8], executable: bool) -> AdmittedArtifact {
         fs::write(path, bytes).unwrap();
         fs::set_permissions(
@@ -547,6 +768,30 @@ mod tests {
         )
         .unwrap();
         crate::artifact::admit_test_artifact(path, executable).unwrap()
+    }
+
+    fn publish_test_generation(
+        store: &RuntimeArtifactStore,
+        parent: &Path,
+        lock: &ArtifactLock,
+        kernel: &[u8],
+    ) -> String {
+        let source = parent.join(Uuid::new_v4().to_string());
+        fs::create_dir(&source).unwrap();
+        fs::set_permissions(&source, fs::Permissions::from_mode(0o700)).unwrap();
+        let cloud_hypervisor = admitted(&source.join("ch"), b"cloud-hypervisor", true);
+        let kernel = admitted(&source.join("kernel"), kernel, false);
+        let initramfs = admitted(&source.join("initramfs"), b"initramfs", false);
+        store
+            .publish_blob(&cloud_hypervisor, &lock.cloud_hypervisor.artifact, true)
+            .unwrap();
+        store.publish_blob(&kernel, &lock.kernel, false).unwrap();
+        store
+            .publish_blob(&initramfs, &lock.initramfs, false)
+            .unwrap();
+        let generation = lock.generation().unwrap();
+        store.publish_generation(&generation, lock).unwrap();
+        generation
     }
 
     #[test]
@@ -700,5 +945,145 @@ mod tests {
             store.read_generation(&generation),
             Err(RuntimeArtifactStoreError::InvalidManifest(value)) if value == generation
         ));
+    }
+
+    #[test]
+    fn collection_retains_exact_generations_and_shared_blobs() {
+        let (parent, engine) = private_root();
+        let store = RuntimeArtifactStore::create(&engine).unwrap();
+        let retained_lock = lock_with_kernel(b"current-kernel");
+        let retained =
+            publish_test_generation(&store, parent.path(), &retained_lock, b"current-kernel");
+        let stale_lock = lock_with_kernel(b"stale-kernel");
+        let stale = publish_test_generation(&store, parent.path(), &stale_lock, b"stale-kernel");
+        let blob_ingest = format!(".ingest-r-{}", Uuid::new_v4());
+        let generation_ingest = format!(".ingest-{}", Uuid::new_v4());
+        store
+            .blobs
+            .create_regular(Path::new(&blob_ingest), 0o400, true)
+            .unwrap();
+        store
+            .generations
+            .create_regular(Path::new(&generation_ingest), 0o400, true)
+            .unwrap();
+
+        let collected = store
+            .collect_unreferenced(&BTreeSet::from([retained.clone()]))
+            .unwrap();
+
+        assert_eq!(collected.removed_generations, vec![stale.clone()]);
+        assert_eq!(
+            collected.removed_blobs,
+            vec![blob_name(&stale_lock.kernel, false)]
+        );
+        assert_eq!(collected.removed_temporary_objects, 2);
+        assert!(collected.reclaimed_bytes > 0);
+        assert!(
+            store
+                .generations
+                .path()
+                .join(generation_manifest_name(&retained))
+                .is_file()
+        );
+        assert!(
+            !store
+                .generations
+                .path()
+                .join(generation_manifest_name(&stale))
+                .exists()
+        );
+        for (spec, executable) in [
+            (&retained_lock.cloud_hypervisor.artifact, true),
+            (&retained_lock.kernel, false),
+            (&retained_lock.initramfs, false),
+        ] {
+            assert!(
+                store
+                    .blobs
+                    .path()
+                    .join(blob_name(spec, executable))
+                    .is_file()
+            );
+        }
+        assert!(
+            !store
+                .blobs
+                .path()
+                .join(blob_name(&stale_lock.kernel, false))
+                .exists()
+        );
+    }
+
+    #[test]
+    fn collection_validates_the_whole_namespace_before_unlink() {
+        let (parent, engine) = private_root();
+        let store = RuntimeArtifactStore::create(&engine).unwrap();
+        let stale_lock = lock_with_kernel(b"stale-kernel");
+        let stale = publish_test_generation(&store, parent.path(), &stale_lock, b"stale-kernel");
+        let unknown = store.blobs.path().join("unknown");
+        fs::write(&unknown, b"leave me").unwrap();
+        fs::set_permissions(&unknown, fs::Permissions::from_mode(0o400)).unwrap();
+
+        assert!(matches!(
+            store.collect_unreferenced(&BTreeSet::new()),
+            Err(RuntimeArtifactStoreError::UnexpectedObject(path)) if path == unknown
+        ));
+        assert!(
+            store
+                .generations
+                .path()
+                .join(generation_manifest_name(&stale))
+                .is_file()
+        );
+        assert!(
+            store
+                .blobs
+                .path()
+                .join(blob_name(&stale_lock.kernel, false))
+                .is_file()
+        );
+    }
+
+    #[test]
+    fn missing_or_corrupt_retained_generation_fails_before_collection() {
+        let (parent, engine) = private_root();
+        let store = RuntimeArtifactStore::create(&engine).unwrap();
+        let retained_lock = lock_with_kernel(b"current-kernel");
+        let retained =
+            publish_test_generation(&store, parent.path(), &retained_lock, b"current-kernel");
+        let stale_lock = lock_with_kernel(b"stale-kernel");
+        let stale = publish_test_generation(&store, parent.path(), &stale_lock, b"stale-kernel");
+
+        let missing = "f".repeat(64);
+        assert!(matches!(
+            store.collect_unreferenced(&BTreeSet::from([missing.clone()])),
+            Err(RuntimeArtifactStoreError::MissingGeneration(value)) if value == missing
+        ));
+        assert!(
+            store
+                .generations
+                .path()
+                .join(generation_manifest_name(&stale))
+                .is_file()
+        );
+
+        let retained_kernel = store
+            .blobs
+            .path()
+            .join(blob_name(&retained_lock.kernel, false));
+        fs::set_permissions(&retained_kernel, fs::Permissions::from_mode(0o600)).unwrap();
+        fs::write(&retained_kernel, b"broken-kernel!").unwrap();
+        fs::set_permissions(&retained_kernel, fs::Permissions::from_mode(0o400)).unwrap();
+        assert!(matches!(
+            store.collect_unreferenced(&BTreeSet::from([retained])),
+            Err(RuntimeArtifactStoreError::BlobMismatch(path)) if path == retained_kernel
+        ));
+        assert!(
+            store
+                .generations
+                .path()
+                .join(generation_manifest_name(&stale))
+                .is_file()
+        );
     }
 }
