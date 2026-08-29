@@ -10,6 +10,10 @@ readonly LONGEST_SOCKET_SUFFIX='/engine/vms/00000000-0000-4000-8000-000000000000
 CW_BIN=''
 ARTIFACT_ROOT=''
 ARTIFACT_LOCK=''
+ORIGINAL_ARTIFACT_ROOT=''
+ORIGINAL_ARTIFACT_LOCK=''
+ADVANCED_ARTIFACT_ROOT=''
+ADVANCED_ARTIFACT_LOCK=''
 SMOKE_PARENT="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
 SMOKE_ROOT=''
 SMOKE_HOME=''
@@ -43,9 +47,10 @@ The smoke uses an isolated HOME and short private native state root, poisons
 the platform destination, installs Docker/Lima/QEMU tripwires, and creates a
 clean disposable Git fixture. Initial create permits direct registry egress;
 every later command receives dead proxy endpoints. It proves digest-pinned OCI
-workspace execution, create/info, bare run and shell, PTY behavior, saved
-output and nonzero status, stop/start persistence, offline disk/CPU/memory
-resize, supervisor crash recovery, and journaled exact deletion cleanup.
+workspace execution, create/info, bare run and shell, PTY behavior, saved output
+and nonzero status, cached-runtime restart after the installed artifact lock
+advances, offline disk/CPU/memory resize, supervisor crash recovery, and
+journaled exact deletion cleanup.
 USAGE
 }
 
@@ -120,7 +125,7 @@ done
   exit 2
 }
 
-for tool in awk cat chmod dirname e2fsck find git id jq mkdir mktemp python3 readlink realpath resize2fs rg script sha256sum sleep stat tail timeout touch tr uname; do
+for tool in awk cat chmod cp dirname e2fsck find git id jq mkdir mktemp python3 readlink realpath resize2fs rg script sha256sum sleep stat tail timeout touch tr uname; do
   require_cmd "$tool"
 done
 [[ "$(uname -s)" == Linux ]] || die 'the native local-environment smoke requires Linux'
@@ -139,6 +144,8 @@ require_absolute_canonical_file 'artifact lock' "$ARTIFACT_LOCK"
 [[ "$(dirname "$ARTIFACT_ROOT")" == "$(dirname "$ARTIFACT_LOCK")" ]] ||
   die 'artifact root and lock must share one staging parent'
 require_absolute_canonical_dir 'scratch parent' "$SMOKE_PARENT"
+ORIGINAL_ARTIFACT_ROOT="$ARTIFACT_ROOT"
+ORIGINAL_ARTIFACT_LOCK="$ARTIFACT_LOCK"
 
 SMOKE_ROOT="$(mktemp -d "$SMOKE_PARENT/.cwn.XXXXXX")"
 chmod 0700 "$SMOKE_ROOT"
@@ -441,6 +448,20 @@ try:
         if row is None or row[0] is None:
             raise SystemExit(1)
         print(json.loads(row[0])["process"]["pid"])
+    elif field == "active_artifact_generation":
+        row = connection.execute(
+            "SELECT active_artifact_generation FROM environments WHERE name = ?", (name,)
+        ).fetchone()
+        if row is None or row[0] is None:
+            raise SystemExit(1)
+        print(row[0])
+    elif field == "runner_artifact_generation":
+        row = connection.execute(
+            "SELECT runner_json FROM environments WHERE name = ?", (name,)
+        ).fetchone()
+        if row is None or row[0] is None:
+            raise SystemExit(1)
+        print(json.loads(row[0])["artifact_generation"])
     elif field == "empty":
         count = connection.execute("SELECT count(*) FROM environments").fetchone()[0]
         current = connection.execute(
@@ -495,6 +516,50 @@ try:
 finally:
     connection.close()
 PY
+}
+
+copy_advanced_artifact() {
+  local query="$1"
+  local destination="$2"
+  local mode="$3"
+  local relative source
+  relative="$(jq -er "$query | select(type == \"string\" and length > 0)" \
+    "$ORIGINAL_ARTIFACT_LOCK")" || die "original artifact lock is missing $query"
+  source="$(realpath -e -- "$ORIGINAL_ARTIFACT_ROOT/$relative")" ||
+    die "original artifact path is unavailable: $relative"
+  [[ "$source" == "$ORIGINAL_ARTIFACT_ROOT/"* && -f "$source" ]] ||
+    die "original artifact escaped its root: $relative"
+  cp -- "$source" "$ADVANCED_ARTIFACT_ROOT/$destination"
+  chmod "$mode" "$ADVANCED_ARTIFACT_ROOT/$destination"
+}
+
+prepare_advanced_artifact_source() {
+  local advanced_parent="$SMOKE_ROOT/a"
+  ADVANCED_ARTIFACT_ROOT="$advanced_parent/artifacts"
+  ADVANCED_ARTIFACT_LOCK="$advanced_parent/artifacts.lock.json"
+  mkdir -m 0700 "$advanced_parent" "$ADVANCED_ARTIFACT_ROOT"
+  copy_advanced_artifact '.cloud_hypervisor.path' 'advanced-cloud-hypervisor' 0500
+  copy_advanced_artifact '.kernel.path' 'advanced-kernel' 0400
+  copy_advanced_artifact '.initramfs.path' 'advanced-initramfs' 0400
+  jq '
+    .cloud_hypervisor.path = "advanced-cloud-hypervisor" |
+    .kernel.path = "advanced-kernel" |
+    .initramfs.path = "advanced-initramfs"
+  ' "$ORIGINAL_ARTIFACT_LOCK" >"$ADVANCED_ARTIFACT_LOCK"
+  chmod 0400 "$ADVANCED_ARTIFACT_LOCK"
+  require_absolute_canonical_dir 'advanced artifact root' "$ADVANCED_ARTIFACT_ROOT"
+  require_absolute_canonical_file 'advanced artifact lock' "$ADVANCED_ARTIFACT_LOCK"
+  [[ "$(dirname "$ADVANCED_ARTIFACT_ROOT")" == "$(dirname "$ADVANCED_ARTIFACT_LOCK")" ]] ||
+    die 'advanced artifact root and lock do not share one staging parent'
+  [[ "$(sha256sum "$ADVANCED_ARTIFACT_LOCK" | awk '{print $1}')" != \
+     "$(sha256sum "$ORIGINAL_ARTIFACT_LOCK" | awk '{print $1}')" ]] ||
+    die 'advanced artifact lock did not change'
+}
+
+runtime_artifact_manifest_count() {
+  find "$STATE_ROOT/engine/runtime-artifacts/generations" \
+    -mindepth 1 -maxdepth 1 -type f -name '*.json' -printf '%f\n' |
+    awk 'END { print NR }'
 }
 
 cleanup() {
@@ -575,6 +640,15 @@ done
   die 'native supervisor database contract drifted'
 [[ "$(native_database_value ownership)" == '64:6' ]] ||
   die 'native artifact generation or owned-object manifest was not recorded'
+ORIGINAL_ARTIFACT_GENERATION="$(native_database_value active_artifact_generation)"
+[[ "$ORIGINAL_ARTIFACT_GENERATION" =~ ^[0-9a-f]{64}$ ]] ||
+  die 'active runtime artifact generation is not an exact SHA-256 identity'
+[[ "$(native_database_value runner_artifact_generation)" == "$ORIGINAL_ARTIFACT_GENERATION" ]] ||
+  die 'initial runner did not use the active runtime artifact generation'
+[[ -f "$STATE_ROOT/engine/runtime-artifacts/generations/$ORIGINAL_ARTIFACT_GENERATION.json" ]] ||
+  die 'active runtime artifact generation manifest is missing'
+[[ "$(runtime_artifact_manifest_count)" == 1 ]] ||
+  die 'initial runtime artifact cache contains an unexpected generation'
 
 ENVIRONMENT_ID="$(native_database_value environment_id)"
 RUNNER_PID="$(native_database_value runner_pid)"
@@ -674,14 +748,41 @@ SESSION_ID="$(jq -er '
 run_cw logs "$NAME" "$SESSION_ID" --raw
 [[ "$(cat "$LAST_STDOUT")" == 'saved-nonzero' ]] || die 'saved session output was not readable'
 
-log 'checking stop/start workspace persistence'
+log 'checking stopped offline restart remains pinned after the installed artifact lock advances'
 run_cw env stop --local "$NAME" --output json
 jq -e '.state == "stopped"' "$LAST_STDOUT" >/dev/null || die 'native environment did not stop'
+STOPPED_RUNNER_PID="$(native_database_value runner_pid)"
+STOPPED_SUPERVISOR_PID="$(find_exact_supervisor_pid)" ||
+  die 'native supervisor process was not found before installed artifact advance'
+kill -KILL -- "$STOPPED_SUPERVISOR_PID"
+wait_for_pid_exit "$STOPPED_SUPERVISOR_PID" ||
+  die 'killed supervisor process did not exit before installed artifact advance'
+[[ "$(kill_recorded_process runner)" == "$STOPPED_RUNNER_PID" ]] ||
+  die 'pidfd runner kill did not target the stopped persisted process identity'
+wait_for_pid_death "$STOPPED_RUNNER_PID" ||
+  die 'stopped runner remained live before installed artifact advance'
+prepare_advanced_artifact_source
+ARTIFACT_ROOT="$ADVANCED_ARTIFACT_ROOT"
+ARTIFACT_LOCK="$ADVANCED_ARTIFACT_LOCK"
 run_cw env start --local "$NAME" --output json
 jq -e '.state == "running"' "$LAST_STDOUT" >/dev/null || die 'native environment did not restart'
+REPLACEMENT_RUNNER_PID="$(native_database_value runner_pid)"
+[[ "$REPLACEMENT_RUNNER_PID" != "$STOPPED_RUNNER_PID" && -d "/proc/$REPLACEMENT_RUNNER_PID" ]] ||
+  die 'installed artifact advance did not produce a replacement live runner'
+[[ "$(native_database_value active_artifact_generation)" == "$ORIGINAL_ARTIFACT_GENERATION" ]] ||
+  die 'restart substituted the installed runtime for the environment-pinned generation'
+[[ "$(native_database_value runner_artifact_generation)" == "$ORIGINAL_ARTIFACT_GENERATION" ]] ||
+  die 'replacement runner did not use the environment-pinned runtime generation'
+[[ "$(runtime_artifact_manifest_count)" == 1 ]] ||
+  die 'restart admitted the advanced installed artifact lock unexpectedly'
+[[ -f "$STATE_ROOT/engine/runtime-artifacts/generations/$ORIGINAL_ARTIFACT_GENERATION.json" ]] ||
+  die 'restart removed the environment-pinned runtime generation manifest'
+RUNNER_PID="$REPLACEMENT_RUNNER_PID"
 run_cw run --no-tty -- /bin/sh -lc 'cat /workspace/sentinel.txt; ./hello.sh'
-rg -qF 'persistence-ok' "$LAST_STDOUT" || die 'workspace sentinel did not survive stop/start'
-rg -qF 'native-workspace-ok' "$LAST_STDOUT" || die 'workspace snapshot did not survive stop/start'
+rg -qF 'persistence-ok' "$LAST_STDOUT" ||
+  die 'workspace sentinel did not survive cached-runtime restart'
+rg -qF 'native-workspace-ok' "$LAST_STDOUT" ||
+  die 'workspace snapshot did not survive cached-runtime restart'
 
 log 'checking journaled offline disk growth and restart-applied CPU and memory'
 run_cw env resize --local "$NAME" --cpu 3 --memory 12Gi --disk 21Gi --yes --force --output json
@@ -771,6 +872,10 @@ done
 [[ -z "$(find "$STATE_ROOT/engine/vms" -mindepth 1 -print -quit)" ]] || die 'owned VM disk or state remained after delete'
 [[ -z "$(find "$STATE_ROOT/engine/trash" -mindepth 1 -print -quit)" ]] ||
   die 'owned VM trash generation remained after delete'
+[[ -z "$(find "$STATE_ROOT/engine/runtime-artifacts/generations" -mindepth 1 -print -quit)" ]] ||
+  die 'runtime artifact generation remained after delete'
+[[ -z "$(find "$STATE_ROOT/engine/runtime-artifacts/blobs" -mindepth 1 -print -quit)" ]] ||
+  die 'runtime artifact blob remained after delete'
 [[ "$(native_database_value empty)" == yes ]] ||
   die 'native environment state entry remained after delete'
 [[ "$(native_database_value journal_complete)" == yes ]] ||
