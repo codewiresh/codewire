@@ -44,6 +44,25 @@ pub(crate) fn apply_setup_layers(
     verified: &VerifiedSetupContents,
     generation_path: &Path,
 ) -> Result<ApplyOutcome, SetupApplyError> {
+    apply_setup_layers_with(
+        input,
+        header,
+        verified,
+        generation_path,
+        copy_regular_payload,
+    )
+}
+
+fn apply_setup_layers_with<W>(
+    input: &mut (impl Read + Seek),
+    header: &SetupHeader,
+    verified: &VerifiedSetupContents,
+    generation_path: &Path,
+    write_payload: W,
+) -> Result<ApplyOutcome, SetupApplyError>
+where
+    W: FnMut(&mut File, &mut dyn Read, u64) -> io::Result<u64>,
+{
     if header.layers.len() != verified.layer_uncompressed_bytes.len()
         || header.layers.len() != verified.layer_plans.len()
     {
@@ -79,7 +98,7 @@ pub(crate) fn apply_setup_layers(
         ),
     )?;
     let lower = open_directory_at(&generation, LOWER_NAME)?;
-    let mut writer = LayerWriter::new(lower);
+    let mut writer = LayerWriter::new(lower, write_payload);
 
     for ((layer, uncompressed_bytes), plan) in header
         .layers
@@ -98,6 +117,10 @@ pub(crate) fn apply_setup_layers(
     )?;
     publish_completion(&generation, &marker)?;
     Ok(ApplyOutcome::Applied)
+}
+
+fn copy_regular_payload(output: &mut File, input: &mut dyn Read, bytes: u64) -> io::Result<u64> {
+    io::copy(&mut input.take(bytes), output)
 }
 
 pub(crate) fn verify_completed_setup_generation(
@@ -121,13 +144,16 @@ pub(crate) fn verify_completed_setup_generation(
     }
 }
 
-fn replay_layer(
+fn replay_layer<W>(
     input: &mut (impl Read + Seek),
     layer: &SetupLayer,
     uncompressed_bytes: u64,
     plan: &VerifiedLayerPlan,
-    writer: &mut LayerWriter,
-) -> Result<(), SetupApplyError> {
+    writer: &mut LayerWriter<W>,
+) -> Result<(), SetupApplyError>
+where
+    W: FnMut(&mut File, &mut dyn Read, u64) -> io::Result<u64>,
+{
     input
         .seek(SeekFrom::Start(layer.object.offset))
         .map_err(|source| SetupApplyError::Io {
@@ -169,20 +195,25 @@ fn map_replay_error(error: ReplayError<SetupApplyError>) -> SetupApplyError {
     }
 }
 
-struct LayerWriter {
+struct LayerWriter<W> {
     root: OwnedFd,
     directories: Vec<DirectoryMetadata>,
     removal: RemovalBudget,
     temp_counter: u64,
+    write_payload: W,
 }
 
-impl LayerWriter {
-    fn new(root: OwnedFd) -> Self {
+impl<W> LayerWriter<W>
+where
+    W: FnMut(&mut File, &mut dyn Read, u64) -> io::Result<u64>,
+{
+    fn new(root: OwnedFd, write_payload: W) -> Self {
         Self {
             root,
             directories: Vec::new(),
             removal: RemovalBudget::default(),
             temp_counter: 0,
+            write_payload,
         }
     }
 
@@ -271,12 +302,12 @@ impl LayerWriter {
         )?;
         let mut file = File::from(descriptor);
         let result = (|| {
-            let mut limited = data.take(entry.size());
-            let copied =
-                io::copy(&mut limited, &mut file).map_err(|source| SetupApplyError::Io {
+            let copied = (self.write_payload)(&mut file, data, entry.size()).map_err(|source| {
+                SetupApplyError::Io {
                     action: "write admitted OCI file payload",
                     source,
-                })?;
+                }
+            })?;
             if copied != entry.size() {
                 return Err(SetupApplyError::TruncatedEntryData);
             }
@@ -367,7 +398,10 @@ impl LayerWriter {
     }
 }
 
-impl EntryConsumer for LayerWriter {
+impl<W> EntryConsumer for LayerWriter<W>
+where
+    W: FnMut(&mut File, &mut dyn Read, u64) -> io::Result<u64>,
+{
     type Error = SetupApplyError;
 
     fn consume(&mut self, entry: &AdmittedEntry, data: &mut dyn Read) -> Result<(), Self::Error> {
@@ -818,7 +852,7 @@ mod tests {
                 Mode::empty(),
             ),
         )?;
-        let mut writer = LayerWriter::new(root);
+        let mut writer = LayerWriter::new(root, copy_regular_payload);
         writer.apply_whiteouts(&scanned.plan)?;
         replay_tar(
             &mut Cursor::new(bytes),
@@ -832,28 +866,43 @@ mod tests {
     }
 
     fn setup_pack(layer: Vec<u8>) -> (SetupHeader, Vec<u8>) {
-        setup_pack_with_encoding(layer, LayerEncoding::Tar)
+        setup_pack_with_layers(vec![(layer, LayerEncoding::Tar)])
     }
 
     fn gzip_setup_pack(layer: Vec<u8>) -> (SetupHeader, Vec<u8>) {
-        setup_pack_with_encoding(layer, LayerEncoding::Gzip)
+        setup_pack_with_layers(vec![(layer, LayerEncoding::Gzip)])
     }
 
-    fn setup_pack_with_encoding(layer: Vec<u8>, encoding: LayerEncoding) -> (SetupHeader, Vec<u8>) {
+    fn setup_pack_with_layers(layers: Vec<(Vec<u8>, LayerEncoding)>) -> (SetupHeader, Vec<u8>) {
+        setup_pack_with_manifest(layers, b"synthetic manifest")
+    }
+
+    fn setup_pack_with_manifest(
+        layers: Vec<(Vec<u8>, LayerEncoding)>,
+        manifest: &[u8],
+    ) -> (SetupHeader, Vec<u8>) {
         let project = br#"{"image":"registry.example/workspace"}"#;
         let config = br#"{"architecture":"amd64","os":"linux"}"#;
         let project_digest = Sha256Value::calculate(project);
-        let manifest_digest = Sha256Value::calculate(b"synthetic manifest");
-        let stored_layer = match encoding {
-            LayerEncoding::Tar => layer.clone(),
-            LayerEncoding::Gzip => {
-                let mut encoder =
-                    flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
-                encoder.write_all(&layer).unwrap();
-                encoder.finish().unwrap()
-            }
-            LayerEncoding::Zstd => unreachable!(),
-        };
+        let manifest_digest = Sha256Value::calculate(manifest);
+        let stored_layers = layers
+            .iter()
+            .map(|(layer, encoding)| {
+                let stored = match encoding {
+                    LayerEncoding::Tar => layer.clone(),
+                    LayerEncoding::Gzip => {
+                        let mut encoder = flate2::write::GzEncoder::new(
+                            Vec::new(),
+                            flate2::Compression::default(),
+                        );
+                        encoder.write_all(layer).unwrap();
+                        encoder.finish().unwrap()
+                    }
+                    LayerEncoding::Zstd => unreachable!(),
+                };
+                (layer, stored, *encoding)
+            })
+            .collect::<Vec<_>>();
         let header = SetupHeader::layout(
             oci_root_generation(project_digest, manifest_digest, SetupArchitecture::Amd64),
             manifest_digest,
@@ -866,21 +915,26 @@ mod tests {
                 size: config.len() as u64,
                 sha256: Sha256Value::calculate(config),
             },
-            vec![SetupLayerBlob {
-                blob: SetupBlob {
-                    size: stored_layer.len() as u64,
-                    sha256: Sha256Value::calculate(&stored_layer),
-                },
-                diff_id: Sha256Value::calculate(&layer),
-                encoding,
-            }],
+            stored_layers
+                .iter()
+                .map(|(layer, stored, encoding)| SetupLayerBlob {
+                    blob: SetupBlob {
+                        size: stored.len() as u64,
+                        sha256: Sha256Value::calculate(stored),
+                    },
+                    diff_id: Sha256Value::calculate(layer),
+                    encoding: *encoding,
+                })
+                .collect(),
         )
         .unwrap();
         let mut pack = vec![0_u8; header.total_bytes as usize];
         pack[..SETUP_HEADER_LEN].copy_from_slice(&header.encode().unwrap());
         copy_object(&mut pack, header.project, project);
         copy_object(&mut pack, header.config, config);
-        copy_object(&mut pack, header.layers[0].object, &stored_layer);
+        for (descriptor, (_, stored, _)) in header.layers.iter().zip(&stored_layers) {
+            copy_object(&mut pack, descriptor.object, stored);
+        }
         (header, pack)
     }
 
@@ -1153,5 +1207,208 @@ mod tests {
             .is_err()
         );
         assert!(!generation.path().join("rootfs.complete").exists());
+    }
+
+    #[test]
+    fn image_deletions_apply_only_to_the_new_completed_generation() {
+        let base = archive(&[
+            EntryFixture {
+                path: "obsolete",
+                kind: tar::EntryType::Regular,
+                link: None,
+                contents: b"old",
+            },
+            EntryFixture {
+                path: "opaque/stale",
+                kind: tar::EntryType::Regular,
+                link: None,
+                contents: b"stale",
+            },
+            EntryFixture {
+                path: "retained",
+                kind: tar::EntryType::Regular,
+                link: None,
+                contents: b"retained",
+            },
+        ]);
+        let deletion = archive(&[
+            EntryFixture {
+                path: ".wh.obsolete",
+                kind: tar::EntryType::Regular,
+                link: None,
+                contents: b"",
+            },
+            EntryFixture {
+                path: "opaque/.wh..wh..opq",
+                kind: tar::EntryType::Regular,
+                link: None,
+                contents: b"",
+            },
+            EntryFixture {
+                path: "opaque/new",
+                kind: tar::EntryType::Regular,
+                link: None,
+                contents: b"new",
+            },
+        ]);
+        let (prior_header, prior_pack) =
+            setup_pack_with_manifest(vec![(base.clone(), LayerEncoding::Tar)], b"prior manifest");
+        let (candidate_header, candidate_pack) = setup_pack_with_manifest(
+            vec![(base, LayerEncoding::Tar), (deletion, LayerEncoding::Tar)],
+            b"candidate manifest",
+        );
+        assert_ne!(
+            prior_header.root_generation,
+            candidate_header.root_generation
+        );
+        let prior_verified =
+            verify_setup_contents(&mut Cursor::new(&prior_pack), &prior_header).unwrap();
+        let candidate_verified =
+            verify_setup_contents(&mut Cursor::new(&candidate_pack), &candidate_header).unwrap();
+        let prior = tempfile::tempdir().unwrap();
+        let candidate = tempfile::tempdir().unwrap();
+
+        apply_setup_layers(
+            &mut Cursor::new(&prior_pack),
+            &prior_header,
+            &prior_verified,
+            prior.path(),
+        )
+        .unwrap();
+        apply_setup_layers(
+            &mut Cursor::new(&candidate_pack),
+            &candidate_header,
+            &candidate_verified,
+            candidate.path(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            fs::read(prior.path().join("lower/obsolete")).unwrap(),
+            b"old"
+        );
+        assert_eq!(
+            fs::read(prior.path().join("lower/opaque/stale")).unwrap(),
+            b"stale"
+        );
+        assert!(!candidate.path().join("lower/obsolete").exists());
+        assert!(!candidate.path().join("lower/opaque/stale").exists());
+        assert_eq!(
+            fs::read(candidate.path().join("lower/opaque/new")).unwrap(),
+            b"new"
+        );
+        assert_eq!(
+            fs::read(candidate.path().join("lower/retained")).unwrap(),
+            b"retained"
+        );
+        verify_completed_setup_generation(prior.path(), prior_header.root_generation).unwrap();
+        verify_completed_setup_generation(candidate.path(), candidate_header.root_generation)
+            .unwrap();
+    }
+
+    #[test]
+    fn enospc_and_crash_residue_retry_without_displacing_a_completed_generation() {
+        let prior_layer = archive(&[EntryFixture {
+            path: "prior-only",
+            kind: tar::EntryType::Regular,
+            link: None,
+            contents: b"retained",
+        }]);
+        let (prior_header, prior_pack) = setup_pack(prior_layer);
+        let prior_verified =
+            verify_setup_contents(&mut Cursor::new(&prior_pack), &prior_header).unwrap();
+        let prior = tempfile::tempdir().unwrap();
+        assert_eq!(
+            apply_setup_layers(
+                &mut Cursor::new(&prior_pack),
+                &prior_header,
+                &prior_verified,
+                prior.path(),
+            )
+            .unwrap(),
+            ApplyOutcome::Applied
+        );
+        let prior_marker = fs::read(prior.path().join("rootfs.complete")).unwrap();
+
+        let candidate_layer = archive(&[EntryFixture {
+            path: "candidate",
+            kind: tar::EntryType::Regular,
+            link: None,
+            contents: b"candidate-payload",
+        }]);
+        let (candidate_header, candidate_pack) = setup_pack(candidate_layer);
+        let candidate_verified =
+            verify_setup_contents(&mut Cursor::new(&candidate_pack), &candidate_header).unwrap();
+        let candidate = tempfile::tempdir().unwrap();
+
+        let failure = apply_setup_layers_with(
+            &mut Cursor::new(&candidate_pack),
+            &candidate_header,
+            &candidate_verified,
+            candidate.path(),
+            |output, input, _bytes| {
+                let copied = io::copy(&mut input.take(4), output)?;
+                assert_eq!(copied, 4);
+                Err(io::Error::from_raw_os_error(libc::ENOSPC))
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(
+            failure,
+            SetupApplyError::Io { source, .. }
+                if source.raw_os_error() == Some(libc::ENOSPC)
+        ));
+        assert!(!candidate.path().join("rootfs.complete").exists());
+        assert!(
+            fs::read_dir(candidate.path().join("lower"))
+                .unwrap()
+                .all(|entry| !entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".codewire-layer-"))
+        );
+        assert_eq!(
+            fs::read(prior.path().join("lower/prior-only")).unwrap(),
+            b"retained"
+        );
+        assert_eq!(
+            fs::read(prior.path().join("rootfs.complete")).unwrap(),
+            prior_marker
+        );
+
+        fs::write(candidate.path().join("lower/crash-residue"), b"incomplete").unwrap();
+        fs::write(
+            candidate.path().join(".rootfs.complete.tmp"),
+            b"partial-marker",
+        )
+        .unwrap();
+
+        assert_eq!(
+            apply_setup_layers(
+                &mut Cursor::new(&candidate_pack),
+                &candidate_header,
+                &candidate_verified,
+                candidate.path(),
+            )
+            .unwrap(),
+            ApplyOutcome::Applied
+        );
+        assert_eq!(
+            fs::read(candidate.path().join("lower/candidate")).unwrap(),
+            b"candidate-payload"
+        );
+        assert!(!candidate.path().join("lower/crash-residue").exists());
+        assert!(!candidate.path().join(".rootfs.complete.tmp").exists());
+        verify_completed_setup_generation(candidate.path(), candidate_header.root_generation)
+            .unwrap();
+        assert_eq!(
+            fs::read(prior.path().join("lower/prior-only")).unwrap(),
+            b"retained"
+        );
+        assert_eq!(
+            fs::read(prior.path().join("rootfs.complete")).unwrap(),
+            prior_marker
+        );
     }
 }
