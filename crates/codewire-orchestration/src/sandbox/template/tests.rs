@@ -1082,7 +1082,7 @@ mod tests {
         }
         assert!(
             !decoded.contains("[[credentials]]"),
-            "init-data should use post-boot CDH REST resource fetch instead of credential prefetch:\n{decoded}"
+            "init-data should leave runtime resource retrieval to Agent-only CDH instead of credential prefetch:\n{decoded}"
         );
         let init_data: toml::Value = toml::from_str(&decoded).unwrap();
         let data = init_data["data"].as_table().unwrap();
@@ -1260,6 +1260,15 @@ mod tests {
             cdh["kbc"]["kbs_cert"].as_str(),
             Some("-----BEGIN CERTIFICATE-----\nCODEWIRE-DEV-CA\n-----END CERTIFICATE-----")
         );
+        assert_eq!(
+            cdh["protected_resource_uri_prefixes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|value| value.as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["kbs:///default/codewire-workspace-luks/"]
+        );
         assert!(
             cdh.get("image").is_none(),
             "a partial image table would suppress agent.image_registry_auth"
@@ -1416,7 +1425,7 @@ mod tests {
             server_namespace: "dev".into(),
             ..Default::default()
         };
-        let want_kernel_params = "agent.image_registry_auth=kbs:///default/containers/auth agent.image_resource_timeout_secs=300 agent.guest_components_rest_api=resource agent.aa_kbc_params=cc_kbc::http://codewire-trustee-kbs.codewire-trustee.svc.cluster.local:8080 agent.log_vport=1025";
+        let want_kernel_params = "agent.image_registry_auth=kbs:///default/containers/auth agent.image_resource_timeout_secs=300 agent.guest_components_procs=confidential-data-hub agent.aa_kbc_params=cc_kbc::http://codewire-trustee-kbs.codewire-trustee.svc.cluster.local:8080 agent.log_vport=1025";
 
         let rendered = render_sandbox_template("codewire-runtime", &opts);
         let annotations = rendered["spec"]["podTemplate"]["metadata"]["annotations"]
@@ -1545,7 +1554,7 @@ mod tests {
                 "http://codewire-trustee-kbs.codewire-trustee.svc.cluster.local:8080".into(),
             ..Default::default()
         };
-        let want_kernel_params = "agent.image_resource_timeout_secs=300 agent.guest_components_rest_api=resource agent.aa_kbc_params=cc_kbc::http://codewire-trustee-kbs.codewire-trustee.svc.cluster.local:8080 agent.log_vport=1025";
+        let want_kernel_params = "agent.image_resource_timeout_secs=300 agent.guest_components_procs=confidential-data-hub agent.aa_kbc_params=cc_kbc::http://codewire-trustee-kbs.codewire-trustee.svc.cluster.local:8080 agent.log_vport=1025";
 
         let rendered = render_sandbox_template("codewire-runtime", &opts);
         let annotations = rendered["spec"]["podTemplate"]["metadata"]["annotations"]

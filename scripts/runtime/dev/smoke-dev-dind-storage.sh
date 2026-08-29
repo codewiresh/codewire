@@ -300,6 +300,7 @@ url = "${COCO_KBS_URL}"
 
 "cdh.toml" = '''
 socket = "unix:///run/confidential-containers/cdh.sock"
+protected_resource_uri_prefixes = ["kbs:///default/codewire-workspace-luks/"]
 
 [kbc]
 name = "cc_kbc"
@@ -460,7 +461,7 @@ YAML
 
 if [[ "$COCO_ANNOTATIONS" == "1" ]]; then
   COCO_INIT_DATA="$(build_coco_init_data)"
-  COCO_KERNEL_PARAMS="agent.guest_components_rest_api=resource agent.aa_kbc_params=cc_kbc::${COCO_KBS_URL} agent.log_vport=1025"
+  COCO_KERNEL_PARAMS="agent.guest_components_procs=confidential-data-hub agent.aa_kbc_params=cc_kbc::${COCO_KBS_URL} agent.log_vport=1025"
   cat >>"$MANIFEST" <<YAML
   annotations:
     io.katacontainers.config.hypervisor.cc_init_data: ${COCO_INIT_DATA}

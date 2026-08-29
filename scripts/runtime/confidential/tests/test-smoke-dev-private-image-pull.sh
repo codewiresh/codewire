@@ -47,7 +47,7 @@ case "$*" in
       jq -cn '{status:{phase:"Pending",conditions:[{type:"PodReadyToStartContainers",status:"False"}],initContainerStatuses:[{name:"secure-scratch-init",state:{waiting:{reason:"PodInitializing"}}}],containerStatuses:[{name:"version",state:{waiting:{reason:"PodInitializing"}}}]}}'
     elif [[ "${FAKE_POD_MODE:-success}" == "init_failure" ]]; then
       jq -cn '{status:{phase:"Pending",initContainerStatuses:[{name:"secure-scratch-init",state:{waiting:{reason:"CreateContainerError"}}}],containerStatuses:[{name:"version",state:{waiting:{reason:"PodInitializing"}}}]}}'
-    elif [[ "${FAKE_POD_MODE:-success}" == "resource_failure" ]]; then
+    elif [[ "${FAKE_POD_MODE:-success}" == "rest_exposed" ]]; then
       jq -cn '{status:{phase:"Failed",containerStatuses:[{name:"version",state:{terminated:{exitCode:22}}}]}}'
     elif [[ "${FAKE_POD_MODE:-success}" == "failure" ]]; then
       jq -cn '{status:{phase:"Pending",containerStatuses:[{name:"version",state:{waiting:{reason:"CreateContainerError"}}}]}}'
@@ -64,11 +64,10 @@ case "$*" in
     ;;
   '-n dev-sandboxes logs codewire-private-pull-be31063a -c version')
     printf 'cw 0.8.1\n'
-    if [[ "${FAKE_LOG_MODE:-success}" == "resource_failure" ]]; then
-      printf 'cdh_http_status=500\n'
+    if [[ "${FAKE_LOG_MODE:-success}" == "rest_exposed" ]]; then
+      printf 'coco_rest_disabled=listener_present\n'
     else
-      printf 'cdh_http_status=200\n'
-      printf 'cdh_test_resource=passed\n'
+      printf 'coco_rest_disabled=passed\n'
     fi
     ;;
   '-n dev-sandboxes delete pod codewire-private-pull-be31063a --ignore-not-found --wait=false'|\
@@ -128,6 +127,10 @@ manifest="$FAKE_KUBECTL_CAPTURE/probe.yaml"
 [[ "$(yq -r 'select(.kind == "Pod") | .metadata.annotations."io.katacontainers.config.hypervisor.kernel_params"' "$manifest")" == \
   *'agent.image_resource_timeout_secs=300'* ]]
 [[ "$(yq -r 'select(.kind == "Pod") | .metadata.annotations."io.katacontainers.config.hypervisor.kernel_params"' "$manifest")" == \
+  *'agent.guest_components_procs=confidential-data-hub'* ]]
+[[ "$(yq -r 'select(.kind == "Pod") | .metadata.annotations."io.katacontainers.config.hypervisor.kernel_params"' "$manifest")" != \
+  *'agent.guest_components_rest_api='* ]]
+[[ "$(yq -r 'select(.kind == "Pod") | .metadata.annotations."io.katacontainers.config.hypervisor.kernel_params"' "$manifest")" == \
   *'agent.log_vport=1025'* ]]
 [[ "$(yq -r 'select(.kind == "Pod") | .spec.volumes[] | select(.name == "secure-scratch") | .emptyDir' "$manifest")" == \
   '{}' ]]
@@ -169,6 +172,8 @@ fi
 cdh_config="$(yq -p=toml -r '.data."cdh.toml"' <<<"$decoded")"
 [[ "$(yq -p=toml -r '.kbc.kbs_cert' <<<"$cdh_config")" == \
   $'-----BEGIN CERTIFICATE-----\nPUBLIC-TEST-CA\n-----END CERTIFICATE-----' ]]
+[[ "$(yq -p=toml -r '.protected_resource_uri_prefixes[0]' <<<"$cdh_config")" == \
+  'kbs:///default/codewire-workspace-luks/' ]]
 if rg -q '^\[image\]|extra_root_certificates' <<<"$decoded"; then
   printf '%s\n' 'private pull probe emitted a partial image table that suppresses kernel auth' >&2
   exit 1
@@ -199,7 +204,7 @@ KUBECTL_BIN="$TMP/kubectl" \
 KUBE_CONTEXT='' \
 PRIVATE_PULL_PROBE_UUID='be31063a-8ec8-46d5-aa17-75cda1729370' \
 EVIDENCE_DIR="$product_evidence" \
-  "$SCRIPT" --wait-seconds 301 --image-role product --assert-test-resource
+  "$SCRIPT" --wait-seconds 301 --image-role product --assert-rest-disabled
 [[ "$(yq -r 'select(.kind == "Pod") | .spec.initContainers[0].image' "$manifest")" == \
   'nexus.example.invalid/oci-approved/codewire/gateway@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' ]]
 [[ "$(yq -r 'select(.kind == "Pod") | .spec.containers[0].image' "$manifest")" == \
@@ -208,10 +213,10 @@ EVIDENCE_DIR="$product_evidence" \
 [[ "$(yq -r 'select(.kind == "Pod") | .spec.containers[1].name' "$manifest")" == 'dind' ]]
 [[ "$(yq -r 'select(.kind == "Pod") | .spec.containers[1].resources.limits.memory' "$manifest")" == '4Gi' ]]
 rg -qF 'http://127.0.0.1:8006/cdh/resource/' "$manifest"
-rg -qF 'curl --max-time 310' "$manifest"
-rg -qF 'cdh_http_status=%s' "$manifest"
+rg -qF 'curl --max-time 3' "$manifest"
+rg -qF 'coco_rest_disabled=passed' "$manifest"
 product_script="$(yq -r 'select(.kind == "Pod") | .spec.containers[0].args[1]' "$manifest")"
-rg -qF 'response="$(curl ' <<<"$product_script"
+rg -qF 'status=$?' <<<"$product_script"
 if rg -qF '/tmp/cdh-resource.out' <<<"$product_script"; then
   printf '%s\n' 'resource probe writes through the read-only workspace root filesystem' >&2
   exit 1
@@ -225,20 +230,19 @@ jq -e '
     .cidr == "0.0.0.0/0" and (.except | index("10.0.0.0/8")))
 ' <<<"$workspace_policy_json" >/dev/null
 
-resource_failure_evidence="$TMP/resource-failure"
-if FAKE_POD_MODE=resource_failure \
-  FAKE_LOG_MODE=resource_failure \
+rest_exposed_evidence="$TMP/rest-exposed"
+if FAKE_POD_MODE=rest_exposed \
+  FAKE_LOG_MODE=rest_exposed \
   KUBECTL_BIN="$TMP/kubectl" \
   KUBE_CONTEXT='' \
   PRIVATE_PULL_PROBE_UUID='be31063a-8ec8-46d5-aa17-75cda1729370' \
-  EVIDENCE_DIR="$resource_failure_evidence" \
-    "$SCRIPT" --wait-seconds 301 --image-role workspace --assert-test-resource \
-      >"$TMP/resource-failure.out" 2>"$TMP/resource-failure.err"; then
-  printf '%s\n' 'failed CDH resource request unexpectedly passed' >&2
+  EVIDENCE_DIR="$rest_exposed_evidence" \
+    "$SCRIPT" --wait-seconds 301 --image-role workspace --assert-rest-disabled \
+      >"$TMP/rest-exposed.out" 2>"$TMP/rest-exposed.err"; then
+  printf '%s\n' 'exposed CDH REST listener unexpectedly passed' >&2
   exit 1
 fi
-rg -F 'stage=resource image_role=workspace http_status=500' "$TMP/resource-failure.err" >/dev/null
-rg -F 'cdh_http_status=500' "$resource_failure_evidence/container.log" >/dev/null
+rg -F 'coco_rest_disabled=listener_present' "$rest_exposed_evidence/container.log" >/dev/null
 
 dind_evidence="$TMP/dind"
 KUBECTL_BIN="$TMP/kubectl" \

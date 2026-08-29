@@ -214,7 +214,10 @@ pub(super) fn kata_coco_kernel_params_annotation(
     params.push(format!(
         "agent.image_resource_timeout_secs={KATA_COCO_IMAGE_RESOURCE_TIMEOUT_SECS}"
     ));
-    params.push("agent.guest_components_rest_api=resource".to_string());
+    // The Pod shares the guest network namespace. Starting api-server-rest
+    // would therefore expose its unauthenticated resource and attestation
+    // routes to workload containers. The Agent needs AA and CDH only.
+    params.push("agent.guest_components_procs=confidential-data-hub".to_string());
     params.push(format!("agent.aa_kbc_params=cc_kbc::{kbs_url}"));
     // runtime-rs already forwards the guest agent's bounded INFO+ log stream
     // from this vsock port. Without the guest listener, CDH failures collapse

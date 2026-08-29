@@ -6,6 +6,8 @@ use base64::Engine;
 use crc32fast::Hasher as Crc32Hasher;
 use sha2::{Digest, Sha256};
 
+use crate::confidential_storage::KBS_RESOURCE_PREFIX;
+
 const CODEWIRE_KATA_AGENT_POLICY_REGO: &str = r#"package agent_policy
 
 # Codewire-owned base policy for commodity Kata Agent Policy and confidential
@@ -97,7 +99,9 @@ pub(super) fn build_codewire_kata_policy_init_data(
         payload.push_str("\ncert = ");
         payload.push_str(&toml_string(kbs_ca_pem));
     }
-    payload.push_str("\n'''\n\n\"cdh.toml\" = '''\nsocket = \"unix:///run/confidential-containers/cdh.sock\"\n\n[kbc]\nname = \"cc_kbc\"\nurl = ");
+    payload.push_str("\n'''\n\n\"cdh.toml\" = '''\nsocket = \"unix:///run/confidential-containers/cdh.sock\"\nprotected_resource_uri_prefixes = [");
+    payload.push_str(&toml_string(&format!("kbs:///{KBS_RESOURCE_PREFIX}/")));
+    payload.push_str("]\n\n[kbc]\nname = \"cc_kbc\"\nurl = ");
     payload.push_str(&toml_string(kbs_url));
     if !kbs_ca_pem.is_empty() {
         payload.push_str("\nkbs_cert = ");

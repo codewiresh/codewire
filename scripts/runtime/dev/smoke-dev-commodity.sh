@@ -251,15 +251,14 @@ Environment:
                            the SandboxTemplate must carry CoCo kernel params
                            for guest registry auth via this KBS resource URI.
   EXPECTED_KATA_COCO_TEST_RESOURCE_URI
-                           Optional; when set, the smoke fetches this
-                           non-sensitive Trustee/KBS resource through the
-                           guest CDH REST API after boot.
+                           Optional; commodity fetches this non-sensitive KBS
+                           resource through guest CDH REST. Confidential uses
+                           the path only to prove that REST listener is absent.
   EXPECTED_KATA_COCO_TEST_RESOURCE_PATH
                            Deprecated compatibility input; ignored by the
-                           current CDH REST smoke path.
+                           current CoCo resource-boundary smoke path.
   EXPECTED_KATA_COCO_TEST_RESOURCE_CONTENT
-                           Optional expected resource content. Defaults to
-                           the dev KBS public marker when the URI is set.
+                           Optional commodity-only expected resource content.
   EXPECTED_CODEWIRE_SMOKE_USER_EMAIL
                            Optional authenticated-user email assertion
 USAGE
@@ -1147,8 +1146,15 @@ assert_pod_coco_kernel_params() {
     [[ "$kernel_params" == *"agent.image_registry_auth=$EXPECTED_KATA_COCO_IMAGE_REGISTRY_AUTH_URI"* ]] || \
       die "$label missing CoCo image_registry_auth kernel param for $EXPECTED_KATA_COCO_IMAGE_REGISTRY_AUTH_URI"
   fi
-  [[ "$kernel_params" == *"agent.guest_components_rest_api=resource"* ]] || \
-    die "$label missing CoCo guest_components_rest_api=resource kernel param"
+  if [[ "$EXPECTED_RUNTIME_CLASS" == "confidential" ]]; then
+    [[ "$kernel_params" == *"agent.guest_components_procs=confidential-data-hub"* ]] || \
+      die "$label missing CoCo guest_components_procs=confidential-data-hub kernel param"
+    [[ "$kernel_params" != *"agent.guest_components_rest_api="* ]] || \
+      die "$label exposes the guest-components REST API in a confidential workload"
+  else
+    [[ "$kernel_params" == *"agent.guest_components_rest_api=resource"* ]] || \
+      die "$label missing CoCo guest_components_rest_api=resource kernel param"
+  fi
   [[ "$kernel_params" == *"agent.log_vport=1025"* ]] || \
     die "$label missing CoCo agent.log_vport=1025 kernel param"
   if [[ -n "$EXPECTED_KATA_COCO_KBS_URL" ]]; then
@@ -1732,6 +1738,10 @@ assert_sandbox_template_kata_init_data() {
       die "SandboxTemplate $template_name Kata init-data missing cdh.toml"
     grep -Fxq "url = \"$EXPECTED_KATA_COCO_KBS_URL\"" "$decoded" || \
       die "SandboxTemplate $template_name Kata init-data missing KBS URL $EXPECTED_KATA_COCO_KBS_URL"
+    if [[ "$EXPECTED_RUNTIME_CLASS" == "confidential" ]]; then
+      grep -Fxq 'protected_resource_uri_prefixes = ["kbs:///default/codewire-workspace-luks/"]' "$decoded" || \
+        die "SandboxTemplate $template_name cdh.toml missing protected volume-key namespace"
+    fi
   fi
   if grep -q '^\[\[credentials\]\]$' "$decoded"; then
     die "SandboxTemplate $template_name should not prefetch CoCo test resources at guest boot"
@@ -1742,8 +1752,15 @@ assert_sandbox_template_kata_init_data() {
       [[ "$kernel_params" == *"agent.image_registry_auth=$EXPECTED_KATA_COCO_IMAGE_REGISTRY_AUTH_URI"* ]] || \
         die "SandboxTemplate $template_name missing CoCo image_registry_auth kernel param for $EXPECTED_KATA_COCO_IMAGE_REGISTRY_AUTH_URI"
     fi
-    [[ "$kernel_params" == *"agent.guest_components_rest_api=resource"* ]] || \
-      die "SandboxTemplate $template_name missing CoCo guest_components_rest_api=resource kernel param"
+    if [[ "$EXPECTED_RUNTIME_CLASS" == "confidential" ]]; then
+      [[ "$kernel_params" == *"agent.guest_components_procs=confidential-data-hub"* ]] || \
+        die "SandboxTemplate $template_name missing CoCo guest_components_procs=confidential-data-hub kernel param"
+      [[ "$kernel_params" != *"agent.guest_components_rest_api="* ]] || \
+        die "SandboxTemplate $template_name exposes guest-components REST in a confidential workload"
+    else
+      [[ "$kernel_params" == *"agent.guest_components_rest_api=resource"* ]] || \
+        die "SandboxTemplate $template_name missing CoCo guest_components_rest_api=resource kernel param"
+    fi
     [[ "$kernel_params" == *"agent.log_vport=1025"* ]] || \
       die "SandboxTemplate $template_name missing CoCo agent.log_vport=1025 kernel param"
     if [[ -n "$EXPECTED_KATA_COCO_KBS_URL" ]]; then
@@ -1974,6 +1991,37 @@ run_environment_session_smoke() {
 
 assert_coco_guest_test_resource() {
   [[ -n "$EXPECTED_KATA_COCO_TEST_RESOURCE_URI" ]] || return 0
+
+  if [[ "$EXPECTED_RUNTIME_CLASS" == "confidential" ]]; then
+    local script
+    script="$(cat <<SCRIPT
+set -eu
+uri=$(shell_quote "$EXPECTED_KATA_COCO_TEST_RESOURCE_URI")
+case "\$uri" in
+  kbs:///*) resource_path="\${uri#kbs:///}" ;;
+  *) echo "unsupported CoCo test resource URI: \$uri" >&2; exit 1 ;;
+esac
+command -v curl >/dev/null 2>&1 || {
+  echo "curl is required for the confidential REST-isolation assertion" >&2
+  exit 1
+}
+set +e
+curl --max-time 3 -sS -o /dev/null "http://127.0.0.1:8006/cdh/resource/\$resource_path"
+status=\$?
+set -e
+[ "\$status" -eq 7 ] || {
+  echo "guest CDH REST listener is reachable or failed ambiguously: \$status" >&2
+  exit 1
+}
+printf 'coco-rest-disabled-ok\\n'
+SCRIPT
+)"
+
+    log "asserting the confidential workload cannot reach a guest CDH REST listener"
+    run_cw_session_script "$script" | grep -qx 'coco-rest-disabled-ok' || \
+      die "confidential guest CDH REST isolation assertion failed"
+    return 0
+  fi
 
   local expected_content="$EXPECTED_KATA_COCO_TEST_RESOURCE_CONTENT"
   if [[ -z "$expected_content" ]]; then

@@ -12,7 +12,7 @@ WAIT_SECONDS="${PRIVATE_PULL_WAIT_SECONDS:-360}"
 KEEP_PROBE="${PRIVATE_PULL_KEEP_PROBE:-0}"
 ENCRYPTED_EMPTYDIR="${PRIVATE_PULL_ENCRYPTED_EMPTYDIR:-0}"
 IMAGE_ROLE="${PRIVATE_PULL_IMAGE_ROLE:-gateway}"
-ASSERT_TEST_RESOURCE="${PRIVATE_PULL_ASSERT_TEST_RESOURCE:-0}"
+ASSERT_REST_DISABLED="${PRIVATE_PULL_ASSERT_REST_DISABLED:-0}"
 PROBE_UUID="${PRIVATE_PULL_PROBE_UUID:-}"
 EVIDENCE_DIR="${EVIDENCE_DIR:-}"
 readonly IMAGE_RESOURCE_TIMEOUT_SECS=300
@@ -31,9 +31,9 @@ Options:
   --image-role ROLE    Exact active image: gateway, workspace, dind, or the
                        combined product image/cache shape
                        (default: gateway)
-  --assert-test-resource
-                       Fetch the active non-secret runtime test resource through
-                       the guest-local CDH REST API (workspace/product only)
+  --assert-rest-disabled
+                       Prove the workload cannot reach a guest-local CDH REST
+                       listener (workspace/product only)
   --wait-seconds N     Terminal wait horizon (default: 360)
   --keep-probe         Keep the Pod and CiliumNetworkPolicy for inspection
   --encrypted-emptydir Exercise an init-to-main shared encrypted emptyDir
@@ -77,8 +77,8 @@ while [[ "$#" -gt 0 ]]; do
       IMAGE_ROLE="$2"
       shift 2
       ;;
-    --assert-test-resource)
-      ASSERT_TEST_RESOURCE=1
+    --assert-rest-disabled)
+      ASSERT_REST_DISABLED=1
       shift
       ;;
     --keep-probe)
@@ -119,11 +119,11 @@ done
 [[ "$IMAGE_ROLE" == "gateway" || "$IMAGE_ROLE" == "workspace" || \
    "$IMAGE_ROLE" == "dind" || "$IMAGE_ROLE" == "product" ]] || \
   die "--image-role must be gateway, workspace, dind, or product"
-[[ "$ASSERT_TEST_RESOURCE" == "0" || "$ASSERT_TEST_RESOURCE" == "1" ]] || \
-  die "PRIVATE_PULL_ASSERT_TEST_RESOURCE must be 0 or 1"
-if [[ "$ASSERT_TEST_RESOURCE" == "1" ]]; then
+[[ "$ASSERT_REST_DISABLED" == "0" || "$ASSERT_REST_DISABLED" == "1" ]] || \
+  die "PRIVATE_PULL_ASSERT_REST_DISABLED must be 0 or 1"
+if [[ "$ASSERT_REST_DISABLED" == "1" ]]; then
   [[ "$IMAGE_ROLE" == "workspace" || "$IMAGE_ROLE" == "product" ]] || \
-    die "--assert-test-resource requires --image-role workspace or product"
+    die "--assert-rest-disabled requires --image-role workspace or product"
 fi
 [[ "$KEEP_PROBE" == "0" || "$KEEP_PROBE" == "1" ]] || die "PRIVATE_PULL_KEEP_PROBE must be 0 or 1"
 [[ "$ENCRYPTED_EMPTYDIR" == "0" || "$ENCRYPTED_EMPTYDIR" == "1" ]] || \
@@ -270,28 +270,28 @@ elif [[ "$IMAGE_ROLE" == "dind" ]]; then
   public_registry_egress=1
 fi
 
-if [[ "$ASSERT_TEST_RESOURCE" == "1" ]]; then
+if [[ "$ASSERT_REST_DISABLED" == "1" ]]; then
   test_resource_path="${test_resource_uri#kbs:///}"
   test_resource_script="$(cat <<SCRIPT
 set -eu
 path='$test_resource_path'
-expected='codewire confidential trustee test resource'
-if ! response="\$(curl --max-time $((IMAGE_RESOURCE_TIMEOUT_SECS + 10)) -sS -w '\\n%{http_code}' "http://127.0.0.1:8006/cdh/resource/\$path")"; then
-  printf 'cdh_http_status=transport_error\\n'
-  exit 23
+if ! command -v curl >/dev/null 2>&1; then
+  printf 'coco_rest_disabled=probe_missing\n'
+  exit 25
 fi
-newline='
-'
-case "\$response" in
-  *"\$newline"*) ;;
-  *) printf 'cdh_http_status=malformed\\n'; exit 1 ;;
-esac
-status="\${response##*"\$newline"}"
-actual="\${response%"\$newline\$status"}"
-printf 'cdh_http_status=%s\n' "\$status"
-[ "\$status" = 200 ] || exit 22
-[ "\$actual" = "\$expected" ] || { printf 'cdh_test_resource=content_mismatch\n'; exit 1; }
-printf 'cdh_test_resource=passed\n'
+set +e
+curl --max-time 3 -sS -o /dev/null "http://127.0.0.1:8006/cdh/resource/\$path"
+status=\$?
+set -e
+if [ "\$status" -eq 0 ]; then
+  printf 'coco_rest_disabled=listener_present\n'
+  exit 24
+fi
+if [ "\$status" -ne 7 ]; then
+  printf 'coco_rest_disabled=unexpected_transport_%s\n' "\$status"
+  exit 25
+fi
+printf 'coco_rest_disabled=passed\n'
 SCRIPT
 )"
   probe_args_yaml="$(jq -cn --arg script "$test_resource_script" '["-c", $script]')"
@@ -385,10 +385,10 @@ init_data="$({
   printf '"policy.rego" = %s\n%s\n%s\n' "$triple_quote" "$policy_rego" "$triple_quote"
   printf '\n"aa.toml" = %s\n[token_configs]\n[token_configs.kbs]\nurl = %s\ncert = %s\n%s\n' \
     "$triple_quote" "$kbs_url_toml" "$kbs_ca_toml" "$triple_quote"
-  printf '\n"cdh.toml" = %s\nsocket = "unix:///run/confidential-containers/cdh.sock"\n\n[kbc]\nname = "cc_kbc"\nurl = %s\nkbs_cert = %s\n%s\n' \
+  printf '\n"cdh.toml" = %s\nsocket = "unix:///run/confidential-containers/cdh.sock"\nprotected_resource_uri_prefixes = ["kbs:///default/codewire-workspace-luks/"]\n\n[kbc]\nname = "cc_kbc"\nurl = %s\nkbs_cert = %s\n%s\n' \
     "$triple_quote" "$kbs_url_toml" "$kbs_ca_toml" "$triple_quote"
 } | gzip -n -c | base64 -w0)"
-kernel_params="agent.image_registry_auth=$registry_auth_uri agent.image_resource_timeout_secs=$IMAGE_RESOURCE_TIMEOUT_SECS agent.guest_components_rest_api=resource agent.aa_kbc_params=cc_kbc::$kbs_url agent.log_vport=1025"
+kernel_params="agent.image_registry_auth=$registry_auth_uri agent.image_resource_timeout_secs=$IMAGE_RESOURCE_TIMEOUT_SECS agent.guest_components_procs=confidential-data-hub agent.aa_kbc_params=cc_kbc::$kbs_url agent.log_vport=1025"
 emptydir_volume_yaml=""
 emptydir_mount_yaml=""
 emptydir_security_yaml=""
@@ -529,48 +529,28 @@ on_exit() {
 trap on_exit EXIT
 
 log "evidence=$EVIDENCE_DIR"
-log "stage=apply image_role=$IMAGE_ROLE exact_image=true encrypted_emptydir=$ENCRYPTED_EMPTYDIR test_resource=$ASSERT_TEST_RESOURCE"
+log "stage=apply image_role=$IMAGE_ROLE exact_image=true encrypted_emptydir=$ENCRYPTED_EMPTYDIR rest_disabled=$ASSERT_REST_DISABLED"
 kubectl_dev apply -f "$manifest" >/dev/null
 
 deadline=$((SECONDS + WAIT_SECONDS))
-resource_deadline_started=0
 while (( SECONDS < deadline )); do
   pod_json="$(kubectl_dev -n "$SANDBOX_NAMESPACE" get pod "$name" -o json 2>/dev/null || true)"
   phase="$(jq -r '.status.phase // ""' <<<"$pod_json" 2>/dev/null || true)"
   case "$phase" in
     Succeeded)
       collect_evidence
-      if [[ "$ASSERT_TEST_RESOURCE" == "1" ]] && \
-         ! grep -qx 'cdh_test_resource=passed' "$container_log"; then
-        die "probe completed without the required CDH test-resource receipt"
+      if [[ "$ASSERT_REST_DISABLED" == "1" ]] && \
+         ! grep -qx 'coco_rest_disabled=passed' "$container_log"; then
+        die "probe completed without the required disabled-REST receipt"
       fi
       log "stage=complete image_role=$IMAGE_ROLE guest_pull=passed"
       exit 0
       ;;
     Failed)
       collect_evidence
-      if [[ "$ASSERT_TEST_RESOURCE" == "1" ]]; then
-        resource_status="$(sed -n 's/^cdh_http_status=\([0-9][0-9][0-9]\)$/\1/p' "$container_log" | tail -n 1)"
-        [[ -z "$resource_status" ]] || log "stage=resource image_role=$IMAGE_ROLE http_status=$resource_status"
-      fi
       die "probe Pod failed; full events are in $event_evidence"
       ;;
   esac
-
-  if [[ "$ASSERT_TEST_RESOURCE" == "1" && "$resource_deadline_started" == "0" ]]; then
-    resource_state="$(jq -r --arg name "$probe_container_name" '
-      .status.containerStatuses[]?
-      | select(.name == $name)
-      | if .state.running != null then "running"
-        elif .state.terminated != null then "terminated"
-        else "" end
-    ' <<<"$pod_json" 2>/dev/null || true)"
-    if [[ "$resource_state" == "running" || "$resource_state" == "terminated" ]]; then
-      resource_deadline_started=1
-      deadline=$((SECONDS + IMAGE_RESOURCE_TIMEOUT_SECS + 20))
-      log "stage=resource image_role=$IMAGE_ROLE request_deadline_seconds=$IMAGE_RESOURCE_TIMEOUT_SECS"
-    fi
-  fi
 
   sandbox_ready="$(jq -r '
     [.status.conditions[]? | select(.type == "PodReadyToStartContainers") | .status]
