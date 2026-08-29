@@ -37,6 +37,8 @@ pub mod supervisor;
 mod supervisor_store;
 #[cfg(target_os = "linux")]
 mod uds;
+#[cfg(target_os = "linux")]
+mod workspace_generation;
 
 #[cfg(target_os = "linux")]
 pub use linux::{

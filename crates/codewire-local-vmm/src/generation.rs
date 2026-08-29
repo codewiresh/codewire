@@ -34,9 +34,7 @@ pub fn ensure_empty_root_generation(
     generation: &str,
     disk_bytes: u64,
 ) -> Result<RootGenerationDisk, GenerationError> {
-    if !(MINIMUM_ROOT_DISK_BYTES..=MAXIMUM_ROOT_DISK_BYTES).contains(&disk_bytes)
-        || !disk_bytes.is_multiple_of(1024 * 1024)
-    {
+    if !valid_root_disk_bytes(disk_bytes) {
         return Err(GenerationError::InvalidDiskSize(disk_bytes));
     }
     let engine = PrivateRoot::open(engine_state_root)?;
@@ -117,6 +115,11 @@ pub fn ensure_empty_root_generation(
         path: generation_paths.root_disk,
         identity,
     })
+}
+
+pub(crate) fn valid_root_disk_bytes(disk_bytes: u64) -> bool {
+    (MINIMUM_ROOT_DISK_BYTES..=MAXIMUM_ROOT_DISK_BYTES).contains(&disk_bytes)
+        && disk_bytes.is_multiple_of(1024 * 1024)
 }
 
 fn format_empty_ext4(disk: &Path) -> Result<(), GenerationError> {

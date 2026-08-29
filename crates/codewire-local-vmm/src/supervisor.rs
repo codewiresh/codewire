@@ -45,6 +45,7 @@ use crate::workspace::{
     WorkspaceError, WorkspaceSource, cleanup_interrupted_workspace_provisioning,
     ensure_clean_git_workspace, inspect_clean_git_workspace,
 };
+use crate::workspace_generation::WorkspaceGenerationRecord;
 use crate::{CloudHypervisorRunner, RunnerConfig, RunnerError};
 
 pub(crate) const SUPERVISOR_STATE_SCHEMA: u32 = 1;
@@ -406,6 +407,12 @@ pub(crate) struct EnvironmentRecord {
     pub(crate) active_artifact_generation: Option<String>,
     #[serde(default)]
     pub(crate) staging_artifact_generation: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) active_workspace_generation: Option<WorkspaceGenerationRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) staging_workspace_generation: Option<WorkspaceGenerationRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) rollback_workspace_generation: Option<WorkspaceGenerationRecord>,
 }
 
 impl EnvironmentRecord {
@@ -426,6 +433,34 @@ impl EnvironmentRecord {
     }
 
     fn validate(&self, key: &str) -> Result<(), SupervisorError> {
+        let workspace_generations = [
+            self.active_workspace_generation.as_ref(),
+            self.staging_workspace_generation.as_ref(),
+            self.rollback_workspace_generation.as_ref(),
+        ];
+        let invalid_workspace_generation = match self.project_spec_sha256.as_deref() {
+            Some(project_sha256) => workspace_generations
+                .iter()
+                .flatten()
+                .any(|generation| generation.validate_for_project(project_sha256).is_err()),
+            None => workspace_generations
+                .iter()
+                .any(|generation| generation.is_some()),
+        };
+        let active_root = self
+            .active_workspace_generation
+            .as_ref()
+            .map(|generation| generation.root_generation.as_str());
+        let staging_root = self
+            .staging_workspace_generation
+            .as_ref()
+            .map(|generation| generation.root_generation.as_str());
+        let rollback_root = self
+            .rollback_workspace_generation
+            .as_ref()
+            .map(|generation| generation.root_generation.as_str());
+        let duplicate_workspace_generation =
+            |left: Option<&str>, right: Option<&str>| left.is_some() && left == right;
         if self.id.is_nil()
             || self.name != key
             || !valid_environment_name(&self.name)
@@ -455,6 +490,12 @@ impl EnvironmentRecord {
                 .staging_artifact_generation
                 .as_ref()
                 .is_some_and(|generation| !valid_sha256(generation))
+            || invalid_workspace_generation
+            || (self.rollback_workspace_generation.is_some()
+                && self.active_workspace_generation.is_none())
+            || duplicate_workspace_generation(active_root, staging_root)
+            || duplicate_workspace_generation(active_root, rollback_root)
+            || duplicate_workspace_generation(staging_root, rollback_root)
             || !self.source_path.is_absolute()
         {
             return Err(SupervisorError::InvalidState);
@@ -703,6 +744,9 @@ impl SupervisorCore {
                                 runner: None,
                                 active_artifact_generation: Some(artifact_generation),
                                 staging_artifact_generation: None,
+                                active_workspace_generation: None,
+                                staging_workspace_generation: None,
+                                rollback_workspace_generation: None,
                             },
                         );
                         next_state.current = Some(request.name.clone());
@@ -2902,6 +2946,9 @@ mod tests {
             runner: None,
             active_artifact_generation: Some("b".repeat(64)),
             staging_artifact_generation: None,
+            active_workspace_generation: None,
+            staging_workspace_generation: None,
+            rollback_workspace_generation: None,
         };
         let first = foundation_root_generation(&environment).unwrap();
         assert!(valid_sha256(&first));
@@ -2960,6 +3007,9 @@ mod tests {
             runner: None,
             active_artifact_generation: Some("b".repeat(64)),
             staging_artifact_generation: None,
+            active_workspace_generation: None,
+            staging_workspace_generation: None,
+            rollback_workspace_generation: None,
         };
         let state = SupervisorState {
             schema_version: SUPERVISOR_STATE_SCHEMA,

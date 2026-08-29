@@ -96,7 +96,7 @@ pub struct ResolvedImage {
 }
 
 impl ResolvedImage {
-    pub fn verify_cached(&self, store: &ContentStore) -> Result<(), RegistryResolverError> {
+    pub(crate) fn validate_metadata(&self) -> Result<(), RegistryResolverError> {
         let reference = RegistryReference::parse(&self.source_reference)?;
         validate_resolved_descriptor(&self.source, DescriptorKind::Source)?;
         validate_resolved_descriptor(&self.manifest, DescriptorKind::Manifest)?;
@@ -110,6 +110,25 @@ impl ResolvedImage {
         {
             return Err(RegistryResolverError::DigestMismatch);
         }
+        if !is_index_media_type(&self.source.media_type) && self.source != self.manifest {
+            return Err(RegistryResolverError::DescriptorMismatch);
+        }
+        let mut total = 0_u64;
+        for layer in &self.layers {
+            validate_resolved_descriptor(&layer.descriptor, DescriptorKind::Layer)?;
+            Sha256Digest::parse(layer.diff_id.as_str())?;
+            total = total
+                .checked_add(layer.descriptor.size)
+                .ok_or(RegistryResolverError::ImageTooLarge)?;
+            if total > MAXIMUM_TOTAL_LAYER_BYTES {
+                return Err(RegistryResolverError::ImageTooLarge);
+            }
+        }
+        Ok(())
+    }
+
+    pub fn verify_cached(&self, store: &ContentStore) -> Result<(), RegistryResolverError> {
+        self.validate_metadata()?;
         let source_bytes = store.read_blob(
             &self.source.digest,
             self.source.size,
@@ -122,8 +141,6 @@ impl ResolvedImage {
             if select_platform_manifest(&index, self.architecture)? != self.manifest {
                 return Err(RegistryResolverError::DescriptorMismatch);
             }
-        } else if self.source != self.manifest {
-            return Err(RegistryResolverError::DescriptorMismatch);
         }
         let manifest_bytes = store.read_blob(
             &self.manifest.digest,
@@ -152,15 +169,7 @@ impl ResolvedImage {
         if diff_ids.len() != self.layers.len() {
             return Err(RegistryResolverError::InvalidConfiguration);
         }
-        let mut total = 0_u64;
         for (layer, diff_id) in self.layers.iter().zip(diff_ids) {
-            validate_resolved_descriptor(&layer.descriptor, DescriptorKind::Layer)?;
-            total = total
-                .checked_add(layer.descriptor.size)
-                .ok_or(RegistryResolverError::ImageTooLarge)?;
-            if total > MAXIMUM_TOTAL_LAYER_BYTES {
-                return Err(RegistryResolverError::ImageTooLarge);
-            }
             if layer.diff_id != diff_id {
                 return Err(RegistryResolverError::InvalidConfiguration);
             }
