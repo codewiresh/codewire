@@ -34,8 +34,8 @@ use crate::lifecycle::{EffectDurability, LifecycleEffect, next_effect};
 use crate::linux::path::{PathError, PrivateRoot, SocketIdentity};
 use crate::linux::process::signal_unreaped_child;
 use crate::linux::state::{
-    DEFAULT_ROOT_DISK_BYTES, DeletionTreeLocation, StateError, cleanup_trashed_vm,
-    cleanup_unreferenced_root_generations, deletion_tree_location, move_stopped_vm_to_trash,
+    DeletionTreeLocation, StateError, cleanup_trashed_vm, cleanup_unreferenced_root_generations,
+    deletion_tree_location, move_stopped_vm_to_trash,
 };
 use crate::linux::{LiveProcess, ProcessIdentity, RecoveryError, VmPaths};
 use crate::oci::{
@@ -648,11 +648,7 @@ impl EnvironmentRecord {
                         .as_ref()
                         .is_some_and(|generation| generation.validate().is_err())
             }
-            (None, None) => {
-                self.active_workspace_generation.is_some()
-                    || self.staging_workspace_generation.is_some()
-                    || self.rollback_workspace_generation.is_some()
-            }
+            (None, None) => true,
             _ => true,
         };
         let active_artifact = self.active_artifact_generation.as_deref();
@@ -699,7 +695,7 @@ impl EnvironmentRecord {
             || !self.disk_bytes.is_multiple_of(1024 * 1024)
             || !valid_object_id(&self.workspace_commit)
             || match (&self.project_spec_json, &self.project_spec_sha256) {
-                (None, None) => false,
+                (None, None) => true,
                 (Some(bytes), Some(digest)) => {
                     validate_project_intent(bytes, digest, None).is_err()
                 }
@@ -708,7 +704,7 @@ impl EnvironmentRecord {
             || self
                 .active_artifact_generation
                 .as_ref()
-                .is_some_and(|generation| !valid_sha256(generation))
+                .is_none_or(|generation| !valid_sha256(generation))
             || self
                 .staging_artifact_generation
                 .as_ref()
@@ -925,8 +921,7 @@ impl SupervisorCore {
         self.collect_unreferenced_runtime_artifacts()?;
         let (project_json, project_sha256, artifact_generation) = {
             let environment = self.environment(name)?;
-            if environment.project_spec_json.is_none()
-                || environment.active_workspace_generation.is_some()
+            if environment.active_workspace_generation.is_some()
                 || environment.staging_workspace_generation.is_some()
             {
                 return Ok(self.state.clone());
@@ -2060,7 +2055,7 @@ impl SupervisorCore {
         {
             return Err(SupervisorError::InvalidState);
         }
-        let target_generation = start_operation_generation(operation, self.environment(name)?)?;
+        let target_generation = start_operation_generation(operation)?;
         let mut operation = operation.clone();
         while let Some(effect) = supervisor_effect(operation.kind, operation.checkpoint)? {
             match effect {
@@ -3316,42 +3311,37 @@ fn prepare_workspace_boot(
     environment: &EnvironmentRecord,
 ) -> Result<PreparedWorkspaceBoot, SupervisorError> {
     let (workspace, staging) = match environment.staging_workspace_generation.as_ref() {
-        Some(generation) => (Some(generation), true),
-        None => (environment.active_workspace_generation.as_ref(), false),
-    };
-    let artifact_generation = artifact_generation_for_boot(environment, staging)?;
-    let (root_generation, root_disk_bytes, setup_root_generation) = match workspace {
-        Some(generation) => {
-            if staging {
-                generation.validate()?;
-            } else {
-                generation.validate_for_project_intent(
-                    environment
-                        .project_spec_json
-                        .as_deref()
-                        .ok_or(SupervisorError::InvalidState)?,
-                    environment
-                        .project_spec_sha256
-                        .as_deref()
-                        .ok_or(SupervisorError::InvalidState)?,
-                )?;
-            }
-            (
-                oci_storage_generation(
-                    &generation.root_generation,
-                    artifact_generation,
-                    generation.root_disk_bytes,
-                )?,
-                generation.root_disk_bytes,
-                generation.root_generation.clone(),
-            )
-        }
+        Some(generation) => (generation, true),
         None => (
-            foundation_root_generation(environment)?,
-            DEFAULT_ROOT_DISK_BYTES,
-            String::new(),
+            environment
+                .active_workspace_generation
+                .as_ref()
+                .ok_or(SupervisorError::InvalidState)?,
+            false,
         ),
     };
+    let artifact_generation = artifact_generation_for_boot(environment, staging)?;
+    if staging {
+        workspace.validate()?;
+    } else {
+        workspace.validate_for_project_intent(
+            environment
+                .project_spec_json
+                .as_deref()
+                .ok_or(SupervisorError::InvalidState)?,
+            environment
+                .project_spec_sha256
+                .as_deref()
+                .ok_or(SupervisorError::InvalidState)?,
+        )?;
+    };
+    let root_generation = oci_storage_generation(
+        &workspace.root_generation,
+        artifact_generation,
+        workspace.root_disk_bytes,
+    )?;
+    let root_disk_bytes = workspace.root_disk_bytes;
+    let setup_root_generation = workspace.root_generation.clone();
 
     // Provision at the replayable start boundary, not only during create.
     // An active generation normally reuses its admitted root without needing
@@ -3363,25 +3353,24 @@ fn prepare_workspace_boot(
         &root_generation,
         root_disk_bytes,
     )?;
-    let setup = match workspace {
-        Some(generation) if staging || root.created => {
-            let project_json = generation.project_spec_json()?;
-            let engine = PrivateRoot::open(engine_state_root)?;
-            let content = ContentStore::create(&engine)?;
-            Some(ensure_setup_pack(
-                engine_state_root,
-                environment.id,
-                &content,
-                SetupPackRequest {
-                    project_json,
-                    project_sha256: &generation.project_sha256,
-                    storage_generation: &root_generation,
-                    root_generation: &generation.root_generation,
-                    image: &generation.image,
-                },
-            )?)
-        }
-        Some(_) | None => None,
+    let setup = if staging || root.created {
+        let project_json = workspace.project_spec_json()?;
+        let engine = PrivateRoot::open(engine_state_root)?;
+        let content = ContentStore::create(&engine)?;
+        Some(ensure_setup_pack(
+            engine_state_root,
+            environment.id,
+            &content,
+            SetupPackRequest {
+                project_json,
+                project_sha256: &workspace.project_sha256,
+                storage_generation: &root_generation,
+                root_generation: &workspace.root_generation,
+                image: &workspace.image,
+            },
+        )?)
+    } else {
+        None
     };
     let setup_root_generation = setup
         .as_ref()
@@ -3446,11 +3435,9 @@ fn artifact_generation_for_boot(
         environment.staging_workspace_generation.as_ref()
     } else {
         environment.active_workspace_generation.as_ref()
-    };
-    let generation = match workspace {
-        Some(workspace) => workspace.artifact_generation()?,
-        None => fallback,
-    };
+    }
+    .ok_or(SupervisorError::InvalidState)?;
+    let generation = workspace.artifact_generation()?;
     if generation != fallback {
         return Err(SupervisorError::InvalidState);
     }
@@ -3501,9 +3488,6 @@ fn referenced_root_storage_generations(
     }
     if let Some(generation) = environment.staging_workspace_generation.as_ref() {
         retained.insert(workspace_storage_generation(generation)?);
-    }
-    if environment.project_spec_json.is_none() {
-        retained.insert(foundation_root_generation(environment)?);
     }
     Ok(retained)
 }
@@ -3579,47 +3563,25 @@ fn retain_content_descriptor(
     Ok(())
 }
 
-fn foundation_root_generation(environment: &EnvironmentRecord) -> Result<String, SupervisorError> {
-    let artifact_generation = environment
-        .active_artifact_generation
-        .as_deref()
-        .filter(|generation| valid_sha256(generation))
-        .ok_or(SupervisorError::InvalidState)?;
-    let mut digest = Sha256::new();
-    digest.update(b"codewire-root-generation-foundation-v1\0");
-    digest.update(artifact_generation.as_bytes());
-    Ok(format!("{:x}", digest.finalize()))
-}
-
-fn start_operation_generation(
-    operation: &OperationRecord,
-    environment: &EnvironmentRecord,
-) -> Result<u64, SupervisorError> {
+fn start_operation_generation(operation: &OperationRecord) -> Result<u64, SupervisorError> {
     if operation.kind != OperationKind::Start {
         return Err(SupervisorError::InvalidState);
     }
-    if let Some(generation) = operation
+    let fields = operation
         .payload
+        .as_object()
+        .filter(|fields| fields.len() == 2)
+        .ok_or(SupervisorError::InvalidState)?;
+    fields
+        .get("name")
+        .and_then(serde_json::Value::as_str)
+        .filter(|name| valid_environment_name(name))
+        .ok_or(SupervisorError::InvalidState)?;
+    fields
         .get("generation")
         .and_then(serde_json::Value::as_u64)
-    {
-        return (generation > 0)
-            .then_some(generation)
-            .ok_or(SupervisorError::InvalidState);
-    }
-    // Compatibility for a pending operation written by the first SQLite
-    // foundation. It had no effect checkpoints and stored only the name.
-    if operation.payload.as_object().map(serde_json::Map::len) != Some(1) {
-        return Err(SupervisorError::InvalidState);
-    }
-    if environment.state == StoredEnvironmentState::Running {
-        Ok(environment.generation)
-    } else {
-        environment
-            .generation
-            .checked_add(1)
-            .ok_or(SupervisorError::InvalidState)
-    }
+        .filter(|generation| *generation > 0)
+        .ok_or(SupervisorError::InvalidState)
 }
 
 fn reconcile_operation_parameters(
@@ -5706,38 +5668,58 @@ mod tests {
     }
 
     #[test]
-    fn foundation_root_generation_is_stable_and_artifact_bound() {
-        let mut environment = EnvironmentRecord {
-            id: Uuid::new_v4(),
-            name: "dev".to_owned(),
-            state: StoredEnvironmentState::Stopped,
-            vcpus: 2,
-            memory_mib: 16 * 1024,
-            disk_bytes: crate::linux::state::MINIMUM_STATE_DISK_BYTES,
-            generation: 1,
-            workspace_commit: "a".repeat(40),
-            source_path: PathBuf::from("/workspace/source"),
-            project_spec_json: None,
-            project_spec_sha256: None,
-            runner: None,
-            active_artifact_generation: Some("b".repeat(64)),
-            staging_artifact_generation: None,
-            active_workspace_generation: None,
-            staging_workspace_generation: None,
-            rollback_workspace_generation: None,
-        };
-        let first = foundation_root_generation(&environment).unwrap();
-        assert!(valid_sha256(&first));
-        assert_eq!(foundation_root_generation(&environment).unwrap(), first);
+    fn native_state_requires_project_intent_and_runtime_generation() {
+        let mut environment = project_environment();
+        assert!(environment.validate("dev").is_ok());
 
-        environment.active_artifact_generation = Some("c".repeat(64));
-        assert_ne!(foundation_root_generation(&environment).unwrap(), first);
-
-        environment.active_artifact_generation = None;
+        environment.project_spec_json = None;
+        environment.project_spec_sha256 = None;
         assert!(matches!(
-            foundation_root_generation(&environment),
+            environment.validate("dev"),
             Err(SupervisorError::InvalidState)
         ));
+
+        let mut environment = project_environment();
+        environment.active_artifact_generation = None;
+        assert!(matches!(
+            environment.validate("dev"),
+            Err(SupervisorError::InvalidState)
+        ));
+    }
+
+    #[test]
+    fn start_operation_requires_an_exact_explicit_generation() {
+        let operation = |payload| OperationRecord {
+            operation_id: Uuid::new_v4(),
+            request_id: Uuid::new_v4(),
+            environment_id: Some(Uuid::new_v4()),
+            kind: OperationKind::Start,
+            phase: OperationPhase::Intent,
+            checkpoint: 0,
+            payload,
+            result: None,
+            error_code: None,
+        };
+
+        assert_eq!(
+            start_operation_generation(&operation(serde_json::json!({
+                "name": "dev",
+                "generation": 2,
+            })))
+            .unwrap(),
+            2
+        );
+        for payload in [
+            serde_json::json!({"name": "dev"}),
+            serde_json::json!({"name": "dev", "generation": 0}),
+            serde_json::json!({"name": "dev", "generation": 2, "compat": true}),
+            serde_json::json!({"generation": 2, "compat": true}),
+        ] {
+            assert!(matches!(
+                start_operation_generation(&operation(payload)),
+                Err(SupervisorError::InvalidState)
+            ));
+        }
     }
 
     #[test]
@@ -5792,11 +5774,31 @@ mod tests {
     #[test]
     fn staging_artifacts_are_selected_only_for_a_staging_boot() {
         let mut environment = project_environment();
+        let project_json = environment.project_spec_json.clone().unwrap();
+        let project_sha256 = environment.project_spec_sha256.clone().unwrap();
+        environment.active_workspace_generation = Some(test_workspace_generation_with_artifact(
+            &project_json,
+            &project_sha256,
+            &"b".repeat(64),
+            b"active",
+        ));
+        environment.staging_workspace_generation = Some(test_workspace_generation_with_artifact(
+            &project_json,
+            &project_sha256,
+            &"b".repeat(64),
+            b"staging",
+        ));
         assert_eq!(
             artifact_generation_for_boot(&environment, true).unwrap(),
             "b".repeat(64)
         );
         environment.staging_artifact_generation = Some("c".repeat(64));
+        environment.staging_workspace_generation = Some(test_workspace_generation_with_artifact(
+            &project_json,
+            &project_sha256,
+            &"c".repeat(64),
+            b"staging",
+        ));
         assert_eq!(
             artifact_generation_for_boot(&environment, true).unwrap(),
             "c".repeat(64)
@@ -5940,6 +5942,7 @@ mod tests {
         let lock = SupervisorLock::acquire(&root).unwrap();
         let (store, _) = SupervisorStore::open(&root).unwrap();
         let existing_id = Uuid::new_v4();
+        let (project_spec_json, project_spec_sha256) = project_intent(2, 16 * 1024, 20);
         let existing = EnvironmentRecord {
             id: existing_id,
             name: "dev".to_owned(),
@@ -5950,8 +5953,8 @@ mod tests {
             generation: 1,
             workspace_commit: "a".repeat(40),
             source_path: PathBuf::from("/workspace/source"),
-            project_spec_json: None,
-            project_spec_sha256: None,
+            project_spec_json: Some(project_spec_json),
+            project_spec_sha256: Some(project_spec_sha256),
             runner: None,
             active_artifact_generation: Some("b".repeat(64)),
             staging_artifact_generation: None,

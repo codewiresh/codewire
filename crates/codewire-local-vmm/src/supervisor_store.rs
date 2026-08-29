@@ -27,7 +27,7 @@ const DATABASE_WAL_FILE: &str = "supervisor.db-wal";
 const DATABASE_SHM_FILE: &str = "supervisor.db-shm";
 const HOST_REBOOT_WORKSPACE_TRANSITIONS_KEY: &str = "host_reboot_workspace_transitions";
 const DATABASE_APPLICATION_ID: i64 = 0x4357_564d; // "CWVM"
-const DATABASE_SCHEMA_VERSION: i64 = 3;
+const DATABASE_SCHEMA_VERSION: i64 = 4;
 // A create journal entry contains the exact canonical project JSON so replay
 // never has to reread a mutable codewire.yaml. The source document itself is
 // bounded to 256 KiB; this higher bound covers JSON string escaping.
@@ -432,10 +432,10 @@ impl SupervisorStore {
                 row.get::<_, i64>(6)?,
                 row.get::<_, String>(7)?,
                 row.get::<_, Vec<u8>>(8)?,
-                row.get::<_, Option<Vec<u8>>>(9)?,
-                row.get::<_, Option<String>>(10)?,
+                row.get::<_, Vec<u8>>(9)?,
+                row.get::<_, String>(10)?,
                 row.get::<_, Option<Vec<u8>>>(11)?,
-                row.get::<_, Option<String>>(12)?,
+                row.get::<_, String>(12)?,
                 row.get::<_, Option<String>>(13)?,
                 row.get::<_, Option<Vec<u8>>>(14)?,
                 row.get::<_, Option<Vec<u8>>>(15)?,
@@ -484,10 +484,10 @@ impl SupervisorStore {
                     .map_err(|_| SupervisorStoreError::InvalidState)?,
                 workspace_commit,
                 source_path: PathBuf::from(OsString::from_vec(source_path)),
-                project_spec_json,
-                project_spec_sha256,
+                project_spec_json: Some(project_spec_json),
+                project_spec_sha256: Some(project_spec_sha256),
                 runner,
-                active_artifact_generation,
+                active_artifact_generation: Some(active_artifact_generation),
                 staging_artifact_generation,
                 active_workspace_generation: decode_workspace_generation(
                     active_workspace_generation_json.as_deref(),
@@ -668,10 +668,10 @@ fn initialize_schema(connection: &Connection) -> Result<(), SupervisorStoreError
            generation INTEGER NOT NULL CHECK (generation >= 0),
            workspace_commit TEXT NOT NULL,
            source_path BLOB NOT NULL,
-           project_spec_json BLOB NULL,
-           project_spec_sha256 TEXT NULL,
+           project_spec_json BLOB NOT NULL,
+           project_spec_sha256 TEXT NOT NULL,
            runner_json BLOB NULL,
-           active_artifact_generation TEXT NULL,
+           active_artifact_generation TEXT NOT NULL,
            staging_artifact_generation TEXT NULL,
            active_workspace_generation_json BLOB NULL,
            staging_workspace_generation_json BLOB NULL,
@@ -706,7 +706,7 @@ fn initialize_schema(connection: &Connection) -> Result<(), SupervisorStoreError
            updated_unix_ms INTEGER NOT NULL
          ) STRICT;
          PRAGMA application_id = 1129797197;
-         PRAGMA user_version = 3;
+         PRAGMA user_version = 4;
          COMMIT;",
     )?;
     validate_schema(connection)
@@ -1394,6 +1394,7 @@ mod tests {
         state: StoredEnvironmentState,
         runner_boot_id: Option<&str>,
     ) -> EnvironmentRecord {
+        let (project_spec_json, project_spec_sha256) = project_intent();
         let runner = runner_boot_id.map(|boot_id| RunnerRecord {
             process: ProcessIdentity {
                 pid: 123,
@@ -1428,8 +1429,8 @@ mod tests {
             generation: 7,
             workspace_commit: "b".repeat(40),
             source_path: PathBuf::from("/workspace/source"),
-            project_spec_json: None,
-            project_spec_sha256: None,
+            project_spec_json: Some(project_spec_json),
+            project_spec_sha256: Some(project_spec_sha256),
             runner,
             active_artifact_generation: Some("c".repeat(64)),
             staging_artifact_generation: None,
@@ -1539,7 +1540,7 @@ mod tests {
         let (store, _) = SupervisorStore::open_for_boot(&root, "boot-a").unwrap();
         store
             .connection
-            .pragma_update(None, "user_version", 2_i64)
+            .pragma_update(None, "user_version", 3_i64)
             .unwrap();
         drop(store);
         let database = root.path().join(DATABASE_FILE);
@@ -1549,7 +1550,7 @@ mod tests {
             SupervisorStore::open_for_boot(&root, "boot-a"),
             Err(SupervisorStoreError::UnsupportedSchema {
                 application_id: DATABASE_APPLICATION_ID,
-                schema_version: 2,
+                schema_version: 3,
             })
         ));
         assert_eq!(fs::read(database).unwrap(), before);

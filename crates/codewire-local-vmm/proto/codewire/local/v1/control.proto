@@ -76,8 +76,7 @@ message Environment {
   string workspace_commit = 8;
   string source_path = 9;
   bool selected = 10;
-  // Empty only for a legacy foundation environment created before canonical
-  // project intent became part of native supervisor state.
+  // Digest of the required canonical project intent stored for this environment.
   string project_spec_sha256 = 11;
 }
 
