@@ -2,7 +2,8 @@
 //!
 //! Registry credentials are deliberately absent. The record contains only the
 //! verified descriptors needed to replay from the owner-private CAS, together
-//! with the project and root-disk policy that define the guest generation.
+//! with the project, runtime-artifact generation, and root-disk policy that
+//! define the guest generation.
 
 use codewire_project::{MAX_PROJECT_DOCUMENT_BYTES, ProjectSpec};
 use codewire_vmm_guest_probe::{SetupArchitecture, Sha256Value, oci_root_generation};
@@ -12,7 +13,8 @@ use crate::generation::valid_root_disk_bytes;
 use crate::oci::{OciArchitecture, ResolvedImage};
 
 const LEGACY_WORKSPACE_GENERATION_SCHEMA_VERSION: u32 = 1;
-const WORKSPACE_GENERATION_SCHEMA_VERSION: u32 = 2;
+const PROJECT_WORKSPACE_GENERATION_SCHEMA_VERSION: u32 = 2;
+const WORKSPACE_GENERATION_SCHEMA_VERSION: u32 = 3;
 const MAXIMUM_WORKSPACE_GENERATION_BYTES: usize = 512 * 1024;
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -23,6 +25,8 @@ pub(crate) struct WorkspaceGenerationRecord {
     pub(crate) project_sha256: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) project_spec_json: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) artifact_generation: Option<String>,
     pub(crate) image: ResolvedImage,
     pub(crate) root_disk_bytes: u64,
 }
@@ -34,6 +38,7 @@ impl std::fmt::Debug for WorkspaceGenerationRecord {
             .field("schema_version", &self.schema_version)
             .field("root_generation", &self.root_generation)
             .field("project_sha256", &self.project_sha256)
+            .field("artifact_generation", &self.artifact_generation)
             .field("architecture", &self.image.architecture)
             .field("source_digest", &self.image.source.digest)
             .field("manifest_digest", &self.image.manifest.digest)
@@ -47,6 +52,7 @@ impl WorkspaceGenerationRecord {
     pub(crate) fn new(
         project_spec_json: &[u8],
         project_sha256: String,
+        artifact_generation: String,
         image: ResolvedImage,
         root_disk_bytes: u64,
     ) -> Result<Self, WorkspaceGenerationError> {
@@ -54,6 +60,7 @@ impl WorkspaceGenerationRecord {
         if project.image != image.source_reference {
             return Err(WorkspaceGenerationError);
         }
+        validate_artifact_generation(&artifact_generation)?;
         let root_generation = calculated_root_generation(&project_sha256, &image)?;
         let record = Self {
             schema_version: WORKSPACE_GENERATION_SCHEMA_VERSION,
@@ -64,6 +71,7 @@ impl WorkspaceGenerationRecord {
                     .map_err(|_| WorkspaceGenerationError)?
                     .to_owned(),
             ),
+            artifact_generation: Some(artifact_generation),
             image,
             root_disk_bytes,
         };
@@ -72,11 +80,27 @@ impl WorkspaceGenerationRecord {
     }
 
     pub(crate) fn validate(&self) -> Result<(), WorkspaceGenerationError> {
-        match (self.schema_version, self.project_spec_json.as_deref()) {
-            (LEGACY_WORKSPACE_GENERATION_SCHEMA_VERSION, None) => {}
-            (WORKSPACE_GENERATION_SCHEMA_VERSION, Some(project_json)) => {
+        match (
+            self.schema_version,
+            self.project_spec_json.as_deref(),
+            self.artifact_generation.as_deref(),
+        ) {
+            (LEGACY_WORKSPACE_GENERATION_SCHEMA_VERSION, None, None) => {}
+            (PROJECT_WORKSPACE_GENERATION_SCHEMA_VERSION, Some(project_json), None) => {
                 let project = validate_project_spec(project_json.as_bytes(), &self.project_sha256)?;
                 if project.image != self.image.source_reference {
+                    return Err(WorkspaceGenerationError);
+                }
+            }
+            (
+                WORKSPACE_GENERATION_SCHEMA_VERSION,
+                Some(project_json),
+                Some(artifact_generation),
+            ) => {
+                let project = validate_project_spec(project_json.as_bytes(), &self.project_sha256)?;
+                if project.image != self.image.source_reference
+                    || validate_artifact_generation(artifact_generation).is_err()
+                {
                     return Err(WorkspaceGenerationError);
                 }
             }
@@ -143,20 +167,43 @@ impl WorkspaceGenerationRecord {
         }
     }
 
-    pub(crate) fn ensure_embedded_project(
+    pub(crate) fn artifact_generation<'a>(
+        &'a self,
+        legacy_artifact_generation: &'a str,
+    ) -> Result<&'a str, WorkspaceGenerationError> {
+        self.validate()?;
+        match self.artifact_generation.as_deref() {
+            Some(artifact_generation) => Ok(artifact_generation),
+            None => {
+                validate_artifact_generation(legacy_artifact_generation)?;
+                Ok(legacy_artifact_generation)
+            }
+        }
+    }
+
+    pub(crate) fn ensure_embedded_context(
         &mut self,
         project_spec_json: &[u8],
         project_sha256: &str,
+        artifact_generation: &str,
     ) -> Result<(), WorkspaceGenerationError> {
         self.validate_for_project_intent(project_spec_json, project_sha256)?;
+        validate_artifact_generation(artifact_generation)?;
         if self.project_spec_json.is_none() {
-            self.schema_version = WORKSPACE_GENERATION_SCHEMA_VERSION;
             self.project_spec_json = Some(
                 std::str::from_utf8(project_spec_json)
                     .map_err(|_| WorkspaceGenerationError)?
                     .to_owned(),
             );
         }
+        match self.artifact_generation.as_deref() {
+            Some(embedded) if embedded != artifact_generation => {
+                return Err(WorkspaceGenerationError);
+            }
+            Some(_) => {}
+            None => self.artifact_generation = Some(artifact_generation.to_owned()),
+        }
+        self.schema_version = WORKSPACE_GENERATION_SCHEMA_VERSION;
         self.validate()
     }
 
@@ -176,6 +223,17 @@ impl WorkspaceGenerationRecord {
         }
         Ok(record)
     }
+}
+
+fn validate_artifact_generation(value: &str) -> Result<(), WorkspaceGenerationError> {
+    if value.len() != 64
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(WorkspaceGenerationError);
+    }
+    Ok(())
 }
 
 fn validate_project_spec(
@@ -275,6 +333,7 @@ mod tests {
             root_generation,
             project_sha256,
             project_spec_json: Some(String::from_utf8(project_spec_json).unwrap()),
+            artifact_generation: Some("a".repeat(64)),
             image,
             root_disk_bytes: crate::linux::state::MINIMUM_ROOT_DISK_BYTES,
         }
@@ -302,6 +361,7 @@ mod tests {
         let constructed = WorkspaceGenerationRecord::new(
             expected.project_spec_json.as_deref().unwrap().as_bytes(),
             expected.project_sha256.clone(),
+            expected.artifact_generation.clone().unwrap(),
             expected.image.clone(),
             expected.root_disk_bytes,
         )
@@ -320,9 +380,11 @@ mod tests {
             .as_bytes()
             .to_vec();
         let project_sha256 = current.project_sha256.clone();
+        let artifact_generation = current.artifact_generation.clone().unwrap();
         let mut legacy = current.clone();
         legacy.schema_version = LEGACY_WORKSPACE_GENERATION_SCHEMA_VERSION;
         legacy.project_spec_json = None;
+        legacy.artifact_generation = None;
         let encoded = legacy.encode_canonical().unwrap();
         assert_eq!(
             WorkspaceGenerationRecord::decode_canonical(&encoded).unwrap(),
@@ -330,12 +392,40 @@ mod tests {
         );
 
         legacy
-            .ensure_embedded_project(&project_json, &project_sha256)
+            .ensure_embedded_context(&project_json, &project_sha256, &artifact_generation)
             .unwrap();
 
         assert_eq!(legacy.schema_version, WORKSPACE_GENERATION_SCHEMA_VERSION);
         assert_eq!(legacy.root_generation, current.root_generation);
         assert_eq!(legacy.project_spec_json, current.project_spec_json);
+        assert_eq!(legacy.artifact_generation, current.artifact_generation);
+    }
+
+    #[test]
+    fn project_v2_record_round_trips_exactly_and_adds_only_its_artifact_binding() {
+        let current = record();
+        let project_json = current
+            .project_spec_json
+            .as_deref()
+            .unwrap()
+            .as_bytes()
+            .to_vec();
+        let project_sha256 = current.project_sha256.clone();
+        let artifact_generation = current.artifact_generation.clone().unwrap();
+        let mut project_v2 = current.clone();
+        project_v2.schema_version = PROJECT_WORKSPACE_GENERATION_SCHEMA_VERSION;
+        project_v2.artifact_generation = None;
+        let encoded = project_v2.encode_canonical().unwrap();
+        assert_eq!(
+            WorkspaceGenerationRecord::decode_canonical(&encoded).unwrap(),
+            project_v2
+        );
+
+        project_v2
+            .ensure_embedded_context(&project_json, &project_sha256, &artifact_generation)
+            .unwrap();
+
+        assert_eq!(project_v2, current);
     }
 
     #[test]
@@ -362,6 +452,10 @@ mod tests {
             ])
             .is_err()
         );
+
+        let mut invalid_artifact = record;
+        invalid_artifact.artifact_generation = Some("g".repeat(64));
+        assert!(invalid_artifact.encode_canonical().is_err());
     }
 
     #[test]

@@ -1726,6 +1726,7 @@ mod tests {
             root_generation,
             project_sha256: project_sha256.to_owned(),
             project_spec_json: None,
+            artifact_generation: None,
             image,
             root_disk_bytes: crate::linux::state::MINIMUM_ROOT_DISK_BYTES,
         }
@@ -2225,16 +2226,16 @@ mod tests {
 
         environment.active_workspace_generation = Some(generation.clone());
         environment.staging_workspace_generation = Some(generation.clone());
-        assert!(state(environment.clone()).validate().is_err());
+        assert!(state(environment.clone()).validate().is_ok());
 
-        environment.active_workspace_generation = None;
         environment.staging_workspace_generation = None;
         environment.rollback_workspace_generation = Some(generation.clone());
         assert!(state(environment.clone()).validate().is_err());
 
-        let mut generation = generation;
-        generation.project_sha256 = "f".repeat(64);
-        environment.active_workspace_generation = Some(generation);
+        environment.rollback_workspace_generation = None;
+        let mut invalid_generation = generation;
+        invalid_generation.project_sha256 = "f".repeat(64);
+        environment.active_workspace_generation = Some(invalid_generation);
         environment.rollback_workspace_generation = None;
         assert!(state(environment).validate().is_err());
     }
