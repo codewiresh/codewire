@@ -420,6 +420,20 @@ pub(crate) struct LocalResizePlan {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct NativeResizeResources {
+    pub(crate) vcpus: u32,
+    pub(crate) memory_mib: u32,
+    pub(crate) disk_bytes: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct NativeResizePlan {
+    pub(crate) current: NativeResizeResources,
+    pub(crate) desired: NativeResizeResources,
+    pub(crate) active_sessions: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct PlatformResizePlan {
     pub(crate) current: EnvironmentResizeResources,
     pub(crate) desired: EnvironmentResizeResources,
@@ -567,6 +581,103 @@ pub(crate) fn resolve_local_resize_plan(
         active_sessions,
         normalized_cpu_request,
     })
+}
+
+pub(crate) fn resolve_native_resize_plan(
+    args: &EnvResizeArgs,
+    current: NativeResizeResources,
+    active_sessions: Vec<String>,
+) -> anyhow::Result<NativeResizePlan> {
+    const GIB: u64 = 1024 * 1024 * 1024;
+    let vcpus = match args.cpu.as_deref() {
+        Some(value) => {
+            let millicores = parse_resize_cpu(value)?;
+            if millicores % 1000 != 0 {
+                anyhow::bail!(
+                    "native local VMs require whole CPU cores; requested {}",
+                    format_resize_cpu(millicores)
+                );
+            }
+            u32::try_from(millicores / 1000)
+                .ok()
+                .filter(|value| (1..=32).contains(value))
+                .ok_or_else(|| anyhow::anyhow!("native CPU must be from 1 through 32 cores"))?
+        }
+        None => current.vcpus,
+    };
+    let memory_mib = match args.memory.as_deref() {
+        Some(value) => u32::try_from(parse_resize_memory(value)?)
+            .ok()
+            .filter(|value| (128..=65_536).contains(value))
+            .ok_or_else(|| anyhow::anyhow!("native memory must be from 128Mi through 64Gi"))?,
+        None => current.memory_mib,
+    };
+    let disk_bytes = match args.disk.as_deref() {
+        Some(value) => {
+            let gib = u64::try_from(parse_resize_disk(value)?)
+                .ok()
+                .filter(|value| (1..=1024).contains(value))
+                .ok_or_else(|| anyhow::anyhow!("native disk must be from 1Gi through 1024Gi"))?;
+            gib.checked_mul(GIB)
+                .ok_or_else(|| anyhow::anyhow!("native disk quantity is too large"))?
+        }
+        None => current.disk_bytes,
+    };
+    if disk_bytes < current.disk_bytes {
+        anyhow::bail!(
+            "native state disk shrink is not supported (current: {}, requested: {})",
+            format_native_disk(current.disk_bytes),
+            format_native_disk(disk_bytes)
+        );
+    }
+    let desired = NativeResizeResources {
+        vcpus,
+        memory_mib,
+        disk_bytes,
+    };
+    if desired == current {
+        anyhow::bail!("the requested resources already match the native local environment");
+    }
+    Ok(NativeResizePlan {
+        current,
+        desired,
+        active_sessions,
+    })
+}
+
+fn format_native_disk(bytes: u64) -> String {
+    const GIB: u64 = 1024 * 1024 * 1024;
+    if bytes.is_multiple_of(GIB) {
+        format!("{} Gi", bytes / GIB)
+    } else {
+        format!("{bytes} bytes")
+    }
+}
+
+pub(crate) fn format_native_resize_plan(name: &str, plan: &NativeResizePlan) -> String {
+    let mut output = format!(
+        "Environment: {name} (local · Cloud Hypervisor)\n\n              Current   Desired\nCPU       {:<9} {}\nMemory    {:<9} {}\nDisk      {:<9} {}\n\n",
+        plan.current.vcpus,
+        plan.desired.vcpus,
+        format_resize_memory(plan.current.memory_mib as i32),
+        format_resize_memory(plan.desired.memory_mib as i32),
+        format_native_disk(plan.current.disk_bytes),
+        format_native_disk(plan.desired.disk_bytes),
+    );
+    if plan.active_sessions.is_empty() {
+        output.push_str("Active sessions: none\n");
+    } else {
+        output.push_str(&format!(
+            "Active sessions ({}): {}\n",
+            plan.active_sessions.len(),
+            plan.active_sessions.join(", ")
+        ));
+        output.push_str("The required VM restart will terminate these sessions.\n");
+    }
+    output.push_str(
+        "Codewire will stop the VM, grow the disk offline if requested, and restore its prior running state. Disk growth cannot be reversed.\n",
+    );
+    output
 }
 
 pub(crate) fn resolve_platform_resize_plan(
@@ -966,6 +1077,74 @@ async fn active_local_resize_sessions(
         .collect())
 }
 
+#[cfg(target_os = "linux")]
+async fn active_native_resize_sessions(
+    environment: &codewire_local_vmm::control::v1::Environment,
+) -> anyhow::Result<Vec<String>> {
+    if environment.state != codewire_local_vmm::control::v1::EnvironmentState::Running as i32 {
+        return Ok(Vec::new());
+    }
+    let sessions = native_environment_session_client(&environment.name)
+        .await?
+        .list()
+        .await?;
+    Ok(sessions
+        .into_iter()
+        .filter(|session| {
+            !matches!(
+                codewire_daemon::client::v1::SessionLifecycleState::try_from(session.state),
+                Ok(codewire_daemon::client::v1::SessionLifecycleState::Stopped
+                    | codewire_daemon::client::v1::SessionLifecycleState::Exited
+                    | codewire_daemon::client::v1::SessionLifecycleState::Failed
+                    | codewire_daemon::client::v1::SessionLifecycleState::Interrupted)
+            )
+        })
+        .map(|session| session.session_id)
+        .collect())
+}
+
+#[cfg(target_os = "linux")]
+async fn handle_native_environment_resize(
+    name: String,
+    mut args: EnvResizeArgs,
+) -> anyhow::Result<()> {
+    let environment = get_native_environment(&name).await?;
+    let current = NativeResizeResources {
+        vcpus: environment.vcpus,
+        memory_mib: environment.memory_mib,
+        disk_bytes: environment.disk_bytes,
+    };
+    let interactive = stdin_is_interactive();
+    if resize_requires_interactive_wizard(&args, interactive)? {
+        args.cpu = prompt_resize_quantity("CPU", &current.vcpus.to_string())?;
+        args.memory =
+            prompt_resize_quantity("Memory", &format_resize_memory(current.memory_mib as i32))?;
+        args.disk = prompt_resize_quantity("Disk", &format_native_disk(current.disk_bytes))?;
+    }
+    let active_sessions = active_native_resize_sessions(&environment).await?;
+    let plan = resolve_native_resize_plan(&args, current, active_sessions)?;
+    if !plan.active_sessions.is_empty() && !args.force && !interactive {
+        anyhow::bail!(
+            "active sessions would be terminated; non-interactive native resize requires --force"
+        );
+    }
+    if matches!(args.output, OutputFormat::Text) {
+        print!("{}", format_native_resize_plan(&name, &plan));
+    }
+    if !args.yes && !prompt_confirm_default_no("Apply this resize")? {
+        println!("Aborted.");
+        return Ok(());
+    }
+    let resized = resize_native_environment(
+        &name,
+        plan.desired.vcpus,
+        plan.desired.memory_mib,
+        plan.desired.disk_bytes,
+    )
+    .await?;
+    print_native_environment(&resized, args.output)
+}
+
 async fn handle_unified_environment_resize(
     globals: &Globals,
     placement: Option<EnvironmentPlacement>,
@@ -976,9 +1155,7 @@ async fn handle_unified_environment_resize(
     let name = match target {
         #[cfg(target_os = "linux")]
         UnifiedEnvironmentTarget::NativeLocal(name) => {
-            anyhow::bail!(
-                "native environment {name:?} has fixed resources in this preview; recreate it to change CPU, memory, or disk"
-            )
+            return handle_native_environment_resize(name, args).await;
         }
         UnifiedEnvironmentTarget::Local(name) => name,
         UnifiedEnvironmentTarget::Platform(environment_id) => {
@@ -1402,9 +1579,17 @@ async fn handle_unified_environment_lifecycle(
                     serde_json::to_string_pretty(&serde_json::json!({
                         "name": removed.name,
                         "removed": removed.removed,
+                        "cleanup_pending": removed.cleanup_pending,
                     }))?
                 ),
-                OutputFormat::Text => eprintln!("Local environment removed: {}.", removed.name),
+                OutputFormat::Text => {
+                    eprintln!("Local environment removed: {}.", removed.name);
+                    if removed.cleanup_pending {
+                        eprintln!(
+                            "An unsafe or unknown object remains quarantined for orphan inspection."
+                        );
+                    }
+                }
             }
             Ok(())
         }

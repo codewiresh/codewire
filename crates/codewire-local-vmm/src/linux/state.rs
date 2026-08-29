@@ -1,4 +1,4 @@
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
@@ -252,6 +252,233 @@ pub fn publish_seed(path: &Path, seed: &[u8]) -> Result<(), StateError> {
         .map_err(StateError::from)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeletionTreeLocation {
+    Active(PathBuf),
+    Trash(PathBuf),
+    Missing,
+}
+
+pub fn deletion_tree_location(
+    state_root: &Path,
+    vm_id: Uuid,
+    operation_id: Uuid,
+) -> Result<DeletionTreeLocation, StateError> {
+    if vm_id.is_nil() || operation_id.is_nil() {
+        return Err(StateError::InvalidTrashIdentity);
+    }
+    let state_root = PrivateRoot::open(state_root)?;
+    let vms_path = state_root.ensure_dir(Path::new("vms"), 0o700)?;
+    let trash_path = state_root.ensure_dir(Path::new("trash"), 0o700)?;
+    let vms = PrivateRoot::open(&vms_path)?;
+    let trash = PrivateRoot::open(&trash_path)?;
+    let source = vm_id.to_string();
+    let destination = trash_name(vm_id, operation_id);
+    let active = optional_private_directory(&vms, Path::new(&source))?;
+    let trashed = optional_private_directory(&trash, Path::new(&destination))?;
+    match (active, trashed) {
+        (Some(_), Some(_)) => Err(StateError::TrashConflict(trash.path().join(destination))),
+        (Some(_), None) => Ok(DeletionTreeLocation::Active(vms.path().join(source))),
+        (None, Some(_)) => Ok(DeletionTreeLocation::Trash(trash.path().join(destination))),
+        (None, None) => Ok(DeletionTreeLocation::Missing),
+    }
+}
+
+pub fn move_stopped_vm_to_trash(
+    state_root: &Path,
+    vm_id: Uuid,
+    operation_id: Uuid,
+) -> Result<PathBuf, StateError> {
+    if vm_id.is_nil() || operation_id.is_nil() {
+        return Err(StateError::InvalidTrashIdentity);
+    }
+    let state_root = PrivateRoot::open(state_root)?;
+    let vms_path = state_root.ensure_dir(Path::new("vms"), 0o700)?;
+    let trash_path = state_root.ensure_dir(Path::new("trash"), 0o700)?;
+    let vms = PrivateRoot::open(&vms_path)?;
+    let trash = PrivateRoot::open(&trash_path)?;
+    let source = vm_id.to_string();
+    let destination = trash_name(vm_id, operation_id);
+    let destination_path = trash.path().join(&destination);
+    if optional_private_directory(&trash, Path::new(&destination))?.is_some() {
+        if optional_private_directory(&vms, Path::new(&source))?.is_some() {
+            return Err(StateError::TrashConflict(destination_path));
+        }
+        return Ok(destination_path);
+    }
+    if optional_private_directory(&vms, Path::new(&source))?.is_none() {
+        return Err(StateError::MissingTrashSource(vms.path().join(source)));
+    }
+    if let Err(error) =
+        vms.move_private_directory_to(Path::new(&source), &trash, Path::new(&destination))
+    {
+        if matches!(
+            error,
+            PathError::Openat2 {
+                source: rustix::io::Errno::EXIST,
+                ..
+            }
+        ) {
+            return Err(StateError::TrashConflict(destination_path));
+        }
+        return Err(error.into());
+    }
+    Ok(destination_path)
+}
+
+pub fn cleanup_trashed_vm(
+    state_root: &Path,
+    vm_id: Uuid,
+    operation_id: Uuid,
+) -> Result<(), StateError> {
+    if vm_id.is_nil() || operation_id.is_nil() {
+        return Err(StateError::InvalidTrashIdentity);
+    }
+    let state_root = PrivateRoot::open(state_root)?;
+    let trash_path = state_root.ensure_dir(Path::new("trash"), 0o700)?;
+    let trash = PrivateRoot::open(&trash_path)?;
+    let name = trash_name(vm_id, operation_id);
+    let vm = match optional_private_directory(&trash, Path::new(&name))? {
+        Some(vm) => vm,
+        None => return Ok(()),
+    };
+
+    validate_owned_vm_tree(&vm)?;
+    if let Some(api) = optional_private_directory(&vm, Path::new("api"))? {
+        api.remove_private_socket(Path::new("api.sock"))?;
+        api.remove_private_regular(Path::new("api.sock.lock"), 0o600)?;
+        vm.remove_empty_private_directory(Path::new("api"))?;
+    }
+    if let Some(vsock) = optional_private_directory(&vm, Path::new("vsock"))? {
+        vsock.remove_private_socket(Path::new("vsock.sock"))?;
+        vm.remove_empty_private_directory(Path::new("vsock"))?;
+    }
+    if let Some(disks) = optional_private_directory(&vm, Path::new("disks"))? {
+        disks.remove_private_regular(Path::new("state.raw"), 0o600)?;
+        vm.remove_empty_private_directory(Path::new("disks"))?;
+    }
+    if let Some(seed) = optional_private_directory(&vm, Path::new("seed"))? {
+        seed.remove_private_regular(Path::new("seed.raw"), 0o400)?;
+        vm.remove_empty_private_directory(Path::new("seed"))?;
+    }
+    if let Some(diagnostics) = optional_private_directory(&vm, Path::new("diagnostics"))? {
+        for file in ["serial.log", "vmm.log", "events.json"] {
+            diagnostics.remove_private_regular(Path::new(file), 0o600)?;
+        }
+        vm.remove_empty_private_directory(Path::new("diagnostics"))?;
+    }
+    vm.remove_private_regular(Path::new("state.json"), 0o600)?;
+    vm.remove_private_regular(Path::new("vm.lock"), 0o600)?;
+    drop(vm);
+    trash.remove_empty_private_directory(Path::new(&name))?;
+    Ok(())
+}
+
+fn trash_name(vm_id: Uuid, operation_id: Uuid) -> String {
+    format!("delete-{operation_id}-{vm_id}")
+}
+
+fn optional_private_directory(
+    root: &PrivateRoot,
+    relative: &Path,
+) -> Result<Option<PrivateRoot>, StateError> {
+    match root.open_private_directory(relative, 0o700) {
+        Ok(directory) => Ok(Some(directory)),
+        Err(error) if path_error_is_not_found(&error) => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+pub(crate) fn validate_owned_vm_tree(vm: &PrivateRoot) -> Result<(), StateError> {
+    ensure_only_entries(
+        vm.path(),
+        &[
+            "api",
+            "vsock",
+            "disks",
+            "seed",
+            "diagnostics",
+            "vm.lock",
+            "state.json",
+        ],
+    )?;
+    for (directory, files) in [
+        (
+            "api",
+            &[(&"api.sock", 0o600, true), (&"api.sock.lock", 0o600, false)][..],
+        ),
+        ("vsock", &[(&"vsock.sock", 0o600, true)][..]),
+        ("disks", &[(&"state.raw", 0o600, false)][..]),
+        ("seed", &[(&"seed.raw", 0o400, false)][..]),
+        (
+            "diagnostics",
+            &[
+                (&"serial.log", 0o600, false),
+                (&"vmm.log", 0o600, false),
+                (&"events.json", 0o600, false),
+            ][..],
+        ),
+    ] {
+        let Some(root) = optional_private_directory(vm, Path::new(directory))? else {
+            continue;
+        };
+        let allowed = files.iter().map(|(name, _, _)| **name).collect::<Vec<_>>();
+        ensure_only_entries(root.path(), &allowed)?;
+        for (name, mode, socket) in files {
+            let relative = Path::new(name);
+            if *socket {
+                match SocketIdentity::capture(&root.path().join(relative)) {
+                    Ok(_) => {}
+                    Err(error) if path_error_is_not_found(&error) => {}
+                    Err(error) => return Err(error.into()),
+                }
+            } else {
+                match root.open_regular(relative, false, None, false, Some(*mode)) {
+                    Ok(_) => {}
+                    Err(error) if path_error_is_not_found(&error) => {}
+                    Err(error) => return Err(error.into()),
+                }
+            }
+        }
+    }
+    for (name, mode) in [("state.json", 0o600), ("vm.lock", 0o600)] {
+        match vm.open_regular(Path::new(name), false, None, false, Some(mode)) {
+            Ok(_) => {}
+            Err(error) if path_error_is_not_found(&error) => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
+}
+
+fn ensure_only_entries(path: &Path, allowed: &[&str]) -> Result<(), StateError> {
+    for entry in fs::read_dir(path).map_err(|source| StateError::Io {
+        path: path.to_owned(),
+        source,
+    })? {
+        let entry = entry.map_err(|source| StateError::Io {
+            path: path.to_owned(),
+            source,
+        })?;
+        let name = entry
+            .file_name()
+            .into_string()
+            .map_err(|name| StateError::UnexpectedOwnedObject(path.join(name)))?;
+        if !allowed.contains(&name.as_str()) {
+            return Err(StateError::UnexpectedOwnedObject(path.join(name)));
+        }
+    }
+    Ok(())
+}
+
+fn path_error_is_not_found(error: &PathError) -> bool {
+    match error {
+        PathError::Openat2 { source, .. } => *source == rustix::io::Errno::NOENT,
+        PathError::Io { source, .. } => source.kind() == io::ErrorKind::NotFound,
+        _ => false,
+    }
+}
+
 fn read_ext4_uuid(file: &File, path: &Path) -> Result<Uuid, StateError> {
     let mut file = file.try_clone().map_err(|source| StateError::Io {
         path: path.to_owned(),
@@ -294,6 +521,14 @@ pub enum StateError {
     StateDiskIdentityChanged(PathBuf),
     #[error("invalid persisted VM state")]
     InvalidPersistedState,
+    #[error("invalid VM trash identity")]
+    InvalidTrashIdentity,
+    #[error("VM trash destination conflicts with a live environment tree: {0}")]
+    TrashConflict(PathBuf),
+    #[error("VM tree is absent from both active and trash state: {0}")]
+    MissingTrashSource(PathBuf),
+    #[error("VM trash contains an unowned or unexpected object: {0}")]
+    UnexpectedOwnedObject(PathBuf),
     #[error("decode persisted VM state failed")]
     Decode(serde_json::Error),
     #[error("encode persisted VM state failed")]
@@ -493,5 +728,83 @@ mod tests {
         ));
         state.vsock_socket = Some(socket);
         assert!(state.validate().is_ok());
+    }
+
+    #[test]
+    fn stopped_vm_tree_moves_to_operation_trash_and_cleans_known_layout() {
+        let (_parent, root) = private_root();
+        let vm_id = Uuid::new_v4();
+        let operation_id = Uuid::new_v4();
+        let paths = VmPaths::create(&root, vm_id).unwrap();
+
+        let trash = move_stopped_vm_to_trash(root.path(), vm_id, operation_id).unwrap();
+        assert!(!paths.vm_dir.exists());
+        assert!(trash.is_dir());
+        assert_eq!(
+            move_stopped_vm_to_trash(root.path(), vm_id, operation_id).unwrap(),
+            trash
+        );
+
+        cleanup_trashed_vm(root.path(), vm_id, operation_id).unwrap();
+        assert!(!trash.exists());
+        cleanup_trashed_vm(root.path(), vm_id, operation_id).unwrap();
+    }
+
+    #[test]
+    fn trash_cleanup_refuses_unknown_objects_without_partial_removal() {
+        let (_parent, root) = private_root();
+        let vm_id = Uuid::new_v4();
+        let operation_id = Uuid::new_v4();
+        let paths = VmPaths::create(&root, vm_id).unwrap();
+        fs::write(paths.vm_dir.join("unknown"), b"leave me").unwrap();
+        fs::set_permissions(
+            paths.vm_dir.join("unknown"),
+            fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+
+        let trash = move_stopped_vm_to_trash(root.path(), vm_id, operation_id).unwrap();
+        assert!(matches!(
+            cleanup_trashed_vm(root.path(), vm_id, operation_id),
+            Err(StateError::UnexpectedOwnedObject(path)) if path == trash.join("unknown")
+        ));
+        assert!(trash.join("unknown").is_file());
+        assert!(trash.join("api").is_dir());
+    }
+
+    #[test]
+    fn trash_move_never_replaces_an_existing_generation() {
+        let (_parent, root) = private_root();
+        let vm_id = Uuid::new_v4();
+        let operation_id = Uuid::new_v4();
+        let paths = VmPaths::create(&root, vm_id).unwrap();
+        let trash = root.ensure_dir(Path::new("trash"), 0o700).unwrap();
+        let trash = PrivateRoot::open(&trash).unwrap();
+        let destination = trash_name(vm_id, operation_id);
+        trash.create_dir(Path::new(&destination), 0o700).unwrap();
+
+        assert!(matches!(
+            move_stopped_vm_to_trash(root.path(), vm_id, operation_id),
+            Err(StateError::TrashConflict(path)) if path == trash.path().join(destination)
+        ));
+        assert!(paths.vm_dir.is_dir());
+    }
+
+    #[test]
+    fn deletion_tree_location_rejects_split_brain() {
+        let (_parent, root) = private_root();
+        let vm_id = Uuid::new_v4();
+        let operation_id = Uuid::new_v4();
+        VmPaths::create(&root, vm_id).unwrap();
+        let trash = root.ensure_dir(Path::new("trash"), 0o700).unwrap();
+        PrivateRoot::open(&trash)
+            .unwrap()
+            .create_dir(Path::new(&trash_name(vm_id, operation_id)), 0o700)
+            .unwrap();
+
+        assert!(matches!(
+            deletion_tree_location(root.path(), vm_id, operation_id),
+            Err(StateError::TrashConflict(_))
+        ));
     }
 }

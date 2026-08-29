@@ -1,5 +1,4 @@
 use std::fmt;
-use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -30,6 +29,8 @@ const START_TIMEOUT: Duration = Duration::from_secs(10);
 const GUEST_POWEROFF_TIMEOUT: Duration = Duration::from_secs(10);
 const GRACEFUL_STOP_TIMEOUT: Duration = Duration::from_secs(5);
 const SIGNAL_STOP_TIMEOUT: Duration = Duration::from_secs(2);
+const E2FSCK: &str = "/usr/bin/e2fsck";
+const RESIZE2FS: &str = "/usr/bin/resize2fs";
 
 #[derive(Debug, Clone)]
 pub struct RunnerConfig {
@@ -278,35 +279,118 @@ impl CloudHypervisorRunner {
         terminate_exact_process(&process, None).await
     }
 
-    pub fn delete_stopped(&self, vm_id: Uuid) -> Result<(), RunnerError> {
+    pub async fn grow_stopped_state_disk(
+        &self,
+        vm_id: Uuid,
+        target_bytes: u64,
+    ) -> Result<u64, RunnerError> {
+        if target_bytes < MINIMUM_STATE_DISK_BYTES || !target_bytes.is_multiple_of(1024 * 1024) {
+            return Err(RunnerError::InvalidDiskGrowth(target_bytes));
+        }
         let paths = VmPaths::create(&self.state_root, vm_id)?;
         let _lock = paths.lock()?;
-        match PersistedVmState::read(&paths.state_file) {
-            Ok(state) => {
-                if state.vm_id != vm_id {
-                    return Err(RunnerError::PersistedIdentityMismatch);
-                }
-                match LiveProcess::recover(&state.process) {
-                    Ok(_) => return Err(RunnerError::VmStillRunning),
-                    Err(RecoveryError::ReadProcess(error))
-                        if error.kind() == io::ErrorKind::NotFound => {}
-                    Err(RecoveryError::ProcessExited | RecoveryError::IdentityMismatch) => {}
-                    Err(error) => return Err(error.into()),
-                }
+        let mut persisted = read_stopped_persisted_state(&paths, vm_id)?;
+        let current = StateDiskIdentity::capture(&paths.state_disk)?;
+        if let Some(expected) = persisted.as_ref().map(|state| &state.state_disk) {
+            if !same_disk_object_ignoring_size(expected, &current)
+                || !matches!(current.file.size, size if size == expected.file.size || size == target_bytes)
+            {
+                return Err(RunnerError::StateDiskGrowthIdentityMismatch(
+                    paths.state_disk.clone(),
+                ));
             }
-            Err(error) if error.is_not_found() => {}
-            Err(error) => return Err(error.into()),
+            if expected.file.size == target_bytes && current.file.size == target_bytes {
+                return Ok(target_bytes);
+            }
         }
-        let expected = self.state_root.path().join("vms").join(vm_id.to_string());
-        if paths.vm_dir != expected {
-            return Err(RunnerError::PersistedIdentityMismatch);
+        if current.file.size > target_bytes {
+            return Err(RunnerError::DiskShrinkUnsupported {
+                current: current.file.size,
+                requested: target_bytes,
+            });
         }
-        fs::remove_dir_all(&paths.vm_dir).map_err(|source| RunnerError::Io {
-            path: paths.vm_dir,
-            source,
-        })?;
-        Ok(())
+
+        let disk_root = PrivateRoot::open(&paths.disks_dir)?;
+        let disk = disk_root.open_regular(
+            Path::new("state.raw"),
+            true,
+            Some(current.file.size),
+            false,
+            Some(0o600),
+        )?;
+        if current.file.size < target_bytes {
+            disk.file()
+                .set_len(target_bytes)
+                .and_then(|()| disk.file().sync_all())
+                .map_err(|source| RunnerError::Io {
+                    path: paths.state_disk.clone(),
+                    source,
+                })?;
+        }
+        drop(disk);
+
+        run_e2fsck(&paths.state_disk).await?;
+        run_resize2fs(&paths.state_disk).await?;
+        let updated = StateDiskIdentity::capture(&paths.state_disk)?;
+        if updated.file.size != target_bytes || !same_disk_object_ignoring_size(&current, &updated)
+        {
+            return Err(RunnerError::StateDiskGrowthIdentityMismatch(
+                paths.state_disk.clone(),
+            ));
+        }
+        if let Some(state) = persisted.as_mut() {
+            state.state_disk = updated;
+            state.write_atomic(&paths.state_file)?;
+        }
+        Ok(target_bytes)
     }
+}
+
+fn same_disk_object_ignoring_size(
+    expected: &StateDiskIdentity,
+    actual: &StateDiskIdentity,
+) -> bool {
+    expected.filesystem_uuid == actual.filesystem_uuid
+        && expected.file.device == actual.file.device
+        && expected.file.inode == actual.file.inode
+        && expected.file.uid == actual.file.uid
+        && expected.file.mode == actual.file.mode
+        && expected.file.links == actual.file.links
+}
+
+async fn run_e2fsck(disk: &Path) -> Result<(), RunnerError> {
+    let status = tokio::process::Command::new(E2FSCK)
+        .args(["-p", "-f"])
+        .arg(disk)
+        .env_clear()
+        .env("LC_ALL", "C")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .await
+        .map_err(|_| RunnerError::E2fsckUnavailable)?;
+    if !matches!(status.code(), Some(0) | Some(1)) {
+        return Err(RunnerError::E2fsckFailed(status.code()));
+    }
+    Ok(())
+}
+
+async fn run_resize2fs(disk: &Path) -> Result<(), RunnerError> {
+    let status = tokio::process::Command::new(RESIZE2FS)
+        .arg(disk)
+        .env_clear()
+        .env("LC_ALL", "C")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .await
+        .map_err(|_| RunnerError::Resize2fsUnavailable)?;
+    if !status.success() {
+        return Err(RunnerError::Resize2fsFailed(status.code()));
+    }
+    Ok(())
 }
 
 /// Owns the just-spawned VMM until every fallible/cancellable startup step has
@@ -951,6 +1035,20 @@ pub enum RunnerError {
         "existing state disk size differs from the requested immutable boot size ({current} != {requested}); resize is a separate stopped operation"
     )]
     StateDiskSizeMismatch { current: u64, requested: u64 },
+    #[error("invalid state disk growth target {0}")]
+    InvalidDiskGrowth(u64),
+    #[error("state disk shrink is unsupported ({current} -> {requested})")]
+    DiskShrinkUnsupported { current: u64, requested: u64 },
+    #[error("state disk identity changed during growth: {0}")]
+    StateDiskGrowthIdentityMismatch(PathBuf),
+    #[error("/usr/bin/e2fsck is unavailable")]
+    E2fsckUnavailable,
+    #[error("e2fsck failed with status {0:?}")]
+    E2fsckFailed(Option<i32>),
+    #[error("/usr/bin/resize2fs is unavailable")]
+    Resize2fsUnavailable,
+    #[error("resize2fs failed with status {0:?}")]
+    Resize2fsFailed(Option<i32>),
     #[error(
         "VM generation must advance beyond persisted generation {previous} (requested {requested})"
     )]
@@ -978,10 +1076,10 @@ pub enum RunnerError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
     use std::io::{Seek, SeekFrom, Write};
     use std::os::fd::AsRawFd;
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-    use std::os::unix::net::UnixListener;
 
     use crate::artifact::AdmittedArtifact;
     use crate::linux::path::{FileIdentity, current_uid};
@@ -1244,7 +1342,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn endpoint_early_exit_is_reaped_and_stopped_delete_removes_the_full_vm_tree() {
+    async fn endpoint_early_exit_is_reaped() {
         let (_parent, runner) = test_runner();
         let vm_id = Uuid::new_v4();
         let paths = VmPaths::create(&runner.state_root, vm_id).unwrap();
@@ -1261,45 +1359,7 @@ mod tests {
         assert!(child.try_wait().unwrap().is_some());
         assert!(process.is_exited().unwrap());
 
-        // Model stale VMM-created control endpoints and arbitrary nested state
-        // that remain after the failed child has been reaped.
-        let api_socket = UnixListener::bind(&paths.api_socket).unwrap();
-        let vsock_socket = UnixListener::bind(&paths.vsock_socket).unwrap();
-        fs::write(paths.diagnostics_dir.join("nested-state"), b"stale").unwrap();
-        drop((api_socket, vsock_socket));
         drop(lock);
-
-        runner.delete_stopped(vm_id).unwrap();
-        assert!(!paths.vm_dir.exists());
-        assert!(!paths.api_socket.exists());
-        assert!(!paths.vsock_socket.exists());
-        assert!(
-            fs::read_dir(runner.state_root.path().join("vms"))
-                .unwrap()
-                .next()
-                .is_none()
-        );
-    }
-
-    #[test]
-    fn stopped_delete_rejects_state_copied_from_another_vm() {
-        let (_parent, runner) = test_runner();
-        let vm_id = Uuid::new_v4();
-        let paths = VmPaths::create(&runner.state_root, vm_id).unwrap();
-        let process = LiveProcess::recover(
-            &super::super::process::ProcessIdentity::capture(std::process::id()).unwrap(),
-        )
-        .unwrap();
-        persisted_starting_state(Uuid::new_v4(), &process)
-            .write_atomic(&paths.state_file)
-            .unwrap();
-
-        assert!(matches!(
-            runner.delete_stopped(vm_id),
-            Err(RunnerError::PersistedIdentityMismatch)
-        ));
-        assert!(paths.vm_dir.exists());
-        assert!(paths.state_file.exists());
     }
 
     #[tokio::test]

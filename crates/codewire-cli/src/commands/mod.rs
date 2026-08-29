@@ -58,8 +58,18 @@ pub(crate) struct DoctorArgs {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum DoctorCommand {
+    #[cfg(target_os = "linux")]
+    #[command(about = "Inspect native local VM orphans without mutating them")]
+    Local(DoctorLocalArgs),
     #[command(about = "Probe environment tailnet transport paths")]
     Tailnet(DoctorTailnetArgs),
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Args)]
+pub(crate) struct DoctorLocalArgs {
+    #[arg(long, value_enum, default_value_t = OutputFormat::Text, help = "Output format")]
+    output: OutputFormat,
 }
 
 #[derive(Debug, Args)]

@@ -4,7 +4,7 @@ use anyhow::Context as _;
 use codewire_local_vmm::control::v1;
 use codewire_local_vmm::runner_service::{RunnerEntrypointConfig, serve_runner};
 use codewire_local_vmm::supervisor::{
-    NativeRuntimeConfig, NativeSupervisorClient, serve_supervisor,
+    NativeRuntimeConfig, NativeSupervisorClient, inspect_orphans, serve_supervisor,
 };
 use serde::Serialize;
 use serde_yaml::Value as YamlValue;
@@ -96,6 +96,7 @@ pub(crate) async fn create_native_environment(
             vcpus,
             memory_mib,
             disk_bytes,
+            request_id: Uuid::new_v4().to_string(),
         })
         .await
         .map_err(native_status)
@@ -106,6 +107,70 @@ pub(crate) async fn native_environments() -> anyhow::Result<Vec<v1::Environment>
         return Ok(Vec::new());
     }
     native_client().await?.list().await.map_err(native_status)
+}
+
+pub(crate) fn native_orphan_report() -> anyhow::Result<NativeOrphanReport> {
+    if !native_state_exists()? {
+        return Ok(NativeOrphanReport {
+            orphans: Vec::new(),
+            reclaimable_bytes: 0,
+        });
+    }
+    let response = inspect_orphans(&native_runtime_config()?.root)
+        .context("inspect native local orphan inventory")?;
+    Ok(NativeOrphanReport {
+        orphans: response
+            .orphans
+            .into_iter()
+            .map(|orphan| NativeOrphanView {
+                kind: orphan.kind,
+                path: orphan.path,
+                reason: orphan.reason,
+                reclaimable_bytes: orphan.reclaimable_bytes,
+            })
+            .collect(),
+        reclaimable_bytes: response.reclaimable_bytes,
+    })
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct NativeOrphanReport {
+    pub(crate) orphans: Vec<NativeOrphanView>,
+    pub(crate) reclaimable_bytes: u64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct NativeOrphanView {
+    pub(crate) kind: String,
+    pub(crate) path: String,
+    pub(crate) reason: String,
+    pub(crate) reclaimable_bytes: u64,
+}
+
+pub(crate) fn print_native_orphan_report(
+    report: &NativeOrphanReport,
+    output: OutputFormat,
+) -> anyhow::Result<()> {
+    match output {
+        OutputFormat::Json => println!("{}", serde_json::to_string_pretty(report)?),
+        OutputFormat::Text if report.orphans.is_empty() => {
+            println!("Native local VM orphans: none");
+        }
+        OutputFormat::Text => {
+            println!("Native local VM orphans:");
+            for orphan in &report.orphans {
+                println!(
+                    "  {}  {}  {}  {}",
+                    orphan.kind,
+                    orphan.reason,
+                    format_binary_bytes(orphan.reclaimable_bytes),
+                    orphan.path
+                );
+            }
+            println!("Reclaimable allocated bytes: {}", report.reclaimable_bytes);
+        }
+    }
+    Ok(())
 }
 
 pub(crate) async fn native_environment(name: &str) -> anyhow::Result<Option<v1::Environment>> {
@@ -146,6 +211,19 @@ pub(crate) async fn stop_native_environment(name: &str) -> anyhow::Result<v1::En
     native_client()
         .await?
         .stop(name)
+        .await
+        .map_err(native_status)
+}
+
+pub(crate) async fn resize_native_environment(
+    name: &str,
+    vcpus: u32,
+    memory_mib: u32,
+    disk_bytes: u64,
+) -> anyhow::Result<v1::Environment> {
+    native_client()
+        .await?
+        .resize(name, vcpus, memory_mib, disk_bytes)
         .await
         .map_err(native_status)
 }
@@ -247,6 +325,7 @@ pub(crate) fn native_state_label(state: i32) -> &'static str {
         Ok(v1::EnvironmentState::Starting) => "starting",
         Ok(v1::EnvironmentState::Running) => "running",
         Ok(v1::EnvironmentState::Error) => "error",
+        Ok(v1::EnvironmentState::Orphaned) => "orphaned",
         _ => "unavailable",
     }
 }
@@ -310,11 +389,15 @@ fn absolute_override(name: &str) -> anyhow::Result<Option<PathBuf>> {
 
 fn native_state_exists() -> anyhow::Result<bool> {
     let config = native_runtime_config()?;
-    match std::fs::symlink_metadata(config.root.join("state.json")) {
-        Ok(metadata) => Ok(metadata.is_file()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(error).context("inspect native local state"),
+    for name in ["supervisor.db", "state.json"] {
+        match std::fs::symlink_metadata(config.root.join(name)) {
+            Ok(metadata) if metadata.is_file() => return Ok(true),
+            Ok(_) => anyhow::bail!("native local state {name} is not a regular file"),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error).context("inspect native local state"),
+        }
     }
+    Ok(false)
 }
 
 fn canonical_current_executable() -> anyhow::Result<PathBuf> {

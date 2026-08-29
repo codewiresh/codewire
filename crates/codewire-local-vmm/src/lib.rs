@@ -20,9 +20,13 @@ pub mod workspace;
 #[cfg(target_os = "linux")]
 pub mod linux;
 #[cfg(target_os = "linux")]
+mod orphan;
+#[cfg(target_os = "linux")]
 pub mod runner_service;
 #[cfg(target_os = "linux")]
 pub mod supervisor;
+#[cfg(target_os = "linux")]
+mod supervisor_store;
 #[cfg(target_os = "linux")]
 mod uds;
 

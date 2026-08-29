@@ -1532,6 +1532,11 @@ pub(crate) async fn handle_doctor_command(
 ) -> anyhow::Result<()> {
     if let Some(command) = args.command {
         return match command {
+            #[cfg(target_os = "linux")]
+            DoctorCommand::Local(args) => {
+                let report = native_orphan_report()?;
+                print_native_orphan_report(&report, args.output)
+            }
             DoctorCommand::Tailnet(args) => handle_doctor_tailnet_command(globals, args).await,
         };
     }

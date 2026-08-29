@@ -102,6 +102,21 @@
         assert!(args.yes);
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn doctor_local_parser_keeps_orphan_inventory_explicit() {
+        let cli = Cli::try_parse_from(["cw", "doctor", "local", "--output", "json"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Doctor(DoctorArgs {
+                command: Some(DoctorCommand::Local(DoctorLocalArgs {
+                    output: OutputFormat::Json,
+                })),
+                ..
+            })
+        ));
+    }
+
     #[test]
     fn resize_quantity_and_automation_validation_is_human_safe() {
         assert_eq!(parse_resize_cpu("500m").unwrap(), 500);
@@ -229,6 +244,38 @@
         assert!(validate_platform_resize_force(1, "restart", true, false).is_ok());
         assert!(validate_platform_resize_force(1, "restart", false, true).is_ok());
         assert!(validate_platform_resize_force(1, "in_place", false, false).is_ok());
+    }
+
+    #[test]
+    fn native_resize_requires_whole_cores_and_never_shrinks_disk() {
+        let current = NativeResizeResources {
+            vcpus: 2,
+            memory_mib: 16 * 1024,
+            disk_bytes: 20 * 1024 * 1024 * 1024,
+        };
+        let args = EnvResizeArgs {
+            environment: "workspace".to_string(),
+            cpu: Some("3".to_string()),
+            memory: Some("12Gi".to_string()),
+            disk: Some("21Gi".to_string()),
+            force: true,
+            allow_restart: false,
+            yes: true,
+            output: OutputFormat::Json,
+        };
+        let plan = resolve_native_resize_plan(&args, current.clone(), vec!["session-1".into()])
+            .unwrap();
+        assert_eq!(plan.desired.vcpus, 3);
+        assert_eq!(plan.desired.memory_mib, 12 * 1024);
+        assert_eq!(plan.desired.disk_bytes, 21 * 1024 * 1024 * 1024);
+        assert!(format_native_resize_plan("workspace", &plan).contains("Cloud Hypervisor"));
+
+        let mut fractional = args;
+        fractional.cpu = Some("1500m".to_string());
+        assert!(resolve_native_resize_plan(&fractional, current.clone(), Vec::new()).is_err());
+        fractional.cpu = None;
+        fractional.disk = Some("19Gi".to_string());
+        assert!(resolve_native_resize_plan(&fractional, current, Vec::new()).is_err());
     }
 
     #[test]

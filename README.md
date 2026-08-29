@@ -74,6 +74,13 @@ cargo build -p codewire-cli-bin --bin cw
 ./target/debug/cw env info --local codewire-dev
 ./target/debug/cw env stop --local codewire-dev
 ./target/debug/cw env start --local codewire-dev
+
+# CPU and memory apply on restart; the persistent ext4 disk grows offline.
+./target/debug/cw env resize --local codewire-dev \
+  --cpu 4 --memory 24Gi --disk 40Gi --yes
+
+# Read-only inventory: this never adopts, repairs, or deletes an orphan.
+./target/debug/cw doctor local
 ./target/debug/cw env rm --local codewire-dev --yes
 ```
 
@@ -81,7 +88,11 @@ The current native slice requires a clean, root Git worktree and snapshots its
 exact checked-out commit onto the persistent guest disk. It does not yet run
 the `codewire.yaml` workspace image; OCI workspace execution is tracked by
 Forgejo issue #1908. Unsupported image, network, secret, mount, port, and
-multi-repository options fail explicitly.
+multi-repository options fail explicitly. An owner-only SQLite WAL is the
+authoritative supervisor state; preview JSON state is imported exactly once.
+Lifecycle effects are journaled, disk shrink is rejected, and delete moves the
+environment tree to an operation-specific trash generation before removing
+only known runtime files.
 
 Developers with artifacts staged outside the default cache can point the CLI
 at them and run the complete product smoke:
@@ -114,10 +125,11 @@ the migration:
 ./target/debug/cw env resize --local legacy-local --cpu 6 --yes --output json
 ```
 
-`cw env resize ENV` resolves the placement when it is unambiguous. Local resize
-currently supports Lima only; it stops and restarts a running VM without
-recreating it, and disk growth cannot be reversed. Platform resize is tracked
-separately in #860.
+`cw env resize ENV` resolves the placement when it is unambiguous. Native and
+Lima local resize both restore a running VM after applying changes without
+recreating the environment, and disk growth cannot be reversed. Native VMs use
+whole CPU cores and perform ext4 growth while stopped. Platform resize is
+tracked separately in #860.
 
 ### Local database and dashboard loop
 

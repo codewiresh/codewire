@@ -8,8 +8,10 @@ service LocalSupervisorService {
   rpc CreateEnvironment(CreateEnvironmentRequest) returns (Environment);
   rpc ListEnvironments(ListEnvironmentsRequest) returns (ListEnvironmentsResponse);
   rpc GetEnvironment(EnvironmentSelector) returns (Environment);
+  rpc ListOrphans(ListOrphansRequest) returns (ListOrphansResponse);
   rpc StartEnvironment(EnvironmentSelector) returns (Environment);
   rpc StopEnvironment(EnvironmentSelector) returns (Environment);
+  rpc ResizeEnvironment(ResizeEnvironmentRequest) returns (Environment);
   rpc DeleteEnvironment(EnvironmentSelector) returns (DeleteEnvironmentResponse);
   rpc GetDaemonAccess(EnvironmentSelector) returns (DaemonAccess);
 }
@@ -19,7 +21,10 @@ service EnvironmentRunnerService {
   rpc GetRunnerInfo(GetRunnerInfoRequest) returns (RunnerInfo);
   rpc StartVm(StartVmRequest) returns (RunnerInfo);
   rpc StopVm(StopVmRequest) returns (RunnerInfo);
-  rpc DeleteVm(DeleteVmRequest) returns (DeleteVmResponse);
+  rpc GrowStateDisk(GrowStateDiskRequest) returns (GrowStateDiskResponse);
+  // Stops the exact owned VMM and releases its device handles. The runner
+  // never removes environment storage; only the supervisor may tombstone it.
+  rpc PrepareDeleteVm(PrepareDeleteVmRequest) returns (PrepareDeleteVmResponse);
   rpc GetDaemonAccess(GetDaemonAccessRequest) returns (DaemonAccess);
 }
 
@@ -29,6 +34,7 @@ enum EnvironmentState {
   ENVIRONMENT_STATE_STARTING = 2;
   ENVIRONMENT_STATE_RUNNING = 3;
   ENVIRONMENT_STATE_ERROR = 4;
+  ENVIRONMENT_STATE_ORPHANED = 5;
 }
 
 message CreateEnvironmentRequest {
@@ -37,10 +43,22 @@ message CreateEnvironmentRequest {
   uint32 vcpus = 3;
   uint32 memory_mib = 4;
   uint64 disk_bytes = 5;
+  string request_id = 6;
 }
 
 message EnvironmentSelector {
   string name = 1;
+  // Required only for mutating lifecycle RPCs. Read-only lookups leave this
+  // empty so retries cannot accidentally acquire mutation semantics.
+  string request_id = 2;
+}
+
+message ResizeEnvironmentRequest {
+  string name = 1;
+  uint32 vcpus = 2;
+  uint32 memory_mib = 3;
+  uint64 disk_bytes = 4;
+  string request_id = 5;
 }
 
 message Environment {
@@ -62,9 +80,26 @@ message ListEnvironmentsResponse {
   repeated Environment environments = 1;
 }
 
+message ListOrphansRequest {}
+
+message Orphan {
+  string kind = 1;
+  string path = 2;
+  string reason = 3;
+  uint64 reclaimable_bytes = 4;
+}
+
+message ListOrphansResponse {
+  repeated Orphan orphans = 1;
+  uint64 reclaimable_bytes = 2;
+}
+
 message DeleteEnvironmentResponse {
   string name = 1;
   bool removed = 2;
+  // True means the environment is destroyed but an unsafe or unknown object
+  // remains quarantined for read-only orphan inspection.
+  bool cleanup_pending = 3;
 }
 
 // The capability is intentionally returned only over an admitted owner-only
@@ -99,6 +134,13 @@ message StartVmRequest {
 }
 
 message StopVmRequest {}
-message DeleteVmRequest {}
-message DeleteVmResponse {}
+message GrowStateDiskRequest {
+  string environment_id = 1;
+  uint64 disk_bytes = 2;
+}
+message GrowStateDiskResponse {
+  uint64 disk_bytes = 1;
+}
+message PrepareDeleteVmRequest {}
+message PrepareDeleteVmResponse {}
 message GetDaemonAccessRequest {}

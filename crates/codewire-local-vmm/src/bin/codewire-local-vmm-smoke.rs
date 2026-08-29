@@ -35,7 +35,9 @@ mod linux {
     use codewire_daemon::client::{SessionClient, SessionClientError, v1};
     use codewire_local_vmm::ch_api::VmInfo;
     use codewire_local_vmm::linux::runner::ExitClass;
-    use codewire_local_vmm::linux::state::{StateDiskIdentity, VmPhase};
+    use codewire_local_vmm::linux::state::{
+        StateDiskIdentity, VmPhase, cleanup_trashed_vm, move_stopped_vm_to_trash,
+    };
     use codewire_local_vmm::{
         CloudHypervisorRunner, CreateVmRequest, LiveProcess, PreparedVm, ProcessIdentity,
         RecoveryError, RunnerConfig, RunningVm, VmPaths,
@@ -504,7 +506,9 @@ mod linux {
         }
         drop(fourth);
         wait_for_identity_to_end(&fourth_process).await?;
-        runner.delete_stopped(arguments.vm_id)?;
+        let cleanup_id = Uuid::new_v4();
+        move_stopped_vm_to_trash(&arguments.state_root, arguments.vm_id, cleanup_id)?;
+        cleanup_trashed_vm(&arguments.state_root, arguments.vm_id, cleanup_id)?;
         require_deleted(&fixture_paths, &arguments.state_root)?;
         observation("vm.cleanup", "complete");
         Ok(())
@@ -515,7 +519,9 @@ mod linux {
         runner
             .terminate_tracked_for_cleanup(arguments.vm_id)
             .await?;
-        runner.delete_stopped(arguments.vm_id)?;
+        let cleanup_id = Uuid::new_v4();
+        move_stopped_vm_to_trash(&arguments.state_root, arguments.vm_id, cleanup_id)?;
+        cleanup_trashed_vm(&arguments.state_root, arguments.vm_id, cleanup_id)?;
         Ok(())
     }
 
@@ -862,6 +868,10 @@ mod linux {
         let vms = state_root.join("vms");
         if vms.exists() && fs::read_dir(vms)?.next().transpose()?.is_some() {
             return Err(failure("VM deletion left an orphan inventory entry"));
+        }
+        let trash = state_root.join("trash");
+        if trash.exists() && fs::read_dir(trash)?.next().transpose()?.is_some() {
+            return Err(failure("VM deletion left a trash generation"));
         }
         Ok(())
     }

@@ -21,6 +21,7 @@ hyper-util = { workspace = true }
 libc = "0.2"
 rand = { workspace = true }
 rustix = { workspace = true }
+rusqlite = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }

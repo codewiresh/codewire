@@ -5,7 +5,8 @@ use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt
 use std::path::{Component, Path, PathBuf};
 
 use rustix::fs::{
-    AtFlags, Mode, OFlags, ResolveFlags, fchmod, mkdirat, openat2, renameat, unlinkat,
+    AtFlags, Mode, OFlags, RenameFlags, ResolveFlags, fchmod, mkdirat, openat2, renameat,
+    renameat_with, unlinkat,
 };
 
 const RESOLVE_PRIVATE: ResolveFlags = ResolveFlags::BENEATH
@@ -192,6 +193,14 @@ impl PrivateRoot {
             return Err(PathError::UnsafeDirectory(self.path.join(relative)));
         }
         Ok(file)
+    }
+
+    pub fn open_private_directory(&self, relative: &Path, mode: u32) -> Result<Self, PathError> {
+        let directory = self.open_directory(relative, mode)?;
+        Ok(Self {
+            path: self.path.join(relative),
+            directory,
+        })
     }
 
     pub fn open_regular(
@@ -397,6 +406,58 @@ impl PrivateRoot {
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
             Err(source) => Err(PathError::Io { path, source }),
         }
+    }
+
+    pub fn move_private_directory_to(
+        &self,
+        source: &Path,
+        destination_root: &Self,
+        destination: &Path,
+    ) -> Result<(), PathError> {
+        validate_single_component(source)?;
+        validate_single_component(destination)?;
+        self.open_directory(source, 0o700)?;
+        renameat_with(
+            self.directory.as_fd(),
+            source,
+            destination_root.directory.as_fd(),
+            destination,
+            RenameFlags::NOREPLACE,
+        )
+        .map_err(|source_error| PathError::Openat2 {
+            path: destination_root.path.join(destination),
+            source: source_error,
+        })?;
+        self.directory
+            .sync_all()
+            .map_err(|source_error| PathError::Io {
+                path: self.path.clone(),
+                source: source_error,
+            })?;
+        destination_root
+            .directory
+            .sync_all()
+            .map_err(|source_error| PathError::Io {
+                path: destination_root.path.clone(),
+                source: source_error,
+            })?;
+        destination_root.open_directory(destination, 0o700)?;
+        Ok(())
+    }
+
+    pub fn remove_empty_private_directory(&self, relative: &Path) -> Result<(), PathError> {
+        validate_single_component(relative)?;
+        self.open_directory(relative, 0o700)?;
+        unlinkat(self.directory.as_fd(), relative, AtFlags::REMOVEDIR).map_err(|source| {
+            PathError::Openat2 {
+                path: self.path.join(relative),
+                source,
+            }
+        })?;
+        self.directory.sync_all().map_err(|source| PathError::Io {
+            path: self.path.clone(),
+            source,
+        })
     }
 }
 
@@ -636,5 +697,29 @@ mod tests {
         );
         assert_eq!(fs::read(&outside).unwrap(), b"");
         assert_eq!(fs::read(root.path().join("state.json")).unwrap(), b"first");
+    }
+
+    #[test]
+    fn private_directory_move_is_no_replace_and_durable() {
+        let (_parent, root) = root();
+        root.create_dir(Path::new("source"), 0o700).unwrap();
+        let destination_path = root.create_dir(Path::new("destination"), 0o700).unwrap();
+        let destination = PrivateRoot::open(&destination_path).unwrap();
+
+        root.move_private_directory_to(Path::new("source"), &destination, Path::new("moved"))
+            .unwrap();
+        assert!(!root.path().join("source").exists());
+        assert!(destination.path().join("moved").is_dir());
+
+        root.create_dir(Path::new("second"), 0o700).unwrap();
+        assert!(matches!(
+            root.move_private_directory_to(Path::new("second"), &destination, Path::new("moved"),),
+            Err(PathError::Openat2 {
+                source: rustix::io::Errno::EXIST,
+                ..
+            })
+        ));
+        assert!(root.path().join("second").is_dir());
+        assert!(destination.path().join("moved").is_dir());
     }
 }

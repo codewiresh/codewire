@@ -41,7 +41,8 @@ The smoke uses an isolated HOME and short private native state root, poisons
 all platform and proxy destinations, installs Docker/Lima/QEMU tripwires, and
 creates a clean disposable Git fixture. It proves create/info, bare run and
 shell, PTY behavior, saved output and nonzero status, stop/start persistence,
-supervisor crash recovery, and exact deletion cleanup.
+offline disk/CPU/memory resize, supervisor crash recovery, and journaled exact
+deletion cleanup.
 USAGE
 }
 
@@ -116,7 +117,7 @@ done
   exit 2
 }
 
-for tool in awk cat chmod dirname find git id jq mkdir mktemp readlink realpath rg script sha256sum sleep stat tail timeout touch tr uname; do
+for tool in awk cat chmod dirname e2fsck find git id jq mkdir mktemp python3 readlink realpath resize2fs rg script sha256sum sleep stat tail timeout touch tr uname; do
   require_cmd "$tool"
 done
 [[ "$(uname -s)" == Linux ]] || die 'the native local-environment smoke requires Linux'
@@ -280,11 +281,73 @@ owned_processes() {
   done
 }
 
+native_database_value() {
+  local field="$1"
+  /usr/bin/env python3 - "$STATE_ROOT/supervisor.db" "$field" "$NAME" <<'PY'
+import json
+import sqlite3
+import sys
+
+database, field, name = sys.argv[1:]
+connection = sqlite3.connect(f"file:{database}?mode=ro", uri=True, timeout=1)
+try:
+    if field == "environment_id":
+        row = connection.execute(
+            "SELECT id FROM environments WHERE name = ?", (name,)
+        ).fetchone()
+        if row is None:
+            raise SystemExit(1)
+        print(row[0])
+    elif field == "runner_pid":
+        row = connection.execute(
+            "SELECT runner_json FROM environments WHERE name = ?", (name,)
+        ).fetchone()
+        if row is None or row[0] is None:
+            raise SystemExit(1)
+        print(json.loads(row[0])["process"]["pid"])
+    elif field == "empty":
+        count = connection.execute("SELECT count(*) FROM environments").fetchone()[0]
+        current = connection.execute(
+            "SELECT current_environment_id FROM supervisor_settings WHERE singleton = 1"
+        ).fetchone()[0]
+        print("yes" if count == 0 and current is None else "no")
+    elif field == "contract":
+        application_id = connection.execute("PRAGMA application_id").fetchone()[0]
+        user_version = connection.execute("PRAGMA user_version").fetchone()[0]
+        journal_mode = connection.execute("PRAGMA journal_mode").fetchone()[0]
+        quick_check = connection.execute("PRAGMA quick_check(1)").fetchone()[0]
+        print(f"{application_id}:{user_version}:{journal_mode}:{quick_check}")
+    elif field == "resize_operation":
+        row = connection.execute(
+            "SELECT kind, phase, checkpoint FROM operations "
+            "WHERE kind IN ('restart', 'grow_disk') ORDER BY created_unix_ms DESC LIMIT 1"
+        ).fetchone()
+        if row is None:
+            raise SystemExit(1)
+        print(f"{row[0]}:{row[1]}:{row[2]}")
+    elif field == "ownership":
+        row = connection.execute(
+            "SELECT id, active_artifact_generation FROM environments WHERE name = ?", (name,)
+        ).fetchone()
+        if row is None:
+            raise SystemExit(1)
+        count = connection.execute(
+            "SELECT count(*) FROM owned_objects WHERE environment_id = ?", (row[0],)
+        ).fetchone()[0]
+        generation = row[1] or ""
+        print(f"{len(generation)}:{count}")
+    else:
+        raise SystemExit(2)
+finally:
+    connection.close()
+PY
+}
+
 cleanup() {
   local status=$?
   local cleanup_status=0
   trap - EXIT HUP INT TERM
-  if [[ "$ENV_CREATED" -eq 1 && -f "$STATE_ROOT/state.json" ]]; then
+  if [[ "$ENV_CREATED" -eq 1 && ( -f "$STATE_ROOT/supervisor.db" || -f "$STATE_ROOT/state.json" ) ]]; then
     log 'cleaning native environment after incomplete smoke'
     if ! cw_isolated env rm --local "$NAME" --yes >/dev/null 2>&1; then
       cleanup_status=1
@@ -309,7 +372,8 @@ log 'checking native and legacy local names cannot collide'
 run_cw_expect_failure env create --local --name legacy --cpu 2 --memory 16Gi --path "$WORKSPACE"
 rg -qF 'already exists in the legacy Docker/Lima state' "$LAST_STDERR" ||
   die 'native creation did not report the legacy-name collision'
-[[ ! -e "$STATE_ROOT/state.json" ]] || die 'rejected native creation wrote native state'
+[[ ! -e "$STATE_ROOT/state.json" && ! -e "$STATE_ROOT/supervisor.db" ]] ||
+  die 'rejected native creation wrote native state'
 
 log 'creating account-free 2-vCPU, 16-GiB native environment'
 run_cw env create --local --name "$NAME" --cpu 2 --memory 16Gi --path "$WORKSPACE" --output json
@@ -341,14 +405,43 @@ jq -e '
   )
 ' "$LAST_STDOUT" >/dev/null || die 'native environment list metadata drifted'
 [[ "$(stat -c '%a' "$STATE_ROOT")" == 700 ]] || die 'native state root is not mode 0700'
-[[ "$(stat -c '%a' "$STATE_ROOT/state.json")" == 600 ]] || die 'native state is not mode 0600'
+[[ "$(stat -c '%a' "$STATE_ROOT/supervisor.db")" == 600 ]] ||
+  die 'native supervisor database is not mode 0600'
+for sqlite_sidecar in "$STATE_ROOT/supervisor.db-wal" "$STATE_ROOT/supervisor.db-shm"; do
+  [[ ! -e "$sqlite_sidecar" || "$(stat -c '%a' "$sqlite_sidecar")" == 600 ]] ||
+    die "native supervisor database sidecar is not mode 0600: $sqlite_sidecar"
+done
+[[ "$(native_database_value contract)" == '1129797197:1:wal:ok' ]] ||
+  die 'native supervisor database contract drifted'
+[[ "$(native_database_value ownership)" == '64:6' ]] ||
+  die 'native artifact generation or owned-object manifest was not recorded'
 
-ENVIRONMENT_ID="$(jq -er --arg name "$NAME" '.environments[$name].id' "$STATE_ROOT/state.json")"
-RUNNER_PID="$(jq -er --arg name "$NAME" '.environments[$name].runner.process.pid' "$STATE_ROOT/state.json")"
+ENVIRONMENT_ID="$(native_database_value environment_id)"
+RUNNER_PID="$(native_database_value runner_pid)"
 [[ -d "/proc/$RUNNER_PID" ]] || die 'persisted runner PID is not live'
 [[ -d "$STATE_ROOT/engine/vms/$ENVIRONMENT_ID" ]] || die 'owned VM state directory is missing'
 [[ ! -e "$STATE_ROOT/engine/vms/$ENVIRONMENT_ID/seed/seed.raw" ]] ||
   die 'one-boot guest seed remained after readiness'
+
+log 'checking read-only orphan inventory without adoption or cleanup'
+ORPHAN_SENTINEL="$STATE_ROOT/engine/vms/$ENVIRONMENT_ID/unknown-object"
+printf 'do-not-adopt-or-delete\n' >"$ORPHAN_SENTINEL"
+chmod 0600 "$ORPHAN_SENTINEL"
+run_cw doctor local --output json
+jq -e --arg path "$ORPHAN_SENTINEL" '
+  .reclaimable_bytes >= 0 and
+  any(.orphans[];
+    .kind == "vm_tree" and
+    .path == ($path | sub("/unknown-object$"; "")) and
+    .reason == "unexpected_environment_object"
+  )
+' "$LAST_STDOUT" >/dev/null || die 'native doctor did not report the exact unknown VM object'
+[[ "$(cat "$ORPHAN_SENTINEL")" == 'do-not-adopt-or-delete' ]] ||
+  die 'native doctor mutated an orphan candidate'
+rm -- "$ORPHAN_SENTINEL"
+run_cw doctor local --output json
+jq -e '.orphans == [] and .reclaimable_bytes == 0' "$LAST_STDOUT" >/dev/null ||
+  die 'native doctor reported an orphan after the test object was removed'
 
 log 'checking guest identity, live resources, workspace, and durable output'
 # The quoted expression is evaluated by the guest shell, not this host script.
@@ -411,15 +504,38 @@ run_cw run --no-tty -- /bin/sh -lc 'cat /workspace/sentinel.txt; ./hello.sh'
 rg -qF 'persistence-ok' "$LAST_STDOUT" || die 'workspace sentinel did not survive stop/start'
 rg -qF 'native-workspace-ok' "$LAST_STDOUT" || die 'workspace snapshot did not survive stop/start'
 
+log 'checking journaled offline disk growth and restart-applied CPU and memory'
+run_cw env resize --local "$NAME" --cpu 3 --memory 12Gi --disk 21Gi --yes --force --output json
+jq -e '
+  .state == "running" and
+  .cpu == 3 and
+  .memory == "12Gi" and
+  .disk == "21Gi"
+' "$LAST_STDOUT" >/dev/null || die 'native resize result drifted'
+[[ "$(stat -c '%s' "$STATE_ROOT/engine/vms/$ENVIRONMENT_ID/disks/state.raw")" == 22548578304 ]] ||
+  die 'native state disk file did not grow to 21 GiB'
+[[ "$(native_database_value resize_operation)" == 'restart:completed:5' ]] ||
+  die 'native resize journal did not commit all four effect checkpoints'
+run_cw run --no-tty -- /bin/sh -lc \
+  'printf "guest-cpus="; grep -c "^processor" /proc/cpuinfo; grep "^MemTotal:" /proc/meminfo; cat /workspace/sentinel.txt'
+rg -qF 'guest-cpus=3' "$LAST_STDOUT" || die 'resized guest did not observe exactly 3 vCPUs'
+rg -qF 'persistence-ok' "$LAST_STDOUT" || die 'workspace sentinel did not survive resize'
+MEMORY_KIB="$(awk '$1 == "MemTotal:" { print $2 }' "$LAST_STDOUT")"
+[[ "$MEMORY_KIB" =~ ^[0-9]+$ && "$MEMORY_KIB" -ge 11000000 && "$MEMORY_KIB" -le 13000000 ]] ||
+  die "guest MemTotal is not consistent with 12 GiB after resize: ${MEMORY_KIB:-missing} KiB"
+run_cw_expect_failure env resize --local "$NAME" --disk 20Gi --yes --output json
+rg -qF 'disk shrink is not supported' "$LAST_STDERR" ||
+  die 'native disk shrink did not fail with an actionable error'
+
 log 'checking exact runner adoption after supervisor crash'
 SUPERVISOR_PID="$(find_exact_supervisor_pid)" || die 'native supervisor process was not found exactly'
 kill -KILL -- "$SUPERVISOR_PID"
 wait_for_pid_exit "$SUPERVISOR_PID" || die 'killed supervisor process did not exit'
 [[ -d "/proc/$RUNNER_PID" ]] || die 'runner did not survive supervisor crash'
 run_cw env info --local "$NAME" --output json
-jq -e '.state == "running" and .cpu == 2 and .memory == "16Gi"' "$LAST_STDOUT" >/dev/null ||
+jq -e '.state == "running" and .cpu == 3 and .memory == "12Gi" and .disk == "21Gi"' "$LAST_STDOUT" >/dev/null ||
   die 'replacement supervisor did not reconcile the running environment'
-[[ "$(jq -er --arg name "$NAME" '.environments[$name].runner.process.pid' "$STATE_ROOT/state.json")" == "$RUNNER_PID" ]] ||
+[[ "$(native_database_value runner_pid)" == "$RUNNER_PID" ]] ||
   die 'replacement supervisor substituted a different runner'
 
 log 'deleting the environment and proving complete owned-object cleanup'
@@ -432,8 +548,13 @@ done
 [[ -z "$(owned_processes)" ]] || die 'an owned supervisor, runner, or VMM process remained after delete'
 [[ -z "$(find "$STATE_ROOT" -type s -print -quit)" ]] || die 'an owned Unix socket remained after delete'
 [[ -z "$(find "$STATE_ROOT/engine/vms" -mindepth 1 -print -quit)" ]] || die 'owned VM disk or state remained after delete'
-jq -e '.current == null and .environments == {}' "$STATE_ROOT/state.json" >/dev/null ||
+[[ -z "$(find "$STATE_ROOT/engine/trash" -mindepth 1 -print -quit)" ]] ||
+  die 'owned VM trash generation remained after delete'
+[[ "$(native_database_value empty)" == yes ]] ||
   die 'native environment state entry remained after delete'
+run_cw doctor local --output json
+jq -e '.orphans == [] and .reclaimable_bytes == 0' "$LAST_STDOUT" >/dev/null ||
+  die 'native doctor reported owned state after exact deletion cleanup'
 [[ ! -e "$TRIPWIRE" ]] || die "a forbidden fallback was invoked: $(tr '\n' ' ' <"$TRIPWIRE")"
 [[ "$(sha256sum "$SMOKE_HOME/.codewire/local_instances.toml" | awk '{print $1}')" == "$LEGACY_SHA256" ]] ||
   die 'pre-existing legacy local state changed'

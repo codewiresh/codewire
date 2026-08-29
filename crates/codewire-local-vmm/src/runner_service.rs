@@ -69,8 +69,26 @@ impl RunnerClient {
         Ok(self.inner.stop_vm(v1::StopVmRequest {}).await?.into_inner())
     }
 
-    pub async fn delete(&mut self) -> Result<(), Status> {
-        self.inner.delete_vm(v1::DeleteVmRequest {}).await?;
+    pub async fn grow_state_disk(
+        &mut self,
+        environment_id: Uuid,
+        disk_bytes: u64,
+    ) -> Result<u64, Status> {
+        Ok(self
+            .inner
+            .grow_state_disk(v1::GrowStateDiskRequest {
+                environment_id: environment_id.to_string(),
+                disk_bytes,
+            })
+            .await?
+            .into_inner()
+            .disk_bytes)
+    }
+
+    pub async fn prepare_delete(&mut self) -> Result<(), Status> {
+        self.inner
+            .prepare_delete_vm(v1::PrepareDeleteVmRequest {})
+            .await?;
         Ok(())
     }
 
@@ -302,10 +320,10 @@ impl EnvironmentRunnerService for RunnerRpc {
         Ok(Response::new(state.info()))
     }
 
-    async fn delete_vm(
+    async fn prepare_delete_vm(
         &self,
-        _request: Request<v1::DeleteVmRequest>,
-    ) -> Result<Response<v1::DeleteVmResponse>, Status> {
+        _request: Request<v1::PrepareDeleteVmRequest>,
+    ) -> Result<Response<v1::PrepareDeleteVmResponse>, Status> {
         let mut state = self.state.lock().await;
         if let Some(running) = state.running.as_mut() {
             let exit = running
@@ -323,12 +341,37 @@ impl EnvironmentRunnerService for RunnerRpc {
             .terminate_tracked_for_cleanup(environment_id)
             .await
             .map_err(|_| Status::internal("tracked VMM cleanup failed"))?;
-        state
-            .runner
-            .delete_stopped(environment_id)
-            .map_err(|_| Status::internal("workspace disk cleanup failed"))?;
         state.state = v1::EnvironmentState::Stopped;
-        Ok(Response::new(v1::DeleteVmResponse {}))
+        Ok(Response::new(v1::PrepareDeleteVmResponse {}))
+    }
+
+    async fn grow_state_disk(
+        &self,
+        request: Request<v1::GrowStateDiskRequest>,
+    ) -> Result<Response<v1::GrowStateDiskResponse>, Status> {
+        let request = request.into_inner();
+        let environment_id = parse_environment_id(&request.environment_id)?;
+        let mut state = self.state.lock().await;
+        if !state.adopted {
+            return Err(Status::failed_precondition("runner is not adopted"));
+        }
+        if environment_id != state.environment_id {
+            return Err(Status::permission_denied("runner identity mismatch"));
+        }
+        state
+            .observe_exit()
+            .map_err(|_| Status::internal("observe VMM state failed"))?;
+        if state.running.is_some() {
+            return Err(Status::failed_precondition(
+                "state disk growth requires a stopped VM",
+            ));
+        }
+        let disk_bytes = state
+            .runner
+            .grow_stopped_state_disk(environment_id, request.disk_bytes)
+            .await
+            .map_err(map_grow_error)?;
+        Ok(Response::new(v1::GrowStateDiskResponse { disk_bytes }))
     }
 
     async fn get_daemon_access(
@@ -363,6 +406,15 @@ fn parse_environment_id(value: &str) -> Result<Uuid, Status> {
 
 fn map_start_error(error: RunnerError) -> Status {
     Status::failed_precondition(error.to_string())
+}
+
+fn map_grow_error(error: RunnerError) -> Status {
+    match error {
+        RunnerError::InvalidDiskGrowth(_) | RunnerError::DiskShrinkUnsupported { .. } => {
+            Status::invalid_argument(error.to_string())
+        }
+        _ => Status::failed_precondition(error.to_string()),
+    }
 }
 
 async fn wait_for_guest_daemon(running: &mut RunningVm) -> Result<(), Status> {
