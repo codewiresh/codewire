@@ -429,7 +429,7 @@ pub(crate) fn resize_local_lima_instance(
     let status = local_lima_instance_status(name)?;
     if status == "missing" {
         anyhow::bail!(
-            "Lima instance {:?} is missing; recreate it with 'cw env --local create --backend lima'",
+            "Lima instance {:?} is missing; recreate it with 'cw env create --local --backend lima'",
             instance.name
         );
     }

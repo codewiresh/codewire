@@ -97,22 +97,29 @@ impl std::fmt::Debug for LiveProcess {
 
 impl LiveProcess {
     pub fn capture_child(pid: u32, expected_executable: &Path) -> Result<Self, RecoveryError> {
+        // The caller still owns the unreaped Child, so this numeric PID cannot
+        // be recycled while the pidfd and identity are captured. Open the
+        // pidfd first and hash the executable once; a second full capture
+        // would add latency without strengthening the process-birth binding.
+        let pidfd = open_process_pidfd(pid)?;
         let identity = ProcessIdentity::capture(pid)?;
         if identity.executable != expected_executable {
             return Err(RecoveryError::UnexpectedSpawnedExecutable);
         }
-        match Self::open_stable(identity) {
-            Err(RecoveryError::IdentityMismatch) => {
-                Err(RecoveryError::SpawnedIdentityChangedDuringCapture)
-            }
-            result => result,
+        let process = Self { identity, pidfd };
+        if process.is_exited()? {
+            return Err(RecoveryError::ProcessExited);
         }
+        Ok(process)
     }
 
     pub fn recover(expected: &ProcessIdentity) -> Result<Self, RecoveryError> {
-        if &ProcessIdentity::capture(expected.pid)? != expected {
-            return Err(RecoveryError::IdentityMismatch);
-        }
+        // Open the pidfd before performing the one full identity comparison.
+        // The pidfd pins that process birth while `open_stable` verifies the
+        // boot ID, start time, executable metadata, and executable digest.
+        // Capturing once before and once after pidfd_open adds no identity
+        // guarantee: a PID recycled between those operations is still caught
+        // by the post-open comparison against `expected`.
         Self::open_stable(expected.clone())
     }
 
@@ -167,11 +174,7 @@ impl LiveProcess {
     }
 
     fn open_stable(identity: ProcessIdentity) -> Result<Self, RecoveryError> {
-        let raw_pid =
-            i32::try_from(identity.pid).map_err(|_| RecoveryError::InvalidPid(identity.pid))?;
-        let pid = Pid::from_raw(raw_pid).ok_or(RecoveryError::InvalidPid(identity.pid))?;
-        let pidfd = pidfd_open(pid, PidfdFlags::empty()).map_err(classify_pidfd_open_error)?;
-        validate_pidfd_target(&pidfd, identity.pid)?;
+        let pidfd = open_process_pidfd(identity.pid)?;
         if ProcessIdentity::capture(identity.pid)? != identity {
             return Err(RecoveryError::IdentityMismatch);
         }
@@ -181,6 +184,15 @@ impl LiveProcess {
         }
         Ok(process)
     }
+}
+
+fn open_process_pidfd(expected_pid: u32) -> Result<OwnedFd, RecoveryError> {
+    let raw_pid =
+        i32::try_from(expected_pid).map_err(|_| RecoveryError::InvalidPid(expected_pid))?;
+    let pid = Pid::from_raw(raw_pid).ok_or(RecoveryError::InvalidPid(expected_pid))?;
+    let pidfd = pidfd_open(pid, PidfdFlags::empty()).map_err(classify_pidfd_open_error)?;
+    validate_pidfd_target(&pidfd, expected_pid)?;
+    Ok(pidfd)
 }
 
 fn classify_pidfd_open_error(error: rustix::io::Errno) -> RecoveryError {

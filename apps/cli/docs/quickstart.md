@@ -20,7 +20,7 @@ cargo build -p codewire-cli-bin --bin cw
 Create a local Lima environment using the workspace image:
 
 ```bash
-cw env --local create \
+cw env create --local \
   --backend lima \
   --name my-app \
   --image workspace \
@@ -40,7 +40,7 @@ agent for either placement:
 
 ```bash
 cw init --image workspace --coding-agent codex
-cw env --local create --backend lima --name my-app --file codewire.yaml
+cw env create --local --backend lima --name my-app --file codewire.yaml
 ```
 
 ## Coding-agent tools and credentials
@@ -91,12 +91,12 @@ the other documented `Ctrl+B` actions.
 ## Manage lifecycle
 
 ```bash
-cw env --local info my-app
-cw env --local stop my-app
-cw env --local start my-app
-cw env --local daemon status my-app
-cw env --local daemon repair my-app
-cw env --local rm my-app
+cw env info --local my-app
+cw env stop --local my-app
+cw env start --local my-app
+cw env daemon status --local my-app
+cw env daemon repair --local my-app
+cw env rm --local my-app
 ```
 
 For a platform environment, omit `--local`:
@@ -128,7 +128,7 @@ Mesh service installation.
 There is no compatibility execution path. The CLI reports exact migration
 guidance for removed commands:
 
-- `cw local ...` → `cw env --local ...`
+- `cw local ...` → `cw env COMMAND --local ...`
 - `cw exec ENV -- COMMAND` → `cw run ENV -- COMMAND`
 - `cw node` → environment daemon lifecycle or `cw network nodes`
 - `cw run --local` and `cw run --node` → create/select an environment, then

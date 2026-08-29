@@ -2,7 +2,7 @@
 //!
 //! - `core`: hook, gateway, target selection, init, VS Code, shell, and CLI utilities.
 //! - `environment`: environment lifecycle, files, access, ports, logs, and list views.
-//! - `local`: local Docker/Lima environment lifecycle behind `cw env --local`.
+//! - `local`: local Docker/Lima environment lifecycle behind `cw env COMMAND --local`.
 //! - `platform_commands`: doctor, billing, login/setup, GitHub, organizations, API keys,
 //!   presets, and secrets.
 //! - `mesh_commands`: network, node, and local Mesh management.
@@ -13,6 +13,11 @@
 //! `lib.rs` line positions are historical anchors only.
 
 use super::*;
+
+#[cfg(target_os = "linux")]
+mod native;
+#[cfg(target_os = "linux")]
+pub(crate) use native::*;
 
 const LOCAL_DAEMON_READY_ATTEMPTS: usize = 25;
 const LOCAL_DAEMON_READY_RETRY_INTERVAL: Duration = Duration::from_millis(200);
@@ -158,18 +163,46 @@ pub(crate) enum EnvironmentPlacement {
 pub(crate) struct EnvArgs {
     #[arg(
         long,
+        global = true,
         conflicts_with = "platform",
         help = "Operate on local environments only"
     )]
     pub(crate) local: bool,
     #[arg(
         long,
+        global = true,
         conflicts_with = "local",
         help = "Operate on current-organization platform environments only"
     )]
     pub(crate) platform: bool,
     #[command(subcommand)]
     pub(crate) command: EnvCommand,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Args)]
+pub(crate) struct NativeSupervisorArgs {
+    #[arg(long)]
+    pub(crate) root: PathBuf,
+    #[arg(long)]
+    pub(crate) artifact_root: PathBuf,
+    #[arg(long)]
+    pub(crate) artifact_lock: PathBuf,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Args)]
+pub(crate) struct NativeRunnerArgs {
+    #[arg(long)]
+    pub(crate) environment_id: String,
+    #[arg(long)]
+    pub(crate) socket: PathBuf,
+    #[arg(long)]
+    pub(crate) engine_state_root: PathBuf,
+    #[arg(long)]
+    pub(crate) artifact_root: PathBuf,
+    #[arg(long)]
+    pub(crate) artifact_lock: PathBuf,
 }
 
 impl EnvArgs {
@@ -524,7 +557,7 @@ pub(crate) struct EnvCreateArgs {
     #[arg(
         long,
         value_name = "BACKEND",
-        help = "Local runtime backend (docker or lima); requires --local"
+        help = "Local runtime backend (native by default; docker or lima for legacy); requires --local"
     )]
     backend: Option<String>,
     #[arg(
@@ -547,12 +580,12 @@ pub(crate) struct EnvCreateArgs {
     spec: Option<String>,
     #[arg(long, help = "Time to live (e.g. 1h, 30m)")]
     ttl: Option<String>,
-    #[arg(long, help = "CPU in millicores")]
-    cpu: Option<i32>,
-    #[arg(long, help = "Memory in MB")]
-    memory: Option<i32>,
-    #[arg(long, help = "Disk in GB")]
-    disk: Option<i32>,
+    #[arg(long, value_name = "QUANTITY", help = "CPU resource quantity")]
+    cpu: Option<String>,
+    #[arg(long, value_name = "QUANTITY", help = "Memory resource quantity")]
+    memory: Option<String>,
+    #[arg(long, value_name = "QUANTITY", help = "Disk resource quantity")]
+    disk: Option<String>,
     #[arg(long, value_parser = ["standard", "confidential"], help = "Product isolation tier")]
     isolation: Option<String>,
     #[arg(

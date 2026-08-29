@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Build the canonical uncompressed newc archive for the local-VMM guest probe,
-# or prove that the exact static-musl build is reproducible. Archive-only mode
-# does not claim the supplied probe was built with the sealed toolchain.
+# or prove that the exact static-musl build is reproducible. Product-root mode
+# additionally seals a caller-pinned static BusyBox into the archive. Archive-
+# only mode does not claim the supplied probe was built with the sealed toolchain.
 # This focused gate does not attest artifact publication or full supply-chain
 # provenance; those remain owned by the supply-chain work item.
 set -euo pipefail
@@ -19,13 +20,17 @@ usage() {
     'usage:' \
     '  build-local-vmm-initramfs.sh --probe ABSOLUTE_PATH --output ABSOLUTE_PATH' \
     '  build-local-vmm-initramfs.sh --verify [--output ABSOLUTE_PATH]' \
+    '  build-local-vmm-initramfs.sh --verify-root --busybox ABSOLUTE_PATH' \
+    '    --busybox-sha256 SHA256 [--output ABSOLUTE_PATH]' \
     '' \
     '--probe/--output creates a deterministic archive from caller-supplied bytes.' \
     'It does not prove the probe is static or came from the sealed Rust toolchain.' \
     '--verify requires exact Rust 1.91.1, libprotoc 35.1, the installed x86_64' \
     'musl standard library, and readelf. It builds twice and fails closed on' \
     'any drift. With --output, the verified archive is published atomically' \
-    'after comparison. Artifact provenance remains a separate gate.' >&2
+    'after comparison. --verify-root applies the same proof and adds a static' \
+    'x86_64 BusyBox whose exact lowercase SHA-256 must be supplied.' \
+    'Artifact provenance remains a separate gate.' >&2
 }
 
 die() {
@@ -34,9 +39,9 @@ die() {
 }
 
 absolute_existing_file() {
-  local path="$1"
-  [[ "$path" == /* ]] || die "probe path must be absolute: $path"
-  [[ -f "$path" && ! -L "$path" ]] || die "probe must be a regular non-symlink file: $path"
+  local label="$1" path="$2"
+  [[ "$path" == /* ]] || die "$label path must be absolute: $path"
+  [[ -f "$path" && ! -L "$path" ]] || die "$label must be a regular non-symlink file: $path"
   printf '%s\n' "$path"
 }
 
@@ -51,7 +56,7 @@ absolute_output() {
 
 build_archive_only() {
   local probe output
-  probe="$(absolute_existing_file "$1")"
+  probe="$(absolute_existing_file probe "$1")"
   output="$(absolute_output "$2")"
   (
     cd "$ROOT"
@@ -134,24 +139,32 @@ build_one() {
 }
 
 verify_static_elf() {
-  local binary="$1"
+  local label="$1" binary="$2"
   readelf -hW "$binary" | grep -Fq 'Advanced Micro Devices X86-64' ||
-    die "guest probe is not an x86_64 ELF"
+    die "$label is not an x86_64 ELF"
   if readelf -lW "$binary" | grep -Fq 'INTERP'; then
-    die "guest probe contains a dynamic program interpreter"
+    die "$label contains a dynamic program interpreter"
   fi
   if readelf -dW "$binary" 2>/dev/null | grep -Fq '(NEEDED)'; then
-    die "guest probe contains a dynamic shared-library dependency"
+    die "$label contains a dynamic shared-library dependency"
   fi
 }
 
 verify_reproducible() {
-  local requested_output="$1"
+  local requested_output="$1" root_busybox="$2" root_busybox_sha256="$3"
   local target_a target_b binary_a binary_b archive_a archive_b
   if [[ -n "$requested_output" ]]; then
     requested_output="$(absolute_output "$requested_output")"
   fi
   require_exact_toolchain
+  if [[ -n "$root_busybox" ]]; then
+    root_busybox="$(absolute_existing_file BusyBox "$root_busybox")"
+    [[ "$root_busybox_sha256" =~ ^[0-9a-f]{64}$ ]] ||
+      die "--busybox-sha256 must be exactly 64 lowercase hexadecimal characters"
+    [[ "$(sha256sum "$root_busybox" | awk '{print $1}')" == "$root_busybox_sha256" ]] ||
+      die "BusyBox digest differs from --busybox-sha256"
+    verify_static_elf BusyBox "$root_busybox"
+  fi
   VERIFY_WORK="$(mktemp -d "${TMPDIR:-/tmp}/codewire-local-vmm-initramfs.XXXXXX")"
   trap cleanup EXIT
   trap 'exit 130' INT
@@ -166,12 +179,17 @@ verify_reproducible() {
   binary_a="$target_a/$TARGET/release/$BINARY"
   binary_b="$target_b/$TARGET/release/$BINARY"
   [[ -x "$binary_a" && -x "$binary_b" ]] || die "static guest build did not produce both binaries"
-  verify_static_elf "$binary_a"
-  verify_static_elf "$binary_b"
+  verify_static_elf 'guest probe' "$binary_a"
+  verify_static_elf 'guest probe' "$binary_b"
   cmp -s "$binary_a" "$binary_b" || die "independent static guest builds are not byte-identical"
 
-  "$binary_a" newc "$binary_a" "$archive_a"
-  "$binary_b" newc "$binary_b" "$archive_b"
+  if [[ -n "$root_busybox" ]]; then
+    "$binary_a" newc-root "$binary_a" "$root_busybox" "$archive_a"
+    "$binary_b" newc-root "$binary_b" "$root_busybox" "$archive_b"
+  else
+    "$binary_a" newc "$binary_a" "$archive_a"
+    "$binary_b" newc "$binary_b" "$archive_b"
+  fi
   cmp -s "$archive_a" "$archive_b" || die "independent canonical newc archives are not byte-identical"
 
   if [[ -n "$requested_output" ]]; then
@@ -179,7 +197,11 @@ verify_reproducible() {
     # static binary. Its writer uses same-directory create-new, file fsync,
     # rename, and parent-directory fsync; the comparison proves the published
     # bytes are archive A rather than a third unverified build.
-    "$binary_a" newc "$binary_a" "$requested_output"
+    if [[ -n "$root_busybox" ]]; then
+      "$binary_a" newc-root "$binary_a" "$root_busybox" "$requested_output"
+    else
+      "$binary_a" newc "$binary_a" "$requested_output"
+    fi
     cmp -s "$archive_a" "$requested_output" ||
       die "atomically published archive differs from verified archive"
   fi
@@ -188,6 +210,11 @@ verify_reproducible() {
   printf 'local VMM initramfs: probe sha256=%s size=%s\n' \
     "$(sha256sum "$binary_a" | awk '{print $1}')" \
     "$(stat -c '%s' "$binary_a")"
+  if [[ -n "$root_busybox" ]]; then
+    printf 'local VMM initramfs: BusyBox sha256=%s size=%s\n' \
+      "$root_busybox_sha256" \
+      "$(stat -c '%s' "$root_busybox")"
+  fi
   printf 'local VMM initramfs: archive sha256=%s size=%s\n' \
     "$(sha256sum "$archive_a" | awk '{print $1}')" \
     "$(stat -c '%s' "$archive_a")"
@@ -209,6 +236,8 @@ cleanup() {
 
 mode=''
 probe=''
+busybox=''
+busybox_sha256=''
 output=''
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -217,12 +246,29 @@ while [[ $# -gt 0 ]]; do
       mode='verify'
       shift
       ;;
+    --verify-root)
+      [[ -z "$mode" ]] || { usage; exit 2; }
+      mode='verify-root'
+      shift
+      ;;
     --probe)
       [[ $# -ge 2 ]] || { usage; exit 2; }
       [[ -z "$mode" || "$mode" == archive ]] || { usage; exit 2; }
       [[ -z "$probe" ]] || { usage; exit 2; }
       mode='archive'
       probe="$2"
+      shift 2
+      ;;
+    --busybox)
+      [[ $# -ge 2 ]] || { usage; exit 2; }
+      [[ -z "$busybox" ]] || { usage; exit 2; }
+      busybox="$2"
+      shift 2
+      ;;
+    --busybox-sha256)
+      [[ $# -ge 2 ]] || { usage; exit 2; }
+      [[ -z "$busybox_sha256" ]] || { usage; exit 2; }
+      busybox_sha256="$2"
       shift 2
       ;;
     --output)
@@ -244,11 +290,15 @@ done
 
 case "$mode" in
   verify)
-    [[ -z "$probe" ]] || { usage; exit 2; }
-    verify_reproducible "$output"
+    [[ -z "$probe" && -z "$busybox" && -z "$busybox_sha256" ]] || { usage; exit 2; }
+    verify_reproducible "$output" '' ''
+    ;;
+  verify-root)
+    [[ -z "$probe" && -n "$busybox" && -n "$busybox_sha256" ]] || { usage; exit 2; }
+    verify_reproducible "$output" "$busybox" "$busybox_sha256"
     ;;
   archive)
-    [[ -n "$probe" && -n "$output" ]] || { usage; exit 2; }
+    [[ -n "$probe" && -n "$output" && -z "$busybox" && -z "$busybox_sha256" ]] || { usage; exit 2; }
     build_archive_only "$probe" "$output"
     ;;
   *)

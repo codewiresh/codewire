@@ -9,12 +9,16 @@
         let cli = Cli::try_parse_from([
             "cw",
             "env",
-            "--local",
             "create",
-            "--backend",
-            "docker",
+            "--local",
             "--name",
             "workspace",
+            "--cpu",
+            "2",
+            "--memory",
+            "16Gi",
+            "--path",
+            ".",
             "--output",
             "json",
         ])
@@ -29,9 +33,28 @@
         };
         assert!(local);
         assert!(!platform);
-        assert_eq!(args.backend.as_deref(), Some("docker"));
+        assert_eq!(args.backend, None);
         assert_eq!(args.name.as_deref(), Some("workspace"));
+        assert_eq!(args.cpu.as_deref(), Some("2"));
+        assert_eq!(args.memory.as_deref(), Some("16Gi"));
+        assert_eq!(args.path.as_deref(), Some(std::path::Path::new(".")));
         assert_eq!(args.output, OutputFormat::Json);
+
+        // The pre-native spelling remains a compatibility form for explicit
+        // legacy backends while help and documentation use the order above.
+        assert!(
+            Cli::try_parse_from([
+                "cw",
+                "env",
+                "--local",
+                "create",
+                "--backend",
+                "docker",
+                "--name",
+                "legacy",
+            ])
+            .is_ok()
+        );
 
         let cli = Cli::try_parse_from(["cw", "env", "--platform", "list"]).unwrap();
         let Command::Env(EnvArgs {
@@ -335,7 +358,7 @@
         };
         assert_eq!(
             reject_local_create_options(&args).unwrap_err().to_string(),
-            "--backend, --path, --file, and --spec require `cw env --local create`"
+            "--backend, --path, --file, and --spec require `cw env create --local`"
         );
     }
 
@@ -343,7 +366,7 @@
     fn ambiguous_placement_error_gives_both_exact_commands() {
         assert_eq!(
             ambiguous_environment_placement_error("start", "workspace").to_string(),
-            "environment \"workspace\" exists in both placements; use `cw env --local start workspace` or `cw env --platform start workspace`"
+            "environment \"workspace\" exists in both placements; use `cw env start --local workspace` or `cw env start --platform workspace`"
         );
     }
 
@@ -467,9 +490,9 @@
         assert_eq!(args.preset_slug.as_deref(), Some("go"));
         assert_eq!(args.name.as_deref(), Some("builder"));
         assert_eq!(args.ttl.as_deref(), Some("1h"));
-        assert_eq!(args.cpu, Some(2000));
-        assert_eq!(args.memory, Some(4096));
-        assert_eq!(args.disk, Some(40));
+        assert_eq!(args.cpu.as_deref(), Some("2000"));
+        assert_eq!(args.memory.as_deref(), Some("4096"));
+        assert_eq!(args.disk.as_deref(), Some("40"));
         assert_eq!(args.image.as_deref(), Some("workspace"));
         assert_eq!(args.coding_agent.as_deref(), Some("codex"));
         assert!(args.no_org_secrets);

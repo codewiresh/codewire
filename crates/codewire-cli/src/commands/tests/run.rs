@@ -159,7 +159,7 @@
         let cases = [
             (
                 vec!["cw", "local", "list"],
-                "`cw local` was removed; use `cw env --local ...`",
+                "`cw local` was removed; use `cw env COMMAND --local ...`",
             ),
             (
                 vec!["cw", "--server", "https://example.test", "exec", "--", "true"],

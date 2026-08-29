@@ -38,7 +38,7 @@ bun run build
 bun run typecheck
 bun run rust:check
 make proto-drift-check
-cw env --local create --backend lima --name codewire-dev
+cw env create --local --backend lima --name codewire-dev
 ```
 
 ## Pre-push gate

@@ -6,9 +6,13 @@ rust-version.workspace = true
 license = "AGPL-3.0-only"
 authors.workspace = true
 description = "Codewire-owned host runtime for isolated local microVM environments"
+build = "build.rs"
 
 [dependencies]
+prost = { workspace = true }
 thiserror = { workspace = true }
+tonic = { workspace = true }
+tonic-prost = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 codewire-daemon = { workspace = true }
@@ -21,11 +25,13 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
 tokio = { workspace = true }
-tonic = { workspace = true }
+tokio-stream = { workspace = true }
 tower = { workspace = true }
 uuid = { workspace = true }
 zeroize = { workspace = true }
 
+[build-dependencies]
+tonic-prost-build = { workspace = true }
+
 [dev-dependencies]
 tempfile = { workspace = true }
-tokio-stream = { workspace = true }

@@ -1,0 +1,104 @@
+syntax = "proto3";
+
+package codewire.local.v1;
+
+// This package is a private host-process contract. It is deliberately not
+// part of codewire.v1 and carries no platform compatibility promise.
+service LocalSupervisorService {
+  rpc CreateEnvironment(CreateEnvironmentRequest) returns (Environment);
+  rpc ListEnvironments(ListEnvironmentsRequest) returns (ListEnvironmentsResponse);
+  rpc GetEnvironment(EnvironmentSelector) returns (Environment);
+  rpc StartEnvironment(EnvironmentSelector) returns (Environment);
+  rpc StopEnvironment(EnvironmentSelector) returns (Environment);
+  rpc DeleteEnvironment(EnvironmentSelector) returns (DeleteEnvironmentResponse);
+  rpc GetDaemonAccess(EnvironmentSelector) returns (DaemonAccess);
+}
+
+service EnvironmentRunnerService {
+  rpc AdoptRunner(AdoptRunnerRequest) returns (RunnerInfo);
+  rpc GetRunnerInfo(GetRunnerInfoRequest) returns (RunnerInfo);
+  rpc StartVm(StartVmRequest) returns (RunnerInfo);
+  rpc StopVm(StopVmRequest) returns (RunnerInfo);
+  rpc DeleteVm(DeleteVmRequest) returns (DeleteVmResponse);
+  rpc GetDaemonAccess(GetDaemonAccessRequest) returns (DaemonAccess);
+}
+
+enum EnvironmentState {
+  ENVIRONMENT_STATE_UNSPECIFIED = 0;
+  ENVIRONMENT_STATE_STOPPED = 1;
+  ENVIRONMENT_STATE_STARTING = 2;
+  ENVIRONMENT_STATE_RUNNING = 3;
+  ENVIRONMENT_STATE_ERROR = 4;
+}
+
+message CreateEnvironmentRequest {
+  string name = 1;
+  string source_path = 2;
+  uint32 vcpus = 3;
+  uint32 memory_mib = 4;
+  uint64 disk_bytes = 5;
+}
+
+message EnvironmentSelector {
+  string name = 1;
+}
+
+message Environment {
+  string id = 1;
+  string name = 2;
+  EnvironmentState state = 3;
+  uint32 vcpus = 4;
+  uint32 memory_mib = 5;
+  uint64 disk_bytes = 6;
+  uint64 generation = 7;
+  string workspace_commit = 8;
+  string source_path = 9;
+  bool selected = 10;
+}
+
+message ListEnvironmentsRequest {}
+
+message ListEnvironmentsResponse {
+  repeated Environment environments = 1;
+}
+
+message DeleteEnvironmentResponse {
+  string name = 1;
+  bool removed = 2;
+}
+
+// The capability is intentionally returned only over an admitted owner-only
+// Unix socket. Callers must keep it in memory and must never serialize or log
+// this message.
+message DaemonAccess {
+  string hybrid_socket = 1;
+  uint32 guest_port = 2;
+  string generation_capability = 3;
+}
+
+message AdoptRunnerRequest {
+  string environment_id = 1;
+}
+
+message GetRunnerInfoRequest {}
+
+message RunnerInfo {
+  string environment_id = 1;
+  EnvironmentState state = 2;
+  uint64 generation = 3;
+}
+
+message StartVmRequest {
+  string environment_id = 1;
+  uint64 generation = 2;
+  uint32 vsock_cid = 3;
+  uint32 daemon_vsock_port = 4;
+  uint64 state_disk_bytes = 5;
+  uint32 vcpus = 6;
+  uint32 memory_mib = 7;
+}
+
+message StopVmRequest {}
+message DeleteVmRequest {}
+message DeleteVmResponse {}
+message GetDaemonAccessRequest {}

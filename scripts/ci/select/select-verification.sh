@@ -832,7 +832,8 @@ if [ "$event_selected" = false ]; then
 
     case "$path" in
       scripts/ci/verify/build-local-vmm-initramfs.sh|\
-      scripts/ci/verify/smoke-local-vmm-cloud-hypervisor.sh)
+      scripts/ci/verify/smoke-local-vmm-cloud-hypervisor.sh|\
+      scripts/ci/verify/smoke-native-local-environment.sh)
         select_token transport
         select_token transport_pkg_codewire_local_vmm
         select_token transport_pkg_codewire_vmm_guest_probe

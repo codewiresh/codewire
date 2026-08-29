@@ -11,11 +11,20 @@ pub mod artifact;
 pub mod ch_api;
 #[cfg(target_os = "linux")]
 pub mod cloud_hypervisor;
+pub mod control;
 #[cfg(target_os = "linux")]
 pub mod hybrid_vsock;
+#[cfg(target_os = "linux")]
+pub mod workspace;
 
 #[cfg(target_os = "linux")]
 pub mod linux;
+#[cfg(target_os = "linux")]
+pub mod runner_service;
+#[cfg(target_os = "linux")]
+pub mod supervisor;
+#[cfg(target_os = "linux")]
+mod uds;
 
 #[cfg(target_os = "linux")]
 pub use linux::{

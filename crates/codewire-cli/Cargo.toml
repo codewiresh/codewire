@@ -29,8 +29,12 @@ sha2 = { workspace = true }
 thiserror = { workspace = true }
 tokio = { version = "1", features = ["io-std", "io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 toml = { workspace = true }
+tonic = { workspace = true }
 url = { workspace = true }
 uuid = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+codewire-local-vmm = { path = "../codewire-local-vmm" }
 
 [dev-dependencies]
 buffa = { workspace = true }

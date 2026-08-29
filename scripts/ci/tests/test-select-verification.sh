@@ -359,6 +359,9 @@ run_paths_case local_vmm_initramfs_builder pull_request refs/pull/5013/head fals
 run_paths_case local_vmm_kvm_smoke pull_request refs/pull/5014/head false \
   'policy transport transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
   scripts/ci/verify/smoke-local-vmm-cloud-hypervisor.sh
+run_paths_case native_local_environment_smoke pull_request refs/pull/5015/head false \
+  'policy transport transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
+  scripts/ci/verify/smoke-native-local-environment.sh
 run_paths_case curated_derp_member_manifest pull_request refs/pull/502/head false \
   'policy rust_curated_locks transport transport_derp_contract transport_pkg_codewire_derp' \
   crates/codewire-derp/Cargo.toml

@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
-use codewire_daemon::client::SessionClient;
+use codewire_daemon::client::{SessionClient, v1 as daemon_v1};
 use codewire_vmm_guest_probe::Seed;
 use rand::{RngCore, rngs::OsRng};
 use rustix::process::Signal;
@@ -27,6 +27,7 @@ use super::state::{
 };
 
 const START_TIMEOUT: Duration = Duration::from_secs(10);
+const GUEST_POWEROFF_TIMEOUT: Duration = Duration::from_secs(10);
 const GRACEFUL_STOP_TIMEOUT: Duration = Duration::from_secs(5);
 const SIGNAL_STOP_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -500,6 +501,34 @@ impl RunningVm {
             .map_err(RunnerError::from)
     }
 
+    pub(crate) fn daemon_access_parts(&self) -> (&Path, u32, &str) {
+        (
+            &self.hybrid.socket,
+            self.hybrid.guest_port,
+            self.token.as_str(),
+        )
+    }
+
+    /// Unlink the one-boot seed after Cloud Hypervisor and the ready guest
+    /// daemon both hold their admitted device handles. The token remains only
+    /// in runner/guest memory and cannot be recovered from persistent state.
+    pub fn discard_seed(&self) -> Result<(), RunnerError> {
+        let seed_root = PrivateRoot::open(&self.paths.seed_dir)?;
+        if !seed_root.remove_private_regular(Path::new("seed.raw"), 0o400)? {
+            return Err(RunnerError::MissingSeedAfterReadiness);
+        }
+        Ok(())
+    }
+
+    pub fn try_exit(&mut self) -> Result<ExitClass, RunnerError> {
+        match self.child.try_wait() {
+            Ok(Some(status)) if status.success() => Ok(ExitClass::GuestShutdown),
+            Ok(Some(status)) => Ok(ExitClass::VmmFailure(status.code())),
+            Ok(None) => Ok(ExitClass::StillRunning),
+            Err(_) => Err(RunnerError::Wait),
+        }
+    }
+
     pub async fn wait_for_exit(&mut self, timeout: Duration) -> Result<ExitClass, RunnerError> {
         match tokio::time::timeout(timeout, self.child.wait()).await {
             Ok(Ok(status)) if status.success() => Ok(ExitClass::GuestShutdown),
@@ -510,6 +539,15 @@ impl RunningVm {
     }
 
     pub async fn stop(&mut self) -> Result<ExitClass, RunnerError> {
+        // Ask trusted guest init to stop the daemon, sync the persistent state
+        // filesystem, and power off. Keep the transient response stream alive
+        // until the VMM exits so transport cancellation cannot kill the
+        // poweroff helper before it signals PID 1.
+        if let Ok(_poweroff_stream) = self.request_guest_poweroff().await
+            && self.process.wait_exited(GUEST_POWEROFF_TIMEOUT).await?
+        {
+            return self.wait_reaped().await;
+        }
         let _ = self.api.shutdown().await;
         if self.process.wait_exited(GRACEFUL_STOP_TIMEOUT).await? {
             return self.wait_reaped().await;
@@ -520,6 +558,20 @@ impl RunningVm {
             return self.wait_reaped().await;
         }
         kill_and_reap(&self.process, &mut self.child).await
+    }
+
+    async fn request_guest_poweroff(
+        &self,
+    ) -> Result<tonic::Streaming<daemon_v1::ExecMessage>, RunnerError> {
+        self.daemon_client()
+            .await?
+            .exec_transient(daemon_v1::ExecStartRequest {
+                command: vec!["/init".to_owned(), "poweroff".to_owned()],
+                working_dir: "/".to_owned(),
+                env: Vec::new(),
+            })
+            .await
+            .map_err(|_| RunnerError::GuestPoweroff)
     }
 
     pub async fn force_kill_for_test(&mut self) -> Result<ExitClass, RunnerError> {
@@ -891,6 +943,8 @@ pub enum RunnerError {
     HybridVsock(#[from] HybridVsockError),
     #[error("guest seed is invalid")]
     Seed(#[from] codewire_vmm_guest_probe::SeedError),
+    #[error("one-boot guest seed is missing after daemon readiness")]
+    MissingSeedAfterReadiness,
     #[error("the preformatted ext4 state disk is absent; production prepare never formats disks")]
     MissingPreformattedStateDisk,
     #[error(
@@ -911,6 +965,8 @@ pub enum RunnerError {
     Wait,
     #[error("Cloud Hypervisor did not exit after pidfd SIGKILL")]
     KillTimeout,
+    #[error("authenticated guest poweroff request failed")]
+    GuestPoweroff,
     #[error("VM is still running")]
     VmStillRunning,
     #[error("persisted VM identity does not match its directory")]

@@ -5,7 +5,7 @@ use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
-use codewire_vmm_guest_probe::canonical_newc;
+use codewire_vmm_guest_probe::{canonical_guest_root_newc, canonical_newc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncReadExt;
@@ -208,7 +208,7 @@ pub enum ArtifactError {
     InvalidElf(PathBuf),
     #[error("kernel artifact has an invalid or wrong-architecture image header: {0}")]
     InvalidKernel(PathBuf),
-    #[error("initramfs is not the exact canonical single-/init newc archive: {0}")]
+    #[error("initramfs is not an exact canonical Codewire guest-root newc archive: {0}")]
     InvalidInitramfs(PathBuf),
     #[error("Cloud Hypervisor lock must pin release {expected}")]
     WrongCloudHypervisorRelease { expected: &'static str },
@@ -477,37 +477,111 @@ fn validate_initramfs(
             path: path.to_owned(),
             source,
         })?;
-    let Some(init) = find_newc_init(&bytes) else {
+    let Some(init) = find_newc_entry(&bytes, b"init") else {
         return Err(ArtifactError::InvalidInitramfs(path.to_owned()));
     };
-    if !valid_elf_header(init, architecture)
-        || canonical_newc(init)
-            .ok()
-            .filter(|canonical| canonical == &bytes)
-            .is_none()
-    {
+    if !valid_elf_header(init, architecture) {
+        return Err(ArtifactError::InvalidInitramfs(path.to_owned()));
+    }
+    let legacy_canonical = canonical_newc(init)
+        .ok()
+        .is_some_and(|canonical| canonical == bytes);
+    let product_canonical = find_newc_entry(&bytes, b"bin/busybox").is_some_and(|busybox| {
+        valid_static_elf_header(busybox, architecture)
+            && canonical_guest_root_newc(init, busybox)
+                .ok()
+                .is_some_and(|canonical| canonical == bytes)
+    });
+    if !legacy_canonical && !product_canonical {
         return Err(ArtifactError::InvalidInitramfs(path.to_owned()));
     }
     Ok(())
 }
 
+#[cfg(test)]
 fn find_newc_init(archive: &[u8]) -> Option<&[u8]> {
-    if archive.len() < 110 || &archive[..6] != b"070701" {
-        return None;
+    find_newc_entry(archive, b"init")
+}
+
+fn find_newc_entry<'a>(archive: &'a [u8], expected: &[u8]) -> Option<&'a [u8]> {
+    let mut offset = 0_usize;
+    loop {
+        let header_end = offset.checked_add(110)?;
+        let header = archive.get(offset..header_end)?;
+        if &header[..6] != b"070701" {
+            return None;
+        }
+        let file_size = parse_hex_u32(&header[54..62])? as usize;
+        let name_size = parse_hex_u32(&header[94..102])? as usize;
+        if name_size == 0 {
+            return None;
+        }
+        let name_start = header_end;
+        let name_end = name_start.checked_add(name_size)?;
+        let name = archive.get(name_start..name_end)?;
+        let data_start = align4(name_end)?;
+        let data_end = data_start.checked_add(file_size)?;
+        let data = archive.get(data_start..data_end)?;
+        if name.strip_suffix(&[0]) == Some(expected) {
+            return Some(data);
+        }
+        if name == b"TRAILER!!!\0" {
+            return None;
+        }
+        offset = align4(data_end)?;
     }
-    let file_size = parse_hex_u32(&archive[54..62])? as usize;
-    let name_size = parse_hex_u32(&archive[94..102])? as usize;
-    if name_size == 0 {
-        return None;
+}
+
+fn valid_static_elf_header(bytes: &[u8], architecture: ArtifactArchitecture) -> bool {
+    if !valid_elf_header(bytes, architecture) || bytes.len() < 64 {
+        return false;
     }
-    let name_start = 110_usize;
-    let name_end = name_start.checked_add(name_size)?;
-    let name = archive.get(name_start..name_end)?;
-    if !matches!(name, b"init\0" | b"./init\0") {
-        return None;
+    let Some(program_offset) = bytes
+        .get(32..40)
+        .and_then(|value| value.try_into().ok())
+        .map(u64::from_le_bytes)
+        .and_then(|value| usize::try_from(value).ok())
+    else {
+        return false;
+    };
+    let Some(entry_size) = bytes
+        .get(54..56)
+        .and_then(|value| value.try_into().ok())
+        .map(u16::from_le_bytes)
+        .map(usize::from)
+    else {
+        return false;
+    };
+    let Some(entry_count) = bytes
+        .get(56..58)
+        .and_then(|value| value.try_into().ok())
+        .map(u16::from_le_bytes)
+        .map(usize::from)
+    else {
+        return false;
+    };
+    if entry_count > 1024 || (entry_count > 0 && entry_size < 56) {
+        return false;
     }
-    let data_start = align4(name_end)?;
-    archive.get(data_start..data_start.checked_add(file_size)?)
+    for index in 0..entry_count {
+        let Some(start) = index
+            .checked_mul(entry_size)
+            .and_then(|relative| program_offset.checked_add(relative))
+        else {
+            return false;
+        };
+        let Some(kind) = bytes
+            .get(start..start.saturating_add(4))
+            .and_then(|value| value.try_into().ok())
+            .map(u32::from_le_bytes)
+        else {
+            return false;
+        };
+        if kind == 3 {
+            return false;
+        }
+    }
+    true
 }
 
 fn parse_hex_u32(bytes: &[u8]) -> Option<u32> {
@@ -807,5 +881,35 @@ mod tests {
             canonical_newc(find_newc_init(&changed).unwrap()).unwrap(),
             changed
         );
+    }
+
+    #[test]
+    fn canonical_product_guest_root_requires_static_busybox() {
+        let architecture = ArtifactArchitecture::host().unwrap();
+        let mut init = vec![0_u8; 64];
+        init[..4].copy_from_slice(b"\x7fELF");
+        init[4] = 2;
+        init[5] = 1;
+        init[16..18].copy_from_slice(&2_u16.to_le_bytes());
+        init[18..20].copy_from_slice(&architecture.elf_machine().to_le_bytes());
+        let busybox = init.clone();
+        let archive = canonical_guest_root_newc(&init, &busybox).unwrap();
+        let staging = tempfile::tempdir().unwrap();
+        let path = staging.path().join("product.cpio");
+        std::fs::write(&path, &archive).unwrap();
+        validate_initramfs(&mut File::open(&path).unwrap(), &path, architecture).unwrap();
+
+        let mut dynamic_busybox = busybox;
+        dynamic_busybox[32..40].copy_from_slice(&64_u64.to_le_bytes());
+        dynamic_busybox[54..56].copy_from_slice(&56_u16.to_le_bytes());
+        dynamic_busybox[56..58].copy_from_slice(&1_u16.to_le_bytes());
+        dynamic_busybox.resize(120, 0);
+        dynamic_busybox[64..68].copy_from_slice(&3_u32.to_le_bytes());
+        let dynamic_archive = canonical_guest_root_newc(&init, &dynamic_busybox).unwrap();
+        std::fs::write(&path, dynamic_archive).unwrap();
+        assert!(matches!(
+            validate_initramfs(&mut File::open(&path).unwrap(), &path, architecture),
+            Err(ArtifactError::InvalidInitramfs(rejected)) if rejected == path
+        ));
     }
 }

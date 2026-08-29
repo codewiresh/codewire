@@ -9,7 +9,7 @@ use rustix::thread::{CapabilitySet, capabilities};
 use super::path::current_uid;
 
 pub const MINIMUM_LANDLOCK_ABI: i32 = 3;
-const KVM_GET_API_VERSION: libc::c_ulong = 0xAE00;
+const KVM_GET_API_VERSION: libc::Ioctl = libc::_IO(0xAE, 0);
 const KVM_API_VERSION: libc::c_int = 12;
 const LANDLOCK_CREATE_RULESET_VERSION: libc::c_uint = 1;
 

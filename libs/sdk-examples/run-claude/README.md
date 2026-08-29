@@ -109,7 +109,7 @@ does not run this paid, credential-bearing smoke in hosted CI.
 
 ### CLI changes this depends on
 
-- **Entrypoint override.** `cw env --local create` (Docker and Lima backends)
+- **Entrypoint override.** `cw env create --local` (Docker and Lima backends)
   starts containers with `--entrypoint /bin/sh`, so images whose
   own entrypoints try to mutate `/home/codewire/.ssh` (mounted read-only)
   don't abort on boot.

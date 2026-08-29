@@ -36,7 +36,7 @@ pub(crate) fn publish_local_ports(
             })
         }
         _ => anyhow::bail!(
-            "interactive 'cw env --local ports' forwarding is only available for Lima; use backend-native port mapping for docker"
+            "interactive 'cw env ports --local' forwarding is only available for Lima; use backend-native port mapping for docker"
         ),
     }
 }

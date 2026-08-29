@@ -371,6 +371,33 @@ impl PrivateRoot {
             Err(source) => Err(PathError::Io { path, source }),
         }
     }
+
+    pub fn remove_private_regular(
+        &self,
+        relative: &Path,
+        exact_permissions: u32,
+    ) -> Result<bool, PathError> {
+        validate_single_component(relative)?;
+        let path = self.path.join(relative);
+        match fs::symlink_metadata(&path) {
+            Ok(_) => {
+                self.open_regular(relative, false, None, false, Some(exact_permissions))?;
+                unlinkat(self.directory.as_fd(), relative, AtFlags::empty()).map_err(|source| {
+                    PathError::Openat2 {
+                        path: relative.to_owned(),
+                        source,
+                    }
+                })?;
+                self.directory.sync_all().map_err(|source| PathError::Io {
+                    path: self.path.clone(),
+                    source,
+                })?;
+                Ok(true)
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+            Err(source) => Err(PathError::Io { path, source }),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -516,6 +543,30 @@ mod tests {
                 Err(PathError::InvalidRelativePath(_))
             ));
         }
+    }
+
+    #[test]
+    fn remove_private_regular_admits_exact_file_before_unlink() {
+        let (_parent, root) = root();
+        root.create_regular(Path::new("seed.raw"), 0o400, true)
+            .unwrap();
+        assert!(
+            root.remove_private_regular(Path::new("seed.raw"), 0o400)
+                .unwrap()
+        );
+        assert!(
+            !root
+                .remove_private_regular(Path::new("seed.raw"), 0o400)
+                .unwrap()
+        );
+
+        root.create_regular(Path::new("wrong.raw"), 0o600, true)
+            .unwrap();
+        assert!(matches!(
+            root.remove_private_regular(Path::new("wrong.raw"), 0o400),
+            Err(PathError::UnsafeFile(_))
+        ));
+        assert!(root.path().join("wrong.raw").exists());
     }
 
     #[test]

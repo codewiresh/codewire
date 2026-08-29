@@ -34,7 +34,7 @@ sha256sum --check SHA256SUMS
 Create a local environment with the workspace image:
 
 ```bash
-cw env --local create \
+cw env create --local \
   --backend lima \
   --name my-app \
   --image workspace \
@@ -44,13 +44,13 @@ cw env --local create \
 Use `--backend docker` for Docker. Manage the same local environment with:
 
 ```bash
-cw env --local list
-cw env --local info my-app
-cw env --local stop my-app
-cw env --local start my-app
-cw env --local daemon status my-app
-cw env --local daemon repair my-app
-cw env --local rm my-app
+cw env list --local
+cw env info --local my-app
+cw env stop --local my-app
+cw env start --local my-app
+cw env daemon status --local my-app
+cw env daemon repair --local my-app
+cw env rm --local my-app
 ```
 
 Platform lifecycle uses the same commands without `--local`:
@@ -120,7 +120,7 @@ Mesh service installation.
 The CLI intentionally has no compatibility implementation for the retired
 host-owned runtime. Migration diagnostics map old grammar to the new model:
 
-- `cw local ...` → `cw env --local ...`
+- `cw local ...` → `cw env COMMAND --local ...`
 - `cw exec ENV -- COMMAND` → `cw run ENV -- COMMAND`
 - `cw node` → `cw env daemon ...` or `cw network nodes`
 - `cw run --local` / `cw run --node` → explicit environment lifecycle plus

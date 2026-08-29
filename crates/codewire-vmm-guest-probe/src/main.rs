@@ -71,11 +71,43 @@ fn entrypoint() -> anyhow::Result<()> {
             guest::run_poweroff()
         }
         Some("newc") => build_newc(arguments),
+        Some("newc-root") => build_guest_root_newc(arguments),
         Some(_) => {
             let _ = executable;
             bail!("unknown guest probe command")
         }
     }
+}
+
+#[cfg(target_os = "linux")]
+fn build_guest_root_newc(mut arguments: impl Iterator<Item = OsString>) -> anyhow::Result<()> {
+    use anyhow::ensure;
+
+    let probe = arguments
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("newc-root requires a probe path"))?;
+    let busybox = arguments
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("newc-root requires a BusyBox path"))?;
+    let output = arguments
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("newc-root requires an output path"))?;
+    ensure!(
+        arguments.next().is_none(),
+        "newc-root accepts exactly three paths"
+    );
+    for (label, value) in [
+        ("probe", &probe),
+        ("BusyBox", &busybox),
+        ("output", &output),
+    ] {
+        ensure!(
+            Path::new(value).is_absolute(),
+            "newc-root {label} path must be absolute"
+        );
+    }
+    codewire_vmm_guest_probe::write_canonical_guest_root_initramfs(probe, busybox, output)?;
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]

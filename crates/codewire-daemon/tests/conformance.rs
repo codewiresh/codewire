@@ -87,6 +87,42 @@ async fn generated_session_client_authenticates_and_requires_ready_daemon() {
 }
 
 #[tokio::test]
+async fn generated_client_transient_exec_is_not_a_durable_session() {
+    let harness = DaemonHarness::spawn_with_auth_token("daemon-test-token").await;
+    let client = SessionClient::from_channel(harness.channel().await, "daemon-test-token")
+        .expect("construct generated session client from injected channel");
+    let marker = harness.workspace_root().join("transient-marker");
+    let mut stream = client
+        .exec_transient(v1::ExecStartRequest {
+            command: vec![
+                "sh".into(),
+                "-c".into(),
+                "printf transient-ok > transient-marker".into(),
+            ],
+            working_dir: harness.workspace_root().to_string_lossy().into_owned(),
+            env: Vec::new(),
+        })
+        .await
+        .expect("start transient exec");
+    let mut exit = None;
+    while let Some(message) = stream.message().await.expect("read transient exec") {
+        if let Some(v1::exec_message::Payload::Exit(status)) = message.payload {
+            exit = Some(status.code);
+        }
+    }
+    assert_eq!(exit, Some(0));
+    assert_eq!(std::fs::read_to_string(marker).unwrap(), "transient-ok");
+    assert!(
+        client
+            .list()
+            .await
+            .expect("list durable sessions")
+            .is_empty()
+    );
+    harness.shutdown().await;
+}
+
+#[tokio::test]
 async fn injected_transport_rejects_unauthenticated_side_effects() {
     let harness = DaemonHarness::spawn_with_auth_token("daemon-test-token").await;
     let marker = harness.workspace_root().join("unauthorized-marker");

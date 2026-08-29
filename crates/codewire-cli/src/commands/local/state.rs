@@ -148,7 +148,7 @@ pub(crate) fn resolve_local_instance_config_from_state(
     match matches.as_slice() {
         [(key, instance)] => Ok(((*key).to_string(), (*instance).clone())),
         [] => anyhow::bail!(
-            "no local environment associated with this directory; pass a name explicitly or run 'cw env --local create'"
+            "no local environment associated with this directory; pass a name explicitly or run 'cw env create --local'"
         ),
         _ => {
             let names = matches

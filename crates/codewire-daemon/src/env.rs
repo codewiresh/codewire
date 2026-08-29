@@ -4,9 +4,28 @@ use std::path::PathBuf;
 
 use crate::config::Config;
 
+const DEFAULT_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+
 pub fn build_process_env(config: &Config, extra: &[String], term: &str) -> Vec<String> {
     let persisted = load_persisted_environment(config);
+    build_process_env_from(
+        config,
+        persisted,
+        extra,
+        term,
+        std::env::vars(),
+        &default_shell(),
+    )
+}
 
+fn build_process_env_from(
+    config: &Config,
+    persisted: Vec<String>,
+    extra: &[String],
+    term: &str,
+    inherited: impl IntoIterator<Item = (String, String)>,
+    fallback_shell: &str,
+) -> Vec<String> {
     let mut override_keys = HashMap::<String, bool>::new();
     let mut session_override = HashMap::<String, bool>::new();
     for entry in &persisted {
@@ -26,11 +45,11 @@ pub fn build_process_env(config: &Config, extra: &[String], term: &str) -> Vec<S
     }
 
     let mut env = Vec::new();
-    for (key, value) in std::env::vars() {
+    for (key, value) in inherited {
         if override_keys.contains_key(&key) {
             continue;
         }
-        if value.is_empty() && matches!(key.as_str(), "HOME" | "USER" | "SHELL") {
+        if value.is_empty() && matches!(key.as_str(), "HOME" | "USER" | "SHELL" | "PATH") {
             continue;
         }
         env.push(format!("{key}={value}"));
@@ -43,7 +62,10 @@ pub fn build_process_env(config: &Config, extra: &[String], term: &str) -> Vec<S
         env.push("USER=codewire".into());
     }
     if !has_non_empty_env_value(&env, "SHELL") && !override_keys.contains_key("SHELL") {
-        env.push(format!("SHELL={}", default_shell()));
+        env.push(format!("SHELL={fallback_shell}"));
+    }
+    if !has_non_empty_env_value(&env, "PATH") && !override_keys.contains_key("PATH") {
+        env.push(format!("PATH={DEFAULT_PATH}"));
     }
     if !term.is_empty() {
         env.push(format!("TERM={term}"));
@@ -130,22 +152,23 @@ mod tests {
 
     #[test]
     fn build_process_env_session_overrides_inherited_values() {
-        unsafe {
-            std::env::set_var("HOME", "/container-home");
-            std::env::set_var("USER", "container-user");
-            std::env::set_var("SHELL", "");
-            std::env::set_var("TERM", "linux");
-            std::env::set_var("PATH", "/usr/local/bin:/usr/bin");
-        }
-
-        let env = build_process_env(
+        let env = build_process_env_from(
             &test_config(PathBuf::from("/home/codewire")),
+            Vec::new(),
             &[
                 "HOME=/session-home".into(),
                 "USER=session-user".into(),
                 "EXTRA=value".into(),
             ],
             "xterm-256color",
+            [
+                ("HOME".into(), "/container-home".into()),
+                ("USER".into(), "container-user".into()),
+                ("SHELL".into(), String::new()),
+                ("TERM".into(), "linux".into()),
+                ("PATH".into(), "/usr/local/bin:/usr/bin".into()),
+            ],
+            "/bin/sh",
         );
         let values = env_map(&env);
 
@@ -154,10 +177,7 @@ mod tests {
             Some("/session-home")
         );
         assert_eq!(values.get("USER").map(String::as_str), Some("session-user"));
-        assert_eq!(
-            values.get("SHELL").map(String::as_str),
-            Some(default_shell().as_str())
-        );
+        assert_eq!(values.get("SHELL").map(String::as_str), Some("/bin/sh"));
         assert_eq!(
             values.get("TERM").map(String::as_str),
             Some("xterm-256color")
@@ -180,17 +200,20 @@ mod tests {
         )
         .expect("environment file");
 
-        unsafe {
-            std::env::set_var("HOME", home.display().to_string());
-            std::env::set_var("USER", "container-user");
-            std::env::set_var("SHELL", "");
-            std::env::set_var("PATH", "/usr/local/bin:/usr/bin");
-        }
-
-        let env = build_process_env(
-            &test_config(home),
+        let config = test_config(home);
+        let persisted = load_persisted_environment(&config);
+        let env = build_process_env_from(
+            &config,
+            persisted,
             &["BAR=from-session".into(), "BAZ=from-session".into()],
             "xterm-256color",
+            [
+                ("HOME".into(), "/container-home".into()),
+                ("USER".into(), "container-user".into()),
+                ("SHELL".into(), String::new()),
+                ("PATH".into(), "/usr/local/bin:/usr/bin".into()),
+            ],
+            "/bin/sh",
         );
         let values = env_map(&env);
 
@@ -200,6 +223,29 @@ mod tests {
         assert_eq!(
             values.get("USER").map(String::as_str),
             Some("persisted-user")
+        );
+    }
+
+    #[test]
+    fn build_process_env_supplies_path_for_environment_free_guest_daemon() {
+        let env = build_process_env_from(
+            &test_config(PathBuf::from("/home/codewire")),
+            Vec::new(),
+            &[],
+            "xterm-256color",
+            [
+                ("HOME".into(), String::new()),
+                ("USER".into(), String::new()),
+                ("SHELL".into(), String::new()),
+                ("PATH".into(), String::new()),
+            ],
+            "/bin/sh",
+        );
+        let values = env_map(&env);
+        assert_eq!(values.get("PATH").map(String::as_str), Some(DEFAULT_PATH));
+        assert_eq!(
+            values.get("HOME").map(String::as_str),
+            Some("/home/codewire")
         );
     }
 

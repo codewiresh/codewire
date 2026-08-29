@@ -157,7 +157,7 @@ pub(crate) async fn handle_init_command(globals: &Globals, args: InitArgs) -> an
         eprintln!("Preset saved: {} ({}).", preset.name, preset.id);
     }
     eprintln!("Next:");
-    eprintln!("  cw env --local create --name <environment>");
+    eprintln!("  cw env create --local --name <environment>");
     eprintln!("  cw run <environment> -- <command>");
     eprintln!("  cw env create");
     Ok(())
@@ -344,9 +344,9 @@ pub(crate) fn env_create_request_from_init_args(
         file: None,
         spec: None,
         ttl: args.ttl.clone(),
-        cpu: args.cpu,
-        memory: args.memory,
-        disk: args.disk,
+        cpu: args.cpu.map(|value| value.to_string()),
+        memory: args.memory.map(|value| value.to_string()),
+        disk: args.disk.map(|value| value.to_string()),
         isolation: args.isolation.clone(),
         repo_flags: args.repo_flags.clone(),
         branch: args.branch.clone(),

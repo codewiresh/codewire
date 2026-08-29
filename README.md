@@ -48,29 +48,70 @@ full local cluster workflow.
 
 ### Local sandbox environment (CLI)
 
+On Linux/x86_64, the native developer preview runs Cloud Hypervisor directly
+through KVM. It requires usable `/dev/kvm` and `/dev/vhost-vsock` devices plus
+the reviewed Cloud Hypervisor, kernel, and Codewire guest-root artifacts under
+`~/.cache/codewire/local-vmm-v1/artifacts` with the sibling lock at
+`~/.cache/codewire/local-vmm-v1/artifacts.lock.json`. The preview never
+downloads or substitutes those artifacts at runtime.
+
 ```bash
 # Build the CLI
 cargo build -p codewire-cli-bin --bin cw
 
-# Create a named local environment from the workspace image.
-./target/debug/cw env --local create \
-  --backend lima \
+# Create a persistent 2-vCPU, 16-GiB native environment from this clean Git commit.
+./target/debug/cw env create --local \
   --name codewire-dev \
+  --cpu 2 \
+  --memory 16Gi \
+  --path .
+
+# Creation selects it, so enter it without a platform login or target argument.
+./target/debug/cw shell
+
+# Run a durable non-interactive session and manage the same VM.
+./target/debug/cw run -- uname -a
+./target/debug/cw env info --local codewire-dev
+./target/debug/cw env stop --local codewire-dev
+./target/debug/cw env start --local codewire-dev
+./target/debug/cw env rm --local codewire-dev --yes
+```
+
+The current native slice requires a clean, root Git worktree and snapshots its
+exact checked-out commit onto the persistent guest disk. It does not yet run
+the `codewire.yaml` workspace image; OCI workspace execution is tracked by
+Forgejo issue #1908. Unsupported image, network, secret, mount, port, and
+multi-repository options fail explicitly.
+
+Developers with artifacts staged outside the default cache can point the CLI
+at them and run the complete product smoke:
+
+```bash
+export CODEWIRE_NATIVE_ARTIFACT_ROOT=/absolute/path/to/artifacts
+export CODEWIRE_NATIVE_ARTIFACT_LOCK=/absolute/path/to/artifacts.lock.json
+
+scripts/ci/verify/smoke-native-local-environment.sh \
+  --cw-bin "$PWD/target/debug/cw" \
+  --artifact-root "$CODEWIRE_NATIVE_ARTIFACT_ROOT" \
+  --artifact-lock "$CODEWIRE_NATIVE_ARTIFACT_LOCK"
+```
+
+The legacy Docker and Lima local backends remain available explicitly during
+the migration:
+
+```bash
+./target/debug/cw env create --local \
+  --backend lima \
+  --name legacy-local \
   --image workspace \
   --path .
 
-# Run a durable session in that environment.
-./target/debug/cw run codewire-dev -- bash
-
-# Inspect and manage the same environment through the unified lifecycle.
-./target/debug/cw env --local info codewire-dev
-
 # Resize a Lima environment. A terminal shows the current-to-desired plan,
 # active-session warning, and a default-no confirmation before the restart.
-./target/debug/cw env --local resize codewire-dev --cpu 6 --memory 12Gi --disk 120Gi
+./target/debug/cw env resize --local legacy-local --cpu 6 --memory 12Gi --disk 120Gi
 
 # Automation must provide explicit resources and --yes.
-./target/debug/cw env --local resize codewire-dev --cpu 6 --yes --output json
+./target/debug/cw env resize --local legacy-local --cpu 6 --yes --output json
 ```
 
 `cw env resize ENV` resolves the placement when it is unambiguous. Local resize

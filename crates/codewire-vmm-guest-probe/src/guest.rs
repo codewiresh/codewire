@@ -25,8 +25,8 @@ use crate::{SEED_DISK_SERIAL, SEED_LEN, STATE_DISK_SERIAL, Seed};
 
 pub const INIT_PATH: &str = "/init";
 pub const STATE_MOUNT_PATH: &str = "/state";
-pub const WORKSPACE_PATH: &str = "/state/workspace";
-pub const HOME_PATH: &str = "/state/home";
+pub const WORKSPACE_PATH: &str = "/workspace";
+pub const HOME_PATH: &str = "/home/codewire";
 pub const CONTROL_PATH: &str = "/state/codewire";
 pub const NONCE_PATH: &str = "/state/codewire/nonce";
 pub const POWEROFF_MARKER_PATH: &str = "/state/codewire/poweroff.accepted";
@@ -42,6 +42,8 @@ const DAEMON_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 const HOST_ONLY_REJECTION_BUDGET: usize = 32;
 const NONCE_MAX_LEN: usize = 256;
 const READ_LIMIT: usize = 4097;
+const PERSISTENT_WORKSPACE_PATH: &str = "/state/workspace";
+const PERSISTENT_HOME_PATH: &str = "/state/home";
 
 static POWEROFF_REQUESTED: AtomicBool = AtomicBool::new(false);
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -76,6 +78,7 @@ pub fn run_init() -> Result<()> {
     validate_block_device(&seed_device)?;
     mount_state(&state_device)?;
     create_state_layout()?;
+    expose_persistent_layout()?;
 
     // Validate the complete seed before starting anything that accepts guest
     // control traffic. The child deliberately rereads it from the immutable
@@ -388,7 +391,7 @@ fn mount_state(device: &Path) -> Result<()> {
         device,
         STATE_MOUNT_PATH,
         "ext4",
-        libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC,
+        libc::MS_NOSUID | libc::MS_NODEV,
         "errors=remount-ro",
     )
     .context("mount persistent state disk")
@@ -397,8 +400,8 @@ fn mount_state(device: &Path) -> Result<()> {
 fn create_state_layout() -> Result<()> {
     for (path, mode) in [
         (CONTROL_PATH, 0o700),
-        (WORKSPACE_PATH, 0o700),
-        (HOME_PATH, 0o700),
+        (PERSISTENT_WORKSPACE_PATH, 0o700),
+        (PERSISTENT_HOME_PATH, 0o700),
     ] {
         create_dir(Path::new(path), mode)?;
     }
@@ -407,6 +410,27 @@ fn create_state_layout() -> Result<()> {
         .sync_all()
         .context("fsync state layout")?;
     Ok(())
+}
+
+fn expose_persistent_layout() -> Result<()> {
+    create_dir(Path::new(WORKSPACE_PATH), 0o700)?;
+    create_dir(Path::new("/home"), 0o755)?;
+    create_dir(Path::new(HOME_PATH), 0o700)?;
+    bind_mount(PERSISTENT_WORKSPACE_PATH, WORKSPACE_PATH)?;
+    bind_mount(PERSISTENT_HOME_PATH, HOME_PATH)
+}
+
+fn bind_mount(source: &str, target: &str) -> Result<()> {
+    mount_fs(source, target, "none", libc::MS_BIND, "")
+        .with_context(|| format!("bind persistent guest path {source} at {target}"))?;
+    mount_fs(
+        source,
+        target,
+        "none",
+        libc::MS_BIND | libc::MS_REMOUNT | libc::MS_NOSUID | libc::MS_NODEV,
+        "",
+    )
+    .with_context(|| format!("confine persistent guest bind mount {target}"))
 }
 
 fn create_dir(path: &Path, mode: u32) -> Result<()> {

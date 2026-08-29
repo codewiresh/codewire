@@ -226,6 +226,31 @@ impl SessionClient {
             .into_inner())
     }
 
+    /// Start one non-durable exec and close its stdin explicitly.
+    ///
+    /// The caller must retain and drain (or otherwise keep alive) the returned
+    /// stream until the command or its transport ends. This is intended for
+    /// private lifecycle control which must not create a user-visible durable
+    /// session record.
+    pub async fn exec_transient(
+        &self,
+        request: v1::ExecStartRequest,
+    ) -> Result<Streaming<v1::ExecMessage>, SessionClientError> {
+        let messages = tokio_stream::iter([
+            v1::ExecMessage {
+                payload: Some(v1::exec_message::Payload::Start(request)),
+            },
+            v1::ExecMessage {
+                payload: Some(v1::exec_message::Payload::CloseStdin(())),
+            },
+        ]);
+        let mut client = self.inner.clone();
+        Ok(client
+            .exec_session(self.authorized(messages))
+            .await?
+            .into_inner())
+    }
+
     pub async fn attach(
         &self,
         session_id: impl Into<String>,

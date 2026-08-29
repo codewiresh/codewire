@@ -1367,7 +1367,7 @@ ports:
             .to_string();
         assert_eq!(
             err,
-            "interactive 'cw env --local ports' forwarding is only available for Lima; use backend-native port mapping for docker"
+            "interactive 'cw env ports --local' forwarding is only available for Lima; use backend-native port mapping for docker"
         );
     }
 

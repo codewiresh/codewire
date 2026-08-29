@@ -180,6 +180,12 @@ enum Command {
         about = "Run the managed environment daemon inside an environment"
     )]
     Daemon,
+    #[cfg(target_os = "linux")]
+    #[command(name = "__native-supervisor", hide = true)]
+    NativeSupervisor(NativeSupervisorArgs),
+    #[cfg(target_os = "linux")]
+    #[command(name = "__native-runner", hide = true)]
+    NativeRunner(NativeRunnerArgs),
     #[command(about = "List sessions for the selected or explicit environment")]
     List(ListArgs),
     #[command(
@@ -252,6 +258,10 @@ where
         Command::Network { command } => handle_network_command(&globals, command).await,
         Command::Mesh { command } => handle_mesh_command(&globals, command),
         Command::Daemon => codewire_daemon::run_entrypoint().await,
+        #[cfg(target_os = "linux")]
+        Command::NativeSupervisor(args) => run_native_supervisor(args).await,
+        #[cfg(target_os = "linux")]
+        Command::NativeRunner(args) => run_native_runner(args).await,
         Command::List(args) => handle_list_command(&globals, args).await,
         Command::Attach(args) => handle_attach_command(&globals, args).await,
         Command::Logs(args) => handle_logs_command(&globals, args).await,
@@ -267,7 +277,7 @@ fn legacy_cli_migration_error(args: &[std::ffi::OsString]) -> Option<String> {
     let command = args[command_index].as_ref();
 
     let guidance = match command {
-        "local" => "`cw local` was removed; use `cw env --local ...`",
+        "local" => "`cw local` was removed; use `cw env COMMAND --local ...`",
         "exec" => "`cw exec` was removed; use `cw run [ENV] -- COMMAND`",
         "node" => {
             "`cw node` was removed; use `cw env daemon ...` for environment-daemon diagnostics or `cw network nodes` for Mesh inventory"

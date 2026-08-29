@@ -22,6 +22,11 @@ struct EnvironmentSessionOutput {
 
 #[derive(Clone)]
 enum EnvironmentSessionTarget {
+    #[cfg(target_os = "linux")]
+    NativeLocal {
+        target: config::CurrentTargetConfig,
+        name: String,
+    },
     Local {
         target: config::CurrentTargetConfig,
         instance: Box<config::LocalInstanceConfig>,
@@ -37,6 +42,8 @@ enum EnvironmentSessionTarget {
 impl EnvironmentSessionTarget {
     fn ensure_ready_for_run(&self) -> anyhow::Result<()> {
         match self {
+            #[cfg(target_os = "linux")]
+            Self::NativeLocal { .. } => Ok(()),
             Self::Local { instance, .. } => ensure_local_environment_runtime_ready(instance),
             Self::Platform { .. } => Ok(()),
         }
@@ -44,6 +51,15 @@ impl EnvironmentSessionTarget {
 
     async fn list(&self) -> anyhow::Result<Vec<EnvironmentSessionView>> {
         match self {
+            #[cfg(target_os = "linux")]
+            Self::NativeLocal { name, .. } => Ok(native_environment_session_client(name)
+                .await?
+                .list()
+                .await
+                .map_err(anyhow::Error::from)?
+                .into_iter()
+                .map(local_environment_session_view)
+                .collect()),
             Self::Local { instance, .. } => Ok(local_environment_session_client(instance)
                 .await?
                 .list()
@@ -78,6 +94,25 @@ impl EnvironmentSessionTarget {
         offset: u64,
     ) -> anyhow::Result<EnvironmentSessionOutput> {
         match self {
+            #[cfg(target_os = "linux")]
+            Self::NativeLocal { name, .. } => {
+                let response = native_environment_session_client(name)
+                    .await?
+                    .read_output(codewire_daemon::client::v1::ReadSessionOutputRequest {
+                        session_id: session_id.to_string(),
+                        offset,
+                        limit: 0,
+                    })
+                    .await?;
+                Ok(EnvironmentSessionOutput {
+                    chunks: response
+                        .chunks
+                        .into_iter()
+                        .map(|chunk| chunk.data)
+                        .collect(),
+                    next_offset: response.next_offset,
+                })
+            }
             Self::Local { instance, .. } => {
                 let response = local_environment_session_client(instance)
                     .await?
@@ -135,6 +170,25 @@ impl EnvironmentSessionTarget {
         let (columns, rows) = session_terminal_size(pty)?;
         let term = env::var("TERM").unwrap_or_default();
         match self {
+            #[cfg(target_os = "linux")]
+            Self::NativeLocal { name, .. } => {
+                let session = native_environment_session_client(name)
+                    .await?
+                    .launch(codewire_daemon::client::v1::LaunchSessionRequest {
+                        command,
+                        working_dir,
+                        env: env
+                            .into_iter()
+                            .map(|(key, value)| format!("{key}={value}"))
+                            .collect(),
+                        pty,
+                        term,
+                        width: i32::from(columns),
+                        height: i32::from(rows),
+                    })
+                    .await?;
+                Ok(local_environment_session_view(session))
+            }
             Self::Local { instance, .. } => {
                 let session = local_environment_session_client(instance)
                     .await?
@@ -185,6 +239,13 @@ impl EnvironmentSessionTarget {
 
     async fn get(&self, session_id: &str) -> anyhow::Result<EnvironmentSessionView> {
         match self {
+            #[cfg(target_os = "linux")]
+            Self::NativeLocal { name, .. } => Ok(local_environment_session_view(
+                native_environment_session_client(name)
+                    .await?
+                    .get(session_id)
+                    .await?,
+            )),
             Self::Local { instance, .. } => Ok(local_environment_session_view(
                 local_environment_session_client(instance)
                     .await?
@@ -217,6 +278,13 @@ impl EnvironmentSessionTarget {
 
     async fn restart(&self, session_id: &str) -> anyhow::Result<EnvironmentSessionView> {
         match self {
+            #[cfg(target_os = "linux")]
+            Self::NativeLocal { name, .. } => Ok(local_environment_session_view(
+                native_environment_session_client(name)
+                    .await?
+                    .restart(session_id)
+                    .await?,
+            )),
             Self::Local { instance, .. } => Ok(local_environment_session_view(
                 local_environment_session_client(instance)
                     .await?
@@ -249,12 +317,16 @@ impl EnvironmentSessionTarget {
 
     fn current_target(&self) -> &config::CurrentTargetConfig {
         match self {
+            #[cfg(target_os = "linux")]
+            Self::NativeLocal { target, .. } => target,
             Self::Local { target, .. } | Self::Platform { target, .. } => target,
         }
     }
 
     fn default_working_dir(&self) -> String {
         match self {
+            #[cfg(target_os = "linux")]
+            Self::NativeLocal { .. } => LOCAL_WORKSPACE_PATH.to_string(),
             Self::Local { instance, .. } => local_environment_session_working_dir(instance),
             Self::Platform { .. } => LOCAL_WORKSPACE_PATH.to_string(),
         }
@@ -267,6 +339,19 @@ async fn resolve_environment_session_target(
 ) -> anyhow::Result<EnvironmentSessionTarget> {
     let env = OsEnv;
     let paths = ResolvePaths::from_env(&env);
+    #[cfg(target_os = "linux")]
+    match environment.and_then(trimmed_str) {
+        Some(name) => {
+            if let Some(environment) = native_environment(name).await? {
+                return Ok(native_session_target(environment.name));
+            }
+        }
+        None => {
+            if let Some(environment) = native_selected_environment().await? {
+                return Ok(native_session_target(environment.name));
+            }
+        }
+    }
     let target = match environment.and_then(trimmed_str) {
         Some(environment) => {
             resolve_named_execution_target(globals, &paths, &env, environment, None).await?
@@ -274,6 +359,18 @@ async fn resolve_environment_session_target(
         None => config::current_target(&paths.mesh_data_dir)?,
     };
     environment_session_target_from_current(globals, &paths, &env, target).await
+}
+
+#[cfg(target_os = "linux")]
+fn native_session_target(name: String) -> EnvironmentSessionTarget {
+    EnvironmentSessionTarget::NativeLocal {
+        target: config::CurrentTargetConfig {
+            kind: "local".to_string(),
+            target_ref: name.clone(),
+            name: name.clone(),
+        },
+        name,
+    }
 }
 
 async fn environment_session_target_from_current(
@@ -670,6 +767,14 @@ async fn attach_environment_session(
     let mut reconnect_budget = AttachmentReconnectBudget::default();
     loop {
         let exit = match &target {
+            #[cfg(target_os = "linux")]
+            EnvironmentSessionTarget::NativeLocal { name, .. } => {
+                let client = native_environment_session_client(name).await?;
+                let attachment = client
+                    .attach(session.session_id.clone(), output_offset)
+                    .await?;
+                attach_local_environment_session(attachment, session.pty, true).await?
+            }
             EnvironmentSessionTarget::Local { instance, .. } => {
                 let client = local_environment_session_client(instance).await?;
                 let attachment = client
@@ -1200,6 +1305,18 @@ async fn follow_session_output(
     let mut reconnect_budget = AttachmentReconnectBudget::default();
     loop {
         let exit = match target {
+            #[cfg(target_os = "linux")]
+            EnvironmentSessionTarget::NativeLocal { name, .. } => {
+                let client = native_environment_session_client(name).await?;
+                attach_local_environment_session(
+                    client
+                        .attach(session.session_id.clone(), output_offset)
+                        .await?,
+                    false,
+                    raw_output,
+                )
+                .await?
+            }
             EnvironmentSessionTarget::Local { instance, .. } => {
                 let client = local_environment_session_client(instance).await?;
                 attach_local_environment_session(

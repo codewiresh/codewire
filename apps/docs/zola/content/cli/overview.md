@@ -20,7 +20,7 @@ make cli-install
 ## Local environment
 
 ```bash
-cw env --local create \
+cw env create --local \
   --backend lima \
   --name my-app \
   --image workspace \
