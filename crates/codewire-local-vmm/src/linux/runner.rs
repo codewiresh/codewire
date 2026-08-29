@@ -21,8 +21,9 @@ use super::path::{PathError, PrivateRoot, set_socket_private};
 use super::preflight::{PreflightError, PreflightReport, preflight};
 use super::process::{LiveProcess, RecoveryError, signal_unreaped_child};
 use super::state::{
-    MINIMUM_STATE_DISK_BYTES, PERSISTED_STATE_SCHEMA_VERSION, PersistedVmState, StateDiskIdentity,
-    StateError, VmLock, VmPaths, VmPhase, publish_seed,
+    MINIMUM_ROOT_DISK_BYTES, MINIMUM_STATE_DISK_BYTES, PERSISTED_STATE_SCHEMA_VERSION,
+    PersistedVmState, StateDiskIdentity, StateError, VmLock, VmPaths, VmPhase, publish_seed,
+    valid_root_generation,
 };
 
 const START_TIMEOUT: Duration = Duration::from_secs(10);
@@ -46,6 +47,8 @@ pub struct CreateVmRequest {
     pub vsock_cid: u32,
     pub daemon_vsock_port: u32,
     pub state_disk_bytes: u64,
+    pub root_generation: String,
+    pub root_disk_bytes: u64,
     pub vcpus: u8,
     pub memory_mib: u32,
 }
@@ -98,6 +101,7 @@ impl CloudHypervisorRunner {
         let lock = paths.lock()?;
         let persisted = read_stopped_persisted_state(&paths, request.vm_id)?;
         let state_disk = admit_state_disk(&paths, &request, persisted.as_ref())?;
+        let (root_disk_path, root_disk) = admit_root_disk(&paths, &request, persisted.as_ref())?;
         paths.clear_stale_runtime_endpoints()?;
 
         let token = Zeroizing::new(generate_auth_token());
@@ -113,6 +117,7 @@ impl CloudHypervisorRunner {
         let config = CloudHypervisorConfig::new(
             &self.artifacts,
             paths.state_disk.clone(),
+            root_disk_path,
             paths.seed_disk.clone(),
             paths.api_socket.clone(),
             paths.event_monitor.clone(),
@@ -128,6 +133,7 @@ impl CloudHypervisorRunner {
             request,
             paths,
             state_disk,
+            root_disk,
             token,
             command,
             lock,
@@ -138,6 +144,10 @@ impl CloudHypervisorRunner {
         preflight()?;
         self.artifacts.revalidate()?;
         prepared.state_disk.revalidate(&prepared.paths.state_disk)?;
+        prepared.root_disk.revalidate(&root_disk_path(
+            &prepared.paths,
+            &prepared.request.root_generation,
+        )?)?;
         validate_seed_file(&prepared.paths.seed_disk)?;
         // Arm cancellation cleanup in the same synchronous span as spawn. An
         // aborted start future must never drop the VM lock while leaving a VMM
@@ -168,6 +178,8 @@ impl CloudHypervisorRunner {
             phase: VmPhase::Starting,
             process: startup.process().identity().clone(),
             state_disk: prepared.state_disk.clone(),
+            root_generation: Some(prepared.request.root_generation.clone()),
+            root_disk: Some(prepared.root_disk.clone()),
             api_socket: None,
             vsock_socket: None,
         };
@@ -194,6 +206,8 @@ impl CloudHypervisorRunner {
                 phase: VmPhase::Running,
                 process: startup.process().identity().clone(),
                 state_disk: prepared.state_disk.clone(),
+                root_generation: Some(prepared.request.root_generation.clone()),
+                root_disk: Some(prepared.root_disk.clone()),
                 api_socket: Some(set_socket_private(&prepared.paths.api_socket)?),
                 vsock_socket: Some(set_socket_private(&prepared.paths.vsock_socket)?),
             };
@@ -214,6 +228,7 @@ impl CloudHypervisorRunner {
             request: prepared.request,
             paths: prepared.paths,
             state_disk: prepared.state_disk,
+            root_disk: prepared.root_disk,
             token: prepared.token,
             child,
             process,
@@ -231,6 +246,9 @@ impl CloudHypervisorRunner {
             return Err(RunnerError::PersistedIdentityMismatch);
         }
         state.state_disk.revalidate(&paths.state_disk)?;
+        if let (Some(generation), Some(root_disk)) = (&state.root_generation, &state.root_disk) {
+            root_disk.revalidate(&root_disk_path(&paths, generation)?)?;
+        }
         if let Some(identity) = &state.api_socket {
             identity.revalidate(&paths.api_socket)?;
         }
@@ -498,6 +516,7 @@ pub struct PreparedVm {
     request: CreateVmRequest,
     paths: VmPaths,
     state_disk: StateDiskIdentity,
+    root_disk: StateDiskIdentity,
     token: Zeroizing<String>,
     command: CommandSpec,
     lock: VmLock,
@@ -510,6 +529,7 @@ impl fmt::Debug for PreparedVm {
             .field("request", &self.request)
             .field("paths", &self.paths)
             .field("state_disk", &self.state_disk)
+            .field("root_disk", &self.root_disk)
             .field("token", &"[REDACTED]")
             .field("command", &self.command)
             .finish_non_exhaustive()
@@ -533,6 +553,10 @@ impl PreparedVm {
         &self.state_disk
     }
 
+    pub fn root_disk_identity(&self) -> &StateDiskIdentity {
+        &self.root_disk
+    }
+
     pub fn auth_token_fingerprint(&self) -> String {
         token_fingerprint(&self.token)
     }
@@ -542,6 +566,7 @@ pub struct RunningVm {
     request: CreateVmRequest,
     paths: VmPaths,
     state_disk: StateDiskIdentity,
+    root_disk: StateDiskIdentity,
     token: Zeroizing<String>,
     child: tokio::process::Child,
     process: LiveProcess,
@@ -557,6 +582,7 @@ impl fmt::Debug for RunningVm {
             .field("request", &self.request)
             .field("paths", &self.paths)
             .field("state_disk", &self.state_disk)
+            .field("root_disk", &self.root_disk)
             .field("process", &self.process)
             .field("token", &"[REDACTED]")
             .finish_non_exhaustive()
@@ -582,6 +608,10 @@ impl RunningVm {
 
     pub fn state_disk_identity(&self) -> &StateDiskIdentity {
         &self.state_disk
+    }
+
+    pub fn root_disk_identity(&self) -> &StateDiskIdentity {
+        &self.root_disk
     }
 
     pub fn api(&self) -> &ChApiClient {
@@ -803,6 +833,9 @@ fn validate_request(request: &CreateVmRequest) -> Result<(), RunnerError> {
         || request.daemon_vsock_port == u32::MAX
         || request.state_disk_bytes < MINIMUM_STATE_DISK_BYTES
         || !request.state_disk_bytes.is_multiple_of(1024 * 1024)
+        || !valid_root_generation(&request.root_generation)
+        || request.root_disk_bytes < MINIMUM_ROOT_DISK_BYTES
+        || !request.root_disk_bytes.is_multiple_of(1024 * 1024)
         || request.vcpus == 0
         || request.vcpus > 32
         || !(128..=65_536).contains(&request.memory_mib)
@@ -861,6 +894,42 @@ fn admit_state_disk(
         });
     }
     Ok(state_disk)
+}
+
+fn admit_root_disk(
+    paths: &VmPaths,
+    request: &CreateVmRequest,
+    persisted: Option<&PersistedVmState>,
+) -> Result<(PathBuf, StateDiskIdentity), RunnerError> {
+    let path = root_disk_path(paths, &request.root_generation)?;
+    if !path.exists() {
+        return Err(RunnerError::MissingPreformattedRootDisk);
+    }
+    let root_disk = match persisted {
+        Some(state) if state.root_generation.as_deref() == Some(&request.root_generation) => {
+            let expected = state
+                .root_disk
+                .as_ref()
+                .ok_or(RunnerError::PersistedRootGenerationMismatch)?;
+            expected.revalidate(&path)?;
+            expected.clone()
+        }
+        _ => StateDiskIdentity::capture(&path)?,
+    };
+    if root_disk.file.size != request.root_disk_bytes {
+        return Err(RunnerError::RootDiskSizeMismatch {
+            current: root_disk.file.size,
+            requested: request.root_disk_bytes,
+        });
+    }
+    Ok((path, root_disk))
+}
+
+fn root_disk_path(paths: &VmPaths, generation: &str) -> Result<PathBuf, RunnerError> {
+    if !valid_root_generation(generation) {
+        return Err(RunnerError::InvalidRequest);
+    }
+    Ok(paths.generations_dir.join(generation).join("root.raw"))
 }
 
 fn generate_auth_token() -> String {
@@ -1056,9 +1125,19 @@ pub enum RunnerError {
     #[error("the preformatted ext4 state disk is absent; production prepare never formats disks")]
     MissingPreformattedStateDisk,
     #[error(
+        "the preformatted ext4 root generation disk is absent; runner prepare never formats it"
+    )]
+    MissingPreformattedRootDisk,
+    #[error(
         "existing state disk size differs from the requested immutable boot size ({current} != {requested}); resize is a separate stopped operation"
     )]
     StateDiskSizeMismatch { current: u64, requested: u64 },
+    #[error(
+        "existing root generation disk size differs from the requested immutable boot size ({current} != {requested})"
+    )]
+    RootDiskSizeMismatch { current: u64, requested: u64 },
+    #[error("persisted root generation identity is incomplete or inconsistent")]
+    PersistedRootGenerationMismatch,
     #[error("invalid state disk growth target {0}")]
     InvalidDiskGrowth(u64),
     #[error("state disk shrink is unsupported ({current} -> {requested})")]
@@ -1108,6 +1187,7 @@ mod tests {
     use crate::artifact::AdmittedArtifact;
     use crate::linux::path::{FileIdentity, current_uid};
     use crate::linux::process::ProcessIdentity;
+    use crate::linux::state::RootGenerationPaths;
 
     fn test_runner() -> (tempfile::TempDir, CloudHypervisorRunner) {
         let parent = tempfile::tempdir().unwrap();
@@ -1146,6 +1226,8 @@ mod tests {
                 },
                 filesystem_uuid: Uuid::new_v4(),
             },
+            root_generation: None,
+            root_disk: None,
             api_socket: None,
             vsock_socket: None,
         }
@@ -1175,6 +1257,8 @@ mod tests {
             vsock_cid: 7,
             daemon_vsock_port: 7_777,
             state_disk_bytes: MINIMUM_STATE_DISK_BYTES,
+            root_generation: "a".repeat(64),
+            root_disk_bytes: MINIMUM_ROOT_DISK_BYTES,
             vcpus,
             memory_mib,
         }
@@ -1253,6 +1337,8 @@ mod tests {
             phase: VmPhase::Starting,
             process: ProcessIdentity::capture(std::process::id()).unwrap(),
             state_disk: admitted.clone(),
+            root_generation: None,
+            root_disk: None,
             api_socket: None,
             vsock_socket: None,
         };
@@ -1285,6 +1371,95 @@ mod tests {
             admit_state_disk(&paths, &next, Some(&persisted)),
             Err(RunnerError::State(StateError::StateDiskIdentityChanged(path)))
                 if path == paths.state_disk
+        ));
+    }
+
+    #[test]
+    fn root_generation_replay_is_bound_to_the_persisted_disk_identity() {
+        let (_parent, runner) = test_runner();
+        let vm_id = Uuid::new_v4();
+        let paths = VmPaths::create(&runner.state_root, vm_id).unwrap();
+        let generation = "a".repeat(64);
+        let root = RootGenerationPaths::create(&paths, &generation).unwrap();
+        let filesystem_uuid = Uuid::new_v4();
+        write_test_ext4(&root.root_disk, filesystem_uuid);
+        let admitted = StateDiskIdentity::capture(&root.root_disk).unwrap();
+        let persisted = PersistedVmState {
+            schema_version: PERSISTED_STATE_SCHEMA_VERSION,
+            vm_id,
+            generation: 1,
+            vsock_cid: 7,
+            daemon_vsock_port: 7_777,
+            phase: VmPhase::Starting,
+            process: ProcessIdentity::capture(std::process::id()).unwrap(),
+            state_disk: admitted.clone(),
+            root_generation: Some(generation.clone()),
+            root_disk: Some(admitted.clone()),
+            api_socket: None,
+            vsock_socket: None,
+        };
+        let mut next = request(2, 16_384);
+        next.vm_id = vm_id;
+        next.generation = 2;
+        assert_eq!(
+            admit_root_disk(&paths, &next, Some(&persisted)).unwrap(),
+            (root.root_disk.clone(), admitted.clone())
+        );
+
+        let replacement = root.generation_dir.join("replacement.raw");
+        write_test_ext4(&replacement, filesystem_uuid);
+        fs::rename(&replacement, &root.root_disk).unwrap();
+        assert!(matches!(
+            admit_root_disk(&paths, &next, Some(&persisted)),
+            Err(RunnerError::State(StateError::StateDiskIdentityChanged(path)))
+                if path == root.root_disk
+        ));
+    }
+
+    #[test]
+    fn a_new_root_generation_is_admitted_with_an_exact_size() {
+        let (_parent, runner) = test_runner();
+        let vm_id = Uuid::new_v4();
+        let paths = VmPaths::create(&runner.state_root, vm_id).unwrap();
+        let previous_generation = "a".repeat(64);
+        let previous = RootGenerationPaths::create(&paths, &previous_generation).unwrap();
+        write_test_ext4(&previous.root_disk, Uuid::new_v4());
+        let previous_identity = StateDiskIdentity::capture(&previous.root_disk).unwrap();
+        let persisted = PersistedVmState {
+            schema_version: PERSISTED_STATE_SCHEMA_VERSION,
+            vm_id,
+            generation: 1,
+            vsock_cid: 7,
+            daemon_vsock_port: 7_777,
+            phase: VmPhase::Starting,
+            process: ProcessIdentity::capture(std::process::id()).unwrap(),
+            state_disk: previous_identity.clone(),
+            root_generation: Some(previous_generation),
+            root_disk: Some(previous_identity),
+            api_socket: None,
+            vsock_socket: None,
+        };
+
+        let next_generation = "b".repeat(64);
+        let next_root = RootGenerationPaths::create(&paths, &next_generation).unwrap();
+        write_test_ext4(&next_root.root_disk, Uuid::new_v4());
+        let next_identity = StateDiskIdentity::capture(&next_root.root_disk).unwrap();
+        let mut next = request(2, 16_384);
+        next.vm_id = vm_id;
+        next.generation = 2;
+        next.root_generation = next_generation;
+        assert_eq!(
+            admit_root_disk(&paths, &next, Some(&persisted)).unwrap(),
+            (next_root.root_disk, next_identity)
+        );
+
+        next.root_disk_bytes += 1024 * 1024;
+        assert!(matches!(
+            admit_root_disk(&paths, &next, Some(&persisted)),
+            Err(RunnerError::RootDiskSizeMismatch {
+                current: MINIMUM_ROOT_DISK_BYTES,
+                requested
+            }) if requested == MINIMUM_ROOT_DISK_BYTES + 1024 * 1024
         ));
     }
 

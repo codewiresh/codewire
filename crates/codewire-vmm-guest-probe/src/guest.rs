@@ -1,10 +1,11 @@
-use std::ffi::{CString, OsStr};
+use std::ffi::{CString, OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::mem::size_of;
-use std::os::fd::{FromRawFd, OwnedFd};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{FileTypeExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::net::UnixDatagram;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process::{Command, Stdio};
@@ -14,6 +15,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail, ensure};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest as _, Sha256};
 use tokio::signal::unix::{SignalKind, signal};
 use tokio_stream::Stream;
 use tokio_vsock::{
@@ -21,19 +24,57 @@ use tokio_vsock::{
 };
 use zeroize::Zeroizing;
 
-use crate::{SEED_DISK_SERIAL, SEED_LEN, STATE_DISK_SERIAL, Seed};
+use crate::newc::BASIC_BUSYBOX_APPLETS;
+use crate::{ROOT_DISK_SERIAL, SEED_DISK_SERIAL, SEED_LEN, STATE_DISK_SERIAL, Seed};
 
 pub const INIT_PATH: &str = "/init";
 pub const STATE_MOUNT_PATH: &str = "/state";
+pub const ROOT_MOUNT_PATH: &str = "/generation";
 pub const WORKSPACE_PATH: &str = "/workspace";
 pub const HOME_PATH: &str = "/home/codewire";
 pub const CONTROL_PATH: &str = "/state/codewire";
+pub const BOOT_STAGE_PATH: &str = "/state/codewire/boot-stage";
 pub const NONCE_PATH: &str = "/state/codewire/nonce";
 pub const POWEROFF_MARKER_PATH: &str = "/state/codewire/poweroff.accepted";
 pub const IDENTITY_MARKER: &str = "CWIDENTITY1";
 pub const NONCE_MARKER: &str = "CWNONCE1";
 pub const NETWORK_MARKER: &str = "CWNETWORK1 loopback-only";
 pub const POWEROFF_MARKER: &str = "CWPOWEROFF1 accepted";
+pub const RUNC_PATH: &str = "/sbin/runc";
+pub const RUNC_STATE_PATH: &str = "/run/codewire/runc";
+pub const RUNC_PROCESS_PATH: &str = "/run/codewire/exec";
+pub const WORKSPACE_CONTAINER_ID: &str = "codewire-workspace";
+pub const CONTAINER_INIT_PATH: &str = "/run/codewire-runtime/init";
+
+const RUNC_BUNDLE_PATH: &str = "/generation/bundle";
+const RUNC_CONFIG_PATH: &str = "/generation/bundle/config.json";
+const RUNC_LOG_PATH: &str = "/state/codewire/runc.log";
+const RUNC_LOG_LIMIT: u64 = 64 * 1024;
+const CGROUP_ROOT_PATH: &str = "/sys/fs/cgroup";
+const CGROUP_HIERARCHY_PATH: &str = "/sys/fs/cgroup/codewire";
+const ROOT_LOWER_PATH: &str = "/generation/lower";
+const ROOT_UPPER_PATH: &str = "/generation/upper";
+const ROOT_WORK_PATH: &str = "/generation/work";
+const ROOT_MERGED_PATH: &str = "/generation/merged";
+const FOUNDATION_VERSION_PATH: &str = "/generation/foundation.version";
+const FOUNDATION_VERSION: &str = "codewire-runc-foundation-v1\n";
+const CONTAINER_CONTROL_PATH: &str = "/run/codewire/container";
+const CONTAINER_IDENTITY_PATH: &str = "/run/codewire/container/identity.json";
+const CONTAINER_POWEROFF_SOCKET: &str = "/run/codewire/container/poweroff.sock";
+const CONTAINER_CONTROL_DESTINATION: &str = "/run/codewire-host";
+const CONTAINER_IDENTITY_DESTINATION: &str = "/run/codewire-host/identity.json";
+const CONTAINER_POWEROFF_DESTINATION: &str = "/run/codewire-host/poweroff.sock";
+const PERSISTENT_PROBE_PATH: &str = "/state/probe";
+const CONTAINER_PROBE_DESTINATION: &str = "/run/codewire-probe";
+const CONTAINER_NONCE_PATH: &str = "/run/codewire-probe/nonce";
+const WORKSPACE_OWNER_VERSION_PATH: &str = "/state/codewire/workspace-owner.version";
+const WORKSPACE_OWNER_VERSION: &[u8] = b"codewire-workspace-owner-v1\n";
+const INITIAL_OWNERSHIP_ENTRY_LIMIT: usize = 1_000_000;
+const CONTAINER_POWEROFF_MARKER_PATH: &str = "/run/codewire-probe/poweroff.accepted";
+const WORKSPACE_START_TIMEOUT: Duration = Duration::from_secs(10);
+const WORKSPACE_STOP_TIMEOUT: Duration = Duration::from_secs(5);
+const RUNC_CONTROL_TIMEOUT: Duration = Duration::from_secs(1);
+const CONTROL_MESSAGE_LIMIT: usize = 32;
 
 const SYS_BLOCK_PATH: &str = "/sys/class/block";
 const DEV_PATH: &str = "/dev";
@@ -42,6 +83,7 @@ const DAEMON_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 const HOST_ONLY_REJECTION_BUDGET: usize = 32;
 const NONCE_MAX_LEN: usize = 256;
 const READ_LIMIT: usize = 4097;
+const RUNC_PROCESS_SPEC_LIMIT: u64 = 1024 * 1024;
 const PERSISTENT_WORKSPACE_PATH: &str = "/state/workspace";
 const PERSISTENT_HOME_PATH: &str = "/state/home";
 
@@ -64,29 +106,54 @@ pub fn run_init() -> Result<()> {
         STATE_DISK_SERIAL,
         DISK_DISCOVERY_TIMEOUT,
     )?;
+    validate_block_device(&state_device)?;
+    mount_state(&state_device)?;
+    create_dir(Path::new(CONTROL_PATH), 0o700)?;
+    record_boot_stage("state-mounted")?;
+    mount_workspace_cgroups()?;
+    record_boot_stage("cgroups-ready")?;
+
     let seed_device = wait_for_disk_by_serial(
         Path::new(SYS_BLOCK_PATH),
         Path::new(DEV_PATH),
         SEED_DISK_SERIAL,
         DISK_DISCOVERY_TIMEOUT,
     )?;
+    let root_device = wait_for_disk_by_serial(
+        Path::new(SYS_BLOCK_PATH),
+        Path::new(DEV_PATH),
+        ROOT_DISK_SERIAL,
+        DISK_DISCOVERY_TIMEOUT,
+    )?;
     ensure!(
-        state_device != seed_device,
-        "state and seed disks resolve to one device"
+        state_device != seed_device && state_device != root_device && seed_device != root_device,
+        "state, root, and seed disks must resolve to distinct devices"
     );
-    validate_block_device(&state_device)?;
     validate_block_device(&seed_device)?;
-    mount_state(&state_device)?;
+    validate_block_device(&root_device)?;
+    record_boot_stage("disks-admitted")?;
+    mount_root_generation(&root_device)?;
+    record_boot_stage("root-mounted")?;
     create_state_layout()?;
+    normalize_initial_persistent_ownership()?;
+    record_boot_stage("ownership-ready")?;
     expose_persistent_layout()?;
+    record_boot_stage("persistent-layout-ready")?;
 
     // Validate the complete seed before starting anything that accepts guest
     // control traffic. The child deliberately rereads it from the immutable
     // disk rather than inheriting the token through argv or environment.
-    let _ = read_seed_file(&seed_device)?;
+    let seed = read_seed_file(&seed_device)?;
+    let poweroff = prepare_container_control(&seed)?;
+    record_boot_stage("container-control-ready")?;
+    prepare_workspace_generation()?;
+    record_boot_stage("root-generation-ready")?;
+    let workspace = spawn_workspace_container()?;
+    record_boot_stage("workspace-running")?;
 
-    let daemon_pid = spawn_daemon()?;
-    supervise_daemon(daemon_pid)
+    let daemon = spawn_daemon()?;
+    record_boot_stage("daemon-started")?;
+    supervise_guest(daemon, workspace, poweroff)
 }
 
 pub async fn run_daemon() -> Result<()> {
@@ -110,6 +177,25 @@ pub async fn run_daemon() -> Result<()> {
         workspace_root: PathBuf::from(WORKSPACE_PATH),
         home_root: PathBuf::from(HOME_PATH),
         auth_token: Some(seed.auth_token().to_owned()),
+        process_execution: codewire_daemon::execution::ProcessExecution::Runc(
+            codewire_daemon::execution::RuncExecution {
+                helper_path: PathBuf::from(INIT_PATH),
+                process_directory: PathBuf::from(RUNC_PROCESS_PATH),
+                container_id: WORKSPACE_CONTAINER_ID.to_owned(),
+                process_wrapper: vec![CONTAINER_INIT_PATH.to_owned(), "workspace-exec".to_owned()],
+                default_shell: "/bin/sh".to_owned(),
+                base_environment: vec![
+                    "HOME=/home/codewire".to_owned(),
+                    "USER=codewire".to_owned(),
+                    "SHELL=/bin/sh".to_owned(),
+                    "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".to_owned(),
+                    "LANG=C.UTF-8".to_owned(),
+                ],
+                uid: 0,
+                gid: 0,
+                additional_gids: Vec::new(),
+            },
+        ),
     };
 
     codewire_daemon::serve_grpc_with_incoming(
@@ -178,22 +264,21 @@ fn rejected_connection_requires_yield(rejected: &mut usize, context: &mut TaskCo
 }
 
 pub fn run_identity() -> Result<()> {
-    let seed = read_seed_from_discovered_disk()?;
+    let identity = read_guest_identity()?;
     let mut stdout = io::stdout().lock();
     writeln!(
         stdout,
         "{IDENTITY_MARKER} vm_id={} generation={}",
-        seed.vm_id(),
-        seed.generation()
+        identity.vm_id, identity.generation
     )?;
     stdout.flush()?;
     Ok(())
 }
 
 pub fn run_write_nonce(nonce: &OsStr) -> Result<()> {
-    let _ = read_seed_from_discovered_disk()?;
+    let _ = read_guest_identity()?;
     let nonce = validate_nonce(nonce)?;
-    write_durable(Path::new(NONCE_PATH), nonce.as_bytes(), 0o600).context("persist guest nonce")?;
+    write_durable(probe_nonce_path(), nonce.as_bytes(), 0o600).context("persist guest nonce")?;
     let mut stdout = io::stdout().lock();
     writeln!(stdout, "{NONCE_MARKER} written")?;
     stdout.flush()?;
@@ -201,8 +286,8 @@ pub fn run_write_nonce(nonce: &OsStr) -> Result<()> {
 }
 
 pub fn run_read_nonce() -> Result<()> {
-    let _ = read_seed_from_discovered_disk()?;
-    let nonce = read_nonce(Path::new(NONCE_PATH))?;
+    let _ = read_guest_identity()?;
+    let nonce = read_nonce(probe_nonce_path())?;
     let mut stdout = io::stdout().lock();
     writeln!(stdout, "{NONCE_MARKER} {nonce}")?;
     stdout.flush()?;
@@ -210,7 +295,7 @@ pub fn run_read_nonce() -> Result<()> {
 }
 
 pub fn run_network_check() -> Result<()> {
-    let _ = read_seed_from_discovered_disk()?;
+    let _ = read_guest_identity()?;
     verify_loopback_only(
         Path::new("/sys/class/net"),
         Path::new("/proc/net/route"),
@@ -224,15 +309,254 @@ pub fn run_network_check() -> Result<()> {
 }
 
 pub fn run_poweroff() -> Result<()> {
-    let seed = read_seed_from_discovered_disk()?;
-    ensure_init_is_expected()?;
+    let identity = read_guest_identity()?;
+    let container = Path::new(CONTAINER_IDENTITY_DESTINATION).is_file();
+    ensure_init_is_expected(container)?;
     let marker = format!(
         "{POWEROFF_MARKER} vm_id={} generation={}\n",
-        seed.vm_id(),
-        seed.generation()
+        identity.vm_id, identity.generation
     );
-    let mut operations = RealPoweroffOperations { marker };
+    let mut operations = RealPoweroffOperations {
+        marker,
+        marker_path: if container {
+            PathBuf::from(CONTAINER_POWEROFF_MARKER_PATH)
+        } else {
+            PathBuf::from(POWEROFF_MARKER_PATH)
+        },
+        target: if container {
+            PoweroffTarget::Socket(PathBuf::from(CONTAINER_POWEROFF_DESTINATION))
+        } else {
+            PoweroffTarget::SignalGuestInit
+        },
+    };
     request_poweroff(&mut operations)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct GuestIdentity {
+    vm_id: uuid::Uuid,
+    generation: u64,
+}
+
+impl GuestIdentity {
+    fn from_seed(seed: &Seed) -> Self {
+        Self {
+            vm_id: seed.vm_id(),
+            generation: seed.generation(),
+        }
+    }
+
+    fn validate(&self) -> Result<()> {
+        ensure!(
+            !self.vm_id.is_nil() && self.generation > 0,
+            "guest identity metadata is invalid"
+        );
+        Ok(())
+    }
+}
+
+fn read_guest_identity() -> Result<GuestIdentity> {
+    let container_identity = Path::new(CONTAINER_IDENTITY_DESTINATION);
+    if container_identity.is_file() {
+        let bytes = read_bounded(container_identity, 4097)
+            .context("read container guest identity metadata")?;
+        ensure!(bytes.len() <= 4096, "guest identity metadata is too large");
+        let identity: GuestIdentity =
+            serde_json::from_slice(&bytes).context("decode guest identity metadata")?;
+        identity.validate()?;
+        return Ok(identity);
+    }
+    Ok(GuestIdentity::from_seed(&read_seed_from_discovered_disk()?))
+}
+
+fn probe_nonce_path() -> &'static Path {
+    if Path::new(CONTAINER_IDENTITY_DESTINATION).is_file() {
+        Path::new(CONTAINER_NONCE_PATH)
+    } else {
+        Path::new(NONCE_PATH)
+    }
+}
+
+/// Execute a session through the sealed runc binary without placing the OCI
+/// process environment on argv or in this helper's environment. The daemon
+/// writes the specification only beneath owner-private tmpfs; this helper
+/// opens and unlinks it before handing an inherited descriptor to runc.
+pub fn run_runc_exec(container_id: &OsStr, process_spec: &Path) -> Result<()> {
+    ensure!(
+        unsafe { libc::getpid() } != 1,
+        "runc session helper must not be PID 1"
+    );
+    let helper_environment = std::env::vars_os().collect::<Vec<_>>();
+    ensure!(
+        runc_helper_environment_is_admitted(&helper_environment),
+        "runc session helper refuses an ambient environment"
+    );
+    ensure!(
+        unsafe { libc::clearenv() } == 0,
+        "runc session helper could not clear its environment"
+    );
+    ensure!(
+        container_id.as_bytes() == WORKSPACE_CONTAINER_ID.as_bytes(),
+        "runc session container ID is invalid"
+    );
+    validate_runc_process_path(process_spec)?;
+
+    let mut options = OpenOptions::new();
+    options
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    let process = options
+        .open(process_spec)
+        .context("open private runc process specification")?;
+    let metadata = process
+        .metadata()
+        .context("inspect private runc process specification")?;
+    ensure!(
+        metadata.file_type().is_file()
+            && metadata.uid() == unsafe { libc::geteuid() }
+            && metadata.permissions().mode() & 0o777 == 0o600
+            && metadata.nlink() == 1
+            && (1..=RUNC_PROCESS_SPEC_LIMIT).contains(&metadata.len()),
+        "runc process specification is not an admitted private file"
+    );
+    fs::remove_file(process_spec).context("unlink private runc process specification")?;
+
+    let descriptor = process.as_raw_fd();
+    ensure!(
+        descriptor > libc::STDERR_FILENO,
+        "runc process descriptor is invalid"
+    );
+    if unsafe { libc::fcntl(descriptor, libc::F_SETFD, 0) } == -1 {
+        return Err(io::Error::last_os_error()).context("inherit runc process descriptor");
+    }
+    let descriptor_path = format!("/proc/self/fd/{descriptor}");
+    let arguments = [
+        RUNC_PATH,
+        "--root",
+        RUNC_STATE_PATH,
+        "exec",
+        "--process",
+        descriptor_path.as_str(),
+        WORKSPACE_CONTAINER_ID,
+    ];
+    let arguments = arguments
+        .iter()
+        .map(|argument| CString::new(*argument).context("runc argument contains NUL"))
+        .collect::<Result<Vec<_>>>()?;
+    let pointers = arguments
+        .iter()
+        .map(|argument| argument.as_ptr())
+        .chain(std::iter::once(std::ptr::null()))
+        .collect::<Vec<_>>();
+    let result = unsafe { libc::execv(arguments[0].as_ptr(), pointers.as_ptr()) };
+    debug_assert_eq!(result, -1);
+    Err(io::Error::last_os_error()).context("execute sealed runc session helper")
+}
+
+fn runc_helper_environment_is_admitted(environment: &[(OsString, OsString)]) -> bool {
+    environment.is_empty()
+        || (environment.len() == 1
+            && environment[0].0 == OsStr::new("SHELL")
+            && environment[0].1 == OsStr::new(INIT_PATH))
+}
+
+fn validate_runc_process_path(path: &Path) -> Result<()> {
+    ensure!(path.is_absolute(), "runc process path is not absolute");
+    ensure!(
+        path.parent() == Some(Path::new(RUNC_PROCESS_PATH)),
+        "runc process path is outside private tmpfs"
+    );
+    let name = path
+        .file_name()
+        .and_then(OsStr::to_str)
+        .ok_or_else(|| anyhow::anyhow!("runc process filename is invalid"))?;
+    let id = name
+        .strip_suffix(".json")
+        .ok_or_else(|| anyhow::anyhow!("runc process filename is invalid"))?;
+    let parsed = uuid::Uuid::parse_str(id).context("runc process filename is invalid")?;
+    ensure!(!parsed.is_nil(), "runc process filename is invalid");
+    Ok(())
+}
+
+/// Stable container PID 1 used beneath runc. Image entrypoint/setup
+/// supervision is added by the generation setup service; this foundation
+/// process already gives daemon exec/PTY calls a durable namespace target.
+pub fn run_workspace_init() -> Result<()> {
+    ensure!(
+        unsafe { libc::getpid() } == 1,
+        "workspace init must be container PID 1"
+    );
+    let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
+    action.sa_sigaction = request_poweroff_signal as *const () as usize;
+    action.sa_flags = libc::SA_NOCLDSTOP;
+    unsafe {
+        libc::sigemptyset(&mut action.sa_mask);
+    }
+    for signal in [libc::SIGTERM, libc::SIGINT] {
+        if unsafe { libc::sigaction(signal, &action, std::ptr::null_mut()) } == -1 {
+            return Err(io::Error::last_os_error())
+                .context("install workspace init signal handler");
+        }
+    }
+    POWEROFF_REQUESTED.store(false, Ordering::Release);
+    loop {
+        if POWEROFF_REQUESTED.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        let mut status = 0;
+        let reaped = unsafe { libc::waitpid(-1, &mut status, libc::WNOHANG) };
+        if reaped > 0
+            || (reaped == -1 && io::Error::last_os_error().raw_os_error() == Some(libc::ECHILD))
+        {
+            thread::sleep(Duration::from_millis(20));
+            continue;
+        }
+        if reaped == 0 || io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
+            thread::sleep(Duration::from_millis(20));
+            continue;
+        }
+        return Err(io::Error::last_os_error()).context("reap workspace child");
+    }
+}
+
+/// Preserve the daemon's exact-child lifecycle across the runc client hop.
+/// The runc client is this process's parent; if transport cleanup kills that
+/// client, the kernel kills the in-container command even when the command
+/// ignores ordinary termination signals.
+pub fn run_workspace_exec(command: Vec<OsString>) -> Result<()> {
+    ensure!(
+        unsafe { libc::getpid() } != 1,
+        "workspace exec trampoline must not be container PID 1"
+    );
+    ensure!(
+        !command.is_empty() && !command[0].is_empty(),
+        "workspace exec command is empty"
+    );
+    let parent = unsafe { libc::getppid() };
+    ensure!(parent != 1, "workspace exec lost its runc parent");
+    if unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) } == -1 {
+        return Err(io::Error::last_os_error()).context("bind workspace exec to its runc parent");
+    }
+    ensure!(
+        unsafe { libc::getppid() } == parent,
+        "workspace exec runc parent changed during admission"
+    );
+
+    let arguments = command
+        .iter()
+        .map(|argument| {
+            CString::new(argument.as_bytes()).context("workspace exec argument contains NUL")
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let pointers = arguments
+        .iter()
+        .map(|argument| argument.as_ptr())
+        .chain(std::iter::once(std::ptr::null()))
+        .collect::<Vec<_>>();
+    let result = unsafe { libc::execvp(arguments[0].as_ptr(), pointers.as_ptr()) };
+    debug_assert_eq!(result, -1);
+    Err(io::Error::last_os_error()).context("execute workspace session command")
 }
 
 pub fn find_disk_by_serial(
@@ -373,12 +697,68 @@ fn mount_minimal_filesystems() -> Result<()> {
     )?;
     create_dir(Path::new("/dev/shm"), 0o1777)?;
     create_dir(Path::new("/run"), 0o755)?;
+    mount_fs(
+        "tmpfs",
+        "/run",
+        "tmpfs",
+        libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC,
+        "mode=0755,size=32m",
+    )?;
     create_dir(Path::new("/tmp"), 0o1777)?;
     replace_ptmx_link()?;
     create_symlink("/proc/self/fd", "/dev/fd")?;
     create_symlink("/proc/self/fd/0", "/dev/stdin")?;
     create_symlink("/proc/self/fd/1", "/dev/stdout")?;
     create_symlink("/proc/self/fd/2", "/dev/stderr")?;
+    Ok(())
+}
+
+fn mount_workspace_cgroups() -> Result<()> {
+    let root =
+        fs::symlink_metadata(CGROUP_ROOT_PATH).context("inspect kernel cgroup mountpoint")?;
+    ensure!(
+        root.file_type().is_dir(),
+        "kernel cgroup mountpoint is not a directory"
+    );
+    mount_fs(
+        "codewire-cgroup-root",
+        CGROUP_ROOT_PATH,
+        "tmpfs",
+        libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC,
+        "mode=0755,size=1m",
+    )
+    .context("mount private cgroup root")?;
+    create_dir(Path::new(CGROUP_HIERARCHY_PATH), 0o755)?;
+    // This admitted kernel exposes cgroup v1. With no subsystem option the
+    // kernel binds every registered controller into this single, private
+    // hierarchy. runc can then enforce the OCI device allowlist without a
+    // host-visible or shared cgroup boundary.
+    mount_fs(
+        "codewire",
+        CGROUP_HIERARCHY_PATH,
+        "cgroup",
+        libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC,
+        "",
+    )
+    .context("mount private cgroup v1 hierarchy")?;
+    let mut statistics: libc::statfs = unsafe { std::mem::zeroed() };
+    let hierarchy = CString::new(CGROUP_HIERARCHY_PATH).expect("static path has no NUL");
+    if unsafe { libc::statfs(hierarchy.as_ptr(), &mut statistics) } == -1 {
+        return Err(io::Error::last_os_error()).context("inspect private cgroup hierarchy");
+    }
+    ensure!(
+        statistics.f_type as u64 == libc::CGROUP_SUPER_MAGIC as u64,
+        "private cgroup hierarchy has the wrong filesystem type"
+    );
+    for required in ["cgroup.procs", "devices.list"] {
+        let path = Path::new(CGROUP_HIERARCHY_PATH).join(required);
+        let metadata = fs::symlink_metadata(&path)
+            .with_context(|| format!("inspect required cgroup file {}", path.display()))?;
+        ensure!(
+            metadata.file_type().is_file(),
+            "required cgroup path is not a regular control file"
+        );
+    }
     Ok(())
 }
 
@@ -397,11 +777,42 @@ fn mount_state(device: &Path) -> Result<()> {
     .context("mount persistent state disk")
 }
 
+fn mount_root_generation(device: &Path) -> Result<()> {
+    create_dir(Path::new(ROOT_MOUNT_PATH), 0o700)?;
+    let device = device
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("root generation disk path is not UTF-8"))?;
+    mount_fs(
+        device,
+        ROOT_MOUNT_PATH,
+        "ext4",
+        libc::MS_NOSUID | libc::MS_NODEV,
+        "errors=remount-ro",
+    )
+    .context("mount root generation disk")
+}
+
+fn record_boot_stage(stage: &'static str) -> Result<()> {
+    ensure!(
+        !stage.is_empty()
+            && stage.len() <= 32
+            && stage
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte == b'-'),
+        "guest boot stage is invalid"
+    );
+    let mut value = stage.as_bytes().to_vec();
+    value.push(b'\n');
+    write_durable(Path::new(BOOT_STAGE_PATH), &value, 0o600)
+        .context("persist bounded guest boot stage")
+}
+
 fn create_state_layout() -> Result<()> {
     for (path, mode) in [
         (CONTROL_PATH, 0o700),
         (PERSISTENT_WORKSPACE_PATH, 0o700),
         (PERSISTENT_HOME_PATH, 0o700),
+        (PERSISTENT_PROBE_PATH, 0o700),
     ] {
         create_dir(Path::new(path), mode)?;
     }
@@ -412,12 +823,329 @@ fn create_state_layout() -> Result<()> {
     Ok(())
 }
 
+fn normalize_initial_persistent_ownership() -> Result<()> {
+    match fs::symlink_metadata(WORKSPACE_OWNER_VERSION_PATH) {
+        Ok(_) => {
+            return ensure_exact_bytes(
+                Path::new(WORKSPACE_OWNER_VERSION_PATH),
+                WORKSPACE_OWNER_VERSION,
+                0o400,
+            )
+            .context("validate persistent workspace ownership marker");
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error).context("inspect persistent workspace ownership marker"),
+    }
+
+    let mut pending = vec![
+        PathBuf::from(PERSISTENT_WORKSPACE_PATH),
+        PathBuf::from(PERSISTENT_HOME_PATH),
+        PathBuf::from(PERSISTENT_PROBE_PATH),
+    ];
+    let mut visited = 0_usize;
+    while let Some(path) = pending.pop() {
+        visited = visited
+            .checked_add(1)
+            .ok_or_else(|| anyhow::anyhow!("persistent ownership entry count overflowed"))?;
+        ensure!(
+            visited <= INITIAL_OWNERSHIP_ENTRY_LIMIT,
+            "persistent workspace exceeds its initial ownership entry bound"
+        );
+        let metadata = fs::symlink_metadata(&path)
+            .with_context(|| format!("inspect persistent path {}", path.display()))?;
+        let kind = metadata.file_type();
+        ensure!(
+            kind.is_dir() || (kind.is_file() && metadata.nlink() == 1),
+            "persistent workspace contains a forbidden inode type"
+        );
+        lchown(&path, 0, 0)?;
+        if kind.is_dir() {
+            for entry in fs::read_dir(&path)
+                .with_context(|| format!("read persistent directory {}", path.display()))?
+            {
+                ensure!(
+                    visited.saturating_add(pending.len()) < INITIAL_OWNERSHIP_ENTRY_LIMIT,
+                    "persistent workspace exceeds its initial ownership entry bound"
+                );
+                pending.push(entry.context("read persistent directory entry")?.path());
+            }
+        }
+    }
+
+    let state = File::open(STATE_MOUNT_PATH).context("open state filesystem for ownership sync")?;
+    if unsafe { libc::syncfs(state.as_raw_fd()) } == -1 {
+        return Err(io::Error::last_os_error()).context("sync persistent workspace ownership");
+    }
+    ensure_exact_bytes(
+        Path::new(WORKSPACE_OWNER_VERSION_PATH),
+        WORKSPACE_OWNER_VERSION,
+        0o400,
+    )
+    .context("publish persistent workspace ownership marker")
+}
+
+fn lchown(path: &Path, uid: libc::uid_t, gid: libc::gid_t) -> Result<()> {
+    let path_bytes = CString::new(path.as_os_str().as_bytes())
+        .with_context(|| format!("persistent path contains NUL: {}", path.display()))?;
+    if unsafe { libc::lchown(path_bytes.as_ptr(), uid, gid) } == -1 {
+        return Err(io::Error::last_os_error())
+            .with_context(|| format!("normalize persistent owner {}", path.display()));
+    }
+    Ok(())
+}
+
 fn expose_persistent_layout() -> Result<()> {
     create_dir(Path::new(WORKSPACE_PATH), 0o700)?;
     create_dir(Path::new("/home"), 0o755)?;
     create_dir(Path::new(HOME_PATH), 0o700)?;
     bind_mount(PERSISTENT_WORKSPACE_PATH, WORKSPACE_PATH)?;
     bind_mount(PERSISTENT_HOME_PATH, HOME_PATH)
+}
+
+fn prepare_container_control(seed: &Seed) -> Result<UnixDatagram> {
+    for (path, mode) in [
+        ("/run/codewire", 0o700),
+        (RUNC_STATE_PATH, 0o700),
+        (RUNC_PROCESS_PATH, 0o700),
+        (CONTAINER_CONTROL_PATH, 0o700),
+    ] {
+        create_dir(Path::new(path), mode)?;
+    }
+
+    let identity = GuestIdentity::from_seed(seed);
+    identity.validate()?;
+    let identity_bytes = serde_json::to_vec(&identity).context("encode guest identity metadata")?;
+    write_durable(Path::new(CONTAINER_IDENTITY_PATH), &identity_bytes, 0o400)
+        .context("publish guest identity metadata")?;
+
+    let socket_path = Path::new(CONTAINER_POWEROFF_SOCKET);
+    match fs::symlink_metadata(socket_path) {
+        Ok(metadata) if metadata.file_type().is_socket() => {
+            fs::remove_file(socket_path).context("remove stale guest poweroff socket")?;
+        }
+        Ok(_) => bail!("guest poweroff path contains an unexpected object"),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error).context("inspect guest poweroff socket"),
+    }
+    let socket = UnixDatagram::bind(socket_path).context("bind guest poweroff socket")?;
+    fs::set_permissions(socket_path, fs::Permissions::from_mode(0o600))
+        .context("confine guest poweroff socket")?;
+    socket
+        .set_nonblocking(true)
+        .context("make guest poweroff socket nonblocking")?;
+    Ok(socket)
+}
+
+fn prepare_workspace_generation() -> Result<()> {
+    for (path, mode) in [
+        (ROOT_LOWER_PATH, 0o700),
+        (ROOT_UPPER_PATH, 0o700),
+        (ROOT_WORK_PATH, 0o700),
+        (ROOT_MERGED_PATH, 0o700),
+        (RUNC_BUNDLE_PATH, 0o700),
+        ("/generation/lower/bin", 0o755),
+        ("/generation/lower/sbin", 0o755),
+        ("/generation/lower/etc", 0o755),
+        ("/generation/lower/dev", 0o755),
+        ("/generation/lower/dev/pts", 0o755),
+        ("/generation/lower/dev/shm", 0o1777),
+        ("/generation/lower/proc", 0o555),
+        ("/generation/lower/sys", 0o555),
+        ("/generation/lower/run", 0o755),
+        ("/generation/lower/run/codewire-host", 0o700),
+        ("/generation/lower/run/codewire-probe", 0o700),
+        ("/generation/lower/tmp", 0o1777),
+        ("/generation/lower/workspace", 0o700),
+        ("/generation/lower/home", 0o755),
+        ("/generation/lower/home/codewire", 0o700),
+    ] {
+        create_dir(Path::new(path), mode)?;
+    }
+
+    ensure_exact_regular(
+        Path::new(INIT_PATH),
+        Path::new("/generation/lower/init"),
+        0o755,
+    )?;
+    ensure_exact_regular(
+        Path::new("/bin/busybox"),
+        Path::new("/generation/lower/bin/busybox"),
+        0o755,
+    )?;
+    for applet in BASIC_BUSYBOX_APPLETS {
+        create_symlink("busybox", &format!("/generation/lower/bin/{applet}"))?;
+    }
+    ensure_exact_bytes(
+        Path::new("/generation/lower/etc/passwd"),
+        b"root:x:0:0:root:/root:/bin/sh\ncodewire:x:0:0:Codewire:/home/codewire:/bin/sh\n",
+        0o644,
+    )?;
+    ensure_exact_bytes(
+        Path::new("/generation/lower/etc/group"),
+        b"root:x:0:\ncodewire:x:0:\n",
+        0o644,
+    )?;
+    ensure_exact_bytes(
+        Path::new(FOUNDATION_VERSION_PATH),
+        FOUNDATION_VERSION.as_bytes(),
+        0o400,
+    )?;
+
+    let config = workspace_oci_config()?;
+    ensure_exact_bytes(Path::new(RUNC_CONFIG_PATH), &config, 0o400)?;
+
+    mount_fs(
+        "overlay",
+        ROOT_MERGED_PATH,
+        "overlay",
+        libc::MS_NOSUID | libc::MS_NODEV,
+        &format!("lowerdir={ROOT_LOWER_PATH},upperdir={ROOT_UPPER_PATH},workdir={ROOT_WORK_PATH}"),
+    )
+    .context("mount workspace root overlay")?;
+    Ok(())
+}
+
+fn ensure_exact_regular(source: &Path, destination: &Path, mode: u32) -> Result<()> {
+    let source_metadata = fs::symlink_metadata(source)
+        .with_context(|| format!("inspect sealed source {}", source.display()))?;
+    ensure!(
+        source_metadata.file_type().is_file() && source_metadata.nlink() == 1,
+        "sealed workspace source is not an admitted regular file"
+    );
+    let source_bytes =
+        fs::read(source).with_context(|| format!("read sealed source {}", source.display()))?;
+    ensure!(!source_bytes.is_empty(), "sealed workspace source is empty");
+    ensure_exact_bytes(destination, &source_bytes, mode)
+}
+
+fn ensure_exact_bytes(path: &Path, expected: &[u8], mode: u32) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            ensure!(
+                metadata.file_type().is_file()
+                    && metadata.uid() == unsafe { libc::geteuid() }
+                    && metadata.permissions().mode() & 0o777 == mode
+                    && metadata.nlink() == 1
+                    && metadata.len() == expected.len() as u64,
+                "root generation contains an invalid sealed file"
+            );
+            let actual = read_bounded(path, expected.len().saturating_add(1))?;
+            ensure!(
+                Sha256::digest(&actual) == Sha256::digest(expected),
+                "root generation sealed file digest changed"
+            );
+            Ok(())
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            write_durable(path, expected, mode).context("publish sealed root generation file")
+        }
+        Err(error) => Err(error).with_context(|| format!("inspect sealed file {}", path.display())),
+    }
+}
+
+fn workspace_oci_config() -> Result<Vec<u8>> {
+    let standard_devices = [
+        ("/dev/null", 1, 3, 0o666),
+        ("/dev/zero", 1, 5, 0o666),
+        ("/dev/full", 1, 7, 0o666),
+        ("/dev/tty", 5, 0, 0o666),
+        ("/dev/random", 1, 8, 0o666),
+        ("/dev/urandom", 1, 9, 0o666),
+    ];
+    let devices = standard_devices
+        .iter()
+        .map(|(path, major, minor, mode)| {
+            serde_json::json!({
+                "path": path,
+                "type": "c",
+                "major": major,
+                "minor": minor,
+                "fileMode": mode,
+                "uid": 0,
+                "gid": 0
+            })
+        })
+        .collect::<Vec<_>>();
+    let allowed_devices = standard_devices
+        .iter()
+        .map(|(_, major, minor, _)| {
+            serde_json::json!({
+                "allow": true,
+                "type": "c",
+                "major": major,
+                "minor": minor,
+                "access": "rwm"
+            })
+        })
+        .collect::<Vec<_>>();
+    serde_json::to_vec(&serde_json::json!({
+        "ociVersion": "1.2.0",
+        "process": {
+            "terminal": false,
+            "user": { "uid": 0, "gid": 0 },
+            "args": [CONTAINER_INIT_PATH, "workspace-init"],
+            "env": [
+                "HOME=/home/codewire",
+                "USER=codewire",
+                "SHELL=/bin/sh",
+                "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                "LANG=C.UTF-8"
+            ],
+            "cwd": WORKSPACE_PATH,
+            "capabilities": {
+                "bounding": [],
+                "effective": [],
+                "inheritable": [],
+                "permitted": [],
+                "ambient": []
+            },
+            "rlimits": [
+                { "type": "RLIMIT_NOFILE", "hard": 1048576, "soft": 1048576 }
+            ],
+            "noNewPrivileges": true
+        },
+        "root": { "path": "../merged", "readonly": false },
+        "hostname": "codewire",
+        "mounts": [
+            { "destination": "/proc", "type": "proc", "source": "proc", "options": ["nosuid", "noexec", "nodev"] },
+            { "destination": "/dev", "type": "tmpfs", "source": "tmpfs", "options": ["nosuid", "strictatime", "mode=755", "size=65536k"] },
+            { "destination": "/dev/pts", "type": "devpts", "source": "devpts", "options": ["nosuid", "noexec", "newinstance", "ptmxmode=0666", "mode=0620"] },
+            { "destination": "/dev/shm", "type": "tmpfs", "source": "shm", "options": ["nosuid", "noexec", "nodev", "mode=1777", "size=65536k"] },
+            { "destination": "/sys", "type": "sysfs", "source": "sysfs", "options": ["nosuid", "noexec", "nodev", "ro"] },
+            { "destination": "/run", "type": "tmpfs", "source": "tmpfs", "options": ["nosuid", "noexec", "nodev", "mode=0755", "size=16m"] },
+            { "destination": CONTAINER_INIT_PATH, "type": "none", "source": INIT_PATH, "options": ["bind", "ro", "nosuid", "nodev"] },
+            { "destination": "/tmp", "type": "tmpfs", "source": "tmpfs", "options": ["nosuid", "nodev", "mode=1777", "size=256m"] },
+            { "destination": WORKSPACE_PATH, "type": "none", "source": PERSISTENT_WORKSPACE_PATH, "options": ["rbind", "rw", "nosuid", "nodev"] },
+            { "destination": HOME_PATH, "type": "none", "source": PERSISTENT_HOME_PATH, "options": ["rbind", "rw", "nosuid", "nodev"] },
+            { "destination": CONTAINER_CONTROL_DESTINATION, "type": "none", "source": CONTAINER_CONTROL_PATH, "options": ["rbind", "ro", "nosuid", "nodev", "noexec"] },
+            { "destination": CONTAINER_PROBE_DESTINATION, "type": "none", "source": PERSISTENT_PROBE_PATH, "options": ["rbind", "rw", "nosuid", "nodev", "noexec"] }
+        ],
+        "linux": {
+            "rootfsPropagation": "rslave",
+            "resources": {
+                "devices": std::iter::once(serde_json::json!({ "allow": false, "access": "rwm" }))
+                    .chain(allowed_devices)
+                    .collect::<Vec<_>>()
+            },
+            "namespaces": [
+                { "type": "pid" },
+                { "type": "network" },
+                { "type": "ipc" },
+                { "type": "uts" },
+                { "type": "mount" }
+            ],
+            "devices": devices,
+            "maskedPaths": [
+                "/proc/acpi", "/proc/asound", "/proc/kcore", "/proc/keys",
+                "/proc/latency_stats", "/proc/timer_list", "/proc/timer_stats",
+                "/proc/sched_debug", "/sys/firmware", "/sys/devices/virtual/powercap"
+            ],
+            "readonlyPaths": [
+                "/proc/bus", "/proc/fs", "/proc/irq", "/proc/sys", "/proc/sysrq-trigger"
+            ]
+        }
+    }))
+    .context("encode workspace OCI configuration")
 }
 
 fn bind_mount(source: &str, target: &str) -> Result<()> {
@@ -512,7 +1240,209 @@ fn mount_fs(
     Ok(())
 }
 
-fn spawn_daemon() -> Result<libc::pid_t> {
+#[derive(Deserialize)]
+struct RuncReportedState {
+    id: String,
+    status: String,
+    pid: i64,
+}
+
+fn spawn_workspace_container() -> Result<std::process::Child> {
+    prepare_runc_log()?;
+    let mut command = Command::new(RUNC_PATH);
+    command
+        .args([
+            "--root",
+            RUNC_STATE_PATH,
+            "--log",
+            RUNC_LOG_PATH,
+            "--log-format",
+            "json",
+            "run",
+            "--no-pivot",
+            "--bundle",
+            RUNC_BUNDLE_PATH,
+            WORKSPACE_CONTAINER_ID,
+        ])
+        .env_clear()
+        .current_dir("/")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let mut child = command.spawn().context("start sealed runc workspace")?;
+    let deadline = Instant::now() + WORKSPACE_START_TIMEOUT;
+    loop {
+        validate_runc_log()?;
+        if child
+            .try_wait()
+            .context("observe sealed runc workspace startup")?
+            .is_some()
+        {
+            bail!("sealed runc workspace exited during startup");
+        }
+        if workspace_container_is_running()? {
+            return Ok(child);
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = force_delete_workspace_container();
+            bail!("sealed runc workspace startup timed out");
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn prepare_runc_log() -> Result<()> {
+    let mut options = OpenOptions::new();
+    options
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    let log = options
+        .open(RUNC_LOG_PATH)
+        .context("prepare bounded runc log")?;
+    let metadata = log.metadata().context("inspect bounded runc log")?;
+    ensure!(
+        metadata.file_type().is_file()
+            && metadata.uid() == unsafe { libc::geteuid() }
+            && metadata.permissions().mode() & 0o777 == 0o600
+            && metadata.nlink() == 1,
+        "runc log is not an owner-private regular file"
+    );
+    log.sync_all().context("sync empty runc log")?;
+    drop(log);
+    validate_runc_log()
+}
+
+fn validate_runc_log() -> Result<()> {
+    let metadata = fs::symlink_metadata(RUNC_LOG_PATH).context("inspect bounded runc log")?;
+    ensure!(
+        metadata.file_type().is_file()
+            && metadata.uid() == unsafe { libc::geteuid() }
+            && metadata.permissions().mode() & 0o777 == 0o600
+            && metadata.nlink() == 1,
+        "runc log is not an owner-private regular file"
+    );
+    ensure!(
+        metadata.len() <= RUNC_LOG_LIMIT,
+        "runc log exceeded its {} byte bound",
+        RUNC_LOG_LIMIT
+    );
+    Ok(())
+}
+
+fn workspace_container_is_running() -> Result<bool> {
+    validate_runc_log()?;
+    let mut command = Command::new(RUNC_PATH);
+    command
+        .args(["--root", RUNC_STATE_PATH, "state", WORKSPACE_CONTAINER_ID])
+        .env_clear()
+        .current_dir("/")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let mut child = command
+        .spawn()
+        .context("query sealed runc workspace state")?;
+    let mut stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("runc state stdout is unavailable"))?;
+    let Some((status, bytes)) =
+        wait_for_bounded_child_output(&mut child, &mut stdout, 64 * 1024, RUNC_CONTROL_TIMEOUT)
+            .context("collect sealed runc workspace state")?
+    else {
+        bail!("sealed runc workspace state query timed out");
+    };
+    if !status.success() {
+        return Ok(false);
+    }
+    let state: RuncReportedState =
+        serde_json::from_slice(&bytes).context("decode sealed runc workspace state")?;
+    ensure!(
+        state.id == WORKSPACE_CONTAINER_ID && state.pid > 1,
+        "sealed runc workspace reported an invalid identity"
+    );
+    Ok(state.status == "running")
+}
+
+fn wait_for_bounded_child_output(
+    child: &mut std::process::Child,
+    stdout: &mut std::process::ChildStdout,
+    limit: usize,
+    timeout: Duration,
+) -> io::Result<Option<(std::process::ExitStatus, Vec<u8>)>> {
+    let descriptor = stdout.as_raw_fd();
+    let flags = unsafe { libc::fcntl(descriptor, libc::F_GETFL) };
+    if flags == -1
+        || unsafe { libc::fcntl(descriptor, libc::F_SETFL, flags | libc::O_NONBLOCK) } == -1
+    {
+        let error = io::Error::last_os_error();
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(error);
+    }
+
+    let deadline = Instant::now() + timeout;
+    let mut bytes = Vec::new();
+    let mut status = None;
+    let mut eof = false;
+    loop {
+        let mut buffer = [0_u8; 4096];
+        loop {
+            match stdout.read(&mut buffer) {
+                Ok(0) => {
+                    eof = true;
+                    break;
+                }
+                Ok(length) => {
+                    if bytes.len().saturating_add(length) > limit {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "child output exceeded its bound",
+                        ));
+                    }
+                    bytes.extend_from_slice(&buffer[..length]);
+                }
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+                Err(error) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(error);
+                }
+            }
+        }
+        if status.is_none() {
+            status = match child.try_wait() {
+                Ok(status) => status,
+                Err(error) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(error);
+                }
+            };
+        }
+        if let Some(status) = status
+            && eof
+        {
+            return Ok(Some((status, bytes)));
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Ok(None);
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn spawn_daemon() -> Result<std::process::Child> {
     let mut command = Command::new(INIT_PATH);
     command
         .arg("daemon")
@@ -521,74 +1451,140 @@ fn spawn_daemon() -> Result<libc::pid_t> {
         .stdin(Stdio::null())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
-    let child = command
+    command
         .spawn()
-        .context("spawn environment-free guest daemon")?;
-    let pid = libc::pid_t::try_from(child.id()).context("guest daemon PID exceeds pid_t")?;
-    drop(child);
-    Ok(pid)
+        .context("spawn environment-free guest daemon")
 }
 
-fn supervise_daemon(daemon_pid: libc::pid_t) -> Result<()> {
+fn supervise_guest(
+    mut daemon: std::process::Child,
+    mut workspace: std::process::Child,
+    poweroff: UnixDatagram,
+) -> Result<()> {
     loop {
-        if POWEROFF_REQUESTED.load(Ordering::Acquire) {
-            stop_daemon(daemon_pid);
+        validate_runc_log()?;
+        if POWEROFF_REQUESTED.load(Ordering::Acquire) || container_poweroff_requested(&poweroff)? {
+            stop_daemon(&mut daemon);
+            stop_workspace_container(&mut workspace);
             return power_off();
         }
-
-        let mut status = 0;
-        // Do not block in waitpid: a poweroff signal can arrive after the
-        // flag check but before waitpid enters the kernel, in which case the
-        // handler has already run and there may be no later signal to wake a
-        // blocking wait. Bounded polling keeps signal handling and adopted-
-        // child reaping race-free without letting PID 1 steal waits from the
-        // still-running Tokio daemon.
-        let reaped = unsafe { libc::waitpid(-1, &mut status, libc::WNOHANG) };
-        if reaped == daemon_pid {
+        if daemon.try_wait().context("observe guest daemon")?.is_some() {
             eprintln!("guest daemon exited; powering off generation");
+            stop_workspace_container(&mut workspace);
             return power_off();
         }
-        if reaped > 0 {
-            // This can only be a child adopted after its Tokio-owning daemon
-            // parent exited. PID 1 is the sole waiter for adopted processes.
-            continue;
+        if workspace
+            .try_wait()
+            .context("observe sealed runc workspace")?
+            .is_some()
+        {
+            eprintln!("workspace container exited; powering off generation");
+            stop_daemon(&mut daemon);
+            let _ = force_delete_workspace_container();
+            return power_off();
         }
-        if reaped == 0 {
-            thread::sleep(Duration::from_millis(20));
-            continue;
-        }
-        let error = io::Error::last_os_error();
-        if error.kind() == io::ErrorKind::Interrupted {
-            continue;
-        }
-        if error.raw_os_error() == Some(libc::ECHILD) {
-            bail!("guest daemon disappeared without a waitable child");
-        }
-        return Err(error).context("reap guest child");
+        thread::sleep(Duration::from_millis(20));
     }
 }
 
-fn stop_daemon(daemon_pid: libc::pid_t) {
-    unsafe {
-        libc::kill(daemon_pid, libc::SIGTERM);
+fn container_poweroff_requested(socket: &UnixDatagram) -> Result<bool> {
+    let mut message = [0_u8; 16];
+    for _ in 0..CONTROL_MESSAGE_LIMIT {
+        match socket.recv(&mut message) {
+            Ok(length) if &message[..length] == b"poweroff" => return Ok(true),
+            Ok(_) => continue,
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(false),
+            Err(error) => return Err(error).context("receive workspace poweroff request"),
+        }
+    }
+    Ok(false)
+}
+
+fn stop_daemon(daemon: &mut std::process::Child) {
+    if daemon.try_wait().ok().flatten().is_some() {
+        return;
+    }
+    if let Ok(pid) = libc::pid_t::try_from(daemon.id()) {
+        unsafe {
+            libc::kill(pid, libc::SIGTERM);
+        }
     }
     let deadline = Instant::now() + DAEMON_SHUTDOWN_TIMEOUT;
     while Instant::now() < deadline {
-        let mut status = 0;
-        let reaped = unsafe { libc::waitpid(-1, &mut status, libc::WNOHANG) };
-        if reaped == daemon_pid
-            || (reaped == -1 && io::Error::last_os_error().raw_os_error() == Some(libc::ECHILD))
-        {
+        if daemon.try_wait().ok().flatten().is_some() {
             return;
         }
         thread::sleep(Duration::from_millis(20));
     }
-    unsafe {
-        libc::kill(daemon_pid, libc::SIGKILL);
-        let mut status = 0;
-        while libc::waitpid(daemon_pid, &mut status, 0) == -1
-            && io::Error::last_os_error().kind() == io::ErrorKind::Interrupted
-        {}
+    let _ = daemon.kill();
+    let _ = daemon.wait();
+}
+
+fn stop_workspace_container(workspace: &mut std::process::Child) {
+    let kill_completed = run_runc_control(&[
+        "--root",
+        RUNC_STATE_PATH,
+        "kill",
+        WORKSPACE_CONTAINER_ID,
+        "KILL",
+    ])
+    .ok()
+    .flatten()
+    .is_some();
+    let deadline = if kill_completed {
+        Instant::now() + WORKSPACE_STOP_TIMEOUT
+    } else {
+        Instant::now()
+    };
+    while Instant::now() < deadline {
+        if workspace.try_wait().ok().flatten().is_some() {
+            let _ = force_delete_workspace_container();
+            return;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    let _ = workspace.kill();
+    let _ = workspace.wait();
+    let _ = force_delete_workspace_container();
+}
+
+fn force_delete_workspace_container() -> io::Result<()> {
+    let _ = run_runc_control(&[
+        "--root",
+        RUNC_STATE_PATH,
+        "delete",
+        "--force",
+        WORKSPACE_CONTAINER_ID,
+    ])?;
+    Ok(())
+}
+
+fn run_runc_control(arguments: &[&str]) -> io::Result<Option<std::process::ExitStatus>> {
+    let mut child = Command::new(RUNC_PATH)
+        .args(arguments)
+        .env_clear()
+        .current_dir("/")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+    let deadline = Instant::now() + RUNC_CONTROL_TIMEOUT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Ok(Some(status)),
+            Ok(None) => {}
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error);
+            }
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Ok(None);
+        }
+        thread::sleep(Duration::from_millis(20));
     }
 }
 
@@ -864,11 +1860,16 @@ fn acceptable_icmp_socket_denial(error: Option<libc::c_int>) -> bool {
     matches!(error, Some(libc::EACCES | libc::EPERM))
 }
 
-fn ensure_init_is_expected() -> Result<()> {
+fn ensure_init_is_expected(container: bool) -> Result<()> {
     let executable = fs::read_link("/proc/1/exe").context("inspect guest PID 1 executable")?;
+    let expected = if container {
+        Path::new(CONTAINER_INIT_PATH)
+    } else {
+        Path::new(INIT_PATH)
+    };
     ensure!(
-        executable == Path::new(INIT_PATH),
-        "guest PID 1 is not /init"
+        executable == expected,
+        "guest PID 1 is not the sealed Codewire init"
     );
     Ok(())
 }
@@ -887,15 +1888,18 @@ fn request_poweroff(operations: &mut impl PoweroffOperations) -> Result<()> {
 
 struct RealPoweroffOperations {
     marker: String,
+    marker_path: PathBuf,
+    target: PoweroffTarget,
+}
+
+enum PoweroffTarget {
+    SignalGuestInit,
+    Socket(PathBuf),
 }
 
 impl PoweroffOperations for RealPoweroffOperations {
     fn persist_marker(&mut self) -> Result<()> {
-        write_durable(
-            Path::new(POWEROFF_MARKER_PATH),
-            self.marker.as_bytes(),
-            0o600,
-        )
+        write_durable(&self.marker_path, self.marker.as_bytes(), 0o600)
     }
 
     fn emit_marker(&mut self) -> Result<()> {
@@ -906,8 +1910,19 @@ impl PoweroffOperations for RealPoweroffOperations {
     }
 
     fn signal_init(&mut self) -> Result<()> {
-        if unsafe { libc::kill(1, libc::SIGUSR1) } == -1 {
-            return Err(io::Error::last_os_error()).context("signal guest init for poweroff");
+        match &self.target {
+            PoweroffTarget::SignalGuestInit => {
+                if unsafe { libc::kill(1, libc::SIGUSR1) } == -1 {
+                    return Err(io::Error::last_os_error())
+                        .context("signal guest init for poweroff");
+                }
+            }
+            PoweroffTarget::Socket(path) => {
+                let socket = UnixDatagram::unbound().context("open workspace poweroff socket")?;
+                socket
+                    .send_to(b"poweroff", path)
+                    .context("request workspace VM poweroff")?;
+            }
         }
         Ok(())
     }
@@ -1020,6 +2035,74 @@ mod tests {
             assert!(!acceptable_icmp_socket_denial(Some(error)));
         }
         assert!(!acceptable_icmp_socket_denial(None));
+    }
+
+    #[test]
+    fn runc_helper_accepts_only_the_sealed_pty_shell_environment() {
+        assert!(runc_helper_environment_is_admitted(&[]));
+        assert!(runc_helper_environment_is_admitted(&[(
+            OsString::from("SHELL"),
+            OsString::from(INIT_PATH),
+        )]));
+        for rejected in [
+            vec![(OsString::from("SHELL"), OsString::from("/bin/sh"))],
+            vec![(OsString::from("PATH"), OsString::from("/bin"))],
+            vec![
+                (OsString::from("SHELL"), OsString::from(INIT_PATH)),
+                (OsString::from("TOKEN"), OsString::from("secret")),
+            ],
+        ] {
+            assert!(!runc_helper_environment_is_admitted(&rejected));
+        }
+    }
+
+    #[test]
+    fn workspace_init_is_a_read_only_sealed_bind_not_overlay_content() {
+        let config: serde_json::Value =
+            serde_json::from_slice(&workspace_oci_config().unwrap()).unwrap();
+        assert_eq!(
+            config["process"]["args"],
+            serde_json::json!([CONTAINER_INIT_PATH, "workspace-init"])
+        );
+        let mounts = config["mounts"].as_array().unwrap();
+        let runtime = mounts
+            .iter()
+            .find(|mount| mount["destination"] == CONTAINER_INIT_PATH)
+            .unwrap();
+        assert_eq!(runtime["source"], INIT_PATH);
+        assert_eq!(
+            runtime["options"],
+            serde_json::json!(["bind", "ro", "nosuid", "nodev"])
+        );
+    }
+
+    #[test]
+    fn child_output_collection_is_bounded_and_reaps_a_timeout() {
+        let mut child = Command::new("/usr/bin/printf")
+            .arg("bounded")
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut stdout = child.stdout.take().unwrap();
+        let (status, output) =
+            wait_for_bounded_child_output(&mut child, &mut stdout, 64, Duration::from_secs(1))
+                .unwrap()
+                .unwrap();
+        assert!(status.success());
+        assert_eq!(output, b"bounded");
+
+        let mut child = Command::new("/usr/bin/sleep")
+            .arg("30")
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut stdout = child.stdout.take().unwrap();
+        assert!(
+            wait_for_bounded_child_output(&mut child, &mut stdout, 64, Duration::from_millis(20),)
+                .unwrap()
+                .is_none()
+        );
+        assert!(child.try_wait().unwrap().is_some());
     }
 
     #[derive(Default)]

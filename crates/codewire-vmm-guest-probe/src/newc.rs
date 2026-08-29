@@ -16,7 +16,7 @@ const SYMLINK_MODE: u32 = 0o120777;
 const ARCHIVE_BLOCK: usize = 512;
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-const BASIC_BUSYBOX_APPLETS: &[&str] = &[
+pub(crate) const BASIC_BUSYBOX_APPLETS: &[&str] = &[
     "[",
     "awk",
     "basename",
@@ -86,28 +86,42 @@ pub fn canonical_newc(probe: &[u8]) -> Result<Vec<u8>, NewcError> {
 }
 
 /// Build the first product-shaped guest root. `/init` remains the trusted
-/// static Codewire PID 1/daemon binary. BusyBox supplies only the interactive
-/// shell and bounded basic utilities; it is not part of the host trust
-/// boundary and the VM still boots with no IP-capable device.
-pub fn canonical_guest_root_newc(probe: &[u8], busybox: &[u8]) -> Result<Vec<u8>, NewcError> {
+/// static Codewire PID 1/daemon binary. The sealed static runc binary is a
+/// trusted guest control component. BusyBox supplies only the interactive
+/// shell and bounded basic utilities, and the VM still boots with no
+/// IP-capable device.
+pub fn canonical_guest_root_newc(
+    probe: &[u8],
+    busybox: &[u8],
+    runc: &[u8],
+) -> Result<Vec<u8>, NewcError> {
     let probe_size = u32::try_from(probe.len()).map_err(|_| NewcError::ProbeTooLarge)?;
     let busybox_size = u32::try_from(busybox.len()).map_err(|_| NewcError::BusyboxTooLarge)?;
+    let runc_size = u32::try_from(runc.len()).map_err(|_| NewcError::RuncTooLarge)?;
     if probe.is_empty() {
         return Err(NewcError::EmptyProbe);
     }
     if busybox.is_empty() {
         return Err(NewcError::EmptyBusybox);
     }
+    if runc.is_empty() {
+        return Err(NewcError::EmptyRunc);
+    }
 
     let mut archive = Vec::with_capacity(
         probe
             .len()
             .saturating_add(busybox.len())
+            .saturating_add(runc.len())
             .saturating_add(BASIC_BUSYBOX_APPLETS.len() * 160)
             .saturating_add(2048),
     );
     let mut inode = 1_u32;
     append_named_entry(&mut archive, inode, DIRECTORY_MODE, "bin", &[], 0);
+    inode += 1;
+    append_named_entry(&mut archive, inode, DIRECTORY_MODE, "sbin", &[], 0);
+    inode += 1;
+    append_named_entry(&mut archive, inode, DIRECTORY_MODE, "run", &[], 0);
     inode += 1;
     append_named_entry(&mut archive, inode, INIT_MODE, "init", probe, probe_size);
     inode += 1;
@@ -119,6 +133,8 @@ pub fn canonical_guest_root_newc(probe: &[u8], busybox: &[u8]) -> Result<Vec<u8>
         busybox,
         busybox_size,
     );
+    inode += 1;
+    append_named_entry(&mut archive, inode, INIT_MODE, "sbin/runc", runc, runc_size);
     inode += 1;
     for applet in BASIC_BUSYBOX_APPLETS {
         append_named_entry(
@@ -160,50 +176,62 @@ pub fn write_canonical_initramfs(
 pub fn write_canonical_guest_root_initramfs(
     probe_path: impl AsRef<Path>,
     busybox_path: impl AsRef<Path>,
+    runc_path: impl AsRef<Path>,
     output_path: impl AsRef<Path>,
 ) -> Result<(), NewcError> {
     let probe_path = probe_path.as_ref();
     let busybox_path = busybox_path.as_ref();
+    let runc_path = runc_path.as_ref();
     let output_path = output_path.as_ref();
-    let probe = read_regular_input(probe_path, false)?;
-    let busybox = read_regular_input(busybox_path, true)?;
-    let archive = canonical_guest_root_newc(&probe, &busybox)?;
+    let probe = read_regular_input(probe_path, GuestRootInput::Probe)?;
+    let busybox = read_regular_input(busybox_path, GuestRootInput::Busybox)?;
+    let runc = read_regular_input(runc_path, GuestRootInput::Runc)?;
+    let archive = canonical_guest_root_newc(&probe, &busybox, &runc)?;
     write_atomic(output_path, &archive)
 }
 
-fn read_regular_input(path: &Path, busybox: bool) -> Result<Vec<u8>, NewcError> {
-    let metadata = fs::symlink_metadata(path).map_err(|source| {
-        if busybox {
-            NewcError::ReadBusybox {
-                path: path.to_path_buf(),
-                source,
-            }
-        } else {
-            NewcError::ReadProbe {
-                path: path.to_path_buf(),
-                source,
-            }
-        }
+#[derive(Clone, Copy)]
+enum GuestRootInput {
+    Probe,
+    Busybox,
+    Runc,
+}
+
+fn read_regular_input(path: &Path, input: GuestRootInput) -> Result<Vec<u8>, NewcError> {
+    let metadata = fs::symlink_metadata(path).map_err(|source| match input {
+        GuestRootInput::Probe => NewcError::ReadProbe {
+            path: path.to_path_buf(),
+            source,
+        },
+        GuestRootInput::Busybox => NewcError::ReadBusybox {
+            path: path.to_path_buf(),
+            source,
+        },
+        GuestRootInput::Runc => NewcError::ReadRunc {
+            path: path.to_path_buf(),
+            source,
+        },
     })?;
     if !metadata.file_type().is_file() {
-        return Err(if busybox {
-            NewcError::BusyboxNotRegular
-        } else {
-            NewcError::ProbeNotRegular
+        return Err(match input {
+            GuestRootInput::Probe => NewcError::ProbeNotRegular,
+            GuestRootInput::Busybox => NewcError::BusyboxNotRegular,
+            GuestRootInput::Runc => NewcError::RuncNotRegular,
         });
     }
-    fs::read(path).map_err(|source| {
-        if busybox {
-            NewcError::ReadBusybox {
-                path: path.to_path_buf(),
-                source,
-            }
-        } else {
-            NewcError::ReadProbe {
-                path: path.to_path_buf(),
-                source,
-            }
-        }
+    fs::read(path).map_err(|source| match input {
+        GuestRootInput::Probe => NewcError::ReadProbe {
+            path: path.to_path_buf(),
+            source,
+        },
+        GuestRootInput::Busybox => NewcError::ReadBusybox {
+            path: path.to_path_buf(),
+            source,
+        },
+        GuestRootInput::Runc => NewcError::ReadRunc {
+            path: path.to_path_buf(),
+            source,
+        },
     })
 }
 
@@ -343,14 +371,22 @@ pub enum NewcError {
     EmptyBusybox,
     #[error("initramfs BusyBox exceeds the newc size field")]
     BusyboxTooLarge,
+    #[error("initramfs runc is empty")]
+    EmptyRunc,
+    #[error("initramfs runc exceeds the newc size field")]
+    RuncTooLarge,
     #[error("initramfs probe is not a regular file")]
     ProbeNotRegular,
     #[error("initramfs BusyBox is not a regular file")]
     BusyboxNotRegular,
+    #[error("initramfs runc is not a regular file")]
+    RuncNotRegular,
     #[error("read initramfs probe {path}: {source}")]
     ReadProbe { path: PathBuf, source: io::Error },
     #[error("read initramfs BusyBox {path}: {source}")]
     ReadBusybox { path: PathBuf, source: io::Error },
+    #[error("read initramfs runc {path}: {source}")]
+    ReadRunc { path: PathBuf, source: io::Error },
     #[error("initramfs output path must be absolute")]
     OutputMustBeAbsolute,
     #[error("initramfs output path must have a parent")]
@@ -396,12 +432,15 @@ mod tests {
 
     #[test]
     fn product_archive_contains_real_shell_and_is_deterministic() {
-        let archive = canonical_guest_root_newc(b"probe-bytes", b"busybox-bytes").unwrap();
+        let archive =
+            canonical_guest_root_newc(b"probe-bytes", b"busybox-bytes", b"runc-bytes").unwrap();
         for entry in [
             b"bin\0".as_slice(),
+            b"sbin\0",
             b"init\0",
             b"bin/busybox\0",
             b"bin/sh\0",
+            b"sbin/runc\0",
         ] {
             assert!(archive.windows(entry.len()).any(|window| window == entry));
         }
@@ -410,10 +449,17 @@ mod tests {
                 .windows(b"busybox-bytes".len())
                 .any(|window| window == b"busybox-bytes")
         );
+        assert!(
+            archive
+                .windows(b"runc-bytes".len())
+                .any(|window| window == b"runc-bytes")
+        );
         assert_eq!(archive.len() % ARCHIVE_BLOCK, 0);
         assert_eq!(
             Sha256::digest(&archive),
-            Sha256::digest(canonical_guest_root_newc(b"probe-bytes", b"busybox-bytes").unwrap())
+            Sha256::digest(
+                canonical_guest_root_newc(b"probe-bytes", b"busybox-bytes", b"runc-bytes").unwrap()
+            )
         );
     }
 
@@ -459,6 +505,7 @@ mod tests {
         assert!(matches!(
             write_canonical_guest_root_initramfs(
                 &probe,
+                temporary.path(),
                 temporary.path(),
                 temporary.path().join("root.cpio")
             ),

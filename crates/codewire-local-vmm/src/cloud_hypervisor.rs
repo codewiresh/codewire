@@ -3,7 +3,7 @@ use std::fmt;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf};
 
-use codewire_vmm_guest_probe::{SEED_DISK_SERIAL, STATE_DISK_SERIAL};
+use codewire_vmm_guest_probe::{ROOT_DISK_SERIAL, SEED_DISK_SERIAL, STATE_DISK_SERIAL};
 
 use crate::artifact::{AdmittedArtifacts, ArtifactError, validate_parameter_path};
 
@@ -37,7 +37,7 @@ const ALLOWED_FLAG_COUNTS: &[(&str, usize)] = &[
     ("--cmdline", 1),
     ("--cpus", 1),
     ("--memory", 1),
-    ("--disk", 2),
+    ("--disk", 3),
     ("--vsock", 1),
     ("--serial", 1),
     ("--console", 1),
@@ -52,6 +52,7 @@ pub struct CloudHypervisorConfig {
     pub kernel: PathBuf,
     pub initramfs: PathBuf,
     pub state_disk: PathBuf,
+    pub root_disk: PathBuf,
     pub seed_disk: PathBuf,
     pub api_socket: PathBuf,
     pub event_monitor: PathBuf,
@@ -71,6 +72,7 @@ impl fmt::Debug for CloudHypervisorConfig {
             .field("kernel", &self.kernel)
             .field("initramfs", &self.initramfs)
             .field("state_disk", &self.state_disk)
+            .field("root_disk", &self.root_disk)
             .field("seed_disk", &self.seed_disk)
             .field("api_socket", &self.api_socket)
             .field("event_monitor", &self.event_monitor)
@@ -89,6 +91,7 @@ impl CloudHypervisorConfig {
     pub fn new(
         artifacts: &AdmittedArtifacts,
         state_disk: PathBuf,
+        root_disk: PathBuf,
         seed_disk: PathBuf,
         api_socket: PathBuf,
         event_monitor: PathBuf,
@@ -104,6 +107,7 @@ impl CloudHypervisorConfig {
             kernel: artifacts.kernel.path().to_owned(),
             initramfs: artifacts.initramfs.path().to_owned(),
             state_disk,
+            root_disk,
             seed_disk,
             api_socket,
             event_monitor,
@@ -194,6 +198,15 @@ impl CloudHypervisorConfig {
             &mut arguments,
             "--disk",
             format!(
+                "path={},readonly=off,direct=off,id=cw-root,serial={},image_type=raw,backing_files=off,sparse=on,lock_granularity=full",
+                display(&self.root_disk)?,
+                ROOT_DISK_SERIAL,
+            ),
+        );
+        push_option(
+            &mut arguments,
+            "--disk",
+            format!(
                 "path={},readonly=on,direct=off,id=cw-seed,serial={},image_type=raw,backing_files=off,sparse=off,lock_granularity=full",
                 display(&self.seed_disk)?,
                 SEED_DISK_SERIAL,
@@ -219,7 +232,7 @@ impl CloudHypervisorConfig {
         push_option(&mut arguments, "--rng", "src=/dev/urandom");
         push_option(&mut arguments, "--seccomp", "true");
         // Native v53 Landlock derives its allowlist from the already parsed VM
-        // configuration. Because this command admits only the two disks,
+        // configuration. Because this command admits only the three disks,
         // kernel/initramfs, bounded diagnostics, API, and dedicated vsock
         // parent, no explicit
         // `--landlock-rules` broadening is permitted. This is defense in depth;
@@ -234,12 +247,13 @@ impl CloudHypervisorConfig {
         Ok(command)
     }
 
-    fn paths(&self) -> [&Path; 10] {
+    fn paths(&self) -> [&Path; 11] {
         [
             &self.executable,
             &self.kernel,
             &self.initramfs,
             &self.state_disk,
+            &self.root_disk,
             &self.seed_disk,
             &self.api_socket,
             &self.event_monitor,
@@ -407,6 +421,7 @@ mod tests {
         CloudHypervisorConfig::new(
             &artifacts,
             "/state/disks/state.raw".into(),
+            "/state/generations/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/root.raw".into(),
             "/state/seed/seed.raw".into(),
             "/state/api/api.sock".into(),
             "/state/diagnostics/events.json".into(),
@@ -435,7 +450,7 @@ mod tests {
         for flag in FORBIDDEN_FLAGS {
             assert!(!args.contains(flag), "forbidden flag {flag}");
         }
-        assert_eq!(args.iter().filter(|value| **value == "--disk").count(), 2);
+        assert_eq!(args.iter().filter(|value| **value == "--disk").count(), 3);
         assert!(args.windows(2).any(|pair| pair == ["--seccomp", "true"]));
         assert!(args.windows(2).any(|pair| pair == ["--serial", "null"]));
         assert!(!args.contains(&"--log-file"));
@@ -445,6 +460,11 @@ mod tests {
         assert!(args.contains(&"size=16384M,shared=off,mergeable=off"));
         assert!(args.iter().any(|argument| {
             argument.contains("serial=CWSTATE1") && argument.contains("lock_granularity=full")
+        }));
+        assert!(args.iter().any(|argument| {
+            argument.contains("serial=CWROOT1")
+                && argument.contains("readonly=off")
+                && argument.contains("lock_granularity=full")
         }));
         assert!(args.iter().any(|argument| {
             argument.contains("serial=CWSEED1")

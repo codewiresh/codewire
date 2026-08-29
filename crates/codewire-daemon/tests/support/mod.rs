@@ -162,6 +162,7 @@ impl DaemonHarness {
                     workspace_root: workspace_root.clone(),
                     home_root: home_root.clone(),
                     auth_token: Some(auth_token.clone()),
+                    process_execution: codewire_daemon::execution::ProcessExecution::Native,
                 };
                 let (shutdown_tx, shutdown_rx) = oneshot::channel();
                 let server = tokio::spawn(async move {
@@ -194,6 +195,7 @@ impl DaemonHarness {
                     workspace_root: workspace_root.clone(),
                     home_root: home_root.clone(),
                     auth_token: Some(auth_token.clone()),
+                    process_execution: codewire_daemon::execution::ProcessExecution::Native,
                 };
                 let (shutdown_tx, shutdown_rx) = oneshot::channel();
                 let server = tokio::spawn(async move {
@@ -223,6 +225,7 @@ impl DaemonHarness {
                 workspace_root: workspace_root.clone(),
                 home_root: home_root.clone(),
                 auth_token: Some(auth_token.clone()),
+                process_execution: codewire_daemon::execution::ProcessExecution::Native,
             };
             let (shutdown_tx, shutdown_rx) = oneshot::channel();
             let server = match transport {

@@ -69,6 +69,7 @@
             workspace_root,
             home_root,
             auth_token: Some(token.to_string()),
+            process_execution: codewire_daemon::execution::ProcessExecution::Native,
         };
         let instance = config::LocalInstanceConfig {
             daemon_host_port: port,

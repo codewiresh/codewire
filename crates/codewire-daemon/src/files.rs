@@ -350,6 +350,7 @@ mod tests {
             workspace_root,
             home_root,
             auth_token: None,
+            process_execution: crate::execution::ProcessExecution::Native,
         }
     }
 

@@ -1,6 +1,8 @@
 use std::env;
 use std::path::{Path, PathBuf};
 
+use crate::execution::ProcessExecution;
+
 pub const SHIM_ADDR_ENV: &str = "CODEWIRE_WORKSPACE_SHIM_ADDR";
 pub const WORKSPACE_ROOT_ENV: &str = "CODEWIRE_WORKSPACE_ROOT";
 pub const HOME_ROOT_ENV: &str = "CODEWIRE_HOME_ROOT";
@@ -16,6 +18,7 @@ pub struct Config {
     pub workspace_root: PathBuf,
     pub home_root: PathBuf,
     pub auth_token: Option<String>,
+    pub process_execution: ProcessExecution,
 }
 
 impl Config {
@@ -25,6 +28,7 @@ impl Config {
             workspace_root: env_path(WORKSPACE_ROOT_ENV, DEFAULT_WORKSPACE_ROOT),
             home_root: env_path(HOME_ROOT_ENV, DEFAULT_HOME_ROOT),
             auth_token: env_value(DAEMON_AUTH_TOKEN_ENV),
+            process_execution: ProcessExecution::Native,
         }
     }
 

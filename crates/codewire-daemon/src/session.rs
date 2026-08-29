@@ -1,16 +1,16 @@
 use std::io::{Read, Write};
-use std::process::Stdio;
 use std::sync::mpsc as std_mpsc;
 
 use codewire_gateway_proto::daemon::v1;
-use portable_pty::{CommandBuilder, PtySize, native_pty_system};
+use portable_pty::{PtySize, native_pty_system};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{mpsc, oneshot};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Status, Streaming};
 
 use crate::config::Config;
-use crate::env::{build_process_env, default_shell};
+use crate::env::{build_process_env, default_shell_for};
+use crate::execution::{PreparedProcess, ProcessExecution};
 
 const BUFFER_SIZE: usize = 32 * 1024;
 
@@ -50,22 +50,32 @@ async fn run_exec_session(
     start: v1::ExecStartRequest,
     tx: mpsc::Sender<Result<v1::ExecMessage, Status>>,
 ) {
-    let command = command_or_default(start.command);
+    let command = command_or_default(start.command, &config);
     let working_dir = normalize_working_dir(&config, &start.working_dir);
     let env = build_process_env(&config, &start.env, "");
 
-    let mut cmd = tokio::process::Command::new(&command[0]);
-    cmd.args(&command[1..])
-        .current_dir(&working_dir)
-        .env_clear()
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
-    apply_env(&mut cmd, &env);
+    let mut prepared = match PreparedProcess::prepare(
+        &config.process_execution,
+        &command,
+        &working_dir,
+        &env,
+        false,
+        0,
+        0,
+    ) {
+        Ok(prepared) => prepared,
+        Err(err) => {
+            send_exec_startup_failure(&tx, err.to_string()).await;
+            return;
+        }
+    };
+    let mut cmd = prepared.tokio_command();
 
     let mut child = match cmd.spawn() {
-        Ok(child) => child,
+        Ok(child) => {
+            prepared.spawned();
+            child
+        }
         Err(err) => {
             send_exec_startup_failure(&tx, err.to_string()).await;
             return;
@@ -123,9 +133,11 @@ async fn run_pty_session(
     start: v1::PtyStartRequest,
     tx: mpsc::Sender<Result<v1::PtyMessage, Status>>,
 ) {
-    let command = command_or_default(start.command);
+    let command = command_or_default(start.command, &config);
     let working_dir = normalize_working_dir(&config, &start.working_dir);
-    if !std::path::Path::new(&working_dir).is_dir() {
+    if matches!(&config.process_execution, ProcessExecution::Native)
+        && !std::path::Path::new(&working_dir).is_dir()
+    {
         send_pty_startup_failure(
             &tx,
             format!("chdir {working_dir}: no such file or directory"),
@@ -145,18 +157,28 @@ async fn run_pty_session(
         }
     };
 
-    let mut builder = CommandBuilder::new(&command[0]);
-    builder.args(&command[1..]);
-    builder.cwd(&working_dir);
-    builder.env_clear();
-    for entry in env {
-        if let Some((key, value)) = entry.split_once('=') {
-            builder.env(key, value);
+    let mut prepared = match PreparedProcess::prepare(
+        &config.process_execution,
+        &command,
+        &working_dir,
+        &env,
+        true,
+        size.cols,
+        size.rows,
+    ) {
+        Ok(prepared) => prepared,
+        Err(err) => {
+            send_pty_startup_failure(&tx, err.to_string()).await;
+            return;
         }
-    }
+    };
+    let builder = prepared.pty_command();
 
     let child = match pair.slave.spawn_command(builder) {
-        Ok(child) => child,
+        Ok(child) => {
+            prepared.spawned();
+            child
+        }
         Err(err) => {
             send_pty_startup_failure(&tx, err.to_string()).await;
             return;
@@ -427,9 +449,9 @@ async fn send_pty_startup_failure(
         .await;
 }
 
-fn command_or_default(command: Vec<String>) -> Vec<String> {
+fn command_or_default(command: Vec<String>, config: &Config) -> Vec<String> {
     if command.is_empty() {
-        vec![default_shell()]
+        vec![default_shell_for(config)]
     } else {
         command
     }
@@ -440,14 +462,6 @@ fn normalize_working_dir(config: &Config, dir: &str) -> String {
         config.home_root.to_string_lossy().into_owned()
     } else {
         dir.into()
-    }
-}
-
-fn apply_env(cmd: &mut tokio::process::Command, env: &[String]) {
-    for entry in env {
-        if let Some((key, value)) = entry.split_once('=') {
-            cmd.env(key, value);
-        }
     }
 }
 

@@ -34,6 +34,7 @@ mod linux {
 
     use codewire_daemon::client::{SessionClient, SessionClientError, v1};
     use codewire_local_vmm::ch_api::VmInfo;
+    use codewire_local_vmm::generation::ensure_empty_root_generation;
     use codewire_local_vmm::linux::runner::ExitClass;
     use codewire_local_vmm::linux::state::{
         StateDiskIdentity, VmPhase, cleanup_trashed_vm, move_stopped_vm_to_trash,
@@ -42,6 +43,7 @@ mod linux {
         CloudHypervisorRunner, CreateVmRequest, LiveProcess, PreparedVm, ProcessIdentity,
         RecoveryError, RunnerConfig, RunningVm, VmPaths,
     };
+    use codewire_vmm_guest_probe::guest::CONTAINER_INIT_PATH;
     use serde_json::Value;
     use tonic::Code;
     use uuid::Uuid;
@@ -49,6 +51,9 @@ mod linux {
     type SmokeResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 
     const STATE_DISK_BYTES: u64 = 256 * 1024 * 1024;
+    const ROOT_DISK_BYTES: u64 = 1024 * 1024 * 1024;
+    const ROOT_GENERATION: &str =
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const DAEMON_READY_TIMEOUT: Duration = Duration::from_secs(15);
     const SESSION_TIMEOUT: Duration = Duration::from_secs(10);
     const VM_EXIT_TIMEOUT: Duration = Duration::from_secs(15);
@@ -289,6 +294,12 @@ mod linux {
         observation("host.vhost_vsock", preflight.vhost_vsock.display());
         observation("vmm.seccomp", "kill");
         observation("vmm.landlock", "native");
+        ensure_empty_root_generation(
+            &arguments.state_root,
+            arguments.vm_id,
+            ROOT_GENERATION,
+            ROOT_DISK_BYTES,
+        )?;
 
         // The concrete lifecycle calls are kept together so every error path
         // can be reconciled by the cleanup subcommand. No credential leaves a
@@ -339,6 +350,8 @@ mod linux {
         require_pty_identity(&first_client, arguments.vm_id, 1).await?;
         observation("guest.identity_verified", true);
         observation("guest.pty_verified", true);
+        require_stopped_session_process_reaped(&first_client).await?;
+        observation("guest.stopped_session_process_reaped", true);
         require_network_probe(&run_guest_command(&first_client, &["network-check"]).await?)?;
         observation("guest.no_network_verified", true);
         let nonce = format!("cw-smoke-{}", arguments.vm_id.simple());
@@ -375,17 +388,26 @@ mod linux {
         observation("vmm.landlock_disk_probe_http_status", denied.get());
         observation(
             "vmm.live_device_boundary",
-            "two-block-disks-plus-vsock-only",
+            "three-block-disks-plus-vsock-only",
         );
 
         let poweroff_session = launch_poweroff(&first_client).await?;
+        observation("vm.generation.1.poweroff_session", "admitted");
+        let first_exit = first.wait_for_exit(VM_EXIT_TIMEOUT).await?;
+        if !matches!(first_exit, ExitClass::GuestShutdown) {
+            observe_poweroff_session(&first_client, &poweroff_session).await;
+        }
         drop(first_client);
-        match first.wait_for_exit(VM_EXIT_TIMEOUT).await? {
-            ExitClass::GuestShutdown => {}
+        match first_exit {
+            ExitClass::GuestShutdown => {
+                observation("vm.generation.1.exit", "guest-shutdown");
+            }
             ExitClass::StillRunning => {
+                observation("vm.generation.1.exit", "timeout");
                 return Err(failure("guest-initiated poweroff did not stop the VMM"));
             }
             ExitClass::VmmFailure(_) => {
+                observation("vm.generation.1.exit", "vmm-failure");
                 return Err(failure(
                     "guest-initiated poweroff was classified as VMM failure",
                 ));
@@ -394,7 +416,6 @@ mod linux {
         drop(first);
         wait_for_identity_to_end(&first_process).await?;
         require_stale_identity_cannot_adopt_replacement(&first_process)?;
-        observation("vm.generation.1.exit", "guest-shutdown");
 
         let prepared_two = runner.prepare(request(2, arguments, resources)).await?;
         require_prepared_identity(&prepared_two, arguments.vm_id, 2)?;
@@ -532,6 +553,8 @@ mod linux {
             vsock_cid: cid_for(arguments.vm_id),
             daemon_vsock_port: 7_777,
             state_disk_bytes: STATE_DISK_BYTES,
+            root_generation: ROOT_GENERATION.to_owned(),
+            root_disk_bytes: ROOT_DISK_BYTES,
             vcpus: resources.vcpus,
             memory_mib: resources.memory_mib,
         }
@@ -801,6 +824,8 @@ mod linux {
             &paths.api_dir,
             &paths.vsock_dir,
             &paths.disks_dir,
+            &paths.generations_dir,
+            &paths.generations_dir.join(ROOT_GENERATION),
             &paths.seed_dir,
             &paths.diagnostics_dir,
         ] {
@@ -829,6 +854,7 @@ mod linux {
         }
         for file in [
             &paths.state_disk,
+            &root_disk_path(paths),
             &paths.lock_file,
             &paths.state_file,
             &paths.serial_log,
@@ -966,7 +992,7 @@ mod linux {
         vm_id: Uuid,
         generation: u64,
     ) -> SmokeResult<()> {
-        let command = vec!["/init".to_owned(), "identity".to_owned()];
+        let command = vec![CONTAINER_INIT_PATH.to_owned(), "identity".to_owned()];
         let admitted = client
             .launch(v1::LaunchSessionRequest {
                 command: command.clone(),
@@ -1002,8 +1028,137 @@ mod linux {
         output.replace("\r\n", "\n")
     }
 
+    async fn require_stopped_session_process_reaped(client: &SessionClient) -> SmokeResult<()> {
+        let command = vec![
+            "/bin/sh".to_owned(),
+            "-c".to_owned(),
+            "printf 'CWSTOPPID1 %s\\n' \"$$\"; exec /bin/sleep 300".to_owned(),
+        ];
+        let admitted = client
+            .launch(v1::LaunchSessionRequest {
+                command: command.clone(),
+                working_dir: "/workspace".to_owned(),
+                env: Vec::new(),
+                pty: false,
+                term: String::new(),
+                width: 0,
+                height: 0,
+            })
+            .await?;
+        let line =
+            wait_for_session_stdout_line(client, &admitted.session_id, "CWSTOPPID1 ").await?;
+        let pid = line
+            .strip_prefix("CWSTOPPID1 ")
+            .and_then(|value| value.parse::<u32>().ok())
+            .filter(|pid| *pid > 1)
+            .ok_or_else(|| failure("stoppable OCI session reported an invalid PID"))?;
+        if !query_session_process(client, pid).await? {
+            return Err(failure(
+                "OCI session process exited before an explicit stop",
+            ));
+        }
+
+        let stopped = client.stop(&admitted.session_id).await?;
+        let state = v1::SessionLifecycleState::try_from(stopped.state)
+            .unwrap_or(v1::SessionLifecycleState::Unspecified);
+        if !matches!(
+            state,
+            v1::SessionLifecycleState::Stopped
+                | v1::SessionLifecycleState::Exited
+                | v1::SessionLifecycleState::Failed
+        ) {
+            return Err(failure("stopped OCI session did not become terminal"));
+        }
+
+        if query_session_process(client, pid).await? {
+            return Err(failure("OCI session process survived explicit stop"));
+        }
+        Ok(())
+    }
+
+    async fn query_session_process(client: &SessionClient, pid: u32) -> SmokeResult<bool> {
+        let query = format!(
+            "if test -r /proc/{pid}/cmdline && tr '\\000' ' ' < /proc/{pid}/cmdline | grep -q '^/bin/sleep 300 '; then printf 'CWPROCESS1 alive\\n'; else printf 'CWPROCESS1 gone\\n'; fi"
+        );
+        let record = client
+            .launch(v1::LaunchSessionRequest {
+                command: vec!["/bin/sh".to_owned(), "-c".to_owned(), query],
+                working_dir: "/workspace".to_owned(),
+                env: Vec::new(),
+                pty: false,
+                term: String::new(),
+                width: 0,
+                height: 0,
+            })
+            .await?;
+        let record = wait_for_terminal_session(client, &record.session_id).await?;
+        if record.state != v1::SessionLifecycleState::Exited as i32 || record.exit_code != Some(0) {
+            return Err(failure("stopped-process query did not exit successfully"));
+        }
+        match read_session_stdout(client, &record.session_id)
+            .await?
+            .as_str()
+        {
+            "CWPROCESS1 alive\n" => Ok(true),
+            "CWPROCESS1 gone\n" => Ok(false),
+            _ => Err(failure("stopped-process query returned an invalid marker")),
+        }
+    }
+
+    async fn wait_for_session_stdout_line(
+        client: &SessionClient,
+        session_id: &str,
+        prefix: &str,
+    ) -> SmokeResult<String> {
+        let deadline = Instant::now() + SESSION_TIMEOUT;
+        loop {
+            let response = client
+                .read_output(v1::ReadSessionOutputRequest {
+                    session_id: session_id.to_owned(),
+                    offset: 0,
+                    limit: MAX_SESSION_OUTPUT as u64,
+                })
+                .await?;
+            let mut stdout = Vec::new();
+            for chunk in response.chunks {
+                if v1::SessionOutputStream::try_from(chunk.stream)
+                    == Ok(v1::SessionOutputStream::Stdout)
+                {
+                    stdout.extend_from_slice(&chunk.data);
+                }
+                if stdout.len() > MAX_SESSION_OUTPUT {
+                    return Err(failure("running session output exceeded its bound"));
+                }
+            }
+            let stdout = String::from_utf8(stdout)
+                .map_err(|_| failure("running session output is not UTF-8"))?;
+            if let Some(line) = stdout.lines().find(|line| line.starts_with(prefix)) {
+                return Ok(line.to_owned());
+            }
+            let state = client.get(session_id).await?;
+            if v1::SessionLifecycleState::try_from(state.state)
+                .ok()
+                .is_some_and(|state| {
+                    matches!(
+                        state,
+                        v1::SessionLifecycleState::Stopped
+                            | v1::SessionLifecycleState::Exited
+                            | v1::SessionLifecycleState::Failed
+                            | v1::SessionLifecycleState::Interrupted
+                    )
+                })
+            {
+                return Err(failure("OCI session exited before reporting its PID"));
+            }
+            if Instant::now() >= deadline {
+                return Err(failure("OCI session PID report timed out"));
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
     async fn run_guest_command(client: &SessionClient, arguments: &[&str]) -> SmokeResult<String> {
-        let mut command = vec!["/init".to_owned()];
+        let mut command = vec![CONTAINER_INIT_PATH.to_owned()];
         command.extend(arguments.iter().map(|argument| (*argument).to_owned()));
         let record = client.launch(launch_request(command.clone())).await?;
         let record = wait_for_terminal_session(client, &record.session_id).await?;
@@ -1066,12 +1221,48 @@ mod linux {
     }
 
     async fn launch_poweroff(client: &SessionClient) -> SmokeResult<String> {
-        let command = vec!["/init".to_owned(), "poweroff".to_owned()];
+        let command = vec![CONTAINER_INIT_PATH.to_owned(), "poweroff".to_owned()];
         let record = client.launch(launch_request(command.clone())).await?;
         if record.command != command || record.session_id.is_empty() {
             return Err(failure("guest poweroff session was not durably admitted"));
         }
         Ok(record.session_id)
+    }
+
+    async fn observe_poweroff_session(client: &SessionClient, session_id: &str) {
+        let state = match client.get(session_id).await {
+            Ok(record) => match v1::SessionLifecycleState::try_from(record.state) {
+                Ok(v1::SessionLifecycleState::Starting) => "starting",
+                Ok(v1::SessionLifecycleState::Running) => "running",
+                Ok(v1::SessionLifecycleState::Stopping) => "stopping",
+                Ok(v1::SessionLifecycleState::Stopped) => "stopped",
+                Ok(v1::SessionLifecycleState::Exited) => "exited",
+                Ok(v1::SessionLifecycleState::Failed) => "failed",
+                Ok(v1::SessionLifecycleState::Interrupted) => "interrupted",
+                Ok(v1::SessionLifecycleState::Unspecified) | Err(_) => "unknown",
+            },
+            Err(_) => "unavailable",
+        };
+        observation("vm.generation.1.poweroff_session_state", state);
+        let accepted = client
+            .read_output(v1::ReadSessionOutputRequest {
+                session_id: session_id.to_owned(),
+                offset: 0,
+                limit: MAX_SESSION_OUTPUT as u64,
+            })
+            .await
+            .ok()
+            .is_some_and(|response| {
+                response.chunks.iter().any(|chunk| {
+                    v1::SessionOutputStream::try_from(chunk.stream)
+                        == Ok(v1::SessionOutputStream::Stdout)
+                        && chunk
+                            .data
+                            .windows(b"CWPOWEROFF1 accepted".len())
+                            .any(|window| window == b"CWPOWEROFF1 accepted")
+                })
+            });
+        observation("vm.generation.1.poweroff_acceptance_observed", accepted);
     }
 
     async fn wait_for_terminal_session(
@@ -1161,7 +1352,7 @@ mod linux {
             .iter()
             .find(|record| record.session_id == session_id)
             .ok_or_else(|| failure("durable poweroff session disappeared after restart"))?;
-        if record.command != ["/init", "poweroff"] {
+        if record.command != [CONTAINER_INIT_PATH, "poweroff"] {
             return Err(failure("durable poweroff session command changed"));
         }
         let output = read_session_stdout(client, session_id).await?;
@@ -1281,7 +1472,7 @@ mod linux {
             .get("disks")
             .and_then(Value::as_array)
             .ok_or_else(|| failure("Cloud Hypervisor vm.info omitted its disks"))?;
-        if disks.len() != 2 {
+        if disks.len() != 3 {
             return Err(failure(
                 "Cloud Hypervisor live configuration has unexpected disks",
             ));
@@ -1292,8 +1483,10 @@ mod linux {
             ));
         }
         let state_path = paths.state_disk.to_string_lossy();
+        let root_path = root_disk_path(paths).to_string_lossy().into_owned();
         let seed_path = paths.seed_disk.to_string_lossy();
         let mut saw_state = false;
+        let mut saw_root = false;
         let mut saw_seed = false;
         for disk in disks {
             let disk = disk
@@ -1317,6 +1510,11 @@ mod linux {
                     if path == state_path =>
                 {
                     saw_state = true;
+                }
+                (Some(path), Some("cw-root"), Some("CWROOT1"), Some(false), Some(true))
+                    if path == root_path =>
+                {
+                    saw_root = true;
                 }
                 (Some(path), Some("cw-seed"), Some("CWSEED1"), Some(true), Some(false))
                     if path == seed_path =>
@@ -1342,7 +1540,7 @@ mod linux {
                 ));
             }
         }
-        if !saw_state || !saw_seed {
+        if !saw_state || !saw_root || !saw_seed {
             return Err(failure(
                 "Cloud Hypervisor live disks lack required serial identities",
             ));
@@ -1362,6 +1560,10 @@ mod linux {
             config: Value::Object(config.clone()),
             device_tree: device_tree.clone(),
         })
+    }
+
+    fn root_disk_path(paths: &VmPaths) -> PathBuf {
+        paths.generations_dir.join(ROOT_GENERATION).join("root.raw")
     }
 
     fn require_unchanged_live_boundary(
@@ -1732,12 +1934,14 @@ mod linux {
             let api_dir = vm_dir.join("api");
             let vsock_dir = vm_dir.join("vsock");
             let disks_dir = vm_dir.join("disks");
+            let generations_dir = vm_dir.join("generations");
             let seed_dir = vm_dir.join("seed");
             let diagnostics_dir = vm_dir.join("diagnostics");
             VmPaths {
                 api_socket: api_dir.join("api.sock"),
                 vsock_socket: vsock_dir.join("vsock.sock"),
                 state_disk: disks_dir.join("state.raw"),
+                generations_dir,
                 seed_disk: seed_dir.join("seed.raw"),
                 serial_log: diagnostics_dir.join("serial.log"),
                 vmm_log: diagnostics_dir.join("vmm.log"),
@@ -1784,6 +1988,18 @@ mod linux {
                         "path": paths.state_disk,
                         "id": "cw-state",
                         "serial": "CWSTATE1",
+                        "readonly": false,
+                        "direct": false,
+                        "vhost_user": false,
+                        "backing_files": false,
+                        "sparse": true,
+                        "image_type": "Raw",
+                        "lock_granularity": "Full"
+                    },
+                    {
+                        "path": root_disk_path(paths),
+                        "id": "cw-root",
+                        "serial": "CWROOT1",
                         "readonly": false,
                         "direct": false,
                         "vhost_user": false,

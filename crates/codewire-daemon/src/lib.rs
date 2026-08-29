@@ -2,6 +2,7 @@ pub mod client;
 pub mod config;
 mod durable_session;
 pub mod env;
+pub mod execution;
 pub mod files;
 pub mod server;
 pub mod service;

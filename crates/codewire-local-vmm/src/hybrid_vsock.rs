@@ -282,6 +282,7 @@ mod tests {
                     workspace_root: workspace,
                     home_root: home,
                     auth_token: Some("daemon-auth-token-for-hybrid-test".into()),
+                    process_execution: codewire_daemon::execution::ProcessExecution::Native,
                 },
                 tokio_stream::wrappers::ReceiverStream::new(incoming_rx),
                 async {
@@ -365,6 +366,7 @@ mod tests {
                     workspace_root: workspace,
                     home_root: home,
                     auth_token: Some("correct-daemon-token".into()),
+                    process_execution: codewire_daemon::execution::ProcessExecution::Native,
                 },
                 tokio_stream::once(Ok::<_, io::Error>(stream)),
                 async {

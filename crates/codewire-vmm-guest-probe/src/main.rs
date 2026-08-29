@@ -4,10 +4,12 @@ use std::ffi::OsString;
 use std::path::Path;
 
 fn main() {
+    #[cfg(target_os = "linux")]
+    let vm_init_entry = std::env::args_os().nth(1).is_none();
     if let Err(error) = entrypoint() {
         eprintln!("codewire guest probe failed: {error:#}");
         #[cfg(target_os = "linux")]
-        if unsafe { libc::getpid() } == 1 {
+        if vm_init_entry && unsafe { libc::getpid() } == 1 {
             codewire_vmm_guest_probe::guest::halt_after_init_failure();
         }
         std::process::exit(1);
@@ -70,6 +72,27 @@ fn entrypoint() -> anyhow::Result<()> {
             ensure!(arguments.next().is_none(), "poweroff accepts no arguments");
             guest::run_poweroff()
         }
+        Some("runc-exec") => {
+            let container_id = arguments
+                .next()
+                .ok_or_else(|| anyhow::anyhow!("runc-exec requires a container ID"))?;
+            let process_spec = arguments
+                .next()
+                .ok_or_else(|| anyhow::anyhow!("runc-exec requires a process spec"))?;
+            ensure!(
+                arguments.next().is_none(),
+                "runc-exec accepts exactly two arguments"
+            );
+            guest::run_runc_exec(&container_id, Path::new(&process_spec))
+        }
+        Some("workspace-init") => {
+            ensure!(
+                arguments.next().is_none(),
+                "workspace-init accepts no arguments"
+            );
+            guest::run_workspace_init()
+        }
+        Some("workspace-exec") => guest::run_workspace_exec(arguments.collect()),
         Some("newc") => build_newc(arguments),
         Some("newc-root") => build_guest_root_newc(arguments),
         Some(_) => {
@@ -89,16 +112,20 @@ fn build_guest_root_newc(mut arguments: impl Iterator<Item = OsString>) -> anyho
     let busybox = arguments
         .next()
         .ok_or_else(|| anyhow::anyhow!("newc-root requires a BusyBox path"))?;
+    let runc = arguments
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("newc-root requires a runc path"))?;
     let output = arguments
         .next()
         .ok_or_else(|| anyhow::anyhow!("newc-root requires an output path"))?;
     ensure!(
         arguments.next().is_none(),
-        "newc-root accepts exactly three paths"
+        "newc-root accepts exactly four paths"
     );
     for (label, value) in [
         ("probe", &probe),
         ("BusyBox", &busybox),
+        ("runc", &runc),
         ("output", &output),
     ] {
         ensure!(
@@ -106,7 +133,7 @@ fn build_guest_root_newc(mut arguments: impl Iterator<Item = OsString>) -> anyho
             "newc-root {label} path must be absolute"
         );
     }
-    codewire_vmm_guest_probe::write_canonical_guest_root_initramfs(probe, busybox, output)?;
+    codewire_vmm_guest_probe::write_canonical_guest_root_initramfs(probe, busybox, runc, output)?;
     Ok(())
 }
 

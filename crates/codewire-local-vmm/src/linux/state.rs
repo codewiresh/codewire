@@ -10,6 +10,9 @@ use super::process::ProcessIdentity;
 
 pub const PERSISTED_STATE_SCHEMA_VERSION: u32 = 1;
 pub const MINIMUM_STATE_DISK_BYTES: u64 = 256 * 1024 * 1024;
+pub const MINIMUM_ROOT_DISK_BYTES: u64 = 256 * 1024 * 1024;
+pub const DEFAULT_ROOT_DISK_BYTES: u64 = 1024 * 1024 * 1024;
+pub(crate) const MAXIMUM_ROOT_GENERATIONS: usize = 64;
 const EXT4_SUPERBLOCK_OFFSET: u64 = 1024;
 const EXT4_SUPERBLOCK_BYTES: usize = 0x78;
 const EXT4_MAGIC_OFFSET: usize = 0x38;
@@ -24,6 +27,7 @@ pub struct VmPaths {
     pub vsock_socket: PathBuf,
     pub disks_dir: PathBuf,
     pub state_disk: PathBuf,
+    pub generations_dir: PathBuf,
     pub seed_dir: PathBuf,
     pub seed_disk: PathBuf,
     pub diagnostics_dir: PathBuf,
@@ -44,6 +48,7 @@ impl VmPaths {
         let api_dir = vm_root.ensure_dir(Path::new("api"), 0o700)?;
         let vsock_dir = vm_root.ensure_dir(Path::new("vsock"), 0o700)?;
         let disks_dir = vm_root.ensure_dir(Path::new("disks"), 0o700)?;
+        let generations_dir = vm_root.ensure_dir(Path::new("generations"), 0o700)?;
         let seed_dir = vm_root.ensure_dir(Path::new("seed"), 0o700)?;
         let diagnostics_dir = vm_root.ensure_dir(Path::new("diagnostics"), 0o700)?;
         Ok(Self {
@@ -60,6 +65,7 @@ impl VmPaths {
             api_dir,
             vsock_dir,
             disks_dir,
+            generations_dir,
             seed_dir,
             diagnostics_dir,
         })
@@ -108,6 +114,35 @@ impl VmPaths {
         }
         Ok(())
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RootGenerationPaths {
+    pub generation: String,
+    pub generation_dir: PathBuf,
+    pub root_disk: PathBuf,
+}
+
+impl RootGenerationPaths {
+    pub fn create(paths: &VmPaths, generation: &str) -> Result<Self, StateError> {
+        if !valid_root_generation(generation) {
+            return Err(StateError::InvalidRootGeneration);
+        }
+        let generations = PrivateRoot::open(&paths.generations_dir)?;
+        let generation_dir = generations.ensure_dir(Path::new(generation), 0o700)?;
+        Ok(Self {
+            generation: generation.to_owned(),
+            root_disk: generation_dir.join("root.raw"),
+            generation_dir,
+        })
+    }
+}
+
+pub fn valid_root_generation(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 pub struct VmLock(File);
@@ -176,6 +211,10 @@ pub struct PersistedVmState {
     pub phase: VmPhase,
     pub process: ProcessIdentity,
     pub state_disk: StateDiskIdentity,
+    #[serde(default)]
+    pub root_generation: Option<String>,
+    #[serde(default)]
+    pub root_disk: Option<StateDiskIdentity>,
     pub api_socket: Option<SocketIdentity>,
     pub vsock_socket: Option<SocketIdentity>,
 }
@@ -223,6 +262,13 @@ impl PersistedVmState {
             (self.phase, &self.api_socket, &self.vsock_socket),
             (VmPhase::Starting, None, None) | (VmPhase::Running, Some(_), Some(_))
         );
+        let valid_root = match (&self.root_generation, &self.root_disk) {
+            (None, None) => true,
+            (Some(generation), Some(disk)) => {
+                valid_root_generation(generation) && !disk.filesystem_uuid.is_nil()
+            }
+            _ => false,
+        };
         if self.schema_version != PERSISTED_STATE_SCHEMA_VERSION
             || self.vm_id.is_nil()
             || self.generation == 0
@@ -231,6 +277,7 @@ impl PersistedVmState {
             || self.daemon_vsock_port == 0
             || self.daemon_vsock_port == u32::MAX
             || self.state_disk.filesystem_uuid.is_nil()
+            || !valid_root
             || !valid_phase
         {
             return Err(StateError::InvalidPersistedState);
@@ -367,6 +414,15 @@ pub fn cleanup_trashed_vm(
         }
         vm.remove_empty_private_directory(Path::new("diagnostics"))?;
     }
+    if let Some(generations) = optional_private_directory(&vm, Path::new("generations"))? {
+        for name in admitted_generation_names(&generations)? {
+            let generation = generations.open_private_directory(Path::new(&name), 0o700)?;
+            generation.remove_private_regular(Path::new("root.raw"), 0o600)?;
+            drop(generation);
+            generations.remove_empty_private_directory(Path::new(&name))?;
+        }
+        vm.remove_empty_private_directory(Path::new("generations"))?;
+    }
     vm.remove_private_regular(Path::new("state.json"), 0o600)?;
     vm.remove_private_regular(Path::new("vm.lock"), 0o600)?;
     drop(vm);
@@ -398,6 +454,7 @@ pub(crate) fn validate_owned_vm_tree(vm: &PrivateRoot) -> Result<(), StateError>
             "disks",
             "seed",
             "diagnostics",
+            "generations",
             "vm.lock",
             "state.json",
         ],
@@ -448,7 +505,44 @@ pub(crate) fn validate_owned_vm_tree(vm: &PrivateRoot) -> Result<(), StateError>
             Err(error) => return Err(error.into()),
         }
     }
+    if let Some(generations) = optional_private_directory(vm, Path::new("generations"))? {
+        for name in admitted_generation_names(&generations)? {
+            let generation = generations.open_private_directory(Path::new(&name), 0o700)?;
+            ensure_only_entries(generation.path(), &["root.raw"])?;
+            match generation.open_regular(Path::new("root.raw"), false, None, false, Some(0o600)) {
+                Ok(_) => {}
+                Err(error) if path_error_is_not_found(&error) => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+    }
     Ok(())
+}
+
+pub(crate) fn admitted_generation_names(root: &PrivateRoot) -> Result<Vec<String>, StateError> {
+    let mut names = Vec::new();
+    for entry in fs::read_dir(root.path()).map_err(|source| StateError::Io {
+        path: root.path().to_owned(),
+        source,
+    })? {
+        let entry = entry.map_err(|source| StateError::Io {
+            path: root.path().to_owned(),
+            source,
+        })?;
+        let name = entry
+            .file_name()
+            .into_string()
+            .map_err(|_| StateError::UnexpectedOwnedObject(entry.path()))?;
+        if !valid_root_generation(&name) {
+            return Err(StateError::UnexpectedOwnedObject(entry.path()));
+        }
+        names.push(name);
+        if names.len() > MAXIMUM_ROOT_GENERATIONS {
+            return Err(StateError::UnexpectedOwnedObject(root.path().to_owned()));
+        }
+    }
+    names.sort();
+    Ok(names)
 }
 
 fn ensure_only_entries(path: &Path, allowed: &[&str]) -> Result<(), StateError> {
@@ -513,6 +607,8 @@ pub enum StateError {
     UnsafeExistingEndpoint(PathBuf),
     #[error("invalid state disk path: {0}")]
     InvalidStateDisk(PathBuf),
+    #[error("root generation identity must be a lowercase SHA-256 digest")]
+    InvalidRootGeneration,
     #[error("invalid state disk size {0}")]
     InvalidDiskSize(u64),
     #[error("state disk is not a valid ext4 filesystem: {0}")]
@@ -621,6 +717,8 @@ mod tests {
                 },
                 filesystem_uuid: Uuid::new_v4(),
             },
+            root_generation: None,
+            root_disk: None,
             api_socket: None,
             vsock_socket: None,
         }
@@ -731,6 +829,40 @@ mod tests {
     }
 
     #[test]
+    fn persisted_root_generation_requires_an_exact_identity_pair() {
+        let mut state = persisted(VmPhase::Starting);
+        let root_disk = state.state_disk.clone();
+
+        state.root_generation = Some("a".repeat(64));
+        assert!(matches!(
+            state.validate(),
+            Err(StateError::InvalidPersistedState)
+        ));
+
+        state.root_generation = None;
+        state.root_disk = Some(root_disk.clone());
+        assert!(matches!(
+            state.validate(),
+            Err(StateError::InvalidPersistedState)
+        ));
+
+        state.root_generation = Some("not-a-generation".to_owned());
+        assert!(matches!(
+            state.validate(),
+            Err(StateError::InvalidPersistedState)
+        ));
+
+        state.root_generation = Some("a".repeat(64));
+        assert!(state.validate().is_ok());
+
+        state.root_disk.as_mut().unwrap().filesystem_uuid = Uuid::nil();
+        assert!(matches!(
+            state.validate(),
+            Err(StateError::InvalidPersistedState)
+        ));
+    }
+
+    #[test]
     fn stopped_vm_tree_moves_to_operation_trash_and_cleans_known_layout() {
         let (_parent, root) = private_root();
         let vm_id = Uuid::new_v4();
@@ -748,6 +880,23 @@ mod tests {
         cleanup_trashed_vm(root.path(), vm_id, operation_id).unwrap();
         assert!(!trash.exists());
         cleanup_trashed_vm(root.path(), vm_id, operation_id).unwrap();
+    }
+
+    #[test]
+    fn trash_cleanup_removes_all_admitted_root_generations() {
+        let (_parent, root) = private_root();
+        let vm_id = Uuid::new_v4();
+        let operation_id = Uuid::new_v4();
+        let paths = VmPaths::create(&root, vm_id).unwrap();
+        for generation in ["a".repeat(64), "b".repeat(64)] {
+            let generation = RootGenerationPaths::create(&paths, &generation).unwrap();
+            write_minimal_ext4(&generation.root_disk, Uuid::new_v4());
+        }
+
+        let trash = move_stopped_vm_to_trash(root.path(), vm_id, operation_id).unwrap();
+        assert!(trash.join("generations").is_dir());
+        cleanup_trashed_vm(root.path(), vm_id, operation_id).unwrap();
+        assert!(!trash.exists());
     }
 
     #[test]
@@ -769,6 +918,32 @@ mod tests {
             Err(StateError::UnexpectedOwnedObject(path)) if path == trash.join("unknown")
         ));
         assert!(trash.join("unknown").is_file());
+        assert!(trash.join("api").is_dir());
+    }
+
+    #[test]
+    fn trash_cleanup_refuses_unknown_generation_without_partial_removal() {
+        let (_parent, root) = private_root();
+        let vm_id = Uuid::new_v4();
+        let operation_id = Uuid::new_v4();
+        let paths = VmPaths::create(&root, vm_id).unwrap();
+        let admitted = RootGenerationPaths::create(&paths, &"a".repeat(64)).unwrap();
+        write_minimal_ext4(&admitted.root_disk, Uuid::new_v4());
+        let unknown = paths.generations_dir.join("not-a-generation");
+        fs::create_dir(&unknown).unwrap();
+        fs::set_permissions(&unknown, fs::Permissions::from_mode(0o700)).unwrap();
+
+        let trash = move_stopped_vm_to_trash(root.path(), vm_id, operation_id).unwrap();
+        let admitted_root = trash
+            .join("generations")
+            .join("a".repeat(64))
+            .join("root.raw");
+        assert!(matches!(
+            cleanup_trashed_vm(root.path(), vm_id, operation_id),
+            Err(StateError::UnexpectedOwnedObject(path))
+                if path == trash.join("generations").join("not-a-generation")
+        ));
+        assert!(admitted_root.is_file());
         assert!(trash.join("api").is_dir());
     }
 

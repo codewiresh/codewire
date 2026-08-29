@@ -13,6 +13,8 @@ pub mod ch_api;
 pub mod cloud_hypervisor;
 pub mod control;
 #[cfg(target_os = "linux")]
+pub mod generation;
+#[cfg(target_os = "linux")]
 pub mod hybrid_vsock;
 #[cfg(target_os = "linux")]
 mod lifecycle;

@@ -8,14 +8,9 @@ const DEFAULT_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/s
 
 pub fn build_process_env(config: &Config, extra: &[String], term: &str) -> Vec<String> {
     let persisted = load_persisted_environment(config);
-    build_process_env_from(
-        config,
-        persisted,
-        extra,
-        term,
-        std::env::vars(),
-        &default_shell(),
-    )
+    let inherited = config.process_execution.base_environment(std::env::vars());
+    let fallback_shell = default_shell_for(config);
+    build_process_env_from(config, persisted, extra, term, inherited, &fallback_shell)
 }
 
 fn build_process_env_from(
@@ -114,6 +109,10 @@ pub fn default_shell() -> String {
     "/bin/sh".into()
 }
 
+pub fn default_shell_for(config: &Config) -> String {
+    config.process_execution.default_shell(default_shell)
+}
+
 fn is_executable(path: &str) -> bool {
     #[cfg(unix)]
     {
@@ -147,6 +146,7 @@ mod tests {
             workspace_root: PathBuf::from("/workspace"),
             home_root,
             auth_token: None,
+            process_execution: crate::execution::ProcessExecution::Native,
         }
     }
 

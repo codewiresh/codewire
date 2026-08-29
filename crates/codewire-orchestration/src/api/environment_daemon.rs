@@ -973,6 +973,7 @@ mod tests {
                 workspace_root,
                 home_root,
                 auth_token: Some(TEST_DAEMON_TOKEN.into()),
+                process_execution: codewire_daemon::execution::ProcessExecution::Native,
             };
             let (shutdown_tx, shutdown_rx) = oneshot::channel();
             let task = tokio::spawn(async move {

@@ -5,7 +5,9 @@ use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
-use codewire_vmm_guest_probe::{canonical_guest_root_newc, canonical_newc};
+use codewire_vmm_guest_probe::canonical_guest_root_newc;
+#[cfg(test)]
+use codewire_vmm_guest_probe::canonical_newc;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncReadExt;
@@ -483,16 +485,16 @@ fn validate_initramfs(
     if !valid_elf_header(init, architecture) {
         return Err(ArtifactError::InvalidInitramfs(path.to_owned()));
     }
-    let legacy_canonical = canonical_newc(init)
-        .ok()
-        .is_some_and(|canonical| canonical == bytes);
     let product_canonical = find_newc_entry(&bytes, b"bin/busybox").is_some_and(|busybox| {
-        valid_static_elf_header(busybox, architecture)
-            && canonical_guest_root_newc(init, busybox)
-                .ok()
-                .is_some_and(|canonical| canonical == bytes)
+        find_newc_entry(&bytes, b"sbin/runc").is_some_and(|runc| {
+            valid_static_elf_header(busybox, architecture)
+                && valid_static_elf_header(runc, architecture)
+                && canonical_guest_root_newc(init, busybox, runc)
+                    .ok()
+                    .is_some_and(|canonical| canonical == bytes)
+        })
     });
-    if !legacy_canonical && !product_canonical {
+    if !product_canonical {
         return Err(ArtifactError::InvalidInitramfs(path.to_owned()));
     }
     Ok(())
@@ -884,7 +886,26 @@ mod tests {
     }
 
     #[test]
-    fn canonical_product_guest_root_requires_static_busybox() {
+    fn probe_only_archive_is_not_admitted_as_a_product_guest_root() {
+        let architecture = ArtifactArchitecture::host().unwrap();
+        let mut init = vec![0_u8; 64];
+        init[..4].copy_from_slice(b"\x7fELF");
+        init[4] = 2;
+        init[5] = 1;
+        init[16..18].copy_from_slice(&2_u16.to_le_bytes());
+        init[18..20].copy_from_slice(&architecture.elf_machine().to_le_bytes());
+        let staging = tempfile::tempdir().unwrap();
+        let path = staging.path().join("probe-only.cpio");
+        std::fs::write(&path, canonical_newc(&init).unwrap()).unwrap();
+
+        assert!(matches!(
+            validate_initramfs(&mut File::open(&path).unwrap(), &path, architecture),
+            Err(ArtifactError::InvalidInitramfs(rejected)) if rejected == path
+        ));
+    }
+
+    #[test]
+    fn canonical_product_guest_root_requires_static_busybox_and_runc() {
         let architecture = ArtifactArchitecture::host().unwrap();
         let mut init = vec![0_u8; 64];
         init[..4].copy_from_slice(b"\x7fELF");
@@ -893,19 +914,33 @@ mod tests {
         init[16..18].copy_from_slice(&2_u16.to_le_bytes());
         init[18..20].copy_from_slice(&architecture.elf_machine().to_le_bytes());
         let busybox = init.clone();
-        let archive = canonical_guest_root_newc(&init, &busybox).unwrap();
+        let runc = init.clone();
+        let archive = canonical_guest_root_newc(&init, &busybox, &runc).unwrap();
         let staging = tempfile::tempdir().unwrap();
         let path = staging.path().join("product.cpio");
         std::fs::write(&path, &archive).unwrap();
         validate_initramfs(&mut File::open(&path).unwrap(), &path, architecture).unwrap();
 
-        let mut dynamic_busybox = busybox;
+        let mut dynamic_busybox = busybox.clone();
         dynamic_busybox[32..40].copy_from_slice(&64_u64.to_le_bytes());
         dynamic_busybox[54..56].copy_from_slice(&56_u16.to_le_bytes());
         dynamic_busybox[56..58].copy_from_slice(&1_u16.to_le_bytes());
         dynamic_busybox.resize(120, 0);
         dynamic_busybox[64..68].copy_from_slice(&3_u32.to_le_bytes());
-        let dynamic_archive = canonical_guest_root_newc(&init, &dynamic_busybox).unwrap();
+        let dynamic_archive = canonical_guest_root_newc(&init, &dynamic_busybox, &runc).unwrap();
+        std::fs::write(&path, dynamic_archive).unwrap();
+        assert!(matches!(
+            validate_initramfs(&mut File::open(&path).unwrap(), &path, architecture),
+            Err(ArtifactError::InvalidInitramfs(rejected)) if rejected == path
+        ));
+
+        let mut dynamic_runc = runc;
+        dynamic_runc[32..40].copy_from_slice(&64_u64.to_le_bytes());
+        dynamic_runc[54..56].copy_from_slice(&56_u16.to_le_bytes());
+        dynamic_runc[56..58].copy_from_slice(&1_u16.to_le_bytes());
+        dynamic_runc.resize(120, 0);
+        dynamic_runc[64..68].copy_from_slice(&3_u32.to_le_bytes());
+        let dynamic_archive = canonical_guest_root_newc(&init, &busybox, &dynamic_runc).unwrap();
         std::fs::write(&path, dynamic_archive).unwrap();
         assert!(matches!(
             validate_initramfs(&mut File::open(&path).unwrap(), &path, architecture),

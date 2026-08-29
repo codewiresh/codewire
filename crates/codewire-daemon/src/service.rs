@@ -1105,6 +1105,7 @@ mod tests {
             workspace_root,
             home_root,
             auth_token,
+            process_execution: crate::execution::ProcessExecution::Native,
         };
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         tokio::spawn(async move {

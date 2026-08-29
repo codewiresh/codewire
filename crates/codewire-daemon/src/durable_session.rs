@@ -1,13 +1,12 @@
 use std::collections::{BTreeMap, HashMap};
 use std::io::{Read, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::sync::mpsc as std_mpsc;
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use codewire_gateway_proto::daemon::v1;
-use portable_pty::{CommandBuilder, PtySize, native_pty_system};
+use portable_pty::{PtySize, native_pty_system};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::process::{Child, ChildStdin};
@@ -17,7 +16,8 @@ use tonic::Status;
 use uuid::Uuid;
 
 use crate::Config;
-use crate::env::{build_process_env, default_shell};
+use crate::env::{build_process_env, default_shell_for};
+use crate::execution::{PreparedProcess, ProcessExecution};
 
 const SESSION_DIRECTORY: &str = ".codewire/daemon/sessions";
 const METADATA_FILE: &str = "session.json";
@@ -214,7 +214,7 @@ impl SessionEngine {
     ) -> Result<v1::SessionRecord, SessionError> {
         self.ensure_initialized().await?;
         let command = if request.command.is_empty() {
-            vec![default_shell()]
+            vec![default_shell_for(&self.inner.config)]
         } else {
             request.command
         };
@@ -228,7 +228,11 @@ impl SessionEngine {
         } else {
             request.working_dir
         };
-        if !path_is_directory(&working_dir).await {
+        if matches!(
+            &self.inner.config.process_execution,
+            ProcessExecution::Native
+        ) && !path_is_directory(&working_dir).await
+        {
             return Err(SessionError::InvalidArgument(format!(
                 "session working directory does not exist: {working_dir}"
             )));
@@ -530,23 +534,29 @@ impl SessionEngine {
         }
         let command = &snapshot.command;
         let environment = build_process_env(&self.inner.config, &snapshot.env, &snapshot.term);
-        let mut process = tokio::process::Command::new(&command[0]);
-        process
-            .args(&command[1..])
-            .current_dir(&snapshot.working_dir)
-            .env_clear()
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
-        for entry in environment {
-            if let Some((key, value)) = entry.split_once('=') {
-                process.env(key, value);
+        let mut prepared = match PreparedProcess::prepare(
+            &self.inner.config.process_execution,
+            command,
+            &snapshot.working_dir,
+            &environment,
+            false,
+            0,
+            0,
+        ) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                return self
+                    .record_startup_failure(handle, format!("prepare session process: {error}"))
+                    .await;
             }
-        }
+        };
+        let mut process = prepared.tokio_command();
 
         let mut child = match process.spawn() {
-            Ok(child) => child,
+            Ok(child) => {
+                prepared.spawned();
+                child
+            }
             Err(error) => {
                 return self
                     .record_startup_failure(handle, format!("launch session process: {error}"))
@@ -633,22 +643,34 @@ impl SessionEngine {
         snapshot: PersistedSession,
     ) -> Result<v1::SessionRecord, SessionError> {
         let environment = build_process_env(&self.inner.config, &snapshot.env, &snapshot.term);
+        let size = pty_size(snapshot.width, snapshot.height);
         let pair = native_pty_system()
-            .openpty(pty_size(snapshot.width, snapshot.height))
+            .openpty(size)
             .map_err(|error| SessionError::Internal(format!("open session PTY: {error}")))?;
 
-        let mut command = CommandBuilder::new(&snapshot.command[0]);
-        command.args(&snapshot.command[1..]);
-        command.cwd(&snapshot.working_dir);
-        command.env_clear();
-        for entry in environment {
-            if let Some((key, value)) = entry.split_once('=') {
-                command.env(key, value);
+        let mut prepared = match PreparedProcess::prepare(
+            &self.inner.config.process_execution,
+            &snapshot.command,
+            &snapshot.working_dir,
+            &environment,
+            true,
+            size.cols,
+            size.rows,
+        ) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                return self
+                    .record_startup_failure(handle, format!("prepare session PTY process: {error}"))
+                    .await;
             }
-        }
+        };
+        let command = prepared.pty_command();
 
         let child = match pair.slave.spawn_command(command) {
-            Ok(child) => child,
+            Ok(child) => {
+                prepared.spawned();
+                child
+            }
             Err(error) => {
                 return self
                     .record_startup_failure(handle, format!("launch session PTY process: {error}"))

@@ -131,6 +131,10 @@ message StartVmRequest {
   uint64 state_disk_bytes = 5;
   uint32 vcpus = 6;
   uint32 memory_mib = 7;
+  // Content identity for the selected OCI/root-format generation. This is
+  // independent from the monotonically increasing VM boot generation.
+  string root_generation = 8;
+  uint64 root_disk_bytes = 9;
 }
 
 message StopVmRequest {}

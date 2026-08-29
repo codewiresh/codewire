@@ -14,6 +14,8 @@ readonly BINARY='codewire-vmm-guest-probe'
 readonly REQUIRED_RUST='1.91.1'
 readonly REQUIRED_PROTOC='libprotoc 35.1'
 readonly TARGET='x86_64-unknown-linux-musl'
+readonly REQUIRED_RUNC_VERSION='1.5.1'
+readonly REQUIRED_RUNC_SHA256='177df879d50c913eb205e898d5c1c05a18f574053c0ce5524c471208eaf06f6f'
 
 usage() {
   printf '%s\n' \
@@ -21,7 +23,8 @@ usage() {
     '  build-local-vmm-initramfs.sh --probe ABSOLUTE_PATH --output ABSOLUTE_PATH' \
     '  build-local-vmm-initramfs.sh --verify [--output ABSOLUTE_PATH]' \
     '  build-local-vmm-initramfs.sh --verify-root --busybox ABSOLUTE_PATH' \
-    '    --busybox-sha256 SHA256 [--output ABSOLUTE_PATH]' \
+    '    --busybox-sha256 SHA256 --runc ABSOLUTE_PATH' \
+    '    --runc-sha256 SHA256 [--output ABSOLUTE_PATH]' \
     '' \
     '--probe/--output creates a deterministic archive from caller-supplied bytes.' \
     'It does not prove the probe is static or came from the sealed Rust toolchain.' \
@@ -29,7 +32,9 @@ usage() {
     'musl standard library, and readelf. It builds twice and fails closed on' \
     'any drift. With --output, the verified archive is published atomically' \
     'after comparison. --verify-root applies the same proof and adds a static' \
-    'x86_64 BusyBox whose exact lowercase SHA-256 must be supplied.' \
+    'x86_64 BusyBox plus the reviewed official static runc 1.5.1 binary. Exact' \
+    'lowercase SHA-256 values must be supplied; runc must match the built-in' \
+    'reviewed release digest.' \
     'Artifact provenance remains a separate gate.' >&2
 }
 
@@ -152,7 +157,8 @@ verify_static_elf() {
 
 verify_reproducible() {
   local requested_output="$1" root_busybox="$2" root_busybox_sha256="$3"
-  local target_a target_b binary_a binary_b archive_a archive_b
+  local root_runc="$4" root_runc_sha256="$5"
+  local target_a target_b binary_a binary_b archive_a archive_b runc_version
   if [[ -n "$requested_output" ]]; then
     requested_output="$(absolute_output "$requested_output")"
   fi
@@ -164,6 +170,17 @@ verify_reproducible() {
     [[ "$(sha256sum "$root_busybox" | awk '{print $1}')" == "$root_busybox_sha256" ]] ||
       die "BusyBox digest differs from --busybox-sha256"
     verify_static_elf BusyBox "$root_busybox"
+    root_runc="$(absolute_existing_file runc "$root_runc")"
+    [[ "$root_runc_sha256" =~ ^[0-9a-f]{64}$ ]] ||
+      die "--runc-sha256 must be exactly 64 lowercase hexadecimal characters"
+    [[ "$root_runc_sha256" == "$REQUIRED_RUNC_SHA256" ]] ||
+      die "runc digest is not the reviewed static v$REQUIRED_RUNC_VERSION release digest"
+    [[ "$(sha256sum "$root_runc" | awk '{print $1}')" == "$root_runc_sha256" ]] ||
+      die "runc digest differs from --runc-sha256"
+    verify_static_elf runc "$root_runc"
+    runc_version="$(env -i PATH=/usr/bin:/bin "$root_runc" --version | sed -n '1s/^runc version //p')"
+    [[ "$runc_version" == "$REQUIRED_RUNC_VERSION" ]] ||
+      die "runc did not report exact version $REQUIRED_RUNC_VERSION"
   fi
   VERIFY_WORK="$(mktemp -d "${TMPDIR:-/tmp}/codewire-local-vmm-initramfs.XXXXXX")"
   trap cleanup EXIT
@@ -184,8 +201,8 @@ verify_reproducible() {
   cmp -s "$binary_a" "$binary_b" || die "independent static guest builds are not byte-identical"
 
   if [[ -n "$root_busybox" ]]; then
-    "$binary_a" newc-root "$binary_a" "$root_busybox" "$archive_a"
-    "$binary_b" newc-root "$binary_b" "$root_busybox" "$archive_b"
+    "$binary_a" newc-root "$binary_a" "$root_busybox" "$root_runc" "$archive_a"
+    "$binary_b" newc-root "$binary_b" "$root_busybox" "$root_runc" "$archive_b"
   else
     "$binary_a" newc "$binary_a" "$archive_a"
     "$binary_b" newc "$binary_b" "$archive_b"
@@ -198,7 +215,7 @@ verify_reproducible() {
     # rename, and parent-directory fsync; the comparison proves the published
     # bytes are archive A rather than a third unverified build.
     if [[ -n "$root_busybox" ]]; then
-      "$binary_a" newc-root "$binary_a" "$root_busybox" "$requested_output"
+      "$binary_a" newc-root "$binary_a" "$root_busybox" "$root_runc" "$requested_output"
     else
       "$binary_a" newc "$binary_a" "$requested_output"
     fi
@@ -214,6 +231,10 @@ verify_reproducible() {
     printf 'local VMM initramfs: BusyBox sha256=%s size=%s\n' \
       "$root_busybox_sha256" \
       "$(stat -c '%s' "$root_busybox")"
+    printf 'local VMM initramfs: runc version=%s sha256=%s size=%s\n' \
+      "$REQUIRED_RUNC_VERSION" \
+      "$root_runc_sha256" \
+      "$(stat -c '%s' "$root_runc")"
   fi
   printf 'local VMM initramfs: archive sha256=%s size=%s\n' \
     "$(sha256sum "$archive_a" | awk '{print $1}')" \
@@ -238,6 +259,8 @@ mode=''
 probe=''
 busybox=''
 busybox_sha256=''
+runc=''
+runc_sha256=''
 output=''
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -271,6 +294,18 @@ while [[ $# -gt 0 ]]; do
       busybox_sha256="$2"
       shift 2
       ;;
+    --runc)
+      [[ $# -ge 2 ]] || { usage; exit 2; }
+      [[ -z "$runc" ]] || { usage; exit 2; }
+      runc="$2"
+      shift 2
+      ;;
+    --runc-sha256)
+      [[ $# -ge 2 ]] || { usage; exit 2; }
+      [[ -z "$runc_sha256" ]] || { usage; exit 2; }
+      runc_sha256="$2"
+      shift 2
+      ;;
     --output)
       [[ $# -ge 2 ]] || { usage; exit 2; }
       [[ -z "$output" ]] || { usage; exit 2; }
@@ -290,15 +325,15 @@ done
 
 case "$mode" in
   verify)
-    [[ -z "$probe" && -z "$busybox" && -z "$busybox_sha256" ]] || { usage; exit 2; }
-    verify_reproducible "$output" '' ''
+    [[ -z "$probe" && -z "$busybox" && -z "$busybox_sha256" && -z "$runc" && -z "$runc_sha256" ]] || { usage; exit 2; }
+    verify_reproducible "$output" '' '' '' ''
     ;;
   verify-root)
-    [[ -z "$probe" && -n "$busybox" && -n "$busybox_sha256" ]] || { usage; exit 2; }
-    verify_reproducible "$output" "$busybox" "$busybox_sha256"
+    [[ -z "$probe" && -n "$busybox" && -n "$busybox_sha256" && -n "$runc" && -n "$runc_sha256" ]] || { usage; exit 2; }
+    verify_reproducible "$output" "$busybox" "$busybox_sha256" "$runc" "$runc_sha256"
     ;;
   archive)
-    [[ -n "$probe" && -n "$output" && -z "$busybox" && -z "$busybox_sha256" ]] || { usage; exit 2; }
+    [[ -n "$probe" && -n "$output" && -z "$busybox" && -z "$busybox_sha256" && -z "$runc" && -z "$runc_sha256" ]] || { usage; exit 2; }
     build_archive_only "$probe" "$output"
     ;;
   *)

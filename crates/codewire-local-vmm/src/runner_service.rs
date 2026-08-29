@@ -261,6 +261,8 @@ impl EnvironmentRunnerService for RunnerRpc {
                 vsock_cid: request.vsock_cid,
                 daemon_vsock_port: request.daemon_vsock_port,
                 state_disk_bytes: request.state_disk_bytes,
+                root_generation: request.root_generation,
+                root_disk_bytes: request.root_disk_bytes,
                 vcpus,
                 memory_mib: request.memory_mib,
             })

@@ -27,12 +27,13 @@ use crate::control::v1::local_supervisor_service_client::LocalSupervisorServiceC
 use crate::control::v1::local_supervisor_service_server::{
     LocalSupervisorService, LocalSupervisorServiceServer,
 };
+use crate::generation::{GenerationError, ensure_empty_root_generation};
 use crate::lifecycle::{EffectDurability, LifecycleEffect, next_effect};
 use crate::linux::path::{PathError, PrivateRoot, SocketIdentity};
 use crate::linux::process::signal_unreaped_child;
 use crate::linux::state::{
-    DeletionTreeLocation, StateError, cleanup_trashed_vm, deletion_tree_location,
-    move_stopped_vm_to_trash,
+    DEFAULT_ROOT_DISK_BYTES, DeletionTreeLocation, StateError, cleanup_trashed_vm,
+    deletion_tree_location, move_stopped_vm_to_trash,
 };
 use crate::linux::{LiveProcess, ProcessIdentity, RecoveryError};
 use crate::runner_service::{RunnerClient, RunnerServiceError};
@@ -1279,6 +1280,23 @@ impl SupervisorCore {
         if current.generation >= generation {
             return Err(SupervisorError::InvalidRunnerResponse);
         }
+        // Provision at the replayable start boundary, not only during create.
+        // This also upgrades a stopped environment whose workspace predates
+        // root-generation disks without mutating its persistent workspace.
+        let root_generation = foundation_root_generation(&environment)?;
+        let engine_root = self.config.engine_root();
+        let environment_id = environment.id;
+        let provisioned_root_generation = root_generation.clone();
+        tokio::task::spawn_blocking(move || {
+            ensure_empty_root_generation(
+                &engine_root,
+                environment_id,
+                &provisioned_root_generation,
+                DEFAULT_ROOT_DISK_BYTES,
+            )
+        })
+        .await
+        .map_err(|_| SupervisorError::RootGenerationProvisionTask)??;
         let info = client
             .start(v1::StartVmRequest {
                 environment_id: environment.id.to_string(),
@@ -1288,6 +1306,8 @@ impl SupervisorCore {
                 state_disk_bytes: environment.disk_bytes,
                 vcpus: u32::from(environment.vcpus),
                 memory_mib: environment.memory_mib,
+                root_generation,
+                root_disk_bytes: DEFAULT_ROOT_DISK_BYTES,
             })
             .await
             .map_err(|status| SupervisorError::VmStart(status.message().to_owned()))?;
@@ -2303,6 +2323,18 @@ fn environment_operation_result(environment: &EnvironmentRecord) -> serde_json::
     })
 }
 
+fn foundation_root_generation(environment: &EnvironmentRecord) -> Result<String, SupervisorError> {
+    let artifact_generation = environment
+        .active_artifact_generation
+        .as_deref()
+        .filter(|generation| valid_sha256(generation))
+        .ok_or(SupervisorError::InvalidState)?;
+    let mut digest = Sha256::new();
+    digest.update(b"codewire-root-generation-foundation-v1\0");
+    digest.update(artifact_generation.as_bytes());
+    Ok(format!("{:x}", digest.finalize()))
+}
+
 fn start_operation_generation(
     operation: &OperationRecord,
     environment: &EnvironmentRecord,
@@ -2625,6 +2657,8 @@ pub enum SupervisorError {
     VmDelete,
     #[error("workspace provisioning task failed")]
     WorkspaceProvisionTask,
+    #[error("root generation provisioning task failed")]
+    RootGenerationProvisionTask,
     #[error("local lifecycle request is already terminal")]
     OperationTerminal,
     #[error("serve native supervisor failed")]
@@ -2639,6 +2673,8 @@ pub enum SupervisorError {
     Recovery(#[from] RecoveryError),
     #[error(transparent)]
     Workspace(#[from] WorkspaceError),
+    #[error(transparent)]
+    Generation(#[from] GenerationError),
     #[error(transparent)]
     Uds(#[from] UdsError),
     #[error(transparent)]
@@ -2680,6 +2716,36 @@ mod tests {
         let id = Uuid::parse_str("12345678-1234-5678-9abc-def012345678").unwrap();
         assert_eq!(allocate_vsock_cid(id), allocate_vsock_cid(id));
         assert!((3..u32::MAX).contains(&allocate_vsock_cid(id)));
+    }
+
+    #[test]
+    fn foundation_root_generation_is_stable_and_artifact_bound() {
+        let mut environment = EnvironmentRecord {
+            id: Uuid::new_v4(),
+            name: "dev".to_owned(),
+            state: StoredEnvironmentState::Stopped,
+            vcpus: 2,
+            memory_mib: 16 * 1024,
+            disk_bytes: crate::linux::state::MINIMUM_STATE_DISK_BYTES,
+            generation: 1,
+            workspace_commit: "a".repeat(40),
+            source_path: PathBuf::from("/workspace/source"),
+            runner: None,
+            active_artifact_generation: Some("b".repeat(64)),
+            staging_artifact_generation: None,
+        };
+        let first = foundation_root_generation(&environment).unwrap();
+        assert!(valid_sha256(&first));
+        assert_eq!(foundation_root_generation(&environment).unwrap(), first);
+
+        environment.active_artifact_generation = Some("c".repeat(64));
+        assert_ne!(foundation_root_generation(&environment).unwrap(), first);
+
+        environment.active_artifact_generation = None;
+        assert!(matches!(
+            foundation_root_generation(&environment),
+            Err(SupervisorError::InvalidState)
+        ));
     }
 
     #[test]

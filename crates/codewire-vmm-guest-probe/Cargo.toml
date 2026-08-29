@@ -25,6 +25,8 @@ zeroize = { workspace = true }
 anyhow = { workspace = true }
 codewire-daemon = { workspace = true }
 libc = "0.2"
+serde = { workspace = true }
+serde_json = { workspace = true }
 tokio = { workspace = true }
 tokio-stream = { workspace = true }
 tokio-vsock = { workspace = true, features = ["tonic014"] }

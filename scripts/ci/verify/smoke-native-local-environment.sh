@@ -591,9 +591,14 @@ log 'checking guest identity, live resources, workspace, and durable output'
 # The quoted expression is evaluated by the guest shell, not this host script.
 # shellcheck disable=SC2016
 run_cw run --no-tty -- /bin/sh -lc \
-  'printf "guest-cwd=%s\n" "$PWD"; printf "guest-pid1="; readlink /proc/1/exe; printf "guest-cpus="; grep -c "^processor" /proc/cpuinfo; grep "^MemTotal:" /proc/meminfo; ./hello.sh; printf persistence-ok > /workspace/sentinel.txt'
+  'printf "guest-cwd=%s\n" "$PWD"; printf "guest-pid1="; readlink /proc/1/exe; awk "/^NoNewPrivs:/ { printf \"guest-no-new-privileges=%s\\n\", \$2 } /^CapEff:/ { printf \"guest-effective-capabilities=%s\\n\", \$2 }" /proc/self/status; printf "guest-cpus="; grep -c "^processor" /proc/cpuinfo; grep "^MemTotal:" /proc/meminfo; ./hello.sh; printf persistence-ok > /workspace/sentinel.txt'
 rg -qF 'guest-cwd=/workspace' "$LAST_STDOUT" || die 'session did not start in /workspace'
-rg -qF 'guest-pid1=/init' "$LAST_STDOUT" || die 'guest PID 1 is not the Codewire init entrypoint'
+rg -qF 'guest-pid1=/run/codewire-runtime/init' "$LAST_STDOUT" ||
+  die 'guest PID 1 is not the sealed Codewire workspace init entrypoint'
+rg -qF 'guest-no-new-privileges=1' "$LAST_STDOUT" ||
+  die 'session did not execute through the no-new-privileges OCI boundary'
+rg -qF 'guest-effective-capabilities=0000000000000000' "$LAST_STDOUT" ||
+  die 'session retained capabilities across the OCI execution boundary'
 rg -qF 'guest-cpus=2' "$LAST_STDOUT" || die 'guest did not observe exactly 2 vCPUs'
 rg -qF 'native-workspace-ok' "$LAST_STDOUT" || die 'clean Git workspace content is unavailable'
 MEMORY_KIB="$(awk '$1 == "MemTotal:" { print $2 }' "$LAST_STDOUT")"
@@ -604,7 +609,13 @@ log 'checking interactive PTY shell through the selected native environment'
 PTY_LOG="$SMOKE_ROOT/pty.log"
 if ! (
   cd "$WORKSPACE"
-  printf 'test -t 0 && test -t 1 && printf "native-pty-ok\\n"\npwd\nexit\n\002d' |
+  {
+    printf 'test -t 0 && test -t 1 && printf "native-pty-ok\\n"\npwd\nexit\n'
+    # Keep testing input sent before the shell banner, but allow the extra
+    # runc console hop to return its output before the local detach chord.
+    sleep 1
+    printf '\002d'
+  } |
     env -i \
       PATH="$SMOKE_ROOT/bin:/usr/bin:/bin" HOME="$SMOKE_HOME" USER="$(id -un)" \
       LOGNAME="$(id -un)" SHELL='/bin/sh' TERM='xterm-256color' LC_ALL=C \

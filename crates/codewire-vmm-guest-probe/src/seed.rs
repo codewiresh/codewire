@@ -8,6 +8,7 @@ use zeroize::Zeroize;
 pub const SEED_LEN: usize = 4096;
 pub const SEED_DISK_SERIAL: &str = "CWSEED1";
 pub const STATE_DISK_SERIAL: &str = "CWSTATE1";
+pub const ROOT_DISK_SERIAL: &str = "CWROOT1";
 
 const MAGIC: &[u8; 8] = b"CWSEED1\0";
 const FORMAT_VERSION: u16 = 1;
