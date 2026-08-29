@@ -8,13 +8,14 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{self, Read, Write};
+use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::artifact::{AdmittedArtifact, AdmittedArtifacts, ArtifactLock, ArtifactSpec};
-use crate::linux::path::{PathError, PrivateRoot};
+use crate::linux::path::{PathError, PrivateRoot, current_uid};
 
 const STORE_DIRECTORY: &str = "runtime-artifacts";
 const BLOBS_DIRECTORY: &str = "blobs";
@@ -365,21 +366,12 @@ impl RuntimeArtifactStore {
                 path: self.generations.path().join(&name),
                 source,
             })?;
-        let lock: ArtifactLock = serde_json::from_slice(&bytes).map_err(|source| {
-            RuntimeArtifactStoreError::DecodeManifest {
-                path: self.generations.path().join(&name),
-                source,
-            }
-        })?;
-        if bytes.len() as u64 != expected_size
-            || lock.canonical_json()? != bytes
-            || lock.generation()? != generation
-        {
+        if bytes.len() as u64 != expected_size {
             return Err(RuntimeArtifactStoreError::InvalidManifest(
                 generation.to_owned(),
             ));
         }
-        Ok(lock)
+        decode_generation_manifest(generation, &self.generations.path().join(&name), &bytes)
     }
 
     fn cleanup_stale_ingest(&self) -> Result<(), RuntimeArtifactStoreError> {
@@ -431,12 +423,743 @@ impl RuntimeArtifactStore {
     }
 }
 
+fn decode_generation_manifest(
+    generation: &str,
+    path: &Path,
+    bytes: &[u8],
+) -> Result<ArtifactLock, RuntimeArtifactStoreError> {
+    validate_generation(generation)?;
+    if bytes.is_empty() || bytes.len() as u64 > MAXIMUM_MANIFEST_BYTES {
+        return Err(RuntimeArtifactStoreError::InvalidManifest(
+            generation.to_owned(),
+        ));
+    }
+    let lock: ArtifactLock = serde_json::from_slice(bytes).map_err(|source| {
+        RuntimeArtifactStoreError::DecodeManifest {
+            path: path.to_owned(),
+            source,
+        }
+    })?;
+    if lock.canonical_json()? != bytes || lock.generation()? != generation {
+        return Err(RuntimeArtifactStoreError::InvalidManifest(
+            generation.to_owned(),
+        ));
+    }
+    let _ = lock.validate_metadata()?;
+    Ok(lock)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RuntimeArtifactCollection {
     pub(crate) removed_generations: Vec<String>,
     pub(crate) removed_blobs: Vec<String>,
     pub(crate) removed_temporary_objects: usize,
     pub(crate) reclaimed_bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RuntimeArtifactDiagnostic {
+    pub(crate) kind: &'static str,
+    pub(crate) path: PathBuf,
+    pub(crate) reason: &'static str,
+    pub(crate) reclaimable: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DiagnosticRetainedBlob {
+    size: u64,
+    executable: bool,
+}
+
+/// Inspects the runtime-artifact namespace without creating, adopting,
+/// repairing, moving, or deleting any object. Reclaimability is asserted only
+/// when every retained manifest needed to derive blob reachability is valid.
+pub(crate) fn runtime_artifact_diagnostics(
+    engine_root: &Path,
+    retained: &BTreeSet<String>,
+) -> Vec<RuntimeArtifactDiagnostic> {
+    let store_path = engine_root.join(STORE_DIRECTORY);
+    let generations_path = store_path.join(GENERATIONS_DIRECTORY);
+    let blobs_path = store_path.join(BLOBS_DIRECTORY);
+    let mut diagnostics = Vec::new();
+
+    let store_metadata = match fs::symlink_metadata(&store_path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            record_unavailable_generations(
+                retained,
+                &generations_path,
+                "recorded_runtime_artifact_generation_missing",
+                &mut diagnostics,
+            );
+            return diagnostics;
+        }
+        Err(_) => {
+            diagnostics.push(runtime_artifact_diagnostic(
+                "runtime_artifact_store",
+                store_path,
+                "unreadable_runtime_artifact_store",
+                false,
+            ));
+            record_unavailable_generations(
+                retained,
+                &generations_path,
+                "recorded_runtime_artifact_generation_unverifiable",
+                &mut diagnostics,
+            );
+            return diagnostics;
+        }
+    };
+    if !private_store_directory(&store_metadata) || PrivateRoot::open(&store_path).is_err() {
+        diagnostics.push(runtime_artifact_diagnostic(
+            "runtime_artifact_store",
+            store_path,
+            "unsafe_runtime_artifact_store",
+            false,
+        ));
+        record_unavailable_generations(
+            retained,
+            &generations_path,
+            "recorded_runtime_artifact_generation_unverifiable",
+            &mut diagnostics,
+        );
+        return diagnostics;
+    }
+
+    match fs::read_dir(&store_path) {
+        Ok(entries) => {
+            for (index, entry) in entries.enumerate() {
+                if index == MAXIMUM_STORE_OBJECTS {
+                    diagnostics.push(runtime_artifact_diagnostic(
+                        "runtime_artifact_store",
+                        store_path.clone(),
+                        "runtime_artifact_object_bound_exceeded",
+                        false,
+                    ));
+                    break;
+                }
+                let Ok(entry) = entry else {
+                    diagnostics.push(runtime_artifact_diagnostic(
+                        "runtime_artifact_store",
+                        store_path.clone(),
+                        "unreadable_runtime_artifact_store",
+                        false,
+                    ));
+                    break;
+                };
+                if !matches!(
+                    entry.file_name().to_str(),
+                    Some(BLOBS_DIRECTORY | GENERATIONS_DIRECTORY)
+                ) {
+                    diagnostics.push(runtime_artifact_diagnostic(
+                        "runtime_artifact_store",
+                        entry.path(),
+                        "unexpected_runtime_artifact_object",
+                        false,
+                    ));
+                }
+            }
+        }
+        Err(_) => diagnostics.push(runtime_artifact_diagnostic(
+            "runtime_artifact_store",
+            store_path,
+            "unreadable_runtime_artifact_store",
+            false,
+        )),
+    }
+
+    let (expected_blobs, retained_reachability_complete) =
+        diagnose_generations(&generations_path, retained, &mut diagnostics);
+    diagnose_blobs(
+        &blobs_path,
+        &expected_blobs,
+        retained_reachability_complete,
+        &mut diagnostics,
+    );
+    diagnostics.sort_by(|left, right| {
+        left.path
+            .cmp(&right.path)
+            .then_with(|| left.kind.cmp(right.kind))
+    });
+    diagnostics
+}
+
+fn diagnose_generations(
+    path: &Path,
+    retained: &BTreeSet<String>,
+    diagnostics: &mut Vec<RuntimeArtifactDiagnostic>,
+) -> (BTreeMap<String, DiagnosticRetainedBlob>, bool) {
+    let mut expected_blobs = BTreeMap::new();
+    let mut found = BTreeSet::new();
+    let mut valid_retained = BTreeSet::new();
+    let mut retained_conflict = false;
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            diagnostics.push(runtime_artifact_diagnostic(
+                "runtime_artifact_store",
+                path.to_owned(),
+                "runtime_artifact_directory_missing",
+                false,
+            ));
+            record_unavailable_generations(
+                retained,
+                path,
+                "recorded_runtime_artifact_generation_missing",
+                diagnostics,
+            );
+            return (expected_blobs, retained.is_empty());
+        }
+        Err(_) => {
+            diagnostics.push(runtime_artifact_diagnostic(
+                "runtime_artifact_store",
+                path.to_owned(),
+                "unreadable_runtime_artifact_directory",
+                false,
+            ));
+            record_unavailable_generations(
+                retained,
+                path,
+                "recorded_runtime_artifact_generation_unverifiable",
+                diagnostics,
+            );
+            return (expected_blobs, retained.is_empty());
+        }
+    };
+    if !private_store_directory(&metadata) {
+        diagnostics.push(runtime_artifact_diagnostic(
+            "runtime_artifact_store",
+            path.to_owned(),
+            "unsafe_runtime_artifact_directory",
+            false,
+        ));
+        record_unavailable_generations(
+            retained,
+            path,
+            "recorded_runtime_artifact_generation_unverifiable",
+            diagnostics,
+        );
+        return (expected_blobs, retained.is_empty());
+    }
+    let generations = match PrivateRoot::open(path) {
+        Ok(generations) => generations,
+        Err(_) => {
+            diagnostics.push(runtime_artifact_diagnostic(
+                "runtime_artifact_store",
+                path.to_owned(),
+                "unsafe_runtime_artifact_directory",
+                false,
+            ));
+            record_unavailable_generations(
+                retained,
+                path,
+                "recorded_runtime_artifact_generation_unverifiable",
+                diagnostics,
+            );
+            return (expected_blobs, retained.is_empty());
+        }
+    };
+    let entries = match fs::read_dir(path) {
+        Ok(entries) => entries,
+        Err(_) => {
+            diagnostics.push(runtime_artifact_diagnostic(
+                "runtime_artifact_store",
+                path.to_owned(),
+                "unreadable_runtime_artifact_directory",
+                false,
+            ));
+            record_unavailable_generations(
+                retained,
+                path,
+                "recorded_runtime_artifact_generation_unverifiable",
+                diagnostics,
+            );
+            return (expected_blobs, retained.is_empty());
+        }
+    };
+    let mut scan_complete = true;
+    for (index, entry) in entries.enumerate() {
+        if index == MAXIMUM_STORE_OBJECTS {
+            diagnostics.push(runtime_artifact_diagnostic(
+                "runtime_artifact_store",
+                path.to_owned(),
+                "runtime_artifact_object_bound_exceeded",
+                false,
+            ));
+            scan_complete = false;
+            break;
+        }
+        let Ok(entry) = entry else {
+            diagnostics.push(runtime_artifact_diagnostic(
+                "runtime_artifact_store",
+                path.to_owned(),
+                "unreadable_runtime_artifact_directory",
+                false,
+            ));
+            scan_complete = false;
+            break;
+        };
+        let object_path = entry.path();
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            diagnostics.push(runtime_artifact_diagnostic(
+                "runtime_artifact_generation",
+                object_path,
+                "unknown_runtime_artifact_object",
+                false,
+            ));
+            continue;
+        };
+        if valid_ingest_name(&name, ".ingest-") {
+            let reclaimable = generations
+                .open_regular(Path::new(&name), false, None, false, Some(0o400))
+                .is_ok();
+            diagnostics.push(runtime_artifact_diagnostic(
+                "runtime_artifact_ingest",
+                object_path,
+                if reclaimable {
+                    "interrupted_runtime_artifact_ingest"
+                } else {
+                    "unsafe_runtime_artifact_ingest"
+                },
+                reclaimable,
+            ));
+            continue;
+        }
+        let Some(generation) = generation_from_manifest_name(&name).map(str::to_owned) else {
+            diagnostics.push(runtime_artifact_diagnostic(
+                "runtime_artifact_generation",
+                object_path,
+                "unknown_runtime_artifact_object",
+                false,
+            ));
+            continue;
+        };
+        found.insert(generation.clone());
+        let referenced = retained.contains(&generation);
+        let opened =
+            match generations.open_regular(Path::new(&name), false, None, false, Some(0o400)) {
+                Ok(opened) => opened,
+                Err(_) => {
+                    diagnostics.push(runtime_artifact_diagnostic(
+                        "runtime_artifact_generation",
+                        object_path,
+                        if referenced {
+                            "unsafe_referenced_runtime_artifact_generation"
+                        } else {
+                            "unsafe_unreferenced_runtime_artifact_generation"
+                        },
+                        false,
+                    ));
+                    continue;
+                }
+            };
+        let expected_size = opened.identity().size;
+        if expected_size == 0 || expected_size > MAXIMUM_MANIFEST_BYTES {
+            diagnostics.push(runtime_artifact_diagnostic(
+                "runtime_artifact_generation",
+                object_path,
+                if referenced {
+                    "invalid_referenced_runtime_artifact_generation"
+                } else {
+                    "invalid_unreferenced_runtime_artifact_generation"
+                },
+                false,
+            ));
+            continue;
+        }
+        let mut bytes = Vec::with_capacity(expected_size as usize);
+        let read = opened
+            .into_file()
+            .take(MAXIMUM_MANIFEST_BYTES + 1)
+            .read_to_end(&mut bytes);
+        let lock = read.ok().and_then(|_| {
+            (bytes.len() as u64 == expected_size)
+                .then(|| decode_generation_manifest(&generation, &object_path, &bytes))
+                .and_then(Result::ok)
+        });
+        let Some(lock) = lock else {
+            diagnostics.push(runtime_artifact_diagnostic(
+                "runtime_artifact_generation",
+                object_path,
+                if referenced {
+                    "invalid_referenced_runtime_artifact_generation"
+                } else {
+                    "invalid_unreferenced_runtime_artifact_generation"
+                },
+                false,
+            ));
+            continue;
+        };
+        if referenced {
+            valid_retained.insert(generation);
+            if retain_diagnostic_blobs(&mut expected_blobs, &lock).is_err() {
+                retained_conflict = true;
+                diagnostics.push(runtime_artifact_diagnostic(
+                    "runtime_artifact_generation",
+                    object_path,
+                    "conflicting_referenced_runtime_artifact_generation",
+                    false,
+                ));
+            }
+        } else {
+            diagnostics.push(runtime_artifact_diagnostic(
+                "runtime_artifact_generation",
+                object_path,
+                "unreferenced_runtime_artifact_generation",
+                true,
+            ));
+        }
+    }
+
+    for generation in retained
+        .iter()
+        .filter(|generation| !found.contains(*generation))
+    {
+        diagnostics.push(runtime_artifact_diagnostic(
+            "runtime_artifact_generation",
+            path.join(generation_manifest_name(generation)),
+            if scan_complete {
+                "recorded_runtime_artifact_generation_missing"
+            } else {
+                "recorded_runtime_artifact_generation_unverifiable"
+            },
+            false,
+        ));
+    }
+    (
+        expected_blobs,
+        !retained_conflict && valid_retained.len() == retained.len(),
+    )
+}
+
+fn diagnose_blobs(
+    path: &Path,
+    expected: &BTreeMap<String, DiagnosticRetainedBlob>,
+    retained_reachability_complete: bool,
+    diagnostics: &mut Vec<RuntimeArtifactDiagnostic>,
+) {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            diagnostics.push(runtime_artifact_diagnostic(
+                "runtime_artifact_store",
+                path.to_owned(),
+                "runtime_artifact_directory_missing",
+                false,
+            ));
+            record_unavailable_blobs(
+                expected,
+                path,
+                "recorded_runtime_artifact_blob_missing",
+                diagnostics,
+            );
+            return;
+        }
+        Err(_) => {
+            diagnostics.push(runtime_artifact_diagnostic(
+                "runtime_artifact_store",
+                path.to_owned(),
+                "unreadable_runtime_artifact_directory",
+                false,
+            ));
+            record_unavailable_blobs(
+                expected,
+                path,
+                "recorded_runtime_artifact_blob_unverifiable",
+                diagnostics,
+            );
+            return;
+        }
+    };
+    if !private_store_directory(&metadata) {
+        diagnostics.push(runtime_artifact_diagnostic(
+            "runtime_artifact_store",
+            path.to_owned(),
+            "unsafe_runtime_artifact_directory",
+            false,
+        ));
+        record_unavailable_blobs(
+            expected,
+            path,
+            "recorded_runtime_artifact_blob_unverifiable",
+            diagnostics,
+        );
+        return;
+    }
+    let blobs = match PrivateRoot::open(path) {
+        Ok(blobs) => blobs,
+        Err(_) => {
+            diagnostics.push(runtime_artifact_diagnostic(
+                "runtime_artifact_store",
+                path.to_owned(),
+                "unsafe_runtime_artifact_directory",
+                false,
+            ));
+            record_unavailable_blobs(
+                expected,
+                path,
+                "recorded_runtime_artifact_blob_unverifiable",
+                diagnostics,
+            );
+            return;
+        }
+    };
+    let entries = match fs::read_dir(path) {
+        Ok(entries) => entries,
+        Err(_) => {
+            diagnostics.push(runtime_artifact_diagnostic(
+                "runtime_artifact_store",
+                path.to_owned(),
+                "unreadable_runtime_artifact_directory",
+                false,
+            ));
+            record_unavailable_blobs(
+                expected,
+                path,
+                "recorded_runtime_artifact_blob_unverifiable",
+                diagnostics,
+            );
+            return;
+        }
+    };
+    let mut found = BTreeSet::new();
+    let mut scan_complete = true;
+    for (index, entry) in entries.enumerate() {
+        if index == MAXIMUM_STORE_OBJECTS {
+            diagnostics.push(runtime_artifact_diagnostic(
+                "runtime_artifact_store",
+                path.to_owned(),
+                "runtime_artifact_object_bound_exceeded",
+                false,
+            ));
+            scan_complete = false;
+            break;
+        }
+        let Ok(entry) = entry else {
+            diagnostics.push(runtime_artifact_diagnostic(
+                "runtime_artifact_store",
+                path.to_owned(),
+                "unreadable_runtime_artifact_directory",
+                false,
+            ));
+            scan_complete = false;
+            break;
+        };
+        let object_path = entry.path();
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            diagnostics.push(runtime_artifact_diagnostic(
+                "runtime_artifact_blob",
+                object_path,
+                "unknown_runtime_artifact_object",
+                false,
+            ));
+            continue;
+        };
+        let blob_shape = if valid_blob_name(&name, 'x') {
+            Some((true, 0o500, name.strip_prefix("x-").unwrap()))
+        } else if valid_blob_name(&name, 'r') {
+            Some((false, 0o400, name.strip_prefix("r-").unwrap()))
+        } else {
+            None
+        };
+        if let Some((executable, permissions, digest)) = blob_shape {
+            found.insert(name.clone());
+            let expected_blob = expected.get(&name);
+            let opened = match blobs.open_regular(
+                Path::new(&name),
+                false,
+                None,
+                executable,
+                Some(permissions),
+            ) {
+                Ok(opened) => opened,
+                Err(_) => {
+                    diagnostics.push(runtime_artifact_diagnostic(
+                        "runtime_artifact_blob",
+                        object_path,
+                        if expected_blob.is_some() {
+                            "unsafe_referenced_runtime_artifact_blob"
+                        } else if retained_reachability_complete {
+                            "unsafe_unreferenced_runtime_artifact_blob"
+                        } else {
+                            "unsafe_runtime_artifact_blob_reachability_unknown"
+                        },
+                        false,
+                    ));
+                    continue;
+                }
+            };
+            if let Some(expected_blob) = expected_blob {
+                if expected_blob.executable != executable
+                    || opened.identity().size != expected_blob.size
+                {
+                    diagnostics.push(runtime_artifact_diagnostic(
+                        "runtime_artifact_blob",
+                        object_path,
+                        "corrupt_referenced_runtime_artifact_blob",
+                        false,
+                    ));
+                    continue;
+                }
+                let digest_matches =
+                    sha256_reader(opened.into_file()).is_ok_and(|actual| actual == digest);
+                if !digest_matches {
+                    diagnostics.push(runtime_artifact_diagnostic(
+                        "runtime_artifact_blob",
+                        object_path,
+                        "corrupt_referenced_runtime_artifact_blob",
+                        false,
+                    ));
+                }
+            } else if retained_reachability_complete {
+                diagnostics.push(runtime_artifact_diagnostic(
+                    "runtime_artifact_blob",
+                    object_path,
+                    "unreferenced_runtime_artifact_blob",
+                    true,
+                ));
+            } else {
+                diagnostics.push(runtime_artifact_diagnostic(
+                    "runtime_artifact_blob",
+                    object_path,
+                    "runtime_artifact_blob_reachability_unknown",
+                    false,
+                ));
+            }
+            continue;
+        }
+        let ingest_permissions = if valid_ingest_name(&name, ".ingest-x-") {
+            Some((true, 0o500))
+        } else if valid_ingest_name(&name, ".ingest-r-") {
+            Some((false, 0o400))
+        } else {
+            None
+        };
+        if let Some((executable, permissions)) = ingest_permissions {
+            let reclaimable = blobs
+                .open_regular(Path::new(&name), false, None, executable, Some(permissions))
+                .is_ok();
+            diagnostics.push(runtime_artifact_diagnostic(
+                "runtime_artifact_ingest",
+                object_path,
+                if reclaimable {
+                    "interrupted_runtime_artifact_ingest"
+                } else {
+                    "unsafe_runtime_artifact_ingest"
+                },
+                reclaimable,
+            ));
+        } else {
+            diagnostics.push(runtime_artifact_diagnostic(
+                "runtime_artifact_blob",
+                object_path,
+                "unknown_runtime_artifact_object",
+                false,
+            ));
+        }
+    }
+    for name in expected.keys().filter(|name| !found.contains(*name)) {
+        diagnostics.push(runtime_artifact_diagnostic(
+            "runtime_artifact_blob",
+            path.join(name),
+            if scan_complete {
+                "recorded_runtime_artifact_blob_missing"
+            } else {
+                "recorded_runtime_artifact_blob_unverifiable"
+            },
+            false,
+        ));
+    }
+}
+
+fn retain_diagnostic_blobs(
+    retained: &mut BTreeMap<String, DiagnosticRetainedBlob>,
+    lock: &ArtifactLock,
+) -> Result<(), ()> {
+    let mut next = retained.clone();
+    for (spec, executable) in [
+        (&lock.cloud_hypervisor.artifact, true),
+        (&lock.kernel, false),
+        (&lock.initramfs, false),
+    ] {
+        let name = blob_name(spec, executable);
+        let candidate = DiagnosticRetainedBlob {
+            size: spec.size,
+            executable,
+        };
+        if next
+            .get(&name)
+            .is_some_and(|existing| existing != &candidate)
+        {
+            return Err(());
+        }
+        next.insert(name, candidate);
+    }
+    *retained = next;
+    Ok(())
+}
+
+fn record_unavailable_generations(
+    retained: &BTreeSet<String>,
+    generations: &Path,
+    reason: &'static str,
+    diagnostics: &mut Vec<RuntimeArtifactDiagnostic>,
+) {
+    for generation in retained {
+        diagnostics.push(runtime_artifact_diagnostic(
+            "runtime_artifact_generation",
+            generations.join(generation_manifest_name(generation)),
+            reason,
+            false,
+        ));
+    }
+}
+
+fn record_unavailable_blobs(
+    expected: &BTreeMap<String, DiagnosticRetainedBlob>,
+    blobs: &Path,
+    reason: &'static str,
+    diagnostics: &mut Vec<RuntimeArtifactDiagnostic>,
+) {
+    for name in expected.keys() {
+        diagnostics.push(runtime_artifact_diagnostic(
+            "runtime_artifact_blob",
+            blobs.join(name),
+            reason,
+            false,
+        ));
+    }
+}
+
+fn runtime_artifact_diagnostic(
+    kind: &'static str,
+    path: PathBuf,
+    reason: &'static str,
+    reclaimable: bool,
+) -> RuntimeArtifactDiagnostic {
+    RuntimeArtifactDiagnostic {
+        kind,
+        path,
+        reason,
+        reclaimable,
+    }
+}
+
+fn private_store_directory(metadata: &fs::Metadata) -> bool {
+    metadata.is_dir() && metadata.uid() == current_uid() && metadata.mode() & 0o777 == 0o700
+}
+
+fn sha256_reader(mut file: fs::File) -> Result<String, io::Error> {
+    let mut digest = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        digest.update(&buffer[..read]);
+    }
+    Ok(format!("{:x}", digest.finalize()))
 }
 
 #[derive(Debug, Clone)]
@@ -1085,5 +1808,196 @@ mod tests {
                 .join(generation_manifest_name(&stale))
                 .is_file()
         );
+    }
+
+    #[test]
+    fn diagnostics_report_only_unreferenced_artifacts_and_interrupted_ingests() {
+        let (parent, engine) = private_root();
+        let store = RuntimeArtifactStore::create(&engine).unwrap();
+        let retained_lock = lock_with_kernel(b"current-kernel");
+        let retained =
+            publish_test_generation(&store, parent.path(), &retained_lock, b"current-kernel");
+        let stale_lock = lock_with_kernel(b"stale-kernel");
+        let stale = publish_test_generation(&store, parent.path(), &stale_lock, b"stale-kernel");
+        let blob_ingest = format!(".ingest-r-{}", Uuid::new_v4());
+        let generation_ingest = format!(".ingest-{}", Uuid::new_v4());
+        store
+            .blobs
+            .create_regular(Path::new(&blob_ingest), 0o400, true)
+            .unwrap();
+        store
+            .generations
+            .create_regular(Path::new(&generation_ingest), 0o400, true)
+            .unwrap();
+
+        let diagnostics =
+            runtime_artifact_diagnostics(engine.path(), &BTreeSet::from([retained.clone()]));
+
+        let retained_manifest = store
+            .generations
+            .path()
+            .join(generation_manifest_name(&retained));
+        assert!(
+            !diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.path == retained_manifest)
+        );
+        for (spec, executable) in [
+            (&retained_lock.cloud_hypervisor.artifact, true),
+            (&retained_lock.kernel, false),
+            (&retained_lock.initramfs, false),
+        ] {
+            let path = store.blobs.path().join(blob_name(spec, executable));
+            assert!(!diagnostics.iter().any(|diagnostic| diagnostic.path == path));
+        }
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.path
+                == store
+                    .generations
+                    .path()
+                    .join(generation_manifest_name(&stale))
+                && diagnostic.reason == "unreferenced_runtime_artifact_generation"
+                && diagnostic.reclaimable
+        }));
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.path
+                == store
+                    .blobs
+                    .path()
+                    .join(blob_name(&stale_lock.kernel, false))
+                && diagnostic.reason == "unreferenced_runtime_artifact_blob"
+                && diagnostic.reclaimable
+        }));
+        for path in [
+            store.blobs.path().join(&blob_ingest),
+            store.generations.path().join(&generation_ingest),
+        ] {
+            assert!(diagnostics.iter().any(|diagnostic| {
+                diagnostic.path == path
+                    && diagnostic.reason == "interrupted_runtime_artifact_ingest"
+                    && diagnostic.reclaimable
+            }));
+            assert!(path.exists());
+        }
+    }
+
+    #[test]
+    fn diagnostics_never_claim_blob_reachability_when_a_retained_manifest_is_missing() {
+        let (parent, engine) = private_root();
+        let store = RuntimeArtifactStore::create(&engine).unwrap();
+        let stale_lock = lock_with_kernel(b"uncommitted-kernel");
+        let stale =
+            publish_test_generation(&store, parent.path(), &stale_lock, b"uncommitted-kernel");
+        let missing = "f".repeat(64);
+
+        let diagnostics =
+            runtime_artifact_diagnostics(engine.path(), &BTreeSet::from([missing.clone()]));
+
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.path
+                == store
+                    .generations
+                    .path()
+                    .join(generation_manifest_name(&missing))
+                && diagnostic.reason == "recorded_runtime_artifact_generation_missing"
+                && !diagnostic.reclaimable
+        }));
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.path
+                == store
+                    .blobs
+                    .path()
+                    .join(blob_name(&stale_lock.kernel, false))
+                && diagnostic.reason == "runtime_artifact_blob_reachability_unknown"
+                && !diagnostic.reclaimable
+        }));
+        assert!(
+            store
+                .generations
+                .path()
+                .join(generation_manifest_name(&stale))
+                .is_file()
+        );
+    }
+
+    #[test]
+    fn diagnostics_report_a_corrupt_referenced_blob_without_mutation() {
+        let (parent, engine) = private_root();
+        let store = RuntimeArtifactStore::create(&engine).unwrap();
+        let retained_lock = lock_with_kernel(b"current-kernel");
+        let retained =
+            publish_test_generation(&store, parent.path(), &retained_lock, b"current-kernel");
+        let kernel = store
+            .blobs
+            .path()
+            .join(blob_name(&retained_lock.kernel, false));
+        fs::set_permissions(&kernel, fs::Permissions::from_mode(0o600)).unwrap();
+        fs::write(&kernel, b"broken-kernel").unwrap();
+        fs::set_permissions(&kernel, fs::Permissions::from_mode(0o400)).unwrap();
+
+        let diagnostics = runtime_artifact_diagnostics(engine.path(), &BTreeSet::from([retained]));
+
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.path == kernel
+                && diagnostic.reason == "corrupt_referenced_runtime_artifact_blob"
+                && !diagnostic.reclaimable
+        }));
+        assert_eq!(fs::read(kernel).unwrap(), b"broken-kernel");
+    }
+
+    #[test]
+    fn diagnostics_classify_unsafe_and_unknown_objects_without_mutation() {
+        let (parent, engine) = private_root();
+        let store = RuntimeArtifactStore::create(&engine).unwrap();
+        let retained_lock = lock_with_kernel(b"current-kernel");
+        let retained =
+            publish_test_generation(&store, parent.path(), &retained_lock, b"current-kernel");
+        let manifest = store
+            .generations
+            .path()
+            .join(generation_manifest_name(&retained));
+        fs::set_permissions(&manifest, fs::Permissions::from_mode(0o600)).unwrap();
+        let unsafe_ingest = format!(".ingest-r-{}", Uuid::new_v4());
+        let unsafe_ingest_path = store.blobs.path().join(&unsafe_ingest);
+        fs::write(&unsafe_ingest_path, b"partial").unwrap();
+        fs::set_permissions(&unsafe_ingest_path, fs::Permissions::from_mode(0o600)).unwrap();
+        let unknown = store.store.path().join("unknown");
+        fs::write(&unknown, b"unknown").unwrap();
+        let mut invalid_lock = lock();
+        invalid_lock.schema_version += 1;
+        let invalid_generation = invalid_lock.generation().unwrap();
+        let invalid_manifest = store
+            .generations
+            .path()
+            .join(generation_manifest_name(&invalid_generation));
+        fs::write(&invalid_manifest, invalid_lock.canonical_json().unwrap()).unwrap();
+        fs::set_permissions(&invalid_manifest, fs::Permissions::from_mode(0o400)).unwrap();
+
+        let diagnostics = runtime_artifact_diagnostics(engine.path(), &BTreeSet::from([retained]));
+
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.path == manifest
+                && diagnostic.reason == "unsafe_referenced_runtime_artifact_generation"
+                && !diagnostic.reclaimable
+        }));
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.path == unsafe_ingest_path
+                && diagnostic.reason == "unsafe_runtime_artifact_ingest"
+                && !diagnostic.reclaimable
+        }));
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.path == unknown
+                && diagnostic.reason == "unexpected_runtime_artifact_object"
+                && !diagnostic.reclaimable
+        }));
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.path == invalid_manifest
+                && diagnostic.reason == "invalid_unreferenced_runtime_artifact_generation"
+                && !diagnostic.reclaimable
+        }));
+        assert!(manifest.exists());
+        assert!(unsafe_ingest_path.exists());
+        assert!(unknown.exists());
+        assert!(invalid_manifest.exists());
     }
 }

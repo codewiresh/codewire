@@ -237,6 +237,26 @@ impl ArtifactLock {
         Ok(format!("{:x}", Sha256::digest(self.canonical_json()?)))
     }
 
+    pub(crate) fn validate_metadata(&self) -> Result<ArtifactArchitecture, ArtifactError> {
+        if self.schema_version != ARTIFACT_LOCK_SCHEMA_VERSION {
+            return Err(ArtifactError::UnsupportedSchema(self.schema_version));
+        }
+        let architecture = ArtifactArchitecture::host()?;
+        for spec in [
+            &self.cloud_hypervisor.artifact,
+            &self.kernel,
+            &self.initramfs,
+        ] {
+            validate_spec(spec, architecture)?;
+        }
+        if self.cloud_hypervisor.version != CLOUD_HYPERVISOR_RELEASE {
+            return Err(ArtifactError::WrongCloudHypervisorRelease {
+                expected: CLOUD_HYPERVISOR_RELEASE,
+            });
+        }
+        Ok(architecture)
+    }
+
     pub fn read(path: &Path) -> Result<Self, ArtifactError> {
         let parent_path = path
             .parent()
@@ -271,22 +291,7 @@ impl ArtifactLock {
     }
 
     pub async fn admit(&self, root_path: &Path) -> Result<AdmittedArtifacts, ArtifactError> {
-        if self.schema_version != ARTIFACT_LOCK_SCHEMA_VERSION {
-            return Err(ArtifactError::UnsupportedSchema(self.schema_version));
-        }
-        let architecture = ArtifactArchitecture::host()?;
-        for spec in [
-            &self.cloud_hypervisor.artifact,
-            &self.kernel,
-            &self.initramfs,
-        ] {
-            validate_spec(spec, architecture)?;
-        }
-        if self.cloud_hypervisor.version != CLOUD_HYPERVISOR_RELEASE {
-            return Err(ArtifactError::WrongCloudHypervisorRelease {
-                expected: CLOUD_HYPERVISOR_RELEASE,
-            });
-        }
+        let architecture = self.validate_metadata()?;
         let root = PrivateRoot::open(root_path).map_err(ArtifactError::ConfinedPath)?;
 
         let cloud_hypervisor = admit_one(&root, &self.cloud_hypervisor.artifact, true)?;

@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 
 use uuid::Uuid;
 
+use crate::artifact_store::runtime_artifact_diagnostics;
 use crate::linux::path::{PrivateRoot, SocketIdentity, current_uid};
 use crate::linux::state::{StateDiskIdentity, validate_owned_vm_tree};
 
@@ -32,18 +33,41 @@ pub(crate) fn inventory(
     runners: &BTreeMap<String, SocketIdentity>,
     deletion_trash_names: &BTreeSet<String>,
     content_blobs: &BTreeMap<String, u64>,
+    artifact_generations: &BTreeSet<String>,
 ) -> Vec<OrphanEntry> {
     let mut orphans = Vec::new();
     inventory_vms(runtime_root, environments, &mut orphans);
     inventory_trash(runtime_root, deletion_trash_names, &mut orphans);
     inventory_runners(runtime_root, runners, &mut orphans);
     inventory_content(runtime_root, content_blobs, &mut orphans);
+    inventory_runtime_artifacts(runtime_root, artifact_generations, &mut orphans);
     orphans.sort_by(|left, right| {
         left.path
             .cmp(&right.path)
             .then_with(|| left.kind.cmp(right.kind))
     });
     orphans
+}
+
+fn inventory_runtime_artifacts(
+    runtime_root: &PrivateRoot,
+    retained: &BTreeSet<String>,
+    orphans: &mut Vec<OrphanEntry>,
+) {
+    orphans.extend(
+        runtime_artifact_diagnostics(&runtime_root.path().join("engine"), retained)
+            .into_iter()
+            .map(|diagnostic| OrphanEntry {
+                reclaimable_bytes: if diagnostic.reclaimable {
+                    allocated_bytes(&diagnostic.path).unwrap_or(0)
+                } else {
+                    0
+                },
+                kind: diagnostic.kind,
+                path: diagnostic.path,
+                reason: diagnostic.reason,
+            }),
+    );
 }
 
 fn inventory_content(
@@ -384,6 +408,7 @@ fn allocated_bytes_bounded(path: &Path, device: u64, remaining: &mut usize) -> i
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sha2::{Digest as _, Sha256};
     use std::os::unix::fs::PermissionsExt as _;
 
     fn runtime_root() -> (tempfile::TempDir, PrivateRoot) {
@@ -419,6 +444,7 @@ mod tests {
             &BTreeMap::new(),
             &BTreeSet::from([trash_name]),
             &BTreeMap::new(),
+            &BTreeSet::new(),
         );
         assert!(entries.iter().any(|entry| {
             entry.path == unknown && entry.reason == "untracked_environment_tree"
@@ -434,6 +460,7 @@ mod tests {
         );
         assert!(unknown.join("data").exists());
         assert!(trash.exists());
+        assert!(!root.path().join("engine/runtime-artifacts").exists());
     }
 
     #[test]
@@ -475,6 +502,7 @@ mod tests {
                 (unsafe_retained.clone(), b"content".len() as u64),
                 (wrong_size.clone(), b"content".len() as u64 + 1),
             ]),
+            &BTreeSet::new(),
         );
 
         assert!(
@@ -501,5 +529,54 @@ mod tests {
                 .iter()
                 .any(|entry| entry.path == unknown && entry.reason == "unknown_content_object")
         );
+    }
+
+    #[test]
+    fn inventory_reports_runtime_artifacts_without_overstating_reclaimability() {
+        let (_parent, root) = runtime_root();
+        let store = root.path().join("engine/runtime-artifacts");
+        let blobs = store.join("blobs");
+        let generations = store.join("generations");
+        for path in [&store, &blobs, &generations] {
+            fs::create_dir(path).unwrap();
+            fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let blob_bytes = b"possibly-live-runtime-blob";
+        let blob_name = format!("r-{:x}", Sha256::digest(blob_bytes));
+        let blob = blobs.join(&blob_name);
+        fs::write(&blob, blob_bytes).unwrap();
+        fs::set_permissions(&blob, fs::Permissions::from_mode(0o400)).unwrap();
+        let ingest_name = format!(".ingest-r-{}", Uuid::new_v4());
+        let ingest = blobs.join(&ingest_name);
+        fs::write(&ingest, b"partial").unwrap();
+        fs::set_permissions(&ingest, fs::Permissions::from_mode(0o400)).unwrap();
+        let missing = "f".repeat(64);
+
+        let entries = inventory(
+            &root,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &BTreeSet::new(),
+            &BTreeMap::new(),
+            &BTreeSet::from([missing.clone()]),
+        );
+
+        assert!(entries.iter().any(|entry| {
+            entry.path == generations.join(format!("{missing}.json"))
+                && entry.reason == "recorded_runtime_artifact_generation_missing"
+                && entry.reclaimable_bytes == 0
+        }));
+        assert!(entries.iter().any(|entry| {
+            entry.path == blob
+                && entry.reason == "runtime_artifact_blob_reachability_unknown"
+                && entry.reclaimable_bytes == 0
+        }));
+        assert!(entries.iter().any(|entry| {
+            entry.path == ingest
+                && entry.reason == "interrupted_runtime_artifact_ingest"
+                && entry.reclaimable_bytes > 0
+        }));
+        assert_eq!(fs::read(blob).unwrap(), blob_bytes);
+        assert_eq!(fs::read(ingest).unwrap(), b"partial");
     }
 }

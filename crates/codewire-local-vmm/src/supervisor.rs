@@ -823,12 +823,14 @@ fn orphan_inventory_response(
         .into_iter()
         .map(|(digest, size)| (digest.hex().to_owned(), size))
         .collect();
+    let artifact_generations = referenced_artifact_generations(state)?;
     let orphans = crate::orphan::inventory(
         root,
         &environments,
         &runners,
         deletion_trash_names,
         &content_blobs,
+        &artifact_generations,
     );
     let reclaimable_bytes = orphans.iter().fold(0_u64, |total, orphan| {
         total.saturating_add(orphan.reclaimable_bytes)
