@@ -38,7 +38,7 @@ use crate::linux::state::{
 use crate::linux::{LiveProcess, ProcessIdentity, RecoveryError, VmPaths};
 use crate::oci::{
     ContentStore, ContentStoreError, RegistryReference, RegistryReferenceError, RegistryResolver,
-    RegistryResolverError,
+    RegistryResolverError, ResolvedDescriptor, Sha256Digest,
 };
 use crate::runner_service::{RunnerClient, RunnerServiceError};
 use crate::setup_pack::{SetupPackError, SetupPackRequest, ensure_setup_pack};
@@ -333,11 +333,7 @@ pub fn inspect_orphans(root: &Path) -> Result<v1::ListOrphansResponse, Superviso
         .map(SupervisorStore::deletion_trash_names)
         .transpose()?
         .unwrap_or_default();
-    Ok(orphan_inventory_response(
-        &root,
-        &state,
-        &deletion_trash_names,
-    ))
+    orphan_inventory_response(&root, &state, &deletion_trash_names)
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -609,7 +605,7 @@ fn orphan_inventory_response(
     root: &PrivateRoot,
     state: &SupervisorState,
     deletion_trash_names: &std::collections::BTreeSet<String>,
-) -> v1::ListOrphansResponse {
+) -> Result<v1::ListOrphansResponse, SupervisorError> {
     let environments = state
         .environments
         .values()
@@ -625,11 +621,21 @@ fn orphan_inventory_response(
                 .map(|runner| (format!("{}.sock", environment.id), runner.socket.clone()))
         })
         .collect();
-    let orphans = crate::orphan::inventory(root, &environments, &runners, deletion_trash_names);
+    let content_blobs = referenced_content_blobs(state)?
+        .into_iter()
+        .map(|(digest, size)| (digest.hex().to_owned(), size))
+        .collect();
+    let orphans = crate::orphan::inventory(
+        root,
+        &environments,
+        &runners,
+        deletion_trash_names,
+        &content_blobs,
+    );
     let reclaimable_bytes = orphans.iter().fold(0_u64, |total, orphan| {
         total.saturating_add(orphan.reclaimable_bytes)
     });
-    v1::ListOrphansResponse {
+    Ok(v1::ListOrphansResponse {
         orphans: orphans
             .into_iter()
             .map(|orphan| v1::Orphan {
@@ -640,7 +646,7 @@ fn orphan_inventory_response(
             })
             .collect(),
         reclaimable_bytes,
-    }
+    })
 }
 
 struct SupervisorCore {
@@ -679,11 +685,7 @@ impl SupervisorCore {
 
     fn orphan_inventory(&self) -> Result<v1::ListOrphansResponse, SupervisorError> {
         let deletion_trash_names = self.store.deletion_trash_names()?;
-        Ok(orphan_inventory_response(
-            &self.root,
-            &self.state,
-            &deletion_trash_names,
-        ))
+        orphan_inventory_response(&self.root, &self.state, &deletion_trash_names)
     }
 
     fn current_artifact_generation(&self) -> Result<String, SupervisorError> {
@@ -713,6 +715,7 @@ impl SupervisorCore {
         name: &str,
     ) -> Result<SupervisorState, SupervisorError> {
         self.collect_unreferenced_workspace_roots(name)?;
+        self.collect_unreferenced_oci_content()?;
         let (project_json, project_sha256) = {
             let environment = self.environment(name)?;
             if environment.project_spec_json.is_none()
@@ -780,6 +783,14 @@ impl SupervisorCore {
         let engine = PrivateRoot::open(&self.config.engine_root())?;
         let paths = VmPaths::create(&engine, environment.id)?;
         cleanup_unreferenced_root_generations(&paths, &retained).map_err(Into::into)
+    }
+
+    fn collect_unreferenced_oci_content(&self) -> Result<(), SupervisorError> {
+        let retained = referenced_content_blobs(&self.state)?;
+        let engine = PrivateRoot::open(&self.config.engine_root())?;
+        let content = ContentStore::create(&engine)?;
+        let _collected = content.collect_unreferenced(&retained)?;
+        Ok(())
     }
 
     async fn create(
@@ -1893,9 +1904,11 @@ impl SupervisorCore {
                     operation = self.checkpoint_state_operation(&operation, next_state)?;
                 }
                 LifecycleEffect::CleanupTrash => {
-                    if cleanup_trashed_vm(&engine_root, environment_id, operation.operation_id)
-                        .is_err()
-                    {
+                    let trash_pending =
+                        cleanup_trashed_vm(&engine_root, environment_id, operation.operation_id)
+                            .is_err();
+                    let content_pending = self.collect_unreferenced_oci_content().is_err();
+                    if trash_pending || content_pending {
                         // Deletion is already durable. Any object that cannot
                         // pass the exact allowlist remains quarantined for
                         // orphan inventory; it is never recursively removed or
@@ -1911,6 +1924,10 @@ impl SupervisorCore {
             deletion_tree_location(&engine_root, environment_id, operation.operation_id)?,
             DeletionTreeLocation::Trash(_)
         );
+        // Re-derive shared-CAS cleanup state after the final checkpoint. This
+        // preserves an honest cleanup_pending result if the supervisor died
+        // after applying CleanupTrash but before completing the operation.
+        cleanup_pending |= self.collect_unreferenced_oci_content().is_err();
         Ok((operation, cleanup_pending))
     }
 
@@ -2752,6 +2769,46 @@ fn referenced_root_storage_generations(
     Ok(retained)
 }
 
+fn referenced_content_blobs(
+    state: &SupervisorState,
+) -> Result<BTreeMap<Sha256Digest, u64>, SupervisorError> {
+    let mut retained = BTreeMap::new();
+    for environment in state.environments.values() {
+        let generations = [
+            environment.active_workspace_generation.as_ref(),
+            environment.staging_workspace_generation.as_ref(),
+            environment.rollback_workspace_generation.as_ref(),
+        ];
+        for generation in generations.into_iter().flatten() {
+            let project_sha256 = environment
+                .project_spec_sha256
+                .as_deref()
+                .ok_or(SupervisorError::InvalidState)?;
+            generation.validate_for_project(project_sha256)?;
+            retain_content_descriptor(&mut retained, &generation.image.source)?;
+            retain_content_descriptor(&mut retained, &generation.image.manifest)?;
+            retain_content_descriptor(&mut retained, &generation.image.config)?;
+            for layer in &generation.image.layers {
+                retain_content_descriptor(&mut retained, &layer.descriptor)?;
+            }
+        }
+    }
+    Ok(retained)
+}
+
+fn retain_content_descriptor(
+    retained: &mut BTreeMap<Sha256Digest, u64>,
+    descriptor: &ResolvedDescriptor,
+) -> Result<(), SupervisorError> {
+    if let Some(size) = retained.get(&descriptor.digest) {
+        return (*size == descriptor.size)
+            .then_some(())
+            .ok_or(SupervisorError::InvalidState);
+    }
+    retained.insert(descriptor.digest.clone(), descriptor.size);
+    Ok(())
+}
+
 fn foundation_root_generation(environment: &EnvironmentRecord) -> Result<String, SupervisorError> {
     let artifact_generation = environment
         .active_artifact_generation
@@ -3291,6 +3348,40 @@ mod tests {
     }
 
     #[test]
+    fn shared_content_reachability_rejects_conflicting_descriptor_sizes() {
+        let mut first = project_environment();
+        first.active_workspace_generation = Some(test_workspace_generation(
+            first.project_spec_sha256.as_deref().unwrap(),
+            b"first",
+        ));
+        let mut second = project_environment();
+        second.id = Uuid::new_v4();
+        second.name = "second".to_owned();
+        let mut second_generation =
+            test_workspace_generation(second.project_spec_sha256.as_deref().unwrap(), b"second");
+        second_generation.image.config.digest = first
+            .active_workspace_generation
+            .as_ref()
+            .unwrap()
+            .image
+            .config
+            .digest
+            .clone();
+        second_generation.image.config.size += 1;
+        second.active_workspace_generation = Some(second_generation);
+        let state = SupervisorState {
+            schema_version: SUPERVISOR_STATE_SCHEMA,
+            current: Some("dev".to_owned()),
+            environments: [("dev".to_owned(), first), ("second".to_owned(), second)].into(),
+        };
+
+        assert!(matches!(
+            referenced_content_blobs(&state),
+            Err(SupervisorError::InvalidState)
+        ));
+    }
+
+    #[test]
     fn admitted_active_workspace_boots_without_registry_or_cas_access() {
         let engine = tempfile::tempdir().unwrap();
         fs::set_permissions(engine.path(), fs::Permissions::from_mode(0o700)).unwrap();
@@ -3567,7 +3658,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn staging_boundary_collects_only_unreferenced_root_storage() {
+    async fn staging_boundary_collects_only_unreferenced_root_and_content_storage() {
         let parent = tempfile::tempdir().unwrap();
         let root_path = parent.path().join("runtime");
         fs::create_dir(&root_path).unwrap();
@@ -3603,6 +3694,25 @@ mod tests {
             current: Some("dev".to_owned()),
             environments: [("dev".to_owned(), environment)].into(),
         };
+        let retained_content = referenced_content_blobs(&state).unwrap();
+        ContentStore::create(&engine).unwrap();
+        let blobs = engine.path().join("content/blobs");
+        for (digest, size) in &retained_content {
+            fs::write(
+                blobs.join(digest.hex()),
+                vec![0_u8; usize::try_from(*size).unwrap()],
+            )
+            .unwrap();
+            fs::set_permissions(blobs.join(digest.hex()), fs::Permissions::from_mode(0o400))
+                .unwrap();
+        }
+        let stale_content = Sha256Digest::parse(&format!("sha256:{}", "e".repeat(64))).unwrap();
+        fs::write(blobs.join(stale_content.hex()), b"stale").unwrap();
+        fs::set_permissions(
+            blobs.join(stale_content.hex()),
+            fs::Permissions::from_mode(0o400),
+        )
+        .unwrap();
         store.replace_state(&state).unwrap();
         let mut core = SupervisorCore {
             config: NativeRuntimeConfig {
@@ -3625,6 +3735,10 @@ mod tests {
         );
         assert!(paths.generations_dir.join(active_storage).is_dir());
         assert!(!paths.generations_dir.join(stale_storage).exists());
+        for digest in retained_content.keys() {
+            assert!(blobs.join(digest.hex()).is_file());
+        }
+        assert!(!blobs.join(stale_content.hex()).exists());
     }
 
     #[test]

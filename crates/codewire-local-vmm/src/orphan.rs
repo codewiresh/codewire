@@ -16,6 +16,7 @@ use crate::linux::path::{PrivateRoot, SocketIdentity, current_uid};
 use crate::linux::state::{StateDiskIdentity, validate_owned_vm_tree};
 
 const MAX_ACCOUNTING_ENTRIES: usize = 10_000;
+const MAX_CONTENT_OBJECTS: usize = 65_536;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct OrphanEntry {
@@ -30,17 +31,156 @@ pub(crate) fn inventory(
     environments: &BTreeMap<Uuid, u64>,
     runners: &BTreeMap<String, SocketIdentity>,
     deletion_trash_names: &BTreeSet<String>,
+    content_blobs: &BTreeMap<String, u64>,
 ) -> Vec<OrphanEntry> {
     let mut orphans = Vec::new();
     inventory_vms(runtime_root, environments, &mut orphans);
     inventory_trash(runtime_root, deletion_trash_names, &mut orphans);
     inventory_runners(runtime_root, runners, &mut orphans);
+    inventory_content(runtime_root, content_blobs, &mut orphans);
     orphans.sort_by(|left, right| {
         left.path
             .cmp(&right.path)
             .then_with(|| left.kind.cmp(right.kind))
     });
     orphans
+}
+
+fn inventory_content(
+    runtime_root: &PrivateRoot,
+    retained: &BTreeMap<String, u64>,
+    orphans: &mut Vec<OrphanEntry>,
+) {
+    let content = runtime_root.path().join("engine/content");
+    let blobs = content.join("blobs");
+    let Ok(content_metadata) = fs::symlink_metadata(&content) else {
+        return;
+    };
+    if !private_directory(&content_metadata) {
+        push(
+            orphan("oci_content", content, "unsafe_content_directory"),
+            orphans,
+        );
+        return;
+    }
+    let Ok(entries) = fs::read_dir(&content) else {
+        push(
+            orphan("oci_content", content, "unreadable_content_directory"),
+            orphans,
+        );
+        return;
+    };
+    for entry in entries.flatten() {
+        if entry.file_name() != "blobs" {
+            push(
+                orphan("oci_content", entry.path(), "unexpected_content_object"),
+                orphans,
+            );
+        }
+    }
+    let Ok(blobs_metadata) = fs::symlink_metadata(&blobs) else {
+        return;
+    };
+    if !private_directory(&blobs_metadata) {
+        push(
+            orphan("oci_content", blobs, "unsafe_blob_directory"),
+            orphans,
+        );
+        return;
+    }
+    let Ok(entries) = fs::read_dir(&blobs) else {
+        push(
+            orphan("oci_content", blobs, "unreadable_blob_directory"),
+            orphans,
+        );
+        return;
+    };
+    for (index, entry) in entries.flatten().enumerate() {
+        if index == MAX_CONTENT_OBJECTS {
+            push(
+                OrphanEntry {
+                    kind: "oci_content",
+                    path: blobs.clone(),
+                    reason: "content_object_bound_exceeded",
+                    reclaimable_bytes: 0,
+                },
+                orphans,
+            );
+            break;
+        }
+        let path = entry.path();
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            push(
+                orphan("oci_content", path, "unknown_content_object"),
+                orphans,
+            );
+            continue;
+        };
+        let Ok(metadata) = fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if valid_blob_name(&name) {
+            let safe = private_regular(&metadata, 0o400);
+            match retained.get(&name) {
+                Some(size) if safe && metadata.len() == *size => {}
+                Some(_) => push(
+                    orphan("oci_blob", path, "unsafe_referenced_content_blob"),
+                    orphans,
+                ),
+                None if safe => push(
+                    orphan("oci_blob", path, "unreferenced_content_blob"),
+                    orphans,
+                ),
+                None => push(
+                    orphan("oci_blob", path, "unsafe_unreferenced_content_blob"),
+                    orphans,
+                ),
+            }
+        } else if valid_ingest_name(&name) {
+            let safe = private_regular(&metadata, 0o600) || private_regular(&metadata, 0o400);
+            push(
+                orphan(
+                    "oci_ingest",
+                    path,
+                    if safe {
+                        "interrupted_content_ingest"
+                    } else {
+                        "unsafe_content_ingest"
+                    },
+                ),
+                orphans,
+            );
+        } else {
+            push(
+                orphan("oci_content", path, "unknown_content_object"),
+                orphans,
+            );
+        }
+    }
+}
+
+fn private_directory(metadata: &fs::Metadata) -> bool {
+    metadata.is_dir() && metadata.uid() == current_uid() && metadata.mode() & 0o777 == 0o700
+}
+
+fn private_regular(metadata: &fs::Metadata, permissions: u32) -> bool {
+    metadata.is_file()
+        && metadata.uid() == current_uid()
+        && metadata.nlink() == 1
+        && metadata.mode() & 0o777 == permissions
+}
+
+fn valid_blob_name(name: &str) -> bool {
+    name.len() == 64
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn valid_ingest_name(name: &str) -> bool {
+    name.strip_prefix(".ingest-")
+        .and_then(|value| Uuid::parse_str(value).ok().map(|uuid| (value, uuid)))
+        .is_some_and(|(value, uuid)| value == uuid.to_string())
 }
 
 fn inventory_vms(
@@ -278,6 +418,7 @@ mod tests {
             &BTreeMap::from([(expected_id, 1024)]),
             &BTreeMap::new(),
             &BTreeSet::from([trash_name]),
+            &BTreeMap::new(),
         );
         assert!(entries.iter().any(|entry| {
             entry.path == unknown && entry.reason == "untracked_environment_tree"
@@ -293,5 +434,72 @@ mod tests {
         );
         assert!(unknown.join("data").exists());
         assert!(trash.exists());
+    }
+
+    #[test]
+    fn inventory_reports_only_unreferenced_or_unsafe_content_objects() {
+        let (_parent, root) = runtime_root();
+        let content = root.path().join("engine/content");
+        let blobs = content.join("blobs");
+        for path in [&content, &blobs] {
+            fs::create_dir(path).unwrap();
+            fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let retained = "a".repeat(64);
+        let stale = "b".repeat(64);
+        let unsafe_retained = "c".repeat(64);
+        let wrong_size = "d".repeat(64);
+        for (name, mode) in [
+            (&retained, 0o400),
+            (&stale, 0o400),
+            (&unsafe_retained, 0o600),
+            (&wrong_size, 0o400),
+        ] {
+            fs::write(blobs.join(name), b"content").unwrap();
+            fs::set_permissions(blobs.join(name), fs::Permissions::from_mode(mode)).unwrap();
+        }
+        let ingest = format!(".ingest-{}", Uuid::new_v4());
+        fs::write(blobs.join(&ingest), b"partial").unwrap();
+        fs::set_permissions(blobs.join(&ingest), fs::Permissions::from_mode(0o600)).unwrap();
+        let unknown = blobs.join("unknown");
+        fs::write(&unknown, b"unknown").unwrap();
+        fs::set_permissions(&unknown, fs::Permissions::from_mode(0o400)).unwrap();
+
+        let entries = inventory(
+            &root,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &BTreeSet::new(),
+            &BTreeMap::from([
+                (retained.clone(), b"content".len() as u64),
+                (unsafe_retained.clone(), b"content".len() as u64),
+                (wrong_size.clone(), b"content".len() as u64 + 1),
+            ]),
+        );
+
+        assert!(
+            !entries
+                .iter()
+                .any(|entry| entry.path == blobs.join(&retained))
+        );
+        assert!(entries.iter().any(|entry| {
+            entry.path == blobs.join(&stale) && entry.reason == "unreferenced_content_blob"
+        }));
+        assert!(entries.iter().any(|entry| {
+            entry.path == blobs.join(&unsafe_retained)
+                && entry.reason == "unsafe_referenced_content_blob"
+        }));
+        assert!(entries.iter().any(|entry| {
+            entry.path == blobs.join(&wrong_size)
+                && entry.reason == "unsafe_referenced_content_blob"
+        }));
+        assert!(entries.iter().any(|entry| {
+            entry.path == blobs.join(&ingest) && entry.reason == "interrupted_content_ingest"
+        }));
+        assert!(
+            entries
+                .iter()
+                .any(|entry| entry.path == unknown && entry.reason == "unknown_content_object")
+        );
     }
 }

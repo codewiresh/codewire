@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::io::{self, Read as _};
 use std::os::unix::fs::PermissionsExt as _;
@@ -15,6 +16,7 @@ use crate::linux::path::{PathError, PrivateRoot};
 const CONTENT_DIRECTORY: &str = "content";
 const BLOBS_DIRECTORY: &str = "blobs";
 const MAXIMUM_BLOB_BYTES: u64 = 16 * 1024 * 1024 * 1024;
+const MAXIMUM_CONTENT_OBJECTS: usize = 65_536;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BlobAdmission {
@@ -25,7 +27,15 @@ pub struct BlobAdmission {
 
 #[derive(Debug)]
 pub struct ContentStore {
+    content: PrivateRoot,
     blobs: PrivateRoot,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ContentCollection {
+    pub(crate) removed_blobs: Vec<Sha256Digest>,
+    pub(crate) removed_temporary_objects: usize,
+    pub(crate) reclaimed_bytes: u64,
 }
 
 impl ContentStore {
@@ -34,6 +44,7 @@ impl ContentStore {
         let content = PrivateRoot::open(&content_path)?;
         let blobs_path = content.ensure_dir(Path::new(BLOBS_DIRECTORY), 0o700)?;
         Ok(Self {
+            content,
             blobs: PrivateRoot::open(&blobs_path)?,
         })
     }
@@ -180,6 +191,119 @@ impl ContentStore {
         Ok(bytes)
     }
 
+    /// Collects only published blobs absent from the complete durable
+    /// supervisor reachability map, plus abandoned bounded ingest files.
+    ///
+    /// The supervisor singleton serializes this with resolution. Every object
+    /// is admitted before the first unlink so an unknown name, type, mode, or
+    /// hardlink leaves the full CAS unchanged for diagnosis.
+    pub(crate) fn collect_unreferenced(
+        &self,
+        retained: &BTreeMap<Sha256Digest, u64>,
+    ) -> Result<ContentCollection, ContentStoreError> {
+        if retained.values().any(|size| *size > MAXIMUM_BLOB_BYTES) {
+            return Err(ContentStoreError::BlobTooLarge);
+        }
+        for entry in fs::read_dir(self.content.path()).map_err(ContentStoreError::Io)? {
+            let entry = entry.map_err(ContentStoreError::Io)?;
+            if entry.file_name() != BLOBS_DIRECTORY {
+                return Err(ContentStoreError::UnexpectedObject(entry.path()));
+            }
+        }
+
+        let mut objects = Vec::new();
+        for entry in fs::read_dir(self.blobs.path()).map_err(ContentStoreError::Io)? {
+            let entry = entry.map_err(ContentStoreError::Io)?;
+            if objects.len() == MAXIMUM_CONTENT_OBJECTS {
+                return Err(ContentStoreError::ObjectLimit);
+            }
+            let path = entry.path();
+            let name = entry
+                .file_name()
+                .into_string()
+                .map_err(|_| ContentStoreError::UnexpectedObject(path.clone()))?;
+            if let Some(digest) = digest_from_blob_name(&name) {
+                let expected_size = retained.get(&digest).copied();
+                let opened = self.blobs.open_regular(
+                    Path::new(&name),
+                    false,
+                    expected_size,
+                    false,
+                    Some(0o400),
+                )?;
+                if opened.identity().size > MAXIMUM_BLOB_BYTES {
+                    return Err(ContentStoreError::BlobTooLarge);
+                }
+                objects.push(ContentObject {
+                    name,
+                    size: opened.identity().size,
+                    permissions: 0o400,
+                    digest: Some(digest),
+                    retained: expected_size.is_some(),
+                });
+                continue;
+            }
+            if valid_temporary_blob_name(&name) {
+                let (size, permissions) = self.admit_temporary_blob(&name)?;
+                objects.push(ContentObject {
+                    name,
+                    size,
+                    permissions,
+                    digest: None,
+                    retained: false,
+                });
+                continue;
+            }
+            return Err(ContentStoreError::UnexpectedObject(path));
+        }
+
+        let mut removed_blobs = Vec::new();
+        let mut removed_temporary_objects = 0_usize;
+        let mut reclaimed_bytes = 0_u64;
+        for object in objects.into_iter().filter(|object| !object.retained) {
+            if !self
+                .blobs
+                .remove_private_regular(Path::new(&object.name), object.permissions)?
+            {
+                return Err(ContentStoreError::UnexpectedObject(
+                    self.blobs.path().join(&object.name),
+                ));
+            }
+            reclaimed_bytes = reclaimed_bytes.saturating_add(object.size);
+            match object.digest {
+                Some(digest) => removed_blobs.push(digest),
+                None => removed_temporary_objects += 1,
+            }
+        }
+        removed_blobs.sort();
+        Ok(ContentCollection {
+            removed_blobs,
+            removed_temporary_objects,
+            reclaimed_bytes,
+        })
+    }
+
+    fn admit_temporary_blob(&self, name: &str) -> Result<(u64, u32), ContentStoreError> {
+        for permissions in [0o600, 0o400] {
+            match self
+                .blobs
+                .open_regular(Path::new(name), false, None, false, Some(permissions))
+            {
+                Ok(opened) => {
+                    if opened.identity().size > MAXIMUM_BLOB_BYTES {
+                        return Err(ContentStoreError::BlobTooLarge);
+                    }
+                    return Ok((opened.identity().size, permissions));
+                }
+                Err(PathError::UnsafeFile(_)) => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Err(ContentStoreError::UnexpectedObject(
+            self.blobs.path().join(name),
+        ))
+    }
+
     fn verify_existing(
         &self,
         digest: &Sha256Digest,
@@ -213,6 +337,27 @@ impl ContentStore {
         }
         Ok(true)
     }
+}
+
+#[derive(Debug)]
+struct ContentObject {
+    name: String,
+    size: u64,
+    permissions: u32,
+    digest: Option<Sha256Digest>,
+    retained: bool,
+}
+
+fn digest_from_blob_name(name: &str) -> Option<Sha256Digest> {
+    (name.len() == 64)
+        .then(|| Sha256Digest::parse(&format!("sha256:{name}")).ok())
+        .flatten()
+}
+
+fn valid_temporary_blob_name(name: &str) -> bool {
+    name.strip_prefix(".ingest-")
+        .and_then(|value| Uuid::parse_str(value).ok().map(|uuid| (value, uuid)))
+        .is_some_and(|(value, uuid)| value == uuid.to_string())
 }
 
 struct TemporaryBlob {
@@ -270,6 +415,10 @@ pub enum ContentStoreError {
     ExistingBlobInvalid,
     #[error("OCI CAS blob is missing")]
     BlobMissing,
+    #[error("OCI CAS contains too many objects")]
+    ObjectLimit,
+    #[error("OCI CAS contains an unknown or unsafe object: {0}")]
+    UnexpectedObject(PathBuf),
     #[error("OCI CAS filesystem I/O failed: {0}")]
     Io(io::Error),
     #[error(transparent)]
@@ -359,5 +508,103 @@ mod tests {
                 .await,
             Err(ContentStoreError::ExistingBlobInvalid)
         ));
+    }
+
+    #[tokio::test]
+    async fn collection_retains_reachable_blobs_and_removes_stale_ingest() {
+        let (_parent, store) = store();
+        let retained_bytes = Bytes::from_static(b"retained");
+        let retained_digest = digest(&retained_bytes);
+        store
+            .admit_bytes(&retained_digest, retained_bytes.clone())
+            .await
+            .unwrap();
+        let stale_bytes = Bytes::from_static(b"stale");
+        let stale_digest = digest(&stale_bytes);
+        store
+            .admit_bytes(&stale_digest, stale_bytes.clone())
+            .await
+            .unwrap();
+        let temporary = format!(".ingest-{}", Uuid::new_v4());
+        fs::write(store.blobs.path().join(&temporary), b"partial").unwrap();
+        fs::set_permissions(
+            store.blobs.path().join(&temporary),
+            fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+
+        let collected = store
+            .collect_unreferenced(&BTreeMap::from([(
+                retained_digest.clone(),
+                retained_bytes.len() as u64,
+            )]))
+            .unwrap();
+
+        assert_eq!(collected.removed_blobs, vec![stale_digest.clone()]);
+        assert_eq!(collected.removed_temporary_objects, 1);
+        assert_eq!(
+            collected.reclaimed_bytes,
+            stale_bytes.len() as u64 + b"partial".len() as u64
+        );
+        assert!(
+            store
+                .contains_verified(&retained_digest, retained_bytes.len() as u64)
+                .unwrap()
+        );
+        assert!(
+            !store
+                .contains_verified(&stale_digest, stale_bytes.len() as u64)
+                .unwrap()
+        );
+        assert!(!store.blobs.path().join(temporary).exists());
+    }
+
+    #[tokio::test]
+    async fn collection_rejects_unknown_objects_before_unlink() {
+        let (_parent, store) = store();
+        let stale_bytes = Bytes::from_static(b"stale");
+        let stale_digest = digest(&stale_bytes);
+        store
+            .admit_bytes(&stale_digest, stale_bytes.clone())
+            .await
+            .unwrap();
+        let unknown = store.blobs.path().join("unknown");
+        fs::write(&unknown, b"leave me").unwrap();
+        fs::set_permissions(&unknown, fs::Permissions::from_mode(0o400)).unwrap();
+
+        assert!(matches!(
+            store.collect_unreferenced(&BTreeMap::new()),
+            Err(ContentStoreError::UnexpectedObject(path)) if path == unknown
+        ));
+        assert!(
+            store
+                .contains_verified(&stale_digest, stale_bytes.len() as u64)
+                .unwrap()
+        );
+
+        fs::remove_file(&unknown).unwrap();
+        let parent_unknown = store.content.path().join("unknown");
+        fs::write(&parent_unknown, b"leave me").unwrap();
+        fs::set_permissions(&parent_unknown, fs::Permissions::from_mode(0o400)).unwrap();
+        assert!(matches!(
+            store.collect_unreferenced(&BTreeMap::new()),
+            Err(ContentStoreError::UnexpectedObject(path)) if path == parent_unknown
+        ));
+        assert!(store.blobs.path().join(stale_digest.hex()).is_file());
+    }
+
+    #[tokio::test]
+    async fn collection_never_retains_a_descriptor_with_the_wrong_size() {
+        let (_parent, store) = store();
+        let bytes = Bytes::from_static(b"retained");
+        let digest = digest(&bytes);
+        store.admit_bytes(&digest, bytes.clone()).await.unwrap();
+
+        assert!(matches!(
+            store
+                .collect_unreferenced(&BTreeMap::from([(digest.clone(), bytes.len() as u64 + 1,)])),
+            Err(ContentStoreError::Path(PathError::UnsafeFile(_)))
+        ));
+        assert!(store.blobs.path().join(digest.hex()).is_file());
     }
 }
