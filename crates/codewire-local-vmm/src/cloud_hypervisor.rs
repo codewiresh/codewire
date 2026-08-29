@@ -3,7 +3,9 @@ use std::fmt;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf};
 
-use codewire_vmm_guest_probe::{ROOT_DISK_SERIAL, SEED_DISK_SERIAL, STATE_DISK_SERIAL};
+use codewire_vmm_guest_probe::{
+    ROOT_DISK_SERIAL, SEED_DISK_SERIAL, SETUP_DISK_SERIAL, STATE_DISK_SERIAL,
+};
 
 use crate::artifact::{AdmittedArtifacts, ArtifactError, validate_parameter_path};
 
@@ -54,6 +56,7 @@ pub struct CloudHypervisorConfig {
     pub state_disk: PathBuf,
     pub root_disk: PathBuf,
     pub seed_disk: PathBuf,
+    pub setup_disk: Option<PathBuf>,
     pub api_socket: PathBuf,
     pub event_monitor: PathBuf,
     pub vsock_socket: PathBuf,
@@ -74,6 +77,7 @@ impl fmt::Debug for CloudHypervisorConfig {
             .field("state_disk", &self.state_disk)
             .field("root_disk", &self.root_disk)
             .field("seed_disk", &self.seed_disk)
+            .field("setup_disk", &self.setup_disk)
             .field("api_socket", &self.api_socket)
             .field("event_monitor", &self.event_monitor)
             .field("vsock_socket", &self.vsock_socket)
@@ -102,6 +106,72 @@ impl CloudHypervisorConfig {
         vcpus: u8,
         memory_mib: u32,
     ) -> Result<Self, CloudHypervisorConfigError> {
+        Self::new_inner(
+            artifacts,
+            state_disk,
+            root_disk,
+            seed_disk,
+            None,
+            api_socket,
+            event_monitor,
+            vsock_socket,
+            serial_log,
+            vmm_log,
+            vsock_cid,
+            vcpus,
+            memory_mib,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_setup(
+        artifacts: &AdmittedArtifacts,
+        state_disk: PathBuf,
+        root_disk: PathBuf,
+        seed_disk: PathBuf,
+        setup_disk: PathBuf,
+        api_socket: PathBuf,
+        event_monitor: PathBuf,
+        vsock_socket: PathBuf,
+        serial_log: PathBuf,
+        vmm_log: PathBuf,
+        vsock_cid: u32,
+        vcpus: u8,
+        memory_mib: u32,
+    ) -> Result<Self, CloudHypervisorConfigError> {
+        Self::new_inner(
+            artifacts,
+            state_disk,
+            root_disk,
+            seed_disk,
+            Some(setup_disk),
+            api_socket,
+            event_monitor,
+            vsock_socket,
+            serial_log,
+            vmm_log,
+            vsock_cid,
+            vcpus,
+            memory_mib,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new_inner(
+        artifacts: &AdmittedArtifacts,
+        state_disk: PathBuf,
+        root_disk: PathBuf,
+        seed_disk: PathBuf,
+        setup_disk: Option<PathBuf>,
+        api_socket: PathBuf,
+        event_monitor: PathBuf,
+        vsock_socket: PathBuf,
+        serial_log: PathBuf,
+        vmm_log: PathBuf,
+        vsock_cid: u32,
+        vcpus: u8,
+        memory_mib: u32,
+    ) -> Result<Self, CloudHypervisorConfigError> {
         let config = Self {
             executable: artifacts.cloud_hypervisor.path().to_owned(),
             kernel: artifacts.kernel.path().to_owned(),
@@ -109,6 +179,7 @@ impl CloudHypervisorConfig {
             state_disk,
             root_disk,
             seed_disk,
+            setup_disk,
             api_socket,
             event_monitor,
             vsock_socket,
@@ -137,6 +208,14 @@ impl CloudHypervisorConfig {
                 return Err(CloudHypervisorConfigError::NonAbsolutePath(path.to_owned()));
             }
             validate_parameter_path(path).map_err(CloudHypervisorConfigError::UnsafePath)?;
+        }
+        let mut disks = vec![&self.state_disk, &self.root_disk, &self.seed_disk];
+        if let Some(setup) = &self.setup_disk {
+            disks.push(setup);
+        }
+        disks.sort();
+        if disks.windows(2).any(|pair| pair[0] == pair[1]) {
+            return Err(CloudHypervisorConfigError::AliasedDiskPaths);
         }
         if self.api_socket == self.vsock_socket
             || self.api_socket.parent().is_none()
@@ -212,6 +291,17 @@ impl CloudHypervisorConfig {
                 SEED_DISK_SERIAL,
             ),
         );
+        if let Some(setup_disk) = &self.setup_disk {
+            push_option(
+                &mut arguments,
+                "--disk",
+                format!(
+                    "path={},readonly=on,direct=off,id=cw-setup,serial={},image_type=raw,backing_files=off,sparse=off,lock_granularity=full",
+                    display(setup_disk)?,
+                    SETUP_DISK_SERIAL,
+                ),
+            );
+        }
         push_option(
             &mut arguments,
             "--vsock",
@@ -232,7 +322,8 @@ impl CloudHypervisorConfig {
         push_option(&mut arguments, "--rng", "src=/dev/urandom");
         push_option(&mut arguments, "--seccomp", "true");
         // Native v53 Landlock derives its allowlist from the already parsed VM
-        // configuration. Because this command admits only the three disks,
+        // configuration. Because this command admits only the three durable/
+        // seed disks plus an optional one-boot read-only setup disk, the
         // kernel/initramfs, bounded diagnostics, API, and dedicated vsock
         // parent, no explicit
         // `--landlock-rules` broadening is permitted. This is defense in depth;
@@ -242,25 +333,30 @@ impl CloudHypervisorConfig {
         let command = CommandSpec {
             program: self.executable.clone(),
             arguments,
+            expected_disk_count: if self.setup_disk.is_some() { 4 } else { 3 },
         };
         command.validate_allowlist()?;
         Ok(command)
     }
 
-    fn paths(&self) -> [&Path; 11] {
-        [
-            &self.executable,
-            &self.kernel,
-            &self.initramfs,
-            &self.state_disk,
-            &self.root_disk,
-            &self.seed_disk,
-            &self.api_socket,
-            &self.event_monitor,
-            &self.vsock_socket,
-            &self.serial_log,
-            &self.vmm_log,
-        ]
+    fn paths(&self) -> Vec<&Path> {
+        let mut paths: Vec<&Path> = vec![
+            self.executable.as_path(),
+            self.kernel.as_path(),
+            self.initramfs.as_path(),
+            self.state_disk.as_path(),
+            self.root_disk.as_path(),
+            self.seed_disk.as_path(),
+            self.api_socket.as_path(),
+            self.event_monitor.as_path(),
+            self.vsock_socket.as_path(),
+            self.serial_log.as_path(),
+            self.vmm_log.as_path(),
+        ];
+        if let Some(setup) = &self.setup_disk {
+            paths.push(setup.as_path());
+        }
+        paths
     }
 }
 
@@ -268,6 +364,7 @@ impl CloudHypervisorConfig {
 pub struct CommandSpec {
     program: PathBuf,
     arguments: Vec<OsString>,
+    expected_disk_count: usize,
 }
 
 impl fmt::Debug for CommandSpec {
@@ -294,12 +391,17 @@ impl CommandSpec {
         Self {
             program,
             arguments: Vec::new(),
+            expected_disk_count: 3,
         }
     }
 
     #[cfg(test)]
     pub(crate) fn for_test_with_arguments(program: PathBuf, arguments: Vec<OsString>) -> Self {
-        Self { program, arguments }
+        Self {
+            program,
+            arguments,
+            expected_disk_count: 3,
+        }
     }
 
     pub fn validate_allowlist(&self) -> Result<(), CloudHypervisorConfigError> {
@@ -337,11 +439,16 @@ impl CommandSpec {
             }
         }
         for (required, expected_count) in ALLOWED_FLAG_COUNTS {
+            let expected_count = if *required == "--disk" {
+                self.expected_disk_count
+            } else {
+                *expected_count
+            };
             let actual_count = counts.get(required).copied().unwrap_or_default();
-            if actual_count != *expected_count {
+            if actual_count != expected_count {
                 return Err(CloudHypervisorConfigError::FlagCount {
                     flag: required,
-                    expected: *expected_count,
+                    expected: expected_count,
                     actual: actual_count,
                 });
             }
@@ -364,6 +471,8 @@ pub enum CloudHypervisorConfigError {
     UnsafePath(ArtifactError),
     #[error("Cloud Hypervisor API and hybrid-vsock sockets must be distinct")]
     AliasedSocketPaths,
+    #[error("Cloud Hypervisor disk paths must be distinct")]
+    AliasedDiskPaths,
     #[error("Cloud Hypervisor Unix socket path is too long: {0}")]
     SocketPathTooLong(PathBuf),
     #[error("Cloud Hypervisor configuration contains forbidden device flag {0}")]
@@ -487,6 +596,54 @@ mod tests {
         assert!(matches!(
             invalid_memory.command(),
             Err(CloudHypervisorConfigError::InvalidMemorySize)
+        ));
+    }
+
+    #[test]
+    fn setup_pack_is_an_exact_optional_fourth_read_only_disk() {
+        let mut with_setup = config();
+        with_setup.setup_disk = Some(
+            "/state/generations/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/setup.raw"
+                .into(),
+        );
+        let command = with_setup.command().unwrap();
+        let args = command
+            .arguments()
+            .iter()
+            .map(|argument| argument.to_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(args.iter().filter(|value| **value == "--disk").count(), 4);
+        assert!(args.iter().any(|argument| {
+            argument.contains("id=cw-setup")
+                && argument.contains("serial=CWSETUP1")
+                && argument.contains("readonly=on")
+                && argument.contains("sparse=off")
+                && argument.contains("lock_granularity=full")
+        }));
+        command.validate_allowlist().unwrap();
+
+        let mut unexpected = config().command().unwrap();
+        unexpected.arguments.push(OsString::from("--disk"));
+        unexpected.arguments.push(OsString::from(
+            "path=/state/extra.raw,readonly=on,id=unexpected",
+        ));
+        assert!(matches!(
+            unexpected.validate_allowlist(),
+            Err(CloudHypervisorConfigError::FlagCount {
+                flag: "--disk",
+                expected: 3,
+                actual: 4
+            })
+        ));
+    }
+
+    #[test]
+    fn setup_pack_must_not_alias_another_disk() {
+        let mut config = config();
+        config.setup_disk = Some(config.root_disk.clone());
+        assert!(matches!(
+            config.validate(),
+            Err(CloudHypervisorConfigError::AliasedDiskPaths)
         ));
     }
 

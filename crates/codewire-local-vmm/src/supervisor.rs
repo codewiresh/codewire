@@ -1331,6 +1331,8 @@ impl SupervisorCore {
                 memory_mib: environment.memory_mib,
                 root_generation,
                 root_disk_bytes: DEFAULT_ROOT_DISK_BYTES,
+                setup_total_bytes: 0,
+                setup_header_sha256: String::new(),
             })
             .await
             .map_err(|status| SupervisorError::VmStart(status.message().to_owned()))?;

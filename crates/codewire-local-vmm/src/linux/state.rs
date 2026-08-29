@@ -121,6 +121,7 @@ pub struct RootGenerationPaths {
     pub generation: String,
     pub generation_dir: PathBuf,
     pub root_disk: PathBuf,
+    pub setup_disk: PathBuf,
 }
 
 impl RootGenerationPaths {
@@ -133,6 +134,7 @@ impl RootGenerationPaths {
         Ok(Self {
             generation: generation.to_owned(),
             root_disk: generation_dir.join("root.raw"),
+            setup_disk: generation_dir.join("setup.raw"),
             generation_dir,
         })
     }
@@ -417,6 +419,7 @@ pub fn cleanup_trashed_vm(
     if let Some(generations) = optional_private_directory(&vm, Path::new("generations"))? {
         for name in admitted_generation_names(&generations)? {
             let generation = generations.open_private_directory(Path::new(&name), 0o700)?;
+            generation.remove_private_regular(Path::new("setup.raw"), 0o400)?;
             generation.remove_private_regular(Path::new("root.raw"), 0o600)?;
             drop(generation);
             generations.remove_empty_private_directory(Path::new(&name))?;
@@ -508,8 +511,13 @@ pub(crate) fn validate_owned_vm_tree(vm: &PrivateRoot) -> Result<(), StateError>
     if let Some(generations) = optional_private_directory(vm, Path::new("generations"))? {
         for name in admitted_generation_names(&generations)? {
             let generation = generations.open_private_directory(Path::new(&name), 0o700)?;
-            ensure_only_entries(generation.path(), &["root.raw"])?;
+            ensure_only_entries(generation.path(), &["root.raw", "setup.raw"])?;
             match generation.open_regular(Path::new("root.raw"), false, None, false, Some(0o600)) {
+                Ok(_) => {}
+                Err(error) if path_error_is_not_found(&error) => {}
+                Err(error) => return Err(error.into()),
+            }
+            match generation.open_regular(Path::new("setup.raw"), false, None, false, Some(0o400)) {
                 Ok(_) => {}
                 Err(error) if path_error_is_not_found(&error) => {}
                 Err(error) => return Err(error.into()),
@@ -891,6 +899,8 @@ mod tests {
         for generation in ["a".repeat(64), "b".repeat(64)] {
             let generation = RootGenerationPaths::create(&paths, &generation).unwrap();
             write_minimal_ext4(&generation.root_disk, Uuid::new_v4());
+            fs::write(&generation.setup_disk, b"setup").unwrap();
+            fs::set_permissions(&generation.setup_disk, fs::Permissions::from_mode(0o400)).unwrap();
         }
 
         let trash = move_stopped_vm_to_trash(root.path(), vm_id, operation_id).unwrap();

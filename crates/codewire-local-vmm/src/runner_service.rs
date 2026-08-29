@@ -9,6 +9,8 @@ use tokio::sync::{Mutex, mpsc, oneshot};
 use tonic::{Request, Response, Status};
 use uuid::Uuid;
 
+use codewire_vmm_guest_probe::{SetupBinding, Sha256Value};
+
 use crate::control::v1;
 use crate::control::v1::environment_runner_service_client::EnvironmentRunnerServiceClient;
 use crate::control::v1::environment_runner_service_server::{
@@ -239,6 +241,7 @@ impl EnvironmentRunnerService for RunnerRpc {
         let environment_id = parse_environment_id(&request.environment_id)?;
         let vcpus = u8::try_from(request.vcpus)
             .map_err(|_| Status::invalid_argument("invalid vCPU count"))?;
+        let setup = parse_setup_binding(&request)?;
         let mut state = self.state.lock().await;
         if !state.adopted {
             return Err(Status::failed_precondition("runner is not adopted"));
@@ -265,6 +268,7 @@ impl EnvironmentRunnerService for RunnerRpc {
                 root_disk_bytes: request.root_disk_bytes,
                 vcpus,
                 memory_mib: request.memory_mib,
+                setup,
             })
             .await
         {
@@ -286,10 +290,10 @@ impl EnvironmentRunnerService for RunnerRpc {
             state.state = v1::EnvironmentState::Error;
             return Err(error);
         }
-        if running.discard_seed().is_err() {
+        if running.discard_one_boot_inputs().is_err() {
             let _ = running.stop().await;
             state.state = v1::EnvironmentState::Error;
-            return Err(Status::internal("one-boot guest seed cleanup failed"));
+            return Err(Status::internal("one-boot guest input cleanup failed"));
         }
         state.generation = request.generation;
         state.state = v1::EnvironmentState::Running;
@@ -406,6 +410,26 @@ fn parse_environment_id(value: &str) -> Result<Uuid, Status> {
     Ok(id)
 }
 
+fn parse_setup_binding(request: &v1::StartVmRequest) -> Result<Option<SetupBinding>, Status> {
+    match (
+        request.setup_total_bytes,
+        request.setup_header_sha256.as_str(),
+    ) {
+        (0, "") => Ok(None),
+        (total_bytes, header_sha256) if total_bytes > 0 && !header_sha256.is_empty() => {
+            let root_generation = Sha256Value::parse_hex(&request.root_generation)
+                .map_err(|_| Status::invalid_argument("invalid setup root generation"))?;
+            let header_sha256 = Sha256Value::parse_hex(header_sha256)
+                .map_err(|_| Status::invalid_argument("invalid setup header digest"))?;
+            Ok(Some(
+                SetupBinding::new(total_bytes, root_generation, header_sha256)
+                    .map_err(|_| Status::invalid_argument("invalid setup binding"))?,
+            ))
+        }
+        _ => Err(Status::invalid_argument("incomplete setup binding")),
+    }
+}
+
 fn map_start_error(error: RunnerError) -> Status {
     Status::failed_precondition(error.to_string())
 }
@@ -480,5 +504,40 @@ mod tests {
         let status = map_start_error(RunnerError::StartTimeout);
         assert_eq!(status.code(), tonic::Code::FailedPrecondition);
         assert_eq!(status.message(), "Cloud Hypervisor startup timed out");
+    }
+
+    #[test]
+    fn private_start_requires_an_exact_complete_setup_binding() {
+        let root_generation = "a".repeat(64);
+        let header_sha256 = "b".repeat(64);
+        let request = v1::StartVmRequest {
+            root_generation: root_generation.clone(),
+            setup_total_bytes: codewire_vmm_guest_probe::SETUP_HEADER_LEN as u64
+                + codewire_vmm_guest_probe::SETUP_ALIGNMENT,
+            setup_header_sha256: header_sha256.clone(),
+            ..Default::default()
+        };
+        let binding = parse_setup_binding(&request).unwrap().unwrap();
+        assert_eq!(binding.root_generation().to_string(), root_generation);
+        assert_eq!(binding.header_sha256().to_string(), header_sha256);
+
+        let mut incomplete = request.clone();
+        incomplete.setup_header_sha256.clear();
+        assert_eq!(
+            parse_setup_binding(&incomplete).unwrap_err().code(),
+            tonic::Code::InvalidArgument
+        );
+
+        let mut invalid = request;
+        invalid.setup_header_sha256 = "B".repeat(64);
+        assert_eq!(
+            parse_setup_binding(&invalid).unwrap_err().code(),
+            tonic::Code::InvalidArgument
+        );
+        assert!(
+            parse_setup_binding(&v1::StartVmRequest::default())
+                .unwrap()
+                .is_none()
+        );
     }
 }

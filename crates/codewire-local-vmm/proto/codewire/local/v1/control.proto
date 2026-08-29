@@ -142,6 +142,11 @@ message StartVmRequest {
   // independent from the monotonically increasing VM boot generation.
   string root_generation = 8;
   uint64 root_disk_bytes = 9;
+  // Optional one-boot, credential-free setup-pack binding. Both fields must
+  // be absent/zero or valid together; the runner derives the exact private
+  // generation path and never accepts an arbitrary host pathname.
+  uint64 setup_total_bytes = 10;
+  string setup_header_sha256 = 11;
 }
 
 message StopVmRequest {}

@@ -1,6 +1,6 @@
 use std::ffi::{CString, OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::mem::size_of;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
@@ -25,7 +25,10 @@ use tokio_vsock::{
 use zeroize::Zeroizing;
 
 use crate::newc::BASIC_BUSYBOX_APPLETS;
-use crate::{ROOT_DISK_SERIAL, SEED_DISK_SERIAL, SEED_LEN, STATE_DISK_SERIAL, Seed};
+use crate::{
+    ROOT_DISK_SERIAL, SEED_DISK_SERIAL, SEED_LEN, SETUP_DISK_SERIAL, SETUP_HEADER_LEN,
+    STATE_DISK_SERIAL, Seed, SetupArchitecture, SetupBinding, SetupHeader, Sha256Value,
+};
 
 pub const INIT_PATH: &str = "/init";
 pub const STATE_MOUNT_PATH: &str = "/state";
@@ -144,6 +147,24 @@ pub fn run_init() -> Result<()> {
     // control traffic. The child deliberately rereads it from the immutable
     // disk rather than inheriting the token through argv or environment.
     let seed = read_seed_file(&seed_device)?;
+    if let Some(binding) = seed.setup() {
+        let setup_device = wait_for_disk_by_serial(
+            Path::new(SYS_BLOCK_PATH),
+            Path::new(DEV_PATH),
+            SETUP_DISK_SERIAL,
+            DISK_DISCOVERY_TIMEOUT,
+        )?;
+        ensure!(
+            setup_device != state_device
+                && setup_device != root_device
+                && setup_device != seed_device,
+            "setup disk must be distinct from every persistent or secret-bearing disk"
+        );
+        validate_block_device(&setup_device)?;
+        let _header = admit_setup_header(&setup_device, binding)?;
+        record_boot_stage("setup-header-ready")?;
+        bail!("verified OCI setup requires guest layer application support");
+    }
     let poweroff = prepare_container_control(&seed)?;
     record_boot_stage("container-control-ready")?;
     prepare_workspace_generation()?;
@@ -651,6 +672,64 @@ fn read_seed_file(path: &Path) -> Result<Seed> {
         "guest seed disk has invalid length"
     );
     Seed::decode(&bytes).context("decode guest seed")
+}
+
+fn admit_setup_header(path: &Path, binding: SetupBinding) -> Result<SetupHeader> {
+    let mut options = OpenOptions::new();
+    options
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    let mut setup = options
+        .open(path)
+        .with_context(|| format!("open guest setup disk {}", path.display()))?;
+    let metadata = setup
+        .metadata()
+        .with_context(|| format!("inspect guest setup disk {}", path.display()))?;
+    ensure!(
+        metadata.file_type().is_block_device(),
+        "guest setup path is not a block device"
+    );
+    verify_setup_header(&mut setup, binding)
+}
+
+fn verify_setup_header(
+    input: &mut (impl Read + Seek),
+    binding: SetupBinding,
+) -> Result<SetupHeader> {
+    let total_bytes = input
+        .seek(SeekFrom::End(0))
+        .context("measure guest setup device")?;
+    ensure!(
+        total_bytes == binding.total_bytes(),
+        "guest setup device size differs from its seed binding"
+    );
+    input
+        .seek(SeekFrom::Start(0))
+        .context("rewind guest setup device")?;
+    let mut bytes = vec![0_u8; SETUP_HEADER_LEN];
+    input
+        .read_exact(&mut bytes)
+        .context("read guest setup header")?;
+    ensure!(
+        Sha256Value::calculate(&bytes) == binding.header_sha256(),
+        "guest setup header differs from its seed binding"
+    );
+    let header = SetupHeader::decode(&bytes).context("decode guest setup header")?;
+    ensure!(
+        header.total_bytes == binding.total_bytes()
+            && header.root_generation == binding.root_generation(),
+        "guest setup header identity differs from its seed binding"
+    );
+    let native = match std::env::consts::ARCH {
+        "x86_64" => SetupArchitecture::Amd64,
+        "aarch64" => SetupArchitecture::Arm64,
+        _ => bail!("guest setup architecture is unsupported"),
+    };
+    ensure!(
+        header.architecture == native,
+        "guest setup architecture is not native"
+    );
+    Ok(header)
 }
 
 fn read_bounded(path: &Path, limit: usize) -> io::Result<Vec<u8>> {
@@ -2074,6 +2153,69 @@ mod tests {
             runtime["options"],
             serde_json::json!(["bind", "ro", "nosuid", "nodev"])
         );
+    }
+
+    #[test]
+    fn setup_header_is_seed_size_digest_generation_and_architecture_bound() {
+        use std::io::Cursor;
+
+        use crate::{SETUP_ALIGNMENT, SetupBlob};
+
+        let architecture = match std::env::consts::ARCH {
+            "x86_64" => SetupArchitecture::Amd64,
+            "aarch64" => SetupArchitecture::Arm64,
+            other => panic!("unsupported test architecture {other}"),
+        };
+        let project_sha256 = Sha256Value::calculate(b"{}");
+        let manifest_sha256 = Sha256Value::calculate(b"manifest");
+        let root_generation =
+            crate::oci_root_generation(project_sha256, manifest_sha256, architecture);
+        let header = SetupHeader::layout(
+            root_generation,
+            manifest_sha256,
+            architecture,
+            SetupBlob {
+                size: 2,
+                sha256: project_sha256,
+            },
+            SetupBlob {
+                size: 2,
+                sha256: Sha256Value::calculate(b"{}"),
+            },
+            Vec::new(),
+        )
+        .unwrap();
+        let header_bytes = header.encode().unwrap();
+        let binding = SetupBinding::new(
+            header.total_bytes,
+            root_generation,
+            Sha256Value::calculate(&header_bytes),
+        )
+        .unwrap();
+        let mut pack = header_bytes;
+        pack.resize(header.total_bytes as usize, 0);
+        assert_eq!(
+            verify_setup_header(&mut Cursor::new(&pack), binding).unwrap(),
+            header
+        );
+
+        let mut truncated = pack.clone();
+        truncated.truncate(truncated.len() - SETUP_ALIGNMENT as usize);
+        assert!(verify_setup_header(&mut Cursor::new(truncated), binding).is_err());
+
+        let mut corrupt = pack;
+        corrupt[100] ^= 1;
+        assert!(verify_setup_header(&mut Cursor::new(corrupt), binding).is_err());
+
+        let wrong_generation = SetupBinding::new(
+            header.total_bytes,
+            Sha256Value::calculate(b"other-root"),
+            binding.header_sha256(),
+        )
+        .unwrap();
+        let mut exact = header.encode().unwrap();
+        exact.resize(header.total_bytes as usize, 0);
+        assert!(verify_setup_header(&mut Cursor::new(exact), wrong_generation).is_err());
     }
 
     #[test]

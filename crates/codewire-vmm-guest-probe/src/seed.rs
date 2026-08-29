@@ -5,14 +5,18 @@ use thiserror::Error;
 use uuid::Uuid;
 use zeroize::Zeroize;
 
+use crate::{MAX_SETUP_PACK_BYTES, SETUP_ALIGNMENT, SETUP_HEADER_LEN, Sha256Value};
+
 pub const SEED_LEN: usize = 4096;
 pub const SEED_DISK_SERIAL: &str = "CWSEED1";
 pub const STATE_DISK_SERIAL: &str = "CWSTATE1";
 pub const ROOT_DISK_SERIAL: &str = "CWROOT1";
 
 const MAGIC: &[u8; 8] = b"CWSEED1\0";
-const FORMAT_VERSION: u16 = 1;
-const HEADER_LEN: usize = 48;
+const FORMAT_VERSION_V1: u16 = 1;
+const FORMAT_VERSION_V2: u16 = 2;
+const HEADER_LEN_V1: usize = 48;
+const HEADER_LEN_V2: usize = 128;
 const CHECKSUM_LEN: usize = 32;
 const CHECKSUM_OFFSET: usize = SEED_LEN - CHECKSUM_LEN;
 const TOKEN_MAX_LEN: usize = 512;
@@ -25,8 +29,58 @@ const VM_ID_OFFSET: usize = 16;
 const GENERATION_OFFSET: usize = 32;
 const PORT_OFFSET: usize = 40;
 const TOKEN_LEN_OFFSET: usize = 44;
-const RESERVED_OFFSET: usize = 46;
-const TOKEN_OFFSET: usize = HEADER_LEN;
+const FLAGS_OFFSET: usize = 46;
+const SETUP_TOTAL_LEN_OFFSET: usize = 48;
+const SETUP_ROOT_GENERATION_OFFSET: usize = 56;
+const SETUP_HEADER_SHA256_OFFSET: usize = 88;
+const V2_RESERVED_OFFSET: usize = 120;
+const TOKEN_OFFSET_V1: usize = HEADER_LEN_V1;
+const TOKEN_OFFSET_V2: usize = HEADER_LEN_V2;
+const SETUP_PRESENT_FLAG: u16 = 1;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SetupBinding {
+    total_bytes: u64,
+    root_generation: Sha256Value,
+    header_sha256: Sha256Value,
+}
+
+impl SetupBinding {
+    pub fn new(
+        total_bytes: u64,
+        root_generation: Sha256Value,
+        header_sha256: Sha256Value,
+    ) -> Result<Self, SeedError> {
+        let binding = Self {
+            total_bytes,
+            root_generation,
+            header_sha256,
+        };
+        binding.validate()?;
+        Ok(binding)
+    }
+
+    pub fn total_bytes(self) -> u64 {
+        self.total_bytes
+    }
+
+    pub fn root_generation(self) -> Sha256Value {
+        self.root_generation
+    }
+
+    pub fn header_sha256(self) -> Sha256Value {
+        self.header_sha256
+    }
+
+    fn validate(self) -> Result<(), SeedError> {
+        if !(SETUP_HEADER_LEN as u64..=MAX_SETUP_PACK_BYTES).contains(&self.total_bytes)
+            || !self.total_bytes.is_multiple_of(SETUP_ALIGNMENT)
+        {
+            return Err(SeedError::InvalidSetupBinding);
+        }
+        Ok(())
+    }
+}
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct Seed {
@@ -34,6 +88,7 @@ pub struct Seed {
     generation: u64,
     daemon_vsock_port: u32,
     auth_token: String,
+    setup: Option<SetupBinding>,
 }
 
 impl Seed {
@@ -48,6 +103,25 @@ impl Seed {
             generation,
             daemon_vsock_port,
             auth_token: auth_token.into(),
+            setup: None,
+        };
+        seed.validate()?;
+        Ok(seed)
+    }
+
+    pub fn new_with_setup(
+        vm_id: Uuid,
+        generation: u64,
+        daemon_vsock_port: u32,
+        auth_token: impl Into<String>,
+        setup: SetupBinding,
+    ) -> Result<Self, SeedError> {
+        let seed = Self {
+            vm_id,
+            generation,
+            daemon_vsock_port,
+            auth_token: auth_token.into(),
+            setup: Some(setup),
         };
         seed.validate()?;
         Ok(seed)
@@ -69,6 +143,10 @@ impl Seed {
         &self.auth_token
     }
 
+    pub fn setup(&self) -> Option<SetupBinding> {
+        self.setup
+    }
+
     pub fn encode(&self) -> [u8; SEED_LEN] {
         // Construction and decoding are the only ways to obtain a Seed, so
         // these invariants have already been checked.
@@ -76,14 +154,26 @@ impl Seed {
 
         let mut bytes = [0_u8; SEED_LEN];
         bytes[..MAGIC.len()].copy_from_slice(MAGIC);
-        put_u16(&mut bytes, VERSION_OFFSET, FORMAT_VERSION);
-        put_u16(&mut bytes, HEADER_LEN_OFFSET, HEADER_LEN as u16);
+        let (version, header_len, token_offset) = match self.setup {
+            Some(_) => (FORMAT_VERSION_V2, HEADER_LEN_V2, TOKEN_OFFSET_V2),
+            None => (FORMAT_VERSION_V1, HEADER_LEN_V1, TOKEN_OFFSET_V1),
+        };
+        put_u16(&mut bytes, VERSION_OFFSET, version);
+        put_u16(&mut bytes, HEADER_LEN_OFFSET, header_len as u16);
         put_u32(&mut bytes, TOTAL_LEN_OFFSET, SEED_LEN as u32);
         bytes[VM_ID_OFFSET..VM_ID_OFFSET + 16].copy_from_slice(self.vm_id.as_bytes());
         put_u64(&mut bytes, GENERATION_OFFSET, self.generation);
         put_u32(&mut bytes, PORT_OFFSET, self.daemon_vsock_port);
         put_u16(&mut bytes, TOKEN_LEN_OFFSET, self.auth_token.len() as u16);
-        bytes[TOKEN_OFFSET..TOKEN_OFFSET + self.auth_token.len()]
+        if let Some(setup) = self.setup {
+            put_u16(&mut bytes, FLAGS_OFFSET, SETUP_PRESENT_FLAG);
+            put_u64(&mut bytes, SETUP_TOTAL_LEN_OFFSET, setup.total_bytes);
+            bytes[SETUP_ROOT_GENERATION_OFFSET..SETUP_ROOT_GENERATION_OFFSET + 32]
+                .copy_from_slice(&setup.root_generation.as_bytes());
+            bytes[SETUP_HEADER_SHA256_OFFSET..SETUP_HEADER_SHA256_OFFSET + 32]
+                .copy_from_slice(&setup.header_sha256.as_bytes());
+        }
+        bytes[token_offset..token_offset + self.auth_token.len()]
             .copy_from_slice(self.auth_token.as_bytes());
 
         let checksum = Sha256::digest(&bytes[..CHECKSUM_OFFSET]);
@@ -100,19 +190,8 @@ impl Seed {
         if &bytes[..MAGIC.len()] != MAGIC {
             return Err(SeedError::BadMagic);
         }
-        if get_u16(bytes, VERSION_OFFSET) != FORMAT_VERSION {
-            return Err(SeedError::UnsupportedVersion);
-        }
-        if usize::from(get_u16(bytes, HEADER_LEN_OFFSET)) != HEADER_LEN
-            || get_u32(bytes, TOTAL_LEN_OFFSET) as usize != SEED_LEN
-        {
+        if get_u32(bytes, TOTAL_LEN_OFFSET) as usize != SEED_LEN {
             return Err(SeedError::InvalidFraming);
-        }
-        if bytes[RESERVED_OFFSET..HEADER_LEN]
-            .iter()
-            .any(|byte| *byte != 0)
-        {
-            return Err(SeedError::NonZeroReserved);
         }
 
         let expected_checksum = Sha256::digest(&bytes[..CHECKSUM_OFFSET]);
@@ -120,8 +199,49 @@ impl Seed {
             return Err(SeedError::ChecksumMismatch);
         }
 
+        let (token_offset, setup) = match get_u16(bytes, VERSION_OFFSET) {
+            FORMAT_VERSION_V1 => {
+                if usize::from(get_u16(bytes, HEADER_LEN_OFFSET)) != HEADER_LEN_V1 {
+                    return Err(SeedError::InvalidFraming);
+                }
+                if get_u16(bytes, FLAGS_OFFSET) != 0 {
+                    return Err(SeedError::NonZeroReserved);
+                }
+                (TOKEN_OFFSET_V1, None)
+            }
+            FORMAT_VERSION_V2 => {
+                if usize::from(get_u16(bytes, HEADER_LEN_OFFSET)) != HEADER_LEN_V2 {
+                    return Err(SeedError::InvalidFraming);
+                }
+                if get_u16(bytes, FLAGS_OFFSET) != SETUP_PRESENT_FLAG
+                    || bytes[V2_RESERVED_OFFSET..HEADER_LEN_V2]
+                        .iter()
+                        .any(|byte| *byte != 0)
+                {
+                    return Err(SeedError::NonZeroReserved);
+                }
+                let root_generation = Sha256Value::from_bytes(
+                    bytes[SETUP_ROOT_GENERATION_OFFSET..SETUP_ROOT_GENERATION_OFFSET + 32]
+                        .try_into()
+                        .expect("fixed seed setup digest"),
+                );
+                let header_sha256 = Sha256Value::from_bytes(
+                    bytes[SETUP_HEADER_SHA256_OFFSET..SETUP_HEADER_SHA256_OFFSET + 32]
+                        .try_into()
+                        .expect("fixed seed setup digest"),
+                );
+                let setup = SetupBinding::new(
+                    get_u64(bytes, SETUP_TOTAL_LEN_OFFSET),
+                    root_generation,
+                    header_sha256,
+                )?;
+                (TOKEN_OFFSET_V2, Some(setup))
+            }
+            _ => return Err(SeedError::UnsupportedVersion),
+        };
+
         let token_len = usize::from(get_u16(bytes, TOKEN_LEN_OFFSET));
-        let token_end = TOKEN_OFFSET
+        let token_end = token_offset
             .checked_add(token_len)
             .filter(|end| *end <= CHECKSUM_OFFSET)
             .ok_or(SeedError::InvalidTokenLength { actual: token_len })?;
@@ -132,16 +252,25 @@ impl Seed {
             return Err(SeedError::NonZeroPadding);
         }
 
-        let token = std::str::from_utf8(&bytes[TOKEN_OFFSET..token_end])
+        let token = std::str::from_utf8(&bytes[token_offset..token_end])
             .map_err(|_| SeedError::InvalidTokenCharacters)?;
         let vm_id = Uuid::from_slice(&bytes[VM_ID_OFFSET..VM_ID_OFFSET + 16])
             .map_err(|_| SeedError::InvalidVmId)?;
-        Self::new(
-            vm_id,
-            get_u64(bytes, GENERATION_OFFSET),
-            get_u32(bytes, PORT_OFFSET),
-            token,
-        )
+        match setup {
+            Some(setup) => Self::new_with_setup(
+                vm_id,
+                get_u64(bytes, GENERATION_OFFSET),
+                get_u32(bytes, PORT_OFFSET),
+                token,
+                setup,
+            ),
+            None => Self::new(
+                vm_id,
+                get_u64(bytes, GENERATION_OFFSET),
+                get_u32(bytes, PORT_OFFSET),
+                token,
+            ),
+        }
     }
 
     fn validate(&self) -> Result<(), SeedError> {
@@ -167,6 +296,9 @@ impl Seed {
         {
             return Err(SeedError::InvalidTokenCharacters);
         }
+        if let Some(setup) = self.setup {
+            setup.validate()?;
+        }
         Ok(())
     }
 }
@@ -179,6 +311,7 @@ impl fmt::Debug for Seed {
             .field("generation", &self.generation)
             .field("daemon_vsock_port", &self.daemon_vsock_port)
             .field("auth_token", &"[REDACTED]")
+            .field("setup", &self.setup)
             .finish()
     }
 }
@@ -215,6 +348,8 @@ pub enum SeedError {
     InvalidTokenLength { actual: usize },
     #[error("seed daemon token contains invalid characters")]
     InvalidTokenCharacters,
+    #[error("seed setup binding is invalid")]
+    InvalidSetupBinding,
 }
 
 fn put_u16(bytes: &mut [u8], offset: usize, value: u16) {
@@ -300,13 +435,13 @@ mod tests {
     #[test]
     fn seed_rejects_bad_framing_and_token_data() {
         let mut encoded = sample_seed().encode();
-        encoded[RESERVED_OFFSET] = 1;
+        encoded[FLAGS_OFFSET] = 1;
         let checksum = Sha256::digest(&encoded[..CHECKSUM_OFFSET]);
         encoded[CHECKSUM_OFFSET..].copy_from_slice(&checksum);
         assert_eq!(Seed::decode(&encoded), Err(SeedError::NonZeroReserved));
 
         let mut encoded = sample_seed().encode();
-        encoded[TOKEN_OFFSET] = b' ';
+        encoded[TOKEN_OFFSET_V1] = b' ';
         let checksum = Sha256::digest(&encoded[..CHECKSUM_OFFSET]);
         encoded[CHECKSUM_OFFSET..].copy_from_slice(&checksum);
         assert_eq!(
@@ -322,7 +457,7 @@ mod tests {
         assert!(!rendered.contains(TOKEN));
 
         let mut corrupt = sample_seed().encode();
-        corrupt[TOKEN_OFFSET] = b'!';
+        corrupt[TOKEN_OFFSET_V1] = b'!';
         let error = Seed::decode(&corrupt).unwrap_err().to_string();
         assert!(!error.contains(TOKEN));
         assert!(!error.contains("012345"));
@@ -346,5 +481,39 @@ mod tests {
                 actual: TOKEN_MIN_LEN - 1
             })
         );
+    }
+
+    #[test]
+    fn seed_v2_binds_one_boot_setup_without_changing_v1() {
+        let setup = SetupBinding::new(
+            SETUP_HEADER_LEN as u64 + SETUP_ALIGNMENT,
+            Sha256Value::calculate(b"root-generation"),
+            Sha256Value::calculate(b"setup-header"),
+        )
+        .unwrap();
+        let seed = Seed::new_with_setup(
+            Uuid::parse_str("8c3d9e72-e77f-4e75-9396-43a292614fa7").unwrap(),
+            7,
+            17777,
+            TOKEN,
+            setup,
+        )
+        .unwrap();
+        let encoded = seed.encode();
+        assert_eq!(
+            format!("{:x}", Sha256::digest(encoded)),
+            "93276f73b575a81fbbda6e7ea504173bfb2185668eaa7e5d375c765c22f22d40"
+        );
+        assert_eq!(get_u16(&encoded, VERSION_OFFSET), FORMAT_VERSION_V2);
+        assert_eq!(get_u16(&encoded, HEADER_LEN_OFFSET), HEADER_LEN_V2 as u16);
+        assert_eq!(Seed::decode(&encoded).unwrap(), seed);
+        assert_eq!(seed.setup(), Some(setup));
+        assert_eq!(sample_seed().setup(), None);
+
+        let mut corrupt = encoded;
+        corrupt[V2_RESERVED_OFFSET] = 1;
+        let checksum = Sha256::digest(&corrupt[..CHECKSUM_OFFSET]);
+        corrupt[CHECKSUM_OFFSET..].copy_from_slice(&checksum);
+        assert_eq!(Seed::decode(&corrupt), Err(SeedError::NonZeroReserved));
     }
 }

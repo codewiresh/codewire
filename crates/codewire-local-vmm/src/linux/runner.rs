@@ -5,7 +5,7 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use codewire_daemon::client::{SessionClient, v1 as daemon_v1};
-use codewire_vmm_guest_probe::Seed;
+use codewire_vmm_guest_probe::{Seed, SetupBinding};
 use rand::{RngCore, rngs::OsRng};
 use rustix::process::Signal;
 use sha2::{Digest, Sha256};
@@ -17,13 +17,13 @@ use crate::ch_api::{ChApiClient, ChApiError};
 use crate::cloud_hypervisor::{CloudHypervisorConfig, CloudHypervisorConfigError, CommandSpec};
 use crate::hybrid_vsock::{HybridVsockError, HybridVsockTarget};
 
-use super::path::{PathError, PrivateRoot, set_socket_private};
+use super::path::{FileIdentity, PathError, PrivateRoot, set_socket_private};
 use super::preflight::{PreflightError, PreflightReport, preflight};
 use super::process::{LiveProcess, RecoveryError, signal_unreaped_child};
 use super::state::{
     MINIMUM_ROOT_DISK_BYTES, MINIMUM_STATE_DISK_BYTES, PERSISTED_STATE_SCHEMA_VERSION,
-    PersistedVmState, StateDiskIdentity, StateError, VmLock, VmPaths, VmPhase, publish_seed,
-    valid_root_generation,
+    PersistedVmState, RootGenerationPaths, StateDiskIdentity, StateError, VmLock, VmPaths, VmPhase,
+    publish_seed, valid_root_generation,
 };
 
 const START_TIMEOUT: Duration = Duration::from_secs(10);
@@ -51,6 +51,13 @@ pub struct CreateVmRequest {
     pub root_disk_bytes: u64,
     pub vcpus: u8,
     pub memory_mib: u32,
+    pub setup: Option<SetupBinding>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SetupDiskIdentity {
+    path: PathBuf,
+    file: FileIdentity,
 }
 
 pub struct CloudHypervisorRunner {
@@ -102,38 +109,66 @@ impl CloudHypervisorRunner {
         let persisted = read_stopped_persisted_state(&paths, request.vm_id)?;
         let state_disk = admit_state_disk(&paths, &request, persisted.as_ref())?;
         let (root_disk_path, root_disk) = admit_root_disk(&paths, &request, persisted.as_ref())?;
+        let setup_disk = admit_setup_disk(&paths, &request)?;
         paths.clear_stale_runtime_endpoints()?;
 
         let token = Zeroizing::new(generate_auth_token());
-        let seed = Seed::new(
-            request.vm_id,
-            request.generation,
-            request.daemon_vsock_port,
-            token.to_string(),
-        )?;
+        let seed = match request.setup {
+            Some(setup) => Seed::new_with_setup(
+                request.vm_id,
+                request.generation,
+                request.daemon_vsock_port,
+                token.to_string(),
+                setup,
+            )?,
+            None => Seed::new(
+                request.vm_id,
+                request.generation,
+                request.daemon_vsock_port,
+                token.to_string(),
+            )?,
+        };
         publish_seed(&paths.seed_disk, &seed.encode())?;
         paths.prepare_diagnostics()?;
 
-        let config = CloudHypervisorConfig::new(
-            &self.artifacts,
-            paths.state_disk.clone(),
-            root_disk_path,
-            paths.seed_disk.clone(),
-            paths.api_socket.clone(),
-            paths.event_monitor.clone(),
-            paths.vsock_socket.clone(),
-            paths.serial_log.clone(),
-            paths.vmm_log.clone(),
-            request.vsock_cid,
-            request.vcpus,
-            request.memory_mib,
-        )?;
+        let config = match &setup_disk {
+            Some(setup) => CloudHypervisorConfig::new_with_setup(
+                &self.artifacts,
+                paths.state_disk.clone(),
+                root_disk_path,
+                paths.seed_disk.clone(),
+                setup.path.clone(),
+                paths.api_socket.clone(),
+                paths.event_monitor.clone(),
+                paths.vsock_socket.clone(),
+                paths.serial_log.clone(),
+                paths.vmm_log.clone(),
+                request.vsock_cid,
+                request.vcpus,
+                request.memory_mib,
+            )?,
+            None => CloudHypervisorConfig::new(
+                &self.artifacts,
+                paths.state_disk.clone(),
+                root_disk_path,
+                paths.seed_disk.clone(),
+                paths.api_socket.clone(),
+                paths.event_monitor.clone(),
+                paths.vsock_socket.clone(),
+                paths.serial_log.clone(),
+                paths.vmm_log.clone(),
+                request.vsock_cid,
+                request.vcpus,
+                request.memory_mib,
+            )?,
+        };
         let command = config.command()?;
         Ok(PreparedVm {
             request,
             paths,
             state_disk,
             root_disk,
+            setup_disk,
             token,
             command,
             lock,
@@ -148,6 +183,9 @@ impl CloudHypervisorRunner {
             &prepared.paths,
             &prepared.request.root_generation,
         )?)?;
+        if let Some(setup) = &prepared.setup_disk {
+            revalidate_setup_disk(setup, prepared.request.setup)?;
+        }
         validate_seed_file(&prepared.paths.seed_disk)?;
         // Arm cancellation cleanup in the same synchronous span as spawn. An
         // aborted start future must never drop the VM lock while leaving a VMM
@@ -229,6 +267,7 @@ impl CloudHypervisorRunner {
             paths: prepared.paths,
             state_disk: prepared.state_disk,
             root_disk: prepared.root_disk,
+            setup_disk: prepared.setup_disk,
             token: prepared.token,
             child,
             process,
@@ -517,6 +556,7 @@ pub struct PreparedVm {
     paths: VmPaths,
     state_disk: StateDiskIdentity,
     root_disk: StateDiskIdentity,
+    setup_disk: Option<SetupDiskIdentity>,
     token: Zeroizing<String>,
     command: CommandSpec,
     lock: VmLock,
@@ -530,6 +570,7 @@ impl fmt::Debug for PreparedVm {
             .field("paths", &self.paths)
             .field("state_disk", &self.state_disk)
             .field("root_disk", &self.root_disk)
+            .field("setup_disk", &self.setup_disk)
             .field("token", &"[REDACTED]")
             .field("command", &self.command)
             .finish_non_exhaustive()
@@ -567,6 +608,7 @@ pub struct RunningVm {
     paths: VmPaths,
     state_disk: StateDiskIdentity,
     root_disk: StateDiskIdentity,
+    setup_disk: Option<SetupDiskIdentity>,
     token: Zeroizing<String>,
     child: tokio::process::Child,
     process: LiveProcess,
@@ -583,6 +625,7 @@ impl fmt::Debug for RunningVm {
             .field("paths", &self.paths)
             .field("state_disk", &self.state_disk)
             .field("root_disk", &self.root_disk)
+            .field("setup_disk", &self.setup_disk)
             .field("process", &self.process)
             .field("token", &"[REDACTED]")
             .finish_non_exhaustive()
@@ -647,15 +690,12 @@ impl RunningVm {
         )
     }
 
-    /// Unlink the one-boot seed after Cloud Hypervisor and the ready guest
+    /// Unlink one-boot setup inputs after Cloud Hypervisor and the ready guest
     /// daemon both hold their admitted device handles. The token remains only
-    /// in runner/guest memory and cannot be recovered from persistent state.
-    pub fn discard_seed(&self) -> Result<(), RunnerError> {
-        let seed_root = PrivateRoot::open(&self.paths.seed_dir)?;
-        if !seed_root.remove_private_regular(Path::new("seed.raw"), 0o400)? {
-            return Err(RunnerError::MissingSeedAfterReadiness);
-        }
-        Ok(())
+    /// in runner/guest memory and cannot be recovered from persistent state;
+    /// a setup pack contains no credential material.
+    pub fn discard_one_boot_inputs(&self) -> Result<(), RunnerError> {
+        discard_one_boot_inputs(&self.paths, self.setup_disk.as_ref(), self.request.setup)
     }
 
     pub fn try_exit(&mut self) -> Result<ExitClass, RunnerError> {
@@ -925,6 +965,81 @@ fn admit_root_disk(
     Ok((path, root_disk))
 }
 
+fn admit_setup_disk(
+    paths: &VmPaths,
+    request: &CreateVmRequest,
+) -> Result<Option<SetupDiskIdentity>, RunnerError> {
+    let Some(binding) = request.setup else {
+        return Ok(None);
+    };
+    if binding.root_generation().to_string() != request.root_generation {
+        return Err(RunnerError::InvalidRequest);
+    }
+    let generation = RootGenerationPaths::create(paths, &request.root_generation)?;
+    let root = PrivateRoot::open(&generation.generation_dir)?;
+    let opened = root.open_regular(
+        Path::new("setup.raw"),
+        false,
+        Some(binding.total_bytes()),
+        false,
+        Some(0o400),
+    )?;
+    Ok(Some(SetupDiskIdentity {
+        path: generation.setup_disk,
+        file: opened.identity().clone(),
+    }))
+}
+
+fn revalidate_setup_disk(
+    expected: &SetupDiskIdentity,
+    binding: Option<SetupBinding>,
+) -> Result<(), RunnerError> {
+    let binding = binding.ok_or(RunnerError::InvalidRequest)?;
+    let parent = expected.path.parent().ok_or(RunnerError::InvalidRequest)?;
+    let root = PrivateRoot::open(parent)?;
+    let opened = root.open_regular(
+        Path::new("setup.raw"),
+        false,
+        Some(binding.total_bytes()),
+        false,
+        Some(0o400),
+    )?;
+    if opened.identity() != &expected.file {
+        return Err(RunnerError::SetupDiskIdentityChanged);
+    }
+    Ok(())
+}
+
+fn discard_one_boot_inputs(
+    paths: &VmPaths,
+    setup_disk: Option<&SetupDiskIdentity>,
+    binding: Option<SetupBinding>,
+) -> Result<(), RunnerError> {
+    // A setup cleanup failure must never prevent the secret-bearing seed from
+    // being unlinked. Preserve the first setup error for the caller after the
+    // independent seed cleanup has been attempted.
+    let setup_result = (|| {
+        if let Some(setup) = setup_disk {
+            revalidate_setup_disk(setup, binding)?;
+            let setup_root =
+                PrivateRoot::open(setup.path.parent().ok_or(RunnerError::InvalidRequest)?)?;
+            if !setup_root.remove_private_regular(Path::new("setup.raw"), 0o400)? {
+                return Err(RunnerError::MissingSetupAfterReadiness);
+            }
+        }
+        Ok(())
+    })();
+    let seed_result = (|| {
+        let seed_root = PrivateRoot::open(&paths.seed_dir)?;
+        if !seed_root.remove_private_regular(Path::new("seed.raw"), 0o400)? {
+            return Err(RunnerError::MissingSeedAfterReadiness);
+        }
+        Ok(())
+    })();
+    setup_result?;
+    seed_result
+}
+
 fn root_disk_path(paths: &VmPaths, generation: &str) -> Result<PathBuf, RunnerError> {
     if !valid_root_generation(generation) {
         return Err(RunnerError::InvalidRequest);
@@ -1122,6 +1237,10 @@ pub enum RunnerError {
     Seed(#[from] codewire_vmm_guest_probe::SeedError),
     #[error("one-boot guest seed is missing after daemon readiness")]
     MissingSeedAfterReadiness,
+    #[error("one-boot guest setup pack is missing after daemon readiness")]
+    MissingSetupAfterReadiness,
+    #[error("one-boot guest setup pack identity changed before VMM admission")]
+    SetupDiskIdentityChanged,
     #[error("the preformatted ext4 state disk is absent; production prepare never formats disks")]
     MissingPreformattedStateDisk,
     #[error(
@@ -1261,6 +1380,7 @@ mod tests {
             root_disk_bytes: MINIMUM_ROOT_DISK_BYTES,
             vcpus,
             memory_mib,
+            setup: None,
         }
     }
 
@@ -1414,6 +1534,106 @@ mod tests {
             Err(RunnerError::State(StateError::StateDiskIdentityChanged(path)))
                 if path == root.root_disk
         ));
+    }
+
+    #[test]
+    fn setup_pack_is_generation_bound_and_revalidated_by_file_identity() {
+        let (_parent, runner) = test_runner();
+        let mut request = request(2, 16_384);
+        let paths = VmPaths::create(&runner.state_root, request.vm_id).unwrap();
+        let generation = RootGenerationPaths::create(&paths, &request.root_generation).unwrap();
+        let total_bytes = (codewire_vmm_guest_probe::SETUP_HEADER_LEN as u64)
+            + codewire_vmm_guest_probe::SETUP_ALIGNMENT;
+        let setup = fs::OpenOptions::new()
+            .create_new(true)
+            .read(true)
+            .write(true)
+            .mode(0o400)
+            .open(&generation.setup_disk)
+            .unwrap();
+        setup.set_len(total_bytes).unwrap();
+        setup.sync_all().unwrap();
+        drop(setup);
+        let binding = SetupBinding::new(
+            total_bytes,
+            codewire_vmm_guest_probe::Sha256Value::parse_hex(&request.root_generation).unwrap(),
+            codewire_vmm_guest_probe::Sha256Value::calculate(b"header"),
+        )
+        .unwrap();
+        request.setup = Some(binding);
+        let admitted = admit_setup_disk(&paths, &request).unwrap().unwrap();
+        assert_eq!(admitted.path, generation.setup_disk);
+        revalidate_setup_disk(&admitted, request.setup).unwrap();
+
+        fs::remove_file(&generation.setup_disk).unwrap();
+        let replacement = fs::OpenOptions::new()
+            .create_new(true)
+            .read(true)
+            .write(true)
+            .mode(0o400)
+            .open(&generation.setup_disk)
+            .unwrap();
+        replacement.set_len(total_bytes).unwrap();
+        replacement.sync_all().unwrap();
+        drop(replacement);
+        assert!(matches!(
+            revalidate_setup_disk(&admitted, request.setup),
+            Err(RunnerError::SetupDiskIdentityChanged)
+        ));
+
+        let wrong_generation = SetupBinding::new(
+            total_bytes,
+            codewire_vmm_guest_probe::Sha256Value::calculate(b"other-root"),
+            codewire_vmm_guest_probe::Sha256Value::calculate(b"header"),
+        )
+        .unwrap();
+        request.setup = Some(wrong_generation);
+        assert!(matches!(
+            admit_setup_disk(&paths, &request),
+            Err(RunnerError::InvalidRequest)
+        ));
+    }
+
+    #[test]
+    fn setup_cleanup_failure_still_unlinks_the_secret_bearing_seed() {
+        let (_parent, runner) = test_runner();
+        let mut request = request(2, 16_384);
+        let paths = VmPaths::create(&runner.state_root, request.vm_id).unwrap();
+        let generation = RootGenerationPaths::create(&paths, &request.root_generation).unwrap();
+        let total_bytes = (codewire_vmm_guest_probe::SETUP_HEADER_LEN as u64)
+            + codewire_vmm_guest_probe::SETUP_ALIGNMENT;
+        let setup = fs::OpenOptions::new()
+            .create_new(true)
+            .read(true)
+            .write(true)
+            .mode(0o400)
+            .open(&generation.setup_disk)
+            .unwrap();
+        setup.set_len(total_bytes).unwrap();
+        setup.sync_all().unwrap();
+        drop(setup);
+        request.setup = Some(
+            SetupBinding::new(
+                total_bytes,
+                codewire_vmm_guest_probe::Sha256Value::parse_hex(&request.root_generation).unwrap(),
+                codewire_vmm_guest_probe::Sha256Value::calculate(b"header"),
+            )
+            .unwrap(),
+        );
+        let admitted = admit_setup_disk(&paths, &request).unwrap().unwrap();
+        let mut seed = fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .mode(0o400)
+            .open(&paths.seed_disk)
+            .unwrap();
+        seed.write_all(b"one-boot-seed").unwrap();
+        seed.sync_all().unwrap();
+        drop(seed);
+
+        fs::remove_file(&generation.setup_disk).unwrap();
+        assert!(discard_one_boot_inputs(&paths, Some(&admitted), request.setup).is_err());
+        assert!(!paths.seed_disk.exists());
     }
 
     #[test]

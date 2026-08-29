@@ -557,6 +557,7 @@ mod linux {
             root_disk_bytes: ROOT_DISK_BYTES,
             vcpus: resources.vcpus,
             memory_mib: resources.memory_mib,
+            setup: None,
         }
     }
 
