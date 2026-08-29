@@ -1,13 +1,13 @@
 //! Durable, owner-only state for the native local supervisor.
 //!
-//! SQLite is the authority after a preview `state.json` has been imported.
-//! The supervisor singleton is the only writer, but WAL and explicit replay
+//! SQLite is the sole authority. The supervisor singleton is the only writer,
+//! but WAL and explicit replay
 //! records keep every lifecycle transition recoverable across process death.
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs;
-use std::io::{self, Read as _};
+use std::io;
 use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -16,7 +16,6 @@ use rusqlite::config::DbConfig;
 use rusqlite::{
     Connection, OpenFlags, OptionalExtension as _, Transaction, TransactionBehavior, params,
 };
-use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
 
 use crate::linux::path::{PathError, PrivateRoot};
@@ -26,14 +25,9 @@ use crate::workspace_generation::WorkspaceGenerationRecord;
 pub(crate) const DATABASE_FILE: &str = "supervisor.db";
 const DATABASE_WAL_FILE: &str = "supervisor.db-wal";
 const DATABASE_SHM_FILE: &str = "supervisor.db-shm";
-const LEGACY_STATE_FILE: &str = "state.json";
-const LEGACY_ARCHIVE_FILE: &str = "state.v1.imported.json";
 const HOST_REBOOT_WORKSPACE_TRANSITIONS_KEY: &str = "host_reboot_workspace_transitions";
 const DATABASE_APPLICATION_ID: i64 = 0x4357_564d; // "CWVM"
 const DATABASE_SCHEMA_VERSION: i64 = 3;
-const PROJECT_INTENT_DATABASE_SCHEMA_VERSION: i64 = 2;
-const LEGACY_DATABASE_SCHEMA_VERSION: i64 = 1;
-const MAXIMUM_STATE_BYTES: u64 = 1024 * 1024;
 // A create journal entry contains the exact canonical project JSON so replay
 // never has to reread a mutable codewire.yaml. The source document itself is
 // bounded to 256 KiB; this higher bound covers JSON string escaping.
@@ -162,10 +156,7 @@ impl SupervisorStore {
         let opened = match root.open_regular(relative, false, None, false, Some(0o600)) {
             Ok(opened) => opened,
             Err(error) if path_error_is_not_found(&error) => {
-                let legacy = read_legacy_state(root)?
-                    .map(|(state, _)| state)
-                    .unwrap_or_default();
-                return Ok((None, legacy));
+                return Ok((None, SupervisorState::default()));
             }
             Err(error) => return Err(error.into()),
         };
@@ -177,7 +168,7 @@ impl SupervisorStore {
         connection.set_db_config(DbConfig::SQLITE_DBCONFIG_DEFENSIVE, true)?;
         connection.pragma_update(None, "foreign_keys", true)?;
         connection.pragma_update(None, "trusted_schema", false)?;
-        validate_schema(&connection, true)?;
+        validate_schema(&connection)?;
         validate_database(&connection)?;
         let reopened = root.open_regular(relative, false, None, false, Some(0o600))?;
         if reopened.identity() != &identity {
@@ -202,8 +193,7 @@ impl SupervisorStore {
         if initialize {
             initialize_schema(&connection)?;
         } else {
-            migrate_schema(&connection)?;
-            validate_schema(&connection, false)?;
+            validate_schema(&connection)?;
         }
         validate_database(&connection)?;
 
@@ -213,32 +203,8 @@ impl SupervisorStore {
         };
         store.ensure_metadata(boot_id)?;
         let mut state = store.load_state()?;
-        let mut changed_for_boot = false;
-
-        if let Some((mut legacy, bytes)) = read_legacy_state(root)? {
-            let digest = sha256_hex(&bytes);
-            match store.legacy_import_digest()? {
-                Some(imported) if imported == digest => {}
-                Some(_) => return Err(SupervisorStoreError::LegacyStateChanged),
-                None if state.environments.is_empty() => {
-                    changed_for_boot = normalize_imported_state(&mut legacy, boot_id);
-                    store.import_legacy_state(&legacy, &digest)?;
-                }
-                None => return Err(SupervisorStoreError::UntrackedLegacyState),
-            }
-            finish_legacy_archive(root, &bytes, &digest)?;
-            // Re-read the committed representation rather than trusting the
-            // import input after its authoritative handoff.
-            state = store.load_state()?;
-        } else if legacy_archive_exists(root)? && store.legacy_import_digest()?.is_none() {
-            return Err(SupervisorStoreError::UntrackedLegacyArchive);
-        }
-
         if store.reconcile_host_boot(boot_id)? {
-            changed_for_boot = true;
             state = store.load_state()?;
-        }
-        if changed_for_boot {
             state
                 .validate()
                 .map_err(|_| SupervisorStoreError::InvalidState)?;
@@ -447,29 +413,14 @@ impl SupervisorStore {
             [],
             |row| row.get(0),
         )?;
-        let schema_version: i64 =
-            self.connection
-                .pragma_query_value(None, "user_version", |row| row.get(0))?;
-        let (project_columns, workspace_generation_columns) = match schema_version {
-            DATABASE_SCHEMA_VERSION => (
-                "project_spec_json, project_spec_sha256",
-                "active_workspace_generation_json, staging_workspace_generation_json, \
-                 rollback_workspace_generation_json",
-            ),
-            PROJECT_INTENT_DATABASE_SCHEMA_VERSION => {
-                ("project_spec_json, project_spec_sha256", "NULL, NULL, NULL")
-            }
-            LEGACY_DATABASE_SCHEMA_VERSION => ("NULL, NULL", "NULL, NULL, NULL"),
-            _ => return Err(SupervisorStoreError::InvalidDatabase),
-        };
-        let query = format!(
+        let mut statement = self.connection.prepare(
             "SELECT id, name, observed_state, vcpus, memory_mib, disk_bytes, generation, \
-                    workspace_commit, source_path, {project_columns}, runner_json, \
-                    active_artifact_generation, staging_artifact_generation, \
-                    {workspace_generation_columns} \
-             FROM environments ORDER BY name"
-        );
-        let mut statement = self.connection.prepare(&query)?;
+                    workspace_commit, source_path, project_spec_json, project_spec_sha256, \
+                    runner_json, active_artifact_generation, staging_artifact_generation, \
+                    active_workspace_generation_json, staging_workspace_generation_json, \
+                    rollback_workspace_generation_json \
+             FROM environments ORDER BY name",
+        )?;
         let rows = statement.query_map([], |row| {
             Ok((
                 row.get::<_, String>(0)?,
@@ -659,25 +610,6 @@ impl SupervisorStore {
         Ok(true)
     }
 
-    fn legacy_import_digest(&self) -> Result<Option<String>, SupervisorStoreError> {
-        metadata_value(&self.connection, "legacy_state_sha256")
-    }
-
-    fn import_legacy_state(
-        &self,
-        state: &SupervisorState,
-        digest: &str,
-    ) -> Result<(), SupervisorStoreError> {
-        let transaction = self.connection.unchecked_transaction()?;
-        write_state(&transaction, state)?;
-        transaction.execute(
-            "INSERT INTO supervisor_metadata(key, value) VALUES ('legacy_state_sha256', ?1)",
-            [digest],
-        )?;
-        transaction.commit()?;
-        Ok(())
-    }
-
     #[cfg(test)]
     fn metadata(&self, key: &str) -> Option<String> {
         metadata_value(&self.connection, key).unwrap()
@@ -777,71 +709,15 @@ fn initialize_schema(connection: &Connection) -> Result<(), SupervisorStoreError
          PRAGMA user_version = 3;
          COMMIT;",
     )?;
-    validate_schema(connection, false)
+    validate_schema(connection)
 }
 
-fn migrate_schema(connection: &Connection) -> Result<(), SupervisorStoreError> {
+fn validate_schema(connection: &Connection) -> Result<(), SupervisorStoreError> {
     let application_id: i64 =
         connection.pragma_query_value(None, "application_id", |row| row.get(0))?;
     let schema_version: i64 =
         connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    if application_id != DATABASE_APPLICATION_ID {
-        return Err(SupervisorStoreError::UnsupportedSchema {
-            application_id,
-            schema_version,
-        });
-    }
-    match schema_version {
-        DATABASE_SCHEMA_VERSION => Ok(()),
-        PROJECT_INTENT_DATABASE_SCHEMA_VERSION => {
-            let transaction =
-                Transaction::new_unchecked(connection, TransactionBehavior::Immediate)?;
-            transaction.execute_batch(
-                "ALTER TABLE environments ADD COLUMN active_workspace_generation_json BLOB NULL;
-                 ALTER TABLE environments ADD COLUMN staging_workspace_generation_json BLOB NULL;
-                 ALTER TABLE environments ADD COLUMN rollback_workspace_generation_json BLOB NULL;",
-            )?;
-            transaction.pragma_update(None, "user_version", DATABASE_SCHEMA_VERSION)?;
-            transaction.commit()?;
-            Ok(())
-        }
-        LEGACY_DATABASE_SCHEMA_VERSION => {
-            let transaction =
-                Transaction::new_unchecked(connection, TransactionBehavior::Immediate)?;
-            transaction.execute_batch(
-                "ALTER TABLE environments ADD COLUMN project_spec_json BLOB NULL;
-                 ALTER TABLE environments ADD COLUMN project_spec_sha256 TEXT NULL;
-                 ALTER TABLE environments ADD COLUMN active_workspace_generation_json BLOB NULL;
-                 ALTER TABLE environments ADD COLUMN staging_workspace_generation_json BLOB NULL;
-                 ALTER TABLE environments ADD COLUMN rollback_workspace_generation_json BLOB NULL;",
-            )?;
-            transaction.pragma_update(None, "user_version", DATABASE_SCHEMA_VERSION)?;
-            transaction.commit()?;
-            Ok(())
-        }
-        _ => Err(SupervisorStoreError::UnsupportedSchema {
-            application_id,
-            schema_version,
-        }),
-    }
-}
-
-fn validate_schema(
-    connection: &Connection,
-    allow_legacy_read: bool,
-) -> Result<(), SupervisorStoreError> {
-    let application_id: i64 =
-        connection.pragma_query_value(None, "application_id", |row| row.get(0))?;
-    let schema_version: i64 =
-        connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    if application_id != DATABASE_APPLICATION_ID
-        || (schema_version != DATABASE_SCHEMA_VERSION
-            && !(allow_legacy_read
-                && matches!(
-                    schema_version,
-                    LEGACY_DATABASE_SCHEMA_VERSION | PROJECT_INTENT_DATABASE_SCHEMA_VERSION
-                )))
-    {
+    if application_id != DATABASE_APPLICATION_ID || schema_version != DATABASE_SCHEMA_VERSION {
         return Err(SupervisorStoreError::UnsupportedSchema {
             application_id,
             schema_version,
@@ -866,41 +742,23 @@ fn validate_schema(
             return Err(SupervisorStoreError::InvalidDatabase);
         }
     }
-    if matches!(
-        schema_version,
-        PROJECT_INTENT_DATABASE_SCHEMA_VERSION | DATABASE_SCHEMA_VERSION
-    ) {
-        for column in ["project_spec_json", "project_spec_sha256"] {
-            let present = connection
-                .query_row(
-                    "SELECT 1 FROM pragma_table_info('environments') WHERE name = ?1",
-                    [column],
-                    |_| Ok(()),
-                )
-                .optional()?
-                .is_some();
-            if !present {
-                return Err(SupervisorStoreError::InvalidDatabase);
-            }
-        }
-    }
-    if schema_version == DATABASE_SCHEMA_VERSION {
-        for column in [
-            "active_workspace_generation_json",
-            "staging_workspace_generation_json",
-            "rollback_workspace_generation_json",
-        ] {
-            let present = connection
-                .query_row(
-                    "SELECT 1 FROM pragma_table_info('environments') WHERE name = ?1",
-                    [column],
-                    |_| Ok(()),
-                )
-                .optional()?
-                .is_some();
-            if !present {
-                return Err(SupervisorStoreError::InvalidDatabase);
-            }
+    for column in [
+        "project_spec_json",
+        "project_spec_sha256",
+        "active_workspace_generation_json",
+        "staging_workspace_generation_json",
+        "rollback_workspace_generation_json",
+    ] {
+        let present = connection
+            .query_row(
+                "SELECT 1 FROM pragma_table_info('environments') WHERE name = ?1",
+                [column],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if !present {
+            return Err(SupervisorStoreError::InvalidDatabase);
         }
     }
     Ok(())
@@ -1350,111 +1208,6 @@ fn unix_millis() -> Result<i64, SupervisorStoreError> {
     i64::try_from(millis).map_err(|_| SupervisorStoreError::InvalidOperation)
 }
 
-fn read_legacy_state(
-    root: &PrivateRoot,
-) -> Result<Option<(SupervisorState, Vec<u8>)>, SupervisorStoreError> {
-    let opened = match root.open_regular(
-        Path::new(LEGACY_STATE_FILE),
-        false,
-        None,
-        false,
-        Some(0o600),
-    ) {
-        Ok(opened) => opened,
-        Err(error) if path_error_is_not_found(&error) => return Ok(None),
-        Err(error) => return Err(error.into()),
-    };
-    let mut bytes = Vec::new();
-    opened
-        .file()
-        .take(MAXIMUM_STATE_BYTES + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|source| SupervisorStoreError::Io {
-            path: root.path().join(LEGACY_STATE_FILE),
-            source,
-        })?;
-    if bytes.len() as u64 > MAXIMUM_STATE_BYTES {
-        return Err(SupervisorStoreError::InvalidState);
-    }
-    let state: SupervisorState =
-        serde_json::from_slice(&bytes).map_err(|_| SupervisorStoreError::InvalidState)?;
-    state
-        .validate()
-        .map_err(|_| SupervisorStoreError::InvalidState)?;
-    Ok(Some((state, bytes)))
-}
-
-fn finish_legacy_archive(
-    root: &PrivateRoot,
-    bytes: &[u8],
-    expected_digest: &str,
-) -> Result<(), SupervisorStoreError> {
-    match root.open_regular(
-        Path::new(LEGACY_ARCHIVE_FILE),
-        false,
-        Some(bytes.len() as u64),
-        false,
-        Some(0o400),
-    ) {
-        Ok(opened) => {
-            let mut archived = Vec::with_capacity(bytes.len());
-            opened.file().read_to_end(&mut archived).map_err(|source| {
-                SupervisorStoreError::Io {
-                    path: root.path().join(LEGACY_ARCHIVE_FILE),
-                    source,
-                }
-            })?;
-            if sha256_hex(&archived) != expected_digest {
-                return Err(SupervisorStoreError::LegacyStateChanged);
-            }
-        }
-        Err(error) if path_error_is_not_found(&error) => {
-            root.atomic_replace(Path::new(LEGACY_ARCHIVE_FILE), bytes, 0o400)?;
-        }
-        Err(error) => return Err(error.into()),
-    }
-    if !root.remove_private_regular(Path::new(LEGACY_STATE_FILE), 0o600)? {
-        return Err(SupervisorStoreError::LegacyStateChanged);
-    }
-    Ok(())
-}
-
-fn normalize_imported_state(state: &mut SupervisorState, boot_id: &str) -> bool {
-    let mut changed = false;
-    for environment in state.environments.values_mut() {
-        let runner_matches_boot = environment
-            .runner
-            .as_ref()
-            .is_some_and(|runner| runner.process.boot_id == boot_id);
-        if environment.runner.is_some() && !runner_matches_boot
-            || environment.runner.is_none()
-                && matches!(
-                    environment.state,
-                    StoredEnvironmentState::Starting | StoredEnvironmentState::Running
-                )
-        {
-            environment.runner = None;
-            environment.state = StoredEnvironmentState::Stopped;
-            changed = true;
-        }
-    }
-    changed
-}
-
-fn legacy_archive_exists(root: &PrivateRoot) -> Result<bool, SupervisorStoreError> {
-    match root.open_regular(
-        Path::new(LEGACY_ARCHIVE_FILE),
-        false,
-        None,
-        false,
-        Some(0o400),
-    ) {
-        Ok(_) => Ok(true),
-        Err(error) if path_error_is_not_found(&error) => Ok(false),
-        Err(error) => Err(error.into()),
-    }
-}
-
 fn validate_database_files(root: &PrivateRoot, writable: bool) -> Result<(), SupervisorStoreError> {
     root.open_regular(Path::new(DATABASE_FILE), writable, None, false, Some(0o600))?;
     for sidecar in [DATABASE_WAL_FILE, DATABASE_SHM_FILE] {
@@ -1499,10 +1252,6 @@ fn parse_uuid(value: &str) -> Result<Uuid, SupervisorStoreError> {
     Ok(id)
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
-}
-
 fn path_error_is_not_found(error: &PathError) -> bool {
     match error {
         PathError::Openat2 { source, .. } => *source == rustix::io::Errno::NOENT,
@@ -1528,12 +1277,6 @@ pub enum SupervisorStoreError {
     InvalidState,
     #[error("native supervisor boot identity is invalid")]
     InvalidBootId,
-    #[error("preview state changed after its durable import")]
-    LegacyStateChanged,
-    #[error("preview state cannot be merged into a nonempty supervisor database")]
-    UntrackedLegacyState,
-    #[error("an imported preview-state archive exists without its database receipt")]
-    UntrackedLegacyArchive,
     #[error("native supervisor operation is invalid")]
     InvalidOperation,
     #[error("native supervisor operation request ID was reused with different input")]
@@ -1555,6 +1298,7 @@ mod tests {
     use std::os::unix::fs::{PermissionsExt as _, symlink};
 
     use codewire_vmm_guest_probe::{SetupArchitecture, Sha256Value, oci_root_generation};
+    use sha2::{Digest as _, Sha256};
 
     use crate::linux::path::{FileIdentity, SocketIdentity, current_uid};
     use crate::linux::process::ProcessIdentity;
@@ -1575,96 +1319,6 @@ mod tests {
         (parent, root)
     }
 
-    fn write_legacy_v1_database(root: &PrivateRoot) -> Uuid {
-        let (connection, initialize) = open_database(root).unwrap();
-        assert!(initialize);
-        configure_connection(&connection).unwrap();
-        initialize_schema(&connection).unwrap();
-        connection
-            .execute_batch(
-                "BEGIN IMMEDIATE;
-                 ALTER TABLE environments DROP COLUMN rollback_workspace_generation_json;
-                 ALTER TABLE environments DROP COLUMN staging_workspace_generation_json;
-                 ALTER TABLE environments DROP COLUMN active_workspace_generation_json;
-                 ALTER TABLE environments DROP COLUMN project_spec_sha256;
-                 ALTER TABLE environments DROP COLUMN project_spec_json;
-                 PRAGMA user_version = 1;
-                 COMMIT;",
-            )
-            .unwrap();
-        let id = Uuid::new_v4();
-        connection
-            .execute(
-                "INSERT INTO environments(
-                   id, name, desired_state, observed_state, vcpus, memory_mib,
-                   disk_bytes, generation, workspace_commit, source_path,
-                   runner_json, active_artifact_generation, staging_artifact_generation
-                 ) VALUES (?1, 'dev', 'stopped', 'stopped', 2, 16384, ?2, 7, ?3, ?4, NULL, ?5, NULL)",
-                params![
-                    id.to_string(),
-                    i64::try_from(crate::linux::state::MINIMUM_STATE_DISK_BYTES).unwrap(),
-                    "b".repeat(40),
-                    b"/workspace/source".as_slice(),
-                    "c".repeat(64),
-                ],
-            )
-            .unwrap();
-        connection
-            .execute(
-                "UPDATE supervisor_settings SET current_environment_id = ?1 WHERE singleton = 1",
-                [id.to_string()],
-            )
-            .unwrap();
-        drop(connection);
-        id
-    }
-
-    fn write_project_v2_database(root: &PrivateRoot) -> (Uuid, Vec<u8>, String) {
-        let (connection, initialize) = open_database(root).unwrap();
-        assert!(initialize);
-        configure_connection(&connection).unwrap();
-        initialize_schema(&connection).unwrap();
-        connection
-            .execute_batch(
-                "BEGIN IMMEDIATE;
-                 ALTER TABLE environments DROP COLUMN rollback_workspace_generation_json;
-                 ALTER TABLE environments DROP COLUMN staging_workspace_generation_json;
-                 ALTER TABLE environments DROP COLUMN active_workspace_generation_json;
-                 PRAGMA user_version = 2;
-                 COMMIT;",
-            )
-            .unwrap();
-        let id = Uuid::new_v4();
-        let (project_json, project_sha256) = project_intent();
-        connection
-            .execute(
-                "INSERT INTO environments(
-                   id, name, desired_state, observed_state, vcpus, memory_mib,
-                   disk_bytes, generation, workspace_commit, source_path,
-                   project_spec_json, project_spec_sha256, runner_json,
-                   active_artifact_generation, staging_artifact_generation
-                 ) VALUES (?1, 'dev', 'stopped', 'stopped', 2, 16384, ?2, 7, ?3, ?4, ?5, ?6, NULL, ?7, NULL)",
-                params![
-                    id.to_string(),
-                    1024_i64 * 1024 * 1024,
-                    "b".repeat(40),
-                    b"/workspace/source".as_slice(),
-                    &project_json,
-                    &project_sha256,
-                    "c".repeat(64),
-                ],
-            )
-            .unwrap();
-        connection
-            .execute(
-                "UPDATE supervisor_settings SET current_environment_id = ?1 WHERE singleton = 1",
-                [id.to_string()],
-            )
-            .unwrap();
-        drop(connection);
-        (id, project_json, project_sha256)
-    }
-
     fn project_intent() -> (Vec<u8>, String) {
         let spec = codewire_project::ProjectSpec {
             image: "registry.example/codewire/workspace:latest".to_owned(),
@@ -1676,7 +1330,7 @@ mod tests {
             ..Default::default()
         };
         let bytes = spec.canonical_json().unwrap();
-        let digest = sha256_hex(&bytes);
+        let digest = format!("{:x}", Sha256::digest(&bytes));
         (bytes, digest)
     }
 
@@ -1684,7 +1338,11 @@ mod tests {
         Sha256Digest::parse(&format!("sha256:{:x}", Sha256::digest(seed))).unwrap()
     }
 
-    fn workspace_generation(project_sha256: &str, seed: &[u8]) -> WorkspaceGenerationRecord {
+    fn workspace_generation(
+        project_spec_json: &[u8],
+        project_sha256: &str,
+        seed: &[u8],
+    ) -> WorkspaceGenerationRecord {
         let architecture = OciArchitecture::native().unwrap();
         let manifest_digest = oci_digest(&[seed, b"-manifest"].concat());
         let manifest = ResolvedDescriptor {
@@ -1722,11 +1380,11 @@ mod tests {
         )
         .to_string();
         WorkspaceGenerationRecord {
-            schema_version: 1,
+            schema_version: 3,
             root_generation,
             project_sha256: project_sha256.to_owned(),
-            project_spec_json: None,
-            artifact_generation: None,
+            project_spec_json: String::from_utf8(project_spec_json.to_vec()).unwrap(),
+            artifact_generation: "c".repeat(64),
             image,
             root_disk_bytes: crate::linux::state::MINIMUM_ROOT_DISK_BYTES,
         }
@@ -1824,221 +1482,6 @@ mod tests {
     }
 
     #[test]
-    fn legacy_v1_database_is_readable_then_migrated_without_reinterpretation() {
-        let (_parent, root) = root();
-        let expected_id = write_legacy_v1_database(&root);
-
-        let (inspected, state) = SupervisorStore::inspect(&root).unwrap();
-        let inspected = inspected.unwrap();
-        let schema: i64 = inspected
-            .connection
-            .pragma_query_value(None, "user_version", |row| row.get(0))
-            .unwrap();
-        assert_eq!(schema, LEGACY_DATABASE_SCHEMA_VERSION);
-        let legacy = &state.environments["dev"];
-        assert_eq!(legacy.id, expected_id);
-        assert!(legacy.project_spec_json.is_none());
-        assert!(legacy.project_spec_sha256.is_none());
-        assert!(legacy.active_workspace_generation.is_none());
-        assert!(legacy.staging_workspace_generation.is_none());
-        assert!(legacy.rollback_workspace_generation.is_none());
-        drop(inspected);
-
-        let (store, mut migrated) = SupervisorStore::open_for_boot(&root, "boot-a").unwrap();
-        let schema: i64 = store
-            .connection
-            .pragma_query_value(None, "user_version", |row| row.get(0))
-            .unwrap();
-        assert_eq!(schema, DATABASE_SCHEMA_VERSION);
-        for column in [
-            "project_spec_json",
-            "project_spec_sha256",
-            "active_workspace_generation_json",
-            "staging_workspace_generation_json",
-            "rollback_workspace_generation_json",
-        ] {
-            assert!(
-                store
-                    .connection
-                    .query_row(
-                        "SELECT 1 FROM pragma_table_info('environments') WHERE name = ?1",
-                        [column],
-                        |_| Ok(()),
-                    )
-                    .optional()
-                    .unwrap()
-                    .is_some()
-            );
-        }
-        let legacy = &migrated.environments["dev"];
-        assert_eq!(legacy.id, expected_id);
-        assert!(legacy.project_spec_json.is_none());
-        assert!(legacy.project_spec_sha256.is_none());
-        assert!(legacy.active_workspace_generation.is_none());
-        assert!(legacy.staging_workspace_generation.is_none());
-        assert!(legacy.rollback_workspace_generation.is_none());
-
-        let (bytes, digest) = project_intent();
-        let environment = migrated.environments.get_mut("dev").unwrap();
-        environment.disk_bytes = 1024 * 1024 * 1024;
-        environment.project_spec_json = Some(bytes.clone());
-        environment.project_spec_sha256 = Some(digest.clone());
-        store.replace_state(&migrated).unwrap();
-        drop(store);
-
-        let (_reopened, persisted) = SupervisorStore::open_for_boot(&root, "boot-a").unwrap();
-        let environment = &persisted.environments["dev"];
-        assert_eq!(
-            environment.project_spec_json.as_deref(),
-            Some(bytes.as_slice())
-        );
-        assert_eq!(
-            environment.project_spec_sha256.as_deref(),
-            Some(digest.as_str())
-        );
-        assert!(environment.active_workspace_generation.is_none());
-        assert!(environment.staging_workspace_generation.is_none());
-        assert!(environment.rollback_workspace_generation.is_none());
-    }
-
-    #[test]
-    fn project_v2_database_is_readable_then_migrated_without_reinterpretation() {
-        let (_parent, root) = root();
-        let (expected_id, project_json, project_sha256) = write_project_v2_database(&root);
-
-        let (inspected, state) = SupervisorStore::inspect(&root).unwrap();
-        let inspected = inspected.unwrap();
-        let schema: i64 = inspected
-            .connection
-            .pragma_query_value(None, "user_version", |row| row.get(0))
-            .unwrap();
-        assert_eq!(schema, PROJECT_INTENT_DATABASE_SCHEMA_VERSION);
-        let environment = &state.environments["dev"];
-        assert_eq!(environment.id, expected_id);
-        assert_eq!(
-            environment.project_spec_json.as_deref(),
-            Some(project_json.as_slice())
-        );
-        assert_eq!(
-            environment.project_spec_sha256.as_deref(),
-            Some(project_sha256.as_str())
-        );
-        assert!(environment.active_workspace_generation.is_none());
-        assert!(environment.staging_workspace_generation.is_none());
-        assert!(environment.rollback_workspace_generation.is_none());
-        drop(inspected);
-
-        let (store, migrated) = SupervisorStore::open_for_boot(&root, "boot-a").unwrap();
-        let schema: i64 = store
-            .connection
-            .pragma_query_value(None, "user_version", |row| row.get(0))
-            .unwrap();
-        assert_eq!(schema, DATABASE_SCHEMA_VERSION);
-        let environment = &migrated.environments["dev"];
-        assert_eq!(environment.id, expected_id);
-        assert_eq!(
-            environment.project_spec_json.as_deref(),
-            Some(project_json.as_slice())
-        );
-        assert_eq!(
-            environment.project_spec_sha256.as_deref(),
-            Some(project_sha256.as_str())
-        );
-        assert!(environment.active_workspace_generation.is_none());
-        assert!(environment.staging_workspace_generation.is_none());
-        assert!(environment.rollback_workspace_generation.is_none());
-    }
-
-    #[test]
-    fn failed_v2_migration_rolls_back_every_schema_change() {
-        let (_parent, root) = root();
-        let (connection, initialize) = open_database(&root).unwrap();
-        assert!(initialize);
-        configure_connection(&connection).unwrap();
-        initialize_schema(&connection).unwrap();
-        connection
-            .execute_batch(
-                "BEGIN IMMEDIATE;
-                 ALTER TABLE environments DROP COLUMN rollback_workspace_generation_json;
-                 ALTER TABLE environments DROP COLUMN active_workspace_generation_json;
-                 PRAGMA user_version = 2;
-                 COMMIT;",
-            )
-            .unwrap();
-
-        assert!(migrate_schema(&connection).is_err());
-        let schema: i64 = connection
-            .pragma_query_value(None, "user_version", |row| row.get(0))
-            .unwrap();
-        assert_eq!(schema, PROJECT_INTENT_DATABASE_SCHEMA_VERSION);
-        for (column, expected) in [
-            ("active_workspace_generation_json", false),
-            ("staging_workspace_generation_json", true),
-            ("rollback_workspace_generation_json", false),
-        ] {
-            let present = connection
-                .query_row(
-                    "SELECT 1 FROM pragma_table_info('environments') WHERE name = ?1",
-                    [column],
-                    |_| Ok(()),
-                )
-                .optional()
-                .unwrap()
-                .is_some();
-            assert_eq!(present, expected, "unexpected state for {column}");
-        }
-    }
-
-    #[test]
-    fn preview_json_import_is_exact_and_idempotent() {
-        let (_parent, root) = root();
-        let expected = state(environment(StoredEnvironmentState::Stopped, None));
-        expected.write(&root).unwrap();
-        let original = fs::read(root.path().join(LEGACY_STATE_FILE)).unwrap();
-
-        let (store, imported) = SupervisorStore::open_for_boot(&root, "boot-a").unwrap();
-        assert_eq!(imported, expected);
-        assert!(!root.path().join(LEGACY_STATE_FILE).exists());
-        assert_eq!(
-            fs::read(root.path().join(LEGACY_ARCHIVE_FILE)).unwrap(),
-            original
-        );
-        assert_eq!(
-            fs::symlink_metadata(root.path().join(LEGACY_ARCHIVE_FILE))
-                .unwrap()
-                .permissions()
-                .mode()
-                & 0o777,
-            0o400
-        );
-        let digest = sha256_hex(&original);
-        assert_eq!(
-            store.metadata("legacy_state_sha256").as_deref(),
-            Some(digest.as_str())
-        );
-
-        drop(store);
-        let (_reopened, loaded) = SupervisorStore::open_for_boot(&root, "boot-a").unwrap();
-        assert_eq!(loaded, expected);
-    }
-
-    #[test]
-    fn import_from_another_boot_clears_stale_runner_ownership() {
-        let (_parent, root) = root();
-        let expected = state(environment(
-            StoredEnvironmentState::Running,
-            Some("boot-before-restart"),
-        ));
-        expected.write(&root).unwrap();
-
-        let (_store, imported) =
-            SupervisorStore::open_for_boot(&root, "boot-after-restart").unwrap();
-        let imported = imported.environments.get("dev").unwrap();
-        assert_eq!(imported.state, StoredEnvironmentState::Stopped);
-        assert!(imported.runner.is_none());
-    }
-
-    #[test]
     fn database_reopen_on_another_boot_stops_every_environment() {
         let (_parent, root) = root();
         let (store, _) = SupervisorStore::open_for_boot(&root, "boot-a").unwrap();
@@ -2081,21 +1524,35 @@ mod tests {
     }
 
     #[test]
-    fn read_only_inspection_does_not_create_or_archive_state() {
+    fn read_only_inspection_without_database_is_empty_and_nonmutating() {
         let (_parent, root) = root();
-        let legacy = state(environment(StoredEnvironmentState::Stopped, None));
-        legacy.write(&root).unwrap();
-        let legacy_bytes = fs::read(root.path().join(LEGACY_STATE_FILE)).unwrap();
 
         let (store, inspected) = SupervisorStore::inspect(&root).unwrap();
         assert!(store.is_none());
-        assert_eq!(inspected, legacy);
-        assert_eq!(
-            fs::read(root.path().join(LEGACY_STATE_FILE)).unwrap(),
-            legacy_bytes
-        );
+        assert_eq!(inspected, SupervisorState::default());
         assert!(!root.path().join(DATABASE_FILE).exists());
-        assert!(!root.path().join(LEGACY_ARCHIVE_FILE).exists());
+    }
+
+    #[test]
+    fn older_database_schema_is_rejected_without_mutation() {
+        let (_parent, root) = root();
+        let (store, _) = SupervisorStore::open_for_boot(&root, "boot-a").unwrap();
+        store
+            .connection
+            .pragma_update(None, "user_version", 2_i64)
+            .unwrap();
+        drop(store);
+        let database = root.path().join(DATABASE_FILE);
+        let before = fs::read(&database).unwrap();
+
+        assert!(matches!(
+            SupervisorStore::open_for_boot(&root, "boot-a"),
+            Err(SupervisorStoreError::UnsupportedSchema {
+                application_id: DATABASE_APPLICATION_ID,
+                schema_version: 2,
+            })
+        ));
+        assert_eq!(fs::read(database).unwrap(), before);
     }
 
     #[test]
@@ -2162,14 +1619,23 @@ mod tests {
         let (project_json, project_sha256) = project_intent();
         let mut environment = environment(StoredEnvironmentState::Stopped, None);
         environment.disk_bytes = 1024 * 1024 * 1024;
-        environment.project_spec_json = Some(project_json);
+        environment.project_spec_json = Some(project_json.clone());
         environment.project_spec_sha256 = Some(project_sha256.clone());
-        environment.active_workspace_generation =
-            Some(workspace_generation(&project_sha256, b"active"));
-        environment.staging_workspace_generation =
-            Some(workspace_generation(&project_sha256, b"staging"));
-        environment.rollback_workspace_generation =
-            Some(workspace_generation(&project_sha256, b"rollback"));
+        environment.active_workspace_generation = Some(workspace_generation(
+            &project_json,
+            &project_sha256,
+            b"active",
+        ));
+        environment.staging_workspace_generation = Some(workspace_generation(
+            &project_json,
+            &project_sha256,
+            b"staging",
+        ));
+        environment.rollback_workspace_generation = Some(workspace_generation(
+            &project_json,
+            &project_sha256,
+            b"rollback",
+        ));
         let expected = state(environment);
         let environment = &expected.environments["dev"];
 
@@ -2232,9 +1698,9 @@ mod tests {
         let (project_json, project_sha256) = project_intent();
         let mut environment = environment(StoredEnvironmentState::Stopped, None);
         environment.disk_bytes = 1024 * 1024 * 1024;
-        environment.project_spec_json = Some(project_json);
+        environment.project_spec_json = Some(project_json.clone());
         environment.project_spec_sha256 = Some(project_sha256.clone());
-        let generation = workspace_generation(&project_sha256, b"same");
+        let generation = workspace_generation(&project_json, &project_sha256, b"same");
 
         environment.active_workspace_generation = Some(generation.clone());
         environment.staging_workspace_generation = Some(generation.clone());
@@ -2462,7 +1928,7 @@ mod tests {
         let (project_json, project_sha256) = project_intent();
         let mut environment = environment(StoredEnvironmentState::Starting, None);
         environment.disk_bytes = 1024 * 1024 * 1024;
-        environment.project_spec_json = Some(project_json);
+        environment.project_spec_json = Some(project_json.clone());
         environment.project_spec_sha256 = Some(project_sha256.clone());
         let environment_id = environment.id;
         let initial = state(environment);
@@ -2476,11 +1942,12 @@ mod tests {
             )
             .unwrap();
         let mut staged = initial;
+        let staging_generation = workspace_generation(&project_json, &project_sha256, b"staging");
         staged
             .environments
             .get_mut("dev")
             .unwrap()
-            .staging_workspace_generation = Some(workspace_generation(&project_sha256, b"staging"));
+            .staging_workspace_generation = Some(staging_generation);
 
         let applied = store
             .replace_state_and_advance_operation(

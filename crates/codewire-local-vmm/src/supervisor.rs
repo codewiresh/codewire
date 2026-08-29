@@ -464,25 +464,23 @@ impl EnvironmentRecord {
             .active_artifact_generation
             .as_deref()
             .ok_or(SupervisorError::InvalidState)?;
-        let mut next_rollback = self.active_workspace_generation.clone();
-        if let Some(active) = next_rollback.as_mut() {
-            active.ensure_embedded_context(
-                current_project_json,
-                current_project_sha256,
-                current_artifact_generation,
-            )?;
+        let next_rollback = self.active_workspace_generation.clone();
+        if let Some(active) = next_rollback.as_ref() {
+            active.validate_for_project_intent(current_project_json, current_project_sha256)?;
+            if active.artifact_generation()? != current_artifact_generation {
+                return Err(SupervisorError::InvalidState);
+            }
         }
-        let next_project_json = staging
-            .project_spec_json(current_project_json, current_project_sha256)?
-            .to_vec();
+        let next_project_json = staging.project_spec_json()?.to_vec();
         let next_project_sha256 = staging.project_sha256.clone();
         let staging_artifact_fallback = self
             .staging_artifact_generation
             .as_deref()
             .unwrap_or(current_artifact_generation);
-        let next_artifact_generation = staging
-            .artifact_generation(staging_artifact_fallback)?
-            .to_owned();
+        let next_artifact_generation = staging.artifact_generation()?.to_owned();
+        if next_artifact_generation != staging_artifact_fallback {
+            return Err(SupervisorError::InvalidState);
+        }
         if self
             .staging_artifact_generation
             .as_deref()
@@ -518,26 +516,15 @@ impl EnvironmentRecord {
             .staging_workspace_generation
             .as_ref()
             .ok_or(SupervisorError::InvalidState)?;
-        if workspace_storage_generation(active, active_artifact)?
-            != workspace_storage_generation(staging, staging_artifact_fallback)?
-        {
+        if workspace_storage_generation(active)? != workspace_storage_generation(staging)? {
             return Err(SupervisorError::InvalidState);
         }
-        let current_project_json = self
-            .project_spec_json
-            .as_deref()
-            .ok_or(SupervisorError::InvalidState)?;
-        let current_project_sha256 = self
-            .project_spec_sha256
-            .as_deref()
-            .ok_or(SupervisorError::InvalidState)?;
-        let next_project_json = staging
-            .project_spec_json(current_project_json, current_project_sha256)?
-            .to_vec();
+        let next_project_json = staging.project_spec_json()?.to_vec();
         let next_project_sha256 = staging.project_sha256.clone();
-        let next_artifact_generation = staging
-            .artifact_generation(staging_artifact_fallback)?
-            .to_owned();
+        let next_artifact_generation = staging.artifact_generation()?.to_owned();
+        if next_artifact_generation != staging_artifact_fallback {
+            return Err(SupervisorError::InvalidState);
+        }
 
         self.active_workspace_generation = self.staging_workspace_generation.take();
         self.project_spec_json = Some(next_project_json);
@@ -560,7 +547,7 @@ impl EnvironmentRecord {
             .active_workspace_generation
             .as_ref()
             .ok_or(SupervisorError::InvalidState)?;
-        if workspace_storage_generation(active, active_artifact)? != expected_active_storage {
+        if workspace_storage_generation(active)? != expected_active_storage {
             return Err(SupervisorError::InvalidState);
         }
         if let Some(staging) = self.staging_workspace_generation.as_ref() {
@@ -568,10 +555,10 @@ impl EnvironmentRecord {
                 .staging_artifact_generation
                 .as_deref()
                 .unwrap_or(active_artifact);
-            if workspace_storage_generation(staging, staging_artifact)? == expected_rollback_storage
+            if workspace_storage_generation(staging)? == expected_rollback_storage
                 && self.rollback_workspace_generation.is_none()
             {
-                if staging.artifact_generation(staging_artifact)? != staging_artifact {
+                if staging.artifact_generation()? != staging_artifact {
                     return Err(SupervisorError::InvalidState);
                 }
                 return Ok(());
@@ -582,31 +569,14 @@ impl EnvironmentRecord {
             .rollback_workspace_generation
             .as_ref()
             .ok_or(SupervisorError::InvalidState)?;
-        if workspace_storage_generation(rollback, active_artifact)? != expected_rollback_storage {
+        if workspace_storage_generation(rollback)? != expected_rollback_storage {
             return Err(SupervisorError::InvalidState);
         }
-        let legacy_project_json = self
-            .project_spec_json
-            .as_deref()
-            .ok_or(SupervisorError::InvalidState)?;
-        let legacy_project_sha256 = self
-            .project_spec_sha256
-            .as_deref()
-            .ok_or(SupervisorError::InvalidState)?;
         let rollback = self
             .rollback_workspace_generation
-            .as_mut()
+            .as_ref()
             .ok_or(SupervisorError::InvalidState)?;
-        let rollback_project_json = rollback
-            .project_spec_json(legacy_project_json, legacy_project_sha256)?
-            .to_vec();
-        let rollback_project_sha256 = rollback.project_sha256.clone();
-        let rollback_artifact = rollback.artifact_generation(active_artifact)?.to_owned();
-        rollback.ensure_embedded_context(
-            &rollback_project_json,
-            &rollback_project_sha256,
-            &rollback_artifact,
-        )?;
+        let rollback_artifact = rollback.artifact_generation()?.to_owned();
         self.staging_artifact_generation = Some(rollback_artifact);
         self.staging_workspace_generation = self.rollback_workspace_generation.take();
         Ok(())
@@ -625,7 +595,7 @@ impl EnvironmentRecord {
             .active_workspace_generation
             .as_ref()
             .ok_or(SupervisorError::InvalidState)?;
-        if workspace_storage_generation(active, active_artifact)? != expected_active_storage
+        if workspace_storage_generation(active)? != expected_active_storage
             || self.rollback_workspace_generation.is_some()
         {
             return Err(SupervisorError::InvalidState);
@@ -638,7 +608,9 @@ impl EnvironmentRecord {
             .staging_workspace_generation
             .as_ref()
             .ok_or(SupervisorError::InvalidState)?;
-        if workspace_storage_generation(staging, staging_artifact)? != expected_rollback_storage {
+        if staging.artifact_generation()? != staging_artifact
+            || workspace_storage_generation(staging)? != expected_rollback_storage
+        {
             return Err(SupervisorError::InvalidState);
         }
         self.rollback_workspace_generation = self.staging_workspace_generation.take();
@@ -693,10 +665,10 @@ impl EnvironmentRecord {
             .as_ref()
             .map(|generation| {
                 let artifact = active_artifact.ok_or(SupervisorError::InvalidState)?;
-                if generation.artifact_generation(artifact)? != artifact {
+                if generation.artifact_generation()? != artifact {
                     return Err(SupervisorError::InvalidState);
                 }
-                workspace_storage_generation(generation, artifact)
+                workspace_storage_generation(generation)
             })
             .transpose()?;
         let staging_storage = self
@@ -704,21 +676,16 @@ impl EnvironmentRecord {
             .as_ref()
             .map(|generation| {
                 let artifact = staging_artifact.ok_or(SupervisorError::InvalidState)?;
-                if generation.artifact_generation(artifact)? != artifact {
+                if generation.artifact_generation()? != artifact {
                     return Err(SupervisorError::InvalidState);
                 }
-                workspace_storage_generation(generation, artifact)
+                workspace_storage_generation(generation)
             })
             .transpose()?;
         let rollback_storage = self
             .rollback_workspace_generation
             .as_ref()
-            .map(|generation| {
-                workspace_storage_generation(
-                    generation,
-                    active_artifact.ok_or(SupervisorError::InvalidState)?,
-                )
-            })
+            .map(workspace_storage_generation)
             .transpose()?;
         let duplicate_workspace_generation =
             |left: Option<&String>, right: Option<&String>| left.is_some() && left == right;
@@ -778,17 +745,6 @@ impl Default for SupervisorState {
 }
 
 impl SupervisorState {
-    #[cfg(test)]
-    pub(crate) fn write(&self, root: &PrivateRoot) -> Result<(), SupervisorError> {
-        self.validate()?;
-        let bytes = serde_json::to_vec(self).map_err(|_| SupervisorError::InvalidState)?;
-        if bytes.len() as u64 > 1024 * 1024 {
-            return Err(SupervisorError::InvalidState);
-        }
-        root.atomic_replace(Path::new("state.json"), &bytes, 0o600)?;
-        Ok(())
-    }
-
     pub(crate) fn validate(&self) -> Result<(), SupervisorError> {
         if self.schema_version != SUPERVISOR_STATE_SCHEMA
             || self
@@ -1046,17 +1002,11 @@ impl SupervisorCore {
         self.collect_unreferenced_runtime_artifacts()?;
         {
             let environment = self.environment(name)?;
-            let active_artifact = environment
-                .active_artifact_generation
-                .as_deref()
-                .ok_or(SupervisorError::InvalidState)?;
             let active = environment
                 .active_workspace_generation
                 .as_ref()
                 .ok_or(SupervisorError::InvalidState)?;
-            if workspace_storage_generation(active, active_artifact)?
-                != parameters.prior_storage_generation
-            {
+            if workspace_storage_generation(active)? != parameters.prior_storage_generation {
                 return Err(SupervisorError::InvalidState);
             }
             if environment.staging_workspace_generation.is_some() {
@@ -1087,17 +1037,11 @@ impl SupervisorCore {
             .environments
             .get_mut(name)
             .ok_or_else(|| SupervisorError::NotFound(name.to_owned()))?;
-        let active_artifact = environment
-            .active_artifact_generation
-            .as_deref()
-            .ok_or(SupervisorError::InvalidState)?;
         let active = environment
             .active_workspace_generation
             .as_ref()
             .ok_or(SupervisorError::InvalidState)?;
-        if workspace_storage_generation(active, active_artifact)?
-            != parameters.prior_storage_generation
-        {
+        if workspace_storage_generation(active)? != parameters.prior_storage_generation {
             return Err(SupervisorError::InvalidState);
         }
         if environment.staging_workspace_generation.is_some() {
@@ -1451,17 +1395,11 @@ impl SupervisorCore {
                 return Err(SupervisorError::InvalidState);
             }
             let parameters = workspace_transition_parameters(&operation, environment)?;
-            let active_artifact = environment
-                .active_artifact_generation
-                .as_deref()
-                .ok_or(SupervisorError::InvalidState)?;
             let active = environment
                 .active_workspace_generation
                 .as_ref()
                 .ok_or(SupervisorError::InvalidState)?;
-            if workspace_storage_generation(active, active_artifact)?
-                != parameters.prior_storage_generation
-            {
+            if workspace_storage_generation(active)? != parameters.prior_storage_generation {
                 return Err(SupervisorError::InvalidState);
             }
             if operation.checkpoint == 0 {
@@ -3425,16 +3363,7 @@ fn prepare_workspace_boot(
     )?;
     let setup = match workspace {
         Some(generation) if staging || root.created => {
-            let legacy_project_json = environment
-                .project_spec_json
-                .as_deref()
-                .ok_or(SupervisorError::InvalidState)?;
-            let legacy_project_sha256 = environment
-                .project_spec_sha256
-                .as_deref()
-                .ok_or(SupervisorError::InvalidState)?;
-            let project_json =
-                generation.project_spec_json(legacy_project_json, legacy_project_sha256)?;
+            let project_json = generation.project_spec_json()?;
             let engine = PrivateRoot::open(engine_state_root)?;
             let content = ContentStore::create(&engine)?;
             Some(ensure_setup_pack(
@@ -3517,7 +3446,7 @@ fn artifact_generation_for_boot(
         environment.active_workspace_generation.as_ref()
     };
     let generation = match workspace {
-        Some(workspace) => workspace.artifact_generation(fallback)?,
+        Some(workspace) => workspace.artifact_generation()?,
         None => fallback,
     };
     if generation != fallback {
@@ -3547,11 +3476,10 @@ fn oci_storage_generation(
 
 fn workspace_storage_generation(
     generation: &WorkspaceGenerationRecord,
-    legacy_artifact_generation: &str,
 ) -> Result<String, SupervisorError> {
     oci_storage_generation(
         &generation.root_generation,
-        generation.artifact_generation(legacy_artifact_generation)?,
+        generation.artifact_generation()?,
         generation.root_disk_bytes,
     )
 }
@@ -3560,7 +3488,6 @@ fn referenced_root_storage_generations(
     environment: &EnvironmentRecord,
 ) -> Result<BTreeSet<String>, SupervisorError> {
     let mut retained = BTreeSet::new();
-    let active_artifact = environment.active_artifact_generation.as_deref();
     for generation in [
         environment.active_workspace_generation.as_ref(),
         environment.rollback_workspace_generation.as_ref(),
@@ -3568,19 +3495,10 @@ fn referenced_root_storage_generations(
     .into_iter()
     .flatten()
     {
-        let artifact = active_artifact
-            .filter(|artifact| valid_sha256(artifact))
-            .ok_or(SupervisorError::InvalidState)?;
-        retained.insert(workspace_storage_generation(generation, artifact)?);
+        retained.insert(workspace_storage_generation(generation)?);
     }
     if let Some(generation) = environment.staging_workspace_generation.as_ref() {
-        let artifact = environment
-            .staging_artifact_generation
-            .as_deref()
-            .or(active_artifact)
-            .filter(|artifact| valid_sha256(artifact))
-            .ok_or(SupervisorError::InvalidState)?;
-        retained.insert(workspace_storage_generation(generation, artifact)?);
+        retained.insert(workspace_storage_generation(generation)?);
     }
     if environment.project_spec_json.is_none() {
         retained.insert(foundation_root_generation(environment)?);
@@ -3626,7 +3544,7 @@ fn referenced_artifact_generations(
             retain_artifact_generation(&mut retained, staging)?;
         }
         if let Some(rollback) = environment.rollback_workspace_generation.as_ref() {
-            retain_artifact_generation(&mut retained, rollback.artifact_generation(active)?)?;
+            retain_artifact_generation(&mut retained, rollback.artifact_generation()?)?;
         }
         if let Some(runner) = environment.runner.as_ref() {
             retain_artifact_generation(&mut retained, &runner.artifact_generation)?;
@@ -3875,16 +3793,11 @@ fn workspace_transition_requires_boot(
     environment: &EnvironmentRecord,
     parameters: &WorkspaceTransitionParameters,
 ) -> Result<bool, SupervisorError> {
-    let active_artifact = environment
-        .active_artifact_generation
-        .as_deref()
-        .ok_or(SupervisorError::InvalidState)?;
     let active = environment
         .active_workspace_generation
         .as_ref()
         .ok_or(SupervisorError::InvalidState)?;
-    if workspace_storage_generation(active, active_artifact)? != parameters.prior_storage_generation
-    {
+    if workspace_storage_generation(active)? != parameters.prior_storage_generation {
         return Err(SupervisorError::InvalidState);
     }
     match &parameters.intent {
@@ -3894,12 +3807,7 @@ fn workspace_transition_requires_boot(
         } => match environment.staging_workspace_generation.as_ref() {
             Some(staging) => {
                 staging.validate_for_project_intent(project_spec_json, project_spec_sha256)?;
-                let staging_artifact = environment
-                    .staging_artifact_generation
-                    .as_deref()
-                    .unwrap_or(active_artifact);
-                Ok(workspace_storage_generation(active, active_artifact)?
-                    != workspace_storage_generation(staging, staging_artifact)?)
+                Ok(workspace_storage_generation(active)? != workspace_storage_generation(staging)?)
             }
             None => {
                 active.validate_for_project_intent(project_spec_json, project_spec_sha256)?;
@@ -3913,13 +3821,8 @@ fn workspace_transition_requires_boot(
                 .staging_workspace_generation
                 .as_ref()
                 .ok_or(SupervisorError::InvalidState)?;
-            let staging_artifact = environment
-                .staging_artifact_generation
-                .as_deref()
-                .unwrap_or(active_artifact);
             if environment.rollback_workspace_generation.is_some()
-                || workspace_storage_generation(staging, staging_artifact)?
-                    != *rollback_storage_generation
+                || workspace_storage_generation(staging)? != *rollback_storage_generation
             {
                 return Err(SupervisorError::InvalidState);
             }
@@ -3945,16 +3848,11 @@ fn validate_workspace_transition_start(
     {
         return Err(SupervisorError::InvalidState);
     }
-    let active_artifact = environment
-        .active_artifact_generation
-        .as_deref()
-        .ok_or(SupervisorError::InvalidState)?;
     let active = environment
         .active_workspace_generation
         .as_ref()
         .ok_or(SupervisorError::InvalidState)?;
-    if workspace_storage_generation(active, active_artifact)? != parameters.prior_storage_generation
-    {
+    if workspace_storage_generation(active)? != parameters.prior_storage_generation {
         return Err(SupervisorError::InvalidState);
     }
     if let WorkspaceTransitionIntent::Rollback {
@@ -3965,8 +3863,7 @@ fn validate_workspace_transition_start(
             .rollback_workspace_generation
             .as_ref()
             .ok_or(SupervisorError::InvalidState)?;
-        if workspace_storage_generation(rollback, active_artifact)? != *rollback_storage_generation
-        {
+        if workspace_storage_generation(rollback)? != *rollback_storage_generation {
             return Err(SupervisorError::InvalidState);
         }
     }
@@ -4413,13 +4310,11 @@ mod tests {
         was_running: bool,
     ) -> serde_json::Value {
         let active = environment.active_workspace_generation.as_ref().unwrap();
-        let active_artifact = environment.active_artifact_generation.as_deref().unwrap();
         serde_json::json!({
             "name": environment.name,
             "project_spec_json": std::str::from_utf8(project_spec_json).unwrap(),
             "project_spec_sha256": project_spec_sha256,
-            "prior_storage_generation": workspace_storage_generation(active, active_artifact)
-                .unwrap(),
+            "prior_storage_generation": workspace_storage_generation(active).unwrap(),
             "target_generation": environment.generation + 1,
             "was_running": was_running,
         })
@@ -4429,15 +4324,12 @@ mod tests {
         environment: &EnvironmentRecord,
         was_running: bool,
     ) -> serde_json::Value {
-        let active_artifact = environment.active_artifact_generation.as_deref().unwrap();
         let active = environment.active_workspace_generation.as_ref().unwrap();
         let rollback = environment.rollback_workspace_generation.as_ref().unwrap();
         serde_json::json!({
             "name": environment.name,
-            "prior_storage_generation": workspace_storage_generation(active, active_artifact)
-                .unwrap(),
-            "rollback_storage_generation": workspace_storage_generation(rollback, active_artifact)
-                .unwrap(),
+            "prior_storage_generation": workspace_storage_generation(active).unwrap(),
+            "rollback_storage_generation": workspace_storage_generation(rollback).unwrap(),
             "target_generation": environment.generation + 1,
             "was_running": was_running,
         })
@@ -4589,8 +4481,8 @@ mod tests {
         );
         assert_eq!(active.root_generation, staging.root_generation);
         assert_ne!(
-            workspace_storage_generation(&active, &old_artifact).unwrap(),
-            workspace_storage_generation(&staging, &next_artifact).unwrap()
+            workspace_storage_generation(&active).unwrap(),
+            workspace_storage_generation(&staging).unwrap()
         );
         environment.active_workspace_generation = Some(active.clone());
         environment.staging_workspace_generation = Some(staging.clone());
@@ -4620,14 +4512,11 @@ mod tests {
             2
         );
 
-        let active_storage = workspace_storage_generation(
-            environment.active_workspace_generation.as_ref().unwrap(),
-            environment.active_artifact_generation.as_deref().unwrap(),
-        )
-        .unwrap();
+        let active_storage =
+            workspace_storage_generation(environment.active_workspace_generation.as_ref().unwrap())
+                .unwrap();
         let rollback_storage = workspace_storage_generation(
             environment.rollback_workspace_generation.as_ref().unwrap(),
-            environment.active_artifact_generation.as_deref().unwrap(),
         )
         .unwrap();
         environment
@@ -4744,15 +4633,11 @@ mod tests {
     }
 
     #[test]
-    fn changed_project_promotion_keeps_the_legacy_active_generation_rebuildable() {
+    fn changed_project_promotion_keeps_the_active_generation_rebuildable() {
         let mut environment = project_environment();
         let old_project_json = environment.project_spec_json.clone().unwrap();
         let old_project_sha256 = environment.project_spec_sha256.clone().unwrap();
-        let mut active =
-            test_workspace_generation(&old_project_json, &old_project_sha256, b"active");
-        active.schema_version = 1;
-        active.project_spec_json = None;
-        active.artifact_generation = None;
+        let active = test_workspace_generation(&old_project_json, &old_project_sha256, b"active");
         let mut next_project: codewire_project::ProjectSpec =
             serde_json::from_slice(&old_project_json).unwrap();
         next_project.image = "registry.example/codewire/workspace:next".to_owned();
@@ -4779,10 +4664,7 @@ mod tests {
         assert_eq!(environment.active_workspace_generation, Some(staging));
         let rollback = environment.rollback_workspace_generation.as_ref().unwrap();
         assert_eq!(rollback.root_generation, active.root_generation);
-        assert_eq!(
-            rollback.project_spec_json.as_deref().unwrap().as_bytes(),
-            old_project_json
-        );
+        assert_eq!(rollback.project_spec_json.as_bytes(), old_project_json);
         rollback.validate().unwrap();
         environment.validate("dev").unwrap();
     }
