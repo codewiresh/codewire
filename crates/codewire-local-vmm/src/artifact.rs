@@ -116,6 +116,14 @@ impl AdmittedArtifact {
     /// spawn. Same-UID replacement remains explicitly inside the host trust
     /// boundary; a different inode is still rejected rather than adopted.
     pub fn revalidate(&self) -> Result<(), ArtifactError> {
+        let file = self.open_exact()?;
+        if sha256_file(&file, &self.path)? != self.sha256 {
+            return Err(ArtifactError::IdentityChanged(self.path.clone()));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn open_exact(&self) -> Result<File, ArtifactError> {
         let root = PrivateRoot::open(&self.root).map_err(ArtifactError::ConfinedPath)?;
         let opened = root
             .open_regular(
@@ -126,12 +134,10 @@ impl AdmittedArtifact {
                 Some(if self.executable { 0o500 } else { 0o400 }),
             )
             .map_err(ArtifactError::ConfinedPath)?;
-        if opened.identity() != &self.identity
-            || sha256_file(opened.file(), &self.path)? != self.sha256
-        {
+        if opened.identity() != &self.identity {
             return Err(ArtifactError::IdentityChanged(self.path.clone()));
         }
-        Ok(())
+        Ok(opened.into_file())
     }
 
     #[cfg(test)]
@@ -184,6 +190,8 @@ pub enum ArtifactError {
         path: PathBuf,
         source: serde_json::Error,
     },
+    #[error("encode canonical artifact lock: {0}")]
+    EncodeLock(serde_json::Error),
     #[error("artifact lock is empty or exceeds the 1 MiB admission limit: {0}")]
     InvalidLockSize(PathBuf),
     #[error("artifact lock schema {0} is unsupported")]
@@ -221,6 +229,14 @@ pub enum ArtifactError {
 }
 
 impl ArtifactLock {
+    pub(crate) fn canonical_json(&self) -> Result<Vec<u8>, ArtifactError> {
+        serde_json::to_vec(self).map_err(ArtifactError::EncodeLock)
+    }
+
+    pub(crate) fn generation(&self) -> Result<String, ArtifactError> {
+        Ok(format!("{:x}", Sha256::digest(self.canonical_json()?)))
+    }
+
     pub fn read(path: &Path) -> Result<Self, ArtifactError> {
         let parent_path = path
             .parent()
@@ -372,6 +388,37 @@ fn admit_one(
         sha256: spec.sha256.clone(),
         executable,
     })
+}
+
+#[cfg(test)]
+pub(crate) fn admit_test_artifact(
+    path: &Path,
+    executable: bool,
+) -> Result<AdmittedArtifact, ArtifactError> {
+    let parent_path = path
+        .parent()
+        .ok_or_else(|| ArtifactError::InvalidRelativePath(path.to_owned()))?;
+    let relative = path
+        .file_name()
+        .map(PathBuf::from)
+        .ok_or_else(|| ArtifactError::InvalidRelativePath(path.to_owned()))?;
+    let root = PrivateRoot::open(parent_path).map_err(ArtifactError::ConfinedPath)?;
+    let opened = root
+        .open_regular(
+            &relative,
+            false,
+            None,
+            executable,
+            Some(if executable { 0o500 } else { 0o400 }),
+        )
+        .map_err(ArtifactError::ConfinedPath)?;
+    let spec = ArtifactSpec {
+        path: relative,
+        size: opened.identity().size,
+        sha256: sha256_file(opened.file(), path)?,
+        architecture: ArtifactArchitecture::host()?,
+    };
+    admit_one(&root, &spec, executable)
 }
 
 fn with_opened<T>(

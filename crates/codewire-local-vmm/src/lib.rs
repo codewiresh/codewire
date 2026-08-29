@@ -8,6 +8,8 @@
 #[cfg(target_os = "linux")]
 pub mod artifact;
 #[cfg(target_os = "linux")]
+mod artifact_store;
+#[cfg(target_os = "linux")]
 pub mod ch_api;
 #[cfg(target_os = "linux")]
 pub mod cloud_hypervisor;

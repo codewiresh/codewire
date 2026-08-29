@@ -22,6 +22,8 @@ use tokio::sync::{Mutex, watch};
 use tonic::{Request, Response, Status};
 use uuid::Uuid;
 
+use crate::RunnerError;
+use crate::artifact_store::RuntimeArtifactStore;
 use crate::control::v1;
 use crate::control::v1::local_supervisor_service_client::LocalSupervisorServiceClient;
 use crate::control::v1::local_supervisor_service_server::{
@@ -51,7 +53,6 @@ use crate::workspace::{
     ensure_clean_git_workspace, inspect_clean_git_workspace,
 };
 use crate::workspace_generation::{WorkspaceGenerationError, WorkspaceGenerationRecord};
-use crate::{CloudHypervisorRunner, RunnerConfig, RunnerError};
 
 pub(crate) const SUPERVISOR_STATE_SCHEMA: u32 = 1;
 const RUNNER_START_TIMEOUT: Duration = Duration::from_secs(15);
@@ -930,23 +931,21 @@ impl SupervisorCore {
 
     fn current_artifact_generation(&self) -> Result<String, SupervisorError> {
         let artifact_lock = crate::artifact::ArtifactLock::read(&self.config.artifact_lock)?;
-        Ok(format!(
-            "{:x}",
-            Sha256::digest(
-                serde_json::to_vec(&artifact_lock).map_err(|_| SupervisorError::InvalidState)?
-            )
-        ))
+        artifact_lock.generation().map_err(Into::into)
+    }
+
+    async fn admit_current_artifact_generation(&mut self) -> Result<String, SupervisorError> {
+        let engine = PrivateRoot::open(&self.config.engine_root())?;
+        RuntimeArtifactStore::create(&engine)
+            .map_err(|_| SupervisorError::ArtifactStore)?
+            .admit_source(&self.config.artifact_lock, &self.config.artifact_root)
+            .await
+            .map_err(|_| SupervisorError::ArtifactStore)
     }
 
     async fn preflight(&mut self) -> Result<String, SupervisorError> {
-        let artifact_generation = self.current_artifact_generation()?;
-        let runner = CloudHypervisorRunner::new(RunnerConfig {
-            state_root: self.config.engine_root(),
-            artifact_root: self.config.artifact_root.clone(),
-            artifact_lock: self.config.artifact_lock.clone(),
-        })
-        .await?;
-        runner.preflight()?;
+        let artifact_generation = self.admit_current_artifact_generation().await?;
+        crate::linux::preflight::preflight().map_err(RunnerError::from)?;
         Ok(artifact_generation)
     }
 
@@ -1058,7 +1057,7 @@ impl SupervisorCore {
         let project: codewire_project::ProjectSpec =
             serde_json::from_slice(project_spec_json).map_err(|_| SupervisorError::InvalidState)?;
         let reference = RegistryReference::parse(&project.image)?;
-        let artifact_generation = self.current_artifact_generation()?;
+        let artifact_generation = self.admit_current_artifact_generation().await?;
         let engine = PrivateRoot::open(&self.config.engine_root())?;
         let content = ContentStore::create(&engine)?;
         let image = RegistryResolver::new(&content)?
@@ -4026,6 +4025,8 @@ pub enum SupervisorError {
     Runner(#[from] RunnerError),
     #[error(transparent)]
     Artifact(#[from] crate::artifact::ArtifactError),
+    #[error("runtime artifact store operation failed")]
+    ArtifactStore,
     #[error(transparent)]
     RunnerService(#[from] RunnerServiceError),
     #[error(transparent)]
