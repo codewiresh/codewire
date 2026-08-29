@@ -26,6 +26,8 @@ pub struct RootGenerationDisk {
     pub generation: String,
     pub path: PathBuf,
     pub identity: StateDiskIdentity,
+    /// True only when this invocation published and formatted the disk.
+    pub created: bool,
 }
 
 pub fn ensure_empty_root_generation(
@@ -61,6 +63,7 @@ pub fn ensure_empty_root_generation(
                 generation: generation.to_owned(),
                 path: generation_paths.root_disk,
                 identity,
+                created: false,
             });
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
@@ -114,6 +117,7 @@ pub fn ensure_empty_root_generation(
         generation: generation.to_owned(),
         path: generation_paths.root_disk,
         identity,
+        created: true,
     })
 }
 
@@ -230,6 +234,7 @@ mod tests {
         .unwrap();
         assert_eq!(admitted.path, root.root_disk);
         assert_eq!(admitted.generation, generation);
+        assert!(!admitted.created);
         assert!(matches!(
             ensure_empty_root_generation(
                 engine.path(),
@@ -239,6 +244,33 @@ mod tests {
             ),
             Err(GenerationError::ExistingDiskSizeMismatch { .. })
         ));
+    }
+
+    #[test]
+    fn creation_is_reported_only_by_the_publishing_invocation() {
+        let engine = tempfile::tempdir().unwrap();
+        fs::set_permissions(engine.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let vm_id = Uuid::new_v4();
+        let generation = "b".repeat(64);
+
+        let created = ensure_empty_root_generation(
+            engine.path(),
+            vm_id,
+            &generation,
+            MINIMUM_ROOT_DISK_BYTES,
+        )
+        .unwrap();
+        assert!(created.created);
+
+        let replayed = ensure_empty_root_generation(
+            engine.path(),
+            vm_id,
+            &generation,
+            MINIMUM_ROOT_DISK_BYTES,
+        )
+        .unwrap();
+        assert!(!replayed.created);
+        assert_eq!(replayed.identity, created.identity);
     }
 
     #[test]

@@ -30,8 +30,11 @@ use tokio_vsock::{
 use zeroize::Zeroizing;
 
 use crate::newc::BASIC_BUSYBOX_APPLETS;
-use crate::setup_apply::{apply_setup_layers, verify_completed_setup_generation};
-use crate::setup_verify::verify_setup_contents;
+use crate::setup_apply::{
+    OCI_LOWER_ROOT_MODE, SetupApplyError, apply_setup_layers, verify_completed_setup_generation,
+};
+use crate::setup_archive::ArchiveError;
+use crate::setup_verify::{SetupContentError, verify_setup_contents};
 use crate::workspace_plan::{
     CONTAINER_PLAN_PATH, MAX_PLAN_BYTES, WORKSPACE_PLAN_PATH, WorkspaceIdentity, WorkspacePlan,
     WorkspacePlanSource,
@@ -64,6 +67,7 @@ const EMPTY_HOME_LOWER_PATH: &str = "/run/codewire/empty-home";
 const RUNC_BUNDLE_PATH: &str = "/generation/bundle";
 const RUNC_CONFIG_PATH: &str = "/generation/bundle/config.json";
 const RUNC_LOG_PATH: &str = "/state/codewire/runc.log";
+const RUNC_STDERR_PATH: &str = "/state/codewire/runc.stderr";
 const RUNC_LOG_LIMIT: u64 = 64 * 1024;
 const CGROUP_ROOT_PATH: &str = "/sys/fs/cgroup";
 const CGROUP_HIERARCHY_PATH: &str = "/sys/fs/cgroup/codewire";
@@ -95,6 +99,32 @@ const RUNC_CONTROL_TIMEOUT: Duration = Duration::from_secs(1);
 const CONTROL_MESSAGE_LIMIT: usize = 32;
 const WORKSPACE_READY_FD: RawFd = 3;
 const WORKSPACE_READY_LIMIT: usize = 96;
+const WORKSPACE_FAILURE_FRAMES: &[(&[u8], &str)] = &[
+    (
+        b"CWFAIL1 workspace-identity-failed\n",
+        "workspace-identity-failed",
+    ),
+    (
+        b"CWFAIL1 workspace-confinement-failed\n",
+        "workspace-confinement-failed",
+    ),
+    (
+        b"CWFAIL1 workspace-plan-invalid\n",
+        "workspace-plan-invalid",
+    ),
+    (
+        b"CWFAIL1 workspace-signal-failed\n",
+        "workspace-signal-failed",
+    ),
+    (
+        b"CWFAIL1 workspace-install-failed\n",
+        "workspace-install-failed",
+    ),
+    (
+        b"CWFAIL1 workspace-workload-failed\n",
+        "workspace-workload-failed",
+    ),
+];
 
 const SYS_BLOCK_PATH: &str = "/sys/class/block";
 const DEV_PATH: &str = "/dev";
@@ -194,11 +224,20 @@ pub fn run_init() -> Result<()> {
         let mut setup = open_setup_device(&setup_device)?;
         let header = verify_setup_header(&mut setup, binding)?;
         record_boot_stage("setup-header-ready")?;
-        let contents = verify_setup_contents(&mut setup, &header)
-            .context("verify every guest setup object and layer digest")?;
+        let contents = match verify_setup_contents(&mut setup, &header) {
+            Ok(contents) => contents,
+            Err(error) => {
+                record_boot_stage(setup_content_failure_stage(&error))?;
+                return Err(error).context("verify every guest setup object and layer digest");
+            }
+        };
         record_boot_stage("setup-content-ready")?;
-        apply_setup_layers(&mut setup, &header, &contents, Path::new(ROOT_MOUNT_PATH))
-            .context("apply every admitted OCI layer into the staging root")?;
+        if let Err(error) =
+            apply_setup_layers(&mut setup, &header, &contents, Path::new(ROOT_MOUNT_PATH))
+        {
+            record_boot_stage(setup_apply_failure_stage(&error))?;
+            return Err(error).context("apply every admitted OCI layer into the staging root");
+        }
         record_boot_stage("root-layers-ready")?;
         let plan = WorkspacePlan::from_verified_setup(
             &contents.project,
@@ -561,15 +600,24 @@ fn validate_runc_process_path(path: &Path) -> Result<()> {
 /// resolved image identity, reports readiness over its inherited private
 /// descriptor, and then remains as the durable exec/PTY namespace target.
 pub fn run_workspace_init() -> Result<()> {
-    ensure!(
-        unsafe { libc::getpid() } == 1,
-        "workspace init must be container PID 1"
-    );
-    if unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0) } == -1 {
-        return Err(io::Error::last_os_error()).context("confine workspace init process state");
+    if unsafe { libc::getpid() } != 1 {
+        return fail_workspace_init(
+            "workspace-identity-failed",
+            anyhow::anyhow!("workspace init must be container PID 1"),
+        );
     }
-    confine_workspace_readiness_descriptor()?;
-    let plan = read_container_workspace_plan()?;
+    if unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0) } == -1 {
+        let error = anyhow::Error::new(io::Error::last_os_error())
+            .context("confine workspace init process state");
+        return fail_workspace_init("workspace-confinement-failed", error);
+    }
+    if let Err(error) = confine_workspace_readiness_descriptor() {
+        return fail_workspace_init("workspace-confinement-failed", error);
+    }
+    let plan = match read_container_workspace_plan() {
+        Ok(plan) => plan,
+        Err(error) => return fail_workspace_init("workspace-plan-invalid", error),
+    };
     let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
     action.sa_sigaction = request_poweroff_signal as *const () as usize;
     action.sa_flags = libc::SA_NOCLDSTOP;
@@ -578,20 +626,26 @@ pub fn run_workspace_init() -> Result<()> {
     }
     for signal in [libc::SIGTERM, libc::SIGINT] {
         if unsafe { libc::sigaction(signal, &action, std::ptr::null_mut()) } == -1 {
-            return Err(io::Error::last_os_error())
+            let error = anyhow::Error::new(io::Error::last_os_error())
                 .context("install workspace init signal handler");
+            return fail_workspace_init("workspace-signal-failed", error);
         }
     }
     POWEROFF_REQUESTED.store(false, Ordering::Release);
 
-    run_workspace_install(&plan)?;
+    if let Err(error) = run_workspace_install(&plan) {
+        return fail_workspace_init("workspace-install-failed", error);
+    }
     if !plan.workload_args.is_empty() {
-        let _workload = spawn_workspace_process(
+        let _workload = match spawn_workspace_process(
             &plan,
             &plan.workload_args,
             &plan.workload_cwd,
             "start image workload",
-        )?;
+        ) {
+            Ok(workload) => workload,
+            Err(error) => return fail_workspace_init("workspace-workload-failed", error),
+        };
     }
     if !plan.startup_script.is_empty() {
         let arguments = vec![
@@ -646,6 +700,27 @@ fn read_container_workspace_plan() -> Result<WorkspacePlan> {
     let bytes = read_bounded(Path::new(CONTAINER_PLAN_PATH), MAX_PLAN_BYTES + 1)
         .context("read container workspace execution plan")?;
     WorkspacePlan::decode(&bytes).context("validate container workspace execution plan")
+}
+
+fn fail_workspace_init<T>(stage: &'static str, error: anyhow::Error) -> Result<T> {
+    let _ = publish_workspace_failure(stage);
+    Err(error)
+}
+
+fn publish_workspace_failure(stage: &'static str) -> Result<()> {
+    let frame = WORKSPACE_FAILURE_FRAMES
+        .iter()
+        .find_map(|(frame, admitted)| (*admitted == stage).then_some(*frame))
+        .ok_or_else(|| anyhow::anyhow!("workspace failure stage is invalid"))?;
+    ensure!(
+        unsafe { libc::fcntl(WORKSPACE_READY_FD, libc::F_GETFD) } != -1,
+        "workspace readiness descriptor is absent"
+    );
+    let mut stream = unsafe { UnixStream::from_raw_fd(WORKSPACE_READY_FD) };
+    stream
+        .write_all(frame)
+        .context("publish trusted workspace failure")?;
+    stream.flush().context("flush trusted workspace failure")
 }
 
 fn run_workspace_install(plan: &WorkspacePlan) -> Result<()> {
@@ -703,14 +778,19 @@ fn spawn_workspace_process(
     let (program, remaining) = arguments
         .split_first()
         .ok_or_else(|| anyhow::anyhow!("workspace process command is empty"))?;
+    ensure!(
+        Path::new(working_directory).is_absolute(),
+        "workspace process directory is not absolute"
+    );
+    let working_directory = CString::new(working_directory.as_bytes())
+        .context("workspace process directory contains NUL")?;
     let mut command = Command::new(program);
     command
         .args(remaining)
-        .current_dir(working_directory)
         .env_clear()
         .stdin(Stdio::null())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit());
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
     for entry in &plan.environment {
         let (key, value) = entry
             .split_once('=')
@@ -730,6 +810,11 @@ fn spawn_workspace_process(
             if libc::setgroups(additional_gids.len(), additional_gids.as_ptr()) == -1
                 || libc::setgid(gid as libc::gid_t) == -1
                 || libc::setuid(uid as libc::uid_t) == -1
+                // The workspace and home are deliberately mode 0700 and
+                // owned by the image identity. Enter the sealed working
+                // directory only after dropping identity; PID 1 does not
+                // retain CAP_DAC_OVERRIDE merely to traverse it as root.
+                || libc::chdir(working_directory.as_ptr()) == -1
             {
                 return Err(io::Error::last_os_error());
             }
@@ -1195,6 +1280,70 @@ fn record_boot_stage(stage: &'static str) -> Result<()> {
         .context("persist bounded guest boot stage")
 }
 
+fn setup_content_failure_stage(error: &SetupContentError) -> &'static str {
+    match error {
+        SetupContentError::InvalidFraming => "setup-invalid-framing",
+        SetupContentError::NonZeroPadding => "setup-nonzero-padding",
+        SetupContentError::TruncatedObject => "setup-truncated-object",
+        SetupContentError::ObjectDigestMismatch => "setup-object-digest",
+        SetupContentError::LayerDiffIdMismatch => "setup-layer-diffid",
+        SetupContentError::LayerExpansionLimit => "setup-layer-expansion",
+        SetupContentError::ImageExpansionLimit => "setup-image-expansion",
+        SetupContentError::UnsupportedLayerEncoding => "setup-layer-encoding",
+        SetupContentError::Archive(error) => match error {
+            ArchiveError::ExpansionLimit => "setup-tar-expansion",
+            ArchiveError::MetadataReadLimit => "setup-tar-metadata-limit",
+            ArchiveError::InvalidTar => "setup-tar-invalid",
+            ArchiveError::InvalidRootEntry => "setup-tar-root-entry",
+            ArchiveError::PathLengthLimit => "setup-tar-path-length",
+            ArchiveError::AbsolutePath => "setup-tar-absolute-path",
+            ArchiveError::NulPathByte => "setup-tar-path-nul",
+            ArchiveError::EmptyPathComponent => "setup-tar-empty-component",
+            ArchiveError::ParentPathComponent => "setup-tar-parent-component",
+            ArchiveError::PathComponentLengthLimit => "setup-tar-component-length",
+            ArchiveError::PathComponentLimit => "setup-tar-component-limit",
+            ArchiveError::EmptyLinkPath => "setup-tar-empty-hardlink",
+            ArchiveError::EmptySymlinkTarget => "setup-tar-empty-symlink",
+            ArchiveError::NulSymlinkTarget => "setup-tar-symlink-nul",
+            ArchiveError::DuplicatePath => "setup-tar-duplicate-path",
+            ArchiveError::PathTypeConflict => "setup-tar-path-conflict",
+            ArchiveError::InvalidMetadata => "setup-tar-invalid-metadata",
+            ArchiveError::InvalidPax => "setup-tar-invalid-pax",
+            ArchiveError::UnsupportedPax => "setup-tar-unsupported-pax",
+            ArchiveError::UnsupportedXattr => "setup-tar-unsupported-xattr",
+            ArchiveError::InvalidXattr => "setup-tar-invalid-xattr",
+            ArchiveError::UnsupportedSparse => "setup-tar-unsupported-sparse",
+            ArchiveError::UnsupportedEntryType => "setup-tar-unsupported-inode",
+            ArchiveError::InvalidWhiteout => "setup-tar-invalid-whiteout",
+            ArchiveError::LayerEntryLimit => "setup-tar-layer-entry-limit",
+            ArchiveError::ImageEntryLimit => "setup-tar-image-entry-limit",
+            ArchiveError::PathBudgetLimit => "setup-tar-path-budget",
+            ArchiveError::WhiteoutBudgetLimit => "setup-tar-whiteout-budget",
+            ArchiveError::TrailingData => "setup-tar-trailing-data",
+        },
+        SetupContentError::Read(_) => "setup-content-read",
+    }
+}
+
+fn setup_apply_failure_stage(error: &SetupApplyError) -> &'static str {
+    match error {
+        SetupApplyError::Capability(_) => "setup-apply-capability",
+        SetupApplyError::Archive(_) => "setup-apply-archive",
+        SetupApplyError::InvalidVerifiedState
+        | SetupApplyError::CompletionMismatch
+        | SetupApplyError::GenerationIncomplete
+        | SetupApplyError::TruncatedLayerObject
+        | SetupApplyError::TruncatedEntryData
+        | SetupApplyError::EntryDataNotConsumed
+        | SetupApplyError::ReplayMismatch
+        | SetupApplyError::UnsupportedLayerEncoding
+        | SetupApplyError::InvalidHardlinkTarget
+        | SetupApplyError::RemovalLimit
+        | SetupApplyError::Io { .. }
+        | SetupApplyError::Fs { .. } => "setup-apply-failed",
+    }
+}
+
 fn create_state_layout() -> Result<()> {
     for (path, mode) in [
         (CONTROL_PATH, 0o700),
@@ -1523,7 +1672,7 @@ fn prepare_workspace_generation(plan: &WorkspacePlan) -> Result<()> {
                 metadata.file_type().is_dir()
                     && metadata.uid() == unsafe { libc::geteuid() }
                     && metadata.gid() == unsafe { libc::getegid() }
-                    && metadata.permissions().mode() & 0o777 == 0o700,
+                    && metadata.permissions().mode() & 0o777 == OCI_LOWER_ROOT_MODE,
                 "completed OCI lower directory is invalid"
             );
             ensure!(
@@ -1536,6 +1685,7 @@ fn prepare_workspace_generation(plan: &WorkspacePlan) -> Result<()> {
 
     let config = workspace_oci_config(plan)?;
     ensure_exact_bytes(Path::new(RUNC_CONFIG_PATH), &config, 0o400)?;
+    inherit_root_directory_metadata(Path::new(ROOT_LOWER_PATH), Path::new(ROOT_UPPER_PATH))?;
 
     mount_fs(
         "overlay",
@@ -1550,7 +1700,7 @@ fn prepare_workspace_generation(plan: &WorkspacePlan) -> Result<()> {
 
 fn prepare_foundation_lower() -> Result<()> {
     for (path, mode) in [
-        (ROOT_LOWER_PATH, 0o700),
+        (ROOT_LOWER_PATH, 0o755),
         ("/generation/lower/bin", 0o755),
         ("/generation/lower/sbin", 0o755),
         ("/generation/lower/etc", 0o755),
@@ -1600,6 +1750,21 @@ fn prepare_foundation_lower() -> Result<()> {
     )?;
 
     Ok(())
+}
+
+fn inherit_root_directory_metadata(lower: &Path, upper: &Path) -> Result<()> {
+    let lower_metadata = fs::symlink_metadata(lower).context("inspect workspace lower root")?;
+    let upper_metadata = fs::symlink_metadata(upper).context("inspect workspace upper root")?;
+    ensure!(
+        lower_metadata.file_type().is_dir() && upper_metadata.file_type().is_dir(),
+        "workspace root overlay path is not a directory"
+    );
+    lchown(upper, lower_metadata.uid(), lower_metadata.gid())?;
+    fs::set_permissions(
+        upper,
+        fs::Permissions::from_mode(lower_metadata.permissions().mode() & 0o7777),
+    )
+    .context("copy admitted OCI root mode to overlay upper")
 }
 
 fn ensure_exact_regular(source: &Path, destination: &Path, mode: u32) -> Result<()> {
@@ -1710,7 +1875,7 @@ fn workspace_oci_config(plan: &WorkspacePlan) -> Result<Vec<u8>> {
             { "destination": "/dev/shm", "type": "tmpfs", "source": "shm", "options": ["nosuid", "noexec", "nodev", "mode=1777", "size=65536k"] },
             { "destination": "/sys", "type": "sysfs", "source": "sysfs", "options": ["nosuid", "noexec", "nodev", "ro"] },
             { "destination": "/run", "type": "tmpfs", "source": "tmpfs", "options": ["nosuid", "noexec", "nodev", "mode=0755", "size=16m"] },
-            { "destination": CONTAINER_INIT_PATH, "type": "none", "source": INIT_PATH, "options": ["bind", "ro", "nosuid", "nodev"] },
+            { "destination": CONTAINER_INIT_PATH, "type": "none", "source": INIT_PATH, "options": ["bind", "ro", "nosuid", "nodev", "exec"] },
             { "destination": CONTAINER_PLAN_PATH, "type": "none", "source": WORKSPACE_PLAN_PATH, "options": ["bind", "ro", "nosuid", "nodev", "noexec"] },
             { "destination": CONTAINER_INSTALL_STATE_PATH, "type": "none", "source": INSTALL_STATE_PATH, "options": ["bind", "ro", "nosuid", "nodev", "noexec"] },
             { "destination": "/tmp", "type": "tmpfs", "source": "tmpfs", "options": ["nosuid", "nodev", "mode=1777", "size=256m"] },
@@ -1874,6 +2039,8 @@ impl Drop for WorkspaceStartGuard {
 
 fn spawn_workspace_container(plan: &WorkspacePlan) -> Result<std::process::Child> {
     prepare_runc_log()?;
+    let runc_stderr = prepare_runc_stderr()?;
+    record_boot_stage("runc-launching")?;
     let expected_readiness = workspace_ready_message(plan)?;
     let (mut readiness, readiness_writer) =
         UnixStream::pair().context("create trusted workspace readiness channel")?;
@@ -1902,7 +2069,7 @@ fn spawn_workspace_container(plan: &WorkspacePlan) -> Result<std::process::Child
         .current_dir("/")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stderr(Stdio::from(runc_stderr));
     unsafe {
         command.pre_exec(move || {
             if readiness_fd != WORKSPACE_READY_FD
@@ -1918,50 +2085,85 @@ fn spawn_workspace_container(plan: &WorkspacePlan) -> Result<std::process::Child
     }
     let child = command.spawn().context("start sealed runc workspace")?;
     let mut child = WorkspaceStartGuard::new(child);
+    record_boot_stage("runc-running")?;
     drop(readiness_writer);
     let deadline = Instant::now() + WORKSPACE_START_TIMEOUT;
     let mut readiness_bytes = Vec::with_capacity(expected_readiness.len());
     loop {
         validate_runc_log()?;
+        validate_runc_stderr()?;
+        let readiness_state = match advance_workspace_readiness(
+            &mut readiness,
+            &expected_readiness,
+            &mut readiness_bytes,
+        ) {
+            Ok(state) => state,
+            Err(error) => {
+                record_boot_stage("workspace-readiness-invalid")?;
+                return Err(error);
+            }
+        };
+        match readiness_state {
+            WorkspaceReadiness::Pending => {}
+            WorkspaceReadiness::Ready if workspace_container_is_running()? => {
+                publish_install_completion(plan)?;
+                return Ok(child.finish());
+            }
+            WorkspaceReadiness::Ready => {}
+            WorkspaceReadiness::Failed(stage) => {
+                record_boot_stage(stage)?;
+                bail!("sealed workspace init reported a bounded startup failure");
+            }
+        }
         if child
             .child()
             .try_wait()
             .context("observe sealed runc workspace startup")?
             .is_some()
         {
+            sync_runc_stderr()?;
+            record_boot_stage("workspace-container-exited")?;
             bail!("sealed runc workspace exited during startup");
         }
-        let ready =
-            advance_workspace_readiness(&mut readiness, &expected_readiness, &mut readiness_bytes)?;
-        if ready && workspace_container_is_running()? {
-            publish_install_completion(plan)?;
-            return Ok(child.finish());
-        }
         if Instant::now() >= deadline {
+            record_boot_stage("workspace-readiness-timeout")?;
             bail!("sealed runc workspace startup timed out");
         }
         thread::sleep(Duration::from_millis(20));
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkspaceReadiness {
+    Pending,
+    Ready,
+    Failed(&'static str),
+}
+
 fn advance_workspace_readiness(
     stream: &mut UnixStream,
     expected: &[u8],
     received: &mut Vec<u8>,
-) -> Result<bool> {
+) -> Result<WorkspaceReadiness> {
     let mut buffer = [0_u8; WORKSPACE_READY_LIMIT + 1];
     match stream.read(&mut buffer) {
         Ok(0) => {
-            ensure!(
-                received == expected,
-                "trusted workspace readiness channel closed early"
-            );
-            Ok(true)
+            if received == expected {
+                return Ok(WorkspaceReadiness::Ready);
+            }
+            if let Some(stage) = admitted_workspace_failure(received) {
+                return Ok(WorkspaceReadiness::Failed(stage));
+            }
+            bail!("trusted workspace readiness channel closed early")
         }
         Ok(length) => {
             received.extend_from_slice(&buffer[..length]);
             ensure!(
-                received.len() <= expected.len() && expected.starts_with(received),
+                received.len() <= WORKSPACE_READY_LIMIT
+                    && (expected.starts_with(received)
+                        || WORKSPACE_FAILURE_FRAMES
+                            .iter()
+                            .any(|(frame, _)| frame.starts_with(received))),
                 "trusted workspace readiness message is invalid"
             );
             // runc retains its preserved descriptor while the container is
@@ -1969,11 +2171,23 @@ fn advance_workspace_readiness(
             // can write: it marks this descriptor close-on-exec before any
             // image process is spawned. The fixed, digest-bound length is the
             // complete frame.
-            Ok(received == expected)
+            if received == expected {
+                Ok(WorkspaceReadiness::Ready)
+            } else if let Some(stage) = admitted_workspace_failure(received) {
+                Ok(WorkspaceReadiness::Failed(stage))
+            } else {
+                Ok(WorkspaceReadiness::Pending)
+            }
         }
-        Err(error) if error.kind() == io::ErrorKind::WouldBlock => Ok(false),
+        Err(error) if error.kind() == io::ErrorKind::WouldBlock => Ok(WorkspaceReadiness::Pending),
         Err(error) => Err(error).context("read trusted workspace readiness"),
     }
+}
+
+fn admitted_workspace_failure(received: &[u8]) -> Option<&'static str> {
+    WORKSPACE_FAILURE_FRAMES
+        .iter()
+        .find_map(|(frame, stage)| (*frame == received).then_some(*stage))
 }
 
 fn prepare_runc_log() -> Result<()> {
@@ -1998,6 +2212,43 @@ fn prepare_runc_log() -> Result<()> {
     log.sync_all().context("sync empty runc log")?;
     drop(log);
     validate_runc_log()
+}
+
+fn prepare_runc_stderr() -> Result<File> {
+    let mut options = OpenOptions::new();
+    options.write(true).create(true).truncate(true).mode(0o600);
+    let stderr = options
+        .open(RUNC_STDERR_PATH)
+        .context("prepare bounded runc stderr")?;
+    validate_runc_stderr()?;
+    stderr.sync_all().context("sync empty runc stderr")?;
+    Ok(stderr)
+}
+
+fn validate_runc_stderr() -> Result<()> {
+    let metadata = fs::symlink_metadata(RUNC_STDERR_PATH).context("inspect bounded runc stderr")?;
+    ensure!(
+        metadata.file_type().is_file()
+            && metadata.uid() == unsafe { libc::geteuid() }
+            && metadata.gid() == unsafe { libc::getegid() }
+            && metadata.permissions().mode() & 0o777 == 0o600
+            && metadata.nlink() == 1,
+        "runc stderr is not an owner-private regular file"
+    );
+    ensure!(
+        metadata.len() <= RUNC_LOG_LIMIT,
+        "runc stderr exceeded its {} byte bound",
+        RUNC_LOG_LIMIT
+    );
+    Ok(())
+}
+
+fn sync_runc_stderr() -> Result<()> {
+    validate_runc_stderr()?;
+    File::open(RUNC_STDERR_PATH)
+        .context("open bounded runc stderr for sync")?
+        .sync_all()
+        .context("sync bounded runc stderr")
 }
 
 fn validate_runc_log() -> Result<()> {
@@ -2757,7 +3008,15 @@ mod tests {
         assert_eq!(runtime["source"], INIT_PATH);
         assert_eq!(
             runtime["options"],
-            serde_json::json!(["bind", "ro", "nosuid", "nodev"])
+            serde_json::json!(["bind", "ro", "nosuid", "nodev", "exec"])
+        );
+        let run = mounts
+            .iter()
+            .find(|mount| mount["destination"] == "/run")
+            .unwrap();
+        assert_eq!(
+            run["options"],
+            serde_json::json!(["nosuid", "noexec", "nodev", "mode=0755", "size=16m"])
         );
         let plan = mounts
             .iter()
@@ -2790,6 +3049,25 @@ mod tests {
             config["process"]["capabilities"]["ambient"],
             serde_json::json!([])
         );
+    }
+
+    #[test]
+    fn overlay_upper_inherits_the_admitted_root_directory_mode() {
+        let temporary = TempDir::new().unwrap();
+        let lower = temporary.path().join("lower");
+        let upper = temporary.path().join("upper");
+        fs::create_dir(&lower).unwrap();
+        fs::create_dir(&upper).unwrap();
+        fs::set_permissions(&lower, fs::Permissions::from_mode(0o751)).unwrap();
+        fs::set_permissions(&upper, fs::Permissions::from_mode(0o700)).unwrap();
+
+        inherit_root_directory_metadata(&lower, &upper).unwrap();
+
+        let lower_metadata = fs::symlink_metadata(&lower).unwrap();
+        let upper_metadata = fs::symlink_metadata(&upper).unwrap();
+        assert_eq!(upper_metadata.uid(), lower_metadata.uid());
+        assert_eq!(upper_metadata.gid(), lower_metadata.gid());
+        assert_eq!(upper_metadata.permissions().mode() & 0o7777, 0o751);
     }
 
     #[test]
@@ -2842,9 +3120,34 @@ mod tests {
         let midpoint = expected.len() / 2;
         writer.write_all(&expected[..midpoint]).unwrap();
         let mut received = Vec::new();
-        assert!(!advance_workspace_readiness(&mut reader, &expected, &mut received).unwrap());
+        assert_eq!(
+            advance_workspace_readiness(&mut reader, &expected, &mut received).unwrap(),
+            WorkspaceReadiness::Pending
+        );
         writer.write_all(&expected[midpoint..]).unwrap();
-        assert!(advance_workspace_readiness(&mut reader, &expected, &mut received).unwrap());
+        assert_eq!(
+            advance_workspace_readiness(&mut reader, &expected, &mut received).unwrap(),
+            WorkspaceReadiness::Ready
+        );
+
+        let (mut reader, mut writer) = UnixStream::pair().unwrap();
+        reader.set_nonblocking(true).unwrap();
+        let failure = WORKSPACE_FAILURE_FRAMES
+            .iter()
+            .copied()
+            .find(|(_, stage)| *stage == "workspace-workload-failed")
+            .unwrap();
+        writer.write_all(&failure.0[..8]).unwrap();
+        let mut received = Vec::new();
+        assert_eq!(
+            advance_workspace_readiness(&mut reader, &expected, &mut received).unwrap(),
+            WorkspaceReadiness::Pending
+        );
+        writer.write_all(&failure.0[8..]).unwrap();
+        assert_eq!(
+            advance_workspace_readiness(&mut reader, &expected, &mut received).unwrap(),
+            WorkspaceReadiness::Failed(failure.1)
+        );
 
         let (mut reader, mut writer) = UnixStream::pair().unwrap();
         reader.set_nonblocking(true).unwrap();

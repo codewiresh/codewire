@@ -28,6 +28,15 @@ const MAX_LAYER_WHITEOUTS: u64 = 100_000;
 const MAX_IMAGE_WHITEOUTS: u64 = 200_000;
 const MAX_LAYER_WHITEOUT_PATH_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_IMAGE_WHITEOUT_PATH_BYTES: u64 = 32 * 1024 * 1024;
+const SCHILY_XATTR_PREFIX: &[u8] = b"SCHILY.xattr.";
+const SECURITY_CAPABILITY_XATTR: &[u8] = b"security.capability";
+const VFS_CAP_REVISION_MASK: u32 = 0xff00_0000;
+const VFS_CAP_FLAGS_EFFECTIVE: u32 = 0x0000_0001;
+const VFS_CAP_REVISION_1: u32 = 0x0100_0000;
+const VFS_CAP_REVISION_2: u32 = 0x0200_0000;
+const VFS_CAP_REVISION_1_BYTES: usize = 12;
+const VFS_CAP_REVISION_2_BYTES: usize = 20;
+const VFS_CAP_REVISION_2_HIGH_VALID_MASK: u32 = 0x0000_01ff;
 
 #[derive(Debug, Default)]
 pub(crate) struct TarImageBudget {
@@ -352,6 +361,7 @@ pub(crate) enum ReplayError<E> {
 pub(crate) struct AdmittedEntry {
     path: Vec<u8>,
     kind: AdmittedKind,
+    security_capability: Option<Vec<u8>>,
     size: u64,
     mode: u32,
     uid: u32,
@@ -388,6 +398,10 @@ impl AdmittedEntry {
         self.mtime
     }
 
+    pub(crate) fn security_capability(&self) -> Option<&[u8]> {
+        self.security_capability.as_deref()
+    }
+
     fn whiteout(&self) -> Option<&Whiteout> {
         match &self.kind {
             AdmittedKind::Whiteout(whiteout) => Some(whiteout),
@@ -409,6 +423,10 @@ impl fmt::Debug for AdmittedEntry {
             .debug_struct("AdmittedEntry")
             .field("path_bytes", &self.path.len())
             .field("kind", &self.kind)
+            .field(
+                "security_capability_bytes",
+                &self.security_capability.as_ref().map(Vec::len),
+            )
             .field("size", &self.size)
             .field("mode", &self.mode)
             .field("uid", &self.uid)
@@ -493,7 +511,7 @@ fn admit_entry<R: Read>(entry: &mut tar::Entry<'_, R>) -> Result<AdmittedEntry, 
         .header()
         .mtime()
         .map_err(|_| ArchiveError::InvalidTar)?;
-    validate_pax(entry, size, uid, gid)?;
+    let security_capability = validate_pax(entry, size, uid, gid)?;
 
     if mode & !0o7777 != 0
         || uid >= u32::MAX as u64
@@ -504,12 +522,14 @@ fn admit_entry<R: Read>(entry: &mut tar::Entry<'_, R>) -> Result<AdmittedEntry, 
     }
     let path = normalize_entry_path(&raw_path)?;
     if path.is_empty() {
-        if !entry_type.is_dir() || size != 0 || link_name.is_some() {
-            return Err(ArchiveError::InvalidPath);
+        if !entry_type.is_dir() || size != 0 || link_name.is_some() || security_capability.is_some()
+        {
+            return Err(ArchiveError::InvalidRootEntry);
         }
         return Ok(AdmittedEntry {
             path,
             kind: AdmittedKind::Directory,
+            security_capability,
             size,
             mode,
             uid: uid as u32,
@@ -519,12 +539,17 @@ fn admit_entry<R: Read>(entry: &mut tar::Entry<'_, R>) -> Result<AdmittedEntry, 
     }
 
     if let Some(whiteout) = classify_whiteout(&path)? {
-        if !entry_type.is_file() || size != 0 || link_name.is_some() {
+        if !entry_type.is_file()
+            || size != 0
+            || link_name.is_some()
+            || security_capability.is_some()
+        {
             return Err(ArchiveError::InvalidWhiteout);
         }
         return Ok(AdmittedEntry {
             path,
             kind: AdmittedKind::Whiteout(whiteout),
+            security_capability,
             size,
             mode,
             uid: uid as u32,
@@ -563,10 +588,16 @@ fn admit_entry<R: Read>(entry: &mut tar::Entry<'_, R>) -> Result<AdmittedEntry, 
     } else {
         return Err(ArchiveError::UnsupportedEntryType);
     };
+    if security_capability.is_some()
+        && !matches!(&kind, AdmittedKind::Regular | AdmittedKind::Hardlink(_))
+    {
+        return Err(ArchiveError::InvalidXattr);
+    }
 
     Ok(AdmittedEntry {
         path,
         kind,
+        security_capability,
         size,
         mode,
         uid: uid as u32,
@@ -580,14 +611,15 @@ fn validate_pax<R: Read>(
     size: u64,
     uid: u64,
     gid: u64,
-) -> Result<(), ArchiveError> {
+) -> Result<Option<Vec<u8>>, ArchiveError> {
     let Some(extensions) = entry
         .pax_extensions()
         .map_err(|_| ArchiveError::InvalidPax)?
     else {
-        return Ok(());
+        return Ok(None);
     };
     let mut keys = HashSet::new();
+    let mut security_capability = None;
     for extension in extensions {
         let extension = extension.map_err(|_| ArchiveError::InvalidPax)?;
         let key = extension.key_bytes();
@@ -600,15 +632,68 @@ fn validate_pax<R: Read>(
             return Err(ArchiveError::InvalidPax);
         }
         match key {
-            b"path" | b"linkpath" | b"uname" | b"gname" | b"comment" | b"charset" => {
+            b"path" | b"linkpath" => validate_path_metadata_value(value)?,
+            b"uname" | b"gname" | b"comment" | b"charset" => {
                 validate_metadata_value(value)?;
             }
             b"size" if parse_decimal(value)? == size => {}
             b"uid" if parse_decimal(value)? == uid => {}
             b"gid" if parse_decimal(value)? == gid => {}
             b"mtime" | b"atime" | b"ctime" if valid_decimal_timestamp(value) => {}
+            _ if key.strip_prefix(SCHILY_XATTR_PREFIX) == Some(SECURITY_CAPABILITY_XATTR) => {
+                security_capability = Some(validate_security_capability(value)?);
+            }
+            _ if key.starts_with(SCHILY_XATTR_PREFIX) || key.starts_with(b"LIBARCHIVE.xattr.") => {
+                return Err(ArchiveError::UnsupportedXattr);
+            }
+            _ if key.starts_with(b"GNU.sparse.") => {
+                return Err(ArchiveError::UnsupportedSparse);
+            }
             _ => return Err(ArchiveError::UnsupportedPax),
         }
+    }
+    Ok(security_capability)
+}
+
+fn validate_security_capability(value: &[u8]) -> Result<Vec<u8>, ArchiveError> {
+    let magic_bytes: [u8; 4] = value
+        .get(..4)
+        .and_then(|bytes| bytes.try_into().ok())
+        .ok_or(ArchiveError::InvalidXattr)?;
+    let magic = u32::from_le_bytes(magic_bytes);
+    let expected_bytes = match magic & VFS_CAP_REVISION_MASK {
+        VFS_CAP_REVISION_1 => VFS_CAP_REVISION_1_BYTES,
+        VFS_CAP_REVISION_2 => VFS_CAP_REVISION_2_BYTES,
+        _ => return Err(ArchiveError::InvalidXattr),
+    };
+    if value.len() != expected_bytes
+        || magic & !(VFS_CAP_REVISION_MASK | VFS_CAP_FLAGS_EFFECTIVE) != 0
+    {
+        return Err(ArchiveError::InvalidXattr);
+    }
+    if expected_bytes == VFS_CAP_REVISION_2_BYTES {
+        let permitted_high = u32::from_le_bytes(
+            value[12..16]
+                .try_into()
+                .map_err(|_| ArchiveError::InvalidXattr)?,
+        );
+        let inheritable_high = u32::from_le_bytes(
+            value[16..20]
+                .try_into()
+                .map_err(|_| ArchiveError::InvalidXattr)?,
+        );
+        if permitted_high & !VFS_CAP_REVISION_2_HIGH_VALID_MASK != 0
+            || inheritable_high & !VFS_CAP_REVISION_2_HIGH_VALID_MASK != 0
+        {
+            return Err(ArchiveError::InvalidXattr);
+        }
+    }
+    Ok(value.to_vec())
+}
+
+fn validate_path_metadata_value(value: &[u8]) -> Result<(), ArchiveError> {
+    if value.len() > MAX_PATH_BYTES || value.contains(&0) {
+        return Err(ArchiveError::InvalidPax);
     }
     Ok(())
 }
@@ -663,13 +748,14 @@ fn normalize_link_path(path: &[u8]) -> Result<Vec<u8>, ArchiveError> {
 }
 
 fn normalize_path(path: &[u8], allow_root: bool) -> Result<Vec<u8>, ArchiveError> {
-    if path.len() > MAX_PATH_BYTES
-        || path.first() == Some(&b'/')
-        || path
-            .iter()
-            .any(|byte| *byte == 0 || *byte == b'\\' || byte.is_ascii_control())
-    {
-        return Err(ArchiveError::InvalidPath);
+    if path.len() > MAX_PATH_BYTES {
+        return Err(ArchiveError::PathLengthLimit);
+    }
+    if path.first() == Some(&b'/') {
+        return Err(ArchiveError::AbsolutePath);
+    }
+    if path.contains(&0) {
+        return Err(ArchiveError::NulPathByte);
     }
     let mut normalized = Vec::with_capacity(path.len());
     let mut components = path.split(|byte| *byte == b'/').peekable();
@@ -679,37 +765,41 @@ fn normalize_path(path: &[u8], allow_root: bool) -> Result<Vec<u8>, ArchiveError
             if components.peek().is_none() {
                 continue;
             }
-            return Err(ArchiveError::InvalidPath);
+            return Err(ArchiveError::EmptyPathComponent);
         }
         if component == b"." {
             continue;
         }
-        if component == b".." || component.len() > MAX_COMPONENT_BYTES {
-            return Err(ArchiveError::InvalidPath);
+        if component == b".." {
+            return Err(ArchiveError::ParentPathComponent);
+        }
+        if component.len() > MAX_COMPONENT_BYTES {
+            return Err(ArchiveError::PathComponentLengthLimit);
         }
         component_count = component_count
             .checked_add(1)
             .filter(|count| *count <= MAX_PATH_COMPONENTS)
-            .ok_or(ArchiveError::InvalidPath)?;
+            .ok_or(ArchiveError::PathComponentLimit)?;
         if !normalized.is_empty() {
             normalized.push(b'/');
         }
         normalized.extend_from_slice(component);
     }
     if normalized.is_empty() && !allow_root {
-        return Err(ArchiveError::InvalidPath);
+        return Err(ArchiveError::EmptyLinkPath);
     }
     Ok(normalized)
 }
 
 fn validate_symlink_target(target: &[u8]) -> Result<(), ArchiveError> {
-    if target.is_empty()
-        || target.len() > MAX_PATH_BYTES
-        || target
-            .iter()
-            .any(|byte| *byte == 0 || *byte == b'\\' || byte.is_ascii_control())
-    {
-        return Err(ArchiveError::InvalidPath);
+    if target.is_empty() {
+        return Err(ArchiveError::EmptySymlinkTarget);
+    }
+    if target.len() > MAX_PATH_BYTES {
+        return Err(ArchiveError::PathLengthLimit);
+    }
+    if target.contains(&0) {
+        return Err(ArchiveError::NulSymlinkTarget);
     }
     Ok(())
 }
@@ -866,8 +956,28 @@ pub(crate) enum ArchiveError {
     MetadataReadLimit,
     #[error("setup layer is not a valid supported tar archive")]
     InvalidTar,
-    #[error("setup tar contains a path outside the admitted relative grammar")]
-    InvalidPath,
+    #[error("setup tar root path metadata is invalid")]
+    InvalidRootEntry,
+    #[error("setup tar path exceeds the admitted length bound")]
+    PathLengthLimit,
+    #[error("setup tar contains an absolute entry or hardlink path")]
+    AbsolutePath,
+    #[error("setup tar path contains a NUL byte")]
+    NulPathByte,
+    #[error("setup tar path contains an empty interior component")]
+    EmptyPathComponent,
+    #[error("setup tar path contains a parent component")]
+    ParentPathComponent,
+    #[error("setup tar path component exceeds the admitted length bound")]
+    PathComponentLengthLimit,
+    #[error("setup tar path exceeds the admitted component bound")]
+    PathComponentLimit,
+    #[error("setup tar hardlink path normalizes to the archive root")]
+    EmptyLinkPath,
+    #[error("setup tar symbolic link has an empty target")]
+    EmptySymlinkTarget,
+    #[error("setup tar symbolic link target contains a NUL byte")]
+    NulSymlinkTarget,
     #[error("setup tar repeats a normalized path")]
     DuplicatePath,
     #[error("setup tar uses a non-directory entry as another entry's parent")]
@@ -878,6 +988,12 @@ pub(crate) enum ArchiveError {
     InvalidPax,
     #[error("setup tar contains unsupported or unsafe PAX metadata")]
     UnsupportedPax,
+    #[error("setup tar contains unsupported extended attributes")]
+    UnsupportedXattr,
+    #[error("setup tar contains a malformed supported extended attribute")]
+    InvalidXattr,
+    #[error("setup tar contains unsupported sparse-file metadata")]
+    UnsupportedSparse,
     #[error("setup tar contains an unsupported inode type")]
     UnsupportedEntryType,
     #[error("setup tar contains a malformed OCI whiteout")]
@@ -934,6 +1050,22 @@ mod tests {
                 .append(&header(entry), Cursor::new(entry.contents))
                 .unwrap();
         }
+        builder.finish().unwrap();
+        builder.into_inner().unwrap()
+    }
+
+    fn pax_file(key: &str, value: &[u8]) -> Vec<u8> {
+        let mut builder = tar::Builder::new(Vec::new());
+        builder.append_pax_extensions([(key, value)]).unwrap();
+        let file = EntryFixture {
+            path: b"file",
+            kind: tar::EntryType::Regular,
+            link: None,
+            contents: b"data",
+        };
+        builder
+            .append(&header(&file), Cursor::new(file.contents))
+            .unwrap();
         builder.finish().unwrap();
         builder.into_inner().unwrap()
     }
@@ -1034,12 +1166,10 @@ mod tests {
         ]);
         assert!(matches!(scan(&duplicate), Err(ArchiveError::DuplicatePath)));
 
-        for path in [
-            &b"../escape"[..],
-            &b"/absolute"[..],
-            &b"double//slash"[..],
-            &b"back\\slash"[..],
-            &b"control\nname"[..],
+        for (path, expected) in [
+            (&b"../escape"[..], ArchiveError::ParentPathComponent),
+            (&b"/absolute"[..], ArchiveError::AbsolutePath),
+            (&b"double//slash"[..], ArchiveError::EmptyPathComponent),
         ] {
             let bytes = archive(&[EntryFixture {
                 path,
@@ -1047,7 +1177,10 @@ mod tests {
                 link: None,
                 contents: b"escape",
             }]);
-            assert!(matches!(scan(&bytes), Err(ArchiveError::InvalidPath)));
+            assert_eq!(
+                std::mem::discriminant(&scan(&bytes).unwrap_err()),
+                std::mem::discriminant(&expected)
+            );
         }
 
         let hardlink = archive(&[EntryFixture {
@@ -1056,7 +1189,10 @@ mod tests {
             link: Some(b"../../outside"),
             contents: b"",
         }]);
-        assert!(matches!(scan(&hardlink), Err(ArchiveError::InvalidPath)));
+        assert!(matches!(
+            scan(&hardlink),
+            Err(ArchiveError::ParentPathComponent)
+        ));
 
         let self_hardlink = archive(&[EntryFixture {
             path: b"hard",
@@ -1067,6 +1203,15 @@ mod tests {
         assert!(matches!(
             scan(&self_hardlink),
             Err(ArchiveError::InvalidMetadata)
+        ));
+
+        assert!(matches!(
+            normalize_entry_path(b"nul\0name"),
+            Err(ArchiveError::NulPathByte)
+        ));
+        assert!(matches!(
+            validate_symlink_target(b"nul\0target"),
+            Err(ArchiveError::NulSymlinkTarget)
         ));
 
         for entries in [
@@ -1104,6 +1249,52 @@ mod tests {
                 Err(ArchiveError::PathTypeConflict)
             ));
         }
+    }
+
+    #[test]
+    fn admits_linux_filename_bytes_without_exposing_them_in_debug_output() {
+        let bytes = archive(&[
+            EntryFixture {
+                path: b"back\\slash",
+                kind: tar::EntryType::Regular,
+                link: None,
+                contents: b"backslash",
+            },
+            EntryFixture {
+                path: b"control\nname",
+                kind: tar::EntryType::Regular,
+                link: None,
+                contents: b"control",
+            },
+            EntryFixture {
+                path: b"link",
+                kind: tar::EntryType::Symlink,
+                link: Some(b"control\ntarget"),
+                contents: b"",
+            },
+        ]);
+        let scanned = scan(&bytes).unwrap();
+        let debug = format!("{scanned:?}");
+        assert!(!debug.contains("back\\\\slash"));
+        assert!(!debug.contains("control"));
+
+        let mut collector = Collector::default();
+        replay_tar(
+            &mut Cursor::new(bytes),
+            scanned.digest,
+            scanned.bytes,
+            &scanned.plan,
+            &mut collector,
+        )
+        .unwrap();
+        assert_eq!(
+            collector.paths,
+            vec![
+                b"back\\slash".to_vec(),
+                b"control\nname".to_vec(),
+                b"link".to_vec()
+            ]
+        );
     }
 
     #[test]
@@ -1148,26 +1339,31 @@ mod tests {
             Err(ArchiveError::InvalidWhiteout)
         ));
 
-        let mut builder = tar::Builder::new(Vec::new());
-        builder
-            .append_pax_extensions([(
-                "SCHILY.xattr.security.capability",
-                &b"attacker-controlled"[..],
-            )])
-            .unwrap();
-        let file = EntryFixture {
-            path: b"file",
-            kind: tar::EntryType::Regular,
-            link: None,
-            contents: b"data",
-        };
-        builder
-            .append(&header(&file), Cursor::new(file.contents))
-            .unwrap();
-        builder.finish().unwrap();
+        let mut capability = [0_u8; VFS_CAP_REVISION_2_BYTES];
+        capability[..4]
+            .copy_from_slice(&(VFS_CAP_REVISION_2 | VFS_CAP_FLAGS_EFFECTIVE).to_le_bytes());
+        capability[4..8].copy_from_slice(&(1_u32 << 13).to_le_bytes());
+        let capability_archive =
+            pax_file("SCHILY.xattr.security.capability", capability.as_slice());
+        let scanned = scan(&capability_archive).unwrap();
+        assert!(!format!("{scanned:?}").contains("capability"));
+
         assert!(matches!(
-            scan(&builder.into_inner().unwrap()),
-            Err(ArchiveError::UnsupportedPax)
+            scan(&pax_file(
+                "SCHILY.xattr.security.capability",
+                b"attacker-controlled"
+            )),
+            Err(ArchiveError::InvalidXattr)
+        ));
+        assert!(matches!(
+            scan(&pax_file("SCHILY.xattr.trusted.overlay.opaque", b"y")),
+            Err(ArchiveError::UnsupportedXattr)
+        ));
+
+        capability[12..16].copy_from_slice(&0x200_u32.to_le_bytes());
+        assert!(matches!(
+            validate_security_capability(&capability),
+            Err(ArchiveError::InvalidXattr)
         ));
     }
 

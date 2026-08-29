@@ -3,6 +3,9 @@
 //! A journal checkpoint is the index of the next effect. Filesystem, process,
 //! and private-RPC effects must therefore be idempotent: a supervisor can die
 //! after the effect succeeds but before its checkpoint commits.
+//! `StageWorkspaceGeneration` may prepare verified CAS objects before its
+//! atomic state/checkpoint commit. A crash can leave only unreferenced content;
+//! no resolved generation becomes authoritative before that transaction.
 
 use crate::supervisor_store::OperationKind;
 
@@ -10,6 +13,7 @@ use crate::supervisor_store::OperationKind;
 pub(crate) enum LifecycleEffect {
     RecordEnvironment,
     ProvisionWorkspace,
+    StageWorkspaceGeneration,
     RecordStarting,
     EnsureRunner,
     StartVm,
@@ -37,6 +41,7 @@ impl LifecycleEffect {
     pub(crate) fn durability(self) -> EffectDurability {
         match self {
             Self::RecordEnvironment
+            | Self::StageWorkspaceGeneration
             | Self::RecordStarting
             | Self::RecordRunning
             | Self::RecordStopped
@@ -60,12 +65,14 @@ impl LifecycleEffect {
 const CREATE: &[LifecycleEffect] = &[
     LifecycleEffect::RecordEnvironment,
     LifecycleEffect::ProvisionWorkspace,
+    LifecycleEffect::StageWorkspaceGeneration,
     LifecycleEffect::EnsureRunner,
     LifecycleEffect::StartVm,
     LifecycleEffect::RecordRunning,
 ];
 const START: &[LifecycleEffect] = &[
     LifecycleEffect::RecordStarting,
+    LifecycleEffect::StageWorkspaceGeneration,
     LifecycleEffect::EnsureRunner,
     LifecycleEffect::StartVm,
     LifecycleEffect::RecordRunning,
@@ -277,12 +284,13 @@ mod tests {
     }
 
     #[test]
-    fn only_database_effects_are_classified_transactional() {
+    fn only_atomic_state_checkpoint_effects_are_classified_transactional() {
         for kind in KINDS {
             for effect in effects(*kind) {
                 let expected = matches!(
                     effect,
                     LifecycleEffect::RecordEnvironment
+                        | LifecycleEffect::StageWorkspaceGeneration
                         | LifecycleEffect::RecordStarting
                         | LifecycleEffect::RecordRunning
                         | LifecycleEffect::RecordStopped

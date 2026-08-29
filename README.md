@@ -50,8 +50,8 @@ full local cluster workflow.
 
 On Linux/x86_64, the native developer preview runs Cloud Hypervisor directly
 through KVM. It requires usable `/dev/kvm` and `/dev/vhost-vsock` devices plus
-the reviewed Cloud Hypervisor, kernel, and Codewire guest-root artifacts under
-`~/.cache/codewire/local-vmm-v1/artifacts` with the sibling lock at
+the reviewed Cloud Hypervisor v53, Linux 6.18.48 LTS, and Codewire guest-root
+artifacts under `~/.cache/codewire/local-vmm-v1/artifacts` with the sibling lock at
 `~/.cache/codewire/local-vmm-v1/artifacts.lock.json`. The preview never
 downloads or substitutes those artifacts at runtime.
 
@@ -85,14 +85,15 @@ cargo build -p codewire-cli-bin --bin cw
 ```
 
 The current native slice requires a clean, root Git worktree and snapshots its
-exact checked-out commit onto the persistent guest disk. It does not yet run
-the `codewire.yaml` workspace image; OCI workspace execution is tracked by
-Forgejo issue #1908. Unsupported image, network, secret, mount, port, and
-multi-repository options fail explicitly. An owner-only SQLite WAL is the
-authoritative supervisor state; preview JSON state is imported exactly once.
-Lifecycle effects are journaled, disk shrink is rejected, and delete moves the
-environment tree to an operation-specific trash generation before removing
-only known runtime files.
+exact checked-out commit onto the persistent guest disk. The primary workspace
+runs directly in the canonical Codewire OCI workspace image beneath trusted
+guest init and runc; Docker does not own it. Custom image, network, secret,
+mount, port, and multi-repository options still fail explicitly while the
+remaining Forgejo #1908 follow-up work is completed. An owner-only SQLite WAL
+is the authoritative supervisor state; preview JSON state is imported exactly
+once. Lifecycle effects are journaled, disk shrink is rejected, and delete
+moves the environment tree to an operation-specific trash generation before
+removing only known runtime files.
 
 Developers with artifacts staged outside the default cache can point the CLI
 at them and run the complete product smoke:

@@ -10,7 +10,11 @@ use tonic::transport::{Channel, Endpoint};
 use crate::linux::path::{PrivateRoot, SocketIdentity, current_uid, set_socket_private};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+// OCI setup is a bounded lifecycle operation and can legitimately include
+// large guest-side verification and layer application before daemon readiness.
+// The transport must not expire before the runner's setup bound; lifecycle
+// progress and cancellation remain separate operation-level concerns.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(21 * 60);
 
 pub(crate) fn bind_owner_only(
     socket: &Path,

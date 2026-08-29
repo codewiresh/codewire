@@ -27,7 +27,7 @@ use crate::control::v1::local_supervisor_service_client::LocalSupervisorServiceC
 use crate::control::v1::local_supervisor_service_server::{
     LocalSupervisorService, LocalSupervisorServiceServer,
 };
-use crate::generation::{GenerationError, ensure_empty_root_generation};
+use crate::generation::{GenerationError, ensure_empty_root_generation, valid_root_disk_bytes};
 use crate::lifecycle::{EffectDurability, LifecycleEffect, next_effect};
 use crate::linux::path::{PathError, PrivateRoot, SocketIdentity};
 use crate::linux::process::signal_unreaped_child;
@@ -36,7 +36,12 @@ use crate::linux::state::{
     deletion_tree_location, move_stopped_vm_to_trash,
 };
 use crate::linux::{LiveProcess, ProcessIdentity, RecoveryError};
+use crate::oci::{
+    ContentStore, ContentStoreError, RegistryReference, RegistryReferenceError, RegistryResolver,
+    RegistryResolverError,
+};
 use crate::runner_service::{RunnerClient, RunnerServiceError};
+use crate::setup_pack::{SetupPackError, SetupPackRequest, ensure_setup_pack};
 use crate::supervisor_store::{
     OperationKind, OperationPhase, OperationRecord, SupervisorStore, SupervisorStoreError,
 };
@@ -45,7 +50,7 @@ use crate::workspace::{
     WorkspaceError, WorkspaceSource, cleanup_interrupted_workspace_provisioning,
     ensure_clean_git_workspace, inspect_clean_git_workspace,
 };
-use crate::workspace_generation::WorkspaceGenerationRecord;
+use crate::workspace_generation::{WorkspaceGenerationError, WorkspaceGenerationRecord};
 use crate::{CloudHypervisorRunner, RunnerConfig, RunnerError};
 
 pub(crate) const SUPERVISOR_STATE_SCHEMA: u32 = 1;
@@ -53,7 +58,17 @@ const RUNNER_START_TIMEOUT: Duration = Duration::from_secs(15);
 const RUNNER_EXIT_TIMEOUT: Duration = Duration::from_secs(5);
 const RESPONSE_DRAIN_DELAY: Duration = Duration::from_millis(100);
 const DAEMON_VSOCK_PORT: u32 = 7777;
+const DEFAULT_OCI_ROOT_DISK_BYTES: u64 = 32 * 1024 * 1024 * 1024;
 const LINUX_CAPABILITY_VERSION_3: u32 = 0x2008_0522;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PreparedWorkspaceBoot {
+    root_generation: String,
+    root_disk_bytes: u64,
+    setup_root_generation: String,
+    setup_total_bytes: u64,
+    setup_header_sha256: String,
+}
 
 #[repr(C)]
 struct LinuxCapabilityHeader {
@@ -432,6 +447,13 @@ impl EnvironmentRecord {
         }
     }
 
+    fn promote_staging_workspace_generation(&mut self) {
+        let Some(staging) = self.staging_workspace_generation.take() else {
+            return;
+        };
+        self.rollback_workspace_generation = self.active_workspace_generation.replace(staging);
+    }
+
     fn validate(&self, key: &str) -> Result<(), SupervisorError> {
         let workspace_generations = [
             self.active_workspace_generation.as_ref(),
@@ -472,14 +494,9 @@ impl EnvironmentRecord {
             || !valid_object_id(&self.workspace_commit)
             || match (&self.project_spec_json, &self.project_spec_sha256) {
                 (None, None) => false,
-                (Some(bytes), Some(digest)) => validate_project_intent(
-                    bytes,
-                    digest,
-                    u32::from(self.vcpus),
-                    self.memory_mib,
-                    self.disk_bytes,
-                )
-                .is_err(),
+                (Some(bytes), Some(digest)) => {
+                    validate_project_intent(bytes, digest, None).is_err()
+                }
                 _ => true,
             }
             || self
@@ -669,14 +686,18 @@ impl SupervisorCore {
         ))
     }
 
-    async fn preflight(&mut self) -> Result<String, SupervisorError> {
+    fn current_artifact_generation(&self) -> Result<String, SupervisorError> {
         let artifact_lock = crate::artifact::ArtifactLock::read(&self.config.artifact_lock)?;
-        let artifact_generation = format!(
+        Ok(format!(
             "{:x}",
             Sha256::digest(
                 serde_json::to_vec(&artifact_lock).map_err(|_| SupervisorError::InvalidState)?
             )
-        );
+        ))
+    }
+
+    async fn preflight(&mut self) -> Result<String, SupervisorError> {
+        let artifact_generation = self.current_artifact_generation()?;
         let runner = CloudHypervisorRunner::new(RunnerConfig {
             state_root: self.config.engine_root(),
             artifact_root: self.config.artifact_root.clone(),
@@ -685,6 +706,68 @@ impl SupervisorCore {
         .await?;
         runner.preflight()?;
         Ok(artifact_generation)
+    }
+
+    async fn stage_workspace_generation(
+        &mut self,
+        name: &str,
+    ) -> Result<SupervisorState, SupervisorError> {
+        let (project_json, project_sha256) = {
+            let environment = self.environment(name)?;
+            if environment.project_spec_json.is_none()
+                || environment.active_workspace_generation.is_some()
+                || environment.staging_workspace_generation.is_some()
+            {
+                return Ok(self.state.clone());
+            }
+            (
+                environment
+                    .project_spec_json
+                    .clone()
+                    .ok_or(SupervisorError::InvalidState)?,
+                environment
+                    .project_spec_sha256
+                    .clone()
+                    .ok_or(SupervisorError::InvalidState)?,
+            )
+        };
+        let project: codewire_project::ProjectSpec =
+            serde_json::from_slice(&project_json).map_err(|_| SupervisorError::InvalidState)?;
+        project
+            .validate()
+            .map_err(|_| SupervisorError::InvalidState)?;
+        if project
+            .canonical_json()
+            .map_err(|_| SupervisorError::InvalidState)?
+            != project_json
+        {
+            return Err(SupervisorError::InvalidState);
+        }
+
+        let reference = RegistryReference::parse(&project.image)?;
+        let engine = PrivateRoot::open(&self.config.engine_root())?;
+        let content = ContentStore::create(&engine)?;
+        let image = RegistryResolver::new(&content)?
+            .resolve_anonymous(&reference)
+            .await?;
+        let generation = WorkspaceGenerationRecord::new(
+            project_sha256.to_owned(),
+            image,
+            DEFAULT_OCI_ROOT_DISK_BYTES,
+        )?;
+
+        let mut next_state = self.state.clone();
+        let environment = next_state
+            .environments
+            .get_mut(name)
+            .ok_or_else(|| SupervisorError::NotFound(name.to_owned()))?;
+        if environment.active_workspace_generation.is_some()
+            || environment.staging_workspace_generation.is_some()
+        {
+            return Err(SupervisorError::InvalidState);
+        }
+        environment.staging_workspace_generation = Some(generation);
+        Ok(next_state)
     }
 
     async fn create(
@@ -779,6 +862,10 @@ impl SupervisorCore {
                     }
                     operation = self.checkpoint_operation(&operation)?;
                 }
+                LifecycleEffect::StageWorkspaceGeneration => {
+                    let next_state = self.stage_workspace_generation(&request.name).await?;
+                    operation = self.checkpoint_state_operation(&operation, next_state)?;
+                }
                 LifecycleEffect::EnsureRunner => {
                     let _ = self.runner_client(&request.name).await?;
                     operation = self.checkpoint_operation(&operation)?;
@@ -793,6 +880,7 @@ impl SupervisorCore {
                         .environments
                         .get_mut(&request.name)
                         .ok_or_else(|| SupervisorError::NotFound(request.name.clone()))?;
+                    environment.promote_staging_workspace_generation();
                     environment.generation = 1;
                     environment.state = StoredEnvironmentState::Running;
                     operation = self.checkpoint_state_operation(&operation, next_state)?;
@@ -825,7 +913,13 @@ impl SupervisorCore {
                         continue;
                     }
                 };
-                let (_, operation) = self.create(&request, &operation).await?;
+                let (_, operation) = match self.create(&request, &operation).await {
+                    Ok(result) => result,
+                    Err(_) => {
+                        self.fail_replayed_operation(&operation, name, "create_interrupted")?;
+                        continue;
+                    }
+                };
                 let result = self
                     .state
                     .environments
@@ -836,7 +930,13 @@ impl SupervisorCore {
                 continue;
             }
             if operation.kind == OperationKind::Start {
-                let (_, operation) = self.start(name, &operation).await?;
+                let (_, operation) = match self.start(name, &operation).await {
+                    Ok(result) => result,
+                    Err(_) => {
+                        self.fail_replayed_operation(&operation, name, "start_interrupted")?;
+                        continue;
+                    }
+                };
                 let result = self
                     .state
                     .environments
@@ -894,6 +994,20 @@ impl SupervisorCore {
             }
             return Err(SupervisorError::InvalidState);
         }
+        Ok(())
+    }
+
+    fn fail_replayed_operation(
+        &mut self,
+        replayed: &OperationRecord,
+        name: &str,
+        error_code: &str,
+    ) -> Result<(), SupervisorError> {
+        let current = self
+            .store
+            .operation_by_request(replayed.request_id)?
+            .ok_or(SupervisorError::InvalidState)?;
+        self.fail_operation_with_environment_error(&current, name, error_code)?;
         Ok(())
     }
 
@@ -1347,23 +1461,19 @@ impl SupervisorCore {
         if current.generation >= generation {
             return Err(SupervisorError::InvalidRunnerResponse);
         }
-        // Provision at the replayable start boundary, not only during create.
-        // This also upgrades a stopped environment whose workspace predates
-        // root-generation disks without mutating its persistent workspace.
-        let root_generation = foundation_root_generation(&environment)?;
+        let staging = environment.staging_workspace_generation.is_some();
+        let expected_artifact_generation =
+            artifact_generation_for_boot(&environment, staging)?.to_owned();
+        if self.current_artifact_generation()? != expected_artifact_generation {
+            return Err(SupervisorError::ArtifactGenerationChanged);
+        }
         let engine_root = self.config.engine_root();
-        let environment_id = environment.id;
-        let provisioned_root_generation = root_generation.clone();
-        tokio::task::spawn_blocking(move || {
-            ensure_empty_root_generation(
-                &engine_root,
-                environment_id,
-                &provisioned_root_generation,
-                DEFAULT_ROOT_DISK_BYTES,
-            )
+        let boot_environment = environment.clone();
+        let workspace = tokio::task::spawn_blocking(move || {
+            prepare_workspace_boot(&engine_root, &boot_environment)
         })
         .await
-        .map_err(|_| SupervisorError::RootGenerationProvisionTask)??;
+        .map_err(|_| SupervisorError::WorkspaceGenerationProvisionTask)??;
         let info = client
             .start(v1::StartVmRequest {
                 environment_id: environment.id.to_string(),
@@ -1373,10 +1483,11 @@ impl SupervisorCore {
                 state_disk_bytes: environment.disk_bytes,
                 vcpus: u32::from(environment.vcpus),
                 memory_mib: environment.memory_mib,
-                root_generation,
-                root_disk_bytes: DEFAULT_ROOT_DISK_BYTES,
-                setup_total_bytes: 0,
-                setup_header_sha256: String::new(),
+                root_generation: workspace.root_generation,
+                root_disk_bytes: workspace.root_disk_bytes,
+                setup_total_bytes: workspace.setup_total_bytes,
+                setup_header_sha256: workspace.setup_header_sha256,
+                setup_root_generation: workspace.setup_root_generation,
             })
             .await
             .map_err(|status| SupervisorError::VmStart(status.message().to_owned()))?;
@@ -1449,6 +1560,10 @@ impl SupervisorCore {
                     }
                     operation = self.checkpoint_state_operation(&operation, next_state)?;
                 }
+                LifecycleEffect::StageWorkspaceGeneration => {
+                    let next_state = self.stage_workspace_generation(name).await?;
+                    operation = self.checkpoint_state_operation(&operation, next_state)?;
+                }
                 LifecycleEffect::EnsureRunner => {
                     let _ = self.runner_client(name).await?;
                     operation = self.checkpoint_operation(&operation)?;
@@ -1463,6 +1578,7 @@ impl SupervisorCore {
                         .environments
                         .get_mut(name)
                         .ok_or_else(|| SupervisorError::NotFound(name.to_owned()))?;
+                    environment.promote_staging_workspace_generation();
                     environment.generation = target_generation;
                     environment.state = StoredEnvironmentState::Running;
                     operation = self.checkpoint_state_operation(&operation, next_state)?;
@@ -1673,6 +1789,7 @@ impl SupervisorCore {
                         .get_mut(name)
                         .ok_or_else(|| SupervisorError::NotFound(name.to_owned()))?;
                     if was_running {
+                        environment.promote_staging_workspace_generation();
                         if environment.state != StoredEnvironmentState::Running {
                             environment.generation = environment
                                 .generation
@@ -2265,9 +2382,7 @@ fn validate_create(request: &v1::CreateEnvironmentRequest) -> Result<Uuid, Super
         || validate_project_intent(
             &request.project_spec_json,
             &request.project_spec_sha256,
-            request.vcpus,
-            request.memory_mib,
-            request.disk_bytes,
+            Some((request.vcpus, request.memory_mib, request.disk_bytes)),
         )
         .is_err()
     {
@@ -2279,16 +2394,13 @@ fn validate_create(request: &v1::CreateEnvironmentRequest) -> Result<Uuid, Super
 fn validate_project_intent(
     canonical_json: &[u8],
     expected_sha256: &str,
-    vcpus: u32,
-    memory_mib: u32,
-    disk_bytes: u64,
+    expected_resources: Option<(u32, u32, u64)>,
 ) -> Result<(), ()> {
     const GIB: u64 = 1024 * 1024 * 1024;
 
     if canonical_json.is_empty()
         || canonical_json.len() > codewire_project::MAX_PROJECT_DOCUMENT_BYTES
         || !valid_sha256(expected_sha256)
-        || !disk_bytes.is_multiple_of(GIB)
     {
         return Err(());
     }
@@ -2311,9 +2423,14 @@ fn validate_project_intent(
         || !spec.secrets.is_empty()
         || !spec.credentials.is_empty()
         || spec.workspace_mode != codewire_project::WorkspaceMode::Auto
-        || spec.resources.cpu_millicores != vcpus.checked_mul(1_000)
-        || spec.resources.memory_mib != Some(u64::from(memory_mib))
-        || spec.resources.disk_gib != Some(disk_bytes / GIB)
+    {
+        return Err(());
+    }
+    if let Some((vcpus, memory_mib, disk_bytes)) = expected_resources
+        && (!disk_bytes.is_multiple_of(GIB)
+            || spec.resources.cpu_millicores != vcpus.checked_mul(1_000)
+            || spec.resources.memory_mib != Some(u64::from(memory_mib))
+            || spec.resources.disk_gib != Some(disk_bytes / GIB))
     {
         return Err(());
     }
@@ -2459,6 +2576,128 @@ fn environment_operation_result(environment: &EnvironmentRecord) -> serde_json::
         "state": environment.state.as_str(),
         "generation": environment.generation,
     })
+}
+
+fn prepare_workspace_boot(
+    engine_state_root: &Path,
+    environment: &EnvironmentRecord,
+) -> Result<PreparedWorkspaceBoot, SupervisorError> {
+    let (workspace, staging) = match environment.staging_workspace_generation.as_ref() {
+        Some(generation) => (Some(generation), true),
+        None => (environment.active_workspace_generation.as_ref(), false),
+    };
+    let artifact_generation = artifact_generation_for_boot(environment, staging)?;
+    let (root_generation, root_disk_bytes, setup_root_generation) = match workspace {
+        Some(generation) => {
+            let project_sha256 = environment
+                .project_spec_sha256
+                .as_deref()
+                .ok_or(SupervisorError::InvalidState)?;
+            generation.validate_for_project(project_sha256)?;
+            (
+                oci_storage_generation(
+                    &generation.root_generation,
+                    artifact_generation,
+                    generation.root_disk_bytes,
+                )?,
+                generation.root_disk_bytes,
+                generation.root_generation.clone(),
+            )
+        }
+        None => (
+            foundation_root_generation(environment)?,
+            DEFAULT_ROOT_DISK_BYTES,
+            String::new(),
+        ),
+    };
+
+    // Provision at the replayable start boundary, not only during create.
+    // An active generation normally reuses its admitted root without needing
+    // the CAS. If its root was removed, rebuilding it still uses the exact
+    // committed descriptors rather than resolving a moving tag again.
+    let root = ensure_empty_root_generation(
+        engine_state_root,
+        environment.id,
+        &root_generation,
+        root_disk_bytes,
+    )?;
+    let setup = match workspace {
+        Some(generation) if staging || root.created => {
+            let project_json = environment
+                .project_spec_json
+                .as_deref()
+                .ok_or(SupervisorError::InvalidState)?;
+            let project_sha256 = environment
+                .project_spec_sha256
+                .as_deref()
+                .ok_or(SupervisorError::InvalidState)?;
+            let engine = PrivateRoot::open(engine_state_root)?;
+            let content = ContentStore::create(&engine)?;
+            Some(ensure_setup_pack(
+                engine_state_root,
+                environment.id,
+                &content,
+                SetupPackRequest {
+                    project_json,
+                    project_sha256,
+                    storage_generation: &root_generation,
+                    root_generation: &generation.root_generation,
+                    image: &generation.image,
+                },
+            )?)
+        }
+        Some(_) | None => None,
+    };
+    let setup_root_generation = setup
+        .as_ref()
+        .map(|_| setup_root_generation)
+        .unwrap_or_default();
+
+    Ok(PreparedWorkspaceBoot {
+        root_generation,
+        root_disk_bytes,
+        setup_root_generation,
+        setup_total_bytes: setup.as_ref().map_or(0, |pack| pack.header.total_bytes),
+        setup_header_sha256: setup
+            .map(|pack| pack.header_sha256.to_string())
+            .unwrap_or_default(),
+    })
+}
+
+fn artifact_generation_for_boot(
+    environment: &EnvironmentRecord,
+    staging: bool,
+) -> Result<&str, SupervisorError> {
+    let generation = if staging {
+        environment
+            .staging_artifact_generation
+            .as_deref()
+            .or(environment.active_artifact_generation.as_deref())
+    } else {
+        environment.active_artifact_generation.as_deref()
+    };
+    generation
+        .filter(|generation| valid_sha256(generation))
+        .ok_or(SupervisorError::InvalidState)
+}
+
+fn oci_storage_generation(
+    oci_generation: &str,
+    artifact_generation: &str,
+    root_disk_bytes: u64,
+) -> Result<String, SupervisorError> {
+    if !valid_sha256(oci_generation)
+        || !valid_sha256(artifact_generation)
+        || !valid_root_disk_bytes(root_disk_bytes)
+    {
+        return Err(SupervisorError::InvalidState);
+    }
+    let mut digest = Sha256::new();
+    digest.update(b"codewire-root-generation-oci-storage-v1\0");
+    digest.update(oci_generation.as_bytes());
+    digest.update(artifact_generation.as_bytes());
+    digest.update(root_disk_bytes.to_le_bytes());
+    Ok(format!("{:x}", digest.finalize()))
 }
 
 fn foundation_root_generation(environment: &EnvironmentRecord) -> Result<String, SupervisorError> {
@@ -2731,9 +2970,18 @@ impl From<SupervisorError> for Status {
             SupervisorError::NotFound(_) => Status::not_found(error.to_string()),
             SupervisorError::NotRunning
             | SupervisorError::Orphaned
-            | SupervisorError::OperationTerminal => Status::failed_precondition(error.to_string()),
+            | SupervisorError::OperationTerminal
+            | SupervisorError::ArtifactGenerationChanged => {
+                Status::failed_precondition(error.to_string())
+            }
             SupervisorError::Workspace(workspace) => {
                 Status::failed_precondition(workspace.to_string())
+            }
+            SupervisorError::RegistryReference(reference) => {
+                Status::failed_precondition(reference.to_string())
+            }
+            SupervisorError::RegistryResolver(resolver) => {
+                Status::failed_precondition(resolver.to_string())
             }
             SupervisorError::Runner(_) => Status::failed_precondition(error.to_string()),
             SupervisorError::VmStart(_)
@@ -2785,6 +3033,10 @@ pub enum SupervisorError {
     RunnerExitTimeout,
     #[error("native environment runner returned invalid state")]
     InvalidRunnerResponse,
+    #[error(
+        "local VMM artifacts changed; runtime migration is required before this environment can start"
+    )]
+    ArtifactGenerationChanged,
     #[error("native VM start failed: {0}")]
     VmStart(String),
     #[error("native VM stop failed")]
@@ -2795,8 +3047,8 @@ pub enum SupervisorError {
     VmDelete,
     #[error("workspace provisioning task failed")]
     WorkspaceProvisionTask,
-    #[error("root generation provisioning task failed")]
-    RootGenerationProvisionTask,
+    #[error("workspace generation provisioning task failed")]
+    WorkspaceGenerationProvisionTask,
     #[error("local lifecycle request is already terminal")]
     OperationTerminal,
     #[error("serve native supervisor failed")]
@@ -2812,6 +3064,16 @@ pub enum SupervisorError {
     #[error(transparent)]
     Workspace(#[from] WorkspaceError),
     #[error(transparent)]
+    RegistryReference(#[from] RegistryReferenceError),
+    #[error(transparent)]
+    RegistryResolver(#[from] RegistryResolverError),
+    #[error(transparent)]
+    ContentStore(#[from] ContentStoreError),
+    #[error(transparent)]
+    SetupPack(#[from] SetupPackError),
+    #[error("workspace generation identity is invalid")]
+    WorkspaceGeneration,
+    #[error(transparent)]
     Generation(#[from] GenerationError),
     #[error(transparent)]
     Uds(#[from] UdsError),
@@ -2825,9 +3087,16 @@ pub enum SupervisorError {
     Io { path: PathBuf, source: io::Error },
 }
 
+impl From<WorkspaceGenerationError> for SupervisorError {
+    fn from(_: WorkspaceGenerationError) -> Self {
+        Self::WorkspaceGeneration
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::oci::{OciArchitecture, ResolvedDescriptor, ResolvedImage, Sha256Digest};
 
     fn project_intent(vcpus: u32, memory_mib: u32, disk_gib: u64) -> (Vec<u8>, String) {
         let spec = codewire_project::ProjectSpec {
@@ -2842,6 +3111,134 @@ mod tests {
         let bytes = spec.canonical_json().unwrap();
         let digest = format!("{:x}", Sha256::digest(&bytes));
         (bytes, digest)
+    }
+
+    fn test_digest(seed: &[u8]) -> Sha256Digest {
+        Sha256Digest::parse(&format!("sha256:{:x}", Sha256::digest(seed))).unwrap()
+    }
+
+    fn test_workspace_generation(project_sha256: &str, seed: &[u8]) -> WorkspaceGenerationRecord {
+        let manifest = ResolvedDescriptor {
+            media_type: "application/vnd.oci.image.manifest.v1+json".to_owned(),
+            digest: test_digest(&[seed, b"-manifest"].concat()),
+            size: 128,
+        };
+        WorkspaceGenerationRecord::new(
+            project_sha256.to_owned(),
+            ResolvedImage {
+                source_reference: format!(
+                    "registry.example/codewire/workspace@{}",
+                    manifest.digest.as_str()
+                ),
+                architecture: OciArchitecture::native().unwrap(),
+                source: manifest.clone(),
+                manifest,
+                config: ResolvedDescriptor {
+                    media_type: "application/vnd.oci.image.config.v1+json".to_owned(),
+                    digest: test_digest(&[seed, b"-config"].concat()),
+                    size: 128,
+                },
+                layers: Vec::new(),
+            },
+            crate::linux::state::MINIMUM_ROOT_DISK_BYTES,
+        )
+        .unwrap()
+    }
+
+    fn project_environment() -> EnvironmentRecord {
+        let (project_spec_json, project_spec_sha256) = project_intent(2, 16 * 1024, 20);
+        EnvironmentRecord {
+            id: Uuid::new_v4(),
+            name: "dev".to_owned(),
+            state: StoredEnvironmentState::Stopped,
+            vcpus: 2,
+            memory_mib: 16 * 1024,
+            disk_bytes: 20 * 1024 * 1024 * 1024,
+            generation: 1,
+            workspace_commit: "a".repeat(40),
+            source_path: PathBuf::from("/workspace/source"),
+            project_spec_json: Some(project_spec_json),
+            project_spec_sha256: Some(project_spec_sha256),
+            runner: None,
+            active_artifact_generation: Some("b".repeat(64)),
+            staging_artifact_generation: None,
+            active_workspace_generation: None,
+            staging_workspace_generation: None,
+            rollback_workspace_generation: None,
+        }
+    }
+
+    #[test]
+    fn readiness_promotion_rotates_only_durable_workspace_generations() {
+        let mut environment = project_environment();
+        let project_sha256 = environment.project_spec_sha256.as_deref().unwrap();
+        let active = test_workspace_generation(project_sha256, b"active");
+        let staging = test_workspace_generation(project_sha256, b"staging");
+        let old_rollback = test_workspace_generation(project_sha256, b"old-rollback");
+        environment.active_workspace_generation = Some(active.clone());
+        environment.staging_workspace_generation = Some(staging.clone());
+        environment.rollback_workspace_generation = Some(old_rollback);
+        environment.validate("dev").unwrap();
+
+        environment.promote_staging_workspace_generation();
+
+        assert_eq!(environment.active_workspace_generation, Some(staging));
+        assert_eq!(environment.rollback_workspace_generation, Some(active));
+        assert!(environment.staging_workspace_generation.is_none());
+        environment.validate("dev").unwrap();
+    }
+
+    #[test]
+    fn admitted_active_workspace_boots_without_registry_or_cas_access() {
+        let engine = tempfile::tempdir().unwrap();
+        fs::set_permissions(engine.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let mut environment = project_environment();
+        let generation = test_workspace_generation(
+            environment.project_spec_sha256.as_deref().unwrap(),
+            b"offline-active",
+        );
+        let storage_generation = oci_storage_generation(
+            &generation.root_generation,
+            environment.active_artifact_generation.as_deref().unwrap(),
+            generation.root_disk_bytes,
+        )
+        .unwrap();
+        ensure_empty_root_generation(
+            engine.path(),
+            environment.id,
+            &storage_generation,
+            generation.root_disk_bytes,
+        )
+        .unwrap();
+        environment.active_workspace_generation = Some(generation.clone());
+
+        let boot = prepare_workspace_boot(engine.path(), &environment).unwrap();
+
+        assert_eq!(boot.root_generation, storage_generation);
+        assert_eq!(boot.root_disk_bytes, generation.root_disk_bytes);
+        assert!(boot.setup_root_generation.is_empty());
+        assert_eq!(boot.setup_total_bytes, 0);
+        assert!(boot.setup_header_sha256.is_empty());
+        assert!(!engine.path().join("content").exists());
+    }
+
+    #[test]
+    fn staging_workspace_never_boots_when_exact_cached_content_is_absent() {
+        let engine = tempfile::tempdir().unwrap();
+        fs::set_permissions(engine.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let mut environment = project_environment();
+        environment.staging_workspace_generation = Some(test_workspace_generation(
+            environment.project_spec_sha256.as_deref().unwrap(),
+            b"missing-content",
+        ));
+
+        assert!(matches!(
+            prepare_workspace_boot(engine.path(), &environment),
+            Err(SupervisorError::SetupPack(SetupPackError::Registry(
+                RegistryResolverError::Content(ContentStoreError::BlobMissing)
+            )))
+        ));
+        assert!(environment.active_workspace_generation.is_none());
     }
 
     #[test]
@@ -2868,15 +3265,20 @@ mod tests {
     fn canonical_project_intent_is_digest_and_resource_bound() {
         let (bytes, digest) = project_intent(2, 16 * 1024, 20);
         let disk_bytes = 20 * 1024 * 1024 * 1024;
-        validate_project_intent(&bytes, &digest, 2, 16 * 1024, disk_bytes).unwrap();
+        validate_project_intent(&bytes, &digest, Some((2, 16 * 1024, disk_bytes))).unwrap();
 
         let mut wrong_digest = digest.clone();
         wrong_digest.replace_range(0..1, "f");
         if wrong_digest == digest {
             wrong_digest.replace_range(0..1, "e");
         }
-        assert!(validate_project_intent(&bytes, &wrong_digest, 2, 16 * 1024, disk_bytes).is_err());
-        assert!(validate_project_intent(&bytes, &digest, 4, 16 * 1024, disk_bytes).is_err());
+        assert!(
+            validate_project_intent(&bytes, &wrong_digest, Some((2, 16 * 1024, disk_bytes)),)
+                .is_err()
+        );
+        assert!(
+            validate_project_intent(&bytes, &digest, Some((4, 16 * 1024, disk_bytes))).is_err()
+        );
 
         let mut noncanonical = bytes.clone();
         noncanonical.push(b'\n');
@@ -2885,12 +3287,25 @@ mod tests {
             validate_project_intent(
                 &noncanonical,
                 &noncanonical_digest,
-                2,
-                16 * 1024,
-                disk_bytes,
+                Some((2, 16 * 1024, disk_bytes)),
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn stored_creation_intent_remains_valid_after_runtime_resource_resize() {
+        let mut environment = project_environment();
+        let creation_intent = environment.project_spec_json.clone().unwrap();
+        let creation_digest = environment.project_spec_sha256.clone().unwrap();
+
+        environment.vcpus = 3;
+        environment.memory_mib = 12 * 1024;
+        environment.disk_bytes = 21 * 1024 * 1024 * 1024;
+
+        environment.validate("dev").unwrap();
+        assert_eq!(environment.project_spec_json, Some(creation_intent));
+        assert_eq!(environment.project_spec_sha256, Some(creation_digest));
     }
 
     #[test]
@@ -2962,6 +3377,73 @@ mod tests {
             foundation_root_generation(&environment),
             Err(SupervisorError::InvalidState)
         ));
+    }
+
+    #[test]
+    fn oci_storage_generation_binds_content_artifacts_and_disk_policy() {
+        let oci_generation = "a".repeat(64);
+        let artifact_generation = "b".repeat(64);
+        let first = oci_storage_generation(
+            &oci_generation,
+            &artifact_generation,
+            DEFAULT_OCI_ROOT_DISK_BYTES,
+        )
+        .unwrap();
+        assert!(valid_sha256(&first));
+        assert_eq!(
+            oci_storage_generation(
+                &oci_generation,
+                &artifact_generation,
+                DEFAULT_OCI_ROOT_DISK_BYTES,
+            )
+            .unwrap(),
+            first
+        );
+        assert_ne!(
+            oci_storage_generation(
+                &"c".repeat(64),
+                &artifact_generation,
+                DEFAULT_OCI_ROOT_DISK_BYTES,
+            )
+            .unwrap(),
+            first
+        );
+        assert_ne!(
+            oci_storage_generation(
+                &oci_generation,
+                &"c".repeat(64),
+                DEFAULT_OCI_ROOT_DISK_BYTES,
+            )
+            .unwrap(),
+            first
+        );
+        assert_ne!(
+            oci_storage_generation(
+                &oci_generation,
+                &artifact_generation,
+                DEFAULT_OCI_ROOT_DISK_BYTES + 1024 * 1024,
+            )
+            .unwrap(),
+            first
+        );
+    }
+
+    #[test]
+    fn staging_artifacts_are_selected_only_for_a_staging_boot() {
+        let mut environment = project_environment();
+        assert_eq!(
+            artifact_generation_for_boot(&environment, true).unwrap(),
+            "b".repeat(64)
+        );
+        environment.staging_artifact_generation = Some("c".repeat(64));
+        assert_eq!(
+            artifact_generation_for_boot(&environment, true).unwrap(),
+            "c".repeat(64)
+        );
+        assert_eq!(
+            artifact_generation_for_boot(&environment, false).unwrap(),
+            "b".repeat(64)
+        );
     }
 
     #[test]
@@ -3050,5 +3532,72 @@ mod tests {
             StoredEnvironmentState::Running
         );
         assert_eq!(core.environment("dev").unwrap().id, existing_id);
+    }
+
+    #[test]
+    fn replay_failure_uses_the_latest_checkpoint_and_unwedges_the_environment() {
+        let parent = tempfile::tempdir().unwrap();
+        let root_path = parent.path().join("runtime");
+        fs::create_dir(&root_path).unwrap();
+        fs::set_permissions(&root_path, fs::Permissions::from_mode(0o700)).unwrap();
+        let root = PrivateRoot::open(&root_path).unwrap();
+        let lock = SupervisorLock::acquire(&root).unwrap();
+        let (store, _) = SupervisorStore::open(&root).unwrap();
+        let environment = project_environment();
+        let environment_id = environment.id;
+        let state = SupervisorState {
+            schema_version: SUPERVISOR_STATE_SCHEMA,
+            current: Some("dev".to_owned()),
+            environments: [("dev".to_owned(), environment)].into(),
+        };
+        store.replace_state(&state).unwrap();
+        let request_id = Uuid::new_v4();
+        let operation = store
+            .begin_operation(
+                request_id,
+                Some(environment_id),
+                OperationKind::Start,
+                &serde_json::json!({"name": "dev", "generation": 2}),
+            )
+            .unwrap();
+        store
+            .advance_operation(
+                operation.operation_id,
+                operation.checkpoint,
+                OperationPhase::EffectApplied,
+                None,
+                None,
+            )
+            .unwrap();
+        let mut core = SupervisorCore {
+            config: NativeRuntimeConfig {
+                root: root_path,
+                artifact_root: parent.path().join("artifacts"),
+                artifact_lock: parent.path().join("artifacts.lock.json"),
+                executable: PathBuf::from("/usr/bin/true"),
+            },
+            root,
+            store,
+            state,
+            children: HashMap::new(),
+            live_runners: HashMap::new(),
+            _lock: lock,
+        };
+
+        core.fail_replayed_operation(&operation, "dev", "start_interrupted")
+            .unwrap();
+
+        let failed = core
+            .store
+            .operation_by_request(request_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(failed.phase, OperationPhase::Failed);
+        assert_eq!(failed.checkpoint, 2);
+        assert_eq!(failed.error_code.as_deref(), Some("start_interrupted"));
+        assert_eq!(
+            core.environment("dev").unwrap().state,
+            StoredEnvironmentState::Error
+        );
     }
 }

@@ -33,6 +33,7 @@ const DOCKER_LAYER_GZIP: &str = "application/vnd.docker.image.rootfs.diff.tar.gz
 pub struct SetupPackRequest<'a> {
     pub project_json: &'a [u8],
     pub project_sha256: &'a str,
+    pub storage_generation: &'a str,
     pub root_generation: &'a str,
     pub image: &'a ResolvedImage,
 }
@@ -43,6 +44,7 @@ impl std::fmt::Debug for SetupPackRequest<'_> {
             .debug_struct("SetupPackRequest")
             .field("project_bytes", &self.project_json.len())
             .field("project_sha256", &self.project_sha256)
+            .field("storage_generation", &self.storage_generation)
             .field("root_generation", &self.root_generation)
             .field("manifest", &self.image.manifest.digest)
             .field("layer_count", &self.image.layers.len())
@@ -74,7 +76,7 @@ pub fn ensure_setup_pack(
     let header_sha256 = Sha256Value::calculate(&header_bytes);
     let engine = PrivateRoot::open(engine_state_root)?;
     let paths = VmPaths::create(&engine, vm_id)?;
-    let generation = RootGenerationPaths::create(&paths, request.root_generation)?;
+    let generation = RootGenerationPaths::create(&paths, request.storage_generation)?;
     let root = PrivateRoot::open(&generation.generation_dir)?;
     let final_name = Path::new(SETUP_FILE_NAME);
     let final_path = generation.setup_disk.clone();
@@ -521,10 +523,12 @@ mod tests {
     async fn setup_pack_is_private_exact_replayable_and_credential_free() {
         let (parent, store, image, project, project_sha256) = fixture().await;
         let root_generation = root_generation(&image, &project_sha256);
+        let storage_generation = "c".repeat(64);
         let vm_id = Uuid::new_v4();
         let request = || SetupPackRequest {
             project_json: &project,
             project_sha256: &project_sha256,
+            storage_generation: &storage_generation,
             root_generation: &root_generation,
             image: &image,
         };
@@ -567,10 +571,12 @@ mod tests {
     async fn setup_pack_replay_rejects_corruption_without_replacement() {
         let (parent, store, image, project, project_sha256) = fixture().await;
         let root_generation = root_generation(&image, &project_sha256);
+        let storage_generation = "c".repeat(64);
         let vm_id = Uuid::new_v4();
         let request = || SetupPackRequest {
             project_json: &project,
             project_sha256: &project_sha256,
+            storage_generation: &storage_generation,
             root_generation: &root_generation,
             image: &image,
         };

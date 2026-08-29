@@ -138,8 +138,9 @@ message StartVmRequest {
   uint64 state_disk_bytes = 5;
   uint32 vcpus = 6;
   uint32 memory_mib = 7;
-  // Content identity for the selected OCI/root-format generation. This is
-  // independent from the monotonically increasing VM boot generation.
+  // Host storage identity for the selected OCI/root-format generation. It
+  // binds the OCI content, root-disk policy, and exact runtime artifact set,
+  // and is independent from the monotonically increasing VM boot generation.
   string root_generation = 8;
   uint64 root_disk_bytes = 9;
   // Optional one-boot, credential-free setup-pack binding. Both fields must
@@ -147,6 +148,10 @@ message StartVmRequest {
   // generation path and never accepts an arbitrary host pathname.
   uint64 setup_total_bytes = 10;
   string setup_header_sha256 = 11;
+  // OCI content identity carried by the setup header and one-boot seed. It is
+  // separate from root_generation so a runtime artifact change rotates host
+  // storage without changing the verified registry/content identity.
+  string setup_root_generation = 12;
 }
 
 message StopVmRequest {}

@@ -5,7 +5,7 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use codewire_daemon::client::{SessionClient, v1 as daemon_v1};
-use codewire_vmm_guest_probe::{Seed, SetupBinding};
+use codewire_vmm_guest_probe::{Seed, SetupBinding, guest::CONTAINER_INIT_PATH};
 use rand::{RngCore, rngs::OsRng};
 use rustix::process::Signal;
 use sha2::{Digest, Sha256};
@@ -314,26 +314,33 @@ impl CloudHypervisorRunner {
     /// not trust guest-mutable disk contents or require control sockets to
     /// remain present. The host-written state and exact process birth identity
     /// are still mandatory, and the per-VM lock prevents racing a live owner.
-    pub async fn terminate_tracked_for_cleanup(&self, vm_id: Uuid) -> Result<(), RunnerError> {
+    pub async fn terminate_tracked_for_cleanup(
+        &self,
+        vm_id: Uuid,
+    ) -> Result<Option<u64>, RunnerError> {
         let paths = VmPaths::create(&self.state_root, vm_id)?;
         let _lock = paths.lock()?;
         let state = match PersistedVmState::read(&paths.state_file) {
             Ok(state) => state,
-            Err(error) if error.is_not_found() => return Ok(()),
+            Err(error) if error.is_not_found() => return Ok(None),
             Err(error) => return Err(error.into()),
         };
         if state.vm_id != vm_id {
             return Err(RunnerError::PersistedIdentityMismatch);
         }
+        let generation = state.generation;
         let process = match LiveProcess::recover(&state.process) {
             Ok(process) => process,
             Err(RecoveryError::ReadProcess(error)) if error.kind() == io::ErrorKind::NotFound => {
-                return Ok(());
+                return Ok(Some(generation));
             }
-            Err(RecoveryError::ProcessExited | RecoveryError::IdentityMismatch) => return Ok(()),
+            Err(RecoveryError::ProcessExited | RecoveryError::IdentityMismatch) => {
+                return Ok(Some(generation));
+            }
             Err(error) => return Err(error.into()),
         };
-        terminate_exact_process(&process, None).await
+        terminate_exact_process(&process, None).await?;
+        Ok(Some(generation))
     }
 
     pub async fn grow_stopped_state_disk(
@@ -744,7 +751,7 @@ impl RunningVm {
         self.daemon_client()
             .await?
             .exec_transient(daemon_v1::ExecStartRequest {
-                command: vec!["/init".to_owned(), "poweroff".to_owned()],
+                command: guest_poweroff_command(),
                 working_dir: "/".to_owned(),
                 env: Vec::new(),
             })
@@ -759,6 +766,10 @@ impl RunningVm {
     async fn wait_reaped(&mut self) -> Result<ExitClass, RunnerError> {
         wait_reaped_child(&mut self.child).await
     }
+}
+
+fn guest_poweroff_command() -> Vec<String> {
+    vec![CONTAINER_INIT_PATH.to_owned(), "poweroff".to_owned()]
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -972,9 +983,6 @@ fn admit_setup_disk(
     let Some(binding) = request.setup else {
         return Ok(None);
     };
-    if binding.root_generation().to_string() != request.root_generation {
-        return Err(RunnerError::InvalidRequest);
-    }
     let generation = RootGenerationPaths::create(paths, &request.root_generation)?;
     let root = PrivateRoot::open(&generation.generation_dir)?;
     let opened = root.open_regular(
@@ -1411,6 +1419,29 @@ mod tests {
         (child, process)
     }
 
+    #[tokio::test]
+    async fn cleanup_reports_the_last_persisted_launch_generation() {
+        let (_parent, runner) = test_runner();
+        let vm_id = Uuid::new_v4();
+        assert_eq!(
+            runner.terminate_tracked_for_cleanup(vm_id).await.unwrap(),
+            None
+        );
+
+        let paths = VmPaths::create(&runner.state_root, vm_id).unwrap();
+        let (mut child, process) = spawn_admitted_sleep("30").await;
+        child.start_kill().unwrap();
+        child.wait().await.unwrap();
+        persisted_starting_state(vm_id, &process)
+            .write_atomic(&paths.state_file)
+            .unwrap();
+
+        assert_eq!(
+            runner.terminate_tracked_for_cleanup(vm_id).await.unwrap(),
+            Some(1)
+        );
+    }
+
     #[test]
     fn create_request_enforces_resource_bounds() {
         assert!(validate_request(&request(2, 16_384)).is_ok());
@@ -1439,6 +1470,15 @@ mod tests {
         assert_eq!(seed.auth_token(), token.as_str());
         assert_eq!(token_fingerprint(&token).len(), 64);
         assert!(!format!("{seed:?}").contains(token.as_str()));
+    }
+
+    #[test]
+    fn guest_poweroff_uses_the_sealed_container_helper() {
+        assert_eq!(
+            guest_poweroff_command(),
+            vec![CONTAINER_INIT_PATH.to_owned(), "poweroff".to_owned()]
+        );
+        assert_ne!(guest_poweroff_command()[0], "/init");
     }
 
     #[test]
@@ -1537,7 +1577,7 @@ mod tests {
     }
 
     #[test]
-    fn setup_pack_is_generation_bound_and_revalidated_by_file_identity() {
+    fn setup_pack_is_storage_generation_scoped_and_revalidated_by_file_identity() {
         let (_parent, runner) = test_runner();
         let mut request = request(2, 16_384);
         let paths = VmPaths::create(&runner.state_root, request.vm_id).unwrap();
@@ -1554,9 +1594,12 @@ mod tests {
         setup.set_len(total_bytes).unwrap();
         setup.sync_all().unwrap();
         drop(setup);
+        let setup_root_generation =
+            codewire_vmm_guest_probe::Sha256Value::calculate(b"oci-content-root");
+        assert_ne!(setup_root_generation.to_string(), request.root_generation);
         let binding = SetupBinding::new(
             total_bytes,
-            codewire_vmm_guest_probe::Sha256Value::parse_hex(&request.root_generation).unwrap(),
+            setup_root_generation,
             codewire_vmm_guest_probe::Sha256Value::calculate(b"header"),
         )
         .unwrap();
@@ -1579,18 +1622,6 @@ mod tests {
         assert!(matches!(
             revalidate_setup_disk(&admitted, request.setup),
             Err(RunnerError::SetupDiskIdentityChanged)
-        ));
-
-        let wrong_generation = SetupBinding::new(
-            total_bytes,
-            codewire_vmm_guest_probe::Sha256Value::calculate(b"other-root"),
-            codewire_vmm_guest_probe::Sha256Value::calculate(b"header"),
-        )
-        .unwrap();
-        request.setup = Some(wrong_generation);
-        assert!(matches!(
-            admit_setup_disk(&paths, &request),
-            Err(RunnerError::InvalidRequest)
         ));
     }
 

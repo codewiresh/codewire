@@ -23,6 +23,8 @@ COMMAND_INDEX=0
 LAST_STDOUT=''
 LAST_STDERR=''
 ENV_CREATED=0
+ALLOW_REGISTRY_EGRESS=0
+CW_COMMAND_TIMEOUT_SECONDS=180
 
 usage() {
   cat <<'USAGE' >&2
@@ -38,11 +40,12 @@ exact Cloud Hypervisor, kernel, and product guest-root artifacts admitted by
 codewire-local-vmm. Missing KVM, artifacts, or required tools fail nonzero.
 
 The smoke uses an isolated HOME and short private native state root, poisons
-all platform and proxy destinations, installs Docker/Lima/QEMU tripwires, and
-creates a clean disposable Git fixture. It proves create/info, bare run and
-shell, PTY behavior, saved output and nonzero status, stop/start persistence,
-offline disk/CPU/memory resize, supervisor crash recovery, and journaled exact
-deletion cleanup.
+the platform destination, installs Docker/Lima/QEMU tripwires, and creates a
+clean disposable Git fixture. Initial create permits direct registry egress;
+every later command receives dead proxy endpoints. It proves digest-pinned OCI
+workspace execution, create/info, bare run and shell, PTY behavior, saved
+output and nonzero status, stop/start persistence, offline disk/CPU/memory
+resize, supervisor crash recovery, and journaled exact deletion cleanup.
 USAGE
 }
 
@@ -188,6 +191,15 @@ WORKSPACE_COMMIT="$(env -i PATH='/usr/bin:/bin' HOME="$SMOKE_HOME" LC_ALL=C \
 
 cw_isolated() {
   (
+    local -a proxy_environment=()
+    if [[ "$ALLOW_REGISTRY_EGRESS" -eq 0 ]]; then
+      proxy_environment=(
+        HTTP_PROXY=http://127.0.0.1:1
+        HTTPS_PROXY=http://127.0.0.1:1
+        ALL_PROXY=http://127.0.0.1:1
+        NO_PROXY=
+      )
+    fi
     cd "$WORKSPACE"
     env -i \
       PATH="$SMOKE_ROOT/bin:/usr/bin:/bin" \
@@ -203,11 +215,9 @@ cw_isolated() {
       CODEWIRE_NATIVE_ARTIFACT_LOCK="$ARTIFACT_LOCK" \
       CODEWIRE_SERVER_URL='http://127.0.0.1:1' \
       CODEWIRE_API_KEY='synthetic-platform-key-must-not-be-used' \
-      HTTP_PROXY='http://127.0.0.1:1' \
-      HTTPS_PROXY='http://127.0.0.1:1' \
-      ALL_PROXY='http://127.0.0.1:1' \
-      NO_PROXY='' \
-      /usr/bin/timeout --foreground --signal=TERM --kill-after=5s 180s \
+      "${proxy_environment[@]}" \
+      /usr/bin/timeout --foreground --signal=TERM --kill-after=5s \
+      "${CW_COMMAND_TIMEOUT_SECONDS}s" \
       "$CW_BIN" "$@"
   )
 }
@@ -453,8 +463,8 @@ try:
         print(f"{row[0]}:{row[1]}:{row[2]}")
     elif field == "journal_complete":
         expected = {
-            "create": 6,
-            "start": 5,
+            "create": 7,
+            "start": 6,
             "stop": 3,
             "restart": 7,
             "grow_disk": 7,
@@ -491,6 +501,8 @@ cleanup() {
   local status=$?
   local cleanup_status=0
   trap - EXIT HUP INT TERM
+  ALLOW_REGISTRY_EGRESS=0
+  CW_COMMAND_TIMEOUT_SECONDS=180
   if [[ "$ENV_CREATED" -eq 1 && ( -f "$STATE_ROOT/supervisor.db" || -f "$STATE_ROOT/state.json" ) ]]; then
     log 'cleaning native environment after incomplete smoke'
     if ! cw_isolated env rm --local "$NAME" --yes >/dev/null 2>&1; then
@@ -520,7 +532,11 @@ rg -qF 'already exists in the legacy Docker/Lima state' "$LAST_STDERR" ||
   die 'rejected native creation wrote native state'
 
 log 'creating account-free 2-vCPU, 16-GiB native environment'
+ALLOW_REGISTRY_EGRESS=1
+CW_COMMAND_TIMEOUT_SECONDS=1500
 run_cw env create --local --name "$NAME" --cpu 2 --memory 16Gi --path "$WORKSPACE" --output json
+ALLOW_REGISTRY_EGRESS=0
+CW_COMMAND_TIMEOUT_SECONDS=180
 ENV_CREATED=1
 jq -e --arg commit "$WORKSPACE_COMMIT" '
   .name == "native-smoke" and
@@ -555,7 +571,7 @@ for sqlite_sidecar in "$STATE_ROOT/supervisor.db-wal" "$STATE_ROOT/supervisor.db
   [[ ! -e "$sqlite_sidecar" || "$(stat -c '%a' "$sqlite_sidecar")" == 600 ]] ||
     die "native supervisor database sidecar is not mode 0600: $sqlite_sidecar"
 done
-[[ "$(native_database_value contract)" == '1129797197:1:wal:ok' ]] ||
+[[ "$(native_database_value contract)" == '1129797197:3:wal:ok' ]] ||
   die 'native supervisor database contract drifted'
 [[ "$(native_database_value ownership)" == '64:6' ]] ||
   die 'native artifact generation or owned-object manifest was not recorded'
@@ -566,6 +582,8 @@ RUNNER_PID="$(native_database_value runner_pid)"
 [[ -d "$STATE_ROOT/engine/vms/$ENVIRONMENT_ID" ]] || die 'owned VM state directory is missing'
 [[ ! -e "$STATE_ROOT/engine/vms/$ENVIRONMENT_ID/seed/seed.raw" ]] ||
   die 'one-boot guest seed remained after readiness'
+[[ -z "$(find "$STATE_ROOT/engine/vms/$ENVIRONMENT_ID/generations" -name setup.raw -print -quit)" ]] ||
+  die 'credential-free one-boot setup pack remained after readiness'
 
 log 'checking read-only orphan inventory without adoption or cleanup'
 ORPHAN_SENTINEL="$STATE_ROOT/engine/vms/$ENVIRONMENT_ID/unknown-object"
@@ -591,15 +609,21 @@ log 'checking guest identity, live resources, workspace, and durable output'
 # The quoted expression is evaluated by the guest shell, not this host script.
 # shellcheck disable=SC2016
 run_cw run --no-tty -- /bin/sh -lc \
-  'printf "guest-cwd=%s\n" "$PWD"; printf "guest-pid1="; readlink /proc/1/exe; awk "/^NoNewPrivs:/ { printf \"guest-no-new-privileges=%s\\n\", \$2 } /^CapEff:/ { printf \"guest-effective-capabilities=%s\\n\", \$2 }" /proc/self/status; printf "guest-cpus="; grep -c "^processor" /proc/cpuinfo; grep "^MemTotal:" /proc/meminfo; ./hello.sh; printf persistence-ok > /workspace/sentinel.txt'
+  'printf "guest-cwd=%s\n" "$PWD"; printf "guest-pid1-comm="; cat /proc/1/comm; if readlink /proc/1/exe >/dev/null 2>&1; then printf "guest-pid1-exe=exposed\n"; else printf "guest-pid1-exe=confined\n"; fi; printf "guest-sealed-init="; /run/codewire-runtime/init identity; awk "/^NoNewPrivs:/ { printf \"guest-no-new-privileges=%s\\n\", \$2 } /^CapEff:/ { printf \"guest-effective-capabilities=%s\\n\", \$2 }" /proc/self/status; printf "guest-cpus="; grep -c "^processor" /proc/cpuinfo; grep "^MemTotal:" /proc/meminfo; printf "workspace-node="; node --version; ./hello.sh; printf persistence-ok > /workspace/sentinel.txt'
 rg -qF 'guest-cwd=/workspace' "$LAST_STDOUT" || die 'session did not start in /workspace'
-rg -qF 'guest-pid1=/run/codewire-runtime/init' "$LAST_STDOUT" ||
-  die 'guest PID 1 is not the sealed Codewire workspace init entrypoint'
+rg -qF 'guest-pid1-comm=init' "$LAST_STDOUT" ||
+  die 'guest PID 1 does not have the sealed init process identity'
+rg -qF 'guest-pid1-exe=confined' "$LAST_STDOUT" ||
+  die 'guest PID 1 exposed its executable link to the workspace identity'
+rg -q '^guest-sealed-init=CWIDENTITY1 vm_id=[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12} generation=1$' "$LAST_STDOUT" ||
+  die 'sealed Codewire init did not return the generation-bound VM identity'
 rg -qF 'guest-no-new-privileges=1' "$LAST_STDOUT" ||
   die 'session did not execute through the no-new-privileges OCI boundary'
 rg -qF 'guest-effective-capabilities=0000000000000000' "$LAST_STDOUT" ||
   die 'session retained capabilities across the OCI execution boundary'
 rg -qF 'guest-cpus=2' "$LAST_STDOUT" || die 'guest did not observe exactly 2 vCPUs'
+rg -q '^workspace-node=v[0-9]+\.' "$LAST_STDOUT" ||
+  die 'session did not execute from the canonical Codewire workspace image'
 rg -qF 'native-workspace-ok' "$LAST_STDOUT" || die 'clean Git workspace content is unavailable'
 MEMORY_KIB="$(awk '$1 == "MemTotal:" { print $2 }' "$LAST_STDOUT")"
 [[ "$MEMORY_KIB" =~ ^[0-9]+$ && "$MEMORY_KIB" -ge 15000000 && "$MEMORY_KIB" -le 17500000 ]] ||

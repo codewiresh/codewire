@@ -8,7 +8,10 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 readonly ROOT
 readonly REQUIRED_CH_SHA256='448af3d4e59b22c2987f7df94c213ad40fb53a10d437e42b5ee6c4fce7c29ecc'
 readonly REQUIRED_CH_SIZE='7062256'
-readonly REQUIRED_KERNEL_SHA256='f10415216b52b2f05d173f8ea20934c386b5911c1d22b99ff02c30b64977ea34'
+readonly REQUIRED_KERNEL_RELEASE='6.18.48-codewire1'
+readonly REQUIRED_KERNEL_PATH="vmlinuz-$REQUIRED_KERNEL_RELEASE"
+readonly REQUIRED_KERNEL_SHA256='785245c31860fd801d1ed30942356d6bb871b971384cffd45624dacad48e8133'
+readonly REQUIRED_KERNEL_SIZE='9450496'
 readonly REQUIRED_ARCH='x86_64'
 readonly REQUIRED_CH_VERSION='v53.0'
 readonly LINUX_SUN_PATH_BYTES=108
@@ -39,8 +42,9 @@ usage: smoke-local-vmm-cloud-hypervisor.sh \
 
 Runs the explicit Linux/x86_64 KVM qualification for codewire-local-vmm.
 The artifact root must already contain the exact locked Cloud Hypervisor v53,
-kernel, and canonical static-musl initramfs. The command does not download,
-extract, install, or fall back to Docker, QEMU, TCG, or another VMM.
+Linux 6.18.48 LTS kernel, and canonical static-musl initramfs. The command does
+not download, extract, install, or fall back to Docker, QEMU, TCG, or another
+VMM.
 COUNT must be from 1 through 32 (default 1). MIB must be from 128 through
 65536 (default 512). Both values are passed explicitly to the smoke driver.
 
@@ -234,6 +238,8 @@ validate_artifact_lock() {
   [[ "$(lock_value '.schema_version')" == 1 ]] || die 'artifact lock schema is not version 1'
   [[ "$(lock_value '.cloud_hypervisor.version')" == "$REQUIRED_CH_VERSION" ]] ||
     die "Cloud Hypervisor lock does not pin $REQUIRED_CH_VERSION"
+  [[ "$(lock_value '.kernel.path')" == "$REQUIRED_KERNEL_PATH" ]] ||
+    die "kernel lock does not pin $REQUIRED_KERNEL_RELEASE"
   [[ "$(jq -c '.cloud_hypervisor | keys | sort' "$ARTIFACT_LOCK")" == '["architecture","path","sha256","size","version"]' ]] ||
     die 'Cloud Hypervisor lock has missing or unknown fields'
   local object
@@ -242,7 +248,7 @@ validate_artifact_lock() {
       die "$object lock has missing or unknown fields"
   done
   verify_locked_artifact 'Cloud Hypervisor' '.cloud_hypervisor' 500 "$REQUIRED_CH_SHA256" "$REQUIRED_CH_SIZE"
-  verify_locked_artifact 'kernel' '.kernel' 400 "$REQUIRED_KERNEL_SHA256" ''
+  verify_locked_artifact 'kernel' '.kernel' 400 "$REQUIRED_KERNEL_SHA256" "$REQUIRED_KERNEL_SIZE"
   verify_locked_artifact 'initramfs' '.initramfs' 400 '' ''
 }
 

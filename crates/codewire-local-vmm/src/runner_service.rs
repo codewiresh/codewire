@@ -21,6 +21,7 @@ use crate::uds::{UdsError, bind_owner_only, connect_owner_only, remove_bound_soc
 use crate::{CloudHypervisorRunner, CreateVmRequest, RunnerConfig, RunnerError, RunningVm};
 
 const DAEMON_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+const SETUP_DAEMON_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20 * 60);
 const DAEMON_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(50);
 
 #[derive(Debug, Clone)]
@@ -113,16 +114,17 @@ pub async fn serve_runner(config: RunnerEntrypointConfig) -> Result<(), RunnerSe
     // If a prior runner died, Cloud Hypervisor received PDEATHSIG. Reconcile
     // the exact persisted process identity anyway before this runner accepts
     // lifecycle requests; no orphan is ever adopted without a fresh token.
-    runner
+    let generation = runner
         .terminate_tracked_for_cleanup(config.environment_id)
-        .await?;
+        .await?
+        .unwrap_or(0);
     let (adoption_tx, mut adoption_rx) = mpsc::channel::<AdoptionRequest>(1);
     let service = RunnerRpc {
         state: Arc::new(Mutex::new(RunnerState {
             environment_id: config.environment_id,
             runner,
             running: None,
-            generation: 0,
+            generation,
             state: v1::EnvironmentState::Stopped,
             adopted: false,
         })),
@@ -242,6 +244,7 @@ impl EnvironmentRunnerService for RunnerRpc {
         let vcpus = u8::try_from(request.vcpus)
             .map_err(|_| Status::invalid_argument("invalid vCPU count"))?;
         let setup = parse_setup_binding(&request)?;
+        let daemon_ready_timeout = daemon_ready_timeout(setup.is_some());
         let mut state = self.state.lock().await;
         if !state.adopted {
             return Err(Status::failed_precondition("runner is not adopted"));
@@ -278,6 +281,11 @@ impl EnvironmentRunnerService for RunnerRpc {
                 return Err(map_start_error(error));
             }
         };
+        // Preparing a launch consumes its monotonically increasing generation.
+        // This keeps a failed pre-readiness attempt visible to the supervisor
+        // and prevents a later start from replaying a generation already bound
+        // into persisted VMM state and the one-boot guest seed.
+        state.generation = request.generation;
         let mut running = match state.runner.start(prepared).await {
             Ok(running) => running,
             Err(error) => {
@@ -285,7 +293,7 @@ impl EnvironmentRunnerService for RunnerRpc {
                 return Err(map_start_error(error));
             }
         };
-        if let Err(error) = wait_for_guest_daemon(&mut running).await {
+        if let Err(error) = wait_for_guest_daemon(&mut running, daemon_ready_timeout).await {
             let _ = running.stop().await;
             state.state = v1::EnvironmentState::Error;
             return Err(error);
@@ -414,10 +422,15 @@ fn parse_setup_binding(request: &v1::StartVmRequest) -> Result<Option<SetupBindi
     match (
         request.setup_total_bytes,
         request.setup_header_sha256.as_str(),
+        request.setup_root_generation.as_str(),
     ) {
-        (0, "") => Ok(None),
-        (total_bytes, header_sha256) if total_bytes > 0 && !header_sha256.is_empty() => {
-            let root_generation = Sha256Value::parse_hex(&request.root_generation)
+        (0, "", "") => Ok(None),
+        (total_bytes, header_sha256, setup_root_generation)
+            if total_bytes > 0
+                && !header_sha256.is_empty()
+                && !setup_root_generation.is_empty() =>
+        {
+            let root_generation = Sha256Value::parse_hex(setup_root_generation)
                 .map_err(|_| Status::invalid_argument("invalid setup root generation"))?;
             let header_sha256 = Sha256Value::parse_hex(header_sha256)
                 .map_err(|_| Status::invalid_argument("invalid setup header digest"))?;
@@ -443,8 +456,19 @@ fn map_grow_error(error: RunnerError) -> Status {
     }
 }
 
-async fn wait_for_guest_daemon(running: &mut RunningVm) -> Result<(), Status> {
-    tokio::time::timeout(DAEMON_READY_TIMEOUT, async {
+fn daemon_ready_timeout(has_setup: bool) -> std::time::Duration {
+    if has_setup {
+        SETUP_DAEMON_READY_TIMEOUT
+    } else {
+        DAEMON_READY_TIMEOUT
+    }
+}
+
+async fn wait_for_guest_daemon(
+    running: &mut RunningVm,
+    timeout: std::time::Duration,
+) -> Result<(), Status> {
+    tokio::time::timeout(timeout, async {
         loop {
             match running
                 .try_exit()
@@ -511,10 +535,11 @@ mod tests {
         let root_generation = "a".repeat(64);
         let header_sha256 = "b".repeat(64);
         let request = v1::StartVmRequest {
-            root_generation: root_generation.clone(),
+            root_generation: "c".repeat(64),
             setup_total_bytes: codewire_vmm_guest_probe::SETUP_HEADER_LEN as u64
                 + codewire_vmm_guest_probe::SETUP_ALIGNMENT,
             setup_header_sha256: header_sha256.clone(),
+            setup_root_generation: root_generation.clone(),
             ..Default::default()
         };
         let binding = parse_setup_binding(&request).unwrap().unwrap();
@@ -539,5 +564,12 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn setup_boots_have_a_distinct_bounded_readiness_window() {
+        assert_eq!(daemon_ready_timeout(false), DAEMON_READY_TIMEOUT);
+        assert_eq!(daemon_ready_timeout(true), SETUP_DAEMON_READY_TIMEOUT);
+        assert!(SETUP_DAEMON_READY_TIMEOUT > DAEMON_READY_TIMEOUT);
     }
 }

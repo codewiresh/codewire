@@ -12,7 +12,7 @@ use std::path::Path;
 use flate2::read::MultiGzDecoder;
 use rustix::fs::{
     self as rfs, AtFlags, FileType, Gid, Mode, OFlags, RenameFlags, ResolveFlags, Timespec,
-    Timestamps, Uid,
+    Timestamps, Uid, XattrFlags,
 };
 use rustix::io::Errno;
 use thiserror::Error;
@@ -25,6 +25,7 @@ use crate::setup_verify::VerifiedSetupContents;
 use crate::{LayerEncoding, SetupHeader, SetupLayer, Sha256Value};
 
 const LOWER_NAME: &[u8] = b"lower";
+pub(crate) const OCI_LOWER_ROOT_MODE: u32 = 0o755;
 const COMPLETION_NAME: &[u8] = b"rootfs.complete";
 const COMPLETION_TEMP_NAME: &[u8] = b".rootfs.complete.tmp";
 const COMPLETION_VERSION: &str = "codewire-oci-lower-v1";
@@ -71,7 +72,11 @@ pub(crate) fn apply_setup_layers(
     remove_at(&generation, LOWER_NAME, &mut removal, 0)?;
     fs_result(
         "create empty OCI lower directory",
-        rfs::mkdirat(&generation, LOWER_NAME, Mode::from_raw_mode(0o700)),
+        rfs::mkdirat(
+            &generation,
+            LOWER_NAME,
+            Mode::from_raw_mode(OCI_LOWER_ROOT_MODE),
+        ),
     )?;
     let lower = open_directory_at(&generation, LOWER_NAME)?;
     let mut writer = LayerWriter::new(lower);
@@ -379,6 +384,7 @@ impl EntryConsumer for LayerWriter {
 #[derive(Clone)]
 struct DirectoryMetadata {
     path: Vec<u8>,
+    security_capability: Option<Vec<u8>>,
     mode: u32,
     uid: u32,
     gid: u32,
@@ -389,6 +395,7 @@ impl DirectoryMetadata {
     fn from_entry(entry: &AdmittedEntry) -> Self {
         Self {
             path: entry.path().to_vec(),
+            security_capability: entry.security_capability().map(<[u8]>::to_vec),
             mode: entry.mode(),
             uid: entry.uid(),
             gid: entry.gid(),
@@ -532,7 +539,17 @@ fn apply_fd_metadata(
     fs_result(
         "set admitted OCI timestamps",
         rfs::futimens(descriptor, &timestamps(metadata.mtime)),
-    )
+    )?;
+    if let Some(capability) = &metadata.security_capability {
+        rfs::fsetxattr(
+            descriptor,
+            b"security.capability" as &[u8],
+            capability,
+            XattrFlags::empty(),
+        )
+        .map_err(SetupApplyError::Capability)?;
+    }
+    Ok(())
 }
 
 fn apply_symlink_metadata(
@@ -724,6 +741,8 @@ pub(crate) enum SetupApplyError {
     InvalidHardlinkTarget,
     #[error("confined OCI cleanup exceeds its entry or depth bound")]
     RemovalLimit,
+    #[error("set admitted OCI file capability: {0}")]
+    Capability(#[source] Errno),
     #[error(transparent)]
     Archive(ArchiveError),
     #[error("{action}: {source}")]
@@ -1046,6 +1065,14 @@ mod tests {
         assert_eq!(
             fs::read(generation.path().join("lower/image-file")).unwrap(),
             b"from-image"
+        );
+        assert_eq!(
+            fs::symlink_metadata(generation.path().join("lower"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o7777,
+            0o755
         );
         assert_eq!(
             fs::read(generation.path().join("rootfs.complete")).unwrap(),

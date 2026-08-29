@@ -40,6 +40,23 @@ impl std::fmt::Debug for WorkspaceGenerationRecord {
 }
 
 impl WorkspaceGenerationRecord {
+    pub(crate) fn new(
+        project_sha256: String,
+        image: ResolvedImage,
+        root_disk_bytes: u64,
+    ) -> Result<Self, WorkspaceGenerationError> {
+        let root_generation = calculated_root_generation(&project_sha256, &image)?;
+        let record = Self {
+            schema_version: WORKSPACE_GENERATION_SCHEMA_VERSION,
+            root_generation,
+            project_sha256,
+            image,
+            root_disk_bytes,
+        };
+        record.validate_for_project(&record.project_sha256)?;
+        Ok(record)
+    }
+
     pub(crate) fn validate_for_project(
         &self,
         expected_project_sha256: &str,
@@ -171,6 +188,19 @@ mod tests {
                 .any(|part| part == b"credential")
         );
         assert!(!bytes.windows("token".len()).any(|part| part == b"token"));
+    }
+
+    #[test]
+    fn constructor_derives_and_validates_the_exact_generation() {
+        let expected = record();
+        let constructed = WorkspaceGenerationRecord::new(
+            expected.project_sha256.clone(),
+            expected.image.clone(),
+            expected.root_disk_bytes,
+        )
+        .unwrap();
+
+        assert_eq!(constructed, expected);
     }
 
     #[test]
