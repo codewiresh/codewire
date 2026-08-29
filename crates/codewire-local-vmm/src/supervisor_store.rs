@@ -28,6 +28,7 @@ const DATABASE_WAL_FILE: &str = "supervisor.db-wal";
 const DATABASE_SHM_FILE: &str = "supervisor.db-shm";
 const LEGACY_STATE_FILE: &str = "state.json";
 const LEGACY_ARCHIVE_FILE: &str = "state.v1.imported.json";
+const HOST_REBOOT_WORKSPACE_TRANSITIONS_KEY: &str = "host_reboot_workspace_transitions";
 const DATABASE_APPLICATION_ID: i64 = 0x4357_564d; // "CWVM"
 const DATABASE_SCHEMA_VERSION: i64 = 3;
 const PROJECT_INTENT_DATABASE_SCHEMA_VERSION: i64 = 2;
@@ -45,6 +46,8 @@ pub(crate) enum OperationKind {
     Start,
     Stop,
     Restart,
+    UpdateWorkspace,
+    RollbackWorkspace,
     Delete,
     GrowDisk,
     Reconcile,
@@ -57,6 +60,8 @@ impl OperationKind {
             Self::Start => "start",
             Self::Stop => "stop",
             Self::Restart => "restart",
+            Self::UpdateWorkspace => "update_workspace",
+            Self::RollbackWorkspace => "rollback_workspace",
             Self::Delete => "delete",
             Self::GrowDisk => "grow_disk",
             Self::Reconcile => "reconcile",
@@ -69,6 +74,8 @@ impl OperationKind {
             "start" => Some(Self::Start),
             "stop" => Some(Self::Stop),
             "restart" => Some(Self::Restart),
+            "update_workspace" => Some(Self::UpdateWorkspace),
+            "rollback_workspace" => Some(Self::RollbackWorkspace),
             "delete" => Some(Self::Delete),
             "grow_disk" => Some(Self::GrowDisk),
             "reconcile" => Some(Self::Reconcile),
@@ -185,7 +192,7 @@ impl SupervisorStore {
         Ok((Some(store), state))
     }
 
-    fn open_for_boot(
+    pub(crate) fn open_for_boot(
         root: &PrivateRoot,
         boot_id: &str,
     ) -> Result<(Self, SupervisorState), SupervisorStoreError> {
@@ -358,6 +365,52 @@ impl SupervisorStore {
         )?;
         let rows = statement.query_map([], decode_operation_row)?;
         rows.map(|row| row.map_err(Into::into)).collect()
+    }
+
+    pub(crate) fn host_reboot_interrupted_workspace_transitions(
+        &self,
+    ) -> Result<Vec<OperationRecord>, SupervisorStoreError> {
+        let Some(encoded) =
+            metadata_value(&self.connection, HOST_REBOOT_WORKSPACE_TRANSITIONS_KEY)?
+        else {
+            return Ok(Vec::new());
+        };
+        if encoded.len() > MAXIMUM_OPERATION_BYTES {
+            return Err(SupervisorStoreError::InvalidOperation);
+        }
+        let ids: Vec<String> =
+            serde_json::from_str(&encoded).map_err(|_| SupervisorStoreError::InvalidOperation)?;
+        let mut unique = std::collections::BTreeSet::new();
+        let mut operations = Vec::with_capacity(ids.len());
+        for id in ids {
+            let id = parse_uuid(&id)?;
+            if !unique.insert(id) {
+                return Err(SupervisorStoreError::InvalidOperation);
+            }
+            let operation = operation_for_id(&self.connection, id)?
+                .ok_or(SupervisorStoreError::OperationNotFound)?;
+            if operation.phase != OperationPhase::Interrupted
+                || operation.error_code.as_deref() != Some("host_reboot")
+                || !matches!(
+                    operation.kind,
+                    OperationKind::UpdateWorkspace | OperationKind::RollbackWorkspace
+                )
+            {
+                return Err(SupervisorStoreError::InvalidOperation);
+            }
+            operations.push(operation);
+        }
+        Ok(operations)
+    }
+
+    pub(crate) fn clear_host_reboot_workspace_transitions(
+        &self,
+    ) -> Result<(), SupervisorStoreError> {
+        self.connection.execute(
+            "DELETE FROM supervisor_metadata WHERE key = ?1",
+            [HOST_REBOOT_WORKSPACE_TRANSITIONS_KEY],
+        )?;
+        Ok(())
     }
 
     pub(crate) fn operation_by_request(
@@ -548,6 +601,45 @@ impl SupervisorStore {
             transaction.commit()?;
             return Ok(false);
         }
+        let interrupted_workspace_transitions = {
+            let mut ids = match metadata_value(&transaction, HOST_REBOOT_WORKSPACE_TRANSITIONS_KEY)?
+            {
+                Some(encoded) => {
+                    if encoded.len() > MAXIMUM_OPERATION_BYTES {
+                        return Err(SupervisorStoreError::InvalidOperation);
+                    }
+                    serde_json::from_str::<Vec<String>>(&encoded)
+                        .map_err(|_| SupervisorStoreError::InvalidOperation)?
+                }
+                None => Vec::new(),
+            };
+            let mut statement = transaction.prepare(
+                "SELECT operation_id FROM operations
+                 WHERE phase NOT IN ('completed', 'failed', 'interrupted')
+                   AND kind IN ('update_workspace', 'rollback_workspace')
+                 ORDER BY created_unix_ms, operation_id",
+            )?;
+            let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+            ids.extend(rows.collect::<Result<Vec<_>, _>>()?);
+            let mut unique = std::collections::BTreeSet::new();
+            for id in &ids {
+                if !unique.insert(parse_uuid(id)?) {
+                    return Err(SupervisorStoreError::InvalidOperation);
+                }
+            }
+            serde_json::to_string(&ids).map_err(|_| SupervisorStoreError::InvalidOperation)?
+        };
+        if interrupted_workspace_transitions.len() > MAXIMUM_OPERATION_BYTES {
+            return Err(SupervisorStoreError::InvalidOperation);
+        }
+        transaction.execute(
+            "INSERT INTO supervisor_metadata(key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![
+                HOST_REBOOT_WORKSPACE_TRANSITIONS_KEY,
+                interrupted_workspace_transitions
+            ],
+        )?;
         transaction.execute(
             "UPDATE environments \
              SET desired_state = 'stopped', observed_state = 'stopped', runner_json = NULL",

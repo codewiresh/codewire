@@ -303,6 +303,7 @@ pub async fn serve_supervisor(config: NativeRuntimeConfig) -> Result<(), Supervi
         live_runners: HashMap::new(),
         _lock: lock,
     };
+    core.recover_host_reboot_workspace_transitions()?;
     core.replay_pending_operations().await?;
     let service = SupervisorRpc {
         core: Arc::new(Mutex::new(core)),
@@ -472,6 +473,65 @@ impl EnvironmentRecord {
         self.project_spec_json = Some(next_project_json);
         self.project_spec_sha256 = Some(next_project_sha256);
         Ok(displaced)
+    }
+
+    fn stage_rollback_workspace_generation(
+        &mut self,
+        expected_active_root: &str,
+        expected_rollback_root: &str,
+    ) -> Result<(), SupervisorError> {
+        if self
+            .active_workspace_generation
+            .as_ref()
+            .map(|generation| generation.root_generation.as_str())
+            != Some(expected_active_root)
+        {
+            return Err(SupervisorError::InvalidState);
+        }
+        if let Some(staging) = self.staging_workspace_generation.as_ref() {
+            if staging.root_generation == expected_rollback_root
+                && self.rollback_workspace_generation.is_none()
+            {
+                return Ok(());
+            }
+            return Err(SupervisorError::InvalidState);
+        }
+        if self
+            .rollback_workspace_generation
+            .as_ref()
+            .map(|generation| generation.root_generation.as_str())
+            != Some(expected_rollback_root)
+        {
+            return Err(SupervisorError::InvalidState);
+        }
+        self.staging_workspace_generation = self.rollback_workspace_generation.take();
+        Ok(())
+    }
+
+    fn restore_staged_rollback_workspace_generation(
+        &mut self,
+        expected_active_root: &str,
+        expected_rollback_root: &str,
+    ) -> Result<(), SupervisorError> {
+        if self
+            .active_workspace_generation
+            .as_ref()
+            .map(|generation| generation.root_generation.as_str())
+            != Some(expected_active_root)
+            || self.rollback_workspace_generation.is_some()
+        {
+            return Err(SupervisorError::InvalidState);
+        }
+        if self
+            .staging_workspace_generation
+            .as_ref()
+            .map(|generation| generation.root_generation.as_str())
+            != Some(expected_rollback_root)
+        {
+            return Err(SupervisorError::InvalidState);
+        }
+        self.rollback_workspace_generation = self.staging_workspace_generation.take();
+        Ok(())
     }
 
     fn validate(&self, key: &str) -> Result<(), SupervisorError> {
@@ -821,6 +881,98 @@ impl SupervisorCore {
         Ok(next_state)
     }
 
+    async fn stage_workspace_update(
+        &mut self,
+        name: &str,
+        parameters: &WorkspaceTransitionParameters,
+    ) -> Result<SupervisorState, SupervisorError> {
+        let WorkspaceTransitionIntent::Update {
+            project_spec_json,
+            project_spec_sha256,
+        } = &parameters.intent
+        else {
+            return Err(SupervisorError::InvalidState);
+        };
+        self.collect_unreferenced_workspace_roots(name)?;
+        self.collect_unreferenced_oci_content()?;
+        {
+            let environment = self.environment(name)?;
+            if environment
+                .active_workspace_generation
+                .as_ref()
+                .map(|generation| generation.root_generation.as_str())
+                != Some(parameters.prior_root_generation.as_str())
+            {
+                return Err(SupervisorError::InvalidState);
+            }
+            if environment.staging_workspace_generation.is_some() {
+                workspace_transition_requires_boot(environment, parameters)?;
+                return Ok(self.state.clone());
+            }
+        }
+
+        let project: codewire_project::ProjectSpec =
+            serde_json::from_slice(project_spec_json).map_err(|_| SupervisorError::InvalidState)?;
+        let reference = RegistryReference::parse(&project.image)?;
+        let engine = PrivateRoot::open(&self.config.engine_root())?;
+        let content = ContentStore::create(&engine)?;
+        let image = RegistryResolver::new(&content)?
+            .resolve_anonymous(&reference)
+            .await?;
+        let generation = WorkspaceGenerationRecord::new(
+            project_spec_json,
+            project_spec_sha256.clone(),
+            image,
+            DEFAULT_OCI_ROOT_DISK_BYTES,
+        )?;
+
+        let mut next_state = self.state.clone();
+        let environment = next_state
+            .environments
+            .get_mut(name)
+            .ok_or_else(|| SupervisorError::NotFound(name.to_owned()))?;
+        let active = environment
+            .active_workspace_generation
+            .as_ref()
+            .filter(|active| active.root_generation == parameters.prior_root_generation)
+            .ok_or(SupervisorError::InvalidState)?;
+        if generation.root_generation == active.root_generation {
+            if generation.root_disk_bytes != active.root_disk_bytes {
+                return Err(SupervisorError::InvalidState);
+            }
+            active.validate_for_project_intent(project_spec_json, project_spec_sha256)?;
+            return Ok(next_state);
+        }
+        if environment.staging_workspace_generation.is_some() {
+            return Err(SupervisorError::InvalidState);
+        }
+        environment.staging_workspace_generation = Some(generation);
+        Ok(next_state)
+    }
+
+    fn stage_workspace_rollback(
+        &self,
+        name: &str,
+        parameters: &WorkspaceTransitionParameters,
+    ) -> Result<SupervisorState, SupervisorError> {
+        let WorkspaceTransitionIntent::Rollback {
+            rollback_root_generation,
+        } = &parameters.intent
+        else {
+            return Err(SupervisorError::InvalidState);
+        };
+        let mut next_state = self.state.clone();
+        next_state
+            .environments
+            .get_mut(name)
+            .ok_or_else(|| SupervisorError::NotFound(name.to_owned()))?
+            .stage_rollback_workspace_generation(
+                &parameters.prior_root_generation,
+                rollback_root_generation,
+            )?;
+        Ok(next_state)
+    }
+
     fn collect_unreferenced_workspace_roots(
         &self,
         name: &str,
@@ -1051,6 +1203,32 @@ impl SupervisorCore {
                 self.complete_operation(&operation, &result)?;
                 continue;
             }
+            if matches!(
+                operation.kind,
+                OperationKind::UpdateWorkspace | OperationKind::RollbackWorkspace
+            ) {
+                let operation = match self.workspace_transition(name, &operation).await {
+                    Ok(operation) => operation,
+                    Err(_) => {
+                        let error_code = match operation.kind {
+                            OperationKind::UpdateWorkspace => "workspace_update_interrupted",
+                            OperationKind::RollbackWorkspace => "workspace_rollback_interrupted",
+                            _ => return Err(SupervisorError::InvalidState),
+                        };
+                        self.abort_replayed_workspace_transition(&operation, name, error_code)
+                            .await?;
+                        continue;
+                    }
+                };
+                let result = self
+                    .state
+                    .environments
+                    .get(name)
+                    .map(environment_operation_result)
+                    .ok_or(SupervisorError::InvalidState)?;
+                self.complete_operation(&operation, &result)?;
+                continue;
+            }
             if operation.kind == OperationKind::Reconcile {
                 let operation = self.apply_reconcile_operation(&operation)?;
                 let result = self
@@ -1062,6 +1240,86 @@ impl SupervisorCore {
                 self.complete_operation(&operation, &result)?;
                 continue;
             }
+            return Err(SupervisorError::InvalidState);
+        }
+        self.ensure_no_unowned_workspace_staging()
+    }
+
+    fn recover_host_reboot_workspace_transitions(&mut self) -> Result<(), SupervisorError> {
+        let operations = self.store.host_reboot_interrupted_workspace_transitions()?;
+        let mut next_state = self.state.clone();
+        let mut changed = false;
+        for operation in operations {
+            let Some(environment_id) = operation.environment_id else {
+                return Err(SupervisorError::InvalidState);
+            };
+            let Some(name) = operation
+                .payload
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+            else {
+                return Err(SupervisorError::InvalidState);
+            };
+            let environment = next_state
+                .environments
+                .get_mut(name)
+                .ok_or(SupervisorError::InvalidState)?;
+            if environment.id != environment_id {
+                return Err(SupervisorError::InvalidState);
+            }
+            if environment.staging_workspace_generation.is_none() {
+                continue;
+            }
+            if environment.active_workspace_generation.is_none() {
+                return Err(SupervisorError::InvalidState);
+            }
+            let parameters = workspace_transition_parameters(&operation, environment)?;
+            if environment
+                .active_workspace_generation
+                .as_ref()
+                .map(|generation| generation.root_generation.as_str())
+                != Some(parameters.prior_root_generation.as_str())
+            {
+                return Err(SupervisorError::InvalidState);
+            }
+            if operation.checkpoint == 0 {
+                return Err(SupervisorError::InvalidState);
+            }
+            match &parameters.intent {
+                WorkspaceTransitionIntent::Update {
+                    project_spec_json,
+                    project_spec_sha256,
+                } => {
+                    environment
+                        .staging_workspace_generation
+                        .as_ref()
+                        .ok_or(SupervisorError::InvalidState)?
+                        .validate_for_project_intent(project_spec_json, project_spec_sha256)?;
+                    environment.staging_workspace_generation = None;
+                }
+                WorkspaceTransitionIntent::Rollback {
+                    rollback_root_generation,
+                } => environment.restore_staged_rollback_workspace_generation(
+                    &parameters.prior_root_generation,
+                    rollback_root_generation,
+                )?,
+            }
+            environment.state = StoredEnvironmentState::Stopped;
+            changed = true;
+        }
+        if changed {
+            self.store.replace_state(&next_state)?;
+            self.state = next_state;
+        }
+        self.store.clear_host_reboot_workspace_transitions()?;
+        Ok(())
+    }
+
+    fn ensure_no_unowned_workspace_staging(&self) -> Result<(), SupervisorError> {
+        if self.state.environments.values().any(|environment| {
+            environment.active_workspace_generation.is_some()
+                && environment.staging_workspace_generation.is_some()
+        }) {
             return Err(SupervisorError::InvalidState);
         }
         Ok(())
@@ -1078,6 +1336,21 @@ impl SupervisorCore {
             .operation_by_request(replayed.request_id)?
             .ok_or(SupervisorError::InvalidState)?;
         self.fail_operation_with_environment_error(&current, name, error_code)?;
+        Ok(())
+    }
+
+    async fn abort_replayed_workspace_transition(
+        &mut self,
+        replayed: &OperationRecord,
+        name: &str,
+        error_code: &str,
+    ) -> Result<(), SupervisorError> {
+        let current = self
+            .store
+            .operation_by_request(replayed.request_id)?
+            .ok_or(SupervisorError::InvalidState)?;
+        self.abort_workspace_transition(&current, name, error_code)
+            .await?;
         Ok(())
     }
 
@@ -1876,6 +2149,160 @@ impl SupervisorCore {
             }
         }
         Ok(operation)
+    }
+
+    async fn workspace_transition(
+        &mut self,
+        name: &str,
+        operation: &OperationRecord,
+    ) -> Result<OperationRecord, SupervisorError> {
+        let environment_id = operation
+            .environment_id
+            .ok_or(SupervisorError::InvalidState)?;
+        if !matches!(
+            operation.kind,
+            OperationKind::UpdateWorkspace | OperationKind::RollbackWorkspace
+        ) || self.environment(name)?.id != environment_id
+        {
+            return Err(SupervisorError::InvalidState);
+        }
+        let parameters = workspace_transition_parameters(operation, self.environment(name)?)?;
+        let mut operation = operation.clone();
+        while let Some(effect) = supervisor_effect(operation.kind, operation.checkpoint)? {
+            match effect {
+                LifecycleEffect::StageWorkspaceGeneration
+                    if operation.kind == OperationKind::UpdateWorkspace =>
+                {
+                    validate_workspace_transition_start(self.environment(name)?, &parameters)?;
+                    let next_state = self.stage_workspace_update(name, &parameters).await?;
+                    operation = self.checkpoint_state_operation(&operation, next_state)?;
+                }
+                LifecycleEffect::StageRollbackGeneration
+                    if operation.kind == OperationKind::RollbackWorkspace =>
+                {
+                    validate_workspace_transition_start(self.environment(name)?, &parameters)?;
+                    let next_state = self.stage_workspace_rollback(name, &parameters)?;
+                    operation = self.checkpoint_state_operation(&operation, next_state)?;
+                }
+                LifecycleEffect::StopVm => {
+                    if workspace_transition_requires_boot(self.environment(name)?, &parameters)? {
+                        self.ensure_vm_stopped(name).await?;
+                    }
+                    operation = self.checkpoint_operation(&operation)?;
+                }
+                LifecycleEffect::RecordStopped => {
+                    let mut next_state = self.state.clone();
+                    let environment = next_state
+                        .environments
+                        .get_mut(name)
+                        .ok_or_else(|| SupervisorError::NotFound(name.to_owned()))?;
+                    if workspace_transition_requires_boot(environment, &parameters)? {
+                        environment.state = StoredEnvironmentState::Stopped;
+                    }
+                    operation = self.checkpoint_state_operation(&operation, next_state)?;
+                }
+                LifecycleEffect::EnsureRunner => {
+                    if workspace_transition_requires_boot(self.environment(name)?, &parameters)? {
+                        let _ = self.runner_client(name).await?;
+                    }
+                    operation = self.checkpoint_operation(&operation)?;
+                }
+                LifecycleEffect::StartVm => {
+                    if workspace_transition_requires_boot(self.environment(name)?, &parameters)? {
+                        self.ensure_vm_started(name, parameters.target_generation)
+                            .await?;
+                    }
+                    operation = self.checkpoint_operation(&operation)?;
+                }
+                LifecycleEffect::RestoreDesiredPower => {
+                    if !parameters.was_running
+                        && workspace_transition_requires_boot(self.environment(name)?, &parameters)?
+                    {
+                        self.ensure_vm_stopped(name).await?;
+                    }
+                    operation = self.checkpoint_operation(&operation)?;
+                }
+                LifecycleEffect::RecordWorkspaceTransition => {
+                    let mut next_state = self.state.clone();
+                    let environment = next_state
+                        .environments
+                        .get_mut(name)
+                        .ok_or_else(|| SupervisorError::NotFound(name.to_owned()))?;
+                    if workspace_transition_requires_boot(environment, &parameters)? {
+                        let _displaced = environment.promote_staging_workspace_generation()?;
+                        environment.generation = parameters.target_generation;
+                        environment.state = if parameters.was_running {
+                            StoredEnvironmentState::Running
+                        } else {
+                            StoredEnvironmentState::Stopped
+                        };
+                    }
+                    operation = self.checkpoint_state_operation(&operation, next_state)?;
+                }
+                _ => return Err(SupervisorError::InvalidState),
+            }
+        }
+        Ok(operation)
+    }
+
+    async fn abort_workspace_transition(
+        &mut self,
+        operation: &OperationRecord,
+        name: &str,
+        error_code: &str,
+    ) -> Result<OperationRecord, SupervisorError> {
+        if operation.phase != OperationPhase::Intent
+            && operation.phase != OperationPhase::EffectApplied
+        {
+            return Err(SupervisorError::OperationTerminal);
+        }
+        let environment = self.environment(name)?;
+        if operation.environment_id != Some(environment.id) {
+            return Err(SupervisorError::InvalidState);
+        }
+        let parameters = workspace_transition_parameters(operation, environment)?;
+        if operation.checkpoint == 0
+            || !workspace_transition_requires_boot(environment, &parameters)?
+        {
+            return self.fail_operation(operation, error_code);
+        }
+
+        self.ensure_vm_stopped(name).await?;
+        let mut next_state = self.state.clone();
+        let environment = next_state
+            .environments
+            .get_mut(name)
+            .ok_or_else(|| SupervisorError::NotFound(name.to_owned()))?;
+        match &parameters.intent {
+            WorkspaceTransitionIntent::Update {
+                project_spec_json,
+                project_spec_sha256,
+            } => {
+                environment
+                    .staging_workspace_generation
+                    .as_ref()
+                    .ok_or(SupervisorError::InvalidState)?
+                    .validate_for_project_intent(project_spec_json, project_spec_sha256)?;
+                environment.staging_workspace_generation = None;
+            }
+            WorkspaceTransitionIntent::Rollback {
+                rollback_root_generation,
+            } => environment.restore_staged_rollback_workspace_generation(
+                &parameters.prior_root_generation,
+                rollback_root_generation,
+            )?,
+        }
+        environment.state = StoredEnvironmentState::Stopped;
+        let updated = self.store.replace_state_and_advance_operation(
+            &next_state,
+            operation.operation_id,
+            operation.checkpoint,
+            OperationPhase::Failed,
+            None,
+            Some(error_code),
+        )?;
+        self.state = next_state;
+        Ok(updated)
     }
 
     async fn delete(
@@ -2976,6 +3403,181 @@ fn resize_operation_parameters(
     Ok((vcpus, memory_mib, disk_bytes, was_running))
 }
 
+struct WorkspaceTransitionParameters {
+    prior_root_generation: String,
+    target_generation: u64,
+    was_running: bool,
+    intent: WorkspaceTransitionIntent,
+}
+
+enum WorkspaceTransitionIntent {
+    Update {
+        project_spec_json: Vec<u8>,
+        project_spec_sha256: String,
+    },
+    Rollback {
+        rollback_root_generation: String,
+    },
+}
+
+fn workspace_transition_parameters(
+    operation: &OperationRecord,
+    environment: &EnvironmentRecord,
+) -> Result<WorkspaceTransitionParameters, SupervisorError> {
+    let fields = operation
+        .payload
+        .as_object()
+        .ok_or(SupervisorError::InvalidState)?;
+    let expected_fields = match operation.kind {
+        OperationKind::UpdateWorkspace => 6,
+        OperationKind::RollbackWorkspace => 5,
+        _ => return Err(SupervisorError::InvalidState),
+    };
+    if fields.len() != expected_fields
+        || fields.get("name").and_then(serde_json::Value::as_str) != Some(environment.name.as_str())
+    {
+        return Err(SupervisorError::InvalidState);
+    }
+    let prior_root_generation = fields
+        .get("prior_root_generation")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| valid_sha256(value))
+        .ok_or(SupervisorError::InvalidState)?
+        .to_owned();
+    let target_generation = fields
+        .get("target_generation")
+        .and_then(serde_json::Value::as_u64)
+        .filter(|value| *value > 0)
+        .ok_or(SupervisorError::InvalidState)?;
+    let was_running = fields
+        .get("was_running")
+        .and_then(serde_json::Value::as_bool)
+        .ok_or(SupervisorError::InvalidState)?;
+    let intent = match operation.kind {
+        OperationKind::UpdateWorkspace => {
+            let project_spec_json = fields
+                .get("project_spec_json")
+                .and_then(serde_json::Value::as_str)
+                .ok_or(SupervisorError::InvalidState)?
+                .as_bytes()
+                .to_vec();
+            let project_spec_sha256 = fields
+                .get("project_spec_sha256")
+                .and_then(serde_json::Value::as_str)
+                .ok_or(SupervisorError::InvalidState)?
+                .to_owned();
+            validate_project_intent(
+                &project_spec_json,
+                &project_spec_sha256,
+                Some((
+                    u32::from(environment.vcpus),
+                    environment.memory_mib,
+                    environment.disk_bytes,
+                )),
+            )
+            .map_err(|_| SupervisorError::InvalidState)?;
+            WorkspaceTransitionIntent::Update {
+                project_spec_json,
+                project_spec_sha256,
+            }
+        }
+        OperationKind::RollbackWorkspace => {
+            let rollback_root_generation = fields
+                .get("rollback_root_generation")
+                .and_then(serde_json::Value::as_str)
+                .filter(|value| valid_sha256(value))
+                .ok_or(SupervisorError::InvalidState)?
+                .to_owned();
+            WorkspaceTransitionIntent::Rollback {
+                rollback_root_generation,
+            }
+        }
+        _ => return Err(SupervisorError::InvalidState),
+    };
+    Ok(WorkspaceTransitionParameters {
+        prior_root_generation,
+        target_generation,
+        was_running,
+        intent,
+    })
+}
+
+fn workspace_transition_requires_boot(
+    environment: &EnvironmentRecord,
+    parameters: &WorkspaceTransitionParameters,
+) -> Result<bool, SupervisorError> {
+    let active = environment
+        .active_workspace_generation
+        .as_ref()
+        .filter(|generation| generation.root_generation == parameters.prior_root_generation)
+        .ok_or(SupervisorError::InvalidState)?;
+    match &parameters.intent {
+        WorkspaceTransitionIntent::Update {
+            project_spec_json,
+            project_spec_sha256,
+        } => match environment.staging_workspace_generation.as_ref() {
+            Some(staging) => {
+                staging.validate_for_project_intent(project_spec_json, project_spec_sha256)?;
+                Ok(true)
+            }
+            None => {
+                active.validate_for_project_intent(project_spec_json, project_spec_sha256)?;
+                Ok(false)
+            }
+        },
+        WorkspaceTransitionIntent::Rollback {
+            rollback_root_generation,
+        } => {
+            if environment.rollback_workspace_generation.is_some()
+                || environment
+                    .staging_workspace_generation
+                    .as_ref()
+                    .map(|generation| generation.root_generation.as_str())
+                    != Some(rollback_root_generation)
+            {
+                return Err(SupervisorError::InvalidState);
+            }
+            Ok(true)
+        }
+    }
+}
+
+fn validate_workspace_transition_start(
+    environment: &EnvironmentRecord,
+    parameters: &WorkspaceTransitionParameters,
+) -> Result<(), SupervisorError> {
+    let expected_generation = environment
+        .generation
+        .checked_add(1)
+        .ok_or(SupervisorError::InvalidState)?;
+    if !matches!(
+        environment.state,
+        StoredEnvironmentState::Running | StoredEnvironmentState::Stopped
+    ) || parameters.was_running != (environment.state == StoredEnvironmentState::Running)
+        || parameters.target_generation != expected_generation
+        || environment.staging_workspace_generation.is_some()
+        || environment
+            .active_workspace_generation
+            .as_ref()
+            .map(|generation| generation.root_generation.as_str())
+            != Some(parameters.prior_root_generation.as_str())
+    {
+        return Err(SupervisorError::InvalidState);
+    }
+    if let WorkspaceTransitionIntent::Rollback {
+        rollback_root_generation,
+    } = &parameters.intent
+        && environment
+            .rollback_workspace_generation
+            .as_ref()
+            .map(|generation| generation.root_generation.as_str())
+            != Some(rollback_root_generation)
+    {
+        return Err(SupervisorError::InvalidState);
+    }
+    Ok(())
+}
+
 fn valid_environment_name(name: &str) -> bool {
     let bytes = name.as_bytes();
     !bytes.is_empty()
@@ -3335,6 +3937,149 @@ mod tests {
         }
     }
 
+    fn workspace_update_payload(
+        environment: &EnvironmentRecord,
+        project_spec_json: &[u8],
+        project_spec_sha256: &str,
+        was_running: bool,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "name": environment.name,
+            "project_spec_json": std::str::from_utf8(project_spec_json).unwrap(),
+            "project_spec_sha256": project_spec_sha256,
+            "prior_root_generation": environment
+                .active_workspace_generation
+                .as_ref()
+                .unwrap()
+                .root_generation,
+            "target_generation": environment.generation + 1,
+            "was_running": was_running,
+        })
+    }
+
+    fn workspace_rollback_payload(
+        environment: &EnvironmentRecord,
+        was_running: bool,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "name": environment.name,
+            "prior_root_generation": environment
+                .active_workspace_generation
+                .as_ref()
+                .unwrap()
+                .root_generation,
+            "rollback_root_generation": environment
+                .rollback_workspace_generation
+                .as_ref()
+                .unwrap()
+                .root_generation,
+            "target_generation": environment.generation + 1,
+            "was_running": was_running,
+        })
+    }
+
+    fn test_supervisor_core(environment: EnvironmentRecord) -> (tempfile::TempDir, SupervisorCore) {
+        let parent = tempfile::tempdir().unwrap();
+        let root_path = parent.path().join("runtime");
+        fs::create_dir(&root_path).unwrap();
+        fs::set_permissions(&root_path, fs::Permissions::from_mode(0o700)).unwrap();
+        let root = PrivateRoot::open(&root_path).unwrap();
+        root.ensure_dir(Path::new("engine"), 0o700).unwrap();
+        root.ensure_dir(Path::new("runners"), 0o700).unwrap();
+        let lock = SupervisorLock::acquire(&root).unwrap();
+        let (store, _) = SupervisorStore::open(&root).unwrap();
+        let state = SupervisorState {
+            schema_version: SUPERVISOR_STATE_SCHEMA,
+            current: Some(environment.name.clone()),
+            environments: [(environment.name.clone(), environment)].into(),
+        };
+        store.replace_state(&state).unwrap();
+        let core = SupervisorCore {
+            config: NativeRuntimeConfig {
+                root: root_path,
+                artifact_root: parent.path().join("artifacts"),
+                artifact_lock: parent.path().join("artifacts.lock.json"),
+                executable: PathBuf::from("/usr/bin/true"),
+            },
+            root,
+            store,
+            state,
+            children: HashMap::new(),
+            live_runners: HashMap::new(),
+            _lock: lock,
+        };
+        (parent, core)
+    }
+
+    fn test_supervisor_core_after_host_reboot(
+        environment: EnvironmentRecord,
+        kind: OperationKind,
+        payload: &serde_json::Value,
+    ) -> (tempfile::TempDir, SupervisorCore) {
+        let parent = tempfile::tempdir().unwrap();
+        let root_path = parent.path().join("runtime");
+        fs::create_dir(&root_path).unwrap();
+        fs::set_permissions(&root_path, fs::Permissions::from_mode(0o700)).unwrap();
+        let root = PrivateRoot::open(&root_path).unwrap();
+        root.ensure_dir(Path::new("engine"), 0o700).unwrap();
+        root.ensure_dir(Path::new("runners"), 0o700).unwrap();
+        let (store, _) = SupervisorStore::open_for_boot(&root, "boot-before").unwrap();
+        let environment_id = environment.id;
+        let state = SupervisorState {
+            schema_version: SUPERVISOR_STATE_SCHEMA,
+            current: Some(environment.name.clone()),
+            environments: [(environment.name.clone(), environment)].into(),
+        };
+        store.replace_state(&state).unwrap();
+        let operation = store
+            .begin_operation(Uuid::new_v4(), Some(environment_id), kind, payload)
+            .unwrap();
+        store
+            .advance_operation(
+                operation.operation_id,
+                operation.checkpoint,
+                OperationPhase::EffectApplied,
+                None,
+                None,
+            )
+            .unwrap();
+        drop(store);
+
+        let (store, _) = SupervisorStore::open_for_boot(&root, "boot-after").unwrap();
+        assert_eq!(
+            store
+                .host_reboot_interrupted_workspace_transitions()
+                .unwrap()
+                .len(),
+            1
+        );
+        drop(store);
+        let (store, state) = SupervisorStore::open_for_boot(&root, "boot-after-again").unwrap();
+        assert_eq!(
+            store
+                .host_reboot_interrupted_workspace_transitions()
+                .unwrap()
+                .len(),
+            1
+        );
+        let lock = SupervisorLock::acquire(&root).unwrap();
+        let core = SupervisorCore {
+            config: NativeRuntimeConfig {
+                root: root_path,
+                artifact_root: parent.path().join("artifacts"),
+                artifact_lock: parent.path().join("artifacts.lock.json"),
+                executable: PathBuf::from("/usr/bin/true"),
+            },
+            root,
+            store,
+            state,
+            children: HashMap::new(),
+            live_runners: HashMap::new(),
+            _lock: lock,
+        };
+        (parent, core)
+    }
+
     #[test]
     fn readiness_promotion_rotates_only_durable_workspace_generations() {
         let mut environment = project_environment();
@@ -3399,6 +4144,335 @@ mod tests {
         );
         rollback.validate().unwrap();
         environment.validate("dev").unwrap();
+    }
+
+    #[tokio::test]
+    async fn failed_workspace_update_discards_only_staging_and_keeps_active_bootable() {
+        let mut environment = project_environment();
+        let old_project_json = environment.project_spec_json.clone().unwrap();
+        let old_project_sha256 = environment.project_spec_sha256.clone().unwrap();
+        let active = test_workspace_generation(&old_project_json, &old_project_sha256, b"active");
+        let mut next_project: codewire_project::ProjectSpec =
+            serde_json::from_slice(&old_project_json).unwrap();
+        next_project.image = "registry.example/codewire/workspace:next".to_owned();
+        let next_project_json = next_project.canonical_json().unwrap();
+        let next_project_sha256 = format!("{:x}", Sha256::digest(&next_project_json));
+        let staging =
+            test_workspace_generation(&next_project_json, &next_project_sha256, b"staging");
+        environment.state = StoredEnvironmentState::Running;
+        environment.active_workspace_generation = Some(active.clone());
+        environment.staging_workspace_generation = Some(staging);
+        let environment_id = environment.id;
+        let payload =
+            workspace_update_payload(&environment, &next_project_json, &next_project_sha256, true);
+        let (_parent, mut core) = test_supervisor_core(environment);
+        let operation = core
+            .store
+            .begin_operation(
+                Uuid::new_v4(),
+                Some(environment_id),
+                OperationKind::UpdateWorkspace,
+                &payload,
+            )
+            .unwrap();
+        let operation = core
+            .store
+            .advance_operation(
+                operation.operation_id,
+                operation.checkpoint,
+                OperationPhase::EffectApplied,
+                None,
+                None,
+            )
+            .unwrap();
+
+        let failed = core
+            .abort_workspace_transition(&operation, "dev", "workspace_update_failed")
+            .await
+            .unwrap();
+
+        assert_eq!(failed.phase, OperationPhase::Failed);
+        let environment = core.environment("dev").unwrap();
+        assert_eq!(environment.state, StoredEnvironmentState::Stopped);
+        assert_eq!(environment.active_workspace_generation, Some(active));
+        assert!(environment.staging_workspace_generation.is_none());
+        assert_eq!(
+            environment.project_spec_json.as_deref(),
+            Some(old_project_json.as_slice())
+        );
+        environment.validate("dev").unwrap();
+    }
+
+    #[tokio::test]
+    async fn replayed_workspace_promotion_atomically_rotates_project_and_generation() {
+        let mut environment = project_environment();
+        let old_project_json = environment.project_spec_json.clone().unwrap();
+        let old_project_sha256 = environment.project_spec_sha256.clone().unwrap();
+        let active = test_workspace_generation(&old_project_json, &old_project_sha256, b"active");
+        let mut next_project: codewire_project::ProjectSpec =
+            serde_json::from_slice(&old_project_json).unwrap();
+        next_project.image = "registry.example/codewire/workspace:next".to_owned();
+        let next_project_json = next_project.canonical_json().unwrap();
+        let next_project_sha256 = format!("{:x}", Sha256::digest(&next_project_json));
+        let staging =
+            test_workspace_generation(&next_project_json, &next_project_sha256, b"staging");
+        environment.active_workspace_generation = Some(active.clone());
+        environment.staging_workspace_generation = Some(staging.clone());
+        let environment_id = environment.id;
+        let payload = workspace_update_payload(
+            &environment,
+            &next_project_json,
+            &next_project_sha256,
+            false,
+        );
+        let (_parent, mut core) = test_supervisor_core(environment);
+        let mut operation = core
+            .store
+            .begin_operation(
+                Uuid::new_v4(),
+                Some(environment_id),
+                OperationKind::UpdateWorkspace,
+                &payload,
+            )
+            .unwrap();
+        for _ in 0..6 {
+            operation = core
+                .store
+                .advance_operation(
+                    operation.operation_id,
+                    operation.checkpoint,
+                    OperationPhase::EffectApplied,
+                    None,
+                    None,
+                )
+                .unwrap();
+        }
+
+        core.recover_host_reboot_workspace_transitions().unwrap();
+        assert!(
+            core.environment("dev")
+                .unwrap()
+                .staging_workspace_generation
+                .is_some()
+        );
+
+        let request_id = operation.request_id;
+        core.replay_pending_operations().await.unwrap();
+        let operation = core
+            .store
+            .operation_by_request(request_id)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(operation.phase, OperationPhase::Completed);
+        assert_eq!(operation.checkpoint, 8);
+        let environment = core.environment("dev").unwrap();
+        assert_eq!(environment.state, StoredEnvironmentState::Stopped);
+        assert_eq!(environment.generation, 2);
+        assert_eq!(environment.active_workspace_generation, Some(staging));
+        assert_eq!(environment.rollback_workspace_generation, Some(active));
+        assert_eq!(
+            environment.project_spec_json.as_deref(),
+            Some(next_project_json.as_slice())
+        );
+        environment.validate("dev").unwrap();
+    }
+
+    #[tokio::test]
+    async fn replayed_workspace_rollback_atomically_restores_the_prior_project() {
+        let mut environment = project_environment();
+        let old_project_json = environment.project_spec_json.clone().unwrap();
+        let old_project_sha256 = environment.project_spec_sha256.clone().unwrap();
+        let rollback =
+            test_workspace_generation(&old_project_json, &old_project_sha256, b"rollback");
+        let mut next_project: codewire_project::ProjectSpec =
+            serde_json::from_slice(&old_project_json).unwrap();
+        next_project.image = "registry.example/codewire/workspace:next".to_owned();
+        let next_project_json = next_project.canonical_json().unwrap();
+        let next_project_sha256 = format!("{:x}", Sha256::digest(&next_project_json));
+        let active = test_workspace_generation(&next_project_json, &next_project_sha256, b"active");
+        environment.project_spec_json = Some(next_project_json);
+        environment.project_spec_sha256 = Some(next_project_sha256);
+        environment.active_workspace_generation = Some(active.clone());
+        environment.rollback_workspace_generation = Some(rollback.clone());
+        let payload = workspace_rollback_payload(&environment, true);
+        environment
+            .stage_rollback_workspace_generation(&active.root_generation, &rollback.root_generation)
+            .unwrap();
+        let environment_id = environment.id;
+        let (_parent, mut core) = test_supervisor_core(environment);
+        let mut operation = core
+            .store
+            .begin_operation(
+                Uuid::new_v4(),
+                Some(environment_id),
+                OperationKind::RollbackWorkspace,
+                &payload,
+            )
+            .unwrap();
+        for _ in 0..6 {
+            operation = core
+                .store
+                .advance_operation(
+                    operation.operation_id,
+                    operation.checkpoint,
+                    OperationPhase::EffectApplied,
+                    None,
+                    None,
+                )
+                .unwrap();
+        }
+        let request_id = operation.request_id;
+
+        core.replay_pending_operations().await.unwrap();
+
+        let operation = core
+            .store
+            .operation_by_request(request_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(operation.phase, OperationPhase::Completed);
+        assert_eq!(operation.checkpoint, 8);
+        let environment = core.environment("dev").unwrap();
+        assert_eq!(environment.state, StoredEnvironmentState::Running);
+        assert_eq!(environment.generation, 2);
+        assert_eq!(environment.active_workspace_generation, Some(rollback));
+        assert_eq!(environment.rollback_workspace_generation, Some(active));
+        assert_eq!(
+            environment.project_spec_json.as_deref(),
+            Some(old_project_json.as_slice())
+        );
+        environment.validate("dev").unwrap();
+    }
+
+    #[test]
+    fn rollback_staging_and_abort_restore_the_exact_prior_slots() {
+        let mut environment = project_environment();
+        let project_json = environment.project_spec_json.clone().unwrap();
+        let project_sha256 = environment.project_spec_sha256.clone().unwrap();
+        let active = test_workspace_generation(&project_json, &project_sha256, b"active");
+        let rollback = test_workspace_generation(&project_json, &project_sha256, b"rollback");
+        environment.active_workspace_generation = Some(active.clone());
+        environment.rollback_workspace_generation = Some(rollback.clone());
+        let payload = workspace_rollback_payload(&environment, true);
+        let operation = OperationRecord {
+            operation_id: Uuid::new_v4(),
+            request_id: Uuid::new_v4(),
+            environment_id: Some(environment.id),
+            kind: OperationKind::RollbackWorkspace,
+            phase: OperationPhase::Intent,
+            checkpoint: 0,
+            payload,
+            result: None,
+            error_code: None,
+        };
+        let parameters = workspace_transition_parameters(&operation, &environment).unwrap();
+
+        environment
+            .stage_rollback_workspace_generation(
+                &parameters.prior_root_generation,
+                match &parameters.intent {
+                    WorkspaceTransitionIntent::Rollback {
+                        rollback_root_generation,
+                    } => rollback_root_generation,
+                    WorkspaceTransitionIntent::Update { .. } => unreachable!(),
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            environment.active_workspace_generation,
+            Some(active.clone())
+        );
+        assert_eq!(
+            environment.staging_workspace_generation,
+            Some(rollback.clone())
+        );
+        assert!(environment.rollback_workspace_generation.is_none());
+        assert!(workspace_transition_requires_boot(&environment, &parameters).unwrap());
+
+        environment
+            .restore_staged_rollback_workspace_generation(
+                &active.root_generation,
+                &rollback.root_generation,
+            )
+            .unwrap();
+        assert_eq!(environment.active_workspace_generation, Some(active));
+        assert!(environment.staging_workspace_generation.is_none());
+        assert_eq!(environment.rollback_workspace_generation, Some(rollback));
+        environment.validate("dev").unwrap();
+    }
+
+    #[test]
+    fn host_reboot_discards_an_interrupted_update_candidate() {
+        let mut environment = project_environment();
+        let old_project_json = environment.project_spec_json.clone().unwrap();
+        let old_project_sha256 = environment.project_spec_sha256.clone().unwrap();
+        let active = test_workspace_generation(&old_project_json, &old_project_sha256, b"active");
+        let mut next_project: codewire_project::ProjectSpec =
+            serde_json::from_slice(&old_project_json).unwrap();
+        next_project.image = "registry.example/codewire/workspace:next".to_owned();
+        let next_project_json = next_project.canonical_json().unwrap();
+        let next_project_sha256 = format!("{:x}", Sha256::digest(&next_project_json));
+        let staging =
+            test_workspace_generation(&next_project_json, &next_project_sha256, b"staging");
+        environment.active_workspace_generation = Some(active.clone());
+        environment.staging_workspace_generation = Some(staging);
+        let payload =
+            workspace_update_payload(&environment, &next_project_json, &next_project_sha256, true);
+        let (_parent, mut core) = test_supervisor_core_after_host_reboot(
+            environment,
+            OperationKind::UpdateWorkspace,
+            &payload,
+        );
+
+        core.recover_host_reboot_workspace_transitions().unwrap();
+
+        let environment = core.environment("dev").unwrap();
+        assert_eq!(environment.active_workspace_generation, Some(active));
+        assert!(environment.staging_workspace_generation.is_none());
+        assert_eq!(environment.state, StoredEnvironmentState::Stopped);
+        core.ensure_no_unowned_workspace_staging().unwrap();
+        assert!(
+            core.store
+                .host_reboot_interrupted_workspace_transitions()
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn host_reboot_restores_an_interrupted_rollback_candidate() {
+        let mut environment = project_environment();
+        let project_json = environment.project_spec_json.clone().unwrap();
+        let project_sha256 = environment.project_spec_sha256.clone().unwrap();
+        let active = test_workspace_generation(&project_json, &project_sha256, b"active");
+        let rollback = test_workspace_generation(&project_json, &project_sha256, b"rollback");
+        environment.active_workspace_generation = Some(active.clone());
+        environment.rollback_workspace_generation = Some(rollback.clone());
+        let payload = workspace_rollback_payload(&environment, true);
+        environment
+            .stage_rollback_workspace_generation(&active.root_generation, &rollback.root_generation)
+            .unwrap();
+        let (_parent, mut core) = test_supervisor_core_after_host_reboot(
+            environment,
+            OperationKind::RollbackWorkspace,
+            &payload,
+        );
+
+        core.recover_host_reboot_workspace_transitions().unwrap();
+
+        let environment = core.environment("dev").unwrap();
+        assert_eq!(environment.active_workspace_generation, Some(active));
+        assert!(environment.staging_workspace_generation.is_none());
+        assert_eq!(environment.rollback_workspace_generation, Some(rollback));
+        assert_eq!(environment.state, StoredEnvironmentState::Stopped);
+        core.ensure_no_unowned_workspace_staging().unwrap();
+        assert!(
+            core.store
+                .host_reboot_interrupted_workspace_transitions()
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]

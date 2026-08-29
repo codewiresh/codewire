@@ -24,6 +24,9 @@ pub(crate) enum LifecycleEffect {
     RecordResources,
     RestartVm,
     RecordResizeOutcome,
+    StageRollbackGeneration,
+    RestoreDesiredPower,
+    RecordWorkspaceTransition,
     PrepareDelete,
     MoveToTrash,
     RemoveEnvironment,
@@ -47,6 +50,8 @@ impl LifecycleEffect {
             | Self::RecordStopped
             | Self::RecordResources
             | Self::RecordResizeOutcome
+            | Self::StageRollbackGeneration
+            | Self::RecordWorkspaceTransition
             | Self::RemoveEnvironment
             | Self::RecordObservation => EffectDurability::Transactional,
             Self::ProvisionWorkspace
@@ -55,6 +60,7 @@ impl LifecycleEffect {
             | Self::StopVm
             | Self::GrowDisk
             | Self::RestartVm
+            | Self::RestoreDesiredPower
             | Self::PrepareDelete
             | Self::MoveToTrash
             | Self::CleanupTrash => EffectDurability::ExternalIdempotent,
@@ -86,6 +92,24 @@ const RESIZE: &[LifecycleEffect] = &[
     LifecycleEffect::RestartVm,
     LifecycleEffect::RecordResizeOutcome,
 ];
+const UPDATE_WORKSPACE: &[LifecycleEffect] = &[
+    LifecycleEffect::StageWorkspaceGeneration,
+    LifecycleEffect::StopVm,
+    LifecycleEffect::RecordStopped,
+    LifecycleEffect::EnsureRunner,
+    LifecycleEffect::StartVm,
+    LifecycleEffect::RestoreDesiredPower,
+    LifecycleEffect::RecordWorkspaceTransition,
+];
+const ROLLBACK_WORKSPACE: &[LifecycleEffect] = &[
+    LifecycleEffect::StageRollbackGeneration,
+    LifecycleEffect::StopVm,
+    LifecycleEffect::RecordStopped,
+    LifecycleEffect::EnsureRunner,
+    LifecycleEffect::StartVm,
+    LifecycleEffect::RestoreDesiredPower,
+    LifecycleEffect::RecordWorkspaceTransition,
+];
 const DELETE: &[LifecycleEffect] = &[
     LifecycleEffect::PrepareDelete,
     LifecycleEffect::MoveToTrash,
@@ -100,6 +124,8 @@ pub(crate) fn effects(kind: OperationKind) -> &'static [LifecycleEffect] {
         OperationKind::Start => START,
         OperationKind::Stop => STOP,
         OperationKind::Restart | OperationKind::GrowDisk => RESIZE,
+        OperationKind::UpdateWorkspace => UPDATE_WORKSPACE,
+        OperationKind::RollbackWorkspace => ROLLBACK_WORKSPACE,
         OperationKind::Delete => DELETE,
         OperationKind::Reconcile => RECONCILE,
     }
@@ -141,6 +167,8 @@ mod tests {
         OperationKind::Start,
         OperationKind::Stop,
         OperationKind::Restart,
+        OperationKind::UpdateWorkspace,
+        OperationKind::RollbackWorkspace,
         OperationKind::GrowDisk,
         OperationKind::Delete,
         OperationKind::Reconcile,
@@ -296,6 +324,8 @@ mod tests {
                         | LifecycleEffect::RecordStopped
                         | LifecycleEffect::RecordResources
                         | LifecycleEffect::RecordResizeOutcome
+                        | LifecycleEffect::StageRollbackGeneration
+                        | LifecycleEffect::RecordWorkspaceTransition
                         | LifecycleEffect::RemoveEnvironment
                         | LifecycleEffect::RecordObservation
                 );
