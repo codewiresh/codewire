@@ -51,12 +51,13 @@ mod tests {
     use super::*;
 
     const ACCEPTED_APPLICATION_SCHEMA_FINGERPRINT: &str =
-        "28770e4ec7b79a5f0bb8883f7d7e6b374c6e74cbed731177ebce88e9a17c86ab";
+        "6dba3266e7e3ffc4c94a470bf44c385a9893e9134eb93325e9ff22ba07fcccf5";
     const RETIRE_MESH_OIDC_CLIENT_VERSION: i64 = 5;
     const ORGANIZATION_ROUTE_SLUGS_VERSION: i64 = 11;
     const OPENBAO_SECRET_AUTHORITY_VERSION: i64 = 12;
     const APPLIED_OPENBAO_SECRET_AUTHORITY_CHECKSUM: &str = "cbd3494fde9235aaf507236bd18440f2d0c87fe6c42f9b1ce3af78f327b044aa968149229acd1bf064b6d4e67c54ed40";
     const OPENBAO_NATIVE_SECRETS_VERSION: i64 = 13;
+    const CONFIDENTIAL_STORAGE_PROFILE_VERSION: i64 = 15;
 
     async fn startup(database_url: String) -> anyhow::Result<()> {
         ensure_schema(&database_url).await
@@ -137,6 +138,7 @@ mod tests {
                 "second SQLx run changed the migration ledger"
             );
             pool.close().await;
+            assert_confidential_storage_profile_upgrade(&admin_url).await?;
             anyhow::Ok(())
         }
         .await;
@@ -521,7 +523,7 @@ mod tests {
             "partial confidential storage manifest tuple was accepted"
         );
 
-        sqlx::query(
+        let retired_schema = sqlx::query(
             "UPDATE confidential_storage_keys SET \
                  volume_id = $1, volume_version = $2, \
                  manifest_schema_version = 2, device_size_bytes = 21474836480, \
@@ -532,6 +534,25 @@ mod tests {
         )
         .bind(ENVIRONMENT_ID)
         .bind(format!("{ENVIRONMENT_ID}-v2"))
+        .execute(pool)
+        .await;
+        anyhow::ensure!(
+            retired_schema.is_err(),
+            "active schema-2 confidential storage was accepted"
+        );
+
+        sqlx::query(
+            "UPDATE confidential_storage_keys SET \
+                 volume_id = $1, volume_version = $2, \
+                 manifest_schema_version = 3, device_size_bytes = 21474836480, \
+                 luks_uuid = 'f617a73e-b03d-4b58-b1ae-354c72276ea0', \
+                 protection_profile = 'luks2-integrity-rw', \
+                 protection_profile_version = 1, \
+                 backing_claim_name = 'workspace' \
+             WHERE environment_id = $1",
+        )
+        .bind(ENVIRONMENT_ID)
+        .bind(format!("{ENVIRONMENT_ID}-v3"))
         .execute(pool)
         .await?;
 
@@ -576,6 +597,11 @@ mod tests {
                 "protection_profile",
                 "UPDATE confidential_storage_keys \
                  SET protection_profile = 'host-selected-profile' WHERE environment_id = $1",
+            ),
+            (
+                "protection_profile_version",
+                "UPDATE confidential_storage_keys \
+                 SET protection_profile_version = 2 WHERE environment_id = $1",
             ),
             (
                 "device_size_bytes",
@@ -641,6 +667,125 @@ mod tests {
             .execute(pool)
             .await?;
         Ok(())
+    }
+
+    async fn assert_confidential_storage_profile_upgrade(admin_url: &str) -> anyhow::Result<()> {
+        const ENVIRONMENT_ID: &str = "88a00a61-f96b-4db2-8217-1842d29ac9ee";
+        let test_db = TestDatabase::create(admin_url).await?;
+        let result = async {
+            apply_migrations_before(&test_db.url, CONFIDENTIAL_STORAGE_PROFILE_VERSION).await?;
+            let pool = PgPoolOptions::new()
+                .max_connections(1)
+                .connect(&test_db.url)
+                .await?;
+            sqlx::query(
+                "INSERT INTO users (id, email) \
+                 VALUES ('profile-upgrade-user', 'profile-upgrade@example.test')",
+            )
+            .execute(&pool)
+            .await?;
+            sqlx::query(
+                "INSERT INTO organizations (id, name, slug, created_by) \
+                 VALUES ('org-profile-upgrade', 'Profile Upgrade', \
+                         'profile-upgrade', 'profile-upgrade-user')",
+            )
+            .execute(&pool)
+            .await?;
+            sqlx::query(
+                "INSERT INTO environment_presets (id, org_id, name, slug) \
+                 VALUES ('preset-profile-upgrade', 'org-profile-upgrade', \
+                         'Profile Upgrade', 'profile-upgrade')",
+            )
+            .execute(&pool)
+            .await?;
+            sqlx::query(
+                "INSERT INTO environments (id, org_id, created_by, type, preset_id) \
+                 VALUES ($1, 'org-profile-upgrade', 'profile-upgrade-user', 'sandbox', \
+                         'preset-profile-upgrade')",
+            )
+            .bind(ENVIRONMENT_ID)
+            .execute(&pool)
+            .await?;
+            sqlx::query(
+                "INSERT INTO confidential_storage_keys \
+                     (environment_id, kbs_uri, openbao_path, state, volume_id, \
+                      volume_version, manifest_schema_version, device_size_bytes, \
+                      luks_uuid, protection_profile, backing_claim_name) \
+                 VALUES ($1, $2, $3, 'ready', $1, $4, 2, 21474836480, \
+                         'f617a73e-b03d-4b58-b1ae-354c72276ea0', \
+                         'luks2-integrity-rw', 'workspace')",
+            )
+            .bind(ENVIRONMENT_ID)
+            .bind(format!(
+                "kbs:///default/codewire-workspace-luks/{ENVIRONMENT_ID}"
+            ))
+            .bind(format!("confidential-storage/{ENVIRONMENT_ID}"))
+            .bind(format!("{ENVIRONMENT_ID}-v2"))
+            .execute(&pool)
+            .await?;
+            pool.close().await;
+
+            let active_error = ensure_schema(&test_db.url).await.unwrap_err();
+            anyhow::ensure!(
+                format!("{active_error:#}").contains(
+                    "schema-3 confidential storage admission requires no active schema-2 volumes"
+                ),
+                "profile migration did not fail at the active schema-2 boundary: {active_error:#}"
+            );
+
+            let pool = PgPoolOptions::new()
+                .max_connections(1)
+                .connect(&test_db.url)
+                .await?;
+            sqlx::query(
+                "UPDATE confidential_storage_keys SET state = 'deleting' \
+                 WHERE environment_id = $1",
+            )
+            .bind(ENVIRONMENT_ID)
+            .execute(&pool)
+            .await?;
+            pool.close().await;
+
+            ensure_schema(&test_db.url).await?;
+            let pool = PgPoolOptions::new()
+                .max_connections(1)
+                .connect(&test_db.url)
+                .await?;
+            let profile_version: Option<i32> = sqlx::query_scalar(
+                "SELECT protection_profile_version FROM confidential_storage_keys \
+                 WHERE environment_id = $1",
+            )
+            .bind(ENVIRONMENT_ID)
+            .fetch_one(&pool)
+            .await?;
+            anyhow::ensure!(
+                profile_version.is_none(),
+                "schema-2 lifecycle history was rewritten as profile 1"
+            );
+            let reactivate = sqlx::query(
+                "UPDATE confidential_storage_keys SET state = 'ready' \
+                 WHERE environment_id = $1",
+            )
+            .bind(ENVIRONMENT_ID)
+            .execute(&pool)
+            .await;
+            anyhow::ensure!(
+                reactivate.is_err(),
+                "retired schema-2 confidential storage was reactivated"
+            );
+            sqlx::query(
+                "UPDATE confidential_storage_keys SET state = 'deleted' \
+                 WHERE environment_id = $1",
+            )
+            .bind(ENVIRONMENT_ID)
+            .execute(&pool)
+            .await?;
+            pool.close().await;
+            anyhow::Ok(())
+        }
+        .await;
+        let cleanup = test_db.drop().await;
+        result.and(cleanup)
     }
 
     async fn assert_organization_route_slug_schema(pool: &PgPool) -> anyhow::Result<()> {

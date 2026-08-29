@@ -1091,6 +1091,11 @@ mod tests {
             Some("be31063a-8ec8-46d5-aa17-75cda1729370"),
             "Trustee key release must remain bound to the measured environment ID"
         );
+        assert_eq!(
+            data["codewire_workspace_storage_manifest_tag"].as_str(),
+            Some("sha256-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"),
+            "Trustee manifest release must remain bound to the measured content tag"
+        );
         assert!(
             !data.contains_key("confidential_storage"),
             "the retired parallel storage registry must remain absent"
@@ -1398,14 +1403,20 @@ mod tests {
             data(&opts)["codewire_workspace_storage_key_id"].as_str(),
             Some("be31063a-8ec8-46d5-aa17-75cda1729370")
         );
+        assert_eq!(
+            data(&opts)["codewire_workspace_storage_manifest_tag"].as_str(),
+            Some("sha256-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+        );
 
         opts.confidential_storage_manifest_uri =
             "kbs:///default/codewire-storage-manifests/latest".into();
         assert!(!data(&opts).contains_key("codewire_workspace_storage_key_id"));
+        assert!(!data(&opts).contains_key("codewire_workspace_storage_manifest_tag"));
 
         opts.confidential_storage_manifest_uri = CONTENT_ADDRESSED_MANIFEST_URI.into();
         opts.environment_id = "BE31063A-8EC8-46D5-AA17-75CDA1729370".into();
         assert!(!data(&opts).contains_key("codewire_workspace_storage_key_id"));
+        assert!(!data(&opts).contains_key("codewire_workspace_storage_manifest_tag"));
     }
 
     #[test]
@@ -1491,6 +1502,13 @@ mod tests {
                 .unwrap()
                 .contains_key("codewire_workspace_storage_key_id"),
             "the gateway must not receive workspace key-release authority"
+        );
+        assert!(
+            !gateway_init_data["data"]
+                .as_table()
+                .unwrap()
+                .contains_key("codewire_workspace_storage_manifest_tag"),
+            "the gateway must not receive workspace manifest-release authority"
         );
         let gateway_init_data = decode_gzip_base64(
             gateway_annotations[KATA_COCO_INIT_DATA_ANNOTATION_KEY]

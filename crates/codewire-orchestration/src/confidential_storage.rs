@@ -40,8 +40,9 @@ pub(crate) const KBS_RESOURCE_PREFIX: &str = "default/codewire-workspace-luks";
 const KBS_MANIFEST_RESOURCE_PREFIX: &str = "default/codewire-storage-manifests";
 const OPENBAO_PARENT_PATH: &str = "confidential-storage";
 const MAX_PROVIDER_RESPONSE_BYTES: usize = 64 * 1024;
-const MANIFEST_SCHEMA_VERSION: i32 = 2;
+const MANIFEST_SCHEMA_VERSION: i32 = 3;
 const PROTECTION_PROFILE: &str = "luks2-integrity-rw";
+const PROTECTION_PROFILE_VERSION: i32 = 1;
 const BACKING_CLAIM_NAME: &str = "workspace";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -109,9 +110,11 @@ pub struct Metadata {
     pub manifest_uri: Option<String>,
     pub volume_id: String,
     pub volume_version: String,
+    pub manifest_schema_version: i32,
     pub device_size_bytes: u64,
     pub luks_uuid: String,
     pub protection_profile: String,
+    pub protection_profile_version: i32,
     pub backing_claim_name: String,
     pub manifest_sha256_fingerprint: Option<String>,
 }
@@ -132,6 +135,7 @@ struct StorageManifest<'a> {
 struct StorageProtection<'a> {
     #[serde(rename = "type")]
     protection_type: &'a str,
+    profile_version: i32,
     key_uri: &'a str,
     key_sha256: &'a str,
     luks_uuid: &'a str,
@@ -296,6 +300,7 @@ impl ConfidentialStorageManager {
         if existing.state == "deleting" || existing.state == "deleted" {
             anyhow::bail!("confidential storage key is being deleted");
         }
+        validate_metadata_core(&existing, environment_id, device_size_bytes)?;
 
         let recovery_result = if existing.sha256_fingerprint.is_some() {
             self.recovery
@@ -331,13 +336,14 @@ impl ConfidentialStorageManager {
             return Err(error.into());
         }
         let manifest = StorageManifest {
-            schema_version: MANIFEST_SCHEMA_VERSION,
+            schema_version: existing.manifest_schema_version,
             volume_id: &existing.volume_id,
             volume_version: &existing.volume_version,
             device_size_bytes: existing.device_size_bytes,
             access: "readWrite",
             protection: StorageProtection {
                 protection_type: &existing.protection_profile,
+                profile_version: existing.protection_profile_version,
                 key_uri: &existing.kbs_uri,
                 key_sha256: &fingerprint,
                 luks_uuid: &existing.luks_uuid,
@@ -428,6 +434,34 @@ pub(crate) fn validate_environment_id(environment_id: &str) -> anyhow::Result<()
     Ok(())
 }
 
+fn validate_metadata_core(
+    metadata: &Metadata,
+    environment_id: &str,
+    device_size_bytes: u64,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        metadata.environment_id == environment_id
+            && metadata.kbs_uri == kbs_uri(environment_id)
+            && metadata.openbao_path == openbao_path(environment_id)
+            && metadata.version == KEY_VERSION
+            && metadata.volume_id == environment_id
+            && metadata.volume_version == manifest_volume_version(environment_id)
+            && metadata.manifest_schema_version == MANIFEST_SCHEMA_VERSION
+            && metadata.device_size_bytes == device_size_bytes
+            && metadata.protection_profile == PROTECTION_PROFILE
+            && metadata.protection_profile_version == PROTECTION_PROFILE_VERSION
+            && metadata.backing_claim_name == BACKING_CLAIM_NAME,
+        "confidential storage persisted contract changed"
+    );
+    let luks_uuid = Uuid::parse_str(&metadata.luks_uuid)
+        .map_err(|_| anyhow::anyhow!("confidential storage persisted LUKS UUID is invalid"))?;
+    anyhow::ensure!(
+        luks_uuid.to_string() == metadata.luks_uuid,
+        "confidential storage persisted LUKS UUID is not canonical"
+    );
+    Ok(())
+}
+
 pub fn kbs_uri(environment_id: &str) -> String {
     format!("kbs:///{KBS_RESOURCE_PREFIX}/{environment_id}")
 }
@@ -450,11 +484,17 @@ pub fn manifest_uri(manifest_fingerprint: &str) -> anyhow::Result<String> {
 }
 
 pub fn validate_manifest_uri(value: &str) -> bool {
-    let prefix = format!("kbs:///{KBS_MANIFEST_RESOURCE_PREFIX}/sha256-");
-    value
-        .strip_prefix(&prefix)
-        .and_then(|fingerprint| manifest_uri(fingerprint).ok())
-        .is_some_and(|canonical| canonical == value)
+    manifest_resource_tag(value).is_some()
+}
+
+pub(crate) fn manifest_resource_tag(value: &str) -> Option<&str> {
+    let prefix = format!("kbs:///{KBS_MANIFEST_RESOURCE_PREFIX}/");
+    let tag = value.strip_prefix(&prefix)?;
+    let fingerprint = tag.strip_prefix("sha256-")?;
+    manifest_uri(fingerprint)
+        .ok()
+        .filter(|canonical| canonical == value)
+        .map(|_| tag)
 }
 
 pub fn openbao_path(environment_id: &str) -> String {
@@ -498,9 +538,10 @@ impl MetadataStore for PgMetadataStore {
             r#"INSERT INTO confidential_storage_keys
                    (environment_id, kbs_uri, openbao_path, version, state, updated_at,
                     volume_id, volume_version, manifest_schema_version,
-                    device_size_bytes, luks_uuid, protection_profile, backing_claim_name)
+                    device_size_bytes, luks_uuid, protection_profile,
+                    protection_profile_version, backing_claim_name)
                VALUES ($1, $2, $3, $4, 'provisioning', NOW(),
-                       $1, $5, $6, $7, $8, $9, $10)
+                       $1, $5, $6, $7, $8, $9, $10, $11)
                ON CONFLICT (environment_id) DO UPDATE SET
                    openbao_path = COALESCE(
                        confidential_storage_keys.openbao_path,
@@ -522,6 +563,7 @@ impl MetadataStore for PgMetadataStore {
                    device_size_bytes = COALESCE(confidential_storage_keys.device_size_bytes, EXCLUDED.device_size_bytes),
                    luks_uuid = COALESCE(confidential_storage_keys.luks_uuid, EXCLUDED.luks_uuid),
                    protection_profile = COALESCE(confidential_storage_keys.protection_profile, EXCLUDED.protection_profile),
+                   protection_profile_version = COALESCE(confidential_storage_keys.protection_profile_version, EXCLUDED.protection_profile_version),
                    backing_claim_name = COALESCE(confidential_storage_keys.backing_claim_name, EXCLUDED.backing_claim_name),
                    updated_at = NOW()
                WHERE (confidential_storage_keys.volume_id IS NULL OR confidential_storage_keys.volume_id = EXCLUDED.volume_id)
@@ -529,11 +571,14 @@ impl MetadataStore for PgMetadataStore {
                  AND (confidential_storage_keys.manifest_schema_version IS NULL OR confidential_storage_keys.manifest_schema_version = EXCLUDED.manifest_schema_version)
                  AND (confidential_storage_keys.device_size_bytes IS NULL OR confidential_storage_keys.device_size_bytes = EXCLUDED.device_size_bytes)
                  AND (confidential_storage_keys.protection_profile IS NULL OR confidential_storage_keys.protection_profile = EXCLUDED.protection_profile)
+                 AND (confidential_storage_keys.protection_profile_version IS NULL OR confidential_storage_keys.protection_profile_version = EXCLUDED.protection_profile_version)
                  AND (confidential_storage_keys.backing_claim_name IS NULL OR confidential_storage_keys.backing_claim_name = EXCLUDED.backing_claim_name)
                RETURNING environment_id, kbs_uri, openbao_path, version,
                          sha256_fingerprint, state, last_redacted_error,
-                         manifest_uri, volume_id, volume_version, device_size_bytes,
-                         luks_uuid, protection_profile, backing_claim_name,
+                         manifest_uri, volume_id, volume_version,
+                         manifest_schema_version, device_size_bytes,
+                         luks_uuid, protection_profile, protection_profile_version,
+                         backing_claim_name,
                          manifest_sha256_fingerprint"#,
         )
         .bind(environment_id)
@@ -545,6 +590,7 @@ impl MetadataStore for PgMetadataStore {
         .bind(device_size_bytes)
         .bind(luks_uuid)
         .bind(PROTECTION_PROFILE)
+        .bind(PROTECTION_PROFILE_VERSION)
         .bind(BACKING_CLAIM_NAME)
         .fetch_optional(&self.pool)
         .await?
@@ -577,8 +623,10 @@ impl MetadataStore for PgMetadataStore {
                  AND state NOT IN ('deleting', 'deleted')
                RETURNING environment_id, kbs_uri, openbao_path, version,
                          sha256_fingerprint, state, last_redacted_error,
-                         manifest_uri, volume_id, volume_version, device_size_bytes,
-                         luks_uuid, protection_profile, backing_claim_name,
+                         manifest_uri, volume_id, volume_version,
+                         manifest_schema_version, device_size_bytes,
+                         luks_uuid, protection_profile, protection_profile_version,
+                         backing_claim_name,
                          manifest_sha256_fingerprint"#,
         )
         .bind(environment_id)
@@ -644,10 +692,12 @@ fn metadata_from_row(row: &sqlx::postgres::PgRow) -> anyhow::Result<Metadata> {
         manifest_uri: row.try_get("manifest_uri")?,
         volume_id: row.try_get("volume_id")?,
         volume_version: row.try_get("volume_version")?,
+        manifest_schema_version: row.try_get("manifest_schema_version")?,
         device_size_bytes: u64::try_from(device_size_bytes)
             .map_err(|_| anyhow::anyhow!("stored confidential storage size is invalid"))?,
         luks_uuid: row.try_get("luks_uuid")?,
         protection_profile: row.try_get("protection_profile")?,
+        protection_profile_version: row.try_get("protection_profile_version")?,
         backing_claim_name: row.try_get("backing_claim_name")?,
         manifest_sha256_fingerprint: row.try_get("manifest_sha256_fingerprint")?,
     })
@@ -1406,9 +1456,11 @@ mod tests {
                     manifest_uri: None,
                     volume_id: environment_id.into(),
                     volume_version,
+                    manifest_schema_version: MANIFEST_SCHEMA_VERSION,
                     device_size_bytes,
                     luks_uuid: "f617a73e-b03d-4b58-b1ae-354c72276ea0".into(),
                     protection_profile: PROTECTION_PROFILE.into(),
+                    protection_profile_version: PROTECTION_PROFILE_VERSION,
                     backing_claim_name: BACKING_CLAIM_NAME.into(),
                     manifest_sha256_fingerprint: None,
                 });
@@ -1482,9 +1534,11 @@ mod tests {
                 manifest_uri: None,
                 volume_id: id.into(),
                 volume_version: manifest_volume_version(id),
+                manifest_schema_version: MANIFEST_SCHEMA_VERSION,
                 device_size_bytes: 20 * 1024 * 1024 * 1024,
                 luks_uuid: "f617a73e-b03d-4b58-b1ae-354c72276ea0".into(),
                 protection_profile: PROTECTION_PROFILE.into(),
+                protection_profile_version: PROTECTION_PROFILE_VERSION,
                 backing_claim_name: BACKING_CLAIM_NAME.into(),
                 manifest_sha256_fingerprint: None,
             });
@@ -1642,13 +1696,14 @@ mod tests {
         assert_eq!(
             manifest,
             serde_json::json!({
-                "schemaVersion": 2,
+                "schemaVersion": 3,
                 "volumeId": ENVIRONMENT_ID,
-                "volumeVersion": "be31063a-8ec8-46d5-aa17-75cda1729370-v2",
+                "volumeVersion": "be31063a-8ec8-46d5-aa17-75cda1729370-v3",
                 "deviceSizeBytes": 20_u64 * 1024 * 1024 * 1024,
                 "access": "readWrite",
                 "protection": {
                     "type": "luks2-integrity-rw",
+                    "profileVersion": 1,
                     "keyUri": "kbs:///default/codewire-workspace-luks/be31063a-8ec8-46d5-aa17-75cda1729370",
                     "keySha256": key_fingerprint,
                     "luksUuid": "f617a73e-b03d-4b58-b1ae-354c72276ea0",
@@ -1700,9 +1755,11 @@ mod tests {
                 manifest_uri: None,
                 volume_id: ENVIRONMENT_ID.into(),
                 volume_version: manifest_volume_version(ENVIRONMENT_ID),
+                manifest_schema_version: MANIFEST_SCHEMA_VERSION,
                 device_size_bytes: 20 * 1024 * 1024 * 1024,
                 luks_uuid: "f617a73e-b03d-4b58-b1ae-354c72276ea0".into(),
                 protection_profile: PROTECTION_PROFILE.into(),
+                protection_profile_version: PROTECTION_PROFILE_VERSION,
                 backing_claim_name: BACKING_CLAIM_NAME.into(),
                 manifest_sha256_fingerprint: None,
             },
@@ -1743,6 +1800,46 @@ mod tests {
             metadata.values.lock().await[ENVIRONMENT_ID].device_size_bytes,
             20 * 1024 * 1024 * 1024
         );
+    }
+
+    #[tokio::test]
+    async fn persisted_schema_or_profile_drift_is_rejected_before_provider_mutation() {
+        let MemoryHarness {
+            manager,
+            metadata,
+            kbs,
+            events,
+        } = manager(false);
+        manager.ensure_ready(ENVIRONMENT_ID, 20).await.unwrap();
+        let key_publications = kbs.values.lock().await.len();
+        let manifest_publications = kbs.manifests.lock().await.len();
+
+        let mutations: [fn(&mut Metadata); 2] = [
+            |value: &mut Metadata| value.manifest_schema_version = 2,
+            |value: &mut Metadata| value.protection_profile_version = 2,
+        ];
+        for mutate in mutations {
+            {
+                let mut values = metadata.values.lock().await;
+                let value = values.get_mut(ENVIRONMENT_ID).unwrap();
+                mutate(value);
+            }
+            events.lock().await.clear();
+
+            let error = manager.ensure_ready(ENVIRONMENT_ID, 20).await.unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                "confidential storage persisted contract changed"
+            );
+            assert_eq!(events.lock().await.as_slice(), ["metadata.core"]);
+            assert_eq!(kbs.values.lock().await.len(), key_publications);
+            assert_eq!(kbs.manifests.lock().await.len(), manifest_publications);
+
+            let mut values = metadata.values.lock().await;
+            let value = values.get_mut(ENVIRONMENT_ID).unwrap();
+            value.manifest_schema_version = MANIFEST_SCHEMA_VERSION;
+            value.protection_profile_version = PROTECTION_PROFILE_VERSION;
+        }
     }
 
     #[tokio::test]
@@ -1842,12 +1939,21 @@ mod tests {
         );
         assert_eq!(
             manifest_volume_version(ENVIRONMENT_ID),
-            "be31063a-8ec8-46d5-aa17-75cda1729370-v2"
+            "be31063a-8ec8-46d5-aa17-75cda1729370-v3"
+        );
+        let manifest_resource_uri = "kbs:///default/codewire-storage-manifests/sha256-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        assert_eq!(
+            super::manifest_uri("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+                .unwrap(),
+            manifest_resource_uri
         );
         assert_eq!(
-            manifest_uri("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
-                .unwrap(),
-            "kbs:///default/codewire-storage-manifests/sha256-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+            manifest_resource_tag(manifest_resource_uri),
+            Some("sha256-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+        );
+        assert_eq!(
+            manifest_resource_tag(&format!("{manifest_resource_uri}?query=1")),
+            None
         );
         assert!(manifest_uri("not-a-digest").is_err());
         assert_eq!(device_size_bytes(20).unwrap(), 20 * 1024 * 1024 * 1024);
@@ -2065,11 +2171,11 @@ mod tests {
             token_file.path().to_path_buf(),
         );
         let key = Zeroizing::new(vec![0x5a; KEY_BYTES]);
-        let manifest = br#"{"schemaVersion":2}"#;
+        let manifest = br#"{"schemaVersion":3}"#;
         let manifest_uri = manifest_uri(&hex_sha256(manifest)).unwrap();
 
         let mismatch = client
-            .set_manifest_resource(&manifest_uri, br#"{"schemaVersion":3}"#)
+            .set_manifest_resource(&manifest_uri, br#"{"schemaVersion":4}"#)
             .await
             .unwrap_err();
         assert_eq!(

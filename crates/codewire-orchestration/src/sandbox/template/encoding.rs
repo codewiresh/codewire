@@ -85,6 +85,13 @@ pub(super) fn build_codewire_kata_policy_init_data(
         payload.push_str("\"codewire_workspace_storage_key_id\" = ");
         payload.push_str(&toml_string(&opts.environment_id));
         payload.push('\n');
+        let manifest_tag = crate::confidential_storage::manifest_resource_tag(
+            &opts.confidential_storage_manifest_uri,
+        )
+        .expect("validated confidential storage manifest URI has a resource tag");
+        payload.push_str("\"codewire_workspace_storage_manifest_tag\" = ");
+        payload.push_str(&toml_string(manifest_tag));
+        payload.push('\n');
     }
 
     let kbs_url = opts.kata_coco_kbs_url.trim();
