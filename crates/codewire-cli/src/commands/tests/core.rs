@@ -549,39 +549,32 @@
     }
 
     #[test]
-    fn env_trust_report_command_parser_accepts_json_and_alias() {
-        let cli = Cli::try_parse_from(["cw", "env", "trust-report", "builder", "--output", "json"])
+    fn env_report_command_parser_accepts_json_and_rejects_retired_names() {
+        let cli = Cli::try_parse_from(["cw", "env", "report", "builder", "--output", "json"])
             .unwrap();
         let Command::Env(EnvArgs {
-            command: EnvCommand::TrustReport(args),
+            command: EnvCommand::Report(args),
             ..
         }) = cli.command
         else {
-            panic!("expected env trust-report command");
+            panic!("expected env report command");
         };
         assert_eq!(args.environment, "builder");
         assert_eq!(args.output, OutputFormat::Json);
 
-        let cli = Cli::try_parse_from(["cw", "env", "attest", "builder"]).unwrap();
-        let Command::Env(EnvArgs {
-            command: EnvCommand::TrustReport(args),
-            ..
-        }) = cli.command
-        else {
-            panic!("expected env attest alias");
-        };
-        assert_eq!(args.environment, "builder");
-        assert_eq!(args.output, OutputFormat::Text);
+        assert!(Cli::try_parse_from(["cw", "env", "trust-report", "builder"]).is_err());
+        assert!(Cli::try_parse_from(["cw", "env", "attest", "builder"]).is_err());
     }
 
     #[test]
-    fn format_env_trust_report_text_marks_confidential_dev_proof() {
+    fn format_env_report_text_marks_confidential_dev_proof() {
         let report: EnvironmentTrustReport = serde_json::from_value(serde_json::json!({
             "environment": {
                 "id": "env_123",
                 "org_id": "org_123",
                 "type": "sandbox",
-                "state": "running"
+                "state": "running",
+                "isolation_tier": "confidential"
             },
             "runtime": {
                 "profile": "confidential",
@@ -641,10 +634,11 @@
         }))
         .unwrap();
 
-        let text = format_env_trust_report_text(&report);
+        let text = format_env_report_text(&report);
 
-        assert!(text.contains("Trust report: env_123\n"));
+        assert!(text.contains("Environment report: env_123\n"));
         assert!(text.contains("Trust level: dev_proof\n"));
+        assert!(text.contains("Isolation: confidential\n"));
         assert!(text.contains(
             "Runtime: confidential / RuntimeClass confidential / handler kata-qemu-snp\n"
         ));
@@ -657,6 +651,54 @@
         assert!(text.contains("Resource: kbs:///default/codewire/runtime-test-resource\n"));
         assert!(text.contains("Evidence issues: #619, #620\n"));
         assert!(text.contains("Raw SEV-SNP reports are intentionally not exposed."));
+    }
+
+    #[test]
+    fn format_env_report_text_describes_standard_isolation_without_attestation_claims() {
+        let report: EnvironmentTrustReport = serde_json::from_value(serde_json::json!({
+            "environment": {
+                "id": "env_standard",
+                "org_id": "org_123",
+                "type": "sandbox",
+                "state": "running",
+                "isolation_tier": "standard"
+            },
+            "runtime": {
+                "profile": "commodity",
+                "runtime_class": "commodity",
+                "handler": "kata-clh",
+                "confidential": false
+            },
+            "attestation": {
+                "status": "not_applicable",
+                "tee": "none",
+                "report_available": false
+            },
+            "trustee": {
+                "status": "not_applicable"
+            },
+            "summary": {
+                "trust_level": "not_confidential",
+                "production_verified": false,
+                "warnings": [
+                    "Commodity runtime has a Kata VM boundary but does not make a TEE attestation claim."
+                ]
+            }
+        }))
+        .unwrap();
+
+        let text = format_env_report_text(&report);
+
+        assert!(text.contains("Environment report: env_standard\n"));
+        assert!(text.contains("Isolation: standard\n"));
+        assert!(text.contains(
+            "Runtime: commodity / RuntimeClass commodity / handler kata-clh\n"
+        ));
+        assert!(text.contains("Confidential: no\n"));
+        assert!(text.contains("Attestation: not_applicable (none)\n"));
+        assert!(text.contains("Trustee: not_applicable\n"));
+        assert!(text.contains("Trust level: not_confidential\n"));
+        assert!(text.contains("does not make a TEE attestation claim"));
     }
 
     #[test]

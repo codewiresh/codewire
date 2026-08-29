@@ -176,14 +176,14 @@ pub(crate) async fn handle_platform_env_command(
                 .context("get environment")?;
             print_env_info(&environment, args.output)?;
         }
-        EnvCommand::TrustReport(args) => {
+        EnvCommand::Report(args) => {
             let environment_id =
                 resolve_environment_id(&environment_client, &org_id, &args.environment).await?;
             let report = environment_client
                 .get_environment_trust_report(&org_id, &environment_id)
                 .await
                 .context("get environment trust report")?;
-            print_env_trust_report(&report, args.output)?;
+            print_env_report(&report, args.output)?;
         }
         EnvCommand::Stop(args) => {
             let environment_id =
@@ -2882,21 +2882,21 @@ pub(crate) fn print_env_info(
     Ok(())
 }
 
-pub(crate) fn print_env_trust_report(
+pub(crate) fn print_env_report(
     report: &EnvironmentTrustReport,
     output: OutputFormat,
 ) -> anyhow::Result<()> {
     match output {
         OutputFormat::Json => println!("{}", serde_json::to_string_pretty(report)?),
-        OutputFormat::Text => print!("{}", format_env_trust_report_text(report)),
+        OutputFormat::Text => print!("{}", format_env_report_text(report)),
     }
     Ok(())
 }
 
-pub(crate) fn format_env_trust_report_text(report: &EnvironmentTrustReport) -> String {
+pub(crate) fn format_env_report_text(report: &EnvironmentTrustReport) -> String {
     let mut output = String::new();
     output.push_str(&format!(
-        "Trust report: {}\n",
+        "Environment report: {}\n",
         display_str(&report.environment.id)
     ));
     output.push_str(&format!(
@@ -2912,9 +2912,12 @@ pub(crate) fn format_env_trust_report_text(report: &EnvironmentTrustReport) -> S
         }
     ));
     output.push_str(&format!(
-        "  Environment: {} ({}, {})\n",
+        "  Environment: {} ({})\n",
         display_str(&report.environment.environment_type),
-        display_str(&report.environment.state),
+        display_str(&report.environment.state)
+    ));
+    output.push_str(&format!(
+        "  Isolation: {}\n",
         display_str(&report.environment.isolation_tier)
     ));
     output.push_str(&format!(

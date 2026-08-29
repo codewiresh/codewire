@@ -507,11 +507,10 @@ pub(crate) enum EnvCommand {
     #[command(about = "Resize a local or platform environment")]
     Resize(EnvResizeArgs),
     #[command(
-        name = "trust-report",
-        alias = "attest",
-        about = "Show runtime trust evidence for an environment"
+        name = "report",
+        about = "Show isolation, runtime, and trust evidence for an environment"
     )]
-    TrustReport(EnvTrustReportArgs),
+    Report(EnvReportArgs),
     #[command(about = "Stop an environment")]
     Stop(EnvTargetArgs),
     #[command(about = "Start an environment")]
@@ -706,7 +705,7 @@ pub(crate) struct EnvResizeArgs {
 }
 
 #[derive(Debug, Args)]
-pub(crate) struct EnvTrustReportArgs {
+pub(crate) struct EnvReportArgs {
     #[arg(value_name = "ID_OR_NAME")]
     environment: String,
     #[arg(long, value_enum, default_value_t = OutputFormat::Text, help = "Output format")]
