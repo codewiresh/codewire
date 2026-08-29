@@ -288,6 +288,18 @@ impl RuntimeArtifactStore {
         generation: &str,
         lock: &ArtifactLock,
     ) -> Result<(), RuntimeArtifactStoreError> {
+        self.publish_generation_with(generation, lock, write_generation_manifest)
+    }
+
+    fn publish_generation_with<W>(
+        &self,
+        generation: &str,
+        lock: &ArtifactLock,
+        write_manifest: W,
+    ) -> Result<(), RuntimeArtifactStoreError>
+    where
+        W: FnOnce(fs::File, &Path, &[u8]) -> Result<(), RuntimeArtifactStoreError>,
+    {
         validate_generation(generation)?;
         if lock.generation()? != generation {
             return Err(RuntimeArtifactStoreError::InvalidManifest(
@@ -305,19 +317,7 @@ impl RuntimeArtifactStore {
         let opened = self
             .generations
             .create_regular(Path::new(&temporary), 0o400, true)?;
-        let write_result = (|| {
-            let mut file = opened.into_file();
-            file.write_all(&bytes)
-                .map_err(|source| RuntimeArtifactStoreError::Io {
-                    path: temporary_path.clone(),
-                    source,
-                })?;
-            file.sync_all()
-                .map_err(|source| RuntimeArtifactStoreError::Io {
-                    path: temporary_path.clone(),
-                    source,
-                })
-        })();
+        let write_result = write_manifest(opened.into_file(), &temporary_path, &bytes);
         if let Err(error) = write_result {
             let _ = self
                 .generations
@@ -421,6 +421,23 @@ impl RuntimeArtifactStore {
         }
         Ok(())
     }
+}
+
+fn write_generation_manifest(
+    mut file: fs::File,
+    path: &Path,
+    bytes: &[u8],
+) -> Result<(), RuntimeArtifactStoreError> {
+    file.write_all(bytes)
+        .map_err(|source| RuntimeArtifactStoreError::Io {
+            path: path.to_owned(),
+            source,
+        })?;
+    file.sync_all()
+        .map_err(|source| RuntimeArtifactStoreError::Io {
+            path: path.to_owned(),
+            source,
+        })
 }
 
 fn decode_generation_manifest(
@@ -1442,6 +1459,7 @@ impl RuntimeArtifactStoreError {
 #[cfg(test)]
 mod tests {
     use std::os::unix::fs::PermissionsExt;
+    use std::sync::{Arc, Barrier};
 
     use crate::artifact::{
         ARTIFACT_LOCK_SCHEMA_VERSION, ArtifactArchitecture, ExecutableArtifactSpec,
@@ -1515,6 +1533,25 @@ mod tests {
         let generation = lock.generation().unwrap();
         store.publish_generation(&generation, lock).unwrap();
         generation
+    }
+
+    fn assert_generation_intact(store: &RuntimeArtifactStore, lock: &ArtifactLock) {
+        let generation = lock.generation().unwrap();
+        assert_eq!(store.read_generation(&generation).unwrap(), *lock);
+        for (spec, executable) in [
+            (&lock.cloud_hypervisor.artifact, true),
+            (&lock.kernel, false),
+            (&lock.initramfs, false),
+        ] {
+            store.verify_blob(spec, executable).unwrap();
+        }
+    }
+
+    fn directory_names(path: &Path) -> BTreeSet<String> {
+        fs::read_dir(path)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect()
     }
 
     #[test]
@@ -1603,6 +1640,165 @@ mod tests {
             b"corrupt-runtime-artifact!!"
         );
         assert_eq!(fs::read_dir(store.blobs.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn admitted_source_tampering_never_publishes_or_disturbs_the_prior_generation() {
+        let (parent, engine) = private_root();
+        let store = RuntimeArtifactStore::create(&engine).unwrap();
+        let retained_lock = lock_with_kernel(b"retained-kernel");
+        publish_test_generation(&store, parent.path(), &retained_lock, b"retained-kernel");
+        let before = directory_names(store.blobs.path());
+        let expected = b"candidate-kernel";
+        let tampered = b"tampered--kernel";
+        assert_eq!(expected.len(), tampered.len());
+        let source = parent.path().join("candidate-kernel");
+        let artifact = admitted(&source, expected, false);
+        let spec = spec("candidate-kernel", expected);
+        fs::set_permissions(&source, fs::Permissions::from_mode(0o600)).unwrap();
+        fs::write(&source, tampered).unwrap();
+        fs::set_permissions(&source, fs::Permissions::from_mode(0o400)).unwrap();
+
+        assert!(matches!(
+            store.publish_blob(&artifact, &spec, false),
+            Err(RuntimeArtifactStoreError::BlobMismatch(path))
+                if path.parent() == Some(store.blobs.path())
+                    && path.file_name().is_some_and(|name| name.to_string_lossy().starts_with(".ingest-r-"))
+        ));
+        assert_eq!(directory_names(store.blobs.path()), before);
+        assert!(!store.blobs.path().join(blob_name(&spec, false)).exists());
+        assert_eq!(fs::read(source).unwrap(), tampered);
+        assert_generation_intact(&store, &retained_lock);
+    }
+
+    #[test]
+    fn concurrent_identical_publishers_converge_without_partial_objects() {
+        let (parent, engine) = private_root();
+        let source = parent.path().join("source");
+        fs::create_dir(&source).unwrap();
+        fs::set_permissions(&source, fs::Permissions::from_mode(0o700)).unwrap();
+        let lock = lock();
+        let cloud_hypervisor = admitted(&source.join("ch"), b"cloud-hypervisor", true);
+        let kernel = admitted(&source.join("kernel"), b"kernel", false);
+        let initramfs = admitted(&source.join("initramfs"), b"initramfs", false);
+        let generation = lock.generation().unwrap();
+        let engine_path = engine.path().to_owned();
+        let barrier = Arc::new(Barrier::new(2));
+
+        std::thread::scope(|scope| {
+            for _ in 0..2 {
+                let engine_path = engine_path.clone();
+                let barrier = Arc::clone(&barrier);
+                let lock = lock.clone();
+                let generation = generation.clone();
+                let cloud_hypervisor = cloud_hypervisor.clone();
+                let kernel = kernel.clone();
+                let initramfs = initramfs.clone();
+                scope.spawn(move || {
+                    let engine = PrivateRoot::open(&engine_path).unwrap();
+                    let store = RuntimeArtifactStore::create(&engine).unwrap();
+                    barrier.wait();
+                    store
+                        .publish_blob(&cloud_hypervisor, &lock.cloud_hypervisor.artifact, true)
+                        .unwrap();
+                    store.publish_blob(&kernel, &lock.kernel, false).unwrap();
+                    store
+                        .publish_blob(&initramfs, &lock.initramfs, false)
+                        .unwrap();
+                    store.publish_generation(&generation, &lock).unwrap();
+                });
+            }
+        });
+
+        let store = RuntimeArtifactStore::create(&engine).unwrap();
+        assert_generation_intact(&store, &lock);
+        assert_eq!(directory_names(store.blobs.path()).len(), 3);
+        assert_eq!(
+            directory_names(store.generations.path()),
+            BTreeSet::from([generation_manifest_name(&generation)])
+        );
+    }
+
+    #[test]
+    fn partial_manifest_enospc_and_crash_residue_keep_the_prior_generation_bootable() {
+        let (parent, engine) = private_root();
+        let store = RuntimeArtifactStore::create(&engine).unwrap();
+        let retained_lock = lock_with_kernel(b"retained-kernel");
+        let retained =
+            publish_test_generation(&store, parent.path(), &retained_lock, b"retained-kernel");
+        let candidate_lock = lock_with_kernel(b"candidate-kernel");
+        let candidate_source = parent.path().join("candidate");
+        fs::create_dir(&candidate_source).unwrap();
+        fs::set_permissions(&candidate_source, fs::Permissions::from_mode(0o700)).unwrap();
+        let cloud_hypervisor = admitted(&candidate_source.join("ch"), b"cloud-hypervisor", true);
+        let kernel = admitted(&candidate_source.join("kernel"), b"candidate-kernel", false);
+        let initramfs = admitted(&candidate_source.join("initramfs"), b"initramfs", false);
+        store
+            .publish_blob(
+                &cloud_hypervisor,
+                &candidate_lock.cloud_hypervisor.artifact,
+                true,
+            )
+            .unwrap();
+        store
+            .publish_blob(&kernel, &candidate_lock.kernel, false)
+            .unwrap();
+        store
+            .publish_blob(&initramfs, &candidate_lock.initramfs, false)
+            .unwrap();
+        let candidate = candidate_lock.generation().unwrap();
+
+        assert!(matches!(
+            store.publish_generation_with(
+                &candidate,
+                &candidate_lock,
+                |mut file, path, _bytes| {
+                    file.write_all(b"partial-manifest").unwrap();
+                    Err(RuntimeArtifactStoreError::Io {
+                        path: path.to_owned(),
+                        source: io::Error::from_raw_os_error(libc::ENOSPC),
+                    })
+                },
+            ),
+            Err(RuntimeArtifactStoreError::Io { source, .. })
+                if source.raw_os_error() == Some(libc::ENOSPC)
+        ));
+        assert!(
+            !store
+                .generations
+                .path()
+                .join(generation_manifest_name(&candidate))
+                .exists()
+        );
+        assert!(
+            directory_names(store.generations.path())
+                .iter()
+                .all(|name| !name.starts_with(".ingest-"))
+        );
+
+        let interrupted = format!(".ingest-{}", Uuid::new_v4());
+        let mut partial = store
+            .generations
+            .create_regular(Path::new(&interrupted), 0o400, true)
+            .unwrap()
+            .into_file();
+        partial.write_all(b"crash-residue").unwrap();
+        partial.sync_all().unwrap();
+        drop(partial);
+
+        let collected = store
+            .collect_unreferenced(&BTreeSet::from([retained]))
+            .unwrap();
+        assert_eq!(collected.removed_generations, Vec::<String>::new());
+        assert_eq!(
+            collected.removed_blobs,
+            vec![blob_name(&candidate_lock.kernel, false)]
+        );
+        assert_eq!(collected.removed_temporary_objects, 1);
+        assert_generation_intact(&store, &retained_lock);
+
+        publish_test_generation(&store, parent.path(), &candidate_lock, b"candidate-kernel");
+        assert_generation_intact(&store, &candidate_lock);
     }
 
     #[test]

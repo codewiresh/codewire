@@ -1083,7 +1083,7 @@ impl SupervisorCore {
         cleanup_unreferenced_root_generations(&paths, &retained).map_err(Into::into)
     }
 
-    fn collect_unreferenced_oci_content(&self) -> Result<(), SupervisorError> {
+    fn collect_unreferenced_oci_content(&mut self) -> Result<(), SupervisorError> {
         let retained = referenced_content_blobs(&self.state)?;
         let engine = PrivateRoot::open(&self.config.engine_root())?;
         let content = ContentStore::create(&engine)?;
@@ -1091,7 +1091,7 @@ impl SupervisorCore {
         Ok(())
     }
 
-    fn collect_unreferenced_runtime_artifacts(&self) -> Result<(), SupervisorError> {
+    fn collect_unreferenced_runtime_artifacts(&mut self) -> Result<(), SupervisorError> {
         let retained = referenced_artifact_generations(&self.state)?;
         let engine = PrivateRoot::open(&self.config.engine_root())?;
         let artifacts =
@@ -5665,6 +5665,21 @@ mod tests {
         let id = Uuid::parse_str("12345678-1234-5678-9abc-def012345678").unwrap();
         assert_eq!(allocate_vsock_cid(id), allocate_vsock_cid(id));
         assert!((3..u32::MAX).contains(&allocate_vsock_cid(id)));
+    }
+
+    #[test]
+    fn supervisor_lock_excludes_a_second_store_mutator_until_release() {
+        let parent = tempfile::tempdir().unwrap();
+        fs::set_permissions(parent.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let root = PrivateRoot::open(parent.path()).unwrap();
+        let first = SupervisorLock::acquire(&root).unwrap();
+
+        assert!(matches!(
+            SupervisorLock::acquire(&root),
+            Err(SupervisorError::AlreadyRunning)
+        ));
+        drop(first);
+        SupervisorLock::acquire(&root).unwrap();
     }
 
     #[test]
