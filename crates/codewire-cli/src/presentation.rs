@@ -268,6 +268,8 @@ pub struct CreateEnvironmentRequest {
     pub include_user_secrets: Option<bool>,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub isolation_tier: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_spec: Option<codewire_project::ProjectSpec>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -278,6 +280,8 @@ pub struct RepoEntry {
     pub branch: String,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub mount_path: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub revision: String,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -342,6 +346,8 @@ pub struct DetectionResult {
     pub cpu: String,
     pub memory: String,
     pub setup_notes: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_spec: Option<codewire_project::ProjectSpec>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
@@ -416,6 +422,7 @@ mod tests {
             repos: vec![RepoEntry {
                 url: "https://github.com/codewiresh/codewire".to_string(),
                 branch: "main".to_string(),
+                revision: String::new(),
                 mount_path: "/workspace/codewire".to_string(),
             }],
             env_vars: BTreeMap::from([("FOO".to_string(), "bar".to_string())]),

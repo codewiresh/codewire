@@ -30,7 +30,7 @@ _CREATE_ENVIRONMENT_DESCRIPTOR_FIELDS = {
     13: "install_command", 14: "startup_script", 15: "env_vars",
     16: "agents", 17: "install_agents", 18: "agent", 19: "agent_env",
     20: "secret_project", 21: "app_ports", 22: "include_org_secrets",
-    23: "include_user_secrets", 24: "isolation_tier",
+    23: "include_user_secrets", 24: "isolation_tier", 25: "project_spec",
 }
 
 
@@ -185,7 +185,13 @@ def _field_value(field: FieldDescriptor, value: Any) -> Any:
             "google.protobuf.Timestamp"
         ):
             return timestamp_string(value)
-        return proto_to_dict(value)
+        converted = proto_to_dict(value)
+        if field.message_type is not None and field.message_type.full_name == (
+            "codewire.v1.RepoEntry"
+        ):
+            if not converted.get("revision"):
+                converted.pop("revision", None)
+        return converted
     if field.type == FieldDescriptor.TYPE_BYTES:
         return bytes(value)
     if field.type == FieldDescriptor.TYPE_ENUM:

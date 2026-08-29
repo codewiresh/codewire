@@ -247,7 +247,7 @@ class ListEnvironmentsResponse(_message.Message):
     def __init__(self, environments: _Optional[_Iterable[_Union[Environment, _Mapping]]] = ..., next_page_token: _Optional[str] = ..., poll_interval: _Optional[_Union[datetime.timedelta, _duration_pb2.Duration, _Mapping]] = ...) -> None: ...
 
 class CreateEnvironmentRequest(_message.Message):
-    __slots__ = ("org_id", "preset_id", "name", "cpu_millicores", "memory_mb", "disk_gb", "ttl_seconds", "preset_slug", "repo_url", "branch", "repos", "image", "install_command", "startup_script", "env_vars", "agents", "install_agents", "agent", "agent_env", "secret_project", "app_ports", "include_org_secrets", "include_user_secrets", "isolation_tier")
+    __slots__ = ("org_id", "preset_id", "name", "cpu_millicores", "memory_mb", "disk_gb", "ttl_seconds", "preset_slug", "repo_url", "branch", "repos", "image", "install_command", "startup_script", "env_vars", "agents", "install_agents", "agent", "agent_env", "secret_project", "app_ports", "include_org_secrets", "include_user_secrets", "isolation_tier", "project_spec")
     class EnvVarsEntry(_message.Message):
         __slots__ = ("key", "value")
         KEY_FIELD_NUMBER: _ClassVar[int]
@@ -286,6 +286,7 @@ class CreateEnvironmentRequest(_message.Message):
     INCLUDE_ORG_SECRETS_FIELD_NUMBER: _ClassVar[int]
     INCLUDE_USER_SECRETS_FIELD_NUMBER: _ClassVar[int]
     ISOLATION_TIER_FIELD_NUMBER: _ClassVar[int]
+    PROJECT_SPEC_FIELD_NUMBER: _ClassVar[int]
     org_id: str
     preset_id: str
     name: str
@@ -310,7 +311,8 @@ class CreateEnvironmentRequest(_message.Message):
     include_org_secrets: bool
     include_user_secrets: bool
     isolation_tier: IsolationTier
-    def __init__(self, org_id: _Optional[str] = ..., preset_id: _Optional[str] = ..., name: _Optional[str] = ..., cpu_millicores: _Optional[int] = ..., memory_mb: _Optional[int] = ..., disk_gb: _Optional[int] = ..., ttl_seconds: _Optional[int] = ..., preset_slug: _Optional[str] = ..., repo_url: _Optional[str] = ..., branch: _Optional[str] = ..., repos: _Optional[_Iterable[_Union[_common_pb2.RepoEntry, _Mapping]]] = ..., image: _Optional[str] = ..., install_command: _Optional[str] = ..., startup_script: _Optional[str] = ..., env_vars: _Optional[_Mapping[str, str]] = ..., agents: _Optional[_Iterable[_Union[_common_pb2.SetupAgent, _Mapping]]] = ..., install_agents: _Optional[bool] = ..., agent: _Optional[str] = ..., agent_env: _Optional[_Mapping[str, str]] = ..., secret_project: _Optional[str] = ..., app_ports: _Optional[_Iterable[_Union[_common_pb2.AppPort, _Mapping]]] = ..., include_org_secrets: _Optional[bool] = ..., include_user_secrets: _Optional[bool] = ..., isolation_tier: _Optional[_Union[IsolationTier, str]] = ...) -> None: ...
+    project_spec: _common_pb2.ProjectSpec
+    def __init__(self, org_id: _Optional[str] = ..., preset_id: _Optional[str] = ..., name: _Optional[str] = ..., cpu_millicores: _Optional[int] = ..., memory_mb: _Optional[int] = ..., disk_gb: _Optional[int] = ..., ttl_seconds: _Optional[int] = ..., preset_slug: _Optional[str] = ..., repo_url: _Optional[str] = ..., branch: _Optional[str] = ..., repos: _Optional[_Iterable[_Union[_common_pb2.RepoEntry, _Mapping]]] = ..., image: _Optional[str] = ..., install_command: _Optional[str] = ..., startup_script: _Optional[str] = ..., env_vars: _Optional[_Mapping[str, str]] = ..., agents: _Optional[_Iterable[_Union[_common_pb2.SetupAgent, _Mapping]]] = ..., install_agents: _Optional[bool] = ..., agent: _Optional[str] = ..., agent_env: _Optional[_Mapping[str, str]] = ..., secret_project: _Optional[str] = ..., app_ports: _Optional[_Iterable[_Union[_common_pb2.AppPort, _Mapping]]] = ..., include_org_secrets: _Optional[bool] = ..., include_user_secrets: _Optional[bool] = ..., isolation_tier: _Optional[_Union[IsolationTier, str]] = ..., project_spec: _Optional[_Union[_common_pb2.ProjectSpec, _Mapping]] = ...) -> None: ...
 
 class CreateEnvironmentResponse(_message.Message):
     __slots__ = ("environment",)
@@ -858,7 +860,7 @@ class PrepareComplete(_message.Message):
     def __init__(self, draft: _Optional[_Union[CreateEnvironmentRequest, _Mapping]] = ..., detection: _Optional[_Union[DetectionResult, _Mapping]] = ..., resolved_preset: _Optional[_Union[_preset_pb2.Preset, _Mapping]] = ..., repo_config: _Optional[_Union[RepoConfig, _Mapping]] = ...) -> None: ...
 
 class DetectionResult(_message.Message):
-    __slots__ = ("project_type", "preset_slug", "preset_image", "install_command", "startup_script", "language", "framework", "suggested_name", "needs_docker", "has_compose", "app_ports", "agents", "install_agents", "secret_project", "include_org_secrets", "include_user_secrets", "cpu", "memory", "setup_notes")
+    __slots__ = ("project_type", "preset_slug", "preset_image", "install_command", "startup_script", "language", "framework", "suggested_name", "needs_docker", "has_compose", "app_ports", "agents", "install_agents", "secret_project", "include_org_secrets", "include_user_secrets", "cpu", "memory", "setup_notes", "project_spec")
     PROJECT_TYPE_FIELD_NUMBER: _ClassVar[int]
     PRESET_SLUG_FIELD_NUMBER: _ClassVar[int]
     PRESET_IMAGE_FIELD_NUMBER: _ClassVar[int]
@@ -878,6 +880,7 @@ class DetectionResult(_message.Message):
     CPU_FIELD_NUMBER: _ClassVar[int]
     MEMORY_FIELD_NUMBER: _ClassVar[int]
     SETUP_NOTES_FIELD_NUMBER: _ClassVar[int]
+    PROJECT_SPEC_FIELD_NUMBER: _ClassVar[int]
     project_type: str
     preset_slug: str
     preset_image: str
@@ -897,7 +900,8 @@ class DetectionResult(_message.Message):
     cpu: str
     memory: str
     setup_notes: str
-    def __init__(self, project_type: _Optional[str] = ..., preset_slug: _Optional[str] = ..., preset_image: _Optional[str] = ..., install_command: _Optional[str] = ..., startup_script: _Optional[str] = ..., language: _Optional[str] = ..., framework: _Optional[str] = ..., suggested_name: _Optional[str] = ..., needs_docker: _Optional[bool] = ..., has_compose: _Optional[bool] = ..., app_ports: _Optional[_Iterable[_Union[_common_pb2.AppPort, _Mapping]]] = ..., agents: _Optional[_Iterable[_Union[_common_pb2.SetupAgent, _Mapping]]] = ..., install_agents: _Optional[bool] = ..., secret_project: _Optional[str] = ..., include_org_secrets: _Optional[bool] = ..., include_user_secrets: _Optional[bool] = ..., cpu: _Optional[str] = ..., memory: _Optional[str] = ..., setup_notes: _Optional[str] = ...) -> None: ...
+    project_spec: _common_pb2.ProjectSpec
+    def __init__(self, project_type: _Optional[str] = ..., preset_slug: _Optional[str] = ..., preset_image: _Optional[str] = ..., install_command: _Optional[str] = ..., startup_script: _Optional[str] = ..., language: _Optional[str] = ..., framework: _Optional[str] = ..., suggested_name: _Optional[str] = ..., needs_docker: _Optional[bool] = ..., has_compose: _Optional[bool] = ..., app_ports: _Optional[_Iterable[_Union[_common_pb2.AppPort, _Mapping]]] = ..., agents: _Optional[_Iterable[_Union[_common_pb2.SetupAgent, _Mapping]]] = ..., install_agents: _Optional[bool] = ..., secret_project: _Optional[str] = ..., include_org_secrets: _Optional[bool] = ..., include_user_secrets: _Optional[bool] = ..., cpu: _Optional[str] = ..., memory: _Optional[str] = ..., setup_notes: _Optional[str] = ..., project_spec: _Optional[_Union[_common_pb2.ProjectSpec, _Mapping]] = ...) -> None: ...
 
 class RepoConfig(_message.Message):
     __slots__ = ("id", "org_id", "repo_url", "preset_id", "setup_config", "created_by", "updated_at")

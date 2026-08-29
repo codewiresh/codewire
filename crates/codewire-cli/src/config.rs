@@ -524,7 +524,7 @@ pub struct LocalMountConfig {
     pub readonly: Option<bool>,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Serialize, PartialEq, Eq)]
 pub struct CodewireConfig {
     #[serde(default)]
     pub preset: String,
@@ -538,9 +538,9 @@ pub struct CodewireConfig {
     pub secrets: Option<CodewireSecretsConfig>,
     #[serde(default)]
     pub env: BTreeMap<String, String>,
-    #[serde(default, deserialize_with = "deserialize_codewire_ports")]
+    #[serde(default)]
     pub ports: Vec<LocalPortConfig>,
-    #[serde(default, deserialize_with = "deserialize_codewire_mounts")]
+    #[serde(default)]
     pub mounts: Vec<LocalMountConfig>,
     #[serde(default)]
     pub cpu: i32,
@@ -578,275 +578,139 @@ pub struct CodewireSecretsConfig {
     pub project: String,
 }
 
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum CodewirePortInput {
-    Int(i32),
-    String(String),
-    Mapping {
-        #[serde(default)]
-        port: i32,
-        #[serde(default)]
-        host_port: i32,
-        #[serde(default)]
-        guest_port: i32,
-        #[serde(default)]
-        published: i32,
-        #[serde(default)]
-        target: i32,
-        #[serde(default)]
-        label: String,
-    },
-}
-
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum CodewireMountInput {
-    String(String),
-    Mapping {
-        #[serde(default)]
-        source: String,
-        #[serde(default)]
-        target: String,
-        #[serde(default)]
-        readonly: Option<bool>,
-    },
-}
-
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum CodewireAgentsInput {
-    String(String),
-    List(Vec<String>),
-    Mapping(CodewireAgentsConfigRaw),
-}
-
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum CodewireSecretsInput {
-    String(String),
-    Mapping(CodewireSecretsConfigRaw),
-}
-
-#[derive(Deserialize)]
-struct CodewireAgentsConfigRaw {
-    #[serde(default)]
-    install: Option<bool>,
-    #[serde(default)]
-    tools: Vec<String>,
-}
-
-#[derive(Deserialize)]
-struct CodewireSecretsConfigRaw {
-    #[serde(default)]
-    org: Option<bool>,
-    #[serde(default)]
-    user: Option<bool>,
-    #[serde(default)]
-    project: String,
-}
-
-impl<'de> Deserialize<'de> for CodewireAgentsConfig {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
+fn legacy_codewire_config(
+    document: codewire_project::ProjectDocument,
+) -> Result<CodewireConfig, codewire_project::ProjectError> {
+    let spec = document.spec;
+    if !spec.repositories.is_empty() {
+        return Err(codewire_project::ProjectError::InvalidField {
+            field: "repositories",
+            detail: "the legacy Docker/Lima backend does not support multiple repositories"
+                .to_string(),
+        });
+    }
+    if spec.working_directory != "/workspace" {
+        return Err(codewire_project::ProjectError::InvalidField {
+            field: "working_directory",
+            detail: "the legacy Docker/Lima backend does not support an explicit workdir"
+                .to_string(),
+        });
+    }
+    if !spec.skills.is_empty() {
+        return Err(codewire_project::ProjectError::InvalidField {
+            field: "skills",
+            detail: "skill snapshots require the native workspace runtime".to_string(),
+        });
+    }
+    if !spec.credentials.is_empty() {
+        return Err(codewire_project::ProjectError::InvalidField {
+            field: "credentials",
+            detail: "credential grants require the native workspace runtime".to_string(),
+        });
+    }
+    if spec.workspace_mode != codewire_project::WorkspaceMode::Auto
+        || document.local.direct_source.is_some()
     {
-        match CodewireAgentsInput::deserialize(deserializer)? {
-            CodewireAgentsInput::String(tool) => Ok(Self {
-                install: None,
-                tools: vec![tool.trim().to_string()],
-            }),
-            CodewireAgentsInput::List(tools) => Ok(Self {
-                install: None,
-                tools,
-            }),
-            CodewireAgentsInput::Mapping(config) => Ok(Self {
-                install: config.install,
-                tools: config.tools,
-            }),
-        }
+        return Err(codewire_project::ProjectError::InvalidField {
+            field: "workspace",
+            detail: "workspace modes require the native workspace runtime".to_string(),
+        });
     }
-}
-
-impl<'de> Deserialize<'de> for CodewireSecretsConfig {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
+    if !spec.agent_environment.is_empty() {
+        return Err(codewire_project::ProjectError::InvalidField {
+            field: "agent_env",
+            detail:
+                "agent-specific environment values are not supported by the legacy local backend"
+                    .to_string(),
+        });
+    }
+    if spec
+        .application_ports
+        .iter()
+        .any(|port| !port.access.is_empty())
     {
-        match CodewireSecretsInput::deserialize(deserializer)? {
-            CodewireSecretsInput::String(project) => Ok(Self {
-                org: None,
-                user: None,
-                project: project.trim().to_string(),
-            }),
-            CodewireSecretsInput::Mapping(config) => Ok(Self {
-                org: config.org,
-                user: config.user,
-                project: config.project,
-            }),
-        }
+        return Err(codewire_project::ProjectError::InvalidField {
+            field: "ports.access",
+            detail: "port access policy is not supported by the legacy local backend".to_string(),
+        });
     }
-}
 
-fn deserialize_codewire_ports<'de, D>(deserializer: D) -> Result<Vec<LocalPortConfig>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let inputs = Vec::<CodewirePortInput>::deserialize(deserializer)?;
-    inputs
+    let host_ports = document
+        .local
+        .host_ports
         .into_iter()
-        .map(codewire_port_input)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(serde::de::Error::custom)
-}
-
-fn deserialize_codewire_mounts<'de, D>(deserializer: D) -> Result<Vec<LocalMountConfig>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let inputs = Vec::<CodewireMountInput>::deserialize(deserializer)?;
-    inputs
+        .map(|binding| (binding.guest_port, binding.host_port))
+        .collect::<BTreeMap<_, _>>();
+    let ports = spec
+        .application_ports
         .into_iter()
-        .map(codewire_mount_input)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(serde::de::Error::custom)
-}
+        .map(|port| match host_ports.get(&port.port).copied() {
+            Some(host_port) if host_port != port.port => LocalPortConfig {
+                host_port: i32::from(host_port),
+                guest_port: i32::from(port.port),
+                label: port.label,
+                ..LocalPortConfig::default()
+            },
+            _ => LocalPortConfig {
+                port: i32::from(port.port),
+                label: port.label,
+                ..LocalPortConfig::default()
+            },
+        })
+        .collect();
+    let agents = (!spec.agents.is_empty()).then_some(CodewireAgentsConfig {
+        install: spec.agents.install,
+        tools: spec.agents.tools,
+    });
+    let secrets = (!spec.secrets.is_empty()).then_some(CodewireSecretsConfig {
+        org: spec.secrets.include_org,
+        user: spec.secrets.include_user,
+        project: spec.secrets.project,
+    });
 
-fn codewire_port_input(input: CodewirePortInput) -> Result<LocalPortConfig, String> {
-    match input {
-        CodewirePortInput::Int(port) => canonical_local_port(LocalPortConfig {
-            port,
-            ..LocalPortConfig::default()
-        }),
-        CodewirePortInput::String(raw) => parse_codewire_port_scalar(&raw),
-        CodewirePortInput::Mapping {
-            port,
-            host_port,
-            guest_port,
-            published,
-            target,
-            label,
-        } => canonical_local_port(LocalPortConfig {
-            port,
-            host_port: if published > 0 { published } else { host_port },
-            guest_port: if target > 0 { target } else { guest_port },
-            label,
-        }),
-    }
-}
-
-fn parse_codewire_port_scalar(raw: &str) -> Result<LocalPortConfig, String> {
-    let raw = raw.trim();
-    if raw.is_empty() {
-        return Err("parse port: empty value".to_string());
-    }
-    if let Ok(port) = raw.parse::<i32>() {
-        return canonical_local_port(LocalPortConfig {
-            port,
-            ..LocalPortConfig::default()
-        });
-    }
-    let Some((host, guest)) = raw.split_once(':') else {
-        return Err(format!("parse port {raw:?}: expected PORT or HOST:PORT"));
-    };
-    let host_port = host
-        .trim()
-        .parse::<i32>()
-        .map_err(|_| format!("parse port {raw:?}: invalid host port"))?;
-    let guest_port = guest
-        .trim()
-        .parse::<i32>()
-        .map_err(|_| format!("parse port {raw:?}: invalid guest port"))?;
-    canonical_local_port(LocalPortConfig {
-        host_port,
-        guest_port,
-        ..LocalPortConfig::default()
-    })
-}
-
-fn canonical_local_port(port: LocalPortConfig) -> Result<LocalPortConfig, String> {
-    let label = port.label.trim().to_string();
-    let has_port = port.port > 0;
-    let has_host_guest = port.host_port > 0 || port.guest_port > 0;
-    if has_port && has_host_guest {
-        return Err("parse port: use either port or host_port/guest_port".to_string());
-    }
-    if has_port {
-        return Ok(LocalPortConfig {
-            port: port.port,
-            label,
-            ..LocalPortConfig::default()
-        });
-    }
-    if port.host_port <= 0 || port.guest_port <= 0 {
-        return Err(
-            "parse port: host_port and guest_port must both be greater than zero".to_string(),
-        );
-    }
-    if port.host_port == port.guest_port {
-        return Ok(LocalPortConfig {
-            port: port.guest_port,
-            label,
-            ..LocalPortConfig::default()
-        });
-    }
-    Ok(LocalPortConfig {
-        host_port: port.host_port,
-        guest_port: port.guest_port,
-        label,
-        ..LocalPortConfig::default()
-    })
-}
-
-fn codewire_mount_input(input: CodewireMountInput) -> Result<LocalMountConfig, String> {
-    match input {
-        CodewireMountInput::String(source) => {
-            let source = source.trim().to_string();
-            if source.is_empty() {
-                return Err("parse mount: empty value".to_string());
-            }
-            Ok(LocalMountConfig {
-                source,
-                ..LocalMountConfig::default()
+    Ok(CodewireConfig {
+        preset: spec.preset,
+        image: spec.image,
+        install: spec.install_command,
+        startup: spec.startup_script,
+        secrets,
+        env: spec.environment,
+        ports,
+        mounts: document
+            .local
+            .mounts
+            .into_iter()
+            .map(|mount| LocalMountConfig {
+                source: mount.source,
+                target: mount.destination,
+                readonly: mount.read_only,
             })
-        }
-        CodewireMountInput::Mapping {
-            source,
-            target,
-            readonly,
-        } => {
-            let source = source.trim().to_string();
-            if source.is_empty() {
-                return Err("parse mount: source is required".to_string());
-            }
-            Ok(LocalMountConfig {
-                source,
-                target,
-                readonly,
-            })
-        }
-    }
+            .collect(),
+        cpu: spec.resources.cpu_millicores.unwrap_or_default() as i32,
+        memory: spec.resources.memory_mib.unwrap_or_default() as i32,
+        disk: spec.resources.disk_gib.unwrap_or_default() as i32,
+        agents,
+        agent: String::new(),
+        install_agents: spec.agents.install,
+        include_org_secrets: None,
+        include_user_secrets: None,
+    })
 }
 
 pub fn canonical_agent_id(raw: &str) -> String {
-    match raw.trim().to_ascii_lowercase().as_str() {
-        "claude" | "claude-code" => "claude-code".to_string(),
-        "codex" => "codex".to_string(),
-        "gemini" | "gemini-cli" => "gemini-cli".to_string(),
-        "kimi" | "kimi-code" => "kimi-code".to_string(),
-        "pi" | "pi-coding-agent" => "pi".to_string(),
-        "aider" => "aider".to_string(),
-        _ => raw.trim().to_string(),
-    }
+    codewire_project::canonical_agent_id(raw)
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| raw.trim())
+        .to_string()
 }
 
 pub fn display_agent_id(raw: &str) -> String {
-    match canonical_agent_id(raw).as_str() {
-        "claude-code" => "claude".to_string(),
-        "gemini-cli" => "gemini".to_string(),
-        "kimi-code" => "kimi".to_string(),
-        other => other.to_string(),
-    }
+    codewire_project::display_agent_id(raw)
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| raw.trim())
+        .to_string()
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
@@ -1300,14 +1164,28 @@ pub fn current_target(data_dir: &Path) -> Result<CurrentTargetConfig, ConfigErro
 }
 
 pub fn load_codewire_config(path: &Path) -> Result<CodewireConfig, ConfigError> {
+    let document = load_project_document(path)?;
+    legacy_codewire_config(document).map_err(|source| ConfigError::ParseCodewireConfig {
+        path: path.to_path_buf(),
+        source,
+    })
+}
+
+pub fn load_project_document(
+    path: &Path,
+) -> Result<codewire_project::ProjectDocument, ConfigError> {
     let data = fs::read_to_string(path).map_err(|source| ConfigError::ReadConfig {
         path: path.to_path_buf(),
         source,
     })?;
-    serde_yaml::from_str(&data).map_err(|source| ConfigError::ParseCodewireConfig {
+    codewire_project::parse_project_yaml(&data).map_err(|source| ConfigError::ParseCodewireConfig {
         path: path.to_path_buf(),
         source,
     })
+}
+
+pub fn parse_codewire_config(data: &str) -> Result<CodewireConfig, codewire_project::ProjectError> {
+    legacy_codewire_config(codewire_project::parse_project_yaml(data)?)
 }
 
 pub fn parse_local_spec_json(data: &[u8]) -> Result<CodewireConfig, ConfigError> {
@@ -1720,7 +1598,7 @@ pub enum ConfigError {
     ParseCodewireConfig {
         path: PathBuf,
         #[source]
-        source: serde_yaml::Error,
+        source: codewire_project::ProjectError,
     },
     #[error("parse local spec json: {source}")]
     ParseLocalSpec {
@@ -1929,7 +1807,7 @@ mounts:
             config.agents,
             Some(CodewireAgentsConfig {
                 install: Some(true),
-                tools: vec!["claude".to_string(), "gemini".to_string()],
+                tools: vec!["claude-code".to_string(), "gemini-cli".to_string()],
             })
         );
         assert_eq!(canonical_agent_id("gemini"), "gemini-cli");

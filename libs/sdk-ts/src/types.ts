@@ -21,13 +21,62 @@ interface AppPort {
 interface RepoEntryInput {
   branch?: string;
   mount_path?: string;
+  revision?: string;
   url?: string;
 }
 
 interface RepoEntry {
   branch?: string;
   mount_path?: string;
+  revision?: string;
   url: string;
+}
+
+export interface ProjectAgents {
+  install?: boolean;
+  tools?: string[];
+}
+
+export interface ProjectSkillSelection {
+  source: "repository" | "user";
+  reference: string;
+  agents?: string[];
+}
+
+export interface ProjectResources {
+  cpu_millicores?: number;
+  memory_mib?: number;
+  disk_gib?: number;
+}
+
+export interface ProjectSecretBindings {
+  project?: string;
+  include_org?: boolean;
+  include_user?: boolean;
+}
+
+export interface ProjectCredentialReference {
+  provider?: string;
+  account: string;
+}
+
+export interface ProjectSpec {
+  schema_version: number;
+  preset?: string;
+  image?: string;
+  repositories?: RepoEntry[];
+  working_directory: string;
+  install_command?: string;
+  startup_script?: string;
+  environment?: { [key: string]: string };
+  agents?: ProjectAgents;
+  agent_environment?: { [key: string]: string };
+  skills?: ProjectSkillSelection[];
+  application_ports?: AppPort[];
+  resources?: ProjectResources;
+  secrets?: ProjectSecretBindings;
+  credentials?: { [key: string]: ProjectCredentialReference };
+  workspace_mode: "auto" | "clone" | "direct";
 }
 
 interface SetupAgentInput {
@@ -52,6 +101,7 @@ interface SetupConfig {
   repo_url?: string;
   repos?: RepoEntry[];
   startup_script?: string;
+  project_spec?: ProjectSpec;
 }
 
 export interface EnvironmentPort {
@@ -205,6 +255,7 @@ export interface CreateEnvironmentRequest {
   secret_project?: string;
   startup_script?: string;
   ttl_seconds?: number | null;
+  project_spec?: ProjectSpec;
 }
 
 export interface CreateTemplateRequest {

@@ -37,6 +37,8 @@ A `(bin)` marker means the crate produces a service/app binary.
 | ----------------------- | -------------------------------------------------------------- | -------- |
 | `codewire-types`        | Pure shared types and functions (no tokio, WASM-safe).         | MIT             |
 | `codewire-client`       | Shared ergonomic Rust client over generated Connect-RPC stubs. | AGPL-3.0-only   |
+| `codewire-project`      | I/O-free versioned project parsing, validation, and normalization. | AGPL-3.0-only |
+| `codewire-project-proto` | Lossless adapters between project intent and the public protobuf contract. | AGPL-3.0-only |
 | `codewire-proto`        | Generated Connect-RPC contract types for the control-plane API. | AGPL-3.0-only   |
 | `codewire-gateway-proto`| Generated protobuf types for the gateway/daemon boundary.      | AGPL-3.0-only   |
 | `codewire-vmm-guest-probe` | Static guest init and daemon probe (bin) for the local microVM boundary. | AGPL-3.0-only |

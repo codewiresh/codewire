@@ -27,6 +27,8 @@ pub struct RepoEntry {
     pub branch: String,
     #[serde(default)]
     pub mount_path: String,
+    #[serde(default)]
+    pub revision: String,
 }
 
 /// Mirrors `worker.setupAgent`.
@@ -67,6 +69,8 @@ pub struct SetupConfig {
     pub include_org_secrets: Option<bool>,
     #[serde(default)]
     pub include_user_secrets: Option<bool>,
+    #[serde(default)]
+    pub project_spec: Option<codewire_project::ProjectSpec>,
 }
 
 impl SetupConfig {
@@ -80,6 +84,7 @@ impl SetupConfig {
                 url: self.repo_url.clone(),
                 branch: self.branch.clone(),
                 mount_path: String::new(),
+                revision: String::new(),
             }];
         }
         Vec::new()
@@ -141,10 +146,16 @@ pub async fn load_environment(pool: &PgPool, env_id: &str) -> anyhow::Result<Env
 
     let setup_json: Option<serde_json::Value> = row.try_get("setup_config")?;
     let setup_config = match setup_json {
-        Some(v) if !v.is_null() => Some(
-            serde_json::from_value(v)
-                .map_err(|e| anyhow::anyhow!("unmarshal setup_config: {e}"))?,
-        ),
+        Some(v) if !v.is_null() => {
+            let config: SetupConfig = serde_json::from_value(v)
+                .map_err(|e| anyhow::anyhow!("unmarshal setup_config: {e}"))?;
+            if let Some(project) = &config.project_spec {
+                project
+                    .validate()
+                    .map_err(|e| anyhow::anyhow!("invalid setup_config project_spec: {e}"))?;
+            }
+            Some(config)
+        }
         _ => None,
     };
 
@@ -227,6 +238,33 @@ mod tests {
         assert_eq!(sc.app_ports[0].port, 3000);
         assert_eq!(sc.include_org_secrets, Some(false));
         assert_eq!(sc.include_user_secrets, None);
+        assert!(sc.project_spec.is_none());
+    }
+
+    #[test]
+    fn setup_config_reads_versioned_project_specs_without_reinterpreting_old_rows() {
+        let json = r#"{
+            "repo_url": "https://github.com/org/app.git",
+            "project_spec": {
+                "schema_version": 1,
+                "working_directory": "/workspace/app",
+                "repositories": [{
+                    "source": "https://github.com/org/app.git",
+                    "revision": "deadbeef",
+                    "destination": "/workspace/app"
+                }],
+                "credentials": {
+                    "work": {"provider": "openai", "account": "acct-work"}
+                },
+                "workspace_mode": "clone"
+            }
+        }"#;
+        let setup: SetupConfig = serde_json::from_str(json).unwrap();
+        let project = setup.project_spec.expect("project spec");
+        project.validate().unwrap();
+        assert_eq!(project.schema_version, 1);
+        assert_eq!(project.repositories[0].revision, "deadbeef");
+        assert_eq!(project.credentials["work"].account, "acct-work");
     }
 
     #[test]

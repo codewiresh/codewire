@@ -18,7 +18,61 @@ type AppPort struct {
 type RepoEntry struct {
 	Branch    *string `json:"branch,omitempty"`
 	MountPath *string `json:"mount_path,omitempty"`
+	Revision  *string `json:"revision,omitempty"`
 	Url       string  `json:"url"`
+}
+
+// ProjectAgents configures canonical setup-time agent intent.
+type ProjectAgents struct {
+	Install *bool    `json:"install,omitempty"`
+	Tools   []string `json:"tools,omitempty"`
+}
+
+// ProjectSkillSelection selects a repository or named user skill snapshot.
+type ProjectSkillSelection struct {
+	Source    string   `json:"source"`
+	Reference string   `json:"reference"`
+	Agents    []string `json:"agents,omitempty"`
+}
+
+// ProjectResources configures portable workspace resource intent.
+type ProjectResources struct {
+	CpuMillicores *uint32 `json:"cpu_millicores,omitempty"`
+	MemoryMib     *uint64 `json:"memory_mib,omitempty"`
+	DiskGib       *uint64 `json:"disk_gib,omitempty"`
+}
+
+// ProjectSecretBindings selects workload-secret scopes without carrying values.
+type ProjectSecretBindings struct {
+	Project     string `json:"project,omitempty"`
+	IncludeOrg  *bool  `json:"include_org,omitempty"`
+	IncludeUser *bool  `json:"include_user,omitempty"`
+}
+
+// ProjectCredentialReference selects an opaque placement-owned account.
+type ProjectCredentialReference struct {
+	Provider string `json:"provider,omitempty"`
+	Account  string `json:"account"`
+}
+
+// ProjectSpec is the versioned placement-neutral codewire.yaml model.
+type ProjectSpec struct {
+	SchemaVersion    uint32                                `json:"schema_version"`
+	Preset           string                                `json:"preset,omitempty"`
+	Image            string                                `json:"image,omitempty"`
+	Repositories     []RepoEntry                           `json:"repositories,omitempty"`
+	WorkingDirectory string                                `json:"working_directory"`
+	InstallCommand   string                                `json:"install_command,omitempty"`
+	StartupScript    string                                `json:"startup_script,omitempty"`
+	Environment      map[string]string                     `json:"environment,omitempty"`
+	Agents           *ProjectAgents                        `json:"agents,omitempty"`
+	AgentEnvironment map[string]string                     `json:"agent_environment,omitempty"`
+	Skills           []ProjectSkillSelection               `json:"skills,omitempty"`
+	ApplicationPorts []AppPort                             `json:"application_ports,omitempty"`
+	Resources        *ProjectResources                     `json:"resources,omitempty"`
+	Secrets          *ProjectSecretBindings                `json:"secrets,omitempty"`
+	Credentials      map[string]ProjectCredentialReference `json:"credentials,omitempty"`
+	WorkspaceMode    string                                `json:"workspace_mode"`
 }
 
 // SetupConfig describes the setup configuration embedded in a preset.
@@ -36,6 +90,7 @@ type SetupConfig struct {
 	RepoUrl            *string            `json:"repo_url,omitempty"`
 	Repos              *[]RepoEntry       `json:"repos,omitempty"`
 	StartupScript      *string            `json:"startup_script,omitempty"`
+	ProjectSpec        *ProjectSpec       `json:"project_spec,omitempty"`
 }
 
 // EnvironmentData is the SDK-owned public representation of an environment.
@@ -152,6 +207,7 @@ type CreateEnvironmentBody struct {
 	SecretProject      *string            `json:"secret_project,omitempty"`
 	StartupScript      *string            `json:"startup_script,omitempty"`
 	TtlSeconds         *int64             `json:"ttl_seconds,omitempty"`
+	ProjectSpec        *ProjectSpec       `json:"project_spec,omitempty"`
 }
 
 // ExecBody configures command execution in an environment.

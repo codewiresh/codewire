@@ -307,6 +307,51 @@ func TestCreateEnvironmentRequestPreservesOwnedNestedValues(t *testing.T) {
 	}
 }
 
+func TestProjectSpecRoundTripPreservesOpaquePortableIntent(t *testing.T) {
+	revision := "deadbeef"
+	mountPath := "/workspace/app"
+	cpu := uint32(2000)
+	memory := uint64(16384)
+	disk := uint64(40)
+	includeOrg := false
+	project := &ProjectSpec{
+		SchemaVersion: 1,
+		Image:         "ghcr.io/example/workspace@sha256:abc",
+		Repositories: []RepoEntry{{
+			Url: "https://example.test/org/app.git", Revision: &revision, MountPath: &mountPath,
+		}},
+		WorkingDirectory: "/workspace/app",
+		Environment:      map[string]string{"RUST_LOG": "info"},
+		Agents:           &ProjectAgents{Tools: []string{"codex"}},
+		Skills:           []ProjectSkillSelection{{Source: "repository", Reference: ".agents/skills/rust", Agents: []string{"codex"}}},
+		ApplicationPorts: []AppPort{{Port: 8080, Label: "api"}},
+		Resources:        &ProjectResources{CpuMillicores: &cpu, MemoryMib: &memory, DiskGib: &disk},
+		Secrets:          &ProjectSecretBindings{Project: "development", IncludeOrg: &includeOrg},
+		Credentials: map[string]ProjectCredentialReference{
+			"work": {Provider: "openai", Account: "acct-work"},
+		},
+		WorkspaceMode: "clone",
+	}
+	protoProject, err := toProtoProjectSpec(project)
+	if err != nil {
+		t.Fatalf("encode project spec: %v", err)
+	}
+	got := fromProtoProjectSpec(protoProject)
+	if !reflect.DeepEqual(got, project) {
+		t.Errorf("project round trip mismatch (-want +got):\nwant: %#v\n got: %#v", project, got)
+	}
+	project.Environment["RUST_LOG"] = "changed"
+	project.Credentials["work"] = ProjectCredentialReference{Provider: "openai", Account: "changed"}
+	if protoProject.GetEnvironment()["RUST_LOG"] != "info" || protoProject.GetCredentials()["work"].GetAccount() != "acct-work" {
+		t.Errorf("protobuf request aliases caller-owned project values: %#v", protoProject)
+	}
+	invalid := *project
+	invalid.WorkspaceMode = "shared"
+	if _, err := toProtoProjectSpec(&invalid); err == nil {
+		t.Error("accepted an unknown project workspace mode")
+	}
+}
+
 func TestFromProtoSecretMetadataGolden(t *testing.T) {
 	got, err := fromProtoSecretMetadata(&codewirev1.SecretMetadata{
 		Key:       "DATABASE_URL",

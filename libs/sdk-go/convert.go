@@ -161,6 +161,22 @@ func copyBoolPointer(value *bool) *bool {
 	return &copy
 }
 
+func copyUint32Pointer(value *uint32) *uint32 {
+	if value == nil {
+		return nil
+	}
+	copy := *value
+	return &copy
+}
+
+func copyUint64Pointer(value *uint64) *uint64 {
+	if value == nil {
+		return nil
+	}
+	copy := *value
+	return &copy
+}
+
 func copyStringMap(value map[string]string) map[string]string {
 	if value == nil {
 		return nil
@@ -301,6 +317,7 @@ func fromProtoSetupConfig(config *codewirev1.SetupConfig) (*SetupConfig, error) 
 		RepoUrl:            stringPointer(config.GetRepoUrl()),
 		Repos:              fromProtoRepoEntries(config.GetRepos()),
 		StartupScript:      stringPointer(config.GetStartupScript()),
+		ProjectSpec:        fromProtoProjectSpec(config.GetProjectSpec()),
 	}
 	converted.Agents = fromProtoSetupAgents(config.GetAgents())
 	return converted, nil
@@ -345,7 +362,7 @@ func fromProtoRepoEntries(repos []*codewirev1.RepoEntry) *[]RepoEntry {
 	converted := make([]RepoEntry, 0, len(repos))
 	for _, repo := range repos {
 		converted = append(converted, RepoEntry{
-			Url: repo.GetUrl(), Branch: stringPointer(repo.GetBranch()), MountPath: stringPointer(repo.GetMountPath()),
+			Url: repo.GetUrl(), Branch: stringPointer(repo.GetBranch()), MountPath: stringPointer(repo.GetMountPath()), Revision: stringPointer(repo.GetRevision()),
 		})
 	}
 	return &converted
@@ -474,10 +491,168 @@ func toProtoRepoEntries(repos *[]RepoEntry) []*codewirev1.RepoEntry {
 	converted := make([]*codewirev1.RepoEntry, 0, len(*repos))
 	for _, repo := range *repos {
 		converted = append(converted, &codewirev1.RepoEntry{
-			Url: repo.Url, Branch: valueOrEmpty(repo.Branch), MountPath: valueOrEmpty(repo.MountPath),
+			Url: repo.Url, Branch: valueOrEmpty(repo.Branch), MountPath: valueOrEmpty(repo.MountPath), Revision: valueOrEmpty(repo.Revision),
 		})
 	}
 	return converted
+}
+
+func fromProtoProjectSpec(value *codewirev1.ProjectSpec) *ProjectSpec {
+	if value == nil {
+		return nil
+	}
+	result := &ProjectSpec{
+		SchemaVersion:    value.GetSchemaVersion(),
+		Preset:           value.GetPreset(),
+		Image:            value.GetImage(),
+		WorkingDirectory: value.GetWorkingDirectory(),
+		InstallCommand:   value.GetInstallCommand(),
+		StartupScript:    value.GetStartupScript(),
+		Environment:      copyStringMap(value.GetEnvironment()),
+		AgentEnvironment: copyStringMap(value.GetAgentEnvironment()),
+		WorkspaceMode:    projectWorkspaceMode(value.GetWorkspaceMode()),
+	}
+	if repositories := fromProtoRepoEntries(value.GetRepositories()); repositories != nil {
+		result.Repositories = *repositories
+	}
+	if agents := value.GetAgents(); agents != nil {
+		result.Agents = &ProjectAgents{Install: copyBoolPointer(agents.Install), Tools: append([]string(nil), agents.GetTools()...)}
+	}
+	for _, skill := range value.GetSkills() {
+		result.Skills = append(result.Skills, ProjectSkillSelection{
+			Source: projectSkillSource(skill.GetSource()), Reference: skill.GetReference(), Agents: append([]string(nil), skill.GetAgents()...),
+		})
+	}
+	if ports := fromProtoAppPorts(value.GetApplicationPorts()); ports != nil {
+		result.ApplicationPorts = *ports
+	}
+	if resources := value.GetResources(); resources != nil {
+		result.Resources = &ProjectResources{
+			CpuMillicores: copyUint32Pointer(resources.CpuMillicores),
+			MemoryMib:     copyUint64Pointer(resources.MemoryMib),
+			DiskGib:       copyUint64Pointer(resources.DiskGib),
+		}
+	}
+	if secrets := value.GetSecrets(); secrets != nil {
+		result.Secrets = &ProjectSecretBindings{
+			Project: secrets.GetProject(), IncludeOrg: copyBoolPointer(secrets.IncludeOrg), IncludeUser: copyBoolPointer(secrets.IncludeUser),
+		}
+	}
+	if len(value.GetCredentials()) > 0 {
+		result.Credentials = make(map[string]ProjectCredentialReference, len(value.GetCredentials()))
+		for alias, credential := range value.GetCredentials() {
+			result.Credentials[alias] = ProjectCredentialReference{Provider: credential.GetProvider(), Account: credential.GetAccount()}
+		}
+	}
+	return result
+}
+
+func toProtoProjectSpec(value *ProjectSpec) (*codewirev1.ProjectSpec, error) {
+	if value == nil {
+		return nil, nil
+	}
+	mode, err := toProtoProjectWorkspaceMode(value.WorkspaceMode)
+	if err != nil {
+		return nil, err
+	}
+	ports := value.ApplicationPorts
+	applicationPorts, err := toProtoAppPorts(&ports)
+	if err != nil {
+		return nil, err
+	}
+	result := &codewirev1.ProjectSpec{
+		SchemaVersion:    value.SchemaVersion,
+		Preset:           value.Preset,
+		Image:            value.Image,
+		WorkingDirectory: value.WorkingDirectory,
+		InstallCommand:   value.InstallCommand,
+		StartupScript:    value.StartupScript,
+		Environment:      copyStringMap(value.Environment),
+		AgentEnvironment: copyStringMap(value.AgentEnvironment),
+		ApplicationPorts: applicationPorts,
+		WorkspaceMode:    mode,
+	}
+	repositories := value.Repositories
+	result.Repositories = toProtoRepoEntries(&repositories)
+	if value.Agents != nil {
+		result.Agents = &codewirev1.ProjectAgents{Install: copyBoolPointer(value.Agents.Install), Tools: append([]string(nil), value.Agents.Tools...)}
+	}
+	for _, skill := range value.Skills {
+		source, err := toProtoProjectSkillSource(skill.Source)
+		if err != nil {
+			return nil, err
+		}
+		result.Skills = append(result.Skills, &codewirev1.ProjectSkillSelection{
+			Source: source, Reference: skill.Reference, Agents: append([]string(nil), skill.Agents...),
+		})
+	}
+	if value.Resources != nil {
+		result.Resources = &codewirev1.ProjectResources{
+			CpuMillicores: copyUint32Pointer(value.Resources.CpuMillicores),
+			MemoryMib:     copyUint64Pointer(value.Resources.MemoryMib),
+			DiskGib:       copyUint64Pointer(value.Resources.DiskGib),
+		}
+	}
+	if value.Secrets != nil {
+		result.Secrets = &codewirev1.ProjectSecretBindings{
+			Project: value.Secrets.Project, IncludeOrg: copyBoolPointer(value.Secrets.IncludeOrg), IncludeUser: copyBoolPointer(value.Secrets.IncludeUser),
+		}
+	}
+	if len(value.Credentials) > 0 {
+		result.Credentials = make(map[string]*codewirev1.ProjectCredentialReference, len(value.Credentials))
+		for alias, credential := range value.Credentials {
+			result.Credentials[alias] = &codewirev1.ProjectCredentialReference{Provider: credential.Provider, Account: credential.Account}
+		}
+	}
+	return result, nil
+}
+
+func projectWorkspaceMode(value codewirev1.ProjectWorkspaceMode) string {
+	switch value {
+	case codewirev1.ProjectWorkspaceMode_PROJECT_WORKSPACE_MODE_AUTO:
+		return "auto"
+	case codewirev1.ProjectWorkspaceMode_PROJECT_WORKSPACE_MODE_CLONE:
+		return "clone"
+	case codewirev1.ProjectWorkspaceMode_PROJECT_WORKSPACE_MODE_DIRECT:
+		return "direct"
+	default:
+		return "unspecified"
+	}
+}
+
+func toProtoProjectWorkspaceMode(value string) (codewirev1.ProjectWorkspaceMode, error) {
+	switch value {
+	case "auto":
+		return codewirev1.ProjectWorkspaceMode_PROJECT_WORKSPACE_MODE_AUTO, nil
+	case "clone":
+		return codewirev1.ProjectWorkspaceMode_PROJECT_WORKSPACE_MODE_CLONE, nil
+	case "direct":
+		return codewirev1.ProjectWorkspaceMode_PROJECT_WORKSPACE_MODE_DIRECT, nil
+	default:
+		return codewirev1.ProjectWorkspaceMode_PROJECT_WORKSPACE_MODE_UNSPECIFIED, fmt.Errorf("codewire: project workspace_mode must be auto, clone, or direct")
+	}
+}
+
+func projectSkillSource(value codewirev1.ProjectSkillSource) string {
+	switch value {
+	case codewirev1.ProjectSkillSource_PROJECT_SKILL_SOURCE_REPOSITORY:
+		return "repository"
+	case codewirev1.ProjectSkillSource_PROJECT_SKILL_SOURCE_USER:
+		return "user"
+	default:
+		return "unspecified"
+	}
+}
+
+func toProtoProjectSkillSource(value string) (codewirev1.ProjectSkillSource, error) {
+	switch value {
+	case "repository":
+		return codewirev1.ProjectSkillSource_PROJECT_SKILL_SOURCE_REPOSITORY, nil
+	case "user":
+		return codewirev1.ProjectSkillSource_PROJECT_SKILL_SOURCE_USER, nil
+	default:
+		return codewirev1.ProjectSkillSource_PROJECT_SKILL_SOURCE_UNSPECIFIED, fmt.Errorf("codewire: project skill source must be repository or user")
+	}
 }
 
 func createEnvironmentRequest(orgID string, body CreateEnvironmentBody) (*codewirev1.CreateEnvironmentRequest, error) {
@@ -512,6 +687,10 @@ func createEnvironmentRequest(orgID string, body CreateEnvironmentBody) (*codewi
 	if err != nil {
 		return nil, err
 	}
+	projectSpec, err := toProtoProjectSpec(body.ProjectSpec)
+	if err != nil {
+		return nil, err
+	}
 	return &codewirev1.CreateEnvironmentRequest{
 		OrgId: orgID, PresetId: copyStringPointer(body.PresetId), Name: copyStringPointer(body.Name),
 		CpuMillicores: cpu, MemoryMb: memory, DiskGb: disk, TtlSeconds: ttl,
@@ -523,6 +702,7 @@ func createEnvironmentRequest(orgID string, body CreateEnvironmentBody) (*codewi
 		SecretProject: valueOrEmpty(body.SecretProject), AppPorts: ports,
 		IncludeOrgSecrets: copyBoolPointer(body.IncludeOrgSecrets), IncludeUserSecrets: copyBoolPointer(body.IncludeUserSecrets),
 		IsolationTier: isolation,
+		ProjectSpec:   projectSpec,
 	}, nil
 }
 
@@ -959,8 +1139,11 @@ func ensureSecretProjectConverterCoverage() error {
 
 func ensureSetupConfigConverterCoverage() error {
 	messages := codewirev1.File_codewire_v1_common_proto.Messages()
+	if err := ensureProjectSpecConverterCoverage(); err != nil {
+		return err
+	}
 	if err := ensureDescriptorCoverage("setup config", messages.ByName("SetupConfig"), map[protoreflect.FieldNumber]protoreflect.Name{
-		1: "repo_url", 2: "branch", 3: "repos", 4: "install_command", 5: "startup_script", 6: "env_vars", 7: "agents", 8: "install_agents", 9: "agent", 10: "agent_env", 11: "app_ports", 12: "include_org_secrets", 13: "include_user_secrets",
+		1: "repo_url", 2: "branch", 3: "repos", 4: "install_command", 5: "startup_script", 6: "env_vars", 7: "agents", 8: "install_agents", 9: "agent", 10: "agent_env", 11: "app_ports", 12: "include_org_secrets", 13: "include_user_secrets", 14: "project_spec",
 	}); err != nil {
 		return err
 	}
@@ -970,11 +1153,34 @@ func ensureSetupConfigConverterCoverage() error {
 	if err := ensureDescriptorCoverage("app port", messages.ByName("AppPort"), map[protoreflect.FieldNumber]protoreflect.Name{1: "port", 2: "label", 3: "access"}); err != nil {
 		return err
 	}
-	return ensureDescriptorCoverage("repo entry", messages.ByName("RepoEntry"), map[protoreflect.FieldNumber]protoreflect.Name{1: "url", 2: "branch", 3: "mount_path"})
+	return ensureDescriptorCoverage("repo entry", messages.ByName("RepoEntry"), map[protoreflect.FieldNumber]protoreflect.Name{1: "url", 2: "branch", 3: "mount_path", 4: "revision"})
+}
+
+func ensureProjectSpecConverterCoverage() error {
+	messages := codewirev1.File_codewire_v1_common_proto.Messages()
+	for name, fields := range map[string]map[protoreflect.FieldNumber]protoreflect.Name{
+		"ProjectAgents":              {1: "install", 2: "tools"},
+		"ProjectSkillSelection":      {1: "source", 2: "reference", 3: "agents"},
+		"ProjectResources":           {1: "cpu_millicores", 2: "memory_mib", 3: "disk_gib"},
+		"ProjectSecretBindings":      {1: "project", 2: "include_org", 3: "include_user"},
+		"ProjectCredentialReference": {1: "provider", 2: "account"},
+		"ProjectSpec": {
+			1: "schema_version", 2: "preset", 3: "image", 4: "repositories", 5: "working_directory", 6: "install_command", 7: "startup_script", 8: "environment", 9: "agents", 10: "agent_environment", 11: "skills", 12: "application_ports", 13: "resources", 14: "secrets", 15: "credentials", 16: "workspace_mode",
+		},
+	} {
+		if err := ensureDescriptorCoverage("project "+name, messages.ByName(protoreflect.Name(name)), fields); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func ensureEnvironmentConverterCoverage() error {
 	environmentCoverageOnce.Do(func() {
+		if err := ensureProjectSpecConverterCoverage(); err != nil {
+			environmentCoverageErr = err
+			return
+		}
 		environmentCoverageErr = ensureDescriptorCoverage("environment", codewirev1.File_codewire_v1_environment_proto.Messages().ByName("Environment"), map[protoreflect.FieldNumber]protoreflect.Name{
 			1: "id", 2: "org_id", 3: "created_by", 4: "preset_id", 5: "type", 6: "name", 7: "state", 8: "desired_state", 9: "error_reason", 10: "recoverable", 11: "state_changed_at", 12: "retry_count", 13: "setup_phase", 14: "setup_complete", 15: "setup_error", 16: "ttl_seconds", 17: "shutdown_at", 18: "cpu_millicores", 19: "memory_mb", 20: "disk_gb", 21: "total_running_seconds", 22: "created_at", 23: "started_at", 24: "stopped_at", 25: "destroyed_at", 26: "protected", 27: "deletion_requested_at", 28: "deletion_grace_until", 29: "preset_name", 30: "network", 31: "ports", 32: "isolation_tier",
 		})
@@ -982,7 +1188,7 @@ func ensureEnvironmentConverterCoverage() error {
 			return
 		}
 		environmentCoverageErr = ensureDescriptorCoverage("create environment request", codewirev1.File_codewire_v1_environment_proto.Messages().ByName("CreateEnvironmentRequest"), map[protoreflect.FieldNumber]protoreflect.Name{
-			1: "org_id", 2: "preset_id", 3: "name", 4: "cpu_millicores", 5: "memory_mb", 6: "disk_gb", 7: "ttl_seconds", 8: "preset_slug", 9: "repo_url", 10: "branch", 11: "repos", 12: "image", 13: "install_command", 14: "startup_script", 15: "env_vars", 16: "agents", 17: "install_agents", 18: "agent", 19: "agent_env", 20: "secret_project", 21: "app_ports", 22: "include_org_secrets", 23: "include_user_secrets", 24: "isolation_tier",
+			1: "org_id", 2: "preset_id", 3: "name", 4: "cpu_millicores", 5: "memory_mb", 6: "disk_gb", 7: "ttl_seconds", 8: "preset_slug", 9: "repo_url", 10: "branch", 11: "repos", 12: "image", 13: "install_command", 14: "startup_script", 15: "env_vars", 16: "agents", 17: "install_agents", 18: "agent", 19: "agent_env", 20: "secret_project", 21: "app_ports", 22: "include_org_secrets", 23: "include_user_secrets", 24: "isolation_tier", 25: "project_spec",
 		})
 	})
 	return environmentCoverageErr

@@ -19,6 +19,8 @@ clap = { workspace = true }
 clap_complete = { workspace = true }
 codewire-client = { workspace = true }
 codewire-daemon = { workspace = true }
+codewire-project = { workspace = true }
+codewire-project-proto = { workspace = true }
 portable-pty = { workspace = true }
 rand = { workspace = true }
 reqwest = { workspace = true }

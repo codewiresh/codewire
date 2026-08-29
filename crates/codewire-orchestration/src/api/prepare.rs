@@ -9,7 +9,10 @@ use serde::Serialize;
 use sqlx::{PgPool, Row};
 
 use super::ApiState;
-use super::create::{CreateEnvironmentBody, SetupConfig, normalize_create_environment_body};
+use super::create::{
+    CreateEnvironmentBody, SetupConfig, apply_detection_defaults, apply_project_spec_defaults,
+    normalize_create_environment_body, synchronize_project_spec,
+};
 use super::detect::{
     self, DetectionResult, apply_detection_workspace_defaults, call_claude_detect,
     call_claude_detect_multi_repo, fetch_all_repo_contexts, fetch_repo_context,
@@ -278,6 +281,9 @@ fn should_analyze(analyze: Option<bool>, body: &CreateEnvironmentBody) -> bool {
 
 /// Mirrors `applySetupConfigDefaults` (saved repo config fills gaps).
 fn apply_setup_config_defaults(body: &mut CreateEnvironmentBody, cfg: SetupConfig) {
+    if body.project_spec.is_none() {
+        body.project_spec = cfg.project_spec;
+    }
     if body.repo_url.is_empty() && !cfg.repo_url.is_empty() {
         body.repo_url = cfg.repo_url;
     }
@@ -389,7 +395,9 @@ async fn prepare_draft(
     progress: &ProgressTx,
 ) -> Result<PrepareResponse, AppError> {
     let pool = &state.pool;
+    apply_project_spec_defaults(&mut body)?;
     normalize_create_environment_body(&mut body);
+    synchronize_project_spec(&mut body)?;
 
     let mut applied_repo_config: Option<RepoConfig> = None;
     if !body.repo_url.is_empty() {
@@ -415,7 +423,9 @@ async fn prepare_draft(
                 }
                 if let Ok(cfg) = serde_json::from_value::<SetupConfig>(rc.setup_config.clone()) {
                     apply_setup_config_defaults(&mut body, cfg);
+                    apply_project_spec_defaults(&mut body)?;
                     normalize_create_environment_body(&mut body);
+                    synchronize_project_spec(&mut body)?;
                 }
                 applied_repo_config = Some(rc);
             }
@@ -590,39 +600,7 @@ async fn prepare_draft(
         detected
     };
 
-    if body.install_command.is_empty() {
-        body.install_command = detection.install_command.clone();
-    }
-    if body.app_ports.is_empty() && !detection.app_ports.is_empty() {
-        body.app_ports = detection.app_ports.clone();
-    }
-    if body.agents.is_empty() && !detection.agents.is_empty() {
-        body.agents = detection.agents.clone();
-    }
-    if body.install_agents.is_none() {
-        body.install_agents = detection.install_agents;
-    }
-    if body.startup_script.is_empty() {
-        body.startup_script = detection.startup_script.clone();
-    }
-    if body.name.is_none() && !detection.suggested_name.is_empty() {
-        body.name = Some(detection.suggested_name.clone());
-    }
-    if body.secret_project.is_empty() && !detection.secret_project.is_empty() {
-        body.secret_project = detection.secret_project.clone();
-    }
-    if body.include_org_secrets.is_none() {
-        body.include_org_secrets = detection.include_org_secrets;
-    }
-    if body.include_user_secrets.is_none() {
-        body.include_user_secrets = detection.include_user_secrets;
-    }
-    if body.preset_slug.is_empty() && !detection.preset_slug.is_empty() {
-        body.preset_slug = detection.preset_slug.clone();
-    }
-    if body.image.is_empty() && !detection.preset_image.is_empty() {
-        body.image = detection.preset_image.clone();
-    }
+    apply_detection_defaults(&mut body, &detection)?;
 
     if !body.preset_slug.is_empty()
         && let Ok(p) = get_preset_by_slug_wire(pool, org_id, &body.preset_slug).await

@@ -7,7 +7,6 @@ use codewire_local_vmm::supervisor::{
     NativeRuntimeConfig, NativeSupervisorClient, inspect_orphans, serve_supervisor,
 };
 use serde::Serialize;
-use serde_yaml::Value as YamlValue;
 use uuid::Uuid;
 
 use super::*;
@@ -76,17 +75,17 @@ pub(crate) async fn create_native_environment(
     let source_path = std::fs::canonicalize(&requested_path)
         .with_context(|| format!("resolve native workspace {}", requested_path.display()))?;
     let yaml = native_codewire_yaml(&source_path, args.file.as_deref())?;
-    let vcpus = match args.cpu.as_deref().or(yaml.cpu.as_deref()) {
+    let vcpus = match args.cpu.as_deref() {
         Some(value) => parse_native_cpu(value)?,
-        None => DEFAULT_NATIVE_VCPUS,
+        None => yaml.vcpus.unwrap_or(DEFAULT_NATIVE_VCPUS),
     };
-    let memory_mib = match args.memory.as_deref().or(yaml.memory.as_deref()) {
+    let memory_mib = match args.memory.as_deref() {
         Some(value) => parse_native_memory(value)?,
-        None => DEFAULT_NATIVE_MEMORY_MIB,
+        None => yaml.memory_mib.unwrap_or(DEFAULT_NATIVE_MEMORY_MIB),
     };
-    let disk_bytes = match args.disk.as_deref().or(yaml.disk.as_deref()) {
+    let disk_bytes = match args.disk.as_deref() {
         Some(value) => parse_native_disk(value)?,
-        None => DEFAULT_NATIVE_DISK_BYTES,
+        None => yaml.disk_bytes.unwrap_or(DEFAULT_NATIVE_DISK_BYTES),
     };
     let mut client = native_client().await?;
     client
@@ -412,9 +411,9 @@ fn canonical_current_executable() -> anyhow::Result<PathBuf> {
 
 #[derive(Debug, Default)]
 struct NativeYamlResources {
-    cpu: Option<String>,
-    memory: Option<String>,
-    disk: Option<String>,
+    vcpus: Option<u32>,
+    memory_mib: Option<u32>,
+    disk_bytes: Option<u64>,
 }
 
 fn native_codewire_yaml(
@@ -438,38 +437,94 @@ fn native_codewire_yaml(
         }
         Err(error) => return Err(error).with_context(|| format!("read {}", path.display())),
     };
-    let value: YamlValue =
-        serde_yaml::from_str(&data).with_context(|| format!("parse {}", path.display()))?;
-    let mapping = value
-        .as_mapping()
-        .ok_or_else(|| anyhow::anyhow!("{} must contain a mapping", path.display()))?;
-    let mut resources = NativeYamlResources::default();
-    for (key, value) in mapping {
-        let key = key
-            .as_str()
-            .ok_or_else(|| anyhow::anyhow!("{} contains a non-string key", path.display()))?;
-        let quantity = yaml_quantity(value, key, &path)?;
-        match key {
-            "cpu" => resources.cpu = Some(quantity),
-            "memory" => resources.memory = Some(quantity),
-            "disk" => resources.disk = Some(quantity),
-            unsupported => anyhow::bail!(
-                "native local preview does not yet support codewire.yaml field {unsupported:?}"
-            ),
-        }
+    let document = codewire_project::parse_project_yaml(&data)
+        .with_context(|| format!("parse {}", path.display()))?;
+    let unsupported = native_unsupported_project_fields(&document);
+    if !unsupported.is_empty() {
+        anyhow::bail!(
+            "native local preview does not yet support codewire.yaml fields: {}",
+            unsupported.join(", ")
+        );
     }
-    Ok(resources)
+    let resources = document.spec.resources;
+    Ok(NativeYamlResources {
+        vcpus: resources
+            .cpu_millicores
+            .map(native_vcpus_from_millicores)
+            .transpose()?,
+        memory_mib: resources
+            .memory_mib
+            .map(native_memory_from_mib)
+            .transpose()?,
+        disk_bytes: resources.disk_gib.map(native_disk_from_gib).transpose()?,
+    })
 }
 
-fn yaml_quantity(value: &YamlValue, key: &str, path: &Path) -> anyhow::Result<String> {
-    match value {
-        YamlValue::String(value) if !value.trim().is_empty() => Ok(value.trim().to_owned()),
-        YamlValue::Number(value) => Ok(value.to_string()),
-        _ => anyhow::bail!(
-            "{} field {key:?} must be a number or resource quantity",
-            path.display()
-        ),
+fn native_unsupported_project_fields(
+    document: &codewire_project::ProjectDocument,
+) -> Vec<&'static str> {
+    let spec = &document.spec;
+    let mut unsupported = Vec::new();
+    if !spec.preset.is_empty() {
+        unsupported.push("preset");
     }
+    if !spec.image.is_empty() {
+        unsupported.push("image");
+    }
+    if !spec.repositories.is_empty() {
+        unsupported.push("repositories");
+    }
+    if spec.working_directory != "/workspace" {
+        unsupported.push("working_directory");
+    }
+    if !spec.install_command.is_empty() {
+        unsupported.push("install");
+    }
+    if !spec.startup_script.is_empty() {
+        unsupported.push("startup");
+    }
+    if !spec.environment.is_empty() {
+        unsupported.push("env");
+    }
+    if !spec.agents.is_empty() || !spec.agent_environment.is_empty() {
+        unsupported.push("agents");
+    }
+    if !spec.skills.is_empty() {
+        unsupported.push("skills");
+    }
+    if !spec.application_ports.is_empty() || !document.local.host_ports.is_empty() {
+        unsupported.push("ports");
+    }
+    if !spec.secrets.is_empty() {
+        unsupported.push("secrets");
+    }
+    if !spec.credentials.is_empty() {
+        unsupported.push("credentials");
+    }
+    if spec.workspace_mode != codewire_project::WorkspaceMode::Auto
+        || document.local.direct_source.is_some()
+    {
+        unsupported.push("workspace");
+    }
+    if !document.local.mounts.is_empty() {
+        unsupported.push("mounts");
+    }
+    unsupported
+}
+
+fn native_vcpus_from_millicores(millicores: u32) -> anyhow::Result<u32> {
+    if !millicores.is_multiple_of(1000) {
+        anyhow::bail!("native CPU must resolve to a whole core count");
+    }
+    parse_native_cpu(&(millicores / 1000).to_string())
+}
+
+fn native_memory_from_mib(memory_mib: u64) -> anyhow::Result<u32> {
+    parse_native_memory(&format!("{memory_mib}Mi"))
+}
+
+fn native_disk_from_gib(disk_gib: u64) -> anyhow::Result<u64> {
+    parse_native_disk(&format!("{disk_gib}Gi"))
 }
 
 fn reject_unsupported_native_create_options(args: &EnvCreateArgs) -> anyhow::Result<()> {
@@ -601,7 +656,21 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         std::fs::write(temp.path().join("codewire.yaml"), "image: workspace\n").unwrap();
         let error = native_codewire_yaml(temp.path(), None).unwrap_err();
-        assert!(error.to_string().contains("field \"image\""));
+        assert!(error.to_string().contains("fields: image"));
+    }
+
+    #[test]
+    fn native_yaml_uses_shared_resource_normalization() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            temp.path().join("codewire.yaml"),
+            "version: 1\ncpu: 2000m\nmemory: 16Gi\ndisk: 40Gi\n",
+        )
+        .unwrap();
+        let resources = native_codewire_yaml(temp.path(), None).unwrap();
+        assert_eq!(resources.vcpus, Some(2));
+        assert_eq!(resources.memory_mib, Some(16 * 1024));
+        assert_eq!(resources.disk_bytes, Some(40 * 1024 * 1024 * 1024));
     }
 
     #[test]

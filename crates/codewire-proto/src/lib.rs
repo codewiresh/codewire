@@ -45,7 +45,9 @@ mod tests {
         MESH_NODE_SERVICE_SERVICE_NAME, MeshInvite, MeshNetwork, MeshNode, MeshNodeEnrollment,
         ORGANIZATION_SERVICE_SERVICE_NAME, OrgMember, OrgRole, Organization,
         OrganizationDeletionState, PORT_SERVICE_SERVICE_NAME, PRESET_SERVICE_SERVICE_NAME, Port,
-        PortAccess, Preset, RedeemMeshNodeEnrollmentResponse, RepoEntry,
+        PortAccess, Preset, ProjectAgents, ProjectCredentialReference, ProjectResources,
+        ProjectSecretBindings, ProjectSkillSelection, ProjectSkillSource, ProjectSpec,
+        ProjectWorkspaceMode, RedeemMeshNodeEnrollmentResponse, RepoEntry,
         SECRET_SERVICE_SERVICE_NAME, SecretMetadata, SetProjectSecretRequest, SetSecretRequest,
         SetUserSecretRequest, SetupAgent, SetupConfig, UpdatePresetRequest,
     };
@@ -265,6 +267,70 @@ mod tests {
         assert_eq!(json["appPorts"][0]["port"], 8080);
         assert_eq!(json["includeOrgSecrets"], true);
         assert!(json.get("repo_url").is_none(), "unexpected JSON: {json}");
+    }
+
+    #[test]
+    fn portable_project_json_contains_only_opaque_placement_bindings() {
+        let project = ProjectSpec {
+            schema_version: 1,
+            repositories: vec![RepoEntry {
+                url: "https://git.example/org/app.git".into(),
+                revision: "deadbeef".into(),
+                mount_path: "/workspace/app".into(),
+                ..Default::default()
+            }],
+            working_directory: "/workspace/app".into(),
+            agents: Some(ProjectAgents {
+                tools: vec!["codex".into()],
+                ..Default::default()
+            })
+            .into(),
+            skills: vec![ProjectSkillSelection {
+                source: ProjectSkillSource::Repository.into(),
+                reference: ".agents/skills/rust".into(),
+                agents: vec!["codex".into()],
+                ..Default::default()
+            }],
+            resources: Some(ProjectResources {
+                cpu_millicores: Some(2_000),
+                memory_mib: Some(16_384),
+                ..Default::default()
+            })
+            .into(),
+            secrets: Some(ProjectSecretBindings {
+                project: "development".into(),
+                ..Default::default()
+            })
+            .into(),
+            credentials: [(
+                "work".into(),
+                ProjectCredentialReference {
+                    provider: "openai".into(),
+                    account: "acct-work".into(),
+                    ..Default::default()
+                },
+            )]
+            .into_iter()
+            .collect(),
+            workspace_mode: ProjectWorkspaceMode::Clone.into(),
+            ..Default::default()
+        };
+        let json = serde_json::to_value(project).expect("portable project proto JSON");
+        assert_eq!(json["schemaVersion"], 1);
+        assert_eq!(json["repositories"][0]["revision"], "deadbeef");
+        assert_eq!(json["credentials"]["work"]["account"], "acct-work");
+        let encoded = json.to_string();
+        for forbidden in [
+            "hostPath",
+            "credentialValue",
+            "providerToken",
+            "backendSocket",
+        ] {
+            assert!(
+                !encoded.contains(forbidden),
+                "unexpected {forbidden}: {encoded}"
+            );
+        }
     }
 
     #[test]

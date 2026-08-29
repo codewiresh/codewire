@@ -11,13 +11,15 @@ message ScaffoldPlaceholder {
   string note = 1;
 }
 
-// RepoEntry selects one repository and an optional branch during setup.
+// RepoEntry selects one repository and an optional branch or immutable
+// revision during setup. Branch and revision are mutually exclusive.
 message RepoEntry {
   string url = 1;
   string branch = 2;
   // Optional normalized checkout directory strictly below /workspace.
   // When omitted, the checkout directory remains /workspace/{repo_name}.
   string mount_path = 3;
+  string revision = 4;
 }
 
 // AppPort requests one application port during setup. Access is an extensible
@@ -48,4 +50,76 @@ message SetupConfig {
   repeated AppPort app_ports = 11;
   optional bool include_org_secrets = 12;
   optional bool include_user_secrets = 13;
+  // Canonical versioned project intent. Legacy fields above remain readable;
+  // new writers populate this field after normalization.
+  ProjectSpec project_spec = 14;
+}
+
+// ProjectWorkspaceMode selects portable workspace placement intent. DIRECT
+// never carries a host path; platform placement rejects it and local placement
+// resolves the separately supplied local path grant.
+enum ProjectWorkspaceMode {
+  PROJECT_WORKSPACE_MODE_UNSPECIFIED = 0;
+  PROJECT_WORKSPACE_MODE_AUTO = 1;
+  PROJECT_WORKSPACE_MODE_CLONE = 2;
+  PROJECT_WORKSPACE_MODE_DIRECT = 3;
+}
+
+enum ProjectSkillSource {
+  PROJECT_SKILL_SOURCE_UNSPECIFIED = 0;
+  PROJECT_SKILL_SOURCE_REPOSITORY = 1;
+  PROJECT_SKILL_SOURCE_USER = 2;
+}
+
+message ProjectAgents {
+  optional bool install = 1;
+  repeated string tools = 2;
+}
+
+message ProjectSkillSelection {
+  ProjectSkillSource source = 1;
+  string reference = 2;
+  repeated string agents = 3;
+}
+
+message ProjectResources {
+  optional uint32 cpu_millicores = 1;
+  optional uint64 memory_mib = 2;
+  optional uint64 disk_gib = 3;
+}
+
+message ProjectSecretBindings {
+  string project = 1;
+  optional bool include_org = 2;
+  optional bool include_user = 3;
+}
+
+// ProjectCredentialReference names an opaque account owned by the selected
+// placement. It is never a token, secret, credential payload, or host path.
+message ProjectCredentialReference {
+  string provider = 1;
+  string account = 2;
+}
+
+// ProjectSpec is the deterministic, placement-neutral codewire.yaml model.
+// It contains guest/workspace intent and opaque bindings only. Resolved host
+// paths, secret values, provider tokens, platform credentials, VMM state, and
+// backend sockets are intentionally absent.
+message ProjectSpec {
+  uint32 schema_version = 1;
+  string preset = 2;
+  string image = 3;
+  repeated RepoEntry repositories = 4;
+  string working_directory = 5;
+  string install_command = 6;
+  string startup_script = 7;
+  map<string, string> environment = 8;
+  ProjectAgents agents = 9;
+  map<string, string> agent_environment = 10;
+  repeated ProjectSkillSelection skills = 11;
+  repeated AppPort application_ports = 12;
+  ProjectResources resources = 13;
+  ProjectSecretBindings secrets = 14;
+  map<string, ProjectCredentialReference> credentials = 15;
+  ProjectWorkspaceMode workspace_mode = 16;
 }

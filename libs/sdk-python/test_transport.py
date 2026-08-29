@@ -355,7 +355,12 @@ class TransportTestCase(unittest.TestCase):
                             url="https://example.test/a",
                             branch="branch",
                             mount_path="/workspace/a",
-                        )
+                        ),
+                        RepoEntry(
+                            url="https://example.test/b",
+                            revision="deadbeef",
+                            mount_path="/workspace/b",
+                        ),
                     ],
                     install_command="pip install",
                     startup_script="python app.py",
@@ -383,7 +388,13 @@ class TransportTestCase(unittest.TestCase):
                     "url": "https://example.test/a",
                     "branch": "branch",
                     "mount_path": "/workspace/a",
-                }
+                },
+                {
+                    "url": "https://example.test/b",
+                    "branch": "",
+                    "mount_path": "/workspace/b",
+                    "revision": "deadbeef",
+                },
             ],
         )
         self.assertEqual(preset_value["install_command"], "pip install")

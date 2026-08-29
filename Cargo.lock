@@ -1177,6 +1177,8 @@ dependencies = [
  "codewire-client",
  "codewire-daemon",
  "codewire-local-vmm",
+ "codewire-project",
+ "codewire-project-proto",
  "portable-pty",
  "rand 0.8.6",
  "reqwest 0.12.28",
@@ -1510,6 +1512,8 @@ dependencies = [
  "codewire-admin-proto",
  "codewire-daemon",
  "codewire-gateway-proto",
+ "codewire-project",
+ "codewire-project-proto",
  "codewire-proto",
  "codewire-server-core",
  "connectrpc",
@@ -1551,6 +1555,25 @@ dependencies = [
  "url",
  "uuid",
  "zeroize",
+]
+
+[[package]]
+name = "codewire-project"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "codewire-project-proto"
+version = "0.1.0"
+dependencies = [
+ "codewire-project",
+ "codewire-proto",
+ "serde_json",
 ]
 
 [[package]]

@@ -301,6 +301,10 @@ fn proto_setup_config(config: SetupConfig) -> ProtoSetupConfig {
         app_ports: config.app_ports.into_iter().map(proto_app_port).collect(),
         include_org_secrets: config.include_org_secrets,
         include_user_secrets: config.include_user_secrets,
+        project_spec: config
+            .project_spec
+            .map(codewire_project_proto::to_proto)
+            .into(),
         ..Default::default()
     }
 }
@@ -310,6 +314,7 @@ fn proto_repo_entry(entry: RepoEntry) -> ProtoRepoEntry {
         url: entry.url,
         branch: entry.branch,
         mount_path: entry.mount_path,
+        revision: entry.revision,
         ..Default::default()
     }
 }

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
-from typing import BinaryIO
+from copy import deepcopy
+from typing import Any, BinaryIO
 
 from google.protobuf.duration_pb2 import Duration
+from google.protobuf.json_format import ParseDict
 
 from codewire._context import ConnectContext
 from codewire._convert import (
@@ -15,7 +17,7 @@ from codewire._convert import (
 from codewire.environment import Environment
 from codewire.environment_ops import exec_environment, list_environment_ports
 from codewire.files import Files
-from codewire.v1.common_pb2 import AppPort
+from codewire.v1.common_pb2 import AppPort, ProjectSpec
 from codewire.v1.environment_connect import EnvironmentServiceClientSync
 from codewire.v1.environment_pb2 import (
     CreateEnvironmentRequest,
@@ -65,6 +67,21 @@ def _isolation_tier(value: str | None) -> int:
     raise ValueError("codewire: isolation_tier must be standard or confidential")
 
 
+def _project_spec(value: dict[str, Any]) -> ProjectSpec:
+    """Convert the SDK's short enum spellings to the canonical proto shape."""
+    payload = deepcopy(value)
+    mode = payload.get("workspace_mode")
+    if mode not in ("auto", "clone", "direct"):
+        raise ValueError("codewire: project workspace_mode must be auto, clone, or direct")
+    payload["workspace_mode"] = f"PROJECT_WORKSPACE_MODE_{mode.upper()}"
+    for skill in payload.get("skills", []):
+        source = skill.get("source")
+        if source not in ("repository", "user"):
+            raise ValueError("codewire: project skill source must be repository or user")
+        skill["source"] = f"PROJECT_SKILL_SOURCE_{source.upper()}"
+    return ParseDict(payload, ProjectSpec())
+
+
 class Environments:
     def __init__(self, context: ConnectContext):
         self._context = context
@@ -95,6 +112,7 @@ class Environments:
         include_user_secrets: bool | None = None,
         isolation_tier: str | None = None,
         secret_project: str | None = None,
+        project_spec: dict[str, Any] | None = None,
         wait: bool = False,
         wait_timeout: float = 300,
     ) -> Environment:
@@ -155,6 +173,8 @@ class Environments:
             # the REST body. PresetService uses a distinct ``*_id`` field,
             # which is resolved in Templates instead.
             request.secret_project = secret_project
+        if project_spec is not None:
+            request.project_spec.CopyFrom(_project_spec(project_spec))
 
         response = self._context.unary(self._client.create_environment, request)
         if not response.HasField("environment"):

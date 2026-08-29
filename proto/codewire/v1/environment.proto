@@ -172,6 +172,9 @@ message CreateEnvironmentRequest {
   optional bool include_org_secrets = 22;
   optional bool include_user_secrets = 23;
   IsolationTier isolation_tier = 24;
+  // Canonical project intent. When set, it is validated and normalized before
+  // the legacy setup fields above are persisted or executed.
+  ProjectSpec project_spec = 25;
 }
 
 message CreateEnvironmentResponse {
@@ -551,6 +554,7 @@ message DetectionResult {
   string cpu = 17;
   string memory = 18;
   string setup_notes = 19;
+  ProjectSpec project_spec = 20;
 }
 
 message RepoConfig {

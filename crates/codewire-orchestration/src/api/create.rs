@@ -48,6 +48,8 @@ pub struct RepoEntry {
     pub branch: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub mount_path: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub revision: String,
 }
 
 /// Mirrors `api.AppPort`.
@@ -98,6 +100,9 @@ pub struct SetupConfig {
     pub include_org_secrets: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub include_user_secrets: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "Option<serde_json::Value>")]
+    pub project_spec: Option<codewire_project::ProjectSpec>,
 }
 
 /// Mirrors `api.CreateEnvironmentBody`.
@@ -149,6 +154,9 @@ pub struct CreateEnvironmentBody {
     pub include_user_secrets: Option<bool>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub isolation_tier: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "Option<serde_json::Value>")]
+    pub project_spec: Option<codewire_project::ProjectSpec>,
 }
 
 /// Mirrors `api.Preset` (the slice the create flow consumes; the full
@@ -187,8 +195,345 @@ pub fn normalize_create_environment_body(body: &mut CreateEnvironmentBody) {
             url: body.repo_url.clone(),
             branch: body.branch.clone(),
             mount_path: String::new(),
+            revision: String::new(),
         }];
     }
+}
+
+/// Validate portable project intent for platform placement, then expose fields
+/// understood by the existing setup worker through its compatibility view.
+/// Fields already supplied by the caller remain explicit placement overrides.
+pub(crate) fn apply_project_spec_defaults(body: &mut CreateEnvironmentBody) -> AppResult<()> {
+    let Some(spec) = body.project_spec.as_ref() else {
+        return Ok(());
+    };
+    spec.validate().map_err(invalid_project_spec)?;
+    if spec.workspace_mode == codewire_project::WorkspaceMode::Direct {
+        return Err(coded(
+            StatusCode::BAD_REQUEST,
+            "local_only_project_field",
+            "workspace.mode direct is local-only and is not supported by platform placement",
+        ));
+    }
+    if body.preset_slug.is_empty() && !spec.preset.is_empty() {
+        body.preset_slug = spec.preset.clone();
+    }
+    if body.image.is_empty() && !spec.image.is_empty() {
+        body.image = spec.image.clone();
+    }
+    if body.repos.is_empty() && !spec.repositories.is_empty() {
+        body.repos = spec
+            .repositories
+            .iter()
+            .map(|repository| RepoEntry {
+                url: repository.source.clone(),
+                branch: repository.branch.clone(),
+                mount_path: repository.destination.clone(),
+                revision: repository.revision.clone(),
+            })
+            .collect();
+    }
+    if body.install_command.is_empty() {
+        body.install_command = spec.install_command.clone();
+    }
+    if body.startup_script.is_empty() {
+        body.startup_script = spec.startup_script.clone();
+    }
+    if body.env_vars.is_empty() {
+        body.env_vars = spec.environment.clone();
+    }
+    if body.agents.is_empty() {
+        body.agents = spec
+            .agents
+            .tools
+            .iter()
+            .map(|agent_type| SetupAgent {
+                agent_type: agent_type.clone(),
+            })
+            .collect();
+    }
+    if body.install_agents.is_none() {
+        body.install_agents = spec.agents.install;
+    }
+    if body.agent_env.is_empty() {
+        body.agent_env = spec.agent_environment.clone();
+    }
+    if body.app_ports.is_empty() {
+        body.app_ports = spec
+            .application_ports
+            .iter()
+            .map(|port| AppPort {
+                port: i32::from(port.port),
+                label: port.label.clone(),
+                access: port.access.clone(),
+            })
+            .collect();
+    }
+    if body.cpu_millicores.is_none() {
+        body.cpu_millicores = spec.resources.cpu_millicores.map(|value| value as i32);
+    }
+    if body.memory_mb.is_none() {
+        body.memory_mb = spec.resources.memory_mib.map(|value| value as i32);
+    }
+    if body.disk_gb.is_none() {
+        body.disk_gb = spec.resources.disk_gib.map(|value| value as i32);
+    }
+    if body.secret_project.is_empty() {
+        body.secret_project = spec.secrets.project.clone();
+    }
+    if body.include_org_secrets.is_none() {
+        body.include_org_secrets = spec.secrets.include_org;
+    }
+    if body.include_user_secrets.is_none() {
+        body.include_user_secrets = spec.secrets.include_user;
+    }
+    Ok(())
+}
+
+/// Merge an in-repository project document beneath explicit request values.
+/// The repository list declared by codewire.yaml replaces the repository used
+/// to discover that file; extended fields that have no legacy compatibility
+/// field retain an explicit caller value when one was supplied.
+pub(crate) fn apply_detected_project_spec(
+    body: &mut CreateEnvironmentBody,
+    detected: Option<&codewire_project::ProjectSpec>,
+) -> AppResult<()> {
+    let Some(detected) = detected else {
+        return Ok(());
+    };
+    let current = body.project_spec.take();
+    let mut merged = detected.clone();
+    if let Some(current) = current {
+        if !current.skills.is_empty() {
+            merged.skills = current.skills;
+        }
+        if !current.credentials.is_empty() {
+            merged.credentials = current.credentials;
+        }
+        if current.workspace_mode != codewire_project::WorkspaceMode::Auto {
+            merged.workspace_mode = current.workspace_mode;
+        }
+        if current.working_directory != default_project_working_directory(&current.repositories) {
+            merged.working_directory = current.working_directory;
+        }
+    }
+    if !detected.repositories.is_empty() {
+        body.repo_url.clear();
+        body.branch.clear();
+        body.repos.clear();
+    }
+    body.project_spec = Some(merged);
+    apply_project_spec_defaults(body)?;
+    normalize_create_environment_body(body);
+    Ok(())
+}
+
+/// Rebuild the compatibility fields of the portable spec from the effective
+/// request while preserving fields owned only by the portable model. This
+/// prevents mixed old/new clients and detection defaults from persisting two
+/// conflicting descriptions of the workspace.
+pub(crate) fn synchronize_project_spec(body: &mut CreateEnvironmentBody) -> AppResult<()> {
+    let Some(mut spec) = body.project_spec.take() else {
+        return Ok(());
+    };
+    let prior_default = default_project_working_directory(&spec.repositories);
+    let custom_working_directory =
+        (spec.working_directory != prior_default).then(|| spec.working_directory.clone());
+
+    let destinations = codewire_project::validate_repository_destinations(
+        body.repos
+            .iter()
+            .map(|repository| (repository.url.as_str(), repository.mount_path.as_str())),
+    )
+    .map_err(invalid_project_spec)?;
+    spec.repositories = body
+        .repos
+        .iter()
+        .zip(destinations)
+        .map(
+            |(repository, destination)| codewire_project::RepositorySpec {
+                source: repository.url.clone(),
+                revision: repository.revision.clone(),
+                branch: repository.branch.clone(),
+                destination,
+            },
+        )
+        .collect();
+    spec.working_directory = custom_working_directory
+        .unwrap_or_else(|| default_project_working_directory(&spec.repositories));
+    spec.preset = body.preset_slug.clone();
+    spec.image = body.image.clone();
+    spec.install_command = body.install_command.clone();
+    spec.startup_script = body.startup_script.clone();
+    spec.environment = body.env_vars.clone();
+    spec.agents = codewire_project::AgentsSpec {
+        install: body.install_agents,
+        tools: body
+            .agents
+            .iter()
+            .map(|agent| agent.agent_type.clone())
+            .collect(),
+    };
+    spec.agent_environment = body.agent_env.clone();
+    spec.application_ports = body
+        .app_ports
+        .iter()
+        .map(|port| {
+            Ok(codewire_project::ApplicationPort {
+                port: u16::try_from(port.port).map_err(|_| {
+                    invalid_project_spec_error("ports.port", "must be from 1 through 65535")
+                })?,
+                label: port.label.clone(),
+                access: port.access.clone(),
+            })
+        })
+        .collect::<AppResult<Vec<_>>>()?;
+    spec.resources = codewire_project::ResourceSpec {
+        cpu_millicores: optional_u32(body.cpu_millicores, "cpu")?,
+        memory_mib: optional_u64(body.memory_mb, "memory")?,
+        disk_gib: optional_u64(body.disk_gb, "disk")?,
+    };
+    spec.secrets = codewire_project::SecretBindings {
+        project: body.secret_project.clone(),
+        include_org: body.include_org_secrets,
+        include_user: body.include_user_secrets,
+    };
+    spec.validate().map_err(invalid_project_spec)?;
+    body.project_spec = Some(spec);
+    Ok(())
+}
+
+pub(crate) fn ensure_synchronized_project_spec(body: &mut CreateEnvironmentBody) -> AppResult<()> {
+    body.project_spec
+        .get_or_insert_with(codewire_project::ProjectSpec::default);
+    synchronize_project_spec(body)
+}
+
+pub(crate) fn apply_detection_defaults(
+    body: &mut CreateEnvironmentBody,
+    detection: &DetectionResult,
+) -> AppResult<()> {
+    apply_detected_project_spec(body, detection.project_spec.as_ref())?;
+    if body.install_command.is_empty() {
+        body.install_command = detection.install_command.clone();
+    }
+    if body.app_ports.is_empty() && !detection.app_ports.is_empty() {
+        body.app_ports = detection.app_ports.clone();
+    }
+    if body.agents.is_empty() && !detection.agents.is_empty() {
+        body.agents = detection.agents.clone();
+    }
+    if body.install_agents.is_none() {
+        body.install_agents = detection.install_agents;
+    }
+    if body.startup_script.is_empty() {
+        body.startup_script = detection.startup_script.clone();
+    }
+    if body.name.is_none() && !detection.suggested_name.is_empty() {
+        body.name = Some(detection.suggested_name.clone());
+    }
+    if body.secret_project.is_empty() && !detection.secret_project.is_empty() {
+        body.secret_project = detection.secret_project.clone();
+    }
+    if body.include_org_secrets.is_none() {
+        body.include_org_secrets = detection.include_org_secrets;
+    }
+    if body.include_user_secrets.is_none() {
+        body.include_user_secrets = detection.include_user_secrets;
+    }
+    if body.preset_slug.is_empty() && !detection.preset_slug.is_empty() {
+        body.preset_slug = detection.preset_slug.clone();
+    }
+    if body.image.is_empty() && !detection.preset_image.is_empty() {
+        body.image = detection.preset_image.clone();
+    }
+    ensure_synchronized_project_spec(body)
+}
+
+fn default_project_working_directory(repositories: &[codewire_project::RepositorySpec]) -> String {
+    match repositories {
+        [repository] => repository.destination.clone(),
+        _ => "/workspace".to_string(),
+    }
+}
+
+fn optional_u32(value: Option<i32>, field: &'static str) -> AppResult<Option<u32>> {
+    value
+        .map(|value| {
+            u32::try_from(value)
+                .map_err(|_| invalid_project_spec_error(field, "must be greater than zero"))
+        })
+        .transpose()
+}
+
+fn optional_u64(value: Option<i32>, field: &'static str) -> AppResult<Option<u64>> {
+    value
+        .map(|value| {
+            u64::try_from(value)
+                .map_err(|_| invalid_project_spec_error(field, "must be greater than zero"))
+        })
+        .transpose()
+}
+
+fn invalid_project_spec_error(field: &'static str, detail: &'static str) -> AppError {
+    invalid_project_spec(codewire_project::ProjectError::InvalidField {
+        field,
+        detail: detail.to_string(),
+    })
+}
+
+fn ensure_current_platform_runtime_support(body: &CreateEnvironmentBody) -> AppResult<()> {
+    let spec = body.project_spec.as_ref();
+    let pending = if body
+        .repos
+        .iter()
+        .any(|repository| !repository.revision.is_empty())
+        || spec.is_some_and(|project| {
+            project
+                .repositories
+                .iter()
+                .any(|repository| !repository.revision.is_empty())
+        }) {
+        Some("repositories.revision")
+    } else {
+        let Some(spec) = spec else {
+            return Ok(());
+        };
+        if !spec.skills.is_empty() {
+            Some("skills")
+        } else if !spec.credentials.is_empty() {
+            Some("credentials")
+        } else {
+            let destinations =
+                codewire_project::validate_repository_destinations(spec.repositories.iter().map(
+                    |repository| (repository.source.as_str(), repository.destination.as_str()),
+                ))
+                .map_err(invalid_project_spec)?;
+            let current_working_directory = match destinations.as_slice() {
+                [destination] => destination.as_str(),
+                _ => "/workspace",
+            };
+            (spec.working_directory != current_working_directory).then_some("working_directory")
+        }
+    };
+    if let Some(field) = pending {
+        return Err(super::environments::coded_owned(
+            StatusCode::BAD_REQUEST,
+            "project_feature_pending",
+            format!(
+                "project field {field} is represented but is not executable by the current platform workspace runtime"
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn invalid_project_spec(error: codewire_project::ProjectError) -> AppError {
+    super::environments::coded_owned(
+        StatusCode::BAD_REQUEST,
+        "invalid_project_spec",
+        error.to_string(),
+    )
 }
 
 fn validate_environment_repository_mounts(repos: &[RepoEntry]) -> AppResult<()> {
@@ -634,7 +979,10 @@ pub(crate) async fn create_environment_core(
         Ok(true) => {}
     }
 
+    apply_project_spec_defaults(&mut body)?;
     normalize_create_environment_body(&mut body);
+    synchronize_project_spec(&mut body)?;
+    ensure_current_platform_runtime_support(&body)?;
     validate_environment_repository_mounts(&body.repos)?;
     // Reject explicit bad values before preset lookup or auto-creation can
     // write preset state. The effective values are checked again after
@@ -798,7 +1146,8 @@ pub(crate) async fn create_environment_core(
                 || !body.agent_env.is_empty()
                 || !body.app_ports.is_empty()
                 || body.include_org_secrets == Some(false)
-                || body.include_user_secrets == Some(false);
+                || body.include_user_secrets == Some(false)
+                || body.project_spec.is_some();
             let setup_cfg = needs_setup_cfg.then(|| SetupConfig {
                 repo_url: body.repo_url.clone(),
                 branch: body.branch.clone(),
@@ -813,6 +1162,7 @@ pub(crate) async fn create_environment_core(
                 app_ports: body.app_ports.clone(),
                 include_org_secrets: body.include_org_secrets,
                 include_user_secrets: body.include_user_secrets,
+                project_spec: body.project_spec.clone(),
             });
 
             // Resolve secret project name → ID if provided.
@@ -981,26 +1331,9 @@ async fn detect_preset_for_repo(
         detected
     };
 
-    if body.install_command.is_empty() {
-        body.install_command = result.install_command.clone();
-    }
-    if body.app_ports.is_empty() && !result.app_ports.is_empty() {
-        body.app_ports = result
-            .app_ports
-            .iter()
-            .map(|p| AppPort {
-                port: p.port,
-                label: p.label.clone(),
-                access: p.access.clone(),
-            })
-            .collect();
-    }
-    if body.startup_script.is_empty() {
-        body.startup_script = result.startup_script.clone();
-    }
-    if body.name.is_none() && !result.suggested_name.is_empty() {
-        body.name = Some(result.suggested_name.clone());
-    }
+    apply_detection_defaults(body, &result)?;
+    ensure_current_platform_runtime_support(body)?;
+    validate_environment_repository_mounts(&body.repos)?;
 
     // Resolve preset slug if detection returned one; fall back to the
     // detected (or default) image.
@@ -1074,11 +1407,13 @@ mod tests {
                 RepoEntry {
                     url: "https://github.com/x/y".into(),
                     branch: "dev".into(),
+                    revision: String::new(),
                     mount_path: "/workspace/api".into(),
                 },
                 RepoEntry {
                     url: "https://github.com/x/z".into(),
                     branch: String::new(),
+                    revision: String::new(),
                     mount_path: "/workspace/web".into(),
                 },
             ],
@@ -1122,6 +1457,213 @@ mod tests {
                 }
             ));
         }
+    }
+
+    #[test]
+    fn project_spec_defaults_are_explicit_and_direct_mode_is_typed_local_only() {
+        let spec = codewire_project::parse_project_yaml(
+            r#"
+image: ghcr.io/example/workspace:1
+repositories:
+  - source: https://example.test/org/app.git
+    branch: main
+    destination: /workspace/app
+install: cargo fetch
+startup: cargo test
+env: {RUST_LOG: info}
+agents: {install: false, tools: [claude]}
+ports: [{port: 8080, label: api, access: private}]
+cpu: 2
+memory: 4Gi
+disk: 40Gi
+secrets: {project: development, org: false, user: true}
+"#,
+        )
+        .unwrap()
+        .spec;
+        let mut body = CreateEnvironmentBody {
+            project_spec: Some(spec.clone()),
+            ..Default::default()
+        };
+
+        apply_project_spec_defaults(&mut body).unwrap();
+        assert_eq!(body.image, spec.image);
+        assert_eq!(body.repos[0].url, spec.repositories[0].source);
+        assert_eq!(body.repos[0].branch, "main");
+        assert_eq!(body.install_command, "cargo fetch");
+        assert_eq!(body.startup_script, "cargo test");
+        assert_eq!(body.env_vars["RUST_LOG"], "info");
+        assert_eq!(body.agents[0].agent_type, "claude-code");
+        assert_eq!(body.install_agents, Some(false));
+        assert_eq!(body.app_ports[0].port, 8080);
+        assert_eq!(body.cpu_millicores, Some(2000));
+        assert_eq!(body.memory_mb, Some(4096));
+        assert_eq!(body.disk_gb, Some(40));
+        assert_eq!(body.secret_project, "development");
+        assert_eq!(body.include_org_secrets, Some(false));
+        assert_eq!(body.include_user_secrets, Some(true));
+
+        let direct = codewire_project::parse_project_yaml("workspace: direct\n")
+            .unwrap()
+            .spec;
+        let error = apply_project_spec_defaults(&mut CreateEnvironmentBody {
+            project_spec: Some(direct),
+            ..Default::default()
+        })
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            AppError::Coded {
+                code: "local_only_project_field",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn detected_project_spec_and_explicit_request_resolve_to_one_canonical_plan() {
+        let requested = codewire_project::parse_project_yaml(
+            "repositories: [{source: https://example.test/org/discovery.git}]\ninstall: caller-install\n",
+        )
+        .unwrap()
+        .spec;
+        let detected = codewire_project::parse_project_yaml(
+            r#"
+image: ghcr.io/example/workspace@sha256:abc
+repositories:
+  - source: https://example.test/org/api.git
+    destination: /workspace/api
+skills: [.agents/skills/rust]
+cpu: 2
+memory: 16Gi
+workspace: clone
+"#,
+        )
+        .unwrap()
+        .spec;
+        let mut body = CreateEnvironmentBody {
+            repo_url: "https://example.test/org/discovery.git".to_string(),
+            repos: vec![RepoEntry {
+                url: "https://example.test/org/discovery.git".to_string(),
+                ..Default::default()
+            }],
+            install_command: "caller-install".to_string(),
+            project_spec: Some(requested),
+            ..Default::default()
+        };
+        apply_detection_defaults(
+            &mut body,
+            &DetectionResult {
+                preset_image: detected.image.clone(),
+                install_command: "detected-install".to_string(),
+                project_spec: Some(detected),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(body.repo_url, "https://example.test/org/api.git");
+        assert_eq!(body.repos[0].mount_path, "/workspace/api");
+        assert_eq!(body.install_command, "caller-install");
+        assert_eq!(body.cpu_millicores, Some(2000));
+        assert_eq!(body.memory_mb, Some(16 * 1024));
+        let project = body.project_spec.expect("synchronized project spec");
+        assert_eq!(project.repositories[0].source, body.repos[0].url);
+        assert_eq!(project.working_directory, "/workspace/api");
+        assert_eq!(project.install_command, body.install_command);
+        assert_eq!(project.skills[0].reference, ".agents/skills/rust");
+        assert_eq!(
+            project.workspace_mode,
+            codewire_project::WorkspaceMode::Clone
+        );
+        project.validate().unwrap();
+    }
+
+    #[test]
+    fn legacy_detection_builds_a_portable_spec_and_mixed_fields_cannot_diverge() {
+        let mut body = CreateEnvironmentBody {
+            repo_url: "codewiresh/codewire".to_string(),
+            repos: vec![RepoEntry {
+                url: "codewiresh/codewire".to_string(),
+                ..Default::default()
+            }],
+            image: "ghcr.io/example/explicit:1".to_string(),
+            project_spec: Some(codewire_project::ProjectSpec {
+                image: "ghcr.io/example/stale:1".to_string(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        apply_project_spec_defaults(&mut body).unwrap();
+        normalize_create_environment_body(&mut body);
+        synchronize_project_spec(&mut body).unwrap();
+        assert_eq!(
+            body.project_spec.as_ref().unwrap().image,
+            "ghcr.io/example/explicit:1"
+        );
+
+        body.project_spec = None;
+        apply_detection_defaults(
+            &mut body,
+            &DetectionResult {
+                startup_script: "cargo test".to_string(),
+                agents: vec![SetupAgent {
+                    agent_type: "codex".to_string(),
+                }],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let project = body.project_spec.expect("legacy request migration spec");
+        assert_eq!(project.repositories[0].source, "codewiresh/codewire");
+        assert_eq!(project.working_directory, "/workspace/codewire");
+        assert_eq!(project.startup_script, "cargo test");
+        assert_eq!(project.agents.tools, ["codex"]);
+        project.validate().unwrap();
+    }
+
+    #[test]
+    fn represented_project_features_fail_closed_until_the_platform_runtime_owns_them() {
+        for yaml in [
+            "repositories: [{source: https://example.test/app.git, revision: deadbeef}]\n",
+            "skills: [.agents/skills/rust]\n",
+            "credentials: {work: {provider: openai, account: acct-work}}\n",
+            "repositories: [{source: https://example.test/app.git}]\nworking_directory: /workspace/app/subdir\n",
+        ] {
+            let spec = codewire_project::parse_project_yaml(yaml).unwrap().spec;
+            let error = ensure_current_platform_runtime_support(&CreateEnvironmentBody {
+                project_spec: Some(spec),
+                ..Default::default()
+            })
+            .unwrap_err();
+            assert!(
+                matches!(
+                    error,
+                    AppError::Coded {
+                        code: "project_feature_pending",
+                        ..
+                    }
+                ),
+                "unexpected result for {yaml:?}: {error}"
+            );
+        }
+
+        let error = ensure_current_platform_runtime_support(&CreateEnvironmentBody {
+            repos: vec![RepoEntry {
+                url: "https://example.test/app.git".to_string(),
+                revision: "deadbeef".to_string(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            AppError::Coded {
+                code: "project_feature_pending",
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -1356,6 +1898,7 @@ mod tests {
             repos: vec![RepoEntry {
                 url: "https://github.com/a/b".into(),
                 branch: String::new(),
+                revision: String::new(),
                 mount_path: String::new(),
             }],
             install_command: "npm install".into(),
@@ -1371,6 +1914,37 @@ mod tests {
         assert_eq!(v["install_command"], "npm install");
         assert_eq!(v["repos"][0]["url"], "https://github.com/a/b");
         assert!(v["repos"][0].get("branch").is_none());
+    }
+
+    #[test]
+    fn setup_config_persists_the_versioned_project_spec_without_values() {
+        let project_spec = codewire_project::parse_project_yaml(
+            r#"
+repositories:
+  - source: https://example.test/org/app.git
+    revision: deadbeef
+credentials:
+  work: {provider: openai, account: acct-work}
+workspace: clone
+"#,
+        )
+        .unwrap()
+        .spec;
+        let value = serde_json::to_value(SetupConfig {
+            project_spec: Some(project_spec),
+            ..Default::default()
+        })
+        .unwrap();
+
+        assert_eq!(value["project_spec"]["schema_version"], 1);
+        assert_eq!(
+            value["project_spec"]["credentials"]["work"]["account"],
+            "acct-work"
+        );
+        let encoded = value.to_string();
+        for forbidden in ["host_path", "token", "secret_value", "backend_socket"] {
+            assert!(!encoded.contains(forbidden), "unexpected {forbidden}");
+        }
     }
 
     #[test]

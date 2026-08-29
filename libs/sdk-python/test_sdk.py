@@ -25,6 +25,11 @@ from codewire.v1.api_key_pb2 import (
     ListApiKeysResponse,
     UpdateApiKeyResponse,
 )
+from codewire.v1.common_pb2 import (
+    ProjectSkillSource,
+    ProjectSpec,
+    ProjectWorkspaceMode,
+)
 from codewire.v1.environment_connect import EnvironmentServiceWSGIApplication
 from codewire.v1.environment_pb2 import (
     CreateEnvironmentResponse,
@@ -273,6 +278,7 @@ class ControlPlaneFixture:
     env_get_sequence: list[dict] | None = None
     last_create_secret_project = ""
     last_create_isolation_tier = IsolationTier.ISOLATION_TIER_UNSPECIFIED
+    last_create_project_spec: ProjectSpec | None = None
 
     def __getattr__(self, name):
         def unimplemented(*args, **kwargs):
@@ -305,6 +311,9 @@ class ControlPlaneFixture:
         self._require_auth(ctx)
         type(self).last_create_secret_project = request.secret_project
         type(self).last_create_isolation_tier = request.isolation_tier
+        type(self).last_create_project_spec = ProjectSpec()
+        if request.HasField("project_spec"):
+            type(self).last_create_project_spec.CopyFrom(request.project_spec)
         return CreateEnvironmentResponse(environment=_environment())
 
     def get_environment(self, request, ctx):
@@ -645,6 +654,42 @@ class SDKTestCase(unittest.TestCase):
     def test_environment_create_rejects_unknown_isolation_tier(self):
         with self.assertRaisesRegex(ValueError, "isolation_tier"):
             self.cw.environments.create(isolation_tier="container")
+
+    def test_environment_create_carries_portable_project_spec(self):
+        self.cw.environments.create(
+            template_slug="python",
+            project_spec={
+                "schema_version": 1,
+                "working_directory": "/workspace/app",
+                "repositories": [{
+                    "url": "https://example.test/org/app.git",
+                    "revision": "deadbeef",
+                    "mount_path": "/workspace/app",
+                }],
+                "skills": [{
+                    "source": "user",
+                    "reference": "personal",
+                    "agents": ["codex"],
+                }],
+                "resources": {"cpu_millicores": 2000, "memory_mib": 16384},
+                "credentials": {
+                    "work": {"provider": "openai", "account": "acct-work"}
+                },
+                "workspace_mode": "clone",
+            },
+        )
+        project = ControlPlaneFixture.last_create_project_spec
+        self.assertIsNotNone(project)
+        self.assertEqual(
+            project.workspace_mode,
+            ProjectWorkspaceMode.PROJECT_WORKSPACE_MODE_CLONE,
+        )
+        self.assertEqual(
+            project.skills[0].source,
+            ProjectSkillSource.PROJECT_SKILL_SOURCE_USER,
+        )
+        self.assertEqual(project.repositories[0].revision, "deadbeef")
+        self.assertEqual(project.credentials["work"].account, "acct-work")
 
     def test_environment_get(self):
         env = self.cw.environments.get("env_123")

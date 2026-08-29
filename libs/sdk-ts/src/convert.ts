@@ -5,7 +5,19 @@ import {
   type CreateApiKeyResponse as ProtoCreateApiKeyResponse,
 } from "@codewire/proto-ts/gen/codewire/v1/api_key_pb";
 import {
+  AppPortSchema,
+  ProjectAgentsSchema,
+  ProjectCredentialReferenceSchema,
+  ProjectResourcesSchema,
+  ProjectSecretBindingsSchema,
+  ProjectSkillSelectionSchema,
+  ProjectSkillSource,
+  ProjectSpecSchema,
+  ProjectWorkspaceMode,
+  RepoEntrySchema,
+  SetupConfigSchema,
   type AppPort as ProtoAppPort,
+  type ProjectSpec as ProtoProjectSpec,
   type RepoEntry as ProtoRepoEntry,
   type SetupAgent as ProtoSetupAgent,
   type SetupConfig as ProtoSetupConfig,
@@ -57,6 +69,8 @@ import type {
   FileEntry,
   IsolationTier,
   ListEnvironmentsParams,
+  ProjectSkillSelection,
+  ProjectSpec,
   SecretMetadata,
   SecretProject,
   TemplateData,
@@ -104,6 +118,22 @@ function int32(
     throw new Error(`codewire: ${name} is outside the API integer range`);
   }
   return value;
+}
+
+function uint32(name: string, value: number | undefined): number | undefined {
+  if (value === undefined) return undefined;
+  if (!Number.isInteger(value) || value < 0 || value > 4_294_967_295) {
+    throw new Error(`codewire: ${name} is outside the API unsigned integer range`);
+  }
+  return value;
+}
+
+function uint64(name: string, value: number | undefined): bigint | undefined {
+  if (value === undefined) return undefined;
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new Error(`codewire: ${name} is outside the API safe integer range`);
+  }
+  return BigInt(value);
 }
 
 function mapEnvironmentState(state: EnvironmentState): string {
@@ -290,12 +320,13 @@ function fromProtoAppPorts(
 
 function fromProtoRepos(
   value: ProtoRepoEntry[],
-): Array<{ branch?: string; mount_path?: string; url: string }> | undefined {
+): Array<{ branch?: string; mount_path?: string; revision?: string; url: string }> | undefined {
   return value.length === 0
     ? undefined
     : value.map((repo) => ({
         branch: optionalString(repo.branch),
         mount_path: optionalString(repo.mountPath),
+        revision: optionalString(repo.revision),
         url: repo.url,
       }));
 }
@@ -318,6 +349,7 @@ function fromProtoSetupConfig(
     repo_url: optionalString(value.repoUrl),
     repos: fromProtoRepos(value.repos),
     startup_script: optionalString(value.startupScript),
+    project_spec: fromProtoProjectSpec(value.projectSpec),
   };
 }
 
@@ -336,13 +368,131 @@ function toProtoAppPorts(
 }
 
 function toProtoRepos(
-  value: Array<{ branch?: string; mount_path?: string; url?: string }> | undefined,
+  value: Array<{ branch?: string; mount_path?: string; revision?: string; url?: string }> | undefined,
 ) {
   return (value ?? []).map((repo) => ({
     branch: repo.branch ?? "",
     mountPath: repo.mount_path ?? "",
+    revision: repo.revision ?? "",
     url: repo.url ?? "",
   }));
+}
+
+function fromProtoProjectSpec(value: ProtoProjectSpec | undefined): ProjectSpec | undefined {
+  if (!value) return undefined;
+  const workspaceMode = (() => {
+    switch (value.workspaceMode) {
+      case ProjectWorkspaceMode.AUTO: return "auto" as const;
+      case ProjectWorkspaceMode.CLONE: return "clone" as const;
+      case ProjectWorkspaceMode.DIRECT: return "direct" as const;
+      default: throw new Error("codewire: project workspace mode is unspecified");
+    }
+  })();
+  return {
+    schema_version: value.schemaVersion,
+    preset: optionalString(value.preset),
+    image: optionalString(value.image),
+    repositories: fromProtoRepos(value.repositories),
+    working_directory: value.workingDirectory,
+    install_command: optionalString(value.installCommand),
+    startup_script: optionalString(value.startupScript),
+    environment: copyStringMap(value.environment),
+    agents: value.agents
+      ? { install: value.agents.install, tools: value.agents.tools.length ? [...value.agents.tools] : undefined }
+      : undefined,
+    agent_environment: copyStringMap(value.agentEnvironment),
+    skills: value.skills.length
+      ? value.skills.map((skill) => ({
+          source: skill.source === ProjectSkillSource.REPOSITORY
+            ? "repository" as const
+            : skill.source === ProjectSkillSource.USER
+            ? "user" as const
+            : (() => { throw new Error("codewire: project skill source is unspecified"); })(),
+          reference: skill.reference,
+          agents: skill.agents.length ? [...skill.agents] : undefined,
+        }))
+      : undefined,
+    application_ports: fromProtoAppPorts(value.applicationPorts),
+    resources: value.resources
+      ? {
+          cpu_millicores: value.resources.cpuMillicores,
+          memory_mib: value.resources.memoryMib === undefined ? undefined : Number(value.resources.memoryMib),
+          disk_gib: value.resources.diskGib === undefined ? undefined : Number(value.resources.diskGib),
+        }
+      : undefined,
+    secrets: value.secrets
+      ? {
+          project: optionalString(value.secrets.project),
+          include_org: value.secrets.includeOrg,
+          include_user: value.secrets.includeUser,
+        }
+      : undefined,
+    credentials: Object.keys(value.credentials).length
+      ? Object.fromEntries(Object.entries(value.credentials).map(([alias, credential]) => [alias, {
+          provider: optionalString(credential.provider), account: credential.account,
+        }]))
+      : undefined,
+    workspace_mode: workspaceMode,
+  };
+}
+
+function toProtoProjectWorkspaceMode(value: ProjectSpec["workspace_mode"]): ProjectWorkspaceMode {
+  switch (value) {
+    case "auto": return ProjectWorkspaceMode.AUTO;
+    case "clone": return ProjectWorkspaceMode.CLONE;
+    case "direct": return ProjectWorkspaceMode.DIRECT;
+    default: throw new Error("codewire: project workspace_mode must be auto, clone, or direct");
+  }
+}
+
+function toProtoProjectSkillSource(value: ProjectSkillSelection["source"]): ProjectSkillSource {
+  switch (value) {
+    case "repository": return ProjectSkillSource.REPOSITORY;
+    case "user": return ProjectSkillSource.USER;
+    default: throw new Error("codewire: project skill source must be repository or user");
+  }
+}
+
+function toProtoProjectSpec(value: ProjectSpec | undefined) {
+  if (!value) return undefined;
+  return {
+    schemaVersion: uint32("project schema_version", value.schema_version) ?? 0,
+    preset: value.preset ?? "",
+    image: value.image ?? "",
+    repositories: toProtoRepos(value.repositories),
+    workingDirectory: value.working_directory,
+    installCommand: value.install_command ?? "",
+    startupScript: value.startup_script ?? "",
+    environment: value.environment ? { ...value.environment } : {},
+    agents: value.agents ? { install: value.agents.install, tools: [...(value.agents.tools ?? [])] } : undefined,
+    agentEnvironment: value.agent_environment ? { ...value.agent_environment } : {},
+    skills: (value.skills ?? []).map((skill) => ({
+      source: toProtoProjectSkillSource(skill.source),
+      reference: skill.reference,
+      agents: [...(skill.agents ?? [])],
+    })),
+    applicationPorts: toProtoAppPorts(value.application_ports),
+    resources: value.resources
+      ? {
+          cpuMillicores: uint32("project cpu_millicores", value.resources.cpu_millicores),
+          memoryMib: uint64("project memory_mib", value.resources.memory_mib),
+          diskGib: uint64("project disk_gib", value.resources.disk_gib),
+        }
+      : undefined,
+    secrets: value.secrets
+      ? {
+          project: value.secrets.project ?? "",
+          includeOrg: value.secrets.include_org,
+          includeUser: value.secrets.include_user,
+        }
+      : undefined,
+    credentials: value.credentials
+      ? Object.fromEntries(Object.entries(value.credentials).map(([alias, credential]) => [alias, {
+          provider: credential.provider ?? "", account: credential.account,
+        }]))
+      : {},
+    workspaceMode: toProtoProjectWorkspaceMode(value.workspace_mode),
+  };
 }
 
 function optionalUpdateString(value: string | null | undefined): string | undefined {
@@ -592,6 +742,7 @@ export function toProtoCreateEnvironmentRequest(
     includeOrgSecrets: body.include_org_secrets ?? undefined,
     includeUserSecrets: body.include_user_secrets ?? undefined,
     isolationTier: toProtoIsolationTier(body.isolation_tier),
+    projectSpec: toProtoProjectSpec(body.project_spec),
   };
 }
 
@@ -722,11 +873,38 @@ export function assertAPIKeyConverterCoverage(): void {
 
 /** Throws when a future runtime proto field has no owned SDK conversion. */
 export function assertRuntimeConverterCoverage(): void {
+  assertDescriptorCoverage("setup config", SetupConfigSchema.fields, new Map([
+    [1, "repo_url"], [2, "branch"], [3, "repos"], [4, "install_command"], [5, "startup_script"], [6, "env_vars"], [7, "agents"], [8, "install_agents"], [9, "agent"], [10, "agent_env"], [11, "app_ports"], [12, "include_org_secrets"], [13, "include_user_secrets"], [14, "project_spec"],
+  ]));
+  assertDescriptorCoverage("repo entry", RepoEntrySchema.fields, new Map([
+    [1, "url"], [2, "branch"], [3, "mount_path"], [4, "revision"],
+  ]));
+  assertDescriptorCoverage("app port", AppPortSchema.fields, new Map([
+    [1, "port"], [2, "label"], [3, "access"],
+  ]));
+  assertDescriptorCoverage("project agents", ProjectAgentsSchema.fields, new Map([
+    [1, "install"], [2, "tools"],
+  ]));
+  assertDescriptorCoverage("project skill", ProjectSkillSelectionSchema.fields, new Map([
+    [1, "source"], [2, "reference"], [3, "agents"],
+  ]));
+  assertDescriptorCoverage("project resources", ProjectResourcesSchema.fields, new Map([
+    [1, "cpu_millicores"], [2, "memory_mib"], [3, "disk_gib"],
+  ]));
+  assertDescriptorCoverage("project secrets", ProjectSecretBindingsSchema.fields, new Map([
+    [1, "project"], [2, "include_org"], [3, "include_user"],
+  ]));
+  assertDescriptorCoverage("project credential reference", ProjectCredentialReferenceSchema.fields, new Map([
+    [1, "provider"], [2, "account"],
+  ]));
+  assertDescriptorCoverage("project spec", ProjectSpecSchema.fields, new Map([
+    [1, "schema_version"], [2, "preset"], [3, "image"], [4, "repositories"], [5, "working_directory"], [6, "install_command"], [7, "startup_script"], [8, "environment"], [9, "agents"], [10, "agent_environment"], [11, "skills"], [12, "application_ports"], [13, "resources"], [14, "secrets"], [15, "credentials"], [16, "workspace_mode"],
+  ]));
   assertDescriptorCoverage("environment", EnvironmentSchema.fields, new Map([
     [1, "id"], [2, "org_id"], [3, "created_by"], [4, "preset_id"], [5, "type"], [6, "name"], [7, "state"], [8, "desired_state"], [9, "error_reason"], [10, "recoverable"], [11, "state_changed_at"], [12, "retry_count"], [13, "setup_phase"], [14, "setup_complete"], [15, "setup_error"], [16, "ttl_seconds"], [17, "shutdown_at"], [18, "cpu_millicores"], [19, "memory_mb"], [20, "disk_gb"], [21, "total_running_seconds"], [22, "created_at"], [23, "started_at"], [24, "stopped_at"], [25, "destroyed_at"], [26, "protected"], [27, "deletion_requested_at"], [28, "deletion_grace_until"], [29, "preset_name"], [30, "network"], [31, "ports"], [32, "isolation_tier"],
   ]));
   assertDescriptorCoverage("create environment request", CreateEnvironmentRequestSchema.fields, new Map([
-    [1, "org_id"], [2, "preset_id"], [3, "name"], [4, "cpu_millicores"], [5, "memory_mb"], [6, "disk_gb"], [7, "ttl_seconds"], [8, "preset_slug"], [9, "repo_url"], [10, "branch"], [11, "repos"], [12, "image"], [13, "install_command"], [14, "startup_script"], [15, "env_vars"], [16, "agents"], [17, "install_agents"], [18, "agent"], [19, "agent_env"], [20, "secret_project"], [21, "app_ports"], [22, "include_org_secrets"], [23, "include_user_secrets"], [24, "isolation_tier"],
+    [1, "org_id"], [2, "preset_id"], [3, "name"], [4, "cpu_millicores"], [5, "memory_mb"], [6, "disk_gb"], [7, "ttl_seconds"], [8, "preset_slug"], [9, "repo_url"], [10, "branch"], [11, "repos"], [12, "image"], [13, "install_command"], [14, "startup_script"], [15, "env_vars"], [16, "agents"], [17, "install_agents"], [18, "agent"], [19, "agent_env"], [20, "secret_project"], [21, "app_ports"], [22, "include_org_secrets"], [23, "include_user_secrets"], [24, "isolation_tier"], [25, "project_spec"],
   ]));
   assertDescriptorCoverage("environment port", PortSchema.fields, new Map([
     [1, "id"], [2, "environment_id"], [3, "port"], [4, "label"], [5, "access"], [6, "preview_url"], [7, "created_at"],

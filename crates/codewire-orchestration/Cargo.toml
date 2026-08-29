@@ -53,6 +53,8 @@ required-features = ["kind-e2e"]
 [dependencies]
 codewire-admin-proto = { workspace = true }
 codewire-gateway-proto = { workspace = true }
+codewire-project = { workspace = true }
+codewire-project-proto = { workspace = true }
 codewire-proto = { workspace = true }
 codewire-server-core = { workspace = true }
 anyhow = { workspace = true }

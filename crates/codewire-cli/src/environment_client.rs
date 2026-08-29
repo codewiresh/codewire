@@ -758,6 +758,7 @@ fn proto_create_environment_request(
                 url: repo.url.clone(),
                 branch: repo.branch.clone(),
                 mount_path: repo.mount_path.clone(),
+                revision: repo.revision.clone(),
                 ..Default::default()
             })
             .collect(),
@@ -794,6 +795,11 @@ fn proto_create_environment_request(
             "confidential" => rpc::IsolationTier::Confidential.into(),
             _ => rpc::IsolationTier::Unspecified.into(),
         },
+        project_spec: request
+            .project_spec
+            .clone()
+            .map(codewire_project_proto::to_proto)
+            .into(),
         ..Default::default()
     }
 }
@@ -833,8 +839,13 @@ fn legacy_prepare_complete(
             .draft
             .into_option()
             .map(legacy_create_environment_request)
+            .transpose()?
             .ok_or_else(|| anyhow::anyhow!("WatchEnvironmentCreate complete event had no draft"))?,
-        detection: complete.detection.into_option().map(legacy_detection),
+        detection: complete
+            .detection
+            .into_option()
+            .map(legacy_detection)
+            .transpose()?,
         resolved_preset: complete
             .resolved_preset
             .into_option()
@@ -850,8 +861,13 @@ fn legacy_prepare_complete(
 
 fn legacy_create_environment_request(
     value: rpc::CreateEnvironmentRequest,
-) -> CreateEnvironmentRequest {
-    CreateEnvironmentRequest {
+) -> anyhow::Result<CreateEnvironmentRequest> {
+    let project_spec = value
+        .project_spec
+        .into_option()
+        .map(codewire_project_proto::from_proto)
+        .transpose()?;
+    Ok(CreateEnvironmentRequest {
         preset_id: value.preset_id,
         name: value.name,
         cpu_millicores: value.cpu_millicores,
@@ -868,6 +884,7 @@ fn legacy_create_environment_request(
                 url: repo.url,
                 branch: repo.branch,
                 mount_path: repo.mount_path,
+                revision: repo.revision,
             })
             .collect(),
         image: value.image,
@@ -902,11 +919,17 @@ fn legacy_create_environment_request(
                 String::new()
             }
         },
-    }
+        project_spec,
+    })
 }
 
-fn legacy_detection(value: rpc::DetectionResult) -> DetectionResult {
-    DetectionResult {
+fn legacy_detection(value: rpc::DetectionResult) -> anyhow::Result<DetectionResult> {
+    let project_spec = value
+        .project_spec
+        .into_option()
+        .map(codewire_project_proto::from_proto)
+        .transpose()?;
+    Ok(DetectionResult {
         project_type: value.project_type,
         preset_slug: value.preset_slug,
         preset_image: value.preset_image,
@@ -940,7 +963,8 @@ fn legacy_detection(value: rpc::DetectionResult) -> DetectionResult {
         cpu: value.cpu,
         memory: value.memory,
         setup_notes: value.setup_notes,
-    }
+        project_spec,
+    })
 }
 
 fn legacy_repo_config(value: rpc::RepoConfig) -> anyhow::Result<RepoConfig> {
@@ -1370,11 +1394,19 @@ mod tests {
                 label: "web".to_string(),
                 access: "public".to_string(),
             }],
+            project_spec: Some(
+                codewire_project::parse_project_yaml(
+                    "version: 1\nimage: ghcr.io/example/workspace@sha256:abc\nworkspace: clone\n",
+                )
+                .unwrap()
+                .spec,
+            ),
             ..CreateEnvironmentRequest::default()
         };
         let round_trip = legacy_create_environment_request(proto_create_environment_request(
             "org_123", &request,
-        ));
+        ))
+        .unwrap();
         assert_eq!(round_trip, request);
 
         let environment = legacy_environment(rpc::Environment {

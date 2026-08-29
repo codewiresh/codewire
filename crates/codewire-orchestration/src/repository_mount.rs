@@ -4,8 +4,6 @@
 
 use std::fmt;
 
-const WORKSPACE_ROOT: &str = "/workspace";
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RepositoryMountError {
     detail: String,
@@ -27,29 +25,15 @@ impl fmt::Display for RepositoryMountError {
 
 impl std::error::Error for RepositoryMountError {}
 
-/// Trim a `.git` suffix, then take the last URL path segment.
-pub(crate) fn repo_name_from_url(repo_url: &str) -> String {
-    let trimmed = repo_url.strip_suffix(".git").unwrap_or(repo_url);
-    let no_frag = trimmed.split(['?', '#']).next().unwrap_or(trimmed);
-    match no_frag.rsplit('/').next() {
-        Some(segment) if !segment.is_empty() => segment.to_string(),
-        _ => no_frag.to_string(),
-    }
-}
-
 /// Return the explicit mount path, or the legacy repository-name-derived path.
 /// The result is always a normalized descendant of `/workspace`.
 pub(crate) fn effective_repository_mount(
     repo_url: &str,
     mount_path: &str,
 ) -> Result<String, RepositoryMountError> {
-    let path = if mount_path.is_empty() {
-        format!("{WORKSPACE_ROOT}/{}", repo_name_from_url(repo_url))
-    } else {
-        mount_path.to_string()
-    };
-    validate_repository_mount(&path)?;
-    Ok(path)
+    codewire_project::validate_repository_destinations([(repo_url, mount_path)])
+        .map(|mut paths| paths.remove(0))
+        .map_err(|error| RepositoryMountError::new(error.to_string()))
 }
 
 /// Validate every effective checkout path and reject duplicate or nested
@@ -58,57 +42,8 @@ pub(crate) fn effective_repository_mount(
 pub(crate) fn validate_repository_mounts<'a>(
     repos: impl IntoIterator<Item = (&'a str, &'a str)>,
 ) -> Result<Vec<String>, RepositoryMountError> {
-    let mut paths = repos
-        .into_iter()
-        .map(|(url, mount_path)| effective_repository_mount(url, mount_path))
-        .collect::<Result<Vec<_>, _>>()?;
-    paths.sort();
-
-    for pair in paths.windows(2) {
-        let parent = &pair[0];
-        let child = &pair[1];
-        if child == parent {
-            return Err(RepositoryMountError::new(format!(
-                "repository mount paths must be unique: {child}"
-            )));
-        }
-        if child
-            .strip_prefix(parent)
-            .is_some_and(|suffix| suffix.starts_with('/'))
-        {
-            return Err(RepositoryMountError::new(format!(
-                "repository mount paths must not overlap: {parent} and {child}"
-            )));
-        }
-    }
-    Ok(paths)
-}
-
-fn validate_repository_mount(path: &str) -> Result<(), RepositoryMountError> {
-    if path.chars().any(char::is_control) {
-        return Err(RepositoryMountError::new(
-            "repository mount path must not contain control characters",
-        ));
-    }
-    let Some(relative) = path.strip_prefix("/workspace/") else {
-        return Err(RepositoryMountError::new(
-            "repository mount path must be strictly under /workspace",
-        ));
-    };
-    if relative.is_empty() || path.ends_with('/') {
-        return Err(RepositoryMountError::new(
-            "repository mount path must name a directory under /workspace",
-        ));
-    }
-    if relative
-        .split('/')
-        .any(|segment| segment.is_empty() || segment == "." || segment == "..")
-    {
-        return Err(RepositoryMountError::new(
-            "repository mount path must be normalized without empty, . or .. segments",
-        ));
-    }
-    Ok(())
+    codewire_project::validate_repository_destinations(repos)
+        .map_err(|error| RepositoryMountError::new(error.to_string()))
 }
 
 #[cfg(test)]

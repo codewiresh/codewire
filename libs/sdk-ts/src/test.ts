@@ -5,6 +5,10 @@ import { Code, ConnectError, createConnectRouter } from "@connectrpc/connect";
 import { BadRequestSchema, ErrorInfoSchema } from "@codewire/proto-ts";
 import { ApiKeySchema, ApiKeyService } from "@codewire/proto-ts/gen/codewire/v1/api_key_pb";
 import {
+  ProjectSkillSource,
+  ProjectWorkspaceMode,
+} from "@codewire/proto-ts/gen/codewire/v1/common_pb";
+import {
   DesiredState,
   EnvironmentResizeExecutionMode,
   EnvironmentResizeOperationState,
@@ -598,11 +602,30 @@ async function runTests() {
     repos: [{
       branch: "main",
       mount_path: "/workspace/platform",
+      revision: "deadbeef",
       url: "https://git.example.test/org/platform",
     }],
+    project_spec: {
+      schema_version: 1,
+      image: "ghcr.io/example/workspace@sha256:abc",
+      repositories: [{
+        revision: "deadbeef",
+        mount_path: "/workspace/platform",
+        url: "https://git.example.test/org/platform",
+      }],
+      working_directory: "/workspace/platform",
+      skills: [{ source: "repository", reference: ".agents/skills/rust", agents: ["codex"] }],
+      resources: { cpu_millicores: 2000, memory_mib: 16384, disk_gib: 40 },
+      credentials: { work: { provider: "openai", account: "acct-work" } },
+      workspace_mode: "clone",
+    },
   });
   assert(createEnvironment.isolationTier === IsolationTier.CONFIDENTIAL, "create environment preserves confidential isolation");
   assert(createEnvironment.repos[0]?.mountPath === "/workspace/platform", "create environment preserves repository mount paths");
+  assert(createEnvironment.repos[0]?.revision === "deadbeef", "create environment preserves repository revisions");
+  assert(createEnvironment.projectSpec?.workspaceMode === ProjectWorkspaceMode.CLONE, "create environment preserves project workspace mode");
+  assert(createEnvironment.projectSpec?.resources?.memoryMib === 16384n, "create environment preserves project resource units");
+  assert(createEnvironment.projectSpec?.credentials.work?.account === "acct-work", "create environment preserves opaque account references");
   let rejectedUnknownIsolation = false;
   try {
     toProtoCreateEnvironmentRequest("org_test", {
@@ -612,6 +635,33 @@ async function runTests() {
     rejectedUnknownIsolation = true;
   }
   assert(rejectedUnknownIsolation, "create environment rejects unknown isolation tiers");
+  let rejectedUnknownWorkspaceMode = false;
+  try {
+    toProtoCreateEnvironmentRequest("org_test", {
+      project_spec: {
+        schema_version: 1,
+        working_directory: "/workspace",
+        workspace_mode: "shared" as never,
+      },
+    });
+  } catch {
+    rejectedUnknownWorkspaceMode = true;
+  }
+  assert(rejectedUnknownWorkspaceMode, "create environment rejects unknown project workspace modes");
+  let rejectedUnknownSkillSource = false;
+  try {
+    toProtoCreateEnvironmentRequest("org_test", {
+      project_spec: {
+        schema_version: 1,
+        working_directory: "/workspace",
+        skills: [{ source: "ambient" as never, reference: "personal" }],
+        workspace_mode: "clone",
+      },
+    });
+  } catch {
+    rejectedUnknownSkillSource = true;
+  }
+  assert(rejectedUnknownSkillSource, "create environment rejects unknown project skill sources");
 
   const convertedPort = fromProtoEnvironmentPort(create(PortSchema, {
     id: "port_2",
@@ -669,12 +719,19 @@ async function runTests() {
         url: "https://git.example.test/org/repo",
       }],
       startupScript: "go test ./...",
+      projectSpec: {
+        schemaVersion: 1,
+        workingDirectory: "/workspace/repo",
+        skills: [{ source: ProjectSkillSource.USER, reference: "personal", agents: ["codex"] }],
+        workspaceMode: ProjectWorkspaceMode.CLONE,
+      },
     },
   }));
   assert(convertedPreset.default_cpu_millicores === 4000, "preset numbers keep SDK values");
   assert(convertedPreset.default_setup_config?.app_ports?.[0]?.access === "public", "preset nested ports preserve values");
   assert(convertedPreset.default_setup_config?.agent_env?.MODE === "test", "preset nested maps preserve values");
   assert(convertedPreset.default_setup_config?.repos?.[0]?.mount_path === "/workspace/repo", "preset repository mount paths are retained");
+  assert(convertedPreset.default_setup_config?.project_spec?.skills?.[0]?.source === "user", "preset project skill sources use ergonomic values");
   assert(convertedPreset.secret_project_id === "sp_1", "preset optional IDs are retained");
 
   const convertedSecretMetadata = fromProtoSecretMetadata(create(SecretMetadataSchema, {
@@ -1063,7 +1120,7 @@ async function runTests() {
     server.close();
   }
 
-  const expectedAssertions = 100;
+  const expectedAssertions = 107;
   if (passed !== expectedAssertions) {
     failed++;
     console.error(

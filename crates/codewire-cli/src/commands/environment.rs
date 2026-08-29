@@ -2089,7 +2089,7 @@ pub(crate) fn env_create_request_from_args(
         }]
     };
 
-    Ok(CreateEnvironmentRequest {
+    let mut request = CreateEnvironmentRequest {
         preset_id,
         name: trimmed_optional(args.name.clone()),
         cpu_millicores: positive_i32(parse_platform_create_quantity(args.cpu.as_deref(), "CPU")?),
@@ -2119,7 +2119,83 @@ pub(crate) fn env_create_request_from_args(
         include_org_secrets: args.no_org_secrets.then_some(false),
         include_user_secrets: args.no_user_secrets.then_some(false),
         isolation_tier: args.isolation.clone().unwrap_or_default(),
-    })
+        project_spec: None,
+    };
+    request.project_spec = Some(project_spec_from_create_request(&request)?);
+    Ok(request)
+}
+
+fn project_spec_from_create_request(
+    request: &CreateEnvironmentRequest,
+) -> anyhow::Result<codewire_project::ProjectSpec> {
+    let destinations = codewire_project::validate_repository_destinations(
+        request
+            .repos
+            .iter()
+            .map(|repository| (repository.url.as_str(), repository.mount_path.as_str())),
+    )?;
+    let repositories = request
+        .repos
+        .iter()
+        .zip(destinations.iter())
+        .map(
+            |(repository, destination)| codewire_project::RepositorySpec {
+                source: repository.url.clone(),
+                revision: repository.revision.clone(),
+                branch: repository.branch.clone(),
+                destination: destination.clone(),
+            },
+        )
+        .collect::<Vec<_>>();
+    let working_directory = match repositories.as_slice() {
+        [repository] => repository.destination.clone(),
+        _ => "/workspace".to_string(),
+    };
+    let application_ports = request
+        .app_ports
+        .iter()
+        .map(|port| {
+            Ok(codewire_project::ApplicationPort {
+                port: u16::try_from(port.port)
+                    .map_err(|_| anyhow::anyhow!("application port is outside 1 through 65535"))?,
+                label: port.label.clone(),
+                access: port.access.clone(),
+            })
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let spec = codewire_project::ProjectSpec {
+        schema_version: codewire_project::PROJECT_SCHEMA_VERSION,
+        preset: request.preset_slug.clone(),
+        image: request.image.clone(),
+        repositories,
+        working_directory,
+        install_command: request.install_command.clone(),
+        startup_script: request.startup_script.clone(),
+        environment: request.env_vars.clone(),
+        agents: codewire_project::AgentsSpec {
+            install: request.install_agents,
+            tools: request
+                .agents
+                .iter()
+                .map(|agent| agent.agent_type.clone())
+                .collect(),
+        },
+        agent_environment: request.agent_env.clone(),
+        application_ports,
+        resources: codewire_project::ResourceSpec {
+            cpu_millicores: request.cpu_millicores.map(|value| value as u32),
+            memory_mib: request.memory_mb.map(|value| value as u64),
+            disk_gib: request.disk_gb.map(|value| value as u64),
+        },
+        secrets: codewire_project::SecretBindings {
+            project: request.secret_project.clone(),
+            include_org: request.include_org_secrets,
+            include_user: request.include_user_secrets,
+        },
+        ..codewire_project::ProjectSpec::default()
+    };
+    spec.validate()?;
+    Ok(spec)
 }
 
 fn parse_platform_create_quantity(value: Option<&str>, label: &str) -> anyhow::Result<Option<i32>> {
@@ -2143,6 +2219,7 @@ pub(crate) fn prepare_platform_env_create_request(
         && request.image.is_empty()
     {
         request.image = CANONICAL_WORKSPACE_IMAGE.to_string();
+        request.project_spec = Some(project_spec_from_create_request(&request)?);
     }
     if !args.no_network {
         validate_env_create_mesh_bootstrap_env(&request)?;
@@ -2376,6 +2453,7 @@ pub(crate) fn collect_env_create_repos(
             url,
             branch: repo_branch,
             mount_path,
+            revision: String::new(),
         });
     }
 

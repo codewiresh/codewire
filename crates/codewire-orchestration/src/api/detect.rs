@@ -58,6 +58,9 @@ pub struct DetectionResult {
     pub memory: String,
     #[serde(default)]
     pub setup_notes: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "Option<serde_json::Value>")]
+    pub project_spec: Option<codewire_project::ProjectSpec>,
 }
 
 /// Mirrors `api.MultiRepoDetectionResult`.
@@ -1107,40 +1110,16 @@ fn slug_to_image(slug: &str) -> Option<&'static str> {
 
 /// Mirrors `parseCodewireYAML` (the in-repo config short-circuit).
 pub fn parse_codewire_yaml(content: &str, repo_name: &str) -> anyhow::Result<DetectionResult> {
-    #[derive(Deserialize)]
-    struct CwYaml {
-        #[serde(default)]
-        preset: String,
-        #[serde(default)]
-        install: String,
-        #[serde(default)]
-        startup: String,
-        #[serde(default)]
-        ports: Vec<AppPort>,
-        #[serde(default)]
-        cpu: i64,
-        #[serde(default)]
-        memory: i64,
-        #[serde(default)]
-        agent: String,
-        #[serde(default)]
-        agents: Option<serde_yaml::Value>,
-        #[serde(default)]
-        install_agents: Option<bool>,
-        #[serde(default)]
-        secrets: Option<serde_yaml::Value>,
-        #[serde(default)]
-        include_org_secrets: Option<bool>,
-        #[serde(default)]
-        include_user_secrets: Option<bool>,
-        #[serde(default)]
-        secret_project: String,
-    }
+    let document = codewire_project::parse_project_yaml(content)
+        .map_err(|error| anyhow::anyhow!("parse codewire.yaml: {error}"))?;
+    document
+        .ensure_platform_compatible()
+        .map_err(|error| anyhow::anyhow!("parse codewire.yaml: {error}"))?;
+    let cfg = document.spec;
 
-    let cfg: CwYaml =
-        serde_yaml::from_str(content).map_err(|e| anyhow::anyhow!("parse codewire.yaml: {e}"))?;
-
-    let (slug, image) = if let Some(img) = slug_to_image(&cfg.preset) {
+    let (slug, image) = if !cfg.image.is_empty() {
+        (String::new(), cfg.image.clone())
+    } else if let Some(img) = slug_to_image(&cfg.preset) {
         (cfg.preset.clone(), img.to_string())
     } else if !cfg.preset.is_empty() {
         // Treat as full image ref.
@@ -1149,180 +1128,73 @@ pub fn parse_codewire_yaml(content: &str, repo_name: &str) -> anyhow::Result<Det
         (String::new(), String::new())
     };
 
-    let cpu_str = if cfg.cpu > 0 {
-        if cfg.cpu < 1000 {
-            "1".to_string()
-        } else {
-            format!("{}", cfg.cpu / 1000)
-        }
-    } else {
-        "2".to_string()
-    };
-    let mem_str = if cfg.memory > 0 {
-        if cfg.memory < 1024 {
-            "1".to_string()
-        } else {
-            format!("{}", cfg.memory / 1024)
-        }
-    } else {
-        "4".to_string()
-    };
+    let cpu_str = cfg
+        .resources
+        .cpu_millicores
+        .map(format_cpu_cores)
+        .unwrap_or_else(|| "2".to_string());
+    let mem_str = cfg
+        .resources
+        .memory_mib
+        .map(format_memory_gib)
+        .unwrap_or_else(|| "4".to_string());
+    let project_spec = cfg.clone();
 
     let mut suggested_name = repo_name.to_string();
     if suggested_name.len() > 32 {
         suggested_name.truncate(32);
     }
 
-    let agents_cfg =
-        parse_codewire_yaml_agents(cfg.agents.as_ref(), &cfg.agent, cfg.install_agents)?;
-    let secrets_cfg = parse_codewire_yaml_secrets(
-        cfg.secrets.as_ref(),
-        cfg.include_org_secrets,
-        cfg.include_user_secrets,
-        &cfg.secret_project,
-    )?;
-
     Ok(DetectionResult {
         project_type: "configured".to_string(),
         preset_slug: slug,
         preset_image: image,
-        install_command: cfg.install,
-        startup_script: cfg.startup,
+        install_command: cfg.install_command.clone(),
+        startup_script: cfg.startup_script.clone(),
         suggested_name,
-        app_ports: cfg.ports,
-        agents: agents_cfg.tools,
-        install_agents: agents_cfg.install,
-        secret_project: secrets_cfg.project,
-        include_org_secrets: secrets_cfg.org,
-        include_user_secrets: secrets_cfg.user,
+        app_ports: cfg
+            .application_ports
+            .into_iter()
+            .map(|port| AppPort {
+                port: i32::from(port.port),
+                label: port.label,
+                access: port.access,
+            })
+            .collect(),
+        agents: cfg
+            .agents
+            .tools
+            .into_iter()
+            .map(|agent_type| SetupAgent { agent_type })
+            .collect(),
+        install_agents: cfg.agents.install,
+        secret_project: cfg.secrets.project.clone(),
+        include_org_secrets: cfg.secrets.include_org,
+        include_user_secrets: cfg.secrets.include_user,
         cpu: cpu_str,
         memory: mem_str,
         setup_notes: "Configured via codewire.yaml".to_string(),
+        project_spec: Some(project_spec),
         ..Default::default()
     })
 }
 
-struct ParsedAgents {
-    install: Option<bool>,
-    tools: Vec<SetupAgent>,
-}
-
-struct ParsedSecrets {
-    org: Option<bool>,
-    user: Option<bool>,
-    project: String,
-}
-
-/// Mirrors `parseCodewireYAMLAgents` (absent | scalar | sequence |
-/// mapping {install, tools}).
-fn parse_codewire_yaml_agents(
-    node: Option<&serde_yaml::Value>,
-    legacy_agent: &str,
-    legacy_install: Option<bool>,
-) -> anyhow::Result<ParsedAgents> {
-    let mut out = ParsedAgents {
-        install: legacy_install,
-        tools: Vec::new(),
-    };
-    match node {
-        None | Some(serde_yaml::Value::Null) => {
-            if !legacy_agent.trim().is_empty()
-                && let Some(t) = canonical_agent_type_from_yaml(legacy_agent)?
-            {
-                out.tools = vec![SetupAgent { agent_type: t }];
-            }
-            Ok(out)
-        }
-        Some(serde_yaml::Value::String(s)) => {
-            if let Some(t) = canonical_agent_type_from_yaml(s.trim())? {
-                out.tools = vec![SetupAgent { agent_type: t }];
-            }
-            Ok(out)
-        }
-        Some(serde_yaml::Value::Sequence(seq)) => {
-            for v in seq {
-                let s = v.as_str().ok_or_else(|| {
-                    anyhow::anyhow!("parse codewire.yaml agents: expected string list")
-                })?;
-                if let Some(t) = canonical_agent_type_from_yaml(s)? {
-                    out.tools.push(SetupAgent { agent_type: t });
-                }
-            }
-            Ok(out)
-        }
-        Some(serde_yaml::Value::Mapping(_)) => {
-            #[derive(Deserialize)]
-            struct AgentsBlock {
-                #[serde(default)]
-                install: Option<bool>,
-                #[serde(default)]
-                tools: Vec<String>,
-            }
-            let block: AgentsBlock = serde_yaml::from_value(node.unwrap().clone())
-                .map_err(|e| anyhow::anyhow!("parse codewire.yaml agents: {e}"))?;
-            out.install = block.install;
-            for tool in block.tools {
-                if let Some(t) = canonical_agent_type_from_yaml(&tool)? {
-                    out.tools.push(SetupAgent { agent_type: t });
-                }
-            }
-            Ok(out)
-        }
-        _ => anyhow::bail!("parse codewire.yaml agents: expected string, list, or mapping"),
+fn format_cpu_cores(millicores: u32) -> String {
+    if millicores.is_multiple_of(1000) {
+        return (millicores / 1000).to_string();
     }
-}
-
-/// Mirrors `parseCodewireYAMLSecrets` (absent | scalar project name |
-/// mapping {org, user, project}).
-fn parse_codewire_yaml_secrets(
-    node: Option<&serde_yaml::Value>,
-    legacy_org: Option<bool>,
-    legacy_user: Option<bool>,
-    legacy_project: &str,
-) -> anyhow::Result<ParsedSecrets> {
-    let mut out = ParsedSecrets {
-        org: legacy_org,
-        user: legacy_user,
-        project: legacy_project.trim().to_string(),
-    };
-    match node {
-        None | Some(serde_yaml::Value::Null) => Ok(out),
-        Some(serde_yaml::Value::String(s)) => {
-            out.project = s.trim().to_string();
-            Ok(out)
-        }
-        Some(serde_yaml::Value::Mapping(_)) => {
-            #[derive(Deserialize)]
-            struct SecretsBlock {
-                #[serde(default)]
-                org: Option<bool>,
-                #[serde(default)]
-                user: Option<bool>,
-                #[serde(default)]
-                project: String,
-            }
-            let block: SecretsBlock = serde_yaml::from_value(node.unwrap().clone())
-                .map_err(|e| anyhow::anyhow!("parse codewire.yaml secrets: {e}"))?;
-            out.org = block.org;
-            out.user = block.user;
-            out.project = block.project.trim().to_string();
-            Ok(out)
-        }
-        _ => anyhow::bail!("parse codewire.yaml secrets: expected string or mapping"),
+    let mut value = format!("{:.3}", f64::from(millicores) / 1000.0);
+    while value.ends_with('0') {
+        value.pop();
     }
+    value.trim_end_matches('.').to_string()
 }
 
-/// Mirrors `canonicalAgentTypeFromYAML`. `Ok(None)` = "none"/empty.
-fn canonical_agent_type_from_yaml(raw: &str) -> anyhow::Result<Option<String>> {
-    match raw.trim().to_lowercase().as_str() {
-        "" | "none" => Ok(None),
-        "claude" | "claude-code" => Ok(Some("claude-code".to_string())),
-        "codex" => Ok(Some("codex".to_string())),
-        "gemini" | "gemini-cli" => Ok(Some("gemini-cli".to_string())),
-        "kimi" | "kimi-code" => Ok(Some("kimi-code".to_string())),
-        "pi" | "pi-coding-agent" => Ok(Some("pi".to_string())),
-        "aider" => Ok(Some("aider".to_string())),
-        other => anyhow::bail!("parse codewire.yaml agents: unsupported agent \"{other}\""),
+fn format_memory_gib(memory_mib: u64) -> String {
+    if memory_mib.is_multiple_of(1024) {
+        (memory_mib / 1024).to_string()
+    } else {
+        format!("{memory_mib}Mi")
     }
 }
 
@@ -1440,6 +1312,47 @@ secrets:
 
         // Unsupported agent errors like Go.
         assert!(parse_codewire_yaml("agent: skynet\n", "repo").is_err());
+    }
+
+    #[test]
+    fn platform_detection_preserves_the_complete_canonical_project_spec() {
+        let yaml = r#"
+version: 1
+image: ghcr.io/example/workspace@sha256:abc
+repositories:
+  - source: https://example.test/org/api.git
+    revision: deadbeef
+    destination: /workspace/api
+  - source: https://example.test/org/web.git
+    branch: main
+    destination: /workspace/web
+working_directory: /workspace/api
+install: cargo fetch
+startup: cargo test
+env: {RUST_LOG: info}
+agents: [claude, codex]
+agent_env: {CODEWIRE_AGENT_MODE: test}
+skills:
+  - {path: .agents/skills/rust, agents: [codex]}
+  - user:personal
+ports: [{port: 8080, label: api, access: private}]
+cpu: 2
+memory: 16Gi
+disk: 40Gi
+secrets: {project: development, org: false, user: true}
+credentials:
+  work: {provider: openai, account: acct-work}
+  personal: {provider: anthropic, account: acct-personal}
+workspace: clone
+"#;
+        let direct = codewire_project::parse_project_yaml(yaml).unwrap().spec;
+        let detected = parse_codewire_yaml(yaml, "codewire").unwrap();
+        let platform = detected.project_spec.expect("portable project spec");
+        assert_eq!(platform, direct);
+        assert_eq!(
+            platform.canonical_json().unwrap(),
+            direct.canonical_json().unwrap()
+        );
     }
 
     #[test]

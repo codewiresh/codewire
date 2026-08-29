@@ -16,6 +16,8 @@ members = [
     "crates/codewire-cli",
     "crates/codewire-cli-bin",
     "crates/codewire-local-vmm",
+    "crates/codewire-project",
+    "crates/codewire-project-proto",
     "crates/codewire-mesh",
     "crates/codewire-oidc",
     "crates/codewire-orchestration",
@@ -59,6 +61,8 @@ codewire-derp = { path = "crates/codewire-derp" }
 codewire-tailnet = { path = "crates/codewire-tailnet" }
 codewire-udp-relay = { path = "crates/codewire-udp-relay" }
 codewire-vmm-guest-probe = { path = "crates/codewire-vmm-guest-probe" }
+codewire-project = { path = "crates/codewire-project" }
+codewire-project-proto = { path = "crates/codewire-project-proto" }
 
 # FFI
 uniffi = "0.31"

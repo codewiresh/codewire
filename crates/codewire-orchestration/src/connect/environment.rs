@@ -112,10 +112,10 @@ impl proto::EnvironmentService for EnvironmentConnectService {
         let user = auth_user(&ctx)?.clone();
         let request = request.to_owned_message();
         let org_id = request.org_id.clone();
-        let environment =
-            create_environment_core(&self.state, &user, &org_id, create_body(request))
-                .await
-                .map_err(|error| environment_rpc_error(&error, &ctx))?;
+        let body = create_body(request).map_err(|error| environment_rpc_error(&error, &ctx))?;
+        let environment = create_environment_core(&self.state, &user, &org_id, body)
+            .await
+            .map_err(|error| environment_rpc_error(&error, &ctx))?;
 
         connectrpc::Response::ok(proto::CreateEnvironmentResponse {
             environment: Some(
@@ -581,11 +581,12 @@ impl proto::EnvironmentService for EnvironmentConnectService {
             .map_err(|error| environment_rpc_error(&error, &ctx))?;
 
         let org_id = request.org_id;
+        let draft = create_body(draft).map_err(|error| environment_rpc_error(&error, &ctx))?;
         let events = start_prepare_stream(
             self.state.clone(),
             org_id.clone(),
             user.user_id,
-            create_body(draft),
+            draft,
             request.analyze,
         );
         let request_id = request_id(&ctx).map(str::to_owned);
@@ -639,8 +640,20 @@ impl proto::EnvironmentService for EnvironmentConnectService {
     }
 }
 
-fn create_body(request: proto::CreateEnvironmentRequest) -> CreateEnvironmentBody {
-    CreateEnvironmentBody {
+fn create_body(request: proto::CreateEnvironmentRequest) -> AppResult<CreateEnvironmentBody> {
+    let project_spec = request
+        .project_spec
+        .into_option()
+        .map(codewire_project_proto::from_proto)
+        .transpose()
+        .map_err(|error| {
+            crate::api::environments::coded_owned(
+                axum::http::StatusCode::BAD_REQUEST,
+                "invalid_project_spec",
+                error.to_string(),
+            )
+        })?;
+    Ok(CreateEnvironmentBody {
         preset_id: request.preset_id,
         name: request.name,
         cpu_millicores: request.cpu_millicores,
@@ -657,6 +670,7 @@ fn create_body(request: proto::CreateEnvironmentRequest) -> CreateEnvironmentBod
                 url: repo.url,
                 branch: repo.branch,
                 mount_path: repo.mount_path,
+                revision: repo.revision,
             })
             .collect(),
         image: request.image,
@@ -692,7 +706,8 @@ fn create_body(request: proto::CreateEnvironmentRequest) -> CreateEnvironmentBod
             Some(proto::IsolationTier::Confidential) => "confidential".to_string(),
             None => format!("unknown-enum-value-{}", request.isolation_tier.to_i32()),
         },
-    }
+        project_spec,
+    })
 }
 
 fn proto_prepare_event(
@@ -873,6 +888,7 @@ fn proto_create_request(
                 url: repo.url,
                 branch: repo.branch,
                 mount_path: repo.mount_path,
+                revision: repo.revision,
                 ..Default::default()
             })
             .collect(),
@@ -904,6 +920,10 @@ fn proto_create_request(
             .collect(),
         include_org_secrets: body.include_org_secrets,
         include_user_secrets: body.include_user_secrets,
+        project_spec: body
+            .project_spec
+            .map(codewire_project_proto::to_proto)
+            .into(),
         ..Default::default()
     }
 }
@@ -947,6 +967,10 @@ pub(crate) fn proto_detection(
         cpu: value.cpu,
         memory: value.memory,
         setup_notes: value.setup_notes,
+        project_spec: value
+            .project_spec
+            .map(codewire_project_proto::to_proto)
+            .into(),
         ..Default::default()
     }
 }
@@ -1615,6 +1639,7 @@ mod tests {
                     repos: vec![RepoEntry {
                         url: repo.into(),
                         branch: String::new(),
+                        revision: String::new(),
                         mount_path: String::new(),
                     }],
                     ..Default::default()

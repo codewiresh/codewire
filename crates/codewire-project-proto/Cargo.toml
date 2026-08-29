@@ -1,0 +1,15 @@
+[package]
+name = "codewire-project-proto"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license = "AGPL-3.0-only"
+authors.workspace = true
+description = "Codewire portable project model protobuf adapters"
+
+[dependencies]
+codewire-project = { workspace = true }
+codewire-proto = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

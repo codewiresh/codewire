@@ -656,9 +656,81 @@
         let request = prepare_platform_env_create_request(&args).unwrap();
 
         assert_eq!(request.image, "ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467");
+        assert_eq!(
+            request.project_spec.as_ref().unwrap().image,
+            request.image,
+            "the portable intent must include the resolved direct-CLI default"
+        );
         assert!(request.preset_id.is_none());
         assert!(request.preset_slug.is_empty());
         assert!(request.repo_url.is_empty());
+    }
+
+    #[test]
+    fn direct_cli_and_codewire_yaml_produce_identical_portable_intent() {
+        let cli = Cli::try_parse_from([
+            "cw",
+            "env",
+            "create",
+            "https://example.test/org/app.git@main::/workspace/app",
+            "--image",
+            "ghcr.io/example/workspace:1",
+            "--install",
+            "cargo fetch",
+            "--startup",
+            "cargo test",
+            "--coding-agent",
+            "claude",
+            "--env",
+            "RUST_LOG=info",
+            "--secrets",
+            "development",
+            "--no-org-secrets",
+            "--no-user-secrets",
+            "--cpu",
+            "2000",
+            "--memory",
+            "4096",
+            "--disk",
+            "40",
+        ])
+        .unwrap();
+        let Command::Env(EnvArgs { command, .. }) = cli.command else {
+            panic!("expected env command");
+        };
+        let EnvCommand::Create(args) = command else {
+            panic!("expected env create command");
+        };
+        let from_cli = env_create_request_from_args(&args)
+            .unwrap()
+            .project_spec
+            .expect("portable project spec");
+        let from_yaml = codewire_project::parse_project_yaml(
+            r#"
+version: 1
+image: ghcr.io/example/workspace:1
+repositories:
+  - source: https://example.test/org/app.git
+    branch: main
+    destination: /workspace/app
+install: cargo fetch
+startup: cargo test
+env: {RUST_LOG: info}
+agents: [claude-code]
+cpu: 2000m
+memory: 4096
+disk: 40
+secrets: {project: development, org: false, user: false}
+"#,
+        )
+        .unwrap()
+        .spec;
+
+        assert_eq!(from_cli, from_yaml);
+        assert_eq!(
+            from_cli.canonical_json().unwrap(),
+            from_yaml.canonical_json().unwrap()
+        );
     }
 
     #[test]
@@ -789,7 +861,7 @@
         handle_init_command(&globals, args).await.unwrap();
 
         let yaml = fs::read_to_string(&path).unwrap();
-        let parsed: config::CodewireConfig = serde_yaml::from_str(&yaml).unwrap();
+        let parsed = config::parse_codewire_config(&yaml).unwrap();
         assert_eq!(parsed.image, "ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467");
         assert_eq!(parsed.install, "pnpm install");
         assert_eq!(parsed.startup, "pnpm dev");
@@ -801,7 +873,7 @@
         assert_eq!(parsed.secrets.as_ref().unwrap().user, Some(false));
         assert_eq!(
             parsed.agents.as_ref().unwrap().tools,
-            vec!["claude".to_string()]
+            vec!["claude-code".to_string()]
         );
     }
 
@@ -1003,7 +1075,7 @@
             ..CreateEnvironmentRequest::default()
         };
         let yaml = serde_yaml::to_string(&codewire_yaml_from_request(&request)).unwrap();
-        let parsed: config::CodewireConfig = serde_yaml::from_str(&yaml).unwrap();
+        let parsed = config::parse_codewire_config(&yaml).unwrap();
 
         assert!(!yaml.contains("preset:"));
         assert_eq!(parsed.image, "ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467");
@@ -1017,7 +1089,7 @@
         assert_eq!(parsed.ports[0].label, "web");
         assert_eq!(
             parsed.agents.as_ref().unwrap().tools,
-            vec!["claude".to_string()]
+            vec!["claude-code".to_string()]
         );
         let secrets = parsed.secrets.as_ref().unwrap();
         assert_eq!(secrets.org, Some(true));
