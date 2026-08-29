@@ -24,6 +24,8 @@ pub mod workspace;
 #[cfg(target_os = "linux")]
 pub mod linux;
 #[cfg(target_os = "linux")]
+pub mod oci;
+#[cfg(target_os = "linux")]
 mod orphan;
 #[cfg(target_os = "linux")]
 pub mod runner_service;

@@ -445,6 +445,44 @@ impl PrivateRoot {
         Ok(())
     }
 
+    /// Atomically publish a prepared owner-private regular file without ever
+    /// replacing an existing content-addressed object. `false` means the
+    /// destination already existed and neither pathname was changed.
+    pub fn publish_private_regular_no_replace(
+        &self,
+        source: &Path,
+        destination: &Path,
+        exact_permissions: u32,
+    ) -> Result<bool, PathError> {
+        validate_single_component(source)?;
+        validate_single_component(destination)?;
+        self.open_regular(source, false, None, false, Some(exact_permissions))?;
+        match renameat_with(
+            self.directory.as_fd(),
+            source,
+            self.directory.as_fd(),
+            destination,
+            RenameFlags::NOREPLACE,
+        ) {
+            Ok(()) => {}
+            Err(rustix::io::Errno::EXIST) => return Ok(false),
+            Err(source_error) => {
+                return Err(PathError::Openat2 {
+                    path: self.path.join(destination),
+                    source: source_error,
+                });
+            }
+        }
+        self.directory
+            .sync_all()
+            .map_err(|source_error| PathError::Io {
+                path: self.path.clone(),
+                source: source_error,
+            })?;
+        self.open_regular(destination, false, None, false, Some(exact_permissions))?;
+        Ok(true)
+    }
+
     pub fn remove_empty_private_directory(&self, relative: &Path) -> Result<(), PathError> {
         validate_single_component(relative)?;
         self.open_directory(relative, 0o700)?;
@@ -721,5 +759,37 @@ mod tests {
         ));
         assert!(root.path().join("second").is_dir());
         assert!(destination.path().join("moved").is_dir());
+    }
+
+    #[test]
+    fn private_regular_publish_is_no_replace_and_leaves_loser_intact() {
+        let (_parent, root) = root();
+        for name in ["first", "second"] {
+            let mut file = root
+                .create_regular(Path::new(name), 0o400, true)
+                .unwrap()
+                .into_file();
+            file.write_all(name.as_bytes()).unwrap();
+            file.sync_all().unwrap();
+        }
+        assert!(
+            root.publish_private_regular_no_replace(
+                Path::new("first"),
+                Path::new("published"),
+                0o400,
+            )
+            .unwrap()
+        );
+        assert!(
+            !root
+                .publish_private_regular_no_replace(
+                    Path::new("second"),
+                    Path::new("published"),
+                    0o400,
+                )
+                .unwrap()
+        );
+        assert_eq!(fs::read(root.path().join("published")).unwrap(), b"first");
+        assert_eq!(fs::read(root.path().join("second")).unwrap(), b"second");
     }
 }

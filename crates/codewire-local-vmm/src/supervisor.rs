@@ -397,6 +397,10 @@ pub(crate) struct EnvironmentRecord {
     pub(crate) generation: u64,
     pub(crate) workspace_commit: String,
     pub(crate) source_path: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) project_spec_json: Option<Vec<u8>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) project_spec_sha256: Option<String>,
     pub(crate) runner: Option<RunnerRecord>,
     #[serde(default)]
     pub(crate) active_artifact_generation: Option<String>,
@@ -417,6 +421,7 @@ impl EnvironmentRecord {
             workspace_commit: self.workspace_commit.clone(),
             source_path: self.source_path.to_string_lossy().into_owned(),
             selected,
+            project_spec_sha256: self.project_spec_sha256.clone().unwrap_or_default(),
         }
     }
 
@@ -430,6 +435,18 @@ impl EnvironmentRecord {
             || self.disk_bytes < crate::linux::state::MINIMUM_STATE_DISK_BYTES
             || !self.disk_bytes.is_multiple_of(1024 * 1024)
             || !valid_object_id(&self.workspace_commit)
+            || match (&self.project_spec_json, &self.project_spec_sha256) {
+                (None, None) => false,
+                (Some(bytes), Some(digest)) => validate_project_intent(
+                    bytes,
+                    digest,
+                    u32::from(self.vcpus),
+                    self.memory_mib,
+                    self.disk_bytes,
+                )
+                .is_err(),
+                _ => true,
+            }
             || self
                 .active_artifact_generation
                 .as_ref()
@@ -652,6 +669,10 @@ impl SupervisorCore {
                             || u32::from(environment.vcpus) != request.vcpus
                             || environment.memory_mib != request.memory_mib
                             || environment.disk_bytes != request.disk_bytes
+                            || environment.project_spec_json.as_deref()
+                                != Some(request.project_spec_json.as_slice())
+                            || environment.project_spec_sha256.as_deref()
+                                != Some(request.project_spec_sha256.as_str())
                         {
                             return Err(SupervisorError::AlreadyExists(request.name.clone()));
                         }
@@ -677,6 +698,8 @@ impl SupervisorCore {
                                 generation: 0,
                                 workspace_commit: source.commit,
                                 source_path: source.source_path,
+                                project_spec_json: Some(request.project_spec_json.clone()),
+                                project_spec_sha256: Some(request.project_spec_sha256.clone()),
                                 runner: None,
                                 active_artifact_generation: Some(artifact_generation),
                                 staging_artifact_generation: None,
@@ -2193,10 +2216,62 @@ fn validate_create(request: &v1::CreateEnvironmentRequest) -> Result<Uuid, Super
         || !(128..=65_536).contains(&request.memory_mib)
         || request.disk_bytes < crate::linux::state::MINIMUM_STATE_DISK_BYTES
         || !request.disk_bytes.is_multiple_of(1024 * 1024)
+        || validate_project_intent(
+            &request.project_spec_json,
+            &request.project_spec_sha256,
+            request.vcpus,
+            request.memory_mib,
+            request.disk_bytes,
+        )
+        .is_err()
     {
         return Err(SupervisorError::InvalidRequest);
     }
     parse_request_id(&request.request_id)
+}
+
+fn validate_project_intent(
+    canonical_json: &[u8],
+    expected_sha256: &str,
+    vcpus: u32,
+    memory_mib: u32,
+    disk_bytes: u64,
+) -> Result<(), ()> {
+    const GIB: u64 = 1024 * 1024 * 1024;
+
+    if canonical_json.is_empty()
+        || canonical_json.len() > codewire_project::MAX_PROJECT_DOCUMENT_BYTES
+        || !valid_sha256(expected_sha256)
+        || !disk_bytes.is_multiple_of(GIB)
+    {
+        return Err(());
+    }
+    let spec: codewire_project::ProjectSpec =
+        serde_json::from_slice(canonical_json).map_err(|_| ())?;
+    spec.validate().map_err(|_| ())?;
+    if spec.canonical_json().map_err(|_| ())? != canonical_json
+        || format!("{:x}", Sha256::digest(canonical_json)) != expected_sha256
+        || spec.image.is_empty()
+        || !spec.preset.is_empty()
+        || !spec.repositories.is_empty()
+        || spec.working_directory != "/workspace"
+        || !spec.install_command.is_empty()
+        || !spec.startup_script.is_empty()
+        || !spec.environment.is_empty()
+        || !spec.agents.is_empty()
+        || !spec.agent_environment.is_empty()
+        || !spec.skills.is_empty()
+        || !spec.application_ports.is_empty()
+        || !spec.secrets.is_empty()
+        || !spec.credentials.is_empty()
+        || spec.workspace_mode != codewire_project::WorkspaceMode::Auto
+        || spec.resources.cpu_millicores != vcpus.checked_mul(1_000)
+        || spec.resources.memory_mib != Some(u64::from(memory_mib))
+        || spec.resources.disk_gib != Some(disk_bytes / GIB)
+    {
+        return Err(());
+    }
+    Ok(())
 }
 
 fn validate_resize(request: &v1::ResizeEnvironmentRequest) -> Result<Uuid, SupervisorError> {
@@ -2251,12 +2326,16 @@ fn begin_create_operation(
 }
 
 fn create_operation_payload(request: &v1::CreateEnvironmentRequest) -> serde_json::Value {
+    let project_spec_json = std::str::from_utf8(&request.project_spec_json)
+        .expect("validated canonical project JSON is UTF-8");
     serde_json::json!({
         "name": request.name,
         "source_path": request.source_path,
         "vcpus": request.vcpus,
         "memory_mib": request.memory_mib,
         "disk_bytes": request.disk_bytes,
+        "project_spec_json": project_spec_json,
+        "project_spec_sha256": request.project_spec_sha256,
     })
 }
 
@@ -2269,7 +2348,7 @@ fn create_request_from_operation(
     let fields = operation
         .payload
         .as_object()
-        .filter(|fields| fields.len() == 5)
+        .filter(|fields| fields.len() == 7)
         .ok_or(SupervisorError::InvalidState)?;
     let name = fields
         .get("name")
@@ -2295,6 +2374,17 @@ fn create_request_from_operation(
         .get("disk_bytes")
         .and_then(serde_json::Value::as_u64)
         .ok_or(SupervisorError::InvalidState)?;
+    let project_spec_json = fields
+        .get("project_spec_json")
+        .and_then(serde_json::Value::as_str)
+        .ok_or(SupervisorError::InvalidState)?
+        .as_bytes()
+        .to_vec();
+    let project_spec_sha256 = fields
+        .get("project_spec_sha256")
+        .and_then(serde_json::Value::as_str)
+        .ok_or(SupervisorError::InvalidState)?
+        .to_owned();
     let request = v1::CreateEnvironmentRequest {
         name,
         source_path,
@@ -2302,6 +2392,8 @@ fn create_request_from_operation(
         memory_mib,
         disk_bytes,
         request_id: operation.request_id.to_string(),
+        project_spec_json,
+        project_spec_sha256,
     };
     validate_create(&request)?;
     Ok(request)
@@ -2691,6 +2783,21 @@ pub enum SupervisorError {
 mod tests {
     use super::*;
 
+    fn project_intent(vcpus: u32, memory_mib: u32, disk_gib: u64) -> (Vec<u8>, String) {
+        let spec = codewire_project::ProjectSpec {
+            image: "ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467".to_owned(),
+            resources: codewire_project::ResourceSpec {
+                cpu_millicores: Some(vcpus * 1_000),
+                memory_mib: Some(u64::from(memory_mib)),
+                disk_gib: Some(disk_gib),
+            },
+            ..Default::default()
+        };
+        let bytes = spec.canonical_json().unwrap();
+        let digest = format!("{:x}", Sha256::digest(&bytes));
+        (bytes, digest)
+    }
+
     #[test]
     fn environment_names_are_single_safe_components() {
         for valid in ["dev", "dev-1", "a_b.c", "9"] {
@@ -2712,6 +2819,64 @@ mod tests {
     }
 
     #[test]
+    fn canonical_project_intent_is_digest_and_resource_bound() {
+        let (bytes, digest) = project_intent(2, 16 * 1024, 20);
+        let disk_bytes = 20 * 1024 * 1024 * 1024;
+        validate_project_intent(&bytes, &digest, 2, 16 * 1024, disk_bytes).unwrap();
+
+        let mut wrong_digest = digest.clone();
+        wrong_digest.replace_range(0..1, "f");
+        if wrong_digest == digest {
+            wrong_digest.replace_range(0..1, "e");
+        }
+        assert!(validate_project_intent(&bytes, &wrong_digest, 2, 16 * 1024, disk_bytes).is_err());
+        assert!(validate_project_intent(&bytes, &digest, 4, 16 * 1024, disk_bytes).is_err());
+
+        let mut noncanonical = bytes.clone();
+        noncanonical.push(b'\n');
+        let noncanonical_digest = format!("{:x}", Sha256::digest(&noncanonical));
+        assert!(
+            validate_project_intent(
+                &noncanonical,
+                &noncanonical_digest,
+                2,
+                16 * 1024,
+                disk_bytes,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn create_journal_reconstructs_exact_canonical_project_intent() {
+        let (project_spec_json, project_spec_sha256) = project_intent(2, 16 * 1024, 20);
+        let request = v1::CreateEnvironmentRequest {
+            name: "dev".to_owned(),
+            source_path: "/workspace/source".to_owned(),
+            vcpus: 2,
+            memory_mib: 16 * 1024,
+            disk_bytes: 20 * 1024 * 1024 * 1024,
+            request_id: Uuid::new_v4().to_string(),
+            project_spec_json,
+            project_spec_sha256,
+        };
+        validate_create(&request).unwrap();
+        let operation = OperationRecord {
+            operation_id: Uuid::new_v4(),
+            request_id: Uuid::parse_str(&request.request_id).unwrap(),
+            environment_id: Some(Uuid::new_v4()),
+            kind: OperationKind::Create,
+            phase: OperationPhase::Intent,
+            checkpoint: 0,
+            payload: create_operation_payload(&request),
+            result: None,
+            error_code: None,
+        };
+
+        assert_eq!(create_request_from_operation(&operation).unwrap(), request);
+    }
+
+    #[test]
     fn vsock_cid_is_stable_and_not_reserved() {
         let id = Uuid::parse_str("12345678-1234-5678-9abc-def012345678").unwrap();
         assert_eq!(allocate_vsock_cid(id), allocate_vsock_cid(id));
@@ -2730,6 +2895,8 @@ mod tests {
             generation: 1,
             workspace_commit: "a".repeat(40),
             source_path: PathBuf::from("/workspace/source"),
+            project_spec_json: None,
+            project_spec_sha256: None,
             runner: None,
             active_artifact_generation: Some("b".repeat(64)),
             staging_artifact_generation: None,
@@ -2786,6 +2953,8 @@ mod tests {
             generation: 1,
             workspace_commit: "a".repeat(40),
             source_path: PathBuf::from("/workspace/source"),
+            project_spec_json: None,
+            project_spec_sha256: None,
             runner: None,
             active_artifact_generation: Some("b".repeat(64)),
             staging_artifact_generation: None,

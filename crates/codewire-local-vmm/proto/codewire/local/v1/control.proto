@@ -44,6 +44,10 @@ message CreateEnvironmentRequest {
   uint32 memory_mib = 4;
   uint64 disk_bytes = 5;
   string request_id = 6;
+  // Exact canonical codewire-project JSON. The supervisor revalidates both
+  // canonical encoding and digest before journaling the create operation.
+  bytes project_spec_json = 7;
+  string project_spec_sha256 = 8;
 }
 
 message EnvironmentSelector {
@@ -72,6 +76,9 @@ message Environment {
   string workspace_commit = 8;
   string source_path = 9;
   bool selected = 10;
+  // Empty only for a legacy foundation environment created before canonical
+  // project intent became part of native supervisor state.
+  string project_spec_sha256 = 11;
 }
 
 message ListEnvironmentsRequest {}

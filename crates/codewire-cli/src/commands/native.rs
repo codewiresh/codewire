@@ -7,6 +7,7 @@ use codewire_local_vmm::supervisor::{
     NativeRuntimeConfig, NativeSupervisorClient, inspect_orphans, serve_supervisor,
 };
 use serde::Serialize;
+use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
 
 use super::*;
@@ -74,19 +75,21 @@ pub(crate) async fn create_native_environment(
     let requested_path = args.path.unwrap_or_else(|| PathBuf::from("."));
     let source_path = std::fs::canonicalize(&requested_path)
         .with_context(|| format!("resolve native workspace {}", requested_path.display()))?;
-    let yaml = native_codewire_yaml(&source_path, args.file.as_deref())?;
+    let project = native_codewire_yaml(&source_path, args.file.as_deref())?;
     let vcpus = match args.cpu.as_deref() {
         Some(value) => parse_native_cpu(value)?,
-        None => yaml.vcpus.unwrap_or(DEFAULT_NATIVE_VCPUS),
+        None => project.vcpus.unwrap_or(DEFAULT_NATIVE_VCPUS),
     };
     let memory_mib = match args.memory.as_deref() {
         Some(value) => parse_native_memory(value)?,
-        None => yaml.memory_mib.unwrap_or(DEFAULT_NATIVE_MEMORY_MIB),
+        None => project.memory_mib.unwrap_or(DEFAULT_NATIVE_MEMORY_MIB),
     };
     let disk_bytes = match args.disk.as_deref() {
         Some(value) => parse_native_disk(value)?,
-        None => yaml.disk_bytes.unwrap_or(DEFAULT_NATIVE_DISK_BYTES),
+        None => project.disk_bytes.unwrap_or(DEFAULT_NATIVE_DISK_BYTES),
     };
+    let (project_spec_json, project_spec_sha256) =
+        canonical_native_project_intent(project.spec, vcpus, memory_mib, disk_bytes)?;
     let mut client = native_client().await?;
     client
         .create(v1::CreateEnvironmentRequest {
@@ -96,6 +99,8 @@ pub(crate) async fn create_native_environment(
             memory_mib,
             disk_bytes,
             request_id: Uuid::new_v4().to_string(),
+            project_spec_json,
+            project_spec_sha256,
         })
         .await
         .map_err(native_status)
@@ -410,7 +415,8 @@ fn canonical_current_executable() -> anyhow::Result<PathBuf> {
 }
 
 #[derive(Debug, Default)]
-struct NativeYamlResources {
+struct NativeProjectPlan {
+    spec: codewire_project::ProjectSpec,
     vcpus: Option<u32>,
     memory_mib: Option<u32>,
     disk_bytes: Option<u64>,
@@ -419,7 +425,7 @@ struct NativeYamlResources {
 fn native_codewire_yaml(
     source_path: &Path,
     requested_file: Option<&Path>,
-) -> anyhow::Result<NativeYamlResources> {
+) -> anyhow::Result<NativeProjectPlan> {
     let file = requested_file.unwrap_or_else(|| Path::new("codewire.yaml"));
     if file.is_absolute()
         || file.as_os_str().is_empty()
@@ -433,7 +439,7 @@ fn native_codewire_yaml(
     let data = match std::fs::read_to_string(&path) {
         Ok(data) => data,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound && requested_file.is_none() => {
-            return Ok(NativeYamlResources::default());
+            return Ok(NativeProjectPlan::default());
         }
         Err(error) => return Err(error).with_context(|| format!("read {}", path.display())),
     };
@@ -446,17 +452,21 @@ fn native_codewire_yaml(
             unsupported.join(", ")
         );
     }
-    let resources = document.spec.resources;
-    Ok(NativeYamlResources {
-        vcpus: resources
-            .cpu_millicores
-            .map(native_vcpus_from_millicores)
-            .transpose()?,
-        memory_mib: resources
-            .memory_mib
-            .map(native_memory_from_mib)
-            .transpose()?,
-        disk_bytes: resources.disk_gib.map(native_disk_from_gib).transpose()?,
+    let resources = &document.spec.resources;
+    let vcpus = resources
+        .cpu_millicores
+        .map(native_vcpus_from_millicores)
+        .transpose()?;
+    let memory_mib = resources
+        .memory_mib
+        .map(native_memory_from_mib)
+        .transpose()?;
+    let disk_bytes = resources.disk_gib.map(native_disk_from_gib).transpose()?;
+    Ok(NativeProjectPlan {
+        spec: document.spec,
+        vcpus,
+        memory_mib,
+        disk_bytes,
     })
 }
 
@@ -525,6 +535,29 @@ fn native_memory_from_mib(memory_mib: u64) -> anyhow::Result<u32> {
 
 fn native_disk_from_gib(disk_gib: u64) -> anyhow::Result<u64> {
     parse_native_disk(&format!("{disk_gib}Gi"))
+}
+
+fn canonical_native_project_intent(
+    mut spec: codewire_project::ProjectSpec,
+    vcpus: u32,
+    memory_mib: u32,
+    disk_bytes: u64,
+) -> anyhow::Result<(Vec<u8>, String)> {
+    spec.image = CANONICAL_WORKSPACE_IMAGE.to_owned();
+    spec.resources = codewire_project::ResourceSpec {
+        cpu_millicores: Some(
+            vcpus
+                .checked_mul(1_000)
+                .ok_or_else(|| anyhow::anyhow!("native CPU quantity is too large"))?,
+        ),
+        memory_mib: Some(u64::from(memory_mib)),
+        disk_gib: Some(disk_bytes / (1024 * 1024 * 1024)),
+    };
+    let bytes = spec
+        .canonical_json()
+        .context("encode canonical native project intent")?;
+    let digest = format!("{:x}", Sha256::digest(&bytes));
+    Ok((bytes, digest))
 }
 
 fn reject_unsupported_native_create_options(args: &EnvCreateArgs) -> anyhow::Result<()> {
@@ -671,6 +704,24 @@ mod tests {
         assert_eq!(resources.vcpus, Some(2));
         assert_eq!(resources.memory_mib, Some(16 * 1024));
         assert_eq!(resources.disk_bytes, Some(40 * 1024 * 1024 * 1024));
+    }
+
+    #[test]
+    fn native_project_intent_records_effective_resources_and_default_image() {
+        let (bytes, digest) = canonical_native_project_intent(
+            codewire_project::ProjectSpec::default(),
+            2,
+            16 * 1024,
+            40 * 1024 * 1024 * 1024,
+        )
+        .unwrap();
+        assert_eq!(format!("{:x}", Sha256::digest(&bytes)), digest);
+        let spec: codewire_project::ProjectSpec = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(spec.image, CANONICAL_WORKSPACE_IMAGE);
+        assert_eq!(spec.resources.cpu_millicores, Some(2_000));
+        assert_eq!(spec.resources.memory_mib, Some(16 * 1024));
+        assert_eq!(spec.resources.disk_gib, Some(40));
+        assert_eq!(spec.canonical_json().unwrap(), bytes);
     }
 
     #[test]

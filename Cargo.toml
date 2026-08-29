@@ -68,6 +68,7 @@ codewire-project-proto = { path = "crates/codewire-project-proto" }
 uniffi = "0.31"
 
 # AI/HTTP
+oci-spec = { version = "=0.10.0", default-features = false, features = ["image"] }
 reqwest = { version = "0.12", default-features = false, features = ["http2", "json", "stream", "rustls-tls"] }
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }

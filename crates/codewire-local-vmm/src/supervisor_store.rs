@@ -28,9 +28,13 @@ const DATABASE_SHM_FILE: &str = "supervisor.db-shm";
 const LEGACY_STATE_FILE: &str = "state.json";
 const LEGACY_ARCHIVE_FILE: &str = "state.v1.imported.json";
 const DATABASE_APPLICATION_ID: i64 = 0x4357_564d; // "CWVM"
-const DATABASE_SCHEMA_VERSION: i64 = 1;
+const DATABASE_SCHEMA_VERSION: i64 = 2;
+const LEGACY_DATABASE_SCHEMA_VERSION: i64 = 1;
 const MAXIMUM_STATE_BYTES: u64 = 1024 * 1024;
-const MAXIMUM_OPERATION_BYTES: usize = 64 * 1024;
+// A create journal entry contains the exact canonical project JSON so replay
+// never has to reread a mutable codewire.yaml. The source document itself is
+// bounded to 256 KiB; this higher bound covers JSON string escaping.
+const MAXIMUM_OPERATION_BYTES: usize = 2 * 1024 * 1024;
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -164,7 +168,7 @@ impl SupervisorStore {
         connection.set_db_config(DbConfig::SQLITE_DBCONFIG_DEFENSIVE, true)?;
         connection.pragma_update(None, "foreign_keys", true)?;
         connection.pragma_update(None, "trusted_schema", false)?;
-        validate_schema(&connection)?;
+        validate_schema(&connection, true)?;
         validate_database(&connection)?;
         let reopened = root.open_regular(relative, false, None, false, Some(0o600))?;
         if reopened.identity() != &identity {
@@ -189,7 +193,8 @@ impl SupervisorStore {
         if initialize {
             initialize_schema(&connection)?;
         } else {
-            validate_schema(&connection)?;
+            migrate_schema(&connection)?;
+            validate_schema(&connection, false)?;
         }
         validate_database(&connection)?;
 
@@ -387,12 +392,21 @@ impl SupervisorStore {
             [],
             |row| row.get(0),
         )?;
-        let mut statement = self.connection.prepare(
+        let schema_version: i64 =
+            self.connection
+                .pragma_query_value(None, "user_version", |row| row.get(0))?;
+        let project_columns = match schema_version {
+            DATABASE_SCHEMA_VERSION => "project_spec_json, project_spec_sha256",
+            LEGACY_DATABASE_SCHEMA_VERSION => "NULL, NULL",
+            _ => return Err(SupervisorStoreError::InvalidDatabase),
+        };
+        let query = format!(
             "SELECT id, name, observed_state, vcpus, memory_mib, disk_bytes, generation, \
-                    workspace_commit, source_path, runner_json, active_artifact_generation, \
-                    staging_artifact_generation \
-             FROM environments ORDER BY name",
-        )?;
+                    workspace_commit, source_path, {project_columns}, runner_json, \
+                    active_artifact_generation, staging_artifact_generation \
+             FROM environments ORDER BY name"
+        );
+        let mut statement = self.connection.prepare(&query)?;
         let rows = statement.query_map([], |row| {
             Ok((
                 row.get::<_, String>(0)?,
@@ -406,7 +420,9 @@ impl SupervisorStore {
                 row.get::<_, Vec<u8>>(8)?,
                 row.get::<_, Option<Vec<u8>>>(9)?,
                 row.get::<_, Option<String>>(10)?,
-                row.get::<_, Option<String>>(11)?,
+                row.get::<_, Option<Vec<u8>>>(11)?,
+                row.get::<_, Option<String>>(12)?,
+                row.get::<_, Option<String>>(13)?,
             ))
         })?;
         let mut environments = BTreeMap::new();
@@ -422,6 +438,8 @@ impl SupervisorStore {
                 generation,
                 workspace_commit,
                 source_path,
+                project_spec_json,
+                project_spec_sha256,
                 runner_json,
                 active_artifact_generation,
                 staging_artifact_generation,
@@ -446,6 +464,8 @@ impl SupervisorStore {
                     .map_err(|_| SupervisorStoreError::InvalidState)?,
                 workspace_commit,
                 source_path: PathBuf::from(OsString::from_vec(source_path)),
+                project_spec_json,
+                project_spec_sha256,
                 runner,
                 active_artifact_generation,
                 staging_artifact_generation,
@@ -599,6 +619,8 @@ fn initialize_schema(connection: &Connection) -> Result<(), SupervisorStoreError
            generation INTEGER NOT NULL CHECK (generation >= 0),
            workspace_commit TEXT NOT NULL,
            source_path BLOB NOT NULL,
+           project_spec_json BLOB NULL,
+           project_spec_sha256 TEXT NULL,
            runner_json BLOB NULL,
            active_artifact_generation TEXT NULL,
            staging_artifact_generation TEXT NULL
@@ -632,18 +654,54 @@ fn initialize_schema(connection: &Connection) -> Result<(), SupervisorStoreError
            updated_unix_ms INTEGER NOT NULL
          ) STRICT;
          PRAGMA application_id = 1129797197;
-         PRAGMA user_version = 1;
+         PRAGMA user_version = 2;
          COMMIT;",
     )?;
-    validate_schema(connection)
+    validate_schema(connection, false)
 }
 
-fn validate_schema(connection: &Connection) -> Result<(), SupervisorStoreError> {
+fn migrate_schema(connection: &Connection) -> Result<(), SupervisorStoreError> {
     let application_id: i64 =
         connection.pragma_query_value(None, "application_id", |row| row.get(0))?;
     let schema_version: i64 =
         connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    if application_id != DATABASE_APPLICATION_ID || schema_version != DATABASE_SCHEMA_VERSION {
+    if application_id != DATABASE_APPLICATION_ID {
+        return Err(SupervisorStoreError::UnsupportedSchema {
+            application_id,
+            schema_version,
+        });
+    }
+    match schema_version {
+        DATABASE_SCHEMA_VERSION => Ok(()),
+        LEGACY_DATABASE_SCHEMA_VERSION => {
+            connection.execute_batch(
+                "BEGIN IMMEDIATE;
+                 ALTER TABLE environments ADD COLUMN project_spec_json BLOB NULL;
+                 ALTER TABLE environments ADD COLUMN project_spec_sha256 TEXT NULL;
+                 PRAGMA user_version = 2;
+                 COMMIT;",
+            )?;
+            Ok(())
+        }
+        _ => Err(SupervisorStoreError::UnsupportedSchema {
+            application_id,
+            schema_version,
+        }),
+    }
+}
+
+fn validate_schema(
+    connection: &Connection,
+    allow_legacy_read: bool,
+) -> Result<(), SupervisorStoreError> {
+    let application_id: i64 =
+        connection.pragma_query_value(None, "application_id", |row| row.get(0))?;
+    let schema_version: i64 =
+        connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    if application_id != DATABASE_APPLICATION_ID
+        || (schema_version != DATABASE_SCHEMA_VERSION
+            && !(allow_legacy_read && schema_version == LEGACY_DATABASE_SCHEMA_VERSION))
+    {
         return Err(SupervisorStoreError::UnsupportedSchema {
             application_id,
             schema_version,
@@ -666,6 +724,21 @@ fn validate_schema(connection: &Connection) -> Result<(), SupervisorStoreError> 
             .is_some();
         if !present {
             return Err(SupervisorStoreError::InvalidDatabase);
+        }
+    }
+    if schema_version == DATABASE_SCHEMA_VERSION {
+        for column in ["project_spec_json", "project_spec_sha256"] {
+            let present = connection
+                .query_row(
+                    "SELECT 1 FROM pragma_table_info('environments') WHERE name = ?1",
+                    [column],
+                    |_| Ok(()),
+                )
+                .optional()?
+                .is_some();
+            if !present {
+                return Err(SupervisorStoreError::InvalidDatabase);
+            }
         }
     }
     Ok(())
@@ -710,8 +783,9 @@ fn write_state(
             "INSERT INTO environments(
                id, name, desired_state, observed_state, vcpus, memory_mib,
                disk_bytes, generation, workspace_commit, source_path, runner_json,
-               active_artifact_generation, staging_artifact_generation
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+               active_artifact_generation, staging_artifact_generation,
+               project_spec_json, project_spec_sha256
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
              ON CONFLICT(id) DO UPDATE SET
                name = excluded.name,
                desired_state = excluded.desired_state,
@@ -724,7 +798,9 @@ fn write_state(
                source_path = excluded.source_path,
                runner_json = excluded.runner_json,
                active_artifact_generation = excluded.active_artifact_generation,
-               staging_artifact_generation = excluded.staging_artifact_generation",
+               staging_artifact_generation = excluded.staging_artifact_generation,
+               project_spec_json = excluded.project_spec_json,
+               project_spec_sha256 = excluded.project_spec_sha256",
             params![
                 environment.id.to_string(),
                 &environment.name,
@@ -739,6 +815,8 @@ fn write_state(
                 runner_json,
                 &environment.active_artifact_generation,
                 &environment.staging_artifact_generation,
+                &environment.project_spec_json,
+                &environment.project_spec_sha256,
             ],
         )?;
         transaction.execute(
@@ -1296,6 +1374,62 @@ mod tests {
         (parent, root)
     }
 
+    fn write_legacy_v1_database(root: &PrivateRoot) -> Uuid {
+        let (connection, initialize) = open_database(root).unwrap();
+        assert!(initialize);
+        configure_connection(&connection).unwrap();
+        initialize_schema(&connection).unwrap();
+        connection
+            .execute_batch(
+                "BEGIN IMMEDIATE;
+                 ALTER TABLE environments DROP COLUMN project_spec_sha256;
+                 ALTER TABLE environments DROP COLUMN project_spec_json;
+                 PRAGMA user_version = 1;
+                 COMMIT;",
+            )
+            .unwrap();
+        let id = Uuid::new_v4();
+        connection
+            .execute(
+                "INSERT INTO environments(
+                   id, name, desired_state, observed_state, vcpus, memory_mib,
+                   disk_bytes, generation, workspace_commit, source_path,
+                   runner_json, active_artifact_generation, staging_artifact_generation
+                 ) VALUES (?1, 'dev', 'stopped', 'stopped', 2, 16384, ?2, 7, ?3, ?4, NULL, ?5, NULL)",
+                params![
+                    id.to_string(),
+                    i64::try_from(crate::linux::state::MINIMUM_STATE_DISK_BYTES).unwrap(),
+                    "b".repeat(40),
+                    b"/workspace/source".as_slice(),
+                    "c".repeat(64),
+                ],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "UPDATE supervisor_settings SET current_environment_id = ?1 WHERE singleton = 1",
+                [id.to_string()],
+            )
+            .unwrap();
+        drop(connection);
+        id
+    }
+
+    fn project_intent() -> (Vec<u8>, String) {
+        let spec = codewire_project::ProjectSpec {
+            image: "ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467".to_owned(),
+            resources: codewire_project::ResourceSpec {
+                cpu_millicores: Some(2_000),
+                memory_mib: Some(16 * 1024),
+                disk_gib: Some(1),
+            },
+            ..Default::default()
+        };
+        let bytes = spec.canonical_json().unwrap();
+        let digest = sha256_hex(&bytes);
+        (bytes, digest)
+    }
+
     fn environment(
         state: StoredEnvironmentState,
         runner_boot_id: Option<&str>,
@@ -1333,6 +1467,8 @@ mod tests {
             generation: 7,
             workspace_commit: "b".repeat(40),
             source_path: PathBuf::from("/workspace/source"),
+            project_spec_json: None,
+            project_spec_sha256: None,
             runner,
             active_artifact_generation: Some("c".repeat(64)),
             staging_artifact_generation: None,
@@ -1368,6 +1504,69 @@ mod tests {
         let (reopened, state) = SupervisorStore::open_for_boot(&root, "boot-a").unwrap();
         assert_eq!(state, SupervisorState::default());
         assert_eq!(reopened.metadata("namespace_id").unwrap(), namespace);
+    }
+
+    #[test]
+    fn legacy_v1_database_is_readable_then_migrated_without_reinterpretation() {
+        let (_parent, root) = root();
+        let expected_id = write_legacy_v1_database(&root);
+
+        let (inspected, state) = SupervisorStore::inspect(&root).unwrap();
+        let inspected = inspected.unwrap();
+        let schema: i64 = inspected
+            .connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(schema, LEGACY_DATABASE_SCHEMA_VERSION);
+        let legacy = &state.environments["dev"];
+        assert_eq!(legacy.id, expected_id);
+        assert!(legacy.project_spec_json.is_none());
+        assert!(legacy.project_spec_sha256.is_none());
+        drop(inspected);
+
+        let (store, mut migrated) = SupervisorStore::open_for_boot(&root, "boot-a").unwrap();
+        let schema: i64 = store
+            .connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(schema, DATABASE_SCHEMA_VERSION);
+        for column in ["project_spec_json", "project_spec_sha256"] {
+            assert!(
+                store
+                    .connection
+                    .query_row(
+                        "SELECT 1 FROM pragma_table_info('environments') WHERE name = ?1",
+                        [column],
+                        |_| Ok(()),
+                    )
+                    .optional()
+                    .unwrap()
+                    .is_some()
+            );
+        }
+        let legacy = &migrated.environments["dev"];
+        assert_eq!(legacy.id, expected_id);
+        assert!(legacy.project_spec_json.is_none());
+        assert!(legacy.project_spec_sha256.is_none());
+
+        let (bytes, digest) = project_intent();
+        let environment = migrated.environments.get_mut("dev").unwrap();
+        environment.disk_bytes = 1024 * 1024 * 1024;
+        environment.project_spec_json = Some(bytes.clone());
+        environment.project_spec_sha256 = Some(digest.clone());
+        store.replace_state(&migrated).unwrap();
+        drop(store);
+
+        let (_reopened, persisted) = SupervisorStore::open_for_boot(&root, "boot-a").unwrap();
+        let environment = &persisted.environments["dev"];
+        assert_eq!(
+            environment.project_spec_json.as_deref(),
+            Some(bytes.as_slice())
+        );
+        assert_eq!(
+            environment.project_spec_sha256.as_deref(),
+            Some(digest.as_str())
+        );
     }
 
     #[test]

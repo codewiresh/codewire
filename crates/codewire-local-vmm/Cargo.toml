@@ -15,11 +15,16 @@ tonic = { workspace = true }
 tonic-prost = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
+bytes = { workspace = true }
+codewire-project = { workspace = true }
 codewire-daemon = { workspace = true }
 codewire-vmm-guest-probe = { workspace = true }
+futures = { workspace = true }
 hyper-util = { workspace = true }
 libc = "0.2"
+oci-spec = { workspace = true }
 rand = { workspace = true }
+reqwest = { workspace = true }
 rustix = { workspace = true }
 rusqlite = { workspace = true }
 serde = { workspace = true }
@@ -28,6 +33,7 @@ sha2 = { workspace = true }
 tokio = { workspace = true }
 tokio-stream = { workspace = true }
 tower = { workspace = true }
+url = { workspace = true }
 uuid = { workspace = true }
 zeroize = { workspace = true }
 
@@ -36,3 +42,4 @@ tonic-prost-build = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+wiremock = { workspace = true }
