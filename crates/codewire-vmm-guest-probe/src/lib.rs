@@ -7,6 +7,8 @@ mod setup;
 
 #[cfg(target_os = "linux")]
 pub mod guest;
+#[cfg(target_os = "linux")]
+mod setup_verify;
 
 pub use newc::{
     NewcError, canonical_guest_root_newc, canonical_newc, write_canonical_guest_root_initramfs,

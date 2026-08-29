@@ -24,6 +24,7 @@ zeroize = { workspace = true }
 [target.'cfg(target_os = "linux")'.dependencies]
 anyhow = { workspace = true }
 codewire-daemon = { workspace = true }
+flate2 = { workspace = true }
 libc = "0.2"
 serde = { workspace = true }
 serde_json = { workspace = true }

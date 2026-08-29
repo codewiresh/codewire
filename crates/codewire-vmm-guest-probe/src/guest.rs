@@ -25,6 +25,7 @@ use tokio_vsock::{
 use zeroize::Zeroizing;
 
 use crate::newc::BASIC_BUSYBOX_APPLETS;
+use crate::setup_verify::verify_setup_contents;
 use crate::{
     ROOT_DISK_SERIAL, SEED_DISK_SERIAL, SEED_LEN, SETUP_DISK_SERIAL, SETUP_HEADER_LEN,
     STATE_DISK_SERIAL, Seed, SetupArchitecture, SetupBinding, SetupHeader, Sha256Value,
@@ -161,8 +162,12 @@ pub fn run_init() -> Result<()> {
             "setup disk must be distinct from every persistent or secret-bearing disk"
         );
         validate_block_device(&setup_device)?;
-        let _header = admit_setup_header(&setup_device, binding)?;
+        let mut setup = open_setup_device(&setup_device)?;
+        let header = verify_setup_header(&mut setup, binding)?;
         record_boot_stage("setup-header-ready")?;
+        let _contents = verify_setup_contents(&mut setup, &header)
+            .context("verify every guest setup object and layer digest")?;
+        record_boot_stage("setup-content-ready")?;
         bail!("verified OCI setup requires guest layer application support");
     }
     let poweroff = prepare_container_control(&seed)?;
@@ -674,12 +679,12 @@ fn read_seed_file(path: &Path) -> Result<Seed> {
     Seed::decode(&bytes).context("decode guest seed")
 }
 
-fn admit_setup_header(path: &Path, binding: SetupBinding) -> Result<SetupHeader> {
+fn open_setup_device(path: &Path) -> Result<File> {
     let mut options = OpenOptions::new();
     options
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
-    let mut setup = options
+    let setup = options
         .open(path)
         .with_context(|| format!("open guest setup disk {}", path.display()))?;
     let metadata = setup
@@ -689,7 +694,7 @@ fn admit_setup_header(path: &Path, binding: SetupBinding) -> Result<SetupHeader>
         metadata.file_type().is_block_device(),
         "guest setup path is not a block device"
     );
-    verify_setup_header(&mut setup, binding)
+    Ok(setup)
 }
 
 fn verify_setup_header(
