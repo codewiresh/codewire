@@ -636,7 +636,7 @@ for sqlite_sidecar in "$STATE_ROOT/supervisor.db-wal" "$STATE_ROOT/supervisor.db
   [[ ! -e "$sqlite_sidecar" || "$(stat -c '%a' "$sqlite_sidecar")" == 600 ]] ||
     die "native supervisor database sidecar is not mode 0600: $sqlite_sidecar"
 done
-[[ "$(native_database_value contract)" == '1129797197:3:wal:ok' ]] ||
+[[ "$(native_database_value contract)" == '1129797197:4:wal:ok' ]] ||
   die 'native supervisor database contract drifted'
 [[ "$(native_database_value ownership)" == '64:6' ]] ||
   die 'native artifact generation or owned-object manifest was not recorded'

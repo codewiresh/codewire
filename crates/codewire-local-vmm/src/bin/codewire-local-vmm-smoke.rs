@@ -26,15 +26,15 @@ mod linux {
     use std::error::Error;
     use std::fs::{self, File, Metadata};
     use std::future::Future;
-    use std::io::{self, Read, Seek, SeekFrom};
-    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+    use std::io::{self, Cursor, Read, Seek, SeekFrom, Write};
+    use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt};
     use std::path::{Path, PathBuf};
     use std::process::{Child, Command, Stdio};
     use std::time::{Duration, Instant};
 
     use codewire_daemon::client::{SessionClient, SessionClientError, v1};
     use codewire_local_vmm::ch_api::VmInfo;
-    use codewire_local_vmm::generation::ensure_empty_root_generation;
+    use codewire_local_vmm::generation::{RootGenerationDisk, ensure_empty_root_generation};
     use codewire_local_vmm::linux::runner::ExitClass;
     use codewire_local_vmm::linux::state::{
         StateDiskIdentity, VmPhase, cleanup_trashed_vm, move_stopped_vm_to_trash,
@@ -43,7 +43,12 @@ mod linux {
         CloudHypervisorRunner, CreateVmRequest, LiveProcess, PreparedVm, ProcessIdentity,
         RecoveryError, RunnerConfig, RunningVm, VmPaths,
     };
+    use codewire_project::ProjectSpec;
     use codewire_vmm_guest_probe::guest::CONTAINER_INIT_PATH;
+    use codewire_vmm_guest_probe::{
+        LayerEncoding, SETUP_HEADER_LEN, SetupArchitecture, SetupBinding, SetupBlob, SetupHeader,
+        SetupLayerBlob, SetupObject, Sha256Value, oci_root_generation,
+    };
     use serde_json::Value;
     use tonic::Code;
     use uuid::Uuid;
@@ -294,33 +299,79 @@ mod linux {
         observation("host.vhost_vsock", preflight.vhost_vsock.display());
         observation("vmm.seccomp", "kill");
         observation("vmm.landlock", "native");
-        ensure_empty_root_generation(
+        let root = ensure_empty_root_generation(
             &arguments.state_root,
             arguments.vm_id,
             ROOT_GENERATION,
             ROOT_DISK_BYTES,
         )?;
+        let setup = prepare_smoke_setup(&runner, &root)?;
 
         // The concrete lifecycle calls are kept together so every error path
         // can be reconciled by the cleanup subcommand. No credential leaves a
         // RunningVm handle or this block.
-        run_lifecycle(&runner, &arguments, outside_disk).await
+        run_lifecycle(&runner, &arguments, outside_disk, setup).await
     }
 
     async fn run_lifecycle(
         runner: &CloudHypervisorRunner,
         arguments: &Args,
         outside_disk: &Path,
+        setup: SetupBinding,
     ) -> SmokeResult<()> {
         let resources = arguments
             .resources
             .ok_or_else(|| failure("run resource configuration is missing"))?;
         observation("vm.requested_vcpus", resources.vcpus);
         observation("vm.requested_memory_mib", resources.memory_mib);
-        let prepared_one = runner.prepare(request(1, arguments, resources)).await?;
-        let fixture_paths = prepared_one.paths().clone();
-        require_prepared_identity(&prepared_one, arguments.vm_id, 1)?;
-        let disk_identity = prepared_one.state_disk_identity().clone();
+
+        let provisioned = runner
+            .prepare(request_with_setup(1, arguments, resources, setup))
+            .await?;
+        let fixture_paths = provisioned.paths().clone();
+        require_prepared_identity(&provisioned, arguments.vm_id, 1)?;
+        let disk_identity = provisioned.state_disk_identity().clone();
+        let provisioning_token = provisioned.auth_token_fingerprint();
+        let mut provisioning = runner.start(provisioned).await?;
+        require_running_identity(&provisioning, arguments.vm_id, 1, &disk_identity)?;
+        let provisioning_process = provisioning.process_identity().clone();
+        let provisioning_client = connect_ready_daemon(&provisioning).await?;
+        require_identity(
+            &run_guest_command(&provisioning_client, &["identity"]).await?,
+            arguments.vm_id,
+            1,
+        )?;
+        provisioning.discard_one_boot_inputs()?;
+        if provisioning.paths().seed_disk.exists()
+            || provisioning
+                .paths()
+                .generations_dir
+                .join(ROOT_GENERATION)
+                .join("setup.raw")
+                .exists()
+        {
+            return Err(failure(
+                "provisioning inputs remained reachable after OCI workspace readiness",
+            ));
+        }
+        drop(provisioning_client);
+        match provisioning.stop().await? {
+            ExitClass::GuestShutdown => {}
+            ExitClass::StillRunning => {
+                return Err(failure("OCI provisioning VM remained running after stop"));
+            }
+            ExitClass::VmmFailure(_) => {
+                return Err(failure("OCI provisioning VM required a failure signal"));
+            }
+        }
+        drop(provisioning);
+        wait_for_identity_to_end(&provisioning_process).await?;
+        observation("guest.oci_setup_applied", true);
+        observation("guest.oci_restart_without_setup", "pending");
+
+        let prepared_one = runner.prepare(request(2, arguments, resources)).await?;
+        require_prepared_identity(&prepared_one, arguments.vm_id, 2)?;
+        require_same_disk(&disk_identity, prepared_one.state_disk_identity())?;
         observation("vm.id", arguments.vm_id);
         observation("vm.state_disk", fixture_paths.state_disk.display());
         observation("vm.state_disk.dev", disk_identity.file.device);
@@ -328,8 +379,13 @@ mod linux {
         observation("vm.state_disk.size", disk_identity.file.size);
         observation("vm.state_disk.ext4_uuid", disk_identity.filesystem_uuid);
         let token_one = prepared_one.auth_token_fingerprint();
+        if token_one == provisioning_token {
+            return Err(failure(
+                "daemon token fingerprint was reused after OCI provisioning",
+            ));
+        }
         let mut first = runner.start(prepared_one).await?;
-        require_running_identity(&first, arguments.vm_id, 1, &disk_identity)?;
+        require_running_identity(&first, arguments.vm_id, 2, &disk_identity)?;
         if first.auth_token_fingerprint() != token_one {
             return Err(failure("daemon token changed between prepare and start"));
         }
@@ -338,6 +394,7 @@ mod linux {
 
         let first_client = connect_ready_daemon(&first).await?;
         observation("guest.daemon_ready", true);
+        observation("guest.oci_restart_without_setup", "verified");
         require_vmm_process_confinement(&first_process)?;
         require_supervisor_socket_boundary()?;
         require_wrong_token_rejected(
@@ -347,7 +404,7 @@ mod linux {
         )
         .await?;
         observation("guest.wrong_token_rejected", true);
-        require_pty_identity(&first_client, arguments.vm_id, 1).await?;
+        require_pty_identity(&first_client, arguments.vm_id, 2).await?;
         observation("guest.identity_verified", true);
         observation("guest.pty_verified", true);
         require_stopped_session_process_reaped(&first_client).await?;
@@ -392,22 +449,22 @@ mod linux {
         );
 
         let poweroff_session = launch_poweroff(&first_client).await?;
-        observation("vm.generation.1.poweroff_session", "admitted");
+        observation("vm.generation.2.poweroff_session", "admitted");
         let first_exit = first.wait_for_exit(VM_EXIT_TIMEOUT).await?;
         if !matches!(first_exit, ExitClass::GuestShutdown) {
-            observe_poweroff_session(&first_client, &poweroff_session).await;
+            observe_poweroff_session(&first_client, &poweroff_session, 2).await;
         }
         drop(first_client);
         match first_exit {
             ExitClass::GuestShutdown => {
-                observation("vm.generation.1.exit", "guest-shutdown");
+                observation("vm.generation.2.exit", "guest-shutdown");
             }
             ExitClass::StillRunning => {
-                observation("vm.generation.1.exit", "timeout");
+                observation("vm.generation.2.exit", "timeout");
                 return Err(failure("guest-initiated poweroff did not stop the VMM"));
             }
             ExitClass::VmmFailure(_) => {
-                observation("vm.generation.1.exit", "vmm-failure");
+                observation("vm.generation.2.exit", "vmm-failure");
                 return Err(failure(
                     "guest-initiated poweroff was classified as VMM failure",
                 ));
@@ -417,28 +474,28 @@ mod linux {
         wait_for_identity_to_end(&first_process).await?;
         require_stale_identity_cannot_adopt_replacement(&first_process)?;
 
-        let prepared_two = runner.prepare(request(2, arguments, resources)).await?;
-        require_prepared_identity(&prepared_two, arguments.vm_id, 2)?;
+        let prepared_two = runner.prepare(request(3, arguments, resources)).await?;
+        require_prepared_identity(&prepared_two, arguments.vm_id, 3)?;
         require_same_disk(&disk_identity, prepared_two.state_disk_identity())?;
         let token_two = prepared_two.auth_token_fingerprint();
-        if token_two == token_one {
+        if token_two == token_one || token_two == provisioning_token {
             return Err(failure(
                 "daemon token fingerprint was reused across generations",
             ));
         }
         let mut second = runner.start(prepared_two).await?;
-        require_running_identity(&second, arguments.vm_id, 2, &disk_identity)?;
+        require_running_identity(&second, arguments.vm_id, 3, &disk_identity)?;
         let second_client = connect_ready_daemon(&second).await?;
         require_identity(
             &run_guest_command(&second_client, &["identity"]).await?,
             arguments.vm_id,
-            2,
+            3,
         )?;
         require_nonce_read(
             &run_guest_command(&second_client, &["read-nonce"]).await?,
             &nonce,
         )?;
-        require_saved_poweroff_marker(&second_client, &poweroff_session, arguments.vm_id, 1)
+        require_saved_poweroff_marker(&second_client, &poweroff_session, arguments.vm_id, 2)
             .await?;
         let second_process = second.process_identity().clone();
         drop(second_client);
@@ -453,12 +510,13 @@ mod linux {
         }
         drop(second);
         wait_for_identity_to_end(&second_process).await?;
-        observation("vm.generation.2.exit", "vmm-failure");
+        observation("vm.generation.3.exit", "vmm-failure");
 
-        let prepared_three = runner.prepare(request(3, arguments, resources)).await?;
+        let prepared_three = runner.prepare(request(4, arguments, resources)).await?;
         require_same_disk(&disk_identity, prepared_three.state_disk_identity())?;
         let token_three = prepared_three.auth_token_fingerprint();
-        if token_three == token_one || token_three == token_two {
+        if token_three == provisioning_token || token_three == token_one || token_three == token_two
+        {
             return Err(failure("daemon token fingerprint repeated after crash"));
         }
         let third = runner.start(prepared_three).await?;
@@ -466,7 +524,7 @@ mod linux {
         require_identity(
             &run_guest_command(&third_client, &["identity"]).await?,
             arguments.vm_id,
-            3,
+            4,
         )?;
         require_nonce_read(
             &run_guest_command(&third_client, &["read-nonce"]).await?,
@@ -483,7 +541,7 @@ mod linux {
         drop(third);
         let recovered = runner.recover(arguments.vm_id)?;
         if recovered.state().phase != VmPhase::Running
-            || recovered.state().generation != 3
+            || recovered.state().generation != 4
             || recovered.state().process != third_process
             || recovered.paths().state_disk != fixture_paths.state_disk
         {
@@ -493,14 +551,14 @@ mod linux {
         drop(recovered);
         wait_for_identity_to_end(&third_process).await?;
         observation(
-            "vm.generation.3.recovery",
+            "vm.generation.4.recovery",
             "identity-checked-orphan-terminated",
         );
 
-        let prepared_four = runner.prepare(request(4, arguments, resources)).await?;
+        let prepared_four = runner.prepare(request(5, arguments, resources)).await?;
         require_same_disk(&disk_identity, prepared_four.state_disk_identity())?;
         let token_four = prepared_four.auth_token_fingerprint();
-        if [token_one, token_two, token_three].contains(&token_four) {
+        if [provisioning_token, token_one, token_two, token_three].contains(&token_four) {
             return Err(failure(
                 "daemon token fingerprint repeated after orphan recovery",
             ));
@@ -510,7 +568,7 @@ mod linux {
         require_identity(
             &run_guest_command(&fourth_client, &["identity"]).await?,
             arguments.vm_id,
-            4,
+            5,
         )?;
         require_nonce_read(
             &run_guest_command(&fourth_client, &["read-nonce"]).await?,
@@ -559,6 +617,206 @@ mod linux {
             memory_mib: resources.memory_mib,
             setup: None,
         }
+    }
+
+    fn request_with_setup(
+        generation: u64,
+        arguments: &Args,
+        resources: RunResources,
+        setup: SetupBinding,
+    ) -> CreateVmRequest {
+        let mut request = request(generation, arguments, resources);
+        request.setup = Some(setup);
+        request
+    }
+
+    fn prepare_smoke_setup(
+        runner: &CloudHypervisorRunner,
+        root: &RootGenerationDisk,
+    ) -> SmokeResult<SetupBinding> {
+        if root.generation != ROOT_GENERATION
+            || root.path.file_name().and_then(|name| name.to_str()) != Some("root.raw")
+        {
+            return Err(failure("prepared root generation has an invalid identity"));
+        }
+        let busybox = runner.read_sealed_guest_busybox()?;
+        let layer = smoke_workspace_layer(&busybox)?;
+        let (architecture, image_architecture) = smoke_setup_architecture()?;
+        let project = ProjectSpec {
+            image: "example.invalid/codewire/kvm-smoke:fixture".to_owned(),
+            ..ProjectSpec::default()
+        };
+        let project = project.canonical_json()?;
+        let diff_id = Sha256Value::calculate(&layer);
+        let config = serde_json::to_vec(&serde_json::json!({
+            "architecture": image_architecture,
+            "os": "linux",
+            "config": {
+                "User": "0",
+                "Env": ["HOME=/root", "PATH=/bin", "SHELL=/bin/sh"],
+                "WorkingDir": "/workspace"
+            },
+            "rootfs": {
+                "type": "layers",
+                "diff_ids": [format!("sha256:{diff_id}")]
+            }
+        }))?;
+        let project_sha256 = Sha256Value::calculate(&project);
+        let manifest_sha256 = Sha256Value::calculate(b"codewire-local-vmm-smoke-manifest-v1");
+        let header = SetupHeader::layout(
+            oci_root_generation(project_sha256, manifest_sha256, architecture),
+            manifest_sha256,
+            architecture,
+            SetupBlob {
+                size: project.len() as u64,
+                sha256: project_sha256,
+            },
+            SetupBlob {
+                size: config.len() as u64,
+                sha256: Sha256Value::calculate(&config),
+            },
+            vec![SetupLayerBlob {
+                blob: SetupBlob {
+                    size: layer.len() as u64,
+                    sha256: Sha256Value::calculate(&layer),
+                },
+                diff_id,
+                encoding: LayerEncoding::Tar,
+            }],
+        )?;
+        let header_bytes = header.encode()?;
+        let pack_len = usize::try_from(header.total_bytes)
+            .map_err(|_| failure("OCI smoke setup pack exceeds host address space"))?;
+        let mut pack = vec![0_u8; pack_len];
+        pack[..SETUP_HEADER_LEN].copy_from_slice(&header_bytes);
+        copy_setup_object(&mut pack, header.project, &project)?;
+        copy_setup_object(&mut pack, header.config, &config)?;
+        copy_setup_object(&mut pack, header.layers[0].object, &layer)?;
+
+        let setup_path = root.path.with_file_name("setup.raw");
+        let result = (|| -> SmokeResult<()> {
+            let mut output = fs::OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .mode(0o400)
+                .open(&setup_path)?;
+            output.write_all(&pack)?;
+            output.sync_all()?;
+            File::open(
+                setup_path
+                    .parent()
+                    .ok_or_else(|| failure("OCI smoke setup path has no parent"))?,
+            )?
+            .sync_all()?;
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(&setup_path);
+        }
+        result?;
+
+        SetupBinding::new(
+            header.total_bytes,
+            header.root_generation,
+            header.encoded_sha256()?,
+        )
+        .map_err(Into::into)
+    }
+
+    fn smoke_setup_architecture() -> SmokeResult<(SetupArchitecture, &'static str)> {
+        match std::env::consts::ARCH {
+            "x86_64" => Ok((SetupArchitecture::Amd64, "amd64")),
+            "aarch64" => Ok((SetupArchitecture::Arm64, "arm64")),
+            _ => Err(failure("host architecture has no OCI smoke fixture")),
+        }
+    }
+
+    fn smoke_workspace_layer(busybox: &[u8]) -> SmokeResult<Vec<u8>> {
+        if busybox.is_empty() {
+            return Err(failure("sealed guest BusyBox payload is empty"));
+        }
+        let mut builder = tar::Builder::new(Vec::new());
+        for (path, mode) in [
+            ("bin", 0o755),
+            ("dev", 0o755),
+            ("proc", 0o555),
+            ("root", 0o700),
+            ("run", 0o755),
+            ("sys", 0o555),
+            ("tmp", 0o1777),
+            ("workspace", 0o700),
+        ] {
+            append_smoke_tar_entry(
+                &mut builder,
+                path,
+                tar::EntryType::Directory,
+                mode,
+                None,
+                &[],
+            )?;
+        }
+        append_smoke_tar_entry(
+            &mut builder,
+            "bin/busybox",
+            tar::EntryType::Regular,
+            0o755,
+            None,
+            busybox,
+        )?;
+        for applet in ["grep", "sh", "sleep", "tr"] {
+            append_smoke_tar_entry(
+                &mut builder,
+                &format!("bin/{applet}"),
+                tar::EntryType::Symlink,
+                0o777,
+                Some(b"busybox"),
+                &[],
+            )?;
+        }
+        builder.finish()?;
+        Ok(builder.into_inner()?)
+    }
+
+    fn append_smoke_tar_entry(
+        builder: &mut tar::Builder<Vec<u8>>,
+        path: &str,
+        entry_type: tar::EntryType,
+        mode: u32,
+        link: Option<&[u8]>,
+        contents: &[u8],
+    ) -> SmokeResult<()> {
+        let mut header = tar::Header::new_ustar();
+        header.set_path(path)?;
+        header.set_entry_type(entry_type);
+        header.set_mode(mode);
+        header.set_uid(0);
+        header.set_gid(0);
+        header.set_mtime(1);
+        header.set_size(contents.len() as u64);
+        if let Some(link) = link {
+            header.set_link_name_literal(link)?;
+        }
+        header.set_cksum();
+        builder.append(&header, Cursor::new(contents))?;
+        Ok(())
+    }
+
+    fn copy_setup_object(pack: &mut [u8], object: SetupObject, contents: &[u8]) -> SmokeResult<()> {
+        let start = usize::try_from(object.offset)
+            .map_err(|_| failure("OCI smoke setup object offset exceeds host address space"))?;
+        let size = usize::try_from(object.size)
+            .map_err(|_| failure("OCI smoke setup object size exceeds host address space"))?;
+        let end = start
+            .checked_add(size)
+            .ok_or_else(|| failure("OCI smoke setup object range overflowed"))?;
+        let destination = pack
+            .get_mut(start..end)
+            .ok_or_else(|| failure("OCI smoke setup object falls outside its pack"))?;
+        if destination.len() != contents.len() {
+            return Err(failure("OCI smoke setup object length is inconsistent"));
+        }
+        destination.copy_from_slice(contents);
+        Ok(())
     }
 
     fn require_prepared_identity(
@@ -1230,7 +1488,7 @@ mod linux {
         Ok(record.session_id)
     }
 
-    async fn observe_poweroff_session(client: &SessionClient, session_id: &str) {
+    async fn observe_poweroff_session(client: &SessionClient, session_id: &str, generation: u64) {
         let state = match client.get(session_id).await {
             Ok(record) => match v1::SessionLifecycleState::try_from(record.state) {
                 Ok(v1::SessionLifecycleState::Starting) => "starting",
@@ -1244,7 +1502,10 @@ mod linux {
             },
             Err(_) => "unavailable",
         };
-        observation("vm.generation.1.poweroff_session_state", state);
+        observation(
+            &format!("vm.generation.{generation}.poweroff_session_state"),
+            state,
+        );
         let accepted = client
             .read_output(v1::ReadSessionOutputRequest {
                 session_id: session_id.to_owned(),
@@ -1263,7 +1524,10 @@ mod linux {
                             .any(|window| window == b"CWPOWEROFF1 accepted")
                 })
             });
-        observation("vm.generation.1.poweroff_acceptance_observed", accepted);
+        observation(
+            &format!("vm.generation.{generation}.poweroff_acceptance_observed"),
+            accepted,
+        );
     }
 
     async fn wait_for_terminal_session(
@@ -1887,6 +2151,45 @@ mod linux {
                 normalize_pty_crlf("first\r\nsecond\nthird\rfourth"),
                 "first\nsecond\nthird\rfourth"
             );
+        }
+
+        #[test]
+        fn oci_smoke_layer_contains_only_the_required_static_workspace_tools() {
+            let layer = smoke_workspace_layer(b"sealed-busybox").unwrap();
+            let mut archive = tar::Archive::new(Cursor::new(layer));
+            let mut entries = BTreeMap::new();
+            for entry in archive.entries().unwrap() {
+                let mut entry = entry.unwrap();
+                let path = entry.path().unwrap().into_owned();
+                let kind = entry.header().entry_type();
+                let mode = entry.header().mode().unwrap();
+                let link = entry.link_name().unwrap().map(|value| value.into_owned());
+                let mut contents = Vec::new();
+                entry.read_to_end(&mut contents).unwrap();
+                assert!(entries.insert(path, (kind, mode, link, contents)).is_none());
+            }
+
+            assert_eq!(entries.len(), 13);
+            assert_eq!(
+                entries.get(Path::new("bin/busybox")),
+                Some(&(
+                    tar::EntryType::Regular,
+                    0o755,
+                    None,
+                    b"sealed-busybox".to_vec()
+                ))
+            );
+            for applet in ["grep", "sh", "sleep", "tr"] {
+                assert_eq!(
+                    entries.get(Path::new(&format!("bin/{applet}"))),
+                    Some(&(
+                        tar::EntryType::Symlink,
+                        0o777,
+                        Some(PathBuf::from("busybox")),
+                        Vec::new()
+                    ))
+                );
+            }
         }
 
         #[test]

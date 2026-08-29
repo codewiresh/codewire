@@ -29,7 +29,6 @@ use tokio_vsock::{
 };
 use zeroize::Zeroizing;
 
-use crate::newc::BASIC_BUSYBOX_APPLETS;
 use crate::setup_apply::{
     OCI_LOWER_ROOT_MODE, SetupApplyError, apply_setup_layers, verify_completed_setup_generation,
 };
@@ -37,7 +36,6 @@ use crate::setup_archive::ArchiveError;
 use crate::setup_verify::{SetupContentError, verify_setup_contents};
 use crate::workspace_plan::{
     CONTAINER_PLAN_PATH, MAX_PLAN_BYTES, WORKSPACE_PLAN_PATH, WorkspaceIdentity, WorkspacePlan,
-    WorkspacePlanSource,
 };
 use crate::{
     ROOT_DISK_SERIAL, SEED_DISK_SERIAL, SEED_LEN, SETUP_DISK_SERIAL, SETUP_HEADER_LEN,
@@ -75,8 +73,6 @@ const ROOT_LOWER_PATH: &str = "/generation/lower";
 const ROOT_UPPER_PATH: &str = "/generation/upper";
 const ROOT_WORK_PATH: &str = "/generation/work";
 const ROOT_MERGED_PATH: &str = "/generation/merged";
-const FOUNDATION_VERSION_PATH: &str = "/generation/foundation.version";
-const FOUNDATION_VERSION: &str = "codewire-runc-foundation-v1\n";
 const CONTAINER_CONTROL_PATH: &str = "/run/codewire/container";
 const CONTAINER_IDENTITY_PATH: &str = "/run/codewire/container/identity.json";
 const CONTAINER_POWEROFF_SOCKET: &str = "/run/codewire/container/poweroff.sock";
@@ -89,7 +85,6 @@ const PERSISTENT_PROBE_PATH: &str = "/state/probe";
 const CONTAINER_PROBE_DESTINATION: &str = "/run/codewire-probe";
 const CONTAINER_NONCE_PATH: &str = "/run/codewire-probe/nonce";
 const WORKSPACE_OWNER_VERSION_PATH: &str = "/state/codewire/workspace-owner.version";
-const LEGACY_WORKSPACE_OWNER_VERSION: &[u8] = b"codewire-workspace-owner-v1\n";
 const PENDING_INSTALL_STATE: &[u8] = b"codewire-workspace-install-v1 pending\n";
 const INITIAL_OWNERSHIP_ENTRY_LIMIT: usize = 1_000_000;
 const CONTAINER_POWEROFF_MARKER_PATH: &str = "/run/codewire-probe/poweroff.accepted";
@@ -249,14 +244,7 @@ pub fn run_init() -> Result<()> {
         persist_workspace_plan(&plan)?;
         plan
     } else {
-        match load_workspace_plan()? {
-            Some(plan) => plan,
-            None => {
-                let plan = WorkspacePlan::foundation();
-                persist_workspace_plan(&plan)?;
-                plan
-            }
-        }
+        require_persisted_workspace_plan(load_workspace_plan()?)?
     };
     record_boot_stage("workspace-plan-ready")?;
     normalize_initial_persistent_ownership(&plan)?;
@@ -274,6 +262,14 @@ pub fn run_init() -> Result<()> {
     let daemon = spawn_daemon()?;
     record_boot_stage("daemon-started")?;
     supervise_guest(daemon, workspace, poweroff)
+}
+
+fn require_persisted_workspace_plan(plan: Option<WorkspacePlan>) -> Result<WorkspacePlan> {
+    plan.ok_or_else(|| {
+        anyhow::anyhow!(
+            "guest boot has neither an OCI setup binding nor an exact persisted workspace plan"
+        )
+    })
 }
 
 pub async fn run_daemon() -> Result<()> {
@@ -1411,12 +1407,8 @@ fn publish_install_completion(plan: &WorkspacePlan) -> Result<()> {
 /// no-follow walk; the marker is published only after the filesystem sync.
 fn normalize_initial_persistent_ownership(plan: &WorkspacePlan) -> Result<()> {
     let identity = &plan.identity;
-    let source = match plan.source {
-        WorkspacePlanSource::Foundation => "foundation",
-        WorkspacePlanSource::Oci => "oci",
-    };
     let expected_marker = format!(
-        "codewire-workspace-owner-v2 {source} {}:{}\n",
+        "codewire-workspace-owner-v3 oci {}:{}\n",
         identity.uid, identity.gid,
     );
     match fs::symlink_metadata(WORKSPACE_OWNER_VERSION_PATH) {
@@ -1493,23 +1485,14 @@ fn normalize_initial_persistent_ownership(plan: &WorkspacePlan) -> Result<()> {
 }
 
 fn valid_workspace_owner_marker(bytes: &[u8]) -> bool {
-    if bytes == LEGACY_WORKSPACE_OWNER_VERSION {
-        return true;
-    }
     let Some(body) = bytes
-        .strip_prefix(b"codewire-workspace-owner-v2 ")
+        .strip_prefix(b"codewire-workspace-owner-v3 oci ")
         .and_then(|value| value.strip_suffix(b"\n"))
         .and_then(|value| std::str::from_utf8(value).ok())
     else {
         return false;
     };
-    let Some((source, identity)) = body.split_once(' ') else {
-        return false;
-    };
-    if !matches!(source, "foundation" | "oci") {
-        return false;
-    }
-    let Some((uid, gid)) = identity.split_once(':') else {
+    let Some((uid, gid)) = body.split_once(':') else {
         return false;
     };
     let canonical_id = |value: &str| {
@@ -1659,29 +1642,19 @@ fn prepare_workspace_generation(plan: &WorkspacePlan) -> Result<()> {
     ] {
         create_dir(Path::new(path), mode)?;
     }
-    match plan.source {
-        WorkspacePlanSource::Foundation => prepare_foundation_lower()?,
-        WorkspacePlanSource::Oci => {
-            let generation = Sha256Value::parse_hex(&plan.root_generation)
-                .context("decode sealed OCI root generation")?;
-            verify_completed_setup_generation(Path::new(ROOT_MOUNT_PATH), generation)
-                .context("validate completed OCI root generation")?;
-            let metadata = fs::symlink_metadata(ROOT_LOWER_PATH)
-                .context("inspect completed OCI lower directory")?;
-            ensure!(
-                metadata.file_type().is_dir()
-                    && metadata.uid() == unsafe { libc::geteuid() }
-                    && metadata.gid() == unsafe { libc::getegid() }
-                    && metadata.permissions().mode() & 0o777 == OCI_LOWER_ROOT_MODE,
-                "completed OCI lower directory is invalid"
-            );
-            ensure!(
-                fs::symlink_metadata(FOUNDATION_VERSION_PATH)
-                    .is_err_and(|error| error.kind() == io::ErrorKind::NotFound),
-                "OCI generation contains foundation metadata"
-            );
-        }
-    }
+    let generation = Sha256Value::parse_hex(&plan.root_generation)
+        .context("decode sealed OCI root generation")?;
+    verify_completed_setup_generation(Path::new(ROOT_MOUNT_PATH), generation)
+        .context("validate completed OCI root generation")?;
+    let metadata =
+        fs::symlink_metadata(ROOT_LOWER_PATH).context("inspect completed OCI lower directory")?;
+    ensure!(
+        metadata.file_type().is_dir()
+            && metadata.uid() == unsafe { libc::geteuid() }
+            && metadata.gid() == unsafe { libc::getegid() }
+            && metadata.permissions().mode() & 0o777 == OCI_LOWER_ROOT_MODE,
+        "completed OCI lower directory is invalid"
+    );
 
     let config = workspace_oci_config(plan)?;
     ensure_exact_bytes(Path::new(RUNC_CONFIG_PATH), &config, 0o400)?;
@@ -1698,60 +1671,6 @@ fn prepare_workspace_generation(plan: &WorkspacePlan) -> Result<()> {
     Ok(())
 }
 
-fn prepare_foundation_lower() -> Result<()> {
-    for (path, mode) in [
-        (ROOT_LOWER_PATH, 0o755),
-        ("/generation/lower/bin", 0o755),
-        ("/generation/lower/sbin", 0o755),
-        ("/generation/lower/etc", 0o755),
-        ("/generation/lower/dev", 0o755),
-        ("/generation/lower/dev/pts", 0o755),
-        ("/generation/lower/dev/shm", 0o1777),
-        ("/generation/lower/proc", 0o555),
-        ("/generation/lower/sys", 0o555),
-        ("/generation/lower/run", 0o755),
-        ("/generation/lower/run/codewire-host", 0o700),
-        ("/generation/lower/run/codewire-probe", 0o700),
-        ("/generation/lower/tmp", 0o1777),
-        ("/generation/lower/workspace", 0o700),
-        ("/generation/lower/home", 0o755),
-        ("/generation/lower/home/codewire", 0o700),
-    ] {
-        create_dir(Path::new(path), mode)?;
-    }
-
-    ensure_exact_regular(
-        Path::new(INIT_PATH),
-        Path::new("/generation/lower/init"),
-        0o755,
-    )?;
-    ensure_exact_regular(
-        Path::new("/bin/busybox"),
-        Path::new("/generation/lower/bin/busybox"),
-        0o755,
-    )?;
-    for applet in BASIC_BUSYBOX_APPLETS {
-        create_symlink("busybox", &format!("/generation/lower/bin/{applet}"))?;
-    }
-    ensure_exact_bytes(
-        Path::new("/generation/lower/etc/passwd"),
-        b"root:x:0:0:root:/root:/bin/sh\ncodewire:x:0:0:Codewire:/home/codewire:/bin/sh\n",
-        0o644,
-    )?;
-    ensure_exact_bytes(
-        Path::new("/generation/lower/etc/group"),
-        b"root:x:0:\ncodewire:x:0:\n",
-        0o644,
-    )?;
-    ensure_exact_bytes(
-        Path::new(FOUNDATION_VERSION_PATH),
-        FOUNDATION_VERSION.as_bytes(),
-        0o400,
-    )?;
-
-    Ok(())
-}
-
 fn inherit_root_directory_metadata(lower: &Path, upper: &Path) -> Result<()> {
     let lower_metadata = fs::symlink_metadata(lower).context("inspect workspace lower root")?;
     let upper_metadata = fs::symlink_metadata(upper).context("inspect workspace upper root")?;
@@ -1765,19 +1684,6 @@ fn inherit_root_directory_metadata(lower: &Path, upper: &Path) -> Result<()> {
         fs::Permissions::from_mode(lower_metadata.permissions().mode() & 0o7777),
     )
     .context("copy admitted OCI root mode to overlay upper")
-}
-
-fn ensure_exact_regular(source: &Path, destination: &Path, mode: u32) -> Result<()> {
-    let source_metadata = fs::symlink_metadata(source)
-        .with_context(|| format!("inspect sealed source {}", source.display()))?;
-    ensure!(
-        source_metadata.file_type().is_file() && source_metadata.nlink() == 1,
-        "sealed workspace source is not an admitted regular file"
-    );
-    let source_bytes =
-        fs::read(source).with_context(|| format!("read sealed source {}", source.display()))?;
-    ensure!(!source_bytes.is_empty(), "sealed workspace source is empty");
-    ensure_exact_bytes(destination, &source_bytes, mode)
 }
 
 fn ensure_exact_bytes(path: &Path, expected: &[u8], mode: u32) -> Result<()> {
@@ -2866,6 +2772,7 @@ impl PoweroffOperations for RealPoweroffOperations {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::workspace_plan::PLAN_SCHEMA_VERSION;
     use std::sync::Arc;
     use std::task::{Wake, Waker};
     use tempfile::TempDir;
@@ -2880,6 +2787,35 @@ mod tests {
 
         fn wake_by_ref(self: &Arc<Self>) {
             self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    fn test_workspace_plan() -> WorkspacePlan {
+        WorkspacePlan {
+            schema_version: PLAN_SCHEMA_VERSION,
+            root_generation: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                .to_owned(),
+            identity: WorkspaceIdentity {
+                username: "root".to_owned(),
+                home: "/root".to_owned(),
+                shell: "/bin/sh".to_owned(),
+                uid: 0,
+                gid: 0,
+                additional_gids: Vec::new(),
+            },
+            environment: vec![
+                "HOME=/root".to_owned(),
+                "LANG=C.UTF-8".to_owned(),
+                "LOGNAME=root".to_owned(),
+                "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".to_owned(),
+                "SHELL=/bin/sh".to_owned(),
+                "USER=root".to_owned(),
+            ],
+            workload_args: Vec::new(),
+            workload_cwd: "/workspace".to_owned(),
+            session_cwd: "/workspace".to_owned(),
+            install_command: String::new(),
+            startup_script: String::new(),
         }
     }
 
@@ -2993,9 +2929,9 @@ mod tests {
 
     #[test]
     fn workspace_init_is_a_read_only_sealed_bind_not_overlay_content() {
-        let foundation = WorkspacePlan::foundation();
+        let plan = test_workspace_plan();
         let config: serde_json::Value =
-            serde_json::from_slice(&workspace_oci_config(&foundation).unwrap()).unwrap();
+            serde_json::from_slice(&workspace_oci_config(&plan).unwrap()).unwrap();
         assert_eq!(
             config["process"]["args"],
             serde_json::json!([CONTAINER_INIT_PATH, "workspace-init"])
@@ -3018,13 +2954,13 @@ mod tests {
             run["options"],
             serde_json::json!(["nosuid", "noexec", "nodev", "mode=0755", "size=16m"])
         );
-        let plan = mounts
+        let plan_mount = mounts
             .iter()
             .find(|mount| mount["destination"] == CONTAINER_PLAN_PATH)
             .unwrap();
-        assert_eq!(plan["source"], WORKSPACE_PLAN_PATH);
+        assert_eq!(plan_mount["source"], WORKSPACE_PLAN_PATH);
         assert_eq!(
-            plan["options"],
+            plan_mount["options"],
             serde_json::json!(["bind", "ro", "nosuid", "nodev", "noexec"])
         );
         let install_state = mounts
@@ -3038,7 +2974,7 @@ mod tests {
         );
         let home = mounts
             .iter()
-            .find(|mount| mount["destination"] == foundation.identity.home)
+            .find(|mount| mount["destination"] == plan.identity.home)
             .unwrap();
         assert_eq!(home["source"], HOME_MERGED_PATH);
         assert_eq!(
@@ -3048,6 +2984,16 @@ mod tests {
         assert_eq!(
             config["process"]["capabilities"]["ambient"],
             serde_json::json!([])
+        );
+    }
+
+    #[test]
+    fn boot_without_setup_requires_an_exact_persisted_oci_plan() {
+        assert!(require_persisted_workspace_plan(None).is_err());
+        let plan = test_workspace_plan();
+        assert_eq!(
+            require_persisted_workspace_plan(Some(plan.clone())).unwrap(),
+            plan
         );
     }
 
@@ -3072,7 +3018,7 @@ mod tests {
 
     #[test]
     fn workspace_completion_messages_are_digest_only_and_plan_bound() {
-        let mut plan = WorkspacePlan::foundation();
+        let mut plan = test_workspace_plan();
         plan.install_command = "attacker-install-canary".to_owned();
         plan.startup_script = "attacker-startup-canary".to_owned();
         let ready = workspace_ready_message(&plan).unwrap();
@@ -3097,24 +3043,26 @@ mod tests {
         assert!(!valid_install_state(
             b"codewire-workspace-install-v1 AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n"
         ));
-        assert!(valid_workspace_owner_marker(LEGACY_WORKSPACE_OWNER_VERSION));
         assert!(valid_workspace_owner_marker(
-            b"codewire-workspace-owner-v2 foundation 0:0\n"
+            b"codewire-workspace-owner-v3 oci 1000:998\n"
         ));
-        assert!(valid_workspace_owner_marker(
+        assert!(!valid_workspace_owner_marker(
+            b"codewire-workspace-owner-v3 oci 01000:998\n"
+        ));
+        assert!(!valid_workspace_owner_marker(
             b"codewire-workspace-owner-v2 oci 1000:998\n"
         ));
         assert!(!valid_workspace_owner_marker(
-            b"codewire-workspace-owner-v2 oci 01000:998\n"
+            b"codewire-workspace-owner-v2 foundation 0:0\n"
         ));
         assert!(!valid_workspace_owner_marker(
-            b"codewire-workspace-owner-v2 attacker 1000:998\n"
+            b"codewire-workspace-owner-v1\n"
         ));
     }
 
     #[test]
     fn workspace_readiness_requires_one_exact_fixed_length_message() {
-        let expected = workspace_ready_message(&WorkspacePlan::foundation()).unwrap();
+        let expected = workspace_ready_message(&test_workspace_plan()).unwrap();
         let (mut reader, mut writer) = UnixStream::pair().unwrap();
         reader.set_nonblocking(true).unwrap();
         let midpoint = expected.len() / 2;

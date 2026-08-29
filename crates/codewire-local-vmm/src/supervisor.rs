@@ -5947,6 +5947,119 @@ mod tests {
         assert!(!artifact_blobs.join(format!("r-{stale_kernel}")).exists());
     }
 
+    #[tokio::test]
+    async fn generation_publication_serializes_all_generation_collectors() {
+        let (_parent, core) = test_supervisor_core(project_environment());
+        let (shutdown, _shutdown_rx) = watch::channel(false);
+        let service = SupervisorRpc {
+            core: Arc::new(Mutex::new(core)),
+            shutdown,
+        };
+
+        // Model the create/staging transaction after it has published bytes to
+        // the three generation stores but before it has durably published the
+        // references. Every RPC mutation and every collector must wait for the
+        // same supervisor-core guard across that entire boundary.
+        let mut create = service.core.lock().await;
+        let engine = PrivateRoot::open(&create.config.engine_root()).unwrap();
+        let (candidate_artifact, candidate_kernel) =
+            install_test_artifact_generation(&engine, b"candidate-kernel");
+        let (stale_artifact, stale_kernel) =
+            install_test_artifact_generation(&engine, b"stale-kernel");
+        let candidate_workspace = test_workspace_generation_with_artifact(
+            create
+                .environment("dev")
+                .unwrap()
+                .project_spec_json
+                .as_deref()
+                .unwrap(),
+            create
+                .environment("dev")
+                .unwrap()
+                .project_spec_sha256
+                .as_deref()
+                .unwrap(),
+            &candidate_artifact,
+            b"candidate",
+        );
+        let candidate_storage = workspace_storage_generation(&candidate_workspace).unwrap();
+        let stale_storage = "f".repeat(64);
+        let paths = VmPaths::create(&engine, create.environment("dev").unwrap().id).unwrap();
+        for storage in [&candidate_storage, &stale_storage] {
+            let generation =
+                crate::linux::state::RootGenerationPaths::create(&paths, storage).unwrap();
+            fs::write(&generation.root_disk, b"root").unwrap();
+            fs::set_permissions(&generation.root_disk, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+
+        let mut published_state = create.state.clone();
+        let published_environment = published_state.environments.get_mut("dev").unwrap();
+        published_environment.active_artifact_generation = Some(candidate_artifact.clone());
+        published_environment.active_workspace_generation = Some(candidate_workspace);
+        let retained_content = referenced_content_blobs(&published_state).unwrap();
+        ContentStore::create(&engine).unwrap();
+        let blobs = engine.path().join("content/blobs");
+        for (digest, size) in &retained_content {
+            fs::write(
+                blobs.join(digest.hex()),
+                vec![0_u8; usize::try_from(*size).unwrap()],
+            )
+            .unwrap();
+            fs::set_permissions(blobs.join(digest.hex()), fs::Permissions::from_mode(0o400))
+                .unwrap();
+        }
+        let stale_content = Sha256Digest::parse(&format!("sha256:{}", "e".repeat(64))).unwrap();
+        fs::write(blobs.join(stale_content.hex()), b"stale").unwrap();
+        fs::set_permissions(
+            blobs.join(stale_content.hex()),
+            fs::Permissions::from_mode(0o400),
+        )
+        .unwrap();
+
+        let (collector_started, collector_reached_lock) = tokio::sync::oneshot::channel();
+        let collector_core = Arc::clone(&service.core);
+        let collector = tokio::spawn(async move {
+            collector_started.send(()).unwrap();
+            let mut core = collector_core.lock().await;
+            let roots = core.collect_unreferenced_workspace_roots("dev").unwrap();
+            core.collect_unreferenced_oci_content().unwrap();
+            core.collect_unreferenced_runtime_artifacts().unwrap();
+            roots
+        });
+        collector_reached_lock.await.unwrap();
+        tokio::task::yield_now().await;
+        assert!(!collector.is_finished());
+
+        create.state = published_state;
+        create.save().unwrap();
+        drop(create);
+
+        assert_eq!(collector.await.unwrap(), vec![stale_storage]);
+        assert!(paths.generations_dir.join(candidate_storage).is_dir());
+        for digest in retained_content.keys() {
+            assert!(blobs.join(digest.hex()).is_file());
+        }
+        assert!(!blobs.join(stale_content.hex()).exists());
+        let artifact_manifests = engine.path().join("runtime-artifacts/generations");
+        let artifact_blobs = engine.path().join("runtime-artifacts/blobs");
+        assert!(
+            artifact_manifests
+                .join(format!("{candidate_artifact}.json"))
+                .is_file()
+        );
+        assert!(
+            artifact_blobs
+                .join(format!("r-{candidate_kernel}"))
+                .is_file()
+        );
+        assert!(
+            !artifact_manifests
+                .join(format!("{stale_artifact}.json"))
+                .exists()
+        );
+        assert!(!artifact_blobs.join(format!("r-{stale_kernel}")).exists());
+    }
+
     #[test]
     fn failed_create_never_marks_a_different_environment_error() {
         let parent = tempfile::tempdir().unwrap();

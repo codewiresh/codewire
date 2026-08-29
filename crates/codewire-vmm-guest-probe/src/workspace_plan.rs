@@ -24,7 +24,7 @@ use crate::{SetupArchitecture, SetupHeader, Sha256Value};
 pub(crate) const WORKSPACE_PLAN_PATH: &str = "/generation/workspace-plan.json";
 pub(crate) const CONTAINER_PLAN_PATH: &str = "/run/codewire-runtime/plan.json";
 
-const PLAN_SCHEMA_VERSION: u32 = 1;
+pub(crate) const PLAN_SCHEMA_VERSION: u32 = 2;
 pub(crate) const MAX_PLAN_BYTES: usize = 1024 * 1024;
 const MAX_IDENTITY_FILE_BYTES: usize = 1024 * 1024;
 const MAX_IDENTITY_ENTRIES: usize = 65_536;
@@ -33,13 +33,6 @@ const MAX_ENVIRONMENT: usize = 4096;
 const MAX_ADDITIONAL_GROUPS: usize = 256;
 const MAX_STRING_BYTES: usize = 64 * 1024;
 const MAX_PATH_BYTES: usize = 4096;
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum WorkspacePlanSource {
-    Foundation,
-    Oci,
-}
 
 #[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -68,8 +61,6 @@ impl fmt::Debug for WorkspaceIdentity {
 #[serde(deny_unknown_fields)]
 pub(crate) struct WorkspacePlan {
     pub schema_version: u32,
-    pub source: WorkspacePlanSource,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub root_generation: String,
     pub identity: WorkspaceIdentity,
     pub environment: Vec<String>,
@@ -88,7 +79,6 @@ impl fmt::Debug for WorkspacePlan {
         formatter
             .debug_struct("WorkspacePlan")
             .field("schema_version", &self.schema_version)
-            .field("source", &self.source)
             .field("root_generation", &self.root_generation)
             .field("identity", &self.identity)
             .field("environment_count", &self.environment.len())
@@ -100,35 +90,6 @@ impl fmt::Debug for WorkspacePlan {
 }
 
 impl WorkspacePlan {
-    pub(crate) fn foundation() -> Self {
-        Self {
-            schema_version: PLAN_SCHEMA_VERSION,
-            source: WorkspacePlanSource::Foundation,
-            root_generation: String::new(),
-            identity: WorkspaceIdentity {
-                username: "codewire".to_owned(),
-                home: "/home/codewire".to_owned(),
-                shell: "/bin/sh".to_owned(),
-                uid: 0,
-                gid: 0,
-                additional_gids: Vec::new(),
-            },
-            environment: vec![
-                "HOME=/home/codewire".to_owned(),
-                "LANG=C.UTF-8".to_owned(),
-                "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".to_owned(),
-                "SHELL=/bin/sh".to_owned(),
-                "USER=codewire".to_owned(),
-                "LOGNAME=codewire".to_owned(),
-            ],
-            workload_args: Vec::new(),
-            workload_cwd: "/workspace".to_owned(),
-            session_cwd: "/workspace".to_owned(),
-            install_command: String::new(),
-            startup_script: String::new(),
-        }
-    }
-
     pub(crate) fn from_verified_setup(
         project_bytes: &[u8],
         config_bytes: &[u8],
@@ -215,7 +176,6 @@ impl WorkspacePlan {
 
         let plan = Self {
             schema_version: PLAN_SCHEMA_VERSION,
-            source: WorkspacePlanSource::Oci,
             root_generation: header.root_generation.to_string(),
             identity,
             environment: environment
@@ -255,10 +215,7 @@ impl WorkspacePlan {
 
     fn validate(&self) -> Result<(), WorkspacePlanError> {
         if self.schema_version != PLAN_SCHEMA_VERSION
-            || match self.source {
-                WorkspacePlanSource::Foundation => !self.root_generation.is_empty(),
-                WorkspacePlanSource::Oci => !valid_sha256(&self.root_generation),
-            }
+            || !valid_sha256(&self.root_generation)
             || self.identity.username.is_empty()
             || self.identity.username.len() > 256
             || !valid_account_name(&self.identity.username)
@@ -840,7 +797,6 @@ mod tests {
         let plan =
             WorkspacePlan::from_verified_setup(&project(), &config, &header, root.path()).unwrap();
 
-        assert_eq!(plan.source, WorkspacePlanSource::Oci);
         assert_eq!(plan.identity.uid, 1000);
         assert_eq!(plan.identity.gid, 1000);
         assert_eq!(plan.identity.additional_gids, vec![998]);
@@ -906,20 +862,27 @@ mod tests {
 
     #[test]
     fn persisted_plan_rejects_unknown_fields_and_noncanonical_bytes() {
-        let mut foundation = WorkspacePlan::foundation();
-        let bytes = foundation.encode().unwrap();
-        assert_eq!(WorkspacePlan::decode(&bytes).unwrap(), foundation);
+        let root = root();
+        let config = config(json!({}));
+        let header = setup(&config);
+        let mut plan =
+            WorkspacePlan::from_verified_setup(&project(), &config, &header, root.path()).unwrap();
+        let bytes = plan.encode().unwrap();
+        assert_eq!(WorkspacePlan::decode(&bytes).unwrap(), plan);
 
         let mut value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         value["unknown"] = true.into();
         assert!(WorkspacePlan::decode(&serde_json::to_vec(&value).unwrap()).is_err());
-        assert!(WorkspacePlan::decode(&serde_json::to_vec_pretty(&foundation).unwrap()).is_err());
+        let mut value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        value["schema_version"] = 1.into();
+        assert!(WorkspacePlan::decode(&serde_json::to_vec(&value).unwrap()).is_err());
+        assert!(WorkspacePlan::decode(&serde_json::to_vec_pretty(&plan).unwrap()).is_err());
 
-        foundation.identity.username = "attacker-user-canary".into();
-        foundation.workload_args = vec!["attacker-command-canary".into()];
-        foundation.environment = vec!["ATTACKER=environment-canary".into()];
-        foundation.install_command = "attacker-install-canary".into();
-        let debug = format!("{foundation:?}");
+        plan.identity.username = "attacker-user-canary".into();
+        plan.workload_args = vec!["attacker-command-canary".into()];
+        plan.environment = vec!["ATTACKER=environment-canary".into()];
+        plan.install_command = "attacker-install-canary".into();
+        let debug = format!("{plan:?}");
         for canary in [
             "attacker-user-canary",
             "attacker-command-canary",

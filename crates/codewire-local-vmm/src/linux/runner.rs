@@ -108,6 +108,14 @@ impl CloudHypervisorRunner {
         preflight().map_err(RunnerError::from)
     }
 
+    /// Reopen the admitted product initramfs and return its exact static
+    /// BusyBox payload for a credential-free OCI setup fixture.
+    pub fn read_sealed_guest_busybox(&self) -> Result<Vec<u8>, RunnerError> {
+        self.artifacts
+            .read_guest_busybox()
+            .map_err(RunnerError::from)
+    }
+
     pub async fn prepare(&self, request: CreateVmRequest) -> Result<PreparedVm, RunnerError> {
         preflight()?;
         validate_request(&request)?;

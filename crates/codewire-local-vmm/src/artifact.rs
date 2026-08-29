@@ -179,6 +179,10 @@ impl AdmittedArtifacts {
         self.initramfs.revalidate()?;
         Ok(())
     }
+
+    pub(crate) fn read_guest_busybox(&self) -> Result<Vec<u8>, ArtifactError> {
+        read_canonical_initramfs_entry(&self.initramfs, b"bin/busybox")
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -550,6 +554,28 @@ fn validate_initramfs(
         return Err(ArtifactError::InvalidInitramfs(path.to_owned()));
     }
     Ok(())
+}
+
+fn read_canonical_initramfs_entry(
+    artifact: &AdmittedArtifact,
+    expected: &[u8],
+) -> Result<Vec<u8>, ArtifactError> {
+    let file = artifact.open_exact()?;
+    let mut bytes = Vec::new();
+    file.take(artifact.size.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|source| ArtifactError::Inspect {
+            path: artifact.path.clone(),
+            source,
+        })?;
+    if bytes.len() as u64 != artifact.size
+        || format!("{:x}", Sha256::digest(&bytes)) != artifact.sha256
+    {
+        return Err(ArtifactError::IdentityChanged(artifact.path.clone()));
+    }
+    find_newc_entry(&bytes, expected)
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| ArtifactError::InvalidInitramfs(artifact.path.clone()))
 }
 
 #[cfg(test)]
@@ -996,6 +1022,33 @@ mod tests {
         std::fs::write(&path, dynamic_archive).unwrap();
         assert!(matches!(
             validate_initramfs(&mut File::open(&path).unwrap(), &path, architecture),
+            Err(ArtifactError::InvalidInitramfs(rejected)) if rejected == path
+        ));
+    }
+
+    #[test]
+    fn admitted_product_busybox_is_reopened_and_digest_bound() {
+        let architecture = ArtifactArchitecture::host().unwrap();
+        let mut executable = vec![0_u8; 64];
+        executable[..4].copy_from_slice(b"\x7fELF");
+        executable[4] = 2;
+        executable[5] = 1;
+        executable[16..18].copy_from_slice(&2_u16.to_le_bytes());
+        executable[18..20].copy_from_slice(&architecture.elf_machine().to_le_bytes());
+        let archive = canonical_guest_root_newc(&executable, &executable, &executable).unwrap();
+        let staging = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(staging.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let path = staging.path().join("initramfs");
+        write_artifact(&path, &archive, 0o400);
+        let root = PrivateRoot::open(staging.path()).unwrap();
+        let admitted = admit_one(&root, &spec("initramfs", &archive), false).unwrap();
+
+        assert_eq!(
+            read_canonical_initramfs_entry(&admitted, b"bin/busybox").unwrap(),
+            executable
+        );
+        assert!(matches!(
+            read_canonical_initramfs_entry(&admitted, b"missing"),
             Err(ArtifactError::InvalidInitramfs(rejected)) if rejected == path
         ));
     }
