@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::fs::{self, File};
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -430,6 +431,58 @@ pub fn cleanup_trashed_vm(
     vm.remove_private_regular(Path::new("vm.lock"), 0o600)?;
     drop(vm);
     trash.remove_empty_private_directory(Path::new(&name))?;
+    Ok(())
+}
+
+/// Removes only root-generation trees that are absent from the supervisor's
+/// durable active/staging/rollback set.
+///
+/// Every generation tree is admitted before the first unlink so an unknown or
+/// unsafe object leaves the complete directory unchanged for orphan diagnosis.
+/// A filesystem failure after admission may leave a partially collected,
+/// unreferenced tree; replay is safe and idempotent.
+pub(crate) fn cleanup_unreferenced_root_generations(
+    paths: &VmPaths,
+    retained: &BTreeSet<String>,
+) -> Result<Vec<String>, StateError> {
+    if retained
+        .iter()
+        .any(|generation| !valid_root_generation(generation))
+    {
+        return Err(StateError::InvalidRootGeneration);
+    }
+
+    let generations = PrivateRoot::open(&paths.generations_dir)?;
+    let admitted = admitted_generation_names(&generations)?;
+    for name in &admitted {
+        validate_root_generation_tree(&generations, name)?;
+    }
+
+    let mut removed = Vec::new();
+    for name in admitted {
+        if retained.contains(&name) {
+            continue;
+        }
+        let generation = generations.open_private_directory(Path::new(&name), 0o700)?;
+        generation.remove_private_regular(Path::new("setup.raw"), 0o400)?;
+        generation.remove_private_regular(Path::new("root.raw"), 0o600)?;
+        drop(generation);
+        generations.remove_empty_private_directory(Path::new(&name))?;
+        removed.push(name);
+    }
+    Ok(removed)
+}
+
+fn validate_root_generation_tree(generations: &PrivateRoot, name: &str) -> Result<(), StateError> {
+    let generation = generations.open_private_directory(Path::new(name), 0o700)?;
+    ensure_only_entries(generation.path(), &["root.raw", "setup.raw"])?;
+    for (file, mode) in [("root.raw", 0o600), ("setup.raw", 0o400)] {
+        match generation.open_regular(Path::new(file), false, None, false, Some(mode)) {
+            Ok(_) => {}
+            Err(error) if path_error_is_not_found(&error) => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
     Ok(())
 }
 
@@ -907,6 +960,81 @@ mod tests {
         assert!(trash.join("generations").is_dir());
         cleanup_trashed_vm(root.path(), vm_id, operation_id).unwrap();
         assert!(!trash.exists());
+    }
+
+    #[test]
+    fn root_generation_collection_retains_only_durable_references() {
+        let (_parent, root) = private_root();
+        let paths = VmPaths::create(&root, Uuid::new_v4()).unwrap();
+        let active = "a".repeat(64);
+        let rollback = "b".repeat(64);
+        let stale = "c".repeat(64);
+        let interrupted = "d".repeat(64);
+
+        for name in [&active, &rollback, &stale] {
+            let generation = RootGenerationPaths::create(&paths, name).unwrap();
+            write_minimal_ext4(&generation.root_disk, Uuid::new_v4());
+            fs::write(&generation.setup_disk, b"setup").unwrap();
+            fs::set_permissions(&generation.setup_disk, fs::Permissions::from_mode(0o400)).unwrap();
+        }
+        RootGenerationPaths::create(&paths, &interrupted).unwrap();
+
+        let removed = cleanup_unreferenced_root_generations(
+            &paths,
+            &BTreeSet::from([active.clone(), rollback.clone()]),
+        )
+        .unwrap();
+
+        assert_eq!(removed, vec![stale.clone(), interrupted.clone()]);
+        assert!(paths.generations_dir.join(active).is_dir());
+        assert!(paths.generations_dir.join(rollback).is_dir());
+        assert!(!paths.generations_dir.join(stale).exists());
+        assert!(!paths.generations_dir.join(interrupted).exists());
+    }
+
+    #[test]
+    fn root_generation_collection_rejects_unknown_objects_before_unlink() {
+        let (_parent, root) = private_root();
+        let paths = VmPaths::create(&root, Uuid::new_v4()).unwrap();
+        let first = "a".repeat(64);
+        let unsafe_generation = "b".repeat(64);
+        for name in [&first, &unsafe_generation] {
+            let generation = RootGenerationPaths::create(&paths, name).unwrap();
+            write_minimal_ext4(&generation.root_disk, Uuid::new_v4());
+        }
+        let unknown = paths
+            .generations_dir
+            .join(&unsafe_generation)
+            .join("unknown");
+        fs::write(&unknown, b"leave me").unwrap();
+        fs::set_permissions(&unknown, fs::Permissions::from_mode(0o600)).unwrap();
+
+        assert!(matches!(
+            cleanup_unreferenced_root_generations(&paths, &BTreeSet::new()),
+            Err(StateError::UnexpectedOwnedObject(path)) if path == unknown
+        ));
+        assert!(paths.generations_dir.join(first).join("root.raw").is_file());
+        assert!(
+            paths
+                .generations_dir
+                .join(unsafe_generation)
+                .join("root.raw")
+                .is_file()
+        );
+    }
+
+    #[test]
+    fn root_generation_collection_rejects_invalid_retained_identity() {
+        let (_parent, root) = private_root();
+        let paths = VmPaths::create(&root, Uuid::new_v4()).unwrap();
+
+        assert!(matches!(
+            cleanup_unreferenced_root_generations(
+                &paths,
+                &BTreeSet::from(["../generation".to_owned()]),
+            ),
+            Err(StateError::InvalidRootGeneration)
+        ));
     }
 
     #[test]

@@ -4,7 +4,7 @@
 //! and socket identities are persisted, but daemon capabilities and workload
 //! credentials never are.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::{self, File};
 use std::io;
 use std::os::unix::fs::PermissionsExt as _;
@@ -33,9 +33,9 @@ use crate::linux::path::{PathError, PrivateRoot, SocketIdentity};
 use crate::linux::process::signal_unreaped_child;
 use crate::linux::state::{
     DEFAULT_ROOT_DISK_BYTES, DeletionTreeLocation, StateError, cleanup_trashed_vm,
-    deletion_tree_location, move_stopped_vm_to_trash,
+    cleanup_unreferenced_root_generations, deletion_tree_location, move_stopped_vm_to_trash,
 };
-use crate::linux::{LiveProcess, ProcessIdentity, RecoveryError};
+use crate::linux::{LiveProcess, ProcessIdentity, RecoveryError, VmPaths};
 use crate::oci::{
     ContentStore, ContentStoreError, RegistryReference, RegistryReferenceError, RegistryResolver,
     RegistryResolverError,
@@ -447,11 +447,11 @@ impl EnvironmentRecord {
         }
     }
 
-    fn promote_staging_workspace_generation(&mut self) {
-        let Some(staging) = self.staging_workspace_generation.take() else {
-            return;
-        };
+    fn promote_staging_workspace_generation(&mut self) -> Option<WorkspaceGenerationRecord> {
+        let staging = self.staging_workspace_generation.take()?;
+        let displaced = self.rollback_workspace_generation.take();
         self.rollback_workspace_generation = self.active_workspace_generation.replace(staging);
+        displaced
     }
 
     fn validate(&self, key: &str) -> Result<(), SupervisorError> {
@@ -712,6 +712,7 @@ impl SupervisorCore {
         &mut self,
         name: &str,
     ) -> Result<SupervisorState, SupervisorError> {
+        self.collect_unreferenced_workspace_roots(name)?;
         let (project_json, project_sha256) = {
             let environment = self.environment(name)?;
             if environment.project_spec_json.is_none()
@@ -768,6 +769,17 @@ impl SupervisorCore {
         }
         environment.staging_workspace_generation = Some(generation);
         Ok(next_state)
+    }
+
+    fn collect_unreferenced_workspace_roots(
+        &self,
+        name: &str,
+    ) -> Result<Vec<String>, SupervisorError> {
+        let environment = self.environment(name)?;
+        let retained = referenced_root_storage_generations(environment)?;
+        let engine = PrivateRoot::open(&self.config.engine_root())?;
+        let paths = VmPaths::create(&engine, environment.id)?;
+        cleanup_unreferenced_root_generations(&paths, &retained).map_err(Into::into)
     }
 
     async fn create(
@@ -880,7 +892,7 @@ impl SupervisorCore {
                         .environments
                         .get_mut(&request.name)
                         .ok_or_else(|| SupervisorError::NotFound(request.name.clone()))?;
-                    environment.promote_staging_workspace_generation();
+                    let _displaced = environment.promote_staging_workspace_generation();
                     environment.generation = 1;
                     environment.state = StoredEnvironmentState::Running;
                     operation = self.checkpoint_state_operation(&operation, next_state)?;
@@ -1578,7 +1590,7 @@ impl SupervisorCore {
                         .environments
                         .get_mut(name)
                         .ok_or_else(|| SupervisorError::NotFound(name.to_owned()))?;
-                    environment.promote_staging_workspace_generation();
+                    let _displaced = environment.promote_staging_workspace_generation();
                     environment.generation = target_generation;
                     environment.state = StoredEnvironmentState::Running;
                     operation = self.checkpoint_state_operation(&operation, next_state)?;
@@ -1789,7 +1801,7 @@ impl SupervisorCore {
                         .get_mut(name)
                         .ok_or_else(|| SupervisorError::NotFound(name.to_owned()))?;
                     if was_running {
-                        environment.promote_staging_workspace_generation();
+                        let _displaced = environment.promote_staging_workspace_generation();
                         if environment.state != StoredEnvironmentState::Running {
                             environment.generation = environment
                                 .generation
@@ -2700,6 +2712,46 @@ fn oci_storage_generation(
     Ok(format!("{:x}", digest.finalize()))
 }
 
+fn referenced_root_storage_generations(
+    environment: &EnvironmentRecord,
+) -> Result<BTreeSet<String>, SupervisorError> {
+    let mut retained = BTreeSet::new();
+    let active_artifact = environment.active_artifact_generation.as_deref();
+    for generation in [
+        environment.active_workspace_generation.as_ref(),
+        environment.rollback_workspace_generation.as_ref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        let artifact = active_artifact
+            .filter(|artifact| valid_sha256(artifact))
+            .ok_or(SupervisorError::InvalidState)?;
+        retained.insert(oci_storage_generation(
+            &generation.root_generation,
+            artifact,
+            generation.root_disk_bytes,
+        )?);
+    }
+    if let Some(generation) = environment.staging_workspace_generation.as_ref() {
+        let artifact = environment
+            .staging_artifact_generation
+            .as_deref()
+            .or(active_artifact)
+            .filter(|artifact| valid_sha256(artifact))
+            .ok_or(SupervisorError::InvalidState)?;
+        retained.insert(oci_storage_generation(
+            &generation.root_generation,
+            artifact,
+            generation.root_disk_bytes,
+        )?);
+    }
+    if environment.project_spec_json.is_none() {
+        retained.insert(foundation_root_generation(environment)?);
+    }
+    Ok(retained)
+}
+
 fn foundation_root_generation(environment: &EnvironmentRecord) -> Result<String, SupervisorError> {
     let artifact_generation = environment
         .active_artifact_generation
@@ -3177,15 +3229,65 @@ mod tests {
         let old_rollback = test_workspace_generation(project_sha256, b"old-rollback");
         environment.active_workspace_generation = Some(active.clone());
         environment.staging_workspace_generation = Some(staging.clone());
-        environment.rollback_workspace_generation = Some(old_rollback);
+        environment.rollback_workspace_generation = Some(old_rollback.clone());
         environment.validate("dev").unwrap();
 
-        environment.promote_staging_workspace_generation();
+        let displaced = environment.promote_staging_workspace_generation();
 
         assert_eq!(environment.active_workspace_generation, Some(staging));
         assert_eq!(environment.rollback_workspace_generation, Some(active));
+        assert_eq!(displaced, Some(old_rollback));
         assert!(environment.staging_workspace_generation.is_none());
         environment.validate("dev").unwrap();
+    }
+
+    #[test]
+    fn durable_workspace_records_are_the_only_retained_storage_generations() {
+        let mut environment = project_environment();
+        let project_sha256 = environment.project_spec_sha256.as_deref().unwrap();
+        let active = test_workspace_generation(project_sha256, b"active");
+        let staging = test_workspace_generation(project_sha256, b"staging");
+        let old_rollback = test_workspace_generation(project_sha256, b"old-rollback");
+        let artifact = environment
+            .active_artifact_generation
+            .as_deref()
+            .unwrap()
+            .to_owned();
+        environment.active_workspace_generation = Some(active.clone());
+        environment.staging_workspace_generation = Some(staging.clone());
+        environment.rollback_workspace_generation = Some(old_rollback.clone());
+
+        let before = referenced_root_storage_generations(&environment).unwrap();
+        assert_eq!(before.len(), 3);
+        for generation in [&active, &staging, &old_rollback] {
+            assert!(
+                before.contains(
+                    &oci_storage_generation(
+                        &generation.root_generation,
+                        &artifact,
+                        generation.root_disk_bytes,
+                    )
+                    .unwrap()
+                )
+            );
+        }
+
+        assert_eq!(
+            environment.promote_staging_workspace_generation(),
+            Some(old_rollback.clone())
+        );
+        let after = referenced_root_storage_generations(&environment).unwrap();
+        assert_eq!(after.len(), 2);
+        assert!(
+            !after.contains(
+                &oci_storage_generation(
+                    &old_rollback.root_generation,
+                    &artifact,
+                    old_rollback.root_disk_bytes,
+                )
+                .unwrap()
+            )
+        );
     }
 
     #[test]
@@ -3462,6 +3564,67 @@ mod tests {
 
         assert_eq!(retried, first);
         assert!(first.environment_id.is_some());
+    }
+
+    #[tokio::test]
+    async fn staging_boundary_collects_only_unreferenced_root_storage() {
+        let parent = tempfile::tempdir().unwrap();
+        let root_path = parent.path().join("runtime");
+        fs::create_dir(&root_path).unwrap();
+        fs::set_permissions(&root_path, fs::Permissions::from_mode(0o700)).unwrap();
+        let root = PrivateRoot::open(&root_path).unwrap();
+        root.ensure_dir(Path::new("engine"), 0o700).unwrap();
+        root.ensure_dir(Path::new("runners"), 0o700).unwrap();
+        let lock = SupervisorLock::acquire(&root).unwrap();
+        let (store, _) = SupervisorStore::open(&root).unwrap();
+        let mut environment = project_environment();
+        let active = test_workspace_generation(
+            environment.project_spec_sha256.as_deref().unwrap(),
+            b"active",
+        );
+        let active_storage = oci_storage_generation(
+            &active.root_generation,
+            environment.active_artifact_generation.as_deref().unwrap(),
+            active.root_disk_bytes,
+        )
+        .unwrap();
+        let stale_storage = "f".repeat(64);
+        environment.active_workspace_generation = Some(active);
+        let engine = PrivateRoot::open(&root_path.join("engine")).unwrap();
+        let paths = VmPaths::create(&engine, environment.id).unwrap();
+        for storage in [&active_storage, &stale_storage] {
+            let generation =
+                crate::linux::state::RootGenerationPaths::create(&paths, storage).unwrap();
+            fs::write(&generation.root_disk, b"root").unwrap();
+            fs::set_permissions(&generation.root_disk, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let state = SupervisorState {
+            schema_version: SUPERVISOR_STATE_SCHEMA,
+            current: Some("dev".to_owned()),
+            environments: [("dev".to_owned(), environment)].into(),
+        };
+        store.replace_state(&state).unwrap();
+        let mut core = SupervisorCore {
+            config: NativeRuntimeConfig {
+                root: root_path,
+                artifact_root: parent.path().join("artifacts"),
+                artifact_lock: parent.path().join("artifacts.lock.json"),
+                executable: PathBuf::from("/usr/bin/true"),
+            },
+            root,
+            store,
+            state,
+            children: HashMap::new(),
+            live_runners: HashMap::new(),
+            _lock: lock,
+        };
+
+        assert_eq!(
+            core.stage_workspace_generation("dev").await.unwrap(),
+            core.state
+        );
+        assert!(paths.generations_dir.join(active_storage).is_dir());
+        assert!(!paths.generations_dir.join(stale_storage).exists());
     }
 
     #[test]
