@@ -291,23 +291,14 @@ impl CloudHypervisorRunner {
         let _lock = paths.lock()?;
         let mut persisted = read_stopped_persisted_state(&paths, vm_id)?;
         let current = StateDiskIdentity::capture(&paths.state_disk)?;
-        if let Some(expected) = persisted.as_ref().map(|state| &state.state_disk) {
-            if !same_disk_object_ignoring_size(expected, &current)
-                || !matches!(current.file.size, size if size == expected.file.size || size == target_bytes)
-            {
-                return Err(RunnerError::StateDiskGrowthIdentityMismatch(
-                    paths.state_disk.clone(),
-                ));
-            }
-            if expected.file.size == target_bytes && current.file.size == target_bytes {
-                return Ok(target_bytes);
-            }
-        }
-        if current.file.size > target_bytes {
-            return Err(RunnerError::DiskShrinkUnsupported {
-                current: current.file.size,
-                requested: target_bytes,
-            });
+        match plan_stopped_disk_growth(
+            persisted.as_ref().map(|state| &state.state_disk),
+            &current,
+            target_bytes,
+            &paths.state_disk,
+        )? {
+            StoppedDiskGrowthPlan::AlreadyComplete => return Ok(target_bytes),
+            StoppedDiskGrowthPlan::ResizeFilesystem => {}
         }
 
         let disk_root = PrivateRoot::open(&paths.disks_dir)?;
@@ -344,6 +335,39 @@ impl CloudHypervisorRunner {
         }
         Ok(target_bytes)
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StoppedDiskGrowthPlan {
+    AlreadyComplete,
+    ResizeFilesystem,
+}
+
+fn plan_stopped_disk_growth(
+    expected: Option<&StateDiskIdentity>,
+    current: &StateDiskIdentity,
+    target_bytes: u64,
+    disk: &Path,
+) -> Result<StoppedDiskGrowthPlan, RunnerError> {
+    if let Some(expected) = expected {
+        if !same_disk_object_ignoring_size(expected, current)
+            || !matches!(current.file.size, size if size == expected.file.size || size == target_bytes)
+        {
+            return Err(RunnerError::StateDiskGrowthIdentityMismatch(
+                disk.to_owned(),
+            ));
+        }
+        if expected.file.size == target_bytes && current.file.size == target_bytes {
+            return Ok(StoppedDiskGrowthPlan::AlreadyComplete);
+        }
+    }
+    if current.file.size > target_bytes {
+        return Err(RunnerError::DiskShrinkUnsupported {
+            current: current.file.size,
+            requested: target_bytes,
+        });
+    }
+    Ok(StoppedDiskGrowthPlan::ResizeFilesystem)
 }
 
 fn same_disk_object_ignoring_size(
@@ -1260,6 +1284,56 @@ mod tests {
         assert!(matches!(
             admit_state_disk(&paths, &next, Some(&persisted)),
             Err(RunnerError::State(StateError::StateDiskIdentityChanged(path)))
+                if path == paths.state_disk
+        ));
+    }
+
+    #[test]
+    fn interrupted_growth_resumes_only_the_same_recorded_disk() {
+        let (_parent, runner) = test_runner();
+        let vm_id = Uuid::new_v4();
+        let paths = VmPaths::create(&runner.state_root, vm_id).unwrap();
+        write_test_ext4(&paths.state_disk, Uuid::new_v4());
+        let recorded = StateDiskIdentity::capture(&paths.state_disk).unwrap();
+        let target = recorded.file.size + 1024 * 1024;
+
+        assert_eq!(
+            plan_stopped_disk_growth(Some(&recorded), &recorded, target, &paths.state_disk,)
+                .unwrap(),
+            StoppedDiskGrowthPlan::ResizeFilesystem
+        );
+
+        // This is the interruption boundary after set_len/sync but before
+        // e2fsck, resize2fs, and the persisted identity update. Replay must
+        // repair the filesystem instead of rejecting or replacing the disk.
+        let mut length_applied = recorded.clone();
+        length_applied.file.size = target;
+        assert_eq!(
+            plan_stopped_disk_growth(Some(&recorded), &length_applied, target, &paths.state_disk,)
+                .unwrap(),
+            StoppedDiskGrowthPlan::ResizeFilesystem
+        );
+        assert_eq!(
+            plan_stopped_disk_growth(
+                Some(&length_applied),
+                &length_applied,
+                target,
+                &paths.state_disk,
+            )
+            .unwrap(),
+            StoppedDiskGrowthPlan::AlreadyComplete
+        );
+
+        let mut replacement = length_applied.clone();
+        replacement.file.inode += 1;
+        assert!(matches!(
+            plan_stopped_disk_growth(
+                Some(&recorded),
+                &replacement,
+                target,
+                &paths.state_disk,
+            ),
+            Err(RunnerError::StateDiskGrowthIdentityMismatch(path))
                 if path == paths.state_disk
         ));
     }

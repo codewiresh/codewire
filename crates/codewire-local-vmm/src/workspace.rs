@@ -8,14 +8,14 @@ use std::ffi::{OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write as _};
 use std::os::unix::ffi::OsStringExt as _;
-use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
 use uuid::Uuid;
 
-use crate::linux::path::PrivateRoot;
-use crate::linux::state::{MINIMUM_STATE_DISK_BYTES, VmPaths};
+use crate::linux::path::{PrivateRoot, current_uid};
+use crate::linux::state::{MINIMUM_STATE_DISK_BYTES, StateDiskIdentity, VmPaths};
 
 const GIT: &str = "/usr/bin/git";
 const MAX_GIT_CONTROL_OUTPUT: usize = 16 * 1024 * 1024;
@@ -27,6 +27,12 @@ pub struct WorkspaceSnapshot {
     pub source_path: PathBuf,
     pub commit: String,
     pub state_disk: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceSource {
+    pub source_path: PathBuf,
+    pub commit: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,55 +57,9 @@ pub fn provision_clean_git_workspace(
     {
         return Err(WorkspaceError::InvalidDiskSize(disk_bytes));
     }
-    let source_path = fs::canonicalize(requested_source).map_err(|source| WorkspaceError::Io {
-        path: requested_source.to_owned(),
-        source,
-    })?;
-    if !fs::metadata(&source_path)
-        .map_err(|source| WorkspaceError::Io {
-            path: source_path.clone(),
-            source,
-        })?
-        .is_dir()
-    {
-        return Err(WorkspaceError::SourceNotDirectory(source_path));
-    }
-
-    let top_level = git_text(&source_path, &["rev-parse", "--show-toplevel"])?;
-    let top_level = fs::canonicalize(top_level.trim()).map_err(|source| WorkspaceError::Io {
-        path: PathBuf::from(top_level.trim()),
-        source,
-    })?;
-    if top_level != source_path {
-        return Err(WorkspaceError::SourceMustBeWorktreeRoot {
-            requested: source_path,
-            root: top_level,
-        });
-    }
-    let bare = git_text(&top_level, &["rev-parse", "--is-bare-repository"])?;
-    if bare.trim() != "false" {
-        return Err(WorkspaceError::BareRepository);
-    }
-    let commit = git_text(&top_level, &["rev-parse", "--verify", "HEAD^{commit}"])?
-        .trim()
-        .to_owned();
-    if !valid_object_id(&commit) {
-        return Err(WorkspaceError::InvalidCommit);
-    }
-    let status = git_output(
-        &top_level,
-        &[
-            "status",
-            "--porcelain=v1",
-            "-z",
-            "--untracked-files=all",
-            "--ignore-submodules=none",
-        ],
-        MAX_GIT_CONTROL_OUTPUT,
-    )?;
-    if !status.stdout.is_empty() {
-        return Err(WorkspaceError::DirtyWorktree);
-    }
+    let source = inspect_clean_git_workspace(requested_source)?;
+    let top_level = source.source_path;
+    let commit = source.commit;
     let tree = git_output(
         &top_level,
         &["ls-tree", "-r", "-z", "--full-tree", &commit],
@@ -109,10 +69,11 @@ pub fn provision_clean_git_workspace(
 
     let engine_root = PrivateRoot::open(engine_state_root)?;
     let paths = VmPaths::create(&engine_root, vm_id)?;
+    cleanup_provisioning_staging(&engine_root, vm_id)?;
     if fs::symlink_metadata(&paths.state_disk).is_ok() {
         return Err(WorkspaceError::StateDiskAlreadyExists(paths.state_disk));
     }
-    let staging_name = format!("provision-{vm_id}");
+    let staging_name = provisioning_staging_name(vm_id);
     let staging_dir = engine_root.create_dir(Path::new(&staging_name), 0o700)?;
     let mut cleanup = ProvisionCleanup::new(staging_dir.clone(), paths.state_disk.clone());
     let workspace = staging_dir.join("workspace");
@@ -194,6 +155,154 @@ pub fn provision_clean_git_workspace(
         commit,
         state_disk: paths.state_disk,
     })
+}
+
+pub fn inspect_clean_git_workspace(
+    requested_source: &Path,
+) -> Result<WorkspaceSource, WorkspaceError> {
+    let source_path = fs::canonicalize(requested_source).map_err(|source| WorkspaceError::Io {
+        path: requested_source.to_owned(),
+        source,
+    })?;
+    if !fs::metadata(&source_path)
+        .map_err(|source| WorkspaceError::Io {
+            path: source_path.clone(),
+            source,
+        })?
+        .is_dir()
+    {
+        return Err(WorkspaceError::SourceNotDirectory(source_path));
+    }
+
+    let top_level = git_text(&source_path, &["rev-parse", "--show-toplevel"])?;
+    let top_level = fs::canonicalize(top_level.trim()).map_err(|source| WorkspaceError::Io {
+        path: PathBuf::from(top_level.trim()),
+        source,
+    })?;
+    if top_level != source_path {
+        return Err(WorkspaceError::SourceMustBeWorktreeRoot {
+            requested: source_path,
+            root: top_level,
+        });
+    }
+    let bare = git_text(&top_level, &["rev-parse", "--is-bare-repository"])?;
+    if bare.trim() != "false" {
+        return Err(WorkspaceError::BareRepository);
+    }
+    let commit = git_text(&top_level, &["rev-parse", "--verify", "HEAD^{commit}"])?
+        .trim()
+        .to_owned();
+    if !valid_object_id(&commit) {
+        return Err(WorkspaceError::InvalidCommit);
+    }
+    let status = git_output(
+        &top_level,
+        &[
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "--untracked-files=all",
+            "--ignore-submodules=none",
+        ],
+        MAX_GIT_CONTROL_OUTPUT,
+    )?;
+    if !status.stdout.is_empty() {
+        return Err(WorkspaceError::DirtyWorktree);
+    }
+    Ok(WorkspaceSource {
+        source_path: top_level,
+        commit,
+    })
+}
+
+pub fn ensure_clean_git_workspace(
+    engine_state_root: &Path,
+    vm_id: Uuid,
+    source: &WorkspaceSource,
+    disk_bytes: u64,
+) -> Result<WorkspaceSnapshot, WorkspaceError> {
+    if !valid_object_id(&source.commit) || !source.source_path.is_absolute() {
+        return Err(WorkspaceError::InvalidCommit);
+    }
+    let engine_root = PrivateRoot::open(engine_state_root)?;
+    let paths = VmPaths::create(&engine_root, vm_id)?;
+    cleanup_provisioning_staging(&engine_root, vm_id)?;
+    match fs::symlink_metadata(&paths.state_disk) {
+        Ok(_) => {
+            let identity = StateDiskIdentity::capture(&paths.state_disk)?;
+            if identity.file.size != disk_bytes {
+                return Err(WorkspaceError::ExistingDiskSizeMismatch {
+                    path: paths.state_disk,
+                    expected: disk_bytes,
+                    actual: identity.file.size,
+                });
+            }
+            Ok(WorkspaceSnapshot {
+                source_path: source.source_path.clone(),
+                commit: source.commit.clone(),
+                state_disk: paths.state_disk,
+            })
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            let admitted = inspect_clean_git_workspace(&source.source_path)?;
+            if admitted != *source {
+                return Err(WorkspaceError::SourceChanged);
+            }
+            provision_clean_git_workspace(engine_state_root, vm_id, &source.source_path, disk_bytes)
+        }
+        Err(source_error) => Err(WorkspaceError::Io {
+            path: paths.state_disk,
+            source: source_error,
+        }),
+    }
+}
+
+fn provisioning_staging_name(vm_id: Uuid) -> String {
+    format!("provision-{vm_id}")
+}
+
+pub(crate) fn cleanup_interrupted_workspace_provisioning(
+    engine_state_root: &Path,
+    vm_id: Uuid,
+) -> Result<(), WorkspaceError> {
+    cleanup_provisioning_staging(&PrivateRoot::open(engine_state_root)?, vm_id)
+}
+
+fn cleanup_provisioning_staging(
+    engine_root: &PrivateRoot,
+    vm_id: Uuid,
+) -> Result<(), WorkspaceError> {
+    let staging = engine_root.path().join(provisioning_staging_name(vm_id));
+    let metadata = match fs::symlink_metadata(&staging) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(source) => {
+            return Err(WorkspaceError::Io {
+                path: staging,
+                source,
+            });
+        }
+    };
+    if !metadata.is_dir()
+        || metadata.uid() != current_uid()
+        || metadata.permissions().mode() & 0o7777 != 0o700
+    {
+        return Err(WorkspaceError::UnsafeProvisioningStaging(staging));
+    }
+    // RecordEnvironment commits this exact UUID-derived path before the
+    // provisioning effect begins. Its contents are a disposable Git-object
+    // assembly owned wholly by that effect, so an interrupted replay may
+    // remove this one admitted tree after checking its root identity.
+    fs::remove_dir_all(&staging).map_err(|source| WorkspaceError::Io {
+        path: staging.clone(),
+        source,
+    })?;
+    File::open(engine_root.path())
+        .and_then(|root| root.sync_all())
+        .map_err(|source| WorkspaceError::Io {
+            path: engine_root.path().to_owned(),
+            source,
+        })
 }
 
 fn git_text(source: &Path, arguments: &[&str]) -> Result<String, WorkspaceError> {
@@ -445,6 +554,18 @@ pub enum WorkspaceError {
     InvalidGitOutput,
     #[error("workspace state disk already exists: {0}")]
     StateDiskAlreadyExists(PathBuf),
+    #[error("workspace provisioning staging path is unsafe: {0}")]
+    UnsafeProvisioningStaging(PathBuf),
+    #[error("workspace source changed after its create intent was recorded")]
+    SourceChanged,
+    #[error(
+        "existing workspace disk has size {actual}, but the recorded manifest requires {expected}: {path}"
+    )]
+    ExistingDiskSizeMismatch {
+        path: PathBuf,
+        expected: u64,
+        actual: u64,
+    },
     #[error("mkfs.ext4 is required for native workspace provisioning")]
     MkfsUnavailable,
     #[error("mkfs.ext4 failed to create the workspace disk")]
@@ -459,7 +580,92 @@ pub enum WorkspaceError {
 
 #[cfg(test)]
 mod tests {
+    use std::io::{Seek as _, SeekFrom, Write as _};
+    use std::os::unix::fs::symlink;
+
     use super::*;
+
+    fn write_test_ext4(path: &Path, size: u64) {
+        let mut disk = OpenOptions::new()
+            .create_new(true)
+            .read(true)
+            .write(true)
+            .mode(0o600)
+            .open(path)
+            .unwrap();
+        disk.set_len(size).unwrap();
+        let mut superblock = [0_u8; 0x78];
+        superblock[0x38..0x3a].copy_from_slice(&[0x53, 0xef]);
+        superblock[0x68..0x78].copy_from_slice(Uuid::new_v4().as_bytes());
+        disk.seek(SeekFrom::Start(1024)).unwrap();
+        disk.write_all(&superblock).unwrap();
+        disk.sync_all().unwrap();
+    }
+
+    #[test]
+    fn replay_accepts_only_the_recorded_valid_existing_workspace_disk() {
+        let engine = tempfile::tempdir().unwrap();
+        fs::set_permissions(engine.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let engine_root = PrivateRoot::open(engine.path()).unwrap();
+        let vm_id = Uuid::new_v4();
+        let paths = VmPaths::create(&engine_root, vm_id).unwrap();
+        write_test_ext4(&paths.state_disk, MINIMUM_STATE_DISK_BYTES);
+        let interrupted_staging = engine.path().join(provisioning_staging_name(vm_id));
+        fs::create_dir(&interrupted_staging).unwrap();
+        fs::set_permissions(&interrupted_staging, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::write(interrupted_staging.join("partial-object"), b"partial").unwrap();
+        let source = WorkspaceSource {
+            source_path: PathBuf::from("/source/no-longer-required"),
+            commit: "a".repeat(40),
+        };
+
+        let snapshot =
+            ensure_clean_git_workspace(engine.path(), vm_id, &source, MINIMUM_STATE_DISK_BYTES)
+                .unwrap();
+        assert_eq!(snapshot.source_path, source.source_path);
+        assert_eq!(snapshot.commit, source.commit);
+        assert_eq!(snapshot.state_disk, paths.state_disk);
+        assert!(!interrupted_staging.exists());
+
+        assert!(matches!(
+            ensure_clean_git_workspace(
+                engine.path(),
+                vm_id,
+                &source,
+                MINIMUM_STATE_DISK_BYTES + 1024 * 1024,
+            ),
+            Err(WorkspaceError::ExistingDiskSizeMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn replay_refuses_a_replaced_workspace_staging_root() {
+        let parent = tempfile::tempdir().unwrap();
+        let engine = parent.path().join("engine");
+        let outside = parent.path().join("outside");
+        fs::create_dir(&engine).unwrap();
+        fs::set_permissions(&engine, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::create_dir(&outside).unwrap();
+        fs::write(outside.join("sentinel"), b"preserve").unwrap();
+        let vm_id = Uuid::new_v4();
+        let staging = engine.join(provisioning_staging_name(vm_id));
+        symlink(&outside, &staging).unwrap();
+        let source = WorkspaceSource {
+            source_path: PathBuf::from("/source/no-longer-required"),
+            commit: "a".repeat(40),
+        };
+
+        assert!(matches!(
+            ensure_clean_git_workspace(
+                &engine,
+                vm_id,
+                &source,
+                MINIMUM_STATE_DISK_BYTES,
+            ),
+            Err(WorkspaceError::UnsafeProvisioningStaging(path)) if path == staging
+        ));
+        assert_eq!(fs::read(outside.join("sentinel")).unwrap(), b"preserve");
+    }
 
     #[test]
     fn tree_parser_accepts_only_regular_git_blobs() {

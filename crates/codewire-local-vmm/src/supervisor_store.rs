@@ -297,53 +297,47 @@ impl SupervisorStore {
         result: Option<&serde_json::Value>,
         error_code: Option<&str>,
     ) -> Result<OperationRecord, SupervisorStoreError> {
-        validate_non_nil(operation_id)?;
-        validate_operation_outcome(phase, result, error_code)?;
-        let result_bytes = result.map(encode_operation_json).transpose()?;
-        let next_checkpoint = expected_checkpoint
-            .checked_add(1)
-            .ok_or(SupervisorStoreError::InvalidOperation)?;
-        let now = unix_millis()?;
         let transaction =
             Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
-        let current = operation_for_id(&transaction, operation_id)?
-            .ok_or(SupervisorStoreError::OperationNotFound)?;
-        if current.checkpoint > expected_checkpoint {
-            if current.checkpoint == next_checkpoint
-                && current.phase == phase
-                && current.result.as_ref() == result
-                && current.error_code.as_deref() == error_code
-            {
-                transaction.commit()?;
-                return Ok(current);
-            }
-            return Err(SupervisorStoreError::JournalConflict);
-        }
-        if current.checkpoint != expected_checkpoint
-            || !valid_phase_transition(current.phase, phase)
-        {
-            return Err(SupervisorStoreError::JournalConflict);
-        }
-        let updated = transaction.execute(
-            "UPDATE operations \
-             SET phase = ?1, checkpoint = ?2, result_json = ?3, error_code = ?4, updated_unix_ms = ?5 \
-             WHERE operation_id = ?6 AND checkpoint = ?7",
-            params![
-                phase.as_str(),
-                i64::from(next_checkpoint),
-                result_bytes,
-                error_code,
-                now,
-                operation_id.to_string(),
-                i64::from(expected_checkpoint),
-            ],
+        let (record, _) = advance_operation_in_transaction(
+            &transaction,
+            operation_id,
+            expected_checkpoint,
+            phase,
+            result,
+            error_code,
         )?;
-        if updated != 1 {
-            return Err(SupervisorStoreError::JournalConflict);
-        }
-        let record = operation_for_id(&transaction, operation_id)?
-            .ok_or(SupervisorStoreError::OperationNotFound)?;
         transaction.commit()?;
+        Ok(record)
+    }
+
+    pub(crate) fn replace_state_and_advance_operation(
+        &self,
+        state: &SupervisorState,
+        operation_id: Uuid,
+        expected_checkpoint: u32,
+        phase: OperationPhase,
+        result: Option<&serde_json::Value>,
+        error_code: Option<&str>,
+    ) -> Result<OperationRecord, SupervisorStoreError> {
+        state
+            .validate()
+            .map_err(|_| SupervisorStoreError::InvalidState)?;
+        let transaction =
+            Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
+        let (record, advanced) = advance_operation_in_transaction(
+            &transaction,
+            operation_id,
+            expected_checkpoint,
+            phase,
+            result,
+            error_code,
+        )?;
+        if advanced {
+            write_state(&transaction, state)?;
+        }
+        transaction.commit()?;
+        validate_database_files(&PrivateRoot::open(&self.root)?, true)?;
         Ok(record)
     }
 
@@ -771,6 +765,19 @@ fn write_state(
                 ],
             )?;
         }
+        if matches!(
+            environment.state,
+            StoredEnvironmentState::Starting | StoredEnvironmentState::Error
+        ) && environment.generation == 0
+        {
+            let relative_path = format!("engine/provision-{}", environment.id);
+            transaction.execute(
+                "INSERT INTO owned_objects(
+                   environment_id, kind, relative_path, identity_json, lifecycle
+                 ) VALUES (?1, 'workspace_staging', ?2, NULL, 'staging')",
+                params![environment.id.to_string(), relative_path.as_bytes()],
+            )?;
+        }
         if let Some(runner) = &environment.runner {
             let identity = serde_json::to_vec(&runner.socket)
                 .map_err(|_| SupervisorStoreError::InvalidState)?;
@@ -859,6 +866,57 @@ fn operation_for_id(
         )
         .optional()
         .map_err(Into::into)
+}
+
+fn advance_operation_in_transaction(
+    transaction: &Transaction<'_>,
+    operation_id: Uuid,
+    expected_checkpoint: u32,
+    phase: OperationPhase,
+    result: Option<&serde_json::Value>,
+    error_code: Option<&str>,
+) -> Result<(OperationRecord, bool), SupervisorStoreError> {
+    validate_non_nil(operation_id)?;
+    validate_operation_outcome(phase, result, error_code)?;
+    let result_bytes = result.map(encode_operation_json).transpose()?;
+    let next_checkpoint = expected_checkpoint
+        .checked_add(1)
+        .ok_or(SupervisorStoreError::InvalidOperation)?;
+    let current = operation_for_id(transaction, operation_id)?
+        .ok_or(SupervisorStoreError::OperationNotFound)?;
+    if current.checkpoint > expected_checkpoint {
+        if current.checkpoint == next_checkpoint
+            && current.phase == phase
+            && current.result.as_ref() == result
+            && current.error_code.as_deref() == error_code
+        {
+            return Ok((current, false));
+        }
+        return Err(SupervisorStoreError::JournalConflict);
+    }
+    if current.checkpoint != expected_checkpoint || !valid_phase_transition(current.phase, phase) {
+        return Err(SupervisorStoreError::JournalConflict);
+    }
+    let updated = transaction.execute(
+        "UPDATE operations \
+         SET phase = ?1, checkpoint = ?2, result_json = ?3, error_code = ?4, updated_unix_ms = ?5 \
+         WHERE operation_id = ?6 AND checkpoint = ?7",
+        params![
+            phase.as_str(),
+            i64::from(next_checkpoint),
+            result_bytes,
+            error_code,
+            unix_millis()?,
+            operation_id.to_string(),
+            i64::from(expected_checkpoint),
+        ],
+    )?;
+    if updated != 1 {
+        return Err(SupervisorStoreError::JournalConflict);
+    }
+    operation_for_id(transaction, operation_id)?
+        .map(|record| (record, true))
+        .ok_or(SupervisorStoreError::OperationNotFound)
 }
 
 fn decode_operation_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<OperationRecord> {
@@ -1366,7 +1424,17 @@ mod tests {
         let (_parent, root) = root();
         let (store, _) = SupervisorStore::open_for_boot(&root, "boot-a").unwrap();
         let expected = state(environment(StoredEnvironmentState::Running, Some("boot-a")));
+        let environment_id = expected.environments["dev"].id;
         store.replace_state(&expected).unwrap();
+        let request_id = Uuid::new_v4();
+        store
+            .begin_operation(
+                request_id,
+                Some(environment_id),
+                OperationKind::Start,
+                &serde_json::json!({"name": "dev", "generation": 8}),
+            )
+            .unwrap();
         drop(store);
 
         let (reopened, loaded) = SupervisorStore::open_for_boot(&root, "boot-b").unwrap();
@@ -1374,6 +1442,11 @@ mod tests {
         assert_eq!(environment.state, StoredEnvironmentState::Stopped);
         assert!(environment.runner.is_none());
         assert_eq!(reopened.metadata("host_boot_id").as_deref(), Some("boot-b"));
+        let interrupted = reopened.operation_by_request(request_id).unwrap().unwrap();
+        assert_eq!(interrupted.phase, OperationPhase::Interrupted);
+        assert_eq!(interrupted.checkpoint, 0);
+        assert_eq!(interrupted.error_code.as_deref(), Some("host_reboot"));
+        assert!(reopened.pending_operations().unwrap().is_empty());
     }
 
     #[test]
@@ -1461,6 +1534,33 @@ mod tests {
             kind == "state_disk"
                 && path == format!("engine/vms/{}/disks/state.raw", environment.id).as_bytes()
         }));
+    }
+
+    #[test]
+    fn create_manifest_owns_its_replayable_workspace_staging_path() {
+        let (_parent, root) = root();
+        let (store, _) = SupervisorStore::open_for_boot(&root, "boot-a").unwrap();
+        let mut environment = environment(StoredEnvironmentState::Starting, None);
+        environment.generation = 0;
+        let environment_id = environment.id;
+        store.replace_state(&state(environment)).unwrap();
+
+        let staging: (Vec<u8>, String) = store
+            .connection
+            .query_row(
+                "SELECT relative_path, lifecycle FROM owned_objects \
+                 WHERE environment_id = ?1 AND kind = 'workspace_staging'",
+                [environment_id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            staging,
+            (
+                format!("engine/provision-{environment_id}").into_bytes(),
+                "staging".to_owned(),
+            )
+        );
     }
 
     #[test]
@@ -1576,6 +1676,132 @@ mod tests {
             ),
             Err(SupervisorStoreError::JournalConflict)
         ));
+    }
+
+    #[test]
+    fn state_and_checkpoint_commit_atomically_without_replay_overwrite() {
+        let (_parent, root) = root();
+        let (store, _) = SupervisorStore::open_for_boot(&root, "boot-a").unwrap();
+        let environment = environment(StoredEnvironmentState::Starting, None);
+        let operation = store
+            .begin_operation(
+                Uuid::new_v4(),
+                Some(environment.id),
+                OperationKind::Create,
+                &serde_json::json!({"name": "dev"}),
+            )
+            .unwrap();
+        let expected = state(environment);
+
+        let applied = store
+            .replace_state_and_advance_operation(
+                &expected,
+                operation.operation_id,
+                operation.checkpoint,
+                OperationPhase::EffectApplied,
+                None,
+                None,
+            )
+            .unwrap();
+        assert_eq!(applied.checkpoint, 1);
+        assert_eq!(store.load_state().unwrap(), expected);
+
+        let mut stale_replay = expected.clone();
+        stale_replay.environments.get_mut("dev").unwrap().memory_mib = 8 * 1024;
+        assert_eq!(
+            store
+                .replace_state_and_advance_operation(
+                    &stale_replay,
+                    operation.operation_id,
+                    operation.checkpoint,
+                    OperationPhase::EffectApplied,
+                    None,
+                    None,
+                )
+                .unwrap(),
+            applied
+        );
+        assert_eq!(store.load_state().unwrap(), expected);
+
+        let mut conflicting = expected.clone();
+        conflicting.environments.get_mut("dev").unwrap().vcpus = 4;
+        assert!(matches!(
+            store.replace_state_and_advance_operation(
+                &conflicting,
+                operation.operation_id,
+                7,
+                OperationPhase::EffectApplied,
+                None,
+                None,
+            ),
+            Err(SupervisorStoreError::JournalConflict)
+        ));
+        assert_eq!(store.load_state().unwrap(), expected);
+    }
+
+    #[test]
+    fn disk_full_rolls_back_state_and_checkpoint_for_retry() {
+        let (_parent, root) = root();
+        let (store, _) = SupervisorStore::open_for_boot(&root, "boot-a").unwrap();
+        let environment = environment(StoredEnvironmentState::Starting, None);
+        let operation = store
+            .begin_operation(
+                Uuid::new_v4(),
+                Some(environment.id),
+                OperationKind::Create,
+                &serde_json::json!({"name": "dev"}),
+            )
+            .unwrap();
+        let initial = state(environment);
+        store.replace_state(&initial).unwrap();
+        let mut expanded = initial.clone();
+        expanded.environments.get_mut("dev").unwrap().source_path =
+            PathBuf::from(format!("/{}", "x".repeat(512 * 1024)));
+
+        let page_count: i64 = store
+            .connection
+            .pragma_query_value(None, "page_count", |row| row.get(0))
+            .unwrap();
+        store
+            .connection
+            .pragma_update(None, "max_page_count", page_count)
+            .unwrap();
+        assert!(matches!(
+            store.replace_state_and_advance_operation(
+                &expanded,
+                operation.operation_id,
+                operation.checkpoint,
+                OperationPhase::EffectApplied,
+                None,
+                None,
+            ),
+            Err(SupervisorStoreError::Sqlite(rusqlite::Error::SqliteFailure(
+                error,
+                _,
+            ))) if error.code == rusqlite::ErrorCode::DiskFull
+        ));
+        assert_eq!(store.load_state().unwrap(), initial);
+        assert_eq!(
+            store.operation_by_request(operation.request_id).unwrap(),
+            Some(operation.clone())
+        );
+
+        store
+            .connection
+            .pragma_update(None, "max_page_count", page_count + 1024)
+            .unwrap();
+        let applied = store
+            .replace_state_and_advance_operation(
+                &expanded,
+                operation.operation_id,
+                operation.checkpoint,
+                OperationPhase::EffectApplied,
+                None,
+                None,
+            )
+            .unwrap();
+        assert_eq!(applied.checkpoint, 1);
+        assert_eq!(store.load_state().unwrap(), expanded);
     }
 
     #[test]

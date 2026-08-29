@@ -250,6 +250,132 @@ wait_for_pid_exit() {
   return 1
 }
 
+wait_for_pid_death() {
+  local pid="$1"
+  local stat suffix state
+  for _attempt in {1..100}; do
+    [[ ! -r "/proc/$pid/stat" ]] && return 0
+    stat="$(<"/proc/$pid/stat")"
+    suffix="${stat##*) }"
+    state="${suffix%% *}"
+    [[ "$state" == Z || "$state" == X ]] && return 0
+    sleep 0.05
+  done
+  return 1
+}
+
+wait_for_environment_state() {
+  local expected="$1"
+  for _attempt in {1..100}; do
+    run_cw env info --local "$NAME" --output json
+    if jq -e --arg expected "$expected" '.state == $expected' "$LAST_STDOUT" >/dev/null; then
+      return 0
+    fi
+    sleep 0.05
+  done
+  return 1
+}
+
+recorded_vmm_pid() {
+  jq -er '.process.pid' "$STATE_ROOT/engine/vms/$ENVIRONMENT_ID/state.json"
+}
+
+kill_recorded_process() {
+  local kind="$1"
+  /usr/bin/env python3 - \
+    "$STATE_ROOT/supervisor.db" \
+    "$STATE_ROOT/engine/vms/$ENVIRONMENT_ID/state.json" \
+    "$NAME" \
+    "$kind" <<'PY'
+import json
+import hashlib
+import os
+import signal
+import sqlite3
+import sys
+
+database, vmm_state, name, kind = sys.argv[1:]
+if kind == "runner":
+    connection = sqlite3.connect(f"file:{database}?mode=ro", uri=True, timeout=1)
+    try:
+        row = connection.execute(
+            "SELECT runner_json FROM environments WHERE name = ?", (name,)
+        ).fetchone()
+        if row is None or row[0] is None:
+            raise SystemExit("runner identity is missing")
+        identity = json.loads(row[0])["process"]
+    finally:
+        connection.close()
+elif kind == "vmm":
+    with open(vmm_state, "r", encoding="utf-8") as source:
+        identity = json.load(source)["process"]
+else:
+    raise SystemExit("unknown process kind")
+
+pid = identity["pid"]
+
+
+def current_identity():
+    with open("/proc/sys/kernel/random/boot_id", "r", encoding="ascii") as source:
+        boot_id = source.read().strip()
+    with open(f"/proc/{pid}/stat", "r", encoding="ascii") as source:
+        stat = source.read()
+    suffix = stat.rsplit(") ", 1)[1].split()
+    executable_path = f"/proc/{pid}/exe"
+    executable = os.readlink(executable_path)
+    executable_stat = os.stat(executable_path)
+    digest = hashlib.sha256()
+    with open(executable_path, "rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return (
+        boot_id,
+        int(suffix[19]),
+        executable,
+        (
+            executable_stat.st_dev,
+            executable_stat.st_ino,
+            executable_stat.st_size,
+            executable_stat.st_uid,
+            executable_stat.st_mode,
+            executable_stat.st_nlink,
+        ),
+        digest.hexdigest(),
+    )
+
+
+expected = (
+    identity["boot_id"],
+    identity["start_time_ticks"],
+    identity["executable"],
+    (
+        identity["executable_file"]["device"],
+        identity["executable_file"]["inode"],
+        identity["executable_file"]["size"],
+        identity["executable_file"]["uid"],
+        identity["executable_file"]["mode"],
+        identity["executable_file"]["links"],
+    ),
+    identity["executable_sha256"],
+)
+pidfd = os.pidfd_open(pid, 0)
+try:
+    if current_identity() != expected:
+        raise SystemExit(f"persisted {kind} identity does not match the pidfd process")
+    with open(f"/proc/self/fdinfo/{pidfd}", "r", encoding="ascii") as source:
+        pidfd_pid = next(
+            (line.removeprefix("Pid:\t").strip() for line in source if line.startswith("Pid:\t")),
+            None,
+        )
+    if pidfd_pid != str(pid):
+        raise SystemExit(f"pidfd target does not match the persisted {kind} PID")
+    signal.pidfd_send_signal(pidfd, signal.SIGKILL)
+finally:
+    os.close(pidfd)
+print(pid)
+PY
+}
+
 find_exact_supervisor_pid() {
   local proc pid
   local -a argv
@@ -325,6 +451,24 @@ try:
         if row is None:
             raise SystemExit(1)
         print(f"{row[0]}:{row[1]}:{row[2]}")
+    elif field == "journal_complete":
+        expected = {
+            "create": 6,
+            "start": 5,
+            "stop": 3,
+            "restart": 7,
+            "grow_disk": 7,
+            "delete": 5,
+            "reconcile": 2,
+        }
+        rows = connection.execute(
+            "SELECT kind, phase, checkpoint FROM operations"
+        ).fetchall()
+        complete = bool(rows) and all(
+            kind in expected and phase == "completed" and checkpoint == expected[kind]
+            for kind, phase, checkpoint in rows
+        )
+        print("yes" if complete else "no")
     elif field == "ownership":
         row = connection.execute(
             "SELECT id, active_artifact_generation FROM environments WHERE name = ?", (name,)
@@ -514,8 +658,8 @@ jq -e '
 ' "$LAST_STDOUT" >/dev/null || die 'native resize result drifted'
 [[ "$(stat -c '%s' "$STATE_ROOT/engine/vms/$ENVIRONMENT_ID/disks/state.raw")" == 22548578304 ]] ||
   die 'native state disk file did not grow to 21 GiB'
-[[ "$(native_database_value resize_operation)" == 'restart:completed:5' ]] ||
-  die 'native resize journal did not commit all four effect checkpoints'
+[[ "$(native_database_value resize_operation)" == 'restart:completed:7' ]] ||
+  die 'native resize journal did not commit all six effect checkpoints'
 run_cw run --no-tty -- /bin/sh -lc \
   'printf "guest-cpus="; grep -c "^processor" /proc/cpuinfo; grep "^MemTotal:" /proc/meminfo; cat /workspace/sentinel.txt'
 rg -qF 'guest-cpus=3' "$LAST_STDOUT" || die 'resized guest did not observe exactly 3 vCPUs'
@@ -538,6 +682,48 @@ jq -e '.state == "running" and .cpu == 3 and .memory == "12Gi" and .disk == "21G
 [[ "$(native_database_value runner_pid)" == "$RUNNER_PID" ]] ||
   die 'replacement supervisor substituted a different runner'
 
+log 'checking exact VMM death classification and normal lifecycle recovery'
+VMM_PID="$(recorded_vmm_pid)" || die 'persisted VMM process identity was not readable'
+[[ "$(kill_recorded_process vmm)" == "$VMM_PID" ]] ||
+  die 'pidfd VMM kill did not target the persisted process identity'
+wait_for_pid_death "$VMM_PID" || die 'pidfd-signalled VMM process remained live'
+wait_for_environment_state error ||
+  die 'VMM death was not classified as an environment error'
+wait_for_pid_exit "$VMM_PID" || die 'reconciled VMM process was not reaped'
+run_cw env start --local "$NAME" --output json
+jq -e '.state == "running"' "$LAST_STDOUT" >/dev/null ||
+  die 'environment did not restart after exact VMM death'
+RECOVERED_VMM_PID="$(recorded_vmm_pid)" || die 'restarted VMM identity was not readable'
+[[ "$RECOVERED_VMM_PID" != "$VMM_PID" && -d "/proc/$RECOVERED_VMM_PID" ]] ||
+  die 'VMM death recovery did not produce a new live VMM process'
+run_cw run --no-tty -- /bin/sh -lc 'cat /workspace/sentinel.txt; ./hello.sh'
+rg -qF 'persistence-ok' "$LAST_STDOUT" || die 'workspace did not survive exact VMM death'
+rg -qF 'native-workspace-ok' "$LAST_STDOUT" || die 'snapshot did not survive exact VMM death'
+
+log 'checking exact runner death, VMM parent-death containment, and recovery'
+RUNNER_PID="$(native_database_value runner_pid)"
+VMM_PID="$(recorded_vmm_pid)"
+[[ "$(kill_recorded_process runner)" == "$RUNNER_PID" ]] ||
+  die 'pidfd runner kill did not target the persisted process identity'
+wait_for_pid_death "$RUNNER_PID" || die 'pidfd-signalled runner process remained live'
+wait_for_pid_death "$VMM_PID" || die 'VMM remained live after its runner died'
+wait_for_environment_state error ||
+  die 'runner death was not classified as an environment error'
+run_cw env start --local "$NAME" --output json
+jq -e '.state == "running"' "$LAST_STDOUT" >/dev/null ||
+  die 'environment did not restart after exact runner death'
+RECOVERED_RUNNER_PID="$(native_database_value runner_pid)"
+RECOVERED_VMM_PID="$(recorded_vmm_pid)"
+[[ "$RECOVERED_RUNNER_PID" != "$RUNNER_PID" && -d "/proc/$RECOVERED_RUNNER_PID" ]] ||
+  die 'runner death recovery did not produce a new live runner process'
+[[ "$RECOVERED_VMM_PID" != "$VMM_PID" && -d "/proc/$RECOVERED_VMM_PID" ]] ||
+  die 'runner death recovery did not produce a new live VMM process'
+run_cw run --no-tty -- /bin/sh -lc 'cat /workspace/sentinel.txt; ./hello.sh'
+rg -qF 'persistence-ok' "$LAST_STDOUT" || die 'workspace did not survive exact runner death'
+rg -qF 'native-workspace-ok' "$LAST_STDOUT" || die 'snapshot did not survive exact runner death'
+[[ "$(native_database_value journal_complete)" == yes ]] ||
+  die 'native lifecycle journal contains a pending or partial operation'
+
 log 'deleting the environment and proving complete owned-object cleanup'
 run_cw env rm --local "$NAME" --yes
 ENV_CREATED=0
@@ -552,6 +738,8 @@ done
   die 'owned VM trash generation remained after delete'
 [[ "$(native_database_value empty)" == yes ]] ||
   die 'native environment state entry remained after delete'
+[[ "$(native_database_value journal_complete)" == yes ]] ||
+  die 'native delete journal did not reach its final checkpoint'
 run_cw doctor local --output json
 jq -e '.orphans == [] and .reclaimable_bytes == 0' "$LAST_STDOUT" >/dev/null ||
   die 'native doctor reported owned state after exact deletion cleanup'
