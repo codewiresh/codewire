@@ -38,8 +38,7 @@ pub(crate) async fn run_native_runner(args: NativeRunnerArgs) -> anyhow::Result<
         environment_id,
         socket: args.socket,
         engine_state_root: args.engine_state_root,
-        artifact_root: args.artifact_root,
-        artifact_lock: args.artifact_lock,
+        artifact_generation: args.artifact_generation,
     })
     .await
     .context("run native environment runner")

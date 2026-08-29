@@ -1758,6 +1758,7 @@ mod tests {
                 uid: current_uid(),
                 mode: 0o140600,
             },
+            artifact_generation: "c".repeat(64),
         });
         EnvironmentRecord {
             id: Uuid::new_v4(),
@@ -1778,6 +1779,17 @@ mod tests {
             staging_workspace_generation: None,
             rollback_workspace_generation: None,
         }
+    }
+
+    #[test]
+    fn runner_record_requires_an_exact_artifact_generation() {
+        let runner = environment(StoredEnvironmentState::Stopped, Some("boot"))
+            .runner
+            .unwrap();
+        let mut value = serde_json::to_value(runner).unwrap();
+        value.as_object_mut().unwrap().remove("artifact_generation");
+
+        assert!(serde_json::from_value::<RunnerRecord>(value).is_err());
     }
 
     fn state(environment: EnvironmentRecord) -> SupervisorState {

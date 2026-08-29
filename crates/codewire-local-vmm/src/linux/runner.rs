@@ -82,15 +82,22 @@ impl CloudHypervisorRunner {
         {
             return Err(RunnerError::InvalidArtifactStagingLayout);
         }
-        let state_root = match PrivateRoot::open(&config.state_root) {
+        let artifact_lock = ArtifactLock::read(&config.artifact_lock)?;
+        let artifacts = artifact_lock.admit(&config.artifact_root).await?;
+        Self::from_admitted(config.state_root, artifacts)
+    }
+
+    pub(crate) fn from_admitted(
+        state_root: PathBuf,
+        artifacts: AdmittedArtifacts,
+    ) -> Result<Self, RunnerError> {
+        let state_root = match PrivateRoot::open(&state_root) {
             Ok(root) => root,
             Err(PathError::Io { source, .. }) if source.kind() == io::ErrorKind::NotFound => {
-                PrivateRoot::create(&config.state_root)?
+                PrivateRoot::create(&state_root)?
             }
             Err(error) => return Err(error.into()),
         };
-        let artifact_lock = ArtifactLock::read(&config.artifact_lock)?;
-        let artifacts = artifact_lock.admit(&config.artifact_root).await?;
         Ok(Self {
             state_root,
             artifacts,

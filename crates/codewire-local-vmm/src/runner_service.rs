@@ -11,14 +11,16 @@ use uuid::Uuid;
 
 use codewire_vmm_guest_probe::{SetupBinding, Sha256Value};
 
+use crate::artifact_store::RuntimeArtifactStore;
 use crate::control::v1;
 use crate::control::v1::environment_runner_service_client::EnvironmentRunnerServiceClient;
 use crate::control::v1::environment_runner_service_server::{
     EnvironmentRunnerService, EnvironmentRunnerServiceServer,
 };
+use crate::linux::path::PrivateRoot;
 use crate::linux::runner::ExitClass;
 use crate::uds::{UdsError, bind_owner_only, connect_owner_only, remove_bound_socket};
-use crate::{CloudHypervisorRunner, CreateVmRequest, RunnerConfig, RunnerError, RunningVm};
+use crate::{CloudHypervisorRunner, CreateVmRequest, RunnerError, RunningVm};
 
 const DAEMON_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 const SETUP_DAEMON_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20 * 60);
@@ -29,8 +31,7 @@ pub struct RunnerEntrypointConfig {
     pub environment_id: Uuid,
     pub socket: PathBuf,
     pub engine_state_root: PathBuf,
-    pub artifact_root: PathBuf,
-    pub artifact_lock: PathBuf,
+    pub artifact_generation: String,
 }
 
 #[derive(Clone)]
@@ -88,9 +89,9 @@ impl RunnerClient {
             .disk_bytes)
     }
 
-    pub async fn prepare_delete(&mut self) -> Result<(), Status> {
+    pub async fn prepare_retire(&mut self) -> Result<(), Status> {
         self.inner
-            .prepare_delete_vm(v1::PrepareDeleteVmRequest {})
+            .prepare_retire_runner(v1::PrepareRetireRunnerRequest {})
             .await?;
         Ok(())
     }
@@ -105,12 +106,13 @@ impl RunnerClient {
 }
 
 pub async fn serve_runner(config: RunnerEntrypointConfig) -> Result<(), RunnerServiceError> {
-    let runner = CloudHypervisorRunner::new(RunnerConfig {
-        state_root: config.engine_state_root,
-        artifact_root: config.artifact_root,
-        artifact_lock: config.artifact_lock,
-    })
-    .await?;
+    let engine = PrivateRoot::open(&config.engine_state_root).map_err(RunnerError::from)?;
+    let artifacts = RuntimeArtifactStore::create(&engine)
+        .map_err(|_| RunnerServiceError::ArtifactStore)?
+        .open_generation(&config.artifact_generation)
+        .await
+        .map_err(|_| RunnerServiceError::ArtifactStore)?;
+    let runner = CloudHypervisorRunner::from_admitted(config.engine_state_root, artifacts)?;
     // If a prior runner died, Cloud Hypervisor received PDEATHSIG. Reconcile
     // the exact persisted process identity anyway before this runner accepts
     // lifecycle requests; no orphan is ever adopted without a fresh token.
@@ -122,6 +124,7 @@ pub async fn serve_runner(config: RunnerEntrypointConfig) -> Result<(), RunnerSe
     let service = RunnerRpc {
         state: Arc::new(Mutex::new(RunnerState {
             environment_id: config.environment_id,
+            artifact_generation: config.artifact_generation,
             runner,
             running: None,
             generation,
@@ -150,6 +153,7 @@ pub async fn serve_runner(config: RunnerEntrypointConfig) -> Result<(), RunnerSe
 
 struct RunnerState {
     environment_id: Uuid,
+    artifact_generation: String,
     runner: CloudHypervisorRunner,
     running: Option<RunningVm>,
     generation: u64,
@@ -163,6 +167,7 @@ impl RunnerState {
             environment_id: self.environment_id.to_string(),
             state: self.state as i32,
             generation: self.generation,
+            artifact_generation: self.artifact_generation.clone(),
         }
     }
 
@@ -334,10 +339,10 @@ impl EnvironmentRunnerService for RunnerRpc {
         Ok(Response::new(state.info()))
     }
 
-    async fn prepare_delete_vm(
+    async fn prepare_retire_runner(
         &self,
-        _request: Request<v1::PrepareDeleteVmRequest>,
-    ) -> Result<Response<v1::PrepareDeleteVmResponse>, Status> {
+        _request: Request<v1::PrepareRetireRunnerRequest>,
+    ) -> Result<Response<v1::PrepareRetireRunnerResponse>, Status> {
         let mut state = self.state.lock().await;
         if let Some(running) = state.running.as_mut() {
             let exit = running
@@ -356,7 +361,7 @@ impl EnvironmentRunnerService for RunnerRpc {
             .await
             .map_err(|_| Status::internal("tracked VMM cleanup failed"))?;
         state.state = v1::EnvironmentState::Stopped;
-        Ok(Response::new(v1::PrepareDeleteVmResponse {}))
+        Ok(Response::new(v1::PrepareRetireRunnerResponse {}))
     }
 
     async fn grow_state_disk(
@@ -513,6 +518,8 @@ pub enum RunnerServiceError {
     Runner(#[from] RunnerError),
     #[error(transparent)]
     Uds(#[from] UdsError),
+    #[error("runtime artifact store operation failed")]
+    ArtifactStore,
     #[error("serve private environment runner failed")]
     Serve,
     #[error("adopt private environment runner failed")]

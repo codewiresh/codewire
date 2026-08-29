@@ -210,9 +210,7 @@ pub(crate) struct NativeRunnerArgs {
     #[arg(long)]
     pub(crate) engine_state_root: PathBuf,
     #[arg(long)]
-    pub(crate) artifact_root: PathBuf,
-    #[arg(long)]
-    pub(crate) artifact_lock: PathBuf,
+    pub(crate) artifact_generation: String,
 }
 
 impl EnvArgs {

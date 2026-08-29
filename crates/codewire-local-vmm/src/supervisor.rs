@@ -397,6 +397,7 @@ impl StoredEnvironmentState {
 pub(crate) struct RunnerRecord {
     pub(crate) process: ProcessIdentity,
     pub(crate) socket: SocketIdentity,
+    pub(crate) artifact_generation: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -929,11 +930,6 @@ impl SupervisorCore {
         orphan_inventory_response(&self.root, &self.state, &deletion_trash_names)
     }
 
-    fn current_artifact_generation(&self) -> Result<String, SupervisorError> {
-        let artifact_lock = crate::artifact::ArtifactLock::read(&self.config.artifact_lock)?;
-        artifact_lock.generation().map_err(Into::into)
-    }
-
     async fn admit_current_artifact_generation(&mut self) -> Result<String, SupervisorError> {
         let engine = PrivateRoot::open(&self.config.engine_root())?;
         RuntimeArtifactStore::create(&engine)
@@ -941,6 +937,19 @@ impl SupervisorCore {
             .admit_source(&self.config.artifact_lock, &self.config.artifact_root)
             .await
             .map_err(|_| SupervisorError::ArtifactStore)
+    }
+
+    async fn admit_cached_artifact_generation(
+        &mut self,
+        artifact_generation: &str,
+    ) -> Result<(), SupervisorError> {
+        let engine = PrivateRoot::open(&self.config.engine_root())?;
+        let _ = RuntimeArtifactStore::create(&engine)
+            .map_err(|_| SupervisorError::ArtifactStore)?
+            .open_generation(artifact_generation)
+            .await
+            .map_err(|_| SupervisorError::ArtifactStore)?;
+        Ok(())
     }
 
     async fn preflight(&mut self) -> Result<String, SupervisorError> {
@@ -1236,7 +1245,15 @@ impl SupervisorCore {
                     operation = self.checkpoint_state_operation(&operation, next_state)?;
                 }
                 LifecycleEffect::EnsureRunner => {
-                    let _ = self.runner_client(&request.name).await?;
+                    let environment = self.environment(&request.name)?;
+                    let artifact_generation = artifact_generation_for_boot(
+                        environment,
+                        environment.staging_workspace_generation.is_some(),
+                    )?
+                    .to_owned();
+                    let _ = self
+                        .runner_client_for_artifact(&request.name, &artifact_generation)
+                        .await?;
                     operation = self.checkpoint_operation(&operation)?;
                 }
                 LifecycleEffect::StartVm => {
@@ -1702,6 +1719,11 @@ impl SupervisorCore {
             self.mark_orphaned(name)?;
             return Ok(());
         }
+        if !runner_artifact_identity_matches(&record.artifact_generation, &info.artifact_generation)
+        {
+            self.mark_orphaned(name)?;
+            return Ok(());
+        }
         let state = match StoredEnvironmentState::from_proto(info.state) {
             Ok(state) => state,
             Err(_) => {
@@ -1807,19 +1829,67 @@ impl SupervisorCore {
         self.record_reconcile_observation(name, state, generation, true)
     }
 
-    async fn runner_client(&mut self, name: &str) -> Result<RunnerClient, SupervisorError> {
+    async fn runner_client_for_artifact(
+        &mut self,
+        name: &str,
+        artifact_generation: &str,
+    ) -> Result<RunnerClient, SupervisorError> {
+        if !valid_sha256(artifact_generation) {
+            return Err(SupervisorError::InvalidState);
+        }
         self.reconcile(name).await?;
         if self.environment(name)?.state == StoredEnvironmentState::Orphaned {
             return Err(SupervisorError::Orphaned);
         }
         if self.environment(name)?.runner.is_none() {
-            return self.spawn_runner(name).await;
+            self.admit_cached_artifact_generation(artifact_generation)
+                .await?;
+            return self.spawn_runner(name, artifact_generation).await;
         }
-        let socket = self.config.runner_socket(self.environment(name)?.id);
-        RunnerClient::connect(&socket).await.map_err(Into::into)
+        let environment = self.environment(name)?;
+        let environment_id = environment.id;
+        let record = environment
+            .runner
+            .as_ref()
+            .ok_or(SupervisorError::InvalidState)?;
+        let socket = self.config.runner_socket(environment_id);
+        let mut client = RunnerClient::connect(&socket).await?;
+        let info = client
+            .info()
+            .await
+            .map_err(|_| SupervisorError::RunnerUnavailable)?;
+        if info.environment_id != environment_id.to_string()
+            || !runner_artifact_identity_matches(
+                &record.artifact_generation,
+                &info.artifact_generation,
+            )
+        {
+            return Err(SupervisorError::InvalidRunnerResponse);
+        }
+        let runner_state = StoredEnvironmentState::from_proto(info.state)?;
+        match runner_artifact_disposition(
+            &record.artifact_generation,
+            artifact_generation,
+            runner_state,
+        ) {
+            RunnerArtifactDisposition::Reuse => return Ok(client),
+            RunnerArtifactDisposition::RejectLiveMismatch => {
+                return Err(SupervisorError::ArtifactGenerationChanged);
+            }
+            RunnerArtifactDisposition::ReplaceStopped => {}
+        }
+        drop(client);
+        self.admit_cached_artifact_generation(artifact_generation)
+            .await?;
+        self.retire_existing_runner(name).await?;
+        self.spawn_runner(name, artifact_generation).await
     }
 
-    async fn spawn_runner(&mut self, name: &str) -> Result<RunnerClient, SupervisorError> {
+    async fn spawn_runner(
+        &mut self,
+        name: &str,
+        artifact_generation: &str,
+    ) -> Result<RunnerClient, SupervisorError> {
         let environment_id = self.environment(name)?.id;
         let socket = self.config.runner_socket(environment_id);
         let runners = PrivateRoot::open(&self.root.path().join("runners"))?;
@@ -1838,10 +1908,8 @@ impl SupervisorCore {
             .arg(&socket)
             .arg("--engine-state-root")
             .arg(self.config.engine_root())
-            .arg("--artifact-root")
-            .arg(&self.config.artifact_root)
-            .arg("--artifact-lock")
-            .arg(&self.config.artifact_lock)
+            .arg("--artifact-generation")
+            .arg(artifact_generation)
             .env_clear()
             .current_dir(&self.config.root)
             .stdin(Stdio::null())
@@ -1904,6 +1972,7 @@ impl SupervisorCore {
         let runner_record = RunnerRecord {
             process: live.identity().clone(),
             socket: socket_identity,
+            artifact_generation: artifact_generation.to_owned(),
         };
         self.environment_mut(name)?.runner = Some(runner_record);
         if let Err(error) = self.save() {
@@ -1922,7 +1991,12 @@ impl SupervisorCore {
                 return Err(error.into());
             }
         };
-        if client.adopt(environment_id).await.is_err() {
+        let adopted = client.adopt(environment_id).await;
+        if !adopted.is_ok_and(|info| {
+            info.environment_id == environment_id.to_string()
+                && info.state == v1::EnvironmentState::Stopped as i32
+                && info.artifact_generation == artifact_generation
+        }) {
             let _ = live.signal(Signal::KILL);
             let _ = child.wait();
             self.environment_mut(name)?.runner = None;
@@ -1939,8 +2013,13 @@ impl SupervisorCore {
         name: &str,
         generation: u64,
     ) -> Result<(), SupervisorError> {
-        let mut client = self.runner_client(name).await?;
         let environment = self.environment(name)?.clone();
+        let staging = environment.staging_workspace_generation.is_some();
+        let expected_artifact_generation =
+            artifact_generation_for_boot(&environment, staging)?.to_owned();
+        let mut client = self
+            .runner_client_for_artifact(name, &expected_artifact_generation)
+            .await?;
         let current = client
             .info()
             .await
@@ -1956,12 +2035,6 @@ impl SupervisorCore {
         }
         if current.generation >= generation {
             return Err(SupervisorError::InvalidRunnerResponse);
-        }
-        let staging = environment.staging_workspace_generation.is_some();
-        let expected_artifact_generation =
-            artifact_generation_for_boot(&environment, staging)?.to_owned();
-        if self.current_artifact_generation()? != expected_artifact_generation {
-            return Err(SupervisorError::ArtifactGenerationChanged);
         }
         let engine_root = self.config.engine_root();
         let boot_environment = environment.clone();
@@ -2061,7 +2134,15 @@ impl SupervisorCore {
                     operation = self.checkpoint_state_operation(&operation, next_state)?;
                 }
                 LifecycleEffect::EnsureRunner => {
-                    let _ = self.runner_client(name).await?;
+                    let environment = self.environment(name)?;
+                    let artifact_generation = artifact_generation_for_boot(
+                        environment,
+                        environment.staging_workspace_generation.is_some(),
+                    )?
+                    .to_owned();
+                    let _ = self
+                        .runner_client_for_artifact(name, &artifact_generation)
+                        .await?;
                     operation = self.checkpoint_operation(&operation)?;
                 }
                 LifecycleEffect::StartVm => {
@@ -2127,27 +2208,22 @@ impl SupervisorCore {
         ))
     }
 
-    async fn prepare_environment_for_delete(&mut self, name: &str) -> Result<(), SupervisorError> {
+    async fn retire_existing_runner(&mut self, name: &str) -> Result<(), SupervisorError> {
+        self.reconcile(name).await?;
+        if self.environment(name)?.state == StoredEnvironmentState::Orphaned {
+            return Err(SupervisorError::Orphaned);
+        }
         let environment = self.environment(name)?;
         let environment_id = environment.id;
-        if environment.generation == 0
-            && matches!(
-                environment.state,
-                StoredEnvironmentState::Starting | StoredEnvironmentState::Error
-            )
-        {
-            cleanup_interrupted_workspace_provisioning(&self.config.engine_root(), environment_id)?;
-        }
-        let mut client = self.runner_client(name).await?;
-        let runner = self
-            .environment(name)?
-            .runner
-            .clone()
-            .ok_or(SupervisorError::InvalidState)?;
+        let Some(runner) = environment.runner.clone() else {
+            return Ok(());
+        };
+        let socket = self.config.runner_socket(environment_id);
+        let mut client = RunnerClient::connect(&socket).await?;
         client
-            .prepare_delete()
+            .prepare_retire()
             .await
-            .map_err(|_| SupervisorError::VmDelete)?;
+            .map_err(|_| SupervisorError::RunnerRetirement)?;
         drop(client);
 
         let mut child = self.children.remove(&environment_id);
@@ -2186,7 +2262,6 @@ impl SupervisorCore {
         if !exited {
             return Err(SupervisorError::RunnerExitTimeout);
         }
-        let socket = self.config.runner_socket(environment_id);
         match fs::symlink_metadata(&socket) {
             Ok(_) => remove_bound_socket(&socket, &runner.socket)?,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
@@ -2201,6 +2276,28 @@ impl SupervisorCore {
         environment.runner = None;
         environment.state = StoredEnvironmentState::Stopped;
         self.save()
+    }
+
+    async fn prepare_environment_for_delete(&mut self, name: &str) -> Result<(), SupervisorError> {
+        let environment = self.environment(name)?;
+        let environment_id = environment.id;
+        if environment.generation == 0
+            && matches!(
+                environment.state,
+                StoredEnvironmentState::Starting | StoredEnvironmentState::Error
+            )
+        {
+            cleanup_interrupted_workspace_provisioning(&self.config.engine_root(), environment_id)?;
+        }
+        self.reconcile(name).await?;
+        if self.environment(name)?.runner.is_none() {
+            let artifact_generation =
+                artifact_generation_for_boot(self.environment(name)?, false)?.to_owned();
+            let _ = self
+                .runner_client_for_artifact(name, &artifact_generation)
+                .await?;
+        }
+        self.retire_existing_runner(name).await
     }
 
     async fn resize(
@@ -2241,7 +2338,12 @@ impl SupervisorCore {
                         return Err(SupervisorError::InvalidRequest);
                     }
                     if disk_bytes > current_disk_bytes {
-                        let mut runner = self.runner_client(name).await?;
+                        let artifact_generation =
+                            artifact_generation_for_boot(self.environment(name)?, false)?
+                                .to_owned();
+                        let mut runner = self
+                            .runner_client_for_artifact(name, &artifact_generation)
+                            .await?;
                         let applied = runner
                             .grow_state_disk(environment_id, disk_bytes)
                             .await
@@ -2356,7 +2458,15 @@ impl SupervisorCore {
                 }
                 LifecycleEffect::EnsureRunner => {
                     if workspace_transition_requires_boot(self.environment(name)?, &parameters)? {
-                        let _ = self.runner_client(name).await?;
+                        let environment = self.environment(name)?;
+                        let artifact_generation = artifact_generation_for_boot(
+                            environment,
+                            environment.staging_workspace_generation.is_some(),
+                        )?
+                        .to_owned();
+                        let _ = self
+                            .runner_client_for_artifact(name, &artifact_generation)
+                            .await?;
                     }
                     operation = self.checkpoint_operation(&operation)?;
                 }
@@ -2571,7 +2681,11 @@ impl SupervisorCore {
         if self.environment(name)?.state != StoredEnvironmentState::Running {
             return Err(SupervisorError::NotRunning);
         }
-        let mut client = self.runner_client(name).await?;
+        let artifact_generation =
+            artifact_generation_for_boot(self.environment(name)?, false)?.to_owned();
+        let mut client = self
+            .runner_client_for_artifact(name, &artifact_generation)
+            .await?;
         client
             .daemon_access()
             .await
@@ -3339,6 +3453,34 @@ fn prepare_workspace_boot(
     })
 }
 
+fn runner_artifact_identity_matches(recorded: &str, reported: &str) -> bool {
+    valid_sha256(recorded) && reported == recorded
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RunnerArtifactDisposition {
+    Reuse,
+    ReplaceStopped,
+    RejectLiveMismatch,
+}
+
+fn runner_artifact_disposition(
+    recorded: &str,
+    requested: &str,
+    state: StoredEnvironmentState,
+) -> RunnerArtifactDisposition {
+    if recorded == requested {
+        return RunnerArtifactDisposition::Reuse;
+    }
+    if matches!(
+        state,
+        StoredEnvironmentState::Running | StoredEnvironmentState::Starting
+    ) {
+        return RunnerArtifactDisposition::RejectLiveMismatch;
+    }
+    RunnerArtifactDisposition::ReplaceStopped
+}
+
 fn artifact_generation_for_boot(
     environment: &EnvironmentRecord,
     staging: bool,
@@ -3999,11 +4141,11 @@ pub enum SupervisorError {
     RunnerUnavailable,
     #[error("native environment runner did not exit")]
     RunnerExitTimeout,
+    #[error("native environment runner retirement failed")]
+    RunnerRetirement,
     #[error("native environment runner returned invalid state")]
     InvalidRunnerResponse,
-    #[error(
-        "local VMM artifacts changed; runtime migration is required before this environment can start"
-    )]
+    #[error("native environment runner is live with a different runtime artifact generation")]
     ArtifactGenerationChanged,
     #[error("native VM start failed: {0}")]
     VmStart(String),
@@ -5506,6 +5648,36 @@ mod tests {
         assert_eq!(
             core.environment("dev").unwrap().state,
             StoredEnvironmentState::Error
+        );
+    }
+
+    #[test]
+    fn runner_artifact_identity_is_exact() {
+        let generation = "a".repeat(64);
+        assert!(runner_artifact_identity_matches(&generation, &generation));
+        assert!(!runner_artifact_identity_matches(
+            &generation,
+            &"b".repeat(64)
+        ));
+        assert!(!runner_artifact_identity_matches("invalid", "invalid"));
+        assert!(!runner_artifact_identity_matches("", ""));
+    }
+
+    #[test]
+    fn only_a_stopped_runner_can_switch_artifact_generations() {
+        let active = "a".repeat(64);
+        let requested = "b".repeat(64);
+        assert_eq!(
+            runner_artifact_disposition(&active, &active, StoredEnvironmentState::Stopped,),
+            RunnerArtifactDisposition::Reuse
+        );
+        assert_eq!(
+            runner_artifact_disposition(&active, &requested, StoredEnvironmentState::Stopped,),
+            RunnerArtifactDisposition::ReplaceStopped
+        );
+        assert_eq!(
+            runner_artifact_disposition(&active, &requested, StoredEnvironmentState::Running,),
+            RunnerArtifactDisposition::RejectLiveMismatch
         );
     }
 }
