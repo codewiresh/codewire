@@ -22,8 +22,8 @@ const MAX_UNCOMPRESSED_IMAGE_BYTES: u64 = 64 * 1024 * 1024 * 1024;
 
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) struct VerifiedSetupContents {
-    pub project_bytes: u64,
-    pub config_bytes: u64,
+    pub project: Vec<u8>,
+    pub config: Vec<u8>,
     pub layer_uncompressed_bytes: Vec<u64>,
     pub total_uncompressed_bytes: u64,
     pub layer_plans: Vec<VerifiedLayerPlan>,
@@ -33,8 +33,8 @@ impl fmt::Debug for VerifiedSetupContents {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("VerifiedSetupContents")
-            .field("project_bytes", &self.project_bytes)
-            .field("config_bytes", &self.config_bytes)
+            .field("project_bytes", &self.project.len())
+            .field("config_bytes", &self.config.len())
             .field("layer_uncompressed_bytes", &self.layer_uncompressed_bytes)
             .field("total_uncompressed_bytes", &self.total_uncompressed_bytes)
             .field("layer_plans", &self.layer_plans)
@@ -78,10 +78,10 @@ fn verify_setup_contents_with_limits(
     }
 
     verify_zero_range(input, SETUP_HEADER_LEN as u64, header.project.offset)?;
-    verify_object(input, header.project)?;
+    let project = read_verified_object(input, header.project)?;
     let mut previous_end = object_end(header.project)?;
     verify_zero_range(input, previous_end, header.config.offset)?;
-    verify_object(input, header.config)?;
+    let config = read_verified_object(input, header.config)?;
     previous_end = object_end(header.config)?;
 
     let mut layer_uncompressed_bytes = Vec::with_capacity(header.layers.len());
@@ -111,12 +111,30 @@ fn verify_setup_contents_with_limits(
     verify_zero_range(input, previous_end, header.total_bytes)?;
 
     Ok(VerifiedSetupContents {
-        project_bytes: header.project.size,
-        config_bytes: header.config.size,
+        project,
+        config,
         layer_uncompressed_bytes,
         total_uncompressed_bytes,
         layer_plans,
     })
+}
+
+fn read_verified_object(
+    input: &mut (impl Read + Seek),
+    object: SetupObject,
+) -> Result<Vec<u8>, SetupContentError> {
+    let length = usize::try_from(object.size).map_err(|_| SetupContentError::InvalidFraming)?;
+    input
+        .seek(SeekFrom::Start(object.offset))
+        .map_err(SetupContentError::Read)?;
+    let mut bytes = vec![0_u8; length];
+    input
+        .read_exact(&mut bytes)
+        .map_err(SetupContentError::Read)?;
+    if Sha256Value::calculate(&bytes) != object.sha256 {
+        return Err(SetupContentError::ObjectDigestMismatch);
+    }
+    Ok(bytes)
 }
 
 fn verify_object(

@@ -13,6 +13,8 @@ mod setup_apply;
 mod setup_archive;
 #[cfg(target_os = "linux")]
 mod setup_verify;
+#[cfg(target_os = "linux")]
+mod workspace_plan;
 
 pub use newc::{
     NewcError, canonical_guest_root_newc, canonical_newc, write_canonical_guest_root_initramfs,

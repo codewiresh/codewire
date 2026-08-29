@@ -2,10 +2,11 @@ use std::ffi::{CString, OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::mem::size_of;
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt};
-use std::os::unix::net::UnixDatagram;
+use std::os::unix::net::{UnixDatagram, UnixStream};
+use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process::{Command, Stdio};
@@ -15,6 +16,10 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail, ensure};
+use rustix::fs::{
+    FileType as RustixFileType, Mode as RustixMode, OFlags as RustixOFlags, ResolveFlags,
+};
+use rustix::io::Errno as RustixErrno;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use tokio::signal::unix::{SignalKind, signal};
@@ -25,8 +30,12 @@ use tokio_vsock::{
 use zeroize::Zeroizing;
 
 use crate::newc::BASIC_BUSYBOX_APPLETS;
-use crate::setup_apply::apply_setup_layers;
+use crate::setup_apply::{apply_setup_layers, verify_completed_setup_generation};
 use crate::setup_verify::verify_setup_contents;
+use crate::workspace_plan::{
+    CONTAINER_PLAN_PATH, MAX_PLAN_BYTES, WORKSPACE_PLAN_PATH, WorkspaceIdentity, WorkspacePlan,
+    WorkspacePlanSource,
+};
 use crate::{
     ROOT_DISK_SERIAL, SEED_DISK_SERIAL, SEED_LEN, SETUP_DISK_SERIAL, SETUP_HEADER_LEN,
     STATE_DISK_SERIAL, Seed, SetupArchitecture, SetupBinding, SetupHeader, Sha256Value,
@@ -36,7 +45,6 @@ pub const INIT_PATH: &str = "/init";
 pub const STATE_MOUNT_PATH: &str = "/state";
 pub const ROOT_MOUNT_PATH: &str = "/generation";
 pub const WORKSPACE_PATH: &str = "/workspace";
-pub const HOME_PATH: &str = "/home/codewire";
 pub const CONTROL_PATH: &str = "/state/codewire";
 pub const BOOT_STAGE_PATH: &str = "/state/codewire/boot-stage";
 pub const NONCE_PATH: &str = "/state/codewire/nonce";
@@ -51,6 +59,8 @@ pub const RUNC_PROCESS_PATH: &str = "/run/codewire/exec";
 pub const WORKSPACE_CONTAINER_ID: &str = "codewire-workspace";
 pub const CONTAINER_INIT_PATH: &str = "/run/codewire-runtime/init";
 
+const HOME_MERGED_PATH: &str = "/run/codewire/home";
+const EMPTY_HOME_LOWER_PATH: &str = "/run/codewire/empty-home";
 const RUNC_BUNDLE_PATH: &str = "/generation/bundle";
 const RUNC_CONFIG_PATH: &str = "/generation/bundle/config.json";
 const RUNC_LOG_PATH: &str = "/state/codewire/runc.log";
@@ -69,17 +79,22 @@ const CONTAINER_POWEROFF_SOCKET: &str = "/run/codewire/container/poweroff.sock";
 const CONTAINER_CONTROL_DESTINATION: &str = "/run/codewire-host";
 const CONTAINER_IDENTITY_DESTINATION: &str = "/run/codewire-host/identity.json";
 const CONTAINER_POWEROFF_DESTINATION: &str = "/run/codewire-host/poweroff.sock";
+const INSTALL_STATE_PATH: &str = "/state/codewire/workspace-install.state";
+const CONTAINER_INSTALL_STATE_PATH: &str = "/run/codewire-runtime/install.state";
 const PERSISTENT_PROBE_PATH: &str = "/state/probe";
 const CONTAINER_PROBE_DESTINATION: &str = "/run/codewire-probe";
 const CONTAINER_NONCE_PATH: &str = "/run/codewire-probe/nonce";
 const WORKSPACE_OWNER_VERSION_PATH: &str = "/state/codewire/workspace-owner.version";
-const WORKSPACE_OWNER_VERSION: &[u8] = b"codewire-workspace-owner-v1\n";
+const LEGACY_WORKSPACE_OWNER_VERSION: &[u8] = b"codewire-workspace-owner-v1\n";
+const PENDING_INSTALL_STATE: &[u8] = b"codewire-workspace-install-v1 pending\n";
 const INITIAL_OWNERSHIP_ENTRY_LIMIT: usize = 1_000_000;
 const CONTAINER_POWEROFF_MARKER_PATH: &str = "/run/codewire-probe/poweroff.accepted";
-const WORKSPACE_START_TIMEOUT: Duration = Duration::from_secs(10);
+const WORKSPACE_START_TIMEOUT: Duration = Duration::from_secs(600);
 const WORKSPACE_STOP_TIMEOUT: Duration = Duration::from_secs(5);
 const RUNC_CONTROL_TIMEOUT: Duration = Duration::from_secs(1);
 const CONTROL_MESSAGE_LIMIT: usize = 32;
+const WORKSPACE_READY_FD: RawFd = 3;
+const WORKSPACE_READY_LIMIT: usize = 96;
 
 const SYS_BLOCK_PATH: &str = "/sys/class/block";
 const DEV_PATH: &str = "/dev";
@@ -91,9 +106,26 @@ const READ_LIMIT: usize = 4097;
 const RUNC_PROCESS_SPEC_LIMIT: u64 = 1024 * 1024;
 const PERSISTENT_WORKSPACE_PATH: &str = "/state/workspace";
 const PERSISTENT_HOME_PATH: &str = "/state/home";
+const PERSISTENT_HOME_WORK_PATH: &str = "/state/home-work";
 
 static POWEROFF_REQUESTED: AtomicBool = AtomicBool::new(false);
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+const LINUX_CAPABILITY_VERSION_3: u32 = 0x2008_0522;
+
+#[repr(C)]
+struct LinuxCapabilityHeader {
+    version: u32,
+    pid: i32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct LinuxCapabilityData {
+    effective: u32,
+    permitted: u32,
+    inheritable: u32,
+}
 
 pub fn run_init() -> Result<()> {
     ensure!(
@@ -140,16 +172,12 @@ pub fn run_init() -> Result<()> {
     mount_root_generation(&root_device)?;
     record_boot_stage("root-mounted")?;
     create_state_layout()?;
-    normalize_initial_persistent_ownership()?;
-    record_boot_stage("ownership-ready")?;
-    expose_persistent_layout()?;
-    record_boot_stage("persistent-layout-ready")?;
 
     // Validate the complete seed before starting anything that accepts guest
     // control traffic. The child deliberately rereads it from the immutable
     // disk rather than inheriting the token through argv or environment.
     let seed = read_seed_file(&seed_device)?;
-    if let Some(binding) = seed.setup() {
+    let plan = if let Some(binding) = seed.setup() {
         let setup_device = wait_for_disk_by_serial(
             Path::new(SYS_BLOCK_PATH),
             Path::new(DEV_PATH),
@@ -172,13 +200,36 @@ pub fn run_init() -> Result<()> {
         apply_setup_layers(&mut setup, &header, &contents, Path::new(ROOT_MOUNT_PATH))
             .context("apply every admitted OCI layer into the staging root")?;
         record_boot_stage("root-layers-ready")?;
-        bail!("applied OCI setup requires image-derived workspace execution support");
-    }
-    let poweroff = prepare_container_control(&seed)?;
+        let plan = WorkspacePlan::from_verified_setup(
+            &contents.project,
+            &contents.config,
+            &header,
+            Path::new(ROOT_LOWER_PATH),
+        )
+        .context("derive sealed workspace execution plan")?;
+        persist_workspace_plan(&plan)?;
+        plan
+    } else {
+        match load_workspace_plan()? {
+            Some(plan) => plan,
+            None => {
+                let plan = WorkspacePlan::foundation();
+                persist_workspace_plan(&plan)?;
+                plan
+            }
+        }
+    };
+    record_boot_stage("workspace-plan-ready")?;
+    normalize_initial_persistent_ownership(&plan)?;
+    record_boot_stage("ownership-ready")?;
+    prepare_install_state()?;
+    let poweroff = prepare_container_control(&seed, &plan.identity)?;
     record_boot_stage("container-control-ready")?;
-    prepare_workspace_generation()?;
+    prepare_workspace_generation(&plan)?;
     record_boot_stage("root-generation-ready")?;
-    let workspace = spawn_workspace_container()?;
+    expose_persistent_layout(&plan)?;
+    record_boot_stage("persistent-layout-ready")?;
+    let workspace = spawn_workspace_container(&plan)?;
     record_boot_stage("workspace-running")?;
 
     let daemon = spawn_daemon()?;
@@ -192,6 +243,8 @@ pub async fn run_daemon() -> Result<()> {
         "guest daemon refuses an ambient environment"
     );
     let seed = read_seed_from_discovered_disk()?;
+    let plan = load_workspace_plan()?
+        .ok_or_else(|| anyhow::anyhow!("sealed workspace execution plan is absent"))?;
     let listener = VsockListener::bind(VsockAddr::new(VMADDR_CID_ANY, seed.daemon_vsock_port()))
         .with_context(|| {
             format!(
@@ -205,7 +258,7 @@ pub async fn run_daemon() -> Result<()> {
         // to bind TCP and intentionally contains no host address.
         listen_addr: format!("vsock:any:{}", seed.daemon_vsock_port()),
         workspace_root: PathBuf::from(WORKSPACE_PATH),
-        home_root: PathBuf::from(HOME_PATH),
+        home_root: PathBuf::from(&plan.identity.home),
         auth_token: Some(seed.auth_token().to_owned()),
         process_execution: codewire_daemon::execution::ProcessExecution::Runc(
             codewire_daemon::execution::RuncExecution {
@@ -213,17 +266,11 @@ pub async fn run_daemon() -> Result<()> {
                 process_directory: PathBuf::from(RUNC_PROCESS_PATH),
                 container_id: WORKSPACE_CONTAINER_ID.to_owned(),
                 process_wrapper: vec![CONTAINER_INIT_PATH.to_owned(), "workspace-exec".to_owned()],
-                default_shell: "/bin/sh".to_owned(),
-                base_environment: vec![
-                    "HOME=/home/codewire".to_owned(),
-                    "USER=codewire".to_owned(),
-                    "SHELL=/bin/sh".to_owned(),
-                    "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".to_owned(),
-                    "LANG=C.UTF-8".to_owned(),
-                ],
-                uid: 0,
-                gid: 0,
-                additional_gids: Vec::new(),
+                default_shell: plan.identity.shell.clone(),
+                base_environment: plan.environment.clone(),
+                uid: plan.identity.uid,
+                gid: plan.identity.gid,
+                additional_gids: plan.identity.additional_gids.clone(),
             },
         ),
     };
@@ -509,14 +556,20 @@ fn validate_runc_process_path(path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Stable container PID 1 used beneath runc. Image entrypoint/setup
-/// supervision is added by the generation setup service; this foundation
-/// process already gives daemon exec/PTY calls a durable namespace target.
+/// Stable trusted container PID 1 used beneath runc. It runs the generation-
+/// bound install step, starts the image process and startup script as the
+/// resolved image identity, reports readiness over its inherited private
+/// descriptor, and then remains as the durable exec/PTY namespace target.
 pub fn run_workspace_init() -> Result<()> {
     ensure!(
         unsafe { libc::getpid() } == 1,
         "workspace init must be container PID 1"
     );
+    if unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0) } == -1 {
+        return Err(io::Error::last_os_error()).context("confine workspace init process state");
+    }
+    confine_workspace_readiness_descriptor()?;
+    let plan = read_container_workspace_plan()?;
     let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
     action.sa_sigaction = request_poweroff_signal as *const () as usize;
     action.sa_flags = libc::SA_NOCLDSTOP;
@@ -530,6 +583,33 @@ pub fn run_workspace_init() -> Result<()> {
         }
     }
     POWEROFF_REQUESTED.store(false, Ordering::Release);
+
+    run_workspace_install(&plan)?;
+    if !plan.workload_args.is_empty() {
+        let _workload = spawn_workspace_process(
+            &plan,
+            &plan.workload_args,
+            &plan.workload_cwd,
+            "start image workload",
+        )?;
+    }
+    if !plan.startup_script.is_empty() {
+        let arguments = vec![
+            plan.identity.shell.clone(),
+            "-lc".to_owned(),
+            plan.startup_script.clone(),
+        ];
+        if let Err(error) = spawn_workspace_process(
+            &plan,
+            &arguments,
+            &plan.session_cwd,
+            "start workspace startup script",
+        ) {
+            eprintln!("workspace startup script warning: {error:#}");
+        }
+    }
+    publish_workspace_readiness(&plan)?;
+
     loop {
         if POWEROFF_REQUESTED.load(Ordering::Acquire) {
             return Ok(());
@@ -548,6 +628,197 @@ pub fn run_workspace_init() -> Result<()> {
         }
         return Err(io::Error::last_os_error()).context("reap workspace child");
     }
+}
+
+fn read_container_workspace_plan() -> Result<WorkspacePlan> {
+    let metadata = fs::symlink_metadata(CONTAINER_PLAN_PATH)
+        .context("inspect container workspace execution plan")?;
+    ensure!(
+        metadata.file_type().is_file()
+            && metadata.uid() == 0
+            && metadata.gid() == 0
+            && metadata.permissions().mode() & 0o777 == 0o400
+            && metadata.nlink() == 1
+            && metadata.len() > 0
+            && metadata.len() <= MAX_PLAN_BYTES as u64,
+        "container workspace execution plan metadata is invalid"
+    );
+    let bytes = read_bounded(Path::new(CONTAINER_PLAN_PATH), MAX_PLAN_BYTES + 1)
+        .context("read container workspace execution plan")?;
+    WorkspacePlan::decode(&bytes).context("validate container workspace execution plan")
+}
+
+fn run_workspace_install(plan: &WorkspacePlan) -> Result<()> {
+    if plan.install_command.is_empty() {
+        return Ok(());
+    }
+    let expected = install_completion(plan)?;
+    let metadata = fs::symlink_metadata(CONTAINER_INSTALL_STATE_PATH)
+        .context("inspect trusted workspace install state")?;
+    ensure!(
+        metadata.file_type().is_file()
+            && metadata.uid() == 0
+            && metadata.gid() == 0
+            && metadata.permissions().mode() & 0o777 == 0o400
+            && metadata.nlink() == 1
+            && metadata.len() > 0
+            && metadata.len() <= WORKSPACE_READY_LIMIT as u64,
+        "trusted workspace install state is invalid"
+    );
+    let actual = read_bounded(
+        Path::new(CONTAINER_INSTALL_STATE_PATH),
+        WORKSPACE_READY_LIMIT + 1,
+    )
+    .context("read trusted workspace install state")?;
+    ensure!(
+        valid_install_state(&actual),
+        "trusted workspace install state is invalid"
+    );
+    if actual == expected {
+        return Ok(());
+    }
+
+    let arguments = vec![
+        plan.identity.shell.clone(),
+        "-lc".to_owned(),
+        plan.install_command.clone(),
+    ];
+    let mut child = spawn_workspace_process(
+        plan,
+        &arguments,
+        &plan.session_cwd,
+        "start workspace install command",
+    )?;
+    let status = child.wait().context("wait for workspace install command")?;
+    ensure!(status.success(), "workspace install command failed");
+    Ok(())
+}
+
+fn spawn_workspace_process(
+    plan: &WorkspacePlan,
+    arguments: &[String],
+    working_directory: &str,
+    action: &'static str,
+) -> Result<std::process::Child> {
+    let (program, remaining) = arguments
+        .split_first()
+        .ok_or_else(|| anyhow::anyhow!("workspace process command is empty"))?;
+    let mut command = Command::new(program);
+    command
+        .args(remaining)
+        .current_dir(working_directory)
+        .env_clear()
+        .stdin(Stdio::null())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit());
+    for entry in &plan.environment {
+        let (key, value) = entry
+            .split_once('=')
+            .ok_or_else(|| anyhow::anyhow!("sealed workspace environment is invalid"))?;
+        command.env(key, value);
+    }
+    let uid = plan.identity.uid;
+    let gid = plan.identity.gid;
+    let additional_gids = plan
+        .identity
+        .additional_gids
+        .iter()
+        .map(|gid| *gid as libc::gid_t)
+        .collect::<Vec<_>>();
+    unsafe {
+        command.pre_exec(move || {
+            if libc::setgroups(additional_gids.len(), additional_gids.as_ptr()) == -1
+                || libc::setgid(gid as libc::gid_t) == -1
+                || libc::setuid(uid as libc::uid_t) == -1
+            {
+                return Err(io::Error::last_os_error());
+            }
+            clear_process_capabilities()?;
+            if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) == -1 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    command.spawn().with_context(|| action)
+}
+
+fn clear_process_capabilities() -> io::Result<()> {
+    let mut header = LinuxCapabilityHeader {
+        version: LINUX_CAPABILITY_VERSION_3,
+        pid: 0,
+    };
+    let data = [LinuxCapabilityData {
+        effective: 0,
+        permitted: 0,
+        inheritable: 0,
+    }; 2];
+    if unsafe { libc::syscall(libc::SYS_capset, &mut header, data.as_ptr()) } == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+fn install_completion(plan: &WorkspacePlan) -> Result<Vec<u8>> {
+    let bytes = plan.encode().context("encode workspace install identity")?;
+    Ok(format!(
+        "codewire-workspace-install-v1 {}\n",
+        Sha256Value::calculate(&bytes)
+    )
+    .into_bytes())
+}
+
+fn valid_install_state(bytes: &[u8]) -> bool {
+    if bytes == PENDING_INSTALL_STATE {
+        return true;
+    }
+    let Some(digest) = bytes
+        .strip_prefix(b"codewire-workspace-install-v1 ")
+        .and_then(|value| value.strip_suffix(b"\n"))
+    else {
+        return false;
+    };
+    digest.len() == 64
+        && digest
+            .iter()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte))
+}
+
+fn workspace_ready_message(plan: &WorkspacePlan) -> Result<Vec<u8>> {
+    let bytes = plan
+        .encode()
+        .context("encode workspace readiness identity")?;
+    Ok(format!("CWREADY1 {}\n", Sha256Value::calculate(&bytes)).into_bytes())
+}
+
+fn confine_workspace_readiness_descriptor() -> Result<()> {
+    let flags = unsafe { libc::fcntl(WORKSPACE_READY_FD, libc::F_GETFD) };
+    if flags == -1
+        || unsafe { libc::fcntl(WORKSPACE_READY_FD, libc::F_SETFD, flags | libc::FD_CLOEXEC) } == -1
+    {
+        return Err(io::Error::last_os_error()).context("confine workspace readiness descriptor");
+    }
+    Ok(())
+}
+
+fn publish_workspace_readiness(plan: &WorkspacePlan) -> Result<()> {
+    let flags = unsafe { libc::fcntl(WORKSPACE_READY_FD, libc::F_GETFD) };
+    ensure!(flags != -1, "workspace readiness descriptor is absent");
+    let mut stream = unsafe { UnixStream::from_raw_fd(WORKSPACE_READY_FD) };
+    let stat = rustix::fs::fstat(&stream).context("inspect workspace readiness descriptor")?;
+    ensure!(
+        RustixFileType::from_raw_mode(stat.st_mode) == RustixFileType::Socket,
+        "workspace readiness descriptor is not a socket"
+    );
+    let message = workspace_ready_message(plan)?;
+    ensure!(
+        message.len() <= WORKSPACE_READY_LIMIT,
+        "workspace readiness message is invalid"
+    );
+    stream
+        .write_all(&message)
+        .context("publish trusted workspace readiness")?;
+    stream.flush().context("flush trusted workspace readiness")
 }
 
 /// Preserve the daemon's exact-child lifecycle across the runc client hop.
@@ -741,6 +1012,35 @@ fn verify_setup_header(
     Ok(header)
 }
 
+fn persist_workspace_plan(plan: &WorkspacePlan) -> Result<()> {
+    let bytes = plan.encode().context("encode sealed workspace plan")?;
+    ensure_exact_bytes(Path::new(WORKSPACE_PLAN_PATH), &bytes, 0o400)
+        .context("publish sealed workspace plan")
+}
+
+fn load_workspace_plan() -> Result<Option<WorkspacePlan>> {
+    let metadata = match fs::symlink_metadata(WORKSPACE_PLAN_PATH) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).context("inspect sealed workspace plan"),
+    };
+    ensure!(
+        metadata.file_type().is_file()
+            && metadata.uid() == unsafe { libc::geteuid() }
+            && metadata.gid() == unsafe { libc::getegid() }
+            && metadata.permissions().mode() & 0o777 == 0o400
+            && metadata.nlink() == 1
+            && metadata.len() > 0
+            && metadata.len() <= MAX_PLAN_BYTES as u64,
+        "sealed workspace plan metadata is invalid"
+    );
+    let bytes = read_bounded(Path::new(WORKSPACE_PLAN_PATH), MAX_PLAN_BYTES + 1)
+        .context("read sealed workspace plan")?;
+    WorkspacePlan::decode(&bytes)
+        .map(Some)
+        .context("validate sealed workspace plan")
+}
+
 fn read_bounded(path: &Path, limit: usize) -> io::Result<Vec<u8>> {
     let mut file = File::open(path)?;
     let mut bytes = Vec::with_capacity(limit.min(4096));
@@ -900,6 +1200,7 @@ fn create_state_layout() -> Result<()> {
         (CONTROL_PATH, 0o700),
         (PERSISTENT_WORKSPACE_PATH, 0o700),
         (PERSISTENT_HOME_PATH, 0o700),
+        (PERSISTENT_HOME_WORK_PATH, 0o700),
         (PERSISTENT_PROBE_PATH, 0o700),
     ] {
         create_dir(Path::new(path), mode)?;
@@ -911,15 +1212,84 @@ fn create_state_layout() -> Result<()> {
     Ok(())
 }
 
-fn normalize_initial_persistent_ownership() -> Result<()> {
+fn prepare_install_state() -> Result<()> {
+    let path = Path::new(INSTALL_STATE_PATH);
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            ensure!(
+                metadata.file_type().is_file()
+                    && metadata.uid() == unsafe { libc::geteuid() }
+                    && metadata.gid() == unsafe { libc::getegid() }
+                    && metadata.permissions().mode() & 0o777 == 0o400
+                    && metadata.nlink() == 1
+                    && metadata.len() > 0
+                    && metadata.len() <= WORKSPACE_READY_LIMIT as u64,
+                "trusted workspace install state is invalid"
+            );
+            let state = read_bounded(path, WORKSPACE_READY_LIMIT + 1)
+                .context("read trusted workspace install state")?;
+            ensure!(
+                valid_install_state(&state),
+                "trusted workspace install state is invalid"
+            );
+            Ok(())
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            write_durable(path, PENDING_INSTALL_STATE, 0o400)
+                .context("initialize trusted workspace install state")
+        }
+        Err(error) => Err(error).context("inspect trusted workspace install state"),
+    }
+}
+
+fn publish_install_completion(plan: &WorkspacePlan) -> Result<()> {
+    let expected = install_completion(plan)?;
+    let actual = read_bounded(Path::new(INSTALL_STATE_PATH), WORKSPACE_READY_LIMIT + 1)
+        .context("read trusted workspace install state before promotion")?;
+    if actual == expected {
+        return Ok(());
+    }
+    ensure!(
+        valid_install_state(&actual),
+        "trusted workspace install state is invalid"
+    );
+    write_durable(Path::new(INSTALL_STATE_PATH), &expected, 0o400)
+        .context("publish trusted workspace install completion")
+}
+
+/// Convergently translate the shared workspace/home owner when a generation
+/// changes image identity. A crash or rollback can safely repeat the bounded,
+/// no-follow walk; the marker is published only after the filesystem sync.
+fn normalize_initial_persistent_ownership(plan: &WorkspacePlan) -> Result<()> {
+    let identity = &plan.identity;
+    let source = match plan.source {
+        WorkspacePlanSource::Foundation => "foundation",
+        WorkspacePlanSource::Oci => "oci",
+    };
+    let expected_marker = format!(
+        "codewire-workspace-owner-v2 {source} {}:{}\n",
+        identity.uid, identity.gid,
+    );
     match fs::symlink_metadata(WORKSPACE_OWNER_VERSION_PATH) {
-        Ok(_) => {
-            return ensure_exact_bytes(
-                Path::new(WORKSPACE_OWNER_VERSION_PATH),
-                WORKSPACE_OWNER_VERSION,
-                0o400,
-            )
-            .context("validate persistent workspace ownership marker");
+        Ok(metadata) => {
+            ensure!(
+                metadata.file_type().is_file()
+                    && metadata.nlink() == 1
+                    && metadata.uid() == unsafe { libc::geteuid() }
+                    && metadata.gid() == unsafe { libc::getegid() }
+                    && metadata.permissions().mode() & 0o777 == 0o400
+                    && metadata.len() <= 128,
+                "persistent workspace ownership marker is invalid"
+            );
+            let actual = read_bounded(Path::new(WORKSPACE_OWNER_VERSION_PATH), 129)
+                .context("read persistent workspace ownership marker")?;
+            if actual == expected_marker.as_bytes() {
+                return Ok(());
+            }
+            ensure!(
+                valid_workspace_owner_marker(&actual),
+                "persistent workspace ownership marker is invalid"
+            );
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(error) => return Err(error).context("inspect persistent workspace ownership marker"),
@@ -939,23 +1309,24 @@ fn normalize_initial_persistent_ownership() -> Result<()> {
             visited <= INITIAL_OWNERSHIP_ENTRY_LIMIT,
             "persistent workspace exceeds its initial ownership entry bound"
         );
-        let metadata = fs::symlink_metadata(&path)
-            .with_context(|| format!("inspect persistent path {}", path.display()))?;
+        let metadata = fs::symlink_metadata(&path).context("inspect persistent workspace entry")?;
         let kind = metadata.file_type();
         ensure!(
-            kind.is_dir() || (kind.is_file() && metadata.nlink() == 1),
+            kind.is_dir()
+                || kind.is_file()
+                || kind.is_symlink()
+                || kind.is_fifo()
+                || kind.is_socket(),
             "persistent workspace contains a forbidden inode type"
         );
-        lchown(&path, 0, 0)?;
+        lchown(&path, identity.uid, identity.gid)?;
         if kind.is_dir() {
-            for entry in fs::read_dir(&path)
-                .with_context(|| format!("read persistent directory {}", path.display()))?
-            {
+            for entry in fs::read_dir(&path).context("read persistent workspace directory")? {
                 ensure!(
                     visited.saturating_add(pending.len()) < INITIAL_OWNERSHIP_ENTRY_LIMIT,
                     "persistent workspace exceeds its initial ownership entry bound"
                 );
-                pending.push(entry.context("read persistent directory entry")?.path());
+                pending.push(entry.context("read persistent workspace entry")?.path());
             }
         }
     }
@@ -964,33 +1335,128 @@ fn normalize_initial_persistent_ownership() -> Result<()> {
     if unsafe { libc::syncfs(state.as_raw_fd()) } == -1 {
         return Err(io::Error::last_os_error()).context("sync persistent workspace ownership");
     }
-    ensure_exact_bytes(
+    write_durable(
         Path::new(WORKSPACE_OWNER_VERSION_PATH),
-        WORKSPACE_OWNER_VERSION,
+        expected_marker.as_bytes(),
         0o400,
     )
     .context("publish persistent workspace ownership marker")
 }
 
+fn valid_workspace_owner_marker(bytes: &[u8]) -> bool {
+    if bytes == LEGACY_WORKSPACE_OWNER_VERSION {
+        return true;
+    }
+    let Some(body) = bytes
+        .strip_prefix(b"codewire-workspace-owner-v2 ")
+        .and_then(|value| value.strip_suffix(b"\n"))
+        .and_then(|value| std::str::from_utf8(value).ok())
+    else {
+        return false;
+    };
+    let Some((source, identity)) = body.split_once(' ') else {
+        return false;
+    };
+    if !matches!(source, "foundation" | "oci") {
+        return false;
+    }
+    let Some((uid, gid)) = identity.split_once(':') else {
+        return false;
+    };
+    let canonical_id = |value: &str| {
+        !value.is_empty()
+            && value.bytes().all(|byte| byte.is_ascii_digit())
+            && (value == "0" || !value.starts_with('0'))
+            && value.parse::<u32>().is_ok()
+    };
+    canonical_id(uid) && canonical_id(gid)
+}
+
 fn lchown(path: &Path, uid: libc::uid_t, gid: libc::gid_t) -> Result<()> {
     let path_bytes = CString::new(path.as_os_str().as_bytes())
-        .with_context(|| format!("persistent path contains NUL: {}", path.display()))?;
+        .context("persistent workspace path contains NUL")?;
     if unsafe { libc::lchown(path_bytes.as_ptr(), uid, gid) } == -1 {
-        return Err(io::Error::last_os_error())
-            .with_context(|| format!("normalize persistent owner {}", path.display()));
+        return Err(io::Error::last_os_error()).context("normalize persistent workspace owner");
     }
     Ok(())
 }
 
-fn expose_persistent_layout() -> Result<()> {
+fn expose_persistent_layout(plan: &WorkspacePlan) -> Result<()> {
     create_dir(Path::new(WORKSPACE_PATH), 0o700)?;
-    create_dir(Path::new("/home"), 0o755)?;
-    create_dir(Path::new(HOME_PATH), 0o700)?;
+    let home = Path::new(&plan.identity.home);
+    let home_parent = home
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("workspace home has no parent"))?;
+    if home_parent != Path::new("/") {
+        create_dir(home_parent, 0o755)?;
+    }
+    create_dir(home, 0o700)?;
     bind_mount(PERSISTENT_WORKSPACE_PATH, WORKSPACE_PATH)?;
-    bind_mount(PERSISTENT_HOME_PATH, HOME_PATH)
+
+    let relative_home = home
+        .strip_prefix("/")
+        .map_err(|_| anyhow::anyhow!("workspace home is not absolute"))?;
+    let image_home = Path::new(ROOT_LOWER_PATH).join(relative_home);
+    let lower = if confined_image_directory_exists(relative_home)? {
+        image_home
+    } else {
+        create_dir(Path::new(EMPTY_HOME_LOWER_PATH), 0o755)?;
+        PathBuf::from(EMPTY_HOME_LOWER_PATH)
+    };
+    create_dir(Path::new(HOME_MERGED_PATH), 0o700)?;
+    mount_fs(
+        "overlay",
+        HOME_MERGED_PATH,
+        "overlay",
+        libc::MS_NOSUID | libc::MS_NODEV,
+        &format!(
+            "lowerdir={},upperdir={PERSISTENT_HOME_PATH},workdir={PERSISTENT_HOME_WORK_PATH}",
+            lower.display()
+        ),
+    )
+    .context("mount persistent workspace home overlay")?;
+    bind_mount(HOME_MERGED_PATH, &plan.identity.home)
 }
 
-fn prepare_container_control(seed: &Seed) -> Result<UnixDatagram> {
+fn confined_image_directory_exists(relative: &Path) -> Result<bool> {
+    let root = rustix::fs::open(
+        ROOT_LOWER_PATH,
+        RustixOFlags::RDONLY
+            | RustixOFlags::DIRECTORY
+            | RustixOFlags::CLOEXEC
+            | RustixOFlags::NOFOLLOW,
+        RustixMode::empty(),
+    )
+    .context("open OCI lower root for confined home inspection")?;
+    let descriptor = match rustix::fs::openat2(
+        &root,
+        relative,
+        RustixOFlags::RDONLY
+            | RustixOFlags::DIRECTORY
+            | RustixOFlags::CLOEXEC
+            | RustixOFlags::NOFOLLOW,
+        RustixMode::empty(),
+        ResolveFlags::BENEATH
+            | ResolveFlags::NO_SYMLINKS
+            | ResolveFlags::NO_MAGICLINKS
+            | ResolveFlags::NO_XDEV,
+    ) {
+        Ok(descriptor) => descriptor,
+        Err(RustixErrno::NOENT) => return Ok(false),
+        Err(error) => return Err(error).context("open confined OCI image home"),
+    };
+    let stat = rustix::fs::fstat(&descriptor).context("inspect confined OCI image home")?;
+    ensure!(
+        RustixFileType::from_raw_mode(stat.st_mode) == RustixFileType::Directory,
+        "OCI image home is not a directory"
+    );
+    Ok(true)
+}
+
+fn prepare_container_control(
+    seed: &Seed,
+    workspace_identity: &WorkspaceIdentity,
+) -> Result<UnixDatagram> {
     for (path, mode) in [
         ("/run/codewire", 0o700),
         (RUNC_STATE_PATH, 0o700),
@@ -1005,6 +1471,11 @@ fn prepare_container_control(seed: &Seed) -> Result<UnixDatagram> {
     let identity_bytes = serde_json::to_vec(&identity).context("encode guest identity metadata")?;
     write_durable(Path::new(CONTAINER_IDENTITY_PATH), &identity_bytes, 0o400)
         .context("publish guest identity metadata")?;
+    lchown(
+        Path::new(CONTAINER_IDENTITY_PATH),
+        workspace_identity.uid,
+        workspace_identity.gid,
+    )?;
 
     let socket_path = Path::new(CONTAINER_POWEROFF_SOCKET);
     match fs::symlink_metadata(socket_path) {
@@ -1018,19 +1489,68 @@ fn prepare_container_control(seed: &Seed) -> Result<UnixDatagram> {
     let socket = UnixDatagram::bind(socket_path).context("bind guest poweroff socket")?;
     fs::set_permissions(socket_path, fs::Permissions::from_mode(0o600))
         .context("confine guest poweroff socket")?;
+    lchown(socket_path, workspace_identity.uid, workspace_identity.gid)?;
+    lchown(
+        Path::new(CONTAINER_CONTROL_PATH),
+        workspace_identity.uid,
+        workspace_identity.gid,
+    )?;
     socket
         .set_nonblocking(true)
         .context("make guest poweroff socket nonblocking")?;
     Ok(socket)
 }
 
-fn prepare_workspace_generation() -> Result<()> {
+fn prepare_workspace_generation(plan: &WorkspacePlan) -> Result<()> {
     for (path, mode) in [
-        (ROOT_LOWER_PATH, 0o700),
         (ROOT_UPPER_PATH, 0o700),
         (ROOT_WORK_PATH, 0o700),
         (ROOT_MERGED_PATH, 0o700),
         (RUNC_BUNDLE_PATH, 0o700),
+    ] {
+        create_dir(Path::new(path), mode)?;
+    }
+    match plan.source {
+        WorkspacePlanSource::Foundation => prepare_foundation_lower()?,
+        WorkspacePlanSource::Oci => {
+            let generation = Sha256Value::parse_hex(&plan.root_generation)
+                .context("decode sealed OCI root generation")?;
+            verify_completed_setup_generation(Path::new(ROOT_MOUNT_PATH), generation)
+                .context("validate completed OCI root generation")?;
+            let metadata = fs::symlink_metadata(ROOT_LOWER_PATH)
+                .context("inspect completed OCI lower directory")?;
+            ensure!(
+                metadata.file_type().is_dir()
+                    && metadata.uid() == unsafe { libc::geteuid() }
+                    && metadata.gid() == unsafe { libc::getegid() }
+                    && metadata.permissions().mode() & 0o777 == 0o700,
+                "completed OCI lower directory is invalid"
+            );
+            ensure!(
+                fs::symlink_metadata(FOUNDATION_VERSION_PATH)
+                    .is_err_and(|error| error.kind() == io::ErrorKind::NotFound),
+                "OCI generation contains foundation metadata"
+            );
+        }
+    }
+
+    let config = workspace_oci_config(plan)?;
+    ensure_exact_bytes(Path::new(RUNC_CONFIG_PATH), &config, 0o400)?;
+
+    mount_fs(
+        "overlay",
+        ROOT_MERGED_PATH,
+        "overlay",
+        libc::MS_NOSUID | libc::MS_NODEV,
+        &format!("lowerdir={ROOT_LOWER_PATH},upperdir={ROOT_UPPER_PATH},workdir={ROOT_WORK_PATH}"),
+    )
+    .context("mount workspace root overlay")?;
+    Ok(())
+}
+
+fn prepare_foundation_lower() -> Result<()> {
+    for (path, mode) in [
+        (ROOT_LOWER_PATH, 0o700),
         ("/generation/lower/bin", 0o755),
         ("/generation/lower/sbin", 0o755),
         ("/generation/lower/etc", 0o755),
@@ -1079,17 +1599,6 @@ fn prepare_workspace_generation() -> Result<()> {
         0o400,
     )?;
 
-    let config = workspace_oci_config()?;
-    ensure_exact_bytes(Path::new(RUNC_CONFIG_PATH), &config, 0o400)?;
-
-    mount_fs(
-        "overlay",
-        ROOT_MERGED_PATH,
-        "overlay",
-        libc::MS_NOSUID | libc::MS_NODEV,
-        &format!("lowerdir={ROOT_LOWER_PATH},upperdir={ROOT_UPPER_PATH},workdir={ROOT_WORK_PATH}"),
-    )
-    .context("mount workspace root overlay")?;
     Ok(())
 }
 
@@ -1131,7 +1640,7 @@ fn ensure_exact_bytes(path: &Path, expected: &[u8], mode: u32) -> Result<()> {
     }
 }
 
-fn workspace_oci_config() -> Result<Vec<u8>> {
+fn workspace_oci_config(plan: &WorkspacePlan) -> Result<Vec<u8>> {
     let standard_devices = [
         ("/dev/null", 1, 3, 0o666),
         ("/dev/zero", 1, 5, 0o666),
@@ -1173,18 +1682,18 @@ fn workspace_oci_config() -> Result<Vec<u8>> {
             "user": { "uid": 0, "gid": 0 },
             "args": [CONTAINER_INIT_PATH, "workspace-init"],
             "env": [
-                "HOME=/home/codewire",
-                "USER=codewire",
+                "HOME=/root",
+                "USER=root",
                 "SHELL=/bin/sh",
                 "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
                 "LANG=C.UTF-8"
             ],
-            "cwd": WORKSPACE_PATH,
+            "cwd": "/",
             "capabilities": {
-                "bounding": [],
-                "effective": [],
+                "bounding": ["CAP_SETGID", "CAP_SETUID"],
+                "effective": ["CAP_SETGID", "CAP_SETUID"],
                 "inheritable": [],
-                "permitted": [],
+                "permitted": ["CAP_SETGID", "CAP_SETUID"],
                 "ambient": []
             },
             "rlimits": [
@@ -1202,9 +1711,11 @@ fn workspace_oci_config() -> Result<Vec<u8>> {
             { "destination": "/sys", "type": "sysfs", "source": "sysfs", "options": ["nosuid", "noexec", "nodev", "ro"] },
             { "destination": "/run", "type": "tmpfs", "source": "tmpfs", "options": ["nosuid", "noexec", "nodev", "mode=0755", "size=16m"] },
             { "destination": CONTAINER_INIT_PATH, "type": "none", "source": INIT_PATH, "options": ["bind", "ro", "nosuid", "nodev"] },
+            { "destination": CONTAINER_PLAN_PATH, "type": "none", "source": WORKSPACE_PLAN_PATH, "options": ["bind", "ro", "nosuid", "nodev", "noexec"] },
+            { "destination": CONTAINER_INSTALL_STATE_PATH, "type": "none", "source": INSTALL_STATE_PATH, "options": ["bind", "ro", "nosuid", "nodev", "noexec"] },
             { "destination": "/tmp", "type": "tmpfs", "source": "tmpfs", "options": ["nosuid", "nodev", "mode=1777", "size=256m"] },
             { "destination": WORKSPACE_PATH, "type": "none", "source": PERSISTENT_WORKSPACE_PATH, "options": ["rbind", "rw", "nosuid", "nodev"] },
-            { "destination": HOME_PATH, "type": "none", "source": PERSISTENT_HOME_PATH, "options": ["rbind", "rw", "nosuid", "nodev"] },
+            { "destination": plan.identity.home, "type": "none", "source": HOME_MERGED_PATH, "options": ["rbind", "rw", "nosuid", "nodev"] },
             { "destination": CONTAINER_CONTROL_DESTINATION, "type": "none", "source": CONTAINER_CONTROL_PATH, "options": ["rbind", "ro", "nosuid", "nodev", "noexec"] },
             { "destination": CONTAINER_PROBE_DESTINATION, "type": "none", "source": PERSISTENT_PROBE_PATH, "options": ["rbind", "rw", "nosuid", "nodev", "noexec"] }
         ],
@@ -1335,8 +1846,41 @@ struct RuncReportedState {
     pid: i64,
 }
 
-fn spawn_workspace_container() -> Result<std::process::Child> {
+struct WorkspaceStartGuard(Option<std::process::Child>);
+
+impl WorkspaceStartGuard {
+    fn new(child: std::process::Child) -> Self {
+        Self(Some(child))
+    }
+
+    fn child(&mut self) -> &mut std::process::Child {
+        self.0.as_mut().expect("workspace start child is present")
+    }
+
+    fn finish(mut self) -> std::process::Child {
+        self.0.take().expect("workspace start child is present")
+    }
+}
+
+impl Drop for WorkspaceStartGuard {
+    fn drop(&mut self) {
+        if let Some(child) = self.0.as_mut() {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = force_delete_workspace_container();
+        }
+    }
+}
+
+fn spawn_workspace_container(plan: &WorkspacePlan) -> Result<std::process::Child> {
     prepare_runc_log()?;
+    let expected_readiness = workspace_ready_message(plan)?;
+    let (mut readiness, readiness_writer) =
+        UnixStream::pair().context("create trusted workspace readiness channel")?;
+    readiness
+        .set_nonblocking(true)
+        .context("make workspace readiness channel nonblocking")?;
+    let readiness_fd = readiness_writer.as_raw_fd();
     let mut command = Command::new(RUNC_PATH);
     command
         .args([
@@ -1348,6 +1892,8 @@ fn spawn_workspace_container() -> Result<std::process::Child> {
             "json",
             "run",
             "--no-pivot",
+            "--preserve-fds",
+            "1",
             "--bundle",
             RUNC_BUNDLE_PATH,
             WORKSPACE_CONTAINER_ID,
@@ -1357,27 +1903,76 @@ fn spawn_workspace_container() -> Result<std::process::Child> {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    let mut child = command.spawn().context("start sealed runc workspace")?;
+    unsafe {
+        command.pre_exec(move || {
+            if readiness_fd != WORKSPACE_READY_FD
+                && libc::dup2(readiness_fd, WORKSPACE_READY_FD) == -1
+            {
+                return Err(io::Error::last_os_error());
+            }
+            if libc::fcntl(WORKSPACE_READY_FD, libc::F_SETFD, 0) == -1 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let child = command.spawn().context("start sealed runc workspace")?;
+    let mut child = WorkspaceStartGuard::new(child);
+    drop(readiness_writer);
     let deadline = Instant::now() + WORKSPACE_START_TIMEOUT;
+    let mut readiness_bytes = Vec::with_capacity(expected_readiness.len());
     loop {
         validate_runc_log()?;
         if child
+            .child()
             .try_wait()
             .context("observe sealed runc workspace startup")?
             .is_some()
         {
             bail!("sealed runc workspace exited during startup");
         }
-        if workspace_container_is_running()? {
-            return Ok(child);
+        let ready =
+            advance_workspace_readiness(&mut readiness, &expected_readiness, &mut readiness_bytes)?;
+        if ready && workspace_container_is_running()? {
+            publish_install_completion(plan)?;
+            return Ok(child.finish());
         }
         if Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            let _ = force_delete_workspace_container();
             bail!("sealed runc workspace startup timed out");
         }
         thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn advance_workspace_readiness(
+    stream: &mut UnixStream,
+    expected: &[u8],
+    received: &mut Vec<u8>,
+) -> Result<bool> {
+    let mut buffer = [0_u8; WORKSPACE_READY_LIMIT + 1];
+    match stream.read(&mut buffer) {
+        Ok(0) => {
+            ensure!(
+                received == expected,
+                "trusted workspace readiness channel closed early"
+            );
+            Ok(true)
+        }
+        Ok(length) => {
+            received.extend_from_slice(&buffer[..length]);
+            ensure!(
+                received.len() <= expected.len() && expected.starts_with(received),
+                "trusted workspace readiness message is invalid"
+            );
+            // runc retains its preserved descriptor while the container is
+            // alive, so EOF is not a protocol delimiter. Only trusted PID 1
+            // can write: it marks this descriptor close-on-exec before any
+            // image process is spawned. The fixed, digest-bound length is the
+            // complete frame.
+            Ok(received == expected)
+        }
+        Err(error) if error.kind() == io::ErrorKind::WouldBlock => Ok(false),
+        Err(error) => Err(error).context("read trusted workspace readiness"),
     }
 }
 
@@ -1949,15 +2544,16 @@ fn acceptable_icmp_socket_denial(error: Option<libc::c_int>) -> bool {
 }
 
 fn ensure_init_is_expected(container: bool) -> Result<()> {
-    let executable = fs::read_link("/proc/1/exe").context("inspect guest PID 1 executable")?;
-    let expected = if container {
-        Path::new(CONTAINER_INIT_PATH)
+    let (process, expected) = if container {
+        ("self", Path::new(CONTAINER_INIT_PATH))
     } else {
-        Path::new(INIT_PATH)
+        ("1", Path::new(INIT_PATH))
     };
+    let executable = fs::read_link(format!("/proc/{process}/exe"))
+        .context("inspect sealed guest init executable")?;
     ensure!(
         executable == expected,
-        "guest PID 1 is not the sealed Codewire init"
+        "guest helper is not the sealed Codewire init"
     );
     Ok(())
 }
@@ -2146,8 +2742,9 @@ mod tests {
 
     #[test]
     fn workspace_init_is_a_read_only_sealed_bind_not_overlay_content() {
+        let foundation = WorkspacePlan::foundation();
         let config: serde_json::Value =
-            serde_json::from_slice(&workspace_oci_config().unwrap()).unwrap();
+            serde_json::from_slice(&workspace_oci_config(&foundation).unwrap()).unwrap();
         assert_eq!(
             config["process"]["args"],
             serde_json::json!([CONTAINER_INIT_PATH, "workspace-init"])
@@ -2161,6 +2758,104 @@ mod tests {
         assert_eq!(
             runtime["options"],
             serde_json::json!(["bind", "ro", "nosuid", "nodev"])
+        );
+        let plan = mounts
+            .iter()
+            .find(|mount| mount["destination"] == CONTAINER_PLAN_PATH)
+            .unwrap();
+        assert_eq!(plan["source"], WORKSPACE_PLAN_PATH);
+        assert_eq!(
+            plan["options"],
+            serde_json::json!(["bind", "ro", "nosuid", "nodev", "noexec"])
+        );
+        let install_state = mounts
+            .iter()
+            .find(|mount| mount["destination"] == CONTAINER_INSTALL_STATE_PATH)
+            .unwrap();
+        assert_eq!(install_state["source"], INSTALL_STATE_PATH);
+        assert_eq!(
+            install_state["options"],
+            serde_json::json!(["bind", "ro", "nosuid", "nodev", "noexec"])
+        );
+        let home = mounts
+            .iter()
+            .find(|mount| mount["destination"] == foundation.identity.home)
+            .unwrap();
+        assert_eq!(home["source"], HOME_MERGED_PATH);
+        assert_eq!(
+            config["process"]["capabilities"]["effective"],
+            serde_json::json!(["CAP_SETGID", "CAP_SETUID"])
+        );
+        assert_eq!(
+            config["process"]["capabilities"]["ambient"],
+            serde_json::json!([])
+        );
+    }
+
+    #[test]
+    fn workspace_completion_messages_are_digest_only_and_plan_bound() {
+        let mut plan = WorkspacePlan::foundation();
+        plan.install_command = "attacker-install-canary".to_owned();
+        plan.startup_script = "attacker-startup-canary".to_owned();
+        let ready = workspace_ready_message(&plan).unwrap();
+        let install = install_completion(&plan).unwrap();
+        for message in [&ready, &install] {
+            let message = std::str::from_utf8(message).unwrap();
+            assert!(!message.contains("attacker-install-canary"));
+            assert!(!message.contains("attacker-startup-canary"));
+        }
+        assert!(
+            std::str::from_utf8(&ready)
+                .unwrap()
+                .starts_with("CWREADY1 ")
+        );
+        assert!(
+            std::str::from_utf8(&install)
+                .unwrap()
+                .starts_with("codewire-workspace-install-v1 ")
+        );
+        assert!(valid_install_state(PENDING_INSTALL_STATE));
+        assert!(valid_install_state(&install));
+        assert!(!valid_install_state(
+            b"codewire-workspace-install-v1 AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n"
+        ));
+        assert!(valid_workspace_owner_marker(LEGACY_WORKSPACE_OWNER_VERSION));
+        assert!(valid_workspace_owner_marker(
+            b"codewire-workspace-owner-v2 foundation 0:0\n"
+        ));
+        assert!(valid_workspace_owner_marker(
+            b"codewire-workspace-owner-v2 oci 1000:998\n"
+        ));
+        assert!(!valid_workspace_owner_marker(
+            b"codewire-workspace-owner-v2 oci 01000:998\n"
+        ));
+        assert!(!valid_workspace_owner_marker(
+            b"codewire-workspace-owner-v2 attacker 1000:998\n"
+        ));
+    }
+
+    #[test]
+    fn workspace_readiness_requires_one_exact_fixed_length_message() {
+        let expected = workspace_ready_message(&WorkspacePlan::foundation()).unwrap();
+        let (mut reader, mut writer) = UnixStream::pair().unwrap();
+        reader.set_nonblocking(true).unwrap();
+        let midpoint = expected.len() / 2;
+        writer.write_all(&expected[..midpoint]).unwrap();
+        let mut received = Vec::new();
+        assert!(!advance_workspace_readiness(&mut reader, &expected, &mut received).unwrap());
+        writer.write_all(&expected[midpoint..]).unwrap();
+        assert!(advance_workspace_readiness(&mut reader, &expected, &mut received).unwrap());
+
+        let (mut reader, mut writer) = UnixStream::pair().unwrap();
+        reader.set_nonblocking(true).unwrap();
+        writer.write_all(&expected).unwrap();
+        writer.write_all(b"forged-suffix").unwrap();
+        writer.shutdown(std::net::Shutdown::Write).unwrap();
+        let error =
+            advance_workspace_readiness(&mut reader, &expected, &mut Vec::new()).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "trusted workspace readiness message is invalid"
         );
     }
 

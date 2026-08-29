@@ -1696,8 +1696,10 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "codewire-daemon",
+ "codewire-project",
  "flate2",
  "libc",
+ "oci-spec",
  "rustix",
  "serde",
  "serde_json",

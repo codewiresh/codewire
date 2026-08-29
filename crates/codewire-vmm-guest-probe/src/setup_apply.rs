@@ -95,6 +95,27 @@ pub(crate) fn apply_setup_layers(
     Ok(ApplyOutcome::Applied)
 }
 
+pub(crate) fn verify_completed_setup_generation(
+    generation_path: &Path,
+    generation: Sha256Value,
+) -> Result<(), SetupApplyError> {
+    let root = fs_result(
+        "open completed root generation directory",
+        rfs::open(
+            generation_path,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+            Mode::empty(),
+        ),
+    )?;
+    match read_completion(&root, &completion_bytes(generation))? {
+        CompletionState::Exact => {
+            let _ = open_directory_at(&root, LOWER_NAME)?;
+            Ok(())
+        }
+        CompletionState::Absent => Err(SetupApplyError::GenerationIncomplete),
+    }
+}
+
 fn replay_layer(
     input: &mut (impl Read + Seek),
     layer: &SetupLayer,
@@ -687,6 +708,8 @@ pub(crate) enum SetupApplyError {
     InvalidVerifiedState,
     #[error("existing OCI completion marker does not match this generation")]
     CompletionMismatch,
+    #[error("OCI root generation is not complete")]
+    GenerationIncomplete,
     #[error("setup layer object ended before its admitted compressed size")]
     TruncatedLayerObject,
     #[error("setup layer entry ended before its admitted payload size")]
@@ -1005,6 +1028,10 @@ mod tests {
         let (header, pack) = gzip_setup_pack(layer);
         let verified = verify_setup_contents(&mut Cursor::new(&pack), &header).unwrap();
         let generation = tempfile::tempdir().unwrap();
+        assert!(matches!(
+            verify_completed_setup_generation(generation.path(), header.root_generation),
+            Err(SetupApplyError::GenerationIncomplete)
+        ));
 
         assert_eq!(
             apply_setup_layers(
@@ -1024,6 +1051,7 @@ mod tests {
             fs::read(generation.path().join("rootfs.complete")).unwrap(),
             completion_bytes(header.root_generation)
         );
+        verify_completed_setup_generation(generation.path(), header.root_generation).unwrap();
         assert_eq!(
             apply_setup_layers(
                 &mut Cursor::new(&pack),
@@ -1061,6 +1089,10 @@ mod tests {
         )
         .unwrap();
         fs::write(generation.path().join("rootfs.complete"), b"wrong").unwrap();
+        assert!(matches!(
+            verify_completed_setup_generation(generation.path(), header.root_generation),
+            Err(SetupApplyError::CompletionMismatch)
+        ));
         assert!(matches!(
             apply_setup_layers(
                 &mut Cursor::new(&pack),
