@@ -77,7 +77,7 @@ case "${FAKE_SHELLCHECK_MODE:-baseline}" in
         findings(2; "scripts/ci/select/select-verification.sh"; 2222) +
         findings(2; "scripts/runtime/dev/smoke-dev-commodity.sh"; 2034) +
         findings(9; "scripts/runtime/tests/test-smoke-dev-commodity.sh"; 1090) +
-        findings(14; "scripts/runtime/tests/test-smoke-dev-commodity.sh"; 2034)
+        findings(12; "scripts/runtime/tests/test-smoke-dev-commodity.sh"; 2034)
       )}
     '
     exit 1

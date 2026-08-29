@@ -7,4 +7,4 @@ $'scripts/ci/select/select-verification.sh\tSC2221\t2\tactive-resize-selector-ow
 $'scripts/ci/select/select-verification.sh\tSC2222\t2\tactive-resize-selector-owner\n'\
 $'scripts/runtime/dev/smoke-dev-commodity.sh\tSC2034\t2\tactive-runtime-artifact-owner\n'\
 $'scripts/runtime/tests/test-smoke-dev-commodity.sh\tSC1090\t9\tintentional-dynamic-source-fixtures\n'\
-$'scripts/runtime/tests/test-smoke-dev-commodity.sh\tSC2034\t14\tstate-consumed-by-sourced-fixtures'
+$'scripts/runtime/tests/test-smoke-dev-commodity.sh\tSC2034\t12\tstate-consumed-by-sourced-fixtures'

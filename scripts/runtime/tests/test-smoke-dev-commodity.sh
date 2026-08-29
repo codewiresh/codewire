@@ -106,6 +106,111 @@ assert_static_contract() {
   awk '/^env_is_running\(\)/,/^}/' "$SMOKE" \
     | rg -F 'fail_if_gateway_crashloop' >/dev/null || \
     fail "environment wait no longer classifies gateway CrashLoopBackOff"
+  rg -F 'classify_coco_rest_isolation_result' "$SMOKE" >/dev/null || \
+    fail "confidential REST-isolation smoke no longer preserves a classified result"
+  if rg -F 'coco-rest-disabled-ok' "$SMOKE" >/dev/null; then
+    fail "confidential REST-isolation smoke still discards cw run evidence through a pipe"
+  fi
+  rg -F '"http://127.0.0.1:8006/cdh/resource/\$resource_path" 2>/dev/null' \
+    "$SMOKE" >/dev/null || \
+    fail "confidential REST-isolation probe can interleave curl diagnostics with its marker"
+}
+
+run_coco_rest_isolation_classifier_case() {
+  local name="$1"
+  local command_exit="$2"
+  local stdout_content="$3"
+  local stderr_content="$4"
+  local expected_status="$5"
+  local expected_curl_exit="$6"
+  local expected_evidence_source="$7"
+  local case_dir="$TEST_TMP/coco-rest-isolation-$name"
+
+  mkdir -p "$case_dir"
+  (
+    set --
+    # shellcheck disable=SC1090 # Intentional dynamic source fixture.
+    source <(sed '$d' "$SMOKE")
+    TMPDIR_SMOKE="$case_dir/runtime"
+    SMOKE_ARTIFACT_DIR="$case_dir/artifact"
+    mkdir -p "$TMPDIR_SMOKE" "$SMOKE_ARTIFACT_DIR"
+    chmod 0700 "$TMPDIR_SMOKE" "$SMOKE_ARTIFACT_DIR"
+
+    local_stdout="$TMPDIR_SMOKE/coco-rest-isolation.stdout"
+    local_stderr="$TMPDIR_SMOKE/coco-rest-isolation.stderr"
+    printf '%s' "$stdout_content" >"$local_stdout"
+    printf '%s' "$stderr_content" >"$local_stderr"
+    chmod 0600 "$local_stdout" "$local_stderr"
+
+    classify_coco_rest_isolation_result \
+      "$command_exit" "$local_stdout" "$local_stderr"
+    [[ "$COCO_REST_ISOLATION_STATUS" == "$expected_status" ]] || \
+      fail "$name classified as $COCO_REST_ISOLATION_STATUS, expected $expected_status"
+    [[ "$COCO_REST_ISOLATION_CURL_EXIT" == "$expected_curl_exit" ]] || \
+      fail "$name curl exit was ${COCO_REST_ISOLATION_CURL_EXIT:-null}, expected ${expected_curl_exit:-null}"
+    [[ "$COCO_REST_ISOLATION_EVIDENCE_SOURCE" == "$expected_evidence_source" ]] || \
+      fail "$name evidence source was $COCO_REST_ISOLATION_EVIDENCE_SOURCE, expected $expected_evidence_source"
+
+    record_coco_rest_isolation_receipt "$command_exit"
+    [[ "$(stat -c '%a' "$COCO_REST_ISOLATION_RECEIPT")" == "600" ]] || \
+      fail "$name receipt is not mode 0600"
+    jq -e \
+      --arg status "$expected_status" \
+      --argjson command_exit "$command_exit" \
+      --arg curl_exit "$expected_curl_exit" \
+      --arg evidence_source "$expected_evidence_source" '
+        .schema == "codewire.coco-rest-isolation/v1"
+        and .status == $status
+        and .commandExit == $command_exit
+        and .curlExit == (if $curl_exit == "" then null else ($curl_exit | tonumber) end)
+        and .evidenceSource == $evidence_source
+        and .rawOutputCapturedPrivately == true
+      ' "$COCO_REST_ISOLATION_RECEIPT" >/dev/null || \
+      fail "$name structural receipt is incomplete"
+  )
+}
+
+run_coco_rest_isolation_classifier_cases() {
+  run_coco_rest_isolation_classifier_case \
+    passed 0 \
+    $'coco_rest_isolation_v1 status=passed curl_exit=7\n' \
+    $'Launched session test\n' \
+    passed 7 guest_marker
+  run_coco_rest_isolation_classifier_case \
+    listener-present 1 \
+    $'coco_rest_isolation_v1 status=listener_present curl_exit=0\n' \
+    $'Error: session exited with code 24\n' \
+    listener_present 0 guest_marker
+  run_coco_rest_isolation_classifier_case \
+    unexpected-transport 1 \
+    $'coco_rest_isolation_v1 status=inconclusive_transport curl_exit=28\n' \
+    $'Error: session exited with code 25\n' \
+    inconclusive_transport 28 guest_marker
+  run_coco_rest_isolation_classifier_case \
+    listener-terminal-status 1 '' \
+    $'Error: session exited with code 24\n' \
+    listener_present 0 cli_terminal_status
+  run_coco_rest_isolation_classifier_case \
+    inconclusive-terminal-status 1 '' \
+    $'Error: session exited with code 25\n' \
+    inconclusive_transport '' cli_terminal_status
+  run_coco_rest_isolation_classifier_case \
+    output-missing 0 '' \
+    $'Launched session test\n' \
+    output_missing '' none
+  run_coco_rest_isolation_classifier_case \
+    output-malformed 0 \
+    $'curl diagnostic interleaved with structural output\n' \
+    $'Launched session test\n' \
+    output_malformed '' none
+  run_coco_rest_isolation_classifier_case \
+    command-failed 1 '' \
+    $'AttachSession transport interrupted\n' \
+    command_failed '' none
+  run_coco_rest_isolation_classifier_case \
+    duplicate-marker 0 \
+    $'coco_rest_isolation_v1 status=passed curl_exit=7\ncoco_rest_isolation_v1 status=passed curl_exit=7\n' \
+    '' command_failed '' none
 }
 
 run_gateway_crashloop_fail_fast_case() {
@@ -949,6 +1054,7 @@ run_admin_oauth_contract_cases() {
 }
 
 assert_static_contract
+run_coco_rest_isolation_classifier_cases
 run_gateway_crashloop_fail_fast_case
 run_application_only_boundary_case
 run_missing_server_namespace_case

@@ -95,6 +95,10 @@ SMOKE_PACKET_CAPTURE_ERROR=""
 SMOKE_PACKET_CAPTURE_SUMMARY=""
 SMOKE_PACKET_CAPTURE_STATUS=""
 SMOKE_PACKET_CAPTURE_UNAVAILABLE=0
+COCO_REST_ISOLATION_STATUS=""
+COCO_REST_ISOLATION_CURL_EXIT=""
+COCO_REST_ISOLATION_EVIDENCE_SOURCE=""
+COCO_REST_ISOLATION_RECEIPT=""
 declare -a SMOKE_ONLY_PHASES=()
 
 usage() {
@@ -1905,6 +1909,91 @@ run_cw_session_script() {
     run --no-tty "$ENV_ID" -- sh -lc "$script"
 }
 
+classify_coco_rest_isolation_result() {
+  local command_exit="$1"
+  local stdout_file="$2"
+  local stderr_file="$3"
+  local marker marker_count
+
+  COCO_REST_ISOLATION_STATUS="command_failed"
+  COCO_REST_ISOLATION_CURL_EXIT=""
+  COCO_REST_ISOLATION_EVIDENCE_SOURCE="none"
+
+  marker_count="$(grep -Ec \
+    '^coco_rest_isolation_v1 status=(passed|listener_present|inconclusive_transport) curl_exit=[0-9]+$' \
+    "$stdout_file" || true)"
+  if [[ "$marker_count" == "1" ]]; then
+    marker="$(grep -E \
+      '^coco_rest_isolation_v1 status=(passed|listener_present|inconclusive_transport) curl_exit=[0-9]+$' \
+      "$stdout_file")"
+    if [[ "$marker" =~ ^coco_rest_isolation_v1\ status=(passed|listener_present|inconclusive_transport)\ curl_exit=([0-9]+)$ ]]; then
+      COCO_REST_ISOLATION_STATUS="${BASH_REMATCH[1]}"
+      COCO_REST_ISOLATION_CURL_EXIT="${BASH_REMATCH[2]}"
+      COCO_REST_ISOLATION_EVIDENCE_SOURCE="guest_marker"
+      case "$COCO_REST_ISOLATION_STATUS:$COCO_REST_ISOLATION_CURL_EXIT:$command_exit" in
+        passed:7:0) return 0 ;;
+        listener_present:0:*)
+          [[ "$command_exit" != "0" ]] && return 0
+          ;;
+        inconclusive_transport:*:*)
+          [[ "$COCO_REST_ISOLATION_CURL_EXIT" != "0" \
+            && "$COCO_REST_ISOLATION_CURL_EXIT" != "7" \
+            && "$command_exit" != "0" ]] && return 0
+          ;;
+      esac
+      COCO_REST_ISOLATION_STATUS="command_failed"
+      return 0
+    fi
+  elif [[ "$marker_count" != "0" ]]; then
+    return 0
+  fi
+
+  if [[ "$command_exit" != "0" ]] \
+      && grep -Fq 'session exited with code 24' "$stderr_file"; then
+    COCO_REST_ISOLATION_STATUS="listener_present"
+    COCO_REST_ISOLATION_CURL_EXIT="0"
+    COCO_REST_ISOLATION_EVIDENCE_SOURCE="cli_terminal_status"
+  elif [[ "$command_exit" != "0" ]] \
+      && grep -Fq 'session exited with code 25' "$stderr_file"; then
+    COCO_REST_ISOLATION_STATUS="inconclusive_transport"
+    COCO_REST_ISOLATION_EVIDENCE_SOURCE="cli_terminal_status"
+  elif [[ "$command_exit" == "0" ]]; then
+    if [[ -s "$stdout_file" ]]; then
+      COCO_REST_ISOLATION_STATUS="output_malformed"
+    else
+      COCO_REST_ISOLATION_STATUS="output_missing"
+    fi
+  fi
+}
+
+record_coco_rest_isolation_receipt() {
+  local command_exit="$1"
+  local receipt="$TMPDIR_SMOKE/coco-rest-isolation.json"
+
+  jq -n \
+    --arg status "$COCO_REST_ISOLATION_STATUS" \
+    --argjson command_exit "$command_exit" \
+    --arg curl_exit "$COCO_REST_ISOLATION_CURL_EXIT" \
+    --arg evidence_source "$COCO_REST_ISOLATION_EVIDENCE_SOURCE" \
+    '{
+      schema: "codewire.coco-rest-isolation/v1",
+      status: $status,
+      commandExit: $command_exit,
+      curlExit: (if $curl_exit == "" then null else ($curl_exit | tonumber) end),
+      evidenceSource: $evidence_source,
+      rawOutputCapturedPrivately: true
+    }' >"$receipt"
+  chmod 0600 "$receipt"
+  COCO_REST_ISOLATION_RECEIPT="$receipt"
+
+  if [[ -n "$SMOKE_ARTIFACT_DIR" ]]; then
+    mkdir -p "$SMOKE_ARTIFACT_DIR"
+    cp "$receipt" "$SMOKE_ARTIFACT_DIR/coco-rest-isolation.json"
+    chmod 0600 "$SMOKE_ARTIFACT_DIR/coco-rest-isolation.json"
+    COCO_REST_ISOLATION_RECEIPT="$SMOKE_ARTIFACT_DIR/coco-rest-isolation.json"
+  fi
+}
+
 wait_for_cw_run() {
   local deadline out last
   out="$TMPDIR_SMOKE/cw-run-ready.out"
@@ -1993,7 +2082,7 @@ assert_coco_guest_test_resource() {
   [[ -n "$EXPECTED_KATA_COCO_TEST_RESOURCE_URI" ]] || return 0
 
   if [[ "$EXPECTED_RUNTIME_CLASS" == "confidential" ]]; then
-    local script
+    local script stdout_file stderr_file command_exit
     script="$(cat <<SCRIPT
 set -eu
 uri=$(shell_quote "$EXPECTED_KATA_COCO_TEST_RESOURCE_URI")
@@ -2006,21 +2095,66 @@ command -v curl >/dev/null 2>&1 || {
   exit 1
 }
 set +e
-curl --max-time 3 -sS -o /dev/null "http://127.0.0.1:8006/cdh/resource/\$resource_path"
+# The durable session stream combines guest stdout and stderr. Suppress curl's
+# redundant diagnostic so it cannot interleave with the structural result; the
+# exact curl exit code below remains the decision-bearing evidence.
+curl --max-time 3 -sS -o /dev/null \
+  "http://127.0.0.1:8006/cdh/resource/\$resource_path" 2>/dev/null
 status=\$?
 set -e
-[ "\$status" -eq 7 ] || {
-  echo "guest CDH REST listener is reachable or failed ambiguously: \$status" >&2
-  exit 1
-}
-printf 'coco-rest-disabled-ok\\n'
+case "\$status" in
+  7)
+    printf 'coco_rest_isolation_v1 status=passed curl_exit=7\\n'
+    ;;
+  0)
+    printf 'coco_rest_isolation_v1 status=listener_present curl_exit=0\\n'
+    exit 24
+    ;;
+  *)
+    printf 'coco_rest_isolation_v1 status=inconclusive_transport curl_exit=%s\\n' "\$status"
+    exit 25
+    ;;
+esac
 SCRIPT
 )"
 
+    stdout_file="$TMPDIR_SMOKE/coco-rest-isolation.stdout"
+    stderr_file="$TMPDIR_SMOKE/coco-rest-isolation.stderr"
+    : >"$stdout_file"
+    : >"$stderr_file"
+    chmod 0600 "$stdout_file" "$stderr_file"
+
     log "asserting the confidential workload cannot reach a guest CDH REST listener"
-    run_cw_session_script "$script" | grep -qx 'coco-rest-disabled-ok' || \
-      die "confidential guest CDH REST isolation assertion failed"
-    return 0
+    if run_cw_session_script "$script" >"$stdout_file" 2>"$stderr_file"; then
+      command_exit=0
+    else
+      command_exit=$?
+    fi
+    classify_coco_rest_isolation_result \
+      "$command_exit" "$stdout_file" "$stderr_file"
+    record_coco_rest_isolation_receipt "$command_exit"
+
+    case "$COCO_REST_ISOLATION_STATUS" in
+      passed)
+        log "confidential guest CDH REST listener is absent (curl_exit=7)"
+        return 0
+        ;;
+      listener_present)
+        die "confidential guest CDH REST listener is reachable (curl_exit=0; receipt=$COCO_REST_ISOLATION_RECEIPT)"
+        ;;
+      inconclusive_transport)
+        die "confidential guest CDH REST isolation probe was inconclusive (curl_exit=${COCO_REST_ISOLATION_CURL_EXIT:-unknown}; receipt=$COCO_REST_ISOLATION_RECEIPT)"
+        ;;
+      output_missing)
+        die "cw run returned success without the guest REST-isolation marker (attachment output gap; receipt=$COCO_REST_ISOLATION_RECEIPT)"
+        ;;
+      output_malformed)
+        die "cw run returned non-empty output without one valid guest REST-isolation marker (malformed or interleaved output; receipt=$COCO_REST_ISOLATION_RECEIPT)"
+        ;;
+      *)
+        die "confidential guest CDH REST isolation probe failed before classification (command_exit=$command_exit; receipt=$COCO_REST_ISOLATION_RECEIPT)"
+        ;;
+    esac
   fi
 
   local expected_content="$EXPECTED_KATA_COCO_TEST_RESOURCE_CONTENT"
