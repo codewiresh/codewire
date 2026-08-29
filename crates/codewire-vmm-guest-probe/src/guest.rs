@@ -25,6 +25,7 @@ use tokio_vsock::{
 use zeroize::Zeroizing;
 
 use crate::newc::BASIC_BUSYBOX_APPLETS;
+use crate::setup_apply::apply_setup_layers;
 use crate::setup_verify::verify_setup_contents;
 use crate::{
     ROOT_DISK_SERIAL, SEED_DISK_SERIAL, SEED_LEN, SETUP_DISK_SERIAL, SETUP_HEADER_LEN,
@@ -165,10 +166,13 @@ pub fn run_init() -> Result<()> {
         let mut setup = open_setup_device(&setup_device)?;
         let header = verify_setup_header(&mut setup, binding)?;
         record_boot_stage("setup-header-ready")?;
-        let _contents = verify_setup_contents(&mut setup, &header)
+        let contents = verify_setup_contents(&mut setup, &header)
             .context("verify every guest setup object and layer digest")?;
         record_boot_stage("setup-content-ready")?;
-        bail!("verified OCI setup requires guest layer application support");
+        apply_setup_layers(&mut setup, &header, &contents, Path::new(ROOT_MOUNT_PATH))
+            .context("apply every admitted OCI layer into the staging root")?;
+        record_boot_stage("root-layers-ready")?;
+        bail!("applied OCI setup requires image-derived workspace execution support");
     }
     let poweroff = prepare_container_control(&seed)?;
     record_boot_stage("container-control-ready")?;

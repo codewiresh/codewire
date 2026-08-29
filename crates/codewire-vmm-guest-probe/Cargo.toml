@@ -26,8 +26,10 @@ anyhow = { workspace = true }
 codewire-daemon = { workspace = true }
 flate2 = { workspace = true }
 libc = "0.2"
+rustix = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+tar = { workspace = true }
 tokio = { workspace = true }
 tokio-stream = { workspace = true }
 tokio-vsock = { workspace = true, features = ["tonic014"] }

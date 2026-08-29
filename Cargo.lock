@@ -1698,9 +1698,11 @@ dependencies = [
  "codewire-daemon",
  "flate2",
  "libc",
+ "rustix",
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "tar",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -7018,6 +7020,16 @@ dependencies = [
  "objc2-core-foundation",
  "objc2-io-kit",
  "windows",
+]
+
+[[package]]
+name = "tar"
+version = "0.4.46"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3f6221d9a6003c78398e3b239969f352578258df48c8eb051caadae0015bc840"
+dependencies = [
+ "filetime",
+ "libc",
 ]
 
 [[package]]

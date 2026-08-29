@@ -8,6 +8,10 @@ mod setup;
 #[cfg(target_os = "linux")]
 pub mod guest;
 #[cfg(target_os = "linux")]
+mod setup_apply;
+#[cfg(target_os = "linux")]
+mod setup_archive;
+#[cfg(target_os = "linux")]
 mod setup_verify;
 
 pub use newc::{

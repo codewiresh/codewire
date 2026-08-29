@@ -13,6 +13,7 @@ use flate2::read::MultiGzDecoder;
 use sha2::{Digest as _, Sha256};
 use thiserror::Error;
 
+use crate::setup_archive::{ArchiveError, TarImageBudget, VerifiedLayerPlan, scan_tar};
 use crate::{LayerEncoding, SETUP_HEADER_LEN, SetupHeader, SetupLayer, SetupObject, Sha256Value};
 
 const BUFFER_BYTES: usize = 64 * 1024;
@@ -25,6 +26,7 @@ pub(crate) struct VerifiedSetupContents {
     pub config_bytes: u64,
     pub layer_uncompressed_bytes: Vec<u64>,
     pub total_uncompressed_bytes: u64,
+    pub layer_plans: Vec<VerifiedLayerPlan>,
 }
 
 impl fmt::Debug for VerifiedSetupContents {
@@ -35,6 +37,7 @@ impl fmt::Debug for VerifiedSetupContents {
             .field("config_bytes", &self.config_bytes)
             .field("layer_uncompressed_bytes", &self.layer_uncompressed_bytes)
             .field("total_uncompressed_bytes", &self.total_uncompressed_bytes)
+            .field("layer_plans", &self.layer_plans)
             .finish()
     }
 }
@@ -82,18 +85,27 @@ fn verify_setup_contents_with_limits(
     previous_end = object_end(header.config)?;
 
     let mut layer_uncompressed_bytes = Vec::with_capacity(header.layers.len());
+    let mut layer_plans = Vec::with_capacity(header.layers.len());
+    let mut tar_budget = TarImageBudget::default();
     let mut total_uncompressed_bytes = 0_u64;
     for layer in &header.layers {
         verify_zero_range(input, previous_end, layer.object.offset)?;
         // This first pass is deliberately independent of decompression. A
         // decoder cannot redefine which exact compressed bytes were admitted.
         verify_object(input, layer.object)?;
-        let layer_bytes = verify_layer_diff_id(input, layer, total_uncompressed_bytes, limits)?;
+        let (layer_bytes, layer_plan) = verify_layer_diff_id(
+            input,
+            layer,
+            total_uncompressed_bytes,
+            limits,
+            &mut tar_budget,
+        )?;
         total_uncompressed_bytes = total_uncompressed_bytes
             .checked_add(layer_bytes)
             .filter(|total| *total <= limits.image_uncompressed_bytes)
             .ok_or(SetupContentError::ImageExpansionLimit)?;
         layer_uncompressed_bytes.push(layer_bytes);
+        layer_plans.push(layer_plan);
         previous_end = object_end(layer.object)?;
     }
     verify_zero_range(input, previous_end, header.total_bytes)?;
@@ -103,6 +115,7 @@ fn verify_setup_contents_with_limits(
         config_bytes: header.config.size,
         layer_uncompressed_bytes,
         total_uncompressed_bytes,
+        layer_plans,
     })
 }
 
@@ -129,7 +142,8 @@ fn verify_layer_diff_id(
     layer: &SetupLayer,
     current_total: u64,
     limits: VerificationLimits,
-) -> Result<u64, SetupContentError> {
+    tar_budget: &mut TarImageBudget,
+) -> Result<(u64, VerifiedLayerPlan), SetupContentError> {
     let remaining_image = limits
         .image_uncompressed_bytes
         .checked_sub(current_total)
@@ -144,33 +158,31 @@ fn verify_layer_diff_id(
         .seek(SeekFrom::Start(layer.object.offset))
         .map_err(SetupContentError::Read)?;
     let mut range = input.take(layer.object.size);
-    let outcome = match layer.encoding {
-        LayerEncoding::Tar => {
-            hash_bounded(&mut range, output_limit).map_err(SetupContentError::Read)?
-        }
+    let scanned = match layer.encoding {
+        LayerEncoding::Tar => scan_tar(&mut range, output_limit, tar_budget),
         LayerEncoding::Gzip => {
             let mut decoder = MultiGzDecoder::new(range);
-            let outcome =
-                hash_bounded(&mut decoder, output_limit).map_err(SetupContentError::InvalidGzip)?;
+            let outcome = scan_tar(&mut decoder, output_limit, tar_budget);
             range = decoder.into_inner();
             outcome
         }
         LayerEncoding::Zstd => return Err(SetupContentError::UnsupportedLayerEncoding),
     };
-    let (actual, output_bytes) = match outcome {
-        BoundedHash::Complete { digest, bytes } => (digest, bytes),
-        BoundedHash::LimitExceeded if image_is_tighter => {
+    let scanned = match scanned {
+        Ok(scanned) => scanned,
+        Err(ArchiveError::ExpansionLimit) if image_is_tighter => {
             return Err(SetupContentError::ImageExpansionLimit);
         }
-        BoundedHash::LimitExceeded => return Err(SetupContentError::LayerExpansionLimit),
+        Err(ArchiveError::ExpansionLimit) => return Err(SetupContentError::LayerExpansionLimit),
+        Err(error) => return Err(SetupContentError::Archive(error)),
     };
     if range.limit() != 0 {
         return Err(SetupContentError::TruncatedObject);
     }
-    if actual != layer.diff_id {
+    if scanned.digest != layer.diff_id {
         return Err(SetupContentError::LayerDiffIdMismatch);
     }
-    Ok(output_bytes)
+    Ok((scanned.bytes, scanned.plan))
 }
 
 fn hash_exact(input: &mut impl Read, bytes: u64) -> Result<Sha256Value, SetupContentError> {
@@ -190,33 +202,6 @@ fn hash_exact(input: &mut impl Read, bytes: u64) -> Result<Sha256Value, SetupCon
         remaining -= read as u64;
     }
     Ok(Sha256Value::from_bytes(digest.finalize().into()))
-}
-
-enum BoundedHash {
-    Complete { digest: Sha256Value, bytes: u64 },
-    LimitExceeded,
-}
-
-fn hash_bounded(input: &mut impl Read, maximum: u64) -> io::Result<BoundedHash> {
-    let mut bytes = 0_u64;
-    let mut digest = Sha256::new();
-    let mut buffer = [0_u8; BUFFER_BYTES];
-    loop {
-        let read = input.read(&mut buffer)?;
-        if read == 0 {
-            return Ok(BoundedHash::Complete {
-                digest: Sha256Value::from_bytes(digest.finalize().into()),
-                bytes,
-            });
-        }
-        bytes = bytes
-            .checked_add(read as u64)
-            .ok_or_else(|| io::Error::other("setup expansion length overflow"))?;
-        if bytes > maximum {
-            return Ok(BoundedHash::LimitExceeded);
-        }
-        digest.update(&buffer[..read]);
-    }
 }
 
 fn verify_zero_range(
@@ -271,10 +256,10 @@ pub(crate) enum SetupContentError {
     ImageExpansionLimit,
     #[error("setup layer encoding is not supported by this guest ABI")]
     UnsupportedLayerEncoding,
+    #[error(transparent)]
+    Archive(ArchiveError),
     #[error("read setup object: {0}")]
     Read(io::Error),
-    #[error("decode gzip setup layer: {0}")]
-    InvalidGzip(io::Error),
 }
 
 #[cfg(test)]
@@ -297,6 +282,22 @@ mod tests {
         let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
         encoder.write_all(bytes).unwrap();
         encoder.finish().unwrap()
+    }
+
+    fn tar_file(path: &str, contents: &[u8]) -> Vec<u8> {
+        let mut builder = tar::Builder::new(Vec::new());
+        let mut header = tar::Header::new_ustar();
+        header.set_path(path).unwrap();
+        header.set_entry_type(tar::EntryType::Regular);
+        header.set_mode(0o644);
+        header.set_uid(0);
+        header.set_gid(0);
+        header.set_mtime(1);
+        header.set_size(contents.len() as u64);
+        header.set_cksum();
+        builder.append(&header, contents).unwrap();
+        builder.finish().unwrap();
+        builder.into_inner().unwrap()
     }
 
     fn fixture(layers: Vec<LayerFixture>) -> (SetupHeader, Vec<u8>) {
@@ -348,10 +349,11 @@ mod tests {
 
     #[test]
     fn verifies_exact_objects_padding_and_independent_diff_ids() {
-        let tar = b"plain uncompressed tar bytes".to_vec();
-        let gzip_contents = b"gzip uncompressed tar bytes".to_vec();
-        let mut concatenated_gzip = gzip(b"gzip uncompressed ");
-        concatenated_gzip.extend_from_slice(&gzip(b"tar bytes"));
+        let tar = tar_file("plain", b"plain uncompressed tar bytes");
+        let gzip_contents = tar_file("gzip", b"gzip uncompressed tar bytes");
+        let split = gzip_contents.len() / 2;
+        let mut concatenated_gzip = gzip(&gzip_contents[..split]);
+        concatenated_gzip.extend_from_slice(&gzip(&gzip_contents[split..]));
         let (header, pack) = fixture(vec![
             LayerFixture {
                 encoding: LayerEncoding::Tar,
@@ -373,12 +375,14 @@ mod tests {
             summary.total_uncompressed_bytes,
             (tar.len() + gzip_contents.len()) as u64
         );
+        assert_eq!(summary.layer_plans[0].entries(), 1);
+        assert_eq!(summary.layer_plans[1].entries(), 1);
         assert!(!format!("{summary:?}").contains("uncompressed tar bytes"));
     }
 
     #[test]
     fn rejects_object_diff_id_padding_and_device_corruption() {
-        let contents = b"verified layer".to_vec();
+        let contents = tar_file("verified", b"verified layer");
         let (header, pack) = fixture(vec![LayerFixture {
             encoding: LayerEncoding::Tar,
             compressed: contents.clone(),
@@ -426,17 +430,17 @@ mod tests {
 
     #[test]
     fn rejects_invalid_gzip_trailing_data_and_unsupported_zstd() {
-        let contents = b"gzip payload";
-        let mut trailing = gzip(contents);
+        let contents = tar_file("gzip", b"gzip payload");
+        let mut trailing = gzip(&contents);
         trailing.extend_from_slice(b"not another gzip member");
         let (header, pack) = fixture(vec![LayerFixture {
             encoding: LayerEncoding::Gzip,
             compressed: trailing,
-            diff_id: Sha256Value::calculate(contents),
+            diff_id: Sha256Value::calculate(&contents),
         }]);
         assert!(matches!(
             verify_setup_contents(&mut Cursor::new(pack), &header),
-            Err(SetupContentError::InvalidGzip(_))
+            Err(SetupContentError::Archive(ArchiveError::InvalidTar))
         ));
 
         let compressed = b"zstd-shaped but deliberately unsupported".to_vec();
@@ -453,7 +457,7 @@ mod tests {
 
     #[test]
     fn expansion_limits_fail_before_unbounded_output_is_consumed() {
-        let expanded = vec![0_u8; 2048];
+        let expanded = tar_file("expanded", &vec![0_u8; 2048]);
         let (header, pack) = fixture(vec![LayerFixture {
             encoding: LayerEncoding::Gzip,
             compressed: gzip(&expanded),
@@ -471,8 +475,8 @@ mod tests {
             Err(SetupContentError::LayerExpansionLimit)
         ));
 
-        let first = vec![1_u8; 700];
-        let second = vec![2_u8; 700];
+        let first = tar_file("first", &vec![1_u8; 700]);
+        let second = tar_file("second", &vec![2_u8; 700]);
         let (header, pack) = fixture(vec![
             LayerFixture {
                 encoding: LayerEncoding::Tar,
@@ -490,8 +494,8 @@ mod tests {
                 &mut Cursor::new(pack),
                 &header,
                 VerificationLimits {
-                    layer_uncompressed_bytes: 1024,
-                    image_uncompressed_bytes: 1024,
+                    layer_uncompressed_bytes: 16 * 1024,
+                    image_uncompressed_bytes: first.len() as u64 + second.len() as u64 / 2,
                 },
             ),
             Err(SetupContentError::ImageExpansionLimit)
