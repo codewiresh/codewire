@@ -58,7 +58,7 @@ impl EnvironmentSessionTarget {
                 .await
                 .map_err(anyhow::Error::from)?
                 .into_iter()
-                .map(local_environment_session_view)
+                .map(platform_environment_session_view)
                 .collect()),
             Self::Local { instance, .. } => Ok(local_environment_session_client(instance)
                 .await?
@@ -98,11 +98,7 @@ impl EnvironmentSessionTarget {
             Self::NativeLocal { name, .. } => {
                 let response = native_environment_session_client(name)
                     .await?
-                    .read_output(codewire_daemon::client::v1::ReadSessionOutputRequest {
-                        session_id: session_id.to_string(),
-                        offset,
-                        limit: 0,
-                    })
+                    .read_output(session_id, offset, 0)
                     .await?;
                 Ok(EnvironmentSessionOutput {
                     chunks: response
@@ -174,20 +170,18 @@ impl EnvironmentSessionTarget {
             Self::NativeLocal { name, .. } => {
                 let session = native_environment_session_client(name)
                     .await?
-                    .launch(codewire_daemon::client::v1::LaunchSessionRequest {
+                    .launch(codewire_client::LaunchSessionRequest {
                         command,
                         working_dir,
-                        env: env
-                            .into_iter()
-                            .map(|(key, value)| format!("{key}={value}"))
-                            .collect(),
+                        env: env.into_iter().collect(),
                         pty,
                         term,
-                        width: i32::from(columns),
-                        height: i32::from(rows),
+                        columns: u32::from(columns),
+                        rows: u32::from(rows),
+                        ..Default::default()
                     })
                     .await?;
-                Ok(local_environment_session_view(session))
+                Ok(platform_environment_session_view(session))
             }
             Self::Local { instance, .. } => {
                 let session = local_environment_session_client(instance)
@@ -240,7 +234,7 @@ impl EnvironmentSessionTarget {
     async fn get(&self, session_id: &str) -> anyhow::Result<EnvironmentSessionView> {
         match self {
             #[cfg(target_os = "linux")]
-            Self::NativeLocal { name, .. } => Ok(local_environment_session_view(
+            Self::NativeLocal { name, .. } => Ok(platform_environment_session_view(
                 native_environment_session_client(name)
                     .await?
                     .get(session_id)
@@ -279,7 +273,7 @@ impl EnvironmentSessionTarget {
     async fn restart(&self, session_id: &str) -> anyhow::Result<EnvironmentSessionView> {
         match self {
             #[cfg(target_os = "linux")]
-            Self::NativeLocal { name, .. } => Ok(local_environment_session_view(
+            Self::NativeLocal { name, .. } => Ok(platform_environment_session_view(
                 native_environment_session_client(name)
                     .await?
                     .restart(session_id)
@@ -770,10 +764,8 @@ async fn attach_environment_session(
             #[cfg(target_os = "linux")]
             EnvironmentSessionTarget::NativeLocal { name, .. } => {
                 let client = native_environment_session_client(name).await?;
-                let attachment = client
-                    .attach(session.session_id.clone(), output_offset)
-                    .await?;
-                attach_local_environment_session(attachment, session.pty, true).await?
+                let attachment = client.attach(&session.session_id, output_offset).await?;
+                attach_platform_environment_session(attachment, session.pty, true).await?
             }
             EnvironmentSessionTarget::Local { instance, .. } => {
                 let client = local_environment_session_client(instance).await?;
@@ -1308,10 +1300,8 @@ async fn follow_session_output(
             #[cfg(target_os = "linux")]
             EnvironmentSessionTarget::NativeLocal { name, .. } => {
                 let client = native_environment_session_client(name).await?;
-                attach_local_environment_session(
-                    client
-                        .attach(session.session_id.clone(), output_offset)
-                        .await?,
+                attach_platform_environment_session(
+                    client.attach(&session.session_id, output_offset).await?,
                     false,
                     raw_output,
                 )

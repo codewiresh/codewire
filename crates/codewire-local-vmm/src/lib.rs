@@ -30,6 +30,8 @@ pub mod oci;
 #[cfg(target_os = "linux")]
 mod orphan;
 #[cfg(target_os = "linux")]
+pub mod public_client;
+#[cfg(target_os = "linux")]
 pub mod runner_service;
 #[cfg(target_os = "linux")]
 pub mod setup_pack;

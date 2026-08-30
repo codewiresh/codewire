@@ -151,6 +151,15 @@ pub struct CodewireClient {
     mesh_invites: MeshInviteServiceClient<ReqwestConnectTransport>,
 }
 
+/// Unauthenticated public durable-session facade over a caller-owned
+/// transport. Local runtimes use this with an owner-verified Unix-socket HTTP/2
+/// connection; platform callers continue to use [`CodewireClient`] so bearer
+/// refresh and authorization remain platform-owned.
+#[derive(Clone)]
+pub struct PublicEnvironmentSessionClient<T> {
+    sessions: EnvironmentSessionServiceClient<T>,
+}
+
 pub struct RunSession {
     input: RunSessionInput,
     output: tokio::sync::mpsc::Receiver<Result<RunResponse, ClientError>>,
@@ -181,6 +190,97 @@ pub struct EnvironmentSessionAttachmentInput {
 }
 
 const DEFAULT_EXEC_TIMEOUT: Duration = Duration::from_secs(600);
+
+impl<T> PublicEnvironmentSessionClient<T>
+where
+    T: ClientTransport,
+    T::ResponseBody: Unpin,
+    <T::ResponseBody as connectrpc::http_body::Body>::Error: std::fmt::Display,
+{
+    pub fn new(transport: T, config: connectrpc::client::ClientConfig) -> Self {
+        Self {
+            sessions: EnvironmentSessionServiceClient::new(transport, config),
+        }
+    }
+
+    pub async fn launch_session(
+        &self,
+        request: LaunchSessionRequest,
+    ) -> Result<LaunchSessionResponse, ClientError> {
+        self.sessions
+            .launch_session(request)
+            .await
+            .map(|response| response.into_owned())
+            .map_err(ClientError::from)
+    }
+
+    pub async fn list_sessions(
+        &self,
+        request: ListSessionsRequest,
+    ) -> Result<ListSessionsResponse, ClientError> {
+        self.sessions
+            .list_sessions(request)
+            .await
+            .map(|response| response.into_owned())
+            .map_err(ClientError::from)
+    }
+
+    pub async fn get_session(
+        &self,
+        request: GetSessionRequest,
+    ) -> Result<GetSessionResponse, ClientError> {
+        self.sessions
+            .get_session(request)
+            .await
+            .map(|response| response.into_owned())
+            .map_err(ClientError::from)
+    }
+
+    pub async fn stop_session(
+        &self,
+        request: StopSessionRequest,
+    ) -> Result<StopSessionResponse, ClientError> {
+        self.sessions
+            .stop_session(request)
+            .await
+            .map(|response| response.into_owned())
+            .map_err(ClientError::from)
+    }
+
+    pub async fn restart_session(
+        &self,
+        request: RestartSessionRequest,
+    ) -> Result<RestartSessionResponse, ClientError> {
+        self.sessions
+            .restart_session(request)
+            .await
+            .map(|response| response.into_owned())
+            .map_err(ClientError::from)
+    }
+
+    pub async fn read_session_output(
+        &self,
+        request: ReadSessionOutputRequest,
+    ) -> Result<ReadSessionOutputResponse, ClientError> {
+        self.sessions
+            .read_session_output(request)
+            .await
+            .map(|response| response.into_owned())
+            .map_err(ClientError::from)
+    }
+
+    pub async fn attach_session(
+        &self,
+        open: AttachSessionOpen,
+    ) -> Result<EnvironmentSessionAttachment, ClientError> {
+        let stream = self
+            .sessions
+            .attach_session()
+            .await
+            .map_err(ClientError::from)?;
+        start_environment_session_attachment(stream, open).await
+    }
+}
 
 impl CodewireClient {
     pub fn new(
@@ -1075,36 +1175,12 @@ impl CodewireClient {
         &self,
         open: AttachSessionOpen,
     ) -> Result<EnvironmentSessionAttachment, ClientError> {
-        let mut stream = self
+        let stream = self
             .sessions
             .attach_session_with_options(self.auth_options().await?)
             .await
             .map_err(ClientError::from)?;
-        stream
-            .send(AttachSessionRequest {
-                input: Some(attach_session_request::Input::Open(Box::new(open))),
-                ..Default::default()
-            })
-            .await
-            .map_err(ClientError::from)?;
-
-        let (input_tx, input_rx) = tokio::sync::mpsc::channel(32);
-        let (output_tx, output_rx) = tokio::sync::mpsc::channel(32);
-        let (terminal_error_tx, terminal_error_rx) = tokio::sync::watch::channel(None);
-        let driver = tokio::spawn(attach_session_stream_driver(
-            stream,
-            input_rx,
-            output_tx,
-            terminal_error_tx,
-        ));
-        Ok(EnvironmentSessionAttachment {
-            input: EnvironmentSessionAttachmentInput {
-                input: input_tx,
-                terminal_error: terminal_error_rx,
-            },
-            output: output_rx,
-            driver,
-        })
+        start_environment_session_attachment(stream, open).await
     }
 
     pub async fn list_files(
@@ -1162,6 +1238,45 @@ impl CodewireClient {
             .await?
             .with_timeout(self.config.unary_timeout()))
     }
+}
+
+async fn start_environment_session_attachment<B>(
+    mut stream: connectrpc::client::BidiStream<
+        B,
+        AttachSessionRequest,
+        AttachSessionResponseView<'static>,
+    >,
+    open: AttachSessionOpen,
+) -> Result<EnvironmentSessionAttachment, ClientError>
+where
+    B: connectrpc::http_body::Body<Data = bytes::Bytes> + Send + Unpin + 'static,
+    B::Error: std::fmt::Display,
+{
+    stream
+        .send(AttachSessionRequest {
+            input: Some(attach_session_request::Input::Open(Box::new(open))),
+            ..Default::default()
+        })
+        .await
+        .map_err(ClientError::from)?;
+
+    let (input_tx, input_rx) = tokio::sync::mpsc::channel(32);
+    let (output_tx, output_rx) = tokio::sync::mpsc::channel(32);
+    let (terminal_error_tx, terminal_error_rx) = tokio::sync::watch::channel(None);
+    let driver = tokio::spawn(attach_session_stream_driver(
+        stream,
+        input_rx,
+        output_tx,
+        terminal_error_tx,
+    ));
+    Ok(EnvironmentSessionAttachment {
+        input: EnvironmentSessionAttachmentInput {
+            input: input_tx,
+            terminal_error: terminal_error_rx,
+        },
+        output: output_rx,
+        driver,
+    })
 }
 
 impl RunSession {
@@ -1314,16 +1429,19 @@ async fn run_stream_driver(
     }
 }
 
-async fn attach_session_stream_driver(
+async fn attach_session_stream_driver<B>(
     mut stream: connectrpc::client::BidiStream<
-        reqwest::Body,
+        B,
         AttachSessionRequest,
         AttachSessionResponseView<'static>,
     >,
     mut input: tokio::sync::mpsc::Receiver<AttachSessionRequest>,
     output: tokio::sync::mpsc::Sender<Result<AttachSessionResponse, ClientError>>,
     terminal_error: tokio::sync::watch::Sender<Option<ClientError>>,
-) {
+) where
+    B: connectrpc::http_body::Body<Data = bytes::Bytes> + Send + Unpin + 'static,
+    B::Error: std::fmt::Display,
+{
     let mut input_closed = false;
     loop {
         tokio::select! {

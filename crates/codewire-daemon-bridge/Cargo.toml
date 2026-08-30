@@ -1,0 +1,23 @@
+[package]
+name = "codewire-daemon-bridge"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license = "AGPL-3.0-only"
+description = "Host-side public Codewire adapters for the private workspace daemon protocol"
+
+[dependencies]
+async-trait = { workspace = true }
+buffa-types = { workspace = true }
+codewire-gateway-proto = { workspace = true }
+codewire-proto = { workspace = true }
+connectrpc = { workspace = true }
+futures = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+buffa = { workspace = true }
+bytes = { workspace = true }
+prost = { workspace = true }
+prost-types = { workspace = true }

@@ -16,14 +16,17 @@ tonic-prost = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 axum = { workspace = true }
+async-trait = { workspace = true }
 buffa = { workspace = true }
 buffa-types = { workspace = true }
 bytes = { workspace = true }
+codewire-client = { workspace = true }
 codewire-proto = { workspace = true }
 codewire-project = { workspace = true }
 codewire-daemon = { workspace = true }
+codewire-daemon-bridge = { workspace = true }
 codewire-vmm-guest-probe = { workspace = true }
-connectrpc = { workspace = true, features = ["axum"] }
+connectrpc = { workspace = true, features = ["axum", "client"] }
 futures = { workspace = true }
 http = { workspace = true }
 hyper-util = { workspace = true }
