@@ -1092,11 +1092,13 @@ async fn active_native_resize_sessions(
         .into_iter()
         .filter(|session| {
             !matches!(
-                codewire_daemon::client::v1::SessionLifecycleState::try_from(session.state),
-                Ok(codewire_daemon::client::v1::SessionLifecycleState::Stopped
-                    | codewire_daemon::client::v1::SessionLifecycleState::Exited
-                    | codewire_daemon::client::v1::SessionLifecycleState::Failed
-                    | codewire_daemon::client::v1::SessionLifecycleState::Interrupted)
+                session.state.as_known(),
+                Some(
+                    codewire_client::EnvironmentSessionState::Stopped
+                        | codewire_client::EnvironmentSessionState::Exited
+                        | codewire_client::EnvironmentSessionState::Failed
+                        | codewire_client::EnvironmentSessionState::Interrupted
+                )
             )
         })
         .map(|session| session.session_id)

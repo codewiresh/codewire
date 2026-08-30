@@ -243,23 +243,10 @@ pub(crate) async fn delete_native_environment(
 
 pub(crate) async fn native_environment_session_client(
     name: &str,
-) -> anyhow::Result<codewire_daemon::client::SessionClient> {
-    let access = native_client()
-        .await?
-        .daemon_access(name)
-        .await
-        .map_err(native_status)?;
-    if access.generation_capability.is_empty() || access.guest_port == 0 {
-        anyhow::bail!("native environment returned invalid daemon access");
-    }
-    let socket = PathBuf::from(access.hybrid_socket);
-    if !socket.is_absolute() {
-        anyhow::bail!("native environment returned invalid daemon access");
-    }
-    codewire_local_vmm::hybrid_vsock::connect_daemon(
-        &socket,
-        access.guest_port,
-        access.generation_capability,
+) -> anyhow::Result<codewire_local_vmm::public_client::NativePublicSessionClient> {
+    codewire_local_vmm::public_client::NativePublicSessionClient::connect_or_start(
+        &native_runtime_config()?,
+        name,
     )
     .await
     .map_err(anyhow::Error::from)

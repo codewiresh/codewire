@@ -7,10 +7,18 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use axum::extract::Request as AxumRequest;
 use axum::middleware::Next;
 use axum::response::{IntoResponse as _, Response as AxumResponse};
 use buffa_types::{Duration as ProtoDuration, Timestamp};
+use codewire_daemon::client::{
+    SessionAttachment as PrivateSessionAttachment, SessionClient, SessionClientError,
+    v1 as daemon_v1,
+};
+use codewire_daemon_bridge::session::{
+    EnvironmentSessionAttachment as BridgeAttachment, EnvironmentSessionBackend, FieldViolation,
+};
 use codewire_proto::codewire::v1 as proto;
 use connectrpc::{RequestContext, ServiceRequest, ServiceResult, ServiceStream};
 use http::{HeaderValue, Method, StatusCode as HttpStatus, header};
@@ -20,15 +28,23 @@ use super::*;
 
 const PRIVATE_SUPERVISOR_ROUTE: &str = "/codewire.local.v1.LocalSupervisorService/{*method}";
 const PUBLIC_ENVIRONMENT_ROUTE: &str = "/codewire.v1.EnvironmentService/{*method}";
+const PUBLIC_SESSION_ROUTE: &str = "/codewire.v1.EnvironmentSessionService/{*method}";
 const ACCEPT_POST: &str =
     "application/connect+json, application/connect+proto, application/json, application/proto";
 const GIB: u64 = 1024 * 1024 * 1024;
 
 pub(super) fn supervisor_router(supervisor: SupervisorRpc) -> axum::Router {
-    let public = environment_router(supervisor.clone());
-    let public = connectrpc::ConnectRpcService::new(public);
-    let public = axum::Router::new()
-        .route_service(PUBLIC_ENVIRONMENT_ROUTE, public)
+    let environment = connectrpc::ConnectRpcService::new(environment_router(supervisor.clone()));
+    let environment = axum::Router::new()
+        .route_service(PUBLIC_ENVIRONMENT_ROUTE, environment)
+        .layer(axum::middleware::from_fn(enforce_connect_only));
+    let sessions = connectrpc::ConnectRpcService::new(codewire_daemon_bridge::session::router(
+        LocalSessionBackend {
+            supervisor: supervisor.clone(),
+        },
+    ));
+    let sessions = axum::Router::new()
+        .route_service(PUBLIC_SESSION_ROUTE, sessions)
         .layer(axum::middleware::from_fn(enforce_connect_only));
 
     axum::Router::new()
@@ -36,7 +52,8 @@ pub(super) fn supervisor_router(supervisor: SupervisorRpc) -> axum::Router {
             PRIVATE_SUPERVISOR_ROUTE,
             LocalSupervisorServiceServer::new(supervisor),
         )
-        .merge(public)
+        .merge(environment)
+        .merge(sessions)
 }
 
 fn environment_router(supervisor: SupervisorRpc) -> connectrpc::Router {
@@ -485,6 +502,290 @@ impl SupervisorRpc {
                 connectrpc::ConnectError::not_found("local environment was not found")
             })?;
         Ok((namespace, environment))
+    }
+
+    async fn public_daemon_client(
+        &self,
+        org_id: &str,
+        environment_id: &str,
+    ) -> Result<SessionClient, connectrpc::ConnectError> {
+        let environment_id = parse_coordinate(environment_id, "environment_id")?;
+        let access = {
+            let mut core = self.core.lock().await;
+            let namespace = core.store.namespace_id().map_err(|_| local_internal())?;
+            require_namespace(namespace, org_id, false)?;
+            let name = core
+                .state
+                .environments
+                .values()
+                .find(|environment| environment.id == environment_id)
+                .map(|environment| environment.name.clone())
+                .ok_or_else(|| {
+                    connectrpc::ConnectError::not_found("local environment was not found")
+                })?;
+            core.replay_pending_operations()
+                .await
+                .map_err(Status::from)
+                .map_err(local_status)?;
+            if core
+                .environment(&name)
+                .map_err(Status::from)
+                .map_err(local_status)?
+                .id
+                != environment_id
+            {
+                return Err(connectrpc::ConnectError::not_found(
+                    "local environment was not found",
+                ));
+            }
+            core.daemon_access(&name)
+                .await
+                .map_err(Status::from)
+                .map_err(local_status)?
+        };
+        if access.generation_capability.is_empty() {
+            return Err(local_internal());
+        }
+        let capability = zeroize::Zeroizing::new(access.generation_capability);
+        let client = crate::hybrid_vsock::connect_daemon(
+            std::path::Path::new(&access.hybrid_socket),
+            access.guest_port,
+            capability.as_str(),
+        )
+        .await
+        .map_err(|_| {
+            connectrpc::ConnectError::unavailable("local environment daemon is unavailable")
+        })?;
+        client.require_ready().await.map_err(local_session_error)?;
+        Ok(client)
+    }
+}
+
+#[derive(Clone)]
+struct LocalSessionBackend {
+    supervisor: SupervisorRpc,
+}
+
+struct LocalSessionAttachment {
+    client: SessionClient,
+    attachment: PrivateSessionAttachment,
+}
+
+#[async_trait]
+impl EnvironmentSessionBackend for LocalSessionBackend {
+    type Attachment = LocalSessionAttachment;
+
+    fn authorize(&self, _ctx: &RequestContext) -> Result<(), connectrpc::ConnectError> {
+        Ok(())
+    }
+
+    fn validation_error(
+        &self,
+        violations: Vec<FieldViolation>,
+        _request_id: Option<&str>,
+    ) -> connectrpc::ConnectError {
+        let fields = violations
+            .iter()
+            .map(|violation| violation.path)
+            .collect::<Vec<_>>()
+            .join(", ");
+        connectrpc::ConnectError::invalid_argument(format!(
+            "local session request is invalid: {fields}"
+        ))
+    }
+
+    fn invalid_daemon_frame(&self, _request_id: Option<&str>) -> connectrpc::ConnectError {
+        connectrpc::ConnectError::internal("local environment daemon returned an invalid frame")
+    }
+
+    async fn launch(
+        &self,
+        _ctx: &RequestContext,
+        org_id: &str,
+        environment_id: &str,
+        request: daemon_v1::LaunchSessionRequest,
+    ) -> Result<daemon_v1::SessionRecord, connectrpc::ConnectError> {
+        self.supervisor
+            .public_daemon_client(org_id, environment_id)
+            .await?
+            .launch(request)
+            .await
+            .map_err(local_session_error)
+    }
+
+    async fn list(
+        &self,
+        _ctx: &RequestContext,
+        org_id: &str,
+        environment_id: &str,
+    ) -> Result<Vec<daemon_v1::SessionRecord>, connectrpc::ConnectError> {
+        self.supervisor
+            .public_daemon_client(org_id, environment_id)
+            .await?
+            .list()
+            .await
+            .map_err(local_session_error)
+    }
+
+    async fn get(
+        &self,
+        _ctx: &RequestContext,
+        org_id: &str,
+        environment_id: &str,
+        session_id: &str,
+    ) -> Result<daemon_v1::SessionRecord, connectrpc::ConnectError> {
+        self.supervisor
+            .public_daemon_client(org_id, environment_id)
+            .await?
+            .get(session_id)
+            .await
+            .map_err(local_session_error)
+    }
+
+    async fn stop(
+        &self,
+        _ctx: &RequestContext,
+        org_id: &str,
+        environment_id: &str,
+        session_id: &str,
+    ) -> Result<daemon_v1::SessionRecord, connectrpc::ConnectError> {
+        self.supervisor
+            .public_daemon_client(org_id, environment_id)
+            .await?
+            .stop(session_id)
+            .await
+            .map_err(local_session_error)
+    }
+
+    async fn restart(
+        &self,
+        _ctx: &RequestContext,
+        org_id: &str,
+        environment_id: &str,
+        session_id: &str,
+    ) -> Result<daemon_v1::SessionRecord, connectrpc::ConnectError> {
+        self.supervisor
+            .public_daemon_client(org_id, environment_id)
+            .await?
+            .restart(session_id)
+            .await
+            .map_err(local_session_error)
+    }
+
+    async fn read_output(
+        &self,
+        _ctx: &RequestContext,
+        org_id: &str,
+        environment_id: &str,
+        request: daemon_v1::ReadSessionOutputRequest,
+    ) -> Result<daemon_v1::ReadSessionOutputResponse, connectrpc::ConnectError> {
+        self.supervisor
+            .public_daemon_client(org_id, environment_id)
+            .await?
+            .read_output(request)
+            .await
+            .map_err(local_session_error)
+    }
+
+    async fn attach(
+        &self,
+        _ctx: &RequestContext,
+        org_id: &str,
+        environment_id: &str,
+        session_id: &str,
+        output_offset: u64,
+    ) -> Result<Self::Attachment, connectrpc::ConnectError> {
+        let client = self
+            .supervisor
+            .public_daemon_client(org_id, environment_id)
+            .await?;
+        let attachment = client
+            .attach(session_id.to_owned(), output_offset)
+            .await
+            .map_err(local_session_error)?;
+        Ok(LocalSessionAttachment { client, attachment })
+    }
+}
+
+#[async_trait]
+impl BridgeAttachment for LocalSessionAttachment {
+    async fn send_input(
+        &self,
+        message: daemon_v1::SessionAttachMessage,
+    ) -> Result<(), connectrpc::ConnectError> {
+        let input = self.attachment.input_handle();
+        match message.payload {
+            Some(daemon_v1::session_attach_message::Payload::Input(input_message)) => input
+                .send_input(input_message.data)
+                .await
+                .map_err(local_session_error),
+            Some(daemon_v1::session_attach_message::Payload::Resize(resize)) => input
+                .resize(resize.width, resize.height)
+                .await
+                .map_err(local_session_error),
+            Some(daemon_v1::session_attach_message::Payload::Detach(_)) => {
+                input.detach().await.map_err(local_session_error)
+            }
+            _ => Err(connectrpc::ConnectError::internal(
+                "local session bridge produced an invalid input frame",
+            )),
+        }
+    }
+
+    async fn next_output(
+        &mut self,
+    ) -> Result<Option<daemon_v1::SessionAttachMessage>, connectrpc::ConnectError> {
+        self.attachment
+            .next_event()
+            .await
+            .map_err(local_session_error)
+    }
+
+    async fn session(
+        &mut self,
+        session_id: &str,
+    ) -> Result<daemon_v1::SessionRecord, connectrpc::ConnectError> {
+        self.client
+            .get(session_id)
+            .await
+            .map_err(local_session_error)
+    }
+}
+
+fn local_session_error(error: SessionClientError) -> connectrpc::ConnectError {
+    match error {
+        SessionClientError::Status(status) => match status.code() {
+            tonic::Code::NotFound => {
+                connectrpc::ConnectError::not_found("local environment session was not found")
+            }
+            tonic::Code::InvalidArgument => connectrpc::ConnectError::invalid_argument(
+                "local environment session request is invalid",
+            ),
+            tonic::Code::Unimplemented | tonic::Code::FailedPrecondition => {
+                connectrpc::ConnectError::failed_precondition(
+                    "local environment daemon does not support this session operation",
+                )
+            }
+            tonic::Code::Unavailable | tonic::Code::DeadlineExceeded | tonic::Code::Cancelled => {
+                connectrpc::ConnectError::unavailable(
+                    "local environment session transport was lost",
+                )
+            }
+            _ => connectrpc::ConnectError::internal("local environment session request failed"),
+        },
+        SessionClientError::NotReady { .. } | SessionClientError::MissingCapability { .. } => {
+            connectrpc::ConnectError::failed_precondition(
+                "local environment daemon is not ready for sessions",
+            )
+        }
+        SessionClientError::Connect | SessionClientError::RequestClosed => {
+            connectrpc::ConnectError::unavailable("local environment session transport was lost")
+        }
+        SessionClientError::InvalidEndpoint
+        | SessionClientError::InvalidCredential
+        | SessionClientError::MissingSessionRecord => {
+            connectrpc::ConnectError::internal("local environment session request failed")
+        }
     }
 }
 
@@ -1319,7 +1620,7 @@ mod tests {
     use super::*;
     use std::collections::BTreeMap;
 
-    use codewire_proto::codewire::v1::EnvironmentServiceClient;
+    use codewire_proto::codewire::v1::{EnvironmentServiceClient, EnvironmentSessionServiceClient};
     use connectrpc::Protocol;
     use connectrpc::client::{ClientConfig, Http2Connection};
     use prost::Message as _;
@@ -1577,8 +1878,10 @@ mod tests {
         .await
         .unwrap()
         .shared(32);
-        let client =
-            EnvironmentServiceClient::new(transport, ClientConfig::new(authority.clone()).proto());
+        let client = EnvironmentServiceClient::new(
+            transport.clone(),
+            ClientConfig::new(authority.clone()).proto(),
+        );
         let listed = client
             .list_environments(proto::ListEnvironmentsRequest::default())
             .await
@@ -1643,6 +1946,27 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(create_error.code, connectrpc::ErrorCode::Unimplemented);
+
+        let sessions = EnvironmentSessionServiceClient::new(
+            transport,
+            ClientConfig::new(authority.clone()).proto(),
+        );
+        let stopped_error = sessions
+            .list_sessions(proto::ListSessionsRequest {
+                org_id: namespace.to_string(),
+                environment_id: environment_id.clone(),
+                ..Default::default()
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(
+            stopped_error.code,
+            connectrpc::ErrorCode::FailedPrecondition
+        );
+        assert_eq!(
+            stopped_error.message.as_deref(),
+            Some("local environment is not in the required state")
+        );
 
         drop(client);
         let grpc_transport = Http2Connection::connect_with_connector(

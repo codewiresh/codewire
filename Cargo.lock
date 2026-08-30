@@ -1213,6 +1213,7 @@ dependencies = [
  "base64",
  "buffa",
  "buffa-types",
+ "bytes",
  "chrono",
  "codewire-proto",
  "codewire-tailnet",
@@ -1294,6 +1295,23 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+]
+
+[[package]]
+name = "codewire-daemon-bridge"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "buffa",
+ "buffa-types",
+ "bytes",
+ "codewire-gateway-proto",
+ "codewire-proto",
+ "connectrpc",
+ "futures",
+ "prost 0.14.4",
+ "prost-types",
+ "tokio",
 ]
 
 [[package]]
@@ -1423,11 +1441,14 @@ dependencies = [
 name = "codewire-local-vmm"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "axum 0.8.9",
  "buffa",
  "buffa-types",
  "bytes",
+ "codewire-client",
  "codewire-daemon",
+ "codewire-daemon-bridge",
  "codewire-project",
  "codewire-proto",
  "codewire-vmm-guest-probe",
@@ -1527,6 +1548,7 @@ dependencies = [
  "chrono",
  "codewire-admin-proto",
  "codewire-daemon",
+ "codewire-daemon-bridge",
  "codewire-gateway-proto",
  "codewire-project",
  "codewire-project-proto",
