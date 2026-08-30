@@ -59,8 +59,26 @@ pub fn truncate_kubernetes_name(name: &str) -> String {
     truncated.trim_end_matches(['-', '.']).to_string()
 }
 
+/// Derive the zero-replica pool used by one per-environment template.
+///
+/// Short historical names remain unchanged. Long template references need a
+/// digest suffix: truncating only from the right can discard the environment
+/// UUID and make cleanup for one environment delete another environment's
+/// pool.
 pub fn shadow_warm_pool_name(template_ref: &str) -> String {
-    truncate_kubernetes_name(&format!("shadow-pool-{template_ref}"))
+    const PREFIX: &str = "shadow-pool-";
+    const MAX_LEN: usize = 63;
+    const HASH_BYTES: usize = 16;
+
+    let full_name = format!("{PREFIX}{template_ref}");
+    if full_name.len() <= MAX_LEN {
+        return full_name;
+    }
+
+    let suffix = sha256_hex_prefix(template_ref.as_bytes(), HASH_BYTES);
+    let stem_len = MAX_LEN - PREFIX.len() - 1 - suffix.len();
+    let stem = truncate_kubernetes_name(&template_ref[..stem_len]);
+    format!("{PREFIX}{stem}-{suffix}")
 }
 
 pub fn warm_pool_name(template_name: &str, opts: &TemplateOpts) -> String {
@@ -80,9 +98,13 @@ pub fn warm_pool_revision_hash(opts: &TemplateOpts) -> String {
 fn sandbox_blueprint_revision_hash(blueprint: &Value) -> String {
     let encoded = serde_json::to_vec(blueprint)
         .expect("the in-memory Sandbox blueprint must be JSON serializable");
-    let digest = Sha256::digest(encoded);
-    let mut hex = String::with_capacity(8);
-    for b in digest.iter().take(4) {
+    sha256_hex_prefix(&encoded, 4)
+}
+
+fn sha256_hex_prefix(input: &[u8], bytes: usize) -> String {
+    let digest = Sha256::digest(input);
+    let mut hex = String::with_capacity(bytes * 2);
+    for b in digest.iter().take(bytes) {
         hex.push_str(&format!("{b:02x}"));
     }
     hex
@@ -262,12 +284,30 @@ mod tests {
     fn shadow_warm_pool_name_handles_digest_derived_template_refs() {
         let template_ref = "codewiresh-workspace-sha256-d864f5f3afec8f7e56e38ee8f6aaba2af33ed2d984316a90c68f3dd5fcdb2d9a";
         let got = shadow_warm_pool_name(template_ref);
-        assert_eq!(
-            got,
-            "shadow-pool-codewiresh-workspace-sha256-d864f5f3afec8f7e56e38ee"
-        );
+        assert!(got.starts_with("shadow-pool-codewiresh-workspa-"));
         assert!(got.len() <= 63);
         assert!(got.ends_with(|c: char| c.is_ascii_alphanumeric()));
+    }
+
+    #[test]
+    fn long_shadow_warm_pool_names_preserve_per_environment_identity() {
+        let template_base = "codewiresh-workspace-sha256-2058b7f1fd76f6f77b1dba";
+        let first = format!("{template_base}-3d6bb495-efac-419f-bf3a-91696e7c7ca4");
+        let second = format!("{template_base}-76169e1f-3bbf-46be-96e0-cac68e0ac910");
+
+        // This is the live collision shape that the old right-truncation
+        // produced.
+        assert_eq!(
+            truncate_kubernetes_name(&format!("shadow-pool-{first}")),
+            truncate_kubernetes_name(&format!("shadow-pool-{second}"))
+        );
+
+        let first_pool = shadow_warm_pool_name(&first);
+        let second_pool = shadow_warm_pool_name(&second);
+        assert_ne!(first_pool, second_pool);
+        assert_eq!(first_pool.len(), 63);
+        assert_eq!(second_pool.len(), 63);
+        assert_eq!(first_pool, shadow_warm_pool_name(&first));
     }
 
     #[test]

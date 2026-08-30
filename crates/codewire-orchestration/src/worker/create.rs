@@ -1816,6 +1816,66 @@ mod tests {
     }
 
     #[test]
+    fn long_per_environment_pool_cleanup_cannot_target_another_claim() {
+        let cfg = SandboxWorkerCfg::default();
+        let env = EnvironmentRow {
+            id: "unused".into(),
+            org_id: "org-1".into(),
+            preset_id: None,
+            env_type: "sandbox".into(),
+            state: "pending".into(),
+            desired_state: "started".into(),
+            isolation_tier: "confidential".into(),
+            external_cleanup_completed_at: None,
+            cpu_millicores: 2000,
+            memory_mb: 16384,
+            disk_gb: 50,
+            auth_token: None,
+            ttl_seconds: None,
+            setup_config: None,
+            secret_project_id: None,
+        };
+        let template_base = "codewiresh-workspace-sha256-2058b7f1fd76f6f77b1dba";
+        let first_id = "3d6bb495-efac-419f-bf3a-91696e7c7ca4";
+        let second_id = "76169e1f-3bbf-46be-96e0-cac68e0ac910";
+
+        let first_claim = environment_claim_opts(
+            &cfg,
+            "ghcr.io/codewiresh/workspace@sha256:2058b7f1fd76f6f77b1dba596a9b54c698c049380e5ace6a0493f10a9d41e1b4",
+            template_base,
+            &env,
+            first_id,
+            "unused",
+        );
+        let second_claim = environment_claim_opts(
+            &cfg,
+            "ghcr.io/codewiresh/workspace@sha256:2058b7f1fd76f6f77b1dba596a9b54c698c049380e5ace6a0493f10a9d41e1b4",
+            template_base,
+            &env,
+            second_id,
+            "unused",
+        );
+        let first_cleanup_template = environment_per_env_template_name(
+            &cfg,
+            "ghcr.io/codewiresh/workspace@sha256:2058b7f1fd76f6f77b1dba596a9b54c698c049380e5ace6a0493f10a9d41e1b4",
+            template_base,
+            &env,
+            first_id,
+        )
+        .unwrap();
+
+        assert_eq!(
+            first_claim.warm_pool_ref,
+            shadow_warm_pool_name(&first_cleanup_template)
+        );
+        assert_ne!(first_claim.warm_pool_ref, second_claim.warm_pool_ref);
+        assert_ne!(
+            shadow_warm_pool_name(&first_cleanup_template),
+            second_claim.warm_pool_ref
+        );
+    }
+
+    #[test]
     fn template_opts_mirror_go_branches() {
         let cfg = SandboxWorkerCfg {
             gateway_image: "gw:1".into(),
