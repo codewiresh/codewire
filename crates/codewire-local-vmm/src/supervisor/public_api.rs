@@ -1,0 +1,1674 @@
+//! Owner-only public Codewire service adapters for the native supervisor.
+//!
+//! The Unix peer UID is authorization. Public organization and environment
+//! UUIDs are stable coordinates only; this module deliberately imports no
+//! platform login, bearer-token, organization-membership, or TCP semantics.
+
+use std::collections::BTreeSet;
+use std::sync::Arc;
+
+use axum::extract::Request as AxumRequest;
+use axum::middleware::Next;
+use axum::response::{IntoResponse as _, Response as AxumResponse};
+use buffa_types::{Duration as ProtoDuration, Timestamp};
+use codewire_proto::codewire::v1 as proto;
+use connectrpc::{RequestContext, ServiceRequest, ServiceResult, ServiceStream};
+use http::{HeaderValue, Method, StatusCode as HttpStatus, header};
+use tonic::Request as TonicRequest;
+
+use super::*;
+
+const PRIVATE_SUPERVISOR_ROUTE: &str = "/codewire.local.v1.LocalSupervisorService/{*method}";
+const PUBLIC_ENVIRONMENT_ROUTE: &str = "/codewire.v1.EnvironmentService/{*method}";
+const ACCEPT_POST: &str =
+    "application/connect+json, application/connect+proto, application/json, application/proto";
+const GIB: u64 = 1024 * 1024 * 1024;
+
+pub(super) fn supervisor_router(supervisor: SupervisorRpc) -> axum::Router {
+    let public = environment_router(supervisor.clone());
+    let public = connectrpc::ConnectRpcService::new(public);
+    let public = axum::Router::new()
+        .route_service(PUBLIC_ENVIRONMENT_ROUTE, public)
+        .layer(axum::middleware::from_fn(enforce_connect_only));
+
+    axum::Router::new()
+        .route_service(
+            PRIVATE_SUPERVISOR_ROUTE,
+            LocalSupervisorServiceServer::new(supervisor),
+        )
+        .merge(public)
+}
+
+fn environment_router(supervisor: SupervisorRpc) -> connectrpc::Router {
+    let router = connectrpc::Router::new().add_service(Arc::new(supervisor));
+    debug_assert_eq!(
+        router.methods().collect::<BTreeSet<_>>(),
+        ENVIRONMENT_RPC_SEMANTICS
+            .iter()
+            .map(|entry| entry.spec.procedure.trim_start_matches('/'))
+            .collect::<BTreeSet<_>>()
+    );
+    debug_assert!(
+        ENVIRONMENT_RPC_SEMANTICS
+            .iter()
+            .any(|entry| entry.behavior == RpcBehavior::Local)
+    );
+    debug_assert!(PUBLIC_MESSAGE_SEMANTICS.iter().all(|message| {
+        !message.full_name.is_empty()
+            && message.fields.iter().all(|field| {
+                field.number > 0
+                    && !field.name.is_empty()
+                    && matches!(
+                        field.behavior,
+                        FieldBehavior::Local
+                            | FieldBehavior::FixedLocal
+                            | FieldBehavior::ZeroOrAbsent
+                            | FieldBehavior::RejectedWhenSet
+                    )
+            })
+    }));
+    router
+}
+
+async fn enforce_connect_only(request: AxumRequest, next: Next) -> AxumResponse {
+    let admitted = match *request.method() {
+        Method::GET => true,
+        Method::POST => {
+            let mut values = request.headers().get_all(header::CONTENT_TYPE).iter();
+            let first = values.next();
+            values.next().is_none() && first.is_some_and(connect_content_type)
+        }
+        _ => false,
+    };
+    if admitted {
+        return next.run(request).await;
+    }
+    let mut response = HttpStatus::UNSUPPORTED_MEDIA_TYPE.into_response();
+    response.headers_mut().insert(
+        http::HeaderName::from_static("accept-post"),
+        HeaderValue::from_static(ACCEPT_POST),
+    );
+    response
+}
+
+fn connect_content_type(value: &HeaderValue) -> bool {
+    let Ok(value) = value.to_str() else {
+        return false;
+    };
+    let essence = value.split(';').next().unwrap_or_default().trim();
+    [
+        "application/connect+json",
+        "application/connect+proto",
+        "application/json",
+        "application/proto",
+    ]
+    .iter()
+    .any(|allowed| essence.eq_ignore_ascii_case(allowed))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RpcBehavior {
+    Local,
+    UnimplementedPlatformOnly,
+    UnimplementedPendingDaemonBridge,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RpcSemantics {
+    spec: connectrpc::Spec,
+    behavior: RpcBehavior,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FieldBehavior {
+    /// Read, validated, or populated from durable local runtime state.
+    Local,
+    /// Populated with a documented local-runtime discriminator or status.
+    FixedLocal,
+    /// Intentionally encoded as protobuf zero/absent until its owning slice.
+    ZeroOrAbsent,
+    /// The method is local, but setting this platform-shaped field is rejected.
+    RejectedWhenSet,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct FieldSemantics {
+    number: i32,
+    name: &'static str,
+    behavior: FieldBehavior,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct MessageSemantics {
+    full_name: &'static str,
+    fields: &'static [FieldSemantics],
+}
+
+const fn field(number: i32, name: &'static str, behavior: FieldBehavior) -> FieldSemantics {
+    FieldSemantics {
+        number,
+        name,
+        behavior,
+    }
+}
+
+const LOCAL: FieldBehavior = FieldBehavior::Local;
+const FIXED: FieldBehavior = FieldBehavior::FixedLocal;
+const ZERO: FieldBehavior = FieldBehavior::ZeroOrAbsent;
+const REJECTED: FieldBehavior = FieldBehavior::RejectedWhenSet;
+
+const ENVIRONMENT_FIELDS: &[FieldSemantics] = &[
+    field(1, "id", LOCAL),
+    field(2, "org_id", LOCAL),
+    field(3, "created_by", ZERO),
+    field(4, "preset_id", ZERO),
+    field(5, "type", FIXED),
+    field(6, "name", LOCAL),
+    field(7, "state", LOCAL),
+    field(8, "desired_state", LOCAL),
+    field(9, "error_reason", LOCAL),
+    field(10, "recoverable", ZERO),
+    field(11, "state_changed_at", ZERO),
+    field(12, "retry_count", ZERO),
+    field(13, "setup_phase", ZERO),
+    field(14, "setup_complete", LOCAL),
+    field(15, "setup_error", ZERO),
+    field(16, "ttl_seconds", ZERO),
+    field(17, "shutdown_at", ZERO),
+    field(18, "cpu_millicores", LOCAL),
+    field(19, "memory_mb", LOCAL),
+    field(20, "disk_gb", LOCAL),
+    field(21, "total_running_seconds", ZERO),
+    field(22, "created_at", ZERO),
+    field(23, "started_at", ZERO),
+    field(24, "stopped_at", ZERO),
+    field(25, "destroyed_at", ZERO),
+    field(26, "protected", ZERO),
+    field(27, "deletion_requested_at", ZERO),
+    field(28, "deletion_grace_until", ZERO),
+    field(29, "preset_name", ZERO),
+    field(30, "network", ZERO),
+    field(31, "ports", ZERO),
+    field(32, "isolation_tier", FIXED),
+];
+
+const PUBLIC_MESSAGE_SEMANTICS: &[MessageSemantics] = &[
+    MessageSemantics {
+        full_name: "codewire.v1.Environment",
+        fields: ENVIRONMENT_FIELDS,
+    },
+    MessageSemantics {
+        full_name: "codewire.v1.ListEnvironmentsRequest",
+        fields: &[
+            field(1, "org_id", LOCAL),
+            field(2, "type", LOCAL),
+            field(3, "state", LOCAL),
+            field(4, "include_destroyed", ZERO),
+            field(5, "page_size", REJECTED),
+            field(6, "page_token", REJECTED),
+        ],
+    },
+    MessageSemantics {
+        full_name: "codewire.v1.ListEnvironmentsResponse",
+        fields: &[
+            field(1, "environments", LOCAL),
+            field(2, "next_page_token", ZERO),
+            field(3, "poll_interval", LOCAL),
+        ],
+    },
+    MessageSemantics {
+        full_name: "codewire.v1.GetEnvironmentRequest",
+        fields: &[field(1, "org_id", LOCAL), field(2, "environment_id", LOCAL)],
+    },
+    MessageSemantics {
+        full_name: "codewire.v1.GetEnvironmentResponse",
+        fields: &[
+            field(1, "environment", LOCAL),
+            field(2, "poll_interval", LOCAL),
+        ],
+    },
+    MessageSemantics {
+        full_name: "codewire.v1.PlanEnvironmentResizeRequest",
+        fields: &[
+            field(1, "org_id", LOCAL),
+            field(2, "environment_id", LOCAL),
+            field(3, "cpu_millicores", LOCAL),
+            field(4, "memory_mb", LOCAL),
+            field(5, "disk_gb", LOCAL),
+        ],
+    },
+    MessageSemantics {
+        full_name: "codewire.v1.PlanEnvironmentResizeResponse",
+        fields: &[field(1, "plan", LOCAL), field(2, "environment", LOCAL)],
+    },
+    MessageSemantics {
+        full_name: "codewire.v1.ResizeEnvironmentRequest",
+        fields: &[
+            field(1, "org_id", LOCAL),
+            field(2, "environment_id", LOCAL),
+            field(3, "cpu_millicores", LOCAL),
+            field(4, "memory_mb", LOCAL),
+            field(5, "disk_gb", LOCAL),
+            field(6, "request_id", LOCAL),
+            field(7, "force", REJECTED),
+            field(8, "disruption_policy", LOCAL),
+        ],
+    },
+    MessageSemantics {
+        full_name: "codewire.v1.ResizeEnvironmentResponse",
+        fields: &[
+            field(1, "operation", LOCAL),
+            field(2, "environment", LOCAL),
+            field(3, "poll_interval", LOCAL),
+        ],
+    },
+    MessageSemantics {
+        full_name: "codewire.v1.GetEnvironmentResizeOperationRequest",
+        fields: &[
+            field(1, "org_id", LOCAL),
+            field(2, "environment_id", LOCAL),
+            field(3, "operation_id", LOCAL),
+        ],
+    },
+    MessageSemantics {
+        full_name: "codewire.v1.GetEnvironmentResizeOperationResponse",
+        fields: &[
+            field(1, "operation", LOCAL),
+            field(2, "environment", LOCAL),
+            field(3, "poll_interval", LOCAL),
+        ],
+    },
+    MessageSemantics {
+        full_name: "codewire.v1.DeleteEnvironmentRequest",
+        fields: &[field(1, "org_id", LOCAL), field(2, "environment_id", LOCAL)],
+    },
+    MessageSemantics {
+        full_name: "codewire.v1.DeleteEnvironmentResponse",
+        fields: &[],
+    },
+    MessageSemantics {
+        full_name: "codewire.v1.StopEnvironmentRequest",
+        fields: &[field(1, "org_id", LOCAL), field(2, "environment_id", LOCAL)],
+    },
+    MessageSemantics {
+        full_name: "codewire.v1.StopEnvironmentResponse",
+        fields: &[field(1, "status", FIXED)],
+    },
+    MessageSemantics {
+        full_name: "codewire.v1.StartEnvironmentRequest",
+        fields: &[field(1, "org_id", LOCAL), field(2, "environment_id", LOCAL)],
+    },
+    MessageSemantics {
+        full_name: "codewire.v1.StartEnvironmentResponse",
+        fields: &[field(1, "status", FIXED), field(2, "outcome", LOCAL)],
+    },
+    MessageSemantics {
+        full_name: "codewire.v1.EnvironmentResources",
+        fields: &[
+            field(1, "cpu_millicores", LOCAL),
+            field(2, "memory_mb", LOCAL),
+            field(3, "disk_gb", LOCAL),
+        ],
+    },
+    MessageSemantics {
+        full_name: "codewire.v1.EnvironmentResizePlan",
+        fields: &[
+            field(1, "previous_resources", LOCAL),
+            field(2, "desired_resources", LOCAL),
+            field(3, "execution_mode", LOCAL),
+            field(4, "active_session_count", ZERO),
+            field(5, "active_sessions_will_be_terminated", ZERO),
+            field(6, "reason", LOCAL),
+            field(7, "warnings", LOCAL),
+        ],
+    },
+    MessageSemantics {
+        full_name: "codewire.v1.EnvironmentResizeOperation",
+        fields: &[
+            field(1, "id", LOCAL),
+            field(2, "environment_id", LOCAL),
+            field(3, "request_id", LOCAL),
+            field(4, "previous_resources", LOCAL),
+            field(5, "desired_resources", LOCAL),
+            field(6, "last_applied_resources", LOCAL),
+            field(7, "state", LOCAL),
+            field(8, "failure", LOCAL),
+            field(9, "created_at", LOCAL),
+            field(10, "updated_at", LOCAL),
+            field(11, "completed_at", LOCAL),
+            field(12, "disruption_policy", LOCAL),
+            field(13, "planned_mode", LOCAL),
+            field(14, "applied_mode", LOCAL),
+            field(15, "pod_replaced", ZERO),
+        ],
+    },
+    MessageSemantics {
+        full_name: "codewire.v1.EnvironmentResizeFailure",
+        fields: &[field(1, "code", LOCAL), field(2, "message", FIXED)],
+    },
+];
+
+const ENVIRONMENT_RPC_SEMANTICS: &[RpcSemantics] = &[
+    rpc(
+        proto::ENVIRONMENT_SERVICE_LIST_ENVIRONMENTS_SPEC,
+        RpcBehavior::Local,
+    ),
+    rpc(
+        proto::ENVIRONMENT_SERVICE_CREATE_ENVIRONMENT_SPEC,
+        RpcBehavior::UnimplementedPlatformOnly,
+    ),
+    rpc(
+        proto::ENVIRONMENT_SERVICE_GET_ENVIRONMENT_SPEC,
+        RpcBehavior::Local,
+    ),
+    rpc(
+        proto::ENVIRONMENT_SERVICE_PLAN_ENVIRONMENT_RESIZE_SPEC,
+        RpcBehavior::Local,
+    ),
+    rpc(
+        proto::ENVIRONMENT_SERVICE_RESIZE_ENVIRONMENT_SPEC,
+        RpcBehavior::Local,
+    ),
+    rpc(
+        proto::ENVIRONMENT_SERVICE_GET_ENVIRONMENT_RESIZE_OPERATION_SPEC,
+        RpcBehavior::Local,
+    ),
+    rpc(
+        proto::ENVIRONMENT_SERVICE_DELETE_ENVIRONMENT_SPEC,
+        RpcBehavior::Local,
+    ),
+    rpc(
+        proto::ENVIRONMENT_SERVICE_STOP_ENVIRONMENT_SPEC,
+        RpcBehavior::Local,
+    ),
+    rpc(
+        proto::ENVIRONMENT_SERVICE_START_ENVIRONMENT_SPEC,
+        RpcBehavior::Local,
+    ),
+    rpc(
+        proto::ENVIRONMENT_SERVICE_PROTECT_ENVIRONMENT_SPEC,
+        RpcBehavior::UnimplementedPlatformOnly,
+    ),
+    rpc(
+        proto::ENVIRONMENT_SERVICE_UNPROTECT_ENVIRONMENT_SPEC,
+        RpcBehavior::UnimplementedPlatformOnly,
+    ),
+    rpc(
+        proto::ENVIRONMENT_SERVICE_CANCEL_ENVIRONMENT_DELETION_SPEC,
+        RpcBehavior::UnimplementedPlatformOnly,
+    ),
+    rpc(
+        proto::ENVIRONMENT_SERVICE_EXTEND_ENVIRONMENT_TTL_SPEC,
+        RpcBehavior::UnimplementedPlatformOnly,
+    ),
+    rpc(
+        proto::ENVIRONMENT_SERVICE_GET_ENVIRONMENT_TRUST_REPORT_SPEC,
+        RpcBehavior::UnimplementedPlatformOnly,
+    ),
+    rpc(
+        proto::ENVIRONMENT_SERVICE_GET_ENVIRONMENT_DAEMON_STATUS_SPEC,
+        RpcBehavior::UnimplementedPendingDaemonBridge,
+    ),
+    rpc(
+        proto::ENVIRONMENT_SERVICE_STREAM_ENVIRONMENT_DAEMON_LOGS_SPEC,
+        RpcBehavior::UnimplementedPendingDaemonBridge,
+    ),
+    rpc(
+        proto::ENVIRONMENT_SERVICE_REPAIR_ENVIRONMENT_DAEMON_SPEC,
+        RpcBehavior::UnimplementedPendingDaemonBridge,
+    ),
+    rpc(
+        proto::ENVIRONMENT_SERVICE_LIST_ENVIRONMENT_ACCESS_SPEC,
+        RpcBehavior::UnimplementedPlatformOnly,
+    ),
+    rpc(
+        proto::ENVIRONMENT_SERVICE_GRANT_ENVIRONMENT_ACCESS_SPEC,
+        RpcBehavior::UnimplementedPlatformOnly,
+    ),
+    rpc(
+        proto::ENVIRONMENT_SERVICE_REVOKE_ENVIRONMENT_ACCESS_SPEC,
+        RpcBehavior::UnimplementedPlatformOnly,
+    ),
+    rpc(
+        proto::ENVIRONMENT_SERVICE_WATCH_ENVIRONMENT_CREATE_SPEC,
+        RpcBehavior::UnimplementedPlatformOnly,
+    ),
+    rpc(
+        proto::ENVIRONMENT_SERVICE_STREAM_LOGS_SPEC,
+        RpcBehavior::UnimplementedPlatformOnly,
+    ),
+];
+
+const fn rpc(spec: connectrpc::Spec, behavior: RpcBehavior) -> RpcSemantics {
+    RpcSemantics { spec, behavior }
+}
+
+impl SupervisorRpc {
+    async fn public_namespace_id(&self) -> Result<Uuid, connectrpc::ConnectError> {
+        self.core
+            .lock()
+            .await
+            .store
+            .namespace_id()
+            .map_err(|_| local_internal())
+    }
+
+    async fn public_environments(&self) -> Result<Vec<v1::Environment>, connectrpc::ConnectError> {
+        LocalSupervisorService::list_environments(
+            self,
+            TonicRequest::new(v1::ListEnvironmentsRequest {}),
+        )
+        .await
+        .map(tonic::Response::into_inner)
+        .map(|response| response.environments)
+        .map_err(local_status)
+    }
+
+    async fn public_environment(
+        &self,
+        org_id: &str,
+        environment_id: &str,
+    ) -> Result<(Uuid, v1::Environment), connectrpc::ConnectError> {
+        let namespace = self.public_namespace_id().await?;
+        require_namespace(namespace, org_id, false)?;
+        let environment_id = parse_coordinate(environment_id, "environment_id")?;
+        let environment = self
+            .public_environments()
+            .await?
+            .into_iter()
+            .find(|environment| {
+                Uuid::parse_str(&environment.id)
+                    .ok()
+                    .is_some_and(|id| id == environment_id)
+            })
+            .ok_or_else(|| {
+                connectrpc::ConnectError::not_found("local environment was not found")
+            })?;
+        Ok((namespace, environment))
+    }
+}
+
+fn require_namespace(
+    namespace: Uuid,
+    value: &str,
+    allow_empty: bool,
+) -> Result<(), connectrpc::ConnectError> {
+    if allow_empty && value.is_empty() {
+        return Ok(());
+    }
+    let requested = parse_coordinate(value, "org_id")?;
+    if requested != namespace {
+        return Err(connectrpc::ConnectError::not_found(
+            "local namespace was not found",
+        ));
+    }
+    Ok(())
+}
+
+fn parse_coordinate(value: &str, field: &str) -> Result<Uuid, connectrpc::ConnectError> {
+    Uuid::parse_str(value)
+        .ok()
+        .filter(|id| !id.is_nil())
+        .ok_or_else(|| connectrpc::ConnectError::invalid_argument(format!("{field} is invalid")))
+}
+
+fn local_status(status: tonic::Status) -> connectrpc::ConnectError {
+    let (code, message) = match status.code() {
+        tonic::Code::Cancelled => (
+            connectrpc::ErrorCode::Canceled,
+            "local request was canceled",
+        ),
+        tonic::Code::InvalidArgument => (
+            connectrpc::ErrorCode::InvalidArgument,
+            "local request is invalid",
+        ),
+        tonic::Code::NotFound => (
+            connectrpc::ErrorCode::NotFound,
+            "local environment was not found",
+        ),
+        tonic::Code::AlreadyExists => (
+            connectrpc::ErrorCode::AlreadyExists,
+            "local environment already exists",
+        ),
+        tonic::Code::FailedPrecondition => (
+            connectrpc::ErrorCode::FailedPrecondition,
+            "local environment is not in the required state",
+        ),
+        tonic::Code::Aborted => (
+            connectrpc::ErrorCode::Aborted,
+            "local request conflicts with durable state",
+        ),
+        tonic::Code::OutOfRange => (
+            connectrpc::ErrorCode::OutOfRange,
+            "local request is out of range",
+        ),
+        tonic::Code::Unimplemented => (
+            connectrpc::ErrorCode::Unimplemented,
+            "local operation is not implemented",
+        ),
+        tonic::Code::Unavailable => (
+            connectrpc::ErrorCode::Unavailable,
+            "local supervisor is unavailable",
+        ),
+        tonic::Code::DeadlineExceeded => (
+            connectrpc::ErrorCode::DeadlineExceeded,
+            "local request deadline was exceeded",
+        ),
+        _ => (
+            connectrpc::ErrorCode::Internal,
+            "local supervisor request failed",
+        ),
+    };
+    connectrpc::ConnectError::new(code, message)
+}
+
+fn local_internal() -> connectrpc::ConnectError {
+    connectrpc::ConnectError::internal("local supervisor request failed")
+}
+
+fn unsupported<T>() -> ServiceResult<T> {
+    Err(connectrpc::ConnectError::unimplemented(
+        "this public RPC has no local runtime semantics",
+    ))
+}
+
+fn private_environment_state(value: i32) -> Result<v1::EnvironmentState, connectrpc::ConnectError> {
+    v1::EnvironmentState::try_from(value).map_err(|_| local_internal())
+}
+
+fn public_environment_state(state: v1::EnvironmentState) -> proto::EnvironmentState {
+    match state {
+        v1::EnvironmentState::Stopped => proto::EnvironmentState::Stopped,
+        v1::EnvironmentState::Starting => proto::EnvironmentState::Starting,
+        v1::EnvironmentState::Running => proto::EnvironmentState::Running,
+        v1::EnvironmentState::Error | v1::EnvironmentState::Orphaned => {
+            proto::EnvironmentState::Error
+        }
+        v1::EnvironmentState::Unspecified => proto::EnvironmentState::Unknown,
+    }
+}
+
+fn public_desired_state(state: v1::EnvironmentState) -> proto::DesiredState {
+    match state {
+        v1::EnvironmentState::Starting | v1::EnvironmentState::Running => {
+            proto::DesiredState::Started
+        }
+        v1::EnvironmentState::Stopped => proto::DesiredState::Stopped,
+        v1::EnvironmentState::Error
+        | v1::EnvironmentState::Orphaned
+        | v1::EnvironmentState::Unspecified => proto::DesiredState::Unspecified,
+    }
+}
+
+fn public_environment(
+    namespace: Uuid,
+    environment: &v1::Environment,
+) -> Result<proto::Environment, connectrpc::ConnectError> {
+    let state = private_environment_state(environment.state)?;
+    let (cpu_millicores, memory_mb, disk_gb) = public_resource_values(environment)?;
+    let error_reason = match state {
+        v1::EnvironmentState::Error => "local_runtime_error",
+        v1::EnvironmentState::Orphaned => "local_runtime_orphaned",
+        _ => "",
+    };
+    Ok(proto::Environment {
+        id: environment.id.clone(),
+        org_id: namespace.to_string(),
+        r#type: "local".to_owned(),
+        name: environment.name.clone(),
+        state: public_environment_state(state).into(),
+        desired_state: public_desired_state(state).into(),
+        error_reason: error_reason.to_owned(),
+        setup_complete: matches!(
+            state,
+            v1::EnvironmentState::Stopped | v1::EnvironmentState::Running
+        ),
+        cpu_millicores,
+        memory_mb,
+        disk_gb,
+        isolation_tier: proto::IsolationTier::Standard.into(),
+        ..Default::default()
+    })
+}
+
+fn public_resource_values(
+    environment: &v1::Environment,
+) -> Result<(i32, i32, i32), connectrpc::ConnectError> {
+    let cpu_millicores = environment
+        .vcpus
+        .checked_mul(1000)
+        .and_then(|value| i32::try_from(value).ok())
+        .ok_or_else(local_internal)?;
+    let memory_mb = i32::try_from(environment.memory_mib).map_err(|_| local_internal())?;
+    if !environment.disk_bytes.is_multiple_of(GIB) {
+        return Err(local_internal());
+    }
+    let disk_gb = i32::try_from(environment.disk_bytes / GIB).map_err(|_| local_internal())?;
+    Ok((cpu_millicores, memory_mb, disk_gb))
+}
+
+fn public_resources(
+    environment: &v1::Environment,
+) -> Result<proto::EnvironmentResources, connectrpc::ConnectError> {
+    let (cpu_millicores, memory_mb, disk_gb) = public_resource_values(environment)?;
+    Ok(proto::EnvironmentResources {
+        cpu_millicores,
+        memory_mb,
+        disk_gb,
+        ..Default::default()
+    })
+}
+
+fn private_resources(
+    cpu_millicores: i32,
+    memory_mb: i32,
+    disk_gb: i32,
+) -> Result<(u32, u32, u64), connectrpc::ConnectError> {
+    if cpu_millicores <= 0
+        || cpu_millicores % 1000 != 0
+        || !(128..=65_536).contains(&memory_mb)
+        || !(1..=1024).contains(&disk_gb)
+    {
+        return Err(connectrpc::ConnectError::invalid_argument(
+            "local resources require whole CPU cores, 128 to 65536 MiB memory, and 1 to 1024 GiB disk",
+        ));
+    }
+    let vcpus = u32::try_from(cpu_millicores / 1000)
+        .ok()
+        .filter(|value| (1..=32).contains(value))
+        .ok_or_else(|| {
+            connectrpc::ConnectError::invalid_argument(
+                "local CPU resources must contain 1 to 32 whole cores",
+            )
+        })?;
+    let memory_mib = u32::try_from(memory_mb).map_err(|_| local_internal())?;
+    let disk_bytes = u64::try_from(disk_gb)
+        .ok()
+        .and_then(|value| value.checked_mul(GIB))
+        .filter(|value| *value >= crate::linux::state::MINIMUM_STATE_DISK_BYTES)
+        .ok_or_else(|| {
+            connectrpc::ConnectError::invalid_argument("local disk resources are out of range")
+        })?;
+    Ok((vcpus, memory_mib, disk_bytes))
+}
+
+fn resize_mode(
+    environment: &v1::Environment,
+    desired: &proto::EnvironmentResources,
+) -> Result<proto::EnvironmentResizeExecutionMode, connectrpc::ConnectError> {
+    let previous = public_resources(environment)?;
+    if previous == *desired {
+        return Ok(proto::EnvironmentResizeExecutionMode::Noop);
+    }
+    match private_environment_state(environment.state)? {
+        v1::EnvironmentState::Stopped => Ok(proto::EnvironmentResizeExecutionMode::ApplyOnStart),
+        v1::EnvironmentState::Running => Ok(proto::EnvironmentResizeExecutionMode::Restart),
+        v1::EnvironmentState::Starting => Err(connectrpc::ConnectError::failed_precondition(
+            "local environment is still starting",
+        )),
+        v1::EnvironmentState::Error | v1::EnvironmentState::Orphaned => {
+            Err(connectrpc::ConnectError::failed_precondition(
+                "local environment must be repaired before resize",
+            ))
+        }
+        v1::EnvironmentState::Unspecified => Err(local_internal()),
+    }
+}
+
+fn resize_plan(
+    environment: &v1::Environment,
+    desired: proto::EnvironmentResources,
+) -> Result<proto::EnvironmentResizePlan, connectrpc::ConnectError> {
+    let previous = public_resources(environment)?;
+    let mode = resize_mode(environment, &desired)?;
+    let (reason, warnings) = match mode {
+        proto::EnvironmentResizeExecutionMode::Noop => ("resources are unchanged", Vec::new()),
+        proto::EnvironmentResizeExecutionMode::ApplyOnStart => (
+            "resources will be applied before the environment next starts",
+            Vec::new(),
+        ),
+        proto::EnvironmentResizeExecutionMode::Restart => (
+            "the local microVM must restart to apply resource changes",
+            vec![
+                "local public session counts are unavailable; restart may terminate active sessions"
+                    .to_owned(),
+            ],
+        ),
+        _ => return Err(local_internal()),
+    };
+    Ok(proto::EnvironmentResizePlan {
+        previous_resources: Some(previous).into(),
+        desired_resources: Some(desired).into(),
+        execution_mode: mode.into(),
+        reason: reason.to_owned(),
+        warnings,
+        ..Default::default()
+    })
+}
+
+fn disruption_policy(
+    value: buffa::EnumValue<proto::EnvironmentResizeDisruptionPolicy>,
+) -> Result<proto::EnvironmentResizeDisruptionPolicy, connectrpc::ConnectError> {
+    match value.as_known() {
+        Some(proto::EnvironmentResizeDisruptionPolicy::Unspecified)
+        | Some(proto::EnvironmentResizeDisruptionPolicy::LiveOnly) => {
+            Ok(proto::EnvironmentResizeDisruptionPolicy::LiveOnly)
+        }
+        Some(proto::EnvironmentResizeDisruptionPolicy::AllowRestart) => {
+            Ok(proto::EnvironmentResizeDisruptionPolicy::AllowRestart)
+        }
+        None => Err(connectrpc::ConnectError::invalid_argument(
+            "resize disruption_policy is invalid",
+        )),
+    }
+}
+
+fn deterministic_request_id(namespace: Uuid, environment: Uuid, request_id: &str) -> Uuid {
+    let mut digest = Sha256::new();
+    digest.update(b"codewire-local-public-resize-request-v1\0");
+    digest.update(namespace.as_bytes());
+    digest.update(environment.as_bytes());
+    digest.update(request_id.as_bytes());
+    let digest = digest.finalize();
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    bytes[6] = (bytes[6] & 0x0f) | 0x80;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    Uuid::from_bytes(bytes)
+}
+
+fn operation_public_request_id(operation: &OperationRecord) -> String {
+    operation
+        .payload
+        .get("public_request_id")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| operation.request_id.to_string())
+}
+
+fn operation_resources(
+    operation: &OperationRecord,
+    prefix: &str,
+) -> Result<proto::EnvironmentResources, connectrpc::ConnectError> {
+    let field = |name: &str| {
+        if prefix.is_empty() {
+            name.to_owned()
+        } else {
+            format!("{prefix}_{name}")
+        }
+    };
+    let vcpus = operation
+        .payload
+        .get(field("vcpus"))
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| value.checked_mul(1000))
+        .and_then(|value| i32::try_from(value).ok())
+        .ok_or_else(local_internal)?;
+    let memory_mb = operation
+        .payload
+        .get(field("memory_mib"))
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| i32::try_from(value).ok())
+        .ok_or_else(local_internal)?;
+    let disk_bytes = operation
+        .payload
+        .get(field("disk_bytes"))
+        .and_then(serde_json::Value::as_u64)
+        .filter(|value| value.is_multiple_of(GIB))
+        .ok_or_else(local_internal)?;
+    let disk_gb = i32::try_from(disk_bytes / GIB).map_err(|_| local_internal())?;
+    Ok(proto::EnvironmentResources {
+        cpu_millicores: vcpus,
+        memory_mb,
+        disk_gb,
+        ..Default::default()
+    })
+}
+
+fn operation_timestamp(unix_ms: i64) -> Result<Timestamp, connectrpc::ConnectError> {
+    let seconds = unix_ms.div_euclid(1000);
+    let nanos =
+        i32::try_from(unix_ms.rem_euclid(1000) * 1_000_000).map_err(|_| local_internal())?;
+    Timestamp::from_unix_checked(seconds, nanos).ok_or_else(local_internal)
+}
+
+fn public_resize_operation(
+    operation: &OperationRecord,
+    environment: &v1::Environment,
+) -> Result<proto::EnvironmentResizeOperation, connectrpc::ConnectError> {
+    if !matches!(
+        operation.kind,
+        OperationKind::Restart | OperationKind::GrowDisk
+    ) || operation.environment_id.map(|id| id.to_string()).as_deref()
+        != Some(environment.id.as_str())
+    {
+        return Err(connectrpc::ConnectError::not_found(
+            "local resize operation was not found",
+        ));
+    }
+    let previous = operation_resources(operation, "previous")?;
+    let desired = operation_resources(operation, "")?;
+    let applied = public_resources(environment)?;
+    let was_running = operation
+        .payload
+        .get("was_running")
+        .and_then(serde_json::Value::as_bool)
+        .ok_or_else(local_internal)?;
+    let planned_mode = if was_running {
+        proto::EnvironmentResizeExecutionMode::Restart
+    } else {
+        proto::EnvironmentResizeExecutionMode::ApplyOnStart
+    };
+    let policy = match operation
+        .payload
+        .get("public_disruption_policy")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+    {
+        "live_only" => proto::EnvironmentResizeDisruptionPolicy::LiveOnly,
+        "" | "allow_restart" => proto::EnvironmentResizeDisruptionPolicy::AllowRestart,
+        _ => return Err(local_internal()),
+    };
+    let (state, applied_mode, completed_at) = match operation.phase {
+        OperationPhase::Intent => (
+            proto::EnvironmentResizeOperationState::Pending,
+            proto::EnvironmentResizeExecutionMode::Unspecified,
+            None,
+        ),
+        OperationPhase::EffectApplied => (
+            if was_running {
+                proto::EnvironmentResizeOperationState::Restarting
+            } else {
+                proto::EnvironmentResizeOperationState::Applying
+            },
+            proto::EnvironmentResizeExecutionMode::Unspecified,
+            None,
+        ),
+        OperationPhase::Completed => (
+            proto::EnvironmentResizeOperationState::Completed,
+            planned_mode,
+            Some(operation_timestamp(operation.updated_unix_ms)?),
+        ),
+        OperationPhase::Failed | OperationPhase::Interrupted => (
+            proto::EnvironmentResizeOperationState::Failed,
+            proto::EnvironmentResizeExecutionMode::Unspecified,
+            Some(operation_timestamp(operation.updated_unix_ms)?),
+        ),
+    };
+    let failure = operation
+        .error_code
+        .as_ref()
+        .map(|code| proto::EnvironmentResizeFailure {
+            code: code.clone(),
+            message: "local resize operation failed".to_owned(),
+            ..Default::default()
+        });
+    Ok(proto::EnvironmentResizeOperation {
+        id: operation.operation_id.to_string(),
+        environment_id: environment.id.clone(),
+        request_id: operation_public_request_id(operation),
+        previous_resources: Some(previous).into(),
+        desired_resources: Some(desired).into(),
+        last_applied_resources: Some(applied).into(),
+        state: state.into(),
+        failure: failure.into(),
+        created_at: Some(operation_timestamp(operation.created_unix_ms)?).into(),
+        updated_at: Some(operation_timestamp(operation.updated_unix_ms)?).into(),
+        completed_at: completed_at.into(),
+        disruption_policy: policy.into(),
+        planned_mode: planned_mode.into(),
+        applied_mode: applied_mode.into(),
+        ..Default::default()
+    })
+}
+
+fn poll_interval(operation: &OperationRecord) -> buffa::MessageField<ProtoDuration> {
+    (!operation.phase.terminal())
+        .then(|| ProtoDuration::from_secs(1))
+        .into()
+}
+
+#[allow(refining_impl_trait)]
+impl proto::EnvironmentService for SupervisorRpc {
+    async fn list_environments(
+        &self,
+        _ctx: RequestContext,
+        request: ServiceRequest<'_, proto::ListEnvironmentsRequest>,
+    ) -> ServiceResult<proto::ListEnvironmentsResponse> {
+        let request = request.view();
+        if !request.page_token.is_empty() || request.page_size != 0 {
+            return Err(connectrpc::ConnectError::invalid_argument(
+                "local environment pagination is not supported",
+            ));
+        }
+        let namespace = self.public_namespace_id().await?;
+        require_namespace(namespace, request.org_id, true)?;
+        let state_filter = match request.state.as_known() {
+            Some(proto::EnvironmentState::Unspecified) => None,
+            Some(state) => Some(state),
+            None => {
+                return Err(connectrpc::ConnectError::invalid_argument(
+                    "environment state filter is invalid",
+                ));
+            }
+        };
+        let mut environments = Vec::new();
+        for environment in self.public_environments().await? {
+            let environment = public_environment(namespace, &environment)?;
+            if !request.r#type.is_empty() && request.r#type != "local" {
+                continue;
+            }
+            if state_filter.is_some_and(|state| environment.state.as_known() != Some(state)) {
+                continue;
+            }
+            environments.push(environment);
+        }
+        let poll = environments
+            .iter()
+            .any(|environment| {
+                environment.state.as_known() == Some(proto::EnvironmentState::Starting)
+            })
+            .then(|| ProtoDuration::from_secs(1));
+        connectrpc::Response::ok(proto::ListEnvironmentsResponse {
+            environments,
+            poll_interval: poll.into(),
+            ..Default::default()
+        })
+    }
+
+    async fn create_environment(
+        &self,
+        _ctx: RequestContext,
+        _request: ServiceRequest<'_, proto::CreateEnvironmentRequest>,
+    ) -> ServiceResult<proto::CreateEnvironmentResponse> {
+        unsupported()
+    }
+
+    async fn get_environment(
+        &self,
+        _ctx: RequestContext,
+        request: ServiceRequest<'_, proto::GetEnvironmentRequest>,
+    ) -> ServiceResult<proto::GetEnvironmentResponse> {
+        let request = request.view();
+        let (namespace, environment) = self
+            .public_environment(request.org_id, request.environment_id)
+            .await?;
+        let environment = public_environment(namespace, &environment)?;
+        let poll = (environment.state.as_known() == Some(proto::EnvironmentState::Starting))
+            .then(|| ProtoDuration::from_secs(1));
+        connectrpc::Response::ok(proto::GetEnvironmentResponse {
+            environment: Some(environment).into(),
+            poll_interval: poll.into(),
+            ..Default::default()
+        })
+    }
+
+    async fn plan_environment_resize(
+        &self,
+        _ctx: RequestContext,
+        request: ServiceRequest<'_, proto::PlanEnvironmentResizeRequest>,
+    ) -> ServiceResult<proto::PlanEnvironmentResizeResponse> {
+        let request = request.view();
+        let (vcpus, memory_mib, disk_bytes) =
+            private_resources(request.cpu_millicores, request.memory_mb, request.disk_gb)?;
+        let desired = proto::EnvironmentResources {
+            cpu_millicores: i32::try_from(vcpus * 1000).map_err(|_| local_internal())?,
+            memory_mb: i32::try_from(memory_mib).map_err(|_| local_internal())?,
+            disk_gb: i32::try_from(disk_bytes / GIB).map_err(|_| local_internal())?,
+            ..Default::default()
+        };
+        let (namespace, environment) = self
+            .public_environment(request.org_id, request.environment_id)
+            .await?;
+        let plan = resize_plan(&environment, desired)?;
+        connectrpc::Response::ok(proto::PlanEnvironmentResizeResponse {
+            plan: Some(plan).into(),
+            environment: Some(public_environment(namespace, &environment)?).into(),
+            ..Default::default()
+        })
+    }
+
+    async fn resize_environment(
+        &self,
+        _ctx: RequestContext,
+        request: ServiceRequest<'_, proto::ResizeEnvironmentRequest>,
+    ) -> ServiceResult<proto::ResizeEnvironmentResponse> {
+        let request = request.view();
+        if request.force {
+            return Err(connectrpc::ConnectError::unimplemented(
+                "force has no local runtime semantics",
+            ));
+        }
+        let public_request_id = request.request_id.trim();
+        if public_request_id.is_empty() || public_request_id.len() > 128 {
+            return Err(connectrpc::ConnectError::invalid_argument(
+                "request_id must contain 1 to 128 characters",
+            ));
+        }
+        let policy = disruption_policy(request.disruption_policy)?;
+        let (vcpus, memory_mib, disk_bytes) =
+            private_resources(request.cpu_millicores, request.memory_mb, request.disk_gb)?;
+        let desired = proto::EnvironmentResources {
+            cpu_millicores: i32::try_from(vcpus * 1000).map_err(|_| local_internal())?,
+            memory_mb: i32::try_from(memory_mib).map_err(|_| local_internal())?,
+            disk_gb: i32::try_from(disk_bytes / GIB).map_err(|_| local_internal())?,
+            ..Default::default()
+        };
+        let (namespace, environment) = self
+            .public_environment(request.org_id, request.environment_id)
+            .await?;
+        let mode = resize_mode(&environment, &desired)?;
+        if mode == proto::EnvironmentResizeExecutionMode::Noop {
+            return Err(connectrpc::ConnectError::invalid_argument(
+                "requested resources already match the local environment",
+            ));
+        }
+        if mode == proto::EnvironmentResizeExecutionMode::Restart
+            && policy != proto::EnvironmentResizeDisruptionPolicy::AllowRestart
+        {
+            return Err(connectrpc::ConnectError::failed_precondition(
+                "local resize requires allow_restart",
+            ));
+        }
+        let environment_id = parse_coordinate(&environment.id, "environment_id")?;
+        let request_id = deterministic_request_id(namespace, environment_id, public_request_id);
+        let operation = LocalSupervisorService::resize_environment(
+            self,
+            TonicRequest::new(v1::ResizeEnvironmentRequest {
+                name: environment.name.clone(),
+                vcpus,
+                memory_mib,
+                disk_bytes,
+                request_id: request_id.to_string(),
+                environment_id: environment.id.clone(),
+                public_request_id: public_request_id.to_owned(),
+                public_disruption_policy: match policy {
+                    proto::EnvironmentResizeDisruptionPolicy::LiveOnly => "live_only",
+                    proto::EnvironmentResizeDisruptionPolicy::AllowRestart => "allow_restart",
+                    _ => return Err(local_internal()),
+                }
+                .to_owned(),
+            }),
+        )
+        .await
+        .map(tonic::Response::into_inner)
+        .map_err(local_status)?;
+        let operation_id = parse_coordinate(&operation.operation_id, "operation_id")?;
+        let operation = self.operation(operation_id).await.map_err(local_status)?;
+        let poll_interval = poll_interval(&operation);
+        connectrpc::Response::ok(proto::ResizeEnvironmentResponse {
+            operation: Some(public_resize_operation(&operation, &environment)?).into(),
+            environment: Some(public_environment(namespace, &environment)?).into(),
+            poll_interval,
+            ..Default::default()
+        })
+    }
+
+    async fn get_environment_resize_operation(
+        &self,
+        _ctx: RequestContext,
+        request: ServiceRequest<'_, proto::GetEnvironmentResizeOperationRequest>,
+    ) -> ServiceResult<proto::GetEnvironmentResizeOperationResponse> {
+        let request = request.view();
+        let (namespace, environment) = self
+            .public_environment(request.org_id, request.environment_id)
+            .await?;
+        let operation_id = parse_coordinate(request.operation_id, "operation_id")?;
+        let operation = self.operation(operation_id).await.map_err(local_status)?;
+        let poll_interval = poll_interval(&operation);
+        connectrpc::Response::ok(proto::GetEnvironmentResizeOperationResponse {
+            operation: Some(public_resize_operation(&operation, &environment)?).into(),
+            environment: Some(public_environment(namespace, &environment)?).into(),
+            poll_interval,
+            ..Default::default()
+        })
+    }
+
+    async fn delete_environment(
+        &self,
+        _ctx: RequestContext,
+        request: ServiceRequest<'_, proto::DeleteEnvironmentRequest>,
+    ) -> ServiceResult<proto::DeleteEnvironmentResponse> {
+        let request = request.view();
+        let (_, environment) = self
+            .public_environment(request.org_id, request.environment_id)
+            .await?;
+        LocalSupervisorService::delete_environment(
+            self,
+            TonicRequest::new(v1::EnvironmentSelector {
+                name: environment.name,
+                request_id: Uuid::new_v4().to_string(),
+                environment_id: environment.id,
+            }),
+        )
+        .await
+        .map_err(local_status)?;
+        connectrpc::Response::ok(proto::DeleteEnvironmentResponse::default())
+    }
+
+    async fn stop_environment(
+        &self,
+        _ctx: RequestContext,
+        request: ServiceRequest<'_, proto::StopEnvironmentRequest>,
+    ) -> ServiceResult<proto::StopEnvironmentResponse> {
+        let request = request.view();
+        let (_, environment) = self
+            .public_environment(request.org_id, request.environment_id)
+            .await?;
+        LocalSupervisorService::stop_environment(
+            self,
+            TonicRequest::new(v1::EnvironmentSelector {
+                name: environment.name,
+                request_id: Uuid::new_v4().to_string(),
+                environment_id: environment.id,
+            }),
+        )
+        .await
+        .map_err(local_status)?;
+        connectrpc::Response::ok(proto::StopEnvironmentResponse {
+            status: "stop requested".to_owned(),
+            ..Default::default()
+        })
+    }
+
+    async fn start_environment(
+        &self,
+        _ctx: RequestContext,
+        request: ServiceRequest<'_, proto::StartEnvironmentRequest>,
+    ) -> ServiceResult<proto::StartEnvironmentResponse> {
+        let request = request.view();
+        let (_, environment) = self
+            .public_environment(request.org_id, request.environment_id)
+            .await?;
+        let retried = private_environment_state(environment.state)? == v1::EnvironmentState::Error;
+        LocalSupervisorService::start_environment(
+            self,
+            TonicRequest::new(v1::EnvironmentSelector {
+                name: environment.name,
+                request_id: Uuid::new_v4().to_string(),
+                environment_id: environment.id,
+            }),
+        )
+        .await
+        .map_err(local_status)?;
+        connectrpc::Response::ok(proto::StartEnvironmentResponse {
+            status: if retried {
+                "retry requested"
+            } else {
+                "start requested"
+            }
+            .to_owned(),
+            outcome: if retried {
+                proto::StartOutcome::Retried
+            } else {
+                proto::StartOutcome::Started
+            }
+            .into(),
+            ..Default::default()
+        })
+    }
+
+    async fn protect_environment(
+        &self,
+        _ctx: RequestContext,
+        _request: ServiceRequest<'_, proto::ProtectEnvironmentRequest>,
+    ) -> ServiceResult<proto::ProtectEnvironmentResponse> {
+        unsupported()
+    }
+
+    async fn unprotect_environment(
+        &self,
+        _ctx: RequestContext,
+        _request: ServiceRequest<'_, proto::UnprotectEnvironmentRequest>,
+    ) -> ServiceResult<proto::UnprotectEnvironmentResponse> {
+        unsupported()
+    }
+
+    async fn cancel_environment_deletion(
+        &self,
+        _ctx: RequestContext,
+        _request: ServiceRequest<'_, proto::CancelEnvironmentDeletionRequest>,
+    ) -> ServiceResult<proto::CancelEnvironmentDeletionResponse> {
+        unsupported()
+    }
+
+    async fn extend_environment_ttl(
+        &self,
+        _ctx: RequestContext,
+        _request: ServiceRequest<'_, proto::ExtendEnvironmentTtlRequest>,
+    ) -> ServiceResult<proto::ExtendEnvironmentTtlResponse> {
+        unsupported()
+    }
+
+    async fn get_environment_trust_report(
+        &self,
+        _ctx: RequestContext,
+        _request: ServiceRequest<'_, proto::GetEnvironmentTrustReportRequest>,
+    ) -> ServiceResult<proto::GetEnvironmentTrustReportResponse> {
+        unsupported()
+    }
+
+    async fn get_environment_daemon_status(
+        &self,
+        _ctx: RequestContext,
+        _request: ServiceRequest<'_, proto::GetEnvironmentDaemonStatusRequest>,
+    ) -> ServiceResult<proto::GetEnvironmentDaemonStatusResponse> {
+        unsupported()
+    }
+
+    async fn stream_environment_daemon_logs(
+        &self,
+        _ctx: RequestContext,
+        _request: ServiceRequest<'_, proto::StreamEnvironmentDaemonLogsRequest>,
+    ) -> ServiceResult<ServiceStream<proto::StreamEnvironmentDaemonLogsResponse>> {
+        unsupported()
+    }
+
+    async fn repair_environment_daemon(
+        &self,
+        _ctx: RequestContext,
+        _request: ServiceRequest<'_, proto::RepairEnvironmentDaemonRequest>,
+    ) -> ServiceResult<proto::RepairEnvironmentDaemonResponse> {
+        unsupported()
+    }
+
+    async fn list_environment_access(
+        &self,
+        _ctx: RequestContext,
+        _request: ServiceRequest<'_, proto::ListEnvironmentAccessRequest>,
+    ) -> ServiceResult<proto::ListEnvironmentAccessResponse> {
+        unsupported()
+    }
+
+    async fn grant_environment_access(
+        &self,
+        _ctx: RequestContext,
+        _request: ServiceRequest<'_, proto::GrantEnvironmentAccessRequest>,
+    ) -> ServiceResult<proto::GrantEnvironmentAccessResponse> {
+        unsupported()
+    }
+
+    async fn revoke_environment_access(
+        &self,
+        _ctx: RequestContext,
+        _request: ServiceRequest<'_, proto::RevokeEnvironmentAccessRequest>,
+    ) -> ServiceResult<proto::RevokeEnvironmentAccessResponse> {
+        unsupported()
+    }
+
+    async fn watch_environment_create(
+        &self,
+        _ctx: RequestContext,
+        _request: ServiceRequest<'_, proto::WatchEnvironmentCreateRequest>,
+    ) -> ServiceResult<ServiceStream<proto::WatchEnvironmentCreateResponse>> {
+        unsupported()
+    }
+
+    async fn stream_logs(
+        &self,
+        _ctx: RequestContext,
+        _request: ServiceRequest<'_, proto::StreamLogsRequest>,
+    ) -> ServiceResult<ServiceStream<proto::StreamLogsResponse>> {
+        unsupported()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    use codewire_proto::codewire::v1::EnvironmentServiceClient;
+    use connectrpc::Protocol;
+    use connectrpc::client::{ClientConfig, Http2Connection};
+    use prost::Message as _;
+
+    use crate::uds::{bind_owner_only_listener, owner_only_connector, remove_bound_socket};
+
+    #[test]
+    fn generated_environment_routes_have_one_explicit_local_semantic() {
+        let descriptor = prost_types::FileDescriptorSet::decode(
+            include_bytes!("../../../codewire-proto/codewire_descriptor.bin").as_slice(),
+        )
+        .unwrap();
+        let methods = descriptor
+            .file
+            .iter()
+            .filter(|file| file.package.as_deref() == Some("codewire.v1"))
+            .flat_map(|file| &file.service)
+            .find(|service| service.name.as_deref() == Some("EnvironmentService"))
+            .unwrap()
+            .method
+            .iter()
+            .map(|method| method.name.as_deref().unwrap().to_owned())
+            .collect::<BTreeSet<_>>();
+        let semantics = ENVIRONMENT_RPC_SEMANTICS
+            .iter()
+            .map(|entry| entry.spec.method().to_owned())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(methods, semantics);
+        assert_eq!(semantics.len(), ENVIRONMENT_RPC_SEMANTICS.len());
+        assert_eq!(
+            ENVIRONMENT_RPC_SEMANTICS
+                .iter()
+                .filter(|entry| entry.behavior == RpcBehavior::Local)
+                .count(),
+            8
+        );
+    }
+
+    #[test]
+    fn implemented_public_messages_have_exhaustive_field_semantics() {
+        let descriptor = prost_types::FileDescriptorSet::decode(
+            include_bytes!("../../../codewire-proto/codewire_descriptor.bin").as_slice(),
+        )
+        .unwrap();
+        let messages = descriptor
+            .file
+            .iter()
+            .flat_map(|file| {
+                let package = file.package.as_deref().unwrap_or_default();
+                file.message_type.iter().map(move |message| {
+                    (
+                        format!("{package}.{}", message.name.as_deref().unwrap()),
+                        message,
+                    )
+                })
+            })
+            .collect::<BTreeMap<_, _>>();
+        let semantics = PUBLIC_MESSAGE_SEMANTICS
+            .iter()
+            .map(|message| (message.full_name, message))
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(semantics.len(), PUBLIC_MESSAGE_SEMANTICS.len());
+
+        for (full_name, expected) in &semantics {
+            let descriptor = messages
+                .get(*full_name)
+                .unwrap_or_else(|| panic!("missing generated message descriptor for {full_name}"));
+            let actual_fields = descriptor
+                .field
+                .iter()
+                .map(|field| {
+                    (
+                        field.number.unwrap(),
+                        field.name.as_deref().unwrap().to_owned(),
+                    )
+                })
+                .collect::<BTreeSet<_>>();
+            let expected_fields = expected
+                .fields
+                .iter()
+                .map(|field| (field.number, field.name.to_owned()))
+                .collect::<BTreeSet<_>>();
+            assert_eq!(actual_fields, expected_fields, "{full_name}");
+            assert_eq!(expected_fields.len(), expected.fields.len(), "{full_name}");
+
+            for field_semantics in expected
+                .fields
+                .iter()
+                .filter(|field| field.behavior == FieldBehavior::Local)
+            {
+                let field = descriptor
+                    .field
+                    .iter()
+                    .find(|field| field.number == Some(field_semantics.number))
+                    .unwrap();
+                if field.r#type == Some(prost_types::field_descriptor_proto::Type::Message as i32)
+                    && field
+                        .type_name
+                        .as_deref()
+                        .is_some_and(|name| name.starts_with(".codewire.v1."))
+                {
+                    let nested = field.type_name.as_deref().unwrap().trim_start_matches('.');
+                    assert!(
+                        semantics.contains_key(nested),
+                        "local field {full_name}.{} lacks nested semantics for {nested}",
+                        field_semantics.name
+                    );
+                }
+            }
+        }
+
+        let environment_service = descriptor
+            .file
+            .iter()
+            .filter(|file| file.package.as_deref() == Some("codewire.v1"))
+            .flat_map(|file| &file.service)
+            .find(|service| service.name.as_deref() == Some("EnvironmentService"))
+            .unwrap();
+        for rpc in ENVIRONMENT_RPC_SEMANTICS
+            .iter()
+            .filter(|rpc| rpc.behavior == RpcBehavior::Local)
+        {
+            let method = environment_service
+                .method
+                .iter()
+                .find(|method| method.name.as_deref() == Some(rpc.spec.method()))
+                .unwrap();
+            for message in [method.input_type.as_deref(), method.output_type.as_deref()] {
+                let full_name = message.unwrap().trim_start_matches('.');
+                assert!(
+                    semantics.contains_key(full_name),
+                    "implemented RPC {} lacks field semantics for {full_name}",
+                    rpc.spec.method()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn connect_content_type_policy_never_admits_grpc_or_grpc_web() {
+        for allowed in [
+            "application/connect+json",
+            "application/connect+proto",
+            "application/json; charset=utf-8",
+            "application/proto",
+        ] {
+            assert!(connect_content_type(
+                &HeaderValue::from_str(allowed).unwrap()
+            ));
+        }
+        for rejected in [
+            "application/grpc",
+            "application/grpc+proto",
+            "application/grpc-web",
+            "application/grpc-web+proto",
+            "text/plain",
+        ] {
+            assert!(!connect_content_type(
+                &HeaderValue::from_str(rejected).unwrap()
+            ));
+        }
+    }
+
+    #[test]
+    fn public_resize_identity_and_resources_round_trip_through_the_durable_operation() {
+        let environment = super::super::tests::project_environment();
+        let private_environment = environment.proto(false);
+        let namespace = Uuid::new_v4();
+        let public_request_id = "codex-profile:secondary";
+        let durable_request_id =
+            deterministic_request_id(namespace, environment.id, public_request_id);
+        assert_eq!(
+            durable_request_id,
+            deterministic_request_id(namespace, environment.id, public_request_id)
+        );
+        assert_ne!(
+            durable_request_id,
+            deterministic_request_id(namespace, environment.id, "codex-profile:primary")
+        );
+        let operation = OperationRecord {
+            operation_id: Uuid::new_v4(),
+            request_id: durable_request_id,
+            environment_id: Some(environment.id),
+            kind: OperationKind::Restart,
+            phase: OperationPhase::Intent,
+            checkpoint: 0,
+            payload: serde_json::json!({
+                "name": "dev",
+                "vcpus": 3,
+                "memory_mib": 24 * 1024,
+                "disk_bytes": 24 * GIB,
+                "was_running": false,
+                "previous_vcpus": 2,
+                "previous_memory_mib": 16 * 1024,
+                "previous_disk_bytes": 20 * GIB,
+                "public_request_id": public_request_id,
+                "public_disruption_policy": "allow_restart",
+            }),
+            result: None,
+            error_code: None,
+            created_unix_ms: 1_000,
+            updated_unix_ms: 2_000,
+        };
+
+        let public = public_resize_operation(&operation, &private_environment).unwrap();
+        assert_eq!(public.environment_id, environment.id.to_string());
+        assert_eq!(public.request_id, public_request_id);
+        assert_eq!(public.previous_resources.cpu_millicores, 2_000);
+        assert_eq!(public.previous_resources.memory_mb, 16 * 1024);
+        assert_eq!(public.previous_resources.disk_gb, 20);
+        assert_eq!(public.desired_resources.cpu_millicores, 3_000);
+        assert_eq!(public.desired_resources.memory_mb, 24 * 1024);
+        assert_eq!(public.desired_resources.disk_gb, 24);
+        assert_eq!(
+            public.state.as_known(),
+            Some(proto::EnvironmentResizeOperationState::Pending)
+        );
+        assert_eq!(
+            public.disruption_policy.as_known(),
+            Some(proto::EnvironmentResizeDisruptionPolicy::AllowRestart)
+        );
+        assert_eq!(
+            public.planned_mode.as_known(),
+            Some(proto::EnvironmentResizeExecutionMode::ApplyOnStart)
+        );
+        assert!(private_resources(2_000, 16 * 1024, 1024).is_ok());
+        let too_large = private_resources(2_000, 16 * 1024, 1025).unwrap_err();
+        assert_eq!(too_large.code, connectrpc::ErrorCode::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn real_uds_connect_client_shares_the_owner_only_supervisor_endpoint() {
+        let (parent, core) =
+            super::super::tests::test_supervisor_core(super::super::tests::project_environment());
+        let socket = core.config.supervisor_socket();
+        let service = super::super::tests::test_supervisor_service(core);
+        let namespace = service.public_namespace_id().await.unwrap();
+        let (listener, socket_identity) = bind_owner_only_listener(&socket).unwrap();
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let server_service = service.clone();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, supervisor_router(server_service))
+                .with_graceful_shutdown(async move {
+                    let _ = shutdown_rx.await;
+                })
+                .await
+                .unwrap();
+        });
+
+        let authority: http::Uri = "http://codewire-local-control".parse().unwrap();
+        let transport = Http2Connection::connect_with_connector(
+            owner_only_connector(&socket).unwrap(),
+            authority.clone(),
+        )
+        .await
+        .unwrap()
+        .shared(32);
+        let client =
+            EnvironmentServiceClient::new(transport, ClientConfig::new(authority.clone()).proto());
+        let listed = client
+            .list_environments(proto::ListEnvironmentsRequest::default())
+            .await
+            .unwrap()
+            .into_owned();
+        assert_eq!(listed.environments.len(), 1);
+        let listed_environment = &listed.environments[0];
+        assert_eq!(listed_environment.org_id, namespace.to_string());
+        assert_eq!(listed_environment.name, "dev");
+        assert_eq!(listed_environment.r#type, "local");
+        assert_eq!(listed_environment.cpu_millicores, 2_000);
+        assert_eq!(listed_environment.memory_mb, 16 * 1024);
+        assert_eq!(listed_environment.disk_gb, 20);
+        assert_eq!(
+            listed_environment.state.as_known(),
+            Some(proto::EnvironmentState::Stopped)
+        );
+        let environment_id = listed_environment.id.clone();
+
+        let fetched = client
+            .get_environment(proto::GetEnvironmentRequest {
+                org_id: namespace.to_string(),
+                environment_id: environment_id.clone(),
+                ..Default::default()
+            })
+            .await
+            .unwrap()
+            .into_owned();
+        assert_eq!(fetched.environment.id, environment_id);
+        assert_eq!(fetched.environment.org_id, namespace.to_string());
+
+        let plan = client
+            .plan_environment_resize(proto::PlanEnvironmentResizeRequest {
+                org_id: namespace.to_string(),
+                environment_id: environment_id.clone(),
+                cpu_millicores: 3_000,
+                memory_mb: 16 * 1024,
+                disk_gb: 20,
+                ..Default::default()
+            })
+            .await
+            .unwrap()
+            .into_owned();
+        assert_eq!(
+            plan.plan.execution_mode.as_known(),
+            Some(proto::EnvironmentResizeExecutionMode::ApplyOnStart)
+        );
+
+        let stopped = client
+            .stop_environment(proto::StopEnvironmentRequest {
+                org_id: namespace.to_string(),
+                environment_id: environment_id.clone(),
+                ..Default::default()
+            })
+            .await
+            .unwrap()
+            .into_owned();
+        assert_eq!(stopped.status, "stop requested");
+
+        let create_error = client
+            .create_environment(proto::CreateEnvironmentRequest::default())
+            .await
+            .unwrap_err();
+        assert_eq!(create_error.code, connectrpc::ErrorCode::Unimplemented);
+
+        drop(client);
+        let grpc_transport = Http2Connection::connect_with_connector(
+            owner_only_connector(&socket).unwrap(),
+            authority.clone(),
+        )
+        .await
+        .unwrap()
+        .shared(32);
+        let grpc_client = EnvironmentServiceClient::new(
+            grpc_transport,
+            ClientConfig::new(authority)
+                .with_protocol(Protocol::Grpc)
+                .proto(),
+        );
+        assert!(
+            grpc_client
+                .list_environments(proto::ListEnvironmentsRequest::default())
+                .await
+                .is_err()
+        );
+
+        drop(grpc_client);
+        shutdown_tx.send(()).unwrap();
+        server.await.unwrap();
+        remove_bound_socket(&socket, &socket_identity).unwrap();
+        drop(parent);
+    }
+}

@@ -406,6 +406,12 @@ impl SupervisorStore {
         self.operation_events.clone()
     }
 
+    pub(crate) fn namespace_id(&self) -> Result<Uuid, SupervisorStoreError> {
+        metadata_value(&self.connection, "namespace_id")?
+            .ok_or(SupervisorStoreError::InvalidState)
+            .and_then(|value| parse_uuid(&value))
+    }
+
     pub(crate) fn deletion_trash_names(
         &self,
     ) -> Result<std::collections::BTreeSet<String>, SupervisorStoreError> {

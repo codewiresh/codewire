@@ -152,6 +152,9 @@ message EnvironmentSelector {
   // Required only for mutating lifecycle RPCs. Read-only lookups leave this
   // empty so retries cannot accidentally acquire mutation semantics.
   string request_id = 2;
+  // Optional stable identity precondition. Public adapters set this so a
+  // delete-and-recreate race can never redirect a mutation by name.
+  string environment_id = 3;
 }
 
 message ResizeEnvironmentRequest {
@@ -160,6 +163,13 @@ message ResizeEnvironmentRequest {
   uint32 memory_mib = 3;
   uint64 disk_bytes = 4;
   string request_id = 5;
+  // Optional stable identity precondition for public-coordinate adapters.
+  string environment_id = 6;
+  // Exact public idempotency key when request_id is its deterministic local
+  // UUID projection. Empty for callers of the private local API.
+  string public_request_id = 7;
+  // Empty for private callers; otherwise one of live_only or allow_restart.
+  string public_disruption_policy = 8;
 }
 
 message Environment {

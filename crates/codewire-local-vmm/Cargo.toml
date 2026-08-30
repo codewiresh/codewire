@@ -15,11 +15,17 @@ tonic = { workspace = true }
 tonic-prost = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
+axum = { workspace = true }
+buffa = { workspace = true }
+buffa-types = { workspace = true }
 bytes = { workspace = true }
+codewire-proto = { workspace = true }
 codewire-project = { workspace = true }
 codewire-daemon = { workspace = true }
 codewire-vmm-guest-probe = { workspace = true }
+connectrpc = { workspace = true, features = ["axum"] }
 futures = { workspace = true }
+http = { workspace = true }
 hyper-util = { workspace = true }
 libc = "0.2"
 oci-spec = { workspace = true }
@@ -42,5 +48,8 @@ zeroize = { workspace = true }
 tonic-prost-build = { workspace = true }
 
 [dev-dependencies]
+codewire-proto = { workspace = true, features = ["client"] }
+connectrpc = { workspace = true, features = ["client"] }
+prost-types = { workspace = true }
 tempfile = { workspace = true }
 wiremock = { workspace = true }

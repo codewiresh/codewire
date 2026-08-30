@@ -52,7 +52,7 @@ use crate::supervisor_store::{
     OperationKind, OperationPhase, OperationRecord, SupervisorOperationReader, SupervisorStore,
     SupervisorStoreError,
 };
-use crate::uds::{UdsError, bind_owner_only, connect_owner_only, remove_bound_socket};
+use crate::uds::{UdsError, bind_owner_only_listener, connect_owner_only, remove_bound_socket};
 use crate::workspace::{
     WorkspaceError, WorkspaceSource, cleanup_interrupted_workspace_provisioning,
     ensure_clean_git_workspace, inspect_clean_git_workspace,
@@ -69,6 +69,8 @@ const MAXIMUM_RUNNER_EVENTS: usize = 128;
 const DAEMON_VSOCK_PORT: u32 = 7777;
 const DEFAULT_OCI_ROOT_DISK_BYTES: u64 = 32 * 1024 * 1024 * 1024;
 const LINUX_CAPABILITY_VERSION_3: u32 = 0x2008_0522;
+
+mod public_api;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PreparedWorkspaceBoot {
@@ -278,6 +280,9 @@ impl NativeSupervisorClient {
                 memory_mib,
                 disk_bytes,
                 request_id: Uuid::new_v4().to_string(),
+                environment_id: String::new(),
+                public_request_id: String::new(),
+                public_disruption_policy: String::new(),
             })
             .await?
             .into_inner();
@@ -433,6 +438,7 @@ fn read_selector(name: &str) -> v1::EnvironmentSelector {
     v1::EnvironmentSelector {
         name: name.to_owned(),
         request_id: String::new(),
+        environment_id: String::new(),
     }
 }
 
@@ -440,6 +446,7 @@ fn mutation_selector(name: &str) -> v1::EnvironmentSelector {
     v1::EnvironmentSelector {
         name: name.to_owned(),
         request_id: Uuid::new_v4().to_string(),
+        environment_id: String::new(),
     }
 }
 
@@ -472,11 +479,11 @@ pub async fn serve_supervisor(config: NativeRuntimeConfig) -> Result<(), Supervi
         worker_running: Arc::new(AtomicBool::new(false)),
     };
     let socket = config.supervisor_socket();
-    let (incoming, socket_identity) = bind_owner_only(&socket)?;
+    let (listener, socket_identity) = bind_owner_only_listener(&socket)?;
     service.schedule_operation_worker(true);
-    let result = tonic::transport::Server::builder()
-        .add_service(LocalSupervisorServiceServer::new(service))
-        .serve_with_incoming_shutdown(incoming, async move {
+    let app = public_api::supervisor_router(service);
+    let result = axum::serve(listener, app)
+        .with_graceful_shutdown(async move {
             while shutdown_rx.changed().await.is_ok() {
                 if *shutdown_rx.borrow() {
                     break;
@@ -3026,9 +3033,11 @@ impl LocalSupervisorService for SupervisorRpc {
         &self,
         request: Request<v1::EnvironmentSelector>,
     ) -> Result<Response<v1::Operation>, Status> {
-        let (name, request_id) = mutation_selection(request.into_inner())?;
+        let (name, request_id, expected_environment_id) = mutation_selection(request.into_inner())?;
         let mut core = self.core.lock().await;
         core.reconcile(&name).await.map_err(Status::from)?;
+        let environment = core.environment(&name).map_err(Status::from)?.clone();
+        require_expected_environment(&environment, expected_environment_id)?;
         let existing = core
             .store
             .operation_by_request(request_id)
@@ -3036,6 +3045,7 @@ impl LocalSupervisorService for SupervisorRpc {
             .map_err(Status::from)?;
         let operation = if let Some(operation) = existing {
             if operation.kind != OperationKind::Start
+                || operation.environment_id != Some(environment.id)
                 || operation
                     .payload
                     .get("name")
@@ -3046,7 +3056,6 @@ impl LocalSupervisorService for SupervisorRpc {
             }
             operation
         } else {
-            let environment = core.environment(&name).map_err(Status::from)?.clone();
             let generation = if environment.state == StoredEnvironmentState::Running {
                 environment.generation
             } else {
@@ -3078,9 +3087,11 @@ impl LocalSupervisorService for SupervisorRpc {
         &self,
         request: Request<v1::EnvironmentSelector>,
     ) -> Result<Response<v1::Operation>, Status> {
-        let (name, request_id) = mutation_selection(request.into_inner())?;
+        let (name, request_id, expected_environment_id) = mutation_selection(request.into_inner())?;
         let core = self.core.lock().await;
-        let environment_id = core.environment(&name).map_err(Status::from)?.id;
+        let environment = core.environment(&name).map_err(Status::from)?;
+        require_expected_environment(environment, expected_environment_id)?;
+        let environment_id = environment.id;
         let payload = serde_json::json!({"name": name});
         let operation = core
             .store
@@ -3106,7 +3117,14 @@ impl LocalSupervisorService for SupervisorRpc {
     ) -> Result<Response<v1::Operation>, Status> {
         let request = request.into_inner();
         let request_id = validate_resize(&request).map_err(Status::from)?;
+        let expected_environment_id =
+            parse_optional_environment_id(&request.environment_id).map_err(Status::from)?;
         let core = self.core.lock().await;
+        let environment = core
+            .environment(&request.name)
+            .map_err(Status::from)?
+            .clone();
+        require_expected_environment(&environment, expected_environment_id)?;
 
         let existing = core
             .store
@@ -3117,11 +3135,12 @@ impl LocalSupervisorService for SupervisorRpc {
             let matches_request = matches!(
                 operation.kind,
                 OperationKind::Restart | OperationKind::GrowDisk
-            ) && operation
-                .payload
-                .get("name")
-                .and_then(serde_json::Value::as_str)
-                == Some(request.name.as_str())
+            ) && operation.environment_id == Some(environment.id)
+                && operation
+                    .payload
+                    .get("name")
+                    .and_then(serde_json::Value::as_str)
+                    == Some(request.name.as_str())
                 && operation
                     .payload
                     .get("vcpus")
@@ -3136,16 +3155,24 @@ impl LocalSupervisorService for SupervisorRpc {
                     .payload
                     .get("disk_bytes")
                     .and_then(serde_json::Value::as_u64)
-                    == Some(request.disk_bytes);
+                    == Some(request.disk_bytes)
+                && operation
+                    .payload
+                    .get("public_request_id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    == request.public_request_id
+                && operation
+                    .payload
+                    .get("public_disruption_policy")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    == request.public_disruption_policy;
             if !matches_request {
                 return Err(Status::aborted("local lifecycle request ID collision"));
             }
             operation
         } else {
-            let environment = core
-                .environment(&request.name)
-                .map_err(Status::from)?
-                .clone();
             if request.disk_bytes < environment.disk_bytes {
                 return Err(Status::invalid_argument(
                     "native local state disk shrink is not supported",
@@ -3166,6 +3193,11 @@ impl LocalSupervisorService for SupervisorRpc {
                 "memory_mib": request.memory_mib,
                 "disk_bytes": request.disk_bytes,
                 "was_running": was_running,
+                "previous_vcpus": environment.vcpus,
+                "previous_memory_mib": environment.memory_mib,
+                "previous_disk_bytes": environment.disk_bytes,
+                "public_request_id": request.public_request_id,
+                "public_disruption_policy": request.public_disruption_policy,
             });
             let kind = if !was_running
                 && request.vcpus == u32::from(environment.vcpus)
@@ -3193,7 +3225,7 @@ impl LocalSupervisorService for SupervisorRpc {
         &self,
         request: Request<v1::EnvironmentSelector>,
     ) -> Result<Response<v1::Operation>, Status> {
-        let (name, request_id) = mutation_selection(request.into_inner())?;
+        let (name, request_id, expected_environment_id) = mutation_selection(request.into_inner())?;
         let core = self.core.lock().await;
         let existing = core
             .store
@@ -3206,10 +3238,17 @@ impl LocalSupervisorService for SupervisorRpc {
                 if operation.kind != OperationKind::Delete || operation.payload != payload {
                     return Err(Status::aborted("local lifecycle request ID collision"));
                 }
+                if expected_environment_id.is_some()
+                    && operation.environment_id != expected_environment_id
+                {
+                    return Err(Status::not_found("local environment was not found"));
+                }
                 operation
             }
             None => {
-                let environment_id = core.environment(&name).map_err(Status::from)?.id;
+                let environment = core.environment(&name).map_err(Status::from)?;
+                require_expected_environment(environment, expected_environment_id)?;
+                let environment_id = environment.id;
                 core.store
                     .begin_operation(
                         request_id,
@@ -3745,10 +3784,35 @@ fn selected_name(request: v1::EnvironmentSelector) -> Result<String, Status> {
     Ok(request.name)
 }
 
-fn mutation_selection(request: v1::EnvironmentSelector) -> Result<(String, Uuid), Status> {
+fn mutation_selection(
+    request: v1::EnvironmentSelector,
+) -> Result<(String, Uuid, Option<Uuid>), Status> {
     let request_id = parse_request_id(&request.request_id).map_err(Status::from)?;
+    let environment_id =
+        parse_optional_environment_id(&request.environment_id).map_err(Status::from)?;
     let name = selected_name(request)?;
-    Ok((name, request_id))
+    Ok((name, request_id, environment_id))
+}
+
+fn parse_optional_environment_id(value: &str) -> Result<Option<Uuid>, SupervisorError> {
+    if value.is_empty() {
+        return Ok(None);
+    }
+    Uuid::parse_str(value)
+        .ok()
+        .filter(|id| !id.is_nil())
+        .map(Some)
+        .ok_or(SupervisorError::InvalidRequest)
+}
+
+fn require_expected_environment(
+    environment: &EnvironmentRecord,
+    expected: Option<Uuid>,
+) -> Result<(), Status> {
+    if expected.is_some_and(|expected| expected != environment.id) {
+        return Err(Status::not_found("local environment was not found"));
+    }
+    Ok(())
 }
 
 fn validate_create(request: &v1::CreateEnvironmentRequest) -> Result<Uuid, SupervisorError> {
@@ -3825,6 +3889,11 @@ fn validate_resize(request: &v1::ResizeEnvironmentRequest) -> Result<Uuid, Super
         || !(128..=65_536).contains(&request.memory_mib)
         || request.disk_bytes < crate::linux::state::MINIMUM_STATE_DISK_BYTES
         || !request.disk_bytes.is_multiple_of(1024 * 1024)
+        || request.public_request_id.len() > 128
+        || !matches!(
+            request.public_disruption_policy.as_str(),
+            "" | "live_only" | "allow_restart"
+        )
     {
         return Err(SupervisorError::InvalidRequest);
     }
@@ -4265,7 +4334,21 @@ fn resize_operation_parameters(
         .payload
         .as_object()
         .ok_or(SupervisorError::InvalidState)?;
-    if fields.len() != 5 {
+    const REQUIRED_FIELDS: [&str; 5] = ["name", "vcpus", "memory_mib", "disk_bytes", "was_running"];
+    const OPTIONAL_FIELDS: [&str; 5] = [
+        "previous_vcpus",
+        "previous_memory_mib",
+        "previous_disk_bytes",
+        "public_request_id",
+        "public_disruption_policy",
+    ];
+    if !REQUIRED_FIELDS
+        .iter()
+        .all(|field| fields.contains_key(*field))
+        || fields.keys().any(|field| {
+            !REQUIRED_FIELDS.contains(&field.as_str()) && !OPTIONAL_FIELDS.contains(&field.as_str())
+        })
+    {
         return Err(SupervisorError::InvalidState);
     }
     let vcpus = fields
@@ -4925,7 +5008,7 @@ mod tests {
         }
     }
 
-    fn project_environment() -> EnvironmentRecord {
+    pub(super) fn project_environment() -> EnvironmentRecord {
         let (project_spec_json, project_spec_sha256) = project_intent(2, 16 * 1024, 20);
         EnvironmentRecord {
             id: Uuid::new_v4(),
@@ -5030,7 +5113,9 @@ mod tests {
         operation
     }
 
-    fn test_supervisor_core(environment: EnvironmentRecord) -> (tempfile::TempDir, SupervisorCore) {
+    pub(super) fn test_supervisor_core(
+        environment: EnvironmentRecord,
+    ) -> (tempfile::TempDir, SupervisorCore) {
         let parent = tempfile::tempdir().unwrap();
         let root_path = parent.path().join("runtime");
         fs::create_dir(&root_path).unwrap();
@@ -5064,7 +5149,7 @@ mod tests {
         (parent, core)
     }
 
-    fn test_supervisor_service(core: SupervisorCore) -> SupervisorRpc {
+    pub(super) fn test_supervisor_service(core: SupervisorCore) -> SupervisorRpc {
         let operation_reader = SupervisorOperationReader::open(&core.root).unwrap();
         let operation_events = core.store.operation_events();
         let operation_progress = core.operation_progress.clone();
@@ -6644,6 +6729,7 @@ mod tests {
             .stop_environment(Request::new(v1::EnvironmentSelector {
                 name: "dev".to_owned(),
                 request_id: Uuid::new_v4().to_string(),
+                environment_id: String::new(),
             }))
             .await
             .unwrap()
@@ -6680,17 +6766,73 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn delete_replay_preserves_the_stable_environment_precondition() {
+        let environment = project_environment();
+        let environment_id = environment.id;
+        let request_id = Uuid::new_v4();
+        let (_parent, core) = test_supervisor_core(environment);
+        core.store
+            .begin_operation(
+                request_id,
+                Some(environment_id),
+                OperationKind::Delete,
+                &serde_json::json!({"name": "dev"}),
+            )
+            .unwrap();
+        let service = test_supervisor_service(core);
+
+        let error = service
+            .delete_environment(Request::new(v1::EnvironmentSelector {
+                name: "dev".to_owned(),
+                request_id: request_id.to_string(),
+                environment_id: Uuid::new_v4().to_string(),
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::NotFound);
+        assert_eq!(error.message(), "local environment was not found");
+    }
+
+    #[tokio::test]
+    async fn start_replay_cannot_cross_a_recreated_environment_identity() {
+        let environment = project_environment();
+        let current_environment_id = environment.id;
+        let prior_environment_id = Uuid::new_v4();
+        let request_id = Uuid::new_v4();
+        let (_parent, core) = test_supervisor_core(environment);
+        core.store
+            .begin_operation(
+                request_id,
+                Some(prior_environment_id),
+                OperationKind::Start,
+                &serde_json::json!({"name": "dev", "generation": 2}),
+            )
+            .unwrap();
+        let service = test_supervisor_service(core);
+
+        let error = service
+            .start_environment(Request::new(v1::EnvironmentSelector {
+                name: "dev".to_owned(),
+                request_id: request_id.to_string(),
+                environment_id: current_environment_id.to_string(),
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::Aborted);
+        assert_eq!(error.message(), "local lifecycle request ID collision");
+    }
+
+    #[tokio::test]
     async fn native_client_waits_for_the_durable_terminal_operation() {
         let (_parent, core) = test_supervisor_core(project_environment());
         let socket = core.config.supervisor_socket();
         let service = test_supervisor_service(core);
-        let (incoming, socket_identity) = bind_owner_only(&socket).unwrap();
+        let (listener, socket_identity) = bind_owner_only_listener(&socket).unwrap();
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
         let server_service = service.clone();
         let server = tokio::spawn(async move {
-            tonic::transport::Server::builder()
-                .add_service(LocalSupervisorServiceServer::new(server_service))
-                .serve_with_incoming_shutdown(incoming, async move {
+            axum::serve(listener, public_api::supervisor_router(server_service))
+                .with_graceful_shutdown(async move {
                     let _ = shutdown_rx.await;
                 })
                 .await
