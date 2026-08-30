@@ -56,13 +56,27 @@ base_settings="$kata_root/src/tools/genpolicy/genpolicy-settings.json"
 [[ -f "$rules" && -f "$base_settings" ]] || die 'Kata source is missing genpolicy rules or settings'
 [[ -f "$RUNTIME_CONTRACT" ]] || die 'Codewire genpolicy runtime contract is missing'
 
-[[ "$(jq -er '.schemaVersion' "$RUNTIME_CONTRACT")" == 1 ]] || \
+[[ "$(jq -er '.schemaVersion' "$RUNTIME_CONTRACT")" == 2 ]] || \
   die 'Codewire genpolicy runtime contract has an unsupported schema'
 oci_version="$(jq -er '.ociVersion' "$RUNTIME_CONTRACT")"
 settings_drop_in_name="$(jq -er '.kataSettingsDropIn' "$RUNTIME_CONTRACT")"
+privileged_caps_provider="$(jq -er '.privilegedCapabilities.provider' "$RUNTIME_CONTRACT")"
+privileged_caps_source_commit="$(jq -er '.privilegedCapabilities.sourceCommit' "$RUNTIME_CONTRACT")"
+dropped_privileged_caps="$(jq -cer '
+  .privilegedCapabilities.drop |
+  if type == "array" and length > 0 and length == (unique | length) and
+     all(.[]; test("^CAP_[A-Z0-9_]+$"))
+  then sort
+  else error("invalid privileged capability drop set")
+  end
+' "$RUNTIME_CONTRACT")"
 [[ "$oci_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die 'Codewire OCI version is malformed'
 [[ "$settings_drop_in_name" =~ ^[A-Za-z0-9._-]+\.json$ ]] || \
   die 'Codewire Kata settings drop-in name is malformed'
+[[ "$privileged_caps_provider" == talos ]] || \
+  die 'Codewire privileged capability provider must be Talos'
+[[ "$privileged_caps_source_commit" =~ ^[0-9a-f]{40}$ ]] || \
+  die 'Codewire Talos capability source commit is malformed'
 settings_drop_in="$kata_root/src/tools/genpolicy/drop-in-examples/$settings_drop_in_name"
 [[ -f "$settings_drop_in" ]] || die "Kata source is missing settings drop-in $settings_drop_in_name"
 [[ "$(jq -er '
@@ -72,6 +86,31 @@ settings_drop_in="$kata_root/src/tools/genpolicy/drop-in-examples/$settings_drop
   ) | .value] | if length == 1 then .[0] else error("invalid OCI drop-in") end
 ' "$settings_drop_in")" == "$oci_version" ]] || \
   die 'Kata settings drop-in does not match the Codewire OCI contract'
+
+base_privileged_caps="$(jq -cer '
+  .common.privileged_caps |
+  if type == "array" and length > 0 and length == (unique | length) and
+     all(.[]; test("^CAP_[A-Z0-9_]+$"))
+  then .
+  else error("invalid Kata privileged capability set")
+  end
+' "$base_settings")"
+unknown_dropped_caps="$(
+  jq -cn \
+    --argjson base "$base_privileged_caps" \
+    --argjson dropped "$dropped_privileged_caps" \
+    '$dropped - $base'
+)"
+[[ "$unknown_dropped_caps" == '[]' ]] || \
+  die "Codewire drops capabilities absent from Kata settings: $unknown_dropped_caps"
+privileged_caps="$(
+  jq -cn \
+    --argjson base "$base_privileged_caps" \
+    --argjson dropped "$dropped_privileged_caps" \
+    '$base - $dropped'
+)"
+[[ "$(jq -nr --argjson caps "$privileged_caps" '$caps | length')" -gt 0 ]] || \
+  die 'Codewire Talos privileged capability set is empty'
 
 genpolicy_bin="${KATA_GENPOLICY_BIN:-}"
 if [[ -z "$genpolicy_bin" ]]; then
@@ -108,6 +147,10 @@ settings="$workdir/genpolicy-settings"
 mkdir -p "$settings/genpolicy-settings.d"
 install -m 0600 "$base_settings" "$settings/genpolicy-settings.json"
 install -m 0600 "$settings_drop_in" "$settings/genpolicy-settings.d/$settings_drop_in_name"
+jq -n \
+  --argjson capabilities "$privileged_caps" \
+  '[{"op":"replace","path":"/common/privileged_caps","value":$capabilities}]' \
+  >"$settings/genpolicy-settings.d/30-talos-privileged-capabilities.json"
 # Both inputs are public and digest-pinned. Do not let the generator consult
 # ambient registry credentials merely because the workstation has a global
 # Docker credential helper configured.
@@ -122,7 +165,7 @@ generate_one() {
   local container_name="$2"
   local unsupported_run_as_non_root="$3"
   local input decoded policy
-  local encoded current policy_oci_versions
+  local encoded current policy_oci_versions policy_privileged_caps
 
   input="$workdir/$(basename "$source_manifest")"
   decoded="$input.initdata.toml"
@@ -167,6 +210,14 @@ generate_one() {
   )"
   [[ "$policy_oci_versions" == "$oci_version" ]] || \
     die "generated Agent policy OCI version is $policy_oci_versions, expected $oci_version"
+  policy_privileged_caps="$(
+    sed -n '/^policy_data := /,$p' "$policy" |
+      sed '1s/^policy_data := //' |
+      jq -ce '.common.privileged_caps'
+  )"
+  [[ "$(jq -cn --argjson caps "$policy_privileged_caps" '$caps | sort')" == \
+      "$(jq -cn --argjson caps "$privileged_caps" '$caps | sort')" ]] || \
+    die 'generated Agent policy privileged capabilities do not match the Talos runtime contract'
 
   if [[ "$mode" == update ]]; then
     CC_INIT_DATA="$encoded" yq -i \
@@ -185,3 +236,6 @@ generate_one "$SMOKE_DIR/confidential-smoke-job.yaml" smoke true
 generate_one "$SMOKE_DIR/confidential-attestation-job.yaml" attest false
 printf 'Kata genpolicy source: %s\n' "$kata_head"
 printf 'Containerd OCI contract: %s\n' "$oci_version"
+printf 'Talos capability source: %s\n' "$privileged_caps_source_commit"
+printf 'Talos-dropped privileged capabilities: %s\n' \
+  "$(jq -r 'join(",")' <<<"$dropped_privileged_caps")"
