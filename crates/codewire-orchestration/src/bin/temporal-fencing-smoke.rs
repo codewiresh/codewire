@@ -33,6 +33,9 @@ mod enabled {
         SandboxWorkerCfg, environment_per_env_template_name,
     };
     use codewire_orchestration::worker::env_data::{load_backend_row, load_environment};
+    use codewire_orchestration::worker::fencing_evidence::{
+        CLONE_FAIL_FIXTURE_URL, CLONE_SIBLING_FIXTURE_URL,
+    };
     use codewire_orchestration::worker::organization_deletion::OrganizationDeletionWorkflowInput;
     use codewire_proto::codewire::v1::{
         DeleteOrganizationRequest, DeleteOrganizationResponse, GetOrganizationRequest,
@@ -983,6 +986,11 @@ mod enabled {
 
         async fn parallel_clone_cleanup(&self) -> anyhow::Result<()> {
             let scenario = "parallel-clone";
+            codewire_project::validate_repository_destinations([
+                (CLONE_FAIL_FIXTURE_URL, ""),
+                (CLONE_SIBLING_FIXTURE_URL, ""),
+            ])
+            .context("parallel-clone fixture sources must pass production validation")?;
             let env_id = format!(
                 "env-wif-clone-{}",
                 &uuid::Uuid::new_v4().simple().to_string()[..8]
@@ -996,8 +1004,8 @@ mod enabled {
                 &env_id,
                 Some(json!({
                     "repos": [
-                        {"url": "kind-e2e://clone-fail"},
-                        {"url": "kind-e2e://clone-sibling"}
+                        {"url": CLONE_FAIL_FIXTURE_URL},
+                        {"url": CLONE_SIBLING_FIXTURE_URL}
                     ],
                     "include_org_secrets": false,
                     "include_user_secrets": false

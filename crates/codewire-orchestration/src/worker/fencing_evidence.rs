@@ -8,6 +8,9 @@ use std::io::Write;
 use std::path::Path;
 use std::time::Duration;
 
+pub const CLONE_FAIL_FIXTURE_URL: &str = "https://kind-e2e.invalid/clone-fail.git";
+pub const CLONE_SIBLING_FIXTURE_URL: &str = "https://kind-e2e.invalid/clone-sibling.git";
+
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum FencingEvidence {
@@ -155,19 +158,38 @@ pub fn fail_once_after_exec(environment_id: &str, phase: i32, pod_uid: &str) -> 
 /// Git installation.
 pub fn clone_fixture_command(url: &str) -> Option<Vec<String>> {
     match url {
-        "kind-e2e://clone-fail" => Some(vec![
+        CLONE_FAIL_FIXTURE_URL => Some(vec![
             "sh".into(),
             "-c".into(),
             "sleep 1; echo injected-clone-failure >&2; exit 42".into(),
         ]),
-        "kind-e2e://clone-sibling" => Some(vec!["sh".into(), "-c".into(), "sleep 60".into()]),
+        CLONE_SIBLING_FIXTURE_URL => Some(vec!["sh".into(), "-c".into(), "sleep 60".into()]),
         _ => None,
     }
 }
 
 #[cfg(all(test, feature = "kind-e2e"))]
 mod tests {
-    use super::safe_exec_wait_error;
+    use super::{
+        CLONE_FAIL_FIXTURE_URL, CLONE_SIBLING_FIXTURE_URL, clone_fixture_command,
+        safe_exec_wait_error,
+    };
+
+    #[test]
+    fn clone_fixtures_are_production_valid_remote_sources() {
+        let destinations = codewire_project::validate_repository_destinations([
+            (CLONE_FAIL_FIXTURE_URL, ""),
+            (CLONE_SIBLING_FIXTURE_URL, ""),
+        ])
+        .expect("Kind clone fixtures must pass production repository validation");
+
+        assert_eq!(
+            destinations,
+            ["/workspace/clone-fail", "/workspace/clone-sibling"]
+        );
+        assert!(clone_fixture_command(CLONE_FAIL_FIXTURE_URL).is_some());
+        assert!(clone_fixture_command(CLONE_SIBLING_FIXTURE_URL).is_some());
+    }
 
     #[test]
     fn exec_wait_evidence_preserves_structural_completion_errors() {
