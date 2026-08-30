@@ -270,16 +270,16 @@ rg -F 'privileged: true' "$SMOKE_DIR/confidential-attestation-job.yaml" >/dev/nu
   printf 'confidential attestation probe does not declare its measured guest-pull groups\n' >&2
   exit 1
 }
-rg -F 'name: codewire-commodity-runtime-smoke-v70' "$SMOKE_DIR/commodity-smoke-job.yaml" >/dev/null || {
-  printf 'commodity runtime probe generation is not v70\n' >&2
+rg -F 'name: codewire-commodity-runtime-smoke-v71' "$SMOKE_DIR/commodity-smoke-job.yaml" >/dev/null || {
+  printf 'commodity runtime probe generation is not v71\n' >&2
   exit 1
 }
-rg -F 'name: codewire-confidential-runtime-smoke-v70' "$SMOKE_DIR/confidential-smoke-job.yaml" >/dev/null || {
-  printf 'confidential runtime probe generation is not v70\n' >&2
+rg -F 'name: codewire-confidential-runtime-smoke-v71' "$SMOKE_DIR/confidential-smoke-job.yaml" >/dev/null || {
+  printf 'confidential runtime probe generation is not v71\n' >&2
   exit 1
 }
-rg -F 'name: codewire-confidential-snp-attestation-v70' "$SMOKE_DIR/confidential-attestation-job.yaml" >/dev/null || {
-  printf 'confidential attestation probe generation is not v70\n' >&2
+rg -F 'name: codewire-confidential-snp-attestation-v71' "$SMOKE_DIR/confidential-attestation-job.yaml" >/dev/null || {
+  printf 'confidential attestation probe generation is not v71\n' >&2
   exit 1
 }
 
@@ -363,6 +363,19 @@ validate_policy_privileged_caps() {
     '$capabilities | length == 39 and length == (unique | length) and
      index("CAP_MKNOD") != null and ($dropped - .) == $dropped' >/dev/null
 }
+validate_policy_stream_contract() {
+  local policy="$1"
+  local request_defaults
+
+  rg -Fx 'default ReadStreamRequest := false' "$policy" >/dev/null || return 1
+  request_defaults="$(
+    sed -n '/^policy_data := /,$p' "$policy" |
+      sed '1s/^policy_data := //' |
+      jq -ce '.request_defaults | {ReadStreamRequest, WriteStreamRequest, CloseStdinRequest}'
+  )" || return 1
+  [[ "$request_defaults" == \
+    '{"ReadStreamRequest":true,"WriteStreamRequest":false,"CloseStdinRequest":false}' ]]
+}
 validate_probe_initdata() {
   local manifest="$1"
   local container_name="$2"
@@ -383,6 +396,7 @@ validate_probe_initdata() {
   rg -F "\"$container_name\"" "$policy" >/dev/null || return 1
   validate_policy_oci_version "$policy" "$expected_oci_version" || return 1
   validate_policy_privileged_caps "$policy" || return 1
+  validate_policy_stream_contract "$policy" || return 1
 }
 
 validate_probe_initdata "$SMOKE_DIR/confidential-smoke-job.yaml" smoke || {
@@ -401,6 +415,28 @@ if validate_policy_oci_version "$wrong_oci_policy" "$expected_oci_version"; then
   printf 'confidential probe contract accepted the rejected OCI 1.1.0 policy version\n' >&2
   exit 1
 fi
+
+for invalid_stream_case in read-denied write-enabled close-enabled; do
+  invalid_stream_policy="$initdata_dir/$invalid_stream_case.rego"
+  case "$invalid_stream_case" in
+    read-denied)
+      request_defaults='{"ReadStreamRequest":false,"WriteStreamRequest":false,"CloseStdinRequest":false}'
+      ;;
+    write-enabled)
+      request_defaults='{"ReadStreamRequest":true,"WriteStreamRequest":true,"CloseStdinRequest":false}'
+      ;;
+    close-enabled)
+      request_defaults='{"ReadStreamRequest":true,"WriteStreamRequest":false,"CloseStdinRequest":true}'
+      ;;
+  esac
+  printf 'default ReadStreamRequest := false\npolicy_data := {"request_defaults":%s}\n' \
+    "$request_defaults" >"$invalid_stream_policy"
+  if validate_policy_stream_contract "$invalid_stream_policy"; then
+    printf 'confidential probe contract accepted invalid stream policy: %s\n' \
+      "$invalid_stream_case" >&2
+    exit 1
+  fi
+done
 
 missing_initdata="$initdata_dir/missing.yaml"
 malformed_initdata="$initdata_dir/malformed.yaml"
@@ -426,6 +462,8 @@ rg -F 'DOCKER_CONFIG="$workdir/docker-config"' "$PROBE_POLICY_GENERATOR" >/dev/n
 rg -F 'genpolicy-runtime-contract.json' "$PROBE_POLICY_GENERATOR" >/dev/null
 rg -F 'drop-in-examples/$settings_drop_in_name' "$PROBE_POLICY_GENERATOR" >/dev/null
 rg -F '30-talos-privileged-capabilities.json' "$PROBE_POLICY_GENERATOR" >/dev/null
+rg -F '40-probe-read-stream.json' "$PROBE_POLICY_GENERATOR" >/dev/null
+rg -F '/request_defaults/ReadStreamRequest' "$PROBE_POLICY_GENERATOR" >/dev/null
 
 runtime_configmap="$({
   jq -n '{

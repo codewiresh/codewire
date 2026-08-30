@@ -151,6 +151,14 @@ jq -n \
   --argjson capabilities "$privileged_caps" \
   '[{"op":"replace","path":"/common/privileged_caps","value":$capabilities}]' \
   >"$settings/genpolicy-settings.d/30-talos-privileged-capabilities.json"
+# The static probes are observed through the Kubernetes CRI log path after
+# completion. Kata services that path with ReadStreamRequest, independently of
+# the container's successful CreateContainer/WaitProcess lifecycle. Permit
+# stdout reads for these disposable one-container probe VMs while retaining the
+# base policy's deny defaults for stdin writes and closes.
+jq -n \
+  '[{"op":"replace","path":"/request_defaults/ReadStreamRequest","value":true}]' \
+  >"$settings/genpolicy-settings.d/40-probe-read-stream.json"
 # Both inputs are public and digest-pinned. Do not let the generator consult
 # ambient registry credentials merely because the workstation has a global
 # Docker credential helper configured.
@@ -165,7 +173,7 @@ generate_one() {
   local container_name="$2"
   local unsupported_run_as_non_root="$3"
   local input decoded policy
-  local encoded current policy_oci_versions policy_privileged_caps
+  local encoded current policy_oci_versions policy_privileged_caps policy_request_defaults
 
   input="$workdir/$(basename "$source_manifest")"
   decoded="$input.initdata.toml"
@@ -203,6 +211,8 @@ generate_one() {
   rg -Fx 'package agent_policy' "$policy" >/dev/null || die 'generated Init-Data lacks Agent policy'
   rg -F "$probe_digest" "$policy" >/dev/null || die 'generated Agent policy lacks the exact probe digest'
   rg -F "\"$container_name\"" "$policy" >/dev/null || die 'generated Agent policy lacks the expected container'
+  rg -Fx 'default ReadStreamRequest := false' "$policy" >/dev/null || \
+    die 'generated Agent policy lost its fail-closed ReadStream default'
   policy_oci_versions="$(
     rg -o '\"Version\": \"[^\"]+\"' "$policy" |
       sed -E 's/^\"Version\": \"([^\"]+)\"$/\1/' |
@@ -218,6 +228,14 @@ generate_one() {
   [[ "$(jq -cn --argjson caps "$policy_privileged_caps" '$caps | sort')" == \
       "$(jq -cn --argjson caps "$privileged_caps" '$caps | sort')" ]] || \
     die 'generated Agent policy privileged capabilities do not match the Talos runtime contract'
+  policy_request_defaults="$(
+    sed -n '/^policy_data := /,$p' "$policy" |
+      sed '1s/^policy_data := //' |
+      jq -ce '.request_defaults | {ReadStreamRequest, WriteStreamRequest, CloseStdinRequest}'
+  )"
+  [[ "$policy_request_defaults" == \
+      '{"ReadStreamRequest":true,"WriteStreamRequest":false,"CloseStdinRequest":false}' ]] || \
+    die 'generated Agent policy does not expose read-only CRI stream observability'
 
   if [[ "$mode" == update ]]; then
     CC_INIT_DATA="$encoded" yq -i \
