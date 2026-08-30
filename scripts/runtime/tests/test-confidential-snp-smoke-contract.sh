@@ -270,16 +270,16 @@ rg -F 'privileged: true' "$SMOKE_DIR/confidential-attestation-job.yaml" >/dev/nu
   printf 'confidential attestation probe does not declare its measured guest-pull groups\n' >&2
   exit 1
 }
-rg -F 'name: codewire-commodity-runtime-smoke-v69' "$SMOKE_DIR/commodity-smoke-job.yaml" >/dev/null || {
-  printf 'commodity runtime probe generation is not v69\n' >&2
+rg -F 'name: codewire-commodity-runtime-smoke-v70' "$SMOKE_DIR/commodity-smoke-job.yaml" >/dev/null || {
+  printf 'commodity runtime probe generation is not v70\n' >&2
   exit 1
 }
-rg -F 'name: codewire-confidential-runtime-smoke-v69' "$SMOKE_DIR/confidential-smoke-job.yaml" >/dev/null || {
-  printf 'confidential runtime probe generation is not v69\n' >&2
+rg -F 'name: codewire-confidential-runtime-smoke-v70' "$SMOKE_DIR/confidential-smoke-job.yaml" >/dev/null || {
+  printf 'confidential runtime probe generation is not v70\n' >&2
   exit 1
 }
-rg -F 'name: codewire-confidential-snp-attestation-v69' "$SMOKE_DIR/confidential-attestation-job.yaml" >/dev/null || {
-  printf 'confidential attestation probe generation is not v69\n' >&2
+rg -F 'name: codewire-confidential-snp-attestation-v70' "$SMOKE_DIR/confidential-attestation-job.yaml" >/dev/null || {
+  printf 'confidential attestation probe generation is not v70\n' >&2
   exit 1
 }
 
@@ -313,10 +313,26 @@ probe_digest="$(awk '$1 == "digest:" { print $2 }' "$SMOKE_DIR/kustomization.con
 }
 
 annotation_key='io.katacontainers.config.hypervisor.cc_init_data'
-[[ "$(jq -er '.schemaVersion' "$GENPOLICY_RUNTIME_CONTRACT")" == 1 ]]
+[[ "$(jq -er '.schemaVersion' "$GENPOLICY_RUNTIME_CONTRACT")" == 2 ]]
 expected_oci_version="$(jq -er '.ociVersion' "$GENPOLICY_RUNTIME_CONTRACT")"
 [[ "$expected_oci_version" == '1.3.0' ]] || {
   printf 'static probes no longer target the live containerd OCI request version\n' >&2
+  exit 1
+}
+[[ "$(jq -er '.privilegedCapabilities.provider' "$GENPOLICY_RUNTIME_CONTRACT")" == talos ]] || {
+  printf 'static probes no longer model the Talos privileged capability boundary\n' >&2
+  exit 1
+}
+[[ "$(jq -er '.privilegedCapabilities.sourceCommit' "$GENPOLICY_RUNTIME_CONTRACT")" == \
+    '47fcdfcc13fd72b45715853736a1cd6dd31e051e' ]] || {
+  printf 'static probes no longer bind the accepted Talos capability source\n' >&2
+  exit 1
+}
+expected_dropped_privileged_caps="$(
+  jq -cer '.privilegedCapabilities.drop | sort' "$GENPOLICY_RUNTIME_CONTRACT"
+)"
+[[ "$expected_dropped_privileged_caps" == '["CAP_SYS_BOOT","CAP_SYS_MODULE"]' ]] || {
+  printf 'static probes no longer drop Talos-ungrantable privileged capabilities\n' >&2
   exit 1
 }
 initdata_dir="$(mktemp -d)"
@@ -331,6 +347,21 @@ validate_policy_oci_version() {
       sort -u
   )"
   [[ "$versions" == "$expected" ]]
+}
+validate_policy_privileged_caps() {
+  local policy="$1"
+  local capabilities
+
+  capabilities="$(
+    sed -n '/^policy_data := /,$p' "$policy" |
+      sed '1s/^policy_data := //' |
+      jq -ce '.common.privileged_caps'
+  )" || return 1
+  jq -en \
+    --argjson capabilities "$capabilities" \
+    --argjson dropped "$expected_dropped_privileged_caps" \
+    '$capabilities | length == 39 and length == (unique | length) and
+     index("CAP_MKNOD") != null and ($dropped - .) == $dropped' >/dev/null
 }
 validate_probe_initdata() {
   local manifest="$1"
@@ -351,6 +382,7 @@ validate_probe_initdata() {
   rg -F "$probe_digest" "$policy" >/dev/null || return 1
   rg -F "\"$container_name\"" "$policy" >/dev/null || return 1
   validate_policy_oci_version "$policy" "$expected_oci_version" || return 1
+  validate_policy_privileged_caps "$policy" || return 1
 }
 
 validate_probe_initdata "$SMOKE_DIR/confidential-smoke-job.yaml" smoke || {
@@ -393,6 +425,7 @@ rg -F 'genpolicy reports $embedded_commit, but Kata source is $kata_head' \
 rg -F 'DOCKER_CONFIG="$workdir/docker-config"' "$PROBE_POLICY_GENERATOR" >/dev/null
 rg -F 'genpolicy-runtime-contract.json' "$PROBE_POLICY_GENERATOR" >/dev/null
 rg -F 'drop-in-examples/$settings_drop_in_name' "$PROBE_POLICY_GENERATOR" >/dev/null
+rg -F '30-talos-privileged-capabilities.json' "$PROBE_POLICY_GENERATOR" >/dev/null
 
 runtime_configmap="$({
   jq -n '{

@@ -1,5 +1,13 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "ociVersion": "1.3.0",
-  "kataSettingsDropIn": "20-oci-1.3.0-drop-in.json"
+  "kataSettingsDropIn": "20-oci-1.3.0-drop-in.json",
+  "privilegedCapabilities": {
+    "provider": "talos",
+    "sourceCommit": "47fcdfcc13fd72b45715853736a1cd6dd31e051e",
+    "drop": [
+      "CAP_SYS_BOOT",
+      "CAP_SYS_MODULE"
+    ]
+  }
 }
