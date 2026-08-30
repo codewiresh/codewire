@@ -16,6 +16,7 @@ use rusqlite::config::DbConfig;
 use rusqlite::{
     Connection, OpenFlags, OptionalExtension as _, Transaction, TransactionBehavior, params,
 };
+use tokio::sync::broadcast;
 use uuid::Uuid;
 
 use crate::linux::path::{PathError, PrivateRoot};
@@ -33,6 +34,7 @@ const DATABASE_SCHEMA_VERSION: i64 = 4;
 // bounded to 256 KiB; this higher bound covers JSON string escaping.
 const MAXIMUM_OPERATION_BYTES: usize = 2 * 1024 * 1024;
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+const OPERATION_EVENT_CAPACITY: usize = 256;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum OperationKind {
@@ -109,7 +111,7 @@ impl OperationPhase {
         }
     }
 
-    fn terminal(self) -> bool {
+    pub(crate) fn terminal(self) -> bool {
         matches!(self, Self::Completed | Self::Failed | Self::Interrupted)
     }
 }
@@ -125,11 +127,18 @@ pub(crate) struct OperationRecord {
     pub(crate) payload: serde_json::Value,
     pub(crate) result: Option<serde_json::Value>,
     pub(crate) error_code: Option<String>,
+    pub(crate) created_unix_ms: i64,
+    pub(crate) updated_unix_ms: i64,
 }
 
 pub(crate) struct SupervisorStore {
     connection: Connection,
     root: PathBuf,
+    operation_events: broadcast::Sender<OperationRecord>,
+}
+
+pub(crate) struct SupervisorOperationReader {
+    connection: Connection,
 }
 
 impl std::fmt::Debug for SupervisorStore {
@@ -168,6 +177,7 @@ impl SupervisorStore {
         connection.set_db_config(DbConfig::SQLITE_DBCONFIG_DEFENSIVE, true)?;
         connection.pragma_update(None, "foreign_keys", true)?;
         connection.pragma_update(None, "trusted_schema", false)?;
+        require_persistent_wal(&connection)?;
         validate_schema(&connection)?;
         validate_database(&connection)?;
         let reopened = root.open_regular(relative, false, None, false, Some(0o600))?;
@@ -178,6 +188,7 @@ impl SupervisorStore {
         let store = Self {
             connection,
             root: root.path().to_owned(),
+            operation_events: broadcast::channel(OPERATION_EVENT_CAPACITY).0,
         };
         let state = store.load_state()?;
         Ok((Some(store), state))
@@ -200,6 +211,7 @@ impl SupervisorStore {
         let store = Self {
             connection,
             root: root.path().to_owned(),
+            operation_events: broadcast::channel(OPERATION_EVENT_CAPACITY).0,
         };
         store.ensure_metadata(boot_id)?;
         let mut state = store.load_state()?;
@@ -266,6 +278,7 @@ impl SupervisorStore {
             return Err(SupervisorStoreError::RequestCollision);
         }
         transaction.commit()?;
+        let _ = self.operation_events.send(record.clone());
         Ok(record)
     }
 
@@ -288,6 +301,7 @@ impl SupervisorStore {
             error_code,
         )?;
         transaction.commit()?;
+        let _ = self.operation_events.send(record.clone());
         Ok(record)
     }
 
@@ -318,13 +332,14 @@ impl SupervisorStore {
         }
         transaction.commit()?;
         validate_database_files(&PrivateRoot::open(&self.root)?, true)?;
+        let _ = self.operation_events.send(record.clone());
         Ok(record)
     }
 
     pub(crate) fn pending_operations(&self) -> Result<Vec<OperationRecord>, SupervisorStoreError> {
         let mut statement = self.connection.prepare(
             "SELECT operation_id, request_id, environment_id, kind, phase, checkpoint,
-                    payload_json, result_json, error_code
+                    payload_json, result_json, error_code, created_unix_ms, updated_unix_ms
              FROM operations
              WHERE phase NOT IN ('completed', 'failed', 'interrupted')
              ORDER BY created_unix_ms, operation_id",
@@ -385,6 +400,10 @@ impl SupervisorStore {
     ) -> Result<Option<OperationRecord>, SupervisorStoreError> {
         validate_non_nil(request_id)?;
         operation_for_request(&self.connection, request_id)
+    }
+
+    pub(crate) fn operation_events(&self) -> broadcast::Sender<OperationRecord> {
+        self.operation_events.clone()
     }
 
     pub(crate) fn deletion_trash_names(
@@ -616,6 +635,38 @@ impl SupervisorStore {
     }
 }
 
+impl SupervisorOperationReader {
+    pub(crate) fn open(root: &PrivateRoot) -> Result<Self, SupervisorStoreError> {
+        let relative = Path::new(DATABASE_FILE);
+        let opened = root.open_regular(relative, false, None, false, Some(0o600))?;
+        let identity = opened.identity().clone();
+        drop(opened);
+        let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+        let connection = Connection::open_with_flags(root.path().join(relative), flags)?;
+        connection.busy_timeout(BUSY_TIMEOUT)?;
+        connection.set_db_config(DbConfig::SQLITE_DBCONFIG_DEFENSIVE, true)?;
+        connection.pragma_update(None, "foreign_keys", true)?;
+        connection.pragma_update(None, "trusted_schema", false)?;
+        require_persistent_wal(&connection)?;
+        validate_schema(&connection)?;
+        validate_database(&connection)?;
+        let reopened = root.open_regular(relative, false, None, false, Some(0o600))?;
+        if reopened.identity() != &identity {
+            return Err(SupervisorStoreError::DatabaseIdentityChanged);
+        }
+        validate_database_files(root, false)?;
+        Ok(Self { connection })
+    }
+
+    pub(crate) fn operation_by_id(
+        &self,
+        operation_id: Uuid,
+    ) -> Result<Option<OperationRecord>, SupervisorStoreError> {
+        validate_non_nil(operation_id)?;
+        operation_for_id(&self.connection, operation_id)
+    }
+}
+
 fn open_database(root: &PrivateRoot) -> Result<(Connection, bool), SupervisorStoreError> {
     let relative = Path::new(DATABASE_FILE);
     let (identity, initialize) = match root.open_regular(relative, true, None, false, Some(0o600)) {
@@ -646,7 +697,34 @@ fn configure_connection(connection: &Connection) -> Result<(), SupervisorStoreEr
     if !journal.eq_ignore_ascii_case("wal") {
         return Err(SupervisorStoreError::InvalidDatabase);
     }
+    require_persistent_wal(connection)?;
     connection.pragma_update(None, "wal_autocheckpoint", 100_i64)?;
+    Ok(())
+}
+
+fn require_persistent_wal(connection: &Connection) -> Result<(), SupervisorStoreError> {
+    fn control(connection: &Connection, value: &mut i32) -> i32 {
+        // SAFETY: the connection remains borrowed for the call, `main` is a
+        // static NUL-terminated schema name, and this opcode reads or writes
+        // exactly the pointed-to integer.
+        unsafe {
+            rusqlite::ffi::sqlite3_file_control(
+                connection.handle(),
+                c"main".as_ptr(),
+                rusqlite::ffi::SQLITE_FCNTL_PERSIST_WAL,
+                std::ptr::from_mut(value).cast(),
+            )
+        }
+    }
+
+    let mut enabled = 1;
+    if control(connection, &mut enabled) != rusqlite::ffi::SQLITE_OK {
+        return Err(SupervisorStoreError::InvalidDatabase);
+    }
+    let mut observed = -1;
+    if control(connection, &mut observed) != rusqlite::ffi::SQLITE_OK || observed != 1 {
+        return Err(SupervisorStoreError::InvalidDatabase);
+    }
     Ok(())
 }
 
@@ -973,7 +1051,7 @@ fn operation_for_request(
     connection
         .query_row(
             "SELECT operation_id, request_id, environment_id, kind, phase, checkpoint,
-                    payload_json, result_json, error_code
+                    payload_json, result_json, error_code, created_unix_ms, updated_unix_ms
              FROM operations WHERE request_id = ?1",
             [request_id.to_string()],
             decode_operation_row,
@@ -989,7 +1067,7 @@ fn operation_for_id(
     connection
         .query_row(
             "SELECT operation_id, request_id, environment_id, kind, phase, checkpoint,
-                    payload_json, result_json, error_code
+                    payload_json, result_json, error_code, created_unix_ms, updated_unix_ms
              FROM operations WHERE operation_id = ?1",
             [operation_id.to_string()],
             decode_operation_row,
@@ -1027,6 +1105,9 @@ fn advance_operation_in_transaction(
     if current.checkpoint != expected_checkpoint || !valid_phase_transition(current.phase, phase) {
         return Err(SupervisorStoreError::JournalConflict);
     }
+    // Wall clocks can step backwards. Public operation timestamps must remain
+    // monotonic even when the host clock is corrected during a long boot.
+    let updated_unix_ms = unix_millis()?.max(current.updated_unix_ms);
     let updated = transaction.execute(
         "UPDATE operations \
          SET phase = ?1, checkpoint = ?2, result_json = ?3, error_code = ?4, updated_unix_ms = ?5 \
@@ -1036,7 +1117,7 @@ fn advance_operation_in_transaction(
             i64::from(next_checkpoint),
             result_bytes,
             error_code,
-            unix_millis()?,
+            updated_unix_ms,
             operation_id.to_string(),
             i64::from(expected_checkpoint),
         ],
@@ -1059,6 +1140,8 @@ fn decode_operation_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<OperationRe
     let payload = row.get::<_, Vec<u8>>(6)?;
     let result = row.get::<_, Option<Vec<u8>>>(7)?;
     let error_code = row.get::<_, Option<String>>(8)?;
+    let created_unix_ms = row.get::<_, i64>(9)?;
+    let updated_unix_ms = row.get::<_, i64>(10)?;
     decode_operation(
         &operation_id,
         &request_id,
@@ -1069,6 +1152,8 @@ fn decode_operation_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<OperationRe
         &payload,
         result.as_deref(),
         error_code,
+        created_unix_ms,
+        updated_unix_ms,
     )
     .map_err(|error| {
         rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(error))
@@ -1086,7 +1171,12 @@ fn decode_operation(
     payload: &[u8],
     result: Option<&[u8]>,
     error_code: Option<String>,
+    created_unix_ms: i64,
+    updated_unix_ms: i64,
 ) -> Result<OperationRecord, SupervisorStoreError> {
+    if created_unix_ms < 0 || updated_unix_ms < created_unix_ms {
+        return Err(SupervisorStoreError::InvalidOperation);
+    }
     let checkpoint =
         u32::try_from(checkpoint).map_err(|_| SupervisorStoreError::InvalidOperation)?;
     let payload = decode_operation_json(payload)?;
@@ -1103,6 +1193,8 @@ fn decode_operation(
         payload,
         result,
         error_code,
+        created_unix_ms,
+        updated_unix_ms,
     })
 }
 
@@ -1483,6 +1575,70 @@ mod tests {
     }
 
     #[test]
+    fn wal_sidecars_remain_named_across_independent_readers_and_reopen() {
+        let (_parent, root) = root();
+        let database = root.path().join(DATABASE_FILE);
+        let operation_id;
+        {
+            let (store, _) = SupervisorStore::open_for_boot(&root, "boot-a").unwrap();
+            let reader = SupervisorOperationReader::open(&root).unwrap();
+            let operation = store
+                .begin_operation(
+                    Uuid::new_v4(),
+                    Some(Uuid::new_v4()),
+                    OperationKind::Start,
+                    &serde_json::json!({"name": "dev", "generation": 1}),
+                )
+                .unwrap();
+            operation_id = operation.operation_id;
+
+            let external = Connection::open_with_flags(
+                &database,
+                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            )
+            .unwrap();
+            assert_eq!(
+                operation_for_id(&external, operation_id).unwrap(),
+                Some(operation.clone())
+            );
+            drop(external);
+            for sidecar in [DATABASE_WAL_FILE, DATABASE_SHM_FILE] {
+                let metadata = fs::symlink_metadata(root.path().join(sidecar)).unwrap();
+                assert!(metadata.is_file());
+                assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+            }
+
+            let completed = store
+                .advance_operation(
+                    operation_id,
+                    operation.checkpoint,
+                    OperationPhase::Completed,
+                    Some(&serde_json::json!({"name": "dev"})),
+                    None,
+                )
+                .unwrap();
+            assert_eq!(
+                reader.operation_by_id(operation_id).unwrap(),
+                Some(completed)
+            );
+        }
+
+        for sidecar in [DATABASE_WAL_FILE, DATABASE_SHM_FILE] {
+            let metadata = fs::symlink_metadata(root.path().join(sidecar)).unwrap();
+            assert!(metadata.is_file());
+            assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+        }
+        let (reopened, _) = SupervisorStore::open_for_boot(&root, "boot-a").unwrap();
+        assert!(
+            operation_for_id(&reopened.connection, operation_id)
+                .unwrap()
+                .unwrap()
+                .phase
+                .terminal()
+        );
+    }
+
+    #[test]
     fn database_reopen_on_another_boot_stops_every_environment() {
         let (_parent, root) = root();
         let (store, _) = SupervisorStore::open_for_boot(&root, "boot-a").unwrap();
@@ -1780,6 +1936,44 @@ mod tests {
             Err(SupervisorStoreError::RequestCollision)
         ));
         assert_eq!(store.pending_operations().unwrap(), vec![first]);
+    }
+
+    #[tokio::test]
+    async fn operation_reader_and_events_follow_the_durable_journal() {
+        let (_parent, root) = root();
+        let (store, _) = SupervisorStore::open_for_boot(&root, "boot-a").unwrap();
+        let reader = SupervisorOperationReader::open(&root).unwrap();
+        let mut events = store.operation_events().subscribe();
+        let operation = store
+            .begin_operation(
+                Uuid::new_v4(),
+                Some(Uuid::new_v4()),
+                OperationKind::Start,
+                &serde_json::json!({"name": "dev", "generation": 1}),
+            )
+            .unwrap();
+        assert_eq!(events.recv().await.unwrap(), operation);
+        assert_eq!(
+            reader.operation_by_id(operation.operation_id).unwrap(),
+            Some(operation.clone())
+        );
+
+        let completed = store
+            .advance_operation(
+                operation.operation_id,
+                operation.checkpoint,
+                OperationPhase::Completed,
+                Some(&serde_json::json!({"name": "dev"})),
+                None,
+            )
+            .unwrap();
+        assert!(completed.phase.terminal());
+        assert!(completed.updated_unix_ms >= completed.created_unix_ms);
+        assert_eq!(events.recv().await.unwrap(), completed);
+        assert_eq!(
+            reader.operation_by_id(operation.operation_id).unwrap(),
+            Some(completed)
+        );
     }
 
     #[test]

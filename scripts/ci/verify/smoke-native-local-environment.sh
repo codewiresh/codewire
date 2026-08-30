@@ -413,6 +413,16 @@ find_exact_supervisor_pid() {
   return 1
 }
 
+terminate_exact_supervisor() {
+  local pid
+  pid="$(find_exact_supervisor_pid)" || return 0
+  if ! kill -TERM -- "$pid" 2>/dev/null; then
+    find_exact_supervisor_pid >/dev/null 2>&1 && return 1
+    return 0
+  fi
+  wait_for_pid_exit "$pid"
+}
+
 owned_processes() {
   local proc cmdline
   for proc in /proc/[0-9]*; do
@@ -574,6 +584,9 @@ cleanup() {
       cleanup_status=1
     fi
   fi
+  if ! terminate_exact_supervisor; then
+    cleanup_status=1
+  fi
   if [[ "$status" -eq 0 && "$cleanup_status" -eq 0 ]]; then
     rm -rf -- "$SMOKE_ROOT"
   else
@@ -638,13 +651,20 @@ for sqlite_sidecar in "$STATE_ROOT/supervisor.db-wal" "$STATE_ROOT/supervisor.db
 done
 [[ "$(native_database_value contract)" == '1129797197:4:wal:ok' ]] ||
   die 'native supervisor database contract drifted'
+[[ "$(native_database_value journal_complete)" == yes ]] ||
+  die 'initial create returned before its lifecycle journal became terminal'
 [[ "$(native_database_value ownership)" == '64:6' ]] ||
   die 'native artifact generation or owned-object manifest was not recorded'
-ORIGINAL_ARTIFACT_GENERATION="$(native_database_value active_artifact_generation)"
+if ! ORIGINAL_ARTIFACT_GENERATION="$(native_database_value active_artifact_generation)"; then
+  die 'active runtime artifact generation is missing'
+fi
 [[ "$ORIGINAL_ARTIFACT_GENERATION" =~ ^[0-9a-f]{64}$ ]] ||
   die 'active runtime artifact generation is not an exact SHA-256 identity'
-[[ "$(native_database_value runner_artifact_generation)" == "$ORIGINAL_ARTIFACT_GENERATION" ]] ||
-  die 'initial runner did not use the active runtime artifact generation'
+if ! RUNNER_ARTIFACT_GENERATION="$(native_database_value runner_artifact_generation)"; then
+  die 'initial runner artifact generation is missing'
+fi
+[[ "$RUNNER_ARTIFACT_GENERATION" == "$ORIGINAL_ARTIFACT_GENERATION" ]] ||
+  die "initial runner artifact generation $RUNNER_ARTIFACT_GENERATION does not match active generation $ORIGINAL_ARTIFACT_GENERATION"
 [[ -f "$STATE_ROOT/engine/runtime-artifacts/generations/$ORIGINAL_ARTIFACT_GENERATION.json" ]] ||
   die 'active runtime artifact generation manifest is missing'
 [[ "$(runtime_artifact_manifest_count)" == 1 ]] ||
@@ -751,6 +771,8 @@ run_cw logs "$NAME" "$SESSION_ID" --raw
 log 'checking stopped offline restart remains pinned after the installed artifact lock advances'
 run_cw env stop --local "$NAME" --output json
 jq -e '.state == "stopped"' "$LAST_STDOUT" >/dev/null || die 'native environment did not stop'
+[[ "$(native_database_value journal_complete)" == yes ]] ||
+  die 'native stop returned before its lifecycle journal became terminal'
 STOPPED_RUNNER_PID="$(native_database_value runner_pid)"
 STOPPED_SUPERVISOR_PID="$(find_exact_supervisor_pid)" ||
   die 'native supervisor process was not found before installed artifact advance'
@@ -761,6 +783,8 @@ wait_for_pid_exit "$STOPPED_SUPERVISOR_PID" ||
   die 'pidfd runner kill did not target the stopped persisted process identity'
 wait_for_pid_death "$STOPPED_RUNNER_PID" ||
   die 'stopped runner remained live before installed artifact advance'
+[[ "$(native_database_value journal_complete)" == yes ]] ||
+  die 'committed lifecycle journal regressed after exact supervisor and runner death'
 prepare_advanced_artifact_source
 ARTIFACT_ROOT="$ADVANCED_ARTIFACT_ROOT"
 ARTIFACT_LOCK="$ADVANCED_ARTIFACT_LOCK"
@@ -863,12 +887,12 @@ rg -qF 'native-workspace-ok' "$LAST_STDOUT" || die 'snapshot did not survive exa
 log 'deleting the environment and proving complete owned-object cleanup'
 run_cw env rm --local "$NAME" --yes
 ENV_CREATED=0
-for _attempt in {1..100}; do
-  [[ -z "$(owned_processes)" ]] && break
-  sleep 0.05
-done
-[[ -z "$(owned_processes)" ]] || die 'an owned supervisor, runner, or VMM process remained after delete'
-[[ -z "$(find "$STATE_ROOT" -type s -print -quit)" ]] || die 'an owned Unix socket remained after delete'
+DELETED_SUPERVISOR_PID="$(find_exact_supervisor_pid)" ||
+  die 'per-user supervisor did not survive final environment deletion'
+[[ "$(owned_processes)" == "$DELETED_SUPERVISOR_PID" ]] ||
+  die 'a runner or VMM process remained after delete'
+[[ "$(find "$STATE_ROOT" -type s -print)" == "$STATE_ROOT/supervisor.sock" ]] ||
+  die 'final deletion did not retain exactly the per-user supervisor socket'
 [[ -z "$(find "$STATE_ROOT/engine/vms" -mindepth 1 -print -quit)" ]] || die 'owned VM disk or state remained after delete'
 [[ -z "$(find "$STATE_ROOT/engine/trash" -mindepth 1 -print -quit)" ]] ||
   die 'owned VM trash generation remained after delete'
@@ -889,5 +913,7 @@ jq -e '.orphans == [] and .reclaimable_bytes == 0' "$LAST_STDOUT" >/dev/null ||
 if rg -qF 'synthetic-platform-key-must-not-be-used' "$TRANSCRIPT"; then
   die 'synthetic platform credential appeared in CLI output'
 fi
+terminate_exact_supervisor || die 'bounded supervisor teardown failed'
+[[ -z "$(owned_processes)" ]] || die 'an owned process remained after bounded smoke teardown'
 
 log 'PASS (Linux/KVM native cw product flow)'

@@ -5,20 +5,23 @@ package codewire.local.v1;
 // This package is a private host-process contract. It is deliberately not
 // part of codewire.v1 and carries no platform compatibility promise.
 service LocalSupervisorService {
-  rpc CreateEnvironment(CreateEnvironmentRequest) returns (Environment);
+  rpc CreateEnvironment(CreateEnvironmentRequest) returns (Operation);
   rpc ListEnvironments(ListEnvironmentsRequest) returns (ListEnvironmentsResponse);
   rpc GetEnvironment(EnvironmentSelector) returns (Environment);
   rpc ListOrphans(ListOrphansRequest) returns (ListOrphansResponse);
-  rpc StartEnvironment(EnvironmentSelector) returns (Environment);
-  rpc StopEnvironment(EnvironmentSelector) returns (Environment);
-  rpc ResizeEnvironment(ResizeEnvironmentRequest) returns (Environment);
-  rpc DeleteEnvironment(EnvironmentSelector) returns (DeleteEnvironmentResponse);
+  rpc StartEnvironment(EnvironmentSelector) returns (Operation);
+  rpc StopEnvironment(EnvironmentSelector) returns (Operation);
+  rpc ResizeEnvironment(ResizeEnvironmentRequest) returns (Operation);
+  rpc DeleteEnvironment(EnvironmentSelector) returns (Operation);
+  rpc GetOperation(GetOperationRequest) returns (Operation);
+  rpc WatchOperation(WatchOperationRequest) returns (stream Operation);
   rpc GetDaemonAccess(EnvironmentSelector) returns (DaemonAccess);
 }
 
 service EnvironmentRunnerService {
   rpc AdoptRunner(AdoptRunnerRequest) returns (RunnerInfo);
   rpc GetRunnerInfo(GetRunnerInfoRequest) returns (RunnerInfo);
+  rpc WatchRunner(WatchRunnerRequest) returns (stream RunnerEvent);
   rpc StartVm(StartVmRequest) returns (RunnerInfo);
   rpc StopVm(StopVmRequest) returns (RunnerInfo);
   rpc GrowStateDisk(GrowStateDiskRequest) returns (GrowStateDiskResponse);
@@ -35,6 +38,100 @@ enum EnvironmentState {
   ENVIRONMENT_STATE_RUNNING = 3;
   ENVIRONMENT_STATE_ERROR = 4;
   ENVIRONMENT_STATE_ORPHANED = 5;
+}
+
+enum OperationKind {
+  OPERATION_KIND_UNSPECIFIED = 0;
+  OPERATION_KIND_CREATE = 1;
+  OPERATION_KIND_START = 2;
+  OPERATION_KIND_STOP = 3;
+  OPERATION_KIND_RESTART = 4;
+  OPERATION_KIND_UPDATE_WORKSPACE = 5;
+  OPERATION_KIND_ROLLBACK_WORKSPACE = 6;
+  OPERATION_KIND_DELETE = 7;
+  OPERATION_KIND_GROW_DISK = 8;
+  OPERATION_KIND_RECONCILE = 9;
+}
+
+enum OperationPhase {
+  OPERATION_PHASE_UNSPECIFIED = 0;
+  OPERATION_PHASE_INTENT = 1;
+  OPERATION_PHASE_EFFECT_APPLIED = 2;
+  OPERATION_PHASE_COMPLETED = 3;
+  OPERATION_PHASE_FAILED = 4;
+  OPERATION_PHASE_INTERRUPTED = 5;
+}
+
+// The next bounded, auditable lifecycle effect. Raw host paths, process output,
+// guest serial data, credentials and daemon capabilities never enter this API.
+enum OperationStage {
+  OPERATION_STAGE_UNSPECIFIED = 0;
+  OPERATION_STAGE_RECORD_ENVIRONMENT = 1;
+  OPERATION_STAGE_PROVISION_WORKSPACE = 2;
+  OPERATION_STAGE_STAGE_WORKSPACE_GENERATION = 3;
+  OPERATION_STAGE_RECORD_STARTING = 4;
+  OPERATION_STAGE_ENSURE_RUNNER = 5;
+  OPERATION_STAGE_START_VM = 6;
+  OPERATION_STAGE_RECORD_RUNNING = 7;
+  OPERATION_STAGE_STOP_VM = 8;
+  OPERATION_STAGE_RECORD_STOPPED = 9;
+  OPERATION_STAGE_GROW_DISK = 10;
+  OPERATION_STAGE_RECORD_RESOURCES = 11;
+  OPERATION_STAGE_RESTART_VM = 12;
+  OPERATION_STAGE_RECORD_RESIZE_OUTCOME = 13;
+  OPERATION_STAGE_STAGE_ROLLBACK_GENERATION = 14;
+  OPERATION_STAGE_RESTORE_DESIRED_POWER = 15;
+  OPERATION_STAGE_RECORD_WORKSPACE_TRANSITION = 16;
+  OPERATION_STAGE_PREPARE_DELETE = 17;
+  OPERATION_STAGE_MOVE_TO_TRASH = 18;
+  OPERATION_STAGE_REMOVE_ENVIRONMENT = 19;
+  OPERATION_STAGE_CLEANUP_TRASH = 20;
+  OPERATION_STAGE_RECORD_OBSERVATION = 21;
+  OPERATION_STAGE_FINALIZING = 22;
+  OPERATION_STAGE_COMPLETED = 23;
+  OPERATION_STAGE_FAILED = 24;
+  OPERATION_STAGE_INTERRUPTED = 25;
+}
+
+message Operation {
+  string operation_id = 1;
+  string request_id = 2;
+  string environment_id = 3;
+  OperationKind kind = 4;
+  OperationPhase phase = 5;
+  uint32 checkpoint = 6;
+  OperationStage stage = 7;
+  int64 created_unix_ms = 8;
+  int64 updated_unix_ms = 9;
+  string error_code = 10;
+  OperationResult result = 11;
+  uint64 progress_sequence = 12;
+  RunnerStage runner_stage = 13;
+  uint64 guest_sequence = 14;
+  GuestBootStage guest_stage = 15;
+  string runner_error_code = 16;
+}
+
+message OperationResult {
+  oneof value {
+    EnvironmentOperationResult environment = 1;
+    DeleteEnvironmentResponse deletion = 2;
+  }
+}
+
+message EnvironmentOperationResult {
+  string environment_id = 1;
+  string name = 2;
+  EnvironmentState state = 3;
+  uint64 generation = 4;
+}
+
+message GetOperationRequest {
+  string operation_id = 1;
+}
+
+message WatchOperationRequest {
+  string operation_id = 1;
 }
 
 message CreateEnvironmentRequest {
@@ -129,6 +226,57 @@ message RunnerInfo {
   uint64 generation = 3;
   // Exact immutable runtime bundle selected when this runner process started.
   string artifact_generation = 4;
+}
+
+enum RunnerStage {
+  RUNNER_STAGE_UNSPECIFIED = 0;
+  RUNNER_STAGE_WAITING_ADOPTION = 1;
+  RUNNER_STAGE_READY = 2;
+  RUNNER_STAGE_PREPARING_VM = 3;
+  RUNNER_STAGE_STARTING_VMM = 4;
+  RUNNER_STAGE_WAITING_GUEST = 5;
+  RUNNER_STAGE_GUEST_INIT = 6;
+  RUNNER_STAGE_DAEMON_READY = 7;
+  RUNNER_STAGE_STOPPING_VM = 8;
+  RUNNER_STAGE_STOPPED = 9;
+  RUNNER_STAGE_GROWING_DISK = 10;
+  RUNNER_STAGE_RETIRING = 11;
+  RUNNER_STAGE_ERROR = 12;
+}
+
+enum GuestBootStage {
+  GUEST_BOOT_STAGE_UNSPECIFIED = 0;
+  GUEST_BOOT_STAGE_STATE_MOUNTED = 1;
+  GUEST_BOOT_STAGE_CGROUPS_READY = 2;
+  GUEST_BOOT_STAGE_DISKS_ADMITTED = 3;
+  GUEST_BOOT_STAGE_ROOT_MOUNTED = 4;
+  GUEST_BOOT_STAGE_SETUP_HEADER_READY = 5;
+  GUEST_BOOT_STAGE_SETUP_CONTENT_READY = 6;
+  GUEST_BOOT_STAGE_ROOT_LAYERS_READY = 7;
+  GUEST_BOOT_STAGE_WORKSPACE_PLAN_READY = 8;
+  GUEST_BOOT_STAGE_OWNERSHIP_READY = 9;
+  GUEST_BOOT_STAGE_CONTAINER_CONTROL_READY = 10;
+  GUEST_BOOT_STAGE_ROOT_GENERATION_READY = 11;
+  GUEST_BOOT_STAGE_PERSISTENT_LAYOUT_READY = 12;
+  GUEST_BOOT_STAGE_RUNC_LAUNCHING = 13;
+  GUEST_BOOT_STAGE_RUNC_RUNNING = 14;
+  GUEST_BOOT_STAGE_WORKSPACE_RUNNING = 15;
+  GUEST_BOOT_STAGE_DAEMON_STARTED = 16;
+  GUEST_BOOT_STAGE_SETUP_FAILED = 17;
+  GUEST_BOOT_STAGE_WORKSPACE_FAILED = 18;
+}
+
+message WatchRunnerRequest {
+  string environment_id = 1;
+}
+
+message RunnerEvent {
+  uint64 sequence = 1;
+  RunnerInfo runner = 2;
+  RunnerStage stage = 3;
+  uint64 guest_sequence = 4;
+  GuestBootStage guest_stage = 5;
+  string error_code = 6;
 }
 
 message StartVmRequest {

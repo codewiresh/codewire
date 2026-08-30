@@ -10,15 +10,19 @@ use std::io;
 use std::os::unix::fs::PermissionsExt as _;
 use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use futures::Stream;
 use rustix::fs::{FlockOperation, flock};
 use rustix::process::Signal;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
-use tokio::sync::{Mutex, watch};
+use tokio::sync::{Mutex, broadcast, mpsc, watch};
+use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 use uuid::Uuid;
 
@@ -45,7 +49,8 @@ use crate::oci::{
 use crate::runner_service::{RunnerClient, RunnerServiceError};
 use crate::setup_pack::{SetupPackError, SetupPackRequest, ensure_setup_pack};
 use crate::supervisor_store::{
-    OperationKind, OperationPhase, OperationRecord, SupervisorStore, SupervisorStoreError,
+    OperationKind, OperationPhase, OperationRecord, SupervisorOperationReader, SupervisorStore,
+    SupervisorStoreError,
 };
 use crate::uds::{UdsError, bind_owner_only, connect_owner_only, remove_bound_socket};
 use crate::workspace::{
@@ -57,7 +62,10 @@ use crate::workspace_generation::{WorkspaceGenerationError, WorkspaceGenerationR
 pub(crate) const SUPERVISOR_STATE_SCHEMA: u32 = 1;
 const RUNNER_START_TIMEOUT: Duration = Duration::from_secs(15);
 const RUNNER_EXIT_TIMEOUT: Duration = Duration::from_secs(5);
-const RESPONSE_DRAIN_DELAY: Duration = Duration::from_millis(100);
+const OPERATION_WATCH_BUFFER: usize = 8;
+const OPERATION_PROGRESS_CAPACITY: usize = 256;
+const RUNNER_EVENT_DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
+const MAXIMUM_RUNNER_EVENTS: usize = 128;
 const DAEMON_VSOCK_PORT: u32 = 7777;
 const DEFAULT_OCI_ROOT_DISK_BYTES: u64 = 32 * 1024 * 1024 * 1024;
 const LINUX_CAPABILITY_VERSION_3: u32 = 0x2008_0522;
@@ -69,6 +77,12 @@ struct PreparedWorkspaceBoot {
     setup_root_generation: String,
     setup_total_bytes: u64,
     setup_header_sha256: String,
+}
+
+#[derive(Clone)]
+struct OperationProgress {
+    operation_id: Uuid,
+    event: v1::RunnerEvent,
 }
 
 #[repr(C)]
@@ -137,6 +151,7 @@ impl NativeRuntimeConfig {
 #[derive(Clone)]
 pub struct NativeSupervisorClient {
     inner: LocalSupervisorServiceClient<tonic::transport::Channel>,
+    restart_config: Option<NativeRuntimeConfig>,
 }
 
 impl NativeSupervisorClient {
@@ -149,7 +164,7 @@ impl NativeSupervisorClient {
             // replacement singleton owns the lock and performs the exact
             // nofollow removal; the CLI never unlinks a control endpoint.
             if let Ok(client) = Self::connect(&socket).await {
-                return Ok(client);
+                return Ok(client.with_restart_config(config));
             }
         }
         let mut child = spawn_supervisor(config)?;
@@ -157,7 +172,7 @@ impl NativeSupervisorClient {
         loop {
             if fs::symlink_metadata(&socket).is_ok() {
                 match Self::connect(&socket).await {
-                    Ok(client) => return Ok(client),
+                    Ok(client) => return Ok(client.with_restart_config(config)),
                     Err(error) if tokio::time::Instant::now() < deadline => {
                         let _ = error;
                     }
@@ -187,14 +202,22 @@ impl NativeSupervisorClient {
         let channel = connect_owner_only(socket).await?;
         Ok(Self {
             inner: LocalSupervisorServiceClient::new(channel),
+            restart_config: None,
         })
+    }
+
+    fn with_restart_config(mut self, config: &NativeRuntimeConfig) -> Self {
+        self.restart_config = Some(config.clone());
+        self
     }
 
     pub async fn create(
         &mut self,
         request: v1::CreateEnvironmentRequest,
     ) -> Result<v1::Environment, Status> {
-        Ok(self.inner.create_environment(request).await?.into_inner())
+        let name = request.name.clone();
+        let operation = self.inner.create_environment(request).await?.into_inner();
+        self.follow_environment_operation(operation, &name).await
     }
 
     pub async fn list(&mut self) -> Result<Vec<v1::Environment>, Status> {
@@ -223,19 +246,21 @@ impl NativeSupervisorClient {
     }
 
     pub async fn start(&mut self, name: &str) -> Result<v1::Environment, Status> {
-        Ok(self
+        let operation = self
             .inner
             .start_environment(mutation_selector(name))
             .await?
-            .into_inner())
+            .into_inner();
+        self.follow_environment_operation(operation, name).await
     }
 
     pub async fn stop(&mut self, name: &str) -> Result<v1::Environment, Status> {
-        Ok(self
+        let operation = self
             .inner
             .stop_environment(mutation_selector(name))
             .await?
-            .into_inner())
+            .into_inner();
+        self.follow_environment_operation(operation, name).await
     }
 
     pub async fn resize(
@@ -245,7 +270,7 @@ impl NativeSupervisorClient {
         memory_mib: u32,
         disk_bytes: u64,
     ) -> Result<v1::Environment, Status> {
-        Ok(self
+        let operation = self
             .inner
             .resize_environment(v1::ResizeEnvironmentRequest {
                 name: name.to_owned(),
@@ -255,15 +280,23 @@ impl NativeSupervisorClient {
                 request_id: Uuid::new_v4().to_string(),
             })
             .await?
-            .into_inner())
+            .into_inner();
+        self.follow_environment_operation(operation, name).await
     }
 
     pub async fn delete(&mut self, name: &str) -> Result<v1::DeleteEnvironmentResponse, Status> {
-        Ok(self
+        let operation = self
             .inner
             .delete_environment(mutation_selector(name))
             .await?
-            .into_inner())
+            .into_inner();
+        let operation = self.follow_operation(operation).await?;
+        match operation.result.and_then(|result| result.value) {
+            Some(v1::operation_result::Value::Deletion(deletion)) => Ok(deletion),
+            _ => Err(Status::internal(
+                "local delete operation returned an invalid result",
+            )),
+        }
     }
 
     pub async fn daemon_access(&mut self, name: &str) -> Result<v1::DaemonAccess, Status> {
@@ -272,6 +305,127 @@ impl NativeSupervisorClient {
             .get_daemon_access(read_selector(name))
             .await?
             .into_inner())
+    }
+
+    async fn follow_environment_operation(
+        &mut self,
+        operation: v1::Operation,
+        name: &str,
+    ) -> Result<v1::Environment, Status> {
+        self.follow_operation(operation).await?;
+        self.get(name).await
+    }
+
+    async fn follow_operation(
+        &mut self,
+        operation: v1::Operation,
+    ) -> Result<v1::Operation, Status> {
+        let operation_id = operation.operation_id.clone();
+        if operation_terminal(&operation)
+            .map_err(|failure| operation_watch_failure(&operation_id, failure))?
+        {
+            return operation_outcome(operation);
+        }
+        let mut reconnects = 0_u8;
+        loop {
+            let stream = self
+                .inner
+                .watch_operation(v1::WatchOperationRequest {
+                    operation_id: operation_id.clone(),
+                })
+                .await;
+            let failure = match stream {
+                Ok(response) => {
+                    let mut updates = response.into_inner();
+                    loop {
+                        match updates.message().await {
+                            Ok(Some(operation))
+                                if operation_terminal(&operation).map_err(|failure| {
+                                    operation_watch_failure(&operation_id, failure)
+                                })? =>
+                            {
+                                return operation_outcome(operation);
+                            }
+                            Ok(Some(_)) => {}
+                            Ok(None) => {
+                                break Status::unavailable(
+                                    "local lifecycle operation stream ended before a terminal result",
+                                );
+                            }
+                            Err(error) => break error,
+                        }
+                    }
+                }
+                Err(error) => error,
+            };
+            if !watch_failure_is_reconnectable(&failure) || reconnects >= 3 {
+                return Err(operation_watch_failure(&operation_id, failure));
+            }
+            reconnects += 1;
+            let config = self.restart_config.clone().ok_or_else(|| {
+                operation_watch_failure(
+                    &operation_id,
+                    Status::unavailable("local supervisor reconnect is unavailable"),
+                )
+            })?;
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let replacement = Self::connect_or_start(&config).await.map_err(|_| {
+                operation_watch_failure(
+                    &operation_id,
+                    Status::unavailable("reconnect to local supervisor failed"),
+                )
+            })?;
+            self.inner = replacement.inner;
+            self.restart_config = replacement.restart_config;
+        }
+    }
+}
+
+fn operation_watch_failure(operation_id: &str, failure: Status) -> Status {
+    Status::new(
+        failure.code(),
+        format!("local lifecycle operation {operation_id} watch failed before a terminal result"),
+    )
+}
+
+fn watch_failure_is_reconnectable(status: &Status) -> bool {
+    matches!(
+        status.code(),
+        tonic::Code::Unavailable | tonic::Code::Unknown | tonic::Code::Cancelled
+    )
+}
+
+fn operation_terminal(operation: &v1::Operation) -> Result<bool, Status> {
+    match v1::OperationPhase::try_from(operation.phase) {
+        Ok(v1::OperationPhase::Intent | v1::OperationPhase::EffectApplied) => Ok(false),
+        Ok(
+            v1::OperationPhase::Completed
+            | v1::OperationPhase::Failed
+            | v1::OperationPhase::Interrupted,
+        ) => Ok(true),
+        _ => Err(Status::internal(
+            "local lifecycle operation returned an invalid phase",
+        )),
+    }
+}
+
+fn operation_outcome(operation: v1::Operation) -> Result<v1::Operation, Status> {
+    match v1::OperationPhase::try_from(operation.phase) {
+        Ok(v1::OperationPhase::Completed) => Ok(operation),
+        Ok(v1::OperationPhase::Failed | v1::OperationPhase::Interrupted) => {
+            let error_code = if operation.error_code.is_empty() {
+                "unknown"
+            } else {
+                operation.error_code.as_str()
+            };
+            Err(Status::failed_precondition(format!(
+                "local lifecycle operation {} failed: {error_code}",
+                operation.operation_id
+            )))
+        }
+        _ => Err(Status::internal(
+            "local lifecycle operation is not terminal",
+        )),
     }
 }
 
@@ -294,6 +448,9 @@ pub async fn serve_supervisor(config: NativeRuntimeConfig) -> Result<(), Supervi
     let root = prepare_runtime_root(&config.root)?;
     let lock = SupervisorLock::acquire(&root)?;
     let (store, state) = SupervisorStore::open(&root)?;
+    let operation_events = store.operation_events();
+    let operation_reader = SupervisorOperationReader::open(&root)?;
+    let operation_progress = broadcast::channel(OPERATION_PROGRESS_CAPACITY).0;
     let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
     let mut core = SupervisorCore {
         config: config.clone(),
@@ -302,16 +459,21 @@ pub async fn serve_supervisor(config: NativeRuntimeConfig) -> Result<(), Supervi
         state,
         children: HashMap::new(),
         live_runners: HashMap::new(),
+        operation_progress: operation_progress.clone(),
         _lock: lock,
     };
     core.recover_host_reboot_workspace_transitions()?;
-    core.replay_pending_operations().await?;
     let service = SupervisorRpc {
         core: Arc::new(Mutex::new(core)),
         shutdown: shutdown_tx,
+        operation_reader: Arc::new(Mutex::new(operation_reader)),
+        operation_events,
+        operation_progress,
+        worker_running: Arc::new(AtomicBool::new(false)),
     };
     let socket = config.supervisor_socket();
     let (incoming, socket_identity) = bind_owner_only(&socket)?;
+    service.schedule_operation_worker(true);
     let result = tonic::transport::Server::builder()
         .add_service(LocalSupervisorServiceServer::new(service))
         .serve_with_incoming_shutdown(incoming, async move {
@@ -852,6 +1014,7 @@ struct SupervisorCore {
     state: SupervisorState,
     children: HashMap<Uuid, Child>,
     live_runners: HashMap<Uuid, LiveProcess>,
+    operation_progress: broadcast::Sender<OperationProgress>,
     _lock: SupervisorLock,
 }
 
@@ -1211,7 +1374,8 @@ impl SupervisorCore {
                     operation = self.checkpoint_operation(&operation)?;
                 }
                 LifecycleEffect::StartVm => {
-                    self.ensure_vm_started(&request.name, 1).await?;
+                    self.ensure_vm_started(&request.name, 1, operation.operation_id)
+                        .await?;
                     operation = self.checkpoint_operation(&operation)?;
                 }
                 LifecycleEffect::RecordRunning => {
@@ -1235,7 +1399,7 @@ impl SupervisorCore {
         ))
     }
 
-    async fn replay_pending_operations(&mut self) -> Result<(), SupervisorError> {
+    async fn run_pending_operations(&mut self, recovering: bool) -> Result<(), SupervisorError> {
         for operation in self.store.pending_operations()? {
             let Some(name) = operation
                 .payload
@@ -1256,7 +1420,12 @@ impl SupervisorCore {
                 let (_, operation) = match self.create(&request, &operation).await {
                     Ok(result) => result,
                     Err(_) => {
-                        self.fail_replayed_operation(&operation, name, "create_interrupted")?;
+                        let error_code = if recovering {
+                            "create_interrupted"
+                        } else {
+                            "create_failed"
+                        };
+                        self.fail_replayed_operation(&operation, name, error_code)?;
                         continue;
                     }
                 };
@@ -1273,7 +1442,12 @@ impl SupervisorCore {
                 let (_, operation) = match self.start(name, &operation).await {
                     Ok(result) => result,
                     Err(_) => {
-                        self.fail_replayed_operation(&operation, name, "start_interrupted")?;
+                        let error_code = if recovering {
+                            "start_interrupted"
+                        } else {
+                            "start_failed"
+                        };
+                        self.fail_replayed_operation(&operation, name, error_code)?;
                         continue;
                     }
                 };
@@ -1287,7 +1461,13 @@ impl SupervisorCore {
                 continue;
             }
             if operation.kind == OperationKind::Stop {
-                let (_, operation) = self.stop(name, &operation).await?;
+                let (_, operation) = match self.stop(name, &operation).await {
+                    Ok(result) => result,
+                    Err(_) => {
+                        self.fail_pending_operation(&operation, "stop_failed")?;
+                        continue;
+                    }
+                };
                 let result = self
                     .state
                     .environments
@@ -1311,7 +1491,18 @@ impl SupervisorCore {
                 operation.kind,
                 OperationKind::Restart | OperationKind::GrowDisk
             ) {
-                let operation = self.resize(name, &operation).await?;
+                let operation = match self.resize(name, &operation).await {
+                    Ok(operation) => operation,
+                    Err(_) => {
+                        let error_code = if recovering {
+                            "resize_interrupted"
+                        } else {
+                            "resize_failed"
+                        };
+                        self.fail_replayed_operation(&operation, name, error_code)?;
+                        continue;
+                    }
+                };
                 let result = self
                     .state
                     .environments
@@ -1329,8 +1520,14 @@ impl SupervisorCore {
                     Ok(operation) => operation,
                     Err(_) => {
                         let error_code = match operation.kind {
-                            OperationKind::UpdateWorkspace => "workspace_update_interrupted",
-                            OperationKind::RollbackWorkspace => "workspace_rollback_interrupted",
+                            OperationKind::UpdateWorkspace if recovering => {
+                                "workspace_update_interrupted"
+                            }
+                            OperationKind::UpdateWorkspace => "workspace_update_failed",
+                            OperationKind::RollbackWorkspace if recovering => {
+                                "workspace_rollback_interrupted"
+                            }
+                            OperationKind::RollbackWorkspace => "workspace_rollback_failed",
                             _ => return Err(SupervisorError::InvalidState),
                         };
                         self.abort_replayed_workspace_transition(&operation, name, error_code)
@@ -1361,6 +1558,14 @@ impl SupervisorCore {
             return Err(SupervisorError::InvalidState);
         }
         self.ensure_no_unowned_workspace_staging()
+    }
+
+    async fn replay_pending_operations(&mut self) -> Result<(), SupervisorError> {
+        self.run_pending_operations(true).await
+    }
+
+    async fn execute_pending_operations(&mut self) -> Result<(), SupervisorError> {
+        self.run_pending_operations(false).await
     }
 
     fn recover_host_reboot_workspace_transitions(&mut self) -> Result<(), SupervisorError> {
@@ -1454,6 +1659,19 @@ impl SupervisorCore {
             .operation_by_request(replayed.request_id)?
             .ok_or(SupervisorError::InvalidState)?;
         self.fail_operation_with_environment_error(&current, name, error_code)?;
+        Ok(())
+    }
+
+    fn fail_pending_operation(
+        &mut self,
+        pending: &OperationRecord,
+        error_code: &str,
+    ) -> Result<(), SupervisorError> {
+        let current = self
+            .store
+            .operation_by_request(pending.request_id)?
+            .ok_or(SupervisorError::InvalidState)?;
+        self.fail_operation(&current, error_code)?;
         Ok(())
     }
 
@@ -1960,6 +2178,7 @@ impl SupervisorCore {
         &mut self,
         name: &str,
         generation: u64,
+        operation_id: Uuid,
     ) -> Result<(), SupervisorError> {
         let environment = self.environment(name)?.clone();
         let staging = environment.staging_workspace_generation.is_some();
@@ -1991,7 +2210,25 @@ impl SupervisorCore {
         })
         .await
         .map_err(|_| SupervisorError::WorkspaceGenerationProvisionTask)??;
-        let info = client
+        let runner_events = client
+            .watch(environment.id)
+            .await
+            .map_err(|_| SupervisorError::RunnerUnavailable)?;
+        let progress = self.operation_progress.clone();
+        let artifact_generation = expected_artifact_generation.clone();
+        let mut relay = tokio::spawn(relay_runner_start_events(
+            runner_events,
+            RunnerStartRelayContext {
+                operation_id,
+                environment_id: environment.id,
+                artifact_generation,
+                prior_generation: current.generation,
+                prior_state: current_state,
+                target_generation: generation,
+                progress,
+            },
+        ));
+        let start = client
             .start(v1::StartVmRequest {
                 environment_id: environment.id.to_string(),
                 generation,
@@ -2006,8 +2243,24 @@ impl SupervisorCore {
                 setup_header_sha256: workspace.setup_header_sha256,
                 setup_root_generation: workspace.setup_root_generation,
             })
-            .await
-            .map_err(|status| SupervisorError::VmStart(status.message().to_owned()))?;
+            .await;
+        let relay_result = match tokio::time::timeout(RUNNER_EVENT_DRAIN_TIMEOUT, &mut relay).await
+        {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) => Err(SupervisorError::InvalidRunnerResponse),
+            Err(_) => {
+                relay.abort();
+                let _ = relay.await;
+                Err(SupervisorError::InvalidRunnerResponse)
+            }
+        };
+        if let Err(error) = relay_result {
+            if start.is_ok() {
+                let _ = client.stop().await;
+            }
+            return Err(error);
+        }
+        let info = start.map_err(|status| SupervisorError::VmStart(status.message().to_owned()))?;
         if info.environment_id != environment.id.to_string()
             || info.generation != generation
             || info.state != v1::EnvironmentState::Running as i32
@@ -2094,7 +2347,8 @@ impl SupervisorCore {
                     operation = self.checkpoint_operation(&operation)?;
                 }
                 LifecycleEffect::StartVm => {
-                    self.ensure_vm_started(name, target_generation).await?;
+                    self.ensure_vm_started(name, target_generation, operation.operation_id)
+                        .await?;
                     operation = self.checkpoint_operation(&operation)?;
                 }
                 LifecycleEffect::RecordRunning => {
@@ -2324,7 +2578,8 @@ impl SupervisorCore {
                                 .checked_add(1)
                                 .ok_or(SupervisorError::InvalidState)?
                         };
-                        self.ensure_vm_started(name, generation).await?;
+                        self.ensure_vm_started(name, generation, operation.operation_id)
+                            .await?;
                     }
                     operation = self.checkpoint_operation(&operation)?;
                 }
@@ -2420,8 +2675,12 @@ impl SupervisorCore {
                 }
                 LifecycleEffect::StartVm => {
                     if workspace_transition_requires_boot(self.environment(name)?, &parameters)? {
-                        self.ensure_vm_started(name, parameters.target_generation)
-                            .await?;
+                        self.ensure_vm_started(
+                            name,
+                            parameters.target_generation,
+                            operation.operation_id,
+                        )
+                        .await?;
                     }
                     operation = self.checkpoint_operation(&operation)?;
                 }
@@ -2647,6 +2906,46 @@ impl SupervisorCore {
 struct SupervisorRpc {
     core: Arc<Mutex<SupervisorCore>>,
     shutdown: watch::Sender<bool>,
+    operation_reader: Arc<Mutex<SupervisorOperationReader>>,
+    operation_events: broadcast::Sender<OperationRecord>,
+    operation_progress: broadcast::Sender<OperationProgress>,
+    worker_running: Arc<AtomicBool>,
+}
+
+impl SupervisorRpc {
+    fn schedule_operation_worker(&self, recovering: bool) {
+        if self
+            .worker_running
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return;
+        }
+        let service = self.clone();
+        tokio::spawn(async move {
+            let mut core = service.core.lock().await;
+            let result = if recovering {
+                core.replay_pending_operations().await
+            } else {
+                core.execute_pending_operations().await
+            };
+            service.worker_running.store(false, Ordering::Release);
+            drop(core);
+            if result.is_err() {
+                let _ = service.shutdown.send(true);
+            }
+        });
+    }
+
+    async fn operation(&self, operation_id: Uuid) -> Result<OperationRecord, Status> {
+        self.operation_reader
+            .lock()
+            .await
+            .operation_by_id(operation_id)
+            .map_err(SupervisorError::from)
+            .map_err(Status::from)?
+            .ok_or_else(|| Status::not_found("local lifecycle operation was not found"))
+    }
 }
 
 #[tonic::async_trait]
@@ -2654,13 +2953,10 @@ impl LocalSupervisorService for SupervisorRpc {
     async fn create_environment(
         &self,
         request: Request<v1::CreateEnvironmentRequest>,
-    ) -> Result<Response<v1::Environment>, Status> {
+    ) -> Result<Response<v1::Operation>, Status> {
         let request = request.into_inner();
         let request_id = validate_create(&request).map_err(Status::from)?;
-        let mut core = self.core.lock().await;
-        core.replay_pending_operations()
-            .await
-            .map_err(Status::from)?;
+        let core = self.core.lock().await;
         let payload = create_operation_payload(&request);
         let operation =
             begin_create_operation(&core.store, request_id, &payload).map_err(Status::from)?;
@@ -2670,47 +2966,12 @@ impl LocalSupervisorService for SupervisorRpc {
         {
             return Err(Status::aborted("local lifecycle request ID collision"));
         }
-        if operation.phase == OperationPhase::Completed {
-            let environment = core
-                .environment(&request.name)
-                .map_err(Status::from)?
-                .proto(core.selected(&request.name));
-            return Ok(Response::new(environment));
+        let response = operation_proto(&operation)?;
+        drop(core);
+        if !operation.phase.terminal() {
+            self.schedule_operation_worker(false);
         }
-        if matches!(
-            operation.phase,
-            OperationPhase::Failed | OperationPhase::Interrupted
-        ) {
-            return Err(Status::failed_precondition(
-                "local create request is already terminal",
-            ));
-        }
-        match core.create(&request, &operation).await {
-            Ok((environment, operation)) => {
-                let result = core
-                    .environment(&request.name)
-                    .map(environment_operation_result)
-                    .map_err(Status::from)?;
-                core.complete_operation(&operation, &result)
-                    .map_err(Status::from)?;
-                Ok(Response::new(environment))
-            }
-            Err(error) => {
-                let operation = core
-                    .store
-                    .operation_by_request(request_id)
-                    .map_err(SupervisorError::from)
-                    .map_err(Status::from)?
-                    .ok_or_else(|| Status::internal("local create operation disappeared"))?;
-                core.fail_operation_with_environment_error(
-                    &operation,
-                    &request.name,
-                    "create_failed",
-                )
-                .map_err(Status::from)?;
-                Err(Status::from(error))
-            }
-        }
+        Ok(Response::new(response))
     }
 
     async fn list_environments(
@@ -2764,12 +3025,9 @@ impl LocalSupervisorService for SupervisorRpc {
     async fn start_environment(
         &self,
         request: Request<v1::EnvironmentSelector>,
-    ) -> Result<Response<v1::Environment>, Status> {
+    ) -> Result<Response<v1::Operation>, Status> {
         let (name, request_id) = mutation_selection(request.into_inner())?;
         let mut core = self.core.lock().await;
-        core.replay_pending_operations()
-            .await
-            .map_err(Status::from)?;
         core.reconcile(&name).await.map_err(Status::from)?;
         let existing = core
             .store
@@ -2808,48 +3066,20 @@ impl LocalSupervisorService for SupervisorRpc {
                 .map_err(SupervisorError::from)
                 .map_err(Status::from)?
         };
-        if operation.phase == OperationPhase::Completed {
-            core.reconcile(&name).await.map_err(Status::from)?;
-            return Ok(Response::new(
-                core.environment(&name)
-                    .map_err(Status::from)?
-                    .proto(core.selected(&name)),
-            ));
+        let response = operation_proto(&operation)?;
+        drop(core);
+        if !operation.phase.terminal() {
+            self.schedule_operation_worker(false);
         }
-        ensure_operation_pending(&operation)?;
-        match core.start(&name, &operation).await {
-            Ok((environment, operation)) => {
-                let result = core
-                    .environment(&name)
-                    .map(environment_operation_result)
-                    .map_err(Status::from)?;
-                core.complete_operation(&operation, &result)
-                    .map_err(Status::from)?;
-                Ok(Response::new(environment))
-            }
-            Err(error) => {
-                let operation = core
-                    .store
-                    .operation_by_request(request_id)
-                    .map_err(SupervisorError::from)
-                    .map_err(Status::from)?
-                    .ok_or_else(|| Status::internal("local start operation disappeared"))?;
-                core.fail_operation_with_environment_error(&operation, &name, "start_failed")
-                    .map_err(Status::from)?;
-                Err(Status::from(error))
-            }
-        }
+        Ok(Response::new(response))
     }
 
     async fn stop_environment(
         &self,
         request: Request<v1::EnvironmentSelector>,
-    ) -> Result<Response<v1::Environment>, Status> {
+    ) -> Result<Response<v1::Operation>, Status> {
         let (name, request_id) = mutation_selection(request.into_inner())?;
-        let mut core = self.core.lock().await;
-        core.replay_pending_operations()
-            .await
-            .map_err(Status::from)?;
+        let core = self.core.lock().await;
         let environment_id = core.environment(&name).map_err(Status::from)?.id;
         let payload = serde_json::json!({"name": name});
         let operation = core
@@ -2862,49 +3092,21 @@ impl LocalSupervisorService for SupervisorRpc {
             )
             .map_err(SupervisorError::from)
             .map_err(Status::from)?;
-        if operation.phase == OperationPhase::Completed {
-            core.reconcile(&name).await.map_err(Status::from)?;
-            return Ok(Response::new(
-                core.environment(&name)
-                    .map_err(Status::from)?
-                    .proto(core.selected(&name)),
-            ));
+        let response = operation_proto(&operation)?;
+        drop(core);
+        if !operation.phase.terminal() {
+            self.schedule_operation_worker(false);
         }
-        ensure_operation_pending(&operation)?;
-        match core.stop(&name, &operation).await {
-            Ok((environment, operation)) => {
-                let result = core
-                    .environment(&name)
-                    .map(environment_operation_result)
-                    .map_err(Status::from)?;
-                core.complete_operation(&operation, &result)
-                    .map_err(Status::from)?;
-                Ok(Response::new(environment))
-            }
-            Err(error) => {
-                let operation = core
-                    .store
-                    .operation_by_request(request_id)
-                    .map_err(SupervisorError::from)
-                    .map_err(Status::from)?
-                    .ok_or_else(|| Status::internal("local stop operation disappeared"))?;
-                core.fail_operation(&operation, "stop_failed")
-                    .map_err(Status::from)?;
-                Err(Status::from(error))
-            }
-        }
+        Ok(Response::new(response))
     }
 
     async fn resize_environment(
         &self,
         request: Request<v1::ResizeEnvironmentRequest>,
-    ) -> Result<Response<v1::Environment>, Status> {
+    ) -> Result<Response<v1::Operation>, Status> {
         let request = request.into_inner();
         let request_id = validate_resize(&request).map_err(Status::from)?;
-        let mut core = self.core.lock().await;
-        core.replay_pending_operations()
-            .await
-            .map_err(Status::from)?;
+        let core = self.core.lock().await;
 
         let existing = core
             .store
@@ -2979,94 +3181,191 @@ impl LocalSupervisorService for SupervisorRpc {
                 .map_err(SupervisorError::from)
                 .map_err(Status::from)?
         };
-        if operation.phase == OperationPhase::Completed {
-            return Ok(Response::new(
-                core.environment(&request.name)
-                    .map_err(Status::from)?
-                    .proto(core.selected(&request.name)),
-            ));
+        let response = operation_proto(&operation)?;
+        drop(core);
+        if !operation.phase.terminal() {
+            self.schedule_operation_worker(false);
         }
-        ensure_operation_pending(&operation)?;
-        let operation = core
-            .resize(&request.name, &operation)
-            .await
-            .map_err(Status::from)?;
-        let environment = core.environment(&request.name).map_err(Status::from)?;
-        let response = environment.proto(core.selected(&request.name));
-        let result = environment_operation_result(environment);
-        core.complete_operation(&operation, &result)
-            .map_err(Status::from)?;
         Ok(Response::new(response))
     }
 
     async fn delete_environment(
         &self,
         request: Request<v1::EnvironmentSelector>,
-    ) -> Result<Response<v1::DeleteEnvironmentResponse>, Status> {
+    ) -> Result<Response<v1::Operation>, Status> {
         let (name, request_id) = mutation_selection(request.into_inner())?;
-        let mut core = self.core.lock().await;
-        core.replay_pending_operations()
-            .await
-            .map_err(Status::from)?;
+        let core = self.core.lock().await;
         let existing = core
             .store
             .operation_by_request(request_id)
             .map_err(SupervisorError::from)
             .map_err(Status::from)?;
-        if let Some(operation) = existing.as_ref()
-            && operation.kind == OperationKind::Delete
-            && operation.payload == serde_json::json!({"name": name})
-            && operation.phase == OperationPhase::Completed
-        {
-            return Ok(Response::new(v1::DeleteEnvironmentResponse {
-                name,
-                removed: true,
-                cleanup_pending: operation
-                    .result
-                    .as_ref()
-                    .and_then(|result| result.get("cleanup_pending"))
-                    .and_then(serde_json::Value::as_bool)
-                    .unwrap_or(false),
-            }));
-        }
-        let environment_id = core.environment(&name).map_err(Status::from)?.id;
         let payload = serde_json::json!({"name": name});
-        let operation = core
-            .store
-            .begin_operation(
-                request_id,
-                Some(environment_id),
-                OperationKind::Delete,
-                &payload,
-            )
-            .map_err(SupervisorError::from)
-            .map_err(Status::from)?;
-        ensure_operation_pending(&operation)?;
-        let (operation, cleanup_pending) =
-            core.delete(&name, &operation).await.map_err(Status::from)?;
-        core.complete_operation(
-            &operation,
-            &serde_json::json!({
-                "name": name,
-                "removed": true,
-                "cleanup_pending": cleanup_pending,
-            }),
-        )
-        .map_err(Status::from)?;
-        let empty = core.state.environments.is_empty();
+        let operation = match existing {
+            Some(operation) => {
+                if operation.kind != OperationKind::Delete || operation.payload != payload {
+                    return Err(Status::aborted("local lifecycle request ID collision"));
+                }
+                operation
+            }
+            None => {
+                let environment_id = core.environment(&name).map_err(Status::from)?.id;
+                core.store
+                    .begin_operation(
+                        request_id,
+                        Some(environment_id),
+                        OperationKind::Delete,
+                        &payload,
+                    )
+                    .map_err(SupervisorError::from)
+                    .map_err(Status::from)?
+            }
+        };
+        let response = operation_proto(&operation)?;
         drop(core);
-        if empty {
-            let shutdown = self.shutdown.clone();
-            tokio::spawn(async move {
-                tokio::time::sleep(RESPONSE_DRAIN_DELAY).await;
-                let _ = shutdown.send(true);
-            });
+        if !operation.phase.terminal() {
+            self.schedule_operation_worker(false);
         }
-        Ok(Response::new(v1::DeleteEnvironmentResponse {
-            name,
-            removed: true,
-            cleanup_pending,
-        }))
+        Ok(Response::new(response))
+    }
+
+    async fn get_operation(
+        &self,
+        request: Request<v1::GetOperationRequest>,
+    ) -> Result<Response<v1::Operation>, Status> {
+        let operation_id = parse_operation_id(&request.into_inner().operation_id)?;
+        let operation = self.operation(operation_id).await?;
+        operation_proto(&operation).map(Response::new)
+    }
+
+    type WatchOperationStream =
+        Pin<Box<dyn Stream<Item = Result<v1::Operation, Status>> + Send + 'static>>;
+
+    async fn watch_operation(
+        &self,
+        request: Request<v1::WatchOperationRequest>,
+    ) -> Result<Response<Self::WatchOperationStream>, Status> {
+        let operation_id = parse_operation_id(&request.into_inner().operation_id)?;
+        // Subscribe before reading the durable snapshot. Events racing the
+        // read remain queued and are de-duplicated by checkpoint below.
+        let mut events = self.operation_events.subscribe();
+        let mut progress_events = self.operation_progress.subscribe();
+        let initial = self.operation(operation_id).await?;
+        let initial_terminal = initial.phase.terminal();
+        let initial_checkpoint = initial.checkpoint;
+        let initial = operation_proto(&initial)?;
+        let reader = Arc::clone(&self.operation_reader);
+        let (sender, receiver) = mpsc::channel(OPERATION_WATCH_BUFFER);
+        tokio::spawn(async move {
+            if sender.send(Ok(initial)).await.is_err() || initial_terminal {
+                return;
+            }
+            let mut checkpoint = initial_checkpoint;
+            let mut progress_sequence = 0_u64;
+            let mut progress_open = true;
+            loop {
+                tokio::select! {
+                    journal = events.recv() => {
+                        let operation = match journal {
+                            Ok(operation)
+                                if operation.operation_id == operation_id
+                                    && operation.checkpoint > checkpoint =>
+                            {
+                                operation
+                            }
+                            Ok(_) => continue,
+                            Err(broadcast::error::RecvError::Lagged(_)) => {
+                                let latest = reader.lock().await.operation_by_id(operation_id);
+                                match latest {
+                                    Ok(Some(operation)) if operation.checkpoint > checkpoint => operation,
+                                    Ok(Some(_)) => continue,
+                                    Ok(None) => {
+                                        let _ = sender
+                                            .send(Err(Status::not_found(
+                                                "local lifecycle operation was not found",
+                                            )))
+                                            .await;
+                                        return;
+                                    }
+                                    Err(_) => {
+                                        let _ = sender
+                                            .send(Err(Status::internal(
+                                                "read local lifecycle operation failed",
+                                            )))
+                                            .await;
+                                        return;
+                                    }
+                                }
+                            }
+                            Err(broadcast::error::RecvError::Closed) => {
+                                let _ = sender
+                                    .send(Err(Status::unavailable(
+                                        "local lifecycle operation stream closed",
+                                    )))
+                                    .await;
+                                return;
+                            }
+                        };
+                        checkpoint = operation.checkpoint;
+                        let terminal = operation.phase.terminal();
+                        let update = match operation_proto(&operation) {
+                            Ok(update) => update,
+                            Err(error) => {
+                                let _ = sender.send(Err(error)).await;
+                                return;
+                            }
+                        };
+                        if sender.send(Ok(update)).await.is_err() || terminal {
+                            return;
+                        }
+                    }
+                    progress = progress_events.recv(), if progress_open => {
+                        let progress = match progress {
+                            Ok(progress)
+                                if progress.operation_id == operation_id
+                                    && progress.event.sequence > progress_sequence => progress,
+                            Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                            Err(broadcast::error::RecvError::Closed) => {
+                                progress_open = false;
+                                continue;
+                            }
+                        };
+                        let operation = match reader.lock().await.operation_by_id(operation_id) {
+                            Ok(Some(operation)) => operation,
+                            Ok(None) => {
+                                let _ = sender
+                                    .send(Err(Status::not_found(
+                                        "local lifecycle operation was not found",
+                                    )))
+                                    .await;
+                                return;
+                            }
+                            Err(_) => {
+                                let _ = sender
+                                    .send(Err(Status::internal(
+                                        "read local lifecycle operation failed",
+                                    )))
+                                    .await;
+                                return;
+                            }
+                        };
+                        progress_sequence = progress.event.sequence;
+                        let terminal = operation.phase.terminal();
+                        let update = match operation_proto_with_runner(&operation, &progress.event) {
+                            Ok(update) => update,
+                            Err(error) => {
+                                let _ = sender.send(Err(error)).await;
+                                return;
+                            }
+                        };
+                        if sender.send(Ok(update)).await.is_err() || terminal {
+                            return;
+                        }
+                    }
+                }
+            }
+        });
+        Ok(Response::new(Box::pin(ReceiverStream::new(receiver))))
     }
 
     async fn get_daemon_access(
@@ -3083,6 +3382,360 @@ impl LocalSupervisorService for SupervisorRpc {
             .map(Response::new)
             .map_err(Status::from)
     }
+}
+
+fn parse_operation_id(value: &str) -> Result<Uuid, Status> {
+    let operation_id =
+        Uuid::parse_str(value).map_err(|_| Status::invalid_argument("invalid operation ID"))?;
+    if operation_id.is_nil() {
+        return Err(Status::invalid_argument("invalid operation ID"));
+    }
+    Ok(operation_id)
+}
+
+struct RunnerStartRelayContext {
+    operation_id: Uuid,
+    environment_id: Uuid,
+    artifact_generation: String,
+    prior_generation: u64,
+    prior_state: StoredEnvironmentState,
+    target_generation: u64,
+    progress: broadcast::Sender<OperationProgress>,
+}
+
+async fn relay_runner_start_events(
+    mut events: tonic::Streaming<v1::RunnerEvent>,
+    context: RunnerStartRelayContext,
+) -> Result<(), SupervisorError> {
+    let mut sequence = 0_u64;
+    let mut guest_sequence = 0_u64;
+    let mut guest_stage = None;
+    let mut accepted_prior_baseline = false;
+    let mut target_started = false;
+    for _ in 0..MAXIMUM_RUNNER_EVENTS {
+        let event = events
+            .message()
+            .await
+            .map_err(|_| SupervisorError::RunnerUnavailable)?
+            .ok_or(SupervisorError::RunnerUnavailable)?;
+        if event.sequence <= sequence {
+            return Err(SupervisorError::InvalidRunnerResponse);
+        }
+        sequence = event.sequence;
+        let runner = event
+            .runner
+            .as_ref()
+            .ok_or(SupervisorError::InvalidRunnerResponse)?;
+        if runner.environment_id != context.environment_id.to_string()
+            || runner.artifact_generation != context.artifact_generation
+            || runner.generation > context.target_generation
+        {
+            return Err(SupervisorError::InvalidRunnerResponse);
+        }
+        let runner_state = StoredEnvironmentState::from_proto(runner.state)?;
+        let stage = v1::RunnerStage::try_from(event.stage)
+            .map_err(|_| SupervisorError::InvalidRunnerResponse)?;
+        let parsed_guest_stage = v1::GuestBootStage::try_from(event.guest_stage)
+            .map_err(|_| SupervisorError::InvalidRunnerResponse)?;
+        let error_code_valid = runner_event_error_code_valid(&event.error_code);
+        if !target_started
+            && !accepted_prior_baseline
+            && runner_event_is_prior_baseline(
+                runner.generation,
+                runner_state,
+                stage,
+                event.guest_sequence,
+                parsed_guest_stage,
+                error_code_valid,
+                (context.prior_generation, context.prior_state),
+            )
+        {
+            accepted_prior_baseline = true;
+            continue;
+        }
+        if runner.generation != context.target_generation {
+            return Err(SupervisorError::InvalidRunnerResponse);
+        }
+        target_started = true;
+        if !matches!(
+            stage,
+            v1::RunnerStage::PreparingVm
+                | v1::RunnerStage::StartingVmm
+                | v1::RunnerStage::WaitingGuest
+                | v1::RunnerStage::GuestInit
+                | v1::RunnerStage::DaemonReady
+                | v1::RunnerStage::Error
+        ) {
+            return Err(SupervisorError::InvalidRunnerResponse);
+        }
+        let state_matches_stage = match stage {
+            v1::RunnerStage::PreparingVm
+            | v1::RunnerStage::StartingVmm
+            | v1::RunnerStage::WaitingGuest
+            | v1::RunnerStage::GuestInit => runner_state == StoredEnvironmentState::Starting,
+            v1::RunnerStage::DaemonReady => runner_state == StoredEnvironmentState::Running,
+            v1::RunnerStage::Error => runner_state == StoredEnvironmentState::Error,
+            _ => false,
+        };
+        if !state_matches_stage {
+            return Err(SupervisorError::InvalidRunnerResponse);
+        }
+        if event.guest_sequence == 0 {
+            if parsed_guest_stage != v1::GuestBootStage::Unspecified {
+                return Err(SupervisorError::InvalidRunnerResponse);
+            }
+        } else {
+            if stage != v1::RunnerStage::GuestInit
+                || event.guest_sequence <= guest_sequence
+                || parsed_guest_stage == v1::GuestBootStage::Unspecified
+                || guest_stage.is_some_and(|prior| (parsed_guest_stage as i32) < (prior as i32))
+            {
+                return Err(SupervisorError::InvalidRunnerResponse);
+            }
+            guest_sequence = event.guest_sequence;
+            guest_stage = Some(parsed_guest_stage);
+        }
+        if (stage == v1::RunnerStage::Error) != error_code_valid {
+            return Err(SupervisorError::InvalidRunnerResponse);
+        }
+        let terminal = matches!(stage, v1::RunnerStage::DaemonReady | v1::RunnerStage::Error);
+        let _ = context.progress.send(OperationProgress {
+            operation_id: context.operation_id,
+            event,
+        });
+        if terminal {
+            return Ok(());
+        }
+    }
+    Err(SupervisorError::InvalidRunnerResponse)
+}
+
+fn runner_event_error_code_valid(error_code: &str) -> bool {
+    !error_code.is_empty()
+        && error_code.len() <= 64
+        && error_code
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
+}
+
+fn runner_event_is_prior_baseline(
+    generation: u64,
+    state: StoredEnvironmentState,
+    stage: v1::RunnerStage,
+    guest_sequence: u64,
+    guest_stage: v1::GuestBootStage,
+    error_code_valid: bool,
+    prior: (u64, StoredEnvironmentState),
+) -> bool {
+    generation == prior.0
+        && state == prior.1
+        && guest_sequence == 0
+        && guest_stage == v1::GuestBootStage::Unspecified
+        && match state {
+            StoredEnvironmentState::Stopped => {
+                matches!(stage, v1::RunnerStage::Ready | v1::RunnerStage::Stopped)
+                    && !error_code_valid
+            }
+            StoredEnvironmentState::Error => stage == v1::RunnerStage::Error && error_code_valid,
+            StoredEnvironmentState::Starting
+            | StoredEnvironmentState::Running
+            | StoredEnvironmentState::Orphaned => false,
+        }
+}
+
+fn operation_proto(operation: &OperationRecord) -> Result<v1::Operation, Status> {
+    let kind = match operation.kind {
+        OperationKind::Create => v1::OperationKind::Create,
+        OperationKind::Start => v1::OperationKind::Start,
+        OperationKind::Stop => v1::OperationKind::Stop,
+        OperationKind::Restart => v1::OperationKind::Restart,
+        OperationKind::UpdateWorkspace => v1::OperationKind::UpdateWorkspace,
+        OperationKind::RollbackWorkspace => v1::OperationKind::RollbackWorkspace,
+        OperationKind::Delete => v1::OperationKind::Delete,
+        OperationKind::GrowDisk => v1::OperationKind::GrowDisk,
+        OperationKind::Reconcile => v1::OperationKind::Reconcile,
+    };
+    let phase = match operation.phase {
+        OperationPhase::Intent => v1::OperationPhase::Intent,
+        OperationPhase::EffectApplied => v1::OperationPhase::EffectApplied,
+        OperationPhase::Completed => v1::OperationPhase::Completed,
+        OperationPhase::Failed => v1::OperationPhase::Failed,
+        OperationPhase::Interrupted => v1::OperationPhase::Interrupted,
+    };
+    let stage = operation_stage(operation)?;
+    let result = operation
+        .result
+        .as_ref()
+        .map(|result| operation_result_proto(operation, result))
+        .transpose()?;
+    Ok(v1::Operation {
+        operation_id: operation.operation_id.to_string(),
+        request_id: operation.request_id.to_string(),
+        environment_id: operation
+            .environment_id
+            .map(|id| id.to_string())
+            .unwrap_or_default(),
+        kind: kind as i32,
+        phase: phase as i32,
+        checkpoint: operation.checkpoint,
+        stage: stage as i32,
+        created_unix_ms: operation.created_unix_ms,
+        updated_unix_ms: operation.updated_unix_ms,
+        error_code: operation.error_code.clone().unwrap_or_default(),
+        result,
+        progress_sequence: 0,
+        runner_stage: v1::RunnerStage::Unspecified as i32,
+        guest_sequence: 0,
+        guest_stage: v1::GuestBootStage::Unspecified as i32,
+        runner_error_code: String::new(),
+    })
+}
+
+fn operation_proto_with_runner(
+    operation: &OperationRecord,
+    event: &v1::RunnerEvent,
+) -> Result<v1::Operation, Status> {
+    let runner = event
+        .runner
+        .as_ref()
+        .ok_or_else(|| Status::internal("runner progress identity is missing"))?;
+    if event.sequence == 0
+        || operation.environment_id.map(|id| id.to_string()).as_deref()
+            != Some(runner.environment_id.as_str())
+    {
+        return Err(Status::internal("runner progress identity is invalid"));
+    }
+    let stage = v1::RunnerStage::try_from(event.stage)
+        .ok()
+        .filter(|stage| *stage != v1::RunnerStage::Unspecified)
+        .ok_or_else(|| Status::internal("runner progress stage is invalid"))?;
+    StoredEnvironmentState::from_proto(runner.state).map_err(Status::from)?;
+    let guest_stage = v1::GuestBootStage::try_from(event.guest_stage)
+        .map_err(|_| Status::internal("guest progress stage is invalid"))?;
+    if (event.guest_sequence == 0) != (guest_stage == v1::GuestBootStage::Unspecified) {
+        return Err(Status::internal("guest progress identity is invalid"));
+    }
+    let runner_error_valid = !event.error_code.is_empty()
+        && event.error_code.len() <= 64
+        && event
+            .error_code
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte == b'_');
+    if (stage == v1::RunnerStage::Error) != runner_error_valid {
+        return Err(Status::internal("runner progress error code is invalid"));
+    }
+    let mut operation = operation_proto(operation)?;
+    operation.progress_sequence = event.sequence;
+    operation.runner_stage = event.stage;
+    operation.guest_sequence = event.guest_sequence;
+    operation.guest_stage = event.guest_stage;
+    operation.runner_error_code = event.error_code.clone();
+    Ok(operation)
+}
+
+fn operation_stage(operation: &OperationRecord) -> Result<v1::OperationStage, Status> {
+    match operation.phase {
+        OperationPhase::Completed => return Ok(v1::OperationStage::Completed),
+        OperationPhase::Failed => return Ok(v1::OperationStage::Failed),
+        OperationPhase::Interrupted => return Ok(v1::OperationStage::Interrupted),
+        OperationPhase::Intent | OperationPhase::EffectApplied => {}
+    }
+    let Some(effect) =
+        supervisor_effect(operation.kind, operation.checkpoint).map_err(Status::from)?
+    else {
+        return Ok(v1::OperationStage::Finalizing);
+    };
+    Ok(match effect {
+        LifecycleEffect::RecordEnvironment => v1::OperationStage::RecordEnvironment,
+        LifecycleEffect::ProvisionWorkspace => v1::OperationStage::ProvisionWorkspace,
+        LifecycleEffect::StageWorkspaceGeneration => v1::OperationStage::StageWorkspaceGeneration,
+        LifecycleEffect::RecordStarting => v1::OperationStage::RecordStarting,
+        LifecycleEffect::EnsureRunner => v1::OperationStage::EnsureRunner,
+        LifecycleEffect::StartVm => v1::OperationStage::StartVm,
+        LifecycleEffect::RecordRunning => v1::OperationStage::RecordRunning,
+        LifecycleEffect::StopVm => v1::OperationStage::StopVm,
+        LifecycleEffect::RecordStopped => v1::OperationStage::RecordStopped,
+        LifecycleEffect::GrowDisk => v1::OperationStage::GrowDisk,
+        LifecycleEffect::RecordResources => v1::OperationStage::RecordResources,
+        LifecycleEffect::RestartVm => v1::OperationStage::RestartVm,
+        LifecycleEffect::RecordResizeOutcome => v1::OperationStage::RecordResizeOutcome,
+        LifecycleEffect::StageRollbackGeneration => v1::OperationStage::StageRollbackGeneration,
+        LifecycleEffect::RestoreDesiredPower => v1::OperationStage::RestoreDesiredPower,
+        LifecycleEffect::RecordWorkspaceTransition => v1::OperationStage::RecordWorkspaceTransition,
+        LifecycleEffect::PrepareDelete => v1::OperationStage::PrepareDelete,
+        LifecycleEffect::MoveToTrash => v1::OperationStage::MoveToTrash,
+        LifecycleEffect::RemoveEnvironment => v1::OperationStage::RemoveEnvironment,
+        LifecycleEffect::CleanupTrash => v1::OperationStage::CleanupTrash,
+        LifecycleEffect::RecordObservation => v1::OperationStage::RecordObservation,
+    })
+}
+
+fn operation_result_proto(
+    operation: &OperationRecord,
+    result: &serde_json::Value,
+) -> Result<v1::OperationResult, Status> {
+    let fields = result
+        .as_object()
+        .ok_or_else(|| Status::internal("local lifecycle operation result is invalid"))?;
+    let value = if operation.kind == OperationKind::Delete {
+        if fields.len() != 3 {
+            return Err(Status::internal(
+                "local lifecycle deletion result is invalid",
+            ));
+        }
+        let name = fields
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .filter(|name| valid_environment_name(name))
+            .ok_or_else(|| Status::internal("local lifecycle deletion result is invalid"))?;
+        let removed = fields
+            .get("removed")
+            .and_then(serde_json::Value::as_bool)
+            .filter(|removed| *removed)
+            .ok_or_else(|| Status::internal("local lifecycle deletion result is invalid"))?;
+        let cleanup_pending = fields
+            .get("cleanup_pending")
+            .and_then(serde_json::Value::as_bool)
+            .ok_or_else(|| Status::internal("local lifecycle deletion result is invalid"))?;
+        v1::operation_result::Value::Deletion(v1::DeleteEnvironmentResponse {
+            name: name.to_owned(),
+            removed,
+            cleanup_pending,
+        })
+    } else {
+        if fields.len() != 4 {
+            return Err(Status::internal(
+                "local lifecycle environment result is invalid",
+            ));
+        }
+        let environment_id = fields
+            .get("environment_id")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|value| Uuid::parse_str(value).ok())
+            .filter(|id| Some(*id) == operation.environment_id && !id.is_nil())
+            .ok_or_else(|| Status::internal("local lifecycle environment result is invalid"))?;
+        let name = fields
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .filter(|name| valid_environment_name(name))
+            .ok_or_else(|| Status::internal("local lifecycle environment result is invalid"))?;
+        let state = fields
+            .get("state")
+            .and_then(serde_json::Value::as_str)
+            .and_then(StoredEnvironmentState::parse)
+            .ok_or_else(|| Status::internal("local lifecycle environment result is invalid"))?;
+        let generation = fields
+            .get("generation")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| Status::internal("local lifecycle environment result is invalid"))?;
+        v1::operation_result::Value::Environment(v1::EnvironmentOperationResult {
+            environment_id: environment_id.to_string(),
+            name: name.to_owned(),
+            state: state.proto() as i32,
+            generation,
+        })
+    };
+    Ok(v1::OperationResult { value: Some(value) })
 }
 
 fn selected_name(request: v1::EnvironmentSelector) -> Result<String, Status> {
@@ -3184,18 +3837,6 @@ fn parse_request_id(value: &str) -> Result<Uuid, SupervisorError> {
         return Err(SupervisorError::InvalidRequest);
     }
     Ok(id)
-}
-
-fn ensure_operation_pending(operation: &OperationRecord) -> Result<(), Status> {
-    match operation.phase {
-        OperationPhase::Intent | OperationPhase::EffectApplied => Ok(()),
-        OperationPhase::Completed => Err(Status::already_exists(
-            "local lifecycle request is already complete",
-        )),
-        OperationPhase::Failed | OperationPhase::Interrupted => Err(Status::failed_precondition(
-            "local lifecycle request is already terminal",
-        )),
-    }
 }
 
 fn begin_create_operation(
@@ -4359,6 +5000,8 @@ mod tests {
             payload,
             result: None,
             error_code: None,
+            created_unix_ms: 1,
+            updated_unix_ms: 1,
         }
     }
 
@@ -4415,9 +5058,25 @@ mod tests {
             state,
             children: HashMap::new(),
             live_runners: HashMap::new(),
+            operation_progress: broadcast::channel(OPERATION_PROGRESS_CAPACITY).0,
             _lock: lock,
         };
         (parent, core)
+    }
+
+    fn test_supervisor_service(core: SupervisorCore) -> SupervisorRpc {
+        let operation_reader = SupervisorOperationReader::open(&core.root).unwrap();
+        let operation_events = core.store.operation_events();
+        let operation_progress = core.operation_progress.clone();
+        let (shutdown, _shutdown_rx) = watch::channel(false);
+        SupervisorRpc {
+            core: Arc::new(Mutex::new(core)),
+            shutdown,
+            operation_reader: Arc::new(Mutex::new(operation_reader)),
+            operation_events,
+            operation_progress,
+            worker_running: Arc::new(AtomicBool::new(false)),
+        }
     }
 
     fn test_supervisor_core_after_host_reboot(
@@ -4475,6 +5134,7 @@ mod tests {
             state,
             children: HashMap::new(),
             live_runners: HashMap::new(),
+            operation_progress: broadcast::channel(OPERATION_PROGRESS_CAPACITY).0,
             _lock: lock,
         };
         (parent, core)
@@ -4722,6 +5382,8 @@ mod tests {
             payload: workspace_rollback_payload(&environment, false),
             result: None,
             error_code: None,
+            created_unix_ms: 1,
+            updated_unix_ms: 1,
         };
         let parameters = workspace_transition_parameters(&operation, &environment).unwrap();
 
@@ -4988,6 +5650,8 @@ mod tests {
                 payload: payload.clone(),
                 result: None,
                 error_code: None,
+                created_unix_ms: 1,
+                updated_unix_ms: 1,
             },
             &environment,
         )
@@ -5070,6 +5734,8 @@ mod tests {
             payload,
             result: None,
             error_code: None,
+            created_unix_ms: 1,
+            updated_unix_ms: 1,
         };
         let parameters = workspace_transition_parameters(&operation, &environment).unwrap();
 
@@ -5655,6 +6321,8 @@ mod tests {
             payload: create_operation_payload(&request),
             result: None,
             error_code: None,
+            created_unix_ms: 1,
+            updated_unix_ms: 1,
         };
 
         assert_eq!(create_request_from_operation(&operation).unwrap(), request);
@@ -5714,6 +6382,8 @@ mod tests {
             payload,
             result: None,
             error_code: None,
+            created_unix_ms: 1,
+            updated_unix_ms: 1,
         };
 
         assert_eq!(
@@ -5842,6 +6512,24 @@ mod tests {
         assert!(first.environment_id.is_some());
     }
 
+    #[test]
+    fn operation_watch_failure_preserves_code_and_safe_operation_identity() {
+        let operation_id = Uuid::new_v4().to_string();
+        let failure = operation_watch_failure(
+            &operation_id,
+            Status::cancelled("raw transport detail must not be reflected"),
+        );
+
+        assert_eq!(failure.code(), tonic::Code::Cancelled);
+        assert_eq!(
+            failure.message(),
+            format!(
+                "local lifecycle operation {operation_id} watch failed before a terminal result"
+            )
+        );
+        assert!(!failure.message().contains("raw transport detail"));
+    }
+
     #[tokio::test]
     async fn staging_boundary_collects_only_unreferenced_root_and_content_storage() {
         let parent = tempfile::tempdir().unwrap();
@@ -5918,6 +6606,7 @@ mod tests {
             state,
             children: HashMap::new(),
             live_runners: HashMap::new(),
+            operation_progress: broadcast::channel(OPERATION_PROGRESS_CAPACITY).0,
             _lock: lock,
         };
 
@@ -5948,13 +6637,249 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn lifecycle_rpc_commits_before_the_detached_worker_completes() {
+        let (_parent, core) = test_supervisor_core(project_environment());
+        let service = test_supervisor_service(core);
+        let submitted = service
+            .stop_environment(Request::new(v1::EnvironmentSelector {
+                name: "dev".to_owned(),
+                request_id: Uuid::new_v4().to_string(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(
+            v1::OperationPhase::try_from(submitted.phase).unwrap(),
+            v1::OperationPhase::Intent
+        );
+        assert_eq!(submitted.checkpoint, 0);
+
+        let response = service
+            .watch_operation(Request::new(v1::WatchOperationRequest {
+                operation_id: submitted.operation_id.clone(),
+            }))
+            .await
+            .unwrap();
+        let mut stream = response.into_inner();
+        let terminal = tokio::time::timeout(Duration::from_secs(1), async {
+            while let Some(update) = futures::StreamExt::next(&mut stream).await {
+                let update = update.unwrap();
+                if operation_terminal(&update).unwrap() {
+                    return update;
+                }
+            }
+            panic!("operation watch ended before completion")
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            v1::OperationPhase::try_from(terminal.phase).unwrap(),
+            v1::OperationPhase::Completed
+        );
+        assert!(terminal.checkpoint > submitted.checkpoint);
+    }
+
+    #[tokio::test]
+    async fn native_client_waits_for_the_durable_terminal_operation() {
+        let (_parent, core) = test_supervisor_core(project_environment());
+        let socket = core.config.supervisor_socket();
+        let service = test_supervisor_service(core);
+        let (incoming, socket_identity) = bind_owner_only(&socket).unwrap();
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let server_service = service.clone();
+        let server = tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(LocalSupervisorServiceServer::new(server_service))
+                .serve_with_incoming_shutdown(incoming, async move {
+                    let _ = shutdown_rx.await;
+                })
+                .await
+                .unwrap();
+        });
+
+        let mut client = NativeSupervisorClient::connect(&socket).await.unwrap();
+        let environment = client.stop("dev").await.unwrap();
+        assert_eq!(
+            v1::EnvironmentState::try_from(environment.state).unwrap(),
+            v1::EnvironmentState::Stopped
+        );
+        {
+            let core = service.core.lock().await;
+            assert!(core.store.pending_operations().unwrap().is_empty());
+        }
+
+        drop(client);
+        shutdown_tx.send(()).unwrap();
+        server.await.unwrap();
+        remove_bound_socket(&socket, &socket_identity).unwrap();
+    }
+
+    #[tokio::test]
+    async fn operation_watch_starts_from_durable_state_and_ends_at_terminal_state() {
+        let (_parent, core) = test_supervisor_core(project_environment());
+        let service = test_supervisor_service(core);
+        let operation = {
+            let core = service.core.lock().await;
+            let environment = core.environment("dev").unwrap();
+            core.store
+                .begin_operation(
+                    Uuid::new_v4(),
+                    Some(environment.id),
+                    OperationKind::Start,
+                    &serde_json::json!({"name": "dev", "generation": 1}),
+                )
+                .unwrap()
+        };
+        let operation_id = operation.operation_id;
+        let response = service
+            .watch_operation(Request::new(v1::WatchOperationRequest {
+                operation_id: operation_id.to_string(),
+            }))
+            .await
+            .unwrap();
+        let mut stream = response.into_inner();
+        let initial = tokio::time::timeout(
+            Duration::from_secs(1),
+            futures::StreamExt::next(&mut stream),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+        assert_eq!(initial.operation_id, operation_id.to_string());
+        assert_eq!(initial.checkpoint, 0);
+        assert_eq!(
+            v1::OperationStage::try_from(initial.stage).unwrap(),
+            v1::OperationStage::RecordStarting
+        );
+
+        assert!(
+            service
+                .operation_progress
+                .send(OperationProgress {
+                    operation_id,
+                    event: v1::RunnerEvent {
+                        sequence: 4,
+                        runner: Some(v1::RunnerInfo {
+                            environment_id: operation.environment_id.unwrap().to_string(),
+                            state: v1::EnvironmentState::Starting as i32,
+                            generation: 1,
+                            artifact_generation: "a".repeat(64),
+                        }),
+                        stage: v1::RunnerStage::GuestInit as i32,
+                        guest_sequence: 3,
+                        guest_stage: v1::GuestBootStage::WorkspacePlanReady as i32,
+                        error_code: String::new(),
+                    },
+                })
+                .is_ok()
+        );
+        let progress = tokio::time::timeout(
+            Duration::from_secs(1),
+            futures::StreamExt::next(&mut stream),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+        assert_eq!(progress.checkpoint, initial.checkpoint);
+        assert_eq!(progress.progress_sequence, 4);
+        assert_eq!(
+            v1::RunnerStage::try_from(progress.runner_stage).unwrap(),
+            v1::RunnerStage::GuestInit
+        );
+        assert_eq!(progress.guest_sequence, 3);
+
+        {
+            let core = service.core.lock().await;
+            let result = environment_operation_result(core.environment("dev").unwrap());
+            core.store
+                .advance_operation(
+                    operation_id,
+                    operation.checkpoint,
+                    OperationPhase::Completed,
+                    Some(&result),
+                    None,
+                )
+                .unwrap();
+        }
+        let terminal = tokio::time::timeout(
+            Duration::from_secs(1),
+            futures::StreamExt::next(&mut stream),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            v1::OperationPhase::try_from(terminal.phase).unwrap(),
+            v1::OperationPhase::Completed
+        );
+        assert_eq!(
+            v1::OperationStage::try_from(terminal.stage).unwrap(),
+            v1::OperationStage::Completed
+        );
+        assert!(terminal.result.is_some());
+        assert!(
+            tokio::time::timeout(
+                Duration::from_secs(1),
+                futures::StreamExt::next(&mut stream)
+            )
+            .await
+            .unwrap()
+            .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn dropping_an_operation_watch_does_not_cancel_the_durable_operation() {
+        let (_parent, core) = test_supervisor_core(project_environment());
+        let service = test_supervisor_service(core);
+        let operation = {
+            let core = service.core.lock().await;
+            let environment = core.environment("dev").unwrap();
+            core.store
+                .begin_operation(
+                    Uuid::new_v4(),
+                    Some(environment.id),
+                    OperationKind::Stop,
+                    &serde_json::json!({"name": "dev"}),
+                )
+                .unwrap()
+        };
+        let response = service
+            .watch_operation(Request::new(v1::WatchOperationRequest {
+                operation_id: operation.operation_id.to_string(),
+            }))
+            .await
+            .unwrap();
+        let mut stream = response.into_inner();
+        assert!(futures::StreamExt::next(&mut stream).await.unwrap().is_ok());
+        drop(stream);
+
+        let completed = {
+            let core = service.core.lock().await;
+            let result = environment_operation_result(core.environment("dev").unwrap());
+            core.store
+                .advance_operation(
+                    operation.operation_id,
+                    operation.checkpoint,
+                    OperationPhase::Completed,
+                    Some(&result),
+                    None,
+                )
+                .unwrap()
+        };
+        assert_eq!(
+            service.operation(operation.operation_id).await.unwrap(),
+            completed
+        );
+    }
+
+    #[tokio::test]
     async fn generation_publication_serializes_all_generation_collectors() {
         let (_parent, core) = test_supervisor_core(project_environment());
-        let (shutdown, _shutdown_rx) = watch::channel(false);
-        let service = SupervisorRpc {
-            core: Arc::new(Mutex::new(core)),
-            shutdown,
-        };
+        let service = test_supervisor_service(core);
 
         // Model the create/staging transaction after it has published bytes to
         // the three generation stores but before it has durably published the
@@ -6116,6 +7041,7 @@ mod tests {
             state,
             children: HashMap::new(),
             live_runners: HashMap::new(),
+            operation_progress: broadcast::channel(OPERATION_PROGRESS_CAPACITY).0,
             _lock: lock,
         };
 
@@ -6178,6 +7104,7 @@ mod tests {
             state,
             children: HashMap::new(),
             live_runners: HashMap::new(),
+            operation_progress: broadcast::channel(OPERATION_PROGRESS_CAPACITY).0,
             _lock: lock,
         };
 
@@ -6208,6 +7135,60 @@ mod tests {
         ));
         assert!(!runner_artifact_identity_matches("invalid", "invalid"));
         assert!(!runner_artifact_identity_matches("", ""));
+    }
+
+    #[test]
+    fn runner_start_accepts_only_the_exact_queried_prior_baseline() {
+        let prior = (3, StoredEnvironmentState::Error);
+        assert!(runner_event_is_prior_baseline(
+            3,
+            StoredEnvironmentState::Error,
+            v1::RunnerStage::Error,
+            0,
+            v1::GuestBootStage::Unspecified,
+            true,
+            prior,
+        ));
+        for generation in [2, 4] {
+            assert!(!runner_event_is_prior_baseline(
+                generation,
+                StoredEnvironmentState::Error,
+                v1::RunnerStage::Error,
+                0,
+                v1::GuestBootStage::Unspecified,
+                true,
+                prior,
+            ));
+        }
+        assert!(!runner_event_is_prior_baseline(
+            3,
+            StoredEnvironmentState::Error,
+            v1::RunnerStage::Error,
+            1,
+            v1::GuestBootStage::RootMounted,
+            true,
+            prior,
+        ));
+        assert!(!runner_event_is_prior_baseline(
+            3,
+            StoredEnvironmentState::Error,
+            v1::RunnerStage::Error,
+            0,
+            v1::GuestBootStage::Unspecified,
+            false,
+            prior,
+        ));
+        for stage in [v1::RunnerStage::Ready, v1::RunnerStage::Stopped] {
+            assert!(runner_event_is_prior_baseline(
+                3,
+                StoredEnvironmentState::Stopped,
+                stage,
+                0,
+                v1::GuestBootStage::Unspecified,
+                false,
+                (3, StoredEnvironmentState::Stopped),
+            ));
+        }
     }
 
     #[test]

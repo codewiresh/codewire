@@ -1699,6 +1699,7 @@ dependencies = [
  "codewire-daemon",
  "codewire-project",
  "flate2",
+ "hmac 0.12.1",
  "libc",
  "oci-spec",
  "rustix",

@@ -2,6 +2,7 @@
 //! the Codewire-owned microVM spike.
 
 mod newc;
+mod progress;
 mod seed;
 mod setup;
 
@@ -19,6 +20,10 @@ mod workspace_plan;
 pub use newc::{
     NewcError, canonical_guest_root_newc, canonical_newc, write_canonical_guest_root_initramfs,
     write_canonical_initramfs,
+};
+pub use progress::{
+    GUEST_PROGRESS_VSOCK_PORT, GuestBootStage, PROGRESS_CHALLENGE_LEN, PROGRESS_FRAME_LEN,
+    PROGRESS_REQUEST_LEN, ProgressError, ProgressFrame, ProgressRequest,
 };
 pub use seed::{
     ROOT_DISK_SERIAL, SEED_DISK_SERIAL, SEED_LEN, STATE_DISK_SERIAL, Seed, SeedError, SetupBinding,

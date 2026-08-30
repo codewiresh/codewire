@@ -5,7 +5,9 @@ use thiserror::Error;
 use uuid::Uuid;
 use zeroize::Zeroize;
 
-use crate::{MAX_SETUP_PACK_BYTES, SETUP_ALIGNMENT, SETUP_HEADER_LEN, Sha256Value};
+use crate::{
+    GUEST_PROGRESS_VSOCK_PORT, MAX_SETUP_PACK_BYTES, SETUP_ALIGNMENT, SETUP_HEADER_LEN, Sha256Value,
+};
 
 pub const SEED_LEN: usize = 4096;
 pub const SEED_DISK_SERIAL: &str = "CWSEED1";
@@ -280,7 +282,10 @@ impl Seed {
         if self.generation == 0 {
             return Err(SeedError::InvalidGeneration);
         }
-        if self.daemon_vsock_port == 0 || self.daemon_vsock_port == u32::MAX {
+        if self.daemon_vsock_port == 0
+            || self.daemon_vsock_port == u32::MAX
+            || self.daemon_vsock_port == GUEST_PROGRESS_VSOCK_PORT
+        {
             return Err(SeedError::InvalidVsockPort);
         }
 

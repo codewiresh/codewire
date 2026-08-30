@@ -10,7 +10,9 @@ use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process::{Command, Stdio};
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc as std_mpsc;
 use std::task::{Context as TaskContext, Poll};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -23,6 +25,7 @@ use rustix::io::Errno as RustixErrno;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use tokio::signal::unix::{SignalKind, signal};
+use tokio::sync::watch;
 use tokio_stream::Stream;
 use tokio_vsock::{
     Incoming, VMADDR_CID_ANY, VMADDR_CID_HOST, VsockAddr, VsockListener, VsockStream,
@@ -38,8 +41,10 @@ use crate::workspace_plan::{
     CONTAINER_PLAN_PATH, MAX_PLAN_BYTES, WORKSPACE_PLAN_PATH, WorkspaceIdentity, WorkspacePlan,
 };
 use crate::{
-    ROOT_DISK_SERIAL, SEED_DISK_SERIAL, SEED_LEN, SETUP_DISK_SERIAL, SETUP_HEADER_LEN,
-    STATE_DISK_SERIAL, Seed, SetupArchitecture, SetupBinding, SetupHeader, Sha256Value,
+    GUEST_PROGRESS_VSOCK_PORT, GuestBootStage, PROGRESS_FRAME_LEN, PROGRESS_REQUEST_LEN,
+    ProgressFrame, ProgressRequest, ROOT_DISK_SERIAL, SEED_DISK_SERIAL, SEED_LEN,
+    SETUP_DISK_SERIAL, SETUP_HEADER_LEN, STATE_DISK_SERIAL, Seed, SetupArchitecture, SetupBinding,
+    SetupHeader, Sha256Value,
 };
 
 pub const INIT_PATH: &str = "/init";
@@ -125,6 +130,7 @@ const SYS_BLOCK_PATH: &str = "/sys/class/block";
 const DEV_PATH: &str = "/dev";
 const DISK_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(5);
 const DAEMON_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+const PROGRESS_REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
 const HOST_ONLY_REJECTION_BUDGET: usize = 32;
 const NONCE_MAX_LEN: usize = 256;
 const READ_LIMIT: usize = 4097;
@@ -135,6 +141,13 @@ const PERSISTENT_HOME_WORK_PATH: &str = "/state/home-work";
 
 static POWEROFF_REQUESTED: AtomicBool = AtomicBool::new(false);
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+static BOOT_PROGRESS: OnceLock<watch::Sender<BootProgressSnapshot>> = OnceLock::new();
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BootProgressSnapshot {
+    sequence: u64,
+    stage: GuestBootStage,
+}
 
 const LINUX_CAPABILITY_VERSION_3: u32 = 0x2008_0522;
 
@@ -202,6 +215,7 @@ pub fn run_init() -> Result<()> {
     // control traffic. The child deliberately rereads it from the immutable
     // disk rather than inheriting the token through argv or environment.
     let seed = read_seed_file(&seed_device)?;
+    start_boot_progress(&seed, GuestBootStage::RootMounted)?;
     let plan = if let Some(binding) = seed.setup() {
         let setup_device = wait_for_disk_by_serial(
             Path::new(SYS_BLOCK_PATH),
@@ -1261,6 +1275,128 @@ fn mount_root_generation(device: &Path) -> Result<()> {
     .context("mount root generation disk")
 }
 
+fn start_boot_progress(seed: &Seed, initial_stage: GuestBootStage) -> Result<()> {
+    let initial = BootProgressSnapshot {
+        sequence: 1,
+        stage: initial_stage,
+    };
+    let (progress_tx, progress_rx) = watch::channel(initial);
+    let (ready_tx, ready_rx) = std_mpsc::sync_channel(1);
+    let vm_id = seed.vm_id();
+    let generation = seed.generation();
+    let token = Zeroizing::new(seed.auth_token().to_owned());
+    thread::Builder::new()
+        .name("codewire-guest-progress".to_owned())
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build();
+            let runtime = match runtime {
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    let _ = ready_tx.send(Err(error));
+                    return;
+                }
+            };
+            runtime.block_on(async move {
+                // Tokio's AF_VSOCK listener registers with the current I/O
+                // driver while binding, so construct it inside this runtime.
+                let listener =
+                    VsockListener::bind(VsockAddr::new(VMADDR_CID_ANY, GUEST_PROGRESS_VSOCK_PORT));
+                let listener = match listener {
+                    Ok(listener) => listener,
+                    Err(error) => {
+                        let _ = ready_tx.send(Err(error));
+                        return;
+                    }
+                };
+                let _ = ready_tx.send(Ok(()));
+                serve_boot_progress(listener, vm_id, generation, token, progress_rx).await;
+            });
+        })
+        .context("spawn guest progress server")?;
+    ready_rx
+        .recv_timeout(PROGRESS_REQUEST_TIMEOUT)
+        .context("wait for guest progress listener")??;
+    BOOT_PROGRESS
+        .set(progress_tx)
+        .map_err(|_| anyhow::anyhow!("guest progress sender is already installed"))?;
+    Ok(())
+}
+
+async fn serve_boot_progress(
+    listener: VsockListener,
+    vm_id: uuid::Uuid,
+    generation: u64,
+    token: Zeroizing<String>,
+    progress: watch::Receiver<BootProgressSnapshot>,
+) {
+    loop {
+        let Ok((stream, peer)) = listener.accept().await else {
+            continue;
+        };
+        if !is_host_cid(peer.cid()) {
+            continue;
+        }
+        let _ = serve_boot_progress_connection(
+            stream,
+            vm_id,
+            generation,
+            token.as_str(),
+            progress.clone(),
+        )
+        .await;
+    }
+}
+
+async fn serve_boot_progress_connection(
+    mut stream: VsockStream,
+    vm_id: uuid::Uuid,
+    generation: u64,
+    token: &str,
+    mut progress: watch::Receiver<BootProgressSnapshot>,
+) -> Result<()> {
+    let mut request = [0_u8; PROGRESS_REQUEST_LEN];
+    tokio::time::timeout(
+        PROGRESS_REQUEST_TIMEOUT,
+        tokio::io::AsyncReadExt::read_exact(&mut stream, &mut request),
+    )
+    .await
+    .context("guest progress request timed out")?
+    .context("read guest progress request")?;
+    let request = ProgressRequest::decode(&request).context("decode guest progress request")?;
+    ensure!(
+        request.vm_id == vm_id && request.generation == generation,
+        "guest progress request identity mismatch"
+    );
+
+    loop {
+        let snapshot = *progress.borrow_and_update();
+        let frame = ProgressFrame {
+            vm_id,
+            generation,
+            sequence: snapshot.sequence,
+            stage: snapshot.stage,
+        }
+        .encode(&request.challenge, token)
+        .context("encode authenticated guest progress")?;
+        debug_assert_eq!(frame.len(), PROGRESS_FRAME_LEN);
+        tokio::io::AsyncWriteExt::write_all(&mut stream, &frame)
+            .await
+            .context("write authenticated guest progress")?;
+        tokio::io::AsyncWriteExt::flush(&mut stream)
+            .await
+            .context("flush guest progress")?;
+        if snapshot.stage.is_terminal() {
+            return Ok(());
+        }
+        progress
+            .changed()
+            .await
+            .context("guest progress publisher closed")?;
+    }
+}
+
 fn record_boot_stage(stage: &'static str) -> Result<()> {
     ensure!(
         !stage.is_empty()
@@ -1270,10 +1406,26 @@ fn record_boot_stage(stage: &'static str) -> Result<()> {
                 .all(|byte| byte.is_ascii_lowercase() || byte == b'-'),
         "guest boot stage is invalid"
     );
+    let progress_stage = GuestBootStage::from_persisted(stage)
+        .ok_or_else(|| anyhow::anyhow!("guest boot stage is outside the progress allowlist"))?;
     let mut value = stage.as_bytes().to_vec();
     value.push(b'\n');
     write_durable(Path::new(BOOT_STAGE_PATH), &value, 0o600)
-        .context("persist bounded guest boot stage")
+        .context("persist bounded guest boot stage")?;
+    if let Some(progress) = BOOT_PROGRESS.get() {
+        let previous = *progress.borrow();
+        if previous.stage != progress_stage {
+            let sequence = previous
+                .sequence
+                .checked_add(1)
+                .ok_or_else(|| anyhow::anyhow!("guest progress sequence overflow"))?;
+            progress.send_replace(BootProgressSnapshot {
+                sequence,
+                stage: progress_stage,
+            });
+        }
+    }
+    Ok(())
 }
 
 fn setup_content_failure_stage(error: &SetupContentError) -> &'static str {

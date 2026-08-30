@@ -712,6 +712,10 @@ impl RunningVm {
         )
     }
 
+    pub(crate) fn progress_access_parts(&self) -> (&HybridVsockTarget, &str) {
+        (&self.hybrid, self.token.as_str())
+    }
+
     /// Unlink one-boot setup inputs after Cloud Hypervisor and the ready guest
     /// daemon both hold their admitted device handles. The token remains only
     /// in runner/guest memory and cannot be recovered from persistent state;

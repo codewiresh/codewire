@@ -218,6 +218,14 @@ impl HybridVsockTarget {
         )
         .await
     }
+
+    pub(crate) async fn connect_guest_port(
+        &self,
+        guest_port: u32,
+    ) -> Result<UnixStream, HybridVsockError> {
+        validate_target(&self.socket, guest_port)?;
+        connect_admitted(&self.socket, &self.identity, guest_port).await
+    }
 }
 
 #[cfg(test)]
