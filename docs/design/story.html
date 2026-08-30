@@ -1,961 +1,2889 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Codewire — The Story</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&display=swap" rel="stylesheet">
+<link rel="icon" href="../../favicon.svg" type="image/svg+xml">
+<title>Codewire — Cloud Environments for Agents and Their Humans</title>
+<meta name="description" content="Cloud environments for agents and their humans. Use one over SSH or VS Code, give one to an agent, or create one with an SDK.">
 <style>
-*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-::selection { background: #EAB308; color: #000; }
-
-:root {
-  --bg: #08090a;
-  --fg: #e8e8e8;
-  --fg-dim: #6b7280;
-  --fg-muted: #3f4451;
-  --teal: #0EA5E9;
-  --yellow: #EAB308;
-  --green: #22C55E;
-  --red: #EF4444;
-  --border: rgba(255,255,255,0.08);
-  --font: 'JetBrains Mono', monospace;
-}
-
-html { scroll-behavior: smooth; }
-body {
-  font-family: var(--font);
-  background: var(--bg);
-  color: var(--fg);
-  font-size: 0.8125rem;
-  line-height: 1.7;
-  -webkit-font-smoothing: antialiased;
-  background-image: radial-gradient(circle, rgba(14,165,233,0.04) 1px, transparent 1px);
-  background-size: 24px 24px;
-}
-a { color: var(--teal); text-decoration: none; }
-a:hover { color: var(--fg); }
-
-/* ── Nav ── */
-.nav {
-  position: sticky; top: 0; z-index: 100;
-  background: var(--bg);
-  border-bottom: 1px solid var(--border);
-  display: flex; align-items: center; justify-content: space-between;
-  padding: 0 24px; height: 48px;
-  font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.06em;
-}
-.nav-left { display: flex; align-items: center; gap: 16px; }
-.nav-left a { color: var(--fg); text-decoration: none; font-weight: 700; }
-.nav-left .wire { color: var(--teal); }
-.nav-left .year { color: var(--fg-muted); font-weight: 400; }
-.nav-links { display: flex; align-items: center; gap: 4px; color: var(--fg-muted); }
-.nav-links a { color: var(--fg-dim); text-decoration: none; }
-.nav-links a:hover { color: var(--fg); }
-.nav-login {
-  border: 1px solid var(--teal); color: var(--teal);
-  padding: 5px 14px; font-family: var(--font); font-size: 0.6875rem;
-  font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em;
-  text-decoration: none; transition: background 0.15s, color 0.15s; margin-left: 8px;
-}
-.nav-login:hover { background: var(--teal); color: var(--bg); }
-.nav-hamburger {
-  display: none; background: none; border: none; cursor: pointer;
-  width: 24px; height: 20px; position: relative; padding: 0;
-}
-.nav-hamburger span {
-  display: block; width: 100%; height: 2px; background: var(--fg-dim);
-  position: absolute; left: 0; transition: transform 0.3s, opacity 0.3s;
-}
-.nav-hamburger span:nth-child(1) { top: 0; }
-.nav-hamburger span:nth-child(2) { top: 9px; }
-.nav-hamburger span:nth-child(3) { top: 18px; }
-.nav-hamburger.open span:nth-child(1) { top: 9px; transform: rotate(45deg); }
-.nav-hamburger.open span:nth-child(2) { opacity: 0; }
-.nav-hamburger.open span:nth-child(3) { top: 9px; transform: rotate(-45deg); }
-.nav-mobile {
-  display: none; position: fixed; top: 48px; left: 0; right: 0; bottom: 0;
-  background: var(--bg); padding: 24px; z-index: 99;
-  flex-direction: column; font-size: 0.8125rem; text-transform: uppercase; letter-spacing: 0.06em;
-}
-.nav-mobile.open { display: flex; }
-.nav-mobile a { color: var(--fg-dim); text-decoration: none; padding: 12px 0; border-bottom: 1px solid var(--border); }
-.nav-mobile a:hover { color: var(--fg); }
-.nav-mobile .nav-login-mobile {
-  display: inline-block; border: 1px solid var(--teal); color: var(--teal);
-  padding: 10px 24px; margin-top: 16px; text-align: center; font-weight: 600; border-bottom: none;
-}
-.nav-mobile .nav-login-mobile:hover { background: var(--teal); color: var(--bg); }
-@media (max-width: 640px) {
-  .nav-links { display: none; }
-  .nav-login { display: none; }
-  .nav-hamburger { display: block; }
-}
-
-/* ── Scrollytelling layout ── */
-.scroll-container {
-  position: relative;
-  max-width: 1100px;
-  margin: 0 auto;
-  padding: 0 24px;
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 0 48px;
-}
-.scroll-text { padding: 0 0 20vh; }
-.scroll-step:first-child { padding-top: 20vh; }
-.scroll-step {
-  min-height: 80vh;
-  display: flex; flex-direction: column; justify-content: center;
-  padding: 40px 0;
-  opacity: 0.15;
-  transition: opacity 0.6s ease;
-}
-.scroll-step.active { opacity: 1; }
-.scroll-step h2 {
-  font-size: 1.5rem; font-weight: 700; line-height: 1.3; margin-bottom: 1rem;
-}
-.scroll-step p { color: var(--fg-dim); margin-bottom: 1rem; }
-.scroll-step p:last-child { margin-bottom: 0; }
-
-.scroll-viz-col { position: relative; }
-.scroll-viz {
-  position: sticky;
-  top: 48px;
-  height: calc(100vh - 48px);
-  display: flex; align-items: center; justify-content: center;
-}
-
-/* ── Stage ── */
-.stage {
-  position: relative;
-  width: 460px;
-  height: 380px;
-  margin: 0 auto;
-}
-
-/* All positioned elements sit at center by default */
-.agent-box, .you-box {
-  position: absolute;
-  left: 50%; top: 50%;
-  transform: translate(-50%, -50%);
-  transition: transform 0.6s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.6s ease, left 0.4s ease, top 0.4s ease;
-}
-
-/* ── Agent box ── */
-.agent-box {
-  width: 150px;
-  border: 1px solid var(--border);
-  padding: 8px 10px;
-  font-size: 0.625rem;
-  line-height: 1.5;
-  overflow: hidden;
-  opacity: 0;
-}
-.agent-box.visible { opacity: 1; }
-.agent-box.dimmed { opacity: 0.2; }
-
-.agent-branch { color: var(--teal); font-weight: 600; margin-bottom: 2px; }
-.agent-conv { height: 2.8em; overflow: hidden; position: relative; }
-.agent-conv-inner { transition: transform 0.4s ease; }
-.agent-msg { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.agent-msg.you { color: var(--fg); }
-.agent-msg.reply { color: var(--fg-muted); }
-.agent-status { color: var(--fg-muted); display: flex; align-items: center; gap: 4px; margin-top: 2px; }
-.pip { display: inline-block; width: 6px; height: 6px; background: var(--green); animation: pip-pulse 2s ease-in-out infinite; }
-@keyframes pip-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.2; } }
-
-/* ── YOU box ── */
-.you-box {
-  border: 1px solid var(--teal);
-  color: var(--teal);
-  font-weight: 700;
-  font-size: 0.6875rem;
-  padding: 8px 16px;
-  white-space: nowrap;
-  opacity: 0;
-  z-index: 2;
-}
-.you-box.visible { opacity: 1; }
-
-/* ── State: queue — YOU positioned by JS ── */
-.state-queue #ab0   { transform: translate(20%, -230%); }
-.state-queue #ab1   { transform: translate(20%, -110%); }
-.state-queue #ab2   { transform: translate(20%, 10%); }
-.state-queue #ab3   { transform: translate(20%, 130%); }
-
-/* ── State: parallel — same layout, all active ── */
-.state-parallel .you-box { transform: translate(-250%, -50%); }
-.state-parallel #ab0   { transform: translate(20%, -230%); }
-.state-parallel #ab1   { transform: translate(20%, -110%); }
-.state-parallel #ab2   { transform: translate(20%, 10%); }
-.state-parallel #ab3   { transform: translate(20%, 130%); }
-
-/* ── State: grid — YOU center, 3 left, 3 right ── */
-.state-grid .you-box { transform: translate(-50%, -50%); }
-.state-grid #ab0   { transform: translate(-170%, -210%); }
-.state-grid #ab1   { transform: translate(-170%, -50%); }
-.state-grid #ab2   { transform: translate(-170%, 110%); }
-.state-grid #ab3   { transform: translate(70%, -210%); }
-.state-grid #ab4   { transform: translate(70%, -50%); }
-.state-grid #ab5   { transform: translate(70%, 110%); }
-
-/* ── Connection lines ── */
-.conn-svg {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  pointer-events: none;
-  z-index: 0;
-  overflow: visible;
-}
-.conn-svg line {
-  stroke: var(--fg-muted);
-  stroke-width: 1;
-  stroke-dasharray: 4 4;
-  transition: opacity 0.15s ease;
-  opacity: 0;
-}
-.conn-svg line.visible { opacity: 1; animation: dash-flow 0.8s linear infinite; }
-@keyframes dash-flow { to { stroke-dashoffset: -8; } }
-.conn-svg circle.flow-dot { fill: var(--green); r: 3; opacity: 0; }
-.conn-svg circle.flow-dot.visible { opacity: 1; }
-
-/* ── Story terminal ── */
-.story-terminal {
-  border: 1px solid var(--border);
-  padding: 12px 16px;
-  font-size: 0.75rem;
-  line-height: 1.85;
-  color: var(--fg-dim);
-  overflow-y: auto;
-  height: 100%;
-  transition: opacity 0.6s ease;
-  text-align: left;
-  opacity: 1;
-}
-.stage:not(.state-terminal) .story-terminal { opacity: 0; pointer-events: none; position: absolute; height: 0; }
-.story-terminal .prompt { color: var(--teal); }
-.story-terminal .cmd { color: var(--fg); }
-.story-terminal .output { color: var(--fg-muted); }
-.story-terminal .cursor { color: var(--yellow); }
-
-/* ── CTA ── */
-.cta-section {
-  max-width: 1100px; margin: 0 auto;
-  padding: 80px 24px; text-align: center;
-}
-.cta-section h2 { font-size: 1.5rem; font-weight: 700; margin-bottom: 1rem; }
-.cta-section p { color: var(--fg-dim); margin-bottom: 1.5rem; }
-.cta-form { display: flex; gap: 12px; max-width: 480px; margin: 0 auto; }
-.cta-form input[type="email"] {
-  flex: 1; font-family: var(--font); font-size: 0.75rem;
-  padding: 12px 16px; background: transparent;
-  border: 1px solid var(--border); color: var(--fg); outline: none;
-}
-.cta-form input[type="email"]:focus { border-color: var(--teal); }
-.cta-form input[type="email"]::placeholder { color: var(--fg-muted); }
-.btn {
-  font-family: var(--font); font-size: 0.75rem; font-weight: 600;
-  text-transform: uppercase; letter-spacing: 0.06em;
-  padding: 12px 28px; border: 1px solid var(--teal);
-  color: var(--teal); background: transparent; cursor: pointer;
-}
-.btn:hover { background: var(--teal); color: var(--bg); }
-
-.footer {
-  text-align: center; padding: 40px 24px;
-  font-size: 0.6875rem; color: var(--fg-muted);
-}
-.footer a { color: var(--fg-dim); }
-
-/* ── Mobile: hidden on desktop ── */
-.mobile-text-panel { display: none; }
-
-@media (max-width: 768px) {
-  body.mobile-story { overflow: hidden; height: 100vh; }
-
-  .scroll-container {
-    display: flex;
-    flex-direction: column;
-    height: calc(100dvh - 48px);
-    max-width: none;
-    padding: 0;
-    overflow: hidden;
+  :root {
+    color-scheme: dark;
+    --bg: #0b0d0e;
+    --surface: #111719;
+    --fg: #fff8e7;
+    --muted: #9aa5a4;
+    --faint: #667473;
+    --rule: #253033;
+    --accent: #2dd4bf;
+    --brand: #2dd4bf;
+    --button: #fff8e7;
+    --success: #35d07f;
+    --terminal-red: #ff5f57;
+    --terminal-yellow: #febc2e;
+    --terminal-green: #28c840;
+    --terminal-bg: #090d0e;
+    --terminal-bar: #0e1416;
+    --terminal-output: #79d99f;
+    --content-width: 800px;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    --serif: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", Georgia, serif;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
   }
-  .scroll-text { display: none; }
 
-  .scroll-viz-col {
-    display: flex;
-    flex: 0 0 50%;
-    align-items: center;
-    justify-content: center;
-    overflow: hidden;
-    padding: 8px;
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+
+  html { scroll-behavior: smooth; }
+
+  body {
+    min-height: 100%;
+    margin: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font-family: var(--mono);
+    font-size: 14px;
+    isolation: isolate;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
   }
-  .scroll-viz {
-    position: relative;
-    top: auto;
+
+  .cosmos {
+    position: fixed;
+    inset: 0;
+    z-index: 0;
+    overflow: hidden;
+    background: #070a0b;
+    pointer-events: none;
+  }
+
+  .cosmos canvas {
+    display: block;
     width: 100%;
     height: 100%;
+  }
+
+  .cosmos::after {
+    position: absolute;
+    inset: 0;
+    background:
+      radial-gradient(circle at 50% 20%, rgba(11, 13, 14, 0.08), rgba(11, 13, 14, 0.32) 48%, rgba(11, 13, 14, 0.72) 100%),
+      linear-gradient(to bottom, rgba(11, 13, 14, 0.16), rgba(11, 13, 14, 0.48));
+    content: "";
+  }
+
+  main,
+  footer {
+    position: relative;
+    z-index: 1;
+  }
+
+  a {
+    color: inherit;
+    text-decoration-color: var(--accent);
+    text-decoration-thickness: 1px;
+    text-underline-offset: 3px;
+  }
+
+  a:hover { text-decoration-color: currentColor; }
+
+  .site-header {
+    position: sticky;
+    top: 0;
+    z-index: 100;
+    width: 100%;
+    border-bottom: 1px solid rgba(37, 48, 51, 0.72);
+    background: rgba(11, 13, 14, 0.78);
+    -webkit-backdrop-filter: blur(14px);
+    backdrop-filter: blur(14px);
+  }
+
+  .header-inner {
     display: flex;
+    width: min(var(--content-width), calc(100% - 40px));
+    margin: 0 auto;
+    align-items: center;
+    justify-content: space-between;
+    gap: 24px;
+    padding: 24px 0;
+  }
+
+  .brand {
+    color: var(--brand);
+    text-decoration: none;
+  }
+
+  .brand-wordmark {
+    display: block;
+    width: 139px;
+    height: 25px;
+  }
+
+  .nav-links {
+    display: flex;
+    margin: 0;
+    padding: 0;
+    align-items: center;
+    gap: 22px;
+    color: var(--muted);
+    list-style: none;
+  }
+
+  .nav-links a {
+    color: inherit;
+    text-decoration: none;
+    transition: color 160ms ease;
+  }
+
+  .site-header nav a:hover,
+  .site-header nav a:focus-visible { color: var(--accent); }
+
+  .site-header .header-cta {
+    display: inline-flex;
+    min-height: 38px;
+    padding: 8px 15px;
+    border: 1px solid var(--button);
+    border-radius: 999px;
     align-items: center;
     justify-content: center;
+    background: var(--button);
+    color: #051116;
+    font-weight: 550;
+    text-decoration: none;
   }
-  .stage { width: 340px; height: 280px; }
-  .agent-box { width: 110px; font-size: 0.5625rem; padding: 6px 8px; }
-  .agent-conv { height: 2.4em; }
-  .you-box { font-size: 0.5625rem; padding: 6px 12px; }
 
-  .mobile-text-panel {
-    display: block;
-    flex: 0 0 50%;
-    overflow: hidden;
+  .site-header .header-cta:hover {
+    color: #051116;
+    opacity: 0.82;
+  }
+
+  main { width: 100%; padding: 92px 0 112px; }
+
+  section {
+    width: min(var(--content-width), calc(100% - 40px));
+    margin-bottom: 72px;
+    margin-right: auto;
+    margin-left: auto;
+    padding-top: 72px;
+  }
+
+  section:first-child {
+    margin-bottom: 72px;
+    padding-top: 0;
+  }
+
+  section > p {
+    margin: 0 0 18px;
+    color: var(--muted);
+  }
+
+  h1,
+  h2,
+  h3 {
+    font-family: var(--mono);
+    font-size: 14px;
+    font-weight: 700;
+    line-height: 1.5;
+    letter-spacing: 0;
+  }
+
+  h1 {
+    max-width: 480px;
+    margin: 0 0 34px;
+  }
+
+  h2 {
+    margin: 0 0 22px;
+  }
+
+  .lede {
+    max-width: 450px;
+    color: var(--fg);
+    font-size: 14px;
+    line-height: 1.6;
+  }
+
+  .hero-section {
     position: relative;
-    border-top: 1px solid rgba(255,255,255,0.15);
-  }
-  .mobile-text-track {
     display: flex;
-    height: 100%;
-    transition: transform 0.4s ease;
+    width: min(var(--content-width), calc(100% - 40px));
+    min-height: min(500px, calc(100svh - 180px));
+    margin-right: auto;
+    margin-left: auto;
+    padding: clamp(54px, 7vh, 82px) 0 !important;
+    align-items: center;
+    justify-content: center;
+    isolation: isolate;
+    text-align: center;
   }
-  .mobile-text-slide {
-    flex: 0 0 100%;
-    padding: 20px 24px;
+
+  .hero-section::before {
+    position: absolute;
+    z-index: -1;
+    width: min(760px, 90vw);
+    height: 460px;
+    border-radius: 50%;
+    background: radial-gradient(ellipse, rgba(45, 212, 191, 0.07), rgba(45, 212, 191, 0.018) 42%, transparent 70%);
+    content: "";
+    filter: blur(12px);
+    pointer-events: none;
+  }
+
+  .hero-copy { width: 100%; }
+
+  .hero-eyebrow {
+    display: inline-flex;
+    margin-bottom: 24px;
+    align-items: center;
+    gap: 8px;
+    color: var(--accent);
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.055em;
+    line-height: 1.2;
+    text-transform: uppercase;
+  }
+
+  .hero-eyebrow::before {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--accent);
+    box-shadow: 0 0 0 4px rgba(45, 212, 191, 0.09);
+    content: "";
+  }
+
+  .hero-section h1 {
+    max-width: none;
+    margin: 0 auto 28px;
+    font-size: clamp(38px, 5vw, 48px);
+    line-height: 1.18;
+    letter-spacing: -0.025em;
+  }
+
+  .hero-section .lede {
+    max-width: none;
+    margin: 0 auto 16px;
+    font-size: 14px;
+    line-height: 1.6;
+  }
+
+  .hero-detail {
+    max-width: none;
+    margin: 0 auto !important;
+    color: var(--muted) !important;
+    font-size: 14px;
+    line-height: 1.6;
+  }
+
+  .hero-actions {
+    display: flex;
+    margin-top: 28px;
+    align-items: center;
+    justify-content: center;
+    flex-wrap: wrap;
+    gap: 10px;
+  }
+
+  .hero-action {
+    display: inline-flex;
+    min-height: 44px;
+    padding: 10px 18px;
+    border: 1px solid var(--rule);
+    border-radius: 999px;
+    align-items: center;
+    justify-content: center;
+    font-weight: 550;
+    text-decoration: none;
+  }
+
+  .hero-action.hero-action--primary {
+    border-color: var(--button);
+    background: var(--button);
+    color: #051116;
+  }
+
+  .hero-action.hero-action--secondary {
+    background: rgba(17, 23, 25, 0.7);
+    color: var(--fg);
+  }
+
+  .hero-action:hover { opacity: 0.82; }
+
+  .faint { color: var(--faint); }
+
+  main a, footer a { color: var(--accent); }
+
+  .workflow-section {
+    width: min(var(--content-width), calc(100% - 40px));
+  }
+
+  .workflow-section > h2 {
+    max-width: none;
+    margin-bottom: 16px;
+    font-size: 14px;
+    font-weight: 700;
+    line-height: 1.5;
+    letter-spacing: 0;
+  }
+
+  .workflow-intro {
+    max-width: none;
+    font-size: 14px;
+    line-height: 1.6;
+  }
+
+  .workflow-stage {
+    position: relative;
+    height: 660vh;
+    margin-top: 42px;
+  }
+
+  .workflow-sticky {
+    position: sticky;
+    top: 28px;
+    display: grid;
+    height: calc(100svh - 56px);
+    min-height: 540px;
+    grid-template-rows: minmax(150px, 0.42fr) minmax(280px, 1fr);
+    gap: clamp(22px, 4vh, 38px);
+    overflow: hidden;
+  }
+
+  .workflow-copy-window {
+    position: relative;
+    min-width: 0;
+    overflow: hidden;
+    border-top: 1px solid var(--rule);
+    border-bottom: 1px solid var(--rule);
+  }
+
+  .workflow-list {
+    position: relative;
+    width: 100%;
+    height: 100%;
+  }
+
+  .workflow-step {
+    position: absolute;
+    top: 0;
+    left: 50%;
+    display: grid;
+    width: min(500px, calc(100% - 96px));
+    height: 100%;
+    grid-template-columns: 38px minmax(0, 1fr);
+    align-content: center;
+    gap: 10px;
+    padding: 22px 0;
+    opacity: 0;
+    transform: translate3d(-50%, 0, 0);
+    will-change: transform, opacity;
+  }
+
+  .workflow-step.is-active {
+    opacity: 1;
+  }
+
+  .workflow-number {
+    padding-top: 3px;
+    color: var(--accent);
+    font-family: var(--mono);
+    font-size: 11px;
+    font-weight: 500;
+    font-variant-numeric: tabular-nums;
+    line-height: 1.4;
+  }
+
+  .workflow-step h3 {
+    margin: 0 0 7px;
+    font-size: 14px;
+    font-weight: 700;
+    line-height: 1.5;
+    letter-spacing: 0;
+  }
+
+  .workflow-step p {
+    max-width: 430px;
+    margin: 0;
+    color: var(--muted);
+    line-height: 1.55;
+  }
+
+  .workflow-terminal-column {
+    min-width: 0;
+    width: 100%;
+    height: 100%;
+    margin: 0 auto;
+  }
+
+  .workflow-terminal {
+    height: 100%;
+    overflow: hidden;
+    border: 1px solid var(--rule);
+    border-radius: 16px;
+    background: var(--terminal-bg);
+    box-shadow: 0 28px 90px rgba(0, 0, 0, 0.28);
+  }
+
+  .workflow-terminal-bar {
+    display: flex;
+    min-height: 46px;
+    align-items: center;
+    gap: 14px;
+    padding: 0 17px;
+    border-bottom: 1px solid var(--rule);
+    background: var(--terminal-bar);
+    color: var(--faint);
+    font-family: var(--mono);
+    font-size: 11px;
+  }
+
+  .terminal-dots {
+    display: flex;
+    gap: 6px;
+  }
+
+  .terminal-dots span {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+  }
+
+  .terminal-dots span:nth-child(1) { background: var(--terminal-red); }
+  .terminal-dots span:nth-child(2) { background: var(--terminal-yellow); }
+  .terminal-dots span:nth-child(3) { background: var(--terminal-green); }
+
+  .workflow-terminal-screen {
+    height: calc(100% - 46px);
+    min-height: calc(100% - 46px);
+    padding: 30px 28px;
     overflow-y: auto;
-    font-size: 0.8125rem;
+    color: var(--fg);
+    font-family: var(--mono);
+    font-size: 14px;
     line-height: 1.7;
   }
-  .mobile-text-slide h2 {
-    font-size: 1.125rem;
-    font-weight: 700;
-    line-height: 1.3;
-    margin-bottom: 0.75rem;
-  }
-  .mobile-text-slide p {
-    color: var(--fg-dim);
-    margin-bottom: 0.75rem;
-  }
-  .mobile-dots {
-    position: absolute;
-    bottom: 8px;
-    left: 50%;
-    transform: translateX(-50%);
-    display: flex;
-    gap: 8px;
-    z-index: 10;
-  }
-  .mobile-dot {
-    width: 6px; height: 6px;
-    background: var(--fg-muted);
-    transition: background 0.3s;
-  }
-  .mobile-dot.active { background: var(--teal); }
 
-  .cta-section, .footer { display: none; }
-}
+  .terminal-command-line {
+    min-height: 1.7em;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+
+  .terminal-prompt { color: var(--accent); }
+
+  .terminal-cursor {
+    display: inline-block;
+    width: 0.58em;
+    height: 1.08em;
+    margin-left: 2px;
+    vertical-align: -0.18em;
+    background: var(--accent);
+    animation: cursor-blink 1s steps(1, end) infinite;
+  }
+
+  .terminal-result {
+    margin-top: 7px;
+    color: var(--terminal-output);
+    white-space: pre-wrap;
+  }
+
+  .terminal-history-entry + .terminal-history-entry,
+  .terminal-history-entry + .terminal-current-entry {
+    margin-top: 15px;
+  }
+
+  .terminal-history-result {
+    margin-top: 4px;
+    color: rgba(121, 217, 159, 0.62);
+    white-space: pre-wrap;
+  }
+
+  .terminal-history-entry .terminal-command-line {
+    color: rgba(255, 248, 231, 0.58);
+  }
+
+  .parallel-section {
+    width: 100%;
+    padding-right: clamp(24px, 5vw, 80px);
+    padding-left: clamp(24px, 5vw, 80px);
+  }
+
+  .parallel-copy {
+    width: min(var(--content-width), 100%);
+    margin: 0 auto;
+  }
+
+  .parallel-copy > h2 {
+    max-width: none;
+    margin-bottom: 12px;
+    font-size: 14px;
+    font-weight: 700;
+    line-height: 1.5;
+    letter-spacing: 0;
+  }
+
+  .parallel-lede {
+    max-width: none;
+    color: var(--fg);
+    font-size: 14px;
+    line-height: 1.6;
+    letter-spacing: 0;
+  }
+
+  .parallel-mode-switch {
+    display: inline-flex;
+    gap: 3px;
+    margin-top: 18px;
+    padding: 4px;
+    border: 1px solid var(--rule);
+    border-radius: 999px;
+    background: #0e1315;
+  }
+
+  .parallel-mode-button {
+    min-height: 34px;
+    padding: 7px 14px;
+    border: 0;
+    background: transparent;
+    color: var(--muted);
+    font-size: 12px;
+  }
+
+  .parallel-mode-button:hover { color: var(--fg); opacity: 1; }
+
+  .parallel-mode-button.is-active {
+    background: var(--button);
+    color: #051116;
+  }
+
+  .parallel-map {
+    position: relative;
+    aspect-ratio: 12 / 5;
+    min-height: 450px;
+    max-height: 720px;
+    margin-top: 48px;
+  }
+
+  .parallel-state {
+    position: absolute;
+    inset: 0;
+    transition: opacity 420ms ease, transform 420ms ease, visibility 0s linear 420ms;
+  }
+
+  .parallel-state--independent {
+    opacity: 1;
+    transform: scale(1);
+    transition-delay: 80ms, 80ms, 0s;
+    visibility: visible;
+  }
+
+  .parallel-state--mesh {
+    opacity: 0;
+    pointer-events: none;
+    transform: scale(0.975);
+    visibility: hidden;
+  }
+
+  .parallel-map[data-mode="mesh"] .parallel-state--independent {
+    opacity: 0;
+    pointer-events: none;
+    transform: scale(0.975);
+    transition-delay: 0s, 0s, 420ms;
+    visibility: hidden;
+  }
+
+  .parallel-map[data-mode="mesh"] .parallel-state--mesh {
+    opacity: 1;
+    pointer-events: auto;
+    transform: scale(1);
+    visibility: visible;
+    transition-delay: 80ms, 80ms, 0s;
+  }
+
+  .parallel-connections {
+    position: absolute;
+    inset: 0;
+    z-index: 0;
+    width: 100%;
+    height: 100%;
+    overflow: visible;
+    pointer-events: none;
+  }
+
+  .parallel-route {
+    fill: none;
+    stroke: var(--rule);
+    stroke-width: 1;
+    vector-effect: non-scaling-stroke;
+  }
+
+  .flow-packet {
+    fill: var(--success);
+    filter: url(#packet-glow);
+  }
+
+  .operator-node {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    z-index: 4;
+    display: flex;
+    width: 11.5%;
+    aspect-ratio: 1;
+    align-items: center;
+    justify-content: center;
+    flex-direction: column;
+    border: 1px solid rgba(45, 212, 191, 0.72);
+    border-radius: 50%;
+    background: var(--bg);
+    box-shadow: 0 0 0 10px rgba(45, 212, 191, 0.04), 0 20px 60px rgba(0, 0, 0, 0.32);
+    transform: translate(-50%, -50%);
+  }
+
+  .operator-node strong {
+    font-family: var(--serif);
+    font-size: clamp(22px, 2vw, 30px);
+    font-weight: 400;
+    line-height: 1;
+  }
+
+  .operator-node span {
+    margin-top: 8px;
+    color: var(--accent);
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.02em;
+  }
+
+  .mesh-operator-connections {
+    position: absolute;
+    inset: 0;
+    z-index: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+  }
+
+  .mesh-cluster {
+    position: absolute;
+    top: 7%;
+    z-index: 1;
+    width: 39%;
+    height: 86%;
+    padding: 52px 16px 16px;
+    border: 1px solid rgba(53, 208, 127, 0.34);
+    border-radius: 18px;
+    background: rgba(14, 19, 21, 0.76);
+    box-shadow: inset 0 0 80px rgba(53, 208, 127, 0.025), 0 22px 70px rgba(0, 0, 0, 0.2);
+  }
+
+  .mesh-cluster--left { left: 0; }
+  .mesh-cluster--right { right: 0; }
+
+  .mesh-cluster-title {
+    position: absolute;
+    top: 15px;
+    right: 16px;
+    left: 16px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 14px;
+    color: var(--muted);
+    font-family: var(--mono);
+    font-size: 11px;
+  }
+
+  .mesh-encrypted {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--success);
+    font-size: 10px;
+  }
+
+  .mesh-encrypted::before {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--success);
+    box-shadow: 0 0 0 3px rgba(53, 208, 127, 0.1);
+    content: "";
+  }
+
+  .mesh-agent-grid {
+    position: relative;
+    z-index: 1;
+    display: grid;
+    height: 100%;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-rows: repeat(2, 100px);
+    align-content: space-between;
+    gap: 14px;
+  }
+
+  .mesh-lines {
+    position: absolute;
+    inset: 52px 16px 16px;
+    z-index: 0;
+    width: calc(100% - 32px);
+    height: calc(100% - 68px);
+    pointer-events: none;
+  }
+
+  .mesh-line {
+    fill: none;
+    stroke: rgba(53, 208, 127, 0.28);
+    stroke-width: 1;
+    vector-effect: non-scaling-stroke;
+  }
+
+  .mesh-message-route {
+    fill: none;
+    stroke: none;
+  }
+
+  .mesh-agent {
+    position: relative;
+    z-index: 1;
+    min-width: 0;
+    padding: 13px;
+    overflow: hidden;
+    border: 1px solid var(--rule);
+    border-radius: 10px;
+    background: #0e1315;
+  }
+
+  .mesh-agent header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    color: var(--faint);
+    font-family: var(--mono);
+    font-size: 10px;
+  }
+
+  .mesh-agent header > span:first-child {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .mesh-agent-tool {
+    display: inline-flex;
+    flex: none;
+    align-items: center;
+    gap: 5px;
+  }
+
+  .mesh-agent-tool::before {
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+    background: var(--success);
+    content: "";
+  }
+
+  .mesh-agent-task {
+    margin-top: 14px;
+    overflow: hidden;
+    color: var(--fg);
+    font-family: var(--mono);
+    font-size: clamp(10px, 0.9vw, 12px);
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .mesh-agent-work {
+    margin-top: 6px;
+    overflow: hidden;
+    color: var(--faint);
+    font-family: var(--mono);
+    font-size: clamp(9px, 0.8vw, 11px);
+    text-overflow: ellipsis;
+    transform: translateY(0);
+    transition: opacity 140ms ease, transform 140ms ease;
+    white-space: nowrap;
+  }
+
+  .agent-terminal {
+    position: absolute;
+    z-index: 1;
+    width: 30%;
+    height: 25%;
+    min-height: 112px;
+    overflow: hidden;
+    border: 1px solid var(--rule);
+    border-radius: 12px;
+    background: #0e1315;
+    box-shadow: 0 18px 54px rgba(0, 0, 0, 0.2);
+  }
+
+  .agent-terminal--lt,
+  .agent-terminal--rt { top: 0; }
+
+  .agent-terminal--lm,
+  .agent-terminal--rm { top: 37.5%; }
+
+  .agent-terminal--lb,
+  .agent-terminal--rb { top: 75%; }
+
+  .agent-terminal--lt,
+  .agent-terminal--lm,
+  .agent-terminal--lb { left: 0; }
+
+  .agent-terminal--rt,
+  .agent-terminal--rm,
+  .agent-terminal--rb { right: 0; }
+
+  .agent-terminal header {
+    display: flex;
+    min-height: 34px;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 0 13px;
+    border-bottom: 1px solid var(--rule);
+    color: var(--faint);
+    font-family: var(--mono);
+    font-size: 10px;
+  }
+
+  .agent-terminal-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .agent-status {
+    display: flex;
+    flex: none;
+    align-items: center;
+    gap: 6px;
+    color: var(--muted);
+  }
+
+  .agent-status-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--success);
+    box-shadow: 0 0 0 3px rgba(53, 208, 127, 0.1);
+    animation: agent-pulse 1.8s ease-in-out infinite;
+  }
+
+  .agent-terminal-body {
+    padding: 14px 15px;
+    font-family: var(--mono);
+    font-size: clamp(10px, 1vw, 13px);
+    line-height: 1.55;
+  }
+
+  .agent-task {
+    overflow: hidden;
+    color: var(--fg);
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .agent-task::before {
+    margin-right: 7px;
+    color: var(--accent);
+    content: "›";
+  }
+
+  .agent-work {
+    overflow: hidden;
+    margin-top: 5px;
+    color: var(--faint);
+    text-overflow: ellipsis;
+    transform: translateY(0);
+    transition: opacity 140ms ease, transform 140ms ease;
+    white-space: nowrap;
+  }
+
+  .agent-work.is-changing,
+  .mesh-agent-work.is-changing {
+    opacity: 0;
+    transform: translateY(3px);
+  }
+
+  .agent-work::after {
+    display: inline-block;
+    width: 0.55em;
+    height: 1em;
+    margin-left: 5px;
+    vertical-align: -0.16em;
+    background: var(--success);
+    content: "";
+    animation: cursor-blink 1s steps(1, end) infinite;
+  }
+
+  .parallel-caption {
+    width: min(var(--content-width), 100%);
+    margin: 34px auto 0 !important;
+    color: var(--fg) !important;
+    text-align: center;
+  }
+
+  .isolation-section {
+    width: min(1100px, calc(100% - 64px));
+  }
+
+  .isolation-copy-block {
+    width: min(var(--content-width), 100%);
+    margin: 0 auto;
+  }
+
+  .isolation-copy-block > h2 {
+    max-width: none;
+    margin-bottom: 14px;
+    font-size: 14px;
+    font-weight: 700;
+    line-height: 1.5;
+    letter-spacing: 0;
+  }
+
+  .isolation-intro {
+    max-width: none;
+    font-size: 14px;
+    line-height: 1.6;
+  }
+
+  .isolation-options {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 18px;
+    margin-top: 34px;
+  }
+
+  .isolation-option {
+    min-width: 0;
+    padding: 24px;
+    border: 1px solid var(--rule);
+    border-radius: 16px;
+    background: rgba(17, 23, 25, 0.72);
+  }
+
+  .isolation-option--confidential {
+    border-color: rgba(45, 212, 191, 0.42);
+    background: linear-gradient(145deg, rgba(45, 212, 191, 0.045), rgba(17, 23, 25, 0.72) 48%);
+  }
+
+  .isolation-option-heading {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 16px;
+  }
+
+  .isolation-option h3 {
+    margin: 0;
+    font-size: 14px;
+    font-weight: 700;
+    line-height: 1.5;
+    letter-spacing: 0;
+  }
+
+  .isolation-tier {
+    flex: none;
+    padding: 4px 8px;
+    border: 1px solid var(--rule);
+    border-radius: 999px;
+    color: var(--faint);
+    font-family: var(--mono);
+    font-size: 9px;
+    letter-spacing: 0.04em;
+    line-height: 1.2;
+    text-transform: uppercase;
+  }
+
+  .isolation-option--confidential .isolation-tier {
+    border-color: rgba(45, 212, 191, 0.34);
+    color: var(--accent);
+  }
+
+  .isolation-diagram {
+    min-height: 292px;
+    margin: 22px 0 20px;
+    padding: 14px;
+    border: 1px solid rgba(255, 255, 255, 0.045);
+    border-radius: 12px;
+    background: #0c1011;
+    font-family: var(--mono);
+  }
+
+  .isolation-host {
+    display: flex;
+    min-height: 262px;
+    padding: 12px;
+    border: 1px dashed #344144;
+    border-radius: 9px;
+    flex-direction: column;
+  }
+
+  .isolation-host-bar,
+  .isolation-vm-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    color: var(--faint);
+    font-size: 9px;
+    letter-spacing: 0.035em;
+    line-height: 1.2;
+    text-transform: uppercase;
+  }
+
+  .isolation-host-bar span:last-child { color: #536160; }
+
+  .isolation-vm {
+    display: grid;
+    min-height: 190px;
+    margin-top: 10px;
+    padding: 12px;
+    border: 1px solid rgba(45, 212, 191, 0.58);
+    border-radius: 8px;
+    grid-template-rows: auto 1fr auto;
+    gap: 10px;
+    background: rgba(45, 212, 191, 0.025);
+  }
+
+  .isolation-option--confidential .isolation-vm {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 4px rgba(45, 212, 191, 0.055), inset 0 0 40px rgba(45, 212, 191, 0.035);
+  }
+
+  .isolation-vm-bar span:first-child { color: var(--accent); }
+
+  .isolation-boundary-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    color: var(--muted);
+    text-transform: none;
+  }
+
+  .isolation-boundary-badge::before {
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+    background: var(--success);
+    box-shadow: 0 0 0 3px rgba(53, 208, 127, 0.08);
+    content: "";
+  }
+
+  .isolation-workload {
+    display: flex;
+    align-self: center;
+    justify-self: center;
+    min-width: min(240px, 82%);
+    padding: 14px 16px;
+    border: 1px solid var(--rule);
+    border-radius: 7px;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    background: var(--surface);
+    color: var(--fg);
+    font-size: 11px;
+  }
+
+  .isolation-workload::before {
+    color: var(--success);
+    content: ">_";
+  }
+
+  .isolation-kernel {
+    display: flex;
+    min-height: 30px;
+    padding: 7px 10px;
+    border: 1px solid var(--rule);
+    border-radius: 5px;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    color: var(--muted);
+    font-size: 9px;
+    line-height: 1.2;
+  }
+
+  .isolation-kernel span:last-child { color: var(--faint); }
+
+  .isolation-option--confidential .isolation-kernel {
+    border-color: rgba(45, 212, 191, 0.22);
+  }
+
+  .isolation-foundation {
+    display: flex;
+    min-height: 30px;
+    margin-top: 8px;
+    padding: 7px 10px;
+    border-top: 1px solid var(--rule);
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    color: var(--faint);
+    font-size: 9px;
+    line-height: 1.2;
+  }
+
+  .isolation-foundation strong {
+    color: var(--muted);
+    font-weight: 500;
+  }
+
+  .isolation-option--confidential .isolation-foundation strong { color: var(--accent); }
+
+  .isolation-copy {
+    margin: 0 !important;
+    color: var(--muted) !important;
+    font-size: 14px;
+    line-height: 1.6;
+  }
+
+  .isolation-difference {
+    width: min(var(--content-width), 100%);
+    margin: 18px auto 0 !important;
+    padding: 15px 18px;
+    border-left: 2px solid var(--accent);
+    border-radius: 0 8px 8px 0;
+    background: rgba(45, 212, 191, 0.045);
+    color: var(--muted) !important;
+    line-height: 1.5;
+  }
+
+  .isolation-difference strong {
+    margin-right: 4px;
+    color: var(--fg);
+    font-weight: 650;
+  }
+
+  @keyframes agent-pulse {
+    50% { opacity: 0.3; }
+  }
+
+  @keyframes cursor-blink {
+    50% { opacity: 0; }
+  }
+
+  pre {
+    max-width: 100%;
+    margin: 30px 0 0;
+    padding: 18px 20px;
+    overflow-x: auto;
+    color: var(--fg);
+    border: 1px solid var(--rule);
+    border-radius: 5px;
+    background: var(--surface);
+    font-family: var(--mono);
+    font-size: 14px;
+    line-height: 1.55;
+    white-space: pre;
+  }
+
+  code { font-family: var(--mono); }
+
+  .workflow-command {
+    display: none;
+    margin: 16px 0 0;
+    padding: 12px 14px;
+    border-radius: 9px;
+    font-size: 13px;
+    line-height: 1.6;
+  }
+
+  .prompt { color: var(--accent); }
+
+  form {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: 8px;
+    margin-top: 28px;
+  }
+
+  form label {
+    grid-column: 1 / -1;
+    margin-bottom: 2px;
+    color: var(--muted);
+  }
+
+  input, button {
+    min-height: 44px;
+    border: 1px solid var(--rule);
+    border-radius: 999px;
+    font: inherit;
+  }
+
+  input {
+    min-width: 0;
+    padding: 10px 13px;
+    background: transparent;
+    color: var(--fg);
+    outline: none;
+  }
+
+  input::placeholder { color: var(--faint); }
+  input:focus { border-color: var(--accent); }
+
+  button {
+    padding: 10px 17px;
+    border-color: var(--button);
+    background: var(--button);
+    color: #051116;
+    cursor: pointer;
+  }
+
+  button:hover { opacity: 0.82; }
+  button:disabled { cursor: wait; opacity: 0.6; }
+
+  .status { min-height: 22px; margin: 12px 0 0; }
+
+  footer {
+    width: min(var(--content-width), calc(100% - 40px));
+    margin-right: auto;
+    margin-left: auto;
+    padding: 30px 0 42px;
+    border-top: 1px solid rgba(255, 255, 255, 0.08);
+    border-color: var(--rule);
+    color: var(--muted);
+  }
+
+  .footer-links {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 16px;
+    margin: 0 0 8px;
+    padding: 0;
+    list-style: none;
+  }
+
+  @media (max-width: 820px) {
+    .workflow-section {
+      width: min(var(--content-width), calc(100% - 40px));
+    }
+
+    .workflow-section > h2 { font-size: 14px; }
+
+    .workflow-stage {
+      display: block;
+      height: auto;
+      margin-top: 36px;
+    }
+
+    .workflow-sticky {
+      position: static;
+      display: block;
+      height: auto;
+      min-height: 0;
+      overflow: visible;
+    }
+
+    .workflow-copy-window {
+      overflow: visible;
+      border-bottom: 1px solid var(--rule);
+    }
+
+    .workflow-list { height: auto; }
+
+    .workflow-step,
+    .workflow-step.is-active {
+      position: static;
+      width: auto;
+      height: auto;
+      min-height: 0;
+      padding: 30px 0 32px;
+      border-top: 1px solid var(--rule);
+      opacity: 1;
+      transform: none !important;
+    }
+
+    .workflow-step:first-child { border-top: 0; }
+
+    .workflow-terminal-column { display: none; }
+    .workflow-command { display: block; }
+
+    .parallel-section {
+      width: min(var(--content-width), calc(100% - 40px));
+      padding-right: 0;
+      padding-left: 0;
+    }
+
+    .parallel-copy > h2 { font-size: 14px; }
+
+    .isolation-section {
+      width: min(var(--content-width), calc(100% - 40px));
+    }
+
+    .isolation-copy-block > h2 { font-size: 14px; }
+
+    .isolation-options { grid-template-columns: 1fr; }
+
+    .parallel-map {
+      display: flex;
+      aspect-ratio: auto;
+      min-height: 0;
+      max-height: none;
+      flex-direction: column;
+      gap: 10px;
+      margin-top: 36px;
+    }
+
+    .parallel-connections { display: none; }
+
+    .parallel-state {
+      position: static;
+      display: grid;
+      gap: 10px;
+      opacity: 1;
+      transform: none;
+      transition: none;
+      visibility: visible;
+    }
+
+    .parallel-map[data-mode="independent"] .parallel-state--mesh,
+    .parallel-map[data-mode="mesh"] .parallel-state--independent { display: none; }
+
+    .operator-node,
+    .agent-terminal {
+      position: static;
+      width: 100%;
+      height: auto;
+      min-height: 0;
+      transform: none;
+    }
+
+    .operator-node {
+      order: -1;
+      width: 76%;
+      aspect-ratio: auto;
+      align-self: center;
+      padding: 18px;
+      border-radius: 12px;
+    }
+
+    .operator-node strong { font-size: 25px; }
+    .agent-terminal-body { font-size: 12px; }
+
+    .mesh-operator-connections,
+    .mesh-lines { display: none; }
+
+    .mesh-cluster {
+      position: relative;
+      top: auto;
+      right: auto;
+      left: auto;
+      width: 100%;
+      height: auto;
+      padding: 52px 10px 10px;
+      border-radius: 12px;
+    }
+
+    .mesh-agent-grid {
+      grid-auto-rows: minmax(112px, auto);
+      gap: 8px;
+    }
+
+    .mesh-agent { padding: 11px; }
+    .mesh-agent-task { font-size: 10px; }
+    .mesh-agent-work { font-size: 9px; }
+  }
+
+  @media (max-width: 560px) {
+    .header-inner {
+      width: min(500px, calc(100% - 40px));
+      align-items: flex-start;
+      flex-direction: column;
+      gap: 16px;
+      padding-top: 22px;
+    }
+
+    .nav-links {
+      width: 100%;
+      justify-content: space-between;
+      gap: 12px;
+    }
+
+    .site-header .header-cta {
+      min-height: 36px;
+      padding: 7px 13px;
+    }
+
+    main { padding-top: 72px; }
+    h1 { font-size: 14px; }
+
+    .hero-section {
+      width: min(500px, calc(100% - 40px));
+      min-height: 0;
+      padding-top: 48px !important;
+      padding-bottom: 58px !important;
+    }
+
+    .hero-section h1 {
+      font-size: 38px;
+      line-height: 1.18;
+    }
+
+    .hero-section .lede { font-size: 14px; }
+    .hero-detail { font-size: 14px; }
+
+    .workflow-step {
+      grid-template-columns: 31px minmax(0, 1fr);
+      gap: 8px;
+    }
+
+    .mesh-agent-grid {
+      grid-template-rows: repeat(2, 116px);
+    }
+
+    .mesh-agent header {
+      align-items: flex-start;
+      flex-direction: column;
+      gap: 5px;
+    }
+
+    .mesh-agent-work {
+      line-height: 1.35;
+      text-overflow: clip;
+      white-space: normal;
+    }
+
+    .isolation-option { padding: 16px; }
+
+    .isolation-diagram {
+      min-height: 276px;
+      padding: 10px;
+    }
+
+    .isolation-host { min-height: 254px; }
+
+    .isolation-workload {
+      min-width: 0;
+      width: 88%;
+      padding-right: 12px;
+      padding-left: 12px;
+    }
+
+    form { grid-template-columns: 1fr; }
+    form label { grid-column: auto; }
+    form button { width: 100%; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    html { scroll-behavior: auto; }
+    .workflow-stage { height: auto; }
+    .workflow-sticky {
+      position: static;
+      display: block;
+      height: auto;
+      min-height: 0;
+      overflow: visible;
+    }
+    .workflow-copy-window { overflow: visible; }
+    .workflow-list { height: auto; }
+    .workflow-step,
+    .workflow-step.is-active {
+      position: static;
+      width: auto;
+      height: auto;
+      padding: 30px 0 32px;
+      border-top: 1px solid var(--rule);
+      opacity: 1;
+      transform: none !important;
+    }
+    .workflow-terminal-column { display: none; }
+    .workflow-command { display: block; }
+    .terminal-cursor,
+    .agent-status-dot,
+    .agent-work::after { animation: none; }
+    .flow-packet { display: none; }
+    .parallel-state { transition: none; }
+  }
+
 </style>
 </head>
 <body>
-
-<nav class="nav">
-  <div class="nav-left">
-    <a href="index.html">CODE<span class="wire">WIRE</span></a>
-    <span class="nav-cursor" data-spinner></span>
-    <span class="year">2026</span>
-  </div>
-  <div class="nav-links">
-    [<a href="index.html">HOME</a>]
-    [<a href="pricing.html">PRICING</a>]
-    [<a href="https://docs.codewire.sh">DOCS</a>]
-  </div>
-  <a href="/login" class="nav-login">LOG IN</a>
-  <button class="nav-hamburger" onclick="this.classList.toggle('open');document.querySelector('.nav-mobile').classList.toggle('open')">
-    <span></span><span></span><span></span>
-  </button>
-</nav>
-<div class="nav-mobile">
-  <a href="index.html">HOME</a>
-  <a href="pricing.html">PRICING</a>
-  <a href="https://docs.codewire.sh">DOCS</a>
-  <a href="/login" class="nav-login-mobile">LOG IN</a>
-</div>
-
-<div class="scroll-container">
-
-  <div class="scroll-text">
-
-    <div class="scroll-step active" data-step="0">
-      <h2>Your job has <span style="color:var(--teal)">changed.</span></h2>
-      <p>The best engineers don't write code anymore. They describe what needs to happen, and Claude, Cursor, Codex — they build it.</p>
-      <p>Your job isn't implementation. It's <strong>direction.</strong></p>
-    </div>
-
-    <div class="scroll-step" data-step="1">
-      <h2>But your machine <span style="color:var(--red)">didn't get the memo.</span></h2>
-      <p>Monday morning. 4 tasks on your plate. You fire up an agent. It takes over your terminal. CPU spikes. Fans scream.</p>
-      <p>Agent 1 is running. Agent 2 is waiting. Agent 3 and 4? Maybe tomorrow.</p>
-      <p>You became the manager, but your laptop is still a <span style="color:var(--red)">single-threaded worker.</span></p>
-      <p>Git worktrees give you five copies of the code. They don't give you five copies of the machine. You only have so much RAM.</p>
-    </div>
-
-    <div class="scroll-step" data-step="2">
-      <h2>What if each agent got <span style="color:var(--teal)">its own machine?</span></h2>
-      <p>4 tasks. 4 cloud machines. All running at the same time. No queuing. No waiting. No fan noise.</p>
-      <p>You kick them off at 9am. You check in at lunch. <strong>They're all done.</strong></p>
-    </div>
-
-    <div class="scroll-step" data-step="3">
-      <h2>Not just parallel. <span style="color:var(--teal)">A fabric.</span></h2>
-      <p>Agents don't just run side by side. They coordinate across a distributed fabric — one agent's output feeds another's input. Events, MCP, shared state flowing between isolated VMs.</p>
-      <p>You're in the center. Add agents, add machines. The fabric grows with you.</p>
-    </div>
-
-    <div class="scroll-step" data-step="4">
-      <h2>You didn't write a line of code. You shipped <span style="color:var(--teal)">6 features.</span></h2>
-      <p>Before: <span style="color:var(--red)">6 days.</span> With Codewire: <span style="color:var(--teal)">1 day.</span></p>
-      <p>Each agent on its own isolated Xen VM. Dedicated kernel. Persistent sessions. SSH from anywhere. 3 commands to get started.</p>
-      <p><a href="#cta">[GET EARLY ACCESS →]</a></p>
-    </div>
-
+  <div class="cosmos" aria-hidden="true">
+    <canvas id="cosmos-canvas"></canvas>
   </div>
 
-  <div class="scroll-viz-col">
-    <div class="scroll-viz">
-      <div class="stage state-terminal" id="stage">
-        <svg class="conn-svg" id="conn-svg">
-          <line id="ln-q"/><line id="ln-g0"/><line id="ln-g1"/><line id="ln-g2"/>
-          <line id="ln-g3"/><line id="ln-g4"/><line id="ln-g5"/>
-          <line id="ln-c0"/><line id="ln-c1"/><line id="ln-c2"/>
-          <circle class="flow-dot" id="fd-q"/><circle class="flow-dot" id="fd-g0"/>
-          <circle class="flow-dot" id="fd-g1"/><circle class="flow-dot" id="fd-g2"/>
-          <circle class="flow-dot" id="fd-g3"/><circle class="flow-dot" id="fd-g4"/>
-          <circle class="flow-dot" id="fd-g5"/><circle class="flow-dot" id="fd-c0"/>
-          <circle class="flow-dot" id="fd-c1"/><circle class="flow-dot" id="fd-c2"/>
+  <header class="site-header">
+    <div class="header-inner">
+      <a class="brand" href="index.html">
+        <svg class="brand-wordmark" viewBox="0 0 495 89" role="img" aria-label="codewire">
+          <path fill="currentColor" d="M22.9844 40C31.9375 40.25 30.1563 53.4375 41.5469 53.8281C44.4844 53.9531 47.6875 53.0625 49.7344 51.3906C60.6094 43.4531 59.8438 25.6563 47.4375 25.6563C41.0313 25.6563 37.8281 29.125 38.8594 35.9063C38.9844 37.0625 38.9844 38.4688 38.2188 38.5938C37.0625 38.8438 36.5469 37.8281 36.2969 36.6719C34.8906 30.9063 30.6563 25.9219 22.7344 25.9219C10.9531 25.9219 0.9688 35.3906 0.9688 54.8438C0.9688 75.0781 18.5 88 35.1406 88C44.75 88 57.1563 82.375 57.1563 71.4844C57.1563 65.4688 51.7813 59.5781 44.6094 59.5781C36.4219 59.5781 34.7656 71.6094 24.6406 71.6094C17.2188 71.6094 11.8438 64.0625 11.7188 55.875C11.5938 47.2969 16.4531 39.875 22.9844 40ZM22.9844 40 M62.9688 55.3594C62.9688 72.25 76.2813 88 93.9375 88C110.0781 88 121.8438 74.5625 121.8438 58.6875C121.8438 41.9219 108.4063 25.9219 90.875 25.9219C74.75 25.9219 62.9688 39.6094 62.9688 55.3594ZM78.0781 64.8281C78.0781 53.7031 85.375 38.9688 96.25 37.5625C96.625 37.5625 97.1406 37.4375 97.5313 37.4375C102.1406 37.4375 105.2031 40.8906 105.8438 46.9063C107 58.9375 99.4531 73.0313 88.7031 75.5781C87.7969 75.8438 87.0313 75.8438 86.2656 75.8438C81.0156 75.8438 78.0781 71.2344 78.0781 64.8281ZM78.0781 64.8281 M181.8594 55.875C166.625 55.875 167.7813 73.0313 154.7188 73.1563C146.0156 73.4063 142.4375 65.4688 142.4375 59.7188C142.4375 52.0313 146.9063 45.5 154.5938 45.125C154.8438 45.125 155.1094 45.125 155.3594 45.125C163.4219 45.125 171.4844 52.5469 179.0469 52.5469C179.6875 52.5469 180.4531 52.4219 181.0938 52.2813C191.5781 50.2344 192.3594 40.25 192.3594 32.1875C192.3594 19.9063 186.2031 5.7031 171.3594 5.7031C164.7031 5.7031 158.1719 8.6406 158.1719 16.1875C158.1719 29.8906 175.2031 26.5625 180.0625 35.5156C181.5938 38.0781 180.9531 40.6406 178.6563 40.6406C178.0156 40.6406 177.25 40.3906 176.3594 40C172.6406 37.9531 164.8281 31.8125 155.75 31.8125C140.125 31.8125 127.9688 43.9688 127.9688 59.9688C127.9688 76.6094 140.3906 88 156 88C166.75 88 175.5781 80.0625 178.5313 70.0781C178.9063 68.5469 179.2969 65.7344 181.2188 66.5C182.625 67.1406 181.7344 69.5625 181.2188 71.3594C179.9375 74.5625 178.4063 77.125 178.5313 81.0938C178.6563 85.7031 182.75 88 186.8438 88C194.1406 88 197.5938 82.1094 197.5938 75.3281C197.5938 66.75 191.4531 55.875 181.8594 55.875ZM181.8594 55.875 M222.0156 56.7656C218.6875 56.7656 216.3906 53.9531 219.8438 48.8281C223.9375 42.6875 230.7188 38.9688 237.375 38.9688C240.4531 38.9688 241.5938 41.7969 240.0625 45.125C238.4063 49.3438 226.75 56.7656 222.0156 56.7656ZM203.9688 61.7656C203.4531 73.5313 208.7031 82.75 218.4375 86.3438C221.375 87.3594 225.0938 87.875 229.0625 87.875C236.6094 87.875 244.9219 85.9531 249.9219 82.875C260.7969 76.2188 253.375 61.7656 243.5156 62.9063C233.1563 64.0625 232.8906 74.2969 225.4688 75.5781C222.7813 76.2188 219.9688 74.4375 218.8125 72.25C216.6406 68.0313 220.4844 64.4531 225.4688 63.5469C235.7188 61.375 256.1875 56.7656 256.1875 41.6563C256.1875 33.0938 248.25 25.5313 237.7656 25.5313C236.9844 25.5313 236.3594 25.6563 235.7188 25.6563C216.7656 27.3281 204.8594 43.9688 203.9688 61.7656ZM203.9688 61.7656 M286.5469 71.3594C285.3906 72 284.1094 72.3906 283.0938 72.3906C280.4063 72.3906 278.6094 70.3438 279.8906 66.375C283.2188 55.75 300.5 47.4219 300.375 36.7969C300.2344 26.4375 289.6094 25.6563 282.4531 25.6563C274.6406 25.6563 265.0469 28.8594 265.0469 38.0781C265.0469 42.8125 269.3906 47.9375 274.25 47.9375C280.9063 47.9375 285.6406 40.25 288.5938 40.25C289.2344 40.25 289.6094 40.8906 289.6094 41.5313C289.6094 43.9688 261.9688 59.9688 261.9688 73.0313C261.9688 83.0156 269.6406 88 278.7344 88C300.625 88 299.8594 52.7969 309.0781 52.7969C315.7344 52.7969 312.6563 65.4688 312.6563 69.0625C312.6563 78.2656 315.7344 88.25 326.8594 88.25C337.75 88.25 341.0781 79.0469 342.7344 69.7031C344.0156 62.9063 344.7813 55.875 344.7813 48.8281C344.7813 39.2344 342.0938 25.5313 329.8125 25.5313C321.6094 25.6563 319.4375 31.8125 320.3438 36.6719C321.3594 44.0938 332.2344 46.0156 332.2344 62.0156C332.2344 64.8281 331.7344 73.1563 327.25 73.1563C320.3438 73.1563 322.25 58.6875 322.6406 54.3438C323.0313 46.9063 319.1875 38.8438 311.5 38.8438C296.2656 38.8438 296.2656 65.4688 286.5469 71.3594ZM286.5469 71.3594 M351.2188 10.9375C351.2188 16.7031 356.2188 21.0625 361.8438 21.0625C367.3594 21.0625 371.7031 17.0938 371.7031 11.3281C371.7031 5.7031 367.2188 0.9531 361.4688 0.9531C355.9531 0.9531 351.2188 5.5625 351.2188 10.9375ZM373.625 36.4219C373.625 29.375 368.25 25.9219 361.9688 25.9219C356.3438 25.9219 350.9688 29.375 351.2188 36.6719C351.4844 42.8125 358.5156 45.7656 358.5156 53.4375C358.5156 62.4063 351.2188 68.6719 350.9688 78.1406C350.9688 84.4219 356.2188 88 361.8438 88C370.4219 88 376.7031 83.2656 375.2813 74.8125C374.3906 68.6719 365.8125 66.5 365.8125 57.4063C365.8125 51.3906 373.625 45.125 373.625 36.4219ZM373.625 36.4219 M403.5938 43.4531C414.4844 43.4531 415.8906 57.4063 424.4688 58.8125C432.2656 60.0938 437.5156 56 439.1875 43.9688C440.4688 35.7813 441.1094 25.4063 430.2188 25.5313C426.5156 25.5313 421.6406 27.9688 421.3906 32.3125C421.0156 37.4375 423.1875 41.4063 425.3594 45.625C425.6094 46.1406 426.5156 47.6875 425.6094 48.1875C424.8438 48.7031 424.0781 47.6875 423.7031 47.1719C420.375 42.5625 411.0313 25.6563 398.8594 25.6563C391.0625 25.6563 383.7656 29.125 383.8906 40.125C384.0156 48.4531 390.4219 53.5625 390.7969 59.3281C391.4375 67.2656 381.9688 67.7813 381.9688 77.125C382.0938 84.1563 387.8594 88 395.5313 88C401.2969 88 407.9531 84.2813 408.0781 77.25C408.2031 65.4688 400.5313 62.4063 398.8594 53.4375C398.3594 49.7344 398.2188 43.4531 403.5938 43.4531ZM403.5938 43.4531 M460.0156 56.7656C456.6875 56.7656 454.3906 53.9531 457.8438 48.8281C461.9375 42.6875 468.7188 38.9688 475.375 38.9688C478.4531 38.9688 479.5938 41.7969 478.0625 45.125C476.4063 49.3438 464.75 56.7656 460.0156 56.7656ZM441.9688 61.7656C441.4531 73.5313 446.7031 82.75 456.4375 86.3438C459.375 87.3594 463.0938 87.875 467.0625 87.875C474.6094 87.875 482.9219 85.9531 487.9219 82.875C498.7969 76.2188 491.375 61.7656 481.5156 62.9063C471.1563 64.0625 470.8906 74.2969 463.4688 75.5781C460.7813 76.2188 457.9688 74.4375 456.8125 72.25C454.6406 68.0313 458.4844 64.4531 463.4688 63.5469C473.7188 61.375 494.1875 56.7656 494.1875 41.6563C494.1875 33.0938 486.25 25.5313 475.7656 25.5313C474.9844 25.5313 474.3594 25.6563 473.7188 25.6563C454.7656 27.3281 442.8594 43.9688 441.9688 61.7656ZM441.9688 61.7656"/>
+        </svg>
+      </a>
+      <nav aria-label="Primary navigation">
+        <ul class="nav-links">
+          <li><a href="https://docs.codewire.sh">Docs</a></li>
+          <li><a href="pricing.html">Pricing</a></li>
+          <li><a href="/login">Sign in</a></li>
+          <li><a class="header-cta" href="#access">Request access</a></li>
+        </ul>
+      </nav>
+    </div>
+  </header>
+
+  <main>
+    <section class="hero-section" aria-labelledby="intro-title">
+      <div class="hero-copy">
+        <span class="hero-eyebrow">Cloud sandboxes</span>
+        <h1 id="intro-title">Cloud environments for agents and their humans.</h1>
+        <p class="lede">Persistent, isolated Linux environments you can access from anywhere, orchestrate through the CLI or SDK, and connect in encrypted private meshes.</p>
+        <p class="hero-detail">Open one in the browser, SSH, or VS Code. Check out any Git repository, manage credentials, and return to the same files, tools, and sessions.</p>
+        <div class="hero-actions">
+          <a class="hero-action hero-action--primary" href="#access">Request access</a>
+          <a class="hero-action hero-action--secondary" href="https://docs.codewire.sh">Read the docs</a>
+        </div>
+      </div>
+    </section>
+
+    <section class="workflow-section" id="how-it-works" aria-labelledby="workflow-title">
+      <h2 id="workflow-title">Everything your session needs. Ready every time.</h2>
+      <p class="workflow-intro">Connect a repository, save your setup, and start a complete Linux sandbox for any session. Open it yourself or hand it to an agent.</p>
+
+      <div class="workflow-stage">
+        <div class="workflow-sticky">
+          <div class="workflow-copy-window">
+            <div class="workflow-list" aria-label="How Codewire works">
+        <article class="workflow-step is-active" id="workflow-step-1" data-title="01 / connect GitHub" data-command="cw github login" data-result="GitHub connected.">
+          <span class="workflow-number" aria-hidden="true">01</span>
+          <div>
+            <h3>Connect GitHub</h3>
+            <p>Authorize once. Codewire can use any public or private repository you choose.</p>
+            <pre class="workflow-command"><code><span class="prompt">$</span> cw github login</code></pre>
+          </div>
+        </article>
+
+        <article class="workflow-step" id="workflow-step-2" data-title="02 / set it up once" data-command="cw init github.com/acme/api --save-preset api" data-result="Preset saved: api">
+          <span class="workflow-number" aria-hidden="true">02</span>
+          <div>
+            <h3>Set it up once</h3>
+            <p>Save the image, tools, install commands, services, secrets, ports, and agent as a reusable preset.</p>
+            <pre class="workflow-command"><code><span class="prompt">$</span> cw init github.com/acme/api \
+    --save-preset api</code></pre>
+          </div>
+        </article>
+
+        <article class="workflow-step" id="workflow-step-3" data-title="03 / add an app secret" data-command="cw secrets create api&#10;cw secrets set api DATABASE_URL" data-result="Secret project &quot;api&quot; created.&#10;Secret DATABASE_URL set in project &quot;api&quot;.">
+          <span class="workflow-number" aria-hidden="true">03</span>
+          <div>
+            <h3>Add an app secret</h3>
+            <p>Store application secrets in a project and bind it only where needed. Agent authentication stays separate.</p>
+            <pre class="workflow-command"><code><span class="prompt">$</span> cw secrets create api
+<span class="prompt">$</span> cw secrets set api DATABASE_URL</code></pre>
+          </div>
+        </article>
+
+        <article class="workflow-step" id="workflow-step-4" data-title="04 / start fresh" data-command="cw env create \&#10;    github.com/acme/api \&#10;    --preset api --secrets api --name auth" data-result="Environment created: auth&#10;Secret project mounted: api">
+          <span class="workflow-number" aria-hidden="true">04</span>
+          <div>
+            <h3>Start a fresh sandbox every time</h3>
+            <p>One click in the dashboard, or one command. The same complete sandbox is ready again—with its tools and credentials.</p>
+            <pre class="workflow-command"><code><span class="prompt">$</span> cw env create \
+    github.com/acme/api \
+    --preset api --secrets api --name auth</code></pre>
+          </div>
+        </article>
+
+        <article class="workflow-step" id="workflow-step-5" data-title="05 / connect" data-command="cw config-ssh&#10;ssh cw-auth" data-result="Connected to auth.">
+          <span class="workflow-number" aria-hidden="true">05</span>
+          <div>
+            <h3>Connect over SSH or VS Code</h3>
+            <p>Run this once. Then use OpenSSH, scp, rsync, or VS Code to connect to the same machine as the agent.</p>
+            <pre class="workflow-command"><code><span class="prompt">$</span> cw config-ssh
+<span class="prompt">$</span> ssh cw-auth</code></pre>
+          </div>
+        </article>
+
+        <article class="workflow-step" id="workflow-step-6" data-title="06 / tell Codex" data-command="cw run --detach auth -- codex \&#10;    &quot;Build a Node.js web app that uses DATABASE_URL and runs on port 3000.&quot;" data-result="Codex session launched in auth.&#10;Building the Node.js app…">
+          <span class="workflow-number" aria-hidden="true">06</span>
+          <div>
+            <h3>Tell Codex what to build</h3>
+            <p>Give the agent the outcome. It works inside the configured environment with the repository, tools, and app secrets already in place.</p>
+            <pre class="workflow-command"><code><span class="prompt">$</span> cw run --detach auth -- codex \
+    "Build a Node.js web app that uses DATABASE_URL and runs on port 3000."</code></pre>
+          </div>
+        </article>
+
+        <article class="workflow-step" id="workflow-step-7" data-title="07 / start the server" data-command="cw run --detach auth -- npm run dev -- --host 0.0.0.0 --port 3000" data-result="Server listening on 0.0.0.0:3000">
+          <span class="workflow-number" aria-hidden="true">07</span>
+          <div>
+            <h3>Start the server</h3>
+            <p>Run the app as another persistent session. It stays live alongside the agent, even after you disconnect.</p>
+            <pre class="workflow-command"><code><span class="prompt">$</span> cw run --detach auth -- npm run dev \
+    -- --host 0.0.0.0 --port 3000</code></pre>
+          </div>
+        </article>
+
+        <article class="workflow-step" id="workflow-step-8" data-title="08 / open a preview" data-command="cw env port add 3000 --label app --access org_members --env auth" data-result="Port 3000 registered as app&#10;URL: https://app-7f3c2-acme.cwpreview.sh&#10;Access: org_members">
+          <span class="workflow-number" aria-hidden="true">08</span>
+          <div>
+            <h3>Open a preview URL</h3>
+            <p>Turn any running port into an authenticated URL for your team. No tunnel or manual proxy to keep alive.</p>
+            <pre class="workflow-command"><code><span class="prompt">$</span> cw env port add 3000 --label app \
+    --access org_members --env auth</code></pre>
+          </div>
+        </article>
+
+        <article class="workflow-step" id="workflow-step-9" data-title="09 / come back" data-command="cw attach auth" data-result="Attached to the latest session.">
+          <span class="workflow-number" aria-hidden="true">09</span>
+          <div>
+            <h3>Come back when it’s ready</h3>
+            <p>Reconnect to the same live session. Its files, process, and complete output are still there.</p>
+            <pre class="workflow-command"><code><span class="prompt">$</span> cw attach auth</code></pre>
+          </div>
+        </article>
+            </div>
+          </div>
+
+          <aside class="workflow-terminal-column" aria-label="Commands for the active step">
+            <div class="workflow-terminal">
+              <div class="workflow-terminal-bar">
+                <span class="terminal-dots" aria-hidden="true"><span></span><span></span><span></span></span>
+                <span id="workflow-terminal-title">01 / connect GitHub</span>
+              </div>
+              <div class="workflow-terminal-screen">
+                <div id="workflow-terminal-commands">
+                  <div class="terminal-command-line"><span class="terminal-prompt">$ </span><span>cw github login</span><span class="terminal-cursor" aria-hidden="true"></span></div>
+                </div>
+                <div class="terminal-result" id="workflow-terminal-result" aria-live="polite">GitHub connected.</div>
+              </div>
+            </div>
+          </aside>
+        </div>
+      </div>
+    </section>
+
+    <section class="parallel-section" id="parallel" aria-labelledby="parallel-title">
+      <div class="parallel-copy">
+        <h2 id="parallel-title">Every session gets its own sandbox.</h2>
+        <p class="parallel-lede">Run agent sessions independently with you at the center—or let sandboxes speak to one another over encrypted private meshes. Size each one for the work.</p>
+
+        <div class="parallel-mode-switch" role="group" aria-label="Agent network mode">
+          <button class="parallel-mode-button is-active" type="button" data-parallel-mode="independent" aria-pressed="true">Independent sessions</button>
+          <button class="parallel-mode-button" type="button" data-parallel-mode="mesh" aria-pressed="false">Encrypted meshes</button>
+        </div>
+      </div>
+
+      <div class="parallel-map" data-mode="independent" aria-label="Six independent agents working in separate, differently sized environments around one operator">
+        <div class="parallel-state parallel-state--independent" aria-hidden="false">
+        <svg class="parallel-connections" viewBox="0 0 1200 500" preserveAspectRatio="none" aria-hidden="true">
+          <defs>
+            <filter id="packet-glow" x="-300%" y="-300%" width="700%" height="700%">
+              <feGaussianBlur stdDeviation="2.5" result="blur"></feGaussianBlur>
+              <feMerge><feMergeNode in="blur"></feMergeNode><feMergeNode in="SourceGraphic"></feMergeNode></feMerge>
+            </filter>
+          </defs>
+
+          <path class="parallel-route" id="parallel-route-1" d="M 530 232 C 470 165 425 95 360 62"></path>
+          <path class="parallel-route" id="parallel-route-2" d="M 516 250 L 360 250"></path>
+          <path class="parallel-route" id="parallel-route-3" d="M 530 268 C 470 335 425 405 360 438"></path>
+          <path class="parallel-route" id="parallel-route-4" d="M 670 232 C 730 165 775 95 840 62"></path>
+          <path class="parallel-route" id="parallel-route-5" d="M 684 250 L 840 250"></path>
+          <path class="parallel-route" id="parallel-route-6" d="M 670 268 C 730 335 775 405 840 438"></path>
+
+          <circle class="flow-packet" r="3.5"><animateMotion dur="3.6s" begin="-0.4s" repeatCount="indefinite"><mpath href="#parallel-route-1"></mpath></animateMotion></circle>
+          <circle class="flow-packet" r="3.5"><animateMotion dur="3.6s" begin="-2.2s" repeatCount="indefinite"><mpath href="#parallel-route-1"></mpath></animateMotion></circle>
+          <circle class="flow-packet" r="3.5"><animateMotion dur="3.3s" begin="-1.1s" repeatCount="indefinite"><mpath href="#parallel-route-2"></mpath></animateMotion></circle>
+          <circle class="flow-packet" r="3.5"><animateMotion dur="3.3s" begin="-2.7s" repeatCount="indefinite"><mpath href="#parallel-route-2"></mpath></animateMotion></circle>
+          <circle class="flow-packet" r="3.5"><animateMotion dur="3.8s" begin="-0.8s" repeatCount="indefinite"><mpath href="#parallel-route-3"></mpath></animateMotion></circle>
+          <circle class="flow-packet" r="3.5"><animateMotion dur="3.8s" begin="-2.7s" repeatCount="indefinite"><mpath href="#parallel-route-3"></mpath></animateMotion></circle>
+          <circle class="flow-packet" r="3.5"><animateMotion dur="3.7s" begin="-1.6s" repeatCount="indefinite"><mpath href="#parallel-route-4"></mpath></animateMotion></circle>
+          <circle class="flow-packet" r="3.5"><animateMotion dur="3.7s" begin="-3.4s" repeatCount="indefinite"><mpath href="#parallel-route-4"></mpath></animateMotion></circle>
+          <circle class="flow-packet" r="3.5"><animateMotion dur="3.2s" begin="-0.6s" repeatCount="indefinite"><mpath href="#parallel-route-5"></mpath></animateMotion></circle>
+          <circle class="flow-packet" r="3.5"><animateMotion dur="3.2s" begin="-2.2s" repeatCount="indefinite"><mpath href="#parallel-route-5"></mpath></animateMotion></circle>
+          <circle class="flow-packet" r="3.5"><animateMotion dur="3.9s" begin="-1.3s" repeatCount="indefinite"><mpath href="#parallel-route-6"></mpath></animateMotion></circle>
+          <circle class="flow-packet" r="3.5"><animateMotion dur="3.9s" begin="-3.2s" repeatCount="indefinite"><mpath href="#parallel-route-6"></mpath></animateMotion></circle>
         </svg>
 
-        <div class="story-terminal" id="story-term"></div>
+        <article class="agent-terminal agent-terminal--lt">
+          <header><span class="agent-terminal-name">auth · 8 GB RAM</span><span class="agent-status"><span class="agent-status-dot"></span>codex</span></header>
+          <div class="agent-terminal-body">
+            <div class="agent-task">fix session expiry</div>
+            <div class="agent-work">reading src/auth/session.rs</div>
+          </div>
+        </article>
 
-        <div class="you-box" id="you-box">YOU</div>
+        <article class="agent-terminal agent-terminal--lm">
+          <header><span class="agent-terminal-name">billing · 16 GB RAM</span><span class="agent-status"><span class="agent-status-dot"></span>claude code</span></header>
+          <div class="agent-terminal-body">
+            <div class="agent-task">trace failed invoice</div>
+            <div class="agent-work">editing webhooks/stripe.go</div>
+          </div>
+        </article>
 
-        <div class="agent-box" id="ab0" data-conv='["> fix the login session bug","  found it — token refresh skips expiry check","  patched + added test for edge case","  PR #241 — all checks green"]'>
-          <div class="agent-branch">feat/auth</div>
-          <div class="agent-conv"><div class="agent-conv-inner"></div></div>
-          <div class="agent-status"><span class="pip"></span> <span class="status-text">working...</span></div>
+        <article class="agent-terminal agent-terminal--lb">
+          <header><span class="agent-terminal-name">docs · 2 GB RAM</span><span class="agent-status"><span class="agent-status-dot"></span>codex</span></header>
+          <div class="agent-terminal-body">
+            <div class="agent-task">update quickstart</div>
+            <div class="agent-work">running docs build</div>
+          </div>
+        </article>
+
+        <article class="agent-terminal agent-terminal--rt">
+          <header><span class="agent-terminal-name">api · 32 GB RAM</span><span class="agent-status"><span class="agent-status-dot"></span>claude code</span></header>
+          <div class="agent-terminal-body">
+            <div class="agent-task">add retry backoff</div>
+            <div class="agent-work">editing client/retry.ts</div>
+          </div>
+        </article>
+
+        <article class="agent-terminal agent-terminal--rm">
+          <header><span class="agent-terminal-name">tests · 16 GB RAM</span><span class="agent-status"><span class="agent-status-dot"></span>codex</span></header>
+          <div class="agent-terminal-body">
+            <div class="agent-task">repair flaky test</div>
+            <div class="agent-work">running cargo test</div>
+          </div>
+        </article>
+
+        <article class="agent-terminal agent-terminal--rb">
+          <header><span class="agent-terminal-name">release · 8 GB RAM</span><span class="agent-status"><span class="agent-status-dot"></span>claude code</span></header>
+          <div class="agent-terminal-body">
+            <div class="agent-task">review release diff</div>
+            <div class="agent-work">checking 18 changed files</div>
+          </div>
+        </article>
         </div>
-        <div class="agent-box" id="ab1" data-conv='["> add cursor pagination to /api/users","  refactored to keyset pagination","  updated OpenAPI spec, regenerated types","  PR #242 — 3x faster on large sets"]'>
-          <div class="agent-branch">fix/pagination</div>
-          <div class="agent-conv"><div class="agent-conv-inner"></div></div>
-          <div class="agent-status"><span class="pip"></span> <span class="status-text">working...</span></div>
+
+        <div class="parallel-state parallel-state--mesh" aria-hidden="true">
+          <svg class="mesh-operator-connections" viewBox="0 0 1200 500" preserveAspectRatio="none" aria-hidden="true">
+            <path class="parallel-route" id="mesh-route-left" d="M 516 250 L 468 250"></path>
+            <path class="parallel-route" id="mesh-route-right" d="M 684 250 L 732 250"></path>
+            <circle class="flow-packet" r="3.5"><animateMotion dur="2.4s" begin="-0.5s" repeatCount="indefinite"><mpath href="#mesh-route-left"></mpath></animateMotion></circle>
+            <circle class="flow-packet" r="3.5"><animateMotion dur="2.4s" begin="-1.7s" repeatCount="indefinite"><mpath href="#mesh-route-left"></mpath></animateMotion></circle>
+            <circle class="flow-packet" r="3.5"><animateMotion dur="2.4s" begin="-1.1s" repeatCount="indefinite"><mpath href="#mesh-route-right"></mpath></animateMotion></circle>
+            <circle class="flow-packet" r="3.5"><animateMotion dur="2.4s" begin="-2.3s" repeatCount="indefinite"><mpath href="#mesh-route-right"></mpath></animateMotion></circle>
+          </svg>
+
+          <div class="mesh-cluster mesh-cluster--left" role="group" aria-labelledby="product-mesh-title">
+            <div class="mesh-cluster-title"><span id="product-mesh-title">product mesh</span><span class="mesh-encrypted">encrypted</span></div>
+            <svg class="mesh-lines" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
+              <path class="mesh-line" d="M 25 13 H 75 M 25 87 H 75 M 25 13 V 87 M 75 13 V 87 M 25 13 L 75 87 M 75 13 L 25 87"></path>
+              <path class="mesh-message-route" id="product-mesh-top" d="M 47 13 H 53"></path>
+              <path class="mesh-message-route" id="product-mesh-right" d="M 75 25 V 75"></path>
+              <path class="mesh-message-route" id="product-mesh-bottom" d="M 53 87 H 47"></path>
+              <path class="mesh-message-route" id="product-mesh-left" d="M 25 75 V 25"></path>
+              <path class="mesh-message-route" id="product-mesh-diagonal-a" d="M 33 25 L 67 75"></path>
+              <path class="mesh-message-route" id="product-mesh-diagonal-b" d="M 67 25 L 33 75"></path>
+              <circle class="flow-packet" r="1.15"><animateMotion dur="1.7s" begin="-0.4s" repeatCount="indefinite"><mpath href="#product-mesh-top"></mpath></animateMotion></circle>
+              <circle class="flow-packet" r="1.15"><animateMotion dur="2.7s" begin="-1.9s" repeatCount="indefinite"><mpath href="#product-mesh-right"></mpath></animateMotion></circle>
+              <circle class="flow-packet" r="1.15"><animateMotion dur="1.8s" begin="-1.1s" repeatCount="indefinite"><mpath href="#product-mesh-bottom"></mpath></animateMotion></circle>
+              <circle class="flow-packet" r="1.15"><animateMotion dur="2.9s" begin="-0.8s" repeatCount="indefinite"><mpath href="#product-mesh-left"></mpath></animateMotion></circle>
+              <circle class="flow-packet" r="1.15"><animateMotion dur="3.1s" begin="-2.4s" repeatCount="indefinite"><mpath href="#product-mesh-diagonal-a"></mpath></animateMotion></circle>
+              <circle class="flow-packet" r="1.15"><animateMotion dur="3.3s" begin="-1.5s" repeatCount="indefinite"><mpath href="#product-mesh-diagonal-b"></mpath></animateMotion></circle>
+            </svg>
+            <div class="mesh-agent-grid">
+              <article class="mesh-agent">
+                <header><span>auth · 8 GB RAM</span><span class="mesh-agent-tool">codex</span></header>
+                <div class="mesh-agent-task">fix session expiry</div>
+                <div class="mesh-agent-work">sending types → api</div>
+              </article>
+              <article class="mesh-agent">
+                <header><span>api · 32 GB RAM</span><span class="mesh-agent-tool">claude</span></header>
+                <div class="mesh-agent-task">add retry backoff</div>
+                <div class="mesh-agent-work">auth types ← auth</div>
+              </article>
+              <article class="mesh-agent">
+                <header><span>web · 2 GB RAM</span><span class="mesh-agent-tool">codex</span></header>
+                <div class="mesh-agent-task">update empty states</div>
+                <div class="mesh-agent-work">preview URL → tests</div>
+              </article>
+              <article class="mesh-agent">
+                <header><span>tests · 16 GB RAM</span><span class="mesh-agent-tool">claude</span></header>
+                <div class="mesh-agent-task">repair flaky test</div>
+                <div class="mesh-agent-work">preview URL ← web</div>
+              </article>
+            </div>
+          </div>
+
+          <div class="mesh-cluster mesh-cluster--right" role="group" aria-labelledby="operations-mesh-title">
+            <div class="mesh-cluster-title"><span id="operations-mesh-title">operations mesh</span><span class="mesh-encrypted">encrypted</span></div>
+            <svg class="mesh-lines" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
+              <path class="mesh-line" d="M 25 13 H 75 M 25 87 H 75 M 25 13 V 87 M 75 13 V 87 M 25 13 L 75 87 M 75 13 L 25 87"></path>
+              <path class="mesh-message-route" id="operations-mesh-top" d="M 47 13 H 53"></path>
+              <path class="mesh-message-route" id="operations-mesh-right" d="M 75 25 V 75"></path>
+              <path class="mesh-message-route" id="operations-mesh-bottom" d="M 53 87 H 47"></path>
+              <path class="mesh-message-route" id="operations-mesh-left" d="M 25 75 V 25"></path>
+              <path class="mesh-message-route" id="operations-mesh-diagonal-a" d="M 33 25 L 67 75"></path>
+              <path class="mesh-message-route" id="operations-mesh-diagonal-b" d="M 67 25 L 33 75"></path>
+              <circle class="flow-packet" r="1.15"><animateMotion dur="1.8s" begin="-1.2s" repeatCount="indefinite"><mpath href="#operations-mesh-top"></mpath></animateMotion></circle>
+              <circle class="flow-packet" r="1.15"><animateMotion dur="2.8s" begin="-0.5s" repeatCount="indefinite"><mpath href="#operations-mesh-right"></mpath></animateMotion></circle>
+              <circle class="flow-packet" r="1.15"><animateMotion dur="1.7s" begin="-0.3s" repeatCount="indefinite"><mpath href="#operations-mesh-bottom"></mpath></animateMotion></circle>
+              <circle class="flow-packet" r="1.15"><animateMotion dur="3s" begin="-2.1s" repeatCount="indefinite"><mpath href="#operations-mesh-left"></mpath></animateMotion></circle>
+              <circle class="flow-packet" r="1.15"><animateMotion dur="3.2s" begin="-1.7s" repeatCount="indefinite"><mpath href="#operations-mesh-diagonal-a"></mpath></animateMotion></circle>
+              <circle class="flow-packet" r="1.15"><animateMotion dur="3.4s" begin="-2.8s" repeatCount="indefinite"><mpath href="#operations-mesh-diagonal-b"></mpath></animateMotion></circle>
+            </svg>
+            <div class="mesh-agent-grid">
+              <article class="mesh-agent">
+                <header><span>billing · 16 GB RAM</span><span class="mesh-agent-tool">claude</span></header>
+                <div class="mesh-agent-task">trace failed invoice</div>
+                <div class="mesh-agent-work">webhook sample → docs</div>
+              </article>
+              <article class="mesh-agent">
+                <header><span>docs · 2 GB RAM</span><span class="mesh-agent-tool">codex</span></header>
+                <div class="mesh-agent-task">update quickstart</div>
+                <div class="mesh-agent-work">webhook ← billing</div>
+              </article>
+              <article class="mesh-agent">
+                <header><span>infra · 32 GB RAM</span><span class="mesh-agent-tool">claude</span></header>
+                <div class="mesh-agent-task">profile the gateway</div>
+                <div class="mesh-agent-work">benchmark → release</div>
+              </article>
+              <article class="mesh-agent">
+                <header><span>release · 8 GB RAM</span><span class="mesh-agent-tool">codex</span></header>
+                <div class="mesh-agent-task">review release diff</div>
+                <div class="mesh-agent-work">benchmark ← infra</div>
+              </article>
+            </div>
+          </div>
         </div>
-        <div class="agent-box" id="ab2" data-conv='["> migrate v1 endpoints to v2 schema","  moved 12 handlers, updated routes","  added 301 redirects for old paths","  PR #243 — zero breaking changes"]'>
-          <div class="agent-branch">feat/api-v2</div>
-          <div class="agent-conv"><div class="agent-conv-inner"></div></div>
-          <div class="agent-status"><span class="pip"></span> <span class="status-text">working...</span></div>
-        </div>
-        <div class="agent-box" id="ab3" data-conv='["> integration tests for billing pipeline","  set up fixtures with stripe-mock","  wrote 14 tests for upgrades + overages","  PR #244 — coverage 23% → 91%"]'>
-          <div class="agent-branch">chore/tests</div>
-          <div class="agent-conv"><div class="agent-conv-inner"></div></div>
-          <div class="agent-status"><span class="pip"></span> <span class="status-text">working...</span></div>
-        </div>
-        <div class="agent-box" id="ab4" data-conv='["> add rate limiting to public endpoints","  implemented token bucket per API key","  added 429 responses + retry-after header","  PR #245 — tested at 10k req/s"]'>
-          <div class="agent-branch">feat/rate-limit</div>
-          <div class="agent-conv"><div class="agent-conv-inner"></div></div>
-          <div class="agent-status"><span class="pip"></span> <span class="status-text">working...</span></div>
-        </div>
-        <div class="agent-box" id="ab5" data-conv='["> refactor webhook delivery to async","  moved to NATS JetStream consumer","  added dead letter queue + retries","  PR #246 — p99 latency down 80%"]'>
-          <div class="agent-branch">refactor/webhooks</div>
-          <div class="agent-conv"><div class="agent-conv-inner"></div></div>
-          <div class="agent-status"><span class="pip"></span> <span class="status-text">working...</span></div>
+
+        <div class="operator-node">
+          <strong>you</strong>
+          <span id="parallel-operator-meta">6 live sessions</span>
         </div>
       </div>
-    </div>
-  </div>
 
-  <!-- ── Mobile text panel (hidden on desktop) ── -->
-  <div class="mobile-text-panel">
-  <div class="mobile-text-track" id="mobile-track">
-    <div class="mobile-text-slide">
-      <h2>Your job has <span style="color:var(--teal)">changed.</span></h2>
-      <p>The best engineers don't write code anymore. They describe what needs to happen, and Claude, Cursor, Codex — they build it.</p>
-      <p>Your job isn't implementation. It's <strong>direction.</strong></p>
-    </div>
-    <div class="mobile-text-slide">
-      <h2>But your machine <span style="color:var(--red)">didn't get the memo.</span></h2>
-      <p>Monday morning. 4 tasks. You fire up an agent. CPU spikes. Fans scream.</p>
-      <p>Agent 1 is running. 2, 3, 4? Waiting.</p>
-      <p>Git worktrees give you five copies of the code. They don't give you five copies of the machine.</p>
-    </div>
-    <div class="mobile-text-slide">
-      <h2>What if each agent got <span style="color:var(--teal)">its own machine?</span></h2>
-      <p>4 tasks. 4 cloud machines. All running at the same time.</p>
-      <p>Kick them off at 9am. Check in at lunch. <strong>They're all done.</strong></p>
-    </div>
-    <div class="mobile-text-slide">
-      <h2>Not just parallel. <span style="color:var(--teal)">A fabric.</span></h2>
-      <p>Agents coordinate across a distributed fabric — events, MCP, shared state flowing between isolated VMs.</p>
-      <p>You're in the center. The fabric grows with you.</p>
-    </div>
-    <div class="mobile-text-slide">
-      <h2>Shipped <span style="color:var(--teal)">6 features.</span> Wrote zero code.</h2>
-      <p>Before: <span style="color:var(--red)">6 days.</span> With Codewire: <span style="color:var(--teal)">1 day.</span></p>
-      <p>Isolated Xen VMs. Per-second billing. Persistent sessions.</p>
-      <div id="mobile-cta-container" style="margin-top:1rem">
-        <form class="cta-form" id="mobile-waitlist-form">
-          <input type="email" placeholder="you@company.com" required id="mobile-cta-email">
-          <button type="submit" class="btn">Join Waitlist →</button>
-        </form>
+      <p class="parallel-caption" id="parallel-caption" aria-live="polite">One session. One sandbox. Sized for the work.</p>
+    </section>
+
+    <section id="sdk" aria-labelledby="sdk-title">
+      <h2 id="sdk-title">Program it</h2>
+      <p>Use the CLI, or use the SDKs for TypeScript, Python, and Go.</p>
+      <p>Create, start, stop, resize, and delete environments. Run commands. Read and write files. Open ports. Build Codewire into your own tools and products.</p>
+      <pre aria-label="Codewire Python SDK example">from codewire import Codewire
+
+cw = Codewire()
+env = cw.environments.create(
+    name="api",
+    repo_url="https://github.com/acme/api",
+    image="workspace",
+    wait=True,
+)
+
+result = env.exec(command=["pytest", "-q"])
+port = env.create_port(port=3000, label="app")</pre>
+      <p>The same <code>cw</code> commands work with the hosted platform and local Docker or Lima environments.</p>
+    </section>
+
+    <section class="isolation-section" aria-labelledby="isolation-title">
+      <div class="isolation-copy-block">
+        <h2 id="isolation-title">Choose your isolation level.</h2>
+        <p class="isolation-intro">Use hypervisor isolation for everyday sessions. When source code, credentials, or customer data need stronger protection, use hardware-encrypted confidential isolation—and get a report that verifies it.</p>
       </div>
-    </div>
-  </div>
-  <div class="mobile-dots">
-    <div class="mobile-dot active"></div>
-    <div class="mobile-dot"></div>
-    <div class="mobile-dot"></div>
-    <div class="mobile-dot"></div>
-    <div class="mobile-dot"></div>
-  </div>
-  </div>
 
-</div>
+      <div class="isolation-options">
+        <article class="isolation-option">
+          <div class="isolation-option-heading">
+            <h3>Hypervisor isolation</h3>
+            <span class="isolation-tier">standard</span>
+          </div>
 
-<div class="cta-section" id="cta">
-  <h2>Stop queuing. <span style="color:var(--teal)">Start orchestrating.</span></h2>
-  <p>We're onboarding teams one at a time during the private beta.</p>
-  <div id="cta-container">
-    <form class="cta-form" id="waitlist-form">
-      <input type="email" placeholder="you@company.com" required id="cta-email">
-      <button type="submit" class="btn">Join Waitlist →</button>
-    </form>
-  </div>
-</div>
+          <div class="isolation-diagram" role="img" aria-label="A standard sandbox isolated from the host by its own virtual machine, guest kernel, and the hypervisor">
+            <div class="isolation-host">
+              <div class="isolation-host-bar"><span>compute host</span><span>host kernel</span></div>
+              <div class="isolation-vm">
+                <div class="isolation-vm-bar"><span>sandbox VM</span><span class="isolation-boundary-badge">isolated</span></div>
+                <div class="isolation-workload">agent + generated code</div>
+                <div class="isolation-kernel"><span>guest kernel</span><span>dedicated</span></div>
+              </div>
+              <div class="isolation-foundation"><strong>hypervisor boundary</strong><span>host kernel stays outside</span></div>
+            </div>
+          </div>
 
-<footer class="footer">
-  <a href="index.html">Home</a> |
-  <a href="pricing.html">Pricing</a> |
-  <a href="https://docs.codewire.sh">Docs</a> |
-  <a href="mailto:hello@codewire.sh">hello@codewire.sh</a>
-  <br>© 2026 Codewire
-</footer>
+          <p class="isolation-copy">Each sandbox runs in its own VM with its own guest kernel. It does not share the host kernel with other sandboxes.</p>
+        </article>
+
+        <article class="isolation-option isolation-option--confidential">
+          <div class="isolation-option-heading">
+            <h3>Confidential isolation</h3>
+            <span class="isolation-tier">confidential</span>
+          </div>
+
+          <div class="isolation-diagram" role="img" aria-label="A confidential sandbox protected from the host by an attested virtual machine, encrypted guest memory, and a hardware trusted execution environment">
+            <div class="isolation-host">
+              <div class="isolation-host-bar"><span>compute host</span><span>memory hidden from host</span></div>
+              <div class="isolation-vm">
+                <div class="isolation-vm-bar"><span>confidential sandbox</span><span class="isolation-boundary-badge">verified</span></div>
+                <div class="isolation-workload">agent + sensitive code</div>
+                <div class="isolation-kernel"><span>guest kernel + memory</span><span>encrypted</span></div>
+              </div>
+              <div class="isolation-foundation"><strong>hardware protection · SEV-SNP</strong><span>attestation report</span></div>
+            </div>
+          </div>
+
+          <p class="isolation-copy">Hardware encrypts the sandbox’s memory while it runs. Use <code>cw env report auth</code> to get a trust report showing the confidential runtime and attestation status.</p>
+        </article>
+      </div>
+
+      <p class="isolation-difference"><strong>Confidential compute, built into your sandbox workflow.</strong> Choose the boundary per session from the CLI, SDK, or API.</p>
+    </section>
+
+    <section id="pricing" aria-labelledby="pricing-title">
+      <h2 id="pricing-title">Agents are not seats</h2>
+      <p>Plans include monthly compute and storage. Additional usage is measured in CPU hours, memory GB-hours, and allocated disk GB-hours. Agent processes never count as user seats.</p>
+      <p>Start with a 14-day trial. No card is required. <a href="pricing.html">See pricing →</a></p>
+    </section>
+
+    <section aria-labelledby="source-title">
+      <h2 id="source-title">Open source</h2>
+      <p>The control plane, web dashboard, CLI, and SDKs are open source under AGPL-3.0-only.</p>
+      <p><a href="https://github.com/codewiresh/codewire">Read the source →</a></p>
+    </section>
+
+    <section id="access" aria-labelledby="access-title">
+      <h2 id="access-title">A sandbox for every session</h2>
+      <p>Codewire is in private beta. Request access below.</p>
+
+      <form id="access-form">
+        <label for="email" class="faint">Work email</label>
+        <input id="email" name="email" type="email" autocomplete="email" placeholder="you@company.com" required>
+        <button type="submit">Request access</button>
+      </form>
+      <p class="status" id="access-status" aria-live="polite"></p>
+    </section>
+  </main>
+
+  <footer>
+    <nav aria-label="Footer navigation">
+      <ul class="footer-links">
+        <li><a href="https://docs.codewire.sh">Docs</a></li>
+        <li><a href="pricing.html">Pricing</a></li>
+        <li><a href="https://github.com/codewiresh/codewire">GitHub</a></li>
+        <li><a href="mailto:hello@codewire.sh">Contact</a></li>
+      </ul>
+    </nav>
+    <div>&copy; 2026 Codewire</div>
+  </footer>
 
 <script>
-/* ── Spinners ── */
 (function() {
-  var f = ['\u2847','\u2807','\u280F','\u2819','\u2839','\u2838','\u283C','\u2834','\u2826','\u2846'];
-  var els = document.querySelectorAll('[data-spinner]');
-  var i = 0, last = 0;
-  function tick(now) {
-    if (now - last >= 80) { i = (i+1)%f.length; els.forEach(function(e){e.textContent=f[i]}); last = now; }
-    requestAnimationFrame(tick);
-  }
-  requestAnimationFrame(tick);
-})();
+  var canvas = document.getElementById('cosmos-canvas');
+  var context = canvas && canvas.getContext('2d', {alpha: true});
 
-/* ── Story terminal typing ── */
-(function() {
-  var el = document.getElementById('story-term');
-  if (!el) return;
-  var lines = [
-    { t:'cmd', s:'$ cw env create github.com/acme/api' },
-    { t:'out', s:'Workspace "api" running (4 vCPU, 16GB)', d:400 },
-    { t:'gap' },
-    { t:'cmd', s:'$ cw run -- claude "fix the auth bug"' },
-    { t:'out', s:'Session 1 started', d:300 },
-    { t:'gap' },
-    { t:'cmd', s:'$ cw run -- claude "add pagination"' },
-    { t:'out', s:'Session 2 started', d:300 },
-    { t:'gap' },
-    { t:'cmd', s:'$ cw status' },
-    { t:'out', s:'WORKSPACE  SESSIONS  STATUS', d:200 },
-    { t:'out', s:'api        2 active  <span style="color:var(--green)">running</span>', d:100 },
-  ];
-  var cf = ['|','/','-','\\'], ci = 0;
-  function run() {
-    el.innerHTML = '';
-    var li = 0;
-    function next() {
-      if (li >= lines.length) { setTimeout(run, 5000); return; }
-      var line = lines[li++];
-      if (line.t === 'gap') { el.innerHTML += '<br>'; el.scrollTop = el.scrollHeight; setTimeout(next, 400); return; }
-      if (line.t === 'out') {
-        setTimeout(function() {
-          var d = document.createElement('div');
-          d.className = 'output';
-          d.innerHTML = line.s;
-          el.appendChild(d);
-          el.scrollTop = el.scrollHeight;
-          next();
-        }, line.d || 200);
-        return;
-      }
-      var text = line.s, chi = 0;
-      var div = document.createElement('div');
-      var cursor = document.createElement('span');
-      cursor.className = 'cursor';
-      el.appendChild(div);
-      el.appendChild(cursor);
-      var cint = setInterval(function() { ci = (ci+1)%4; cursor.textContent = cf[ci]; }, 100);
-      function tc() {
-        if (chi >= text.length) { clearInterval(cint); el.removeChild(cursor); setTimeout(next, 200); return; }
-        var c = text[chi];
-        if (chi === 0 && c === '$') { div.innerHTML += '<span class="prompt">$</span>'; chi++; setTimeout(tc, 30); return; }
-        if (chi === 1 && c === ' ') { div.innerHTML += ' <span class="cmd">'; chi++; setTimeout(tc, 30); return; }
-        var span = div.querySelector('.cmd');
-        if (span) span.textContent += c; else div.innerHTML += c;
-        el.scrollTop = el.scrollHeight;
-        chi++;
-        setTimeout(tc, 30 + Math.random() * 25);
-      }
-      tc();
+  if (!canvas || !context) return;
+
+  var motionPreference = window.matchMedia('(prefers-reduced-motion: reduce)');
+  var reducedMotion = motionPreference.matches;
+  var frameId = 0;
+  var resizeId = 0;
+  var lastFrameTime = 0;
+  var frameInterval = 1000 / 30;
+  var width = 0;
+  var height = 0;
+  var pixelRatio = 1;
+  var stars = [];
+  var dust = [];
+  var nebulae = [];
+  var accretion = [];
+  var clusters = [];
+
+  function createRandom(seed) {
+    return function() {
+      seed |= 0;
+      seed = seed + 0x6d2b79f5 | 0;
+      var value = Math.imul(seed ^ seed >>> 15, 1 | seed);
+      value = value + Math.imul(value ^ value >>> 7, 61 | value) ^ value;
+      return ((value ^ value >>> 14) >>> 0) / 4294967296;
+    };
+  }
+
+  function color(colorValue, alpha) {
+    return 'rgba(' + colorValue[0] + ', ' + colorValue[1] + ', ' + colorValue[2] + ', ' + alpha + ')';
+  }
+
+  function noiseHash(x, y, seed) {
+    var value = Math.imul(x, 374761393) + Math.imul(y, 668265263) + Math.imul(seed, 1442695041);
+    value = Math.imul(value ^ value >>> 13, 1274126177);
+    return ((value ^ value >>> 16) >>> 0) / 4294967295;
+  }
+
+  function smoothNoise(x, y, seed) {
+    var x0 = Math.floor(x);
+    var y0 = Math.floor(y);
+    var xBlend = x - x0;
+    var yBlend = y - y0;
+    var topLeft = noiseHash(x0, y0, seed);
+    var topRight = noiseHash(x0 + 1, y0, seed);
+    var bottomLeft = noiseHash(x0, y0 + 1, seed);
+    var bottomRight = noiseHash(x0 + 1, y0 + 1, seed);
+
+    xBlend = xBlend * xBlend * (3 - 2 * xBlend);
+    yBlend = yBlend * yBlend * (3 - 2 * yBlend);
+
+    return (topLeft + (topRight - topLeft) * xBlend) * (1 - yBlend)
+      + (bottomLeft + (bottomRight - bottomLeft) * xBlend) * yBlend;
+  }
+
+  function fractalNoise(x, y, seed, octaves) {
+    var amplitude = 0.57;
+    var frequency = 1;
+    var total = 0;
+    var normalization = 0;
+
+    for (var octave = 0; octave < octaves; octave += 1) {
+      total += smoothNoise(x * frequency, y * frequency, seed + octave * 1013) * amplitude;
+      normalization += amplitude;
+      frequency *= 2.03;
+      amplitude *= 0.54;
     }
-    next();
+
+    return total / normalization;
   }
-  run();
-})();
 
-/* ── Conversation scrolling for all agent boxes ── */
-(function() {
-  document.querySelectorAll('.agent-box').forEach(function(box, bi) {
-    var msgs = JSON.parse(box.getAttribute('data-conv'));
-    var inner = box.querySelector('.agent-conv-inner');
-    var stxt = box.querySelector('.status-text');
-    var pip = box.querySelector('.pip');
+  function buildNebulaTexture(cluster, clusterIndex) {
+    var texture = document.createElement('canvas');
+    var textureWidth = 320;
+    var textureHeight = 220;
+    var textureContext;
+    var image;
+    var pixels;
+    var seed = 4603 + clusterIndex * 7919;
 
-    msgs.forEach(function(m, i) {
-      var d = document.createElement('div');
-      d.className = 'agent-msg ' + (i === 0 ? 'you' : 'reply');
-      d.textContent = m;
-      inner.appendChild(d);
+    texture.width = textureWidth;
+    texture.height = textureHeight;
+    textureContext = texture.getContext('2d', {alpha: true});
+    if (!textureContext) return texture;
+
+    image = textureContext.createImageData(textureWidth, textureHeight);
+    pixels = image.data;
+
+    // Approximate a turbulent column-density field with domain-warped fBm,
+    // ridged filaments, and a lognormal density remap.
+    for (var y = 0; y < textureHeight; y += 1) {
+      for (var x = 0; x < textureWidth; x += 1) {
+        var normalizedX = (x / textureWidth - 0.5) * 3.5;
+        var normalizedY = (y / textureHeight - 0.5) * 2.55;
+        var warpX = fractalNoise(normalizedX * 0.72 + 11.3, normalizedY * 0.72 - 4.1, seed + 17, 3) - 0.5;
+        var warpY = fractalNoise(normalizedX * 0.72 - 7.7, normalizedY * 0.72 + 8.4, seed + 37, 3) - 0.5;
+        var warpedX = normalizedX + warpX * 1.45;
+        var warpedY = normalizedY + warpY * 1.45;
+        var broad = fractalNoise(warpedX * 0.82, warpedY * 0.82, seed, 5);
+        var ridgedSource = fractalNoise(warpedX * 1.7 + 19.2, warpedY * 1.7 - 13.4, seed + 71, 4);
+        var ridged = 1 - Math.abs(ridgedSource * 2 - 1);
+        var detail = fractalNoise(warpedX * 3.8, warpedY * 3.8, seed + 149, 3);
+        var spine = warpedY - Math.sin(warpedX * 1.35 + cluster.phase) * 0.34;
+        var envelope = Math.exp(-(spine * spine * 0.72 + warpedX * warpedX * 0.12));
+        var turbulence = broad * 0.54 + ridged * 0.34 + detail * 0.12;
+        var logDensity = Math.exp((turbulence - 0.56) * 3.1);
+        var density = Math.max(0, Math.min(1, (logDensity - 0.48) * 0.72)) * envelope;
+        var absorption = Math.max(0, fractalNoise(warpedX * 1.25 - 28, warpedY * 1.25 + 16, seed + 211, 3) - 0.58) * 2.1;
+        var colorMix = fractalNoise(warpedX * 0.55 + 31, warpedY * 0.55 - 22, seed + 307, 3);
+        var edgeDistance = Math.min(
+          Math.min(x, textureWidth - 1 - x) / (textureWidth * 0.16),
+          Math.min(y, textureHeight - 1 - y) / (textureHeight * 0.18)
+        );
+        var edgeWindow = Math.max(0, Math.min(1, edgeDistance));
+        var alpha;
+        var pixelIndex = (y * textureWidth + x) * 4;
+
+        edgeWindow = edgeWindow * edgeWindow * (3 - 2 * edgeWindow);
+        alpha = Math.pow(Math.max(0, density - absorption), 1.18) * edgeWindow;
+
+        pixels[pixelIndex] = Math.round(cluster.color[0] + (cluster.secondary[0] - cluster.color[0]) * colorMix);
+        pixels[pixelIndex + 1] = Math.round(cluster.color[1] + (cluster.secondary[1] - cluster.color[1]) * colorMix);
+        pixels[pixelIndex + 2] = Math.round(cluster.color[2] + (cluster.secondary[2] - cluster.color[2]) * colorMix);
+        pixels[pixelIndex + 3] = Math.round(alpha * 118);
+      }
+    }
+
+    textureContext.putImageData(image, 0, 0);
+
+    return texture;
+  }
+
+  function buildField() {
+    var random = createRandom(0xc0de71);
+    var area = width * height;
+    var starCount = Math.max(72, Math.min(190, Math.round(area / 6800)));
+    var dustCount = Math.max(110, Math.min(300, Math.round(area / 4300)));
+    var palette = [
+      [45, 212, 191],
+      [92, 145, 255],
+      [166, 119, 255],
+      [255, 248, 231]
+    ];
+
+    clusters = [
+      {x: 0.16, y: 0.22, radius: 0.34, squash: 0.7, phase: 0.2, rotation: -0.12, color: palette[0], secondary: palette[1]},
+      {x: 0.82, y: 0.28, radius: 0.3, squash: 0.78, phase: 2.1, rotation: 0.16, color: palette[1], secondary: palette[2]},
+      {x: 0.57, y: 0.76, radius: 0.38, squash: 0.64, phase: 4.2, rotation: -0.2, color: palette[2], secondary: [255, 118, 160]},
+      {x: 0.2, y: 0.86, radius: 0.24, squash: 0.82, phase: 5.4, rotation: 0.1, color: palette[3], secondary: [255, 188, 104]}
+    ];
+
+    stars = [];
+    for (var starIndex = 0; starIndex < starCount; starIndex += 1) {
+      stars.push({
+        x: random(),
+        y: random(),
+        size: 0.35 + Math.pow(random(), 3) * 1.55,
+        alpha: 0.18 + random() * 0.58,
+        phase: random() * Math.PI * 2,
+        speed: 0.22 + random() * 0.62,
+        drift: 3 + random() * 11,
+        velocityX: (0.22 + random() * 0.72) * (random() > 0.5 ? 1 : -1),
+        velocityY: (0.08 + random() * 0.26) * (random() > 0.5 ? 1 : -1),
+        color: palette[Math.floor(random() * palette.length)]
+      });
+    }
+
+    dust = [];
+    for (var dustIndex = 0; dustIndex < dustCount; dustIndex += 1) {
+      var clusterIndex = Math.floor(random() * clusters.length);
+      dust.push({
+        cluster: clusterIndex,
+        angle: random() * Math.PI * 2,
+        radius: Math.pow(random(), 0.72),
+        size: 0.3 + Math.pow(random(), 2.4) * 1.8,
+        alpha: 0.08 + random() * 0.42,
+        phase: random() * Math.PI * 2,
+        speed: (0.008 + random() * 0.018) * (random() > 0.5 ? 1 : -1),
+        depth: 0.58 + random() * 0.74,
+        glow: random() > 0.965
+      });
+    }
+
+    nebulae = clusters.map(function(cluster, clusterIndex) {
+      return buildNebulaTexture(cluster, clusterIndex);
     });
 
-    var lineH = inner.children[0] ? inner.children[0].offsetHeight || 14 : 14;
-    var off = 0;
-
-    function scroll() {
-      if (off >= msgs.length - 2) {
-        stxt.textContent = 'PR opened';
-        pip.style.background = 'var(--teal)';
-        pip.style.animation = 'none';
-        setTimeout(function() {
-          off = 0;
-          inner.style.transition = 'none';
-          inner.style.transform = 'translateY(0)';
-          stxt.textContent = 'working...';
-          pip.style.background = ''; pip.style.animation = '';
-          setTimeout(function() {
-            inner.style.transition = 'transform 0.4s ease';
-            setTimeout(scroll, 2000 + bi * 300);
-          }, 50);
-        }, 4000);
-        return;
-      }
-      off++;
-      inner.style.transform = 'translateY(-' + (off * lineH) + 'px)';
-      setTimeout(scroll, 2200 + bi * 250);
+    accretion = [];
+    var accretionCount = width < 600 ? 58 : 112;
+    for (var accretionIndex = 0; accretionIndex < accretionCount; accretionIndex += 1) {
+      accretion.push({
+        angle: random() * Math.PI * 2,
+        orbit: 1.35 + Math.pow(random(), 0.8) * 1.45,
+        depth: 0.7 + random() * 0.6,
+        size: 0.45 + Math.pow(random(), 2) * 1.4,
+        alpha: 0.16 + random() * 0.5,
+        speed: 0.025 + random() * 0.045,
+        color: [[255, 248, 231], [255, 190, 92], [255, 112, 74], [92, 145, 255]][Math.floor(random() * 4)]
+      });
     }
-    setTimeout(scroll, 2000 + bi * 600);
+  }
+
+  function clusterPosition(cluster, time) {
+    return {
+      x: cluster.x * width + Math.sin(time * 0.13 + cluster.phase) * Math.min(34, width * 0.035),
+      y: cluster.y * height + Math.cos(time * 0.1 + cluster.phase) * Math.min(28, height * 0.034)
+    };
+  }
+
+  function drawNebula(time) {
+    var scale = Math.min(width, height);
+
+    context.globalCompositeOperation = 'screen';
+    context.imageSmoothingEnabled = true;
+    clusters.forEach(function(cluster, clusterIndex) {
+      var center = clusterPosition(cluster, time);
+      var baseRadius = scale * cluster.radius;
+      var underglow = context.createRadialGradient(center.x, center.y, 0, center.x, center.y, baseRadius * 1.2);
+
+      underglow.addColorStop(0, color(cluster.color, 0.07));
+      underglow.addColorStop(0.5, color(cluster.color, 0.025));
+      underglow.addColorStop(1, color(cluster.color, 0));
+      context.globalAlpha = 1;
+      context.fillStyle = underglow;
+      context.beginPath();
+      context.arc(center.x, center.y, baseRadius * 1.2, 0, Math.PI * 2);
+      context.fill();
+
+      // Two independently moving veils approximate slow gas advection without
+      // rebuilding the density field on every frame.
+      for (var veil = 0; veil < 2; veil += 1) {
+        var direction = veil === 0 ? 1 : -1;
+        var motion = time * (veil === 0 ? 0.145 : 0.105) + cluster.phase + veil * 2.4;
+        var breathe = 1 + Math.sin(time * (veil === 0 ? 0.13 : 0.098) + cluster.phase) * (veil === 0 ? 0.045 : 0.07);
+        var driftX = Math.cos(motion) * baseRadius * (veil === 0 ? 0.12 : 0.18);
+        var driftY = Math.sin(motion * 0.83) * baseRadius * (veil === 0 ? 0.08 : 0.12);
+
+        context.save();
+        context.translate(center.x + driftX, center.y + driftY);
+        context.rotate(cluster.rotation + direction * Math.sin(time * 0.095 + cluster.phase) * (veil === 0 ? 0.065 : 0.1));
+        context.scale(veil === 0 ? 1 : -1, 1);
+        context.globalAlpha = veil === 0
+          ? 0.58 + Math.sin(time * 0.12 + cluster.phase) * 0.07
+          : 0.17 + Math.cos(time * 0.09 + cluster.phase) * 0.035;
+        context.drawImage(
+          nebulae[clusterIndex],
+          -baseRadius * 1.8 * breathe,
+          -baseRadius * 1.14 / breathe,
+          baseRadius * 3.6 * breathe,
+          baseRadius * 2.28 / breathe
+        );
+        context.restore();
+      }
+    });
+  }
+
+  function drawDust(time) {
+    var scale = Math.min(width, height);
+
+    context.globalCompositeOperation = 'screen';
+    dust.forEach(function(particle) {
+      var cluster = clusters[particle.cluster];
+      var center = clusterPosition(cluster, time);
+      var angle = particle.angle + time * particle.speed;
+      var radius = scale * cluster.radius * particle.radius * particle.depth;
+      var x = center.x + Math.cos(angle) * radius * 1.3;
+      var y = center.y + Math.sin(angle) * radius * cluster.squash;
+      var shimmer = 0.68 + Math.sin(time * 0.55 + particle.phase) * 0.32;
+
+      if (x < -12 || x > width + 12 || y < -12 || y > height + 12) return;
+
+      context.globalAlpha = particle.alpha * shimmer;
+      context.fillStyle = color(cluster.color, 1);
+      if (particle.glow) {
+        context.shadowBlur = 9;
+        context.shadowColor = color(cluster.color, 0.75);
+      }
+      context.beginPath();
+      context.arc(x, y, particle.size, 0, Math.PI * 2);
+      context.fill();
+      context.shadowBlur = 0;
+    });
+  }
+
+  function drawStars(time) {
+    context.globalCompositeOperation = 'screen';
+    stars.forEach(function(star) {
+      var margin = 18;
+      var travelWidth = width + margin * 2;
+      var travelHeight = height + margin * 2;
+      var starX = star.x * width + time * star.velocityX + Math.sin(time * 0.09 + star.phase) * star.drift + margin;
+      var starY = star.y * height + time * star.velocityY + Math.cos(time * 0.072 + star.phase) * star.drift * 0.65 + margin;
+      var x = ((starX % travelWidth) + travelWidth) % travelWidth - margin;
+      var y = ((starY % travelHeight) + travelHeight) % travelHeight - margin;
+      var twinkle = 0.58 + Math.sin(time * star.speed + star.phase) * 0.42;
+
+      context.globalAlpha = star.alpha * twinkle;
+      context.fillStyle = color(star.color, 1);
+      context.beginPath();
+      context.arc(x, y, star.size, 0, Math.PI * 2);
+      context.fill();
+    });
+  }
+
+  function blackHoleMetrics(time) {
+    var mobile = width < 600;
+    var baseRadius = Math.min(width, height) * 0.076;
+
+    return {
+      x: width * 0.82 + Math.sin(time * 0.018) * (mobile ? 3 : 8),
+      y: height * (mobile ? 0.19 : 0.72) + Math.cos(time * 0.015) * (mobile ? 3 : 7),
+      radius: Math.max(mobile ? 22 : 42, Math.min(mobile ? 31 : 72, baseRadius)),
+      rotation: -0.2
+    };
+  }
+
+  function drawBlackHole(time) {
+    var metrics = blackHoleMetrics(time);
+    var x = metrics.x;
+    var y = metrics.y;
+    var radius = metrics.radius;
+    var halo = context.createRadialGradient(x, y, radius * 0.85, x, y, radius * 3.4);
+
+    context.globalCompositeOperation = 'screen';
+    context.globalAlpha = 1;
+    halo.addColorStop(0, 'rgba(255, 248, 231, 0)');
+    halo.addColorStop(0.32, 'rgba(255, 190, 92, 0.09)');
+    halo.addColorStop(0.56, 'rgba(255, 112, 74, 0.045)');
+    halo.addColorStop(1, 'rgba(166, 119, 255, 0)');
+    context.fillStyle = halo;
+    context.beginPath();
+    context.arc(x, y, radius * 3.4, 0, Math.PI * 2);
+    context.fill();
+
+    context.save();
+    context.translate(x, y);
+    context.rotate(metrics.rotation);
+    var diskGradient = context.createLinearGradient(-radius * 3.3, 0, radius * 3.3, 0);
+
+    diskGradient.addColorStop(0, 'rgba(255, 112, 74, 0)');
+    diskGradient.addColorStop(0.12, 'rgba(255, 112, 74, 0.28)');
+    diskGradient.addColorStop(0.38, 'rgba(255, 225, 162, 0.72)');
+    diskGradient.addColorStop(0.49, 'rgba(255, 248, 231, 0.84)');
+    diskGradient.addColorStop(0.64, 'rgba(255, 170, 78, 0.34)');
+    diskGradient.addColorStop(0.88, 'rgba(255, 112, 74, 0.12)');
+    diskGradient.addColorStop(1, 'rgba(255, 112, 74, 0)');
+
+    for (var lane = -4; lane <= 4; lane += 1) {
+      var laneOffset = lane * radius * 0.034;
+      var shear = Math.sin(time * 0.12 + lane * 1.7) * radius * 0.028;
+
+      context.globalAlpha = (0.28 + (4 - Math.abs(lane)) * 0.075) * (0.88 + Math.sin(time * 0.15 + lane) * 0.12);
+      context.strokeStyle = diskGradient;
+      context.lineWidth = 0.7 + (4 - Math.abs(lane)) * 0.23;
+      context.beginPath();
+      context.moveTo(-radius * 3.25, laneOffset);
+      context.bezierCurveTo(
+        -radius * 1.35,
+        laneOffset - shear,
+        radius * 1.3,
+        -laneOffset + shear,
+        radius * 3.25,
+        -laneOffset * 0.5
+      );
+      context.stroke();
+    }
+
+    accretion.forEach(function(particle) {
+      var angle = particle.angle + time * particle.speed;
+      var orbit = radius * particle.orbit;
+      var particleX = Math.cos(angle) * orbit;
+      var particleY = Math.sin(angle) * orbit * 0.16 * particle.depth;
+      var beaming = particleX < 0 ? 1.35 : 0.58;
+
+      context.globalAlpha = particle.alpha * beaming * (0.72 + Math.sin(time * 0.3 + particle.angle) * 0.28);
+      context.fillStyle = color(particle.color, 1);
+      context.beginPath();
+      context.arc(particleX, particleY, particle.size, 0, Math.PI * 2);
+      context.fill();
+    });
+    context.restore();
+
+    context.globalCompositeOperation = 'source-over';
+    context.globalAlpha = 1;
+    var voidGradient = context.createRadialGradient(x - radius * 0.18, y - radius * 0.2, 0, x, y, radius);
+    voidGradient.addColorStop(0, '#000000');
+    voidGradient.addColorStop(0.72, '#010203');
+    voidGradient.addColorStop(1, '#050708');
+    context.fillStyle = voidGradient;
+    context.beginPath();
+    context.arc(x, y, radius, 0, Math.PI * 2);
+    context.fill();
+
+    context.globalCompositeOperation = 'screen';
+    var photonGradient = context.createLinearGradient(x - radius, y, x + radius, y);
+    photonGradient.addColorStop(0, 'rgba(255, 248, 231, 0.72)');
+    photonGradient.addColorStop(0.45, 'rgba(255, 190, 92, 0.54)');
+    photonGradient.addColorStop(1, 'rgba(255, 112, 74, 0.22)');
+    context.globalAlpha = 0.7;
+    context.strokeStyle = photonGradient;
+    context.lineWidth = 1;
+    context.shadowBlur = 6;
+    context.shadowColor = 'rgba(255, 190, 92, 0.34)';
+    context.beginPath();
+    context.arc(x, y, radius * 1.07, 0, Math.PI * 2);
+    context.stroke();
+    context.shadowBlur = 0;
+
+    context.save();
+    context.translate(x, y);
+    context.rotate(metrics.rotation);
+    context.strokeStyle = diskGradient;
+    context.lineCap = 'round';
+
+    context.globalAlpha = 0.74 + Math.sin(time * 0.18) * 0.08;
+    context.lineWidth = 1.5;
+    context.beginPath();
+    context.ellipse(0, 0, radius * 1.12, radius * 1.34, 0, Math.PI, Math.PI * 2);
+    context.stroke();
+
+    context.globalAlpha = 0.28;
+    context.lineWidth = 0.8;
+    context.beginPath();
+    context.ellipse(0, 0, radius * 1.1, radius * 1.3, 0, 0, Math.PI);
+    context.stroke();
+    context.restore();
+  }
+
+  function drawComet(time, offset, duration, yRatio) {
+    var activeTime = (time + offset) % duration;
+    var activeDuration = Math.min(3.8, duration * 0.16);
+
+    if (activeTime > activeDuration || reducedMotion) return;
+
+    var progress = activeTime / activeDuration;
+    var x = width * (-0.12 + progress * 1.24);
+    var y = height * yRatio + progress * Math.min(130, height * 0.17);
+    var trail = Math.min(150, width * 0.13);
+    var opacity = Math.sin(progress * Math.PI) * 0.38;
+    var gradient = context.createLinearGradient(x - trail, y - trail * 0.38, x, y);
+
+    gradient.addColorStop(0, 'rgba(45, 212, 191, 0)');
+    gradient.addColorStop(1, 'rgba(255, 248, 231, ' + opacity + ')');
+    context.globalCompositeOperation = 'screen';
+    context.globalAlpha = 1;
+    context.strokeStyle = gradient;
+    context.lineWidth = 1;
+    context.beginPath();
+    context.moveTo(x - trail, y - trail * 0.38);
+    context.lineTo(x, y);
+    context.stroke();
+  }
+
+  function draw(time) {
+    context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
+    context.clearRect(0, 0, width, height);
+    context.globalAlpha = 1;
+    context.shadowBlur = 0;
+    drawNebula(time);
+    drawDust(time);
+    drawStars(time);
+    drawBlackHole(time);
+    drawComet(time, 4.5, 23, 0.16);
+    drawComet(time, 15, 31, 0.58);
+    context.globalAlpha = 1;
+    context.globalCompositeOperation = 'source-over';
+  }
+
+  function setSize() {
+    width = Math.max(1, document.documentElement.clientWidth || window.innerWidth);
+    height = Math.max(1, document.documentElement.clientHeight || window.innerHeight);
+    pixelRatio = Math.min(window.devicePixelRatio || 1, 1.5);
+    canvas.width = Math.round(width * pixelRatio);
+    canvas.height = Math.round(height * pixelRatio);
+    canvas.style.width = width + 'px';
+    canvas.style.height = height + 'px';
+    buildField();
+    draw(reducedMotion ? 0 : performance.now() / 1000);
+  }
+
+  function animate(timestamp) {
+    frameId = 0;
+    if (timestamp - lastFrameTime >= frameInterval) {
+      lastFrameTime = timestamp;
+      draw(timestamp / 1000);
+    }
+    startAnimation();
+  }
+
+  function startAnimation() {
+    if (frameId || reducedMotion || document.hidden) return;
+    frameId = window.requestAnimationFrame(animate);
+  }
+
+  function stopAnimation() {
+    if (!frameId) return;
+    window.cancelAnimationFrame(frameId);
+    frameId = 0;
+  }
+
+  function requestResize() {
+    if (resizeId) window.clearTimeout(resizeId);
+    resizeId = window.setTimeout(function() {
+      resizeId = 0;
+      setSize();
+    }, 120);
+  }
+
+  function updateMotionPreference(event) {
+    reducedMotion = event.matches;
+    stopAnimation();
+    draw(reducedMotion ? 0 : performance.now() / 1000);
+    startAnimation();
+  }
+
+  window.addEventListener('resize', requestResize, {passive: true});
+  document.addEventListener('visibilitychange', function() {
+    if (document.hidden) {
+      stopAnimation();
+    } else {
+      startAnimation();
+    }
   });
+
+  if (motionPreference.addEventListener) {
+    motionPreference.addEventListener('change', updateMotionPreference);
+  }
+
+  setSize();
+  startAnimation();
 })();
 
-/* ── Layout states ── */
-var stage = document.getElementById('stage');
-var connSvg = document.getElementById('conn-svg');
-var boxes = [0,1,2,3,4,5].map(function(i) { return document.getElementById('ab'+i); });
-var youBox = document.getElementById('you-box');
-var qLine = document.getElementById('ln-q');
-var gLines = [0,1,2,3,4,5].map(function(i) { return document.getElementById('ln-g'+i); });
-var cLines = [0,1,2].map(function(i) { return document.getElementById('ln-c'+i); });
-var allLines = [qLine].concat(gLines).concat(cLines);
+(function() {
+  var stage = document.querySelector('.workflow-stage');
+  var sticky = document.querySelector('.workflow-sticky');
+  var copyWindow = document.querySelector('.workflow-copy-window');
+  var steps = Array.prototype.slice.call(document.querySelectorAll('.workflow-step'));
+  var title = document.getElementById('workflow-terminal-title');
+  var commands = document.getElementById('workflow-terminal-commands');
+  var result = document.getElementById('workflow-terminal-result');
+  var screen = document.querySelector('.workflow-terminal-screen');
+  var reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var activeIndex = -1;
+  var animationToken = 0;
+  var ticking = false;
+  var horizontalLayout = null;
 
-function hideAllLines() { allLines.forEach(function(l) { l.classList.remove('visible'); }); }
-function setLine(ln, x1, y1, x2, y2) {
-  ln.setAttribute('x1',x1); ln.setAttribute('y1',y1); ln.setAttribute('x2',x2); ln.setAttribute('y2',y2);
-}
-function pos(el) {
-  var sr = connSvg.getBoundingClientRect(), r = el.getBoundingClientRect();
-  return { cx:r.left+r.width/2-sr.left, cy:r.top+r.height/2-sr.top, l:r.left-sr.left, r:r.right-sr.left, t:r.top-sr.top, b:r.bottom-sr.top };
-}
+  if (!stage || !sticky || !copyWindow || !steps.length || !title || !commands || !result || !screen) return;
 
-function updateLinePositions() {
-  if (currentState === 'terminal' || currentState === 'queue') return;
-  var you = pos(youBox);
-  if (currentState === 'parallel') {
-    [0,1,2,3].forEach(function(i) { var b = pos(boxes[i]); setLine(gLines[i], you.r, you.cy, b.l, b.cy); });
+  function scrollTerminalToLatest() {
+    screen.scrollTop = screen.scrollHeight;
   }
-  if (currentState === 'grid') {
-    var vis = boxes.filter(function(b) { return b.classList.contains('visible'); });
-    vis.forEach(function(box, i) {
-      var b = pos(box), isLeft = b.cx < you.cx;
-      setLine(gLines[i], isLeft ? you.l : you.r, you.cy, isLeft ? b.r : b.l, b.cy);
+
+  function appendCompletedStep(step) {
+    var entry = document.createElement('div');
+    var lines = (step.getAttribute('data-command') || '').split('\n');
+    var historyResult = document.createElement('div');
+
+    entry.className = 'terminal-history-entry';
+    lines.forEach(function(line) {
+      var row = document.createElement('div');
+      var prompt = document.createElement('span');
+      var command = document.createElement('span');
+
+      row.className = 'terminal-command-line';
+      prompt.className = 'terminal-prompt';
+      prompt.textContent = /^\s/.test(line) ? '  ' : '$ ';
+      command.textContent = line;
+      row.appendChild(prompt);
+      row.appendChild(command);
+      entry.appendChild(row);
     });
-    if (vis.length >= 4) { var p0=pos(vis[0]),p3=pos(vis[3]); setLine(cLines[0],p0.r,p0.cy,p3.l,p3.cy); }
-    if (vis.length >= 6) { var p2=pos(vis[2]),p5=pos(vis[5]); setLine(cLines[1],p2.r,p2.cy,p5.l,p5.cy); }
-    if (vis.length >= 2) { var pA=pos(vis[0]),pB=pos(vis[1]); setLine(cLines[2],pA.cx,pA.b,pB.cx,pB.t); }
+
+    historyResult.className = 'terminal-history-result';
+    historyResult.textContent = step.getAttribute('data-result') || '';
+    entry.appendChild(historyResult);
+    commands.appendChild(entry);
   }
-}
 
-function drawLines() {
-  hideAllLines();
-  if (currentState === 'terminal') return;
+  function finishScene(step, token) {
+    window.setTimeout(function() {
+      if (token !== animationToken) return;
+      result.textContent = step.getAttribute('data-result') || '';
+      scrollTerminalToLatest();
+    }, reduceMotion ? 0 : 140);
+  }
 
-  if (currentState === 'queue') {
-    // Don't draw static lines — use CSS transition on the SVG line instead
-    // Line position is updated continuously by the queue animation loop
+  function renderScene(index) {
+    var step = steps[index];
+    var token = ++animationToken;
+    var lines = (step.getAttribute('data-command') || '').split('\n');
+    var lineIndex = 0;
+    var currentEntry = document.createElement('div');
+
+    title.textContent = step.getAttribute('data-title') || '';
+    commands.textContent = '';
+    result.textContent = '';
+    steps.slice(0, index).forEach(appendCompletedStep);
+    currentEntry.className = 'terminal-current-entry';
+    commands.appendChild(currentEntry);
+    scrollTerminalToLatest();
+
+    function renderLine() {
+      if (token !== animationToken) return;
+      if (lineIndex >= lines.length) {
+        finishScene(step, token);
+        return;
+      }
+
+      var line = lines[lineIndex++];
+      var row = document.createElement('div');
+      var prompt = document.createElement('span');
+      var typed = document.createElement('span');
+      var cursor = document.createElement('span');
+      var characterIndex = reduceMotion ? line.length : 0;
+
+      row.className = 'terminal-command-line';
+      prompt.className = 'terminal-prompt';
+      prompt.textContent = /^\s/.test(line) ? '  ' : '$ ';
+      cursor.className = 'terminal-cursor';
+      cursor.setAttribute('aria-hidden', 'true');
+      typed.textContent = line.slice(0, characterIndex);
+      row.appendChild(prompt);
+      row.appendChild(typed);
+      row.appendChild(cursor);
+      currentEntry.appendChild(row);
+      scrollTerminalToLatest();
+
+      if (reduceMotion) {
+        cursor.remove();
+        renderLine();
+        return;
+      }
+
+      function typeCharacter() {
+        if (token !== animationToken) return;
+        if (characterIndex < line.length) {
+          characterIndex += 1;
+          typed.textContent = line.slice(0, characterIndex);
+          scrollTerminalToLatest();
+          window.setTimeout(typeCharacter, 22);
+          return;
+        }
+
+        if (lineIndex < lines.length) cursor.remove();
+        window.setTimeout(renderLine, 120);
+      }
+
+      typeCharacter();
+    }
+
+    renderLine();
+  }
+
+  function setActive(index) {
+    if (index === activeIndex) return;
+    activeIndex = index;
+    steps.forEach(function(step, stepIndex) {
+      step.classList.toggle('is-active', stepIndex === index);
+    });
+    renderScene(index);
+  }
+
+  function updateActiveStep() {
+    ticking = false;
+
+    if (window.innerWidth <= 820) {
+      if (horizontalLayout !== false) {
+        steps.forEach(function(step) {
+          step.style.removeProperty('transform');
+          step.style.removeProperty('opacity');
+        });
+        setActive(0);
+        horizontalLayout = false;
+      }
+      return;
+    }
+
+    horizontalLayout = true;
+    var stageRect = stage.getBoundingClientRect();
+    var stickyTop = parseFloat(window.getComputedStyle(sticky).top) || 0;
+    var scrollRange = Math.max(1, stage.offsetHeight - sticky.offsetHeight);
+    var stageStart = window.scrollY + stageRect.top - stickyTop;
+    var sectionProgress = Math.min(1, Math.max(0, (window.scrollY - stageStart) / scrollRange));
+    var stepProgress = sectionProgress * (steps.length - 1);
+    var travel = Math.max(copyWindow.clientWidth * 0.72, 520);
+
+    steps.forEach(function(step, index) {
+      var distance = Math.abs(index - stepProgress);
+      var offset = (index - stepProgress) * travel;
+      step.style.transform = 'translate3d(calc(-50% + ' + offset.toFixed(2) + 'px), 0, 0)';
+      step.style.opacity = String(Math.max(0, Math.min(1, 1 - distance * 0.72)));
+    });
+
+    setActive(Math.round(stepProgress));
+  }
+
+  function requestUpdate() {
+    if (ticking) return;
+    ticking = true;
+    window.requestAnimationFrame(updateActiveStep);
+  }
+
+  if (reduceMotion) {
+    setActive(0);
     return;
   }
 
-  var you = pos(youBox);
-  if (currentState === 'parallel') {
-    [0,1,2,3].forEach(function(i) { var b = pos(boxes[i]); setLine(gLines[i], you.r, you.cy, b.l, b.cy); gLines[i].classList.add('visible'); });
-  }
-  if (currentState === 'grid') {
-    var vis = boxes.filter(function(b) { return b.classList.contains('visible'); });
-    vis.forEach(function(box, i) {
-      var b = pos(box), isLeft = b.cx < you.cx;
-      setLine(gLines[i], isLeft ? you.l : you.r, you.cy, isLeft ? b.r : b.l, b.cy);
-      gLines[i].classList.add('visible');
-    });
-    if (vis.length >= 4) { var p0=pos(vis[0]),p3=pos(vis[3]); setLine(cLines[0],p0.r,p0.cy,p3.l,p3.cy); cLines[0].classList.add('visible'); }
-    if (vis.length >= 6) { var p2=pos(vis[2]),p5=pos(vis[5]); setLine(cLines[1],p2.r,p2.cy,p5.l,p5.cy); cLines[1].classList.add('visible'); }
-    if (vis.length >= 2) { var pA=pos(vis[0]),pB=pos(vis[1]); setLine(cLines[2],pA.cx,pA.b,pB.cx,pB.t); cLines[2].classList.add('visible'); }
-  }
-}
-
-var _queueInterval = null;
-var _stateGen = 0; // generation counter — increments on every state change
-function stopQueue() {
-  if (_queueInterval) { clearInterval(_queueInterval); _queueInterval = null; }
-}
-
-var stateMap = ['terminal', 'queue', 'parallel', 'grid', 'grid'];
-var currentState = '';
-
-function applyState(name) {
-  _stateGen++;
-  var gen = _stateGen;
-  stopQueue();
-  hideAllLines();
-  currentState = name;
-  youBox.style.transform = '';
-  youBox.style.left = '';
-  youBox.style.top = '';
-
-  // Clear old state class, apply new
-  stage.className = 'stage state-' + name;
-
-  // Visibility
-  youBox.classList.toggle('visible', name !== 'terminal');
-  [0,1,2,3].forEach(function(i) { boxes[i].classList.toggle('visible', name !== 'terminal'); });
-  [4,5].forEach(function(i) { boxes[i].classList.toggle('visible', name === 'grid'); });
-  boxes.forEach(function(b) { b.classList.remove('dimmed'); });
-
-  if (name === 'queue') {
-    var qIdx = 0;
-
-    function positionYouAtBox(idx) {
-      var stageRect = stage.getBoundingClientRect();
-      var boxRect = boxes[idx].getBoundingClientRect();
-      var youH = youBox.offsetHeight;
-      youBox.style.left = '40px';
-      youBox.style.top = ((boxRect.top + boxRect.height/2) - stageRect.top - youH/2) + 'px';
-      youBox.style.transform = 'none';
-    }
-
-    // Hide YOU until boxes settle
-    youBox.classList.remove('visible');
-    [0,1,2,3].forEach(function(i) { boxes[i].classList.toggle('dimmed', i !== 0); });
-    qIdx = 1;
-
-    // Continuously update line to track YOU
-    function trackLine() {
-      if (gen !== _stateGen) return;
-      var you = pos(youBox);
-      var active = boxes.find(function(b) { return b.classList.contains('visible') && !b.classList.contains('dimmed'); });
-      if (active) {
-        var b = pos(active);
-        setLine(qLine, you.r, you.cy, b.l, you.cy);
-        qLine.classList.add('visible');
-      }
-      requestAnimationFrame(trackLine);
-    }
-
-    // Wait for box transforms to finish, then snap YOU to first box
-    setTimeout(function() {
-      if (gen !== _stateGen) return;
-      youBox.style.transition = 'none';
-      positionYouAtBox(0);
-      void youBox.offsetHeight;
-      youBox.classList.add('visible');
-      youBox.style.transition = '';
-      trackLine();
-
-      _queueInterval = setInterval(function() {
-        if (gen !== _stateGen) { stopQueue(); return; }
-        [0,1,2,3].forEach(function(i) { boxes[i].classList.toggle('dimmed', i !== qIdx); });
-        positionYouAtBox(qIdx);
-        qIdx = (qIdx + 1) % 4;
-      }, 1200);
-    }, 650);
-  }
-
-  // Continuously redraw lines during transform animation
-  if (name !== 'terminal' && name !== 'queue') {
-    var _lineStart = performance.now();
-    var _lineDrawn = false;
-    function _trackLines(now) {
-      if (gen !== _stateGen) return;
-      if (!_lineDrawn) { drawLines(); _lineDrawn = true; }
-      else { updateLinePositions(); }
-      if (now - _lineStart < 650) requestAnimationFrame(_trackLines);
-    }
-    requestAnimationFrame(_trackLines);
-  }
-}
-
-applyState('terminal');
-window.addEventListener('resize', function() { if (currentState !== 'terminal') setTimeout(drawLines, 100); });
-
-/* ── Desktop: Scroll observer ── */
-function isMobile() { return window.innerWidth <= 768; }
-
-(function() {
-  if (isMobile()) return;
-  var steps = document.querySelectorAll('.scroll-step');
-  var observer = new IntersectionObserver(function(entries) {
-    entries.forEach(function(entry) {
-      if (entry.isIntersecting) {
-        var idx = parseInt(entry.target.getAttribute('data-step'));
-        steps.forEach(function(s, i) { s.classList.toggle('active', i === idx); });
-        applyState(stateMap[idx]);
-      }
-    });
-  }, { rootMargin: '-30% 0px -30% 0px', threshold: 0 });
-  steps.forEach(function(s) { observer.observe(s); });
+  window.addEventListener('scroll', requestUpdate, {passive: true});
+  window.addEventListener('resize', requestUpdate);
+  requestUpdate();
 })();
 
-/* ── Mobile: scroll-jacking carousel ── */
 (function() {
-  if (!isMobile()) return;
-  document.body.classList.add('mobile-story');
+  var map = document.querySelector('.parallel-map');
+  var buttons = Array.prototype.slice.call(document.querySelectorAll('[data-parallel-mode]'));
+  var independentState = document.querySelector('.parallel-state--independent');
+  var meshState = document.querySelector('.parallel-state--mesh');
+  var operatorMeta = document.getElementById('parallel-operator-meta');
+  var caption = document.getElementById('parallel-caption');
 
-  var track = document.getElementById('mobile-track');
-  var dots = document.querySelectorAll('.mobile-dot');
-  var totalSteps = 5;
-  var mobileStep = 0;
+  if (!map || !buttons.length || !independentState || !meshState || !operatorMeta || !caption) return;
 
-  function goTo(idx) {
-    idx = Math.max(0, Math.min(idx, totalSteps - 1));
-    if (idx === mobileStep) return;
-    mobileStep = idx;
-    track.style.transform = 'translateX(-' + (idx * 100) + '%)';
-    applyState(stateMap[idx]);
-    dots.forEach(function(d, i) { d.classList.toggle('active', i === idx); });
-  }
+  function setMode(mode) {
+    var isMesh = mode === 'mesh';
+    map.setAttribute('data-mode', isMesh ? 'mesh' : 'independent');
+    map.setAttribute('aria-label', isMesh
+      ? 'Two encrypted meshes where every sandbox exchanges messages with another sandbox'
+      : 'Six independent agent sessions working in separate, differently sized sandboxes around one operator');
+    independentState.setAttribute('aria-hidden', String(isMesh));
+    meshState.setAttribute('aria-hidden', String(!isMesh));
+    operatorMeta.textContent = isMesh ? '2 encrypted meshes' : '6 live sessions';
+    caption.textContent = isMesh
+      ? 'Every sandbox can speak to another. Each mesh stays private.'
+      : 'One session. One sandbox. Sized for the work.';
 
-  // Scroll (vertical + horizontal) → step
-  var accum = 0;
-  document.addEventListener('wheel', function(e) {
-    e.preventDefault();
-    var delta = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
-    accum += delta;
-    if (accum > 80) { goTo(mobileStep + 1); accum = 0; }
-    else if (accum < -80) { goTo(mobileStep - 1); accum = 0; }
-  }, { passive: false });
-
-  // Touch swipe (vertical + horizontal)
-  var touchX = 0, touchY = 0;
-  document.addEventListener('touchstart', function(e) {
-    touchX = e.touches[0].clientX;
-    touchY = e.touches[0].clientY;
-  });
-  document.addEventListener('touchend', function(e) {
-    var dx = touchX - e.changedTouches[0].clientX;
-    var dy = touchY - e.changedTouches[0].clientY;
-    // Use whichever axis had more movement
-    var d = Math.abs(dx) > Math.abs(dy) ? dx : dy;
-    if (d > 50) goTo(mobileStep + 1);
-    else if (d < -50) goTo(mobileStep - 1);
-  });
-
-  // Mobile waitlist form
-  var mf = document.getElementById('mobile-waitlist-form');
-  if (mf) {
-    mf.addEventListener('submit', function(e) {
-      e.preventDefault();
-      var email = document.getElementById('mobile-cta-email').value;
-      if (!email) return;
-      var btn = mf.querySelector('button');
-      btn.textContent = 'Joining...'; btn.disabled = true;
-      fetch('/api/v1/waitlist', {
-        method: 'POST',
-        headers: {'Content-Type':'application/json'},
-        body: JSON.stringify({email:email})
-      }).then(function(r) {
-        if (r.ok) {
-          document.getElementById('mobile-cta-container').innerHTML =
-            '<p style="color:var(--teal);font-weight:600">You\'re on the list!</p>';
-        } else { btn.textContent='Join Waitlist \u2192'; btn.disabled=false; }
-      }).catch(function() { btn.textContent='Join Waitlist \u2192'; btn.disabled=false; });
+    buttons.forEach(function(button) {
+      var isActive = button.getAttribute('data-parallel-mode') === mode;
+      button.classList.toggle('is-active', isActive);
+      button.setAttribute('aria-pressed', String(isActive));
     });
   }
-})();
 
-/* ── Animate flow dots along lines ── */
-(function() {
-  var pairs = [
-    ['ln-q','fd-q'],
-    ['ln-g0','fd-g0'],['ln-g1','fd-g1'],['ln-g2','fd-g2'],
-    ['ln-g3','fd-g3'],['ln-g4','fd-g4'],['ln-g5','fd-g5'],
-    ['ln-c0','fd-c0'],['ln-c1','fd-c1'],['ln-c2','fd-c2']
-  ];
-  var els = pairs.map(function(p) {
-    return { line: document.getElementById(p[0]), dot: document.getElementById(p[1]) };
-  });
-
-  var t = 0;
-  function tick() {
-    t = (t + 0.008) % 1;
-    els.forEach(function(e, i) {
-      var vis = e.line.classList.contains('visible');
-      e.dot.classList.toggle('visible', vis);
-      if (!vis) return;
-      // stagger each dot
-      var progress = (t + i * 0.12) % 1;
-      var x1 = parseFloat(e.line.getAttribute('x1'));
-      var y1 = parseFloat(e.line.getAttribute('y1'));
-      var x2 = parseFloat(e.line.getAttribute('x2'));
-      var y2 = parseFloat(e.line.getAttribute('y2'));
-      e.dot.setAttribute('cx', x1 + (x2 - x1) * progress);
-      e.dot.setAttribute('cy', y1 + (y2 - y1) * progress);
+  buttons.forEach(function(button) {
+    button.addEventListener('click', function() {
+      setMode(button.getAttribute('data-parallel-mode'));
     });
-    requestAnimationFrame(tick);
-  }
-  requestAnimationFrame(tick);
+  });
 })();
 
-/* ── Waitlist ── */
 (function() {
-  var f = document.getElementById('waitlist-form');
-  if (!f) return;
-  f.addEventListener('submit', function(e) {
-    e.preventDefault();
-    var email = document.getElementById('cta-email').value;
-    if (!email) return;
-    var btn = f.querySelector('button');
-    btn.textContent = 'Joining...'; btn.disabled = true;
+  var reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var activityByEnvironment = {
+    auth: [
+      'tool › rg "session" src/auth',
+      'reading src/auth/session.rs:184',
+      'editing refresh_session()',
+      'tool › cargo test auth::session',
+      'checking test output'
+    ],
+    billing: [
+      'tool › rg "invoice.failed" .',
+      'reading stripe/webhook.go:92',
+      'editing retry_invoice()',
+      'tool › go test ./billing/...',
+      'reviewing the diff'
+    ],
+    docs: [
+      'reading docs/config.toml',
+      'editing quickstart.md',
+      'tool › zola check',
+      'checking internal links',
+      'reviewing rendered output'
+    ],
+    api: [
+      'tool › rg "retry" client',
+      'reading client/retry.ts:41',
+      'editing exponentialBackoff()',
+      'tool › pnpm test retry',
+      'checking type errors'
+    ],
+    tests: [
+      'tool › cargo test --workspace',
+      'inspecting failure output',
+      'editing flaky_test.rs:73',
+      'rerunning the targeted test',
+      'checking the final result'
+    ],
+    release: [
+      'reading 18 changed files',
+      'tool › cargo clippy',
+      'checking generated clients',
+      'reviewing migration notes',
+      'writing a release summary'
+    ],
+    web: [
+      'tool › rg "empty state" apps',
+      'reading components/empty.tsx',
+      'editing empty-state copy',
+      'tool › pnpm test --filter web',
+      'checking the browser output'
+    ],
+    infra: [
+      'reading gateway traces',
+      'tool › rg "latency" crates',
+      'profiling the hot path',
+      'editing gateway/router.rs',
+      'rerunning the benchmark'
+    ]
+  };
+  var meshActivityByEnvironment = {
+    auth: [
+      'sending types → api',
+      'retry result ← api',
+      'sending token → api',
+      'schema update → api'
+    ],
+    api: [
+      'auth types ← auth',
+      'sending retry → auth',
+      'test token ← auth',
+      'schema update ← auth'
+    ],
+    web: [
+      'preview URL → tests',
+      'failing spec ← tests',
+      'DOM snapshot → tests',
+      'test result ← tests'
+    ],
+    tests: [
+      'preview URL ← web',
+      'failing spec → web',
+      'DOM snapshot ← web',
+      'test result → web'
+    ],
+    billing: [
+      'webhook sample → docs',
+      'runbook link ← docs',
+      'invoice trace → docs',
+      'copy update ← docs'
+    ],
+    docs: [
+      'webhook ← billing',
+      'runbook → billing',
+      'invoice trace ← billing',
+      'copy update → billing'
+    ],
+    infra: [
+      'benchmark → release',
+      'candidate SHA ← release',
+      'gateway trace → release',
+      'rollout plan ← release'
+    ],
+    release: [
+      'benchmark ← infra',
+      'candidate SHA → infra',
+      'gateway trace ← infra',
+      'rollout plan → infra'
+    ]
+  };
+  var activityNodes = Array.prototype.slice.call(document.querySelectorAll('.agent-work, .mesh-agent-work'));
+
+  if (reduceMotion) return;
+
+  activityNodes.forEach(function(node, nodeIndex) {
+    var article = node.closest('.agent-terminal, .mesh-agent');
+    var label = article && article.querySelector('header > span:first-child');
+    var environment = label ? label.textContent.split('·')[0].trim() : '';
+    var isMeshSession = node.classList.contains('mesh-agent-work');
+    var activities = isMeshSession
+      ? meshActivityByEnvironment[environment]
+      : activityByEnvironment[environment];
+    var activityIndex = nodeIndex % (activities ? activities.length : 1);
+
+    if (!activities || activities.length < 2) return;
+
+    function scheduleNext() {
+      window.setTimeout(function() {
+        node.classList.add('is-changing');
+        window.setTimeout(function() {
+          activityIndex = (activityIndex + 1) % activities.length;
+          node.textContent = activities[activityIndex];
+          node.classList.remove('is-changing');
+          scheduleNext();
+        }, 140);
+      }, 2100 + (nodeIndex % 5) * 180);
+    }
+
+    scheduleNext();
+  });
+})();
+
+(function() {
+  var form = document.getElementById('access-form');
+  var input = document.getElementById('email');
+  var button = form.querySelector('button');
+  var status = document.getElementById('access-status');
+
+  form.addEventListener('submit', function(event) {
+    event.preventDefault();
+    if (!input.value) return;
+
+    button.textContent = 'Requesting…';
+    button.disabled = true;
+    status.textContent = '';
+
     fetch('/api/v1/waitlist', {
       method: 'POST',
-      headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({email:email})
-    }).then(function(r) {
-      if (r.ok) {
-        document.getElementById('cta-container').innerHTML =
-          '<p style="color:var(--teal);font-weight:600">You\'re on the list!</p>';
-      } else { btn.textContent='Join Waitlist \u2192'; btn.disabled=false; }
-    }).catch(function() { btn.textContent='Join Waitlist \u2192'; btn.disabled=false; });
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({email: input.value})
+    }).then(function(response) {
+      if (!response.ok) throw new Error('request failed');
+      form.hidden = true;
+      status.textContent = 'Request received. We\'ll be in touch.';
+    }).catch(function() {
+      button.textContent = 'Request access';
+      button.disabled = false;
+      status.textContent = 'Something went wrong. Try again.';
+    });
   });
 })();
 </script>
