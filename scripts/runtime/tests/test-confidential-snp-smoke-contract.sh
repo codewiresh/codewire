@@ -7,6 +7,7 @@ RUNTIME_CONFIGMAP_SELECTOR="$ROOT/scripts/runtime/confidential/select-required-r
 READY_CURRENT_SELECTOR="$ROOT/scripts/runtime/confidential/select-ready-current.jq"
 RESOLVER="$ROOT/scripts/runtime/confidential/resolve-coco-support-lock.sh"
 PROBE_POLICY_GENERATOR="$ROOT/scripts/runtime/confidential/generate-confidential-probe-initdata.sh"
+GENPOLICY_RUNTIME_CONTRACT="$ROOT/deployments/k8s/runtime-profiles/policy/genpolicy-runtime-contract.json"
 WRAPPER="$ROOT/scripts/runtime/confidential/with-dev-confidential-coco-config.sh"
 PROFILE="$ROOT/deployments/k8s/overlays/dev/config-runtime-profile.yaml"
 COMMODITY_PROFILE="$ROOT/deployments/k8s/overlays/dev/config-runtime-profile-commodity.yaml"
@@ -269,16 +270,16 @@ rg -F 'privileged: true' "$SMOKE_DIR/confidential-attestation-job.yaml" >/dev/nu
   printf 'confidential attestation probe does not declare its measured guest-pull groups\n' >&2
   exit 1
 }
-rg -F 'name: codewire-commodity-runtime-smoke-v68' "$SMOKE_DIR/commodity-smoke-job.yaml" >/dev/null || {
-  printf 'commodity runtime probe generation is not v68\n' >&2
+rg -F 'name: codewire-commodity-runtime-smoke-v69' "$SMOKE_DIR/commodity-smoke-job.yaml" >/dev/null || {
+  printf 'commodity runtime probe generation is not v69\n' >&2
   exit 1
 }
-rg -F 'name: codewire-confidential-runtime-smoke-v68' "$SMOKE_DIR/confidential-smoke-job.yaml" >/dev/null || {
-  printf 'confidential runtime probe generation is not v68\n' >&2
+rg -F 'name: codewire-confidential-runtime-smoke-v69' "$SMOKE_DIR/confidential-smoke-job.yaml" >/dev/null || {
+  printf 'confidential runtime probe generation is not v69\n' >&2
   exit 1
 }
-rg -F 'name: codewire-confidential-snp-attestation-v68' "$SMOKE_DIR/confidential-attestation-job.yaml" >/dev/null || {
-  printf 'confidential attestation probe generation is not v68\n' >&2
+rg -F 'name: codewire-confidential-snp-attestation-v69' "$SMOKE_DIR/confidential-attestation-job.yaml" >/dev/null || {
+  printf 'confidential attestation probe generation is not v69\n' >&2
   exit 1
 }
 
@@ -312,7 +313,25 @@ probe_digest="$(awk '$1 == "digest:" { print $2 }' "$SMOKE_DIR/kustomization.con
 }
 
 annotation_key='io.katacontainers.config.hypervisor.cc_init_data'
+[[ "$(jq -er '.schemaVersion' "$GENPOLICY_RUNTIME_CONTRACT")" == 1 ]]
+expected_oci_version="$(jq -er '.ociVersion' "$GENPOLICY_RUNTIME_CONTRACT")"
+[[ "$expected_oci_version" == '1.3.0' ]] || {
+  printf 'static probes no longer target the live containerd OCI request version\n' >&2
+  exit 1
+}
 initdata_dir="$(mktemp -d)"
+validate_policy_oci_version() {
+  local policy="$1"
+  local expected="$2"
+  local versions
+
+  versions="$(
+    rg -o '\"Version\": \"[^\"]+\"' "$policy" |
+      sed -E 's/^\"Version\": \"([^\"]+)\"$/\1/' |
+      sort -u
+  )"
+  [[ "$versions" == "$expected" ]]
+}
 validate_probe_initdata() {
   local manifest="$1"
   local container_name="$2"
@@ -331,6 +350,7 @@ validate_probe_initdata() {
   rg -Fx 'package agent_policy' "$policy" >/dev/null || return 1
   rg -F "$probe_digest" "$policy" >/dev/null || return 1
   rg -F "\"$container_name\"" "$policy" >/dev/null || return 1
+  validate_policy_oci_version "$policy" "$expected_oci_version" || return 1
 }
 
 validate_probe_initdata "$SMOKE_DIR/confidential-smoke-job.yaml" smoke || {
@@ -341,6 +361,14 @@ validate_probe_initdata "$SMOKE_DIR/confidential-attestation-job.yaml" attest ||
   printf 'confidential attestation probe Init-Data is absent, malformed, or stale\n' >&2
   exit 1
 }
+
+wrong_oci_policy="$initdata_dir/wrong-oci-version.rego"
+cp "$initdata_dir/confidential-smoke-job.yaml.rego" "$wrong_oci_policy"
+sed -i '0,/\"Version\": \"1\.3\.0\"/s//\"Version\": \"1.1.0\"/' "$wrong_oci_policy"
+if validate_policy_oci_version "$wrong_oci_policy" "$expected_oci_version"; then
+  printf 'confidential probe contract accepted the rejected OCI 1.1.0 policy version\n' >&2
+  exit 1
+fi
 
 missing_initdata="$initdata_dir/missing.yaml"
 malformed_initdata="$initdata_dir/malformed.yaml"
@@ -363,6 +391,8 @@ rg -F "EXPECTED_KATA_COMMIT='c3774d4a0b57bf16c550d6f698024f07589ee07b'" \
 rg -F 'genpolicy reports $embedded_commit, but Kata source is $kata_head' \
   "$PROBE_POLICY_GENERATOR" >/dev/null
 rg -F 'DOCKER_CONFIG="$workdir/docker-config"' "$PROBE_POLICY_GENERATOR" >/dev/null
+rg -F 'genpolicy-runtime-contract.json' "$PROBE_POLICY_GENERATOR" >/dev/null
+rg -F 'drop-in-examples/$settings_drop_in_name' "$PROBE_POLICY_GENERATOR" >/dev/null
 
 runtime_configmap="$({
   jq -n '{
