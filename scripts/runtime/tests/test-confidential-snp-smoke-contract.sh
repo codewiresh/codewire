@@ -6,6 +6,7 @@ SMOKE="$ROOT/scripts/runtime/confidential/smoke-dev-confidential-snp.sh"
 RUNTIME_CONFIGMAP_SELECTOR="$ROOT/scripts/runtime/confidential/select-required-runtime-configmap.jq"
 READY_CURRENT_SELECTOR="$ROOT/scripts/runtime/confidential/select-ready-current.jq"
 RESOLVER="$ROOT/scripts/runtime/confidential/resolve-coco-support-lock.sh"
+PROBE_POLICY_GENERATOR="$ROOT/scripts/runtime/confidential/generate-confidential-probe-initdata.sh"
 WRAPPER="$ROOT/scripts/runtime/confidential/with-dev-confidential-coco-config.sh"
 PROFILE="$ROOT/deployments/k8s/overlays/dev/config-runtime-profile.yaml"
 COMMODITY_PROFILE="$ROOT/deployments/k8s/overlays/dev/config-runtime-profile-commodity.yaml"
@@ -39,6 +40,7 @@ fi
 
 bash -n "$SMOKE"
 bash -n "$RESOLVER"
+bash -n "$PROBE_POLICY_GENERATOR"
 [[ ! -e "$WRAPPER" ]] || {
   printf 'imperative confidential ConfigMap wrapper still exists\n' >&2
   exit 1
@@ -259,13 +261,24 @@ rg -F 'kubernetes.io/hostname: cw-dev-prod-node-1' "$SMOKE_DIR/commodity-smoke-j
 rg -F 'storageClassName: longhorn' "$SMOKE_DIR/commodity-smoke-job.yaml" >/dev/null
 rg -F 'longhorn-workspace-ok' "$SMOKE_DIR/commodity-smoke-job.yaml" >/dev/null
 rg -F 'privileged: true' "$SMOKE_DIR/confidential-attestation-job.yaml" >/dev/null
-rg -F 'name: codewire-commodity-runtime-smoke-v67' "$SMOKE_DIR/commodity-smoke-job.yaml" >/dev/null
-rg -F 'name: codewire-confidential-runtime-smoke-v67' "$SMOKE_DIR/confidential-smoke-job.yaml" >/dev/null || {
-  printf 'confidential runtime probe generation is not v67\n' >&2
+[[ "$(yq -er '.spec.template.spec.securityContext.supplementalGroups' "$SMOKE_DIR/confidential-smoke-job.yaml" -o=json -I=0)" == '[0]' ]] || {
+  printf 'confidential runtime probe does not declare its measured guest-pull groups\n' >&2
   exit 1
 }
-rg -F 'name: codewire-confidential-snp-attestation-v67' "$SMOKE_DIR/confidential-attestation-job.yaml" >/dev/null || {
-  printf 'confidential attestation probe generation is not v67\n' >&2
+[[ "$(yq -er '.spec.template.spec.securityContext.supplementalGroups' "$SMOKE_DIR/confidential-attestation-job.yaml" -o=json -I=0)" == '[10]' ]] || {
+  printf 'confidential attestation probe does not declare its measured guest-pull groups\n' >&2
+  exit 1
+}
+rg -F 'name: codewire-commodity-runtime-smoke-v68' "$SMOKE_DIR/commodity-smoke-job.yaml" >/dev/null || {
+  printf 'commodity runtime probe generation is not v68\n' >&2
+  exit 1
+}
+rg -F 'name: codewire-confidential-runtime-smoke-v68' "$SMOKE_DIR/confidential-smoke-job.yaml" >/dev/null || {
+  printf 'confidential runtime probe generation is not v68\n' >&2
+  exit 1
+}
+rg -F 'name: codewire-confidential-snp-attestation-v68' "$SMOKE_DIR/confidential-attestation-job.yaml" >/dev/null || {
+  printf 'confidential attestation probe generation is not v68\n' >&2
   exit 1
 }
 
@@ -297,6 +310,59 @@ probe_digest="$(awk '$1 == "digest:" { print $2 }' "$SMOKE_DIR/kustomization.con
   printf 'confidential activation still contains the local digest sentinel\n' >&2
   exit 1
 }
+
+annotation_key='io.katacontainers.config.hypervisor.cc_init_data'
+initdata_dir="$(mktemp -d)"
+validate_probe_initdata() {
+  local manifest="$1"
+  local container_name="$2"
+  local encoded decoded policy
+
+  encoded="$(yq -er ".spec.template.metadata.annotations.\"$annotation_key\"" "$manifest")" || return 1
+  [[ -n "$encoded" && "${#encoded}" -le 65536 ]] || return 1
+  decoded="$initdata_dir/$(basename "$manifest").toml"
+  policy="$initdata_dir/$(basename "$manifest").rego"
+  printf '%s' "$encoded" | base64 -d | gzip -dc >"$decoded" 2>/dev/null || return 1
+  yq -p=toml -oy -e \
+    '.version == "0.1.0" and .algorithm == "sha256" and
+     (.data | has("policy.rego")) and (.data | length == 1)' \
+    "$decoded" >/dev/null || return 1
+  yq -p=toml -oy -er '.data."policy.rego"' "$decoded" >"$policy" || return 1
+  rg -Fx 'package agent_policy' "$policy" >/dev/null || return 1
+  rg -F "$probe_digest" "$policy" >/dev/null || return 1
+  rg -F "\"$container_name\"" "$policy" >/dev/null || return 1
+}
+
+validate_probe_initdata "$SMOKE_DIR/confidential-smoke-job.yaml" smoke || {
+  printf 'confidential runtime probe Init-Data is absent, malformed, or stale\n' >&2
+  exit 1
+}
+validate_probe_initdata "$SMOKE_DIR/confidential-attestation-job.yaml" attest || {
+  printf 'confidential attestation probe Init-Data is absent, malformed, or stale\n' >&2
+  exit 1
+}
+
+missing_initdata="$initdata_dir/missing.yaml"
+malformed_initdata="$initdata_dir/malformed.yaml"
+cp "$SMOKE_DIR/confidential-smoke-job.yaml" "$missing_initdata"
+cp "$SMOKE_DIR/confidential-smoke-job.yaml" "$malformed_initdata"
+yq -i "del(.spec.template.metadata.annotations.\"$annotation_key\")" "$missing_initdata"
+yq -i ".spec.template.metadata.annotations.\"$annotation_key\" = \"not-gzip-base64\"" "$malformed_initdata"
+if validate_probe_initdata "$missing_initdata" smoke 2>/dev/null; then
+  printf 'confidential probe contract accepted missing Init-Data\n' >&2
+  exit 1
+fi
+if validate_probe_initdata "$malformed_initdata" smoke 2>/dev/null; then
+  printf 'confidential probe contract accepted malformed Init-Data\n' >&2
+  exit 1
+fi
+rm -rf "$initdata_dir"
+
+rg -F "EXPECTED_KATA_COMMIT='c3774d4a0b57bf16c550d6f698024f07589ee07b'" \
+  "$PROBE_POLICY_GENERATOR" >/dev/null
+rg -F 'genpolicy reports $embedded_commit, but Kata source is $kata_head' \
+  "$PROBE_POLICY_GENERATOR" >/dev/null
+rg -F 'DOCKER_CONFIG="$workdir/docker-config"' "$PROBE_POLICY_GENERATOR" >/dev/null
 
 runtime_configmap="$({
   jq -n '{
