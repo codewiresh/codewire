@@ -563,6 +563,8 @@ run_paths_case dashboard pull_request refs/pull/12/head false \
   'policy web' apps/dashboard/playwright.config.ts
 run_paths_case dashboard_design_preview pull_request refs/pull/120/head false \
   'policy web' scripts/dev/design-system-server.py
+run_paths_case marketing_brand_assets pull_request refs/pull/1201/head false \
+  'policy web' favicon.svg logo/wordmark.svg
 run_paths_case dashboard_runtime_inventory pull_request refs/pull/121/head false \
   'deploy edge_kind go_consumer_interop go_support policy release runtime_confidential security web' \
   apps/dashboard/runtime-inventory.json

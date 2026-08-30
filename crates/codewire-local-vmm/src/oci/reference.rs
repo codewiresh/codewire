@@ -263,8 +263,8 @@ mod tests {
     fn ambiguous_or_credential_bearing_references_fail_closed() {
         for rejected in [
             "ubuntu:latest",
-            "https://ghcr.io/codewiresh/workspace:latest",
-            "user@ghcr.io/codewiresh/workspace:latest",
+            "https://registry.example/codewire/workspace:latest",
+            "user@registry.example/codewire/workspace:latest",
             "GHCR.io/codewiresh/workspace:latest",
             "ghcr.io/../workspace:latest",
             "ghcr.io/codewiresh/workspace:bad tag",
