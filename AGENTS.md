@@ -103,6 +103,14 @@ weakening of the required local hardware gate.
 
 ## HTML and frontend
 
+- Never inject disposable diagnostic JavaScript, inline browser probes,
+  temporary data attributes, console logging, forced scrolling, or similar
+  instrumentation into tracked product templates or editable design fixtures,
+  even when the plan is to remove it before handoff. Diagnose from external
+  browser or repository-owned test tooling. If that tooling is unavailable,
+  use static evidence and existing checks or report the verification gap;
+  tracked JavaScript must implement intentional product behavior or a durable
+  repository-owned test.
 - Use native semantic HTML throughout the product and editable design fixtures.
   Landmarks, headings, sections, navigation, lists, tables, forms, labels,
   links, and buttons must describe their actual purpose. Use a `div` or `span`
