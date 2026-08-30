@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT="$(git rev-parse --show-toplevel)"
 SMOKE_DIR="$ROOT/deployments/k8s/runtime-profiles/confidential-smoke"
 KUSTOMIZATION="$SMOKE_DIR/kustomization.confidential-snp.yaml"
+RUNTIME_CONTRACT="$ROOT/deployments/k8s/runtime-profiles/policy/genpolicy-runtime-contract.json"
 ANNOTATION='io.katacontainers.config.hypervisor.cc_init_data'
 EXPECTED_KATA_COMMIT='c3774d4a0b57bf16c550d6f698024f07589ee07b'
 
@@ -40,7 +41,7 @@ kata_root="${2:-}"
 }
 [[ -n "$kata_root" && -e "$kata_root/.git" ]] || die 'KATA_SOURCE must be a Kata git worktree'
 
-for command in base64 git gzip timeout yq; do
+for command in base64 git gzip install jq rg sed sort timeout yq; do
   require_cmd "$command"
 done
 
@@ -51,8 +52,26 @@ git -C "$kata_root" diff --quiet --ignore-submodules -- || die 'Kata source has 
 git -C "$kata_root" diff --cached --quiet --ignore-submodules -- || die 'Kata source has tracked staged changes'
 
 rules="$kata_root/src/tools/genpolicy/rules.rego"
-settings="$kata_root/src/tools/genpolicy/genpolicy-settings.json"
-[[ -f "$rules" && -f "$settings" ]] || die 'Kata source is missing genpolicy rules or settings'
+base_settings="$kata_root/src/tools/genpolicy/genpolicy-settings.json"
+[[ -f "$rules" && -f "$base_settings" ]] || die 'Kata source is missing genpolicy rules or settings'
+[[ -f "$RUNTIME_CONTRACT" ]] || die 'Codewire genpolicy runtime contract is missing'
+
+[[ "$(jq -er '.schemaVersion' "$RUNTIME_CONTRACT")" == 1 ]] || \
+  die 'Codewire genpolicy runtime contract has an unsupported schema'
+oci_version="$(jq -er '.ociVersion' "$RUNTIME_CONTRACT")"
+settings_drop_in_name="$(jq -er '.kataSettingsDropIn' "$RUNTIME_CONTRACT")"
+[[ "$oci_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die 'Codewire OCI version is malformed'
+[[ "$settings_drop_in_name" =~ ^[A-Za-z0-9._-]+\.json$ ]] || \
+  die 'Codewire Kata settings drop-in name is malformed'
+settings_drop_in="$kata_root/src/tools/genpolicy/drop-in-examples/$settings_drop_in_name"
+[[ -f "$settings_drop_in" ]] || die "Kata source is missing settings drop-in $settings_drop_in_name"
+[[ "$(jq -er '
+  [.[] | select(
+    .op == "replace" and
+    .path == "/kata_config/oci_version"
+  ) | .value] | if length == 1 then .[0] else error("invalid OCI drop-in") end
+' "$settings_drop_in")" == "$oci_version" ]] || \
+  die 'Kata settings drop-in does not match the Codewire OCI contract'
 
 genpolicy_bin="${KATA_GENPOLICY_BIN:-}"
 if [[ -z "$genpolicy_bin" ]]; then
@@ -70,7 +89,7 @@ fi
 [[ -n "$genpolicy_bin" && -x "$genpolicy_bin" ]] || \
   die 'exact-head genpolicy binary not found; build it from KATA_SOURCE first'
 
-version_output="$($genpolicy_bin -p "$rules" -j "$settings" -v)"
+version_output="$($genpolicy_bin -p "$rules" -j "$base_settings" -v)"
 embedded_commit="${version_output##*commit: }"
 [[ "$embedded_commit" == "$kata_head" ]] || \
   die "genpolicy reports $embedded_commit, but Kata source is $kata_head; regenerate src/version.rs and rebuild"
@@ -85,6 +104,10 @@ mkdir -p "$ROOT/.tmp"
 workdir="$(mktemp -d "$ROOT/.tmp/confidential-probe-genpolicy.XXXXXX")"
 chmod 0700 "$workdir"
 mkdir -p "$workdir/docker-config"
+settings="$workdir/genpolicy-settings"
+mkdir -p "$settings/genpolicy-settings.d"
+install -m 0600 "$base_settings" "$settings/genpolicy-settings.json"
+install -m 0600 "$settings_drop_in" "$settings/genpolicy-settings.d/$settings_drop_in_name"
 # Both inputs are public and digest-pinned. Do not let the generator consult
 # ambient registry credentials merely because the workstation has a global
 # Docker credential helper configured.
@@ -99,7 +122,7 @@ generate_one() {
   local container_name="$2"
   local unsupported_run_as_non_root="$3"
   local input decoded policy
-  local encoded current
+  local encoded current policy_oci_versions
 
   input="$workdir/$(basename "$source_manifest")"
   decoded="$input.initdata.toml"
@@ -137,6 +160,13 @@ generate_one() {
   rg -Fx 'package agent_policy' "$policy" >/dev/null || die 'generated Init-Data lacks Agent policy'
   rg -F "$probe_digest" "$policy" >/dev/null || die 'generated Agent policy lacks the exact probe digest'
   rg -F "\"$container_name\"" "$policy" >/dev/null || die 'generated Agent policy lacks the expected container'
+  policy_oci_versions="$(
+    rg -o '\"Version\": \"[^\"]+\"' "$policy" |
+      sed -E 's/^\"Version\": \"([^\"]+)\"$/\1/' |
+      sort -u
+  )"
+  [[ "$policy_oci_versions" == "$oci_version" ]] || \
+    die "generated Agent policy OCI version is $policy_oci_versions, expected $oci_version"
 
   if [[ "$mode" == update ]]; then
     CC_INIT_DATA="$encoded" yq -i \
@@ -154,3 +184,4 @@ export PROBE_IMAGE="$probe_image"
 generate_one "$SMOKE_DIR/confidential-smoke-job.yaml" smoke true
 generate_one "$SMOKE_DIR/confidential-attestation-job.yaml" attest false
 printf 'Kata genpolicy source: %s\n' "$kata_head"
+printf 'Containerd OCI contract: %s\n' "$oci_version"
