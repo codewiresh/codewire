@@ -259,13 +259,13 @@ rg -F 'kubernetes.io/hostname: cw-dev-prod-node-1' "$SMOKE_DIR/commodity-smoke-j
 rg -F 'storageClassName: longhorn' "$SMOKE_DIR/commodity-smoke-job.yaml" >/dev/null
 rg -F 'longhorn-workspace-ok' "$SMOKE_DIR/commodity-smoke-job.yaml" >/dev/null
 rg -F 'privileged: true' "$SMOKE_DIR/confidential-attestation-job.yaml" >/dev/null
-rg -F 'name: codewire-commodity-runtime-smoke-v66' "$SMOKE_DIR/commodity-smoke-job.yaml" >/dev/null
-rg -F 'name: codewire-confidential-runtime-smoke-v66' "$SMOKE_DIR/confidential-smoke-job.yaml" >/dev/null || {
-  printf 'confidential runtime probe generation is not v66\n' >&2
+rg -F 'name: codewire-commodity-runtime-smoke-v67' "$SMOKE_DIR/commodity-smoke-job.yaml" >/dev/null
+rg -F 'name: codewire-confidential-runtime-smoke-v67' "$SMOKE_DIR/confidential-smoke-job.yaml" >/dev/null || {
+  printf 'confidential runtime probe generation is not v67\n' >&2
   exit 1
 }
-rg -F 'name: codewire-confidential-snp-attestation-v66' "$SMOKE_DIR/confidential-attestation-job.yaml" >/dev/null || {
-  printf 'confidential attestation probe generation is not v66\n' >&2
+rg -F 'name: codewire-confidential-snp-attestation-v67' "$SMOKE_DIR/confidential-attestation-job.yaml" >/dev/null || {
+  printf 'confidential attestation probe generation is not v67\n' >&2
   exit 1
 }
 
