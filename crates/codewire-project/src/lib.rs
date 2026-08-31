@@ -270,11 +270,18 @@ pub struct LocalProjectIntent {
     pub host_ports: Vec<HostPortBinding>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LocalMountIntent {
     pub source: String,
     pub destination: String,
+    pub mode: LocalMountMode,
     pub read_only: Option<bool>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LocalMountMode {
+    Copy,
+    Direct,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -335,7 +342,7 @@ struct RawProject {
     #[serde(default)]
     workspace: Option<RawWorkspace>,
     #[serde(default)]
-    mounts: Vec<RawMount>,
+    mounts: Vec<RawMountBlock>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -474,13 +481,6 @@ struct RawWorkspaceBlock {
     read_only: bool,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
-enum RawMount {
-    String(String),
-    Mapping(RawMountBlock),
-}
-
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawMountBlock {
@@ -488,6 +488,8 @@ struct RawMountBlock {
     source: String,
     #[serde(default, alias = "target")]
     destination: String,
+    #[serde(default)]
+    mode: String,
     #[serde(default, alias = "readonly")]
     read_only: Option<bool>,
 }

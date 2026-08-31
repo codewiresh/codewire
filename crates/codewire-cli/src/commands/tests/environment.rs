@@ -19,6 +19,8 @@
             "16Gi",
             "--path",
             ".",
+            "--path-mode",
+            "copy",
             "--output",
             "json",
         ])
@@ -38,6 +40,7 @@
         assert_eq!(args.cpu.as_deref(), Some("2"));
         assert_eq!(args.memory.as_deref(), Some("16Gi"));
         assert_eq!(args.path.as_deref(), Some(std::path::Path::new(".")));
+        assert_eq!(args.path_mode, Some(PathModeArg::Copy));
         assert_eq!(args.output, OutputFormat::Json);
 
         // The pre-native spelling remains a compatibility form for explicit
@@ -421,7 +424,19 @@
         };
         assert_eq!(
             reject_local_create_options(&args).unwrap_err().to_string(),
-            "--backend, --path, --file, and --spec require `cw env create --local`"
+            "--backend, --path, --path-mode, --file, and --spec require `cw env create --local`"
+        );
+
+        assert!(
+            Cli::try_parse_from([
+                "cw",
+                "env",
+                "create",
+                "--local",
+                "--path-mode",
+                "direct",
+            ])
+            .is_err()
         );
     }
 

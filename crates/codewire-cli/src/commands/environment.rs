@@ -1807,7 +1807,8 @@ pub(crate) fn local_create_args_from_environment_args(
             "repository arguments are only supported for --platform environment creation"
         );
     }
-    if args.preset_id.is_some()
+    if args.path_mode.is_some()
+        || args.preset_id.is_some()
         || args.ttl.is_some()
         || !args.follow
         || args.no_wait
@@ -1856,8 +1857,15 @@ fn parse_legacy_create_quantity(value: Option<&str>, label: &str) -> anyhow::Res
 }
 
 pub(crate) fn reject_local_create_options(args: &EnvCreateArgs) -> anyhow::Result<()> {
-    if args.backend.is_some() || args.path.is_some() || args.file.is_some() || args.spec.is_some() {
-        anyhow::bail!("--backend, --path, --file, and --spec require `cw env create --local`");
+    if args.backend.is_some()
+        || args.path.is_some()
+        || args.path_mode.is_some()
+        || args.file.is_some()
+        || args.spec.is_some()
+    {
+        anyhow::bail!(
+            "--backend, --path, --path-mode, --file, and --spec require `cw env create --local`"
+        );
     }
     Ok(())
 }

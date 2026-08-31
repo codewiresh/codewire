@@ -1,17 +1,20 @@
-//! Clean-Git workspace snapshot provisioning for the first native preview.
+//! Environment-owned workspace preparation for the native runtime.
 //!
-//! Host worktree paths are used only to ask a fixed `/usr/bin/git` for the
-//! checked-out commit and cleanliness. File contents come from Git object
-//! bytes, never by following the host worktree, filters, hooks, or mounts.
+//! Git worktrees are cloned from committed state. Ordinary directories are
+//! copied through dirfd-relative, no-follow traversal. Neither preparation
+//! leaves a host mount attached to the VM.
 
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Write as _};
-use std::os::unix::ffi::OsStringExt as _;
-use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _};
+use std::io::{self, Read as _, Write as _};
+use std::os::fd::AsFd as _;
+use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
+use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _, symlink};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
+use rustix::fs::{Dir, Mode, OFlags, ResolveFlags, openat2, readlinkat};
+use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
 
 use crate::linux::path::{PrivateRoot, current_uid};
@@ -20,12 +23,37 @@ use crate::linux::state::{MINIMUM_STATE_DISK_BYTES, StateDiskIdentity, VmPaths};
 const GIT: &str = "/usr/bin/git";
 const MAX_GIT_CONTROL_OUTPUT: usize = 16 * 1024 * 1024;
 const MINIMUM_EXT4_HEADROOM: u64 = 128 * 1024 * 1024;
-const LFS_POINTER_PREFIX: &[u8] = b"version https://git-lfs.github.com/spec/v1\n";
+const MAXIMUM_COPY_ENTRIES: u64 = 1_000_000;
+const MAXIMUM_COPY_DEPTH: usize = 128;
+const MAXIMUM_COPY_BYTES: u64 = 1024 * 1024 * 1024 * 1024;
+const COPY_MANIFEST_SCHEMA: &[u8] = b"codewire-workspace-copy-v1\0";
+const RESOLVE_SOURCE: ResolveFlags = ResolveFlags::BENEATH
+    .union(ResolveFlags::NO_MAGICLINKS)
+    .union(ResolveFlags::NO_XDEV);
+
+pub fn workspace_content_limit(disk_bytes: u64) -> u64 {
+    disk_bytes.saturating_sub(MINIMUM_EXT4_HEADROOM)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkspaceSelection {
+    Auto,
+    Clone,
+    Copy,
+    Direct,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkspaceSourceMode {
+    Clone,
+    Copy,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkspaceSnapshot {
     pub source_path: PathBuf,
     pub commit: String,
+    pub mode: WorkspaceSourceMode,
     pub state_disk: PathBuf,
 }
 
@@ -33,22 +61,65 @@ pub struct WorkspaceSnapshot {
 pub struct WorkspaceSource {
     pub source_path: PathBuf,
     pub commit: String,
+    pub mode: WorkspaceSourceMode,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct TreeEntry {
-    mode: u32,
-    object_id: String,
+#[derive(Debug)]
+struct SourceDirectory {
     path: PathBuf,
+    directory: File,
+    device: u64,
+    inode: u64,
 }
 
-/// Create a new sparse ext4 state disk containing `workspace/` and `home/`.
+#[derive(Debug)]
+struct CopyManifest {
+    sha256: String,
+}
+
+pub fn resolve_workspace_mode(
+    requested_source: &Path,
+    requested_mode: WorkspaceSelection,
+) -> Result<WorkspaceSourceMode, WorkspaceError> {
+    let source = open_source_directory(requested_source)?;
+    match requested_mode {
+        WorkspaceSelection::Auto => match fs::symlink_metadata(source.path.join(".git")) {
+            Ok(metadata) if metadata.is_dir() || metadata.is_file() => {
+                Ok(WorkspaceSourceMode::Clone)
+            }
+            Ok(_) => Err(WorkspaceError::UnsafeGitMarker(source.path.join(".git"))),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(WorkspaceSourceMode::Copy),
+            Err(source_error) => Err(WorkspaceError::Io {
+                path: source.path.join(".git"),
+                source: source_error,
+            }),
+        },
+        WorkspaceSelection::Clone => Ok(WorkspaceSourceMode::Clone),
+        WorkspaceSelection::Copy => Ok(WorkspaceSourceMode::Copy),
+        WorkspaceSelection::Direct => Err(WorkspaceError::DirectModeUnavailable),
+    }
+}
+
+pub fn inspect_workspace(
+    requested_source: &Path,
+    requested_mode: WorkspaceSelection,
+    maximum_copy_bytes: u64,
+) -> Result<WorkspaceSource, WorkspaceError> {
+    match resolve_workspace_mode(requested_source, requested_mode)? {
+        WorkspaceSourceMode::Clone => inspect_clean_git_workspace(requested_source),
+        WorkspaceSourceMode::Copy => {
+            inspect_copy_workspace(requested_source, maximum_copy_bytes.min(MAXIMUM_COPY_BYTES))
+        }
+    }
+}
+
+/// Create a sparse ext4 state disk containing `workspace/` and `home/`.
 /// The destination must not already exist. A failed operation removes only the
 /// UUID-named staging directory and the newly-created incomplete disk.
-pub fn provision_clean_git_workspace(
+fn provision_workspace(
     engine_state_root: &Path,
     vm_id: Uuid,
-    requested_source: &Path,
+    source: &WorkspaceSource,
     disk_bytes: u64,
 ) -> Result<WorkspaceSnapshot, WorkspaceError> {
     if disk_bytes < MINIMUM_STATE_DISK_BYTES
@@ -57,16 +128,6 @@ pub fn provision_clean_git_workspace(
     {
         return Err(WorkspaceError::InvalidDiskSize(disk_bytes));
     }
-    let source = inspect_clean_git_workspace(requested_source)?;
-    let top_level = source.source_path;
-    let commit = source.commit;
-    let tree = git_output(
-        &top_level,
-        &["ls-tree", "-r", "-z", "--full-tree", &commit],
-        MAX_GIT_CONTROL_OUTPUT,
-    )?;
-    let entries = parse_tree(&tree.stdout)?;
-
     let engine_root = PrivateRoot::open(engine_state_root)?;
     let paths = VmPaths::create(&engine_root, vm_id)?;
     cleanup_provisioning_staging(&engine_root, vm_id)?;
@@ -99,29 +160,27 @@ pub fn provision_clean_git_workspace(
         }
     })?;
 
-    let content_limit = disk_bytes - MINIMUM_EXT4_HEADROOM;
-    let mut total_bytes = 0_u64;
-    for entry in entries {
-        let size_text = git_text(&top_level, &["cat-file", "-s", &entry.object_id])?;
-        let size = size_text
-            .trim()
-            .parse::<u64>()
-            .map_err(|_| WorkspaceError::InvalidObjectSize)?;
-        total_bytes = total_bytes
-            .checked_add(size)
-            .ok_or(WorkspaceError::WorkspaceTooLarge)?;
-        if total_bytes > content_limit || size > usize::MAX as u64 {
-            return Err(WorkspaceError::WorkspaceTooLarge);
+    let content_limit = workspace_content_limit(disk_bytes);
+    let prepared_identity = match source.mode {
+        WorkspaceSourceMode::Clone => {
+            prepare_git_clone(source, &workspace, &staging_dir)?;
+            let bytes = bounded_staging_regular_bytes(&workspace, content_limit)?;
+            if bytes > content_limit {
+                return Err(WorkspaceError::WorkspaceTooLarge);
+            }
+            source.commit.clone()
         }
-        let object = git_output(
-            &top_level,
-            &["cat-file", "blob", &entry.object_id],
-            usize::try_from(size).map_err(|_| WorkspaceError::WorkspaceTooLarge)?,
-        )?;
-        if object.stdout.starts_with(LFS_POINTER_PREFIX) {
-            return Err(WorkspaceError::GitLfsUnsupported(entry.path));
+        WorkspaceSourceMode::Copy => {
+            let manifest = copy_directory_manifest(
+                &open_source_directory(&source.source_path)?,
+                Some(&workspace),
+                content_limit,
+            )?;
+            manifest.sha256
         }
-        write_tree_file(&workspace, &entry, &object.stdout)?;
+    };
+    if prepared_identity != source.commit {
+        return Err(WorkspaceError::SourceChanged);
     }
 
     let disk = OpenOptions::new()
@@ -143,6 +202,7 @@ pub fn provision_clean_git_workspace(
     format_ext4(&staging_dir, &paths.state_disk)?;
     File::open(&paths.state_disk)
         .and_then(|file| file.sync_all())
+        .and_then(|()| File::open(&paths.disks_dir)?.sync_all())
         .map_err(|source| WorkspaceError::Io {
             path: paths.state_disk.clone(),
             source,
@@ -151,8 +211,9 @@ pub fn provision_clean_git_workspace(
     cleanup.remove_staging()?;
     cleanup.disarm_disk();
     Ok(WorkspaceSnapshot {
-        source_path: top_level,
-        commit,
+        source_path: source.source_path.clone(),
+        commit: source.commit.clone(),
+        mode: source.mode,
         state_disk: paths.state_disk,
     })
 }
@@ -195,6 +256,7 @@ pub fn inspect_clean_git_workspace(
     if !valid_object_id(&commit) {
         return Err(WorkspaceError::InvalidCommit);
     }
+    reject_git_submodules(&top_level, &commit)?;
     let status = git_output(
         &top_level,
         &[
@@ -202,7 +264,7 @@ pub fn inspect_clean_git_workspace(
             "--porcelain=v1",
             "-z",
             "--untracked-files=all",
-            "--ignore-submodules=none",
+            "--ignore-submodules=all",
         ],
         MAX_GIT_CONTROL_OUTPUT,
     )?;
@@ -212,10 +274,24 @@ pub fn inspect_clean_git_workspace(
     Ok(WorkspaceSource {
         source_path: top_level,
         commit,
+        mode: WorkspaceSourceMode::Clone,
     })
 }
 
-pub fn ensure_clean_git_workspace(
+fn inspect_copy_workspace(
+    requested_source: &Path,
+    maximum_bytes: u64,
+) -> Result<WorkspaceSource, WorkspaceError> {
+    let source = open_source_directory(requested_source)?;
+    let manifest = copy_directory_manifest(&source, None, maximum_bytes)?;
+    Ok(WorkspaceSource {
+        source_path: source.path,
+        commit: manifest.sha256,
+        mode: WorkspaceSourceMode::Copy,
+    })
+}
+
+pub fn ensure_workspace(
     engine_state_root: &Path,
     vm_id: Uuid,
     source: &WorkspaceSource,
@@ -240,15 +316,24 @@ pub fn ensure_clean_git_workspace(
             Ok(WorkspaceSnapshot {
                 source_path: source.source_path.clone(),
                 commit: source.commit.clone(),
+                mode: source.mode,
                 state_disk: paths.state_disk,
             })
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            let admitted = inspect_clean_git_workspace(&source.source_path)?;
+            let selection = match source.mode {
+                WorkspaceSourceMode::Clone => WorkspaceSelection::Clone,
+                WorkspaceSourceMode::Copy => WorkspaceSelection::Copy,
+            };
+            let admitted = inspect_workspace(
+                &source.source_path,
+                selection,
+                workspace_content_limit(disk_bytes),
+            )?;
             if admitted != *source {
                 return Err(WorkspaceError::SourceChanged);
             }
-            provision_clean_git_workspace(engine_state_root, vm_id, &source.source_path, disk_bytes)
+            provision_workspace(engine_state_root, vm_id, source, disk_bytes)
         }
         Err(source_error) => Err(WorkspaceError::Io {
             path: paths.state_disk,
@@ -315,7 +400,11 @@ fn git_output(
     arguments: &[&str],
     maximum_stdout: usize,
 ) -> Result<Output, WorkspaceError> {
-    let output = Command::new(GIT)
+    let stdout_limit = maximum_stdout
+        .checked_add(1)
+        .ok_or(WorkspaceError::GitOutputTooLarge)? as u64;
+    let mut command = Command::new(GIT);
+    command
         .args([
             "-c",
             "core.fsmonitor=false",
@@ -336,70 +425,43 @@ fn git_output(
         .current_dir(source)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .output()
+        .stderr(Stdio::null());
+    let mut child = command
+        .spawn()
         .map_err(|_| WorkspaceError::GitUnavailable)?;
+    let mut stdout = Vec::new();
+    let Some(pipe) = child.stdout.take() else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(WorkspaceError::GitCommandFailed);
+    };
+    if pipe.take(stdout_limit).read_to_end(&mut stdout).is_err() {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(WorkspaceError::GitCommandFailed);
+    }
+    if stdout.len() > maximum_stdout {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(WorkspaceError::GitOutputTooLarge);
+    }
+    let status = match child.wait() {
+        Ok(status) => status,
+        Err(_) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(WorkspaceError::GitCommandFailed);
+        }
+    };
+    let output = Output {
+        status,
+        stdout,
+        stderr: Vec::new(),
+    };
     if !output.status.success() {
         return Err(WorkspaceError::GitCommandFailed);
     }
-    // `cat-file` callers pass the exact object size. Control output receives a
-    // separate fixed bound. One extra byte is not accepted as a benign drift.
-    if output.stdout.len() > maximum_stdout {
-        return Err(WorkspaceError::GitOutputTooLarge);
-    }
     Ok(output)
-}
-
-fn parse_tree(bytes: &[u8]) -> Result<Vec<TreeEntry>, WorkspaceError> {
-    let mut entries = Vec::new();
-    for record in bytes
-        .split(|byte| *byte == 0)
-        .filter(|record| !record.is_empty())
-    {
-        let tab = record
-            .iter()
-            .position(|byte| *byte == b'\t')
-            .ok_or(WorkspaceError::InvalidTree)?;
-        let header =
-            std::str::from_utf8(&record[..tab]).map_err(|_| WorkspaceError::InvalidTree)?;
-        let mut header = header.split_ascii_whitespace();
-        let mode = header.next().ok_or(WorkspaceError::InvalidTree)?;
-        let object_type = header.next().ok_or(WorkspaceError::InvalidTree)?;
-        let object_id = header.next().ok_or(WorkspaceError::InvalidTree)?;
-        if header.next().is_some() || object_type != "blob" || !valid_object_id(object_id) {
-            return Err(WorkspaceError::UnsupportedTreeEntry);
-        }
-        let mode = match mode {
-            "100644" => 0o644,
-            "100755" => 0o755,
-            "120000" => return Err(WorkspaceError::SymlinkUnsupported),
-            "160000" => return Err(WorkspaceError::SubmoduleUnsupported),
-            _ => return Err(WorkspaceError::UnsupportedTreeEntry),
-        };
-        let path = PathBuf::from(OsString::from_vec(record[tab + 1..].to_vec()));
-        validate_tree_path(&path)?;
-        if path == Path::new(".gitmodules") {
-            return Err(WorkspaceError::SubmoduleUnsupported);
-        }
-        entries.push(TreeEntry {
-            mode,
-            object_id: object_id.to_owned(),
-            path,
-        });
-    }
-    Ok(entries)
-}
-
-fn validate_tree_path(path: &Path) -> Result<(), WorkspaceError> {
-    if path.as_os_str().is_empty()
-        || path.is_absolute()
-        || path
-            .components()
-            .any(|component| !matches!(component, Component::Normal(_)))
-    {
-        return Err(WorkspaceError::InvalidTreePath);
-    }
-    Ok(())
 }
 
 fn valid_object_id(value: &str) -> bool {
@@ -409,41 +471,708 @@ fn valid_object_id(value: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
-fn write_tree_file(
-    workspace: &Path,
-    entry: &TreeEntry,
-    contents: &[u8],
-) -> Result<(), WorkspaceError> {
-    let destination = workspace.join(&entry.path);
-    if let Some(parent) = destination.parent() {
-        fs::create_dir_all(parent).map_err(|source| WorkspaceError::Io {
-            path: parent.to_owned(),
-            source,
-        })?;
-        // Every parent remains inside an owner-only staging root and contains
-        // no symlink because Codewire created the tree from scratch.
-        fs::set_permissions(parent, fs::Permissions::from_mode(0o755)).map_err(|source| {
-            WorkspaceError::Io {
-                path: parent.to_owned(),
-                source,
-            }
-        })?;
-    }
-    let mut file = OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .mode(entry.mode)
-        .open(&destination)
+fn open_source_directory(requested_source: &Path) -> Result<SourceDirectory, WorkspaceError> {
+    let path = fs::canonicalize(requested_source).map_err(|source| WorkspaceError::Io {
+        path: requested_source.to_owned(),
+        source,
+    })?;
+    let directory = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(&path)
         .map_err(|source| WorkspaceError::Io {
-            path: destination.clone(),
+            path: path.clone(),
             source,
+        })?;
+    let opened = directory.metadata().map_err(|source| WorkspaceError::Io {
+        path: path.clone(),
+        source,
+    })?;
+    let named = fs::symlink_metadata(&path).map_err(|source| WorkspaceError::Io {
+        path: path.clone(),
+        source,
+    })?;
+    if !opened.is_dir() || !named.is_dir() {
+        return Err(WorkspaceError::SourceNotDirectory(path));
+    }
+    if opened.dev() != named.dev() || opened.ino() != named.ino() {
+        return Err(WorkspaceError::SourceRootChanged(path));
+    }
+    Ok(SourceDirectory {
+        path,
+        directory,
+        device: opened.dev(),
+        inode: opened.ino(),
+    })
+}
+
+fn verify_source_root(source: &SourceDirectory) -> Result<(), WorkspaceError> {
+    let named = fs::symlink_metadata(&source.path).map_err(|source_error| WorkspaceError::Io {
+        path: source.path.clone(),
+        source: source_error,
+    })?;
+    if !named.is_dir() || named.dev() != source.device || named.ino() != source.inode {
+        return Err(WorkspaceError::SourceRootChanged(source.path.clone()));
+    }
+    Ok(())
+}
+
+struct CopyWalk {
+    hasher: Sha256,
+    regular_bytes: u64,
+    entries: u64,
+    maximum_bytes: u64,
+}
+
+fn copy_directory_manifest(
+    source: &SourceDirectory,
+    destination: Option<&Path>,
+    maximum_bytes: u64,
+) -> Result<CopyManifest, WorkspaceError> {
+    let mut walk = CopyWalk {
+        hasher: Sha256::new(),
+        regular_bytes: 0,
+        entries: 0,
+        maximum_bytes,
+    };
+    walk.hasher.update(COPY_MANIFEST_SCHEMA);
+    copy_directory_level(
+        source,
+        &source.directory,
+        Path::new(""),
+        destination,
+        0,
+        &mut walk,
+    )?;
+    verify_source_root(source)?;
+    Ok(CopyManifest {
+        sha256: format!("{:x}", walk.hasher.finalize()),
+    })
+}
+
+fn copy_directory_level(
+    source: &SourceDirectory,
+    directory: &File,
+    relative: &Path,
+    destination_root: Option<&Path>,
+    depth: usize,
+    walk: &mut CopyWalk,
+) -> Result<(), WorkspaceError> {
+    if depth > MAXIMUM_COPY_DEPTH {
+        return Err(WorkspaceError::CopyDepthExceeded);
+    }
+    let before = directory
+        .metadata()
+        .map_err(|source_error| WorkspaceError::Io {
+            path: source.path.join(relative),
+            source: source_error,
+        })?;
+    let mut entries =
+        Dir::read_from(directory.as_fd()).map_err(|source_error| WorkspaceError::SourceOpen {
+            path: source.path.join(relative),
+            source: source_error,
+        })?;
+    let mut names = Vec::new();
+    for entry in &mut entries {
+        let entry = entry.map_err(|source_error| WorkspaceError::SourceOpen {
+            path: source.path.join(relative),
+            source: source_error,
+        })?;
+        let bytes = entry.file_name().to_bytes();
+        if bytes == b"." || bytes == b".." {
+            continue;
+        }
+        if bytes.is_empty() || bytes.contains(&b'/') {
+            return Err(WorkspaceError::InvalidCopyPath(relative.to_owned()));
+        }
+        if names.len() as u64 == MAXIMUM_COPY_ENTRIES {
+            return Err(WorkspaceError::CopyEntryLimitExceeded);
+        }
+        names.push(OsString::from_vec(bytes.to_vec()));
+    }
+    names.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
+
+    for name in names {
+        walk.entries = walk
+            .entries
+            .checked_add(1)
+            .ok_or(WorkspaceError::WorkspaceTooLarge)?;
+        if walk.entries > MAXIMUM_COPY_ENTRIES {
+            return Err(WorkspaceError::CopyEntryLimitExceeded);
+        }
+        let entry_relative = relative.join(&name);
+        validate_copy_path(&entry_relative)?;
+        let identity = open_source_entry(directory, Path::new(&name), &entry_relative)?;
+        let metadata = identity
+            .metadata()
+            .map_err(|source_error| WorkspaceError::Io {
+                path: source.path.join(&entry_relative),
+                source: source_error,
+            })?;
+        if metadata.dev() != source.device {
+            return Err(WorkspaceError::SourceMountBoundary(entry_relative));
+        }
+        let destination = destination_root.map(|root| root.join(&entry_relative));
+        if metadata.is_dir() {
+            let mode = safe_copy_mode(&entry_relative, &metadata)?;
+            record_copy_entry(walk, b'd', &entry_relative, mode, 0);
+            let child = open_source_directory_entry(directory, Path::new(&name), &entry_relative)?;
+            if let Some(destination) = destination.as_ref() {
+                fs::create_dir(destination).map_err(|source_error| WorkspaceError::Io {
+                    path: destination.clone(),
+                    source: source_error,
+                })?;
+                fs::set_permissions(destination, fs::Permissions::from_mode(0o700)).map_err(
+                    |source_error| WorkspaceError::Io {
+                        path: destination.clone(),
+                        source: source_error,
+                    },
+                )?;
+            }
+            copy_directory_level(
+                source,
+                &child,
+                &entry_relative,
+                destination_root,
+                depth + 1,
+                walk,
+            )?;
+            if let Some(destination) = destination.as_ref() {
+                fs::set_permissions(destination, fs::Permissions::from_mode(mode)).map_err(
+                    |source_error| WorkspaceError::Io {
+                        path: destination.clone(),
+                        source: source_error,
+                    },
+                )?;
+            }
+        } else if metadata.is_file() {
+            let mode = safe_copy_mode(&entry_relative, &metadata)?;
+            let mut input =
+                open_source_regular_entry(directory, Path::new(&name), &entry_relative)?;
+            let opened = input
+                .metadata()
+                .map_err(|source_error| WorkspaceError::Io {
+                    path: source.path.join(&entry_relative),
+                    source: source_error,
+                })?;
+            if opened.dev() != metadata.dev() || opened.ino() != metadata.ino() {
+                return Err(WorkspaceError::SourceEntryChanged(entry_relative));
+            }
+            walk.regular_bytes = walk
+                .regular_bytes
+                .checked_add(opened.len())
+                .ok_or(WorkspaceError::WorkspaceTooLarge)?;
+            if walk.regular_bytes > walk.maximum_bytes {
+                return Err(WorkspaceError::WorkspaceTooLarge);
+            }
+            record_copy_entry(walk, b'f', &entry_relative, mode, opened.len());
+            copy_regular_contents(
+                source,
+                &entry_relative,
+                &mut input,
+                &opened,
+                destination.as_deref(),
+                mode,
+                walk,
+            )?;
+        } else if metadata.file_type().is_symlink() {
+            let target =
+                readlinkat(&identity, Path::new(""), Vec::new()).map_err(|source_error| {
+                    WorkspaceError::SourceOpen {
+                        path: source.path.join(&entry_relative),
+                        source: source_error,
+                    }
+                })?;
+            let target = PathBuf::from(OsString::from_vec(target.to_bytes().to_vec()));
+            validate_internal_symlink(&entry_relative, &target)?;
+            record_copy_entry(
+                walk,
+                b'l',
+                &entry_relative,
+                0,
+                target.as_os_str().as_bytes().len() as u64,
+            );
+            walk.hasher.update(target.as_os_str().as_bytes());
+            if let Some(destination) = destination.as_ref() {
+                symlink(&target, destination).map_err(|source_error| WorkspaceError::Io {
+                    path: destination.clone(),
+                    source: source_error,
+                })?;
+            }
+        } else {
+            return Err(WorkspaceError::UnsupportedCopyEntry(entry_relative));
+        }
+    }
+
+    let after = directory
+        .metadata()
+        .map_err(|source_error| WorkspaceError::Io {
+            path: source.path.join(relative),
+            source: source_error,
+        })?;
+    if before.dev() != after.dev()
+        || before.ino() != after.ino()
+        || before.mtime() != after.mtime()
+        || before.mtime_nsec() != after.mtime_nsec()
+        || before.ctime() != after.ctime()
+        || before.ctime_nsec() != after.ctime_nsec()
+    {
+        return Err(WorkspaceError::SourceEntryChanged(relative.to_owned()));
+    }
+    Ok(())
+}
+
+fn open_source_entry(
+    directory: &File,
+    name: &Path,
+    relative: &Path,
+) -> Result<File, WorkspaceError> {
+    let owned = openat2(
+        directory.as_fd(),
+        name,
+        OFlags::PATH | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+        RESOLVE_SOURCE,
+    )
+    .map_err(|source| WorkspaceError::SourceOpen {
+        path: relative.to_owned(),
+        source,
+    })?;
+    Ok(File::from(owned))
+}
+
+fn open_source_directory_entry(
+    directory: &File,
+    name: &Path,
+    relative: &Path,
+) -> Result<File, WorkspaceError> {
+    let owned = openat2(
+        directory.as_fd(),
+        name,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+        RESOLVE_SOURCE,
+    )
+    .map_err(|source| WorkspaceError::SourceOpen {
+        path: relative.to_owned(),
+        source,
+    })?;
+    Ok(File::from(owned))
+}
+
+fn open_source_regular_entry(
+    directory: &File,
+    name: &Path,
+    relative: &Path,
+) -> Result<File, WorkspaceError> {
+    let owned = openat2(
+        directory.as_fd(),
+        name,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+        RESOLVE_SOURCE,
+    )
+    .map_err(|source| WorkspaceError::SourceOpen {
+        path: relative.to_owned(),
+        source,
+    })?;
+    Ok(File::from(owned))
+}
+
+fn validate_copy_path(path: &Path) -> Result<(), WorkspaceError> {
+    if path.as_os_str().is_empty()
+        || path.is_absolute()
+        || path.components().count() > MAXIMUM_COPY_DEPTH
+        || path
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return Err(WorkspaceError::InvalidCopyPath(path.to_owned()));
+    }
+    Ok(())
+}
+
+fn safe_copy_mode(path: &Path, metadata: &fs::Metadata) -> Result<u32, WorkspaceError> {
+    let mode = metadata.permissions().mode();
+    if mode & 0o7000 != 0 {
+        return Err(WorkspaceError::UnsafeCopyMode(path.to_owned()));
+    }
+    Ok(mode & 0o777)
+}
+
+fn validate_internal_symlink(path: &Path, target: &Path) -> Result<(), WorkspaceError> {
+    if target.as_os_str().is_empty() || target.is_absolute() {
+        return Err(WorkspaceError::UnsafeCopySymlink(path.to_owned()));
+    }
+    let mut depth = path
+        .parent()
+        .map_or(0, |parent| parent.components().count());
+    for component in target.components() {
+        match component {
+            Component::CurDir => {}
+            Component::Normal(_) => depth += 1,
+            Component::ParentDir if depth > 0 => depth -= 1,
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return Err(WorkspaceError::UnsafeCopySymlink(path.to_owned()));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn record_copy_entry(walk: &mut CopyWalk, kind: u8, path: &Path, mode: u32, size: u64) {
+    let bytes = path.as_os_str().as_bytes();
+    walk.hasher.update([kind]);
+    walk.hasher.update((bytes.len() as u64).to_le_bytes());
+    walk.hasher.update(bytes);
+    walk.hasher.update(mode.to_le_bytes());
+    walk.hasher.update(size.to_le_bytes());
+}
+
+fn copy_regular_contents(
+    source: &SourceDirectory,
+    relative: &Path,
+    input: &mut File,
+    expected: &fs::Metadata,
+    destination: Option<&Path>,
+    mode: u32,
+    walk: &mut CopyWalk,
+) -> Result<(), WorkspaceError> {
+    let mut output = destination
+        .map(|destination| {
+            OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .mode(0o600)
+                .open(destination)
+                .map_err(|source_error| WorkspaceError::Io {
+                    path: destination.to_owned(),
+                    source: source_error,
+                })
+        })
+        .transpose()?;
+    let mut buffer = [0_u8; 64 * 1024];
+    let mut copied_bytes = 0_u64;
+    loop {
+        let read = input
+            .read(&mut buffer)
+            .map_err(|source_error| WorkspaceError::Io {
+                path: source.path.join(relative),
+                source: source_error,
+            })?;
+        if read == 0 {
+            break;
+        }
+        copied_bytes = copied_bytes
+            .checked_add(read as u64)
+            .ok_or(WorkspaceError::WorkspaceTooLarge)?;
+        if copied_bytes > expected.len() {
+            return Err(WorkspaceError::SourceEntryChanged(relative.to_owned()));
+        }
+        walk.hasher.update(&buffer[..read]);
+        if let Some(output) = output.as_mut() {
+            output
+                .write_all(&buffer[..read])
+                .map_err(|source_error| WorkspaceError::Io {
+                    path: destination.expect("output has destination").to_owned(),
+                    source: source_error,
+                })?;
+        }
+    }
+    if copied_bytes != expected.len() {
+        return Err(WorkspaceError::SourceEntryChanged(relative.to_owned()));
+    }
+    let after = input
+        .metadata()
+        .map_err(|source_error| WorkspaceError::Io {
+            path: source.path.join(relative),
+            source: source_error,
+        })?;
+    if expected.dev() != after.dev()
+        || expected.ino() != after.ino()
+        || expected.len() != after.len()
+        || expected.mtime() != after.mtime()
+        || expected.mtime_nsec() != after.mtime_nsec()
+        || expected.ctime() != after.ctime()
+        || expected.ctime_nsec() != after.ctime_nsec()
+    {
+        return Err(WorkspaceError::SourceEntryChanged(relative.to_owned()));
+    }
+    if let (Some(mut output), Some(destination)) = (output, destination) {
+        output.flush().map_err(|source_error| WorkspaceError::Io {
+            path: destination.to_owned(),
+            source: source_error,
+        })?;
+        output
+            .sync_all()
+            .map_err(|source_error| WorkspaceError::Io {
+                path: destination.to_owned(),
+                source: source_error,
+            })?;
+        fs::set_permissions(destination, fs::Permissions::from_mode(mode)).map_err(
+            |source_error| WorkspaceError::Io {
+                path: destination.to_owned(),
+                source: source_error,
+            },
+        )?;
+    }
+    Ok(())
+}
+
+fn prepare_git_clone(
+    source: &WorkspaceSource,
+    workspace: &Path,
+    staging: &Path,
+) -> Result<(), WorkspaceError> {
+    reject_git_submodules(&source.source_path, &source.commit)?;
+    let template = staging.join("git-template");
+    fs::create_dir(&template).map_err(|source_error| WorkspaceError::Io {
+        path: template.clone(),
+        source: source_error,
+    })?;
+    let output = git_clone_output(&source.source_path, workspace, &template)?;
+    if !output.status.success() {
+        return Err(WorkspaceError::GitCloneFailed);
+    }
+    fs::remove_dir(&template).map_err(|source_error| WorkspaceError::Io {
+        path: template,
+        source: source_error,
+    })?;
+    git_output(
+        workspace,
+        &["checkout", "--detach", "--force", &source.commit],
+        MAX_GIT_CONTROL_OUTPUT,
+    )?;
+    let head = git_text(workspace, &["rev-parse", "--verify", "HEAD^{commit}"])?;
+    if head.trim() != source.commit {
+        return Err(WorkspaceError::SourceChanged);
+    }
+    let object_format = git_text(workspace, &["rev-parse", "--show-object-format"])?;
+    write_sanitized_git_config(workspace, object_format.trim())?;
+    remove_git_trace_files(workspace)?;
+    remove_unselected_git_refs(workspace)?;
+    git_output(
+        workspace,
+        &["reflog", "expire", "--expire=now", "--all"],
+        MAX_GIT_CONTROL_OUTPUT,
+    )?;
+    git_output(workspace, &["repack", "-Ad"], MAX_GIT_CONTROL_OUTPUT)?;
+    git_output(
+        workspace,
+        &["prune", "--expire=now"],
+        MAX_GIT_CONTROL_OUTPUT,
+    )?;
+    let alternates = workspace.join(".git/objects/info/alternates");
+    if fs::symlink_metadata(&alternates).is_ok() {
+        return Err(WorkspaceError::GitAlternatesPresent);
+    }
+    let status = git_output(
+        workspace,
+        &[
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "--untracked-files=all",
+            "--ignore-submodules=none",
+        ],
+        MAX_GIT_CONTROL_OUTPUT,
+    )?;
+    if !status.stdout.is_empty() {
+        return Err(WorkspaceError::GitCloneNotClean);
+    }
+    Ok(())
+}
+
+fn git_clone_output(
+    source: &Path,
+    destination: &Path,
+    template: &Path,
+) -> Result<Output, WorkspaceError> {
+    Command::new(GIT)
+        .args([
+            "-c",
+            "core.fsmonitor=false",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "clone",
+            "--local",
+            "--no-hardlinks",
+            "--no-checkout",
+            "--no-tags",
+            "--dissociate",
+            "--template",
+        ])
+        .arg(template)
+        .arg("--")
+        .arg(source)
+        .arg(destination)
+        .env_clear()
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("LC_ALL", "C")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .map_err(|_| WorkspaceError::GitUnavailable)
+}
+
+fn reject_git_submodules(source: &Path, commit: &str) -> Result<(), WorkspaceError> {
+    let tree = git_output(
+        source,
+        &["ls-tree", "-r", "-z", "--full-tree", commit],
+        MAX_GIT_CONTROL_OUTPUT,
+    )?;
+    for record in tree.stdout.split(|byte| *byte == 0) {
+        let Some(tab) = record.iter().position(|byte| *byte == b'\t') else {
+            if record.is_empty() {
+                continue;
+            }
+            return Err(WorkspaceError::InvalidTree);
+        };
+        if record[..tab].starts_with(b"160000 commit ") {
+            return Err(WorkspaceError::SubmoduleUnsupported);
+        }
+    }
+    Ok(())
+}
+
+fn write_sanitized_git_config(workspace: &Path, object_format: &str) -> Result<(), WorkspaceError> {
+    let contents = match object_format {
+        "sha1" => {
+            b"[core]\n\trepositoryformatversion = 0\n\tfilemode = true\n\tbare = false\n\tlogallrefupdates = true\n"
+                .as_slice()
+        }
+        "sha256" => b"[core]\n\trepositoryformatversion = 1\n\tfilemode = true\n\tbare = false\n\tlogallrefupdates = true\n[extensions]\n\tobjectformat = sha256\n".as_slice(),
+        _ => return Err(WorkspaceError::InvalidGitObjectFormat),
+    };
+    let config = workspace.join(".git/config");
+    let mut file = OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(&config)
+        .map_err(|source_error| WorkspaceError::Io {
+            path: config.clone(),
+            source: source_error,
         })?;
     file.write_all(contents)
         .and_then(|()| file.sync_all())
-        .map_err(|source| WorkspaceError::Io {
-            path: destination,
-            source,
+        .map_err(|source_error| WorkspaceError::Io {
+            path: config,
+            source: source_error,
         })
+}
+
+fn remove_git_trace_files(workspace: &Path) -> Result<(), WorkspaceError> {
+    for relative in [".git/logs", ".git/FETCH_HEAD"] {
+        let path = workspace.join(relative);
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.is_dir() => {
+                fs::remove_dir_all(&path).map_err(|source_error| WorkspaceError::Io {
+                    path,
+                    source: source_error,
+                })?;
+            }
+            Ok(metadata) if metadata.is_file() => {
+                fs::remove_file(&path).map_err(|source_error| WorkspaceError::Io {
+                    path,
+                    source: source_error,
+                })?;
+            }
+            Ok(_) => return Err(WorkspaceError::UnsafeGitMetadata(path)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(source_error) => {
+                return Err(WorkspaceError::Io {
+                    path,
+                    source: source_error,
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn remove_unselected_git_refs(workspace: &Path) -> Result<(), WorkspaceError> {
+    let git_dir = workspace.join(".git");
+    let refs = git_dir.join("refs");
+    match fs::symlink_metadata(&refs) {
+        Ok(metadata) if metadata.is_dir() => {
+            fs::remove_dir_all(&refs).map_err(|source_error| WorkspaceError::Io {
+                path: refs.clone(),
+                source: source_error,
+            })?;
+        }
+        Ok(_) => return Err(WorkspaceError::UnsafeGitMetadata(refs)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(source_error) => {
+            return Err(WorkspaceError::Io {
+                path: refs,
+                source: source_error,
+            });
+        }
+    }
+    for relative in ["refs", "refs/heads", "refs/tags"] {
+        let path = git_dir.join(relative);
+        fs::create_dir(&path).map_err(|source_error| WorkspaceError::Io {
+            path,
+            source: source_error,
+        })?;
+    }
+    let packed_refs = git_dir.join("packed-refs");
+    match fs::symlink_metadata(&packed_refs) {
+        Ok(metadata) if metadata.is_file() => {
+            fs::remove_file(&packed_refs).map_err(|source_error| WorkspaceError::Io {
+                path: packed_refs,
+                source: source_error,
+            })?;
+        }
+        Ok(_) => return Err(WorkspaceError::UnsafeGitMetadata(packed_refs)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(source_error) => {
+            return Err(WorkspaceError::Io {
+                path: packed_refs,
+                source: source_error,
+            });
+        }
+    }
+    Ok(())
+}
+
+fn bounded_staging_regular_bytes(root: &Path, maximum: u64) -> Result<u64, WorkspaceError> {
+    fn visit(path: &Path, total: &mut u64, maximum: u64) -> Result<(), WorkspaceError> {
+        let metadata = fs::symlink_metadata(path).map_err(|source| WorkspaceError::Io {
+            path: path.to_owned(),
+            source,
+        })?;
+        if metadata.is_file() {
+            *total = total
+                .checked_add(metadata.len())
+                .ok_or(WorkspaceError::WorkspaceTooLarge)?;
+            if *total > maximum {
+                return Err(WorkspaceError::WorkspaceTooLarge);
+            }
+        } else if metadata.is_dir() {
+            for entry in fs::read_dir(path).map_err(|source| WorkspaceError::Io {
+                path: path.to_owned(),
+                source,
+            })? {
+                let entry = entry.map_err(|source| WorkspaceError::Io {
+                    path: path.to_owned(),
+                    source,
+                })?;
+                visit(&entry.path(), total, maximum)?;
+            }
+        } else if !metadata.file_type().is_symlink() {
+            return Err(WorkspaceError::UnsupportedCopyEntry(path.to_owned()));
+        }
+        Ok(())
+    }
+
+    let mut total = 0;
+    visit(root, &mut total, maximum)?;
+    Ok(total)
 }
 
 fn format_ext4(staging: &Path, disk: &Path) -> Result<(), WorkspaceError> {
@@ -520,34 +1249,63 @@ pub enum WorkspaceError {
     InvalidDiskSize(u64),
     #[error("workspace source is not a directory: {0}")]
     SourceNotDirectory(PathBuf),
+    #[error("workspace source root changed while it was being opened or copied: {0}")]
+    SourceRootChanged(PathBuf),
+    #[error("workspace source has an unsafe .git marker: {0}")]
+    UnsafeGitMarker(PathBuf),
+    #[error("direct workspace mounts are not available in this native runtime slice")]
+    DirectModeUnavailable,
     #[error("--path must name the Git worktree root ({requested} is inside {root})")]
     SourceMustBeWorktreeRoot { requested: PathBuf, root: PathBuf },
     #[error("bare Git repositories are not supported")]
     BareRepository,
-    #[error("workspace Git commit is invalid")]
+    #[error("workspace source identity is invalid")]
     InvalidCommit,
-    #[error("workspace has modified, staged, or untracked files; commit or clean it first")]
+    #[error(
+        "workspace has local Git changes; commit them, use --path-mode copy for a point-in-time directory snapshot, or declare an explicit direct mount"
+    )]
     DirtyWorktree,
     #[error("Git submodules are not supported by the native preview")]
     SubmoduleUnsupported,
-    #[error("Git symlinks are not supported by the native preview")]
-    SymlinkUnsupported,
-    #[error("Git LFS content is not supported by the native preview: {0}")]
-    GitLfsUnsupported(PathBuf),
-    #[error("workspace contains an unsupported Git tree entry")]
-    UnsupportedTreeEntry,
-    #[error("workspace contains an invalid Git tree path")]
-    InvalidTreePath,
     #[error("workspace Git tree is malformed")]
     InvalidTree,
-    #[error("workspace Git object size is invalid")]
-    InvalidObjectSize,
+    #[error("workspace source entry could not be opened safely at {path}: {source}")]
+    SourceOpen {
+        path: PathBuf,
+        source: rustix::io::Errno,
+    },
+    #[error("workspace copy crossed a mount boundary at {0}")]
+    SourceMountBoundary(PathBuf),
+    #[error("workspace source entry changed while it was copied: {0}")]
+    SourceEntryChanged(PathBuf),
+    #[error("workspace copy contains an invalid relative path: {0}")]
+    InvalidCopyPath(PathBuf),
+    #[error("workspace copy exceeds the maximum directory depth")]
+    CopyDepthExceeded,
+    #[error("workspace copy exceeds the maximum entry count")]
+    CopyEntryLimitExceeded,
+    #[error("workspace copy contains an unsupported special entry: {0}")]
+    UnsupportedCopyEntry(PathBuf),
+    #[error("workspace copy contains set-id or sticky permissions: {0}")]
+    UnsafeCopyMode(PathBuf),
+    #[error("workspace copy contains a symlink that leaves the selected root: {0}")]
+    UnsafeCopySymlink(PathBuf),
     #[error("workspace content does not fit on the requested disk")]
     WorkspaceTooLarge,
-    #[error("/usr/bin/git is required for native clone-mode snapshots")]
+    #[error("/usr/bin/git is required for native clone-mode workspaces")]
     GitUnavailable,
     #[error("Git could not inspect the requested clean commit")]
     GitCommandFailed,
+    #[error("Git could not create an independent local clone")]
+    GitCloneFailed,
+    #[error("the prepared Git clone contains an external object alternate")]
+    GitAlternatesPresent,
+    #[error("the prepared Git clone is not clean")]
+    GitCloneNotClean,
+    #[error("the prepared Git clone uses an unsupported object format")]
+    InvalidGitObjectFormat,
+    #[error("the prepared Git clone contains unsafe metadata: {0}")]
+    UnsafeGitMetadata(PathBuf),
     #[error("Git output exceeded the native preview safety limit")]
     GitOutputTooLarge,
     #[error("Git returned invalid text")]
@@ -617,18 +1375,18 @@ mod tests {
         let source = WorkspaceSource {
             source_path: PathBuf::from("/source/no-longer-required"),
             commit: "a".repeat(40),
+            mode: WorkspaceSourceMode::Clone,
         };
 
         let snapshot =
-            ensure_clean_git_workspace(engine.path(), vm_id, &source, MINIMUM_STATE_DISK_BYTES)
-                .unwrap();
+            ensure_workspace(engine.path(), vm_id, &source, MINIMUM_STATE_DISK_BYTES).unwrap();
         assert_eq!(snapshot.source_path, source.source_path);
         assert_eq!(snapshot.commit, source.commit);
         assert_eq!(snapshot.state_disk, paths.state_disk);
         assert!(!interrupted_staging.exists());
 
         assert!(matches!(
-            ensure_clean_git_workspace(
+            ensure_workspace(
                 engine.path(),
                 vm_id,
                 &source,
@@ -653,10 +1411,11 @@ mod tests {
         let source = WorkspaceSource {
             source_path: PathBuf::from("/source/no-longer-required"),
             commit: "a".repeat(40),
+            mode: WorkspaceSourceMode::Clone,
         };
 
         assert!(matches!(
-            ensure_clean_git_workspace(
+            ensure_workspace(
                 &engine,
                 vm_id,
                 &source,
@@ -667,40 +1426,319 @@ mod tests {
         assert_eq!(fs::read(outside.join("sentinel")).unwrap(), b"preserve");
     }
 
-    #[test]
-    fn tree_parser_accepts_only_regular_git_blobs() {
-        let tree = b"100644 blob 0123456789012345678901234567890123456789\tREADME.md\0\
-100755 blob abcdefabcdefabcdefabcdefabcdefabcdefabcd\tbin/run\0";
-        let parsed = parse_tree(tree).unwrap();
-        assert_eq!(parsed.len(), 2);
-        assert_eq!(parsed[0].mode, 0o644);
-        assert_eq!(parsed[1].mode, 0o755);
-        assert_eq!(parsed[1].path, Path::new("bin/run"));
+    fn git(source: &Path, arguments: &[&str]) {
+        let status = Command::new(GIT)
+            .args(arguments)
+            .current_dir(source)
+            .env_clear()
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("LC_ALL", "C")
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {arguments:?} failed");
     }
 
     #[test]
-    fn tree_parser_rejects_symlinks_submodules_and_traversal() {
-        let hash = "0123456789012345678901234567890123456789";
-        assert!(matches!(
-            parse_tree(format!("120000 blob {hash}\tlink\0").as_bytes()),
-            Err(WorkspaceError::SymlinkUnsupported)
-        ));
-        assert!(matches!(
-            parse_tree(format!("160000 commit {hash}\tdep\0").as_bytes()),
-            Err(WorkspaceError::UnsupportedTreeEntry | WorkspaceError::SubmoduleUnsupported)
-        ));
-        assert!(matches!(
-            parse_tree(format!("100644 blob {hash}\t../escape\0").as_bytes()),
-            Err(WorkspaceError::InvalidTreePath)
-        ));
-    }
-
-    #[test]
-    fn lfs_pointer_prefix_is_exact() {
-        assert!(
-            b"version https://git-lfs.github.com/spec/v1\noid sha256:x\n"
-                .starts_with(LFS_POINTER_PREFIX)
+    fn auto_classifies_exact_git_roots_and_ordinary_directories() {
+        let ordinary = tempfile::tempdir().unwrap();
+        assert_eq!(
+            resolve_workspace_mode(ordinary.path(), WorkspaceSelection::Auto).unwrap(),
+            WorkspaceSourceMode::Copy
         );
-        assert!(!b"version https://example.invalid/spec/v1\n".starts_with(LFS_POINTER_PREFIX));
+
+        let repository = tempfile::tempdir().unwrap();
+        git(repository.path(), &["init", "-q"]);
+        assert_eq!(
+            resolve_workspace_mode(repository.path(), WorkspaceSelection::Auto).unwrap(),
+            WorkspaceSourceMode::Clone
+        );
+        assert!(matches!(
+            resolve_workspace_mode(repository.path(), WorkspaceSelection::Direct),
+            Err(WorkspaceError::DirectModeUnavailable)
+        ));
+    }
+
+    #[test]
+    fn git_control_output_is_stopped_at_the_requested_read_bound() {
+        let repository = tempfile::tempdir().unwrap();
+        git(repository.path(), &["init", "-q"]);
+        fs::write(repository.path().join("untracked"), b"contents").unwrap();
+
+        assert!(matches!(
+            git_output(
+                repository.path(),
+                &["status", "--porcelain=v1", "--untracked-files=all"],
+                4,
+            ),
+            Err(WorkspaceError::GitOutputTooLarge)
+        ));
+    }
+
+    #[test]
+    fn copy_snapshot_includes_hidden_files_and_materializes_hardlinks() {
+        let source = tempfile::tempdir().unwrap();
+        fs::create_dir(source.path().join("sub")).unwrap();
+        fs::write(source.path().join("sub/file"), b"contents").unwrap();
+        fs::write(source.path().join(".hidden"), b"hidden").unwrap();
+        fs::hard_link(
+            source.path().join("sub/file"),
+            source.path().join("hardlink"),
+        )
+        .unwrap();
+        symlink("sub/file", source.path().join("link")).unwrap();
+
+        let admitted =
+            inspect_workspace(source.path(), WorkspaceSelection::Copy, MAXIMUM_COPY_BYTES).unwrap();
+        assert_eq!(admitted.mode, WorkspaceSourceMode::Copy);
+        let destination = tempfile::tempdir().unwrap();
+        let copied = copy_directory_manifest(
+            &open_source_directory(source.path()).unwrap(),
+            Some(destination.path()),
+            MAXIMUM_COPY_BYTES,
+        )
+        .unwrap();
+        assert_eq!(copied.sha256, admitted.commit);
+        assert_eq!(
+            fs::read(destination.path().join(".hidden")).unwrap(),
+            b"hidden"
+        );
+        assert_eq!(
+            fs::read_link(destination.path().join("link")).unwrap(),
+            Path::new("sub/file")
+        );
+        assert_eq!(
+            fs::metadata(destination.path().join("sub/file"))
+                .unwrap()
+                .nlink(),
+            1
+        );
+        assert_eq!(
+            fs::metadata(destination.path().join("hardlink"))
+                .unwrap()
+                .nlink(),
+            1
+        );
+
+        fs::write(source.path().join("sub/file"), b"changed").unwrap();
+        let changed =
+            inspect_workspace(source.path(), WorkspaceSelection::Copy, MAXIMUM_COPY_BYTES).unwrap();
+        assert_ne!(changed.commit, admitted.commit);
+    }
+
+    #[test]
+    fn copy_snapshot_rejects_external_symlinks_and_sockets() {
+        let source = tempfile::tempdir().unwrap();
+        symlink("../outside", source.path().join("escape")).unwrap();
+        assert!(matches!(
+            inspect_workspace(
+                source.path(),
+                WorkspaceSelection::Copy,
+                MAXIMUM_COPY_BYTES,
+            ),
+            Err(WorkspaceError::UnsafeCopySymlink(path)) if path == Path::new("escape")
+        ));
+
+        fs::remove_file(source.path().join("escape")).unwrap();
+        let _socket = std::os::unix::net::UnixListener::bind(source.path().join("socket")).unwrap();
+        assert!(matches!(
+            inspect_workspace(
+                source.path(),
+                WorkspaceSelection::Copy,
+                MAXIMUM_COPY_BYTES,
+            ),
+            Err(WorkspaceError::UnsupportedCopyEntry(path)) if path == Path::new("socket")
+        ));
+    }
+
+    #[test]
+    fn copy_snapshot_enforces_size_and_mode_bounds_before_provisioning() {
+        let source = tempfile::tempdir().unwrap();
+        fs::write(source.path().join("large"), b"12345678").unwrap();
+        assert!(matches!(
+            inspect_workspace(source.path(), WorkspaceSelection::Copy, 7),
+            Err(WorkspaceError::WorkspaceTooLarge)
+        ));
+
+        fs::set_permissions(
+            source.path().join("large"),
+            fs::Permissions::from_mode(0o4755),
+        )
+        .unwrap();
+        assert!(matches!(
+            inspect_workspace(
+                source.path(),
+                WorkspaceSelection::Copy,
+                MAXIMUM_COPY_BYTES,
+            ),
+            Err(WorkspaceError::UnsafeCopyMode(path)) if path == Path::new("large")
+        ));
+    }
+
+    #[test]
+    fn copy_snapshot_rejects_file_growth_after_entry_admission() {
+        let source = tempfile::tempdir().unwrap();
+        let path = source.path().join("changing");
+        fs::write(&path, b"before").unwrap();
+        let source = open_source_directory(source.path()).unwrap();
+        let mut input = open_source_regular_entry(
+            &source.directory,
+            Path::new("changing"),
+            Path::new("changing"),
+        )
+        .unwrap();
+        let expected = input.metadata().unwrap();
+        OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(b"-after")
+            .unwrap();
+        let mut walk = CopyWalk {
+            hasher: Sha256::new(),
+            regular_bytes: expected.len(),
+            entries: 1,
+            maximum_bytes: MAXIMUM_COPY_BYTES,
+        };
+
+        assert!(matches!(
+            copy_regular_contents(
+                &source,
+                Path::new("changing"),
+                &mut input,
+                &expected,
+                None,
+                0o644,
+                &mut walk,
+            ),
+            Err(WorkspaceError::SourceEntryChanged(path)) if path == Path::new("changing")
+        ));
+    }
+
+    #[test]
+    fn clone_requires_clean_state_and_creates_independent_sanitized_git_metadata() {
+        let source = tempfile::tempdir().unwrap();
+        git(source.path(), &["init", "-q"]);
+        fs::write(source.path().join("README.md"), b"committed\n").unwrap();
+        git(source.path(), &["add", "README.md"]);
+        git(
+            source.path(),
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.invalid",
+                "commit",
+                "-q",
+                "-m",
+                "initial",
+            ],
+        );
+        git(
+            source.path(),
+            &["config", "credential.helper", "malicious-helper"],
+        );
+        git(
+            source.path(),
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://user:secret@example.invalid/repo.git",
+            ],
+        );
+        fs::write(source.path().join("dangling-secret"), b"not selected\n").unwrap();
+        let dangling = git_text(source.path(), &["hash-object", "-w", "dangling-secret"])
+            .unwrap()
+            .trim()
+            .to_owned();
+        fs::remove_file(source.path().join("dangling-secret")).unwrap();
+        let marker = source.path().join("hook-ran");
+        let hook = source.path().join(".git/hooks/post-checkout");
+        fs::write(&hook, format!("#!/bin/sh\ntouch {}\n", marker.display())).unwrap();
+        fs::set_permissions(&hook, fs::Permissions::from_mode(0o700)).unwrap();
+
+        let admitted =
+            inspect_workspace(source.path(), WorkspaceSelection::Clone, MAXIMUM_COPY_BYTES)
+                .unwrap();
+        let staging = tempfile::tempdir().unwrap();
+        let workspace = staging.path().join("workspace");
+        fs::create_dir(&workspace).unwrap();
+        prepare_git_clone(&admitted, &workspace, staging.path()).unwrap();
+
+        assert!(!marker.exists());
+        assert_eq!(
+            fs::read(workspace.join("README.md")).unwrap(),
+            b"committed\n"
+        );
+        let config = fs::read_to_string(workspace.join(".git/config")).unwrap();
+        assert!(!config.contains("credential"));
+        assert!(!config.contains("secret"));
+        assert!(!config.contains(source.path().to_string_lossy().as_ref()));
+        assert!(!workspace.join(".git/objects/info/alternates").exists());
+        assert!(!workspace.join(".git/logs").exists());
+        assert!(
+            git_output(
+                &workspace,
+                &["for-each-ref", "--format=%(refname)"],
+                MAX_GIT_CONTROL_OUTPUT,
+            )
+            .unwrap()
+            .stdout
+            .is_empty()
+        );
+        assert!(matches!(
+            git_output(
+                &workspace,
+                &["cat-file", "-e", &dangling],
+                MAX_GIT_CONTROL_OUTPUT,
+            ),
+            Err(WorkspaceError::GitCommandFailed)
+        ));
+
+        fs::write(source.path().join("README.md"), b"dirty\n").unwrap();
+        assert!(matches!(
+            inspect_workspace(source.path(), WorkspaceSelection::Clone, MAXIMUM_COPY_BYTES,),
+            Err(WorkspaceError::DirtyWorktree)
+        ));
+    }
+
+    #[test]
+    fn clone_provisioning_builds_the_ext4_workspace_disk() {
+        let source = tempfile::tempdir().unwrap();
+        git(source.path(), &["init", "-q"]);
+        fs::write(source.path().join("README.md"), b"provisioned\n").unwrap();
+        git(source.path(), &["add", "README.md"]);
+        git(
+            source.path(),
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.invalid",
+                "commit",
+                "-q",
+                "-m",
+                "initial",
+            ],
+        );
+        let admitted =
+            inspect_workspace(source.path(), WorkspaceSelection::Clone, MAXIMUM_COPY_BYTES)
+                .unwrap();
+        let engine = tempfile::tempdir().unwrap();
+        fs::set_permissions(engine.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let snapshot = provision_workspace(
+            engine.path(),
+            Uuid::new_v4(),
+            &admitted,
+            MINIMUM_STATE_DISK_BYTES,
+        )
+        .unwrap();
+        assert_eq!(snapshot.commit, admitted.commit);
+        assert_eq!(snapshot.mode, WorkspaceSourceMode::Clone);
+        assert_eq!(
+            fs::metadata(&snapshot.state_disk).unwrap().len(),
+            MINIMUM_STATE_DISK_BYTES
+        );
     }
 }

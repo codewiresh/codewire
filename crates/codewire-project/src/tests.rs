@@ -94,6 +94,7 @@ workspace: {mode: direct, source: ., readonly: true}
 mounts:
   - source: ../shared
     target: /workspace/shared
+    mode: direct
     readonly: true
 ports: ["18080:8080"]
 "#,
@@ -120,11 +121,54 @@ ports: ["18080:8080"]
 }
 
 #[test]
+fn separates_local_filesystem_copies_from_portable_repositories() {
+    let document = parse_project_yaml(
+        r#"
+repositories:
+  - source: https://example.com/acme/api.git
+    destination: /workspace/api
+mounts:
+  - source: ./fixtures
+    destination: /workspace/fixtures
+    mode: copy
+  - source: ../shared
+    destination: /workspace/shared
+    mode: direct
+    read_only: true
+working_directory: /workspace/api
+"#,
+    )
+    .unwrap();
+    assert_eq!(document.spec.repositories.len(), 1);
+    assert_eq!(document.local.mounts.len(), 2);
+    assert_eq!(document.local.mounts[0].destination, "/workspace/fixtures");
+    assert_eq!(document.local.mounts[0].mode, LocalMountMode::Copy);
+    assert_eq!(document.local.mounts[1].mode, LocalMountMode::Direct);
+    assert!(matches!(
+        document.ensure_platform_compatible(),
+        Err(ProjectError::PlatformUnsupported { field: "mounts" })
+    ));
+    let canonical = document.canonical_json().unwrap();
+    assert!(
+        !canonical
+            .windows(b"./fixtures".len())
+            .any(|value| value == b"./fixtures")
+    );
+}
+
+#[test]
 fn rejects_unknown_unsafe_overlapping_and_nonportable_shapes() {
     for yaml in [
         "mystery: true\n",
         "repositories: [{url: https://x/a, mount_path: /workspace/../x}]\n",
         "repositories: [{url: https://x/a, mount_path: /workspace/a}, {url: https://x/b, mount_path: /workspace/a/b}]\n",
+        "mounts: [{source: ./a, destination: /workspace, mode: copy}]\n",
+        "mounts: [{source: ./a, destination: /outside, mode: copy}]\n",
+        "mounts: [{source: ./a}]\n",
+        "mounts: [{source: ./a, destination: /workspace/a, mode: direct}]\n",
+        "mounts: [{source: ./a, destination: /workspace/a, mode: copy, read_only: true}]\n",
+        "repositories: [{source: https://x/a, destination: /workspace/a}]\nmounts: [{source: ./a, destination: /workspace/a, mode: copy}]\n",
+        "mounts: [{source: ./a, destination: /workspace/a, mode: copy}, {source: ./b, destination: /workspace/a/b, mode: direct, read_only: true}]\n",
         "credentials: {work: {provider: openai, account: ''}}\n",
         "skills: [{path: ../outside}]\n",
         "workspace: {mode: clone, source: .}\n",
@@ -265,7 +309,9 @@ fn schema_and_input_bounds_fail_closed() {
             format!(
                 "mounts: [{}]\n",
                 (0..=MAX_LOCAL_MOUNTS)
-                    .map(|index| format!("./shared-{index}"))
+                    .map(|index| format!(
+                        "{{source: ./shared-{index}, destination: /workspace/shared-{index}, mode: copy}}"
+                    ))
                     .collect::<Vec<_>>()
                     .join(",")
             ),

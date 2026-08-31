@@ -574,6 +574,13 @@ pub(crate) struct EnvCreateArgs {
     )]
     path: Option<PathBuf>,
     #[arg(
+        long = "path-mode",
+        value_enum,
+        value_name = "MODE",
+        help = "Prepare the implicit --path source as auto, clone, or copy; requires --local"
+    )]
+    path_mode: Option<PathModeArg>,
+    #[arg(
         long,
         value_name = "FILE",
         help = "Local preset file, relative to --path; used with --local"
@@ -646,6 +653,13 @@ pub(crate) struct EnvCreateArgs {
     write_preset: bool,
     #[arg(long = "save-preset", help = "Save the resolved preset to the server")]
     save_preset: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub(crate) enum PathModeArg {
+    Auto,
+    Clone,
+    Copy,
 }
 
 #[derive(Debug, Args)]
