@@ -1290,7 +1290,14 @@ impl SupervisorCore {
     }
 
     fn collect_unreferenced_content(&mut self) -> Result<(), SupervisorError> {
-        let retained = referenced_content_blobs(&self.state)?;
+        let mut retained = referenced_content_blobs(&self.state)?;
+        for operation in self.store.pending_operations()? {
+            if operation.kind != OperationKind::Create {
+                continue;
+            }
+            let (_, workspace_plan) = create_request_from_operation(&operation)?;
+            retain_workspace_plan_content(&mut retained, &workspace_plan)?;
+        }
         let engine = PrivateRoot::open(&self.config.engine_root())?;
         let content = ContentStore::create(&engine)?;
         let _collected = content.collect_unreferenced(&retained)?;
@@ -4363,10 +4370,7 @@ fn referenced_content_blobs(
 ) -> Result<BTreeMap<Sha256Digest, u64>, SupervisorError> {
     let mut retained = BTreeMap::new();
     for environment in state.environments.values() {
-        environment.workspace_plan.validate()?;
-        for (digest, size) in environment.workspace_plan.retained_bundles() {
-            retain_content_blob(&mut retained, digest, size)?;
-        }
+        retain_workspace_plan_content(&mut retained, &environment.workspace_plan)?;
         let generations = [
             environment.active_workspace_generation.as_ref(),
             environment.staging_workspace_generation.as_ref(),
@@ -4383,6 +4387,17 @@ fn referenced_content_blobs(
         }
     }
     Ok(retained)
+}
+
+fn retain_workspace_plan_content(
+    retained: &mut BTreeMap<Sha256Digest, u64>,
+    workspace_plan: &WorkspacePlan,
+) -> Result<(), SupervisorError> {
+    workspace_plan.validate()?;
+    for (digest, size) in workspace_plan.retained_bundles() {
+        retain_content_blob(retained, digest, size)?;
+    }
+    Ok(())
 }
 
 fn referenced_artifact_generations(
@@ -7317,6 +7332,104 @@ mod tests {
                 .exists()
         );
         assert!(!artifact_blobs.join(format!("r-{stale_kernel}")).exists());
+    }
+
+    #[tokio::test]
+    async fn content_collection_retains_bundles_owned_by_pending_creates() {
+        let (_parent, mut core) = test_supervisor_core(project_environment());
+        let engine = PrivateRoot::open(&core.config.engine_root()).unwrap();
+        let content = ContentStore::create(&engine).unwrap();
+        let bundle_bytes = bytes::Bytes::from_static(b"pending repository bundle");
+        let bundle_digest = test_digest(&bundle_bytes);
+        content
+            .admit_bytes(&bundle_digest, bundle_bytes.clone())
+            .await
+            .unwrap();
+        let stale_bytes = bytes::Bytes::from_static(b"stale content");
+        let stale_digest = test_digest(&stale_bytes);
+        content
+            .admit_bytes(&stale_digest, stale_bytes.clone())
+            .await
+            .unwrap();
+
+        let project = codewire_project::ProjectSpec {
+            image: "registry.example/codewire/workspace:latest".to_owned(),
+            repositories: vec![codewire_project::RepositorySpec {
+                source: "https://example.test/org/app.git".to_owned(),
+                revision: String::new(),
+                branch: "main".to_owned(),
+                destination: "/workspace/app".to_owned(),
+            }],
+            working_directory: "/workspace/app".to_owned(),
+            resources: codewire_project::ResourceSpec {
+                cpu_millicores: Some(2_000),
+                memory_mib: Some(16 * 1024),
+                disk_gib: Some(20),
+            },
+            ..Default::default()
+        };
+        let project_spec_json = project.canonical_json().unwrap();
+        let request_id = Uuid::new_v4();
+        let request = v1::CreateEnvironmentRequest {
+            name: "pending".to_owned(),
+            source_path: String::new(),
+            vcpus: 2,
+            memory_mib: 16 * 1024,
+            disk_bytes: 20 * 1024 * 1024 * 1024,
+            request_id: request_id.to_string(),
+            project_spec_sha256: format!("{:x}", Sha256::digest(&project_spec_json)),
+            project_spec_json,
+            implicit_path_mode: String::new(),
+        };
+        let workspace_plan = WorkspacePlan {
+            schema_version: 1,
+            inputs: vec![crate::workspace_plan::WorkspaceInput::Repository {
+                source: "https://example.test/org/app.git".to_owned(),
+                commit: "a".repeat(40),
+                branch: "main".to_owned(),
+                destination: "/workspace/app".to_owned(),
+                bundle_digest: bundle_digest.clone(),
+                bundle_size: bundle_bytes.len() as u64,
+            }],
+        };
+        let payload = create_operation_payload(&request, &workspace_plan).unwrap();
+        let operation = core
+            .store
+            .begin_operation(
+                request_id,
+                Some(Uuid::new_v4()),
+                OperationKind::Create,
+                &payload,
+            )
+            .unwrap();
+
+        core.collect_unreferenced_content().unwrap();
+        assert!(
+            content
+                .contains_verified(&bundle_digest, bundle_bytes.len() as u64)
+                .unwrap()
+        );
+        assert!(
+            !content
+                .contains_verified(&stale_digest, stale_bytes.len() as u64)
+                .unwrap()
+        );
+
+        core.store
+            .advance_operation(
+                operation.operation_id,
+                operation.checkpoint,
+                OperationPhase::Failed,
+                None,
+                Some("test_failure"),
+            )
+            .unwrap();
+        core.collect_unreferenced_content().unwrap();
+        assert!(
+            !content
+                .contains_verified(&bundle_digest, bundle_bytes.len() as u64)
+                .unwrap()
+        );
     }
 
     #[test]
