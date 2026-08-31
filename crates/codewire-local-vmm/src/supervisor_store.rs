@@ -33,6 +33,7 @@ const DATABASE_SCHEMA_VERSION: i64 = 4;
 // never has to reread a mutable codewire.yaml. The source document itself is
 // bounded to 256 KiB; this higher bound covers JSON string escaping.
 const MAXIMUM_OPERATION_BYTES: usize = 2 * 1024 * 1024;
+const MAXIMUM_DIAGNOSTIC_OPERATIONS: usize = 128;
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const OPERATION_EVENT_CAPACITY: usize = 256;
 
@@ -50,7 +51,7 @@ pub(crate) enum OperationKind {
 }
 
 impl OperationKind {
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Create => "create",
             Self::Start => "start",
@@ -90,7 +91,7 @@ pub(crate) enum OperationPhase {
 }
 
 impl OperationPhase {
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Intent => "intent",
             Self::EffectApplied => "effect_applied",
@@ -670,6 +671,32 @@ impl SupervisorOperationReader {
     ) -> Result<Option<OperationRecord>, SupervisorStoreError> {
         validate_non_nil(operation_id)?;
         operation_for_id(&self.connection, operation_id)
+    }
+
+    pub(crate) fn recent_environment_operations(
+        &self,
+        environment_id: Uuid,
+    ) -> Result<Vec<OperationRecord>, SupervisorStoreError> {
+        validate_non_nil(environment_id)?;
+        let limit = i64::try_from(MAXIMUM_DIAGNOSTIC_OPERATIONS)
+            .map_err(|_| SupervisorStoreError::InvalidOperation)?;
+        let mut statement = self.connection.prepare(
+            "SELECT operation_id, request_id, environment_id, kind, phase, checkpoint,
+                    payload_json, result_json, error_code, created_unix_ms, updated_unix_ms
+             FROM operations
+             WHERE environment_id = ?1
+             ORDER BY updated_unix_ms DESC, operation_id DESC
+             LIMIT ?2",
+        )?;
+        let rows = statement.query_map(
+            params![environment_id.to_string(), limit],
+            decode_operation_row,
+        )?;
+        let mut operations = rows
+            .map(|row| row.map_err(Into::into))
+            .collect::<Result<Vec<_>, SupervisorStoreError>>()?;
+        operations.reverse();
+        Ok(operations)
     }
 }
 
@@ -1641,6 +1668,66 @@ mod tests {
                 .unwrap()
                 .phase
                 .terminal()
+        );
+    }
+
+    #[test]
+    fn diagnostic_operation_reader_is_environment_scoped_and_chronological() {
+        let (_parent, root) = root();
+        let (store, _) = SupervisorStore::open_for_boot(&root, "boot-a").unwrap();
+        let environment_id = Uuid::new_v4();
+        let other_environment_id = Uuid::new_v4();
+        let first = store
+            .begin_operation(
+                Uuid::new_v4(),
+                Some(environment_id),
+                OperationKind::Start,
+                &serde_json::json!({"name": "dev", "generation": 1}),
+            )
+            .unwrap();
+        let second = store
+            .begin_operation(
+                Uuid::new_v4(),
+                Some(environment_id),
+                OperationKind::Stop,
+                &serde_json::json!({"name": "dev"}),
+            )
+            .unwrap();
+        store
+            .begin_operation(
+                Uuid::new_v4(),
+                Some(other_environment_id),
+                OperationKind::Stop,
+                &serde_json::json!({"name": "other"}),
+            )
+            .unwrap();
+        let timestamp = first.created_unix_ms.max(second.created_unix_ms);
+        store
+            .connection
+            .execute(
+                "UPDATE operations SET updated_unix_ms = ?1 WHERE operation_id = ?2",
+                params![timestamp + 10, first.operation_id.to_string()],
+            )
+            .unwrap();
+        store
+            .connection
+            .execute(
+                "UPDATE operations SET updated_unix_ms = ?1 WHERE operation_id = ?2",
+                params![timestamp + 20, second.operation_id.to_string()],
+            )
+            .unwrap();
+
+        let reader = SupervisorOperationReader::open(&root).unwrap();
+        let operations = reader
+            .recent_environment_operations(environment_id)
+            .unwrap();
+        assert_eq!(operations.len(), 2);
+        assert_eq!(operations[0].operation_id, first.operation_id);
+        assert_eq!(operations[1].operation_id, second.operation_id);
+        assert!(
+            operations
+                .iter()
+                .all(|operation| operation.environment_id == Some(environment_id))
         );
     }
 

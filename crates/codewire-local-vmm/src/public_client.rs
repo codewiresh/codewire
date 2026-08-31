@@ -11,10 +11,12 @@ use codewire_client::{
     ReadSessionOutputRequest, ReadSessionOutputResponse, RestartSessionRequest,
 };
 use codewire_proto::codewire::v1::{
-    DownloadFileRequest, DownloadFileResponse, EnvironmentServiceClient, ExecRequest, ExecResponse,
-    ExecServiceClient, FileEntry, FileServiceClient, GetSessionRequest, ListEnvironmentsRequest,
-    ListFilesRequest, StopSessionRequest, UploadFileHeader, UploadFileRequest, UploadFileResponse,
-    download_file_response, upload_file_request,
+    DownloadFileRequest, DownloadFileResponse, EnvironmentDaemonStatus, EnvironmentServiceClient,
+    ExecRequest, ExecResponse, ExecServiceClient, FileEntry, FileServiceClient,
+    GetEnvironmentDaemonStatusRequest, GetSessionRequest, ListEnvironmentsRequest,
+    ListFilesRequest, RepairEnvironmentDaemonRequest, StopSessionRequest,
+    StreamEnvironmentDaemonLogsRequest, StreamEnvironmentDaemonLogsResponse, UploadFileHeader,
+    UploadFileRequest, UploadFileResponse, download_file_response, upload_file_request,
 };
 use connectrpc::client::{ClientConfig, Http2Connection, SharedHttp2Connection};
 
@@ -23,6 +25,90 @@ use crate::uds::{UdsError, owner_only_connector};
 
 const LOCAL_AUTHORITY: &str = "http://codewire-local-control";
 const FILE_CHUNK_BYTES: usize = 64 * 1024;
+const MAXIMUM_DAEMON_LOG_BYTES: usize = 64 * 1024;
+
+#[derive(Clone)]
+pub struct NativePublicEnvironmentClient {
+    inner: EnvironmentServiceClient<SharedHttp2Connection>,
+    org_id: String,
+    environment_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct NativeDaemonRepair {
+    pub status: EnvironmentDaemonStatus,
+    pub replaced_pod_name: String,
+}
+
+impl NativePublicEnvironmentClient {
+    pub async fn connect_or_start(
+        config: &NativeRuntimeConfig,
+        target: &str,
+    ) -> Result<Self, NativePublicClientError> {
+        let target = connect_target(config, target).await?;
+        Ok(Self {
+            inner: EnvironmentServiceClient::new(target.transport, target.client_config),
+            org_id: target.org_id,
+            environment_id: target.environment_id,
+        })
+    }
+
+    pub async fn daemon_status(&self) -> Result<EnvironmentDaemonStatus, NativePublicClientError> {
+        self.inner
+            .get_environment_daemon_status(GetEnvironmentDaemonStatusRequest {
+                org_id: self.org_id.clone(),
+                environment_id: self.environment_id.clone(),
+                ..Default::default()
+            })
+            .await?
+            .into_owned()
+            .status
+            .into_option()
+            .ok_or(NativePublicClientError::Protocol)
+    }
+
+    pub async fn daemon_logs(&self) -> Result<Vec<u8>, NativePublicClientError> {
+        let mut stream = self
+            .inner
+            .stream_environment_daemon_logs(StreamEnvironmentDaemonLogsRequest {
+                org_id: self.org_id.clone(),
+                environment_id: self.environment_id.clone(),
+                ..Default::default()
+            })
+            .await?;
+        let mut data = Vec::new();
+        while let Some(message) = stream
+            .message::<StreamEnvironmentDaemonLogsResponse>()
+            .await?
+        {
+            let message = message.to_owned_message();
+            if data.len().saturating_add(message.data.len()) > MAXIMUM_DAEMON_LOG_BYTES {
+                return Err(NativePublicClientError::Protocol);
+            }
+            data.extend(message.data);
+        }
+        Ok(data)
+    }
+
+    pub async fn repair_daemon(&self) -> Result<NativeDaemonRepair, NativePublicClientError> {
+        let response = self
+            .inner
+            .repair_environment_daemon(RepairEnvironmentDaemonRequest {
+                org_id: self.org_id.clone(),
+                environment_id: self.environment_id.clone(),
+                ..Default::default()
+            })
+            .await?
+            .into_owned();
+        Ok(NativeDaemonRepair {
+            status: response
+                .status
+                .into_option()
+                .ok_or(NativePublicClientError::Protocol)?,
+            replaced_pod_name: response.replaced_pod_name,
+        })
+    }
+}
 
 #[derive(Clone)]
 pub struct NativePublicSessionClient {

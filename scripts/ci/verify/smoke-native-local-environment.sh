@@ -49,10 +49,10 @@ The smoke uses an isolated HOME and short private native state root, poisons
 the platform destination, installs Docker/Lima/QEMU tripwires, and creates a
 clean disposable Git fixture. Initial create permits direct registry egress;
 every later command receives dead proxy endpoints. It proves digest-pinned OCI
-workspace execution, create/info, bare run and shell, PTY behavior, saved output
-and nonzero status, cached-runtime restart after the installed artifact lock
-advances, offline disk/CPU/memory resize, supervisor crash recovery, and
-journaled exact deletion cleanup.
+    workspace execution, create/info, bounded daemon diagnostics and repair, bare
+    run and shell, PTY behavior, saved output and nonzero status, cached-runtime
+    restart after the installed artifact lock advances, offline disk/CPU/memory
+    resize, supervisor crash recovery, and journaled exact deletion cleanup.
 USAGE
 }
 
@@ -721,6 +721,30 @@ RUNNER_PID="$(native_database_value runner_pid)"
 log 'checking public Exec/File over the owner-only supervisor UDS'
 run_public_data_smoke
 
+log 'checking bounded public daemon status over the owner-only supervisor UDS'
+run_cw env --local daemon status "$NAME" --output json
+jq -e '
+  .state == "ready" and
+  .protocol_version == 1 and
+  .minimum_protocol_version == 1 and
+  (.daemon_version | type == "string" and length > 0) and
+  .capabilities == [
+    "attach.v1",
+    "exec.v1",
+    "files.v1",
+    "health.v1",
+    "pty.v1",
+    "sessions.v1"
+  ] and
+  .message == "local environment daemon is ready" and
+  .diagnostics == [{
+    "name": "daemon",
+    "healthy": true,
+    "message": "local environment daemon is ready"
+  }] and
+  .pod_name == ""
+' "$LAST_STDOUT" >/dev/null || die 'native daemon ready status drifted'
+
 log 'checking read-only orphan inventory without adoption or cleanup'
 ORPHAN_SENTINEL="$STATE_ROOT/engine/vms/$ENVIRONMENT_ID/unknown-object"
 printf 'do-not-adopt-or-delete\n' >"$ORPHAN_SENTINEL"
@@ -764,6 +788,18 @@ rg -qF 'native-workspace-ok' "$LAST_STDOUT" || die 'clean Git workspace content 
 MEMORY_KIB="$(awk '$1 == "MemTotal:" { print $2 }' "$LAST_STDOUT")"
 [[ "$MEMORY_KIB" =~ ^[0-9]+$ && "$MEMORY_KIB" -ge 15000000 && "$MEMORY_KIB" -le 17500000 ]] ||
   die "guest MemTotal is not consistent with 16 GiB: ${MEMORY_KIB:-missing} KiB"
+
+log 'checking daemon logs contain only trusted lifecycle journal fields'
+DAEMON_GUEST_SENTINEL='guest-output-must-not-enter-daemon-logs-1909'
+run_cw run --no-tty -- /bin/sh -lc "printf '%s\\n' '$DAEMON_GUEST_SENTINEL'"
+rg -qF "$DAEMON_GUEST_SENTINEL" "$LAST_STDOUT" || die 'guest diagnostic sentinel was not emitted'
+run_cw env --local daemon logs "$NAME"
+rg -q '^time_unix_ms=[0-9]+ operation=[0-9a-f-]{36} kind=create phase=completed checkpoint=7 stage=OPERATION_STAGE_[A-Z_]+ error=-$' "$LAST_STDOUT" ||
+  die 'native daemon logs did not expose the trusted create journal record'
+[[ "$(stat -c '%s' "$LAST_STDOUT")" -le 65536 ]] || die 'native daemon logs exceeded their public bound'
+if rg -qF "$DAEMON_GUEST_SENTINEL" "$LAST_STDOUT"; then
+  die 'guest command output entered native daemon logs'
+fi
 
 log 'checking interactive PTY shell through the selected native environment'
 PTY_LOG="$SMOKE_ROOT/pty.log"
@@ -850,6 +886,88 @@ rg -qF 'persistence-ok' "$LAST_STDOUT" ||
 rg -qF 'native-workspace-ok' "$LAST_STDOUT" ||
   die 'workspace snapshot did not survive cached-runtime restart'
 
+log 'checking exact runner adoption after supervisor crash'
+SUPERVISOR_PID="$(find_exact_supervisor_pid)" || die 'native supervisor process was not found exactly'
+kill -KILL -- "$SUPERVISOR_PID"
+wait_for_pid_exit "$SUPERVISOR_PID" || die 'killed supervisor process did not exit'
+[[ -d "/proc/$RUNNER_PID" ]] || die 'runner did not survive supervisor crash'
+run_cw env info --local "$NAME" --output json
+jq -e '.state == "running" and .cpu == 2 and .memory == "16Gi" and .disk == "20Gi"' "$LAST_STDOUT" >/dev/null ||
+  die 'replacement supervisor did not reconcile the running environment'
+[[ "$(native_database_value runner_pid)" == "$RUNNER_PID" ]] ||
+  die 'replacement supervisor substituted a different runner'
+run_public_data_smoke
+
+log 'checking exact 2-vCPU, 16-GiB VMM death classification and daemon repair'
+VMM_PID="$(recorded_vmm_pid)" || die 'persisted VMM process identity was not readable'
+VMM_GENERATION="$(jq -er '.generation' "$STATE_ROOT/engine/vms/$ENVIRONMENT_ID/state.json")" ||
+  die 'persisted VMM generation was not readable'
+[[ "$(kill_recorded_process vmm)" == "$VMM_PID" ]] ||
+  die 'pidfd VMM kill did not target the persisted process identity'
+wait_for_pid_death "$VMM_PID" || die 'pidfd-signalled VMM process remained live'
+wait_for_environment_state error ||
+  die 'VMM death was not classified as an environment error'
+wait_for_pid_exit "$VMM_PID" || die 'reconciled VMM process was not reaped'
+run_cw env --local daemon status "$NAME" --output json
+jq -e '
+  .state == "unhealthy" and
+  .protocol_version == 1 and
+  .minimum_protocol_version == 1 and
+  .capabilities == [] and
+  .message == "local environment runtime requires repair" and
+  .diagnostics == [{
+    "name": "daemon",
+    "healthy": false,
+    "message": "local environment runtime requires repair"
+  }] and
+  .pod_name == ""
+' "$LAST_STDOUT" >/dev/null || die 'native daemon error status drifted after exact VMM death'
+run_cw env --local daemon repair "$NAME" --output json
+jq -e '
+  .replaced_pod_name == "" and
+  .status.state == "ready" and
+  .status.protocol_version == 1 and
+  .status.minimum_protocol_version == 1 and
+  .status.message == "local environment daemon is ready" and
+  .status.pod_name == ""
+' "$LAST_STDOUT" >/dev/null || die 'native daemon repair result drifted after exact VMM death'
+RECOVERED_VMM_PID="$(recorded_vmm_pid)" || die 'restarted VMM identity was not readable'
+[[ "$RECOVERED_VMM_PID" != "$VMM_PID" && -d "/proc/$RECOVERED_VMM_PID" ]] ||
+  die 'VMM death recovery did not produce a new live VMM process'
+RECOVERED_VMM_GENERATION="$(jq -er '.generation' "$STATE_ROOT/engine/vms/$ENVIRONMENT_ID/state.json")" ||
+  die 'repaired VMM generation was not readable'
+[[ "$RECOVERED_VMM_GENERATION" -eq $((VMM_GENERATION + 1)) ]] ||
+  die 'daemon repair did not rotate the VMM generation exactly once'
+[[ "$(native_database_value environment_id)" == "$ENVIRONMENT_ID" ]] ||
+  die 'daemon repair changed the durable environment identity'
+run_cw run --no-tty -- /bin/sh -lc 'cat /workspace/sentinel.txt; ./hello.sh'
+rg -qF 'persistence-ok' "$LAST_STDOUT" || die 'workspace did not survive exact VMM death'
+rg -qF 'native-workspace-ok' "$LAST_STDOUT" || die 'snapshot did not survive exact VMM death'
+
+log 'checking exact runner death, VMM parent-death containment, and recovery'
+RUNNER_PID="$(native_database_value runner_pid)"
+VMM_PID="$(recorded_vmm_pid)"
+[[ "$(kill_recorded_process runner)" == "$RUNNER_PID" ]] ||
+  die 'pidfd runner kill did not target the persisted process identity'
+wait_for_pid_death "$RUNNER_PID" || die 'pidfd-signalled runner process remained live'
+wait_for_pid_death "$VMM_PID" || die 'VMM remained live after its runner died'
+wait_for_environment_state error ||
+  die 'runner death was not classified as an environment error'
+run_cw env --local daemon repair "$NAME" --output json
+jq -e '.replaced_pod_name == "" and .status.state == "ready" and .status.pod_name == ""' \
+  "$LAST_STDOUT" >/dev/null || die 'environment daemon did not repair after exact runner death'
+RECOVERED_RUNNER_PID="$(native_database_value runner_pid)"
+RECOVERED_VMM_PID="$(recorded_vmm_pid)"
+[[ "$RECOVERED_RUNNER_PID" != "$RUNNER_PID" && -d "/proc/$RECOVERED_RUNNER_PID" ]] ||
+  die 'runner death recovery did not produce a new live runner process'
+[[ "$RECOVERED_VMM_PID" != "$VMM_PID" && -d "/proc/$RECOVERED_VMM_PID" ]] ||
+  die 'runner death recovery did not produce a new live VMM process'
+run_cw run --no-tty -- /bin/sh -lc 'cat /workspace/sentinel.txt; ./hello.sh'
+rg -qF 'persistence-ok' "$LAST_STDOUT" || die 'workspace did not survive exact runner death'
+rg -qF 'native-workspace-ok' "$LAST_STDOUT" || die 'snapshot did not survive exact runner death'
+[[ "$(native_database_value journal_complete)" == yes ]] ||
+  die 'native lifecycle journal contains a pending or partial operation'
+
 log 'checking journaled offline disk growth and restart-applied CPU and memory'
 run_cw env resize --local "$NAME" --cpu 3 --memory 12Gi --disk 21Gi --yes --force --output json
 jq -e '
@@ -872,60 +990,6 @@ MEMORY_KIB="$(awk '$1 == "MemTotal:" { print $2 }' "$LAST_STDOUT")"
 run_cw_expect_failure env resize --local "$NAME" --disk 20Gi --yes --output json
 rg -qF 'disk shrink is not supported' "$LAST_STDERR" ||
   die 'native disk shrink did not fail with an actionable error'
-
-log 'checking exact runner adoption after supervisor crash'
-SUPERVISOR_PID="$(find_exact_supervisor_pid)" || die 'native supervisor process was not found exactly'
-kill -KILL -- "$SUPERVISOR_PID"
-wait_for_pid_exit "$SUPERVISOR_PID" || die 'killed supervisor process did not exit'
-[[ -d "/proc/$RUNNER_PID" ]] || die 'runner did not survive supervisor crash'
-run_cw env info --local "$NAME" --output json
-jq -e '.state == "running" and .cpu == 3 and .memory == "12Gi" and .disk == "21Gi"' "$LAST_STDOUT" >/dev/null ||
-  die 'replacement supervisor did not reconcile the running environment'
-[[ "$(native_database_value runner_pid)" == "$RUNNER_PID" ]] ||
-  die 'replacement supervisor substituted a different runner'
-run_public_data_smoke
-
-log 'checking exact VMM death classification and normal lifecycle recovery'
-VMM_PID="$(recorded_vmm_pid)" || die 'persisted VMM process identity was not readable'
-[[ "$(kill_recorded_process vmm)" == "$VMM_PID" ]] ||
-  die 'pidfd VMM kill did not target the persisted process identity'
-wait_for_pid_death "$VMM_PID" || die 'pidfd-signalled VMM process remained live'
-wait_for_environment_state error ||
-  die 'VMM death was not classified as an environment error'
-wait_for_pid_exit "$VMM_PID" || die 'reconciled VMM process was not reaped'
-run_cw env start --local "$NAME" --output json
-jq -e '.state == "running"' "$LAST_STDOUT" >/dev/null ||
-  die 'environment did not restart after exact VMM death'
-RECOVERED_VMM_PID="$(recorded_vmm_pid)" || die 'restarted VMM identity was not readable'
-[[ "$RECOVERED_VMM_PID" != "$VMM_PID" && -d "/proc/$RECOVERED_VMM_PID" ]] ||
-  die 'VMM death recovery did not produce a new live VMM process'
-run_cw run --no-tty -- /bin/sh -lc 'cat /workspace/sentinel.txt; ./hello.sh'
-rg -qF 'persistence-ok' "$LAST_STDOUT" || die 'workspace did not survive exact VMM death'
-rg -qF 'native-workspace-ok' "$LAST_STDOUT" || die 'snapshot did not survive exact VMM death'
-
-log 'checking exact runner death, VMM parent-death containment, and recovery'
-RUNNER_PID="$(native_database_value runner_pid)"
-VMM_PID="$(recorded_vmm_pid)"
-[[ "$(kill_recorded_process runner)" == "$RUNNER_PID" ]] ||
-  die 'pidfd runner kill did not target the persisted process identity'
-wait_for_pid_death "$RUNNER_PID" || die 'pidfd-signalled runner process remained live'
-wait_for_pid_death "$VMM_PID" || die 'VMM remained live after its runner died'
-wait_for_environment_state error ||
-  die 'runner death was not classified as an environment error'
-run_cw env start --local "$NAME" --output json
-jq -e '.state == "running"' "$LAST_STDOUT" >/dev/null ||
-  die 'environment did not restart after exact runner death'
-RECOVERED_RUNNER_PID="$(native_database_value runner_pid)"
-RECOVERED_VMM_PID="$(recorded_vmm_pid)"
-[[ "$RECOVERED_RUNNER_PID" != "$RUNNER_PID" && -d "/proc/$RECOVERED_RUNNER_PID" ]] ||
-  die 'runner death recovery did not produce a new live runner process'
-[[ "$RECOVERED_VMM_PID" != "$VMM_PID" && -d "/proc/$RECOVERED_VMM_PID" ]] ||
-  die 'runner death recovery did not produce a new live VMM process'
-run_cw run --no-tty -- /bin/sh -lc 'cat /workspace/sentinel.txt; ./hello.sh'
-rg -qF 'persistence-ok' "$LAST_STDOUT" || die 'workspace did not survive exact runner death'
-rg -qF 'native-workspace-ok' "$LAST_STDOUT" || die 'snapshot did not survive exact runner death'
-[[ "$(native_database_value journal_complete)" == yes ]] ||
-  die 'native lifecycle journal contains a pending or partial operation'
 
 log 'deleting the environment and proving complete owned-object cleanup'
 run_cw env rm --local "$NAME" --yes

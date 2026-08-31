@@ -1360,9 +1360,9 @@ async fn handle_unified_environment_daemon_command(
     let target = resolve_unified_environment_daemon_target(globals, placement, &command).await?;
     match target {
         #[cfg(target_os = "linux")]
-        UnifiedEnvironmentTarget::NativeLocal(_) => anyhow::bail!(
-            "native environment daemon diagnostics are not exposed in this preview; use cw shell or cw run"
-        ),
+        UnifiedEnvironmentTarget::NativeLocal(name) => {
+            handle_native_environment_daemon_command(&name, command).await
+        }
         UnifiedEnvironmentTarget::Local(name) => {
             let env = OsEnv;
             let paths = ResolvePaths::from_env(&env);
@@ -1383,6 +1383,54 @@ async fn handle_unified_environment_daemon_command(
             .await
         }
     }
+}
+
+#[cfg(target_os = "linux")]
+async fn handle_native_environment_daemon_command(
+    name: &str,
+    command: EnvDaemonCommand,
+) -> anyhow::Result<()> {
+    let client = native_environment_diagnostic_client(name).await?;
+    match command {
+        EnvDaemonCommand::Status(args) => {
+            let status = client
+                .daemon_status()
+                .await
+                .context("get native environment daemon status")?;
+            let status = crate::environment_client::legacy_environment_daemon_status(status);
+            print_environment_daemon_status(&status, args.output)?;
+        }
+        EnvDaemonCommand::Logs(_) => {
+            let logs = client
+                .daemon_logs()
+                .await
+                .context("get native environment daemon logs")?;
+            std::io::stdout()
+                .write_all(&logs)
+                .context("write native environment daemon logs")?;
+        }
+        EnvDaemonCommand::Repair(args) => {
+            let repair = client
+                .repair_daemon()
+                .await
+                .context("repair native environment daemon")?;
+            let repair = EnvironmentDaemonRepair {
+                status: crate::environment_client::legacy_environment_daemon_status(repair.status),
+                replaced_pod_name: repair.replaced_pod_name,
+            };
+            match args.output {
+                OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&repair)?),
+                OutputFormat::Text => {
+                    println!(
+                        "Environment daemon repaired: {}",
+                        display_str(&repair.status.state)
+                    );
+                    print!("{}", format_environment_daemon_status(&repair.status));
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 async fn resolve_unified_environment_daemon_target(

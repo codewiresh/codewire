@@ -252,6 +252,17 @@ pub(crate) async fn native_environment_session_client(
     .map_err(anyhow::Error::from)
 }
 
+pub(crate) async fn native_environment_diagnostic_client(
+    name: &str,
+) -> anyhow::Result<codewire_local_vmm::public_client::NativePublicEnvironmentClient> {
+    codewire_local_vmm::public_client::NativePublicEnvironmentClient::connect_or_start(
+        &native_runtime_config()?,
+        name,
+    )
+    .await
+    .map_err(anyhow::Error::from)
+}
+
 pub(crate) fn print_native_environment(
     environment: &v1::Environment,
     output: OutputFormat,

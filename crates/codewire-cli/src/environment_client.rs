@@ -984,7 +984,7 @@ fn legacy_repo_config(value: rpc::RepoConfig) -> anyhow::Result<RepoConfig> {
     })
 }
 
-fn legacy_environment_daemon_status(
+pub(crate) fn legacy_environment_daemon_status(
     value: rpc::EnvironmentDaemonStatus,
 ) -> EnvironmentDaemonStatus {
     let state = match value.state.as_known() {

@@ -11,6 +11,7 @@ service LocalSupervisorService {
   rpc ListOrphans(ListOrphansRequest) returns (ListOrphansResponse);
   rpc StartEnvironment(EnvironmentSelector) returns (Operation);
   rpc StopEnvironment(EnvironmentSelector) returns (Operation);
+  rpc RestartEnvironment(EnvironmentSelector) returns (Operation);
   rpc ResizeEnvironment(ResizeEnvironmentRequest) returns (Operation);
   rpc DeleteEnvironment(EnvironmentSelector) returns (Operation);
   rpc GetOperation(GetOperationRequest) returns (Operation);
