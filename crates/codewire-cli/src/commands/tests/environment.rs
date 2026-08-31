@@ -361,6 +361,22 @@
     }
 
     #[test]
+    fn platform_lifecycle_wait_horizon_matches_server_class() {
+        assert_eq!(
+            platform_lifecycle_ready_timeout("standard"),
+            Duration::from_secs(600)
+        );
+        assert_eq!(
+            platform_lifecycle_ready_timeout(""),
+            Duration::from_secs(600)
+        );
+        assert_eq!(
+            platform_lifecycle_ready_timeout("confidential"),
+            Duration::from_secs(1800)
+        );
+    }
+
+    #[test]
     fn local_and_platform_create_options_do_not_cross_placements() {
         let cli = Cli::try_parse_from([
             "cw",

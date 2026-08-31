@@ -2,6 +2,12 @@ use std::io::Write as _;
 
 use super::*;
 
+// Match the server-owned sandbox lifecycle first, then give daemon setup its
+// own post-running window. Confidential guests deliberately have a longer boot
+// horizon; one fixed three-minute stopwatch reports false failure while the
+// accepted server operation is still progressing.
+const PLATFORM_READY_TIMEOUT: Duration = Duration::from_secs(600);
+const PLATFORM_CONFIDENTIAL_READY_TIMEOUT: Duration = Duration::from_secs(1800);
 const PLATFORM_DAEMON_READY_TIMEOUT: Duration = Duration::from_secs(180);
 
 pub(crate) async fn handle_env_command(globals: &Globals, args: EnvArgs) -> anyhow::Result<()> {
@@ -1883,25 +1889,33 @@ async fn wait_for_platform_environment_daemon_ready(
     org_id: &str,
     environment_id: &str,
 ) -> anyhow::Result<()> {
-    let started = Instant::now();
+    let lifecycle_started = Instant::now();
+    let mut lifecycle_timeout = PLATFORM_READY_TIMEOUT;
+    let mut daemon_started = None;
 
     loop {
         let (environment, poll_interval) = client
             .get_environment_with_poll_interval(org_id, environment_id)
             .await
             .context("get environment")?;
+        lifecycle_timeout = lifecycle_timeout.max(platform_lifecycle_ready_timeout(
+            &environment.isolation_tier,
+        ));
 
         let observation = match environment.state.as_str() {
-            "running" => match client
-                .get_environment_daemon_status(org_id, environment_id)
-                .await
-            {
-                Ok(status) => match environment_daemon_readiness(&status)? {
-                    true => return Ok(()),
-                    false => "daemon is still starting".to_string(),
-                },
-                Err(error) => error.to_string(),
-            },
+            "running" => {
+                daemon_started.get_or_insert_with(Instant::now);
+                match client
+                    .get_environment_daemon_status(org_id, environment_id)
+                    .await
+                {
+                    Ok(status) => match environment_daemon_readiness(&status)? {
+                        true => return Ok(()),
+                        false => "daemon is still starting".to_string(),
+                    },
+                    Err(error) => error.to_string(),
+                }
+            }
             "destroyed" | "destroying" | "failed" | "error" => {
                 anyhow::bail!(
                     "environment {environment_id:?} became {} before its daemon was ready",
@@ -1911,12 +1925,28 @@ async fn wait_for_platform_environment_daemon_ready(
             state => format!("environment is {state}"),
         };
 
-        if started.elapsed() >= PLATFORM_DAEMON_READY_TIMEOUT {
+        if daemon_started
+            .as_ref()
+            .is_some_and(|started| started.elapsed() >= PLATFORM_DAEMON_READY_TIMEOUT)
+        {
             anyhow::bail!(
                 "timed out waiting for environment {environment_id:?} daemon to become ready: {observation}"
             );
         }
+        if daemon_started.is_none() && lifecycle_started.elapsed() >= lifecycle_timeout {
+            anyhow::bail!(
+                "timed out waiting for environment {environment_id:?} to reach running state: {observation}"
+            );
+        }
         tokio::time::sleep(poll_interval.unwrap_or(Duration::from_secs(2))).await;
+    }
+}
+
+pub(crate) fn platform_lifecycle_ready_timeout(isolation_tier: &str) -> Duration {
+    if isolation_tier == "confidential" {
+        PLATFORM_CONFIDENTIAL_READY_TIMEOUT
+    } else {
+        PLATFORM_READY_TIMEOUT
     }
 }
 
