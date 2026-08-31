@@ -202,6 +202,7 @@ fn provision_workspace(
     format_ext4(&staging_dir, &paths.state_disk)?;
     File::open(&paths.state_disk)
         .and_then(|file| file.sync_all())
+        .and_then(|()| File::open(&paths.disks_dir)?.sync_all())
         .map_err(|source| WorkspaceError::Io {
             path: paths.state_disk.clone(),
             source,
@@ -399,7 +400,11 @@ fn git_output(
     arguments: &[&str],
     maximum_stdout: usize,
 ) -> Result<Output, WorkspaceError> {
-    let output = Command::new(GIT)
+    let stdout_limit = maximum_stdout
+        .checked_add(1)
+        .ok_or(WorkspaceError::GitOutputTooLarge)? as u64;
+    let mut command = Command::new(GIT);
+    command
         .args([
             "-c",
             "core.fsmonitor=false",
@@ -420,14 +425,41 @@ fn git_output(
         .current_dir(source)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .output()
+        .stderr(Stdio::null());
+    let mut child = command
+        .spawn()
         .map_err(|_| WorkspaceError::GitUnavailable)?;
-    if !output.status.success() {
+    let mut stdout = Vec::new();
+    let Some(pipe) = child.stdout.take() else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(WorkspaceError::GitCommandFailed);
+    };
+    if pipe.take(stdout_limit).read_to_end(&mut stdout).is_err() {
+        let _ = child.kill();
+        let _ = child.wait();
         return Err(WorkspaceError::GitCommandFailed);
     }
-    if output.stdout.len() > maximum_stdout {
+    if stdout.len() > maximum_stdout {
+        let _ = child.kill();
+        let _ = child.wait();
         return Err(WorkspaceError::GitOutputTooLarge);
+    }
+    let status = match child.wait() {
+        Ok(status) => status,
+        Err(_) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(WorkspaceError::GitCommandFailed);
+        }
+    };
+    let output = Output {
+        status,
+        stdout,
+        stderr: Vec::new(),
+    };
+    if !output.status.success() {
+        return Err(WorkspaceError::GitCommandFailed);
     }
     Ok(output)
 }
@@ -552,6 +584,9 @@ fn copy_directory_level(
         }
         if bytes.is_empty() || bytes.contains(&b'/') {
             return Err(WorkspaceError::InvalidCopyPath(relative.to_owned()));
+        }
+        if names.len() as u64 == MAXIMUM_COPY_ENTRIES {
+            return Err(WorkspaceError::CopyEntryLimitExceeded);
         }
         names.push(OsString::from_vec(bytes.to_vec()));
     }
@@ -1421,6 +1456,22 @@ mod tests {
         assert!(matches!(
             resolve_workspace_mode(repository.path(), WorkspaceSelection::Direct),
             Err(WorkspaceError::DirectModeUnavailable)
+        ));
+    }
+
+    #[test]
+    fn git_control_output_is_stopped_at_the_requested_read_bound() {
+        let repository = tempfile::tempdir().unwrap();
+        git(repository.path(), &["init", "-q"]);
+        fs::write(repository.path().join("untracked"), b"contents").unwrap();
+
+        assert!(matches!(
+            git_output(
+                repository.path(),
+                &["status", "--porcelain=v1", "--untracked-files=all"],
+                4,
+            ),
+            Err(WorkspaceError::GitOutputTooLarge)
         ));
     }
 
