@@ -59,7 +59,7 @@ downloads or substitutes those artifacts at runtime.
 # Build the CLI
 cargo build -p codewire-cli-bin --bin cw
 
-# Create a persistent 2-vCPU, 16-GiB native environment from this clean Git commit.
+# Auto-clone a clean Git root, or copy an ordinary directory once.
 ./target/debug/cw env create --local \
   --name codewire-dev \
   --cpu 2 \
@@ -84,16 +84,20 @@ cargo build -p codewire-cli-bin --bin cw
 ./target/debug/cw env rm --local codewire-dev --yes
 ```
 
-The current native slice requires a clean, root Git worktree and snapshots its
-exact checked-out commit onto the persistent guest disk. The primary workspace
-runs directly in the canonical Codewire OCI workspace image beneath trusted
-guest init and runc; Docker does not own it. Custom image, network, secret,
-mount, port, and multi-repository options still fail explicitly while the
-remaining Forgejo #1908 follow-up work is completed. An owner-only SQLite WAL
-is the authoritative supervisor state; preview JSON state is imported exactly
-once. Lifecycle effects are journaled, disk shrink is rejected, and delete
-moves the environment tree to an operation-specific trash generation before
-removing only known runtime files.
+An exact clean Git root becomes an independent clone of its checked-out commit;
+host hooks, credential helpers, embedded remote credentials, unrelated refs,
+and later host changes do not enter the VM. An ordinary directory becomes an
+environment-owned point-in-time copy. Use `--path-mode clone` or
+`--path-mode copy` to override automatic classification; direct host access is
+never inferred from `--path`. The primary workspace runs directly in the
+canonical Codewire OCI workspace image beneath trusted guest init and runc;
+Docker does not own it. Custom image, network, secret, explicit mount, port, and
+multi-repository options still fail explicitly while the remaining Forgejo
+#1910 slices are completed. An owner-only SQLite WAL is the authoritative
+supervisor state; preview JSON state is imported exactly once. Lifecycle
+effects are journaled, disk shrink is rejected, and delete moves the
+environment tree to an operation-specific trash generation before removing
+only known runtime files.
 
 Developers with artifacts staged outside the default cache can point the CLI
 at them and run the complete product smoke:
@@ -102,12 +106,15 @@ at them and run the complete product smoke:
 export CODEWIRE_NATIVE_ARTIFACT_ROOT=/absolute/path/to/artifacts
 export CODEWIRE_NATIVE_ARTIFACT_LOCK=/absolute/path/to/artifacts.lock.json
 cargo build -p codewire-local-vmm --bin codewire-local-public-data-smoke
+mkdir -p .tmp
+chmod 0700 .tmp
 
 scripts/ci/verify/smoke-native-local-environment.sh \
   --cw-bin "$PWD/target/debug/cw" \
   --data-plane-smoke-bin "$PWD/target/debug/codewire-local-public-data-smoke" \
   --artifact-root "$CODEWIRE_NATIVE_ARTIFACT_ROOT" \
-  --artifact-lock "$CODEWIRE_NATIVE_ARTIFACT_LOCK"
+  --artifact-lock "$CODEWIRE_NATIVE_ARTIFACT_LOCK" \
+  --scratch-parent "$PWD/.tmp"
 ```
 
 The legacy Docker and Lima local backends remain available explicitly during

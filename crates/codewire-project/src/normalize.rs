@@ -44,6 +44,7 @@ pub(super) fn normalize_raw_project(raw: RawProject) -> Result<ProjectDocument, 
     let credentials = normalize_credentials(raw.credentials)?;
     let (workspace_mode, direct_source, direct_read_only) = normalize_workspace(raw.workspace)?;
     let mounts = normalize_mounts(raw.mounts)?;
+    validate_workspace_input_destinations(&repositories, &mounts)?;
     let environment = normalize_environment("environment", raw.environment)?;
     let agent_environment = normalize_environment("agent_env", raw.agent_env)?;
 
@@ -650,30 +651,83 @@ fn parse_workspace_mode(value: &str) -> Result<WorkspaceMode, ProjectError> {
     }
 }
 
-fn normalize_mounts(mounts: Vec<RawMount>) -> Result<Vec<LocalMountIntent>, ProjectError> {
+fn normalize_mounts(mounts: Vec<RawMountBlock>) -> Result<Vec<LocalMountIntent>, ProjectError> {
     mounts
         .into_iter()
         .map(|mount| {
-            let (source, destination, read_only) = match mount {
-                RawMount::String(source) => (source, String::new(), None),
-                RawMount::Mapping(mount) => (mount.source, mount.destination, mount.read_only),
-            };
-            let source = short_value("mounts.source", &source)?;
+            let source = short_value("mounts.source", &mount.source)?;
             if source.is_empty() {
                 return invalid("mounts.source", "value is required");
             }
             validate_explicit_local_source("mounts.source", &source)?;
-            let destination = short_value("mounts.destination", &destination)?;
-            if !destination.is_empty() {
-                validate_absolute_path("mounts.destination", &destination)?;
+            let destination = short_value("mounts.destination", &mount.destination)?;
+            if destination.is_empty() {
+                return invalid("mounts.destination", "value is required");
+            }
+            validate_workspace_path("mounts.destination", &destination, false)?;
+            let mode = match mount.mode.trim().to_ascii_lowercase().as_str() {
+                "copy" => LocalMountMode::Copy,
+                "direct" => LocalMountMode::Direct,
+                "" => return invalid("mounts.mode", "value is required: copy or direct"),
+                other => {
+                    return invalid(
+                        "mounts.mode",
+                        format!("unsupported mode {other:?}; use copy or direct"),
+                    );
+                }
+            };
+            if mode == LocalMountMode::Copy && mount.read_only.is_some() {
+                return invalid("mounts.read_only", "only applies to direct mounts");
+            }
+            if mode == LocalMountMode::Direct && mount.read_only.is_none() {
+                return invalid(
+                    "mounts.read_only",
+                    "must explicitly select true or false for a direct mount",
+                );
             }
             Ok(LocalMountIntent {
                 source,
                 destination,
-                read_only,
+                mode,
+                read_only: mount.read_only,
             })
         })
         .collect()
+}
+
+fn validate_workspace_input_destinations(
+    repositories: &[RepositorySpec],
+    mounts: &[LocalMountIntent],
+) -> Result<(), ProjectError> {
+    let mut destinations = repositories
+        .iter()
+        .map(|repository| (repository.destination.as_str(), "repository"))
+        .chain(mounts.iter().map(|mount| {
+            let kind = match mount.mode {
+                LocalMountMode::Copy => "copy mount",
+                LocalMountMode::Direct => "direct mount",
+            };
+            (mount.destination.as_str(), kind)
+        }))
+        .collect::<Vec<_>>();
+    destinations.sort_unstable_by(|left, right| left.0.cmp(right.0));
+    for pair in destinations.windows(2) {
+        let (left_path, left_kind) = pair[0];
+        let (right_path, right_kind) = pair[1];
+        let duplicate = left_path == right_path;
+        let nested = right_path
+            .strip_prefix(left_path)
+            .is_some_and(|suffix| suffix.starts_with('/'));
+        if duplicate || nested {
+            return invalid(
+                "workspace destinations",
+                format!(
+                    "{left_kind} destination {left_path} overlaps {right_kind} destination {right_path}"
+                ),
+            );
+        }
+    }
+    Ok(())
 }
 
 pub fn canonical_agent_id(raw: &str) -> Result<Option<&'static str>, ProjectError> {
@@ -996,16 +1050,6 @@ fn validate_explicit_local_source(field: &'static str, path: &str) -> Result<(),
         return invalid(field, "must not contain empty path segments");
     }
     Ok(())
-}
-
-fn validate_absolute_path(field: &'static str, path: &str) -> Result<(), ProjectError> {
-    let Some(relative) = path.strip_prefix('/') else {
-        return invalid(field, "must be an absolute path");
-    };
-    if relative.is_empty() || path.ends_with('/') {
-        return invalid(field, "must name a normalized absolute path");
-    }
-    validate_path_segments(field, relative)
 }
 
 fn validate_path_segments(field: &'static str, relative: &str) -> Result<(), ProjectError> {

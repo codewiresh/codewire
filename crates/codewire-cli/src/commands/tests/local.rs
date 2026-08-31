@@ -694,7 +694,8 @@ ports:
   - "18080:8080"
 mounts:
   - source: data
-    target: /data
+    target: /workspace/data
+    mode: direct
     readonly: true
 secrets:
   org: false
@@ -745,7 +746,7 @@ agents:
         assert_eq!(instance.ports[0].host_port, 18080);
         assert_eq!(instance.ports[0].guest_port, 8080);
         assert_eq!(instance.mounts[0].source, mount.display().to_string());
-        assert_eq!(instance.mounts[0].target, "/data");
+        assert_eq!(instance.mounts[0].target, "/workspace/data");
         assert_eq!(instance.mounts[0].readonly, Some(true));
         assert_eq!(instance.secrets, "dev");
         assert_eq!(instance.agent, "claude-code");

@@ -146,6 +146,9 @@ message CreateEnvironmentRequest {
   // canonical encoding and digest before journaling the create operation.
   bytes project_spec_json = 7;
   string project_spec_sha256 = 8;
+  // Private host preparation for the implicit --path source. Exactly clone or
+  // copy after CLI-side auto resolution; direct paths use explicit shares.
+  string implicit_path_mode = 9;
 }
 
 message EnvironmentSelector {

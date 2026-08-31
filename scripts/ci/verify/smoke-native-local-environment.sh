@@ -23,6 +23,10 @@ WORKSPACE=''
 PLATFORM_CONFIG=''
 TRIPWIRE=''
 TRANSCRIPT=''
+SOURCE_HOOK_MARKER=''
+SOURCE_CREDENTIAL_MARKER=''
+SOURCE_CONFIG_SHA256=''
+SCRATCH_MOUNT_OPTIONS=''
 NAME='native-smoke'
 COMMAND_INDEX=0
 LAST_STDOUT=''
@@ -46,10 +50,10 @@ exact Cloud Hypervisor, kernel, and product guest-root artifacts admitted by
 codewire-local-vmm. Missing KVM, artifacts, or required tools fail nonzero.
 
 The smoke uses an isolated HOME and short private native state root, poisons
-the platform destination, installs Docker/Lima/QEMU tripwires, and creates a
-clean disposable Git fixture. Initial create permits direct registry egress;
+the platform destination, installs Docker/Lima/QEMU tripwires, and creates
+disposable Git-clone and filesystem-copy fixtures. Initial create permits direct registry egress;
 every later command receives dead proxy endpoints. It proves digest-pinned OCI
-    workspace execution, create/info, bounded daemon diagnostics and repair, bare
+    workspace execution, independent clone/copy preparation, create/info, bounded daemon diagnostics and repair, bare
     run and shell, PTY behavior, saved output and nonzero status, cached-runtime
     restart after the installed artifact lock advances, offline disk/CPU/memory
     resize, supervisor crash recovery, and journaled exact deletion cleanup.
@@ -132,7 +136,7 @@ done
   exit 2
 }
 
-for tool in awk cat chmod cp dirname e2fsck find git id jq mkdir mktemp python3 readlink realpath resize2fs rg script sha256sum sleep stat tail timeout touch tr uname; do
+for tool in awk cat chmod cp dirname e2fsck find findmnt git id jq ln mkdir mktemp python3 readlink realpath resize2fs rg script sha256sum sleep stat tail timeout touch tr uname; do
   require_cmd "$tool"
 done
 [[ "$(uname -s)" == Linux ]] || die 'the native local-environment smoke requires Linux'
@@ -154,6 +158,14 @@ require_absolute_canonical_file 'artifact lock' "$ARTIFACT_LOCK"
 [[ "$(dirname "$ARTIFACT_ROOT")" == "$(dirname "$ARTIFACT_LOCK")" ]] ||
   die 'artifact root and lock must share one staging parent'
 require_absolute_canonical_dir 'scratch parent' "$SMOKE_PARENT"
+if ! SCRATCH_MOUNT_OPTIONS="$(findmnt -nro OPTIONS -T "$SMOKE_PARENT")"; then
+  die "cannot inspect scratch-parent mount options: $SMOKE_PARENT"
+fi
+case ",$SCRATCH_MOUNT_OPTIONS," in
+  *,noexec,*)
+    die 'scratch parent is mounted noexec; pass --scratch-parent on an executable filesystem'
+    ;;
+esac
 ORIGINAL_ARTIFACT_ROOT="$ARTIFACT_ROOT"
 ORIGINAL_ARTIFACT_LOCK="$ARTIFACT_LOCK"
 
@@ -166,6 +178,8 @@ WORKSPACE="$SMOKE_ROOT/w"
 PLATFORM_CONFIG="$SMOKE_ROOT/c"
 TRIPWIRE="$SMOKE_ROOT/fallback-invoked"
 TRANSCRIPT="$SMOKE_ROOT/transcript"
+SOURCE_HOOK_MARKER="$SMOKE_ROOT/source-hook-invoked"
+SOURCE_CREDENTIAL_MARKER="$SMOKE_ROOT/source-credential-helper-invoked"
 mkdir -m 0700 "$SMOKE_HOME" "$STATE_ROOT" "$WORKSPACE" "$PLATFORM_CONFIG" "$SMOKE_ROOT/bin"
 touch "$TRANSCRIPT"
 chmod 0600 "$TRANSCRIPT"
@@ -205,6 +219,15 @@ env -i PATH='/usr/bin:/bin' HOME="$SMOKE_HOME" LC_ALL=C \
     -c user.email='smoke@invalid.example' commit -q -m fixture
 WORKSPACE_COMMIT="$(env -i PATH='/usr/bin:/bin' HOME="$SMOKE_HOME" LC_ALL=C \
   /usr/bin/git -C "$WORKSPACE" rev-parse HEAD)"
+env -i PATH='/usr/bin:/bin' HOME="$SMOKE_HOME" LC_ALL=C \
+  /usr/bin/git -C "$WORKSPACE" config credential.helper \
+    "!touch '$SOURCE_CREDENTIAL_MARKER'"
+env -i PATH='/usr/bin:/bin' HOME="$SMOKE_HOME" LC_ALL=C \
+  /usr/bin/git -C "$WORKSPACE" remote add origin \
+    'https://host-user:host-secret@example.invalid/codewire/smoke.git'
+printf '#!/bin/sh\ntouch %q\n' "$SOURCE_HOOK_MARKER" >"$WORKSPACE/.git/hooks/post-checkout"
+chmod 0700 "$WORKSPACE/.git/hooks/post-checkout"
+SOURCE_CONFIG_SHA256="$(sha256sum "$WORKSPACE/.git/config" | awk '{print $1}')"
 
 cw_isolated() {
   (
@@ -664,6 +687,11 @@ jq -e --arg commit "$WORKSPACE_COMMIT" '
   .memory == "16Gi" and
   .workspace_commit == $commit
 ' "$LAST_STDOUT" >/dev/null || die 'created native environment metadata drifted'
+[[ ! -e "$SOURCE_HOOK_MARKER" ]] || die 'source Git hook ran during native clone preparation'
+[[ ! -e "$SOURCE_CREDENTIAL_MARKER" ]] ||
+  die 'source Git credential helper ran during native clone preparation'
+printf 'host changed after environment creation\n' >"$WORKSPACE/README.md"
+printf 'host-only untracked content\n' >"$WORKSPACE/host-only.txt"
 run_cw env list --local --output json
 jq -e '
   length == 2 and
@@ -769,7 +797,7 @@ log 'checking guest identity, live resources, workspace, and durable output'
 # The quoted expression is evaluated by the guest shell, not this host script.
 # shellcheck disable=SC2016
 run_cw run --no-tty -- /bin/sh -lc \
-  'printf "guest-cwd=%s\n" "$PWD"; printf "guest-pid1-comm="; cat /proc/1/comm; if readlink /proc/1/exe >/dev/null 2>&1; then printf "guest-pid1-exe=exposed\n"; else printf "guest-pid1-exe=confined\n"; fi; printf "guest-sealed-init="; /run/codewire-runtime/init identity; awk "/^NoNewPrivs:/ { printf \"guest-no-new-privileges=%s\\n\", \$2 } /^CapEff:/ { printf \"guest-effective-capabilities=%s\\n\", \$2 }" /proc/self/status; printf "guest-cpus="; grep -c "^processor" /proc/cpuinfo; grep "^MemTotal:" /proc/meminfo; printf "workspace-node="; node --version; ./hello.sh; printf persistence-ok > /workspace/sentinel.txt'
+  'printf "guest-cwd=%s\n" "$PWD"; printf "guest-pid1-comm="; cat /proc/1/comm; if readlink /proc/1/exe >/dev/null 2>&1; then printf "guest-pid1-exe=exposed\n"; else printf "guest-pid1-exe=confined\n"; fi; printf "guest-sealed-init="; /run/codewire-runtime/init identity; awk "/^NoNewPrivs:/ { printf \"guest-no-new-privileges=%s\\n\", \$2 } /^CapEff:/ { printf \"guest-effective-capabilities=%s\\n\", \$2 }" /proc/self/status; printf "guest-cpus="; grep -c "^processor" /proc/cpuinfo; grep "^MemTotal:" /proc/meminfo; printf "workspace-node="; node --version; test -d .git; test -z "$(git status --porcelain=v1 --untracked-files=all)"; printf "guest-git-head="; git rev-parse HEAD; printf "guest-readme="; cat README.md; git config --local --list; test ! -e host-only.txt; ./hello.sh; printf persistence-ok > /workspace/sentinel.txt'
 rg -qF 'guest-cwd=/workspace' "$LAST_STDOUT" || die 'session did not start in /workspace'
 rg -qF 'guest-pid1-comm=init' "$LAST_STDOUT" ||
   die 'guest PID 1 does not have the sealed init process identity'
@@ -785,6 +813,14 @@ rg -qF 'guest-cpus=2' "$LAST_STDOUT" || die 'guest did not observe exactly 2 vCP
 rg -q '^workspace-node=v[0-9]+\.' "$LAST_STDOUT" ||
   die 'session did not execute from the canonical Codewire workspace image'
 rg -qF 'native-workspace-ok' "$LAST_STDOUT" || die 'clean Git workspace content is unavailable'
+rg -qF "guest-git-head=$WORKSPACE_COMMIT" "$LAST_STDOUT" ||
+  die 'guest Git metadata does not identify the admitted commit'
+rg -qF 'guest-readme=native workspace fixture' "$LAST_STDOUT" ||
+  die 'host changes after creation entered the guest clone'
+if rg -qF 'host-secret' "$LAST_STDOUT" || rg -qF 'credential.helper' "$LAST_STDOUT" ||
+   rg -qF "$WORKSPACE" "$LAST_STDOUT"; then
+  die 'host Git credential or source-path metadata entered the guest clone'
+fi
 MEMORY_KIB="$(awk '$1 == "MemTotal:" { print $2 }' "$LAST_STDOUT")"
 [[ "$MEMORY_KIB" =~ ^[0-9]+$ && "$MEMORY_KIB" -ge 15000000 && "$MEMORY_KIB" -le 17500000 ]] ||
   die "guest MemTotal is not consistent with 16 GiB: ${MEMORY_KIB:-missing} KiB"
@@ -1011,9 +1047,71 @@ DELETED_SUPERVISOR_PID="$(find_exact_supervisor_pid)" ||
   die 'native environment state entry remained after delete'
 [[ "$(native_database_value journal_complete)" == yes ]] ||
   die 'native delete journal did not reach its final checkpoint'
+[[ "$(cat "$WORKSPACE/README.md")" == 'host changed after environment creation' ]] ||
+  die 'guest clone or environment deletion mutated the host Git worktree'
+[[ "$(cat "$WORKSPACE/host-only.txt")" == 'host-only untracked content' ]] ||
+  die 'host-only content changed during guest clone lifecycle'
+[[ ! -e "$WORKSPACE/sentinel.txt" ]] ||
+  die 'guest writes escaped the environment-owned clone into the host source'
+[[ "$(sha256sum "$WORKSPACE/.git/config" | awk '{print $1}')" == "$SOURCE_CONFIG_SHA256" ]] ||
+  die 'native clone preparation mutated the host Git configuration'
+[[ -x "$WORKSPACE/.git/hooks/post-checkout" ]] ||
+  die 'native clone lifecycle mutated the source Git hook'
+[[ ! -e "$SOURCE_HOOK_MARKER" && ! -e "$SOURCE_CREDENTIAL_MARKER" ]] ||
+  die 'source Git executable configuration ran during the native lifecycle'
 run_cw doctor local --output json
 jq -e '.orphans == [] and .reclaimable_bytes == 0' "$LAST_STDOUT" >/dev/null ||
   die 'native doctor reported owned state after exact deletion cleanup'
+
+log 'checking explicit copy-mode path preparation is detached from the host'
+NAME='native-copy-smoke'
+WORKSPACE="$SMOKE_ROOT/copy-source"
+mkdir -m 0700 "$WORKSPACE"
+printf 'copy source before creation\n' >"$WORKSPACE/data.txt"
+printf 'hidden copy content\n' >"$WORKSPACE/.hidden"
+printf '#!/bin/sh\nprintf "copy-executable-ok\\n"\n' >"$WORKSPACE/tool.sh"
+chmod 0755 "$WORKSPACE/tool.sh"
+ln "$WORKSPACE/data.txt" "$WORKSPACE/hardlink.txt"
+ln -s data.txt "$WORKSPACE/link.txt"
+ALLOW_REGISTRY_EGRESS=1
+CW_COMMAND_TIMEOUT_SECONDS=1500
+run_cw env create --local --name "$NAME" --cpu 2 --memory 16Gi \
+  --path "$WORKSPACE" --path-mode copy --output json
+ALLOW_REGISTRY_EGRESS=0
+CW_COMMAND_TIMEOUT_SECONDS=180
+ENV_CREATED=1
+jq -e '
+  .name == "native-copy-smoke" and
+  .backend == "cloud-hypervisor" and
+  .state == "running" and
+  (.workspace_commit | test("^[0-9a-f]{64}$"))
+' "$LAST_STDOUT" >/dev/null || die 'copy-mode environment metadata drifted'
+printf 'host changed after copy creation\n' >"$WORKSPACE/data.txt"
+printf 'host-only after copy\n' >"$WORKSPACE/host-only.txt"
+# The quoted expression is evaluated by the guest shell, not this host script.
+# shellcheck disable=SC2016
+run_cw run --no-tty -- /bin/sh -lc \
+  'test ! -e .git; grep -qx "copy source before creation" data.txt; grep -qx "hidden copy content" .hidden; test "$(readlink link.txt)" = data.txt; test "$(stat -c %h data.txt)" = 1; test "$(stat -c %h hardlink.txt)" = 1; test ! -e host-only.txt; ./tool.sh; printf guest-copy-write > guest-only.txt'
+rg -qF 'copy-executable-ok' "$LAST_STDOUT" ||
+  die 'copy-mode executable content was unavailable in the guest'
+[[ "$(cat "$WORKSPACE/data.txt")" == 'host changed after copy creation' ]] ||
+  die 'copy-mode guest read or write mutated the selected host source'
+[[ ! -e "$WORKSPACE/guest-only.txt" ]] ||
+  die 'copy-mode guest write escaped into the selected host source'
+run_cw env rm --local "$NAME" --yes
+ENV_CREATED=0
+[[ "$(cat "$WORKSPACE/data.txt")" == 'host changed after copy creation' ]] ||
+  die 'copy-mode deletion mutated the selected host source'
+[[ "$(cat "$WORKSPACE/host-only.txt")" == 'host-only after copy' ]] ||
+  die 'copy-mode deletion mutated host-only content'
+[[ ! -e "$WORKSPACE/guest-only.txt" ]] ||
+  die 'copy-mode deletion synchronized guest state into the host source'
+[[ "$(native_database_value empty)" == yes ]] ||
+  die 'copy-mode environment state remained after deletion'
+run_cw doctor local --output json
+jq -e '.orphans == [] and .reclaimable_bytes == 0' "$LAST_STDOUT" >/dev/null ||
+  die 'copy-mode deletion left native owned state'
+
 [[ ! -e "$TRIPWIRE" ]] || die "a forbidden fallback was invoked: $(tr '\n' ' ' <"$TRIPWIRE")"
 [[ "$(sha256sum "$SMOKE_HOME/.codewire/local_instances.toml" | awk '{print $1}')" == "$LEGACY_SHA256" ]] ||
   die 'pre-existing legacy local state changed'

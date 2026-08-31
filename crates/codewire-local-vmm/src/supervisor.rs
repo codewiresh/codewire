@@ -54,8 +54,9 @@ use crate::supervisor_store::{
 };
 use crate::uds::{UdsError, bind_owner_only_listener, connect_owner_only, remove_bound_socket};
 use crate::workspace::{
-    WorkspaceError, WorkspaceSource, cleanup_interrupted_workspace_provisioning,
-    ensure_clean_git_workspace, inspect_clean_git_workspace,
+    WorkspaceError, WorkspaceSelection, WorkspaceSource, WorkspaceSourceMode,
+    cleanup_interrupted_workspace_provisioning, ensure_workspace, inspect_workspace,
+    workspace_content_limit,
 };
 use crate::workspace_generation::{WorkspaceGenerationError, WorkspaceGenerationRecord};
 
@@ -1305,8 +1306,14 @@ impl SupervisorCore {
                     } else {
                         let artifact_generation = self.preflight().await?;
                         let requested_source = PathBuf::from(&request.source_path);
+                        let path_mode = parse_implicit_path_mode(&request.implicit_path_mode)?;
+                        let maximum_copy_bytes = workspace_content_limit(request.disk_bytes);
                         let source = tokio::task::spawn_blocking(move || {
-                            inspect_clean_git_workspace(&requested_source)
+                            inspect_workspace(
+                                &requested_source,
+                                workspace_selection(path_mode),
+                                maximum_copy_bytes,
+                            )
                         })
                         .await
                         .map_err(|_| SupervisorError::WorkspaceProvisionTask)??;
@@ -1341,24 +1348,22 @@ impl SupervisorCore {
                 LifecycleEffect::ProvisionWorkspace => {
                     let environment = self.environment(&request.name)?.clone();
                     let engine_root = self.config.engine_root();
+                    let path_mode = parse_implicit_path_mode(&request.implicit_path_mode)?;
                     let source = WorkspaceSource {
                         source_path: environment.source_path,
                         commit: environment.workspace_commit,
+                        mode: path_mode,
                     };
                     let expected_source = source.clone();
                     let disk_bytes = environment.disk_bytes;
                     let snapshot = tokio::task::spawn_blocking(move || {
-                        ensure_clean_git_workspace(
-                            &engine_root,
-                            environment_id,
-                            &source,
-                            disk_bytes,
-                        )
+                        ensure_workspace(&engine_root, environment_id, &source, disk_bytes)
                     })
                     .await
                     .map_err(|_| SupervisorError::WorkspaceProvisionTask)??;
                     if snapshot.source_path != expected_source.source_path
                         || snapshot.commit != expected_source.commit
+                        || snapshot.mode != expected_source.mode
                     {
                         return Err(SupervisorError::InvalidState);
                     }
@@ -3872,6 +3877,7 @@ fn require_expected_environment(
 }
 
 fn validate_create(request: &v1::CreateEnvironmentRequest) -> Result<Uuid, SupervisorError> {
+    let implicit_path_mode = parse_implicit_path_mode(&request.implicit_path_mode)?;
     if !valid_environment_name(&request.name)
         || request.source_path.is_empty()
         || !Path::new(&request.source_path).is_absolute()
@@ -3886,10 +3892,30 @@ fn validate_create(request: &v1::CreateEnvironmentRequest) -> Result<Uuid, Super
             Some((request.vcpus, request.memory_mib, request.disk_bytes)),
         )
         .is_err()
+        || !project_mode_matches_implicit_path(&request.project_spec_json, implicit_path_mode)
     {
         return Err(SupervisorError::InvalidRequest);
     }
     parse_request_id(&request.request_id)
+}
+
+fn project_mode_matches_implicit_path(
+    canonical_json: &[u8],
+    implicit_path_mode: WorkspaceSourceMode,
+) -> bool {
+    let Ok(spec) = serde_json::from_slice::<codewire_project::ProjectSpec>(canonical_json) else {
+        return false;
+    };
+    matches!(
+        (spec.workspace_mode, implicit_path_mode),
+        (
+            codewire_project::WorkspaceMode::Clone,
+            WorkspaceSourceMode::Clone
+        ) | (
+            codewire_project::WorkspaceMode::Auto,
+            WorkspaceSourceMode::Copy
+        )
+    )
 }
 
 fn validate_project_intent(
@@ -3923,7 +3949,10 @@ fn validate_project_intent(
         || !spec.application_ports.is_empty()
         || !spec.secrets.is_empty()
         || !spec.credentials.is_empty()
-        || spec.workspace_mode != codewire_project::WorkspaceMode::Auto
+        || !matches!(
+            spec.workspace_mode,
+            codewire_project::WorkspaceMode::Auto | codewire_project::WorkspaceMode::Clone
+        )
     {
         return Err(());
     }
@@ -3936,6 +3965,21 @@ fn validate_project_intent(
         return Err(());
     }
     Ok(())
+}
+
+fn parse_implicit_path_mode(value: &str) -> Result<WorkspaceSourceMode, SupervisorError> {
+    match value {
+        "clone" => Ok(WorkspaceSourceMode::Clone),
+        "copy" => Ok(WorkspaceSourceMode::Copy),
+        _ => Err(SupervisorError::InvalidRequest),
+    }
+}
+
+fn workspace_selection(value: WorkspaceSourceMode) -> WorkspaceSelection {
+    match value {
+        WorkspaceSourceMode::Clone => WorkspaceSelection::Clone,
+        WorkspaceSourceMode::Copy => WorkspaceSelection::Copy,
+    }
 }
 
 fn validate_resize(request: &v1::ResizeEnvironmentRequest) -> Result<Uuid, SupervisorError> {
@@ -3993,6 +4037,7 @@ fn create_operation_payload(request: &v1::CreateEnvironmentRequest) -> serde_jso
         "disk_bytes": request.disk_bytes,
         "project_spec_json": project_spec_json,
         "project_spec_sha256": request.project_spec_sha256,
+        "implicit_path_mode": request.implicit_path_mode,
     })
 }
 
@@ -4005,7 +4050,7 @@ fn create_request_from_operation(
     let fields = operation
         .payload
         .as_object()
-        .filter(|fields| fields.len() == 7)
+        .filter(|fields| fields.len() == 8)
         .ok_or(SupervisorError::InvalidState)?;
     let name = fields
         .get("name")
@@ -4042,6 +4087,11 @@ fn create_request_from_operation(
         .and_then(serde_json::Value::as_str)
         .ok_or(SupervisorError::InvalidState)?
         .to_owned();
+    let implicit_path_mode = fields
+        .get("implicit_path_mode")
+        .and_then(serde_json::Value::as_str)
+        .ok_or(SupervisorError::InvalidState)?
+        .to_owned();
     let request = v1::CreateEnvironmentRequest {
         name,
         source_path,
@@ -4051,6 +4101,7 @@ fn create_request_from_operation(
         request_id: operation.request_id.to_string(),
         project_spec_json,
         project_spec_sha256,
+        implicit_path_mode,
     };
     validate_create(&request)?;
     Ok(request)
@@ -4908,6 +4959,7 @@ mod tests {
     fn project_intent(vcpus: u32, memory_mib: u32, disk_gib: u64) -> (Vec<u8>, String) {
         let spec = codewire_project::ProjectSpec {
             image: "registry.example/codewire/workspace:latest".to_owned(),
+            workspace_mode: codewire_project::WorkspaceMode::Clone,
             resources: codewire_project::ResourceSpec {
                 cpu_millicores: Some(vcpus * 1_000),
                 memory_mib: Some(u64::from(memory_mib)),
@@ -6396,6 +6448,22 @@ mod tests {
         let (bytes, digest) = project_intent(2, 16 * 1024, 20);
         let disk_bytes = 20 * 1024 * 1024 * 1024;
         validate_project_intent(&bytes, &digest, Some((2, 16 * 1024, disk_bytes))).unwrap();
+        assert!(project_mode_matches_implicit_path(
+            &bytes,
+            WorkspaceSourceMode::Clone
+        ));
+        assert!(!project_mode_matches_implicit_path(
+            &bytes,
+            WorkspaceSourceMode::Copy
+        ));
+
+        let mut copy_spec: codewire_project::ProjectSpec = serde_json::from_slice(&bytes).unwrap();
+        copy_spec.workspace_mode = codewire_project::WorkspaceMode::Auto;
+        let copy_bytes = copy_spec.canonical_json().unwrap();
+        assert!(project_mode_matches_implicit_path(
+            &copy_bytes,
+            WorkspaceSourceMode::Copy
+        ));
 
         let mut wrong_digest = digest.clone();
         wrong_digest.replace_range(0..1, "f");
@@ -6450,6 +6518,7 @@ mod tests {
             request_id: Uuid::new_v4().to_string(),
             project_spec_json,
             project_spec_sha256,
+            implicit_path_mode: "clone".to_owned(),
         };
         validate_create(&request).unwrap();
         let operation = OperationRecord {

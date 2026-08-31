@@ -616,6 +616,17 @@ fn legacy_codewire_config(
             detail: "workspace modes require the native workspace runtime".to_string(),
         });
     }
+    if document
+        .local
+        .mounts
+        .iter()
+        .any(|mount| mount.mode == codewire_project::LocalMountMode::Copy)
+    {
+        return Err(codewire_project::ProjectError::InvalidField {
+            field: "mounts.mode",
+            detail: "copy mounts require the native workspace runtime".to_string(),
+        });
+    }
     if !spec.agent_environment.is_empty() {
         return Err(codewire_project::ProjectError::InvalidField {
             field: "agent_env",
@@ -1769,9 +1780,13 @@ agents:
     - claude
     - gemini
 mounts:
-  - ../agentic
+  - source: ../agentic
+    target: /workspace/agentic
+    mode: direct
+    readonly: true
   - source: /srv/shared
-    target: /mnt/shared
+    target: /workspace/shared
+    mode: direct
     readonly: false
 "#,
         )
@@ -1786,11 +1801,12 @@ mounts:
             vec![
                 LocalMountConfig {
                     source: "../agentic".to_string(),
-                    ..LocalMountConfig::default()
+                    target: "/workspace/agentic".to_string(),
+                    readonly: Some(true),
                 },
                 LocalMountConfig {
                     source: "/srv/shared".to_string(),
-                    target: "/mnt/shared".to_string(),
+                    target: "/workspace/shared".to_string(),
                     readonly: Some(false),
                 },
             ]
