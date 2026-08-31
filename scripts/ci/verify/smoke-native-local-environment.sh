@@ -9,6 +9,7 @@ readonly LONGEST_SOCKET_SUFFIX='/engine/vms/00000000-0000-4000-8000-000000000000
 
 CW_BIN=''
 DATA_PLANE_SMOKE_BIN=''
+STATE_PROBE_BIN=''
 ARTIFACT_ROOT=''
 ARTIFACT_LOCK=''
 ORIGINAL_ARTIFACT_ROOT=''
@@ -40,6 +41,7 @@ usage() {
 usage: smoke-native-local-environment.sh \
   --cw-bin ABSOLUTE_PATH \
   --data-plane-smoke-bin ABSOLUTE_PATH \
+  --state-probe-bin ABSOLUTE_PATH \
   --artifact-root ABSOLUTE_PRIVATE_DIRECTORY \
   --artifact-lock ABSOLUTE_LOCK_FILE \
   [--scratch-parent ABSOLUTE_DIRECTORY]
@@ -105,6 +107,11 @@ while [[ $# -gt 0 ]]; do
       DATA_PLANE_SMOKE_BIN="$2"
       shift 2
       ;;
+    --state-probe-bin)
+      [[ $# -ge 2 && -z "$STATE_PROBE_BIN" ]] || { usage; exit 2; }
+      STATE_PROBE_BIN="$2"
+      shift 2
+      ;;
     --artifact-root)
       [[ $# -ge 2 && -z "$ARTIFACT_ROOT" ]] || { usage; exit 2; }
       ARTIFACT_ROOT="$2"
@@ -131,7 +138,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-[[ -n "$CW_BIN" && -n "$DATA_PLANE_SMOKE_BIN" && -n "$ARTIFACT_ROOT" && -n "$ARTIFACT_LOCK" ]] || {
+[[ -n "$CW_BIN" && -n "$DATA_PLANE_SMOKE_BIN" && -n "$STATE_PROBE_BIN" && -n "$ARTIFACT_ROOT" && -n "$ARTIFACT_LOCK" ]] || {
   usage
   exit 2
 }
@@ -151,6 +158,9 @@ require_absolute_canonical_file 'cw binary' "$CW_BIN"
 require_absolute_canonical_file 'public data-plane smoke binary' "$DATA_PLANE_SMOKE_BIN"
 [[ -x "$DATA_PLANE_SMOKE_BIN" ]] ||
   die "public data-plane smoke binary is not executable: $DATA_PLANE_SMOKE_BIN"
+require_absolute_canonical_file 'native state probe binary' "$STATE_PROBE_BIN"
+[[ -x "$STATE_PROBE_BIN" ]] ||
+  die "native state probe binary is not executable: $STATE_PROBE_BIN"
 [[ "$CW_BIN" =~ ^[-_./0-9A-Za-z]+$ ]] ||
   die 'cw binary path contains characters unsafe for the PTY smoke command'
 require_absolute_canonical_dir 'artifact root' "$ARTIFACT_ROOT"
@@ -361,31 +371,22 @@ recorded_vmm_pid() {
 
 kill_recorded_process() {
   local kind="$1"
+  if [[ "$kind" == runner ]]; then
+    env -i PATH='/usr/bin:/bin' LC_ALL=C \
+      "$STATE_PROBE_BIN" kill-runner --state-root "$STATE_ROOT" --name "$NAME"
+    return
+  fi
   /usr/bin/env python3 - \
-    "$STATE_ROOT/supervisor.db" \
     "$STATE_ROOT/engine/vms/$ENVIRONMENT_ID/state.json" \
-    "$NAME" \
     "$kind" <<'PY'
 import json
 import hashlib
 import os
 import signal
-import sqlite3
 import sys
 
-database, vmm_state, name, kind = sys.argv[1:]
-if kind == "runner":
-    connection = sqlite3.connect(f"file:{database}?mode=ro", uri=True, timeout=1)
-    try:
-        row = connection.execute(
-            "SELECT runner_json FROM environments WHERE name = ?", (name,)
-        ).fetchone()
-        if row is None or row[0] is None:
-            raise SystemExit("runner identity is missing")
-        identity = json.loads(row[0])["process"]
-    finally:
-        connection.close()
-elif kind == "vmm":
+vmm_state, kind = sys.argv[1:]
+if kind == "vmm":
     with open(vmm_state, "r", encoding="utf-8") as source:
         identity = json.load(source)["process"]
 else:
@@ -496,98 +497,49 @@ owned_processes() {
   done
 }
 
+terminate_remaining_owned_processes() {
+  local pid
+  local -a pids=()
+  mapfile -t pids < <(owned_processes)
+  for pid in "${pids[@]}"; do
+    [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+    kill -KILL -- "$pid" 2>/dev/null || [[ ! -e "/proc/$pid" ]] || return 1
+  done
+  for pid in "${pids[@]}"; do
+    wait_for_pid_death "$pid" || return 1
+  done
+}
+
 native_database_value() {
   local field="$1"
-  /usr/bin/env python3 - "$STATE_ROOT/supervisor.db" "$field" "$NAME" <<'PY'
-import json
-import sqlite3
-import sys
+  env -i PATH='/usr/bin:/bin' LC_ALL=C \
+    "$STATE_PROBE_BIN" value "$field" --state-root "$STATE_ROOT" --name "$NAME"
+}
 
-database, field, name = sys.argv[1:]
-connection = sqlite3.connect(f"file:{database}?mode=ro", uri=True, timeout=1)
-try:
-    if field == "environment_id":
-        row = connection.execute(
-            "SELECT id FROM environments WHERE name = ?", (name,)
-        ).fetchone()
-        if row is None:
-            raise SystemExit(1)
-        print(row[0])
-    elif field == "runner_pid":
-        row = connection.execute(
-            "SELECT runner_json FROM environments WHERE name = ?", (name,)
-        ).fetchone()
-        if row is None or row[0] is None:
-            raise SystemExit(1)
-        print(json.loads(row[0])["process"]["pid"])
-    elif field == "active_artifact_generation":
-        row = connection.execute(
-            "SELECT active_artifact_generation FROM environments WHERE name = ?", (name,)
-        ).fetchone()
-        if row is None or row[0] is None:
-            raise SystemExit(1)
-        print(row[0])
-    elif field == "runner_artifact_generation":
-        row = connection.execute(
-            "SELECT runner_json FROM environments WHERE name = ?", (name,)
-        ).fetchone()
-        if row is None or row[0] is None:
-            raise SystemExit(1)
-        print(json.loads(row[0])["artifact_generation"])
-    elif field == "empty":
-        count = connection.execute("SELECT count(*) FROM environments").fetchone()[0]
-        current = connection.execute(
-            "SELECT current_environment_id FROM supervisor_settings WHERE singleton = 1"
-        ).fetchone()[0]
-        print("yes" if count == 0 and current is None else "no")
-    elif field == "contract":
-        application_id = connection.execute("PRAGMA application_id").fetchone()[0]
-        user_version = connection.execute("PRAGMA user_version").fetchone()[0]
-        journal_mode = connection.execute("PRAGMA journal_mode").fetchone()[0]
-        quick_check = connection.execute("PRAGMA quick_check(1)").fetchone()[0]
-        print(f"{application_id}:{user_version}:{journal_mode}:{quick_check}")
-    elif field == "resize_operation":
-        row = connection.execute(
-            "SELECT kind, phase, checkpoint FROM operations "
-            "WHERE kind IN ('restart', 'grow_disk') ORDER BY created_unix_ms DESC LIMIT 1"
-        ).fetchone()
-        if row is None:
-            raise SystemExit(1)
-        print(f"{row[0]}:{row[1]}:{row[2]}")
-    elif field == "journal_complete":
-        expected = {
-            "create": 7,
-            "start": 6,
-            "stop": 3,
-            "restart": 7,
-            "grow_disk": 7,
-            "delete": 5,
-            "reconcile": 2,
-        }
-        rows = connection.execute(
-            "SELECT kind, phase, checkpoint FROM operations"
-        ).fetchall()
-        complete = bool(rows) and all(
-            kind in expected and phase == "completed" and checkpoint == expected[kind]
-            for kind, phase, checkpoint in rows
-        )
-        print("yes" if complete else "no")
-    elif field == "ownership":
-        row = connection.execute(
-            "SELECT id, active_artifact_generation FROM environments WHERE name = ?", (name,)
-        ).fetchone()
-        if row is None:
-            raise SystemExit(1)
-        count = connection.execute(
-            "SELECT count(*) FROM owned_objects WHERE environment_id = ?", (row[0],)
-        ).fetchone()[0]
-        generation = row[1] or ""
-        print(f"{len(generation)}:{count}")
-    else:
-        raise SystemExit(2)
-finally:
-    connection.close()
-PY
+wait_for_journal_complete() {
+  for _attempt in {1..100}; do
+    [[ "$(native_database_value journal_complete)" == yes ]] && return 0
+    sleep 0.05
+  done
+  return 1
+}
+
+wait_for_replaced_runner_pid() {
+  local previous_pid="$1"
+  local candidate='unavailable'
+  for _attempt in {1..100}; do
+    candidate="$(native_database_value runner_pid)" || {
+      log 'runner replacement observation could not read the persisted process identity'
+      return 1
+    }
+    if [[ "$candidate" != "$previous_pid" && -d "/proc/$candidate" ]]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+    sleep 0.05
+  done
+  log "runner replacement observation timed out: previous=$previous_pid observed=$candidate observed_live=$([[ -d "/proc/$candidate" ]] && printf yes || printf no)"
+  return 1
 }
 
 copy_advanced_artifact() {
@@ -637,16 +589,30 @@ runtime_artifact_manifest_count() {
 cleanup() {
   local status=$?
   local cleanup_status=0
+  local diagnostic_runner_pid=''
   trap - EXIT HUP INT TERM
   ALLOW_REGISTRY_EGRESS=0
   CW_COMMAND_TIMEOUT_SECONDS=180
   if [[ "$ENV_CREATED" -eq 1 && ( -f "$STATE_ROOT/supervisor.db" || -f "$STATE_ROOT/state.json" ) ]]; then
-    log 'cleaning native environment after incomplete smoke'
-    if ! cw_isolated env rm --local "$NAME" --yes >/dev/null 2>&1; then
-      cleanup_status=1
+    if [[ "$status" -eq 0 ]]; then
+      log 'cleaning native environment after incomplete smoke'
+      if ! cw_isolated env rm --local "$NAME" --yes >/dev/null 2>&1; then
+        cleanup_status=1
+      fi
+    else
+      log 'stopping exact native processes while preserving failed environment state'
+      ENVIRONMENT_ID="${ENVIRONMENT_ID:-$(native_database_value environment_id 2>/dev/null || true)}"
+      diagnostic_runner_pid="$(native_database_value runner_pid 2>/dev/null || true)"
+      if [[ -n "$ENVIRONMENT_ID" && -n "$diagnostic_runner_pid" ]]; then
+        kill_recorded_process runner >/dev/null 2>&1 || true
+        wait_for_pid_death "$diagnostic_runner_pid" || cleanup_status=1
+      fi
     fi
   fi
   if ! terminate_exact_supervisor; then
+    cleanup_status=1
+  fi
+  if [[ "$status" -ne 0 ]] && ! terminate_remaining_owned_processes; then
     cleanup_status=1
   fi
   if [[ "$status" -eq 0 && "$cleanup_status" -eq 0 ]]; then
@@ -718,8 +684,8 @@ for sqlite_sidecar in "$STATE_ROOT/supervisor.db-wal" "$STATE_ROOT/supervisor.db
 done
 [[ "$(native_database_value contract)" == '1129797197:4:wal:ok' ]] ||
   die 'native supervisor database contract drifted'
-[[ "$(native_database_value journal_complete)" == yes ]] ||
-  die 'initial create returned before its lifecycle journal became terminal'
+wait_for_journal_complete ||
+  die "initial create returned before its lifecycle journal became terminal: $(native_database_value journal_summary)"
 [[ "$(native_database_value ownership)" == '64:6' ]] ||
   die 'native artifact generation or owned-object manifest was not recorded'
 if ! ORIGINAL_ARTIFACT_GENERATION="$(native_database_value active_artifact_generation)"; then
@@ -885,7 +851,7 @@ run_cw logs "$NAME" "$SESSION_ID" --raw
 log 'checking stopped offline restart remains pinned after the installed artifact lock advances'
 run_cw env stop --local "$NAME" --output json
 jq -e '.state == "stopped"' "$LAST_STDOUT" >/dev/null || die 'native environment did not stop'
-[[ "$(native_database_value journal_complete)" == yes ]] ||
+wait_for_journal_complete ||
   die 'native stop returned before its lifecycle journal became terminal'
 STOPPED_RUNNER_PID="$(native_database_value runner_pid)"
 STOPPED_SUPERVISOR_PID="$(find_exact_supervisor_pid)" ||
@@ -897,7 +863,7 @@ wait_for_pid_exit "$STOPPED_SUPERVISOR_PID" ||
   die 'pidfd runner kill did not target the stopped persisted process identity'
 wait_for_pid_death "$STOPPED_RUNNER_PID" ||
   die 'stopped runner remained live before installed artifact advance'
-[[ "$(native_database_value journal_complete)" == yes ]] ||
+wait_for_journal_complete ||
   die 'committed lifecycle journal regressed after exact supervisor and runner death'
 prepare_advanced_artifact_source
 ARTIFACT_ROOT="$ADVANCED_ARTIFACT_ROOT"
@@ -992,16 +958,17 @@ wait_for_environment_state error ||
 run_cw env --local daemon repair "$NAME" --output json
 jq -e '.replaced_pod_name == "" and .status.state == "ready" and .status.pod_name == ""' \
   "$LAST_STDOUT" >/dev/null || die 'environment daemon did not repair after exact runner death'
-RECOVERED_RUNNER_PID="$(native_database_value runner_pid)"
+RECOVERED_RUNNER_PID="$(wait_for_replaced_runner_pid "$RUNNER_PID")" ||
+  die 'runner death recovery did not publish a new live runner process identity'
 RECOVERED_VMM_PID="$(recorded_vmm_pid)"
-[[ "$RECOVERED_RUNNER_PID" != "$RUNNER_PID" && -d "/proc/$RECOVERED_RUNNER_PID" ]] ||
-  die 'runner death recovery did not produce a new live runner process'
+[[ -d "/proc/$RECOVERED_RUNNER_PID" ]] ||
+  die 'replacement runner exited before recovery verification completed'
 [[ "$RECOVERED_VMM_PID" != "$VMM_PID" && -d "/proc/$RECOVERED_VMM_PID" ]] ||
   die 'runner death recovery did not produce a new live VMM process'
 run_cw run --no-tty -- /bin/sh -lc 'cat /workspace/sentinel.txt; ./hello.sh'
 rg -qF 'persistence-ok' "$LAST_STDOUT" || die 'workspace did not survive exact runner death'
 rg -qF 'native-workspace-ok' "$LAST_STDOUT" || die 'snapshot did not survive exact runner death'
-[[ "$(native_database_value journal_complete)" == yes ]] ||
+wait_for_journal_complete ||
   die 'native lifecycle journal contains a pending or partial operation'
 
 log 'checking journaled offline disk growth and restart-applied CPU and memory'
@@ -1045,7 +1012,7 @@ DELETED_SUPERVISOR_PID="$(find_exact_supervisor_pid)" ||
   die 'runtime artifact blob remained after delete'
 [[ "$(native_database_value empty)" == yes ]] ||
   die 'native environment state entry remained after delete'
-[[ "$(native_database_value journal_complete)" == yes ]] ||
+wait_for_journal_complete ||
   die 'native delete journal did not reach its final checkpoint'
 [[ "$(cat "$WORKSPACE/README.md")" == 'host changed after environment creation' ]] ||
   die 'guest clone or environment deletion mutated the host Git worktree'
