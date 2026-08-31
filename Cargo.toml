@@ -3,6 +3,7 @@ resolver = "2"
 # The root workspace is for server/runtime/shared crates. Desktop app crates
 # are excluded so non-desktop Cargo commands never resolve GPUI/font-kit.
 members = [
+    "crates/codewire-access",
     "crates/codewire-admin-proto",
     "crates/codewire-billing",
     "crates/codewire-client",
@@ -19,6 +20,7 @@ members = [
     "crates/codewire-local-vmm",
     "crates/codewire-project",
     "crates/codewire-project-proto",
+    "crates/codewire-protected-store",
     "crates/codewire-mesh",
     "crates/codewire-oidc",
     "crates/codewire-orchestration",
@@ -44,6 +46,7 @@ authors = ["Sonica"]
 
 [workspace.dependencies]
 # Internal crates
+codewire-access = { path = "crates/codewire-access" }
 codewire-client = { path = "crates/codewire-client" }
 codewire-types = { path = "crates/codewire-types" }
 codewire-server-core = { path = "crates/codewire-server-core" }
@@ -65,6 +68,7 @@ codewire-udp-relay = { path = "crates/codewire-udp-relay" }
 codewire-vmm-guest-probe = { path = "crates/codewire-vmm-guest-probe" }
 codewire-project = { path = "crates/codewire-project" }
 codewire-project-proto = { path = "crates/codewire-project-proto" }
+codewire-protected-store = { path = "crates/codewire-protected-store" }
 
 # FFI
 uniffi = "0.31"
@@ -86,7 +90,9 @@ alacritty_terminal = "0.25"
 portable-pty = "0.9"
 
 # Async utilities
+async-io = "2"
 async-trait = "0.1"
+futures-lite = "2"
 thiserror = "2"
 anyhow = "1"
 clap = { version = "4", default-features = false, features = ["derive", "error-context", "help", "std", "usage"] }
@@ -108,6 +114,7 @@ rustix = { version = "=1.1.4", features = ["fs", "process", "thread"] }
 rusqlite = { version = "=0.32.1", features = ["bundled"] }
 
 # OAuth & Keychain
+secret-service = "5.2"
 keyring = "3"
 tiny_http = "0.12"
 open = "5"

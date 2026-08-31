@@ -1,0 +1,20 @@
+[package]
+name = "codewire-protected-store"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license = "AGPL-3.0-only"
+authors.workspace = true
+description = "Opaque fail-closed protected credential storage for Codewire authorities"
+
+[dependencies]
+thiserror = { workspace = true }
+zeroize = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+async-io = { workspace = true }
+futures-lite = { workspace = true }
+secret-service = { workspace = true, features = ["rt-async-io-crypto-rust"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { workspace = true, features = ["apple-native"] }

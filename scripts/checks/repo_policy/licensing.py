@@ -59,6 +59,7 @@ def check_license_map(_args: argparse.Namespace) -> int:
         )
 
     cargo_declarations = {
+        "crates/codewire-access/Cargo.toml": "AGPL-3.0-only",
         "crates/codewire-admin-proto/Cargo.toml": "AGPL-3.0-only",
         "crates/codewire-billing/Cargo.toml": "AGPL-3.0-only",
         "crates/codewire-cli-bin/Cargo.toml": "workspace",
@@ -80,6 +81,7 @@ def check_license_map(_args: argparse.Namespace) -> int:
         "crates/codewire-platform-native/Cargo.toml": "MIT",
         "crates/codewire-project-proto/Cargo.toml": "AGPL-3.0-only",
         "crates/codewire-project/Cargo.toml": "AGPL-3.0-only",
+        "crates/codewire-protected-store/Cargo.toml": "AGPL-3.0-only",
         "crates/codewire-proto/Cargo.toml": "AGPL-3.0-only",
         "crates/codewire-server-core/Cargo.toml": "AGPL-3.0-only",
         "crates/codewire-tailnet/Cargo.toml": "BSD-3-Clause",
