@@ -498,11 +498,16 @@ pub(crate) fn parse_resize_cpu(value: &str) -> anyhow::Result<i32> {
     Ok(millicores)
 }
 
-fn parse_resize_binary_quantity(value: &str, unit: &str, label: &str) -> anyhow::Result<i32> {
+fn parse_resize_binary_quantity(value: &str, units: &[&str], label: &str) -> anyhow::Result<i32> {
     let value = value.trim();
-    let amount = value.strip_suffix(unit).ok_or_else(|| {
-        anyhow::anyhow!("invalid {label} quantity {value:?}; use a value such as 512Mi or 4Gi")
-    })?;
+    let lowercase = value.to_ascii_lowercase();
+    let amount = units
+        .iter()
+        .find(|unit| lowercase.ends_with(**unit))
+        .map(|unit| &value[..value.len() - unit.len()])
+        .ok_or_else(|| {
+            anyhow::anyhow!("invalid {label} quantity {value:?}; use a value such as 512MB or 8GB")
+        })?;
     let amount: i32 = amount
         .parse()
         .with_context(|| format!("invalid {label} quantity {value:?}"))?;
@@ -513,16 +518,31 @@ fn parse_resize_binary_quantity(value: &str, unit: &str, label: &str) -> anyhow:
 }
 
 pub(crate) fn parse_resize_memory(value: &str) -> anyhow::Result<i32> {
-    if value.trim().ends_with("Mi") {
-        return parse_resize_binary_quantity(value, "Mi", "memory");
+    let lowercase = value.trim().to_ascii_lowercase();
+    if ["mib", "mi", "mb"]
+        .iter()
+        .any(|unit| lowercase.ends_with(unit))
+    {
+        return parse_resize_binary_quantity(value, &["mib", "mi", "mb"], "memory");
     }
-    let gib = parse_resize_binary_quantity(value, "Gi", "memory")?;
+    let gib = parse_resize_binary_quantity(value, &["gib", "gi", "gb"], "memory")?;
     gib.checked_mul(1024)
         .ok_or_else(|| anyhow::anyhow!("memory quantity {value:?} is too large"))
 }
 
 pub(crate) fn parse_resize_disk(value: &str) -> anyhow::Result<i32> {
-    parse_resize_binary_quantity(value, "Gi", "disk")
+    let lowercase = value.trim().to_ascii_lowercase();
+    if ["mib", "mi", "mb"]
+        .iter()
+        .any(|unit| lowercase.ends_with(unit))
+    {
+        let mib = parse_resize_binary_quantity(value, &["mib", "mi", "mb"], "disk")?;
+        if mib % 1024 != 0 {
+            anyhow::bail!("disk quantity must resolve to a whole GB");
+        }
+        return Ok(mib / 1024);
+    }
+    parse_resize_binary_quantity(value, &["gib", "gi", "gb"], "disk")
 }
 
 fn format_resize_cpu(millicores: i32) -> String {
@@ -1821,8 +1841,8 @@ pub(crate) fn local_create_args_from_environment_args(
         anyhow::anyhow!("legacy local creation requires --backend docker or --backend lima")
     })?;
     let cpu = parse_legacy_create_quantity(args.cpu.as_deref(), "CPU")?;
-    let memory = parse_legacy_create_quantity(args.memory.as_deref(), "memory")?;
-    let disk = parse_legacy_create_quantity(args.disk.as_deref(), "disk")?;
+    let memory = parse_create_memory(args.memory.as_deref())?.unwrap_or_default();
+    let disk = parse_create_disk(args.disk.as_deref())?.unwrap_or_default();
     Ok(LocalCreateArgs {
         backend,
         name: args.name,
@@ -2181,14 +2201,8 @@ pub(crate) fn env_create_request_from_args(
         preset_id,
         name: trimmed_optional(args.name.clone()),
         cpu_millicores: positive_i32(parse_platform_create_quantity(args.cpu.as_deref(), "CPU")?),
-        memory_mb: positive_i32(parse_platform_create_quantity(
-            args.memory.as_deref(),
-            "memory",
-        )?),
-        disk_gb: positive_i32(parse_platform_create_quantity(
-            args.disk.as_deref(),
-            "disk",
-        )?),
+        memory_mb: positive_i32(parse_create_memory(args.memory.as_deref())?),
+        disk_gb: positive_i32(parse_create_disk(args.disk.as_deref())?),
         ttl_seconds,
         preset_slug,
         repo_url,
@@ -2292,6 +2306,26 @@ fn parse_platform_create_quantity(value: Option<&str>, label: &str) -> anyhow::R
             value
                 .parse::<i32>()
                 .with_context(|| format!("platform {label} must use the existing integer unit"))
+        })
+        .transpose()
+}
+
+fn parse_create_memory(value: Option<&str>) -> anyhow::Result<Option<i32>> {
+    value
+        .map(|value| match value.parse::<i32>() {
+            Ok(value) => Ok(value),
+            Err(_) => parse_resize_memory(value)
+                .context("memory must be an integer MiB value or use MB/GB units"),
+        })
+        .transpose()
+}
+
+fn parse_create_disk(value: Option<&str>) -> anyhow::Result<Option<i32>> {
+    value
+        .map(|value| match value.parse::<i32>() {
+            Ok(value) => Ok(value),
+            Err(_) => parse_resize_disk(value)
+                .context("disk must be an integer GiB value or use GB units"),
         })
         .transpose()
 }

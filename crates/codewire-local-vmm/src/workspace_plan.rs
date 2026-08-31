@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
-use codewire_project::RepositorySpec;
+use codewire_project::{ProjectSpec, RepositorySpec};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use tokio::io::AsyncReadExt as _;
@@ -62,14 +62,13 @@ pub(crate) enum WorkspaceInput {
 
 impl WorkspacePlan {
     pub(crate) fn local(source: &WorkspaceSource) -> Result<Self, WorkspacePlanError> {
+        Self::from_inputs(vec![WorkspaceInput::local(source, "/workspace")])
+    }
+
+    pub(crate) fn from_inputs(inputs: Vec<WorkspaceInput>) -> Result<Self, WorkspacePlanError> {
         let plan = Self {
             schema_version: WORKSPACE_PLAN_SCHEMA_VERSION,
-            inputs: vec![WorkspaceInput::Local {
-                source_path: source.source_path.as_os_str().as_bytes().to_vec(),
-                identity: source.commit.clone(),
-                mode: source.mode,
-                destination: "/workspace".to_owned(),
-            }],
+            inputs,
         };
         plan.validate()?;
         Ok(plan)
@@ -78,7 +77,8 @@ impl WorkspacePlan {
     pub(crate) fn validate(&self) -> Result<(), WorkspacePlanError> {
         if self.schema_version != WORKSPACE_PLAN_SCHEMA_VERSION
             || self.inputs.is_empty()
-            || self.inputs.len() > codewire_project::MAX_REPOSITORIES + 1
+            || self.inputs.len()
+                > codewire_project::MAX_REPOSITORIES + codewire_project::MAX_LOCAL_MOUNTS
         {
             return Err(WorkspacePlanError::InvalidPlan);
         }
@@ -91,13 +91,13 @@ impl WorkspacePlan {
                 WorkspaceInput::Local {
                     source_path,
                     identity,
+                    mode,
                     destination,
-                    ..
                 } => {
                     let path = PathBuf::from(OsString::from_vec(source_path.clone()));
                     if !path.is_absolute()
                         || !valid_object_id(identity)
-                        || destination != "/workspace"
+                        || (*mode == WorkspaceSourceMode::Clone && destination != "/workspace")
                     {
                         return Err(WorkspacePlanError::InvalidPlan);
                     }
@@ -129,6 +129,52 @@ impl WorkspacePlan {
             {
                 return Err(WorkspacePlanError::OverlappingDestinations);
             }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn validate_for_project(
+        &self,
+        project: &ProjectSpec,
+    ) -> Result<(), WorkspacePlanError> {
+        self.validate()?;
+        if project.repositories.len() > self.inputs.len() {
+            return Err(WorkspacePlanError::InvalidPlan);
+        }
+        for (repository, input) in project.repositories.iter().zip(&self.inputs) {
+            let WorkspaceInput::Repository {
+                source,
+                branch,
+                destination,
+                ..
+            } = input
+            else {
+                return Err(WorkspacePlanError::InvalidPlan);
+            };
+            if source != &repository.source
+                || destination != &repository.destination
+                || (!repository.branch.is_empty() && branch != &repository.branch)
+            {
+                return Err(WorkspacePlanError::InvalidPlan);
+            }
+        }
+        if self.inputs[project.repositories.len()..]
+            .iter()
+            .any(|input| matches!(input, WorkspaceInput::Repository { .. }))
+        {
+            return Err(WorkspacePlanError::InvalidPlan);
+        }
+        if project.working_directory != "/workspace"
+            && !self.inputs.iter().any(|input| {
+                let destination = input.destination();
+                project.working_directory == destination
+                    || project
+                        .working_directory
+                        .strip_prefix(destination)
+                        .is_some_and(|suffix| suffix.starts_with('/'))
+            })
+        {
+            return Err(WorkspacePlanError::InvalidPlan);
         }
         Ok(())
     }
@@ -172,6 +218,15 @@ impl WorkspacePlan {
 }
 
 impl WorkspaceInput {
+    pub(crate) fn local(source: &WorkspaceSource, destination: &str) -> Self {
+        Self::Local {
+            source_path: source.source_path.as_os_str().as_bytes().to_vec(),
+            identity: source.commit.clone(),
+            mode: source.mode,
+            destination: destination.to_owned(),
+        }
+    }
+
     pub(crate) fn destination(&self) -> &str {
         match self {
             Self::Local { destination, .. } | Self::Repository { destination, .. } => destination,
@@ -195,6 +250,16 @@ impl WorkspaceInput {
     }
 }
 
+pub(crate) fn validate_local_mount_destination(
+    destination: &str,
+) -> Result<(), WorkspacePlanError> {
+    validate_destination(destination)?;
+    if destination == "/workspace" {
+        return Err(WorkspacePlanError::InvalidPlan);
+    }
+    Ok(())
+}
+
 pub(crate) async fn prepare_repository_plan(
     engine_state_root: &Path,
     repositories: &[RepositorySpec],
@@ -208,12 +273,7 @@ pub(crate) async fn prepare_repository_plan(
     for repository in repositories {
         inputs.push(prepare_repository(&root, &content, repository).await?);
     }
-    let plan = WorkspacePlan {
-        schema_version: WORKSPACE_PLAN_SCHEMA_VERSION,
-        inputs,
-    };
-    plan.validate()?;
-    Ok(plan)
+    WorkspacePlan::from_inputs(inputs)
 }
 
 async fn prepare_repository(
@@ -722,6 +782,53 @@ mod tests {
         let plan = WorkspacePlan::local(&source).unwrap();
         let bytes = plan.encode_canonical().unwrap();
         assert_eq!(WorkspacePlan::decode_canonical(&bytes).unwrap(), plan);
+    }
+
+    #[test]
+    fn mixed_plans_bind_project_destinations_and_working_directory() {
+        let source = WorkspaceSource {
+            source_path: PathBuf::from("/host/fixtures"),
+            commit: "d".repeat(40),
+            mode: WorkspaceSourceMode::Copy,
+        };
+        let digest = Sha256Digest::parse(&format!("sha256:{}", "a".repeat(64))).unwrap();
+        let plan = WorkspacePlan::from_inputs(vec![
+            WorkspaceInput::Repository {
+                source: "https://example.test/org/app.git".to_owned(),
+                commit: "b".repeat(40),
+                branch: "main".to_owned(),
+                destination: "/workspace/app".to_owned(),
+                bundle_digest: digest,
+                bundle_size: 1,
+            },
+            WorkspaceInput::local(&source, "/workspace/fixtures"),
+        ])
+        .unwrap();
+        let project = ProjectSpec {
+            repositories: vec![RepositorySpec {
+                source: "https://example.test/org/app.git".to_owned(),
+                revision: String::new(),
+                branch: "main".to_owned(),
+                destination: "/workspace/app".to_owned(),
+            }],
+            working_directory: "/workspace/fixtures/subdir".to_owned(),
+            ..ProjectSpec::default()
+        };
+        plan.validate_for_project(&project).unwrap();
+
+        let mut mismatched = project;
+        mismatched.working_directory = "/workspace/missing".to_owned();
+        assert!(matches!(
+            plan.validate_for_project(&mismatched),
+            Err(WorkspacePlanError::InvalidPlan)
+        ));
+    }
+
+    #[test]
+    fn explicit_local_mount_destinations_must_be_below_workspace_root() {
+        assert!(validate_local_mount_destination("/workspace/fixtures").is_ok());
+        assert!(validate_local_mount_destination("/workspace").is_err());
+        assert!(validate_local_mount_destination("/tmp/fixtures").is_err());
     }
 
     #[tokio::test]

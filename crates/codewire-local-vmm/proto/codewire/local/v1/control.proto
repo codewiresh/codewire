@@ -64,7 +64,8 @@ enum OperationPhase {
 }
 
 // The next bounded, auditable lifecycle effect. Raw host paths, process output,
-// guest serial data, credentials and daemon capabilities never enter this API.
+// guest serial data, credentials and daemon capabilities never enter operation
+// progress or its public projection.
 enum OperationStage {
   OPERATION_STAGE_UNSPECIFIED = 0;
   OPERATION_STAGE_RECORD_ENVIRONMENT = 1;
@@ -152,6 +153,24 @@ message CreateEnvironmentRequest {
   // when the portable project declares repositories; otherwise exactly clone
   // or copy after CLI-side auto resolution.
   string implicit_path_mode = 9;
+  // Local-only explicit filesystem grants. Source paths are canonical host
+  // bytes and never enter the portable project contract or the guest. Copy is
+  // supported first; direct remains fail-closed until its VMM attachment and
+  // confinement contract is implemented.
+  repeated LocalMountInput local_mounts = 10;
+}
+
+enum LocalMountMode {
+  LOCAL_MOUNT_MODE_UNSPECIFIED = 0;
+  LOCAL_MOUNT_MODE_COPY = 1;
+  LOCAL_MOUNT_MODE_DIRECT = 2;
+}
+
+message LocalMountInput {
+  bytes source_path = 1;
+  string destination = 2;
+  LocalMountMode mode = 3;
+  optional bool read_only = 4;
 }
 
 message EnvironmentSelector {

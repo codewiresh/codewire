@@ -596,9 +596,9 @@ pub(crate) struct EnvCreateArgs {
     ttl: Option<String>,
     #[arg(long, value_name = "QUANTITY", help = "CPU resource quantity")]
     cpu: Option<String>,
-    #[arg(long, value_name = "QUANTITY", help = "Memory resource quantity")]
+    #[arg(long, value_name = "QUANTITY", help = "Memory (for example 8GB)")]
     memory: Option<String>,
-    #[arg(long, value_name = "QUANTITY", help = "Disk resource quantity")]
+    #[arg(long, value_name = "QUANTITY", help = "Disk size (for example 40GB)")]
     disk: Option<String>,
     #[arg(long, value_parser = ["standard", "confidential"], help = "Product isolation tier")]
     isolation: Option<String>,
@@ -691,10 +691,10 @@ pub(crate) struct EnvResizeArgs {
     #[arg(
         long,
         value_name = "MEMORY",
-        help = "Memory (for example 512Mi or 4Gi)"
+        help = "Memory (for example 512MB or 8GB)"
     )]
     pub(crate) memory: Option<String>,
-    #[arg(long, value_name = "DISK", help = "Disk size (for example 20Gi)")]
+    #[arg(long, value_name = "DISK", help = "Disk size (for example 40GB)")]
     pub(crate) disk: Option<String>,
     #[arg(
         long,

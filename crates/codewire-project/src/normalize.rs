@@ -26,7 +26,10 @@ pub(super) fn normalize_raw_project(raw: RawProject) -> Result<ProjectDocument, 
     enforce_count("mounts", raw.mounts.len(), MAX_LOCAL_MOUNTS)?;
 
     let repositories = normalize_repositories(raw.repositories)?;
-    let working_directory = normalize_working_directory(&raw.working_directory, &repositories)?;
+    let mounts = normalize_mounts(raw.mounts)?;
+    let working_directory_explicit = !raw.working_directory.trim().is_empty();
+    let working_directory =
+        normalize_working_directory(&raw.working_directory, &repositories, &mounts)?;
     let agents = normalize_agents(raw.agents, &raw.agent, raw.install_agents)?;
     let skills = normalize_skills(raw.skills)?;
     let (application_ports, host_ports) = normalize_ports(raw.ports)?;
@@ -42,7 +45,6 @@ pub(super) fn normalize_raw_project(raw: RawProject) -> Result<ProjectDocument, 
         raw.include_user_secrets,
     )?;
     let credentials = normalize_credentials(raw.credentials)?;
-    let mounts = normalize_mounts(raw.mounts)?;
     validate_workspace_input_destinations(&repositories, &mounts)?;
     let environment = normalize_environment("environment", raw.environment)?;
     let agent_environment = normalize_environment("agent_env", raw.agent_env)?;
@@ -66,6 +68,7 @@ pub(super) fn normalize_raw_project(raw: RawProject) -> Result<ProjectDocument, 
             credentials,
         },
         local: LocalProjectIntent { mounts, host_ports },
+        working_directory_explicit,
     };
     document.spec.validate()?;
     Ok(document)
@@ -261,16 +264,18 @@ fn normalize_repositories(
 fn normalize_working_directory(
     working_directory: &str,
     repositories: &[RepositorySpec],
+    mounts: &[LocalMountIntent],
 ) -> Result<String, ProjectError> {
     let working_directory = short_value("working_directory", working_directory)?;
     if !working_directory.is_empty() {
         validate_workspace_path("working_directory", &working_directory, true)?;
         return Ok(working_directory);
     }
-    Ok(match repositories {
-        [repository] => repository.destination.clone(),
-        _ => WORKSPACE_ROOT.to_string(),
-    })
+    match (repositories, mounts) {
+        ([repository], []) => Ok(repository.destination.clone()),
+        ([], [mount]) => Ok(mount.destination.clone()),
+        _ => Ok(WORKSPACE_ROOT.to_string()),
+    }
 }
 
 fn normalize_agents(
@@ -502,19 +507,19 @@ fn normalize_binary_quantity(
         }
         RawQuantity::String(value) => {
             let value = value.trim();
-            let (number, multiplier) = if let Some(number) = value
-                .strip_suffix("GiB")
-                .or_else(|| value.strip_suffix("Gi"))
-            {
-                (number, 1024_u64)
-            } else if let Some(number) = value
-                .strip_suffix("MiB")
-                .or_else(|| value.strip_suffix("Mi"))
-            {
-                (number, 1_u64)
+            let lowercase = value.to_ascii_lowercase();
+            let (suffix_len, multiplier) = if lowercase.ends_with("gib") {
+                (3, 1024_u64)
+            } else if lowercase.ends_with("gi") || lowercase.ends_with("gb") {
+                (2, 1024_u64)
+            } else if lowercase.ends_with("mib") {
+                (3, 1_u64)
+            } else if lowercase.ends_with("mi") || lowercase.ends_with("mb") {
+                (2, 1_u64)
             } else {
-                (value, default_multiplier_mib)
+                (0, default_multiplier_mib)
             };
+            let number = &value[..value.len() - suffix_len];
             let number = number
                 .trim()
                 .parse::<u64>()
