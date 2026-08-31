@@ -14,11 +14,14 @@ use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
 use rustix::fs::{Dir, Mode, OFlags, ResolveFlags, openat2, readlinkat};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
 
 use crate::linux::path::{PrivateRoot, current_uid};
 use crate::linux::state::{MINIMUM_STATE_DISK_BYTES, StateDiskIdentity, VmPaths};
+use crate::oci::ContentStore;
+use crate::workspace_plan::{WorkspaceInput, WorkspacePlan};
 
 const GIT: &str = "/usr/bin/git";
 const MAX_GIT_CONTROL_OUTPUT: usize = 16 * 1024 * 1024;
@@ -43,7 +46,8 @@ pub enum WorkspaceSelection {
     Direct,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
 pub enum WorkspaceSourceMode {
     Clone,
     Copy,
@@ -62,6 +66,12 @@ pub struct WorkspaceSource {
     pub source_path: PathBuf,
     pub commit: String,
     pub mode: WorkspaceSourceMode,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WorkspacePlanSnapshot {
+    pub(crate) plan_sha256: String,
+    pub(crate) state_disk: PathBuf,
 }
 
 #[derive(Debug)]
@@ -342,6 +352,196 @@ pub fn ensure_workspace(
     }
 }
 
+pub(crate) fn ensure_workspace_plan(
+    engine_state_root: &Path,
+    vm_id: Uuid,
+    plan: &WorkspacePlan,
+    disk_bytes: u64,
+) -> Result<WorkspacePlanSnapshot, WorkspaceError> {
+    plan.validate()?;
+    let plan_sha256 = plan.sha256()?;
+    let engine_root = PrivateRoot::open(engine_state_root)?;
+    let paths = VmPaths::create(&engine_root, vm_id)?;
+    cleanup_provisioning_staging(&engine_root, vm_id)?;
+    match fs::symlink_metadata(&paths.state_disk) {
+        Ok(_) => {
+            let identity = StateDiskIdentity::capture(&paths.state_disk)?;
+            if identity.file.size != disk_bytes {
+                return Err(WorkspaceError::ExistingDiskSizeMismatch {
+                    path: paths.state_disk,
+                    expected: disk_bytes,
+                    actual: identity.file.size,
+                });
+            }
+            Ok(WorkspacePlanSnapshot {
+                plan_sha256,
+                state_disk: paths.state_disk,
+            })
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            provision_workspace_plan(engine_state_root, vm_id, plan, disk_bytes)
+        }
+        Err(source_error) => Err(WorkspaceError::Io {
+            path: paths.state_disk,
+            source: source_error,
+        }),
+    }
+}
+
+fn provision_workspace_plan(
+    engine_state_root: &Path,
+    vm_id: Uuid,
+    plan: &WorkspacePlan,
+    disk_bytes: u64,
+) -> Result<WorkspacePlanSnapshot, WorkspaceError> {
+    plan.validate()?;
+    if disk_bytes < MINIMUM_STATE_DISK_BYTES
+        || !disk_bytes.is_multiple_of(1024 * 1024)
+        || disk_bytes <= MINIMUM_EXT4_HEADROOM
+    {
+        return Err(WorkspaceError::InvalidDiskSize(disk_bytes));
+    }
+    let engine_root = PrivateRoot::open(engine_state_root)?;
+    let content = ContentStore::create(&engine_root)?;
+    let paths = VmPaths::create(&engine_root, vm_id)?;
+    cleanup_provisioning_staging(&engine_root, vm_id)?;
+    if fs::symlink_metadata(&paths.state_disk).is_ok() {
+        return Err(WorkspaceError::StateDiskAlreadyExists(paths.state_disk));
+    }
+    let staging_name = provisioning_staging_name(vm_id);
+    let staging_dir = engine_root.create_dir(Path::new(&staging_name), 0o700)?;
+    let mut cleanup = ProvisionCleanup::new(staging_dir.clone(), paths.state_disk.clone());
+    let workspace = staging_dir.join("workspace");
+    let home = staging_dir.join("home");
+    fs::create_dir(&workspace).map_err(|source| WorkspaceError::Io {
+        path: workspace.clone(),
+        source,
+    })?;
+    fs::set_permissions(&workspace, fs::Permissions::from_mode(0o755)).map_err(|source| {
+        WorkspaceError::Io {
+            path: workspace.clone(),
+            source,
+        }
+    })?;
+    fs::create_dir(&home).map_err(|source| WorkspaceError::Io {
+        path: home.clone(),
+        source,
+    })?;
+    fs::set_permissions(&home, fs::Permissions::from_mode(0o700)).map_err(|source| {
+        WorkspaceError::Io {
+            path: home.clone(),
+            source,
+        }
+    })?;
+
+    for input in &plan.inputs {
+        let destination = staging_workspace_destination(&staging_dir, input.destination())?;
+        if let Some(parent) = destination.parent() {
+            fs::create_dir_all(parent).map_err(|source| WorkspaceError::Io {
+                path: parent.to_owned(),
+                source,
+            })?;
+        }
+        match input {
+            WorkspaceInput::Local { identity, mode, .. } => {
+                let source = input
+                    .local_source()
+                    .ok_or(WorkspaceError::InvalidWorkspacePlan)?;
+                let admitted = inspect_workspace(
+                    &source.source_path,
+                    match mode {
+                        WorkspaceSourceMode::Clone => WorkspaceSelection::Clone,
+                        WorkspaceSourceMode::Copy => WorkspaceSelection::Copy,
+                    },
+                    workspace_content_limit(disk_bytes),
+                )?;
+                if admitted != source {
+                    return Err(WorkspaceError::SourceChanged);
+                }
+                match mode {
+                    WorkspaceSourceMode::Clone => {
+                        prepare_git_clone(&source, &destination, &staging_dir)?;
+                    }
+                    WorkspaceSourceMode::Copy => {
+                        let manifest = copy_directory_manifest(
+                            &open_source_directory(&source.source_path)?,
+                            Some(&destination),
+                            workspace_content_limit(disk_bytes),
+                        )?;
+                        if &manifest.sha256 != identity {
+                            return Err(WorkspaceError::SourceChanged);
+                        }
+                    }
+                }
+            }
+            WorkspaceInput::Repository {
+                source,
+                commit,
+                branch,
+                bundle_digest,
+                bundle_size,
+                ..
+            } => {
+                let bundle = content.verified_blob_path(bundle_digest, *bundle_size)?;
+                prepare_git_bundle(&bundle, &destination, &staging_dir, source, commit, branch)?;
+            }
+        }
+    }
+    bounded_staging_regular_bytes(&workspace, workspace_content_limit(disk_bytes))?;
+
+    let disk = OpenOptions::new()
+        .create_new(true)
+        .read(true)
+        .write(true)
+        .mode(0o600)
+        .open(&paths.state_disk)
+        .map_err(|source| WorkspaceError::Io {
+            path: paths.state_disk.clone(),
+            source,
+        })?;
+    disk.set_len(disk_bytes)
+        .map_err(|source| WorkspaceError::Io {
+            path: paths.state_disk.clone(),
+            source,
+        })?;
+    drop(disk);
+    format_ext4(&staging_dir, &paths.state_disk)?;
+    File::open(&paths.state_disk)
+        .and_then(|file| file.sync_all())
+        .and_then(|()| File::open(&paths.disks_dir)?.sync_all())
+        .map_err(|source| WorkspaceError::Io {
+            path: paths.state_disk.clone(),
+            source,
+        })?;
+
+    cleanup.remove_staging()?;
+    cleanup.disarm_disk();
+    Ok(WorkspacePlanSnapshot {
+        plan_sha256: plan.sha256()?,
+        state_disk: paths.state_disk,
+    })
+}
+
+fn staging_workspace_destination(
+    staging: &Path,
+    destination: &str,
+) -> Result<PathBuf, WorkspaceError> {
+    if destination == "/workspace" {
+        return Ok(staging.join("workspace"));
+    }
+    let relative = destination
+        .strip_prefix("/workspace/")
+        .ok_or(WorkspaceError::InvalidWorkspacePlan)?;
+    if relative.is_empty()
+        || relative
+            .split('/')
+            .any(|component| component.is_empty() || matches!(component, "." | ".."))
+    {
+        return Err(WorkspaceError::InvalidWorkspacePlan);
+    }
+    Ok(staging.join("workspace").join(relative))
+}
+
 fn provisioning_staging_name(vm_id: Uuid) -> String {
     format!("provision-{vm_id}")
 }
@@ -419,6 +619,7 @@ fn git_output(
         .env_clear()
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_NO_LAZY_FETCH", "1")
         .env("GIT_OPTIONAL_LOCKS", "0")
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("LC_ALL", "C")
@@ -983,6 +1184,172 @@ fn prepare_git_clone(
     Ok(())
 }
 
+fn prepare_git_bundle(
+    bundle: &Path,
+    workspace: &Path,
+    staging: &Path,
+    source: &str,
+    commit: &str,
+    branch: &str,
+) -> Result<(), WorkspaceError> {
+    if !valid_object_id(commit) {
+        return Err(WorkspaceError::InvalidCommit);
+    }
+    let template = staging.join(format!("git-template-{}", Uuid::new_v4()));
+    fs::create_dir(&template).map_err(|source_error| WorkspaceError::Io {
+        path: template.clone(),
+        source: source_error,
+    })?;
+    import_git_bundle(bundle, workspace, &template)?;
+    fs::remove_dir(&template).map_err(|source_error| WorkspaceError::Io {
+        path: template,
+        source: source_error,
+    })?;
+    git_output(
+        workspace,
+        &["checkout", "--detach", "--force", commit],
+        MAX_GIT_CONTROL_OUTPUT,
+    )?;
+    let head = git_text(workspace, &["rev-parse", "--verify", "HEAD^{commit}"])?;
+    if head.trim() != commit {
+        return Err(WorkspaceError::SourceChanged);
+    }
+    reject_git_submodules(workspace, commit)?;
+    let object_format = git_text(workspace, &["rev-parse", "--show-object-format"])?;
+    remove_git_trace_files(workspace)?;
+    remove_unselected_git_refs(workspace)?;
+    if !branch.is_empty() {
+        let local_ref = format!("refs/heads/{branch}");
+        let remote_ref = format!("refs/remotes/origin/{branch}");
+        git_output(
+            workspace,
+            &["update-ref", &local_ref, commit],
+            MAX_GIT_CONTROL_OUTPUT,
+        )?;
+        git_output(
+            workspace,
+            &["update-ref", &remote_ref, commit],
+            MAX_GIT_CONTROL_OUTPUT,
+        )?;
+        git_output(
+            workspace,
+            &["symbolic-ref", "HEAD", &local_ref],
+            MAX_GIT_CONTROL_OUTPUT,
+        )?;
+        git_output(
+            workspace,
+            &["reset", "--hard", commit],
+            MAX_GIT_CONTROL_OUTPUT,
+        )?;
+    }
+    write_repository_git_config(workspace, object_format.trim(), source, branch)?;
+    git_output(
+        workspace,
+        &["reflog", "expire", "--expire=now", "--all"],
+        MAX_GIT_CONTROL_OUTPUT,
+    )?;
+    git_output(workspace, &["repack", "-Ad"], MAX_GIT_CONTROL_OUTPUT)?;
+    git_output(
+        workspace,
+        &["prune", "--expire=now"],
+        MAX_GIT_CONTROL_OUTPUT,
+    )?;
+    let alternates = workspace.join(".git/objects/info/alternates");
+    if fs::symlink_metadata(&alternates).is_ok() {
+        return Err(WorkspaceError::GitAlternatesPresent);
+    }
+    let status = git_output(
+        workspace,
+        &[
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "--untracked-files=all",
+            "--ignore-submodules=none",
+        ],
+        MAX_GIT_CONTROL_OUTPUT,
+    )?;
+    if !status.stdout.is_empty() {
+        return Err(WorkspaceError::GitCloneNotClean);
+    }
+    Ok(())
+}
+
+fn import_git_bundle(
+    bundle: &Path,
+    destination: &Path,
+    template: &Path,
+) -> Result<(), WorkspaceError> {
+    let initialized = Command::new(GIT)
+        .args([
+            "-c",
+            "core.fsmonitor=false",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "init",
+            "--quiet",
+            "--template",
+        ])
+        .arg(template)
+        .arg("--")
+        .arg(destination)
+        .env_clear()
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_ASKPASS", "/bin/false")
+        .env("GIT_NO_LAZY_FETCH", "1")
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("LC_ALL", "C")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map_err(|_| WorkspaceError::GitUnavailable)?;
+    if !initialized.success() {
+        return Err(WorkspaceError::GitCloneFailed);
+    }
+
+    let fetched = Command::new(GIT)
+        .args([
+            "-c",
+            "credential.helper=",
+            "-c",
+            "core.fsmonitor=false",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "protocol.file.allow=always",
+            "fetch",
+            "--quiet",
+            "--no-tags",
+            "--force",
+            "--no-write-fetch-head",
+            "--no-recurse-submodules",
+            "--",
+        ])
+        .arg(bundle)
+        .arg("refs/codewire/source:refs/codewire/source")
+        .env_clear()
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_ASKPASS", "/bin/false")
+        .env("GIT_NO_LAZY_FETCH", "1")
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("LC_ALL", "C")
+        .current_dir(destination)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map_err(|_| WorkspaceError::GitUnavailable)?;
+    if !fetched.success() {
+        return Err(WorkspaceError::GitCloneFailed);
+    }
+    Ok(())
+}
+
 fn git_clone_output(
     source: &Path,
     destination: &Path,
@@ -1009,6 +1376,7 @@ fn git_clone_output(
         .env_clear()
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_NO_LAZY_FETCH", "1")
         .env("GIT_OPTIONAL_LOCKS", "0")
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("LC_ALL", "C")
@@ -1063,6 +1431,46 @@ fn write_sanitized_git_config(workspace: &Path, object_format: &str) -> Result<(
             path: config,
             source: source_error,
         })
+}
+
+fn write_repository_git_config(
+    workspace: &Path,
+    object_format: &str,
+    source: &str,
+    branch: &str,
+) -> Result<(), WorkspaceError> {
+    write_sanitized_git_config(workspace, object_format)?;
+    git_output(
+        workspace,
+        &["config", "--local", "remote.origin.url", source],
+        MAX_GIT_CONTROL_OUTPUT,
+    )?;
+    git_output(
+        workspace,
+        &[
+            "config",
+            "--local",
+            "remote.origin.fetch",
+            "+refs/heads/*:refs/remotes/origin/*",
+        ],
+        MAX_GIT_CONTROL_OUTPUT,
+    )?;
+    if !branch.is_empty() {
+        let remote_key = format!("branch.{branch}.remote");
+        let merge_key = format!("branch.{branch}.merge");
+        let merge_ref = format!("refs/heads/{branch}");
+        git_output(
+            workspace,
+            &["config", "--local", &remote_key, "origin"],
+            MAX_GIT_CONTROL_OUTPUT,
+        )?;
+        git_output(
+            workspace,
+            &["config", "--local", &merge_key, &merge_ref],
+            MAX_GIT_CONTROL_OUTPUT,
+        )?;
+    }
+    Ok(())
 }
 
 fn remove_git_trace_files(workspace: &Path) -> Result<(), WorkspaceError> {
@@ -1261,6 +1669,8 @@ pub enum WorkspaceError {
     BareRepository,
     #[error("workspace source identity is invalid")]
     InvalidCommit,
+    #[error("workspace input plan is invalid")]
+    InvalidWorkspacePlan,
     #[error(
         "workspace has local Git changes; commit them, use --path-mode copy for a point-in-time directory snapshot, or declare an explicit direct mount"
     )]
@@ -1332,6 +1742,10 @@ pub enum WorkspaceError {
     Path(#[from] crate::linux::path::PathError),
     #[error(transparent)]
     State(#[from] crate::linux::state::StateError),
+    #[error(transparent)]
+    Plan(#[from] crate::workspace_plan::WorkspacePlanError),
+    #[error(transparent)]
+    Content(#[from] crate::oci::ContentStoreError),
     #[error("filesystem operation failed for {path}: {source}")]
     Io { path: PathBuf, source: io::Error },
 }
@@ -1701,6 +2115,82 @@ mod tests {
             inspect_workspace(source.path(), WorkspaceSelection::Clone, MAXIMUM_COPY_BYTES,),
             Err(WorkspaceError::DirtyWorktree)
         ));
+    }
+
+    #[test]
+    fn repository_bundle_imports_only_the_resolved_commit_with_a_safe_origin() {
+        let source = tempfile::tempdir().unwrap();
+        git(source.path(), &["init", "-q"]);
+        fs::write(source.path().join("README.md"), b"bundled\n").unwrap();
+        git(source.path(), &["add", "README.md"]);
+        git(
+            source.path(),
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.invalid",
+                "commit",
+                "-q",
+                "-m",
+                "initial",
+            ],
+        );
+        let commit = git_text(source.path(), &["rev-parse", "HEAD"])
+            .unwrap()
+            .trim()
+            .to_owned();
+        git(
+            source.path(),
+            &["update-ref", "refs/codewire/source", &commit],
+        );
+
+        let staging = tempfile::tempdir().unwrap();
+        let bundle = staging.path().join("source.bundle");
+        let status = Command::new(GIT)
+            .args(["bundle", "create"])
+            .arg(&bundle)
+            .arg("refs/codewire/source")
+            .current_dir(source.path())
+            .env_clear()
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("LC_ALL", "C")
+            .status()
+            .unwrap();
+        assert!(status.success());
+
+        let workspace = staging.path().join("workspace");
+        prepare_git_bundle(
+            &bundle,
+            &workspace,
+            staging.path(),
+            "https://example.invalid/acme/repository.git",
+            &commit,
+            "main",
+        )
+        .unwrap();
+
+        assert_eq!(fs::read(workspace.join("README.md")).unwrap(), b"bundled\n");
+        assert_eq!(
+            git_text(&workspace, &["rev-parse", "HEAD"]).unwrap().trim(),
+            commit
+        );
+        let config = fs::read_to_string(workspace.join(".git/config")).unwrap();
+        assert!(config.contains("https://example.invalid/acme/repository.git"));
+        assert!(!config.contains(source.path().to_string_lossy().as_ref()));
+        assert!(!config.contains(bundle.to_string_lossy().as_ref()));
+        assert!(!config.contains("credential"));
+        assert_eq!(
+            git_text(&workspace, &["symbolic-ref", "HEAD"])
+                .unwrap()
+                .trim(),
+            "refs/heads/main"
+        );
+        assert_eq!(
+            git_text(&workspace, &["for-each-ref", "--format=%(refname)"],).unwrap(),
+            "refs/heads/main\nrefs/remotes/origin/main\n"
+        );
     }
 
     #[test]

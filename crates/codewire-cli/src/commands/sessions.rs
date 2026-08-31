@@ -26,6 +26,7 @@ enum EnvironmentSessionTarget {
     NativeLocal {
         target: config::CurrentTargetConfig,
         name: String,
+        working_dir: String,
     },
     Local {
         target: config::CurrentTargetConfig,
@@ -320,7 +321,7 @@ impl EnvironmentSessionTarget {
     fn default_working_dir(&self) -> String {
         match self {
             #[cfg(target_os = "linux")]
-            Self::NativeLocal { .. } => LOCAL_WORKSPACE_PATH.to_string(),
+            Self::NativeLocal { working_dir, .. } => working_dir.clone(),
             Self::Local { instance, .. } => local_environment_session_working_dir(instance),
             Self::Platform { .. } => LOCAL_WORKSPACE_PATH.to_string(),
         }
@@ -337,12 +338,12 @@ async fn resolve_environment_session_target(
     match environment.and_then(trimmed_str) {
         Some(name) => {
             if let Some(environment) = native_environment(name).await? {
-                return Ok(native_session_target(environment.name));
+                return Ok(native_session_target(environment));
             }
         }
         None => {
             if let Some(environment) = native_selected_environment().await? {
-                return Ok(native_session_target(environment.name));
+                return Ok(native_session_target(environment));
             }
         }
     }
@@ -356,7 +357,11 @@ async fn resolve_environment_session_target(
 }
 
 #[cfg(target_os = "linux")]
-fn native_session_target(name: String) -> EnvironmentSessionTarget {
+fn native_session_target(
+    environment: codewire_local_vmm::control::v1::Environment,
+) -> EnvironmentSessionTarget {
+    let working_dir = native_environment_session_working_dir(&environment);
+    let name = environment.name;
     EnvironmentSessionTarget::NativeLocal {
         target: config::CurrentTargetConfig {
             kind: "local".to_string(),
@@ -364,7 +369,17 @@ fn native_session_target(name: String) -> EnvironmentSessionTarget {
             name: name.clone(),
         },
         name,
+        working_dir,
     }
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn native_environment_session_working_dir(
+    environment: &codewire_local_vmm::control::v1::Environment,
+) -> String {
+    trimmed_str(&environment.working_directory)
+        .unwrap_or(LOCAL_WORKSPACE_PATH)
+        .to_owned()
 }
 
 async fn environment_session_target_from_current(

@@ -76,7 +76,6 @@ export interface ProjectSpec {
   resources?: ProjectResources;
   secrets?: ProjectSecretBindings;
   credentials?: { [key: string]: ProjectCredentialReference };
-  workspace_mode: "auto" | "clone" | "direct";
 }
 
 interface SetupAgentInput {

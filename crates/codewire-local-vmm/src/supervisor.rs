@@ -54,11 +54,12 @@ use crate::supervisor_store::{
 };
 use crate::uds::{UdsError, bind_owner_only_listener, connect_owner_only, remove_bound_socket};
 use crate::workspace::{
-    WorkspaceError, WorkspaceSelection, WorkspaceSource, WorkspaceSourceMode,
-    cleanup_interrupted_workspace_provisioning, ensure_workspace, inspect_workspace,
+    WorkspaceError, WorkspaceSelection, WorkspaceSourceMode,
+    cleanup_interrupted_workspace_provisioning, ensure_workspace_plan, inspect_workspace,
     workspace_content_limit,
 };
 use crate::workspace_generation::{WorkspaceGenerationError, WorkspaceGenerationRecord};
+use crate::workspace_plan::{WorkspacePlan, WorkspacePlanError, prepare_repository_plan};
 
 pub(crate) const SUPERVISOR_STATE_SCHEMA: u32 = 1;
 const RUNNER_START_TIMEOUT: Duration = Duration::from_secs(15);
@@ -580,8 +581,7 @@ pub(crate) struct EnvironmentRecord {
     pub(crate) memory_mib: u32,
     pub(crate) disk_bytes: u64,
     pub(crate) generation: u64,
-    pub(crate) workspace_commit: String,
-    pub(crate) source_path: PathBuf,
+    pub(crate) workspace_plan: WorkspacePlan,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) project_spec_json: Option<Vec<u8>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -609,10 +609,19 @@ impl EnvironmentRecord {
             memory_mib: self.memory_mib,
             disk_bytes: self.disk_bytes,
             generation: self.generation,
-            workspace_commit: self.workspace_commit.clone(),
-            source_path: self.source_path.to_string_lossy().into_owned(),
             selected,
             project_spec_sha256: self.project_spec_sha256.clone().unwrap_or_default(),
+            workspace_plan_sha256: self.workspace_plan.sha256().unwrap_or_default(),
+            workspace_input_count: u32::try_from(self.workspace_plan.inputs.len())
+                .unwrap_or_default(),
+            working_directory: self
+                .project_spec_json
+                .as_deref()
+                .and_then(|bytes| {
+                    serde_json::from_slice::<codewire_project::ProjectSpec>(bytes).ok()
+                })
+                .map(|project| project.working_directory)
+                .unwrap_or_default(),
         }
     }
 
@@ -863,7 +872,7 @@ impl EnvironmentRecord {
             || !(128..=65_536).contains(&self.memory_mib)
             || self.disk_bytes < crate::linux::state::MINIMUM_STATE_DISK_BYTES
             || !self.disk_bytes.is_multiple_of(1024 * 1024)
-            || !valid_object_id(&self.workspace_commit)
+            || self.workspace_plan.validate().is_err()
             || match (&self.project_spec_json, &self.project_spec_sha256) {
                 (None, None) => true,
                 (Some(bytes), Some(digest)) => {
@@ -884,7 +893,6 @@ impl EnvironmentRecord {
                 && self.active_workspace_generation.is_none())
             || duplicate_workspace_generation(active_storage.as_ref(), rollback_storage.as_ref())
             || duplicate_workspace_generation(staging_storage.as_ref(), rollback_storage.as_ref())
-            || !self.source_path.is_absolute()
         {
             return Err(SupervisorError::InvalidState);
         }
@@ -1083,12 +1091,39 @@ impl SupervisorCore {
         Ok(artifact_generation)
     }
 
+    async fn prepare_create_workspace_plan(
+        &mut self,
+        request: &v1::CreateEnvironmentRequest,
+    ) -> Result<WorkspacePlan, SupervisorError> {
+        let project: codewire_project::ProjectSpec =
+            serde_json::from_slice(&request.project_spec_json)
+                .map_err(|_| SupervisorError::InvalidRequest)?;
+        if project.repositories.is_empty() {
+            let requested_source = PathBuf::from(&request.source_path);
+            let path_mode = parse_implicit_path_mode(&request.implicit_path_mode)?;
+            let maximum_copy_bytes = workspace_content_limit(request.disk_bytes);
+            let source = tokio::task::spawn_blocking(move || {
+                inspect_workspace(
+                    &requested_source,
+                    workspace_selection(path_mode),
+                    maximum_copy_bytes,
+                )
+            })
+            .await
+            .map_err(|_| SupervisorError::WorkspaceProvisionTask)??;
+            return WorkspacePlan::local(&source).map_err(Into::into);
+        }
+        prepare_repository_plan(&self.config.engine_root(), &project.repositories)
+            .await
+            .map_err(Into::into)
+    }
+
     async fn stage_workspace_generation(
         &mut self,
         name: &str,
     ) -> Result<SupervisorState, SupervisorError> {
         self.collect_unreferenced_workspace_roots(name)?;
-        self.collect_unreferenced_oci_content()?;
+        self.collect_unreferenced_content()?;
         self.collect_unreferenced_runtime_artifacts()?;
         let (project_json, project_sha256, artifact_generation) = {
             let environment = self.environment(name)?;
@@ -1166,7 +1201,7 @@ impl SupervisorCore {
             return Err(SupervisorError::InvalidState);
         };
         self.collect_unreferenced_workspace_roots(name)?;
-        self.collect_unreferenced_oci_content()?;
+        self.collect_unreferenced_content()?;
         self.collect_unreferenced_runtime_artifacts()?;
         {
             let environment = self.environment(name)?;
@@ -1254,7 +1289,7 @@ impl SupervisorCore {
         cleanup_unreferenced_root_generations(&paths, &retained).map_err(Into::into)
     }
 
-    fn collect_unreferenced_oci_content(&mut self) -> Result<(), SupervisorError> {
+    fn collect_unreferenced_content(&mut self) -> Result<(), SupervisorError> {
         let retained = referenced_content_blobs(&self.state)?;
         let engine = PrivateRoot::open(&self.config.engine_root())?;
         let content = ContentStore::create(&engine)?;
@@ -1276,13 +1311,14 @@ impl SupervisorCore {
     async fn create(
         &mut self,
         request: &v1::CreateEnvironmentRequest,
+        workspace_plan: &WorkspacePlan,
         operation: &OperationRecord,
     ) -> Result<(v1::Environment, OperationRecord), SupervisorError> {
         let environment_id = operation
             .environment_id
             .ok_or(SupervisorError::InvalidState)?;
         if operation.kind != OperationKind::Create
-            || operation.payload != create_operation_payload(request)
+            || operation.payload != create_operation_payload(request, workspace_plan)?
         {
             return Err(SupervisorError::InvalidState);
         }
@@ -1300,23 +1336,12 @@ impl SupervisorCore {
                                 != Some(request.project_spec_json.as_slice())
                             || environment.project_spec_sha256.as_deref()
                                 != Some(request.project_spec_sha256.as_str())
+                            || &environment.workspace_plan != workspace_plan
                         {
                             return Err(SupervisorError::AlreadyExists(request.name.clone()));
                         }
                     } else {
                         let artifact_generation = self.preflight().await?;
-                        let requested_source = PathBuf::from(&request.source_path);
-                        let path_mode = parse_implicit_path_mode(&request.implicit_path_mode)?;
-                        let maximum_copy_bytes = workspace_content_limit(request.disk_bytes);
-                        let source = tokio::task::spawn_blocking(move || {
-                            inspect_workspace(
-                                &requested_source,
-                                workspace_selection(path_mode),
-                                maximum_copy_bytes,
-                            )
-                        })
-                        .await
-                        .map_err(|_| SupervisorError::WorkspaceProvisionTask)??;
                         let vcpus = u8::try_from(request.vcpus)
                             .map_err(|_| SupervisorError::InvalidRequest)?;
                         next_state.environments.insert(
@@ -1329,8 +1354,7 @@ impl SupervisorCore {
                                 memory_mib: request.memory_mib,
                                 disk_bytes: request.disk_bytes,
                                 generation: 0,
-                                workspace_commit: source.commit,
-                                source_path: source.source_path,
+                                workspace_plan: workspace_plan.clone(),
                                 project_spec_json: Some(request.project_spec_json.clone()),
                                 project_spec_sha256: Some(request.project_spec_sha256.clone()),
                                 runner: None,
@@ -1348,23 +1372,15 @@ impl SupervisorCore {
                 LifecycleEffect::ProvisionWorkspace => {
                     let environment = self.environment(&request.name)?.clone();
                     let engine_root = self.config.engine_root();
-                    let path_mode = parse_implicit_path_mode(&request.implicit_path_mode)?;
-                    let source = WorkspaceSource {
-                        source_path: environment.source_path,
-                        commit: environment.workspace_commit,
-                        mode: path_mode,
-                    };
-                    let expected_source = source.clone();
+                    let expected_plan_sha256 = environment.workspace_plan.sha256()?;
+                    let plan = environment.workspace_plan;
                     let disk_bytes = environment.disk_bytes;
                     let snapshot = tokio::task::spawn_blocking(move || {
-                        ensure_workspace(&engine_root, environment_id, &source, disk_bytes)
+                        ensure_workspace_plan(&engine_root, environment_id, &plan, disk_bytes)
                     })
                     .await
                     .map_err(|_| SupervisorError::WorkspaceProvisionTask)??;
-                    if snapshot.source_path != expected_source.source_path
-                        || snapshot.commit != expected_source.commit
-                        || snapshot.mode != expected_source.mode
-                    {
+                    if snapshot.plan_sha256 != expected_plan_sha256 {
                         return Err(SupervisorError::InvalidState);
                     }
                     operation = self.checkpoint_operation(&operation)?;
@@ -1422,14 +1438,15 @@ impl SupervisorCore {
                 continue;
             };
             if operation.kind == OperationKind::Create {
-                let request = match create_request_from_operation(&operation) {
-                    Ok(request) => request,
+                let (request, workspace_plan) = match create_request_from_operation(&operation) {
+                    Ok(prepared) => prepared,
                     Err(_) => {
                         self.interrupt_operation(&operation, "invalid_replay_payload")?;
                         continue;
                     }
                 };
-                let (_, operation) = match self.create(&request, &operation).await {
+                let (_, operation) = match self.create(&request, &workspace_plan, &operation).await
+                {
                     Ok(result) => result,
                     Err(_) => {
                         let error_code = if recovering {
@@ -1438,6 +1455,11 @@ impl SupervisorCore {
                             "create_failed"
                         };
                         self.fail_replayed_operation(&operation, name, error_code)?;
+                        // If failure happened before RecordEnvironment, the
+                        // prepared repository bundles have no durable owner.
+                        // If it happened later, the recorded plan retains
+                        // them. Re-derive reachability in either case.
+                        let _ = self.collect_unreferenced_content();
                         continue;
                     }
                 };
@@ -2871,7 +2893,7 @@ impl SupervisorCore {
                     let trash_pending =
                         cleanup_trashed_vm(&engine_root, environment_id, operation.operation_id)
                             .is_err();
-                    let content_pending = self.collect_unreferenced_oci_content().is_err();
+                    let content_pending = self.collect_unreferenced_content().is_err();
                     let artifact_pending = self.collect_unreferenced_runtime_artifacts().is_err();
                     if trash_pending || content_pending || artifact_pending {
                         // Deletion is already durable. Any object that cannot
@@ -2892,7 +2914,7 @@ impl SupervisorCore {
         // Re-derive shared-CAS cleanup state after the final checkpoint. This
         // preserves an honest cleanup_pending result if the supervisor died
         // after applying CleanupTrash but before completing the operation.
-        cleanup_pending |= self.collect_unreferenced_oci_content().is_err();
+        cleanup_pending |= self.collect_unreferenced_content().is_err();
         cleanup_pending |= self.collect_unreferenced_runtime_artifacts().is_err();
         Ok((operation, cleanup_pending))
     }
@@ -2968,12 +2990,42 @@ impl LocalSupervisorService for SupervisorRpc {
     ) -> Result<Response<v1::Operation>, Status> {
         let request = request.into_inner();
         let request_id = validate_create(&request).map_err(Status::from)?;
-        let core = self.core.lock().await;
-        let payload = create_operation_payload(&request);
-        let operation =
-            begin_create_operation(&core.store, request_id, &payload).map_err(Status::from)?;
+        let mut core = self.core.lock().await;
+        let operation = match core
+            .store
+            .operation_by_request(request_id)
+            .map_err(SupervisorError::from)
+            .map_err(Status::from)?
+        {
+            Some(operation) => {
+                let (recorded, _) =
+                    create_request_from_operation(&operation).map_err(Status::from)?;
+                if recorded != request {
+                    return Err(Status::aborted("local lifecycle request ID collision"));
+                }
+                operation
+            }
+            None => {
+                let workspace_plan = match core.prepare_create_workspace_plan(&request).await {
+                    Ok(workspace_plan) => workspace_plan,
+                    Err(error) => {
+                        // A multi-repository preparation can admit an earlier
+                        // bundle before a later repository fails. The
+                        // supervisor lock makes it safe to re-derive retained
+                        // content here without racing another lifecycle.
+                        let _ = core.collect_unreferenced_content();
+                        return Err(Status::from(error));
+                    }
+                };
+                let payload =
+                    create_operation_payload(&request, &workspace_plan).map_err(Status::from)?;
+                begin_create_operation(&core.store, request_id, &payload).map_err(Status::from)?
+            }
+        };
+        let payload_matches = create_request_from_operation(&operation)
+            .is_ok_and(|(recorded, _)| recorded == request);
         if operation.kind != OperationKind::Create
-            || operation.payload != payload
+            || !payload_matches
             || operation.environment_id.is_none()
         {
             return Err(Status::aborted("local lifecycle request ID collision"));
@@ -3877,10 +3929,7 @@ fn require_expected_environment(
 }
 
 fn validate_create(request: &v1::CreateEnvironmentRequest) -> Result<Uuid, SupervisorError> {
-    let implicit_path_mode = parse_implicit_path_mode(&request.implicit_path_mode)?;
     if !valid_environment_name(&request.name)
-        || request.source_path.is_empty()
-        || !Path::new(&request.source_path).is_absolute()
         || request.vcpus == 0
         || request.vcpus > 32
         || !(128..=65_536).contains(&request.memory_mib)
@@ -3892,30 +3941,20 @@ fn validate_create(request: &v1::CreateEnvironmentRequest) -> Result<Uuid, Super
             Some((request.vcpus, request.memory_mib, request.disk_bytes)),
         )
         .is_err()
-        || !project_mode_matches_implicit_path(&request.project_spec_json, implicit_path_mode)
     {
         return Err(SupervisorError::InvalidRequest);
     }
+    let project: codewire_project::ProjectSpec = serde_json::from_slice(&request.project_spec_json)
+        .map_err(|_| SupervisorError::InvalidRequest)?;
+    if project.repositories.is_empty() {
+        parse_implicit_path_mode(&request.implicit_path_mode)?;
+        if request.source_path.is_empty() || !Path::new(&request.source_path).is_absolute() {
+            return Err(SupervisorError::InvalidRequest);
+        }
+    } else if !request.source_path.is_empty() || !request.implicit_path_mode.is_empty() {
+        return Err(SupervisorError::InvalidRequest);
+    }
     parse_request_id(&request.request_id)
-}
-
-fn project_mode_matches_implicit_path(
-    canonical_json: &[u8],
-    implicit_path_mode: WorkspaceSourceMode,
-) -> bool {
-    let Ok(spec) = serde_json::from_slice::<codewire_project::ProjectSpec>(canonical_json) else {
-        return false;
-    };
-    matches!(
-        (spec.workspace_mode, implicit_path_mode),
-        (
-            codewire_project::WorkspaceMode::Clone,
-            WorkspaceSourceMode::Clone
-        ) | (
-            codewire_project::WorkspaceMode::Auto,
-            WorkspaceSourceMode::Copy
-        )
-    )
 }
 
 fn validate_project_intent(
@@ -3938,8 +3977,7 @@ fn validate_project_intent(
         || format!("{:x}", Sha256::digest(canonical_json)) != expected_sha256
         || spec.image.is_empty()
         || !spec.preset.is_empty()
-        || !spec.repositories.is_empty()
-        || spec.working_directory != "/workspace"
+        || (spec.repositories.is_empty() && spec.working_directory != "/workspace")
         || !spec.install_command.is_empty()
         || !spec.startup_script.is_empty()
         || !spec.environment.is_empty()
@@ -3949,10 +3987,6 @@ fn validate_project_intent(
         || !spec.application_ports.is_empty()
         || !spec.secrets.is_empty()
         || !spec.credentials.is_empty()
-        || !matches!(
-            spec.workspace_mode,
-            codewire_project::WorkspaceMode::Auto | codewire_project::WorkspaceMode::Clone
-        )
     {
         return Err(());
     }
@@ -4026,10 +4060,14 @@ fn begin_create_operation(
     }
 }
 
-fn create_operation_payload(request: &v1::CreateEnvironmentRequest) -> serde_json::Value {
+fn create_operation_payload(
+    request: &v1::CreateEnvironmentRequest,
+    workspace_plan: &WorkspacePlan,
+) -> Result<serde_json::Value, SupervisorError> {
     let project_spec_json = std::str::from_utf8(&request.project_spec_json)
         .expect("validated canonical project JSON is UTF-8");
-    serde_json::json!({
+    workspace_plan.validate()?;
+    Ok(serde_json::json!({
         "name": request.name,
         "source_path": request.source_path,
         "vcpus": request.vcpus,
@@ -4038,19 +4076,20 @@ fn create_operation_payload(request: &v1::CreateEnvironmentRequest) -> serde_jso
         "project_spec_json": project_spec_json,
         "project_spec_sha256": request.project_spec_sha256,
         "implicit_path_mode": request.implicit_path_mode,
-    })
+        "workspace_plan": workspace_plan,
+    }))
 }
 
 fn create_request_from_operation(
     operation: &OperationRecord,
-) -> Result<v1::CreateEnvironmentRequest, SupervisorError> {
+) -> Result<(v1::CreateEnvironmentRequest, WorkspacePlan), SupervisorError> {
     if operation.kind != OperationKind::Create {
         return Err(SupervisorError::InvalidState);
     }
     let fields = operation
         .payload
         .as_object()
-        .filter(|fields| fields.len() == 8)
+        .filter(|fields| fields.len() == 9)
         .ok_or(SupervisorError::InvalidState)?;
     let name = fields
         .get("name")
@@ -4092,6 +4131,16 @@ fn create_request_from_operation(
         .and_then(serde_json::Value::as_str)
         .ok_or(SupervisorError::InvalidState)?
         .to_owned();
+    let workspace_plan: WorkspacePlan = serde_json::from_value(
+        fields
+            .get("workspace_plan")
+            .cloned()
+            .ok_or(SupervisorError::InvalidState)?,
+    )
+    .map_err(|_| SupervisorError::InvalidState)?;
+    workspace_plan
+        .validate()
+        .map_err(|_| SupervisorError::InvalidState)?;
     let request = v1::CreateEnvironmentRequest {
         name,
         source_path,
@@ -4104,7 +4153,7 @@ fn create_request_from_operation(
         implicit_path_mode,
     };
     validate_create(&request)?;
-    Ok(request)
+    Ok((request, workspace_plan))
 }
 
 fn supervisor_effect(
@@ -4314,6 +4363,10 @@ fn referenced_content_blobs(
 ) -> Result<BTreeMap<Sha256Digest, u64>, SupervisorError> {
     let mut retained = BTreeMap::new();
     for environment in state.environments.values() {
+        environment.workspace_plan.validate()?;
+        for (digest, size) in environment.workspace_plan.retained_bundles() {
+            retain_content_blob(&mut retained, digest, size)?;
+        }
         let generations = [
             environment.active_workspace_generation.as_ref(),
             environment.staging_workspace_generation.as_ref(),
@@ -4371,12 +4424,20 @@ fn retain_content_descriptor(
     retained: &mut BTreeMap<Sha256Digest, u64>,
     descriptor: &ResolvedDescriptor,
 ) -> Result<(), SupervisorError> {
-    if let Some(size) = retained.get(&descriptor.digest) {
-        return (*size == descriptor.size)
+    retain_content_blob(retained, &descriptor.digest, descriptor.size)
+}
+
+fn retain_content_blob(
+    retained: &mut BTreeMap<Sha256Digest, u64>,
+    digest: &Sha256Digest,
+    size: u64,
+) -> Result<(), SupervisorError> {
+    if let Some(retained_size) = retained.get(digest) {
+        return (*retained_size == size)
             .then_some(())
             .ok_or(SupervisorError::InvalidState);
     }
-    retained.insert(descriptor.digest.clone(), descriptor.size);
+    retained.insert(digest.clone(), size);
     Ok(())
 }
 
@@ -4675,13 +4736,6 @@ fn valid_environment_name(name: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
 }
 
-fn valid_object_id(value: &str) -> bool {
-    matches!(value.len(), 40 | 64)
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-}
-
 fn valid_sha256(value: &str) -> bool {
     value.len() == 64
         && value
@@ -4829,6 +4883,7 @@ impl From<SupervisorError> for Status {
             SupervisorError::Workspace(workspace) => {
                 Status::failed_precondition(workspace.to_string())
             }
+            SupervisorError::WorkspacePlan(plan) => Status::failed_precondition(plan.to_string()),
             SupervisorError::RegistryReference(reference) => {
                 Status::failed_precondition(reference.to_string())
             }
@@ -4918,6 +4973,8 @@ pub enum SupervisorError {
     #[error(transparent)]
     Workspace(#[from] WorkspaceError),
     #[error(transparent)]
+    WorkspacePlan(#[from] WorkspacePlanError),
+    #[error(transparent)]
     RegistryReference(#[from] RegistryReferenceError),
     #[error(transparent)]
     RegistryResolver(#[from] RegistryResolverError),
@@ -4959,7 +5016,6 @@ mod tests {
     fn project_intent(vcpus: u32, memory_mib: u32, disk_gib: u64) -> (Vec<u8>, String) {
         let spec = codewire_project::ProjectSpec {
             image: "registry.example/codewire/workspace:latest".to_owned(),
-            workspace_mode: codewire_project::WorkspaceMode::Clone,
             resources: codewire_project::ResourceSpec {
                 cpu_millicores: Some(vcpus * 1_000),
                 memory_mib: Some(u64::from(memory_mib)),
@@ -5126,8 +5182,12 @@ mod tests {
             memory_mib: 16 * 1024,
             disk_bytes: 20 * 1024 * 1024 * 1024,
             generation: 1,
-            workspace_commit: "a".repeat(40),
-            source_path: PathBuf::from("/workspace/source"),
+            workspace_plan: WorkspacePlan::local(&crate::workspace::WorkspaceSource {
+                source_path: PathBuf::from("/workspace/source"),
+                commit: "a".repeat(40),
+                mode: WorkspaceSourceMode::Clone,
+            })
+            .unwrap(),
             project_spec_json: Some(project_spec_json),
             project_spec_sha256: Some(project_spec_sha256),
             runner: None,
@@ -6448,22 +6508,6 @@ mod tests {
         let (bytes, digest) = project_intent(2, 16 * 1024, 20);
         let disk_bytes = 20 * 1024 * 1024 * 1024;
         validate_project_intent(&bytes, &digest, Some((2, 16 * 1024, disk_bytes))).unwrap();
-        assert!(project_mode_matches_implicit_path(
-            &bytes,
-            WorkspaceSourceMode::Clone
-        ));
-        assert!(!project_mode_matches_implicit_path(
-            &bytes,
-            WorkspaceSourceMode::Copy
-        ));
-
-        let mut copy_spec: codewire_project::ProjectSpec = serde_json::from_slice(&bytes).unwrap();
-        copy_spec.workspace_mode = codewire_project::WorkspaceMode::Auto;
-        let copy_bytes = copy_spec.canonical_json().unwrap();
-        assert!(project_mode_matches_implicit_path(
-            &copy_bytes,
-            WorkspaceSourceMode::Copy
-        ));
 
         let mut wrong_digest = digest.clone();
         wrong_digest.replace_range(0..1, "f");
@@ -6476,6 +6520,20 @@ mod tests {
         );
         assert!(
             validate_project_intent(&bytes, &digest, Some((4, 16 * 1024, disk_bytes))).is_err()
+        );
+
+        let mut unsupported_working_directory: codewire_project::ProjectSpec =
+            serde_json::from_slice(&bytes).unwrap();
+        unsupported_working_directory.working_directory = "/workspace/missing".to_owned();
+        let unsupported_bytes = unsupported_working_directory.canonical_json().unwrap();
+        let unsupported_digest = format!("{:x}", Sha256::digest(&unsupported_bytes));
+        assert!(
+            validate_project_intent(
+                &unsupported_bytes,
+                &unsupported_digest,
+                Some((2, 16 * 1024, disk_bytes)),
+            )
+            .is_err()
         );
 
         let mut noncanonical = bytes.clone();
@@ -6521,6 +6579,12 @@ mod tests {
             implicit_path_mode: "clone".to_owned(),
         };
         validate_create(&request).unwrap();
+        let workspace_plan = WorkspacePlan::local(&crate::workspace::WorkspaceSource {
+            source_path: PathBuf::from("/workspace/source"),
+            commit: "a".repeat(40),
+            mode: WorkspaceSourceMode::Clone,
+        })
+        .unwrap();
         let operation = OperationRecord {
             operation_id: Uuid::new_v4(),
             request_id: Uuid::parse_str(&request.request_id).unwrap(),
@@ -6528,14 +6592,17 @@ mod tests {
             kind: OperationKind::Create,
             phase: OperationPhase::Intent,
             checkpoint: 0,
-            payload: create_operation_payload(&request),
+            payload: create_operation_payload(&request, &workspace_plan).unwrap(),
             result: None,
             error_code: None,
             created_unix_ms: 1,
             updated_unix_ms: 1,
         };
 
-        assert_eq!(create_request_from_operation(&operation).unwrap(), request);
+        assert_eq!(
+            create_request_from_operation(&operation).unwrap(),
+            (request, workspace_plan)
+        );
     }
 
     #[test]
@@ -7214,7 +7281,7 @@ mod tests {
             collector_started.send(()).unwrap();
             let mut core = collector_core.lock().await;
             let roots = core.collect_unreferenced_workspace_roots("dev").unwrap();
-            core.collect_unreferenced_oci_content().unwrap();
+            core.collect_unreferenced_content().unwrap();
             core.collect_unreferenced_runtime_artifacts().unwrap();
             roots
         });
@@ -7271,8 +7338,12 @@ mod tests {
             memory_mib: 16 * 1024,
             disk_bytes: crate::linux::state::MINIMUM_STATE_DISK_BYTES,
             generation: 1,
-            workspace_commit: "a".repeat(40),
-            source_path: PathBuf::from("/workspace/source"),
+            workspace_plan: WorkspacePlan::local(&crate::workspace::WorkspaceSource {
+                source_path: PathBuf::from("/workspace/source"),
+                commit: "a".repeat(40),
+                mode: WorkspaceSourceMode::Clone,
+            })
+            .unwrap(),
             project_spec_json: Some(project_spec_json),
             project_spec_sha256: Some(project_spec_sha256),
             runner: None,

@@ -5,10 +5,8 @@
 //! records keep every lifecycle transition recoverable across process death.
 
 use std::collections::BTreeMap;
-use std::ffi::OsString;
 use std::fs;
 use std::io;
-use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -22,13 +20,14 @@ use uuid::Uuid;
 use crate::linux::path::{PathError, PrivateRoot};
 use crate::supervisor::{EnvironmentRecord, RunnerRecord, StoredEnvironmentState, SupervisorState};
 use crate::workspace_generation::WorkspaceGenerationRecord;
+use crate::workspace_plan::WorkspacePlan;
 
 pub(crate) const DATABASE_FILE: &str = "supervisor.db";
 const DATABASE_WAL_FILE: &str = "supervisor.db-wal";
 const DATABASE_SHM_FILE: &str = "supervisor.db-shm";
 const HOST_REBOOT_WORKSPACE_TRANSITIONS_KEY: &str = "host_reboot_workspace_transitions";
 const DATABASE_APPLICATION_ID: i64 = 0x4357_564d; // "CWVM"
-const DATABASE_SCHEMA_VERSION: i64 = 4;
+const DATABASE_SCHEMA_VERSION: i64 = 5;
 // A create journal entry contains the exact canonical project JSON so replay
 // never has to reread a mutable codewire.yaml. The source document itself is
 // bounded to 256 KiB; this higher bound covers JSON string escaping.
@@ -441,7 +440,7 @@ impl SupervisorStore {
         )?;
         let mut statement = self.connection.prepare(
             "SELECT id, name, observed_state, vcpus, memory_mib, disk_bytes, generation, \
-                    workspace_commit, source_path, project_spec_json, project_spec_sha256, \
+                    workspace_plan_json, project_spec_json, project_spec_sha256, \
                     runner_json, active_artifact_generation, staging_artifact_generation, \
                     active_workspace_generation_json, staging_workspace_generation_json, \
                     rollback_workspace_generation_json \
@@ -456,16 +455,15 @@ impl SupervisorStore {
                 row.get::<_, i64>(4)?,
                 row.get::<_, i64>(5)?,
                 row.get::<_, i64>(6)?,
-                row.get::<_, String>(7)?,
+                row.get::<_, Vec<u8>>(7)?,
                 row.get::<_, Vec<u8>>(8)?,
-                row.get::<_, Vec<u8>>(9)?,
-                row.get::<_, String>(10)?,
-                row.get::<_, Option<Vec<u8>>>(11)?,
-                row.get::<_, String>(12)?,
-                row.get::<_, Option<String>>(13)?,
+                row.get::<_, String>(9)?,
+                row.get::<_, Option<Vec<u8>>>(10)?,
+                row.get::<_, String>(11)?,
+                row.get::<_, Option<String>>(12)?,
+                row.get::<_, Option<Vec<u8>>>(13)?,
                 row.get::<_, Option<Vec<u8>>>(14)?,
                 row.get::<_, Option<Vec<u8>>>(15)?,
-                row.get::<_, Option<Vec<u8>>>(16)?,
             ))
         })?;
         let mut environments = BTreeMap::new();
@@ -479,8 +477,7 @@ impl SupervisorStore {
                 memory_mib,
                 disk_bytes,
                 generation,
-                workspace_commit,
-                source_path,
+                workspace_plan_json,
                 project_spec_json,
                 project_spec_sha256,
                 runner_json,
@@ -508,8 +505,8 @@ impl SupervisorStore {
                     .map_err(|_| SupervisorStoreError::InvalidState)?,
                 generation: u64::try_from(generation)
                     .map_err(|_| SupervisorStoreError::InvalidState)?,
-                workspace_commit,
-                source_path: PathBuf::from(OsString::from_vec(source_path)),
+                workspace_plan: WorkspacePlan::decode_canonical(&workspace_plan_json)
+                    .map_err(|_| SupervisorStoreError::InvalidState)?,
                 project_spec_json: Some(project_spec_json),
                 project_spec_sha256: Some(project_spec_sha256),
                 runner,
@@ -777,8 +774,7 @@ fn initialize_schema(connection: &Connection) -> Result<(), SupervisorStoreError
            memory_mib INTEGER NOT NULL CHECK (memory_mib BETWEEN 128 AND 65536),
            disk_bytes INTEGER NOT NULL CHECK (disk_bytes > 0),
            generation INTEGER NOT NULL CHECK (generation >= 0),
-           workspace_commit TEXT NOT NULL,
-           source_path BLOB NOT NULL,
+           workspace_plan_json BLOB NOT NULL,
            project_spec_json BLOB NOT NULL,
            project_spec_sha256 TEXT NOT NULL,
            runner_json BLOB NULL,
@@ -817,7 +813,7 @@ fn initialize_schema(connection: &Connection) -> Result<(), SupervisorStoreError
            updated_unix_ms INTEGER NOT NULL
          ) STRICT;
          PRAGMA application_id = 1129797197;
-         PRAGMA user_version = 4;
+         PRAGMA user_version = 5;
          COMMIT;",
     )?;
     validate_schema(connection)
@@ -854,6 +850,7 @@ fn validate_schema(connection: &Connection) -> Result<(), SupervisorStoreError> 
         }
     }
     for column in [
+        "workspace_plan_json",
         "project_spec_json",
         "project_spec_sha256",
         "active_workspace_generation_json",
@@ -902,6 +899,10 @@ fn write_state(
             .map(serde_json::to_vec)
             .transpose()
             .map_err(|_| SupervisorStoreError::InvalidState)?;
+        let workspace_plan_json = environment
+            .workspace_plan
+            .encode_canonical()
+            .map_err(|_| SupervisorStoreError::InvalidState)?;
         let active_workspace_generation_json =
             encode_workspace_generation(environment.active_workspace_generation.as_ref())?;
         let staging_workspace_generation_json =
@@ -919,12 +920,12 @@ fn write_state(
         transaction.execute(
             "INSERT INTO environments(
                id, name, desired_state, observed_state, vcpus, memory_mib,
-               disk_bytes, generation, workspace_commit, source_path, runner_json,
+               disk_bytes, generation, workspace_plan_json, runner_json,
                active_artifact_generation, staging_artifact_generation,
                project_spec_json, project_spec_sha256,
                active_workspace_generation_json, staging_workspace_generation_json,
                rollback_workspace_generation_json
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
              ON CONFLICT(id) DO UPDATE SET
                name = excluded.name,
                desired_state = excluded.desired_state,
@@ -933,8 +934,7 @@ fn write_state(
                memory_mib = excluded.memory_mib,
                disk_bytes = excluded.disk_bytes,
                generation = excluded.generation,
-               workspace_commit = excluded.workspace_commit,
-               source_path = excluded.source_path,
+               workspace_plan_json = excluded.workspace_plan_json,
                runner_json = excluded.runner_json,
                active_artifact_generation = excluded.active_artifact_generation,
                staging_artifact_generation = excluded.staging_artifact_generation,
@@ -952,8 +952,7 @@ fn write_state(
                 i64::from(environment.memory_mib),
                 disk_bytes,
                 generation,
-                &environment.workspace_commit,
-                environment.source_path.as_os_str().as_bytes(),
+                workspace_plan_json,
                 runner_json,
                 &environment.active_artifact_generation,
                 &environment.staging_artifact_generation,
@@ -1552,8 +1551,12 @@ mod tests {
             memory_mib: 16 * 1024,
             disk_bytes: crate::linux::state::MINIMUM_STATE_DISK_BYTES,
             generation: 7,
-            workspace_commit: "b".repeat(40),
-            source_path: PathBuf::from("/workspace/source"),
+            workspace_plan: WorkspacePlan::local(&crate::workspace::WorkspaceSource {
+                source_path: PathBuf::from("/workspace/source"),
+                commit: "b".repeat(40),
+                mode: crate::workspace::WorkspaceSourceMode::Clone,
+            })
+            .unwrap(),
             project_spec_json: Some(project_spec_json),
             project_spec_sha256: Some(project_spec_sha256),
             runner,
@@ -2274,8 +2277,16 @@ mod tests {
         let initial = state(environment);
         store.replace_state(&initial).unwrap();
         let mut expanded = initial.clone();
-        expanded.environments.get_mut("dev").unwrap().source_path =
-            PathBuf::from(format!("/{}", "x".repeat(512 * 1024)));
+        let crate::workspace_plan::WorkspaceInput::Local { source_path, .. } = &mut expanded
+            .environments
+            .get_mut("dev")
+            .unwrap()
+            .workspace_plan
+            .inputs[0]
+        else {
+            panic!("test plan must be local");
+        };
+        *source_path = [vec![b'/'], vec![b'x'; 100 * 1024]].concat();
 
         let page_count: i64 = store
             .connection

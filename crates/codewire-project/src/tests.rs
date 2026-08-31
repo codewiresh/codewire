@@ -58,7 +58,6 @@ skills:
 credentials:
   work: {provider: openai, account_ref: acct-work}
   personal: acct-personal
-workspace: clone
 "#,
     )
     .unwrap();
@@ -67,7 +66,6 @@ workspace: clone
     assert_eq!(document.spec.skills[0].agents, ["claude-code", "codex"]);
     assert_eq!(document.spec.skills[1].source, SkillSource::User);
     assert_eq!(document.spec.credentials.len(), 2);
-    assert_eq!(document.spec.workspace_mode, WorkspaceMode::Clone);
     document.ensure_platform_compatible().unwrap();
 }
 
@@ -90,7 +88,6 @@ fn defaults_working_directory_from_repository_count() {
 fn separates_local_only_directives_from_portable_intent() {
     let document = parse_project_yaml(
         r#"
-workspace: {mode: direct, source: ., readonly: true}
 mounts:
   - source: ../shared
     target: /workspace/shared
@@ -100,16 +97,14 @@ ports: ["18080:8080"]
 "#,
     )
     .unwrap();
-    assert_eq!(document.spec.workspace_mode, WorkspaceMode::Direct);
     assert_eq!(document.spec.application_ports[0].port, 8080);
-    assert_eq!(document.local.direct_source.as_deref(), Some("."));
-    assert!(document.local.direct_read_only);
+    assert_eq!(document.local.mounts[0].source, "../shared");
+    assert_eq!(document.local.mounts[0].mode, LocalMountMode::Direct);
+    assert_eq!(document.local.mounts[0].read_only, Some(true));
     assert_eq!(document.local.host_ports[0].host_port, 18080);
     assert!(matches!(
         document.ensure_platform_compatible(),
-        Err(ProjectError::PlatformUnsupported {
-            field: "workspace.mode"
-        })
+        Err(ProjectError::PlatformUnsupported { field: "mounts" })
     ));
     assert!(
         !document
@@ -331,25 +326,23 @@ fn schema_and_input_bounds_fail_closed() {
 #[test]
 fn canonicalization_is_idempotent_for_generated_valid_specs() {
     for repositories in 0..=3 {
-        for mode in ["auto", "clone"] {
-            for agents in ["[]", "[claude, codex]"] {
-                let repos = (0..repositories)
-                    .map(|index| {
-                        format!(
-                            "{{url: https://example.com/org/r{index}.git, mount_path: /workspace/r{index}}}"
-                        )
-                    })
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                let yaml = format!(
-                    "version: 1\nrepositories: [{repos}]\nworkspace: {mode}\nagents: {agents}\nenv: {{Z: last, A: first}}\n"
-                );
-                let first = parse_project_yaml(&yaml).unwrap().spec;
-                let encoded = first.canonical_json().unwrap();
-                let second: ProjectSpec = serde_json::from_slice(&encoded).unwrap();
-                assert_eq!(first, second);
-                assert_eq!(encoded, second.canonical_json().unwrap());
-            }
+        for agents in ["[]", "[claude, codex]"] {
+            let repos = (0..repositories)
+                .map(|index| {
+                    format!(
+                        "{{url: https://example.com/org/r{index}.git, mount_path: /workspace/r{index}}}"
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            let yaml = format!(
+                "version: 1\nrepositories: [{repos}]\nagents: {agents}\nenv: {{Z: last, A: first}}\n"
+            );
+            let first = parse_project_yaml(&yaml).unwrap().spec;
+            let encoded = first.canonical_json().unwrap();
+            let second: ProjectSpec = serde_json::from_slice(&encoded).unwrap();
+            assert_eq!(first, second);
+            assert_eq!(encoded, second.canonical_json().unwrap());
         }
     }
 }
@@ -394,11 +387,15 @@ fn typed_specs_validate_before_crossing_adapter_boundaries() {
 #[test]
 fn local_source_paths_are_explicit_but_not_resolved_by_the_parser() {
     for source in [".", "../shared", "/srv/workspace"] {
-        let yaml = format!("workspace: {{mode: direct, source: {source:?}}}\n");
+        let yaml = format!(
+            "mounts: [{{mode: direct, source: {source:?}, destination: /workspace/source, read_only: true}}]\n"
+        );
         assert!(parse_project_yaml(&yaml).is_ok(), "rejected {source:?}");
     }
     for source in ["/", "foo//bar", "/srv//workspace", "path/"] {
-        let yaml = format!("workspace: {{mode: direct, source: {source:?}}}\n");
+        let yaml = format!(
+            "mounts: [{{mode: direct, source: {source:?}, destination: /workspace/source, read_only: true}}]\n"
+        );
         assert!(parse_project_yaml(&yaml).is_err(), "accepted {source:?}");
     }
 }

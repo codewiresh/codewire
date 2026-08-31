@@ -208,13 +208,6 @@ pub(crate) fn apply_project_spec_defaults(body: &mut CreateEnvironmentBody) -> A
         return Ok(());
     };
     spec.validate().map_err(invalid_project_spec)?;
-    if spec.workspace_mode == codewire_project::WorkspaceMode::Direct {
-        return Err(coded(
-            StatusCode::BAD_REQUEST,
-            "local_only_project_field",
-            "workspace.mode direct is local-only and is not supported by platform placement",
-        ));
-    }
     if body.preset_slug.is_empty() && !spec.preset.is_empty() {
         body.preset_slug = spec.preset.clone();
     }
@@ -309,9 +302,6 @@ pub(crate) fn apply_detected_project_spec(
         }
         if !current.credentials.is_empty() {
             merged.credentials = current.credentials;
-        }
-        if current.workspace_mode != codewire_project::WorkspaceMode::Auto {
-            merged.workspace_mode = current.workspace_mode;
         }
         if current.working_directory != default_project_working_directory(&current.repositories) {
             merged.working_directory = current.working_directory;
@@ -1502,22 +1492,6 @@ secrets: {project: development, org: false, user: true}
         assert_eq!(body.secret_project, "development");
         assert_eq!(body.include_org_secrets, Some(false));
         assert_eq!(body.include_user_secrets, Some(true));
-
-        let direct = codewire_project::parse_project_yaml("workspace: direct\n")
-            .unwrap()
-            .spec;
-        let error = apply_project_spec_defaults(&mut CreateEnvironmentBody {
-            project_spec: Some(direct),
-            ..Default::default()
-        })
-        .unwrap_err();
-        assert!(matches!(
-            error,
-            AppError::Coded {
-                code: "local_only_project_field",
-                ..
-            }
-        ));
     }
 
     #[test]
@@ -1536,7 +1510,6 @@ repositories:
 skills: [.agents/skills/rust]
 cpu: 2
 memory: 16Gi
-workspace: clone
 "#,
         )
         .unwrap()
@@ -1572,10 +1545,6 @@ workspace: clone
         assert_eq!(project.working_directory, "/workspace/api");
         assert_eq!(project.install_command, body.install_command);
         assert_eq!(project.skills[0].reference, ".agents/skills/rust");
-        assert_eq!(
-            project.workspace_mode,
-            codewire_project::WorkspaceMode::Clone
-        );
         project.validate().unwrap();
     }
 
@@ -1925,7 +1894,6 @@ repositories:
     revision: deadbeef
 credentials:
   work: {provider: openai, account: acct-work}
-workspace: clone
 "#,
         )
         .unwrap()

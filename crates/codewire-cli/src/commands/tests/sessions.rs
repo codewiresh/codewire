@@ -122,6 +122,29 @@
         );
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn native_session_default_working_dir_uses_the_recorded_project_intent() {
+        let environment = codewire_local_vmm::control::v1::Environment {
+            name: "native".to_owned(),
+            working_directory: "/workspace/github".to_owned(),
+            ..Default::default()
+        };
+        assert_eq!(
+            native_environment_session_working_dir(&environment),
+            "/workspace/github"
+        );
+
+        let fallback = codewire_local_vmm::control::v1::Environment {
+            name: "native".to_owned(),
+            ..Default::default()
+        };
+        assert_eq!(
+            native_environment_session_working_dir(&fallback),
+            LOCAL_WORKSPACE_PATH
+        );
+    }
+
     #[test]
     fn environment_run_tty_selection_preserves_interactive_and_machine_modes() {
         let Command::Run(interactive) = Cli::try_parse_from(["cw", "run", "builder", "--", "codex"])

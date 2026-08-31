@@ -72,7 +72,6 @@ type ProjectSpec struct {
 	Resources        *ProjectResources                     `json:"resources,omitempty"`
 	Secrets          *ProjectSecretBindings                `json:"secrets,omitempty"`
 	Credentials      map[string]ProjectCredentialReference `json:"credentials,omitempty"`
-	WorkspaceMode    string                                `json:"workspace_mode"`
 }
 
 // SetupConfig describes the setup configuration embedded in a preset.

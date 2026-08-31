@@ -55,10 +55,11 @@ message SetupConfig {
   ProjectSpec project_spec = 14;
 }
 
-// ProjectWorkspaceMode selects portable workspace placement intent. DIRECT
-// never carries a host path; platform placement rejects it and local placement
-// resolves the separately supplied local path grant.
+// Deprecated wire tombstone for the retired top-level workspace mode. New
+// writers leave the field below unspecified; placement-specific filesystem
+// behavior is expressed outside the portable project contract.
 enum ProjectWorkspaceMode {
+  option deprecated = true;
   PROJECT_WORKSPACE_MODE_UNSPECIFIED = 0;
   PROJECT_WORKSPACE_MODE_AUTO = 1;
   PROJECT_WORKSPACE_MODE_CLONE = 2;
@@ -121,5 +122,5 @@ message ProjectSpec {
   ProjectResources resources = 13;
   ProjectSecretBindings secrets = 14;
   map<string, ProjectCredentialReference> credentials = 15;
-  ProjectWorkspaceMode workspace_mode = 16;
+  ProjectWorkspaceMode workspace_mode = 16 [deprecated = true];
 }

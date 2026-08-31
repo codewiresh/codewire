@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use bytes::Bytes;
 use futures::{Stream, StreamExt as _};
 use sha2::{Digest as _, Sha256};
-use tokio::io::AsyncWriteExt as _;
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use uuid::Uuid;
 
 use super::Sha256Digest;
@@ -61,6 +61,25 @@ impl ContentStore {
             futures::stream::once(async move { Ok::<_, std::convert::Infallible>(bytes) }),
         )
         .await
+    }
+
+    pub(crate) async fn admit_file(
+        &self,
+        digest: &Sha256Digest,
+        expected_size: u64,
+        file: File,
+    ) -> Result<BlobAdmission, ContentStoreError> {
+        let stream =
+            futures::stream::try_unfold(tokio::fs::File::from_std(file), |mut file| async move {
+                let mut buffer = vec![0_u8; 64 * 1024];
+                let length = file.read(&mut buffer).await?;
+                if length == 0 {
+                    return Ok::<_, io::Error>(None);
+                }
+                buffer.truncate(length);
+                Ok(Some((Bytes::from(buffer), file)))
+            });
+        self.admit_stream(digest, expected_size, stream).await
     }
 
     pub fn contains_verified(
@@ -171,6 +190,17 @@ impl ContentStore {
                 Some(0o400),
             )?
             .into_file())
+    }
+
+    pub(crate) fn verified_blob_path(
+        &self,
+        digest: &Sha256Digest,
+        expected_size: u64,
+    ) -> Result<PathBuf, ContentStoreError> {
+        if !self.verify_existing(digest, expected_size)? {
+            return Err(ContentStoreError::BlobMissing);
+        }
+        Ok(self.blobs.path().join(digest.hex()))
     }
 
     pub fn read_blob(
@@ -403,21 +433,21 @@ fn path_error_is_not_found(error: &PathError) -> bool {
 
 #[derive(Debug, thiserror::Error)]
 pub enum ContentStoreError {
-    #[error("OCI blob exceeds the local content bound")]
+    #[error("content blob exceeds the local bound")]
     BlobTooLarge,
-    #[error("OCI blob stream failed")]
+    #[error("content blob stream failed")]
     Stream,
-    #[error("OCI blob size mismatch: expected {expected}, received {actual}")]
+    #[error("content blob size mismatch: expected {expected}, received {actual}")]
     SizeMismatch { expected: u64, actual: u64 },
-    #[error("OCI blob digest mismatch")]
+    #[error("content blob digest mismatch")]
     DigestMismatch,
-    #[error("existing OCI CAS blob is invalid")]
+    #[error("existing content-addressed blob is invalid")]
     ExistingBlobInvalid,
-    #[error("OCI CAS blob is missing")]
+    #[error("content-addressed blob is missing")]
     BlobMissing,
-    #[error("OCI CAS contains too many objects")]
+    #[error("content store contains too many objects")]
     ObjectLimit,
-    #[error("OCI CAS contains an unknown or unsafe object: {0}")]
+    #[error("content store contains an unknown or unsafe object: {0}")]
     UnexpectedObject(PathBuf),
     #[error("OCI CAS filesystem I/O failed: {0}")]
     Io(io::Error),

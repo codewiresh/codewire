@@ -13,16 +13,16 @@ pub fn from_proto(
     let agents = value.agents.into_option().unwrap_or_default();
     let resources = value.resources.into_option().unwrap_or_default();
     let secrets = value.secrets.into_option().unwrap_or_default();
-    let workspace_mode = match value.workspace_mode.as_known() {
-        Some(proto::ProjectWorkspaceMode::Auto) => project::WorkspaceMode::Auto,
-        Some(proto::ProjectWorkspaceMode::Clone) => project::WorkspaceMode::Clone,
-        Some(proto::ProjectWorkspaceMode::Direct) => project::WorkspaceMode::Direct,
-        Some(proto::ProjectWorkspaceMode::Unspecified) => {
-            return invalid("project_spec.workspace_mode", "must be specified");
+    match value.workspace_mode.as_known() {
+        Some(proto::ProjectWorkspaceMode::Unspecified) => {}
+        Some(_) => {
+            return invalid(
+                "project_spec.workspace_mode",
+                "is retired; use portable repositories or placement-specific mounts",
+            );
         }
         None => return invalid("project_spec.workspace_mode", "contains an unknown value"),
-    };
-
+    }
     let mut skills = Vec::with_capacity(value.skills.len());
     for skill in value.skills {
         let source = match skill.source.as_known() {
@@ -96,7 +96,6 @@ pub fn from_proto(
                 )
             })
             .collect(),
-        workspace_mode,
     };
     spec.validate()?;
     Ok(spec)
@@ -182,11 +181,6 @@ pub fn to_proto(value: project::ProjectSpec) -> proto::ProjectSpec {
                 )
             })
             .collect(),
-        workspace_mode: match value.workspace_mode {
-            project::WorkspaceMode::Auto => proto::ProjectWorkspaceMode::Auto.into(),
-            project::WorkspaceMode::Clone => proto::ProjectWorkspaceMode::Clone.into(),
-            project::WorkspaceMode::Direct => proto::ProjectWorkspaceMode::Direct.into(),
-        },
         ..Default::default()
     }
 }
@@ -227,7 +221,6 @@ disk: 40Gi
 secrets: {project: dev, org: false}
 credentials:
   work: {provider: openai, account: acct-work}
-workspace: clone
 "#,
         )
         .unwrap()
@@ -245,7 +238,6 @@ workspace: clone
         let proto = proto::ProjectSpec {
             schema_version: project::PROJECT_SCHEMA_VERSION,
             working_directory: "/workspace".to_string(),
-            workspace_mode: proto::ProjectWorkspaceMode::Direct.into(),
             credentials: [(
                 "work".to_string(),
                 proto::ProjectCredentialReference {
@@ -258,6 +250,15 @@ workspace: clone
             ..Default::default()
         };
         assert!(from_proto(proto).is_err());
+
+        let retired_workspace_mode = proto::ProjectSpec {
+            schema_version: project::PROJECT_SCHEMA_VERSION,
+            working_directory: "/workspace".to_string(),
+            workspace_mode: proto::ProjectWorkspaceMode::Clone.into(),
+            ..Default::default()
+        };
+        let error = from_proto(retired_workspace_mode).unwrap_err();
+        assert!(error.to_string().contains("workspace_mode"), "{error}");
 
         let descriptor_json = serde_json::to_string(&to_proto(project::ProjectSpec::default()))
             .expect("serialize public project spec");

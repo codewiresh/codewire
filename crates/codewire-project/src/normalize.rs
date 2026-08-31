@@ -42,7 +42,6 @@ pub(super) fn normalize_raw_project(raw: RawProject) -> Result<ProjectDocument, 
         raw.include_user_secrets,
     )?;
     let credentials = normalize_credentials(raw.credentials)?;
-    let (workspace_mode, direct_source, direct_read_only) = normalize_workspace(raw.workspace)?;
     let mounts = normalize_mounts(raw.mounts)?;
     validate_workspace_input_destinations(&repositories, &mounts)?;
     let environment = normalize_environment("environment", raw.environment)?;
@@ -65,14 +64,8 @@ pub(super) fn normalize_raw_project(raw: RawProject) -> Result<ProjectDocument, 
             resources,
             secrets,
             credentials,
-            workspace_mode,
         },
-        local: LocalProjectIntent {
-            direct_source,
-            direct_read_only,
-            mounts,
-            host_ports,
-        },
+        local: LocalProjectIntent { mounts, host_ports },
     };
     document.spec.validate()?;
     Ok(document)
@@ -613,44 +606,6 @@ fn normalize_credentials(
     Ok(normalized)
 }
 
-fn normalize_workspace(
-    workspace: Option<RawWorkspace>,
-) -> Result<(WorkspaceMode, Option<String>, bool), ProjectError> {
-    let (mode, source, read_only) = match workspace {
-        None => (WorkspaceMode::Auto, String::new(), false),
-        Some(RawWorkspace::String(mode)) => (parse_workspace_mode(&mode)?, String::new(), false),
-        Some(RawWorkspace::Mapping(workspace)) => (
-            parse_workspace_mode(&workspace.mode)?,
-            workspace.source,
-            workspace.read_only,
-        ),
-    };
-    let source = source.trim();
-    if source.is_empty() {
-        if read_only && mode != WorkspaceMode::Direct {
-            return invalid(
-                "workspace.read_only",
-                "requires direct mode or an explicit direct source",
-            );
-        }
-        return Ok((mode, None, read_only));
-    }
-    if mode == WorkspaceMode::Clone {
-        return invalid("workspace.source", "cannot be set in clone mode");
-    }
-    validate_explicit_local_source("workspace.source", source)?;
-    Ok((WorkspaceMode::Direct, Some(source.to_string()), read_only))
-}
-
-fn parse_workspace_mode(value: &str) -> Result<WorkspaceMode, ProjectError> {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "" | "auto" => Ok(WorkspaceMode::Auto),
-        "clone" | "snapshot" => Ok(WorkspaceMode::Clone),
-        "direct" => Ok(WorkspaceMode::Direct),
-        other => invalid("workspace.mode", format!("unsupported mode {other:?}")),
-    }
-}
-
 fn normalize_mounts(mounts: Vec<RawMountBlock>) -> Result<Vec<LocalMountIntent>, ProjectError> {
     mounts
         .into_iter()
@@ -773,7 +728,8 @@ pub fn repository_name(source: &str) -> String {
 }
 
 fn validate_repository_source(index: usize, source: &str) -> Result<(), ProjectError> {
-    if source.starts_with('/')
+    if source.starts_with('-')
+        || source.starts_with('/')
         || source.starts_with('~')
         || source == "."
         || source == ".."

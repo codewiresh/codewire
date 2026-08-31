@@ -27,6 +27,10 @@ TRANSCRIPT=''
 SOURCE_HOOK_MARKER=''
 SOURCE_CREDENTIAL_MARKER=''
 SOURCE_CONFIG_SHA256=''
+GITEA_COMMIT='bcbae548ab2f4f0e407068aa8717cec341084d7a'
+GITEA_README_SHA256='d4911db7bc817528fbcbaaf39e76851700084b65494dac1e29afb997867ac006'
+GITHUB_COMMIT='93f68ba4abc9f6e222481265b9b759e71d332575'
+GITHUB_README_SHA256='3661bce99f8eba5e48077eeddb4840f4404c1ceafbf200b9e8470bc7b4f22e50'
 SCRATCH_MOUNT_OPTIONS=''
 NAME='native-smoke'
 COMMAND_INDEX=0
@@ -53,12 +57,14 @@ codewire-local-vmm. Missing KVM, artifacts, or required tools fail nonzero.
 
 The smoke uses an isolated HOME and short private native state root, poisons
 the platform destination, installs Docker/Lima/QEMU tripwires, and creates
-disposable Git-clone and filesystem-copy fixtures. Initial create permits direct registry egress;
-every later command receives dead proxy endpoints. It proves digest-pinned OCI
-    workspace execution, independent clone/copy preparation, create/info, bounded daemon diagnostics and repair, bare
-    run and shell, PTY behavior, saved output and nonzero status, cached-runtime
-    restart after the installed artifact lock advances, offline disk/CPU/memory
-    resize, supervisor crash recovery, and journaled exact deletion cleanup.
+disposable multi-repository and filesystem-copy fixtures. Initial create
+permits direct registry and Git egress; every later command receives dead proxy
+endpoints. It proves digest-pinned OCI workspace execution, exact
+credential-free git.example.invalid/GitHub preparation, independent copy preparation,
+create/info, bounded daemon diagnostics and repair, bare run and shell, PTY
+behavior, saved output and nonzero status, cached-runtime restart after the
+installed artifact lock advances, offline disk/CPU/memory resize, supervisor
+crash recovery, and journaled exact deletion cleanup.
 USAGE
 }
 
@@ -227,8 +233,6 @@ env -i PATH='/usr/bin:/bin' HOME="$SMOKE_HOME" LC_ALL=C \
 env -i PATH='/usr/bin:/bin' HOME="$SMOKE_HOME" LC_ALL=C \
   /usr/bin/git -C "$WORKSPACE" -c user.name='Codewire Smoke' \
     -c user.email='smoke@invalid.example' commit -q -m fixture
-WORKSPACE_COMMIT="$(env -i PATH='/usr/bin:/bin' HOME="$SMOKE_HOME" LC_ALL=C \
-  /usr/bin/git -C "$WORKSPACE" rev-parse HEAD)"
 env -i PATH='/usr/bin:/bin' HOME="$SMOKE_HOME" LC_ALL=C \
   /usr/bin/git -C "$WORKSPACE" config credential.helper \
     "!touch '$SOURCE_CREDENTIAL_MARKER'"
@@ -238,6 +242,17 @@ env -i PATH='/usr/bin:/bin' HOME="$SMOKE_HOME" LC_ALL=C \
 printf '#!/bin/sh\ntouch %q\n' "$SOURCE_HOOK_MARKER" >"$WORKSPACE/.git/hooks/post-checkout"
 chmod 0700 "$WORKSPACE/.git/hooks/post-checkout"
 SOURCE_CONFIG_SHA256="$(sha256sum "$WORKSPACE/.git/config" | awk '{print $1}')"
+cat >"$WORKSPACE/codewire.yaml" <<EOF
+version: 1
+repositories:
+  - source: https://git.example.invalid/supplychain.git
+    revision: $GITEA_COMMIT
+    destination: /workspace/gitea
+  - source: https://github.com/noeljackson/method.git
+    revision: $GITHUB_COMMIT
+    destination: /workspace/github
+working_directory: /workspace/github
+EOF
 
 cw_isolated() {
   (
@@ -644,14 +659,16 @@ run_cw env create --local --name "$NAME" --cpu 2 --memory 16Gi --path "$WORKSPAC
 ALLOW_REGISTRY_EGRESS=0
 CW_COMMAND_TIMEOUT_SECONDS=180
 ENV_CREATED=1
-jq -e --arg commit "$WORKSPACE_COMMIT" '
+jq -e '
   .name == "native-smoke" and
   .backend == "cloud-hypervisor" and
   .state == "running" and
   .selected == true and
   .cpu == 2 and
   .memory == "16Gi" and
-  .workspace_commit == $commit
+  .working_directory == "/workspace/github" and
+  .workspace_inputs == 2 and
+  (.workspace_plan | test("^[0-9a-f]{64}$"))
 ' "$LAST_STDOUT" >/dev/null || die 'created native environment metadata drifted'
 [[ ! -e "$SOURCE_HOOK_MARKER" ]] || die 'source Git hook ran during native clone preparation'
 [[ ! -e "$SOURCE_CREDENTIAL_MARKER" ]] ||
@@ -682,7 +699,7 @@ for sqlite_sidecar in "$STATE_ROOT/supervisor.db-wal" "$STATE_ROOT/supervisor.db
   [[ ! -e "$sqlite_sidecar" || "$(stat -c '%a' "$sqlite_sidecar")" == 600 ]] ||
     die "native supervisor database sidecar is not mode 0600: $sqlite_sidecar"
 done
-[[ "$(native_database_value contract)" == '1129797197:4:wal:ok' ]] ||
+[[ "$(native_database_value contract)" == '1129797197:5:wal:ok' ]] ||
   die 'native supervisor database contract drifted'
 wait_for_journal_complete ||
   die "initial create returned before its lifecycle journal became terminal: $(native_database_value journal_summary)"
@@ -763,14 +780,18 @@ log 'checking guest identity, live resources, workspace, and durable output'
 # The quoted expression is evaluated by the guest shell, not this host script.
 # shellcheck disable=SC2016
 run_cw run --no-tty -- /bin/sh -lc \
-  'printf "guest-cwd=%s\n" "$PWD"; printf "guest-pid1-comm="; cat /proc/1/comm; if readlink /proc/1/exe >/dev/null 2>&1; then printf "guest-pid1-exe=exposed\n"; else printf "guest-pid1-exe=confined\n"; fi; printf "guest-sealed-init="; /run/codewire-runtime/init identity; awk "/^NoNewPrivs:/ { printf \"guest-no-new-privileges=%s\\n\", \$2 } /^CapEff:/ { printf \"guest-effective-capabilities=%s\\n\", \$2 }" /proc/self/status; printf "guest-cpus="; grep -c "^processor" /proc/cpuinfo; grep "^MemTotal:" /proc/meminfo; printf "workspace-node="; node --version; test -d .git; test -z "$(git status --porcelain=v1 --untracked-files=all)"; printf "guest-git-head="; git rev-parse HEAD; printf "guest-readme="; cat README.md; git config --local --list; test ! -e host-only.txt; ./hello.sh; printf persistence-ok > /workspace/sentinel.txt'
-rg -qF 'guest-cwd=/workspace' "$LAST_STDOUT" || die 'session did not start in /workspace'
+  'printf "guest-cwd=%s\n" "$PWD"; printf "guest-pid1-comm="; cat /proc/1/comm; if readlink /proc/1/exe >/dev/null 2>&1; then printf "guest-pid1-exe=exposed\n"; else printf "guest-pid1-exe=confined\n"; fi; printf "guest-sealed-init="; /run/codewire-runtime/init identity; printf "guest-machine-id="; cat /etc/machine-id; awk "/^NoNewPrivs:/ { printf \"guest-no-new-privileges=%s\\n\", \$2 } /^CapEff:/ { printf \"guest-effective-capabilities=%s\\n\", \$2 }" /proc/self/status; printf "guest-cpus="; grep -c "^processor" /proc/cpuinfo; grep "^MemTotal:" /proc/meminfo; printf "workspace-node="; node --version; test -d /workspace/github/.git; test -d /workspace/gitea/.git; test -z "$(git -C /workspace/github status --porcelain=v1 --untracked-files=all)"; test -z "$(git -C /workspace/gitea status --porcelain=v1 --untracked-files=all)"; printf "guest-github-head="; git -C /workspace/github rev-parse HEAD; printf "guest-gitea-head="; git -C /workspace/gitea rev-parse HEAD; printf "guest-github-readme-sha="; sha256sum /workspace/github/README.md | cut -d " " -f 1; printf "guest-gitea-readme-sha="; sha256sum /workspace/gitea/README.md | cut -d " " -f 1; printf "guest-github-origin="; git -C /workspace/github config --local --get remote.origin.url; printf "guest-gitea-origin="; git -C /workspace/gitea config --local --get remote.origin.url; git -C /workspace/github config --local --list; git -C /workspace/gitea config --local --list; printf persistence-ok > /workspace/sentinel.txt'
+rg -qF 'guest-cwd=/workspace/github' "$LAST_STDOUT" ||
+  die 'session did not start in the configured repository working directory'
 rg -qF 'guest-pid1-comm=init' "$LAST_STDOUT" ||
   die 'guest PID 1 does not have the sealed init process identity'
 rg -qF 'guest-pid1-exe=confined' "$LAST_STDOUT" ||
   die 'guest PID 1 exposed its executable link to the workspace identity'
 rg -q '^guest-sealed-init=CWIDENTITY1 vm_id=[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12} generation=1$' "$LAST_STDOUT" ||
   die 'sealed Codewire init did not return the generation-bound VM identity'
+EXPECTED_MACHINE_ID="${ENVIRONMENT_ID//-/}"
+rg -qF "guest-machine-id=$EXPECTED_MACHINE_ID" "$LAST_STDOUT" ||
+  die 'workspace inherited image machine identity instead of its environment identity'
 rg -qF 'guest-no-new-privileges=1' "$LAST_STDOUT" ||
   die 'session did not execute through the no-new-privileges OCI boundary'
 rg -qF 'guest-effective-capabilities=0000000000000000' "$LAST_STDOUT" ||
@@ -778,11 +799,18 @@ rg -qF 'guest-effective-capabilities=0000000000000000' "$LAST_STDOUT" ||
 rg -qF 'guest-cpus=2' "$LAST_STDOUT" || die 'guest did not observe exactly 2 vCPUs'
 rg -q '^workspace-node=v[0-9]+\.' "$LAST_STDOUT" ||
   die 'session did not execute from the canonical Codewire workspace image'
-rg -qF 'native-workspace-ok' "$LAST_STDOUT" || die 'clean Git workspace content is unavailable'
-rg -qF "guest-git-head=$WORKSPACE_COMMIT" "$LAST_STDOUT" ||
-  die 'guest Git metadata does not identify the admitted commit'
-rg -qF 'guest-readme=native workspace fixture' "$LAST_STDOUT" ||
-  die 'host changes after creation entered the guest clone'
+rg -qF "guest-github-head=$GITHUB_COMMIT" "$LAST_STDOUT" ||
+  die 'GitHub workspace does not identify the pinned commit'
+rg -qF "guest-gitea-head=$GITEA_COMMIT" "$LAST_STDOUT" ||
+  die 'git.example.invalid workspace does not identify the pinned commit'
+rg -qF "guest-github-readme-sha=$GITHUB_README_SHA256" "$LAST_STDOUT" ||
+  die 'GitHub workspace content drifted from the pinned commit'
+rg -qF "guest-gitea-readme-sha=$GITEA_README_SHA256" "$LAST_STDOUT" ||
+  die 'git.example.invalid workspace content drifted from the pinned commit'
+rg -qF 'guest-github-origin=https://github.com/noeljackson/method.git' "$LAST_STDOUT" ||
+  die 'GitHub workspace origin metadata is not the sanitized public source'
+rg -qF 'guest-gitea-origin=https://git.example.invalid/supplychain.git' "$LAST_STDOUT" ||
+  die 'git.example.invalid workspace origin metadata is not the sanitized public source'
 if rg -qF 'host-secret' "$LAST_STDOUT" || rg -qF 'credential.helper' "$LAST_STDOUT" ||
    rg -qF "$WORKSPACE" "$LAST_STDOUT"; then
   die 'host Git credential or source-path metadata entered the guest clone'
@@ -832,7 +860,8 @@ if ! (
 fi
 cat "$SMOKE_ROOT/pty.stdout" "$SMOKE_ROOT/pty.stderr" >>"$TRANSCRIPT"
 rg -qF 'native-pty-ok' "$PTY_LOG" || die 'guest shell did not receive a PTY'
-rg -qF '/workspace' "$PTY_LOG" || die 'interactive shell did not start in /workspace'
+rg -qF '/workspace/github' "$PTY_LOG" ||
+  die 'interactive shell did not start in the configured repository directory'
 
 log 'checking nonzero status and saved session output'
 run_cw_expect_failure run --no-tty -- /bin/sh -lc 'printf saved-nonzero; exit 42'
@@ -882,11 +911,15 @@ REPLACEMENT_RUNNER_PID="$(native_database_value runner_pid)"
 [[ -f "$STATE_ROOT/engine/runtime-artifacts/generations/$ORIGINAL_ARTIFACT_GENERATION.json" ]] ||
   die 'restart removed the environment-pinned runtime generation manifest'
 RUNNER_PID="$REPLACEMENT_RUNNER_PID"
-run_cw run --no-tty -- /bin/sh -lc 'cat /workspace/sentinel.txt; ./hello.sh'
+run_cw run --no-tty -- /bin/sh -lc 'cat /workspace/sentinel.txt; git -C /workspace/github rev-parse HEAD; git -C /workspace/gitea rev-parse HEAD; cat /etc/machine-id'
 rg -qF 'persistence-ok' "$LAST_STDOUT" ||
   die 'workspace sentinel did not survive cached-runtime restart'
-rg -qF 'native-workspace-ok' "$LAST_STDOUT" ||
-  die 'workspace snapshot did not survive cached-runtime restart'
+rg -qF "$GITHUB_COMMIT" "$LAST_STDOUT" ||
+  die 'GitHub workspace did not survive cached-runtime restart'
+rg -qF "$GITEA_COMMIT" "$LAST_STDOUT" ||
+  die 'git.example.invalid workspace did not survive cached-runtime restart'
+rg -qF "$EXPECTED_MACHINE_ID" "$LAST_STDOUT" ||
+  die 'environment-specific machine identity did not survive restart'
 
 log 'checking exact runner adoption after supervisor crash'
 SUPERVISOR_PID="$(find_exact_supervisor_pid)" || die 'native supervisor process was not found exactly'
@@ -942,9 +975,9 @@ RECOVERED_VMM_GENERATION="$(jq -er '.generation' "$STATE_ROOT/engine/vms/$ENVIRO
   die 'daemon repair did not rotate the VMM generation exactly once'
 [[ "$(native_database_value environment_id)" == "$ENVIRONMENT_ID" ]] ||
   die 'daemon repair changed the durable environment identity'
-run_cw run --no-tty -- /bin/sh -lc 'cat /workspace/sentinel.txt; ./hello.sh'
+run_cw run --no-tty -- /bin/sh -lc \
+  "cat /workspace/sentinel.txt; test \"\$(git -C /workspace/github rev-parse HEAD)\" = '$GITHUB_COMMIT'; test \"\$(git -C /workspace/gitea rev-parse HEAD)\" = '$GITEA_COMMIT'"
 rg -qF 'persistence-ok' "$LAST_STDOUT" || die 'workspace did not survive exact VMM death'
-rg -qF 'native-workspace-ok' "$LAST_STDOUT" || die 'snapshot did not survive exact VMM death'
 
 log 'checking exact runner death, VMM parent-death containment, and recovery'
 RUNNER_PID="$(native_database_value runner_pid)"
@@ -965,9 +998,9 @@ RECOVERED_VMM_PID="$(recorded_vmm_pid)"
   die 'replacement runner exited before recovery verification completed'
 [[ "$RECOVERED_VMM_PID" != "$VMM_PID" && -d "/proc/$RECOVERED_VMM_PID" ]] ||
   die 'runner death recovery did not produce a new live VMM process'
-run_cw run --no-tty -- /bin/sh -lc 'cat /workspace/sentinel.txt; ./hello.sh'
+run_cw run --no-tty -- /bin/sh -lc \
+  "cat /workspace/sentinel.txt; test \"\$(git -C /workspace/github rev-parse HEAD)\" = '$GITHUB_COMMIT'; test \"\$(git -C /workspace/gitea rev-parse HEAD)\" = '$GITEA_COMMIT'"
 rg -qF 'persistence-ok' "$LAST_STDOUT" || die 'workspace did not survive exact runner death'
-rg -qF 'native-workspace-ok' "$LAST_STDOUT" || die 'snapshot did not survive exact runner death'
 wait_for_journal_complete ||
   die 'native lifecycle journal contains a pending or partial operation'
 
@@ -1010,6 +1043,8 @@ DELETED_SUPERVISOR_PID="$(find_exact_supervisor_pid)" ||
   die 'runtime artifact generation remained after delete'
 [[ -z "$(find "$STATE_ROOT/engine/runtime-artifacts/blobs" -mindepth 1 -print -quit)" ]] ||
   die 'runtime artifact blob remained after delete'
+[[ -z "$(find "$STATE_ROOT/engine/content/blobs" -mindepth 1 -print -quit)" ]] ||
+  die 'workspace image or repository content blob remained after delete'
 [[ "$(native_database_value empty)" == yes ]] ||
   die 'native environment state entry remained after delete'
 wait_for_journal_complete ||
@@ -1051,7 +1086,9 @@ jq -e '
   .name == "native-copy-smoke" and
   .backend == "cloud-hypervisor" and
   .state == "running" and
-  (.workspace_commit | test("^[0-9a-f]{64}$"))
+  .working_directory == "/workspace" and
+  .workspace_inputs == 1 and
+  (.workspace_plan | test("^[0-9a-f]{64}$"))
 ' "$LAST_STDOUT" >/dev/null || die 'copy-mode environment metadata drifted'
 printf 'host changed after copy creation\n' >"$WORKSPACE/data.txt"
 printf 'host-only after copy\n' >"$WORKSPACE/host-only.txt"

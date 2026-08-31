@@ -22,6 +22,8 @@ pub mod hybrid_vsock;
 mod lifecycle;
 #[cfg(target_os = "linux")]
 pub mod workspace;
+#[cfg(target_os = "linux")]
+mod workspace_plan;
 
 #[cfg(target_os = "linux")]
 pub mod linux;

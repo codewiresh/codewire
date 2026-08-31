@@ -80,9 +80,11 @@ const ROOT_WORK_PATH: &str = "/generation/work";
 const ROOT_MERGED_PATH: &str = "/generation/merged";
 const CONTAINER_CONTROL_PATH: &str = "/run/codewire/container";
 const CONTAINER_IDENTITY_PATH: &str = "/run/codewire/container/identity.json";
+const CONTAINER_MACHINE_ID_PATH: &str = "/run/codewire/container/machine-id";
 const CONTAINER_POWEROFF_SOCKET: &str = "/run/codewire/container/poweroff.sock";
 const CONTAINER_CONTROL_DESTINATION: &str = "/run/codewire-host";
 const CONTAINER_IDENTITY_DESTINATION: &str = "/run/codewire-host/identity.json";
+const CONTAINER_MACHINE_ID_DESTINATION: &str = "/etc/machine-id";
 const CONTAINER_POWEROFF_DESTINATION: &str = "/run/codewire-host/poweroff.sock";
 const INSTALL_STATE_PATH: &str = "/state/codewire/workspace-install.state";
 const CONTAINER_INSTALL_STATE_PATH: &str = "/run/codewire-runtime/install.state";
@@ -479,6 +481,10 @@ impl GuestIdentity {
             "guest identity metadata is invalid"
         );
         Ok(())
+    }
+
+    fn machine_id(&self) -> String {
+        format!("{}\n", self.vm_id.simple())
     }
 }
 
@@ -1755,6 +1761,12 @@ fn prepare_container_control(
     let identity_bytes = serde_json::to_vec(&identity).context("encode guest identity metadata")?;
     write_durable(Path::new(CONTAINER_IDENTITY_PATH), &identity_bytes, 0o400)
         .context("publish guest identity metadata")?;
+    write_durable(
+        Path::new(CONTAINER_MACHINE_ID_PATH),
+        identity.machine_id().as_bytes(),
+        0o444,
+    )
+    .context("publish environment-specific machine identity")?;
     lchown(
         Path::new(CONTAINER_IDENTITY_PATH),
         workspace_identity.uid,
@@ -1936,6 +1948,7 @@ fn workspace_oci_config(plan: &WorkspacePlan) -> Result<Vec<u8>> {
             { "destination": CONTAINER_INIT_PATH, "type": "none", "source": INIT_PATH, "options": ["bind", "ro", "nosuid", "nodev", "exec"] },
             { "destination": CONTAINER_PLAN_PATH, "type": "none", "source": WORKSPACE_PLAN_PATH, "options": ["bind", "ro", "nosuid", "nodev", "noexec"] },
             { "destination": CONTAINER_INSTALL_STATE_PATH, "type": "none", "source": INSTALL_STATE_PATH, "options": ["bind", "ro", "nosuid", "nodev", "noexec"] },
+            { "destination": CONTAINER_MACHINE_ID_DESTINATION, "type": "none", "source": CONTAINER_MACHINE_ID_PATH, "options": ["bind", "ro", "nosuid", "nodev", "noexec"] },
             { "destination": "/tmp", "type": "tmpfs", "source": "tmpfs", "options": ["nosuid", "nodev", "mode=1777", "size=256m"] },
             { "destination": WORKSPACE_PATH, "type": "none", "source": PERSISTENT_WORKSPACE_PATH, "options": ["rbind", "rw", "nosuid", "nodev"] },
             { "destination": plan.identity.home, "type": "none", "source": HOME_MERGED_PATH, "options": ["rbind", "rw", "nosuid", "nodev"] },
@@ -3124,6 +3137,15 @@ mod tests {
             install_state["options"],
             serde_json::json!(["bind", "ro", "nosuid", "nodev", "noexec"])
         );
+        let machine_id = mounts
+            .iter()
+            .find(|mount| mount["destination"] == CONTAINER_MACHINE_ID_DESTINATION)
+            .unwrap();
+        assert_eq!(machine_id["source"], CONTAINER_MACHINE_ID_PATH);
+        assert_eq!(
+            machine_id["options"],
+            serde_json::json!(["bind", "ro", "nosuid", "nodev", "noexec"])
+        );
         let home = mounts
             .iter()
             .find(|mount| mount["destination"] == plan.identity.home)
@@ -3137,6 +3159,26 @@ mod tests {
             config["process"]["capabilities"]["ambient"],
             serde_json::json!([])
         );
+    }
+
+    #[test]
+    fn workspace_machine_id_is_stable_per_environment_without_image_identity_reuse() {
+        let first = GuestIdentity {
+            vm_id: uuid::Uuid::parse_str("20cf5e9e-5615-4f51-ae28-20d228223cc3").unwrap(),
+            generation: 1,
+        };
+        let restarted = GuestIdentity {
+            generation: 2,
+            ..first.clone()
+        };
+        let second = GuestIdentity {
+            vm_id: uuid::Uuid::parse_str("341eed6a-1529-4d77-a922-d185c58408da").unwrap(),
+            generation: 1,
+        };
+
+        assert_eq!(first.machine_id(), "20cf5e9e56154f51ae2820d228223cc3\n");
+        assert_eq!(restarted.machine_id(), first.machine_id());
+        assert_ne!(second.machine_id(), first.machine_id());
     }
 
     #[test]

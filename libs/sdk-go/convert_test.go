@@ -330,7 +330,6 @@ func TestProjectSpecRoundTripPreservesOpaquePortableIntent(t *testing.T) {
 		Credentials: map[string]ProjectCredentialReference{
 			"work": {Provider: "openai", Account: "acct-work"},
 		},
-		WorkspaceMode: "clone",
 	}
 	protoProject, err := toProtoProjectSpec(project)
 	if err != nil {
@@ -344,11 +343,6 @@ func TestProjectSpecRoundTripPreservesOpaquePortableIntent(t *testing.T) {
 	project.Credentials["work"] = ProjectCredentialReference{Provider: "openai", Account: "changed"}
 	if protoProject.GetEnvironment()["RUST_LOG"] != "info" || protoProject.GetCredentials()["work"].GetAccount() != "acct-work" {
 		t.Errorf("protobuf request aliases caller-owned project values: %#v", protoProject)
-	}
-	invalid := *project
-	invalid.WorkspaceMode = "shared"
-	if _, err := toProtoProjectSpec(&invalid); err == nil {
-		t.Error("accepted an unknown project workspace mode")
 	}
 }
 
