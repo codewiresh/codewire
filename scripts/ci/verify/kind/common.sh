@@ -2171,43 +2171,10 @@ coordinator_ingress_smoke() {
 }
 
 exec_service_connect_smoke() {
-  log "running ExecService Connect same-pod smoke and REST-retirement probe"
-  local environment_id=env_contract_1
+  local environment_id="$1"
+  log "running daemon-native ExecService Connect smoke and REST-retirement probe"
   local ascii_command ascii_connect_payload ascii_connect
   local invalid_command invalid_connect_payload invalid_connect
-
-  kubectl -n "$NS" exec -i deploy/postgres -- \
-    psql -U codewire -d codewire -v ON_ERROR_STOP=1 <<SQL
-UPDATE environments
-SET state = 'running', desired_state = 'started', error_reason = NULL,
-    state_changed_at = NOW(),
-    environment_operation_generation = GREATEST(environment_operation_generation, 1)
-WHERE id = '$environment_id';
-
--- This fixture is a raw pod, not an Agent Sandbox claim. Mark the harness as
--- the active setup owner while it exercises that pod so the real liveness
--- reconciler does not correctly reject the deliberately claim-less fixture
--- in the middle of the paced streaming comparison.
-INSERT INTO sandbox_environment_backend (
-  environment_id, namespace, pod_name,
-  setup_owner_generation, setup_owner_activity_id, setup_owner_attempt,
-  setup_owner_phase, setup_owner_status, setup_owner_pod_uid
-)
-SELECT '$environment_id', '$SANDBOX_NS', 'exec-smoke',
-       environment_operation_generation, 'kind-exec-service-smoke', 1,
-       0, 'claimed', NULL
-FROM environments
-WHERE id = '$environment_id'
-ON CONFLICT (environment_id) DO UPDATE
-SET namespace = EXCLUDED.namespace,
-    pod_name = EXCLUDED.pod_name,
-    setup_owner_generation = EXCLUDED.setup_owner_generation,
-    setup_owner_activity_id = EXCLUDED.setup_owner_activity_id,
-    setup_owner_attempt = EXCLUDED.setup_owner_attempt,
-    setup_owner_phase = EXCLUDED.setup_owner_phase,
-    setup_owner_status = EXCLUDED.setup_owner_status,
-    setup_owner_pod_uid = EXCLUDED.setup_owner_pod_uid;
-SQL
 
   SMOKE_CONNECT_BASE_URL="$KIND_INGRESS_URL" \
     SMOKE_DIRECT_BASE_URL=http://127.0.0.1:8084 \
@@ -2280,7 +2247,7 @@ SQL
     return 1
   fi
 
-  log "ExecService Connect semantics and REST retirement green; retaining its pod for FileService"
+  log "daemon-native ExecService Connect semantics and REST retirement green"
 }
 
 environment_setup_terminal_smoke() (
@@ -2412,12 +2379,11 @@ EOF
 )
 
 file_service_smoke() {
-  log "running FileService client/server streaming and Connect contract smoke"
-  local sftp_environment_id=env-crd-smoke
-  local exec_environment_id=env_contract_1
+  log "running daemon-native FileService client/server streaming and Connect contract smoke"
+  local environment_id=env-crd-smoke
   local daemon_pod=crd-smoke-workspace-daemon
   local daemon_token
-  daemon_token="$(daemon_auth_token_for_environment "$sftp_environment_id")"
+  daemon_token="$(daemon_auth_token_for_environment "$environment_id")"
 
   kubectl -n "$NS" exec -i deploy/postgres -- \
     psql -U codewire -d codewire -v ON_ERROR_STOP=1 <<SQL
@@ -2427,8 +2393,8 @@ INSERT INTO environments (
   environment_operation_generation, state_changed_at
 )
 VALUES (
-  '$sftp_environment_id', 'org_contract_1', 'usr_contract_user', 'sandbox',
-  'file-service-sftp', 'running', 'started', 'preset_contract_1',
+  '$environment_id', 'org_contract_1', 'usr_contract_user', 'sandbox',
+  'file-service-daemon', 'running', 'started', 'preset_contract_1',
   2000, 4096, 10, 1, NOW()
 )
 ON CONFLICT (id) DO UPDATE
@@ -2441,11 +2407,11 @@ INSERT INTO sandbox_environment_backend (
   setup_owner_generation, setup_owner_activity_id, setup_owner_attempt,
   setup_owner_phase, setup_owner_status, setup_owner_pod_uid
 )
-SELECT '$sftp_environment_id', '$SANDBOX_NS', '$daemon_pod',
+SELECT '$environment_id', '$SANDBOX_NS', '$daemon_pod',
        environment_operation_generation, 'kind-file-service-smoke', 1,
        0, 'claimed', NULL
 FROM environments
-WHERE id = '$sftp_environment_id'
+WHERE id = '$environment_id'
 ON CONFLICT (environment_id) DO UPDATE
 SET namespace = EXCLUDED.namespace,
     pod_name = EXCLUDED.pod_name,
@@ -2457,28 +2423,24 @@ SET namespace = EXCLUDED.namespace,
     setup_owner_pod_uid = EXCLUDED.setup_owner_pod_uid;
 SQL
 
-  environment_daemon_proxy_smoke "$sftp_environment_id" "$daemon_pod"
-  platform_run_connect_smoke "$sftp_environment_id"
-  environment_session_protocol_smoke "$sftp_environment_id"
-
-  kubectl -n "$SANDBOX_NS" exec pod/exec-smoke -c workspace -- \
-    sh -c "mkdir -p /workspace && printf '%s\n' 'exec-only FileService download' > /workspace/exec-file-service.txt"
+  environment_daemon_proxy_smoke "$environment_id" "$daemon_pod"
+  exec_service_connect_smoke "$environment_id"
+  platform_run_connect_smoke "$environment_id"
+  environment_session_protocol_smoke "$environment_id"
 
   SMOKE_CONNECT_BASE_URL="$KIND_INGRESS_URL" \
     SMOKE_DIRECT_BASE_URL=http://127.0.0.1:8084 \
     SMOKE_ORG_ID=org_contract_1 \
-    SMOKE_SFTP_ENVIRONMENT_ID="$sftp_environment_id" \
-    SMOKE_EXEC_ENVIRONMENT_ID="$exec_environment_id" \
+    SMOKE_ENVIRONMENT_ID="$environment_id" \
     SMOKE_SESSION_TOKEN=contract-user-session-token \
     "$CARGO_CI_DIR/file-service-smoke"
 
   kubectl -n "$NS" exec -i deploy/postgres -- \
     psql -U codewire -d codewire -v ON_ERROR_STOP=1 <<SQL
 DELETE FROM sandbox_environment_backend
-WHERE environment_id IN ('$sftp_environment_id', '$exec_environment_id');
-DELETE FROM environments WHERE id = '$sftp_environment_id';
+WHERE environment_id = '$environment_id';
+DELETE FROM environments WHERE id = '$environment_id';
 SQL
-  kubectl -n "$SANDBOX_NS" delete pod exec-smoke --wait=true --timeout=60s >/dev/null
   CRD_SMOKE_NAMESPACE="$SANDBOX_NS" \
     CRD_SMOKE_SERVER_NAMESPACE="$NS" \
     CRD_SMOKE_WORKSPACE_IMAGE="$(kind_workspace_runtime_image)" \
@@ -2489,7 +2451,7 @@ SQL
   kubectl -n "$SANDBOX_NS" delete pod "$daemon_pod" --wait=true >/dev/null
   rm -rf "$GATEWAY_SMOKE_TMPDIR"
   GATEWAY_SMOKE_TMPDIR=""
-  log "FileService streaming, backend selection, and black-box Connect contract green"
+  log "daemon-native FileService streaming and black-box Connect contract green"
 }
 
 platform_run_connect_smoke() {
@@ -2682,8 +2644,7 @@ workspace_service_smokes() {
   gateway_host_key_restart_smoke
 
   log "running workspace exec smoke"
-  SMOKE_NAMESPACE="$SANDBOX_NS" SMOKE_KEEP_POD=1 "$CARGO_CI_DIR/exec-smoke"
-  exec_service_connect_smoke
+  SMOKE_NAMESPACE="$SANDBOX_NS" "$CARGO_CI_DIR/exec-smoke"
   environment_setup_terminal_smoke
   file_service_smoke
   environment_resize_smoke
@@ -3333,6 +3294,8 @@ spec:
         periodSeconds: 1
         timeoutSeconds: 1
       volumeMounts:
+        - name: workspace
+          mountPath: /home/codewire
         - name: workspace
           mountPath: /workspace
   volumes:

@@ -673,23 +673,30 @@ VALUES (
     '2026-07-10 10:41:00+00'
 );
 
--- ExecService's command and upstream boundaries need a valid resolved target.
--- The contract kubeconfig points back at orchestration's own HTTP listener, so
--- the Kubernetes exec upgrade fails deterministically after every database
--- gate has succeeded without granting the test process cluster access.
+-- ExecService and FileService resolve one actual daemon fixture plus one
+-- deterministic unavailable target after every database gate succeeds.
 INSERT INTO environments (
     id, org_id, created_by, type, name, state, desired_state, preset_id,
     created_at
 )
-VALUES (
-    'env_exec_contract_backend', 'org_apikey_contract_1',
-    'usr_apikey_contract_admin', 'sandbox', 'exec-contract-backend',
-    'running', 'started', 'preset_contract_in_use',
-    '2026-07-10 10:35:00'
-);
+VALUES
+    (
+        'env_exec_contract_backend', 'org_apikey_contract_1',
+        'usr_apikey_contract_admin', 'sandbox', 'exec-contract-backend',
+        'running', 'started', 'preset_contract_in_use',
+        '2026-07-10 10:35:00'
+    ),
+    (
+        'env_exec_contract_unavailable', 'org_apikey_contract_1',
+        'usr_apikey_contract_admin', 'sandbox', 'exec-contract-unavailable',
+        'running', 'started', 'preset_contract_in_use',
+        '2026-07-10 10:35:01'
+    );
 
 INSERT INTO sandbox_environment_backend (environment_id, namespace, pod_name)
-VALUES ('env_exec_contract_backend', 'exec-contract', 'exec-contract-pod');
+VALUES
+    ('env_exec_contract_backend', 'exec-contract', 'exec-contract-pod'),
+    ('env_exec_contract_unavailable', 'exec-contract', 'exec-contract-unavailable-pod');
 
 -- Deterministic state for REST/Connect anti-divergence. The hash is never
 -- used for authentication; only non-secret metadata and timestamp mapping are

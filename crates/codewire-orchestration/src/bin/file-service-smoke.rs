@@ -1,8 +1,8 @@
 //! Live ingress proof for WS06 WI-6 FileService.
 //!
 //! Exercises the first client-streaming public RPC with a payload larger than
-//! 8 MiB, then proves list/download framing, byte identity, and exec-first
-//! and SFTP-fallback selection.
+//! 8 MiB, then proves daemon-native list/download framing, metadata, and byte
+//! identity through both Connect codecs and both ingress paths.
 
 use anyhow::Context as _;
 use codewire_proto::codewire::v1::{
@@ -14,26 +14,17 @@ use connectrpc::{CodecFormat, ErrorCode};
 use reqwest::header::COOKIE;
 
 const CONNECT_PATH: &str = "/workspace/connect-file-service.bin";
-const JSON_PATH: &str = "/workspace/connect-file-service-json.bin";
-const EXEC_PATH: &str = "/workspace/exec-file-service.txt";
+const JSON_PATH: &str = "/workspace/connect-file-service-json/nested.bin";
 const TRANSFER_SIZE: usize = 8 * 1024 * 1024 + 12_345;
 const JSON_TRANSFER_SIZE: usize = 3 * 64 * 1024 + 777;
 const TRANSFER_CHUNK_SIZE: usize = 64 * 1024;
-const EXEC_PAYLOAD: &[u8] = b"exec-only FileService download\n";
-
-#[derive(Clone, Copy)]
-enum DownloadMetadata {
-    Sftp,
-    ExecUnavailable,
-}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let base_url = required_env("SMOKE_CONNECT_BASE_URL")?;
     let direct_base_url = required_env("SMOKE_DIRECT_BASE_URL")?;
     let org_id = required_env("SMOKE_ORG_ID")?;
-    let sftp_environment_id = required_env("SMOKE_SFTP_ENVIRONMENT_ID")?;
-    let exec_environment_id = required_env("SMOKE_EXEC_ENVIRONMENT_ID")?;
+    let environment_id = required_env("SMOKE_ENVIRONMENT_ID")?;
     let session_token = required_env("SMOKE_SESSION_TOKEN")?;
     let cookie = format!("codewire.session_token={session_token}");
 
@@ -49,69 +40,34 @@ async fn main() -> anyhow::Result<()> {
     let direct_client = FileServiceClient::new(HttpClient::plaintext(), direct_config);
     let expected = deterministic_payload(TRANSFER_SIZE);
 
-    upload_connect(
-        &client,
-        &org_id,
-        &sftp_environment_id,
-        CONNECT_PATH,
-        &expected,
-    )
-    .await?;
+    upload_connect(&client, &org_id, &environment_id, CONNECT_PATH, &expected).await?;
     list_connect(
         &client,
         &org_id,
-        &sftp_environment_id,
+        &environment_id,
         CONNECT_PATH,
         expected.len(),
     )
     .await?;
-    expect_list_error(&client, &org_id, &sftp_environment_id).await?;
+    expect_list_error(&client, &org_id, &environment_id).await?;
     // ingress-nginx consumes X-Accel-Buffering as an upstream control header;
     // the shared edge probe measures incremental delivery through ingress.
-    let downloaded = download_connect(
-        &client,
-        &org_id,
-        &sftp_environment_id,
-        CONNECT_PATH,
-        DownloadMetadata::Sftp,
-        false,
-    )
-    .await?;
+    let downloaded =
+        download_connect(&client, &org_id, &environment_id, CONNECT_PATH, false).await?;
     anyhow::ensure!(
         downloaded == expected,
-        "Connect SFTP fallback changed file bytes"
+        "Connect daemon download changed file bytes"
     );
-
-    let exec_downloaded = download_connect(
-        &client,
-        &org_id,
-        &exec_environment_id,
-        EXEC_PATH,
-        DownloadMetadata::ExecUnavailable,
-        false,
-    )
-    .await?;
+    let direct_downloaded =
+        download_connect(&direct_client, &org_id, &environment_id, CONNECT_PATH, true).await?;
     anyhow::ensure!(
-        exec_downloaded == EXEC_PAYLOAD,
-        "Connect exec-first download changed file bytes"
-    );
-    let direct_exec_downloaded = download_connect(
-        &direct_client,
-        &org_id,
-        &exec_environment_id,
-        EXEC_PATH,
-        DownloadMetadata::ExecUnavailable,
-        true,
-    )
-    .await?;
-    anyhow::ensure!(
-        direct_exec_downloaded == EXEC_PAYLOAD,
-        "direct Connect exec-first download changed file bytes"
+        direct_downloaded == expected,
+        "direct Connect daemon download changed file bytes"
     );
     expect_download_error(
         &client,
         &org_id,
-        &sftp_environment_id,
+        &environment_id,
         "/workspace/file-service-missing",
         ErrorCode::NotFound,
     )
@@ -119,29 +75,13 @@ async fn main() -> anyhow::Result<()> {
     expect_download_error(
         &client,
         &org_id,
-        &exec_environment_id,
-        "/workspace/file-service-missing",
-        ErrorCode::NotFound,
-    )
-    .await?;
-    expect_download_error(
-        &client,
-        &org_id,
-        &sftp_environment_id,
-        "/workspace",
-        ErrorCode::InvalidArgument,
-    )
-    .await?;
-    expect_download_error(
-        &client,
-        &org_id,
-        &exec_environment_id,
+        &environment_id,
         "/workspace",
         ErrorCode::InvalidArgument,
     )
     .await?;
     // ProtoJSON is a first-class Connect codec, not a client-language
-    // behavior. Exercise it against the same real SFTP and exec backends.
+    // behavior. Exercise it against the same daemon-native backend.
     let json_config = ClientConfig::new(base_url.parse().context("parse Connect base URL")?)
         .with_default_header(COOKIE, cookie.clone())
         .with_codec_format(CodecFormat::Json);
@@ -158,7 +98,7 @@ async fn main() -> anyhow::Result<()> {
     upload_connect(
         &json_client,
         &org_id,
-        &sftp_environment_id,
+        &environment_id,
         JSON_PATH,
         &json_expected,
     )
@@ -166,73 +106,47 @@ async fn main() -> anyhow::Result<()> {
     list_connect(
         &json_client,
         &org_id,
-        &sftp_environment_id,
+        &environment_id,
         JSON_PATH,
         json_expected.len(),
     )
     .await?;
-    expect_list_error(&json_client, &org_id, &sftp_environment_id).await?;
+    expect_list_error(&json_client, &org_id, &environment_id).await?;
     anyhow::ensure!(
-        download_connect(
-            &json_client,
-            &org_id,
-            &sftp_environment_id,
-            JSON_PATH,
-            DownloadMetadata::Sftp,
-            false,
-        )
-        .await?
+        download_connect(&json_client, &org_id, &environment_id, JSON_PATH, false).await?
             == json_expected,
-        "ProtoJSON SFTP fallback changed file bytes"
-    );
-    anyhow::ensure!(
-        download_connect(
-            &json_client,
-            &org_id,
-            &exec_environment_id,
-            EXEC_PATH,
-            DownloadMetadata::ExecUnavailable,
-            false,
-        )
-        .await?
-            == EXEC_PAYLOAD,
-        "ProtoJSON exec-first download changed file bytes"
+        "ProtoJSON daemon download changed file bytes"
     );
     anyhow::ensure!(
         download_connect(
             &direct_json_client,
             &org_id,
-            &exec_environment_id,
-            EXEC_PATH,
-            DownloadMetadata::ExecUnavailable,
+            &environment_id,
+            JSON_PATH,
             true,
         )
         .await?
-            == EXEC_PAYLOAD,
-        "direct ProtoJSON exec-first download changed file bytes"
+            == json_expected,
+        "direct ProtoJSON daemon download changed file bytes"
     );
-    for environment_id in [&sftp_environment_id, &exec_environment_id] {
-        expect_download_error(
-            &json_client,
-            &org_id,
-            environment_id,
-            "/workspace/file-service-missing",
-            ErrorCode::NotFound,
-        )
-        .await?;
-        expect_download_error(
-            &json_client,
-            &org_id,
-            environment_id,
-            "/workspace",
-            ErrorCode::InvalidArgument,
-        )
-        .await?;
-    }
+    expect_download_error(
+        &json_client,
+        &org_id,
+        &environment_id,
+        "/workspace/file-service-missing",
+        ErrorCode::NotFound,
+    )
+    .await?;
+    expect_download_error(
+        &json_client,
+        &org_id,
+        &environment_id,
+        "/workspace",
+        ErrorCode::InvalidArgument,
+    )
+    .await?;
 
-    println!(
-        "file-service-smoke: binary and ProtoJSON client/server streams, exec primary, and SFTP fallback green"
-    );
+    println!("file-service-smoke: daemon-native binary and ProtoJSON client/server streams green");
     Ok(())
 }
 
@@ -371,7 +285,12 @@ where
         .list_files(ListFilesRequest {
             org_id: org_id.into(),
             environment_id: environment_id.into(),
-            path: "/workspace".into(),
+            path: path
+                .rsplit_once('/')
+                .map(|(parent, _)| parent)
+                .filter(|parent| !parent.is_empty())
+                .unwrap_or("/workspace")
+                .into(),
             ..Default::default()
         })
         .await
@@ -402,7 +321,6 @@ async fn download_connect<T>(
     org_id: &str,
     environment_id: &str,
     path: &str,
-    expected_metadata: DownloadMetadata,
     require_no_buffering_header: bool,
 ) -> anyhow::Result<Vec<u8>>
 where
@@ -452,26 +370,8 @@ where
                     "DownloadFile info name mismatch: {}",
                     info.name
                 );
-                match expected_metadata {
-                    DownloadMetadata::Sftp => {
-                        anyhow::ensure!(info.mode != 0, "DownloadFile info omitted raw mode");
-                        anyhow::ensure!(
-                            info.mod_time.is_set(),
-                            "DownloadFile info omitted mod_time"
-                        );
-                    }
-                    DownloadMetadata::ExecUnavailable => {
-                        anyhow::ensure!(
-                            info.mode == 0,
-                            "exec DownloadFile invented raw mode {}",
-                            info.mode
-                        );
-                        anyhow::ensure!(
-                            !info.mod_time.is_set(),
-                            "exec DownloadFile invented mod_time"
-                        );
-                    }
-                }
+                anyhow::ensure!(info.mode != 0, "DownloadFile info omitted raw mode");
+                anyhow::ensure!(info.mod_time.is_set(), "DownloadFile info omitted mod_time");
                 info_size = Some(info.size);
             }
             Some(download_file_response::Payload::Chunk(chunk)) => {

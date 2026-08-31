@@ -1284,6 +1284,7 @@ dependencies = [
  "portable-pty",
  "prost-types",
  "reqwest 0.12.28",
+ "rustix",
  "serde",
  "serde_json",
  "subtle",
@@ -1305,13 +1306,19 @@ dependencies = [
  "buffa",
  "buffa-types",
  "bytes",
+ "codewire-daemon",
  "codewire-gateway-proto",
  "codewire-proto",
  "connectrpc",
  "futures",
  "prost 0.14.4",
  "prost-types",
+ "tempfile",
+ "thiserror 2.0.18",
  "tokio",
+ "tokio-stream",
+ "tonic 0.14.6",
+ "uuid",
 ]
 
 [[package]]

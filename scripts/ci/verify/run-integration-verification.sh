@@ -29,6 +29,8 @@ TEMPORAL_PORT=$((PORT_BASE + 5))
 NATS_CLIENT_PORT=$((PORT_BASE + 6))
 NATS_MONITOR_PORT=$((PORT_BASE + 7))
 ORCHESTRATION_KUBE_STUB_PORT=$((PORT_BASE + 8))
+ORCHESTRATION_DAEMON_PORT=$((PORT_BASE + 9))
+ORCHESTRATION_UNAVAILABLE_DAEMON_PORT=$((PORT_BASE + 10))
 TEMPORAL_HOST_PORT="127.0.0.1:${TEMPORAL_PORT}"
 INTEGRATION_DOCKER_NETWORK="${INTEGRATION_DOCKER_NETWORK:-}"
 INTEGRATION_NATS_HOST="${INTEGRATION_NATS_HOST:-codewire-integration-nats}"
@@ -71,7 +73,7 @@ cargo_ci() {
 dump_logs() {
   local name
   for name in idp coordinator billing orchestration \
-      orchestration-kube-stub temporal nats; do
+      orchestration-daemon orchestration-kube-stub temporal nats; do
     if [ -f "$RUN_DIR/${name}.log" ]; then
       echo "--- ${name}.log ---"
       tail -200 "$RUN_DIR/${name}.log" || true
@@ -354,6 +356,7 @@ build_selected_services() {
   fi
   if selected service_orchestration; then
     selected service_temporal && orchestration_bins+=( --bin temporal-smoke )
+    cargo_ci build --locked --profile ci -p codewire-daemon --bin codewire-daemon
     cargo_ci build --locked --profile ci -p codewire-orchestration \
       "${orchestration_bins[@]}" --features kind-e2e
   fi
@@ -606,12 +609,93 @@ http.server.ThreadingHTTPServer(("127.0.0.1", port), Handler).serve_forever()
 ' "$ORCHESTRATION_KUBE_STUB_PORT"
 }
 
+start_orchestration_daemon_fixture() {
+  local fixture_root="$RUN_DIR/orchestration-daemon-root"
+  local workspace_root="$fixture_root/workspace"
+  local home_root="$fixture_root/home"
+  local token
+  install -d -m 0700 "$fixture_root" "$workspace_root" "$home_root"
+  cat > "$workspace_root/codewire-contract-exec-happy" <<'EOF'
+#!/bin/sh
+printf 'stdout-one\n'
+printf 'stderr-one\n' >&2
+printf 'stdout-two\n'
+exit 17
+EOF
+  cat > "$workspace_root/codewire-contract-exec-timeout" <<'EOF'
+#!/bin/sh
+sleep 1
+EOF
+  chmod 0500 \
+    "$workspace_root/codewire-contract-exec-happy" \
+    "$workspace_root/codewire-contract-exec-timeout"
+  token="$(
+    CODEWIRE_TOKEN_SECRET="$SESSION_SECRET" \
+    CODEWIRE_TOKEN_ENVIRONMENT_ID=env_exec_contract_backend \
+      python3 - <<'PY'
+import base64
+import hashlib
+import hmac
+import json
+import os
+
+environment_id = os.environ["CODEWIRE_TOKEN_ENVIRONMENT_ID"]
+secret = os.environ["CODEWIRE_TOKEN_SECRET"].encode()
+payload = json.dumps(
+    {"environment_id": environment_id, "scope": "coordinate"},
+    separators=(",", ":"),
+).encode()
+encoded = base64.urlsafe_b64encode(payload).rstrip(b"=")
+signature = base64.urlsafe_b64encode(
+    hmac.new(secret, encoded, hashlib.sha256).digest()
+).rstrip(b"=")
+print((encoded + b"." + signature).decode())
+PY
+  )"
+
+  log "starting orchestration-daemon"
+  env \
+    PATH="$workspace_root:$PATH" \
+    CODEWIRE_WORKSPACE_SHIM_ADDR="127.0.0.1:${ORCHESTRATION_DAEMON_PORT}" \
+    CODEWIRE_WORKSPACE_ROOT="$workspace_root" \
+    CODEWIRE_HOME_ROOT="$home_root" \
+    CODEWIRE_DAEMON_AUTH_TOKEN="$token" \
+    "$CARGO_CI_DIR/codewire-daemon" \
+    > "$RUN_DIR/orchestration-daemon.log" 2>&1 &
+  echo $! > "$RUN_DIR/orchestration-daemon.pid"
+  local _
+  for _ in $(seq 1 45); do
+    if python3 - "$ORCHESTRATION_DAEMON_PORT" <<'PY'
+import socket
+import sys
+
+with socket.create_connection(("127.0.0.1", int(sys.argv[1])), timeout=1):
+    pass
+PY
+    then
+      log "orchestration-daemon ready"
+      return
+    fi
+    if ! kill -0 "$(cat "$RUN_DIR/orchestration-daemon.pid")" 2>/dev/null; then
+      echo "::error::orchestration-daemon exited before accepting connections"
+      return 1
+    fi
+    sleep 1
+  done
+  echo "::error::orchestration-daemon did not become ready"
+  return 1
+}
+
 start_orchestration_process() {
   local kube_mode="$1" kubeconfig anthropic_api_key
+  local -a daemon_endpoint_environment=()
   case "$kube_mode" in
     configured)
       kubeconfig="$(write_orchestration_kubeconfig)"
       anthropic_api_key=contract-test-key
+      daemon_endpoint_environment=(
+        CODEWIRE_TEST_ENVIRONMENT_DAEMON_ENDPOINTS_JSON="{\"env_exec_contract_backend\":\"http://127.0.0.1:${ORCHESTRATION_DAEMON_PORT}\",\"env_exec_contract_unavailable\":\"http://127.0.0.1:${ORCHESTRATION_UNAVAILABLE_DAEMON_PORT}\"}"
+      )
       ;;
     unconfigured)
       kubeconfig="$RUN_DIR/orchestration-deliberately-missing-kubeconfig"
@@ -632,6 +716,7 @@ start_orchestration_process() {
     ORCHESTRATION_PORT="$ORCHESTRATION_PORT" \
     ANTHROPIC_API_KEY="$anthropic_api_key" \
     TEMPORAL_HOST_PORT="$TEMPORAL_HOST_PORT" WORKER_CONSUMERS= WORKER_LOOPS= \
+    "${daemon_endpoint_environment[@]}" \
     CONNECT_TESTING_SURFACE=1 "$CARGO_CI_DIR/codewire-orchestration"
 }
 
@@ -640,6 +725,7 @@ start_orchestration() {
     -f "$ROOT/tests/fixtures/orchestration/seed.sql"
   start_temporal
   start_orchestration_kube_stub
+  start_orchestration_daemon_fixture
   start_orchestration_process configured
   probe_connect_surface orchestration "$ORCHESTRATION_PORT"
 }
@@ -676,6 +762,7 @@ run_orchestration() {
     "$CARGO_CI_DIR/log-stream-smoke"
 
   stop_proc orchestration
+  stop_proc orchestration-daemon
   start_orchestration_process unconfigured
   logfile="$RUN_DIR/orchestration-kube-unconfigured-contract.log"
   ORCHESTRATION_BASE_URL="http://127.0.0.1:${ORCHESTRATION_PORT}" \
