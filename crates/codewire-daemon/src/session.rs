@@ -111,7 +111,19 @@ async fn run_exec_session(
         disconnected = disconnected_rx => {
             if disconnected.unwrap_or(true) {
                 let _ = child.kill().await;
+                child.wait().await.map(exit_code).unwrap_or(1)
+            } else {
+                tokio::select! {
+                    status = child.wait() => status.map(exit_code).unwrap_or(1),
+                    _ = tx.closed() => {
+                        let _ = child.kill().await;
+                        child.wait().await.map(exit_code).unwrap_or(1)
+                    }
+                }
             }
+        }
+        _ = tx.closed() => {
+            let _ = child.kill().await;
             child.wait().await.map(exit_code).unwrap_or(1)
         }
     };
@@ -208,7 +220,7 @@ async fn run_pty_session(
         let tx = tx.clone();
         move || copy_pty_output(reader, tx)
     });
-    let mut killer = child.clone_killer();
+    let mut killer = Some(child.clone_killer());
     let mut wait_task = tokio::task::spawn_blocking(move || {
         let mut child = child;
         child
@@ -223,6 +235,24 @@ async fn run_pty_session(
         result = &mut wait_task => result.unwrap_or(1),
         disconnected = disconnected_rx => {
             if disconnected.unwrap_or(true) {
+                if let Some(mut killer) = killer.take() {
+                    let _ = tokio::task::spawn_blocking(move || killer.kill()).await;
+                }
+                wait_task.await.unwrap_or(1)
+            } else {
+                tokio::select! {
+                    result = &mut wait_task => result.unwrap_or(1),
+                    _ = tx.closed() => {
+                        if let Some(mut killer) = killer.take() {
+                            let _ = tokio::task::spawn_blocking(move || killer.kill()).await;
+                        }
+                        wait_task.await.unwrap_or(1)
+                    }
+                }
+            }
+        }
+        _ = tx.closed() => {
+            if let Some(mut killer) = killer.take() {
                 let _ = tokio::task::spawn_blocking(move || killer.kill()).await;
             }
             wait_task.await.unwrap_or(1)

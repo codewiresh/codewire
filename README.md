@@ -101,9 +101,11 @@ at them and run the complete product smoke:
 ```bash
 export CODEWIRE_NATIVE_ARTIFACT_ROOT=/absolute/path/to/artifacts
 export CODEWIRE_NATIVE_ARTIFACT_LOCK=/absolute/path/to/artifacts.lock.json
+cargo build -p codewire-local-vmm --bin codewire-local-public-data-smoke
 
 scripts/ci/verify/smoke-native-local-environment.sh \
   --cw-bin "$PWD/target/debug/cw" \
+  --data-plane-smoke-bin "$PWD/target/debug/codewire-local-public-data-smoke" \
   --artifact-root "$CODEWIRE_NATIVE_ARTIFACT_ROOT" \
   --artifact-lock "$CODEWIRE_NATIVE_ARTIFACT_LOCK"
 ```

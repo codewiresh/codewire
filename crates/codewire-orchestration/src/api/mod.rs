@@ -72,6 +72,9 @@ pub struct ApiState {
     /// Ambient kube client for the exec/file proxy routes; None mirrors
     /// Go's nil sandbox client (503 "sandbox client not configured").
     pub kube: Option<KubeClient>,
+    /// Cluster-local daemon resolution plus a loopback-only external wire-test
+    /// override that cannot be enabled without CONNECT_TESTING_SURFACE=1.
+    pub environment_daemon_endpoints: environment_daemon::EnvironmentDaemonEndpointOverrides,
     /// Shared session secret (Go: cfg.SessionSecret). Used by the
     /// internal gateway-binding endpoint to issue coordinate-scoped
     /// sidecar tokens (Go: gatewayservice.NewInProcessService).

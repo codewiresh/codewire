@@ -17,6 +17,7 @@ use super::{
 
 const EXEC_SERVICE: &str = "codewire.v1.ExecService";
 const BACKEND_ENV: &str = "env_exec_contract_backend";
+const UNAVAILABLE_ENV: &str = "env_exec_contract_unavailable";
 const STOPPED_ENV: &str = "env_environment_contract_start_binary";
 const NO_BACKEND_ENV: &str = "env_environment_contract_read";
 const VIEWER_ENV: &str = "env_port_contract_viewer";
@@ -129,20 +130,24 @@ async fn assert_exec_happy_paths(harness: &Harness) {
         {
             events.push(message.to_owned_message().event.expect("exec event"));
         }
-        assert_eq!(events.len(), 4);
-        assert!(
-            matches!(&events[0], stream_exec_response::Event::Stdout(value) if value == b"stdout-one\n")
-        );
-        assert!(
-            matches!(&events[1], stream_exec_response::Event::Stderr(value) if value == b"stderr-one\n")
-        );
-        assert!(
-            matches!(&events[2], stream_exec_response::Event::Stdout(value) if value == b"stdout-two\n")
-        );
+        assert!(!events.is_empty());
         assert!(matches!(
-            events[3],
-            stream_exec_response::Event::ExitCode(17)
+            events.last(),
+            Some(stream_exec_response::Event::ExitCode(17))
         ));
+        let mut stdout = Vec::<u8>::new();
+        let mut stderr = Vec::<u8>::new();
+        for event in &events[..events.len() - 1] {
+            match event {
+                stream_exec_response::Event::Stdout(value) => stdout.extend(value),
+                stream_exec_response::Event::Stderr(value) => stderr.extend(value),
+                stream_exec_response::Event::ExitCode(code) => {
+                    panic!("exit event {code} arrived before stream output completed")
+                }
+            }
+        }
+        assert_eq!(stdout, b"stdout-one\nstdout-two\n");
+        assert_eq!(stderr, b"stderr-one\n");
     }
 }
 
@@ -331,7 +336,8 @@ async fn assert_file_gates_and_protocol(harness: &Harness) {
             })
             .await
             .expect_err("unknown file page token must fail");
-        assert_rpc_error(&page, ErrorCode::InvalidArgument, "unrecognized page_token");
+        assert_rpc_error(&page, ErrorCode::InvalidArgument, "validation failed");
+        assert_rpc_bad_request(&page, &["page_token"]);
 
         let path = download_error(
             &client,
@@ -456,17 +462,17 @@ async fn assert_canonical_exec_details(harness: &Harness) {
         .connect_json(
             EXEC_SERVICE,
             "Exec",
-            json!({"orgId": PRIMARY_ORG, "environmentId": BACKEND_ENV, "command": ["true"], "timeout": "0.001s"}),
+            json!({"orgId": PRIMARY_ORG, "environmentId": BACKEND_ENV, "command": ["codewire-contract-exec-timeout"], "timeout": "0.001s"}),
             Auth::Admin,
         )
         .await;
     let body = assert_connect_error(
         &timeout,
-        StatusCode::SERVICE_UNAVAILABLE,
-        "unavailable",
-        "workspace exec failed: timed out",
+        StatusCode::GATEWAY_TIMEOUT,
+        "deadline_exceeded",
+        "environment command timed out",
     );
-    assert_retry_info(&body);
+    assert!(!has_detail(&body, "google.rpc.RetryInfo"));
 }
 
 pub(super) async fn assert_runtime_boundaries(harness: &Harness) {
@@ -474,7 +480,7 @@ pub(super) async fn assert_runtime_boundaries(harness: &Harness) {
         .connect_json(
             EXEC_SERVICE,
             "Exec",
-            json!({"orgId": PRIMARY_ORG, "environmentId": BACKEND_ENV, "command": ["true"]}),
+            json!({"orgId": PRIMARY_ORG, "environmentId": UNAVAILABLE_ENV, "command": ["true"]}),
             Auth::Admin,
         )
         .await;
@@ -483,18 +489,10 @@ pub(super) async fn assert_runtime_boundaries(harness: &Harness) {
         StatusCode::SERVICE_UNAVAILABLE,
         "unavailable",
         match harness.kube_mode {
-            KubeMode::Configured => "",
+            KubeMode::Configured => "environment daemon is unavailable",
             KubeMode::Unconfigured => "sandbox client not configured",
         },
     );
-    if harness.kube_mode == KubeMode::Configured {
-        assert!(
-            body["message"]
-                .as_str()
-                .is_some_and(|message| message.starts_with("workspace exec failed:")),
-            "Connect error body={body}"
-        );
-    }
     assert_eq!(
         has_detail(&body, "google.rpc.RetryInfo"),
         harness.kube_mode == KubeMode::Configured
@@ -506,14 +504,14 @@ pub(super) async fn assert_runtime_boundaries(harness: &Harness) {
     let exec_client = exec_client(harness, Auth::Admin, CodecFormat::Proto);
     let stream_error = stream_exec_error(
         &exec_client,
-        stream_request(PRIMARY_ORG, BACKEND_ENV, &["true"]),
+        stream_request(PRIMARY_ORG, UNAVAILABLE_ENV, &["true"]),
     )
     .await;
     assert_rpc_error(
         &stream_error,
         ErrorCode::Unavailable,
         match harness.kube_mode {
-            KubeMode::Configured => "workspace exec failed:",
+            KubeMode::Configured => "environment daemon is unavailable",
             KubeMode::Unconfigured => "sandbox client not configured",
         },
     );
@@ -526,7 +524,7 @@ pub(super) async fn assert_runtime_boundaries(harness: &Harness) {
     let file_error = file_client
         .list_files(ListFilesRequest {
             org_id: PRIMARY_ORG.into(),
-            environment_id: BACKEND_ENV.into(),
+            environment_id: UNAVAILABLE_ENV.into(),
             ..Default::default()
         })
         .await
@@ -535,7 +533,7 @@ pub(super) async fn assert_runtime_boundaries(harness: &Harness) {
         &file_error,
         ErrorCode::Unavailable,
         match harness.kube_mode {
-            KubeMode::Configured => "workspace file connection failed:",
+            KubeMode::Configured => "environment daemon is unavailable",
             KubeMode::Unconfigured => "sandbox client not configured",
         },
     );

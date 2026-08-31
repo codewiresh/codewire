@@ -653,10 +653,15 @@ fn ok_status() -> v1::OperationStatus {
 pub fn status_from_file_error(err: files::FileError) -> Status {
     match err {
         files::FileError::PathOutsideWorkspace
+        | files::FileError::InvalidPath
+        | files::FileError::NotRegularFile
+        | files::FileError::NotSymlink
         | files::FileError::InvalidOffset
         | files::FileError::InvalidLength
         | files::FileError::InvalidSize
         | files::FileError::IsDirectory => Status::invalid_argument(err.to_string()),
+        files::FileError::TraversalDenied => Status::permission_denied(err.to_string()),
+        files::FileError::UntrustedRoot => Status::failed_precondition(err.to_string()),
         files::FileError::Io(err) => match err.kind() {
             std::io::ErrorKind::NotFound => Status::not_found(err.to_string()),
             std::io::ErrorKind::PermissionDenied => Status::permission_denied(err.to_string()),

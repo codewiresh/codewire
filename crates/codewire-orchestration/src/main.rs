@@ -232,6 +232,15 @@ async fn main() -> anyhow::Result<()> {
             .ok()
             .as_deref(),
     )?;
+    let environment_daemon_endpoints =
+        codewire_orchestration::api::environment_daemon::EnvironmentDaemonEndpointOverrides::from_testing_config(
+            codewire_server_core::connect_testing::enabled(),
+            std::env::var(
+                codewire_orchestration::api::environment_daemon::TEST_DAEMON_ENDPOINTS_ENV,
+            )
+            .ok()
+            .as_deref(),
+        )?;
     let api_state = codewire_orchestration::api::ApiState {
         pool: pool.clone(),
         preview_base_domain: std::env::var("PREVIEW_BASE_DOMAIN").unwrap_or_default(),
@@ -246,6 +255,7 @@ async fn main() -> anyhow::Result<()> {
         // Ambient kube client for the exec proxy; unavailable mirrors
         // Go's nil sandbox client (the route then 503s).
         kube,
+        environment_daemon_endpoints,
         // Shared session secret for the internal gateway-binding token
         // issuance (Go: cfg.SessionSecret).
         session_secret: cfg.session_secret.clone(),

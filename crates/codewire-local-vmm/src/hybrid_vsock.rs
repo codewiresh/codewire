@@ -103,6 +103,15 @@ async fn connect_daemon_admitted(
     guest_port: u32,
     auth_token: impl AsRef<str>,
 ) -> Result<SessionClient, HybridVsockError> {
+    let channel = connect_channel_admitted(socket, identity, guest_port).await?;
+    SessionClient::from_channel(channel, auth_token).map_err(HybridVsockError::from)
+}
+
+async fn connect_channel_admitted(
+    socket: PathBuf,
+    identity: SocketIdentity,
+    guest_port: u32,
+) -> Result<tonic::transport::Channel, HybridVsockError> {
     let endpoint = Endpoint::from_static("http://codewire-guest-daemon")
         .connect_timeout(CONNECT_TIMEOUT)
         .timeout(Duration::from_secs(10));
@@ -118,7 +127,7 @@ async fn connect_daemon_admitted(
         }))
         .await
         .map_err(|_| HybridVsockError::Channel)?;
-    SessionClient::from_channel(channel, auth_token).map_err(HybridVsockError::from)
+    Ok(channel)
 }
 
 fn validate_target(socket: &Path, guest_port: u32) -> Result<(), HybridVsockError> {
@@ -217,6 +226,12 @@ impl HybridVsockTarget {
             auth_token,
         )
         .await
+    }
+
+    pub(crate) async fn connect_channel(
+        &self,
+    ) -> Result<tonic::transport::Channel, HybridVsockError> {
+        connect_channel_admitted(self.socket.clone(), self.identity.clone(), self.guest_port).await
     }
 
     pub(crate) async fn connect_guest_port(

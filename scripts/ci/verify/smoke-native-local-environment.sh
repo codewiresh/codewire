@@ -8,6 +8,7 @@ readonly LINUX_SUN_PATH_BYTES=108
 readonly LONGEST_SOCKET_SUFFIX='/engine/vms/00000000-0000-4000-8000-000000000000/vsock/vsock.sock'
 
 CW_BIN=''
+DATA_PLANE_SMOKE_BIN=''
 ARTIFACT_ROOT=''
 ARTIFACT_LOCK=''
 ORIGINAL_ARTIFACT_ROOT=''
@@ -34,6 +35,7 @@ usage() {
   cat <<'USAGE' >&2
 usage: smoke-native-local-environment.sh \
   --cw-bin ABSOLUTE_PATH \
+  --data-plane-smoke-bin ABSOLUTE_PATH \
   --artifact-root ABSOLUTE_PRIVATE_DIRECTORY \
   --artifact-lock ABSOLUTE_LOCK_FILE \
   [--scratch-parent ABSOLUTE_DIRECTORY]
@@ -94,6 +96,11 @@ while [[ $# -gt 0 ]]; do
       CW_BIN="$2"
       shift 2
       ;;
+    --data-plane-smoke-bin)
+      [[ $# -ge 2 && -z "$DATA_PLANE_SMOKE_BIN" ]] || { usage; exit 2; }
+      DATA_PLANE_SMOKE_BIN="$2"
+      shift 2
+      ;;
     --artifact-root)
       [[ $# -ge 2 && -z "$ARTIFACT_ROOT" ]] || { usage; exit 2; }
       ARTIFACT_ROOT="$2"
@@ -120,7 +127,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-[[ -n "$CW_BIN" && -n "$ARTIFACT_ROOT" && -n "$ARTIFACT_LOCK" ]] || {
+[[ -n "$CW_BIN" && -n "$DATA_PLANE_SMOKE_BIN" && -n "$ARTIFACT_ROOT" && -n "$ARTIFACT_LOCK" ]] || {
   usage
   exit 2
 }
@@ -137,6 +144,9 @@ done
 
 require_absolute_canonical_file 'cw binary' "$CW_BIN"
 [[ -x "$CW_BIN" ]] || die "cw binary is not executable: $CW_BIN"
+require_absolute_canonical_file 'public data-plane smoke binary' "$DATA_PLANE_SMOKE_BIN"
+[[ -x "$DATA_PLANE_SMOKE_BIN" ]] ||
+  die "public data-plane smoke binary is not executable: $DATA_PLANE_SMOKE_BIN"
 [[ "$CW_BIN" =~ ^[-_./0-9A-Za-z]+$ ]] ||
   die 'cw binary path contains characters unsafe for the PTY smoke command'
 require_absolute_canonical_dir 'artifact root' "$ARTIFACT_ROOT"
@@ -256,6 +266,35 @@ run_cw_expect_failure() {
   cat "$stdout_file" "$stderr_file" >>"$TRANSCRIPT"
   LAST_STDOUT="$stdout_file"
   LAST_STDERR="$stderr_file"
+}
+
+run_public_data_smoke() {
+  local stdout_file stderr_file
+  COMMAND_INDEX=$((COMMAND_INDEX + 1))
+  stdout_file="$SMOKE_ROOT/command-$COMMAND_INDEX.stdout"
+  stderr_file="$SMOKE_ROOT/command-$COMMAND_INDEX.stderr"
+  if ! env -i \
+    PATH='/usr/bin:/bin' \
+    HOME="$SMOKE_HOME" \
+    USER="$(id -un)" \
+    LOGNAME="$(id -un)" \
+    SHELL='/bin/sh' \
+    TERM='xterm-256color' \
+    LC_ALL=C \
+    /usr/bin/timeout --foreground --signal=TERM --kill-after=5s 180s \
+    "$DATA_PLANE_SMOKE_BIN" \
+      --state-root "$STATE_ROOT" \
+      --artifact-root "$ARTIFACT_ROOT" \
+      --artifact-lock "$ARTIFACT_LOCK" \
+      --cw-bin "$CW_BIN" \
+      --target "$NAME" >"$stdout_file" 2>"$stderr_file"; then
+    cat "$stdout_file" "$stderr_file" >>"$TRANSCRIPT"
+    tail -n 80 "$stderr_file" >&2
+    die 'public Exec/File data-plane smoke failed'
+  fi
+  cat "$stdout_file" "$stderr_file" >>"$TRANSCRIPT"
+  [[ "$(cat "$stdout_file")" == 'codewire-local-public-data-smoke: PASS' ]] ||
+    die 'public Exec/File data-plane smoke receipt drifted'
 }
 
 wait_for_pid_exit() {
@@ -679,6 +718,9 @@ RUNNER_PID="$(native_database_value runner_pid)"
 [[ -z "$(find "$STATE_ROOT/engine/vms/$ENVIRONMENT_ID/generations" -name setup.raw -print -quit)" ]] ||
   die 'credential-free one-boot setup pack remained after readiness'
 
+log 'checking public Exec/File over the owner-only supervisor UDS'
+run_public_data_smoke
+
 log 'checking read-only orphan inventory without adoption or cleanup'
 ORPHAN_SENTINEL="$STATE_ROOT/engine/vms/$ENVIRONMENT_ID/unknown-object"
 printf 'do-not-adopt-or-delete\n' >"$ORPHAN_SENTINEL"
@@ -841,6 +883,7 @@ jq -e '.state == "running" and .cpu == 3 and .memory == "12Gi" and .disk == "21G
   die 'replacement supervisor did not reconcile the running environment'
 [[ "$(native_database_value runner_pid)" == "$RUNNER_PID" ]] ||
   die 'replacement supervisor substituted a different runner'
+run_public_data_smoke
 
 log 'checking exact VMM death classification and normal lifecycle recovery'
 VMM_PID="$(recorded_vmm_pid)" || die 'persisted VMM process identity was not readable'

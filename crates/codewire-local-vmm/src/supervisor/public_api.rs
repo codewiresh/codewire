@@ -16,6 +16,9 @@ use codewire_daemon::client::{
     SessionAttachment as PrivateSessionAttachment, SessionClient, SessionClientError,
     v1 as daemon_v1,
 };
+use codewire_daemon_bridge::client::{DaemonClient, DaemonClientError};
+use codewire_daemon_bridge::exec::ExecBackend;
+use codewire_daemon_bridge::file::FileBackend;
 use codewire_daemon_bridge::session::{
     EnvironmentSessionAttachment as BridgeAttachment, EnvironmentSessionBackend, FieldViolation,
 };
@@ -29,6 +32,8 @@ use super::*;
 const PRIVATE_SUPERVISOR_ROUTE: &str = "/codewire.local.v1.LocalSupervisorService/{*method}";
 const PUBLIC_ENVIRONMENT_ROUTE: &str = "/codewire.v1.EnvironmentService/{*method}";
 const PUBLIC_SESSION_ROUTE: &str = "/codewire.v1.EnvironmentSessionService/{*method}";
+const PUBLIC_EXEC_ROUTE: &str = "/codewire.v1.ExecService/{*method}";
+const PUBLIC_FILE_ROUTE: &str = "/codewire.v1.FileService/{*method}";
 const ACCEPT_POST: &str =
     "application/connect+json, application/connect+proto, application/json, application/proto";
 const GIB: u64 = 1024 * 1024 * 1024;
@@ -46,6 +51,22 @@ pub(super) fn supervisor_router(supervisor: SupervisorRpc) -> axum::Router {
     let sessions = axum::Router::new()
         .route_service(PUBLIC_SESSION_ROUTE, sessions)
         .layer(axum::middleware::from_fn(enforce_connect_only));
+    let exec = connectrpc::ConnectRpcService::new(codewire_daemon_bridge::exec::router(
+        LocalExecBackend {
+            supervisor: supervisor.clone(),
+        },
+    ));
+    let exec = axum::Router::new()
+        .route_service(PUBLIC_EXEC_ROUTE, exec)
+        .layer(axum::middleware::from_fn(enforce_connect_only));
+    let files = connectrpc::ConnectRpcService::new(codewire_daemon_bridge::file::router(
+        LocalFileBackend {
+            supervisor: supervisor.clone(),
+        },
+    ));
+    let files = axum::Router::new()
+        .route_service(PUBLIC_FILE_ROUTE, files)
+        .layer(axum::middleware::from_fn(enforce_connect_only));
 
     axum::Router::new()
         .route_service(
@@ -54,6 +75,8 @@ pub(super) fn supervisor_router(supervisor: SupervisorRpc) -> axum::Router {
         )
         .merge(environment)
         .merge(sessions)
+        .merge(exec)
+        .merge(files)
 }
 
 fn environment_router(supervisor: SupervisorRpc) -> connectrpc::Router {
@@ -504,11 +527,11 @@ impl SupervisorRpc {
         Ok((namespace, environment))
     }
 
-    async fn public_daemon_client(
+    async fn public_daemon_access(
         &self,
         org_id: &str,
         environment_id: &str,
-    ) -> Result<SessionClient, connectrpc::ConnectError> {
+    ) -> Result<v1::DaemonAccess, connectrpc::ConnectError> {
         let environment_id = parse_coordinate(environment_id, "environment_id")?;
         let access = {
             let mut core = self.core.lock().await;
@@ -546,6 +569,15 @@ impl SupervisorRpc {
         if access.generation_capability.is_empty() {
             return Err(local_internal());
         }
+        Ok(access)
+    }
+
+    async fn public_daemon_client(
+        &self,
+        org_id: &str,
+        environment_id: &str,
+    ) -> Result<SessionClient, connectrpc::ConnectError> {
+        let access = self.public_daemon_access(org_id, environment_id).await?;
         let capability = zeroize::Zeroizing::new(access.generation_capability);
         let client = crate::hybrid_vsock::connect_daemon(
             std::path::Path::new(&access.hybrid_socket),
@@ -558,6 +590,220 @@ impl SupervisorRpc {
         })?;
         client.require_ready().await.map_err(local_session_error)?;
         Ok(client)
+    }
+
+    async fn public_bridge_daemon_client(
+        &self,
+        org_id: &str,
+        environment_id: &str,
+    ) -> Result<DaemonClient, connectrpc::ConnectError> {
+        let access = self.public_daemon_access(org_id, environment_id).await?;
+        let capability = zeroize::Zeroizing::new(access.generation_capability);
+        let target = crate::hybrid_vsock::HybridVsockTarget::new(
+            std::path::PathBuf::from(access.hybrid_socket),
+            access.guest_port,
+        )
+        .map_err(|_| {
+            connectrpc::ConnectError::unavailable("local environment daemon is unavailable")
+        })?;
+        let channel = target.connect_channel().await.map_err(|_| {
+            connectrpc::ConnectError::unavailable("local environment daemon is unavailable")
+        })?;
+        DaemonClient::from_channel(channel, capability.as_str()).map_err(|_| local_internal())
+    }
+}
+
+#[derive(Clone)]
+struct LocalExecBackend {
+    supervisor: SupervisorRpc,
+}
+
+#[async_trait]
+impl ExecBackend for LocalExecBackend {
+    fn authorize(&self, _ctx: &RequestContext) -> Result<(), connectrpc::ConnectError> {
+        Ok(())
+    }
+
+    fn validation_error(
+        &self,
+        violations: Vec<FieldViolation>,
+        _request_id: Option<&str>,
+    ) -> connectrpc::ConnectError {
+        local_bridge_validation("exec", &violations)
+    }
+
+    fn daemon_error(
+        &self,
+        error: DaemonClientError,
+        _request_id: Option<&str>,
+    ) -> connectrpc::ConnectError {
+        local_exec_error(error)
+    }
+
+    fn timeout_error(&self, _request_id: Option<&str>) -> connectrpc::ConnectError {
+        connectrpc::ConnectError::deadline_exceeded("local environment command timed out")
+    }
+
+    fn output_limit_error(&self, _request_id: Option<&str>) -> connectrpc::ConnectError {
+        connectrpc::ConnectError::resource_exhausted(
+            "local environment command output is too large",
+        )
+    }
+
+    fn invalid_daemon_frame(&self, _request_id: Option<&str>) -> connectrpc::ConnectError {
+        connectrpc::ConnectError::internal(
+            "local environment daemon returned an invalid command stream",
+        )
+    }
+
+    async fn daemon(
+        &self,
+        _ctx: &RequestContext,
+        org_id: &str,
+        environment_id: &str,
+    ) -> Result<DaemonClient, connectrpc::ConnectError> {
+        self.supervisor
+            .public_bridge_daemon_client(org_id, environment_id)
+            .await
+    }
+}
+
+#[derive(Clone)]
+struct LocalFileBackend {
+    supervisor: SupervisorRpc,
+}
+
+#[async_trait]
+impl FileBackend for LocalFileBackend {
+    fn authorize(&self, _ctx: &RequestContext) -> Result<(), connectrpc::ConnectError> {
+        Ok(())
+    }
+
+    fn validation_error(
+        &self,
+        violations: Vec<FieldViolation>,
+        _request_id: Option<&str>,
+    ) -> connectrpc::ConnectError {
+        local_bridge_validation("file", &violations)
+    }
+
+    fn daemon_error(
+        &self,
+        error: DaemonClientError,
+        _request_id: Option<&str>,
+    ) -> connectrpc::ConnectError {
+        local_file_error(error)
+    }
+
+    fn invalid_file_type(&self, _request_id: Option<&str>) -> connectrpc::ConnectError {
+        connectrpc::ConnectError::invalid_argument("local file path is not a regular file")
+    }
+
+    async fn daemon(
+        &self,
+        _ctx: &RequestContext,
+        org_id: &str,
+        environment_id: &str,
+    ) -> Result<DaemonClient, connectrpc::ConnectError> {
+        self.supervisor
+            .public_bridge_daemon_client(org_id, environment_id)
+            .await
+    }
+}
+
+fn local_bridge_validation(
+    operation: &str,
+    violations: &[FieldViolation],
+) -> connectrpc::ConnectError {
+    let fields = violations
+        .iter()
+        .map(|violation| violation.path)
+        .collect::<Vec<_>>()
+        .join(", ");
+    connectrpc::ConnectError::invalid_argument(format!(
+        "local {operation} request is invalid: {fields}"
+    ))
+}
+
+fn local_exec_error(error: DaemonClientError) -> connectrpc::ConnectError {
+    match error {
+        DaemonClientError::Status(status) => match status.code() {
+            tonic::Code::InvalidArgument => {
+                connectrpc::ConnectError::invalid_argument("local command request is invalid")
+            }
+            tonic::Code::Unimplemented | tonic::Code::FailedPrecondition => {
+                connectrpc::ConnectError::failed_precondition(
+                    "local environment daemon does not support this command operation",
+                )
+            }
+            tonic::Code::Unavailable | tonic::Code::DeadlineExceeded | tonic::Code::Cancelled => {
+                connectrpc::ConnectError::unavailable(
+                    "local environment command transport was lost",
+                )
+            }
+            _ => connectrpc::ConnectError::internal("local environment command failed"),
+        },
+        DaemonClientError::NotReady { .. }
+        | DaemonClientError::MissingCapability { .. }
+        | DaemonClientError::IncompatibleProtocol { .. } => {
+            connectrpc::ConnectError::failed_precondition(
+                "local environment daemon is not ready for commands",
+            )
+        }
+        DaemonClientError::Connect | DaemonClientError::RequestClosed => {
+            connectrpc::ConnectError::unavailable("local environment command transport was lost")
+        }
+        DaemonClientError::Remote(_) => {
+            connectrpc::ConnectError::failed_precondition("local environment command failed")
+        }
+        DaemonClientError::InvalidEndpoint
+        | DaemonClientError::InvalidCredential
+        | DaemonClientError::MissingResponse(_)
+        | DaemonClientError::InvalidFrame(_) => {
+            connectrpc::ConnectError::internal("local environment command failed")
+        }
+    }
+}
+
+fn local_file_error(error: DaemonClientError) -> connectrpc::ConnectError {
+    match error {
+        DaemonClientError::Status(status) => match status.code() {
+            tonic::Code::NotFound => {
+                connectrpc::ConnectError::not_found("local file was not found")
+            }
+            tonic::Code::InvalidArgument | tonic::Code::PermissionDenied => {
+                connectrpc::ConnectError::invalid_argument("local file path is invalid or denied")
+            }
+            tonic::Code::AlreadyExists => {
+                connectrpc::ConnectError::already_exists("local file already exists")
+            }
+            tonic::Code::Unimplemented | tonic::Code::FailedPrecondition => {
+                connectrpc::ConnectError::failed_precondition(
+                    "local environment daemon does not support this file operation",
+                )
+            }
+            tonic::Code::Unavailable | tonic::Code::DeadlineExceeded | tonic::Code::Cancelled => {
+                connectrpc::ConnectError::unavailable("local file transport was lost")
+            }
+            _ => connectrpc::ConnectError::internal("local file request failed"),
+        },
+        DaemonClientError::NotReady { .. }
+        | DaemonClientError::MissingCapability { .. }
+        | DaemonClientError::IncompatibleProtocol { .. } => {
+            connectrpc::ConnectError::failed_precondition(
+                "local environment daemon is not ready for files",
+            )
+        }
+        DaemonClientError::Connect | DaemonClientError::RequestClosed => {
+            connectrpc::ConnectError::unavailable("local file transport was lost")
+        }
+        DaemonClientError::InvalidEndpoint
+        | DaemonClientError::InvalidCredential
+        | DaemonClientError::MissingResponse(_)
+        | DaemonClientError::InvalidFrame(_)
+        | DaemonClientError::Remote(_) => {
+            connectrpc::ConnectError::internal("local file request failed")
+        }
     }
 }
 
@@ -1620,7 +1866,10 @@ mod tests {
     use super::*;
     use std::collections::BTreeMap;
 
-    use codewire_proto::codewire::v1::{EnvironmentServiceClient, EnvironmentSessionServiceClient};
+    use codewire_proto::codewire::v1::{
+        EnvironmentServiceClient, EnvironmentSessionServiceClient, ExecServiceClient,
+        FileServiceClient,
+    };
     use connectrpc::Protocol;
     use connectrpc::client::{ClientConfig, Http2Connection};
     use prost::Message as _;
@@ -1948,13 +2197,54 @@ mod tests {
         assert_eq!(create_error.code, connectrpc::ErrorCode::Unimplemented);
 
         let sessions = EnvironmentSessionServiceClient::new(
-            transport,
+            transport.clone(),
             ClientConfig::new(authority.clone()).proto(),
         );
         let stopped_error = sessions
             .list_sessions(proto::ListSessionsRequest {
                 org_id: namespace.to_string(),
                 environment_id: environment_id.clone(),
+                ..Default::default()
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(
+            stopped_error.code,
+            connectrpc::ErrorCode::FailedPrecondition
+        );
+        assert_eq!(
+            stopped_error.message.as_deref(),
+            Some("local environment is not in the required state")
+        );
+
+        let exec = ExecServiceClient::new(
+            transport.clone(),
+            ClientConfig::new(authority.clone()).proto(),
+        );
+        let stopped_error = exec
+            .exec(proto::ExecRequest {
+                org_id: namespace.to_string(),
+                environment_id: environment_id.clone(),
+                command: vec!["true".to_owned()],
+                ..Default::default()
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(
+            stopped_error.code,
+            connectrpc::ErrorCode::FailedPrecondition
+        );
+        assert_eq!(
+            stopped_error.message.as_deref(),
+            Some("local environment is not in the required state")
+        );
+
+        let files = FileServiceClient::new(transport, ClientConfig::new(authority.clone()).proto());
+        let stopped_error = files
+            .list_files(proto::ListFilesRequest {
+                org_id: namespace.to_string(),
+                environment_id: environment_id.clone(),
+                path: "/workspace".to_owned(),
                 ..Default::default()
             })
             .await

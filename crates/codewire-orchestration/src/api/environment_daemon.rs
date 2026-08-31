@@ -5,13 +5,15 @@
 //! environment-scoped daemon token inside the control plane, and never returns
 //! that credential to the caller.
 
+use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::time::Duration;
 
+use codewire_daemon_bridge::client::DaemonClient;
 use codewire_gateway_proto::daemon::v1;
 use codewire_gateway_proto::{
-    DAEMON_AUTH_TOKEN_HEADER, DAEMON_CAPABILITY_ATTACH, DAEMON_CAPABILITY_EXEC,
-    DAEMON_CAPABILITY_FILES, DAEMON_CAPABILITY_HEALTH, DAEMON_CAPABILITY_PTY,
-    DAEMON_CAPABILITY_SESSIONS, DAEMON_PROTOCOL_VERSION,
+    DAEMON_AUTH_TOKEN_HEADER, DAEMON_CAPABILITY_ATTACH, DAEMON_CAPABILITY_FILES,
+    DAEMON_CAPABILITY_HEALTH, DAEMON_CAPABILITY_SESSIONS, DAEMON_PROTOCOL_VERSION,
 };
 use codewire_server_core::auth::AuthUser;
 use codewire_server_core::org_deletion::{
@@ -37,6 +39,80 @@ const DAEMON_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const DAEMON_REPAIR_TIMEOUT: Duration = Duration::from_secs(120);
 const DAEMON_STATUS_RETRY_INTERVAL: Duration = Duration::from_millis(250);
 const DAEMON_LOG_TAIL_LINES: i64 = 500;
+const MAXIMUM_TEST_ENDPOINT_CONFIG_BYTES: usize = 16 * 1024;
+const MAXIMUM_TEST_ENDPOINTS: usize = 64;
+
+pub const TEST_DAEMON_ENDPOINTS_ENV: &str = "CODEWIRE_TEST_ENVIRONMENT_DAEMON_ENDPOINTS_JSON";
+
+/// Loopback-only endpoint injection for the checked-in external wire fixture.
+/// Production and ordinary development always resolve the environment's
+/// cluster-local daemon Service.
+#[derive(Clone, Debug, Default)]
+pub struct EnvironmentDaemonEndpointOverrides {
+    endpoints: Arc<BTreeMap<String, String>>,
+}
+
+impl EnvironmentDaemonEndpointOverrides {
+    pub fn from_testing_config(
+        testing_surface_enabled: bool,
+        encoded: Option<&str>,
+    ) -> anyhow::Result<Self> {
+        let Some(encoded) = encoded else {
+            return Ok(Self::default());
+        };
+        if !testing_surface_enabled {
+            anyhow::bail!("{TEST_DAEMON_ENDPOINTS_ENV} requires CONNECT_TESTING_SURFACE=1");
+        }
+        if encoded.is_empty() || encoded.len() > MAXIMUM_TEST_ENDPOINT_CONFIG_BYTES {
+            anyhow::bail!("invalid {TEST_DAEMON_ENDPOINTS_ENV}");
+        }
+        let configured: BTreeMap<String, String> = serde_json::from_str(encoded)
+            .map_err(|_| anyhow::anyhow!("invalid {TEST_DAEMON_ENDPOINTS_ENV}"))?;
+        if configured.is_empty() || configured.len() > MAXIMUM_TEST_ENDPOINTS {
+            anyhow::bail!("invalid {TEST_DAEMON_ENDPOINTS_ENV}");
+        }
+
+        let mut endpoints = BTreeMap::new();
+        for (environment_id, endpoint) in configured {
+            if environment_id.is_empty()
+                || environment_id.len() > 128
+                || !environment_id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+            {
+                anyhow::bail!("invalid {TEST_DAEMON_ENDPOINTS_ENV}");
+            }
+            let url = url::Url::parse(&endpoint)
+                .map_err(|_| anyhow::anyhow!("invalid {TEST_DAEMON_ENDPOINTS_ENV}"))?;
+            let port = url
+                .port()
+                .filter(|port| *port != 0)
+                .ok_or_else(|| anyhow::anyhow!("invalid {TEST_DAEMON_ENDPOINTS_ENV}"))?;
+            if endpoint.trim() != endpoint
+                || url.scheme() != "http"
+                || url.host_str() != Some("127.0.0.1")
+                || !url.username().is_empty()
+                || url.password().is_some()
+                || url.path() != "/"
+                || url.query().is_some()
+                || url.fragment().is_some()
+            {
+                anyhow::bail!("invalid {TEST_DAEMON_ENDPOINTS_ENV}");
+            }
+            endpoints.insert(environment_id, format!("http://127.0.0.1:{port}"));
+        }
+        Ok(Self {
+            endpoints: Arc::new(endpoints),
+        })
+    }
+
+    fn endpoint(&self, namespace: &str, environment_id: &str) -> String {
+        self.endpoints
+            .get(environment_id)
+            .cloned()
+            .unwrap_or_else(|| cluster_daemon_endpoint(namespace, environment_id))
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EnvironmentDaemonDiagnostic {
@@ -61,42 +137,6 @@ pub struct EnvironmentDaemonStatus {
 pub struct EnvironmentDaemonRepair {
     pub status: EnvironmentDaemonStatus,
     pub replaced_pod_name: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct EnvironmentDaemonRunStart {
-    pub command: Vec<String>,
-    pub working_dir: String,
-    pub env: Vec<String>,
-    pub allocate_tty: bool,
-    pub term: String,
-    pub columns: i32,
-    pub rows: i32,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum EnvironmentDaemonRunInput {
-    Stdin(Vec<u8>),
-    Resize { columns: i32, rows: i32 },
-    CloseStdin,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum EnvironmentDaemonRunOutput {
-    Stdout(Vec<u8>),
-    Stderr(Vec<u8>),
-    Exit(i32),
-}
-
-pub enum EnvironmentDaemonRunSession {
-    Exec {
-        input: mpsc::Sender<v1::ExecMessage>,
-        output: Streaming<v1::ExecMessage>,
-    },
-    Pty {
-        input: mpsc::Sender<v1::PtyMessage>,
-        output: Streaming<v1::PtyMessage>,
-    },
 }
 
 /// Authenticated handle for a durable environment-daemon session attachment.
@@ -370,170 +410,27 @@ impl EnvironmentDaemonSessionAttachment {
     }
 }
 
-pub async fn start_environment_daemon_run_core(
+/// Resolve an authorized environment to the shared host-side daemon client.
+///
+/// The environment-scoped credential remains inside orchestration and is
+/// marked sensitive by `DaemonClient`; public adapters receive only the typed
+/// client handle.
+pub(crate) async fn environment_daemon_bridge_client_core(
     state: &ApiState,
     user: &AuthUser,
     org_id: &str,
     environment_id: &str,
-    start: EnvironmentDaemonRunStart,
-) -> AppResult<EnvironmentDaemonRunSession> {
+) -> AppResult<DaemonClient> {
+    if state.kube.is_none() {
+        return Err(AppError::ServiceUnavailable(
+            "sandbox client not configured".into(),
+        ));
+    }
     let target = resolve_target(state, user, org_id, environment_id).await?;
     let (channel, token) =
         daemon_channel_for_target(state, &target.namespace, &target.environment_id).await?;
-    let mut client = v1::daemon_service_client::DaemonServiceClient::new(channel);
-    start_daemon_run(&mut client, &token, start).await
-}
-
-async fn start_daemon_run(
-    client: &mut v1::daemon_service_client::DaemonServiceClient<Channel>,
-    token: &str,
-    start: EnvironmentDaemonRunStart,
-) -> AppResult<EnvironmentDaemonRunSession> {
-    let required_capability = if start.allocate_tty {
-        DAEMON_CAPABILITY_PTY
-    } else {
-        DAEMON_CAPABILITY_EXEC
-    };
-    require_ready_daemon(client, token, &[required_capability]).await?;
-
-    if start.allocate_tty {
-        let (input, rx) = mpsc::channel(32);
-        input
-            .send(v1::PtyMessage {
-                payload: Some(v1::pty_message::Payload::Start(v1::PtyStartRequest {
-                    command: start.command,
-                    working_dir: start.working_dir,
-                    env: start.env,
-                    term: start.term,
-                    width: start.columns,
-                    height: start.rows,
-                })),
-            })
-            .await
-            .map_err(|_| AppError::InternalMsg("failed to start environment command".into()))?;
-        let output = client
-            .pty_session(authorize(ReceiverStream::new(rx), token)?)
-            .await
-            .map_err(daemon_run_error)?
-            .into_inner();
-        Ok(EnvironmentDaemonRunSession::Pty { input, output })
-    } else {
-        let (input, rx) = mpsc::channel(32);
-        input
-            .send(v1::ExecMessage {
-                payload: Some(v1::exec_message::Payload::Start(v1::ExecStartRequest {
-                    command: start.command,
-                    working_dir: start.working_dir,
-                    env: start.env,
-                })),
-            })
-            .await
-            .map_err(|_| AppError::InternalMsg("failed to start environment command".into()))?;
-        let output = client
-            .exec_session(authorize(ReceiverStream::new(rx), token)?)
-            .await
-            .map_err(daemon_run_error)?
-            .into_inner();
-        Ok(EnvironmentDaemonRunSession::Exec { input, output })
-    }
-}
-
-impl EnvironmentDaemonRunSession {
-    pub async fn send_input(&self, input: EnvironmentDaemonRunInput) -> AppResult<()> {
-        match self {
-            Self::Exec { input: tx, .. } => {
-                let payload = match input {
-                    EnvironmentDaemonRunInput::Stdin(data) => {
-                        v1::exec_message::Payload::Stdin(data)
-                    }
-                    EnvironmentDaemonRunInput::CloseStdin => {
-                        v1::exec_message::Payload::CloseStdin(())
-                    }
-                    EnvironmentDaemonRunInput::Resize { .. } => return Ok(()),
-                };
-                tx.send(v1::ExecMessage {
-                    payload: Some(payload),
-                })
-                .await
-                .map_err(|_| AppError::Upstream("environment command input closed".into()))
-            }
-            Self::Pty { input: tx, .. } => {
-                let payload = match input {
-                    EnvironmentDaemonRunInput::Stdin(data) => v1::pty_message::Payload::Stdin(data),
-                    EnvironmentDaemonRunInput::Resize { columns, rows } => {
-                        v1::pty_message::Payload::Resize(v1::ResizeRequest {
-                            width: columns,
-                            height: rows,
-                        })
-                    }
-                    EnvironmentDaemonRunInput::CloseStdin => {
-                        v1::pty_message::Payload::CloseStdin(())
-                    }
-                };
-                tx.send(v1::PtyMessage {
-                    payload: Some(payload),
-                })
-                .await
-                .map_err(|_| AppError::Upstream("environment command input closed".into()))
-            }
-        }
-    }
-
-    pub async fn next_output(&mut self) -> AppResult<Option<EnvironmentDaemonRunOutput>> {
-        loop {
-            let payload = match self {
-                Self::Exec { output, .. } => {
-                    let Some(message) = output.message().await.map_err(daemon_run_error)? else {
-                        return Ok(None);
-                    };
-                    match message.payload {
-                        Some(v1::exec_message::Payload::Stdout(data)) => {
-                            return Ok(Some(EnvironmentDaemonRunOutput::Stdout(data)));
-                        }
-                        Some(v1::exec_message::Payload::Stderr(data)) => {
-                            return Ok(Some(EnvironmentDaemonRunOutput::Stderr(data)));
-                        }
-                        Some(v1::exec_message::Payload::Exit(exit)) => {
-                            return Ok(Some(EnvironmentDaemonRunOutput::Exit(exit.code)));
-                        }
-                        Some(v1::exec_message::Payload::Error(error)) => Some(error),
-                        Some(v1::exec_message::Payload::Start(_))
-                        | Some(v1::exec_message::Payload::Stdin(_))
-                        | Some(v1::exec_message::Payload::CloseStdin(()))
-                        | None => None,
-                    }
-                }
-                Self::Pty { output, .. } => {
-                    let Some(message) = output.message().await.map_err(daemon_run_error)? else {
-                        return Ok(None);
-                    };
-                    match message.payload {
-                        Some(v1::pty_message::Payload::Stdout(data)) => {
-                            return Ok(Some(EnvironmentDaemonRunOutput::Stdout(data)));
-                        }
-                        Some(v1::pty_message::Payload::Stderr(data)) => {
-                            return Ok(Some(EnvironmentDaemonRunOutput::Stderr(data)));
-                        }
-                        Some(v1::pty_message::Payload::Exit(exit)) => {
-                            return Ok(Some(EnvironmentDaemonRunOutput::Exit(exit.code)));
-                        }
-                        Some(v1::pty_message::Payload::Error(error)) => Some(error),
-                        Some(v1::pty_message::Payload::Start(_))
-                        | Some(v1::pty_message::Payload::Stdin(_))
-                        | Some(v1::pty_message::Payload::Resize(_))
-                        | Some(v1::pty_message::Payload::CloseStdin(()))
-                        | None => None,
-                    }
-                }
-            };
-            if let Some(error) = payload {
-                tracing::warn!(%error, "environment daemon command failed");
-                return Err(AppError::Precondition(
-                    "environment command failed to start".into(),
-                ));
-            }
-        }
-    }
+    DaemonClient::from_channel(channel, token)
+        .map_err(|_| AppError::InternalMsg("failed to authorize environment daemon".into()))
 }
 
 pub async fn get_environment_daemon_status_core(
@@ -739,7 +636,14 @@ async fn daemon_channel_for_target(
     namespace: &str,
     environment_id: &str,
 ) -> AppResult<(Channel, String)> {
-    daemon_channel_for_runtime(&state.session_secret, namespace, environment_id).await
+    daemon_channel_for_endpoint(
+        &state.session_secret,
+        environment_id,
+        state
+            .environment_daemon_endpoints
+            .endpoint(namespace, environment_id),
+    )
+    .await
 }
 
 async fn daemon_channel_for_runtime(
@@ -747,16 +651,32 @@ async fn daemon_channel_for_runtime(
     namespace: &str,
     environment_id: &str,
 ) -> AppResult<(Channel, String)> {
-    let token = issue_token(session_secret, environment_id, SCOPE_COORDINATE).map_err(|error| {
-        tracing::error!(environment_id, %error, "issue environment daemon token failed");
-        AppError::InternalMsg("failed to authorize environment daemon".into())
-    })?;
-    let endpoint = format!(
+    daemon_channel_for_endpoint(
+        session_secret,
+        environment_id,
+        cluster_daemon_endpoint(namespace, environment_id),
+    )
+    .await
+}
+
+fn cluster_daemon_endpoint(namespace: &str, environment_id: &str) -> String {
+    format!(
         "http://{}.{}.svc.cluster.local:{}",
         workspace_daemon_service_name(environment_id),
         namespace,
         WORKSPACE_DAEMON_PORT
-    );
+    )
+}
+
+async fn daemon_channel_for_endpoint(
+    session_secret: &str,
+    environment_id: &str,
+    endpoint: String,
+) -> AppResult<(Channel, String)> {
+    let token = issue_token(session_secret, environment_id, SCOPE_COORDINATE).map_err(|error| {
+        tracing::error!(environment_id, %error, "issue environment daemon token failed");
+        AppError::InternalMsg("failed to authorize environment daemon".into())
+    })?;
     let channel = Endpoint::from_shared(endpoint.clone())
         .map_err(|error| {
             tracing::error!(environment_id, %endpoint, %error, "build daemon endpoint failed");
@@ -950,6 +870,50 @@ mod tests {
 
     const TEST_DAEMON_TOKEN: &str = "daemon-proxy-test-token";
 
+    #[test]
+    fn external_wire_endpoint_overrides_are_testing_only_and_loopback_bound() {
+        assert!(
+            EnvironmentDaemonEndpointOverrides::from_testing_config(
+                false,
+                Some(r#"{"env":"http://127.0.0.1:7777"}"#),
+            )
+            .is_err()
+        );
+        for invalid in [
+            "{}",
+            r#"{"env":"https://127.0.0.1:7777"}"#,
+            r#"{"env":"http://example.test:7777"}"#,
+            r#"{"env":"http://127.0.0.1:0"}"#,
+            r#"{"env":"http://127.0.0.1:7777/path"}"#,
+            r#"{"env":"http://127.0.0.1:7777?query"}"#,
+            r#"{"env":"http://127.0.0.1:7777#fragment"}"#,
+            r#"{"env":"http://user@127.0.0.1:7777"}"#,
+            r#"{"env":"http://user:password@127.0.0.1:7777"}"#,
+            r#"{"env":"http://127.0.0.1:7777 "}"#,
+            r#"{"../env":"http://127.0.0.1:7777"}"#,
+        ] {
+            assert!(
+                EnvironmentDaemonEndpointOverrides::from_testing_config(true, Some(invalid))
+                    .is_err(),
+                "accepted invalid endpoint configuration: {invalid}"
+            );
+        }
+
+        let overrides = EnvironmentDaemonEndpointOverrides::from_testing_config(
+            true,
+            Some(r#"{"env_wire":"http://127.0.0.1:7777"}"#),
+        )
+        .expect("valid external wire endpoint");
+        assert_eq!(
+            overrides.endpoint("wire", "env_wire"),
+            "http://127.0.0.1:7777"
+        );
+        assert_eq!(
+            overrides.endpoint("wire", "env_other"),
+            "http://cw-daemon-env-other.wire.svc.cluster.local:7777"
+        );
+    }
+
     struct DaemonHarness {
         channel: Channel,
         shutdown: Option<oneshot::Sender<()>>,
@@ -1073,167 +1037,6 @@ mod tests {
                 message: "workspace filesystem is unavailable".into(),
             }]
         );
-        harness.shutdown().await;
-    }
-
-    #[tokio::test]
-    async fn authenticated_exec_proxy_streams_pipe_input_and_remote_exit() {
-        let harness = DaemonHarness::spawn(DaemonRuntimeState::ready()).await;
-        let mut client =
-            v1::daemon_service_client::DaemonServiceClient::new(harness.channel.clone());
-        let mut session = start_daemon_run(
-            &mut client,
-            TEST_DAEMON_TOKEN,
-            EnvironmentDaemonRunStart {
-                command: vec![
-                    "/bin/sh".into(),
-                    "-c".into(),
-                    "read line; printf 'out:%s' \"$line\"; printf 'err' >&2; exit 17".into(),
-                ],
-                working_dir: String::new(),
-                env: Vec::new(),
-                allocate_tty: false,
-                term: String::new(),
-                columns: 0,
-                rows: 0,
-            },
-        )
-        .await
-        .expect("start authenticated exec");
-        session
-            .send_input(EnvironmentDaemonRunInput::Stdin(b"slow pipe\n".to_vec()))
-            .await
-            .expect("send exec stdin");
-        session
-            .send_input(EnvironmentDaemonRunInput::CloseStdin)
-            .await
-            .expect("close exec stdin");
-
-        let (stdout, stderr, exit) = timeout(
-            TokioDuration::from_secs(5),
-            collect_run_output(&mut session),
-        )
-        .await
-        .expect("exec proxy completed")
-        .expect("exec proxy output");
-        assert_eq!(stdout, b"out:slow pipe");
-        assert_eq!(stderr, b"err");
-        assert_eq!(exit, 17);
-        drop(session);
-        drop(client);
-        harness.shutdown().await;
-    }
-
-    #[tokio::test]
-    async fn authenticated_pty_proxy_forwards_resize_and_interrupt() {
-        let harness = DaemonHarness::spawn(DaemonRuntimeState::ready()).await;
-        let mut client =
-            v1::daemon_service_client::DaemonServiceClient::new(harness.channel.clone());
-        let mut session = start_daemon_run(
-            &mut client,
-            TEST_DAEMON_TOKEN,
-            EnvironmentDaemonRunStart {
-                command: vec![
-                    "/bin/sh".into(),
-                    "-c".into(),
-                    "trap 'exit 23' INT; read ready; stty size; printf ready; while :; do sleep 1; done"
-                        .into(),
-                ],
-                working_dir: String::new(),
-                env: Vec::new(),
-                allocate_tty: true,
-                term: "xterm-256color".into(),
-                columns: 80,
-                rows: 24,
-            },
-        )
-        .await
-        .expect("start authenticated PTY");
-        session
-            .send_input(EnvironmentDaemonRunInput::Resize {
-                columns: 111,
-                rows: 37,
-            })
-            .await
-            .expect("resize PTY");
-        session
-            .send_input(EnvironmentDaemonRunInput::Stdin(b"go\n".to_vec()))
-            .await
-            .expect("release PTY command");
-
-        let mut first = Vec::new();
-        while !String::from_utf8_lossy(&first).contains("ready") {
-            let event = timeout(TokioDuration::from_secs(5), session.next_output())
-                .await
-                .expect("PTY emitted resized output")
-                .expect("PTY output")
-                .expect("PTY output event");
-            match event {
-                EnvironmentDaemonRunOutput::Stdout(data) => first.extend(data),
-                EnvironmentDaemonRunOutput::Stderr(data) => {
-                    panic!(
-                        "unexpected PTY stderr: {:?}",
-                        String::from_utf8_lossy(&data)
-                    );
-                }
-                EnvironmentDaemonRunOutput::Exit(code) => {
-                    panic!("PTY exited before interrupt with {code}");
-                }
-            }
-        }
-        assert!(
-            String::from_utf8_lossy(&first).contains("37 111"),
-            "resized PTY output: {:?}",
-            String::from_utf8_lossy(&first)
-        );
-        session
-            .send_input(EnvironmentDaemonRunInput::Stdin(vec![0x03]))
-            .await
-            .expect("forward terminal interrupt");
-
-        let (_, _, exit) = timeout(
-            TokioDuration::from_secs(5),
-            collect_run_output(&mut session),
-        )
-        .await
-        .expect("PTY interrupt completed")
-        .expect("PTY interrupt output");
-        assert_eq!(exit, 23);
-        drop(session);
-        drop(client);
-        harness.shutdown().await;
-    }
-
-    #[tokio::test]
-    async fn command_proxy_rejects_unhealthy_daemon_without_fallback() {
-        let harness = DaemonHarness::spawn(DaemonRuntimeState::new(
-            v1::DaemonState::Unhealthy,
-            "not ready",
-            Vec::new(),
-        ))
-        .await;
-        let mut client =
-            v1::daemon_service_client::DaemonServiceClient::new(harness.channel.clone());
-        let error = match start_daemon_run(
-            &mut client,
-            TEST_DAEMON_TOKEN,
-            EnvironmentDaemonRunStart {
-                command: vec!["true".into()],
-                working_dir: String::new(),
-                env: Vec::new(),
-                allocate_tty: false,
-                term: String::new(),
-                columns: 0,
-                rows: 0,
-            },
-        )
-        .await
-        {
-            Ok(_) => panic!("unhealthy daemon must fail closed"),
-            Err(error) => error,
-        };
-        assert!(matches!(error, AppError::Precondition(_)));
-        drop(client);
         harness.shutdown().await;
     }
 
@@ -1372,22 +1175,5 @@ mod tests {
         drop(attachment);
         drop(client);
         harness.shutdown().await;
-    }
-
-    async fn collect_run_output(
-        session: &mut EnvironmentDaemonRunSession,
-    ) -> AppResult<(Vec<u8>, Vec<u8>, i32)> {
-        let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
-        loop {
-            match session.next_output().await? {
-                Some(EnvironmentDaemonRunOutput::Stdout(data)) => stdout.extend(data),
-                Some(EnvironmentDaemonRunOutput::Stderr(data)) => stderr.extend(data),
-                Some(EnvironmentDaemonRunOutput::Exit(code)) => return Ok((stdout, stderr, code)),
-                None => {
-                    return Err(AppError::Upstream("test command ended without exit".into()));
-                }
-            }
-        }
     }
 }

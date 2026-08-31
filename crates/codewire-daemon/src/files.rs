@@ -1,13 +1,24 @@
-use std::fs::{self, File, OpenOptions};
+use std::fs;
+#[cfg(not(target_os = "linux"))]
+use std::fs::{File, OpenOptions};
+#[cfg(not(target_os = "linux"))]
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+#[cfg(not(target_os = "linux"))]
+use std::time::Duration;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use codewire_gateway_proto::daemon::v1;
+#[cfg(not(target_os = "linux"))]
 use filetime::FileTime;
 use prost_types::Timestamp;
 
 use crate::config::{Config, clean_path};
+
+#[cfg(target_os = "linux")]
+mod linux;
+#[cfg(target_os = "linux")]
+pub use linux::{list, mkdir, open_file, read, readlink, remove, rename, set_stat, stat, write};
 
 const GO_MODE_DIR: u32 = 1 << 31;
 const GO_MODE_SYMLINK: u32 = 1 << 27;
@@ -20,6 +31,16 @@ const GO_MODE_CHAR_DEVICE: u32 = 1 << 21;
 pub enum FileError {
     #[error("path must stay under /workspace or /home/codewire")]
     PathOutsideWorkspace,
+    #[error("configured workspace root is not a stable canonical directory")]
+    UntrustedRoot,
+    #[error("path traversal through a symlink, magic link, or nested mount is denied")]
+    TraversalDenied,
+    #[error("operation requires a path below the workspace root")]
+    InvalidPath,
+    #[error("path is not a regular file")]
+    NotRegularFile,
+    #[error("path is not a symbolic link")]
+    NotSymlink,
     #[error("invalid offset")]
     InvalidOffset,
     #[error("invalid length")]
@@ -61,6 +82,7 @@ pub fn is_allowed_workspace_path(config: &Config, path: &Path) -> bool {
         || path.starts_with(&config.home_root)
 }
 
+#[cfg(not(target_os = "linux"))]
 pub fn list(config: &Config, path: &str) -> Result<Vec<v1::FileMetadata>> {
     let target = resolve_workspace_path(config, path)?;
     let entries = fs::read_dir(&target)?;
@@ -79,6 +101,7 @@ pub fn list(config: &Config, path: &str) -> Result<Vec<v1::FileMetadata>> {
     Ok(result)
 }
 
+#[cfg(not(target_os = "linux"))]
 pub fn stat(config: &Config, path: &str, follow: bool) -> Result<v1::FileMetadata> {
     let target = resolve_workspace_path(config, path)?;
     let mut metadata = fs::symlink_metadata(&target)?;
@@ -88,6 +111,7 @@ pub fn stat(config: &Config, path: &str, follow: bool) -> Result<v1::FileMetadat
     file_metadata_from_info(&target, &metadata)
 }
 
+#[cfg(not(target_os = "linux"))]
 pub fn open_file(
     config: &Config,
     path: &str,
@@ -115,6 +139,7 @@ pub fn open_file(
     Ok(())
 }
 
+#[cfg(not(target_os = "linux"))]
 pub fn read(config: &Config, path: &str, offset: i64, length: i64) -> Result<Vec<u8>> {
     let target = resolve_workspace_path(config, path)?;
     if offset < 0 {
@@ -144,6 +169,7 @@ pub fn read(config: &Config, path: &str, offset: i64, length: i64) -> Result<Vec
     }
 }
 
+#[cfg(not(target_os = "linux"))]
 pub fn write(config: &Config, path: &str, offset: i64, data: &[u8]) -> Result<i64> {
     let target = resolve_workspace_path(config, path)?;
     if offset < 0 {
@@ -156,6 +182,7 @@ pub fn write(config: &Config, path: &str, offset: i64, data: &[u8]) -> Result<i6
     Ok(i64::try_from(data.len()).unwrap_or(i64::MAX))
 }
 
+#[cfg(not(target_os = "linux"))]
 pub fn mkdir(config: &Config, path: &str, perm: u32) -> Result<()> {
     let target = resolve_workspace_path(config, path)?;
     #[cfg(unix)]
@@ -173,6 +200,7 @@ pub fn mkdir(config: &Config, path: &str, perm: u32) -> Result<()> {
     Ok(())
 }
 
+#[cfg(not(target_os = "linux"))]
 pub fn remove(config: &Config, path: &str) -> Result<()> {
     let target = resolve_workspace_path(config, path)?;
     fs::remove_file(&target).or_else(|err| {
@@ -185,6 +213,7 @@ pub fn remove(config: &Config, path: &str) -> Result<()> {
     Ok(())
 }
 
+#[cfg(not(target_os = "linux"))]
 pub fn rename(config: &Config, old_path: &str, new_path: &str) -> Result<()> {
     let old_path = resolve_workspace_path(config, old_path)?;
     let new_path = resolve_workspace_path(config, new_path)?;
@@ -192,6 +221,7 @@ pub fn rename(config: &Config, old_path: &str, new_path: &str) -> Result<()> {
     Ok(())
 }
 
+#[cfg(not(target_os = "linux"))]
 pub fn set_stat(config: &Config, request: &v1::SetStatRequest) -> Result<()> {
     let target = resolve_workspace_path(config, &request.path)?;
     if let Some(size) = request.size {
@@ -233,6 +263,7 @@ pub fn set_stat(config: &Config, request: &v1::SetStatRequest) -> Result<()> {
     Ok(())
 }
 
+#[cfg(not(target_os = "linux"))]
 pub fn readlink(config: &Config, path: &str) -> Result<String> {
     let target = resolve_workspace_path(config, path)?;
     Ok(fs::read_link(target)?.to_string_lossy().into_owned())
@@ -283,6 +314,7 @@ fn timestamp_from_system_time(time: SystemTime) -> Timestamp {
     }
 }
 
+#[cfg(not(target_os = "linux"))]
 fn system_time_from_timestamp(timestamp: &Timestamp) -> SystemTime {
     if timestamp.seconds >= 0 {
         UNIX_EPOCH + Duration::new(timestamp.seconds as u64, timestamp.nanos.max(0) as u32)
@@ -329,10 +361,12 @@ fn go_mode_from_metadata(metadata: &fs::Metadata) -> u32 {
     }
 }
 
+#[cfg(not(target_os = "linux"))]
 trait FileLenExt {
     fn size(&self) -> u64;
 }
 
+#[cfg(not(target_os = "linux"))]
 impl FileLenExt for fs::Metadata {
     fn size(&self) -> u64 {
         self.len()

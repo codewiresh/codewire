@@ -6,4 +6,10 @@
 //! responsibilities stay behind backend traits so the public protocol and
 //! stream behavior have one implementation without merging trust boundaries.
 
+pub mod client;
+pub mod exec;
+pub mod file;
 pub mod session;
+
+#[cfg(test)]
+mod test_support;
