@@ -10,8 +10,8 @@ use std::time::Duration;
 pub use codewire_gateway_proto::daemon::v1;
 use codewire_gateway_proto::{
     DAEMON_AUTH_TOKEN_HEADER, DAEMON_CAPABILITY_ATTACH, DAEMON_CAPABILITY_SESSIONS,
-    DAEMON_PROTOCOL_VERSION,
 };
+pub use codewire_gateway_proto::{DAEMON_MINIMUM_PROTOCOL_VERSION, DAEMON_PROTOCOL_VERSION};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::metadata::MetadataValue;

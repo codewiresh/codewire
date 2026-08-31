@@ -3111,6 +3111,62 @@ impl LocalSupervisorService for SupervisorRpc {
         Ok(Response::new(response))
     }
 
+    async fn restart_environment(
+        &self,
+        request: Request<v1::EnvironmentSelector>,
+    ) -> Result<Response<v1::Operation>, Status> {
+        let (name, request_id, expected_environment_id) = mutation_selection(request.into_inner())?;
+        let mut core = self.core.lock().await;
+        core.reconcile(&name).await.map_err(Status::from)?;
+        let environment = core.environment(&name).map_err(Status::from)?.clone();
+        require_expected_environment(&environment, expected_environment_id)?;
+        if !matches!(
+            environment.state,
+            StoredEnvironmentState::Running | StoredEnvironmentState::Error
+        ) {
+            return Err(Status::failed_precondition(
+                "native local environment must be running or recoverable",
+            ));
+        }
+        let payload = serde_json::json!({
+            "name": name,
+            "vcpus": environment.vcpus,
+            "memory_mib": environment.memory_mib,
+            "disk_bytes": environment.disk_bytes,
+            "was_running": true,
+        });
+        let existing = core
+            .store
+            .operation_by_request(request_id)
+            .map_err(SupervisorError::from)
+            .map_err(Status::from)?;
+        let operation = if let Some(operation) = existing {
+            if operation.kind != OperationKind::Restart
+                || operation.environment_id != Some(environment.id)
+                || operation.payload != payload
+            {
+                return Err(Status::aborted("local lifecycle request ID collision"));
+            }
+            operation
+        } else {
+            core.store
+                .begin_operation(
+                    request_id,
+                    Some(environment.id),
+                    OperationKind::Restart,
+                    &payload,
+                )
+                .map_err(SupervisorError::from)
+                .map_err(Status::from)?
+        };
+        let response = operation_proto(&operation)?;
+        drop(core);
+        if !operation.phase.terminal() {
+            self.schedule_operation_worker(false);
+        }
+        Ok(Response::new(response))
+    }
+
     async fn resize_environment(
         &self,
         request: Request<v1::ResizeEnvironmentRequest>,

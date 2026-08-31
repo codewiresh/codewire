@@ -6,6 +6,7 @@
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use axum::extract::Request as AxumRequest;
@@ -13,6 +14,7 @@ use axum::middleware::Next;
 use axum::response::{IntoResponse as _, Response as AxumResponse};
 use buffa_types::{Duration as ProtoDuration, Timestamp};
 use codewire_daemon::client::{
+    DAEMON_MINIMUM_PROTOCOL_VERSION, DAEMON_PROTOCOL_VERSION,
     SessionAttachment as PrivateSessionAttachment, SessionClient, SessionClientError,
     v1 as daemon_v1,
 };
@@ -37,6 +39,16 @@ const PUBLIC_FILE_ROUTE: &str = "/codewire.v1.FileService/{*method}";
 const ACCEPT_POST: &str =
     "application/connect+json, application/connect+proto, application/json, application/proto";
 const GIB: u64 = 1024 * 1024 * 1024;
+const DAEMON_REPAIR_TIMEOUT: Duration = Duration::from_secs(180);
+const MAXIMUM_DAEMON_LOG_BYTES: usize = 64 * 1024;
+const REQUIRED_LOCAL_DAEMON_CAPABILITIES: &[&str] = &[
+    "attach.v1",
+    "exec.v1",
+    "files.v1",
+    "health.v1",
+    "pty.v1",
+    "sessions.v1",
+];
 
 pub(super) fn supervisor_router(supervisor: SupervisorRpc) -> axum::Router {
     let environment = connectrpc::ConnectRpcService::new(environment_router(supervisor.clone()));
@@ -150,7 +162,6 @@ fn connect_content_type(value: &HeaderValue) -> bool {
 enum RpcBehavior {
     Local,
     UnimplementedPlatformOnly,
-    UnimplementedPendingDaemonBridge,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -343,6 +354,54 @@ const PUBLIC_MESSAGE_SEMANTICS: &[MessageSemantics] = &[
         fields: &[field(1, "status", FIXED), field(2, "outcome", LOCAL)],
     },
     MessageSemantics {
+        full_name: "codewire.v1.EnvironmentDaemonDiagnostic",
+        fields: &[
+            field(1, "name", FIXED),
+            field(2, "healthy", LOCAL),
+            field(3, "message", FIXED),
+        ],
+    },
+    MessageSemantics {
+        full_name: "codewire.v1.EnvironmentDaemonStatus",
+        fields: &[
+            field(1, "state", LOCAL),
+            field(2, "protocol_version", LOCAL),
+            field(3, "minimum_protocol_version", LOCAL),
+            field(4, "daemon_version", FIXED),
+            field(5, "capabilities", LOCAL),
+            field(6, "message", FIXED),
+            field(7, "diagnostics", LOCAL),
+            field(8, "pod_name", ZERO),
+        ],
+    },
+    MessageSemantics {
+        full_name: "codewire.v1.GetEnvironmentDaemonStatusRequest",
+        fields: &[field(1, "org_id", LOCAL), field(2, "environment_id", LOCAL)],
+    },
+    MessageSemantics {
+        full_name: "codewire.v1.GetEnvironmentDaemonStatusResponse",
+        fields: &[field(1, "status", LOCAL)],
+    },
+    MessageSemantics {
+        full_name: "codewire.v1.StreamEnvironmentDaemonLogsRequest",
+        fields: &[field(1, "org_id", LOCAL), field(2, "environment_id", LOCAL)],
+    },
+    MessageSemantics {
+        full_name: "codewire.v1.StreamEnvironmentDaemonLogsResponse",
+        fields: &[field(1, "data", LOCAL)],
+    },
+    MessageSemantics {
+        full_name: "codewire.v1.RepairEnvironmentDaemonRequest",
+        fields: &[field(1, "org_id", LOCAL), field(2, "environment_id", LOCAL)],
+    },
+    MessageSemantics {
+        full_name: "codewire.v1.RepairEnvironmentDaemonResponse",
+        fields: &[
+            field(1, "status", LOCAL),
+            field(2, "replaced_pod_name", ZERO),
+        ],
+    },
+    MessageSemantics {
         full_name: "codewire.v1.EnvironmentResources",
         fields: &[
             field(1, "cpu_millicores", LOCAL),
@@ -447,15 +506,15 @@ const ENVIRONMENT_RPC_SEMANTICS: &[RpcSemantics] = &[
     ),
     rpc(
         proto::ENVIRONMENT_SERVICE_GET_ENVIRONMENT_DAEMON_STATUS_SPEC,
-        RpcBehavior::UnimplementedPendingDaemonBridge,
+        RpcBehavior::Local,
     ),
     rpc(
         proto::ENVIRONMENT_SERVICE_STREAM_ENVIRONMENT_DAEMON_LOGS_SPEC,
-        RpcBehavior::UnimplementedPendingDaemonBridge,
+        RpcBehavior::Local,
     ),
     rpc(
         proto::ENVIRONMENT_SERVICE_REPAIR_ENVIRONMENT_DAEMON_SPEC,
-        RpcBehavior::UnimplementedPendingDaemonBridge,
+        RpcBehavior::Local,
     ),
     rpc(
         proto::ENVIRONMENT_SERVICE_LIST_ENVIRONMENT_ACCESS_SPEC,
@@ -572,7 +631,7 @@ impl SupervisorRpc {
         Ok(access)
     }
 
-    async fn public_daemon_client(
+    async fn public_daemon_probe_client(
         &self,
         org_id: &str,
         environment_id: &str,
@@ -588,6 +647,17 @@ impl SupervisorRpc {
         .map_err(|_| {
             connectrpc::ConnectError::unavailable("local environment daemon is unavailable")
         })?;
+        Ok(client)
+    }
+
+    async fn public_daemon_client(
+        &self,
+        org_id: &str,
+        environment_id: &str,
+    ) -> Result<SessionClient, connectrpc::ConnectError> {
+        let client = self
+            .public_daemon_probe_client(org_id, environment_id)
+            .await?;
         client.require_ready().await.map_err(local_session_error)?;
         Ok(client)
     }
@@ -611,6 +681,246 @@ impl SupervisorRpc {
         })?;
         DaemonClient::from_channel(channel, capability.as_str()).map_err(|_| local_internal())
     }
+
+    async fn public_daemon_status(
+        &self,
+        org_id: &str,
+        environment_id: &str,
+    ) -> Result<proto::EnvironmentDaemonStatus, connectrpc::ConnectError> {
+        let (_, environment) = self.public_environment(org_id, environment_id).await?;
+        match private_environment_state(environment.state)? {
+            v1::EnvironmentState::Stopped => {
+                return Ok(fixed_daemon_status(
+                    proto::EnvironmentDaemonState::Starting,
+                    "local environment is stopped",
+                ));
+            }
+            v1::EnvironmentState::Starting => {
+                return Ok(fixed_daemon_status(
+                    proto::EnvironmentDaemonState::Starting,
+                    "local environment daemon is starting",
+                ));
+            }
+            v1::EnvironmentState::Error | v1::EnvironmentState::Orphaned => {
+                return Ok(fixed_daemon_status(
+                    proto::EnvironmentDaemonState::Unhealthy,
+                    "local environment runtime requires repair",
+                ));
+            }
+            v1::EnvironmentState::Running => {}
+            v1::EnvironmentState::Unspecified => {
+                return Ok(fixed_daemon_status(
+                    proto::EnvironmentDaemonState::Unhealthy,
+                    "local environment runtime state is unavailable",
+                ));
+            }
+        }
+
+        let client = match self
+            .public_daemon_probe_client(org_id, environment_id)
+            .await
+        {
+            Ok(client) => client,
+            Err(_) => {
+                return Ok(fixed_daemon_status(
+                    proto::EnvironmentDaemonState::Unhealthy,
+                    "local environment daemon is unavailable",
+                ));
+            }
+        };
+        let capabilities = match client
+            .get_capabilities(REQUIRED_LOCAL_DAEMON_CAPABILITIES)
+            .await
+        {
+            Ok(capabilities) => capabilities,
+            Err(_) => {
+                return Ok(fixed_daemon_status(
+                    proto::EnvironmentDaemonState::Unhealthy,
+                    "local environment daemon probe failed",
+                ));
+            }
+        };
+        let health = match client.get_health().await {
+            Ok(health) => health,
+            Err(_) => {
+                return Ok(fixed_daemon_status(
+                    proto::EnvironmentDaemonState::Unhealthy,
+                    "local environment daemon health probe failed",
+                ));
+            }
+        };
+        Ok(project_daemon_status(&capabilities, &health))
+    }
+
+    async fn public_daemon_logs(
+        &self,
+        org_id: &str,
+        environment_id: &str,
+    ) -> Result<Vec<u8>, connectrpc::ConnectError> {
+        let (_, environment) = self.public_environment(org_id, environment_id).await?;
+        let environment_id = parse_coordinate(&environment.id, "environment_id")?;
+        let operations = self
+            .operation_reader
+            .lock()
+            .await
+            .recent_environment_operations(environment_id)
+            .map_err(|_| local_internal())?;
+        trusted_daemon_logs(&operations)
+    }
+
+    async fn wait_for_terminal_operation(
+        &self,
+        operation_id: Uuid,
+    ) -> Result<(), connectrpc::ConnectError> {
+        let mut events = self.operation_events.subscribe();
+        let deadline = tokio::time::Instant::now() + DAEMON_REPAIR_TIMEOUT;
+        let mut operation = self.operation(operation_id).await.map_err(local_status)?;
+        loop {
+            match operation.phase {
+                OperationPhase::Completed => return Ok(()),
+                OperationPhase::Failed | OperationPhase::Interrupted => {
+                    return Err(connectrpc::ConnectError::unavailable(
+                        "local environment daemon repair did not converge",
+                    ));
+                }
+                OperationPhase::Intent | OperationPhase::EffectApplied => {}
+            }
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            match tokio::time::timeout(remaining, events.recv()).await {
+                Ok(Ok(next)) if next.operation_id == operation_id => operation = next,
+                Ok(Ok(_)) => {}
+                Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {
+                    operation = self.operation(operation_id).await.map_err(local_status)?;
+                }
+                Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) | Err(_) => {
+                    return Err(connectrpc::ConnectError::unavailable(
+                        "local environment daemon repair did not converge",
+                    ));
+                }
+            }
+        }
+    }
+}
+
+fn fixed_daemon_status(
+    state: proto::EnvironmentDaemonState,
+    message: &'static str,
+) -> proto::EnvironmentDaemonStatus {
+    proto::EnvironmentDaemonStatus {
+        state: state.into(),
+        protocol_version: DAEMON_PROTOCOL_VERSION,
+        minimum_protocol_version: DAEMON_MINIMUM_PROTOCOL_VERSION,
+        daemon_version: env!("CARGO_PKG_VERSION").to_owned(),
+        message: message.to_owned(),
+        diagnostics: vec![proto::EnvironmentDaemonDiagnostic {
+            name: "daemon".to_owned(),
+            healthy: state == proto::EnvironmentDaemonState::Ready,
+            message: message.to_owned(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    }
+}
+
+fn project_daemon_status(
+    capabilities: &daemon_v1::GetCapabilitiesResponse,
+    health: &daemon_v1::GetHealthResponse,
+) -> proto::EnvironmentDaemonStatus {
+    let reported = capabilities
+        .capabilities
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let admitted = REQUIRED_LOCAL_DAEMON_CAPABILITIES
+        .iter()
+        .filter(|capability| reported.contains(**capability))
+        .map(|capability| (*capability).to_owned())
+        .collect::<Vec<_>>();
+    let protocol_compatible = capabilities.minimum_protocol_version <= DAEMON_PROTOCOL_VERSION
+        && capabilities.protocol_version >= DAEMON_PROTOCOL_VERSION;
+    let bundle_compatible = capabilities.daemon_version == env!("CARGO_PKG_VERSION");
+    let capability_state = daemon_state(capabilities.state);
+    let mut state = if !protocol_compatible || !bundle_compatible {
+        proto::EnvironmentDaemonState::UpgradeRequired
+    } else if capability_state == proto::EnvironmentDaemonState::Ready
+        && admitted.len() != REQUIRED_LOCAL_DAEMON_CAPABILITIES.len()
+    {
+        proto::EnvironmentDaemonState::Unsupported
+    } else if capability_state == proto::EnvironmentDaemonState::Ready {
+        daemon_state(health.state)
+    } else {
+        capability_state
+    };
+    if state == proto::EnvironmentDaemonState::Unspecified {
+        state = proto::EnvironmentDaemonState::Unhealthy;
+    }
+    let message = daemon_state_message(state);
+    proto::EnvironmentDaemonStatus {
+        state: state.into(),
+        protocol_version: capabilities.protocol_version,
+        minimum_protocol_version: capabilities.minimum_protocol_version,
+        daemon_version: env!("CARGO_PKG_VERSION").to_owned(),
+        capabilities: admitted,
+        message: message.to_owned(),
+        diagnostics: vec![proto::EnvironmentDaemonDiagnostic {
+            name: "daemon".to_owned(),
+            healthy: state == proto::EnvironmentDaemonState::Ready,
+            message: message.to_owned(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    }
+}
+
+fn daemon_state(value: i32) -> proto::EnvironmentDaemonState {
+    match daemon_v1::DaemonState::try_from(value).unwrap_or(daemon_v1::DaemonState::Unspecified) {
+        daemon_v1::DaemonState::Unspecified => proto::EnvironmentDaemonState::Unspecified,
+        daemon_v1::DaemonState::Unsupported => proto::EnvironmentDaemonState::Unsupported,
+        daemon_v1::DaemonState::Starting => proto::EnvironmentDaemonState::Starting,
+        daemon_v1::DaemonState::Ready => proto::EnvironmentDaemonState::Ready,
+        daemon_v1::DaemonState::Unhealthy => proto::EnvironmentDaemonState::Unhealthy,
+        daemon_v1::DaemonState::UpgradeRequired => proto::EnvironmentDaemonState::UpgradeRequired,
+    }
+}
+
+fn daemon_state_message(state: proto::EnvironmentDaemonState) -> &'static str {
+    match state {
+        proto::EnvironmentDaemonState::Unspecified | proto::EnvironmentDaemonState::Unhealthy => {
+            "local environment daemon is unhealthy"
+        }
+        proto::EnvironmentDaemonState::Unsupported => {
+            "local environment daemon is missing required capabilities"
+        }
+        proto::EnvironmentDaemonState::Starting => "local environment daemon is starting",
+        proto::EnvironmentDaemonState::Ready => "local environment daemon is ready",
+        proto::EnvironmentDaemonState::UpgradeRequired => {
+            "local environment daemon bundle is incompatible"
+        }
+    }
+}
+
+fn trusted_daemon_logs(
+    operations: &[OperationRecord],
+) -> Result<Vec<u8>, connectrpc::ConnectError> {
+    let mut output = Vec::new();
+    for operation in operations {
+        let stage = operation_stage(operation).map_err(local_status)?;
+        let line = format!(
+            "time_unix_ms={} operation={} kind={} phase={} checkpoint={} stage={} error={}\n",
+            operation.updated_unix_ms,
+            operation.operation_id,
+            operation.kind.as_str(),
+            operation.phase.as_str(),
+            operation.checkpoint,
+            stage.as_str_name(),
+            operation.error_code.as_deref().unwrap_or("-"),
+        );
+        if output.len().saturating_add(line.len()) > MAXIMUM_DAEMON_LOG_BYTES {
+            break;
+        }
+        output.extend_from_slice(line.as_bytes());
+    }
+    Ok(output)
 }
 
 #[derive(Clone)]
@@ -1799,25 +2109,64 @@ impl proto::EnvironmentService for SupervisorRpc {
     async fn get_environment_daemon_status(
         &self,
         _ctx: RequestContext,
-        _request: ServiceRequest<'_, proto::GetEnvironmentDaemonStatusRequest>,
+        request: ServiceRequest<'_, proto::GetEnvironmentDaemonStatusRequest>,
     ) -> ServiceResult<proto::GetEnvironmentDaemonStatusResponse> {
-        unsupported()
+        let request = request.view();
+        let status = self
+            .public_daemon_status(request.org_id, request.environment_id)
+            .await?;
+        connectrpc::Response::ok(proto::GetEnvironmentDaemonStatusResponse {
+            status: Some(status).into(),
+            ..Default::default()
+        })
     }
 
     async fn stream_environment_daemon_logs(
         &self,
         _ctx: RequestContext,
-        _request: ServiceRequest<'_, proto::StreamEnvironmentDaemonLogsRequest>,
+        request: ServiceRequest<'_, proto::StreamEnvironmentDaemonLogsRequest>,
     ) -> ServiceResult<ServiceStream<proto::StreamEnvironmentDaemonLogsResponse>> {
-        unsupported()
+        let request = request.view();
+        let data = self
+            .public_daemon_logs(request.org_id, request.environment_id)
+            .await?;
+        connectrpc::Response::stream_ok(futures::stream::iter([Ok(
+            proto::StreamEnvironmentDaemonLogsResponse {
+                data,
+                ..Default::default()
+            },
+        )]))
     }
 
     async fn repair_environment_daemon(
         &self,
         _ctx: RequestContext,
-        _request: ServiceRequest<'_, proto::RepairEnvironmentDaemonRequest>,
+        request: ServiceRequest<'_, proto::RepairEnvironmentDaemonRequest>,
     ) -> ServiceResult<proto::RepairEnvironmentDaemonResponse> {
-        unsupported()
+        let request = request.view();
+        let (_, environment) = self
+            .public_environment(request.org_id, request.environment_id)
+            .await?;
+        let operation = LocalSupervisorService::restart_environment(
+            self,
+            TonicRequest::new(v1::EnvironmentSelector {
+                name: environment.name,
+                request_id: Uuid::new_v4().to_string(),
+                environment_id: environment.id,
+            }),
+        )
+        .await
+        .map(tonic::Response::into_inner)
+        .map_err(local_status)?;
+        let operation_id = parse_coordinate(&operation.operation_id, "operation_id")?;
+        self.wait_for_terminal_operation(operation_id).await?;
+        let status = self
+            .public_daemon_status(request.org_id, request.environment_id)
+            .await?;
+        connectrpc::Response::ok(proto::RepairEnvironmentDaemonResponse {
+            status: Some(status).into(),
+            ..Default::default()
+        })
     }
 
     async fn list_environment_access(
@@ -1904,7 +2253,7 @@ mod tests {
                 .iter()
                 .filter(|entry| entry.behavior == RpcBehavior::Local)
                 .count(),
-            8
+            11
         );
     }
 
@@ -2031,6 +2380,80 @@ mod tests {
                 &HeaderValue::from_str(rejected).unwrap()
             ));
         }
+    }
+
+    #[test]
+    fn daemon_status_projection_never_reflects_guest_controlled_text() {
+        let sentinel = "guest-bearer-and-terminal-sentinel\u{1b}[31m";
+        let capabilities = daemon_v1::GetCapabilitiesResponse {
+            protocol_version: DAEMON_PROTOCOL_VERSION,
+            minimum_protocol_version: DAEMON_MINIMUM_PROTOCOL_VERSION,
+            daemon_version: env!("CARGO_PKG_VERSION").to_owned(),
+            capabilities: REQUIRED_LOCAL_DAEMON_CAPABILITIES
+                .iter()
+                .map(|value| (*value).to_owned())
+                .chain([sentinel.to_owned()])
+                .collect(),
+            state: daemon_v1::DaemonState::Ready as i32,
+            message: sentinel.to_owned(),
+        };
+        let health = daemon_v1::GetHealthResponse {
+            state: daemon_v1::DaemonState::Ready as i32,
+            message: sentinel.to_owned(),
+            diagnostics: vec![daemon_v1::HealthDiagnostic {
+                name: sentinel.to_owned(),
+                healthy: false,
+                message: sentinel.to_owned(),
+            }],
+        };
+
+        let status = project_daemon_status(&capabilities, &health);
+        assert_eq!(
+            status.state.as_known(),
+            Some(proto::EnvironmentDaemonState::Ready)
+        );
+        assert_eq!(status.capabilities, REQUIRED_LOCAL_DAEMON_CAPABILITIES);
+        assert_eq!(status.message, "local environment daemon is ready");
+        assert_eq!(status.diagnostics.len(), 1);
+        assert_eq!(status.diagnostics[0].name, "daemon");
+        assert!(status.diagnostics[0].healthy);
+        assert!(!format!("{status:?}").contains(sentinel));
+
+        let mut incompatible = capabilities;
+        incompatible.daemon_version = sentinel.to_owned();
+        let status = project_daemon_status(&incompatible, &health);
+        assert_eq!(
+            status.state.as_known(),
+            Some(proto::EnvironmentDaemonState::UpgradeRequired)
+        );
+        assert_eq!(status.daemon_version, env!("CARGO_PKG_VERSION"));
+        assert!(!format!("{status:?}").contains(sentinel));
+    }
+
+    #[test]
+    fn daemon_logs_render_only_trusted_journal_fields() {
+        let sentinel = "guest-output-and-token-sentinel";
+        let operation = OperationRecord {
+            operation_id: Uuid::new_v4(),
+            request_id: Uuid::new_v4(),
+            environment_id: Some(Uuid::new_v4()),
+            kind: OperationKind::Create,
+            phase: OperationPhase::Completed,
+            checkpoint: 7,
+            payload: serde_json::json!({"name": sentinel}),
+            result: Some(serde_json::json!({"message": sentinel})),
+            error_code: None,
+            created_unix_ms: 1_000,
+            updated_unix_ms: 2_000,
+        };
+
+        let logs = String::from_utf8(trusted_daemon_logs(&[operation]).unwrap()).unwrap();
+        assert!(logs.contains("time_unix_ms=2000"));
+        assert!(logs.contains("kind=create"));
+        assert!(logs.contains("phase=completed"));
+        assert!(logs.contains("stage=OPERATION_STAGE_COMPLETED"));
+        assert!(!logs.contains(sentinel));
+        assert!(logs.len() <= MAXIMUM_DAEMON_LOG_BYTES);
     }
 
     #[test]
@@ -2161,6 +2584,51 @@ mod tests {
             .into_owned();
         assert_eq!(fetched.environment.id, environment_id);
         assert_eq!(fetched.environment.org_id, namespace.to_string());
+
+        let daemon_status = client
+            .get_environment_daemon_status(proto::GetEnvironmentDaemonStatusRequest {
+                org_id: namespace.to_string(),
+                environment_id: environment_id.clone(),
+                ..Default::default()
+            })
+            .await
+            .unwrap()
+            .into_owned()
+            .status
+            .into_option()
+            .unwrap();
+        assert_eq!(
+            daemon_status.state.as_known(),
+            Some(proto::EnvironmentDaemonState::Starting)
+        );
+        assert_eq!(daemon_status.message, "local environment is stopped");
+        assert!(daemon_status.pod_name.is_empty());
+
+        let mut daemon_logs = client
+            .stream_environment_daemon_logs(proto::StreamEnvironmentDaemonLogsRequest {
+                org_id: namespace.to_string(),
+                environment_id: environment_id.clone(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let daemon_logs = daemon_logs
+            .message::<proto::StreamEnvironmentDaemonLogsResponse>()
+            .await
+            .unwrap()
+            .unwrap()
+            .to_owned_message();
+        assert!(daemon_logs.data.is_empty());
+
+        let repair_error = client
+            .repair_environment_daemon(proto::RepairEnvironmentDaemonRequest {
+                org_id: namespace.to_string(),
+                environment_id: environment_id.clone(),
+                ..Default::default()
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(repair_error.code, connectrpc::ErrorCode::FailedPrecondition);
 
         let plan = client
             .plan_environment_resize(proto::PlanEnvironmentResizeRequest {
