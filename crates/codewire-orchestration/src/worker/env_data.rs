@@ -255,8 +255,7 @@ mod tests {
                 }],
                 "credentials": {
                     "work": {"provider": "openai", "account": "acct-work"}
-                },
-                "workspace_mode": "clone"
+                }
             }
         }"#;
         let setup: SetupConfig = serde_json::from_str(json).unwrap();

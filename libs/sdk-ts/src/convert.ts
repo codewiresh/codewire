@@ -13,7 +13,6 @@ import {
   ProjectSkillSelectionSchema,
   ProjectSkillSource,
   ProjectSpecSchema,
-  ProjectWorkspaceMode,
   RepoEntrySchema,
   SetupConfigSchema,
   type AppPort as ProtoAppPort,
@@ -380,14 +379,6 @@ function toProtoRepos(
 
 function fromProtoProjectSpec(value: ProtoProjectSpec | undefined): ProjectSpec | undefined {
   if (!value) return undefined;
-  const workspaceMode = (() => {
-    switch (value.workspaceMode) {
-      case ProjectWorkspaceMode.AUTO: return "auto" as const;
-      case ProjectWorkspaceMode.CLONE: return "clone" as const;
-      case ProjectWorkspaceMode.DIRECT: return "direct" as const;
-      default: throw new Error("codewire: project workspace mode is unspecified");
-    }
-  })();
   return {
     schema_version: value.schemaVersion,
     preset: optionalString(value.preset),
@@ -432,17 +423,7 @@ function fromProtoProjectSpec(value: ProtoProjectSpec | undefined): ProjectSpec 
           provider: optionalString(credential.provider), account: credential.account,
         }]))
       : undefined,
-    workspace_mode: workspaceMode,
   };
-}
-
-function toProtoProjectWorkspaceMode(value: ProjectSpec["workspace_mode"]): ProjectWorkspaceMode {
-  switch (value) {
-    case "auto": return ProjectWorkspaceMode.AUTO;
-    case "clone": return ProjectWorkspaceMode.CLONE;
-    case "direct": return ProjectWorkspaceMode.DIRECT;
-    default: throw new Error("codewire: project workspace_mode must be auto, clone, or direct");
-  }
 }
 
 function toProtoProjectSkillSource(value: ProjectSkillSelection["source"]): ProjectSkillSource {
@@ -491,7 +472,6 @@ function toProtoProjectSpec(value: ProjectSpec | undefined) {
           provider: credential.provider ?? "", account: credential.account,
         }]))
       : {},
-    workspaceMode: toProtoProjectWorkspaceMode(value.workspace_mode),
   };
 }
 

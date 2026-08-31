@@ -1343,7 +1343,6 @@ secrets: {project: development, org: false, user: true}
 credentials:
   work: {provider: openai, account: acct-work}
   personal: {provider: anthropic, account: acct-personal}
-workspace: clone
 "#;
         let direct = codewire_project::parse_project_yaml(yaml).unwrap().spec;
         let detected = parse_codewire_yaml(yaml, "codewire").unwrap();

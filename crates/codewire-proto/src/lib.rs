@@ -47,9 +47,9 @@ mod tests {
         OrganizationDeletionState, PORT_SERVICE_SERVICE_NAME, PRESET_SERVICE_SERVICE_NAME, Port,
         PortAccess, Preset, ProjectAgents, ProjectCredentialReference, ProjectResources,
         ProjectSecretBindings, ProjectSkillSelection, ProjectSkillSource, ProjectSpec,
-        ProjectWorkspaceMode, RedeemMeshNodeEnrollmentResponse, RepoEntry,
-        SECRET_SERVICE_SERVICE_NAME, SecretMetadata, SetProjectSecretRequest, SetSecretRequest,
-        SetUserSecretRequest, SetupAgent, SetupConfig, UpdatePresetRequest,
+        RedeemMeshNodeEnrollmentResponse, RepoEntry, SECRET_SERVICE_SERVICE_NAME, SecretMetadata,
+        SetProjectSecretRequest, SetSecretRequest, SetUserSecretRequest, SetupAgent, SetupConfig,
+        UpdatePresetRequest,
     };
 
     #[test]
@@ -312,7 +312,6 @@ mod tests {
             )]
             .into_iter()
             .collect(),
-            workspace_mode: ProjectWorkspaceMode::Clone.into(),
             ..Default::default()
         };
         let json = serde_json::to_value(project).expect("portable project proto JSON");

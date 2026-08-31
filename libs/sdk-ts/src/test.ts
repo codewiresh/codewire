@@ -4,10 +4,7 @@ import { DurationSchema } from "@bufbuild/protobuf/wkt";
 import { Code, ConnectError, createConnectRouter } from "@connectrpc/connect";
 import { BadRequestSchema, ErrorInfoSchema } from "@codewire/proto-ts";
 import { ApiKeySchema, ApiKeyService } from "@codewire/proto-ts/gen/codewire/v1/api_key_pb";
-import {
-  ProjectSkillSource,
-  ProjectWorkspaceMode,
-} from "@codewire/proto-ts/gen/codewire/v1/common_pb";
+import { ProjectSkillSource } from "@codewire/proto-ts/gen/codewire/v1/common_pb";
 import {
   DesiredState,
   EnvironmentResizeExecutionMode,
@@ -617,13 +614,11 @@ async function runTests() {
       skills: [{ source: "repository", reference: ".agents/skills/rust", agents: ["codex"] }],
       resources: { cpu_millicores: 2000, memory_mib: 16384, disk_gib: 40 },
       credentials: { work: { provider: "openai", account: "acct-work" } },
-      workspace_mode: "clone",
     },
   });
   assert(createEnvironment.isolationTier === IsolationTier.CONFIDENTIAL, "create environment preserves confidential isolation");
   assert(createEnvironment.repos[0]?.mountPath === "/workspace/platform", "create environment preserves repository mount paths");
   assert(createEnvironment.repos[0]?.revision === "deadbeef", "create environment preserves repository revisions");
-  assert(createEnvironment.projectSpec?.workspaceMode === ProjectWorkspaceMode.CLONE, "create environment preserves project workspace mode");
   assert(createEnvironment.projectSpec?.resources?.memoryMib === 16384n, "create environment preserves project resource units");
   assert(createEnvironment.projectSpec?.credentials.work?.account === "acct-work", "create environment preserves opaque account references");
   let rejectedUnknownIsolation = false;
@@ -635,19 +630,6 @@ async function runTests() {
     rejectedUnknownIsolation = true;
   }
   assert(rejectedUnknownIsolation, "create environment rejects unknown isolation tiers");
-  let rejectedUnknownWorkspaceMode = false;
-  try {
-    toProtoCreateEnvironmentRequest("org_test", {
-      project_spec: {
-        schema_version: 1,
-        working_directory: "/workspace",
-        workspace_mode: "shared" as never,
-      },
-    });
-  } catch {
-    rejectedUnknownWorkspaceMode = true;
-  }
-  assert(rejectedUnknownWorkspaceMode, "create environment rejects unknown project workspace modes");
   let rejectedUnknownSkillSource = false;
   try {
     toProtoCreateEnvironmentRequest("org_test", {
@@ -655,7 +637,6 @@ async function runTests() {
         schema_version: 1,
         working_directory: "/workspace",
         skills: [{ source: "ambient" as never, reference: "personal" }],
-        workspace_mode: "clone",
       },
     });
   } catch {
@@ -723,7 +704,6 @@ async function runTests() {
         schemaVersion: 1,
         workingDirectory: "/workspace/repo",
         skills: [{ source: ProjectSkillSource.USER, reference: "personal", agents: ["codex"] }],
-        workspaceMode: ProjectWorkspaceMode.CLONE,
       },
     },
   }));
@@ -1120,7 +1100,7 @@ async function runTests() {
     server.close();
   }
 
-  const expectedAssertions = 107;
+  const expectedAssertions = 105;
   if (passed !== expectedAssertions) {
     failed++;
     console.error(

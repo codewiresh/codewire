@@ -54,16 +54,6 @@ pub struct ProjectDocument {
 
 impl ProjectDocument {
     pub fn ensure_platform_compatible(&self) -> Result<(), ProjectError> {
-        if self.spec.workspace_mode == WorkspaceMode::Direct {
-            return Err(ProjectError::PlatformUnsupported {
-                field: "workspace.mode",
-            });
-        }
-        if self.local.direct_source.is_some() {
-            return Err(ProjectError::PlatformUnsupported {
-                field: "workspace.source",
-            });
-        }
         if !self.local.mounts.is_empty() {
             return Err(ProjectError::PlatformUnsupported { field: "mounts" });
         }
@@ -111,8 +101,6 @@ pub struct ProjectSpec {
     pub secrets: SecretBindings,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub credentials: BTreeMap<String, CredentialReference>,
-    #[serde(default, skip_serializing_if = "WorkspaceMode::is_auto")]
-    pub workspace_mode: WorkspaceMode,
 }
 
 impl Default for ProjectSpec {
@@ -133,7 +121,6 @@ impl Default for ProjectSpec {
             resources: ResourceSpec::default(),
             secrets: SecretBindings::default(),
             credentials: BTreeMap::new(),
-            workspace_mode: WorkspaceMode::Auto,
         }
     }
 }
@@ -247,25 +234,8 @@ pub struct CredentialReference {
     pub account: String,
 }
 
-#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum WorkspaceMode {
-    #[default]
-    Auto,
-    Clone,
-    Direct,
-}
-
-impl WorkspaceMode {
-    fn is_auto(value: &Self) -> bool {
-        *value == Self::Auto
-    }
-}
-
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LocalProjectIntent {
-    pub direct_source: Option<String>,
-    pub direct_read_only: bool,
     pub mounts: Vec<LocalMountIntent>,
     pub host_ports: Vec<HostPortBinding>,
 }
@@ -339,8 +309,6 @@ struct RawProject {
     include_user_secrets: Option<bool>,
     #[serde(default)]
     credentials: BTreeMap<String, RawCredential>,
-    #[serde(default)]
-    workspace: Option<RawWorkspace>,
     #[serde(default)]
     mounts: Vec<RawMountBlock>,
 }
@@ -461,24 +429,6 @@ struct RawCredentialBlock {
     provider: String,
     #[serde(default, alias = "account_ref")]
     account: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
-enum RawWorkspace {
-    String(String),
-    Mapping(RawWorkspaceBlock),
-}
-
-#[derive(Debug, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawWorkspaceBlock {
-    #[serde(default)]
-    mode: String,
-    #[serde(default)]
-    source: String,
-    #[serde(default, alias = "readonly")]
-    read_only: bool,
 }
 
 #[derive(Debug, Default, Deserialize)]

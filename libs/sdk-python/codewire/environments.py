@@ -70,10 +70,6 @@ def _isolation_tier(value: str | None) -> int:
 def _project_spec(value: dict[str, Any]) -> ProjectSpec:
     """Convert the SDK's short enum spellings to the canonical proto shape."""
     payload = deepcopy(value)
-    mode = payload.get("workspace_mode")
-    if mode not in ("auto", "clone", "direct"):
-        raise ValueError("codewire: project workspace_mode must be auto, clone, or direct")
-    payload["workspace_mode"] = f"PROJECT_WORKSPACE_MODE_{mode.upper()}"
     for skill in payload.get("skills", []):
         source = skill.get("source")
         if source not in ("repository", "user"):

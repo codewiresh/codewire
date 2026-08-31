@@ -74,20 +74,12 @@ pub(crate) async fn create_native_environment(
             "local environment {name:?} already exists in the legacy Docker/Lima state; choose a different name or remove it explicitly"
         );
     }
-    let requested_path = args.path.unwrap_or_else(|| PathBuf::from("."));
-    let source_path = std::fs::canonicalize(&requested_path)
+    let requested_path = args.path.as_deref().unwrap_or_else(|| Path::new("."));
+    let source_path = std::fs::canonicalize(requested_path)
         .with_context(|| format!("resolve native workspace {}", requested_path.display()))?;
-    let mut project = native_codewire_yaml(&source_path, args.file.as_deref())?;
-    let requested_workspace = args
-        .path_mode
-        .map(workspace_selection_from_arg)
-        .unwrap_or_else(|| workspace_selection_from_project(project.spec.workspace_mode));
-    let implicit_path_mode = resolve_workspace_mode(&source_path, requested_workspace)
-        .context("resolve native workspace preparation mode")?;
-    project.spec.workspace_mode = match implicit_path_mode {
-        WorkspaceSourceMode::Clone => codewire_project::WorkspaceMode::Clone,
-        WorkspaceSourceMode::Copy => codewire_project::WorkspaceMode::Auto,
-    };
+    let project = native_codewire_yaml(&source_path, args.file.as_deref())?;
+    let (request_source_path, implicit_path_mode) =
+        native_workspace_request(&source_path, &project.spec, args.path_mode)?;
     let vcpus = match args.cpu.as_deref() {
         Some(value) => parse_native_cpu(value)?,
         None => project.vcpus.unwrap_or(DEFAULT_NATIVE_VCPUS),
@@ -106,14 +98,14 @@ pub(crate) async fn create_native_environment(
     client
         .create(v1::CreateEnvironmentRequest {
             name,
-            source_path: source_path.to_string_lossy().into_owned(),
+            source_path: request_source_path,
             vcpus,
             memory_mib,
             disk_bytes,
             request_id: Uuid::new_v4().to_string(),
             project_spec_json,
             project_spec_sha256,
-            implicit_path_mode: workspace_source_mode_name(implicit_path_mode).to_owned(),
+            implicit_path_mode,
         })
         .await
         .map_err(native_status)
@@ -299,8 +291,9 @@ pub(crate) struct NativeEnvironmentView {
     pub(crate) cpu: u32,
     pub(crate) memory: String,
     pub(crate) disk: String,
-    pub(crate) workspace_commit: String,
-    pub(crate) source_path: String,
+    pub(crate) workspace_plan: String,
+    pub(crate) workspace_inputs: u32,
+    pub(crate) working_directory: String,
 }
 
 impl From<&v1::Environment> for NativeEnvironmentView {
@@ -314,23 +307,25 @@ impl From<&v1::Environment> for NativeEnvironmentView {
             cpu: environment.vcpus,
             memory: format_binary_mib(environment.memory_mib),
             disk: format_binary_bytes(environment.disk_bytes),
-            workspace_commit: environment.workspace_commit.clone(),
-            source_path: environment.source_path.clone(),
+            workspace_plan: environment.workspace_plan_sha256.clone(),
+            workspace_inputs: environment.workspace_input_count,
+            working_directory: environment.working_directory.clone(),
         }
     }
 }
 
 fn format_native_environment(view: &NativeEnvironmentView) -> String {
     format!(
-        "Environment: {}\nBackend:     {}\nState:       {}\nCPU:         {}\nMemory:      {}\nDisk:        {}\nCommit:      {}\nSource:      {}\n",
+        "Environment: {}\nBackend:     {}\nState:       {}\nCPU:         {}\nMemory:      {}\nDisk:        {}\nWorkspace:   {} input(s), plan {}\nWorking dir: {}\n",
         view.name,
         view.backend,
         view.state,
         view.cpu,
         view.memory,
         view.disk,
-        view.workspace_commit,
-        view.source_path,
+        view.workspace_inputs,
+        view.workspace_plan,
+        view.working_directory,
     )
 }
 
@@ -492,10 +487,7 @@ fn native_unsupported_project_fields(
     if !spec.image.is_empty() {
         unsupported.push("image");
     }
-    if !spec.repositories.is_empty() {
-        unsupported.push("repositories");
-    }
-    if spec.working_directory != "/workspace" {
+    if spec.repositories.is_empty() && spec.working_directory != "/workspace" {
         unsupported.push("working_directory");
     }
     if !spec.install_command.is_empty() {
@@ -521,11 +513,6 @@ fn native_unsupported_project_fields(
     }
     if !spec.credentials.is_empty() {
         unsupported.push("credentials");
-    }
-    if spec.workspace_mode == codewire_project::WorkspaceMode::Direct
-        || document.local.direct_source.is_some()
-    {
-        unsupported.push("workspace");
     }
     if !document.local.mounts.is_empty() {
         unsupported.push("mounts");
@@ -554,12 +541,6 @@ fn canonical_native_project_intent(
     memory_mib: u32,
     disk_bytes: u64,
 ) -> anyhow::Result<(Vec<u8>, String)> {
-    if !matches!(
-        spec.workspace_mode,
-        codewire_project::WorkspaceMode::Auto | codewire_project::WorkspaceMode::Clone
-    ) {
-        anyhow::bail!("native workspace mode is invalid for clone/copy preparation");
-    }
     spec.image = CANONICAL_WORKSPACE_IMAGE.to_owned();
     spec.resources = codewire_project::ResourceSpec {
         cpu_millicores: Some(
@@ -585,19 +566,33 @@ fn workspace_selection_from_arg(value: PathModeArg) -> WorkspaceSelection {
     }
 }
 
-fn workspace_selection_from_project(value: codewire_project::WorkspaceMode) -> WorkspaceSelection {
-    match value {
-        codewire_project::WorkspaceMode::Auto => WorkspaceSelection::Auto,
-        codewire_project::WorkspaceMode::Clone => WorkspaceSelection::Clone,
-        codewire_project::WorkspaceMode::Direct => WorkspaceSelection::Direct,
-    }
-}
-
 fn workspace_source_mode_name(value: WorkspaceSourceMode) -> &'static str {
     match value {
         WorkspaceSourceMode::Clone => "clone",
         WorkspaceSourceMode::Copy => "copy",
     }
+}
+
+fn native_workspace_request(
+    source_path: &Path,
+    spec: &codewire_project::ProjectSpec,
+    requested_mode: Option<PathModeArg>,
+) -> anyhow::Result<(String, String)> {
+    if !spec.repositories.is_empty() {
+        if requested_mode.is_some() {
+            anyhow::bail!("--path-mode applies only when codewire.yaml has no repositories");
+        }
+        return Ok((String::new(), String::new()));
+    }
+    let requested_workspace = requested_mode
+        .map(workspace_selection_from_arg)
+        .unwrap_or(WorkspaceSelection::Auto);
+    let mode = resolve_workspace_mode(source_path, requested_workspace)
+        .context("resolve native workspace preparation mode")?;
+    Ok((
+        source_path.to_string_lossy().into_owned(),
+        workspace_source_mode_name(mode).to_owned(),
+    ))
 }
 
 fn reject_unsupported_native_create_options(args: &EnvCreateArgs) -> anyhow::Result<()> {
@@ -759,6 +754,41 @@ mod tests {
     }
 
     #[test]
+    fn native_yaml_repositories_replace_the_implicit_local_workspace() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            temp.path().join("codewire.yaml"),
+            r#"version: 1
+repositories:
+  - source: https://github.com/noeljackson/method.git
+    revision: 93f68ba4abc9f6e222481265b9b759e71d332575
+    destination: /workspace/github
+  - source: https://git.example.invalid/supplychain.git
+    revision: bcbae548ab2f4f0e407068aa8717cec341084d7a
+    destination: /workspace/gitea
+working_directory: /workspace/github
+"#,
+        )
+        .unwrap();
+
+        let project = native_codewire_yaml(temp.path(), None).unwrap();
+        assert_eq!(project.spec.repositories.len(), 2);
+        assert_eq!(project.spec.working_directory, "/workspace/github");
+        assert_eq!(
+            native_workspace_request(temp.path(), &project.spec, None).unwrap(),
+            (String::new(), String::new())
+        );
+        let error = native_workspace_request(temp.path(), &project.spec, Some(PathModeArg::Copy))
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("--path-mode applies only when codewire.yaml has no repositories"),
+            "{error}"
+        );
+    }
+
+    #[test]
     fn path_mode_arguments_map_only_the_implicit_local_source() {
         assert_eq!(
             workspace_selection_from_arg(PathModeArg::Auto),
@@ -772,18 +802,11 @@ mod tests {
             workspace_selection_from_arg(PathModeArg::Copy),
             WorkspaceSelection::Copy
         );
-        assert_eq!(
-            workspace_selection_from_project(codewire_project::WorkspaceMode::Direct),
-            WorkspaceSelection::Direct
-        );
     }
 
     #[test]
     fn native_project_intent_records_effective_resources_and_default_image() {
-        let spec = codewire_project::ProjectSpec {
-            workspace_mode: codewire_project::WorkspaceMode::Clone,
-            ..Default::default()
-        };
+        let spec = codewire_project::ProjectSpec::default();
         let (bytes, digest) =
             canonical_native_project_intent(spec, 2, 16 * 1024, 40 * 1024 * 1024 * 1024).unwrap();
         assert_eq!(format!("{:x}", Sha256::digest(&bytes)), digest);

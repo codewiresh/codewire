@@ -28,7 +28,6 @@ from codewire.v1.api_key_pb2 import (
 from codewire.v1.common_pb2 import (
     ProjectSkillSource,
     ProjectSpec,
-    ProjectWorkspaceMode,
 )
 from codewire.v1.environment_connect import EnvironmentServiceWSGIApplication
 from codewire.v1.environment_pb2 import (
@@ -675,15 +674,10 @@ class SDKTestCase(unittest.TestCase):
                 "credentials": {
                     "work": {"provider": "openai", "account": "acct-work"}
                 },
-                "workspace_mode": "clone",
             },
         )
         project = ControlPlaneFixture.last_create_project_spec
         self.assertIsNotNone(project)
-        self.assertEqual(
-            project.workspace_mode,
-            ProjectWorkspaceMode.PROJECT_WORKSPACE_MODE_CLONE,
-        )
         self.assertEqual(
             project.skills[0].source,
             ProjectSkillSource.PROJECT_SKILL_SOURCE_USER,

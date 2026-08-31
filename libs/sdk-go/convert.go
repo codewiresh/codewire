@@ -510,7 +510,6 @@ func fromProtoProjectSpec(value *codewirev1.ProjectSpec) *ProjectSpec {
 		StartupScript:    value.GetStartupScript(),
 		Environment:      copyStringMap(value.GetEnvironment()),
 		AgentEnvironment: copyStringMap(value.GetAgentEnvironment()),
-		WorkspaceMode:    projectWorkspaceMode(value.GetWorkspaceMode()),
 	}
 	if repositories := fromProtoRepoEntries(value.GetRepositories()); repositories != nil {
 		result.Repositories = *repositories
@@ -551,10 +550,6 @@ func toProtoProjectSpec(value *ProjectSpec) (*codewirev1.ProjectSpec, error) {
 	if value == nil {
 		return nil, nil
 	}
-	mode, err := toProtoProjectWorkspaceMode(value.WorkspaceMode)
-	if err != nil {
-		return nil, err
-	}
 	ports := value.ApplicationPorts
 	applicationPorts, err := toProtoAppPorts(&ports)
 	if err != nil {
@@ -570,7 +565,6 @@ func toProtoProjectSpec(value *ProjectSpec) (*codewirev1.ProjectSpec, error) {
 		Environment:      copyStringMap(value.Environment),
 		AgentEnvironment: copyStringMap(value.AgentEnvironment),
 		ApplicationPorts: applicationPorts,
-		WorkspaceMode:    mode,
 	}
 	repositories := value.Repositories
 	result.Repositories = toProtoRepoEntries(&repositories)
@@ -605,32 +599,6 @@ func toProtoProjectSpec(value *ProjectSpec) (*codewirev1.ProjectSpec, error) {
 		}
 	}
 	return result, nil
-}
-
-func projectWorkspaceMode(value codewirev1.ProjectWorkspaceMode) string {
-	switch value {
-	case codewirev1.ProjectWorkspaceMode_PROJECT_WORKSPACE_MODE_AUTO:
-		return "auto"
-	case codewirev1.ProjectWorkspaceMode_PROJECT_WORKSPACE_MODE_CLONE:
-		return "clone"
-	case codewirev1.ProjectWorkspaceMode_PROJECT_WORKSPACE_MODE_DIRECT:
-		return "direct"
-	default:
-		return "unspecified"
-	}
-}
-
-func toProtoProjectWorkspaceMode(value string) (codewirev1.ProjectWorkspaceMode, error) {
-	switch value {
-	case "auto":
-		return codewirev1.ProjectWorkspaceMode_PROJECT_WORKSPACE_MODE_AUTO, nil
-	case "clone":
-		return codewirev1.ProjectWorkspaceMode_PROJECT_WORKSPACE_MODE_CLONE, nil
-	case "direct":
-		return codewirev1.ProjectWorkspaceMode_PROJECT_WORKSPACE_MODE_DIRECT, nil
-	default:
-		return codewirev1.ProjectWorkspaceMode_PROJECT_WORKSPACE_MODE_UNSPECIFIED, fmt.Errorf("codewire: project workspace_mode must be auto, clone, or direct")
-	}
 }
 
 func projectSkillSource(value codewirev1.ProjectSkillSource) string {

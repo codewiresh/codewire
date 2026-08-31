@@ -608,14 +608,6 @@ fn legacy_codewire_config(
             detail: "credential grants require the native workspace runtime".to_string(),
         });
     }
-    if spec.workspace_mode != codewire_project::WorkspaceMode::Auto
-        || document.local.direct_source.is_some()
-    {
-        return Err(codewire_project::ProjectError::InvalidField {
-            field: "workspace",
-            detail: "workspace modes require the native workspace runtime".to_string(),
-        });
-    }
     if document
         .local
         .mounts

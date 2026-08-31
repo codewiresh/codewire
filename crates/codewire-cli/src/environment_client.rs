@@ -1396,7 +1396,7 @@ mod tests {
             }],
             project_spec: Some(
                 codewire_project::parse_project_yaml(
-                    "version: 1\nimage: ghcr.io/example/workspace@sha256:abc\nworkspace: clone\n",
+                    "version: 1\nimage: ghcr.io/example/workspace@sha256:abc\n",
                 )
                 .unwrap()
                 .spec,
