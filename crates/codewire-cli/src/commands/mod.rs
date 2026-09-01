@@ -981,19 +981,49 @@ pub(crate) struct EnvExtendArgs {
 }
 
 #[derive(Debug, Args)]
+#[command(args_conflicts_with_subcommands = true)]
 pub(crate) struct EnvAccessArgs {
+    #[arg(value_name = "ID_OR_NAME")]
+    environment: Option<String>,
+    #[arg(long, value_enum, default_value_t = OutputFormat::Text, help = "Output format")]
+    output: OutputFormat,
     #[command(subcommand)]
-    command: EnvAccessCommand,
+    command: Option<EnvAccessCommand>,
 }
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum EnvAccessCommand {
+    #[command(about = "Apply an access-profile revision to an environment")]
+    Apply(EnvAccessApplyArgs),
     #[command(about = "List access grants for an environment")]
     List(EnvAccessTargetArgs),
     #[command(about = "Grant a user access to an environment")]
     Grant(EnvAccessGrantArgs),
     #[command(about = "Revoke a user's access to an environment")]
     Revoke(EnvAccessRevokeArgs),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct EnvAccessApplyArgs {
+    #[arg(value_name = "ID_OR_NAME")]
+    environment: String,
+    #[arg(
+        long,
+        value_name = "SCOPE/NAME",
+        required_unless_present = "clear",
+        conflicts_with = "clear",
+        help = "Access profile to bind, for example user/work"
+    )]
+    profile: Option<String>,
+    #[arg(
+        long,
+        required_unless_present = "profile",
+        conflicts_with = "profile",
+        help = "Remove the environment access profile"
+    )]
+    clear: bool,
+    #[arg(long, value_enum, default_value_t = OutputFormat::Text, help = "Output format")]
+    output: OutputFormat,
 }
 
 #[derive(Debug, Args)]

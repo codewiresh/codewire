@@ -536,6 +536,111 @@ impl LocalCredentialControlClient {
         }
     }
 
+    /// Applies one exact, compare-and-swap environment binding transition.
+    ///
+    /// The operation is safe to replay after either the authority mutation or
+    /// the caller's journal checkpoint: observing the exact target is success,
+    /// while any binding other than the recorded source or target fails
+    /// closed. Profile material is never available through this client.
+    pub async fn apply_environment_access_binding(
+        &mut self,
+        environment_id: &EnvironmentId,
+        expected: Option<&EnvironmentAccessBinding>,
+        target: Option<(&EnvironmentAccessBinding, &AccessProfileReference)>,
+    ) -> Result<Option<EnvironmentAccessBindingRecord>, Status> {
+        if expected.is_some_and(|binding| {
+            binding.validate().is_err() || binding.environment_id != *environment_id
+        }) || target.is_some_and(|(binding, _)| {
+            binding.validate().is_err() || binding.environment_id != *environment_id
+        }) {
+            return Err(Status::invalid_argument(
+                "invalid local environment access transition",
+            ));
+        }
+
+        if let Some((binding, reference)) = target {
+            if reference.scope() != AccessProfileScope::User {
+                return Err(Status::failed_precondition(
+                    "local environment access profile is unavailable",
+                ));
+            }
+            let profile = profile_revision_from_proto(
+                self.inner
+                    .get_access_profile_revision(v1::GetAccessProfileRevisionRequest {
+                        profile_id: binding.profile_id.to_string(),
+                        revision: binding.profile_revision,
+                    })
+                    .await?
+                    .into_inner(),
+            )?;
+            if profile.profile.name != *reference.name() {
+                return Err(Status::failed_precondition(
+                    "local environment access profile does not match",
+                ));
+            }
+        }
+
+        let current = match self.get_environment_access_binding(environment_id).await {
+            Ok(current) => Some(current),
+            Err(status) if status.code() == tonic::Code::NotFound => None,
+            Err(status) => return Err(status),
+        };
+        if current.as_ref().map(|record| &record.binding) == target.map(|(binding, _)| binding) {
+            return Ok(current);
+        }
+        if current.as_ref().map(|record| &record.binding) != expected {
+            return Err(Status::failed_precondition(
+                "local environment access binding does not match",
+            ));
+        }
+
+        match target {
+            Some((binding, _)) => match expected {
+                Some(expected) => environment_binding_from_proto(
+                    self.inner
+                        .replace_environment_access_binding(
+                            v1::ReplaceEnvironmentAccessBindingRequest {
+                                environment_id: environment_id.to_string(),
+                                expected_profile_id: expected.profile_id.to_string(),
+                                expected_profile_revision: expected.profile_revision,
+                                profile_id: binding.profile_id.to_string(),
+                                profile_revision: binding.profile_revision,
+                            },
+                        )
+                        .await?
+                        .into_inner(),
+                )
+                .map(Some),
+                None => environment_binding_from_proto(
+                    self.inner
+                        .create_environment_access_binding(
+                            v1::CreateEnvironmentAccessBindingRequest {
+                                environment_id: environment_id.to_string(),
+                                profile_id: binding.profile_id.to_string(),
+                                profile_revision: binding.profile_revision,
+                            },
+                        )
+                        .await?
+                        .into_inner(),
+                )
+                .map(Some),
+            },
+            None => {
+                let expected = expected.ok_or_else(|| {
+                    Status::failed_precondition("local environment access binding does not match")
+                })?;
+                self.inner
+                    .delete_environment_access_binding(v1::DeleteEnvironmentAccessBindingRequest {
+                        environment_id: environment_id.to_string(),
+                        expected_profile_id: expected.profile_id.to_string(),
+                        expected_profile_revision: expected.profile_revision,
+                    })
+                    .await?;
+                Ok(None)
+            }
+        }
+    }
+
     pub async fn get_environment_access_binding(
         &mut self,
         environment_id: &EnvironmentId,

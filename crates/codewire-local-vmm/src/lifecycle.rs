@@ -29,6 +29,8 @@ pub(crate) enum LifecycleEffect {
     StageRollbackGeneration,
     RestoreDesiredPower,
     RecordWorkspaceTransition,
+    ApplyEnvironmentAccess,
+    RecordEnvironmentAccess,
     PrepareDelete,
     MoveToTrash,
     RevokeEnvironmentAccess,
@@ -55,6 +57,7 @@ impl LifecycleEffect {
             | Self::RecordResizeOutcome
             | Self::StageRollbackGeneration
             | Self::RecordWorkspaceTransition
+            | Self::RecordEnvironmentAccess
             | Self::RemoveEnvironment
             | Self::RecordObservation => EffectDurability::Transactional,
             Self::ProvisionWorkspace
@@ -66,6 +69,7 @@ impl LifecycleEffect {
             | Self::GrowDisk
             | Self::RestartVm
             | Self::RestoreDesiredPower
+            | Self::ApplyEnvironmentAccess
             | Self::PrepareDelete
             | Self::MoveToTrash
             | Self::RevokeEnvironmentAccess
@@ -128,6 +132,10 @@ const DELETE: &[LifecycleEffect] = &[
     LifecycleEffect::RemoveEnvironment,
     LifecycleEffect::CleanupTrash,
 ];
+const APPLY_ENVIRONMENT_ACCESS: &[LifecycleEffect] = &[
+    LifecycleEffect::ApplyEnvironmentAccess,
+    LifecycleEffect::RecordEnvironmentAccess,
+];
 const RECONCILE: &[LifecycleEffect] = &[LifecycleEffect::RecordObservation];
 
 pub(crate) fn effects(kind: OperationKind) -> &'static [LifecycleEffect] {
@@ -138,6 +146,7 @@ pub(crate) fn effects(kind: OperationKind) -> &'static [LifecycleEffect] {
         OperationKind::Restart | OperationKind::GrowDisk => RESIZE,
         OperationKind::UpdateWorkspace => UPDATE_WORKSPACE,
         OperationKind::RollbackWorkspace => ROLLBACK_WORKSPACE,
+        OperationKind::ApplyEnvironmentAccess => APPLY_ENVIRONMENT_ACCESS,
         OperationKind::Delete => DELETE,
         OperationKind::Reconcile => RECONCILE,
     }
@@ -181,6 +190,7 @@ mod tests {
         OperationKind::Restart,
         OperationKind::UpdateWorkspace,
         OperationKind::RollbackWorkspace,
+        OperationKind::ApplyEnvironmentAccess,
         OperationKind::GrowDisk,
         OperationKind::Delete,
         OperationKind::Reconcile,
@@ -338,6 +348,7 @@ mod tests {
                         | LifecycleEffect::RecordResizeOutcome
                         | LifecycleEffect::StageRollbackGeneration
                         | LifecycleEffect::RecordWorkspaceTransition
+                        | LifecycleEffect::RecordEnvironmentAccess
                         | LifecycleEffect::RemoveEnvironment
                         | LifecycleEffect::RecordObservation
                 );

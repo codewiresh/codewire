@@ -1,6 +1,8 @@
 use std::path::{Component, Path, PathBuf};
 
 use anyhow::Context as _;
+use codewire_access::{AccessProfileReference, EnvironmentId};
+use codewire_local_credentials::LocalCredentialClient;
 use codewire_local_vmm::control::v1;
 use codewire_local_vmm::runner_service::{RunnerEntrypointConfig, serve_runner};
 use codewire_local_vmm::supervisor::{
@@ -238,7 +240,7 @@ pub(crate) async fn get_native_environment(name: &str) -> anyhow::Result<v1::Env
 
 pub(crate) async fn start_native_environment(name: &str) -> anyhow::Result<v1::Environment> {
     let mut client = native_client().await?;
-    let environment = client.get(name).await.map_err(native_status)?;
+    let environment = get_native_environment_with_authority_recovery(&mut client, name).await?;
     ensure_native_access_authority(&environment).await?;
     client.start(name).await.map_err(native_status)
 }
@@ -258,12 +260,26 @@ pub(crate) async fn resize_native_environment(
     disk_bytes: u64,
 ) -> anyhow::Result<v1::Environment> {
     let mut client = native_client().await?;
-    let environment = client.get(name).await.map_err(native_status)?;
+    let environment = get_native_environment_with_authority_recovery(&mut client, name).await?;
     ensure_native_access_authority(&environment).await?;
     client
         .resize(name, vcpus, memory_mib, disk_bytes)
         .await
         .map_err(native_status)
+}
+
+async fn get_native_environment_with_authority_recovery(
+    client: &mut NativeSupervisorClient,
+    name: &str,
+) -> anyhow::Result<v1::Environment> {
+    match client.get(name).await {
+        Ok(environment) => Ok(environment),
+        Err(status) if status.code() == tonic::Code::Unavailable => {
+            drop(connect_local_credential_authority().await?);
+            client.get(name).await.map_err(native_status)
+        }
+        Err(status) => Err(native_status(status)),
+    }
 }
 
 pub(crate) async fn delete_native_environment(
@@ -275,6 +291,180 @@ pub(crate) async fn delete_native_environment(
         let _ = connect_local_credential_authority().await;
     }
     client.delete(name).await.map_err(native_status)
+}
+
+pub(crate) async fn handle_native_environment_access(args: EnvAccessArgs) -> anyhow::Result<()> {
+    match args.command {
+        None => {
+            let name = args
+                .environment
+                .as_deref()
+                .and_then(trimmed_str)
+                .ok_or_else(|| anyhow::anyhow!("environment name is required"))?;
+            let mut credentials = connect_local_credential_authority().await?;
+            let environment = native_client()
+                .await?
+                .get(name)
+                .await
+                .map_err(native_status)?;
+            let view = inspect_native_environment_access(&environment, &mut credentials).await?;
+            print_native_environment_access(&view, args.output)
+        }
+        Some(EnvAccessCommand::Apply(apply)) => {
+            let mut credentials = connect_local_credential_authority().await?;
+            let mut supervisor = native_client().await?;
+            let environment = supervisor
+                .get(&apply.environment)
+                .await
+                .map_err(native_status)?;
+            let target = match apply.profile.as_deref() {
+                Some(reference) => {
+                    let reference = trimmed_str(reference)
+                        .ok_or_else(|| anyhow::anyhow!("--profile cannot be empty"))?
+                        .parse::<AccessProfileReference>()
+                        .context("parse local access profile reference")?;
+                    let profile = credentials
+                        .resolve_profile(&reference)
+                        .await
+                        .context("resolve local access profile")?;
+                    Some((
+                        reference.to_string(),
+                        profile.profile.id.to_string(),
+                        profile.profile.revision,
+                    ))
+                }
+                None if apply.clear => None,
+                None => anyhow::bail!("either --profile or --clear is required"),
+            };
+            let updated = supervisor
+                .apply_access(
+                    &environment.name,
+                    &environment.id,
+                    target.as_ref().map(|(reference, id, revision)| {
+                        (reference.as_str(), id.as_str(), *revision)
+                    }),
+                )
+                .await
+                .map_err(native_status)?;
+            let view = inspect_native_environment_access(&updated, &mut credentials).await?;
+            print_native_environment_access(&view, apply.output)
+        }
+        Some(
+            EnvAccessCommand::List(_) | EnvAccessCommand::Grant(_) | EnvAccessCommand::Revoke(_),
+        ) => {
+            anyhow::bail!("collaborator access commands require --platform")
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub(crate) struct NativeEnvironmentAccessView {
+    pub(crate) environment: String,
+    pub(crate) environment_id: String,
+    pub(crate) placement: String,
+    pub(crate) profile: Option<String>,
+    pub(crate) bound_revision: Option<u64>,
+    pub(crate) current_revision: Option<u64>,
+    pub(crate) update_available: bool,
+}
+
+async fn inspect_native_environment_access(
+    environment: &v1::Environment,
+    credentials: &mut LocalCredentialClient,
+) -> anyhow::Result<NativeEnvironmentAccessView> {
+    let environment_id = EnvironmentId::parse(environment.id.clone())
+        .map_err(|_| anyhow::anyhow!("native environment returned an invalid ID"))?;
+    if environment.access_profile.is_empty() {
+        if environment.access_profile_revision != 0 {
+            anyhow::bail!("native environment access metadata is inconsistent");
+        }
+        match credentials
+            .get_environment_access_binding(&environment_id)
+            .await
+        {
+            Err(status) if status.code() == tonic::Code::NotFound => {}
+            Ok(_) => anyhow::bail!("native environment access metadata is inconsistent"),
+            Err(status) => {
+                return Err(native_status(status)).context("read local environment access binding");
+            }
+        }
+        return Ok(NativeEnvironmentAccessView {
+            environment: environment.name.clone(),
+            environment_id: environment.id.clone(),
+            placement: "local".to_owned(),
+            profile: None,
+            bound_revision: None,
+            current_revision: None,
+            update_available: false,
+        });
+    }
+    if environment.access_profile_revision == 0 {
+        anyhow::bail!("native environment access metadata is inconsistent");
+    }
+    let reference = environment
+        .access_profile
+        .parse::<AccessProfileReference>()
+        .map_err(|_| anyhow::anyhow!("native environment access metadata is inconsistent"))?;
+    let current = credentials
+        .resolve_profile(&reference)
+        .await
+        .context("resolve bound local access profile")?;
+    let binding = credentials
+        .get_environment_access_binding(&environment_id)
+        .await
+        .context("read local environment access binding")?;
+    if binding.binding.profile_id != current.profile.id
+        || binding.binding.profile_revision != environment.access_profile_revision
+    {
+        anyhow::bail!("native environment access binding does not match supervisor state");
+    }
+    let bound = credentials
+        .get_profile_revision(&current.profile.id, environment.access_profile_revision)
+        .await
+        .context("read bound local access profile revision")?;
+    if bound.profile.name != *reference.name()
+        || current.profile.revision < environment.access_profile_revision
+    {
+        anyhow::bail!("native environment access profile history is inconsistent");
+    }
+    Ok(NativeEnvironmentAccessView {
+        environment: environment.name.clone(),
+        environment_id: environment.id.clone(),
+        placement: "local".to_owned(),
+        profile: Some(reference.to_string()),
+        bound_revision: Some(environment.access_profile_revision),
+        current_revision: Some(current.profile.revision),
+        update_available: current.profile.revision > environment.access_profile_revision,
+    })
+}
+
+pub(crate) fn print_native_environment_access(
+    view: &NativeEnvironmentAccessView,
+    output: OutputFormat,
+) -> anyhow::Result<()> {
+    match output {
+        OutputFormat::Json => println!("{}", serde_json::to_string_pretty(view)?),
+        OutputFormat::Text => print!("{}", format_native_environment_access(view)),
+    }
+    Ok(())
+}
+
+pub(crate) fn format_native_environment_access(view: &NativeEnvironmentAccessView) -> String {
+    match (
+        view.profile.as_deref(),
+        view.bound_revision,
+        view.current_revision,
+    ) {
+        (Some(profile), Some(bound), Some(current)) => format!(
+            "Environment:      {}\nPlacement:        local\nAccess profile:   {profile}\nBound revision:   {bound}\nCurrent revision: {current}\nUpdate available: {}\n",
+            view.environment,
+            if view.update_available { "yes" } else { "no" }
+        ),
+        _ => format!(
+            "Environment:    {}\nPlacement:      local\nAccess profile: none\n",
+            view.environment
+        ),
+    }
 }
 
 async fn ensure_native_access_authority(environment: &v1::Environment) -> anyhow::Result<()> {
@@ -333,6 +523,8 @@ pub(crate) struct NativeEnvironmentView {
     pub(crate) working_directory: String,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub(crate) access_profile: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) access_profile_revision: Option<u64>,
 }
 
 impl From<&v1::Environment> for NativeEnvironmentView {
@@ -350,11 +542,20 @@ impl From<&v1::Environment> for NativeEnvironmentView {
             workspace_inputs: environment.workspace_input_count,
             working_directory: environment.working_directory.clone(),
             access_profile: environment.access_profile.clone(),
+            access_profile_revision: (!environment.access_profile.is_empty()
+                && environment.access_profile_revision > 0)
+                .then_some(environment.access_profile_revision),
         }
     }
 }
 
 fn format_native_environment(view: &NativeEnvironmentView) -> String {
+    let access = match (&view.access_profile, view.access_profile_revision) {
+        (profile, Some(revision)) if !profile.is_empty() => {
+            format!("{profile} (revision {revision})")
+        }
+        _ => "none".to_owned(),
+    };
     format!(
         "Environment: {}\nBackend:     {}\nState:       {}\nCPU:         {}\nMemory:      {}\nDisk:        {}\nWorkspace:   {} input(s), plan {}\nWorking dir: {}\nAccess:      {}\n",
         view.name,
@@ -366,11 +567,7 @@ fn format_native_environment(view: &NativeEnvironmentView) -> String {
         view.workspace_inputs,
         view.workspace_plan,
         view.working_directory,
-        if view.access_profile.is_empty() {
-            "none"
-        } else {
-            &view.access_profile
-        },
+        access,
     )
 }
 
@@ -884,5 +1081,39 @@ working_directory: /workspace/github
             "running"
         );
         assert_eq!(native_state_label(i32::MAX), "unavailable");
+    }
+
+    #[test]
+    fn native_access_view_locks_redacted_human_and_json_fields() {
+        let view = NativeEnvironmentAccessView {
+            environment: "dev".to_owned(),
+            environment_id: "env-dev".to_owned(),
+            placement: "local".to_owned(),
+            profile: Some("user/work".to_owned()),
+            bound_revision: Some(2),
+            current_revision: Some(3),
+            update_available: true,
+        };
+        assert_eq!(
+            format_native_environment_access(&view),
+            "Environment:      dev\nPlacement:        local\nAccess profile:   user/work\nBound revision:   2\nCurrent revision: 3\nUpdate available: yes\n"
+        );
+        let json = serde_json::to_value(&view).unwrap();
+        assert_eq!(json["profile"], "user/work");
+        assert_eq!(json["bound_revision"], 2);
+        assert_eq!(json["current_revision"], 3);
+        assert!(json.get("profile_id").is_none());
+
+        let none = NativeEnvironmentAccessView {
+            profile: None,
+            bound_revision: None,
+            current_revision: None,
+            update_available: false,
+            ..view
+        };
+        assert_eq!(
+            format_native_environment_access(&none),
+            "Environment:    dev\nPlacement:      local\nAccess profile: none\n"
+        );
     }
 }

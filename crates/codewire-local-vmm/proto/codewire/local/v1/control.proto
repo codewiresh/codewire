@@ -13,6 +13,7 @@ service LocalSupervisorService {
   rpc StopEnvironment(EnvironmentSelector) returns (Operation);
   rpc RestartEnvironment(EnvironmentSelector) returns (Operation);
   rpc ResizeEnvironment(ResizeEnvironmentRequest) returns (Operation);
+  rpc ApplyEnvironmentAccess(ApplyEnvironmentAccessRequest) returns (Operation);
   rpc DeleteEnvironment(EnvironmentSelector) returns (Operation);
   rpc GetOperation(GetOperationRequest) returns (Operation);
   rpc WatchOperation(WatchOperationRequest) returns (stream Operation);
@@ -52,6 +53,7 @@ enum OperationKind {
   OPERATION_KIND_DELETE = 7;
   OPERATION_KIND_GROW_DISK = 8;
   OPERATION_KIND_RECONCILE = 9;
+  OPERATION_KIND_APPLY_ENVIRONMENT_ACCESS = 10;
 }
 
 enum OperationPhase {
@@ -95,6 +97,8 @@ enum OperationStage {
   OPERATION_STAGE_BIND_ENVIRONMENT_ACCESS = 26;
   OPERATION_STAGE_REVOKE_ENVIRONMENT_ACCESS = 27;
   OPERATION_STAGE_REQUIRE_ENVIRONMENT_ACCESS = 28;
+  OPERATION_STAGE_APPLY_ENVIRONMENT_ACCESS = 29;
+  OPERATION_STAGE_RECORD_ENVIRONMENT_ACCESS = 30;
 }
 
 message Operation {
@@ -186,6 +190,20 @@ message ResizeEnvironmentRequest {
   string public_disruption_policy = 8;
 }
 
+message ApplyEnvironmentAccessRequest {
+  string name = 1;
+  string request_id = 2;
+  // Stable identity precondition so delete-and-recreate cannot redirect an
+  // access mutation by name.
+  string environment_id = 3;
+  // Material-free exact target resolved by the local credential authority.
+  // Set all three target fields, or set clear=true with all three empty/zero.
+  string access_profile = 4;
+  string access_profile_id = 5;
+  uint64 access_profile_revision = 6;
+  bool clear = 7;
+}
+
 message Environment {
   string id = 1;
   string name = 2;
@@ -203,9 +221,12 @@ message Environment {
   uint32 workspace_input_count = 13;
   // Canonical session default from the recorded portable project intent.
   string working_directory = 14;
-  // Logical scope-qualified profile reference from the portable project.
-  // The exact ID/revision remains private supervisor/authority metadata.
+  // Logical scope-qualified profile reference selected for this environment.
+  // The placement-private profile ID remains supervisor/authority metadata.
   string access_profile = 15;
+  // Exact bound revision safe to display. The placement-private profile ID is
+  // deliberately omitted.
+  uint64 access_profile_revision = 16;
 }
 
 message ListEnvironmentsRequest {}

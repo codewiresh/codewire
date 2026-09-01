@@ -45,16 +45,42 @@ pub(crate) async fn handle_env_command(globals: &Globals, args: EnvArgs) -> anyh
             )
             .await
         }
+        EnvCommand::Access(access) => {
+            handle_unified_environment_access(globals, placement, access).await
+        }
         EnvCommand::Daemon(args) => {
             handle_unified_environment_daemon_command(globals, placement, args.command).await
         }
         command => {
             if placement.is_some() {
                 anyhow::bail!(
-                    "--local and --platform currently support only create, list, info, start, stop, rm, and daemon diagnostics"
+                    "--local and --platform currently support only create, list, info, start, stop, rm, access, and daemon diagnostics"
                 );
             }
             handle_platform_env_command(globals, command).await
+        }
+    }
+}
+
+async fn handle_unified_environment_access(
+    globals: &Globals,
+    placement: Option<EnvironmentPlacement>,
+    args: EnvAccessArgs,
+) -> anyhow::Result<()> {
+    match placement {
+        Some(EnvironmentPlacement::Local) => {
+            #[cfg(target_os = "linux")]
+            {
+                handle_native_environment_access(args).await
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                let _ = args;
+                anyhow::bail!("native local environment access currently requires Linux")
+            }
+        }
+        Some(EnvironmentPlacement::Platform) | None => {
+            handle_platform_env_command(globals, EnvCommand::Access(args)).await
         }
     }
 }
@@ -351,7 +377,17 @@ pub(crate) async fn handle_platform_env_command(
             print_env_extend_status(&args.environment, &response, hours, args.output)?;
         }
         EnvCommand::Access(args) => {
-            handle_env_access_command(&environment_client, &org_id, args.command).await?;
+            let command = args.command.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "environment access-profile inspection is not yet available for platform environments"
+                )
+            })?;
+            if matches!(&command, EnvAccessCommand::Apply(_)) {
+                anyhow::bail!(
+                    "environment access-profile apply is not yet available for platform environments"
+                );
+            }
+            handle_env_access_command(&environment_client, &org_id, command).await?;
         }
         EnvCommand::Port(args) => {
             handle_env_port_command(
@@ -2606,6 +2642,11 @@ pub(crate) async fn handle_env_access_command(
     command: EnvAccessCommand,
 ) -> anyhow::Result<()> {
     match command {
+        EnvAccessCommand::Apply(_) => {
+            anyhow::bail!(
+                "environment access-profile apply is not yet available for platform environments"
+            )
+        }
         EnvAccessCommand::List(args) => {
             let environment_id = resolve_environment_id(client, org_id, &args.environment).await?;
             let grants = client

@@ -392,28 +392,42 @@ async fn owner_only_rpc_persists_exact_bindings_and_returns_material_free_grants
             .code(),
         Code::FailedPrecondition
     );
-    let stale = client
-        .replace_environment_access_binding(
+    let reference = "user/bound".parse::<AccessProfileReference>().unwrap();
+    let replaced = control
+        .apply_environment_access_binding(
             &environment_id,
-            &profile.profile.id,
-            updated.profile.revision,
-            &profile.profile.id,
-            updated.profile.revision,
+            Some(&binding),
+            Some((&updated_binding, &reference)),
         )
         .await
-        .unwrap_err();
-    assert_eq!(stale.code(), Code::FailedPrecondition);
-    let replaced = client
-        .replace_environment_access_binding(
-            &environment_id,
-            &profile.profile.id,
-            profile.profile.revision,
-            &profile.profile.id,
-            updated.profile.revision,
-        )
-        .await
+        .unwrap()
         .unwrap();
     assert_eq!(replaced.binding.profile_revision, updated.profile.revision);
+    assert_eq!(
+        control
+            .apply_environment_access_binding(
+                &environment_id,
+                Some(&binding),
+                Some((&updated_binding, &reference)),
+            )
+            .await
+            .unwrap()
+            .unwrap()
+            .binding,
+        updated_binding
+    );
+    assert_eq!(
+        control
+            .apply_environment_access_binding(
+                &environment_id,
+                Some(&binding),
+                Some((&binding, &reference)),
+            )
+            .await
+            .unwrap_err()
+            .code(),
+        Code::FailedPrecondition
+    );
     assert_eq!(
         client
             .delete_profile(&profile.profile.id)
@@ -421,6 +435,46 @@ async fn owner_only_rpc_persists_exact_bindings_and_returns_material_free_grants
             .unwrap_err()
             .code(),
         Code::FailedPrecondition
+    );
+    assert!(
+        control
+            .apply_environment_access_binding(&environment_id, Some(&updated_binding), None)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        control
+            .apply_environment_access_binding(&environment_id, Some(&updated_binding), None)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        control
+            .apply_environment_access_binding(
+                &environment_id,
+                None,
+                Some((&updated_binding, &reference)),
+            )
+            .await
+            .unwrap()
+            .unwrap()
+            .binding,
+        updated_binding
+    );
+    assert_eq!(
+        control
+            .apply_environment_access_binding(
+                &environment_id,
+                None,
+                Some((&updated_binding, &reference)),
+            )
+            .await
+            .unwrap()
+            .unwrap()
+            .binding,
+        updated_binding
     );
 
     shutdown.send(()).unwrap();
@@ -441,6 +495,20 @@ async fn owner_only_rpc_persists_exact_bindings_and_returns_material_free_grants
     let mut control = LocalCredentialControlClient::connect(&config)
         .await
         .unwrap();
+    assert!(
+        control
+            .apply_environment_access_binding(&environment_id, Some(&updated_binding), None)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        control
+            .apply_environment_access_binding(&environment_id, Some(&updated_binding), None)
+            .await
+            .unwrap()
+            .is_none()
+    );
     control
         .delete_environment_access_binding_if_present(&environment_id)
         .await
