@@ -1748,6 +1748,7 @@ dependencies = [
 name = "codewire-project"
 version = "0.1.0"
 dependencies = [
+ "codewire-access",
  "serde",
  "serde_json",
  "serde_yaml",

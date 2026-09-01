@@ -2277,8 +2277,8 @@ fn project_spec_from_create_request(
         },
         secrets: codewire_project::SecretBindings {
             project: request.secret_project.clone(),
-            include_org: request.include_org_secrets,
-            include_user: request.include_user_secrets,
+            organization: request.include_org_secrets.unwrap_or(false),
+            user: request.include_user_secrets.unwrap_or(false),
         },
         ..codewire_project::ProjectSpec::default()
     };
@@ -2397,7 +2397,7 @@ pub(crate) struct ResolvedCodewireAgentsYaml {
 
 #[derive(serde::Serialize)]
 pub(crate) struct ResolvedCodewireSecretsYaml {
-    pub(crate) org: bool,
+    pub(crate) organization: bool,
     pub(crate) user: bool,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub(crate) project: String,
@@ -2426,7 +2426,7 @@ pub(crate) fn codewire_yaml_from_request(
         install: request.install_command.clone(),
         startup: request.startup_script.clone(),
         secrets: Some(ResolvedCodewireSecretsYaml {
-            org: request.include_org_secrets.unwrap_or(true),
+            organization: request.include_org_secrets.unwrap_or(true),
             user: request.include_user_secrets.unwrap_or(true),
             project: request.secret_project.clone(),
         }),

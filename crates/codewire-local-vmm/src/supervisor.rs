@@ -3993,7 +3993,7 @@ fn validate_project_intent(
         || !spec.skills.is_empty()
         || !spec.application_ports.is_empty()
         || !spec.secrets.is_empty()
-        || !spec.credentials.is_empty()
+        || spec.access.is_some()
     {
         return Err(());
     }

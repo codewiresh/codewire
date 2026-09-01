@@ -534,14 +534,11 @@ func fromProtoProjectSpec(value *codewirev1.ProjectSpec) *ProjectSpec {
 	}
 	if secrets := value.GetSecrets(); secrets != nil {
 		result.Secrets = &ProjectSecretBindings{
-			Project: secrets.GetProject(), IncludeOrg: copyBoolPointer(secrets.IncludeOrg), IncludeUser: copyBoolPointer(secrets.IncludeUser),
+			Project: secrets.GetProject(), Organization: secrets.GetOrganization(), User: secrets.GetUser(),
 		}
 	}
-	if len(value.GetCredentials()) > 0 {
-		result.Credentials = make(map[string]ProjectCredentialReference, len(value.GetCredentials()))
-		for alias, credential := range value.GetCredentials() {
-			result.Credentials[alias] = ProjectCredentialReference{Provider: credential.GetProvider(), Account: credential.GetAccount()}
-		}
+	if access := value.GetAccess(); access != nil {
+		result.Access = &ProjectAccessBinding{Profile: access.GetProfile()}
 	}
 	return result
 }
@@ -589,14 +586,11 @@ func toProtoProjectSpec(value *ProjectSpec) (*codewirev1.ProjectSpec, error) {
 	}
 	if value.Secrets != nil {
 		result.Secrets = &codewirev1.ProjectSecretBindings{
-			Project: value.Secrets.Project, IncludeOrg: copyBoolPointer(value.Secrets.IncludeOrg), IncludeUser: copyBoolPointer(value.Secrets.IncludeUser),
+			Project: value.Secrets.Project, Organization: value.Secrets.Organization, User: value.Secrets.User,
 		}
 	}
-	if len(value.Credentials) > 0 {
-		result.Credentials = make(map[string]*codewirev1.ProjectCredentialReference, len(value.Credentials))
-		for alias, credential := range value.Credentials {
-			result.Credentials[alias] = &codewirev1.ProjectCredentialReference{Provider: credential.Provider, Account: credential.Account}
-		}
+	if value.Access != nil {
+		result.Access = &codewirev1.ProjectAccessBinding{Profile: value.Access.Profile}
 	}
 	return result, nil
 }
@@ -1130,10 +1124,11 @@ func ensureProjectSpecConverterCoverage() error {
 		"ProjectAgents":              {1: "install", 2: "tools"},
 		"ProjectSkillSelection":      {1: "source", 2: "reference", 3: "agents"},
 		"ProjectResources":           {1: "cpu_millicores", 2: "memory_mib", 3: "disk_gib"},
-		"ProjectSecretBindings":      {1: "project", 2: "include_org", 3: "include_user"},
-		"ProjectCredentialReference": {1: "provider", 2: "account"},
+		"ProjectSecretBindings":      {1: "project", 2: "include_org", 3: "include_user", 4: "organization", 5: "user"},
+		"ProjectCredentialReference": {1: "provider", 2: "account"}, // Deprecated wire tombstone; not exposed by the ergonomic SDK.
+		"ProjectAccessBinding":       {1: "profile"},
 		"ProjectSpec": {
-			1: "schema_version", 2: "preset", 3: "image", 4: "repositories", 5: "working_directory", 6: "install_command", 7: "startup_script", 8: "environment", 9: "agents", 10: "agent_environment", 11: "skills", 12: "application_ports", 13: "resources", 14: "secrets", 15: "credentials", 16: "workspace_mode",
+			1: "schema_version", 2: "preset", 3: "image", 4: "repositories", 5: "working_directory", 6: "install_command", 7: "startup_script", 8: "environment", 9: "agents", 10: "agent_environment", 11: "skills", 12: "application_ports", 13: "resources", 14: "secrets", 15: "credentials", 16: "workspace_mode", 17: "access",
 		},
 	} {
 		if err := ensureDescriptorCoverage("project "+name, messages.ByName(protoreflect.Name(name)), fields); err != nil {

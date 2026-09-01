@@ -22,7 +22,6 @@ pub(super) fn normalize_raw_project(raw: RawProject) -> Result<ProjectDocument, 
     enforce_count("agent_env", raw.agent_env.len(), MAX_ENVIRONMENT_VALUES)?;
     enforce_count("ports", raw.ports.len(), MAX_APPLICATION_PORTS)?;
     enforce_count("skills", raw.skills.len(), MAX_SKILLS)?;
-    enforce_count("credentials", raw.credentials.len(), MAX_CREDENTIALS)?;
     enforce_count("mounts", raw.mounts.len(), MAX_LOCAL_MOUNTS)?;
 
     let repositories = normalize_repositories(raw.repositories)?;
@@ -35,13 +34,10 @@ pub(super) fn normalize_raw_project(raw: RawProject) -> Result<ProjectDocument, 
         memory_mib: raw.memory.map(normalize_memory).transpose()?,
         disk_gib: raw.disk.map(normalize_disk).transpose()?,
     };
-    let secrets = normalize_secrets(
-        raw.secrets,
-        &raw.secret_project,
-        raw.include_org_secrets,
-        raw.include_user_secrets,
-    )?;
-    let credentials = normalize_credentials(raw.credentials)?;
+    let secrets = normalize_secrets(raw.secrets)?;
+    let access = raw.access.map(|access| AccessBinding {
+        profile: access.profile,
+    });
     let mounts = normalize_mounts(raw.mounts)?;
     validate_workspace_input_destinations(&repositories, &mounts)?;
     let environment = normalize_environment("environment", raw.environment)?;
@@ -63,7 +59,7 @@ pub(super) fn normalize_raw_project(raw: RawProject) -> Result<ProjectDocument, 
             application_ports,
             resources,
             secrets,
-            credentials,
+            access,
         },
         local: LocalProjectIntent { mounts, host_ports },
     };
@@ -89,7 +85,6 @@ pub(super) fn validate_project_spec(spec: &ProjectSpec) -> Result<(), ProjectErr
     enforce_count("agents", spec.agents.tools.len(), MAX_AGENTS)?;
     enforce_count("skills", spec.skills.len(), MAX_SKILLS)?;
     enforce_count("ports", spec.application_ports.len(), MAX_APPLICATION_PORTS)?;
-    enforce_count("credentials", spec.credentials.len(), MAX_CREDENTIALS)?;
 
     ensure_short_value("preset", &spec.preset)?;
     ensure_short_value("image", &spec.image)?;
@@ -171,18 +166,6 @@ pub(super) fn validate_project_spec(spec: &ProjectSpec) -> Result<(), ProjectErr
     }
 
     ensure_short_value("secrets.project", &spec.secrets.project)?;
-    for (alias, credential) in &spec.credentials {
-        validate_identifier("credentials.alias", alias)?;
-        ensure_short_value("credentials.provider", &credential.provider)?;
-        if !credential.provider.is_empty() {
-            validate_identifier("credentials.provider", &credential.provider)?;
-        }
-        ensure_short_value("credentials.account", &credential.account)?;
-        if credential.account.is_empty() {
-            return invalid("credentials.account", format!("alias {alias:?} is empty"));
-        }
-        validate_identifier("credentials.account", &credential.account)?;
-    }
     Ok(())
 }
 
@@ -532,78 +515,15 @@ fn normalize_binary_quantity(
     }
 }
 
-fn normalize_secrets(
-    secrets: Option<RawSecrets>,
-    legacy_project: &str,
-    legacy_org: Option<bool>,
-    legacy_user: Option<bool>,
-) -> Result<SecretBindings, ProjectError> {
-    let mut normalized = SecretBindings {
-        project: short_value("secret_project", legacy_project)?,
-        include_org: legacy_org,
-        include_user: legacy_user,
+fn normalize_secrets(secrets: Option<RawSecretsBlock>) -> Result<SecretBindings, ProjectError> {
+    let Some(secrets) = secrets else {
+        return Ok(SecretBindings::default());
     };
-    match secrets {
-        None => {}
-        Some(RawSecrets::String(project)) => {
-            let project = short_value("secrets.project", &project)?;
-            if !normalized.project.is_empty()
-                && !project.is_empty()
-                && normalized.project != project
-            {
-                return invalid("secrets.project", "conflicts with secret_project");
-            }
-            normalized.project = project;
-        }
-        Some(RawSecrets::Mapping(secrets)) => {
-            let project = short_value("secrets.project", &secrets.project)?;
-            if !normalized.project.is_empty()
-                && !project.is_empty()
-                && normalized.project != project
-            {
-                return invalid("secrets.project", "conflicts with secret_project");
-            }
-            if !project.is_empty() {
-                normalized.project = project;
-            }
-            normalized.include_org = secrets.org.or(normalized.include_org);
-            normalized.include_user = secrets.user.or(normalized.include_user);
-        }
-    }
-    Ok(normalized)
-}
-
-fn normalize_credentials(
-    credentials: BTreeMap<String, RawCredential>,
-) -> Result<BTreeMap<String, CredentialReference>, ProjectError> {
-    let mut normalized = BTreeMap::new();
-    for (alias, credential) in credentials {
-        let alias = alias.trim().to_ascii_lowercase();
-        validate_identifier("credentials.alias", &alias)?;
-        let (provider, account) = match credential {
-            RawCredential::String(account) => (String::new(), account),
-            RawCredential::Mapping(credential) => (credential.provider, credential.account),
-        };
-        let provider = short_value("credentials.provider", &provider)?.to_ascii_lowercase();
-        if !provider.is_empty() {
-            validate_identifier("credentials.provider", &provider)?;
-        }
-        let account = short_value("credentials.account", &account)?;
-        if account.is_empty() {
-            return invalid("credentials.account", format!("alias {alias:?} is empty"));
-        }
-        validate_identifier("credentials.account", &account)?;
-        if normalized
-            .insert(alias.clone(), CredentialReference { provider, account })
-            .is_some()
-        {
-            return invalid(
-                "credentials.alias",
-                format!("duplicate normalized alias {alias:?}"),
-            );
-        }
-    }
-    Ok(normalized)
+    Ok(SecretBindings {
+        project: short_value("secrets.project", &secrets.project)?,
+        organization: secrets.organization,
+        user: secrets.user,
+    })
 }
 
 fn normalize_mounts(mounts: Vec<RawMountBlock>) -> Result<Vec<LocalMountIntent>, ProjectError> {

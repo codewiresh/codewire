@@ -253,9 +253,7 @@ mod tests {
                     "revision": "deadbeef",
                     "destination": "/workspace/app"
                 }],
-                "credentials": {
-                    "work": {"provider": "openai", "account": "acct-work"}
-                }
+                "access": {"profile": "user/work"}
             }
         }"#;
         let setup: SetupConfig = serde_json::from_str(json).unwrap();
@@ -263,7 +261,10 @@ mod tests {
         project.validate().unwrap();
         assert_eq!(project.schema_version, 1);
         assert_eq!(project.repositories[0].revision, "deadbeef");
-        assert_eq!(project.credentials["work"].account, "acct-work");
+        assert_eq!(
+            project.access.expect("access binding").profile.to_string(),
+            "user/work"
+        );
     }
 
     #[test]

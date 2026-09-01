@@ -511,8 +511,8 @@ fn native_unsupported_project_fields(
     if !spec.secrets.is_empty() {
         unsupported.push("secrets");
     }
-    if !spec.credentials.is_empty() {
-        unsupported.push("credentials");
+    if spec.access.is_some() {
+        unsupported.push("access");
     }
     if !document.local.mounts.is_empty() {
         unsupported.push("mounts");

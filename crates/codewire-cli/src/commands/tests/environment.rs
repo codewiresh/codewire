@@ -751,7 +751,7 @@ agents: [claude-code]
 cpu: 2000m
 memory: 4096
 disk: 40
-secrets: {project: development, org: false, user: false}
+secrets: {project: development, organization: false, user: false}
 "#,
         )
         .unwrap()

@@ -1169,8 +1169,8 @@ pub fn parse_codewire_yaml(content: &str, repo_name: &str) -> anyhow::Result<Det
             .collect(),
         install_agents: cfg.agents.install,
         secret_project: cfg.secrets.project.clone(),
-        include_org_secrets: cfg.secrets.include_org,
-        include_user_secrets: cfg.secrets.include_user,
+        include_org_secrets: Some(cfg.secrets.organization),
+        include_user_secrets: Some(cfg.secrets.user),
         cpu: cpu_str,
         memory: mem_str,
         setup_notes: "Configured via codewire.yaml".to_string(),
@@ -1278,7 +1278,7 @@ agents:
   install: true
   tools: [claude, codex]
 secrets:
-  org: false
+  organization: false
   project: myproj
 "#;
         let r = parse_codewire_yaml(yaml, "a-very-long-repo-name-that-exceeds-32-chars").unwrap();
@@ -1301,10 +1301,11 @@ secrets:
         assert_eq!(r.preset_slug, "");
         assert_eq!(r.preset_image, "ghcr.io/x/y:1");
 
-        // Scalar agent + scalar secrets forms.
-        let r = parse_codewire_yaml("agent: gemini\nsecrets: proj2\n", "repo").unwrap();
+        // Scalar agents remain supported; secret bindings are explicit.
+        let r = parse_codewire_yaml("agent: gemini\nsecrets: {project: proj2}\n", "repo").unwrap();
         assert_eq!(r.agents[0].agent_type, "gemini-cli");
         assert_eq!(r.secret_project, "proj2");
+        assert!(parse_codewire_yaml("secrets: proj2\n", "repo").is_err());
 
         let r = parse_codewire_yaml("agents: [kimi, pi-coding-agent]\n", "repo").unwrap();
         assert_eq!(r.agents[0].agent_type, "kimi-code");
@@ -1339,10 +1340,8 @@ ports: [{port: 8080, label: api, access: private}]
 cpu: 2
 memory: 16Gi
 disk: 40Gi
-secrets: {project: development, org: false, user: true}
-credentials:
-  work: {provider: openai, account: acct-work}
-  personal: {provider: anthropic, account: acct-personal}
+secrets: {project: development, organization: false, user: true}
+access: {profile: user/work}
 "#;
         let direct = codewire_project::parse_project_yaml(yaml).unwrap().spec;
         let detected = parse_codewire_yaml(yaml, "codewire").unwrap();
