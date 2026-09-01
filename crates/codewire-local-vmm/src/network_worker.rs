@@ -34,6 +34,11 @@ use tokio::task::JoinSet;
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
+use crate::linux::confinement::{
+    install_denied_syscalls, install_deny_all_filesystem_domain as restrict_filesystem,
+    require_single_threaded_process as require_single_thread,
+};
+
 pub const NETWORK_BOOTSTRAP_FD: RawFd = 4;
 pub const WORKER_PREPARED_MESSAGE: &[u8] = b"CWNETW1 prepared\n";
 pub const WORKER_READY_MESSAGE: &[u8] = b"CWNETW1 ready\n";
@@ -75,37 +80,6 @@ const BROKER_TIMEOUT: Duration = Duration::from_secs(2);
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
 const GUEST_IP: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 2);
 const WORKER_IP: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 1);
-
-const LANDLOCK_ACCESS_FS_EXECUTE: u64 = 1 << 0;
-const LANDLOCK_ACCESS_FS_WRITE_FILE: u64 = 1 << 1;
-const LANDLOCK_ACCESS_FS_READ_FILE: u64 = 1 << 2;
-const LANDLOCK_ACCESS_FS_READ_DIR: u64 = 1 << 3;
-const LANDLOCK_ACCESS_FS_REMOVE_DIR: u64 = 1 << 4;
-const LANDLOCK_ACCESS_FS_REMOVE_FILE: u64 = 1 << 5;
-const LANDLOCK_ACCESS_FS_MAKE_CHAR: u64 = 1 << 6;
-const LANDLOCK_ACCESS_FS_MAKE_DIR: u64 = 1 << 7;
-const LANDLOCK_ACCESS_FS_MAKE_REG: u64 = 1 << 8;
-const LANDLOCK_ACCESS_FS_MAKE_SOCK: u64 = 1 << 9;
-const LANDLOCK_ACCESS_FS_MAKE_FIFO: u64 = 1 << 10;
-const LANDLOCK_ACCESS_FS_MAKE_BLOCK: u64 = 1 << 11;
-const LANDLOCK_ACCESS_FS_MAKE_SYM: u64 = 1 << 12;
-const LANDLOCK_ACCESS_FS_REFER: u64 = 1 << 13;
-const LANDLOCK_ACCESS_FS_TRUNCATE: u64 = 1 << 14;
-const LANDLOCK_HANDLED_ACCESS_FS_V3: u64 = LANDLOCK_ACCESS_FS_EXECUTE
-    | LANDLOCK_ACCESS_FS_WRITE_FILE
-    | LANDLOCK_ACCESS_FS_READ_FILE
-    | LANDLOCK_ACCESS_FS_READ_DIR
-    | LANDLOCK_ACCESS_FS_REMOVE_DIR
-    | LANDLOCK_ACCESS_FS_REMOVE_FILE
-    | LANDLOCK_ACCESS_FS_MAKE_CHAR
-    | LANDLOCK_ACCESS_FS_MAKE_DIR
-    | LANDLOCK_ACCESS_FS_MAKE_REG
-    | LANDLOCK_ACCESS_FS_MAKE_SOCK
-    | LANDLOCK_ACCESS_FS_MAKE_FIFO
-    | LANDLOCK_ACCESS_FS_MAKE_BLOCK
-    | LANDLOCK_ACCESS_FS_MAKE_SYM
-    | LANDLOCK_ACCESS_FS_REFER
-    | LANDLOCK_ACCESS_FS_TRUNCATE;
 
 pub type BoxedBrokerStream = Pin<Box<dyn AsyncReadWrite + Send + Sync + Unpin + 'static>>;
 
@@ -682,74 +656,12 @@ fn send_worker_bytes(descriptor: RawFd, buffer: &[u8]) -> io::Result<usize> {
 }
 
 fn require_single_threaded_process() -> Result<(), NetworkWorkerError> {
-    let mut tasks =
-        std::fs::read_dir("/proc/self/task").map_err(|_| NetworkWorkerError::ThreadConfinement)?;
-    let first = tasks
-        .next()
-        .transpose()
-        .map_err(|_| NetworkWorkerError::ThreadConfinement)?;
-    let second = tasks
-        .next()
-        .transpose()
-        .map_err(|_| NetworkWorkerError::ThreadConfinement)?;
-    if first.is_none() || second.is_some() {
-        return Err(NetworkWorkerError::ThreadConfinement);
-    }
-    Ok(())
+    require_single_thread().map_err(|_| NetworkWorkerError::ThreadConfinement)
 }
 
-#[repr(C)]
-struct LandlockRulesetAttr {
-    handled_access_fs: u64,
-}
-
-/// Enter a Landlock v3 domain with no filesystem rules. The worker needs only
-/// its inherited descriptors after bootstrap, so every handled path operation
-/// is denied. Linux preflight already requires Landlock ABI 3 or newer.
 fn install_deny_all_filesystem_domain() -> Result<(), NetworkWorkerError> {
-    if unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) } == -1 {
-        return Err(NetworkWorkerError::FilesystemConfinement);
-    }
-    let attributes = LandlockRulesetAttr {
-        handled_access_fs: LANDLOCK_HANDLED_ACCESS_FS_V3,
-    };
-    let descriptor = unsafe {
-        libc::syscall(
-            libc::SYS_landlock_create_ruleset,
-            &raw const attributes,
-            std::mem::size_of::<LandlockRulesetAttr>(),
-            0_u32,
-        )
-    };
-    if descriptor < 0 || descriptor > i32::MAX as libc::c_long {
-        return Err(NetworkWorkerError::FilesystemConfinement);
-    }
-    // SAFETY: a successful create_ruleset call returns one new descriptor and
-    // this is its sole owner.
-    let descriptor = unsafe { OwnedFd::from_raw_fd(descriptor as RawFd) };
-    if unsafe {
-        libc::syscall(
-            libc::SYS_landlock_restrict_self,
-            std::os::fd::AsRawFd::as_raw_fd(&descriptor),
-            0_u32,
-        )
-    } != 0
-    {
-        return Err(NetworkWorkerError::FilesystemConfinement);
-    }
-    Ok(())
+    restrict_filesystem().map_err(|_| NetworkWorkerError::FilesystemConfinement)
 }
-
-const BPF_LD_W_ABS: u16 = 0x20;
-const BPF_JMP_JEQ_K: u16 = 0x15;
-const BPF_RET_K: u16 = 0x06;
-const SECCOMP_RET_KILL_PROCESS: u32 = 0x8000_0000;
-const SECCOMP_RET_ERRNO: u32 = 0x0005_0000;
-const SECCOMP_RET_ALLOW: u32 = 0x7fff_0000;
-#[cfg(target_arch = "x86_64")]
-const AUDIT_ARCH_NATIVE: u32 = 0xc000_003e;
-#[cfg(target_arch = "aarch64")]
-const AUDIT_ARCH_NATIVE: u32 = 0xc000_00b7;
 
 const NETWORK_WORKER_DENIED_SYSCALLS: &[libc::c_long] = &[
     libc::SYS_socket,
@@ -802,53 +714,15 @@ const NETWORK_WORKER_ARCH_DENIED_SYSCALLS: &[libc::c_long] = &[libc::SYS_fork, l
 #[cfg(target_arch = "aarch64")]
 const NETWORK_WORKER_ARCH_DENIED_SYSCALLS: &[libc::c_long] = &[];
 
-const fn bpf_statement(code: u16, value: u32) -> libc::sock_filter {
-    libc::sock_filter {
-        code,
-        jt: 0,
-        jf: 0,
-        k: value,
-    }
-}
-
-const fn bpf_equal(value: u32, equal: u8, unequal: u8) -> libc::sock_filter {
-    libc::sock_filter {
-        code: BPF_JMP_JEQ_K,
-        jt: equal,
-        jf: unequal,
-        k: value,
-    }
-}
-
 /// Install the worker's dedicated syscall layer only after the exact
 /// single-threaded Tokio runtime has created its private internal wakeup
 /// descriptor. No guest-controlled byte is read before this filter is active.
 fn install_network_worker_seccomp() -> Result<(), NetworkWorkerError> {
-    let mut filter = vec![
-        bpf_statement(BPF_LD_W_ABS, 4),
-        bpf_equal(AUDIT_ARCH_NATIVE, 1, 0),
-        bpf_statement(BPF_RET_K, SECCOMP_RET_KILL_PROCESS),
-        bpf_statement(BPF_LD_W_ABS, 0),
-    ];
-    for syscall in NETWORK_WORKER_DENIED_SYSCALLS
-        .iter()
-        .chain(NETWORK_WORKER_ARCH_DENIED_SYSCALLS)
-    {
-        filter.push(bpf_equal(*syscall as u32, 0, 1));
-        filter.push(bpf_statement(
-            BPF_RET_K,
-            SECCOMP_RET_ERRNO | libc::EPERM as u32,
-        ));
-    }
-    filter.push(bpf_statement(BPF_RET_K, SECCOMP_RET_ALLOW));
-    let program = libc::sock_fprog {
-        len: filter.len() as u16,
-        filter: filter.as_mut_ptr(),
-    };
-    if unsafe { libc::syscall(libc::SYS_seccomp, 1_u32, 0_u32, &raw const program) } != 0 {
-        return Err(NetworkWorkerError::SyscallConfinement);
-    }
-    Ok(())
+    install_denied_syscalls(
+        NETWORK_WORKER_DENIED_SYSCALLS,
+        NETWORK_WORKER_ARCH_DENIED_SYSCALLS,
+    )
+    .map_err(|_| NetworkWorkerError::SyscallConfinement)
 }
 
 fn inherited_std_unix_stream(descriptor: RawFd) -> Result<StdUnixStream, NetworkWorkerError> {

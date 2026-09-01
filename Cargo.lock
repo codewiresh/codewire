@@ -1201,8 +1201,12 @@ name = "codewire-cli-bin"
 version = "0.1.0"
 dependencies = [
  "codewire-cli",
+ "codewire-egress-broker",
+ "codewire-egress-policy",
+ "codewire-local-vmm",
  "libc",
  "tokio",
+ "uuid",
 ]
 
 [[package]]
@@ -1484,6 +1488,8 @@ dependencies = [
  "codewire-client",
  "codewire-daemon",
  "codewire-daemon-bridge",
+ "codewire-egress-broker",
+ "codewire-egress-policy",
  "codewire-netstack",
  "codewire-project",
  "codewire-proto",

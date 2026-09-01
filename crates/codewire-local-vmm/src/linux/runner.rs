@@ -29,6 +29,7 @@ use crate::network_worker::{
     encode_worker_bootstrap, send_worker_network_descriptor,
 };
 
+use super::confinement::lock_process_privileges;
 use super::path::{FileIdentity, PathError, PrivateRoot, set_socket_private};
 use super::preflight::{PreflightError, PreflightReport, preflight};
 use super::process::{LiveProcess, RecoveryError, signal_unreaped_child};
@@ -1469,47 +1470,7 @@ fn prepare_network_worker_child(
     if unsafe { libc::fcntl(NETWORK_BOOTSTRAP_FD, libc::F_SETFD, 0) } == -1 {
         return Err(io::Error::last_os_error());
     }
-    clear_network_worker_capabilities()?;
-    if unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0) } == -1
-        || unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) } == -1
-    {
-        return Err(io::Error::last_os_error());
-    }
-    unsafe {
-        libc::umask(0o077);
-    }
-    Ok(())
-}
-
-#[repr(C)]
-struct WorkerCapabilityHeader {
-    version: u32,
-    pid: i32,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct WorkerCapabilityData {
-    effective: u32,
-    permitted: u32,
-    inheritable: u32,
-}
-
-fn clear_network_worker_capabilities() -> io::Result<()> {
-    let header = WorkerCapabilityHeader {
-        version: 0x2008_0522,
-        pid: 0,
-    };
-    let empty = WorkerCapabilityData {
-        effective: 0,
-        permitted: 0,
-        inheritable: 0,
-    };
-    let data = [empty; 2];
-    if unsafe { libc::syscall(libc::SYS_capset, &raw const header, data.as_ptr()) } != 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(())
+    lock_process_privileges()
 }
 
 fn guest_poweroff_command() -> Vec<String> {

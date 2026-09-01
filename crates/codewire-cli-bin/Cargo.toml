@@ -16,4 +16,8 @@ codewire-cli = { path = "../codewire-cli" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
+codewire-egress-broker = { workspace = true }
+codewire-egress-policy = { workspace = true }
+codewire-local-vmm = { path = "../codewire-local-vmm" }
 libc = "0.2"
+uuid = { workspace = true }

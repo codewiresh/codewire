@@ -189,6 +189,9 @@ enum Command {
     #[cfg(target_os = "linux")]
     #[command(name = "__native-network-worker", hide = true)]
     NativeNetworkWorker(NativeNetworkWorkerArgs),
+    #[cfg(target_os = "linux")]
+    #[command(name = "__native-egress-broker", hide = true)]
+    NativeEgressBroker(NativeEgressBrokerArgs),
     #[command(about = "List sessions for the selected or explicit environment")]
     List(ListArgs),
     #[command(
@@ -223,6 +226,15 @@ pub fn native_network_worker_exit_code(error: &anyhow::Error) -> Option<i32> {
     error
         .downcast_ref::<codewire_local_vmm::network_worker::NetworkWorkerError>()
         .map(codewire_local_vmm::network_worker::NetworkWorkerError::exit_code)
+}
+
+/// Preserve the fixed private broker failure taxonomy across the thin binary
+/// wrapper without printing process-internal detail to ambient stderr.
+#[cfg(target_os = "linux")]
+pub fn native_egress_broker_exit_code(error: &anyhow::Error) -> Option<i32> {
+    error
+        .downcast_ref::<codewire_local_vmm::egress_broker::EgressBrokerProcessError>()
+        .map(codewire_local_vmm::egress_broker::EgressBrokerProcessError::exit_code)
 }
 
 pub async fn run_from<I, T>(args: I) -> anyhow::Result<()>
@@ -276,6 +288,8 @@ where
         Command::NativeRunner(args) => run_native_runner(args).await,
         #[cfg(target_os = "linux")]
         Command::NativeNetworkWorker(args) => run_native_network_worker(args).await,
+        #[cfg(target_os = "linux")]
+        Command::NativeEgressBroker(args) => run_native_egress_broker(args).await,
         Command::List(args) => handle_list_command(&globals, args).await,
         Command::Attach(args) => handle_attach_command(&globals, args).await,
         Command::Logs(args) => handle_logs_command(&globals, args).await,

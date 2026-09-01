@@ -55,6 +55,14 @@ pub(crate) async fn run_native_network_worker(args: NativeNetworkWorkerArgs) -> 
         .context("run native environment network worker")
 }
 
+pub(crate) async fn run_native_egress_broker(args: NativeEgressBrokerArgs) -> anyhow::Result<()> {
+    let environment_id = Uuid::parse_str(&args.environment_id)
+        .context("native egress broker environment ID is invalid")?;
+    codewire_local_vmm::egress_broker::run_inherited_egress_broker(environment_id, args.generation)
+        .await
+        .context("run native environment egress broker")
+}
+
 pub(crate) fn native_create_selected(args: &EnvCreateArgs) -> anyhow::Result<bool> {
     match args.backend.as_deref().map(str::trim) {
         None | Some("") | Some("native") | Some("cloud-hypervisor") => Ok(true),

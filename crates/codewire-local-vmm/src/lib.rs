@@ -15,6 +15,8 @@ pub mod ch_api;
 pub mod cloud_hypervisor;
 pub mod control;
 #[cfg(target_os = "linux")]
+pub mod egress_broker;
+#[cfg(target_os = "linux")]
 pub mod generation;
 #[cfg(target_os = "linux")]
 pub mod hybrid_vsock;

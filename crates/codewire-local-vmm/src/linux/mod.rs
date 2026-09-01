@@ -1,3 +1,4 @@
+pub(crate) mod confinement;
 pub mod path;
 pub mod preflight;
 pub mod process;
