@@ -1,10 +1,9 @@
 //! Placement-neutral admission core for one Codewire egress broker.
 //!
-//! This crate owns no resolver, socket, process, IPC channel, credential, or
-//! audit sink. Instead, it composes the pure policy/lease state with injected
-//! resolver, connector, and monotonic-clock ports. A platform or local adapter
-//! can therefore put the same decision path behind its native isolation and
-//! transport boundary.
+//! This crate owns no concrete resolver, outbound connector, process, credential,
+//! or audit sink. It composes the pure policy/lease state with injected resolver,
+//! connector, and monotonic-clock ports and, on Unix, defines the authenticated
+//! capability IPC used to reach that core across a confinement boundary.
 
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
@@ -18,6 +17,9 @@ use codewire_egress_policy::lease::{
 use codewire_egress_policy::{CompiledPolicy, PolicyDecision, PolicyDigest, RouteClass};
 use thiserror::Error;
 use tokio::sync::Mutex;
+
+#[cfg(unix)]
+pub mod ipc;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DnsRecordFamily {

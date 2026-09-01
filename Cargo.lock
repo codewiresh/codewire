@@ -1373,8 +1373,13 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "codewire-egress-policy",
+ "hmac 0.12.1",
+ "rustix",
+ "sha2 0.10.9",
  "thiserror 2.0.18",
  "tokio",
+ "uuid",
+ "zeroize",
 ]
 
 [[package]]
