@@ -1316,12 +1316,14 @@ dependencies = [
  "chrono",
  "clap",
  "clap_complete",
+ "codewire-access",
  "codewire-client",
  "codewire-daemon",
  "codewire-local-credentials",
  "codewire-local-vmm",
  "codewire-project",
  "codewire-project-proto",
+ "codewire-protected-store",
  "libc",
  "portable-pty",
  "rand 0.8.6",
@@ -1338,6 +1340,7 @@ dependencies = [
  "url",
  "uuid",
  "wiremock",
+ "zeroize",
 ]
 
 [[package]]

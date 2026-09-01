@@ -22,6 +22,10 @@ pub(crate) use native::*;
 mod credential_authority;
 #[cfg(target_os = "linux")]
 pub(crate) use credential_authority::*;
+#[cfg(target_os = "linux")]
+mod credentials;
+#[cfg(target_os = "linux")]
+pub(crate) use credentials::*;
 
 const LOCAL_DAEMON_READY_ATTEMPTS: usize = 25;
 const LOCAL_DAEMON_READY_RETRY_INTERVAL: Duration = Duration::from_millis(200);
@@ -231,6 +235,174 @@ pub(crate) struct LocalCredentialAuthorityProbeArgs {
     pub(crate) root: PathBuf,
     #[arg(long)]
     pub(crate) shutdown: bool,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Args)]
+pub(crate) struct CredentialsArgs {
+    #[arg(long, conflicts_with = "platform")]
+    pub(crate) local: bool,
+    #[arg(long, conflicts_with = "local")]
+    pub(crate) platform: bool,
+    #[command(subcommand)]
+    pub(crate) command: CredentialsCommand,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Subcommand)]
+pub(crate) enum CredentialsCommand {
+    #[command(about = "Add an explicitly supplied credential")]
+    Add(CredentialAddArgs),
+    #[command(about = "List credential metadata")]
+    List(CredentialListArgs),
+    #[command(about = "Show credential metadata")]
+    Get(CredentialSelectorArgs),
+    #[command(about = "Rename a credential")]
+    Rename(CredentialRenameArgs),
+    #[command(about = "Replace credential material")]
+    Rotate(CredentialRotateArgs),
+    #[command(about = "Revoke a credential immediately")]
+    Revoke(CredentialSelectorArgs),
+    #[command(alias = "rm", about = "Delete a credential")]
+    Delete(CredentialDeleteArgs),
+    #[command(about = "Manage access profiles")]
+    Profile {
+        #[command(subcommand)]
+        command: CredentialProfileCommand,
+    },
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub(crate) enum CredentialAuthenticationKindArg {
+    Oauth,
+    ApiKey,
+    AccessToken,
+    GithubApp,
+    SshPrivateKey,
+    SshAgent,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Args)]
+pub(crate) struct CredentialAddArgs {
+    #[arg(value_name = "PROVIDER")]
+    pub(crate) provider: String,
+    #[arg(long, value_enum, value_name = "KIND")]
+    pub(crate) kind: CredentialAuthenticationKindArg,
+    #[arg(long, value_name = "NAME")]
+    pub(crate) name: String,
+    #[arg(long, value_name = "HINT")]
+    pub(crate) account_hint: Option<String>,
+    #[arg(long, value_name = "UNIX_SECONDS")]
+    pub(crate) expires_at: Option<u64>,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Args)]
+pub(crate) struct CredentialListArgs {
+    #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+    pub(crate) output: OutputFormat,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Args)]
+pub(crate) struct CredentialSelectorArgs {
+    #[arg(value_name = "ID_OR_NAME")]
+    pub(crate) credential: String,
+    #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+    pub(crate) output: OutputFormat,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Args)]
+pub(crate) struct CredentialRenameArgs {
+    #[arg(value_name = "ID_OR_NAME")]
+    pub(crate) credential: String,
+    #[arg(value_name = "NEW_NAME")]
+    pub(crate) name: String,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Args)]
+pub(crate) struct CredentialRotateArgs {
+    #[arg(value_name = "ID_OR_NAME")]
+    pub(crate) credential: String,
+    #[arg(long, value_name = "UNIX_SECONDS")]
+    pub(crate) expires_at: Option<u64>,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Args)]
+pub(crate) struct CredentialDeleteArgs {
+    #[arg(value_name = "ID_OR_NAME")]
+    pub(crate) credential: String,
+    #[arg(long)]
+    pub(crate) yes: bool,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Subcommand)]
+pub(crate) enum CredentialProfileCommand {
+    #[command(about = "Create an empty access profile")]
+    Create(CredentialProfileNameArgs),
+    #[command(about = "List access profiles")]
+    List(CredentialListArgs),
+    #[command(about = "Show an access profile")]
+    Get(CredentialProfileSelectorArgs),
+    #[command(about = "Select a credential for one capability slot")]
+    Set(CredentialProfileSetArgs),
+    #[command(about = "Remove one capability slot from a profile")]
+    Unset(CredentialProfileSlotArgs),
+    #[command(about = "List immutable profile revisions")]
+    Revisions(CredentialProfileSelectorArgs),
+    #[command(alias = "rm", about = "Delete an access profile")]
+    Delete(CredentialProfileDeleteArgs),
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Args)]
+pub(crate) struct CredentialProfileNameArgs {
+    #[arg(value_name = "NAME")]
+    pub(crate) name: String,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Args)]
+pub(crate) struct CredentialProfileSelectorArgs {
+    #[arg(value_name = "ID_OR_NAME")]
+    pub(crate) profile: String,
+    #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+    pub(crate) output: OutputFormat,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Args)]
+pub(crate) struct CredentialProfileSetArgs {
+    #[arg(value_name = "PROFILE")]
+    pub(crate) profile: String,
+    #[arg(value_name = "SLOT")]
+    pub(crate) slot: String,
+    #[arg(value_name = "CREDENTIAL")]
+    pub(crate) credential: String,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Args)]
+pub(crate) struct CredentialProfileSlotArgs {
+    #[arg(value_name = "PROFILE")]
+    pub(crate) profile: String,
+    #[arg(value_name = "SLOT")]
+    pub(crate) slot: String,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Args)]
+pub(crate) struct CredentialProfileDeleteArgs {
+    #[arg(value_name = "ID_OR_NAME")]
+    pub(crate) profile: String,
+    #[arg(long)]
+    pub(crate) yes: bool,
 }
 
 impl EnvArgs {

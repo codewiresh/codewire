@@ -162,6 +162,9 @@ enum Command {
         #[command(subcommand)]
         command: SecretsCommand,
     },
+    #[cfg(target_os = "linux")]
+    #[command(about = "Manage protected credentials and access profiles")]
+    Credentials(CredentialsArgs),
     #[command(
         alias = "networks",
         about = "Manage Mesh networks for environments and nodes"
@@ -261,6 +264,8 @@ where
         Command::ApiKeys { command } => handle_api_keys_command(&globals, command).await,
         Command::Preset { command } => handle_preset_command(&globals, command).await,
         Command::Secrets { command } => handle_secrets_command(&globals, command).await,
+        #[cfg(target_os = "linux")]
+        Command::Credentials(args) => handle_credentials_command(args).await,
         Command::Network { command } => handle_network_command(&globals, command).await,
         Command::Mesh { command } => handle_mesh_command(&globals, command),
         Command::Daemon => codewire_daemon::run_entrypoint().await,

@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io;
+use std::os::unix::fs::MetadataExt as _;
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -155,7 +156,7 @@ async fn owner_only_rpc_keeps_material_out_of_metadata_and_recovers_process_loss
     assert_eq!(
         client.info(),
         AuthorityInfo {
-            protocol_version: 1,
+            protocol_version: 2,
             protected_store_persistence: ProtectedStorePersistence::ProcessLifetime,
         }
     );
@@ -291,7 +292,7 @@ async fn connect_or_start_reuses_the_admitted_authority_without_spawning() {
     })
     .await
     .unwrap();
-    assert_eq!(client.info().protocol_version, 1);
+    assert_eq!(client.info().protocol_version, 2);
     client.shutdown().await.unwrap();
     task.await.unwrap().unwrap();
     drop(shutdown);
@@ -322,7 +323,7 @@ async fn losing_launcher_waits_for_the_admitted_authority() {
     })
     .await
     .unwrap();
-    assert_eq!(client.info().protocol_version, 1);
+    assert_eq!(client.info().protocol_version, 2);
     client.shutdown().await.unwrap();
     task.await.unwrap().unwrap();
     assert!(!config.socket().exists());
@@ -371,4 +372,19 @@ async fn connector_rejects_a_replaced_socket_identity() {
         .unwrap_err();
     assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
     remove_bound_socket(&config, &replacement_identity).unwrap();
+}
+
+#[test]
+fn authority_prepares_one_missing_private_state_parent() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut config = runtime_config(&temp);
+    config.root = temp.path().join("state").join("authority");
+
+    config.prepare_root().unwrap();
+
+    for path in [config.root.parent().unwrap(), config.root.as_path()] {
+        let metadata = fs::symlink_metadata(path).unwrap();
+        assert_eq!(metadata.mode() & 0o7777, 0o700);
+        assert_eq!(metadata.uid(), current_uid());
+    }
 }

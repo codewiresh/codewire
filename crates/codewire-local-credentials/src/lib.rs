@@ -257,9 +257,16 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
         input: NewCredential,
         material: ProtectedValue,
     ) -> Result<CredentialRecord, LocalCredentialError> {
-        if self.catalog.get(&input.provider).is_none() {
-            return Err(AccessError::ProviderUnavailable {
+        let provider =
+            self.catalog
+                .get(&input.provider)
+                .ok_or_else(|| AccessError::ProviderUnavailable {
+                    provider: input.provider.clone(),
+                })?;
+        if !provider.supports_authentication_kind(input.authentication_kind) {
+            return Err(AccessError::UnsupportedAuthenticationKind {
                 provider: input.provider,
+                kind: input.authentication_kind,
             }
             .into());
         }

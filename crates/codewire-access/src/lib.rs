@@ -6,10 +6,12 @@
 //! validates placement-local credential metadata, revisioned access profiles,
 //! and the derived grants consumed by a placement credential broker.
 
+mod catalog;
 mod grant;
 mod id;
 mod model;
 
+pub use catalog::builtin_provider_catalog;
 pub use grant::{DerivedGrant, GrantContext, derive_grants, validate_profile_entries};
 pub use id::{
     AccessProfileId, AccessProfileName, AccessProfileReference, AccessProfileScope,
@@ -66,6 +68,11 @@ pub enum AccessError {
     CredentialExpired { credential: CredentialId },
     #[error("provider {provider} is not enabled")]
     ProviderUnavailable { provider: ProviderId },
+    #[error("provider {provider} does not support authentication kind {kind:?}")]
+    UnsupportedAuthenticationKind {
+        provider: ProviderId,
+        kind: CredentialAuthKind,
+    },
     #[error("provider {provider} does not support slot {slot} with this authentication kind")]
     UnsupportedCapability {
         provider: ProviderId,

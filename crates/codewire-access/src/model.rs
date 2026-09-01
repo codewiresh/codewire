@@ -191,6 +191,12 @@ impl ProviderDefinition {
         }
         Ok(())
     }
+
+    pub fn supports_authentication_kind(&self, kind: CredentialAuthKind) -> bool {
+        self.capabilities
+            .values()
+            .any(|policy| policy.authentication_kinds.contains(&kind))
+    }
 }
 
 /// Explicit provider capability matrix. A provider or authentication kind is

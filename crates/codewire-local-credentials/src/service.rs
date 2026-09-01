@@ -8,6 +8,7 @@ use std::sync::Arc;
 use codewire_access::{
     AccessError, AccessProfileId, AccessProfileName, AccessProfileReference, CapabilitySlot,
     CredentialAuthKind, CredentialId, CredentialStatus, ProviderCatalog, ProviderId,
+    builtin_provider_catalog,
 };
 use codewire_protected_store::{
     MAX_PROTECTED_VALUE_BYTES, OsProtectedStore, ProtectedStore, ProtectedStorePersistence,
@@ -54,13 +55,12 @@ pub async fn serve_local_credential_authority<S: ProtectedStore + 'static>(
 }
 
 /// Run the production local authority against the operating-system protected
-/// store. Provider adapters populate the catalog in later slices; until then
-/// the empty catalog makes every material add fail closed.
+/// store and the exact capability catalog compiled into this binary.
 pub async fn serve_os_local_credential_authority(
     config: AuthorityRuntimeConfig,
 ) -> Result<(), AuthorityRuntimeError> {
     verify_production_process_confinement()?;
-    serve_local_credential_authority(config, OsProtectedStore, ProviderCatalog::default()).await
+    serve_local_credential_authority(config, OsProtectedStore, builtin_provider_catalog()).await
 }
 
 #[cfg(target_os = "linux")]

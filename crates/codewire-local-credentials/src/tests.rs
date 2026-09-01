@@ -154,6 +154,35 @@ fn catalog() -> ProviderCatalog {
     .expect("provider catalog")
 }
 
+fn catalog_with_incompatible_api_key_slot() -> ProviderCatalog {
+    ProviderCatalog::from_definitions([ProviderDefinition {
+        id: provider("openai"),
+        capabilities: BTreeMap::from([
+            (
+                CapabilitySlot::codex(),
+                CapabilityPolicy {
+                    authentication_kinds: BTreeSet::from([CredentialAuthKind::OAuth]),
+                    permissions: BTreeSet::from([GrantPermission {
+                        operation: BrokerOperationId::parse("responses").expect("operation ID"),
+                        route: BrokerRouteId::parse("openai-api").expect("route ID"),
+                    }]),
+                },
+            ),
+            (
+                CapabilitySlot::github(),
+                CapabilityPolicy {
+                    authentication_kinds: BTreeSet::from([CredentialAuthKind::ApiKey]),
+                    permissions: BTreeSet::from([GrantPermission {
+                        operation: BrokerOperationId::parse("github-api").expect("operation ID"),
+                        route: BrokerRouteId::parse("github-api").expect("route ID"),
+                    }]),
+                },
+            ),
+        ]),
+    }])
+    .expect("provider catalog")
+}
+
 fn authority_root(temp: &TempDir) -> PathBuf {
     temp.path().join("authority")
 }
@@ -241,6 +270,34 @@ fn multiple_credentials_are_selected_by_profiles_without_material_in_metadata() 
                 .any(|window| window == secret)
         );
     }
+}
+
+#[test]
+fn unsupported_authentication_kind_is_rejected_before_protected_store_access() {
+    let temp = TempDir::new().expect("temporary directory");
+    let store = TestProtectedStore::new(ProtectedStorePersistence::OperatingSystem);
+    let authority =
+        LocalCredentialAuthority::open(&authority_root(&temp), store.clone(), catalog())
+            .expect("open authority");
+    let mut input = new_credential("unsupported-api-key");
+    input.authentication_kind = CredentialAuthKind::ApiKey;
+
+    assert_eq!(
+        authority.add_credential(input, material(b"synthetic-api-key")),
+        Err(LocalCredentialError::Access(
+            AccessError::UnsupportedAuthenticationKind {
+                provider: provider("openai"),
+                kind: CredentialAuthKind::ApiKey,
+            }
+        ))
+    );
+    assert_eq!(store.entry_count(), 0);
+    assert!(
+        authority
+            .list_credentials()
+            .expect("list credentials")
+            .is_empty()
+    );
 }
 
 #[test]
@@ -564,7 +621,7 @@ fn local_profiles_reject_organization_scope_and_incompatible_credentials() {
     let authority = LocalCredentialAuthority::open(
         &authority_root(&temp),
         TestProtectedStore::new(ProtectedStorePersistence::OperatingSystem),
-        catalog(),
+        catalog_with_incompatible_api_key_slot(),
     )
     .expect("open authority");
     let reference: AccessProfileReference = "organization/work".parse().expect("profile reference");

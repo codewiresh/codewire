@@ -18,7 +18,7 @@ use crate::{LocalCredentialError, ensure_private_root, validate_private_parent};
 
 // Bump this whenever a detached authority must be replaced, including
 // behavior or provider-catalog changes that leave the wire layout intact.
-pub(crate) const AUTHORITY_PROTOCOL_VERSION: u32 = 1;
+pub(crate) const AUTHORITY_PROTOCOL_VERSION: u32 = 2;
 const AUTHORITY_SOCKET_FILE: &str = "authority.sock";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -54,6 +54,13 @@ impl AuthorityRuntimeConfig {
 
             #[cfg(unix)]
             {
+                let parent = self
+                    .root
+                    .parent()
+                    .ok_or(AuthorityRuntimeError::InvalidPrivatePath)?;
+                if !parent.exists() {
+                    ensure_private_root(parent).map_err(AuthorityRuntimeError::Credential)?;
+                }
                 validate_private_parent(&self.root).map_err(AuthorityRuntimeError::Credential)?;
                 let mut builder = fs::DirBuilder::new();
                 builder.mode(0o700);

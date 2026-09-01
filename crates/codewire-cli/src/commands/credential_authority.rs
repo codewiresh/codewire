@@ -5,6 +5,7 @@ use std::os::unix::process::CommandExt as _;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 
+use crate::config::{Env, OsEnv, ResolvePaths};
 use anyhow::Context as _;
 use codewire_local_credentials::{
     AUTHORITY_ALLOWED_ENVIRONMENT_VARIABLES, AuthorityRuntimeConfig, AuthorityRuntimeError,
@@ -13,6 +14,7 @@ use codewire_local_credentials::{
 
 use super::{LocalCredentialAuthorityArgs, LocalCredentialAuthorityProbeArgs};
 
+const LOCAL_CREDENTIAL_ROOT_ENV: &str = "CODEWIRE_LOCAL_CREDENTIAL_ROOT";
 const LINUX_CAPABILITY_VERSION_3: u32 = 0x2008_0522;
 
 #[repr(C)]
@@ -51,6 +53,28 @@ pub(crate) async fn run_local_credential_authority_probe(
             .context("stop local credential authority")?;
     }
     Ok(())
+}
+
+pub(crate) async fn connect_local_credential_authority() -> anyhow::Result<LocalCredentialClient> {
+    let env = OsEnv;
+    let root = local_credential_root(&env)?;
+    let config = authority_config(root)?;
+    LocalCredentialClient::connect_or_start_with(&config, spawn_authority)
+        .await
+        .context("connect to local credential authority")
+}
+
+fn local_credential_root(env: &impl Env) -> anyhow::Result<PathBuf> {
+    if let Some(value) = env.var(LOCAL_CREDENTIAL_ROOT_ENV) {
+        let root = PathBuf::from(value);
+        if !root.is_absolute() {
+            anyhow::bail!("{LOCAL_CREDENTIAL_ROOT_ENV} must be an absolute path");
+        }
+        return Ok(root);
+    }
+    Ok(ResolvePaths::from_env(env)
+        .mesh_data_dir
+        .join("credentials-v1"))
 }
 
 fn authority_config(root: PathBuf) -> anyhow::Result<AuthorityRuntimeConfig> {
@@ -156,6 +180,8 @@ fn confine_spawned_process() -> io::Result<()> {
 mod tests {
     use std::collections::BTreeMap;
 
+    use crate::config::MapEnv;
+
     use super::*;
 
     #[test]
@@ -183,6 +209,30 @@ mod tests {
                     OsString::from("/run/user/1000"),
                 ),
             ]
+        );
+    }
+
+    #[test]
+    fn local_credential_state_is_separate_from_platform_login() {
+        let env = MapEnv::new([
+            ("HOME", "/home/tester"),
+            ("CW_CONFIG_DIR", "/tmp/platform-login"),
+        ]);
+        assert_eq!(
+            local_credential_root(&env).unwrap(),
+            PathBuf::from("/home/tester/.codewire/credentials-v1")
+        );
+
+        let overridden = MapEnv::new([
+            ("HOME", "/home/tester"),
+            (LOCAL_CREDENTIAL_ROOT_ENV, "/tmp/private/credentials"),
+        ]);
+        assert_eq!(
+            local_credential_root(&overridden).unwrap(),
+            PathBuf::from("/tmp/private/credentials")
+        );
+        assert!(
+            local_credential_root(&MapEnv::new([(LOCAL_CREDENTIAL_ROOT_ENV, "relative")])).is_err()
         );
     }
 }
