@@ -308,28 +308,49 @@ impl RunnerState {
     }
 
     fn observe_exit(&mut self) -> Result<(), RunnerError> {
+        self.observe_exit_with_reason().map(drop)
+    }
+
+    fn observe_exit_with_reason(&mut self) -> Result<Option<&'static str>, RunnerError> {
         let Some(running) = self.running.as_mut() else {
-            return Ok(());
+            return Ok(None);
         };
-        match running.try_exit()? {
-            ExitClass::StillRunning => Ok(()),
+        let exit = running.try_exit()?;
+        let error_code = runner_exit_error_code(exit);
+        match exit {
+            ExitClass::StillRunning => Ok(error_code),
             ExitClass::GuestShutdown => {
                 self.running = None;
                 self.state = v1::EnvironmentState::Stopped;
-                Ok(())
+                Ok(error_code)
             }
             ExitClass::VmmFailure(_) => {
                 self.running = None;
                 self.state = v1::EnvironmentState::Error;
-                Ok(())
+                Ok(error_code)
             }
             ExitClass::NetworkWorkerFailure(_) => {
                 // Keep ownership of the live, now fail-closed VMM so an
                 // explicit stop/restart can reap it safely.
                 self.state = v1::EnvironmentState::Error;
-                Ok(())
+                Ok(error_code)
+            }
+            ExitClass::EgressBrokerFailure(_) => {
+                // The public packet path is fail-closed as soon as the
+                // separately confined policy broker disappears.
+                self.state = v1::EnvironmentState::Error;
+                Ok(error_code)
             }
         }
+    }
+}
+
+fn runner_exit_error_code(exit: ExitClass) -> Option<&'static str> {
+    match exit {
+        ExitClass::StillRunning | ExitClass::GuestShutdown => None,
+        ExitClass::VmmFailure(_) => Some("vmm_exit"),
+        ExitClass::NetworkWorkerFailure(_) => Some("network_worker_exit"),
+        ExitClass::EgressBrokerFailure(_) => Some("egress_broker_exit"),
     }
 }
 
@@ -386,8 +407,8 @@ impl EnvironmentRunnerService for RunnerRpc {
     ) -> Result<Response<v1::RunnerInfo>, Status> {
         let mut state = self.state.lock().await;
         let prior = state.state;
-        state
-            .observe_exit()
+        let exit_reason = state
+            .observe_exit_with_reason()
             .map_err(|_| Status::internal("observe VMM state failed"))?;
         if state.state != prior {
             let stage = if state.state == v1::EnvironmentState::Stopped {
@@ -400,7 +421,7 @@ impl EnvironmentRunnerService for RunnerRpc {
                 state.generation,
                 stage,
                 None,
-                (stage == v1::RunnerStage::Error).then_some("vmm_exit"),
+                (stage == v1::RunnerStage::Error).then_some(exit_reason.unwrap_or("runtime_exit")),
             )?;
         }
         Ok(Response::new(state.info()))
@@ -626,7 +647,8 @@ impl EnvironmentRunnerService for RunnerRpc {
                 }
                 ExitClass::GuestShutdown
                 | ExitClass::VmmFailure(_)
-                | ExitClass::NetworkWorkerFailure(_) => {}
+                | ExitClass::NetworkWorkerFailure(_)
+                | ExitClass::EgressBrokerFailure(_) => {}
             }
         }
         state.running = None;
@@ -1001,6 +1023,11 @@ async fn wait_for_guest_daemon(
                                 "isolated network worker exited before guest daemon readiness with status {code:?}"
                             )));
                         }
+                        ExitClass::EgressBrokerFailure(code) => {
+                            return Err(Status::unavailable(format!(
+                                "isolated egress broker exited before guest daemon readiness with status {code:?}"
+                            )));
+                        }
                     }
                     if !daemon_ready
                         && let Ok(client) = running.daemon_client().await
@@ -1257,5 +1284,23 @@ mod tests {
         assert_eq!(update.sequence, 2);
         assert_eq!(update.guest_sequence, 5);
         assert!(!format!("{update:?}").contains(PROGRESS_TOKEN));
+    }
+
+    #[test]
+    fn internal_runner_exit_codes_preserve_the_failed_component() {
+        assert_eq!(runner_exit_error_code(ExitClass::StillRunning), None);
+        assert_eq!(runner_exit_error_code(ExitClass::GuestShutdown), None);
+        assert_eq!(
+            runner_exit_error_code(ExitClass::VmmFailure(Some(1))),
+            Some("vmm_exit")
+        );
+        assert_eq!(
+            runner_exit_error_code(ExitClass::NetworkWorkerFailure(Some(2))),
+            Some("network_worker_exit")
+        );
+        assert_eq!(
+            runner_exit_error_code(ExitClass::EgressBrokerFailure(Some(3))),
+            Some("egress_broker_exit")
+        );
     }
 }

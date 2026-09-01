@@ -254,11 +254,11 @@ impl ClientState {
             &self.key,
             payload,
         )?;
-        if self.stream.write_all(&frame).await.is_err() || self.stream.flush().await.is_err() {
+        if write_client_bytes(&self.stream, &frame).await.is_err() {
             self.failed = true;
             return Err(BrokerIpcError::FrameIo);
         }
-        let response = match read_frame(
+        let response = match read_client_frame(
             &mut self.stream,
             FRAME_KIND_RESPONSE,
             sequence,
@@ -282,6 +282,71 @@ impl ClientState {
         };
         Ok(response)
     }
+}
+
+/// The confined packet worker deliberately denies `sendto`/`recvfrom` even
+/// though Tokio may use them to implement ordinary Unix-stream I/O. Drive the
+/// already-connected broker capability with readiness plus `read`/`write` so
+/// the client needs no socket creation, addressing, or datagram authority.
+async fn write_client_bytes(stream: &UnixStream, mut bytes: &[u8]) -> io::Result<()> {
+    while !bytes.is_empty() {
+        stream.writable().await?;
+        match stream.try_io(Interest::WRITABLE, || {
+            rustix::io::write(stream, bytes).map_err(errno_to_io_error)
+        }) {
+            Ok(0) => return Err(io::Error::from(io::ErrorKind::WriteZero)),
+            Ok(written) => bytes = &bytes[written..],
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
+async fn read_client_exact(stream: &UnixStream, mut bytes: &mut [u8]) -> io::Result<()> {
+    while !bytes.is_empty() {
+        stream.readable().await?;
+        match stream.try_io(Interest::READABLE, || {
+            rustix::io::read(stream, &mut *bytes).map_err(errno_to_io_error)
+        }) {
+            Ok(0) => return Err(io::Error::from(io::ErrorKind::UnexpectedEof)),
+            Ok(read) => bytes = &mut bytes[read..],
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
+async fn read_client_frame(
+    stream: &mut UnixStream,
+    expected_kind: u8,
+    expected_sequence: u64,
+    binding: BrokerIpcBinding,
+    key: &BrokerIpcKey,
+) -> Result<Vec<u8>, BrokerIpcError> {
+    let mut header = [0_u8; FRAME_HEADER_LEN];
+    read_client_exact(stream, &mut header)
+        .await
+        .map_err(|_| BrokerIpcError::FrameIo)?;
+    let payload_len = usize::from(u16::from_be_bytes([header[10], header[11]]));
+    if payload_len > FRAME_MAX_PAYLOAD_LEN {
+        return Err(BrokerIpcError::OversizedFrame);
+    }
+    let frame_len = FRAME_HEADER_LEN
+        .checked_add(payload_len)
+        .and_then(|length| length.checked_add(FRAME_TAG_LEN))
+        .ok_or(BrokerIpcError::OversizedFrame)?;
+    if frame_len > FRAME_MAX_LEN {
+        return Err(BrokerIpcError::OversizedFrame);
+    }
+    let mut frame = Vec::with_capacity(frame_len);
+    frame.extend_from_slice(&header);
+    frame.resize(frame_len, 0);
+    read_client_exact(stream, &mut frame[FRAME_HEADER_LEN..])
+        .await
+        .map_err(|_| BrokerIpcError::FrameIo)?;
+    decode_frame(&frame, expected_kind, expected_sequence, binding, key)
 }
 
 impl BrokerIpcError {

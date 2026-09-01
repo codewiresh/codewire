@@ -4,12 +4,19 @@ use std::collections::BTreeMap;
 use std::io::{Read as _, Write as _};
 use std::os::fd::{AsRawFd as _, RawFd};
 use std::os::unix::process::CommandExt as _;
-use std::process::{Child, Command, Stdio};
-use std::time::Duration;
+use std::process::{Child, Command, ExitStatus, Stdio};
+use std::time::{Duration, Instant};
 
+use codewire_egress_broker::ipc::BROKER_IPC_KEY_LEN;
+use codewire_local_vmm::egress_broker::{
+    EGRESS_BROKER_BOOTSTRAP_FD, EGRESS_BROKER_CONFINE_MESSAGE, EGRESS_BROKER_PREPARED_MESSAGE,
+    EGRESS_BROKER_READY_MESSAGE, EgressBrokerStartupFailure,
+    encode_developer_egress_broker_bootstrap,
+};
 use codewire_local_vmm::network_worker::{
-    NETWORK_BOOTSTRAP_FD, NetworkWorkerStartupFailure, WORKER_PREPARED_MESSAGE,
-    WORKER_READY_MESSAGE, WORKER_STATUS_MAX_BYTES, encode_worker_bootstrap,
+    NETWORK_BOOTSTRAP_FD, NetworkWorkerStartupFailure, WORKER_BROKER_READY_MESSAGE,
+    WORKER_PREPARED_MESSAGE, WORKER_READY_MESSAGE, WORKER_STATUS_MAX_BYTES,
+    encode_product_worker_bootstrap, encode_worker_bootstrap,
 };
 use codewire_vmm_guest_probe::{
     NETWORK_HOST_HELLO_LEN, NETWORK_HOST_READY_LEN, NetworkGuestAck, NetworkHostHello,
@@ -17,6 +24,7 @@ use codewire_vmm_guest_probe::{
 };
 use uuid::Uuid;
 
+const BROKER_DESCRIPTOR_MARKER: u8 = b'B';
 const NETWORK_DESCRIPTOR_MARKER: u8 = b'N';
 const CONTROL_BYTES: usize = 64;
 
@@ -28,6 +36,23 @@ union ControlBuffer {
 
 struct ChildGuard(Child);
 
+impl ChildGuard {
+    fn wait_bounded(&mut self) -> ExitStatus {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(status) = self.0.try_wait().unwrap() {
+                return status;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "isolated network process {} did not terminate",
+                self.0.id()
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+}
+
 impl Drop for ChildGuard {
     fn drop(&mut self) {
         let _ = self.0.kill();
@@ -36,7 +61,7 @@ impl Drop for ChildGuard {
 }
 
 #[test]
-fn confined_product_worker_completes_the_two_phase_authenticated_bootstrap() {
+fn confined_fixture_worker_completes_the_two_phase_authenticated_bootstrap() {
     let directory = tempfile::tempdir().unwrap();
     let (mut bootstrap_parent, bootstrap_child) = std::os::unix::net::UnixStream::pair().unwrap();
     bootstrap_parent
@@ -54,7 +79,7 @@ fn confined_product_worker_completes_the_two_phase_authenticated_bootstrap() {
     let source = bootstrap_child.as_raw_fd();
     let mut command = Command::new(env!("CARGO_BIN_EXE_codewire-local-vmm-smoke"));
     command
-        .arg("__native-network-worker")
+        .arg("__native-network-worker-fixture")
         .arg("--environment-id")
         .arg(vm_id.to_string())
         .arg("--generation")
@@ -103,7 +128,11 @@ fn confined_product_worker_completes_the_two_phase_authenticated_bootstrap() {
     guest
         .set_write_timeout(Some(Duration::from_secs(5)))
         .unwrap();
-    send_descriptor(bootstrap_parent.as_raw_fd(), worker_network.as_raw_fd());
+    send_descriptor(
+        bootstrap_parent.as_raw_fd(),
+        worker_network.as_raw_fd(),
+        NETWORK_DESCRIPTOR_MARKER,
+    );
     drop(worker_network);
 
     let mut hello = [0_u8; NETWORK_HOST_HELLO_LEN];
@@ -164,6 +193,166 @@ fn confined_product_worker_completes_the_two_phase_authenticated_bootstrap() {
     );
 }
 
+#[test]
+fn confined_product_worker_authenticates_the_separate_broker_capability() {
+    let directory = tempfile::tempdir().unwrap();
+    let vm_id = Uuid::parse_str("00112233-4455-6677-8899-aabbccddeeff").unwrap();
+    let generation = 9_u64;
+    let broker_key = [0x5a; BROKER_IPC_KEY_LEN];
+
+    let (mut broker_parent, broker_child_socket) = std::os::unix::net::UnixStream::pair().unwrap();
+    broker_parent
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    broker_parent
+        .set_write_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let broker_source = broker_child_socket.as_raw_fd();
+    let mut broker_command = Command::new(env!("CARGO_BIN_EXE_codewire-local-vmm-smoke"));
+    broker_command
+        .arg("__native-egress-broker")
+        .arg("--environment-id")
+        .arg(vm_id.to_string())
+        .arg("--generation")
+        .arg(generation.to_string())
+        .env_clear()
+        .current_dir(directory.path())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    prepare_inherited_descriptor(
+        &mut broker_command,
+        broker_source,
+        EGRESS_BROKER_BOOTSTRAP_FD,
+    );
+    let mut broker = ChildGuard(broker_command.spawn().unwrap());
+    drop(broker_child_socket);
+    let broker_bootstrap =
+        encode_developer_egress_broker_bootstrap(vm_id, generation, &broker_key).unwrap();
+    broker_parent.write_all(broker_bootstrap.as_ref()).unwrap();
+    assert_eq!(
+        read_status_frame(&mut broker_parent),
+        EGRESS_BROKER_PREPARED_MESSAGE
+    );
+    broker_parent
+        .write_all(EGRESS_BROKER_CONFINE_MESSAGE)
+        .unwrap();
+    assert_eq!(
+        read_status_frame(&mut broker_parent),
+        EGRESS_BROKER_READY_MESSAGE
+    );
+
+    let (mut worker_parent, worker_child_socket) = std::os::unix::net::UnixStream::pair().unwrap();
+    worker_parent
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    worker_parent
+        .set_write_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let token = "product-worker-process-test-token-0123456789abcdef";
+    let network_key = NetworkKey::derive(token, vm_id, generation).unwrap();
+    let worker_bootstrap =
+        encode_product_worker_bootstrap(vm_id, generation, &network_key, &broker_key).unwrap();
+    let worker_source = worker_child_socket.as_raw_fd();
+    let mut worker_command = Command::new(env!("CARGO_BIN_EXE_codewire-local-vmm-smoke"));
+    worker_command
+        .arg("__native-network-worker")
+        .arg("--environment-id")
+        .arg(vm_id.to_string())
+        .arg("--generation")
+        .arg(generation.to_string())
+        .env_clear()
+        .current_dir(directory.path())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    prepare_inherited_descriptor(&mut worker_command, worker_source, NETWORK_BOOTSTRAP_FD);
+    let mut worker = ChildGuard(worker_command.spawn().unwrap());
+    drop(worker_child_socket);
+
+    worker_parent.write_all(worker_bootstrap.as_ref()).unwrap();
+    assert_eq!(
+        read_status_frame(&mut worker_parent),
+        WORKER_PREPARED_MESSAGE
+    );
+    send_descriptor(
+        worker_parent.as_raw_fd(),
+        broker_parent.as_raw_fd(),
+        BROKER_DESCRIPTOR_MARKER,
+    );
+    drop(broker_parent);
+    assert_eq!(
+        read_status_frame(&mut worker_parent),
+        WORKER_BROKER_READY_MESSAGE
+    );
+
+    let (mut guest, worker_network) = std::os::unix::net::UnixStream::pair().unwrap();
+    guest
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    guest
+        .set_write_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    send_descriptor(
+        worker_parent.as_raw_fd(),
+        worker_network.as_raw_fd(),
+        NETWORK_DESCRIPTOR_MARKER,
+    );
+    drop(worker_network);
+
+    let mut hello = [0_u8; NETWORK_HOST_HELLO_LEN];
+    guest.read_exact(&mut hello).unwrap();
+    let hello = NetworkHostHello::decode(&hello, &network_key, vm_id, generation).unwrap();
+    guest
+        .write_all(
+            &NetworkGuestAck::new(hello.nonce)
+                .unwrap()
+                .encode(&network_key),
+        )
+        .unwrap();
+    let mut ready = [0_u8; NETWORK_HOST_READY_LEN];
+    guest.read_exact(&mut ready).unwrap();
+    NetworkHostReady::decode(&ready, &network_key, &hello.nonce).unwrap();
+    assert_eq!(read_status_frame(&mut worker_parent), WORKER_READY_MESSAGE);
+
+    drop(guest);
+    let worker_status = worker.wait_bounded();
+    assert_eq!(
+        worker_status.code(),
+        Some(NetworkWorkerStartupFailure::FrameIo.exit_code())
+    );
+    let broker_status = broker.wait_bounded();
+    assert_eq!(
+        broker_status.code(),
+        Some(EgressBrokerStartupFailure::Protocol.exit_code())
+    );
+}
+
+fn prepare_inherited_descriptor(command: &mut Command, source: RawFd, target: RawFd) {
+    // SAFETY: the hook performs only descriptor syscalls before exec and
+    // admits exactly one connected bootstrap capability at the fixed fd.
+    unsafe {
+        command.pre_exec(move || {
+            if libc::syscall(
+                libc::SYS_close_range,
+                3_u32,
+                u32::MAX,
+                libc::CLOSE_RANGE_CLOEXEC,
+            ) != 0
+            {
+                return Err(std::io::Error::last_os_error());
+            }
+            if source != target && libc::dup2(source, target) == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if libc::fcntl(target, libc::F_SETFD, 0) == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+}
+
 fn read_status_frame(stream: &mut std::os::unix::net::UnixStream) -> Vec<u8> {
     read_status_frame_result(stream).unwrap()
 }
@@ -183,8 +372,8 @@ fn read_status_frame_result(
     }
 }
 
-fn send_descriptor(bootstrap: RawFd, network: RawFd) {
-    let mut marker = [NETWORK_DESCRIPTOR_MARKER];
+fn send_descriptor(bootstrap: RawFd, descriptor: RawFd, descriptor_marker: u8) {
+    let mut marker = [descriptor_marker];
     let mut vector = libc::iovec {
         iov_base: marker.as_mut_ptr().cast(),
         iov_len: marker.len(),
@@ -205,7 +394,7 @@ fn send_descriptor(bootstrap: RawFd, network: RawFd) {
         (*header).cmsg_level = libc::SOL_SOCKET;
         (*header).cmsg_type = libc::SCM_RIGHTS;
         (*header).cmsg_len = libc::CMSG_LEN(std::mem::size_of::<RawFd>() as u32) as usize;
-        std::ptr::write(libc::CMSG_DATA(header).cast::<RawFd>(), network);
+        std::ptr::write(libc::CMSG_DATA(header).cast::<RawFd>(), descriptor);
     }
     assert_eq!(
         unsafe { libc::sendmsg(bootstrap, &raw const message, libc::MSG_NOSIGNAL) },

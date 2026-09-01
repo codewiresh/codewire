@@ -1,8 +1,9 @@
 //! Confined host process for one local environment's general egress policy.
 //!
 //! The runner supplies one already-connected AF_UNIX stream containing a
-//! generation-bound bootstrap record and then the authenticated broker IPC.
-//! The process accepts no configuration from files or environment variables.
+//! generation-bound bootstrap record, an exact confinement admission after
+//! process capture, and then the authenticated broker IPC. The process accepts
+//! no configuration from files or environment variables.
 
 use std::io::{self, Read as _, Write as _};
 use std::os::fd::{FromRawFd as _, RawFd};
@@ -26,6 +27,8 @@ use crate::linux::confinement::{
 };
 
 pub const EGRESS_BROKER_BOOTSTRAP_FD: RawFd = 4;
+pub const EGRESS_BROKER_PREPARED_MESSAGE: &[u8] = b"CWEBB1 prepared\n";
+pub const EGRESS_BROKER_CONFINE_MESSAGE: &[u8] = b"CWEBB1 confine\n";
 pub const EGRESS_BROKER_READY_MESSAGE: &[u8] = b"CWEBB1 ready\n";
 pub const EGRESS_BROKER_STATUS_MAX_BYTES: usize = 64;
 pub const EGRESS_BROKER_BOOTSTRAP_LEN: usize = 96;
@@ -36,6 +39,7 @@ const POLICY_DIGEST_LEN: usize = 32;
 const POLICY_DIGEST_END: usize = EGRESS_BROKER_POLICY_DIGEST_OFFSET + POLICY_DIGEST_LEN;
 const KEY_OFFSET: usize = POLICY_DIGEST_END;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
+const CONFINEMENT_ADMISSION_TIMEOUT: Duration = Duration::from_secs(10);
 
 const BROKER_DENIED_SYSCALLS: &[libc::c_long] = &[
     libc::SYS_socketpair,
@@ -319,6 +323,11 @@ pub async fn run_inherited_egress_broker(
         Arc::new(SystemBrokerClock::new()),
     ));
 
+    if let Err(error) = await_confinement_admission(&mut bootstrap) {
+        let _ = write_status(&bootstrap, error.startup_failure().message());
+        return Err(error);
+    }
+
     bootstrap
         .set_read_timeout(None)
         .map_err(|_| EgressBrokerProcessError::BootstrapIo)?;
@@ -357,6 +366,24 @@ pub async fn run_inherited_egress_broker(
     serve_broker_ipc(stream, decoded.binding, decoded.key, broker)
         .await
         .map_err(|_| EgressBrokerProcessError::Protocol)
+}
+
+fn await_confinement_admission(
+    bootstrap: &mut StdUnixStream,
+) -> Result<(), EgressBrokerProcessError> {
+    write_status(bootstrap, EGRESS_BROKER_PREPARED_MESSAGE)
+        .map_err(|_| EgressBrokerProcessError::StatusIo)?;
+    bootstrap
+        .set_read_timeout(Some(CONFINEMENT_ADMISSION_TIMEOUT))
+        .map_err(|_| EgressBrokerProcessError::BootstrapIo)?;
+    let mut admission = [0_u8; EGRESS_BROKER_CONFINE_MESSAGE.len()];
+    bootstrap
+        .read_exact(&mut admission)
+        .map_err(|_| EgressBrokerProcessError::BootstrapIo)?;
+    if admission != EGRESS_BROKER_CONFINE_MESSAGE {
+        return Err(EgressBrokerProcessError::Protocol);
+    }
+    Ok(())
 }
 
 fn prepare_broker(
@@ -565,6 +592,14 @@ mod tests {
         assert_eq!(
             decode_egress_broker_startup_status(EGRESS_BROKER_READY_MESSAGE),
             Some(EgressBrokerStartupStatus::Ready)
+        );
+        assert_eq!(
+            decode_egress_broker_startup_status(EGRESS_BROKER_PREPARED_MESSAGE),
+            None
+        );
+        assert_eq!(
+            decode_egress_broker_startup_status(EGRESS_BROKER_CONFINE_MESSAGE),
+            None
         );
         for failure in ALL_FAILURES {
             assert!(failure.message().len() <= EGRESS_BROKER_STATUS_MAX_BYTES);

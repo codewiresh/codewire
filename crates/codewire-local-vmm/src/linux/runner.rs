@@ -7,6 +7,7 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use codewire_daemon::client::{SessionClient, v1 as daemon_v1};
+use codewire_egress_broker::ipc::BROKER_IPC_KEY_LEN;
 use codewire_vmm_guest_probe::{
     GUEST_NETWORK_VSOCK_PORT, GUEST_PROGRESS_VSOCK_PORT, GuestBootStage, NetworkKey,
     PROGRESS_CHALLENGE_LEN, PROGRESS_FRAME_LEN, ProgressFrame, ProgressRequest, Seed, SetupBinding,
@@ -22,11 +23,18 @@ use zeroize::Zeroizing;
 use crate::artifact::{AdmittedArtifacts, ArtifactError, ArtifactLock};
 use crate::ch_api::{ChApiClient, ChApiError};
 use crate::cloud_hypervisor::{CloudHypervisorConfig, CloudHypervisorConfigError, CommandSpec};
+use crate::egress_broker::{
+    EGRESS_BROKER_BOOTSTRAP_FD, EGRESS_BROKER_CONFINE_MESSAGE, EGRESS_BROKER_PREPARED_MESSAGE,
+    EGRESS_BROKER_READY_MESSAGE, EGRESS_BROKER_STATUS_MAX_BYTES, EgressBrokerStartupFailure,
+    EgressBrokerStartupStatus, decode_egress_broker_startup_status,
+    encode_developer_egress_broker_bootstrap,
+};
 use crate::hybrid_vsock::{HybridVsockError, HybridVsockTarget};
 use crate::network_worker::{
     NETWORK_BOOTSTRAP_FD, NetworkWorkerStartupFailure, NetworkWorkerStartupStatus,
-    WORKER_PREPARED_MESSAGE, WORKER_STATUS_MAX_BYTES, decode_worker_startup_status,
-    encode_worker_bootstrap, send_worker_network_descriptor,
+    WORKER_BROKER_READY_MESSAGE, WORKER_PREPARED_MESSAGE, WORKER_STATUS_MAX_BYTES,
+    decode_worker_startup_status, encode_product_worker_bootstrap, encode_worker_bootstrap,
+    send_worker_broker_descriptor, send_worker_network_descriptor,
 };
 
 use super::confinement::lock_process_privileges;
@@ -45,6 +53,7 @@ const GRACEFUL_STOP_TIMEOUT: Duration = Duration::from_secs(5);
 const SIGNAL_STOP_TIMEOUT: Duration = Duration::from_secs(2);
 const NETWORK_WORKER_RETRY_DELAY: Duration = Duration::from_millis(50);
 const NETWORK_WORKER_READY_TIMEOUT: Duration = Duration::from_secs(5);
+const EGRESS_BROKER_READY_TIMEOUT: Duration = Duration::from_secs(10);
 const NETWORK_WORKER_ATTACH_TIMEOUT: Duration = Duration::from_secs(10);
 const NETWORK_WORKER_PROGRESS_FRAME_LIMIT: usize = 64;
 const NETWORK_WORKER_HANDSHAKE_ATTEMPT_LIMIT: usize = 8;
@@ -774,13 +783,38 @@ impl RunningVm {
         }
     }
 
-    /// Attach the isolated deny-by-default host network worker for this boot.
-    /// The worker receives one already-connected hybrid-vsock descriptor and
-    /// a derived key; it never receives the guest daemon token.
+    /// Attach the isolated host network worker and its separate policy broker
+    /// for this boot. Neither process receives the guest daemon token.
     pub async fn start_network_worker(
         &mut self,
         executable: &Path,
         timeout: Duration,
+    ) -> Result<(), RunnerError> {
+        self.start_network_worker_with_mode(executable, timeout, NetworkWorkerMode::Product)
+            .await
+    }
+
+    /// Preserve the socket-free injected broker used only by the checked-in
+    /// qualified-host verification binary.
+    #[doc(hidden)]
+    pub async fn start_network_worker_with_injected_broker_for_verification(
+        &mut self,
+        executable: &Path,
+        timeout: Duration,
+    ) -> Result<(), RunnerError> {
+        self.start_network_worker_with_mode(
+            executable,
+            timeout,
+            NetworkWorkerMode::InjectedVerification,
+        )
+        .await
+    }
+
+    async fn start_network_worker_with_mode(
+        &mut self,
+        executable: &Path,
+        timeout: Duration,
+        mode: NetworkWorkerMode,
     ) -> Result<(), RunnerError> {
         if self.network_worker.is_some()
             || timeout.is_zero()
@@ -793,11 +827,12 @@ impl RunningVm {
         let readiness_deadline = tokio::time::Instant::now() + timeout;
         self.wait_for_network_guest_readiness(readiness_deadline)
             .await?;
-        // Guest boot readiness and worker attachment are distinct bounded
-        // phases. A slow but valid boot must not consume the worker's entire
-        // handshake window, while setup boots must not turn attachment into a
-        // multi-minute wait merely because their provisioning window is long.
-        let deadline = tokio::time::Instant::now() + network_worker_attach_timeout(timeout);
+        // Guest readiness and host-stack attachment are distinct bounded
+        // phases. Product attachment budgets one capped phase for the broker
+        // and one for the worker; the fixture has only the worker. A slow boot
+        // must not consume either, while a long setup window cannot make host
+        // attachment unbounded.
+        let deadline = tokio::time::Instant::now() + network_stack_attach_timeout(timeout, mode);
         let mut handshake_attempts = 0_usize;
         let mut last_handshake_failure = None;
         loop {
@@ -818,17 +853,15 @@ impl RunningVm {
                 self.request.generation,
             )
             .map_err(|_| RunnerError::InvalidNetworkWorker)?;
-            match spawn_network_worker_process(
+            let launch = NetworkStackLaunch {
                 executable,
-                &self.paths.vm_dir,
-                &self.hybrid,
-                key,
-                self.request.vm_id,
-                self.request.generation,
+                working_directory: &self.paths.vm_dir,
+                hybrid: &self.hybrid,
+                vm_id: self.request.vm_id,
+                generation: self.request.generation,
                 deadline,
-            )
-            .await
-            {
+            };
+            match spawn_network_stack_processes(&launch, key, mode).await {
                 Ok(worker) => {
                     self.network_worker = Some(worker);
                     return Ok(());
@@ -900,6 +933,27 @@ impl RunningVm {
             .map(|worker| worker.process.identity())
     }
 
+    pub fn egress_broker_process_identity(&self) -> Option<&super::process::ProcessIdentity> {
+        self.network_worker
+            .as_ref()
+            .and_then(|worker| worker.broker.as_ref())
+            .map(|broker| broker.process.identity())
+    }
+
+    /// Signal the exact runner-owned broker birth for checked-in qualified-host
+    /// verification. The confined broker is deliberately non-dumpable, so a
+    /// verifier must not try to reacquire it through `/proc`.
+    #[doc(hidden)]
+    pub fn force_kill_egress_broker_for_verification(&self) -> Result<(), RunnerError> {
+        let broker = self
+            .network_worker
+            .as_ref()
+            .and_then(|worker| worker.broker.as_ref())
+            .ok_or(RunnerError::InvalidNetworkWorker)?;
+        broker.process.signal(Signal::KILL)?;
+        Ok(())
+    }
+
     /// Unlink one-boot setup inputs after Cloud Hypervisor and the ready guest
     /// daemon both hold their admitted device handles. The token remains only
     /// in runner/guest memory and cannot be recovered from persistent state;
@@ -918,11 +972,19 @@ impl RunningVm {
         if vmm != ExitClass::StillRunning {
             return Ok(vmm);
         }
-        match self.network_worker.as_mut() {
-            Some(worker) => match worker.child.try_wait() {
-                Ok(Some(status)) => Ok(ExitClass::NetworkWorkerFailure(status.code())),
+        let Some(worker) = self.network_worker.as_mut() else {
+            return Ok(ExitClass::StillRunning);
+        };
+        match worker.child.try_wait() {
+            Ok(Some(status)) => return Ok(ExitClass::NetworkWorkerFailure(status.code())),
+            Ok(None) => {}
+            Err(_) => return Err(RunnerError::NetworkWorkerWait),
+        }
+        match worker.broker.as_mut() {
+            Some(broker) => match broker.child.try_wait() {
+                Ok(Some(status)) => Ok(ExitClass::EgressBrokerFailure(status.code())),
                 Ok(None) => Ok(ExitClass::StillRunning),
-                Err(_) => Err(RunnerError::NetworkWorkerWait),
+                Err(_) => Err(RunnerError::EgressBrokerWait),
             },
             None => Ok(ExitClass::StillRunning),
         }
@@ -933,7 +995,7 @@ impl RunningVm {
             Ok(Ok(status)) if status.success() => Ok(ExitClass::GuestShutdown),
             Ok(Ok(status)) => Ok(ExitClass::VmmFailure(status.code())),
             Ok(Err(_)) => Err(RunnerError::Wait),
-            Err(_) => Ok(ExitClass::StillRunning),
+            Err(_) => self.try_exit(),
         }?;
         if exit != ExitClass::StillRunning {
             self.stop_network_worker().await?;
@@ -976,35 +1038,15 @@ impl RunningVm {
         let Some(mut worker) = self.network_worker.take() else {
             return Ok(());
         };
-        if worker
-            .child
-            .try_wait()
-            .map_err(|_| RunnerError::NetworkWorkerWait)?
-            .is_some()
-        {
-            return Ok(());
+        let worker_result = stop_network_worker_process(&mut worker).await;
+        let broker_result = match worker.broker.as_mut() {
+            Some(broker) => stop_egress_broker_process(broker).await,
+            None => Ok(()),
+        };
+        match (worker_result, broker_result) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(error), _) | (_, Err(error)) => Err(error),
         }
-        if worker.process.wait_exited(SIGNAL_STOP_TIMEOUT).await? {
-            worker
-                .child
-                .wait()
-                .await
-                .map_err(|_| RunnerError::NetworkWorkerWait)?;
-            return Ok(());
-        }
-        if !signal_or_observe_exit(&worker.process, Signal::TERM)?
-            && !worker.process.wait_exited(SIGNAL_STOP_TIMEOUT).await?
-            && !signal_or_observe_exit(&worker.process, Signal::KILL)?
-            && !worker.process.wait_exited(SIGNAL_STOP_TIMEOUT).await?
-        {
-            return Err(RunnerError::NetworkWorkerKillTimeout);
-        }
-        worker
-            .child
-            .wait()
-            .await
-            .map_err(|_| RunnerError::NetworkWorkerWait)?;
-        Ok(())
     }
 
     async fn request_guest_poweroff(
@@ -1122,13 +1164,52 @@ async fn wait_for_network_progress_attempt(
     Err(NetworkProgressAttemptError::Rejected)
 }
 
-fn network_worker_attach_timeout(requested: Duration) -> Duration {
-    std::cmp::min(requested, NETWORK_WORKER_ATTACH_TIMEOUT)
+fn network_stack_attach_timeout(requested: Duration, mode: NetworkWorkerMode) -> Duration {
+    let phase = std::cmp::min(requested, NETWORK_WORKER_ATTACH_TIMEOUT);
+    match mode {
+        NetworkWorkerMode::Product => phase.saturating_mul(2),
+        NetworkWorkerMode::InjectedVerification => phase,
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NetworkWorkerMode {
+    Product,
+    InjectedVerification,
+}
+
+enum WorkerBrokerAttachment {
+    Product {
+        endpoint: StdUnixStream,
+        key: Zeroizing<[u8; BROKER_IPC_KEY_LEN]>,
+    },
+    InjectedVerification,
+}
+
+struct EgressBrokerProcess {
+    child: tokio::process::Child,
+    process: LiveProcess,
+}
+
+struct EgressBrokerLaunch {
+    process: EgressBrokerProcess,
+    endpoint: StdUnixStream,
+    key: Zeroizing<[u8; BROKER_IPC_KEY_LEN]>,
+}
+
+struct NetworkStackLaunch<'a> {
+    executable: &'a Path,
+    working_directory: &'a Path,
+    hybrid: &'a HybridVsockTarget,
+    vm_id: Uuid,
+    generation: u64,
+    deadline: tokio::time::Instant,
 }
 
 struct NetworkWorkerProcess {
     child: tokio::process::Child,
     process: LiveProcess,
+    broker: Option<EgressBrokerProcess>,
 }
 
 struct NetworkWorkerStartup {
@@ -1164,11 +1245,60 @@ impl NetworkWorkerStartup {
                 .process
                 .take()
                 .expect("admitted network worker owns its process identity"),
+            broker: None,
         }
     }
 }
 
 impl Drop for NetworkWorkerStartup {
+    fn drop(&mut self) {
+        if let Some(process) = &self.process {
+            let _ = process.signal(Signal::KILL);
+        }
+        if let Some(child) = self.child.as_mut() {
+            let _ = child.start_kill();
+        }
+    }
+}
+
+struct EgressBrokerStartup {
+    child: Option<tokio::process::Child>,
+    process: Option<LiveProcess>,
+}
+
+impl EgressBrokerStartup {
+    fn new(child: tokio::process::Child) -> Self {
+        Self {
+            child: Some(child),
+            process: None,
+        }
+    }
+
+    fn child_mut(&mut self) -> &mut tokio::process::Child {
+        self.child
+            .as_mut()
+            .expect("armed egress broker startup owns its child")
+    }
+
+    fn admit(&mut self, process: LiveProcess) {
+        self.process = Some(process);
+    }
+
+    fn disarm(mut self) -> EgressBrokerProcess {
+        EgressBrokerProcess {
+            child: self
+                .child
+                .take()
+                .expect("admitted egress broker owns its child"),
+            process: self
+                .process
+                .take()
+                .expect("admitted egress broker owns its process identity"),
+        }
+    }
+}
+
+impl Drop for EgressBrokerStartup {
     fn drop(&mut self) {
         if let Some(process) = &self.process {
             let _ = process.signal(Signal::KILL);
@@ -1198,16 +1328,274 @@ async fn reap_failed_network_worker_startup(
     Ok(())
 }
 
-async fn spawn_network_worker_process(
-    executable: &Path,
-    working_directory: &Path,
-    hybrid: &HybridVsockTarget,
-    key: NetworkKey,
-    vm_id: Uuid,
-    generation: u64,
-    deadline: tokio::time::Instant,
+async fn reap_failed_egress_broker_startup(
+    startup: &mut EgressBrokerStartup,
+) -> Result<(), RunnerError> {
+    if startup
+        .child_mut()
+        .try_wait()
+        .map_err(|_| RunnerError::EgressBrokerWait)?
+        .is_some()
+    {
+        return Ok(());
+    }
+    let _ = startup.child_mut().start_kill();
+    tokio::time::timeout(SIGNAL_STOP_TIMEOUT, startup.child_mut().wait())
+        .await
+        .map_err(|_| RunnerError::EgressBrokerKillTimeout)?
+        .map_err(|_| RunnerError::EgressBrokerWait)?;
+    Ok(())
+}
+
+async fn stop_network_worker_process(worker: &mut NetworkWorkerProcess) -> Result<(), RunnerError> {
+    if worker
+        .child
+        .try_wait()
+        .map_err(|_| RunnerError::NetworkWorkerWait)?
+        .is_some()
+    {
+        return Ok(());
+    }
+    if worker.process.wait_exited(SIGNAL_STOP_TIMEOUT).await? {
+        worker
+            .child
+            .wait()
+            .await
+            .map_err(|_| RunnerError::NetworkWorkerWait)?;
+        return Ok(());
+    }
+    if !signal_or_observe_exit(&worker.process, Signal::TERM)?
+        && !worker.process.wait_exited(SIGNAL_STOP_TIMEOUT).await?
+        && !signal_or_observe_exit(&worker.process, Signal::KILL)?
+        && !worker.process.wait_exited(SIGNAL_STOP_TIMEOUT).await?
+    {
+        return Err(RunnerError::NetworkWorkerKillTimeout);
+    }
+    worker
+        .child
+        .wait()
+        .await
+        .map_err(|_| RunnerError::NetworkWorkerWait)?;
+    Ok(())
+}
+
+async fn stop_egress_broker_process(broker: &mut EgressBrokerProcess) -> Result<(), RunnerError> {
+    if broker
+        .child
+        .try_wait()
+        .map_err(|_| RunnerError::EgressBrokerWait)?
+        .is_some()
+    {
+        return Ok(());
+    }
+    if broker.process.wait_exited(SIGNAL_STOP_TIMEOUT).await? {
+        broker
+            .child
+            .wait()
+            .await
+            .map_err(|_| RunnerError::EgressBrokerWait)?;
+        return Ok(());
+    }
+    if !signal_or_observe_exit(&broker.process, Signal::TERM)?
+        && !broker.process.wait_exited(SIGNAL_STOP_TIMEOUT).await?
+        && !signal_or_observe_exit(&broker.process, Signal::KILL)?
+        && !broker.process.wait_exited(SIGNAL_STOP_TIMEOUT).await?
+    {
+        return Err(RunnerError::EgressBrokerKillTimeout);
+    }
+    broker
+        .child
+        .wait()
+        .await
+        .map_err(|_| RunnerError::EgressBrokerWait)?;
+    Ok(())
+}
+
+async fn spawn_network_stack_processes(
+    context: &NetworkStackLaunch<'_>,
+    network_key: NetworkKey,
+    mode: NetworkWorkerMode,
 ) -> Result<NetworkWorkerProcess, RunnerError> {
-    PrivateRoot::open(working_directory)?;
+    let launch = match mode {
+        NetworkWorkerMode::Product => Some(spawn_egress_broker_process(context).await?),
+        NetworkWorkerMode::InjectedVerification => None,
+    };
+    let (attachment, mut broker) = match launch {
+        Some(EgressBrokerLaunch {
+            process,
+            endpoint,
+            key,
+        }) => (
+            WorkerBrokerAttachment::Product { endpoint, key },
+            Some(process),
+        ),
+        None => (WorkerBrokerAttachment::InjectedVerification, None),
+    };
+    let worker = spawn_network_worker_process(context, network_key, attachment).await;
+    match worker {
+        Ok(mut worker) => {
+            worker.broker = broker;
+            Ok(worker)
+        }
+        Err(error) => {
+            if let Some(broker) = broker.as_mut() {
+                stop_egress_broker_process(broker).await?;
+            }
+            Err(error)
+        }
+    }
+}
+
+async fn spawn_egress_broker_process(
+    context: &NetworkStackLaunch<'_>,
+) -> Result<EgressBrokerLaunch, RunnerError> {
+    PrivateRoot::open(context.working_directory)?;
+    let (bootstrap_parent, bootstrap_child) =
+        StdUnixStream::pair().map_err(|_| RunnerError::EgressBrokerSpawn)?;
+    bootstrap_parent
+        .set_nonblocking(true)
+        .map_err(|_| RunnerError::EgressBrokerSpawn)?;
+    let mut bootstrap = tokio::net::UnixStream::from_std(bootstrap_parent)
+        .map_err(|_| RunnerError::EgressBrokerSpawn)?;
+    let key = fresh_egress_broker_key();
+    let bytes = encode_developer_egress_broker_bootstrap(context.vm_id, context.generation, &key)
+        .map_err(|_| RunnerError::EgressBrokerBootstrap)?;
+    let inherited_bootstrap = duplicate_inherited_descriptor(bootstrap_child.as_raw_fd())
+        .map_err(|_| RunnerError::EgressBrokerSpawn)?;
+    let bootstrap_fd = inherited_bootstrap.as_raw_fd();
+    let expected_parent = unsafe { libc::getpid() };
+    let mut command = tokio::process::Command::new(context.executable);
+    command
+        .arg("__native-egress-broker")
+        .arg("--environment-id")
+        .arg(context.vm_id.to_string())
+        .arg("--generation")
+        .arg(context.generation.to_string())
+        .env_clear()
+        .current_dir(context.working_directory)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    unsafe {
+        command.pre_exec(move || {
+            prepare_isolated_child(expected_parent, bootstrap_fd, EGRESS_BROKER_BOOTSTRAP_FD)
+        });
+    }
+    let child = command
+        .spawn()
+        .map_err(|_| RunnerError::EgressBrokerSpawn)?;
+    drop(inherited_bootstrap);
+    drop(bootstrap_child);
+    let mut startup = EgressBrokerStartup::new(child);
+    let Some(pid) = startup.child_mut().id() else {
+        reap_failed_egress_broker_startup(&mut startup).await?;
+        return Err(RunnerError::EgressBrokerSpawn);
+    };
+
+    let ready_deadline = std::cmp::min(
+        context.deadline,
+        tokio::time::Instant::now() + EGRESS_BROKER_READY_TIMEOUT,
+    );
+    let bootstrap_write = tokio::time::timeout_at(ready_deadline, async {
+        bootstrap.write_all(bytes.as_ref()).await?;
+        bootstrap.flush().await
+    })
+    .await;
+    match bootstrap_write {
+        Ok(Ok(())) => {}
+        Err(_) => {
+            reap_failed_egress_broker_startup(&mut startup).await?;
+            return Err(RunnerError::EgressBrokerStartTimeout);
+        }
+        Ok(Err(_)) => {
+            reap_failed_egress_broker_startup(&mut startup).await?;
+            return Err(RunnerError::EgressBrokerBootstrap);
+        }
+    }
+    let prepared = match read_egress_broker_status_frame(&mut bootstrap, ready_deadline).await {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            let error = classify_egress_broker_startup_error(&mut startup, error).await?;
+            return Err(error);
+        }
+    };
+    if prepared.as_slice() != EGRESS_BROKER_PREPARED_MESSAGE {
+        if let Some(EgressBrokerStartupStatus::Failed(failure)) =
+            decode_egress_broker_startup_status(&prepared)
+        {
+            reap_failed_egress_broker_startup(&mut startup).await?;
+            return Err(RunnerError::EgressBrokerStartup(failure));
+        }
+        reap_failed_egress_broker_startup(&mut startup).await?;
+        return Err(RunnerError::EgressBrokerBootstrap);
+    }
+    // The child has validated its generation-bound bootstrap but deliberately
+    // waits before locking dumpability. This lets the runner capture and hash
+    // the exact executable without racing either the short initial bootstrap
+    // deadline or the broker's final confinement boundary.
+    let process = match LiveProcess::capture_child(pid, context.executable) {
+        Ok(process) => process,
+        Err(error) => {
+            let fallback = RunnerError::Recovery(error);
+            let error = classify_egress_broker_startup_error(&mut startup, fallback).await?;
+            return Err(error);
+        }
+    };
+    startup.admit(process);
+    let confinement_admission = tokio::time::timeout_at(ready_deadline, async {
+        bootstrap.write_all(EGRESS_BROKER_CONFINE_MESSAGE).await?;
+        bootstrap.flush().await
+    })
+    .await;
+    match confinement_admission {
+        Ok(Ok(())) => {}
+        Err(_) => {
+            reap_failed_egress_broker_startup(&mut startup).await?;
+            return Err(RunnerError::EgressBrokerStartTimeout);
+        }
+        Ok(Err(_)) => {
+            reap_failed_egress_broker_startup(&mut startup).await?;
+            return Err(RunnerError::EgressBrokerBootstrap);
+        }
+    }
+    let status = match read_egress_broker_status_frame(&mut bootstrap, ready_deadline).await {
+        Ok(status) => status,
+        Err(error) => {
+            let error = classify_egress_broker_startup_error(&mut startup, error).await?;
+            return Err(error);
+        }
+    };
+    match decode_egress_broker_startup_status(&status) {
+        Some(EgressBrokerStartupStatus::Ready) => {}
+        Some(EgressBrokerStartupStatus::Failed(failure)) => {
+            reap_failed_egress_broker_startup(&mut startup).await?;
+            return Err(RunnerError::EgressBrokerStartup(failure));
+        }
+        None => {
+            reap_failed_egress_broker_startup(&mut startup).await?;
+            return Err(RunnerError::EgressBrokerBootstrap);
+        }
+    }
+    if status.as_slice() != EGRESS_BROKER_READY_MESSAGE {
+        reap_failed_egress_broker_startup(&mut startup).await?;
+        return Err(RunnerError::EgressBrokerBootstrap);
+    }
+    let endpoint = bootstrap
+        .into_std()
+        .map_err(|_| RunnerError::EgressBrokerBootstrap)?;
+    Ok(EgressBrokerLaunch {
+        process: startup.disarm(),
+        endpoint,
+        key,
+    })
+}
+
+async fn spawn_network_worker_process(
+    context: &NetworkStackLaunch<'_>,
+    key: NetworkKey,
+    attachment: WorkerBrokerAttachment,
+) -> Result<NetworkWorkerProcess, RunnerError> {
+    PrivateRoot::open(context.working_directory)?;
     let (bootstrap_parent, bootstrap_child) =
         StdUnixStream::pair().map_err(|_| RunnerError::NetworkWorkerSpawn)?;
     bootstrap_parent
@@ -1215,25 +1603,47 @@ async fn spawn_network_worker_process(
         .map_err(|_| RunnerError::NetworkWorkerSpawn)?;
     let mut bootstrap = tokio::net::UnixStream::from_std(bootstrap_parent)
         .map_err(|_| RunnerError::NetworkWorkerSpawn)?;
-    let bytes = encode_worker_bootstrap(vm_id, generation, &key)
-        .map_err(|_| RunnerError::NetworkWorkerBootstrap)?;
-    let inherited_bootstrap = duplicate_inherited_descriptor(bootstrap_child.as_raw_fd())?;
+    let product_worker = matches!(&attachment, WorkerBrokerAttachment::Product { .. });
+    let (bytes, mut broker_endpoint) = match attachment {
+        WorkerBrokerAttachment::Product {
+            endpoint,
+            key: broker_key,
+        } => (
+            encode_product_worker_bootstrap(context.vm_id, context.generation, &key, &broker_key)
+                .map(|bytes| Zeroizing::new(bytes.to_vec())),
+            Some(endpoint),
+        ),
+        WorkerBrokerAttachment::InjectedVerification => (
+            encode_worker_bootstrap(context.vm_id, context.generation, &key)
+                .map(|bytes| Zeroizing::new(bytes.to_vec())),
+            None,
+        ),
+    };
+    let bytes = bytes.map_err(|_| RunnerError::NetworkWorkerBootstrap)?;
+    let inherited_bootstrap = duplicate_inherited_descriptor(bootstrap_child.as_raw_fd())
+        .map_err(|_| RunnerError::NetworkWorkerSpawn)?;
     let bootstrap_fd = inherited_bootstrap.as_raw_fd();
     let expected_parent = unsafe { libc::getpid() };
-    let mut command = tokio::process::Command::new(executable);
+    let mut command = tokio::process::Command::new(context.executable);
     command
-        .arg("__native-network-worker")
+        .arg(if product_worker {
+            "__native-network-worker"
+        } else {
+            "__native-network-worker-fixture"
+        })
         .arg("--environment-id")
-        .arg(vm_id.to_string())
+        .arg(context.vm_id.to_string())
         .arg("--generation")
-        .arg(generation.to_string())
+        .arg(context.generation.to_string())
         .env_clear()
-        .current_dir(working_directory)
+        .current_dir(context.working_directory)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     unsafe {
-        command.pre_exec(move || prepare_network_worker_child(expected_parent, bootstrap_fd));
+        command.pre_exec(move || {
+            prepare_isolated_child(expected_parent, bootstrap_fd, NETWORK_BOOTSTRAP_FD)
+        });
     }
     let child = command
         .spawn()
@@ -1246,7 +1656,7 @@ async fn spawn_network_worker_process(
         return Err(RunnerError::NetworkWorkerSpawn);
     };
 
-    let bootstrap_write = tokio::time::timeout_at(deadline, async {
+    let bootstrap_write = tokio::time::timeout_at(context.deadline, async {
         bootstrap.write_all(bytes.as_ref()).await?;
         bootstrap.flush().await
     })
@@ -1262,9 +1672,10 @@ async fn spawn_network_worker_process(
             return Err(RunnerError::NetworkWorkerBootstrap);
         }
     }
+    drop(bytes);
 
     let prepared_deadline = std::cmp::min(
-        deadline,
+        context.deadline,
         tokio::time::Instant::now() + NETWORK_WORKER_READY_TIMEOUT,
     );
     let prepared = match read_worker_status_frame(&mut bootstrap, prepared_deadline).await {
@@ -1285,14 +1696,48 @@ async fn spawn_network_worker_process(
         return Err(RunnerError::NetworkWorkerBootstrap);
     }
 
-    let process = match LiveProcess::capture_child(pid, executable) {
+    let process = match LiveProcess::capture_child(pid, context.executable) {
         Ok(process) => process,
         Err(error) => {
-            reap_failed_network_worker_startup(&mut startup).await?;
-            return Err(error.into());
+            let fallback = RunnerError::Recovery(error);
+            let error = classify_network_worker_startup_error(&mut startup, fallback).await?;
+            return Err(error);
         }
     };
     startup.admit(process);
+
+    if let Some(endpoint) = broker_endpoint.as_ref() {
+        if let Err(error) = transfer_worker_descriptor(
+            &bootstrap,
+            endpoint.as_raw_fd(),
+            context.deadline,
+            send_worker_broker_descriptor,
+        )
+        .await
+        {
+            reap_failed_network_worker_startup(&mut startup).await?;
+            return Err(error);
+        }
+        drop(broker_endpoint.take());
+
+        let status = match read_worker_status_frame(&mut bootstrap, context.deadline).await {
+            Ok(status) => status,
+            Err(error) => {
+                let error = classify_network_worker_startup_error(&mut startup, error).await?;
+                return Err(error);
+            }
+        };
+        if status.as_slice() != WORKER_BROKER_READY_MESSAGE {
+            if let Some(NetworkWorkerStartupStatus::Failed(failure)) =
+                decode_worker_startup_status(&status)
+            {
+                reap_failed_network_worker_startup(&mut startup).await?;
+                return Err(RunnerError::NetworkWorkerStartup(failure));
+            }
+            reap_failed_network_worker_startup(&mut startup).await?;
+            return Err(RunnerError::NetworkWorkerBootstrap);
+        }
+    }
 
     let network = loop {
         match startup.child_mut().try_wait() {
@@ -1304,8 +1749,8 @@ async fn spawn_network_worker_process(
             }
         }
         let connection = tokio::time::timeout_at(
-            deadline,
-            hybrid.connect_guest_port(GUEST_NETWORK_VSOCK_PORT),
+            context.deadline,
+            context.hybrid.connect_guest_port(GUEST_NETWORK_VSOCK_PORT),
         )
         .await;
         match connection {
@@ -1318,7 +1763,7 @@ async fn spawn_network_worker_process(
                 reap_failed_network_worker_startup(&mut startup).await?;
                 return Err(RunnerError::NetworkWorkerBootstrap);
             }
-            Ok(Err(_)) if tokio::time::Instant::now() < deadline => {
+            Ok(Err(_)) if tokio::time::Instant::now() < context.deadline => {
                 tokio::time::sleep(NETWORK_WORKER_RETRY_DELAY).await;
             }
             Ok(Err(_)) | Err(_) => {
@@ -1334,30 +1779,23 @@ async fn spawn_network_worker_process(
             return Err(RunnerError::NetworkWorkerBootstrap);
         }
     };
-    let descriptor_transfer = tokio::time::timeout_at(deadline, async {
-        loop {
-            bootstrap.writable().await?;
-            match send_worker_network_descriptor(bootstrap.as_raw_fd(), network.as_raw_fd()) {
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => continue,
-                result => return result,
-            }
-        }
-    })
+    let descriptor_transfer = transfer_worker_descriptor(
+        &bootstrap,
+        network.as_raw_fd(),
+        context.deadline,
+        send_worker_network_descriptor,
+    )
     .await;
     drop(network);
     match descriptor_transfer {
-        Ok(Ok(())) => {}
-        Err(_) => {
+        Ok(()) => {}
+        Err(error) => {
             reap_failed_network_worker_startup(&mut startup).await?;
-            return Err(RunnerError::NetworkWorkerStartTimeout);
-        }
-        Ok(Err(_)) => {
-            reap_failed_network_worker_startup(&mut startup).await?;
-            return Err(RunnerError::NetworkWorkerBootstrap);
+            return Err(error);
         }
     }
 
-    let status = match read_worker_status_frame(&mut bootstrap, deadline).await {
+    let status = match read_worker_status_frame(&mut bootstrap, context.deadline).await {
         Ok(status) => status,
         Err(error) => {
             let error = classify_network_worker_startup_error(&mut startup, error).await?;
@@ -1376,6 +1814,26 @@ async fn spawn_network_worker_process(
         }
     }
     Ok(startup.disarm())
+}
+
+async fn transfer_worker_descriptor(
+    bootstrap: &tokio::net::UnixStream,
+    descriptor: RawFd,
+    deadline: tokio::time::Instant,
+    transfer: fn(RawFd, RawFd) -> io::Result<()>,
+) -> Result<(), RunnerError> {
+    tokio::time::timeout_at(deadline, async {
+        loop {
+            bootstrap.writable().await?;
+            match transfer(bootstrap.as_raw_fd(), descriptor) {
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => continue,
+                result => return result,
+            }
+        }
+    })
+    .await
+    .map_err(|_| RunnerError::NetworkWorkerStartTimeout)?
+    .map_err(|_| RunnerError::NetworkWorkerBootstrap)
 }
 
 async fn read_worker_status_frame(
@@ -1401,6 +1859,33 @@ async fn read_worker_status_frame(
         }
         if byte[0] == b'\r' || !byte[0].is_ascii() {
             return Err(RunnerError::NetworkWorkerBootstrap);
+        }
+    }
+}
+
+async fn read_egress_broker_status_frame(
+    stream: &mut tokio::net::UnixStream,
+    deadline: tokio::time::Instant,
+) -> Result<Vec<u8>, RunnerError> {
+    let mut frame = Vec::with_capacity(EGRESS_BROKER_STATUS_MAX_BYTES);
+    loop {
+        if frame.len() == EGRESS_BROKER_STATUS_MAX_BYTES {
+            return Err(RunnerError::EgressBrokerBootstrap);
+        }
+        let mut byte = [0_u8; 1];
+        let read = tokio::time::timeout_at(deadline, stream.read(&mut byte))
+            .await
+            .map_err(|_| RunnerError::EgressBrokerStartTimeout)?
+            .map_err(|_| RunnerError::EgressBrokerBootstrap)?;
+        if read == 0 {
+            return Err(RunnerError::EgressBrokerBootstrap);
+        }
+        frame.push(byte[0]);
+        if byte[0] == b'\n' {
+            return Ok(frame);
+        }
+        if byte[0] == b'\r' || !byte[0].is_ascii() {
+            return Err(RunnerError::EgressBrokerBootstrap);
         }
     }
 }
@@ -1434,17 +1919,47 @@ fn network_worker_exit_error(status: std::process::ExitStatus) -> RunnerError {
         )
 }
 
-fn duplicate_inherited_descriptor(descriptor: i32) -> Result<OwnedFd, RunnerError> {
+async fn classify_egress_broker_startup_error(
+    startup: &mut EgressBrokerStartup,
+    fallback: RunnerError,
+) -> Result<RunnerError, RunnerError> {
+    let exit_deadline = tokio::time::Instant::now() + Duration::from_millis(100);
+    loop {
+        match startup.child_mut().try_wait() {
+            Ok(Some(status)) => return Ok(egress_broker_exit_error(status)),
+            Ok(None) => {}
+            Err(_) => return Err(RunnerError::EgressBrokerWait),
+        }
+        if tokio::time::Instant::now() >= exit_deadline {
+            reap_failed_egress_broker_startup(startup).await?;
+            return Ok(fallback);
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
+fn egress_broker_exit_error(status: std::process::ExitStatus) -> RunnerError {
+    status
+        .code()
+        .and_then(EgressBrokerStartupFailure::from_exit_code)
+        .map_or(
+            RunnerError::EgressBrokerBootstrap,
+            RunnerError::EgressBrokerStartup,
+        )
+}
+
+fn duplicate_inherited_descriptor(descriptor: i32) -> io::Result<OwnedFd> {
     let duplicated = unsafe { libc::fcntl(descriptor, libc::F_DUPFD_CLOEXEC, 10) };
     if duplicated == -1 {
-        return Err(RunnerError::NetworkWorkerSpawn);
+        return Err(io::Error::last_os_error());
     }
     Ok(unsafe { OwnedFd::from_raw_fd(duplicated) })
 }
 
-fn prepare_network_worker_child(
+fn prepare_isolated_child(
     expected_parent: libc::pid_t,
     bootstrap_fd: RawFd,
+    target_fd: RawFd,
 ) -> io::Result<()> {
     if unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) } == -1
         || unsafe { libc::getppid() } != expected_parent
@@ -1462,12 +1977,10 @@ fn prepare_network_worker_child(
     {
         return Err(io::Error::last_os_error());
     }
-    if bootstrap_fd != NETWORK_BOOTSTRAP_FD
-        && unsafe { libc::dup2(bootstrap_fd, NETWORK_BOOTSTRAP_FD) } == -1
-    {
+    if bootstrap_fd != target_fd && unsafe { libc::dup2(bootstrap_fd, target_fd) } == -1 {
         return Err(io::Error::last_os_error());
     }
-    if unsafe { libc::fcntl(NETWORK_BOOTSTRAP_FD, libc::F_SETFD, 0) } == -1 {
+    if unsafe { libc::fcntl(target_fd, libc::F_SETFD, 0) } == -1 {
         return Err(io::Error::last_os_error());
     }
     lock_process_privileges()
@@ -1483,6 +1996,7 @@ pub enum ExitClass {
     GuestShutdown,
     VmmFailure(Option<i32>),
     NetworkWorkerFailure(Option<i32>),
+    EgressBrokerFailure(Option<i32>),
 }
 
 async fn kill_and_reap(
@@ -1772,6 +2286,16 @@ fn generate_auth_token() -> String {
     token
 }
 
+fn fresh_egress_broker_key() -> Zeroizing<[u8; BROKER_IPC_KEY_LEN]> {
+    loop {
+        let mut key = Zeroizing::new([0_u8; BROKER_IPC_KEY_LEN]);
+        OsRng.fill_bytes(key.as_mut());
+        if key.iter().any(|byte| *byte != 0) {
+            return key;
+        }
+    }
+}
+
 fn token_fingerprint(token: &str) -> String {
     format!("{:x}", Sha256::digest(token.as_bytes()))
 }
@@ -2009,6 +2533,18 @@ pub enum RunnerError {
     NetworkWorkerWait,
     #[error("network worker did not exit after pidfd SIGKILL")]
     NetworkWorkerKillTimeout,
+    #[error("egress broker process spawn failed")]
+    EgressBrokerSpawn,
+    #[error("egress broker did not become ready before the startup deadline")]
+    EgressBrokerStartTimeout,
+    #[error("egress broker private bootstrap failed")]
+    EgressBrokerBootstrap,
+    #[error("egress broker startup failed: {0:?}")]
+    EgressBrokerStartup(EgressBrokerStartupFailure),
+    #[error("wait for egress broker failed")]
+    EgressBrokerWait,
+    #[error("egress broker did not exit after pidfd SIGKILL")]
+    EgressBrokerKillTimeout,
     #[error("wait for Cloud Hypervisor failed")]
     Wait,
     #[error("Cloud Hypervisor did not exit after pidfd SIGKILL")]
@@ -2253,9 +2789,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn network_worker_status_reader_preserves_the_two_phase_socket() {
+    async fn network_worker_status_reader_preserves_the_staged_socket() {
         let (mut runner, mut worker) = tokio::net::UnixStream::pair().unwrap();
         worker.write_all(WORKER_PREPARED_MESSAGE).await.unwrap();
+        worker.write_all(WORKER_BROKER_READY_MESSAGE).await.unwrap();
         worker
             .write_all(crate::network_worker::WORKER_READY_MESSAGE)
             .await
@@ -2272,8 +2809,46 @@ mod tests {
             read_worker_status_frame(&mut runner, deadline)
                 .await
                 .unwrap(),
+            WORKER_BROKER_READY_MESSAGE
+        );
+        assert_eq!(
+            read_worker_status_frame(&mut runner, deadline)
+                .await
+                .unwrap(),
             crate::network_worker::WORKER_READY_MESSAGE
         );
+    }
+
+    #[tokio::test]
+    async fn egress_broker_status_reader_is_exact_and_bounded() {
+        let (mut runner, mut broker) = tokio::net::UnixStream::pair().unwrap();
+        broker
+            .write_all(EGRESS_BROKER_PREPARED_MESSAGE)
+            .await
+            .unwrap();
+        broker.write_all(EGRESS_BROKER_READY_MESSAGE).await.unwrap();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+        assert_eq!(
+            read_egress_broker_status_frame(&mut runner, deadline)
+                .await
+                .unwrap(),
+            EGRESS_BROKER_PREPARED_MESSAGE
+        );
+        assert_eq!(
+            read_egress_broker_status_frame(&mut runner, deadline)
+                .await
+                .unwrap(),
+            EGRESS_BROKER_READY_MESSAGE
+        );
+
+        broker
+            .write_all(&[b'x'; EGRESS_BROKER_STATUS_MAX_BYTES + 1])
+            .await
+            .unwrap();
+        assert!(matches!(
+            read_egress_broker_status_frame(&mut runner, deadline).await,
+            Err(RunnerError::EgressBrokerBootstrap)
+        ));
     }
 
     #[tokio::test]
@@ -2294,19 +2869,55 @@ mod tests {
     }
 
     #[test]
-    fn network_worker_attachment_has_a_fresh_bounded_phase() {
+    fn network_stack_attachment_budgets_each_isolated_process_phase() {
         assert_eq!(
-            network_worker_attach_timeout(Duration::from_secs(1)),
+            network_stack_attach_timeout(Duration::from_secs(1), NetworkWorkerMode::Product),
+            Duration::from_secs(2)
+        );
+        assert_eq!(
+            network_stack_attach_timeout(Duration::from_secs(15), NetworkWorkerMode::Product),
+            Duration::from_secs(20)
+        );
+        assert_eq!(
+            network_stack_attach_timeout(Duration::from_secs(20 * 60), NetworkWorkerMode::Product),
+            Duration::from_secs(20)
+        );
+        assert_eq!(
+            network_stack_attach_timeout(
+                Duration::from_secs(1),
+                NetworkWorkerMode::InjectedVerification
+            ),
             Duration::from_secs(1)
         );
         assert_eq!(
-            network_worker_attach_timeout(Duration::from_secs(15)),
+            network_stack_attach_timeout(
+                Duration::from_secs(15),
+                NetworkWorkerMode::InjectedVerification
+            ),
             NETWORK_WORKER_ATTACH_TIMEOUT
         );
-        assert_eq!(
-            network_worker_attach_timeout(Duration::from_secs(20 * 60)),
-            NETWORK_WORKER_ATTACH_TIMEOUT
-        );
+    }
+
+    #[tokio::test]
+    async fn network_stack_stop_reaps_worker_and_broker_independently() {
+        let (worker_child, worker_process) = spawn_admitted_sleep("30").await;
+        let (broker_child, broker_process) = spawn_admitted_sleep("30").await;
+        let mut stack = NetworkWorkerProcess {
+            child: worker_child,
+            process: worker_process,
+            broker: Some(EgressBrokerProcess {
+                child: broker_child,
+                process: broker_process,
+            }),
+        };
+
+        stop_network_worker_process(&mut stack).await.unwrap();
+        assert!(stack.child.try_wait().unwrap().is_some());
+        let broker = stack.broker.as_mut().unwrap();
+        assert!(broker.child.try_wait().unwrap().is_none());
+
+        stop_egress_broker_process(broker).await.unwrap();
+        assert!(broker.child.try_wait().unwrap().is_some());
     }
 
     #[tokio::test]
@@ -2360,6 +2971,13 @@ mod tests {
         assert_eq!(seed.auth_token(), token.as_str());
         assert_eq!(token_fingerprint(&token).len(), 64);
         assert!(!format!("{seed:?}").contains(token.as_str()));
+    }
+
+    #[test]
+    fn generated_egress_broker_keys_are_nonzero_and_bootstrap_admissible() {
+        let key = fresh_egress_broker_key();
+        assert!(key.iter().any(|byte| *byte != 0));
+        assert!(encode_developer_egress_broker_bootstrap(Uuid::new_v4(), 1, &key).is_ok());
     }
 
     #[test]

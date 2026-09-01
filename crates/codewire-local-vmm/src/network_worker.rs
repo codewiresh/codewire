@@ -1,10 +1,10 @@
 //! Isolated host-side worker for one local microVM raw-IP stream.
 //!
 //! The worker has no dial authority. TCP and DNS are available only through an
-//! injected broker implementation; the product entrypoint uses [`DenyBroker`]
-//! until the policy broker is attached. The process receives an already-open
-//! hybrid-vsock stream and a derived generation key on inherited AF_UNIX
-//! descriptors, never the guest daemon token.
+//! authenticated capability to the separate egress broker. Verification may
+//! inject a socket-free broker through a separate explicit entrypoint. The
+//! process receives already-open streams and generation keys on inherited
+//! AF_UNIX descriptors, never the guest daemon token or provider credentials.
 
 use std::collections::HashMap;
 use std::io::{self, Read as _};
@@ -17,8 +17,14 @@ use std::task::{Context as TaskContext, Poll};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use codewire_egress_broker::DnsRecordFamily;
+use codewire_egress_broker::ipc::{
+    BROKER_IPC_KEY_LEN, BrokerIpcBinding, BrokerIpcClient, BrokerIpcDnsResponse, BrokerIpcError,
+    BrokerIpcKey,
+};
+use codewire_egress_policy::CompiledPolicy;
 use codewire_netstack::{
-    DnsAnswer, DnsQuestion, Netstack, NetstackConfig, NetstackLimits, TcpListener,
+    DnsAnswer, DnsQuestion, DnsRecordType, Netstack, NetstackConfig, NetstackLimits, TcpListener,
     build_ipv4_dns_response, parse_canonical_ipv4_tcp_packet, parse_ipv4_dns_question,
 };
 use codewire_vmm_guest_probe::{
@@ -41,8 +47,10 @@ use crate::linux::confinement::{
 
 pub const NETWORK_BOOTSTRAP_FD: RawFd = 4;
 pub const WORKER_PREPARED_MESSAGE: &[u8] = b"CWNETW1 prepared\n";
+pub const WORKER_BROKER_READY_MESSAGE: &[u8] = b"CWNETW1 broker-ready\n";
 pub const WORKER_READY_MESSAGE: &[u8] = b"CWNETW1 ready\n";
 pub const WORKER_STATUS_MAX_BYTES: usize = 64;
+const WORKER_BROKER_DESCRIPTOR_MARKER: u8 = b'B';
 const WORKER_NETWORK_DESCRIPTOR_MARKER: u8 = b'N';
 const WORKER_CONTROL_BYTES: usize = 64;
 
@@ -73,6 +81,10 @@ fn decode_control_length(value: ControlLength) -> usize {
 
 const BOOTSTRAP_MAGIC: &[u8; 8] = b"CWNETB1\0";
 const BOOTSTRAP_LEN: usize = 64;
+const PRODUCT_BOOTSTRAP_MAGIC: &[u8; 8] = b"CWNETB2\0";
+const PRODUCT_BOOTSTRAP_LEN: usize = 128;
+const PRODUCT_POLICY_DIGEST_OFFSET: usize = 64;
+const PRODUCT_BROKER_KEY_OFFSET: usize = 96;
 const PACKET_QUEUE: usize = 256;
 const NETWORK_MTU: usize = 1_500;
 const DNS_MESSAGE_LIMIT: usize = 1_232;
@@ -248,9 +260,17 @@ union WorkerControlBuffer {
 }
 
 pub(crate) fn send_worker_network_descriptor(bootstrap: RawFd, network: RawFd) -> io::Result<()> {
+    send_worker_descriptor(bootstrap, network, WORKER_NETWORK_DESCRIPTOR_MARKER)
+}
+
+pub(crate) fn send_worker_broker_descriptor(bootstrap: RawFd, broker: RawFd) -> io::Result<()> {
+    send_worker_descriptor(bootstrap, broker, WORKER_BROKER_DESCRIPTOR_MARKER)
+}
+
+fn send_worker_descriptor(bootstrap: RawFd, descriptor: RawFd, marker: u8) -> io::Result<()> {
     validate_inherited_unix_socket(bootstrap).map_err(io::Error::other)?;
-    validate_inherited_unix_socket(network).map_err(io::Error::other)?;
-    let mut marker = [WORKER_NETWORK_DESCRIPTOR_MARKER];
+    validate_inherited_unix_socket(descriptor).map_err(io::Error::other)?;
+    let mut marker = [marker];
     let mut vector = libc::iovec {
         iov_base: marker.as_mut_ptr().cast(),
         iov_len: marker.len(),
@@ -284,7 +304,7 @@ pub(crate) fn send_worker_network_descriptor(bootstrap: RawFd, network: RawFd) -
                 .ok_or_else(|| {
                     io::Error::other("network descriptor control record is too large")
                 })?;
-        std::ptr::write(libc::CMSG_DATA(header).cast::<RawFd>(), network);
+        std::ptr::write(libc::CMSG_DATA(header).cast::<RawFd>(), descriptor);
     }
     let sent = unsafe { libc::sendmsg(bootstrap, &raw const message, libc::MSG_NOSIGNAL) };
     if sent == marker.len() as isize {
@@ -300,6 +320,17 @@ pub(crate) fn send_worker_network_descriptor(bootstrap: RawFd, network: RawFd) -
 }
 
 fn receive_worker_network_descriptor(bootstrap: RawFd) -> Result<OwnedFd, NetworkWorkerError> {
+    receive_worker_descriptor(bootstrap, WORKER_NETWORK_DESCRIPTOR_MARKER)
+}
+
+fn receive_worker_broker_descriptor(bootstrap: RawFd) -> Result<OwnedFd, NetworkWorkerError> {
+    receive_worker_descriptor(bootstrap, WORKER_BROKER_DESCRIPTOR_MARKER)
+}
+
+fn receive_worker_descriptor(
+    bootstrap: RawFd,
+    expected_marker: u8,
+) -> Result<OwnedFd, NetworkWorkerError> {
     let mut marker = [0_u8; 1];
     let mut vector = libc::iovec {
         iov_base: marker.as_mut_ptr().cast(),
@@ -315,41 +346,49 @@ fn receive_worker_network_descriptor(bootstrap: RawFd) -> Result<OwnedFd, Networ
     message.msg_controllen = encode_control_length(WORKER_CONTROL_BYTES)
         .ok_or(NetworkWorkerError::InheritedDescriptor)?;
     let received = unsafe { libc::recvmsg(bootstrap, &raw mut message, libc::MSG_CMSG_CLOEXEC) };
-    if received != marker.len() as isize
-        || marker[0] != WORKER_NETWORK_DESCRIPTOR_MARKER
-        || message.msg_flags & (libc::MSG_CTRUNC | libc::MSG_TRUNC) != 0
-    {
+    if received <= 0 {
         return Err(NetworkWorkerError::InheritedDescriptor);
     }
 
     let mut descriptors = Vec::new();
+    let mut valid_control = true;
     let mut header = unsafe { libc::CMSG_FIRSTHDR(&raw const message) };
     while !header.is_null() {
         let header_ref = unsafe { &*header };
         if header_ref.cmsg_level != libc::SOL_SOCKET || header_ref.cmsg_type != libc::SCM_RIGHTS {
-            return Err(NetworkWorkerError::InheritedDescriptor);
+            valid_control = false;
+            header = unsafe { libc::CMSG_NXTHDR(&raw const message, header) };
+            continue;
         }
         let minimum = unsafe { libc::CMSG_LEN(0) as usize };
         let header_len = decode_control_length(header_ref.cmsg_len);
         if header_len < minimum {
-            return Err(NetworkWorkerError::InheritedDescriptor);
+            valid_control = false;
+            break;
         }
         let payload = header_len - minimum;
         if payload == 0 || !payload.is_multiple_of(std::mem::size_of::<RawFd>()) {
-            return Err(NetworkWorkerError::InheritedDescriptor);
+            valid_control = false;
+            break;
         }
         let count = payload / std::mem::size_of::<RawFd>();
         let data = unsafe { libc::CMSG_DATA(header).cast::<RawFd>() };
         for index in 0..count {
             let descriptor = unsafe { *data.add(index) };
             if descriptor < 0 {
-                return Err(NetworkWorkerError::InheritedDescriptor);
+                valid_control = false;
+                continue;
             }
             descriptors.push(unsafe { OwnedFd::from_raw_fd(descriptor) });
         }
         header = unsafe { libc::CMSG_NXTHDR(&raw const message, header) };
     }
-    if descriptors.len() != 1 {
+    if received != marker.len() as isize
+        || marker[0] != expected_marker
+        || message.msg_flags & (libc::MSG_CTRUNC | libc::MSG_TRUNC) != 0
+        || !valid_control
+        || descriptors.len() != 1
+    {
         return Err(NetworkWorkerError::InheritedDescriptor);
     }
     let descriptor = descriptors
@@ -369,6 +408,12 @@ pub struct TcpFlow {
     pub destination: SocketAddr,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BrokerDnsAnswer {
+    pub answer: DnsAnswer,
+    pub ttl_seconds: u32,
+}
+
 #[async_trait]
 pub trait EgressBroker: Send + Sync + 'static {
     /// Cheap policy admission before the worker binds an AnyIP listener.
@@ -378,7 +423,7 @@ pub trait EgressBroker: Send + Sync + 'static {
     async fn connect_tcp(&self, flow: TcpFlow) -> io::Result<BoxedBrokerStream>;
 
     /// Resolve one already-parsed canonical DNS question.
-    async fn resolve_dns(&self, question: &DnsQuestion) -> io::Result<DnsAnswer>;
+    async fn resolve_dns(&self, question: &DnsQuestion) -> io::Result<BrokerDnsAnswer>;
 }
 
 #[derive(Debug, Default)]
@@ -394,9 +439,126 @@ impl EgressBroker for DenyBroker {
         Err(denied())
     }
 
-    async fn resolve_dns(&self, _question: &DnsQuestion) -> io::Result<DnsAnswer> {
+    async fn resolve_dns(&self, _question: &DnsQuestion) -> io::Result<BrokerDnsAnswer> {
         Err(denied())
     }
+}
+
+pub struct IpcEgressBroker {
+    client: BrokerIpcClient,
+}
+
+impl IpcEgressBroker {
+    fn new(stream: tokio::net::UnixStream, binding: BrokerIpcBinding, key: BrokerIpcKey) -> Self {
+        Self {
+            client: BrokerIpcClient::new(stream, binding, key),
+        }
+    }
+
+    /// Prove the authenticated binding without opening a network connection.
+    /// The compiled policy must deny this protected loopback destination.
+    async fn verify_binding(&self) -> Result<(), NetworkWorkerError> {
+        match self
+            .client
+            .authorize_tcp(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1))
+            .await
+        {
+            Err(BrokerIpcError::Denied) => Ok(()),
+            Ok(()) | Err(_) => Err(NetworkWorkerError::Protocol),
+        }
+    }
+
+    fn admit_guest_flow(flow: TcpFlow) -> io::Result<SocketAddr> {
+        if flow.source.ip() != IpAddr::V4(GUEST_IP)
+            || flow.source.port() == 0
+            || flow.destination.port() == 0
+        {
+            return Err(denied());
+        }
+        Ok(flow.destination)
+    }
+}
+
+#[async_trait]
+impl EgressBroker for IpcEgressBroker {
+    async fn authorize_tcp(&self, flow: TcpFlow) -> io::Result<()> {
+        let destination = Self::admit_guest_flow(flow)?;
+        self.client
+            .authorize_tcp(destination)
+            .await
+            .map_err(ipc_broker_error)
+    }
+
+    async fn connect_tcp(&self, flow: TcpFlow) -> io::Result<BoxedBrokerStream> {
+        let destination = Self::admit_guest_flow(flow)?;
+        let descriptor = self
+            .client
+            .connect_tcp(destination)
+            .await
+            .map_err(ipc_broker_error)?;
+        let stream = transferred_stream(descriptor)?;
+        Ok(Box::pin(stream))
+    }
+
+    async fn resolve_dns(&self, question: &DnsQuestion) -> io::Result<BrokerDnsAnswer> {
+        if question.source.ip() != IpAddr::V4(GUEST_IP)
+            || question.source.port() == 0
+            || question.server != SocketAddr::new(IpAddr::V4(WORKER_IP), 53)
+        {
+            return Err(denied());
+        }
+        let family = match question.record_type {
+            DnsRecordType::A => DnsRecordFamily::Ipv4,
+            DnsRecordType::Aaaa => DnsRecordFamily::Ipv6,
+        };
+        match self
+            .client
+            .resolve_dns(&question.name, family)
+            .await
+            .map_err(ipc_broker_error)?
+        {
+            BrokerIpcDnsResponse::Addresses {
+                addresses,
+                ttl_seconds,
+            } => {
+                let address = addresses
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| io::Error::other("egress broker returned no DNS address"))?;
+                let answer = match (question.record_type, address) {
+                    (DnsRecordType::A, IpAddr::V4(address)) => DnsAnswer::Ipv4(address),
+                    (DnsRecordType::Aaaa, IpAddr::V6(address)) => DnsAnswer::Ipv6(address),
+                    _ => {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "egress broker returned the wrong DNS family",
+                        ));
+                    }
+                };
+                Ok(BrokerDnsAnswer {
+                    answer,
+                    ttl_seconds,
+                })
+            }
+            BrokerIpcDnsResponse::NoData => Ok(BrokerDnsAnswer {
+                answer: DnsAnswer::NoData,
+                ttl_seconds: 30,
+            }),
+            BrokerIpcDnsResponse::NameError => Ok(BrokerDnsAnswer {
+                answer: DnsAnswer::NameError,
+                ttl_seconds: 30,
+            }),
+        }
+    }
+}
+
+fn ipc_broker_error(error: BrokerIpcError) -> io::Error {
+    let kind = match error {
+        BrokerIpcError::Denied => io::ErrorKind::PermissionDenied,
+        BrokerIpcError::RemoteUnavailable => io::ErrorKind::ConnectionRefused,
+        _ => io::ErrorKind::ConnectionAborted,
+    };
+    io::Error::new(kind, "authenticated egress broker request failed")
 }
 
 fn denied() -> io::Error {
@@ -421,17 +583,108 @@ pub fn encode_worker_bootstrap(
     Ok(bytes)
 }
 
-/// Entrypoint used only by the hidden `cw` worker command.
+/// Encode the product bootstrap containing only one generation network key,
+/// one policy digest, and one non-provider broker HMAC key.
+pub fn encode_product_worker_bootstrap(
+    vm_id: Uuid,
+    generation: u64,
+    network_key: &NetworkKey,
+    broker_key: &[u8; BROKER_IPC_KEY_LEN],
+) -> Result<Zeroizing<[u8; PRODUCT_BOOTSTRAP_LEN]>, NetworkWorkerError> {
+    validate_identity(vm_id, generation)?;
+    if broker_key.iter().all(|byte| *byte == 0) {
+        return Err(NetworkWorkerError::InvalidBootstrap);
+    }
+    let policy = CompiledPolicy::developer_baseline();
+    let mut bytes = Zeroizing::new([0_u8; PRODUCT_BOOTSTRAP_LEN]);
+    bytes[..8].copy_from_slice(PRODUCT_BOOTSTRAP_MAGIC);
+    bytes[8..24].copy_from_slice(vm_id.as_bytes());
+    bytes[24..32].copy_from_slice(&generation.to_le_bytes());
+    network_key.with_bytes(|key| bytes[32..64].copy_from_slice(key));
+    bytes[PRODUCT_POLICY_DIGEST_OFFSET..PRODUCT_BROKER_KEY_OFFSET]
+        .copy_from_slice(policy.digest().as_bytes());
+    bytes[PRODUCT_BROKER_KEY_OFFSET..].copy_from_slice(broker_key);
+    Ok(bytes)
+}
+
+struct ProductWorkerBootstrap {
+    network_key: NetworkKey,
+    broker_binding: BrokerIpcBinding,
+    broker_key: BrokerIpcKey,
+}
+
+/// Entrypoint used only by the hidden product `cw` worker command.
 pub async fn run_inherited_worker(vm_id: Uuid, generation: u64) -> Result<(), NetworkWorkerError> {
-    run_inherited_worker_with_broker(vm_id, generation, Arc::new(DenyBroker)).await
+    validate_identity(vm_id, generation)?;
+    let mut bootstrap = inherited_std_unix_stream(NETWORK_BOOTSTRAP_FD)?;
+    let prepared = (|| {
+        bootstrap
+            .set_read_timeout(Some(HANDSHAKE_TIMEOUT))
+            .map_err(|_| NetworkWorkerError::BootstrapIo)?;
+        bootstrap
+            .set_write_timeout(Some(HANDSHAKE_TIMEOUT))
+            .map_err(|_| NetworkWorkerError::BootstrapIo)?;
+        if std::env::vars_os().next().is_some() {
+            return Err(NetworkWorkerError::AmbientEnvironment);
+        }
+        require_single_threaded_process()?;
+        let mut bytes = Zeroizing::new([0_u8; PRODUCT_BOOTSTRAP_LEN]);
+        bootstrap
+            .read_exact(bytes.as_mut())
+            .map_err(|_| NetworkWorkerError::BootstrapIo)?;
+        decode_product_worker_bootstrap(bytes.as_ref(), vm_id, generation)
+    })();
+    let prepared = match prepared {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            let _ = write_worker_control_message(&bootstrap, error.startup_failure().message());
+            return Err(error);
+        }
+    };
+    let confinement =
+        install_deny_all_filesystem_domain().and_then(|()| install_network_worker_seccomp());
+    if let Err(error) = confinement {
+        let _ = write_worker_control_message(&bootstrap, error.startup_failure().message());
+        return Err(error);
+    }
+    bootstrap
+        .set_read_timeout(None)
+        .map_err(|_| NetworkWorkerError::BootstrapIo)?;
+    write_worker_control_message(&bootstrap, WORKER_PREPARED_MESSAGE)
+        .map_err(|_| NetworkWorkerError::PreparedIo)?;
+    let broker_descriptor = match receive_worker_broker_descriptor(bootstrap.as_raw_fd()) {
+        Ok(descriptor) => descriptor,
+        Err(error) => {
+            let _ = write_worker_control_message(&bootstrap, error.startup_failure().message());
+            return Err(error);
+        }
+    };
+    let broker_stream = match transferred_tokio_unix_stream(broker_descriptor) {
+        Ok(stream) => stream,
+        Err(error) => {
+            let _ = write_worker_control_message(&bootstrap, error.startup_failure().message());
+            return Err(error);
+        }
+    };
+    let broker = Arc::new(IpcEgressBroker::new(
+        broker_stream,
+        prepared.broker_binding,
+        prepared.broker_key,
+    ));
+    if let Err(error) = broker.verify_binding().await {
+        let _ = write_worker_control_message(&bootstrap, error.startup_failure().message());
+        return Err(error);
+    }
+    write_worker_control_message(&bootstrap, WORKER_BROKER_READY_MESSAGE)
+        .map_err(|_| NetworkWorkerError::PreparedIo)?;
+    run_prepared_worker(bootstrap, prepared.network_key, vm_id, generation, broker).await
 }
 
 /// Run the inherited worker with one explicitly injected broker.
 ///
-/// The product entrypoint above always supplies [`DenyBroker`]. The qualified
-/// hardware smoke supplies a socket-free fixture broker so the same confined
-/// process and guest seam can prove allowed DNS/TCP without creating a hidden
-/// host dial path.
+/// The qualified hardware smoke supplies a socket-free fixture broker so the
+/// same confined process and guest seam can prove allowed DNS/TCP without
+/// creating a hidden host dial path.
 pub async fn run_inherited_worker_with_broker<B: EgressBroker>(
     vm_id: Uuid,
     generation: u64,
@@ -475,6 +728,16 @@ pub async fn run_inherited_worker_with_broker<B: EgressBroker>(
         .map_err(|_| NetworkWorkerError::BootstrapIo)?;
     write_worker_control_message(&bootstrap, WORKER_PREPARED_MESSAGE)
         .map_err(|_| NetworkWorkerError::PreparedIo)?;
+    run_prepared_worker(bootstrap, key, vm_id, generation, broker).await
+}
+
+async fn run_prepared_worker<B: EgressBroker>(
+    bootstrap: StdUnixStream,
+    key: NetworkKey,
+    vm_id: Uuid,
+    generation: u64,
+    broker: Arc<B>,
+) -> Result<(), NetworkWorkerError> {
     let descriptor = match receive_worker_network_descriptor(bootstrap.as_raw_fd()) {
         Ok(descriptor) => descriptor,
         Err(error) => {
@@ -482,9 +745,10 @@ pub async fn run_inherited_worker_with_broker<B: EgressBroker>(
             return Err(error);
         }
     };
-    let network = match transferred_unix_stream(descriptor) {
+    let network = match transferred_stream(descriptor) {
         Ok(network) => network,
-        Err(error) => {
+        Err(_) => {
+            let error = NetworkWorkerError::InheritedDescriptor;
             let _ = write_worker_control_message(&bootstrap, error.startup_failure().message());
             return Err(error);
         }
@@ -501,13 +765,21 @@ pub async fn run_inherited_worker_with_broker<B: EgressBroker>(
     result
 }
 
-struct TransferredUnixStream {
+fn transferred_tokio_unix_stream(
+    descriptor: OwnedFd,
+) -> Result<tokio::net::UnixStream, NetworkWorkerError> {
+    let stream = StdUnixStream::from(descriptor);
+    stream
+        .set_nonblocking(true)
+        .map_err(|_| NetworkWorkerError::InheritedDescriptor)?;
+    tokio::net::UnixStream::from_std(stream).map_err(|_| NetworkWorkerError::InheritedDescriptor)
+}
+
+struct TransferredStream {
     descriptor: AsyncFd<OwnedFd>,
 }
 
-fn transferred_unix_stream(
-    descriptor: OwnedFd,
-) -> Result<TransferredUnixStream, NetworkWorkerError> {
+fn transferred_stream(descriptor: OwnedFd) -> io::Result<TransferredStream> {
     let flags = unsafe { libc::fcntl(descriptor.as_raw_fd(), libc::F_GETFL) };
     if flags == -1
         || unsafe {
@@ -518,14 +790,13 @@ fn transferred_unix_stream(
             )
         } == -1
     {
-        return Err(NetworkWorkerError::InheritedDescriptor);
+        return Err(io::Error::last_os_error());
     }
-    let descriptor =
-        AsyncFd::new(descriptor).map_err(|_| NetworkWorkerError::InheritedDescriptor)?;
-    Ok(TransferredUnixStream { descriptor })
+    let descriptor = AsyncFd::new(descriptor)?;
+    Ok(TransferredStream { descriptor })
 }
 
-impl AsyncRead for TransferredUnixStream {
+impl AsyncRead for TransferredStream {
     fn poll_read(
         mut self: Pin<&mut Self>,
         context: &mut TaskContext<'_>,
@@ -555,7 +826,7 @@ impl AsyncRead for TransferredUnixStream {
     }
 }
 
-impl AsyncWrite for TransferredUnixStream {
+impl AsyncWrite for TransferredStream {
     fn poll_write(
         mut self: Pin<&mut Self>,
         context: &mut TaskContext<'_>,
@@ -637,16 +908,9 @@ fn read_worker_bytes(descriptor: RawFd, buffer: &mut [u8]) -> io::Result<usize> 
 
 fn send_worker_bytes(descriptor: RawFd, buffer: &[u8]) -> io::Result<usize> {
     loop {
-        let mut vector = libc::iovec {
-            iov_base: buffer.as_ptr().cast_mut().cast(),
-            iov_len: buffer.len(),
-        };
-        let mut header: libc::msghdr = unsafe { std::mem::zeroed() };
-        header.msg_iov = &raw mut vector;
-        header.msg_iovlen = 1;
-        let sent = unsafe { libc::sendmsg(descriptor, &raw const header, libc::MSG_NOSIGNAL) };
-        if sent >= 0 {
-            return Ok(sent as usize);
+        let written = unsafe { libc::write(descriptor, buffer.as_ptr().cast(), buffer.len()) };
+        if written >= 0 {
+            return Ok(written as usize);
         }
         let error = io::Error::last_os_error();
         if error.kind() != io::ErrorKind::Interrupted {
@@ -672,6 +936,7 @@ const NETWORK_WORKER_DENIED_SYSCALLS: &[libc::c_long] = &[
     libc::SYS_accept,
     libc::SYS_accept4,
     libc::SYS_sendto,
+    libc::SYS_sendmsg,
     libc::SYS_sendmmsg,
     libc::SYS_recvfrom,
     libc::SYS_recvmmsg,
@@ -799,6 +1064,47 @@ fn decode_worker_bootstrap(
     let mut key = Zeroizing::new([0_u8; NETWORK_KEY_LEN]);
     key.copy_from_slice(&bytes[32..]);
     NetworkKey::from_derived_bytes(*key).map_err(|_| NetworkWorkerError::InvalidBootstrap)
+}
+
+fn decode_product_worker_bootstrap(
+    bytes: &[u8],
+    expected_vm_id: Uuid,
+    expected_generation: u64,
+) -> Result<ProductWorkerBootstrap, NetworkWorkerError> {
+    validate_identity(expected_vm_id, expected_generation)?;
+    if bytes.len() != PRODUCT_BOOTSTRAP_LEN || &bytes[..8] != PRODUCT_BOOTSTRAP_MAGIC {
+        return Err(NetworkWorkerError::InvalidBootstrap);
+    }
+    let vm_id =
+        Uuid::from_slice(&bytes[8..24]).map_err(|_| NetworkWorkerError::InvalidBootstrap)?;
+    let generation = u64::from_le_bytes(
+        bytes[24..32]
+            .try_into()
+            .expect("fixed product worker bootstrap generation"),
+    );
+    if vm_id != expected_vm_id || generation != expected_generation {
+        return Err(NetworkWorkerError::InvalidBootstrap);
+    }
+    let mut network_key = Zeroizing::new([0_u8; NETWORK_KEY_LEN]);
+    network_key.copy_from_slice(&bytes[32..64]);
+    let network_key = NetworkKey::from_derived_bytes(*network_key)
+        .map_err(|_| NetworkWorkerError::InvalidBootstrap)?;
+    let policy = CompiledPolicy::developer_baseline();
+    if bytes[PRODUCT_POLICY_DIGEST_OFFSET..PRODUCT_BROKER_KEY_OFFSET] != *policy.digest().as_bytes()
+    {
+        return Err(NetworkWorkerError::InvalidBootstrap);
+    }
+    let broker_binding = BrokerIpcBinding::new(vm_id, generation, policy.digest())
+        .map_err(|_| NetworkWorkerError::InvalidBootstrap)?;
+    let mut broker_key = Zeroizing::new([0_u8; BROKER_IPC_KEY_LEN]);
+    broker_key.copy_from_slice(&bytes[PRODUCT_BROKER_KEY_OFFSET..]);
+    let broker_key =
+        BrokerIpcKey::from_bytes(*broker_key).map_err(|_| NetworkWorkerError::InvalidBootstrap)?;
+    Ok(ProductWorkerBootstrap {
+        network_key,
+        broker_binding,
+        broker_key,
+    })
 }
 
 fn validate_identity(vm_id: Uuid, generation: u64) -> Result<(), NetworkWorkerError> {
@@ -979,8 +1285,9 @@ async fn dispatch_packets<B: EgressBroker>(
                     Ok(Ok(answer)) => answer,
                     Ok(Err(_)) | Err(_) => continue,
                 };
-            let response = build_ipv4_dns_response(&question, answer, 30, NETWORK_MTU)
-                .map_err(|_| NetworkWorkerError::Engine)?;
+            let response =
+                build_ipv4_dns_response(&question, answer.answer, answer.ttl_seconds, NETWORK_MTU)
+                    .map_err(|_| NetworkWorkerError::Engine)?;
             outbound
                 .send(response)
                 .await
@@ -1161,7 +1468,12 @@ mod tests {
     #[test]
     fn startup_status_is_one_exact_bounded_fixed_message() {
         assert!(WORKER_PREPARED_MESSAGE.len() <= WORKER_STATUS_MAX_BYTES);
+        assert!(WORKER_BROKER_READY_MESSAGE.len() <= WORKER_STATUS_MAX_BYTES);
         assert_eq!(decode_worker_startup_status(WORKER_PREPARED_MESSAGE), None);
+        assert_eq!(
+            decode_worker_startup_status(WORKER_BROKER_READY_MESSAGE),
+            None
+        );
         assert_eq!(
             decode_worker_startup_status(WORKER_READY_MESSAGE),
             Some(NetworkWorkerStartupStatus::Ready)
@@ -1252,6 +1564,25 @@ mod tests {
     }
 
     #[test]
+    fn transferred_descriptor_markers_are_role_bound() {
+        let (bootstrap_sender, bootstrap_receiver) = StdUnixStream::pair().unwrap();
+        let (_peer, descriptor) = StdUnixStream::pair().unwrap();
+        send_worker_broker_descriptor(bootstrap_sender.as_raw_fd(), descriptor.as_raw_fd())
+            .unwrap();
+        assert!(matches!(
+            receive_worker_network_descriptor(bootstrap_receiver.as_raw_fd()),
+            Err(NetworkWorkerError::InheritedDescriptor)
+        ));
+
+        send_worker_network_descriptor(bootstrap_sender.as_raw_fd(), descriptor.as_raw_fd())
+            .unwrap();
+        assert!(matches!(
+            receive_worker_broker_descriptor(bootstrap_receiver.as_raw_fd()),
+            Err(NetworkWorkerError::InheritedDescriptor)
+        ));
+    }
+
+    #[test]
     fn inherited_descriptor_must_be_a_connected_unix_stream() {
         let (stream, _peer) = StdUnixStream::pair().unwrap();
         assert!(validate_inherited_unix_socket(stream.as_raw_fd()).is_ok());
@@ -1324,7 +1655,7 @@ mod tests {
             Ok(Box::pin(connector))
         }
 
-        async fn resolve_dns(&self, question: &DnsQuestion) -> io::Result<DnsAnswer> {
+        async fn resolve_dns(&self, question: &DnsQuestion) -> io::Result<BrokerDnsAnswer> {
             if question.source.ip() != IpAddr::V4(GUEST_IP)
                 || question.server != SocketAddr::new(IpAddr::V4(WORKER_IP), 53)
                 || question.name != TEST_DNS_NAME
@@ -1333,7 +1664,10 @@ mod tests {
                 return Err(denied());
             }
             self.resolved.fetch_add(1, Ordering::Relaxed);
-            Ok(DnsAnswer::Ipv4(TEST_DNS_ANSWER))
+            Ok(BrokerDnsAnswer {
+                answer: DnsAnswer::Ipv4(TEST_DNS_ANSWER),
+                ttl_seconds: 30,
+            })
         }
     }
 
@@ -1344,6 +1678,51 @@ mod tests {
         let bytes = encode_worker_bootstrap(vm_id, generation, &key).unwrap();
         assert!(decode_worker_bootstrap(bytes.as_ref(), vm_id, generation).is_ok());
         assert!(decode_worker_bootstrap(bytes.as_ref(), vm_id, generation + 1).is_err());
+        assert!(
+            !bytes
+                .windows(TOKEN.len())
+                .any(|window| window == TOKEN.as_bytes())
+        );
+    }
+
+    #[test]
+    fn product_bootstrap_binds_network_broker_and_policy_to_one_generation() {
+        let (vm_id, generation) = identity();
+        let network_key = NetworkKey::derive(TOKEN, vm_id, generation).unwrap();
+        let broker_key = [0x5a; BROKER_IPC_KEY_LEN];
+        let bytes =
+            encode_product_worker_bootstrap(vm_id, generation, &network_key, &broker_key).unwrap();
+        let decoded = decode_product_worker_bootstrap(bytes.as_ref(), vm_id, generation).unwrap();
+        assert_eq!(decoded.broker_binding.environment_id(), vm_id);
+        assert_eq!(decoded.broker_binding.generation(), generation);
+        assert_eq!(
+            decoded.broker_binding.policy_digest(),
+            CompiledPolicy::developer_baseline().digest()
+        );
+        network_key.with_bytes(|expected| {
+            decoded
+                .network_key
+                .with_bytes(|actual| assert_eq!(actual, expected));
+        });
+        assert!(decode_product_worker_bootstrap(bytes.as_ref(), vm_id, generation + 1).is_err());
+
+        let mut wrong_policy = bytes.clone();
+        wrong_policy[PRODUCT_POLICY_DIGEST_OFFSET] ^= 1;
+        assert!(decode_product_worker_bootstrap(wrong_policy.as_ref(), vm_id, generation).is_err());
+        let mut zero_broker_key = bytes.clone();
+        zero_broker_key[PRODUCT_BROKER_KEY_OFFSET..].fill(0);
+        assert!(
+            decode_product_worker_bootstrap(zero_broker_key.as_ref(), vm_id, generation).is_err()
+        );
+        assert!(
+            encode_product_worker_bootstrap(
+                vm_id,
+                generation,
+                &network_key,
+                &[0_u8; BROKER_IPC_KEY_LEN]
+            )
+            .is_err()
+        );
         assert!(
             !bytes
                 .windows(TOKEN.len())
@@ -1557,6 +1936,12 @@ mod tests {
                 -1
             );
             assert_eq!(io::Error::last_os_error().raw_os_error(), Some(libc::EPERM));
+            let message: libc::msghdr = unsafe { std::mem::zeroed() };
+            assert_eq!(
+                unsafe { libc::sendmsg(control.as_raw_fd(), &raw const message, 0) },
+                -1
+            );
+            assert_eq!(io::Error::last_os_error().raw_os_error(), Some(libc::EPERM));
             assert_eq!(
                 unsafe { libc::syscall(libc::SYS_pidfd_open, libc::getpid(), 0_u32) },
                 -1
@@ -1578,6 +1963,77 @@ mod tests {
         let status = std::process::Command::new(std::env::current_exe().unwrap())
             .arg("--exact")
             .arg("network_worker::tests::seccomp_denies_dial_process_and_async_io_authority")
+            .arg("--nocapture")
+            .env(CHILD_MARKER, "1")
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+
+    #[test]
+    fn confined_transferred_tcp_stream_uses_only_read_write_authority() {
+        const CHILD_MARKER: &str = "CODEWIRE_TEST_TRANSFERRED_TCP_SECCOMP";
+        if std::env::var_os(CHILD_MARKER).is_some() {
+            let listener = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+            let client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+            let (peer, _) = listener.accept().unwrap();
+            drop(listener);
+            client.set_nonblocking(true).unwrap();
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_io()
+                .build()
+                .unwrap();
+            assert_eq!(
+                unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) },
+                0
+            );
+            install_network_worker_seccomp().unwrap();
+            let descriptor = OwnedFd::from(client);
+            let mut transferred = {
+                let _runtime_context = runtime.enter();
+                transferred_stream(descriptor).unwrap()
+            };
+            runtime.block_on(async {
+                transferred.write_all(b"worker-to-broker").await.unwrap();
+                let mut received = [0_u8; 16];
+                assert_eq!(
+                    unsafe {
+                        libc::read(
+                            peer.as_raw_fd(),
+                            received.as_mut_ptr().cast(),
+                            received.len(),
+                        )
+                    },
+                    received.len() as isize
+                );
+                assert_eq!(&received, b"worker-to-broker");
+
+                assert_eq!(
+                    unsafe {
+                        libc::write(
+                            peer.as_raw_fd(),
+                            b"broker-to-worker".as_ptr().cast(),
+                            b"broker-to-worker".len(),
+                        )
+                    },
+                    b"broker-to-worker".len() as isize
+                );
+                let mut returned = [0_u8; 16];
+                transferred.read_exact(&mut returned).await.unwrap();
+                assert_eq!(&returned, b"broker-to-worker");
+            });
+            assert_eq!(
+                unsafe { libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0) },
+                -1
+            );
+            assert_eq!(io::Error::last_os_error().raw_os_error(), Some(libc::EPERM));
+            return;
+        }
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg(
+                "network_worker::tests::confined_transferred_tcp_stream_uses_only_read_write_authority",
+            )
             .arg("--nocapture")
             .env(CHILD_MARKER, "1")
             .status()

@@ -13,15 +13,20 @@ fn main() {
 
 #[cfg(target_os = "linux")]
 fn main() {
-    let network_worker = std::env::args_os()
-        .nth(1)
-        .is_some_and(|argument| argument == "__native-network-worker");
-    let mut runtime = if network_worker {
+    let isolated_command = std::env::args_os().nth(1);
+    let network_worker = isolated_command.as_ref().is_some_and(|argument| {
+        argument == "__native-network-worker" || argument == "__native-network-worker-fixture"
+    });
+    let egress_broker = isolated_command
+        .as_ref()
+        .is_some_and(|argument| argument == "__native-egress-broker");
+    let isolated_process = network_worker || egress_broker;
+    let mut runtime = if isolated_process {
         tokio::runtime::Builder::new_current_thread()
     } else {
         tokio::runtime::Builder::new_multi_thread()
     };
-    if network_worker {
+    if isolated_process {
         runtime.enable_io().enable_time();
     } else {
         runtime.enable_all();
@@ -34,6 +39,12 @@ fn main() {
         if network_worker {
             let code = error
                 .downcast_ref::<codewire_local_vmm::network_worker::NetworkWorkerError>()
+                .map_or(1, |error| error.exit_code());
+            std::process::exit(code);
+        }
+        if egress_broker {
+            let code = error
+                .downcast_ref::<codewire_local_vmm::egress_broker::EgressBrokerProcessError>()
                 .map_or(1, |error| error.exit_code());
             std::process::exit(code);
         }
@@ -65,7 +76,9 @@ mod linux {
     use codewire_local_vmm::linux::state::{
         StateDiskIdentity, VmPhase, cleanup_trashed_vm, move_stopped_vm_to_trash,
     };
-    use codewire_local_vmm::network_worker::{BoxedBrokerStream, EgressBroker, TcpFlow};
+    use codewire_local_vmm::network_worker::{
+        BoxedBrokerStream, BrokerDnsAnswer, EgressBroker, TcpFlow,
+    };
     use codewire_local_vmm::{
         CloudHypervisorRunner, CreateVmRequest, LiveProcess, PreparedVm, ProcessIdentity,
         RecoveryError, RunnerConfig, RunnerError, RunningVm, VmPaths,
@@ -90,6 +103,7 @@ mod linux {
     const ROOT_GENERATION: &str =
         "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const DAEMON_READY_TIMEOUT: Duration = Duration::from_secs(15);
+    const SETUP_NETWORK_READY_TIMEOUT: Duration = Duration::from_secs(30);
     const SESSION_TIMEOUT: Duration = Duration::from_secs(10);
     const VM_EXIT_TIMEOUT: Duration = Duration::from_secs(15);
     const MAX_SESSION_OUTPUT: usize = 64 * 1024;
@@ -149,22 +163,48 @@ mod linux {
             generation_flag,
             generation,
         ] = raw_arguments.as_slice()
-            && command == "__native-network-worker"
             && environment_flag == "--environment-id"
             && generation_flag == "--generation"
+            && matches!(
+                command.as_str(),
+                "__native-network-worker"
+                    | "__native-network-worker-fixture"
+                    | "__native-egress-broker"
+            )
         {
             let environment_id = Uuid::parse_str(environment_id)
                 .map_err(|_| failure("network worker environment ID is invalid"))?;
             let generation = generation
                 .parse::<u64>()
                 .map_err(|_| failure("network worker generation is invalid"))?;
-            return codewire_local_vmm::network_worker::run_inherited_worker_with_broker(
-                environment_id,
-                generation,
-                Arc::new(SmokeNetworkBroker),
-            )
-            .await
-            .map_err(|error| Box::new(error) as Box<dyn Error + Send + Sync>);
+            return match command.as_str() {
+                "__native-network-worker" => {
+                    codewire_local_vmm::network_worker::run_inherited_worker(
+                        environment_id,
+                        generation,
+                    )
+                    .await
+                    .map_err(|error| Box::new(error) as Box<dyn Error + Send + Sync>)
+                }
+                "__native-network-worker-fixture" => {
+                    codewire_local_vmm::network_worker::run_inherited_worker_with_broker(
+                        environment_id,
+                        generation,
+                        Arc::new(SmokeNetworkBroker),
+                    )
+                    .await
+                    .map_err(|error| Box::new(error) as Box<dyn Error + Send + Sync>)
+                }
+                "__native-egress-broker" => {
+                    codewire_local_vmm::egress_broker::run_inherited_egress_broker(
+                        environment_id,
+                        generation,
+                    )
+                    .await
+                    .map_err(|error| Box::new(error) as Box<dyn Error + Send + Sync>)
+                }
+                _ => unreachable!("isolated command was validated"),
+            };
         }
         let arguments = match Args::parse(raw_arguments) {
             Ok(Some(arguments)) => arguments,
@@ -411,7 +451,9 @@ mod linux {
             }
         };
         observation("vm.generation.1.vmm_started", true);
-        if let Err(error) = attach_network_worker(&mut provisioning).await {
+        if let Err(error) =
+            attach_network_worker(&mut provisioning, SETUP_NETWORK_READY_TIMEOUT).await
+        {
             observation(
                 "vm.generation.1.network_worker_error",
                 runner_error_class(&error),
@@ -470,6 +512,9 @@ mod linux {
             ExitClass::NetworkWorkerFailure(_) => {
                 return Err(failure("OCI provisioning network worker failed"));
             }
+            ExitClass::EgressBrokerFailure(_) => {
+                return Err(failure("OCI provisioning egress broker failed"));
+            }
         }
         drop(provisioning);
         wait_for_identity_to_end(&provisioning_process).await?;
@@ -493,7 +538,7 @@ mod linux {
             ));
         }
         let mut first = runner.start(prepared_one).await?;
-        attach_network_worker(&mut first).await?;
+        attach_network_worker(&mut first, DAEMON_READY_TIMEOUT).await?;
         require_running_identity(&first, arguments.vm_id, 2, &disk_identity)?;
         if first.auth_token_fingerprint() != token_one {
             return Err(failure("daemon token changed between prepare and start"));
@@ -581,6 +626,9 @@ mod linux {
             ExitClass::NetworkWorkerFailure(_) => {
                 return Err(failure("network worker failed during guest poweroff"));
             }
+            ExitClass::EgressBrokerFailure(_) => {
+                return Err(failure("egress broker failed during guest poweroff"));
+            }
         }
         drop(first);
         wait_for_identity_to_end(&first_process).await?;
@@ -596,7 +644,7 @@ mod linux {
             ));
         }
         let mut second = runner.start(prepared_two).await?;
-        attach_network_worker(&mut second).await?;
+        attach_network_worker(&mut second, DAEMON_READY_TIMEOUT).await?;
         require_running_identity(&second, arguments.vm_id, 3, &disk_identity)?;
         let second_client = connect_ready_daemon(&mut second).await?;
         require_identity(
@@ -623,6 +671,9 @@ mod linux {
             ExitClass::NetworkWorkerFailure(_) => {
                 return Err(failure("network worker failed before hard VMM kill"));
             }
+            ExitClass::EgressBrokerFailure(_) => {
+                return Err(failure("egress broker failed before hard VMM kill"));
+            }
         }
         drop(second);
         wait_for_identity_to_end(&second_process).await?;
@@ -637,7 +688,7 @@ mod linux {
         }
         let third = runner.start(prepared_three).await?;
         let mut third = third;
-        attach_network_worker(&mut third).await?;
+        attach_network_worker(&mut third, DAEMON_READY_TIMEOUT).await?;
         let third_client = connect_ready_daemon(&mut third).await?;
         require_identity(
             &run_guest_command(&third_client, &["identity"]).await?,
@@ -673,7 +724,13 @@ mod linux {
             "identity-checked-orphan-terminated",
         );
 
-        let prepared_four = runner.prepare(request(5, arguments, resources)).await?;
+        let prepared_four = match runner.prepare(request(5, arguments, resources)).await {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                observation("vm.generation.5.prepare_error", runner_error_class(&error));
+                return Err(Box::new(error));
+            }
+        };
         require_same_disk(&disk_identity, prepared_four.state_disk_identity())?;
         let token_four = prepared_four.auth_token_fingerprint();
         if [provisioning_token, token_one, token_two, token_three].contains(&token_four) {
@@ -681,9 +738,32 @@ mod linux {
                 "daemon token fingerprint repeated after orphan recovery",
             ));
         }
-        let mut fourth = runner.start(prepared_four).await?;
-        attach_network_worker(&mut fourth).await?;
+        let mut fourth = match runner.start(prepared_four).await {
+            Ok(running) => running,
+            Err(error) => {
+                observation("vm.generation.5.start_error", runner_error_class(&error));
+                return Err(Box::new(error));
+            }
+        };
+        if let Err(error) = attach_product_network_stack(&mut fourth).await {
+            observation(
+                "vm.generation.5.product_network_stack_error",
+                runner_error_class(&error),
+            );
+            return Err(Box::new(error));
+        }
+        observation("vm.generation.5.product_network_stack_attached", true);
+        let fourth_worker = fourth
+            .network_worker_process_identity()
+            .ok_or_else(|| failure("product network worker identity is absent"))?
+            .clone();
+        let fourth_broker = fourth
+            .egress_broker_process_identity()
+            .ok_or_else(|| failure("product egress broker identity is absent"))?
+            .clone();
+        observation("vm.generation.5.product_process_identities", true);
         let fourth_client = connect_ready_daemon(&mut fourth).await?;
+        observation("vm.generation.5.daemon_ready", true);
         require_identity(
             &run_guest_command(&fourth_client, &["identity"]).await?,
             arguments.vm_id,
@@ -693,6 +773,13 @@ mod linux {
             &run_guest_command(&fourth_client, &["read-nonce"]).await?,
             &nonce,
         )?;
+        observation("vm.generation.5.guest_state_verified", true);
+        fourth.force_kill_egress_broker_for_verification()?;
+        observation("vm.generation.5.egress_broker_kill_sent", true);
+        wait_for_egress_broker_failure(&mut fourth).await?;
+        observation("vm.generation.5.egress_broker_loss_observed", true);
+        require_network_denied_after_broker_loss(&fourth_client).await?;
+        observation("egress_broker.loss_fail_closed", true);
         let fourth_process = fourth.process_identity().clone();
         drop(fourth_client);
         match fourth.stop().await? {
@@ -704,9 +791,14 @@ mod linux {
             ExitClass::NetworkWorkerFailure(_) => {
                 return Err(failure("final network worker failed during stop"));
             }
+            ExitClass::EgressBrokerFailure(_) => {
+                return Err(failure("final egress broker failed during stop"));
+            }
         }
         drop(fourth);
         wait_for_identity_to_end(&fourth_process).await?;
+        wait_for_identity_to_end(&fourth_worker).await?;
+        wait_for_identity_to_end(&fourth_broker).await?;
         let cleanup_id = Uuid::new_v4();
         move_stopped_vm_to_trash(&arguments.state_root, arguments.vm_id, cleanup_id)?;
         cleanup_trashed_vm(&arguments.state_root, arguments.vm_id, cleanup_id)?;
@@ -715,14 +807,32 @@ mod linux {
         Ok(())
     }
 
-    async fn attach_network_worker(running: &mut RunningVm) -> Result<(), RunnerError> {
+    async fn attach_network_worker(
+        running: &mut RunningVm,
+        timeout: Duration,
+    ) -> Result<(), RunnerError> {
+        let current = std::env::current_exe().map_err(|_| RunnerError::InvalidNetworkWorker)?;
+        let executable =
+            std::fs::canonicalize(current).map_err(|_| RunnerError::InvalidNetworkWorker)?;
+        running
+            .start_network_worker_with_injected_broker_for_verification(&executable, timeout)
+            .await?;
+        if running.network_worker_process_identity().is_none() {
+            return Err(RunnerError::InvalidNetworkWorker);
+        }
+        Ok(())
+    }
+
+    async fn attach_product_network_stack(running: &mut RunningVm) -> Result<(), RunnerError> {
         let current = std::env::current_exe().map_err(|_| RunnerError::InvalidNetworkWorker)?;
         let executable =
             std::fs::canonicalize(current).map_err(|_| RunnerError::InvalidNetworkWorker)?;
         running
             .start_network_worker(&executable, DAEMON_READY_TIMEOUT)
             .await?;
-        if running.network_worker_process_identity().is_none() {
+        if running.network_worker_process_identity().is_none()
+            || running.egress_broker_process_identity().is_none()
+        {
             return Err(RunnerError::InvalidNetworkWorker);
         }
         Ok(())
@@ -759,17 +869,21 @@ mod linux {
             Ok(Box::pin(connected))
         }
 
-        async fn resolve_dns(&self, question: &DnsQuestion) -> io::Result<DnsAnswer> {
+        async fn resolve_dns(&self, question: &DnsQuestion) -> io::Result<BrokerDnsAnswer> {
             if question.source.ip() != FIXTURE_GUEST_IP
                 || question.server != FIXTURE_RESOLVER
                 || question.name != FIXTURE_DNS_NAME
             {
                 return Err(io::Error::from(io::ErrorKind::PermissionDenied));
             }
-            match question.record_type {
-                DnsRecordType::A => Ok(DnsAnswer::Ipv4(FIXTURE_DNS_ANSWER)),
-                DnsRecordType::Aaaa => Ok(DnsAnswer::NoData),
-            }
+            let answer = match question.record_type {
+                DnsRecordType::A => DnsAnswer::Ipv4(FIXTURE_DNS_ANSWER),
+                DnsRecordType::Aaaa => DnsAnswer::NoData,
+            };
+            Ok(BrokerDnsAnswer {
+                answer,
+                ttl_seconds: 30,
+            })
         }
     }
 
@@ -809,6 +923,12 @@ mod linux {
             RunnerError::NetworkWorkerStartup(failure) => failure.code(),
             RunnerError::NetworkWorkerWait => "network-worker-wait",
             RunnerError::NetworkWorkerKillTimeout => "network-worker-kill-timeout",
+            RunnerError::EgressBrokerSpawn => "egress-broker-spawn",
+            RunnerError::EgressBrokerStartTimeout => "egress-broker-start-timeout",
+            RunnerError::EgressBrokerBootstrap => "egress-broker-bootstrap",
+            RunnerError::EgressBrokerStartup(failure) => failure.code(),
+            RunnerError::EgressBrokerWait => "egress-broker-wait",
+            RunnerError::EgressBrokerKillTimeout => "egress-broker-kill-timeout",
             RunnerError::ExitedDuringStart => "vmm-exited-during-start",
             RunnerError::StartTimeout => "vmm-start-timeout",
             RunnerError::Spawn => "vmm-spawn",
@@ -1363,11 +1483,39 @@ mod linux {
                             "VMM exited while proving isolated network worker loss",
                         ));
                     }
+                    ExitClass::EgressBrokerFailure(_) => {
+                        return Err(failure(
+                            "egress broker exited while proving isolated network worker loss",
+                        ));
+                    }
                 }
             }
         })
         .await
         .map_err(|_| failure("network worker did not exit after exact pidfd kill"))?
+    }
+
+    async fn wait_for_egress_broker_failure(running: &mut RunningVm) -> SmokeResult<()> {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                match running.try_exit()? {
+                    ExitClass::EgressBrokerFailure(_) => return Ok(()),
+                    ExitClass::StillRunning => tokio::time::sleep(Duration::from_millis(20)).await,
+                    ExitClass::GuestShutdown | ExitClass::VmmFailure(_) => {
+                        return Err(failure(
+                            "VMM exited while proving isolated egress broker loss",
+                        ));
+                    }
+                    ExitClass::NetworkWorkerFailure(_) => {
+                        return Err(failure(
+                            "network worker exited before egress broker loss was observed",
+                        ));
+                    }
+                }
+            }
+        })
+        .await
+        .map_err(|_| failure("egress broker did not exit after exact pidfd kill"))?
     }
 
     fn parse_process_confinement(status: &str) -> SmokeResult<ProcessConfinement> {
@@ -1599,6 +1747,15 @@ mod linux {
                     );
                     return Err(failure(
                         "network worker exited before guest daemon readiness",
+                    ));
+                }
+                ExitClass::EgressBrokerFailure(code) => {
+                    observation(
+                        "egress_broker.unexpected_exit",
+                        code.map_or_else(|| "signal".to_owned(), |code| code.to_string()),
+                    );
+                    return Err(failure(
+                        "egress broker exited before guest daemon readiness",
                     ));
                 }
                 ExitClass::GuestShutdown => {
@@ -1933,6 +2090,24 @@ mod linux {
         if throughput != format!("CWTHROUGHPUT1 {FIXTURE_THROUGHPUT_BYTES}\n") {
             return Err(failure(
                 "fixture TCP did not meet the one-MiB round-trip session floor",
+            ));
+        }
+        Ok(())
+    }
+
+    async fn require_network_denied_after_broker_loss(client: &SessionClient) -> SmokeResult<()> {
+        let output = run_workspace_command(
+            client,
+            format!(
+                "if /bin/busybox nc -n -w 1 {} {} </dev/null >/dev/null 2>&1; then exit 1; fi; printf 'CWBROKER1 denied\\n'",
+                FIXTURE_TCP_DESTINATION.ip(),
+                FIXTURE_TCP_DESTINATION.port(),
+            ),
+        )
+        .await?;
+        if output != "CWBROKER1 denied\n" {
+            return Err(failure(
+                "guest TCP did not fail closed after isolated egress broker loss",
             ));
         }
         Ok(())

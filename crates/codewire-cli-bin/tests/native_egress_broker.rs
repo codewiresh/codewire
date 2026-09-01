@@ -13,9 +13,10 @@ use codewire_egress_broker::ipc::{
 };
 use codewire_egress_policy::CompiledPolicy;
 use codewire_local_vmm::egress_broker::{
-    EGRESS_BROKER_BOOTSTRAP_FD, EGRESS_BROKER_POLICY_DIGEST_OFFSET, EGRESS_BROKER_READY_MESSAGE,
-    EGRESS_BROKER_STATUS_MAX_BYTES, EgressBrokerStartupFailure, EgressBrokerStartupStatus,
-    decode_egress_broker_startup_status, encode_developer_egress_broker_bootstrap,
+    EGRESS_BROKER_BOOTSTRAP_FD, EGRESS_BROKER_CONFINE_MESSAGE, EGRESS_BROKER_POLICY_DIGEST_OFFSET,
+    EGRESS_BROKER_PREPARED_MESSAGE, EGRESS_BROKER_READY_MESSAGE, EGRESS_BROKER_STATUS_MAX_BYTES,
+    EgressBrokerStartupFailure, EgressBrokerStartupStatus, decode_egress_broker_startup_status,
+    encode_developer_egress_broker_bootstrap,
 };
 use uuid::Uuid;
 
@@ -154,7 +155,7 @@ fn cw_hidden_egress_broker_preserves_its_typed_failure_exit() {
 }
 
 #[test]
-fn product_broker_rejects_ambient_environment_invalid_bootstrap_and_policy_mismatch() {
+fn product_broker_rejects_ambient_environment_bootstrap_policy_and_admission_forgery() {
     let (ambient_parent, mut ambient_child) = spawn_broker(true);
     assert_eq!(
         decode_egress_broker_startup_status(&read_status_frame(&ambient_parent)),
@@ -199,6 +200,28 @@ fn product_broker_rejects_ambient_environment_invalid_bootstrap_and_policy_misma
         policy_child.wait_bounded().code(),
         Some(EgressBrokerStartupFailure::PolicyMismatch.exit_code())
     );
+
+    let bootstrap =
+        encode_developer_egress_broker_bootstrap(environment_id, generation, &TEST_KEY).unwrap();
+    let (mut admission_parent, mut admission_child) = spawn_broker(false);
+    admission_parent.write_all(bootstrap.as_ref()).unwrap();
+    assert_eq!(
+        read_status_frame(&admission_parent),
+        EGRESS_BROKER_PREPARED_MESSAGE
+    );
+    let mut forged_admission = EGRESS_BROKER_CONFINE_MESSAGE.to_vec();
+    forged_admission[0] ^= 1;
+    admission_parent.write_all(&forged_admission).unwrap();
+    assert_eq!(
+        decode_egress_broker_startup_status(&read_status_frame(&admission_parent)),
+        Some(EgressBrokerStartupStatus::Failed(
+            EgressBrokerStartupFailure::Protocol
+        ))
+    );
+    assert_eq!(
+        admission_child.wait_bounded().code(),
+        Some(EgressBrokerStartupFailure::Protocol.exit_code())
+    );
 }
 
 #[test]
@@ -208,6 +231,8 @@ fn confined_product_broker_serves_authenticated_policy_and_closes_with_its_capab
         encode_developer_egress_broker_bootstrap(environment_id, generation, &TEST_KEY).unwrap();
     let (mut parent, mut child) = spawn_broker(false);
     parent.write_all(bootstrap.as_ref()).unwrap();
+    assert_eq!(read_status_frame(&parent), EGRESS_BROKER_PREPARED_MESSAGE);
+    parent.write_all(EGRESS_BROKER_CONFINE_MESSAGE).unwrap();
     assert_eq!(read_status_frame(&parent), EGRESS_BROKER_READY_MESSAGE);
 
     parent.set_read_timeout(None).unwrap();
