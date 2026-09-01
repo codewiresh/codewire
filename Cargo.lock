@@ -1587,6 +1587,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "codewire-local-credentials"
+version = "0.1.0"
+dependencies = [
+ "codewire-access",
+ "codewire-protected-store",
+ "rusqlite",
+ "rustix",
+ "tempfile",
+ "thiserror 2.0.18",
+ "uuid",
+]
+
+[[package]]
 name = "codewire-local-vmm"
 version = "0.1.0"
 dependencies = [

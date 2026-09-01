@@ -200,6 +200,30 @@ fn profile_revision_is_bound_exactly() {
 }
 
 #[test]
+fn edit_time_profile_validation_is_shared_and_material_free() {
+    let user = Owner::User(owner_id("user-one"));
+    let selected = credential("codex-work", user.clone());
+    let selected_profile = profile("work", user, "codex-work");
+    validate_profile_entries(
+        &selected_profile,
+        &[(selected.id.clone(), selected)].into_iter().collect(),
+        &catalog([CredentialAuthKind::OAuth]),
+    )
+    .expect("compatible profile");
+
+    let wrong_owner = credential("codex-work", Owner::User(owner_id("user-other")));
+    let error = validate_profile_entries(
+        &selected_profile,
+        &[(wrong_owner.id.clone(), wrong_owner)]
+            .into_iter()
+            .collect(),
+        &catalog([CredentialAuthKind::OAuth]),
+    )
+    .expect_err("wrong owner");
+    assert!(matches!(error, AccessError::CredentialOwnerMismatch { .. }));
+}
+
+#[test]
 fn credential_map_key_must_match_credential_metadata_identity() {
     let user = Owner::User(owner_id("user-one"));
     let selected = credential("different-id", user.clone());

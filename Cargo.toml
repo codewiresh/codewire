@@ -17,6 +17,7 @@ members = [
     "crates/codewire-idp",
     "crates/codewire-cli",
     "crates/codewire-cli-bin",
+    "crates/codewire-local-credentials",
     "crates/codewire-local-vmm",
     "crates/codewire-project",
     "crates/codewire-project-proto",
@@ -69,6 +70,7 @@ codewire-vmm-guest-probe = { path = "crates/codewire-vmm-guest-probe" }
 codewire-project = { path = "crates/codewire-project" }
 codewire-project-proto = { path = "crates/codewire-project-proto" }
 codewire-protected-store = { path = "crates/codewire-protected-store" }
+codewire-local-credentials = { path = "crates/codewire-local-credentials" }
 
 # FFI
 uniffi = "0.31"

@@ -53,6 +53,68 @@ pub struct DerivedGrant {
     pub permissions: BTreeSet<GrantPermission>,
 }
 
+/// Validate one profile revision against material-free credential metadata.
+///
+/// This is the shared edit-time policy used by local and platform authorities.
+/// Environment-specific authorization, expiry, and personal-credential policy
+/// are deliberately rechecked by [`derive_grants`] when the profile is bound.
+pub fn validate_profile_entries(
+    profile: &AccessProfile,
+    credentials: &BTreeMap<CredentialId, CredentialMetadata>,
+    catalog: &ProviderCatalog,
+) -> Result<(), AccessError> {
+    profile.validate()?;
+    if profile.placement == Placement::Local && profile.owner.is_organization() {
+        return Err(AccessError::LocalOrganizationUnsupported);
+    }
+
+    for (slot, credential_id) in &profile.entries {
+        let credential =
+            credentials
+                .get(credential_id)
+                .ok_or_else(|| AccessError::CredentialMissing {
+                    credential: credential_id.clone(),
+                })?;
+        if &credential.id != credential_id {
+            return Err(AccessError::CredentialIdentityMismatch {
+                credential: credential_id.clone(),
+            });
+        }
+        credential.validate()?;
+        if credential.placement != profile.placement {
+            return Err(AccessError::PlacementMismatch {
+                subject: "credential",
+            });
+        }
+        validate_profile_entry_owner(profile, credential)?;
+
+        let provider =
+            catalog
+                .get(&credential.provider)
+                .ok_or_else(|| AccessError::ProviderUnavailable {
+                    provider: credential.provider.clone(),
+                })?;
+        let policy =
+            provider
+                .capabilities
+                .get(slot)
+                .ok_or_else(|| AccessError::UnsupportedCapability {
+                    provider: credential.provider.clone(),
+                    slot: slot.clone(),
+                })?;
+        if !policy
+            .authentication_kinds
+            .contains(&credential.authentication_kind)
+        {
+            return Err(AccessError::UnsupportedCapability {
+                provider: credential.provider.clone(),
+                slot: slot.clone(),
+            });
+        }
+    }
+    Ok(())
+}
+
 pub fn derive_grants(
     context: &GrantContext,
     binding: &EnvironmentAccessBinding,
@@ -63,7 +125,7 @@ pub fn derive_grants(
 ) -> Result<Vec<DerivedGrant>, AccessError> {
     context.validate()?;
     binding.validate()?;
-    profile.validate()?;
+    validate_profile_entries(profile, credentials, catalog)?;
 
     if binding.environment_id != context.environment_id
         || binding.profile_id != profile.id
@@ -179,6 +241,31 @@ fn validate_profile_owner(context: &GrantContext, owner: &Owner) -> Result<(), A
                 return Err(AccessError::ProfileOwnerMismatch);
             }
         }
+    }
+    Ok(())
+}
+
+fn validate_profile_entry_owner(
+    profile: &AccessProfile,
+    credential: &CredentialMetadata,
+) -> Result<(), AccessError> {
+    if profile.placement == Placement::Local && credential.owner.is_organization() {
+        return Err(AccessError::LocalOrganizationUnsupported);
+    }
+    let compatible = match (&profile.owner, &credential.owner) {
+        (Owner::User(profile_user), Owner::User(credential_user)) => {
+            profile_user == credential_user
+        }
+        (Owner::User(_), Owner::Organization(_)) => profile.placement == Placement::Platform,
+        (Owner::Organization(profile_org), Owner::Organization(credential_org)) => {
+            profile_org == credential_org
+        }
+        (Owner::Organization(_), Owner::User(_)) => false,
+    };
+    if !compatible {
+        return Err(AccessError::CredentialOwnerMismatch {
+            credential: credential.id.clone(),
+        });
     }
     Ok(())
 }

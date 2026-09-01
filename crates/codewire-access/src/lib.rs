@@ -10,7 +10,7 @@ mod grant;
 mod id;
 mod model;
 
-pub use grant::{DerivedGrant, GrantContext, derive_grants};
+pub use grant::{DerivedGrant, GrantContext, derive_grants, validate_profile_entries};
 pub use id::{
     AccessProfileId, AccessProfileName, AccessProfileReference, AccessProfileScope,
     BrokerOperationId, BrokerRouteId, CapabilitySlot, CredentialId, EnvironmentId, OwnerId,
