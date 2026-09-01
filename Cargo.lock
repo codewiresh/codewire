@@ -1368,6 +1368,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "codewire-egress-policy"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "sha2 0.10.9",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "codewire-gateway"
 version = "0.1.0"
 dependencies = [

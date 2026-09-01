@@ -11,6 +11,7 @@ members = [
     "crates/codewire-daemon",
     "crates/codewire-daemon-bridge",
     "crates/codewire-derp",
+    "crates/codewire-egress-policy",
     "crates/codewire-gateway",
     "crates/codewire-gateway-proto",
     "crates/codewire-idp",
@@ -61,6 +62,7 @@ codewire-admin-proto = { path = "crates/codewire-admin-proto", default-features 
 codewire-daemon = { path = "crates/codewire-daemon" }
 codewire-daemon-bridge = { path = "crates/codewire-daemon-bridge" }
 codewire-derp = { path = "crates/codewire-derp" }
+codewire-egress-policy = { path = "crates/codewire-egress-policy" }
 codewire-netstack = { path = "crates/codewire-netstack" }
 codewire-tailnet = { path = "crates/codewire-tailnet" }
 codewire-udp-relay = { path = "crates/codewire-udp-relay" }
