@@ -7,19 +7,23 @@ use zeroize::Zeroize;
 pub const GUEST_NETWORK_VSOCK_PORT: u32 = 7_775;
 pub const NETWORK_HOST_HELLO_LEN: usize = 96;
 pub const NETWORK_GUEST_ACK_LEN: usize = 72;
+pub const NETWORK_HOST_READY_LEN: usize = 72;
 pub const NETWORK_FRAME_HEADER_LEN: usize = 20;
 pub const NETWORK_MAX_PACKET_BYTES: usize = 2_048;
+pub const NETWORK_KEY_LEN: usize = 32;
 
-const TAG_LEN: usize = 32;
+const TAG_LEN: usize = NETWORK_KEY_LEN;
 const NONCE_LEN: usize = 32;
 const TOKEN_MIN_LEN: usize = 32;
 const TOKEN_MAX_LEN: usize = 512;
 const HOST_HELLO_MAGIC: &[u8; 8] = b"CWNETH1\0";
 const GUEST_ACK_MAGIC: &[u8; 8] = b"CWNETA1\0";
+const HOST_READY_MAGIC: &[u8; 8] = b"CWNETR1\0";
 const FRAME_MAGIC: &[u8; 8] = b"CWNETF1\0";
 const KEY_DOMAIN: &[u8] = b"codewire-network-key-v1\0";
 const HOST_HELLO_DOMAIN: &[u8] = b"codewire-network-host-hello-v1\0";
 const GUEST_ACK_DOMAIN: &[u8] = b"codewire-network-guest-ack-v1\0";
+const HOST_READY_DOMAIN: &[u8] = b"codewire-network-host-ready-v1\0";
 const SESSION_DOMAIN: &[u8] = b"codewire-network-session-v1\0";
 const FRAME_DOMAIN: &[u8] = b"codewire-network-frame-v1\0";
 
@@ -41,6 +45,15 @@ impl NetworkKey {
         mac.update(vm_id.as_bytes());
         mac.update(&generation.to_le_bytes());
         Ok(Self(mac.finalize().into_bytes().into()))
+    }
+
+    /// Reconstitute a key delivered over a private inherited bootstrap
+    /// descriptor. The daemon token is never exposed to the host worker.
+    pub fn from_derived_bytes(bytes: [u8; NETWORK_KEY_LEN]) -> Result<Self, NetworkError> {
+        if bytes.iter().all(|byte| *byte == 0) {
+            return Err(NetworkError::InvalidKey);
+        }
+        Ok(Self(bytes))
     }
 
     /// Expose the derived key only to an in-process operation such as writing
@@ -149,6 +162,52 @@ impl NetworkGuestAck {
         let nonce = bytes[8..40]
             .try_into()
             .expect("fixed network acknowledgement nonce");
+        if &nonce != expected_nonce {
+            return Err(NetworkError::InvalidIdentity);
+        }
+        Self::new(nonce)
+    }
+}
+
+/// Host proof that the authenticated worker has installed its fail-closed
+/// packet engine. Guest PID 1 does not launch the workspace before this
+/// message arrives.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NetworkHostReady {
+    pub nonce: [u8; NONCE_LEN],
+}
+
+impl NetworkHostReady {
+    pub fn new(nonce: [u8; NONCE_LEN]) -> Result<Self, NetworkError> {
+        validate_nonce(&nonce)?;
+        Ok(Self { nonce })
+    }
+
+    pub fn encode(&self, key: &NetworkKey) -> [u8; NETWORK_HOST_READY_LEN] {
+        let mut bytes = [0_u8; NETWORK_HOST_READY_LEN];
+        bytes[..8].copy_from_slice(HOST_READY_MAGIC);
+        bytes[8..40].copy_from_slice(&self.nonce);
+        let tag = authentication_tag(key, HOST_READY_DOMAIN, &[&bytes[..40]]);
+        bytes[40..].copy_from_slice(&tag);
+        bytes
+    }
+
+    pub fn decode(
+        bytes: &[u8],
+        key: &NetworkKey,
+        expected_nonce: &[u8; NONCE_LEN],
+    ) -> Result<Self, NetworkError> {
+        validate_nonce(expected_nonce)?;
+        if bytes.len() != NETWORK_HOST_READY_LEN {
+            return Err(NetworkError::InvalidLength);
+        }
+        if &bytes[..8] != HOST_READY_MAGIC {
+            return Err(NetworkError::InvalidMagic);
+        }
+        verify_authentication_tag(key, HOST_READY_DOMAIN, &[&bytes[..40]], &bytes[40..])?;
+        let nonce = bytes[8..40]
+            .try_into()
+            .expect("fixed network host-ready nonce");
         if &nonce != expected_nonce {
             return Err(NetworkError::InvalidIdentity);
         }
@@ -469,9 +528,19 @@ mod tests {
             ack.encode(&key).as_slice(),
             decode_hex(fixture["guest_ack_hex"].as_str().unwrap())
         );
+        let ready = NetworkHostReady::new(nonce).unwrap();
+        assert_eq!(
+            ready.encode(&key).as_slice(),
+            decode_hex(fixture["host_ready_hex"].as_str().unwrap())
+        );
         assert_eq!(
             NetworkGuestAck::decode(&ack.encode(&key), &key, &nonce).unwrap(),
             ack
+        );
+        let ready = NetworkHostReady::new(nonce).unwrap();
+        assert_eq!(
+            NetworkHostReady::decode(&ready.encode(&key), &key, &nonce).unwrap(),
+            ready
         );
 
         let mut guest = NetworkSession::new(&key, &nonce, NetworkRole::Guest).unwrap();
@@ -520,6 +589,14 @@ mod tests {
         assert_eq!(
             NetworkGuestAck::decode(
                 &NetworkGuestAck::new(nonce).unwrap().encode(&key),
+                &key,
+                &[0xa5; NONCE_LEN],
+            ),
+            Err(NetworkError::InvalidIdentity)
+        );
+        assert_eq!(
+            NetworkHostReady::decode(
+                &NetworkHostReady::new(nonce).unwrap().encode(&key),
                 &key,
                 &[0xa5; NONCE_LEN],
             ),
@@ -575,5 +652,12 @@ mod tests {
             encoded_network_frame_len(&header),
             Err(NetworkError::InvalidFraming)
         );
+    }
+
+    #[test]
+    fn inherited_worker_key_rejects_only_the_invalid_zero_value() {
+        assert!(NetworkKey::from_derived_bytes([0; NETWORK_KEY_LEN]).is_err());
+        let key = NetworkKey::from_derived_bytes([0xa5; NETWORK_KEY_LEN]).unwrap();
+        key.with_bytes(|bytes| assert_eq!(bytes, &[0xa5; NETWORK_KEY_LEN]));
     }
 }

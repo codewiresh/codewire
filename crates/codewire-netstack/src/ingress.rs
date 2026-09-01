@@ -18,6 +18,14 @@ pub struct InitialTcpSyn {
     pub destination: SocketAddr,
 }
 
+/// Canonical source/destination metadata for any admitted IPv4 TCP packet.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CanonicalIpv4TcpPacket {
+    pub source: SocketAddr,
+    pub destination: SocketAddr,
+    pub initial_syn: bool,
+}
+
 /// Why a packet cannot open a new transparent TCP admission.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InitialTcpSynError {
@@ -59,6 +67,52 @@ impl std::error::Error for InitialTcpSynError {}
 /// The caller must apply destination and source policy to the returned flow
 /// before it creates an exact AnyIP listener or forwards the packet.
 pub fn parse_initial_ipv4_tcp_syn(packet: &[u8]) -> Result<InitialTcpSyn, InitialTcpSynError> {
+    let parsed = parse_canonical_ipv4_tcp_packet_inner(packet)?;
+    if !parsed.syn || parsed.ack || parsed.fin || parsed.rst {
+        return Err(InitialTcpSynError::NotInitialSyn);
+    }
+    if !parsed.payload_empty {
+        return Err(InitialTcpSynError::SynPayload);
+    }
+    Ok(InitialTcpSyn {
+        source: parsed.source,
+        destination: parsed.destination,
+    })
+}
+
+/// Parse one canonical, unfragmented IPv4 TCP packet without allocating.
+///
+/// Consumers use this after the strict initial-SYN admission to ensure only
+/// the expected guest source and an already-admitted destination enter the
+/// userspace TCP/IP engine.
+pub fn parse_canonical_ipv4_tcp_packet(
+    packet: &[u8],
+) -> Result<CanonicalIpv4TcpPacket, InitialTcpSynError> {
+    let parsed = parse_canonical_ipv4_tcp_packet_inner(packet)?;
+    Ok(CanonicalIpv4TcpPacket {
+        source: parsed.source,
+        destination: parsed.destination,
+        initial_syn: parsed.syn
+            && !parsed.ack
+            && !parsed.fin
+            && !parsed.rst
+            && parsed.payload_empty,
+    })
+}
+
+struct ParsedTcpPacket {
+    source: SocketAddr,
+    destination: SocketAddr,
+    syn: bool,
+    ack: bool,
+    fin: bool,
+    rst: bool,
+    payload_empty: bool,
+}
+
+fn parse_canonical_ipv4_tcp_packet_inner(
+    packet: &[u8],
+) -> Result<ParsedTcpPacket, InitialTcpSynError> {
     let ipv4 = Ipv4Packet::new_checked(packet).map_err(|_| InitialTcpSynError::InvalidIpv4)?;
     if usize::from(ipv4.total_len()) != packet.len() {
         return Err(InitialTcpSynError::NonCanonicalIpv4Length);
@@ -82,17 +136,11 @@ pub fn parse_initial_ipv4_tcp_syn(packet: &[u8]) -> Result<InitialTcpSyn, Initia
     if !tcp.verify_checksum(&source_ip, &destination_ip) {
         return Err(InitialTcpSynError::InvalidTcpChecksum);
     }
-    if !tcp.syn() || tcp.ack() || tcp.fin() || tcp.rst() {
-        return Err(InitialTcpSynError::NotInitialSyn);
-    }
     if tcp.src_port() == 0 || tcp.dst_port() == 0 {
         return Err(InitialTcpSynError::ZeroPort);
     }
-    if !tcp.payload().is_empty() {
-        return Err(InitialTcpSynError::SynPayload);
-    }
 
-    Ok(InitialTcpSyn {
+    Ok(ParsedTcpPacket {
         source: SocketAddr::new(
             IpAddr::V4(Ipv4Addr::from(ipv4.src_addr().octets())),
             tcp.src_port(),
@@ -101,5 +149,10 @@ pub fn parse_initial_ipv4_tcp_syn(packet: &[u8]) -> Result<InitialTcpSyn, Initia
             IpAddr::V4(Ipv4Addr::from(ipv4.dst_addr().octets())),
             tcp.dst_port(),
         ),
+        syn: tcp.syn(),
+        ack: tcp.ack(),
+        fin: tcp.fin(),
+        rst: tcp.rst(),
+        payload_empty: tcp.payload().is_empty(),
     })
 }

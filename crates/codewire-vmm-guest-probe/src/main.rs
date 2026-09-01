@@ -43,6 +43,18 @@ fn entrypoint() -> anyhow::Result<()> {
                 .context("create guest daemon Tokio runtime")?;
             runtime.block_on(guest::run_daemon())
         }
+        Some("network-agent") => {
+            ensure!(
+                arguments.next().is_none(),
+                "network agent accepts no arguments"
+            );
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_io()
+                .enable_time()
+                .build()
+                .context("create guest network-agent Tokio runtime")?;
+            runtime.block_on(guest::run_network_agent())
+        }
         Some("identity") => {
             ensure!(arguments.next().is_none(), "identity accepts no arguments");
             guest::run_identity()

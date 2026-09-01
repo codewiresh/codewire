@@ -41,7 +41,10 @@ pub use dns::{
     build_ipv4_dns_response, parse_ipv4_dns_question, DnsAnswer, DnsBoundaryError, DnsQuestion,
     DnsRecordType,
 };
-pub use ingress::{parse_initial_ipv4_tcp_syn, InitialTcpSyn, InitialTcpSynError};
+pub use ingress::{
+    parse_canonical_ipv4_tcp_packet, parse_initial_ipv4_tcp_syn, CanonicalIpv4TcpPacket,
+    InitialTcpSyn, InitialTcpSynError,
+};
 pub use stream::{TcpListener, TcpStream};
 
 use std::net::{IpAddr, SocketAddr};

@@ -1,7 +1,7 @@
 use std::ffi::{CString, OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
-use std::mem::size_of;
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpStream, UdpSocket};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt};
@@ -10,9 +10,9 @@ use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process::{Command, Stdio};
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc as std_mpsc;
+use std::sync::{Arc, OnceLock};
 use std::task::{Context as TaskContext, Poll};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -26,12 +26,21 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::watch;
+use tokio::{
+    io::unix::AsyncFd,
+    io::{AsyncReadExt, AsyncWriteExt},
+};
 use tokio_stream::Stream;
 use tokio_vsock::{
     Incoming, VMADDR_CID_ANY, VMADDR_CID_HOST, VsockAddr, VsockListener, VsockStream,
 };
 use zeroize::Zeroizing;
 
+use crate::network::{
+    GUEST_NETWORK_VSOCK_PORT, NETWORK_FRAME_HEADER_LEN, NETWORK_HOST_HELLO_LEN,
+    NETWORK_HOST_READY_LEN, NETWORK_MAX_PACKET_BYTES, NetworkGuestAck, NetworkHostHello,
+    NetworkHostReady, NetworkKey, NetworkRole, NetworkSession, encoded_network_frame_len,
+};
 use crate::setup_apply::{
     OCI_LOWER_ROOT_MODE, SetupApplyError, apply_setup_layers, verify_completed_setup_generation,
 };
@@ -53,11 +62,12 @@ pub const ROOT_MOUNT_PATH: &str = "/generation";
 pub const WORKSPACE_PATH: &str = "/workspace";
 pub const CONTROL_PATH: &str = "/state/codewire";
 pub const BOOT_STAGE_PATH: &str = "/state/codewire/boot-stage";
+pub const NETWORK_STATUS_PATH: &str = "/state/codewire/network-status";
 pub const NONCE_PATH: &str = "/state/codewire/nonce";
 pub const POWEROFF_MARKER_PATH: &str = "/state/codewire/poweroff.accepted";
 pub const IDENTITY_MARKER: &str = "CWIDENTITY1";
 pub const NONCE_MARKER: &str = "CWNONCE1";
-pub const NETWORK_MARKER: &str = "CWNETWORK1 loopback-only";
+pub const NETWORK_MARKER: &str = "CWNETWORK2 isolated-tun";
 pub const POWEROFF_MARKER: &str = "CWPOWEROFF1 accepted";
 pub const RUNC_PATH: &str = "/sbin/runc";
 pub const RUNC_STATE_PATH: &str = "/run/codewire/runc";
@@ -81,10 +91,12 @@ const ROOT_MERGED_PATH: &str = "/generation/merged";
 const CONTAINER_CONTROL_PATH: &str = "/run/codewire/container";
 const CONTAINER_IDENTITY_PATH: &str = "/run/codewire/container/identity.json";
 const CONTAINER_MACHINE_ID_PATH: &str = "/run/codewire/container/machine-id";
+const CONTAINER_RESOLV_CONF_PATH: &str = "/run/codewire/container/resolv.conf";
 const CONTAINER_POWEROFF_SOCKET: &str = "/run/codewire/container/poweroff.sock";
 const CONTAINER_CONTROL_DESTINATION: &str = "/run/codewire-host";
 const CONTAINER_IDENTITY_DESTINATION: &str = "/run/codewire-host/identity.json";
 const CONTAINER_MACHINE_ID_DESTINATION: &str = "/etc/machine-id";
+const CONTAINER_RESOLV_CONF_DESTINATION: &str = "/etc/resolv.conf";
 const CONTAINER_POWEROFF_DESTINATION: &str = "/run/codewire-host/poweroff.sock";
 const INSTALL_STATE_PATH: &str = "/state/codewire/workspace-install.state";
 const CONTAINER_INSTALL_STATE_PATH: &str = "/run/codewire-runtime/install.state";
@@ -100,6 +112,57 @@ const WORKSPACE_STOP_TIMEOUT: Duration = Duration::from_secs(5);
 const RUNC_CONTROL_TIMEOUT: Duration = Duration::from_secs(1);
 const CONTROL_MESSAGE_LIMIT: usize = 32;
 const WORKSPACE_READY_FD: RawFd = 3;
+const NETWORK_AGENT_READY_FD: RawFd = 3;
+const NETWORK_AGENT_READY: &[u8] = b"CWNETG1 namespace-ready\n";
+const NETWORK_AGENT_HOST_READY: &[u8] = b"CWNETG1 host-ready\n";
+const NETWORK_NAMESPACE_PATH: &str = "/run/codewire/netns/workspace";
+const NETWORK_NAMESPACE_DIRECTORY: &str = "/run/codewire/netns";
+const NETWORK_INTERFACE: &str = "cw0";
+const NETWORK_GUEST_ADDRESS: &str = "192.0.2.2/30";
+const NETWORK_GATEWAY_ADDRESS: &str = "192.0.2.1";
+const NETWORK_MTU: usize = 1_500;
+const NETWORK_AGENT_START_TIMEOUT: Duration = Duration::from_secs(10);
+const NETWORK_AGENT_HOST_TIMEOUT: Duration = Duration::from_secs(30);
+const NETWORK_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
+const NSFS_MAGIC: u64 = 0x6e73_6673;
+const NETWORK_AGENT_FAILURE_STAGES: &[&str] = &[
+    "workspace-net-seed-failed",
+    "workspace-net-tun-open-failed",
+    "workspace-net-tun-attach-failed",
+    "workspace-net-loopback-failed",
+    "workspace-net-link-failed",
+    "workspace-net-address-failed",
+    "workspace-net-route-failed",
+    "workspace-net-ipv-six-failed",
+    "workspace-net-topology-failed",
+    "workspace-net-async-failed",
+    "workspace-net-vsock-failed",
+    "workspace-net-caps-failed",
+    "workspace-net-ready-failed",
+    "workspace-net-publish-failed",
+    "workspace-net-peer-failed",
+    "workspace-net-handshake-timeout",
+    "workspace-net-hello-read-failed",
+    "workspace-net-hello-auth-failed",
+    "workspace-net-ack-write-failed",
+    "workspace-net-ready-read-failed",
+    "workspace-net-ready-auth-failed",
+    "workspace-net-session-failed",
+];
+const NETWORK_AGENT_GENERIC_FAILURE_STAGE: &str = "workspace-net-start-failed";
+const NETWORK_AGENT_HOST_FAILURE_STAGE: &str = "workspace-net-host-failed";
+const NETWORK_STATUS_VALUES: &[&str] = &[
+    "network-listening",
+    "network-peer-rejected",
+    "network-handshake-timeout",
+    "network-hello-read-failed",
+    "network-hello-auth-failed",
+    "network-ack-write-failed",
+    "network-ready-read-failed",
+    "network-ready-auth-failed",
+    "network-session-failed",
+    "network-authenticated",
+];
 const WORKSPACE_READY_LIMIT: usize = 96;
 const WORKSPACE_FAILURE_FRAMES: &[(&[u8], &str)] = &[
     (
@@ -268,16 +331,27 @@ pub fn run_init() -> Result<()> {
     prepare_install_state()?;
     let poweroff = prepare_container_control(&seed, &plan.identity)?;
     record_boot_stage("container-control-ready")?;
+    let mut network = match spawn_guest_network_agent() {
+        Ok(network) => network,
+        Err(error) => {
+            record_network_agent_failure(NETWORK_AGENT_GENERIC_FAILURE_STAGE)?;
+            return Err(error);
+        }
+    };
     prepare_workspace_generation(&plan)?;
     record_boot_stage("root-generation-ready")?;
     expose_persistent_layout(&plan)?;
     record_boot_stage("persistent-layout-ready")?;
+    if let Err(error) = network.wait_for_host() {
+        record_network_agent_failure(NETWORK_AGENT_HOST_FAILURE_STAGE)?;
+        return Err(error);
+    }
     let workspace = spawn_workspace_container(&plan)?;
     record_boot_stage("workspace-running")?;
 
     let daemon = spawn_daemon()?;
     record_boot_stage("daemon-started")?;
-    supervise_guest(daemon, workspace, poweroff)
+    supervise_guest(daemon, workspace, network.into_child()?, poweroff)
 }
 
 fn require_persisted_workspace_plan(plan: Option<WorkspacePlan>) -> Result<WorkspacePlan> {
@@ -333,6 +407,482 @@ pub async fn run_daemon() -> Result<()> {
     )
     .await
     .context("serve authenticated guest daemon over AF_VSOCK")
+}
+
+/// Trusted guest-side end of the raw-IP seam. This process is created by PID
+/// 1 inside a fresh network namespace, configures exactly one TUN, drops every
+/// capability, and then accepts only authenticated host-CID sessions.
+pub async fn run_network_agent() -> Result<()> {
+    ensure!(
+        unsafe { libc::getpid() } != 1,
+        "guest network agent must not be PID 1"
+    );
+    ensure!(
+        std::env::vars_os().next().is_none(),
+        "guest network agent refuses an ambient environment"
+    );
+    if unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0) } == -1 {
+        record_boot_stage("workspace-net-caps-failed")?;
+        return Err(io::Error::last_os_error()).context("confine guest network agent state");
+    }
+
+    let mut readiness = network_agent_readiness_stream().inspect_err(|_| {
+        let _ = record_boot_stage("workspace-net-ready-failed");
+    })?;
+    let seed = network_agent_startup(
+        read_seed_from_discovered_disk(),
+        "workspace-net-seed-failed",
+    )?;
+    let vm_id = seed.vm_id();
+    let generation = seed.generation();
+    let key = network_agent_startup(
+        NetworkKey::derive(seed.auth_token(), vm_id, generation)
+            .context("derive guest network session key"),
+        "workspace-net-seed-failed",
+    )?;
+    let tun = Arc::new(network_agent_startup(
+        AsyncFd::new(open_and_configure_tun()?)
+            .context("register guest TUN with the async runtime"),
+        "workspace-net-async-failed",
+    )?);
+    let listener = network_agent_startup(
+        VsockListener::bind(VsockAddr::new(VMADDR_CID_ANY, GUEST_NETWORK_VSOCK_PORT))
+            .context("bind guest network AF_VSOCK port"),
+        "workspace-net-vsock-failed",
+    )?;
+    network_agent_startup(
+        clear_process_capabilities().context("drop guest network agent capabilities"),
+        "workspace-net-caps-failed",
+    )?;
+    if unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) } == -1 {
+        record_boot_stage("workspace-net-caps-failed")?;
+        return Err(io::Error::last_os_error()).context("confine guest network agent privileges");
+    }
+
+    network_agent_startup(
+        publish_network_agent_message(&mut readiness, NETWORK_AGENT_READY),
+        "workspace-net-publish-failed",
+    )?;
+    let mut readiness = Some(readiness);
+    record_network_status("network-listening")?;
+
+    loop {
+        tokio::select! {
+            packet = read_tun_packet(&tun) => {
+                // With no authenticated host, consuming and discarding the
+                // bounded packet is the fail-closed path. It also prevents a
+                // later worker from receiving pre-authentication traffic.
+                let _ = packet?;
+            }
+            accepted = listener.accept() => {
+                let (stream, peer) = accepted.context("accept guest network AF_VSOCK session")?;
+                if peer.cid() != VMADDR_CID_HOST {
+                    record_network_status("network-peer-rejected")?;
+                    record_boot_stage("workspace-net-peer-failed")?;
+                    bail!("guest network peer is not the host CID");
+                }
+                let authenticated = tokio::time::timeout(
+                    NETWORK_HANDSHAKE_TIMEOUT,
+                    authenticate_guest_network(stream, &key, vm_id, generation),
+                )
+                .await;
+                let (stream, session) = match authenticated {
+                    Ok(Ok(authenticated)) => authenticated,
+                    Ok(Err(error)) => {
+                        let status = error.status();
+                        record_network_status(status)?;
+                        record_boot_stage(error.failure_stage())?;
+                        bail!("guest network authentication failed");
+                    }
+                    Err(_) => {
+                        record_network_status("network-handshake-timeout")?;
+                        record_boot_stage("workspace-net-handshake-timeout")?;
+                        bail!("guest network authentication timed out");
+                    }
+                };
+                record_network_status("network-authenticated")?;
+                if let Some(mut channel) = readiness.take() {
+                    publish_network_agent_message(&mut channel, NETWORK_AGENT_HOST_READY)?;
+                }
+                // A lost or malformed worker session never opens another
+                // route. Return to the host-only accept loop and drain/drop
+                // packets until a fresh authenticated worker arrives.
+                if bridge_guest_network(stream, session, Arc::clone(&tun))
+                    .await
+                    .is_err()
+                {
+                    record_network_status("network-session-failed")?;
+                }
+            }
+        }
+    }
+}
+
+async fn authenticate_guest_network(
+    mut stream: VsockStream,
+    key: &NetworkKey,
+    vm_id: uuid::Uuid,
+    generation: u64,
+) -> Result<(VsockStream, NetworkSession), GuestNetworkHandshakeError> {
+    let mut hello = [0_u8; NETWORK_HOST_HELLO_LEN];
+    AsyncReadExt::read_exact(&mut stream, &mut hello)
+        .await
+        .map_err(|_| GuestNetworkHandshakeError::ReadHello)?;
+    let hello = NetworkHostHello::decode(&hello, key, vm_id, generation)
+        .map_err(|_| GuestNetworkHandshakeError::AuthenticateHello)?;
+    let acknowledgement = NetworkGuestAck::new(hello.nonce)
+        .map_err(|_| GuestNetworkHandshakeError::AuthenticateHello)?
+        .encode(key);
+    AsyncWriteExt::write_all(&mut stream, &acknowledgement)
+        .await
+        .map_err(|_| GuestNetworkHandshakeError::WriteAcknowledgement)?;
+    let mut ready = [0_u8; NETWORK_HOST_READY_LEN];
+    AsyncReadExt::read_exact(&mut stream, &mut ready)
+        .await
+        .map_err(|_| GuestNetworkHandshakeError::ReadReady)?;
+    NetworkHostReady::decode(&ready, key, &hello.nonce)
+        .map_err(|_| GuestNetworkHandshakeError::AuthenticateReady)?;
+    let session = NetworkSession::new(key, &hello.nonce, NetworkRole::Guest)
+        .map_err(|_| GuestNetworkHandshakeError::Session)?;
+    Ok((stream, session))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GuestNetworkHandshakeError {
+    ReadHello,
+    AuthenticateHello,
+    WriteAcknowledgement,
+    ReadReady,
+    AuthenticateReady,
+    Session,
+}
+
+impl GuestNetworkHandshakeError {
+    fn status(self) -> &'static str {
+        match self {
+            Self::ReadHello => "network-hello-read-failed",
+            Self::AuthenticateHello => "network-hello-auth-failed",
+            Self::WriteAcknowledgement => "network-ack-write-failed",
+            Self::ReadReady => "network-ready-read-failed",
+            Self::AuthenticateReady => "network-ready-auth-failed",
+            Self::Session => "network-session-failed",
+        }
+    }
+
+    fn failure_stage(self) -> &'static str {
+        match self {
+            Self::ReadHello => "workspace-net-hello-read-failed",
+            Self::AuthenticateHello => "workspace-net-hello-auth-failed",
+            Self::WriteAcknowledgement => "workspace-net-ack-write-failed",
+            Self::ReadReady => "workspace-net-ready-read-failed",
+            Self::AuthenticateReady => "workspace-net-ready-auth-failed",
+            Self::Session => "workspace-net-session-failed",
+        }
+    }
+}
+
+async fn bridge_guest_network(
+    stream: VsockStream,
+    session: NetworkSession,
+    tun: Arc<AsyncFd<OwnedFd>>,
+) -> Result<()> {
+    let session = Arc::new(tokio::sync::Mutex::new(session));
+    let (mut stream_read, mut stream_write) = tokio::io::split(stream);
+    let outbound_session = Arc::clone(&session);
+    let outbound_tun = Arc::clone(&tun);
+    let outbound = async move {
+        loop {
+            let packet = read_tun_packet(&outbound_tun).await?;
+            if !canonical_ipv4_packet(&packet) {
+                continue;
+            }
+            let frame = outbound_session
+                .lock()
+                .await
+                .encode_packet(&packet)
+                .context("authenticate guest network outbound packet")?;
+            stream_write
+                .write_all(&frame)
+                .await
+                .context("write guest network packet frame")?;
+        }
+        #[allow(unreachable_code)]
+        Ok::<(), anyhow::Error>(())
+    };
+    let inbound_session = Arc::clone(&session);
+    let inbound = async move {
+        loop {
+            let mut header = [0_u8; NETWORK_FRAME_HEADER_LEN];
+            stream_read
+                .read_exact(&mut header)
+                .await
+                .context("read guest network frame header")?;
+            let frame_len =
+                encoded_network_frame_len(&header).context("bound guest network frame")?;
+            let mut frame = vec![0_u8; frame_len];
+            frame[..NETWORK_FRAME_HEADER_LEN].copy_from_slice(&header);
+            stream_read
+                .read_exact(&mut frame[NETWORK_FRAME_HEADER_LEN..])
+                .await
+                .context("read guest network frame payload")?;
+            let packet = inbound_session
+                .lock()
+                .await
+                .decode_packet(&frame)
+                .context("authenticate guest network inbound packet")?;
+            ensure!(
+                canonical_ipv4_packet(&packet),
+                "host supplied a non-canonical IPv4 packet"
+            );
+            write_tun_packet(&tun, &packet).await?;
+        }
+        #[allow(unreachable_code)]
+        Ok::<(), anyhow::Error>(())
+    };
+    tokio::try_join!(outbound, inbound)?;
+    Ok(())
+}
+
+fn canonical_ipv4_packet(packet: &[u8]) -> bool {
+    if !(20..=NETWORK_MTU).contains(&packet.len()) || packet[0] >> 4 != 4 {
+        return false;
+    }
+    let header_words = usize::from(packet[0] & 0x0f);
+    if header_words < 5
+        || header_words
+            .checked_mul(4)
+            .is_none_or(|length| length > packet.len())
+    {
+        return false;
+    }
+    usize::from(u16::from_be_bytes([packet[2], packet[3]])) == packet.len()
+}
+
+async fn read_tun_packet(tun: &AsyncFd<OwnedFd>) -> io::Result<Vec<u8>> {
+    let mut packet = vec![0_u8; NETWORK_MAX_PACKET_BYTES];
+    loop {
+        let mut ready = tun.readable().await?;
+        match ready.try_io(|descriptor| {
+            let length = unsafe {
+                libc::read(
+                    descriptor.get_ref().as_raw_fd(),
+                    packet.as_mut_ptr().cast(),
+                    packet.len(),
+                )
+            };
+            if length == -1 {
+                Err(io::Error::last_os_error())
+            } else {
+                Ok(length as usize)
+            }
+        }) {
+            Ok(Ok(0)) => return Err(io::Error::from(io::ErrorKind::UnexpectedEof)),
+            Ok(Ok(length)) => {
+                packet.truncate(length);
+                return Ok(packet);
+            }
+            Ok(Err(error)) => return Err(error),
+            Err(_) => continue,
+        }
+    }
+}
+
+async fn write_tun_packet(tun: &AsyncFd<OwnedFd>, packet: &[u8]) -> io::Result<()> {
+    loop {
+        let mut ready = tun.writable().await?;
+        match ready.try_io(|descriptor| {
+            let length = unsafe {
+                libc::write(
+                    descriptor.get_ref().as_raw_fd(),
+                    packet.as_ptr().cast(),
+                    packet.len(),
+                )
+            };
+            if length == -1 {
+                Err(io::Error::last_os_error())
+            } else {
+                Ok(length as usize)
+            }
+        }) {
+            Ok(Ok(length)) if length == packet.len() => return Ok(()),
+            Ok(Ok(_)) => return Err(io::Error::from(io::ErrorKind::WriteZero)),
+            Ok(Err(error)) => return Err(error),
+            Err(_) => continue,
+        }
+    }
+}
+
+#[repr(C)]
+struct TunIfreq {
+    name: [libc::c_char; libc::IF_NAMESIZE],
+    flags: libc::c_short,
+    padding: [u8; 22],
+}
+
+fn open_and_configure_tun() -> Result<OwnedFd> {
+    let raw = unsafe {
+        libc::open(
+            c"/dev/net/tun".as_ptr(),
+            libc::O_RDWR | libc::O_NONBLOCK | libc::O_CLOEXEC,
+        )
+    };
+    if raw == -1 {
+        record_boot_stage("workspace-net-tun-open-failed")?;
+        return Err(io::Error::last_os_error()).context("open guest TUN device");
+    }
+    let descriptor = unsafe { OwnedFd::from_raw_fd(raw) };
+    let mut request = TunIfreq {
+        name: [0; libc::IF_NAMESIZE],
+        flags: (0x0001 | 0x1000) as libc::c_short,
+        padding: [0; 22],
+    };
+    for (destination, byte) in request.name.iter_mut().zip(NETWORK_INTERFACE.bytes()) {
+        *destination = byte as libc::c_char;
+    }
+    let tunsetiff = if cfg!(any(
+        target_arch = "mips",
+        target_arch = "mips64",
+        target_arch = "powerpc",
+        target_arch = "powerpc64",
+        target_arch = "sparc64"
+    )) {
+        0x8004_54ca_u64
+    } else {
+        0x4004_54ca_u64
+    } as libc::c_ulong;
+    if unsafe { libc::ioctl(descriptor.as_raw_fd(), tunsetiff as _, &mut request) } == -1 {
+        record_boot_stage("workspace-net-tun-attach-failed")?;
+        return Err(io::Error::last_os_error()).context("attach guest TUN interface");
+    }
+
+    for (arguments, failure_stage) in [
+        (
+            vec!["ip", "link", "set", "dev", "lo", "up"],
+            "workspace-net-loopback-failed",
+        ),
+        (
+            vec![
+                "ip",
+                "link",
+                "set",
+                "dev",
+                NETWORK_INTERFACE,
+                "mtu",
+                "1500",
+                "up",
+            ],
+            "workspace-net-link-failed",
+        ),
+        (
+            vec![
+                "ip",
+                "addr",
+                "add",
+                NETWORK_GUEST_ADDRESS,
+                "dev",
+                NETWORK_INTERFACE,
+            ],
+            "workspace-net-address-failed",
+        ),
+        (
+            vec![
+                "ip",
+                "route",
+                "add",
+                "default",
+                "via",
+                NETWORK_GATEWAY_ADDRESS,
+                "dev",
+                NETWORK_INTERFACE,
+            ],
+            "workspace-net-route-failed",
+        ),
+    ] {
+        network_agent_startup(run_fixed_busybox(&arguments), failure_stage)?;
+    }
+    for path in [
+        "/proc/sys/net/ipv6/conf/all/disable_ipv6",
+        "/proc/sys/net/ipv6/conf/default/disable_ipv6",
+        "/proc/sys/net/ipv6/conf/lo/disable_ipv6",
+        "/proc/sys/net/ipv6/conf/cw0/disable_ipv6",
+    ] {
+        network_agent_startup(
+            write_proc_value(Path::new(path), b"1\n"),
+            "workspace-net-ipv-six-failed",
+        )?;
+    }
+    network_agent_startup(
+        verify_isolated_tun(
+            Path::new("/proc/net/dev"),
+            Path::new("/proc/net/route"),
+            Path::new("/proc/net/ipv6_route"),
+        ),
+        "workspace-net-topology-failed",
+    )?;
+    Ok(descriptor)
+}
+
+fn network_agent_startup<T>(result: Result<T>, failure_stage: &'static str) -> Result<T> {
+    debug_assert!(NETWORK_AGENT_FAILURE_STAGES.contains(&failure_stage));
+    match result {
+        Ok(value) => Ok(value),
+        Err(error) => {
+            record_boot_stage(failure_stage)?;
+            Err(error)
+        }
+    }
+}
+
+fn run_fixed_busybox(arguments: &[&str]) -> Result<()> {
+    let status = Command::new("/bin/busybox")
+        .args(arguments)
+        .env_clear()
+        .current_dir("/")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .context("configure isolated guest TUN")?;
+    ensure!(status.success(), "isolated guest TUN configuration failed");
+    Ok(())
+}
+
+fn write_proc_value(path: &Path, value: &[u8]) -> Result<()> {
+    let mut file = OpenOptions::new()
+        .write(true)
+        .open(path)
+        .with_context(|| format!("open kernel network setting {}", path.display()))?;
+    file.write_all(value)
+        .with_context(|| format!("write kernel network setting {}", path.display()))
+}
+
+fn network_agent_readiness_stream() -> Result<UnixStream> {
+    let flags = unsafe { libc::fcntl(NETWORK_AGENT_READY_FD, libc::F_GETFD) };
+    ensure!(flags != -1, "guest network readiness descriptor is absent");
+    if unsafe {
+        libc::fcntl(
+            NETWORK_AGENT_READY_FD,
+            libc::F_SETFD,
+            flags | libc::FD_CLOEXEC,
+        )
+    } == -1
+    {
+        return Err(io::Error::last_os_error()).context("confine guest network readiness channel");
+    }
+    let stream = unsafe { UnixStream::from_raw_fd(NETWORK_AGENT_READY_FD) };
+    let stat = rustix::fs::fstat(&stream).context("inspect guest network readiness channel")?;
+    ensure!(
+        RustixFileType::from_raw_mode(stat.st_mode) == RustixFileType::Socket,
+        "guest network readiness descriptor is not a socket"
+    );
+    Ok(stream)
+}
+
+fn publish_network_agent_message(stream: &mut UnixStream, message: &[u8]) -> Result<()> {
+    stream
+        .write_all(message)
+        .context("publish guest network readiness")?;
+    stream.flush().context("flush guest network readiness")
 }
 
 struct HostOnlyIncoming {
@@ -424,15 +974,76 @@ pub fn run_read_nonce() -> Result<()> {
 
 pub fn run_network_check() -> Result<()> {
     let _ = read_guest_identity()?;
-    verify_loopback_only(
-        Path::new("/sys/class/net"),
+    verify_isolated_tun(
+        Path::new("/proc/net/dev"),
         Path::new("/proc/net/route"),
         Path::new("/proc/net/ipv6_route"),
     )?;
-    verify_no_ip_egress_canaries()?;
+    for destination in [
+        SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 1), 53),
+        SocketAddrV4::new(Ipv4Addr::new(203, 0, 113, 19), 443),
+        SocketAddrV4::new(Ipv4Addr::LOCALHOST, 1),
+        SocketAddrV4::new(Ipv4Addr::new(169, 254, 169, 254), 80),
+    ] {
+        ensure!(
+            TcpStream::connect_timeout(&SocketAddr::V4(destination), Duration::from_millis(100),)
+                .is_err(),
+            "isolated workspace unexpectedly completed a TCP connection"
+        );
+    }
+    require_no_udp_response()?;
+    require_raw_icmp_denied()?;
     let mut stdout = io::stdout().lock();
     writeln!(stdout, "{NETWORK_MARKER}")?;
     stdout.flush()?;
+    Ok(())
+}
+
+fn require_no_udp_response() -> Result<()> {
+    let socket = UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0))
+        .context("bind isolated workspace UDP canary")?;
+    socket
+        .set_read_timeout(Some(Duration::from_millis(100)))
+        .context("bound isolated workspace UDP canary")?;
+    let query = b"\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x07fixture\x08codewire\x04test\x00\x00\x01\x00\x01";
+    let mut response = [0_u8; 512];
+    for destination in [
+        SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 1), 53),
+        SocketAddrV4::new(Ipv4Addr::new(8, 8, 8, 8), 53),
+        SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 1), 9),
+    ] {
+        let _ = socket.send_to(query, destination);
+        match socket.recv_from(&mut response) {
+            Ok(_) => bail!("isolated workspace unexpectedly received a UDP response"),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                ) => {}
+            Err(_) => {}
+        }
+    }
+    Ok(())
+}
+
+fn require_raw_icmp_denied() -> Result<()> {
+    let descriptor = unsafe {
+        libc::socket(
+            libc::AF_INET,
+            libc::SOCK_RAW | libc::SOCK_CLOEXEC,
+            libc::IPPROTO_ICMP,
+        )
+    };
+    if descriptor != -1 {
+        unsafe {
+            libc::close(descriptor);
+        }
+        bail!("isolated workspace unexpectedly created a raw ICMP socket");
+    }
+    ensure!(
+        io::Error::last_os_error().raw_os_error() == Some(libc::EPERM),
+        "isolated workspace raw ICMP denial is not capability-enforced"
+    );
     Ok(())
 }
 
@@ -1434,6 +2045,36 @@ fn record_boot_stage(stage: &'static str) -> Result<()> {
     Ok(())
 }
 
+fn record_network_status(status: &'static str) -> Result<()> {
+    ensure!(
+        NETWORK_STATUS_VALUES.contains(&status),
+        "guest network status is outside the fixed allowlist"
+    );
+    let mut value = status.as_bytes().to_vec();
+    value.push(b'\n');
+    write_durable(Path::new(NETWORK_STATUS_PATH), &value, 0o600)
+        .context("persist bounded guest network status")
+}
+
+fn record_network_agent_failure(fallback: &'static str) -> Result<()> {
+    debug_assert!(
+        fallback == NETWORK_AGENT_GENERIC_FAILURE_STAGE
+            || fallback == NETWORK_AGENT_HOST_FAILURE_STAGE
+    );
+    let persisted = read_bounded(Path::new(BOOT_STAGE_PATH), 34)
+        .ok()
+        .and_then(|bytes| {
+            let value = bytes.strip_suffix(b"\n")?;
+            let value = std::str::from_utf8(value).ok()?;
+            NETWORK_AGENT_FAILURE_STAGES
+                .iter()
+                .copied()
+                .find(|candidate| *candidate == value)
+        })
+        .unwrap_or(fallback);
+    record_boot_stage(persisted)
+}
+
 fn setup_content_failure_stage(error: &SetupContentError) -> &'static str {
     match error {
         SetupContentError::InvalidFraming => "setup-invalid-framing",
@@ -1767,6 +2408,12 @@ fn prepare_container_control(
         0o444,
     )
     .context("publish environment-specific machine identity")?;
+    write_durable(
+        Path::new(CONTAINER_RESOLV_CONF_PATH),
+        format!("nameserver {NETWORK_GATEWAY_ADDRESS}\noptions attempts:1 timeout:1\n").as_bytes(),
+        0o444,
+    )
+    .context("publish isolated workspace resolver configuration")?;
     lchown(
         Path::new(CONTAINER_IDENTITY_PATH),
         workspace_identity.uid,
@@ -1795,6 +2442,172 @@ fn prepare_container_control(
         .set_nonblocking(true)
         .context("make guest poweroff socket nonblocking")?;
     Ok(socket)
+}
+
+struct GuestNetworkAgent {
+    child: Option<std::process::Child>,
+    readiness: UnixStream,
+}
+
+impl GuestNetworkAgent {
+    fn wait_for_host(&mut self) -> Result<()> {
+        wait_for_network_agent_message(
+            &mut self.readiness,
+            NETWORK_AGENT_HOST_READY,
+            NETWORK_AGENT_HOST_TIMEOUT,
+        )
+    }
+
+    fn into_child(mut self) -> Result<std::process::Child> {
+        self.child
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("guest network agent child is absent"))
+    }
+}
+
+impl Drop for GuestNetworkAgent {
+    fn drop(&mut self) {
+        if let Some(child) = self.child.as_mut() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+fn spawn_guest_network_agent() -> Result<GuestNetworkAgent> {
+    create_dir(Path::new(NETWORK_NAMESPACE_DIRECTORY), 0o700)?;
+    let namespace = Path::new(NETWORK_NAMESPACE_PATH);
+    let mut options = OpenOptions::new();
+    options
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    let namespace_file = options
+        .open(namespace)
+        .context("create private workspace network namespace mountpoint")?;
+    namespace_file
+        .sync_all()
+        .context("sync workspace network namespace mountpoint")?;
+    drop(namespace_file);
+
+    let (readiness, readiness_writer) =
+        UnixStream::pair().context("create guest network readiness channel")?;
+    readiness
+        .set_nonblocking(true)
+        .context("make guest network readiness channel nonblocking")?;
+    let readiness_fd = readiness_writer.as_raw_fd();
+    let expected_parent = unsafe { libc::getpid() };
+    let mut command = Command::new(INIT_PATH);
+    command
+        .arg("network-agent")
+        .env_clear()
+        .current_dir("/")
+        .stdin(Stdio::null())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit());
+    unsafe {
+        command.pre_exec(move || {
+            if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) == -1
+                || libc::getppid() != expected_parent
+                || libc::unshare(libc::CLONE_NEWNET) == -1
+            {
+                return Err(io::Error::last_os_error());
+            }
+            if readiness_fd != NETWORK_AGENT_READY_FD
+                && libc::dup2(readiness_fd, NETWORK_AGENT_READY_FD) == -1
+            {
+                return Err(io::Error::last_os_error());
+            }
+            if libc::fcntl(NETWORK_AGENT_READY_FD, libc::F_SETFD, 0) == -1
+                || libc::syscall(
+                    libc::SYS_close_range,
+                    4_u32,
+                    u32::MAX,
+                    libc::CLOSE_RANGE_CLOEXEC,
+                ) != 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let child = command
+        .spawn()
+        .context("spawn trusted guest network agent")?;
+    let mut agent = GuestNetworkAgent {
+        child: Some(child),
+        readiness,
+    };
+    drop(readiness_writer);
+
+    let pid = agent
+        .child
+        .as_ref()
+        .map(std::process::Child::id)
+        .ok_or_else(|| anyhow::anyhow!("guest network agent PID is absent"))?;
+    let source = format!("/proc/{pid}/ns/net");
+    let link = fs::read_link(&source).context("inspect guest network agent namespace")?;
+    ensure!(
+        link.as_os_str().as_bytes().starts_with(b"net:["),
+        "guest network agent namespace identity is invalid"
+    );
+    mount_fs(&source, NETWORK_NAMESPACE_PATH, "none", libc::MS_BIND, "")
+        .context("pin workspace network namespace")?;
+    validate_network_namespace_mount(namespace)?;
+    wait_for_network_agent_message(
+        &mut agent.readiness,
+        NETWORK_AGENT_READY,
+        NETWORK_AGENT_START_TIMEOUT,
+    )?;
+    Ok(agent)
+}
+
+fn validate_network_namespace_mount(path: &Path) -> Result<()> {
+    let path = CString::new(path.as_os_str().as_bytes())
+        .context("workspace network namespace path contains NUL")?;
+    let mut filesystem: libc::statfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::statfs(path.as_ptr(), &mut filesystem) } == -1 {
+        return Err(io::Error::last_os_error())
+            .context("inspect workspace network namespace mount");
+    }
+    ensure!(
+        filesystem.f_type as u64 == NSFS_MAGIC,
+        "workspace network namespace is not an nsfs mount"
+    );
+    Ok(())
+}
+
+fn wait_for_network_agent_message(
+    stream: &mut UnixStream,
+    expected: &[u8],
+    timeout: Duration,
+) -> Result<()> {
+    let deadline = Instant::now() + timeout;
+    let mut received = Vec::with_capacity(expected.len());
+    while Instant::now() < deadline {
+        let mut buffer = [0_u8; 64];
+        let remaining = expected.len().saturating_sub(received.len());
+        let chunk = remaining.min(buffer.len());
+        match stream.read(&mut buffer[..chunk]) {
+            Ok(0) => bail!("guest network readiness channel closed early"),
+            Ok(length) => {
+                received.extend_from_slice(&buffer[..length]);
+                ensure!(
+                    expected.starts_with(&received),
+                    "guest network readiness message is invalid"
+                );
+                if received == expected {
+                    return Ok(());
+                }
+            }
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(20));
+            }
+            Err(error) => return Err(error).context("read guest network readiness"),
+        }
+    }
+    bail!("guest network readiness timed out")
 }
 
 fn prepare_workspace_generation(plan: &WorkspacePlan) -> Result<()> {
@@ -1949,6 +2762,7 @@ fn workspace_oci_config(plan: &WorkspacePlan) -> Result<Vec<u8>> {
             { "destination": CONTAINER_PLAN_PATH, "type": "none", "source": WORKSPACE_PLAN_PATH, "options": ["bind", "ro", "nosuid", "nodev", "noexec"] },
             { "destination": CONTAINER_INSTALL_STATE_PATH, "type": "none", "source": INSTALL_STATE_PATH, "options": ["bind", "ro", "nosuid", "nodev", "noexec"] },
             { "destination": CONTAINER_MACHINE_ID_DESTINATION, "type": "none", "source": CONTAINER_MACHINE_ID_PATH, "options": ["bind", "ro", "nosuid", "nodev", "noexec"] },
+            { "destination": CONTAINER_RESOLV_CONF_DESTINATION, "type": "none", "source": CONTAINER_RESOLV_CONF_PATH, "options": ["bind", "ro", "nosuid", "nodev", "noexec"] },
             { "destination": "/tmp", "type": "tmpfs", "source": "tmpfs", "options": ["nosuid", "nodev", "mode=1777", "size=256m"] },
             { "destination": WORKSPACE_PATH, "type": "none", "source": PERSISTENT_WORKSPACE_PATH, "options": ["rbind", "rw", "nosuid", "nodev"] },
             { "destination": plan.identity.home, "type": "none", "source": HOME_MERGED_PATH, "options": ["rbind", "rw", "nosuid", "nodev"] },
@@ -1964,7 +2778,7 @@ fn workspace_oci_config(plan: &WorkspacePlan) -> Result<Vec<u8>> {
             },
             "namespaces": [
                 { "type": "pid" },
-                { "type": "network" },
+                { "type": "network", "path": NETWORK_NAMESPACE_PATH },
                 { "type": "ipc" },
                 { "type": "uts" },
                 { "type": "mount" }
@@ -2464,6 +3278,7 @@ fn spawn_daemon() -> Result<std::process::Child> {
 fn supervise_guest(
     mut daemon: std::process::Child,
     mut workspace: std::process::Child,
+    mut network: std::process::Child,
     poweroff: UnixDatagram,
 ) -> Result<()> {
     loop {
@@ -2471,11 +3286,13 @@ fn supervise_guest(
         if POWEROFF_REQUESTED.load(Ordering::Acquire) || container_poweroff_requested(&poweroff)? {
             stop_daemon(&mut daemon);
             stop_workspace_container(&mut workspace);
+            stop_network_agent(&mut network);
             return power_off();
         }
         if daemon.try_wait().context("observe guest daemon")?.is_some() {
             eprintln!("guest daemon exited; powering off generation");
             stop_workspace_container(&mut workspace);
+            stop_network_agent(&mut network);
             return power_off();
         }
         if workspace
@@ -2485,11 +3302,42 @@ fn supervise_guest(
         {
             eprintln!("workspace container exited; powering off generation");
             stop_daemon(&mut daemon);
+            stop_network_agent(&mut network);
             let _ = force_delete_workspace_container();
+            return power_off();
+        }
+        if network
+            .try_wait()
+            .context("observe trusted guest network agent")?
+            .is_some()
+        {
+            eprintln!("guest network agent exited; powering off generation");
+            stop_daemon(&mut daemon);
+            stop_workspace_container(&mut workspace);
             return power_off();
         }
         thread::sleep(Duration::from_millis(20));
     }
+}
+
+fn stop_network_agent(network: &mut std::process::Child) {
+    if network.try_wait().ok().flatten().is_some() {
+        return;
+    }
+    if let Ok(pid) = libc::pid_t::try_from(network.id()) {
+        unsafe {
+            libc::kill(pid, libc::SIGTERM);
+        }
+    }
+    let deadline = Instant::now() + DAEMON_SHUTDOWN_TIMEOUT;
+    while Instant::now() < deadline {
+        if network.try_wait().ok().flatten().is_some() {
+            return;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    let _ = network.kill();
+    let _ = network.wait();
 }
 
 fn container_poweroff_requested(socket: &UnixDatagram) -> Result<bool> {
@@ -2723,32 +3571,66 @@ fn write_durable(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
     bail!("durable temporary filename collisions exceeded limit")
 }
 
-fn verify_loopback_only(sys_net: &Path, route: &Path, ipv6_route: &Path) -> Result<()> {
+fn verify_isolated_tun(net_dev: &Path, route: &Path, ipv6_route: &Path) -> Result<()> {
+    // An inherited sysfs mount remains associated with the network namespace
+    // in which it was mounted. /proc/net is process-namespace aware, so use
+    // its bounded interface table to inspect this agent's actual namespace.
+    let devices = fs::read_to_string(net_dev)
+        .with_context(|| format!("read guest network interfaces {}", net_dev.display()))?;
+    let mut lines = devices.lines();
+    ensure!(
+        lines.next().is_some() && lines.next().is_some(),
+        "guest network interface table is malformed"
+    );
     let mut interfaces = Vec::new();
-    for entry in fs::read_dir(sys_net)
-        .with_context(|| format!("read guest network interfaces {}", sys_net.display()))?
-    {
-        interfaces.push(entry.context("read guest network interface")?.file_name());
+    for line in lines.filter(|line| !line.trim().is_empty()) {
+        let (interface, counters) = line
+            .split_once(':')
+            .ok_or_else(|| anyhow::anyhow!("guest network interface table is malformed"))?;
+        let interface = interface.trim();
+        let counters = counters.split_ascii_whitespace().collect::<Vec<_>>();
+        ensure!(
+            !interface.is_empty()
+                && counters.len() == 16
+                && counters
+                    .iter()
+                    .all(|value| !value.is_empty()
+                        && value.bytes().all(|byte| byte.is_ascii_digit())),
+            "guest network interface table is malformed"
+        );
+        interfaces.push(interface);
     }
     interfaces.sort();
     ensure!(
-        interfaces.as_slice() == [OsStr::new("lo")],
-        "guest has a non-loopback network interface"
+        interfaces.as_slice() == [NETWORK_INTERFACE, "lo"],
+        "guest network namespace does not contain exactly loopback and the trusted TUN"
     );
 
     let routes = fs::read_to_string(route)
         .with_context(|| format!("read guest route table {}", route.display()))?;
+    let mut default_route = false;
     for line in routes
         .lines()
         .skip(1)
         .filter(|line| !line.trim().is_empty())
     {
-        let interface = line
-            .split_ascii_whitespace()
-            .next()
-            .ok_or_else(|| anyhow::anyhow!("guest route table is malformed"))?;
-        ensure!(interface == "lo", "guest has a non-loopback route");
+        let fields = line.split_ascii_whitespace().collect::<Vec<_>>();
+        ensure!(fields.len() >= 8, "guest route table is malformed");
+        ensure!(
+            matches!(fields[0], "lo" | NETWORK_INTERFACE),
+            "guest has a route through an unexpected interface"
+        );
+        if fields[1] == "00000000" {
+            ensure!(
+                fields[0] == NETWORK_INTERFACE
+                    && fields[2].eq_ignore_ascii_case("010200C0")
+                    && fields[7] == "00000000",
+                "guest default route is not bound to the trusted TUN gateway"
+            );
+            default_route = true;
+        }
     }
+    ensure!(default_route, "guest trusted TUN default route is absent");
 
     match fs::read_to_string(ipv6_route) {
         Ok(routes) => {
@@ -2757,7 +3639,10 @@ fn verify_loopback_only(sys_net: &Path, route: &Path, ipv6_route: &Path) -> Resu
                     .split_ascii_whitespace()
                     .next_back()
                     .ok_or_else(|| anyhow::anyhow!("guest IPv6 route table is malformed"))?;
-                ensure!(interface == "lo", "guest has a non-loopback IPv6 route");
+                ensure!(
+                    interface == "lo",
+                    "guest TUN unexpectedly has an IPv6 route"
+                );
             }
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -2766,103 +3651,6 @@ fn verify_loopback_only(sys_net: &Path, route: &Path, ipv6_route: &Path) -> Resu
         Err(error) => return Err(error).context("read guest IPv6 route table"),
     }
     Ok(())
-}
-
-fn verify_no_ip_egress_canaries() -> Result<()> {
-    // TEST-NET-1 is reserved for documentation and must never be routed by
-    // this no-net VM. Opening each socket is the positive control that the
-    // corresponding syscall/protocol path ran; connect must then fail at
-    // route lookup rather than silently succeeding.
-    for (label, socket_type, protocol, address, port) in [
-        (
-            "TCP",
-            libc::SOCK_STREAM,
-            libc::IPPROTO_TCP,
-            [192, 0, 2, 1],
-            9,
-        ),
-        (
-            "UDP",
-            libc::SOCK_DGRAM,
-            libc::IPPROTO_UDP,
-            [192, 0, 2, 1],
-            9,
-        ),
-        (
-            "DNS",
-            libc::SOCK_DGRAM,
-            libc::IPPROTO_UDP,
-            [192, 0, 2, 53],
-            53,
-        ),
-        (
-            "ICMP",
-            libc::SOCK_DGRAM,
-            libc::IPPROTO_ICMP,
-            [192, 0, 2, 1],
-            0,
-        ),
-    ] {
-        verify_unroutable_ipv4(label, socket_type, protocol, address, port)?;
-    }
-    Ok(())
-}
-
-fn verify_unroutable_ipv4(
-    label: &str,
-    socket_type: libc::c_int,
-    protocol: libc::c_int,
-    address: [u8; 4],
-    port: u16,
-) -> Result<()> {
-    let descriptor =
-        unsafe { libc::socket(libc::AF_INET, socket_type | libc::SOCK_CLOEXEC, protocol) };
-    if descriptor == -1 {
-        let error = io::Error::last_os_error();
-        if label == "ICMP" && acceptable_icmp_socket_denial(error.raw_os_error()) {
-            // Ping datagram sockets are subject to the kernel's ping-group and
-            // protocol policy even for a uid-0 process without capabilities.
-            // TCP/UDP/DNS above remain mandatory route-lookup canaries; an
-            // narrow kernel policy denial is itself a fail-closed result rather
-            // than evidence of an egress path. Unsupported protocol errors are
-            // rejected because they would skip the intended ICMP canary.
-            return Ok(());
-        }
-        return Err(error).with_context(|| format!("open {label} canary socket"));
-    }
-    let descriptor = unsafe { OwnedFd::from_raw_fd(descriptor) };
-    let endpoint = libc::sockaddr_in {
-        sin_family: libc::AF_INET as libc::sa_family_t,
-        sin_port: port.to_be(),
-        sin_addr: libc::in_addr {
-            s_addr: u32::from_ne_bytes(address),
-        },
-        sin_zero: [0; 8],
-    };
-    let result = unsafe {
-        libc::connect(
-            std::os::fd::AsRawFd::as_raw_fd(&descriptor),
-            (&raw const endpoint).cast::<libc::sockaddr>(),
-            size_of::<libc::sockaddr_in>() as libc::socklen_t,
-        )
-    };
-    ensure!(
-        result == -1,
-        "guest {label} canary unexpectedly found an IP route"
-    );
-    let error = io::Error::last_os_error();
-    ensure!(
-        matches!(
-            error.raw_os_error(),
-            Some(libc::ENETUNREACH) | Some(libc::EHOSTUNREACH) | Some(libc::ENODEV)
-        ),
-        "guest {label} canary failed for a reason other than no route: {error}"
-    );
-    Ok(())
-}
-
-fn acceptable_icmp_socket_denial(error: Option<libc::c_int>) -> bool {
-    matches!(error, Some(libc::EACCES | libc::EPERM))
 }
 
 fn ensure_init_is_expected(container: bool) -> Result<()> {
@@ -3037,40 +3825,40 @@ mod tests {
     }
 
     #[test]
-    fn network_check_requires_exactly_loopback() {
+    fn network_check_requires_exactly_loopback_and_the_pinned_tun() {
         let temporary = TempDir::new().unwrap();
-        let sys = temporary.path().join("net");
-        fs::create_dir(&sys).unwrap();
-        fs::create_dir(sys.join("lo")).unwrap();
+        let net_dev = temporary.path().join("dev");
+        fs::write(
+            &net_dev,
+            "Inter-| Receive | Transmit\n\
+             face |bytes packets errs drop fifo frame compressed multicast|bytes packets errs drop fifo colls carrier compressed\n\
+             lo: 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n\
+             cw0: 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n",
+        )
+        .unwrap();
         let route = temporary.path().join("route");
-        fs::write(&route, "Iface Destination Gateway Flags\n").unwrap();
+        fs::write(
+            &route,
+            "Iface Destination Gateway Flags RefCnt Use Metric Mask MTU Window IRTT\n\
+             cw0 00000000 010200C0 0003 0 0 0 00000000 0 0 0\n\
+             cw0 000200C0 00000000 0001 0 0 0 00FFFFFF 0 0 0\n",
+        )
+        .unwrap();
         let ipv6_route = temporary.path().join("ipv6_route");
         fs::write(
             &ipv6_route,
             "00000000000000000000000000000001 80 00000000000000000000000000000000 00 00000000 00000001 00000000 80200001 lo\n",
         )
         .unwrap();
-        verify_loopback_only(&sys, &route, &ipv6_route).unwrap();
+        verify_isolated_tun(&net_dev, &route, &ipv6_route).unwrap();
 
-        fs::create_dir(sys.join("eth0")).unwrap();
-        assert!(verify_loopback_only(&sys, &route, &ipv6_route).is_err());
-    }
-
-    #[test]
-    fn only_explicit_icmp_socket_policy_denials_are_accepted() {
-        for error in [libc::EACCES, libc::EPERM] {
-            assert!(acceptable_icmp_socket_denial(Some(error)));
-        }
-        for error in [
-            libc::EAFNOSUPPORT,
-            libc::EPROTONOSUPPORT,
-            libc::ENETUNREACH,
-            libc::EINVAL,
-            libc::EMFILE,
-        ] {
-            assert!(!acceptable_icmp_socket_denial(Some(error)));
-        }
-        assert!(!acceptable_icmp_socket_denial(None));
+        OpenOptions::new()
+            .append(true)
+            .open(&net_dev)
+            .unwrap()
+            .write_all(b"eth0: 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n")
+            .unwrap();
+        assert!(verify_isolated_tun(&net_dev, &route, &ipv6_route).is_err());
     }
 
     #[test]
@@ -3146,6 +3934,15 @@ mod tests {
             machine_id["options"],
             serde_json::json!(["bind", "ro", "nosuid", "nodev", "noexec"])
         );
+        let resolver = mounts
+            .iter()
+            .find(|mount| mount["destination"] == CONTAINER_RESOLV_CONF_DESTINATION)
+            .unwrap();
+        assert_eq!(resolver["source"], CONTAINER_RESOLV_CONF_PATH);
+        assert_eq!(
+            resolver["options"],
+            serde_json::json!(["bind", "ro", "nosuid", "nodev", "noexec"])
+        );
         let home = mounts
             .iter()
             .find(|mount| mount["destination"] == plan.identity.home)
@@ -3158,6 +3955,25 @@ mod tests {
         assert_eq!(
             config["process"]["capabilities"]["ambient"],
             serde_json::json!([])
+        );
+        assert_eq!(
+            config["linux"]["namespaces"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|namespace| namespace["type"] == "network")
+                .collect::<Vec<_>>(),
+            vec![&serde_json::json!({
+                "type": "network",
+                "path": NETWORK_NAMESPACE_PATH
+            })]
+        );
+        assert!(
+            config["linux"]["devices"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|device| device["path"] != "/dev/net/tun")
         );
     }
 
@@ -3442,6 +4258,57 @@ mod tests {
         assert!(!is_host_cid(VMADDR_CID_ANY));
         assert!(!is_host_cid(3));
         assert!(!is_host_cid(u32::MAX));
+    }
+
+    #[test]
+    fn network_startup_failures_are_fixed_bounded_progress_stages() {
+        let mut stages = NETWORK_AGENT_FAILURE_STAGES.to_vec();
+        stages.push(NETWORK_AGENT_GENERIC_FAILURE_STAGE);
+        stages.push(NETWORK_AGENT_HOST_FAILURE_STAGE);
+        let original_len = stages.len();
+        stages.sort_unstable();
+        stages.dedup();
+        assert_eq!(stages.len(), original_len);
+        for stage in stages {
+            assert!(!stage.is_empty() && stage.len() <= 32);
+            assert!(
+                stage
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte == b'-')
+            );
+            assert_eq!(
+                GuestBootStage::from_persisted(stage),
+                Some(GuestBootStage::WorkspaceFailed)
+            );
+        }
+    }
+
+    #[test]
+    fn network_handshake_statuses_are_fixed_and_bounded() {
+        let mut statuses = NETWORK_STATUS_VALUES.to_vec();
+        let original_len = statuses.len();
+        statuses.sort_unstable();
+        statuses.dedup();
+        assert_eq!(statuses.len(), original_len);
+        for status in &statuses {
+            assert!(!status.is_empty() && status.len() <= 32);
+            assert!(
+                status
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte == b'-')
+            );
+        }
+        for failure in [
+            GuestNetworkHandshakeError::ReadHello,
+            GuestNetworkHandshakeError::AuthenticateHello,
+            GuestNetworkHandshakeError::WriteAcknowledgement,
+            GuestNetworkHandshakeError::ReadReady,
+            GuestNetworkHandshakeError::AuthenticateReady,
+            GuestNetworkHandshakeError::Session,
+        ] {
+            assert!(NETWORK_STATUS_VALUES.contains(&failure.status()));
+            assert!(NETWORK_AGENT_FAILURE_STAGES.contains(&failure.failure_stage()));
+        }
     }
 
     #[test]
