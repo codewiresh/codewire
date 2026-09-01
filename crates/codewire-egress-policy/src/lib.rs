@@ -14,6 +14,7 @@ use thiserror::Error;
 
 mod cidr;
 mod hostname;
+pub mod lease;
 
 use cidr::IpNetwork;
 use hostname::{NamePattern, canonical_hostname, protected_name};
