@@ -91,13 +91,23 @@ environment-owned point-in-time copy. Use `--path-mode clone` or
 `--path-mode copy` to override automatic classification; direct host access is
 never inferred from `--path`. The primary workspace runs directly in the
 canonical Codewire OCI workspace image beneath trusted guest init and runc;
-Docker does not own it. Custom image, network, secret, explicit mount, port, and
-multi-repository options still fail explicitly while the remaining Forgejo
-#1910 slices are completed. An owner-only SQLite WAL is the authoritative
-supervisor state; preview JSON state is imported exactly once. Lifecycle
-effects are journaled, disk shrink is rejected, and delete moves the
-environment tree to an operation-specific trash generation before removing
-only known runtime files.
+Docker does not own it. Multi-repository `repositories` entries use the same
+normalized project model as the platform. A bare `ports` entry declares a guest
+application port; an explicit `HOST:GUEST` entry also publishes it for the VM
+lifetime on `127.0.0.1:HOST` only:
+
+```yaml
+ports:
+  - 18080:8080
+```
+
+Custom image, preset, install/startup, environment, agent/skill,
+secret/credential, network, and explicit mount options still fail explicitly
+while the remaining Forgejo #1910 slices are completed. An owner-only SQLite
+WAL is the authoritative supervisor state; preview JSON state is imported
+exactly once. Lifecycle effects are journaled, disk shrink is rejected, and
+delete moves the environment tree to an operation-specific trash generation
+before removing only known runtime files.
 
 Developers with artifacts staged outside the default cache can point the CLI
 at them and run the complete product smoke:

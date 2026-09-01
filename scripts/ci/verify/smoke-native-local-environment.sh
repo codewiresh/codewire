@@ -27,6 +27,7 @@ TRANSCRIPT=''
 SOURCE_HOOK_MARKER=''
 SOURCE_CREDENTIAL_MARKER=''
 SOURCE_CONFIG_SHA256=''
+HOST_PORT=''
 GITEA_COMMIT='bcbae548ab2f4f0e407068aa8717cec341084d7a'
 GITEA_README_SHA256='d4911db7bc817528fbcbaaf39e76851700084b65494dac1e29afb997867ac006'
 GITHUB_COMMIT='93f68ba4abc9f6e222481265b9b759e71d332575'
@@ -61,10 +62,11 @@ disposable multi-repository and filesystem-copy fixtures. Initial create
 permits direct registry and Git egress; every later command receives dead proxy
 endpoints. It proves digest-pinned OCI workspace execution, exact
 credential-free git.example.invalid/GitHub preparation, independent copy preparation,
-create/info, bounded daemon diagnostics and repair, bare run and shell, PTY
-behavior, saved output and nonzero status, cached-runtime restart after the
-installed artifact lock advances, offline disk/CPU/memory resize, supervisor
-crash recovery, and journaled exact deletion cleanup.
+create/info, loopback-only host-port publication, bounded daemon diagnostics and
+repair, bare run and shell, PTY behavior, saved output and nonzero status,
+cached-runtime restart after the installed artifact lock advances, offline
+disk/CPU/memory resize, supervisor crash recovery, and journaled exact deletion
+cleanup.
 USAGE
 }
 
@@ -242,6 +244,29 @@ env -i PATH='/usr/bin:/bin' HOME="$SMOKE_HOME" LC_ALL=C \
 printf '#!/bin/sh\ntouch %q\n' "$SOURCE_HOOK_MARKER" >"$WORKSPACE/.git/hooks/post-checkout"
 chmod 0700 "$WORKSPACE/.git/hooks/post-checkout"
 SOURCE_CONFIG_SHA256="$(sha256sum "$WORKSPACE/.git/config" | awk '{print $1}')"
+HOST_PORT="$(
+  /usr/bin/env python3 - <<'PY'
+import os
+import socket
+
+lower = 20_000
+upper = 29_999
+span = upper - lower + 1
+start = lower + (os.getpid() % span)
+for offset in range(span):
+    port = lower + ((start - lower + offset) % span)
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+            listener.bind(("127.0.0.1", port))
+    except OSError:
+        continue
+    print(port)
+    break
+else:
+    raise SystemExit("no free loopback port in the native smoke range")
+PY
+)"
+[[ "$HOST_PORT" =~ ^[0-9]+$ ]] || die 'failed to select a loopback host port'
 cat >"$WORKSPACE/codewire.yaml" <<EOF
 version: 1
 repositories:
@@ -252,6 +277,8 @@ repositories:
     revision: $GITHUB_COMMIT
     destination: /workspace/github
 working_directory: /workspace/github
+ports:
+  - $HOST_PORT:3000
 EOF
 
 cw_isolated() {
@@ -347,7 +374,8 @@ run_public_data_smoke() {
 
 wait_for_pid_exit() {
   local pid="$1"
-  for _attempt in {1..100}; do
+  # Match the direct VMM gate's 15-second process-identity termination bound.
+  for _attempt in {1..300}; do
     [[ ! -e "/proc/$pid" ]] && return 0
     sleep 0.05
   done
@@ -357,7 +385,7 @@ wait_for_pid_exit() {
 wait_for_pid_death() {
   local pid="$1"
   local stat suffix state
-  for _attempt in {1..100}; do
+  for _attempt in {1..300}; do
     [[ ! -r "/proc/$pid/stat" ]] && return 0
     stat="$(<"/proc/$pid/stat")"
     suffix="${stat##*) }"
@@ -659,7 +687,7 @@ run_cw env create --local --name "$NAME" --cpu 2 --memory 16Gi --path "$WORKSPAC
 ALLOW_REGISTRY_EGRESS=0
 CW_COMMAND_TIMEOUT_SECONDS=180
 ENV_CREATED=1
-jq -e '
+jq -e --arg listen "127.0.0.1:$HOST_PORT" '
   .name == "native-smoke" and
   .backend == "cloud-hypervisor" and
   .state == "running" and
@@ -668,6 +696,7 @@ jq -e '
   .memory == "16Gi" and
   .working_directory == "/workspace/github" and
   .workspace_inputs == 2 and
+  .ports == [{"listen": $listen, "guest_port": 3000}] and
   (.workspace_plan | test("^[0-9a-f]{64}$"))
 ' "$LAST_STDOUT" >/dev/null || die 'created native environment metadata drifted'
 [[ ! -e "$SOURCE_HOOK_MARKER" ]] || die 'source Git hook ran during native clone preparation'
@@ -699,7 +728,7 @@ for sqlite_sidecar in "$STATE_ROOT/supervisor.db-wal" "$STATE_ROOT/supervisor.db
   [[ ! -e "$sqlite_sidecar" || "$(stat -c '%a' "$sqlite_sidecar")" == 600 ]] ||
     die "native supervisor database sidecar is not mode 0600: $sqlite_sidecar"
 done
-[[ "$(native_database_value contract)" == '1129797197:5:wal:ok' ]] ||
+[[ "$(native_database_value contract)" == '1129797197:6:wal:ok' ]] ||
   die 'native supervisor database contract drifted'
 wait_for_journal_complete ||
   die "initial create returned before its lifecycle journal became terminal: $(native_database_value journal_summary)"
@@ -731,6 +760,67 @@ RUNNER_PID="$(native_database_value runner_pid)"
 
 log 'checking public Exec/File over the owner-only supervisor UDS'
 run_public_data_smoke
+
+log 'checking codewire.yaml loopback host-port publication through the native VM'
+HOST_PORT_SERVER='const net=require("node:net");const server=net.createServer((socket)=>{const chunks=[];socket.on("data",(chunk)=>chunks.push(chunk));socket.on("end",()=>{const request=Buffer.concat(chunks).toString("utf8");socket.end(request==="codewire-host-port-request"?"codewire-host-port-response":"unexpected-request",()=>server.close());});});server.listen(3000,"0.0.0.0",()=>process.stdout.write("codewire-host-port-ready\n"));'
+run_cw run --detach --no-tty --output json -- node -e "$HOST_PORT_SERVER"
+HOST_PORT_SESSION_ID="$(jq -er '.session_id | select(type == "string" and length > 0)' "$LAST_STDOUT")" ||
+  die 'host-port guest session did not return an identity'
+HOST_PORT_SESSION_READY=0
+for _attempt in {1..200}; do
+  run_cw logs "$NAME" "$HOST_PORT_SESSION_ID" --raw
+  if rg -qxF 'codewire-host-port-ready' "$LAST_STDOUT"; then
+    HOST_PORT_SESSION_READY=1
+    break
+  fi
+  sleep 0.05
+done
+[[ "$HOST_PORT_SESSION_READY" -eq 1 ]] ||
+  die 'host-port guest listener did not become ready'
+if ! /usr/bin/env python3 - "$HOST_PORT" \
+  >"$SMOKE_ROOT/host-port.stdout" 2>"$SMOKE_ROOT/host-port.stderr" <<'PY'
+import socket
+import sys
+
+port = int(sys.argv[1])
+request = b"codewire-host-port-request"
+expected = b"codewire-host-port-response"
+with socket.create_connection(("127.0.0.1", port), timeout=2) as stream:
+    stream.settimeout(2)
+    stream.sendall(request)
+    stream.shutdown(socket.SHUT_WR)
+    response = bytearray()
+    while chunk := stream.recv(4096):
+        response.extend(chunk)
+if bytes(response) != expected:
+    raise SystemExit(f"unexpected host-port response: {bytes(response)!r}")
+print("codewire-native-host-port: PASS")
+PY
+then
+  cat "$SMOKE_ROOT/host-port.stdout" "$SMOKE_ROOT/host-port.stderr" >>"$TRANSCRIPT"
+  tail -n 80 "$SMOKE_ROOT/host-port.stderr" >&2
+  die 'native host-port round trip failed'
+fi
+cat "$SMOKE_ROOT/host-port.stdout" "$SMOKE_ROOT/host-port.stderr" >>"$TRANSCRIPT"
+[[ "$(cat "$SMOKE_ROOT/host-port.stdout")" == 'codewire-native-host-port: PASS' ]] ||
+  die 'native host-port receipt drifted'
+HOST_PORT_SESSION_EXITED=0
+for _attempt in {1..100}; do
+  run_cw list --output json
+  if jq -e --arg session_id "$HOST_PORT_SESSION_ID" '
+    any(.[];
+      .session_id == $session_id and
+      .state == "Exited" and
+      .exit_code == 0
+    )
+  ' "$LAST_STDOUT" >/dev/null; then
+    HOST_PORT_SESSION_EXITED=1
+    break
+  fi
+  sleep 0.05
+done
+[[ "$HOST_PORT_SESSION_EXITED" -eq 1 ]] ||
+  die 'host-port guest session did not exit successfully'
 
 log 'checking bounded public daemon status over the owner-only supervisor UDS'
 run_cw env --local daemon status "$NAME" --output json

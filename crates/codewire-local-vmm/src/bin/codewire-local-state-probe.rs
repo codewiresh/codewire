@@ -35,7 +35,7 @@ mod linux {
     use uuid::Uuid;
 
     const DATABASE_APPLICATION_ID: i64 = 0x4357_564d;
-    const DATABASE_SCHEMA_VERSION: i64 = 5;
+    const DATABASE_SCHEMA_VERSION: i64 = 6;
     const DATABASE_FILE: &str = "supervisor.db";
     const MAXIMUM_OPERATIONS: usize = 128;
     const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -520,7 +520,7 @@ mod linux {
                          );
                          INSERT INTO supervisor_settings VALUES (1, NULL);
                          PRAGMA application_id = 1129797197;
-                         PRAGMA user_version = 5;",
+                         PRAGMA user_version = 6;",
                     )
                     .unwrap();
                 fs::set_permissions(&database, fs::Permissions::from_mode(0o600)).unwrap();
