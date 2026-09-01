@@ -16,6 +16,7 @@ smoltcp = { version = "0.13", default-features = false, features = [
     "socket-tcp",
 ] }
 tokio = { version = "1", features = ["io-util", "macros", "rt", "sync", "time"] }
+tokio-util = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]

@@ -17,6 +17,8 @@ pub const PEER_RELAY_INNER_PACKET_BUDGET: usize =
 /// MTU advertised to tailnet peers after accounting for the most constrained
 /// cross-node peer-relay path.
 pub const TUNNEL_MTU: usize = 1130;
+/// Maximum bare-IP packets queued between the netstack and WireGuard pump.
+pub const PACKET_QUEUE_CAPACITY: usize = 256;
 
 const _: () = assert!(TUNNEL_MTU <= PEER_RELAY_INNER_PACKET_BUDGET);
 
@@ -30,8 +32,8 @@ impl Netstack {
     pub fn new(
         local_ip: IpAddr,
         prefix_len: u8,
-        inbound: mpsc::UnboundedReceiver<Vec<u8>>,
-        outbound: mpsc::UnboundedSender<Vec<u8>>,
+        inbound: mpsc::Receiver<Vec<u8>>,
+        outbound: mpsc::Sender<Vec<u8>>,
     ) -> Self {
         let inner = codewire_netstack::Netstack::with_config(
             codewire_netstack::NetstackConfig {

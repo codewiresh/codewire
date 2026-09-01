@@ -57,6 +57,7 @@ subtle = "=2.6.1"
 thiserror = "2"
 tiny_http = "0.12"
 tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["rt"] }
 tokio-stream = { version = "0.1", features = ["net"] }
 tonic = "0.14"
 tonic-prost = "0.14"

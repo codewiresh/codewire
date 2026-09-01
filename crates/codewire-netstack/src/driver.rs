@@ -8,7 +8,7 @@
 //!
 //! Responsibilities each wakeup:
 //!   1. Stage inbound IP packets from the consumer transport into the device.
-//!   2. Apply pending control commands (connect/bind/send/close/drop).
+//!   2. Apply pending control commands (connect/bind).
 //!   3. `poll` smoltcp (advances handshakes, ACKs, retransmits, emits packets).
 //!   4. Service every managed socket: drain RX -> stream, push queued TX into
 //!      the socket, detect established/closed transitions, replenish LISTEN
@@ -16,20 +16,19 @@
 //!   5. Sleep until the earliest of: a new inbound packet, a new command, or
 //!      smoltcp's own `poll_at` deadline (retransmit/delayed-ACK timers).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::{Arc, OnceLock};
 
 use smoltcp::iface::{Config, Interface, SocketHandle, SocketSet};
 use smoltcp::socket::tcp;
-use smoltcp::time::Instant;
+use smoltcp::time::{Duration as SmolDuration, Instant};
 use smoltcp::wire::{HardwareAddress, IpAddress, IpCidr, IpEndpoint, IpListenEndpoint};
 use tokio::sync::mpsc;
+use tokio::sync::Notify;
 
 use super::device::ChannelDevice;
-use super::stream::{ByteChunk, TcpListener, TcpStream};
-
-/// Per-socket send/receive ring sizes (bytes). 64 KiB matches a generous
-/// default TCP window and is plenty for the spike's payloads.
-const SOCKET_BUF: usize = 64 * 1024;
+use super::stream::{ByteChunk, StreamControl, TcpListener, TcpStream};
+use super::NetstackLimits;
 
 /// How many LISTEN-state sockets to keep parked per bound port.
 ///
@@ -47,42 +46,42 @@ pub(crate) enum Command {
     /// receiver wired up.
     Bind {
         endpoint: IpListenEndpoint,
-        reply: tokio::sync::oneshot::Sender<TcpListener>,
+        reply: tokio::sync::oneshot::Sender<std::io::Result<TcpListener>>,
     },
     /// Dial `remote`; reply with the connecting stream (resolves before the
     /// handshake completes — reads/writes drive it, mirroring tokio's
     /// `TcpStream::connect` returning a connected-enough socket).
     Connect {
         remote: IpEndpoint,
-        reply: tokio::sync::oneshot::Sender<TcpStream>,
+        reply: tokio::sync::oneshot::Sender<std::io::Result<TcpStream>>,
     },
-    /// Application bytes to send on `handle`.
-    Send { handle: SocketHandle, data: Vec<u8> },
-    /// Half-close (FIN) `handle`.
-    Close { handle: SocketHandle },
-    /// The stream handle was dropped; abort + reap `handle`.
-    Drop { handle: SocketHandle },
 }
 
 /// State the driver keeps for one connected (or connecting) socket.
 struct Conn {
-    /// Driver -> stream: received bytes. `None` once the stream side is gone.
-    to_stream: Option<mpsc::UnboundedSender<ByteChunk>>,
+    /// Driver -> stream: received bytes.
+    to_stream: Option<mpsc::Sender<ByteChunk>>,
+    /// Stream -> driver: bounded application writes.
+    from_stream: mpsc::Receiver<ByteChunk>,
+    control: Arc<StreamControl>,
     /// Bytes queued from the stream that did not fit the socket's tx buffer yet.
-    pending_tx: std::collections::VecDeque<u8>,
-    /// FIN requested by the stream; flush remaining tx then close.
-    closing: bool,
-    /// We have observed the socket become active (handshake done) at least once.
-    was_active: bool,
+    pending_tx: VecDeque<u8>,
+    /// We have observed the socket complete its handshake at least once.
+    was_established: bool,
 }
 
 impl Conn {
-    fn new(to_stream: mpsc::UnboundedSender<ByteChunk>) -> Self {
+    fn new(
+        to_stream: mpsc::Sender<ByteChunk>,
+        from_stream: mpsc::Receiver<ByteChunk>,
+        control: Arc<StreamControl>,
+    ) -> Self {
         Self {
             to_stream: Some(to_stream),
-            pending_tx: std::collections::VecDeque::new(),
-            closing: false,
-            was_active: false,
+            from_stream,
+            control,
+            pending_tx: VecDeque::new(),
+            was_established: false,
         }
     }
 }
@@ -90,7 +89,7 @@ impl Conn {
 /// A bound listener's accept side, owned by the driver.
 struct ListenSlot {
     /// Driver -> listener: newly accepted streams.
-    to_listener: mpsc::UnboundedSender<TcpStream>,
+    to_listener: mpsc::Sender<TcpStream>,
     /// Handles currently parked in LISTEN on this port (the backlog).
     listening: Vec<SocketHandle>,
 }
@@ -103,20 +102,40 @@ struct Driver {
     conns: HashMap<SocketHandle, Conn>,
     listeners: HashMap<IpListenEndpoint, ListenSlot>,
     /// Clone handed to every stream so its writes/closes reach us.
-    cmd_tx: mpsc::UnboundedSender<Command>,
+    cmd_tx: mpsc::Sender<Command>,
+    stream_notify: Arc<Notify>,
+    limits: NetstackLimits,
+    next_ephemeral_port: u16,
+    abort_after_poll: HashSet<SocketHandle>,
 }
 
 impl Driver {
-    fn fresh_tcp_socket() -> tcp::Socket<'static> {
-        let rx = tcp::SocketBuffer::new(vec![0u8; SOCKET_BUF]);
-        let tx = tcp::SocketBuffer::new(vec![0u8; SOCKET_BUF]);
-        tcp::Socket::new(rx, tx)
+    fn fresh_tcp_socket(&self) -> tcp::Socket<'static> {
+        let rx = tcp::SocketBuffer::new(vec![0u8; self.limits.socket_buffer_bytes]);
+        let tx = tcp::SocketBuffer::new(vec![0u8; self.limits.socket_buffer_bytes]);
+        let mut socket = tcp::Socket::new(rx, tx);
+        socket.set_timeout(Some(SmolDuration::from(self.limits.tcp_idle_timeout)));
+        socket
     }
 
     fn handle_command(&mut self, cmd: Command) {
+        self.reap_closed_handles();
         match cmd {
             Command::Bind { endpoint, reply } => {
-                let (to_listener, incoming) = mpsc::unbounded_channel();
+                if self.listeners.contains_key(&endpoint) {
+                    let _ = reply.send(Err(std::io::Error::new(
+                        std::io::ErrorKind::AddrInUse,
+                        "netstack TCP endpoint is already bound",
+                    )));
+                    return;
+                }
+                if self.listeners.len() >= self.limits.max_listeners {
+                    let _ = reply.send(Err(std::io::Error::other(
+                        "netstack TCP listener limit reached",
+                    )));
+                    return;
+                }
+                let (to_listener, incoming) = mpsc::channel(self.limits.accept_queue);
                 let mut slot = ListenSlot {
                     to_listener,
                     listening: Vec::new(),
@@ -125,6 +144,12 @@ impl Driver {
                     if let Some(h) = self.spawn_listen_socket(endpoint) {
                         slot.listening.push(h);
                     }
+                }
+                if slot.listening.len() != LISTEN_BACKLOG {
+                    let _ = reply.send(Err(std::io::Error::other(
+                        "netstack could not allocate a TCP listener socket",
+                    )));
+                    return;
                 }
                 self.listeners.insert(endpoint, slot);
                 tracing::debug!(
@@ -137,79 +162,122 @@ impl Driver {
                     endpoint,
                     incoming,
                     _tx: self.cmd_tx.clone(),
+                    notify: self.stream_notify.clone(),
                 };
-                let _ = reply.send(listener);
+                let _ = reply.send(Ok(listener));
             }
             Command::Connect { remote, reply } => {
-                let mut socket = Self::fresh_tcp_socket();
+                if self.conns.len() >= self.limits.max_connections {
+                    let _ = reply.send(Err(std::io::Error::other(
+                        "netstack TCP connection limit reached",
+                    )));
+                    return;
+                }
+                let mut socket = self.fresh_tcp_socket();
                 // Ephemeral local port. smoltcp picks one if we pass 0 as the
                 // listen endpoint port; we give an explicit high port to keep
-                // the handshake deterministic for the spike.
+                // allocation deterministic inside this bounded engine.
                 let local_port = self.next_ephemeral_port();
                 let result = socket.connect(self.iface.context(), remote, local_port);
-                let handle = self.sockets.add(socket);
-                let (to_stream, rx) = mpsc::unbounded_channel();
-                let stream = TcpStream::new(handle, rx, self.cmd_tx.clone());
-                if result.is_ok() {
+                if let Err(error) = result {
                     tracing::debug!(
                         remote_addr = ?remote.addr,
                         remote_port = remote.port,
                         local_port,
-                        "rust userspace netstack TCP connect started"
-                    );
-                    self.conns.insert(handle, Conn::new(to_stream));
-                } else {
-                    // Connect setup failed; drop the socket so the stream EOFs.
-                    tracing::debug!(
-                        remote_addr = ?remote.addr,
-                        remote_port = remote.port,
-                        local_port,
-                        error = ?result.err(),
+                        ?error,
                         "rust userspace netstack TCP connect setup failed"
                     );
+                    let _ = reply.send(Err(std::io::Error::other(format!(
+                        "netstack TCP connect setup failed: {error:?}"
+                    ))));
+                    return;
+                }
+                let handle = self.sockets.add(socket);
+                let Some((stream, conn)) = self.stream_for_socket(handle) else {
                     self.sockets.remove(handle);
-                }
-                let _ = reply.send(stream);
+                    let _ = reply.send(Err(std::io::Error::other(
+                        "netstack TCP socket has no endpoints",
+                    )));
+                    return;
+                };
+                tracing::debug!(
+                    remote_addr = ?remote.addr,
+                    remote_port = remote.port,
+                    local_port,
+                    "rust userspace netstack TCP connect started"
+                );
+                self.conns.insert(handle, conn);
+                let _ = reply.send(Ok(stream));
             }
-            Command::Send { handle, data } => {
-                if let Some(conn) = self.conns.get_mut(&handle) {
-                    conn.pending_tx.extend(data);
+        }
+    }
+
+    fn stream_for_socket(&self, handle: SocketHandle) -> Option<(TcpStream, Conn)> {
+        let socket = self.sockets.get::<tcp::Socket>(handle);
+        let local = socket.local_endpoint()?;
+        let peer = socket.remote_endpoint()?;
+        let (to_stream, rx) = mpsc::channel(self.limits.stream_receive_queue);
+        let (tx, from_stream) = mpsc::channel(self.limits.stream_send_queue);
+        let control = Arc::new(StreamControl::new(self.stream_notify.clone()));
+        let stream = TcpStream::new(
+            rx,
+            tx,
+            control.clone(),
+            self.cmd_tx.clone(),
+            local,
+            peer,
+            self.limits.stream_chunk_bytes,
+        );
+        Some((stream, Conn::new(to_stream, from_stream, control)))
+    }
+
+    fn reap_closed_handles(&mut self) {
+        let endpoints: Vec<_> = self
+            .listeners
+            .iter()
+            .filter_map(|(endpoint, slot)| slot.to_listener.is_closed().then_some(*endpoint))
+            .collect();
+        for endpoint in endpoints {
+            if let Some(slot) = self.listeners.remove(&endpoint) {
+                for handle in slot.listening {
+                    self.schedule_abort(handle);
                 }
             }
-            Command::Close { handle } => {
-                if let Some(conn) = self.conns.get_mut(&handle) {
-                    conn.closing = true;
-                }
-            }
-            Command::Drop { handle } => {
-                if self.conns.remove(&handle).is_some()
-                    && self.sockets.iter().any(|(h, _)| h == handle)
-                {
-                    let socket = self.sockets.get_mut::<tcp::Socket>(handle);
-                    socket.abort();
-                }
-            }
+        }
+
+        let handles: Vec<_> = self
+            .conns
+            .iter()
+            .filter_map(|(handle, conn)| conn.control.dropped().then_some(*handle))
+            .collect();
+        for handle in handles {
+            self.conns.remove(&handle);
+            self.schedule_abort(handle);
+        }
+    }
+
+    fn schedule_abort(&mut self, handle: SocketHandle) {
+        if self
+            .sockets
+            .iter()
+            .any(|(candidate, _)| candidate == handle)
+        {
+            self.sockets.get_mut::<tcp::Socket>(handle).abort();
+            self.abort_after_poll.insert(handle);
         }
     }
 
     /// Create a new socket parked on one listen endpoint.
     fn spawn_listen_socket(&mut self, endpoint: IpListenEndpoint) -> Option<SocketHandle> {
-        let mut socket = Self::fresh_tcp_socket();
+        let mut socket = self.fresh_tcp_socket();
         socket.listen(endpoint).ok()?;
         Some(self.sockets.add(socket))
     }
 
     fn next_ephemeral_port(&mut self) -> u16 {
-        // Simple rotating counter in the dynamic/private range. Good enough for
-        // a single-process spike; the `Conn` wiring can adopt a real allocator.
-        use std::sync::atomic::{AtomicU16, Ordering};
-        static NEXT: AtomicU16 = AtomicU16::new(49152);
-        let p = NEXT.fetch_add(1, Ordering::Relaxed);
-        if p == 0 {
-            49152
-        } else {
-            p
-        }
+        let port = self.next_ephemeral_port;
+        self.next_ephemeral_port = if port == u16::MAX { 49152 } else { port + 1 };
+        port
     }
 
     /// Drain inbound packets, apply timers, poll, and service sockets.
@@ -223,9 +291,20 @@ impl Driver {
         // into those buffers, so a single poll-before-service can strand
         // freshly queued SSH handshake bytes until another external wakeup.
         // Bound the loop to avoid a busy spin while still flushing immediate
-        // receive/write/ACK work like Tailscale's gVisor netstack does.
+        // receive/write/ACK work promptly.
         for _ in 0..8 {
+            let pending_aborts: Vec<_> = self.abort_after_poll.iter().copied().collect();
             let _ = self.iface.poll(now, &mut self.device, &mut self.sockets);
+            for handle in pending_aborts {
+                if self
+                    .sockets
+                    .iter()
+                    .any(|(candidate, _)| candidate == handle)
+                {
+                    self.sockets.remove(handle);
+                }
+                self.abort_after_poll.remove(&handle);
+            }
             self.service_sockets();
             poll_at = self.iface.poll_at(now, &self.sockets);
             if !self.has_immediate_work() {
@@ -240,16 +319,19 @@ impl Driver {
         if self.device.has_inbound() {
             return true;
         }
+        if !self.abort_after_poll.is_empty() {
+            return true;
+        }
 
         for h in self.conns.keys().copied() {
             if !self.sockets.iter().any(|(x, _)| x == h) {
                 continue;
             }
-            if self
-                .conns
-                .get(&h)
-                .is_some_and(|conn| !conn.pending_tx.is_empty())
-            {
+            if self.conns.get(&h).is_some_and(|conn| {
+                !conn.pending_tx.is_empty()
+                    || !conn.from_stream.is_empty()
+                    || conn.control.dropped()
+            }) {
                 return true;
             }
             let socket = self.sockets.get::<tcp::Socket>(h);
@@ -279,6 +361,8 @@ impl Driver {
     /// Move bytes between smoltcp sockets and the stream channels, and react to
     /// connection state transitions (accept, established, closed).
     fn service_sockets(&mut self) {
+        self.reap_closed_handles();
+
         // 1) Promote any LISTEN socket that became connected into an accepted
         //    stream, and replenish the backlog.
         let mut promotions: Vec<(IpListenEndpoint, SocketHandle)> = Vec::new();
@@ -298,31 +382,53 @@ impl Driver {
             }
         }
         for (endpoint, h) in promotions {
-            // Remove from the backlog list and wire up a stream.
-            let mut new_listener: Option<SocketHandle> = None;
             if let Some(slot) = self.listeners.get_mut(&endpoint) {
                 slot.listening.retain(|&x| x != h);
-                let (to_stream, rx) = mpsc::unbounded_channel();
-                let stream = TcpStream::new(h, rx, self.cmd_tx.clone());
-                if slot.to_listener.send(stream).is_ok() {
+            }
+
+            let accepted = if self.conns.len() >= self.limits.max_connections {
+                tracing::debug!(
+                    listen_addr = ?endpoint.addr,
+                    listen_port = endpoint.port,
+                    connection_limit = self.limits.max_connections,
+                    "rust userspace netstack rejected TCP stream at connection limit"
+                );
+                false
+            } else if let Some((stream, conn)) = self.stream_for_socket(h) {
+                let delivered = self
+                    .listeners
+                    .get(&endpoint)
+                    .is_some_and(|slot| slot.to_listener.try_send(stream).is_ok());
+                if delivered {
                     tracing::debug!(
                         listen_addr = ?endpoint.addr,
                         listen_port = endpoint.port,
                         "rust userspace netstack TCP stream accepted"
                     );
-                    self.conns.insert(h, Conn::new(to_stream));
-                } else {
-                    // Listener gone; abort the socket.
-                    let socket = self.sockets.get_mut::<tcp::Socket>(h);
-                    socket.abort();
+                    self.conns.insert(h, conn);
                 }
+                delivered
+            } else {
+                false
+            };
+
+            if !accepted {
+                self.schedule_abort(h);
             }
-            // Replenish backlog outside the borrow above.
-            if self.listeners.contains_key(&endpoint) {
-                new_listener = self.spawn_listen_socket(endpoint);
-            }
-            if let (Some(slot), Some(nh)) = (self.listeners.get_mut(&endpoint), new_listener) {
-                slot.listening.push(nh);
+
+            // Replenish the single parked socket only while the listener's
+            // bounded accept receiver still exists.
+            let replenish = self
+                .listeners
+                .get(&endpoint)
+                .is_some_and(|slot| !slot.to_listener.is_closed());
+            if replenish {
+                let new_listener = self.spawn_listen_socket(endpoint);
+                if let (Some(slot), Some(handle)) =
+                    (self.listeners.get_mut(&endpoint), new_listener)
+                {
+                    slot.listening.push(handle);
+                }
             }
         }
 
@@ -334,43 +440,80 @@ impl Driver {
                 self.conns.remove(&h);
                 continue;
             }
-            let socket = self.sockets.get_mut::<tcp::Socket>(h);
-
-            // Track first activation.
-            if socket.is_active() {
-                if let Some(conn) = self.conns.get_mut(&h) {
-                    conn.was_active = true;
-                }
+            if self
+                .conns
+                .get(&h)
+                .is_some_and(|conn| conn.control.dropped())
+            {
+                self.conns.remove(&h);
+                self.schedule_abort(h);
+                continue;
             }
 
-            // Push queued tx bytes into the socket as far as it will take them.
-            if socket.can_send() {
-                if let Some(conn) = self.conns.get_mut(&h) {
-                    while !conn.pending_tx.is_empty() {
-                        let (front, _) = conn.pending_tx.as_slices();
-                        if front.is_empty() {
-                            break;
-                        }
-                        match socket.send_slice(front) {
-                            Ok(0) => break,
-                            Ok(n) => {
-                                tracing::debug!(
-                                    bytes = n,
-                                    "rust userspace netstack queued TCP transmit bytes"
-                                );
-                                conn.pending_tx.drain(..n);
-                            }
-                            Err(_) => break,
-                        }
+            let socket = self.sockets.get_mut::<tcp::Socket>(h);
+            let conn = self.conns.get_mut(&h).expect("connection handle exists");
+
+            // `is_active` includes SYN-SENT/SYN-RECEIVED. Track only a
+            // completed handshake so a connecting socket cannot signal EOF.
+            if matches!(
+                socket.state(),
+                tcp::State::Established
+                    | tcp::State::CloseWait
+                    | tcp::State::FinWait1
+                    | tcp::State::FinWait2
+                    | tcp::State::Closing
+                    | tcp::State::LastAck
+                    | tcp::State::TimeWait
+            ) {
+                conn.was_established = true;
+            }
+
+            // Pull at most one bounded stream chunk at a time, then move it
+            // into smoltcp. Leaving later chunks in the bounded channel makes
+            // AsyncWrite observe real TCP backpressure.
+            while socket.can_send() {
+                if conn.pending_tx.is_empty() {
+                    match conn.from_stream.try_recv() {
+                        Ok(chunk) => conn.pending_tx.extend(chunk),
+                        Err(mpsc::error::TryRecvError::Empty) => break,
+                        Err(mpsc::error::TryRecvError::Disconnected) => break,
                     }
                 }
+                let (front, _) = conn.pending_tx.as_slices();
+                if front.is_empty() {
+                    break;
+                }
+                match socket.send_slice(front) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        tracing::debug!(
+                            bytes = n,
+                            "rust userspace netstack queued TCP transmit bytes"
+                        );
+                        conn.pending_tx.drain(..n);
+                    }
+                    Err(_) => break,
+                }
             }
 
-            // Drain received bytes up to the stream.
+            // Drain received bytes only while the bounded application queue
+            // has capacity. A full queue leaves bytes in the TCP receive
+            // window, applying protocol-level backpressure to the peer.
             while socket.can_recv() {
+                let Some(to_stream) = conn.to_stream.clone() else {
+                    break;
+                };
+                let permit = match to_stream.try_reserve() {
+                    Ok(permit) => permit,
+                    Err(mpsc::error::TrySendError::Full(_)) => break,
+                    Err(mpsc::error::TrySendError::Closed(_)) => {
+                        conn.to_stream = None;
+                        break;
+                    }
+                };
                 let chunk = socket.recv(|data| {
-                    let v = data.to_vec();
-                    (v.len(), v)
+                    let len = data.len().min(self.limits.stream_chunk_bytes);
+                    (len, data[..len].to_vec())
                 });
                 match chunk {
                     Ok(v) if !v.is_empty() => {
@@ -378,65 +521,55 @@ impl Driver {
                             bytes = v.len(),
                             "rust userspace netstack delivered TCP receive bytes"
                         );
-                        if let Some(conn) = self.conns.get_mut(&h) {
-                            if let Some(tx) = &conn.to_stream {
-                                if tx.send(v).is_err() {
-                                    conn.to_stream = None;
-                                }
-                            }
-                        }
+                        permit.send(v);
                     }
                     _ => break,
                 }
             }
 
+            if matches!(socket.state(), tcp::State::Closed) && !conn.control.shutdown_requested() {
+                conn.control.mark_peer_aborted();
+            }
+
+            // A peer FIN closes only the receive half. Drop the application
+            // sender once smoltcp has drained it so AsyncRead observes EOF,
+            // while retaining the socket and write half for a response.
+            if conn.was_established && !socket.may_recv() && socket.recv_queue() == 0 {
+                conn.to_stream = None;
+            }
+
             // Apply a requested half-close once tx is fully flushed.
-            let drained = self
-                .conns
-                .get(&h)
-                .map(|c| c.pending_tx.is_empty())
-                .unwrap_or(true);
-            let closing = self.conns.get(&h).map(|c| c.closing).unwrap_or(false);
-            if closing && drained {
-                let socket = self.sockets.get_mut::<tcp::Socket>(h);
-                if socket.send_queue() == 0 {
-                    socket.close();
-                }
+            let drained = conn.pending_tx.is_empty() && conn.from_stream.is_empty();
+            if drained && socket.send_queue() == 0 {
+                conn.control.mark_flushed();
+            }
+            if conn.control.shutdown_requested() && drained && socket.send_queue() == 0 {
+                socket.close();
             }
 
             // Reap fully-closed sockets and signal EOF to the stream.
-            let socket = self.sockets.get::<tcp::Socket>(h);
-            let was_active = self.conns.get(&h).map(|c| c.was_active).unwrap_or(false);
+            let was_established = conn.was_established;
             let dead = matches!(socket.state(), tcp::State::Closed)
-                || (was_active && !socket.is_active() && socket.recv_queue() == 0);
+                || (was_established && !socket.is_active() && socket.recv_queue() == 0);
             if dead {
-                // Dropping `to_stream` signals EOF to the reader.
-                if let Some(conn) = self.conns.get_mut(&h) {
-                    conn.to_stream = None;
-                }
-                // Only fully remove once recv is drained and socket is closed.
-                if matches!(socket.state(), tcp::State::Closed) {
-                    self.sockets.remove(h);
-                    self.conns.remove(&h);
-                }
+                self.sockets.remove(h);
+                self.conns.remove(&h);
             }
         }
     }
 }
 
-/// Current time as a smoltcp `Instant`. smoltcp only needs a monotonically
-/// increasing clock; tokio's wall clock via `SystemTime` is fine for the spike.
+/// Current time as a smoltcp `Instant` from a process-local monotonic epoch.
 fn now() -> Instant {
-    let dur = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default();
+    static START: OnceLock<std::time::Instant> = OnceLock::new();
+    let dur = START.get_or_init(std::time::Instant::now).elapsed();
     Instant::from_micros(dur.as_micros() as i64)
 }
 
 /// Handle used by the public API to talk to a running driver.
 #[derive(Clone)]
 pub(crate) struct DriverHandle {
-    pub(crate) cmd_tx: mpsc::UnboundedSender<Command>,
+    pub(crate) cmd_tx: mpsc::Sender<Command>,
 }
 
 /// Spawn the driver task. `inbound` delivers IP packets from the consumer
@@ -447,10 +580,11 @@ pub(crate) fn spawn(
     prefix_len: u8,
     accept_any_ip: bool,
     default_gateway: Option<IpAddress>,
-    mut inbound: mpsc::UnboundedReceiver<Vec<u8>>,
+    mut inbound: mpsc::Receiver<Vec<u8>>,
     device: ChannelDevice,
+    limits: NetstackLimits,
 ) -> std::io::Result<DriverHandle> {
-    let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<Command>();
+    let (cmd_tx, mut cmd_rx) = mpsc::channel::<Command>(limits.command_queue);
     let handle = DriverHandle {
         cmd_tx: cmd_tx.clone(),
     };
@@ -479,6 +613,7 @@ pub(crate) fn spawn(
         None => {}
     }
 
+    let stream_notify = Arc::new(Notify::new());
     let mut driver = Driver {
         iface,
         device,
@@ -486,6 +621,10 @@ pub(crate) fn spawn(
         conns: HashMap::new(),
         listeners: HashMap::new(),
         cmd_tx,
+        stream_notify: stream_notify.clone(),
+        limits,
+        next_ephemeral_port: 49152,
+        abort_after_poll: HashSet::new(),
     };
 
     tokio::spawn(async move {
@@ -515,9 +654,11 @@ pub(crate) fn spawn(
                     match pkt {
                         Some(pkt) => {
                             driver.device.push_inbound(pkt);
-                            // Drain any other immediately-available packets.
-                            while let Ok(p) = inbound.try_recv() {
-                                driver.device.push_inbound(p);
+                            // Bound work per wake so packet floods cannot
+                            // starve lifecycle/control processing.
+                            for _ in 1..driver.limits.max_packets_per_wake {
+                                let Ok(packet) = inbound.try_recv() else { break; };
+                                driver.device.push_inbound(packet);
                             }
                             poll_at = driver.pump();
                         }
@@ -537,6 +678,10 @@ pub(crate) fn spawn(
                         }
                         None => break,
                     }
+                }
+                // Application stream write/shutdown/drop notification.
+                _ = stream_notify.notified() => {
+                    poll_at = driver.pump();
                 }
                 // smoltcp timer fired (retransmit / delayed ACK / etc).
                 _ = tokio::time::sleep(timer) => {

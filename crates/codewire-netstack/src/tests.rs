@@ -20,29 +20,70 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use smoltcp::wire::{IpAddress, IpProtocol, Ipv6Packet, TcpPacket};
+use smoltcp::wire::{IpAddress, IpProtocol, Ipv4Packet, Ipv6Packet, TcpPacket};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
 
-use super::{Netstack, NetstackConfig};
+use super::{
+    parse_initial_ipv4_tcp_syn, InitialTcpSynError, Netstack, NetstackConfig, NetstackLimits,
+};
 
 /// Documentation-only ULA addresses for the in-process endpoints.
 const A_IP: Ipv6Addr = Ipv6Addr::new(0xfd7a, 0x115c, 0xa1e0, 0, 0, 0, 0, 0x000a);
 const B_IP: Ipv6Addr = Ipv6Addr::new(0xfd7a, 0x115c, 0xa1e0, 0, 0, 0, 0, 0x000b);
 const PREFIX: u8 = 48;
+const PACKET_QUEUE: usize = 64;
 
 /// Build two netstacks with their packet channels cross-wired so each one's
 /// outbound IP packets become the other's inbound packets — an in-process
 /// "wire" standing in for an arbitrary packet transport.
 fn wired_pair() -> (Netstack, Netstack) {
     // A.out -> B.in
-    let (a_out_tx, b_in_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+    let (a_out_tx, b_in_rx) = mpsc::channel::<Vec<u8>>(PACKET_QUEUE);
     // B.out -> A.in
-    let (b_out_tx, a_in_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+    let (b_out_tx, a_in_rx) = mpsc::channel::<Vec<u8>>(PACKET_QUEUE);
 
     let a = Netstack::new(IpAddr::V6(A_IP), PREFIX, a_in_rx, a_out_tx);
     let b = Netstack::new(IpAddr::V6(B_IP), PREFIX, b_in_rx, b_out_tx);
     (a, b)
+}
+
+fn wired_pair_with_limits(
+    a_limits: NetstackLimits,
+    b_limits: NetstackLimits,
+) -> (Netstack, Netstack) {
+    let packet_capacity = a_limits.max_queued_packets.min(b_limits.max_queued_packets);
+    let (a_out_tx, b_in_rx) = mpsc::channel::<Vec<u8>>(packet_capacity);
+    let (b_out_tx, a_in_rx) = mpsc::channel::<Vec<u8>>(packet_capacity);
+    let config = |local_ip| NetstackConfig {
+        local_ip,
+        prefix_len: PREFIX,
+        mtu: 1_500,
+        verify_rx_checksums: true,
+        accept_any_ip: false,
+        default_gateway: None,
+    };
+    let a = Netstack::with_config_and_limits(config(IpAddr::V6(A_IP)), a_limits, a_in_rx, a_out_tx)
+        .expect("A bounded netstack");
+    let b = Netstack::with_config_and_limits(config(IpAddr::V6(B_IP)), b_limits, b_in_rx, b_out_tx)
+        .expect("B bounded netstack");
+    (a, b)
+}
+
+fn tight_limits() -> NetstackLimits {
+    NetstackLimits {
+        max_listeners: 4,
+        max_connections: 4,
+        socket_buffer_bytes: 1024,
+        command_queue: 4,
+        accept_queue: 1,
+        stream_send_queue: 1,
+        stream_receive_queue: 1,
+        stream_chunk_bytes: 128,
+        max_queued_packets: 16,
+        max_packets_per_wake: 4,
+        tcp_idle_timeout: Duration::from_secs(5),
+    }
 }
 
 #[tokio::test]
@@ -106,8 +147,10 @@ async fn any_ip_destination_bridges_only_through_an_injected_stream() {
     const ORIGINAL_DESTINATION: SocketAddr =
         SocketAddr::new(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 19)), 443);
 
-    let (guest_out, worker_in) = mpsc::unbounded_channel();
-    let (worker_out, guest_in) = mpsc::unbounded_channel();
+    let (guest_out, mut guest_packets) = mpsc::channel(PACKET_QUEUE);
+    let (to_worker, worker_in) = mpsc::channel(PACKET_QUEUE);
+    let (worker_out, mut worker_packets) = mpsc::channel(PACKET_QUEUE);
+    let (to_guest, guest_in) = mpsc::channel(PACKET_QUEUE);
     let guest = Netstack::with_config(
         NetstackConfig {
             local_ip: IpAddr::V4(GUEST_IP),
@@ -135,11 +178,74 @@ async fn any_ip_destination_bridges_only_through_an_injected_stream() {
     )
     .expect("worker netstack config");
 
+    let connect = tokio::spawn(async move {
+        guest
+            .connect(ORIGINAL_DESTINATION)
+            .await
+            .expect("guest connect")
+    });
+    let initial_packet = tokio::time::timeout(Duration::from_secs(5), guest_packets.recv())
+        .await
+        .expect("guest did not emit an initial packet")
+        .expect("guest packet channel closed");
+    let initial = parse_initial_ipv4_tcp_syn(&initial_packet).expect("strict initial SYN");
+    assert_eq!(initial.source.ip(), IpAddr::V4(GUEST_IP));
+    assert_eq!(initial.destination, ORIGINAL_DESTINATION);
+
+    assert_eq!(
+        parse_initial_ipv4_tcp_syn(&initial_packet[..10]),
+        Err(InitialTcpSynError::InvalidIpv4)
+    );
+    let mut trailing = initial_packet.clone();
+    trailing.push(0);
+    assert_eq!(
+        parse_initial_ipv4_tcp_syn(&trailing),
+        Err(InitialTcpSynError::NonCanonicalIpv4Length)
+    );
+    let mut corrupt_checksum = initial_packet.clone();
+    corrupt_checksum[8] ^= 1;
+    assert_eq!(
+        parse_initial_ipv4_tcp_syn(&corrupt_checksum),
+        Err(InitialTcpSynError::InvalidIpv4Checksum)
+    );
+    let mut fragmented = initial_packet.clone();
+    {
+        let mut ipv4 = Ipv4Packet::new_unchecked(fragmented.as_mut_slice());
+        ipv4.set_more_frags(true);
+        ipv4.fill_checksum();
+    }
+    assert_eq!(
+        parse_initial_ipv4_tcp_syn(&fragmented),
+        Err(InitialTcpSynError::FragmentedIpv4)
+    );
+
+    // Admission is dynamic: only after the caller validates the surfaced
+    // original destination does it bind that exact AnyIP endpoint and feed
+    // the SYN to the stack.
     let mut listener = worker
         .bind_endpoint(ORIGINAL_DESTINATION)
         .await
         .expect("bind exact external destination");
     assert_eq!(listener.local_endpoint(), Some(ORIGINAL_DESTINATION));
+    to_worker
+        .send(initial_packet)
+        .await
+        .expect("forward admitted initial SYN");
+
+    let guest_wire = tokio::spawn(async move {
+        while let Some(packet) = guest_packets.recv().await {
+            if to_worker.send(packet).await.is_err() {
+                break;
+            }
+        }
+    });
+    let worker_wire = tokio::spawn(async move {
+        while let Some(packet) = worker_packets.recv().await {
+            if to_guest.send(packet).await.is_err() {
+                break;
+            }
+        }
+    });
 
     let accepted = tokio::spawn(async move {
         listener
@@ -147,15 +253,16 @@ async fn any_ip_destination_bridges_only_through_an_injected_stream() {
             .await
             .expect("worker accepts guest connection")
     });
-    let mut guest_stream =
-        tokio::time::timeout(Duration::from_secs(5), guest.connect(ORIGINAL_DESTINATION))
-            .await
-            .expect("guest connect did not hang")
-            .expect("guest connect");
+    let mut guest_stream = tokio::time::timeout(Duration::from_secs(5), connect)
+        .await
+        .expect("guest connect did not hang")
+        .expect("guest connect task");
     let mut worker_stream = tokio::time::timeout(Duration::from_secs(5), accepted)
         .await
         .expect("worker accept did not hang")
         .expect("worker accept task");
+    assert_eq!(worker_stream.local_addr(), ORIGINAL_DESTINATION);
+    assert_eq!(worker_stream.peer_addr(), initial.source);
 
     // The duplex pair models a connected stream injected by the egress
     // broker. Neither userspace netstack owns or creates a host socket.
@@ -199,6 +306,247 @@ async fn any_ip_destination_bridges_only_through_an_injected_stream() {
         .expect("bridge shutdown did not hang")
         .expect("bridge task")
         .expect("bridge copy");
+    guest_wire.abort();
+    worker_wire.abort();
+}
+
+#[tokio::test]
+async fn listener_and_packet_queue_limits_are_hard_and_recoverable() {
+    let mut limits = tight_limits();
+    limits.max_listeners = 1;
+    limits.max_queued_packets = 4;
+    limits.max_packets_per_wake = 2;
+
+    let (oversized_out, _oversized_packets) = mpsc::channel(5);
+    let (_oversized_in, oversized_rx) = mpsc::channel(4);
+    let invalid = Netstack::with_config_and_limits(
+        NetstackConfig {
+            local_ip: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
+            prefix_len: 30,
+            mtu: 1_500,
+            verify_rx_checksums: true,
+            accept_any_ip: true,
+            default_gateway: None,
+        },
+        limits,
+        oversized_rx,
+        oversized_out,
+    );
+    assert!(invalid.is_err(), "oversized packet queues must be rejected");
+
+    let (outbound, _packets) = mpsc::channel(4);
+    let (keep_inbound_open, inbound) = mpsc::channel(4);
+    let stack = Netstack::with_config_and_limits(
+        NetstackConfig {
+            local_ip: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
+            prefix_len: 30,
+            mtu: 1_500,
+            verify_rx_checksums: true,
+            accept_any_ip: true,
+            default_gateway: None,
+        },
+        limits,
+        inbound,
+        outbound,
+    )
+    .expect("bounded stack");
+    let first_endpoint = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1)), 443);
+    let second_endpoint = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 2)), 443);
+    let first = stack
+        .bind_endpoint(first_endpoint)
+        .await
+        .expect("first bind");
+    match stack.bind_endpoint(first_endpoint).await {
+        Ok(_) => panic!("duplicate endpoint must not bind"),
+        Err(error) => assert_eq!(error.kind(), std::io::ErrorKind::AddrInUse),
+    }
+    assert!(
+        stack.bind_endpoint(second_endpoint).await.is_err(),
+        "a second live listener must exceed the configured limit"
+    );
+    drop(first);
+    let replacement = stack
+        .bind_endpoint(second_endpoint)
+        .await
+        .expect("dropping a listener must release its slot");
+    assert_eq!(replacement.local_endpoint(), Some(second_endpoint));
+    drop(keep_inbound_open);
+}
+
+#[tokio::test]
+async fn connection_limit_rejects_excess_and_recovers_after_drop() {
+    let guest_limits = tight_limits();
+    let mut worker_limits = tight_limits();
+    worker_limits.max_connections = 1;
+    let (guest, worker) = wired_pair_with_limits(guest_limits, worker_limits);
+    let mut first_listener = worker.bind(7101).await.expect("first listener");
+    let mut second_listener = worker.bind(7102).await.expect("second listener");
+
+    let first_client = guest
+        .connect(SocketAddr::new(IpAddr::V6(B_IP), 7101))
+        .await
+        .expect("first client");
+    let first_server = tokio::time::timeout(Duration::from_secs(2), first_listener.accept())
+        .await
+        .expect("first accept timed out")
+        .expect("first accepted stream");
+
+    let excess_client = guest
+        .connect(SocketAddr::new(IpAddr::V6(B_IP), 7102))
+        .await
+        .expect("excess client starts locally");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(150), second_listener.accept())
+            .await
+            .is_err(),
+        "worker must not surface a connection beyond its cap"
+    );
+
+    drop(excess_client);
+    drop(first_server);
+    drop(first_client);
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    let replacement_client = guest
+        .connect(SocketAddr::new(IpAddr::V6(B_IP), 7102))
+        .await
+        .expect("replacement client");
+    let replacement_server = tokio::time::timeout(Duration::from_secs(2), second_listener.accept())
+        .await
+        .expect("replacement accept timed out")
+        .expect("replacement accepted stream");
+    drop(replacement_server);
+    drop(replacement_client);
+}
+
+#[tokio::test]
+async fn bounded_stream_queues_apply_backpressure() {
+    let limits = tight_limits();
+    let (client_stack, server_stack) = wired_pair_with_limits(limits, limits);
+    let mut listener = server_stack.bind(7200).await.expect("listener");
+    let mut client = client_stack
+        .connect(SocketAddr::new(IpAddr::V6(B_IP), 7200))
+        .await
+        .expect("client");
+    let _server = tokio::time::timeout(Duration::from_secs(2), listener.accept())
+        .await
+        .expect("accept timed out")
+        .expect("accepted stream");
+
+    let payload = vec![0x5a; 1024 * 1024];
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), client.write_all(&payload))
+            .await
+            .is_err(),
+        "a non-reading peer must backpressure a bounded writer"
+    );
+}
+
+#[tokio::test]
+async fn half_close_keeps_the_reverse_direction_open() {
+    let (client_stack, server_stack) = wired_pair();
+    let mut listener = server_stack.bind(7300).await.expect("listener");
+    let mut client = client_stack
+        .connect(SocketAddr::new(IpAddr::V6(B_IP), 7300))
+        .await
+        .expect("client");
+    let mut server = tokio::time::timeout(Duration::from_secs(2), listener.accept())
+        .await
+        .expect("accept timed out")
+        .expect("accepted stream");
+
+    client.write_all(b"request").await.expect("client request");
+    client.shutdown().await.expect("client half-close");
+    let mut request = Vec::new();
+    tokio::time::timeout(Duration::from_secs(2), server.read_to_end(&mut request))
+        .await
+        .expect("server did not observe client FIN")
+        .expect("server read through FIN");
+    assert_eq!(request, b"request");
+
+    server
+        .write_all(b"response")
+        .await
+        .expect("server response");
+    let mut response = [0; 8];
+    tokio::time::timeout(Duration::from_secs(2), client.read_exact(&mut response))
+        .await
+        .expect("client did not receive reverse-direction response")
+        .expect("client response read");
+    assert_eq!(&response, b"response");
+    server.shutdown().await.expect("server half-close");
+    let mut eof = Vec::new();
+    tokio::time::timeout(Duration::from_secs(2), client.read_to_end(&mut eof))
+        .await
+        .expect("client did not observe server FIN")
+        .expect("client read through FIN");
+    assert!(eof.is_empty());
+}
+
+#[tokio::test]
+async fn dropped_peer_surfaces_a_prompt_connection_abort() {
+    let (client_stack, server_stack) = wired_pair();
+    let mut listener = server_stack.bind(7400).await.expect("listener");
+    let mut client = client_stack
+        .connect(SocketAddr::new(IpAddr::V6(B_IP), 7400))
+        .await
+        .expect("client");
+    let server = tokio::time::timeout(Duration::from_secs(2), listener.accept())
+        .await
+        .expect("accept timed out")
+        .expect("accepted stream");
+    drop(server);
+
+    let mut byte = [0; 1];
+    let error = tokio::time::timeout(Duration::from_secs(2), client.read(&mut byte))
+        .await
+        .expect("peer reset did not terminate the connection")
+        .expect_err("peer reset must not look like a clean EOF");
+    assert_eq!(error.kind(), std::io::ErrorKind::ConnectionAborted);
+}
+
+#[tokio::test]
+async fn packet_transport_loss_closes_listeners_and_rejects_commands() {
+    let (outbound, _packets) = mpsc::channel(PACKET_QUEUE);
+    let (inbound, inbound_rx) = mpsc::channel(PACKET_QUEUE);
+    let stack = Netstack::new(IpAddr::V6(A_IP), PREFIX, inbound_rx, outbound);
+    let mut listener = stack.bind(7500).await.expect("listener");
+
+    drop(inbound);
+    assert!(
+        tokio::time::timeout(Duration::from_secs(2), listener.accept())
+            .await
+            .expect("listener did not close after packet transport loss")
+            .is_none(),
+        "packet transport loss must close the accept side"
+    );
+    assert!(
+        stack.bind(7501).await.is_err(),
+        "driver commands must fail after packet transport loss"
+    );
+}
+
+#[tokio::test]
+async fn idle_timeout_reclaims_a_silent_connection() {
+    let mut limits = tight_limits();
+    limits.tcp_idle_timeout = Duration::from_secs(1);
+    let (client_stack, server_stack) = wired_pair_with_limits(limits, limits);
+    let mut listener = server_stack.bind(7600).await.expect("listener");
+    let mut client = client_stack
+        .connect(SocketAddr::new(IpAddr::V6(B_IP), 7600))
+        .await
+        .expect("client");
+    let _server = tokio::time::timeout(Duration::from_secs(2), listener.accept())
+        .await
+        .expect("accept timed out")
+        .expect("accepted stream");
+
+    let mut byte = [0; 1];
+    let error = tokio::time::timeout(Duration::from_secs(3), client.read(&mut byte))
+        .await
+        .expect("idle timeout did not reclaim the connection")
+        .expect_err("idle timeout must not look like a clean EOF");
+    assert_eq!(error.kind(), std::io::ErrorKind::ConnectionAborted);
 }
 
 /// Audit one wire packet like a checksum-verifying peer: every TCP segment
@@ -238,15 +586,15 @@ fn audit_tunnel_packet(pkt: &[u8], failures: &Mutex<Vec<String>>, tcp_segments: 
 }
 
 fn spawn_auditing_wire(
-    mut from: mpsc::UnboundedReceiver<Vec<u8>>,
-    to: mpsc::UnboundedSender<Vec<u8>>,
+    mut from: mpsc::Receiver<Vec<u8>>,
+    to: mpsc::Sender<Vec<u8>>,
     failures: Arc<Mutex<Vec<String>>>,
     tcp_segments: Arc<AtomicUsize>,
 ) {
     tokio::spawn(async move {
         while let Some(pkt) = from.recv().await {
             audit_tunnel_packet(&pkt, &failures, &tcp_segments);
-            if to.send(pkt).is_err() {
+            if to.send(pkt).await.is_err() {
                 break;
             }
         }
@@ -263,10 +611,10 @@ async fn loopback_packets_carry_verifiable_checksums() {
     let failures = Arc::new(Mutex::new(Vec::new()));
     let tcp_segments = Arc::new(AtomicUsize::new(0));
 
-    let (a_out_tx, a_out_rx) = mpsc::unbounded_channel::<Vec<u8>>();
-    let (b_in_tx, b_in_rx) = mpsc::unbounded_channel::<Vec<u8>>();
-    let (b_out_tx, b_out_rx) = mpsc::unbounded_channel::<Vec<u8>>();
-    let (a_in_tx, a_in_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+    let (a_out_tx, a_out_rx) = mpsc::channel::<Vec<u8>>(PACKET_QUEUE);
+    let (b_in_tx, b_in_rx) = mpsc::channel::<Vec<u8>>(PACKET_QUEUE);
+    let (b_out_tx, b_out_rx) = mpsc::channel::<Vec<u8>>(PACKET_QUEUE);
+    let (a_in_tx, a_in_rx) = mpsc::channel::<Vec<u8>>(PACKET_QUEUE);
 
     let a = Netstack::new(IpAddr::V6(A_IP), PREFIX, a_in_rx, a_out_tx);
     let b = Netstack::new(IpAddr::V6(B_IP), PREFIX, b_in_rx, b_out_tx);

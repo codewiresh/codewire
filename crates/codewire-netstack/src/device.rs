@@ -1,8 +1,8 @@
 //! A [`smoltcp::phy::Device`] backed by a packet I/O channel.
 //!
 //! smoltcp speaks only to a `Device`; this adapter reads inbound IP packets from a
-//! queue (filled from the inbound channel before each poll) and write outbound
-//! IP packets to an unbounded sender (drained by whoever owns the other side —
+//! queue (filled from the inbound channel before each poll) and writes outbound
+//! IP packets to a bounded sender (drained by whoever owns the other side —
 //! in the loopback proof, the peer netstack's inbound channel).
 //!
 //! Medium is [`Medium::Ip`]: the transport carries bare IP packets with no
@@ -13,7 +13,7 @@ use std::collections::VecDeque;
 use smoltcp::phy::{self, Checksum, Device, DeviceCapabilities, Medium};
 use smoltcp::time::Instant;
 use smoltcp::wire::{IpAddress, IpProtocol, Ipv4Packet, Ipv6Packet, TcpPacket};
-use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::mpsc::Sender;
 
 /// A channel-backed smoltcp device.
 ///
@@ -22,13 +22,13 @@ use tokio::sync::mpsc::UnboundedSender;
 /// `receive`. `outbound` is where smoltcp hands us packets to emit.
 pub struct ChannelDevice {
     pub(crate) inbound: VecDeque<Vec<u8>>,
-    pub(crate) outbound: UnboundedSender<Vec<u8>>,
+    pub(crate) outbound: Sender<Vec<u8>>,
     mtu: usize,
     verify_rx_checksums: bool,
 }
 
 impl ChannelDevice {
-    pub fn new(outbound: UnboundedSender<Vec<u8>>, mtu: usize, verify_rx_checksums: bool) -> Self {
+    pub fn new(outbound: Sender<Vec<u8>>, mtu: usize, verify_rx_checksums: bool) -> Self {
         Self {
             inbound: VecDeque::new(),
             outbound,
@@ -38,9 +38,18 @@ impl ChannelDevice {
     }
 
     /// Stage an inbound IP packet for the next `poll`.
-    pub fn push_inbound(&mut self, pkt: Vec<u8>) {
+    pub fn push_inbound(&mut self, pkt: Vec<u8>) -> bool {
+        if !(20..=self.mtu).contains(&pkt.len()) {
+            tracing::debug!(
+                packet_len = pkt.len(),
+                mtu = self.mtu,
+                "rust userspace netstack dropped invalid-size inbound packet"
+            );
+            return false;
+        }
         log_tcp_packet("inbound", &pkt);
         self.inbound.push_back(pkt);
+        true
     }
 
     /// Whether there is staged inbound work (used to decide whether another
@@ -111,7 +120,7 @@ impl phy::RxToken for RxToken {
 /// will notice via timeouts), which keeps `transmit` infallible as the trait
 /// requires.
 pub struct TxToken<'a> {
-    outbound: &'a UnboundedSender<Vec<u8>>,
+    outbound: &'a Sender<Vec<u8>>,
 }
 
 impl phy::TxToken for TxToken<'_> {
@@ -122,7 +131,13 @@ impl phy::TxToken for TxToken<'_> {
         let mut buffer = vec![0u8; len];
         let result = f(&mut buffer);
         log_tcp_packet("outbound", &buffer);
-        let _ = self.outbound.send(buffer);
+        if let Err(error) = self.outbound.try_send(buffer) {
+            let queue_closed = matches!(error, tokio::sync::mpsc::error::TrySendError::Closed(_));
+            tracing::debug!(
+                queue_closed,
+                "rust userspace netstack dropped outbound packet at bounded queue"
+            );
+        }
         result
     }
 }
@@ -198,8 +213,8 @@ mod tests {
 
     #[test]
     fn channel_device_uses_configured_mtu_and_checksum_capabilities() {
-        let (outbound, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let device = ChannelDevice::new(outbound, 1500, true);
+        let (outbound, _rx) = tokio::sync::mpsc::channel(8);
+        let mut device = ChannelDevice::new(outbound, 1500, true);
         let caps = device.capabilities();
 
         assert_eq!(caps.medium, Medium::Ip);
@@ -210,5 +225,8 @@ mod tests {
         assert!(caps.checksum.tcp.tx());
         assert!(caps.checksum.udp.rx());
         assert!(caps.checksum.udp.tx());
+        assert!(!device.push_inbound(vec![0; 19]));
+        assert!(!device.push_inbound(vec![0; 1501]));
+        assert!(!device.has_inbound());
     }
 }
