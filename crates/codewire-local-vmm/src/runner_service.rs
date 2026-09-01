@@ -308,15 +308,15 @@ impl RunnerState {
         }
     }
 
-    fn observe_exit(&mut self) -> Result<(), RunnerError> {
-        self.observe_exit_with_reason().map(drop)
+    async fn observe_exit(&mut self) -> Result<(), RunnerError> {
+        self.observe_exit_with_reason().await.map(drop)
     }
 
-    fn observe_exit_with_reason(&mut self) -> Result<Option<&'static str>, RunnerError> {
+    async fn observe_exit_with_reason(&mut self) -> Result<Option<&'static str>, RunnerError> {
         let Some(running) = self.running.as_mut() else {
             return Ok(None);
         };
-        let exit = running.try_exit()?;
+        let exit = running.observe_exit().await?;
         let error_code = runner_exit_error_code(exit);
         match exit {
             ExitClass::StillRunning => Ok(error_code),
@@ -415,6 +415,7 @@ impl EnvironmentRunnerService for RunnerRpc {
         let prior = state.state;
         let exit_reason = state
             .observe_exit_with_reason()
+            .await
             .map_err(|_| Status::internal("observe VMM state failed"))?;
         if state.state != prior {
             let stage = if state.state == v1::EnvironmentState::Stopped {
@@ -481,6 +482,7 @@ impl EnvironmentRunnerService for RunnerRpc {
         }
         state
             .observe_exit()
+            .await
             .map_err(|_| Status::internal("observe VMM state failed"))?;
         if state.running.is_some() {
             return Err(Status::already_exists("environment is already running"));
@@ -636,6 +638,7 @@ impl EnvironmentRunnerService for RunnerRpc {
         let mut state = self.state.lock().await;
         state
             .observe_exit()
+            .await
             .map_err(|_| Status::internal("observe VMM state failed"))?;
         self.events.publish(
             state.state,
@@ -726,6 +729,7 @@ impl EnvironmentRunnerService for RunnerRpc {
         }
         state
             .observe_exit()
+            .await
             .map_err(|_| Status::internal("observe VMM state failed"))?;
         if state.running.is_some() {
             return Err(Status::failed_precondition(
@@ -761,6 +765,7 @@ impl EnvironmentRunnerService for RunnerRpc {
         let mut state = self.state.lock().await;
         state
             .observe_exit()
+            .await
             .map_err(|_| Status::internal("observe VMM state failed"))?;
         let running = state
             .running
@@ -1036,7 +1041,8 @@ async fn wait_for_guest_daemon(
                 },
                 _ = tokio::time::sleep(DAEMON_RETRY_DELAY) => {
                     match running
-                        .try_exit()
+                        .observe_exit()
+                        .await
                         .map_err(|error| Status::internal(error.to_string()))?
                     {
                         ExitClass::StillRunning => {}

@@ -70,6 +70,7 @@ const NETWORK_WORKER_PROGRESS_FRAME_LIMIT: usize = 64;
 const NETWORK_WORKER_HANDSHAKE_ATTEMPT_LIMIT: usize = 8;
 const HOST_PORT_CONTROL_TIMEOUT: Duration = Duration::from_secs(2);
 const HOST_PORT_ACCEPT_QUEUE: usize = 64;
+const VMM_CASCADE_EXIT_TIMEOUT: Duration = Duration::from_millis(250);
 const E2FSCK: &str = "/usr/bin/e2fsck";
 const RESIZE2FS: &str = "/usr/bin/resize2fs";
 
@@ -1056,6 +1057,18 @@ impl RunningVm {
             return Ok(ExitClass::HostPortForwarderFailure);
         }
         Ok(ExitClass::StillRunning)
+    }
+
+    pub async fn observe_exit(&mut self) -> Result<ExitClass, RunnerError> {
+        let preliminary = self.try_exit()?;
+        let observed = prioritize_exited_vmm(&self.process, &mut self.child, preliminary).await?;
+        if matches!(
+            observed,
+            ExitClass::GuestShutdown | ExitClass::VmmFailure(_)
+        ) {
+            self.stop_network_worker().await?;
+        }
+        Ok(observed)
     }
 
     pub async fn wait_for_exit(&mut self, timeout: Duration) -> Result<ExitClass, RunnerError> {
@@ -2332,6 +2345,34 @@ async fn wait_reaped_child(child: &mut tokio::process::Child) -> Result<ExitClas
     } else {
         Ok(ExitClass::VmmFailure(status.code()))
     }
+}
+
+async fn prioritize_exited_vmm(
+    process: &LiveProcess,
+    child: &mut tokio::process::Child,
+    observed: ExitClass,
+) -> Result<ExitClass, RunnerError> {
+    if matches!(
+        observed,
+        ExitClass::GuestShutdown | ExitClass::VmmFailure(_)
+    ) {
+        return Ok(observed);
+    }
+
+    let exited = match observed {
+        ExitClass::NetworkWorkerFailure(_)
+        | ExitClass::EgressBrokerFailure(_)
+        | ExitClass::HostPortForwarderFailure => {
+            process.wait_exited(VMM_CASCADE_EXIT_TIMEOUT).await?
+        }
+        ExitClass::StillRunning => process.is_exited()?,
+        ExitClass::GuestShutdown | ExitClass::VmmFailure(_) => unreachable!(),
+    };
+    if !exited {
+        return Ok(observed);
+    }
+
+    wait_reaped_child(child).await
 }
 
 pub struct RecoveredVm {
@@ -3844,6 +3885,28 @@ mod tests {
         ));
         assert!(child.try_wait().unwrap().is_some());
         assert!(process.is_exited().unwrap());
+    }
+
+    #[tokio::test]
+    async fn cascading_vmm_exit_is_reaped_before_a_sidecar_failure_is_reported() {
+        let (mut child, process) = spawn_admitted_sleep("30").await;
+        let identity = process.identity().clone();
+        let delayed_kill = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+            LiveProcess::recover(&identity)
+                .unwrap()
+                .signal(Signal::KILL)
+                .unwrap();
+        });
+
+        assert!(matches!(
+            prioritize_exited_vmm(&process, &mut child, ExitClass::HostPortForwarderFailure,)
+                .await
+                .unwrap(),
+            ExitClass::VmmFailure(_)
+        ));
+        delayed_kill.await.unwrap();
+        assert!(child.try_wait().unwrap().is_some());
     }
 
     #[tokio::test]
