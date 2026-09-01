@@ -28,9 +28,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use codewire_access::{
     AccessError, AccessProfile, AccessProfileId, AccessProfileName, AccessProfileReference,
-    AccessProfileScope, CapabilitySlot, CredentialAuthKind, CredentialId, CredentialMetadata,
-    CredentialStatus, DerivedGrant, EnvironmentAccessBinding, EnvironmentId, GrantContext, Owner,
-    OwnerId, Placement, ProviderCatalog, ProviderId, derive_grants, validate_profile_entries,
+    AccessProfileScope, BrokerOperationId, BrokerRouteId, CapabilitySlot, CredentialAuthKind,
+    CredentialId, CredentialMetadata, CredentialStatus, DerivedGrant, EnvironmentAccessBinding,
+    EnvironmentId, GrantContext, GrantPermission, Owner, OwnerId, Placement, ProviderCatalog,
+    ProviderId, derive_grants, validate_profile_entries,
 };
 use codewire_protected_store::{
     ProtectedEntryId, ProtectedStore, ProtectedStoreError, ProtectedStorePersistence,
@@ -101,27 +102,52 @@ pub struct EnvironmentAccessBindingRecord {
     pub updated_at_unix_ms: u64,
 }
 
-/// Material lease for the future authority/broker process. Debug output never
-/// renders the protected value.
-pub struct CredentialMaterial {
-    pub record: CredentialRecord,
+/// One exact credential operation admitted for the co-located local broker.
+///
+/// This value is deliberately non-cloneable and non-serializable. It is
+/// created only after the authority rederives the environment's current grant
+/// and checks the requested capability, operation, and route. Debug output
+/// never renders protected material.
+pub struct CredentialOperationLease {
+    pub credential: CredentialRecord,
+    pub grant: DerivedGrant,
+    pub permission: GrantPermission,
     value: ProtectedValue,
 }
 
-impl CredentialMaterial {
-    pub fn expose_secret(&self) -> &[u8] {
-        self.value.expose_secret()
+impl CredentialOperationLease {
+    /// Consume this lease while performing its one authorized operation.
+    /// Protected material is borrowed only for the duration of the callback
+    /// and is zeroized when the consumed lease is dropped.
+    pub fn with_material<T>(self, operation: impl FnOnce(&[u8]) -> T) -> T {
+        operation(self.value.expose_secret())
     }
 }
 
-impl fmt::Debug for CredentialMaterial {
+impl fmt::Debug for CredentialOperationLease {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("CredentialMaterial")
-            .field("record", &self.record)
+            .debug_struct("CredentialOperationLease")
+            .field("credential", &self.credential)
+            .field("grant", &self.grant)
+            .field("permission", &self.permission)
             .field("value", &"[REDACTED]")
             .finish()
     }
+}
+
+/// Material-free request from the authenticated broker boundary.
+///
+/// The broker is responsible for authenticating the environment generation;
+/// the authority binds the resulting material to that exact generation and
+/// admits only the capability selected by the environment's current profile.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CredentialOperationLeaseRequest {
+    pub environment_id: EnvironmentId,
+    pub environment_generation: u64,
+    pub capability_slot: CapabilitySlot,
+    pub operation: BrokerOperationId,
+    pub route: BrokerRouteId,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -602,12 +628,38 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
         delete_pending_delete(&connection, id)
     }
 
-    pub fn credential_material(
+    pub fn lease_environment_credential_operation(
         &self,
-        id: &CredentialId,
-    ) -> Result<CredentialMaterial, LocalCredentialError> {
+        request: &CredentialOperationLeaseRequest,
+    ) -> Result<CredentialOperationLease, LocalCredentialError> {
         let connection = self.connection()?;
-        let record = load_internal_credential(&connection, id, Some(MaterialState::Ready))?;
+        let binding =
+            load_environment_access_binding(&connection, &request.environment_id)?.binding;
+        let grant = derive_local_environment_grants(
+            &connection,
+            &binding,
+            request.environment_generation,
+            &self.owner_id,
+            &self.catalog,
+        )?
+        .into_iter()
+        .find(|grant| grant.capability_slot == request.capability_slot)
+        .ok_or(LocalCredentialError::CredentialOperationLeaseDenied)?;
+        let permission = GrantPermission {
+            operation: request.operation.clone(),
+            route: request.route.clone(),
+        };
+        if !grant.permissions.contains(&permission) {
+            return Err(LocalCredentialError::CredentialOperationLeaseDenied);
+        }
+        let record = load_internal_credential(
+            &connection,
+            &grant.credential_id,
+            Some(MaterialState::Ready),
+        )?;
+        if record.public.metadata.revocation_generation != grant.credential_revocation_generation {
+            return Err(LocalCredentialError::CredentialOperationLeaseDenied);
+        }
         if record.public.metadata.status != CredentialStatus::Active {
             return Err(LocalCredentialError::CredentialInactive);
         }
@@ -620,10 +672,32 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
             .protected_store
             .get(&record.protected_entry_id)?
             .ok_or(LocalCredentialError::CredentialMaterialMissing)?;
-        Ok(CredentialMaterial {
-            record: record.public,
+        Ok(CredentialOperationLease {
+            credential: record.public,
+            grant,
+            permission,
             value,
         })
+    }
+
+    #[cfg(test)]
+    fn credential_material_for_test(
+        &self,
+        id: &CredentialId,
+    ) -> Result<ProtectedValue, LocalCredentialError> {
+        let connection = self.connection()?;
+        let record = load_internal_credential(&connection, id, Some(MaterialState::Ready))?;
+        if record.public.metadata.status != CredentialStatus::Active {
+            return Err(LocalCredentialError::CredentialInactive);
+        }
+        if let Some(expires_at) = record.public.metadata.expires_at_unix
+            && expires_at <= unix_seconds()?
+        {
+            return Err(LocalCredentialError::CredentialInactive);
+        }
+        self.protected_store
+            .get(&record.protected_entry_id)?
+            .ok_or(LocalCredentialError::CredentialMaterialMissing)
     }
 
     pub fn create_profile(
@@ -2098,6 +2172,8 @@ pub enum LocalCredentialError {
     CredentialInactive,
     #[error("local credential material is missing from protected storage")]
     CredentialMaterialMissing,
+    #[error("local credential operation lease is unavailable")]
+    CredentialOperationLeaseDenied,
     #[error("local credential protected entry unexpectedly already exists")]
     ProtectedEntryCollision,
     #[error("local credential is selected by an access profile or environment")]

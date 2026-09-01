@@ -673,6 +673,7 @@ fn status_for_error(error: LocalCredentialError) -> Status {
         LocalCredentialError::CredentialUnavailable
         | LocalCredentialError::CredentialInactive
         | LocalCredentialError::CredentialMaterialMissing
+        | LocalCredentialError::CredentialOperationLeaseDenied
         | LocalCredentialError::CredentialInUse
         | LocalCredentialError::StaleProfileRevision
         | LocalCredentialError::ProfileInUse

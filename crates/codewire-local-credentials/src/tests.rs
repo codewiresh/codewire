@@ -52,6 +52,10 @@ impl TestProtectedStore {
         self.state.lock().expect("store lock").put_fault = fault;
     }
 
+    fn set_get_fault(&self, fault: Fault) {
+        self.state.lock().expect("store lock").get_fault = fault;
+    }
+
     fn set_delete_fault(&self, fault: Fault) {
         self.state.lock().expect("store lock").delete_fault = fault;
     }
@@ -69,6 +73,10 @@ impl TestProtectedStore {
 
     fn delete_call_count(&self) -> usize {
         self.state.lock().expect("store lock").delete_calls
+    }
+
+    fn clear_entries(&self) {
+        self.state.lock().expect("store lock").entries.clear();
     }
 }
 
@@ -209,6 +217,37 @@ fn profile_entries(credential: &CredentialId) -> BTreeMap<CapabilitySlot, Creden
     BTreeMap::from([(CapabilitySlot::codex(), credential.clone())])
 }
 
+fn operation_lease_request(environment_id: &EnvironmentId) -> CredentialOperationLeaseRequest {
+    CredentialOperationLeaseRequest {
+        environment_id: environment_id.clone(),
+        environment_generation: 7,
+        capability_slot: CapabilitySlot::codex(),
+        operation: BrokerOperationId::parse("responses").expect("operation ID"),
+        route: BrokerRouteId::parse("openai-api").expect("route ID"),
+    }
+}
+
+fn bind_credential(
+    authority: &LocalCredentialAuthority<TestProtectedStore>,
+    environment_id: &EnvironmentId,
+    credential_id: &CredentialId,
+) -> AccessProfileRecord {
+    let profile = authority
+        .create_profile(
+            AccessProfileName::parse("work").expect("profile name"),
+            profile_entries(credential_id),
+        )
+        .expect("create profile");
+    authority
+        .create_environment_access_binding(EnvironmentAccessBinding {
+            environment_id: environment_id.clone(),
+            profile_id: profile.profile.id.clone(),
+            profile_revision: profile.profile.revision,
+        })
+        .expect("bind environment access");
+    profile
+}
+
 #[test]
 fn multiple_credentials_are_selected_by_profiles_without_material_in_metadata() {
     let temp = TempDir::new().expect("temporary directory");
@@ -261,7 +300,7 @@ fn multiple_credentials_are_selected_by_profiles_without_material_in_metadata() 
         personal_profile.profile
     );
     let lease = authority
-        .credential_material(&work.metadata.id)
+        .credential_material_for_test(&work.metadata.id)
         .expect("load work credential material");
     assert_eq!(lease.expose_secret(), work_secret);
     assert!(!format!("{lease:?}").contains("synthetic-work-oauth-token"));
@@ -274,6 +313,173 @@ fn multiple_credentials_are_selected_by_profiles_without_material_in_metadata() 
                 .any(|window| window == secret)
         );
     }
+}
+
+#[test]
+fn broker_operation_lease_rederives_the_bound_grant_before_material_access() {
+    let temp = TempDir::new().expect("temporary directory");
+    let store = TestProtectedStore::new(ProtectedStorePersistence::OperatingSystem);
+    let authority = LocalCredentialAuthority::open(&authority_root(&temp), store, catalog())
+        .expect("open authority");
+    let secret = b"synthetic-operation-token";
+    let credential = authority
+        .add_credential(new_credential("work"), material(secret))
+        .expect("add credential");
+    let environment_id = environment("env-lease");
+    let profile = bind_credential(&authority, &environment_id, &credential.metadata.id);
+
+    let mut request = operation_lease_request(&environment_id);
+    request.environment_generation = 41;
+    let lease = authority
+        .lease_environment_credential_operation(&request)
+        .expect("lease exact operation");
+    assert_eq!(lease.credential.metadata.id, credential.metadata.id);
+    assert_eq!(lease.grant.environment_id, environment_id);
+    assert_eq!(lease.grant.environment_generation, 41);
+    assert_eq!(lease.grant.profile_id, profile.profile.id);
+    assert_eq!(lease.grant.profile_revision, profile.profile.revision);
+    assert_eq!(lease.grant.capability_slot, CapabilitySlot::codex());
+    assert_eq!(lease.permission.operation.as_str(), "responses");
+    assert_eq!(lease.permission.route.as_str(), "openai-api");
+    let rendered = format!("{lease:?}");
+    assert!(!rendered.contains("synthetic-operation-token"));
+    assert!(!rendered.contains("protected_entry"));
+    assert_eq!(lease.with_material(<[u8]>::to_vec), secret);
+}
+
+#[test]
+fn broker_operation_lease_denies_unbound_capabilities_routes_and_operations() {
+    let temp = TempDir::new().expect("temporary directory");
+    let store = TestProtectedStore::new(ProtectedStorePersistence::OperatingSystem);
+    let authority =
+        LocalCredentialAuthority::open(&authority_root(&temp), store.clone(), catalog())
+            .expect("open authority");
+    let credential = authority
+        .add_credential(new_credential("work"), material(b"synthetic-token"))
+        .expect("add credential");
+    let environment_id = environment("env-lease");
+    bind_credential(&authority, &environment_id, &credential.metadata.id);
+    store.set_get_fault(Fault::BeforeEffect);
+
+    let mut request = operation_lease_request(&environment_id);
+    request.capability_slot = CapabilitySlot::github();
+    assert!(matches!(
+        authority.lease_environment_credential_operation(&request),
+        Err(LocalCredentialError::CredentialOperationLeaseDenied)
+    ));
+
+    let mut request = operation_lease_request(&environment_id);
+    request.route = BrokerRouteId::parse("other-route").expect("route ID");
+    assert!(matches!(
+        authority.lease_environment_credential_operation(&request),
+        Err(LocalCredentialError::CredentialOperationLeaseDenied)
+    ));
+
+    let mut request = operation_lease_request(&environment_id);
+    request.operation = BrokerOperationId::parse("other-operation").expect("operation ID");
+    assert!(matches!(
+        authority.lease_environment_credential_operation(&request),
+        Err(LocalCredentialError::CredentialOperationLeaseDenied)
+    ));
+
+    let request = operation_lease_request(&environment("unbound-environment"));
+    assert!(matches!(
+        authority.lease_environment_credential_operation(&request),
+        Err(LocalCredentialError::EnvironmentBindingNotFound)
+    ));
+
+    let mut request = operation_lease_request(&environment_id);
+    request.environment_generation = 0;
+    assert!(matches!(
+        authority.lease_environment_credential_operation(&request),
+        Err(LocalCredentialError::Access(AccessError::ZeroGeneration {
+            field: "environment generation"
+        }))
+    ));
+}
+
+#[test]
+fn broker_operation_lease_denies_expired_material_before_store_access() {
+    let temp = TempDir::new().expect("temporary directory");
+    let store = TestProtectedStore::new(ProtectedStorePersistence::OperatingSystem);
+    let authority =
+        LocalCredentialAuthority::open(&authority_root(&temp), store.clone(), catalog())
+            .expect("open authority");
+    let credential = authority
+        .add_credential(new_credential("expired"), material(b"expired-token"))
+        .expect("add credential");
+    let environment_id = environment("env-expired");
+    bind_credential(&authority, &environment_id, &credential.metadata.id);
+    authority
+        .connection()
+        .expect("database connection")
+        .execute(
+            "UPDATE credentials SET expires_at_unix = 1 WHERE id = ?1",
+            [credential.metadata.id.as_str()],
+        )
+        .expect("expire credential after binding");
+    store.set_get_fault(Fault::BeforeEffect);
+
+    assert!(matches!(
+        authority.lease_environment_credential_operation(&operation_lease_request(&environment_id)),
+        Err(LocalCredentialError::Access(
+            AccessError::CredentialExpired { .. }
+        ))
+    ));
+}
+
+#[test]
+fn broker_operation_lease_tracks_rotation_and_fails_closed_on_revocation_or_storage_loss() {
+    let temp = TempDir::new().expect("temporary directory");
+    let store = TestProtectedStore::new(ProtectedStorePersistence::OperatingSystem);
+    let authority =
+        LocalCredentialAuthority::open(&authority_root(&temp), store.clone(), catalog())
+            .expect("open authority");
+    let credential = authority
+        .add_credential(new_credential("work"), material(b"first-token"))
+        .expect("add credential");
+    let environment_id = environment("env-lease");
+    bind_credential(&authority, &environment_id, &credential.metadata.id);
+    let request = operation_lease_request(&environment_id);
+
+    let first = authority
+        .lease_environment_credential_operation(&request)
+        .expect("lease first generation");
+    assert_eq!(first.grant.credential_revocation_generation, 1);
+    assert_eq!(first.with_material(<[u8]>::to_vec), b"first-token");
+
+    authority
+        .rotate_credential_material(&credential.metadata.id, material(b"second-token"), None)
+        .expect("rotate credential");
+    let rotated = authority
+        .lease_environment_credential_operation(&request)
+        .expect("lease rotated generation");
+    assert_eq!(rotated.grant.credential_revocation_generation, 2);
+    assert_eq!(rotated.with_material(<[u8]>::to_vec), b"second-token");
+
+    store.set_get_fault(Fault::BeforeEffect);
+    assert!(matches!(
+        authority.lease_environment_credential_operation(&request),
+        Err(LocalCredentialError::ProtectedStore(
+            ProtectedStoreError::Unavailable
+        ))
+    ));
+    store.clear_faults();
+    store.clear_entries();
+    assert!(matches!(
+        authority.lease_environment_credential_operation(&request),
+        Err(LocalCredentialError::CredentialMaterialMissing)
+    ));
+
+    authority
+        .revoke_credential(&credential.metadata.id)
+        .expect("revoke credential");
+    assert!(matches!(
+        authority.lease_environment_credential_operation(&request),
+        Err(LocalCredentialError::Access(
+            AccessError::CredentialInactive { .. }
+        ))
+    ));
 }
 
 #[test]
@@ -336,7 +542,7 @@ fn names_are_unique_case_insensitively_and_metadata_lifecycle_is_explicit() {
     assert_eq!(revoked.metadata.status, CredentialStatus::Revoked);
     assert_eq!(revoked.metadata.revocation_generation, 2);
     assert!(matches!(
-        authority.credential_material(&credential.metadata.id),
+        authority.credential_material_for_test(&credential.metadata.id),
         Err(LocalCredentialError::CredentialInactive)
     ));
 }
@@ -678,7 +884,7 @@ fn rotation_switches_generations_without_overwriting_the_active_entry() {
     assert_eq!(store.entry_count(), 1);
     assert_eq!(
         authority
-            .credential_material(&credential.metadata.id)
+            .credential_material_for_test(&credential.metadata.id)
             .expect("rotated material")
             .expose_secret(),
         b"new-synthetic-token"
@@ -722,7 +928,7 @@ fn interrupted_rotation_rolls_back_the_uncommitted_generation() {
     );
     assert_eq!(
         authority
-            .credential_material(&credential.metadata.id)
+            .credential_material_for_test(&credential.metadata.id)
             .expect("original material")
             .expose_secret(),
         b"active-token"
@@ -741,7 +947,7 @@ fn interrupted_rotation_rolls_back_the_uncommitted_generation() {
     );
     assert_eq!(
         recovered
-            .credential_material(&credential.metadata.id)
+            .credential_material_for_test(&credential.metadata.id)
             .expect("recovered material")
             .expose_secret(),
         b"active-token"
@@ -771,7 +977,7 @@ fn committed_rotation_stays_usable_while_retired_entry_cleanup_is_pending() {
     assert_eq!(store.entry_count(), 2);
     assert_eq!(
         authority
-            .credential_material(&credential.metadata.id)
+            .credential_material_for_test(&credential.metadata.id)
             .expect("new active material")
             .expose_secret(),
         b"active-rotated-token"
@@ -1008,7 +1214,7 @@ fn process_lifetime_material_loss_marks_persisted_metadata_expired() {
         CredentialStatus::Expired
     );
     assert!(matches!(
-        reopened.credential_material(&credential.metadata.id),
+        reopened.credential_material_for_test(&credential.metadata.id),
         Err(LocalCredentialError::CredentialInactive)
     ));
 }
