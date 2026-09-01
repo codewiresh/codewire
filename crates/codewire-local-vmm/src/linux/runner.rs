@@ -1,5 +1,6 @@
 use std::fmt;
 use std::io;
+use std::net::{Ipv4Addr, SocketAddrV4, TcpListener as StdTcpListener};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::net::UnixStream as StdUnixStream;
 use std::path::{Path, PathBuf};
@@ -13,10 +14,13 @@ use codewire_vmm_guest_probe::{
     PROGRESS_CHALLENGE_LEN, PROGRESS_FRAME_LEN, ProgressFrame, ProgressRequest, Seed, SetupBinding,
     guest::CONTAINER_INIT_PATH,
 };
+use futures::FutureExt as _;
 use rand::{RngCore, rngs::OsRng};
 use rustix::process::Signal;
 use sha2::{Digest, Sha256};
+use tokio::io::unix::AsyncFd;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+use tokio::task::{JoinHandle, JoinSet};
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
@@ -24,17 +28,23 @@ use crate::artifact::{AdmittedArtifacts, ArtifactError, ArtifactLock};
 use crate::ch_api::{ChApiClient, ChApiError};
 use crate::cloud_hypervisor::{CloudHypervisorConfig, CloudHypervisorConfigError, CommandSpec};
 use crate::egress_broker::{
-    EGRESS_BROKER_BOOTSTRAP_FD, EGRESS_BROKER_CONFINE_MESSAGE, EGRESS_BROKER_PREPARED_MESSAGE,
+    EGRESS_BROKER_BOOTSTRAP_FD, EGRESS_BROKER_CONFINE_MESSAGE,
+    EGRESS_BROKER_CONFINEMENT_ADMISSION_TIMEOUT, EGRESS_BROKER_PREPARED_MESSAGE,
     EGRESS_BROKER_READY_MESSAGE, EGRESS_BROKER_STATUS_MAX_BYTES, EgressBrokerStartupFailure,
     EgressBrokerStartupStatus, decode_egress_broker_startup_status,
     encode_developer_egress_broker_bootstrap,
+};
+use crate::host_port::{
+    HOST_PORT_CONTROL_KEY_LEN, HostPortBinding, HostPortControlFrame,
+    validate_canonical_host_port_bindings,
 };
 use crate::hybrid_vsock::{HybridVsockError, HybridVsockTarget};
 use crate::network_worker::{
     NETWORK_BOOTSTRAP_FD, NetworkWorkerStartupFailure, NetworkWorkerStartupStatus,
     WORKER_BROKER_READY_MESSAGE, WORKER_PREPARED_MESSAGE, WORKER_STATUS_MAX_BYTES,
     decode_worker_startup_status, encode_product_worker_bootstrap, encode_worker_bootstrap,
-    send_worker_broker_descriptor, send_worker_network_descriptor,
+    send_worker_broker_descriptor, send_worker_host_port_descriptor,
+    send_worker_network_descriptor,
 };
 
 use super::confinement::lock_process_privileges;
@@ -53,10 +63,13 @@ const GRACEFUL_STOP_TIMEOUT: Duration = Duration::from_secs(5);
 const SIGNAL_STOP_TIMEOUT: Duration = Duration::from_secs(2);
 const NETWORK_WORKER_RETRY_DELAY: Duration = Duration::from_millis(50);
 const NETWORK_WORKER_READY_TIMEOUT: Duration = Duration::from_secs(5);
-const EGRESS_BROKER_READY_TIMEOUT: Duration = Duration::from_secs(10);
-const NETWORK_WORKER_ATTACH_TIMEOUT: Duration = Duration::from_secs(10);
+const EGRESS_BROKER_READY_TIMEOUT: Duration =
+    EGRESS_BROKER_CONFINEMENT_ADMISSION_TIMEOUT.saturating_add(Duration::from_secs(5));
+const NETWORK_WORKER_ATTACH_TIMEOUT: Duration = Duration::from_secs(20);
 const NETWORK_WORKER_PROGRESS_FRAME_LIMIT: usize = 64;
 const NETWORK_WORKER_HANDSHAKE_ATTEMPT_LIMIT: usize = 8;
+const HOST_PORT_CONTROL_TIMEOUT: Duration = Duration::from_secs(2);
+const HOST_PORT_ACCEPT_QUEUE: usize = 64;
 const E2FSCK: &str = "/usr/bin/e2fsck";
 const RESIZE2FS: &str = "/usr/bin/resize2fs";
 
@@ -79,6 +92,7 @@ pub struct CreateVmRequest {
     pub vcpus: u8,
     pub memory_mib: u32,
     pub setup: Option<SetupBinding>,
+    pub host_ports: Vec<HostPortBinding>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -146,6 +160,7 @@ impl CloudHypervisorRunner {
     pub async fn prepare(&self, request: CreateVmRequest) -> Result<PreparedVm, RunnerError> {
         preflight()?;
         validate_request(&request)?;
+        let host_port_listeners = reserve_host_ports(&request.host_ports)?;
         let paths = VmPaths::create(&self.state_root, request.vm_id)?;
         let lock = paths.lock()?;
         let persisted = read_stopped_persisted_state(&paths, request.vm_id)?;
@@ -213,6 +228,7 @@ impl CloudHypervisorRunner {
             setup_disk,
             token,
             command,
+            host_port_listeners,
             lock,
         })
     }
@@ -316,6 +332,7 @@ impl CloudHypervisorRunner {
             api,
             hybrid,
             network_worker: None,
+            host_port_listeners: prepared.host_port_listeners,
             _lock: prepared.lock,
         })
     }
@@ -601,6 +618,32 @@ impl Drop for StartupOwnership {
     }
 }
 
+struct ReservedHostPort {
+    binding: HostPortBinding,
+    listener: StdTcpListener,
+}
+
+fn reserve_host_ports(bindings: &[HostPortBinding]) -> Result<Vec<ReservedHostPort>, RunnerError> {
+    validate_canonical_host_port_bindings(bindings).map_err(|_| RunnerError::InvalidRequest)?;
+    let mut listeners = Vec::with_capacity(bindings.len());
+    for binding in bindings {
+        let address = SocketAddrV4::new(Ipv4Addr::LOCALHOST, binding.host_port);
+        let listener = StdTcpListener::bind(address)
+            .map_err(|_| RunnerError::HostPortUnavailable(binding.host_port))?;
+        listener
+            .set_nonblocking(true)
+            .map_err(|_| RunnerError::HostPortUnavailable(binding.host_port))?;
+        if listener.local_addr().ok() != Some(address.into()) {
+            return Err(RunnerError::HostPortUnavailable(binding.host_port));
+        }
+        listeners.push(ReservedHostPort {
+            binding: *binding,
+            listener,
+        });
+    }
+    Ok(listeners)
+}
+
 pub struct PreparedVm {
     request: CreateVmRequest,
     paths: VmPaths,
@@ -609,6 +652,7 @@ pub struct PreparedVm {
     setup_disk: Option<SetupDiskIdentity>,
     token: Zeroizing<String>,
     command: CommandSpec,
+    host_port_listeners: Vec<ReservedHostPort>,
     lock: VmLock,
 }
 
@@ -665,6 +709,7 @@ pub struct RunningVm {
     api: ChApiClient,
     hybrid: HybridVsockTarget,
     network_worker: Option<NetworkWorkerProcess>,
+    host_port_listeners: Vec<ReservedHostPort>,
     _lock: VmLock,
 }
 
@@ -862,7 +907,25 @@ impl RunningVm {
                 deadline,
             };
             match spawn_network_stack_processes(&launch, key, mode).await {
-                Ok(worker) => {
+                Ok(mut worker) => {
+                    if mode == NetworkWorkerMode::Product {
+                        let listeners = std::mem::take(&mut self.host_port_listeners);
+                        if let Err(error) = start_host_port_forwarder(
+                            &self.process,
+                            &mut worker,
+                            listeners,
+                            self.request.vm_id,
+                            self.request.generation,
+                        ) {
+                            let _ = stop_network_worker_process(&mut worker).await;
+                            if let Some(broker) = worker.broker.as_mut() {
+                                let _ = stop_egress_broker_process(broker).await;
+                            }
+                            return Err(error);
+                        }
+                    } else if !self.host_port_listeners.is_empty() {
+                        return Err(RunnerError::InvalidNetworkWorker);
+                    }
                     self.network_worker = Some(worker);
                     return Ok(());
                 }
@@ -980,14 +1043,19 @@ impl RunningVm {
             Ok(None) => {}
             Err(_) => return Err(RunnerError::NetworkWorkerWait),
         }
-        match worker.broker.as_mut() {
-            Some(broker) => match broker.child.try_wait() {
-                Ok(Some(status)) => Ok(ExitClass::EgressBrokerFailure(status.code())),
-                Ok(None) => Ok(ExitClass::StillRunning),
-                Err(_) => Err(RunnerError::EgressBrokerWait),
-            },
-            None => Ok(ExitClass::StillRunning),
+        if let Some(broker) = worker.broker.as_mut() {
+            match broker.child.try_wait() {
+                Ok(Some(status)) => {
+                    return Ok(ExitClass::EgressBrokerFailure(status.code()));
+                }
+                Ok(None) => {}
+                Err(_) => return Err(RunnerError::EgressBrokerWait),
+            }
         }
+        if take_host_port_forwarder_failure(&mut worker.host_port_forwarder) {
+            return Ok(ExitClass::HostPortForwarderFailure);
+        }
+        Ok(ExitClass::StillRunning)
     }
 
     pub async fn wait_for_exit(&mut self, timeout: Duration) -> Result<ExitClass, RunnerError> {
@@ -1210,6 +1278,28 @@ struct NetworkWorkerProcess {
     child: tokio::process::Child,
     process: LiveProcess,
     broker: Option<EgressBrokerProcess>,
+    host_port_control: Option<tokio::net::UnixStream>,
+    host_port_key: Option<Zeroizing<[u8; HOST_PORT_CONTROL_KEY_LEN]>>,
+    host_port_forwarder: Option<JoinHandle<Result<(), RunnerError>>>,
+}
+
+fn take_host_port_forwarder_failure(
+    forwarder: &mut Option<JoinHandle<Result<(), RunnerError>>>,
+) -> bool {
+    let outcome = {
+        let Some(forwarder) = forwarder.as_mut() else {
+            return false;
+        };
+        if !forwarder.is_finished() {
+            return false;
+        }
+        (&mut *forwarder).now_or_never()
+    };
+    let Some(outcome) = outcome else {
+        return false;
+    };
+    let _ = forwarder.take();
+    !matches!(outcome, Ok(Ok(())))
 }
 
 struct NetworkWorkerStartup {
@@ -1235,7 +1325,11 @@ impl NetworkWorkerStartup {
         self.process = Some(process);
     }
 
-    fn disarm(mut self) -> NetworkWorkerProcess {
+    fn disarm(
+        mut self,
+        host_port_control: Option<tokio::net::UnixStream>,
+        host_port_key: Option<Zeroizing<[u8; HOST_PORT_CONTROL_KEY_LEN]>>,
+    ) -> NetworkWorkerProcess {
         NetworkWorkerProcess {
             child: self
                 .child
@@ -1246,6 +1340,9 @@ impl NetworkWorkerStartup {
                 .take()
                 .expect("admitted network worker owns its process identity"),
             broker: None,
+            host_port_control,
+            host_port_key,
+            host_port_forwarder: None,
         }
     }
 }
@@ -1348,6 +1445,12 @@ async fn reap_failed_egress_broker_startup(
 }
 
 async fn stop_network_worker_process(worker: &mut NetworkWorkerProcess) -> Result<(), RunnerError> {
+    if let Some(forwarder) = worker.host_port_forwarder.take() {
+        forwarder.abort();
+        let _ = forwarder.await;
+    }
+    drop(worker.host_port_control.take());
+    drop(worker.host_port_key.take());
     if worker
         .child
         .try_wait()
@@ -1409,6 +1512,203 @@ async fn stop_egress_broker_process(broker: &mut EgressBrokerProcess) -> Result<
         .await
         .map_err(|_| RunnerError::EgressBrokerWait)?;
     Ok(())
+}
+
+struct AcceptedHostPort {
+    binding: HostPortBinding,
+    stream: tokio::net::TcpStream,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HostPortDependency {
+    Vmm,
+    NetworkWorker,
+    EgressBroker,
+}
+
+fn start_host_port_forwarder(
+    vmm: &LiveProcess,
+    worker: &mut NetworkWorkerProcess,
+    listeners: Vec<ReservedHostPort>,
+    vm_id: Uuid,
+    generation: u64,
+) -> Result<(), RunnerError> {
+    if listeners.is_empty() {
+        return Ok(());
+    }
+    let control = worker
+        .host_port_control
+        .take()
+        .ok_or(RunnerError::HostPortControl)?;
+    let key = worker
+        .host_port_key
+        .take()
+        .ok_or(RunnerError::HostPortControl)?;
+    let mut async_listeners = Vec::with_capacity(listeners.len());
+    for reserved in listeners {
+        let binding = reserved.binding;
+        let listener = tokio::net::TcpListener::from_std(reserved.listener)
+            .map_err(|_| RunnerError::HostPortControl)?;
+        let address = listener
+            .local_addr()
+            .map_err(|_| RunnerError::HostPortControl)?;
+        if address.ip() != Ipv4Addr::LOCALHOST || address.port() != binding.host_port {
+            return Err(RunnerError::HostPortControl);
+        }
+        async_listeners.push((listener, binding));
+    }
+    let mut process_wait_descriptors = vec![
+        (HostPortDependency::Vmm, vmm.duplicate_wait_descriptor()?),
+        (
+            HostPortDependency::NetworkWorker,
+            worker.process.duplicate_wait_descriptor()?,
+        ),
+    ];
+    if let Some(broker) = worker.broker.as_ref() {
+        process_wait_descriptors.push((
+            HostPortDependency::EgressBroker,
+            broker.process.duplicate_wait_descriptor()?,
+        ));
+    }
+    worker.host_port_forwarder = Some(tokio::spawn(run_host_port_forwarder(
+        control,
+        key,
+        async_listeners,
+        process_wait_descriptors,
+        vm_id,
+        generation,
+    )));
+    Ok(())
+}
+
+async fn run_host_port_forwarder(
+    mut control: tokio::net::UnixStream,
+    key: Zeroizing<[u8; HOST_PORT_CONTROL_KEY_LEN]>,
+    listeners: Vec<(tokio::net::TcpListener, HostPortBinding)>,
+    process_wait_descriptors: Vec<(HostPortDependency, OwnedFd)>,
+    vm_id: Uuid,
+    generation: u64,
+) -> Result<(), RunnerError> {
+    let (accepted_tx, mut accepted_rx) = tokio::sync::mpsc::channel(HOST_PORT_ACCEPT_QUEUE);
+    let mut acceptors = JoinSet::new();
+    for (listener, binding) in listeners {
+        let accepted_tx = accepted_tx.clone();
+        acceptors.spawn(accept_host_port(listener, binding, accepted_tx));
+    }
+    drop(accepted_tx);
+    let mut monitors = JoinSet::new();
+    for (dependency, descriptor) in process_wait_descriptors {
+        monitors.spawn(async move {
+            let descriptor = AsyncFd::new(descriptor).map_err(|_| RunnerError::HostPortControl)?;
+            let _ready = descriptor
+                .readable()
+                .await
+                .map_err(|_| RunnerError::HostPortControl)?;
+            Ok::<HostPortDependency, RunnerError>(dependency)
+        });
+    }
+    let mut sequence = 1_u64;
+    let mut accepting = true;
+    loop {
+        tokio::select! {
+            accepted = accepted_rx.recv(), if accepting => {
+                let accepted = accepted.ok_or(RunnerError::HostPortControl)?;
+                transfer_host_port_connection(
+                    &mut control,
+                    &key,
+                    vm_id,
+                    generation,
+                    sequence,
+                    accepted,
+                ).await?;
+                sequence = sequence.checked_add(1).ok_or(RunnerError::HostPortControl)?;
+            }
+            readable = control.readable() => {
+                readable.map_err(|_| RunnerError::HostPortControl)?;
+                let mut unexpected = [0_u8; 1];
+                match control.try_read(&mut unexpected) {
+                    Ok(0) | Ok(_) => return Err(RunnerError::HostPortControl),
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+                    Err(_) => return Err(RunnerError::HostPortControl),
+                }
+            }
+            completed = acceptors.join_next(), if !acceptors.is_empty() => {
+                let _ = completed;
+                return Err(RunnerError::HostPortControl);
+            }
+            completed = monitors.join_next(), if !monitors.is_empty() => {
+                let dependency = completed
+                    .ok_or(RunnerError::HostPortControl)?
+                    .map_err(|_| RunnerError::HostPortControl)??;
+                match dependency {
+                    HostPortDependency::Vmm | HostPortDependency::NetworkWorker => return Ok(()),
+                    HostPortDependency::EgressBroker => {
+                        // Egress and ingress have separate authorities. Broker
+                        // loss must release every host listener, but closing the
+                        // worker control stream here would turn the resulting
+                        // fail-closed worker into a misleading worker failure.
+                        accepting = false;
+                        acceptors.abort_all();
+                        while acceptors.join_next().await.is_some() {}
+                        accepted_rx.close();
+                        while accepted_rx.try_recv().is_ok() {}
+                    }
+                }
+            }
+        }
+    }
+}
+
+async fn accept_host_port(
+    listener: tokio::net::TcpListener,
+    binding: HostPortBinding,
+    accepted: tokio::sync::mpsc::Sender<AcceptedHostPort>,
+) -> Result<(), RunnerError> {
+    loop {
+        let (stream, peer) = listener
+            .accept()
+            .await
+            .map_err(|_| RunnerError::HostPortControl)?;
+        if !peer.ip().is_loopback()
+            || stream.local_addr().ok().is_none_or(|address| {
+                address.ip() != Ipv4Addr::LOCALHOST || address.port() != binding.host_port
+            })
+        {
+            continue;
+        }
+        accepted
+            .send(AcceptedHostPort { binding, stream })
+            .await
+            .map_err(|_| RunnerError::HostPortControl)?;
+    }
+}
+
+async fn transfer_host_port_connection(
+    control: &mut tokio::net::UnixStream,
+    key: &[u8; HOST_PORT_CONTROL_KEY_LEN],
+    vm_id: Uuid,
+    generation: u64,
+    sequence: u64,
+    accepted: AcceptedHostPort,
+) -> Result<(), RunnerError> {
+    let frame = HostPortControlFrame::encode(vm_id, generation, sequence, accepted.binding, key)
+        .map_err(|_| RunnerError::HostPortControl)?;
+    let deadline = tokio::time::Instant::now() + HOST_PORT_CONTROL_TIMEOUT;
+    tokio::time::timeout_at(deadline, async {
+        control.write_all(&frame).await?;
+        control.flush().await
+    })
+    .await
+    .map_err(|_| RunnerError::HostPortControl)?
+    .map_err(|_| RunnerError::HostPortControl)?;
+    transfer_worker_descriptor(
+        control,
+        accepted.stream.as_raw_fd(),
+        deadline,
+        send_worker_host_port_descriptor,
+    )
+    .await
+    .map_err(|_| RunnerError::HostPortControl)
 }
 
 async fn spawn_network_stack_processes(
@@ -1604,13 +1904,22 @@ async fn spawn_network_worker_process(
     let mut bootstrap = tokio::net::UnixStream::from_std(bootstrap_parent)
         .map_err(|_| RunnerError::NetworkWorkerSpawn)?;
     let product_worker = matches!(&attachment, WorkerBrokerAttachment::Product { .. });
+    let host_port_key = product_worker.then(fresh_host_port_control_key);
     let (bytes, mut broker_endpoint) = match attachment {
         WorkerBrokerAttachment::Product {
             endpoint,
             key: broker_key,
         } => (
-            encode_product_worker_bootstrap(context.vm_id, context.generation, &key, &broker_key)
-                .map(|bytes| Zeroizing::new(bytes.to_vec())),
+            encode_product_worker_bootstrap(
+                context.vm_id,
+                context.generation,
+                &key,
+                &broker_key,
+                host_port_key
+                    .as_deref()
+                    .expect("product worker has a host-port control key"),
+            )
+            .map(|bytes| Zeroizing::new(bytes.to_vec())),
             Some(endpoint),
         ),
         WorkerBrokerAttachment::InjectedVerification => (
@@ -1813,7 +2122,8 @@ async fn spawn_network_worker_process(
             return Err(RunnerError::NetworkWorkerBootstrap);
         }
     }
-    Ok(startup.disarm())
+    let host_port_control = product_worker.then_some(bootstrap);
+    Ok(startup.disarm(host_port_control, host_port_key))
 }
 
 async fn transfer_worker_descriptor(
@@ -1997,6 +2307,7 @@ pub enum ExitClass {
     VmmFailure(Option<i32>),
     NetworkWorkerFailure(Option<i32>),
     EgressBrokerFailure(Option<i32>),
+    HostPortForwarderFailure,
 }
 
 async fn kill_and_reap(
@@ -2110,6 +2421,7 @@ fn validate_request(request: &CreateVmRequest) -> Result<(), RunnerError> {
         || request.vcpus == 0
         || request.vcpus > 32
         || !(128..=65_536).contains(&request.memory_mib)
+        || validate_canonical_host_port_bindings(&request.host_ports).is_err()
     {
         return Err(RunnerError::InvalidRequest);
     }
@@ -2289,6 +2601,16 @@ fn generate_auth_token() -> String {
 fn fresh_egress_broker_key() -> Zeroizing<[u8; BROKER_IPC_KEY_LEN]> {
     loop {
         let mut key = Zeroizing::new([0_u8; BROKER_IPC_KEY_LEN]);
+        OsRng.fill_bytes(key.as_mut());
+        if key.iter().any(|byte| *byte != 0) {
+            return key;
+        }
+    }
+}
+
+fn fresh_host_port_control_key() -> Zeroizing<[u8; HOST_PORT_CONTROL_KEY_LEN]> {
+    loop {
+        let mut key = Zeroizing::new([0_u8; HOST_PORT_CONTROL_KEY_LEN]);
         OsRng.fill_bytes(key.as_mut());
         if key.iter().any(|byte| *byte != 0) {
             return key;
@@ -2533,6 +2855,10 @@ pub enum RunnerError {
     NetworkWorkerWait,
     #[error("network worker did not exit after pidfd SIGKILL")]
     NetworkWorkerKillTimeout,
+    #[error("local loopback host port {0} is unavailable")]
+    HostPortUnavailable(u16),
+    #[error("host-port forwarding control failed")]
+    HostPortControl,
     #[error("egress broker process spawn failed")]
     EgressBrokerSpawn,
     #[error("egress broker did not become ready before the startup deadline")]
@@ -2568,6 +2894,7 @@ mod tests {
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
     use crate::artifact::AdmittedArtifact;
+    use crate::host_port::RESERVED_GUEST_DAEMON_PORT;
     use crate::linux::path::{FileIdentity, current_uid};
     use crate::linux::process::ProcessIdentity;
     use crate::linux::state::RootGenerationPaths;
@@ -2645,6 +2972,7 @@ mod tests {
             vcpus,
             memory_mib,
             setup: None,
+            host_ports: Vec::new(),
         }
     }
 
@@ -2870,17 +3198,25 @@ mod tests {
 
     #[test]
     fn network_stack_attachment_budgets_each_isolated_process_phase() {
+        assert!(
+            EGRESS_BROKER_READY_TIMEOUT > EGRESS_BROKER_CONFINEMENT_ADMISSION_TIMEOUT,
+            "the runner must retain a margin around the child's executable-admission window"
+        );
         assert_eq!(
             network_stack_attach_timeout(Duration::from_secs(1), NetworkWorkerMode::Product),
             Duration::from_secs(2)
         );
         assert_eq!(
             network_stack_attach_timeout(Duration::from_secs(15), NetworkWorkerMode::Product),
-            Duration::from_secs(20)
+            Duration::from_secs(30)
+        );
+        assert!(
+            network_stack_attach_timeout(Duration::from_secs(15), NetworkWorkerMode::Product)
+                > EGRESS_BROKER_READY_TIMEOUT
         );
         assert_eq!(
             network_stack_attach_timeout(Duration::from_secs(20 * 60), NetworkWorkerMode::Product),
-            Duration::from_secs(20)
+            Duration::from_secs(40)
         );
         assert_eq!(
             network_stack_attach_timeout(
@@ -2891,7 +3227,7 @@ mod tests {
         );
         assert_eq!(
             network_stack_attach_timeout(
-                Duration::from_secs(15),
+                Duration::from_secs(20 * 60),
                 NetworkWorkerMode::InjectedVerification
             ),
             NETWORK_WORKER_ATTACH_TIMEOUT
@@ -2909,6 +3245,9 @@ mod tests {
                 child: broker_child,
                 process: broker_process,
             }),
+            host_port_control: None,
+            host_port_key: None,
+            host_port_forwarder: None,
         };
 
         stop_network_worker_process(&mut stack).await.unwrap();
@@ -2962,6 +3301,164 @@ mod tests {
             validate_request(&request(2, 65_537)),
             Err(RunnerError::InvalidRequest)
         ));
+
+        let mut valid_host_port = request(2, 16_384);
+        valid_host_port.host_ports = vec![HostPortBinding::new(18_080, 3_000).unwrap()];
+        assert!(validate_request(&valid_host_port).is_ok());
+
+        let mut duplicate_host_port = request(2, 16_384);
+        duplicate_host_port.host_ports = vec![
+            HostPortBinding::new(18_080, 3_000).unwrap(),
+            HostPortBinding::new(18_080, 3_001).unwrap(),
+        ];
+        assert!(matches!(
+            validate_request(&duplicate_host_port),
+            Err(RunnerError::InvalidRequest)
+        ));
+
+        let mut daemon_port = request(2, 16_384);
+        daemon_port.host_ports = vec![HostPortBinding {
+            host_port: 18_080,
+            guest_port: RESERVED_GUEST_DAEMON_PORT,
+        }];
+        assert!(matches!(
+            validate_request(&daemon_port),
+            Err(RunnerError::InvalidRequest)
+        ));
+    }
+
+    #[test]
+    fn host_port_reservation_is_loopback_collision_safe_and_atomic() {
+        let (first_port, blocked_port, blocker) = (20_000_u16..60_000)
+            .find_map(|first_port| {
+                let blocked_port = first_port.checked_add(1)?;
+                let blocker = StdTcpListener::bind((Ipv4Addr::LOCALHOST, blocked_port)).ok()?;
+                let first = StdTcpListener::bind((Ipv4Addr::LOCALHOST, first_port)).ok()?;
+                drop(first);
+                Some((first_port, blocked_port, blocker))
+            })
+            .expect("two adjacent loopback ports must be available for the collision fixture");
+        let bindings = vec![
+            HostPortBinding::new(first_port, 3_000).unwrap(),
+            HostPortBinding::new(blocked_port, 3_001).unwrap(),
+        ];
+
+        assert!(matches!(
+            reserve_host_ports(&bindings),
+            Err(RunnerError::HostPortUnavailable(port)) if port == blocked_port
+        ));
+        let rebound = StdTcpListener::bind((Ipv4Addr::LOCALHOST, first_port))
+            .expect("an atomic reservation failure must release earlier listeners");
+        assert_eq!(
+            rebound.local_addr().unwrap(),
+            SocketAddrV4::new(Ipv4Addr::LOCALHOST, first_port).into()
+        );
+        assert!(StdTcpListener::bind((Ipv4Addr::LOCALHOST, blocked_port)).is_err());
+        drop(rebound);
+        drop(blocker);
+
+        let listeners = reserve_host_ports(&bindings).unwrap();
+        assert_eq!(listeners.len(), bindings.len());
+        for (listener, binding) in listeners.iter().zip(bindings) {
+            assert_eq!(listener.binding, binding);
+            assert_eq!(
+                listener.listener.local_addr().unwrap(),
+                SocketAddrV4::new(Ipv4Addr::LOCALHOST, binding.host_port).into()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn expected_host_port_forwarder_completion_defers_to_process_exit() {
+        let mut forwarder = Some(tokio::spawn(async { Ok::<(), RunnerError>(()) }));
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !forwarder.as_ref().unwrap().is_finished() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        assert!(!take_host_port_forwarder_failure(&mut forwarder));
+        assert!(forwarder.is_none());
+    }
+
+    #[tokio::test]
+    async fn failed_host_port_forwarder_is_reported() {
+        let mut forwarder = Some(tokio::spawn(async {
+            Err::<(), RunnerError>(RunnerError::HostPortControl)
+        }));
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !forwarder.as_ref().unwrap().is_finished() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        assert!(take_host_port_forwarder_failure(&mut forwarder));
+        assert!(forwarder.is_none());
+    }
+
+    #[tokio::test]
+    async fn broker_loss_releases_host_ports_without_closing_worker_control() {
+        let (mut vmm_child, vmm) = spawn_admitted_sleep("30").await;
+        let (mut worker_child, worker) = spawn_admitted_sleep("30").await;
+        let (mut broker_child, broker) = spawn_admitted_sleep("30").await;
+        let listener = StdTcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let host_port = listener.local_addr().unwrap().port();
+        let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+        let (control, _worker_control) = StdUnixStream::pair().unwrap();
+        control.set_nonblocking(true).unwrap();
+        let control = tokio::net::UnixStream::from_std(control).unwrap();
+        let mut forwarder = tokio::spawn(run_host_port_forwarder(
+            control,
+            Zeroizing::new([7_u8; HOST_PORT_CONTROL_KEY_LEN]),
+            vec![(listener, HostPortBinding::new(host_port, 3_000).unwrap())],
+            vec![
+                (
+                    HostPortDependency::Vmm,
+                    vmm.duplicate_wait_descriptor().unwrap(),
+                ),
+                (
+                    HostPortDependency::NetworkWorker,
+                    worker.duplicate_wait_descriptor().unwrap(),
+                ),
+                (
+                    HostPortDependency::EgressBroker,
+                    broker.duplicate_wait_descriptor().unwrap(),
+                ),
+            ],
+            Uuid::new_v4(),
+            1,
+        ));
+
+        broker.signal(Signal::KILL).unwrap();
+        broker_child.wait().await.unwrap();
+        let rebound = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                match StdTcpListener::bind((Ipv4Addr::LOCALHOST, host_port)) {
+                    Ok(listener) => break listener,
+                    Err(_) => tokio::time::sleep(Duration::from_millis(10)).await,
+                }
+            }
+        })
+        .await
+        .expect("broker loss did not release the host listener");
+        drop(rebound);
+        assert!(!forwarder.is_finished());
+
+        worker.signal(Signal::KILL).unwrap();
+        worker_child.wait().await.unwrap();
+        tokio::time::timeout(Duration::from_secs(1), &mut forwarder)
+            .await
+            .expect("worker loss did not end the host-port forwarder")
+            .unwrap()
+            .unwrap();
+
+        vmm.signal(Signal::KILL).unwrap();
+        vmm_child.wait().await.unwrap();
     }
 
     #[test]

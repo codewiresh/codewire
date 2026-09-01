@@ -108,6 +108,14 @@ pub(crate) async fn create_native_environment(
         Some(value) => parse_native_disk(value)?,
         None => project.disk_bytes.unwrap_or(DEFAULT_NATIVE_DISK_BYTES),
     };
+    let host_ports = project
+        .host_ports
+        .iter()
+        .map(|binding| v1::HostPortBinding {
+            host_port: u32::from(binding.host_port),
+            guest_port: u32::from(binding.guest_port),
+        })
+        .collect();
     let (project_spec_json, project_spec_sha256) =
         canonical_native_project_intent(project.spec, vcpus, memory_mib, disk_bytes)?;
     let mut client = native_client().await?;
@@ -122,6 +130,7 @@ pub(crate) async fn create_native_environment(
             project_spec_json,
             project_spec_sha256,
             implicit_path_mode,
+            host_ports,
         })
         .await
         .map_err(native_status)
@@ -310,6 +319,13 @@ pub(crate) struct NativeEnvironmentView {
     pub(crate) workspace_plan: String,
     pub(crate) workspace_inputs: u32,
     pub(crate) working_directory: String,
+    pub(crate) ports: Vec<NativeHostPortView>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct NativeHostPortView {
+    pub(crate) listen: String,
+    pub(crate) guest_port: u32,
 }
 
 impl From<&v1::Environment> for NativeEnvironmentView {
@@ -326,12 +342,20 @@ impl From<&v1::Environment> for NativeEnvironmentView {
             workspace_plan: environment.workspace_plan_sha256.clone(),
             workspace_inputs: environment.workspace_input_count,
             working_directory: environment.working_directory.clone(),
+            ports: environment
+                .host_ports
+                .iter()
+                .map(|binding| NativeHostPortView {
+                    listen: format!("127.0.0.1:{}", binding.host_port),
+                    guest_port: binding.guest_port,
+                })
+                .collect(),
         }
     }
 }
 
 fn format_native_environment(view: &NativeEnvironmentView) -> String {
-    format!(
+    let mut output = format!(
         "Environment: {}\nBackend:     {}\nState:       {}\nCPU:         {}\nMemory:      {}\nDisk:        {}\nWorkspace:   {} input(s), plan {}\nWorking dir: {}\n",
         view.name,
         view.backend,
@@ -342,7 +366,14 @@ fn format_native_environment(view: &NativeEnvironmentView) -> String {
         view.workspace_inputs,
         view.workspace_plan,
         view.working_directory,
-    )
+    );
+    for port in &view.ports {
+        output.push_str(&format!(
+            "Port:        {} -> {}\n",
+            port.listen, port.guest_port
+        ));
+    }
+    output
 }
 
 pub(crate) fn native_state_label(state: i32) -> &'static str {
@@ -439,6 +470,7 @@ fn canonical_current_executable() -> anyhow::Result<PathBuf> {
 #[derive(Debug, Default)]
 struct NativeProjectPlan {
     spec: codewire_project::ProjectSpec,
+    host_ports: Vec<codewire_project::HostPortBinding>,
     vcpus: Option<u32>,
     memory_mib: Option<u32>,
     disk_bytes: Option<u64>,
@@ -486,6 +518,7 @@ fn native_codewire_yaml(
     let disk_bytes = resources.disk_gib.map(native_disk_from_gib).transpose()?;
     Ok(NativeProjectPlan {
         spec: document.spec,
+        host_ports: document.local.host_ports,
         vcpus,
         memory_mib,
         disk_bytes,
@@ -520,9 +553,6 @@ fn native_unsupported_project_fields(
     }
     if !spec.skills.is_empty() {
         unsupported.push("skills");
-    }
-    if !spec.application_ports.is_empty() || !document.local.host_ports.is_empty() {
-        unsupported.push("ports");
     }
     if !spec.secrets.is_empty() {
         unsupported.push("secrets");
@@ -805,6 +835,30 @@ working_directory: /workspace/github
     }
 
     #[test]
+    fn native_yaml_keeps_port_intent_and_exact_loopback_publications() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            temp.path().join("codewire.yaml"),
+            "ports:\n  - 3000\n  - 18080:8080\n",
+        )
+        .unwrap();
+
+        let project = native_codewire_yaml(temp.path(), None).unwrap();
+        assert_eq!(
+            project
+                .spec
+                .application_ports
+                .iter()
+                .map(|port| port.port)
+                .collect::<Vec<_>>(),
+            vec![3_000, 8_080]
+        );
+        assert_eq!(project.host_ports.len(), 1);
+        assert_eq!(project.host_ports[0].host_port, 18_080);
+        assert_eq!(project.host_ports[0].guest_port, 8_080);
+    }
+
+    #[test]
     fn path_mode_arguments_map_only_the_implicit_local_source() {
         assert_eq!(
             workspace_selection_from_arg(PathModeArg::Auto),
@@ -841,5 +895,30 @@ working_directory: /workspace/github
             "running"
         );
         assert_eq!(native_state_label(i32::MAX), "unavailable");
+    }
+
+    #[test]
+    fn native_environment_text_reports_exact_loopback_mapping() {
+        let view = NativeEnvironmentView {
+            id: Uuid::new_v4().to_string(),
+            name: "dev".to_owned(),
+            backend: "cloud-hypervisor".to_owned(),
+            state: "running".to_owned(),
+            selected: true,
+            cpu: 2,
+            memory: "16Gi".to_owned(),
+            disk: "20Gi".to_owned(),
+            workspace_plan: "c".repeat(64),
+            workspace_inputs: 1,
+            working_directory: "/workspace".to_owned(),
+            ports: vec![NativeHostPortView {
+                listen: "127.0.0.1:18080".to_owned(),
+                guest_port: 8_080,
+            }],
+        };
+
+        assert!(
+            format_native_environment(&view).contains("Port:        127.0.0.1:18080 -> 8080\n")
+        );
     }
 }

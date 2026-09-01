@@ -1496,6 +1496,7 @@ dependencies = [
  "codewire-vmm-guest-probe",
  "connectrpc",
  "futures",
+ "hmac 0.12.1",
  "http",
  "hyper-util",
  "libc",

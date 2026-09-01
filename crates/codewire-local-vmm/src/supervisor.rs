@@ -34,6 +34,9 @@ use crate::control::v1::local_supervisor_service_server::{
     LocalSupervisorService, LocalSupervisorServiceServer,
 };
 use crate::generation::{GenerationError, ensure_empty_root_generation, valid_root_disk_bytes};
+use crate::host_port::{
+    HostPortBinding, canonical_host_port_bindings, validate_canonical_host_port_bindings,
+};
 use crate::lifecycle::{EffectDurability, LifecycleEffect, next_effect};
 use crate::linux::path::{PathError, PrivateRoot, SocketIdentity};
 use crate::linux::process::signal_unreaped_child;
@@ -581,6 +584,8 @@ pub(crate) struct EnvironmentRecord {
     pub(crate) memory_mib: u32,
     pub(crate) disk_bytes: u64,
     pub(crate) generation: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) host_ports: Vec<HostPortBinding>,
     pub(crate) workspace_plan: WorkspacePlan,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) project_spec_json: Option<Vec<u8>>,
@@ -622,6 +627,7 @@ impl EnvironmentRecord {
                 })
                 .map(|project| project.working_directory)
                 .unwrap_or_default(),
+            host_ports: host_ports_to_proto(&self.host_ports),
         }
     }
 
@@ -873,6 +879,7 @@ impl EnvironmentRecord {
             || self.disk_bytes < crate::linux::state::MINIMUM_STATE_DISK_BYTES
             || !self.disk_bytes.is_multiple_of(1024 * 1024)
             || self.workspace_plan.validate().is_err()
+            || validate_canonical_host_port_bindings(&self.host_ports).is_err()
             || match (&self.project_spec_json, &self.project_spec_sha256) {
                 (None, None) => true,
                 (Some(bytes), Some(digest)) => {
@@ -880,6 +887,13 @@ impl EnvironmentRecord {
                 }
                 _ => true,
             }
+            || self
+                .project_spec_json
+                .as_deref()
+                .and_then(|bytes| serde_json::from_slice(bytes).ok())
+                .is_none_or(|project: codewire_project::ProjectSpec| {
+                    validate_host_ports_for_project(&self.host_ports, &project).is_err()
+                })
             || self
                 .active_artifact_generation
                 .as_ref()
@@ -1339,6 +1353,7 @@ impl SupervisorCore {
                             || u32::from(environment.vcpus) != request.vcpus
                             || environment.memory_mib != request.memory_mib
                             || environment.disk_bytes != request.disk_bytes
+                            || environment.host_ports != host_ports_from_proto(&request.host_ports)?
                             || environment.project_spec_json.as_deref()
                                 != Some(request.project_spec_json.as_slice())
                             || environment.project_spec_sha256.as_deref()
@@ -1361,6 +1376,7 @@ impl SupervisorCore {
                                 memory_mib: request.memory_mib,
                                 disk_bytes: request.disk_bytes,
                                 generation: 0,
+                                host_ports: host_ports_from_proto(&request.host_ports)?,
                                 workspace_plan: workspace_plan.clone(),
                                 project_spec_json: Some(request.project_spec_json.clone()),
                                 project_spec_sha256: Some(request.project_spec_sha256.clone()),
@@ -2283,6 +2299,7 @@ impl SupervisorCore {
                 setup_total_bytes: workspace.setup_total_bytes,
                 setup_header_sha256: workspace.setup_header_sha256,
                 setup_root_generation: workspace.setup_root_generation,
+                host_ports: host_ports_to_proto(&environment.host_ports),
             })
             .await;
         let relay_result = match tokio::time::timeout(RUNNER_EVENT_DRAIN_TIMEOUT, &mut relay).await
@@ -2995,7 +3012,9 @@ impl LocalSupervisorService for SupervisorRpc {
         &self,
         request: Request<v1::CreateEnvironmentRequest>,
     ) -> Result<Response<v1::Operation>, Status> {
-        let request = request.into_inner();
+        let mut request = request.into_inner();
+        request.host_ports =
+            canonicalize_host_ports_proto(&request.host_ports).map_err(Status::from)?;
         let request_id = validate_create(&request).map_err(Status::from)?;
         let mut core = self.core.lock().await;
         let operation = match core
@@ -3935,6 +3954,74 @@ fn require_expected_environment(
     Ok(())
 }
 
+fn canonicalize_host_ports_proto(
+    bindings: &[v1::HostPortBinding],
+) -> Result<Vec<v1::HostPortBinding>, SupervisorError> {
+    let bindings = bindings
+        .iter()
+        .map(|binding| {
+            Ok(HostPortBinding {
+                host_port: u16::try_from(binding.host_port)
+                    .map_err(|_| SupervisorError::InvalidRequest)?,
+                guest_port: u16::try_from(binding.guest_port)
+                    .map_err(|_| SupervisorError::InvalidRequest)?,
+            })
+        })
+        .collect::<Result<Vec<_>, SupervisorError>>()?;
+    canonical_host_port_bindings(bindings)
+        .map(|bindings| host_ports_to_proto(&bindings))
+        .map_err(|_| SupervisorError::InvalidRequest)
+}
+
+fn host_ports_from_proto(
+    bindings: &[v1::HostPortBinding],
+) -> Result<Vec<HostPortBinding>, SupervisorError> {
+    let canonical = canonicalize_host_ports_proto(bindings)?;
+    if canonical != bindings {
+        return Err(SupervisorError::InvalidRequest);
+    }
+    canonical
+        .into_iter()
+        .map(|binding| {
+            Ok(HostPortBinding {
+                host_port: u16::try_from(binding.host_port)
+                    .map_err(|_| SupervisorError::InvalidRequest)?,
+                guest_port: u16::try_from(binding.guest_port)
+                    .map_err(|_| SupervisorError::InvalidRequest)?,
+            })
+        })
+        .collect()
+}
+
+fn host_ports_to_proto(bindings: &[HostPortBinding]) -> Vec<v1::HostPortBinding> {
+    bindings
+        .iter()
+        .map(|binding| v1::HostPortBinding {
+            host_port: u32::from(binding.host_port),
+            guest_port: u32::from(binding.guest_port),
+        })
+        .collect()
+}
+
+fn validate_host_ports_for_project(
+    bindings: &[HostPortBinding],
+    project: &codewire_project::ProjectSpec,
+) -> Result<(), SupervisorError> {
+    validate_canonical_host_port_bindings(bindings).map_err(|_| SupervisorError::InvalidRequest)?;
+    let application_ports = project
+        .application_ports
+        .iter()
+        .map(|port| port.port)
+        .collect::<BTreeSet<_>>();
+    if bindings
+        .iter()
+        .any(|binding| !application_ports.contains(&binding.guest_port))
+    {
+        return Err(SupervisorError::InvalidRequest);
+    }
+    Ok(())
+}
+
 fn validate_create(request: &v1::CreateEnvironmentRequest) -> Result<Uuid, SupervisorError> {
     if !valid_environment_name(&request.name)
         || request.vcpus == 0
@@ -3953,6 +4040,7 @@ fn validate_create(request: &v1::CreateEnvironmentRequest) -> Result<Uuid, Super
     }
     let project: codewire_project::ProjectSpec = serde_json::from_slice(&request.project_spec_json)
         .map_err(|_| SupervisorError::InvalidRequest)?;
+    validate_host_ports_for_project(&host_ports_from_proto(&request.host_ports)?, &project)?;
     if project.repositories.is_empty() {
         parse_implicit_path_mode(&request.implicit_path_mode)?;
         if request.source_path.is_empty() || !Path::new(&request.source_path).is_absolute() {
@@ -3991,7 +4079,6 @@ fn validate_project_intent(
         || !spec.agents.is_empty()
         || !spec.agent_environment.is_empty()
         || !spec.skills.is_empty()
-        || !spec.application_ports.is_empty()
         || !spec.secrets.is_empty()
         || !spec.credentials.is_empty()
     {
@@ -4073,6 +4160,7 @@ fn create_operation_payload(
 ) -> Result<serde_json::Value, SupervisorError> {
     let project_spec_json = std::str::from_utf8(&request.project_spec_json)
         .expect("validated canonical project JSON is UTF-8");
+    let host_ports = host_ports_from_proto(&request.host_ports)?;
     workspace_plan.validate()?;
     Ok(serde_json::json!({
         "name": request.name,
@@ -4083,6 +4171,7 @@ fn create_operation_payload(
         "project_spec_json": project_spec_json,
         "project_spec_sha256": request.project_spec_sha256,
         "implicit_path_mode": request.implicit_path_mode,
+        "host_ports": host_ports,
         "workspace_plan": workspace_plan,
     }))
 }
@@ -4096,7 +4185,7 @@ fn create_request_from_operation(
     let fields = operation
         .payload
         .as_object()
-        .filter(|fields| fields.len() == 9)
+        .filter(|fields| fields.len() == 10)
         .ok_or(SupervisorError::InvalidState)?;
     let name = fields
         .get("name")
@@ -4138,6 +4227,15 @@ fn create_request_from_operation(
         .and_then(serde_json::Value::as_str)
         .ok_or(SupervisorError::InvalidState)?
         .to_owned();
+    let host_ports = serde_json::from_value::<Vec<HostPortBinding>>(
+        fields
+            .get("host_ports")
+            .cloned()
+            .ok_or(SupervisorError::InvalidState)?,
+    )
+    .map_err(|_| SupervisorError::InvalidState)?;
+    validate_canonical_host_port_bindings(&host_ports)
+        .map_err(|_| SupervisorError::InvalidState)?;
     let workspace_plan: WorkspacePlan = serde_json::from_value(
         fields
             .get("workspace_plan")
@@ -4158,6 +4256,7 @@ fn create_request_from_operation(
         project_spec_json,
         project_spec_sha256,
         implicit_path_mode,
+        host_ports: host_ports_to_proto(&host_ports),
     };
     validate_create(&request)?;
     Ok((request, workspace_plan))
@@ -5197,6 +5296,7 @@ mod tests {
             memory_mib: 16 * 1024,
             disk_bytes: 20 * 1024 * 1024 * 1024,
             generation: 1,
+            host_ports: Vec::new(),
             workspace_plan: WorkspacePlan::local(&crate::workspace::WorkspaceSource {
                 source_path: PathBuf::from("/workspace/source"),
                 commit: "a".repeat(40),
@@ -6581,7 +6681,16 @@ mod tests {
 
     #[test]
     fn create_journal_reconstructs_exact_canonical_project_intent() {
-        let (project_spec_json, project_spec_sha256) = project_intent(2, 16 * 1024, 20);
+        let (project_spec_json, _) = project_intent(2, 16 * 1024, 20);
+        let mut project: codewire_project::ProjectSpec =
+            serde_json::from_slice(&project_spec_json).unwrap();
+        project.application_ports = vec![codewire_project::ApplicationPort {
+            port: 3_000,
+            label: "app".to_owned(),
+            access: String::new(),
+        }];
+        let project_spec_json = project.canonical_json().unwrap();
+        let project_spec_sha256 = format!("{:x}", Sha256::digest(&project_spec_json));
         let request = v1::CreateEnvironmentRequest {
             name: "dev".to_owned(),
             source_path: "/workspace/source".to_owned(),
@@ -6592,6 +6701,10 @@ mod tests {
             project_spec_json,
             project_spec_sha256,
             implicit_path_mode: "clone".to_owned(),
+            host_ports: vec![v1::HostPortBinding {
+                host_port: 18_080,
+                guest_port: 3_000,
+            }],
         };
         validate_create(&request).unwrap();
         let workspace_plan = WorkspacePlan::local(&crate::workspace::WorkspaceSource {
@@ -6618,6 +6731,46 @@ mod tests {
             create_request_from_operation(&operation).unwrap(),
             (request, workspace_plan)
         );
+    }
+
+    #[test]
+    fn local_host_ports_are_canonical_and_must_target_declared_application_ports() {
+        let canonical = canonicalize_host_ports_proto(&[
+            v1::HostPortBinding {
+                host_port: 18_081,
+                guest_port: 3_001,
+            },
+            v1::HostPortBinding {
+                host_port: 18_080,
+                guest_port: 3_000,
+            },
+        ])
+        .unwrap();
+        assert_eq!(canonical[0].host_port, 18_080);
+        assert_eq!(canonical[1].host_port, 18_081);
+
+        let project = codewire_project::ProjectSpec {
+            application_ports: vec![codewire_project::ApplicationPort {
+                port: 3_000,
+                label: String::new(),
+                access: String::new(),
+            }],
+            ..Default::default()
+        };
+        assert!(
+            validate_host_ports_for_project(
+                &[HostPortBinding::new(18_080, 3_000).unwrap()],
+                &project,
+            )
+            .is_ok()
+        );
+        assert!(matches!(
+            validate_host_ports_for_project(
+                &[HostPortBinding::new(18_081, 3_001).unwrap()],
+                &project,
+            ),
+            Err(SupervisorError::InvalidRequest)
+        ));
     }
 
     #[test]
@@ -7380,6 +7533,7 @@ mod tests {
             project_spec_sha256: format!("{:x}", Sha256::digest(&project_spec_json)),
             project_spec_json,
             implicit_path_mode: String::new(),
+            host_ports: Vec::new(),
         };
         let workspace_plan = WorkspacePlan {
             schema_version: 1,
@@ -7451,6 +7605,7 @@ mod tests {
             memory_mib: 16 * 1024,
             disk_bytes: crate::linux::state::MINIMUM_STATE_DISK_BYTES,
             generation: 1,
+            host_ports: Vec::new(),
             workspace_plan: WorkspacePlan::local(&crate::workspace::WorkspaceSource {
                 source_path: PathBuf::from("/workspace/source"),
                 commit: "a".repeat(40),

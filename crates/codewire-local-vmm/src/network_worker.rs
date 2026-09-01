@@ -8,7 +8,7 @@
 
 use std::collections::HashMap;
 use std::io::{self, Read as _};
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::net::UnixStream as StdUnixStream;
 use std::pin::Pin;
@@ -34,12 +34,16 @@ use codewire_vmm_guest_probe::{
 };
 use rand::{RngCore as _, rngs::OsRng};
 use tokio::io::unix::AsyncFd;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
-use tokio::sync::{Mutex, mpsc};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, Interest, ReadBuf};
+use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio::task::JoinSet;
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
+use crate::host_port::{
+    HOST_PORT_CONTROL_FRAME_LEN, HOST_PORT_CONTROL_KEY_LEN, HostPortBinding,
+    HostPortControlReceiver,
+};
 use crate::linux::confinement::{
     install_denied_syscalls, install_deny_all_filesystem_domain as restrict_filesystem,
     require_single_threaded_process as require_single_thread,
@@ -52,6 +56,7 @@ pub const WORKER_READY_MESSAGE: &[u8] = b"CWNETW1 ready\n";
 pub const WORKER_STATUS_MAX_BYTES: usize = 64;
 const WORKER_BROKER_DESCRIPTOR_MARKER: u8 = b'B';
 const WORKER_NETWORK_DESCRIPTOR_MARKER: u8 = b'N';
+const WORKER_HOST_PORT_DESCRIPTOR_MARKER: u8 = b'P';
 const WORKER_CONTROL_BYTES: usize = 64;
 
 #[cfg(target_env = "musl")]
@@ -82,10 +87,12 @@ fn decode_control_length(value: ControlLength) -> usize {
 const BOOTSTRAP_MAGIC: &[u8; 8] = b"CWNETB1\0";
 const BOOTSTRAP_LEN: usize = 64;
 const PRODUCT_BOOTSTRAP_MAGIC: &[u8; 8] = b"CWNETB2\0";
-const PRODUCT_BOOTSTRAP_LEN: usize = 128;
+const PRODUCT_BOOTSTRAP_LEN: usize = 160;
 const PRODUCT_POLICY_DIGEST_OFFSET: usize = 64;
 const PRODUCT_BROKER_KEY_OFFSET: usize = 96;
+const PRODUCT_HOST_PORT_KEY_OFFSET: usize = 128;
 const PACKET_QUEUE: usize = 256;
+const MAX_INBOUND_HOST_PORT_FLOWS: usize = 64;
 const NETWORK_MTU: usize = 1_500;
 const DNS_MESSAGE_LIMIT: usize = 1_232;
 const BROKER_TIMEOUT: Duration = Duration::from_secs(2);
@@ -260,16 +267,28 @@ union WorkerControlBuffer {
 }
 
 pub(crate) fn send_worker_network_descriptor(bootstrap: RawFd, network: RawFd) -> io::Result<()> {
+    validate_inherited_unix_socket(network).map_err(io::Error::other)?;
     send_worker_descriptor(bootstrap, network, WORKER_NETWORK_DESCRIPTOR_MARKER)
 }
 
 pub(crate) fn send_worker_broker_descriptor(bootstrap: RawFd, broker: RawFd) -> io::Result<()> {
+    validate_inherited_unix_socket(broker).map_err(io::Error::other)?;
     send_worker_descriptor(bootstrap, broker, WORKER_BROKER_DESCRIPTOR_MARKER)
+}
+
+pub(crate) fn send_worker_host_port_descriptor(bootstrap: RawFd, stream: RawFd) -> io::Result<()> {
+    validate_connected_ipv4_stream(stream, None).map_err(io::Error::other)?;
+    send_worker_descriptor(bootstrap, stream, WORKER_HOST_PORT_DESCRIPTOR_MARKER)
 }
 
 fn send_worker_descriptor(bootstrap: RawFd, descriptor: RawFd, marker: u8) -> io::Result<()> {
     validate_inherited_unix_socket(bootstrap).map_err(io::Error::other)?;
-    validate_inherited_unix_socket(descriptor).map_err(io::Error::other)?;
+    if descriptor < 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "invalid transferred descriptor",
+        ));
+    }
     let mut marker = [marker];
     let mut vector = libc::iovec {
         iov_base: marker.as_mut_ptr().cast(),
@@ -320,17 +339,20 @@ fn send_worker_descriptor(bootstrap: RawFd, descriptor: RawFd, marker: u8) -> io
 }
 
 fn receive_worker_network_descriptor(bootstrap: RawFd) -> Result<OwnedFd, NetworkWorkerError> {
-    receive_worker_descriptor(bootstrap, WORKER_NETWORK_DESCRIPTOR_MARKER)
+    let descriptor = receive_worker_descriptor(bootstrap, WORKER_NETWORK_DESCRIPTOR_MARKER)
+        .map_err(|_| NetworkWorkerError::InheritedDescriptor)?;
+    validate_inherited_unix_socket(descriptor.as_raw_fd())?;
+    Ok(descriptor)
 }
 
 fn receive_worker_broker_descriptor(bootstrap: RawFd) -> Result<OwnedFd, NetworkWorkerError> {
-    receive_worker_descriptor(bootstrap, WORKER_BROKER_DESCRIPTOR_MARKER)
+    let descriptor = receive_worker_descriptor(bootstrap, WORKER_BROKER_DESCRIPTOR_MARKER)
+        .map_err(|_| NetworkWorkerError::InheritedDescriptor)?;
+    validate_inherited_unix_socket(descriptor.as_raw_fd())?;
+    Ok(descriptor)
 }
 
-fn receive_worker_descriptor(
-    bootstrap: RawFd,
-    expected_marker: u8,
-) -> Result<OwnedFd, NetworkWorkerError> {
+fn receive_worker_descriptor(bootstrap: RawFd, expected_marker: u8) -> io::Result<OwnedFd> {
     let mut marker = [0_u8; 1];
     let mut vector = libc::iovec {
         iov_base: marker.as_mut_ptr().cast(),
@@ -344,10 +366,13 @@ fn receive_worker_descriptor(
     message.msg_iovlen = 1;
     message.msg_control = unsafe { control.bytes.as_mut_ptr().cast() };
     message.msg_controllen = encode_control_length(WORKER_CONTROL_BYTES)
-        .ok_or(NetworkWorkerError::InheritedDescriptor)?;
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid control length"))?;
     let received = unsafe { libc::recvmsg(bootstrap, &raw mut message, libc::MSG_CMSG_CLOEXEC) };
-    if received <= 0 {
-        return Err(NetworkWorkerError::InheritedDescriptor);
+    if received == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    if received == 0 {
+        return Err(io::Error::from(io::ErrorKind::UnexpectedEof));
     }
 
     let mut descriptors = Vec::new();
@@ -389,13 +414,14 @@ fn receive_worker_descriptor(
         || !valid_control
         || descriptors.len() != 1
     {
-        return Err(NetworkWorkerError::InheritedDescriptor);
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid transferred descriptor record",
+        ));
     }
-    let descriptor = descriptors
+    descriptors
         .pop()
-        .ok_or(NetworkWorkerError::InheritedDescriptor)?;
-    validate_inherited_unix_socket(descriptor.as_raw_fd())?;
-    Ok(descriptor)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "descriptor is absent"))
 }
 
 pub trait AsyncReadWrite: AsyncRead + AsyncWrite {}
@@ -583,16 +609,17 @@ pub fn encode_worker_bootstrap(
     Ok(bytes)
 }
 
-/// Encode the product bootstrap containing only one generation network key,
-/// one policy digest, and one non-provider broker HMAC key.
+/// Encode the product bootstrap containing one generation network key, one
+/// policy digest, and separate non-provider broker and host-port HMAC keys.
 pub fn encode_product_worker_bootstrap(
     vm_id: Uuid,
     generation: u64,
     network_key: &NetworkKey,
     broker_key: &[u8; BROKER_IPC_KEY_LEN],
+    host_port_key: &[u8; HOST_PORT_CONTROL_KEY_LEN],
 ) -> Result<Zeroizing<[u8; PRODUCT_BOOTSTRAP_LEN]>, NetworkWorkerError> {
     validate_identity(vm_id, generation)?;
-    if broker_key.iter().all(|byte| *byte == 0) {
+    if broker_key.iter().all(|byte| *byte == 0) || host_port_key.iter().all(|byte| *byte == 0) {
         return Err(NetworkWorkerError::InvalidBootstrap);
     }
     let policy = CompiledPolicy::developer_baseline();
@@ -603,7 +630,8 @@ pub fn encode_product_worker_bootstrap(
     network_key.with_bytes(|key| bytes[32..64].copy_from_slice(key));
     bytes[PRODUCT_POLICY_DIGEST_OFFSET..PRODUCT_BROKER_KEY_OFFSET]
         .copy_from_slice(policy.digest().as_bytes());
-    bytes[PRODUCT_BROKER_KEY_OFFSET..].copy_from_slice(broker_key);
+    bytes[PRODUCT_BROKER_KEY_OFFSET..PRODUCT_HOST_PORT_KEY_OFFSET].copy_from_slice(broker_key);
+    bytes[PRODUCT_HOST_PORT_KEY_OFFSET..].copy_from_slice(host_port_key);
     Ok(bytes)
 }
 
@@ -611,6 +639,7 @@ struct ProductWorkerBootstrap {
     network_key: NetworkKey,
     broker_binding: BrokerIpcBinding,
     broker_key: BrokerIpcKey,
+    host_port_key: Zeroizing<[u8; HOST_PORT_CONTROL_KEY_LEN]>,
 }
 
 /// Entrypoint used only by the hidden product `cw` worker command.
@@ -677,7 +706,15 @@ pub async fn run_inherited_worker(vm_id: Uuid, generation: u64) -> Result<(), Ne
     }
     write_worker_control_message(&bootstrap, WORKER_BROKER_READY_MESSAGE)
         .map_err(|_| NetworkWorkerError::PreparedIo)?;
-    run_prepared_worker(bootstrap, prepared.network_key, vm_id, generation, broker).await
+    run_prepared_product_worker(
+        bootstrap,
+        prepared.network_key,
+        prepared.host_port_key,
+        vm_id,
+        generation,
+        broker,
+    )
+    .await
 }
 
 /// Run the inherited worker with one explicitly injected broker.
@@ -729,6 +766,167 @@ pub async fn run_inherited_worker_with_broker<B: EgressBroker>(
     write_worker_control_message(&bootstrap, WORKER_PREPARED_MESSAGE)
         .map_err(|_| NetworkWorkerError::PreparedIo)?;
     run_prepared_worker(bootstrap, key, vm_id, generation, broker).await
+}
+
+async fn run_prepared_product_worker<B: EgressBroker>(
+    bootstrap: StdUnixStream,
+    key: NetworkKey,
+    host_port_key: Zeroizing<[u8; HOST_PORT_CONTROL_KEY_LEN]>,
+    vm_id: Uuid,
+    generation: u64,
+    broker: Arc<B>,
+) -> Result<(), NetworkWorkerError> {
+    let descriptor = match receive_worker_network_descriptor(bootstrap.as_raw_fd()) {
+        Ok(descriptor) => descriptor,
+        Err(error) => {
+            let _ = write_worker_control_message(&bootstrap, error.startup_failure().message());
+            return Err(error);
+        }
+    };
+    let network = match transferred_stream(descriptor) {
+        Ok(network) => network,
+        Err(_) => {
+            let error = NetworkWorkerError::InheritedDescriptor;
+            let _ = write_worker_control_message(&bootstrap, error.startup_failure().message());
+            return Err(error);
+        }
+    };
+    bootstrap
+        .set_nonblocking(true)
+        .map_err(|_| NetworkWorkerError::BootstrapIo)?;
+    let control =
+        tokio::net::UnixStream::from_std(bootstrap).map_err(|_| NetworkWorkerError::BootstrapIo)?;
+    let (host_ports_tx, host_ports_rx) = mpsc::channel(MAX_INBOUND_HOST_PORT_FLOWS);
+    let (status_tx, status_rx) = oneshot::channel::<&'static [u8]>();
+    let status = Arc::new(StdMutex::new(Some(status_tx)));
+    let ready_status = Arc::clone(&status);
+    let mut control_task = tokio::spawn(run_host_port_control(
+        control,
+        status_rx,
+        host_ports_tx,
+        host_port_key,
+        vm_id,
+        generation,
+    ));
+    let session = run_host_session_with_ports(
+        network,
+        key,
+        vm_id,
+        generation,
+        broker,
+        Some(host_ports_rx),
+        move || publish_product_worker_status(&ready_status, WORKER_READY_MESSAGE),
+    );
+    tokio::pin!(session);
+    tokio::select! {
+        result = &mut session => {
+            if let Err(error) = &result {
+                let _ = publish_product_worker_status(&status, error.startup_failure().message());
+            }
+            let _ = tokio::time::timeout(HANDSHAKE_TIMEOUT, &mut control_task).await;
+            result
+        }
+        result = &mut control_task => {
+            result
+                .map_err(|_| NetworkWorkerError::Engine)?
+        }
+    }
+}
+
+fn publish_product_worker_status(
+    status: &StdMutex<Option<oneshot::Sender<&'static [u8]>>>,
+    message: &'static [u8],
+) -> io::Result<()> {
+    status
+        .lock()
+        .map_err(|_| io::Error::other("network worker status lock failed"))?
+        .take()
+        .ok_or_else(|| io::Error::other("network worker status was already published"))?
+        .send(message)
+        .map_err(|_| io::Error::other("network worker status channel closed"))
+}
+
+struct InboundHostPort {
+    binding: HostPortBinding,
+    stream: TransferredStream,
+}
+
+async fn run_host_port_control(
+    control: tokio::net::UnixStream,
+    status: oneshot::Receiver<&'static [u8]>,
+    host_ports: mpsc::Sender<InboundHostPort>,
+    key: Zeroizing<[u8; HOST_PORT_CONTROL_KEY_LEN]>,
+    vm_id: Uuid,
+    generation: u64,
+) -> Result<(), NetworkWorkerError> {
+    let status = status.await.map_err(|_| NetworkWorkerError::StatusIo)?;
+    write_worker_control_descriptor(control.as_raw_fd(), status)
+        .map_err(|_| NetworkWorkerError::StatusIo)?;
+    if status != WORKER_READY_MESSAGE {
+        return Err(NetworkWorkerError::Protocol);
+    }
+
+    let mut receiver = HostPortControlReceiver::new(vm_id, generation)
+        .map_err(|_| NetworkWorkerError::Protocol)?;
+    loop {
+        let mut frame = [0_u8; HOST_PORT_CONTROL_FRAME_LEN];
+        read_worker_control_exact(&control, &mut frame).await?;
+        let frame = receiver
+            .decode(&frame, &key)
+            .map_err(|_| NetworkWorkerError::Protocol)?;
+        let descriptor = receive_worker_host_port_descriptor(&control, frame.binding).await?;
+        let stream =
+            transferred_stream(descriptor).map_err(|_| NetworkWorkerError::InheritedDescriptor)?;
+        host_ports
+            .send(InboundHostPort {
+                binding: frame.binding,
+                stream,
+            })
+            .await
+            .map_err(|_| NetworkWorkerError::Engine)?;
+    }
+}
+
+async fn receive_worker_host_port_descriptor(
+    control: &tokio::net::UnixStream,
+    binding: HostPortBinding,
+) -> Result<OwnedFd, NetworkWorkerError> {
+    loop {
+        control
+            .readable()
+            .await
+            .map_err(|_| NetworkWorkerError::FrameIo)?;
+        match receive_worker_descriptor(control.as_raw_fd(), WORKER_HOST_PORT_DESCRIPTOR_MARKER) {
+            Ok(descriptor) => {
+                validate_connected_ipv4_stream(descriptor.as_raw_fd(), Some(binding))?;
+                return Ok(descriptor);
+            }
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => continue,
+            Err(_) => return Err(NetworkWorkerError::InheritedDescriptor),
+        }
+    }
+}
+
+async fn read_worker_control_exact(
+    control: &tokio::net::UnixStream,
+    mut bytes: &mut [u8],
+) -> Result<(), NetworkWorkerError> {
+    // Tokio's AsyncRead implementation for UnixStream uses recvfrom(2), which
+    // this worker intentionally denies. Keep that confinement boundary and use
+    // the already-audited read(2) helper for this fixed-size control record.
+    while !bytes.is_empty() {
+        let read = control
+            .async_io(Interest::READABLE, || {
+                read_worker_bytes(control.as_raw_fd(), bytes)
+            })
+            .await
+            .map_err(|_| NetworkWorkerError::FrameIo)?;
+        if read == 0 {
+            return Err(NetworkWorkerError::FrameIo);
+        }
+        bytes = &mut bytes[read..];
+    }
+    Ok(())
 }
 
 async fn run_prepared_worker<B: EgressBroker>(
@@ -876,6 +1074,10 @@ fn publish_worker_status(
 }
 
 fn write_worker_control_message(stream: &StdUnixStream, message: &[u8]) -> io::Result<()> {
+    write_worker_control_descriptor(stream.as_raw_fd(), message)
+}
+
+fn write_worker_control_descriptor(descriptor: RawFd, message: &[u8]) -> io::Result<()> {
     if message.is_empty() || message.len() > WORKER_STATUS_MAX_BYTES || !message.ends_with(b"\n") {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -884,7 +1086,7 @@ fn write_worker_control_message(stream: &StdUnixStream, message: &[u8]) -> io::R
     }
     let mut written = 0_usize;
     while written < message.len() {
-        let sent = send_worker_bytes(stream.as_raw_fd(), &message[written..])?;
+        let sent = send_worker_bytes(descriptor, &message[written..])?;
         if sent == 0 {
             return Err(io::Error::from(io::ErrorKind::WriteZero));
         }
@@ -1023,6 +1225,61 @@ fn validate_inherited_unix_socket(descriptor: RawFd) -> Result<(), NetworkWorker
     Ok(())
 }
 
+fn validate_connected_ipv4_stream(
+    descriptor: RawFd,
+    expected: Option<HostPortBinding>,
+) -> Result<(SocketAddrV4, SocketAddrV4), NetworkWorkerError> {
+    if socket_option(descriptor, libc::SO_DOMAIN)? != libc::AF_INET
+        || socket_option(descriptor, libc::SO_TYPE)? != libc::SOCK_STREAM
+        || socket_option(descriptor, libc::SO_ACCEPTCONN)? != 0
+    {
+        return Err(NetworkWorkerError::InheritedDescriptor);
+    }
+    let local = ipv4_socket_address(descriptor, false)?;
+    let peer = ipv4_socket_address(descriptor, true)?;
+    if !local.ip().is_loopback()
+        || !peer.ip().is_loopback()
+        || local.port() == 0
+        || peer.port() == 0
+        || expected.is_some_and(|binding| local.port() != binding.host_port)
+    {
+        return Err(NetworkWorkerError::InheritedDescriptor);
+    }
+    Ok((local, peer))
+}
+
+fn ipv4_socket_address(descriptor: RawFd, peer: bool) -> Result<SocketAddrV4, NetworkWorkerError> {
+    let mut address: libc::sockaddr_in = unsafe { std::mem::zeroed() };
+    let mut length = std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t;
+    let result = if peer {
+        unsafe {
+            libc::getpeername(
+                descriptor,
+                (&raw mut address).cast::<libc::sockaddr>(),
+                &mut length,
+            )
+        }
+    } else {
+        unsafe {
+            libc::getsockname(
+                descriptor,
+                (&raw mut address).cast::<libc::sockaddr>(),
+                &mut length,
+            )
+        }
+    };
+    if result == -1
+        || length as usize != std::mem::size_of::<libc::sockaddr_in>()
+        || address.sin_family as i32 != libc::AF_INET
+    {
+        return Err(NetworkWorkerError::InheritedDescriptor);
+    }
+    Ok(SocketAddrV4::new(
+        Ipv4Addr::from(u32::from_be(address.sin_addr.s_addr)),
+        u16::from_be(address.sin_port),
+    ))
+}
+
 fn socket_option(descriptor: RawFd, option: i32) -> Result<i32, NetworkWorkerError> {
     let mut value = 0_i32;
     let mut length = std::mem::size_of::<i32>() as libc::socklen_t;
@@ -1097,13 +1354,19 @@ fn decode_product_worker_bootstrap(
     let broker_binding = BrokerIpcBinding::new(vm_id, generation, policy.digest())
         .map_err(|_| NetworkWorkerError::InvalidBootstrap)?;
     let mut broker_key = Zeroizing::new([0_u8; BROKER_IPC_KEY_LEN]);
-    broker_key.copy_from_slice(&bytes[PRODUCT_BROKER_KEY_OFFSET..]);
+    broker_key.copy_from_slice(&bytes[PRODUCT_BROKER_KEY_OFFSET..PRODUCT_HOST_PORT_KEY_OFFSET]);
     let broker_key =
         BrokerIpcKey::from_bytes(*broker_key).map_err(|_| NetworkWorkerError::InvalidBootstrap)?;
+    let mut host_port_key = Zeroizing::new([0_u8; HOST_PORT_CONTROL_KEY_LEN]);
+    host_port_key.copy_from_slice(&bytes[PRODUCT_HOST_PORT_KEY_OFFSET..]);
+    if host_port_key.iter().all(|byte| *byte == 0) {
+        return Err(NetworkWorkerError::InvalidBootstrap);
+    }
     Ok(ProductWorkerBootstrap {
         network_key,
         broker_binding,
         broker_key,
+        host_port_key,
     })
 }
 
@@ -1118,11 +1381,28 @@ fn validate_identity(vm_id: Uuid, generation: u64) -> Result<(), NetworkWorkerEr
 /// `ready` is called only after the bounded engine exists and the guest has
 /// accepted the authenticated host-ready proof.
 pub async fn run_host_session<S, B, R>(
+    stream: S,
+    key: NetworkKey,
+    vm_id: Uuid,
+    generation: u64,
+    broker: Arc<B>,
+    ready: R,
+) -> Result<(), NetworkWorkerError>
+where
+    S: AsyncRead + AsyncWrite + Send + Unpin + 'static,
+    B: EgressBroker,
+    R: FnOnce() -> io::Result<()> + Send,
+{
+    run_host_session_with_ports(stream, key, vm_id, generation, broker, None, ready).await
+}
+
+async fn run_host_session_with_ports<S, B, R>(
     mut stream: S,
     key: NetworkKey,
     vm_id: Uuid,
     generation: u64,
     broker: Arc<B>,
+    host_ports: Option<mpsc::Receiver<InboundHostPort>>,
     ready: R,
 ) -> Result<(), NetworkWorkerError>
 where
@@ -1189,7 +1469,14 @@ where
     let (guest_packet_tx, guest_packets) = mpsc::channel(PACKET_QUEUE);
     let reader = read_authenticated_frames(stream_read, Arc::clone(&session), guest_packet_tx);
     let writer = write_authenticated_frames(stream_write, session, outbound_packets);
-    let dispatcher = dispatch_packets(guest_packets, stack, to_stack, from_stack, broker);
+    let dispatcher = dispatch_packets(
+        guest_packets,
+        stack,
+        to_stack,
+        from_stack,
+        broker,
+        host_ports,
+    );
     tokio::pin!(reader, writer, dispatcher);
     tokio::select! {
         result = &mut reader => result,
@@ -1273,9 +1560,43 @@ async fn dispatch_packets<B: EgressBroker>(
     to_stack: mpsc::Sender<Vec<u8>>,
     outbound: mpsc::Sender<Vec<u8>>,
     broker: Arc<B>,
+    mut host_ports: Option<mpsc::Receiver<InboundHostPort>>,
 ) -> Result<(), NetworkWorkerError> {
     let mut listeners = HashMap::<SocketAddr, tokio::task::JoinHandle<()>>::new();
-    while let Some(packet) = packets.recv().await {
+    let mut inbound_bridges = JoinSet::new();
+    loop {
+        let packet = tokio::select! {
+            packet = packets.recv() => {
+                packet.ok_or(NetworkWorkerError::FrameIo)?
+            }
+            incoming = next_inbound_host_port(&mut host_ports) => {
+                let Some(mut incoming) = incoming else {
+                    host_ports = None;
+                    continue;
+                };
+                if inbound_bridges.len() >= MAX_INBOUND_HOST_PORT_FLOWS {
+                    continue;
+                }
+                let destination = SocketAddr::new(
+                    IpAddr::V4(GUEST_IP),
+                    incoming.binding.guest_port,
+                );
+                let guest = tokio::time::timeout(BROKER_TIMEOUT, stack.connect(destination)).await;
+                let Ok(Ok(mut guest)) = guest else {
+                    continue;
+                };
+                inbound_bridges.spawn(async move {
+                    let _ = tokio::io::copy_bidirectional(&mut incoming.stream, &mut guest).await;
+                    let _ = incoming.stream.shutdown().await;
+                    let _ = guest.shutdown().await;
+                });
+                continue;
+            }
+            completed = inbound_bridges.join_next(), if !inbound_bridges.is_empty() => {
+                let _ = completed;
+                continue;
+            }
+        };
         if let Ok(question) = parse_ipv4_dns_question(&packet, WORKER_IP, DNS_MESSAGE_LIMIT) {
             if question.source.ip() != IpAddr::V4(GUEST_IP) {
                 continue;
@@ -1300,8 +1621,18 @@ async fn dispatch_packets<B: EgressBroker>(
             // malformed/fragmented packets are intentionally not admitted.
             continue;
         };
-        if tcp.source.ip() != IpAddr::V4(GUEST_IP) || tcp.destination.ip() == IpAddr::V4(WORKER_IP)
-        {
+        if tcp.source.ip() != IpAddr::V4(GUEST_IP) {
+            continue;
+        }
+        if tcp.destination.ip() == IpAddr::V4(WORKER_IP) {
+            // Host-port publication creates an outbound userspace-netstack
+            // connection from WORKER_IP to one exact guest port. Feed return
+            // packets to that stack; it has no listener on WORKER_IP and
+            // rejects anything that does not match an existing connection.
+            to_stack
+                .send(packet)
+                .await
+                .map_err(|_| NetworkWorkerError::Engine)?;
             continue;
         }
         if listeners.contains_key(&tcp.destination) {
@@ -1338,7 +1669,15 @@ async fn dispatch_packets<B: EgressBroker>(
             .await
             .map_err(|_| NetworkWorkerError::Engine)?;
     }
-    Err(NetworkWorkerError::FrameIo)
+}
+
+async fn next_inbound_host_port(
+    host_ports: &mut Option<mpsc::Receiver<InboundHostPort>>,
+) -> Option<InboundHostPort> {
+    match host_ports {
+        Some(host_ports) => host_ports.recv().await,
+        None => std::future::pending().await,
+    }
 }
 
 async fn serve_listener<B: EgressBroker>(mut listener: TcpListener, broker: Arc<B>) {
@@ -1451,6 +1790,8 @@ mod tests {
     use codewire_netstack::DnsRecordType;
     use codewire_vmm_guest_probe::{NETWORK_HOST_HELLO_LEN, NETWORK_HOST_READY_LEN, NetworkError};
     use tokio::io::{DuplexStream, duplex};
+
+    use crate::host_port::HostPortControlFrame;
 
     const TOKEN: &str = "local-worker-test-token-0123456789abcdef";
     const TEST_DESTINATION: SocketAddr =
@@ -1608,6 +1949,89 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn host_port_descriptor_must_be_the_exact_connected_loopback_stream() {
+        let listener = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let host_port = listener.local_addr().unwrap().port();
+        let client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (accepted, _) = listener.accept().unwrap();
+        let binding = HostPortBinding::new(host_port, 3_000).unwrap();
+        let client_address = match client.local_addr().unwrap() {
+            SocketAddr::V4(address) => address,
+            SocketAddr::V6(_) => panic!("IPv4 listener returned an IPv6 client address"),
+        };
+
+        assert_eq!(
+            validate_connected_ipv4_stream(accepted.as_raw_fd(), Some(binding)).unwrap(),
+            (
+                SocketAddrV4::new(Ipv4Addr::LOCALHOST, host_port),
+                client_address,
+            )
+        );
+        assert!(matches!(
+            validate_connected_ipv4_stream(
+                accepted.as_raw_fd(),
+                Some(HostPortBinding::new(host_port.saturating_sub(1), 3_000).unwrap())
+            ),
+            Err(NetworkWorkerError::InheritedDescriptor)
+        ));
+        assert!(matches!(
+            validate_connected_ipv4_stream(listener.as_raw_fd(), Some(binding)),
+            Err(NetworkWorkerError::InheritedDescriptor)
+        ));
+    }
+
+    #[tokio::test]
+    async fn authenticated_host_port_control_delivers_the_matching_stream() {
+        let (vm_id, generation) = identity();
+        let key = [0xa5; HOST_PORT_CONTROL_KEY_LEN];
+        let (runner, worker) = StdUnixStream::pair().unwrap();
+        runner.set_nonblocking(true).unwrap();
+        worker.set_nonblocking(true).unwrap();
+        let mut runner = tokio::net::UnixStream::from_std(runner).unwrap();
+        let worker = tokio::net::UnixStream::from_std(worker).unwrap();
+        let (host_ports_tx, mut host_ports_rx) = mpsc::channel(1);
+        let (status_tx, status_rx) = oneshot::channel();
+        let control = tokio::spawn(run_host_port_control(
+            worker,
+            status_rx,
+            host_ports_tx,
+            Zeroizing::new(key),
+            vm_id,
+            generation,
+        ));
+        status_tx.send(WORKER_READY_MESSAGE).unwrap();
+        let mut ready = [0_u8; WORKER_READY_MESSAGE.len()];
+        runner.read_exact(&mut ready).await.unwrap();
+        assert_eq!(&ready, WORKER_READY_MESSAGE);
+
+        let listener = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let mut client = std::net::TcpStream::connect(address).unwrap();
+        let (accepted, _) = listener.accept().unwrap();
+        let binding = HostPortBinding::new(address.port(), 3_000).unwrap();
+        let frame = HostPortControlFrame::encode(vm_id, generation, 1, binding, &key).unwrap();
+        runner.write_all(&frame).await.unwrap();
+        runner.flush().await.unwrap();
+        send_worker_host_port_descriptor(runner.as_raw_fd(), accepted.as_raw_fd()).unwrap();
+
+        let mut incoming = tokio::time::timeout(Duration::from_secs(2), host_ports_rx.recv())
+            .await
+            .expect("control did not deliver the stream")
+            .expect("control closed the host-port channel");
+        assert_eq!(incoming.binding, binding);
+        client.write_all(b"transferred").unwrap();
+        let mut received = [0_u8; 11];
+        incoming.stream.read_exact(&mut received).await.unwrap();
+        assert_eq!(&received, b"transferred");
+
+        drop(runner);
+        assert!(matches!(
+            control.await.unwrap(),
+            Err(NetworkWorkerError::FrameIo)
+        ));
+    }
+
     struct FixtureBroker {
         allowed_destination: Option<SocketAddr>,
         connector: StdMutex<Option<DuplexStream>>,
@@ -1690,8 +2114,15 @@ mod tests {
         let (vm_id, generation) = identity();
         let network_key = NetworkKey::derive(TOKEN, vm_id, generation).unwrap();
         let broker_key = [0x5a; BROKER_IPC_KEY_LEN];
-        let bytes =
-            encode_product_worker_bootstrap(vm_id, generation, &network_key, &broker_key).unwrap();
+        let host_port_key = [0xa5; HOST_PORT_CONTROL_KEY_LEN];
+        let bytes = encode_product_worker_bootstrap(
+            vm_id,
+            generation,
+            &network_key,
+            &broker_key,
+            &host_port_key,
+        )
+        .unwrap();
         let decoded = decode_product_worker_bootstrap(bytes.as_ref(), vm_id, generation).unwrap();
         assert_eq!(decoded.broker_binding.environment_id(), vm_id);
         assert_eq!(decoded.broker_binding.generation(), generation);
@@ -1710,7 +2141,7 @@ mod tests {
         wrong_policy[PRODUCT_POLICY_DIGEST_OFFSET] ^= 1;
         assert!(decode_product_worker_bootstrap(wrong_policy.as_ref(), vm_id, generation).is_err());
         let mut zero_broker_key = bytes.clone();
-        zero_broker_key[PRODUCT_BROKER_KEY_OFFSET..].fill(0);
+        zero_broker_key[PRODUCT_BROKER_KEY_OFFSET..PRODUCT_HOST_PORT_KEY_OFFSET].fill(0);
         assert!(
             decode_product_worker_bootstrap(zero_broker_key.as_ref(), vm_id, generation).is_err()
         );
@@ -1719,9 +2150,16 @@ mod tests {
                 vm_id,
                 generation,
                 &network_key,
-                &[0_u8; BROKER_IPC_KEY_LEN]
+                &[0_u8; BROKER_IPC_KEY_LEN],
+                &host_port_key,
             )
             .is_err()
+        );
+        let mut zero_host_port_key = bytes.clone();
+        zero_host_port_key[PRODUCT_HOST_PORT_KEY_OFFSET..].fill(0);
+        assert!(
+            decode_product_worker_bootstrap(zero_host_port_key.as_ref(), vm_id, generation)
+                .is_err()
         );
         assert!(
             !bytes
@@ -1805,6 +2243,137 @@ mod tests {
             .expect("worker did not fail closed after transport loss")
             .unwrap();
         assert!(matches!(result, Err(NetworkWorkerError::FrameIo)));
+    }
+
+    #[tokio::test]
+    async fn authenticated_host_port_bridges_loopback_to_the_exact_guest_port() {
+        let (vm_id, generation) = identity();
+        let network_key = NetworkKey::derive(TOKEN, vm_id, generation).unwrap();
+        let (host_endpoint, guest_endpoint) = duplex(128 * 1024);
+        let broker = Arc::new(FixtureBroker::new(None, None));
+        let (host_ports_tx, host_ports_rx) = mpsc::channel(MAX_INBOUND_HOST_PORT_FLOWS);
+        let (ready_tx, ready_rx) = oneshot::channel();
+        let mut host = tokio::spawn(run_host_session_with_ports(
+            host_endpoint,
+            network_key,
+            vm_id,
+            generation,
+            broker,
+            Some(host_ports_rx),
+            move || {
+                ready_tx
+                    .send(())
+                    .map_err(|_| io::Error::other("host-port readiness receiver closed"))
+            },
+        ));
+
+        let (guest_outbound, guest_packets) = mpsc::channel(PACKET_QUEUE);
+        let (to_guest, guest_inbound) = mpsc::channel(PACKET_QUEUE);
+        let guest = Netstack::with_config(
+            NetstackConfig {
+                local_ip: IpAddr::V4(GUEST_IP),
+                prefix_len: 30,
+                mtu: NETWORK_MTU,
+                verify_rx_checksums: true,
+                accept_any_ip: false,
+                default_gateway: Some(IpAddr::V4(WORKER_IP)),
+            },
+            guest_inbound,
+            guest_outbound,
+        )
+        .unwrap();
+        let guest_port = 3_000;
+        let mut guest_listener = guest
+            .bind_endpoint(SocketAddr::new(IpAddr::V4(GUEST_IP), guest_port))
+            .await
+            .unwrap();
+        let guest_key = NetworkKey::derive(TOKEN, vm_id, generation).unwrap();
+        let guest_transport = tokio::spawn(run_guest_packet_transport(
+            guest_endpoint,
+            guest_key,
+            vm_id,
+            generation,
+            guest_packets,
+            to_guest,
+        ));
+
+        tokio::time::timeout(Duration::from_secs(5), ready_rx)
+            .await
+            .expect("worker did not become ready for host ports")
+            .unwrap();
+
+        let listener = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let client = std::net::TcpStream::connect(address).unwrap();
+        let (accepted, _) = listener.accept().unwrap();
+        drop(listener);
+        client.set_nonblocking(true).unwrap();
+        let mut client = tokio::net::TcpStream::from_std(client).unwrap();
+        let binding = HostPortBinding::new(address.port(), guest_port).unwrap();
+        host_ports_tx
+            .send(InboundHostPort {
+                binding,
+                stream: transferred_stream(OwnedFd::from(accepted)).unwrap(),
+            })
+            .await
+            .unwrap();
+
+        let request = b"host-to-guest";
+        client.write_all(request).await.unwrap();
+        client.shutdown().await.unwrap();
+        let mut guest_stream = tokio::select! {
+            accepted = guest_listener.accept() => accepted.expect("guest listener closed"),
+            result = &mut host => panic!("network worker exited before host-port delivery: {result:?}"),
+            () = tokio::time::sleep(Duration::from_secs(5)) => {
+                panic!("guest did not receive the host-port connection")
+            }
+        };
+        let mut received = [0_u8; 13];
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            guest_stream.read_exact(&mut received),
+        )
+        .await
+        .expect("guest did not receive host bytes")
+        .unwrap();
+        assert_eq!(&received, request);
+        let mut eof = [0_u8; 1];
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(5), guest_stream.read(&mut eof))
+                .await
+                .expect("guest did not observe the host half-close")
+                .unwrap(),
+            0
+        );
+
+        let response = b"guest-to-host";
+        guest_stream.write_all(response).await.unwrap();
+        let mut returned = [0_u8; 13];
+        tokio::time::timeout(Duration::from_secs(5), client.read_exact(&mut returned))
+            .await
+            .expect("host did not receive guest bytes")
+            .unwrap();
+        assert_eq!(&returned, response);
+
+        guest_stream.shutdown().await.unwrap();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(5), client.read(&mut eof))
+                .await
+                .expect("host did not observe the guest half-close")
+                .unwrap(),
+            0
+        );
+
+        drop(host_ports_tx);
+        guest_transport.abort();
+        assert!(guest_transport.await.unwrap_err().is_cancelled());
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(2), host)
+                .await
+                .expect("network worker did not fail closed after transport loss")
+                .unwrap(),
+            Err(NetworkWorkerError::FrameIo)
+        ));
     }
 
     #[tokio::test]
@@ -1939,6 +2508,21 @@ mod tests {
             let message: libc::msghdr = unsafe { std::mem::zeroed() };
             assert_eq!(
                 unsafe { libc::sendmsg(control.as_raw_fd(), &raw const message, 0) },
+                -1
+            );
+            assert_eq!(io::Error::last_os_error().raw_os_error(), Some(libc::EPERM));
+            let mut recv_byte = [0_u8; 1];
+            assert_eq!(
+                unsafe {
+                    libc::recvfrom(
+                        control.as_raw_fd(),
+                        recv_byte.as_mut_ptr().cast(),
+                        recv_byte.len(),
+                        libc::MSG_DONTWAIT,
+                        std::ptr::null_mut(),
+                        std::ptr::null_mut(),
+                    )
+                },
                 -1
             );
             assert_eq!(io::Error::last_os_error().raw_os_error(), Some(libc::EPERM));

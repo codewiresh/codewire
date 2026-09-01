@@ -28,6 +28,7 @@ use crate::control::v1::environment_runner_service_client::EnvironmentRunnerServ
 use crate::control::v1::environment_runner_service_server::{
     EnvironmentRunnerService, EnvironmentRunnerServiceServer,
 };
+use crate::host_port::{HostPortBinding, canonical_host_port_bindings};
 use crate::hybrid_vsock::{HybridVsockError, HybridVsockTarget};
 use crate::linux::path::PrivateRoot;
 use crate::linux::runner::ExitClass;
@@ -341,6 +342,10 @@ impl RunnerState {
                 self.state = v1::EnvironmentState::Error;
                 Ok(error_code)
             }
+            ExitClass::HostPortForwarderFailure => {
+                self.state = v1::EnvironmentState::Error;
+                Ok(error_code)
+            }
         }
     }
 }
@@ -351,6 +356,7 @@ fn runner_exit_error_code(exit: ExitClass) -> Option<&'static str> {
         ExitClass::VmmFailure(_) => Some("vmm_exit"),
         ExitClass::NetworkWorkerFailure(_) => Some("network_worker_exit"),
         ExitClass::EgressBrokerFailure(_) => Some("egress_broker_exit"),
+        ExitClass::HostPortForwarderFailure => Some("host_port_forwarder_exit"),
     }
 }
 
@@ -464,6 +470,7 @@ impl EnvironmentRunnerService for RunnerRpc {
         let vcpus = u8::try_from(request.vcpus)
             .map_err(|_| Status::invalid_argument("invalid vCPU count"))?;
         let setup = parse_setup_binding(&request)?;
+        let host_ports = parse_host_ports(&request)?;
         let daemon_ready_timeout = daemon_ready_timeout(setup.is_some());
         let mut state = self.state.lock().await;
         if !state.adopted {
@@ -499,6 +506,7 @@ impl EnvironmentRunnerService for RunnerRpc {
                 vcpus,
                 memory_mib: request.memory_mib,
                 setup,
+                host_ports,
             })
             .await
         {
@@ -648,7 +656,8 @@ impl EnvironmentRunnerService for RunnerRpc {
                 ExitClass::GuestShutdown
                 | ExitClass::VmmFailure(_)
                 | ExitClass::NetworkWorkerFailure(_)
-                | ExitClass::EgressBrokerFailure(_) => {}
+                | ExitClass::EgressBrokerFailure(_)
+                | ExitClass::HostPortForwarderFailure => {}
             }
         }
         state.running = None;
@@ -798,6 +807,29 @@ fn parse_setup_binding(request: &v1::StartVmRequest) -> Result<Option<SetupBindi
         }
         _ => Err(Status::invalid_argument("incomplete setup binding")),
     }
+}
+
+fn parse_host_ports(request: &v1::StartVmRequest) -> Result<Vec<HostPortBinding>, Status> {
+    let provided = request
+        .host_ports
+        .iter()
+        .map(|binding| {
+            Ok(HostPortBinding {
+                host_port: u16::try_from(binding.host_port)
+                    .map_err(|_| Status::invalid_argument("invalid host-port binding"))?,
+                guest_port: u16::try_from(binding.guest_port)
+                    .map_err(|_| Status::invalid_argument("invalid host-port binding"))?,
+            })
+        })
+        .collect::<Result<Vec<_>, Status>>()?;
+    let canonical = canonical_host_port_bindings(provided.clone())
+        .map_err(|_| Status::invalid_argument("invalid host-port binding"))?;
+    if canonical != provided {
+        return Err(Status::invalid_argument(
+            "host-port bindings are not canonical",
+        ));
+    }
+    Ok(canonical)
 }
 
 fn map_start_error(error: RunnerError) -> Status {
@@ -1027,6 +1059,11 @@ async fn wait_for_guest_daemon(
                             return Err(Status::unavailable(format!(
                                 "isolated egress broker exited before guest daemon readiness with status {code:?}"
                             )));
+                        }
+                        ExitClass::HostPortForwarderFailure => {
+                            return Err(Status::unavailable(
+                                "host-port forwarder exited before guest daemon readiness",
+                            ));
                         }
                     }
                     if !daemon_ready

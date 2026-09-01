@@ -13,6 +13,9 @@ use codewire_local_vmm::egress_broker::{
     EGRESS_BROKER_READY_MESSAGE, EgressBrokerStartupFailure,
     encode_developer_egress_broker_bootstrap,
 };
+use codewire_local_vmm::host_port::{
+    HOST_PORT_CONTROL_KEY_LEN, HostPortBinding, HostPortControlFrame,
+};
 use codewire_local_vmm::network_worker::{
     NETWORK_BOOTSTRAP_FD, NetworkWorkerStartupFailure, WORKER_BROKER_READY_MESSAGE,
     WORKER_PREPARED_MESSAGE, WORKER_READY_MESSAGE, WORKER_STATUS_MAX_BYTES,
@@ -26,6 +29,7 @@ use uuid::Uuid;
 
 const BROKER_DESCRIPTOR_MARKER: u8 = b'B';
 const NETWORK_DESCRIPTOR_MARKER: u8 = b'N';
+const HOST_PORT_DESCRIPTOR_MARKER: u8 = b'P';
 const CONTROL_BYTES: usize = 64;
 
 #[repr(C)]
@@ -251,8 +255,15 @@ fn confined_product_worker_authenticates_the_separate_broker_capability() {
         .unwrap();
     let token = "product-worker-process-test-token-0123456789abcdef";
     let network_key = NetworkKey::derive(token, vm_id, generation).unwrap();
-    let worker_bootstrap =
-        encode_product_worker_bootstrap(vm_id, generation, &network_key, &broker_key).unwrap();
+    let host_port_key = [0x7b; HOST_PORT_CONTROL_KEY_LEN];
+    let worker_bootstrap = encode_product_worker_bootstrap(
+        vm_id,
+        generation,
+        &network_key,
+        &broker_key,
+        &host_port_key,
+    )
+    .unwrap();
     let worker_source = worker_child_socket.as_raw_fd();
     let mut worker_command = Command::new(env!("CARGO_BIN_EXE_codewire-local-vmm-smoke"));
     worker_command
@@ -313,7 +324,59 @@ fn confined_product_worker_authenticates_the_separate_broker_capability() {
     let mut ready = [0_u8; NETWORK_HOST_READY_LEN];
     guest.read_exact(&mut ready).unwrap();
     NetworkHostReady::decode(&ready, &network_key, &hello.nonce).unwrap();
-    assert_eq!(read_status_frame(&mut worker_parent), WORKER_READY_MESSAGE);
+    let ready_status = read_status_frame_result(&mut worker_parent);
+    if let Err(error) = ready_status {
+        let exit = worker.wait_bounded();
+        panic!(
+            "product worker closed before ready status: {error}; exit={:?}",
+            exit.code()
+        );
+    }
+    assert_eq!(ready_status.unwrap(), WORKER_READY_MESSAGE);
+
+    let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let address = listener.local_addr().unwrap();
+    let mut host_client = std::net::TcpStream::connect(address).unwrap();
+    host_client
+        .set_read_timeout(Some(Duration::from_millis(200)))
+        .unwrap();
+    let (accepted, peer) = listener.accept().unwrap();
+    assert!(peer.ip().is_loopback());
+    let binding = HostPortBinding::new(address.port(), 3_000).unwrap();
+    let frame =
+        HostPortControlFrame::encode(vm_id, generation, 1, binding, &host_port_key).unwrap();
+    worker_parent.write_all(&frame).unwrap();
+    send_descriptor(
+        worker_parent.as_raw_fd(),
+        accepted.as_raw_fd(),
+        HOST_PORT_DESCRIPTOR_MARKER,
+    );
+    drop(accepted);
+    std::thread::sleep(Duration::from_millis(100));
+    if let Some(status) = worker.0.try_wait().unwrap() {
+        panic!(
+            "confined product worker rejected host-port control before payload: exit={:?}",
+            status.code()
+        );
+    }
+    host_client
+        .write_all(b"host-port-process-boundary")
+        .unwrap();
+    let mut byte = [0_u8; 1];
+    let read = host_client.read(&mut byte);
+    if !read.as_ref().is_err_and(|error| {
+        matches!(
+            error.kind(),
+            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+        )
+    }) {
+        let status = worker.wait_bounded();
+        panic!(
+            "confined product worker rejected the transferred host-port stream: {read:?}; exit={:?}",
+            status.code()
+        );
+    }
+    assert!(worker.0.try_wait().unwrap().is_none());
 
     drop(guest);
     let worker_status = worker.wait_bounded();

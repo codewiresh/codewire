@@ -19,6 +19,8 @@ pub mod egress_broker;
 #[cfg(target_os = "linux")]
 pub mod generation;
 #[cfg(target_os = "linux")]
+pub mod host_port;
+#[cfg(target_os = "linux")]
 pub mod hybrid_vsock;
 #[cfg(target_os = "linux")]
 mod lifecycle;

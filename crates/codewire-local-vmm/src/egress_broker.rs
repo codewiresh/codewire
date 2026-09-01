@@ -39,7 +39,7 @@ const POLICY_DIGEST_LEN: usize = 32;
 const POLICY_DIGEST_END: usize = EGRESS_BROKER_POLICY_DIGEST_OFFSET + POLICY_DIGEST_LEN;
 const KEY_OFFSET: usize = POLICY_DIGEST_END;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
-const CONFINEMENT_ADMISSION_TIMEOUT: Duration = Duration::from_secs(10);
+pub(crate) const EGRESS_BROKER_CONFINEMENT_ADMISSION_TIMEOUT: Duration = Duration::from_secs(20);
 
 const BROKER_DENIED_SYSCALLS: &[libc::c_long] = &[
     libc::SYS_socketpair,
@@ -374,7 +374,7 @@ fn await_confinement_admission(
     write_status(bootstrap, EGRESS_BROKER_PREPARED_MESSAGE)
         .map_err(|_| EgressBrokerProcessError::StatusIo)?;
     bootstrap
-        .set_read_timeout(Some(CONFINEMENT_ADMISSION_TIMEOUT))
+        .set_read_timeout(Some(EGRESS_BROKER_CONFINEMENT_ADMISSION_TIMEOUT))
         .map_err(|_| EgressBrokerProcessError::BootstrapIo)?;
     let mut admission = [0_u8; EGRESS_BROKER_CONFINE_MESSAGE.len()];
     bootstrap

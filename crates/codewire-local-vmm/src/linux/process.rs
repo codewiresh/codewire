@@ -131,6 +131,10 @@ impl LiveProcess {
         pidfd_send_signal(&self.pidfd, signal).map_err(RecoveryError::Pidfd)
     }
 
+    pub(crate) fn duplicate_wait_descriptor(&self) -> Result<OwnedFd, RecoveryError> {
+        rustix::io::dup(&self.pidfd).map_err(RecoveryError::Pidfd)
+    }
+
     /// Duplicate one descriptor from this exact process birth and return its
     /// socket domain. This is deliberately narrower than exposing the pidfd or
     /// a general remote-fd duplication primitive: the qualified-host verifier

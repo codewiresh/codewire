@@ -61,7 +61,7 @@ mod linux {
     #[cfg(test)]
     use std::future::Future;
     use std::io::{self, Cursor, Read, Seek, SeekFrom, Write};
-    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener as StdTcpListener};
     use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt};
     use std::path::{Path, PathBuf};
     use std::process::{Child, Command, Stdio};
@@ -72,6 +72,7 @@ mod linux {
     use codewire_daemon::client::{SessionClient, SessionClientError, v1};
     use codewire_local_vmm::ch_api::VmInfo;
     use codewire_local_vmm::generation::{RootGenerationDisk, ensure_empty_root_generation};
+    use codewire_local_vmm::host_port::HostPortBinding;
     use codewire_local_vmm::linux::runner::ExitClass;
     use codewire_local_vmm::linux::state::{
         StateDiskIdentity, VmPhase, cleanup_trashed_vm, move_stopped_vm_to_trash,
@@ -115,6 +116,9 @@ mod linux {
     const FIXTURE_DNS_NAME: &str = "allowed.codewire.test";
     const FIXTURE_DNS_ANSWER: Ipv4Addr = Ipv4Addr::new(203, 0, 113, 20);
     const FIXTURE_THROUGHPUT_BYTES: usize = 1024 * 1024;
+    const HOST_PORT_GUEST_PORT: u16 = 3_000;
+    const HOST_PORT_REQUEST: &[u8] = b"CWPORT1 host";
+    const HOST_PORT_RESPONSE: &[u8] = b"CWPORT1 guest";
     const PROBE_PTY_TERM: &str = "xterm-256color";
     const PROBE_PTY_WIDTH: i32 = 80;
     const PROBE_PTY_HEIGHT: i32 = 24;
@@ -451,15 +455,24 @@ mod linux {
             }
         };
         observation("vm.generation.1.vmm_started", true);
+        let setup_network_started = Instant::now();
         if let Err(error) =
             attach_network_worker(&mut provisioning, SETUP_NETWORK_READY_TIMEOUT).await
         {
+            observation(
+                "vm.generation.1.network_ready_elapsed_ms",
+                setup_network_started.elapsed().as_millis(),
+            );
             observation(
                 "vm.generation.1.network_worker_error",
                 runner_error_class(&error),
             );
             return Err(Box::new(error));
         }
+        observation(
+            "vm.generation.1.network_ready_elapsed_ms",
+            setup_network_started.elapsed().as_millis(),
+        );
         observation("vm.generation.1.network_worker_attached", true);
         require_running_identity(&provisioning, arguments.vm_id, 1, &disk_identity)?;
         let provisioning_process = provisioning.process_identity().clone();
@@ -514,6 +527,9 @@ mod linux {
             }
             ExitClass::EgressBrokerFailure(_) => {
                 return Err(failure("OCI provisioning egress broker failed"));
+            }
+            ExitClass::HostPortForwarderFailure => {
+                return Err(failure("OCI provisioning host-port forwarder failed"));
             }
         }
         drop(provisioning);
@@ -629,6 +645,9 @@ mod linux {
             ExitClass::EgressBrokerFailure(_) => {
                 return Err(failure("egress broker failed during guest poweroff"));
             }
+            ExitClass::HostPortForwarderFailure => {
+                return Err(failure("host-port forwarder failed during guest poweroff"));
+            }
         }
         drop(first);
         wait_for_identity_to_end(&first_process).await?;
@@ -673,6 +692,9 @@ mod linux {
             }
             ExitClass::EgressBrokerFailure(_) => {
                 return Err(failure("egress broker failed before hard VMM kill"));
+            }
+            ExitClass::HostPortForwarderFailure => {
+                return Err(failure("host-port forwarder failed before hard VMM kill"));
             }
         }
         drop(second);
@@ -724,13 +746,30 @@ mod linux {
             "identity-checked-orphan-terminated",
         );
 
-        let prepared_four = match runner.prepare(request(5, arguments, resources)).await {
+        let collision = StdTcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
+        let host_port = collision.local_addr()?.port();
+        match runner
+            .prepare(request_with_host_port(5, arguments, resources, host_port))
+            .await
+        {
+            Err(RunnerError::HostPortUnavailable(port)) if port == host_port => {}
+            Err(error) => return Err(Box::new(error)),
+            Ok(_) => return Err(failure("runner admitted an occupied local host port")),
+        }
+        drop(collision);
+        observation("host_port.collision", "rejected");
+        let prepared_four = match runner
+            .prepare(request_with_host_port(5, arguments, resources, host_port))
+            .await
+        {
             Ok(prepared) => prepared,
             Err(error) => {
                 observation("vm.generation.5.prepare_error", runner_error_class(&error));
                 return Err(Box::new(error));
             }
         };
+        require_loopback_port_reserved(host_port)?;
+        observation("host_port.prepare_reservation", host_port);
         require_same_disk(&disk_identity, prepared_four.state_disk_identity())?;
         let token_four = prepared_four.auth_token_fingerprint();
         if [provisioning_token, token_one, token_two, token_three].contains(&token_four) {
@@ -745,13 +784,26 @@ mod linux {
                 return Err(Box::new(error));
             }
         };
+        let product_network_started = Instant::now();
         if let Err(error) = attach_product_network_stack(&mut fourth).await {
+            observation(
+                "vm.generation.5.product_network_stack_elapsed_ms",
+                product_network_started.elapsed().as_millis(),
+            );
+            observation(
+                "vm.generation.5.product_network_stack_component",
+                runner_error_component(&error),
+            );
             observation(
                 "vm.generation.5.product_network_stack_error",
                 runner_error_class(&error),
             );
             return Err(Box::new(error));
         }
+        observation(
+            "vm.generation.5.product_network_stack_elapsed_ms",
+            product_network_started.elapsed().as_millis(),
+        );
         observation("vm.generation.5.product_network_stack_attached", true);
         let fourth_worker = fourth
             .network_worker_process_identity()
@@ -774,10 +826,20 @@ mod linux {
             &nonce,
         )?;
         observation("vm.generation.5.guest_state_verified", true);
+        if let Err(error) = require_host_port_round_trip(&fourth_client, host_port).await {
+            observation(
+                "host_port.generation_5_runner_state",
+                running_exit_class(&mut fourth),
+            );
+            return Err(error);
+        }
+        observation("host_port.generation_5_round_trip", true);
         fourth.force_kill_egress_broker_for_verification()?;
         observation("vm.generation.5.egress_broker_kill_sent", true);
         wait_for_egress_broker_failure(&mut fourth).await?;
         observation("vm.generation.5.egress_broker_loss_observed", true);
+        wait_for_loopback_port_released(host_port).await?;
+        observation("host_port.broker_loss_release", true);
         require_network_denied_after_broker_loss(&fourth_client).await?;
         observation("egress_broker.loss_fail_closed", true);
         let fourth_process = fourth.process_identity().clone();
@@ -794,11 +856,73 @@ mod linux {
             ExitClass::EgressBrokerFailure(_) => {
                 return Err(failure("final egress broker failed during stop"));
             }
+            ExitClass::HostPortForwarderFailure => {
+                return Err(failure("final host-port forwarder failed during stop"));
+            }
         }
         drop(fourth);
         wait_for_identity_to_end(&fourth_process).await?;
         wait_for_identity_to_end(&fourth_worker).await?;
         wait_for_identity_to_end(&fourth_broker).await?;
+
+        let prepared_five = runner
+            .prepare(request_with_host_port(6, arguments, resources, host_port))
+            .await?;
+        require_same_disk(&disk_identity, prepared_five.state_disk_identity())?;
+        require_loopback_port_reserved(host_port)?;
+        let mut fifth = runner.start(prepared_five).await?;
+        attach_product_network_stack(&mut fifth).await?;
+        let fifth_process = fifth.process_identity().clone();
+        let fifth_worker = fifth
+            .network_worker_process_identity()
+            .ok_or_else(|| failure("restarted product network worker identity is absent"))?
+            .clone();
+        let fifth_broker = fifth
+            .egress_broker_process_identity()
+            .ok_or_else(|| failure("restarted product egress broker identity is absent"))?
+            .clone();
+        let fifth_client = connect_ready_daemon(&mut fifth).await?;
+        require_identity(
+            &run_guest_command(&fifth_client, &["identity"]).await?,
+            arguments.vm_id,
+            6,
+        )?;
+        require_nonce_read(
+            &run_guest_command(&fifth_client, &["read-nonce"]).await?,
+            &nonce,
+        )?;
+        if let Err(error) = require_host_port_round_trip(&fifth_client, host_port).await {
+            observation(
+                "host_port.generation_6_runner_state",
+                running_exit_class(&mut fifth),
+            );
+            return Err(error);
+        }
+        observation("host_port.restart_restore", true);
+        drop(fifth_client);
+        match fifth.stop().await? {
+            ExitClass::GuestShutdown => {}
+            ExitClass::StillRunning => return Err(failure("restarted VM stop remained running")),
+            ExitClass::VmmFailure(_) => {
+                return Err(failure("restarted VM stop required a failure signal"));
+            }
+            ExitClass::NetworkWorkerFailure(_) => {
+                return Err(failure("restarted network worker failed during stop"));
+            }
+            ExitClass::EgressBrokerFailure(_) => {
+                return Err(failure("restarted egress broker failed during stop"));
+            }
+            ExitClass::HostPortForwarderFailure => {
+                return Err(failure("restarted host-port forwarder failed during stop"));
+            }
+        }
+        drop(fifth);
+        wait_for_identity_to_end(&fifth_process).await?;
+        wait_for_identity_to_end(&fifth_worker).await?;
+        wait_for_identity_to_end(&fifth_broker).await?;
+        wait_for_loopback_port_released(host_port).await?;
+        observation("host_port.stop_release", true);
+
         let cleanup_id = Uuid::new_v4();
         move_stopped_vm_to_trash(&arguments.state_root, arguments.vm_id, cleanup_id)?;
         cleanup_trashed_vm(&arguments.state_root, arguments.vm_id, cleanup_id)?;
@@ -923,6 +1047,8 @@ mod linux {
             RunnerError::NetworkWorkerStartup(failure) => failure.code(),
             RunnerError::NetworkWorkerWait => "network-worker-wait",
             RunnerError::NetworkWorkerKillTimeout => "network-worker-kill-timeout",
+            RunnerError::HostPortUnavailable(_) => "host-port-unavailable",
+            RunnerError::HostPortControl => "host-port-control",
             RunnerError::EgressBrokerSpawn => "egress-broker-spawn",
             RunnerError::EgressBrokerStartTimeout => "egress-broker-start-timeout",
             RunnerError::EgressBrokerBootstrap => "egress-broker-bootstrap",
@@ -938,6 +1064,37 @@ mod linux {
             RunnerError::VmStillRunning => "vm-still-running",
             RunnerError::PersistedIdentityMismatch => "persisted-identity-mismatch",
             RunnerError::Io { .. } => "io",
+        }
+    }
+
+    fn running_exit_class(running: &mut RunningVm) -> &'static str {
+        match running.try_exit() {
+            Ok(ExitClass::StillRunning) => "running",
+            Ok(ExitClass::GuestShutdown) => "guest-shutdown",
+            Ok(ExitClass::VmmFailure(_)) => "vmm-failure",
+            Ok(ExitClass::NetworkWorkerFailure(_)) => "network-worker-failure",
+            Ok(ExitClass::EgressBrokerFailure(_)) => "egress-broker-failure",
+            Ok(ExitClass::HostPortForwarderFailure) => "host-port-forwarder-failure",
+            Err(_) => "unavailable",
+        }
+    }
+
+    fn runner_error_component(error: &RunnerError) -> &'static str {
+        match error {
+            RunnerError::InvalidNetworkWorker
+            | RunnerError::NetworkWorkerSpawn
+            | RunnerError::NetworkWorkerStartTimeout
+            | RunnerError::NetworkWorkerBootstrap
+            | RunnerError::NetworkWorkerStartup(_)
+            | RunnerError::NetworkWorkerWait
+            | RunnerError::NetworkWorkerKillTimeout => "network-worker",
+            RunnerError::EgressBrokerSpawn
+            | RunnerError::EgressBrokerStartTimeout
+            | RunnerError::EgressBrokerBootstrap
+            | RunnerError::EgressBrokerStartup(_)
+            | RunnerError::EgressBrokerWait
+            | RunnerError::EgressBrokerKillTimeout => "egress-broker",
+            _ => "runner",
         }
     }
 
@@ -981,6 +1138,7 @@ mod linux {
             vcpus: resources.vcpus,
             memory_mib: resources.memory_mib,
             setup: None,
+            host_ports: Vec::new(),
         }
     }
 
@@ -992,6 +1150,20 @@ mod linux {
     ) -> CreateVmRequest {
         let mut request = request(generation, arguments, resources);
         request.setup = Some(setup);
+        request
+    }
+
+    fn request_with_host_port(
+        generation: u64,
+        arguments: &Args,
+        resources: RunResources,
+        host_port: u16,
+    ) -> CreateVmRequest {
+        let mut request = request(generation, arguments, resources);
+        request.host_ports = vec![
+            HostPortBinding::new(host_port, HOST_PORT_GUEST_PORT)
+                .expect("smoke host-port constants are valid"),
+        ];
         request
     }
 
@@ -1488,6 +1660,11 @@ mod linux {
                             "egress broker exited while proving isolated network worker loss",
                         ));
                     }
+                    ExitClass::HostPortForwarderFailure => {
+                        return Err(failure(
+                            "host-port forwarder exited while proving isolated network worker loss",
+                        ));
+                    }
                 }
             }
         })
@@ -1496,26 +1673,43 @@ mod linux {
     }
 
     async fn wait_for_egress_broker_failure(running: &mut RunningVm) -> SmokeResult<()> {
-        tokio::time::timeout(Duration::from_secs(2), async {
+        match tokio::time::timeout(Duration::from_secs(2), async {
             loop {
                 match running.try_exit()? {
-                    ExitClass::EgressBrokerFailure(_) => return Ok(()),
+                    ExitClass::EgressBrokerFailure(_) => {
+                        observation("vm.egress_broker_loss_exit", "egress-broker");
+                        return Ok(());
+                    }
                     ExitClass::StillRunning => tokio::time::sleep(Duration::from_millis(20)).await,
                     ExitClass::GuestShutdown | ExitClass::VmmFailure(_) => {
+                        observation("vm.egress_broker_loss_exit", "vmm");
                         return Err(failure(
                             "VMM exited while proving isolated egress broker loss",
                         ));
                     }
                     ExitClass::NetworkWorkerFailure(_) => {
+                        observation("vm.egress_broker_loss_exit", "network-worker");
                         return Err(failure(
                             "network worker exited before egress broker loss was observed",
+                        ));
+                    }
+                    ExitClass::HostPortForwarderFailure => {
+                        observation("vm.egress_broker_loss_exit", "host-port-forwarder");
+                        return Err(failure(
+                            "host-port forwarder exited before egress broker loss was observed",
                         ));
                     }
                 }
             }
         })
         .await
-        .map_err(|_| failure("egress broker did not exit after exact pidfd kill"))?
+        {
+            Ok(result) => result,
+            Err(_) => {
+                observation("vm.egress_broker_loss_exit", "timeout");
+                Err(failure("egress broker did not exit after exact pidfd kill"))
+            }
+        }
     }
 
     fn parse_process_confinement(status: &str) -> SmokeResult<ProcessConfinement> {
@@ -1756,6 +1950,11 @@ mod linux {
                     );
                     return Err(failure(
                         "egress broker exited before guest daemon readiness",
+                    ));
+                }
+                ExitClass::HostPortForwarderFailure => {
+                    return Err(failure(
+                        "host-port forwarder exited before guest daemon readiness",
                     ));
                 }
                 ExitClass::GuestShutdown => {
@@ -2047,6 +2246,149 @@ mod linux {
             return Err(failure("workspace network fixture command failed"));
         }
         read_session_stdout(client, &record.session_id).await
+    }
+
+    fn require_loopback_port_reserved(port: u16) -> SmokeResult<()> {
+        match StdTcpListener::bind((Ipv4Addr::LOCALHOST, port)) {
+            Err(error) if error.kind() == io::ErrorKind::AddrInUse => Ok(()),
+            Err(error) => Err(Box::new(error)),
+            Ok(listener) => {
+                drop(listener);
+                Err(failure(
+                    "runner did not retain its loopback host-port reservation",
+                ))
+            }
+        }
+    }
+
+    async fn wait_for_loopback_port_released(port: u16) -> SmokeResult<()> {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            match StdTcpListener::bind((Ipv4Addr::LOCALHOST, port)) {
+                Ok(listener) => {
+                    drop(listener);
+                    return Ok(());
+                }
+                Err(error) if error.kind() == io::ErrorKind::AddrInUse => {
+                    if tokio::time::Instant::now() >= deadline {
+                        return Err(failure("loopback host port remained reserved after loss"));
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+                Err(error) => return Err(Box::new(error)),
+            }
+        }
+    }
+
+    async fn require_host_port_round_trip(
+        client: &SessionClient,
+        host_port: u16,
+    ) -> SmokeResult<()> {
+        let script = host_port_guest_script(host_port);
+        let command = vec!["/bin/sh".to_owned(), "-c".to_owned(), script];
+        let received_path = host_port_received_path(host_port);
+        let admitted = client
+            .launch(v1::LaunchSessionRequest {
+                command: command.clone(),
+                working_dir: "/workspace".to_owned(),
+                env: Vec::new(),
+                pty: false,
+                term: String::new(),
+                width: 0,
+                height: 0,
+            })
+            .await?;
+        wait_for_session_stdout_line(client, &admitted.session_id, "CWPORT1 handler-ready").await?;
+        observation("host_port.guest_handler_executable", true);
+        wait_for_session_stdout_line(client, &admitted.session_id, "CWPORT1 ready").await?;
+        observation("host_port.guest_listener_ready", host_port);
+
+        tokio::time::timeout(SESSION_TIMEOUT, async {
+            let mut stream = tokio::net::TcpStream::connect((Ipv4Addr::LOCALHOST, host_port))
+                .await
+                .map_err(|error| Box::new(error) as Box<dyn Error + Send + Sync>)?;
+            observation("host_port.host_connected", host_port);
+            stream
+                .write_all(HOST_PORT_REQUEST)
+                .await
+                .map_err(|error| Box::new(error) as Box<dyn Error + Send + Sync>)?;
+            observation("host_port.host_request_written", true);
+            stream
+                .shutdown()
+                .await
+                .map_err(|error| Box::new(error) as Box<dyn Error + Send + Sync>)?;
+            observation("host_port.host_write_half_closed", true);
+            let mut response = vec![0_u8; HOST_PORT_RESPONSE.len()];
+            stream
+                .read_exact(&mut response)
+                .await
+                .map_err(|error| Box::new(error) as Box<dyn Error + Send + Sync>)?;
+            if response != HOST_PORT_RESPONSE {
+                return Err(failure("host port returned an invalid guest response"));
+            }
+            observation("host_port.host_response_read", true);
+            let mut trailing = [0_u8; 1];
+            if stream
+                .read(&mut trailing)
+                .await
+                .map_err(|error| Box::new(error) as Box<dyn Error + Send + Sync>)?
+                != 0
+            {
+                return Err(failure("host port returned unexpected trailing bytes"));
+            }
+            observation("host_port.host_read_eof", true);
+            observation("host_port.bidirectional_bytes", "verified");
+            Ok::<(), Box<dyn Error + Send + Sync>>(())
+        })
+        .await
+        .map_err(|_| failure("host-port round trip exceeded its bound"))??;
+
+        let record = wait_for_terminal_session(client, &admitted.session_id).await?;
+        if record.command != command
+            || record.state != v1::SessionLifecycleState::Exited as i32
+            || record.exit_code != Some(0)
+            || read_session_stdout(client, &record.session_id).await?
+                != "CWPORT1 handler-ready\nCWPORT1 ready\nCWPORT1 done\n"
+        {
+            return Err(failure("guest host-port fixture did not exit cleanly"));
+        }
+        observation("host_port.guest_session", "clean");
+        let verified = run_workspace_command(
+            client,
+            format!(
+                "test \"$(/bin/busybox cat {received_path})\" = 'CWPORT1 host' && /bin/busybox rm -f {received_path} && printf 'CWPORT1 verified\\n'"
+            ),
+        )
+        .await?;
+        if verified != "CWPORT1 verified\n" {
+            return Err(failure("guest did not receive exact host-port bytes"));
+        }
+        observation("host_port.guest_received_bytes", "verified");
+        Ok(())
+    }
+
+    fn host_port_received_path(host_port: u16) -> String {
+        format!("/workspace/.cw-host-port-{host_port}")
+    }
+
+    fn host_port_guest_script(host_port: u16) -> String {
+        let received_path = host_port_received_path(host_port);
+        let handler_path = format!("/workspace/.cw-host-port-handler-{host_port}");
+        let guest_port_hex = format!("{HOST_PORT_GUEST_PORT:04X}");
+        format!(
+            "/bin/busybox rm -f {received_path} {handler_path}; \
+             /bin/busybox printf '#!/bin/sh\\n/bin/busybox cat > {received_path}\\nprintf \"CWPORT1 guest\"\\n' > {handler_path}; \
+             /bin/busybox chmod 0700 {handler_path}; \
+             test \"$({handler_path} </dev/null)\" = 'CWPORT1 guest'; /bin/busybox rm -f {received_path}; printf 'CWPORT1 handler-ready\\n'; \
+             /bin/busybox nc -l -s 0.0.0.0 -p {HOST_PORT_GUEST_PORT} -e {handler_path} & \
+             server=\"$!\"; ready=0; i=0; \
+             while test \"$i\" -lt 200; do \
+               if /bin/busybox grep -q ':{guest_port_hex} .* 0A ' /proc/net/tcp; then ready=1; break; fi; \
+               i=$((i + 1)); /bin/busybox sleep 0.05; \
+             done; \
+             test \"$ready\" -eq 1; printf 'CWPORT1 ready\\n'; \
+             wait \"$server\"; /bin/busybox rm -f {handler_path}; printf 'CWPORT1 done\\n'"
+        )
     }
 
     async fn require_allowed_network_fixture(client: &SessionClient) -> SmokeResult<()> {
@@ -2851,6 +3193,16 @@ mod linux {
             let rendered = top_level_failure_message(attacker_controlled_error.as_ref());
             assert_eq!(rendered, TOP_LEVEL_FAILURE_MESSAGE);
             assert!(!rendered.contains(ATTACKER_MARKER));
+        }
+
+        #[test]
+        fn host_port_guest_fixture_binds_all_guest_addresses_without_a_peer_filter() {
+            let script = host_port_guest_script(18_080);
+            assert!(script.contains(
+                "/bin/busybox nc -l -s 0.0.0.0 -p 3000 -e /workspace/.cw-host-port-handler-18080"
+            ));
+            assert!(!script.contains("nc -l 0.0.0.0"));
+            assert!(script.contains("/workspace/.cw-host-port-18080"));
         }
 
         #[test]
