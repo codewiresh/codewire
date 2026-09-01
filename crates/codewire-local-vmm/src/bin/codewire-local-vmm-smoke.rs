@@ -12,9 +12,31 @@ fn main() {
 }
 
 #[cfg(target_os = "linux")]
-#[tokio::main]
-async fn main() {
-    if let Err(error) = linux::entry().await {
+fn main() {
+    let network_worker = std::env::args_os()
+        .nth(1)
+        .is_some_and(|argument| argument == "__native-network-worker");
+    let mut runtime = if network_worker {
+        tokio::runtime::Builder::new_current_thread()
+    } else {
+        tokio::runtime::Builder::new_multi_thread()
+    };
+    if network_worker {
+        runtime.enable_io().enable_time();
+    } else {
+        runtime.enable_all();
+    }
+    let runtime = runtime.build().unwrap_or_else(|_| {
+        eprintln!("codewire-local-vmm-smoke: ERROR: qualified-host proof failed");
+        std::process::exit(1);
+    });
+    if let Err(error) = runtime.block_on(linux::entry()) {
+        if network_worker {
+            let code = error
+                .downcast_ref::<codewire_local_vmm::network_worker::NetworkWorkerError>()
+                .map_or(1, |error| error.exit_code());
+            std::process::exit(code);
+        }
         eprintln!("{}", linux::top_level_failure_message(error.as_ref()));
         std::process::exit(1);
     }
@@ -25,13 +47,17 @@ mod linux {
     use std::collections::{BTreeMap, BTreeSet};
     use std::error::Error;
     use std::fs::{self, File, Metadata};
+    #[cfg(test)]
     use std::future::Future;
     use std::io::{self, Cursor, Read, Seek, SeekFrom, Write};
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt};
     use std::path::{Path, PathBuf};
     use std::process::{Child, Command, Stdio};
+    use std::sync::Arc;
     use std::time::{Duration, Instant};
 
+    use async_trait::async_trait;
     use codewire_daemon::client::{SessionClient, SessionClientError, v1};
     use codewire_local_vmm::ch_api::VmInfo;
     use codewire_local_vmm::generation::{RootGenerationDisk, ensure_empty_root_generation};
@@ -39,17 +65,21 @@ mod linux {
     use codewire_local_vmm::linux::state::{
         StateDiskIdentity, VmPhase, cleanup_trashed_vm, move_stopped_vm_to_trash,
     };
+    use codewire_local_vmm::network_worker::{BoxedBrokerStream, EgressBroker, TcpFlow};
     use codewire_local_vmm::{
         CloudHypervisorRunner, CreateVmRequest, LiveProcess, PreparedVm, ProcessIdentity,
-        RecoveryError, RunnerConfig, RunningVm, VmPaths,
+        RecoveryError, RunnerConfig, RunnerError, RunningVm, VmPaths,
     };
+    use codewire_netstack::{DnsAnswer, DnsQuestion, DnsRecordType};
     use codewire_project::ProjectSpec;
     use codewire_vmm_guest_probe::guest::CONTAINER_INIT_PATH;
     use codewire_vmm_guest_probe::{
         LayerEncoding, SETUP_HEADER_LEN, SetupArchitecture, SetupBinding, SetupBlob, SetupHeader,
         SetupLayerBlob, SetupObject, Sha256Value, oci_root_generation,
     };
+    use rustix::process::Signal;
     use serde_json::Value;
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     use tonic::Code;
     use uuid::Uuid;
 
@@ -63,6 +93,14 @@ mod linux {
     const SESSION_TIMEOUT: Duration = Duration::from_secs(10);
     const VM_EXIT_TIMEOUT: Duration = Duration::from_secs(15);
     const MAX_SESSION_OUTPUT: usize = 64 * 1024;
+    const FIXTURE_GUEST_IP: IpAddr = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 2));
+    const FIXTURE_RESOLVER: SocketAddr =
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)), 53);
+    const FIXTURE_TCP_DESTINATION: SocketAddr =
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 19)), 4_443);
+    const FIXTURE_DNS_NAME: &str = "allowed.codewire.test";
+    const FIXTURE_DNS_ANSWER: Ipv4Addr = Ipv4Addr::new(203, 0, 113, 20);
+    const FIXTURE_THROUGHPUT_BYTES: usize = 1024 * 1024;
     const PROBE_PTY_TERM: &str = "xterm-256color";
     const PROBE_PTY_WIDTH: i32 = 80;
     const PROBE_PTY_HEIGHT: i32 = 24;
@@ -103,7 +141,32 @@ mod linux {
     }
 
     pub async fn entry() -> SmokeResult<()> {
-        let arguments = match Args::parse(std::env::args().skip(1)) {
+        let raw_arguments = std::env::args().skip(1).collect::<Vec<_>>();
+        if let [
+            command,
+            environment_flag,
+            environment_id,
+            generation_flag,
+            generation,
+        ] = raw_arguments.as_slice()
+            && command == "__native-network-worker"
+            && environment_flag == "--environment-id"
+            && generation_flag == "--generation"
+        {
+            let environment_id = Uuid::parse_str(environment_id)
+                .map_err(|_| failure("network worker environment ID is invalid"))?;
+            let generation = generation
+                .parse::<u64>()
+                .map_err(|_| failure("network worker generation is invalid"))?;
+            return codewire_local_vmm::network_worker::run_inherited_worker_with_broker(
+                environment_id,
+                generation,
+                Arc::new(SmokeNetworkBroker),
+            )
+            .await
+            .map_err(|error| Box::new(error) as Box<dyn Error + Send + Sync>);
+        }
+        let arguments = match Args::parse(raw_arguments) {
             Ok(Some(arguments)) => arguments,
             Ok(None) => {
                 print_usage();
@@ -325,22 +388,55 @@ mod linux {
         observation("vm.requested_vcpus", resources.vcpus);
         observation("vm.requested_memory_mib", resources.memory_mib);
 
-        let provisioned = runner
+        let provisioned = match runner
             .prepare(request_with_setup(1, arguments, resources, setup))
-            .await?;
+            .await
+        {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                observation("vm.generation.1.prepare_error", runner_error_class(&error));
+                return Err(Box::new(error));
+            }
+        };
+        observation("vm.generation.1.prepared", true);
         let fixture_paths = provisioned.paths().clone();
         require_prepared_identity(&provisioned, arguments.vm_id, 1)?;
         let disk_identity = provisioned.state_disk_identity().clone();
         let provisioning_token = provisioned.auth_token_fingerprint();
-        let mut provisioning = runner.start(provisioned).await?;
+        let mut provisioning = match runner.start(provisioned).await {
+            Ok(running) => running,
+            Err(error) => {
+                observation("vm.generation.1.start_error", runner_error_class(&error));
+                return Err(Box::new(error));
+            }
+        };
+        observation("vm.generation.1.vmm_started", true);
+        if let Err(error) = attach_network_worker(&mut provisioning).await {
+            observation(
+                "vm.generation.1.network_worker_error",
+                runner_error_class(&error),
+            );
+            return Err(Box::new(error));
+        }
+        observation("vm.generation.1.network_worker_attached", true);
         require_running_identity(&provisioning, arguments.vm_id, 1, &disk_identity)?;
         let provisioning_process = provisioning.process_identity().clone();
-        let provisioning_client = connect_ready_daemon(&provisioning).await?;
+        let provisioning_worker = provisioning
+            .network_worker_process_identity()
+            .cloned()
+            .ok_or_else(|| failure("provisioning network worker identity is absent"))?;
+        let provisioning_client = connect_ready_daemon(&mut provisioning).await?;
+        observation("vm.generation.1.daemon_ready", true);
         require_identity(
             &run_guest_command(&provisioning_client, &["identity"]).await?,
             arguments.vm_id,
             1,
         )?;
+        observation("vm.generation.1.identity_verified", true);
+        require_allowed_network_fixture(&provisioning_client).await?;
+        observation("network.fixture_dns", "allowed");
+        observation("network.fixture_tcp", "allowed");
+        observation("network.fixture_throughput_bytes", FIXTURE_THROUGHPUT_BYTES);
         provisioning.discard_one_boot_inputs()?;
         if provisioning.paths().seed_disk.exists()
             || provisioning
@@ -354,6 +450,14 @@ mod linux {
                 "provisioning inputs remained reachable after OCI workspace readiness",
             ));
         }
+        observation("vm.generation.1.inputs_discarded", true);
+        require_network_worker_boundary(&provisioning_worker, provisioning.paths())?;
+        observation("vm.generation.1.network_worker_boundary", true);
+        LiveProcess::recover(&provisioning_worker)?.signal(Signal::KILL)?;
+        wait_for_network_worker_failure(&mut provisioning).await?;
+        observation("vm.generation.1.network_worker_loss_observed", true);
+        require_network_probe(&run_guest_command(&provisioning_client, &["network-check"]).await?)?;
+        observation("network_worker.loss_fail_closed", true);
         drop(provisioning_client);
         match provisioning.stop().await? {
             ExitClass::GuestShutdown => {}
@@ -363,9 +467,13 @@ mod linux {
             ExitClass::VmmFailure(_) => {
                 return Err(failure("OCI provisioning VM required a failure signal"));
             }
+            ExitClass::NetworkWorkerFailure(_) => {
+                return Err(failure("OCI provisioning network worker failed"));
+            }
         }
         drop(provisioning);
         wait_for_identity_to_end(&provisioning_process).await?;
+        wait_for_identity_to_end(&provisioning_worker).await?;
         observation("guest.oci_setup_applied", true);
         observation("guest.oci_restart_without_setup", "pending");
 
@@ -385,6 +493,7 @@ mod linux {
             ));
         }
         let mut first = runner.start(prepared_one).await?;
+        attach_network_worker(&mut first).await?;
         require_running_identity(&first, arguments.vm_id, 2, &disk_identity)?;
         if first.auth_token_fingerprint() != token_one {
             return Err(failure("daemon token changed between prepare and start"));
@@ -392,7 +501,7 @@ mod linux {
         let first_process = first.process_identity().clone();
         observe_process(&first_process);
 
-        let first_client = connect_ready_daemon(&first).await?;
+        let first_client = connect_ready_daemon(&mut first).await?;
         observation("guest.daemon_ready", true);
         observation("guest.oci_restart_without_setup", "verified");
         require_vmm_process_confinement(&first_process)?;
@@ -469,6 +578,9 @@ mod linux {
                     "guest-initiated poweroff was classified as VMM failure",
                 ));
             }
+            ExitClass::NetworkWorkerFailure(_) => {
+                return Err(failure("network worker failed during guest poweroff"));
+            }
         }
         drop(first);
         wait_for_identity_to_end(&first_process).await?;
@@ -484,8 +596,9 @@ mod linux {
             ));
         }
         let mut second = runner.start(prepared_two).await?;
+        attach_network_worker(&mut second).await?;
         require_running_identity(&second, arguments.vm_id, 3, &disk_identity)?;
-        let second_client = connect_ready_daemon(&second).await?;
+        let second_client = connect_ready_daemon(&mut second).await?;
         require_identity(
             &run_guest_command(&second_client, &["identity"]).await?,
             arguments.vm_id,
@@ -507,6 +620,9 @@ mod linux {
                     "hard-killed VMM was misclassified as guest shutdown",
                 ));
             }
+            ExitClass::NetworkWorkerFailure(_) => {
+                return Err(failure("network worker failed before hard VMM kill"));
+            }
         }
         drop(second);
         wait_for_identity_to_end(&second_process).await?;
@@ -520,7 +636,9 @@ mod linux {
             return Err(failure("daemon token fingerprint repeated after crash"));
         }
         let third = runner.start(prepared_three).await?;
-        let third_client = connect_ready_daemon(&third).await?;
+        let mut third = third;
+        attach_network_worker(&mut third).await?;
+        let third_client = connect_ready_daemon(&mut third).await?;
         require_identity(
             &run_guest_command(&third_client, &["identity"]).await?,
             arguments.vm_id,
@@ -564,7 +682,8 @@ mod linux {
             ));
         }
         let mut fourth = runner.start(prepared_four).await?;
-        let fourth_client = connect_ready_daemon(&fourth).await?;
+        attach_network_worker(&mut fourth).await?;
+        let fourth_client = connect_ready_daemon(&mut fourth).await?;
         require_identity(
             &run_guest_command(&fourth_client, &["identity"]).await?,
             arguments.vm_id,
@@ -582,6 +701,9 @@ mod linux {
             ExitClass::VmmFailure(_) => {
                 return Err(failure("final VM stop required a failure signal"));
             }
+            ExitClass::NetworkWorkerFailure(_) => {
+                return Err(failure("final network worker failed during stop"));
+            }
         }
         drop(fourth);
         wait_for_identity_to_end(&fourth_process).await?;
@@ -591,6 +713,129 @@ mod linux {
         require_deleted(&fixture_paths, &arguments.state_root)?;
         observation("vm.cleanup", "complete");
         Ok(())
+    }
+
+    async fn attach_network_worker(running: &mut RunningVm) -> Result<(), RunnerError> {
+        let current = std::env::current_exe().map_err(|_| RunnerError::InvalidNetworkWorker)?;
+        let executable =
+            std::fs::canonicalize(current).map_err(|_| RunnerError::InvalidNetworkWorker)?;
+        running
+            .start_network_worker(&executable, DAEMON_READY_TIMEOUT)
+            .await?;
+        if running.network_worker_process_identity().is_none() {
+            return Err(RunnerError::InvalidNetworkWorker);
+        }
+        Ok(())
+    }
+
+    struct SmokeNetworkBroker;
+
+    #[async_trait]
+    impl EgressBroker for SmokeNetworkBroker {
+        async fn authorize_tcp(&self, flow: TcpFlow) -> io::Result<()> {
+            if flow.source.ip() == FIXTURE_GUEST_IP && flow.destination == FIXTURE_TCP_DESTINATION {
+                Ok(())
+            } else {
+                Err(io::Error::from(io::ErrorKind::PermissionDenied))
+            }
+        }
+
+        async fn connect_tcp(&self, flow: TcpFlow) -> io::Result<BoxedBrokerStream> {
+            self.authorize_tcp(flow).await?;
+            let (connected, mut fixture) = tokio::io::duplex(64 * 1024);
+            tokio::spawn(async move {
+                let mut buffer = [0_u8; 16 * 1024];
+                loop {
+                    let read = match fixture.read(&mut buffer).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(read) => read,
+                    };
+                    if fixture.write_all(&buffer[..read]).await.is_err() {
+                        break;
+                    }
+                }
+                let _ = fixture.shutdown().await;
+            });
+            Ok(Box::pin(connected))
+        }
+
+        async fn resolve_dns(&self, question: &DnsQuestion) -> io::Result<DnsAnswer> {
+            if question.source.ip() != FIXTURE_GUEST_IP
+                || question.server != FIXTURE_RESOLVER
+                || question.name != FIXTURE_DNS_NAME
+            {
+                return Err(io::Error::from(io::ErrorKind::PermissionDenied));
+            }
+            match question.record_type {
+                DnsRecordType::A => Ok(DnsAnswer::Ipv4(FIXTURE_DNS_ANSWER)),
+                DnsRecordType::Aaaa => Ok(DnsAnswer::NoData),
+            }
+        }
+    }
+
+    fn runner_error_class(error: &RunnerError) -> &'static str {
+        match error {
+            RunnerError::InvalidRequest => "invalid-request",
+            RunnerError::InvalidArtifactStagingLayout => "invalid-artifact-layout",
+            RunnerError::Artifact(_) => "artifact",
+            RunnerError::Path(_) => "path",
+            RunnerError::State(_) => "state",
+            RunnerError::Preflight(_) => "preflight",
+            RunnerError::Recovery(error) => recovery_error_class(error),
+            RunnerError::Config(_) => "config",
+            RunnerError::Api(_) => "api",
+            RunnerError::HybridVsock(_) => "hybrid-vsock",
+            RunnerError::Seed(_) => "seed",
+            RunnerError::MissingSeedAfterReadiness => "missing-seed-after-readiness",
+            RunnerError::MissingSetupAfterReadiness => "missing-setup-after-readiness",
+            RunnerError::SetupDiskIdentityChanged => "setup-disk-identity-changed",
+            RunnerError::MissingPreformattedStateDisk => "missing-state-disk",
+            RunnerError::MissingPreformattedRootDisk => "missing-root-disk",
+            RunnerError::StateDiskSizeMismatch { .. } => "state-disk-size-mismatch",
+            RunnerError::RootDiskSizeMismatch { .. } => "root-disk-size-mismatch",
+            RunnerError::PersistedRootGenerationMismatch => "root-generation-mismatch",
+            RunnerError::InvalidDiskGrowth(_) => "invalid-disk-growth",
+            RunnerError::DiskShrinkUnsupported { .. } => "disk-shrink",
+            RunnerError::StateDiskGrowthIdentityMismatch(_) => "disk-growth-identity",
+            RunnerError::E2fsckUnavailable => "e2fsck-unavailable",
+            RunnerError::E2fsckFailed(_) => "e2fsck-failed",
+            RunnerError::Resize2fsUnavailable => "resize2fs-unavailable",
+            RunnerError::Resize2fsFailed(_) => "resize2fs-failed",
+            RunnerError::GenerationNotAdvanced { .. } => "generation-not-advanced",
+            RunnerError::InvalidNetworkWorker => "invalid-network-worker",
+            RunnerError::NetworkWorkerSpawn => "network-worker-spawn",
+            RunnerError::NetworkWorkerStartTimeout => "network-worker-start-timeout",
+            RunnerError::NetworkWorkerBootstrap => "network-worker-bootstrap",
+            RunnerError::NetworkWorkerStartup(failure) => failure.code(),
+            RunnerError::NetworkWorkerWait => "network-worker-wait",
+            RunnerError::NetworkWorkerKillTimeout => "network-worker-kill-timeout",
+            RunnerError::ExitedDuringStart => "vmm-exited-during-start",
+            RunnerError::StartTimeout => "vmm-start-timeout",
+            RunnerError::Spawn => "vmm-spawn",
+            RunnerError::Wait => "vmm-wait",
+            RunnerError::KillTimeout => "vmm-kill-timeout",
+            RunnerError::GuestPoweroff => "guest-poweroff",
+            RunnerError::VmStillRunning => "vm-still-running",
+            RunnerError::PersistedIdentityMismatch => "persisted-identity-mismatch",
+            RunnerError::Io { .. } => "io",
+        }
+    }
+
+    fn recovery_error_class(error: &RecoveryError) -> &'static str {
+        match error {
+            RecoveryError::InvalidPid(_) => "recovery-invalid-pid",
+            RecoveryError::ReadProcess(_) => "recovery-read-process",
+            RecoveryError::MalformedProcess => "recovery-malformed-process",
+            RecoveryError::IdentityMismatch => "recovery-identity-mismatch",
+            RecoveryError::UnexpectedSpawnedExecutable => "recovery-unexpected-executable",
+            RecoveryError::SpawnedIdentityChangedDuringCapture => "recovery-spawn-identity-changed",
+            RecoveryError::InvalidTargetFd(_) => "recovery-invalid-target-fd",
+            RecoveryError::ProcessExited => "recovery-process-exited",
+            RecoveryError::DuplicateProcessFd(_) => "recovery-duplicate-fd",
+            RecoveryError::InspectSocket(_) => "recovery-inspect-socket",
+            RecoveryError::MalformedSocketDomain => "recovery-socket-domain",
+            RecoveryError::Pidfd(_) => "recovery-pidfd",
+        }
     }
 
     async fn cleanup(arguments: Args) -> SmokeResult<()> {
@@ -989,6 +1234,142 @@ mod linux {
         Ok(())
     }
 
+    fn require_network_worker_boundary(
+        identity: &ProcessIdentity,
+        paths: &VmPaths,
+    ) -> SmokeResult<()> {
+        if ProcessIdentity::capture(identity.pid)? != *identity {
+            return Err(failure(
+                "network worker identity changed before boundary inspection",
+            ));
+        }
+        let supervisor = parse_process_confinement(&fs::read_to_string("/proc/self/status")?)?;
+        let worker = parse_process_confinement(&fs::read_to_string(format!(
+            "/proc/{}/status",
+            identity.pid
+        ))?)?;
+        if worker.seccomp != 2
+            || worker.seccomp_filters <= supervisor.seccomp_filters
+            || worker.no_new_privs != 1
+            || !capability_sets_empty(&worker)
+        {
+            return Err(failure(
+                "network worker lacks its dedicated seccomp/capability boundary",
+            ));
+        }
+        let tasks =
+            fs::read_dir(format!("/proc/{}/task", identity.pid))?.collect::<Result<Vec<_>, _>>()?;
+        if tasks.len() != 1 {
+            return Err(failure(
+                "network worker is not running on its required single-threaded runtime",
+            ));
+        }
+        let cwd = fs::read_link(format!("/proc/{}/cwd", identity.pid))?;
+        if cwd != paths.vm_dir {
+            return Err(failure(
+                "network worker working directory is not its private VM directory",
+            ));
+        }
+
+        // The worker intentionally sets PR_SET_DUMPABLE=0, which makes
+        // pidfd_getfd fail its ptrace access check even for the parent. Match
+        // every live socket descriptor to the exact kernel AF_UNIX table
+        // instead. The child inherited only its admitted bootstrap stream,
+        // receives one validated connected AF_UNIX stream, and installs a
+        // filter denying socket/socketpair/connect before guest bytes arrive.
+        let unix_sockets = unix_socket_records(identity.pid)?;
+        let mut socket_inodes = BTreeMap::<u64, usize>::new();
+        let mut socket_count = 0_usize;
+        let mut descriptor_count = 0_usize;
+        for entry in fs::read_dir(format!("/proc/{}/fd", identity.pid))? {
+            let entry = entry?;
+            descriptor_count += 1;
+            let _fd = entry
+                .file_name()
+                .to_string_lossy()
+                .parse::<u32>()
+                .map_err(|_| failure("network worker descriptor number is malformed"))?;
+            let target = fs::read_link(entry.path())?;
+            let text = target.to_string_lossy();
+            if matches!(
+                text.as_ref(),
+                "/dev/kvm"
+                    | "/dev/vhost-vsock"
+                    | "/dev/net/tun"
+                    | "/dev/net/tap"
+                    | "/dev/vhost-net"
+            ) || text.starts_with("/dev/tap")
+                || target == paths.seed_disk
+                || target == paths.state_disk
+                || target.starts_with(&paths.generations_dir)
+            {
+                return Err(failure(
+                    "network worker owns a forbidden device or VM-content descriptor",
+                ));
+            }
+            if text.starts_with("socket:") {
+                let inode = socket_inode(&text).ok_or_else(|| {
+                    failure("network worker socket descriptor target is malformed")
+                })?;
+                let record = unix_sockets.get(&inode).ok_or_else(|| {
+                    failure("network worker socket is absent from the kernel AF_UNIX table")
+                })?;
+                if record.socket_type != libc::SOCK_STREAM as u16
+                    || record.state != 3
+                    || record.path.is_some()
+                {
+                    return Err(failure(
+                        "network worker owns a socket outside its inherited AF_UNIX path",
+                    ));
+                }
+                *socket_inodes.entry(inode).or_default() += 1;
+                socket_count += 1;
+            }
+        }
+        let mut socket_multiplicity = socket_inodes.values().copied().collect::<Vec<_>>();
+        socket_multiplicity.sort_unstable();
+        if descriptor_count == 0
+            || socket_count != 4
+            || socket_inodes.len() != 3
+            || socket_multiplicity != [1, 1, 2]
+        {
+            return Err(failure(
+                "network worker socket topology differs from one admitted stream and the fixed Tokio runtime pair",
+            ));
+        }
+        if ProcessIdentity::capture(identity.pid)? != *identity {
+            return Err(failure(
+                "network worker identity changed during boundary inspection",
+            ));
+        }
+        observation("network_worker.pid", identity.pid);
+        observation("network_worker.seccomp", worker.seccomp);
+        observation("network_worker.seccomp_filters", worker.seccomp_filters);
+        observation("network_worker.task_count", tasks.len());
+        observation("network_worker.fd_count", descriptor_count);
+        observation("network_worker.socket_count", socket_count);
+        observation("network_worker.boundary_verified", true);
+        Ok(())
+    }
+
+    async fn wait_for_network_worker_failure(running: &mut RunningVm) -> SmokeResult<()> {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                match running.try_exit()? {
+                    ExitClass::NetworkWorkerFailure(_) => return Ok(()),
+                    ExitClass::StillRunning => tokio::time::sleep(Duration::from_millis(20)).await,
+                    ExitClass::GuestShutdown | ExitClass::VmmFailure(_) => {
+                        return Err(failure(
+                            "VMM exited while proving isolated network worker loss",
+                        ));
+                    }
+                }
+            }
+        })
+        .await
+        .map_err(|_| failure("network worker did not exit after exact pidfd kill"))?
+    }
+
     fn parse_process_confinement(status: &str) -> SmokeResult<ProcessConfinement> {
         let seccomp = parse_status_decimal(unique_status_value(status, "Seccomp")?)?;
         let seccomp_filters =
@@ -1184,19 +1565,84 @@ mod linux {
         Ok(())
     }
 
-    async fn connect_ready_daemon(running: &RunningVm) -> SmokeResult<SessionClient> {
-        wait_for_daemon_ready_with_timeout(
-            DAEMON_READY_TIMEOUT,
-            Duration::from_millis(50),
-            || async {
-                let client = running.daemon_client().await.ok()?;
-                require_daemon(&client).await.ok()?;
-                Some(client)
-            },
-        )
-        .await
+    async fn connect_ready_daemon(running: &mut RunningVm) -> SmokeResult<SessionClient> {
+        let stage = match running
+            .authenticated_guest_terminal_stage(DAEMON_READY_TIMEOUT)
+            .await
+        {
+            Ok(stage) => stage,
+            Err(error) => {
+                observation("guest.authenticated_terminal_stage", "unavailable");
+                return Err(Box::new(error));
+            }
+        };
+        observation("guest.authenticated_terminal_stage", format!("{stage:?}"));
+        if stage.is_failure() {
+            return Err(failure("authenticated guest initialization failed"));
+        }
+        let deadline = tokio::time::Instant::now() + DAEMON_READY_TIMEOUT;
+        let mut attempts = 0_u64;
+        loop {
+            let exit = match running.try_exit() {
+                Ok(exit) => exit,
+                Err(error) => {
+                    observation("vmm.exit_inspection", "failed");
+                    return Err(Box::new(error));
+                }
+            };
+            match exit {
+                ExitClass::StillRunning => {}
+                ExitClass::NetworkWorkerFailure(code) => {
+                    observation(
+                        "network_worker.unexpected_exit",
+                        code.map_or_else(|| "signal".to_owned(), |code| code.to_string()),
+                    );
+                    return Err(failure(
+                        "network worker exited before guest daemon readiness",
+                    ));
+                }
+                ExitClass::GuestShutdown => {
+                    observation("vmm.unexpected_exit", "guest-shutdown");
+                    return Err(failure("VMM exited before guest daemon readiness"));
+                }
+                ExitClass::VmmFailure(code) => {
+                    observation(
+                        "vmm.unexpected_exit",
+                        code.map_or_else(|| "signal".to_owned(), |code| code.to_string()),
+                    );
+                    return Err(failure("VMM exited before guest daemon readiness"));
+                }
+            }
+            attempts += 1;
+            let attempt = tokio::time::timeout_at(deadline, async {
+                let client = running.daemon_client().await.map_err(|_| "transport")?;
+                require_daemon(&client).await.map_err(|_| "rpc-or-state")?;
+                Ok::<_, &'static str>(client)
+            })
+            .await;
+            let attempt_failure = match attempt {
+                Ok(Ok(client)) => return Ok(client),
+                Ok(Err(failure)) => failure,
+                Err(_) => {
+                    observation("daemon.readiness_attempts", attempts);
+                    observation("daemon.last_failure", "attempt-timeout");
+                    return Err(failure(
+                        "authenticated guest daemon did not become ready within its bound",
+                    ));
+                }
+            };
+            if tokio::time::Instant::now() >= deadline {
+                observation("daemon.readiness_attempts", attempts);
+                observation("daemon.last_failure", attempt_failure);
+                return Err(failure(
+                    "authenticated guest daemon did not become ready within its bound",
+                ));
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
     }
 
+    #[cfg(test)]
     async fn wait_for_daemon_ready_with_timeout<T, Attempt, AttemptFuture>(
         timeout: Duration,
         retry_interval: Duration,
@@ -1433,6 +1879,65 @@ mod linux {
         read_session_stdout(client, &record.session_id).await
     }
 
+    async fn run_workspace_command(client: &SessionClient, script: String) -> SmokeResult<String> {
+        let command = vec!["/bin/sh".to_owned(), "-c".to_owned(), script];
+        let record = client.launch(launch_request(command.clone())).await?;
+        let record = wait_for_terminal_session(client, &record.session_id).await?;
+        if record.command != command
+            || record.state != v1::SessionLifecycleState::Exited as i32
+            || record.exit_code != Some(0)
+        {
+            return Err(failure("workspace network fixture command failed"));
+        }
+        read_session_stdout(client, &record.session_id).await
+    }
+
+    async fn require_allowed_network_fixture(client: &SessionClient) -> SmokeResult<()> {
+        let dns = run_workspace_command(
+            client,
+            format!(
+                "/bin/busybox nslookup {FIXTURE_DNS_NAME} 2>/dev/null | /bin/busybox grep -Fq '{FIXTURE_DNS_ANSWER}' && printf 'CWDNS1 allowed\\n'"
+            ),
+        )
+        .await?;
+        if dns != "CWDNS1 allowed\n" {
+            return Err(failure(
+                "fixture DNS did not cross the isolated network seam",
+            ));
+        }
+
+        let tcp = run_workspace_command(
+            client,
+            format!(
+                "response=\"$(printf 'CWTCP1 echo' | /bin/busybox nc -n -w 1 {} {})\"; test \"$response\" = 'CWTCP1 echo' && printf 'CWTCP1 allowed\\n'",
+                FIXTURE_TCP_DESTINATION.ip(),
+                FIXTURE_TCP_DESTINATION.port(),
+            ),
+        )
+        .await?;
+        if tcp != "CWTCP1 allowed\n" {
+            return Err(failure(
+                "fixture TCP did not cross the isolated network seam",
+            ));
+        }
+
+        let throughput = run_workspace_command(
+            client,
+            format!(
+                "count=\"$(/bin/busybox dd if=/dev/zero bs=65536 count=16 2>/dev/null | /bin/busybox nc -n -w 1 {} {} | /bin/busybox wc -c)\"; test \"$count\" -eq {FIXTURE_THROUGHPUT_BYTES} && printf 'CWTHROUGHPUT1 {FIXTURE_THROUGHPUT_BYTES}\\n'",
+                FIXTURE_TCP_DESTINATION.ip(),
+                FIXTURE_TCP_DESTINATION.port(),
+            ),
+        )
+        .await?;
+        if throughput != format!("CWTHROUGHPUT1 {FIXTURE_THROUGHPUT_BYTES}\n") {
+            return Err(failure(
+                "fixture TCP did not meet the one-MiB round-trip session floor",
+            ));
+        }
+        Ok(())
+    }
+
     async fn observe_network_failure_class(client: &SessionClient, session_id: &str) {
         let Ok(response) = client
             .read_output(v1::ReadSessionOutputRequest {
@@ -1653,7 +2158,7 @@ mod linux {
     }
 
     fn require_network_probe(output: &str) -> SmokeResult<()> {
-        if output != "CWNETWORK1 loopback-only\n" {
+        if output != "CWNETWORK2 isolated-tun\n" {
             return Err(failure("guest network boundary probe did not pass"));
         }
         Ok(())
@@ -1903,6 +2408,13 @@ mod linux {
         unix_paths: BTreeSet<PathBuf>,
     }
 
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct UnixSocketRecord {
+        socket_type: u16,
+        state: u16,
+        path: Option<PathBuf>,
+    }
+
     fn require_supervisor_socket_boundary() -> SmokeResult<()> {
         let identity = ProcessIdentity::capture(std::process::id())?;
         let live = LiveProcess::recover(&identity)?;
@@ -2055,6 +2567,18 @@ mod linux {
 
     fn unix_socket_paths(pid: u32) -> SmokeResult<BTreeMap<u64, PathBuf>> {
         let contents = fs::read_to_string(format!("/proc/{pid}/net/unix"))?;
+        Ok(parse_unix_socket_table(&contents)?
+            .into_iter()
+            .filter_map(|(inode, record)| record.path.map(|path| (inode, path)))
+            .collect())
+    }
+
+    fn unix_socket_records(pid: u32) -> SmokeResult<BTreeMap<u64, UnixSocketRecord>> {
+        let contents = fs::read_to_string(format!("/proc/{pid}/net/unix"))?;
+        parse_unix_socket_table(&contents)
+    }
+
+    fn parse_unix_socket_table(contents: &str) -> SmokeResult<BTreeMap<u64, UnixSocketRecord>> {
         let mut result = BTreeMap::new();
         for line in contents.lines().skip(1) {
             let fields = line.split_ascii_whitespace().collect::<Vec<_>>();
@@ -2064,8 +2588,17 @@ mod linux {
             let inode = fields[6]
                 .parse()
                 .map_err(|_| failure("kernel Unix socket inode is malformed"))?;
-            if let Some(path) = fields.get(7) {
-                result.insert(inode, PathBuf::from(path));
+            let socket_type = u16::from_str_radix(fields[4], 16)
+                .map_err(|_| failure("kernel Unix socket type is malformed"))?;
+            let state = u16::from_str_radix(fields[5], 16)
+                .map_err(|_| failure("kernel Unix socket state is malformed"))?;
+            let record = UnixSocketRecord {
+                socket_type,
+                state,
+                path: fields.get(7).map(PathBuf::from),
+            };
+            if result.insert(inode, record).is_some() {
+                return Err(failure("kernel Unix socket inode is duplicated"));
             }
         }
         Ok(result)
@@ -2480,6 +3013,37 @@ mod linux {
             assert_eq!(socket_inode("socket:[1234]"), Some(1234));
             assert_eq!(socket_inode("socket:[1234] trailing"), None);
             assert_eq!(socket_inode("pipe:[1234]"), None);
+        }
+
+        #[test]
+        fn unix_socket_table_preserves_named_and_unnamed_socket_inodes() {
+            let table = concat!(
+                "Num RefCount Protocol Flags Type St Inode Path\n",
+                "0000000000000000: 00000002 00000000 00000000 0001 03 1234\n",
+                "0000000000000001: 00000002 00000000 00010000 0001 01 5678 /run/codewire.sock\n",
+            );
+            let parsed = parse_unix_socket_table(table).unwrap();
+            assert_eq!(
+                parsed.get(&1234),
+                Some(&UnixSocketRecord {
+                    socket_type: 1,
+                    state: 3,
+                    path: None,
+                })
+            );
+            assert_eq!(
+                parsed.get(&5678),
+                Some(&UnixSocketRecord {
+                    socket_type: 1,
+                    state: 1,
+                    path: Some(PathBuf::from("/run/codewire.sock")),
+                })
+            );
+
+            let duplicate =
+                format!("{table}0000000000000002: 00000002 00000000 00000000 0001 03 1234\n");
+            assert!(parse_unix_socket_table(&duplicate).is_err());
+            assert!(parse_unix_socket_table("header\nmalformed\n").is_err());
         }
 
         #[test]
