@@ -18,6 +18,10 @@ use super::*;
 mod native;
 #[cfg(target_os = "linux")]
 pub(crate) use native::*;
+#[cfg(target_os = "linux")]
+mod credential_authority;
+#[cfg(target_os = "linux")]
+pub(crate) use credential_authority::*;
 
 const LOCAL_DAEMON_READY_ATTEMPTS: usize = 25;
 const LOCAL_DAEMON_READY_RETRY_INTERVAL: Duration = Duration::from_millis(200);
@@ -211,6 +215,22 @@ pub(crate) struct NativeRunnerArgs {
     pub(crate) engine_state_root: PathBuf,
     #[arg(long)]
     pub(crate) artifact_generation: String,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Args)]
+pub(crate) struct LocalCredentialAuthorityArgs {
+    #[arg(long)]
+    pub(crate) root: PathBuf,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Args)]
+pub(crate) struct LocalCredentialAuthorityProbeArgs {
+    #[arg(long)]
+    pub(crate) root: PathBuf,
+    #[arg(long)]
+    pub(crate) shutdown: bool,
 }
 
 impl EnvArgs {

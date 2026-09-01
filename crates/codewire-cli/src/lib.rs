@@ -186,6 +186,12 @@ enum Command {
     #[cfg(target_os = "linux")]
     #[command(name = "__native-runner", hide = true)]
     NativeRunner(NativeRunnerArgs),
+    #[cfg(target_os = "linux")]
+    #[command(name = "__local-credential-authority", hide = true)]
+    LocalCredentialAuthority(LocalCredentialAuthorityArgs),
+    #[cfg(target_os = "linux")]
+    #[command(name = "__local-credential-authority-probe", hide = true)]
+    LocalCredentialAuthorityProbe(LocalCredentialAuthorityProbeArgs),
     #[command(about = "List sessions for the selected or explicit environment")]
     List(ListArgs),
     #[command(
@@ -262,6 +268,12 @@ where
         Command::NativeSupervisor(args) => run_native_supervisor(args).await,
         #[cfg(target_os = "linux")]
         Command::NativeRunner(args) => run_native_runner(args).await,
+        #[cfg(target_os = "linux")]
+        Command::LocalCredentialAuthority(args) => run_local_credential_authority(args).await,
+        #[cfg(target_os = "linux")]
+        Command::LocalCredentialAuthorityProbe(args) => {
+            run_local_credential_authority_probe(args).await
+        }
         Command::List(args) => handle_list_command(&globals, args).await,
         Command::Attach(args) => handle_attach_command(&globals, args).await,
         Command::Logs(args) => handle_logs_command(&globals, args).await,

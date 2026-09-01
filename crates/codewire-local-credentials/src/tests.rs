@@ -788,6 +788,38 @@ fn authority_rejects_non_private_roots_and_database_symlinks() {
         ),
         Err(LocalCredentialError::InvalidDatabasePath)
     ));
+
+    let real_parent = temp.path().join("real-parent");
+    fs::create_dir(&real_parent).expect("create real parent");
+    fs::set_permissions(&real_parent, fs::Permissions::from_mode(0o700))
+        .expect("set real parent permissions");
+    let linked_parent = temp.path().join("linked-parent");
+    symlink(&real_parent, &linked_parent).expect("create parent symlink");
+    assert!(matches!(
+        LocalCredentialAuthority::open(
+            &linked_parent.join("authority"),
+            TestProtectedStore::new(ProtectedStorePersistence::OperatingSystem),
+            catalog()
+        ),
+        Err(LocalCredentialError::InvalidDatabasePath)
+    ));
+
+    let writable_parent = temp.path().join("writable-parent");
+    fs::create_dir(&writable_parent).expect("create writable parent");
+    fs::set_permissions(&writable_parent, fs::Permissions::from_mode(0o777))
+        .expect("set writable parent permissions");
+    let private_child = writable_parent.join("authority");
+    fs::create_dir(&private_child).expect("create private child");
+    fs::set_permissions(&private_child, fs::Permissions::from_mode(0o700))
+        .expect("set private child permissions");
+    assert!(matches!(
+        LocalCredentialAuthority::open(
+            &private_child,
+            TestProtectedStore::new(ProtectedStorePersistence::OperatingSystem),
+            catalog()
+        ),
+        Err(LocalCredentialError::InvalidDatabasePath)
+    ));
 }
 
 #[test]

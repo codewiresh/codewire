@@ -36,7 +36,9 @@ url = { workspace = true }
 uuid = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
+codewire-local-credentials = { workspace = true }
 codewire-local-vmm = { path = "../codewire-local-vmm" }
+libc = "0.2"
 
 [dev-dependencies]
 buffa = { workspace = true }

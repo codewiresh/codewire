@@ -1318,9 +1318,11 @@ dependencies = [
  "clap_complete",
  "codewire-client",
  "codewire-daemon",
+ "codewire-local-credentials",
  "codewire-local-vmm",
  "codewire-project",
  "codewire-project-proto",
+ "libc",
  "portable-pty",
  "rand 0.8.6",
  "reqwest 0.12.28",
@@ -1592,11 +1594,21 @@ version = "0.1.0"
 dependencies = [
  "codewire-access",
  "codewire-protected-store",
+ "http",
+ "hyper-util",
+ "prost 0.14.4",
  "rusqlite",
  "rustix",
  "tempfile",
  "thiserror 2.0.18",
+ "tokio",
+ "tokio-stream",
+ "tonic 0.14.6",
+ "tonic-prost",
+ "tonic-prost-build",
+ "tower 0.5.3",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]

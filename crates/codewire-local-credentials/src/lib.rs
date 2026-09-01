@@ -6,8 +6,18 @@
 //! SQLite contains metadata and exact protected-store entry references only.
 //! Provider material is accepted as [`ProtectedValue`], written to one exact
 //! entry, and never serialized, formatted, or exposed through metadata APIs.
-//! This crate is synchronous by design; a future RPC process must execute its
-//! operations on bounded blocking workers rather than a VM supervisor loop.
+//! The synchronous persistence kernel is served by a separate owner-only local
+//! RPC process on bounded blocking workers. The VM supervisor does not link or
+//! own that material-bearing authority.
+
+mod client;
+mod control;
+mod service;
+mod transport;
+
+pub use client::{AuthorityInfo, LocalCredentialClient};
+pub use service::{serve_local_credential_authority, serve_os_local_credential_authority};
+pub use transport::{AuthorityRuntimeConfig, AuthorityRuntimeError};
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -38,6 +48,12 @@ use std::os::unix::fs::{DirBuilderExt as _, MetadataExt as _, PermissionsExt as 
 
 pub const DATABASE_FILE: &str = "credentials.db";
 pub const LOCAL_OWNER_ID: &str = "local-user";
+/// The complete environment inherited by the detached Linux authority.
+///
+/// These variables locate the user session bus used by Secret Service. The
+/// launcher clears every other ambient variable before exec.
+pub const AUTHORITY_ALLOWED_ENVIRONMENT_VARIABLES: [&str; 2] =
+    ["DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR"];
 
 const AUTHORITY_LOCK_FILE: &str = "authority.lock";
 const DATABASE_APPLICATION_ID: i64 = 0x4357_4352; // "CWCR"
@@ -230,6 +246,10 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
 
     pub fn owner_id(&self) -> &OwnerId {
         &self.owner_id
+    }
+
+    pub fn protected_store_persistence(&self) -> ProtectedStorePersistence {
+        self.protected_store.persistence()
     }
 
     pub fn add_credential(
@@ -918,7 +938,8 @@ fn open_database(root: &Path) -> Result<Connection, LocalCredentialError> {
 }
 
 #[cfg(unix)]
-fn ensure_private_root(root: &Path) -> Result<(), LocalCredentialError> {
+pub(crate) fn ensure_private_root(root: &Path) -> Result<(), LocalCredentialError> {
+    validate_private_parent(root)?;
     match fs::symlink_metadata(root) {
         Ok(_) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -932,11 +953,31 @@ fn ensure_private_root(root: &Path) -> Result<(), LocalCredentialError> {
     }
     let metadata =
         fs::symlink_metadata(root).map_err(|_| LocalCredentialError::InvalidDatabasePath)?;
-    let current_uid = rustix::process::getuid().as_raw();
+    let current_uid = rustix::process::geteuid().as_raw();
     if !metadata.file_type().is_dir()
         || metadata.file_type().is_symlink()
         || metadata.uid() != current_uid
         || metadata.mode() & 0o7777 != 0o700
+        || fs::canonicalize(root).map_err(|_| LocalCredentialError::InvalidDatabasePath)? != root
+    {
+        return Err(LocalCredentialError::InvalidDatabasePath);
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+pub(crate) fn validate_private_parent(root: &Path) -> Result<(), LocalCredentialError> {
+    let parent = root
+        .parent()
+        .filter(|parent| *parent != root)
+        .ok_or(LocalCredentialError::InvalidDatabasePath)?;
+    let parent_metadata =
+        fs::symlink_metadata(parent).map_err(|_| LocalCredentialError::InvalidDatabasePath)?;
+    if !parent_metadata.file_type().is_dir()
+        || parent_metadata.file_type().is_symlink()
+        || parent_metadata.mode() & 0o022 != 0
+        || fs::canonicalize(parent).map_err(|_| LocalCredentialError::InvalidDatabasePath)?
+            != parent
     {
         return Err(LocalCredentialError::InvalidDatabasePath);
     }
@@ -945,7 +986,7 @@ fn ensure_private_root(root: &Path) -> Result<(), LocalCredentialError> {
 
 #[cfg(unix)]
 fn validate_private_file(metadata: &fs::Metadata) -> Result<(), LocalCredentialError> {
-    let current_uid = rustix::process::getuid().as_raw();
+    let current_uid = rustix::process::geteuid().as_raw();
     if !metadata.file_type().is_file()
         || metadata.file_type().is_symlink()
         || metadata.uid() != current_uid
@@ -1746,5 +1787,7 @@ pub enum LocalCredentialError {
     ProtectedStore(#[from] ProtectedStoreError),
 }
 
+#[cfg(test)]
+mod rpc_tests;
 #[cfg(test)]
 mod tests;
