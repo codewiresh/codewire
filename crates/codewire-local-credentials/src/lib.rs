@@ -15,7 +15,7 @@ mod control;
 mod service;
 mod transport;
 
-pub use client::{AuthorityInfo, LocalCredentialClient};
+pub use client::{AuthorityInfo, LocalCredentialClient, LocalCredentialControlClient};
 pub use service::{serve_local_credential_authority, serve_os_local_credential_authority};
 pub use transport::{AuthorityRuntimeConfig, AuthorityRuntimeError};
 

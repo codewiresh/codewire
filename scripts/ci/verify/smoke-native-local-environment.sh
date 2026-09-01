@@ -699,7 +699,7 @@ for sqlite_sidecar in "$STATE_ROOT/supervisor.db-wal" "$STATE_ROOT/supervisor.db
   [[ ! -e "$sqlite_sidecar" || "$(stat -c '%a' "$sqlite_sidecar")" == 600 ]] ||
     die "native supervisor database sidecar is not mode 0600: $sqlite_sidecar"
 done
-[[ "$(native_database_value contract)" == '1129797197:5:wal:ok' ]] ||
+[[ "$(native_database_value contract)" == '1129797197:6:wal:ok' ]] ||
   die 'native supervisor database contract drifted'
 wait_for_journal_complete ||
   die "initial create returned before its lifecycle journal became terminal: $(native_database_value journal_summary)"
@@ -824,7 +824,7 @@ DAEMON_GUEST_SENTINEL='guest-output-must-not-enter-daemon-logs-1909'
 run_cw run --no-tty -- /bin/sh -lc "printf '%s\\n' '$DAEMON_GUEST_SENTINEL'"
 rg -qF "$DAEMON_GUEST_SENTINEL" "$LAST_STDOUT" || die 'guest diagnostic sentinel was not emitted'
 run_cw env --local daemon logs "$NAME"
-rg -q '^time_unix_ms=[0-9]+ operation=[0-9a-f-]{36} kind=create phase=completed checkpoint=7 stage=OPERATION_STAGE_[A-Z_]+ error=-$' "$LAST_STDOUT" ||
+rg -q '^time_unix_ms=[0-9]+ operation=[0-9a-f-]{36} kind=create phase=completed checkpoint=8 stage=OPERATION_STAGE_[A-Z_]+ error=-$' "$LAST_STDOUT" ||
   die 'native daemon logs did not expose the trusted create journal record'
 [[ "$(stat -c '%s' "$LAST_STDOUT")" -le 65536 ]] || die 'native daemon logs exceeded their public bound'
 if rg -qF "$DAEMON_GUEST_SENTINEL" "$LAST_STDOUT"; then

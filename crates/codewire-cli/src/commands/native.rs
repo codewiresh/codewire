@@ -28,6 +28,7 @@ pub(crate) async fn run_native_supervisor(args: NativeSupervisorArgs) -> anyhow:
         root: args.root,
         artifact_root: args.artifact_root,
         artifact_lock: args.artifact_lock,
+        credential_authority_root: args.credential_authority_root,
         executable,
     })
     .await
@@ -77,7 +78,16 @@ pub(crate) async fn create_native_environment(
     let requested_path = args.path.as_deref().unwrap_or_else(|| Path::new("."));
     let source_path = std::fs::canonicalize(requested_path)
         .with_context(|| format!("resolve native workspace {}", requested_path.display()))?;
-    let project = native_codewire_yaml(&source_path, args.file.as_deref())?;
+    let mut project = native_codewire_yaml(&source_path, args.file.as_deref())?;
+    if let Some(reference) = args.access_profile.as_deref() {
+        let reference = trimmed_str(reference)
+            .ok_or_else(|| anyhow::anyhow!("--access-profile cannot be empty"))?;
+        project.spec.access = Some(codewire_project::AccessBinding {
+            profile: reference
+                .parse()
+                .context("parse local access profile reference")?,
+        });
+    }
     let (request_source_path, implicit_path_mode) =
         native_workspace_request(&source_path, &project.spec, args.path_mode)?;
     let vcpus = match args.cpu.as_deref() {
@@ -91,6 +101,17 @@ pub(crate) async fn create_native_environment(
     let disk_bytes = match args.disk.as_deref() {
         Some(value) => parse_native_disk(value)?,
         None => project.disk_bytes.unwrap_or(DEFAULT_NATIVE_DISK_BYTES),
+    };
+    let access_selection = match project.spec.access.as_ref() {
+        Some(access) => {
+            let mut credentials = connect_local_credential_authority().await?;
+            let profile = credentials
+                .resolve_profile(&access.profile)
+                .await
+                .context("resolve local access profile")?;
+            Some((profile.profile.id.to_string(), profile.profile.revision))
+        }
+        None => None,
     };
     let (project_spec_json, project_spec_sha256) =
         canonical_native_project_intent(project.spec, vcpus, memory_mib, disk_bytes)?;
@@ -106,6 +127,13 @@ pub(crate) async fn create_native_environment(
             project_spec_json,
             project_spec_sha256,
             implicit_path_mode,
+            access_profile_id: access_selection
+                .as_ref()
+                .map(|selection| selection.0.clone())
+                .unwrap_or_default(),
+            access_profile_revision: access_selection
+                .map(|selection| selection.1)
+                .unwrap_or_default(),
         })
         .await
         .map_err(native_status)
@@ -209,11 +237,10 @@ pub(crate) async fn get_native_environment(name: &str) -> anyhow::Result<v1::Env
 }
 
 pub(crate) async fn start_native_environment(name: &str) -> anyhow::Result<v1::Environment> {
-    native_client()
-        .await?
-        .start(name)
-        .await
-        .map_err(native_status)
+    let mut client = native_client().await?;
+    let environment = client.get(name).await.map_err(native_status)?;
+    ensure_native_access_authority(&environment).await?;
+    client.start(name).await.map_err(native_status)
 }
 
 pub(crate) async fn stop_native_environment(name: &str) -> anyhow::Result<v1::Environment> {
@@ -230,8 +257,10 @@ pub(crate) async fn resize_native_environment(
     memory_mib: u32,
     disk_bytes: u64,
 ) -> anyhow::Result<v1::Environment> {
-    native_client()
-        .await?
+    let mut client = native_client().await?;
+    let environment = client.get(name).await.map_err(native_status)?;
+    ensure_native_access_authority(&environment).await?;
+    client
         .resize(name, vcpus, memory_mib, disk_bytes)
         .await
         .map_err(native_status)
@@ -240,11 +269,19 @@ pub(crate) async fn resize_native_environment(
 pub(crate) async fn delete_native_environment(
     name: &str,
 ) -> anyhow::Result<v1::DeleteEnvironmentResponse> {
-    native_client()
-        .await?
-        .delete(name)
-        .await
-        .map_err(native_status)
+    let mut client = native_client().await?;
+    let environment = client.get(name).await.map_err(native_status)?;
+    if !environment.access_profile.is_empty() {
+        let _ = connect_local_credential_authority().await;
+    }
+    client.delete(name).await.map_err(native_status)
+}
+
+async fn ensure_native_access_authority(environment: &v1::Environment) -> anyhow::Result<()> {
+    if !environment.access_profile.is_empty() {
+        drop(connect_local_credential_authority().await?);
+    }
+    Ok(())
 }
 
 pub(crate) async fn native_environment_session_client(
@@ -294,6 +331,8 @@ pub(crate) struct NativeEnvironmentView {
     pub(crate) workspace_plan: String,
     pub(crate) workspace_inputs: u32,
     pub(crate) working_directory: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub(crate) access_profile: String,
 }
 
 impl From<&v1::Environment> for NativeEnvironmentView {
@@ -310,13 +349,14 @@ impl From<&v1::Environment> for NativeEnvironmentView {
             workspace_plan: environment.workspace_plan_sha256.clone(),
             workspace_inputs: environment.workspace_input_count,
             working_directory: environment.working_directory.clone(),
+            access_profile: environment.access_profile.clone(),
         }
     }
 }
 
 fn format_native_environment(view: &NativeEnvironmentView) -> String {
     format!(
-        "Environment: {}\nBackend:     {}\nState:       {}\nCPU:         {}\nMemory:      {}\nDisk:        {}\nWorkspace:   {} input(s), plan {}\nWorking dir: {}\n",
+        "Environment: {}\nBackend:     {}\nState:       {}\nCPU:         {}\nMemory:      {}\nDisk:        {}\nWorkspace:   {} input(s), plan {}\nWorking dir: {}\nAccess:      {}\n",
         view.name,
         view.backend,
         view.state,
@@ -326,6 +366,11 @@ fn format_native_environment(view: &NativeEnvironmentView) -> String {
         view.workspace_inputs,
         view.workspace_plan,
         view.working_directory,
+        if view.access_profile.is_empty() {
+            "none"
+        } else {
+            &view.access_profile
+        },
     )
 }
 
@@ -382,6 +427,7 @@ fn native_runtime_config() -> anyhow::Result<NativeRuntimeConfig> {
         root,
         artifact_root,
         artifact_lock,
+        credential_authority_root: local_credential_root(&env)?,
         executable: canonical_current_executable()?,
     })
 }
@@ -510,9 +556,6 @@ fn native_unsupported_project_fields(
     }
     if !spec.secrets.is_empty() {
         unsupported.push("secrets");
-    }
-    if spec.access.is_some() {
-        unsupported.push("access");
     }
     if !document.local.mounts.is_empty() {
         unsupported.push("mounts");
@@ -739,6 +782,22 @@ mod tests {
         assert_eq!(resources.vcpus, Some(2));
         assert_eq!(resources.memory_mib, Some(16 * 1024));
         assert_eq!(resources.disk_bytes, Some(40 * 1024 * 1024 * 1024));
+    }
+
+    #[test]
+    fn native_yaml_preserves_the_logical_access_profile() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            temp.path().join("codewire.yaml"),
+            "version: 1\naccess: {profile: user/work}\n",
+        )
+        .unwrap();
+
+        let project = native_codewire_yaml(temp.path(), None).unwrap();
+        assert_eq!(
+            project.spec.access.as_ref().unwrap().profile.to_string(),
+            "user/work"
+        );
     }
 
     #[test]

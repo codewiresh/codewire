@@ -427,6 +427,48 @@
             "--backend, --path, --path-mode, --file, and --spec require `cw env create --local`"
         );
 
+        let cli = Cli::try_parse_from([
+            "cw",
+            "env",
+            "--local",
+            "create",
+            "--name",
+            "dev",
+            "--access-profile",
+            "user/work",
+        ])
+        .unwrap();
+        let Command::Env(EnvArgs {
+            command: EnvCommand::Create(args),
+            ..
+        }) = cli.command
+        else {
+            panic!("expected native local environment create");
+        };
+        assert_eq!(args.access_profile.as_deref(), Some("user/work"));
+        assert!(native_create_selected(&args).unwrap());
+
+        let cli = Cli::try_parse_from([
+            "cw",
+            "env",
+            "--platform",
+            "create",
+            "--access-profile",
+            "user/work",
+        ])
+        .unwrap();
+        let Command::Env(EnvArgs {
+            command: EnvCommand::Create(args),
+            ..
+        }) = cli.command
+        else {
+            panic!("expected platform environment create");
+        };
+        assert_eq!(
+            reject_local_create_options(&args).unwrap_err().to_string(),
+            "--access-profile is not yet available for platform environments"
+        );
+
         assert!(
             Cli::try_parse_from([
                 "cw",

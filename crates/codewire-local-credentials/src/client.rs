@@ -4,10 +4,10 @@ use std::process::Child;
 use std::time::Duration;
 
 use codewire_access::{
-    AccessProfile, AccessProfileId, AccessProfileName, AccessProfileReference, BrokerOperationId,
-    BrokerRouteId, CapabilitySlot, CredentialAuthKind, CredentialId, CredentialMetadata,
-    CredentialStatus, DerivedGrant, EnvironmentAccessBinding, EnvironmentId, GrantPermission,
-    Owner, OwnerId, Placement, ProviderId,
+    AccessProfile, AccessProfileId, AccessProfileName, AccessProfileReference, AccessProfileScope,
+    BrokerOperationId, BrokerRouteId, CapabilitySlot, CredentialAuthKind, CredentialId,
+    CredentialMetadata, CredentialStatus, DerivedGrant, EnvironmentAccessBinding, EnvironmentId,
+    GrantPermission, Owner, OwnerId, Placement, ProviderId,
 };
 use codewire_protected_store::{
     MAX_PROTECTED_VALUE_BYTES, ProtectedStorePersistence, ProtectedValue,
@@ -38,6 +38,26 @@ pub struct AuthorityInfo {
 pub struct LocalCredentialClient {
     inner: LocalCredentialAuthorityServiceClient<tonic::transport::Channel>,
     info: AuthorityInfo,
+}
+
+/// Material-free authority client for lifecycle supervisors.
+///
+/// This deliberately exposes only exact environment/profile binding controls.
+/// The VM supervisor cannot use this type to submit or retrieve provider
+/// material, mutate credentials, or edit access profiles.
+#[derive(Clone)]
+pub struct LocalCredentialControlClient {
+    inner: LocalCredentialAuthorityServiceClient<tonic::transport::Channel>,
+    info: AuthorityInfo,
+}
+
+impl std::fmt::Debug for LocalCredentialControlClient {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("LocalCredentialControlClient")
+            .field("info", &self.info)
+            .finish_non_exhaustive()
+    }
 }
 
 impl std::fmt::Debug for LocalCredentialClient {
@@ -436,6 +456,117 @@ impl LocalCredentialClient {
             .into_iter()
             .map(derived_grant_from_proto)
             .collect()
+    }
+}
+
+impl LocalCredentialControlClient {
+    pub async fn connect(config: &AuthorityRuntimeConfig) -> Result<Self, AuthorityRuntimeError> {
+        let client = LocalCredentialClient::connect(config).await?;
+        Ok(Self {
+            inner: client.inner,
+            info: client.info,
+        })
+    }
+
+    pub fn info(&self) -> AuthorityInfo {
+        self.info
+    }
+
+    pub async fn ensure_environment_access_binding(
+        &mut self,
+        binding: &EnvironmentAccessBinding,
+        reference: &AccessProfileReference,
+    ) -> Result<EnvironmentAccessBindingRecord, Status> {
+        if reference.scope() != AccessProfileScope::User {
+            return Err(Status::failed_precondition(
+                "local environment access profile is unavailable",
+            ));
+        }
+        let profile = profile_revision_from_proto(
+            self.inner
+                .get_access_profile_revision(v1::GetAccessProfileRevisionRequest {
+                    profile_id: binding.profile_id.to_string(),
+                    revision: binding.profile_revision,
+                })
+                .await?
+                .into_inner(),
+        )?;
+        if profile.profile.name != *reference.name() {
+            return Err(Status::failed_precondition(
+                "local environment access profile does not match",
+            ));
+        }
+        match self
+            .get_environment_access_binding(&binding.environment_id)
+            .await
+        {
+            Ok(record) if record.binding == *binding => return Ok(record),
+            Ok(_) => {
+                return Err(Status::failed_precondition(
+                    "local environment access binding does not match",
+                ));
+            }
+            Err(status) if status.code() == tonic::Code::NotFound => {}
+            Err(status) => return Err(status),
+        }
+
+        match self
+            .inner
+            .create_environment_access_binding(v1::CreateEnvironmentAccessBindingRequest {
+                environment_id: binding.environment_id.to_string(),
+                profile_id: binding.profile_id.to_string(),
+                profile_revision: binding.profile_revision,
+            })
+            .await
+        {
+            Ok(response) => environment_binding_from_proto(response.into_inner()),
+            Err(status) if status.code() == tonic::Code::AlreadyExists => {
+                let record = self
+                    .get_environment_access_binding(&binding.environment_id)
+                    .await?;
+                if record.binding == *binding {
+                    Ok(record)
+                } else {
+                    Err(Status::failed_precondition(
+                        "local environment access binding does not match",
+                    ))
+                }
+            }
+            Err(status) => Err(status),
+        }
+    }
+
+    pub async fn get_environment_access_binding(
+        &mut self,
+        environment_id: &EnvironmentId,
+    ) -> Result<EnvironmentAccessBindingRecord, Status> {
+        environment_binding_from_proto(
+            self.inner
+                .get_environment_access_binding(v1::EnvironmentAccessBindingSelector {
+                    environment_id: environment_id.to_string(),
+                })
+                .await?
+                .into_inner(),
+        )
+    }
+
+    pub async fn delete_environment_access_binding_if_present(
+        &mut self,
+        environment_id: &EnvironmentId,
+    ) -> Result<(), Status> {
+        let current = match self.get_environment_access_binding(environment_id).await {
+            Ok(current) => current,
+            Err(status) if status.code() == tonic::Code::NotFound => return Ok(()),
+            Err(status) => return Err(status),
+        };
+        self.inner
+            .delete_environment_access_binding(v1::DeleteEnvironmentAccessBindingRequest {
+                environment_id: environment_id.to_string(),
+                expected_profile_id: current.binding.profile_id.to_string(),
+                expected_profile_revision: current.binding.profile_revision,
+            })
+            .await?;
+        Ok(())
     }
 }
 

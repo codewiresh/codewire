@@ -12,6 +12,8 @@ use crate::supervisor_store::OperationKind;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum LifecycleEffect {
     RecordEnvironment,
+    BindEnvironmentAccess,
+    RequireEnvironmentAccess,
     ProvisionWorkspace,
     StageWorkspaceGeneration,
     RecordStarting,
@@ -29,6 +31,7 @@ pub(crate) enum LifecycleEffect {
     RecordWorkspaceTransition,
     PrepareDelete,
     MoveToTrash,
+    RevokeEnvironmentAccess,
     RemoveEnvironment,
     CleanupTrash,
     RecordObservation,
@@ -55,6 +58,8 @@ impl LifecycleEffect {
             | Self::RemoveEnvironment
             | Self::RecordObservation => EffectDurability::Transactional,
             Self::ProvisionWorkspace
+            | Self::BindEnvironmentAccess
+            | Self::RequireEnvironmentAccess
             | Self::EnsureRunner
             | Self::StartVm
             | Self::StopVm
@@ -63,6 +68,7 @@ impl LifecycleEffect {
             | Self::RestoreDesiredPower
             | Self::PrepareDelete
             | Self::MoveToTrash
+            | Self::RevokeEnvironmentAccess
             | Self::CleanupTrash => EffectDurability::ExternalIdempotent,
         }
     }
@@ -70,6 +76,7 @@ impl LifecycleEffect {
 
 const CREATE: &[LifecycleEffect] = &[
     LifecycleEffect::RecordEnvironment,
+    LifecycleEffect::BindEnvironmentAccess,
     LifecycleEffect::ProvisionWorkspace,
     LifecycleEffect::StageWorkspaceGeneration,
     LifecycleEffect::EnsureRunner,
@@ -77,6 +84,7 @@ const CREATE: &[LifecycleEffect] = &[
     LifecycleEffect::RecordRunning,
 ];
 const START: &[LifecycleEffect] = &[
+    LifecycleEffect::RequireEnvironmentAccess,
     LifecycleEffect::RecordStarting,
     LifecycleEffect::StageWorkspaceGeneration,
     LifecycleEffect::EnsureRunner,
@@ -85,6 +93,7 @@ const START: &[LifecycleEffect] = &[
 ];
 const STOP: &[LifecycleEffect] = &[LifecycleEffect::StopVm, LifecycleEffect::RecordStopped];
 const RESIZE: &[LifecycleEffect] = &[
+    LifecycleEffect::RequireEnvironmentAccess,
     LifecycleEffect::StopVm,
     LifecycleEffect::RecordStopped,
     LifecycleEffect::GrowDisk,
@@ -93,6 +102,7 @@ const RESIZE: &[LifecycleEffect] = &[
     LifecycleEffect::RecordResizeOutcome,
 ];
 const UPDATE_WORKSPACE: &[LifecycleEffect] = &[
+    LifecycleEffect::RequireEnvironmentAccess,
     LifecycleEffect::StageWorkspaceGeneration,
     LifecycleEffect::StopVm,
     LifecycleEffect::RecordStopped,
@@ -102,6 +112,7 @@ const UPDATE_WORKSPACE: &[LifecycleEffect] = &[
     LifecycleEffect::RecordWorkspaceTransition,
 ];
 const ROLLBACK_WORKSPACE: &[LifecycleEffect] = &[
+    LifecycleEffect::RequireEnvironmentAccess,
     LifecycleEffect::StageRollbackGeneration,
     LifecycleEffect::StopVm,
     LifecycleEffect::RecordStopped,
@@ -113,6 +124,7 @@ const ROLLBACK_WORKSPACE: &[LifecycleEffect] = &[
 const DELETE: &[LifecycleEffect] = &[
     LifecycleEffect::PrepareDelete,
     LifecycleEffect::MoveToTrash,
+    LifecycleEffect::RevokeEnvironmentAccess,
     LifecycleEffect::RemoveEnvironment,
     LifecycleEffect::CleanupTrash,
 ];

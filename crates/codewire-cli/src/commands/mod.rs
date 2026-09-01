@@ -206,6 +206,8 @@ pub(crate) struct NativeSupervisorArgs {
     pub(crate) artifact_root: PathBuf,
     #[arg(long)]
     pub(crate) artifact_lock: PathBuf,
+    #[arg(long)]
+    pub(crate) credential_authority_root: PathBuf,
 }
 
 #[cfg(target_os = "linux")]
@@ -819,6 +821,12 @@ pub(crate) struct EnvCreateArgs {
     env: Vec<String>,
     #[arg(long = "secrets", help = "Secret project to bind")]
     secret_project: Option<String>,
+    #[arg(
+        long,
+        value_name = "SCOPE/NAME",
+        help = "Local access profile, for example user/work"
+    )]
+    access_profile: Option<String>,
     #[arg(long, help = "Do not inject org-level secrets")]
     no_org_secrets: bool,
     #[arg(long, help = "Do not inject user-level secrets")]

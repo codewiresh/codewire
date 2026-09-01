@@ -44,9 +44,10 @@ mod linux {
         let args = Args::parse(std::env::args().skip(1))?;
         let client = NativePublicDataClient::connect_or_start(
             &NativeRuntimeConfig {
-                root: args.state_root,
+                root: args.state_root.clone(),
                 artifact_root: args.artifact_root,
                 artifact_lock: args.artifact_lock,
+                credential_authority_root: args.state_root.join("credential-authority"),
                 executable: args.cw_bin,
             },
             &args.target,

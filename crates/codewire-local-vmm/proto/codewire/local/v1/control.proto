@@ -92,6 +92,9 @@ enum OperationStage {
   OPERATION_STAGE_COMPLETED = 23;
   OPERATION_STAGE_FAILED = 24;
   OPERATION_STAGE_INTERRUPTED = 25;
+  OPERATION_STAGE_BIND_ENVIRONMENT_ACCESS = 26;
+  OPERATION_STAGE_REVOKE_ENVIRONMENT_ACCESS = 27;
+  OPERATION_STAGE_REQUIRE_ENVIRONMENT_ACCESS = 28;
 }
 
 message Operation {
@@ -152,6 +155,10 @@ message CreateEnvironmentRequest {
   // when the portable project declares repositories; otherwise exactly clone
   // or copy after CLI-side auto resolution.
   string implicit_path_mode = 9;
+  // Material-free exact revision resolved from project_spec_json.access.profile.
+  // Both fields are empty/zero when the project selects no credential access.
+  string access_profile_id = 10;
+  uint64 access_profile_revision = 11;
 }
 
 message EnvironmentSelector {
@@ -196,6 +203,9 @@ message Environment {
   uint32 workspace_input_count = 13;
   // Canonical session default from the recorded portable project intent.
   string working_directory = 14;
+  // Logical scope-qualified profile reference from the portable project.
+  // The exact ID/revision remains private supervisor/authority metadata.
+  string access_profile = 15;
 }
 
 message ListEnvironmentsRequest {}

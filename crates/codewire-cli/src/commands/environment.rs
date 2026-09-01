@@ -1817,6 +1817,9 @@ pub(crate) fn local_create_args_from_environment_args(
     {
         anyhow::bail!("the selected create option is only supported for --platform environments");
     }
+    if args.access_profile.is_some() {
+        anyhow::bail!("--access-profile requires the native local backend");
+    }
     let backend = args.backend.ok_or_else(|| {
         anyhow::anyhow!("legacy local creation requires --backend docker or --backend lima")
     })?;
@@ -1866,6 +1869,9 @@ pub(crate) fn reject_local_create_options(args: &EnvCreateArgs) -> anyhow::Resul
         anyhow::bail!(
             "--backend, --path, --path-mode, --file, and --spec require `cw env create --local`"
         );
+    }
+    if args.access_profile.is_some() {
+        anyhow::bail!("--access-profile is not yet available for platform environments");
     }
     Ok(())
 }

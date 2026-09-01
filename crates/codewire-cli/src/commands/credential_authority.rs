@@ -64,7 +64,7 @@ pub(crate) async fn connect_local_credential_authority() -> anyhow::Result<Local
         .context("connect to local credential authority")
 }
 
-fn local_credential_root(env: &impl Env) -> anyhow::Result<PathBuf> {
+pub(crate) fn local_credential_root(env: &impl Env) -> anyhow::Result<PathBuf> {
     if let Some(value) = env.var(LOCAL_CREDENTIAL_ROOT_ENV) {
         let root = PathBuf::from(value);
         if !root.is_absolute() {

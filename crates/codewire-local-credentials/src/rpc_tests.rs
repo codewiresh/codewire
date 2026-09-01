@@ -334,6 +334,33 @@ async fn owner_only_rpc_persists_exact_bindings_and_returns_material_free_grants
         client.list_environment_access_bindings().await.unwrap(),
         vec![created.clone()]
     );
+    let mut control = LocalCredentialControlClient::connect(&config)
+        .await
+        .unwrap();
+    assert_eq!(control.info(), client.info());
+    assert_eq!(
+        control
+            .ensure_environment_access_binding(
+                &binding,
+                &"user/bound".parse::<AccessProfileReference>().unwrap(),
+            )
+            .await
+            .unwrap(),
+        created
+    );
+    assert_eq!(
+        control
+            .ensure_environment_access_binding(
+                &binding,
+                &"organization/bound"
+                    .parse::<AccessProfileReference>()
+                    .unwrap(),
+            )
+            .await
+            .unwrap_err()
+            .code(),
+        Code::FailedPrecondition
+    );
     let grants = client
         .evaluate_environment_grants(&environment_id, 41)
         .await
@@ -349,6 +376,22 @@ async fn owner_only_rpc_persists_exact_bindings_and_returns_material_free_grants
         .update_profile(&profile.profile.id, profile.profile.revision, &entries)
         .await
         .unwrap();
+    let updated_binding = EnvironmentAccessBinding {
+        environment_id: environment_id.clone(),
+        profile_id: profile.profile.id.clone(),
+        profile_revision: updated.profile.revision,
+    };
+    assert_eq!(
+        control
+            .ensure_environment_access_binding(
+                &updated_binding,
+                &"user/bound".parse::<AccessProfileReference>().unwrap(),
+            )
+            .await
+            .unwrap_err()
+            .code(),
+        Code::FailedPrecondition
+    );
     let stale = client
         .replace_environment_access_binding(
             &environment_id,
@@ -383,6 +426,7 @@ async fn owner_only_rpc_persists_exact_bindings_and_returns_material_free_grants
     shutdown.send(()).unwrap();
     task.await.unwrap().unwrap();
     drop(client);
+    drop(control);
 
     let (shutdown, task) = start_server(config.clone(), TestProtectedStore::default()).await;
     let mut client = connect_when_ready(&config).await;
@@ -394,24 +438,15 @@ async fn owner_only_rpc_persists_exact_bindings_and_returns_material_free_grants
             .binding,
         replaced.binding
     );
-    assert_eq!(
-        client
-            .delete_environment_access_binding(
-                &environment_id,
-                &profile.profile.id,
-                profile.profile.revision,
-            )
-            .await
-            .unwrap_err()
-            .code(),
-        Code::FailedPrecondition
-    );
-    client
-        .delete_environment_access_binding(
-            &environment_id,
-            &profile.profile.id,
-            updated.profile.revision,
-        )
+    let mut control = LocalCredentialControlClient::connect(&config)
+        .await
+        .unwrap();
+    control
+        .delete_environment_access_binding_if_present(&environment_id)
+        .await
+        .unwrap();
+    control
+        .delete_environment_access_binding_if_present(&environment_id)
         .await
         .unwrap();
     client.delete_profile(&profile.profile.id).await.unwrap();
