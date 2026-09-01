@@ -10,6 +10,7 @@ description = "Placement-neutral Codewire egress broker admission core"
 [dependencies]
 async-trait = { workspace = true }
 codewire-egress-policy = { workspace = true }
+hickory-resolver = { workspace = true }
 hmac = { workspace = true }
 rustix = { workspace = true, features = ["net"] }
 sha2 = { workspace = true }
