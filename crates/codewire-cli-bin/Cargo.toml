@@ -14,3 +14,6 @@ path = "src/main.rs"
 [dependencies]
 codewire-cli = { path = "../codewire-cli" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+libc = "0.2"

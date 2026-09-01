@@ -47,6 +47,14 @@ pub(crate) async fn run_native_runner(args: NativeRunnerArgs) -> anyhow::Result<
     .context("run native environment runner")
 }
 
+pub(crate) async fn run_native_network_worker(args: NativeNetworkWorkerArgs) -> anyhow::Result<()> {
+    let environment_id = Uuid::parse_str(&args.environment_id)
+        .context("native network worker environment ID is invalid")?;
+    codewire_local_vmm::network_worker::run_inherited_worker(environment_id, args.generation)
+        .await
+        .context("run native environment network worker")
+}
+
 pub(crate) fn native_create_selected(args: &EnvCreateArgs) -> anyhow::Result<bool> {
     match args.backend.as_deref().map(str::trim) {
         None | Some("") | Some("native") | Some("cloud-hypervisor") => Ok(true),

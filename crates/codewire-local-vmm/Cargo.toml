@@ -25,6 +25,7 @@ codewire-proto = { workspace = true }
 codewire-project = { workspace = true }
 codewire-daemon = { workspace = true }
 codewire-daemon-bridge = { workspace = true }
+codewire-netstack = { workspace = true }
 codewire-vmm-guest-probe = { workspace = true }
 connectrpc = { workspace = true, features = ["axum", "client"] }
 futures = { workspace = true }

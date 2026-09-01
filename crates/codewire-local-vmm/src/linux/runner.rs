@@ -1,14 +1,21 @@
 use std::fmt;
 use std::io;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::os::unix::net::UnixStream as StdUnixStream;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
 use codewire_daemon::client::{SessionClient, v1 as daemon_v1};
-use codewire_vmm_guest_probe::{Seed, SetupBinding, guest::CONTAINER_INIT_PATH};
+use codewire_vmm_guest_probe::{
+    GUEST_NETWORK_VSOCK_PORT, GUEST_PROGRESS_VSOCK_PORT, GuestBootStage, NetworkKey,
+    PROGRESS_CHALLENGE_LEN, PROGRESS_FRAME_LEN, ProgressFrame, ProgressRequest, Seed, SetupBinding,
+    guest::CONTAINER_INIT_PATH,
+};
 use rand::{RngCore, rngs::OsRng};
 use rustix::process::Signal;
 use sha2::{Digest, Sha256};
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
@@ -16,6 +23,11 @@ use crate::artifact::{AdmittedArtifacts, ArtifactError, ArtifactLock};
 use crate::ch_api::{ChApiClient, ChApiError};
 use crate::cloud_hypervisor::{CloudHypervisorConfig, CloudHypervisorConfigError, CommandSpec};
 use crate::hybrid_vsock::{HybridVsockError, HybridVsockTarget};
+use crate::network_worker::{
+    NETWORK_BOOTSTRAP_FD, NetworkWorkerStartupFailure, NetworkWorkerStartupStatus,
+    WORKER_PREPARED_MESSAGE, WORKER_STATUS_MAX_BYTES, decode_worker_startup_status,
+    encode_worker_bootstrap, send_worker_network_descriptor,
+};
 
 use super::path::{FileIdentity, PathError, PrivateRoot, set_socket_private};
 use super::preflight::{PreflightError, PreflightReport, preflight};
@@ -30,6 +42,11 @@ const START_TIMEOUT: Duration = Duration::from_secs(10);
 const GUEST_POWEROFF_TIMEOUT: Duration = Duration::from_secs(10);
 const GRACEFUL_STOP_TIMEOUT: Duration = Duration::from_secs(5);
 const SIGNAL_STOP_TIMEOUT: Duration = Duration::from_secs(2);
+const NETWORK_WORKER_RETRY_DELAY: Duration = Duration::from_millis(50);
+const NETWORK_WORKER_READY_TIMEOUT: Duration = Duration::from_secs(5);
+const NETWORK_WORKER_ATTACH_TIMEOUT: Duration = Duration::from_secs(10);
+const NETWORK_WORKER_PROGRESS_FRAME_LIMIT: usize = 64;
+const NETWORK_WORKER_HANDSHAKE_ATTEMPT_LIMIT: usize = 8;
 const E2FSCK: &str = "/usr/bin/e2fsck";
 const RESIZE2FS: &str = "/usr/bin/resize2fs";
 
@@ -288,6 +305,7 @@ impl CloudHypervisorRunner {
             process,
             api,
             hybrid,
+            network_worker: None,
             _lock: prepared.lock,
         })
     }
@@ -636,6 +654,7 @@ pub struct RunningVm {
     process: LiveProcess,
     api: ChApiClient,
     hybrid: HybridVsockTarget,
+    network_worker: Option<NetworkWorkerProcess>,
     _lock: VmLock,
 }
 
@@ -716,6 +735,170 @@ impl RunningVm {
         (&self.hybrid, self.token.as_str())
     }
 
+    /// Wait for an authenticated, allowlisted terminal guest boot stage. The
+    /// generation token and progress transport remain private to the runner
+    /// and are never exposed to diagnostics.
+    pub async fn authenticated_guest_terminal_stage(
+        &self,
+        timeout: Duration,
+    ) -> Result<GuestBootStage, RunnerError> {
+        if timeout.is_zero() {
+            return Err(RunnerError::NetworkWorkerStartTimeout);
+        }
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            match wait_for_network_progress_attempt(
+                &self.hybrid,
+                self.token.as_str(),
+                self.request.vm_id,
+                self.request.generation,
+                deadline,
+                NetworkProgressGoal::Terminal,
+            )
+            .await
+            {
+                Ok(stage) => return Ok(stage),
+                Err(NetworkProgressAttemptError::Retry)
+                    if tokio::time::Instant::now() < deadline =>
+                {
+                    tokio::time::sleep(NETWORK_WORKER_RETRY_DELAY).await;
+                }
+                Err(NetworkProgressAttemptError::Retry | NetworkProgressAttemptError::Timeout) => {
+                    return Err(RunnerError::NetworkWorkerStartTimeout);
+                }
+                Err(NetworkProgressAttemptError::Rejected) => {
+                    return Err(RunnerError::NetworkWorkerBootstrap);
+                }
+            }
+        }
+    }
+
+    /// Attach the isolated deny-by-default host network worker for this boot.
+    /// The worker receives one already-connected hybrid-vsock descriptor and
+    /// a derived key; it never receives the guest daemon token.
+    pub async fn start_network_worker(
+        &mut self,
+        executable: &Path,
+        timeout: Duration,
+    ) -> Result<(), RunnerError> {
+        if self.network_worker.is_some()
+            || timeout.is_zero()
+            || !executable.is_absolute()
+            || std::fs::canonicalize(executable).ok().as_deref() != Some(executable)
+            || !std::fs::metadata(executable).is_ok_and(|metadata| metadata.is_file())
+        {
+            return Err(RunnerError::InvalidNetworkWorker);
+        }
+        let readiness_deadline = tokio::time::Instant::now() + timeout;
+        self.wait_for_network_guest_readiness(readiness_deadline)
+            .await?;
+        // Guest boot readiness and worker attachment are distinct bounded
+        // phases. A slow but valid boot must not consume the worker's entire
+        // handshake window, while setup boots must not turn attachment into a
+        // multi-minute wait merely because their provisioning window is long.
+        let deadline = tokio::time::Instant::now() + network_worker_attach_timeout(timeout);
+        let mut handshake_attempts = 0_usize;
+        let mut last_handshake_failure = None;
+        loop {
+            if self
+                .child
+                .try_wait()
+                .map_err(|_| RunnerError::Wait)?
+                .is_some()
+            {
+                return Err(last_handshake_failure.map_or(
+                    RunnerError::ExitedDuringStart,
+                    RunnerError::NetworkWorkerStartup,
+                ));
+            }
+            let key = NetworkKey::derive(
+                self.token.as_str(),
+                self.request.vm_id,
+                self.request.generation,
+            )
+            .map_err(|_| RunnerError::InvalidNetworkWorker)?;
+            match spawn_network_worker_process(
+                executable,
+                &self.paths.vm_dir,
+                &self.hybrid,
+                key,
+                self.request.vm_id,
+                self.request.generation,
+                deadline,
+            )
+            .await
+            {
+                Ok(worker) => {
+                    self.network_worker = Some(worker);
+                    return Ok(());
+                }
+                Err(RunnerError::NetworkWorkerStartup(
+                    failure @ (NetworkWorkerStartupFailure::HelloWriteIo
+                    | NetworkWorkerStartupFailure::HelloWriteTimeout
+                    | NetworkWorkerStartupFailure::AcknowledgementReadIo
+                    | NetworkWorkerStartupFailure::AcknowledgementReadTimeout),
+                )) => {
+                    handshake_attempts += 1;
+                    last_handshake_failure = Some(failure);
+                    if handshake_attempts >= NETWORK_WORKER_HANDSHAKE_ATTEMPT_LIMIT {
+                        return Err(RunnerError::NetworkWorkerStartup(failure));
+                    }
+                    if tokio::time::Instant::now() >= deadline {
+                        return Err(RunnerError::NetworkWorkerStartTimeout);
+                    }
+                    tokio::time::sleep(NETWORK_WORKER_RETRY_DELAY).await;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    async fn wait_for_network_guest_readiness(
+        &mut self,
+        deadline: tokio::time::Instant,
+    ) -> Result<(), RunnerError> {
+        loop {
+            if self
+                .child
+                .try_wait()
+                .map_err(|_| RunnerError::Wait)?
+                .is_some()
+            {
+                return Err(RunnerError::ExitedDuringStart);
+            }
+            match wait_for_network_progress_attempt(
+                &self.hybrid,
+                self.token.as_str(),
+                self.request.vm_id,
+                self.request.generation,
+                deadline,
+                NetworkProgressGoal::NetworkReady,
+            )
+            .await
+            {
+                Ok(stage) if !stage.is_failure() => return Ok(()),
+                Ok(_) => return Err(RunnerError::NetworkWorkerBootstrap),
+                Err(NetworkProgressAttemptError::Retry)
+                    if tokio::time::Instant::now() < deadline =>
+                {
+                    tokio::time::sleep(NETWORK_WORKER_RETRY_DELAY).await;
+                }
+                Err(NetworkProgressAttemptError::Retry | NetworkProgressAttemptError::Timeout) => {
+                    return Err(RunnerError::NetworkWorkerStartTimeout);
+                }
+                Err(NetworkProgressAttemptError::Rejected) => {
+                    return Err(RunnerError::NetworkWorkerBootstrap);
+                }
+            }
+        }
+    }
+
+    pub fn network_worker_process_identity(&self) -> Option<&super::process::ProcessIdentity> {
+        self.network_worker
+            .as_ref()
+            .map(|worker| worker.process.identity())
+    }
+
     /// Unlink one-boot setup inputs after Cloud Hypervisor and the ready guest
     /// daemon both hold their admitted device handles. The token remains only
     /// in runner/guest memory and cannot be recovered from persistent state;
@@ -725,24 +908,48 @@ impl RunningVm {
     }
 
     pub fn try_exit(&mut self) -> Result<ExitClass, RunnerError> {
-        match self.child.try_wait() {
+        let vmm = match self.child.try_wait() {
             Ok(Some(status)) if status.success() => Ok(ExitClass::GuestShutdown),
             Ok(Some(status)) => Ok(ExitClass::VmmFailure(status.code())),
             Ok(None) => Ok(ExitClass::StillRunning),
             Err(_) => Err(RunnerError::Wait),
+        }?;
+        if vmm != ExitClass::StillRunning {
+            return Ok(vmm);
+        }
+        match self.network_worker.as_mut() {
+            Some(worker) => match worker.child.try_wait() {
+                Ok(Some(status)) => Ok(ExitClass::NetworkWorkerFailure(status.code())),
+                Ok(None) => Ok(ExitClass::StillRunning),
+                Err(_) => Err(RunnerError::NetworkWorkerWait),
+            },
+            None => Ok(ExitClass::StillRunning),
         }
     }
 
     pub async fn wait_for_exit(&mut self, timeout: Duration) -> Result<ExitClass, RunnerError> {
-        match tokio::time::timeout(timeout, self.child.wait()).await {
+        let exit = match tokio::time::timeout(timeout, self.child.wait()).await {
             Ok(Ok(status)) if status.success() => Ok(ExitClass::GuestShutdown),
             Ok(Ok(status)) => Ok(ExitClass::VmmFailure(status.code())),
             Ok(Err(_)) => Err(RunnerError::Wait),
             Err(_) => Ok(ExitClass::StillRunning),
+        }?;
+        if exit != ExitClass::StillRunning {
+            self.stop_network_worker().await?;
         }
+        Ok(exit)
     }
 
     pub async fn stop(&mut self) -> Result<ExitClass, RunnerError> {
+        let vmm = self.stop_vmm().await;
+        let worker = self.stop_network_worker().await;
+        match (vmm, worker) {
+            (Ok(exit), Ok(())) => Ok(exit),
+            (Err(error), _) | (_, Err(error)) => Err(error),
+        }
+    }
+
+    async fn stop_vmm(&mut self) -> Result<ExitClass, RunnerError> {
         // Ask trusted guest init to stop the daemon, sync the persistent state
         // filesystem, and power off. Keep the transient response stream alive
         // until the VMM exits so transport cancellation cannot kill the
@@ -764,6 +971,41 @@ impl RunningVm {
         kill_and_reap(&self.process, &mut self.child).await
     }
 
+    async fn stop_network_worker(&mut self) -> Result<(), RunnerError> {
+        let Some(mut worker) = self.network_worker.take() else {
+            return Ok(());
+        };
+        if worker
+            .child
+            .try_wait()
+            .map_err(|_| RunnerError::NetworkWorkerWait)?
+            .is_some()
+        {
+            return Ok(());
+        }
+        if worker.process.wait_exited(SIGNAL_STOP_TIMEOUT).await? {
+            worker
+                .child
+                .wait()
+                .await
+                .map_err(|_| RunnerError::NetworkWorkerWait)?;
+            return Ok(());
+        }
+        if !signal_or_observe_exit(&worker.process, Signal::TERM)?
+            && !worker.process.wait_exited(SIGNAL_STOP_TIMEOUT).await?
+            && !signal_or_observe_exit(&worker.process, Signal::KILL)?
+            && !worker.process.wait_exited(SIGNAL_STOP_TIMEOUT).await?
+        {
+            return Err(RunnerError::NetworkWorkerKillTimeout);
+        }
+        worker
+            .child
+            .wait()
+            .await
+            .map_err(|_| RunnerError::NetworkWorkerWait)?;
+        Ok(())
+    }
+
     async fn request_guest_poweroff(
         &self,
     ) -> Result<tonic::Streaming<daemon_v1::ExecMessage>, RunnerError> {
@@ -779,12 +1021,495 @@ impl RunningVm {
     }
 
     pub async fn force_kill_for_test(&mut self) -> Result<ExitClass, RunnerError> {
-        kill_and_reap(&self.process, &mut self.child).await
+        let exit = kill_and_reap(&self.process, &mut self.child).await;
+        let worker = self.stop_network_worker().await;
+        match (exit, worker) {
+            (Ok(exit), Ok(())) => Ok(exit),
+            (Err(error), _) | (_, Err(error)) => Err(error),
+        }
     }
 
     async fn wait_reaped(&mut self) -> Result<ExitClass, RunnerError> {
         wait_reaped_child(&mut self.child).await
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NetworkProgressAttemptError {
+    Retry,
+    Timeout,
+    Rejected,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NetworkProgressGoal {
+    NetworkReady,
+    Terminal,
+}
+
+async fn wait_for_network_progress_attempt(
+    hybrid: &HybridVsockTarget,
+    token: &str,
+    vm_id: Uuid,
+    generation: u64,
+    deadline: tokio::time::Instant,
+    goal: NetworkProgressGoal,
+) -> Result<GuestBootStage, NetworkProgressAttemptError> {
+    let connected = tokio::time::timeout_at(
+        deadline,
+        hybrid.connect_guest_port(GUEST_PROGRESS_VSOCK_PORT),
+    )
+    .await
+    .map_err(|_| NetworkProgressAttemptError::Timeout)?;
+    let mut stream = match connected {
+        Ok(stream) => stream,
+        Err(
+            HybridVsockError::InvalidSocketPath
+            | HybridVsockError::InvalidGuestPort
+            | HybridVsockError::SocketIdentity(_),
+        ) => return Err(NetworkProgressAttemptError::Rejected),
+        Err(_) => return Err(NetworkProgressAttemptError::Retry),
+    };
+
+    let mut challenge = [0_u8; PROGRESS_CHALLENGE_LEN];
+    while challenge.iter().all(|byte| *byte == 0) {
+        OsRng.fill_bytes(&mut challenge);
+    }
+    let request = ProgressRequest {
+        vm_id,
+        generation,
+        challenge,
+    };
+    match tokio::time::timeout_at(deadline, async {
+        stream.write_all(&request.encode()).await?;
+        stream.flush().await
+    })
+    .await
+    {
+        Err(_) => return Err(NetworkProgressAttemptError::Timeout),
+        Ok(Err(_)) => return Err(NetworkProgressAttemptError::Retry),
+        Ok(Ok(())) => {}
+    }
+
+    let mut sequence = 0_u64;
+    let mut stage = None;
+    for _ in 0..NETWORK_WORKER_PROGRESS_FRAME_LIMIT {
+        let mut bytes = [0_u8; PROGRESS_FRAME_LEN];
+        match tokio::time::timeout_at(deadline, stream.read_exact(&mut bytes)).await {
+            Err(_) => return Err(NetworkProgressAttemptError::Timeout),
+            Ok(Err(_)) => return Err(NetworkProgressAttemptError::Retry),
+            Ok(Ok(_)) => {}
+        }
+        let frame = ProgressFrame::decode(&bytes, &challenge, token, vm_id, generation)
+            .map_err(|_| NetworkProgressAttemptError::Rejected)?;
+        if frame.sequence <= sequence || stage.is_some_and(|previous| frame.stage < previous) {
+            return Err(NetworkProgressAttemptError::Rejected);
+        }
+        sequence = frame.sequence;
+        stage = Some(frame.stage);
+        if frame.stage.is_failure()
+            || match goal {
+                NetworkProgressGoal::NetworkReady => {
+                    frame.stage >= GuestBootStage::RootGenerationReady
+                }
+                NetworkProgressGoal::Terminal => frame.stage.is_terminal(),
+            }
+        {
+            return Ok(frame.stage);
+        }
+    }
+    Err(NetworkProgressAttemptError::Rejected)
+}
+
+fn network_worker_attach_timeout(requested: Duration) -> Duration {
+    std::cmp::min(requested, NETWORK_WORKER_ATTACH_TIMEOUT)
+}
+
+struct NetworkWorkerProcess {
+    child: tokio::process::Child,
+    process: LiveProcess,
+}
+
+struct NetworkWorkerStartup {
+    child: Option<tokio::process::Child>,
+    process: Option<LiveProcess>,
+}
+
+impl NetworkWorkerStartup {
+    fn new(child: tokio::process::Child) -> Self {
+        Self {
+            child: Some(child),
+            process: None,
+        }
+    }
+
+    fn child_mut(&mut self) -> &mut tokio::process::Child {
+        self.child
+            .as_mut()
+            .expect("armed network worker startup owns its child")
+    }
+
+    fn admit(&mut self, process: LiveProcess) {
+        self.process = Some(process);
+    }
+
+    fn disarm(mut self) -> NetworkWorkerProcess {
+        NetworkWorkerProcess {
+            child: self
+                .child
+                .take()
+                .expect("admitted network worker owns its child"),
+            process: self
+                .process
+                .take()
+                .expect("admitted network worker owns its process identity"),
+        }
+    }
+}
+
+impl Drop for NetworkWorkerStartup {
+    fn drop(&mut self) {
+        if let Some(process) = &self.process {
+            let _ = process.signal(Signal::KILL);
+        }
+        if let Some(child) = self.child.as_mut() {
+            let _ = child.start_kill();
+        }
+    }
+}
+
+async fn reap_failed_network_worker_startup(
+    startup: &mut NetworkWorkerStartup,
+) -> Result<(), RunnerError> {
+    if startup
+        .child_mut()
+        .try_wait()
+        .map_err(|_| RunnerError::NetworkWorkerWait)?
+        .is_some()
+    {
+        return Ok(());
+    }
+    let _ = startup.child_mut().start_kill();
+    tokio::time::timeout(SIGNAL_STOP_TIMEOUT, startup.child_mut().wait())
+        .await
+        .map_err(|_| RunnerError::NetworkWorkerKillTimeout)?
+        .map_err(|_| RunnerError::NetworkWorkerWait)?;
+    Ok(())
+}
+
+async fn spawn_network_worker_process(
+    executable: &Path,
+    working_directory: &Path,
+    hybrid: &HybridVsockTarget,
+    key: NetworkKey,
+    vm_id: Uuid,
+    generation: u64,
+    deadline: tokio::time::Instant,
+) -> Result<NetworkWorkerProcess, RunnerError> {
+    PrivateRoot::open(working_directory)?;
+    let (bootstrap_parent, bootstrap_child) =
+        StdUnixStream::pair().map_err(|_| RunnerError::NetworkWorkerSpawn)?;
+    bootstrap_parent
+        .set_nonblocking(true)
+        .map_err(|_| RunnerError::NetworkWorkerSpawn)?;
+    let mut bootstrap = tokio::net::UnixStream::from_std(bootstrap_parent)
+        .map_err(|_| RunnerError::NetworkWorkerSpawn)?;
+    let bytes = encode_worker_bootstrap(vm_id, generation, &key)
+        .map_err(|_| RunnerError::NetworkWorkerBootstrap)?;
+    let inherited_bootstrap = duplicate_inherited_descriptor(bootstrap_child.as_raw_fd())?;
+    let bootstrap_fd = inherited_bootstrap.as_raw_fd();
+    let expected_parent = unsafe { libc::getpid() };
+    let mut command = tokio::process::Command::new(executable);
+    command
+        .arg("__native-network-worker")
+        .arg("--environment-id")
+        .arg(vm_id.to_string())
+        .arg("--generation")
+        .arg(generation.to_string())
+        .env_clear()
+        .current_dir(working_directory)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    unsafe {
+        command.pre_exec(move || prepare_network_worker_child(expected_parent, bootstrap_fd));
+    }
+    let child = command
+        .spawn()
+        .map_err(|_| RunnerError::NetworkWorkerSpawn)?;
+    drop(inherited_bootstrap);
+    drop(bootstrap_child);
+    let mut startup = NetworkWorkerStartup::new(child);
+    let Some(pid) = startup.child_mut().id() else {
+        reap_failed_network_worker_startup(&mut startup).await?;
+        return Err(RunnerError::NetworkWorkerSpawn);
+    };
+
+    let bootstrap_write = tokio::time::timeout_at(deadline, async {
+        bootstrap.write_all(bytes.as_ref()).await?;
+        bootstrap.flush().await
+    })
+    .await;
+    match bootstrap_write {
+        Ok(Ok(())) => {}
+        Err(_) => {
+            reap_failed_network_worker_startup(&mut startup).await?;
+            return Err(RunnerError::NetworkWorkerStartTimeout);
+        }
+        Ok(Err(_)) => {
+            reap_failed_network_worker_startup(&mut startup).await?;
+            return Err(RunnerError::NetworkWorkerBootstrap);
+        }
+    }
+
+    let prepared_deadline = std::cmp::min(
+        deadline,
+        tokio::time::Instant::now() + NETWORK_WORKER_READY_TIMEOUT,
+    );
+    let prepared = match read_worker_status_frame(&mut bootstrap, prepared_deadline).await {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            let error = classify_network_worker_startup_error(&mut startup, error).await?;
+            return Err(error);
+        }
+    };
+    if prepared.as_slice() != WORKER_PREPARED_MESSAGE {
+        if let Some(NetworkWorkerStartupStatus::Failed(failure)) =
+            decode_worker_startup_status(&prepared)
+        {
+            reap_failed_network_worker_startup(&mut startup).await?;
+            return Err(RunnerError::NetworkWorkerStartup(failure));
+        }
+        reap_failed_network_worker_startup(&mut startup).await?;
+        return Err(RunnerError::NetworkWorkerBootstrap);
+    }
+
+    let process = match LiveProcess::capture_child(pid, executable) {
+        Ok(process) => process,
+        Err(error) => {
+            reap_failed_network_worker_startup(&mut startup).await?;
+            return Err(error.into());
+        }
+    };
+    startup.admit(process);
+
+    let network = loop {
+        match startup.child_mut().try_wait() {
+            Ok(Some(status)) => return Err(network_worker_exit_error(status)),
+            Ok(None) => {}
+            Err(_) => {
+                reap_failed_network_worker_startup(&mut startup).await?;
+                return Err(RunnerError::NetworkWorkerWait);
+            }
+        }
+        let connection = tokio::time::timeout_at(
+            deadline,
+            hybrid.connect_guest_port(GUEST_NETWORK_VSOCK_PORT),
+        )
+        .await;
+        match connection {
+            Ok(Ok(network)) => break network,
+            Ok(Err(
+                HybridVsockError::InvalidSocketPath
+                | HybridVsockError::InvalidGuestPort
+                | HybridVsockError::SocketIdentity(_),
+            )) => {
+                reap_failed_network_worker_startup(&mut startup).await?;
+                return Err(RunnerError::NetworkWorkerBootstrap);
+            }
+            Ok(Err(_)) if tokio::time::Instant::now() < deadline => {
+                tokio::time::sleep(NETWORK_WORKER_RETRY_DELAY).await;
+            }
+            Ok(Err(_)) | Err(_) => {
+                reap_failed_network_worker_startup(&mut startup).await?;
+                return Err(RunnerError::NetworkWorkerStartTimeout);
+            }
+        }
+    };
+    let network = match network.into_std() {
+        Ok(network) => network,
+        Err(_) => {
+            reap_failed_network_worker_startup(&mut startup).await?;
+            return Err(RunnerError::NetworkWorkerBootstrap);
+        }
+    };
+    let descriptor_transfer = tokio::time::timeout_at(deadline, async {
+        loop {
+            bootstrap.writable().await?;
+            match send_worker_network_descriptor(bootstrap.as_raw_fd(), network.as_raw_fd()) {
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => continue,
+                result => return result,
+            }
+        }
+    })
+    .await;
+    drop(network);
+    match descriptor_transfer {
+        Ok(Ok(())) => {}
+        Err(_) => {
+            reap_failed_network_worker_startup(&mut startup).await?;
+            return Err(RunnerError::NetworkWorkerStartTimeout);
+        }
+        Ok(Err(_)) => {
+            reap_failed_network_worker_startup(&mut startup).await?;
+            return Err(RunnerError::NetworkWorkerBootstrap);
+        }
+    }
+
+    let status = match read_worker_status_frame(&mut bootstrap, deadline).await {
+        Ok(status) => status,
+        Err(error) => {
+            let error = classify_network_worker_startup_error(&mut startup, error).await?;
+            return Err(error);
+        }
+    };
+    match decode_worker_startup_status(&status) {
+        Some(NetworkWorkerStartupStatus::Ready) => {}
+        Some(NetworkWorkerStartupStatus::Failed(failure)) => {
+            reap_failed_network_worker_startup(&mut startup).await?;
+            return Err(RunnerError::NetworkWorkerStartup(failure));
+        }
+        None => {
+            reap_failed_network_worker_startup(&mut startup).await?;
+            return Err(RunnerError::NetworkWorkerBootstrap);
+        }
+    }
+    Ok(startup.disarm())
+}
+
+async fn read_worker_status_frame(
+    stream: &mut tokio::net::UnixStream,
+    deadline: tokio::time::Instant,
+) -> Result<Vec<u8>, RunnerError> {
+    let mut frame = Vec::with_capacity(WORKER_STATUS_MAX_BYTES);
+    loop {
+        if frame.len() == WORKER_STATUS_MAX_BYTES {
+            return Err(RunnerError::NetworkWorkerBootstrap);
+        }
+        let mut byte = [0_u8; 1];
+        let read = tokio::time::timeout_at(deadline, stream.read(&mut byte))
+            .await
+            .map_err(|_| RunnerError::NetworkWorkerStartTimeout)?
+            .map_err(|_| RunnerError::NetworkWorkerBootstrap)?;
+        if read == 0 {
+            return Err(RunnerError::NetworkWorkerBootstrap);
+        }
+        frame.push(byte[0]);
+        if byte[0] == b'\n' {
+            return Ok(frame);
+        }
+        if byte[0] == b'\r' || !byte[0].is_ascii() {
+            return Err(RunnerError::NetworkWorkerBootstrap);
+        }
+    }
+}
+
+async fn classify_network_worker_startup_error(
+    startup: &mut NetworkWorkerStartup,
+    fallback: RunnerError,
+) -> Result<RunnerError, RunnerError> {
+    let exit_deadline = tokio::time::Instant::now() + Duration::from_millis(100);
+    loop {
+        match startup.child_mut().try_wait() {
+            Ok(Some(status)) => return Ok(network_worker_exit_error(status)),
+            Ok(None) => {}
+            Err(_) => return Err(RunnerError::NetworkWorkerWait),
+        }
+        if tokio::time::Instant::now() >= exit_deadline {
+            reap_failed_network_worker_startup(startup).await?;
+            return Ok(fallback);
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
+fn network_worker_exit_error(status: std::process::ExitStatus) -> RunnerError {
+    status
+        .code()
+        .and_then(NetworkWorkerStartupFailure::from_exit_code)
+        .map_or(
+            RunnerError::NetworkWorkerBootstrap,
+            RunnerError::NetworkWorkerStartup,
+        )
+}
+
+fn duplicate_inherited_descriptor(descriptor: i32) -> Result<OwnedFd, RunnerError> {
+    let duplicated = unsafe { libc::fcntl(descriptor, libc::F_DUPFD_CLOEXEC, 10) };
+    if duplicated == -1 {
+        return Err(RunnerError::NetworkWorkerSpawn);
+    }
+    Ok(unsafe { OwnedFd::from_raw_fd(duplicated) })
+}
+
+fn prepare_network_worker_child(
+    expected_parent: libc::pid_t,
+    bootstrap_fd: RawFd,
+) -> io::Result<()> {
+    if unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) } == -1
+        || unsafe { libc::getppid() } != expected_parent
+    {
+        return Err(io::Error::last_os_error());
+    }
+    if unsafe {
+        libc::syscall(
+            libc::SYS_close_range,
+            3_u32,
+            u32::MAX,
+            libc::CLOSE_RANGE_CLOEXEC,
+        )
+    } != 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    if bootstrap_fd != NETWORK_BOOTSTRAP_FD
+        && unsafe { libc::dup2(bootstrap_fd, NETWORK_BOOTSTRAP_FD) } == -1
+    {
+        return Err(io::Error::last_os_error());
+    }
+    if unsafe { libc::fcntl(NETWORK_BOOTSTRAP_FD, libc::F_SETFD, 0) } == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    clear_network_worker_capabilities()?;
+    if unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0) } == -1
+        || unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) } == -1
+    {
+        return Err(io::Error::last_os_error());
+    }
+    unsafe {
+        libc::umask(0o077);
+    }
+    Ok(())
+}
+
+#[repr(C)]
+struct WorkerCapabilityHeader {
+    version: u32,
+    pid: i32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct WorkerCapabilityData {
+    effective: u32,
+    permitted: u32,
+    inheritable: u32,
+}
+
+fn clear_network_worker_capabilities() -> io::Result<()> {
+    let header = WorkerCapabilityHeader {
+        version: 0x2008_0522,
+        pid: 0,
+    };
+    let empty = WorkerCapabilityData {
+        effective: 0,
+        permitted: 0,
+        inheritable: 0,
+    };
+    let data = [empty; 2];
+    if unsafe { libc::syscall(libc::SYS_capset, &raw const header, data.as_ptr()) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 fn guest_poweroff_command() -> Vec<String> {
@@ -796,6 +1521,7 @@ pub enum ExitClass {
     StillRunning,
     GuestShutdown,
     VmmFailure(Option<i32>),
+    NetworkWorkerFailure(Option<i32>),
 }
 
 async fn kill_and_reap(
@@ -1308,6 +2034,20 @@ pub enum RunnerError {
     ExitedDuringStart,
     #[error("Cloud Hypervisor startup timed out")]
     StartTimeout,
+    #[error("network worker executable or lifecycle state is invalid")]
+    InvalidNetworkWorker,
+    #[error("network worker process spawn failed")]
+    NetworkWorkerSpawn,
+    #[error("network worker did not attach before the guest startup deadline")]
+    NetworkWorkerStartTimeout,
+    #[error("network worker private bootstrap failed")]
+    NetworkWorkerBootstrap,
+    #[error("network worker startup failed: {0:?}")]
+    NetworkWorkerStartup(NetworkWorkerStartupFailure),
+    #[error("wait for network worker failed")]
+    NetworkWorkerWait,
+    #[error("network worker did not exit after pidfd SIGKILL")]
+    NetworkWorkerKillTimeout,
     #[error("wait for Cloud Hypervisor failed")]
     Wait,
     #[error("Cloud Hypervisor did not exit after pidfd SIGKILL")]
@@ -1436,6 +2176,176 @@ mod tests {
         wait_for_exec(pid, &executable).await;
         let process = LiveProcess::capture_child(pid, &executable).unwrap();
         (child, process)
+    }
+
+    async fn serve_progress_fixture(
+        listener: tokio::net::UnixListener,
+        token: &'static str,
+        vm_id: Uuid,
+        generation: u64,
+        stages: Vec<GuestBootStage>,
+    ) {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut connect = Vec::new();
+        loop {
+            let mut byte = [0_u8; 1];
+            stream.read_exact(&mut byte).await.unwrap();
+            connect.push(byte[0]);
+            if byte[0] == b'\n' {
+                break;
+            }
+        }
+        assert_eq!(
+            connect,
+            format!("CONNECT {GUEST_PROGRESS_VSOCK_PORT}\n").as_bytes()
+        );
+        stream
+            .write_all(format!("OK {GUEST_PROGRESS_VSOCK_PORT}\n").as_bytes())
+            .await
+            .unwrap();
+        let mut request = [0_u8; codewire_vmm_guest_probe::PROGRESS_REQUEST_LEN];
+        stream.read_exact(&mut request).await.unwrap();
+        let request = ProgressRequest::decode(&request).unwrap();
+        assert_eq!(request.vm_id, vm_id);
+        assert_eq!(request.generation, generation);
+        for (index, stage) in stages.into_iter().enumerate() {
+            let frame = ProgressFrame {
+                vm_id,
+                generation,
+                sequence: index as u64 + 1,
+                stage,
+            }
+            .encode(&request.challenge, token)
+            .unwrap();
+            stream.write_all(&frame).await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn network_worker_waits_for_authenticated_guest_network_readiness() {
+        const TOKEN: &str = "network-progress-test-token-0123456789abcdef";
+        let temporary = tempfile::tempdir().unwrap();
+        fs::set_permissions(temporary.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let socket = temporary.path().join("hybrid.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        set_socket_private(&socket).unwrap();
+        let target = HybridVsockTarget::new(socket, 7_777).unwrap();
+        let vm_id = Uuid::new_v4();
+        let server = tokio::spawn(serve_progress_fixture(
+            listener,
+            TOKEN,
+            vm_id,
+            9,
+            vec![
+                GuestBootStage::WorkspacePlanReady,
+                GuestBootStage::RootGenerationReady,
+            ],
+        ));
+
+        assert_eq!(
+            wait_for_network_progress_attempt(
+                &target,
+                TOKEN,
+                vm_id,
+                9,
+                tokio::time::Instant::now() + Duration::from_secs(1),
+                NetworkProgressGoal::NetworkReady,
+            )
+            .await
+            .unwrap(),
+            GuestBootStage::RootGenerationReady
+        );
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn network_worker_reports_authenticated_guest_startup_failure() {
+        const TOKEN: &str = "network-progress-test-token-0123456789abcdef";
+        let temporary = tempfile::tempdir().unwrap();
+        fs::set_permissions(temporary.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let socket = temporary.path().join("hybrid.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        set_socket_private(&socket).unwrap();
+        let target = HybridVsockTarget::new(socket, 7_777).unwrap();
+        let vm_id = Uuid::new_v4();
+        let server = tokio::spawn(serve_progress_fixture(
+            listener,
+            TOKEN,
+            vm_id,
+            9,
+            vec![GuestBootStage::WorkspaceFailed],
+        ));
+
+        assert_eq!(
+            wait_for_network_progress_attempt(
+                &target,
+                TOKEN,
+                vm_id,
+                9,
+                tokio::time::Instant::now() + Duration::from_secs(1),
+                NetworkProgressGoal::Terminal,
+            )
+            .await,
+            Ok(GuestBootStage::WorkspaceFailed)
+        );
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn network_worker_status_reader_preserves_the_two_phase_socket() {
+        let (mut runner, mut worker) = tokio::net::UnixStream::pair().unwrap();
+        worker.write_all(WORKER_PREPARED_MESSAGE).await.unwrap();
+        worker
+            .write_all(crate::network_worker::WORKER_READY_MESSAGE)
+            .await
+            .unwrap();
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+        assert_eq!(
+            read_worker_status_frame(&mut runner, deadline)
+                .await
+                .unwrap(),
+            WORKER_PREPARED_MESSAGE
+        );
+        assert_eq!(
+            read_worker_status_frame(&mut runner, deadline)
+                .await
+                .unwrap(),
+            crate::network_worker::WORKER_READY_MESSAGE
+        );
+    }
+
+    #[tokio::test]
+    async fn network_worker_status_reader_rejects_oversized_frames() {
+        let (mut runner, mut worker) = tokio::net::UnixStream::pair().unwrap();
+        worker
+            .write_all(&[b'x'; WORKER_STATUS_MAX_BYTES + 1])
+            .await
+            .unwrap();
+        assert!(matches!(
+            read_worker_status_frame(
+                &mut runner,
+                tokio::time::Instant::now() + Duration::from_secs(1),
+            )
+            .await,
+            Err(RunnerError::NetworkWorkerBootstrap)
+        ));
+    }
+
+    #[test]
+    fn network_worker_attachment_has_a_fresh_bounded_phase() {
+        assert_eq!(
+            network_worker_attach_timeout(Duration::from_secs(1)),
+            Duration::from_secs(1)
+        );
+        assert_eq!(
+            network_worker_attach_timeout(Duration::from_secs(15)),
+            NETWORK_WORKER_ATTACH_TIMEOUT
+        );
+        assert_eq!(
+            network_worker_attach_timeout(Duration::from_secs(20 * 60)),
+            NETWORK_WORKER_ATTACH_TIMEOUT
+        );
     }
 
     #[tokio::test]

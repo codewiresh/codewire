@@ -186,6 +186,9 @@ enum Command {
     #[cfg(target_os = "linux")]
     #[command(name = "__native-runner", hide = true)]
     NativeRunner(NativeRunnerArgs),
+    #[cfg(target_os = "linux")]
+    #[command(name = "__native-network-worker", hide = true)]
+    NativeNetworkWorker(NativeNetworkWorkerArgs),
     #[command(about = "List sessions for the selected or explicit environment")]
     List(ListArgs),
     #[command(
@@ -211,6 +214,15 @@ pub async fn run() -> anyhow::Result<()> {
         *program = "cw".to_string();
     }
     run_from(args).await
+}
+
+/// Preserve the fixed private worker failure taxonomy across the thin binary
+/// wrapper. Ordinary CLI failures continue to use the generic exit status.
+#[cfg(target_os = "linux")]
+pub fn native_network_worker_exit_code(error: &anyhow::Error) -> Option<i32> {
+    error
+        .downcast_ref::<codewire_local_vmm::network_worker::NetworkWorkerError>()
+        .map(codewire_local_vmm::network_worker::NetworkWorkerError::exit_code)
 }
 
 pub async fn run_from<I, T>(args: I) -> anyhow::Result<()>
@@ -262,6 +274,8 @@ where
         Command::NativeSupervisor(args) => run_native_supervisor(args).await,
         #[cfg(target_os = "linux")]
         Command::NativeRunner(args) => run_native_runner(args).await,
+        #[cfg(target_os = "linux")]
+        Command::NativeNetworkWorker(args) => run_native_network_worker(args).await,
         Command::List(args) => handle_list_command(&globals, args).await,
         Command::Attach(args) => handle_attach_command(&globals, args).await,
         Command::Logs(args) => handle_logs_command(&globals, args).await,

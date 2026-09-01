@@ -1201,6 +1201,7 @@ name = "codewire-cli-bin"
 version = "0.1.0"
 dependencies = [
  "codewire-cli",
+ "libc",
  "tokio",
 ]
 
@@ -1456,6 +1457,7 @@ dependencies = [
  "codewire-client",
  "codewire-daemon",
  "codewire-daemon-bridge",
+ "codewire-netstack",
  "codewire-project",
  "codewire-proto",
  "codewire-vmm-guest-probe",

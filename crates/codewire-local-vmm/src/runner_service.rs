@@ -323,6 +323,12 @@ impl RunnerState {
                 self.state = v1::EnvironmentState::Error;
                 Ok(())
             }
+            ExitClass::NetworkWorkerFailure(_) => {
+                // Keep ownership of the live, now fail-closed VMM so an
+                // explicit stop/restart can reap it safely.
+                self.state = v1::EnvironmentState::Error;
+                Ok(())
+            }
         }
     }
 }
@@ -514,6 +520,40 @@ impl EnvironmentRunnerService for RunnerRpc {
                 return Err(map_start_error(error));
             }
         };
+        let worker_executable = std::env::current_exe()
+            .ok()
+            .and_then(|path| std::fs::canonicalize(path).ok())
+            .ok_or(());
+        let worker_executable = match worker_executable {
+            Ok(executable) => executable,
+            Err(()) => {
+                let _ = running.stop().await;
+                state.state = v1::EnvironmentState::Error;
+                self.events.publish(
+                    v1::EnvironmentState::Error,
+                    request.generation,
+                    v1::RunnerStage::Error,
+                    None,
+                    Some("network_worker_failed"),
+                )?;
+                return Err(Status::internal("resolve network worker executable failed"));
+            }
+        };
+        if let Err(error) = running
+            .start_network_worker(&worker_executable, daemon_ready_timeout)
+            .await
+        {
+            let _ = running.stop().await;
+            state.state = v1::EnvironmentState::Error;
+            self.events.publish(
+                v1::EnvironmentState::Error,
+                request.generation,
+                v1::RunnerStage::Error,
+                None,
+                Some("network_worker_failed"),
+            )?;
+            return Err(map_start_error(error));
+        }
         self.events.publish(
             v1::EnvironmentState::Starting,
             request.generation,
@@ -584,7 +624,9 @@ impl EnvironmentRunnerService for RunnerRpc {
                 ExitClass::StillRunning => {
                     return Err(Status::internal("owned VMM process is still running"));
                 }
-                ExitClass::GuestShutdown | ExitClass::VmmFailure(_) => {}
+                ExitClass::GuestShutdown
+                | ExitClass::VmmFailure(_)
+                | ExitClass::NetworkWorkerFailure(_) => {}
             }
         }
         state.running = None;
@@ -952,6 +994,11 @@ async fn wait_for_guest_daemon(
                         ExitClass::VmmFailure(code) => {
                             return Err(Status::unavailable(format!(
                                 "Cloud Hypervisor exited before guest daemon readiness with status {code:?}"
+                            )));
+                        }
+                        ExitClass::NetworkWorkerFailure(code) => {
+                            return Err(Status::unavailable(format!(
+                                "isolated network worker exited before guest daemon readiness with status {code:?}"
                             )));
                         }
                     }

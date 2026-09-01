@@ -213,6 +213,15 @@ pub(crate) struct NativeRunnerArgs {
     pub(crate) artifact_generation: String,
 }
 
+#[cfg(target_os = "linux")]
+#[derive(Debug, Args)]
+pub(crate) struct NativeNetworkWorkerArgs {
+    #[arg(long)]
+    pub(crate) environment_id: String,
+    #[arg(long)]
+    pub(crate) generation: u64,
+}
+
 impl EnvArgs {
     pub(crate) fn placement(&self) -> Option<EnvironmentPlacement> {
         if self.local {
