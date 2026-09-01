@@ -765,8 +765,6 @@ const NETWORK_WORKER_DENIED_SYSCALLS: &[libc::c_long] = &[
     libc::SYS_recvmmsg,
     libc::SYS_clone,
     libc::SYS_clone3,
-    libc::SYS_fork,
-    libc::SYS_vfork,
     libc::SYS_ptrace,
     libc::SYS_process_vm_readv,
     libc::SYS_process_vm_writev,
@@ -794,6 +792,15 @@ const NETWORK_WORKER_DENIED_SYSCALLS: &[libc::c_long] = &[
     libc::SYS_name_to_handle_at,
     libc::SYS_reboot,
 ];
+
+// AArch64 exposes process creation through clone/clone3 and has no distinct
+// fork or vfork syscall numbers. Keep the legacy x86_64 entry points denied
+// where they exist without making the release build depend on absent libc
+// constants on AArch64.
+#[cfg(target_arch = "x86_64")]
+const NETWORK_WORKER_ARCH_DENIED_SYSCALLS: &[libc::c_long] = &[libc::SYS_fork, libc::SYS_vfork];
+#[cfg(target_arch = "aarch64")]
+const NETWORK_WORKER_ARCH_DENIED_SYSCALLS: &[libc::c_long] = &[];
 
 const fn bpf_statement(code: u16, value: u32) -> libc::sock_filter {
     libc::sock_filter {
@@ -823,7 +830,10 @@ fn install_network_worker_seccomp() -> Result<(), NetworkWorkerError> {
         bpf_statement(BPF_RET_K, SECCOMP_RET_KILL_PROCESS),
         bpf_statement(BPF_LD_W_ABS, 0),
     ];
-    for syscall in NETWORK_WORKER_DENIED_SYSCALLS {
+    for syscall in NETWORK_WORKER_DENIED_SYSCALLS
+        .iter()
+        .chain(NETWORK_WORKER_ARCH_DENIED_SYSCALLS)
+    {
         filter.push(bpf_equal(*syscall as u32, 0, 1));
         filter.push(bpf_statement(
             BPF_RET_K,
