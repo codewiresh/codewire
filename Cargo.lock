@@ -1368,6 +1368,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "codewire-egress-broker"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "codewire-egress-policy",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
 name = "codewire-egress-policy"
 version = "0.1.0"
 dependencies = [

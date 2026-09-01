@@ -1,0 +1,14 @@
+[package]
+name = "codewire-egress-broker"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license = "AGPL-3.0-only"
+authors.workspace = true
+description = "Placement-neutral Codewire egress broker admission core"
+
+[dependencies]
+async-trait = { workspace = true }
+codewire-egress-policy = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }

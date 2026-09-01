@@ -162,6 +162,22 @@ impl<T> Admission<T> {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AdmittedDnsQuery {
+    name: String,
+    decision: PolicyDecision,
+}
+
+impl AdmittedDnsQuery {
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn decision(&self) -> &PolicyDecision {
+        &self.decision
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AdmittedDnsResolution {
     name: String,
     aliases: Vec<String>,
@@ -260,6 +276,29 @@ impl EgressLeaseTable {
         self.policy.digest()
     }
 
+    /// Apply policy before invoking an external resolver.
+    ///
+    /// Allowed queries return the canonical name that a resolver adapter must
+    /// use. A denial therefore cannot leak the requested name to DNS.
+    pub fn authorize_dns_query(
+        &self,
+        name: &str,
+        route_class: RouteClass,
+    ) -> Result<Admission<AdmittedDnsQuery>, LeaseError> {
+        let query = EgressRequest::dns_query(name, route_class)?;
+        let decision = self.policy.evaluate(&query);
+        if !decision.is_allowed() {
+            return Ok(Admission::Denied(decision));
+        }
+        Ok(Admission::Allowed(AdmittedDnsQuery {
+            name: query
+                .hostname()
+                .expect("a validated DNS query always carries its name")
+                .to_string(),
+            decision,
+        }))
+    }
+
     /// Admit a resolver result and create bounded name-to-address leases.
     ///
     /// The caller owns DNS transport and supplies the complete canonical CNAME
@@ -273,15 +312,12 @@ impl EgressLeaseTable {
         resolution: DnsResolution,
         now: LeaseInstant,
     ) -> Result<Admission<AdmittedDnsResolution>, LeaseError> {
-        let query = EgressRequest::dns_query(name, route_class)?;
-        let query_decision = self.policy.evaluate(&query);
-        if !query_decision.is_allowed() {
-            return Ok(Admission::Denied(query_decision));
-        }
-        let name = query
-            .hostname()
-            .expect("a validated DNS query always carries its name")
-            .to_string();
+        let query = match self.authorize_dns_query(name, route_class)? {
+            Admission::Allowed(query) => query,
+            Admission::Denied(decision) => return Ok(Admission::Denied(decision)),
+        };
+        let name = query.name;
+        let query_decision = query.decision;
 
         for alias in &resolution.aliases {
             if alias.name == name {
@@ -551,6 +587,25 @@ rules:
                 .unwrap(),
         );
         assert_eq!(expired.reason, DecisionReason::DefaultDeny);
+    }
+
+    #[test]
+    fn dns_query_policy_runs_before_resolution_and_returns_only_a_canonical_name() {
+        let table = EgressLeaseTable::new(named_policy());
+        let query = allowed(
+            table
+                .authorize_dns_query("Allowed.Example.COM.", RouteClass::General)
+                .unwrap(),
+        );
+        assert_eq!(query.name(), "allowed.example.com");
+        assert!(query.decision().is_allowed());
+
+        let decision = denied(
+            table
+                .authorize_dns_query("denied.example.com", RouteClass::General)
+                .unwrap(),
+        );
+        assert_eq!(decision.reason, DecisionReason::DefaultDeny);
     }
 
     #[test]

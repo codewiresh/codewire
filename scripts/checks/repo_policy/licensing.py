@@ -69,6 +69,7 @@ def check_license_map(_args: argparse.Namespace) -> int:
         "crates/codewire-daemon/Cargo.toml": "AGPL-3.0-only",
         "crates/codewire-daemon-bridge/Cargo.toml": "AGPL-3.0-only",
         "crates/codewire-derp/Cargo.toml": "BSD-3-Clause",
+        "crates/codewire-egress-broker/Cargo.toml": "AGPL-3.0-only",
         "crates/codewire-egress-policy/Cargo.toml": "AGPL-3.0-only",
         "crates/codewire-desktop/Cargo.toml": "MIT",
         "crates/codewire-gateway-proto/Cargo.toml": "AGPL-3.0-only",
